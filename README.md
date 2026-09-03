@@ -13,5 +13,8 @@ Monorepo（npm workspace + Turbo）｜`apps/web` Next.js 16｜`apps/api` Express
 > 對標 Apollo/MayoHR 的補齊計畫見 [`docs/plans/2026-07-01-apollo-parity.md`](docs/plans/2026-07-01-apollo-parity.md)。
 
 ## 線上環境
-- Web（Vercel）: https://hr-theta-peach.vercel.app
-- API（Railway）: https://hr-production-994f.up.railway.app/health
+- Web（Vercel）: https://aster-system.vercel.app
+- API（Vercel）: https://aster-hr-api.vercel.app/health
+
+> 舊的 `hr-theta-peach.vercel.app`（更名前的 HRLink 版本）與 Railway 上的 API
+> 皆已停用，Railway 服務不存在（回 404）。上面兩個才是現行環境。
