@@ -60,16 +60,29 @@ interface SalaryRow {
   base_salary: string | null
   daily_wage: string | null
   hourly_wage: string | null
+  labor_insured_salary: string | null
+  health_insured_salary: string | null
 }
 
 /** Map a stored salary_structures row → the engine's SalaryStructure (numerics
- * are returned by PostgREST as strings, so coerce). */
-function toSalaryStructure(row: SalaryRow): SalaryStructure {
+ * are returned by PostgREST as strings, so coerce).
+ *
+ * 投保薪資必須帶進來：引擎的保費計算是
+ * `ins && salary.laborInsuredSalary ? ... : 0`，欄位缺漏時會靜默算成 0，
+ * 導致每張薪資單都不扣勞健保、實發金額被高估。
+ * （salary_structures 尚無勞退自提率與預支欄位，故 pensionVoluntaryRate /
+ *  advance 仍無來源；要支援需先加 migration。） */
+function toSalaryStructure(row: SalaryRow, nhiDependents = 0): SalaryStructure {
   return {
     method: row.method === "by_attendance_days" ? "by_attendance_days" : "monthly",
     baseSalary: row.base_salary != null ? Number(row.base_salary) : undefined,
     dailyWage: row.daily_wage != null ? Number(row.daily_wage) : undefined,
     hourlyWage: row.hourly_wage != null ? Number(row.hourly_wage) : 0,
+    laborInsuredSalary:
+      row.labor_insured_salary != null ? Number(row.labor_insured_salary) : undefined,
+    healthInsuredSalary:
+      row.health_insured_salary != null ? Number(row.health_insured_salary) : undefined,
+    nhiDependents,
   }
 }
 
@@ -119,8 +132,9 @@ function isHrRole(role: string | undefined): boolean {
  * structure. An already-FINALIZED payslip for the (employee, period) is left
  * untouched and reported in `skipped` (a finalized slip is locked).
  *
- * Returns { generated: N, skipped: string[] } (skipped = employee ids skipped
- * because their payslip was already finalized).
+ * Returns { generated: N, skipped: string[], missingInsuredSalary: string[] }
+ * (skipped = employee ids skipped because their payslip was already finalized;
+ * missingInsuredSalary = 有保費規則但未設投保薪資者，其保費會被算成 0)。
  */
 payrollRouter.post(
   "/payroll/run",
@@ -162,7 +176,9 @@ payrollRouter.post(
       // --- in-scope salary structures (the run is salary-driven) --------------
       let salQuery = supabaseAdmin
         .from("salary_structures")
-        .select("employee_id, method, base_salary, daily_wage, hourly_wage")
+        .select(
+          "employee_id, method, base_salary, daily_wage, hourly_wage, labor_insured_salary, health_insured_salary",
+        )
         .eq("tenant_id", tenantId)
       if (employeeId) salQuery = salQuery.eq("employee_id", employeeId)
       const { data: salData, error: salErr } = await salQuery
@@ -200,6 +216,26 @@ payrollRouter.post(
         else daysByEmployee.set(row.employee_id, [day])
       }
 
+      // --- 健保眷屬人數（僅計 insured = true）--------------------------------
+      // 眷口數影響健保自付額（本人 + 眷口，法定上限 3 口由引擎裁切）。
+      const { data: depData, error: depErr } = await supabaseAdmin
+        .from("nhi_dependents")
+        .select("employee_id")
+        .eq("tenant_id", tenantId)
+        .in("employee_id", employeeIds)
+        .eq("insured", true)
+      if (depErr) {
+        next(new Error(`POST /payroll/run (nhi_dependents): ${depErr.message}`))
+        return
+      }
+      const dependentsByEmployee = new Map<string, number>()
+      for (const row of (depData ?? []) as Array<{ employee_id: string }>) {
+        dependentsByEmployee.set(
+          row.employee_id,
+          (dependentsByEmployee.get(row.employee_id) ?? 0) + 1,
+        )
+      }
+
       // --- already-finalized payslips for this period (locked, skip) ----------
       const { data: finData, error: finErr } = await supabaseAdmin
         .from("payslips")
@@ -216,6 +252,10 @@ payrollRouter.post(
 
       // --- compute + upsert each employee's payslip ---------------------------
       const skipped: string[] = []
+      // 設有保費規則卻沒填投保薪資的員工。引擎遇此情況會把保費算成 0
+      // 而不會報錯，薪資單看起來正常但實發被高估——必須回報給呼叫端，
+      // 否則錯誤會一路靜默到員工的存摺。
+      const missingInsuredSalary: string[] = []
       const rows: Array<Record<string, unknown>> = []
       const now = new Date().toISOString()
       for (const sal of salaries) {
@@ -223,8 +263,18 @@ payrollRouter.post(
           skipped.push(sal.employee_id)
           continue
         }
+        if (
+          rules.insurance &&
+          (sal.labor_insured_salary == null || sal.health_insured_salary == null)
+        ) {
+          missingInsuredSalary.push(sal.employee_id)
+        }
         const days = daysByEmployee.get(sal.employee_id) ?? []
-        const breakdown = computePayslip(days, toSalaryStructure(sal), rules)
+        const breakdown = computePayslip(
+          days,
+          toSalaryStructure(sal, dependentsByEmployee.get(sal.employee_id) ?? 0),
+          rules,
+        )
         rows.push({
           tenant_id: tenantId,
           employee_id: sal.employee_id,
@@ -250,7 +300,7 @@ payrollRouter.post(
         }
       }
 
-      res.status(201).json({ generated: rows.length, skipped })
+      res.status(201).json({ generated: rows.length, skipped, missingInsuredSalary })
     } catch (err) {
       next(err)
     }

@@ -8,6 +8,7 @@
  * 代墊支出刻意不進 gross:那是代收代付、非薪資所得,課稅基礎不同。
  */
 
+import { nhiEmployeePremium } from "./tw-tax.js";
 import type { OvertimeWhen, RuleConfig } from "./rules-schema.js";
 import type {
   AttendanceDay,
@@ -181,14 +182,17 @@ export function computePayslip(
     ins && salary.laborInsuredSalary
       ? roundYuan(salary.laborInsuredSalary * ins.labor.rate * ins.labor.employeeShare)
       : 0;
-  // 健保自付額含眷屬:本人 + 眷屬數(眷屬上限由設定端控管,引擎不代為裁切)。
+  // 健保自付額含眷屬:本人 + 計費眷口數。
+  // 一律走 tw-tax 的 nhiEmployeePremium,那裡有健保法定的 3 口上限裁切
+  // (第 4 口起免繳)。先前此處自行相乘且未裁切,與 tw-tax 兩份實作不一致——
+  // 眷屬 4 口以上會多扣。裁切邏輯只留一份,避免再次分岔。
   const healthInsurance =
     ins && salary.healthInsuredSalary
-      ? roundYuan(
-          salary.healthInsuredSalary *
-            ins.health.rate *
-            ins.health.employeeShare *
-            (1 + (salary.nhiDependents ?? 0)),
+      ? nhiEmployeePremium(
+          salary.healthInsuredSalary,
+          salary.nhiDependents ?? 0,
+          ins.health.rate,
+          ins.health.employeeShare,
         )
       : 0;
   const pensionVoluntary = roundYuan(
