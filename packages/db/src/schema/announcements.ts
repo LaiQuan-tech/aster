@@ -14,8 +14,14 @@ import { employees } from "./employees"
  * `deleteReason` 三欄同時寫入，列表與編輯端點以 `deleted_at IS NULL` 過濾。
  * `deleteReason` 必填。DB 層另有 sql/0018 的 no_hard_delete trigger 兜底。
  *
- * 尚未做：版本鏈。目前 PATCH 仍就地覆寫，舊內容不留存 —— 這是模組二
- * 第 2 條要求的「進版控制」，待該模組正式動工時補。
+ * 版本鏈：內容的權威來源是 `announcement_versions`。本表的 title / body /
+ * audience 是**現行版的去正規化快取**（讓既有列表查詢維持單表讀取，
+ * 比照 payslips 的 denormalised 欄位 + breakdown jsonb 作法）。
+ * `currentVersionId` 指向現行版；PATCH 發新版並同步更新此處的快取，
+ * 不再就地覆寫歷史。
+ *
+ * `currentVersionId` 刻意不加 FK：與 announcement_versions.announcementId
+ * 互為環狀參照，加 FK 需 deferrable constraint，收益不值得那個複雜度。
  */
 export const announcements = pgTable(
   "announcements",
@@ -27,6 +33,8 @@ export const announcements = pgTable(
     title: text("title").notNull(),
     body: text("body").notNull(),
     audience: text("audience").notNull().default("all"),
+    /** 現行版指標（見上方說明，刻意無 FK）。 */
+    currentVersionId: uuid("current_version_id"),
     createdBy: uuid("created_by").references(() => employees.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

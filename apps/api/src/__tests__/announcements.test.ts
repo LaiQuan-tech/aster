@@ -260,3 +260,138 @@ describe("F5 cross-tenant isolation", () => {
     expect(items.every((a) => a.tenant_id === A.tenantId)).toBe(true)
   })
 })
+describe("F5 版本鏈 — PATCH 發新版，不覆寫歷史（模組二第 2 條）", () => {
+  let annId: string
+  let v1Id: string
+
+  it("POST 建立公告時同時建第一版（initial）", async () => {
+    const res = await request(app)
+      .post("/announcements")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({
+        title: "工作規則",
+        body: "第一版內容",
+        requiresSignature: true,
+        effectiveFrom: "2026-01-01",
+      })
+    expect(res.status).toBe(201)
+    annId = res.body.id
+    v1Id = res.body.versionId
+    expect(res.body.versionNo).toBe(1)
+  })
+
+  it("PATCH 產生第二版，舊版被補上 effective_to，內容都還在", async () => {
+    const res = await request(app)
+      .patch(`/announcements/${annId}`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({
+        body: "第二版內容",
+        changeType: "amendment",
+        changeNote: "加班規定調整",
+        effectiveFrom: "2026-07-01",
+        isAdverseChange: true,
+      })
+    expect(res.status).toBe(200)
+    expect(res.body.versionNo).toBe(2)
+
+    const versions = await request(app)
+      .get(`/announcements/${annId}/versions`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+    expect(versions.status).toBe(200)
+    const list = versions.body.versions as Array<Record<string, unknown>>
+    expect(list).toHaveLength(2)
+
+    // 第一版的文字沒有被覆寫 —— 這正是舊實作做不到的事。
+    expect(list[0].version_no).toBe(1)
+    expect(list[0].body).toBe("第一版內容")
+    expect(list[0].effective_to).toBe("2026-07-01")
+
+    expect(list[1].version_no).toBe(2)
+    expect(list[1].body).toBe("第二版內容")
+    expect(list[1].change_type).toBe("amendment")
+    expect(list[1].is_adverse_change).toBe(true)
+    expect(list[1].effective_to).toBeNull()
+
+    // requires_signature 未指定時沿用前一版（是文件性質，不因改一行字消失）。
+    expect(list[1].requires_signature).toBe(true)
+  })
+
+  it("跨年度進版：條款一字未改也能發新版", async () => {
+    const res = await request(app)
+      .patch(`/announcements/${annId}`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ changeType: "annual_rollover", effectiveFrom: "2027-01-01" })
+    expect(res.status).toBe(200)
+    expect(res.body.versionNo).toBe(3)
+
+    const versions = await request(app)
+      .get(`/announcements/${annId}/versions`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+    const v3 = (versions.body.versions as Array<Record<string, unknown>>)[2]
+    expect(v3.change_type).toBe("annual_rollover")
+    expect(v3.body).toBe("第二版內容") // 內容沿用，但這是不同的一版
+  })
+
+  it("列表的快取欄位跟著現行版走", async () => {
+    const list = await request(app)
+      .get("/announcements")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+    const found = (list.body.announcements as Array<{ id: string; body: string }>).find(
+      (a) => a.id === annId,
+    )
+    expect(found?.body).toBe("第二版內容")
+  })
+
+  it("員工自行 acknowledge 只寫 viewed_at（查閱紀錄，非勾選同意）", async () => {
+    const res = await request(app)
+      .post(`/announcement-versions/${v1Id}/acknowledge`)
+      .set("Authorization", `Bearer ${empToken}`)
+      .send({})
+    expect(res.status).toBe(200)
+    expect(res.body.acknowledgement.viewed_at).not.toBeNull()
+    expect(res.body.acknowledgement.signed_at).toBeNull()
+  })
+
+  it("員工不可代他人登錄 → 403", async () => {
+    const res = await request(app)
+      .post(`/announcement-versions/${v1Id}/acknowledge`)
+      .set("Authorization", `Bearer ${empToken}`)
+      .send({ employeeId: "00000000-0000-0000-0000-000000000001" })
+    expect(res.status).toBe(403)
+  })
+
+  it("同意率只計 consent_to_change，新人 accept_on_hire 不進分母", async () => {
+    // 取得該租戶兩位員工。
+    const { data: emps } = await supabaseAdmin
+      .from("employees")
+      .select("id")
+      .eq("tenant_id", A.tenantId)
+      .limit(2)
+    const ids = (emps ?? []).map((e) => e.id as string)
+    expect(ids.length).toBeGreaterThanOrEqual(2)
+
+    // 一位在職員工簽了「同意變更」。
+    const signed = await request(app)
+      .post(`/announcement-versions/${v1Id}/acknowledge`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ employeeId: ids[0], kind: "consent_to_change", signedAt: "2026-02-01T00:00:00.000Z" })
+    expect(signed.status).toBe(200)
+    expect(signed.body.acknowledgement.signed_at).not.toBeNull()
+
+    // 一位新人是「到職接受」，尚未簽。
+    await supabaseAdmin.from("announcement_acknowledgements").upsert(
+      { tenant_id: A.tenantId, version_id: v1Id, employee_id: ids[1], kind: "accept_on_hire" },
+      { onConflict: "tenant_id,version_id,employee_id" },
+    )
+
+    const res = await request(app)
+      .get(`/announcements/${annId}/acknowledgements?versionId=${v1Id}`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+    expect(res.status).toBe(200)
+    // 分母只有那位 consent_to_change 的在職員工，不含新人。
+    expect(res.body.consentRate).toEqual({ signed: 1, total: 1 })
+    // 但新人仍出現在 pending，HR 看得到「誰還沒簽」。
+    const pending = res.body.pending as Array<{ employee_id: string }>
+    expect(pending.some((r) => r.employee_id === ids[1])).toBe(true)
+  })
+})

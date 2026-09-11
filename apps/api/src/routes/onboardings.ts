@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { seedHireAcknowledgements } from "../services/onboarding-signatures.js"
 
 export const onboardingsRouter = Router()
 
@@ -250,6 +251,9 @@ onboardingsRouter.patch(
  * the onboarding, role='employee', status='active') and stamps the onboarding
  * with employee_id + status='completed'. 409 if already completed. No auth user
  * is created here — that stays a separate invite step (POST /employees).
+ *
+ * 同時生成該員的待簽清單（模組二第 3 條）：所有現行生效且需簽收的規章版本，
+ * kind='accept_on_hire'。建不出來不影響報到本身（見 seedHireAcknowledgements）。
  */
 onboardingsRouter.post(
   "/onboardings/:id/complete",
@@ -306,7 +310,16 @@ onboardingsRouter.post(
         next(new Error(`POST /onboardings/${id}/complete (update): ${upErr.message}`))
         return
       }
-      res.status(200).json({ id, status: "completed", employeeId: emp.id })
+      // 待簽清單：現行生效且需簽收的規章，kind='accept_on_hire'。
+      const pendingSignatures = await seedHireAcknowledgements(
+        tenantId,
+        emp.id as string,
+        (ob.report_date as string | null) ?? undefined,
+      )
+
+      res
+        .status(200)
+        .json({ id, status: "completed", employeeId: emp.id, pendingSignatures })
     } catch (err) {
       next(err)
     }

@@ -34,19 +34,28 @@
 -- 可逆：見檔末的還原指令。
 -- =====================================================================
 
+-- 共用判斷：這個租戶的資料是否可被實體刪除（0019 的稽核表也會用）。
+CREATE OR REPLACE FUNCTION public.is_disposable_tenant(p_tenant_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT coalesce(
+    (SELECT t.status IN ('test', 'demo') FROM public.tenants t WHERE t.id = p_tenant_id),
+    false
+  );
+$$;
+
+COMMENT ON FUNCTION public.is_disposable_tenant(uuid) IS
+  '租戶資料是否可實體刪除：僅 status 為 test/demo 者。正式租戶（active）一律 false。';
+
 CREATE OR REPLACE FUNCTION public.forbid_hard_delete()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
-DECLARE
-  v_status text;
 BEGIN
-  SELECT t.status INTO v_status
-  FROM public.tenants t
-  WHERE t.id = OLD.tenant_id;
-
   -- 測試／示範租戶放行（資料非證據）。
-  IF v_status IN ('test', 'demo') THEN
+  IF public.is_disposable_tenant(OLD.tenant_id) THEN
     RETURN OLD;
   END IF;
 

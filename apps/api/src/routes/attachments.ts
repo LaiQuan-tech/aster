@@ -40,6 +40,7 @@ async function authorizeRequestAccess(
     .select("id, employee_id")
     .eq("tenant_id", tenantId)
     .eq("id", requestId)
+    .is("deleted_at", null) // 已註銷的單不該再被附加或讀取附件
     .maybeSingle()
   if (lrErr) throw new Error(`attachments authorize (request): ${lrErr.message}`)
   if (!lr) return { ok: false, notFound: true }
