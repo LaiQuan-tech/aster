@@ -154,6 +154,7 @@ async function loadContext(tenantId: string, input: AiReportInput | AiAskInput) 
     .from("leave_requests")
     .select("employee_id, kind, status, hours, start_at, end_at, created_at")
     .eq("tenant_id", tenantId)
+    .is("deleted_at", null)
   if (leaveErr) throw new Error(`ai context leave: ${leaveErr.message}`)
   const leaveRows = ((leaveData ?? []) as LeaveRow[]).filter((row) => {
     if (!employeeIds.includes(row.employee_id)) return false

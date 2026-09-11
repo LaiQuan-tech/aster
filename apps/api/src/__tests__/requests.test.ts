@@ -890,3 +890,123 @@ describe("F4 cross-tenant isolation", () => {
     expect(items.some((r) => r.id === bReq.id)).toBe(false)
   })
 })
+describe("F4 DELETE /requests/:id — 軟刪除，紀錄不滅失", () => {
+  // 被駁回的申請是勞資爭議中雇主唯一的反證，硬刪等於證據滅失。
+  // 端點改為軟刪除：寫 deleted_at/deleted_by_emp_id/delete_reason，
+  // 附件與簽核軌跡保留，列表與動作端點以 deleted_at IS NULL 過濾。
+  let rejectedId: string
+
+  it("先造一筆被駁回的請假單", async () => {
+    await request(app)
+      .put("/approval-flows/leave")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId] })
+
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        startAt: "2026-12-01T01:00:00.000Z",
+        endAt: "2026-12-01T09:00:00.000Z",
+      })
+    expect(filed.status).toBe(201)
+    rejectedId = filed.body.requestId
+
+    const rejected = await request(app)
+      .post(`/requests/${rejectedId}/reject`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({})
+    expect(rejected.status).toBe(200)
+  })
+
+  it("未附理由 → 400 reason_required", async () => {
+    const res = await request(app)
+      .delete(`/requests/${rejectedId}`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({})
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("reason_required")
+  })
+
+  it("非 HR → 403", async () => {
+    const res = await request(app)
+      .delete(`/requests/${rejectedId}`)
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({ reason: "測試" })
+    expect(res.status).toBe(403)
+  })
+
+  it("HR 附理由註銷 → 200，且 DB 內該列仍在（軟刪除）", async () => {
+    const res = await request(app)
+      .delete(`/requests/${rejectedId}`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ reason: "重複申請，與前一筆相同" })
+    expect(res.status).toBe(200)
+
+    const { data } = await supabaseAdmin
+      .from("leave_requests")
+      .select("id, status, deleted_at, deleted_by_emp_id, delete_reason")
+      .eq("id", rejectedId)
+      .maybeSingle()
+    expect(data).not.toBeNull()
+    expect(data?.deleted_at).not.toBeNull()
+    expect(data?.delete_reason).toBe("重複申請，與前一筆相同")
+    expect(data?.deleted_by_emp_id).toBe(A.hrEmpId)
+    // 原狀態不被覆寫——「被駁回」這件事本身是證據。
+    expect(data?.status).toBe("rejected")
+  })
+
+  it("簽核軌跡一併保留（不再連坐刪除）", async () => {
+    const { data: steps } = await supabaseAdmin
+      .from("approval_steps")
+      .select("id")
+      .eq("tenant_id", A.tenantId)
+      .eq("request_id", rejectedId)
+    expect((steps ?? []).length).toBeGreaterThan(0)
+  })
+
+  it("註銷後不出現在 GET /requests", async () => {
+    const res = await request(app)
+      .get("/requests")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+    expect(res.status).toBe(200)
+    const items = res.body.requests as Array<{ id: string }>
+    expect(items.some((r) => r.id === rejectedId)).toBe(false)
+  })
+
+  it("重複註銷 → 409 already_deleted", async () => {
+    const res = await request(app)
+      .delete(`/requests/${rejectedId}`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ reason: "再一次" })
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("already_deleted")
+  })
+
+  it("已核准的單仍不可註銷 → 409（其 ledger 效果已發生）", async () => {
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        startAt: "2026-12-05T01:00:00.000Z",
+        endAt: "2026-12-05T09:00:00.000Z",
+      })
+    expect(filed.status).toBe(201)
+    const approvedId = filed.body.requestId
+    await request(app)
+      .post(`/requests/${approvedId}/approve`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({})
+
+    const res = await request(app)
+      .delete(`/requests/${approvedId}`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ reason: "測試" })
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("approved_request_cannot_be_deleted")
+  })
+})

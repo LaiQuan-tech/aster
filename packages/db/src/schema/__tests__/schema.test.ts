@@ -8,6 +8,7 @@ import {
   projectMembers,
   projectShareAdjustments,
   projectDocuments,
+  leaveRequests,
 } from "../index"
 
 describe("tenants table", () => {
@@ -151,5 +152,28 @@ describe("employees table", () => {
 
   it("tenantId is not null", () => {
     expect(cols.tenantId.notNull).toBe(true)
+  })
+})
+
+describe("leaveRequests table — 軟刪除欄位", () => {
+  const cols = getTableColumns(leaveRequests)
+
+  // 表單一旦建立即不實體刪除（見 schema/leave-requests.ts 的說明）：
+  // 被駁回的申請是勞資爭議中雇主唯一的反證，硬刪等於證據滅失。
+  it("有 deletedAt / deletedByEmpId / deleteReason 三個軟刪除欄位", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining(["deletedAt", "deletedByEmpId", "deleteReason"]),
+    )
+  })
+
+  it("三個欄位皆可為 null（null = 未註銷）", () => {
+    expect(cols.deletedAt.notNull).toBe(false)
+    expect(cols.deletedByEmpId.notNull).toBe(false)
+    expect(cols.deleteReason.notNull).toBe(false)
+  })
+
+  it("status 仍為請求層級狀態機，與註銷狀態互不干擾", () => {
+    expect(cols.status.notNull).toBe(true)
+    expect(cols.status.default).toBe("pending")
   })
 })

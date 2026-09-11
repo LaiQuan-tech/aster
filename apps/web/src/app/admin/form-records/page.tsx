@@ -289,16 +289,25 @@ export default function FormRecordsPage() {
   }
 
   async function remove(id: string) {
-    if (!window.confirm("確定刪除此表單紀錄？已核准紀錄不可刪除。")) return;
+    // 註銷理由必填：伺服器端為軟刪除，紀錄與附件、簽核軌跡都會保留，
+    // 理由會一併存進 delete_reason 供日後追溯。
+    const reason = window.prompt(
+      "註銷此表單紀錄。紀錄不會被刪除，僅標記為已註銷並保留追溯。\n請輸入註銷理由（必填）：",
+    );
+    if (reason === null) return;
+    if (!reason.trim()) {
+      setError("註銷理由為必填");
+      return;
+    }
     setBusyId(id);
     setError(null);
     setMessage(null);
     try {
-      await deleteRequest(id);
-      setMessage("表單紀錄已刪除");
+      await deleteRequest(id, reason.trim());
+      setMessage("表單紀錄已註銷（紀錄保留）");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "刪除失敗");
+      setError(err instanceof Error ? err.message : "註銷失敗");
     } finally {
       setBusyId(null);
     }
@@ -306,7 +315,7 @@ export default function FormRecordsPage() {
 
   return (
     <>
-      <PageHeader title="表單紀錄管理" desc="查詢、催簽、刪除與匯出請假、加班、補卡、公出/出差表單" />
+      <PageHeader title="表單紀錄管理" desc="查詢、催簽、註銷與匯出請假、加班、補卡、公出/出差表單" />
 
       <Card>
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -509,7 +518,7 @@ export default function FormRecordsPage() {
                           disabled={busyId === record.id || record.status === "approved"}
                           className="rounded-md border border-red-300 px-3 py-1.5 text-xs font-medium text-red-700 disabled:opacity-50"
                         >
-                          刪除
+                          註銷
                         </button>
                       </div>
                     </td>

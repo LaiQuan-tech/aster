@@ -10,6 +10,12 @@ import { leaveTypes } from "./leave-types"
  * is the request-level state machine (pending → approved | rejected | cancelled)
  * and `currentStep` points at the approval_steps.step_order awaiting a decision.
  * Approval routing lives in the sibling approval_steps rows.
+ *
+ * 表單一旦建立即不再實體刪除 —— 出勤與請假單據是勞資爭議的證據，尤其
+ * 被駁回的申請（員工主張「我有申請、公司不准」時的唯一反證）。HR 的
+ * 「刪除」改為軟刪除：`deletedAt` / `deletedByEmpId` / `deleteReason` 三欄
+ * 同時寫入，列表與動作端點以 `deleted_at IS NULL` 過濾，附件與簽核軌跡
+ * 一併保留。`deleteReason` 為必填 —— 無理由的刪除正是本機制要防的事。
  */
 export const leaveRequests = pgTable("leave_requests", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -40,4 +46,8 @@ export const leaveRequests = pgTable("leave_requests", {
   status: text("status").notNull().default("pending"),
   currentStep: integer("current_step").notNull().default(1),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  // 軟刪除（見上方說明）。三欄一起寫，null 代表未刪除。
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  deletedByEmpId: uuid("deleted_by_emp_id").references(() => employees.id),
+  deleteReason: text("delete_reason"),
 })

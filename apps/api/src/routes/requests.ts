@@ -328,6 +328,7 @@ requestsRouter.get(
           .from("leave_requests")
           .select(REQUEST_COLS)
           .eq("tenant_id", tenantId)
+          .is("deleted_at", null)
         if (status) query = query.eq("status", status)
         if (kind) query = query.eq("kind", kind)
         if (employeeId) query = query.eq("employee_id", employeeId)
@@ -373,6 +374,7 @@ requestsRouter.get(
         .from("leave_requests")
         .select(REQUEST_COLS)
         .eq("tenant_id", tenantId)
+        .is("deleted_at", null)
         .or(orParts.join(","))
       if (status) query = query.eq("status", status)
       if (kind) query = query.eq("kind", kind)
@@ -436,6 +438,7 @@ async function decide(
         "id, status, current_step, employee_id, kind, leave_type_id, hours, start_at, end_at, payout",
       )
       .eq("tenant_id", tenantId)
+      .is("deleted_at", null)
       .eq("id", requestId)
       .maybeSingle()
     if (lrErr) {
@@ -579,6 +582,7 @@ async function decideOneRequest(params: {
     .from("leave_requests")
     .select("id, status, current_step, employee_id, kind, leave_type_id, hours, start_at, end_at, payout")
     .eq("tenant_id", tenantId)
+    .is("deleted_at", null)
     .eq("id", requestId)
     .maybeSingle()
   if (lrErr) return { ok: false, id: requestId, error: lrErr.message }
@@ -779,6 +783,7 @@ requestsRouter.post(
         .from("leave_requests")
         .select("id, kind, status, current_step")
         .eq("tenant_id", tenantId)
+        .is("deleted_at", null)
         .eq("id", requestId)
         .maybeSingle()
       if (lrErr) {
@@ -896,6 +901,7 @@ requestsRouter.post(
         .from("leave_requests")
         .select("id, employee_id, kind, status, current_step")
         .eq("tenant_id", tenantId)
+        .is("deleted_at", null)
         .eq("id", requestId)
         .maybeSingle()
       if (lrErr) {
@@ -986,6 +992,7 @@ requestsRouter.post(
         .from("leave_requests")
         .select("id, employee_id, status")
         .eq("tenant_id", tenantId)
+        .is("deleted_at", null)
         .eq("id", requestId)
         .maybeSingle()
       if (lrErr) {
@@ -1022,9 +1029,27 @@ requestsRouter.post(
 )
 
 /**
- * DELETE /requests/:id — HR admin removes a non-approved form record. Approved
- * records are retained because they may already have ledger/payroll effects.
+ * DELETE /requests/:id — HR admin 註銷一筆非核准的表單紀錄（**軟刪除**）。
+ *
+ * 不做實體刪除。出勤與請假單據是勞資爭議的證據，其中**被駁回的申請**尤其
+ * 關鍵——員工日後主張「我有申請、公司不准」時，該筆紀錄是雇主唯一的反證。
+ * 舊版以 `status === 'approved'` 為界實體刪除 pending/rejected/cancelled，
+ * 並連帶刪掉 request_attachments 與 approval_steps，判準是「會不會影響帳」
+ * 而非「會不會有爭議」。
+ *
+ * 現行行為：寫入 deleted_at / deleted_by_emp_id / delete_reason，列表與各動作
+ * 端點以 `deleted_at IS NULL` 過濾，**附件與簽核軌跡一併保留**。
+ * `reason` 必填——無理由的註銷正是本機制要防的事。
+ * 已核准者仍回 409（其 ledger 效果已發生，註銷會讓餘額與單據不一致）；
+ * 已註銷者回 409，不重複寫入。
+ *
+ * 註：應用層擋不住持有 service_role key 者直接下 DELETE（service_role 繞過
+ * RLS）。真正的防線是 DB 層的 BEFORE DELETE trigger，待測試清理策略確定後補。
  */
+const deleteRequestSchema = z.object({
+  reason: z.string().trim().min(1).max(250),
+})
+
 requestsRouter.delete(
   "/requests/:id",
   requireAuth,
@@ -1038,6 +1063,12 @@ requestsRouter.delete(
     }
     const requestId = req.params.id
 
+    const parsed = deleteRequestSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: "reason_required", details: parsed.error.flatten() })
+      return
+    }
+
     try {
       const self = await resolveSelf(tenantId, userId)
       if (!isHrRole(self?.role)) {
@@ -1047,7 +1078,7 @@ requestsRouter.delete(
 
       const { data: lr, error: lrErr } = await supabaseAdmin
         .from("leave_requests")
-        .select("id, status")
+        .select("id, status, deleted_at")
         .eq("tenant_id", tenantId)
         .eq("id", requestId)
         .maybeSingle()
@@ -1059,24 +1090,22 @@ requestsRouter.delete(
         res.status(404).json({ error: "not_found" })
         return
       }
+      if (lr.deleted_at) {
+        res.status(409).json({ error: "already_deleted" })
+        return
+      }
       if (lr.status === "approved") {
         res.status(409).json({ error: "approved_request_cannot_be_deleted" })
         return
       }
 
-      await supabaseAdmin
-        .from("request_attachments")
-        .delete()
-        .eq("tenant_id", tenantId)
-        .eq("request_id", requestId)
-      await supabaseAdmin
-        .from("approval_steps")
-        .delete()
-        .eq("tenant_id", tenantId)
-        .eq("request_id", requestId)
       const { error: delErr } = await supabaseAdmin
         .from("leave_requests")
-        .delete()
+        .update({
+          deleted_at: new Date().toISOString(),
+          deleted_by_emp_id: self?.id ?? null,
+          delete_reason: parsed.data.reason,
+        })
         .eq("tenant_id", tenantId)
         .eq("id", requestId)
       if (delErr) {

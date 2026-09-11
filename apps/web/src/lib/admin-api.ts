@@ -636,8 +636,12 @@ export function changeRequestApprover(id: string, approverEmpId: string, comment
   });
 }
 
-export function deleteRequest(id: string) {
-  return apiFetch<{ id: string }>(`/requests/${id}`, { method: "DELETE" });
+/** 註銷表單紀錄（伺服器端為軟刪除，紀錄保留）。reason 為必填。 */
+export function deleteRequest(id: string, reason: string) {
+  return apiFetch<{ id: string }>(`/requests/${id}`, {
+    method: "DELETE",
+    body: JSON.stringify({ reason }),
+  });
 }
 
 /* ------------------------------------------------------- announcements ----- */
