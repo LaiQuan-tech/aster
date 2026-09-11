@@ -73,12 +73,20 @@ export default function AnnouncementsPage() {
   }
 
   async function onDelete(id: string) {
-    if (!confirm("確定刪除此公告？")) return;
+    // 註銷理由必填：公告為勞資爭議證據，伺服器端為軟刪除，內容與理由都保留。
+    const reason = window.prompt(
+      "註銷此公告。公告不會被刪除，僅標記為已註銷並保留追溯。\n請輸入註銷理由（必填）：",
+    );
+    if (reason === null) return;
+    if (!reason.trim()) {
+      setError("註銷理由為必填");
+      return;
+    }
     try {
-      await deleteAnnouncement(id);
+      await deleteAnnouncement(id, reason.trim());
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "刪除失敗");
+      setError(err instanceof Error ? err.message : "註銷失敗");
     }
   }
 
@@ -168,7 +176,7 @@ export default function AnnouncementsPage() {
                           onClick={() => onDelete(a.id)}
                           className="text-sm text-red-600 hover:underline"
                         >
-                          刪除
+                          註銷
                         </button>
                       </div>
                     </div>

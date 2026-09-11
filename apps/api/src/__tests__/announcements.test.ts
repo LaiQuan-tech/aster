@@ -147,10 +147,20 @@ describe("F5 announcements — HR publishes, employees read", () => {
     expect(found?.title).toBe("颱風假公告（更新）")
   })
 
-  it("HR DELETE /announcements/:id removes it; GET no longer lists it", async () => {
+  it("HR DELETE /announcements/:id 未附理由 → 400 reason_required", async () => {
     const res = await request(app)
       .delete(`/announcements/${annId}`)
       .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({})
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("reason_required")
+  })
+
+  it("HR DELETE /announcements/:id 附理由 → 200，GET 不再列出，但 DB 內該列仍在", async () => {
+    const res = await request(app)
+      .delete(`/announcements/${annId}`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ reason: "內容有誤，另行重發" })
     expect(res.status).toBe(200)
 
     const list = await request(app)
@@ -158,6 +168,25 @@ describe("F5 announcements — HR publishes, employees read", () => {
       .set("Authorization", `Bearer ${empToken}`)
     const items = list.body.announcements as Array<{ id: string }>
     expect(items.some((a) => a.id === annId)).toBe(false)
+
+    // 軟刪除：公告是勞資爭議證據，列必須還在。
+    const { data } = await supabaseAdmin
+      .from("announcements")
+      .select("id, deleted_at, delete_reason, deleted_by_emp_id")
+      .eq("id", annId)
+      .maybeSingle()
+    expect(data).not.toBeNull()
+    expect(data?.deleted_at).not.toBeNull()
+    expect(data?.delete_reason).toBe("內容有誤，另行重發")
+    expect(data?.deleted_by_emp_id).not.toBeNull() // 有記到操作者
+  })
+
+  it("重複註銷 → 404（已註銷者不再匹配）", async () => {
+    const res = await request(app)
+      .delete(`/announcements/${annId}`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ reason: "再一次" })
+    expect(res.status).toBe(404)
   })
 })
 
@@ -210,6 +239,7 @@ describe("F5 cross-tenant isolation", () => {
     const del = await request(app)
       .delete(`/announcements/${bAnn.id}`)
       .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ reason: "跨租戶測試" })
     expect(del.status).toBe(404)
 
     // B's row is unchanged and still present.

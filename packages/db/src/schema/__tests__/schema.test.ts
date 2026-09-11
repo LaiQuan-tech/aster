@@ -9,6 +9,7 @@ import {
   projectShareAdjustments,
   projectDocuments,
   leaveRequests,
+  announcements,
 } from "../index"
 
 describe("tenants table", () => {
@@ -175,5 +176,22 @@ describe("leaveRequests table — 軟刪除欄位", () => {
   it("status 仍為請求層級狀態機，與註銷狀態互不干擾", () => {
     expect(cols.status.notNull).toBe(true)
     expect(cols.status.default).toBe("pending")
+  })
+})
+
+describe("announcements table — 軟刪除欄位", () => {
+  const cols = getTableColumns(announcements)
+
+  // 公告與規章是勞資爭議證據，客戶要求保留 5~7 年追溯期（模組二第 2 條）。
+  it("有 deletedAt / deletedByEmpId / deleteReason 三個軟刪除欄位", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining(["deletedAt", "deletedByEmpId", "deleteReason"]),
+    )
+  })
+
+  it("三個欄位皆可為 null（null = 未註銷）", () => {
+    expect(cols.deletedAt.notNull).toBe(false)
+    expect(cols.deletedByEmpId.notNull).toBe(false)
+    expect(cols.deleteReason.notNull).toBe(false)
   })
 })

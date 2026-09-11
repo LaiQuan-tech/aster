@@ -44,6 +44,7 @@ announcementsRouter.get(
         .from("announcements")
         .select(SELECT_COLS)
         .eq("tenant_id", tenantId)
+        .is("deleted_at", null)
         .order("created_at", { ascending: false })
 
       if (error) {
@@ -133,6 +134,7 @@ announcementsRouter.patch(
         .update(patch)
         .eq("tenant_id", tenantId)
         .eq("id", id)
+        .is("deleted_at", null)
         .select("id")
         .maybeSingle()
 
@@ -151,7 +153,19 @@ announcementsRouter.patch(
   },
 )
 
-// DELETE /announcements/:id — remove an announcement (this tenant only).
+/**
+ * DELETE /announcements/:id — HR admin 註銷一則公告（**軟刪除**）。
+ *
+ * 公告與規章是勞資爭議的證據（施行細則 §37 的揭示／發給義務、以及爭議時
+ * 「當時公告的是哪一版」的舉證），客戶亦明文要求保留 5~7 年追溯期。
+ * 因此不做實體刪除：寫入 deleted_at / deleted_by_emp_id / delete_reason，
+ * 列表與 PATCH 以 `deleted_at IS NULL` 過濾。`reason` 必填。
+ * DB 層另有 sql/0018 的 no_hard_delete trigger 兜底。
+ */
+const deleteAnnouncementSchema = z.object({
+  reason: z.string().trim().min(1).max(250),
+})
+
 announcementsRouter.delete(
   "/announcements/:id",
   requireAuth,
@@ -159,13 +173,37 @@ announcementsRouter.delete(
   requireHrAdmin,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
     const { id } = req.params
+
+    const parsed = deleteAnnouncementSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: "reason_required", details: parsed.error.flatten() })
+      return
+    }
+
     try {
+      const { data: emp, error: empErr } = await supabaseAdmin
+        .from("employees")
+        .select("id")
+        .eq("tenant_id", tenantId)
+        .eq("user_id", userId)
+        .maybeSingle()
+      if (empErr) {
+        next(new Error(`DELETE /announcements/${id} (resolve actor): ${empErr.message}`))
+        return
+      }
+
       const { data, error } = await supabaseAdmin
         .from("announcements")
-        .delete()
+        .update({
+          deleted_at: new Date().toISOString(),
+          deleted_by_emp_id: emp?.id ?? null,
+          delete_reason: parsed.data.reason,
+        })
         .eq("tenant_id", tenantId)
         .eq("id", id)
+        .is("deleted_at", null)
         .select("id")
         .maybeSingle()
 
@@ -174,6 +212,7 @@ announcementsRouter.delete(
         return
       }
       if (!data) {
+        // 不存在、跨租戶、或已註銷 —— 一律 404，不洩漏哪一種。
         res.status(404).json({ error: "not_found" })
         return
       }

@@ -64,6 +64,24 @@ async function resolveCallerEmployeeId(tenantId: string, userId: string | undefi
   return (data?.id as string | undefined) ?? null
 }
 
+/**
+ * 租戶是否可被 demo seed 覆寫。
+ *
+ * seed 為了冪等會刪掉 demo 員工的 punch_records / leave_requests 與那則示範
+ * 公告——對正式租戶而言那是刪除出勤與請假紀錄，正是模組二第 2 條
+ * （「嚴禁系統刪除」）禁止的事，且 sql/0018 的 no_hard_delete trigger 也會
+ * 擋下。故 seed 僅允許在明確標記為示範／測試的租戶上執行。
+ */
+async function tenantAllowsDemoSeed(tenantId: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from("tenants")
+    .select("status")
+    .eq("id", tenantId)
+    .maybeSingle()
+  if (error) throw new Error(`demo tenant status: ${error.message}`)
+  return data?.status === "demo" || data?.status === "test"
+}
+
 demoRouter.post(
   "/demo/seed",
   requireAuth,
@@ -71,6 +89,14 @@ demoRouter.post(
   requireHrAdmin,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
+    if (!(await tenantAllowsDemoSeed(tenantId))) {
+      res.status(409).json({
+        error: "tenant_not_demo",
+        message:
+          "示範資料只能寫入標記為 demo/test 的租戶。對正式租戶執行會刪除真實出勤與請假紀錄。",
+      })
+      return
+    }
     const callerEmployeeId = await resolveCallerEmployeeId(tenantId, req.auth?.userId)
     const today = dateDaysAgo(0)
     const workDates = [dateDaysAgo(6), dateDaysAgo(5), dateDaysAgo(4), dateDaysAgo(3), dateDaysAgo(2)]

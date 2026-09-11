@@ -26,7 +26,19 @@ export interface ProvisionTenantResult {
  *
  * Best-effort rollback: if a later step fails we tear down what we already
  * created so onboarding failures don't leave orphaned tenants/users behind.
+ *
+ * tenants.status：正式租戶一律 'active'。僅當 NODE_ENV=test **且**
+ * ASTER_PROVISION_TEST_TENANTS=true（兩個條件都要）時標記為 'test'，
+ * 讓 sql/0018 的 no_hard_delete trigger 放行整合測試的資料清理。
+ * 該環境變數只由 src/__tests__/setup.ts 設定，不在 .env.example，
+ * 也不應出現在任何部署環境。
  */
+function provisionStatus(): string {
+  const isTest =
+    process.env.NODE_ENV === "test" && process.env.ASTER_PROVISION_TEST_TENANTS === "true"
+  return isTest ? "test" : "active"
+}
+
 export async function provisionTenant({
   name,
   adminEmail,
@@ -37,6 +49,7 @@ export async function provisionTenant({
     .from("tenants")
     .insert({
       name,
+      status: provisionStatus(),
       branding: { logoUrl: null, primaryColor: "#1F4E79", appName: name },
       features: { payroll: true, kpi: true, ai_assistant: true },
     })

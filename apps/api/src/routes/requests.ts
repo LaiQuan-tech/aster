@@ -271,8 +271,16 @@ requestsRouter.post(
         .select("step_order, approver_emp_id")
         .order("step_order", { ascending: true })
       if (stepErr || !steps) {
-        // Best-effort cleanup so we don't leave a request with no chain.
-        await supabaseAdmin.from("leave_requests").delete().eq("id", requestId)
+        // 回滾：簽核鏈建不起來，這張單不該留在列表上。但 leave_requests 受
+        // sql/0018 的 no_hard_delete trigger 保護，不能實體刪除，改標記註銷。
+        // （此列剛建立、無簽核軌跡，不是證據，但仍走同一條軟刪除路徑。）
+        await supabaseAdmin
+          .from("leave_requests")
+          .update({
+            deleted_at: new Date().toISOString(),
+            delete_reason: "建單失敗自動回滾：簽核鏈建立失敗",
+          })
+          .eq("id", requestId)
         next(new Error(`POST /requests (steps): ${stepErr?.message}`))
         return
       }
