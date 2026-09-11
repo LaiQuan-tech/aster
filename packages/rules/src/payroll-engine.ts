@@ -67,6 +67,20 @@ export function computePayslip(
   rules: RuleConfig,
   /** 本期核准的員工代墊支出合計 (加項)。預設 0。 */
   expenses = 0,
+  /**
+   * 本期定額補貼合計 (油錢補貼這類「每月固定 X 元、不論實花」的給付)。
+   * 預設 0。
+   *
+   * **與 expenses 稅務性質相反,不可互換**:定額補貼屬薪資所得
+   * (所得稅法 §14 第 1 類含各種補助費),要進 gross、要併入扣繳、
+   * 且應計入勞健保投保薪資。把它當代墊支出處理 = 不課稅 + 不計保
+   * = 漏報薪資所得 + 高薪低報。
+   *
+   * 註:本函式不會因為補貼而自動調整保費 —— 投保薪資是另行申報的級距,
+   * 不是從當月 gross 推算的。補貼是否使該員需重新申報投保薪資,
+   * 由呼叫端依投保級距表判斷 (該表尚未匯入,見帳本待辦)。
+   */
+  allowances = 0,
 ): PayslipBreakdown {
   const method: PayrollMethod = salary.method ?? rules.payroll.method;
   const hourlyWage = salary.hourlyWage;
@@ -173,7 +187,11 @@ export function computePayslip(
     lines.push({ label: "全勤遲到扣款", amount: -attendanceDeduction });
   }
 
-  const gross = round(base + overtimePay + nightPay + attendanceBonus);
+  // 定額補貼屬薪資所得,進 gross (與 expenses 的處理刻意不同,見參數說明)。
+  const allowancesTotal = round(allowances);
+  if (allowancesTotal !== 0) lines.push({ label: "定額補貼", amount: allowancesTotal });
+
+  const gross = round(base + overtimePay + nightPay + attendanceBonus + allowancesTotal);
 
   // --- 應扣項目 ----------------------------------------------------------
   // 保費以「投保薪資」為基數(非本俸)。缺任一設定就當 0,不臆測。
@@ -221,6 +239,7 @@ export function computePayslip(
     nightPay,
     attendanceBonus,
     attendanceDeduction,
+    allowances: allowancesTotal,
     compTimeMinutes,
     gross,
     overtimeSegments,

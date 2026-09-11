@@ -90,6 +90,10 @@ BEGIN
     'projects',                  -- bonus_pool
     'project_members',           -- share_pct / share_amount
     'project_share_adjustments',
+    -- 報銷（模組三）—— nature 欄位決定課稅與投保歸屬，改動必須留痕
+    'expense_categories',
+    'expense_claims',
+    'expense_settlements',
     -- 證據（模組二）
     'leave_requests',
     'approval_steps',
@@ -149,7 +153,8 @@ CREATE TRIGGER audit_logs_append_only
 -- DO $$ DECLARE t text; BEGIN
 --   FOREACH t IN ARRAY ARRAY['payslips','salary_structures','salary_adjustments',
 --     'leave_balances','comp_time_ledger','non_employee_income','rule_configs',
---     'projects','project_members','project_share_adjustments','leave_requests',
+--     'projects','project_members','project_share_adjustments',
+--     'expense_categories','expense_claims','expense_settlements','leave_requests',
 --     'approval_steps','announcements','announcement_versions',
 --     'announcement_signature_sheets','announcement_acknowledgements']
 --   LOOP EXECUTE format('DROP TRIGGER IF EXISTS audit_all ON public.%I', t); END LOOP;

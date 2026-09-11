@@ -27,6 +27,10 @@
 --     approval_steps、announcements
 --   法定保存義務（勞基法 §30 V 出勤紀錄 5 年、§23 II 工資清冊 5 年）：
 --     punch_records、attendance_days、payslips
+--   金流憑證（模組三）：expense_claims、expense_claim_attachments、
+--     expense_settlements —— 報銷單與憑證是稅上主張「非所得代墊費用」的
+--     依據，且營所稅列費用亦需憑證。本模組刻意不提供刪除端點，
+--     撤回走 status='cancelled'。
 --   ※ 若只要客戶明文那一組，刪掉下方第二個 FOREACH 區塊即可。
 --
 -- 套用方式：經 Supabase Management API query 端點（同 0001~0017）。
@@ -98,7 +102,10 @@ BEGIN
   FOREACH t IN ARRAY ARRAY[
     'punch_records',
     'attendance_days',
-    'payslips'
+    'payslips',
+    'expense_claims',
+    'expense_claim_attachments',
+    'expense_settlements'
   ]
   LOOP
     EXECUTE format('DROP TRIGGER IF EXISTS no_hard_delete ON public.%I', t);
@@ -111,7 +118,8 @@ END $$;
 -- ── 還原 ────────────────────────────────────────────────────────────
 -- DO $$ DECLARE t text; BEGIN
 --   FOREACH t IN ARRAY ARRAY['leave_requests','request_attachments',
---     'approval_steps','announcements','punch_records','attendance_days','payslips']
+--     'approval_steps','announcements','punch_records','attendance_days','payslips',
+--     'expense_claims','expense_claim_attachments','expense_settlements']
 --   LOOP EXECUTE format('DROP TRIGGER IF EXISTS no_hard_delete ON public.%I', t); END LOOP;
 -- END $$;
 -- DROP FUNCTION IF EXISTS public.forbid_hard_delete();

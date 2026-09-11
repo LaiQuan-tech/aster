@@ -14,6 +14,9 @@ import {
   announcementVersions,
   announcementSignatureSheets,
   announcementAcknowledgements,
+  expenseCategories,
+  expenseClaims,
+  expenseSettlements,
 } from "../index"
 
 describe("tenants table", () => {
@@ -289,5 +292,60 @@ describe("announcementAcknowledgements table — 逐人簽收", () => {
 
   it("signatureSheetId 可為 null（先建待簽項、之後補掃描檔）", () => {
     expect(cols.signatureSheetId.notNull).toBe(false)
+  })
+})
+
+describe("expenseCategories table — nature 是本模組的關鍵欄位", () => {
+  const cols = getTableColumns(expenseCategories)
+
+  // 實報實銷非所得、不計投保薪資；定額補貼屬薪資所得、應計入投保薪資。
+  // 設錯＝漏報薪資所得 ＋ 高薪低報。
+  it("nature 必填且預設為 reimbursement（較保守的那一邊需明示改成 allowance）", () => {
+    expect(cols.nature.notNull).toBe(true)
+    expect(cols.nature.default).toBe("reimbursement")
+  })
+
+  it("requiresReceipt 預設為 true —— 省的是事前審核，不是憑證", () => {
+    expect(cols.requiresReceipt.default).toBe(true)
+  })
+
+  it("crossCheckAttendance 預設 false，需逐類別明示開啟", () => {
+    expect(cols.crossCheckAttendance.default).toBe(false)
+  })
+})
+
+describe("expenseClaims table — 發生日與歸屬期分開", () => {
+  const cols = getTableColumns(expenseClaims)
+
+  // 上月的收據這月才交：歸屬期是本月，發生日仍是上月。
+  // 發生日是「報銷 × 出勤交叉檢核」的比對鍵，混為一欄兩邊都會錯。
+  it("incurredOn 與 period 是兩個欄位，且皆必填", () => {
+    expect(cols.incurredOn.notNull).toBe(true)
+    expect(cols.period.notNull).toBe(true)
+  })
+
+  // 類別的預設性質日後可能調整，已送出的單必須凍結當時的稅務認定。
+  it("nature 在單上再存一份（不只靠 category 帶）", () => {
+    expect(Object.keys(cols)).toEqual(expect.arrayContaining(["nature"]))
+    expect(cols.nature.notNull).toBe(true)
+  })
+
+  it("status 預設 submitted —— 無簽核鏈，月結時一次轉 settled", () => {
+    expect(cols.status.default).toBe("submitted")
+  })
+})
+
+describe("expenseSettlements table — 月結批次", () => {
+  const cols = getTableColumns(expenseSettlements)
+
+  // 兩個合計分開存：在薪資引擎走不同路徑，混算即稅務錯誤。
+  it("reimbursementTotal 與 allowanceTotal 分開存", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining(["reimbursementTotal", "allowanceTotal", "claimCount"]),
+    )
+  })
+
+  it("status 預設 open，核銷後轉 settled 即鎖定該期", () => {
+    expect(cols.status.default).toBe("open")
   })
 })

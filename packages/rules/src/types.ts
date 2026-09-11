@@ -84,8 +84,13 @@ export interface PayslipLine {
 
 /**
  * 薪資單明細 (payroll-engine 的輸出)。所有欄位為金額。
- * gross = base + overtimePay + nightPay + attendanceBonus − attendanceDeduction
+ * gross = base + overtimePay + nightPay + attendanceBonus + allowances
+ *         − attendanceDeduction
  * (attendanceDeduction 以正值表示扣了多少;已反映在 gross)。
+ *
+ * 注意 allowances 與 expenses 的差別 —— 兩者稅務性質相反,不可互換:
+ *   • allowances 定額補貼 → **屬薪資所得**,進 gross,應計入投保薪資
+ *   • expenses   實報實銷 → 非所得,不進 gross,直接加在實發
  */
 export interface PayslipBreakdown {
   /** 本俸 (月薪 baseSalary 或 出勤天數×dailyWage)。 */
@@ -100,6 +105,8 @@ export interface PayslipBreakdown {
   attendanceBonus: number;
   /** 全勤獎金被扣的金額 (正值)。 */
   attendanceDeduction: number;
+  /** 定額補貼合計 (屬薪資所得,已計入 gross;見本介面開頭說明)。 */
+  allowances: number;
   /** 轉補休的加班時數 (compTime=true 的規則;不發現金,僅供 ledger)。 */
   compTimeMinutes: number;
   /** 應發合計。 */

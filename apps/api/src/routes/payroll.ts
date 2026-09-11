@@ -236,6 +236,34 @@ payrollRouter.post(
         )
       }
 
+      // --- 本期已核銷的報銷單（模組三第 1 條）---------------------------------
+      // 兩種性質走引擎的不同路徑，**不可混算**：
+      //   • reimbursement 實報實銷 → expenses，非所得，不進 gross、不影響保費
+      //   • allowance     定額補貼 → allowances，屬薪資所得，進 gross
+      // 只取 status='settled'：未核銷的單不該進當期薪資（故核銷必須在本
+      // 端點之前執行，見 expense-settlements 的說明）。
+      const { data: expData, error: expErr } = await supabaseAdmin
+        .from("expense_claims")
+        .select("employee_id, nature, amount")
+        .eq("tenant_id", tenantId)
+        .eq("period", period)
+        .eq("status", "settled")
+        .in("employee_id", employeeIds)
+      if (expErr) {
+        next(new Error(`POST /payroll/run (expense_claims): ${expErr.message}`))
+        return
+      }
+      const expensesByEmployee = new Map<string, number>()
+      const allowancesByEmployee = new Map<string, number>()
+      for (const row of (expData ?? []) as Array<{
+        employee_id: string
+        nature: string
+        amount: string | number
+      }>) {
+        const target = row.nature === "allowance" ? allowancesByEmployee : expensesByEmployee
+        target.set(row.employee_id, (target.get(row.employee_id) ?? 0) + Number(row.amount))
+      }
+
       // --- already-finalized payslips for this period (locked, skip) ----------
       const { data: finData, error: finErr } = await supabaseAdmin
         .from("payslips")
@@ -274,6 +302,8 @@ payrollRouter.post(
           days,
           toSalaryStructure(sal, dependentsByEmployee.get(sal.employee_id) ?? 0),
           rules,
+          expensesByEmployee.get(sal.employee_id) ?? 0,
+          allowancesByEmployee.get(sal.employee_id) ?? 0,
         )
         rows.push({
           tenant_id: tenantId,
@@ -300,7 +330,17 @@ payrollRouter.post(
         }
       }
 
-      res.status(201).json({ generated: rows.length, skipped, missingInsuredSalary })
+      // 定額補貼屬薪資所得，可能使該員需重新申報勞健保投保薪資。引擎不會
+      // 自動調整保費（投保薪資是另行申報的級距，非從當月 gross 推算），
+      // 故把本期有補貼的人列出來供 HR 覆核。
+      // ⚠️ 自動判斷是否跨級距需要投保級距表，該表尚未匯入（見帳本待辦）。
+      const allowanceReview = Array.from(allowancesByEmployee.entries())
+        .filter(([, amount]) => amount > 0)
+        .map(([employeeId, amount]) => ({ employeeId, allowanceTotal: amount }))
+
+      res
+        .status(201)
+        .json({ generated: rows.length, skipped, missingInsuredSalary, allowanceReview })
     } catch (err) {
       next(err)
     }

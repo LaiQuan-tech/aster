@@ -106,3 +106,75 @@ describe("保費計算的前置條件", () => {
     expect(slip.net).toBeLessThan(slip.gross);
   });
 });
+
+/**
+ * 定額補貼 vs 實報實銷 —— 兩者稅務性質相反，引擎路徑必須不同。
+ *
+ * 客戶原文列「夜間計程車、捷運、公車及油錢補貼」：前三項實支實付，
+ * 「補貼」通常是定額給付。把定額補貼當代墊支出處理
+ * ＝ 不課稅 ＋ 不計投保薪資 ＝ 漏報薪資所得 ＋ 高薪低報。
+ */
+describe("allowances（定額補貼）與 expenses（實報實銷）", () => {
+  const rules = makeRules(true);
+
+  it("expenses 不進 gross，只加在實發", () => {
+    const withoutExp = computePayslip(oneNormalDay, baseSalary, rules);
+    const withExp = computePayslip(oneNormalDay, baseSalary, rules, 1200);
+
+    expect(withExp.gross).toBe(withoutExp.gross); // gross 不變
+    expect(withExp.expenses).toBe(1200);
+    expect(withExp.net).toBe(withoutExp.net + 1200);
+    // 應扣項目（保費）也不因代墊款而改變。
+    expect(withExp.totalDeductions).toBe(withoutExp.totalDeductions);
+  });
+
+  it("allowances 進 gross —— 這是與 expenses 的關鍵差異", () => {
+    const withoutAll = computePayslip(oneNormalDay, baseSalary, rules);
+    const withAll = computePayslip(oneNormalDay, baseSalary, rules, 0, 3000);
+
+    expect(withAll.allowances).toBe(3000);
+    expect(withAll.gross).toBe(withoutAll.gross + 3000); // gross 變大
+    expect(withAll.net).toBe(withoutAll.net + 3000);
+    expect(withAll.expenses).toBe(0);
+  });
+
+  it("同額的補貼與代墊，gross 不同但實發相同", () => {
+    const asExpense = computePayslip(oneNormalDay, baseSalary, rules, 3000, 0);
+    const asAllowance = computePayslip(oneNormalDay, baseSalary, rules, 0, 3000);
+
+    expect(asAllowance.gross - asExpense.gross).toBe(3000);
+    expect(asAllowance.net).toBe(asExpense.net);
+  });
+
+  it("兩者並存時各走各的路徑", () => {
+    const bare = computePayslip(oneNormalDay, baseSalary, rules);
+    const both = computePayslip(oneNormalDay, baseSalary, rules, 1200, 3000);
+
+    expect(both.expenses).toBe(1200);
+    expect(both.allowances).toBe(3000);
+    expect(both.gross).toBe(bare.gross + 3000);
+    expect(both.net).toBe(bare.net + 4200);
+  });
+
+  it("補貼會出現在逐項明細，代墊款也是（兩條不同的 line）", () => {
+    const slip = computePayslip(oneNormalDay, baseSalary, rules, 1200, 3000);
+    const labels = slip.lines.map((l) => l.label);
+    expect(labels).toContain("定額補貼");
+    expect(labels).toContain("支出(代墊)");
+  });
+
+  it("保費仍以投保薪資為基數，不因補貼而自動改變", () => {
+    // 投保薪資是另行申報的級距，不是從當月 gross 推算的。
+    // 補貼是否使該員需重新申報，由呼叫端依投保級距表判斷（該表尚未匯入）。
+    const bare = computePayslip(oneNormalDay, baseSalary, rules);
+    const withAll = computePayslip(oneNormalDay, baseSalary, rules, 0, 9000);
+    expect(withAll.laborInsurance).toBe(bare.laborInsurance);
+    expect(withAll.healthInsurance).toBe(bare.healthInsurance);
+  });
+
+  it("兩者皆為 0 時行為與舊簽章完全相同（回歸保護）", () => {
+    const threeArg = computePayslip(oneNormalDay, baseSalary, rules);
+    const fiveArg = computePayslip(oneNormalDay, baseSalary, rules, 0, 0);
+    expect(fiveArg).toEqual(threeArg);
+  });
+});

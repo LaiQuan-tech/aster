@@ -204,6 +204,13 @@
       "when": 1789163470568,
       "tag": "0028_smart_mesmero",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1789164574309,
+      "tag": "0029_closed_landau",
+      "breakpoints": true
     }
   ]
 }

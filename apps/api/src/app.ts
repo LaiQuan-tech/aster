@@ -31,6 +31,7 @@ import { employeeProfileRouter } from "./routes/employee-profile.js"
 import { recruitmentRouter } from "./routes/recruitment.js"
 import { payrollTaxRouter } from "./routes/payroll-tax.js"
 import { dashboardRouter } from "./routes/dashboard.js"
+import { expensesRouter } from "./routes/expenses.js"
 import { attachmentsRouter } from "./routes/attachments.js"
 import { internalJobsRouter } from "./routes/internal-jobs.js"
 import { personalNotesRouter } from "./routes/personal-notes.js"
@@ -91,6 +92,7 @@ app.use(employeeProfileRouter)
 app.use(recruitmentRouter)
 app.use(payrollTaxRouter)
 app.use(dashboardRouter)
+app.use(expensesRouter)
 app.use(attachmentsRouter)
 app.use(internalJobsRouter)
 app.use(personalNotesRouter)
