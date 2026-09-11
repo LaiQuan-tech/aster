@@ -1662,3 +1662,204 @@ export interface DemoSeedResult {
 export function seedDemoData() {
   return apiFetch<DemoSeedResult>("/demo/seed", { method: "POST" });
 }
+
+/* ------------------------------------------------------- 報銷（模組三） */
+
+export interface ExpenseCategory {
+  id: string;
+  code: string;
+  name: string;
+  /** 'reimbursement' 實報實銷（非所得）／'allowance' 定額補貼（屬薪資所得）。 */
+  nature: "reimbursement" | "allowance";
+  requires_receipt: boolean;
+  cross_check_attendance: boolean;
+  monthly_cap: string | null;
+  active: boolean;
+}
+
+export interface ExpenseClaim {
+  id: string;
+  employee_id: string;
+  category_id: string;
+  nature: "reimbursement" | "allowance";
+  amount: string;
+  incurred_on: string;
+  period: string;
+  note: string | null;
+  status: string;
+  status_reason: string | null;
+  settlement_id: string | null;
+}
+
+export interface ExpenseReview {
+  period: string;
+  claimCount: number;
+  reimbursementTotal: number;
+  allowanceTotal: number;
+  issues: {
+    missingReceipt: Array<{ claimId: string; employeeId: string; amount: number }>;
+    overCap: Array<{ employeeId: string; categoryId: string; total: number; cap: number }>;
+    attendanceMismatch: Array<{
+      claimId: string;
+      employeeId: string;
+      incurredOn: string;
+      amount: number;
+      overtimeMinutes: number | null;
+      hint: string;
+    }>;
+  };
+}
+
+export interface ExpenseSettlement {
+  id: string;
+  period: string;
+  status: string;
+  reimbursement_total: string;
+  allowance_total: string;
+  claim_count: number;
+  note: string | null;
+  settled_at: string | null;
+}
+
+export function getExpenseCategories() {
+  return apiFetch<{ categories: ExpenseCategory[] }>("/expense-categories");
+}
+
+export function upsertExpenseCategory(body: {
+  code: string;
+  name: string;
+  nature?: "reimbursement" | "allowance";
+  requiresReceipt?: boolean;
+  crossCheckAttendance?: boolean;
+  monthlyCap?: number;
+  active?: boolean;
+}) {
+  return apiFetch<{ category: { id: string; code: string; nature: string } }>(
+    "/expense-categories",
+    { method: "PUT", body: JSON.stringify(body) },
+  );
+}
+
+export function getExpenseClaims(params: { period?: string; employeeId?: string; status?: string } = {}) {
+  const q = new URLSearchParams();
+  if (params.period) q.set("period", params.period);
+  if (params.employeeId) q.set("employeeId", params.employeeId);
+  if (params.status) q.set("status", params.status);
+  const qs = q.toString();
+  return apiFetch<{ claims: ExpenseClaim[] }>(`/expenses${qs ? `?${qs}` : ""}`);
+}
+
+/** 月結前的審視清單：缺憑證、超月限額、報銷 × 出勤不符。 */
+export function getExpenseReview(period: string) {
+  return apiFetch<ExpenseReview>(`/expense-settlements/${period}/review`);
+}
+
+export function settleExpenses(period: string, note?: string) {
+  return apiFetch<{
+    period: string;
+    settlementId: string;
+    claimCount: number;
+    reimbursementTotal: number;
+    allowanceTotal: number;
+  }>(`/expense-settlements/${period}/settle`, {
+    method: "POST",
+    body: JSON.stringify({ note: note ?? null }),
+  });
+}
+
+export function getExpenseSettlements(period?: string) {
+  return apiFetch<{ settlements: ExpenseSettlement[] }>(
+    `/expense-settlements${period ? `?period=${period}` : ""}`,
+  );
+}
+
+/* --------------------------------------------- 公告版本與簽收（模組二） */
+
+export interface AnnouncementVersion {
+  id: string;
+  announcement_id: string;
+  version_no: number;
+  title: string;
+  body: string;
+  audience: string;
+  change_type: "initial" | "amendment" | "annual_rollover";
+  change_note: string | null;
+  effective_from: string | null;
+  effective_to: string | null;
+  requires_signature: boolean;
+  is_adverse_change: boolean;
+  content_hash: string | null;
+  created_at: string;
+}
+
+export interface AnnouncementAck {
+  id: string;
+  employee_id: string;
+  kind: "consent_to_change" | "accept_on_hire";
+  viewed_at: string | null;
+  signed_at: string | null;
+  signature_sheet_id: string | null;
+  note: string | null;
+}
+
+export function getAnnouncementVersions(id: string) {
+  return apiFetch<{ versions: AnnouncementVersion[] }>(`/announcements/${id}/versions`);
+}
+
+export function getAnnouncementAcks(id: string, versionId?: string) {
+  return apiFetch<{
+    versionId: string | null;
+    signed: AnnouncementAck[];
+    pending: AnnouncementAck[];
+    /** 只計 consent_to_change：新人到職接受不進分母也不進分子。 */
+    consentRate: { signed: number; total: number } | null;
+  }>(`/announcements/${id}/acknowledgements${versionId ? `?versionId=${versionId}` : ""}`);
+}
+
+/** HR 登錄紙本簽署。signedAt 是實際簽署日，掃描檔上看不出來，必須人工輸入。 */
+export function recordPaperSignature(
+  versionId: string,
+  body: { employeeId: string; kind?: "consent_to_change" | "accept_on_hire"; signedAt?: string; note?: string },
+) {
+  return apiFetch<{ acknowledgement: AnnouncementAck }>(
+    `/announcement-versions/${versionId}/acknowledge`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
+export interface SignatureSheet {
+  id: string;
+  sheetNo: number;
+  fileName: string;
+  sizeBytes: number;
+  contentHash: string | null;
+  note: string | null;
+  uploadedAt: string;
+  url: string | null;
+}
+
+export function getSignatureSheets(versionId: string) {
+  return apiFetch<{ sheets: SignatureSheet[] }>(`/announcement-versions/${versionId}/sheets`);
+}
+
+/** 補簽後上傳新的掃描檔（加一份，不覆蓋舊的）。 */
+export async function uploadSignatureSheet(versionId: string, file: File, note?: string) {
+  const dataBase64 = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+    r.onerror = () => reject(new Error("讀取檔案失敗"));
+    r.readAsDataURL(file);
+  });
+  return apiFetch<{ id: string; sheetNo: number }>(
+    `/announcement-versions/${versionId}/sheets`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        fileName: file.name,
+        contentType: file.type || "application/octet-stream",
+        dataBase64,
+        note: note ?? undefined,
+      }),
+    },
+  );
+}

@@ -83,6 +83,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { href: "/admin/payroll", label: "薪資 / 保險資料" },
       { href: "/admin/payslips", label: "薪資明細表", soon: true },
       { href: "/admin/payroll-tax", label: "所得稅 / 補充保費" },
+      { href: "/admin/expenses", label: "日常費用月結" },
     ],
   },
   {

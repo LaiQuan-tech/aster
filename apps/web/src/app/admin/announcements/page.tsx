@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getAnnouncements,
@@ -172,6 +173,12 @@ export default function AnnouncementsPage() {
                         >
                           編輯
                         </button>
+                        <Link
+                          href={`/admin/announcements/${a.id}`}
+                          className="text-sm text-blue-600 hover:underline"
+                        >
+                          版本與簽收
+                        </Link>
                         <button
                           onClick={() => onDelete(a.id)}
                           className="text-sm text-red-600 hover:underline"

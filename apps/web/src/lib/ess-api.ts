@@ -603,3 +603,74 @@ export async function uploadAttachment(requestId: string, file: File): Promise<v
     body: JSON.stringify({ fileName: file.name, contentType: file.type || "application/octet-stream", dataBase64 }),
   });
 }
+
+/* ------------------------------------------------------- 報銷（模組三） */
+
+export interface MyExpenseCategory {
+  id: string;
+  code: string;
+  name: string;
+  nature: "reimbursement" | "allowance";
+  requires_receipt: boolean;
+  monthly_cap: string | null;
+  active: boolean;
+}
+
+export interface MyExpenseClaim {
+  id: string;
+  category_id: string;
+  nature: "reimbursement" | "allowance";
+  amount: string;
+  incurred_on: string;
+  period: string;
+  note: string | null;
+  status: string;
+}
+
+export function getMyExpenseCategories() {
+  return apiFetch<{ categories: MyExpenseCategory[] }>("/expense-categories");
+}
+
+export function getMyExpenses(period?: string) {
+  return apiFetch<{ claims: MyExpenseClaim[] }>(
+    `/expenses${period ? `?period=${period}` : ""}`,
+  );
+}
+
+export function fileExpense(body: {
+  categoryId: string;
+  amount: number;
+  incurredOn: string;
+  period?: string;
+  note?: string;
+}) {
+  return apiFetch<{ id: string; period: string; nature: string }>("/expenses", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 撤回自己尚未核銷的單（不刪除，狀態改 cancelled 並留理由）。 */
+export function cancelExpense(id: string, reason: string) {
+  return apiFetch<{ id: string }>(`/expenses/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status: "cancelled", statusReason: reason }),
+  });
+}
+
+export async function uploadExpenseReceipt(claimId: string, file: File): Promise<void> {
+  const dataBase64 = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+    r.onerror = () => reject(new Error("讀取檔案失敗"));
+    r.readAsDataURL(file);
+  });
+  await apiFetch<{ id: string }>(`/expenses/${claimId}/attachments`, {
+    method: "POST",
+    body: JSON.stringify({
+      fileName: file.name,
+      contentType: file.type || "application/octet-stream",
+      dataBase64,
+    }),
+  });
+}
