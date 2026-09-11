@@ -132,7 +132,16 @@ async function loadVersion(tenantId: string, versionId: string) {
   return data
 }
 
-// GET /announcements — list this tenant's announcements, newest first.
+/**
+ * GET /announcements — 本租戶的公告，新到舊。
+ *
+ * 每列附帶現行版的 `requires_signature` 與 `version_no`：員工端據此只對
+ * **需簽收的規章**記錄查閱（`viewed_at`），一般佈告不記。規章少、佈告多，
+ * 對每則公告都寫一次查閱紀錄既無意義也浪費。
+ *
+ * 沒有用 foreign-table select —— `current_version_id` 刻意無 FK（與
+ * announcement_versions.announcement_id 互為環狀參照），故分兩次查詢再併。
+ */
 announcementsRouter.get(
   "/announcements",
   requireAuth,
@@ -151,7 +160,41 @@ announcementsRouter.get(
         next(new Error(`GET /announcements: ${error.message}`))
         return
       }
-      res.status(200).json({ announcements: data ?? [] })
+      const rows = data ?? []
+      const versionIds = rows
+        .map((r) => r.current_version_id as string | null)
+        .filter((id): id is string => !!id)
+
+      const versionById = new Map<string, { requires_signature: boolean; version_no: number }>()
+      if (versionIds.length > 0) {
+        const { data: vers, error: verErr } = await supabaseAdmin
+          .from("announcement_versions")
+          .select("id, requires_signature, version_no")
+          .eq("tenant_id", tenantId)
+          .in("id", versionIds)
+        if (verErr) {
+          next(new Error(`GET /announcements (versions): ${verErr.message}`))
+          return
+        }
+        for (const v of vers ?? []) {
+          versionById.set(v.id as string, {
+            requires_signature: v.requires_signature as boolean,
+            version_no: v.version_no as number,
+          })
+        }
+      }
+
+      const announcements = rows.map((r) => {
+        const v = r.current_version_id
+          ? versionById.get(r.current_version_id as string)
+          : undefined
+        return {
+          ...r,
+          requires_signature: v?.requires_signature ?? false,
+          version_no: v?.version_no ?? null,
+        }
+      })
+      res.status(200).json({ announcements })
     } catch (err) {
       next(err)
     }
@@ -737,6 +780,19 @@ announcementsRouter.post(
 
       const isPaperSignature = parsed.data.employeeId !== undefined
       const now = new Date().toISOString()
+
+      const { data: existing, error: exErr } = await supabaseAdmin
+        .from("announcement_acknowledgements")
+        .select("id, viewed_at, signed_at")
+        .eq("tenant_id", tenantId)
+        .eq("version_id", vid)
+        .eq("employee_id", targetEmpId)
+        .maybeSingle()
+      if (exErr) {
+        next(new Error(`POST acknowledge (load): ${exErr.message}`))
+        return
+      }
+
       const row: Record<string, unknown> = {
         tenant_id: tenantId,
         version_id: vid,
@@ -747,8 +803,14 @@ announcementsRouter.post(
         row.signed_at = parsed.data.signedAt ?? now
         if (parsed.data.signatureSheetId) row.signature_sheet_id = parsed.data.signatureSheetId
         if (parsed.data.note) row.note = parsed.data.note
+        // 已有的查閱時間不因登錄紙本簽署而被清掉。
+        if (existing?.viewed_at) row.viewed_at = existing.viewed_at
       } else {
-        row.viewed_at = now
+        // **只記第一次查閱。** 「已發給且可取得」的證據是初次送達的時點，
+        // 用最近一次覆蓋會把那個時點洗掉。員工端每次開首頁都會呼叫本端點，
+        // 若不保留首次時間，viewed_at 會永遠是「剛剛」而失去舉證價值。
+        row.viewed_at = existing?.viewed_at ?? now
+        if (existing?.signed_at) row.signed_at = existing.signed_at
       }
 
       const { data, error } = await supabaseAdmin

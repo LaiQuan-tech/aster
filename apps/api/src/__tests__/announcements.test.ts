@@ -352,6 +352,42 @@ describe("F5 版本鏈 — PATCH 發新版，不覆寫歷史（模組二第 2 �
     expect(res.body.acknowledgement.signed_at).toBeNull()
   })
 
+  it("重複查閱只保留第一次的時間 —— 「已發給」的證據是初次送達時點", async () => {
+    const { data: first } = await supabaseAdmin
+      .from("announcement_acknowledgements")
+      .select("viewed_at")
+      .eq("version_id", v1Id)
+      .not("viewed_at", "is", null)
+      .limit(1)
+      .maybeSingle()
+    expect(first?.viewed_at).not.toBeNull()
+
+    // 員工端每次開首頁都會呼叫本端點；若用最近一次覆蓋，
+    // viewed_at 會永遠是「剛剛」而失去舉證價值。
+    await new Promise((r) => setTimeout(r, 1100))
+    const again = await request(app)
+      .post(`/announcement-versions/${v1Id}/acknowledge`)
+      .set("Authorization", `Bearer ${empToken}`)
+      .send({})
+    expect(again.status).toBe(200)
+    expect(again.body.acknowledgement.viewed_at).toBe(first?.viewed_at)
+  })
+
+  it("列表帶出現行版的 requires_signature，員工端據此決定是否記錄查閱", async () => {
+    const res = await request(app)
+      .get("/announcements")
+      .set("Authorization", `Bearer ${empToken}`)
+    expect(res.status).toBe(200)
+    const items = res.body.announcements as Array<{
+      id: string
+      requires_signature: boolean
+      version_no: number | null
+    }>
+    const target = items.find((a) => a.id === annId)
+    expect(target?.requires_signature).toBe(true)
+    expect(target?.version_no).toBe(3)
+  })
+
   it("員工不可代他人登錄 → 403", async () => {
     const res = await request(app)
       .post(`/announcement-versions/${v1Id}/acknowledge`)

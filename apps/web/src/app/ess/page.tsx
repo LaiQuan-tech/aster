@@ -8,6 +8,7 @@ import {
   getBranding,
   getPunchToday,
   getAnnouncements,
+  recordAnnouncementView,
   getPersonalNote,
   getRequests,
   postPunch,
@@ -86,7 +87,18 @@ function EssHome() {
           .sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0));
         setInternalLinks(links);
       }
-      if (annRes.status === "fulfilled") setAnnouncements(annRes.value.announcements);
+      if (annRes.status === "fulfilled") {
+        const list = annRes.value.announcements;
+        setAnnouncements(list);
+        // 只對**需簽收的規章**記錄查閱：一般佈告不記，規章少、佈告多，
+        // 對每則都寫一次既無意義也浪費。伺服器只保留第一次查閱時間。
+        // 這是被動 log，不是「勾選同意」——後者客戶明確排斥。
+        for (const a of list) {
+          if (a.requires_signature && a.current_version_id) {
+            void recordAnnouncementView(a.current_version_id).catch(() => null);
+          }
+        }
+      }
       getRequests("pending").then((r) => setPendingCount(r.requests.length)).catch(() => null);
       if (noteRes.status === "fulfilled") {
         setNote(noteRes.value.note.body);

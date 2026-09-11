@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Card,
   PageHeader,
@@ -12,13 +12,19 @@ import {
 } from "@/components/admin-ui";
 import {
   getExpenseCategories,
+  getExpenseClaims,
+  getExpenseAttachments,
   getExpenseReview,
   getExpenseSettlements,
+  getEmployees,
   settleExpenses,
   upsertExpenseCategory,
+  type ExpenseAttachment,
   type ExpenseCategory,
+  type ExpenseClaim,
   type ExpenseReview,
   type ExpenseSettlement,
+  type Employee,
 } from "@/lib/admin-api";
 
 /** 'YYYY-MM' for today. */
@@ -35,6 +41,8 @@ export default function AdminExpensesPage() {
   const [review, setReview] = useState<ExpenseReview | null>(null);
   const [settlement, setSettlement] = useState<ExpenseSettlement | null>(null);
   const [categories, setCategories] = useState<ExpenseCategory[]>([]);
+  const [claims, setClaims] = useState<ExpenseClaim[]>([]);
+  const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,14 +52,16 @@ export default function AdminExpensesPage() {
     setLoading(true);
     setError(null);
     try {
-      const [rev, sets, cats] = await Promise.all([
+      const [rev, sets, cats, cls] = await Promise.all([
         getExpenseReview(period),
         getExpenseSettlements(period),
         getExpenseCategories(),
+        getExpenseClaims({ period }),
       ]);
       setReview(rev);
       setSettlement(sets.settlements[0] ?? null);
       setCategories(cats.categories);
+      setClaims(cls.claims);
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入失敗");
       setReview(null);
@@ -63,6 +73,22 @@ export default function AdminExpensesPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    getEmployees()
+      .then((e) => setEmployees(e.employees))
+      .catch(() => null);
+  }, []);
+
+  /** 異常清單與單據列表一律顯示姓名；查不到才退回 id 前 8 碼。 */
+  const empName = useCallback(
+    (id: string) => employees.find((e) => e.id === id)?.name ?? id.slice(0, 8),
+    [employees],
+  );
+  const catName = useCallback(
+    (id: string) => categories.find((c) => c.id === id)?.name ?? id.slice(0, 8),
+    [categories],
+  );
 
   const isSettled = settlement?.status === "settled";
   const issueCount = useMemo(() => {
@@ -188,8 +214,7 @@ export default function AdminExpensesPage() {
                 <ul className="space-y-1 text-sm">
                   {review.issues.missingReceipt.map((r) => (
                     <li key={r.claimId} className="rounded border border-gray-200 px-3 py-2">
-                      員工 <code className="text-xs">{r.employeeId.slice(0, 8)}</code> ·{" "}
-                      {money(r.amount)} 元
+                      {empName(r.employeeId)} · {money(r.amount)} 元
                     </li>
                   ))}
                 </ul>
@@ -208,7 +233,7 @@ export default function AdminExpensesPage() {
                       key={`${r.employeeId}-${r.categoryId}`}
                       className="rounded border border-gray-200 px-3 py-2"
                     >
-                      員工 <code className="text-xs">{r.employeeId.slice(0, 8)}</code> ·
+                      {empName(r.employeeId)} · {catName(r.categoryId)} ·
                       合計 {money(r.total)} / 上限 {money(r.cap)}
                     </li>
                   ))}
@@ -233,9 +258,7 @@ export default function AdminExpensesPage() {
                       key={r.claimId}
                       className="rounded border border-red-200 bg-red-50 px-3 py-2"
                     >
-                      {r.incurredOn} · 員工{" "}
-                      <code className="text-xs">{r.employeeId.slice(0, 8)}</code> ·{" "}
-                      {money(r.amount)} 元
+                      {r.incurredOn} · {empName(r.employeeId)} · {money(r.amount)} 元
                       <span className="ml-2 text-xs text-red-700">{r.hint}</span>
                     </li>
                   ))}
@@ -246,8 +269,156 @@ export default function AdminExpensesPage() {
         )}
       </Card>
 
+      <ClaimList
+        claims={claims}
+        empName={empName}
+        catName={catName}
+        categories={categories}
+      />
+
       <CategoryManager categories={categories} onChanged={() => void load()} />
     </>
+  );
+}
+
+/**
+ * 本期單據列表。**「缺憑證」只告訴 HR 哪些沒附，這裡才看得到已附的是什麼。**
+ * 憑證採點開才載入（signed URL 有效期只有一小時，一次全抓會大量浪費且過期）。
+ */
+function ClaimList({
+  claims,
+  empName,
+  catName,
+  categories,
+}: {
+  claims: ExpenseClaim[];
+  empName: (id: string) => string;
+  catName: (id: string) => string;
+  categories: ExpenseCategory[];
+}) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<Record<string, ExpenseAttachment[]>>({});
+  const [loadingId, setLoadingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function toggle(claimId: string) {
+    if (openId === claimId) {
+      setOpenId(null);
+      return;
+    }
+    setOpenId(claimId);
+    if (attachments[claimId]) return;
+    setLoadingId(claimId);
+    setError(null);
+    try {
+      const res = await getExpenseAttachments(claimId);
+      setAttachments((prev) => ({ ...prev, [claimId]: res.attachments }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "載入憑證失敗");
+    } finally {
+      setLoadingId(null);
+    }
+  }
+
+  const needsReceipt = (categoryId: string) =>
+    categories.find((c) => c.id === categoryId)?.requires_receipt !== false;
+
+  return (
+    <Card>
+      <h2 className="mb-1 text-sm font-medium text-gray-500">本期單據（{claims.length}）</h2>
+      <p className="mb-4 text-xs text-gray-500">點「憑證」可直接檢視附件。</p>
+
+      {error && <ErrorText>{error}</ErrorText>}
+
+      {claims.length === 0 ? (
+        <Empty>本期沒有單據。</Empty>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[760px] text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 text-left text-xs text-gray-500">
+                <th className="py-2">發生日</th>
+                <th className="py-2">員工</th>
+                <th className="py-2">類別</th>
+                <th className="py-2">性質</th>
+                <th className="py-2 text-right">金額</th>
+                <th className="py-2">狀態</th>
+                <th className="py-2" />
+              </tr>
+            </thead>
+            <tbody>
+              {claims.map((c) => (
+                <Fragment key={c.id}>
+                  <tr className="border-b border-gray-100">
+                    <td className="py-2 text-xs">{c.incurred_on}</td>
+                    <td className="py-2">{empName(c.employee_id)}</td>
+                    <td className="py-2 text-xs">{catName(c.category_id)}</td>
+                    <td className="py-2">
+                      {c.nature === "allowance" ? (
+                        <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-900">
+                          定額補貼
+                        </span>
+                      ) : (
+                        <span className="text-xs text-gray-600">實報實銷</span>
+                      )}
+                    </td>
+                    <td className="py-2 text-right">{money(Number(c.amount))}</td>
+                    <td className="py-2 text-xs">{c.status}</td>
+                    <td className="py-2 text-right">
+                      {needsReceipt(c.category_id) ? (
+                        <button
+                          type="button"
+                          onClick={() => void toggle(c.id)}
+                          className="text-xs text-blue-600 underline"
+                        >
+                          {openId === c.id ? "收合" : "憑證"}
+                        </button>
+                      ) : (
+                        <span className="text-xs text-gray-400">免附</span>
+                      )}
+                    </td>
+                  </tr>
+                  {openId === c.id && (
+                    <tr className="border-b border-gray-100 bg-gray-50">
+                      <td colSpan={7} className="px-3 py-2">
+                        {loadingId === c.id ? (
+                          <span className="text-xs text-gray-500">載入中…</span>
+                        ) : (attachments[c.id] ?? []).length === 0 ? (
+                          <span className="text-xs text-red-700">
+                            此單沒有憑證。沒有憑證的給付，國稅局傾向認定為薪資。
+                          </span>
+                        ) : (
+                          <ul className="space-y-1">
+                            {(attachments[c.id] ?? []).map((a) => (
+                              <li key={a.id} className="text-xs">
+                                {a.fileName}
+                                <span className="ml-2 text-gray-500">
+                                  {Math.round(a.sizeBytes / 1024)} KB
+                                </span>
+                                {a.url ? (
+                                  <a
+                                    href={a.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="ml-2 text-blue-600 underline"
+                                  >
+                                    開啟
+                                  </a>
+                                ) : null}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
   );
 }
 

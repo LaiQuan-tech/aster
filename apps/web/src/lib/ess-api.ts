@@ -65,6 +65,25 @@ export interface Announcement {
   created_by: string | null;
   created_at: string;
   updated_at: string | null;
+  /** 現行版指標（用來記錄查閱）。 */
+  current_version_id: string | null;
+  /** 現行版是否需簽收；只有需簽收的規章才記錄查閱。 */
+  requires_signature: boolean;
+  version_no: number | null;
+}
+
+/**
+ * 記錄自己查閱了某一版公告（只寫 viewed_at，伺服器只保留**第一次**）。
+ *
+ * 這是**被動的查閱紀錄，不是「勾選同意」**——客戶明確排斥後者。
+ * 它證明「已發給且可取得」，滿足勞基法施行細則 §37 的揭示／發給義務。
+ * 失敗不影響畫面，故呼叫端一律 catch 掉。
+ */
+export function recordAnnouncementView(versionId: string) {
+  return apiFetch<{ acknowledgement: unknown }>(
+    `/announcement-versions/${versionId}/acknowledge`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
 }
 
 export type RequestStatus = "pending" | "approved" | "rejected" | "cancelled";

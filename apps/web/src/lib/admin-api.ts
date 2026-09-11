@@ -1767,6 +1767,20 @@ export function settleExpenses(period: string, note?: string) {
   });
 }
 
+export interface ExpenseAttachment {
+  id: string;
+  fileName: string;
+  sizeBytes: number;
+  contentType: string | null;
+  contentHash: string | null;
+  url: string | null;
+}
+
+/** 某筆報銷的憑證（含短效期 signed URL）。 */
+export function getExpenseAttachments(claimId: string) {
+  return apiFetch<{ attachments: ExpenseAttachment[] }>(`/expenses/${claimId}/attachments`);
+}
+
 export function getExpenseSettlements(period?: string) {
   return apiFetch<{ settlements: ExpenseSettlement[] }>(
     `/expense-settlements${period ? `?period=${period}` : ""}`,
