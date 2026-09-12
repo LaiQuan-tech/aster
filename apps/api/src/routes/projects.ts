@@ -17,6 +17,10 @@ import {
 import { resolveSelf, isHrRole, managedDeptIds } from "../middleware/scope.js"
 import { writeAuditLog } from "../services/audit.js"
 import { DEFAULT_AUTO_ARCHIVE_MONTHS } from "../services/project-archive.js"
+import {
+  DEFAULT_STAMP_DUTY_RATE,
+  DEFAULT_LOOKBACK_YEARS,
+} from "../services/stamp-duty.js"
 
 export const projectsRouter = Router()
 
@@ -125,6 +129,27 @@ function computeAmount(project: ProjectRow, pct: number | null, amount: number |
 }
 
 /**
+ * 哪些專案有「已簽訂的合約」（模組四第 3 條）。
+ *
+ * 專案層級的「合約 or 報價單」刻意**衍生**而不另存欄位：存了旗標就會有
+ * 兩份真相，而合約是會改版、會作廢的。有 `doc_type='contract'` 且有
+ * `signed_on` 的未刪除列 ＝ 已簽約。
+ */
+async function signedProjectIds(tenantId: string, projectIds: string[]): Promise<Set<string>> {
+  if (projectIds.length === 0) return new Set()
+  const { data, error } = await supabaseAdmin
+    .from("contracts")
+    .select("project_id")
+    .eq("tenant_id", tenantId)
+    .eq("doc_type", "contract")
+    .is("deleted_at", null)
+    .not("signed_on", "is", null)
+    .in("project_id", projectIds)
+  if (error) throw new Error(`signedProjectIds: ${error.message}`)
+  return new Set((data ?? []).map((r) => r.project_id as string))
+}
+
+/**
  * 載入專案並判定呼叫者對「分潤」的可見/可管理範圍。
  * canManage（＝可見全部分潤）＝ HR / 該專案 lead(欄位或成員角色) / 該專案所屬部門主管。
  */
@@ -189,9 +214,15 @@ projectsRouter.get(
         next(new Error(`GET /projects: ${error.message}`))
         return
       }
+      // 「有沒有簽約」是衍生的，不另存旗標——旗標與 contracts 會對不起來。
+      // 整份列表一次查完，不做 N+1。
+      const ids = (data ?? []).map((p) => (p as ProjectRow).id)
+      const signed = await signedProjectIds(tenantId, ids)
+
       const projects = (data ?? []).map((p) => {
         const row = p as ProjectRow
         return {
+          hasSignedContract: signed.has(row.id),
           id: row.id,
           name: row.name,
           code: row.code,
@@ -316,8 +347,10 @@ projectsRouter.get(
         return
       }
       const row = data as ProjectRow
+      const signed = await signedProjectIds(tenantId, [row.id])
       res.status(200).json({
         project: {
+          hasSignedContract: signed.has(row.id),
           id: row.id,
           name: row.name,
           code: row.code,
@@ -850,6 +883,10 @@ const projectSettingsSchema = z
     autoArchiveEnabled: z.boolean().optional(),
     /** 0 表示終止當天就封存。上限 120 個月，超過等於沒在封存。 */
     autoArchiveMonths: z.number().int().min(0).max(120).optional(),
+    /** 新建合約時的預設費率（模組四第 3 條）。實際費率凍結在合約列上。 */
+    stampDutyRate: z.number().min(0).max(1).optional(),
+    /** 印花稅清單回溯年數。預設 7——未申報的核課期間是 7 年，不是 5 年。 */
+    stampDutyLookbackYears: z.number().int().min(1).max(15).optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 
@@ -863,7 +900,7 @@ projectsRouter.get(
     try {
       const { data, error } = await supabaseAdmin
         .from("project_settings")
-        .select("auto_archive_enabled, auto_archive_months")
+        .select("auto_archive_enabled, auto_archive_months, stamp_duty_rate, stamp_duty_lookback_years")
         .eq("tenant_id", tenantId)
         .maybeSingle()
       if (error) {
@@ -877,6 +914,10 @@ projectsRouter.get(
           autoArchiveMonths: data
             ? Number(data.auto_archive_months)
             : DEFAULT_AUTO_ARCHIVE_MONTHS,
+          stampDutyRate: data ? Number(data.stamp_duty_rate) : DEFAULT_STAMP_DUTY_RATE,
+          stampDutyLookbackYears: data
+            ? Number(data.stamp_duty_lookback_years)
+            : DEFAULT_LOOKBACK_YEARS,
         },
       })
     } catch (err) {
@@ -913,11 +954,15 @@ projectsRouter.put(
         row.auto_archive_enabled = parsed.data.autoArchiveEnabled
       if (parsed.data.autoArchiveMonths !== undefined)
         row.auto_archive_months = parsed.data.autoArchiveMonths
+      if (parsed.data.stampDutyRate !== undefined)
+        row.stamp_duty_rate = parsed.data.stampDutyRate
+      if (parsed.data.stampDutyLookbackYears !== undefined)
+        row.stamp_duty_lookback_years = parsed.data.stampDutyLookbackYears
 
       const { data, error } = await supabaseAdmin
         .from("project_settings")
         .upsert(row, { onConflict: "tenant_id" })
-        .select("auto_archive_enabled, auto_archive_months")
+        .select("auto_archive_enabled, auto_archive_months, stamp_duty_rate, stamp_duty_lookback_years")
         .single()
       if (error || !data) {
         next(new Error(`PUT /project-settings: ${error?.message}`))
@@ -937,6 +982,8 @@ projectsRouter.put(
         settings: {
           autoArchiveEnabled: data.auto_archive_enabled !== false,
           autoArchiveMonths: Number(data.auto_archive_months),
+          stampDutyRate: Number(data.stamp_duty_rate),
+          stampDutyLookbackYears: Number(data.stamp_duty_lookback_years),
         },
       })
     } catch (err) {

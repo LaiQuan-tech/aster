@@ -1,6 +1,7 @@
 import { pgTable, uuid, text, integer, timestamp } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 import { projects } from "./projects"
+import { contracts } from "./contracts"
 
 /**
  * Project documents — 專案知識庫檔案，比照 request_attachments。binary 存
@@ -16,6 +17,11 @@ export const projectDocuments = pgTable("project_documents", {
   projectId: uuid("project_id")
     .notNull()
     .references(() => projects.id),
+  /**
+   * 合約掃描檔掛在合約上，專案層級文件（申請單、會議紀錄）維持掛專案。
+   * 一個可空外鍵就同時支援兩層，不必另建一張合約附件表。
+   */
+  contractId: uuid("contract_id").references(() => contracts.id),
   fileName: text("file_name").notNull(),
   storagePath: text("storage_path").notNull(),
   sizeBytes: integer("size_bytes").notNull().default(0),

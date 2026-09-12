@@ -14,6 +14,7 @@
 --   [3] migration 0031 —— projects.fiscal_year + 編號唯一索引（模組四第 1 條）
 --   [4] migration 0032 + sql/0021 —— 專案案情狀態與封存（模組四第 2 條）
 --   [5] migration 0033 —— 自動封存：project_settings + projects.unarchived_at
+--   [6] migration 0034 + sql/0022 —— 合約／報價單與印花稅（模組四第 3 條）
 --
 -- 全部冪等，重複執行無害。
 -- ⚠️ [3] 有一個前置檢查要先跑（既有專案若有重複編號，索引會建不起來）。
@@ -239,6 +240,93 @@ CREATE TRIGGER audit_all
 -- ENABLE_INTERNAL_JOBS=true / INTERNAL_JOB_TOKEN，與既有三支排程相同。
 
 -- ─────────────────────────────────────────────────────────────────
+-- [6] migration 0034 + sql/0022 —— 合約／報價單與印花稅（模組四第 3 條）
+-- ─────────────────────────────────────────────────────────────────
+-- 文件類型（合約／報價單／追加減帳）與我方角色（承攬人／定作人）**一起**
+-- 決定課不課印花稅：
+--   • 報價單不是契據（無雙方合意）→ 不課
+--   • 承攬契據課千分之一，印花稅法 §7③ **由承攬人貼**
+--     → 公司發包給下包的合約是下包在貼，不該算進我方應納稅額
+--
+-- 費率與試算稅額**凍結在合約列上**：清單要回溯 5～7 年，2021 年簽的約
+-- 要用 2021 年的費率，不是今天設定的那個。
+--
+-- 回溯年數預設 **7** 不是客戶原文的 5：稅捐稽徵法 §21 未申報者核課期間
+-- 7 年，而印花稅沒貼過花正是「未申報」——做 5 年會漏掉最需要清單的情形。
+
+CREATE TABLE IF NOT EXISTS "contracts" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"tenant_id" uuid NOT NULL,
+	"project_id" uuid NOT NULL,
+	"doc_type" text NOT NULL,
+	"our_role" text DEFAULT 'contractor' NOT NULL,
+	"title" text NOT NULL,
+	"counterparty" text,
+	"amount" numeric,
+	"signed_on" date,
+	"version" integer DEFAULT 1 NOT NULL,
+	"supersedes_id" uuid,
+	"copies" integer DEFAULT 1 NOT NULL,
+	"stamp_duty_required" text DEFAULT 'auto' NOT NULL,
+	"stamp_duty_rate" numeric,
+	"stamp_duty_amount" numeric,
+	"stamp_duty_paid_on" date,
+	"stamp_duty_note" text,
+	"created_by_emp_id" uuid,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"deleted_at" timestamp with time zone,
+	"deleted_by_emp_id" uuid,
+	"delete_reason" text
+);
+
+ALTER TABLE public.project_documents ADD COLUMN IF NOT EXISTS "contract_id" uuid;
+ALTER TABLE public.project_settings ADD COLUMN IF NOT EXISTS "stamp_duty_rate" numeric DEFAULT '0.001' NOT NULL;
+ALTER TABLE public.project_settings ADD COLUMN IF NOT EXISTS "stamp_duty_lookback_years" integer DEFAULT 7 NOT NULL;
+
+DO $$ BEGIN
+ ALTER TABLE "contracts" ADD CONSTRAINT "contracts_tenant_id_tenants_id_fk"
+   FOREIGN KEY ("tenant_id") REFERENCES "public"."tenants"("id");
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+ ALTER TABLE "contracts" ADD CONSTRAINT "contracts_project_id_projects_id_fk"
+   FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id");
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+ ALTER TABLE "project_documents" ADD CONSTRAINT "project_documents_contract_id_contracts_id_fk"
+   FOREIGN KEY ("contract_id") REFERENCES "public"."contracts"("id");
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+CREATE INDEX IF NOT EXISTS "contracts_project_idx" ON "contracts" USING btree ("tenant_id","project_id");
+CREATE INDEX IF NOT EXISTS "contracts_signed_idx"  ON "contracts" USING btree ("tenant_id","signed_on");
+
+-- ── sql/0022：禁刪 + 稽核 + 合法值防呆 ──────────────────────────────
+-- 已貼花的合約被實體刪除，等於把「這筆稅貼過了」的證據一起刪掉，
+-- 而印花稅核課期間最長 7 年，追徵時拿不出東西。
+DROP TRIGGER IF EXISTS no_hard_delete ON public.contracts;
+CREATE TRIGGER no_hard_delete
+  BEFORE DELETE ON public.contracts
+  FOR EACH ROW EXECUTE FUNCTION public.forbid_hard_delete();
+
+DROP TRIGGER IF EXISTS audit_all ON public.contracts;
+CREATE TRIGGER audit_all
+  AFTER INSERT OR UPDATE OR DELETE ON public.contracts
+  FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+ALTER TABLE public.contracts DROP CONSTRAINT IF EXISTS contracts_doc_type_chk;
+ALTER TABLE public.contracts ADD CONSTRAINT contracts_doc_type_chk
+  CHECK (doc_type IN ('contract', 'quotation', 'change_order'));
+
+ALTER TABLE public.contracts DROP CONSTRAINT IF EXISTS contracts_our_role_chk;
+ALTER TABLE public.contracts ADD CONSTRAINT contracts_our_role_chk
+  CHECK (our_role IN ('contractor', 'client'));
+
+ALTER TABLE public.contracts DROP CONSTRAINT IF EXISTS contracts_stamp_flag_chk;
+ALTER TABLE public.contracts ADD CONSTRAINT contracts_stamp_flag_chk
+  CHECK (stamp_duty_required IN ('auto', 'yes', 'no'));
+
+-- ─────────────────────────────────────────────────────────────────
 -- 驗證（**分開跑**，一次只跑這一條）
 -- ─────────────────────────────────────────────────────────────────
 -- select
@@ -275,7 +363,14 @@ CREATE TRIGGER audit_all
 --                                                                as "project_settings(預期1)",
 --   (select count(*) from information_schema.columns
 --     where table_schema='public' and table_name='projects' and column_name='unarchived_at')
---                                                                as "unarchived_at(預期1)";
+--                                                                as "unarchived_at(預期1)",
+--   (select count(*) from information_schema.tables
+--     where table_schema='public' and table_name='contracts')    as "contracts(預期1)",
+--   (select count(*) from pg_trigger t
+--      join pg_class c on c.oid=t.tgrelid
+--      join pg_namespace n on n.oid=c.relnamespace
+--     where n.nspname='public' and not t.tgisinternal and c.relname='contracts')
+--                                                                as "contracts trigger(預期2)";
 
 -- ─────────────────────────────────────────────────────────────────
 -- 補救：若先前那份增量 SQL 已經跑過（存在 trip_advances）

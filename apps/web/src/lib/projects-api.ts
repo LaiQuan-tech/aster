@@ -59,6 +59,8 @@ export interface Project {
   archivedAt: string | null
   /** 人工解除封存的時點；自動封存看這一欄放過該筆。 */
   unarchivedAt?: string | null
+  /** 衍生（模組四第 3 條）：有已簽訂的合約 = 成案；只有報價單 = 還沒。 */
+  hasSignedContract?: boolean
   deptId: string | null
   leadEmpId: string | null
   shareMode: ShareMode
@@ -120,6 +122,155 @@ export interface ProjectSettings {
   autoArchiveEnabled: boolean
   /** 終止狀態滿這麼多個月自動封存。暫停不在此列。 */
   autoArchiveMonths: number
+  /** 新建合約時的預設印花稅率；實際費率凍結在合約列上。 */
+  stampDutyRate: number
+  /** 印花稅清單回溯年數。預設 7——未申報的核課期間是 7 年。 */
+  stampDutyLookbackYears: number
+}
+
+/* -------------------------------------------------------------- contracts -- */
+
+export type DocType = "contract" | "quotation" | "change_order"
+export type OurRole = "contractor" | "client"
+export type StampDutyFlag = "auto" | "yes" | "no"
+
+export const DOC_TYPE_LABELS: Record<DocType, string> = {
+  contract: "合約",
+  quotation: "報價單",
+  change_order: "追加減帳",
+}
+
+export const OUR_ROLE_LABELS: Record<OurRole, string> = {
+  contractor: "我方承攬（我方貼花）",
+  client: "我方定作（對方貼花）",
+}
+
+export interface Contract {
+  id: string
+  projectId: string
+  docType: DocType
+  ourRole: OurRole
+  title: string
+  counterparty: string | null
+  amount: number | null
+  signedOn: string | null
+  version: number
+  supersedesId: string | null
+  copies: number
+  stampDutyRequired: StampDutyFlag
+  stampDutyRate: number | null
+  stampDutyAmount: number | null
+  stampDutyPaidOn: string | null
+  stampDutyNote: string | null
+  createdAt: string
+  /** 衍生：最終是否應由我方貼花。 */
+  dutiable: boolean
+}
+
+export interface StampDutySummary {
+  dutiableCount: number
+  dutiableTotal: number
+  paidCount: number
+  paidTotal: number
+  unpaidCount: number
+  unpaidTotal: number
+  /** 應貼花卻沒填金額，算不出稅額。不併進「未貼 0 元」。 */
+  missingAmountCount: number
+  /** 應貼花卻沒有簽訂日，不在期間查詢裡但最該被追。 */
+  missingSignedOn: number
+}
+
+export interface StampDutyItem {
+  id: string
+  projectId: string
+  projectName: string | null
+  projectCode: string | null
+  docType: DocType
+  ourRole: OurRole
+  title: string
+  counterparty: string | null
+  amount: number | null
+  signedOn: string | null
+  copies: number
+  dutiable: boolean
+  stampDutyRate: number | null
+  stampDutyAmount: number | null
+  stampDutyPaidOn: string | null
+  stampDutyNote: string | null
+}
+
+export function getContracts(projectId: string) {
+  return apiFetch<{ contracts: Contract[] }>(`/projects/${projectId}/contracts`)
+}
+
+export function createContract(
+  projectId: string,
+  body: {
+    docType: DocType
+    ourRole?: OurRole
+    title: string
+    counterparty?: string | null
+    amount?: number | null
+    signedOn?: string | null
+    copies?: number
+    supersedesId?: string | null
+    stampDutyRequired?: StampDutyFlag
+    /** 補登舊約時指定當年度費率。 */
+    stampDutyRate?: number | null
+    stampDutyPaidOn?: string | null
+    stampDutyNote?: string | null
+  },
+) {
+  return apiFetch<{ contract: Contract }>(`/projects/${projectId}/contracts`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+/** docType / ourRole 不在參數裡：兩者決定課不課稅，要改請作廢後重立。 */
+export function updateContract(
+  id: string,
+  body: {
+    title?: string
+    counterparty?: string | null
+    amount?: number | null
+    signedOn?: string | null
+    copies?: number
+    stampDutyRequired?: StampDutyFlag
+    stampDutyRate?: number | null
+    stampDutyPaidOn?: string | null
+    stampDutyNote?: string | null
+  },
+) {
+  return apiFetch<{ contract: Contract }>(`/contracts/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  })
+}
+
+export function deleteContract(id: string, reason: string) {
+  return apiFetch<{ id: string }>(`/contracts/${id}`, {
+    method: "DELETE",
+    body: JSON.stringify({ reason }),
+  })
+}
+
+export function getStampDutyReport(params?: {
+  from?: string
+  to?: string
+  unpaidOnly?: boolean
+}) {
+  const q = new URLSearchParams()
+  if (params?.from) q.set("from", params.from)
+  if (params?.to) q.set("to", params.to)
+  if (params?.unpaidOnly) q.set("unpaidOnly", "1")
+  const qs = q.toString()
+  return apiFetch<{
+    range: { from: string; to: string; lookbackYears: number }
+    summary: StampDutySummary
+    items: StampDutyItem[]
+    disclaimer: string
+  }>(`/reports/stamp-duty${qs ? `?${qs}` : ""}`)
 }
 
 /* --------------------------------------------------------------- settings -- */

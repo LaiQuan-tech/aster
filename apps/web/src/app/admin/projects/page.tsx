@@ -272,6 +272,7 @@ export default function AdminProjectsPage() {
                 <tr className="border-b text-left text-gray-500">
                   <th className="py-2 pr-3">編號</th>
                   <th className="py-2 pr-3">專案</th>
+                  <th className="py-2 pr-3">文件</th>
                   <th className="py-2 pr-3">歸屬年度</th>
                   <th className="py-2 pr-3">部門</th>
                   <th className="py-2 pr-3">負責人</th>
@@ -286,6 +287,13 @@ export default function AdminProjectsPage() {
                   <tr key={p.id} className="border-b last:border-0">
                     <td className="py-2 pr-3 font-mono text-xs text-gray-500">{p.code ?? "—"}</td>
                     <td className="py-2 pr-3 font-medium text-gray-900">{p.name}</td>
+                    <td className="py-2 pr-3">
+                      {p.hasSignedContract ? (
+                        <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">合約</span>
+                      ) : (
+                        <span className="text-xs text-gray-400">報價單／未簽</span>
+                      )}
+                    </td>
                     <td className="py-2 pr-3 text-gray-600">{p.fiscalYear ?? "—"}</td>
                     <td className="py-2 pr-3 text-gray-600">{deptName(p.deptId)}</td>
                     <td className="py-2 pr-3 text-gray-600">{empName(p.leadEmpId)}</td>

@@ -52,6 +52,7 @@ afterAll(async () => {
     await supabaseAdmin.from("project_share_adjustments").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("project_members").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("project_documents").delete().eq("tenant_id", tid)
+    await supabaseAdmin.from("contracts").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("project_settings").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("projects").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
@@ -460,5 +461,219 @@ describe("M4-2 專案參數", () => {
       .get(`/projects/${p.body.id}`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(got.body.project.archivedAt).toBeNull()
+  })
+})
+
+describe("M4-3 合約／報價單與印花稅", () => {
+  let projectId: string
+  let contractId: string
+
+  beforeAll(async () => {
+    const res = await createProject({ name: "印花稅測試案" })
+    projectId = res.body.id
+  })
+
+  function addContract(body: Record<string, unknown>) {
+    return request(app)
+      .post(`/projects/${projectId}/contracts`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send(body)
+  }
+
+  it("報價單不課印花稅——不是契據", async () => {
+    const res = await addContract({
+      docType: "quotation",
+      title: "官網改版報價單",
+      amount: 1_000_000,
+      signedOn: "2024-03-01",
+    })
+    expect(res.status).toBe(201)
+    expect(res.body.contract.dutiable).toBe(false)
+    expect(res.body.contract.stampDutyAmount).toBeNull()
+  })
+
+  it("只有報價單時，專案不算已簽約", async () => {
+    const res = await request(app)
+      .get(`/projects/${projectId}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(res.body.project.hasSignedContract).toBe(false)
+  })
+
+  it("承攬契據課千分之一", async () => {
+    const res = await addContract({
+      docType: "contract",
+      ourRole: "contractor",
+      title: "官網改版承攬契約",
+      counterparty: "某某建設",
+      amount: 3_000_000,
+      signedOn: "2024-04-01",
+    })
+    expect(res.status).toBe(201)
+    expect(res.body.contract.dutiable).toBe(true)
+    expect(res.body.contract.stampDutyRate).toBe(0.001)
+    expect(res.body.contract.stampDutyAmount).toBe(3000)
+    contractId = res.body.contract.id
+  })
+
+  it("有合約且有簽訂日 → 專案算已簽約（衍生，不另存旗標）", async () => {
+    const res = await request(app)
+      .get(`/projects/${projectId}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(res.body.project.hasSignedContract).toBe(true)
+  })
+
+  it("⚠️ 我方是定作人就不課——發包出去的由下包貼花", async () => {
+    const res = await addContract({
+      docType: "contract",
+      ourRole: "client",
+      title: "水電工程發包合約",
+      amount: 800_000,
+      signedOn: "2024-05-01",
+    })
+    expect(res.status).toBe(201)
+    expect(res.body.contract.dutiable).toBe(false)
+    expect(res.body.contract.stampDutyAmount).toBeNull()
+  })
+
+  it("追加減帳也要補貼花", async () => {
+    const res = await addContract({
+      docType: "change_order",
+      title: "追加：增設後台報表",
+      amount: 500_000,
+      signedOn: "2024-08-01",
+    })
+    expect(res.status).toBe(201)
+    expect(res.body.contract.stampDutyAmount).toBe(500)
+  })
+
+  it("份數相乘", async () => {
+    const res = await addContract({
+      docType: "contract",
+      title: "一式兩份的約",
+      amount: 1_000_000,
+      signedOn: "2024-09-01",
+      copies: 2,
+    })
+    expect(res.status).toBe(201)
+    expect(res.body.contract.stampDutyAmount).toBe(2000)
+  })
+
+  it("改金額會重算稅額", async () => {
+    const res = await request(app)
+      .patch(`/contracts/${contractId}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 5_000_000 })
+    expect(res.status).toBe(200)
+    expect(res.body.contract.stampDutyAmount).toBe(5000)
+  })
+
+  it("重算用列上凍結的費率，不抓當下設定", async () => {
+    // 把租戶設定改掉，既有合約的費率不該跟著變。
+    await request(app)
+      .put("/project-settings")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ stampDutyRate: 0.004 })
+
+    const res = await request(app)
+      .patch(`/contracts/${contractId}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ amount: 2_000_000 })
+    expect(res.status).toBe(200)
+    expect(res.body.contract.stampDutyRate).toBe(0.001)
+    expect(res.body.contract.stampDutyAmount).toBe(2000)
+
+    await request(app)
+      .put("/project-settings")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ stampDutyRate: 0.001 })
+  })
+
+  it("補登舊約可指定當年度費率", async () => {
+    const res = await addContract({
+      docType: "contract",
+      title: "2019 年的舊約",
+      amount: 1_000_000,
+      signedOn: "2019-06-01",
+      stampDutyRate: 0.002,
+    })
+    expect(res.status).toBe(201)
+    expect(res.body.contract.stampDutyRate).toBe(0.002)
+    expect(res.body.contract.stampDutyAmount).toBe(2000)
+  })
+
+  it("清單只收應貼花的，並分出已貼／未貼", async () => {
+    const res = await request(app)
+      .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31")
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(res.status).toBe(200)
+    // 報價單與下包合約不進應貼花件數。
+    expect(res.body.summary.dutiableCount).toBe(5)
+    expect(res.body.summary.paidCount).toBe(0)
+    expect(res.body.summary.unpaidCount).toBe(5)
+    expect(res.body.disclaimer).toContain("試算")
+  })
+
+  it("標記已貼花後移到已貼那一側", async () => {
+    await request(app)
+      .patch(`/contracts/${contractId}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ stampDutyPaidOn: "2024-04-15" })
+
+    const res = await request(app)
+      .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31")
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(res.body.summary.paidCount).toBe(1)
+    expect(res.body.summary.unpaidCount).toBe(4)
+  })
+
+  it("unpaidOnly=1 只回未貼花的", async () => {
+    const res = await request(app)
+      .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31&unpaidOnly=1")
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(res.body.items.every((i: { stampDutyPaidOn: string | null }) => !i.stampDutyPaidOn)).toBe(true)
+  })
+
+  it("⚠️ 應貼花但缺簽訂日的另外計數——不在任何區間查詢裡", async () => {
+    await addContract({ docType: "contract", title: "還沒填簽訂日的約", amount: 1_000_000 })
+
+    const res = await request(app)
+      .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31")
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(res.body.summary.missingSignedOn).toBeGreaterThanOrEqual(1)
+  })
+
+  it("預設區間回溯 7 年，不是 5 年", async () => {
+    const res = await request(app)
+      .get("/reports/stamp-duty")
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(res.body.range.lookbackYears).toBe(7)
+  })
+
+  it("作廢要理由，且是軟刪除", async () => {
+    const noReason = await request(app)
+      .delete(`/contracts/${contractId}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({})
+    expect(noReason.status).toBe(400)
+    expect(noReason.body.error).toBe("reason_required")
+
+    const ok = await request(app)
+      .delete(`/contracts/${contractId}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ reason: "重複建檔" })
+    expect(ok.status).toBe(200)
+
+    const again = await request(app)
+      .delete(`/contracts/${contractId}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ reason: "再刪一次" })
+    expect(again.status).toBe(409)
+  })
+
+  it("作廢後不出現在清單也不出現在專案文件裡", async () => {
+    const list = await request(app)
+      .get(`/projects/${projectId}/contracts`)
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(list.body.contracts.map((c: { id: string }) => c.id)).not.toContain(contractId)
   })
 })

@@ -42,7 +42,10 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   },
   {
     title: "獎金自動分配",
-    items: [{ href: "/admin/projects", label: "專案與成員分潤" }],
+    items: [
+      { href: "/admin/projects", label: "專案與成員分潤" },
+      { href: "/admin/stamp-duty", label: "印花稅備查清單" },
+    ],
   },
   {
     title: "帳號與權限",

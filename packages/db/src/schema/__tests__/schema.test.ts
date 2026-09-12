@@ -21,6 +21,7 @@ import {
   advances,
   expenseSettings,
   projectSettings,
+  contracts,
   leaveRequests as leaveRequestsTable,
 } from "../index"
 
@@ -152,6 +153,44 @@ describe("projectSettings table", () => {
     )
     expect(idx).toBeDefined()
     expect(idx!.config.unique).toBe(true)
+  })
+
+  // 模組四第 3 條：清單回溯 7 年，不是客戶原文的 5 年。
+  it("印花稅預設：千分之一、回溯 7 年", () => {
+    expect(cols.stampDutyRate.default).toBe("0.001")
+    expect(cols.stampDutyLookbackYears.default).toBe(7)
+  })
+})
+
+describe("contracts table", () => {
+  const cols = getTableColumns(contracts)
+
+  it("有文件類型與我方角色——兩者一起決定課不課印花稅", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining(["docType", "ourRole", "amount", "signedOn", "copies"]),
+    )
+    expect(cols.ourRole.default).toBe("contractor")
+    expect(cols.copies.default).toBe(1)
+  })
+
+  // 清單要回溯 5~7 年：2021 年簽的約要用 2021 年的費率，不是今天的。
+  it("費率與稅額凍結在列上", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining(["stampDutyRate", "stampDutyAmount", "stampDutyPaidOn"]),
+    )
+  })
+
+  it("版本鏈：改版新增一列指回舊列，不就地覆寫", () => {
+    expect(Object.keys(cols)).toEqual(expect.arrayContaining(["version", "supersedesId"]))
+    expect(cols.version.default).toBe(1)
+  })
+
+  // 已貼花的合約被刪掉，等於把「這筆稅貼過了」的證據一起刪掉，
+  // 而印花稅核課期間最長 7 年。
+  it("軟刪除欄位齊全（金額憑證不實體刪除）", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining(["deletedAt", "deletedByEmpId", "deleteReason"]),
+    )
   })
 })
 
