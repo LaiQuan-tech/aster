@@ -135,6 +135,13 @@ export interface CreateRequestBody {
   tripType?: "outing" | "business_trip";
   location?: string;
   remark?: string;
+  // ── 出差申請（模組三第 2 條）────────────────────────────────────────
+  /** 出差範圍。用下拉而非讓系統從 location 猜文字。 */
+  tripScope?: "local" | "domestic_intercity" | "overseas";
+  /** 預估此趟總花費，供簽核者判斷。 */
+  estimatedCost?: number;
+  /** 申請預支金額。核准後由系統開出一筆預支，HR 撥款後才拿得到錢。 */
+  advanceRequested?: number;
 }
 
 /* ------------------------------------------------ punches / balances / 班表 */
@@ -631,6 +638,8 @@ export interface MyExpenseCategory {
   name: string;
   nature: "reimbursement" | "allowance";
   requires_receipt: boolean;
+  /** true = 本類別的報銷必須綁一張已核准的出差單（模組三第 2 條）。 */
+  requires_trip_approval: boolean;
   monthly_cap: string | null;
   active: boolean;
 }
@@ -662,6 +671,8 @@ export function fileExpense(body: {
   incurredOn: string;
   period?: string;
   note?: string;
+  /** 出差軌類別必填：綁定的已核准出差單。 */
+  tripRequestId?: string;
 }) {
   return apiFetch<{ id: string; period: string; nature: string }>("/expenses", {
     method: "POST",
@@ -691,5 +702,55 @@ export async function uploadExpenseReceipt(claimId: string, file: File): Promise
       contentType: file.type || "application/octet-stream",
       dataBase64,
     }),
+  });
+}
+
+/* --------------------------------------------------- 出差預支（模組三第 2 條） */
+
+export interface MyTrip {
+  id: string;
+  start_at: string;
+  end_at: string;
+  location: string | null;
+  trip_scope: string | null;
+  advance_requested: string | null;
+  trip_report: string | null;
+  status: string;
+}
+
+export interface MyTripAdvance {
+  id: string;
+  trip_request_id: string;
+  amount: string;
+  status: string;
+  payout_channel: string | null;
+  paid_at: string | null;
+  actual_total: string | null;
+  balance: string | null;
+  balance_handling: string | null;
+  recovery_period: string | null;
+  settled_at: string | null;
+}
+
+/** 我已核准的出差單 —— 出差軌報銷填報時要綁其中一張。 */
+export function getMyApprovedTrips() {
+  return apiFetch<{ requests: MyTrip[] }>(
+    "/requests?kind=business_trip&status=approved",
+  );
+}
+
+/** 我的預支：看得到「核准了但還沒撥款」與「撥了還沒核銷」兩種狀態。 */
+export function getMyTripAdvances() {
+  return apiFetch<{ advances: MyTripAdvance[] }>("/trip-advances");
+}
+
+/**
+ * 回程出差報告。營所稅查核準則 §74 要求出差旅費須有出差報告單；
+ * 這一欄就是那份報告。
+ */
+export function submitTripReport(requestId: string, tripReport: string) {
+  return apiFetch<{ id: string }>(`/requests/${requestId}/trip-report`, {
+    method: "PATCH",
+    body: JSON.stringify({ tripReport }),
   });
 }

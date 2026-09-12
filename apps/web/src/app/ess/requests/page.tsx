@@ -114,6 +114,10 @@ function RequestsView() {
   const [otHoursTouched, setOtHoursTouched] = useState(false);
   const [tripType, setTripType] = useState<"outing" | "business_trip">("outing");
   const [location, setLocation] = useState("");
+  // 出差申請（模組三第 2 條）
+  const [tripScope, setTripScope] = useState<"local" | "domestic_intercity" | "overseas">("local");
+  const [estimatedCost, setEstimatedCost] = useState("");
+  const [advanceRequested, setAdvanceRequested] = useState("");
   const [remark, setRemark] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -257,6 +261,13 @@ function RequestsView() {
         tripType: kind === "business_trip" ? tripType : undefined,
         location: kind === "business_trip" ? location.trim() || undefined : undefined,
         remark: kind === "business_trip" ? remark.trim() || undefined : undefined,
+        tripScope: kind === "business_trip" ? tripScope : undefined,
+        estimatedCost:
+          kind === "business_trip" && estimatedCost.trim() ? Number(estimatedCost) : undefined,
+        advanceRequested:
+          kind === "business_trip" && advanceRequested.trim()
+            ? Number(advanceRequested)
+            : undefined,
       });
       for (const f of files) {
         await uploadAttachment(created.requestId, f);
@@ -276,6 +287,9 @@ function RequestsView() {
       setTripType("outing");
       setLocation("");
       setRemark("");
+      setTripScope("local");
+      setEstimatedCost("");
+      setAdvanceRequested("");
       await loadRequests();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "送出失敗");
@@ -531,6 +545,73 @@ function RequestsView() {
                       <input type="radio" name="tripType" checked={tripType === "business_trip"} onChange={() => setTripType("business_trip")} />
                       出差（一天以上）
                     </label>
+                  </div>
+                </div>
+
+                <div>
+                  <label
+                    className="block text-sm font-medium text-gray-700 mb-1"
+                    htmlFor="trip-scope"
+                  >
+                    出差範圍
+                  </label>
+                  <select
+                    id="trip-scope"
+                    value={tripScope}
+                    onChange={(e) =>
+                      setTripScope(
+                        e.target.value as "local" | "domestic_intercity" | "overseas",
+                      )
+                    }
+                    className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                  >
+                    <option value="local">市內</option>
+                    <option value="domestic_intercity">跨縣市</option>
+                    <option value="overseas">海外</option>
+                  </select>
+                  {tripScope !== "local" && (
+                    <p className="mt-1 text-xs text-gray-500">
+                      跨縣市以上的長途出差需經簽核同意後才成立。
+                    </p>
+                  )}
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label
+                      className="block text-sm font-medium text-gray-700 mb-1"
+                      htmlFor="trip-cost"
+                    >
+                      預估總花費（選填）
+                    </label>
+                    <input
+                      id="trip-cost"
+                      type="number"
+                      min="0"
+                      value={estimatedCost}
+                      onChange={(e) => setEstimatedCost(e.target.value)}
+                      className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                    />
+                    <p className="mt-1 text-xs text-gray-400">供簽核者判斷，不是申請金額。</p>
+                  </div>
+                  <div>
+                    <label
+                      className="block text-sm font-medium text-gray-700 mb-1"
+                      htmlFor="trip-advance"
+                    >
+                      申請預支（選填）
+                    </label>
+                    <input
+                      id="trip-advance"
+                      type="number"
+                      min="0"
+                      value={advanceRequested}
+                      onChange={(e) => setAdvanceRequested(e.target.value)}
+                      className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                    />
+                    <p className="mt-1 text-xs text-gray-400">
+                      核准後由公司先撥款給你帶著去；回程再以實際報銷沖抵，多退少補。
+                    </p>
                   </div>
                 </div>
                 <div>

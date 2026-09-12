@@ -438,6 +438,7 @@ function CategoryManager({
   const [nature, setNature] = useState<"reimbursement" | "allowance">("reimbursement");
   const [requiresReceipt, setRequiresReceipt] = useState(true);
   const [crossCheck, setCrossCheck] = useState(false);
+  const [requiresTrip, setRequiresTrip] = useState(false);
   const [cap, setCap] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -453,11 +454,13 @@ function CategoryManager({
         nature,
         requiresReceipt,
         crossCheckAttendance: crossCheck,
+        requiresTripApproval: requiresTrip,
         monthlyCap: cap.trim() ? Number(cap) : undefined,
       });
       setCode("");
       setName("");
       setCap("");
+      setRequiresTrip(false);
       onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存失敗");
@@ -482,6 +485,7 @@ function CategoryManager({
                 <th className="py-2">稅務性質</th>
                 <th className="py-2">憑證</th>
                 <th className="py-2">出勤檢核</th>
+                <th className="py-2">軌道</th>
                 <th className="py-2">月限額</th>
               </tr>
             </thead>
@@ -505,6 +509,15 @@ function CategoryManager({
                   </td>
                   <td className="py-2 text-xs">{c.requires_receipt ? "必附" : "免附"}</td>
                   <td className="py-2 text-xs">{c.cross_check_attendance ? "是" : "—"}</td>
+                  <td className="py-2 text-xs">
+                    {c.requires_trip_approval ? (
+                      <span className="rounded bg-blue-100 px-2 py-0.5 text-blue-900">
+                        出差軌 · 須先核准
+                      </span>
+                    ) : (
+                      <span className="text-gray-500">日常軌</span>
+                    )}
+                  </td>
                   <td className="py-2 text-xs">
                     {c.monthly_cap ? money(Number(c.monthly_cap)) : "無上限"}
                   </td>
@@ -582,6 +595,13 @@ function CategoryManager({
           </div>
         </fieldset>
 
+        <p className="rounded-lg bg-gray-50 px-3 py-2 text-xs leading-relaxed text-gray-600">
+          <strong>兩軌政策</strong>：日常常態費用不需逐筆事前審核，月結一次核銷；
+          長途出差則須先經簽核同意。勾選「須綁已核准的出差單」的類別，
+          同仁填報時必須指定一張已核准的出差單——
+          <strong>沒有這道限制，出差費用可以拆成日常報銷繞過事前審核。</strong>
+        </p>
+
         <div className="flex flex-wrap gap-6">
           <label className="flex items-center gap-2 text-sm">
             <input
@@ -598,6 +618,14 @@ function CategoryManager({
               onChange={(e) => setCrossCheck(e.target.checked)}
             />
             與出勤交叉檢核（夜間交通費類）
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={requiresTrip}
+              onChange={(e) => setRequiresTrip(e.target.checked)}
+            />
+            須綁已核准的出差單
           </label>
           <div>
             <label className={labelCls} htmlFor="cat-cap">

@@ -12,9 +12,13 @@ import {
   fileExpense,
   cancelExpense,
   uploadExpenseReceipt,
+  getMyApprovedTrips,
+  getMyTripAdvances,
   type Branding,
   type MyExpenseCategory,
   type MyExpenseClaim,
+  type MyTrip,
+  type MyTripAdvance,
 } from "@/lib/ess-api";
 
 function thisPeriod(): string {
@@ -52,12 +56,23 @@ function ExpensesInner() {
   const [note, setNote] = useState("");
   const [receipt, setReceipt] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  // 出差軌（模組三第 2 條）：這類報銷必須綁一張已核准的出差單。
+  const [trips, setTrips] = useState<MyTrip[]>([]);
+  const [tripRequestId, setTripRequestId] = useState("");
+  const [advances, setAdvances] = useState<MyTripAdvance[]>([]);
 
   const load = useCallback(async () => {
     try {
-      const [c, e] = await Promise.all([getMyExpenseCategories(), getMyExpenses(period)]);
+      const [c, e, t, a] = await Promise.all([
+        getMyExpenseCategories(),
+        getMyExpenses(period),
+        getMyApprovedTrips(),
+        getMyTripAdvances(),
+      ]);
       setCategories(c.categories.filter((x) => x.active));
       setClaims(e.claims);
+      setTrips(t.requests);
+      setAdvances(a.advances);
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入失敗");
     }
@@ -85,6 +100,7 @@ function ExpensesInner() {
         amount: Number(amount),
         incurredOn,
         note: note.trim() || undefined,
+        tripRequestId: selected?.requires_trip_approval ? tripRequestId : undefined,
       });
       // 憑證跟著單子一起送：事前審核可以省，憑證不能省。
       if (receipt) await uploadExpenseReceipt(created.id, receipt);
@@ -92,6 +108,7 @@ function ExpensesInner() {
       setAmount("");
       setNote("");
       setReceipt(null);
+      setTripRequestId("");
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "送出失敗");
@@ -166,6 +183,42 @@ function ExpensesInner() {
               )}
             </div>
 
+            {/* 出差軌：日常費用不必事前審核，長途出差必須先核准。 */}
+            {selected?.requires_trip_approval && (
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700" htmlFor="trip">
+                  綁定出差單
+                </label>
+                {trips.length === 0 ? (
+                  <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    你目前沒有已核准的出差單。此類別的費用必須先提出「公出/出差」
+                    申請並經簽核，核准後才能報銷。
+                  </p>
+                ) : (
+                  <>
+                    <select
+                      id="trip"
+                      value={tripRequestId}
+                      onChange={(e) => setTripRequestId(e.target.value)}
+                      required
+                      className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                    >
+                      <option value="">請選擇</option>
+                      {trips.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.start_at.slice(0, 10)}
+                          {t.location ? ` · ${t.location}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="mt-1 text-xs text-gray-400">
+                      此類別的費用須掛在已核准的出差之下。
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className="mb-1 block text-sm font-medium text-gray-700" htmlFor="amt">
@@ -228,7 +281,11 @@ function ExpensesInner() {
 
             <button
               type="submit"
-              disabled={busy || !categoryId}
+              disabled={
+                busy ||
+                !categoryId ||
+                (selected?.requires_trip_approval === true && !tripRequestId)
+              }
               className="w-full rounded-xl px-4 py-3 text-sm font-semibold text-white disabled:opacity-50"
               style={{ backgroundColor: "var(--brand)" }}
             >
@@ -236,6 +293,52 @@ function ExpensesInner() {
             </button>
           </form>
         </section>
+
+        {advances.length > 0 && (
+          <section className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:p-6">
+            <h2 className="mb-1 text-lg font-semibold text-gray-800">我的出差預支</h2>
+            <p className="mb-4 text-xs text-gray-500">
+              已撥款但尚未核銷的金額，回程請憑單據報銷後由公司沖抵，多退少補。
+            </p>
+            <ul className="space-y-2">
+              {advances.map((a) => {
+                const bal = a.balance === null ? null : Number(a.balance);
+                return (
+                  <li
+                    key={a.id}
+                    className="rounded-2xl border border-gray-100 bg-gray-50 p-3 text-sm"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="font-medium text-gray-900">
+                          {money(Number(a.amount))} 元
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {a.status === "requested"
+                            ? "已核准，尚未撥款"
+                            : a.status === "paid"
+                              ? `已撥款 ${a.paid_at?.slice(0, 10) ?? ""}・待核銷`
+                              : a.status === "settled"
+                                ? `已核銷 ${a.settled_at?.slice(0, 10) ?? ""}`
+                                : a.status}
+                        </div>
+                      </div>
+                      {a.status === "settled" && bal !== null && (
+                        <span className="text-xs text-gray-600">
+                          {bal === 0
+                            ? "剛好結清"
+                            : bal > 0
+                              ? `公司補你 ${money(bal)}`
+                              : `應退回 ${money(Math.abs(bal))}`}
+                        </span>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        )}
 
         <section className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:p-6">
           <div className="mb-4 flex items-center justify-between gap-3">

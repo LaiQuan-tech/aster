@@ -1673,6 +1673,8 @@ export interface ExpenseCategory {
   nature: "reimbursement" | "allowance";
   requires_receipt: boolean;
   cross_check_attendance: boolean;
+  /** true = 本類別的報銷必須綁一張已核准的出差單（模組三第 2 條的閘門）。 */
+  requires_trip_approval: boolean;
   monthly_cap: string | null;
   active: boolean;
 }
@@ -1731,6 +1733,7 @@ export function upsertExpenseCategory(body: {
   nature?: "reimbursement" | "allowance";
   requiresReceipt?: boolean;
   crossCheckAttendance?: boolean;
+  requiresTripApproval?: boolean;
   monthlyCap?: number;
   active?: boolean;
 }) {
@@ -1876,4 +1879,72 @@ export async function uploadSignatureSheet(versionId: string, file: File, note?:
       }),
     },
   );
+}
+
+/* --------------------------------------------------- 出差預支（模組三第 2 條） */
+
+export interface TripAdvance {
+  id: string;
+  trip_request_id: string;
+  employee_id: string;
+  amount: string;
+  /** 'requested' 核准未撥款 ｜ 'paid' 已撥款未核銷 ｜ 'settled' ｜ 'cancelled' */
+  status: string;
+  payout_channel: string | null;
+  paid_at: string | null;
+  paid_by_emp_id: string | null;
+  actual_total: string | null;
+  /** actualTotal − amount。正＝公司補給員工；負＝員工應退。核銷時凍結。 */
+  balance: string | null;
+  balance_handling: string | null;
+  recovery_period: string | null;
+  settled_at: string | null;
+  note: string | null;
+  created_at: string;
+}
+
+export function getTripAdvances(params: { status?: string; employeeId?: string } = {}) {
+  const q = new URLSearchParams();
+  if (params.status) q.set("status", params.status);
+  if (params.employeeId) q.set("employeeId", params.employeeId);
+  const qs = q.toString();
+  return apiFetch<{ advances: TripAdvance[] }>(`/trip-advances${qs ? `?${qs}` : ""}`);
+}
+
+/** 已撥款但尚未核銷 —— 公司對員工的未結債權，離職結算要扣回的依據。 */
+export function getOutstandingTripAdvances() {
+  return apiFetch<{
+    advances: Array<TripAdvance & { daysOutstanding: number | null }>;
+    count: number;
+    total: number;
+  }>("/trip-advances/outstanding");
+}
+
+/** 撥款。payoutChannel 必填 —— 現金撥款尤其要留痕。 */
+export function payTripAdvance(
+  id: string,
+  body: { payoutChannel: "cash" | "transfer"; note?: string },
+) {
+  return apiFetch<{ id: string; status: string }>(`/trip-advances/${id}/pay`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 回程核銷沖抵。balanceHandling='payroll' 時 recoveryPeriod 必填。 */
+export function settleTripAdvance(
+  id: string,
+  body: { balanceHandling: "cash" | "payroll"; recoveryPeriod?: string; note?: string },
+) {
+  return apiFetch<{
+    id: string;
+    status: string;
+    amount: number;
+    actualTotal: number;
+    balance: number;
+    direction: string;
+  }>(`/trip-advances/${id}/settle`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
