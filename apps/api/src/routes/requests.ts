@@ -40,6 +40,13 @@ const createSchema = z.object({
   payout: z.enum(["pay", "comp_time"]).optional(),
   tripType: z.enum(["outing", "business_trip"]).optional(),
   location: z.string().trim().min(1).max(250).optional(),
+  // ── 出差申請（模組三第 2 條），僅 kind='business_trip' 採用 ──────────
+  /** 出差範圍。用下拉而非從 location 猜文字：縣市字串比對不可靠。 */
+  tripScope: z.enum(["local", "domestic_intercity", "overseas"]).optional(),
+  /** 預估此趟總花費，供簽核者判斷。 */
+  estimatedCost: z.number().nonnegative().optional(),
+  /** 申請預支金額。核准後由 applyApprovalEffects 開出 trip_advances 一列。 */
+  advanceRequested: z.number().nonnegative().optional(),
   remark: z.string().trim().max(250).optional(),
 })
 
@@ -67,7 +74,7 @@ const changeApproverSchema = z.object({
 })
 
 const REQUEST_COLS =
-  "id, tenant_id, employee_id, kind, leave_type_id, start_at, end_at, hours, reason, agent_name, payout, trip_type, location, remark, segments, status, current_step, created_at"
+  "id, tenant_id, employee_id, kind, leave_type_id, start_at, end_at, hours, reason, agent_name, payout, trip_type, location, trip_scope, estimated_cost, advance_requested, trip_report, remark, segments, status, current_step, created_at"
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000"
 
@@ -150,6 +157,9 @@ requestsRouter.post(
       payout,
       tripType,
       location,
+      tripScope,
+      estimatedCost,
+      advanceRequested,
       remark,
       onBehalfOfEmployeeId,
       segments,
@@ -244,6 +254,9 @@ requestsRouter.post(
           payout: kind === "ot" ? (payout ?? null) : null,
           trip_type: kind === "business_trip" ? (tripType ?? null) : null,
           location: kind === "business_trip" ? (location ?? null) : null,
+          trip_scope: kind === "business_trip" ? (tripScope ?? null) : null,
+          estimated_cost: kind === "business_trip" ? (estimatedCost ?? null) : null,
+          advance_requested: kind === "business_trip" ? (advanceRequested ?? null) : null,
           remark: remark ?? null,
           segments: segments ?? null,
           status: "pending",
@@ -443,7 +456,7 @@ async function decide(
     const { data: lr, error: lrErr } = await supabaseAdmin
       .from("leave_requests")
       .select(
-        "id, status, current_step, employee_id, kind, leave_type_id, hours, start_at, end_at, payout",
+        "id, status, current_step, employee_id, kind, leave_type_id, hours, start_at, end_at, payout, advance_requested",
       )
       .eq("tenant_id", tenantId)
       .is("deleted_at", null)
@@ -588,7 +601,7 @@ async function decideOneRequest(params: {
 
   const { data: lr, error: lrErr } = await supabaseAdmin
     .from("leave_requests")
-    .select("id, status, current_step, employee_id, kind, leave_type_id, hours, start_at, end_at, payout")
+    .select("id, status, current_step, employee_id, kind, leave_type_id, hours, start_at, end_at, payout, advance_requested")
     .eq("tenant_id", tenantId)
     .is("deleted_at", null)
     .eq("id", requestId)
@@ -1030,6 +1043,82 @@ requestsRouter.post(
         return
       }
       res.status(200).json({ status: "cancelled" })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * PATCH /requests/:id/trip-report — 回程填寫出差報告（本人或 HR）。
+ *
+ * 營所稅查核準則 §74 要求出差旅費須有**出差報告單**。申請單已有
+ * location / start_at / end_at / reason，補上回程報告即同時滿足該憑證要求。
+ * 客戶未要求，但幾乎不用多做。
+ *
+ * 僅限已核准的出差單；報告可重複更新（趟程結束後補寫是常態）。
+ */
+const tripReportSchema = z.object({
+  tripReport: z.string().trim().min(1).max(4000),
+})
+
+requestsRouter.patch(
+  "/requests/:id/trip-report",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const requestId = req.params.id as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
+    const parsed = tripReportSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const self = await resolveSelf(tenantId, userId)
+      if (!self) {
+        res.status(403).json({ error: "not_an_employee" })
+        return
+      }
+      const { data: trip, error: loadErr } = await supabaseAdmin
+        .from("leave_requests")
+        .select("id, kind, status, employee_id")
+        .eq("tenant_id", tenantId)
+        .eq("id", requestId)
+        .is("deleted_at", null)
+        .maybeSingle()
+      if (loadErr) {
+        next(new Error(`PATCH /requests/${requestId}/trip-report (load): ${loadErr.message}`))
+        return
+      }
+      if (!trip || trip.kind !== "business_trip") {
+        res.status(404).json({ error: "not_found" })
+        return
+      }
+      if (!isHrRole(self.role) && trip.employee_id !== self.id) {
+        res.status(403).json({ error: "forbidden" })
+        return
+      }
+      if (trip.status !== "approved") {
+        res.status(409).json({ error: "trip_not_approved", status: trip.status })
+        return
+      }
+
+      const { error } = await supabaseAdmin
+        .from("leave_requests")
+        .update({ trip_report: parsed.data.tripReport })
+        .eq("tenant_id", tenantId)
+        .eq("id", requestId)
+      if (error) {
+        next(new Error(`PATCH /requests/${requestId}/trip-report: ${error.message}`))
+        return
+      }
+      res.status(200).json({ id: requestId })
     } catch (err) {
       next(err)
     }

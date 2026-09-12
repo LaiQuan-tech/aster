@@ -105,7 +105,8 @@ BEGIN
     'payslips',
     'expense_claims',
     'expense_claim_attachments',
-    'expense_settlements'
+    'expense_settlements',
+    'trip_advances'
   ]
   LOOP
     EXECUTE format('DROP TRIGGER IF EXISTS no_hard_delete ON public.%I', t);
@@ -119,7 +120,7 @@ END $$;
 -- DO $$ DECLARE t text; BEGIN
 --   FOREACH t IN ARRAY ARRAY['leave_requests','request_attachments',
 --     'approval_steps','announcements','punch_records','attendance_days','payslips',
---     'expense_claims','expense_claim_attachments','expense_settlements']
+--     'expense_claims','expense_claim_attachments','expense_settlements','trip_advances']
 --   LOOP EXECUTE format('DROP TRIGGER IF EXISTS no_hard_delete ON public.%I', t); END LOOP;
 -- END $$;
 -- DROP FUNCTION IF EXISTS public.forbid_hard_delete();

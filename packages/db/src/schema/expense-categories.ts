@@ -44,6 +44,18 @@ export const expenseCategories = pgTable(
      * 而矛盾本身比單純漏記更難解釋。標出來讓 HR 決定是補工時還是退件。
      */
     crossCheckAttendance: boolean("cross_check_attendance").notNull().default(false),
+    /**
+     * 本類別的報銷是否必須綁定一張**已核准的出差單**（模組三第 2 條）。
+     *
+     * 第 1 條與第 2 條合起來是兩軌政策：日常常態不事前審核、長途出差必須
+     * 老闆簽核。**系統必須知道一筆報銷走哪條軌道**——否則員工把出差費用
+     * 拆成「日常」報銷就能繞過事前審核，第 2 條即形同虛設。
+     *
+     * 設為 true 的類別（如「出差交通」「出差住宿」），填報時必須帶
+     * `expense_claims.trip_request_id`，且該單須為該員本人、已核准的
+     * business_trip。
+     */
+    requiresTripApproval: boolean("requires_trip_approval").notNull().default(false),
     /** 每月上限，null = 無上限。超出由月結時標示，不擋填報。 */
     monthlyCap: numeric("monthly_cap"),
     active: boolean("active").notNull().default(true),

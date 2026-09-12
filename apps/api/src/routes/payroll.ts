@@ -72,7 +72,15 @@ interface SalaryRow {
  * 導致每張薪資單都不扣勞健保、實發金額被高估。
  * （salary_structures 尚無勞退自提率與預支欄位，故 pensionVoluntaryRate /
  *  advance 仍無來源；要支援需先加 migration。） */
-function toSalaryStructure(row: SalaryRow, nhiDependents = 0): SalaryStructure {
+/**
+ * @param advance 本期要從薪資扣回的預支（正值）。來自已核銷的出差預支差額，
+ *   **不是** salary_structures 上的欄位——預支是逐期事件，不是薪資結構。
+ */
+function toSalaryStructure(
+  row: SalaryRow,
+  nhiDependents = 0,
+  advance = 0,
+): SalaryStructure {
   return {
     method: row.method === "by_attendance_days" ? "by_attendance_days" : "monthly",
     baseSalary: row.base_salary != null ? Number(row.base_salary) : undefined,
@@ -83,6 +91,7 @@ function toSalaryStructure(row: SalaryRow, nhiDependents = 0): SalaryStructure {
     healthInsuredSalary:
       row.health_insured_salary != null ? Number(row.health_insured_salary) : undefined,
     nhiDependents,
+    advance,
   }
 }
 
@@ -248,6 +257,12 @@ payrollRouter.post(
         .eq("tenant_id", tenantId)
         .eq("period", period)
         .eq("status", "settled")
+        // ⚠️ **排除綁定出差單的報銷**（模組三第 2 條）。
+        // 出差是「先撥預支、回程沖抵」：員工已經先拿到 amount，回程報的單
+        // 只是用來算 actualTotal。若這些單同時走一般 expenses 加項，
+        // 公司會付兩次——預支一次、報銷再一次。
+        // 出差那一軌只結差額（balance），見下方 trip_advances 區塊。
+        .is("trip_request_id", null)
         .in("employee_id", employeeIds)
       if (expErr) {
         next(new Error(`POST /payroll/run (expense_claims): ${expErr.message}`))
@@ -262,6 +277,48 @@ payrollRouter.post(
       }>) {
         const target = row.nature === "allowance" ? allowancesByEmployee : expensesByEmployee
         target.set(row.employee_id, (target.get(row.employee_id) ?? 0) + Number(row.amount))
+      }
+
+      // --- 本期要結算的出差預支差額（模組三第 2 條）--------------------------
+      // 只取 balance_handling='payroll' 且 recovery_period 指到本期的已核銷列。
+      //   • balance > 0 → 實支超過預支，**公司補給員工**。性質同代墊款
+      //     （非所得），故併入 expenses 加項。
+      //   • balance < 0 → 預支有餘，**員工應退**。併入 advance 扣項。
+      //
+      // 註：`advance` 不該是 salary_structures 的固定欄位——預支沖抵是逐期
+      // 發生的事件，放在薪資結構上會變成人工改且無歷史。正確來源就是這裡，
+      // 與 expenses / allowances 同一個模式。（修正帳本待辦 #3 的一半。）
+      const { data: advData, error: advErr } = await supabaseAdmin
+        .from("trip_advances")
+        .select("employee_id, balance")
+        .eq("tenant_id", tenantId)
+        .eq("status", "settled")
+        .eq("balance_handling", "payroll")
+        .eq("recovery_period", period)
+        .in("employee_id", employeeIds)
+      if (advErr) {
+        next(new Error(`POST /payroll/run (trip_advances): ${advErr.message}`))
+        return
+      }
+      const advanceRecoveryByEmployee = new Map<string, number>()
+      for (const row of (advData ?? []) as Array<{
+        employee_id: string
+        balance: string | number | null
+      }>) {
+        const balance = Number(row.balance ?? 0)
+        if (balance > 0) {
+          // 公司補給員工 → 加在實發（非所得，同代墊款）。
+          expensesByEmployee.set(
+            row.employee_id,
+            (expensesByEmployee.get(row.employee_id) ?? 0) + balance,
+          )
+        } else if (balance < 0) {
+          // 員工應退 → 從薪資扣回（引擎的 advance 為正值扣項）。
+          advanceRecoveryByEmployee.set(
+            row.employee_id,
+            (advanceRecoveryByEmployee.get(row.employee_id) ?? 0) + Math.abs(balance),
+          )
+        }
       }
 
       // --- already-finalized payslips for this period (locked, skip) ----------
@@ -300,7 +357,11 @@ payrollRouter.post(
         const days = daysByEmployee.get(sal.employee_id) ?? []
         const breakdown = computePayslip(
           days,
-          toSalaryStructure(sal, dependentsByEmployee.get(sal.employee_id) ?? 0),
+          toSalaryStructure(
+            sal,
+            dependentsByEmployee.get(sal.employee_id) ?? 0,
+            advanceRecoveryByEmployee.get(sal.employee_id) ?? 0,
+          ),
           rules,
           expensesByEmployee.get(sal.employee_id) ?? 0,
           allowancesByEmployee.get(sal.employee_id) ?? 0,

@@ -94,6 +94,7 @@ BEGIN
     'expense_categories',
     'expense_claims',
     'expense_settlements',
+    'trip_advances',             -- 出差預支：現金撥款與沖抵，必須留痕
     -- 證據（模組二）
     'leave_requests',
     'approval_steps',
@@ -154,7 +155,7 @@ CREATE TRIGGER audit_logs_append_only
 --   FOREACH t IN ARRAY ARRAY['payslips','salary_structures','salary_adjustments',
 --     'leave_balances','comp_time_ledger','non_employee_income','rule_configs',
 --     'projects','project_members','project_share_adjustments',
---     'expense_categories','expense_claims','expense_settlements','leave_requests',
+--     'expense_categories','expense_claims','expense_settlements','trip_advances','leave_requests',
 --     'approval_steps','announcements','announcement_versions',
 --     'announcement_signature_sheets','announcement_acknowledgements']
 --   LOOP EXECUTE format('DROP TRIGGER IF EXISTS audit_all ON public.%I', t); END LOOP;

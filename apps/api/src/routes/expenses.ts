@@ -23,6 +23,7 @@ const categorySchema = z.object({
   nature: z.enum(NATURES).optional(),
   requiresReceipt: z.boolean().optional(),
   crossCheckAttendance: z.boolean().optional(),
+  requiresTripApproval: z.boolean().optional(),
   monthlyCap: z.number().nonnegative().optional(),
   active: z.boolean().optional(),
 })
@@ -36,6 +37,11 @@ const claimSchema = z.object({
   note: z.string().trim().max(250).optional(),
   /** HR 代填；非 HR 給了會 403。 */
   onBehalfOfEmployeeId: z.string().uuid().optional(),
+  /**
+   * 綁定的出差單（模組三第 2 條）。類別的 `requires_trip_approval` 為 true
+   * 時必填，且該單須為本人、已核准的 business_trip。
+   */
+  tripRequestId: z.string().uuid().optional(),
 })
 
 const claimPatchSchema = z.object({
@@ -56,7 +62,7 @@ const receiptSchema = z.object({
 
 const CLAIM_COLS =
   "id, tenant_id, employee_id, category_id, nature, amount, incurred_on, period, note, " +
-  "status, status_reason, settlement_id, created_at, updated_at"
+  "status, status_reason, settlement_id, trip_request_id, created_at, updated_at"
 
 /**
  * Expense routes — 常態日常支出報銷（模組三第 1 條）。
@@ -113,7 +119,7 @@ expensesRouter.get(
     try {
       const { data, error } = await supabaseAdmin
         .from("expense_categories")
-        .select("id, code, name, nature, requires_receipt, cross_check_attendance, monthly_cap, active")
+        .select("id, code, name, nature, requires_receipt, cross_check_attendance, requires_trip_approval, monthly_cap, active")
         .eq("tenant_id", tenantId)
         .order("code", { ascending: true })
       if (error) {
@@ -165,6 +171,8 @@ expensesRouter.put(
       if (parsed.data.requiresReceipt !== undefined) row.requires_receipt = parsed.data.requiresReceipt
       if (parsed.data.crossCheckAttendance !== undefined)
         row.cross_check_attendance = parsed.data.crossCheckAttendance
+      if (parsed.data.requiresTripApproval !== undefined)
+        row.requires_trip_approval = parsed.data.requiresTripApproval
       if (parsed.data.monthlyCap !== undefined) row.monthly_cap = parsed.data.monthlyCap
       if (parsed.data.active !== undefined) row.active = parsed.data.active
 
@@ -238,7 +246,7 @@ expensesRouter.post(
 
       const { data: cat, error: catErr } = await supabaseAdmin
         .from("expense_categories")
-        .select("id, nature, active")
+        .select("id, nature, active, requires_trip_approval")
         .eq("tenant_id", tenantId)
         .eq("id", parsed.data.categoryId)
         .maybeSingle()
@@ -249,6 +257,38 @@ expensesRouter.post(
       if (!cat || cat.active === false) {
         res.status(400).json({ error: "invalid_category" })
         return
+      }
+
+      // ── 兩軌政策的閘門（模組三第 1 條 vs 第 2 條）────────────────────
+      // 日常常態不事前審核；長途出差必須老闆簽核。**沒有這道檢查，出差費用
+      // 可以拆成「日常」報銷繞過事前審核，第 2 條即形同虛設。**
+      if (cat.requires_trip_approval === true) {
+        if (!parsed.data.tripRequestId) {
+          res.status(400).json({ error: "trip_request_required" })
+          return
+        }
+        const { data: trip, error: tripErr } = await supabaseAdmin
+          .from("leave_requests")
+          .select("id, kind, status, employee_id")
+          .eq("tenant_id", tenantId)
+          .eq("id", parsed.data.tripRequestId)
+          .is("deleted_at", null)
+          .maybeSingle()
+        if (tripErr) {
+          next(new Error(`POST /expenses (trip): ${tripErr.message}`))
+          return
+        }
+        // 不區分「不存在」「非出差單」「非本人」「未核准」——一律同一個錯誤，
+        // 免得成為探測他人單號的管道。
+        if (
+          !trip ||
+          trip.kind !== "business_trip" ||
+          trip.status !== "approved" ||
+          trip.employee_id !== employeeId
+        ) {
+          res.status(400).json({ error: "invalid_trip_request" })
+          return
+        }
       }
 
       const { data, error } = await supabaseAdmin
@@ -263,6 +303,7 @@ expensesRouter.post(
           period,
           note: parsed.data.note ?? null,
           status: "submitted",
+          trip_request_id: parsed.data.tripRequestId ?? null,
         })
         .select("id, period, nature")
         .single()

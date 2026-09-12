@@ -17,6 +17,8 @@ export interface ApprovedRequest {
   end_at: string
   /** OT 給付方式 the filer chose ('pay' | 'comp_time'); null/absent → rule config decides. */
   payout?: string | null
+  /** business_trip 申請的預支金額（模組三第 2 條）；核准時據此建立 trip_advances。 */
+  advance_requested?: string | number | null
 }
 
 /** Whole hours between two ISO timestamps (>= 0), used when a request omits an
@@ -143,12 +145,52 @@ async function debitLeaveBalance(
 }
 
 /**
+ * 出差單最終核准 → 開一筆預支（模組三第 2 條）。
+ *
+ * 客戶確認「放款」是**核准後先撥一筆錢給同仁帶著去**，故核准即是金流的起點。
+ * 但本函式只把預支開成 `requested`（**尚未撥款**）——真正的撥款是 HR 的動作，
+ * 要記時間、經手人與管道（現金／匯款）。核准與撥款分開，才看得出
+ * 「已核准但還沒拿到錢」與「已撥款但還沒核銷」這兩種不同的狀態。
+ *
+ * 未填或填 0 的預支金額不建列：不是每趟出差都要預支。
+ * 重複核准（理論上不會發生）由 (trip_request_id) 的既有列擋下，不重複開。
+ */
+async function openTripAdvance(
+  supabase: SupabaseClient,
+  tenantId: string,
+  req: ApprovedRequest,
+): Promise<void> {
+  const amount = Number(req.advance_requested ?? 0)
+  if (!Number.isFinite(amount) || amount <= 0) return
+
+  const { data: existing, error: selErr } = await supabase
+    .from("trip_advances")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("trip_request_id", req.id)
+    .maybeSingle()
+  if (selErr) throw new Error(`ledger openTripAdvance (select): ${selErr.message}`)
+  if (existing) return
+
+  const { error } = await supabase.from("trip_advances").insert({
+    tenant_id: tenantId,
+    trip_request_id: req.id,
+    employee_id: req.employee_id,
+    amount,
+    status: "requested",
+  })
+  if (error) throw new Error(`ledger openTripAdvance: ${error.message}`)
+}
+
+/**
  * Apply the ledger side-effects of FINAL approval of a request.
  *
  *   • kind='leave' with a leave_type_id → debit that leave balance by the
  *     request's hours (auto-creating the year bucket if needed).
  *   • kind='ot' whose tenant rule converts overtime to comp-time → credit a
  *     comp_time_ledger block of the request's hours.
+ *   • kind='business_trip' with advance_requested > 0 → open a trip_advances
+ *     row（模組三第 2 條的「放款」起點）。
  *   • anything else → no-op.
  *
  * MUST be best-effort: a ledger failure logs and returns without throwing so it
@@ -182,6 +224,11 @@ export async function applyApprovalEffects(
       if (overtimeIsCompTime(rules)) {
         await creditCompTime(supabase, tenantId, req, hours)
       }
+      return
+    }
+
+    if (req.kind === "business_trip") {
+      await openTripAdvance(supabase, tenantId, req)
       return
     }
   } catch (err) {

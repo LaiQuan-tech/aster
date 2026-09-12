@@ -17,6 +17,8 @@ import {
   expenseCategories,
   expenseClaims,
   expenseSettlements,
+  tripAdvances,
+  leaveRequests as leaveRequestsTable,
 } from "../index"
 
 describe("tenants table", () => {
@@ -347,5 +349,61 @@ describe("expenseSettlements table — 月結批次", () => {
 
   it("status 預設 open，核銷後轉 settled 即鎖定該期", () => {
     expect(cols.status.default).toBe("open")
+  })
+})
+
+describe("tripAdvances table — 出差預支（模組三第 2 條）", () => {
+  const cols = getTableColumns(tripAdvances)
+
+  // 客戶確認「放款」是核准後先撥一筆錢給同仁帶著去，回程再核銷沖抵。
+  it("涵蓋整個生命週期：撥款、沖抵、差額處理", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining([
+        "tripRequestId", "employeeId", "amount", "status",
+        "payoutChannel", "paidAt", "paidByEmpId",
+        "actualTotal", "balance", "balanceHandling", "recoveryPeriod",
+        "settledAt", "settledByEmpId",
+      ]),
+    )
+  })
+
+  it("status 預設 requested —— 核准即開單，但尚未撥款", () => {
+    expect(cols.status.notNull).toBe(true)
+    expect(cols.status.default).toBe("requested")
+  })
+
+  // balance 於核銷當下凍結：綁定的報銷單日後若有異動，
+  // 核銷時的結論不該跟著變。
+  it("actualTotal / balance 可為 null（尚未核銷）", () => {
+    expect(cols.actualTotal.notNull).toBe(false)
+    expect(cols.balance.notNull).toBe(false)
+  })
+
+  it("amount 必填 —— 沒有金額的預支列沒有意義", () => {
+    expect(cols.amount.notNull).toBe(true)
+  })
+})
+
+describe("兩軌政策的接點（模組三第 1、2 條）", () => {
+  const catCols = getTableColumns(expenseCategories)
+  const claimCols = getTableColumns(expenseClaims)
+  const reqCols = getTableColumns(leaveRequestsTable)
+
+  // 沒有這一對欄位，出差費用可以拆成「日常」報銷繞過事前審核，
+  // 第 2 條即形同虛設。
+  it("類別可標記須綁已核准出差單，且預設為 false（日常軌）", () => {
+    expect(catCols.requiresTripApproval.notNull).toBe(true)
+    expect(catCols.requiresTripApproval.default).toBe(false)
+  })
+
+  it("報銷單可綁出差單", () => {
+    expect(Object.keys(claimCols)).toEqual(expect.arrayContaining(["tripRequestId"]))
+    expect(claimCols.tripRequestId.notNull).toBe(false)
+  })
+
+  it("出差申請單有範圍、預估、預支與回程報告四欄", () => {
+    expect(Object.keys(reqCols)).toEqual(
+      expect.arrayContaining(["tripScope", "estimatedCost", "advanceRequested", "tripReport"]),
+    )
   })
 })

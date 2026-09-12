@@ -5,6 +5,7 @@ import { tenants } from "./tenants"
 import { employees } from "./employees"
 import { expenseCategories } from "./expense-categories"
 import { expenseSettlements } from "./expense-settlements"
+import { leaveRequests } from "./leave-requests"
 
 /**
  * Expense claims — 同仁線上填報的單筆日常支出。
@@ -52,6 +53,16 @@ export const expenseClaims = pgTable(
     statusReason: text("status_reason"),
     settlementId: uuid("settlement_id").references(
       (): AnyPgColumn => expenseSettlements.id,
+    ),
+    /**
+     * 綁定的出差單（模組三第 2 條）。類別的 `requires_trip_approval` 為 true
+     * 時必填，且該單須為本人、已核准的 business_trip。
+     *
+     * 這是兩軌政策的接點：沒有這一欄，出差費用可以偽裝成日常報銷繞過
+     * 事前審核。
+     */
+    tripRequestId: uuid("trip_request_id").references(
+      (): AnyPgColumn => leaveRequests.id,
     ),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
