@@ -218,6 +218,13 @@
       "when": 1789245132779,
       "tag": "0030_harsh_hellfire_club",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1789247092484,
+      "tag": "0031_broad_tattoo",
+      "breakpoints": true
     }
   ]
 }

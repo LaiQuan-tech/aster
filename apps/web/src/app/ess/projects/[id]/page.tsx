@@ -87,7 +87,7 @@ function ProjectDetailInner() {
             {/* 專案資訊 */}
             <section className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:p-6">
               <h2 className="text-lg font-semibold text-gray-900">{project.name}</h2>
-              {project.code && <p className="text-xs text-gray-400">代號 {project.code}</p>}
+              {project.code && <p className="font-mono text-xs text-gray-400">{project.code}</p>}
               {project.description && <p className="mt-2 whitespace-pre-wrap text-sm text-gray-600">{project.description}</p>}
             </section>
 

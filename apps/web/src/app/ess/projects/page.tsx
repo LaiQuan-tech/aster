@@ -42,7 +42,7 @@ function ProjectsInner() {
                     <div className="min-w-0">
                       <p className="font-medium text-gray-900">
                         {p.name}
-                        {p.code && <span className="ml-2 text-xs text-gray-400">{p.code}</span>}
+                        {p.code && <span className="ml-2 font-mono text-xs text-gray-400">{p.code}</span>}
                       </p>
                       {p.description && <p className="mt-0.5 truncate text-sm text-gray-500">{p.description}</p>}
                     </div>

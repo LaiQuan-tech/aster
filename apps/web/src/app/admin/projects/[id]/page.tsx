@@ -178,7 +178,7 @@ export default function AdminProjectDetailPage() {
   return (
     <>
       <div className="flex items-center justify-between">
-        <PageHeader title={project.name} desc={project.code ? `代號 ${project.code}` : undefined} />
+        <PageHeader title={project.name} desc={project.code ? `編號 ${project.code}（不可變更）` : undefined} />
         <Link href="/admin/projects" className="text-sm text-gray-500 hover:underline">← 專案列表</Link>
       </div>
 
@@ -238,6 +238,23 @@ export default function AdminProjectDetailPage() {
               />
             </div>
           )}
+          <div>
+            <label className={labelCls}>歸屬年度</label>
+            <input
+              className={inputCls}
+              type="number"
+              min="2000"
+              max="2100"
+              defaultValue={project.fiscalYear ?? ""}
+              onBlur={(e) => {
+                const v = e.target.value === "" ? null : Number(e.target.value);
+                if (v !== project.fiscalYear) saveProjectField({ fiscalYear: v });
+              }}
+            />
+            <p className="mt-1 text-xs text-gray-400">
+              報表與獎金歸在哪一年。編號裡的年度是建立年，已印在合約上，不隨這裡改動。
+            </p>
+          </div>
           <div>
             <label className={labelCls}>狀態</label>
             <select

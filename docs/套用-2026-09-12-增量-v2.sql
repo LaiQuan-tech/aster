@@ -11,8 +11,10 @@
 -- 內容：
 --   [1] migration 0030 —— advances、expense_settings 兩張新表 + 既有表加欄位
 --   [2] 把 advances 納入既有的禁刪與稽核 trigger（金流表必須留痕）
+--   [3] migration 0031 —— projects.fiscal_year + 編號唯一索引（模組四第 1 條）
 --
 -- 全部冪等，重複執行無害。
+-- ⚠️ [3] 有一個前置檢查要先跑（既有專案若有重複編號，索引會建不起來）。
 -- =====================================================================
 
 -- ─────────────────────────────────────────────────────────────────
@@ -120,6 +122,35 @@ CREATE TRIGGER audit_all AFTER INSERT OR UPDATE OR DELETE ON public.advances
   FOR EACH ROW EXECUTE FUNCTION public.audit_row();
 
 -- ─────────────────────────────────────────────────────────────────
+-- [3] migration 0031 —— 專案編號與歸屬年度（模組四第 1 條）
+-- ─────────────────────────────────────────────────────────────────
+-- 編號（code）是識別碼，會印在合約與請款單上，建立後不可變更；
+-- 歸屬年度（fiscal_year）是分析維度，可人工調整。兩者刻意分開。
+--
+-- ⚠️ **先跑這一條**，確認既有資料沒有重複編號，否則唯一索引會建失敗：
+--
+--   select tenant_id, code, count(*)
+--     from public.projects
+--    where code is not null
+--    group by tenant_id, code
+--   having count(*) > 1;
+--
+-- 有列出來就先把重複的改掉（改哪一筆由業務決定，不要系統亂改）再往下跑。
+-- 沒有列出來（No rows）就可以直接跑下面三條。
+
+ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS "fiscal_year" integer;
+
+-- code 可空，Postgres 視 NULL 互不相等，所以舊資料沒編號不會互撞。
+CREATE UNIQUE INDEX IF NOT EXISTS "projects_tenant_code_uq"
+  ON public.projects USING btree ("tenant_id", "code");
+
+-- 既有專案回填歸屬年度＝建立年（與新建的預設值一致）。
+-- 只補空值，不覆蓋任何已填的資料。要略過這一條也可以，之後手動填。
+UPDATE public.projects
+   SET fiscal_year = extract(year from created_at)::int
+ WHERE fiscal_year IS NULL;
+
+-- ─────────────────────────────────────────────────────────────────
 -- 驗證（**分開跑**，一次只跑這一條）
 -- ─────────────────────────────────────────────────────────────────
 -- select
@@ -137,7 +168,13 @@ CREATE TRIGGER audit_all AFTER INSERT OR UPDATE OR DELETE ON public.advances
 --      join pg_class c on c.oid=t.tgrelid
 --      join pg_namespace n on n.oid=c.relnamespace
 --     where n.nspname='public' and not t.tgisinternal and c.relname='advances')
---                                                                as "advances trigger(預期2)";
+--                                                                as "advances trigger(預期2)",
+--   (select count(*) from information_schema.columns
+--     where table_schema='public' and table_name='projects' and column_name='fiscal_year')
+--                                                                as "projects.fiscal_year(預期1)",
+--   (select count(*) from pg_indexes
+--     where schemaname='public' and indexname='projects_tenant_code_uq')
+--                                                                as "編號唯一索引(預期1)";
 
 -- ─────────────────────────────────────────────────────────────────
 -- 補救：若先前那份增量 SQL 已經跑過（存在 trip_advances）

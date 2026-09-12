@@ -11,7 +11,10 @@ export type ShareMode = "pool_pct" | "fixed_amount"
 export interface Project {
   id: string
   name: string
+  /** 專案編號（識別碼，建立後不可變更）。 */
   code: string | null
+  /** 歸屬年度（分析維度，可調整）。 */
+  fiscalYear: number | null
   description: string | null
   status: string
   deptId: string | null
@@ -83,24 +86,31 @@ export function getProject(id: string) {
 
 export function createProject(body: {
   name: string
+  /** 省略＝系統產號（`P{建立年}-{流水號}`）；填了就是人工指定，撞號回 409。 */
   code?: string | null
+  /** 省略＝同編號的年度（建立年）。 */
+  fiscalYear?: number | null
   description?: string | null
   deptId?: string | null
   leadEmpId?: string | null
   shareMode?: ShareMode
   bonusPool?: number | null
 }) {
-  return apiFetch<{ id: string }>("/projects", {
+  return apiFetch<{ id: string; code: string | null }>("/projects", {
     method: "POST",
     body: JSON.stringify(body),
   })
 }
 
+/**
+ * 編輯專案。**`code` 不在參數裡**——編號是識別碼，已印在合約與請款單上，
+ * 不可變更；後端帶了 code 會回 409。要調歸屬年度請用 `fiscalYear`。
+ */
 export function updateProject(
   id: string,
   body: {
     name?: string
-    code?: string | null
+    fiscalYear?: number | null
     description?: string | null
     status?: "active" | "archived"
     deptId?: string | null

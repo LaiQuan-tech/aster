@@ -15,13 +15,17 @@ export default function AdminProjectsPage() {
 
   // create form
   const [name, setName] = useState("");
+  // 編號留空＝系統產號（P{建立年}-{流水號}）。填了就是人工指定，撞號後端回 409。
   const [code, setCode] = useState("");
+  const [fiscalYear, setFiscalYear] = useState("");
   const [description, setDescription] = useState("");
   const [deptId, setDeptId] = useState("");
   const [leadEmpId, setLeadEmpId] = useState("");
   const [shareMode, setShareMode] = useState<ShareMode>("pool_pct");
   const [bonusPool, setBonusPool] = useState("");
   const [saving, setSaving] = useState(false);
+  /** 建立成功後回報系統產生的編號——使用者要知道拿到的是哪一個號。 */
+  const [createdCode, setCreatedCode] = useState<string | null>(null);
 
   async function load() {
     setLoading(true);
@@ -49,18 +53,22 @@ export default function AdminProjectsPage() {
     }
     setSaving(true);
     setError(null);
+    setCreatedCode(null);
     try {
-      await createProject({
+      const created = await createProject({
         name: name.trim(),
         code: code.trim() || null,
+        fiscalYear: fiscalYear ? Number(fiscalYear) : null,
         description: description.trim() || null,
         deptId: deptId || null,
         leadEmpId: leadEmpId || null,
         shareMode,
         bonusPool: shareMode === "pool_pct" && bonusPool ? Number(bonusPool) : null,
       });
+      setCreatedCode(created.code);
       setName("");
       setCode("");
+      setFiscalYear("");
       setDescription("");
       setDeptId("");
       setLeadEmpId("");
@@ -68,7 +76,14 @@ export default function AdminProjectsPage() {
       setShareMode("pool_pct");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "建立失敗");
+      const msg = err instanceof Error ? err.message : "建立失敗";
+      setError(
+        msg.includes("code_taken")
+          ? `編號 ${code.trim()} 已被使用。請換一個，或清空讓系統自動產號。`
+          : msg.includes("code_generation_failed")
+            ? "系統產號連續碰撞，請稍候再試一次。"
+            : msg,
+      );
     } finally {
       setSaving(false);
     }
@@ -89,8 +104,16 @@ export default function AdminProjectsPage() {
             <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：官網改版" />
           </div>
           <div>
-            <label className={labelCls}>專案代號</label>
-            <input className={inputCls} value={code} onChange={(e) => setCode(e.target.value)} placeholder="選填" />
+            <label className={labelCls}>歸屬年度</label>
+            <input className={inputCls} type="number" min="2000" max="2100" value={fiscalYear} onChange={(e) => setFiscalYear(e.target.value)} placeholder={`留空＝${new Date().getFullYear()}`} />
+            <p className="mt-1 text-xs text-gray-400">報表與獎金歸在哪一年。12 月談成、1 月才立案的案子可設回前一年。</p>
+          </div>
+          <div className="sm:col-span-2">
+            <label className={labelCls}>專案編號</label>
+            <input className={inputCls} value={code} onChange={(e) => setCode(e.target.value)} placeholder={`留空＝自動產生 P${new Date().getFullYear()}-001`} />
+            <p className="mt-1 text-xs text-gray-400">
+              只有匯入舊案才需要手填。編號會印在合約與請款單上，<span className="font-medium text-gray-500">建立後不可變更</span>；要改歸屬請改上面的歸屬年度。
+            </p>
           </div>
           <div className="sm:col-span-2">
             <label className={labelCls}>說明</label>
@@ -130,6 +153,7 @@ export default function AdminProjectsPage() {
         </div>
         <div className="mt-4 flex items-center gap-3">
           <PrimaryButton onClick={submit} disabled={saving}>{saving ? "建立中…" : "建立專案"}</PrimaryButton>
+          {createdCode && <span className="text-sm text-green-700">已建立，編號 <span className="font-mono font-medium">{createdCode}</span></span>}
           <ErrorText>{error}</ErrorText>
         </div>
       </Card>
@@ -145,7 +169,9 @@ export default function AdminProjectsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b text-left text-gray-500">
+                  <th className="py-2 pr-3">編號</th>
                   <th className="py-2 pr-3">專案</th>
+                  <th className="py-2 pr-3">歸屬年度</th>
                   <th className="py-2 pr-3">部門</th>
                   <th className="py-2 pr-3">負責人</th>
                   <th className="py-2 pr-3">分潤模式</th>
@@ -157,10 +183,9 @@ export default function AdminProjectsPage() {
               <tbody>
                 {projects.map((p) => (
                   <tr key={p.id} className="border-b last:border-0">
-                    <td className="py-2 pr-3 font-medium text-gray-900">
-                      {p.name}
-                      {p.code && <span className="ml-1 text-xs text-gray-400">{p.code}</span>}
-                    </td>
+                    <td className="py-2 pr-3 font-mono text-xs text-gray-500">{p.code ?? "—"}</td>
+                    <td className="py-2 pr-3 font-medium text-gray-900">{p.name}</td>
+                    <td className="py-2 pr-3 text-gray-600">{p.fiscalYear ?? "—"}</td>
                     <td className="py-2 pr-3 text-gray-600">{deptName(p.deptId)}</td>
                     <td className="py-2 pr-3 text-gray-600">{empName(p.leadEmpId)}</td>
                     <td className="py-2 pr-3 text-gray-600">{p.shareMode === "pool_pct" ? "池×%" : "固定金額"}</td>

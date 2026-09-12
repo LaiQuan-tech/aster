@@ -4,16 +4,27 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import {
+  nextProjectCode,
+  isUniqueViolation,
+  MAX_CODE_ATTEMPTS,
+} from "../services/project-code.js"
 import { resolveSelf, isHrRole, managedDeptIds } from "../middleware/scope.js"
 
 export const projectsRouter = Router()
 
 const PROJECT_COLS =
-  "id, tenant_id, name, code, description, status, dept_id, lead_emp_id, share_mode, bonus_pool, created_at"
+  "id, tenant_id, name, code, fiscal_year, description, status, dept_id, lead_emp_id, share_mode, bonus_pool, created_at"
 
 const createSchema = z.object({
   name: z.string().trim().min(1).max(200),
+  /**
+   * 人工指定編號（匯入舊案用）。**省略時由系統產生**，見 services/project-code.ts。
+   * 指定重複的編號會回 409，不會自動改號——人工指定就代表有意義，不該被系統改掉。
+   */
   code: z.string().trim().min(1).max(60).nullish(),
+  /** 歸屬年度（分析維度）。省略時預設為編號的年度，即建立年。 */
+  fiscalYear: z.number().int().min(2000).max(2100).nullish(),
   description: z.string().trim().max(4000).nullish(),
   deptId: z.string().uuid().nullish(),
   leadEmpId: z.string().uuid().nullish(),
@@ -24,7 +35,11 @@ const createSchema = z.object({
 const updateSchema = z
   .object({
     name: z.string().trim().min(1).max(200).optional(),
+    // `code` 刻意**不可經此端點變更**：編號是識別碼，會被印在合約、請款單、
+    // 發票與往來文件上。要調整歸屬請改 `fiscalYear`，那是分析維度。
+    // 帶了 code 會回 409，不是靜默忽略——靜默忽略會讓人以為改成功了。
     code: z.string().trim().min(1).max(60).nullable().optional(),
+    fiscalYear: z.number().int().min(2000).max(2100).nullable().optional(),
     description: z.string().trim().max(4000).nullable().optional(),
     status: z.enum(["active", "archived"]).optional(),
     deptId: z.string().uuid().nullable().optional(),
@@ -55,6 +70,7 @@ type ProjectRow = {
   tenant_id: string
   name: string
   code: string | null
+  fiscal_year: number | null
   description: string | null
   status: string
   dept_id: string | null
@@ -155,6 +171,7 @@ projectsRouter.get(
           id: row.id,
           name: row.name,
           code: row.code,
+          fiscalYear: row.fiscal_year,
           description: row.description,
           status: row.status,
           deptId: row.dept_id,
@@ -186,26 +203,62 @@ projectsRouter.post(
     }
     const b = parsed.data
     try {
-      const { data, error } = await supabaseAdmin
-        .from("projects")
-        .insert({
-          tenant_id: tenantId,
-          name: b.name,
-          code: b.code ?? null,
-          description: b.description ?? null,
-          dept_id: b.deptId ?? null,
-          lead_emp_id: b.leadEmpId ?? null,
-          share_mode: b.shareMode ?? "pool_pct",
-          bonus_pool: b.bonusPool ?? null,
-          status: "active",
-        })
-        .select("id")
-        .single()
-      if (error || !data) {
-        next(new Error(`POST /projects: ${error?.message}`))
+      // 編號的年度一律取**建立年**（見 services/project-code.ts 的說明）。
+      const year = new Date().getFullYear()
+      const manualCode = b.code ?? null
+
+      const baseRow = {
+        tenant_id: tenantId,
+        name: b.name,
+        fiscal_year: b.fiscalYear ?? year,
+        description: b.description ?? null,
+        dept_id: b.deptId ?? null,
+        lead_emp_id: b.leadEmpId ?? null,
+        share_mode: b.shareMode ?? "pool_pct",
+        bonus_pool: b.bonusPool ?? null,
+        status: "active",
+      }
+
+      // 人工指定編號：只試一次。撞號回 409——人工指定代表那個號有意義，
+      // 不該被系統自動換掉。
+      if (manualCode) {
+        const { data, error } = await supabaseAdmin
+          .from("projects")
+          .insert({ ...baseRow, code: manualCode })
+          .select("id, code")
+          .single()
+        if (error) {
+          if (isUniqueViolation(error)) {
+            res.status(409).json({ error: "code_taken", code: manualCode })
+            return
+          }
+          next(new Error(`POST /projects: ${error.message}`))
+          return
+        }
+        res.status(201).json({ id: data!.id, code: data!.code })
         return
       }
-      res.status(201).json({ id: data.id })
+
+      // 系統產號：MAX(seq)+1 在併發時會撞號，unique index 是真正的保證，
+      // 這裡碰到衝突就重算重試——讓 DB 當最後防線，不靠應用層搶。
+      for (let attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt++) {
+        const code = await nextProjectCode(tenantId, year)
+        const { data, error } = await supabaseAdmin
+          .from("projects")
+          .insert({ ...baseRow, code })
+          .select("id, code")
+          .single()
+        if (!error) {
+          res.status(201).json({ id: data!.id, code: data!.code })
+          return
+        }
+        if (!isUniqueViolation(error)) {
+          next(new Error(`POST /projects: ${error.message}`))
+          return
+        }
+        // 撞號 → 下一圈重算
+      }
+      res.status(503).json({ error: "code_generation_failed", attempts: MAX_CODE_ATTEMPTS })
     } catch (err) {
       next(err)
     }
@@ -240,6 +293,7 @@ projectsRouter.get(
           id: row.id,
           name: row.name,
           code: row.code,
+          fiscalYear: row.fiscal_year,
           description: row.description,
           status: row.status,
           deptId: row.dept_id,
@@ -283,9 +337,18 @@ projectsRouter.patch(
         return
       }
       const b = parsed.data
+
+      // 編號不可變更（模組四第 1 條）。回 409 而不是靜默忽略——靜默忽略
+      // 會讓呼叫端以為改成功了，等到對帳才發現合約上的號跟系統裡的不同。
+      // 要調整歸屬年度請改 `fiscalYear`。
+      if (b.code !== undefined) {
+        res.status(409).json({ error: "code_immutable", hint: "use fiscalYear" })
+        return
+      }
+
       const patch: Record<string, unknown> = {}
       if (b.name !== undefined) patch.name = b.name
-      if (b.code !== undefined) patch.code = b.code
+      if (b.fiscalYear !== undefined) patch.fiscal_year = b.fiscalYear
       if (b.description !== undefined) patch.description = b.description
       if (b.status !== undefined) patch.status = b.status
       if (b.deptId !== undefined) patch.dept_id = b.deptId

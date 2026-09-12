@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest"
 import { getTableColumns } from "drizzle-orm"
+import { getTableConfig } from "drizzle-orm/pg-core"
 import {
   tenants,
   departments,
@@ -68,6 +69,8 @@ describe("projects table", () => {
         "leadEmpId",
         "shareMode",
         "bonusPool",
+        // 模組四第 1 條：歸屬年度與編號分開。
+        "fiscalYear",
       ]),
     )
   })
@@ -75,6 +78,26 @@ describe("projects table", () => {
   it("tenantId is not null and shareMode defaults to pool_pct", () => {
     expect(cols.tenantId.notNull).toBe(true)
     expect(cols.shareMode.default).toBe("pool_pct")
+  })
+
+  // 編號唯一性是 DB 的事，不是應用層的事：兩人同時建案時各自查都說沒重複。
+  it("(tenant_id, code) 有 unique index，撞號由 DB 擋下", () => {
+    const idx = getTableConfig(projects).indexes.find(
+      (i) => i.config.name === "projects_tenant_code_uq",
+    )
+    expect(idx).toBeDefined()
+    expect(idx!.config.unique).toBe(true)
+    expect(idx!.config.columns.map((c) => (c as { name: string }).name)).toEqual([
+      "tenant_id",
+      "code",
+    ])
+  })
+
+  // 舊資料沒有編號；Postgres 的 unique index 視 NULL 互不相等，所以可空欄位
+  // 不會讓多筆舊資料互撞。新建一律由 API 產號。
+  it("code 與 fiscalYear 皆可空（相容既有資料）", () => {
+    expect(cols.code.notNull).toBe(false)
+    expect(cols.fiscalYear.notNull).toBe(false)
   })
 })
 
