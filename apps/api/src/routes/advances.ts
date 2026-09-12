@@ -6,7 +6,7 @@ import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
 
-export const tripAdvancesRouter = Router()
+export const advancesRouter = Router()
 
 const periodRe = /^\d{4}-\d{2}$/
 
@@ -24,18 +24,24 @@ const settleSchema = z.object({
 })
 
 const ADV_COLS =
-  "id, tenant_id, trip_request_id, employee_id, amount, status, payout_channel, " +
+  "id, tenant_id, kind, request_id, employee_id, amount, status, payout_channel, " +
   "paid_at, paid_by_emp_id, actual_total, balance, balance_handling, recovery_period, " +
   "settled_at, settled_by_emp_id, note, created_at"
 
 /**
- * Trip advance routes — 出差預支（模組三第 2 條）。
+ * Advance routes — 員工預支（模組三第 2、3 條）。
  *
- * 客戶確認「放款」是**核准後先撥一筆錢給同仁帶著去**。流程：
- *   出差單核准（自動開 `requested`）→ HR 撥款（`paid`）→ 回程核銷（`settled`）
+ * 兩種來源共用同一條流程與同一張表：
+ *   • `kind='trip'`       出差預支——核准的出差單授權
+ *   • `kind='petty_cash'` 零用金預支——單次高額費用，主管／老闆同意
+ *
+ * 流程：申請單核准（自動開 `requested`）→ 撥款（`paid`）→ 核銷沖抵（`settled`）
  *
  * 核准與撥款刻意分開：只有分開才看得出「已核准但還沒拿到錢」與
  * 「已撥款但還沒核銷」是兩種不同的狀態，後者是公司對員工的債權。
+ *
+ * **合併成一張表的理由是離職結算**：未核銷預支是離職扣回的依據；
+ * 分兩張表，離職結算就要查兩個地方，一定有人漏查其中一張。
  */
 
 async function resolveSelf(
@@ -49,7 +55,7 @@ async function resolveSelf(
     .eq("tenant_id", tenantId)
     .eq("user_id", userId)
     .maybeSingle()
-  if (error) throw new Error(`trip-advances resolve self: ${error.message}`)
+  if (error) throw new Error(`advances resolve self: ${error.message}`)
   return data ? { id: data.id as string, role: data.role as string } : null
 }
 
@@ -57,16 +63,16 @@ function isHr(role?: string): boolean {
   return !!role && ["hr_admin", "platform_admin"].includes(role)
 }
 
-/** GET /trip-advances?status=&employeeId= — 非 HR 一律鎖定本人。 */
-tripAdvancesRouter.get(
-  "/trip-advances",
+/** GET /advances?status=&employeeId= — 非 HR 一律鎖定本人。 */
+advancesRouter.get(
+  "/advances",
   requireAuth,
   requireTenant,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {
       const self = await resolveSelf(tenantId, req.auth?.userId)
-      let query = supabaseAdmin.from("trip_advances").select(ADV_COLS).eq("tenant_id", tenantId)
+      let query = supabaseAdmin.from("advances").select(ADV_COLS).eq("tenant_id", tenantId)
 
       if (isHr(self?.role)) {
         const employeeId = typeof req.query.employeeId === "string" ? req.query.employeeId : null
@@ -79,7 +85,7 @@ tripAdvancesRouter.get(
 
       const { data, error } = await query.order("created_at", { ascending: false })
       if (error) {
-        next(new Error(`GET /trip-advances: ${error.message}`))
+        next(new Error(`GET /advances: ${error.message}`))
         return
       }
       res.status(200).json({ advances: data ?? [] })
@@ -90,13 +96,18 @@ tripAdvancesRouter.get(
 )
 
 /**
- * GET /trip-advances/outstanding — **已撥款但尚未核銷**的預支（HR）。
+ * GET /advances/outstanding — **已撥款但尚未核銷**的預支（HR）。
  *
- * 這是公司對員工的未結債權：離職結算要扣回的依據，也是「出差回來很久
+ * 這是公司對員工的未結債權：離職結算要扣回的依據，也是「錢拿走很久
  * 卻沒交單」的催辦清單。`daysOutstanding` 讓逾期的一眼可見。
+ *
+ * 逾期天數門檻取自 `expense_settings`（預設 30）而非寫死：
+ * 預支在沖抵前性質是借款、不課稅；**長期不沖抵、實質變成變相薪資，
+ * 則可能被認定為所得**——這個門檻就是讓那件事提前可見，
+ * 而不同公司的合理天數本來就不一樣。
  */
-tripAdvancesRouter.get(
-  "/trip-advances/outstanding",
+advancesRouter.get(
+  "/advances/outstanding",
   requireAuth,
   requireTenant,
   requireHrAdmin,
@@ -104,26 +115,34 @@ tripAdvancesRouter.get(
     const tenantId = res.locals.tenantId as string
     try {
       const { data, error } = await supabaseAdmin
-        .from("trip_advances")
+        .from("advances")
         .select(ADV_COLS)
         .eq("tenant_id", tenantId)
         .eq("status", "paid")
         .order("paid_at", { ascending: true })
       if (error) {
-        next(new Error(`GET /trip-advances/outstanding: ${error.message}`))
+        next(new Error(`GET /advances/outstanding: ${error.message}`))
         return
       }
       // ADV_COLS 是串接字串，supabase-js 推不出列型別 → 明確轉型後再處理。
+      const { data: cfg } = await supabaseAdmin
+        .from("expense_settings")
+        .select("advance_overdue_days")
+        .eq("tenant_id", tenantId)
+        .maybeSingle()
+      const overdueDays = cfg ? Number(cfg.advance_overdue_days) : 30
+
+      // ADV_COLS 是串接字串，supabase-js 推不出列型別 → 明確轉型後再處理。
       const rows = (data ?? []) as unknown as Array<Record<string, unknown>>
       const now = Date.now()
-      const advances = rows.map((a) => ({
-        ...a,
-        daysOutstanding: a.paid_at
+      const advances = rows.map((a) => {
+        const days = a.paid_at
           ? Math.floor((now - new Date(a.paid_at as string).getTime()) / 86_400_000)
-          : null,
-      }))
+          : null
+        return { ...a, daysOutstanding: days, overdue: days !== null && days >= overdueDays }
+      })
       const total = rows.reduce((sum, a) => sum + Number(a.amount), 0)
-      res.status(200).json({ advances, count: advances.length, total })
+      res.status(200).json({ advances, count: advances.length, total, overdueDays })
     } catch (err) {
       next(err)
     }
@@ -131,12 +150,12 @@ tripAdvancesRouter.get(
 )
 
 /**
- * POST /trip-advances/:id/pay — HR 撥款（`requested` → `paid`）。
+ * POST /advances/:id/pay — HR 撥款（`requested` → `paid`）。
  *
  * `payoutChannel` 必填：現金撥款尤其要留痕，那是最常產生爭議的管道。
  */
-tripAdvancesRouter.post(
-  "/trip-advances/:id/pay",
+advancesRouter.post(
+  "/advances/:id/pay",
   requireAuth,
   requireTenant,
   requireHrAdmin,
@@ -151,7 +170,7 @@ tripAdvancesRouter.post(
     try {
       const self = await resolveSelf(tenantId, req.auth?.userId)
       const { data: adv, error: loadErr } = await supabaseAdmin
-        .from("trip_advances")
+        .from("advances")
         .select("id, status, amount")
         .eq("tenant_id", tenantId)
         .eq("id", id)
@@ -170,7 +189,7 @@ tripAdvancesRouter.post(
       }
 
       const { error } = await supabaseAdmin
-        .from("trip_advances")
+        .from("advances")
         .update({
           status: "paid",
           payout_channel: parsed.data.payoutChannel,
@@ -188,13 +207,13 @@ tripAdvancesRouter.post(
 
       await writeAuditLog({
         tenantId,
-        tableName: "trip_advances",
+        tableName: "advances",
         recordId: id,
         action: "UPDATE",
         oldRow: { status: "requested" },
         newRow: { status: "paid", amount: adv.amount, channel: parsed.data.payoutChannel },
         actorEmpId: self?.id,
-        context: "POST /trip-advances/:id/pay",
+        context: "POST /advances/:id/pay",
       })
 
       res.status(200).json({ id, status: "paid" })
@@ -205,7 +224,7 @@ tripAdvancesRouter.post(
 )
 
 /**
- * POST /trip-advances/:id/settle — 回程核銷沖抵（`paid` → `settled`）。
+ * POST /advances/:id/settle — 回程核銷沖抵（`paid` → `settled`）。
  *
  * 把綁定此趟出差的報銷單合計成 `actualTotal`，算出
  * `balance = actualTotal − amount`：
@@ -217,8 +236,8 @@ tripAdvancesRouter.post(
  *
  * 只計 `submitted` / `settled` 的單——已撤回或退件的不算數。
  */
-tripAdvancesRouter.post(
-  "/trip-advances/:id/settle",
+advancesRouter.post(
+  "/advances/:id/settle",
   requireAuth,
   requireTenant,
   requireHrAdmin,
@@ -238,8 +257,8 @@ tripAdvancesRouter.post(
     try {
       const self = await resolveSelf(tenantId, req.auth?.userId)
       const { data: adv, error: loadErr } = await supabaseAdmin
-        .from("trip_advances")
-        .select("id, status, amount, trip_request_id, employee_id")
+        .from("advances")
+        .select("id, status, amount, kind, request_id, employee_id")
         .eq("tenant_id", tenantId)
         .eq("id", id)
         .maybeSingle()
@@ -256,11 +275,13 @@ tripAdvancesRouter.post(
         return
       }
 
+      // 沖抵一律以 `advance_id` 為準——零用金預支沒有出差單可反推，
+      // 兩種預支必須走同一條沖抵邏輯，否則又會是兩套規則。
       const { data: claims, error: claimErr } = await supabaseAdmin
         .from("expense_claims")
         .select("amount, status")
         .eq("tenant_id", tenantId)
-        .eq("trip_request_id", adv.trip_request_id)
+        .eq("advance_id", adv.id)
         .in("status", ["submitted", "settled"])
       if (claimErr) {
         next(new Error(`POST settle (claims): ${claimErr.message}`))
@@ -270,7 +291,7 @@ tripAdvancesRouter.post(
       const balance = Number((actualTotal - Number(adv.amount)).toFixed(2))
 
       const { error } = await supabaseAdmin
-        .from("trip_advances")
+        .from("advances")
         .update({
           status: "settled",
           actual_total: actualTotal,
@@ -291,13 +312,13 @@ tripAdvancesRouter.post(
 
       await writeAuditLog({
         tenantId,
-        tableName: "trip_advances",
+        tableName: "advances",
         recordId: id,
         action: "UPDATE",
         oldRow: { status: "paid", amount: adv.amount },
         newRow: { status: "settled", actualTotal, balance, handling: parsed.data.balanceHandling },
         actorEmpId: self?.id,
-        context: "POST /trip-advances/:id/settle",
+        context: "POST /advances/:id/settle",
       })
 
       res.status(200).json({

@@ -17,7 +17,8 @@ import {
   expenseCategories,
   expenseClaims,
   expenseSettlements,
-  tripAdvances,
+  advances,
+  expenseSettings,
   leaveRequests as leaveRequestsTable,
 } from "../index"
 
@@ -352,14 +353,15 @@ describe("expenseSettlements table — 月結批次", () => {
   })
 })
 
-describe("tripAdvances table — 出差預支（模組三第 2 條）", () => {
-  const cols = getTableColumns(tripAdvances)
+describe("advances table — 員工預支（模組三第 2、3 條）", () => {
+  const cols = getTableColumns(advances)
 
-  // 客戶確認「放款」是核准後先撥一筆錢給同仁帶著去，回程再核銷沖抵。
+  // 出差預支與零用金預支合併成一張表：未核銷預支是離職扣回的依據，
+  // 分兩張表則離職結算要查兩處，一定有人漏查，而漏查的那筆就是收不回來的錢。
   it("涵蓋整個生命週期：撥款、沖抵、差額處理", () => {
     expect(Object.keys(cols)).toEqual(
       expect.arrayContaining([
-        "tripRequestId", "employeeId", "amount", "status",
+        "kind", "requestId", "employeeId", "amount", "status",
         "payoutChannel", "paidAt", "paidByEmpId",
         "actualTotal", "balance", "balanceHandling", "recoveryPeriod",
         "settledAt", "settledByEmpId",
@@ -382,6 +384,21 @@ describe("tripAdvances table — 出差預支（模組三第 2 條）", () => {
   it("amount 必填 —— 沒有金額的預支列沒有意義", () => {
     expect(cols.amount.notNull).toBe(true)
   })
+
+  it("kind 預設 trip，零用金需明示 petty_cash", () => {
+    expect(cols.kind.notNull).toBe(true)
+    expect(cols.kind.default).toBe("trip")
+  })
+})
+
+describe("expenseSettings table — 門檻做成參數，不寫死", () => {
+  const cols = getTableColumns(expenseSettings)
+
+  // 使用者裁示：低於門檻標示但不擋，由簽核者判斷。
+  it("預支門檻預設 5000、逾期天數預設 30", () => {
+    expect(cols.advanceThreshold.default).toBe("5000")
+    expect(cols.advanceOverdueDays.default).toBe(30)
+  })
 })
 
 describe("兩軌政策的接點（模組三第 1、2 條）", () => {
@@ -396,9 +413,14 @@ describe("兩軌政策的接點（模組三第 1、2 條）", () => {
     expect(catCols.requiresTripApproval.default).toBe(false)
   })
 
-  it("報銷單可綁出差單", () => {
-    expect(Object.keys(claimCols)).toEqual(expect.arrayContaining(["tripRequestId"]))
+  // 兩欄職責不同：tripRequestId 是「屬於哪趟出差」（閘門＋歸屬），
+  // advanceId 是「用哪筆預支的錢付的」（沖抵）。零用金沒有出差單可反推。
+  it("報銷單可綁出差單，也可綁預支", () => {
+    expect(Object.keys(claimCols)).toEqual(
+      expect.arrayContaining(["tripRequestId", "advanceId"]),
+    )
     expect(claimCols.tripRequestId.notNull).toBe(false)
+    expect(claimCols.advanceId.notNull).toBe(false)
   })
 
   it("出差申請單有範圍、預估、預支與回程報告四欄", () => {

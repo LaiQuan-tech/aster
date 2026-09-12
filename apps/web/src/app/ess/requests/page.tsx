@@ -21,6 +21,7 @@ import {
   type LeaveType,
   type RequestKind,
   type RequestStatus,
+  getExpenseSettingsForMe,
 } from "@/lib/ess-api";
 
 const KIND_LABEL: Record<RequestKind, string> = {
@@ -28,6 +29,7 @@ const KIND_LABEL: Record<RequestKind, string> = {
   ot: "加班",
   fix_punch: "補卡",
   business_trip: "公出/出差",
+  petty_cash: "零用金預支",
 };
 
 const STATUS_STYLE: Record<RequestStatus, string> = {
@@ -118,6 +120,8 @@ function RequestsView() {
   const [tripScope, setTripScope] = useState<"local" | "domestic_intercity" | "overseas">("local");
   const [estimatedCost, setEstimatedCost] = useState("");
   const [advanceRequested, setAdvanceRequested] = useState("");
+  /** 建議提出預支申請的金額門檻（伺服器設定，不在前端寫死）。 */
+  const [advanceThreshold, setAdvanceThreshold] = useState<number | null>(null);
   const [remark, setRemark] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -141,12 +145,16 @@ function RequestsView() {
     let active = true;
     (async () => {
       // Leave types are HR-only on the API; treat failure as "no list".
-      const [brandRes, ltRes, meRes] = await Promise.allSettled([
+      const [brandRes, ltRes, meRes, cfgRes] = await Promise.allSettled([
         getBranding(),
         getLeaveTypes(),
         getMe(),
+        getExpenseSettingsForMe(),
       ]);
       if (!active) return;
+      if (cfgRes.status === "fulfilled") {
+        setAdvanceThreshold(cfgRes.value.settings.advanceThreshold);
+      }
       if (brandRes.status === "fulfilled") setBranding(brandRes.value.branding);
       if (ltRes.status === "fulfilled") setLeaveTypes(ltRes.value.leaveTypes);
       if (meRes.status === "fulfilled") {
@@ -265,7 +273,7 @@ function RequestsView() {
         estimatedCost:
           kind === "business_trip" && estimatedCost.trim() ? Number(estimatedCost) : undefined,
         advanceRequested:
-          kind === "business_trip" && advanceRequested.trim()
+          (kind === "business_trip" || kind === "petty_cash") && advanceRequested.trim()
             ? Number(advanceRequested)
             : undefined,
       });
@@ -358,6 +366,7 @@ function RequestsView() {
                 <option value="ot">加班</option>
                 <option value="fix_punch">補卡</option>
                 <option value="business_trip">公出/出差</option>
+                <option value="petty_cash">零用金預支</option>
               </select>
             </div>
 
@@ -528,6 +537,41 @@ function RequestsView() {
                     <input type="radio" name="payout" checked={payout === "comp_time"} onChange={() => setPayout("comp_time")} />
                     補休
                   </label>
+                </div>
+              </div>
+            )}
+
+            {kind === "petty_cash" && (
+              <div className="space-y-4">
+                <div>
+                  <label
+                    className="block text-sm font-medium text-gray-700 mb-1"
+                    htmlFor="pc-amount"
+                  >
+                    預支金額
+                  </label>
+                  <input
+                    id="pc-amount"
+                    type="number"
+                    min="0"
+                    value={advanceRequested}
+                    onChange={(e) => setAdvanceRequested(e.target.value)}
+                    required
+                    className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                  />
+                  {/* 門檻是提示不是閘門：低於門檻仍可送出，由簽核者判斷。 */}
+                  {advanceThreshold !== null &&
+                    advanceRequested.trim() !== "" &&
+                    Number(advanceRequested) < advanceThreshold && (
+                      <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        此金額低於建議門檻 {advanceThreshold.toLocaleString("zh-TW")} 元。
+                        仍可送出，但會在簽核時標示——請在用途說明原因。
+                      </p>
+                    )}
+                  <p className="mt-1 text-xs text-gray-400">
+                    核准後由公司先撥款給你；之後請憑單據報銷沖抵，多退少補。
+                    <strong>未核銷的預支會列為未結款項。</strong>
+                  </p>
                 </div>
               </div>
             )}

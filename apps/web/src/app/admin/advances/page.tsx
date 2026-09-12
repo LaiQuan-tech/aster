@@ -9,12 +9,12 @@ import {
   PrimaryButton,
 } from "@/components/admin-ui";
 import {
-  getTripAdvances,
-  getOutstandingTripAdvances,
-  payTripAdvance,
-  settleTripAdvance,
+  getAdvances,
+  getOutstandingAdvances,
+  payAdvance,
+  settleAdvance,
   getEmployees,
-  type TripAdvance,
+  type Advance,
   type Employee,
 } from "@/lib/admin-api";
 
@@ -22,16 +22,15 @@ function money(n: number): string {
   return n.toLocaleString("zh-TW", { maximumFractionDigits: 0 });
 }
 
-/** 逾期門檻：出差回來超過這麼多天還沒核銷，視為該催辦。 */
-const OVERDUE_DAYS = 30;
-
-export default function AdminTripAdvancesPage() {
-  const [requested, setRequested] = useState<TripAdvance[]>([]);
+export default function AdminAdvancesPage() {
+  const [requested, setRequested] = useState<Advance[]>([]);
   const [outstanding, setOutstanding] = useState<
-    Array<TripAdvance & { daysOutstanding: number | null }>
+    Array<Advance & { daysOutstanding: number | null; overdue: boolean }>
   >([]);
+  // 逾期門檻由伺服器給（取自 expense_settings），不在前端寫死。
+  const [overdueDays, setOverdueDays] = useState(30);
   const [outstandingTotal, setOutstandingTotal] = useState(0);
-  const [settled, setSettled] = useState<TripAdvance[]>([]);
+  const [settled, setSettled] = useState<Advance[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,13 +40,14 @@ export default function AdminTripAdvancesPage() {
     setError(null);
     try {
       const [req, out, set] = await Promise.all([
-        getTripAdvances({ status: "requested" }),
-        getOutstandingTripAdvances(),
-        getTripAdvances({ status: "settled" }),
+        getAdvances({ status: "requested" }),
+        getOutstandingAdvances(),
+        getAdvances({ status: "settled" }),
       ]);
       setRequested(req.advances);
       setOutstanding(out.advances);
       setOutstandingTotal(out.total);
+      setOverdueDays(out.overdueDays);
       setSettled(set.advances);
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入失敗");
@@ -64,7 +64,7 @@ export default function AdminTripAdvancesPage() {
   const empName = (id: string) =>
     employees.find((e) => e.id === id)?.name ?? id.slice(0, 8);
 
-  async function onPay(a: TripAdvance) {
+  async function onPay(a: Advance) {
     const channel = window.confirm(
       `撥款 ${money(Number(a.amount))} 元給 ${empName(a.employee_id)}。\n\n` +
         "確定 = 現金\n取消 = 改選匯款（下一步會再問）",
@@ -79,7 +79,7 @@ export default function AdminTripAdvancesPage() {
     setError(null);
     setMessage(null);
     try {
-      await payTripAdvance(a.id, { payoutChannel: channel as "cash" | "transfer" });
+      await payAdvance(a.id, { payoutChannel: channel as "cash" | "transfer" });
       setMessage(
         `已撥款 ${money(Number(a.amount))} 元（${channel === "cash" ? "現金" : "匯款"}）`,
       );
@@ -91,10 +91,10 @@ export default function AdminTripAdvancesPage() {
     }
   }
 
-  async function onSettle(a: TripAdvance) {
+  async function onSettle(a: Advance) {
     const viaPayroll = window.confirm(
       `核銷 ${empName(a.employee_id)} 的預支 ${money(Number(a.amount))} 元。\n\n` +
-        "系統會把綁定這趟出差的報銷單合計起來，算出差額。\n\n" +
+        "系統會把綁定這筆預支的報銷單合計起來，算出差額。\n\n" +
         "差額怎麼處理？\n確定 = 從薪資扣／補\n取消 = 現金找補",
     );
     let recoveryPeriod: string | undefined;
@@ -115,7 +115,7 @@ export default function AdminTripAdvancesPage() {
     setError(null);
     setMessage(null);
     try {
-      const res = await settleTripAdvance(a.id, {
+      const res = await settleAdvance(a.id, {
         balanceHandling: viaPayroll ? "payroll" : "cash",
         recoveryPeriod,
       });
@@ -134,8 +134,8 @@ export default function AdminTripAdvancesPage() {
   return (
     <>
       <PageHeader
-        title="出差預支"
-        desc="出差核准後先撥款給同仁帶著去，回程再以實際報銷沖抵。核准與撥款是兩件事。"
+        title="員工預支"
+        desc="出差預支與零用金預支共用同一條流程：核准 → 撥款 → 以實際報銷沖抵。核准與撥款是兩件事。"
       />
 
       {(error || message) && (
@@ -152,8 +152,8 @@ export default function AdminTripAdvancesPage() {
         </h2>
         <p className="mb-4 text-xs leading-relaxed text-gray-500">
           這是<strong>公司對員工的未結債權</strong>——離職結算要扣回的依據，
-          也是「回來很久卻沒交單」的催辦清單。合計{" "}
-          <strong>{money(outstandingTotal)}</strong> 元。
+          也是「錢拿走很久卻沒交單」的催辦清單。合計{" "}
+          <strong>{money(outstandingTotal)}</strong> 元；逾 {overdueDays} 天標示為逾期。
         </p>
 
         {outstanding.length === 0 ? (
@@ -164,6 +164,7 @@ export default function AdminTripAdvancesPage() {
               <thead>
                 <tr className="border-b border-gray-200 text-left text-xs text-gray-500">
                   <th className="py-2">員工</th>
+                  <th className="py-2">種類</th>
                   <th className="py-2 text-right">預支金額</th>
                   <th className="py-2">撥款日</th>
                   <th className="py-2">管道</th>
@@ -173,13 +174,16 @@ export default function AdminTripAdvancesPage() {
               </thead>
               <tbody>
                 {outstanding.map((a) => {
-                  const overdue = (a.daysOutstanding ?? 0) >= OVERDUE_DAYS;
+                  const overdue = a.overdue;
                   return (
                     <tr
                       key={a.id}
                       className={`border-b border-gray-100 ${overdue ? "bg-amber-50" : ""}`}
                     >
                       <td className="py-2">{empName(a.employee_id)}</td>
+                      <td className="py-2 text-xs">
+                        {a.kind === "petty_cash" ? "零用金" : "出差"}
+                      </td>
                       <td className="py-2 text-right">{money(Number(a.amount))}</td>
                       <td className="py-2 text-xs">{a.paid_at?.slice(0, 10) ?? "—"}</td>
                       <td className="py-2 text-xs">
@@ -215,7 +219,7 @@ export default function AdminTripAdvancesPage() {
           已核准・待撥款（{requested.length}）
         </h2>
         <p className="mb-4 text-xs text-gray-500">
-          出差單核准時自動開單，但<strong>錢還沒出去</strong>。撥款須指定管道，
+          申請核准時自動開單，但<strong>錢還沒出去</strong>。撥款須指定管道，
           現金尤其要留痕。
         </p>
 
@@ -229,7 +233,11 @@ export default function AdminTripAdvancesPage() {
                 className="flex flex-wrap items-center justify-between gap-3 rounded border border-gray-200 px-3 py-2 text-sm"
               >
                 <span>
-                  {empName(a.employee_id)} · <strong>{money(Number(a.amount))}</strong> 元
+                  {empName(a.employee_id)} ·{" "}
+                  <span className="text-xs text-gray-500">
+                    {a.kind === "petty_cash" ? "零用金" : "出差"}
+                  </span>{" "}
+                  · <strong>{money(Number(a.amount))}</strong> 元
                   <span className="ml-2 text-xs text-gray-500">
                     核准於 {a.created_at.slice(0, 10)}
                   </span>

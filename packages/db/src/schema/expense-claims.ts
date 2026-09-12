@@ -6,6 +6,7 @@ import { employees } from "./employees"
 import { expenseCategories } from "./expense-categories"
 import { expenseSettlements } from "./expense-settlements"
 import { leaveRequests } from "./leave-requests"
+import { advances } from "./advances"
 
 /**
  * Expense claims — 同仁線上填報的單筆日常支出。
@@ -64,6 +65,16 @@ export const expenseClaims = pgTable(
     tripRequestId: uuid("trip_request_id").references(
       (): AnyPgColumn => leaveRequests.id,
     ),
+    /**
+     * 這筆費用是用哪一筆預支的錢付的（模組三第 2、3 條的沖抵連結）。
+     *
+     * 與 `tripRequestId` 職責不同，兩欄不重複：
+     *   • `tripRequestId` = 屬於哪趟出差（**兩軌閘門** ＋ 費用歸屬）
+     *   • `advanceId`     = 用哪筆預支的錢付的（**沖抵**）
+     *
+     * 零用金預支沒有出差單可反推，故沖抵一律以本欄為準。
+     */
+    advanceId: uuid("advance_id").references((): AnyPgColumn => advances.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

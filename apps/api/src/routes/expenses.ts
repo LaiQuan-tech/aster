@@ -42,6 +42,11 @@ const claimSchema = z.object({
    * 時必填，且該單須為本人、已核准的 business_trip。
    */
   tripRequestId: z.string().uuid().optional(),
+  /**
+   * 這筆費用用哪一筆預支的錢付的（模組三第 2、3 條的沖抵連結）。
+   * 出差軌若該趟已有預支，省略時由系統自動綁上；零用金必須明指。
+   */
+  advanceId: z.string().uuid().optional(),
 })
 
 const claimPatchSchema = z.object({
@@ -62,7 +67,7 @@ const receiptSchema = z.object({
 
 const CLAIM_COLS =
   "id, tenant_id, employee_id, category_id, nature, amount, incurred_on, period, note, " +
-  "status, status_reason, settlement_id, trip_request_id, created_at, updated_at"
+  "status, status_reason, settlement_id, trip_request_id, advance_id, created_at, updated_at"
 
 /**
  * Expense routes — 常態日常支出報銷（模組三第 1 條）。
@@ -291,6 +296,25 @@ expensesRouter.post(
         }
       }
 
+      // 沖抵連結：出差軌若該趟已開預支，未明指時自動綁上——同仁沒有理由
+      // 記得自己的預支單號，而漏綁會讓核銷算不到這筆、差額算錯。
+      let advanceId = parsed.data.advanceId ?? null
+      if (!advanceId && parsed.data.tripRequestId) {
+        const { data: adv, error: advErr } = await supabaseAdmin
+          .from("advances")
+          .select("id")
+          .eq("tenant_id", tenantId)
+          .eq("request_id", parsed.data.tripRequestId)
+          .eq("employee_id", employeeId)
+          .in("status", ["requested", "paid"])
+          .maybeSingle()
+        if (advErr) {
+          next(new Error(`POST /expenses (advance): ${advErr.message}`))
+          return
+        }
+        advanceId = (adv?.id as string | undefined) ?? null
+      }
+
       const { data, error } = await supabaseAdmin
         .from("expense_claims")
         .insert({
@@ -304,6 +328,7 @@ expensesRouter.post(
           note: parsed.data.note ?? null,
           status: "submitted",
           trip_request_id: parsed.data.tripRequestId ?? null,
+          advance_id: advanceId,
         })
         .select("id, period, nature")
         .single()
@@ -882,6 +907,114 @@ expensesRouter.get(
         return
       }
       res.status(200).json({ settlements: data ?? [] })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// ── 模組設定 ─────────────────────────────────────────────────────────
+
+const settingsSchema = z.object({
+  advanceThreshold: z.number().nonnegative().optional(),
+  advanceOverdueDays: z.number().int().positive().optional(),
+})
+
+const DEFAULT_SETTINGS = { advanceThreshold: 5000, advanceOverdueDays: 30 }
+
+/**
+ * GET /expense-settings — 報銷模組的租戶級參數。
+ *
+ * 開放給所有員工讀取：ESS 端要用 `advanceThreshold` 顯示提示
+ * （「此金額低於建議門檻，仍可申請」）。沒有設定列時回預設值，
+ * 讓租戶不必先設定就能用。
+ */
+expensesRouter.get(
+  "/expense-settings",
+  requireAuth,
+  requireTenant,
+  async (_req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("expense_settings")
+        .select("advance_threshold, advance_overdue_days")
+        .eq("tenant_id", tenantId)
+        .maybeSingle()
+      if (error) {
+        next(new Error(`GET /expense-settings: ${error.message}`))
+        return
+      }
+      res.status(200).json({
+        settings: {
+          advanceThreshold: data
+            ? Number(data.advance_threshold)
+            : DEFAULT_SETTINGS.advanceThreshold,
+          advanceOverdueDays: data
+            ? Number(data.advance_overdue_days)
+            : DEFAULT_SETTINGS.advanceOverdueDays,
+        },
+      })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * PUT /expense-settings — HR 調整門檻。
+ *
+ * **門檻是提示，不是閘門**（使用者裁示）：低於門檻的預支申請會被標示，
+ * 但不擋——有人可能正當需要低於門檻的預支，由簽核者判斷。
+ */
+expensesRouter.put(
+  "/expense-settings",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const parsed = settingsSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const self = await resolveSelf(tenantId, req.auth?.userId)
+      const row: Record<string, unknown> = {
+        tenant_id: tenantId,
+        updated_at: new Date().toISOString(),
+      }
+      if (parsed.data.advanceThreshold !== undefined)
+        row.advance_threshold = parsed.data.advanceThreshold
+      if (parsed.data.advanceOverdueDays !== undefined)
+        row.advance_overdue_days = parsed.data.advanceOverdueDays
+
+      const { data, error } = await supabaseAdmin
+        .from("expense_settings")
+        .upsert(row, { onConflict: "tenant_id" })
+        .select("advance_threshold, advance_overdue_days")
+        .single()
+      if (error || !data) {
+        next(new Error(`PUT /expense-settings: ${error?.message}`))
+        return
+      }
+
+      await writeAuditLog({
+        tenantId,
+        tableName: "expense_settings",
+        action: "UPDATE",
+        newRow: parsed.data,
+        actorEmpId: self?.id,
+        context: "PUT /expense-settings",
+      })
+
+      res.status(200).json({
+        settings: {
+          advanceThreshold: Number(data.advance_threshold),
+          advanceOverdueDays: Number(data.advance_overdue_days),
+        },
+      })
     } catch (err) {
       next(err)
     }

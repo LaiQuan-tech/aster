@@ -13,12 +13,12 @@ import {
   cancelExpense,
   uploadExpenseReceipt,
   getMyApprovedTrips,
-  getMyTripAdvances,
+  getMyAdvances,
   type Branding,
   type MyExpenseCategory,
   type MyExpenseClaim,
   type MyTrip,
-  type MyTripAdvance,
+  type MyAdvance,
 } from "@/lib/ess-api";
 
 function thisPeriod(): string {
@@ -59,7 +59,7 @@ function ExpensesInner() {
   // 出差軌（模組三第 2 條）：這類報銷必須綁一張已核准的出差單。
   const [trips, setTrips] = useState<MyTrip[]>([]);
   const [tripRequestId, setTripRequestId] = useState("");
-  const [advances, setAdvances] = useState<MyTripAdvance[]>([]);
+  const [advances, setAdvances] = useState<MyAdvance[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -67,7 +67,7 @@ function ExpensesInner() {
         getMyExpenseCategories(),
         getMyExpenses(period),
         getMyApprovedTrips(),
-        getMyTripAdvances(),
+        getMyAdvances(),
       ]);
       setCategories(c.categories.filter((x) => x.active));
       setClaims(e.claims);
@@ -296,9 +296,9 @@ function ExpensesInner() {
 
         {advances.length > 0 && (
           <section className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:p-6">
-            <h2 className="mb-1 text-lg font-semibold text-gray-800">我的出差預支</h2>
+            <h2 className="mb-1 text-lg font-semibold text-gray-800">我的預支</h2>
             <p className="mb-4 text-xs text-gray-500">
-              已撥款但尚未核銷的金額，回程請憑單據報銷後由公司沖抵，多退少補。
+              已撥款但尚未核銷的金額，請憑單據報銷後由公司沖抵，多退少補。
             </p>
             <ul className="space-y-2">
               {advances.map((a) => {

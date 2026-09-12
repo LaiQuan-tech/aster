@@ -1881,11 +1881,14 @@ export async function uploadSignatureSheet(versionId: string, file: File, note?:
   );
 }
 
-/* --------------------------------------------------- 出差預支（模組三第 2 條） */
+/* ------------------------------------------ 員工預支（模組三第 2、3 條） */
 
-export interface TripAdvance {
+export interface Advance {
   id: string;
-  trip_request_id: string;
+  /** 'trip' 出差預支 ｜ 'petty_cash' 零用金預支 —— 同一張表，同一條流程。 */
+  kind: "trip" | "petty_cash";
+  /** 授權來源的申請單（business_trip 或 petty_cash）。 */
+  request_id: string;
   employee_id: string;
   amount: string;
   /** 'requested' 核准未撥款 ｜ 'paid' 已撥款未核銷 ｜ 'settled' ｜ 'cancelled' */
@@ -1903,36 +1906,38 @@ export interface TripAdvance {
   created_at: string;
 }
 
-export function getTripAdvances(params: { status?: string; employeeId?: string } = {}) {
+export function getAdvances(params: { status?: string; employeeId?: string } = {}) {
   const q = new URLSearchParams();
   if (params.status) q.set("status", params.status);
   if (params.employeeId) q.set("employeeId", params.employeeId);
   const qs = q.toString();
-  return apiFetch<{ advances: TripAdvance[] }>(`/trip-advances${qs ? `?${qs}` : ""}`);
+  return apiFetch<{ advances: Advance[] }>(`/advances${qs ? `?${qs}` : ""}`);
 }
 
 /** 已撥款但尚未核銷 —— 公司對員工的未結債權，離職結算要扣回的依據。 */
-export function getOutstandingTripAdvances() {
+export function getOutstandingAdvances() {
   return apiFetch<{
-    advances: Array<TripAdvance & { daysOutstanding: number | null }>;
+    advances: Array<Advance & { daysOutstanding: number | null; overdue: boolean }>;
     count: number;
     total: number;
-  }>("/trip-advances/outstanding");
+    /** 逾期天數門檻，取自 expense_settings（預設 30）。 */
+    overdueDays: number;
+  }>("/advances/outstanding");
 }
 
 /** 撥款。payoutChannel 必填 —— 現金撥款尤其要留痕。 */
-export function payTripAdvance(
+export function payAdvance(
   id: string,
   body: { payoutChannel: "cash" | "transfer"; note?: string },
 ) {
-  return apiFetch<{ id: string; status: string }>(`/trip-advances/${id}/pay`, {
+  return apiFetch<{ id: string; status: string }>(`/advances/${id}/pay`, {
     method: "POST",
     body: JSON.stringify(body),
   });
 }
 
 /** 回程核銷沖抵。balanceHandling='payroll' 時 recoveryPeriod 必填。 */
-export function settleTripAdvance(
+export function settleAdvance(
   id: string,
   body: { balanceHandling: "cash" | "payroll"; recoveryPeriod?: string; note?: string },
 ) {
@@ -1943,8 +1948,28 @@ export function settleTripAdvance(
     actualTotal: number;
     balance: number;
     direction: string;
-  }>(`/trip-advances/${id}/settle`, {
+  }>(`/advances/${id}/settle`, {
     method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/* -------------------------------------------------- 報銷模組設定 */
+
+export interface ExpenseSettings {
+  /** 建議提出預支申請的金額門檻。**低於門檻標示但不擋**，由簽核者判斷。 */
+  advanceThreshold: number;
+  /** 已撥款超過這麼多天仍未核銷即標示逾期。 */
+  advanceOverdueDays: number;
+}
+
+export function getExpenseSettings() {
+  return apiFetch<{ settings: ExpenseSettings }>("/expense-settings");
+}
+
+export function updateExpenseSettings(body: Partial<ExpenseSettings>) {
+  return apiFetch<{ settings: ExpenseSettings }>("/expense-settings", {
+    method: "PUT",
     body: JSON.stringify(body),
   });
 }

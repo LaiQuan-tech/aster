@@ -53,7 +53,7 @@ export const leaveRequests = pgTable("leave_requests", {
   estimatedCost: numeric("estimated_cost"),
   /**
    * 申請預支的金額（客戶確認：核准後**先撥一筆錢給同仁帶著去**）。
-   * 核准時據此建立 `trip_advances` 一列；本欄只是申請表上的數字，
+   * 核准時據此建立 `advances` 一列；本欄只是申請表上的數字，
    * 實際金流一律記在那張表。
    */
   advanceRequested: numeric("advance_requested"),

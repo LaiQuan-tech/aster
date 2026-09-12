@@ -17,7 +17,7 @@ export interface ApprovedRequest {
   end_at: string
   /** OT 給付方式 the filer chose ('pay' | 'comp_time'); null/absent → rule config decides. */
   payout?: string | null
-  /** business_trip 申請的預支金額（模組三第 2 條）；核准時據此建立 trip_advances。 */
+  /** 申請的預支金額（模組三第 2、3 條）；核准時據此建立 advances 一列。 */
   advance_requested?: string | number | null
 }
 
@@ -145,41 +145,47 @@ async function debitLeaveBalance(
 }
 
 /**
- * 出差單最終核准 → 開一筆預支（模組三第 2 條）。
+ * 申請單最終核准 → 開一筆預支（模組三第 2、3 條）。
  *
- * 客戶確認「放款」是**核准後先撥一筆錢給同仁帶著去**，故核准即是金流的起點。
- * 但本函式只把預支開成 `requested`（**尚未撥款**）——真正的撥款是 HR 的動作，
+ * 兩種來源共用同一張 `advances` 表：
+ *   • `business_trip` → `kind='trip'`（出差預支）
+ *   • `petty_cash`    → `kind='petty_cash'`（零用金預支）
+ *
+ * 客戶確認「放款」是**核准後先撥一筆錢給同仁帶著去**，故核准即是金流起點。
+ * 但本函式只把預支開成 `requested`（**尚未撥款**）——真正的撥款是另一個動作，
  * 要記時間、經手人與管道（現金／匯款）。核准與撥款分開，才看得出
  * 「已核准但還沒拿到錢」與「已撥款但還沒核銷」這兩種不同的狀態。
  *
  * 未填或填 0 的預支金額不建列：不是每趟出差都要預支。
- * 重複核准（理論上不會發生）由 (trip_request_id) 的既有列擋下，不重複開。
+ * 重複核准（理論上不會發生）由 (request_id) 的既有列擋下，不重複開。
  */
-async function openTripAdvance(
+async function openAdvance(
   supabase: SupabaseClient,
   tenantId: string,
   req: ApprovedRequest,
+  kind: "trip" | "petty_cash",
 ): Promise<void> {
   const amount = Number(req.advance_requested ?? 0)
   if (!Number.isFinite(amount) || amount <= 0) return
 
   const { data: existing, error: selErr } = await supabase
-    .from("trip_advances")
+    .from("advances")
     .select("id")
     .eq("tenant_id", tenantId)
-    .eq("trip_request_id", req.id)
+    .eq("request_id", req.id)
     .maybeSingle()
-  if (selErr) throw new Error(`ledger openTripAdvance (select): ${selErr.message}`)
+  if (selErr) throw new Error(`ledger openAdvance (select): ${selErr.message}`)
   if (existing) return
 
-  const { error } = await supabase.from("trip_advances").insert({
+  const { error } = await supabase.from("advances").insert({
     tenant_id: tenantId,
-    trip_request_id: req.id,
+    kind,
+    request_id: req.id,
     employee_id: req.employee_id,
     amount,
     status: "requested",
   })
-  if (error) throw new Error(`ledger openTripAdvance: ${error.message}`)
+  if (error) throw new Error(`ledger openAdvance: ${error.message}`)
 }
 
 /**
@@ -189,8 +195,8 @@ async function openTripAdvance(
  *     request's hours (auto-creating the year bucket if needed).
  *   • kind='ot' whose tenant rule converts overtime to comp-time → credit a
  *     comp_time_ledger block of the request's hours.
- *   • kind='business_trip' with advance_requested > 0 → open a trip_advances
- *     row（模組三第 2 條的「放款」起點）。
+ *   • kind='business_trip' / 'petty_cash' with advance_requested > 0 → open an
+ *     `advances` row（模組三第 2、3 條的「放款」起點）。
  *   • anything else → no-op.
  *
  * MUST be best-effort: a ledger failure logs and returns without throwing so it
@@ -228,7 +234,12 @@ export async function applyApprovalEffects(
     }
 
     if (req.kind === "business_trip") {
-      await openTripAdvance(supabase, tenantId, req)
+      await openAdvance(supabase, tenantId, req, "trip")
+      return
+    }
+
+    if (req.kind === "petty_cash") {
+      await openAdvance(supabase, tenantId, req, "petty_cash")
       return
     }
   } catch (err) {

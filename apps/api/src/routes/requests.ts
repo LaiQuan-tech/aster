@@ -11,7 +11,9 @@ export const requestsRouter = Router()
 // file → multi-step approval pipeline as the others; it carries no ledger effect
 // (applyApprovalEffects only touches 'leave'/'ot'), so a final approval simply
 // marks the trip authorised.
-const KINDS = ["leave", "ot", "fix_punch", "business_trip"] as const
+// 'petty_cash' 零用金預支（模組三第 3 條）走同一條簽核管線：與出差預支
+// 是同一個機制，差別只在授權來源，沒有理由另建一套簽核。
+const KINDS = ["leave", "ot", "fix_punch", "business_trip", "petty_cash"] as const
 
 const createSchema = z.object({
   kind: z.enum(KINDS),
@@ -45,7 +47,7 @@ const createSchema = z.object({
   tripScope: z.enum(["local", "domestic_intercity", "overseas"]).optional(),
   /** 預估此趟總花費，供簽核者判斷。 */
   estimatedCost: z.number().nonnegative().optional(),
-  /** 申請預支金額。核准後由 applyApprovalEffects 開出 trip_advances 一列。 */
+  /** 申請預支金額。核准後由 applyApprovalEffects 開出 advances 一列。 */
   advanceRequested: z.number().nonnegative().optional(),
   remark: z.string().trim().max(250).optional(),
 })
@@ -256,7 +258,10 @@ requestsRouter.post(
           location: kind === "business_trip" ? (location ?? null) : null,
           trip_scope: kind === "business_trip" ? (tripScope ?? null) : null,
           estimated_cost: kind === "business_trip" ? (estimatedCost ?? null) : null,
-          advance_requested: kind === "business_trip" ? (advanceRequested ?? null) : null,
+          advance_requested:
+            kind === "business_trip" || kind === "petty_cash"
+              ? (advanceRequested ?? null)
+              : null,
           remark: remark ?? null,
           segments: segments ?? null,
           status: "pending",

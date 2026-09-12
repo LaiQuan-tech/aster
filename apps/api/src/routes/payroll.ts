@@ -261,7 +261,7 @@ payrollRouter.post(
         // 出差是「先撥預支、回程沖抵」：員工已經先拿到 amount，回程報的單
         // 只是用來算 actualTotal。若這些單同時走一般 expenses 加項，
         // 公司會付兩次——預支一次、報銷再一次。
-        // 出差那一軌只結差額（balance），見下方 trip_advances 區塊。
+        // 出差那一軌只結差額（balance），見下方 advances 區塊。
         .is("trip_request_id", null)
         .in("employee_id", employeeIds)
       if (expErr) {
@@ -279,8 +279,9 @@ payrollRouter.post(
         target.set(row.employee_id, (target.get(row.employee_id) ?? 0) + Number(row.amount))
       }
 
-      // --- 本期要結算的出差預支差額（模組三第 2 條）--------------------------
-      // 只取 balance_handling='payroll' 且 recovery_period 指到本期的已核銷列。
+      // --- 本期要結算的預支差額（模組三第 2、3 條：出差與零用金共用）--------------------------
+      // 只取 balance_handling='payroll' 且 recovery_period 指到本期的已核銷列，
+      // 兩種預支（trip / petty_cash）走同一條路徑。
       //   • balance > 0 → 實支超過預支，**公司補給員工**。性質同代墊款
       //     （非所得），故併入 expenses 加項。
       //   • balance < 0 → 預支有餘，**員工應退**。併入 advance 扣項。
@@ -289,7 +290,7 @@ payrollRouter.post(
       // 發生的事件，放在薪資結構上會變成人工改且無歷史。正確來源就是這裡，
       // 與 expenses / allowances 同一個模式。（修正帳本待辦 #3 的一半。）
       const { data: advData, error: advErr } = await supabaseAdmin
-        .from("trip_advances")
+        .from("advances")
         .select("employee_id, balance")
         .eq("tenant_id", tenantId)
         .eq("status", "settled")
@@ -297,7 +298,7 @@ payrollRouter.post(
         .eq("recovery_period", period)
         .in("employee_id", employeeIds)
       if (advErr) {
-        next(new Error(`POST /payroll/run (trip_advances): ${advErr.message}`))
+        next(new Error(`POST /payroll/run (advances): ${advErr.message}`))
         return
       }
       const advanceRecoveryByEmployee = new Map<string, number>()

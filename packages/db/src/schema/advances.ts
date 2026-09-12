@@ -6,10 +6,18 @@ import { employees } from "./employees"
 import { leaveRequests } from "./leave-requests"
 
 /**
- * Trip advances — 出差預支（模組三第 2 條）。
+ * Advances — 員工預支（模組三第 2、3 條）。
  *
- * 客戶確認：出差核准後**先撥一筆錢給同仁帶著去**，回程再核銷沖抵。
- * 這與模組三第 1 條的日常報銷（事後實報實銷、不預撥）是兩回事。
+ * **兩種來源、同一張表**：
+ *   • `kind='trip'`       出差預支（第 2 條）——核准的出差單授權
+ *   • `kind='petty_cash'` 零用金預支（第 3 條）——單次高額費用，主管／老闆同意
+ *
+ * 流程完全相同：預支 → 撥款 → 以實際報銷沖抵 → 多退少補。
+ * 差別只在「誰授權」與「憑什麼授權」。
+ *
+ * **為何合併成一張表而非各做一張**：未核銷預支是**離職時扣回的依據**。
+ * 分兩張表，離職結算就要查兩個地方——一定有人漏查其中一張，而漏查的那筆
+ * 就是收不回來的錢。「這個人身上還有多少公司的錢」不該有兩個答案。
  *
  * 生命週期：
  *   1. `requested` — 出差單最終核准時自動建立，金額取自
@@ -32,14 +40,20 @@ import { leaveRequests } from "./leave-requests"
  * `balance` 於核銷當下凍結存下（而非每次由 actualTotal − amount 現算）：
  * 綁定的報銷單日後若有異動，核銷時的結論不該跟著變。
  */
-export const tripAdvances = pgTable(
-  "trip_advances",
+export const advances = pgTable(
+  "advances",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     tenantId: uuid("tenant_id")
       .notNull()
       .references(() => tenants.id),
-    tripRequestId: uuid("trip_request_id")
+    /** 'trip' | 'petty_cash'（見上方說明）。 */
+    kind: text("kind").notNull().default("trip"),
+    /**
+     * 授權來源的申請單。出差預支指向 business_trip 單；零用金預支指向
+     * petty_cash 單。兩者都走同一條申請簽核管線，故同一個欄位即可。
+     */
+    requestId: uuid("request_id")
       .notNull()
       .references(() => leaveRequests.id),
     employeeId: uuid("employee_id")
@@ -69,13 +83,13 @@ export const tripAdvances = pgTable(
   },
   (table) => ({
     /** 「這個人還有哪些未核銷的預支」——離職結算與逾期催辦都靠這條。 */
-    tenantEmployeeStatusIdx: index("trip_advances_tenant_employee_status_idx").on(
+    tenantEmployeeStatusIdx: index("advances_tenant_employee_status_idx").on(
       table.tenantId,
       table.employeeId,
       table.status,
     ),
     /** 薪資結算時「本期要扣回多少預支」。 */
-    tenantRecoveryPeriodIdx: index("trip_advances_tenant_recovery_period_idx").on(
+    tenantRecoveryPeriodIdx: index("advances_tenant_recovery_period_idx").on(
       table.tenantId,
       table.recoveryPeriod,
     ),

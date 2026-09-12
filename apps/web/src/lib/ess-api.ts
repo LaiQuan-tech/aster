@@ -87,7 +87,13 @@ export function recordAnnouncementView(versionId: string) {
 }
 
 export type RequestStatus = "pending" | "approved" | "rejected" | "cancelled";
-export type RequestKind = "leave" | "ot" | "fix_punch" | "business_trip";
+export type RequestKind =
+  | "leave"
+  | "ot"
+  | "fix_punch"
+  | "business_trip"
+  /** 零用金預支（模組三第 3 條），走與出差預支相同的簽核管線。 */
+  | "petty_cash";
 
 export interface LeaveRequest {
   id: string;
@@ -673,6 +679,8 @@ export function fileExpense(body: {
   note?: string;
   /** 出差軌類別必填：綁定的已核准出差單。 */
   tripRequestId?: string;
+  /** 這筆費用用哪筆預支的錢付的；出差軌若已有預支，省略時由系統自動綁。 */
+  advanceId?: string;
 }) {
   return apiFetch<{ id: string; period: string; nature: string }>("/expenses", {
     method: "POST",
@@ -718,9 +726,10 @@ export interface MyTrip {
   status: string;
 }
 
-export interface MyTripAdvance {
+export interface MyAdvance {
   id: string;
-  trip_request_id: string;
+  kind: "trip" | "petty_cash";
+  request_id: string;
   amount: string;
   status: string;
   payout_channel: string | null;
@@ -739,9 +748,9 @@ export function getMyApprovedTrips() {
   );
 }
 
-/** 我的預支：看得到「核准了但還沒撥款」與「撥了還沒核銷」兩種狀態。 */
-export function getMyTripAdvances() {
-  return apiFetch<{ advances: MyTripAdvance[] }>("/trip-advances");
+/** 我的預支（出差＋零用金）：看得到「核准了但還沒撥款」與「撥了還沒核銷」。 */
+export function getMyAdvances() {
+  return apiFetch<{ advances: MyAdvance[] }>("/advances");
 }
 
 /**
@@ -753,4 +762,11 @@ export function submitTripReport(requestId: string, tripReport: string) {
     method: "PATCH",
     body: JSON.stringify({ tripReport }),
   });
+}
+
+/** 報銷模組設定。ESS 端用 advanceThreshold 顯示「低於建議門檻」提示。 */
+export function getExpenseSettingsForMe() {
+  return apiFetch<{
+    settings: { advanceThreshold: number; advanceOverdueDays: number };
+  }>("/expense-settings");
 }
