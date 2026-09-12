@@ -22,6 +22,7 @@ const SCHEDULER_IDS = [
   "daily-attendance-settle",
   "deliver-pending-notifications",
   "detect-and-notify-attendance",
+  "auto-archive-projects",
 ];
 
 /**
@@ -58,6 +59,13 @@ async function registerSchedulers() {
     { pattern: "0 3 * * *", tz: "Asia/Taipei" },
     { name: "detect-and-notify-attendance", data: { anomalyDays: 7 } },
   );
+  // 自動封存終止已久的專案（模組四第 2 條）。一天一次就夠——門檻是「月」，
+  // 早幾小時晚幾小時沒有任何差別，排在出勤那幾支之後避免互相搶。
+  await attendanceQueue.upsertJobScheduler(
+    "auto-archive-projects",
+    { pattern: "0 4 * * *", tz: "Asia/Taipei" },
+    { name: "auto-archive-projects", data: {} },
+  );
 
   attendanceWorker = new Worker(
     "attendance",
@@ -77,6 +85,7 @@ async function registerSchedulers() {
         "daily-attendance-settle": "/internal/attendance/daily-settle",
         "deliver-pending-notifications": "/internal/notifications/deliver-pending",
         "detect-and-notify-attendance": "/internal/attendance/detect-and-notify",
+        "auto-archive-projects": "/internal/projects/auto-archive",
       };
       const endpoint = endpointByJob[job.name] ?? "/internal/attendance/daily-settle";
       const body =
@@ -121,7 +130,7 @@ async function registerSchedulers() {
   );
 
   logger.info(
-    "Job schedulers registered (attendance daily, detection daily, notifications every 5 minutes)",
+    "Job schedulers registered (attendance daily, detection daily, project auto-archive daily, notifications every 5 minutes)",
   );
 }
 

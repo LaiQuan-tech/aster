@@ -13,6 +13,7 @@
 --   [2] 把 advances 納入既有的禁刪與稽核 trigger（金流表必須留痕）
 --   [3] migration 0031 —— projects.fiscal_year + 編號唯一索引（模組四第 1 條）
 --   [4] migration 0032 + sql/0021 —— 專案案情狀態與封存（模組四第 2 條）
+--   [5] migration 0033 —— 自動封存：project_settings + projects.unarchived_at
 --
 -- 全部冪等，重複執行無害。
 -- ⚠️ [3] 有一個前置檢查要先跑（既有專案若有重複編號，索引會建不起來）。
@@ -194,6 +195,50 @@ ALTER TABLE public.projects ADD CONSTRAINT projects_status_chk
 --  where status_reason like '由舊制%';
 
 -- ─────────────────────────────────────────────────────────────────
+-- [5] migration 0033 —— 自動封存（模組四第 2 條，使用者裁示「自動化」）
+-- ─────────────────────────────────────────────────────────────────
+-- 終止狀態（結案／已解約）滿 N 個月自動封存，N 可調（預設 6）。
+--
+-- **暫停永遠不自動封存**——暫停的案子最需要被看見，收起來就真的忘了，
+-- 而忘掉的暫停案就是沒人去追的爛尾。
+--
+-- `unarchived_at`：有人特地把案子拉回來（多半在追尾款），排程當晚又把它
+-- 收起來，這功能等於壞的。排程看這一欄放過該筆，直到案情再次變動。
+
+CREATE TABLE IF NOT EXISTS "project_settings" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"tenant_id" uuid NOT NULL,
+	"auto_archive_enabled" boolean DEFAULT true NOT NULL,
+	"auto_archive_months" integer DEFAULT 6 NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS "unarchived_at" timestamp with time zone;
+
+DO $$ BEGIN
+ ALTER TABLE "project_settings" ADD CONSTRAINT "project_settings_tenant_id_tenants_id_fk"
+   FOREIGN KEY ("tenant_id") REFERENCES "public"."tenants"("id")
+   ON DELETE no action ON UPDATE no action;
+EXCEPTION
+ WHEN duplicate_object THEN null;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS "project_settings_tenant_uq"
+  ON "project_settings" USING btree ("tenant_id");
+
+-- 參數改動要留痕（比照 expense_settings 已納入 sql/0019 的稽核清單）。
+DROP TRIGGER IF EXISTS audit_all ON public.project_settings;
+CREATE TRIGGER audit_all
+  AFTER INSERT OR UPDATE OR DELETE ON public.project_settings
+  FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+-- ── 排程 ────────────────────────────────────────────────────────────
+-- 由 worker 每天 04:00（台北）呼叫 API 的
+--   POST /internal/projects/auto-archive
+-- 需要 worker 的 ENABLE_WORKER_SCHEDULERS=true 與 API 的
+-- ENABLE_INTERNAL_JOBS=true / INTERNAL_JOB_TOKEN，與既有三支排程相同。
+
+-- ─────────────────────────────────────────────────────────────────
 -- 驗證（**分開跑**，一次只跑這一條）
 -- ─────────────────────────────────────────────────────────────────
 -- select
@@ -224,7 +269,13 @@ ALTER TABLE public.projects ADD CONSTRAINT projects_status_chk
 --        'status_changed_by_emp_id','archived_at'))
 --                                                                as "案情欄位(預期5)",
 --   (select count(*) from public.projects where status='archived')
---                                                                as "殘留舊狀態(預期0)";
+--                                                                as "殘留舊狀態(預期0)",
+--   (select count(*) from information_schema.tables
+--     where table_schema='public' and table_name='project_settings')
+--                                                                as "project_settings(預期1)",
+--   (select count(*) from information_schema.columns
+--     where table_schema='public' and table_name='projects' and column_name='unarchived_at')
+--                                                                as "unarchived_at(預期1)";
 
 -- ─────────────────────────────────────────────────────────────────
 -- 補救：若先前那份增量 SQL 已經跑過（存在 trip_advances）

@@ -69,6 +69,12 @@ export const projects = pgTable(
     statusChangedByEmpId: uuid("status_changed_by_emp_id"),
     /** 可見性：非 null 即已封存，列表預設不顯示。與 status 互不干涉。 */
     archivedAt: timestamp("archived_at", { withTimezone: true }),
+    /**
+     * 人工解除封存的時點。**自動封存看這一欄決定要不要放過這筆**：
+     * 有人特地把案子拉回來（多半是在追尾款），排程當晚又把它收起來，
+     * 那個功能就等於壞的。案情之後再變動（`statusChangedAt` 更晚）才恢復自動。
+     */
+    unarchivedAt: timestamp("unarchived_at", { withTimezone: true }),
     deptId: uuid("dept_id").references(() => departments.id),
     leadEmpId: uuid("lead_emp_id"),
     shareMode: text("share_mode").notNull().default("pool_pct"),

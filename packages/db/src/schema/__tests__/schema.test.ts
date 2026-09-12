@@ -20,6 +20,7 @@ import {
   expenseSettlements,
   advances,
   expenseSettings,
+  projectSettings,
   leaveRequests as leaveRequestsTable,
 } from "../index"
 
@@ -122,6 +123,35 @@ describe("projects table", () => {
     )
     expect(cols.statusEffectiveOn.columnType).toBe("PgDateString")
     expect(cols.statusChangedAt.columnType).toBe("PgTimestamp")
+  })
+
+  // 有人特地把案子拉回來（多半在追尾款），排程當晚又收起來，功能等於壞的。
+  it("記得人工解除封存的時點，自動封存才知道要放過", () => {
+    expect(Object.keys(cols)).toEqual(expect.arrayContaining(["unarchivedAt"]))
+    expect(cols.unarchivedAt.notNull).toBe(false)
+  })
+})
+
+describe("projectSettings table", () => {
+  const cols = getTableColumns(projectSettings)
+
+  it("有自動封存的兩個參數", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining(["tenantId", "autoArchiveEnabled", "autoArchiveMonths"]),
+    )
+  })
+
+  it("預設開啟、6 個月", () => {
+    expect(cols.autoArchiveEnabled.default).toBe(true)
+    expect(cols.autoArchiveMonths.default).toBe(6)
+  })
+
+  it("一租戶一列", () => {
+    const idx = getTableConfig(projectSettings).indexes.find(
+      (i) => i.config.name === "project_settings_tenant_uq",
+    )
+    expect(idx).toBeDefined()
+    expect(idx!.config.unique).toBe(true)
   })
 })
 

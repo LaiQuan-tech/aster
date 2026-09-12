@@ -111,10 +111,72 @@ export function resolveStatusPatch(input: StatusPatchInput): StatusPatchResult {
     if (!input.currentArchivedAt) patch.archived_at = input.nowIso
   } else if (input.archived === false) {
     patch.archived_at = null
+    // 留下「人特地把它拉回來」的時點——自動封存靠這一欄放過這筆。
+    patch.unarchived_at = input.nowIso
   } else if (targetStatus === "active" && input.currentArchivedAt) {
     // 從終止／暫停轉回進行中時自動解除封存，否則會變成「進行中但看不到」。
     patch.archived_at = null
   }
 
   return { ok: true, patch }
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * 自動封存（模組四第 2 條，使用者裁示「自動化」）
+ * ────────────────────────────────────────────────────────────────── */
+
+/**
+ * 月份加法，日期溢位時夾到當月最後一天。
+ * 8/31 + 6 個月＝2/28（或 2/29），不是滾到 3/3。
+ */
+export function addMonths(date: string, months: number): string {
+  const [y, m, d] = date.split("-").map(Number)
+  const target = new Date(Date.UTC(y, m - 1 + months, 1))
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate()
+  target.setUTCDate(Math.min(d, lastDay))
+  return target.toISOString().slice(0, 10)
+}
+
+export type AutoArchiveCandidate = {
+  status: string
+  archived_at: string | null
+  unarchived_at: string | null
+  status_effective_on: string | null
+  status_changed_at: string | null
+}
+
+/**
+ * 這筆專案今天該不該被自動封存。
+ *
+ * 四條規則，每一條都有理由：
+ *
+ * 1. **只封存終止狀態**（結案／已解約）。**暫停永遠不自動封存**——
+ *    暫停的案子最需要被看見，收起來就真的忘了，而忘掉的暫停案就是
+ *    沒人去追的爛尾。
+ * 2. **起算日取「法律生效日」與「輸入時點」較晚的那個**。補登一張三個月前
+ *    的解約單，不該讓它當晚就消失；人總要有時間把尾款與驗收文件收乾淨。
+ * 3. **人工拉回來的就放過**。有人特地解除封存（多半在追尾款），排程當晚
+ *    又收起來，這功能等於壞的。案情之後再變動才恢復自動。
+ * 4. **兩個日期都沒有就不動**。不知道案子何時結束，就不要猜。
+ */
+export function shouldAutoArchive(
+  p: AutoArchiveCandidate,
+  opts: { today: string; months: number },
+): boolean {
+  if (p.archived_at) return false
+  if (!isTerminal(p.status)) return false
+
+  const changedOn = p.status_changed_at ? p.status_changed_at.slice(0, 10) : null
+  const baseline = [p.status_effective_on, changedOn]
+    .filter((v): v is string => !!v)
+    .sort()
+    .pop()
+  if (!baseline) return false
+
+  if (p.unarchived_at) {
+    // 案情在解除封存之後又變動過，才重新納入自動封存。
+    if (!p.status_changed_at || p.status_changed_at <= p.unarchived_at) return false
+  }
+
+  return addMonths(baseline, opts.months) <= opts.today
 }

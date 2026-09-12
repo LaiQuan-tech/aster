@@ -7,12 +7,15 @@ import { getDepartments, getEmployees, type Department, type Employee } from "@/
 import {
   listProjects,
   createProject,
+  getProjectSettings,
+  updateProjectSettings,
   statusLabel,
   PROJECT_STATUS_ORDER,
   PROJECT_STATUS_LABELS,
   type Project,
   type ShareMode,
   type ProjectStatus,
+  type ProjectSettings,
 } from "@/lib/projects-api";
 
 const STATUS_BADGE: Record<ProjectStatus, string> = {
@@ -33,6 +36,10 @@ export default function AdminProjectsPage() {
   const [includeArchived, setIncludeArchived] = useState(false);
   const [statusFilter, setStatusFilter] = useState<ProjectStatus | "">("");
 
+  // 自動封存設定（模組四第 2 條）
+  const [settings, setSettings] = useState<ProjectSettings | null>(null);
+  const [savingSettings, setSavingSettings] = useState(false);
+
   // create form
   const [name, setName] = useState("");
   // 編號留空＝系統產號（P{建立年}-{流水號}）。填了就是人工指定，撞號後端回 409。
@@ -51,11 +58,13 @@ export default function AdminProjectsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [p, d, e] = await Promise.all([
+      const [p, d, e, st] = await Promise.all([
         listProjects(includeArchived),
         getDepartments(),
         getEmployees(),
+        getProjectSettings(),
       ]);
+      setSettings(st.settings);
       setProjects(p.projects);
       setDepts(d.departments);
       setEmps(e.employees.filter((x) => x.status === "active"));
@@ -115,6 +124,19 @@ export default function AdminProjectsPage() {
   }
 
   const shown = statusFilter ? projects.filter((p) => p.status === statusFilter) : projects;
+
+  async function saveSettings(patch: Partial<ProjectSettings>) {
+    setSavingSettings(true);
+    setError(null);
+    try {
+      const res = await updateProjectSettings(patch);
+      setSettings(res.settings);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "儲存設定失敗");
+    } finally {
+      setSavingSettings(false);
+    }
+  }
 
   const deptName = (id: string | null) => depts.find((d) => d.id === id)?.name ?? "—";
   const empName = (id: string | null) => emps.find((e) => e.id === id)?.name ?? "—";
@@ -206,6 +228,38 @@ export default function AdminProjectsPage() {
             />
             顯示已封存
           </label>
+
+          {settings && (
+            <div className="ml-auto flex items-center gap-2 text-sm text-gray-500">
+              <label className="flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={settings.autoArchiveEnabled}
+                  disabled={savingSettings}
+                  onChange={(e) => saveSettings({ autoArchiveEnabled: e.target.checked })}
+                />
+                自動封存
+              </label>
+              <input
+                className="w-16 rounded-lg border border-gray-200 px-2 py-1 text-sm"
+                type="number"
+                min="0"
+                max="120"
+                disabled={savingSettings || !settings.autoArchiveEnabled}
+                defaultValue={settings.autoArchiveMonths}
+                key={settings.autoArchiveMonths}
+                onBlur={(e) => {
+                  const v = Number(e.target.value);
+                  if (Number.isInteger(v) && v >= 0 && v !== settings.autoArchiveMonths) {
+                    saveSettings({ autoArchiveMonths: v });
+                  }
+                }}
+              />
+              <span title="暫停的專案永遠不會自動封存——收起來就真的忘了">
+                個月後收起結案／解約的案子
+              </span>
+            </div>
+          )}
         </div>
         {loading ? (
           <Empty>載入中…</Empty>

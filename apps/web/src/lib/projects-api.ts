@@ -57,6 +57,8 @@ export interface Project {
   statusChangedAt: string | null
   /** 可見性：非 null 即已封存。 */
   archivedAt: string | null
+  /** 人工解除封存的時點；自動封存看這一欄放過該筆。 */
+  unarchivedAt?: string | null
   deptId: string | null
   leadEmpId: string | null
   shareMode: ShareMode
@@ -112,6 +114,25 @@ export interface MyProjectShare {
   sharePct: number | null
   shareAmount: number | null
   computedAmount: number | null
+}
+
+export interface ProjectSettings {
+  autoArchiveEnabled: boolean
+  /** 終止狀態滿這麼多個月自動封存。暫停不在此列。 */
+  autoArchiveMonths: number
+}
+
+/* --------------------------------------------------------------- settings -- */
+
+export function getProjectSettings() {
+  return apiFetch<{ settings: ProjectSettings }>("/project-settings")
+}
+
+export function updateProjectSettings(body: Partial<ProjectSettings>) {
+  return apiFetch<{ settings: ProjectSettings }>("/project-settings", {
+    method: "PUT",
+    body: JSON.stringify(body),
+  })
 }
 
 /* --------------------------------------------------------------- projects -- */

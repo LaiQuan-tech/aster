@@ -15,6 +15,8 @@ import {
   taipeiToday,
 } from "../services/project-status.js"
 import { resolveSelf, isHrRole, managedDeptIds } from "../middleware/scope.js"
+import { writeAuditLog } from "../services/audit.js"
+import { DEFAULT_AUTO_ARCHIVE_MONTHS } from "../services/project-archive.js"
 
 export const projectsRouter = Router()
 
@@ -833,6 +835,110 @@ projectsRouter.get(
         }
       })
       res.status(200).json({ shares })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/* ─────────────────────────────────────────────────────────────────────
+ * 專案模組的租戶級參數（模組四第 2 條）
+ * ───────────────────────────────────────────────────────────────────── */
+
+const projectSettingsSchema = z
+  .object({
+    autoArchiveEnabled: z.boolean().optional(),
+    /** 0 表示終止當天就封存。上限 120 個月，超過等於沒在封存。 */
+    autoArchiveMonths: z.number().int().min(0).max(120).optional(),
+  })
+  .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
+
+// ── GET /project-settings — 全員可讀（UI 要顯示「N 個月後自動封存」）──
+projectsRouter.get(
+  "/project-settings",
+  requireAuth,
+  requireTenant,
+  async (_req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("project_settings")
+        .select("auto_archive_enabled, auto_archive_months")
+        .eq("tenant_id", tenantId)
+        .maybeSingle()
+      if (error) {
+        next(new Error(`GET /project-settings: ${error.message}`))
+        return
+      }
+      // 沒有設定列就回預設值，讓租戶不必先設定就能用。
+      res.status(200).json({
+        settings: {
+          autoArchiveEnabled: data ? data.auto_archive_enabled !== false : true,
+          autoArchiveMonths: data
+            ? Number(data.auto_archive_months)
+            : DEFAULT_AUTO_ARCHIVE_MONTHS,
+        },
+      })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// ── PUT /project-settings — HR 調整 ───────────────────────────────────
+projectsRouter.put(
+  "/project-settings",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const parsed = projectSettingsSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
+    try {
+      const self = await resolveSelf(tenantId, userId)
+      const row: Record<string, unknown> = {
+        tenant_id: tenantId,
+        updated_at: new Date().toISOString(),
+      }
+      if (parsed.data.autoArchiveEnabled !== undefined)
+        row.auto_archive_enabled = parsed.data.autoArchiveEnabled
+      if (parsed.data.autoArchiveMonths !== undefined)
+        row.auto_archive_months = parsed.data.autoArchiveMonths
+
+      const { data, error } = await supabaseAdmin
+        .from("project_settings")
+        .upsert(row, { onConflict: "tenant_id" })
+        .select("auto_archive_enabled, auto_archive_months")
+        .single()
+      if (error || !data) {
+        next(new Error(`PUT /project-settings: ${error?.message}`))
+        return
+      }
+
+      await writeAuditLog({
+        tenantId,
+        tableName: "project_settings",
+        action: "UPDATE",
+        newRow: parsed.data,
+        actorEmpId: self?.id,
+        context: "PUT /project-settings",
+      })
+
+      res.status(200).json({
+        settings: {
+          autoArchiveEnabled: data.auto_archive_enabled !== false,
+          autoArchiveMonths: Number(data.auto_archive_months),
+        },
+      })
     } catch (err) {
       next(err)
     }

@@ -52,6 +52,7 @@ afterAll(async () => {
     await supabaseAdmin.from("project_share_adjustments").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("project_members").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("project_documents").delete().eq("tenant_id", tid)
+    await supabaseAdmin.from("project_settings").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("projects").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
@@ -312,5 +313,152 @@ describe("M4-2 案情狀態", () => {
     const got = await get()
     expect(got.body.project.statusReason).toBe("更正：依約第 12 條第 2 項")
     expect(got.body.project.status).toBe("active")
+  })
+})
+
+describe("M4-2 自動封存", () => {
+  let projectId: string
+
+  beforeAll(async () => {
+    const res = await createProject({ name: "自動封存測試案" })
+    projectId = res.body.id
+    await request(app)
+      .patch(`/projects/${projectId}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({
+        status: "closed",
+        statusReason: "驗收完成",
+        statusEffectiveOn: "2020-01-01",
+      })
+    // 輸入時點是「現在」，而起算日取兩者較晚者 → 今天跑不會被封存。
+  })
+
+  function runJob(body: Record<string, unknown> = {}) {
+    return request(app)
+      .post("/internal/projects/auto-archive")
+      .set("x-internal-job-token", process.env.INTERNAL_JOB_TOKEN ?? "")
+      .send(body)
+  }
+
+  function get() {
+    return request(app)
+      .get(`/projects/${projectId}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+  }
+
+  it("沒有 token 就打不到", async () => {
+    const res = await request(app).post("/internal/projects/auto-archive").send({})
+    expect([401, 404]).toContain(res.status)
+  })
+
+  it("生效日很舊但剛輸入 → 今天不封存（補登不該當晚消失）", async () => {
+    const res = await runJob()
+    if (res.status === 409) return // internal jobs 未啟用
+    expect(res.status).toBe(200)
+
+    const got = await get()
+    expect(got.body.project.archivedAt).toBeNull()
+  })
+
+  it("months=0 就會被封存", async () => {
+    const res = await runJob({ months: 0 })
+    if (res.status === 409) return
+    expect(res.status).toBe(200)
+
+    const got = await get()
+    expect(got.body.project.archivedAt).not.toBeNull()
+    // 封存不動案情。
+    expect(got.body.project.status).toBe("closed")
+  })
+
+  it("重跑不會重複處理（冪等）", async () => {
+    const before = await get()
+    const res = await runJob({ months: 0 })
+    if (res.status === 409) return
+    const after = await get()
+    expect(after.body.project.archivedAt).toBe(before.body.project.archivedAt)
+  })
+
+  it("人工拉回來之後，排程不會再把它收起來", async () => {
+    const unarchive = await request(app)
+      .patch(`/projects/${projectId}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ archived: false })
+    expect(unarchive.status).toBe(200)
+
+    const res = await runJob({ months: 0 })
+    if (res.status === 409) return
+    expect(res.status).toBe(200)
+
+    const got = await get()
+    expect(got.body.project.archivedAt).toBeNull()
+  })
+
+  it("暫停的專案永遠不會被自動封存", async () => {
+    const other = await createProject({ name: "暫停中的案子" })
+    await request(app)
+      .patch(`/projects/${other.body.id}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ status: "suspended", statusReason: "等都審" })
+
+    const res = await runJob({ months: 0 })
+    if (res.status === 409) return
+
+    const got = await request(app)
+      .get(`/projects/${other.body.id}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(got.body.project.status).toBe("suspended")
+    expect(got.body.project.archivedAt).toBeNull()
+  })
+})
+
+describe("M4-2 專案參數", () => {
+  it("沒有設定列時回預設值", async () => {
+    const res = await request(app)
+      .get("/project-settings")
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(res.status).toBe(200)
+    expect(res.body.settings.autoArchiveEnabled).toBe(true)
+    expect(res.body.settings.autoArchiveMonths).toBe(6)
+  })
+
+  it("HR 可以調整並讀回", async () => {
+    const put = await request(app)
+      .put("/project-settings")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ autoArchiveMonths: 12 })
+    expect(put.status).toBe(200)
+    expect(put.body.settings.autoArchiveMonths).toBe(12)
+
+    const get = await request(app)
+      .get("/project-settings")
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(get.body.settings.autoArchiveMonths).toBe(12)
+  })
+
+  it("關掉之後排程完全不動手", async () => {
+    await request(app)
+      .put("/project-settings")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ autoArchiveEnabled: false })
+
+    const p = await createProject({ name: "關掉自動封存後的案子" })
+    await request(app)
+      .patch(`/projects/${p.body.id}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ status: "terminated", statusReason: "解約" })
+
+    // months 由設定決定時才會看 enabled；這裡不覆寫 months。
+    const res = await request(app)
+      .post("/internal/projects/auto-archive")
+      .set("x-internal-job-token", process.env.INTERNAL_JOB_TOKEN ?? "")
+      .send({})
+    if (res.status === 409) return
+    expect(res.status).toBe(200)
+
+    const got = await request(app)
+      .get(`/projects/${p.body.id}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(got.body.project.archivedAt).toBeNull()
   })
 })

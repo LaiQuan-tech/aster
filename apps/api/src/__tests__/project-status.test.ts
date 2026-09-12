@@ -5,6 +5,8 @@ import {
   isTerminal,
   taipeiToday,
   resolveStatusPatch,
+  addMonths,
+  shouldAutoArchive,
 } from "../services/project-status"
 
 /**
@@ -212,5 +214,146 @@ describe("taipeiToday", () => {
     // UTC 2026-09-12T23:00Z 在台北已經是 9/13。
     expect(taipeiToday(new Date("2026-09-12T23:00:00.000Z"))).toBe("2026-09-13")
     expect(taipeiToday(new Date("2026-09-12T10:00:00.000Z"))).toBe("2026-09-12")
+  })
+})
+
+/* ── 自動封存（使用者裁示「自動化」）────────────────────────────── */
+
+describe("addMonths", () => {
+  it("一般情況", () => {
+    expect(addMonths("2026-03-15", 6)).toBe("2026-09-15")
+    expect(addMonths("2026-09-15", 6)).toBe("2027-03-15")
+    expect(addMonths("2026-09-15", 0)).toBe("2026-09-15")
+  })
+
+  it("日期溢位時夾到當月最後一天，不滾到下個月", () => {
+    // 8/31 + 6 個月是 2/28，不是 3/3。
+    expect(addMonths("2026-08-31", 6)).toBe("2027-02-28")
+    expect(addMonths("2027-08-31", 6)).toBe("2028-02-29") // 閏年
+    expect(addMonths("2026-01-31", 1)).toBe("2026-02-28")
+  })
+})
+
+describe("shouldAutoArchive", () => {
+  const OPTS = { today: "2026-09-12", months: 6 }
+  const CLOSED = {
+    status: "closed",
+    archived_at: null as string | null,
+    unarchived_at: null as string | null,
+    status_effective_on: "2026-01-01",
+    status_changed_at: "2026-01-01T00:00:00.000Z",
+  }
+
+  it("結案滿 6 個月就封存", () => {
+    expect(shouldAutoArchive(CLOSED, OPTS)).toBe(true)
+  })
+
+  it("還沒滿就不封存", () => {
+    expect(
+      shouldAutoArchive(
+        { ...CLOSED, status_effective_on: "2026-06-01", status_changed_at: "2026-06-01T00:00:00.000Z" },
+        OPTS,
+      ),
+    ).toBe(false)
+  })
+
+  it("已解約同樣會被自動封存", () => {
+    expect(shouldAutoArchive({ ...CLOSED, status: "terminated" }, OPTS)).toBe(true)
+  })
+
+  it("⚠️ 暫停永遠不自動封存——收起來就真的忘了", () => {
+    expect(shouldAutoArchive({ ...CLOSED, status: "suspended" }, OPTS)).toBe(false)
+  })
+
+  it("進行中不封存", () => {
+    expect(shouldAutoArchive({ ...CLOSED, status: "active" }, OPTS)).toBe(false)
+  })
+
+  it("已封存的不重複處理（冪等）", () => {
+    expect(
+      shouldAutoArchive({ ...CLOSED, archived_at: "2026-05-01T00:00:00.000Z" }, OPTS),
+    ).toBe(false)
+  })
+
+  it("起算日取兩個日期較晚者——補登舊解約單不該當晚就消失", () => {
+    // 解約日是去年，但今天才進系統：從輸入日起算，還要等 6 個月。
+    expect(
+      shouldAutoArchive(
+        {
+          ...CLOSED,
+          status: "terminated",
+          status_effective_on: "2025-03-01",
+          status_changed_at: "2026-09-12T01:00:00.000Z",
+        },
+        OPTS,
+      ),
+    ).toBe(false)
+  })
+
+  it("反過來，生效日較晚時用生效日", () => {
+    // 預先登記一張下個月才生效的結案：更不該現在封存。
+    expect(
+      shouldAutoArchive(
+        { ...CLOSED, status_effective_on: "2026-10-01", status_changed_at: "2026-01-01T00:00:00.000Z" },
+        OPTS,
+      ),
+    ).toBe(false)
+  })
+
+  it("⚠️ 人工拉回來的就放過——否則排程當晚又收起來，功能等於壞的", () => {
+    expect(
+      shouldAutoArchive(
+        { ...CLOSED, unarchived_at: "2026-08-01T00:00:00.000Z" },
+        OPTS,
+      ),
+    ).toBe(false)
+  })
+
+  it("拉回來之後案情又變動過，才恢復自動封存", () => {
+    expect(
+      shouldAutoArchive(
+        {
+          ...CLOSED,
+          unarchived_at: "2026-02-01T00:00:00.000Z",
+          // 解除封存後又重新結案一次 → 新的寬限期已過
+          status_effective_on: "2026-02-15",
+          status_changed_at: "2026-02-15T00:00:00.000Z",
+        },
+        OPTS,
+      ),
+    ).toBe(true)
+  })
+
+  it("兩個日期都沒有就不動——不知道何時結束就不要猜", () => {
+    expect(
+      shouldAutoArchive(
+        { ...CLOSED, status_effective_on: null, status_changed_at: null },
+        OPTS,
+      ),
+    ).toBe(false)
+  })
+
+  it("months 設 0 表示終止當天就封存", () => {
+    expect(
+      shouldAutoArchive(
+        { ...CLOSED, status_effective_on: "2026-09-12", status_changed_at: "2026-09-12T00:00:00.000Z" },
+        { today: "2026-09-12", months: 0 },
+      ),
+    ).toBe(true)
+  })
+})
+
+describe("解除封存要留下時點", () => {
+  it("人工解除封存寫下 unarchived_at，自動封存才知道要放過", () => {
+    const r = resolveStatusPatch({
+      ...BASE,
+      currentStatus: "closed",
+      currentArchivedAt: "2026-01-01T00:00:00.000Z",
+      archived: false,
+    })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.patch.archived_at).toBeNull()
+    expect(r.patch.unarchived_at).toBe(BASE.nowIso)
   })
 })

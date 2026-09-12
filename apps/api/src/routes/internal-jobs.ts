@@ -4,6 +4,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { settleAttendance } from "../services/settlement.js"
 import { deliverPendingNotifications } from "../services/notification-delivery.js"
 import { scanMissingPunches, detectAnomalies } from "../services/detection.js"
+import { autoArchiveProjects } from "../services/project-archive.js"
 
 export const internalJobsRouter = Router()
 
@@ -24,6 +25,16 @@ const detectAndNotifySchema = z.object({
 
 type DailySettleResult =
   | { tenantId: string; ok: true; settled: number }
+  | { tenantId: string; ok: false; error: string }
+
+const autoArchiveSchema = z.object({
+  date: z.string().regex(dateRe).optional(),
+  /** 覆寫租戶設定，只用於補跑或驗證。 */
+  months: z.number().int().min(0).max(120).optional(),
+})
+
+type AutoArchiveJobResult =
+  | { tenantId: string; ok: true; scanned: number; archived: number }
   | { tenantId: string; ok: false; error: string }
 
 type DetectAndNotifyResult =
@@ -204,6 +215,65 @@ internalJobsRouter.post(
     try {
       const result = await deliverPendingNotifications(parsed.data.limit)
       res.status(200).json(result)
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * POST /internal/projects/auto-archive — 自動封存終止已久的專案
+ * （模組四第 2 條，使用者裁示「自動化」）。
+ *
+ * 一租戶失敗不影響其他租戶：逐租戶 try/catch，結果一併回報。
+ * 冪等——已封存的不會再被撈到。
+ */
+internalJobsRouter.post(
+  "/internal/projects/auto-archive",
+  async (req: Request, res: Response, next: NextFunction) => {
+    if (!requireInternalToken(req, res)) return
+    if (!requireInternalJobsEnabled(res)) return
+    const parsed = autoArchiveSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+
+    try {
+      const { data: tenants, error } = await supabaseAdmin
+        .from("tenants")
+        .select("id")
+        .eq("status", "active")
+      if (error) {
+        next(new Error(`POST /internal/projects/auto-archive (tenants): ${error.message}`))
+        return
+      }
+
+      const results: AutoArchiveJobResult[] = []
+      for (const tenant of tenants ?? []) {
+        const tenantId = tenant.id as string
+        try {
+          const result = await autoArchiveProjects({
+            tenantId,
+            today: parsed.data.date,
+            months: parsed.data.months,
+          })
+          results.push({ tenantId, ok: true, scanned: result.scanned, archived: result.archived })
+        } catch (err) {
+          results.push({
+            tenantId,
+            ok: false,
+            error: err instanceof Error ? err.message : "auto_archive_failed",
+          })
+        }
+      }
+
+      res.status(200).json({
+        tenants: results.length,
+        archived: results.reduce((sum, item) => sum + (item.ok ? item.archived : 0), 0),
+        failed: results.filter((item) => !item.ok).length,
+        results,
+      })
     } catch (err) {
       next(err)
     }

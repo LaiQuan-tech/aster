@@ -232,6 +232,13 @@
       "when": 1789251315909,
       "tag": "0032_wealthy_hiroim",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1789252165194,
+      "tag": "0033_tired_ma_gnuci",
+      "breakpoints": true
     }
   ]
 }
