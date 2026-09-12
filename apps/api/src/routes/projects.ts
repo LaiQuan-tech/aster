@@ -9,12 +9,19 @@ import {
   isUniqueViolation,
   MAX_CODE_ATTEMPTS,
 } from "../services/project-code.js"
+import {
+  PROJECT_STATUSES,
+  resolveStatusPatch,
+  taipeiToday,
+} from "../services/project-status.js"
 import { resolveSelf, isHrRole, managedDeptIds } from "../middleware/scope.js"
 
 export const projectsRouter = Router()
 
+// ⚠️ 必須是單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別，
+// 相接後會退化成 GenericStringError，下游的 as ProjectRow 全數失效。
 const PROJECT_COLS =
-  "id, tenant_id, name, code, fiscal_year, description, status, dept_id, lead_emp_id, share_mode, bonus_pool, created_at"
+  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, dept_id, lead_emp_id, share_mode, bonus_pool, created_at"
 
 const createSchema = z.object({
   name: z.string().trim().min(1).max(200),
@@ -41,7 +48,13 @@ const updateSchema = z
     code: z.string().trim().min(1).max(60).nullable().optional(),
     fiscalYear: z.number().int().min(2000).max(2100).nullable().optional(),
     description: z.string().trim().max(4000).nullable().optional(),
-    status: z.enum(["active", "archived"]).optional(),
+    // 案情（模組四第 2 條）。改狀態一律要 statusReason，否則 400。
+    status: z.enum(PROJECT_STATUSES).optional(),
+    statusReason: z.string().trim().min(1).max(2000).optional(),
+    /** 法律生效日（解約日／結案日）。未填時取今天，但 UI 要讓人填真正那天。 */
+    statusEffectiveOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+    /** 可見性，與 status 互不干涉。 */
+    archived: z.boolean().optional(),
     deptId: z.string().uuid().nullable().optional(),
     leadEmpId: z.string().uuid().nullable().optional(),
     shareMode: z.enum(["pool_pct", "fixed_amount"]).optional(),
@@ -73,6 +86,10 @@ type ProjectRow = {
   fiscal_year: number | null
   description: string | null
   status: string
+  status_reason: string | null
+  status_effective_on: string | null
+  status_changed_at: string | null
+  archived_at: string | null
   dept_id: string | null
   lead_emp_id: string | null
   share_mode: string
@@ -153,14 +170,19 @@ projectsRouter.get(
   "/projects",
   requireAuth,
   requireTenant,
-  async (_req: Request, res: Response, next: NextFunction) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
+    // 封存的目的就是從列表收起來，所以預設不回。要看全部帶 ?includeArchived=1。
+    // 案情（進行中／暫停／結案／解約）不在這裡篩——那是前端的檢視選擇，
+    // 已解約的案子仍要出現在列表上。
+    const includeArchived = req.query.includeArchived === "1"
     try {
-      const { data, error } = await supabaseAdmin
+      let query = supabaseAdmin
         .from("projects")
         .select(PROJECT_COLS)
         .eq("tenant_id", tenantId)
-        .order("created_at", { ascending: false })
+      if (!includeArchived) query = query.is("archived_at", null)
+      const { data, error } = await query.order("created_at", { ascending: false })
       if (error) {
         next(new Error(`GET /projects: ${error.message}`))
         return
@@ -174,6 +196,10 @@ projectsRouter.get(
           fiscalYear: row.fiscal_year,
           description: row.description,
           status: row.status,
+          statusReason: row.status_reason,
+          statusEffectiveOn: row.status_effective_on,
+          statusChangedAt: row.status_changed_at,
+          archivedAt: row.archived_at,
           deptId: row.dept_id,
           leadEmpId: row.lead_emp_id,
           shareMode: row.share_mode,
@@ -296,6 +322,10 @@ projectsRouter.get(
           fiscalYear: row.fiscal_year,
           description: row.description,
           status: row.status,
+          statusReason: row.status_reason,
+          statusEffectiveOn: row.status_effective_on,
+          statusChangedAt: row.status_changed_at,
+          archivedAt: row.archived_at,
           deptId: row.dept_id,
           leadEmpId: row.lead_emp_id,
           shareMode: row.share_mode,
@@ -350,11 +380,33 @@ projectsRouter.patch(
       if (b.name !== undefined) patch.name = b.name
       if (b.fiscalYear !== undefined) patch.fiscal_year = b.fiscalYear
       if (b.description !== undefined) patch.description = b.description
-      if (b.status !== undefined) patch.status = b.status
       if (b.deptId !== undefined) patch.dept_id = b.deptId
       if (b.leadEmpId !== undefined) patch.lead_emp_id = b.leadEmpId
       if (b.shareMode !== undefined) patch.share_mode = b.shareMode
       if (b.bonusPool !== undefined) patch.bonus_pool = b.bonusPool
+
+      // 案情與封存的規則全在 services/project-status.ts，這裡只搬運。
+      const status = resolveStatusPatch({
+        currentStatus: scope.project.status,
+        currentArchivedAt: scope.project.archived_at,
+        status: b.status,
+        statusReason: b.statusReason,
+        statusEffectiveOn: b.statusEffectiveOn,
+        archived: b.archived,
+        today: taipeiToday(),
+        nowIso: new Date().toISOString(),
+        actorEmpId: scope.self.id,
+      })
+      if (!status.ok) {
+        res.status(400).json({ error: status.error })
+        return
+      }
+      Object.assign(patch, status.patch)
+
+      if (Object.keys(patch).length === 0) {
+        res.status(200).json({ id: req.params.id as string })
+        return
+      }
 
       const oldPool = num(scope.project.bonus_pool)
       const { data, error } = await supabaseAdmin

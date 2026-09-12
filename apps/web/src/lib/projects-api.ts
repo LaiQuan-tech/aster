@@ -8,6 +8,37 @@ import { apiFetch } from "./api-client"
 
 export type ShareMode = "pool_pct" | "fixed_amount"
 
+/**
+ * 案情狀態（模組四第 2 條）。與「封存」是兩軸——封存是可見性，
+ * 混進同一欄會弄丟「這案子是解約收場」這件事。
+ */
+export type ProjectStatus = "active" | "suspended" | "closed" | "terminated"
+
+export const PROJECT_STATUS_LABELS: Record<ProjectStatus, string> = {
+  active: "進行中",
+  suspended: "暫停",
+  closed: "結案",
+  terminated: "已解約",
+}
+
+export const PROJECT_STATUS_ORDER: ProjectStatus[] = [
+  "active",
+  "suspended",
+  "closed",
+  "terminated",
+]
+
+/** 終止狀態：案子已結束（正常完工或中途解約）。 */
+export function isTerminalStatus(s: string): boolean {
+  return s === "closed" || s === "terminated"
+}
+
+export function statusLabel(s: string | null): string {
+  return s && s in PROJECT_STATUS_LABELS
+    ? PROJECT_STATUS_LABELS[s as ProjectStatus]
+    : (s ?? "—")
+}
+
 export interface Project {
   id: string
   name: string
@@ -16,7 +47,16 @@ export interface Project {
   /** 歸屬年度（分析維度，可調整）。 */
   fiscalYear: number | null
   description: string | null
+  /** 案情。 */
   status: string
+  /** 這次狀態變更的理由（任何變更都必填）。 */
+  statusReason: string | null
+  /** 法律生效日（解約日／結案日），≠ 輸入時點。 */
+  statusEffectiveOn: string | null
+  /** 輸入時點。 */
+  statusChangedAt: string | null
+  /** 可見性：非 null 即已封存。 */
+  archivedAt: string | null
   deptId: string | null
   leadEmpId: string | null
   shareMode: ShareMode
@@ -76,8 +116,11 @@ export interface MyProjectShare {
 
 /* --------------------------------------------------------------- projects -- */
 
-export function listProjects() {
-  return apiFetch<{ projects: Project[] }>("/projects")
+/** 預設不回已封存的專案——封存的目的就是從列表收起來。 */
+export function listProjects(includeArchived = false) {
+  return apiFetch<{ projects: Project[] }>(
+    includeArchived ? "/projects?includeArchived=1" : "/projects",
+  )
 }
 
 export function getProject(id: string) {
@@ -112,7 +155,13 @@ export function updateProject(
     name?: string
     fiscalYear?: number | null
     description?: string | null
-    status?: "active" | "archived"
+    /** 改狀態一律要一併給 statusReason，否則後端回 400。 */
+    status?: ProjectStatus
+    statusReason?: string
+    /** 法律生效日；未給時後端取今天。 */
+    statusEffectiveOn?: string | null
+    /** 可見性，與 status 互不干涉。封存「進行中」的專案會被擋（400）。 */
+    archived?: boolean
     deptId?: string | null
     leadEmpId?: string | null
     shareMode?: ShareMode

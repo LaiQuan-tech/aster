@@ -4,7 +4,23 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import { getDepartments, getEmployees, type Department, type Employee } from "@/lib/admin-api";
-import { listProjects, createProject, type Project, type ShareMode } from "@/lib/projects-api";
+import {
+  listProjects,
+  createProject,
+  statusLabel,
+  PROJECT_STATUS_ORDER,
+  PROJECT_STATUS_LABELS,
+  type Project,
+  type ShareMode,
+  type ProjectStatus,
+} from "@/lib/projects-api";
+
+const STATUS_BADGE: Record<ProjectStatus, string> = {
+  active: "bg-green-50 text-green-700",
+  suspended: "bg-amber-50 text-amber-700",
+  closed: "bg-gray-100 text-gray-600",
+  terminated: "bg-red-50 text-red-700",
+};
 
 export default function AdminProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -12,6 +28,10 @@ export default function AdminProjectsPage() {
   const [emps, setEmps] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // 檢視選項：封存要向後端要（預設不回），案情篩選在前端做就好。
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<ProjectStatus | "">("");
 
   // create form
   const [name, setName] = useState("");
@@ -31,7 +51,11 @@ export default function AdminProjectsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [p, d, e] = await Promise.all([listProjects(), getDepartments(), getEmployees()]);
+      const [p, d, e] = await Promise.all([
+        listProjects(includeArchived),
+        getDepartments(),
+        getEmployees(),
+      ]);
       setProjects(p.projects);
       setDepts(d.departments);
       setEmps(e.employees.filter((x) => x.status === "active"));
@@ -44,7 +68,8 @@ export default function AdminProjectsPage() {
 
   useEffect(() => {
     load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [includeArchived]);
 
   async function submit() {
     if (!name.trim()) {
@@ -88,6 +113,8 @@ export default function AdminProjectsPage() {
       setSaving(false);
     }
   }
+
+  const shown = statusFilter ? projects.filter((p) => p.status === statusFilter) : projects;
 
   const deptName = (id: string | null) => depts.find((d) => d.id === id)?.name ?? "—";
   const empName = (id: string | null) => emps.find((e) => e.id === id)?.name ?? "—";
@@ -159,11 +186,31 @@ export default function AdminProjectsPage() {
       </Card>
 
       <Card>
-        <h2 className="mb-3 text-sm font-semibold text-gray-700">所有專案</h2>
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <h2 className="text-sm font-semibold text-gray-700">所有專案</h2>
+          <select
+            className="rounded-lg border border-gray-200 px-2 py-1 text-sm"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as ProjectStatus | "")}
+          >
+            <option value="">全部案情</option>
+            {PROJECT_STATUS_ORDER.map((v) => (
+              <option key={v} value={v}>{PROJECT_STATUS_LABELS[v]}</option>
+            ))}
+          </select>
+          <label className="flex items-center gap-1.5 text-sm text-gray-600">
+            <input
+              type="checkbox"
+              checked={includeArchived}
+              onChange={(e) => setIncludeArchived(e.target.checked)}
+            />
+            顯示已封存
+          </label>
+        </div>
         {loading ? (
           <Empty>載入中…</Empty>
-        ) : projects.length === 0 ? (
-          <Empty>尚無專案</Empty>
+        ) : shown.length === 0 ? (
+          <Empty>{projects.length === 0 ? "尚無專案" : "沒有符合條件的專案"}</Empty>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -181,7 +228,7 @@ export default function AdminProjectsPage() {
                 </tr>
               </thead>
               <tbody>
-                {projects.map((p) => (
+                {shown.map((p) => (
                   <tr key={p.id} className="border-b last:border-0">
                     <td className="py-2 pr-3 font-mono text-xs text-gray-500">{p.code ?? "—"}</td>
                     <td className="py-2 pr-3 font-medium text-gray-900">{p.name}</td>
@@ -191,9 +238,17 @@ export default function AdminProjectsPage() {
                     <td className="py-2 pr-3 text-gray-600">{p.shareMode === "pool_pct" ? "池×%" : "固定金額"}</td>
                     <td className="py-2 pr-3 text-gray-600">{p.bonusPool != null ? p.bonusPool.toLocaleString() : "—"}</td>
                     <td className="py-2 pr-3">
-                      <span className={`rounded-full px-2 py-0.5 text-xs ${p.status === "active" ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-500"}`}>
-                        {p.status === "active" ? "進行中" : "已封存"}
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs ${
+                          STATUS_BADGE[p.status as ProjectStatus] ?? "bg-gray-100 text-gray-500"
+                        }`}
+                        title={p.statusReason ?? undefined}
+                      >
+                        {statusLabel(p.status)}
                       </span>
+                      {p.archivedAt && (
+                        <span className="ml-1 text-xs text-gray-400">已封存</span>
+                      )}
                     </td>
                     <td className="py-2 pr-3">
                       <Link href={`/admin/projects/${p.id}`} className="text-sm font-medium" style={{ color: "var(--brand)" }}>

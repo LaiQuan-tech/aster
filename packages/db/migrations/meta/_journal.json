@@ -225,6 +225,13 @@
       "when": 1789247092484,
       "tag": "0031_broad_tattoo",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1789251315909,
+      "tag": "0032_wealthy_hiroim",
+      "breakpoints": true
     }
   ]
 }

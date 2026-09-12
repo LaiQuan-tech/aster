@@ -200,3 +200,117 @@ describe("M4-1 專案編號 — 租戶隔離", () => {
     expect(other.tenantId).not.toBe(tenantId)
   }, 60_000)
 })
+
+describe("M4-2 案情狀態", () => {
+  let projectId: string
+
+  beforeAll(async () => {
+    const res = await createProject({ name: "狀態測試案" })
+    projectId = res.body.id
+  })
+
+  function patch(body: Record<string, unknown>) {
+    return request(app)
+      .patch(`/projects/${projectId}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send(body)
+  }
+
+  function get(id = projectId) {
+    return request(app).get(`/projects/${id}`).set("Authorization", `Bearer ${adminToken}`)
+  }
+
+  it("新建的專案是進行中", async () => {
+    const res = await get()
+    expect(res.body.project.status).toBe("active")
+    expect(res.body.project.archivedAt).toBeNull()
+  })
+
+  it("改狀態沒填理由回 400", async () => {
+    const res = await patch({ status: "suspended" })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("status_reason_required")
+  })
+
+  it("舊制的 archived 不再是合法狀態", async () => {
+    const res = await patch({ status: "archived", statusReason: "x" })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("invalid_body")
+  })
+
+  it("填了理由就能暫停，並記下生效日與輸入時點", async () => {
+    const res = await patch({
+      status: "suspended",
+      statusReason: "業主要求緩辦，等都審",
+      statusEffectiveOn: "2026-08-01",
+    })
+    expect(res.status).toBe(200)
+
+    const got = await get()
+    expect(got.body.project.status).toBe("suspended")
+    expect(got.body.project.statusReason).toBe("業主要求緩辦，等都審")
+    // 法律生效日是填的那天，不是今天。
+    expect(got.body.project.statusEffectiveOn).toBe("2026-08-01")
+    expect(got.body.project.statusChangedAt).not.toBeNull()
+  })
+
+  it("轉解約也留下理由，且蓋掉的是案情不是紀錄", async () => {
+    const res = await patch({
+      status: "terminated",
+      statusReason: "業主資金斷鏈，依約第 12 條終止",
+      statusEffectiveOn: "2026-09-01",
+    })
+    expect(res.status).toBe(200)
+
+    const got = await get()
+    expect(got.body.project.status).toBe("terminated")
+    expect(got.body.project.statusEffectiveOn).toBe("2026-09-01")
+  })
+
+  it("封存不覆寫案情——已解約的案子封存後仍是已解約", async () => {
+    const res = await patch({ archived: true })
+    expect(res.status).toBe(200)
+
+    const got = await get()
+    expect(got.body.project.status).toBe("terminated")
+    expect(got.body.project.archivedAt).not.toBeNull()
+  })
+
+  it("已封存的專案預設不出現在列表", async () => {
+    const res = await request(app).get("/projects").set("Authorization", `Bearer ${adminToken}`)
+    expect(res.status).toBe(200)
+    expect(res.body.projects.map((p: { id: string }) => p.id)).not.toContain(projectId)
+  })
+
+  it("?includeArchived=1 才看得到", async () => {
+    const res = await request(app)
+      .get("/projects?includeArchived=1")
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(res.status).toBe(200)
+    expect(res.body.projects.map((p: { id: string }) => p.id)).toContain(projectId)
+  })
+
+  it("轉回進行中會自動解除封存，不會變成「進行中但看不到」", async () => {
+    const res = await patch({ status: "active", statusReason: "雙方復談，合約回復" })
+    expect(res.status).toBe(200)
+
+    const got = await get()
+    expect(got.body.project.status).toBe("active")
+    expect(got.body.project.archivedAt).toBeNull()
+  })
+
+  it("進行中的專案不能封存", async () => {
+    const res = await patch({ archived: true })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("archive_requires_non_active")
+  })
+
+  it("狀態沒變時可以只更正理由", async () => {
+    const res = await patch({ statusReason: "更正：依約第 12 條第 2 項" })
+    expect(res.status).toBe(200)
+
+    const got = await get()
+    expect(got.body.project.statusReason).toBe("更正：依約第 12 條第 2 項")
+    expect(got.body.project.status).toBe("active")
+  })
+})

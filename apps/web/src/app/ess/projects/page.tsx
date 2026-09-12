@@ -5,7 +5,14 @@ import Link from "next/link";
 import { AuthGate } from "@/components/AuthGate";
 import { EssHeader } from "@/components/EssHeader";
 import { getBranding, getMe, isAdminRole, type Branding } from "@/lib/ess-api";
-import { listProjects, type Project } from "@/lib/projects-api";
+import { listProjects, statusLabel, type Project } from "@/lib/projects-api";
+
+const STATUS_BADGE: Record<string, string> = {
+  active: "bg-green-50 text-green-700",
+  suspended: "bg-amber-50 text-amber-700",
+  closed: "bg-gray-100 text-gray-600",
+  terminated: "bg-red-50 text-red-700",
+};
 
 function ProjectsInner() {
   const [branding, setBranding] = useState<Branding | null>(null);
@@ -46,8 +53,8 @@ function ProjectsInner() {
                       </p>
                       {p.description && <p className="mt-0.5 truncate text-sm text-gray-500">{p.description}</p>}
                     </div>
-                    <span className={`ml-3 shrink-0 rounded-full px-2 py-0.5 text-xs ${p.status === "active" ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-500"}`}>
-                      {p.status === "active" ? "進行中" : "已封存"}
+                    <span className={`ml-3 shrink-0 rounded-full px-2 py-0.5 text-xs ${STATUS_BADGE[p.status] ?? "bg-gray-100 text-gray-500"}`}>
+                      {statusLabel(p.status)}
                     </span>
                   </Link>
                 </li>

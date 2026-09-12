@@ -99,6 +99,30 @@ describe("projects table", () => {
     expect(cols.code.notNull).toBe(false)
     expect(cols.fiscalYear.notNull).toBe(false)
   })
+
+  // 模組四第 2 條：案情（status）與可見性（archivedAt）是兩軸。
+  // 混成一欄的話，封存一個已解約的案子就得覆寫 terminated，
+  // 「這案子是解約收場」就沒了。
+  it("案情與封存是分開的兩欄", () => {
+    expect(Object.keys(cols)).toEqual(expect.arrayContaining(["status", "archivedAt"]))
+    expect(cols.status.notNull).toBe(true)
+    expect(cols.status.default).toBe("active")
+    expect(cols.archivedAt.notNull).toBe(false)
+  })
+
+  // 解約通知書上的日期可能早於輸入日，而解約日決定請款範圍與獎金結算基準。
+  it("狀態的法律生效日與輸入時點是分開的兩欄", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining([
+        "statusReason",
+        "statusEffectiveOn",
+        "statusChangedAt",
+        "statusChangedByEmpId",
+      ]),
+    )
+    expect(cols.statusEffectiveOn.columnType).toBe("PgDateString")
+    expect(cols.statusChangedAt.columnType).toBe("PgTimestamp")
+  })
 })
 
 describe("projectMembers table", () => {

@@ -21,7 +21,18 @@ import {
   type ShareAdjustment,
   type ProjectDocument,
   type ShareMode,
+  type ProjectStatus,
+  PROJECT_STATUS_ORDER,
+  PROJECT_STATUS_LABELS,
+  statusLabel,
 } from "@/lib/projects-api";
+
+/** 後端的錯誤碼翻成人看得懂的話。 */
+const STATUS_ERRORS: Record<string, string> = {
+  status_reason_required: "變更案情狀態必須填理由。",
+  archive_requires_non_active: "「進行中」的專案不能封存。要收起來請先改成暫停、結案或已解約。",
+  invalid_status: "狀態值不合法。",
+};
 
 function fmtMoney(n: number | null): string {
   return n == null ? "—" : n.toLocaleString();
@@ -40,6 +51,12 @@ export default function AdminProjectDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // 案情狀態變更（模組四第 2 條）。改狀態要理由，所以不能是即存下拉。
+  const [newStatus, setNewStatus] = useState<ProjectStatus | "">("");
+  const [statusReason, setStatusReason] = useState("");
+  const [statusEffectiveOn, setStatusEffectiveOn] = useState("");
+  const [savingStatus, setSavingStatus] = useState(false);
 
   // add-member form
   const [newEmp, setNewEmp] = useState("");
@@ -81,6 +98,15 @@ export default function AdminProjectDetailPage() {
   // pool 模式的 % 加總（提示是否超過 100）。
   const pctTotal = members.reduce((s, m) => s + (m.sharePct ?? 0), 0);
 
+  function humanError(err: unknown, fallback: string): string {
+    const msg = err instanceof Error ? err.message : fallback;
+    for (const [code, text] of Object.entries(STATUS_ERRORS)) {
+      if (msg.includes(code)) return text;
+    }
+    if (msg.includes("code_immutable")) return "專案編號不可變更。";
+    return msg;
+  }
+
   async function saveProjectField(patch: Parameters<typeof updateProject>[1]) {
     if (!project) return;
     setError(null);
@@ -88,7 +114,32 @@ export default function AdminProjectDetailPage() {
       await updateProject(project.id, patch);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "更新失敗");
+      setError(humanError(err, "更新失敗"));
+    }
+  }
+
+  async function changeStatus() {
+    if (!project || !newStatus) return;
+    if (!statusReason.trim()) {
+      setError(STATUS_ERRORS.status_reason_required);
+      return;
+    }
+    setSavingStatus(true);
+    setError(null);
+    try {
+      await updateProject(project.id, {
+        status: newStatus,
+        statusReason: statusReason.trim(),
+        statusEffectiveOn: statusEffectiveOn || null,
+      });
+      setNewStatus("");
+      setStatusReason("");
+      setStatusEffectiveOn("");
+      await load();
+    } catch (err) {
+      setError(humanError(err, "變更狀態失敗"));
+    } finally {
+      setSavingStatus(false);
     }
   }
 
@@ -255,17 +306,101 @@ export default function AdminProjectDetailPage() {
               報表與獎金歸在哪一年。編號裡的年度是建立年，已印在合約上，不隨這裡改動。
             </p>
           </div>
+        </div>
+        <ErrorText>{error}</ErrorText>
+      </Card>
+
+      {/* 案情狀態（模組四第 2 條）。與封存是兩軸。 */}
+      <Card>
+        <h2 className="mb-3 text-sm font-semibold text-gray-700">案情狀態</h2>
+
+        <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+          <span
+            className={`rounded-full px-2.5 py-1 text-xs font-medium ${
+              project.status === "active"
+                ? "bg-green-50 text-green-700"
+                : project.status === "suspended"
+                  ? "bg-amber-50 text-amber-700"
+                  : project.status === "terminated"
+                    ? "bg-red-50 text-red-700"
+                    : "bg-gray-100 text-gray-600"
+            }`}
+          >
+            {statusLabel(project.status)}
+          </span>
+          {project.statusEffectiveOn && (
+            <span className="text-gray-500">自 {project.statusEffectiveOn} 起</span>
+          )}
+          {project.archivedAt && (
+            <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-500">已封存</span>
+          )}
+        </div>
+        {project.statusReason && (
+          <p className="mb-4 whitespace-pre-wrap rounded-lg bg-gray-50 p-3 text-sm text-gray-600">
+            理由：{project.statusReason}
+          </p>
+        )}
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <div>
-            <label className={labelCls}>狀態</label>
+            <label className={labelCls}>變更為</label>
             <select
               className={inputCls}
-              value={project.status}
-              onChange={(e) => saveProjectField({ status: e.target.value as "active" | "archived" })}
+              value={newStatus}
+              onChange={(e) => setNewStatus(e.target.value as ProjectStatus | "")}
             >
-              <option value="active">進行中</option>
-              <option value="archived">已封存</option>
+              <option value="">不變更</option>
+              {PROJECT_STATUS_ORDER.filter((v) => v !== project.status).map((v) => (
+                <option key={v} value={v}>{PROJECT_STATUS_LABELS[v]}</option>
+              ))}
             </select>
           </div>
+          <div>
+            <label className={labelCls}>生效日</label>
+            <input
+              className={inputCls}
+              type="date"
+              value={statusEffectiveOn}
+              onChange={(e) => setStatusEffectiveOn(e.target.value)}
+            />
+            <p className="mt-1 text-xs text-gray-400">
+              解約通知書／結案文件上的那一天，不是今天。留空才用今天。
+            </p>
+          </div>
+          <div>
+            <label className={labelCls}>理由 *</label>
+            <input
+              className={inputCls}
+              value={statusReason}
+              onChange={(e) => setStatusReason(e.target.value)}
+              placeholder="例如：業主資金斷鏈，依約第 12 條終止"
+            />
+          </div>
+        </div>
+        <div className="mt-3 flex items-center gap-3">
+          <PrimaryButton onClick={changeStatus} disabled={savingStatus || !newStatus}>
+            {savingStatus ? "變更中…" : "變更狀態"}
+          </PrimaryButton>
+          <span className="text-xs text-gray-400">
+            狀態變更不擋（結案後返工是真的），但一律留下理由與生效日。
+          </span>
+        </div>
+
+        <div className="mt-5 border-t pt-4">
+          <label className={labelCls}>封存（只影響列表是否顯示，與案情無關）</label>
+          {project.status === "active" ? (
+            <p className="text-sm text-gray-400">
+              「進行中」的專案不能封存。要收起來請先改成暫停、結案或已解約。
+            </p>
+          ) : (
+            <button
+              type="button"
+              className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+              onClick={() => saveProjectField({ archived: !project.archivedAt })}
+            >
+              {project.archivedAt ? "取消封存" : "封存此專案"}
+            </button>
+          )}
         </div>
         <ErrorText>{error}</ErrorText>
       </Card>

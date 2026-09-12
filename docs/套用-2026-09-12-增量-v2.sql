@@ -12,9 +12,11 @@
 --   [1] migration 0030 —— advances、expense_settings 兩張新表 + 既有表加欄位
 --   [2] 把 advances 納入既有的禁刪與稽核 trigger（金流表必須留痕）
 --   [3] migration 0031 —— projects.fiscal_year + 編號唯一索引（模組四第 1 條）
+--   [4] migration 0032 + sql/0021 —— 專案案情狀態與封存（模組四第 2 條）
 --
 -- 全部冪等，重複執行無害。
 -- ⚠️ [3] 有一個前置檢查要先跑（既有專案若有重複編號，索引會建不起來）。
+-- ⚠️ [4] 會轉換舊的 status='archived'，裡面有一筆「猜測」，請看該段說明。
 -- =====================================================================
 
 -- ─────────────────────────────────────────────────────────────────
@@ -151,6 +153,47 @@ UPDATE public.projects
  WHERE fiscal_year IS NULL;
 
 -- ─────────────────────────────────────────────────────────────────
+-- [4] migration 0032 + sql/0021 —— 案情狀態與封存（模組四第 2 條）
+-- ─────────────────────────────────────────────────────────────────
+-- status（案情）與 archived_at（可見性）是兩軸。混成一欄的話，要封存一個
+-- 已解約的案子就得把 terminated 覆寫掉，「這案子是解約收場」就沒了——
+-- 而保留款收得到與收不到，差別就在這裡。
+--
+-- status_effective_on 是法律日期（解約通知書上的那天），
+-- status_changed_at 是輸入時點。解約通知可能是上個月的，這週才進系統；
+-- 解約日決定已完成部分的請款範圍與分期獎金的結算基準。
+
+ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS "status_reason" text;
+ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS "status_effective_on" date;
+ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS "status_changed_at" timestamp with time zone;
+ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS "status_changed_by_emp_id" uuid;
+ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS "archived_at" timestamp with time zone;
+
+-- ── ⚠️ 舊資料轉換：這裡有一筆猜測 ────────────────────────────────
+-- 舊制只有 active / archived 兩個值。archived 的專案**無從得知**它是
+-- 正常結案還是中途解約——舊模型沒記。只能一律當結案並標記待補。
+-- 跑完請用下面那條查詢把它們列出來人工確認。
+UPDATE public.projects
+   SET status = 'closed',
+       archived_at = coalesce(archived_at, now()),
+       status_reason = coalesce(status_reason,
+         '由舊制「已封存」轉入，實際案情（結案／解約）待人工確認'),
+       status_changed_at = coalesce(status_changed_at, now())
+ WHERE status = 'archived';
+
+-- 舊的 active 維持 active，不動。
+
+-- 合法值防呆。舊資料轉完才能加，否則 archived 那些列會擋住。
+ALTER TABLE public.projects DROP CONSTRAINT IF EXISTS projects_status_chk;
+ALTER TABLE public.projects ADD CONSTRAINT projects_status_chk
+  CHECK (status IN ('active', 'suspended', 'closed', 'terminated'));
+
+-- ── 跑完之後：列出需要人工補案情的專案 ──────────────────────────
+-- select id, code, name, status_reason
+--   from public.projects
+--  where status_reason like '由舊制%';
+
+-- ─────────────────────────────────────────────────────────────────
 -- 驗證（**分開跑**，一次只跑這一條）
 -- ─────────────────────────────────────────────────────────────────
 -- select
@@ -174,7 +217,14 @@ UPDATE public.projects
 --                                                                as "projects.fiscal_year(預期1)",
 --   (select count(*) from pg_indexes
 --     where schemaname='public' and indexname='projects_tenant_code_uq')
---                                                                as "編號唯一索引(預期1)";
+--                                                                as "編號唯一索引(預期1)",
+--   (select count(*) from information_schema.columns
+--     where table_schema='public' and table_name='projects' and column_name in
+--       ('status_reason','status_effective_on','status_changed_at',
+--        'status_changed_by_emp_id','archived_at'))
+--                                                                as "案情欄位(預期5)",
+--   (select count(*) from public.projects where status='archived')
+--                                                                as "殘留舊狀態(預期0)";
 
 -- ─────────────────────────────────────────────────────────────────
 -- 補救：若先前那份增量 SQL 已經跑過（存在 trip_advances）
