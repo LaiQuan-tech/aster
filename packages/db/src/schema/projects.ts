@@ -75,6 +75,12 @@ export const projects = pgTable(
      * 那個功能就等於壞的。案情之後再變動（`statusChangedAt` 更晚）才恢復自動。
      */
     unarchivedAt: timestamp("unarchived_at", { withTimezone: true }),
+    /**
+     * 預定起訖日——甘特圖與進度示警的依據（都是「預定」，實際結案看 statusEffectiveOn）。
+     * 可空：沒填的案子在總覽上以建立日～今天畫虛線，示警會提醒補。
+     */
+    startsOn: date("starts_on"),
+    endsOn: date("ends_on"),
     deptId: uuid("dept_id").references(() => departments.id),
     leadEmpId: uuid("lead_emp_id"),
     shareMode: text("share_mode").notNull().default("pool_pct"),

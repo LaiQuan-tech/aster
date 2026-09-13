@@ -30,9 +30,10 @@ import { readFileSync, readdirSync } from "node:fs"
 import { join, resolve, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 
-let PGlite
+let PGlite, vector
 try {
   ;({ PGlite } = await import("@electric-sql/pglite"))
+  ;({ vector } = await import("@electric-sql/pglite/vector"))
 } catch {
   console.error("缺 @electric-sql/pglite：npm install（它是 @hr/db 的 devDependency）")
   process.exit(2)
@@ -59,6 +60,8 @@ const read = (f) => readFileSync(resolve(baseDir, f), "utf8")
 
 // Supabase 專有物件的 stub：只求 migration / policy 寫得出來，不模擬行為
 const STUBS = `
+create schema if not exists extensions;
+set search_path = public, extensions;
 create schema if not exists auth;
 create table if not exists auth.users (id uuid primary key);
 create or replace function auth.uid() returns uuid language sql stable
@@ -77,7 +80,9 @@ do $$ begin
 end $$;
 `
 
-const db = new PGlite()
+// pgvector：migration 0037 起 knowledge_chunks.embedding 用 vector(768)
+const newDb = () => new PGlite({ extensions: { vector } })
+const db = newDb()
 let failed = 0
 
 async function exec(label, text) {
@@ -147,7 +152,7 @@ async function catalog(d) {
 }
 if (opt.compareRaw) {
   console.log("\n── 與「全部 raw migrations + 全部 sql/」比對 schema")
-  const raw = new PGlite()
+  const raw = newDb()
   await raw.exec(STUBS)
   for (const f of migs) for (const stmt of readFileSync(join(MIG, f), "utf8").split("--> statement-breakpoint")) if (stmt.trim()) await raw.exec(stmt)
   for (const f of readdirSync(SQL).filter((f) => f.endsWith(".sql")).sort()) await raw.exec(readFileSync(join(SQL, f), "utf8"))

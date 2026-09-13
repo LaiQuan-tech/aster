@@ -260,6 +260,13 @@
       "when": 1789312948711,
       "tag": "0036_pension_voluntary_rate",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1789317772518,
+      "tag": "0037_ai_modules_foundation",
+      "breakpoints": true
     }
   ]
 }
