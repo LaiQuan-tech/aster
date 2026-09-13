@@ -52,6 +52,7 @@ afterAll(async () => {
     await supabaseAdmin.from("project_share_adjustments").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("project_members").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("project_documents").delete().eq("tenant_id", tid)
+    await supabaseAdmin.from("project_billings").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("contracts").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("project_settings").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("projects").delete().eq("tenant_id", tid)
@@ -675,5 +676,218 @@ describe("M4-3 合約／報價單與印花稅", () => {
       .get(`/projects/${projectId}/contracts`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(list.body.contracts.map((c: { id: string }) => c.id)).not.toContain(contractId)
+  })
+})
+
+describe("M4-4 分期請款期程", () => {
+  let projectId: string
+  let installmentIds: string[] = []
+
+  beforeAll(async () => {
+    const res = await createProject({ name: "分期請款測試案" })
+    projectId = res.body.id
+  })
+
+  function saveSchedule(installments: Array<Record<string, unknown>>) {
+    return request(app)
+      .put(`/projects/${projectId}/billings`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ installments })
+  }
+
+  function getSchedule() {
+    return request(app)
+      .get(`/projects/${projectId}/billings`)
+      .set("Authorization", `Bearer ${adminToken}`)
+  }
+
+  function addContract(body: Record<string, unknown>) {
+    return request(app)
+      .post(`/projects/${projectId}/contracts`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send(body)
+  }
+
+  it("沒有合約時分母是 null，不是 0", async () => {
+    const res = await saveSchedule([
+      { installmentNo: 1, percentage: 20, milestone: "開工款" },
+      { installmentNo: 2, percentage: 20 },
+      { installmentNo: 3, percentage: 20 },
+      { installmentNo: 4, percentage: 20 },
+      { installmentNo: 5, percentage: 20, milestone: "驗收款" },
+    ])
+    expect(res.status).toBe(200)
+    expect(res.body.contract.total).toBeNull()
+    expect(res.body.installments).toHaveLength(5)
+    // 0 元會看起來像算過了，null 才能讓 UI 說「還沒有合約」。
+    expect(res.body.installments.every((i: { calculatedAmount: number | null }) => i.calculatedAmount === null)).toBe(true)
+    expect(res.body.summary.percentageTotal).toBe(100)
+    installmentIds = res.body.installments.map((i: { id: string }) => i.id)
+  })
+
+  it("⚠️ 建立合約後金額自動算出來，不必回頭按存檔", async () => {
+    const c = await addContract({
+      docType: "contract",
+      title: "承攬契約",
+      amount: 8_888_888,
+      signedOn: "2026-01-15",
+    })
+    expect(c.status).toBe(201)
+
+    const res = await getSchedule()
+    expect(res.body.contract.total).toBe(8_888_888)
+    // 每期 1,777,777.6 → 1,777,778，五期合計會多 2 元。
+    expect(res.body.installments[0].calculatedAmount).toBe(1_777_778)
+    // 末期吸收 −2，合計回到合約金額。
+    expect(res.body.installments[4].residueApplied).toBe(-2)
+    expect(res.body.installments[4].calculatedAmount).toBe(1_777_776)
+    expect(res.body.summary.effectiveTotal).toBe(8_888_888)
+  })
+
+  it("標記請款會凍結該期金額", async () => {
+    const res = await request(app)
+      .post(`/billings/${installmentIds[0]}/bill`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ billedOn: "2026-02-01" })
+    expect(res.status).toBe(200)
+    const first = res.body.installments[0]
+    expect(first.billedOn).toBe("2026-02-01")
+    expect(first.billedAmount).toBe(1_777_778)
+    expect(res.body.summary.billedTotal).toBe(1_777_778)
+  })
+
+  it("重複標記回 409", async () => {
+    const res = await request(app)
+      .post(`/billings/${installmentIds[0]}/bill`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({})
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("already_billed")
+  })
+
+  it("⚠️ 追加減帳改變分母，已請款那期不動，未請款的重算", async () => {
+    const c = await addContract({
+      docType: "change_order",
+      title: "追加：增設後台",
+      amount: 1_111_112,
+      signedOn: "2026-03-01",
+    })
+    expect(c.status).toBe(201)
+
+    const res = await getSchedule()
+    // 分母 8,888,888 + 1,111,112 = 10,000,000
+    expect(res.body.contract.total).toBe(10_000_000)
+    expect(res.body.contract.changeOrders).toBe(1_111_112)
+    // 已請款那期維持原值——帳已經出去了。
+    expect(res.body.installments[0].billedAmount).toBe(1_777_778)
+    // 未請款各期照新分母算 20%。
+    expect(res.body.installments[1].calculatedAmount).toBe(2_000_000)
+    // 合計仍等於新的合約總額。
+    expect(res.body.summary.effectiveTotal).toBe(10_000_000)
+  })
+
+  it("尾差落在最後一個未請款期別", async () => {
+    const res = await getSchedule()
+    expect(res.body.installments[4].residueApplied).not.toBe(0)
+    expect(res.body.installments[0].residueApplied).toBe(0)
+  })
+
+  it("人工指定金額必須填理由", async () => {
+    const res = await saveSchedule([
+      { id: installmentIds[0], installmentNo: 1, percentage: 20 },
+      { id: installmentIds[1], installmentNo: 2, percentage: 20, overrideAmount: 3_000_000 },
+      { id: installmentIds[2], installmentNo: 3, percentage: 20 },
+      { id: installmentIds[3], installmentNo: 4, percentage: 20 },
+      { id: installmentIds[4], installmentNo: 5, percentage: 20 },
+    ])
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("override_reason_required")
+  })
+
+  it("人工指定後，試算與覆寫分開存，差額掛末期", async () => {
+    const res = await saveSchedule([
+      { id: installmentIds[0], installmentNo: 1, percentage: 20 },
+      {
+        id: installmentIds[1],
+        installmentNo: 2,
+        percentage: 20,
+        overrideAmount: 3_000_000,
+        overrideReason: "業主要求本期多付",
+      },
+      { id: installmentIds[2], installmentNo: 3, percentage: 20 },
+      { id: installmentIds[3], installmentNo: 4, percentage: 20 },
+      { id: installmentIds[4], installmentNo: 5, percentage: 20 },
+    ])
+    expect(res.status).toBe(200)
+    expect(res.body.installments[1].overrideAmount).toBe(3_000_000)
+    expect(res.body.installments[1].effectiveAmount).toBe(3_000_000)
+    // 差額落在末期，讓合計仍等於合約金額。
+    expect(res.body.summary.effectiveTotal).toBe(10_000_000)
+    expect(res.body.installments[4].residueApplied).toBe(-1_000_000)
+  })
+
+  it("⚠️ 已請款的期別不可移除", async () => {
+    const res = await saveSchedule([
+      { id: installmentIds[1], installmentNo: 2, percentage: 25, overrideAmount: 3_000_000, overrideReason: "x" },
+      { id: installmentIds[2], installmentNo: 3, percentage: 25 },
+    ])
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("billed_installment_not_removable")
+  })
+
+  it("未請款的期別可以移除，且尾差重新落點", async () => {
+    const res = await saveSchedule([
+      { id: installmentIds[0], installmentNo: 1, percentage: 20 },
+      { id: installmentIds[1], installmentNo: 2, percentage: 20 },
+      { id: installmentIds[2], installmentNo: 3, percentage: 30 },
+      { id: installmentIds[3], installmentNo: 4, percentage: 30 },
+    ])
+    expect(res.status).toBe(200)
+    expect(res.body.installments).toHaveLength(4)
+    expect(res.body.summary.effectiveTotal).toBe(10_000_000)
+  })
+
+  it("重複期別編號回 400", async () => {
+    const res = await saveSchedule([
+      { installmentNo: 1, percentage: 50 },
+      { installmentNo: 1, percentage: 50 },
+    ])
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("duplicate_installment_no")
+  })
+
+  it("取消請款要理由，取消後該期回到試算", async () => {
+    const noReason = await request(app)
+      .post(`/billings/${installmentIds[0]}/unbill`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({})
+    expect(noReason.status).toBe(400)
+    expect(noReason.body.error).toBe("reason_required")
+
+    const res = await request(app)
+      .post(`/billings/${installmentIds[0]}/unbill`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ reason: "業主退件重開" })
+    expect(res.status).toBe(200)
+    expect(res.body.installments[0].billedOn).toBeNull()
+    expect(res.body.summary.billedTotal).toBe(0)
+    expect(res.body.summary.effectiveTotal).toBe(10_000_000)
+  })
+
+  it("作廢合約後分母跟著變", async () => {
+    const list = await request(app)
+      .get(`/projects/${projectId}/contracts`)
+      .set("Authorization", `Bearer ${adminToken}`)
+    const changeOrder = list.body.contracts.find((c: { docType: string }) => c.docType === "change_order")
+
+    await request(app)
+      .delete(`/contracts/${changeOrder.id}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ reason: "追加取消" })
+
+    const res = await getSchedule()
+    expect(res.body.contract.total).toBe(8_888_888)
+    expect(res.body.contract.changeOrders).toBe(0)
+    expect(res.body.summary.effectiveTotal).toBe(8_888_888)
   })
 })

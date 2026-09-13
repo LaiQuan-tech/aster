@@ -34,6 +34,12 @@ import {
   type Contract,
   type DocType,
   type OurRole,
+  getBillings,
+  saveBillings,
+  billInstallment,
+  unbillInstallment,
+  type BillingSchedule,
+  type InstallmentInput,
 } from "@/lib/projects-api";
 
 /** 後端的錯誤碼翻成人看得懂的話。 */
@@ -41,6 +47,13 @@ const STATUS_ERRORS: Record<string, string> = {
   status_reason_required: "變更案情狀態必須填理由。",
   archive_requires_non_active: "「進行中」的專案不能封存。要收起來請先改成暫停、結案或已解約。",
   invalid_status: "狀態值不合法。",
+  override_reason_required: "人工指定金額必須填理由——偏離期程的金額是談出來的，要留得下痕跡。",
+  billed_installment_not_removable: "已請款的期別不能移除。帳已經出去了，移掉那筆應收會憑空消失。",
+  duplicate_installment_no: "期別編號重複。",
+  installment_no_taken: "期別編號已存在。",
+  amount_unknown: "算不出金額（還沒有合約，或這期沒有百分比也沒有人工金額）。",
+  already_billed: "這期已經標記請款過了。",
+  not_billed: "這期還沒標記請款。",
 };
 
 function fmtMoney(n: number | null): string {
@@ -56,6 +69,10 @@ export default function AdminProjectDetailPage() {
   const [adjustments, setAdjustments] = useState<ShareAdjustment[]>([]);
   const [documents, setDocuments] = useState<ProjectDocument[]>([]);
   const [contracts, setContracts] = useState<Contract[]>([]);
+  const [schedule, setSchedule] = useState<BillingSchedule | null>(null);
+  /** 期程是整批存的，所以編輯中的狀態獨立於已存檔的 schedule。 */
+  const [draft, setDraft] = useState<InstallmentInput[]>([]);
+  const [savingSchedule, setSavingSchedule] = useState(false);
   const [depts, setDepts] = useState<Department[]>([]);
   const [emps, setEmps] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
@@ -87,16 +104,29 @@ export default function AdminProjectDetailPage() {
     setLoading(true);
     setError(null);
     try {
-      const [p, m, adj, docs, cs, d, e] = await Promise.all([
+      const [p, m, adj, docs, cs, bs, d, e] = await Promise.all([
         getProject(projectId),
         getProjectMembers(projectId),
         getProjectAdjustments(projectId),
         getProjectDocuments(projectId),
         getContracts(projectId),
+        getBillings(projectId),
         getDepartments(),
         getEmployees(),
       ]);
       setContracts(cs.contracts);
+      setSchedule(bs);
+      setDraft(
+        bs.installments.map((i) => ({
+          id: i.id,
+          installmentNo: i.installmentNo,
+          percentage: i.percentage,
+          milestone: i.milestone,
+          plannedOn: i.plannedOn,
+          overrideAmount: i.overrideAmount,
+          overrideReason: i.overrideReason,
+        })),
+      );
       setProject(p.project);
       setMembers(m.members);
       setAdjustments(adj.adjustments);
@@ -137,6 +167,64 @@ export default function AdminProjectDetailPage() {
       await load();
     } catch (err) {
       setError(humanError(err, "更新失敗"));
+    }
+  }
+
+  /* ── 請款期程（模組四第 4 條）────────────────────────────────── */
+
+  function patchDraft(idx: number, patch: Partial<InstallmentInput>) {
+    setDraft((d) => d.map((row, i) => (i === idx ? { ...row, ...patch } : row)));
+  }
+
+  function addRow() {
+    const nextNo = draft.reduce((m, r) => Math.max(m, r.installmentNo), 0) + 1;
+    setDraft((d) => [...d, { installmentNo: nextNo, percentage: null, milestone: "" }]);
+  }
+
+  function removeRow(idx: number) {
+    setDraft((d) => d.filter((_, i) => i !== idx));
+  }
+
+  /** 平均分配百分比——這正是客戶說的「不要用 Excel 拉格」。 */
+  function splitEvenly() {
+    if (draft.length === 0) return;
+    const pct = Math.round((100 / draft.length) * 1000) / 1000;
+    setDraft((d) => d.map((row) => ({ ...row, percentage: pct })));
+  }
+
+  async function saveSchedule() {
+    setSavingSchedule(true);
+    setError(null);
+    try {
+      const res = await saveBillings(projectId, draft);
+      setSchedule(res);
+      await load();
+    } catch (err) {
+      setError(humanError(err, "儲存期程失敗"));
+    } finally {
+      setSavingSchedule(false);
+    }
+  }
+
+  async function markBilled(id: string) {
+    setError(null);
+    try {
+      setSchedule(await billInstallment(id));
+      await load();
+    } catch (err) {
+      setError(humanError(err, "標記請款失敗"));
+    }
+  }
+
+  async function cancelBilled(id: string) {
+    const reason = window.prompt("取消請款的理由？");
+    if (!reason?.trim()) return;
+    setError(null);
+    try {
+      setSchedule(await unbillInstallment(id, reason.trim()));
+      await load();
+    } catch (err) {
+      setError(humanError(err, "取消請款失敗"));
     }
   }
 
@@ -526,6 +614,230 @@ export default function AdminProjectDetailPage() {
               印花稅為系統試算，非申報值；承攬契據認定與免稅憑證請會計師確認。
             </span>
           </div>
+        </div>
+        <ErrorText>{error}</ErrorText>
+      </Card>
+
+      {/* 請款期程（模組四第 4 條）。金額一律系統算，不手動拉格。 */}
+      <Card>
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <h2 className="text-sm font-semibold text-gray-700">分期請款期程</h2>
+          {schedule?.contract.total == null ? (
+            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700">
+              還沒有合約，無法計算金額
+            </span>
+          ) : (
+            <span className="text-xs text-gray-500">
+              分母 {fmtMoney(schedule.contract.total)}
+              <span className="text-gray-400">
+                （主約 {fmtMoney(schedule.contract.base)}
+                {schedule.contract.changeOrders !== 0 &&
+                  ` ＋追加減 ${schedule.contract.changeOrders > 0 ? "+" : ""}${schedule.contract.changeOrders.toLocaleString()}`}
+                ）
+              </span>
+            </span>
+          )}
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b text-left text-gray-500">
+                <th className="py-2 pr-2 w-14">期</th>
+                <th className="py-2 pr-2">階段</th>
+                <th className="py-2 pr-2 w-24">百分比</th>
+                <th className="py-2 pr-2 w-36">預定日</th>
+                <th className="py-2 pr-2 text-right">系統試算</th>
+                <th className="py-2 pr-2 w-32 text-right">人工指定</th>
+                <th className="py-2 pr-2">狀態</th>
+                <th className="py-2 pr-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {draft.map((rowDraft, idx) => {
+                const saved = schedule?.installments.find((i) => i.id === rowDraft.id);
+                const billed = !!saved?.billedOn;
+                return (
+                  <tr key={rowDraft.id ?? `new-${idx}`} className="border-b last:border-0">
+                    <td className="py-2 pr-2">
+                      <input
+                        className={`${inputCls} w-12`}
+                        type="number"
+                        min="1"
+                        value={rowDraft.installmentNo}
+                        disabled={billed}
+                        onChange={(e) => patchDraft(idx, { installmentNo: Number(e.target.value) })}
+                      />
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input
+                        className={inputCls}
+                        value={rowDraft.milestone ?? ""}
+                        placeholder="開工款／完成 50%／驗收款／保留款"
+                        onChange={(e) => patchDraft(idx, { milestone: e.target.value })}
+                      />
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input
+                        className={inputCls}
+                        type="number"
+                        step="0.001"
+                        min="0"
+                        max="100"
+                        value={rowDraft.percentage ?? ""}
+                        disabled={billed}
+                        onChange={(e) =>
+                          patchDraft(idx, {
+                            percentage: e.target.value === "" ? null : Number(e.target.value),
+                          })
+                        }
+                      />
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input
+                        className={inputCls}
+                        type="date"
+                        value={rowDraft.plannedOn ?? ""}
+                        onChange={(e) => patchDraft(idx, { plannedOn: e.target.value || null })}
+                      />
+                    </td>
+                    <td className="py-2 pr-2 text-right text-gray-600">
+                      {saved?.calculatedAmount == null ? (
+                        "—"
+                      ) : (
+                        <>
+                          {fmtMoney(saved.calculatedAmount)}
+                          {saved.residueApplied !== 0 && (
+                            <span
+                              className="block text-xs text-amber-600"
+                              title="尾差落在最後一個未請款的期別，讓合計等於合約金額"
+                            >
+                              含尾差 {saved.residueApplied > 0 ? "+" : ""}
+                              {saved.residueApplied.toLocaleString()}
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </td>
+                    <td className="py-2 pr-2">
+                      <input
+                        className={`${inputCls} text-right`}
+                        type="number"
+                        placeholder="—"
+                        value={rowDraft.overrideAmount ?? ""}
+                        disabled={billed}
+                        onChange={(e) =>
+                          patchDraft(idx, {
+                            overrideAmount: e.target.value === "" ? null : Number(e.target.value),
+                          })
+                        }
+                      />
+                      {rowDraft.overrideAmount != null && (
+                        <input
+                          className={`${inputCls} mt-1`}
+                          placeholder="理由 *"
+                          value={rowDraft.overrideReason ?? ""}
+                          onChange={(e) => patchDraft(idx, { overrideReason: e.target.value })}
+                        />
+                      )}
+                    </td>
+                    <td className="py-2 pr-2">
+                      {billed ? (
+                        <button
+                          type="button"
+                          className="text-xs text-green-700 hover:underline"
+                          onClick={() => rowDraft.id && cancelBilled(rowDraft.id)}
+                          title={`已請款 ${fmtMoney(saved?.billedAmount ?? null)}，點一下取消`}
+                        >
+                          已請款 {saved?.billedOn}
+                        </button>
+                      ) : rowDraft.id ? (
+                        <button
+                          type="button"
+                          className="rounded border border-gray-200 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-50"
+                          onClick={() => rowDraft.id && markBilled(rowDraft.id)}
+                        >
+                          標記請款
+                        </button>
+                      ) : (
+                        <span className="text-xs text-gray-400">存檔後可請款</span>
+                      )}
+                    </td>
+                    <td className="py-2 pr-2 text-right">
+                      {!billed && (
+                        <button
+                          type="button"
+                          className="text-xs text-gray-400 hover:text-red-600"
+                          onClick={() => removeRow(idx)}
+                        >
+                          移除
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            {schedule && draft.length > 0 && (
+              <tfoot>
+                <tr className="border-t-2 font-medium">
+                  <td className="py-2 pr-2" colSpan={2}>合計</td>
+                  <td className="py-2 pr-2">
+                    <span className={schedule.summary.percentageTotal === 100 ? "text-gray-700" : "text-amber-600"}>
+                      {schedule.summary.percentageTotal}%
+                      {schedule.summary.percentageTotal !== 100 && " ⚠️"}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-2"></td>
+                  <td className="py-2 pr-2 text-right" colSpan={2}>
+                    {fmtMoney(schedule.summary.effectiveTotal)}
+                  </td>
+                  <td className="py-2 pr-2 text-xs text-gray-500" colSpan={2}>
+                    已請款 {fmtMoney(schedule.summary.billedTotal)}／
+                    未請款 {fmtMoney(schedule.summary.unbilledTotal)}
+                  </td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+
+        {schedule && schedule.summary.percentageTotal !== 100 && draft.length > 0 && (
+          <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+            百分比合計為 {schedule.summary.percentageTotal}%，不是 100%。
+            金額仍會補平到合約總額（差額落在最後一個未請款的期別），但期程本身可能還沒設定完。
+          </p>
+        )}
+        {schedule && schedule.summary.unallocatedResidue !== 0 && (
+          <p className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-800">
+            有 {fmtMoney(schedule.summary.unallocatedResidue)} 元無法分配——
+            所有期別都已請款或已人工指定金額，沒有期別可以吸收差額。
+            請新增一期，或調整人工指定的金額。
+          </p>
+        )}
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <PrimaryButton onClick={saveSchedule} disabled={savingSchedule}>
+            {savingSchedule ? "儲存中…" : "儲存期程"}
+          </PrimaryButton>
+          <button
+            type="button"
+            className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+            onClick={addRow}
+          >
+            ＋ 新增一期
+          </button>
+          <button
+            type="button"
+            className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+            onClick={splitEvenly}
+            disabled={draft.length === 0}
+          >
+            平均分配百分比
+          </button>
+          <span className="text-xs text-gray-400">
+            金額一律由系統算：末期自動吸收四捨五入的尾差，合計必然等於合約金額。
+          </span>
         </div>
         <ErrorText>{error}</ErrorText>
       </Card>

@@ -15,6 +15,7 @@
 --   [4] migration 0032 + sql/0021 —— 專案案情狀態與封存（模組四第 2 條）
 --   [5] migration 0033 —— 自動封存：project_settings + projects.unarchived_at
 --   [6] migration 0034 + sql/0022 —— 合約／報價單與印花稅（模組四第 3 條）
+--   [7] migration 0035 + sql/0023 —— 分期請款期程（模組四第 4 條）
 --
 -- 全部冪等，重複執行無害。
 -- ⚠️ [3] 有一個前置檢查要先跑（既有專案若有重複編號，索引會建不起來）。
@@ -327,6 +328,84 @@ ALTER TABLE public.contracts ADD CONSTRAINT contracts_stamp_flag_chk
   CHECK (stamp_duty_required IN ('auto', 'yes', 'no'));
 
 -- ─────────────────────────────────────────────────────────────────
+-- [7] migration 0035 + sql/0023 —— 分期請款期程（模組四第 4 條）
+-- ─────────────────────────────────────────────────────────────────
+-- 「輸入百分比後系統自動計算各期應收金額，嚴禁人工口算或 Excel 手動拉格」。
+-- 痛點不是算不動，是加總對不起來：
+--   合約 8,888,888 分 5 期每期 20% → 每期 1,777,778，五期合計 8,888,890
+--   百分比合計剛好 100%，金額合計卻多 2 元。
+-- → 最後一期＝合約總額 − 前面各期合計，總和才必然等於合約金額。
+--
+-- 分母＝我方承攬的合約 + 追加減帳（`contracts` 表，第 3 條）。
+-- 已請款的期別凍結不重算；尾差落在最後一個未請款的期別。
+
+CREATE TABLE IF NOT EXISTS "project_billings" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"tenant_id" uuid NOT NULL,
+	"project_id" uuid NOT NULL,
+	"installment_no" integer NOT NULL,
+	"percentage" numeric,
+	"milestone" text,
+	"planned_on" date,
+	"calculated_amount" numeric,
+	"residue_applied" numeric,
+	"override_amount" numeric,
+	"override_reason" text,
+	"billed_on" date,
+	"billed_amount" numeric,
+	"note" text,
+	"created_by_emp_id" uuid,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"deleted_at" timestamp with time zone,
+	"deleted_by_emp_id" uuid,
+	"delete_reason" text
+);
+
+DO $$ BEGIN
+ ALTER TABLE "project_billings" ADD CONSTRAINT "project_billings_tenant_id_tenants_id_fk"
+   FOREIGN KEY ("tenant_id") REFERENCES "public"."tenants"("id");
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+ ALTER TABLE "project_billings" ADD CONSTRAINT "project_billings_project_id_projects_id_fk"
+   FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id");
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+-- ⚠️ **必須是 partial index。** 把 deleted_at 當成索引欄位是錯的——
+-- Postgres 視 NULL 互不相等，兩筆 deleted_at IS NULL 的列反而不會相撞，
+-- 索引等於沒作用。
+CREATE UNIQUE INDEX IF NOT EXISTS "project_billings_no_uq"
+  ON "project_billings" USING btree ("tenant_id","project_id","installment_no")
+  WHERE "project_billings"."deleted_at" is null;
+
+-- ── sql/0023：禁刪 + 稽核 + 合法值防呆 ──────────────────────────────
+-- 實體刪除一筆已請款的期別，等於讓那筆應收憑空消失，而對帳時只會看到
+-- 「合計對不起來」卻查不出哪裡少了。
+DROP TRIGGER IF EXISTS no_hard_delete ON public.project_billings;
+CREATE TRIGGER no_hard_delete
+  BEFORE DELETE ON public.project_billings
+  FOR EACH ROW EXECUTE FUNCTION public.forbid_hard_delete();
+
+DROP TRIGGER IF EXISTS audit_all ON public.project_billings;
+CREATE TRIGGER audit_all
+  AFTER INSERT OR UPDATE OR DELETE ON public.project_billings
+  FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+ALTER TABLE public.project_billings DROP CONSTRAINT IF EXISTS project_billings_pct_chk;
+ALTER TABLE public.project_billings ADD CONSTRAINT project_billings_pct_chk
+  CHECK (percentage IS NULL OR (percentage >= 0 AND percentage <= 100));
+
+-- 人工覆寫必須有理由：偏離期程的金額是談出來的，要留得下痕跡。
+ALTER TABLE public.project_billings DROP CONSTRAINT IF EXISTS project_billings_override_chk;
+ALTER TABLE public.project_billings ADD CONSTRAINT project_billings_override_chk
+  CHECK (override_amount IS NULL OR override_reason IS NOT NULL);
+
+-- billed_on 有值而 billed_amount 為空，對帳時會變成一筆看不見金額的應收。
+ALTER TABLE public.project_billings DROP CONSTRAINT IF EXISTS project_billings_billed_chk;
+ALTER TABLE public.project_billings ADD CONSTRAINT project_billings_billed_chk
+  CHECK (billed_on IS NULL OR billed_amount IS NOT NULL);
+
+-- ─────────────────────────────────────────────────────────────────
 -- 驗證（**分開跑**，一次只跑這一條）
 -- ─────────────────────────────────────────────────────────────────
 -- select
@@ -370,7 +449,13 @@ ALTER TABLE public.contracts ADD CONSTRAINT contracts_stamp_flag_chk
 --      join pg_class c on c.oid=t.tgrelid
 --      join pg_namespace n on n.oid=c.relnamespace
 --     where n.nspname='public' and not t.tgisinternal and c.relname='contracts')
---                                                                as "contracts trigger(預期2)";
+--                                                                as "contracts trigger(預期2)",
+--   (select count(*) from information_schema.tables
+--     where table_schema='public' and table_name='project_billings')
+--                                                                as "project_billings(預期1)",
+--   (select count(*) from pg_indexes
+--     where schemaname='public' and indexname='project_billings_no_uq'
+--       and indexdef like '%WHERE%')                             as "partial index(預期1)";
 
 -- ─────────────────────────────────────────────────────────────────
 -- 補救：若先前那份增量 SQL 已經跑過（存在 trip_advances）

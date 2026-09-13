@@ -255,6 +255,82 @@ export function deleteContract(id: string, reason: string) {
   })
 }
 
+/* --------------------------------------------------------------- billings -- */
+
+export interface Installment {
+  id: string
+  installmentNo: number
+  percentage: number | null
+  milestone: string | null
+  plannedOn: string | null
+  /** 系統試算。已請款或已覆寫的期別為 null。 */
+  calculatedAmount: number | null
+  /** 本期吸收的尾差。非 0 要明示，別讓人以為系統算錯。 */
+  residueApplied: number
+  overrideAmount: number | null
+  overrideReason: string | null
+  billedOn: string | null
+  billedAmount: number | null
+  note: string | null
+  /** 有效金額 = 已請款 ?? 人工覆寫 ?? 試算。 */
+  effectiveAmount: number | null
+}
+
+export interface BillingSchedule {
+  /** 分母的組成攤開顯示——看不到組成就會有人去試算表對帳。 */
+  contract: { total: number | null; base: number; changeOrders: number }
+  installments: Installment[]
+  summary: {
+    percentageTotal: number
+    effectiveTotal: number
+    /** 非 0 代表所有期別都已請款或已覆寫，尾差沒地方放。 */
+    unallocatedResidue: number
+    billedTotal: number
+    unbilledTotal: number
+  }
+}
+
+export interface InstallmentInput {
+  id?: string
+  installmentNo: number
+  percentage?: number | null
+  milestone?: string | null
+  plannedOn?: string | null
+  /** 有覆寫金額就必須有理由，否則後端回 400。 */
+  overrideAmount?: number | null
+  overrideReason?: string | null
+  note?: string | null
+}
+
+export function getBillings(projectId: string) {
+  return apiFetch<BillingSchedule>(`/projects/${projectId}/billings`)
+}
+
+/** 整批存：改一期的百分比會牽動尾差落點，逐筆存會出現假的中間狀態。 */
+export function saveBillings(projectId: string, installments: InstallmentInput[]) {
+  return apiFetch<BillingSchedule>(`/projects/${projectId}/billings`, {
+    method: "PUT",
+    body: JSON.stringify({ installments }),
+  })
+}
+
+export function billInstallment(
+  id: string,
+  body: { billedOn?: string; billedAmount?: number | null } = {},
+) {
+  return apiFetch<BillingSchedule>(`/billings/${id}/bill`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export function unbillInstallment(id: string, reason: string) {
+  return apiFetch<BillingSchedule>(`/billings/${id}/unbill`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  })
+}
+
 export function getStampDutyReport(params?: {
   from?: string
   to?: string

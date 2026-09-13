@@ -22,6 +22,7 @@ import {
   expenseSettings,
   projectSettings,
   contracts,
+  projectBillings,
   leaveRequests as leaveRequestsTable,
 } from "../index"
 
@@ -191,6 +192,45 @@ describe("contracts table", () => {
     expect(Object.keys(cols)).toEqual(
       expect.arrayContaining(["deletedAt", "deletedByEmpId", "deleteReason"]),
     )
+  })
+})
+
+describe("projectBillings table", () => {
+  const cols = getTableColumns(projectBillings)
+
+  // 業主說「這期就開我 180 萬」不管百分比。存成同一欄就再也算不回來。
+  it("系統試算與人工覆寫分開存", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining(["calculatedAmount", "overrideAmount", "overrideReason"]),
+    )
+  })
+
+  // 尾差不能悄悄併進金額裡，否則使用者會以為系統算錯。
+  it("尾差單獨一欄，供 UI 明示", () => {
+    expect(Object.keys(cols)).toEqual(expect.arrayContaining(["residueApplied"]))
+  })
+
+  // 已請款的期別不再隨追加減重算——帳已經出去了。
+  it("已請款事件是凍結的觸發點", () => {
+    expect(Object.keys(cols)).toEqual(expect.arrayContaining(["billedOn", "billedAmount"]))
+  })
+
+  /**
+   * ⚠️ 必須是 partial index。把 deletedAt 當索引欄位是錯的：Postgres 視
+   * NULL 互不相等，兩筆 deleted_at IS NULL 的列反而不會相撞。
+   */
+  it("期別編號在未刪除的列之間唯一（partial unique index）", () => {
+    const idx = getTableConfig(projectBillings).indexes.find(
+      (i) => i.config.name === "project_billings_no_uq",
+    )
+    expect(idx).toBeDefined()
+    expect(idx!.config.unique).toBe(true)
+    expect(idx!.config.where).toBeDefined()
+    expect(idx!.config.columns.map((c) => (c as { name: string }).name)).toEqual([
+      "tenant_id",
+      "project_id",
+      "installment_no",
+    ])
   })
 })
 

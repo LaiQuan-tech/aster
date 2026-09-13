@@ -40,6 +40,7 @@ import { preferencesRouter } from "./routes/preferences.js"
 import { projectsRouter } from "./routes/projects.js"
 import { projectDocumentsRouter } from "./routes/project-documents.js"
 import { contractsRouter } from "./routes/contracts.js"
+import { billingsRouter } from "./routes/billings.js"
 
 const WEB_ORIGINS = (process.env.WEB_ORIGINS ?? "http://localhost:3000")
   .split(",")
@@ -103,6 +104,7 @@ app.use(preferencesRouter)
 app.use(projectsRouter)
 app.use(projectDocumentsRouter)
 app.use(contractsRouter)
+app.use(billingsRouter)
 
 // 404 fallback.
 app.use((_req: Request, res: Response) => {

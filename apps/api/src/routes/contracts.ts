@@ -18,6 +18,7 @@ import {
   type StampDutyRow,
 } from "../services/stamp-duty.js"
 import { taipeiToday } from "../services/project-status.js"
+import { recomputeBillings } from "../services/billing-store.js"
 
 export const contractsRouter = Router()
 
@@ -248,6 +249,9 @@ contractsRouter.post(
         next(new Error(`POST /projects/${req.params.id}/contracts: ${error?.message}`))
         return
       }
+      // 合約金額是分期請款的分母（模組四第 4 條）。新增／追加後期程就過時了，
+      // 這裡重算，否則使用者要自己回去按一次存檔才會更新。
+      await recomputeBillings(tenantId, req.params.id as string)
       res.status(201).json({ contract: serialize(data as ContractRow) })
     } catch (err) {
       next(err)
@@ -355,6 +359,7 @@ contractsRouter.patch(
         next(new Error(`PATCH /contracts/${req.params.id}: ${error?.message}`))
         return
       }
+      if (b.amount !== undefined) await recomputeBillings(tenantId, row.project_id)
       res.status(200).json({ contract: serialize(data as ContractRow) })
     } catch (err) {
       next(err)
@@ -418,6 +423,7 @@ contractsRouter.delete(
         next(new Error(`DELETE /contracts/${req.params.id}: ${error.message}`))
         return
       }
+      await recomputeBillings(tenantId, current.project_id as string)
       res.status(200).json({ id: req.params.id })
     } catch (err) {
       next(err)
