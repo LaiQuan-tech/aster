@@ -15,11 +15,24 @@ Monorepo（npm workspace + Turbo）｜`apps/web` Next.js 16｜`apps/api` Express
 ## 線上環境
 - Web（Vercel）: https://aster-system.vercel.app
 - API（Vercel）: https://aster-hr-api.vercel.app/health
-- Worker（Railway）: `apps/worker`，排程時鐘（每日出勤結算 02:00、異常偵測 03:00、專案自動封存 04:00、
-  專案示警 04:30、通知投遞每 5 分鐘），全部透過 API 的 `/internal/*` 端點執行；
-  Railway 的建置／啟動設定就是 repo 根目錄的 `railway.json`（這個 repo 只有 worker 一個 Railway 服務）。
-  需要的環境變數：`REDIS_URL`、`ENABLE_WORKER_SCHEDULERS=true`、`API_INTERNAL_URL`、`INTERNAL_JOB_TOKEN`；
-  API 端要對應開 `ENABLE_INTERNAL_JOBS=true` 並設同一把 `INTERNAL_JOB_TOKEN`。
+- Worker（Railway，2026-09-14 上線）: `apps/worker`，排程時鐘（台北時間：每日出勤結算 02:00、
+  異常偵測 03:00、專案自動封存 04:00、專案示警 04:30、通知投遞每 5 分鐘），本身不碰 DB，
+  全部透過 API 的 `/internal/*` 端點執行。Railway 專案 `aster`（帳號 gathertaiwan@gmail.com）
+  底下兩個服務：`Redis`（BullMQ 用）與 `worker`。
+
+  - **部署方式是 `railway up`，不是 GitHub 自動部署**：這個 Railway 帳號沒接 LaiQuan-tech 這個
+    GitHub 組織（`railway add --repo` 回 repo not found），所以改 worker 程式後要在 repo 根目錄跑
+    `railway up -s worker -c`（先 `railway link -p 2136f8c1-04b4-4693-8de6-47c4c1496fc1`）。
+  - **建置／啟動指令設在 Railway 服務設定上，不在 repo**：Railway 已把 `railway.json` 這種
+    config-as-code 列為 deprecated，新服務會直接忽略它（實測：檔案在、設定全沒套上，Railpack 找不到
+    start command 而失敗）。現行設定＝builder Nixpacks、build `npm run build -w @hr/worker`、
+    start `npm run start -w @hr/worker`、healthcheck `/health`。
+  - worker 需要的變數：`REDIS_URL=${{Redis.REDIS_URL}}?family=0`（Railway 內網是 IPv6-only，
+    ioredis 預設只解 IPv4，沒有 `?family=0` 會連不上）、`ENABLE_WORKER_SCHEDULERS=true`、
+    `API_INTERNAL_URL=https://aster-hr-api.vercel.app`、`INTERNAL_JOB_TOKEN`；
+    API 端（Vercel）要對應開 `ENABLE_INTERNAL_JOBS=true` 並設同一把 `INTERNAL_JOB_TOKEN`。
+  - 通知投遞的 email／LINE 管道尚未設定（API 沒有 `RESEND_API_KEY`／`NOTIFICATION_EMAIL_FROM`／
+    `LINE_CHANNEL_ACCESS_TOKEN`／`NOTIFICATION_DEFAULT_CHANNELS`），目前排程只會產生站內通知。
 
 > 舊的 `hr-theta-peach.vercel.app`（更名前的 HRLink 版本）與 Railway 上的 API
 > 皆已停用（API 現在只在 Vercel）。上面三個才是現行環境。
