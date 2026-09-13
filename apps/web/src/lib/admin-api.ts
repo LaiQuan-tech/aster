@@ -1183,6 +1183,8 @@ export interface SalaryStructure {
   allowances: Record<string, unknown>;
   labor_insured_salary?: string | null;
   health_insured_salary?: string | null;
+  /** 勞退自提比例 (0–0.06)，PostgREST 回字串。 */
+  pension_voluntary_rate?: string | null;
 }
 
 export function getSalaryStructure(employeeId: string) {
@@ -1198,6 +1200,7 @@ export function putSalaryStructure(
     hourlyWage?: number;
     laborInsuredSalary?: number | null;
     healthInsuredSalary?: number | null;
+    pensionVoluntaryRate?: number | null;
   },
 ) {
   return apiFetch<{ id: string }>(`/salary/${employeeId}`, {

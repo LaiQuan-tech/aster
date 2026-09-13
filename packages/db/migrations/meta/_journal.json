@@ -253,6 +253,13 @@
       "when": 1789260821208,
       "tag": "0035_giant_stick",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1789312948711,
+      "tag": "0036_pension_voluntary_rate",
+      "breakpoints": true
     }
   ]
 }

@@ -8,8 +8,10 @@ import { employees } from "./employees"
  * and may override it per employee. `hourlyWage` (required, default 0) is the
  * base rate the engine折算s overtime/night against; `baseSalary` feeds 月薪 base,
  * `dailyWage` feeds 按出勤天數 base. `allowances` is an open jsonb bag of fixed
- * add-ons. The unique (tenant_id, employee_id) index makes "one structure per
- * employee" a DB invariant and powers the upsert in the salary API.
+ * add-ons. `pensionVoluntaryRate` is the employee's 勞退自提 ratio; the engine
+ * multiplies it against `laborInsuredSalary`. The unique (tenant_id,
+ * employee_id) index makes "one structure per employee" a DB invariant and
+ * powers the upsert in the salary API.
  */
 export const salaryStructures = pgTable(
   "salary_structures",
@@ -29,6 +31,9 @@ export const salaryStructures = pgTable(
     // 投保級距 (Apollo 保險資料): 勞保/健保投保金額 per government brackets.
     laborInsuredSalary: numeric("labor_insured_salary"),
     healthInsuredSalary: numeric("health_insured_salary"),
+    // 勞工自願提繳退休金比例 (0–0.06，勞退條例 §14 III)。NULL/0 = 不自提。
+    // 上限不做 DB CHECK：法規參數不寫死，由 API 以 @hr/rules 的常數把關。
+    pensionVoluntaryRate: numeric("pension_voluntary_rate"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

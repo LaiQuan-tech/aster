@@ -40,6 +40,8 @@ export default function PayrollAdminPage() {
   const [hourlyWage, setHourlyWage] = useState("");
   const [laborGrade, setLaborGrade] = useState("");
   const [healthGrade, setHealthGrade] = useState("");
+  // 畫面用「%」(0–6)，API 用比例 (0–0.06)
+  const [pensionPct, setPensionPct] = useState("");
   const [employeeKeyword, setEmployeeKeyword] = useState("");
   const [employeeIdentityById, setEmployeeIdentityById] = useState<Record<string, string>>({});
   const [salaryMsg, setSalaryMsg] = useState<string | null>(null);
@@ -129,6 +131,11 @@ export default function PayrollAdminPage() {
       setHourlyWage(salary.hourly_wage ?? "");
       setLaborGrade(salary.labor_insured_salary ?? "");
       setHealthGrade(salary.health_insured_salary ?? "");
+      setPensionPct(
+        salary.pension_voluntary_rate != null
+          ? String(Math.round(Number(salary.pension_voluntary_rate) * 10000) / 100)
+          : "",
+      );
     } catch {
       setMethod("monthly");
       setBaseSalary("");
@@ -136,6 +143,7 @@ export default function PayrollAdminPage() {
       setHourlyWage("");
       setLaborGrade("");
       setHealthGrade("");
+      setPensionPct("");
     }
     try {
       const [nhi, tax] = await Promise.all([getNhiDependents(id), getTaxDependents(id)]);
@@ -162,6 +170,7 @@ export default function PayrollAdminPage() {
         hourlyWage: hourlyWage ? Number(hourlyWage) : 0,
         laborInsuredSalary: laborGrade ? Number(laborGrade) : null,
         healthInsuredSalary: healthGrade ? Number(healthGrade) : null,
+        pensionVoluntaryRate: pensionPct ? Number(pensionPct) / 100 : null,
       });
       setSalaryMsg("已儲存");
     } catch (err) {
@@ -334,6 +343,10 @@ pre{background:#f7f7f7;padding:12px;font-size:12px;overflow:auto}</style></head>
                 <div>
                   <label className={labelCls}>健保投保級距</label>
                   <input type="number" className={inputCls} value={healthGrade} onChange={(e) => setHealthGrade(e.target.value)} />
+                </div>
+                <div>
+                  <label className={labelCls}>勞退自提率（%，0–6）</label>
+                  <input type="number" min={0} max={6} step={0.5} className={inputCls} value={pensionPct} onChange={(e) => setPensionPct(e.target.value)} />
                 </div>
               </div>
               <div className="flex items-center gap-3">

@@ -178,3 +178,50 @@ describe("allowances（定額補貼）與 expenses（實報實銷）", () => {
     expect(fiveArg).toEqual(threeArg);
   });
 });
+
+/**
+ * 勞退自提（勞退條例 §14 III，0–6%）。
+ *
+ * 背景：引擎早就支援 pensionVoluntaryRate，但 salary_structures 一直沒這個欄位，
+ * API 層映射不到 → 每張薪資單都當成 0。補上欄位（migration 0036）後把行為釘住：
+ * 有比例就扣、扣項獨立成一條 line、沒設定時與舊行為完全相同。
+ */
+describe("勞退自提扣項", () => {
+  it("未設定比例 → 扣項 0、明細沒有這條", () => {
+    const slip = computePayslip(oneNormalDay, baseSalary, makeRules());
+    expect(slip.pensionVoluntary).toBe(0);
+    expect(slip.lines.find((l) => l.label === "勞工自願提繳退休金")).toBeUndefined();
+  });
+
+  it("自提 6% → 以勞保投保薪資為基數：38,200 × 6% = 2,292，實發同額減少", () => {
+    const without = computePayslip(oneNormalDay, baseSalary, makeRules());
+    const slip = computePayslip(
+      oneNormalDay,
+      { ...baseSalary, pensionVoluntaryRate: 0.06 },
+      makeRules(),
+    );
+    expect(slip.pensionVoluntary).toBe(2292);
+    expect(slip.net).toBe(without.net - 2292);
+    expect(slip.lines.find((l) => l.label === "勞工自願提繳退休金")?.amount).toBe(-2292);
+  });
+
+  it("★ 比例存的是 0.06 不是 6：若 API 傳百分比進來，扣項會放大 100 倍", () => {
+    const slip = computePayslip(
+      oneNormalDay,
+      { ...baseSalary, pensionVoluntaryRate: 6 },
+      makeRules(),
+    );
+    // 這不是我們要的結果——用來提醒 API/UI 的換算責任在它們那邊
+    expect(slip.pensionVoluntary).toBe(229200);
+  });
+
+  it("自提不依賴 insurance 設定：rule_config 沒 insurance 也照扣", () => {
+    const slip = computePayslip(
+      oneNormalDay,
+      { ...baseSalary, pensionVoluntaryRate: 0.03 },
+      makeRules(false),
+    );
+    expect(slip.laborInsurance).toBe(0);
+    expect(slip.pensionVoluntary).toBe(1146); // 38200 × 3%
+  });
+});

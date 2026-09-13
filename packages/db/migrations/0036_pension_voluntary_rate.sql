@@ -1,0 +1,1 @@
+ALTER TABLE "salary_structures" ADD COLUMN "pension_voluntary_rate" numeric;

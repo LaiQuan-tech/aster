@@ -62,6 +62,7 @@ interface SalaryRow {
   hourly_wage: string | null
   labor_insured_salary: string | null
   health_insured_salary: string | null
+  pension_voluntary_rate: string | null
 }
 
 /** Map a stored salary_structures row → the engine's SalaryStructure (numerics
@@ -70,8 +71,7 @@ interface SalaryRow {
  * 投保薪資必須帶進來：引擎的保費計算是
  * `ins && salary.laborInsuredSalary ? ... : 0`，欄位缺漏時會靜默算成 0，
  * 導致每張薪資單都不扣勞健保、實發金額被高估。
- * （salary_structures 尚無勞退自提率與預支欄位，故 pensionVoluntaryRate /
- *  advance 仍無來源；要支援需先加 migration。） */
+ * 勞退自提率來自 salary_structures.pension_voluntary_rate（migration 0036）。 */
 /**
  * @param advance 本期要從薪資扣回的預支（正值）。來自已核銷的出差預支差額，
  *   **不是** salary_structures 上的欄位——預支是逐期事件，不是薪資結構。
@@ -91,6 +91,8 @@ function toSalaryStructure(
     healthInsuredSalary:
       row.health_insured_salary != null ? Number(row.health_insured_salary) : undefined,
     nhiDependents,
+    pensionVoluntaryRate:
+      row.pension_voluntary_rate != null ? Number(row.pension_voluntary_rate) : undefined,
     advance,
   }
 }
@@ -186,7 +188,7 @@ payrollRouter.post(
       let salQuery = supabaseAdmin
         .from("salary_structures")
         .select(
-          "employee_id, method, base_salary, daily_wage, hourly_wage, labor_insured_salary, health_insured_salary",
+          "employee_id, method, base_salary, daily_wage, hourly_wage, labor_insured_salary, health_insured_salary, pension_voluntary_rate",
         )
         .eq("tenant_id", tenantId)
       if (employeeId) salQuery = salQuery.eq("employee_id", employeeId)

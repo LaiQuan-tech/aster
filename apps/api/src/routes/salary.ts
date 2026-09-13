@@ -1,5 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
+import { PENSION_VOLUNTARY_RATE_MAX } from "@hr/rules"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
@@ -8,7 +9,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 export const salaryRouter = Router()
 
 const SELECT_COLS =
-  "id, tenant_id, employee_id, method, base_salary, daily_wage, hourly_wage, allowances, labor_insured_salary, health_insured_salary, created_at"
+  "id, tenant_id, employee_id, method, base_salary, daily_wage, hourly_wage, allowances, labor_insured_salary, health_insured_salary, pension_voluntary_rate, created_at"
 
 // Numeric columns are returned by PostgREST as strings; the client coerces.
 const upsertSchema = z
@@ -20,6 +21,13 @@ const upsertSchema = z
     allowances: z.record(z.unknown()).optional(),
     laborInsuredSalary: z.number().nullable().optional(),
     healthInsuredSalary: z.number().nullable().optional(),
+    // 勞退自提比例 (0–0.06)，以比例而非百分比儲存，與引擎 SalaryStructure 一致。
+    pensionVoluntaryRate: z
+      .number()
+      .min(0)
+      .max(PENSION_VOLUNTARY_RATE_MAX)
+      .nullable()
+      .optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 
@@ -91,6 +99,8 @@ salaryRouter.put(
       row.labor_insured_salary = parsed.data.laborInsuredSalary
     if (parsed.data.healthInsuredSalary !== undefined)
       row.health_insured_salary = parsed.data.healthInsuredSalary
+    if (parsed.data.pensionVoluntaryRate !== undefined)
+      row.pension_voluntary_rate = parsed.data.pensionVoluntaryRate
 
     try {
       const { data, error } = await supabaseAdmin
