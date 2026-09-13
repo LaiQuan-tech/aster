@@ -7,7 +7,14 @@ import { AdminGate } from "@/components/AdminGate";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
 import { getBranding, type Branding, type Me } from "@/lib/admin-api";
 
-type NavItem = { href: string; label: string; soon?: boolean };
+type NavItem = { href: string; label: string; soon?: boolean; fresh?: boolean };
+
+/**
+ * `fresh: true` = 2026-09-14 這批上線的新功能，名稱前加「＊」讓 Jeff 驗收時一眼認得出來
+ * （新頁面：印花稅備查、日常費用月結、員工預支；大改的既有頁：專案、公告、薪資資料）。
+ * 驗收完把 fresh 拿掉即可，純顯示用。
+ */
+const labelOf = (item: NavItem) => (item.fresh ? `＊${item.label}` : item.label);
 
 /**
  * 選單分組刻意對齊合約賣給客戶的模組（公司形象官網／系統基礎建置／員工帳號權限
@@ -43,8 +50,8 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "獎金自動分配",
     items: [
-      { href: "/admin/projects", label: "專案與成員分潤" },
-      { href: "/admin/stamp-duty", label: "印花稅備查清單" },
+      { href: "/admin/projects", label: "專案與成員分潤", fresh: true },
+      { href: "/admin/stamp-duty", label: "印花稅備查清單", fresh: true },
     ],
   },
   {
@@ -83,11 +90,11 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "人事差勤 · 薪資",
     items: [
-      { href: "/admin/payroll", label: "薪資 / 保險資料" },
+      { href: "/admin/payroll", label: "薪資 / 保險資料", fresh: true },
       { href: "/admin/payslips", label: "薪資明細表", soon: true },
       { href: "/admin/payroll-tax", label: "所得稅 / 補充保費" },
-      { href: "/admin/expenses", label: "日常費用月結" },
-      { href: "/admin/advances", label: "員工預支" },
+      { href: "/admin/expenses", label: "日常費用月結", fresh: true },
+      { href: "/admin/advances", label: "員工預支", fresh: true },
     ],
   },
   {
@@ -100,7 +107,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "公司公告",
     items: [
-      { href: "/admin/announcements", label: "最新消息 / 公告" },
+      { href: "/admin/announcements", label: "最新消息 / 公告", fresh: true },
       { href: "/admin/company-space", label: "Company Space" },
       { href: "/admin/company-info", label: "公司福利 / 職安資訊", soon: true },
     ],
@@ -187,7 +194,7 @@ function Shell({ me, children }: { me: Me; children: React.ReactNode }) {
                       }`}
                       style={isActive(item.href) ? { backgroundColor: "var(--brand)" } : undefined}
                     >
-                      {item.label}
+                      {labelOf(item)}
                     </Link>
                   ),
                 )}
@@ -259,7 +266,7 @@ function Shell({ me, children }: { me: Me; children: React.ReactNode }) {
                   }`}
                   style={isActive(item.href) ? { backgroundColor: "var(--brand)" } : undefined}
                 >
-                  {item.label}
+                  {labelOf(item)}
                 </Link>
               ),
             )}
