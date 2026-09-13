@@ -138,8 +138,10 @@ async function registerSchedulers() {
     logger.error({ queue: "attendance", err: err.message }, "worker error"),
   );
 
+  // 從 SCHEDULER_IDS 動態列出，避免這行訊息與實際註冊的排程數量各自維護而不同步。
   logger.info(
-    "Job schedulers registered (attendance daily, detection daily, project auto-archive daily, notifications every 5 minutes)",
+    { schedulers: SCHEDULER_IDS },
+    `Job schedulers registered (${SCHEDULER_IDS.length}): ${SCHEDULER_IDS.join(", ")}`,
   );
 }
 
