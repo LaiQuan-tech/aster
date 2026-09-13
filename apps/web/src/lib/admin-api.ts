@@ -1219,6 +1219,8 @@ export interface Payslip {
   attendance_bonus: string;
   gross: string;
   status: string;
+  /** 列表也帶 breakdown（API SELECT_COLS 含它）；舊資料可能沒有。 */
+  breakdown?: PayslipBreakdown | null;
 }
 
 export function runPayroll(period: string, employeeId?: string) {
@@ -1572,12 +1574,37 @@ export interface PayrollReportRow {
   overtimePay: number;
   nightPay: number;
   attendanceBonus: number;
+  allowances: number;
   gross: number;
+  laborInsurance: number;
+  healthInsurance: number;
+  pensionVoluntary: number;
+  advance: number;
+  totalDeductions: number;
+  expenses: number;
+  net: number;
+  status: string;
 }
 
 export interface PayrollReport {
   rows: PayrollReportRow[];
-  total: { gross: number };
+  total: { gross: number; totalDeductions: number; expenses: number; net: number };
+}
+
+/** 引擎 PayslipResult 存進 payslips.breakdown 的部分欄位（薪資明細表用）。 */
+export interface PayslipBreakdown {
+  allowances?: number;
+  laborInsurance?: number;
+  healthInsurance?: number;
+  pensionVoluntary?: number;
+  advance?: number;
+  totalDeductions?: number;
+  expenses?: number;
+  net?: number;
+  attendanceDeduction?: number;
+  compTimeMinutes?: number;
+  lines?: { label: string; amount: number }[];
+  overtimeSegments?: { when: string; multiplier: number; hours: number; amount: number }[];
 }
 
 export interface LeaveReportSummaryRow {

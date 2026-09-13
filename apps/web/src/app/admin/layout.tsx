@@ -91,7 +91,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     title: "人事差勤 · 薪資",
     items: [
       { href: "/admin/payroll", label: "薪資 / 保險資料", fresh: true },
-      { href: "/admin/payslips", label: "薪資明細表", soon: true },
+      { href: "/admin/payslips", label: "薪資明細表", fresh: true },
       { href: "/admin/payroll-tax", label: "所得稅 / 補充保費" },
       { href: "/admin/expenses", label: "日常費用月結", fresh: true },
       { href: "/admin/advances", label: "員工預支", fresh: true },

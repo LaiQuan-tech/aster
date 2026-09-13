@@ -186,12 +186,22 @@ interface PayslipRow {
   night_pay: string | number
   attendance_bonus: string | number
   gross: string | number
+  status: string
+  /** 引擎的 PayslipResult 整包；扣項與實發只存在這裡（payslips 表只有應發側欄位）。 */
+  breakdown: Record<string, unknown> | null
 }
+
+const bdNum = (bd: Record<string, unknown> | null, key: string) =>
+  bd && typeof bd[key] === "number" && Number.isFinite(bd[key] as number) ? (bd[key] as number) : 0
 
 /**
  * GET /reports/payroll?period= — per-employee payslip lines for the period plus
- * a total gross. Numeric columns come back from PostgREST as strings, so they
- * are coerced to numbers for the sums (and the JSON rows expose numbers).
+ * totals. Numeric columns come back from PostgREST as strings, so they are
+ * coerced to numbers for the sums (and the JSON rows expose numbers).
+ *
+ * 2026-09-14 補扣項側：工資清冊（勞基法 §23 II）要記到「工資各項目計算方式明細」，
+ * 只有應發側不算清冊。扣項與實發從 breakdown（引擎 PayslipResult）取，
+ * 舊薪資單沒有 breakdown 的欄位一律以 0 呈現。
  */
 reportsRouter.get(
   "/reports/payroll",
@@ -221,7 +231,7 @@ reportsRouter.get(
 
       const { data: slips, error: psErr } = await supabaseAdmin
         .from("payslips")
-        .select("employee_id, base, overtime_pay, night_pay, attendance_bonus, gross")
+        .select("employee_id, base, overtime_pay, night_pay, attendance_bonus, gross, status, breakdown")
         .eq("tenant_id", tenantId)
         .eq("period", period)
       if (psErr) {
@@ -236,11 +246,27 @@ reportsRouter.get(
         overtimePay: Number(s.overtime_pay),
         nightPay: Number(s.night_pay),
         attendanceBonus: Number(s.attendance_bonus),
+        allowances: bdNum(s.breakdown, "allowances"),
         gross: Number(s.gross),
+        laborInsurance: bdNum(s.breakdown, "laborInsurance"),
+        healthInsurance: bdNum(s.breakdown, "healthInsurance"),
+        pensionVoluntary: bdNum(s.breakdown, "pensionVoluntary"),
+        advance: bdNum(s.breakdown, "advance"),
+        totalDeductions: bdNum(s.breakdown, "totalDeductions"),
+        expenses: bdNum(s.breakdown, "expenses"),
+        net: s.breakdown && typeof s.breakdown.net === "number" ? (s.breakdown.net as number) : Number(s.gross),
+        status: s.status,
       }))
       rows.sort((x, y) => x.employeeName.localeCompare(y.employeeName))
 
-      const total = { gross: rows.reduce((s, r) => s + r.gross, 0) }
+      const sum = (key: keyof (typeof rows)[number]) =>
+        rows.reduce((acc, r) => acc + (typeof r[key] === "number" ? (r[key] as number) : 0), 0)
+      const total = {
+        gross: sum("gross"),
+        totalDeductions: sum("totalDeductions"),
+        expenses: sum("expenses"),
+        net: sum("net"),
+      }
 
       // CSV gets the per-employee rows plus an appended total row.
       const csvRows: Array<Record<string, unknown>> = [
@@ -248,11 +274,20 @@ reportsRouter.get(
         {
           employeeId: "",
           employeeName: "合計",
-          base: "",
-          overtimePay: "",
-          nightPay: "",
-          attendanceBonus: "",
+          base: sum("base"),
+          overtimePay: sum("overtimePay"),
+          nightPay: sum("nightPay"),
+          attendanceBonus: sum("attendanceBonus"),
+          allowances: sum("allowances"),
           gross: total.gross,
+          laborInsurance: sum("laborInsurance"),
+          healthInsurance: sum("healthInsurance"),
+          pensionVoluntary: sum("pensionVoluntary"),
+          advance: sum("advance"),
+          totalDeductions: total.totalDeductions,
+          expenses: total.expenses,
+          net: total.net,
+          status: "",
         },
       ]
 
@@ -265,7 +300,16 @@ reportsRouter.get(
           { key: "overtimePay", label: "加班費" },
           { key: "nightPay", label: "夜間加給" },
           { key: "attendanceBonus", label: "全勤獎金" },
+          { key: "allowances", label: "定額補貼" },
           { key: "gross", label: "應發合計" },
+          { key: "laborInsurance", label: "勞保自付" },
+          { key: "healthInsurance", label: "健保自付" },
+          { key: "pensionVoluntary", label: "勞退自提" },
+          { key: "advance", label: "預支扣回" },
+          { key: "totalDeductions", label: "應扣合計" },
+          { key: "expenses", label: "代墊支出" },
+          { key: "net", label: "實發金額" },
+          { key: "status", label: "狀態" },
         ],
         rows: csvRows,
       })

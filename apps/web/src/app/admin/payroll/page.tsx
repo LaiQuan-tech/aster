@@ -1,17 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { Card, PageHeader, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
-import { apiDownload } from "@/lib/api-client";
 import {
   getEmployees,
   getEmployeeProfile,
   getSalaryStructure,
   putSalaryStructure,
   runPayroll,
-  getPayslips,
-  getPayslip,
-  finalizePayslip,
   getNhiDependents,
   addNhiDependent,
   deleteNhiDependent,
@@ -19,7 +16,6 @@ import {
   addTaxDependent,
   deleteTaxDependent,
   type Employee,
-  type Payslip,
   type NhiDependent,
   type TaxDependent,
 } from "@/lib/admin-api";
@@ -56,13 +52,11 @@ export default function PayrollAdminPage() {
   const [taxIdNumber, setTaxIdNumber] = useState("");
   const [taxBirthYear, setTaxBirthYear] = useState("");
 
-  // 執行薪資作業 + 查詢/列印
+  // 執行薪資作業（查詢／列印／定案在薪資明細表 /admin/payslips）
   const currentPeriod = new Date().toISOString().slice(0, 7);
   const [runPeriod, setRunPeriod] = useState(currentPeriod);
   const [runEmployeeId, setRunEmployeeId] = useState("");
   const [runMsg, setRunMsg] = useState<string | null>(null);
-  const [listPeriod, setListPeriod] = useState(currentPeriod);
-  const [payslips, setPayslips] = useState<Payslip[]>([]);
 
   const visibleEmployees = useMemo(() => {
     const term = employeeKeyword.trim().toLowerCase();
@@ -73,20 +67,6 @@ export default function PayrollAdminPage() {
         .some((value) => String(value).toLowerCase().includes(term));
     });
   }, [employeeIdentityById, employeeKeyword, employees]);
-
-  const payslipSummary = useMemo(() => {
-    return payslips.reduce(
-      (summary, payslip) => {
-        summary.gross += Number(payslip.gross);
-        summary.overtime += Number(payslip.overtime_pay);
-        summary.night += Number(payslip.night_pay);
-        summary.bonus += Number(payslip.attendance_bonus);
-        summary.draft += payslip.status === "finalized" ? 0 : 1;
-        return summary;
-      },
-      { gross: 0, overtime: 0, night: 0, bonus: 0, draft: 0 },
-    );
-  }, [payslips]);
 
   useEffect(() => {
     let active = true;
@@ -220,25 +200,10 @@ export default function PayrollAdminPage() {
     try {
       const result = await runPayroll(runPeriod, runEmployeeId || undefined);
       setRunMsg(`已執行 ${runPeriod} 薪資作業：產生 ${result.generated} 筆，略過已定案 ${result.skipped.length} 筆`);
-      if (listPeriod === runPeriod) await loadPayslips();
     } catch (err) {
       setRunMsg(err instanceof Error ? err.message : "執行失敗");
     }
   }
-
-  const loadPayslips = useCallback(async () => {
-    try {
-      const res = await getPayslips(listPeriod || undefined);
-      setPayslips(res.payslips);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "載入薪資單失敗");
-    }
-  }, [listPeriod]);
-
-  useEffect(() => {
-    void loadPayslips();
-  }, [loadPayslips]);
 
   const empName = (id: string) => {
     const employee = employees.find((item) => item.id === id);
@@ -248,40 +213,9 @@ export default function PayrollAdminPage() {
   const selectedIdentity = empId ? employeeIdentityById[empId] : "";
   const taxStatusLabel = (status: TaxDependent["support_status"]) => (status === "claimed" ? "扶養中" : status);
 
-  async function finalizeAll() {
-    const drafts = payslips.filter((payslip) => payslip.status !== "finalized");
-    if (drafts.length === 0) return;
-    for (const payslip of drafts) {
-      await finalizePayslip(payslip.id);
-    }
-    await loadPayslips();
-  }
-
-  async function printPayslip(id: string) {
-    try {
-      const { payslip } = await getPayslip(id);
-      const bd = JSON.stringify(payslip.breakdown ?? {}, null, 2);
-      const w = window.open("", "_blank", "width=720,height=900");
-      if (!w) return;
-      w.document.write(`<!doctype html><html><head><title>薪資單 ${payslip.period}</title>
-<style>body{font-family:ui-sans-serif,system-ui,'Noto Sans TC';padding:32px;color:#111}
-h1{font-size:20px}table{border-collapse:collapse;width:100%;margin-top:16px}
-td,th{border:1px solid #ddd;padding:8px;text-align:left;font-size:14px}
-pre{background:#f7f7f7;padding:12px;font-size:12px;overflow:auto}</style></head><body>
-<h1>薪資單 — ${empName(payslip.employee_id)}（${payslip.period}）</h1>
-<table><tr><th>本薪</th><th>加班費</th><th>夜間加給</th><th>全勤獎金</th><th>應發合計</th></tr>
-<tr><td>${payslip.base}</td><td>${payslip.overtime_pay}</td><td>${payslip.night_pay}</td><td>${payslip.attendance_bonus}</td><td><b>${payslip.gross}</b></td></tr></table>
-<h2 style="font-size:15px;margin-top:20px">計算明細</h2><pre>${bd.replace(/</g, "&lt;")}</pre>
-<script>window.print()</script></body></html>`);
-      w.document.close();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "列印失敗");
-    }
-  }
-
   return (
     <>
-      <PageHeader title="薪資作業" desc="員工薪資保險資料、執行薪資作業與薪資單查詢" />
+      <PageHeader title="薪資作業" desc="員工薪資保險資料與執行薪資作業；薪資單查詢與定案在薪資明細表" />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
 
       <Card>
@@ -438,100 +372,13 @@ pre{background:#f7f7f7;padding:12px;font-size:12px;overflow:auto}</style></head>
       </Card>
 
       <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">查詢/列印（薪資單）</h2>
-        <div className="mb-4 flex flex-wrap items-end gap-3">
-          <div>
-            <label className={labelCls}>期間</label>
-            <input type="month" className={inputCls} value={listPeriod} onChange={(e) => setListPeriod(e.target.value)} />
-          </div>
-          <PrimaryButton type="button" onClick={() => void loadPayslips()}>查詢</PrimaryButton>
-          <button
-            type="button"
-            onClick={() => apiDownload(`/reports/payroll?period=${listPeriod}&format=csv`, `薪資報表_${listPeriod}.csv`).catch((downloadError) => setError(downloadError.message))}
-            className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700"
-          >
-            匯出 CSV
-          </button>
-          <button
-            type="button"
-            onClick={() => void finalizeAll()}
-            disabled={payslipSummary.draft === 0}
-            className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 disabled:opacity-50"
-          >
-            全部定案
-          </button>
-        </div>
-        <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
-          <div className="rounded-xl bg-slate-50 p-4">
-            <p className="text-xs text-slate-500">應發合計</p>
-            <p className="mt-1 text-xl font-semibold text-slate-900">{payslipSummary.gross}</p>
-          </div>
-          <div className="rounded-xl bg-blue-50 p-4">
-            <p className="text-xs text-blue-600">加班費</p>
-            <p className="mt-1 text-xl font-semibold text-blue-700">{payslipSummary.overtime}</p>
-          </div>
-          <div className="rounded-xl bg-indigo-50 p-4">
-            <p className="text-xs text-indigo-600">夜間加給</p>
-            <p className="mt-1 text-xl font-semibold text-indigo-700">{payslipSummary.night}</p>
-          </div>
-          <div className="rounded-xl bg-amber-50 p-4">
-            <p className="text-xs text-amber-700">草稿筆數</p>
-            <p className="mt-1 text-xl font-semibold text-amber-800">{payslipSummary.draft}</p>
-          </div>
-        </div>
-        {payslips.length === 0 ? (
-          <Empty>查無薪資單</Empty>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead>
-                <tr className="border-b border-gray-200 text-xs text-gray-500">
-                  <th className="py-2 pr-4">員工</th>
-                  <th className="py-2 pr-4">期間</th>
-                  <th className="py-2 pr-4">本薪</th>
-                  <th className="py-2 pr-4">加班費</th>
-                  <th className="py-2 pr-4">夜間加給</th>
-                  <th className="py-2 pr-4">全勤獎金</th>
-                  <th className="py-2 pr-4">應發合計</th>
-                  <th className="py-2 pr-4">狀態</th>
-                  <th className="py-2">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {payslips.map((p) => (
-                  <tr key={p.id} className="border-b border-gray-50">
-                    <td className="py-2 pr-4 font-medium text-gray-800">{empName(p.employee_id)}</td>
-                    <td className="py-2 pr-4">{p.period}</td>
-                    <td className="py-2 pr-4">{p.base}</td>
-                    <td className="py-2 pr-4">{p.overtime_pay}</td>
-                    <td className="py-2 pr-4">{p.night_pay}</td>
-                    <td className="py-2 pr-4">{p.attendance_bonus}</td>
-                    <td className="py-2 pr-4 font-medium">{p.gross}</td>
-                    <td className="py-2 pr-4">
-                      <span className={`rounded-full px-2 py-0.5 text-xs ${p.status === "finalized" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
-                        {p.status === "finalized" ? "已定案" : "草稿"}
-                      </span>
-                    </td>
-                    <td className="py-2">
-                      <button onClick={() => printPayslip(p.id)} className="mr-3 text-sm text-gray-600 hover:underline">
-                        列印
-                      </button>
-                      {p.status !== "finalized" && (
-                        <button
-                          onClick={() => finalizePayslip(p.id).then(() => loadPayslips())}
-                          className="text-sm font-medium"
-                          style={{ color: "var(--brand)" }}
-                        >
-                          定案
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <p className="text-sm text-gray-600">
+          薪資單的查詢、逐項明細、列印、匯出工資清冊與定案，都在
+          <Link href="/admin/payslips" className="ml-1 font-medium hover:underline" style={{ color: "var(--brand)" }}>
+            薪資明細表
+          </Link>
+          。
+        </p>
       </Card>
     </>
   );
