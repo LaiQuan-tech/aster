@@ -2,10 +2,10 @@
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "npm run build -w @hr/rules && npm run build -w @hr/api"
+    "buildCommand": "npm run build -w @hr/worker"
   },
   "deploy": {
-    "startCommand": "sh -c 'if [ -n \"$DATABASE_URL\" ]; then npm run db:migrate; else echo \"DATABASE_URL missing, skipping db:migrate\"; fi; npm run start -w @hr/api'",
+    "startCommand": "npm run start -w @hr/worker",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 100,
     "restartPolicyType": "ON_FAILURE"
