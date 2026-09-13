@@ -4,5 +4,15 @@
   "installCommand": "cd ../.. && npm install",
   "framework": null,
   "outputDirectory": "public",
-  "rewrites": [{ "source": "/(.*)", "destination": "/api" }]
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api"
+    }
+  ],
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 60
+    }
+  }
 }

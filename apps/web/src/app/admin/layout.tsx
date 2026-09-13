@@ -42,8 +42,8 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "AI 知識庫",
     items: [
-      { href: "/admin/knowledge", label: "文件庫 · 語意搜尋", soon: true },
-      { href: "/admin/knowledge/ask", label: "AI 文件問答", soon: true },
+      { href: "/admin/knowledge", label: "文件庫 · 語意搜尋", fresh: true },
+      { href: "/admin/knowledge/ask", label: "AI 文件問答", fresh: true },
       { href: "/admin/vendors", label: "廠商名冊 · 名片建檔", fresh: true },
     ],
   },
