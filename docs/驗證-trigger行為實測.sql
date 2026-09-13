@@ -73,3 +73,37 @@ select table_name, action, db_user, at
   from public.audit_logs
  order by at desc
  limit 5;
+
+
+-- ── 實測 E：稽核 trigger（D 的替代——rule_configs 空的時候 D 什麼都測不到）────
+--
+-- 2026-09-14 正式庫實跑：rule_configs 0 列，D 無結論；改用這段：在子交易裡 insert 一筆
+-- 到有掛 audit_all 的 expense_categories、數 audit_logs、再強制回滾。PL/pgSQL 變數在
+-- 例外後保留（只有 DB 變更被回滾），所以計數拿得出來、資料不留。結果：0 → 1，通過。
+create or replace function public._probe_audit()
+returns text language plpgsql as $$
+declare
+  v_tenant uuid;
+  v_before bigint;
+  v_after  bigint;
+begin
+  select id into v_tenant from public.tenants where status = 'active' limit 1;
+  if v_tenant is null then return '略過（沒有正式租戶）'; end if;
+  select count(*) into v_before from public.audit_logs where table_name = 'expense_categories';
+  begin
+    insert into public.expense_categories (tenant_id, code, name) values (v_tenant, '_PROBE', '_probe_稽核測試');
+    select count(*) into v_after from public.audit_logs where table_name = 'expense_categories';
+    raise exception 'ROLLBACK_PROBE';
+  exception
+    when others then
+      if sqlerrm <> 'ROLLBACK_PROBE' then
+        return '⚠️ ' || sqlerrm || ' (' || sqlstate || ')';
+      end if;
+  end;
+  return case when v_after > v_before
+              then '✅ 通過 — insert 產生了稽核列（' || v_before || ' → ' || v_after || '，已回滾）'
+              else '❌ 失敗 — insert 後 audit_logs 沒增加' end;
+end $$;
+
+select public._probe_audit() as "稽核 trigger 實測";
+drop function public._probe_audit();
