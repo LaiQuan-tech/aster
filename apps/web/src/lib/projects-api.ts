@@ -99,6 +99,8 @@ export interface ShareAdjustment {
 
 export interface ProjectDocument {
   id: string
+  /** 有值 = 合約掃描檔（掛在該合約上）；null = 專案層級文件。 */
+  contractId: string | null
   fileName: string
   sizeBytes: number
   contentType: string | null
@@ -487,7 +489,8 @@ async function fileToBase64(file: File): Promise<string> {
   return btoa(binary)
 }
 
-export async function uploadProjectDocument(projectId: string, file: File) {
+/** 帶 contractId 就是合約掃描檔；後端會驗合約屬於此專案且未作廢，授權比照合約（HR / lead / 部門主管）。 */
+export async function uploadProjectDocument(projectId: string, file: File, contractId?: string) {
   const dataBase64 = await fileToBase64(file)
   return apiFetch<{ id: string; sizeBytes: number }>(`/projects/${projectId}/documents`, {
     method: "POST",
@@ -495,6 +498,7 @@ export async function uploadProjectDocument(projectId: string, file: File) {
       fileName: file.name,
       contentType: file.type || "application/octet-stream",
       dataBase64,
+      ...(contractId ? { contractId } : {}),
     }),
   })
 }

@@ -101,9 +101,12 @@ function ProjectDetailInner() {
                 <ul className="divide-y">
                   {documents.map((doc) => (
                     <li key={doc.id} className="flex items-center justify-between py-2 text-sm">
-                      <a href={doc.url ?? "#"} target="_blank" rel="noreferrer" className="font-medium" style={{ color: "var(--brand)" }}>
-                        {doc.fileName}
-                      </a>
+                      <span className="min-w-0">
+                        <a href={doc.url ?? "#"} target="_blank" rel="noreferrer" className="font-medium" style={{ color: "var(--brand)" }}>
+                          {doc.fileName}
+                        </a>
+                        {doc.contractId && <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500">合約掃描檔</span>}
+                      </span>
                       <span className="text-xs text-gray-400">{Math.round(doc.sizeBytes / 1024)} KB</span>
                     </li>
                   ))}

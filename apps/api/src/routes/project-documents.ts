@@ -14,6 +14,8 @@ const uploadSchema = z.object({
   fileName: z.string().trim().min(1).max(200),
   contentType: z.string().trim().min(1).max(120),
   dataBase64: z.string().min(1),
+  /** 帶了就是合約掃描檔：掛在該合約上（合約必須屬於這個專案且未作廢）。 */
+  contractId: z.string().uuid().optional(),
 })
 
 /** 專案是否存在（回 {id, deptId, leadEmpId}）；查無回 null。 */
@@ -26,6 +28,35 @@ async function loadProject(tenantId: string, projectId: string) {
     .maybeSingle()
   if (error) throw new Error(`project-documents loadProject: ${error.message}`)
   return data as { id: string; dept_id: string | null; lead_emp_id: string | null } | null
+}
+
+/** 合約層授權（比照 contracts.ts 的 canManage）：HR / lead / 部門主管。
+ * 一般專案成員可以傳專案文件，但合約掃描檔跟合約本身走同一條線。 */
+async function canManageContracts(
+  tenantId: string,
+  self: { id: string; role: string },
+  project: { dept_id: string | null; lead_emp_id: string | null },
+): Promise<boolean> {
+  if (isHrRole(self.role) || project.lead_emp_id === self.id) return true
+  if (project.dept_id) {
+    const managed = await managedDeptIds(tenantId, self.id)
+    if (managed.includes(project.dept_id)) return true
+  }
+  return false
+}
+
+/** 合約是否屬於此專案且未作廢；不是就回 null（不分「不存在」與「別的專案」，避免洩漏）。 */
+async function loadActiveContract(tenantId: string, projectId: string, contractId: string) {
+  const { data, error } = await supabaseAdmin
+    .from("contracts")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("project_id", projectId)
+    .eq("id", contractId)
+    .is("deleted_at", null)
+    .maybeSingle()
+  if (error) throw new Error(`project-documents loadActiveContract: ${error.message}`)
+  return data ? { id: data.id as string } : null
 }
 
 /** 上傳/刪除授權：HR / 專案成員(任一角色) / lead / 該專案所屬部門主管。 */
@@ -67,7 +98,7 @@ projectDocumentsRouter.get(
       }
       const { data, error } = await supabaseAdmin
         .from("project_documents")
-        .select("id, file_name, storage_path, size_bytes, content_type, created_at")
+        .select("id, contract_id, file_name, storage_path, size_bytes, content_type, created_at")
         .eq("tenant_id", tenantId)
         .eq("project_id", projectId)
         .order("created_at", { ascending: false })
@@ -83,6 +114,7 @@ projectDocumentsRouter.get(
             .createSignedUrl(r.storage_path as string, 3600)
           return {
             id: r.id,
+            contractId: (r.contract_id as string | null) ?? null,
             fileName: r.file_name,
             sizeBytes: r.size_bytes,
             contentType: r.content_type,
@@ -131,6 +163,20 @@ projectDocumentsRouter.post(
         res.status(403).json({ error: "forbidden" })
         return
       }
+      // 合約掃描檔：先驗合約真的在這個專案底下且未作廢，再驗合約層授權。
+      // 歸屬查詢不分「不存在」與「別的專案」，拿別專案的 id 來試探只會得到同一個 400。
+      const contractId = parsed.data.contractId ?? null
+      if (contractId) {
+        const contract = await loadActiveContract(tenantId, projectId, contractId)
+        if (!contract) {
+          res.status(400).json({ error: "contract_not_in_project" })
+          return
+        }
+        if (!(await canManageContracts(tenantId, self, project))) {
+          res.status(403).json({ error: "forbidden" })
+          return
+        }
+      }
 
       let bytes: Buffer
       try {
@@ -159,6 +205,7 @@ projectDocumentsRouter.post(
         .insert({
           tenant_id: tenantId,
           project_id: projectId,
+          contract_id: contractId,
           file_name: parsed.data.fileName,
           storage_path: path,
           size_bytes: bytes.length,
@@ -206,7 +253,7 @@ projectDocumentsRouter.delete(
       }
       const { data: doc, error: docErr } = await supabaseAdmin
         .from("project_documents")
-        .select("id, storage_path, uploaded_by_emp_id")
+        .select("id, contract_id, storage_path, uploaded_by_emp_id")
         .eq("tenant_id", tenantId)
         .eq("project_id", projectId)
         .eq("id", docId)
@@ -220,7 +267,12 @@ projectDocumentsRouter.delete(
         return
       }
       const isUploader = (doc.uploaded_by_emp_id as string | null) === self.id
-      if (!isUploader && !(await canWriteDocs(tenantId, self, project, projectId))) {
+      const allowed = isUploader
+        ? true
+        : doc.contract_id
+          ? await canManageContracts(tenantId, self, project)
+          : await canWriteDocs(tenantId, self, project, projectId)
+      if (!allowed) {
         res.status(403).json({ error: "forbidden" })
         return
       }

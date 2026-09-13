@@ -78,6 +78,9 @@ export default function AdminProjectDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // 合約掃描檔共用一個隱藏 input；點哪一列的「上傳掃描檔」就把該合約 id 暫存起來
+  const contractFileRef = useRef<HTMLInputElement>(null);
+  const pendingContractId = useRef<string | null>(null);
 
   // 合約／報價單（模組四第 3 條）
   const [cDocType, setCDocType] = useState<DocType>("quotation");
@@ -375,6 +378,39 @@ export default function AdminProjectDetailPage() {
     }
   }
 
+  function pickContractScan(contractId: string) {
+    pendingContractId.current = contractId;
+    contractFileRef.current?.click();
+  }
+
+  async function onUploadContractScan(file: File | undefined) {
+    const contractId = pendingContractId.current;
+    pendingContractId.current = null;
+    if (contractFileRef.current) contractFileRef.current.value = "";
+    if (!file || !contractId) return;
+    setError(null);
+    try {
+      await uploadProjectDocument(projectId, file, contractId);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "上傳失敗");
+    }
+  }
+
+  // 掃描檔跟著合約列顯示，專案文件區只列專案層級的；作廢合約的掃描檔會退回專案文件區（帶標記），不會消失。
+  const activeContractIds = new Set(contracts.map((c) => c.id));
+  const scansByContract = new Map<string, ProjectDocument[]>();
+  const projectLevelDocs: ProjectDocument[] = [];
+  for (const doc of documents) {
+    if (doc.contractId && activeContractIds.has(doc.contractId)) {
+      const list = scansByContract.get(doc.contractId) ?? [];
+      list.push(doc);
+      scansByContract.set(doc.contractId, list);
+    } else {
+      projectLevelDocs.push(doc);
+    }
+  }
+
   async function removeDoc(doc: ProjectDocument) {
     if (!confirm(`確定刪除文件「${doc.fileName}」？`)) return;
     setError(null);
@@ -498,6 +534,7 @@ export default function AdminProjectDetailPage() {
                   <th className="py-2 pr-3">簽訂日</th>
                   <th className="py-2 pr-3 text-right">印花稅</th>
                   <th className="py-2 pr-3">貼花</th>
+                  <th className="py-2 pr-3">掃描檔</th>
                   <th className="py-2 pr-3"></th>
                 </tr>
               </thead>
@@ -547,6 +584,27 @@ export default function AdminProjectDetailPage() {
                         </button>
                       )}
                     </td>
+                    <td className="py-2 pr-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {(scansByContract.get(c.id) ?? []).map((doc) => (
+                          <span key={doc.id} className="inline-flex items-center gap-1">
+                            <a href={doc.url ?? "#"} target="_blank" rel="noreferrer" className="text-xs" style={{ color: "var(--brand)" }} title={`${Math.round(doc.sizeBytes / 1024)} KB`}>
+                              {doc.fileName}
+                            </a>
+                            <button type="button" className="text-xs text-gray-300 hover:text-red-600" onClick={() => removeDoc(doc)} title="刪除掃描檔">
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                        <button
+                          type="button"
+                          className="rounded border border-gray-200 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-50"
+                          onClick={() => pickContractScan(c.id)}
+                        >
+                          上傳掃描檔
+                        </button>
+                      </div>
+                    </td>
                     <td className="py-2 pr-3 text-right">
                       <button
                         type="button"
@@ -562,6 +620,13 @@ export default function AdminProjectDetailPage() {
             </table>
           </div>
         )}
+
+        <input
+          ref={contractFileRef}
+          type="file"
+          className="hidden"
+          onChange={(e) => onUploadContractScan(e.target.files?.[0])}
+        />
 
         <div className="mt-4 border-t pt-4">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -1039,17 +1104,18 @@ export default function AdminProjectDetailPage() {
           className="mb-3 block text-sm"
           onChange={(e) => onUpload(e.target.files?.[0])}
         />
-        {documents.length === 0 ? (
+        {projectLevelDocs.length === 0 ? (
           <Empty>尚無文件</Empty>
         ) : (
           <ul className="divide-y">
-            {documents.map((doc) => (
+            {projectLevelDocs.map((doc) => (
               <li key={doc.id} className="flex items-center justify-between py-2 text-sm">
                 <div className="min-w-0">
                   <a href={doc.url ?? "#"} target="_blank" rel="noreferrer" className="font-medium" style={{ color: "var(--brand)" }}>
                     {doc.fileName}
                   </a>
                   <span className="ml-2 text-xs text-gray-400">{Math.round(doc.sizeBytes / 1024)} KB</span>
+                  {doc.contractId && <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500">作廢合約的掃描檔</span>}
                 </div>
                 <button onClick={() => removeDoc(doc)} className="text-xs text-red-600 hover:underline">刪除</button>
               </li>
