@@ -101,7 +101,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     title: "人事差勤 · 招募與考核",
     items: [
       { href: "/admin/recruitment", label: "招募 ATS" },
-      { href: "/admin/kpi", label: "績效考核", soon: true },
+      { href: "/admin/kpi", label: "績效考核", fresh: true },
     ],
   },
   {
