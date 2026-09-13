@@ -9,8 +9,12 @@
  * - 一個檔案 = 一次 simple-protocol 多語句查詢 = **一個隱含交易**。檔案中任何一條
  *   失敗，整個檔案回滾，資料庫回到執行前的狀態；後面的檔案不會再跑。
  *   這與把整檔貼進 SQL Editor 執行的語意相同。
- * - 連線字串只從環境變數 DATABASE_URL 或 repo 根目錄 .env 讀，**永遠不印出來**；
- *   錯誤只印 postgres 回的訊息。金鑰不要貼進對話、不要寫進任何會 commit 的檔案。
+ * - 連線資訊只從環境變數（或 repo 根目錄 .env）讀，**永遠不印出來**；錯誤只印 postgres
+ *   回的訊息。金鑰不要貼進對話、不要寫進任何會 commit 的檔案。兩種寫法擇一：
+ *     DATABASE_URL=postgresql://user:pass@host:5432/postgres
+ *     PGHOST= / PGPORT= / PGDATABASE= / PGUSER= / PGPASSWORD=   （密碼有特殊字元時用這種，免 URL 編碼）
+ *   Supabase 的 direct host（db.<ref>.supabase.co）只有 IPv6；沒有 IPv6 的機器要用
+ *   Session pooler（aws-0-<region>.pooler.supabase.com:5432，使用者 postgres.<ref>）。
  * - --dry-run：只讀檔、列出將執行的檔案與大小，不連線。
  */
 import { readFileSync, existsSync } from "node:fs"
@@ -58,21 +62,31 @@ if (dryRun) process.exit(0)
 
 loadDotEnv()
 const url = process.env.DATABASE_URL
-if (!url) {
+const pg = {
+  host: process.env.PGHOST,
+  port: Number(process.env.PGPORT || 5432),
+  database: process.env.PGDATABASE || "postgres",
+  username: process.env.PGUSER,
+  password: process.env.PGPASSWORD,
+}
+if (!url && !(pg.host && pg.username && pg.password)) {
   console.error(
-    "找不到 DATABASE_URL。到 Supabase → Project Settings → Database → Connection string" +
-      "（選 Session pooler），把它填進 repo 根目錄 .env 的 DATABASE_URL=（.env 已在 .gitignore）。",
+    "找不到連線資訊。在 repo 根目錄 .env 填 DATABASE_URL=，或拆開填 PGHOST / PGPORT / " +
+      "PGDATABASE / PGUSER / PGPASSWORD（.env 已在 .gitignore，不要貼進對話）。",
   )
   process.exit(2)
 }
 
-const isLocal = /@(localhost|127\.0\.0\.1)[:/]/.test(url)
-const sql = postgres(url, {
+const hostForSsl = url ? url : pg.host
+const isLocal = /(@|^)(localhost|127\.0\.0\.1)([:/]|$)/.test(hostForSsl)
+const common = {
   max: 1, // 單一連線：多語句批次與隱含交易都綁在同一條連線上
   prepare: false, // 相容 transaction pooler
   ssl: isLocal ? false : "require",
   onnotice: (n) => console.log(`  notice: ${n.message}`),
-})
+}
+const sql = url ? postgres(url, common) : postgres({ ...pg, ...common })
+console.log(`連線目標：${url ? "DATABASE_URL" : `${pg.host}:${pg.port}/${pg.database}（${pg.username}）`}`)
 
 function printResult(r) {
   const rows = Array.isArray(r) ? r : []
