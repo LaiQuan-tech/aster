@@ -505,6 +505,33 @@ export default function AdminProjectDetailPage() {
               報表與獎金歸在哪一年。編號裡的年度是建立年，已印在合約上，不隨這裡改動。
             </p>
           </div>
+          <div>
+            <label className={labelCls}>預定起始日</label>
+            <input
+              className={inputCls}
+              type="date"
+              defaultValue={project.startsOn ?? ""}
+              onBlur={(e) => {
+                const v = e.target.value || null;
+                if (v !== (project.startsOn ?? null)) saveProjectField({ startsOn: v });
+              }}
+            />
+          </div>
+          <div>
+            <label className={labelCls}>預定完工日</label>
+            <input
+              className={inputCls}
+              type="date"
+              defaultValue={project.endsOn ?? ""}
+              onBlur={(e) => {
+                const v = e.target.value || null;
+                if (v !== (project.endsOn ?? null)) saveProjectField({ endsOn: v });
+              }}
+            />
+            <p className="mt-1 text-xs text-gray-400">
+              甘特圖與進度示警的依據。過了完工日還沒結案會被示警。
+            </p>
+          </div>
         </div>
         <ErrorText>{error}</ErrorText>
       </Card>

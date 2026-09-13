@@ -35,8 +35,8 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "AI 專案進度追蹤",
     items: [
-      { href: "/admin/projects/overview", label: "專案總覽 · 甘特圖／看板", soon: true },
-      { href: "/admin/projects/alerts", label: "AI 進度示警", soon: true },
+      { href: "/admin/projects/overview", label: "專案總覽 · 甘特圖／看板", fresh: true },
+      { href: "/admin/projects/alerts", label: "AI 進度示警", fresh: true },
     ],
   },
   {
@@ -151,10 +151,13 @@ function Shell({ me, children }: { me: Me; children: React.ReactNode }) {
 
   // Active when the path matches exactly, or (for sub-pages) starts with the
   // nav href — but "/admin" only lights up on an exact match so it isn't always on.
-  const isActive = (href: string) =>
-    href === "/admin" ? pathname === "/admin" : pathname.startsWith(href);
   const flatNav = NAV_GROUPS.flatMap((group) => group.items);
-  const activeItem = flatNav.find((item) => isActive(item.href));
+  // 最長前綴才算 active：/admin/projects/overview 只亮「專案總覽」，不連「專案與成員分潤」一起亮
+  const matches = (href: string) =>
+    href === "/admin" ? pathname === "/admin" : pathname === href || pathname.startsWith(`${href}/`);
+  const activeHref = flatNav.filter((item) => matches(item.href)).sort((a, b) => b.href.length - a.href.length)[0]?.href;
+  const isActive = (href: string) => href === activeHref;
+  const activeItem = flatNav.find((item) => item.href === activeHref);
 
   return (
     <div style={brandStyle} className="admin-shell min-h-screen bg-gray-50 md:flex">

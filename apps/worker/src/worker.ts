@@ -23,6 +23,7 @@ const SCHEDULER_IDS = [
   "deliver-pending-notifications",
   "detect-and-notify-attendance",
   "auto-archive-projects",
+  "project-alerts",
 ];
 
 /**
@@ -66,6 +67,13 @@ async function registerSchedulers() {
     { pattern: "0 4 * * *", tz: "Asia/Taipei" },
     { name: "auto-archive-projects", data: {} },
   );
+  // 專案進度示警：逾期請款、到期未結案等，通知 lead 與 HR。排在自動封存之後，
+  // 剛被封存的案子就不會再被示警。
+  await attendanceQueue.upsertJobScheduler(
+    "project-alerts",
+    { pattern: "30 4 * * *", tz: "Asia/Taipei" },
+    { name: "project-alerts", data: {} },
+  );
 
   attendanceWorker = new Worker(
     "attendance",
@@ -86,6 +94,7 @@ async function registerSchedulers() {
         "deliver-pending-notifications": "/internal/notifications/deliver-pending",
         "detect-and-notify-attendance": "/internal/attendance/detect-and-notify",
         "auto-archive-projects": "/internal/projects/auto-archive",
+        "project-alerts": "/internal/projects/alert-notify",
       };
       const endpoint = endpointByJob[job.name] ?? "/internal/attendance/daily-settle";
       const body =

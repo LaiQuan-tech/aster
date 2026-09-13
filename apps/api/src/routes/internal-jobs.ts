@@ -5,6 +5,7 @@ import { settleAttendance } from "../services/settlement.js"
 import { deliverPendingNotifications } from "../services/notification-delivery.js"
 import { scanMissingPunches, detectAnomalies } from "../services/detection.js"
 import { autoArchiveProjects } from "../services/project-archive.js"
+import { notifyProjectAlerts } from "../services/project-alert-store.js"
 
 export const internalJobsRouter = Router()
 
@@ -272,6 +273,49 @@ internalJobsRouter.post(
         tenants: results.length,
         archived: results.reduce((sum, item) => sum + (item.ok ? item.archived : 0), 0),
         failed: results.filter((item) => !item.ok).length,
+        results,
+      })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * POST /internal/projects/alert-notify — 每日專案進度示警通知（worker 04:30 台北）。
+ * 對每個 active 租戶算示警，high／medium 通知 lead 與 HR；同日同 key 不重發。
+ */
+const alertNotifySchema = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() })
+internalJobsRouter.post(
+  "/internal/projects/alert-notify",
+  async (req: Request, res: Response, next: NextFunction) => {
+    if (!requireInternalToken(req, res)) return
+    if (!requireInternalJobsEnabled(res)) return
+    const parsed = alertNotifySchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const { data: tenants, error } = await supabaseAdmin.from("tenants").select("id").eq("status", "active")
+      if (error) {
+        next(new Error(`POST /internal/projects/alert-notify (tenants): ${error.message}`))
+        return
+      }
+      const results: Array<{ tenantId: string; ok: boolean; alerts?: number; notified?: number; skipped?: number; error?: string }> = []
+      for (const t of tenants ?? []) {
+        const tenantId = t.id as string
+        try {
+          const r = await notifyProjectAlerts(tenantId, parsed.data.date)
+          results.push({ tenantId, ok: true, ...r })
+        } catch (err) {
+          results.push({ tenantId, ok: false, error: err instanceof Error ? err.message : "alert_notify_failed" })
+        }
+      }
+      res.status(200).json({
+        tenants: results.length,
+        notified: results.reduce((s, r) => s + (r.notified ?? 0), 0),
+        failed: results.filter((r) => !r.ok).length,
         results,
       })
     } catch (err) {

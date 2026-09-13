@@ -57,6 +57,9 @@ export interface Project {
   statusChangedAt: string | null
   /** 可見性：非 null 即已封存。 */
   archivedAt: string | null
+  /** 預定起訖日（甘特圖／示警）；可空。 */
+  startsOn?: string | null
+  endsOn?: string | null
   /** 人工解除封存的時點；自動封存看這一欄放過該筆。 */
   unarchivedAt?: string | null
   /** 衍生（模組四第 3 條）：有已簽訂的合約 = 成案；只有報價單 = 還沒。 */
@@ -388,6 +391,8 @@ export function createProject(body: {
   leadEmpId?: string | null
   shareMode?: ShareMode
   bonusPool?: number | null
+  startsOn?: string | null
+  endsOn?: string | null
 }) {
   return apiFetch<{ id: string; code: string | null }>("/projects", {
     method: "POST",
@@ -412,6 +417,8 @@ export function updateProject(
     statusEffectiveOn?: string | null
     /** 可見性，與 status 互不干涉。封存「進行中」的專案會被擋（400）。 */
     archived?: boolean
+    startsOn?: string | null
+    endsOn?: string | null
     deptId?: string | null
     leadEmpId?: string | null
     shareMode?: ShareMode
@@ -507,4 +514,56 @@ export function deleteProjectDocument(projectId: string, docId: string) {
   return apiFetch<{ id: string }>(`/projects/${projectId}/documents/${docId}`, {
     method: "DELETE",
   })
+}
+
+/* ------------------------------------------------- 專案總覽與進度示警 -- */
+
+export interface OverviewMilestone {
+  installmentNo: number
+  plannedOn: string | null
+  billedOn: string | null
+  amount: number | null
+}
+export interface OverviewProject {
+  id: string
+  name: string
+  code: string | null
+  status: ProjectStatus
+  startsOn: string | null
+  endsOn: string | null
+  createdAt: string
+  leadEmpId: string | null
+  leadName: string | null
+  hasContract: boolean
+  contractTotal: number | null
+  billedTotal: number
+  scheduledTotal: number
+  milestones: OverviewMilestone[]
+  lastActivity: string | null
+  alerts: { high: number; medium: number; low: number }
+}
+export function getProjectOverview() {
+  return apiFetch<{ today: string; projects: OverviewProject[] }>("/projects/overview")
+}
+
+export type AlertSeverity = "high" | "medium" | "low"
+export interface ProjectAlert {
+  key: string
+  rule: string
+  severity: AlertSeverity
+  projectId: string
+  projectName: string
+  projectCode: string | null
+  leadEmpId: string | null
+  message: string
+  dueOn?: string
+  amount?: number
+  installmentNo?: number
+  daysOverdue?: number
+}
+export function getProjectAlerts() {
+  return apiFetch<{ today: string; alerts: ProjectAlert[]; ruleLabels: Record<string, string>; aiAvailable: boolean }>("/projects/alerts")
+}
+export function getProjectAlertDigest() {
+  return apiFetch<{ digest: string; model: string | null; alerts: number }>("/projects/alerts/digest", { method: "POST" })
 }

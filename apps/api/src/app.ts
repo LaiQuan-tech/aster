@@ -39,6 +39,7 @@ import { personalNotesRouter } from "./routes/personal-notes.js"
 import { preferencesRouter } from "./routes/preferences.js"
 import { projectsRouter } from "./routes/projects.js"
 import { projectDocumentsRouter } from "./routes/project-documents.js"
+import { projectOverviewRouter } from "./routes/project-overview.js"
 import { contractsRouter } from "./routes/contracts.js"
 import { billingsRouter } from "./routes/billings.js"
 import { companyPagesRouter } from "./routes/company-pages.js"
@@ -104,6 +105,7 @@ app.use(attachmentsRouter)
 app.use(internalJobsRouter)
 app.use(personalNotesRouter)
 app.use(preferencesRouter)
+app.use(projectOverviewRouter) // /projects/overview、/projects/alerts 要在 /projects/:id 之前
 app.use(projectsRouter)
 app.use(projectDocumentsRouter)
 app.use(contractsRouter)

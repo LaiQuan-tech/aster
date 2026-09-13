@@ -27,7 +27,7 @@ export const projectsRouter = Router()
 // ⚠️ 必須是單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別，
 // 相接後會退化成 GenericStringError，下游的 as ProjectRow 全數失效。
 const PROJECT_COLS =
-  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, dept_id, lead_emp_id, share_mode, bonus_pool, created_at"
+  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, starts_on, ends_on, dept_id, lead_emp_id, share_mode, bonus_pool, created_at"
 
 const createSchema = z.object({
   name: z.string().trim().min(1).max(200),
@@ -43,6 +43,9 @@ const createSchema = z.object({
   leadEmpId: z.string().uuid().nullish(),
   shareMode: z.enum(["pool_pct", "fixed_amount"]).optional(),
   bonusPool: z.number().nonnegative().nullish(),
+  /** 預定起訖日（甘特圖／示警）。 */
+  startsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
+  endsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
 })
 
 const updateSchema = z
@@ -65,8 +68,11 @@ const updateSchema = z
     leadEmpId: z.string().uuid().nullable().optional(),
     shareMode: z.enum(["pool_pct", "fixed_amount"]).optional(),
     bonusPool: z.number().nonnegative().nullable().optional(),
+    startsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+    endsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
+  .refine((b) => !(b.startsOn && b.endsOn) || b.startsOn <= b.endsOn, { message: "endsOn must not be before startsOn" })
 
 const memberCreateSchema = z.object({
   employeeId: z.string().uuid(),
@@ -96,6 +102,8 @@ type ProjectRow = {
   status_effective_on: string | null
   status_changed_at: string | null
   archived_at: string | null
+  starts_on: string | null
+  ends_on: string | null
   dept_id: string | null
   lead_emp_id: string | null
   share_mode: string
@@ -233,6 +241,8 @@ projectsRouter.get(
           statusEffectiveOn: row.status_effective_on,
           statusChangedAt: row.status_changed_at,
           archivedAt: row.archived_at,
+          startsOn: row.starts_on,
+          endsOn: row.ends_on,
           deptId: row.dept_id,
           leadEmpId: row.lead_emp_id,
           shareMode: row.share_mode,
@@ -275,6 +285,8 @@ projectsRouter.post(
         lead_emp_id: b.leadEmpId ?? null,
         share_mode: b.shareMode ?? "pool_pct",
         bonus_pool: b.bonusPool ?? null,
+        starts_on: b.startsOn ?? null,
+        ends_on: b.endsOn ?? null,
         status: "active",
       }
 
@@ -361,6 +373,8 @@ projectsRouter.get(
           statusEffectiveOn: row.status_effective_on,
           statusChangedAt: row.status_changed_at,
           archivedAt: row.archived_at,
+          startsOn: row.starts_on,
+          endsOn: row.ends_on,
           deptId: row.dept_id,
           leadEmpId: row.lead_emp_id,
           shareMode: row.share_mode,
@@ -419,6 +433,8 @@ projectsRouter.patch(
       if (b.leadEmpId !== undefined) patch.lead_emp_id = b.leadEmpId
       if (b.shareMode !== undefined) patch.share_mode = b.shareMode
       if (b.bonusPool !== undefined) patch.bonus_pool = b.bonusPool
+      if (b.startsOn !== undefined) patch.starts_on = b.startsOn
+      if (b.endsOn !== undefined) patch.ends_on = b.endsOn
 
       // 案情與封存的規則全在 services/project-status.ts，這裡只搬運。
       const status = resolveStatusPatch({
