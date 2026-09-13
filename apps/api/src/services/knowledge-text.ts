@@ -2,8 +2,9 @@
  * 知識庫的文字層：從檔案抽純文字、把長文切成可向量化的塊。
  * chunkText 是純函式（有測試）；extractText 依 contentType 分派到解析器。
  */
-import { PDFParse } from "pdf-parse"
-import mammoth from "mammoth"
+// pdf-parse（含 pdfjs）與 mammoth 都用動態 import：它們只在索引 PDF／DOCX 時才需要，
+// 而且是這支 API 裡最重、最可能在 serverless 環境出狀況的相依——靜態 import 一壞整個
+// API 起不來；動態 import 壞了只有那一份文件標 failed。
 
 export const SUPPORTED_TYPES: Record<string, "text" | "pdf" | "docx"> = {
   "text/plain": "text",
@@ -35,6 +36,7 @@ export async function extractText(bytes: Buffer, contentType: string, fileName: 
   const kind = kindOf(contentType, fileName)
   if (kind === "text") return bytes.toString("utf8")
   if (kind === "pdf") {
+    const { PDFParse } = await import("pdf-parse")
     const parser = new PDFParse({ data: new Uint8Array(bytes) })
     try {
       const r = await parser.getText()
@@ -45,6 +47,7 @@ export async function extractText(bytes: Buffer, contentType: string, fileName: 
     }
   }
   if (kind === "docx") {
+    const { default: mammoth } = await import("mammoth")
     const r = await mammoth.extractRawText({ buffer: bytes })
     return r.value
   }
