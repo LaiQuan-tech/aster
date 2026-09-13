@@ -10,11 +10,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "drizzle-orm": "^0.36",
-    "postgres": "^3",
-    "@supabase/supabase-js": "^2"
+    "@supabase/supabase-js": "^2",
+    "drizzle-orm": "^0.45.2",
+    "postgres": "^3"
   },
   "devDependencies": {
-    "drizzle-kit": "^0.28"
+    "drizzle-kit": "^0.31.10"
   }
 }

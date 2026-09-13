@@ -1,7 +1,10 @@
 {
   "name": "hr-saas",
   "private": true,
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
@@ -11,11 +14,19 @@
     "db:migrate": "npm -w @hr/db run migrate"
   },
   "devDependencies": {
+    "@types/node": "^22",
     "turbo": "^2",
     "typescript": "^5.6",
-    "vitest": "^2",
-    "@types/node": "^22"
+    "vitest": "^4.1.11"
   },
-  "engines": { "node": ">=22" },
-  "packageManager": "npm@11.9.0"
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "npm@11.9.0",
+  "overrides": {
+    "postcss": "^8.5.28",
+    "@esbuild-kit/core-utils": {
+      "esbuild": ">=0.25.0"
+    }
+  }
 }
