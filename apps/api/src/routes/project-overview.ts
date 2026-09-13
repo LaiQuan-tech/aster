@@ -100,7 +100,7 @@ projectOverviewRouter.post("/projects/alerts/digest", requireAuth, requireTenant
       嚴重度: a.severity, 規則: ALERT_RULE_LABEL[a.rule], 專案: `${a.projectCode ? `${a.projectCode} ` : ""}${a.projectName}`, 說明: a.message,
       ...(a.dueOn ? { 日期: a.dueOn } : {}), ...(a.amount != null ? { 金額: a.amount } : {}),
     }))
-    const { text, model } = await generateText(DIGEST_SYSTEM, `今天是 ${today}。示警清單：\n${JSON.stringify(compact, null, 0)}`, { temperature: 0.3, maxOutputTokens: 800 })
+    const { text, model } = await generateText(DIGEST_SYSTEM, `今天是 ${today}。示警清單：\n${JSON.stringify(compact, null, 0)}`, { temperature: 0.3, maxOutputTokens: 2048 })
     res.status(200).json({ digest: text, model, alerts: alerts.length })
   } catch (err) {
     if (err instanceof GeminiNotConfiguredError) {

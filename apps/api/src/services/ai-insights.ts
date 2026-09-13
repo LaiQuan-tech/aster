@@ -294,7 +294,8 @@ async function generateWithGemini(system: string, prompt: string): Promise<{ tex
     process.env.GOOGLE_API_KEY
   if (!apiKey) throw new GeminiNotConfiguredError()
 
-  const model = process.env.GEMINI_MODEL ?? "gemini-2.0-flash"
+  // 2026-09-14：gemini-2.0-flash 已下架，改用浮動別名（同 lib/gemini.ts）
+  const model = process.env.GEMINI_MODEL ?? "gemini-flash-latest"
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
     {

@@ -33,8 +33,13 @@ export function isGeminiConfigured(): boolean {
   return !!(process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? process.env.GOOGLE_API_KEY)
 }
 
+/**
+ * 預設用 Google 的浮動別名 `gemini-flash-latest`，不釘死版本：2026-09-14 實測
+ * `gemini-2.0-flash` 已被下架（API 直接回「no longer available」），釘死版本等於
+ * 給自己埋一顆會炸的雷。要固定行為就在環境變數 GEMINI_MODEL 指定版本。
+ */
 export function generationModel(): string {
-  return process.env.GEMINI_MODEL ?? "gemini-2.0-flash"
+  return process.env.GEMINI_MODEL ?? "gemini-flash-latest"
 }
 export function embeddingModel(): string {
   return process.env.GEMINI_EMBED_MODEL ?? "gemini-embedding-001"
@@ -76,7 +81,9 @@ export async function generateText(
     contents: [{ role: "user", parts }],
     generationConfig: {
       temperature: opts.temperature ?? 0.2,
-      maxOutputTokens: opts.maxOutputTokens ?? 1400,
+      // 2.5 之後的 flash 預設會「思考」，思考 token 也算在 maxOutputTokens 裡，
+      // 預算太小答案會被截斷（實測 60 只吐得出三個字）。給寬一點，成本差異很小。
+      maxOutputTokens: opts.maxOutputTokens ?? 4096,
       ...(opts.json ? { responseMimeType: "application/json" } : {}),
     },
   })
@@ -95,7 +102,7 @@ export async function generateJson<T = unknown>(
   prompt: string,
   opts: { images?: InlineImage[]; temperature?: number } = {},
 ): Promise<{ data: T; model: string }> {
-  const { text, model } = await generateText(system, prompt, { ...opts, json: true, maxOutputTokens: 1024 })
+  const { text, model } = await generateText(system, prompt, { ...opts, json: true, maxOutputTokens: 4096 })
   const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim()
   try {
     return { data: JSON.parse(cleaned) as T, model }

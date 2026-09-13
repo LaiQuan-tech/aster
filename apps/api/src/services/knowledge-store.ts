@@ -208,6 +208,6 @@ export async function askKnowledge(tenantId: string, question: string): Promise<
     return { answer: "知識庫裡找不到跟這個問題相關的內容。可以換個說法，或先上傳相關文件。", sources: [], model: "", mode }
   }
   const context = hits.map((h, i) => `[${i + 1}]（${h.title}）\n${h.content}`).join("\n\n")
-  const { text, model } = await generateText(ASK_SYSTEM, `參考資料：\n${context}\n\n問題：${question}`, { temperature: 0.2, maxOutputTokens: 900 })
+  const { text, model } = await generateText(ASK_SYSTEM, `參考資料：\n${context}\n\n問題：${question}`, { temperature: 0.2, maxOutputTokens: 2048 })
   return { answer: text, sources: hits, model, mode }
 }
