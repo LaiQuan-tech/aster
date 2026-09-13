@@ -17,6 +17,10 @@
  *                      什麼」來重建，不是照 repo 現況。
  * --seed file          重建完 base 後先種資料（讓資料轉換那類語句有東西可轉）
  * --verify file        套用後執行，並印出每條語句回傳的列（可多個）
+ * --compare-raw        另建一個「全部 raw migrations + 全部 sql/」的庫，比對兩邊的
+ *                      欄位／索引／約束／trigger／policy／function／RLS 是否完全一致。
+ *                      合併檔是手工組的，漏一段或多一段只有這樣抓得到
+ *                      （2026-09-13 就是這樣抓到 project_settings 的 audit_all 只在合併檔裡）。
  *
  * 限制：auth / storage schema 是 stub，RLS 的實際行為與 storage policy 在這裡驗不了
  * （那要在 Supabase 上以真實身分測，見 docs/驗證-trigger行為實測.sql 的說明）。
@@ -40,12 +44,13 @@ const SQL = resolve(here, "../sql")
 const baseDir = process.env.INIT_CWD ?? process.cwd()
 
 const args = process.argv.slice(2)
-const opt = { baseMigration: Infinity, baseSql: Infinity, baseFiles: [], seed: null, verify: [], pending: [] }
+const opt = { baseMigration: Infinity, baseSql: Infinity, baseFiles: [], seed: null, verify: [], pending: [], compareRaw: false }
 for (let i = 0; i < args.length; i++) {
   const a = args[i]
   if (a === "--base-migration") opt.baseMigration = Number(args[++i])
   else if (a === "--base-sql") opt.baseSql = Number(args[++i])
   else if (a === "--base-file") opt.baseFiles.push(args[++i])
+  else if (a === "--compare-raw") opt.compareRaw = true
   else if (a === "--seed") opt.seed = args[++i]
   else if (a === "--verify") opt.verify.push(args[++i])
   else opt.pending.push(a)
@@ -125,6 +130,36 @@ for (const f of opt.verify) {
   console.log(`\n── 驗證 ${f}`)
   const results = await exec(f, read(f))
   for (const r of results ?? []) if (r.rows?.length) console.table(r.rows)
+}
+
+// ── 合併檔 vs raw 檔：schema 目錄快照必須一模一樣 ─────────────────────
+async function catalog(d) {
+  const q = async (t) => (await d.query(t)).rows
+  return {
+    columns: await q(`select table_name, column_name, data_type, is_nullable, column_default from information_schema.columns where table_schema='public' order by 1,2`),
+    indexes: await q(`select tablename, indexname, indexdef from pg_indexes where schemaname='public' order by 1,2`),
+    constraints: await q(`select conrelid::regclass::text t, conname, pg_get_constraintdef(oid) d from pg_constraint where connamespace='public'::regnamespace order by 1,2`),
+    triggers: await q(`select c.relname, t.tgname, pg_get_triggerdef(t.oid) d from pg_trigger t join pg_class c on c.oid=t.tgrelid where not t.tgisinternal and c.relnamespace='public'::regnamespace order by 1,2`),
+    policies: await q(`select tablename, policyname, cmd, roles::text, qual, with_check from pg_policies where schemaname='public' order by 1,2`),
+    functions: await q(`select proname, pg_get_function_identity_arguments(oid) a, md5(prosrc) src from pg_proc where pronamespace='public'::regnamespace order by 1,2`),
+    rls: await q(`select relname, relrowsecurity, relforcerowsecurity from pg_class where relnamespace='public'::regnamespace and relkind='r' order by 1`),
+  }
+}
+if (opt.compareRaw) {
+  console.log("\n── 與「全部 raw migrations + 全部 sql/」比對 schema")
+  const raw = new PGlite()
+  await raw.exec(STUBS)
+  for (const f of migs) for (const stmt of readFileSync(join(MIG, f), "utf8").split("--> statement-breakpoint")) if (stmt.trim()) await raw.exec(stmt)
+  for (const f of readdirSync(SQL).filter((f) => f.endsWith(".sql")).sort()) await raw.exec(readFileSync(join(SQL, f), "utf8"))
+  const A = await catalog(db), B = await catalog(raw)
+  for (const k of Object.keys(A)) {
+    if (JSON.stringify(A[k]) === JSON.stringify(B[k])) { console.log(`✓ ${k} 一致（${A[k].length}）`); continue }
+    failed++
+    const sa = new Set(A[k].map((r) => JSON.stringify(r))), sb = new Set(B[k].map((r) => JSON.stringify(r)))
+    console.error(`✗ ${k} 不一致`)
+    for (const r of sa) if (!sb.has(r)) console.error(`   只在合併檔那邊: ${r.slice(0, 200)}`)
+    for (const r of sb) if (!sa.has(r)) console.error(`   只在 raw 那邊  : ${r.slice(0, 200)}`)
+  }
 }
 
 console.log(failed ? `\n❌ ${failed} 個失敗` : "\n✅ 全部通過")

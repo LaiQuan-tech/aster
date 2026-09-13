@@ -9,8 +9,10 @@
 --   • no_hard_delete —— 實體刪除一律擋下（test/demo 租戶除外），API 只做軟刪除
 --   • audit_all      —— INSERT/UPDATE/DELETE 全量留痕
 --
--- project_settings 的印花稅參數同樣要留痕（費率改了會改變試算結果），
--- 但它已在本批 [5] 段掛上 audit_all，這裡不重複。
+-- project_settings 的印花稅參數同樣要留痕（費率改了會改變試算結果）。
+-- 2026-09-13 補：它原本只在合併檔 docs/套用-2026-09-12-增量-v2.sql 的 [5] 段掛
+-- audit_all，raw 檔沒有——全新安裝照 raw 檔跑會漏掉這個 trigger（pglite 重放
+-- 兩條路 schema 比對抓到的）。所以這裡也掛一次；冪等，與 [5] 重複執行無害。
 --
 -- 套用方式：Supabase SQL Editor。
 -- 冪等：DROP IF EXISTS + CREATE，可重複執行。
@@ -25,6 +27,11 @@ CREATE TRIGGER no_hard_delete
 DROP TRIGGER IF EXISTS audit_all ON public.contracts;
 CREATE TRIGGER audit_all
   AFTER INSERT OR UPDATE OR DELETE ON public.contracts
+  FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+DROP TRIGGER IF EXISTS audit_all ON public.project_settings;
+CREATE TRIGGER audit_all
+  AFTER INSERT OR UPDATE OR DELETE ON public.project_settings
   FOR EACH ROW EXECUTE FUNCTION public.audit_row();
 
 -- ── 合法值防呆 ──────────────────────────────────────────────────────
