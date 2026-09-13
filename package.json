@@ -11,7 +11,9 @@
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
     "db:generate": "npm -w @hr/db run generate",
-    "db:migrate": "npm -w @hr/db run migrate"
+    "db:migrate": "npm -w @hr/db run migrate",
+    "db:apply": "npm -w @hr/db run apply-sql --",
+    "db:replay": "npm -w @hr/db run replay --"
   },
   "devDependencies": {
     "@types/node": "^22",

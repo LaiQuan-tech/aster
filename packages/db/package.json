@@ -7,7 +7,9 @@
     "generate": "drizzle-kit generate",
     "migrate": "drizzle-kit migrate",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "apply-sql": "node scripts/apply-sql.mjs",
+    "replay": "node scripts/replay-on-pglite.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2",
@@ -15,6 +17,7 @@
     "postgres": "^3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "drizzle-kit": "^0.31.10"
   }
 }
