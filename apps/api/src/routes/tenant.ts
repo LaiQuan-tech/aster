@@ -74,6 +74,15 @@ const tenantSettingsSchema = z.object({
           adminPortalPath: z.string().trim().min(1).optional(),
         })
         .optional(),
+      /** 專屬 Email 配發：公司網域與地址命名規則（後台「專屬 Email 配發」頁）。 */
+      mail: z
+        .object({
+          domain: z.string().trim().toLowerCase().regex(/^[a-z0-9.-]+\.[a-z]{2,}$/, "domain 格式").optional(),
+          /** 預設 local part 來源：emp_no（工號）或 manual（每人手填） */
+          rule: z.enum(["emp_no", "manual"]).optional(),
+          provider: z.enum(["google", "microsoft", "other"]).optional(),
+        })
+        .optional(),
     })
     .optional(),
 })

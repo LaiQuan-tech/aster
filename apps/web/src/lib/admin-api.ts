@@ -1152,6 +1152,12 @@ export interface TenantFeatures {
     employeePortalPath?: string;
     adminPortalPath?: string;
   };
+  /** 專屬 Email 配發：公司網域、地址命名規則、供應商 */
+  mail?: {
+    domain?: string;
+    rule?: "emp_no" | "manual";
+    provider?: "google" | "microsoft" | "other";
+  };
   [key: string]: unknown;
 }
 

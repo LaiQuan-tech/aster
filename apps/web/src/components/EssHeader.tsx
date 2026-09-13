@@ -31,6 +31,7 @@ export function EssHeader({
     | "bonus"
     | "expenses"
     | "kpi"
+    | "company"
     | "ai";
   /** When the signed-in user is an HR/platform admin, show a link to /admin. */
   isAdmin?: boolean;
@@ -61,6 +62,7 @@ export function EssHeader({
       | "bonus"
       | "expenses"
       | "kpi"
+      | "company"
       | "ai";
     label: string;
     short: string;
@@ -80,6 +82,7 @@ export function EssHeader({
     { key: "kpi", label: "我的考核", short: "考核", href: "/ess/kpi" },
     { key: "jobs", label: "內部職缺", short: "職缺", href: "/ess/jobs" },
     { key: "ai", label: "AI 問答", short: "AI", href: "/ess/ai" },
+    { key: "company", label: "公司資訊", short: "公司", href: "/ess/company-info" },
     { key: "notifications", label: "通知中心", short: "通知", href: "/ess/notifications" },
     { key: "mydata", label: "我的資料", short: "資料", href: "/ess/mydata" },
   ];

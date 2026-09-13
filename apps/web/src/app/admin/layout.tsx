@@ -44,7 +44,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { href: "/admin/knowledge", label: "文件庫 · 語意搜尋", soon: true },
       { href: "/admin/knowledge/ask", label: "AI 文件問答", soon: true },
-      { href: "/admin/vendors", label: "廠商名冊 · 名片建檔", soon: true },
+      { href: "/admin/vendors", label: "廠商名冊 · 名片建檔", fresh: true },
     ],
   },
   {
@@ -58,7 +58,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     title: "帳號與權限",
     items: [
       { href: "/admin/employees", label: "員工帳號與密碼配發" },
-      { href: "/admin/employee-mail", label: "專屬 Email 配發", soon: true },
+      { href: "/admin/employee-mail", label: "專屬 Email 配發", fresh: true },
     ],
   },
   {
@@ -109,7 +109,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { href: "/admin/announcements", label: "最新消息 / 公告", fresh: true },
       { href: "/admin/company-space", label: "Company Space" },
-      { href: "/admin/company-info", label: "公司福利 / 職安資訊", soon: true },
+      { href: "/admin/company-info", label: "公司福利 / 職安資訊", fresh: true },
     ],
   },
   {
