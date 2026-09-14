@@ -52,6 +52,18 @@ body {
   .print-sheet table {
     font-size: 11px;
   }
+
+  /* B6：專案申請單分區列印。勾選狀態存在 localStorage，掛載後同步成 <body> 上的
+     print-hide-<key> class（見 admin/projects/[id]/application/page.tsx）；這裡只
+     負責把對應的 [data-print-block] 藏起來。用 margin 撐間距、display:none 整塊
+     移除，不會留下空白頁。 */
+  body.print-hide-customer [data-print-block="customer"],
+  body.print-hide-sales [data-print-block="sales"],
+  body.print-hide-payment [data-print-block="payment"],
+  body.print-hide-engineers [data-print-block="engineers"],
+  body.print-hide-subcontract [data-print-block="subcontract"] {
+    display: none !important;
+  }
 }
 
 /* PWA safe-area helpers (iOS notch / Dynamic Island / home-indicator), used
