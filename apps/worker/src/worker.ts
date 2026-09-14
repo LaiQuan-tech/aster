@@ -24,6 +24,7 @@ const SCHEDULER_IDS = [
   "detect-and-notify-attendance",
   "auto-archive-projects",
   "project-alerts",
+  "generate-attendance-sheets",
 ];
 
 /**
@@ -74,6 +75,13 @@ async function registerSchedulers() {
     { pattern: "30 4 * * *", tz: "Asia/Taipei" },
     { name: "project-alerts", data: {} },
   );
+  // 出勤月表（P1）：每月 1 日 05:00 台北，對所有租戶產生上個月的月表草稿
+  // （含結算）。排在每日結算之後，月底最後一天的打卡已入 attendance_days。
+  await attendanceQueue.upsertJobScheduler(
+    "generate-attendance-sheets",
+    { pattern: "0 5 1 * *", tz: "Asia/Taipei" },
+    { name: "generate-attendance-sheets", data: {} },
+  );
 
   attendanceWorker = new Worker(
     "attendance",
@@ -95,11 +103,14 @@ async function registerSchedulers() {
         "detect-and-notify-attendance": "/internal/attendance/detect-and-notify",
         "auto-archive-projects": "/internal/projects/auto-archive",
         "project-alerts": "/internal/projects/alert-notify",
+        "generate-attendance-sheets": "/internal/attendance-sheets/generate",
       };
       const endpoint = endpointByJob[job.name] ?? "/internal/attendance/daily-settle";
       const body =
         job.name === "deliver-pending-notifications"
           ? { limit: typeof job.data?.limit === "number" ? job.data.limit : 50 }
+          : job.name === "generate-attendance-sheets"
+            ? (typeof job.data?.period === "string" ? { period: job.data.period } : {})
           : job.name === "detect-and-notify-attendance"
             ? {
                 ...(typeof job.data?.date === "string" ? { date: job.data.date } : {}),

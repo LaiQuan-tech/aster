@@ -6,6 +6,7 @@ import { deliverPendingNotifications } from "../services/notification-delivery.j
 import { scanMissingPunches, detectAnomalies } from "../services/detection.js"
 import { autoArchiveProjects } from "../services/project-archive.js"
 import { notifyProjectAlerts } from "../services/project-alert-store.js"
+import { generateSheets, previousPeriod } from "../services/attendance-sheets.js"
 
 export const internalJobsRouter = Router()
 
@@ -315,6 +316,60 @@ internalJobsRouter.post(
       res.status(200).json({
         tenants: results.length,
         notified: results.reduce((s, r) => s + (r.notified ?? 0), 0),
+        failed: results.filter((r) => !r.ok).length,
+        results,
+      })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * POST /internal/attendance-sheets/generate {period?} — 每月 1 日 05:00（台北）
+ * 由 worker 觸發：對所有 active 租戶產生／重算上個月的出勤月表（P1）。
+ * period 預設上個月（台北曆）。逐租戶 try/catch，一家失敗不影響其他家；
+ * 表未遷移（0039）的環境會回報 sheets_not_migrated 但不中斷。
+ */
+const generateSheetsSchema = z.object({
+  period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(),
+})
+type GenerateSheetsJobResult =
+  | { tenantId: string; ok: true; generated: number; rebuilt: number; skipped: number }
+  | { tenantId: string; ok: false; error: string }
+
+internalJobsRouter.post(
+  "/internal/attendance-sheets/generate",
+  async (req: Request, res: Response, next: NextFunction) => {
+    if (!requireInternalToken(req, res)) return
+    if (!requireInternalJobsEnabled(res)) return
+    const parsed = generateSheetsSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    const period = parsed.data.period ?? previousPeriod(taipeiDateDaysAgo(0))
+    try {
+      const { data: tenants, error } = await supabaseAdmin.from("tenants").select("id").eq("status", "active")
+      if (error) {
+        next(new Error(`POST /internal/attendance-sheets/generate (tenants): ${error.message}`))
+        return
+      }
+      const results: GenerateSheetsJobResult[] = []
+      for (const t of tenants ?? []) {
+        const tenantId = t.id as string
+        try {
+          const r = await generateSheets({ tenantId, period })
+          results.push({ tenantId, ok: true, generated: r.generated, rebuilt: r.rebuilt, skipped: r.skipped.length })
+        } catch (err) {
+          results.push({ tenantId, ok: false, error: err instanceof Error ? err.message : "generate_failed" })
+        }
+      }
+      res.status(200).json({
+        period,
+        tenants: results.length,
+        generated: results.reduce((s, r) => s + (r.ok ? r.generated : 0), 0),
+        rebuilt: results.reduce((s, r) => s + (r.ok ? r.rebuilt : 0), 0),
         failed: results.filter((r) => !r.ok).length,
         results,
       })

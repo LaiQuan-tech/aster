@@ -1,21 +1,19 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
-import {
-  computePayslip,
-  parseRuleConfig,
-  type RuleConfig,
-  type AttendanceDay,
-  type DayType,
-  type SalaryStructure,
-} from "@hr/rules"
+import { computePayslip, resolvePayrollGates, type AttendanceDay } from "@hr/rules"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
-import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { logger } from "../lib/logger.js"
-import { leaveDeductRate, loadLeaveTypes } from "../services/settlement.js"
+import {
+  loadAttendanceDays,
+  loadPayrollInputs,
+  toAttendanceDay,
+  toSalaryStructure,
+} from "../services/payroll-inputs.js"
+import { SheetError, lockApprovedSheetFor, type SheetSnapshot } from "../services/attendance-sheets.js"
 
 export const payrollRouter = Router()
 
@@ -45,101 +43,6 @@ function monthBounds(period: string): { first: string; nextFirst: string } {
   const nm = m === 12 ? 1 : m + 1
   const nextFirst = `${String(ny).padStart(4, "0")}-${String(nm).padStart(2, "0")}-01`
   return { first, nextFirst }
-}
-
-interface AttendanceDayRow {
-  employee_id: string
-  work_date: string
-  worked_minutes: number
-  late_minutes: number
-  overtime_minutes: number
-  night_minutes: number
-  day_type: string
-  // P0 columns (migration 0038) — absent on a live DB that predates it.
-  leave_minutes?: number | null
-  leave_breakdown?: Record<string, number> | null
-  outing_minutes?: number | null
-  early_leave_minutes?: number | null
-}
-
-const ATTENDANCE_BASE_COLS =
-  "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type"
-const ATTENDANCE_P0_COLS = `${ATTENDANCE_BASE_COLS}, leave_minutes, leave_breakdown, outing_minutes, early_leave_minutes`
-
-/** The engine ignores fields it does not know; outingMinutes rides along for audit. */
-type AttendanceDayInput = AttendanceDay & { outingMinutes?: number }
-
-interface SalaryRow {
-  employee_id: string
-  method: string
-  base_salary: string | null
-  daily_wage: string | null
-  hourly_wage: string | null
-  labor_insured_salary: string | null
-  health_insured_salary: string | null
-  pension_voluntary_rate: string | null
-}
-
-/** Map a stored salary_structures row → the engine's SalaryStructure (numerics
- * are returned by PostgREST as strings, so coerce).
- *
- * 投保薪資必須帶進來：引擎的保費計算是
- * `ins && salary.laborInsuredSalary ? ... : 0`，欄位缺漏時會靜默算成 0，
- * 導致每張薪資單都不扣勞健保、實發金額被高估。
- * 勞退自提率來自 salary_structures.pension_voluntary_rate（migration 0036）。 */
-/**
- * @param advance 本期要從薪資扣回的預支（正值）。來自已核銷的出差預支差額，
- *   **不是** salary_structures 上的欄位——預支是逐期事件，不是薪資結構。
- */
-function toSalaryStructure(
-  row: SalaryRow,
-  nhiDependents = 0,
-  advance = 0,
-): SalaryStructure {
-  return {
-    method: row.method === "by_attendance_days" ? "by_attendance_days" : "monthly",
-    baseSalary: row.base_salary != null ? Number(row.base_salary) : undefined,
-    dailyWage: row.daily_wage != null ? Number(row.daily_wage) : undefined,
-    // 空或 0 → undefined：讓引擎以 本薪 ÷ payroll.hourlyWageDivisor（預設 240）
-    // 推算時薪（亞斯特 37000 ÷ 240 = 154.1667）。兩者皆無時引擎會丟錯，由
-    // run 端接住列入 skipped（hourly_wage_missing）。
-    hourlyWage:
-      row.hourly_wage != null && Number(row.hourly_wage) > 0 ? Number(row.hourly_wage) : undefined,
-    laborInsuredSalary:
-      row.labor_insured_salary != null ? Number(row.labor_insured_salary) : undefined,
-    healthInsuredSalary:
-      row.health_insured_salary != null ? Number(row.health_insured_salary) : undefined,
-    nhiDependents,
-    pensionVoluntaryRate:
-      row.pension_voluntary_rate != null ? Number(row.pension_voluntary_rate) : undefined,
-    advance,
-  }
-}
-
-/**
- * Map a stored attendance_days row → the engine's AttendanceDay. The P0
- * columns feed the leave deduction (leave_breakdown {code: minutes} × the
- * leave type's deduct_rate) and the late/early deduction (early_leave_minutes).
- */
-function toAttendanceDay(row: AttendanceDayRow, deductRateByCode: Map<string, number>): AttendanceDayInput {
-  const dt = row.day_type
-  const dayType: DayType =
-    dt === "rest_day" || dt === "fixed_holiday" ? dt : "workday"
-  const breakdown = row.leave_breakdown && typeof row.leave_breakdown === "object" ? row.leave_breakdown : {}
-  const leaves = Object.entries(breakdown)
-    .map(([code, minutes]) => ({ code, minutes: Number(minutes) || 0, deductRate: deductRateByCode.get(code) ?? 0 }))
-    .filter((l) => l.minutes > 0)
-  return {
-    date: row.work_date,
-    workedMinutes: row.worked_minutes,
-    lateMinutes: row.late_minutes,
-    earlyLeaveMinutes: row.early_leave_minutes ?? 0,
-    overtimeMinutes: row.overtime_minutes,
-    nightMinutes: row.night_minutes,
-    dayType,
-    leaves: leaves.length > 0 ? leaves : undefined,
-    outingMinutes: row.outing_minutes ?? 0,
-  }
 }
 
 // Resolve the caller's own employee row (id + role) in this tenant, or null.
@@ -195,41 +98,11 @@ payrollRouter.post(
     const { first, nextFirst } = monthBounds(period)
 
     try {
-      // --- tenant rule config (active) or default -----------------------------
-      const { data: cfgRow, error: cfgErr } = await supabaseAdmin
-        .from("rule_configs")
-        .select("config")
-        .eq("tenant_id", tenantId)
-        .eq("active", true)
-        .order("version", { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      if (cfgErr) {
-        next(new Error(`POST /payroll/run (rule_config): ${cfgErr.message}`))
-        return
-      }
-      let rules: RuleConfig
-      try {
-        rules = cfgRow?.config ? parseRuleConfig(cfgRow.config) : DEFAULT_RULE_CONFIG
-      } catch {
-        // A malformed stored config should not block payroll — fall back safely.
-        rules = DEFAULT_RULE_CONFIG
-      }
-
-      // --- in-scope salary structures (the run is salary-driven) --------------
-      let salQuery = supabaseAdmin
-        .from("salary_structures")
-        .select(
-          "employee_id, method, base_salary, daily_wage, hourly_wage, labor_insured_salary, health_insured_salary, pension_voluntary_rate",
-        )
-        .eq("tenant_id", tenantId)
-      if (employeeId) salQuery = salQuery.eq("employee_id", employeeId)
-      const { data: salData, error: salErr } = await salQuery
-      if (salErr) {
-        next(new Error(`POST /payroll/run (salaries): ${salErr.message}`))
-        return
-      }
-      const salaries = (salData ?? []) as SalaryRow[]
+      // --- rule config / salary structures / 眷屬 / 報銷 / 預支 ----------------
+      // 全部由 services/payroll-inputs.ts 組裝（與出勤月表的試算共用同一套輸入）。
+      const inputs = await loadPayrollInputs(tenantId, period, employeeId ? [employeeId] : undefined)
+      const { rules, deductRateByCode, dependentsByEmployee, expensesByEmployee, allowancesByEmployee, advanceRecoveryByEmployee } = inputs
+      const salaries = Array.from(inputs.salaryByEmployee.values())
       const employeeIds = salaries.map((s) => s.employee_id)
 
       if (employeeIds.length === 0) {
@@ -237,33 +110,40 @@ payrollRouter.post(
         return
       }
 
-      // --- this period's attendance_days for those employees ------------------
+      // --- 已核准的出勤月表快照（P1）----------------------------------------
+      // approved/locked 且有 snapshot 的員工，本期出勤以快照的 payrollDays 為準
+      // （有效加班＝人工覆寫 ?? 系統試算、請假、早退、外出都凍結在核准當下），
+      // 不再讀 attendance_days；沒有核准月表的人照舊讀 attendance_days，並在
+      // 回應列出 unapprovedSheets；規則 requireApprovedSheet=true 時改列 skipped。
+      const snapshotDaysByEmployee = new Map<string, AttendanceDay[]>()
+      {
+        const { data: sheetData, error: sheetErr } = await supabaseAdmin
+          .from("attendance_sheets")
+          .select("employee_id, status, snapshot")
+          .eq("tenant_id", tenantId)
+          .eq("period", period)
+          .in("employee_id", employeeIds)
+          .in("status", ["approved", "locked"])
+        if (sheetErr) {
+          if (!isMissingTableError(sheetErr)) {
+            next(new Error(`POST /payroll/run (attendance_sheets): ${sheetErr.message}`))
+            return
+          }
+          warnSchemaGapOnce("attendance_sheets", sheetErr)
+        } else {
+          for (const row of (sheetData ?? []) as Array<{ employee_id: string; status: string; snapshot: SheetSnapshot | null }>) {
+            const days = row.snapshot?.payrollDays
+            if (Array.isArray(days)) snapshotDaysByEmployee.set(row.employee_id, days as AttendanceDay[])
+          }
+        }
+      }
+      const unapprovedSheets = employeeIds.filter((id) => !snapshotDaysByEmployee.has(id))
+      const requireApprovedSheet = resolvePayrollGates(rules).requireApprovedSheet
+
+      // --- this period's attendance_days for employees without a snapshot ------
       // (P0 columns first; fall back to the pre-0038 column set on a live DB
       // that has not been migrated yet — leave/early-leave deductions are then 0.)
-      const loadAttendance = (cols: string) =>
-        supabaseAdmin
-          .from("attendance_days")
-          .select(cols)
-          .eq("tenant_id", tenantId)
-          .in("employee_id", employeeIds)
-          .gte("work_date", first)
-          .lt("work_date", nextFirst)
-      let attendance = await loadAttendance(ATTENDANCE_P0_COLS)
-      if (attendance.error && isMissingColumnError(attendance.error)) {
-        warnSchemaGapOnce("attendance_days.p0_columns", attendance.error)
-        attendance = await loadAttendance(ATTENDANCE_BASE_COLS)
-      }
-      if (attendance.error) {
-        next(new Error(`POST /payroll/run (attendance_days): ${attendance.error.message}`))
-        return
-      }
-      const adData = (attendance.data ?? []) as unknown as AttendanceDayRow[]
-
-      // 請假扣款比例：leave_breakdown 的 key 是假別 code → 假別主檔的 deduct_rate
-      // （NULL 時 paid→0、unpaid→1）。
-      const leaveTypes = await loadLeaveTypes(tenantId)
-      const deductRateByCode = new Map<string, number>()
-      for (const lt of leaveTypes.values()) deductRateByCode.set(lt.code, leaveDeductRate(lt))
+      const adData = await loadAttendanceDays(tenantId, unapprovedSheets, first, nextFirst)
 
       const daysByEmployee = new Map<string, AttendanceDay[]>()
       for (const row of adData) {
@@ -272,103 +152,7 @@ payrollRouter.post(
         if (arr) arr.push(day)
         else daysByEmployee.set(row.employee_id, [day])
       }
-
-      // --- 健保眷屬人數（僅計 insured = true）--------------------------------
-      // 眷口數影響健保自付額（本人 + 眷口，法定上限 3 口由引擎裁切）。
-      const { data: depData, error: depErr } = await supabaseAdmin
-        .from("nhi_dependents")
-        .select("employee_id")
-        .eq("tenant_id", tenantId)
-        .in("employee_id", employeeIds)
-        .eq("insured", true)
-      if (depErr) {
-        next(new Error(`POST /payroll/run (nhi_dependents): ${depErr.message}`))
-        return
-      }
-      const dependentsByEmployee = new Map<string, number>()
-      for (const row of (depData ?? []) as Array<{ employee_id: string }>) {
-        dependentsByEmployee.set(
-          row.employee_id,
-          (dependentsByEmployee.get(row.employee_id) ?? 0) + 1,
-        )
-      }
-
-      // --- 本期已核銷的報銷單（模組三第 1 條）---------------------------------
-      // 兩種性質走引擎的不同路徑，**不可混算**：
-      //   • reimbursement 實報實銷 → expenses，非所得，不進 gross、不影響保費
-      //   • allowance     定額補貼 → allowances，屬薪資所得，進 gross
-      // 只取 status='settled'：未核銷的單不該進當期薪資（故核銷必須在本
-      // 端點之前執行，見 expense-settlements 的說明）。
-      const { data: expData, error: expErr } = await supabaseAdmin
-        .from("expense_claims")
-        .select("employee_id, nature, amount")
-        .eq("tenant_id", tenantId)
-        .eq("period", period)
-        .eq("status", "settled")
-        // ⚠️ **排除綁定出差單的報銷**（模組三第 2 條）。
-        // 出差是「先撥預支、回程沖抵」：員工已經先拿到 amount，回程報的單
-        // 只是用來算 actualTotal。若這些單同時走一般 expenses 加項，
-        // 公司會付兩次——預支一次、報銷再一次。
-        // 出差那一軌只結差額（balance），見下方 advances 區塊。
-        .is("trip_request_id", null)
-        .in("employee_id", employeeIds)
-      if (expErr) {
-        next(new Error(`POST /payroll/run (expense_claims): ${expErr.message}`))
-        return
-      }
-      const expensesByEmployee = new Map<string, number>()
-      const allowancesByEmployee = new Map<string, number>()
-      for (const row of (expData ?? []) as Array<{
-        employee_id: string
-        nature: string
-        amount: string | number
-      }>) {
-        const target = row.nature === "allowance" ? allowancesByEmployee : expensesByEmployee
-        target.set(row.employee_id, (target.get(row.employee_id) ?? 0) + Number(row.amount))
-      }
-
-      // --- 本期要結算的預支差額（模組三第 2、3 條：出差與零用金共用）--------------------------
-      // 只取 balance_handling='payroll' 且 recovery_period 指到本期的已核銷列，
-      // 兩種預支（trip / petty_cash）走同一條路徑。
-      //   • balance > 0 → 實支超過預支，**公司補給員工**。性質同代墊款
-      //     （非所得），故併入 expenses 加項。
-      //   • balance < 0 → 預支有餘，**員工應退**。併入 advance 扣項。
-      //
-      // 註：`advance` 不該是 salary_structures 的固定欄位——預支沖抵是逐期
-      // 發生的事件，放在薪資結構上會變成人工改且無歷史。正確來源就是這裡，
-      // 與 expenses / allowances 同一個模式。（修正帳本待辦 #3 的一半。）
-      const { data: advData, error: advErr } = await supabaseAdmin
-        .from("advances")
-        .select("employee_id, balance")
-        .eq("tenant_id", tenantId)
-        .eq("status", "settled")
-        .eq("balance_handling", "payroll")
-        .eq("recovery_period", period)
-        .in("employee_id", employeeIds)
-      if (advErr) {
-        next(new Error(`POST /payroll/run (advances): ${advErr.message}`))
-        return
-      }
-      const advanceRecoveryByEmployee = new Map<string, number>()
-      for (const row of (advData ?? []) as Array<{
-        employee_id: string
-        balance: string | number | null
-      }>) {
-        const balance = Number(row.balance ?? 0)
-        if (balance > 0) {
-          // 公司補給員工 → 加在實發（非所得，同代墊款）。
-          expensesByEmployee.set(
-            row.employee_id,
-            (expensesByEmployee.get(row.employee_id) ?? 0) + balance,
-          )
-        } else if (balance < 0) {
-          // 員工應退 → 從薪資扣回（引擎的 advance 為正值扣項）。
-          advanceRecoveryByEmployee.set(
-            row.employee_id,
-            (advanceRecoveryByEmployee.get(row.employee_id) ?? 0) + Math.abs(balance),
-          )
-        }
-      }
+      for (const [id, days] of snapshotDaysByEmployee) daysByEmployee.set(id, days)
 
       // --- already-finalized payslips for this period (locked, skip) ----------
       const { data: finData, error: finErr } = await supabaseAdmin
@@ -388,7 +172,10 @@ payrollRouter.post(
       // `skipped` keeps its historical shape (employee ids) for existing
       // clients; `skippedDetails` says why (finalized | hourly_wage_missing).
       const skipped: string[] = []
-      const skippedDetails: Array<{ employeeId: string; reason: "finalized" | "hourly_wage_missing" }> = []
+      const skippedDetails: Array<{
+        employeeId: string
+        reason: "finalized" | "hourly_wage_missing" | "sheet_not_approved"
+      }> = []
       // 設有保費規則卻沒填投保薪資的員工。引擎遇此情況會把保費算成 0
       // 而不會報錯，薪資單看起來正常但實發被高估——必須回報給呼叫端，
       // 否則錯誤會一路靜默到員工的存摺。
@@ -399,6 +186,11 @@ payrollRouter.post(
         if (finalized.has(sal.employee_id)) {
           skipped.push(sal.employee_id)
           skippedDetails.push({ employeeId: sal.employee_id, reason: "finalized" })
+          continue
+        }
+        if (requireApprovedSheet && !snapshotDaysByEmployee.has(sal.employee_id)) {
+          skipped.push(sal.employee_id)
+          skippedDetails.push({ employeeId: sal.employee_id, reason: "sheet_not_approved" })
           continue
         }
         if (
@@ -462,9 +254,14 @@ payrollRouter.post(
         .filter(([, amount]) => amount > 0)
         .map(([employeeId, amount]) => ({ employeeId, allowanceTotal: amount }))
 
-      res
-        .status(201)
-        .json({ generated: rows.length, skipped, skippedDetails, missingInsuredSalary, allowanceReview })
+      res.status(201).json({
+        generated: rows.length,
+        skipped,
+        skippedDetails,
+        missingInsuredSalary,
+        allowanceReview,
+        unapprovedSheets,
+      })
     } catch (err) {
       next(err)
     }
@@ -616,13 +413,24 @@ payrollRouter.post(
         .update({ status: "finalized", updated_at: new Date().toISOString() })
         .eq("tenant_id", tenantId)
         .eq("id", id)
-        .select("id, status")
+        .select("id, status, employee_id, period")
         .single()
       if (updErr || !updated) {
         next(new Error(`POST /payslips/${id}/finalize (update): ${updErr?.message}`))
         return
       }
-      res.status(200).json({ id: updated.id, status: updated.status })
+      // 薪資定稿 → 同員同月 approved 的出勤月表轉 locked（P1）。表未遷移或
+      // 沒有核准月表就略過；鎖定失敗不影響已定稿的薪資單，只記 log。
+      let sheetLocked = false
+      try {
+        const locked = await lockApprovedSheetFor(tenantId, updated.employee_id as string, updated.period as string)
+        sheetLocked = locked?.status === "locked"
+      } catch (err) {
+        if (!(err instanceof SheetError && err.code === "sheets_not_migrated")) {
+          logger.warn({ err, tenantId, payslipId: id }, "finalize: attendance sheet not locked")
+        }
+      }
+      res.status(200).json({ id: updated.id, status: updated.status, sheetLocked })
     } catch (err) {
       next(err)
     }

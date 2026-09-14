@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "../lib/supabase.js"
-import { computeInstallments, type InstallmentInput } from "./billing-schedule.js"
+import type { InstallmentInput } from "./billing-schedule.js"
+import { computeSchedule, type ScheduleRowInput } from "./project-money.js"
 
 /**
  * 分期請款的 DB 存取（模組四第 4 條）。
@@ -11,12 +12,14 @@ import { computeInstallments, type InstallmentInput } from "./billing-schedule.j
 
 // ⚠️ 單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別。
 export const BILLING_COLS =
-  "id, project_id, installment_no, percentage, milestone, planned_on, calculated_amount, residue_applied, override_amount, override_reason, billed_on, billed_amount, note, created_at"
+  "id, project_id, installment_no, kind, percentage, milestone, planned_on, calculated_amount, residue_applied, override_amount, override_reason, billed_on, billed_amount, invoice_no, invoiced_on, received_on, received_amount, note, created_at"
 
 export type BillingRow = {
   id: string
   project_id: string
   installment_no: number
+  /** 'installment' 一般分期 | 'guild_advance' 公會制估驗預付款（不進尾差）。 */
+  kind: string
   percentage: string | null
   milestone: string | null
   planned_on: string | null
@@ -26,6 +29,11 @@ export type BillingRow = {
   override_reason: string | null
   billed_on: string | null
   billed_amount: string | null
+  // P3：開票與收款是請款之後的兩個獨立事件（請款 ≠ 開票 ≠ 收款）。
+  invoice_no: string | null
+  invoiced_on: string | null
+  received_on: string | null
+  received_amount: string | null
   note: string | null
   created_at: string
 }
@@ -91,6 +99,35 @@ export function toInput(row: BillingRow): InstallmentInput {
   }
 }
 
+/** 同上，但帶 kind——整份期程要分 installment／guild_advance 兩路算。 */
+export function toScheduleInput(row: BillingRow): ScheduleRowInput {
+  return { ...toInput(row), kind: row.kind ?? "installment" }
+}
+
+/**
+ * 沒有合約時的分母後備：最新的報價單（我方承攬、未作廢）。
+ * 先看簽訂日最新，沒簽訂日的排後面，再看建立時間。
+ */
+export async function latestQuotationAmount(
+  tenantId: string,
+  projectId: string,
+): Promise<number | null> {
+  const { data, error } = await supabaseAdmin
+    .from("contracts")
+    .select("amount")
+    .eq("tenant_id", tenantId)
+    .eq("project_id", projectId)
+    .eq("our_role", "contractor")
+    .eq("doc_type", "quotation")
+    .is("deleted_at", null)
+    .order("signed_on", { ascending: false, nullsFirst: false })
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) throw new Error(`latestQuotationAmount: ${error.message}`)
+  return data ? num(data.amount as string | null) : null
+}
+
 export async function loadBillings(tenantId: string, projectId: string): Promise<BillingRow[]> {
   const { data, error } = await supabaseAdmin
     .from("project_billings")
@@ -119,7 +156,8 @@ export async function recomputeBillings(tenantId: string, projectId: string): Pr
   ])
   if (rows.length === 0) return
 
-  const result = computeInstallments(rows.map(toInput), total)
+  // installment 走尾差演算法；guild_advance 只是一筆金額（不進尾差）。
+  const result = computeSchedule(rows.map(toScheduleInput), total)
   const byNo = new Map(result.rows.map((r) => [r.installmentNo, r]))
 
   for (const row of rows) {

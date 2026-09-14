@@ -7,14 +7,18 @@ import { AuthGate } from "@/components/AuthGate";
 import { EssHeader } from "@/components/EssHeader";
 import { getBranding, getMe, isAdminRole, type Branding } from "@/lib/ess-api";
 import {
-  getProject,
   getProjectMembers,
   getProjectDocuments,
   uploadProjectDocument,
-  type Project,
   type MembersResponse,
   type ProjectDocument,
 } from "@/lib/projects-api";
+import {
+  getProjectDetail,
+  ENGINEER_DISCIPLINE_LABELS,
+  ENGINEER_DISCIPLINES,
+  type ProjectDetail,
+} from "@/lib/projects-ext-api";
 
 function money(n: number | null): string {
   return n == null ? "—" : n.toLocaleString("zh-TW");
@@ -26,7 +30,7 @@ function ProjectDetailInner() {
 
   const [branding, setBranding] = useState<Branding | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [project, setProject] = useState<Project | null>(null);
+  const [project, setProject] = useState<ProjectDetail | null>(null);
   const [membersRes, setMembersRes] = useState<MembersResponse | null>(null);
   const [documents, setDocuments] = useState<ProjectDocument[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -35,12 +39,14 @@ function ProjectDetailInner() {
 
   async function load() {
     try {
-      const [p, m, docs] = await Promise.all([
-        getProject(projectId),
+      const [detail, m, docs] = await Promise.all([
+        getProjectDetail(projectId),
         getProjectMembers(projectId),
         getProjectDocuments(projectId),
       ]);
-      setProject(p.project);
+      // 金額（money）與財務用的分潤細節不在這裡顯示——非 finance 者本來就拿
+      // 不到（API 回 null），這裡只取基本資料／協力技師／客戶名稱／簽約狀態。
+      setProject(detail.project);
       setMembersRes(m);
       setDocuments(docs.documents);
     } catch (err) {
@@ -84,11 +90,29 @@ function ProjectDetailInner() {
           <p className="text-sm text-red-600">{error ?? "找不到專案"}</p>
         ) : (
           <>
-            {/* 專案資訊 */}
+            {/* 專案資訊（只給基本資料；金額不在 ESS 顯示，非 finance 者 API 本來就回 null） */}
             <section className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:p-6">
-              <h2 className="text-lg font-semibold text-gray-900">{project.name}</h2>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-semibold text-gray-900">{project.name}</h2>
+                {project.hasSignedContract ? (
+                  <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">已簽約</span>
+                ) : (
+                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500">報價單／未簽</span>
+                )}
+              </div>
               {project.code && <p className="font-mono text-xs text-gray-400">{project.code}</p>}
+              {project.client?.name && <p className="mt-1 text-sm text-gray-600">客戶：{project.client.name}</p>}
               {project.description && <p className="mt-2 whitespace-pre-wrap text-sm text-gray-600">{project.description}</p>}
+              {ENGINEER_DISCIPLINES.some((d) => project.engineers?.[d]?.name) && (
+                <div className="mt-3 flex flex-wrap gap-3 border-t border-gray-100 pt-3 text-sm">
+                  {ENGINEER_DISCIPLINES.filter((d) => project.engineers?.[d]?.name).map((d) => (
+                    <span key={d} className="text-gray-600">
+                      <span className="text-gray-400">{ENGINEER_DISCIPLINE_LABELS[d]}：</span>
+                      {project.engineers?.[d]?.name}
+                    </span>
+                  ))}
+                </div>
+              )}
             </section>
 
             {/* 文件 */}

@@ -23,6 +23,7 @@ export function EssHeader({
     | "notifications"
     | "mydata"
     | "punches"
+    | "sheet"
     | "balances"
     | "schedule"
     | "payslips"
@@ -54,6 +55,7 @@ export function EssHeader({
       | "notifications"
       | "mydata"
       | "punches"
+      | "sheet"
       | "balances"
       | "schedule"
       | "payslips"
@@ -73,6 +75,7 @@ export function EssHeader({
     { key: "home", label: "今日打卡", short: "打卡", href: "/ess" },
     { key: "schedule", label: "個人班表", short: "班表", href: "/ess/schedule" },
     { key: "punches", label: "打卡紀錄", short: "紀錄", href: "/ess/punches" },
+    { key: "sheet", label: "出勤月表", short: "月表", href: "/ess/attendance-sheet" },
     { key: "balances", label: "剩餘假別", short: "假別", href: "/ess/balances" },
     { key: "requests", label: "我的申請", short: "申請", href: "/ess/requests" },
     { key: "projects", label: "專案知識庫", short: "專案", href: "/ess/projects" },
@@ -106,7 +109,7 @@ export function EssHeader({
   return (
     <header
       style={brandStyle}
-      className="sticky top-0 z-50 border-b border-gray-100 bg-white/95 px-3 py-3 shadow-sm backdrop-blur sm:px-4"
+      className="no-print sticky top-0 z-50 border-b border-gray-100 bg-white/95 px-3 py-3 shadow-sm backdrop-blur sm:px-4"
     >
       <div className="relative z-20 flex items-center justify-between gap-3">
         <button

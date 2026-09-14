@@ -66,3 +66,45 @@ export async function managedDeptIds(tenantId: string, empId: string): Promise<s
   }
   return [...result]
 }
+
+/**
+ * 員工的直屬審核主管：`employees.dept_id → departments.manager_emp_id`。
+ * 該部門主管是本人或空 → 沿 `parent_id` 往上找（自己當自己部門主管的人，
+ * 月表要交給上一層審）。找不到（無部門、鏈上都沒主管、或主管全是本人）回 null，
+ * 由呼叫端決定跳關（出勤月表：直接進 manager_reviewed 交 HR）。
+ * 一次載入該租戶全部 departments 後在記憶體走鏈（同 managedDeptIds 的做法）。
+ */
+export async function managerOfEmployee(tenantId: string, empId: string): Promise<string | null> {
+  const { data: emp, error: empErr } = await supabaseAdmin
+    .from("employees")
+    .select("dept_id")
+    .eq("tenant_id", tenantId)
+    .eq("id", empId)
+    .maybeSingle()
+  if (empErr) throw new Error(`managerOfEmployee (employee): ${empErr.message}`)
+  const deptId = (emp?.dept_id as string | null | undefined) ?? null
+  if (!deptId) return null
+
+  const { data, error } = await supabaseAdmin
+    .from("departments")
+    .select("id, parent_id, manager_emp_id")
+    .eq("tenant_id", tenantId)
+  if (error) throw new Error(`managerOfEmployee (departments): ${error.message}`)
+  const byId = new Map<string, { parentId: string | null; managerEmpId: string | null }>()
+  for (const r of data ?? []) {
+    byId.set(r.id as string, {
+      parentId: (r.parent_id as string | null) ?? null,
+      managerEmpId: (r.manager_emp_id as string | null) ?? null,
+    })
+  }
+  const seen = new Set<string>()
+  let cursor: string | null = deptId
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor)
+    const dept = byId.get(cursor)
+    if (!dept) break
+    if (dept.managerEmpId && dept.managerEmpId !== empId) return dept.managerEmpId
+    cursor = dept.parentId
+  }
+  return null
+}

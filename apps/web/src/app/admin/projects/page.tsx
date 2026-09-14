@@ -5,18 +5,30 @@ import Link from "next/link";
 import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import { getDepartments, getEmployees, type Department, type Employee } from "@/lib/admin-api";
 import {
-  listProjects,
-  createProject,
   getProjectSettings,
   updateProjectSettings,
   statusLabel,
   PROJECT_STATUS_ORDER,
   PROJECT_STATUS_LABELS,
-  type Project,
   type ShareMode,
   type ProjectStatus,
   type ProjectSettings,
 } from "@/lib/projects-api";
+import {
+  listProjectsExt,
+  createProjectExt,
+  reserveProjectCodes,
+  listClients,
+  createClient,
+  humanizeClientError,
+  humanizeProjectExtError,
+  clientNameOf,
+  PROJECT_KIND_LABELS,
+  PROJECT_KIND_ORDER,
+  type ProjectListItem,
+  type ProjectKind,
+  type Client,
+} from "@/lib/projects-ext-api";
 
 const STATUS_BADGE: Record<ProjectStatus, string> = {
   active: "bg-green-50 text-green-700",
@@ -26,14 +38,16 @@ const STATUS_BADGE: Record<ProjectStatus, string> = {
 };
 
 export default function AdminProjectsPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
+  const [projects, setProjects] = useState<ProjectListItem[]>([]);
+  const [clients, setClients] = useState<Client[]>([]);
   const [depts, setDepts] = useState<Department[]>([]);
   const [emps, setEmps] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 檢視選項：封存要向後端要（預設不回），案情篩選在前端做就好。
+  // 檢視選項：封存／預先取號的號碼要向後端要（預設不回），案情篩選在前端做就好。
   const [includeArchived, setIncludeArchived] = useState(false);
+  const [includeReserved, setIncludeReserved] = useState(false);
   const [statusFilter, setStatusFilter] = useState<ProjectStatus | "">("");
 
   // 自動封存設定（模組四第 2 條）
@@ -50,22 +64,39 @@ export default function AdminProjectsPage() {
   const [leadEmpId, setLeadEmpId] = useState("");
   const [shareMode, setShareMode] = useState<ShareMode>("pool_pct");
   const [bonusPool, setBonusPool] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [kind, setKind] = useState<ProjectKind>("main");
+  const [parentProjectId, setParentProjectId] = useState("");
   const [saving, setSaving] = useState(false);
   /** 建立成功後回報系統產生的編號——使用者要知道拿到的是哪一個號。 */
   const [createdCode, setCreatedCode] = useState<string | null>(null);
+
+  // 就地新增客戶（模組五）
+  const [showNewClient, setShowNewClient] = useState(false);
+  const [newClientName, setNewClientName] = useState("");
+  const [newClientTaxId, setNewClientTaxId] = useState("");
+  const [newClientPhone, setNewClientPhone] = useState("");
+  const [creatingClient, setCreatingClient] = useState(false);
+
+  // 預先取號（模組五）
+  const [reserveCount, setReserveCount] = useState("1");
+  const [reserving, setReserving] = useState(false);
+  const [reservedCodes, setReservedCodes] = useState<string[] | null>(null);
 
   async function load() {
     setLoading(true);
     setError(null);
     try {
-      const [p, d, e, st] = await Promise.all([
-        listProjects(includeArchived),
+      const [p, cl, d, e, st] = await Promise.all([
+        listProjectsExt({ includeArchived, includeReserved }),
+        listClients(),
         getDepartments(),
         getEmployees(),
         getProjectSettings(),
       ]);
       setSettings(st.settings);
       setProjects(p.projects);
+      setClients(cl.clients);
       setDepts(d.departments);
       setEmps(e.employees.filter((x) => x.status === "active"));
     } catch (err) {
@@ -78,18 +109,24 @@ export default function AdminProjectsPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [includeArchived]);
+  }, [includeArchived, includeReserved]);
+
+  const mainProjects = projects.filter((p) => (p.kind ?? "main") === "main");
 
   async function submit() {
     if (!name.trim()) {
       setError("請輸入專案名稱");
       return;
     }
+    if (kind !== "main" && !parentProjectId) {
+      setError("變更設計／追加／代墊必須選擇母案");
+      return;
+    }
     setSaving(true);
     setError(null);
     setCreatedCode(null);
     try {
-      const created = await createProject({
+      const created = await createProjectExt({
         name: name.trim(),
         code: code.trim() || null,
         fiscalYear: fiscalYear ? Number(fiscalYear) : null,
@@ -98,6 +135,9 @@ export default function AdminProjectsPage() {
         leadEmpId: leadEmpId || null,
         shareMode,
         bonusPool: shareMode === "pool_pct" && bonusPool ? Number(bonusPool) : null,
+        clientId: clientId || null,
+        kind,
+        parentProjectId: kind === "main" ? null : parentProjectId,
       });
       setCreatedCode(created.code);
       setName("");
@@ -108,6 +148,9 @@ export default function AdminProjectsPage() {
       setLeadEmpId("");
       setBonusPool("");
       setShareMode("pool_pct");
+      setClientId("");
+      setKind("main");
+      setParentProjectId("");
       await load();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "建立失敗";
@@ -116,10 +159,53 @@ export default function AdminProjectsPage() {
           ? `編號 ${code.trim()} 已被使用。請換一個，或清空讓系統自動產號。`
           : msg.includes("code_generation_failed")
             ? "系統產號連續碰撞，請稍候再試一次。"
-            : msg,
+            : humanizeProjectExtError(err, msg),
       );
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function submitNewClient() {
+    if (!newClientName.trim()) return;
+    setCreatingClient(true);
+    setError(null);
+    try {
+      const res = await createClient({
+        name: newClientName.trim(),
+        taxId: newClientTaxId.trim() || null,
+        phone: newClientPhone.trim() || null,
+      });
+      setClients((cs) => [...cs, res.client]);
+      setClientId(res.client.id);
+      setShowNewClient(false);
+      setNewClientName("");
+      setNewClientTaxId("");
+      setNewClientPhone("");
+    } catch (err) {
+      setError(humanizeClientError(err, "新增客戶失敗"));
+    } finally {
+      setCreatingClient(false);
+    }
+  }
+
+  async function submitReserve() {
+    const n = Number(reserveCount);
+    if (!Number.isInteger(n) || n < 1) {
+      setError("預先取號筆數請填正整數");
+      return;
+    }
+    setReserving(true);
+    setError(null);
+    try {
+      const res = await reserveProjectCodes(n);
+      setReservedCodes(res.projects.map((p) => p.code));
+      setIncludeReserved(true);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "預先取號失敗");
+    } finally {
+      setReserving(false);
     }
   }
 
@@ -168,6 +254,57 @@ export default function AdminProjectsPage() {
             <label className={labelCls}>說明</label>
             <textarea className={inputCls} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="選填" />
           </div>
+
+          <div className="sm:col-span-2">
+            <label className={labelCls}>客戶</label>
+            <div className="flex flex-wrap items-center gap-2">
+              <select className={`${inputCls} max-w-xs`} value={clientId} onChange={(e) => setClientId(e.target.value)}>
+                <option value="">不指定</option>
+                {clients.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => setShowNewClient((v) => !v)}
+                className="shrink-0 rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700"
+              >
+                {showNewClient ? "取消新增客戶" : "＋ 新增客戶"}
+              </button>
+            </div>
+            {showNewClient && (
+              <div className="mt-2 grid grid-cols-1 gap-2 rounded-lg border border-dashed border-gray-300 p-3 sm:grid-cols-4">
+                <input className={inputCls} value={newClientName} onChange={(e) => setNewClientName(e.target.value)} placeholder="客戶名稱 *" />
+                <input className={inputCls} value={newClientTaxId} onChange={(e) => setNewClientTaxId(e.target.value)} placeholder="統編（選填）" />
+                <input className={inputCls} value={newClientPhone} onChange={(e) => setNewClientPhone(e.target.value)} placeholder="電話（選填）" />
+                <PrimaryButton type="button" onClick={submitNewClient} disabled={creatingClient || !newClientName.trim()}>
+                  {creatingClient ? "建立中…" : "建立並選用"}
+                </PrimaryButton>
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label className={labelCls}>案件類型</label>
+            <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value as ProjectKind)}>
+              {PROJECT_KIND_ORDER.map((k) => (
+                <option key={k} value={k}>{PROJECT_KIND_LABELS[k]}</option>
+              ))}
+            </select>
+          </div>
+          {kind !== "main" && (
+            <div>
+              <label className={labelCls}>母案 *</label>
+              <select className={inputCls} value={parentProjectId} onChange={(e) => setParentProjectId(e.target.value)}>
+                <option value="">請選擇母案</option>
+                {mainProjects.map((p) => (
+                  <option key={p.id} value={p.id}>{p.code ? `${p.code}　` : ""}{p.name}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-gray-400">變更設計／追加／代墊都要掛回一個主案。</p>
+            </div>
+          )}
+
           <div>
             <label className={labelCls}>所屬部門（驅動部門主管可見分潤）</label>
             <select className={inputCls} value={deptId} onChange={(e) => setDeptId(e.target.value)}>
@@ -205,6 +342,25 @@ export default function AdminProjectsPage() {
           {createdCode && <span className="text-sm text-green-700">已建立，編號 <span className="font-mono font-medium">{createdCode}</span></span>}
           <ErrorText>{error}</ErrorText>
         </div>
+
+        <div className="mt-4 flex flex-wrap items-end gap-3 border-t pt-4">
+          <div>
+            <label className={labelCls}>預先取號</label>
+            <input className={`${inputCls} w-24`} type="number" min="1" max="50" value={reserveCount} onChange={(e) => setReserveCount(e.target.value)} />
+          </div>
+          <button
+            type="button"
+            onClick={() => void submitReserve()}
+            disabled={reserving}
+            className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 disabled:opacity-50"
+          >
+            {reserving ? "取號中…" : `預先取號 ${reserveCount || "N"} 筆`}
+          </button>
+          {reservedCodes && (
+            <span className="text-sm text-green-700">已取號：{reservedCodes.join("、")}</span>
+          )}
+          <span className="text-xs text-gray-400">立案前先掛號用；下方列表勾選「顯示預先取號」可見。</span>
+        </div>
       </Card>
 
       <Card>
@@ -227,6 +383,14 @@ export default function AdminProjectsPage() {
               onChange={(e) => setIncludeArchived(e.target.checked)}
             />
             顯示已封存
+          </label>
+          <label className="flex items-center gap-1.5 text-sm text-gray-600">
+            <input
+              type="checkbox"
+              checked={includeReserved}
+              onChange={(e) => setIncludeReserved(e.target.checked)}
+            />
+            顯示預先取號
           </label>
 
           {settings && (
@@ -272,6 +436,7 @@ export default function AdminProjectsPage() {
                 <tr className="border-b text-left text-gray-500">
                   <th className="py-2 pr-3">編號</th>
                   <th className="py-2 pr-3">專案</th>
+                  <th className="py-2 pr-3">客戶</th>
                   <th className="py-2 pr-3">文件</th>
                   <th className="py-2 pr-3">歸屬年度</th>
                   <th className="py-2 pr-3">部門</th>
@@ -285,8 +450,12 @@ export default function AdminProjectsPage() {
               <tbody>
                 {shown.map((p) => (
                   <tr key={p.id} className="border-b last:border-0">
-                    <td className="py-2 pr-3 font-mono text-xs text-gray-500">{p.code ?? "—"}</td>
-                    <td className="py-2 pr-3 font-medium text-gray-900">{p.name}</td>
+                    <td className="py-2 pr-3 font-mono text-xs text-gray-500">
+                      {p.code ?? "—"}
+                      {p.reservedAt && <span className="ml-1 rounded bg-blue-50 px-1 py-0.5 text-[10px] font-sans text-blue-700">預先取號</span>}
+                    </td>
+                    <td className="py-2 pr-3 font-medium text-gray-900">{p.name || "（未命名）"}</td>
+                    <td className="py-2 pr-3 text-gray-600">{clientNameOf(p)}</td>
                     <td className="py-2 pr-3">
                       {p.hasSignedContract ? (
                         <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">合約</span>

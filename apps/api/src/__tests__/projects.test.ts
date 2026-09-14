@@ -5,6 +5,7 @@ import request from "supertest"
 // module is imported, so the eagerly-constructed clients below have real creds.
 import { supabaseAdmin } from "../lib/supabase"
 import { provisionTenant } from "../services/tenants"
+import { taipeiToday } from "../services/project-status"
 import { app } from "../app"
 
 const SUPABASE_URL = process.env.SUPABASE_URL ?? ""
@@ -17,8 +18,10 @@ const createdTenantIds: string[] = []
 let tenantId: string
 let adminToken: string
 
-/** 編號的年度＝建立年。測試與程式取同一個來源。 */
-const YEAR = new Date().getFullYear()
+/** 編號的年度＝建立年（台北）。測試與程式取同一個來源。 */
+const YEAR = Number(taipeiToday().slice(0, 4))
+/** P3 起編號格式預設 AT-民國年-流水號（見 services/project-code.ts）。 */
+const ROC = YEAR - 1911
 
 async function signIn(email: string, password: string): Promise<string> {
   const anon = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -66,17 +69,17 @@ afterAll(async () => {
 describe("M4-1 專案編號 — 系統產號", () => {
   let firstId: string
 
-  it("第一個案子拿到 P{建立年}-001", async () => {
+  it("第一個案子拿到 AT-{民國建立年}-001", async () => {
     const res = await createProject({ name: "官網改版" })
     expect(res.status).toBe(201)
-    expect(res.body.code).toBe(`P${YEAR}-001`)
+    expect(res.body.code).toBe(`AT-${ROC}-001`)
     firstId = res.body.id
   })
 
   it("流水號遞增", async () => {
     const res = await createProject({ name: "倉儲系統" })
     expect(res.status).toBe(201)
-    expect(res.body.code).toBe(`P${YEAR}-002`)
+    expect(res.body.code).toBe(`AT-${ROC}-002`)
   })
 
   it("歸屬年度未指定時預設為建立年", async () => {
@@ -91,7 +94,7 @@ describe("M4-1 專案編號 — 系統產號", () => {
     const res = await createProject({ name: "跨年案", fiscalYear: YEAR - 1 })
     expect(res.status).toBe(201)
     // 編號仍是建立年——編號不表達歸屬。
-    expect(res.body.code).toBe(`P${YEAR}-003`)
+    expect(res.body.code).toBe(`AT-${ROC}-003`)
 
     const got = await request(app)
       .get(`/projects/${res.body.id}`)
@@ -108,10 +111,10 @@ describe("M4-1 專案編號 — 人工指定（匯入舊案）", () => {
   })
 
   it("人工編號不參與流水號計算，下一個自動號不會被推高", async () => {
-    // ABC-999 若被算進去，這裡會變成 P{YEAR}-1000。
+    // ABC-999 若被算進去，這裡會變成 AT-{ROC}-1000。
     const res = await createProject({ name: "後續案" })
     expect(res.status).toBe(201)
-    expect(res.body.code).toBe(`P${YEAR}-004`)
+    expect(res.body.code).toBe(`AT-${ROC}-004`)
   })
 
   it("撞號回 409，不自動改號——人工指定代表那個號有意義", async () => {
@@ -121,7 +124,7 @@ describe("M4-1 專案編號 — 人工指定（匯入舊案）", () => {
   })
 
   it("人工指定既有的系統編號一樣擋下", async () => {
-    const res = await createProject({ name: "手打撞到自動號", code: `P${YEAR}-001` })
+    const res = await createProject({ name: "手打撞到自動號", code: `AT-${ROC}-001` })
     expect(res.status).toBe(409)
     expect(res.body.error).toBe("code_taken")
   })
@@ -199,7 +202,7 @@ describe("M4-1 專案編號 — 租戶隔離", () => {
       .set("Authorization", `Bearer ${otherToken}`)
       .send({ name: "別家的第一個案子" })
     expect(res.status).toBe(201)
-    expect(res.body.code).toBe(`P${YEAR}-001`)
+    expect(res.body.code).toBe(`AT-${ROC}-001`)
     expect(other.tenantId).not.toBe(tenantId)
   }, 60_000)
 })

@@ -21,3 +21,35 @@ body {
     white-space: nowrap;
   }
 }
+
+/* 出勤月表列印（ESS /ess/attendance-sheet 與 Admin /admin/attendance-sheets/[id]
+   共用）。抬頭平常隱藏，只在列印時出現；.no-print 用來蓋掉不該印出來的操作列、
+   篩選列與導覽（後台側欄／ESS 頂欄）。 */
+.print-sheet-header {
+  display: none;
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 12mm;
+  }
+
+  .admin-shell aside,
+  .admin-shell header,
+  .no-print {
+    display: none !important;
+  }
+
+  .print-sheet-header {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .print-sheet,
+  .print-sheet table {
+    font-size: 11px;
+  }
+}

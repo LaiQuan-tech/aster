@@ -7,7 +7,9 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import {
   nextProjectCode,
   isUniqueViolation,
+  loadCodeFormat,
   MAX_CODE_ATTEMPTS,
+  DEFAULT_CODE_FORMAT,
 } from "../services/project-code.js"
 import {
   PROJECT_STATUSES,
@@ -21,13 +23,66 @@ import {
   DEFAULT_STAMP_DUTY_RATE,
   DEFAULT_LOOKBACK_YEARS,
 } from "../services/stamp-duty.js"
+import { todayKey, localDateKey } from "../lib/tz.js"
+import { getTenantTimezone } from "../lib/tenant-tz.js"
+import {
+  PROJECT_KINDS,
+  INVOICE_TYPES,
+  PAYMENT_METHODS,
+  DEFAULT_VAT_RATE,
+  rocDate,
+} from "../services/project-money.js"
+import {
+  loadP3Settings,
+  loadProjectFinance,
+  loadClient,
+  serializeClient,
+  serializeBilling,
+  serializeSubcontract,
+  serializeContractLite,
+} from "../services/project-application-store.js"
 
 export const projectsRouter = Router()
 
 // ⚠️ 必須是單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別，
 // 相接後會退化成 GenericStringError，下游的 as ProjectRow 全數失效。
 const PROJECT_COLS =
-  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, starts_on, ends_on, dept_id, lead_emp_id, share_mode, bonus_pool, created_at"
+  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, starts_on, ends_on, dept_id, lead_emp_id, share_mode, bonus_pool, created_at, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers"
+
+/** 預先取號的專案名稱——之後 PATCH 填真名時自動清掉 reserved_at。 */
+export const RESERVED_NAME = "（預先取號）"
+
+/* ── P3 專案申請單的欄位（模組五） ──────────────────────────────────── */
+
+const designScopeItem = z.object({
+  discipline: z.string().trim().min(1).max(40),
+  item: z.string().trim().max(200).nullish(),
+  amount: z.number().nonnegative().nullish(),
+})
+
+/** 工程師（技師）指派：值可以是名冊裡的廠商（vendorId）或直接填名字。 */
+const engineerRef = z.object({
+  vendorId: z.string().uuid().nullish(),
+  name: z.string().trim().max(120).nullish(),
+})
+const engineersSchema = z.record(z.enum(["electrical", "hvac", "fire"]), engineerRef.nullable())
+
+const dayField = z.string().trim().max(40).nullish()
+
+const applicationFields = {
+  clientId: z.string().uuid().nullish(),
+  parentProjectId: z.string().uuid().nullish(),
+  kind: z.enum(PROJECT_KINDS).optional(),
+  siteAddress: z.string().trim().max(300).nullish(),
+  siteAreaM2: z.number().nonnegative().max(1e9).nullish(),
+  designScope: z.array(designScopeItem).max(50).optional(),
+  invoiceType: z.enum(INVOICE_TYPES).nullish(),
+  paymentMethod: z.enum(PAYMENT_METHODS).nullish(),
+  closingDay: dayField,
+  paymentDay: dayField,
+  otherExpenses: z.number().nonnegative().max(1e12).nullish(),
+  engineers: engineersSchema.optional(),
+}
 
 const createSchema = z.object({
   name: z.string().trim().min(1).max(200),
@@ -46,6 +101,11 @@ const createSchema = z.object({
   /** 預定起訖日（甘特圖／示警）。 */
   startsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
   endsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
+  ...applicationFields,
+})
+
+const reserveSchema = z.object({
+  count: z.number().int().min(1).max(20),
 })
 
 const updateSchema = z
@@ -70,6 +130,7 @@ const updateSchema = z
     bonusPool: z.number().nonnegative().nullable().optional(),
     startsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
     endsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+    ...applicationFields,
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
   .refine((b) => !(b.startsOn && b.endsOn) || b.startsOn <= b.endsOn, { message: "endsOn must not be before startsOn" })
@@ -109,6 +170,134 @@ type ProjectRow = {
   share_mode: string
   bonus_pool: string | null
   created_at: string
+  // P3 專案申請單
+  client_id: string | null
+  parent_project_id: string | null
+  kind: string
+  reserved_at: string | null
+  site_address: string | null
+  site_area_m2: string | null
+  design_scope: unknown
+  invoice_type: string | null
+  payment_method: string | null
+  closing_day: string | null
+  payment_day: string | null
+  other_expenses: string | null
+  engineers: unknown
+}
+
+type DesignScopeItem = z.infer<typeof designScopeItem>
+
+/** design_scope 是 jsonb，讀回來要收斂形狀；非 finance 的人看不到金額。 */
+function designScopeOf(v: unknown, withAmount: boolean): DesignScopeItem[] {
+  if (!Array.isArray(v)) return []
+  const out: DesignScopeItem[] = []
+  for (const item of v) {
+    if (!item || typeof item !== "object") continue
+    const o = item as Record<string, unknown>
+    if (typeof o.discipline !== "string") continue
+    out.push({
+      discipline: o.discipline,
+      item: typeof o.item === "string" ? o.item : null,
+      amount: withAmount && typeof o.amount === "number" ? o.amount : null,
+    })
+  }
+  return out
+}
+
+function engineersOf(v: unknown): Record<string, { vendorId: string | null; name: string | null } | null> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return {}
+  const out: Record<string, { vendorId: string | null; name: string | null } | null> = {}
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (val === null) {
+      out[k] = null
+      continue
+    }
+    if (!val || typeof val !== "object") continue
+    const o = val as Record<string, unknown>
+    out[k] = {
+      vendorId: typeof o.vendorId === "string" ? o.vendorId : null,
+      name: typeof o.name === "string" ? o.name : null,
+    }
+  }
+  return out
+}
+
+/** 專案基本資料（basic 段）。`finance=false` 時不帶任何金額欄位。 */
+function serializeProject(row: ProjectRow, opts: { finance: boolean; hasSignedContract: boolean }) {
+  return {
+    hasSignedContract: opts.hasSignedContract,
+    id: row.id,
+    name: row.name,
+    code: row.code,
+    fiscalYear: row.fiscal_year,
+    description: row.description,
+    status: row.status,
+    statusReason: row.status_reason,
+    statusEffectiveOn: row.status_effective_on,
+    statusChangedAt: row.status_changed_at,
+    archivedAt: row.archived_at,
+    startsOn: row.starts_on,
+    endsOn: row.ends_on,
+    deptId: row.dept_id,
+    leadEmpId: row.lead_emp_id,
+    shareMode: row.share_mode,
+    // 分潤池維持既有可見性（bonus 段照舊）；finance 只收斂申請單的金額欄。
+    bonusPool: num(row.bonus_pool),
+    createdAt: row.created_at,
+    // P3
+    clientId: row.client_id,
+    parentProjectId: row.parent_project_id,
+    kind: row.kind ?? "main",
+    reservedAt: row.reserved_at,
+    siteAddress: row.site_address,
+    siteAreaM2: num(row.site_area_m2),
+    designScope: designScopeOf(row.design_scope, opts.finance),
+    invoiceType: row.invoice_type,
+    paymentMethod: row.payment_method,
+    closingDay: row.closing_day,
+    paymentDay: row.payment_day,
+    otherExpenses: opts.finance ? (num(row.other_expenses) ?? 0) : null,
+    engineers: engineersOf(row.engineers),
+  }
+}
+
+/**
+ * 案型與母案的規則：
+ *   • kind≠main 必須掛母案（追加減／加做／估驗都是「某個主案的」）→ parent_required
+ *   • 母案必須同租戶、且本身是 main（不能掛在追加減底下疊羅漢）→ invalid_parent
+ *   • main 不掛母案、也不能掛自己
+ */
+async function validateParent(
+  tenantId: string,
+  kind: string,
+  parentProjectId: string | null,
+  selfId: string | null,
+): Promise<"parent_required" | "invalid_parent" | null> {
+  if (kind === "main") return parentProjectId ? "invalid_parent" : null
+  if (!parentProjectId) return "parent_required"
+  if (selfId && parentProjectId === selfId) return "invalid_parent"
+  const { data, error } = await supabaseAdmin
+    .from("projects")
+    .select("id, kind")
+    .eq("tenant_id", tenantId)
+    .eq("id", parentProjectId)
+    .maybeSingle()
+  if (error) throw new Error(`validateParent: ${error.message}`)
+  if (!data || (data.kind ?? "main") !== "main") return "invalid_parent"
+  return null
+}
+
+async function clientExists(tenantId: string, clientId: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from("clients")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("id", clientId)
+    .is("deleted_at", null)
+    .maybeSingle()
+  if (error) throw new Error(`clientExists: ${error.message}`)
+  return !!data
 }
 
 function num(v: string | number | null | undefined): number | null {
@@ -155,6 +344,18 @@ async function signedProjectIds(tenantId: string, projectIds: string[]): Promise
     .in("project_id", projectIds)
   if (error) throw new Error(`signedProjectIds: ${error.message}`)
   return new Set((data ?? []).map((r) => r.project_id as string))
+}
+
+async function clientNamesById(tenantId: string, ids: Array<string | null>): Promise<Map<string, string>> {
+  const uniq = [...new Set(ids.filter((v): v is string => !!v))]
+  if (uniq.length === 0) return new Map()
+  const { data, error } = await supabaseAdmin
+    .from("clients")
+    .select("id, name")
+    .eq("tenant_id", tenantId)
+    .in("id", uniq)
+  if (error) throw new Error(`clientNamesById: ${error.message}`)
+  return new Map((data ?? []).map((c) => [c.id as string, c.name as string]))
 }
 
 /**
@@ -211,12 +412,16 @@ projectsRouter.get(
     // 案情（進行中／暫停／結案／解約）不在這裡篩——那是前端的檢視選擇，
     // 已解約的案子仍要出現在列表上。
     const includeArchived = req.query.includeArchived === "1"
+    // 預先取號的空列（reserved_at 非空）預設不進列表——它們還不是案子，
+    // 只是佔了號。年度總表要看得到，帶 ?includeReserved=1。
+    const includeReserved = req.query.includeReserved === "1"
     try {
       let query = supabaseAdmin
         .from("projects")
         .select(PROJECT_COLS)
         .eq("tenant_id", tenantId)
       if (!includeArchived) query = query.is("archived_at", null)
+      if (!includeReserved) query = query.is("reserved_at", null)
       const { data, error } = await query.order("created_at", { ascending: false })
       if (error) {
         next(new Error(`GET /projects: ${error.message}`))
@@ -224,32 +429,17 @@ projectsRouter.get(
       }
       // 「有沒有簽約」是衍生的，不另存旗標——旗標與 contracts 會對不起來。
       // 整份列表一次查完，不做 N+1。
-      const ids = (data ?? []).map((p) => (p as ProjectRow).id)
-      const signed = await signedProjectIds(tenantId, ids)
+      const rows = (data ?? []) as ProjectRow[]
+      const ids = rows.map((p) => p.id)
+      const [signed, clientNames] = await Promise.all([
+        signedProjectIds(tenantId, ids),
+        clientNamesById(tenantId, rows.map((p) => p.client_id)),
+      ])
 
-      const projects = (data ?? []).map((p) => {
-        const row = p as ProjectRow
-        return {
-          hasSignedContract: signed.has(row.id),
-          id: row.id,
-          name: row.name,
-          code: row.code,
-          fiscalYear: row.fiscal_year,
-          description: row.description,
-          status: row.status,
-          statusReason: row.status_reason,
-          statusEffectiveOn: row.status_effective_on,
-          statusChangedAt: row.status_changed_at,
-          archivedAt: row.archived_at,
-          startsOn: row.starts_on,
-          endsOn: row.ends_on,
-          deptId: row.dept_id,
-          leadEmpId: row.lead_emp_id,
-          shareMode: row.share_mode,
-          bonusPool: num(row.bonus_pool),
-          createdAt: row.created_at,
-        }
-      })
+      const projects = rows.map((row) => ({
+        ...serializeProject(row, { finance: false, hasSignedContract: signed.has(row.id) }),
+        clientName: row.client_id ? (clientNames.get(row.client_id) ?? null) : null,
+      }))
       res.status(200).json({ projects })
     } catch (err) {
       next(err)
@@ -272,9 +462,28 @@ projectsRouter.post(
     }
     const b = parsed.data
     try {
-      // 編號的年度一律取**建立年**（見 services/project-code.ts 的說明）。
-      const year = new Date().getFullYear()
+      // 編號的年度一律取**建立年**（見 services/project-code.ts 的說明），
+      // 而且是**台北當地**的年——12/31 深夜立的案不該拿到新年度的號。
+      const year = await taipeiYear(tenantId)
       const manualCode = b.code ?? null
+
+      // 案型與母案（P3）。
+      const kind = b.kind ?? "main"
+      const parentError = await validateParent(tenantId, kind, b.parentProjectId ?? null, null)
+      if (parentError) {
+        res.status(400).json({ error: parentError })
+        return
+      }
+      // 業主：要存在且未刪。請款慣例（開票聯式／付款方式／結帳日／付款日）
+      // 未填時從業主名冊預填，專案上可個別覆寫。
+      let client: Awaited<ReturnType<typeof loadClient>> = null
+      if (b.clientId) {
+        client = await loadClient(tenantId, b.clientId)
+        if (!client || client.deleted_at) {
+          res.status(400).json({ error: "invalid_client" })
+          return
+        }
+      }
 
       const baseRow = {
         tenant_id: tenantId,
@@ -288,6 +497,19 @@ projectsRouter.post(
         starts_on: b.startsOn ?? null,
         ends_on: b.endsOn ?? null,
         status: "active",
+        // P3
+        client_id: b.clientId ?? null,
+        parent_project_id: kind === "main" ? null : (b.parentProjectId ?? null),
+        kind,
+        site_address: b.siteAddress ?? null,
+        site_area_m2: b.siteAreaM2 ?? null,
+        design_scope: b.designScope ?? [],
+        invoice_type: b.invoiceType ?? client?.invoice_type ?? null,
+        payment_method: b.paymentMethod ?? client?.payment_method ?? null,
+        closing_day: b.closingDay ?? client?.closing_day ?? null,
+        payment_day: b.paymentDay ?? client?.payment_day ?? null,
+        other_expenses: b.otherExpenses ?? 0,
+        engineers: b.engineers ?? {},
       }
 
       // 人工指定編號：只試一次。撞號回 409——人工指定代表那個號有意義，
@@ -312,75 +534,226 @@ projectsRouter.post(
 
       // 系統產號：MAX(seq)+1 在併發時會撞號，unique index 是真正的保證，
       // 這裡碰到衝突就重算重試——讓 DB 當最後防線，不靠應用層搶。
-      for (let attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt++) {
-        const code = await nextProjectCode(tenantId, year)
-        const { data, error } = await supabaseAdmin
-          .from("projects")
-          .insert({ ...baseRow, code })
-          .select("id, code")
-          .single()
-        if (!error) {
-          res.status(201).json({ id: data!.id, code: data!.code })
-          return
-        }
-        if (!isUniqueViolation(error)) {
-          next(new Error(`POST /projects: ${error.message}`))
-          return
-        }
-        // 撞號 → 下一圈重算
+      const inserted = await insertWithGeneratedCode(tenantId, year, baseRow)
+      if (!inserted) {
+        res.status(503).json({ error: "code_generation_failed", attempts: MAX_CODE_ATTEMPTS })
+        return
       }
-      res.status(503).json({ error: "code_generation_failed", attempts: MAX_CODE_ATTEMPTS })
+      res.status(201).json(inserted)
     } catch (err) {
       next(err)
     }
   },
 )
 
-// ── GET /projects/:id — 全員讀專案詳情 ────────────────────────────────
+/** 台北（租戶時區）的今年——編號與歸屬年度的預設值。 */
+async function taipeiYear(tenantId: string): Promise<number> {
+  const tz = await getTenantTimezone(tenantId)
+  return Number(todayKey(tz).slice(0, 4))
+}
+
+/**
+ * 系統產號＋插入，撞號重試。回 null 代表重試用盡（呼叫端回 503）。
+ * 建案與預先取號共用——兩邊的併發與格式邏輯要一模一樣。
+ */
+async function insertWithGeneratedCode(
+  tenantId: string,
+  year: number,
+  row: Record<string, unknown>,
+): Promise<{ id: string; code: string } | null> {
+  const fmt = await loadCodeFormat(tenantId)
+  for (let attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt++) {
+    const code = await nextProjectCode(tenantId, year, fmt)
+    const { data, error } = await supabaseAdmin
+      .from("projects")
+      .insert({ ...row, code })
+      .select("id, code")
+      .single()
+    if (!error) return { id: data!.id as string, code: data!.code as string }
+    if (!isUniqueViolation(error)) throw new Error(`insertWithGeneratedCode: ${error.message}`)
+    // 撞號 → 下一圈重算
+  }
+  return null
+}
+
+// ── POST /projects/reserve — HR 預先取號（連號） ─────────────────────
+/**
+ * 老闆的做法：申請單編號先開好，案子談定再補內容。連續取 `count` 個號，
+ * 每個都是一列 `name='（預先取號）'`、`reserved_at=now` 的空專案；之後
+ * `PATCH /projects/:id` 填 name 時自動清掉 reserved_at，就變成正式的案子。
+ * 列表預設不回 reserved 列（見 GET /projects 的 includeReserved）。
+ */
+projectsRouter.post(
+  "/projects/reserve",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const parsed = reserveSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const year = await taipeiYear(tenantId)
+      const nowIso = new Date().toISOString()
+      const projects: Array<{ id: string; code: string }> = []
+      for (let i = 0; i < parsed.data.count; i++) {
+        const inserted = await insertWithGeneratedCode(tenantId, year, {
+          tenant_id: tenantId,
+          name: RESERVED_NAME,
+          fiscal_year: year,
+          status: "active",
+          kind: "main",
+          reserved_at: nowIso,
+          design_scope: [],
+          engineers: {},
+          other_expenses: 0,
+        })
+        if (!inserted) {
+          // 已經取到的號留著（它們是合法的空列），只回報取到幾個。
+          res.status(503).json({ error: "code_generation_failed", attempts: MAX_CODE_ATTEMPTS, projects })
+          return
+        }
+        projects.push(inserted)
+      }
+      res.status(201).json({ projects })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * 專案詳情的三段：basic（全員）／finance（錢）／bonus（分潤）。
+ * finance＝HR／該案 lead／該案部門主管（`loadScope().canManage`）；bonus 維持
+ * 既有分潤區的邏輯（目前與 finance 同一條規則，但分開回傳，前端別綁在一起）。
+ * 非 finance：`money:null, billings:[], subcontracts:[], contracts:[]`，
+ * 且 project 裡的金額欄位（designScope.amount／otherExpenses）也不帶。
+ */
+export async function loadProjectDetail(tenantId: string, userId: string, projectId: string) {
+  const scope = await loadScope(tenantId, userId, projectId)
+  if (!scope.ok) return scope
+  const row = scope.project
+  const finance = scope.canManage
+  const [signed, client, settings] = await Promise.all([
+    signedProjectIds(tenantId, [row.id]),
+    loadClient(tenantId, row.client_id),
+    loadP3Settings(tenantId),
+  ])
+  const project = {
+    ...serializeProject(row, { finance, hasSignedContract: signed.has(row.id) }),
+    client: client ? serializeClient(client) : null,
+  }
+  const access = { finance, bonus: scope.canManage }
+  if (!finance) {
+    return {
+      ok: true as const,
+      project,
+      access,
+      money: null,
+      billings: [] as ReturnType<typeof serializeBilling>[],
+      subcontracts: [] as ReturnType<typeof serializeSubcontract>[],
+      contracts: [] as ReturnType<typeof serializeContractLite>[],
+      latestDocument: null,
+      settings,
+    }
+  }
+  const bundle = await loadProjectFinance(tenantId, row.id, num(row.other_expenses) ?? 0, settings)
+  const paymentsBySub = new Map<string, typeof bundle.payments>()
+  for (const p of bundle.payments) {
+    const arr = paymentsBySub.get(p.subcontract_id)
+    if (arr) arr.push(p)
+    else paymentsBySub.set(p.subcontract_id, [p])
+  }
+  return {
+    ok: true as const,
+    project,
+    access,
+    money: bundle.money,
+    billings: bundle.billings.map(serializeBilling),
+    subcontracts: bundle.subcontracts.map((sc) => serializeSubcontract(sc, paymentsBySub.get(sc.id) ?? [])),
+    contracts: bundle.contracts.map(serializeContractLite),
+    latestDocument: bundle.latestDocument,
+    settings,
+  }
+}
+
+// ── GET /projects/:id — 全員讀專案詳情（錢依權限裁剪） ────────────────
 projectsRouter.get(
   "/projects/:id",
   requireAuth,
   requireTenant,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
     try {
-      const { data, error } = await supabaseAdmin
-        .from("projects")
-        .select(PROJECT_COLS)
-        .eq("tenant_id", tenantId)
-        .eq("id", req.params.id)
-        .maybeSingle()
-      if (error) {
-        next(new Error(`GET /projects/${req.params.id}: ${error.message}`))
+      const detail = await loadProjectDetail(tenantId, userId, req.params.id as string)
+      if (!detail.ok) {
+        res.status(detail.status).json({ error: detail.error })
         return
       }
-      if (!data) {
-        res.status(404).json({ error: "not_found" })
-        return
-      }
-      const row = data as ProjectRow
-      const signed = await signedProjectIds(tenantId, [row.id])
       res.status(200).json({
-        project: {
-          hasSignedContract: signed.has(row.id),
-          id: row.id,
-          name: row.name,
-          code: row.code,
-          fiscalYear: row.fiscal_year,
-          description: row.description,
-          status: row.status,
-          statusReason: row.status_reason,
-          statusEffectiveOn: row.status_effective_on,
-          statusChangedAt: row.status_changed_at,
-          archivedAt: row.archived_at,
-          startsOn: row.starts_on,
-          endsOn: row.ends_on,
-          deptId: row.dept_id,
-          leadEmpId: row.lead_emp_id,
-          shareMode: row.share_mode,
-          bonusPool: num(row.bonus_pool),
-          createdAt: row.created_at,
+        project: detail.project,
+        access: detail.access,
+        money: detail.money,
+        billings: detail.billings,
+        subcontracts: detail.subcontracts,
+        contracts: detail.contracts,
+      })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// ── GET /projects/:id/application — 申請單資料（Word 申請單的欄位集） ──
+/**
+ * 老闆的 Word「專案申請單」一頁要印的東西：編號、日期（民國）、業主、
+ * 現場、設計範圍、工程師、最新文件（合約／報價單）、請款期程、副委託、
+ * 金額試算。權限同 GET /projects/:id：非 finance 只拿得到 basic＋client。
+ */
+projectsRouter.get(
+  "/projects/:id/application",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
+    try {
+      const detail = await loadProjectDetail(tenantId, userId, req.params.id as string)
+      if (!detail.ok) {
+        res.status(detail.status).json({ error: detail.error })
+        return
+      }
+      const tz = await getTenantTimezone(tenantId)
+      const createdOn = localDateKey(detail.project.createdAt, tz)
+      const { client, ...project } = detail.project
+      res.status(200).json({
+        application: {
+          code: project.code,
+          createdOn,
+          dateRoc: rocDate(createdOn),
+          project,
+          client,
+          latestDocument: detail.latestDocument,
+          designScope: project.designScope,
+          engineers: project.engineers,
+          billings: detail.billings,
+          subcontracts: detail.subcontracts,
+          money: detail.money,
+          settings: { vatRate: detail.settings.vatRate, disciplines: detail.settings.disciplines },
         },
+        access: detail.access,
       })
     } catch (err) {
       next(err)
@@ -426,7 +799,11 @@ projectsRouter.patch(
       }
 
       const patch: Record<string, unknown> = {}
-      if (b.name !== undefined) patch.name = b.name
+      if (b.name !== undefined) {
+        patch.name = b.name
+        // 預先取號的空列一填上真名就是正式的案子了。
+        if (scope.project.reserved_at && b.name !== RESERVED_NAME) patch.reserved_at = null
+      }
       if (b.fiscalYear !== undefined) patch.fiscal_year = b.fiscalYear
       if (b.description !== undefined) patch.description = b.description
       if (b.deptId !== undefined) patch.dept_id = b.deptId
@@ -435,6 +812,36 @@ projectsRouter.patch(
       if (b.bonusPool !== undefined) patch.bonus_pool = b.bonusPool
       if (b.startsOn !== undefined) patch.starts_on = b.startsOn
       if (b.endsOn !== undefined) patch.ends_on = b.endsOn
+
+      // ── P3 專案申請單欄位 ──
+      if (b.kind !== undefined || b.parentProjectId !== undefined) {
+        const kind = b.kind ?? scope.project.kind ?? "main"
+        const parentId =
+          b.parentProjectId !== undefined ? b.parentProjectId : scope.project.parent_project_id
+        const parentError = await validateParent(tenantId, kind, parentId ?? null, scope.project.id)
+        if (parentError) {
+          res.status(400).json({ error: parentError })
+          return
+        }
+        patch.kind = kind
+        patch.parent_project_id = kind === "main" ? null : parentId
+      }
+      if (b.clientId !== undefined) {
+        if (b.clientId && !(await clientExists(tenantId, b.clientId))) {
+          res.status(400).json({ error: "invalid_client" })
+          return
+        }
+        patch.client_id = b.clientId
+      }
+      if (b.siteAddress !== undefined) patch.site_address = b.siteAddress
+      if (b.siteAreaM2 !== undefined) patch.site_area_m2 = b.siteAreaM2
+      if (b.designScope !== undefined) patch.design_scope = b.designScope
+      if (b.invoiceType !== undefined) patch.invoice_type = b.invoiceType
+      if (b.paymentMethod !== undefined) patch.payment_method = b.paymentMethod
+      if (b.closingDay !== undefined) patch.closing_day = b.closingDay
+      if (b.paymentDay !== undefined) patch.payment_day = b.paymentDay
+      if (b.otherExpenses !== undefined) patch.other_expenses = b.otherExpenses ?? 0
+      if (b.engineers !== undefined) patch.engineers = b.engineers
 
       // 案情與封存的規則全在 services/project-status.ts，這裡只搬運。
       const status = resolveStatusPatch({
@@ -903,8 +1310,45 @@ const projectSettingsSchema = z
     stampDutyRate: z.number().min(0).max(1).optional(),
     /** 印花稅清單回溯年數。預設 7——未申報的核課期間是 7 年，不是 5 年。 */
     stampDutyLookbackYears: z.number().int().min(1).max(15).optional(),
+    // ── P3：編號格式與稅率。改格式只影響之後產的號，既有編號不動。 ──
+    codePrefix: z.string().trim().min(1).max(10).regex(/^[A-Za-z0-9]+$/, "前綴只能是英數").optional(),
+    codeYearStyle: z.enum(["roc", "ad"]).optional(),
+    codeSeqDigits: z.number().int().min(1).max(6).optional(),
+    vatRate: z.number().min(0).max(1).optional(),
+    disciplines: z.array(z.string().trim().min(1).max(40)).max(30).optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
+
+const SETTINGS_COLS =
+  "auto_archive_enabled, auto_archive_months, stamp_duty_rate, stamp_duty_lookback_years, code_prefix, code_year_style, code_seq_digits, vat_rate, disciplines"
+
+type SettingsRow = {
+  auto_archive_enabled: boolean | null
+  auto_archive_months: number | string | null
+  stamp_duty_rate: number | string | null
+  stamp_duty_lookback_years: number | string | null
+  code_prefix: string | null
+  code_year_style: string | null
+  code_seq_digits: number | string | null
+  vat_rate: number | string | null
+  disciplines: unknown
+}
+
+function serializeSettings(data: SettingsRow | null) {
+  return {
+    autoArchiveEnabled: data ? data.auto_archive_enabled !== false : true,
+    autoArchiveMonths: data ? Number(data.auto_archive_months) : DEFAULT_AUTO_ARCHIVE_MONTHS,
+    stampDutyRate: data ? Number(data.stamp_duty_rate) : DEFAULT_STAMP_DUTY_RATE,
+    stampDutyLookbackYears: data ? Number(data.stamp_duty_lookback_years) : DEFAULT_LOOKBACK_YEARS,
+    codePrefix: data?.code_prefix ?? DEFAULT_CODE_FORMAT.prefix,
+    codeYearStyle: data?.code_year_style === "ad" ? "ad" : DEFAULT_CODE_FORMAT.yearStyle,
+    codeSeqDigits: data?.code_seq_digits ? Number(data.code_seq_digits) : DEFAULT_CODE_FORMAT.seqDigits,
+    vatRate: data?.vat_rate !== null && data?.vat_rate !== undefined ? Number(data.vat_rate) : DEFAULT_VAT_RATE,
+    disciplines: Array.isArray(data?.disciplines)
+      ? (data!.disciplines as unknown[]).filter((d): d is string => typeof d === "string")
+      : ["電機", "空調", "消防", "汙水"],
+  }
+}
 
 // ── GET /project-settings — 全員可讀（UI 要顯示「N 個月後自動封存」）──
 projectsRouter.get(
@@ -916,7 +1360,7 @@ projectsRouter.get(
     try {
       const { data, error } = await supabaseAdmin
         .from("project_settings")
-        .select("auto_archive_enabled, auto_archive_months, stamp_duty_rate, stamp_duty_lookback_years")
+        .select(SETTINGS_COLS)
         .eq("tenant_id", tenantId)
         .maybeSingle()
       if (error) {
@@ -924,18 +1368,7 @@ projectsRouter.get(
         return
       }
       // 沒有設定列就回預設值，讓租戶不必先設定就能用。
-      res.status(200).json({
-        settings: {
-          autoArchiveEnabled: data ? data.auto_archive_enabled !== false : true,
-          autoArchiveMonths: data
-            ? Number(data.auto_archive_months)
-            : DEFAULT_AUTO_ARCHIVE_MONTHS,
-          stampDutyRate: data ? Number(data.stamp_duty_rate) : DEFAULT_STAMP_DUTY_RATE,
-          stampDutyLookbackYears: data
-            ? Number(data.stamp_duty_lookback_years)
-            : DEFAULT_LOOKBACK_YEARS,
-        },
-      })
+      res.status(200).json({ settings: serializeSettings(data as SettingsRow | null) })
     } catch (err) {
       next(err)
     }
@@ -974,11 +1407,16 @@ projectsRouter.put(
         row.stamp_duty_rate = parsed.data.stampDutyRate
       if (parsed.data.stampDutyLookbackYears !== undefined)
         row.stamp_duty_lookback_years = parsed.data.stampDutyLookbackYears
+      if (parsed.data.codePrefix !== undefined) row.code_prefix = parsed.data.codePrefix
+      if (parsed.data.codeYearStyle !== undefined) row.code_year_style = parsed.data.codeYearStyle
+      if (parsed.data.codeSeqDigits !== undefined) row.code_seq_digits = parsed.data.codeSeqDigits
+      if (parsed.data.vatRate !== undefined) row.vat_rate = parsed.data.vatRate
+      if (parsed.data.disciplines !== undefined) row.disciplines = parsed.data.disciplines
 
       const { data, error } = await supabaseAdmin
         .from("project_settings")
         .upsert(row, { onConflict: "tenant_id" })
-        .select("auto_archive_enabled, auto_archive_months, stamp_duty_rate, stamp_duty_lookback_years")
+        .select(SETTINGS_COLS)
         .single()
       if (error || !data) {
         next(new Error(`PUT /project-settings: ${error?.message}`))
@@ -994,14 +1432,7 @@ projectsRouter.put(
         context: "PUT /project-settings",
       })
 
-      res.status(200).json({
-        settings: {
-          autoArchiveEnabled: data.auto_archive_enabled !== false,
-          autoArchiveMonths: Number(data.auto_archive_months),
-          stampDutyRate: Number(data.stamp_duty_rate),
-          stampDutyLookbackYears: Number(data.stamp_duty_lookback_years),
-        },
-      })
+      res.status(200).json({ settings: serializeSettings(data as SettingsRow) })
     } catch (err) {
       next(err)
     }

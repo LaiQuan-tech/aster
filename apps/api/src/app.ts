@@ -16,6 +16,8 @@ import { meRouter } from "./routes/me.js"
 import { ruleConfigRouter } from "./routes/rule-config.js"
 import { salaryRouter } from "./routes/salary.js"
 import { attendanceRouter } from "./routes/attendance.js"
+import { attendanceSheetsRouter } from "./routes/attendance-sheets.js"
+import { exportsRouter } from "./routes/exports.js"
 import { calendarRouter } from "./routes/calendar.js"
 import { payrollRouter } from "./routes/payroll.js"
 import { leaveBalancesRouter } from "./routes/leave-balances.js"
@@ -43,6 +45,10 @@ import { projectDocumentsRouter } from "./routes/project-documents.js"
 import { projectOverviewRouter } from "./routes/project-overview.js"
 import { contractsRouter } from "./routes/contracts.js"
 import { billingsRouter } from "./routes/billings.js"
+import { projectsAnnualRouter } from "./routes/projects-annual.js"
+import { subcontractsRouter } from "./routes/subcontracts.js"
+import { clientsRouter } from "./routes/clients.js"
+import { companiesRouter } from "./routes/companies.js"
 import { companyPagesRouter } from "./routes/company-pages.js"
 import { employeeMailboxesRouter } from "./routes/employee-mailboxes.js"
 import { vendorsRouter } from "./routes/vendors.js"
@@ -86,6 +92,8 @@ app.use(meRouter)
 app.use(ruleConfigRouter)
 app.use(salaryRouter)
 app.use(attendanceRouter)
+app.use(attendanceSheetsRouter)
+app.use(exportsRouter)
 app.use(calendarRouter)
 app.use(payrollRouter)
 app.use(leaveBalancesRouter)
@@ -109,10 +117,14 @@ app.use(internalJobsRouter)
 app.use(personalNotesRouter)
 app.use(preferencesRouter)
 app.use(projectOverviewRouter) // /projects/overview、/projects/alerts 要在 /projects/:id 之前
+app.use(projectsAnnualRouter) // /projects/annual、/projects/receivables 同上
 app.use(projectsRouter)
 app.use(projectDocumentsRouter)
 app.use(contractsRouter)
 app.use(billingsRouter)
+app.use(subcontractsRouter)
+app.use(clientsRouter)
+app.use(companiesRouter)
 app.use(companyPagesRouter)
 app.use(employeeMailboxesRouter)
 app.use(vendorsRouter)
