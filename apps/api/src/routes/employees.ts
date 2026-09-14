@@ -5,6 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
+import { belongsToTenant } from "../services/auth-invite.js"
 
 export const employeesRouter = Router()
 
@@ -241,6 +242,18 @@ employeesRouter.post(
       }
       if (!emp.user_id) {
         res.status(409).json({ error: "no_account" })
+        return
+      }
+      // 只准重設「真的屬於本租戶」的 auth 帳號：列上的 user_id 若指向別租戶／無租戶的帳號
+      // （修補 ff60eef 之前被綁上的殘留列），這裡是最後一道閘，不能讓 HR 藉此接管。
+      const { data: authUser, error: userErr } = await supabaseAdmin.auth.admin.getUserById(emp.user_id as string)
+      if (userErr || !authUser?.user) {
+        res.status(409).json({ error: "no_account" })
+        return
+      }
+      const lite = { id: authUser.user.id, email: authUser.user.email ?? null, appMetadata: authUser.user.app_metadata ?? {} }
+      if (!belongsToTenant(lite, tenantId)) {
+        res.status(409).json({ error: "email_in_other_tenant" })
         return
       }
       const password = parsed.data.password ?? generatePassword()
