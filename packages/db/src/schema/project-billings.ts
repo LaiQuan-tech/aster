@@ -69,6 +69,15 @@ export const projectBillings = pgTable(
     billedOn: date("billed_on"),
     billedAmount: numeric("billed_amount"),
 
+    // ── P3：開票與收款（模組四第 1 條「請款 ≠ 開票 ≠ 收款」的後兩件事）──
+    invoiceNo: text("invoice_no"),
+    invoicedOn: date("invoiced_on"),
+    /** 收款事件。寫入後代表這期款項已入帳。 */
+    receivedOn: date("received_on"),
+    receivedAmount: numeric("received_amount", { precision: 14, scale: 2 }),
+    /** 'installment' 一般分期 | 'guild_advance' 公會制估驗預付款。 */
+    kind: text("kind").notNull().default("installment"),
+
     note: text("note"),
     createdByEmpId: uuid("created_by_emp_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

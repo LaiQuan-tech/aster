@@ -1,8 +1,9 @@
 import {
-  pgTable, uuid, text, integer, numeric, timestamp, date, uniqueIndex,
+  pgTable, uuid, text, integer, numeric, timestamp, date, jsonb, uniqueIndex,
 } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 import { departments } from "./departments"
+import { clients } from "./clients"
 
 /**
  * Projects — 專案，內部知識庫與獎金分潤的核心單位。
@@ -85,6 +86,32 @@ export const projects = pgTable(
     leadEmpId: uuid("lead_emp_id"),
     shareMode: text("share_mode").notNull().default("pool_pct"),
     bonusPool: numeric("bonus_pool"),
+    // ── P3 專案申請單（模組五）新增 ──────────────────────────────────
+    /** 業主／客戶。可空：知識庫舊案未必補得回業主資料。 */
+    clientId: uuid("client_id").references(() => clients.id),
+    /** 母專案，用於「追加減／加做／估驗」掛回主案。刻意不設 FK
+     * （比照 departments.managerEmpId／projects.leadEmpId 的排除理由：
+     * 這裡純粹是分類用的軟參照，不是完整性關鍵鏈）。 */
+    parentProjectId: uuid("parent_project_id"),
+    /** 'main' 主案 | 'change' 追加減 | 'addition' 加做 | 'advance' 估驗（公會制）。 */
+    kind: text("kind").notNull().default("main"),
+    /** 建案／保留案號的時點，與 createdAt（系統寫入時點）分開。 */
+    reservedAt: timestamp("reserved_at", { withTimezone: true }),
+    siteAddress: text("site_address"),
+    siteAreaM2: numeric("site_area_m2", { precision: 12, scale: 2 }),
+    /** 設計範圍（複選），如 ["電機","空調"]。 */
+    designScope: jsonb("design_scope").notNull().default([]),
+    /** 'duplicate' 二聯式 | 'triplicate' 三聯式。新建時可由 clientId 預填，
+     * 專案上可個別覆寫（業主慣例與單一專案的約定可能不同）。 */
+    invoiceType: text("invoice_type"),
+    /** 'transfer' 匯款 | 'check' 支票。同上，可個別覆寫。 */
+    paymentMethod: text("payment_method"),
+    closingDay: text("closing_day"),
+    paymentDay: text("payment_day"),
+    /** 雜項支出（差旅、規費等），計入專案損益但不屬於下包/技師費。 */
+    otherExpenses: numeric("other_expenses", { precision: 14, scale: 2 }).notNull().default("0"),
+    /** 工程師指派，開放形狀如 {discipline: employeeId[]}。 */
+    engineers: jsonb("engineers").notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

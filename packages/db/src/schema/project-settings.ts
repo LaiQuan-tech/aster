@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, integer, numeric, boolean, timestamp, uniqueIndex,
+  pgTable, uuid, text, integer, numeric, boolean, jsonb, timestamp, uniqueIndex,
 } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 
@@ -46,6 +46,17 @@ export const projectSettings = pgTable(
     stampDutyRate: numeric("stamp_duty_rate").notNull().default("0.001"),
     /** 印花稅清單回溯幾年。預設 7，見上方說明。 */
     stampDutyLookbackYears: integer("stamp_duty_lookback_years").notNull().default(7),
+    // ── P3 專案編號與稅率參數 ──────────────────────────────────────
+    /** 專案編號前綴，預設 'AT'。 */
+    codePrefix: text("code_prefix").notNull().default("AT"),
+    /** 編號年度取法：'roc' 民國 | 'ad' 西元。 */
+    codeYearStyle: text("code_year_style").notNull().default("roc"),
+    /** 編號流水號位數，預設 3（如 001）。 */
+    codeSeqDigits: integer("code_seq_digits").notNull().default(3),
+    /** 營業稅率，預設 5%。 */
+    vatRate: numeric("vat_rate", { precision: 5, scale: 4 }).notNull().default("0.05"),
+    /** 專案設計範圍可選項目（供 UI 下拉，租戶可自行增減）。 */
+    disciplines: jsonb("disciplines").notNull().default(["電機", "空調", "消防", "汙水"]),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

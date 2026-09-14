@@ -1,4 +1,7 @@
-import { pgTable, uuid, text, doublePrecision, timestamp, index } from "drizzle-orm/pg-core"
+import {
+  pgTable, uuid, text, doublePrecision, timestamp, index, uniqueIndex,
+} from "drizzle-orm/pg-core"
+import { sql } from "drizzle-orm"
 import { tenants } from "./tenants"
 import { employees } from "./employees"
 
@@ -43,5 +46,13 @@ export const punchRecords = pgTable(
       table.employeeId,
       table.punchAt,
     ),
+    /**
+     * 補打卡落地冪等：同一張核准的補卡申請（`requestId`）若因重試或併發
+     * 被呼叫兩次，不該落地成兩筆一樣的打卡。只在 `requestId IS NOT NULL`
+     * 時生效（partial index）——一般打卡沒有 requestId，不受此限制。
+     */
+    requestDedupeIdx: uniqueIndex("punch_records_request_dedupe_uidx")
+      .on(table.tenantId, table.employeeId, table.type, table.punchAt)
+      .where(sql`${table.requestId} is not null`),
   }),
 )

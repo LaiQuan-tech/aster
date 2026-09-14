@@ -15,6 +15,7 @@
     "@supabase/supabase-js": "^2",
     "cors": "^2",
     "dotenv": "^16",
+    "exceljs": "^4.4.0",
     "express": "^5",
     "mammoth": "^1.12.3",
     "pdf-parse": "^2.4.5",

@@ -3,6 +3,7 @@ import {
 } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 import { projects } from "./projects"
+import { clients } from "./clients"
 
 /**
  * Contracts — 專案搭配的合約／報價單／追加減帳（模組四第 3 條，docs/02 區塊 E）。
@@ -42,6 +43,9 @@ export const contracts = pgTable(
     projectId: uuid("project_id")
       .notNull()
       .references(() => projects.id),
+    /** 業主／客戶（P3）。可空：與 projects.clientId 同一業主，這裡冗存
+     * 是因為合約簽訂當下的業主可能與專案目前掛的業主不同（易主／換約）。 */
+    clientId: uuid("client_id").references(() => clients.id),
     /** 'contract' 合約 | 'quotation' 報價單 | 'change_order' 追加減帳 */
     docType: text("doc_type").notNull(),
     /** 我方角色：'contractor' 承攬人（我方貼花）| 'client' 定作人（對方貼花） */
