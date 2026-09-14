@@ -47,7 +47,7 @@ export const projectsRouter = Router()
 // ⚠️ 必須是單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別，
 // 相接後會退化成 GenericStringError，下游的 as ProjectRow 全數失效。
 const PROJECT_COLS =
-  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, starts_on, ends_on, dept_id, lead_emp_id, share_mode, bonus_pool, created_at, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers"
+  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, starts_on, ends_on, opened_on, dept_id, lead_emp_id, share_mode, bonus_pool, created_at, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers"
 
 /** 預先取號的專案名稱——之後 PATCH 填真名時自動清掉 reserved_at。 */
 export const RESERVED_NAME = "（預先取號）"
@@ -70,6 +70,12 @@ const engineersSchema = z.record(z.enum(["electrical", "hvac", "fire"]), enginee
 const dayField = z.string().trim().max(40).nullish()
 
 const applicationFields = {
+  /**
+   * 開案日期（A5）。事後補 K 單的案子不該用建立日／K 單當天當日期，
+   * 讓人可填實際開案那天。POST 省略／null 時由呼叫端補租戶今天（見
+   * `tenantToday`）；PATCH 省略則不動、帶 null 會清空。
+   */
+  openedOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
   clientId: z.string().uuid().nullish(),
   parentProjectId: z.string().uuid().nullish(),
   kind: z.enum(PROJECT_KINDS).optional(),
@@ -165,6 +171,8 @@ type ProjectRow = {
   archived_at: string | null
   starts_on: string | null
   ends_on: string | null
+  /** 開案日（A5）。可空：既有資料由 sql/0031 backfill；新案由 API 預設今天。 */
+  opened_on: string | null
   dept_id: string | null
   lead_emp_id: string | null
   share_mode: string
@@ -239,6 +247,8 @@ function serializeProject(row: ProjectRow, opts: { finance: boolean; hasSignedCo
     archivedAt: row.archived_at,
     startsOn: row.starts_on,
     endsOn: row.ends_on,
+    /** 開案日期（A5）。全員可見，不受 finance 收斂——跟起訖日同一類。 */
+    openedOn: row.opened_on,
     deptId: row.dept_id,
     leadEmpId: row.lead_emp_id,
     shareMode: row.share_mode,
@@ -466,6 +476,8 @@ projectsRouter.post(
       // 而且是**台北當地**的年——12/31 深夜立的案不該拿到新年度的號。
       const year = await taipeiYear(tenantId)
       const manualCode = b.code ?? null
+      // A5：省略／null 一律補租戶今天——事後補 K 單的案子，UI 會讓人改成真正開案那天。
+      const openedOn = b.openedOn ?? (await tenantToday(tenantId))
 
       // 案型與母案（P3）。
       const kind = b.kind ?? "main"
@@ -496,6 +508,7 @@ projectsRouter.post(
         bonus_pool: b.bonusPool ?? null,
         starts_on: b.startsOn ?? null,
         ends_on: b.endsOn ?? null,
+        opened_on: openedOn,
         status: "active",
         // P3
         client_id: b.clientId ?? null,
@@ -550,6 +563,12 @@ projectsRouter.post(
 async function taipeiYear(tenantId: string): Promise<number> {
   const tz = await getTenantTimezone(tenantId)
   return Number(todayKey(tz).slice(0, 4))
+}
+
+/** 租戶時區的今天——A5 開案日期（`openedOn`）未填時的預設值。 */
+async function tenantToday(tenantId: string): Promise<string> {
+  const tz = await getTenantTimezone(tenantId)
+  return todayKey(tz)
 }
 
 /**
@@ -738,11 +757,15 @@ projectsRouter.get(
       const tz = await getTenantTimezone(tenantId)
       const createdOn = localDateKey(detail.project.createdAt, tz)
       const { client, ...project } = detail.project
+      // A5：申請單抬頭印「開案日期」，用 openedOn（缺值才退回建立日）——
+      // createdOn／dateRoc 維持原本建立日語意，兩者刻意分開，別互相取代。
+      const openedOn = project.openedOn ?? createdOn
       res.status(200).json({
         application: {
           code: project.code,
           createdOn,
           dateRoc: rocDate(createdOn),
+          openedOn,
           project,
           client,
           latestDocument: detail.latestDocument,
@@ -812,6 +835,7 @@ projectsRouter.patch(
       if (b.bonusPool !== undefined) patch.bonus_pool = b.bonusPool
       if (b.startsOn !== undefined) patch.starts_on = b.startsOn
       if (b.endsOn !== undefined) patch.ends_on = b.endsOn
+      if (b.openedOn !== undefined) patch.opened_on = b.openedOn
 
       // ── P3 專案申請單欄位 ──
       if (b.kind !== undefined || b.parentProjectId !== undefined) {

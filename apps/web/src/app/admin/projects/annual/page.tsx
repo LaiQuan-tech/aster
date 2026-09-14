@@ -26,7 +26,8 @@ function formatBlockMonth(m: string): string {
 
 /**
  * 年度專案申請單總表（模組五）：老闆 Excel「年度專案申請單總表」的線上版，
- * 一列一案（含預先取號的空列），依建立月份分區塊小計，最後年度總計。
+ * 一列一案（含預先取號的空列），依開案月份分區塊小計，最後年度總計。
+ * 開案日（A5）：優先用 opened_on（客戶事後補 K 單常見），缺值才退回建立日。
  * 科別欄位是動態的（`disciplines[]`，租戶設定在前、資料裡冒出的新科別接後面）。
  */
 export default function AnnualProjectsPage() {
@@ -83,7 +84,7 @@ export default function AnnualProjectsPage() {
 
   return (
     <>
-      <PageHeader title="年度專案申請單總表" desc="一列一案，依建立月份分區塊小計，最後年度總計；科別欄依租戶設定的順序排列" />
+      <PageHeader title="年度專案申請單總表" desc="一列一案，依開案月份分區塊小計，最後年度總計；科別欄依租戶設定的順序排列" />
 
       <Card>
         <div className="flex flex-wrap items-end gap-3">

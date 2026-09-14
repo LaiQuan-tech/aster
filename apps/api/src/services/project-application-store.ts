@@ -479,14 +479,17 @@ export type AnnualProjectRow = {
   lead_emp_id: string | null
   other_expenses: string | number | null
   created_at: string
+  /** 開案日（A5）。可空：缺值時退回 created_at 的台北日期。 */
+  opened_on: string | null
 }
 
 export type AnnualRow = {
   seq: number
   projectId: string
   code: string | null
-  /** 建立日（台北），民國寫法 'yyy.m.d'。 */
+  /** 開案日（opened_on，缺值退回建立日的台北日期），民國寫法 'yyy.m.d'。 */
   dateRoc: string | null
+  /** 開案日（opened_on ?? 建立日的台北日期），'YYYY-MM-DD'。也是月份分區塊的依據。 */
   createdOn: string
   clientName: string | null
   name: string
@@ -589,7 +592,7 @@ export async function buildAnnualTable(
   let q = supabaseAdmin
     .from("projects")
     .select(
-      "id, name, code, fiscal_year, status, kind, reserved_at, archived_at, client_id, lead_emp_id, other_expenses, created_at",
+      "id, name, code, fiscal_year, status, kind, reserved_at, archived_at, client_id, lead_emp_id, other_expenses, created_at, opened_on",
     )
     .eq("tenant_id", tenantId)
     .eq("fiscal_year", year)
@@ -642,7 +645,9 @@ export async function buildAnnualTable(
     }
     const installmentRows = pb.filter((b) => (b.kind ?? "installment") === "installment")
     const billedCount = installmentRows.filter((b) => b.billed_on).length
-    const createdOn = localDateKey(p.created_at, tz)
+    // A5：客戶事後補 K 單，K 單／建立日那天不能當這欄的日期——優先用開案日
+    // （opened_on），只有既有資料還沒補過才退回建立日的台北日期。
+    const createdOn = p.opened_on ?? localDateKey(p.created_at, tz)
     return {
       seq: 0,
       projectId: p.id,

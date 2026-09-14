@@ -30,6 +30,15 @@ import {
   type Client,
 } from "@/lib/projects-ext-api";
 
+/** 瀏覽器當地日期 'YYYY-MM-DD'——開案日期表單欄位的預設值（今天）。 */
+function todayLocalKey(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 const STATUS_BADGE: Record<ProjectStatus, string> = {
   active: "bg-green-50 text-green-700",
   suspended: "bg-amber-50 text-amber-700",
@@ -59,6 +68,8 @@ export default function AdminProjectsPage() {
   // 編號留空＝系統產號（P{建立年}-{流水號}）。填了就是人工指定，撞號後端回 409。
   const [code, setCode] = useState("");
   const [fiscalYear, setFiscalYear] = useState("");
+  // 開案日期（A5）：預設今天，事後補 K 單的案子可以改成實際開案那天。
+  const [openedOn, setOpenedOn] = useState(todayLocalKey());
   const [description, setDescription] = useState("");
   const [deptId, setDeptId] = useState("");
   const [leadEmpId, setLeadEmpId] = useState("");
@@ -130,6 +141,7 @@ export default function AdminProjectsPage() {
         name: name.trim(),
         code: code.trim() || null,
         fiscalYear: fiscalYear ? Number(fiscalYear) : null,
+        openedOn: openedOn || null,
         description: description.trim() || null,
         deptId: deptId || null,
         leadEmpId: leadEmpId || null,
@@ -143,6 +155,7 @@ export default function AdminProjectsPage() {
       setName("");
       setCode("");
       setFiscalYear("");
+      setOpenedOn(todayLocalKey());
       setDescription("");
       setDeptId("");
       setLeadEmpId("");
@@ -237,6 +250,11 @@ export default function AdminProjectsPage() {
           <div>
             <label className={labelCls}>專案名稱 *</label>
             <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：官網改版" />
+          </div>
+          <div>
+            <label className={labelCls}>開案日期</label>
+            <input className={inputCls} type="date" value={openedOn} onChange={(e) => setOpenedOn(e.target.value)} />
+            <p className="mt-1 text-xs text-gray-400">預設今天；事後補登的案子請改成實際開案那天，不要用建立日或補單當天。</p>
           </div>
           <div>
             <label className={labelCls}>歸屬年度</label>

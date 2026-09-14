@@ -72,7 +72,7 @@ export function ApplicationDocument({ data }: { data: ApplicationData }) {
     <div className="print-sheet mx-auto max-w-3xl bg-white p-6 text-gray-900 print:max-w-none print:p-0">
       <h1 className="text-center text-xl font-bold tracking-[0.3em]">專案申請單</h1>
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-b-2 border-gray-800 pb-2 text-xs">
-        <span>申請日期：{formatRocDate(data.createdOn)}</span>
+        <span>開案日期：{formatRocDate(data.openedOn)}</span>
         <span>工程名稱：{project.name}</span>
         <span className="font-mono">專案序號：{data.code ?? "—"}</span>
       </div>
