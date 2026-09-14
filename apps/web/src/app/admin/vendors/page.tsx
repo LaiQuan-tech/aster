@@ -14,17 +14,23 @@ import {
 type Form = {
   name: string; category: string; contactName: string; title: string; phone: string; mobile: string;
   email: string; address: string; taxId: string; website: string; note: string;
+  bankName: string; bankCode: string; bankAccount: string; accountHolder: string;
 };
-const emptyForm = (): Form => ({ name: "", category: "", contactName: "", title: "", phone: "", mobile: "", email: "", address: "", taxId: "", website: "", note: "" });
+const emptyForm = (): Form => ({
+  name: "", category: "", contactName: "", title: "", phone: "", mobile: "", email: "", address: "", taxId: "", website: "", note: "",
+  bankName: "", bankCode: "", bankAccount: "", accountHolder: "",
+});
 const fromVendor = (v: Vendor): Form => ({
   name: v.name, category: v.category ?? "", contactName: v.contactName ?? "", title: v.title ?? "", phone: v.phone ?? "", mobile: v.mobile ?? "",
   email: v.email ?? "", address: v.address ?? "", taxId: v.taxId ?? "", website: v.website ?? "", note: v.note ?? "",
+  bankName: v.bankName ?? "", bankCode: v.bankCode ?? "", bankAccount: v.bankAccount ?? "", accountHolder: v.accountHolder ?? "",
 });
 const toInput = (f: Form): VendorInput => ({
   name: f.name.trim(),
   category: f.category.trim() || null, contactName: f.contactName.trim() || null, title: f.title.trim() || null,
   phone: f.phone.trim() || null, mobile: f.mobile.trim() || null, email: f.email.trim() || null, address: f.address.trim() || null,
   taxId: f.taxId.trim() || null, website: f.website.trim() || null, note: f.note.trim() || null,
+  bankName: f.bankName.trim() || null, bankCode: f.bankCode.trim() || null, bankAccount: f.bankAccount.trim() || null, accountHolder: f.accountHolder.trim() || null,
 });
 
 export default function VendorsPage() {
@@ -155,6 +161,10 @@ export default function VendorsPage() {
                   <th className="py-2 pr-3">電話 / 手機</th>
                   <th className="py-2 pr-3">Email</th>
                   <th className="py-2 pr-3">統編</th>
+                  <th className="py-2 pr-3">銀行</th>
+                  <th className="py-2 pr-3">代碼</th>
+                  <th className="py-2 pr-3">帳號</th>
+                  <th className="py-2 pr-3">戶名</th>
                   <th className="py-2"></th>
                 </tr>
               </thead>
@@ -173,6 +183,10 @@ export default function VendorsPage() {
                       {v.taxId ?? "—"}
                       {v.taxIdValid === false && <span className="ml-1 text-xs text-amber-700" title="統一編號檢查碼不符">⚠</span>}
                     </td>
+                    <td className="py-2 pr-3 text-gray-600">{v.bankName ?? "—"}</td>
+                    <td className="py-2 pr-3 text-gray-600">{v.bankCode ?? "—"}</td>
+                    <td className="py-2 pr-3 text-gray-600">{v.bankAccount ?? "—"}</td>
+                    <td className="py-2 pr-3 text-gray-600">{v.accountHolder ?? "—"}</td>
                     <td className="py-2 text-right whitespace-nowrap">
                       <button type="button" onClick={() => void startEdit(v)} className="mr-3 text-xs text-gray-600 hover:underline">編輯</button>
                       <button type="button" onClick={() => void remove(v)} className="text-xs text-gray-400 hover:text-red-600">刪除</button>
@@ -200,6 +214,10 @@ export default function VendorsPage() {
               {F("email", "Email")}
               {F("website", "網站")}
               {F("taxId", "統一編號", "8 碼")}
+              {F("bankName", "銀行", "例：兆豐銀行")}
+              {F("bankCode", "銀行代碼", "例：017")}
+              {F("bankAccount", "帳號")}
+              {F("accountHolder", "戶名", "帳戶開戶姓名／公司名，供放款核對用")}
               <div className="sm:col-span-2">{F("address", "地址")}</div>
               <div className="sm:col-span-2">
                 <label className={labelCls}>備註</label>

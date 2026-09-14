@@ -361,6 +361,9 @@ export interface SubcontractPayment {
   receiptIssuerCompanyId?: string | null
   receiptRef?: string | null
   note?: string | null
+  /** 放款專區連動：這期是由哪筆匯款單付的（唯讀，null＝舊路徑手動標記或尚未付）。 */
+  disbursementId?: string | null
+  disbursementNo?: string | null
 }
 
 export interface SubcontractSummary {

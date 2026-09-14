@@ -47,6 +47,12 @@ export const subcontractsRouter = Router()
  * trigger（sql/0028），所以**期款列不能移除**：payload 漏掉既有列一律 409
  * `payment_not_removable`（已付的回 `paid`）。要「拿掉」一期就把它的百分比
  * 改成 0。測試租戶雖然刪得掉，這裡刻意不刪，免得正式環境行為不一樣。
+ *
+ * ── 與放款專區的分工 ────────────────────────────────────────────────
+ * 期款有 `disbursement_id`（放款專區連動付清）時，放款日／實付／撤銷付款
+ * 一律 409 `linked_to_disbursement`——單一真相在匯款單，要改就作廢那張單。
+ * 沒有 `disbursement_id` 的舊路徑（手動標記已付）維持原樣，專案頁顯示
+ * 「手動標記」，放款專區列表可用 `manualPaid=1` 找出來補單。
  */
 
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
@@ -490,6 +496,23 @@ subcontractsRouter.put(
         if (pctChanged || overrideChanged) {
           res.status(409).json({ error: "paid", installmentNo: row.installment_no })
           return
+        }
+        // 由放款專區連動付清的期別：放款日／實付／撤銷付款都歸匯款單管（要改就去作廢那張單），
+        // 這裡只准改備註類欄位。
+        if (row.disbursement_id) {
+          const paidOnChanged = item.paidOn !== undefined && item.paidOn !== row.paid_on
+          const paidAmountChanged =
+            item.paidAmount !== undefined && item.paidAmount !== null && item.paidAmount !== num(row.paid_amount)
+          if (paidOnChanged || paidAmountChanged) {
+            res.status(409).json({
+              error: "linked_to_disbursement",
+              installmentNo: row.installment_no,
+              disbursementId: row.disbursement_id,
+              disbursementNo: row.disbursement_no ?? null,
+              hint: "此期款由放款專區的匯款單連動付清；要改放款日／實付或撤銷，請作廢該匯款單。",
+            })
+            return
+          }
         }
         if (item.paidOn === null) unpaying = true
       }

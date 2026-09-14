@@ -7,6 +7,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { generateJson, GeminiNotConfiguredError, isGeminiConfigured } from "../lib/gemini.js"
 import { isValidTaiwanTaxId, TAX_ID_RE } from "../services/tax-id.js"
+import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 
 export const vendorsRouter = Router()
 
@@ -20,8 +21,30 @@ export const vendorsRouter = Router()
 
 const BUCKET = "vendor-cards"
 const MAX_BYTES = 8 * 1024 * 1024
+// 收款帳戶四欄（bank_*／account_holder）由 packages/db 0041 加入，放款專區建立匯款時預填。
 const COLS =
+  "id, tenant_id, name, category, contact_name, title, phone, mobile, email, address, tax_id, website, bank_name, bank_code, bank_account, account_holder, note, card_storage_path, source, created_by_emp_id, created_at, updated_at, deleted_at"
+/** 正式庫尚未套 0041 時的退路（見 lib/schema-compat.ts 的部署順序說明）。 */
+const COLS_LEGACY =
   "id, tenant_id, name, category, contact_name, title, phone, mobile, email, address, tax_id, website, note, card_storage_path, source, created_by_emp_id, created_at, updated_at, deleted_at"
+const BANK_COLS = ["bank_name", "bank_code", "bank_account", "account_holder"]
+let bankColsMissing = false
+
+/**
+ * 用完整欄位集跑一次；撞到「欄位不存在」就記住並用舊欄位集重跑（寫入時 toRow 會
+ * 同步略過銀行欄）。套完 0041 後永遠不會走到第二次。
+ */
+async function withVendorCols<T>(
+  run: (cols: string) => PromiseLike<{ data: T; error: { code?: string | null; message?: string | null } | null }>,
+): Promise<{ data: T; error: { code?: string | null; message?: string | null } | null }> {
+  let r = await run(bankColsMissing ? COLS_LEGACY : COLS)
+  if (r.error && !bankColsMissing && isMissingColumnError(r.error)) {
+    bankColsMissing = true
+    warnSchemaGapOnce("vendors.bank_*", r.error)
+    r = await run(COLS_LEGACY)
+  }
+  return r
+}
 
 const vendorBody = z.object({
   name: z.string().trim().min(1).max(120),
@@ -39,6 +62,11 @@ const vendorBody = z.object({
     .optional()
     .refine((v) => v == null || v === "" || TAX_ID_RE.test(v), "統一編號須為 8 碼數字"),
   website: z.string().trim().max(200).nullable().optional(),
+  /** 收款帳戶（放款專區預填用）。 */
+  bankName: z.string().trim().max(120).nullable().optional(),
+  bankCode: z.string().trim().max(20).nullable().optional(),
+  bankAccount: z.string().trim().max(60).nullable().optional(),
+  accountHolder: z.string().trim().max(120).nullable().optional(),
   note: z.string().trim().max(2000).nullable().optional(),
   cardStoragePath: z.string().trim().max(300).nullable().optional(),
   source: z.enum(["manual", "card_ocr"]).optional(),
@@ -64,6 +92,10 @@ function serialize(r: Record<string, unknown>) {
     taxId: r.tax_id ?? null,
     taxIdValid: typeof r.tax_id === "string" && r.tax_id ? isValidTaiwanTaxId(r.tax_id) : null,
     website: r.website ?? null,
+    bankName: r.bank_name ?? null,
+    bankCode: r.bank_code ?? null,
+    bankAccount: r.bank_account ?? null,
+    accountHolder: r.account_holder ?? null,
     note: r.note ?? null,
     hasCard: !!r.card_storage_path,
     source: r.source,
@@ -77,9 +109,15 @@ function toRow(b: z.infer<typeof vendorBody>): Record<string, unknown> {
   const map: Array<[keyof typeof b, string]> = [
     ["name", "name"], ["category", "category"], ["contactName", "contact_name"], ["title", "title"],
     ["phone", "phone"], ["mobile", "mobile"], ["email", "email"], ["address", "address"],
-    ["taxId", "tax_id"], ["website", "website"], ["note", "note"], ["cardStoragePath", "card_storage_path"], ["source", "source"],
+    ["taxId", "tax_id"], ["website", "website"],
+    ["bankName", "bank_name"], ["bankCode", "bank_code"], ["bankAccount", "bank_account"], ["accountHolder", "account_holder"],
+    ["note", "note"], ["cardStoragePath", "card_storage_path"], ["source", "source"],
   ]
-  for (const [k, col] of map) if (b[k] !== undefined) row[col] = b[k] === "" ? null : b[k]
+  for (const [k, col] of map) {
+    if (b[k] === undefined) continue
+    if (bankColsMissing && BANK_COLS.includes(col)) continue
+    row[col] = b[k] === "" ? null : b[k]
+  }
   return row
 }
 
@@ -88,17 +126,19 @@ vendorsRouter.get("/vendors", requireAuth, requireTenant, async (req: Request, r
   const tenantId = res.locals.tenantId as string
   const q = typeof req.query.q === "string" ? req.query.q.trim() : ""
   try {
-    let query = supabaseAdmin.from("vendors").select(COLS).eq("tenant_id", tenantId).is("deleted_at", null)
-    if (q) {
-      const like = `%${q.replace(/[%_]/g, "")}%`
-      query = query.or(`name.ilike.${like},contact_name.ilike.${like},category.ilike.${like},tax_id.ilike.${like},phone.ilike.${like},mobile.ilike.${like}`)
-    }
-    const { data, error } = await query.order("name", { ascending: true })
+    const { data, error } = await withVendorCols((cols) => {
+      let query = supabaseAdmin.from("vendors").select(cols).eq("tenant_id", tenantId).is("deleted_at", null)
+      if (q) {
+        const like = `%${q.replace(/[%_]/g, "")}%`
+        query = query.or(`name.ilike.${like},contact_name.ilike.${like},category.ilike.${like},tax_id.ilike.${like},phone.ilike.${like},mobile.ilike.${like}`)
+      }
+      return query.order("name", { ascending: true })
+    })
     if (error) {
       next(new Error(`GET /vendors: ${error.message}`))
       return
     }
-    res.status(200).json({ vendors: (data ?? []).map((r) => serialize(r as Record<string, unknown>)) })
+    res.status(200).json({ vendors: (data ?? []).map((r) => serialize(r as unknown as Record<string, unknown>)) })
   } catch (err) {
     next(err)
   }
@@ -115,16 +155,18 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, async (req: Request, 
   }
   try {
     const self = userId ? await resolveSelf(tenantId, userId) : null
-    const { data, error } = await supabaseAdmin
-      .from("vendors")
-      .insert({ tenant_id: tenantId, created_by_emp_id: self?.id ?? null, ...toRow(parsed.data) })
-      .select(COLS)
-      .single()
+    const { data, error } = await withVendorCols((cols) =>
+      supabaseAdmin
+        .from("vendors")
+        .insert({ tenant_id: tenantId, created_by_emp_id: self?.id ?? null, ...toRow(parsed.data) })
+        .select(cols)
+        .single(),
+    )
     if (error || !data) {
       next(new Error(`POST /vendors: ${error?.message}`))
       return
     }
-    res.status(201).json({ vendor: serialize(data as Record<string, unknown>) })
+    res.status(201).json({ vendor: serialize(data as unknown as Record<string, unknown>) })
   } catch (err) {
     next(err)
   }
@@ -139,20 +181,21 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, async (req: Requ
     res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
     return
   }
-  const row = toRow(parsed.data as z.infer<typeof vendorBody>)
-  if (Object.keys(row).length === 0) {
+  if (Object.keys(toRow(parsed.data as z.infer<typeof vendorBody>)).length === 0) {
     res.status(400).json({ error: "no_fields" })
     return
   }
   try {
-    const { data, error } = await supabaseAdmin
-      .from("vendors")
-      .update({ ...row, updated_at: new Date().toISOString() })
-      .eq("tenant_id", tenantId)
-      .eq("id", id)
-      .is("deleted_at", null)
-      .select(COLS)
-      .maybeSingle()
+    const { data, error } = await withVendorCols((cols) =>
+      supabaseAdmin
+        .from("vendors")
+        .update({ ...toRow(parsed.data as z.infer<typeof vendorBody>), updated_at: new Date().toISOString() })
+        .eq("tenant_id", tenantId)
+        .eq("id", id)
+        .is("deleted_at", null)
+        .select(cols)
+        .maybeSingle(),
+    )
     if (error) {
       next(new Error(`PATCH /vendors/${id}: ${error.message}`))
       return
@@ -161,7 +204,7 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, async (req: Requ
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(200).json({ vendor: serialize(data as Record<string, unknown>) })
+    res.status(200).json({ vendor: serialize(data as unknown as Record<string, unknown>) })
   } catch (err) {
     next(err)
   }

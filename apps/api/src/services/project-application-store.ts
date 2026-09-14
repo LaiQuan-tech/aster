@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { localDateKey, DEFAULT_TIMEZONE } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { BILLING_COLS, num, type BillingRow } from "./billing-store.js"
@@ -34,6 +35,10 @@ export const SUBCONTRACT_COLS =
   "id, project_id, kind, discipline, vendor_id, vendor_name, contact, item, amount, billing_basis, order_type, contract_id, withholding_rate, withholding_threshold, sort_order, note, created_at, updated_at, deleted_at, vendors(name)"
 
 export const PAYMENT_COLS =
+  "id, subcontract_id, installment_no, percentage, amount, override_amount, override_reason, due_when, paid_on, paid_amount, withheld_amount, paying_company_id, receipt_issuer_company_id, receipt_ref, disbursement_id, note, created_at, updated_at"
+
+/** 正式庫尚未套 0041（`disbursement_id` 欄不存在）時的退路；套完就不會再走到。 */
+export const PAYMENT_COLS_LEGACY =
   "id, subcontract_id, installment_no, percentage, amount, override_amount, override_reason, due_when, paid_on, paid_amount, withheld_amount, paying_company_id, receipt_issuer_company_id, receipt_ref, note, created_at, updated_at"
 
 export const CONTRACT_LITE_COLS =
@@ -77,6 +82,10 @@ export type PaymentRow = {
   paying_company_id: string | null
   receipt_issuer_company_id: string | null
   receipt_ref: string | null
+  /** 放款專區連動寫入的匯款單；null＝未經放款專區（含舊路徑手動標記已付）。未套 0041 時欄位不存在。 */
+  disbursement_id?: string | null
+  /** 由 loadPayments 以 disbursement_id 批次補上的單號（非 DB 欄位）。 */
+  disbursement_no?: string | null
   note: string | null
   created_at: string
   updated_at: string
@@ -214,6 +223,9 @@ export function serializePayment(row: PaymentRow, computed?: {
     payingCompanyId: row.paying_company_id,
     receiptIssuerCompanyId: row.receipt_issuer_company_id,
     receiptRef: row.receipt_ref,
+    /** 放款專區連動的匯款單；兩者皆 null 而 paidOn 有值＝舊路徑「手動標記」。 */
+    disbursementId: row.disbursement_id ?? null,
+    disbursementNo: row.disbursement_no ?? null,
     note: row.note,
   }
 }
@@ -293,16 +305,47 @@ export async function loadSubcontracts(tenantId: string, projectId: string): Pro
   return (data ?? []) as unknown as SubcontractRow[]
 }
 
+/** 一旦探到 `disbursement_id` 欄不存在（未套 0041）就記住，之後直接走退路，不每次多打一次。 */
+let paymentDisbursementColMissing = false
+
 export async function loadPayments(tenantId: string, subcontractIds: string[]): Promise<PaymentRow[]> {
   if (subcontractIds.length === 0) return []
-  const { data, error } = await supabaseAdmin
-    .from("project_subcontract_payments")
-    .select(PAYMENT_COLS)
-    .eq("tenant_id", tenantId)
-    .in("subcontract_id", subcontractIds)
-    .order("installment_no", { ascending: true })
+  const select = (cols: string) =>
+    supabaseAdmin
+      .from("project_subcontract_payments")
+      .select(cols)
+      .eq("tenant_id", tenantId)
+      .in("subcontract_id", subcontractIds)
+      .order("installment_no", { ascending: true })
+  let { data, error } = await select(paymentDisbursementColMissing ? PAYMENT_COLS_LEGACY : PAYMENT_COLS)
+  if (error && !paymentDisbursementColMissing && isMissingColumnError(error)) {
+    // 正式庫還沒套 0041：退回舊欄位集，行為與放款專區上線前一致。
+    paymentDisbursementColMissing = true
+    warnSchemaGapOnce("project_subcontract_payments.disbursement_id", error)
+    ;({ data, error } = await select(PAYMENT_COLS_LEGACY))
+  }
   if (error) throw new Error(`loadPayments: ${error.message}`)
-  return (data ?? []) as PaymentRow[]
+  const rows = (data ?? []) as unknown as PaymentRow[]
+  await attachDisbursementNos(tenantId, rows)
+  return rows
+}
+
+/** 有 disbursement_id 的期款列補上單號（專案頁顯示「D-115-001」而不是 uuid）。 */
+export async function attachDisbursementNos(tenantId: string, rows: PaymentRow[]): Promise<void> {
+  const ids = uniq(rows.map((r) => r.disbursement_id))
+  if (ids.length === 0) return
+  const found = await batch<{ id: string; disbursement_no: string }>(
+    "disbursements",
+    "id, disbursement_no",
+    tenantId,
+    ids,
+    "id",
+    false,
+  )
+  const noById = new Map(found.map((d) => [d.id, d.disbursement_no]))
+  for (const r of rows) {
+    r.disbursement_no = r.disbursement_id ? (noById.get(r.disbursement_id) ?? null) : null
+  }
 }
 
 export async function loadContractsLite(tenantId: string, projectId: string): Promise<ContractLite[]> {
@@ -708,11 +751,11 @@ export function compareCode(a: string | null, b: string | null): number {
   return 0
 }
 
-function uniq(ids: Array<string | null | undefined>): string[] {
+export function uniq(ids: Array<string | null | undefined>): string[] {
   return [...new Set(ids.filter((v): v is string => !!v))]
 }
 
-function groupBy<T>(rows: T[], key: (r: T) => string): Map<string, T[]> {
+export function groupBy<T>(rows: T[], key: (r: T) => string): Map<string, T[]> {
   const m = new Map<string, T[]>()
   for (const r of rows) {
     const k = key(r)
@@ -723,8 +766,8 @@ function groupBy<T>(rows: T[], key: (r: T) => string): Map<string, T[]> {
   return m
 }
 
-/** `.in()` 有 URL 長度上限，分批撈。 */
-async function batch<T>(
+/** `.in()` 有 URL 長度上限，分批撈。放款專區（services/disbursements.ts）也用這三個 helper。 */
+export async function batch<T>(
   table: string,
   cols: string,
   tenantId: string,

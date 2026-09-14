@@ -55,6 +55,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { href: "/admin/projects", label: "專案與成員分潤", fresh: true },
       { href: "/admin/projects/annual", label: "年度專案總表", fresh: true },
       { href: "/admin/projects/receivables", label: "未收款追蹤", fresh: true },
+      { href: "/admin/disbursements", label: "放款專區", fresh: true },
       { href: "/admin/stamp-duty", label: "印花稅備查清單", fresh: true },
     ],
   },

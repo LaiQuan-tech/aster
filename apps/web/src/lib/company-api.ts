@@ -67,6 +67,11 @@ export interface Vendor {
   taxIdValid: boolean | null
   website: string | null
   note: string | null
+  /** 收款帳戶（放款專區用）。 */
+  bankName: string | null
+  bankCode: string | null
+  bankAccount: string | null
+  accountHolder: string | null
   hasCard: boolean
   source: "manual" | "card_ocr"
   createdAt: string

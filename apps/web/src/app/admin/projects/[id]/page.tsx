@@ -1700,6 +1700,7 @@ export default function AdminProjectDetailPage() {
                                     <th className="py-1 pr-2">%</th>
                                     <th className="py-1 pr-2 text-right">金額</th>
                                     <th className="py-1 pr-2">應付時機</th>
+                                    <th className="py-1 pr-2">匯款單</th>
                                     <th className="py-1 pr-2">放款日</th>
                                     <th className="py-1 pr-2 text-right">實付</th>
                                     <th className="py-1 pr-2 text-right">代扣</th>
@@ -1726,23 +1727,48 @@ export default function AdminProjectDetailPage() {
                                           <input className="w-24 rounded border border-gray-300 px-1 py-0.5" value={p.dueWhen ?? ""} onChange={(e) => patchPayment(row.id as string, pIdx, { dueWhen: e.target.value })} />
                                         </td>
                                         <td className="py-1 pr-2">
-                                          <input className="rounded border border-gray-300 px-1 py-0.5" type="date" value={p.paidOn ?? ""} onChange={(e) => patchPayment(row.id as string, pIdx, { paidOn: e.target.value || null })} />
+                                          {p.disbursementNo ? (
+                                            <Link href={`/admin/disbursements/${p.disbursementId}`} className="hover:underline" style={{ color: "var(--brand)" }}>
+                                              {p.disbursementNo}
+                                            </Link>
+                                          ) : (
+                                            <span className="text-gray-300">—</span>
+                                          )}
                                         </td>
                                         <td className="py-1 pr-2">
-                                          <input className="w-20 rounded border border-gray-300 px-1 py-0.5 text-right" type="number" value={p.paidAmount ?? ""} placeholder={fmtMoney(p.netAmount ?? null)} onChange={(e) => patchPayment(row.id as string, pIdx, { paidAmount: e.target.value === "" ? null : Number(e.target.value) })} />
+                                          {p.disbursementId ? (
+                                            <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">{p.paidOn ?? "—"}</span>
+                                          ) : (
+                                            <input className="rounded border border-gray-300 px-1 py-0.5" type="date" value={p.paidOn ?? ""} onChange={(e) => patchPayment(row.id as string, pIdx, { paidOn: e.target.value || null })} />
+                                          )}
+                                        </td>
+                                        <td className="py-1 pr-2">
+                                          {p.disbursementId ? (
+                                            <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">{fmtMoney(p.paidAmount ?? null)}</span>
+                                          ) : (
+                                            <input className="w-20 rounded border border-gray-300 px-1 py-0.5 text-right" type="number" value={p.paidAmount ?? ""} placeholder={fmtMoney(p.netAmount ?? null)} onChange={(e) => patchPayment(row.id as string, pIdx, { paidAmount: e.target.value === "" ? null : Number(e.target.value) })} />
+                                          )}
                                         </td>
                                         <td className="py-1 pr-2 text-right text-gray-500">{fmtMoney(p.withheldAmount ?? null)}</td>
                                         <td className="py-1 pr-2">
-                                          <select className="rounded border border-gray-300 px-1 py-0.5" value={p.payingCompanyId ?? ""} onChange={(e) => patchPayment(row.id as string, pIdx, { payingCompanyId: e.target.value || null })}>
-                                            <option value="">—</option>
-                                            {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                                          </select>
+                                          {p.disbursementId ? (
+                                            <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">{companies.find((c) => c.id === p.payingCompanyId)?.name ?? "—"}</span>
+                                          ) : (
+                                            <select className="rounded border border-gray-300 px-1 py-0.5" value={p.payingCompanyId ?? ""} onChange={(e) => patchPayment(row.id as string, pIdx, { payingCompanyId: e.target.value || null })}>
+                                              <option value="">—</option>
+                                              {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                            </select>
+                                          )}
                                         </td>
                                         <td className="py-1 pr-2">
-                                          <select className="rounded border border-gray-300 px-1 py-0.5" value={p.receiptIssuerCompanyId ?? ""} onChange={(e) => patchPayment(row.id as string, pIdx, { receiptIssuerCompanyId: e.target.value || null })}>
-                                            <option value="">—</option>
-                                            {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                                          </select>
+                                          {p.disbursementId ? (
+                                            <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">{companies.find((c) => c.id === p.receiptIssuerCompanyId)?.name ?? "—"}</span>
+                                          ) : (
+                                            <select className="rounded border border-gray-300 px-1 py-0.5" value={p.receiptIssuerCompanyId ?? ""} onChange={(e) => patchPayment(row.id as string, pIdx, { receiptIssuerCompanyId: e.target.value || null })}>
+                                              <option value="">—</option>
+                                              {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                            </select>
+                                          )}
                                         </td>
                                         <td className="py-1 pr-2">
                                           <input className="w-20 rounded border border-gray-300 px-1 py-0.5" value={p.receiptRef ?? ""} onChange={(e) => patchPayment(row.id as string, pIdx, { receiptRef: e.target.value })} />
