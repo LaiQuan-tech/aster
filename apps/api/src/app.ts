@@ -54,6 +54,7 @@ import { employeeMailboxesRouter } from "./routes/employee-mailboxes.js"
 import { vendorsRouter } from "./routes/vendors.js"
 import { knowledgeRouter } from "./routes/knowledge.js"
 import { disbursementsRouter } from "./routes/disbursements.js"
+import { disbursementReportsRouter } from "./routes/disbursement-reports.js"
 
 const WEB_ORIGINS = (process.env.WEB_ORIGINS ?? "http://localhost:3000")
   .split(",")
@@ -130,6 +131,7 @@ app.use(companyPagesRouter)
 app.use(employeeMailboxesRouter)
 app.use(vendorsRouter)
 app.use(knowledgeRouter)
+app.use(disbursementReportsRouter) // /disbursements/pivot、/disbursements/pivot.xlsx 要在 /disbursements/:id 之前
 app.use(disbursementsRouter)
 
 // 404 fallback.
