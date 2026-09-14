@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js"
 import request from "supertest"
 import { supabaseAdmin } from "../lib/supabase"
 import { provisionTenant } from "../services/tenants"
+import { recoveryLinkFor, requestPasswordReset } from "../services/auth-invite"
 import { app } from "../app"
 
 /**
@@ -17,6 +18,10 @@ import { app } from "../app"
  * → POST /employees 建帳號者 must_change_password=true → /me/password 舊密碼錯 401、
  * 對 200、新密碼可登入、旗標清掉 → /me/password-done → forgot-password 一律 200
  * → intern 的 /me essTabs 預設清單。
+ * 另一組「不可被接管」案例：無 tenant_id 的既有帳號／另一租戶的帳號／
+ * PLATFORM_ADMIN_EMAILS 白名單 email → invite／bulk-invite／send-reset 一律 409
+ * email_in_other_tenant 且對方 app_metadata 不被改寫；forgot-password 只對
+ * 「有 tenant_id 且該租戶 employees 綁著」的帳號進寄信流程。
  *
  * 正式庫尚未套 0042（employees.must_change_password 不存在）時整組跳過。
  */
@@ -244,6 +249,193 @@ describe.skipIf(!ready)("A1 帳號與邀請信 — live", () => {
       expect(reset.status).toBe(200)
       expect(reset.body.type).toBe("recovery")
       expect(reset.body.email).toBe(email)
+    })
+  })
+
+  describe("跨租戶／無 tenant_id 帳號不可被接管（invite／bulk-invite／send-reset／forgot-password）", () => {
+    // 無 tenant_id 的既有 auth user：平台操作員的形狀（白名單只認 email、沒 employees 列）。
+    const ORPHAN_EMAIL = `invite-${stamp}-orphan@example.com`
+    // 另一個 throwaway 租戶的 HR。
+    const OTHER_EMAIL = `invite-${stamp}-other-admin@example.com`
+    const OTHER_PASSWORD = `Pw-${stamp}-Bb2!`
+    // 在白名單裡、但還沒有帳號：租戶 HR 不能「順手」建出這個帳號。
+    const PLATFORM_NEW_EMAIL = `invite-${stamp}-platform-new@example.com`
+    // 有 tenant_id（本租戶）但沒有任何 employees 列綁著。
+    const STRAY_EMAIL = `invite-${stamp}-stray@example.com`
+    const ORIGINAL_PLATFORM_ADMIN_EMAILS = process.env.PLATFORM_ADMIN_EMAILS
+    let orphanUserId: string
+    let otherTenantId: string
+    let otherUserId: string
+    let otherAdminEmpId: string
+    let targetEmpId: string // 本租戶、user_id null：每個案例都拿它當「要綁的那一列」
+
+    beforeAll(async () => {
+      const { data: orphan, error: orphanErr } = await supabaseAdmin.auth.admin.createUser({
+        email: ORPHAN_EMAIL,
+        password: `Pw-${stamp}-Oo0!`,
+        email_confirm: true,
+      })
+      if (orphanErr || !orphan.user) throw new Error(`createUser(orphan): ${orphanErr?.message}`)
+      orphanUserId = orphan.user.id
+      createdUserIds.add(orphanUserId)
+
+      const other = await provisionTenant({ name: `INVITETEST-OTHER ${stamp}`, adminEmail: OTHER_EMAIL, adminPassword: OTHER_PASSWORD })
+      otherTenantId = other.tenantId
+      otherUserId = other.userId
+      createdTenantIds.push(otherTenantId)
+      createdUserIds.add(otherUserId)
+      const { data: otherHr } = await supabaseAdmin.from("employees").select("id").eq("tenant_id", otherTenantId).eq("user_id", otherUserId).single()
+      otherAdminEmpId = otherHr!.id as string
+
+      const { data: stray, error: strayErr } = await supabaseAdmin.auth.admin.createUser({
+        email: STRAY_EMAIL,
+        password: `Pw-${stamp}-Ss7!`,
+        email_confirm: true,
+        app_metadata: { tenant_id: tenantId },
+      })
+      if (strayErr || !stray.user) throw new Error(`createUser(stray): ${strayErr?.message}`)
+      createdUserIds.add(stray.user.id)
+
+      targetEmpId = await insertEmployee("接管目標")
+    })
+
+    afterAll(() => {
+      if (ORIGINAL_PLATFORM_ADMIN_EMAILS === undefined) delete process.env.PLATFORM_ADMIN_EMAILS
+      else process.env.PLATFORM_ADMIN_EMAILS = ORIGINAL_PLATFORM_ADMIN_EMAILS
+    })
+
+    async function orphanTenantId(): Promise<unknown> {
+      const { data } = await supabaseAdmin.auth.admin.getUserById(orphanUserId)
+      return data.user?.app_metadata?.tenant_id
+    }
+    async function targetUserId(): Promise<string | null> {
+      const { data } = await supabaseAdmin.from("employees").select("user_id").eq("id", targetEmpId).single()
+      return (data!.user_id as string | null) ?? null
+    }
+
+    it("(i) 無 tenant_id 的既有帳號：invite → 409 email_in_other_tenant，app_metadata 未被改寫、員工列仍未綁；bulk-invite 同 email 也跳過", async () => {
+      expect(await orphanTenantId()).toBeUndefined()
+      const res = await asAdmin(request(app).post(`/employees/${targetEmpId}/invite`)).send({ dryRun: true, email: ORPHAN_EMAIL })
+      expect(res.status).toBe(409)
+      expect(res.body.error).toBe("email_in_other_tenant")
+      expect(res.body.link).toBeUndefined()
+      expect(res.body.type).toBeUndefined()
+      expect(await orphanTenantId()).toBeUndefined() // 不能被「認領」成本租戶
+      expect(await targetUserId()).toBeNull()
+
+      const bulk = await asAdmin(request(app).post("/employees/bulk-invite")).send({
+        csv: ["name,email", `接管目標,${ORPHAN_EMAIL}`].join("\n"),
+        dryRun: true,
+      })
+      expect(bulk.status).toBe(200)
+      expect(bulk.body.invited).toBe(0)
+      expect(bulk.body.bound).toBe(0)
+      expect(bulk.body.created).toBe(0)
+      expect(bulk.body.skipped).toBe(1)
+      expect(bulk.body.errors[0].error).toMatch(/^email_in_other_tenant/)
+      expect(bulk.body.rows[0].link).toBeUndefined()
+      expect(await orphanTenantId()).toBeUndefined()
+      expect(await targetUserId()).toBeNull()
+    })
+
+    it("(ii) 另一租戶的帳號：invite／bulk-invite → 409 email_in_other_tenant，對方 tenant_id 不變、回應不洩漏對方租戶；對方 HR 自己仍可 send-reset", async () => {
+      const res = await asAdmin(request(app).post(`/employees/${targetEmpId}/invite`)).send({ dryRun: true, email: OTHER_EMAIL })
+      expect(res.status).toBe(409)
+      expect(res.body.error).toBe("email_in_other_tenant")
+      expect(res.body.link).toBeUndefined()
+      expect(JSON.stringify(res.body)).not.toContain(otherTenantId)
+      const { data: au } = await supabaseAdmin.auth.admin.getUserById(otherUserId)
+      expect(au.user?.app_metadata?.tenant_id).toBe(otherTenantId)
+      expect(await targetUserId()).toBeNull()
+
+      const bulk = await asAdmin(request(app).post("/employees/bulk-invite")).send({
+        csv: ["name,email", `接管目標,${OTHER_EMAIL}`].join("\n"),
+        dryRun: true,
+      })
+      expect(bulk.status).toBe(200)
+      expect(bulk.body.skipped).toBe(1)
+      expect(bulk.body.errors[0].error).toMatch(/^email_in_other_tenant/)
+      expect(await targetUserId()).toBeNull()
+
+      // 對方租戶的 HR 對自己（已綁、tenant_id 相符）寄重設信：既有行為不受影響。
+      const otherToken = await signIn(OTHER_EMAIL, OTHER_PASSWORD)
+      const own = await request(app)
+        .post(`/employees/${otherAdminEmpId}/send-reset`)
+        .set("Authorization", `Bearer ${otherToken}`)
+        .send({ dryRun: true })
+      expect(own.status).toBe(200)
+      expect(own.body.type).toBe("recovery")
+      expect(own.body.email).toBe(OTHER_EMAIL)
+    })
+
+    it("(iii) 本租戶已綁員工 send-reset → 200 recovery（既有行為不變）；列的 user_id 若指向無 tenant_id 的帳號 → send-reset／invite 皆 409", async () => {
+      const ok = await asAdmin(request(app).post(`/employees/${adminEmpId}/send-reset`)).send({ dryRun: true })
+      expect(ok.status).toBe(200)
+      expect(ok.body.type).toBe("recovery")
+      expect(ok.body.action).toBe("existing")
+      expect(String(ok.body.link)).toContain("type=recovery")
+
+      // 資料層被動過手腳（employees.user_id 直接指到別人的帳號）：「列在本租戶」不夠，
+      // app_metadata.tenant_id 也要相符才發連結。
+      const hijacked = await insertEmployee("被綁錯的列", { user_id: orphanUserId })
+      const reset = await asAdmin(request(app).post(`/employees/${hijacked}/send-reset`)).send({ dryRun: true })
+      expect(reset.status).toBe(409)
+      expect(reset.body.error).toBe("email_in_other_tenant")
+      expect(reset.body.link).toBeUndefined()
+      const invite = await asAdmin(request(app).post(`/employees/${hijacked}/invite`)).send({ dryRun: true })
+      expect(invite.status).toBe(409)
+      expect(invite.body.error).toBe("email_in_other_tenant")
+      expect(await orphanTenantId()).toBeUndefined()
+    })
+
+    it("(iv) email 在 PLATFORM_ADMIN_EMAILS（大小寫不敏感）→ invite／bulk-invite 409；連尚無帳號的白名單 email 也不會被建出來", async () => {
+      process.env.PLATFORM_ADMIN_EMAILS = ` boss@saas.example ,${ORPHAN_EMAIL.toUpperCase()}, ${PLATFORM_NEW_EMAIL.toUpperCase()} `
+
+      const existing = await asAdmin(request(app).post(`/employees/${targetEmpId}/invite`)).send({ dryRun: true, email: ORPHAN_EMAIL })
+      expect(existing.status).toBe(409)
+      expect(existing.body.error).toBe("email_in_other_tenant")
+      expect(await orphanTenantId()).toBeUndefined()
+
+      const fresh = await asAdmin(request(app).post(`/employees/${targetEmpId}/invite`)).send({ dryRun: true, email: PLATFORM_NEW_EMAIL })
+      expect(fresh.status).toBe(409)
+      expect(fresh.body.error).toBe("email_in_other_tenant")
+      expect(fresh.body.link).toBeUndefined()
+      expect(await recoveryLinkFor(PLATFORM_NEW_EMAIL)).toBeNull() // 沒有偷建 auth user
+      expect(await targetUserId()).toBeNull()
+
+      const bulk = await asAdmin(request(app).post("/employees/bulk-invite")).send({
+        csv: ["name,email", `接管目標,${PLATFORM_NEW_EMAIL}`, `平台新人,${PLATFORM_NEW_EMAIL}`].join("\n"),
+        dryRun: true,
+      })
+      expect(bulk.status).toBe(200)
+      expect(bulk.body.created).toBe(0)
+      expect(bulk.body.bound).toBe(0)
+      expect(bulk.body.skipped).toBe(2)
+      expect(bulk.body.errors.every((e: { error: string }) => e.error.startsWith("email_in_other_tenant"))).toBe(true)
+      expect(await recoveryLinkFor(PLATFORM_NEW_EMAIL)).toBeNull()
+      const { count } = await supabaseAdmin
+        .from("employees")
+        .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId)
+        .eq("name", "平台新人")
+      expect(count).toBe(0)
+    })
+
+    it("forgot-password：無 tenant_id／有 tenant_id 但租戶沒綁／白名單 → 不寄（端點仍 200）；本租戶已綁 → 進寄信流程", async () => {
+      process.env.PLATFORM_ADMIN_EMAILS = `invite-${stamp}-SPEC@example.com` // 已綁到本租戶（上一組案例），但在白名單
+
+      const orphan = await requestPasswordReset(ORPHAN_EMAIL)
+      expect(orphan).toEqual({ sent: false, found: true, throttled: false, eligible: false })
+      const stray = await requestPasswordReset(STRAY_EMAIL)
+      expect(stray).toEqual({ sent: false, found: true, throttled: false, eligible: false })
+      const platform = await requestPasswordReset(`invite-${stamp}-spec@example.com`)
+      expect(platform).toEqual({ sent: false, found: false, throttled: false, eligible: false })
+      const bound = await requestPasswordReset(BIND_EMAIL) // 王小明：bulk-invite 綁的本租戶帳號
+      expect(bound).toMatchObject({ found: true, throttled: false, eligible: true })
+
+      const endpoint = await request(app).post("/auth/forgot-password").send({ email: OTHER_EMAIL })
+      expect(endpoint.status).toBe(200)
+      expect(endpoint.body).toEqual({ ok: true })
     })
   })
 

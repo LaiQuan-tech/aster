@@ -4,6 +4,7 @@ import { isMailConfigured, sendMail } from "../lib/resend.js"
 import { parseCsv } from "../lib/csv.js"
 import { logger } from "../lib/logger.js"
 import { writeAuditLog } from "./audit.js"
+import { isPlatformAdminEmail } from "../middleware/platform.js"
 
 /**
  * 帳號邀請／重設密碼／改密碼（A1）。
@@ -21,6 +22,19 @@ import { writeAuditLog } from "./audit.js"
  * auth user）。`invite` 的 `options.data` 只會進 user_metadata，`app_metadata.tenant_id`
  * （requireTenant／RLS 讀的那個）要再用 `updateUserById` 補上，跟 `POST /employees`
  * 的 `createUser({ app_metadata: { tenant_id } })` 對齊。
+ *
+ * ## 誰能拿到連結（安全邊界）
+ *
+ * 連結（invite／recovery）等於「設這個帳號的密碼」，所以只有兩種情況會發：
+ *   (a) auth user 是**本次呼叫新建**的（`generateLink invite`）→ invite 連結；
+ *   (b) auth user 已存在，**且** `app_metadata.tenant_id === 呼叫方租戶`，**且**
+ *       已綁到本租戶的 employees 列（或正要綁的那一列 `user_id is null`）→ recovery。
+ * 其餘一律 409 `email_in_other_tenant`：tenant_id 為空或不同、或 email 在
+ * PLATFORM_ADMIN_EMAILS 白名單（平台操作員沒有 tenant_id、沒有 employees 列，
+ * 白名單只認 email）。訊息不透露是哪個租戶，也**絕不改寫既有帳號的
+ * app_metadata**——只有全新建立的帳號才寫 tenant_id。曾經的「tenant_id 為空就
+ * 認領成本租戶」是帳號接管漏洞（任一租戶 HR 知道操作員 email 就能拿 recovery
+ * 連結設新密碼）。
  */
 
 export type LinkType = "invite" | "recovery"
@@ -99,21 +113,46 @@ export async function inviteLinkFor(email: string, tenantId: string): Promise<Li
   }
 }
 
+const OTHER_TENANT_MESSAGE = "此 Email 已屬於其他公司的帳號"
+
+/** `app_metadata.tenant_id` 是否正好等於呼叫方租戶（空值、非字串都算不是）。 */
+export function belongsToTenant(user: AuthUserLite, tenantId: string): boolean {
+  const userTenant = user.appMetadata.tenant_id
+  return typeof userTenant === "string" && userTenant.length > 0 && userTenant === tenantId
+}
+
+/**
+ * 既有 auth user 必須歸本租戶所有才能對它發連結：`app_metadata.tenant_id` 等於
+ * 呼叫方租戶，且 email 不在平台操作員白名單。不符一律 409 `email_in_other_tenant`
+ * ——同一個 code、同一句訊息，不透露對方是別的租戶、沒 tenant_id 還是平台帳號；
+ * 也不動對方任何資料。
+ */
+function assertOwnedByTenant(user: AuthUserLite, tenantId: string): void {
+  if (isPlatformAdminEmail(user.email) || !belongsToTenant(user, tenantId)) {
+    throw new AccountError("email_in_other_tenant", 409, OTHER_TENANT_MESSAGE)
+  }
+}
+
 /**
  * 依 email 決定該寄 invite 還是 recovery，並確保 auth user 屬於本租戶且尚未
  * 綁到本租戶其他員工列。回傳的 `fresh` 表示 auth user 是這次新建的（呼叫端
  * 之後若寫 employees 失敗要把它刪掉，避免留下孤兒帳號）。
+ *
+ * 既有帳號只在 `app_metadata.tenant_id` 已經是本租戶時才回 recovery（呼叫端接著
+ * 把它綁到 `user_id is null` 的那一列）；tenant_id 為空／不同、或 email 在
+ * PLATFORM_ADMIN_EMAILS → 409 `email_in_other_tenant`，且**不改寫**對方的
+ * app_metadata。白名單 email 連「尚無帳號」都擋——否則租戶 HR 能建出一個
+ * 白名單 email 的帳號，直接變成平台操作員。
  */
 export async function resolveAuthUserForEmail(
   tenantId: string,
   email: string,
 ): Promise<LinkToken & { fresh: boolean }> {
+  // 先擋白名單，連 recovery token 都不替平台操作員產生。
+  if (isPlatformAdminEmail(email)) throw new AccountError("email_in_other_tenant", 409, OTHER_TENANT_MESSAGE)
   const existing = await recoveryLinkFor(email)
   if (existing) {
-    const userTenant = existing.user.appMetadata.tenant_id
-    if (userTenant && userTenant !== tenantId) {
-      throw new AccountError("email_in_other_tenant", 409, "此 Email 已屬於其他公司的帳號")
-    }
+    assertOwnedByTenant(existing.user, tenantId)
     const { data: bound, error: boundErr } = await supabaseAdmin
       .from("employees")
       .select("id, name")
@@ -123,13 +162,6 @@ export async function resolveAuthUserForEmail(
     if (boundErr) throw new Error(`resolveAuthUserForEmail (bound): ${boundErr.message}`)
     if (bound) {
       throw new AccountError("email_already_bound", 409, `此 Email 已綁定員工「${bound.name as string}」`)
-    }
-    if (!userTenant) {
-      const { error: metaErr } = await supabaseAdmin.auth.admin.updateUserById(existing.user.id, {
-        app_metadata: { tenant_id: tenantId },
-      })
-      if (metaErr) throw new Error(`resolveAuthUserForEmail (app_metadata): ${metaErr.message}`)
-      existing.user.appMetadata = { ...existing.user.appMetadata, tenant_id: tenantId }
     }
     return { ...existing, fresh: false }
   }
@@ -268,9 +300,13 @@ async function profileEmail(tenantId: string, employeeId: string): Promise<strin
 }
 
 /**
- * 對一位員工寄帳號信：已綁帳號 → recovery；未綁但 email 已有 auth user → 綁上後
- * recovery；都沒有 → invite（建 auth user、回填 user_id）。`forceRecovery`（HR 的
- * 「寄重設密碼信」）對沒帳號的員工回 409 no_account，不會偷建帳號。
+ * 對一位員工寄帳號信：已綁帳號 → recovery；未綁但 email 已有本租戶的 auth user →
+ * 綁上後 recovery；都沒有 → invite（建 auth user、回填 user_id）。`forceRecovery`
+ * （HR 的「寄重設密碼信」）對沒帳號的員工回 409 no_account，不會偷建帳號。
+ *
+ * 已綁帳號的那條路也要驗 `app_metadata.tenant_id === tenantId` 且 email 不在平台
+ * 白名單——employees.user_id 若被指到別人的帳號（資料層被動手腳），不能因為
+ * 「列在本租戶」就替它發 recovery 連結。
  */
 export async function sendEmployeeAccountLink(opts: {
   tenantId: string
@@ -289,6 +325,8 @@ export async function sendEmployeeAccountLink(opts: {
     if (error || !data.user) throw new AccountError("auth_user_missing", 409, "員工綁定的登入帳號已不存在")
     const email = data.user.email ?? null
     if (!email) throw new AccountError("no_email", 409, "登入帳號沒有 Email")
+    // 先驗歸屬再產 token：不替不屬於本租戶的帳號產生任何 recovery token。
+    assertOwnedByTenant(liteUser(data.user), tenantId)
     const token = await recoveryLinkFor(email)
     if (!token) throw new AccountError("auth_user_missing", 409, "員工綁定的登入帳號已不存在")
     const delivered = await deliverAccountLink({
@@ -611,25 +649,51 @@ export async function bulkInviteFromCsv(opts: {
 const forgotLastSent = new Map<string, number>()
 const FORGOT_WINDOW_MS = 60_000
 
+export interface PasswordResetOutcome {
+  sent: boolean
+  found: boolean
+  throttled: boolean
+  /** 通過歸屬檢查、進入寄信流程（dryRun 時 sent 仍為 false）。 */
+  eligible: boolean
+}
+
 /**
- * 找得到帳號才寄 recovery；同一 email 60 秒內只寄一次。回傳值只給呼叫端做
- * log／測試用，端點一律回 `{ ok: true }`，不透露帳號是否存在。
+ * 找得到帳號、**且**帳號有 `app_metadata.tenant_id`、**且**該租戶的 employees 有一列
+ * 綁著這個 user_id，才寄 recovery；平台操作員白名單 email 一律不寄。其餘
+ * （不存在、無 tenant_id、租戶沒綁、白名單）都靜默不寄。同一 email 60 秒內只寄
+ * 一次。回傳值只給呼叫端做 log／測試用，端點一律回 `{ ok: true }`，不透露帳號
+ * 是否存在、也不透露為什麼沒寄。
  */
-export async function requestPasswordReset(emailRaw: string): Promise<{ sent: boolean; found: boolean; throttled: boolean }> {
+export async function requestPasswordReset(emailRaw: string): Promise<PasswordResetOutcome> {
   const email = emailRaw.trim().toLowerCase()
   const now = Date.now()
   const last = forgotLastSent.get(email) ?? 0
-  if (now - last < FORGOT_WINDOW_MS) return { sent: false, found: false, throttled: true }
+  if (now - last < FORGOT_WINDOW_MS) return { sent: false, found: false, throttled: true, eligible: false }
   forgotLastSent.set(email, now)
   // 簡單防止 Map 無限成長。
   if (forgotLastSent.size > 5000) {
     for (const [k, t] of forgotLastSent) if (now - t > FORGOT_WINDOW_MS) forgotLastSent.delete(k)
   }
 
+  // 平台操作員不走這條（沒有 tenant_id、沒有 employees 列）；連 token 都不產生。
+  if (isPlatformAdminEmail(email)) return { sent: false, found: false, throttled: false, eligible: false }
+
   const token = await recoveryLinkFor(email)
-  if (!token) return { sent: false, found: false, throttled: false }
+  if (!token) return { sent: false, found: false, throttled: false, eligible: false }
   const tenantId = token.user.appMetadata.tenant_id
-  const appName = typeof tenantId === "string" ? await tenantAppName(tenantId) : null
+  if (typeof tenantId !== "string" || !tenantId) {
+    return { sent: false, found: true, throttled: false, eligible: false }
+  }
+  const { data: bound, error: boundErr } = await supabaseAdmin
+    .from("employees")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("user_id", token.user.id)
+    .maybeSingle()
+  if (boundErr) throw new Error(`requestPasswordReset (bound): ${boundErr.message}`)
+  if (!bound) return { sent: false, found: true, throttled: false, eligible: false }
+
+  const appName = await tenantAppName(tenantId)
   const delivered = await deliverAccountLink({
     to: email,
     name: null,
@@ -643,7 +707,7 @@ export async function requestPasswordReset(emailRaw: string): Promise<{ sent: bo
     logger.warn({ email }, "forgot-password: RESEND_API_KEY not set, mail not sent (dryRun)")
     logger.debug({ link: delivered.link }, "forgot-password dryRun link")
   }
-  return { sent: delivered.sent, found: true, throttled: false }
+  return { sent: delivered.sent, found: true, throttled: false, eligible: true }
 }
 
 /* ── 已登入：改密碼 / 清旗標 ───────────────────────────────────────── */
