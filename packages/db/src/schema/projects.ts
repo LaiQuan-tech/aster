@@ -112,6 +112,12 @@ export const projects = pgTable(
     otherExpenses: numeric("other_expenses", { precision: 14, scale: 2 }).notNull().default("0"),
     /** 工程師指派，開放形狀如 {discipline: employeeId[]}。 */
     engineers: jsonb("engineers").notNull().default({}),
+    /**
+     * 開案日——供「開案日期」WP 使用，區別於 `reservedAt`（建號／保留案號的
+     * 時點）與 `startsOn`（預定開工日）。可空：既有案件由 sql/0031 backfill
+     * 成 `createdAt`（台北時區）當天；之後新案由 API 視流程另填。
+     */
+    openedOn: date("opened_on"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
