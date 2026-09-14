@@ -109,6 +109,17 @@ const tenantSettingsSchema = z.object({
        * 沒列的身分類別＝全部可見；tab key 定義見 apps/web/src/components/EssHeader.tsx。
        */
       essTabs: z.record(z.string().trim().min(1), z.array(z.string().trim().min(1))).optional(),
+      /**
+       * 出勤月表（B8 假單月底核銷）approve 關卡：預設 false（月表異常
+       * unsettled_leave_in_period 只是 warn）；true 時升級為 error，approve
+       * 前必須先核銷完當月已核准假單。見 routes/attendance-sheets.ts 的
+       * approve 409 檢查與 services/attendance-sheets.ts 的 computeAnomalies。
+       */
+      attendance: z
+        .object({
+          blockApproveOnUnsettledLeave: z.boolean().optional(),
+        })
+        .optional(),
     })
     .optional(),
 })

@@ -85,6 +85,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { href: "/admin/leave-types", label: "假別與簽核流程" },
       { href: "/admin/leave-balances", label: "假別時數管理" },
       { href: "/admin/attendance-sheets", label: "出勤月表 · 月結簽核", fresh: true },
+      { href: "/admin/leave-settlement", label: "假單月底核銷", fresh: true },
       { href: "/admin/attendance-settlement", label: "結算作業" },
     ],
   },

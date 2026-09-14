@@ -6,7 +6,7 @@ import { requireHrAdmin } from "../middleware/role.js"
 import { isHrRole, managedDeptIds, resolveSelf, type SelfEmployee } from "../middleware/scope.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
-import { todayKey } from "../lib/tz.js"
+import { todayKey, monthRangeKeys, dayWindowUtc } from "../lib/tz.js"
 import {
   SheetError,
   approveSheet,
@@ -25,6 +25,7 @@ import {
   type SheetRow,
 } from "../services/attendance-sheets.js"
 import type { SheetStatus } from "../services/attendance-sheet-types.js"
+import { hasUnsettledApprovedLeaveOverlapping, tenantBlocksApproveOnUnsettledLeave } from "../services/leave-settlement.js"
 import { PeriodCloseError, closePeriod, listPeriodCloses, listSheetSnapshots, reopenPeriod } from "../services/backup-snapshot.js"
 
 export const attendanceSheetsRouter = Router()
@@ -153,6 +154,33 @@ async function canRead(tenantId: string, caller: Caller, sheet: SheetRow): Promi
   if (sheet.manager_emp_id === caller.self.id) return true
   const visible = await visibleEmployeeIds(tenantId, caller.self)
   return visible.includes(sheet.employee_id)
+}
+
+/**
+ * B8：approve 前的即時（非快取）檢查——tenants.features.attendance
+ * .blockApproveOnUnsettledLeave 為 true 時，若該員工在月表期間內仍有已核准但
+ * 未核銷的假單則擋下（409 unsettled_leave）。刻意不看 sheet.month_anomalies
+ * （那是上次 recompute 的快照——manager_reviewed 之後就不能再 recompute，核銷
+ * 卻可能發生在最後一次 recompute 之後，approve 前必須查當下真值）。與
+ * services/attendance-sheets.ts 的 computeAnomalies／unsettled_leave_in_period
+ * 月級異常是同一件事的兩處判斷；查詢邏輯共用 services/leave-settlement.ts。
+ *
+ * 調查結論（任務要求先確認再動手）：這個檔案／服務目前唯一的「error 級異常
+ * 自動擋下」機制是 services/attendance-sheets.ts submitSheet 內的
+ * `resolvePayrollGates(rules).requireAnomalyAck` 檢查，但那條路只在
+ * draft/returned → submitted 的轉場觸發、且只看**日級**異常（月表沒有月級
+ * ack 欄，其註解明講「月級 error 只提示不擋」）。approve（manager_reviewed →
+ * approved）完全不會經過那段邏輯，且我們這個新異常是月級的，本來就不會被
+ * 該機制擋下。因此這裡在 HTTP 層另外补一個 409 檢查，不去動
+ * services/attendance-sheets.ts 的 approveSheet（避開該檔案受保護的區域）。
+ */
+async function blockedByUnsettledLeave(tenantId: string, sheet: SheetRow): Promise<boolean> {
+  if (!(await tenantBlocksApproveOnUnsettledLeave(tenantId))) return false
+  const tz = await getTenantTimezone(tenantId)
+  const { from, to } = monthRangeKeys(sheet.period)
+  const rangeStart = dayWindowUtc(from, tz).startIso
+  const rangeEnd = dayWindowUtc(to, tz).endIso
+  return hasUnsettledApprovedLeaveOverlapping(tenantId, sheet.employee_id, rangeStart, rangeEnd)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -427,6 +455,11 @@ attendanceSheetsRouter.post(
     try {
       const caller = await requireCaller(req, res)
       if (!caller) return
+      const sheet = await loadSheet(tenantId, id)
+      if (await blockedByUnsettledLeave(tenantId, sheet)) {
+        res.status(409).json({ error: "unsettled_leave" })
+        return
+      }
       const next_ = await approveSheet(tenantId, id, caller.self.id)
       res.status(200).json({ id: next_.id, status: next_.status, approvedAt: next_.approved_at })
     } catch (err) {

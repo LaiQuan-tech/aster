@@ -57,6 +57,7 @@ import { vendorsRouter } from "./routes/vendors.js"
 import { knowledgeRouter } from "./routes/knowledge.js"
 import { disbursementsRouter } from "./routes/disbursements.js"
 import { disbursementReportsRouter } from "./routes/disbursement-reports.js"
+import { leaveSettlementRouter } from "./routes/leave-settlement.js"
 import { auditLogsRouter } from "./routes/audit-logs.js"
 import { runWithRequestContext } from "./lib/request-context.js"
 
@@ -157,6 +158,7 @@ app.use(vendorsRouter)
 app.use(knowledgeRouter)
 app.use(disbursementReportsRouter) // /disbursements/pivot、/disbursements/pivot.xlsx 要在 /disbursements/:id 之前
 app.use(disbursementsRouter)
+app.use(leaveSettlementRouter)
 app.use(auditLogsRouter)
 
 // 404 fallback.
