@@ -4,6 +4,7 @@ import {
 import { tenants } from "./tenants"
 import { projectSubcontracts } from "./project-subcontracts"
 import { companies } from "./companies"
+import { disbursements } from "./disbursements"
 
 /**
  * Project subcontract payments — 下包／副委託的分期期款，結構比照
@@ -47,6 +48,8 @@ export const projectSubcontractPayments = pgTable(
     payingCompanyId: uuid("paying_company_id").references(() => companies.id),
     receiptIssuerCompanyId: uuid("receipt_issuer_company_id").references(() => companies.id),
     receiptRef: text("receipt_ref"),
+    /** 放款專區連動寫入；null＝尚未經放款專區處理（含舊路徑手動標記已付）。 */
+    disbursementId: uuid("disbursement_id").references(() => disbursements.id),
     note: text("note"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

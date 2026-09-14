@@ -26,6 +26,11 @@ export const vendors = pgTable(
     address: text("address"),
     taxId: text("tax_id"),
     website: text("website"),
+    /** 收款帳戶——放款專區建立匯款時預填收款方銀行資訊。 */
+    bankName: text("bank_name"),
+    bankCode: text("bank_code"),
+    bankAccount: text("bank_account"),
+    accountHolder: text("account_holder"),
     note: text("note"),
     cardStoragePath: text("card_storage_path"),
     source: text("source").notNull().default("manual"),
