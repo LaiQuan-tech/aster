@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import { getBranding, getMe, isAdminRole, type Branding } from "@/lib/ess-api";
 import { getMyProjectShares, type MyProjectShare } from "@/lib/projects-api";
@@ -81,8 +81,8 @@ function MyBonusInner() {
 
 export default function MyBonusPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="bonus">
       <MyBonusInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

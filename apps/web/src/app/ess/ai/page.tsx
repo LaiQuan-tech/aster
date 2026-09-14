@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import { askAiQuestion, getBranding, getMe, isAdminRole, type Branding } from "@/lib/ess-api";
 
@@ -107,8 +107,8 @@ function EssAiPageInner() {
 
 export default function EssAiPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="ai">
       <EssAiPageInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

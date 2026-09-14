@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import {
   getBranding,
@@ -101,8 +101,8 @@ function PayslipsInner() {
 
 export default function PayslipsPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="payslips">
       <PayslipsInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

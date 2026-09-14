@@ -15,6 +15,13 @@ import {
   type OvertimeRoundingMode,
   type TenantFeatures,
 } from "@/lib/admin-api";
+import { ESS_TABS } from "@/components/EssHeader";
+import {
+  EMPLOYMENT_TYPES,
+  EMPLOYMENT_TYPE_LABELS,
+  INTERN_DEFAULT_ESS_TABS,
+  type EmploymentType,
+} from "@/lib/ess-tabs";
 
 const CALENDARS = [
   { name: "台灣行事曆", owner: "全公司", years: ["2025 已發佈", "2026 已發佈", "2027 待新增"] },
@@ -232,10 +239,37 @@ function TierEditor({
   );
 }
 
+/** essTabsCfg 的形狀：身分類別 → 目前勾選（可見）的 tab key 清單，順序不重要（存檔時會重排）。 */
+type EssTabsConfig = Record<EmploymentType, string[]>;
+
+/** 某身分類別完全沒有設定時的預設勾選狀態：intern 只給六個，其餘全勾。 */
+function defaultEssTabsFor(type: EmploymentType): string[] {
+  return type === "intern" ? [...INTERN_DEFAULT_ESS_TABS] : ESS_TABS.map((t) => t.key);
+}
+
+function defaultEssTabsConfig(): EssTabsConfig {
+  const cfg = {} as EssTabsConfig;
+  for (const type of EMPLOYMENT_TYPES) cfg[type] = defaultEssTabsFor(type);
+  return cfg;
+}
+
+/** 由 tenants.features.essTabs 還原表單狀態；缺欄位或格式不對都退回預設值。 */
+function hydrateEssTabsConfig(raw: unknown): EssTabsConfig {
+  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const cfg = {} as EssTabsConfig;
+  for (const type of EMPLOYMENT_TYPES) {
+    const list = source[type];
+    cfg[type] =
+      Array.isArray(list) && list.every((v) => typeof v === "string") ? (list as string[]) : defaultEssTabsFor(type);
+  }
+  return cfg;
+}
+
 export default function ModuleSettingsPage() {
   const [ruleConfig, setRuleConfig] = useState<RuleConfigResponse | null>(null);
   const [otForm, setOtForm] = useState<OvertimeParamsForm>(DEFAULT_OT_FORM);
   const [features, setFeatures] = useState<TenantFeatures>({});
+  const [essTabsCfg, setEssTabsCfg] = useState<EssTabsConfig>(() => defaultEssTabsConfig());
   const [myDataRequiresApproval, setMyDataRequiresApproval] = useState(true);
   const [editableFields, setEditableFields] = useState("basic,contact,education,certification,workHistory");
   const [attachmentLimitKb, setAttachmentLimitKb] = useState("300");
@@ -285,6 +319,7 @@ export default function ModuleSettingsPage() {
           enableAutoSettlement?: boolean;
         } | undefined) ?? {};
         setFeatures(nextFeatures);
+        setEssTabsCfg(hydrateEssTabsConfig(nextFeatures.essTabs));
         setMyDataRequiresApproval(formParameters.myDataRequiresApproval ?? true);
         setEditableFields((formParameters.editableFields ?? ["basic", "contact", "education", "certification", "workHistory"]).join(","));
         setAttachmentLimitKb(String(formParameters.attachmentLimitKb ?? 300));
@@ -439,6 +474,31 @@ export default function ModuleSettingsPage() {
       setMessage("差勤模組設定已儲存");
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存差勤模組設定失敗");
+    }
+  }
+
+  /** 切換某身分類別對某個 tab 的勾選；存回去時永遠照 ESS_TABS 原本順序排列。 */
+  function toggleEssTab(type: EmploymentType, tab: string) {
+    setEssTabsCfg((prev) => {
+      const current = new Set(prev[type]);
+      if (current.has(tab)) current.delete(tab);
+      else current.add(tab);
+      const next = ESS_TABS.map((t) => t.key).filter((key) => current.has(key));
+      return { ...prev, [type]: next };
+    });
+  }
+
+  /** A3：員工端功能開放——四類身分各自可見的 ESS 分頁，存到 tenants.features.essTabs。 */
+  async function onSaveEssTabs() {
+    setError(null);
+    setMessage(null);
+    try {
+      const nextFeatures: TenantFeatures = { ...features, essTabs: essTabsCfg };
+      const saved = await saveTenantSettings({ features: nextFeatures });
+      setFeatures(saved.features ?? nextFeatures);
+      setMessage("員工端功能開放設定已儲存");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "儲存員工端功能開放設定失敗");
     }
   }
 
@@ -835,6 +895,37 @@ export default function ModuleSettingsPage() {
         </div>
         <div className="mt-4">
           <PrimaryButton onClick={onSaveFormParameters}>儲存表單參數</PrimaryButton>
+        </div>
+      </Card>
+
+      <Card>
+        <h2 className="mb-1 text-base font-semibold text-gray-900">員工端功能開放</h2>
+        <p className="mb-4 text-sm text-gray-500">
+          依身分類別限縮 ESS 可見／可進入的分頁；未勾＝該類別看不到，直接打網址也會被擋。實習生預設只開放六個（打卡首頁／班表／打卡紀錄／申請／通知／我的資料）。
+        </p>
+        <div className="space-y-5">
+          {EMPLOYMENT_TYPES.map((type) => (
+            <div key={type}>
+              <p className="mb-2 text-sm font-medium text-gray-700">{EMPLOYMENT_TYPE_LABELS[type]}</p>
+              <div className="flex flex-wrap gap-2">
+                {ESS_TABS.map((t) => {
+                  const checked = essTabsCfg[type]?.includes(t.key) ?? false;
+                  return (
+                    <label
+                      key={t.key}
+                      className="flex items-center gap-1.5 rounded-full border border-gray-200 px-3 py-1.5 text-sm text-gray-700"
+                    >
+                      <input type="checkbox" checked={checked} onChange={() => toggleEssTab(type, t.key)} />
+                      {t.label}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="mt-4">
+          <PrimaryButton onClick={onSaveEssTabs}>儲存員工端功能開放設定</PrimaryButton>
         </div>
       </Card>
     </>

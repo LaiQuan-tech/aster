@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import { KpiScoreForm } from "@/components/KpiScoreForm";
 import { getBranding, getMe, isAdminRole, type Branding, type Me } from "@/lib/ess-api";
@@ -118,8 +118,8 @@ function KpiInner() {
 
 export default function KpiPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="kpi">
       <KpiInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

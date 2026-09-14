@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader, invalidateEssHeaderState } from "@/components/EssHeader";
 import {
   approveRequest,
@@ -349,8 +349,8 @@ function ApprovalsView() {
 
 export default function ApprovalsPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="approvals">
       <ApprovalsView />
-    </AuthGate>
+    </EssTabGate>
   );
 }

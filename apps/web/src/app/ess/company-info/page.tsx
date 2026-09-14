@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import { SimpleMarkdown } from "@/components/SimpleMarkdown";
 import { getBranding, getMe, isAdminRole, type Branding } from "@/lib/ess-api";
@@ -55,8 +55,8 @@ function CompanyInfoInner() {
 
 export default function CompanyInfoPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="company">
       <CompanyInfoInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

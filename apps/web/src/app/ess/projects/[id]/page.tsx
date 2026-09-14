@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import { getBranding, getMe, isAdminRole, type Branding } from "@/lib/ess-api";
 import {
@@ -181,8 +181,8 @@ function ProjectDetailInner() {
 
 export default function EssProjectDetailPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="projects">
       <ProjectDetailInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

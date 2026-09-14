@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import { getBranding, getMe, isAdminRole, type Branding } from "@/lib/ess-api";
 import { listProjects, statusLabel, type Project } from "@/lib/projects-api";
@@ -69,8 +69,8 @@ function ProjectsInner() {
 
 export default function EssProjectsPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="projects">
       <ProjectsInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

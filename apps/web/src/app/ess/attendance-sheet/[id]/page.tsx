@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import { AttendanceSheetTable } from "@/components/AttendanceSheetTable";
 import { getBranding, getMe, isAdminRole, type Branding } from "@/lib/ess-api";
@@ -149,8 +149,8 @@ function ReviewInner() {
 
 export default function AttendanceSheetReviewPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="sheet">
       <ReviewInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

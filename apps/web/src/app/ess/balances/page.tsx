@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import {
   getBranding,
@@ -117,8 +117,8 @@ function BalancesInner() {
 
 export default function BalancesPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="balances">
       <BalancesInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import { MonthPicker } from "@/components/MonthPicker";
 import { AttendanceSheetTable } from "@/components/AttendanceSheetTable";
@@ -225,8 +225,8 @@ function AttendanceSheetInner() {
 
 export default function AttendanceSheetPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="sheet">
       <AttendanceSheetInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

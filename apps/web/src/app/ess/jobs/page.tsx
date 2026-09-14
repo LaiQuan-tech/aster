@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import {
   getBranding,
@@ -54,8 +54,8 @@ function JobsInner() {
 
 export default function JobsPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="jobs">
       <JobsInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

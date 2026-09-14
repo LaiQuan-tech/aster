@@ -26,3 +26,33 @@ export function visibleTabs<T extends EssTabLike>(
   const allowed = new Set(allowedKeys);
   return tabs.filter((tab) => tab.key === "home" || allowed.has(tab.key));
 }
+
+/**
+ * 身分類別（employees.employment_type）：目前系統只有這四種可指派值（來源：
+ * app/admin/employees/page.tsx 新增員工表單的下拉選單），後台「員工端功能
+ * 開放」（module-settings 頁）只針對這四類各給一排 checkbox。
+ */
+export const EMPLOYMENT_TYPES = ["regular", "parttime", "contract", "intern"] as const;
+export type EmploymentType = (typeof EMPLOYMENT_TYPES)[number];
+
+export const EMPLOYMENT_TYPE_LABELS: Record<EmploymentType, string> = {
+  regular: "正職",
+  parttime: "兼職",
+  contract: "約聘",
+  intern: "實習",
+};
+
+/**
+ * intern 在 tenants.features.essTabs 沒有設定時的後端預設值，鏡射
+ * apps/api/src/routes/me.ts 的 INTERN_DEFAULT_ESS_TABS——後台用它當 intern
+ * 排的預設勾選狀態。兩邊是各自檔案裡的常數（web 不能 import api），改一邊
+ * 要記得改另一邊。
+ */
+export const INTERN_DEFAULT_ESS_TABS: readonly string[] = [
+  "home",
+  "schedule",
+  "punches",
+  "requests",
+  "notifications",
+  "mydata",
+];
