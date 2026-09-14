@@ -46,6 +46,23 @@
  *     腳本填入的「投保薪資」用內建費率換算，並未對照官方勞健保級距表
  *     四捨五入到最接近的官方級距，因此不會精確等於 Excel 的自付額/實領；
  *     差異僅供參考（任務說明本身也允許「算不準就取最近級距並在回報寫差額」）。
+ *
+ * 已修正的兩個 seed 瑕疵（2026-09-14 第二輪）：
+ *   • overtime_only 員工「外出」當天（如余裕哲 6/10 高雄、6/16 屏東）加班段
+ *     起點早於班表下班時間，兩段打卡會重疊——現在改成偵測 d.in < shift.end
+ *     時只合成「一對」：in=班表開始、out=加班段結束，視為單一整段工時
+ *     （不再合成會重疊的「班表下班」+「加班段起點」兩個中間點）。
+ *   • 排班只排該員工 fixture 實際涵蓋到的日期，不再無條件排整月週一至五
+ *     ——避免像劉明哲（fixture 只給 6 天樣本）被排到 21 天班表，其餘 15 天
+ *     「有排班無打卡」被誤判 absent_scheduled。
+ *
+ * ⚠️ 殘留待清理：上一輪（2026-09-14 第一輪）已經把明哲多排的 15 天寫進
+ * `schedules` 表；`schedules` 路由沒有 DELETE 端點（也不能用 upsert
+ * shiftId:null 假裝清除——`scheduled` 判斷只看該列存不存在，不看 shift_id
+ * 是否為 null），本腳本無法自己補這個洞。main() 執行到 ensureSchedules 後
+ * 會呼叫 reportStraySchedules()，把任何「fixture 沒有涵蓋、但過去可能已經
+ * 建過班表」的日期整理成 [ISSUE] 行＋一段可直接貼去 Supabase SQL editor 跑
+ * 的 DELETE 陳述式；需要人工（或有 DB 寫入權限的一方）執行。
  */
 
 import { readFileSync, writeFileSync } from "node:fs"
@@ -372,18 +389,50 @@ async function ensureNhiDependents(p, empId) {
   }
 }
 
+// 該員工 fixture 實際涵蓋到的「六月工作日」清單（週一至五、扣 6/19）。
+// 大部分員工的 fixture 涵蓋整月工作日，只有明哲（只給 6 天樣本）會比較短。
+function fixtureWorkdaysOf(p) {
+  const covered = new Set(p.fixture.days.map((d) => d.date))
+  const out = []
+  for (let day = 1; day <= 30; day++) {
+    const dateKey = `2026-06-${String(day).padStart(2, "0")}`
+    if (isJuneWorkday(dateKey) && covered.has(dateKey)) out.push(dateKey)
+  }
+  return out
+}
+
 async function ensureSchedules(plan, empIdByName, shiftIdByName) {
   const assignments = []
   for (const p of plan) {
     const empId = empIdByName.get(p.name)
     const shiftId = shiftIdByName.get(p.shiftName)
-    for (let day = 1; day <= 30; day++) {
-      const dateKey = `2026-06-${String(day).padStart(2, "0")}`
-      if (isJuneWorkday(dateKey)) assignments.push({ employeeId: empId, workDate: dateKey, shiftId })
+    for (const dateKey of fixtureWorkdaysOf(p)) {
+      assignments.push({ employeeId: empId, workDate: dateKey, shiftId })
     }
   }
   const res = await api("POST", "/schedules", { assignments })
   COUNTS.schedulesUpserted = res.body.count ?? 0
+}
+
+// 只讀 GET /schedules 比對「這個月週一至五（扣 6/19）」跟「fixture 實際涵蓋
+// 到的工作日」的差集：非空代表過去某一輪曾經排過、但這次不會再排的日期，
+// 需要有人拿掉那些多餘的 schedules 列（沒有 DELETE 端點可用，見檔頭說明）。
+async function reportStraySchedules(plan, empIdByName) {
+  for (const p of plan) {
+    const empId = empIdByName.get(p.name)
+    const wanted = new Set(fixtureWorkdaysOf(p))
+    const got = await api("GET", `/schedules?employeeId=${empId}&from=2026-06-01&to=2026-06-30`)
+    const stray = (got.body.schedules ?? []).map((s) => s.work_date).filter((d) => !wanted.has(d))
+    if (stray.length === 0) continue
+    stray.sort()
+    issue(
+      `${p.name}（empId=${empId}）目前在 schedules 表裡還有 ${stray.length} 天不在這次 fixture 範圍內的排班` +
+        `（${stray.join(", ")}）——多半是上一輪跑的殘留，會讓那幾天被判成「有排班無打卡」(absent_scheduled)。` +
+        `schedules 路由沒有 DELETE 端點，也不能用 upsert shiftId:null 假裝清除` +
+        `（scheduled 只看列存不存在），需要直接對 DB 清除，可貼進 Supabase SQL editor：` +
+        `DELETE FROM schedules WHERE employee_id = '${empId}' AND work_date IN ('${stray.join("','")}');`,
+    )
+  }
 }
 
 async function existingPunchKeys(empId) {
@@ -413,14 +462,23 @@ async function ensurePunches(plan, empIdByName) {
       if (fx.punchMode === "full_day") {
         add(d.date, d.in, "in")
         add(d.nextDay ? addDaysKey(d.date, 1) : d.date, d.out, "out")
+      } else if (!isJuneWorkday(d.date)) {
+        // overtime_only + 例假/國定假（如余裕哲 6/21、6/27）：沒有正班，
+        // 只有加班段一對。
+        add(d.date, d.in, "in")
+        add(d.nextDay ? addDaysKey(d.date, 1) : d.date, d.out, "out")
+      } else if (d.in < fx.shift.end) {
+        // overtime_only + 外出／提早回來（如余裕哲 6/10 高雄、6/16 屏東）：
+        // fixture 的加班段起點早於班表下班時間（甚至早於上班時間），跟
+        // 「正班一對」會重疊，兩段打卡沒有意義——視為單一整段工時，只合成
+        // 一對：in=班表開始、out=fixture 的加班段結束。
+        add(d.date, fx.shift.start, "in")
+        add(d.nextDay ? addDaysKey(d.date, 1) : d.date, d.out, "out")
       } else {
-        // overtime_only：fixture 的 in/out 只是加班段，正班時間不在表內。
-        // 只在真的排班的工作日才補一段「班表時段」的正班打卡；例假/國定假
-        // （如 6/21、6/27）當天沒有正班，只留加班段。
-        if (isJuneWorkday(d.date)) {
-          add(d.date, fx.shift.start, "in")
-          add(d.date, fx.shift.end, "out") // 三個班別本身皆不跨午夜
-        }
+        // overtime_only 一般情況：正班一對（班表時段）+ 加班段一對，中間空
+        // 檔就是晚餐時間，兩段互不重疊。
+        add(d.date, fx.shift.start, "in")
+        add(d.date, fx.shift.end, "out") // 三個班別本身皆不跨午夜
         add(d.date, d.in, "in")
         add(d.nextDay ? addDaysKey(d.date, 1) : d.date, d.out, "out")
       }
@@ -688,6 +746,7 @@ async function main() {
   await api("PUT", "/approval-flows/leave", { approverEmpIds: [adminEmpId] })
 
   await ensureSchedules(plan, empIdByName, shiftIdByName)
+  await reportStraySchedules(plan, empIdByName)
   await ensurePunches(plan, empIdByName)
   await ensureLeaveRequests(plan, empIdByName, leaveTypeIdByCode)
 
