@@ -36,3 +36,20 @@ Monorepo（npm workspace + Turbo）｜`apps/web` Next.js 16｜`apps/api` Express
 
 > 舊的 `hr-theta-peach.vercel.app`（更名前的 HRLink 版本）與 Railway 上的 API
 > 皆已停用（API 現在只在 Vercel）。上面三個才是現行環境。
+
+## Demo 租戶灌測試資料
+
+正式站的 demo 租戶（`admin@kimihr.app`）給老闆看後台用，本身沒有員工/出勤資料。兩支
+可重跑腳本直接打線上 API 把資料灌進去：
+
+- [`docs/test/seed-attendance-demo.mjs`](docs/test/seed-attendance-demo.mjs) — 五名員工
+  （依 `docs/test/fixtures/attendance-115-06/` 的真實 Excel 出勤表轉出的 fixture）+
+  部門/班別/假別/薪資/排班/打卡/請假，跑完呼叫 `attendance-sheets/generate` 產生
+  2026-06 出勤月表，並把系統算出來的數字跟 Excel 原始查核值並排印出來比對。
+- [`docs/test/seed-projects-demo.mjs`](docs/test/seed-projects-demo.mjs) — 專案申請單/
+  合約/請款/副委託等 P3 模組的示範資料（不動員工/出勤，只讀 `GET /employees`）。
+
+跑法：`node docs/test/seed-attendance-demo.mjs`（`API_URL`／`ADMIN_EMAIL`／
+`ADMIN_PASSWORD` 可用環境變數覆寫；讀 repo 根目錄 `.env` 的 `SUPABASE_URL`／
+`SUPABASE_ANON_KEY` 換 HR 的 JWT，值不會被印出來）。兩支都是冪等設計，
+已存在的部門/員工/打卡/請假單/專案會直接沿用、不重複建立，可放心重跑。
