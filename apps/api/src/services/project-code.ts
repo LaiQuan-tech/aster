@@ -144,3 +144,51 @@ export async function nextProjectCode(
 export function isUniqueViolation(err: { code?: string } | null): boolean {
   return err?.code === "23505"
 }
+
+/* ──────────────────────────────────────────────────────────────────
+ * 複製案（C2 追加減／加做）的編號：`{根 main 案 code}-{n}`
+ * ──────────────────────────────────────────────────────────────────
+ * 合約變更（1000 萬 → 2000 萬）**不改原案**，而是把原案複製成新案再封存原案：
+ * `AT-115-013` → `AT-115-013-1`；從 `-1` 再複製一次是 `AT-115-013-2`，**不是**
+ * `-1-1`——尾碼永遠掛在根 main 案的編號後面，同一條變更鏈一眼看得出來。
+ *
+ * 尾碼與年度流水號互不干擾：`parseSeq` 要求完整比對且錨定 `(\d+)$`，
+ * `AT-115-013-1` 對年度格式回 null，不會把之後的年度流水號推到 014。
+ * 反過來 `parseDupSuffix` 也只認 `{root}-{n}` 的完整形狀，`AT-115-0131`、
+ * `AT-115-013-1-1` 都不算。
+ *
+ * 併發：同 nextProjectCode——MAX+1 會撞號，靠 `projects_tenant_code_uq`
+ * 擋、撞到就重算重試（services/project-duplicate.ts）。
+ */
+
+/** `AT-115-013-7` 相對根案 `AT-115-013` → 7；非同源或格式不符回 null。 */
+export function parseDupSuffix(rootCode: string, code: string): number | null {
+  if (!rootCode || !code) return null
+  const m = code.match(new RegExp(`^${escapeRe(rootCode)}-(\\d+)$`))
+  return m ? Number(m[1]) : null
+}
+
+export function formatDupCode(rootCode: string, n: number): string {
+  return `${rootCode}-${n}`
+}
+
+/**
+ * 取根案底下的下一個複製案編號：掃 `code like '{root}-%'`，取符合
+ * `^{root}-(\d+)$` 的最大尾碼 +1。LIKE 只是粗篩（`_`／`%` 當萬用字元只會多撈，
+ * 不會漏），真正的判定在 parseDupSuffix。
+ */
+export async function nextDuplicateCode(tenantId: string, rootCode: string): Promise<string> {
+  const { data, error } = await supabaseAdmin
+    .from("projects")
+    .select("code")
+    .eq("tenant_id", tenantId)
+    .like("code", `${rootCode}-%`)
+  if (error) throw new Error(`nextDuplicateCode: ${error.message}`)
+
+  let max = 0
+  for (const row of data ?? []) {
+    const n = parseDupSuffix(rootCode, (row.code as string) ?? "")
+    if (n !== null && n > max) max = n
+  }
+  return formatDupCode(rootCode, max + 1)
+}

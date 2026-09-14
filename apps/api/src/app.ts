@@ -43,6 +43,7 @@ import { personalNotesRouter } from "./routes/personal-notes.js"
 import { preferencesRouter } from "./routes/preferences.js"
 import { projectsRouter } from "./routes/projects.js"
 import { projectDocumentsRouter } from "./routes/project-documents.js"
+import { projectDuplicateRouter } from "./routes/project-duplicate.js"
 import { projectOverviewRouter } from "./routes/project-overview.js"
 import { contractsRouter } from "./routes/contracts.js"
 import { billingsRouter } from "./routes/billings.js"
@@ -123,6 +124,7 @@ app.use(preferencesRouter)
 app.use(projectOverviewRouter) // /projects/overview、/projects/alerts 要在 /projects/:id 之前
 app.use(projectsAnnualRouter) // /projects/annual、/projects/receivables 同上
 app.use(projectsRouter)
+app.use(projectDuplicateRouter) // /projects/:id/duplicate、/projects/:id/lineage（C2 複製專案）
 app.use(projectDocumentsRouter)
 app.use(contractsRouter)
 app.use(billingsRouter)

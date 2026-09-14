@@ -822,3 +822,91 @@ export function formatRocDate(iso: string | null | undefined): string {
   if (Number.isNaN(d.getTime())) return iso
   return `民國${adYearToRoc(d.getFullYear())}年${d.getMonth() + 1}月${d.getDate()}日`
 }
+
+/* ======================================================== C2 複製專案 == */
+/**
+ * 合約變更（1000 萬 → 2000 萬）不改原案：把原案複製成新案 `{根案 code}-{n}`
+ * （`AT-115-013` → `AT-115-013-1`），新案依 amount 新建一筆合約，原案封存但保留。
+ * 後端 apps/api/src/routes/project-duplicate.ts、services/project-duplicate.ts。
+ */
+
+export type DuplicateKind = "change" | "addition"
+
+/** 對話框用的說法（客戶口語：追加減／加做），括號內對應既有 PROJECT_KIND_LABELS。 */
+export const DUPLICATE_KIND_LABELS: Record<DuplicateKind, string> = {
+  change: "追加減（變更設計）",
+  addition: "加做（追加）",
+}
+
+export interface DuplicateCopyOptions {
+  engineers?: boolean
+  subcontracts?: boolean
+  billings?: boolean
+  members?: boolean
+}
+
+export interface DuplicateProjectBody {
+  kind: DuplicateKind
+  /** 新案的合約金額（未稅）。 */
+  amount: number
+  reason: string
+  /** 預設 true；demo／要保留舊案時帶 false。 */
+  archiveOriginal?: boolean
+  copy?: DuplicateCopyOptions
+}
+
+export interface DuplicateProjectResponse {
+  project: {
+    id: string
+    code: string
+    name: string
+    kind: DuplicateKind
+    parentProjectId: string
+    rootCode: string
+  }
+  archived: { id: string; code: string | null } | null
+}
+
+export function duplicateProject(id: string, body: DuplicateProjectBody) {
+  return apiFetch<DuplicateProjectResponse>(`/projects/${id}/duplicate`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export interface LineageEntry {
+  id: string
+  code: string | null
+  name: string
+  kind: ProjectKind
+  status: string
+  parentProjectId: string | null
+  openedOn: string | null
+  archivedAt: string | null
+  archiveReason: string | null
+  /** 合約總額（未稅）；非 finance 或沒合約時 null。 */
+  contractTotal: number | null
+  createdAt: string
+}
+
+export interface LineageResponse {
+  projectId: string
+  rootId: string
+  finance: boolean
+  /** 根案＋所有同源後代，依編號排。 */
+  projects: LineageEntry[]
+}
+
+export function getProjectLineage(id: string) {
+  return apiFetch<LineageResponse>(`/projects/${id}/lineage`)
+}
+
+export function humanizeDuplicateError(err: unknown, fallback: string): string {
+  const msg = err instanceof Error ? err.message : fallback
+  if (msg.includes("reserved_project")) return "預先取號的空案還沒有內容，無法複製。"
+  if (msg.includes("root_code_missing")) return "根案沒有編號，無法產生複製案編號。"
+  if (msg.includes("code_generation_failed")) return "編號產生失敗（併發撞號），請再試一次。"
+  if (msg.includes("forbidden")) return "沒有權限複製此專案（需 HR 或本案負責人／部門主管）。"
+  if (msg.includes("invalid_body")) return "請確認類型、金額與理由都有填。"
+  return msg
+}

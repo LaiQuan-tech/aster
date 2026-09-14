@@ -579,6 +579,9 @@ function fmtMoney(n: number): string {
   return n.toLocaleString("en-US")
 }
 
+/** C2：母案追加減帳與子案同時存在時寫進年度總表備註的警告（前端／xlsx 都是原字串輸出）。 */
+export const ANNUAL_DUPLICATE_COUNT_WARNING = "⚠ 母案追加減帳與子案可能重複採計，請擇一"
+
 /**
  * 該歸屬年度的所有專案，一列一案，含 reserved 空列；封存的除非 includeArchived。
  * 分母／稅／進度全走 computeMoney，與單案頁一致。
@@ -602,18 +605,21 @@ export async function buildAnnualTable(
   const projects = (projData ?? []) as AnnualProjectRow[]
   const ids = projects.map((p) => p.id)
 
-  const [contracts, billings, subcontracts, clients, employees] = await Promise.all([
+  const [contracts, billings, subcontracts, clients, employees, children] = await Promise.all([
     batch<ContractLite & { project_id: string }>("contracts", CONTRACT_LITE_COLS, tenantId, ids, "project_id", true),
     batch<BillingRow>("project_billings", BILLING_COLS, tenantId, ids, "project_id", true),
     batch<SubcontractRow>("project_subcontracts", SUBCONTRACT_COLS, tenantId, ids, "project_id", true),
     batch<{ id: string; name: string }>("clients", "id, name", tenantId, uniq(projects.map((p) => p.client_id)), "id", false),
     batch<{ id: string; name: string }>("employees", "id, name", tenantId, uniq(projects.map((p) => p.lead_emp_id)), "id", false),
+    // C2 防呆用：哪些母案底下掛了子案（子案可能在別的歸屬年度或已封存，所以另查，不從本年的列推）。
+    batch<{ parent_project_id: string }>("projects", "parent_project_id", tenantId, ids, "parent_project_id", false),
   ])
   const clientName = new Map(clients.map((c) => [c.id, c.name]))
   const empName = new Map(employees.map((e) => [e.id, e.name]))
   const contractsBy = groupBy(contracts, (c) => c.project_id)
   const billingsBy = groupBy(billings, (b) => b.project_id)
   const subsBy = groupBy(subcontracts, (s) => s.project_id)
+  const hasChildren = new Set(children.map((c) => c.parent_project_id))
 
   const rows: AnnualRow[] = projects.map((p) => {
     const pc = contractsBy.get(p.id) ?? []
@@ -633,6 +639,16 @@ export async function buildAnnualTable(
     const noteParts: string[] = []
     if (money.billingProgressPct !== null) noteParts.push(`累計請款 ${money.billingProgressPct}%`)
     if (amountSource === "quotation") noteParts.push("金額為報價單")
+    // C2 防呆：合約變更的正路是「複製成子案＋封存母案」。母案自己掛著追加減帳
+    // （change_order 已進母案分母）、底下又有子案（子案的合約另計）時，同一筆
+    // 變更會在總表上被算兩次——不擋，但把警告寫進備註讓人擇一。
+    if (
+      (p.kind ?? "main") === "main" &&
+      hasChildren.has(p.id) &&
+      pc.some((c) => c.doc_type === "change_order" && c.our_role === "contractor" && !c.deleted_at)
+    ) {
+      noteParts.push(ANNUAL_DUPLICATE_COUNT_WARNING)
+    }
     for (const s of ps) {
       const amt = num(s.amount) ?? 0
       if (s.kind === "technician") {

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { PageHeader, ErrorText, Empty } from "@/components/admin-ui";
 import { getDepartments, getEmployees, type Department, type Employee } from "@/lib/admin-api";
 import { listVendors, type Vendor } from "@/lib/company-api";
@@ -55,6 +55,7 @@ import { StatusCard } from "./_sections/StatusCard";
 import { MembersCard } from "./_sections/MembersCard";
 import { DocumentsCard } from "./_sections/DocumentsCard";
 import { AdjustmentsCard } from "./_sections/AdjustmentsCard";
+import { LineageCard, DuplicateProjectDialog } from "./_sections/LineageCard";
 
 /**
  * 專案詳情頁。B0 拆檔後這裡只留：資料載入、共用 state、header、各 Card 的組裝；
@@ -63,6 +64,9 @@ import { AdjustmentsCard } from "./_sections/AdjustmentsCard";
 export default function AdminProjectDetailPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
+  const router = useRouter();
+  // C2 複製為追加減／加做（對話框開關；成功後導到新案）
+  const [dupOpen, setDupOpen] = useState(false);
 
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [access, setAccess] = useState<ProjectAccess>({ finance: true, bonus: true });
@@ -246,6 +250,16 @@ export default function AdminProjectDetailPage() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <PageHeader title={project.name} desc={headerDesc || undefined} />
         <div className="flex items-center gap-3">
+          {canFinance && !project.reservedAt && (
+            <button
+              type="button"
+              onClick={() => setDupOpen(true)}
+              className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              data-testid="duplicate-project-button"
+            >
+              複製為追加減／加做
+            </button>
+          )}
           <Link href={`/admin/projects/${project.id}/application`} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
             列印申請單 →
           </Link>
@@ -253,8 +267,22 @@ export default function AdminProjectDetailPage() {
         </div>
       </div>
 
+      {/* C2 複製對話框：成功後導到新案（同一個 page 元件換 id 重新 load） */}
+      <DuplicateProjectDialog
+        open={dupOpen}
+        project={project}
+        onClose={() => setDupOpen(false)}
+        onDone={(res) => {
+          setDupOpen(false);
+          router.push(`/admin/projects/${res.project.id}`);
+        }}
+      />
+
       {/* 專案設定 */}
       <ProjectSettingsCard project={project} depts={depts} emps={emps} isPool={isPool} saveProjectField={saveProjectField} error={error} />
+
+      {/* C2 變更歷史：根案 → -1 → -2…，本案高亮、封存案灰字＋理由 */}
+      <LineageCard projectId={projectId} />
 
       {/* 申請單資料（模組五） */}
       {appForm && (

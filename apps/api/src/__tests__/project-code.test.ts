@@ -7,8 +7,11 @@ import {
   isUniqueViolation,
   DEFAULT_CODE_FORMAT,
   MAX_CODE_ATTEMPTS,
+  parseDupSuffix,
+  formatDupCode,
   type CodeFormat,
 } from "../services/project-code"
+import { duplicateName, archiveReasonFor } from "../services/project-duplicate"
 
 /**
  * 專案編號的格式與流水號解析（模組四第 1 條；P3 改成可設定格式）。
@@ -148,5 +151,64 @@ describe("重試上限", () => {
   it("是個正整數——0 會讓系統產號永遠失敗", () => {
     expect(Number.isInteger(MAX_CODE_ATTEMPTS)).toBe(true)
     expect(MAX_CODE_ATTEMPTS).toBeGreaterThan(0)
+  })
+})
+
+/* ── C2 複製案的尾碼（`{根案 code}-{n}`）───────────────────────────── */
+
+describe("parseDupSuffix（C2 複製案尾碼）", () => {
+  it("同源：AT-115-013-7 相對根案 AT-115-013 → 7", () => {
+    expect(parseDupSuffix("AT-115-013", "AT-115-013-7")).toBe(7)
+    expect(parseDupSuffix("AT-115-013", "AT-115-013-1")).toBe(1)
+    expect(parseDupSuffix("AT-115-013", "AT-115-013-12")).toBe(12)
+    expect(parseDupSuffix("AT-115-013", formatDupCode("AT-115-013", 3))).toBe(3)
+  })
+
+  it("非同源回 null：別的根案、根案本身、黏在一起的數字", () => {
+    expect(parseDupSuffix("AT-115-013", "AT-115-014-1")).toBeNull()
+    expect(parseDupSuffix("AT-115-013", "AT-115-013")).toBeNull()
+    expect(parseDupSuffix("AT-115-013", "AT-115-0131")).toBeNull()
+    expect(parseDupSuffix("AT-115-013", "AT-115-01-31")).toBeNull()
+    expect(parseDupSuffix("AT-115-013", "")).toBeNull()
+    expect(parseDupSuffix("", "AT-115-013-1")).toBeNull()
+  })
+
+  it("只認完整的 `{root}-{n}`：疊羅漢與非數字尾碼不算", () => {
+    expect(parseDupSuffix("AT-115-013", "AT-115-013-1-1")).toBeNull()
+    expect(parseDupSuffix("AT-115-013", "AT-115-013-a")).toBeNull()
+    expect(parseDupSuffix("AT-115-013", "XAT-115-013-1")).toBeNull()
+  })
+
+  it("根案 code 裡的 regex 特殊字元要跳脫（人工編號可能含 . 或 +）", () => {
+    expect(parseDupSuffix("P.1+2", "P.1+2-4")).toBe(4)
+    expect(parseDupSuffix("P.1+2", "Px1+2-4")).toBeNull()
+  })
+
+  it("複製案的尾碼不參與年度流水號：parseSeq 對 AT-115-013-1 回 null", () => {
+    expect(parseSeq(ROC, "AT-115-013-1", 2026)).toBeNull()
+    expect(parseSeq(ROC, "AT-115-013-12", 2026)).toBeNull()
+    // 反過來，年度流水號也不是任何根案的尾碼。
+    expect(parseDupSuffix("AT-115", "AT-115-013")).toBe(13) // 這是同一格式的必然結果——
+    // 所以根案永遠取「根 main 案的 code」（AT-115-013），不是前綴＋年度（AT-115）。
+  })
+})
+
+describe("duplicateName／archiveReasonFor（C2 複製案的名稱與封存理由）", () => {
+  it("加後綴「（追加減 n）」或「（加做 n）」", () => {
+    expect(duplicateName("惠特總部機電設計", "change", 1)).toBe("惠特總部機電設計（追加減 1）")
+    expect(duplicateName("惠特總部機電設計", "addition", 2)).toBe("惠特總部機電設計（加做 2）")
+  })
+
+  it("從複製案再複製：先剝掉舊後綴，不會疊成兩個括號", () => {
+    expect(duplicateName("惠特總部機電設計（追加減 1）", "change", 2)).toBe("惠特總部機電設計（追加減 2）")
+    expect(duplicateName("惠特總部機電設計（加做 1）", "change", 2)).toBe("惠特總部機電設計（追加減 2）")
+    // 名稱中間出現的括號不動，只剝結尾那個。
+    expect(duplicateName("A（追加減 1）B", "addition", 3)).toBe("A（追加減 1）B（加做 3）")
+  })
+
+  it("封存理由帶新編號與原因", () => {
+    expect(archiveReasonFor("AT-115-013-1", "合約由 1000 萬變更為 2000 萬")).toBe(
+      "已由 AT-115-013-1 取代：合約由 1000 萬變更為 2000 萬",
+    )
   })
 })
