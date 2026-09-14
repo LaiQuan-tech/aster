@@ -57,6 +57,8 @@ import { vendorsRouter } from "./routes/vendors.js"
 import { knowledgeRouter } from "./routes/knowledge.js"
 import { disbursementsRouter } from "./routes/disbursements.js"
 import { disbursementReportsRouter } from "./routes/disbursement-reports.js"
+import { auditLogsRouter } from "./routes/audit-logs.js"
+import { runWithRequestContext } from "./lib/request-context.js"
 
 const WEB_ORIGINS = (process.env.WEB_ORIGINS ?? "http://localhost:3000")
   .split(",")
@@ -75,6 +77,24 @@ app.use(
 
 // 12mb 容得下專案文件的 base64 上傳（單檔上限 8MB，見 project-documents.ts）。
 app.use(express.json({ limit: "12mb" }))
+
+// 稽核操作者情境：每個請求開一份 AsyncLocalStorage store（lib/request-context.ts），
+// 後續 middleware／handler 查到呼叫者 employee 時 setActor()，supabaseAdmin 的
+// fetch 就會自動夾 x-actor-emp-id／x-actor-route 給 DB trigger audit_row() 讀。
+// `next()` 必須在 run() 內呼叫，Express 5 之後的 middleware／async handler 才會
+// 落在同一個 store。route 延遲解析：req.route.path（'/employees/:id' 這種 pattern）
+// 要到 route 層 match 後才有。
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  runWithRequestContext(
+    {
+      route: () => {
+        const pattern = (req.route as { path?: unknown } | undefined)?.path
+        return `${req.method} ${typeof pattern === "string" ? pattern : req.path}`
+      },
+    },
+    () => next(),
+  )
+})
 
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "ok" })
@@ -137,6 +157,7 @@ app.use(vendorsRouter)
 app.use(knowledgeRouter)
 app.use(disbursementReportsRouter) // /disbursements/pivot、/disbursements/pivot.xlsx 要在 /disbursements/:id 之前
 app.use(disbursementsRouter)
+app.use(auditLogsRouter)
 
 // 404 fallback.
 app.use((_req: Request, res: Response) => {

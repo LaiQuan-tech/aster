@@ -5,6 +5,8 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { setActor } from "../lib/request-context.js"
+import { writeAuditLog } from "../services/audit.js"
 import { isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { logger } from "../lib/logger.js"
 import {
@@ -57,6 +59,7 @@ async function resolveSelf(
     .eq("user_id", userId)
     .maybeSingle()
   if (error) throw new Error(`resolve self employee: ${error.message}`)
+  if (data) setActor(data.id as string) // 稽核：本請求後續 DB 寫入由 trigger 記 actor
   return data ? { id: data.id as string, role: data.role as string } : null
 }
 
@@ -430,6 +433,15 @@ payrollRouter.post(
           logger.warn({ err, tenantId, payslipId: id }, "finalize: attendance sheet not locked")
         }
       }
+      await writeAuditLog({
+        tenantId,
+        tableName: "payslips",
+        recordId: updated.id as string,
+        action: "UPDATE",
+        oldRow: { status: existing.status },
+        newRow: { status: "finalized", employee_id: updated.employee_id, period: updated.period, sheet_locked: sheetLocked },
+        context: "POST /payslips/:id/finalize — 薪資單定稿",
+      })
       res.status(200).json({ id: updated.id, status: updated.status, sheetLocked })
     } catch (err) {
       next(err)

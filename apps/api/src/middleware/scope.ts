@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { setActor } from "../lib/request-context.js"
 
 /**
  * 共用授權/範圍 helper（收斂原本散落各 route 的 resolveSelf/isHrRole，並加上
@@ -26,6 +27,7 @@ export async function resolveSelf(tenantId: string, userId: string): Promise<Sel
     .maybeSingle()
   if (error) throw new Error(`resolveSelf: ${error.message}`)
   if (!data) return null
+  setActor(data.id as string) // 稽核：本請求後續 DB 寫入由 trigger 記 actor
   return {
     id: data.id as string,
     role: data.role as string,

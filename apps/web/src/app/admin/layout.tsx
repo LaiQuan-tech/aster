@@ -125,6 +125,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { href: "/admin/module-settings", label: "模組設定" },
       { href: "/admin/reports", label: "報表中心" },
+      { href: "/admin/audit-logs", label: "稽核紀錄", fresh: true },
     ],
   },
 ];

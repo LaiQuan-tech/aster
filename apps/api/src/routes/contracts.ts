@@ -5,6 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { resolveSelf, isHrRole, managedDeptIds } from "../middleware/scope.js"
+import { writeAuditLog } from "../services/audit.js"
 import {
   DOC_TYPES,
   OUR_ROLES,
@@ -366,6 +367,18 @@ contractsRouter.patch(
         return
       }
       if (b.amount !== undefined) await recomputeBillings(tenantId, row.project_id)
+      // 稽核（應用層）：只記這次改的欄位（前後值），整列由 trigger 記。
+      const before: Record<string, unknown> = {}
+      for (const k of Object.keys(patch)) before[k] = (row as unknown as Record<string, unknown>)[k] ?? null
+      await writeAuditLog({
+        tenantId,
+        tableName: "contracts",
+        recordId: req.params.id as string,
+        action: "UPDATE",
+        oldRow: before,
+        newRow: patch,
+        context: "PATCH /contracts/:id — 修改合約",
+      })
       res.status(200).json({ contract: serialize(data as ContractRow) })
     } catch (err) {
       next(err)

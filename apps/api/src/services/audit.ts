@@ -1,13 +1,17 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { getRequestContext } from "../lib/request-context.js"
 
 /**
- * 稽核軌跡的**應用層**寫入（另一半是 sql/0019 的 DB trigger）。
+ * 稽核軌跡的**應用層**寫入（另一半是 sql/0019／0033 的 DB trigger）。
  *
  * 分工：
- *   • DB trigger 擋不掉、繞不過，保證「什麼被改了」不會漏，但 DB 不知道
- *     應用層的操作者是誰（API 全程走 service_role，PostgREST 的
- *     request.jwt.claims 只會是 service_role 本身，沒有使用者身分）。
- *   • 本函式知道操作者，補上 `actorEmpId` 與 `context`，但可被繞過。
+ *   • DB trigger 擋不掉、繞不過，保證「什麼被改了」不會漏。sql/0033 起 trigger
+ *     也會從請求 header（lib/request-context.ts → lib/supabase.ts actorFetch）
+ *     讀到操作者與 route，所以「誰改的／哪支端點」已由 DB 層記錄。
+ *   • 本函式補的是「為什麼」：語意 payload（例如 status 從 draft 到 finalized、
+ *     連帶鎖了月表）與帶中文說明的 context，但可被繞過。
+ *   `actorEmpId`／`context` 沒帶時自動從本請求的 AsyncLocalStorage 補
+ *   （requireRole／resolveSelf 查到呼叫者時已 setActor）。
  *
  * 查核時以 (tableName, recordId) 把兩邊的列拼起來看。
  *
@@ -35,8 +39,8 @@ export async function writeAuditLog(entry: AuditEntry): Promise<void> {
       action: entry.action,
       old_row: entry.oldRow ?? null,
       new_row: entry.newRow ?? null,
-      actor_emp_id: entry.actorEmpId ?? null,
-      context: entry.context ?? null,
+      actor_emp_id: entry.actorEmpId ?? getRequestContext()?.actorEmpId ?? null,
+      context: entry.context ?? getRequestContext()?.route ?? null,
     })
     if (error) {
       console.error(`[audit] write failed (${entry.tableName}/${entry.action}): ${error.message}`)

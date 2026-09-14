@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { Card, PageHeader, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import AuditDrawer from "@/components/AuditDrawer";
 import { listVendors, type Vendor } from "@/lib/company-api";
 import { listCompanies, type Company } from "@/lib/projects-ext-api";
 import { listProjects } from "@/lib/projects-api";
@@ -55,6 +56,7 @@ export default function DisbursementDetailPage() {
   const [payOn, setPayOn] = useState(todayKey());
 
   const [copied, setCopied] = useState(false);
+  const [auditOpen, setAuditOpen] = useState(false); // C1 稽核抽屜
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fileRef = useRef<HTMLInputElement>(null);
@@ -244,10 +246,16 @@ export default function DisbursementDetailPage() {
     <>
       <div className="no-print flex items-center justify-between">
         <PageHeader title={`匯款單 ${d.disbursementNo}`} desc={`收款方：${d.payeeName}（${PAYEE_KIND_LABELS[d.payeeKind]}）`} />
-        <button type="button" onClick={() => router.push("/admin/disbursements")} className="text-sm text-gray-500 hover:underline">
-          ← 回放款專區
-        </button>
+        <div className="flex items-center gap-4">
+          <button type="button" onClick={() => setAuditOpen(true)} className="text-sm text-gray-600 hover:underline" title="誰在什麼時候改了這張匯款單">
+            異動紀錄
+          </button>
+          <button type="button" onClick={() => router.push("/admin/disbursements")} className="text-sm text-gray-500 hover:underline">
+            ← 回放款專區
+          </button>
+        </div>
       </div>
+      {auditOpen && <AuditDrawer table="disbursements" recordId={d.id} title={`匯款單 ${d.disbursementNo} 的異動紀錄`} onClose={() => setAuditOpen(false)} />}
 
       <div className="print-sheet space-y-4">
         <p className="print-sheet-header">匯款單 {d.disbursementNo}</p>

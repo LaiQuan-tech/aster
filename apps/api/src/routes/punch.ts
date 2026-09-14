@@ -4,6 +4,8 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { setActor } from "../lib/request-context.js"
+import { writeAuditLog } from "../services/audit.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { dayWindowUtc, todayKey } from "../lib/tz.js"
 
@@ -59,6 +61,7 @@ async function resolveSelf(
     .eq("user_id", userId)
     .maybeSingle()
   if (error) throw new Error(`resolve self employee: ${error.message}`)
+  if (data) setActor(data.id as string) // 稽核：本請求後續 DB 寫入由 trigger 記 actor
   return data ? { id: data.id as string, role: data.role as string } : null
 }
 
@@ -470,6 +473,14 @@ punchRouter.post(
         next(new Error(`POST /punch/manual: ${error?.message}`))
         return
       }
+      await writeAuditLog({
+        tenantId,
+        tableName: "punch_records",
+        recordId: data.id as string,
+        action: "INSERT",
+        newRow: { employee_id: employeeId, punch_at: punchAt, type, source: "manual" },
+        context: "POST /punch/manual — HR 補登打卡",
+      })
       res.status(201).json({ id: data.id })
     } catch (err) {
       next(err)

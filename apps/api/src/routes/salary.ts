@@ -5,6 +5,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { writeAuditLog } from "../services/audit.js"
 
 export const salaryRouter = Router()
 
@@ -113,6 +114,16 @@ salaryRouter.put(
         next(new Error(`PUT /salary/${employeeId}: ${error?.message}`))
         return
       }
+      // 稽核（應用層）：這次 PUT 送進來的欄位（去掉鍵值 tenant_id／employee_id）；整列前後值由 trigger 記。
+      const { tenant_id: _t, employee_id: _e, ...changed } = row
+      await writeAuditLog({
+        tenantId,
+        tableName: "salary_structures",
+        recordId: data.id as string,
+        action: "UPDATE",
+        newRow: changed,
+        context: "PUT /salary/:employeeId — 儲存薪資結構",
+      })
       res.status(200).json({ id: data.id })
     } catch (err) {
       next(err)

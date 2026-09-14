@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { writeAuditLog } from "../services/audit.js"
 
 export const employeesRouter = Router()
 
@@ -134,6 +135,16 @@ employeesRouter.post(
         next(new Error(`POST /employees: failed to insert employee row: ${empErr?.message}`))
         return
       }
+
+      // 稽核（應用層補「為什麼」）：trigger 記到的 employees 列沒有 email（在 auth），這裡補上。
+      await writeAuditLog({
+        tenantId,
+        tableName: "employees",
+        recordId: emp.id as string,
+        action: "INSERT",
+        newRow: { name, email, role: role ?? "employee", dept_id: deptId ?? null, emp_no: empNo ?? null },
+        context: "POST /employees — 建立員工帳號",
+      })
 
       res.status(201).json({ employeeId: emp.id, userId })
     } catch (err) {
@@ -279,6 +290,15 @@ employeesRouter.post(
         res.status(404).json({ error: "not_found" })
         return
       }
+      await writeAuditLog({
+        tenantId,
+        tableName: "employees",
+        recordId: data.id as string,
+        action: "UPDATE",
+        oldRow: { status: "active" },
+        newRow: { status: "inactive" },
+        context: "POST /employees/:id/deactivate — 停用員工",
+      })
       res.status(200).json({ id: data.id, status: "inactive" })
     } catch (err) {
       next(err)

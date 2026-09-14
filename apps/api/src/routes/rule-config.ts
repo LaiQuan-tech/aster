@@ -5,6 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
+import { writeAuditLog } from "../services/audit.js"
 
 export const ruleConfigRouter = Router()
 
@@ -122,6 +123,16 @@ ruleConfigRouter.put(
         return
       }
 
+      // 稽核（應用層）：版本遞移；config 全文由 trigger 的 new_row 記。
+      await writeAuditLog({
+        tenantId,
+        tableName: "rule_configs",
+        recordId: inserted.id as string,
+        action: "INSERT",
+        oldRow: current ? { id: current.id, version: current.version } : null,
+        newRow: { version: inserted.version, scope: "all", active: true },
+        context: "PUT /rule-config — 儲存差勤／薪資規則（新版本）",
+      })
       res.status(200).json({ id: inserted.id, version: inserted.version })
     } catch (err) {
       next(err)

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import AuditDrawer from "@/components/AuditDrawer";
 import {
   addEmployeeCertification,
   addEmployeeEducation,
@@ -160,6 +161,8 @@ export default function EmployeesPage() {
   const [linkResult, setLinkResult] = useState<{ empName: string; result: AccountLinkResult } | null>(null);
   const [tempPassword, setTempPassword] = useState<{ empName: string; password: string } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // C1 稽核：右側抽屜顯示該員工 employees 列的異動時間線
+  const [auditTarget, setAuditTarget] = useState<{ id: string; name: string } | null>(null);
 
   // 批次邀請（CSV）。
   const [csvText, setCsvText] = useState("");
@@ -808,6 +811,7 @@ export default function EmployeesPage() {
                               <button disabled={busyId === employee.id} onClick={() => void onSendInvite(employee.id, employee.name)} className="text-sm font-medium hover:underline disabled:opacity-50" style={{ color: "var(--brand)" }}>寄邀請信</button>
                             )}
                             {employee.status === "active" && <button onClick={() => void onDeactivate(employee.id)} className="text-sm text-red-600 hover:underline">停用</button>}
+                            <button onClick={() => setAuditTarget({ id: employee.id, name: employee.name })} className="text-sm text-gray-600 hover:underline" title="誰在什麼時候改了這位員工的資料">異動紀錄</button>
                           </div>
                         </td>
                       </>
@@ -1046,6 +1050,14 @@ export default function EmployeesPage() {
             </div>
           )}
         </Card>
+      )}
+      {auditTarget && (
+        <AuditDrawer
+          table="employees"
+          recordId={auditTarget.id}
+          title={`${auditTarget.name} 的異動紀錄`}
+          onClose={() => setAuditTarget(null)}
+        />
       )}
     </>
   );
