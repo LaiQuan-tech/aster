@@ -792,6 +792,8 @@ describe("P3-6 年度總表與未收款", () => {
     const a = res.body.application
     expect(a.code).toBe(`AT-${ROC}-001`)
     expect(a.dateRoc).toMatch(/^\d{3}\.\d{1,2}\.\d{1,2}$/)
+    // mainProjectId 建立時沒帶 openedOn，A5 預設值＝建立當天（租戶今天）。
+    expect(a.openedOn).toBe(taipeiToday())
     expect(a.latestDocument.docType).toBe("contract")
     expect(a.latestDocument.signedOn).toBe(`${YEAR}-01-15`)
     expect(a.billings).toHaveLength(4)
@@ -826,5 +828,36 @@ describe("P3-1 編號格式可設定", () => {
     await asAdmin(request(app).put("/project-settings")).send({ codePrefix: "AT", codeYearStyle: "roc", codeSeqDigits: 3 })
     const back = await createProject({ name: "改回舊格式的案子" })
     expect(back.body.code).toBe(`AT-${ROC}-011`)
+  })
+})
+
+// 這個 describe 刻意放在檔案最後——它另外 createProject 兩次，若插在中段會
+// 讓後面依賴精確流水號（如上面「改回舊格式的案子」的 011）的斷言全部位移。
+describe("A5 開案日期", () => {
+  it("POST 不帶 openedOn → 預設租戶今天", async () => {
+    const res = await createProject({ name: "開案日期預設今天" })
+    expect(res.status).toBe(201)
+    const got = await asAdmin(request(app).get(`/projects/${res.body.id}`))
+    expect(got.body.project.openedOn).toBe(taipeiToday())
+  })
+
+  it("PATCH 改 2024-03-01 → GET 回同值；年度總表該列日期＝2024-03-01；申請單抬頭也跟著走", async () => {
+    const created = await createProject({ name: "補登開案日期案", fiscalYear: YEAR })
+    expect(created.status).toBe(201)
+    const id = created.body.id as string
+
+    const patched = await asAdmin(request(app).patch(`/projects/${id}`)).send({ openedOn: "2024-03-01" })
+    expect(patched.status).toBe(200)
+    const got = await asAdmin(request(app).get(`/projects/${id}`))
+    expect(got.body.project.openedOn).toBe("2024-03-01")
+
+    const annual = await asAdmin(request(app).get(`/projects/annual?year=${ROC}`))
+    const row = (annual.body.rows as Array<Record<string, unknown>>).find((r) => r.projectId === id)!
+    expect(row).toBeDefined()
+    expect(row.createdOn).toBe("2024-03-01")
+    expect(row.dateRoc).toBe("113.3.1")
+
+    const application = await asAdmin(request(app).get(`/projects/${id}/application`))
+    expect(application.body.application.openedOn).toBe("2024-03-01")
   })
 })

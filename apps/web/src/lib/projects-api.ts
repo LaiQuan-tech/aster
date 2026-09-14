@@ -60,6 +60,8 @@ export interface Project {
   /** 預定起訖日（甘特圖／示警）；可空。 */
   startsOn?: string | null
   endsOn?: string | null
+  /** 開案日期（A5）。事後補 K 單的案子不用建立日／K 單日，用這欄真正開案那天。 */
+  openedOn: string | null
   /** 人工解除封存的時點；自動封存看這一欄放過該筆。 */
   unarchivedAt?: string | null
   /** 衍生（模組四第 3 條）：有已簽訂的合約 = 成案；只有報價單 = 還沒。 */
@@ -393,6 +395,8 @@ export function createProject(body: {
   bonusPool?: number | null
   startsOn?: string | null
   endsOn?: string | null
+  /** 開案日期（A5）。省略／null＝伺服器補租戶今天。 */
+  openedOn?: string | null
 }) {
   return apiFetch<{ id: string; code: string | null }>("/projects", {
     method: "POST",
@@ -419,6 +423,8 @@ export function updateProject(
     archived?: boolean
     startsOn?: string | null
     endsOn?: string | null
+    /** 開案日期（A5）。省略＝不動；帶 null 會清空。 */
+    openedOn?: string | null
     deptId?: string | null
     leadEmpId?: string | null
     shareMode?: ShareMode

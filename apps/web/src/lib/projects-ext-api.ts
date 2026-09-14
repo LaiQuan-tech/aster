@@ -169,6 +169,8 @@ export interface CreateProjectExtBody {
   bonusPool?: number | null
   startsOn?: string | null
   endsOn?: string | null
+  /** 開案日期（A5）。省略／null＝伺服器補租戶今天。 */
+  openedOn?: string | null
   clientId?: string | null
   parentProjectId?: string | null
   kind?: ProjectKind
@@ -525,8 +527,10 @@ export interface ApplicationData {
   code: string | null
   /** 建立日（租戶當地時區），'YYYY-MM-DD'。 */
   createdOn: string
-  /** 申請日期的民國寫法 'yyy.m.d'。 */
+  /** 建立日的民國寫法 'yyy.m.d'（≠ 抬頭「開案日期」，那個用 openedOn）。 */
   dateRoc: string | null
+  /** 開案日期（A5，opened_on ?? 建立日），'YYYY-MM-DD'。申請單抬頭用這個。 */
+  openedOn: string
   project: Omit<ProjectDetail, "client">
   client: Client | null
   latestDocument: LatestDocument | null
