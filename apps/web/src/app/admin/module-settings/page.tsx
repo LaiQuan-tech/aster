@@ -5,10 +5,12 @@ import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls }
 import {
   getBranding,
   getRuleConfig,
+  getRuleConfigVersions,
   saveRuleConfig,
   saveTenantSettings,
   type RuleConfig,
   type RuleConfigResponse,
+  type RuleConfigVersion,
   type OvertimeRule,
   type OvertimeTier,
   type OvertimeWhen,
@@ -265,6 +267,98 @@ function hydrateEssTabsConfig(raw: unknown): EssTabsConfig {
   return cfg;
 }
 
+/* --------------------------------------------- 規則版本生效日（C4） --- */
+/**
+ * 存規則時可選「這次改動何時生效」，對應 saveRuleConfig 的 opts.effectiveFrom：
+ * "now" = 立即生效（今天）、"nextMonth"（不傳 opts）= 後端預設下個月1號、
+ * "custom" = 指定日期，實際送出 'YYYY-MM-DD'。
+ */
+type EffectiveMode = "now" | "nextMonth" | "custom";
+
+function toEffectiveOpts(mode: EffectiveMode, date: string): { effectiveFrom?: string } {
+  if (mode === "now") return { effectiveFrom: "now" };
+  if (mode === "custom") return date ? { effectiveFrom: date } : {};
+  return {};
+}
+
+/**
+ * 本地「今天」（YYYY-MM-DD，瀏覽器本地時區）。不用 toISOString().slice(0,10)：
+ * UTC+8 時區下每天 00:00–08:00 會少算一天（同 apps/web/src/lib/projects-ext-api.ts
+ * 的 localTodayKey 註解），這裡只是顯示文案用，不影響送給後端的 effectiveFrom 值。
+ */
+function localTodayKey(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** 存檔成功後的提示文案；effectiveFrom 來自 saveRuleConfig 的回傳值。 */
+function describeSaveResult(version: number, effectiveFrom: string): string {
+  return effectiveFrom <= localTodayKey()
+    ? `已儲存第 ${version} 版，已立即生效`
+    : `已儲存第 ${version} 版，將於 ${effectiveFrom} 生效`;
+}
+
+/** 版本歷史表格的建立時間欄位；沿用 attendance-sheets/[id] 頁面同款格式。 */
+function fmtDateTime(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("zh-TW", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function EffectiveDateFields({
+  mode,
+  date,
+  onModeChange,
+  onDateChange,
+  groupName,
+}: {
+  mode: EffectiveMode;
+  date: string;
+  onModeChange: (mode: EffectiveMode) => void;
+  onDateChange: (date: string) => void;
+  groupName: string;
+}) {
+  return (
+    <div>
+      <label className={labelCls}>生效時間</label>
+      <div className="flex flex-wrap items-center gap-4">
+        <label className="flex items-center gap-1.5 text-sm text-gray-700">
+          <input type="radio" name={groupName} checked={mode === "now"} onChange={() => onModeChange("now")} />
+          立即生效
+        </label>
+        <label className="flex items-center gap-1.5 text-sm text-gray-700">
+          <input
+            type="radio"
+            name={groupName}
+            checked={mode === "nextMonth"}
+            onChange={() => onModeChange("nextMonth")}
+          />
+          下個月 1 日生效
+        </label>
+        <label className="flex items-center gap-1.5 text-sm text-gray-700">
+          <input type="radio" name={groupName} checked={mode === "custom"} onChange={() => onModeChange("custom")} />
+          指定日期
+        </label>
+        {mode === "custom" && (
+          <input
+            type="date"
+            min={localTodayKey()}
+            value={date}
+            onChange={(e) => onDateChange(e.target.value)}
+            className="rounded-md border border-gray-300 px-2 py-1.5 text-sm"
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function ModuleSettingsPage() {
   const [ruleConfig, setRuleConfig] = useState<RuleConfigResponse | null>(null);
   const [otForm, setOtForm] = useState<OvertimeParamsForm>(DEFAULT_OT_FORM);
@@ -282,6 +376,12 @@ export default function ModuleSettingsPage() {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [ruleVersions, setRuleVersions] = useState<RuleConfigVersion[] | null>(null);
+  const [ruleVersionsError, setRuleVersionsError] = useState<string | null>(null);
+  const [jsonEffectiveMode, setJsonEffectiveMode] = useState<EffectiveMode>("nextMonth");
+  const [jsonEffectiveDate, setJsonEffectiveDate] = useState("");
+  const [otEffectiveMode, setOtEffectiveMode] = useState<EffectiveMode>("nextMonth");
+  const [otEffectiveDate, setOtEffectiveDate] = useState("");
 
   const parsedEditableFields = useMemo(
     () =>
@@ -333,13 +433,40 @@ export default function ModuleSettingsPage() {
       .catch(() => null);
   }, []);
 
+  useEffect(() => {
+    // 版本歷史非關鍵路徑：拿不到就顯示錯誤字樣，不擋頁面其餘內容。
+    getRuleConfigVersions()
+      .then((rows) => setRuleVersions(rows))
+      .catch((err) => setRuleVersionsError(err instanceof Error ? err.message : "版本歷史載入失敗"));
+  }, []);
+
+  /**
+   * 重新載入「現在實際生效」的規則狀態。存檔成功後改呼叫這個，不要用剛存的 config
+   * 手動兜一個 RuleConfigResponse——這次存檔若選的是未來生效（下個月或指定日期），
+   * 存檔當下真正生效的其實還是舊版本，直接把新版本標成「目前生效」會誤導畫面。
+   */
+  async function reloadRuleConfig() {
+    const res = await getRuleConfig();
+    setRuleConfig(res);
+    setDraft(JSON.stringify(res.config, null, 2));
+    setOtForm(hydrateOvertimeForm(res.config));
+    return res;
+  }
+
   async function onSave() {
     setError(null);
     setMessage(null);
+    if (jsonEffectiveMode === "custom" && !jsonEffectiveDate) {
+      setError("請選擇指定生效日期");
+      return;
+    }
     try {
       const parsed = JSON.parse(draft);
-      const res = await saveRuleConfig(parsed);
-      setMessage(`規則設定已儲存，版本 ${res.version}`);
+      const res = await saveRuleConfig(parsed, toEffectiveOpts(jsonEffectiveMode, jsonEffectiveDate));
+      setMessage(describeSaveResult(res.version, res.effectiveFrom));
+      await reloadRuleConfig().catch(() => {
+        // 存檔已成功；重新整理「目前生效」狀態失敗不影響這次存檔結果。
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存失敗");
     }
@@ -379,6 +506,10 @@ export default function ModuleSettingsPage() {
     if (!ruleConfig) return;
     setError(null);
     setMessage(null);
+    if (otEffectiveMode === "custom" && !otEffectiveDate) {
+      setError("請選擇指定生效日期");
+      return;
+    }
     try {
       const base = ruleConfig.config;
       const existingWeekday = base.overtime.rules.find((r) => r.when === "weekday_ot");
@@ -422,10 +553,11 @@ export default function ModuleSettingsPage() {
         },
       };
 
-      const res = await saveRuleConfig(merged);
-      setRuleConfig({ config: merged, version: res.version, isDefault: false, scope: ruleConfig.scope });
-      setDraft(JSON.stringify(merged, null, 2));
-      setMessage(`加班與計薪參數已儲存，版本 ${res.version}`);
+      const res = await saveRuleConfig(merged, toEffectiveOpts(otEffectiveMode, otEffectiveDate));
+      setMessage(describeSaveResult(res.version, res.effectiveFrom));
+      await reloadRuleConfig().catch(() => {
+        // 存檔已成功；重新整理「目前生效」狀態失敗不影響這次存檔結果。
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存加班與計薪參數失敗");
     }
@@ -802,6 +934,14 @@ export default function ModuleSettingsPage() {
               </label>
             </div>
 
+            <EffectiveDateFields
+              mode={otEffectiveMode}
+              date={otEffectiveDate}
+              onModeChange={setOtEffectiveMode}
+              onDateChange={setOtEffectiveDate}
+              groupName="ot-effective-mode"
+            />
+
             <div>
               <PrimaryButton onClick={onSaveOvertimeParams}>儲存加班與計薪參數</PrimaryButton>
             </div>
@@ -836,6 +976,15 @@ export default function ModuleSettingsPage() {
               className="h-96 w-full rounded-md border border-gray-300 p-3 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand)]"
             />
             <div className="mt-4">
+              <EffectiveDateFields
+                mode={jsonEffectiveMode}
+                date={jsonEffectiveDate}
+                onModeChange={setJsonEffectiveMode}
+                onDateChange={setJsonEffectiveDate}
+                groupName="json-effective-mode"
+              />
+            </div>
+            <div className="mt-4">
               <PrimaryButton onClick={onSave}>儲存規則</PrimaryButton>
             </div>
           </>
@@ -844,6 +993,53 @@ export default function ModuleSettingsPage() {
         )}
         {message && <p className="mt-3 text-sm text-green-600">{message}</p>}
         {error && <div className="mt-3"><ErrorText>{error}</ErrorText></div>}
+      </Card>
+
+      <Card>
+        <div className="mb-4">
+          <h2 className="text-base font-semibold text-gray-900">規則版本歷史</h2>
+          <p className="mt-1 text-sm text-gray-500">
+            每次儲存規則都會建立一個新版本；「目前生效」比對的是上方目前載入的版本號，與後端依生效日選版的結果一致。
+          </p>
+        </div>
+        {ruleVersions ? (
+          ruleVersions.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 text-xs text-gray-500">
+                    <th className="py-2 pr-4">版本</th>
+                    <th className="py-2 pr-4">生效日</th>
+                    <th className="py-2 pr-4">建立時間</th>
+                    <th className="py-2">目前生效</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ruleVersions.map((v) => (
+                    <tr key={v.version} className="border-b border-gray-50">
+                      <td className="py-2 pr-4 font-medium text-gray-800">v{v.version}</td>
+                      <td className="py-2 pr-4 text-gray-600">{v.effectiveFrom}</td>
+                      <td className="py-2 pr-4 text-gray-600">{fmtDateTime(v.createdAt)}</td>
+                      <td className="py-2">
+                        {ruleConfig?.version === v.version ? (
+                          <span className="rounded-full bg-green-50 px-2 py-1 text-xs text-green-700">目前生效</span>
+                        ) : (
+                          <span className="text-xs text-gray-300">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <Empty>尚無版本紀錄</Empty>
+          )
+        ) : ruleVersionsError ? (
+          <ErrorText>{ruleVersionsError}</ErrorText>
+        ) : (
+          <Empty>載入中…</Empty>
+        )}
       </Card>
 
       <Card>

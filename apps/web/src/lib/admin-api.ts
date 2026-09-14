@@ -644,6 +644,13 @@ export function deleteRequest(id: string, reason: string) {
   });
 }
 
+/** 列出某張單的附件（signed URL 清單），供簽核主管/HR 檢視與下載。 */
+export function getRequestAttachments(requestId: string) {
+  return apiFetch<{ attachments: Array<{ id: string; fileName: string; sizeBytes: number; contentType: string; url: string }> }>(
+    `/requests/${requestId}/attachments`
+  );
+}
+
 /* ------------------------------------------------------- announcements ----- */
 
 export interface Announcement {
@@ -749,6 +756,8 @@ export interface LeaveType {
    * （paid=true → 0、paid=false → 1，邏輯與 DB 欄位註解一致）。
    */
   deduct_rate: string | null;
+  /** 核准前是否須附憑證（例如病假須附診所收據）。 */
+  requiresAttachment: boolean;
   created_at: string;
 }
 
@@ -762,6 +771,7 @@ export function createLeaveType(body: {
   paid?: boolean;
   special?: boolean;
   deductRate?: number | null;
+  requiresAttachment?: boolean;
 }) {
   return apiFetch<{ id: string }>("/leave-types", {
     method: "POST",
@@ -771,7 +781,7 @@ export function createLeaveType(body: {
 
 export function updateLeaveType(
   id: string,
-  body: { code?: string; name?: string; paid?: boolean; special?: boolean; deductRate?: number | null },
+  body: { code?: string; name?: string; paid?: boolean; special?: boolean; deductRate?: number | null; requiresAttachment?: boolean },
 ) {
   return apiFetch<{ id: string }>(`/leave-types/${id}`, {
     method: "PATCH",
@@ -1670,7 +1680,7 @@ export function getRuleConfigVersions() {
  * 不用跟著改。
  */
 export function saveRuleConfig(config: RuleConfig, opts?: { effectiveFrom?: string }) {
-  return apiFetch<{ id: string; version: number }>("/rule-config", {
+  return apiFetch<{ id: string; version: number; effectiveFrom: string }>("/rule-config", {
     method: "PUT",
     body: JSON.stringify({ ...config, effectiveFrom: opts?.effectiveFrom }),
   });
