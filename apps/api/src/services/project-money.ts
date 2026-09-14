@@ -309,8 +309,11 @@ export type OverdueBasis = "billed" | "invoiced"
  * - `'invoiced'`（省略時的預設，相容舊呼叫）：已開票且未入帳，從開票日起算——原本唯一的行為。
  * - `'billed'`（B5 新增）：已請款且未入帳，從請款日起算，不需要已開票。這是 B5 的重點：
  *   已請款但還沒開票的錢，舊邏輯永遠不會顯示逾期，老闆看不到「該催的錢」。
- * 已入帳一律 null；對應基準的起算日不存在（例如 basis='billed' 但根本沒請款）也是 null。
- * `billedOn` 只有 basis='billed' 時才用得到，舊的三參數呼叫可以不傳、行為不變。
+ *   `billedOn` 缺席（例如先開票才補請款、或請款被取消但開票沒撤——見
+ *   routes/billings.ts 的 `invoiced_before_billed` 警告與 `unbill` 保留 invoiced_on）
+ *   時退回用 `invoicedOn`：這兩種情形都代表錢已經跑出去該收了，不能因為
+ *   請款日剛好沒登記就讓這筆錢從逾期清單消失。
+ * 已入帳一律 null；兩個起算日都不存在也是 null。
  */
 export function overdueDays(
   invoicedOn: string | null,
@@ -320,7 +323,7 @@ export function overdueDays(
   billedOn: string | null = null,
 ): number | null {
   if (receivedOn) return null
-  const startOn = basis === "billed" ? billedOn : invoicedOn
+  const startOn = basis === "billed" ? (billedOn ?? invoicedOn) : invoicedOn
   if (!startOn) return null
   const days = diffDays(startOn, today)
   return days < 0 ? 0 : days

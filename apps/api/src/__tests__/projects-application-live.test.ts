@@ -775,21 +775,26 @@ describe("P3-6 年度總表與未收款", () => {
     expect(emp.body.receivables).toEqual([])
   })
 
-  it("receivables 逾期：B5 起逾期天數依租戶逾期基準起算（租戶沒設定時預設 'billed'＝從請款日算，不需要已開票）", async () => {
+  it("receivables 逾期：開票後未入帳從開票日起算（即使從沒請款——basis='billed' 沒有請款日時要退回開票日，不能讓這筆錢從逾期清單消失）", async () => {
     const sched = await asAdmin(request(app).get(`/projects/${mainProjectId}/billings`))
     const second = sched.body.installments.find((i: { installmentNo: number }) => i.installmentNo === 2)
-    // B5 之前這裡只開票不請款也能觸發逾期（從開票日起算）；預設基準改成 'billed' 後，
-    // 沒有請款日就沒有起算點，所以這裡先補請款，模擬正常「請款 → 開票」的順序。
-    const bill = await asAdmin(request(app).post(`/billings/${second.id}/bill`)).send({ billedOn: `${YEAR - 1}-11-01` })
-    expect(bill.status).toBe(200)
+    // 刻意不先 /bill：這是系統明確支援的順序（invoice 前 billings.ts 只會提醒
+    // invoiced_before_billed，不會擋），也是 unbill 之後 invoiced_on 被保留、
+    // billed_on 被清空的真實狀態。overdueDays 在 basis='billed' 下若沒有 billedOn
+    // 退回用 invoicedOn，這筆錢才不會從逾期清單裡消失（B5 review 抓到的迴歸）。
     const inv = await asAdmin(request(app).post(`/billings/${second.id}/invoice`)).send({ invoiceNo: "AB-00000003", invoicedOn: `${YEAR - 1}-12-01` })
     expect(inv.status).toBe(200)
     const res = await asAdmin(request(app).get("/projects/receivables"))
     expect(res.body.basis).toBe("billed")
     const row = (res.body.receivables as Array<Record<string, unknown>>).find((r) => r.billingId === second.id)!
+    expect(row.billedOn).toBeNull()
     expect(row.overdueDays as number).toBeGreaterThan(200)
     expect(row.state).toBe("overdue")
     expect(res.body.summary.overdueCount).toBeGreaterThanOrEqual(1)
+    // 逾期的要排在清單最前面幾名（compareReceivables 用新算出的 overdueDays 重排，
+    // 不能還在用 buildReceivables 內部那個舊基準排好的順序）。
+    const idx = (res.body.receivables as Array<Record<string, unknown>>).findIndex((r) => r.billingId === second.id)
+    expect(idx).toBeLessThan(3)
   })
 
   it("receivables：?state= 篩選——billed 只回已請款未開票未入帳；overdue 每列 state 都是 overdue；不帶 state 回全部且每列有 state", async () => {

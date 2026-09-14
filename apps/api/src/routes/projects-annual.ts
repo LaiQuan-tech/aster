@@ -7,7 +7,7 @@ import { todayKey } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { financeProjectIds } from "../services/project-scope.js"
-import { parseYearParam, overdueDays, receivableState, type OverdueBasis } from "../services/project-money.js"
+import { parseYearParam, overdueDays, receivableState, compareReceivables, type OverdueBasis } from "../services/project-money.js"
 import { buildAnnualTable, buildReceivables, loadP3Settings } from "../services/project-application-store.js"
 import { annualFilename, annualWorkbookBuffer } from "../lib/xlsx/projects-annual.js"
 
@@ -141,6 +141,10 @@ projectsAnnualRouter.get(
           state: receivableState({ billedOn: r.billedOn, invoicedOn: r.invoicedOn, receivedOn: r.receivedOn, overdueDays: od }),
         }
       })
+      // buildReceivables 內部已經排序過，但用的是舊基準（永遠 invoiced-only）算出的
+      // overdueDays；上面這段改寫了 overdueDays 之後排序可能已經不對，basis='billed'
+      // 時尤其明顯，必須用新值重排一次，否則清單順序跟畫面上顯示的逾期天數對不起來。
+      rows.sort(compareReceivables)
       if (state !== "all") rows = rows.filter((r) => r.state === state)
       const unreceivedTotal = rows.reduce((s, r) => s + (r.unreceived ?? 0), 0)
       res.status(200).json({
