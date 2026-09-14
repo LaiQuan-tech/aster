@@ -1830,8 +1830,65 @@ export async function reviewSheet(
 }
 
 /**
+ * appendSheetSnapshot — 把本次核准凍結的 snapshot 追加進 attendance_sheet_snapshots
+ * （C3 月表快照歷史；seq＝該表既有最大＋1，unique(tenant, sheet, seq)）。
+ * `attendance_sheets.snapshot` 只留最新一份、return／reopen 會清掉；這裡是不可
+ * 覆蓋也不可刪（sql/0033 no_hard_delete）的歷史序列，每次核准都多一列。
+ *
+ * 失敗不回滾核准：核准已經 commit，這時丟 500 只會讓 HR 看到「錯誤」卻發現
+ * 表已核准、重按又 invalid_transition。改記 error log 讓人追；表未遷移的環境
+ * （0044 未套）只警告一次。seq 撞 unique（同表同時核准，理論上被 version
+ * 樂觀鎖擋掉）就重讀 max 再試，最多三次。
+ */
+async function appendSheetSnapshot(
+  tenantId: string,
+  sheet: SheetRow,
+  snapshot: SheetSnapshot,
+  actorEmpId: string,
+  reason: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { data: last, error: seqErr } = await supabaseAdmin
+      .from("attendance_sheet_snapshots")
+      .select("seq")
+      .eq("tenant_id", tenantId)
+      .eq("sheet_id", sheet.id)
+      .order("seq", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (seqErr) {
+      if (isMissingTableError(seqErr)) {
+        warnSchemaGapOnce("attendance_sheet_snapshots", seqErr)
+        return
+      }
+      logger.error({ err: seqErr.message, sheetId: sheet.id }, "attendance-sheets: snapshot history seq lookup failed")
+      return
+    }
+    const seq = ((last?.seq as number | undefined) ?? 0) + 1
+    const { error } = await supabaseAdmin.from("attendance_sheet_snapshots").insert({
+      tenant_id: tenantId,
+      sheet_id: sheet.id,
+      employee_id: sheet.employee_id,
+      period: sheet.period,
+      seq,
+      snapshot,
+      rule_config_version: snapshot.ruleConfigVersion,
+      taken_at: snapshot.snapshotAt,
+      taken_by_emp_id: actorEmpId,
+      reason,
+    })
+    if (!error) return
+    if (error.code === "23505") continue
+    logger.error({ err: error.message, sheetId: sheet.id, seq }, "attendance-sheets: snapshot history insert failed")
+    return
+  }
+  logger.error({ sheetId: sheet.id }, "attendance-sheets: snapshot history seq kept colliding, gave up")
+}
+
+/**
  * approveSheet — manager_reviewed → approved，並把完整 SheetView（含 money）＋
  * 規則版本＋薪資結構＋引擎用逐日資料寫進 snapshot。之後薪資結算讀快照。
+ * 同時 append 一列 attendance_sheet_snapshots（reason 'approve'）留歷史。
  */
 export async function approveSheet(tenantId: string, sheetId: string, actorEmpId: string): Promise<SheetRow> {
   const sheet = await loadSheet(tenantId, sheetId)
@@ -1855,11 +1912,15 @@ export async function approveSheet(tenantId: string, sheetId: string, actorEmpId
     approved_by: actorEmpId,
     snapshot,
   })
+  await appendSheetSnapshot(tenantId, next, snapshot, actorEmpId, "approve")
   await notify(tenantId, [sheet.employee_id], next, "approved", `出勤月表已核准（${sheet.period}）`, `你的 ${sheet.period} 出勤月表已由 HR 核准。`)
   return next
 }
 
-/** returnSheet — submitted/manager_reviewed/approved → returned（清掉快照）；locked → 409 locked。 */
+/**
+ * returnSheet — submitted/manager_reviewed/approved → returned（清掉 sheets.snapshot；
+ * attendance_sheet_snapshots 的歷史不動）；locked → 409 locked。
+ */
 export async function returnSheet(tenantId: string, sheetId: string, actorEmpId: string, reason: string): Promise<SheetRow> {
   const sheet = await loadSheet(tenantId, sheetId)
   assertTransition(sheet, "returned")
@@ -1876,7 +1937,10 @@ export async function returnSheet(tenantId: string, sheetId: string, actorEmpId:
   return next
 }
 
-/** reopenSheet — approved → draft（HR 重新開放；清掉快照，記 reopen_reason）。 */
+/**
+ * reopenSheet — approved → draft（HR 重新開放；清掉 sheets.snapshot，記 reopen_reason）。
+ * attendance_sheet_snapshots 的歷史不動：再次核准會 append 下一個 seq。
+ */
 export async function reopenSheet(tenantId: string, sheetId: string, actorEmpId: string, reason: string): Promise<SheetRow> {
   const sheet = await loadSheet(tenantId, sheetId)
   assertTransition(sheet, "draft")

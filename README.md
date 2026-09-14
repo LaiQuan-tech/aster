@@ -16,7 +16,8 @@ Monorepo（npm workspace + Turbo）｜`apps/web` Next.js 16｜`apps/api` Express
 - Web（Vercel）: https://aster-system.vercel.app
 - API（Vercel）: https://aster-hr-api.vercel.app/health
 - Worker（Railway，2026-09-14 上線）: `apps/worker`，排程時鐘（台北時間：每日出勤結算 02:00、
-  異常偵測 03:00、專案自動封存 04:00、專案示警 04:30、通知投遞每 5 分鐘），本身不碰 DB，
+  異常偵測 03:00、專案自動封存 04:00、專案示警 04:30、通知投遞每 5 分鐘、每月 1 日 05:00 產生上月出勤月表、
+  每月 1 日 06:00 月度資料快照），本身不碰 DB，
   全部透過 API 的 `/internal/*` 端點執行。Railway 專案 `aster`（帳號 gathertaiwan@gmail.com）
   底下兩個服務：`Redis`（BullMQ 用）與 `worker`。
 
@@ -70,3 +71,37 @@ HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼�
 `ADMIN_PASSWORD` 可用環境變數覆寫；讀 repo 根目錄 `.env` 的 `SUPABASE_URL`／
 `SUPABASE_ANON_KEY` 換 HR 的 JWT，值不會被印出來）。兩支都是冪等設計，
 已存在的部門/員工/打卡/請假單/專案會直接沿用、不重複建立，可放心重跑。
+
+## 備份政策（C3，2026-09-15）
+
+客戶要求「每月一次全系統資料快照（Final 版鎖定）備查，資料被覆蓋／誤刪回得去」。分三層：
+
+1. **應用層月度快照（已上線）** — worker 排程 `monthly-snapshot`（每月 1 日 06:00 台北，排在月表產生之後）
+   打 `POST /internal/backups/monthly-snapshot`，對每個 active 租戶把 `apps/api/src/services/backup-snapshot.ts`
+   裡 `SNAPSHOT_TABLES` 列的業務表（人事／出勤／月表／請假／薪資／專案／放款／公告／招募／稽核 log 等 60 餘張；
+   刻意不收 notifications、knowledge_chunks、personal_notes、user_preferences）**全表**（非增量）逐表分頁讀出、gzip
+   後上傳私有 bucket `tenant-snapshots/{tenantId}/{period}/{table}.json.gz`，最後寫 `manifest.json`
+   （每表列數／bytes／sha256、產生時間、drizzle／sql schema 版本）。同一 period 重跑＝先清資料夾再覆蓋。
+   - API 端一次呼叫只做一段（12 秒軟預算，Vercel maxDuration 60），回 `nextTenantId/nextTable/nextOffset`，
+     worker 端 `while(!done)` 續打（上限 300 次）；進度存在 Storage 的 manifest（`status: running → complete`）。
+   - 後台「系統設定 › 資料快照備份」（`/admin/backups`）：看每月快照的 manifest（各表列數、大小）、
+     「立即產生本月快照」（前端迴圈續打並顯示進度）、下載 manifest／各表 gz（15 分鐘 signed URL）。
+   - **保留 24 個月**，超過的由維護人員手動從 Storage 清（目前沒有自動清除，避免誤刪）。
+2. **整公司月結 Final** — `POST /attendance-sheets/close-period {period, force?}`（HR）：該月所有在職員工的月表都要
+   approved／locked，否則 409 `sheets_not_approved` 附清單（含「尚未產生月表」）；通過就把 approved 全部轉
+   locked（沿用 `lockSheet`）並寫 `period_closes`（unique(tenant, period)，記 sheet_count／locked_count／
+   操作者／該月快照 manifest 路徑）。`force: true` 只鎖已核准的、略過其餘並記在 note。
+   `POST /attendance-sheets/reopen-period {period, reason}` 只把紀錄標成 reopened、留理由，**不解鎖月表**
+   （要改哪張表走該表自己的 reopen）。後台「出勤月表 · 月結簽核」頁有「本月 Final 月結」按鈕與已月結徽章。
+3. **月表快照歷史** — 每次 `approveSheet` 都往 `attendance_sheet_snapshots` 追加一列（seq 遞增、不可刪），
+   return／reopen 只清 `attendance_sheets.snapshot`、歷史不動；`GET /attendance-sheets/:id/snapshots`（HR）列出。
+
+**平台側（待確認方案）**：資料庫本體由 Supabase 託管。Free 方案沒有自動備份、也沒有 PITR；Pro 方案有每日
+備份（保留 7 天），PITR（時間點還原）是 Pro 以上的付費加購、要另外開啟才有。**目前這個專案用哪個方案、
+有沒有開 PITR，請以 Supabase dashboard 為準（待確認）**——上面的應用層快照是「不管平台方案為何都一定有的」那一層。
+
+**還原方式（人工，不做一鍵還原）**：從 `/admin/backups` 或直接從 Storage 下載該月的 `manifest.json` 與各表
+`.json.gz`；`gunzip` 後每個檔案是該表整份列陣列（PostgREST 原始欄位名，含 id／tenant_id）。先比對 manifest 的
+`schemaVersion` 與現行 migration 是否一致（不一致要先處理欄位差異），再由維護人員用 service_role 對目標表
+`upsert`（以 id 為鍵；只還原確認要救回的那幾張表／那幾列），還原前先對現況再做一次快照。多頁的表會拆成
+`{table}.part-0001.json.gz`…，manifest 的 `files` 列出順序；表級 sha256＝各檔 sha256 以換行串起再 sha256。

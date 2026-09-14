@@ -25,6 +25,7 @@ import {
   type SheetRow,
 } from "../services/attendance-sheets.js"
 import type { SheetStatus } from "../services/attendance-sheet-types.js"
+import { PeriodCloseError, closePeriod, listPeriodCloses, listSheetSnapshots, reopenPeriod } from "../services/backup-snapshot.js"
 
 export const attendanceSheetsRouter = Router()
 
@@ -509,6 +510,140 @@ attendanceSheetsRouter.post(
     try {
       const next_ = await recomputeSheet(tenantId, id, { settle: true })
       res.status(200).json({ id: next_.id, status: next_.status, computedAt: next_.computed_at })
+    } catch (err) {
+      sendSheetError(res, err, next)
+    }
+  },
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C3 整公司月結 Final ＋ 月表快照歷史（services/backup-snapshot.ts [B][C]）
+//   POST /attendance-sheets/close-period   {period, force?}  HR：全員月表 approved/locked
+//                                          → approved 全部 locked ＋ 寫 period_closes；
+//                                          否則 409 sheets_not_approved 附清單；force 只鎖已核准的
+//   POST /attendance-sheets/reopen-period  {period, reason}  HR：period_closes 標 reopened（月表不解鎖）
+//   GET  /attendance-sheets/period-closes?period=            HR：月結紀錄
+//   GET  /attendance-sheets/:id/snapshots?full=1             HR：該表每次核准的快照歷史（seq 遞增）
+// 這幾條掛在 /:id 之後也沒關係：/:id 對非 uuid 的 id 會 next() 讓路。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const closePeriodSchema = z.object({
+  period: z.string().regex(periodRe, "period must be YYYY-MM"),
+  force: z.boolean().optional(),
+})
+
+const reopenPeriodSchema = z.object({
+  period: z.string().regex(periodRe, "period must be YYYY-MM"),
+  reason: z.string().trim().min(1).max(500),
+})
+
+const periodClosesQuerySchema = z.object({
+  period: z.string().regex(periodRe, "period must be YYYY-MM").optional(),
+})
+
+function sendPeriodCloseError(res: Response, err: unknown, next: NextFunction): void {
+  if (err instanceof PeriodCloseError) {
+    res.status(err.httpStatus).json({ error: err.code, ...(err.details ?? {}) })
+    return
+  }
+  sendSheetError(res, err, next)
+}
+
+attendanceSheetsRouter.post(
+  "/attendance-sheets/close-period",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const parsed = closePeriodSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const caller = await requireCaller(req, res)
+      if (!caller) return
+      const result = await closePeriod(tenantId, parsed.data.period, caller.self.id, { force: parsed.data.force })
+      res.status(200).json({
+        period: result.periodClose.period,
+        status: result.periodClose.status,
+        closedAt: result.periodClose.closed_at,
+        closedByEmpId: result.periodClose.closed_by_emp_id,
+        sheetCount: result.periodClose.sheet_count,
+        lockedCount: result.periodClose.locked_count,
+        lockedNow: result.lockedNow,
+        skipped: result.skipped,
+        snapshotManifestPath: result.periodClose.snapshot_manifest_path,
+        note: result.periodClose.note,
+      })
+    } catch (err) {
+      sendPeriodCloseError(res, err, next)
+    }
+  },
+)
+
+attendanceSheetsRouter.post(
+  "/attendance-sheets/reopen-period",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const parsed = reopenPeriodSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const caller = await requireCaller(req, res)
+      if (!caller) return
+      const row = await reopenPeriod(tenantId, parsed.data.period, caller.self.id, parsed.data.reason)
+      res.status(200).json({ period: row.period, status: row.status, closedAt: row.closed_at, note: row.note })
+    } catch (err) {
+      sendPeriodCloseError(res, err, next)
+    }
+  },
+)
+
+attendanceSheetsRouter.get(
+  "/attendance-sheets/period-closes",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const parsed = periodClosesQuerySchema.safeParse(req.query)
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const closes = await listPeriodCloses(tenantId, parsed.data.period)
+      res.status(200).json({ closes })
+    } catch (err) {
+      sendPeriodCloseError(res, err, next)
+    }
+  },
+)
+
+attendanceSheetsRouter.get(
+  "/attendance-sheets/:id/snapshots",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const id = String(req.params.id)
+    if (!uuidRe.test(id)) {
+      next()
+      return
+    }
+    try {
+      const sheet = await loadSheet(tenantId, id)
+      const full = req.query.full === "1" || req.query.full === "true"
+      const snapshots = await listSheetSnapshots(tenantId, sheet.id, { full })
+      res.status(200).json({ sheetId: sheet.id, employeeId: sheet.employee_id, period: sheet.period, status: sheet.status, snapshots })
     } catch (err) {
       sendSheetError(res, err, next)
     }

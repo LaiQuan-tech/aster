@@ -7,6 +7,20 @@ import { scanMissingPunches, detectAnomalies } from "../services/detection.js"
 import { autoArchiveProjects } from "../services/project-archive.js"
 import { notifyProjectAlerts } from "../services/project-alert-store.js"
 import { generateSheets, previousPeriod } from "../services/attendance-sheets.js"
+import { requireAuth } from "../middleware/auth.js"
+import { requireTenant } from "../middleware/tenant.js"
+import { requireHrAdmin } from "../middleware/role.js"
+import { resolveSelf } from "../middleware/scope.js"
+import { writeAuditLog } from "../services/audit.js"
+import {
+  BackupError,
+  SNAPSHOT_RETENTION_MONTHS,
+  SNAPSHOT_TABLES,
+  firstActiveTenantId,
+  listSnapshotPeriods,
+  runSnapshotStep,
+  signedSnapshotUrl,
+} from "../services/backup-snapshot.js"
 
 export const internalJobsRouter = Router()
 
@@ -375,6 +389,162 @@ internalJobsRouter.post(
       })
     } catch (err) {
       next(err)
+    }
+  },
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C3 月度快照備份（services/backup-snapshot.ts [A]）
+// ─────────────────────────────────────────────────────────────────────────────
+
+const monthPeriodRe = /^\d{4}-(0[1-9]|1[0-2])$/
+
+/**
+ * POST /internal/backups/monthly-snapshot {tenantId?, period?, table?, offset?, allTenants?}
+ * — 每月 1 日 06:00（台北）worker 觸發的月度全表快照。一次呼叫只做一段（service
+ * 內有 12 秒軟預算），回 `nextTenantId/nextTable/nextOffset`；worker 端
+ * while(!done) 原樣帶回續打（上限 300 次）。
+ *   • 沒給 tenantId → 從第一個 active 租戶開始、跨租戶（allTenants 預設 true）
+ *   • 給了 tenantId → 只做那家（allTenants 預設 false；status 非 active 的租戶
+ *     也可以，例如測試／demo 租戶）
+ *   • period 預設上個月（台北曆）；同 period 重跑＝覆蓋
+ */
+const monthlySnapshotSchema = z.object({
+  tenantId: z.string().uuid().optional(),
+  period: z.string().regex(monthPeriodRe).optional(),
+  table: z.string().min(1).optional(),
+  offset: z.number().int().min(0).optional(),
+  allTenants: z.boolean().optional(),
+})
+
+function sendBackupError(res: Response, err: unknown, next: NextFunction): void {
+  if (err instanceof BackupError) {
+    res.status(err.httpStatus).json({ error: err.code, ...(err.details ?? {}) })
+    return
+  }
+  next(err)
+}
+
+internalJobsRouter.post(
+  "/internal/backups/monthly-snapshot",
+  async (req: Request, res: Response, next: NextFunction) => {
+    if (!requireInternalToken(req, res)) return
+    if (!requireInternalJobsEnabled(res)) return
+    const parsed = monthlySnapshotSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    const period = parsed.data.period ?? previousPeriod(taipeiDateDaysAgo(0))
+    const allTenants = parsed.data.allTenants ?? !parsed.data.tenantId
+    try {
+      let tenantId = parsed.data.tenantId
+      if (!tenantId) {
+        tenantId = (await firstActiveTenantId()) ?? undefined
+        if (!tenantId) {
+          res.status(200).json({ done: true, tenantId: null, period, table: null, rowsWritten: 0, tablesCompleted: 0, elapsedMs: 0 })
+          return
+        }
+      }
+      const result = await runSnapshotStep({
+        tenantId,
+        period,
+        table: parsed.data.table,
+        offset: parsed.data.offset,
+        allTenants,
+      })
+      res.status(200).json(result)
+    } catch (err) {
+      sendBackupError(res, err, next)
+    }
+  },
+)
+
+/**
+ * HR 端點（一般登入＋HR 角色，不是 internal token）。放在這支 router 是因為與
+ * 內部排程共用同一個 service，且不必動 app.ts 另掛 router。
+ *   GET  /backups                                租戶各 period 的快照清單（manifest＋Storage 檔案）
+ *   POST /backups/run {period, table?, offset?}   立即產生：一次一段回 next*，前端迴圈到 done
+ *   GET  /backups/:period/files/:name/url         下載用短效 signed URL（15 分鐘）
+ */
+const backupRunSchema = z.object({
+  period: z.string().regex(monthPeriodRe),
+  table: z.string().min(1).optional(),
+  offset: z.number().int().min(0).optional(),
+})
+
+internalJobsRouter.get(
+  "/backups",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (_req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    try {
+      const periods = await listSnapshotPeriods(tenantId)
+      res.status(200).json({
+        periods,
+        tables: SNAPSHOT_TABLES.map((t) => t.name),
+        retentionMonths: SNAPSHOT_RETENTION_MONTHS,
+      })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+internalJobsRouter.post(
+  "/backups/run",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const parsed = backupRunSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const fresh = !parsed.data.table && !parsed.data.offset
+      if (fresh) {
+        // 誰在什麼時候按了「立即產生」——只在新一輪開始時記一次，續打不重複記。
+        const self = req.auth?.userId ? await resolveSelf(tenantId, req.auth.userId) : null
+        await writeAuditLog({
+          tenantId,
+          tableName: "tenant_snapshots",
+          action: "INSERT",
+          newRow: { period: parsed.data.period, trigger: "manual" },
+          actorEmpId: self?.id ?? null,
+          context: "backups/run",
+        })
+      }
+      const result = await runSnapshotStep({
+        tenantId,
+        period: parsed.data.period,
+        table: parsed.data.table,
+        offset: parsed.data.offset,
+        allTenants: false,
+      })
+      res.status(200).json(result)
+    } catch (err) {
+      sendBackupError(res, err, next)
+    }
+  },
+)
+
+internalJobsRouter.get(
+  "/backups/:period/files/:name/url",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    try {
+      const url = await signedSnapshotUrl(tenantId, String(req.params.period), String(req.params.name))
+      res.status(200).json({ url, expiresIn: 900 })
+    } catch (err) {
+      sendBackupError(res, err, next)
     }
   },
 )

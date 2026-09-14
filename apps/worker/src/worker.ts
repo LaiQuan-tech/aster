@@ -25,7 +25,35 @@ const SCHEDULER_IDS = [
   "auto-archive-projects",
   "project-alerts",
   "generate-attendance-sheets",
+  "monthly-snapshot",
 ];
+
+/** 月度快照是「一次呼叫做一段、帶游標續打」的分頁 API；這是續打次數上限（防迴圈跑不完）。 */
+const MONTHLY_SNAPSHOT_MAX_CALLS = 300;
+
+async function postInternal(
+  baseUrl: string,
+  token: string,
+  endpoint: string,
+  body: unknown,
+): Promise<{ status: number; ok: boolean; text: string; payload: unknown }> {
+  const response = await fetch(`${baseUrl}${endpoint}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-internal-job-token": token,
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let payload: unknown = text;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    /* keep text payload */
+  }
+  return { status: response.status, ok: response.ok, text, payload };
+}
 
 /**
  * Register the daily attendance settlement scheduler.
@@ -82,6 +110,14 @@ async function registerSchedulers() {
     { pattern: "0 5 1 * *", tz: "Asia/Taipei" },
     { name: "generate-attendance-sheets", data: {} },
   );
+  // 月度快照備份（C3）：每月 1 日 06:00 台北，所有 active 租戶的業務表全表快照
+  // 上個月版本進 Storage `tenant-snapshots`。排在月表產生之後，快照裡就有上月月表。
+  // API 端一次只做一段（Vercel 60 秒限制），handler 內 while(!done) 續打。
+  await attendanceQueue.upsertJobScheduler(
+    "monthly-snapshot",
+    { pattern: "0 6 1 * *", tz: "Asia/Taipei" },
+    { name: "monthly-snapshot", data: {} },
+  );
 
   attendanceWorker = new Worker(
     "attendance",
@@ -104,8 +140,65 @@ async function registerSchedulers() {
         "auto-archive-projects": "/internal/projects/auto-archive",
         "project-alerts": "/internal/projects/alert-notify",
         "generate-attendance-sheets": "/internal/attendance-sheets/generate",
+        "monthly-snapshot": "/internal/backups/monthly-snapshot",
       };
       const endpoint = endpointByJob[job.name] ?? "/internal/attendance/daily-settle";
+
+      if (job.name === "monthly-snapshot") {
+        // 分頁續打：API 回 nextTenantId/nextTable/nextOffset 就原樣帶回去，直到 done。
+        // 跨租戶（allTenants）由 API 端依 active 租戶 id 排序逐一往下指。
+        let body: Record<string, unknown> = {
+          ...(typeof job.data?.period === "string" ? { period: job.data.period } : {}),
+          ...(typeof job.data?.tenantId === "string" ? { tenantId: job.data.tenantId, allTenants: false } : {}),
+        };
+        let calls = 0;
+        let rowsWritten = 0;
+        let tablesCompleted = 0;
+        const tenantsDone: string[] = [];
+        for (;;) {
+          calls += 1;
+          const r = await postInternal(baseUrl, token, endpoint, body);
+          if (!r.ok) {
+            throw new Error(`${job.name} API failed ${r.status} (call ${calls}): ${r.text.slice(0, 500)}`);
+          }
+          const p = (r.payload ?? {}) as {
+            done?: boolean;
+            tenantId?: string | null;
+            period?: string;
+            table?: string | null;
+            rowsWritten?: number;
+            tablesCompleted?: number;
+            manifestPath?: string;
+            nextTenantId?: string;
+            nextTable?: string;
+            nextOffset?: number;
+          };
+          rowsWritten += p.rowsWritten ?? 0;
+          tablesCompleted += p.tablesCompleted ?? 0;
+          if (p.manifestPath && p.tenantId) tenantsDone.push(p.tenantId);
+          logger.debug(
+            { jobId: job.id, call: calls, tenantId: p.tenantId, table: p.table, rowsWritten: p.rowsWritten, next: p.nextTable ?? p.nextTenantId ?? null },
+            "monthly-snapshot step",
+          );
+          if (p.done) break;
+          if (calls >= MONTHLY_SNAPSHOT_MAX_CALLS) {
+            throw new Error(`${job.name} exceeded ${MONTHLY_SNAPSHOT_MAX_CALLS} calls without done (last tenant ${p.tenantId}, table ${p.nextTable ?? p.table})`);
+          }
+          body = {
+            ...(p.period ? { period: p.period } : {}),
+            tenantId: p.nextTenantId ?? p.tenantId,
+            ...(p.nextTable ? { table: p.nextTable } : {}),
+            ...(typeof p.nextOffset === "number" ? { offset: p.nextOffset } : {}),
+            allTenants: typeof job.data?.tenantId === "string" ? false : true,
+          };
+        }
+        logger.info(
+          { jobId: job.id, name: job.name, calls, rowsWritten, tablesCompleted, tenants: tenantsDone },
+          `${job.name} completed`,
+        );
+        return;
+      }
+
       const body =
         job.name === "deliver-pending-notifications"
           ? { limit: typeof job.data?.limit === "number" ? job.data.limit : 50 }
@@ -119,25 +212,11 @@ async function registerSchedulers() {
             : typeof job.data?.date === "string"
               ? { date: job.data.date }
               : {};
-      const response = await fetch(`${baseUrl}${endpoint}`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-internal-job-token": token,
-        },
-        body: JSON.stringify(body),
-      });
-      const text = await response.text();
-      let payload: unknown = text;
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        /* keep text payload */
+      const r = await postInternal(baseUrl, token, endpoint, body);
+      if (!r.ok) {
+        throw new Error(`${job.name} API failed ${r.status}: ${r.text.slice(0, 500)}`);
       }
-      if (!response.ok) {
-        throw new Error(`${job.name} API failed ${response.status}: ${text.slice(0, 500)}`);
-      }
-      logger.info({ jobId: job.id, name: job.name, result: payload }, `${job.name} completed`);
+      logger.info({ jobId: job.id, name: job.name, result: r.payload }, `${job.name} completed`);
     },
     { connection: maybeRedis },
   );
@@ -176,7 +255,7 @@ if (process.env.REDIS_URL) {
     logger.error({ err: err.message }, "failed to register job schedulers");
     process.exit(1);
   });
-  logger.info("Worker process started (attendance + detection + notifications)");
+  logger.info("Worker process started (attendance + detection + notifications + monthly snapshot)");
 } else {
   // Skeleton mode: no broker, so we only run the health server. This keeps the
   // worker bootable on a bare laptop without Redis.

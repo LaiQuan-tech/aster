@@ -14,6 +14,14 @@ import {
   type SheetListItem,
   type SheetStatus,
 } from "@/lib/attendance-sheets-api";
+import {
+  closePeriod,
+  listPeriodCloses,
+  reopenPeriod,
+  NOT_READY_STATUS_LABEL,
+  type NotReadySheet,
+  type PeriodClose,
+} from "@/lib/backup-api";
 
 const currentPeriod = new Date().toISOString().slice(0, 7);
 
@@ -52,6 +60,71 @@ export default function AttendanceSheetsPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  // C3 整公司月結 Final：這個月的 period_closes 紀錄（沒有＝尚未月結）＋按下去被擋時的未核准清單。
+  const [periodClose, setPeriodClose] = useState<PeriodClose | null>(null);
+  const [notReady, setNotReady] = useState<NotReadySheet[] | null>(null);
+  const [closing, setClosing] = useState(false);
+
+  const loadPeriodClose = useCallback(async () => {
+    try {
+      const res = await listPeriodCloses(period);
+      setPeriodClose(res.closes[0] ?? null);
+    } catch {
+      setPeriodClose(null);
+    }
+  }, [period]);
+
+  useEffect(() => {
+    setNotReady(null);
+    void loadPeriodClose();
+  }, [loadPeriodClose]);
+
+  async function onClosePeriod(force: boolean) {
+    const question = force
+      ? `確定只鎖定 ${period} 已核准的月表、略過未核准的，強制完成整公司月結？`
+      : `確定要對 ${period} 做整公司月結（Final）？所有已核准的出勤月表會被鎖定，之後不可再修改。`;
+    if (!window.confirm(question)) return;
+    setClosing(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const outcome = await closePeriod(period, force);
+      if (!outcome.ok) {
+        setNotReady(outcome.sheets);
+        setError(`${period} 尚有 ${outcome.sheets.length} 位員工的月表未核准，無法月結（清單見下方）。`);
+        return;
+      }
+      setNotReady(null);
+      const r = outcome.result;
+      setMessage(
+        `${period} 已完成整公司月結 Final：共 ${r.sheetCount} 張月表、${r.lockedCount} 張已鎖定（本次新鎖 ${r.lockedNow} 張）${
+          r.skipped.length > 0 ? `，略過 ${r.skipped.length} 張未核准` : ""
+        }。`,
+      );
+      await Promise.all([loadPeriodClose(), load()]);
+    } catch (err) {
+      setError(friendlyError(err, "月結失敗"));
+    } finally {
+      setClosing(false);
+    }
+  }
+
+  async function onReopenPeriod() {
+    const reason = window.prompt(`重開 ${period} 的整公司月結？請輸入理由（月表本身不會解鎖，要改哪張再個別重開）：`);
+    if (!reason || !reason.trim()) return;
+    setClosing(true);
+    setError(null);
+    setMessage(null);
+    try {
+      await reopenPeriod(period, reason.trim());
+      setMessage(`${period} 月結已標記為重開。`);
+      await loadPeriodClose();
+    } catch (err) {
+      setError(friendlyError(err, "重開失敗"));
+    } finally {
+      setClosing(false);
+    }
+  }
 
   // 當月還沒有月表時（例如月初、或 demo 資料在別的月份），自動往前找最近一個有月表的月份，
   // 免得老闆打開看到一片空白。只在「沒套任何篩選」且是第一次載入時做，最多往回找 12 個月。
@@ -195,12 +268,76 @@ export default function AttendanceSheetsPage() {
           >
             匯出全員 xlsx
           </button>
+          {periodClose?.status === "closed" ? (
+            <button
+              type="button"
+              onClick={() => void onReopenPeriod()}
+              disabled={closing}
+              className="rounded-md border border-amber-300 px-4 py-2 text-sm font-medium text-amber-700 disabled:opacity-50"
+            >
+              重開月結
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void onClosePeriod(false)}
+              disabled={closing || loading}
+              title="該月所有在職員工的月表都已核准後，一鍵鎖定並記錄整公司月結 Final"
+              className="rounded-md px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+              style={{ backgroundColor: "#166534" }}
+            >
+              {closing ? "月結中…" : "本月 Final 月結"}
+            </button>
+          )}
         </div>
+
+        {periodClose && (
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-sm" data-testid="period-close-badge">
+            {periodClose.status === "closed" ? (
+              <span className="rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-semibold text-green-700">已月結 Final</span>
+            ) : (
+              <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-semibold text-amber-700">月結已重開</span>
+            )}
+            <span className="text-gray-600">
+              {fmtDateTime(periodClose.closedAt)}
+              {periodClose.closedByName ? ` · ${periodClose.closedByName}` : ""} · {periodClose.lockedCount}/{periodClose.sheetCount} 張已鎖定
+              {periodClose.note ? ` · ${periodClose.note}` : ""}
+            </span>
+          </div>
+        )}
 
         {message && <p className="mb-3 text-sm text-green-600">{message}</p>}
         {error && (
           <div className="mb-3">
             <ErrorText>{error}</ErrorText>
+          </div>
+        )}
+        {notReady && notReady.length > 0 && (
+          <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm">
+            <p className="font-medium text-amber-800">尚未核准，月結被擋下：</p>
+            <ul className="mt-2 grid gap-1 md:grid-cols-2">
+              {notReady.map((n) => (
+                <li key={n.employeeId} className="flex items-center justify-between gap-2 text-amber-900">
+                  <span>{n.employeeName}</span>
+                  <span className="flex items-center gap-2">
+                    <span className="rounded-full bg-white px-2 py-0.5 text-xs">{NOT_READY_STATUS_LABEL[n.status]}</span>
+                    {n.sheetId && (
+                      <Link href={`/admin/attendance-sheets/${n.sheetId}`} className="text-xs hover:underline" style={{ color: "var(--brand)" }}>
+                        檢視
+                      </Link>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              onClick={() => void onClosePeriod(true)}
+              disabled={closing}
+              className="mt-3 rounded-md border border-amber-400 px-3 py-1.5 text-xs font-medium text-amber-800 disabled:opacity-50"
+            >
+              只鎖已核准的（強制月結，略過上列）
+            </button>
           </div>
         )}
 
