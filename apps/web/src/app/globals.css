@@ -53,3 +53,21 @@ body {
     font-size: 11px;
   }
 }
+
+/* PWA safe-area helpers (iOS notch / Dynamic Island / home-indicator), used
+   by the ESS mobile punch page. env(safe-area-inset-*) resolves to 0 on
+   desktop and non-notched devices, so these are safe to apply unconditionally
+   — they only ever add space where a real inset exists. Kept as plain
+   classes (not paired with a Tailwind `sm:` override on the same element) so
+   Tailwind v4's cascade-layer rules for unlayered CSS can't fight them. */
+.safe-t {
+  padding-top: env(safe-area-inset-top);
+}
+
+.safe-b {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.pb-safe-16 {
+  padding-bottom: calc(env(safe-area-inset-bottom) + 4rem);
+}

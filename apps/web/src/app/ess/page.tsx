@@ -171,7 +171,7 @@ function EssHome() {
   const nextAction = status === "working" ? "下班打卡" : "上班打卡";
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 safe-t">
       <EssHeader
         appName={branding?.appName}
         primaryColor={branding?.primaryColor}
@@ -197,20 +197,26 @@ function EssHome() {
             </span>
           </div>
 
-          <button
-            onClick={onPunch}
-            disabled={punching || loading}
-            className="w-full rounded-2xl py-6 text-2xl font-bold text-white shadow-lg shadow-gray-200 active:scale-[0.99] disabled:opacity-60 sm:rounded-lg sm:py-5 sm:text-xl"
-            style={{ backgroundColor: "var(--brand)" }}
-          >
-            {punching ? "打卡中…" : nextAction}
-          </button>
+          {/* Mobile: pinned to the bottom of the screen (thumb zone) so the
+              primary punch action stays reachable while scrolling, clearing
+              the iOS home-indicator via .safe-b. Desktop (sm:+) reverts to
+              the original static, in-card button — unchanged. */}
+          <div className="fixed inset-x-0 bottom-0 z-40 border-t border-gray-100 bg-white px-3 pt-3 shadow-[0_-4px_16px_rgba(0,0,0,0.08)] safe-b sm:static sm:inset-auto sm:z-auto sm:border-0 sm:bg-transparent sm:p-0 sm:shadow-none">
+            <button
+              onClick={onPunch}
+              disabled={punching || loading}
+              className="w-full rounded-2xl py-6 text-2xl font-bold text-white shadow-lg shadow-gray-200 active:scale-[0.99] disabled:opacity-60 sm:rounded-lg sm:py-5 sm:text-xl"
+              style={{ backgroundColor: "var(--brand)" }}
+            >
+              {punching ? "打卡中…" : nextAction}
+            </button>
 
-          {error && (
-            <p className="text-sm text-red-600 mt-3" role="alert">
-              {error}
-            </p>
-          )}
+            {error && (
+              <p className="text-sm text-red-600 mt-3" role="alert">
+                {error}
+              </p>
+            )}
+          </div>
 
           {/* Today's records */}
           <div className="mt-5">
@@ -351,6 +357,11 @@ function EssHome() {
             </ul>
           )}
         </section>
+
+        {/* Reserve scroll room at the very bottom on mobile so the fixed
+            punch bar above never covers the tail of this page's content.
+            No-op on desktop (sm:+): no fixed bar there to clear. */}
+        <div className="pb-safe-16 sm:hidden" aria-hidden="true" />
       </main>
     </div>
   );

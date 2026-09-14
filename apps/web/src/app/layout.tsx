@@ -26,12 +26,27 @@ const branding = getBranding();
 export const metadata: Metadata = {
   title: branding.title,
   description: "亞斯特設計顧問 數位化系統 — 資料電子化、獎金自動分配、專案進度追蹤與人事差勤",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "default",
+    title: "亞斯特",
+  },
+  icons: {
+    icon: [
+      { url: "/favicon.ico" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+  },
 };
 
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
+  themeColor: branding.brandColor,
 };
 
 export default function RootLayout({
