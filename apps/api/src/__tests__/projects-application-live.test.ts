@@ -775,15 +775,101 @@ describe("P3-6 年度總表與未收款", () => {
     expect(emp.body.receivables).toEqual([])
   })
 
-  it("receivables 逾期：開票後未入帳從開票日起算", async () => {
+  it("receivables 逾期：B5 起逾期天數依租戶逾期基準起算（租戶沒設定時預設 'billed'＝從請款日算，不需要已開票）", async () => {
     const sched = await asAdmin(request(app).get(`/projects/${mainProjectId}/billings`))
     const second = sched.body.installments.find((i: { installmentNo: number }) => i.installmentNo === 2)
+    // B5 之前這裡只開票不請款也能觸發逾期（從開票日起算）；預設基準改成 'billed' 後，
+    // 沒有請款日就沒有起算點，所以這裡先補請款，模擬正常「請款 → 開票」的順序。
+    const bill = await asAdmin(request(app).post(`/billings/${second.id}/bill`)).send({ billedOn: `${YEAR - 1}-11-01` })
+    expect(bill.status).toBe(200)
     const inv = await asAdmin(request(app).post(`/billings/${second.id}/invoice`)).send({ invoiceNo: "AB-00000003", invoicedOn: `${YEAR - 1}-12-01` })
     expect(inv.status).toBe(200)
     const res = await asAdmin(request(app).get("/projects/receivables"))
+    expect(res.body.basis).toBe("billed")
     const row = (res.body.receivables as Array<Record<string, unknown>>).find((r) => r.billingId === second.id)!
     expect(row.overdueDays as number).toBeGreaterThan(200)
+    expect(row.state).toBe("overdue")
     expect(res.body.summary.overdueCount).toBeGreaterThanOrEqual(1)
+  })
+
+  it("receivables：?state= 篩選——billed 只回已請款未開票未入帳；overdue 每列 state 都是 overdue；不帶 state 回全部且每列有 state", async () => {
+    const all = await asAdmin(request(app).get("/projects/receivables?status=all"))
+    expect(all.status).toBe(200)
+    const allRows = all.body.receivables as Array<Record<string, unknown>>
+    expect(allRows.length).toBeGreaterThan(0)
+    for (const r of allRows) {
+      expect(["unbilled", "billed", "invoiced", "overdue", "received"]).toContain(r.state)
+    }
+
+    const overdue = await asAdmin(request(app).get("/projects/receivables?status=all&state=overdue"))
+    expect(overdue.status).toBe(200)
+    const overdueRows = overdue.body.receivables as Array<Record<string, unknown>>
+    expect(overdueRows.length).toBeGreaterThan(0)
+    for (const r of overdueRows) expect(r.state).toBe("overdue")
+    expect(overdueRows.map((r) => r.billingId).sort()).toEqual(
+      allRows.filter((r) => r.state === "overdue").map((r) => r.billingId).sort(),
+    )
+
+    const billed = await asAdmin(request(app).get("/projects/receivables?status=all&state=billed"))
+    expect(billed.status).toBe(200)
+    const billedRows = billed.body.receivables as Array<Record<string, unknown>>
+    for (const r of billedRows) {
+      expect(r.state).toBe("billed")
+      expect(r.billedOn).not.toBeNull()
+      expect(r.invoicedOn).toBeNull()
+      expect(r.receivedOn).toBeNull()
+    }
+
+    const bad = await asAdmin(request(app).get("/projects/receivables?state=not_a_state"))
+    expect(bad.status).toBe(400)
+  })
+
+  it("receivables：剛請款／剛開票（今天，還沒逾期）分別落在 billed／invoiced，不會被誤判成 overdue", async () => {
+    // 專案共用夾具到這裡已經被前面很多 it 改動過，另開一個乾淨的小案子，
+    // 才能保證「今天請款」「今天開票」不會被夾具裡的舊日期資料混到。
+    const proj = await createProject({ name: "B5：billed／invoiced 非逾期驗證" })
+    expect(proj.status).toBe(201)
+    const projId = proj.body.id
+    const c = await asAdmin(request(app).post(`/projects/${projId}/contracts`)).send({
+      docType: "contract",
+      title: "承攬契約",
+      amount: 1_000_000,
+      signedOn: `${YEAR}-01-15`,
+    })
+    expect(c.status).toBe(201)
+    const sch = await asAdmin(request(app).put(`/projects/${projId}/billings`)).send({
+      installments: [{ installmentNo: 1, percentage: 100, milestone: "全額" }],
+    })
+    expect(sch.status).toBe(200)
+    const billingId = sch.body.installments[0].id as string
+
+    // 還沒請款：unbilled。
+    const beforeBill = await asAdmin(request(app).get(`/projects/receivables?status=all`))
+    const rowUnbilled = (beforeBill.body.receivables as Array<Record<string, unknown>>).find((r) => r.billingId === billingId)!
+    expect(rowUnbilled.state).toBe("unbilled")
+    expect(rowUnbilled.overdueDays).toBeNull()
+
+    // 今天請款（不帶 billedOn，伺服器補今天）：billed，不是 overdue。
+    const bill = await asAdmin(request(app).post(`/billings/${billingId}/bill`)).send({})
+    expect(bill.status).toBe(200)
+    const afterBill = await asAdmin(request(app).get(`/projects/receivables?status=all`))
+    const rowBilled = (afterBill.body.receivables as Array<Record<string, unknown>>).find((r) => r.billingId === billingId)!
+    expect(rowBilled.state).toBe("billed")
+    expect(rowBilled.overdueDays).toBe(0)
+    const billedFilter = await asAdmin(request(app).get(`/projects/receivables?status=all&state=billed`))
+    expect((billedFilter.body.receivables as Array<Record<string, unknown>>).some((r) => r.billingId === billingId)).toBe(true)
+    const overdueFilter = await asAdmin(request(app).get(`/projects/receivables?status=all&state=overdue`))
+    expect((overdueFilter.body.receivables as Array<Record<string, unknown>>).some((r) => r.billingId === billingId)).toBe(false)
+
+    // 今天開票：invoiced，一樣不是 overdue。
+    const inv = await asAdmin(request(app).post(`/billings/${billingId}/invoice`)).send({ invoiceNo: "B5-TEST-0001" })
+    expect(inv.status).toBe(200)
+    const afterInvoice = await asAdmin(request(app).get(`/projects/receivables?status=all`))
+    const rowInvoiced = (afterInvoice.body.receivables as Array<Record<string, unknown>>).find((r) => r.billingId === billingId)!
+    expect(rowInvoiced.state).toBe("invoiced")
+    expect(rowInvoiced.overdueDays).toBe(0)
+    const invoicedFilter = await asAdmin(request(app).get(`/projects/receivables?status=all&state=invoiced`))
+    expect((invoicedFilter.body.receivables as Array<Record<string, unknown>>).some((r) => r.billingId === billingId)).toBe(true)
   })
 
   it("/application：申請單資料（民國日期、最新文件、期程、副委託、money）", async () => {
@@ -825,9 +911,11 @@ describe("P3-1 編號格式可設定", () => {
     expect(old.body.project.code).toBe(`AT-${ROC}-001`)
 
     // 改回來；流水號從既有 AT 編號接著算，不會重複。
+    // 011（不是 010）：B5 的 receivables 測試在這之前多開了一個 AT 案子驗證
+    // billed／invoiced 非逾期的狀態，流水號跟著往後推一個。
     await asAdmin(request(app).put("/project-settings")).send({ codePrefix: "AT", codeYearStyle: "roc", codeSeqDigits: 3 })
     const back = await createProject({ name: "改回舊格式的案子" })
-    expect(back.body.code).toBe(`AT-${ROC}-011`)
+    expect(back.body.code).toBe(`AT-${ROC}-012`)
   })
 })
 

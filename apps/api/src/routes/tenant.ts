@@ -46,6 +46,16 @@ const tenantSettingsSchema = z.object({
     .optional(),
   features: z
     .object({
+      /**
+       * 未收款追蹤（B5）：逾期天數起算基準。'billed'＝已請款未開票也算逾期（預設，
+       * 沒設定時走這個）；'invoiced'＝維持舊行為，只從開票日起算。
+       * 見 apps/api/src/services/project-money.ts 的 overdueDays。
+       */
+      receivable: z
+        .object({
+          overdueBasis: z.enum(["billed", "invoiced"]).optional(),
+        })
+        .optional(),
       permissions: z
         .array(
           z.object({

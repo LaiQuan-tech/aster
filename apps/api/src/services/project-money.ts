@@ -302,14 +302,27 @@ export function computeSubcontractPayments(
  * 未收款清單
  * ────────────────────────────────────────────────────────────────── */
 
-/** 逾期天數：已開票且未入帳，從開票日起算到今天；否則 null。 */
+export type OverdueBasis = "billed" | "invoiced"
+
+/**
+ * 逾期天數。`basis` 決定起算日：
+ * - `'invoiced'`（省略時的預設，相容舊呼叫）：已開票且未入帳，從開票日起算——原本唯一的行為。
+ * - `'billed'`（B5 新增）：已請款且未入帳，從請款日起算，不需要已開票。這是 B5 的重點：
+ *   已請款但還沒開票的錢，舊邏輯永遠不會顯示逾期，老闆看不到「該催的錢」。
+ * 已入帳一律 null；對應基準的起算日不存在（例如 basis='billed' 但根本沒請款）也是 null。
+ * `billedOn` 只有 basis='billed' 時才用得到，舊的三參數呼叫可以不傳、行為不變。
+ */
 export function overdueDays(
   invoicedOn: string | null,
   receivedOn: string | null,
   today: string,
+  basis: OverdueBasis = "invoiced",
+  billedOn: string | null = null,
 ): number | null {
-  if (!invoicedOn || receivedOn) return null
-  const days = diffDays(invoicedOn, today)
+  if (receivedOn) return null
+  const startOn = basis === "billed" ? billedOn : invoicedOn
+  if (!startOn) return null
+  const days = diffDays(startOn, today)
   return days < 0 ? 0 : days
 }
 
@@ -317,6 +330,26 @@ function diffDays(a: string, b: string): number {
   const [ay, am, ad] = a.split("-").map(Number)
   const [by, bm, bd] = b.split("-").map(Number)
   return Math.round((Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad)) / 86_400_000)
+}
+
+export type ReceivableState = "unbilled" | "billed" | "invoiced" | "overdue" | "received"
+
+/**
+ * 請款三段狀態＋逾期（B5）：已入帳 > 逾期 > 已開票未入帳 > 已請款未開票 > 未請款。
+ * 「逾期」的優先序蓋掉 billed／invoiced，跟 `/projects/receivables` 的 `overdueCount`
+ * 定義一致（未入帳且 overdueDays > 0，起算基準由呼叫端解析後傳入 `overdueDays`）。
+ */
+export function receivableState(input: {
+  billedOn: string | null
+  invoicedOn: string | null
+  receivedOn: string | null
+  overdueDays: number | null
+}): ReceivableState {
+  if (input.receivedOn) return "received"
+  if (input.overdueDays !== null && input.overdueDays > 0) return "overdue"
+  if (input.invoicedOn) return "invoiced"
+  if (input.billedOn) return "billed"
+  return "unbilled"
 }
 
 export type ReceivableSortKey = {

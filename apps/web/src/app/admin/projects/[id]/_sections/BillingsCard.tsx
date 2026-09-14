@@ -12,6 +12,10 @@ import {
   unreceiveBilling,
   humanizeBillingError,
   BILLING_KIND_LABELS,
+  computeReceivableState,
+  localTodayKey,
+  RECEIVABLE_STATE_LABELS,
+  RECEIVABLE_STATE_BADGE_CLASS,
   type BillingScheduleExt,
   type InstallmentInputExt,
   type BillingKind,
@@ -215,6 +219,16 @@ export function BillingsCard({
               const billed = !!saved?.billedOn;
               const received = !!saved?.receivedOn;
               const locked = billed || received;
+              // B5：同一套三段狀態＋逾期 badge（跟 /admin/projects/receivables 共用顏色）。
+              // 這支 schedule API 沒有租戶逾期基準，固定用 'billed'（見 computeReceivableState 註解）。
+              // today 用 localTodayKey()，不是這檔案原本的 todayKey()——後者取 UTC 日期，
+              // 在 UTC+8 每天凌晨會少算一天，會把「逾期一天」誤判成「還沒逾期」。
+              const rowState = computeReceivableState({
+                billedOn: saved?.billedOn ?? null,
+                invoicedOn: saved?.invoicedOn ?? null,
+                receivedOn: saved?.receivedOn ?? null,
+                today: localTodayKey(),
+              });
               return (
                 <Fragment key={rowDraft.id ?? `new-${idx}`}>
                   <tr className="border-b last:border-0">
@@ -310,6 +324,12 @@ export function BillingsCard({
                       )}
                     </td>
                     <td className="py-2 pr-2">
+                      <span
+                        className={`mb-1 inline-block rounded-full px-1.5 py-0.5 text-[10px] ${RECEIVABLE_STATE_BADGE_CLASS[rowState]}`}
+                      >
+                        {RECEIVABLE_STATE_LABELS[rowState]}
+                      </span>
+                      <br />
                       {billed ? (
                         <button
                           type="button"

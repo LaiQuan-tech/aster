@@ -694,6 +694,29 @@ export function downloadAnnualProjectsXlsx(params: { year: number; sort?: Annual
 
 /* -------------------------------------------------------------- 未收款 -- */
 
+/** B5：請款三段狀態＋逾期。已入帳 > 逾期 > 已開票未入帳 > 已請款未開票 > 未請款。 */
+export type ReceivableState = "unbilled" | "billed" | "invoiced" | "overdue" | "received"
+
+export const RECEIVABLE_STATE_LABELS: Record<ReceivableState, string> = {
+  unbilled: "未請款",
+  billed: "已請款未開票",
+  invoiced: "已開票未入帳",
+  overdue: "逾期",
+  received: "已入帳",
+}
+
+/**
+ * B5 狀態 badge 顏色：billed 琥珀／invoiced 橘／overdue 紅／received 綠。
+ * `/admin/projects/receivables` 與專案詳情頁 BillingsCard 共用同一套，兩處看起來要是同一件事。
+ */
+export const RECEIVABLE_STATE_BADGE_CLASS: Record<ReceivableState, string> = {
+  unbilled: "bg-gray-100 text-gray-500",
+  billed: "bg-amber-50 text-amber-700",
+  invoiced: "bg-orange-50 text-orange-700",
+  overdue: "bg-red-50 text-red-700",
+  received: "bg-green-50 text-green-700",
+}
+
 export interface ReceivableRow {
   projectId: string
   code: string | null
@@ -712,6 +735,8 @@ export interface ReceivableRow {
   receivedAmount: number | null
   unreceived: number | null
   overdueDays: number | null
+  /** B5：後端已依租戶的逾期基準算好。 */
+  state: ReceivableState
   /** 該筆所屬專案整體的未收比例，用於解讀為何排序在前面。 */
   projectUnreceivedPct: number | null
   projectCode: string | null
@@ -720,14 +745,60 @@ export interface ReceivableRow {
 export interface ReceivablesResponse {
   today: string
   status: "open" | "all"
+  /** B5：本次套用的 state 篩選，'all' = 沒篩。 */
+  state: ReceivableState | "all"
+  /** B5：本次逾期天數用的基準，讀自 tenants.features.receivable.overdueBasis（沒設＝'billed'）。 */
+  basis: "billed" | "invoiced"
   /** "mine" = 非 HR 只看得到自己 finance 權限內的專案；HR 一律 "all"。 */
   scope: "all" | "mine"
   receivables: ReceivableRow[]
   summary: { count: number; unreceivedTotal: number; overdueCount: number }
 }
 
-export function getReceivables(status: "open" | "all" = "open") {
-  return apiFetch<ReceivablesResponse>(`/projects/receivables?status=${status}`)
+export function getReceivables(status: "open" | "all" = "open", state: ReceivableState | "all" = "all") {
+  const q = new URLSearchParams({ status })
+  if (state !== "all") q.set("state", state)
+  return apiFetch<ReceivablesResponse>(`/projects/receivables?${q.toString()}`)
+}
+
+/**
+ * 本地「今天」，取瀏覽器本地日期（非 UTC）。`_sections/shared.tsx` 的 `todayKey()`
+ * 用 `toISOString().slice(0,10)`，UTC+8 時區下每天 00:00–08:00 會少算一天
+ * （例如台灣時間 09-15 凌晨 3 點，UTC 還是 09-14）。那支不在 B5 授權範圍內不能改，
+ * 這裡單獨提供一個算對的版本給 computeReceivableState 用，才不會把「今天剛到期」
+ * 誤判成「還沒到」，把已經逾期一天的東西畫成沒逾期的顏色。
+ */
+export function localTodayKey(): string {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, "0")
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/**
+ * BillingsCard（專案詳情頁的請款卡）用：那支 schedule API 沒有 basis／state 欄位，
+ * 這裡固定用 'billed' 基準——目前系統唯一的預設（逾期基準設定 UI 還沒做，見 B5 交付說明）。
+ * 之後若要讓詳情頁也吃租戶自訂的基準，這裡要改成多收一個 basis 參數。
+ * `today` 請傳 `localTodayKey()`，不要傳 shared.tsx 的 `todayKey()`（見上方註解）。
+ */
+export function computeReceivableState(input: {
+  billedOn: string | null
+  invoicedOn: string | null
+  receivedOn: string | null
+  today: string
+}): ReceivableState {
+  if (input.receivedOn) return "received"
+  const overdue = !!input.billedOn && daysBetween(input.billedOn, input.today) > 0
+  if (overdue) return "overdue"
+  if (input.invoicedOn) return "invoiced"
+  if (input.billedOn) return "billed"
+  return "unbilled"
+}
+
+function daysBetween(a: string, b: string): number {
+  const [ay, am, ad] = a.split("-").map(Number)
+  const [by, bm, bd] = b.split("-").map(Number)
+  const days = Math.round((Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad)) / 86_400_000)
+  return days < 0 ? 0 : days
 }
 
 /* ---------------------------------------------------------- 民國年工具 -- */
