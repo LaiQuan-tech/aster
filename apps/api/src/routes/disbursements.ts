@@ -66,6 +66,8 @@ const createBody = z.object({
   payeeName: z.string().trim().max(200).nullish(),
   payeeBankName: z.string().trim().max(160).nullish(),
   payeeBankAccount: z.string().trim().max(160).nullish(),
+  /** 收款方銀行代碼；未給且 payeeKind='vendor' 時服務層從 vendors 快照。 */
+  payeeBankCode: z.string().trim().max(20).nullish(),
   payingCompanyId: z.string().uuid(),
   method: z.enum(DISBURSEMENT_METHODS),
   paidOn: dateKey.nullish(),
@@ -74,6 +76,9 @@ const createBody = z.object({
   withheldAmount: z.number().nonnegative().max(1e12).nullish(),
   receiptIssuerCompanyId: z.string().uuid().nullish(),
   receiptRef: z.string().trim().max(120).nullish(),
+  /** 是否已取得發票／收據；paid 之後仍可用 PATCH 補（見 services/disbursements.ts PAID_EDITABLE）。 */
+  hasInvoice: z.boolean().optional(),
+  invoiceNo: z.string().trim().max(40).nullish(),
   purpose: z.string().trim().max(500).nullish(),
   note: z.string().trim().max(2000).nullish(),
   status: z.enum(["draft", "paid"]).default("draft"),

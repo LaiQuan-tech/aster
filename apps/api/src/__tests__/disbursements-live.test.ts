@@ -731,6 +731,99 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
       expect(big.body.error).toBe("file_too_large")
     }, 60_000)
   })
+
+  describe("B2：發票／收據勾選＋匯款資訊（payeeBankCode／hasInvoice／invoiceNo）", () => {
+    let invoiceVendorId: string
+    let b2Id: string
+    let b2No: string
+
+    beforeAll(async () => {
+      const v = await asAdmin(request(app).post("/vendors")).send({
+        name: `發票測試廠商 ${stamp}`,
+        bankName: "合作金庫",
+        bankCode: "012",
+        bankAccount: "012-3456-7890",
+        accountHolder: `發票測試廠商 ${stamp}`,
+      })
+      expect(v.status).toBe(201)
+      invoiceVendorId = v.body.vendor.id
+    })
+
+    it("vendor 帶 bank_code=012、未給 payeeBankCode → POST 201 快照、GET 回 payeeBankCode='012'、hasInvoice=false", async () => {
+      const res = await asAdmin(request(app).post("/disbursements")).send({
+        payeeKind: "vendor",
+        vendorId: invoiceVendorId,
+        payingCompanyId: payerId,
+        method: "transfer",
+        paidOn: TODAY,
+        amount: 0,
+        withheldAmount: 0,
+        status: "paid",
+        allocations: [],
+      })
+      expect(res.status).toBe(201)
+      b2Id = res.body.disbursement.id
+      b2No = res.body.disbursement.disbursementNo
+      expect(res.body.disbursement.payeeBankCode).toBe("012")
+      expect(res.body.disbursement.hasInvoice).toBe(false)
+      expect(res.body.disbursement.invoiceNo).toBeNull()
+
+      const got = await asAdmin(request(app).get(`/disbursements/${b2Id}`))
+      expect(got.status).toBe(200)
+      expect(got.body.disbursement.payeeBankCode).toBe("012")
+      expect(got.body.disbursement.hasInvoice).toBe(false)
+    })
+
+    it("POST 明確帶 payeeBankCode 會覆蓋廠商快照（沿用 payeeBankName／payeeBankAccount 的既有規則）", async () => {
+      const res = await asAdmin(request(app).post("/disbursements")).send({
+        payeeKind: "vendor",
+        vendorId: invoiceVendorId,
+        payeeBankCode: "999",
+        payingCompanyId: payerId,
+        method: "transfer",
+        amount: 0,
+        withheldAmount: 0,
+        status: "draft",
+        allocations: [],
+      })
+      expect(res.status).toBe(201)
+      expect(res.body.disbursement.payeeBankCode).toBe("999")
+    })
+
+    it("PATCH paid 單 {hasInvoice:true, invoiceNo:'AB12345678'} → 200；改 amount 仍 409 paid", async () => {
+      const patched = await asAdmin(request(app).patch(`/disbursements/${b2Id}`)).send({
+        hasInvoice: true,
+        invoiceNo: "AB12345678",
+      })
+      expect(patched.status).toBe(200)
+      expect(patched.body.disbursement.hasInvoice).toBe(true)
+      expect(patched.body.disbursement.invoiceNo).toBe("AB12345678")
+
+      const blocked = await asAdmin(request(app).patch(`/disbursements/${b2Id}`)).send({ amount: 999 })
+      expect(blocked.status).toBe(409)
+      expect(blocked.body.error).toBe("paid")
+      expect(blocked.body.field).toBe("amount")
+    })
+
+    it("export.xlsx 多兩欄：有發票／發票號碼（既有列數／合計斷言不受影響，見上一個 describe）", async () => {
+      const res = await asAdmin(request(app).get("/disbursements/export.xlsx")).buffer(true).parse(binaryParser)
+      expect(res.status).toBe(200)
+      const wb = new ExcelJS.Workbook()
+      await wb.xlsx.load(new Uint8Array(res.body as Buffer) as unknown as ExcelJS.Buffer)
+      const ws = wb.getWorksheet("放款紀錄")!
+      expect(ws.getRow(4).getCell(11).value).toBe("有發票")
+      expect(ws.getRow(4).getCell(12).value).toBe("發票號碼")
+      let row: { hasInvoice: unknown; invoiceNo: unknown } | undefined
+      for (let r = 5; r <= ws.rowCount; r++) {
+        if (ws.getRow(r).getCell(1).value === b2No) {
+          row = { hasInvoice: ws.getRow(r).getCell(11).value, invoiceNo: ws.getRow(r).getCell(12).value }
+          break
+        }
+      }
+      expect(row?.hasInvoice).toBe("✓")
+      expect(row?.invoiceNo).toBe("AB12345678")
+    })
+  })
 })
 
 describe.skipIf(migrated)("放款專區 — schema not migrated (0041)", () => {

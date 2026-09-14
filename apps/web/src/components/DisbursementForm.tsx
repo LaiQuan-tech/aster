@@ -38,6 +38,7 @@ export interface DisbursementFormInitial {
   payeeName?: string;
   payeeBankName?: string | null;
   payeeBankAccount?: string | null;
+  payeeBankCode?: string | null;
   payingCompanyId?: string | null;
   method?: DisbursementMethod;
   paidOn?: string | null;
@@ -45,6 +46,9 @@ export interface DisbursementFormInitial {
   withheldAmount?: number;
   receiptIssuerCompanyId?: string | null;
   receiptRef?: string | null;
+  /** 是否已取得發票／收據；已匯款後仍可補改。 */
+  hasInvoice?: boolean;
+  invoiceNo?: string | null;
   purpose?: string | null;
   note?: string | null;
   status?: "draft" | "paid";
@@ -88,6 +92,7 @@ function initFromDisbursement(d?: DisbursementFormInitial): {
   payeeName: string;
   payeeBankName: string;
   payeeBankAccount: string;
+  payeeBankCode: string;
   payingCompanyId: string;
   method: DisbursementMethod;
   paidOn: string;
@@ -96,6 +101,8 @@ function initFromDisbursement(d?: DisbursementFormInitial): {
   grossAmount: string;
   receiptIssuerCompanyId: string;
   receiptRef: string;
+  hasInvoice: boolean;
+  invoiceNo: string;
   purpose: string;
   note: string;
   status: "draft" | "paid";
@@ -109,6 +116,7 @@ function initFromDisbursement(d?: DisbursementFormInitial): {
     payeeName: d?.payeeName ?? "",
     payeeBankName: d?.payeeBankName ?? "",
     payeeBankAccount: d?.payeeBankAccount ?? "",
+    payeeBankCode: d?.payeeBankCode ?? "",
     payingCompanyId: d?.payingCompanyId ?? "",
     method: d?.method ?? "transfer",
     paidOn: d?.paidOn ?? "",
@@ -117,6 +125,8 @@ function initFromDisbursement(d?: DisbursementFormInitial): {
     grossAmount: String(amount + withheld),
     receiptIssuerCompanyId: d?.receiptIssuerCompanyId ?? "",
     receiptRef: d?.receiptRef ?? "",
+    hasInvoice: d?.hasInvoice ?? false,
+    invoiceNo: d?.invoiceNo ?? "",
     purpose: d?.purpose ?? "",
     note: d?.note ?? "",
     status: d?.status ?? "draft",
@@ -181,6 +191,7 @@ export default function DisbursementForm({
       payeeName: v ? v.name : s.payeeName,
       payeeBankName: v?.bankName ?? s.payeeBankName,
       payeeBankAccount: v?.bankAccount ?? s.payeeBankAccount,
+      payeeBankCode: v?.bankCode ?? s.payeeBankCode,
     }));
   }
 
@@ -249,6 +260,7 @@ export default function DisbursementForm({
       payeeName: state.payeeName.trim(),
       payeeBankName: state.payeeBankName.trim() || null,
       payeeBankAccount: state.payeeBankAccount.trim() || null,
+      payeeBankCode: state.payeeBankCode.trim() || null,
       payingCompanyId: state.payingCompanyId,
       method: state.method,
       paidOn: state.paidOn || null,
@@ -256,6 +268,8 @@ export default function DisbursementForm({
       withheldAmount: toNum(state.withheldAmount),
       receiptIssuerCompanyId: state.receiptIssuerCompanyId || null,
       receiptRef: state.receiptRef.trim() || null,
+      hasInvoice: state.hasInvoice,
+      invoiceNo: state.invoiceNo.trim() || null,
       purpose: state.purpose.trim() || null,
       note: state.note.trim() || null,
       status: state.status,
@@ -290,6 +304,16 @@ export default function DisbursementForm({
         <div>
           <label className={labelCls}>收據編號</label>
           <input className={inputCls} value={state.receiptRef} onChange={(e) => set("receiptRef", e.target.value)} />
+        </div>
+        <div>
+          <label className="flex items-center gap-1.5 text-sm text-gray-700">
+            <input type="checkbox" checked={state.hasInvoice} onChange={(e) => set("hasInvoice", e.target.checked)} />
+            已取得發票／收據
+          </label>
+        </div>
+        <div>
+          <label className={labelCls}>發票號碼</label>
+          <input className={inputCls} value={state.invoiceNo} onChange={(e) => set("invoiceNo", e.target.value)} placeholder="例：AB12345678" />
         </div>
         <div>
           <label className={labelCls}>用途</label>
@@ -347,6 +371,10 @@ export default function DisbursementForm({
         <div>
           <label className={labelCls}>收款銀行</label>
           <input className={inputCls} value={state.payeeBankName} onChange={(e) => set("payeeBankName", e.target.value)} />
+        </div>
+        <div>
+          <label className={labelCls}>收款銀行代碼</label>
+          <input className={inputCls} value={state.payeeBankCode} onChange={(e) => set("payeeBankCode", e.target.value)} placeholder="選了廠商會自動帶入，可覆寫" />
         </div>
         <div>
           <label className={labelCls}>收款帳號</label>
@@ -417,6 +445,16 @@ export default function DisbursementForm({
         <div>
           <label className={labelCls}>收據編號</label>
           <input className={inputCls} value={state.receiptRef} onChange={(e) => set("receiptRef", e.target.value)} />
+        </div>
+        <div>
+          <label className="flex items-center gap-1.5 py-1.5 text-sm text-gray-700">
+            <input type="checkbox" checked={state.hasInvoice} onChange={(e) => set("hasInvoice", e.target.checked)} />
+            已取得發票／收據
+          </label>
+        </div>
+        <div>
+          <label className={labelCls}>發票號碼</label>
+          <input className={inputCls} value={state.invoiceNo} onChange={(e) => set("invoiceNo", e.target.value)} placeholder="例：AB12345678" />
         </div>
         <div className="sm:col-span-2">
           <label className={labelCls}>用途</label>

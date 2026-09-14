@@ -41,7 +41,8 @@ import { writeAuditLog } from "./audit.js"
  *   draft ──pay──▶ paid ──void──▶ void
  *     └────────────void───────────▶ void
  *   • draft：不動期款；全部欄位可改（allocations 整批覆蓋）。
- *   • paid：連動期款（`syncPaymentsOnPay`）；只可改 note／receiptRef／purpose。
+ *   • paid：連動期款（`syncPaymentsOnPay`）；只可改 note／receiptRef／purpose／
+ *     hasInvoice／invoiceNo（已匯款後補發票號是常態）。
  *   • void：反向清期款（`unsyncPaymentsOnVoid`）；之後不能再改。
  *
  * ── 金額口徑 ──────────────────────────────────────────────────────
@@ -83,7 +84,7 @@ export const AMOUNT_TOLERANCE = 0.01
 
 // ⚠️ 單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別。
 export const DISBURSEMENT_COLS =
-  "id, tenant_id, disbursement_no, status, payee_kind, vendor_id, payee_name, payee_bank_name, payee_bank_account, paying_company_id, paying_company_name, paying_bank_account, method, paid_on, amount, withheld_amount, receipt_issuer_company_id, receipt_ref, purpose, note, void_reason, paid_by_emp_id, created_by_emp_id, created_at, updated_at"
+  "id, tenant_id, disbursement_no, status, payee_kind, vendor_id, payee_name, payee_bank_name, payee_bank_account, payee_bank_code, paying_company_id, paying_company_name, paying_bank_account, method, paid_on, amount, withheld_amount, receipt_issuer_company_id, receipt_ref, has_invoice, invoice_no, purpose, note, void_reason, paid_by_emp_id, created_by_emp_id, created_at, updated_at"
 export const ALLOCATION_COLS =
   "id, disbursement_id, project_id, subcontract_id, subcontract_payment_id, amount, withheld_amount, note, created_at"
 export const ATTACHMENT_COLS =
@@ -99,6 +100,7 @@ export type DisbursementRow = {
   payee_name: string
   payee_bank_name: string | null
   payee_bank_account: string | null
+  payee_bank_code: string | null
   paying_company_id: string
   paying_company_name: string | null
   paying_bank_account: string | null
@@ -108,6 +110,8 @@ export type DisbursementRow = {
   withheld_amount: string | number
   receipt_issuer_company_id: string | null
   receipt_ref: string | null
+  has_invoice: boolean
+  invoice_no: string | null
   purpose: string | null
   note: string | null
   void_reason: string | null
@@ -200,6 +204,8 @@ export type DisbursementInput = {
   payeeName?: string | null
   payeeBankName?: string | null
   payeeBankAccount?: string | null
+  /** 收款方銀行代碼，與 payeeBankName／payeeBankAccount 同組快照。 */
+  payeeBankCode?: string | null
   payingCompanyId: string
   method: DisbursementMethod
   paidOn?: string | null
@@ -208,6 +214,9 @@ export type DisbursementInput = {
   withheldAmount?: number | null
   receiptIssuerCompanyId?: string | null
   receiptRef?: string | null
+  /** 收款方是否已開立發票；paid 之後仍可補改（見 PAID_EDITABLE）。 */
+  hasInvoice?: boolean
+  invoiceNo?: string | null
   purpose?: string | null
   note?: string | null
   status: "draft" | "paid"
@@ -472,6 +481,7 @@ export type SerializedDisbursement = {
   payeeName: string
   payeeBankName: string | null
   payeeBankAccount: string | null
+  payeeBankCode: string | null
   payingCompanyId: string
   payingCompanyName: string | null
   payingBankAccount: string | null
@@ -483,6 +493,8 @@ export type SerializedDisbursement = {
   receiptIssuerCompanyId: string | null
   receiptIssuerCompanyName: string | null
   receiptRef: string | null
+  hasInvoice: boolean
+  invoiceNo: string | null
   purpose: string | null
   note: string | null
   voidReason: string | null
@@ -565,6 +577,7 @@ export function serializeDisbursement(
     payeeName: d.payee_name,
     payeeBankName: d.payee_bank_name,
     payeeBankAccount: d.payee_bank_account,
+    payeeBankCode: d.payee_bank_code,
     payingCompanyId: d.paying_company_id,
     payingCompanyName: d.paying_company_name ?? companies.get(d.paying_company_id)?.name ?? null,
     payingBankAccount: d.paying_bank_account,
@@ -576,6 +589,8 @@ export function serializeDisbursement(
     receiptIssuerCompanyId: d.receipt_issuer_company_id,
     receiptIssuerCompanyName: d.receipt_issuer_company_id ? (companies.get(d.receipt_issuer_company_id)?.name ?? null) : null,
     receiptRef: d.receipt_ref,
+    hasInvoice: d.has_invoice,
+    invoiceNo: d.invoice_no,
     purpose: d.purpose,
     note: d.note,
     voidReason: d.void_reason,
@@ -1161,6 +1176,7 @@ type ResolvedHeader = {
   payee_name: string
   payee_bank_name: string | null
   payee_bank_account: string | null
+  payee_bank_code: string | null
   paying_company_id: string
   paying_company_name: string | null
   paying_bank_account: string | null
@@ -1170,6 +1186,8 @@ type ResolvedHeader = {
   withheld_amount: number
   receipt_issuer_company_id: string | null
   receipt_ref: string | null
+  has_invoice: boolean
+  invoice_no: string | null
   purpose: string | null
   note: string | null
 }
@@ -1227,6 +1245,7 @@ async function resolveHeader(tenantId: string, input: Omit<DisbursementInput, "s
         : vendor
           ? [vendor.bank_account, vendor.account_holder].filter(Boolean).join(" ") || null
           : null,
+    payee_bank_code: input.payeeBankCode !== undefined ? (input.payeeBankCode ?? null) : vendor ? (vendor.bank_code ?? null) : null,
     paying_company_id: paying.id,
     paying_company_name: paying.name,
     paying_bank_account: companyBankAccount(paying),
@@ -1236,6 +1255,8 @@ async function resolveHeader(tenantId: string, input: Omit<DisbursementInput, "s
     withheld_amount: withheld,
     receipt_issuer_company_id: input.receiptIssuerCompanyId ?? null,
     receipt_ref: input.receiptRef?.trim() || null,
+    has_invoice: input.hasInvoice ?? false,
+    invoice_no: input.invoiceNo?.trim() || null,
     purpose: input.purpose?.trim() || null,
     note: input.note?.trim() || null,
   }
@@ -1618,7 +1639,7 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
   return (await getDisbursement(tenantId, row.id))!
 }
 
-const PAID_EDITABLE = new Set<keyof DisbursementPatch>(["note", "receiptRef", "purpose"])
+const PAID_EDITABLE = new Set<keyof DisbursementPatch>(["note", "receiptRef", "purpose", "hasInvoice", "invoiceNo"])
 
 function headerToInput(d: DisbursementRow): Omit<DisbursementInput, "status" | "allocations"> {
   return {
@@ -1627,6 +1648,7 @@ function headerToInput(d: DisbursementRow): Omit<DisbursementInput, "status" | "
     payeeName: d.payee_name,
     payeeBankName: d.payee_bank_name,
     payeeBankAccount: d.payee_bank_account,
+    payeeBankCode: d.payee_bank_code,
     payingCompanyId: d.paying_company_id,
     method: d.method,
     paidOn: d.paid_on,
@@ -1634,6 +1656,8 @@ function headerToInput(d: DisbursementRow): Omit<DisbursementInput, "status" | "
     withheldAmount: num(d.withheld_amount) ?? 0,
     receiptIssuerCompanyId: d.receipt_issuer_company_id,
     receiptRef: d.receipt_ref,
+    hasInvoice: d.has_invoice,
+    invoiceNo: d.invoice_no,
     purpose: d.purpose,
     note: d.note,
   }
@@ -1641,8 +1665,9 @@ function headerToInput(d: DisbursementRow): Omit<DisbursementInput, "status" | "
 
 /**
  * PATCH：draft 全部可改（allocations 整批覆蓋、快照重抓）；paid 只可改
- * note／receiptRef／purpose——其他欄位若出現且與現值不同 → 409 `paid`
- * （UI 送整份表單但值沒動的情況放行）；void → 409 `void`。
+ * note／receiptRef／purpose／hasInvoice／invoiceNo（已匯款後補發票號是常態）——
+ * 其他欄位若出現且與現值不同 → 409 `paid`（UI 送整份表單但值沒動的情況放行）；
+ * void → 409 `void`。
  */
 export async function updateDisbursement(
   tenantId: string,
@@ -1675,6 +1700,8 @@ export async function updateDisbursement(
     if (patch.note !== undefined) fields.note = patch.note?.trim() || null
     if (patch.receiptRef !== undefined) fields.receipt_ref = patch.receiptRef?.trim() || null
     if (patch.purpose !== undefined) fields.purpose = patch.purpose?.trim() || null
+    if (patch.hasInvoice !== undefined) fields.has_invoice = patch.hasInvoice
+    if (patch.invoiceNo !== undefined) fields.invoice_no = patch.invoiceNo?.trim() || null
     const { error } = await supabaseAdmin.from("disbursements").update(fields).eq("tenant_id", tenantId).eq("id", id)
     if (error) throw new Error(`updateDisbursement (paid): ${error.message}`)
     if (fields.receipt_ref !== undefined && fields.receipt_ref !== current.receipt_ref) {
@@ -1696,6 +1723,7 @@ export async function updateDisbursement(
       if (patch.payeeName === undefined) merged.payeeName = null
       if (patch.payeeBankName === undefined) delete merged.payeeBankName
       if (patch.payeeBankAccount === undefined) delete merged.payeeBankAccount
+      if (patch.payeeBankCode === undefined) delete merged.payeeBankCode
     }
     const header = await resolveHeader(tenantId, merged)
     const allocInputs: AllocationInput[] =

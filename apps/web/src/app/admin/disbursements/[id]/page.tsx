@@ -9,6 +9,7 @@ import { listCompanies, type Company } from "@/lib/projects-ext-api";
 import { listProjects } from "@/lib/projects-api";
 import DisbursementForm, { type DisbursementFormInitial, type ProjectOption } from "@/components/DisbursementForm";
 import {
+  buildRemittanceText,
   deleteDisbursementAttachment,
   getDisbursement,
   humanizeDisbursementError,
@@ -52,6 +53,9 @@ export default function DisbursementDetailPage() {
 
   const [payOpen, setPayOpen] = useState(false);
   const [payOn, setPayOn] = useState(todayKey());
+
+  const [copied, setCopied] = useState(false);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fileRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
@@ -112,6 +116,41 @@ export default function DisbursementDetailPage() {
     }
   }
 
+  /** 複製匯款資訊：戶名／銀行（代號）／帳號／金額，一行一項，貼進網銀 APP。
+   * 優先用 Clipboard API；不支援（非 https／舊瀏覽器）時退回
+   * document.execCommand('copy')；兩者都失敗就跳出視窗讓使用者手動選取複製。 */
+  async function handleCopyRemittance() {
+    if (!disbursement) return;
+    const text = buildRemittanceText({
+      payeeName: disbursement.payeeName,
+      payeeBankName: disbursement.payeeBankName,
+      payeeBankCode: disbursement.payeeBankCode,
+      payeeBankAccount: disbursement.payeeBankAccount,
+      amount: disbursement.amount,
+    });
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        const ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        if (!ok) throw new Error("execCommand copy failed");
+      }
+      setCopied(true);
+      if (copiedTimer.current) clearTimeout(copiedTimer.current);
+      copiedTimer.current = setTimeout(() => setCopied(false), 2000);
+    } catch {
+      window.prompt("無法自動複製，請手動選取以下文字複製：", text);
+    }
+  }
+
   async function handleEditSubmit(body: DisbursementInput) {
     if (!disbursement) return;
     setSaving(true);
@@ -119,7 +158,13 @@ export default function DisbursementDetailPage() {
     try {
       const patch =
         disbursement.status === "paid"
-          ? { note: body.note, receiptRef: body.receiptRef, purpose: body.purpose }
+          ? {
+              note: body.note,
+              receiptRef: body.receiptRef,
+              purpose: body.purpose,
+              hasInvoice: body.hasInvoice,
+              invoiceNo: body.invoiceNo,
+            }
           : body;
       const res = await patchDisbursement(disbursement.id, patch);
       setDisbursement(res.disbursement);
@@ -168,6 +213,7 @@ export default function DisbursementDetailPage() {
     payeeName: d.payeeName,
     payeeBankName: d.payeeBankName,
     payeeBankAccount: d.payeeBankAccount,
+    payeeBankCode: d.payeeBankCode,
     payingCompanyId: d.payingCompanyId,
     method: d.method,
     paidOn: d.paidOn,
@@ -175,6 +221,8 @@ export default function DisbursementDetailPage() {
     withheldAmount: d.withheldAmount,
     receiptIssuerCompanyId: d.receiptIssuerCompanyId,
     receiptRef: d.receiptRef,
+    hasInvoice: d.hasInvoice,
+    invoiceNo: d.invoiceNo,
     purpose: d.purpose,
     note: d.note,
     status: d.status === "void" ? "draft" : d.status,
@@ -222,6 +270,9 @@ export default function DisbursementDetailPage() {
             <button type="button" onClick={() => window.print()} className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
               列印
             </button>
+            <button type="button" onClick={() => void handleCopyRemittance()} className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
+              {copied ? "已複製" : "複製匯款資訊"}
+            </button>
           </div>
 
           {payOpen && (
@@ -259,12 +310,14 @@ export default function DisbursementDetailPage() {
                 <div><p className="text-xs text-gray-500">付款公司</p><p className="font-medium text-gray-800">{d.payingCompanyName ?? "—"}</p></div>
                 <div><p className="text-xs text-gray-500">收款方</p><p className="font-medium text-gray-800">{d.payeeName}</p></div>
                 <div><p className="text-xs text-gray-500">收款銀行／帳號</p><p className="font-medium text-gray-800">{[d.payeeBankName, d.payeeBankAccount].filter(Boolean).join(" / ") || "—"}</p></div>
+                <div><p className="text-xs text-gray-500">收款銀行代碼</p><p className="font-medium text-gray-800">{d.payeeBankCode ?? "—"}</p></div>
                 <div><p className="text-xs text-gray-500">實付</p><p className="font-medium text-gray-900">{fmtMoney(d.amount)}</p></div>
                 <div><p className="text-xs text-gray-500">代扣</p><p className="font-medium text-gray-700">{fmtMoney(d.withheldAmount)}</p></div>
                 <div><p className="text-xs text-gray-500">毛額</p><p className="font-medium text-gray-900">{fmtMoney(d.grossAmount)}</p></div>
                 <div><p className="text-xs text-gray-500">收據抬頭</p><p className="font-medium text-gray-800">{companies.find((c) => c.id === d.receiptIssuerCompanyId)?.name ?? "—"}</p></div>
                 <div><p className="text-xs text-gray-500">收據編號</p><p className="font-medium text-gray-800">{d.receiptRef ?? "—"}</p></div>
                 <div><p className="text-xs text-gray-500">用途</p><p className="font-medium text-gray-800">{d.purpose ?? "—"}</p></div>
+                <div><p className="text-xs text-gray-500">發票</p><p className="font-medium text-gray-800">{d.hasInvoice ? `已開立${d.invoiceNo ? "・" + d.invoiceNo : ""}` : "未開立"}</p></div>
               </div>
               {d.note && <p className="mt-3 text-sm text-gray-600">備註：{d.note}</p>}
               {d.status === "void" && d.voidReason && (

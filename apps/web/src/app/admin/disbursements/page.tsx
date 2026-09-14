@@ -418,6 +418,7 @@ export default function DisbursementsPage() {
                       <th className="py-2 pr-2 text-right">實付</th>
                       <th className="py-2 pr-2 text-right">代扣</th>
                       <th className="py-2 pr-2">分攤專案</th>
+                      <th className="py-2 pr-2 text-center">發票</th>
                       <th className="py-2 pr-2">狀態</th>
                     </tr>
                   </thead>
@@ -437,6 +438,7 @@ export default function DisbursementsPage() {
                         <td className="py-1.5 pr-2 text-gray-500">
                           {Array.from(new Set(d.allocations.map((a) => a.projectCode ?? a.projectName ?? a.projectId))).join("、") || "—"}
                         </td>
+                        <td className="py-1.5 pr-2 text-center">{d.hasInvoice ? "✓" : "—"}</td>
                         <td className="py-1.5 pr-2">
                           <span className={d.status === "void" ? "text-gray-400" : d.status === "paid" ? "text-green-700" : "text-amber-700"}>
                             {DISBURSEMENT_STATUS_LABELS[d.status]}

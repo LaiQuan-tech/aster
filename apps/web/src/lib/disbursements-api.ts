@@ -63,6 +63,8 @@ export interface Disbursement {
   payeeName: string
   payeeBankName: string | null
   payeeBankAccount: string | null
+  /** 收款方銀行代碼，與 payeeBankName／payeeBankAccount 同組快照。 */
+  payeeBankCode: string | null
   payingCompanyId: string | null
   payingCompanyName: string | null
   payingBankAccount: string | null
@@ -78,6 +80,9 @@ export interface Disbursement {
   /** 收據抬頭公司名稱（快照/join），GET 回應才有。 */
   receiptIssuerCompanyName?: string | null
   receiptRef: string | null
+  /** 收款方是否已開立發票（B2）。 */
+  hasInvoice: boolean
+  invoiceNo: string | null
   purpose: string | null
   note: string | null
   voidReason: string | null
@@ -98,6 +103,7 @@ export interface DisbursementInput {
   payeeName?: string
   payeeBankName?: string | null
   payeeBankAccount?: string | null
+  payeeBankCode?: string | null
   payingCompanyId: string
   method: DisbursementMethod
   paidOn?: string | null
@@ -105,6 +111,9 @@ export interface DisbursementInput {
   withheldAmount?: number
   receiptIssuerCompanyId?: string | null
   receiptRef?: string | null
+  /** 是否已取得發票／收據；paid 狀態下仍可用 PATCH 補（見 DisbursementPatchInput 註記）。 */
+  hasInvoice?: boolean
+  invoiceNo?: string | null
   purpose?: string | null
   note?: string | null
   status: "draft" | "paid"
@@ -112,9 +121,10 @@ export interface DisbursementInput {
 }
 
 /** PATCH：draft 全欄可改（allocations 整批覆蓋，列數變少可能 409
- * allocation_not_removable）。paid 狀態下 note/receiptRef/purpose 可正常改；其餘欄位
- * 「省略不送」沒事、「送了但值跟現存相同」也沒事，只有「送了且值不同」才會 409
- * paid（帶 field）——所以呼叫端請只送這三個欄位，別把整張表單原樣回傳。 */
+ * allocation_not_removable）。paid 狀態下 note/receiptRef/purpose/hasInvoice/invoiceNo
+ * 可正常改（已匯款後補發票號是常態）；其餘欄位「省略不送」沒事、「送了但值跟現存
+ * 相同」也沒事，只有「送了且值不同」才會 409 paid（帶 field）——所以呼叫端請只送
+ * 這五個欄位，別把整張表單原樣回傳。 */
 export type DisbursementPatchInput = Partial<Omit<DisbursementInput, "status">>
 
 export interface Payable {
@@ -372,7 +382,7 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   max_files_reached: "附件已達上限（5 個）。",
   // 這個必須排在 payment_already_paid／paid_on_required 之後，見上方註記。
   already_paid: "這筆匯款已經是已匯款狀態，不能再標記一次。",
-  paid: "已匯款的單只能改用途／收據編號／備註，其餘欄位維持原樣才會通過。",
+  paid: "已匯款的單只能改用途／收據編號／發票資訊／備註，其餘欄位維持原樣才會通過。",
   invalid_query: "查詢參數格式錯誤。",
   invalid_body: "送出的資料格式錯誤。",
   invalid_base64: "檔案內容編碼錯誤，請重新選擇檔案。",
@@ -385,4 +395,33 @@ export function humanizeDisbursementError(err: unknown, fallback: string): strin
     if (msg.includes(code)) return text
   }
   return msg
+}
+
+/* ------------------------------------------------------------ 匯款資訊複製 -- */
+/** 銀行顯示字串：後端 vendor 快照慣例會把代碼內嵌進 bankName（如「國泰世華（013）」，
+ * 見 services/disbursements.ts vendorBankName）；已內嵌就照原樣顯示，否則把
+ * bankCode 用括號補在後面，避免「國泰世華（013）（013）」重複。純函式。 */
+function formatBankLine(bankName: string | null, bankCode: string | null): string {
+  const name = (bankName ?? "").trim()
+  const code = (bankCode ?? "").trim()
+  if (!code) return name
+  if (name.includes(code)) return name
+  return name ? `${name}（${code}）` : code
+}
+
+/** 「複製匯款資訊」按鈕的文字組裝（純函式，不碰 DOM／clipboard，方便單元測試）：
+ * 戶名／銀行（代號）／帳號／金額，一行一項，貼進網銀 APP 轉帳頁面剛好對應四個欄位。 */
+export function buildRemittanceText(d: {
+  payeeName: string
+  payeeBankName: string | null
+  payeeBankCode: string | null
+  payeeBankAccount: string | null
+  amount: number
+}): string {
+  return [
+    `戶名：${d.payeeName || "—"}`,
+    `銀行：${formatBankLine(d.payeeBankName, d.payeeBankCode) || "—"}`,
+    `帳號：${d.payeeBankAccount || "—"}`,
+    `金額：${d.amount.toLocaleString()}`,
+  ].join("\n")
 }

@@ -216,6 +216,7 @@ describe("xlsx 放款紀錄", () => {
       payeeName: "王技師",
       payeeBankName: "台銀（004）",
       payeeBankAccount: "123",
+      payeeBankCode: "004",
       payingCompanyId: "c1",
       payingCompanyName: "亞斯特",
       payingBankAccount: null,
@@ -227,6 +228,8 @@ describe("xlsx 放款紀錄", () => {
       receiptIssuerCompanyId: "c2",
       receiptIssuerCompanyName: "龍權",
       receiptRef: "R-1",
+      hasInvoice: true,
+      invoiceNo: "AB-0001",
       purpose: "技師簽證費",
       note: null,
       voidReason: null,
@@ -240,9 +243,12 @@ describe("xlsx 放款紀錄", () => {
     }
   }
 
-  it("表頭 13 欄、一列一筆、合計不含作廢", async () => {
+  it("表頭 15 欄（含 B2 新增有發票／發票號碼）、一列一筆、合計不含作廢", async () => {
     const wb = buildDisbursementsWorkbook(
-      [d({}), d({ id: "y", disbursementNo: "D-115-002", status: "void", amount: 999, withheldAmount: 0, grossAmount: 999 })],
+      [
+        d({}),
+        d({ id: "y", disbursementNo: "D-115-002", status: "void", amount: 999, withheldAmount: 0, grossAmount: 999, hasInvoice: false, invoiceNo: null }),
+      ],
       { from: "2026-09-01", to: "2026-09-14", today: "2026-09-14" },
     )
     const buf = Buffer.from(await wb.xlsx.writeBuffer())
@@ -250,12 +256,18 @@ describe("xlsx 放款紀錄", () => {
     await read.xlsx.load(new Uint8Array(buf) as unknown as ExcelJS.Buffer)
     const ws = read.getWorksheet("放款紀錄")!
     const header = ws.getRow(4).values as unknown[]
-    expect(header.slice(1)).toEqual(["單號", "匯款日", "收款方", "付款公司", "方式", "實付", "代扣", "毛額", "收據抬頭", "收據編號", "分攤專案", "用途", "狀態"])
+    expect(header.slice(1)).toEqual([
+      "單號", "匯款日", "收款方", "付款公司", "方式", "實付", "代扣", "毛額", "收據抬頭", "收據編號", "有發票", "發票號碼", "分攤專案", "用途", "狀態",
+    ])
     expect(ws.getRow(5).getCell(1).value).toBe("D-115-001")
     expect(ws.getRow(5).getCell(6).value).toBe(22_500)
     expect(ws.getRow(5).getCell(9).value).toBe("龍權")
-    expect(ws.getRow(5).getCell(13).value).toBe("已匯款")
-    expect(ws.getRow(6).getCell(13).value).toBe("作廢")
+    expect(ws.getRow(5).getCell(11).value).toBe("✓")
+    expect(ws.getRow(5).getCell(12).value).toBe("AB-0001")
+    expect(ws.getRow(5).getCell(15).value).toBe("已匯款")
+    expect(ws.getRow(6).getCell(11).value).toBe("—")
+    expect(ws.getRow(6).getCell(12).value).toBe("")
+    expect(ws.getRow(6).getCell(15).value).toBe("作廢")
     // 合計列：只算未作廢
     expect(ws.getRow(7).getCell(6).value).toBe(22_500)
     expect(ws.getRow(7).getCell(8).value).toBe(25_000)

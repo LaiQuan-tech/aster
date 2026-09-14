@@ -6,7 +6,8 @@ import type { SerializedDisbursement } from "../../services/disbursements.js"
  * xlsx「放款紀錄」——一列一筆匯款單（純函式，不連 DB）。
  *
  * 欄：單號｜匯款日｜收款方｜付款公司｜方式｜實付｜代扣｜毛額｜收據抬頭｜收據編號｜
- *     分攤專案｜用途｜狀態（計畫 §三）。最後一列合計（實付／代扣／毛額）。
+ *     有發票｜發票號碼｜分攤專案｜用途｜狀態（計畫 §三；有發票／發票號碼為 B2 新增）。
+ *     最後一列合計（實付／代扣／毛額）。
  * 金額寫數字＋`#,##0.##`（不是字串），老闆要在旁邊拉公式；日期寫 'YYYY-MM-DD'
  * 字串（與畫面一致，避免 Excel 的時區把日期往前推一天）。
  */
@@ -35,7 +36,7 @@ export function buildDisbursementsWorkbook(
   wb.creator = "aster-hr"
   const ws = wb.addWorksheet("放款紀錄", { views: [{ state: "frozen", ySplit: 4 }] })
 
-  const headers = ["單號", "匯款日", "收款方", "付款公司", "方式", "實付", "代扣", "毛額", "收據抬頭", "收據編號", "分攤專案", "用途", "狀態"]
+  const headers = ["單號", "匯款日", "收款方", "付款公司", "方式", "實付", "代扣", "毛額", "收據抬頭", "收據編號", "有發票", "發票號碼", "分攤專案", "用途", "狀態"]
   ws.getCell("A1").value = "放款紀錄"
   ws.getCell("A1").font = { bold: true, size: 16 }
   ws.mergeCells(1, 1, 1, headers.length)
@@ -47,7 +48,7 @@ export function buildDisbursementsWorkbook(
     headerRow.getCell(i + 1).value = h
   })
   applyHeaderStyle(headerRow)
-  const widths = [13, 12, 22, 22, 7, 13, 11, 13, 22, 16, 36, 24, 8]
+  const widths = [13, 12, 22, 22, 7, 13, 11, 13, 22, 16, 8, 16, 36, 24, 8]
   widths.forEach((w, i) => {
     ws.getColumn(i + 1).width = w
   })
@@ -65,11 +66,14 @@ export function buildDisbursementsWorkbook(
     money(row.getCell(8), d.grossAmount)
     row.getCell(9).value = d.receiptIssuerCompanyName ?? ""
     row.getCell(10).value = d.receiptRef ?? ""
-    row.getCell(11).value = d.allocationLabel
-    row.getCell(11).alignment = { wrapText: true, vertical: "top" }
-    row.getCell(12).value = d.purpose ?? ""
-    row.getCell(13).value = STATUS_LABEL[d.status] ?? d.status
-    row.getCell(13).alignment = { horizontal: "center" }
+    row.getCell(11).value = d.hasInvoice ? "✓" : "—"
+    row.getCell(11).alignment = { horizontal: "center" }
+    row.getCell(12).value = d.invoiceNo ?? ""
+    row.getCell(13).value = d.allocationLabel
+    row.getCell(13).alignment = { wrapText: true, vertical: "top" }
+    row.getCell(14).value = d.purpose ?? ""
+    row.getCell(15).value = STATUS_LABEL[d.status] ?? d.status
+    row.getCell(15).alignment = { horizontal: "center" }
     r += 1
   }
 
