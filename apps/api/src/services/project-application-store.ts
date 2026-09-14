@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { isOurContract } from "../lib/contract-role.js"
 import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { localDateKey, DEFAULT_TIMEZONE } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
@@ -645,7 +646,7 @@ export async function buildAnnualTable(
     if (
       (p.kind ?? "main") === "main" &&
       hasChildren.has(p.id) &&
-      pc.some((c) => c.doc_type === "change_order" && c.our_role === "contractor" && !c.deleted_at)
+      pc.some((c) => c.doc_type === "change_order" && isOurContract(c.our_role) && !c.deleted_at)
     ) {
       noteParts.push(ANNUAL_DUPLICATE_COUNT_WARNING)
     }

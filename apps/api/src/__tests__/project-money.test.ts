@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { overdueDays, receivableState } from "../services/project-money"
+import { overdueDays, receivableState, summarizeContracts } from "../services/project-money"
 
 /**
  * B5：請款三段狀態顏色／未收款篩選／逾期基準可設定——純函式部分。
@@ -28,6 +28,14 @@ describe("overdueDays：basis", () => {
     const today = "2026-09-15"
     expect(overdueDays(invoicedOn, null, today, "billed", billedOn)).toBe(76)
     expect(overdueDays(invoicedOn, null, today, "invoiced", billedOn)).toBeNull()
+  })
+
+  it("已開票但沒有請款日（先開票才補請款、或請款被取消但開票沒撤）：basis='billed' 退回用開票日，不能讓這筆錢消失（B5 review 抓到的迴歸）", () => {
+    const billedOn = null
+    const invoicedOn = "2026-08-01"
+    const today = "2026-09-15"
+    expect(overdueDays(invoicedOn, null, today, "billed", billedOn)).toBe(45) // 退回 invoicedOn，跟 basis='invoiced' 同一天數
+    expect(overdueDays(invoicedOn, null, today, "invoiced", billedOn)).toBe(45)
   })
 
   it("未請款也未開票：兩種 basis 都是 null", () => {
@@ -73,5 +81,38 @@ describe("receivableState：三段狀態＋逾期", () => {
 
   it("overdueDays 為 0（今天才到期）不算逾期", () => {
     expect(receivableState({ billedOn: "2026-09-15", invoicedOn: null, receivedOn: null, overdueDays: 0 })).toBe("billed")
+  })
+})
+
+/**
+ * C1：修 our_role 第三值 both（印花稅各自貼）留下的漏洞——both 底下我方仍是
+ * 承攬方，營收／分母判斷不能只認 "contractor"，只有 "client" 才不算我方的。
+ * （B1 於 2f6ad95 加入 both 值時，summarizeContracts 等四處仍寫死
+ * `=== "contractor"`，正式合約標成 both 會被靜默排除在營收之外。）
+ */
+describe("summarizeContracts：our_role=both 視為我方承攬", () => {
+  it("100 萬合約 our_role=both → total 含 100 萬；client 不含", () => {
+    const s = summarizeContracts([
+      { doc_type: "contract", our_role: "both", amount: "1000000", signed_on: "2026-01-01", created_at: "2026-01-01T00:00:00Z" },
+      { doc_type: "contract", our_role: "client", amount: "500000", signed_on: "2026-02-01", created_at: "2026-02-01T00:00:00Z" },
+    ])
+    expect(s.total).toBe(1_000_000)
+    expect(s.base).toBe(1_000_000)
+  })
+
+  it("both 的追加減帳一樣併入 changeOrders／total", () => {
+    const s = summarizeContracts([
+      { doc_type: "contract", our_role: "both", amount: "1000000", signed_on: "2026-01-01", created_at: "2026-01-01T00:00:00Z" },
+      { doc_type: "change_order", our_role: "both", amount: "50000", signed_on: "2026-03-01", created_at: "2026-03-01T00:00:00Z" },
+    ])
+    expect(s.total).toBe(1_050_000)
+    expect(s.changeOrders).toBe(50_000)
+  })
+
+  it("只有 our_role=client 的合約：一張都不算我方的，total 為 null（那是應付，不是應收）", () => {
+    const s = summarizeContracts([
+      { doc_type: "contract", our_role: "client", amount: "800000", signed_on: "2026-01-01", created_at: "2026-01-01T00:00:00Z" },
+    ])
+    expect(s.total).toBeNull()
   })
 })

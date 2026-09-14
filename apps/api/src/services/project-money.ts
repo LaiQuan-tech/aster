@@ -1,4 +1,5 @@
 import { computeInstallments, type InstallmentInput } from "./billing-schedule.js"
+import { isOurContract } from "../lib/contract-role.js"
 
 /**
  * 專案申請單的錢——**純函式**，不碰 DB（IO 在 project-application-store.ts）。
@@ -465,7 +466,7 @@ export function summarizeContracts(rows: ContractLite[]): ContractSummary {
   let latestQuotationRow: ContractLite | null = null
   for (const r of rows) {
     if (r.deleted_at) continue
-    if (r.our_role !== "contractor") continue
+    if (!isOurContract(r.our_role)) continue
     const amount = toNum(r.amount) ?? 0
     if (r.doc_type === "quotation") {
       if (!latestQuotationRow || newer(r, latestQuotationRow)) latestQuotationRow = r
