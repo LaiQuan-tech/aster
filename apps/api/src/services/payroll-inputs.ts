@@ -9,6 +9,7 @@ import {
 import { supabaseAdmin } from "../lib/supabase.js"
 import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
 import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { DEFAULT_TIMEZONE, todayKey } from "../lib/tz.js"
 import { leaveDeductRate, loadLeaveTypes } from "./settlement.js"
 
 /**
@@ -132,30 +133,138 @@ export function toAttendanceDay(
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * 規則版本選版（C4）
+ *
+ * rule_configs 是「有版本歷史」的表（version / effective_from / active）。
+ * 舊的讀法是「active=true 裡 version 最高的那一筆」，完全不看正在算的是哪個
+ * 月份——HR 今天調高加班倍率，昨天重算八月的月表就會被套上新倍率，跟客戶的
+ * 期待（舊月份照當時的規則呈現）不符。
+ *
+ * 正確的語意是：**計算月份 → 該月份當時生效的版本**。判準只有一條——
+ * 版本的 effective_from 必須早於「計算月份的下個月1號」（exclusive 上界），
+ * 也就是該版本在這個月裡的任何一天生效過就算數；符合的版本裡取
+ * effective_from 最晚的一筆，同日再取 version 最大的一筆。
+ * ------------------------------------------------------------------------- */
+
+/** 'YYYY-MM' → 下個月第一天 'YYYY-MM-DD'（選版的 exclusive 上界）。 */
+export function nextPeriodFirstDay(period: string): string {
+  const [y, m] = period.split("-").map(Number)
+  const ny = m === 12 ? y + 1 : y
+  const nm = m === 12 ? 1 : m + 1
+  return `${ny}-${String(nm).padStart(2, "0")}-01`
+}
+
 /**
- * The tenant's active rule config (parsed) and its version; DEFAULT_RULE_CONFIG
- * / version 0 when none is stored, and the default when the stored jsonb is
- * malformed (a broken config must not block payroll or settlement).
+ * 從所有版本中挑出 `period`（'YYYY-MM'）當時生效的那一筆；沒有任何一筆在這個
+ * 月份之前生效過就回 `null`（由呼叫端決定 fallback，不要退而求其次拿「最早那
+ * 版」——那版技術上還沒生效）。
+ *
+ * 'YYYY-MM-DD' 是定寬零補的字串，字典序＝時間序，不必轉 Date。
+ * 純函式、不碰 DB，選版規則的單元測試直接測這支（__tests__/rule-config.test.ts）。
  */
-export async function loadRuleConfig(
+export function pickRuleConfigVersion<T extends { version: number; effectiveFrom: string }>(
+  rows: readonly T[],
+  period: string,
+): T | null {
+  const boundary = nextPeriodFirstDay(period) // exclusive 上界
+  const eligible = rows.filter((r) => r.effectiveFrom < boundary)
+  if (eligible.length === 0) return null
+  return eligible.reduce<T | null>((best, r) => {
+    if (!best) return r
+    if (r.effectiveFrom !== best.effectiveFrom) return r.effectiveFrom > best.effectiveFrom ? r : best
+    return r.version > best.version ? r : best
+  }, null)
+}
+
+/**
+ * 今天的 'YYYY-MM-DD'。
+ *
+ * 簡化：一律用產品預設營運時區（Asia/Taipei），不去查 tenants.timezone——選版
+ * 只需要知道「今天算哪個月」，租戶時區差異只會在月底跨日的那幾個小時內造成
+ * 落差，不值得為此多打一次 DB。
+ */
+export function todayDateString(): string {
+  return todayKey(DEFAULT_TIMEZONE)
+}
+
+/** 今天所屬的計算月份 'YYYY-MM'（時區簡化同 todayDateString）。 */
+export function currentPeriod(): string {
+  return todayDateString().slice(0, 7)
+}
+
+/** `loadRuleConfigFor` 的回傳：選到的規則、版本、生效日，以及有沒有退回預設值。 */
+export interface RuleConfigResult {
+  rules: RuleConfig
+  version: number
+  /** 選到的版本的 effective_from；退回 DEFAULT_RULE_CONFIG（查無適用版本）時為 null。 */
+  effectiveFrom: string | null
+  /** true = rules 是 DEFAULT_RULE_CONFIG（查無適用版本，或存的 jsonb 壞掉）。 */
+  isDefault: boolean
+}
+
+/**
+ * `period`（'YYYY-MM'）當時生效的規則版本。
+ *
+ * ⚠️ 這裡**故意不篩 `active = true`**：PUT /rule-config 每存一次新版就把該租戶
+ * 舊列全部翻成 active=false，只留最新一筆 active=true。若選版還篩 active，永遠
+ * 只會查到最新那一版，選版邏輯等於沒作用。active 現在只是「目前生效中的那版」
+ * 的標記，不是選版條件。
+ *
+ * 查無適用版本（這個租戶完全沒有版本，或所有版本的 effective_from 都晚於這個
+ * 月份）→ DEFAULT_RULE_CONFIG / version 0 / effectiveFrom null / isDefault true。
+ * 選到了但 jsonb 壞掉 → 一樣退回 DEFAULT_RULE_CONFIG，但保留查到的
+ * version / effectiveFrom（壞掉的 config 不該擋住薪資或結算）。
+ */
+export async function loadRuleConfigFor(
   tenantId: string,
-): Promise<{ rules: RuleConfig; version: number }> {
-  const { data: cfgRow, error: cfgErr } = await supabaseAdmin
+  period: string,
+): Promise<RuleConfigResult> {
+  const { data, error } = await supabaseAdmin
     .from("rule_configs")
-    .select("config, version")
+    .select("config, version, effective_from")
     .eq("tenant_id", tenantId)
-    .eq("active", true)
-    .order("version", { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  if (cfgErr) throw new Error(`loadRuleConfig: ${cfgErr.message}`)
-  const version = typeof cfgRow?.version === "number" ? cfgRow.version : 0
+  if (error) throw new Error(`loadRuleConfigFor: ${error.message}`)
+  const rows = ((data ?? []) as Array<{
+    config: unknown
+    version: number | null
+    effective_from: string | null
+  }>).map((r) => ({
+    config: r.config,
+    version: typeof r.version === "number" ? r.version : 0,
+    // effective_from 是 NOT NULL DEFAULT '1900-01-01'；NULL 只可能出現在還沒
+    // backfill 的資料上，當作「很久以前就生效」處理，不要讓它落選。
+    effectiveFrom: typeof r.effective_from === "string" ? r.effective_from : "1900-01-01",
+  }))
+  const picked = pickRuleConfigVersion(rows, period)
+  if (!picked) return { rules: DEFAULT_RULE_CONFIG, version: 0, effectiveFrom: null, isDefault: true }
   try {
-    return { rules: cfgRow?.config ? parseRuleConfig(cfgRow.config) : DEFAULT_RULE_CONFIG, version }
+    return {
+      rules: picked.config ? parseRuleConfig(picked.config) : DEFAULT_RULE_CONFIG,
+      version: picked.version,
+      effectiveFrom: picked.effectiveFrom,
+      isDefault: !picked.config,
+    }
   } catch {
     // A malformed stored config should not block payroll — fall back safely.
-    return { rules: DEFAULT_RULE_CONFIG, version }
+    return {
+      rules: DEFAULT_RULE_CONFIG,
+      version: picked.version,
+      effectiveFrom: picked.effectiveFrom,
+      isDefault: true,
+    }
   }
+}
+
+/**
+ * 今天所屬月份生效的規則版本（`loadRuleConfigFor` 的薄包裝）。
+ *
+ * 「跟月份無關」的呼叫端（例如設定頁要顯示目前的規則）用這支；凡是在算「某個
+ * 月份」的資料，一律改用 `loadRuleConfigFor(tenantId, period)`，否則舊月份會被
+ * 套上今天的規則。
+ */
+export async function loadRuleConfig(tenantId: string): Promise<RuleConfigResult> {
+  return loadRuleConfigFor(tenantId, currentPeriod())
 }
 
 /** attendance_days of `employeeIds` with work_date in [first, nextFirst), P0 columns with fallback. */
@@ -219,7 +328,8 @@ export async function loadPayrollInputs(
   period: string,
   employeeIds?: string[],
 ): Promise<PayrollInputs> {
-  const { rules, version } = await loadRuleConfig(tenantId)
+  // 規則依「計算月份」選版，不是「今天」——重算舊月份要拿當時的規則。
+  const { rules, version } = await loadRuleConfigFor(tenantId, period)
 
   // --- salary structures (the run is salary-driven) --------------------------
   let salQuery = supabaseAdmin.from("salary_structures").select(SALARY_COLS).eq("tenant_id", tenantId)

@@ -25,10 +25,12 @@ import {
 import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { managerOfEmployee } from "../middleware/scope.js"
 import { settleAttendance } from "./settlement.js"
+import { tenantBlocksApproveOnUnsettledLeave } from "./leave-settlement.js"
 import { pairPunchesTz } from "./punch-pairing.js"
 import {
   buildPayrollInputs,
   loadRuleConfig,
+  loadRuleConfigFor,
   toAttendanceDay,
   type AttendanceDayInput,
   type AttendanceDayRow,
@@ -325,6 +327,16 @@ export interface AnomalyContext {
   dayFacts: Map<DateKey, AnomalyDayFacts>
   /** pending 假單（期間內）數量。 */
   pendingLeaveCount: number
+  /**
+   * B8：已核准但尚未核銷（settled_at IS NULL，期間內重疊）假單數量。Optional
+   * （非 undefined 就參與判斷）是為了不破壞既有
+   * __tests__/attendance-sheets-anomalies.test.ts 手工建構 AnomalyContext 的
+   * fixture（那個檔案不在本次任務改動範圍內）——真正的生產路徑
+   * （anomalyContextFor）一定會填這兩欄。
+   */
+  unsettledLeaveCount?: number
+  /** B8：tenants.features.attendance.blockApproveOnUnsettledLeave——true 時上面那條異常升級為 error。 */
+  blockApproveOnUnsettledLeave?: boolean
   hasSalaryStructure: boolean
 }
 
@@ -510,6 +522,17 @@ export function computeAnomalies(
       message: `本月仍有 ${ctx.pendingLeaveCount} 張假單待簽核，核准後請假時數才會計入`,
     })
   }
+  // B8 假單月底核銷：期間內已核准但尚未核銷的假單。severity 由 tenants.features
+  // .attendance.blockApproveOnUnsettledLeave 決定（預設 false → warn；true → error）。
+  const unsettledLeaveCount = ctx.unsettledLeaveCount ?? 0
+  if (unsettledLeaveCount > 0) {
+    result.month.push({
+      code: "unsettled_leave_in_period" as SheetAnomaly["code"],
+      severity: ctx.blockApproveOnUnsettledLeave === true ? "error" : "warn",
+      detail: { count: unsettledLeaveCount, period: sheet.period },
+      message: `本月有 ${unsettledLeaveCount} 張假單已核准但人資尚未核銷`,
+    })
+  }
   if (!ctx.hasSalaryStructure) {
     result.month.push({ code: "no_salary_structure", severity: "warn", message: "尚未設定薪資結構，無法試算金額" })
   }
@@ -620,6 +643,10 @@ interface MonthFacts {
   calendar: Map<DateKey, DayType>
   leaveNameByCode: Map<string, string>
   pendingLeaveByEmp: Map<string, number>
+  /** B8：已核准但尚未核銷（settled_at IS NULL，期間內重疊）假單數量。 */
+  unsettledLeaveByEmp: Map<string, number>
+  /** B8：tenants.features.attendance.blockApproveOnUnsettledLeave。整批（同一次 loadMonthFacts）共用同一個值。 */
+  blockApproveOnUnsettledLeave: boolean
   salaryEmpIds: Set<string>
 }
 
@@ -653,7 +680,7 @@ async function loadCalendarDayTypes(tenantId: string, from: DateKey, to: DateKey
 async function loadMonthFacts(tenantId: string, period: string, employeeIds: string[]): Promise<MonthFacts> {
   const tz = await getTenantTimezone(tenantId)
   const { from, to } = monthRangeKeys(period)
-  const { rules, version } = await loadRuleConfig(tenantId)
+  const { rules, version } = await loadRuleConfigFor(tenantId, period)
   const facts: MonthFacts = {
     tz,
     rules,
@@ -667,6 +694,8 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     calendar: new Map(),
     leaveNameByCode: new Map(),
     pendingLeaveByEmp: new Map(),
+    unsettledLeaveByEmp: new Map(),
+    blockApproveOnUnsettledLeave: false,
     salaryEmpIds: new Set(),
   }
   if (employeeIds.length === 0) return facts
@@ -797,6 +826,24 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     facts.pendingLeaveByEmp.set(r.employee_id, (facts.pendingLeaveByEmp.get(r.employee_id) ?? 0) + 1)
   }
 
+  // B8：已核准但尚未核銷（settled_at IS NULL）的假單，overlap 語意同上一段的 pending leave 查詢。
+  const { data: unsettledData, error: unsettledErr } = await supabaseAdmin
+    .from("leave_requests")
+    .select("employee_id")
+    .eq("tenant_id", tenantId)
+    .eq("kind", "leave")
+    .eq("status", "approved")
+    .is("settled_at", null)
+    .is("deleted_at", null)
+    .in("employee_id", employeeIds)
+    .lt("start_at", rangeEnd)
+    .gt("end_at", rangeStart)
+  if (unsettledErr) throw new Error(`attendance-sheets (unsettled leave): ${unsettledErr.message}`)
+  for (const r of (unsettledData ?? []) as Array<{ employee_id: string }>) {
+    facts.unsettledLeaveByEmp.set(r.employee_id, (facts.unsettledLeaveByEmp.get(r.employee_id) ?? 0) + 1)
+  }
+  facts.blockApproveOnUnsettledLeave = await tenantBlocksApproveOnUnsettledLeave(tenantId)
+
   // salary structures present?
   const { data: salData, error: salErr } = await supabaseAdmin
     .from("salary_structures")
@@ -886,6 +933,8 @@ function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContex
     rules: facts.rules,
     dayFacts,
     pendingLeaveCount: facts.pendingLeaveByEmp.get(employeeId) ?? 0,
+    unsettledLeaveCount: facts.unsettledLeaveByEmp.get(employeeId) ?? 0,
+    blockApproveOnUnsettledLeave: facts.blockApproveOnUnsettledLeave,
     hasSalaryStructure: facts.salaryEmpIds.has(employeeId),
   }
 }

@@ -1,13 +1,10 @@
 import {
   computeAttendanceDay,
-  parseRuleConfig,
   resolveOvertimeDailyCapMinutes,
   type DayType,
-  type RuleConfig,
   type ShiftDef,
 } from "@hr/rules"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import {
   addDaysKey,
@@ -18,6 +15,7 @@ import {
   type DateKey,
 } from "../lib/tz.js"
 import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { loadRuleConfigFor } from "./payroll-inputs.js"
 import { pairPunchesTz, type PairedDay } from "./punch-pairing.js"
 
 /**
@@ -30,7 +28,8 @@ import { pairPunchesTz, type PairedDay } from "./punch-pairing.js"
  *   • the employee's schedule → shift (start/end/break) for the day,
  *   • the day's type from tenant_calendar_days (fallback: Sat/Sun rest_day),
  *   • approved leave minutes sliced onto that local day (by leave-type code),
- *   • the tenant's active rule_config (falling back to the default template),
+ *   • the rule_config version in effect for the settled month (falling back to
+ *     the default template),
  * then calls computeAttendanceDay and upserts the result into attendance_days.
  *
  * Business clock = the tenant's timezone (tenants.timezone, default
@@ -222,26 +221,6 @@ function sliceLeave(
   return out
 }
 
-async function loadRules(tenantId: string): Promise<RuleConfig> {
-  const { data: cfgRow, error: cfgErr } = await supabaseAdmin
-    .from("rule_configs")
-    .select("config")
-    .eq("tenant_id", tenantId)
-    .eq("active", true)
-    .order("version", { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  if (cfgErr) throw new Error(`settleAttendance (rule_config): ${cfgErr.message}`)
-  try {
-    // Always run the stored jsonb through parseRuleConfig — the engine's
-    // resolve* helpers assume a parsed shape (defaults applied, enums checked).
-    return cfgRow?.config ? parseRuleConfig(cfgRow.config) : DEFAULT_RULE_CONFIG
-  } catch {
-    // A malformed stored config should not block settlement — fall back safely.
-    return DEFAULT_RULE_CONFIG
-  }
-}
-
 /** tenant_calendar_days in [from, to] → date → DayType (empty until 0038). */
 async function loadCalendar(tenantId: string, from: DateKey, to: DateKey): Promise<Map<DateKey, DayType>> {
   const map = new Map<DateKey, DayType>()
@@ -310,7 +289,11 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   if (from > to) throw new Error("settleAttendance: from must be <= to")
 
   const tz = await getTenantTimezone(tenantId)
-  const rules = await loadRules(tenantId)
+  // 規則依「結算的是哪個月」選版（以結束日期所屬月份為準）——重跑舊月份的結算
+  // 必須拿當時生效的規則，不能拿今天的。attendance-sheets 的 generateSheets /
+  // recomputeSheet 都是 monthRangeKeys(period) 算出 from/to，故 to 恆落在
+  // period 當月，與那邊 loadMonthFacts(period) 的選版一致。
+  const { rules } = await loadRuleConfigFor(tenantId, to.slice(0, 7))
   const regularMinutes = Math.round(rules.payroll.dailyRegularHours * 60)
   const dailyCap = resolveOvertimeDailyCapMinutes(rules)
 

@@ -1638,17 +1638,73 @@ export interface RuleConfigResponse {
   version: number;
   scope?: string;
   isDefault: boolean;
+  /** 這個版本的生效日（'YYYY-MM-DD'）；查無適用版本、退回 DEFAULT_RULE_CONFIG 時為 null。 */
+  effectiveFrom: string | null;
+}
+
+/**
+ * GET /rule-config/versions 的單筆版本紀錄。
+ * summary 後端目前沒有資料來源，幾乎必為 undefined——顯示時不要假設一定有值。
+ */
+export interface RuleConfigVersion {
+  version: number;
+  effectiveFrom: string;
+  createdAt: string;
+  active: boolean;
+  summary?: string;
 }
 
 export function getRuleConfig() {
   return apiFetch<RuleConfigResponse>("/rule-config");
 }
 
-export function saveRuleConfig(config: RuleConfig) {
+export function getRuleConfigVersions() {
+  return apiFetch<RuleConfigVersion[]>("/rule-config/versions");
+}
+
+/**
+ * opts.effectiveFrom："now" = 立即生效（今天）、undefined/不傳 = 後端預設下個月1號、
+ * "YYYY-MM-DD" = 指定生效日。
+ * 不傳 opts 時序列化結果跟改動前完全一樣（JSON.stringify 會省略值為 undefined 的欄位），
+ * 舊呼叫端（apps/web/src/app/admin/module-settings/page.tsx 的兩處 saveRuleConfig(...)）
+ * 不用跟著改。
+ */
+export function saveRuleConfig(config: RuleConfig, opts?: { effectiveFrom?: string }) {
   return apiFetch<{ id: string; version: number }>("/rule-config", {
     method: "PUT",
-    body: JSON.stringify(config),
+    body: JSON.stringify({ ...config, effectiveFrom: opts?.effectiveFrom }),
   });
+}
+
+/** 'YYYY-MM' → 下個月第一天 'YYYY-MM-DD'（選版的 exclusive 上界）。 */
+export function nextPeriodFirstDay(period: string): string {
+  const [y, m] = period.split("-").map(Number);
+  const ny = m === 12 ? y + 1 : y;
+  const nm = m === 12 ? 1 : m + 1;
+  return `${ny}-${String(nm).padStart(2, "0")}-01`;
+}
+
+/**
+ * 從版本清單中挑出 `period`（'YYYY-MM'）當時生效的那一筆；沒有任何一筆在這個月份
+ * 之前生效過就回 null（呼叫端自行決定 fallback 文字，例如顯示「預設規則」）。
+ *
+ * 純函式、不打 API，方便之後單測。選版邏輯必須對齊後端
+ * apps/api/src/services/payroll-inputs.ts 的 pickRuleConfigVersion（同名，同演算法）：
+ * 取 effectiveFrom < 下個月1號 的版本中，effectiveFrom 最大、同日 version 最大者。
+ * 'YYYY-MM-DD' 是定寬零補字串，字典序＝時間序，字串比較即可、不用轉 Date。
+ */
+export function pickRuleConfigVersion<T extends { version: number; effectiveFrom: string }>(
+  rows: readonly T[],
+  period: string,
+): T | null {
+  const boundary = nextPeriodFirstDay(period);
+  const eligible = rows.filter((r) => r.effectiveFrom < boundary);
+  if (eligible.length === 0) return null;
+  return eligible.reduce<T | null>((best, r) => {
+    if (!best) return r;
+    if (r.effectiveFrom !== best.effectiveFrom) return r.effectiveFrom > best.effectiveFrom ? r : best;
+    return r.version > best.version ? r : best;
+  }, null);
 }
 
 /* ---------------------------------------------------------- 行事曆 / 假日表 --- */

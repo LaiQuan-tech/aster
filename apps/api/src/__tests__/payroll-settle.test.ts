@@ -168,7 +168,9 @@ describe("F2 rule-config — validate via @hr/rules + upsert active", () => {
     const put = await request(app)
       .put("/rule-config")
       .set("Authorization", `Bearer ${A.adminToken}`)
-      .send(VALID_DSL)
+      // C4：不給 effectiveFrom 現在預設下個月1號生效，這裡要驗「馬上 GET 回剛存的」，
+      // 必須明講 now，否則 GET 會落回 DEFAULT_RULE_CONFIG（這版還沒生效）。
+      .send({ ...VALID_DSL, effectiveFrom: "now" })
     expect(put.status).toBe(200)
 
     const get = await request(app)

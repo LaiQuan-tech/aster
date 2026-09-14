@@ -19,6 +19,7 @@ import {
   type SheetView,
   type SheetDayPatch,
 } from "@/lib/attendance-sheets-api";
+import { getRuleConfigVersions, pickRuleConfigVersion, type RuleConfigVersion } from "@/lib/admin-api";
 
 function fmtDateTime(iso: string | null): string {
   if (!iso) return "—";
@@ -40,6 +41,8 @@ export default function AttendanceSheetDetailPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  // 本月適用規則版本清單；null = 還在載入或拿不到，此時上方顯示直接跳過，不擋月表其餘內容。
+  const [ruleVersions, setRuleVersions] = useState<RuleConfigVersion[] | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -57,6 +60,15 @@ export default function AttendanceSheetDetailPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    // 生效日資訊非關鍵路徑：拿不到就跳過顯示，不影響月表其餘內容。
+    getRuleConfigVersions()
+      .then(setRuleVersions)
+      .catch(() => {
+        // 忽略——ruleVersions 維持 null，畫面上該區塊直接不顯示。
+      });
+  }, []);
 
   async function handlePatchDay(date: string, patch: SheetDayPatch) {
     if (!sheet) return;
@@ -177,6 +189,13 @@ export default function AttendanceSheetDetailPage() {
   const canReopen = sheet.status === "approved";
   const canRecompute = sheet.status === "draft" || sheet.status === "returned";
 
+  const pickedRuleVersion = ruleVersions ? pickRuleConfigVersion(ruleVersions, sheet.period) : null;
+  const ruleVersionLabel = !ruleVersions
+    ? null
+    : pickedRuleVersion
+      ? `本月適用規則 v${pickedRuleVersion.version}（生效 ${pickedRuleVersion.effectiveFrom}）`
+      : "本月適用規則：預設規則";
+
   return (
     <>
       <div className="no-print mb-2 flex items-start justify-between gap-3">
@@ -195,6 +214,7 @@ export default function AttendanceSheetDetailPage() {
           <span>經理審 {fmtDateTime(sheet.managerReviewedAt)}</span>
           <span>核准 {fmtDateTime(sheet.approvedAt)}</span>
           <span>鎖定 {fmtDateTime(sheet.lockedAt)}</span>
+          {ruleVersionLabel && <span>{ruleVersionLabel}</span>}
           {sheet.returnReason && <span className="text-red-600">退回原因：{sheet.returnReason}</span>}
         </div>
 

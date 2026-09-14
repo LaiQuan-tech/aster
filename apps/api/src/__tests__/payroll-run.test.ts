@@ -182,7 +182,9 @@ beforeAll(async () => {
   const putRules = await request(app)
     .put("/rule-config")
     .set("Authorization", `Bearer ${A.adminToken}`)
-    .send(VALID_DSL)
+    // C4：PUT 預設下個月1號生效，這裡要馬上算薪資，必須明講 now，否則會撈到
+    // DEFAULT_RULE_CONFIG（這版還沒生效）。
+    .send({ ...VALID_DSL, effectiveFrom: "now" })
   if (putRules.status !== 200) throw new Error(`beforeAll: PUT rule-config (${putRules.status})`)
 
   const putSalary = await request(app)
