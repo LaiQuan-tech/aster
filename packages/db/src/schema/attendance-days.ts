@@ -12,6 +12,12 @@ import { employees } from "./employees"
  * settlement notes (e.g. an unpaired punch). The unique (tenant_id,
  * employee_id, work_date) index makes the settlement idempotent (re-running
  * updates rather than duplicates) and powers payroll/report reads downstream.
+ *
+ * P0 亞斯特 Excel 對齊新增四欄：`leaveMinutes`（當日請假分鐘數合計）、
+ * `leaveBreakdown`（依假別拆分，`{leaveTypeCode: minutes}`，供明細表列出
+ * 「病假 2 小時、特休 1 小時」而不是只有一個總數）、`outingMinutes`（外出/
+ * 公出，計入出勤但不計入請假）、`earlyLeaveMinutes`（早退分鐘數，與
+ * `lateMinutes` 對稱，Excel 的「內容」欄常同時記遲到與早退)。
  */
 export const attendanceDays = pgTable(
   "attendance_days",
@@ -30,6 +36,10 @@ export const attendanceDays = pgTable(
     nightMinutes: integer("night_minutes").notNull().default(0),
     dayType: text("day_type").notNull().default("workday"),
     anomaly: jsonb("anomaly"),
+    leaveMinutes: integer("leave_minutes").notNull().default(0),
+    leaveBreakdown: jsonb("leave_breakdown").notNull().default({}),
+    outingMinutes: integer("outing_minutes").notNull().default(0),
+    earlyLeaveMinutes: integer("early_leave_minutes").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

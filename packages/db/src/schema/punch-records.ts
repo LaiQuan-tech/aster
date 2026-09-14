@@ -10,6 +10,13 @@ import { employees } from "./employees"
  * employee's perspective (HR may correct). The (tenant_id, employee_id,
  * punch_at) index powers "this employee's punches in a date window" and the
  * "last punch today" lookup that drives in/out auto-inference.
+ *
+ * `requestId` optionally points at the approved 補打卡 request that created
+ * this row (kind='punch_correction' on the requests table family), so a
+ * corrected punch can be traced back to its paper trail. Deliberately no FK:
+ * the correction-request table lives in a different module that may not be
+ * migrated yet on every environment, and this is a soft trace, not an
+ * integrity-critical link.
  */
 export const punchRecords = pgTable(
   "punch_records",
@@ -27,6 +34,7 @@ export const punchRecords = pgTable(
     lat: doublePrecision("lat"),
     lng: doublePrecision("lng"),
     deviceId: text("device_id"),
+    requestId: uuid("request_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

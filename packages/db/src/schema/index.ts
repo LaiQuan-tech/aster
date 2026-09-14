@@ -1,5 +1,6 @@
 // Schema barrel.
 export { tenants } from "./tenants"
+export { tenantCalendarDays } from "./tenant-calendar-days"
 export { departments } from "./departments"
 export { employees } from "./employees"
 export { shifts } from "./shifts"

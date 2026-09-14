@@ -31,7 +31,7 @@ describe("tenants table", () => {
 
   it("has the expected columns", () => {
     expect(Object.keys(cols).sort()).toEqual(
-      ["id", "name", "status", "branding", "features", "createdAt"].sort(),
+      ["id", "name", "status", "branding", "features", "timezone", "createdAt"].sort(),
     )
   })
 })

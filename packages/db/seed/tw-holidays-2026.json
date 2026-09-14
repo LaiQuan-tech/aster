@@ -1,0 +1,44 @@
+{
+  "_comment": "中華民國115年（西元2026年）政府行政機關辦公日曆表 — 放假日清單（不含例假日週六、週日）。JSON 不支援註解，說明放在這個 _comment 欄位；消費端程式請忽略以底線開頭的欄位。",
+  "_source": [
+    "https://www.dgpa.gov.tw/information?pid=12573&uid=41",
+    "https://www.dgpa.gov.tw/informationlist?uid=30",
+    "https://blog.104.com.tw/2026-taiwan-government-calendar/",
+    "https://www.businessweekly.com.tw/focus/blog/3018416",
+    "https://www.storm.mg/lifestyle/11113820",
+    "https://www.storm.mg/article/11085595"
+  ],
+  "_note": "行政院人事行政總處官網（dgpa.gov.tw）該公告頁面的日曆表本身是圖檔（PNG 內嵌），WebFetch 無法直接讀出文字，故以上列多家新聞／人力銀行報導交叉核對日期（每個日期至少 2 個獨立來源一致）；2026 下半年起新制「只補假、不補班」，故全年沒有補班日。",
+  "_checkedOn": "2026-09-14",
+  "_verifiedAgainstChecklist": {
+    "1/1": "verified", "春節連假": "verified(除夕~初三+小年夜調整放假)",
+    "2/28": "verified", "兒童節清明": "verified",
+    "5/1": "verified", "6/19端午": "verified",
+    "9/25中秋": "verified", "9/28教師節": "verified",
+    "10/9(10/10補假)": "verified", "10/26(光復節補假)": "verified",
+    "12/25": "verified"
+  },
+  "holidays": [
+    { "date": "2026-01-01", "label": "元旦" },
+    { "date": "2026-02-16", "label": "春節（除夕）" },
+    { "date": "2026-02-17", "label": "春節（初一）" },
+    { "date": "2026-02-18", "label": "春節（初二）" },
+    { "date": "2026-02-19", "label": "春節（初三）" },
+    { "date": "2026-02-20", "label": "小年夜調整放假（小年夜2/15適逢週日，調整至本日放假）", "type": "adjusted" },
+    { "date": "2026-02-27", "label": "和平紀念日補假（2/28適逢週六）", "type": "make_up" },
+    { "date": "2026-02-28", "label": "和平紀念日" },
+    { "date": "2026-04-03", "label": "兒童節補假（4/4適逢週六）", "type": "make_up" },
+    { "date": "2026-04-04", "label": "兒童節" },
+    { "date": "2026-04-05", "label": "清明節" },
+    { "date": "2026-04-06", "label": "清明節補假（4/5適逢週日）", "type": "make_up" },
+    { "date": "2026-05-01", "label": "勞動節" },
+    { "date": "2026-06-19", "label": "端午節" },
+    { "date": "2026-09-25", "label": "中秋節" },
+    { "date": "2026-09-28", "label": "教師節" },
+    { "date": "2026-10-09", "label": "國慶日補假（10/10適逢週六）", "type": "make_up" },
+    { "date": "2026-10-10", "label": "國慶日" },
+    { "date": "2026-10-25", "label": "台灣光復暨金門古寧頭大捷紀念日" },
+    { "date": "2026-10-26", "label": "台灣光復暨金門古寧頭大捷紀念日補假（10/25適逢週日）", "type": "make_up" },
+    { "date": "2026-12-25", "label": "行憲紀念日" }
+  ]
+}

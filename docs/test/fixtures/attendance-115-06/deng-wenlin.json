@@ -1,0 +1,560 @@
+{
+  "employee": {
+    "name": "鄧文琳",
+    "title": "助理工程師",
+    "baseSalary": 46000,
+    "laborInsurance": 1145,
+    "healthInsurance": 710,
+    "pensionVoluntary": 0,
+    "nhiDependents": 0,
+    "hireDate": "2023-01-30"
+  },
+  "punchMode": "full_day",
+  "shift": {
+    "start": "09:00",
+    "end": "18:00",
+    "breakMinutes": 60
+  },
+  "days": [
+    {
+      "date": "2026-06-01",
+      "weekday": "一",
+      "in": "08:56",
+      "out": "17:17",
+      "leaveHours": 1,
+      "leaveType": "育嬰假",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-02",
+      "weekday": "二",
+      "in": "08:56",
+      "out": "17:07",
+      "leaveHours": 1,
+      "leaveType": "育嬰假",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-03",
+      "weekday": "三",
+      "in": "08:52",
+      "out": "17:03",
+      "leaveHours": 1,
+      "leaveType": "育嬰假",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-04",
+      "weekday": "四",
+      "in": "08:49",
+      "out": "17:02",
+      "leaveHours": 1,
+      "leaveType": "育嬰假",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-05",
+      "weekday": "五",
+      "in": "08:50",
+      "out": "17:09",
+      "leaveHours": 1,
+      "leaveType": "育嬰假",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-06",
+      "weekday": "六",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": true
+    },
+    {
+      "date": "2026-06-07",
+      "weekday": "日",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": true
+    },
+    {
+      "date": "2026-06-08",
+      "weekday": "一",
+      "in": "08:51",
+      "out": "12:08",
+      "leaveHours": 5,
+      "leaveType": "育嬰假",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-09",
+      "weekday": "二",
+      "in": "08:53",
+      "out": "17:16",
+      "leaveHours": 1,
+      "leaveType": "育嬰假",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-10",
+      "weekday": "三",
+      "in": "08:56",
+      "out": "17:06",
+      "leaveHours": 1,
+      "leaveType": "育嬰假123",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": "育嬰假123",
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-11",
+      "weekday": "四",
+      "in": "08:52",
+      "out": "17:08",
+      "leaveHours": 1,
+      "leaveType": "育嬰假",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-12",
+      "weekday": "五",
+      "in": "08:56",
+      "out": "18:16",
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-13",
+      "weekday": "六",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": true
+    },
+    {
+      "date": "2026-06-14",
+      "weekday": "日",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": true
+    },
+    {
+      "date": "2026-06-15",
+      "weekday": "一",
+      "in": "08:50",
+      "out": "17:14",
+      "leaveHours": 1,
+      "leaveType": "育嬰假",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-16",
+      "weekday": "二",
+      "in": "08:52",
+      "out": "17:02",
+      "leaveHours": 1,
+      "leaveType": "育嬰假",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-17",
+      "weekday": "三",
+      "in": "08:41",
+      "out": "17:03",
+      "leaveHours": 1,
+      "leaveType": "育嬰假124",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": "育嬰假124",
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-18",
+      "weekday": "四",
+      "in": "08:38",
+      "out": "17:07",
+      "leaveHours": 1,
+      "leaveType": "育嬰假",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-19",
+      "weekday": "五",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": "端午節",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": "端午節",
+      "outing": null,
+      "project": null,
+      "hidden": true
+    },
+    {
+      "date": "2026-06-20",
+      "weekday": "六",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": true
+    },
+    {
+      "date": "2026-06-21",
+      "weekday": "日",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": true
+    },
+    {
+      "date": "2026-06-22",
+      "weekday": "一",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": "特休",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": "特休",
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-23",
+      "weekday": "二",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": "特休",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": "特休",
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-24",
+      "weekday": "三",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": "特休",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": "特休",
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-25",
+      "weekday": "四",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": "特休",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": "特休",
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-26",
+      "weekday": "五",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": "特休",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": "特休",
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-27",
+      "weekday": "六",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": true
+    },
+    {
+      "date": "2026-06-28",
+      "weekday": "日",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": true
+    },
+    {
+      "date": "2026-06-29",
+      "weekday": "一",
+      "in": "08:57",
+      "out": "17:05",
+      "leaveHours": 1,
+      "leaveType": "育嬰假",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-06-30",
+      "weekday": "二",
+      "in": "08:52",
+      "out": "17:06",
+      "leaveHours": 1,
+      "leaveType": "育嬰假125",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": "育嬰假125",
+      "outing": null,
+      "project": null,
+      "hidden": false
+    },
+    {
+      "date": "2026-07-01",
+      "weekday": "三",
+      "in": null,
+      "out": null,
+      "leaveHours": 0,
+      "leaveType": "育嬰假125",
+      "otExcel": {
+        "le2": 0,
+        "h3to8": 0,
+        "h9to12": 0
+      },
+      "content": "育嬰假125",
+      "outing": null,
+      "project": null,
+      "hidden": true
+    }
+  ],
+  "summaryExcel": {
+    "leaveHours": 19,
+    "otLe2": 0,
+    "otH3to8": 0,
+    "otH9to12": 0,
+    "otTotal": 0,
+    "hourly": 191.67,
+    "otPay": 0.0,
+    "leaveDeduction": 3641.67,
+    "net": 40503.33,
+    "expenses": 0.0,
+    "netPlusExpenses": 40503.33
+  }
+}

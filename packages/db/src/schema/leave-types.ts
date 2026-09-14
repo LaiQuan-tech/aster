@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, boolean, timestamp, uniqueIndex } from "drizzle-orm/pg-core"
+import { pgTable, uuid, text, boolean, numeric, timestamp, uniqueIndex } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 
 /**
@@ -9,6 +9,12 @@ import { tenants } from "./tenants"
  * entry can list them apart from ordinary leave. Only used by requests of kind
  * 'leave'. The unique (tenant_id, code) index lets a tenant reuse a code another
  * tenant already took while keeping it unique within their own org.
+ *
+ * `deductRate` is how much of a leave day counts against attendance-based pay
+ * (0 = no deduction … 1 = full-day deduction; e.g. 病假半薪 = 0.50). NULL means
+ * "derive from `paid`": paid=true → 0, paid=false → 1. Kept nullable rather
+ * than backfilled so existing rows keep falling back to the `paid` flag until
+ * someone explicitly sets a rate.
  */
 export const leaveTypes = pgTable(
   "leave_types",
@@ -21,6 +27,7 @@ export const leaveTypes = pgTable(
     name: text("name").notNull(),
     paid: boolean("paid").notNull().default(true),
     special: boolean("special").notNull().default(false),
+    deductRate: numeric("deduct_rate", { precision: 3, scale: 2 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

@@ -1,0 +1,141 @@
+{
+  "employee": {
+    "name": "劉明哲",
+    "title": "經理",
+    "baseSalary": 51000,
+    "laborInsurance": 1145,
+    "healthInsurance": 1644,
+    "pensionVoluntary": 0.06,
+    "nhiDependents": 2,
+    "hireDate": "2015-07-01"
+  },
+  "punchMode": "overtime_only",
+  "shift": {
+    "start": "14:00",
+    "end": "22:00",
+    "breakMinutes": 60
+  },
+  "days": [
+    {
+      "date": "2026-06-01",
+      "weekday": "一",
+      "in": "22:30",
+      "out": "03:30",
+      "nextDay": true,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 2,
+        "h3to8": 3,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": "橋新安居",
+      "hidden": false
+    },
+    {
+      "date": "2026-06-02",
+      "weekday": "二",
+      "in": "22:30",
+      "out": "03:30",
+      "nextDay": true,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 2,
+        "h3to8": 3,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": "橋新安居",
+      "hidden": false
+    },
+    {
+      "date": "2026-06-03",
+      "weekday": "三",
+      "in": "22:30",
+      "out": "02:30",
+      "nextDay": true,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 2,
+        "h3to8": 2,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": "橋新安居",
+      "hidden": false
+    },
+    {
+      "date": "2026-06-04",
+      "weekday": "四",
+      "in": "22:30",
+      "out": "03:00",
+      "nextDay": true,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 2,
+        "h3to8": 2.5,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": "橋新安居",
+      "hidden": false
+    },
+    {
+      "date": "2026-06-05",
+      "weekday": "五",
+      "in": "22:30",
+      "out": "04:00",
+      "nextDay": true,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 2,
+        "h3to8": 3.5,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": "橋新安居",
+      "hidden": false
+    },
+    {
+      "date": "2026-06-08",
+      "weekday": "一",
+      "in": "22:30",
+      "out": "04:00",
+      "nextDay": true,
+      "leaveHours": 0,
+      "leaveType": null,
+      "otExcel": {
+        "le2": 2,
+        "h3to8": 3.5,
+        "h9to12": 0
+      },
+      "content": null,
+      "outing": null,
+      "project": "橋新安居",
+      "hidden": false
+    }
+  ],
+  "summaryExcel": {
+    "leaveHours": 0,
+    "otLe2": 12,
+    "otH3to8": 17.5,
+    "otH9to12": 0,
+    "otTotal": 29.5,
+    "hourly": 212.5,
+    "otPay": 9599.62,
+    "leaveDeduction": 0,
+    "net": 55062.62,
+    "expenses": 2350.0,
+    "netPlusExpenses": 57412.62
+  }
+}

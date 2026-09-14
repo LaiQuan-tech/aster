@@ -267,6 +267,13 @@
       "when": 1789317772518,
       "tag": "0037_ai_modules_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1789354053825,
+      "tag": "0038_p0_attendance_foundation",
+      "breakpoints": true
     }
   ]
 }
