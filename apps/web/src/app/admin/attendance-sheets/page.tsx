@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Card, PageHeader, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { MonthPicker } from "@/components/MonthPicker";
@@ -53,6 +53,9 @@ export default function AttendanceSheetsPage() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
+  // 當月還沒有月表時（例如月初、或 demo 資料在別的月份），自動往前找最近一個有月表的月份，
+  // 免得老闆打開看到一片空白。只在「沒套任何篩選」且是第一次載入時做，最多往回找 12 個月。
+  const autoJumped = useRef(false);
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -62,6 +65,20 @@ export default function AttendanceSheetsPage() {
         deptId: deptId || undefined,
         anomaly: onlyAnomaly || undefined,
       });
+      if (res.sheets.length === 0 && !autoJumped.current && !status && !deptId && !onlyAnomaly) {
+        autoJumped.current = true;
+        for (let back = 1; back <= 12; back += 1) {
+          const [y, m] = period.split("-").map(Number);
+          const d = new Date(Date.UTC(y, m - 1 - back, 1));
+          const candidate = d.toISOString().slice(0, 7);
+          const prev = await listAttendanceSheets({ period: candidate });
+          if (prev.sheets.length > 0) {
+            setPeriod(candidate);
+            setMessage(`${period} 尚無月表，已切到最近有資料的 ${candidate}`);
+            return;
+          }
+        }
+      }
       setSheets(res.sheets);
       setError(null);
     } catch (err) {
