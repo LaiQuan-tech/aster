@@ -72,12 +72,15 @@ const updateSchema = z
     amount: z.number().nullable().optional(),
     signedOn: z.string().regex(dateRe).nullable().optional(),
     copies: z.number().int().min(1).max(50).optional(),
+    // B1：貼花方式（我方貼／對方貼／各自貼）常常是簽約後才確認，開放可改；
+    // 下面 touchesDuty 會連同稅額一起重算，不會留下舊結論。
+    ourRole: z.enum(OUR_ROLES).optional(),
     stampDutyRequired: z.enum(STAMP_DUTY_FLAGS).optional(),
     stampDutyRate: z.number().min(0).max(1).nullable().optional(),
     stampDutyPaidOn: z.string().regex(dateRe).nullable().optional(),
     stampDutyNote: z.string().trim().max(2000).nullable().optional(),
-    // docType / ourRole 刻意不可改：兩者決定課不課稅，改了等於改變已經
-    // 試算並可能已貼花的結論。要改請作廢後重立一件。
+    // docType 刻意不可改：決定課不課稅的文件分類（契據／報價單），改了等於
+    // 把契據冒充報價單（或反過來）。要改請作廢後重立一件。
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 
@@ -320,23 +323,26 @@ contractsRouter.patch(
       if (b.amount !== undefined) patch.amount = b.amount
       if (b.signedOn !== undefined) patch.signed_on = b.signedOn
       if (b.copies !== undefined) patch.copies = b.copies
+      if (b.ourRole !== undefined) patch.our_role = b.ourRole
       if (b.stampDutyRequired !== undefined) patch.stamp_duty_required = b.stampDutyRequired
       if (b.stampDutyRate !== undefined) patch.stamp_duty_rate = b.stampDutyRate
       if (b.stampDutyPaidOn !== undefined) patch.stamp_duty_paid_on = b.stampDutyPaidOn
       if (b.stampDutyNote !== undefined) patch.stamp_duty_note = b.stampDutyNote
 
-      // 金額／份數／費率／應貼花旗標任一改動，稅額就要重算——
-      // 否則清單會拿舊的凍結值，跟合約上的金額對不起來。
+      // 金額／份數／費率／應貼花旗標／我方角色任一改動，稅額就要重算——
+      // 否則清單會拿舊的凍結值，跟合約上的金額或貼花方式對不起來。
       const touchesDuty =
         b.amount !== undefined ||
         b.copies !== undefined ||
         b.stampDutyRate !== undefined ||
-        b.stampDutyRequired !== undefined
+        b.stampDutyRequired !== undefined ||
+        b.ourRole !== undefined
       if (touchesDuty) {
         const flag = b.stampDutyRequired ?? row.stamp_duty_required
+        const ourRole = b.ourRole ?? row.our_role
         const dutiable = resolveStampDutyRequired({
           docType: row.doc_type,
-          ourRole: row.our_role,
+          ourRole,
           flag,
         })
         // 重算用**列上凍結的費率**，不抓當下設定：本件適用的是簽約當年度
@@ -508,13 +514,14 @@ contractsRouter.get(
       }
 
       // 應貼花卻沒有簽訂日的合約：它們不在期間查詢裡，但正是最該被追的。
+      // our_role 包含 both——雙重身分我方仍須貼，漏掉會讓這格靜默低估。
       const { count: missingSignedOn } = await supabaseAdmin
         .from("contracts")
         .select("id", { count: "exact", head: true })
         .eq("tenant_id", tenantId)
         .is("deleted_at", null)
         .is("signed_on", null)
-        .eq("our_role", "contractor")
+        .in("our_role", ["contractor", "both"])
         .in("doc_type", ["contract", "change_order"])
 
       res.status(200).json({

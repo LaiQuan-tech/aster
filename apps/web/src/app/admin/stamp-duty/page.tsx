@@ -8,6 +8,7 @@ import {
   getProjectSettings,
   updateProjectSettings,
   DOC_TYPE_LABELS,
+  OUR_ROLE_SHORT_LABELS,
   type StampDutyItem,
   type StampDutySummary,
 } from "@/lib/projects-api";
@@ -75,7 +76,7 @@ export default function StampDutyPage() {
     <>
       <PageHeader
         title="印花稅計算與申報備查清單"
-        desc="凡我方為承攬人且已簽訂的合約與追加減帳，自動納入本清單。報價單不是契據，不課印花稅。"
+        desc="凡我方為承攬人或雙重身分（各自貼）且已簽訂的合約與追加減帳，自動納入本清單。報價單不是契據，不課印花稅。"
       />
 
       <Card>
@@ -105,7 +106,7 @@ export default function StampDutyPage() {
           <div className="flex items-end">
             <label className="flex items-center gap-1.5 pb-2 text-sm text-gray-600">
               <input type="checkbox" checked={unpaidOnly} onChange={(e) => setUnpaidOnly(e.target.checked)} />
-              只看未貼花
+              只看我方應貼未貼
             </label>
           </div>
         </div>
@@ -168,6 +169,7 @@ export default function StampDutyPage() {
                   <th className="py-2 pr-3">簽訂日</th>
                   <th className="py-2 pr-3">專案</th>
                   <th className="py-2 pr-3">類型</th>
+                  <th className="py-2 pr-3">貼花方式</th>
                   <th className="py-2 pr-3">文件</th>
                   <th className="py-2 pr-3">對方</th>
                   <th className="py-2 pr-3 text-right">金額</th>
@@ -186,6 +188,10 @@ export default function StampDutyPage() {
                       </Link>
                     </td>
                     <td className="py-2 pr-3 text-gray-600">{DOC_TYPE_LABELS[i.docType]}</td>
+                    <td className="py-2 pr-3 text-gray-600" title={i.stampDutyNote ?? undefined}>
+                      {OUR_ROLE_SHORT_LABELS[i.ourRole]}
+                      {i.stampDutyNote ? <span className="ml-1 text-gray-300">•</span> : null}
+                    </td>
                     <td className="py-2 pr-3 text-gray-900">{i.title}</td>
                     <td className="py-2 pr-3 text-gray-600">{i.counterparty ?? "—"}</td>
                     <td className="py-2 pr-3 text-right text-gray-600">{fmt(i.amount)}</td>

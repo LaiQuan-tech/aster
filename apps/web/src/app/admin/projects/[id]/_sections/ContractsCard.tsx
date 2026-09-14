@@ -10,6 +10,7 @@ import {
   deleteContract,
   DOC_TYPE_LABELS,
   OUR_ROLE_LABELS,
+  OUR_ROLE_SHORT_LABELS,
   type Contract,
   type DocType,
   type OurRole,
@@ -116,6 +117,44 @@ export function ContractsCard({
     }
   }
 
+  /** B1：貼花方式三選一——我方貼／對方貼／各自貼。簽約後常常才確認，
+   * 後端 PATCH 會連同印花稅額一起重算。 */
+  async function changeOurRole(c: Contract, ourRole: OurRole) {
+    if (ourRole === c.ourRole) return;
+    setError(null);
+    try {
+      await updateContract(c.id, { ourRole });
+      await load();
+    } catch (err) {
+      setError(humanError(err, "更新失敗"));
+    }
+  }
+
+  /** B1：「不用貼」開關——on 時強制 stampDutyRequired='no'（§6 免稅憑證等
+   * 系統判不了的情形）；off 時回到 'auto' 讓規則重新判定，不是留在某個
+   * 人工覆寫值上。 */
+  async function toggleStampDutyNotRequired(c: Contract, notRequired: boolean) {
+    setError(null);
+    try {
+      await updateContract(c.id, { stampDutyRequired: notRequired ? "no" : "auto" });
+      await load();
+    } catch (err) {
+      setError(humanError(err, "更新失敗"));
+    }
+  }
+
+  async function editStampDutyNote(c: Contract) {
+    const note = window.prompt("印花稅備註（例如：各自貼一份／已取得免稅憑證）", c.stampDutyNote ?? "");
+    if (note === null) return;
+    setError(null);
+    try {
+      await updateContract(c.id, { stampDutyNote: note.trim() || null });
+      await load();
+    } catch (err) {
+      setError(humanError(err, "更新失敗"));
+    }
+  }
+
   async function removeContract(c: Contract) {
     const reason = window.prompt(`作廢「${c.title}」的理由？`);
     if (!reason?.trim()) return;
@@ -171,7 +210,7 @@ export function ContractsCard({
                 <th className="py-2 pr-3 text-right">金額</th>
                 <th className="py-2 pr-3">簽訂日</th>
                 <th className="py-2 pr-3 text-right">印花稅</th>
-                <th className="py-2 pr-3">貼花</th>
+                <th className="py-2 pr-3">貼花方式／狀態</th>
                 <th className="py-2 pr-3">掃描檔</th>
                 <th className="py-2 pr-3"></th>
               </tr>
@@ -201,26 +240,58 @@ export function ContractsCard({
                     )}
                   </td>
                   <td className="py-2 pr-3">
-                    {!c.dutiable ? (
-                      "—"
-                    ) : c.stampDutyPaidOn ? (
+                    <div className="flex flex-col items-start gap-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <select
+                          className="rounded border border-gray-200 px-1 py-0.5 text-xs text-gray-600"
+                          value={c.ourRole}
+                          onChange={(e) => changeOurRole(c, e.target.value as OurRole)}
+                          title="貼花方式：我方貼／對方貼／各自貼"
+                        >
+                          {(Object.keys(OUR_ROLE_SHORT_LABELS) as OurRole[]).map((v) => (
+                            <option key={v} value={v}>
+                              {OUR_ROLE_SHORT_LABELS[v]}
+                            </option>
+                          ))}
+                        </select>
+                        <label className="flex items-center gap-1 text-xs text-gray-500">
+                          <input
+                            type="checkbox"
+                            checked={c.stampDutyRequired === "no"}
+                            onChange={(e) => toggleStampDutyNotRequired(c, e.target.checked)}
+                          />
+                          不用貼
+                        </label>
+                      </div>
+                      {!c.dutiable ? (
+                        <span className="text-xs text-gray-400">—</span>
+                      ) : c.stampDutyPaidOn ? (
+                        <button
+                          type="button"
+                          className="text-xs text-green-700 hover:underline"
+                          onClick={() => markStamped(c, null)}
+                          title="點一下取消標記"
+                        >
+                          已貼 {c.stampDutyPaidOn}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="rounded border border-gray-200 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-50"
+                          onClick={() => markStamped(c, new Date().toISOString().slice(0, 10))}
+                        >
+                          標記已貼花
+                        </button>
+                      )}
                       <button
                         type="button"
-                        className="text-xs text-green-700 hover:underline"
-                        onClick={() => markStamped(c, null)}
-                        title="點一下取消標記"
+                        className="max-w-[9rem] truncate text-left text-xs text-gray-400 hover:text-gray-600"
+                        onClick={() => editStampDutyNote(c)}
+                        title={c.stampDutyNote ?? "新增印花稅備註"}
                       >
-                        已貼 {c.stampDutyPaidOn}
+                        {c.stampDutyNote ? `備註：${c.stampDutyNote}` : "＋ 備註"}
                       </button>
-                    ) : (
-                      <button
-                        type="button"
-                        className="rounded border border-gray-200 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-50"
-                        onClick={() => markStamped(c, new Date().toISOString().slice(0, 10))}
-                      >
-                        標記已貼花
-                      </button>
-                    )}
+                    </div>
                   </td>
                   <td className="py-2 pr-3">
                     <div className="flex flex-wrap items-center gap-2">
@@ -284,7 +355,7 @@ export function ContractsCard({
                 <option key={v} value={v}>{OUR_ROLE_LABELS[v]}</option>
               ))}
             </select>
-            <p className="mt-1 text-xs text-gray-400">承攬契據由承攬人貼花，發包出去的由下包貼。</p>
+            <p className="mt-1 text-xs text-gray-400">承攬契據由承攬人貼花，發包出去的由下包貼；各自貼＝雙方各執一份、各自負責己方，我方仍需貼。</p>
           </div>
           <div>
             <label className={labelCls}>文件名稱 *</label>

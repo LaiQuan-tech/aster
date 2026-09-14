@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest"
 import {
+  OUR_ROLES,
   DEFAULT_STAMP_DUTY_RATE,
   DEFAULT_LOOKBACK_YEARS,
   isStampDutyApplicable,
@@ -63,6 +64,84 @@ describe("人工覆寫 auto / yes / no", () => {
     expect(
       resolveStampDutyRequired({ docType: "quotation", ourRole: "contractor", flag: "yes" }),
     ).toBe(true)
+  })
+})
+
+describe("B1：雙重身分 both（印花稅各自貼）", () => {
+  it("OUR_ROLES 含 both", () => {
+    expect(OUR_ROLES).toContain("both")
+  })
+
+  it("契據課——both 各自貼自己那份，我方仍須貼，跟 contractor 判定一致", () => {
+    expect(isStampDutyApplicable({ docType: "contract", ourRole: "both" })).toBe(true)
+    expect(isStampDutyApplicable({ docType: "change_order", ourRole: "both" })).toBe(true)
+  })
+
+  it("⚠️ 報價單仍不課——both 不會讓非契據變成契據", () => {
+    expect(isStampDutyApplicable({ docType: "quotation", ourRole: "both" })).toBe(false)
+  })
+
+  it("auto 規則下 both 與 contractor 的 dutiable 判定相同", () => {
+    const contractorResult = resolveStampDutyRequired({
+      docType: "contract",
+      ourRole: "contractor",
+      flag: "auto",
+    })
+    const bothResult = resolveStampDutyRequired({ docType: "contract", ourRole: "both", flag: "auto" })
+    expect(bothResult).toBe(contractorResult)
+    expect(bothResult).toBe(true)
+  })
+
+  it("summarizeStampDuty：both 與 contractor 同金額算出同額稅額（稅額照 contractor 算）", () => {
+    function row(ourRole: string): StampDutyRow {
+      return {
+        doc_type: "contract",
+        our_role: ourRole,
+        stamp_duty_required: "auto",
+        amount: "1000000",
+        stamp_duty_rate: "0.001",
+        stamp_duty_amount: null,
+        stamp_duty_paid_on: null,
+        signed_on: "2024-01-01",
+      }
+    }
+    const contractorSummary = summarizeStampDuty([row("contractor")])
+    const bothSummary = summarizeStampDuty([row("both")])
+    expect(bothSummary.dutiableCount).toBe(contractorSummary.dutiableCount)
+    expect(bothSummary.dutiableTotal).toBe(contractorSummary.dutiableTotal)
+    expect(bothSummary.unpaidTotal).toBe(contractorSummary.unpaidTotal)
+    expect(bothSummary.dutiableTotal).toBe(1000)
+  })
+
+  it("client 不比照 both／contractor——我方是定作人仍不課", () => {
+    expect(resolveStampDutyRequired({ docType: "contract", ourRole: "client", flag: "auto" })).toBe(false)
+  })
+})
+
+describe("B1：stampDutyRequired = 'no'（不用貼）", () => {
+  it("no 蓋過 contractor／both 原本會課稅的判定", () => {
+    expect(resolveStampDutyRequired({ docType: "contract", ourRole: "contractor", flag: "no" })).toBe(false)
+    expect(resolveStampDutyRequired({ docType: "contract", ourRole: "both", flag: "no" })).toBe(false)
+  })
+
+  it("summarizeStampDuty：稅額不計入應貼花，也不進未貼花——完全跳過這列", () => {
+    const s = summarizeStampDuty([
+      {
+        doc_type: "contract",
+        our_role: "contractor",
+        stamp_duty_required: "no",
+        amount: "5000000",
+        stamp_duty_rate: "0.001",
+        stamp_duty_amount: null,
+        stamp_duty_paid_on: null,
+        signed_on: "2024-01-01",
+      },
+    ])
+    expect(s.dutiableCount).toBe(0)
+    expect(s.dutiableTotal).toBe(0)
+    expect(s.unpaidCount).toBe(0)
+    expect(s.unpaidTotal).toBe(0)
+    expect(s.missingAmountCount).toBe(0)
   })
 })
 

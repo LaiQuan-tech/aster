@@ -22,7 +22,7 @@
 export const DOC_TYPES = ["contract", "quotation", "change_order"] as const
 export type DocType = (typeof DOC_TYPES)[number]
 
-export const OUR_ROLES = ["contractor", "client"] as const
+export const OUR_ROLES = ["contractor", "client", "both"] as const
 export type OurRole = (typeof OUR_ROLES)[number]
 
 /** 應貼花與否的人工覆寫：auto 依規則判定，yes/no 強制。 */
@@ -51,14 +51,19 @@ export function isDocType(v: string): v is DocType {
  *
  * 兩個條件都要成立：
  * 1. **是契據**——合約與追加減帳是，報價單不是
- * 2. **我方是承攬人**——§7③ 由承攬人貼花。公司發包給下包時，
- *    貼花的是下包，這種列不該進我方的應納稅額
+ * 2. **我方要貼**——§7③ 由承攬人貼花：
+ *    • `contractor` 我方是承攬人 → 我方貼
+ *    • `both` 雙重身分（B 批次新增）——雙方互為承攬與定作，各自貼自己
+ *      持有的那份，我方仍須貼，稅額算法與 `contractor` 相同（見
+ *      `computeStampDuty` 的 `copies` 本就只算我方持有份數）
+ *    • `client` 我方是定作人，公司發包給下包時貼花的是下包，
+ *      這種列不該進我方的應納稅額
  */
 export function isStampDutyApplicable(input: {
   docType: string
   ourRole: string
 }): boolean {
-  if (input.ourRole !== "contractor") return false
+  if (input.ourRole !== "contractor" && input.ourRole !== "both") return false
   return input.docType === "contract" || input.docType === "change_order"
 }
 

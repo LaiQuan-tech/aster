@@ -138,7 +138,7 @@ export interface ProjectSettings {
 /* -------------------------------------------------------------- contracts -- */
 
 export type DocType = "contract" | "quotation" | "change_order"
-export type OurRole = "contractor" | "client"
+export type OurRole = "contractor" | "client" | "both"
 export type StampDutyFlag = "auto" | "yes" | "no"
 
 export const DOC_TYPE_LABELS: Record<DocType, string> = {
@@ -150,6 +150,14 @@ export const DOC_TYPE_LABELS: Record<DocType, string> = {
 export const OUR_ROLE_LABELS: Record<OurRole, string> = {
   contractor: "我方承攬（我方貼花）",
   client: "我方定作（對方貼花）",
+  both: "雙重身分（各自貼花，我方仍需貼）",
+}
+
+/** 精簡標籤：表格／徽章等窄空間用（合約卡三選一、印花稅備查清單）。 */
+export const OUR_ROLE_SHORT_LABELS: Record<OurRole, string> = {
+  contractor: "我方貼",
+  client: "對方貼",
+  both: "各自貼",
 }
 
 export interface Contract {
@@ -234,7 +242,11 @@ export function createContract(
   })
 }
 
-/** docType / ourRole 不在參數裡：兩者決定課不課稅，要改請作廢後重立。 */
+/**
+ * docType 不在參數裡：決定課不課稅的文件分類，要改請作廢後重立一件。
+ * ourRole 可改——貼花方式（我方貼／對方貼／各自貼）常常簽約後才確認，
+ * 後端會連同稅額一起重算，不會留下舊結論。
+ */
 export function updateContract(
   id: string,
   body: {
@@ -243,6 +255,7 @@ export function updateContract(
     amount?: number | null
     signedOn?: string | null
     copies?: number
+    ourRole?: OurRole
     stampDutyRequired?: StampDutyFlag
     stampDutyRate?: number | null
     stampDutyPaidOn?: string | null
