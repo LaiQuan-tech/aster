@@ -5,6 +5,8 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { toCsv, type CsvColumn } from "../lib/csv.js"
+import { getTenantTimezone } from "../lib/tenant-tz.js"
+import { dayWindowUtc } from "../lib/tz.js"
 
 export const reportsRouter = Router()
 
@@ -356,11 +358,15 @@ reportsRouter.get(
       return
     }
     const { from, to } = parsed.data
-    // Window as timestamps: [from 00:00, to 24:00) for created/overlap tests.
-    const fromTs = `${from}T00:00:00.000Z`
-    const toTsExclusive = nextDayUtc(to)
 
     try {
+      // Window as instants on the tenant's clock: [from 00:00, to 24:00) for
+      // the created/overlap tests below (compared as epoch ms, not strings —
+      // PostgREST renders timestamptz with "+00:00", not "Z").
+      const tz = await getTenantTimezone(tenantId)
+      const fromMs = new Date(dayWindowUtc(from, tz).startIso).getTime()
+      const toMsExclusive = new Date(dayWindowUtc(to, tz).endIso).getTime()
+
       const { data: emps, error: empErr } = await supabaseAdmin
         .from("employees")
         .select("id, name")
@@ -383,8 +389,11 @@ reportsRouter.get(
 
       // Keep rows created in-window OR whose [start,end] overlaps the window.
       const inWindow = ((reqs ?? []) as LeaveRow[]).filter((r) => {
-        const createdIn = r.created_at >= fromTs && r.created_at < toTsExclusive
-        const overlaps = r.start_at < toTsExclusive && r.end_at >= fromTs
+        const created = new Date(r.created_at).getTime()
+        const start = new Date(r.start_at).getTime()
+        const end = new Date(r.end_at).getTime()
+        const createdIn = created >= fromMs && created < toMsExclusive
+        const overlaps = start < toMsExclusive && end >= fromMs
         return createdIn || overlaps
       })
 
@@ -502,10 +511,3 @@ reportsRouter.get(
     }
   },
 )
-
-/** 1st instant of the day AFTER `date` (UTC), for an exclusive upper bound. */
-function nextDayUtc(date: string): string {
-  const d = new Date(`${date}T00:00:00.000Z`)
-  d.setUTCDate(d.getUTCDate() + 1)
-  return d.toISOString()
-}

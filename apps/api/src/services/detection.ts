@@ -1,4 +1,7 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { getTenantTimezone } from "../lib/tenant-tz.js"
+import { addDaysKey, dayWindowUtc, localDateKey } from "../lib/tz.js"
+import { pairPunchesTz } from "./punch-pairing.js"
 
 /**
  * Rule-based attendance detection — pure query logic shared by the HR API routes
@@ -14,9 +17,11 @@ import { supabaseAdmin } from "../lib/supabase.js"
  *   • detectAnomalies    — connected-late streaks, frequent missing punches and
  *     monthly overtime that breaches the 勞基法 46h ceiling.
  *
- * Time model: punches are stored as UTC instants and the product's business
- * clock is UTC (the punch API scopes "today" with Date.UTC), so a calendar
- * `date` (YYYY-MM-DD) maps to the UTC day window [dateT00:00, +1dayT00:00).
+ * Time model: punches are stored as UTC instants; the business clock is the
+ * tenant's timezone (tenants.timezone, default Asia/Taipei — see lib/tz.ts),
+ * so a calendar `date` (YYYY-MM-DD) maps to that timezone's [00:00, 24:00)
+ * window. `computeLateStats` / `detectAnomalies` work on attendance_days'
+ * `work_date`, which settlement already keys by the same local calendar.
  */
 
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
@@ -56,20 +61,14 @@ interface PunchRow {
   punch_at: string
 }
 
-/** 1st instant of the day AFTER `date` (UTC) — exclusive upper bound. */
-function nextDayUtc(date: string): string {
-  const d = new Date(`${date}T00:00:00.000Z`)
-  d.setUTCDate(d.getUTCDate() + 1)
-  return d.toISOString()
-}
-
 /**
- * scanMissingPunches — for a tenant + calendar `date`, find every employee who
- * has a schedule that day, pair it against their punches in the UTC day window,
- * and flag a problem:
- *   • no 'in' punch at all                 → issue 'no_in'
- *   • has an 'in' but no 'out'             → issue 'no_out'
- * A day with both an in and an out is healthy and not flagged.
+ * scanMissingPunches — for a tenant + calendar `date` (tenant-local), find
+ * every employee who has a schedule that day, pair their punches (same
+ * pairing as settlement: an 'in' on `date` may close with an 'out' on the
+ * next local day, e.g. a 22:30→03:30 night shift), and flag a problem:
+ *   • no 'in' punch on `date` at all              → issue 'no_in'
+ *   • an 'in' on `date` that never paired with an 'out' → issue 'no_out'
+ * A day with a closed in/out pair is healthy and not flagged.
  *
  * For each finding it enqueues one in-app notification (type 'missing_punch',
  * status 'pending') addressed to the offending employee, unless an identical
@@ -82,8 +81,11 @@ export async function scanMissingPunches(
 ): Promise<ScanMissingResult> {
   if (!dateRe.test(date)) throw new Error("scanMissingPunches: date must be YYYY-MM-DD")
 
-  const start = `${date}T00:00:00.000Z`
-  const end = nextDayUtc(date)
+  const tz = await getTenantTimezone(tenantId)
+  // Local day window, extended one day forward so a cross-midnight 'out' can
+  // still close an 'in' that belongs to `date`.
+  const start = dayWindowUtc(date, tz).startIso
+  const end = dayWindowUtc(addDaysKey(date, 1), tz).endIso
 
   // Employees scheduled on `date`.
   const { data: schedData, error: schedErr } = await supabaseAdmin
@@ -122,11 +124,18 @@ export async function scanMissingPunches(
   if (punchErr) throw new Error(`scanMissingPunches (punches): ${punchErr.message}`)
   const punches = (punchData ?? []) as PunchRow[]
 
-  const hasIn = new Set<string>()
-  const hasOut = new Set<string>()
+  const byEmp = new Map<string, PunchRow[]>()
   for (const p of punches) {
-    if (p.type === "in") hasIn.add(p.employee_id)
-    else if (p.type === "out") hasOut.add(p.employee_id)
+    const arr = byEmp.get(p.employee_id)
+    if (arr) arr.push(p)
+    else byEmp.set(p.employee_id, [p])
+  }
+  const hasIn = new Set<string>()
+  const hasPair = new Set<string>()
+  for (const [empId, list] of byEmp) {
+    if (list.some((p) => p.type === "in" && localDateKey(p.punch_at, tz) === date)) hasIn.add(empId)
+    const day = pairPunchesTz(list, tz).get(date)
+    if (day && day.segments.length > 0) hasPair.add(empId)
   }
 
   // One finding per scheduled employee (dedupe shift-per-day already a DB
@@ -138,7 +147,7 @@ export async function scanMissingPunches(
     seen.add(s.employee_id)
     if (!hasIn.has(s.employee_id)) {
       missing.push({ employeeId: s.employee_id, issue: "no_in" })
-    } else if (!hasOut.has(s.employee_id)) {
+    } else if (!hasPair.has(s.employee_id)) {
       missing.push({ employeeId: s.employee_id, issue: "no_out" })
     }
   }

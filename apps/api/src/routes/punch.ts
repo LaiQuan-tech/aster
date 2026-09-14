@@ -4,6 +4,8 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { getTenantTimezone } from "../lib/tenant-tz.js"
+import { dayWindowUtc, todayKey } from "../lib/tz.js"
 
 export const punchRouter = Router()
 
@@ -36,16 +38,13 @@ const querySchema = z.object({
 
 const SELECT_COLS = "id, tenant_id, employee_id, punch_at, type, source, lat, lng, device_id"
 
-// UTC day window [start, end) covering "today" — used to scope today's punches
-// and to infer the next in/out. Deterministic and timezone-stable for the API.
-function todayWindow(): { start: string; end: string } {
-  const now = new Date()
-  const start = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0),
-  )
-  const end = new Date(start)
-  end.setUTCDate(end.getUTCDate() + 1)
-  return { start: start.toISOString(), end: end.toISOString() }
+// [start, end) UTC instants covering "today" on the TENANT's clock
+// (tenants.timezone, default Asia/Taipei) — used to scope today's punches and
+// to infer the next in/out. Deterministic regardless of the host timezone.
+async function todayWindow(tenantId: string): Promise<{ start: string; end: string }> {
+  const tz = await getTenantTimezone(tenantId)
+  const { startIso, endIso } = dayWindowUtc(todayKey(tz), tz)
+  return { start: startIso, end: endIso }
 }
 
 // Resolve the caller's own employee row (id + role) in this tenant, or null.
@@ -109,7 +108,7 @@ punchRouter.post(
       // Infer in/out from today's last punch when the client didn't specify.
       let resolvedType = type
       if (!resolvedType) {
-        const { start, end } = todayWindow()
+        const { start, end } = await todayWindow(tenantId)
         const { data: last, error: lastErr } = await supabaseAdmin
           .from("punch_records")
           .select("type")
@@ -177,7 +176,7 @@ punchRouter.get(
         return
       }
 
-      const { start, end } = todayWindow()
+      const { start, end } = await todayWindow(tenantId)
       const { data, error } = await supabaseAdmin
         .from("punch_records")
         .select(SELECT_COLS)
@@ -211,7 +210,8 @@ punchRouter.get(
  *     employeeId param (passing someone else's id reveals nothing).
  *
  * Uses supabaseAdmin (bypasses RLS); the explicit filters are the load-bearing
- * guard. from/to are inclusive on the date; `to` is expanded to end-of-day.
+ * guard. from/to are inclusive calendar days on the tenant's clock (`to` is
+ * expanded to the end of that local day).
  */
 punchRouter.get(
   "/punch",
@@ -261,8 +261,11 @@ punchRouter.get(
 
       if (type) query = query.eq("type", type)
       if (source) query = query.eq("source", source)
-      if (from) query = query.gte("punch_at", `${from}T00:00:00.000Z`)
-      if (to) query = query.lte("punch_at", `${to}T23:59:59.999Z`)
+      if (from || to) {
+        const tz = await getTenantTimezone(tenantId)
+        if (from) query = query.gte("punch_at", dayWindowUtc(from, tz).startIso)
+        if (to) query = query.lt("punch_at", dayWindowUtc(to, tz).endIso)
+      }
 
       const { data, error } = await query.order("punch_at", { ascending: true })
       if (error) {

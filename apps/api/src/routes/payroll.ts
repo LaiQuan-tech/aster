@@ -13,6 +13,9 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
+import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { logger } from "../lib/logger.js"
+import { leaveDeductRate, loadLeaveTypes } from "../services/settlement.js"
 
 export const payrollRouter = Router()
 
@@ -52,7 +55,19 @@ interface AttendanceDayRow {
   overtime_minutes: number
   night_minutes: number
   day_type: string
+  // P0 columns (migration 0038) — absent on a live DB that predates it.
+  leave_minutes?: number | null
+  leave_breakdown?: Record<string, number> | null
+  outing_minutes?: number | null
+  early_leave_minutes?: number | null
 }
+
+const ATTENDANCE_BASE_COLS =
+  "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type"
+const ATTENDANCE_P0_COLS = `${ATTENDANCE_BASE_COLS}, leave_minutes, leave_breakdown, outing_minutes, early_leave_minutes`
+
+/** The engine ignores fields it does not know; outingMinutes rides along for audit. */
+type AttendanceDayInput = AttendanceDay & { outingMinutes?: number }
 
 interface SalaryRow {
   employee_id: string
@@ -85,7 +100,11 @@ function toSalaryStructure(
     method: row.method === "by_attendance_days" ? "by_attendance_days" : "monthly",
     baseSalary: row.base_salary != null ? Number(row.base_salary) : undefined,
     dailyWage: row.daily_wage != null ? Number(row.daily_wage) : undefined,
-    hourlyWage: row.hourly_wage != null ? Number(row.hourly_wage) : 0,
+    // 空或 0 → undefined：讓引擎以 本薪 ÷ payroll.hourlyWageDivisor（預設 240）
+    // 推算時薪（亞斯特 37000 ÷ 240 = 154.1667）。兩者皆無時引擎會丟錯，由
+    // run 端接住列入 skipped（hourly_wage_missing）。
+    hourlyWage:
+      row.hourly_wage != null && Number(row.hourly_wage) > 0 ? Number(row.hourly_wage) : undefined,
     laborInsuredSalary:
       row.labor_insured_salary != null ? Number(row.labor_insured_salary) : undefined,
     healthInsuredSalary:
@@ -97,18 +116,29 @@ function toSalaryStructure(
   }
 }
 
-/** Map a stored attendance_days row → the engine's AttendanceDay. */
-function toAttendanceDay(row: AttendanceDayRow): AttendanceDay {
+/**
+ * Map a stored attendance_days row → the engine's AttendanceDay. The P0
+ * columns feed the leave deduction (leave_breakdown {code: minutes} × the
+ * leave type's deduct_rate) and the late/early deduction (early_leave_minutes).
+ */
+function toAttendanceDay(row: AttendanceDayRow, deductRateByCode: Map<string, number>): AttendanceDayInput {
   const dt = row.day_type
   const dayType: DayType =
     dt === "rest_day" || dt === "fixed_holiday" ? dt : "workday"
+  const breakdown = row.leave_breakdown && typeof row.leave_breakdown === "object" ? row.leave_breakdown : {}
+  const leaves = Object.entries(breakdown)
+    .map(([code, minutes]) => ({ code, minutes: Number(minutes) || 0, deductRate: deductRateByCode.get(code) ?? 0 }))
+    .filter((l) => l.minutes > 0)
   return {
     date: row.work_date,
     workedMinutes: row.worked_minutes,
     lateMinutes: row.late_minutes,
+    earlyLeaveMinutes: row.early_leave_minutes ?? 0,
     overtimeMinutes: row.overtime_minutes,
     nightMinutes: row.night_minutes,
     dayType,
+    leaves: leaves.length > 0 ? leaves : undefined,
+    outingMinutes: row.outing_minutes ?? 0,
   }
 }
 
@@ -143,9 +173,11 @@ function isHrRole(role: string | undefined): boolean {
  * structure. An already-FINALIZED payslip for the (employee, period) is left
  * untouched and reported in `skipped` (a finalized slip is locked).
  *
- * Returns { generated: N, skipped: string[], missingInsuredSalary: string[] }
- * (skipped = employee ids skipped because their payslip was already finalized;
- * missingInsuredSalary = 有保費規則但未設投保薪資者，其保費會被算成 0)。
+ * Returns { generated: N, skipped: string[], skippedDetails, missingInsuredSalary }
+ * (skipped = employee ids skipped — payslip already finalized, or the engine
+ * could not derive a wage (no hourly_wage and no base salary); skippedDetails
+ * carries the reason per id; missingInsuredSalary = 有保費規則但未設投保薪資者，
+ * 其保費會被算成 0)。
  */
 payrollRouter.post(
   "/payroll/run",
@@ -206,23 +238,37 @@ payrollRouter.post(
       }
 
       // --- this period's attendance_days for those employees ------------------
-      const { data: adData, error: adErr } = await supabaseAdmin
-        .from("attendance_days")
-        .select(
-          "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type",
-        )
-        .eq("tenant_id", tenantId)
-        .in("employee_id", employeeIds)
-        .gte("work_date", first)
-        .lt("work_date", nextFirst)
-      if (adErr) {
-        next(new Error(`POST /payroll/run (attendance_days): ${adErr.message}`))
+      // (P0 columns first; fall back to the pre-0038 column set on a live DB
+      // that has not been migrated yet — leave/early-leave deductions are then 0.)
+      const loadAttendance = (cols: string) =>
+        supabaseAdmin
+          .from("attendance_days")
+          .select(cols)
+          .eq("tenant_id", tenantId)
+          .in("employee_id", employeeIds)
+          .gte("work_date", first)
+          .lt("work_date", nextFirst)
+      let attendance = await loadAttendance(ATTENDANCE_P0_COLS)
+      if (attendance.error && isMissingColumnError(attendance.error)) {
+        warnSchemaGapOnce("attendance_days.p0_columns", attendance.error)
+        attendance = await loadAttendance(ATTENDANCE_BASE_COLS)
+      }
+      if (attendance.error) {
+        next(new Error(`POST /payroll/run (attendance_days): ${attendance.error.message}`))
         return
       }
+      const adData = (attendance.data ?? []) as unknown as AttendanceDayRow[]
+
+      // 請假扣款比例：leave_breakdown 的 key 是假別 code → 假別主檔的 deduct_rate
+      // （NULL 時 paid→0、unpaid→1）。
+      const leaveTypes = await loadLeaveTypes(tenantId)
+      const deductRateByCode = new Map<string, number>()
+      for (const lt of leaveTypes.values()) deductRateByCode.set(lt.code, leaveDeductRate(lt))
+
       const daysByEmployee = new Map<string, AttendanceDay[]>()
-      for (const row of (adData ?? []) as AttendanceDayRow[]) {
+      for (const row of adData) {
         const arr = daysByEmployee.get(row.employee_id)
-        const day = toAttendanceDay(row)
+        const day = toAttendanceDay(row, deductRateByCode)
         if (arr) arr.push(day)
         else daysByEmployee.set(row.employee_id, [day])
       }
@@ -339,7 +385,10 @@ payrollRouter.post(
       const finalized = new Set((finData ?? []).map((r) => r.employee_id as string))
 
       // --- compute + upsert each employee's payslip ---------------------------
+      // `skipped` keeps its historical shape (employee ids) for existing
+      // clients; `skippedDetails` says why (finalized | hourly_wage_missing).
       const skipped: string[] = []
+      const skippedDetails: Array<{ employeeId: string; reason: "finalized" | "hourly_wage_missing" }> = []
       // 設有保費規則卻沒填投保薪資的員工。引擎遇此情況會把保費算成 0
       // 而不會報錯，薪資單看起來正常但實發被高估——必須回報給呼叫端，
       // 否則錯誤會一路靜默到員工的存摺。
@@ -349,6 +398,7 @@ payrollRouter.post(
       for (const sal of salaries) {
         if (finalized.has(sal.employee_id)) {
           skipped.push(sal.employee_id)
+          skippedDetails.push({ employeeId: sal.employee_id, reason: "finalized" })
           continue
         }
         if (
@@ -358,17 +408,27 @@ payrollRouter.post(
           missingInsuredSalary.push(sal.employee_id)
         }
         const days = daysByEmployee.get(sal.employee_id) ?? []
-        const breakdown = computePayslip(
-          days,
-          toSalaryStructure(
-            sal,
-            dependentsByEmployee.get(sal.employee_id) ?? 0,
-            advanceRecoveryByEmployee.get(sal.employee_id) ?? 0,
-          ),
-          rules,
-          expensesByEmployee.get(sal.employee_id) ?? 0,
-          allowancesByEmployee.get(sal.employee_id) ?? 0,
-        )
+        let breakdown: ReturnType<typeof computePayslip>
+        try {
+          breakdown = computePayslip(
+            days,
+            toSalaryStructure(
+              sal,
+              dependentsByEmployee.get(sal.employee_id) ?? 0,
+              advanceRecoveryByEmployee.get(sal.employee_id) ?? 0,
+            ),
+            rules,
+            expensesByEmployee.get(sal.employee_id) ?? 0,
+            allowancesByEmployee.get(sal.employee_id) ?? 0,
+          )
+        } catch (err) {
+          // The engine refuses to guess a wage (no hourly_wage AND no base
+          // salary). Skip this employee, keep the batch going.
+          logger.warn({ err, tenantId, employeeId: sal.employee_id, period }, "payroll run: employee skipped")
+          skipped.push(sal.employee_id)
+          skippedDetails.push({ employeeId: sal.employee_id, reason: "hourly_wage_missing" })
+          continue
+        }
         rows.push({
           tenant_id: tenantId,
           employee_id: sal.employee_id,
@@ -404,7 +464,7 @@ payrollRouter.post(
 
       res
         .status(201)
-        .json({ generated: rows.length, skipped, missingInsuredSalary, allowanceReview })
+        .json({ generated: rows.length, skipped, skippedDetails, missingInsuredSalary, allowanceReview })
     } catch (err) {
       next(err)
     }

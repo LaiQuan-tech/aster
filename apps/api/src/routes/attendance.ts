@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { settleAttendance } from "../services/settlement.js"
 
 export const attendanceRouter = Router()
@@ -25,12 +26,16 @@ const querySchema = z.object({
 
 const SELECT_COLS =
   "id, tenant_id, employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type, anomaly, created_at"
+// P0 (migration 0038) adds the leave / outing / early-leave columns the monthly
+// sheet shows; fall back to the base set on a live DB that predates them.
+const SELECT_COLS_P0 = `${SELECT_COLS}, leave_minutes, leave_breakdown, outing_minutes, early_leave_minutes`
 
 /**
  * POST /attendance/settle — HR admin runs the worktime settlement for a date
- * range (optionally a single employee). Each employee×day with any punch or
- * schedule is fed through @hr/rules' computeAttendanceDay and the result is
- * upserted into attendance_days (idempotent). Returns { settled: N }.
+ * range (optionally a single employee) on the tenant's clock. Each employee×day
+ * with any punch, schedule or approved leave is fed through @hr/rules'
+ * computeAttendanceDay and the result is upserted into attendance_days
+ * (idempotent). Returns { settled: N }.
  */
 attendanceRouter.post(
   "/attendance/settle",
@@ -99,28 +104,30 @@ attendanceRouter.get(
 
       const isHr = !!me && ["hr_admin", "platform_admin"].includes(me.role)
 
-      let query = supabaseAdmin
-        .from("attendance_days")
-        .select(SELECT_COLS)
-        .eq("tenant_id", tenantId)
-
-      if (isHr) {
-        if (employeeId) query = query.eq("employee_id", employeeId)
-      } else {
-        // Non-HR: always pinned to self. No employee row → impossible filter →
-        // empty result (never another user's data).
-        query = query.eq("employee_id", me?.id ?? "00000000-0000-0000-0000-000000000000")
+      const buildQuery = (cols: string) => {
+        let query = supabaseAdmin.from("attendance_days").select(cols).eq("tenant_id", tenantId)
+        if (isHr) {
+          if (employeeId) query = query.eq("employee_id", employeeId)
+        } else {
+          // Non-HR: always pinned to self. No employee row → impossible filter →
+          // empty result (never another user's data).
+          query = query.eq("employee_id", me?.id ?? "00000000-0000-0000-0000-000000000000")
+        }
+        if (from) query = query.gte("work_date", from)
+        if (to) query = query.lte("work_date", to)
+        return query.order("work_date", { ascending: true })
       }
 
-      if (from) query = query.gte("work_date", from)
-      if (to) query = query.lte("work_date", to)
-
-      const { data, error } = await query.order("work_date", { ascending: true })
-      if (error) {
-        next(new Error(`GET /attendance-days: ${error.message}`))
+      let result = await buildQuery(SELECT_COLS_P0)
+      if (result.error && isMissingColumnError(result.error)) {
+        warnSchemaGapOnce("attendance_days.p0_columns", result.error)
+        result = await buildQuery(SELECT_COLS)
+      }
+      if (result.error) {
+        next(new Error(`GET /attendance-days: ${result.error.message}`))
         return
       }
-      res.status(200).json({ attendanceDays: data ?? [] })
+      res.status(200).json({ attendanceDays: result.data ?? [] })
     } catch (err) {
       next(err)
     }

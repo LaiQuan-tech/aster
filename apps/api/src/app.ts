@@ -16,6 +16,7 @@ import { meRouter } from "./routes/me.js"
 import { ruleConfigRouter } from "./routes/rule-config.js"
 import { salaryRouter } from "./routes/salary.js"
 import { attendanceRouter } from "./routes/attendance.js"
+import { calendarRouter } from "./routes/calendar.js"
 import { payrollRouter } from "./routes/payroll.js"
 import { leaveBalancesRouter } from "./routes/leave-balances.js"
 import { compTimeRouter } from "./routes/comp-time.js"
@@ -85,6 +86,7 @@ app.use(meRouter)
 app.use(ruleConfigRouter)
 app.use(salaryRouter)
 app.use(attendanceRouter)
+app.use(calendarRouter)
 app.use(payrollRouter)
 app.use(leaveBalancesRouter)
 app.use(compTimeRouter)

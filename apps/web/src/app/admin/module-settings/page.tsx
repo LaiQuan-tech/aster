@@ -7,7 +7,12 @@ import {
   getRuleConfig,
   saveRuleConfig,
   saveTenantSettings,
+  type RuleConfig,
   type RuleConfigResponse,
+  type OvertimeRule,
+  type OvertimeTier,
+  type OvertimeWhen,
+  type OvertimeRoundingMode,
   type TenantFeatures,
 } from "@/lib/admin-api";
 
@@ -33,8 +38,203 @@ const FIELD_OPTIONS = [
   { value: "workHistory", label: "工作經歷" },
 ];
 
+/* --------------------------------------------- 加班與計薪參數（亞斯特出勤表） --- */
+/**
+ * 這個區塊把 packages/rules/src/rules-schema.ts 的加班/計薪 knob 做成表單覆蓋
+ * ruleConfig.config 的對應欄位，其餘欄位（attendance_bonus / night / insurance）
+ * 原樣保留。所有數字欄位在表單內存字串，避免 controlled input 出現 NaN；儲存時
+ * 才轉數字，轉不出來就退回目前值或欄位預設值。
+ *
+ * 三段倍率與固定假日 minChargeHours 的預設值取自
+ * packages/rules/src/__tests__/golden.test.ts「規則五 亞斯特 115-06」：
+ * 前 2h ×1.334、2–8h ×1.666667、8h 以上 ×2.666667；固定假日 ×1 做 1 給 8。
+ */
+
+interface TierFormRow {
+  uptoHours: string;
+  multiplier: string;
+}
+
+const ASTER_STATUTORY_TIERS: [TierFormRow, TierFormRow, TierFormRow] = [
+  { uptoHours: "2", multiplier: "1.334" },
+  { uptoHours: "8", multiplier: "1.666667" },
+  { uptoHours: "", multiplier: "2.666667" },
+];
+
+interface OvertimeParamsForm {
+  unitMinutes: string;
+  mode: OvertimeRoundingMode;
+  minimumMinutes: string;
+  mealBreakEnabled: boolean;
+  mealAfterMinutes: string;
+  mealDeductMinutes: string;
+  dailyCapMinutes: string;
+  monthlyAlertHours: [string, string, string];
+  hourlyWageDivisor: string;
+  fixedHolidayMinChargeHours: string;
+  weekdayTiers: [TierFormRow, TierFormRow, TierFormRow];
+  restDayTiers: [TierFormRow, TierFormRow, TierFormRow];
+  lateEarlyEnabled: boolean;
+  requireApprovedSheet: boolean;
+  requireAnomalyAck: boolean;
+}
+
+const DEFAULT_OT_FORM: OvertimeParamsForm = {
+  unitMinutes: "30",
+  mode: "floor",
+  minimumMinutes: "30",
+  mealBreakEnabled: true,
+  mealAfterMinutes: "180",
+  mealDeductMinutes: "30",
+  dailyCapMinutes: "240",
+  monthlyAlertHours: ["36", "40", "46"],
+  hourlyWageDivisor: "240",
+  fixedHolidayMinChargeHours: "8",
+  weekdayTiers: ASTER_STATUTORY_TIERS,
+  restDayTiers: ASTER_STATUTORY_TIERS,
+  lateEarlyEnabled: false,
+  requireApprovedSheet: false,
+  requireAnomalyAck: true,
+};
+
+function tiersToForm(tiers: OvertimeTier[] | undefined): [TierFormRow, TierFormRow, TierFormRow] {
+  if (!tiers || tiers.length === 0) return ASTER_STATUTORY_TIERS;
+  const at = (i: number): TierFormRow => {
+    const t = tiers[i];
+    if (!t) return { uptoHours: "", multiplier: "" };
+    return { uptoHours: t.uptoHours !== undefined ? String(t.uptoHours) : "", multiplier: String(t.multiplier) };
+  };
+  return [at(0), at(1), at(2)];
+}
+
+function alertHoursToForm(hours: number[] | undefined): [string, string, string] {
+  const source = hours && hours.length > 0 ? hours : [36, 40, 46];
+  const at = (i: number) => (source[i] !== undefined ? String(source[i]) : "");
+  return [at(0), at(1), at(2)];
+}
+
+/** 由目前 config 推算表單初值；config 缺的欄位一律套引擎 resolve* 的同一組預設值。 */
+function hydrateOvertimeForm(config: RuleConfig): OvertimeParamsForm {
+  const ot = config.overtime;
+  const weekday = ot.rules.find((r) => r.when === "weekday_ot");
+  const rest = ot.rules.find((r) => r.when === "rest_day");
+  const fixed = ot.rules.find((r) => r.when === "fixed_holiday");
+  const mealBreak = ot.mealBreak;
+  return {
+    unitMinutes: String(ot.rounding?.unitMinutes ?? 30),
+    mode: ot.rounding?.mode ?? "floor",
+    minimumMinutes: String(ot.rounding?.minimumMinutes ?? 30),
+    // schema 語意：省略 mealBreak = 用預設（視為啟用）；明確 null 才是關閉。
+    mealBreakEnabled: mealBreak !== null,
+    mealAfterMinutes: String(mealBreak?.afterMinutes ?? 180),
+    mealDeductMinutes: String(mealBreak?.deductMinutes ?? 30),
+    dailyCapMinutes: String(ot.dailyCapMinutes ?? 240),
+    monthlyAlertHours: alertHoursToForm(ot.monthlyAlertHours),
+    hourlyWageDivisor: String(config.payroll.hourlyWageDivisor ?? 240),
+    fixedHolidayMinChargeHours: String(fixed?.minChargeHours ?? 8),
+    weekdayTiers: tiersToForm(weekday?.tiers),
+    restDayTiers: tiersToForm(rest?.tiers),
+    lateEarlyEnabled: config.leave_deduction?.lateEarly?.enabled ?? false,
+    requireApprovedSheet: config.payroll.requireApprovedSheet ?? false,
+    requireAnomalyAck: config.payroll.requireAnomalyAck ?? true,
+  };
+}
+
+function buildTieredRule(
+  when: OvertimeWhen,
+  tiers: [TierFormRow, TierFormRow, TierFormRow],
+  existing: OvertimeRule | undefined,
+): OvertimeRule {
+  const t1 = { uptoHours: Number(tiers[0].uptoHours) || 2, multiplier: Number(tiers[0].multiplier) || 1 };
+  const t2 = { uptoHours: Number(tiers[1].uptoHours) || 8, multiplier: Number(tiers[1].multiplier) || 1 };
+  const t3 = { multiplier: Number(tiers[2].multiplier) || 1 };
+  return {
+    when,
+    // 沒有 tiers 時的後備單一倍率；有 tiers 時引擎忽略，取第一段當代表值。
+    multiplier: t1.multiplier,
+    tiers: [t1, t2, t3],
+    compTime: existing?.compTime,
+  };
+}
+
+function buildFixedHolidayRule(existing: OvertimeRule | undefined, minChargeHoursInput: string): OvertimeRule {
+  const parsed = Number(minChargeHoursInput);
+  const minChargeHours =
+    minChargeHoursInput.trim() !== "" && Number.isFinite(parsed) ? parsed : existing?.minChargeHours;
+  return {
+    when: "fixed_holiday",
+    multiplier: existing?.multiplier ?? 1,
+    compTime: existing?.compTime,
+    tiers: existing?.tiers,
+    minChargeHours,
+  };
+}
+
+function TierEditor({
+  title,
+  hint,
+  tiers,
+  onChange,
+}: {
+  title: string;
+  hint: string;
+  tiers: [TierFormRow, TierFormRow, TierFormRow];
+  onChange: (index: 0 | 1 | 2, field: "uptoHours" | "multiplier", value: string) => void;
+}) {
+  const rowLabels = ["第 1 段（≤2h）", "第 2 段（≤8h）", "第 3 段（其後）"];
+  return (
+    <div>
+      <p className="mb-2 text-sm font-medium text-gray-700">{title}</p>
+      <div className="overflow-x-auto rounded-lg border border-gray-100">
+        <table className="w-full text-left text-sm">
+          <thead>
+            <tr className="border-b border-gray-100 text-xs text-gray-500">
+              <th className="py-1.5 pl-3">段別</th>
+              <th className="py-1.5">上限（小時）</th>
+              <th className="py-1.5 pr-3">倍率</th>
+            </tr>
+          </thead>
+          <tbody>
+            {([0, 1, 2] as const).map((i) => (
+              <tr key={i} className="border-t border-gray-50">
+                <td className="py-1.5 pl-3 text-xs text-gray-500">{rowLabels[i]}</td>
+                <td className="py-1.5">
+                  {i === 2 ? (
+                    <span className="text-xs text-gray-400">無上限</span>
+                  ) : (
+                    <input
+                      type="number"
+                      min={0}
+                      step="any"
+                      value={tiers[i].uptoHours}
+                      onChange={(e) => onChange(i, "uptoHours", e.target.value)}
+                      className="w-20 rounded-md border border-gray-300 px-2 py-1 text-sm"
+                    />
+                  )}
+                </td>
+                <td className="py-1.5 pr-3">
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={tiers[i].multiplier}
+                    onChange={(e) => onChange(i, "multiplier", e.target.value)}
+                    className="w-24 rounded-md border border-gray-300 px-2 py-1 text-sm"
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-1 text-xs text-gray-400">{hint}</p>
+    </div>
+  );
+}
+
 export default function ModuleSettingsPage() {
   const [ruleConfig, setRuleConfig] = useState<RuleConfigResponse | null>(null);
+  const [otForm, setOtForm] = useState<OvertimeParamsForm>(DEFAULT_OT_FORM);
   const [features, setFeatures] = useState<TenantFeatures>({});
   const [myDataRequiresApproval, setMyDataRequiresApproval] = useState(true);
   const [editableFields, setEditableFields] = useState("basic,contact,education,certification,workHistory");
@@ -65,6 +265,7 @@ export default function ModuleSettingsPage() {
       .then((res) => {
         setRuleConfig(res);
         setDraft(JSON.stringify(res.config, null, 2));
+        setOtForm(hydrateOvertimeForm(res.config));
       })
       .catch((err) => setError(err instanceof Error ? err.message : "載入模組設定失敗"));
     getBranding()
@@ -106,6 +307,92 @@ export default function ModuleSettingsPage() {
       setMessage(`規則設定已儲存，版本 ${res.version}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存失敗");
+    }
+  }
+
+  function patchOt(partial: Partial<OvertimeParamsForm>) {
+    setOtForm((prev) => ({ ...prev, ...partial }));
+  }
+
+  function setTierField(
+    which: "weekdayTiers" | "restDayTiers",
+    index: 0 | 1 | 2,
+    field: "uptoHours" | "multiplier",
+    value: string,
+  ) {
+    setOtForm((prev) => {
+      const tiers: [TierFormRow, TierFormRow, TierFormRow] = [...prev[which]];
+      tiers[index] = { ...tiers[index], [field]: value };
+      return { ...prev, [which]: tiers };
+    });
+  }
+
+  function setAlertHour(index: 0 | 1 | 2, value: string) {
+    setOtForm((prev) => {
+      const arr: [string, string, string] = [...prev.monthlyAlertHours];
+      arr[index] = value;
+      return { ...prev, monthlyAlertHours: arr };
+    });
+  }
+
+  /**
+   * 把表單覆蓋進目前 config 的 overtime / payroll / leave_deduction，其餘欄位
+   * （attendance_bonus / night / insurance）原樣保留後整包 PUT——後端 parseRuleConfig
+   * 驗證的是完整物件，沒有「只改一個欄位」的 PATCH 語意。
+   */
+  async function onSaveOvertimeParams() {
+    if (!ruleConfig) return;
+    setError(null);
+    setMessage(null);
+    try {
+      const base = ruleConfig.config;
+      const existingWeekday = base.overtime.rules.find((r) => r.when === "weekday_ot");
+      const existingRest = base.overtime.rules.find((r) => r.when === "rest_day");
+      const existingFixed = base.overtime.rules.find((r) => r.when === "fixed_holiday");
+
+      const weekdayRule = buildTieredRule("weekday_ot", otForm.weekdayTiers, existingWeekday);
+      const restRule = buildTieredRule("rest_day", otForm.restDayTiers, existingRest);
+      const fixedRule = buildFixedHolidayRule(existingFixed, otForm.fixedHolidayMinChargeHours);
+
+      const merged: RuleConfig = {
+        ...base,
+        overtime: {
+          rules: [weekdayRule, restRule, fixedRule],
+          rounding: {
+            unitMinutes: Number(otForm.unitMinutes) || 30,
+            mode: otForm.mode,
+            minimumMinutes: Number(otForm.minimumMinutes) || 0,
+          },
+          mealBreak: otForm.mealBreakEnabled
+            ? {
+                afterMinutes: Number(otForm.mealAfterMinutes) || 0,
+                deductMinutes: Number(otForm.mealDeductMinutes) || 0,
+              }
+            : null,
+          dailyCapMinutes: otForm.dailyCapMinutes.trim() === "" ? undefined : Number(otForm.dailyCapMinutes) || undefined,
+          monthlyAlertHours: otForm.monthlyAlertHours
+            .map((v) => Number(v))
+            .filter((v) => Number.isFinite(v) && v > 0),
+        },
+        payroll: {
+          ...base.payroll,
+          hourlyWageDivisor:
+            otForm.hourlyWageDivisor.trim() === "" ? undefined : Number(otForm.hourlyWageDivisor) || undefined,
+          requireApprovedSheet: otForm.requireApprovedSheet,
+          requireAnomalyAck: otForm.requireAnomalyAck,
+        },
+        leave_deduction: {
+          ...base.leave_deduction,
+          lateEarly: { enabled: otForm.lateEarlyEnabled },
+        },
+      };
+
+      const res = await saveRuleConfig(merged);
+      setRuleConfig({ config: merged, version: res.version, isDefault: false, scope: ruleConfig.scope });
+      setDraft(JSON.stringify(merged, null, 2));
+      setMessage(`加班與計薪參數已儲存，版本 ${res.version}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "儲存加班與計薪參數失敗");
     }
   }
 
@@ -221,6 +508,9 @@ export default function ModuleSettingsPage() {
             </tbody>
           </table>
         </div>
+        <p className="mt-3 text-xs text-gray-400">
+          逐日的例假日／國定假日覆寫請至「人事差勤 · 差勤管理 → 行事曆 / 假日表」維護。
+        </p>
       </Card>
 
       <Card>
@@ -273,10 +563,201 @@ export default function ModuleSettingsPage() {
       </Card>
 
       <Card>
+        <div className="mb-4">
+          <h2 className="text-base font-semibold text-gray-900">加班與計薪參數</h2>
+          <p className="mt-1 text-sm text-gray-500">
+            對應客戶「出勤統計表」Excel 的加班取整、用餐扣除、分段倍率與計薪規則（來源：亞斯特 115-06 出勤表案例）。
+          </p>
+        </div>
+
+        {ruleConfig ? (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <div>
+                <label className={labelCls}>取整單位（分）</label>
+                <input
+                  type="number"
+                  min={1}
+                  className={inputCls}
+                  value={otForm.unitMinutes}
+                  onChange={(e) => patchOt({ unitMinutes: e.target.value })}
+                />
+                <p className="mt-1 text-xs text-gray-400">Excel：30 分為單位無條件捨去</p>
+              </div>
+              <div>
+                <label className={labelCls}>取整模式</label>
+                <select
+                  className={inputCls}
+                  value={otForm.mode}
+                  onChange={(e) => patchOt({ mode: e.target.value as OvertimeRoundingMode })}
+                >
+                  <option value="floor">無條件捨去 floor</option>
+                  <option value="nearest">四捨五入 nearest</option>
+                  <option value="ceil">無條件進位 ceil</option>
+                </select>
+              </div>
+              <div>
+                <label className={labelCls}>最低計入（分）</label>
+                <input
+                  type="number"
+                  min={0}
+                  className={inputCls}
+                  value={otForm.minimumMinutes}
+                  onChange={(e) => patchOt({ minimumMinutes: e.target.value })}
+                />
+                <p className="mt-1 text-xs text-gray-400">Excel：未滿 30 分不計加班</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={otForm.mealBreakEnabled}
+                  onChange={(e) => patchOt({ mealBreakEnabled: e.target.checked })}
+                />
+                啟用晚餐扣除
+              </label>
+              <div>
+                <label className={labelCls}>延長工時超過幾分鐘扣（門檻分）</label>
+                <input
+                  type="number"
+                  min={0}
+                  disabled={!otForm.mealBreakEnabled}
+                  className={`${inputCls} disabled:bg-gray-50 disabled:text-gray-400`}
+                  value={otForm.mealAfterMinutes}
+                  onChange={(e) => patchOt({ mealAfterMinutes: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className={labelCls}>扣除分鐘</label>
+                <input
+                  type="number"
+                  min={0}
+                  disabled={!otForm.mealBreakEnabled}
+                  className={`${inputCls} disabled:bg-gray-50 disabled:text-gray-400`}
+                  value={otForm.mealDeductMinutes}
+                  onChange={(e) => patchOt({ mealDeductMinutes: e.target.value })}
+                />
+                <p className="mt-1 text-xs text-gray-400">Excel：延長工時超過 3 小時（180 分）扣 30 分晚餐</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label className={labelCls}>單日加班上限（分）</label>
+                <input
+                  type="number"
+                  min={0}
+                  className={inputCls}
+                  value={otForm.dailyCapMinutes}
+                  onChange={(e) => patchOt({ dailyCapMinutes: e.target.value })}
+                />
+                <p className="mt-1 text-xs text-gray-400">
+                  Excel：單日加班上限 240 分（4 小時）；引擎只回傳不裁切，供結算頁判異常
+                </p>
+              </div>
+              <div>
+                <label className={labelCls}>月加班警示門檻（小時，由小到大）</label>
+                <div className="flex gap-2">
+                  {([0, 1, 2] as const).map((i) => (
+                    <input
+                      key={i}
+                      type="number"
+                      min={0}
+                      className={inputCls}
+                      value={otForm.monthlyAlertHours[i]}
+                      onChange={(e) => setAlertHour(i, e.target.value)}
+                    />
+                  ))}
+                </div>
+                <p className="mt-1 text-xs text-gray-400">預設 36 / 40 / 46 小時，供結算頁分級提醒</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <TierEditor
+                title="加班分段倍率 · 平日延長工時（weekday_ot）"
+                hint="Excel：前 2 小時 ×1.334、2–8 小時 ×1.666667、8 小時以上 ×2.666667"
+                tiers={otForm.weekdayTiers}
+                onChange={(i, f, v) => setTierField("weekdayTiers", i, f, v)}
+              />
+              <TierEditor
+                title="加班分段倍率 · 例假日出勤（rest_day）"
+                hint="Excel：與平日延長工時共用同一組分段倍率"
+                tiers={otForm.restDayTiers}
+                onChange={(i, f, v) => setTierField("restDayTiers", i, f, v)}
+              />
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label className={labelCls}>國定假日做 1 給 8（小時）</label>
+                <input
+                  type="number"
+                  min={0}
+                  className={inputCls}
+                  value={otForm.fixedHolidayMinChargeHours}
+                  onChange={(e) => patchOt({ fixedHolidayMinChargeHours: e.target.value })}
+                />
+                <p className="mt-1 text-xs text-gray-400">Excel：固定假日出勤 ×1，當日不足 8 小時仍以 8 小時計</p>
+              </div>
+              <div>
+                <label className={labelCls}>時薪除數</label>
+                <input
+                  type="number"
+                  min={1}
+                  className={inputCls}
+                  value={otForm.hourlyWageDivisor}
+                  onChange={(e) => patchOt({ hourlyWageDivisor: e.target.value })}
+                />
+                <p className="mt-1 text-xs text-gray-400">Excel：時薪 = 本薪 ÷ 240</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={otForm.lateEarlyEnabled}
+                  onChange={(e) => patchOt({ lateEarlyEnabled: e.target.checked })}
+                />
+                遲到早退扣款
+              </label>
+              <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={otForm.requireApprovedSheet}
+                  onChange={(e) => patchOt({ requireApprovedSheet: e.target.checked })}
+                />
+                結算薪資前須出勤表已核准
+              </label>
+              <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={otForm.requireAnomalyAck}
+                  onChange={(e) => patchOt({ requireAnomalyAck: e.target.checked })}
+                />
+                結算薪資前須異常已確認
+              </label>
+            </div>
+
+            <div>
+              <PrimaryButton onClick={onSaveOvertimeParams}>儲存加班與計薪參數</PrimaryButton>
+            </div>
+          </div>
+        ) : (
+          <Empty>載入中…</Empty>
+        )}
+      </Card>
+
+      <Card>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-base font-semibold text-gray-900">差勤 / 薪資規則</h2>
-            <p className="mt-1 text-sm text-gray-500">JSON 規則控制遲到、加班、夜間與薪資計算。</p>
+            <h2 className="text-base font-semibold text-gray-900">差勤 / 薪資規則（原始 JSON）</h2>
+            <p className="mt-1 text-sm text-gray-500">
+              完整規則 DSL，供進階調整；上方「加班與計薪參數」儲存後會同步更新這裡的內容。
+            </p>
           </div>
           {ruleConfig && (
             <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">

@@ -37,7 +37,9 @@ let bEmpToken: string
 let dayShiftId: string // A reusable 09:00–18:00 shift under A.
 
 // The day we run the忘打卡 scan against. Punches are stored as UTC instants and
-// the scan windows the UTC calendar day, matching the punch API's day model.
+// the scan windows the TENANT's calendar day (Asia/Taipei by default) — emp2's
+// 09:02Z in / 18:05Z out below are 17:02 / next-day 02:05 Taipei, a
+// cross-midnight pair the scan must still recognise as complete.
 const SCAN_DATE = "2026-03-10"
 // Anomaly window — three consecutive late days + an excess-overtime month.
 const ANOM_FROM = "2026-03-01"

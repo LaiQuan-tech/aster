@@ -2,6 +2,9 @@ import type { SupabaseClient } from "@supabase/supabase-js"
 import { parseRuleConfig, type RuleConfig } from "@hr/rules"
 import { logger } from "../lib/logger.js"
 import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
+import { getTenantTimezone } from "../lib/tenant-tz.js"
+import { zonedTimeToUtc } from "../lib/tz.js"
+import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 
 /**
  * The fields of a leave_requests row the ledger effects need. Numerics arrive
@@ -19,6 +22,9 @@ export interface ApprovedRequest {
   payout?: string | null
   /** 申請的預支金額（模組三第 2、3 條）；核准時據此建立 advances 一列。 */
   advance_requested?: string | number | null
+  /** 多段日期（Apollo 新增列）；fix_punch 若某段帶 `type` 則直接指定補卡種類。 */
+  segments?: Array<Record<string, unknown>> | null
+  reason?: string | null
 }
 
 /** Whole hours between two ISO timestamps (>= 0), used when a request omits an
@@ -188,13 +194,125 @@ async function openAdvance(
   if (error) throw new Error(`ledger openAdvance: ${error.message}`)
 }
 
+const PUNCH_TYPES = new Set(["in", "out", "break_in", "break_out", "outing_in", "outing_out"])
+
+/**
+ * Decide which punches an approved 補卡 (fix_punch) request materialises.
+ *
+ * The request form (ESS 新增申請) has no explicit punch-type field today — a
+ * fix_punch row carries the same start_at/end_at as every other kind — so the
+ * type is INFERRED, in this order:
+ *   1. `segments[]` items that carry a `type` ('in' | 'out' | break/outing
+ *      pairs) plus `date` + `startTime` (tenant-local) → one punch each. This
+ *      is forward-compatible: nothing writes such segments yet, but a client
+ *      that knows what was forgotten can say so precisely.
+ *   2. otherwise `start_at` → 'in' and, when `end_at` is strictly later than
+ *      `start_at`, `end_at` → 'out'. A request whose end equals its start is
+ *      read as "I only forgot to punch in".
+ * A duplicate of an existing punch (same employee, same type, same minute) is
+ * skipped, so "I forgot the out but filled in both times" does not create a
+ * second 'in'.
+ */
+export function fixPunchCandidates(
+  req: ApprovedRequest,
+  tz: string,
+): Array<{ type: string; punchAt: string }> {
+  const out: Array<{ type: string; punchAt: string }> = []
+  const segs = Array.isArray(req.segments) ? req.segments : []
+  const typed = segs.filter(
+    (s) =>
+      s &&
+      typeof s.type === "string" &&
+      PUNCH_TYPES.has(s.type) &&
+      typeof s.date === "string" &&
+      /^\d{4}-\d{2}-\d{2}$/.test(s.date) &&
+      typeof s.startTime === "string" &&
+      /^\d{2}:\d{2}$/.test(s.startTime),
+  )
+  if (typed.length > 0) {
+    for (const s of typed) {
+      const [hh, mm] = (s.startTime as string).split(":").map(Number)
+      out.push({ type: s.type as string, punchAt: zonedTimeToUtc(s.date as string, hh, mm, tz).toISOString() })
+    }
+    return out
+  }
+  const start = new Date(req.start_at)
+  const end = new Date(req.end_at)
+  if (Number.isNaN(start.getTime())) return out
+  out.push({ type: "in", punchAt: start.toISOString() })
+  if (!Number.isNaN(end.getTime()) && end.getTime() > start.getTime()) {
+    out.push({ type: "out", punchAt: end.toISOString() })
+  }
+  return out
+}
+
+/**
+ * kind='fix_punch' final approval → punch_records rows (source 'manual',
+ * request_id = the request) so settlement / the missing-punch scan see the
+ * corrected punches. Idempotent on request_id; per-punch same-minute dedupe
+ * (see fixPunchCandidates). Until migration 0038 adds punch_records.request_id
+ * the rows are written without it (same-minute dedupe still guards re-runs).
+ */
+async function materializeFixPunch(
+  supabase: SupabaseClient,
+  tenantId: string,
+  req: ApprovedRequest,
+): Promise<void> {
+  const { data: existing, error: selErr } = await supabase
+    .from("punch_records")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("request_id", req.id)
+    .limit(1)
+  if (selErr && !isMissingColumnError(selErr)) {
+    throw new Error(`ledger materializeFixPunch (select): ${selErr.message}`)
+  }
+  const hasRequestIdColumn = !selErr
+  if (!hasRequestIdColumn) warnSchemaGapOnce("punch_records.request_id", selErr)
+  if (existing && existing.length > 0) return
+
+  const tz = await getTenantTimezone(tenantId)
+  const rows: Array<Record<string, unknown>> = []
+  for (const c of fixPunchCandidates(req, tz)) {
+    const minuteStart = new Date(c.punchAt)
+    minuteStart.setUTCSeconds(0, 0)
+    const minuteEnd = new Date(minuteStart.getTime() + 60_000)
+    const { data: dup, error: dupErr } = await supabase
+      .from("punch_records")
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .eq("employee_id", req.employee_id)
+      .eq("type", c.type)
+      .gte("punch_at", minuteStart.toISOString())
+      .lt("punch_at", minuteEnd.toISOString())
+      .limit(1)
+    if (dupErr) throw new Error(`ledger materializeFixPunch (dedupe): ${dupErr.message}`)
+    if (dup && dup.length > 0) continue
+    const row: Record<string, unknown> = {
+      tenant_id: tenantId,
+      employee_id: req.employee_id,
+      punch_at: c.punchAt,
+      type: c.type,
+      source: "manual",
+    }
+    if (hasRequestIdColumn) row.request_id = req.id
+    rows.push(row)
+  }
+  if (rows.length === 0) return
+  const { error: insErr } = await supabase.from("punch_records").insert(rows)
+  if (insErr) throw new Error(`ledger materializeFixPunch (insert): ${insErr.message}`)
+}
+
 /**
  * Apply the ledger side-effects of FINAL approval of a request.
  *
  *   • kind='leave' with a leave_type_id → debit that leave balance by the
- *     request's hours (auto-creating the year bucket if needed).
+ *     request's hours (auto-creating the year bucket if needed). Settlement
+ *     reads the approved request itself for per-day leave minutes.
  *   • kind='ot' whose tenant rule converts overtime to comp-time → credit a
  *     comp_time_ledger block of the request's hours.
+ *   • kind='fix_punch' → insert the corrected punch_records (see
+ *     materializeFixPunch).
  *   • kind='business_trip' / 'petty_cash' with advance_requested > 0 → open an
  *     `advances` row（模組三第 2、3 條的「放款」起點）。
  *   • anything else → no-op.
@@ -230,6 +348,11 @@ export async function applyApprovalEffects(
       if (overtimeIsCompTime(rules)) {
         await creditCompTime(supabase, tenantId, req, hours)
       }
+      return
+    }
+
+    if (req.kind === "fix_punch") {
+      await materializeFixPunch(supabase, tenantId, req)
       return
     }
 

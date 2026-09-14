@@ -73,6 +73,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     title: "人事差勤 · 差勤管理",
     items: [
       { href: "/admin/shifts", label: "班別" },
+      { href: "/admin/calendar", label: "行事曆 / 假日表", fresh: true },
       { href: "/admin/schedules", label: "排班 / 班表審核" },
       { href: "/admin/punch-records", label: "打卡紀錄維護" },
       { href: "/admin/leave-types", label: "假別與簽核流程" },

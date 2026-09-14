@@ -744,6 +744,11 @@ export interface LeaveType {
   name: string;
   paid: boolean;
   special: boolean;
+  /**
+   * 扣薪比例 0–1（PostgREST 對 numeric 欄位回字串）；null = 依 paid 推算
+   * （paid=true → 0、paid=false → 1，邏輯與 DB 欄位註解一致）。
+   */
+  deduct_rate: string | null;
   created_at: string;
 }
 
@@ -756,6 +761,7 @@ export function createLeaveType(body: {
   name: string;
   paid?: boolean;
   special?: boolean;
+  deductRate?: number | null;
 }) {
   return apiFetch<{ id: string }>("/leave-types", {
     method: "POST",
@@ -765,7 +771,7 @@ export function createLeaveType(body: {
 
 export function updateLeaveType(
   id: string,
-  body: { code?: string; name?: string; paid?: boolean; special?: boolean },
+  body: { code?: string; name?: string; paid?: boolean; special?: boolean; deductRate?: number | null },
 ) {
   return apiFetch<{ id: string }>(`/leave-types/${id}`, {
     method: "PATCH",
@@ -1533,8 +1539,84 @@ export function setLeaveBalance(body: {
   });
 }
 
+/**
+ * RuleConfig — 鏡射 packages/rules/src/rules-schema.ts 的 zod схема（apps/web 不吃
+ * @hr/rules，型別在此手動對齊，與 PayslipBreakdown 同一套「前後端各自維護」慣例）。
+ * GET /rule-config 保證回傳一個通過 parseRuleConfig 驗證的完整物件（租戶自存的版本，
+ * 或後端的 DEFAULT_RULE_CONFIG），故頂層四個必填欄位一定存在；insurance／
+ * leave_deduction 在 schema 上整段 optional，可能不存在。
+ */
+export type OvertimeWhen = "weekday_ot" | "rest_day" | "fixed_holiday";
+
+export interface OvertimeTier {
+  /** 這一段的累計上限（小時，含）；省略 = 最後一段、無上限。 */
+  uptoHours?: number;
+  multiplier: number;
+}
+
+export interface OvertimeRule {
+  when: OvertimeWhen;
+  /** 沒有 tiers 時的單一倍率（相容舊設定）；有 tiers 時引擎忽略此值。 */
+  multiplier: number;
+  tiers?: OvertimeTier[];
+  compTime?: boolean;
+  /** 做 1 給 8：當日有加班分鐘 (>0) 時，當日加班分鐘至少以此時數（小時）計。 */
+  minChargeHours?: number;
+}
+
+export type OvertimeRoundingMode = "floor" | "nearest" | "ceil";
+
+export interface OvertimeRounding {
+  unitMinutes: number;
+  mode: OvertimeRoundingMode;
+  minimumMinutes: number;
+}
+
+export interface OvertimeMealBreak {
+  afterMinutes: number;
+  deductMinutes: number;
+}
+
+export interface RuleConfigOvertime {
+  rules: OvertimeRule[];
+  /** 省略 = 後端預設 {unitMinutes:30, mode:"floor", minimumMinutes:30}。 */
+  rounding?: OvertimeRounding;
+  /** 省略 = 後端預設 {afterMinutes:180, deductMinutes:30}；null = 不扣。 */
+  mealBreak?: OvertimeMealBreak | null;
+  /** 單日加班上限（分）；引擎只回傳不裁切，供 API 判異常。省略 = 240。 */
+  dailyCapMinutes?: number;
+  /** 月累計加班警示門檻（小時，由小到大）；省略 = [36, 40, 46]。 */
+  monthlyAlertHours?: number[];
+}
+
+export interface RuleConfigPayroll {
+  method: "monthly" | "by_attendance_days";
+  overtimeFlatHourly?: number;
+  dailyRegularHours: number;
+  /** 時薪除數：時薪 = 本薪 ÷ divisor；省略 = 240。 */
+  hourlyWageDivisor?: number;
+  /** 結算薪資前是否要求出勤表已核准；省略 = false。 */
+  requireApprovedSheet?: boolean;
+  /** 結算薪資前是否要求異常已確認；省略 = true。 */
+  requireAnomalyAck?: boolean;
+}
+
+export interface RuleConfigLeaveDeduction {
+  /** true 時扣 (遲到分鐘+早退分鐘)÷60×時薪；省略 = false。 */
+  lateEarly?: { enabled: boolean };
+}
+
+export interface RuleConfig {
+  attendance_bonus: { base: number; tiers: { lateMinutesUpTo: number | null; deduct: number }[] };
+  overtime: RuleConfigOvertime;
+  night: { window: { from: string; to: string }; multiplier: number };
+  payroll: RuleConfigPayroll;
+  insurance?: unknown;
+  leave_deduction?: RuleConfigLeaveDeduction;
+}
+
 export interface RuleConfigResponse {
-  config: unknown;
+  config: RuleConfig;
   version: number;
   scope?: string;
   isDefault: boolean;
@@ -1544,11 +1626,56 @@ export function getRuleConfig() {
   return apiFetch<RuleConfigResponse>("/rule-config");
 }
 
-export function saveRuleConfig(config: unknown) {
+export function saveRuleConfig(config: RuleConfig) {
   return apiFetch<{ id: string; version: number }>("/rule-config", {
     method: "PUT",
     body: JSON.stringify(config),
   });
+}
+
+/* ---------------------------------------------------------- 行事曆 / 假日表 --- */
+
+export type CalendarDayType = "workday" | "rest_day" | "fixed_holiday";
+
+export interface CalendarDay {
+  id: string;
+  date: string;
+  day_type: CalendarDayType;
+  label: string | null;
+  source: string;
+}
+
+/**
+ * GET /calendar?year= 的外殼由另一位 agent 同步開發的 API 決定；做防禦性正規化，
+ * 容忍對方回傳裸陣列或 { days: [...] } 兩種外殼，頁面一律拿到 { days: CalendarDay[] }。
+ * 若實際回應形狀不同（例如欄位是 dayType 而非 day_type），需回頭調整這個函式。
+ */
+export async function getCalendar(year: number): Promise<{ days: CalendarDay[] }> {
+  const res = await apiFetch<{ days: CalendarDay[] } | CalendarDay[]>(`/calendar?year=${year}`);
+  return { days: Array.isArray(res) ? res : (res?.days ?? []) };
+}
+
+/** HR 專用：覆寫指定日期的 day_type／label（單日或多日一次送）。 */
+export function putCalendarDays(
+  days: { date: string; dayType: CalendarDayType; label?: string | null }[],
+) {
+  return apiFetch<unknown>("/calendar/days", {
+    method: "PUT",
+    body: JSON.stringify({ days }),
+  });
+}
+
+/** HR 專用：批次產生週末＋國定假日；不帶 holidays 時套用該年度內建清單。 */
+export function generateCalendar(body: { year: number; holidays?: { date: string; label: string }[] }) {
+  return apiFetch<{ generated: number; imported: number; skipped: number }>("/calendar/generate", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** HR 專用：移除單一日期的覆寫（恢復為預設 workday）。 */
+export function deleteCalendarDay(date: string) {
+  return apiFetch<unknown>(`/calendar/days/${encodeURIComponent(date)}`, { method: "DELETE" });
 }
 
 export interface HeadcountReport {
@@ -1609,6 +1736,12 @@ export interface PayslipBreakdown {
   net?: number;
   attendanceDeduction?: number;
   compTimeMinutes?: number;
+  /** 本次計算採用的基準時薪（明示 hourlyWage 或 baseSalary÷除數）；舊資料沒有此欄。 */
+  hourlyWage?: number;
+  /** 請假扣款（正值） = Σ請假分鐘÷60×時薪×deductRate；舊資料沒有此欄。 */
+  leaveDeduction?: number;
+  /** 遲到早退扣款（正值）；僅 leave_deduction.lateEarly.enabled 時計，否則 0；舊資料沒有此欄。 */
+  lateEarlyDeduction?: number;
   lines?: { label: string; amount: number }[];
   overtimeSegments?: { when: string; multiplier: number; hours: number; amount: number }[];
 }

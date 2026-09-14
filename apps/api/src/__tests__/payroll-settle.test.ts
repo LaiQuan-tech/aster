@@ -295,22 +295,23 @@ describe("F2 worktime settlement — wired @hr/rules engine", () => {
       .send({ employeeId: aEmployeeId, workDate, shiftId })
     expect(schedRes.status).toBe(201)
 
-    // 3) punches: in 09:10, out 19:00 (UTC, deterministic). Insert directly so
-    //    we control exact timestamps (the punch API would stamp 'now').
+    // 3) punches: in 09:10, out 19:00 on the tenant's clock (Asia/Taipei =
+    //    UTC+8 → 01:10Z / 11:00Z). Insert directly so we control exact
+    //    timestamps (the punch API would stamp 'now').
     const { error: pErr } = await supabaseAdmin.from("punch_records").insert([
       {
         tenant_id: A.tenantId,
         employee_id: aEmployeeId,
         type: "in",
         source: "web",
-        punch_at: `${workDate}T09:10:00.000Z`,
+        punch_at: `${workDate}T01:10:00.000Z`,
       },
       {
         tenant_id: A.tenantId,
         employee_id: aEmployeeId,
         type: "out",
         source: "web",
-        punch_at: `${workDate}T19:00:00.000Z`,
+        punch_at: `${workDate}T11:00:00.000Z`,
       },
     ])
     expect(pErr).toBeNull()
@@ -339,8 +340,8 @@ describe("F2 worktime settlement — wired @hr/rules engine", () => {
     expect(day).toBeTruthy()
 
     // 6) Cross-check against the engine itself (single source of truth). The
-    //    settlement interprets the stored UTC instants on the business clock
-    //    (UTC wall-clock), so we feed the engine the matching naive wall-clock
+    //    settlement projects the stored UTC instants onto the tenant's clock
+    //    (Asia/Taipei), so we feed the engine the matching naive wall-clock
     //    times (no 'Z' → 09:10 / 19:00 on the engine's local clock).
     const expected = computeAttendanceDay(
       { inAt: `${workDate}T09:10:00`, outAt: `${workDate}T19:00:00` },

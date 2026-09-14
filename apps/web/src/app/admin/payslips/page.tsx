@@ -142,7 +142,7 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:14px;margin:20px 0 6px;color:#555}
 table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6px 8px;font-size:13px;text-align:left}
 .sum td{font-weight:600;background:#f7f7f7}.muted{color:#777;font-size:12px}</style></head><body>
 <h1>薪資單　${esc(empName(p.employee_id))}</h1>
-<div class="muted">期間 ${p.period}　狀態 ${p.status === "finalized" ? "已定案" : "草稿"}</div>
+<div class="muted">期間 ${p.period}　狀態 ${p.status === "finalized" ? "已定案" : "草稿"}　基準時薪 ${money(n(b.hourlyWage))}</div>
 <h2>應發</h2><table>
 <tr><td>本薪</td><td style="text-align:right">${money(n(p.base))}</td></tr>
 <tr><td>加班費</td><td style="text-align:right">${money(n(p.overtime_pay))}</td></tr>
@@ -155,6 +155,8 @@ table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6p
 <tr><td>健保自付</td><td style="text-align:right">${money(n(b.healthInsurance))}</td></tr>
 <tr><td>勞退自提</td><td style="text-align:right">${money(n(b.pensionVoluntary))}</td></tr>
 <tr><td>預支扣回</td><td style="text-align:right">${money(n(b.advance))}</td></tr>
+<tr><td>請假扣款</td><td style="text-align:right">${money(n(b.leaveDeduction))}</td></tr>
+<tr><td>遲到早退扣款</td><td style="text-align:right">${money(n(b.lateEarlyDeduction))}</td></tr>
 <tr class="sum"><td>應扣合計</td><td style="text-align:right">${money(n(b.totalDeductions))}</td></tr></table>
 <h2>實發</h2><table>
 <tr><td>代墊支出（不計薪資所得）</td><td style="text-align:right">${money(n(b.expenses))}</td></tr>
@@ -224,6 +226,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
               <thead>
                 <tr className="border-b border-gray-200 text-xs text-gray-500">
                   <th className="py-2 pr-3">員工</th>
+                  <th className="py-2 pr-3 text-right">時薪</th>
                   <th className="py-2 pr-3 text-right">本薪</th>
                   <th className="py-2 pr-3 text-right">加班費</th>
                   <th className="py-2 pr-3 text-right">夜間</th>
@@ -234,6 +237,8 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                   <th className="py-2 pr-3 text-right">健保</th>
                   <th className="py-2 pr-3 text-right">勞退自提</th>
                   <th className="py-2 pr-3 text-right">預支</th>
+                  <th className="py-2 pr-3 text-right">請假扣款</th>
+                  <th className="py-2 pr-3 text-right">遲到早退扣款</th>
                   <th className="py-2 pr-3 text-right">代墊</th>
                   <th className="py-2 pr-3 text-right font-semibold">實發</th>
                   <th className="py-2 pr-3">狀態</th>
@@ -260,6 +265,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                 })}
                 <tr className="border-t border-gray-300 bg-gray-50 text-sm font-semibold">
                   <td className="py-2 pr-3">合計（{rows.length} 人）</td>
+                  <td className="py-2 pr-3 text-right text-gray-400" title="時薪為個人費率，不加總">—</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(p.base), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(p.overtime_pay), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(p.night_pay), 0))}</td>
@@ -270,6 +276,8 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).healthInsurance), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).pensionVoluntary), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).advance), 0))}</td>
+                  <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).leaveDeduction), 0))}</td>
+                  <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).lateEarlyDeduction), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(totals.expenses)}</td>
                   <td className="py-2 pr-3 text-right">{money(totals.net)}</td>
                   <td colSpan={2} />
@@ -321,6 +329,7 @@ function PayslipRow({
             name
           )}
         </td>
+        <td className="py-2 pr-3 text-right text-gray-500">{money(n(b.hourlyWage))}</td>
         <td className="py-2 pr-3 text-right">{money(n(p.base))}</td>
         <td className="py-2 pr-3 text-right">{money(n(p.overtime_pay))}</td>
         <td className="py-2 pr-3 text-right">{money(n(p.night_pay))}</td>
@@ -331,6 +340,8 @@ function PayslipRow({
         <td className="py-2 pr-3 text-right text-rose-700">{money(n(b.healthInsurance))}</td>
         <td className="py-2 pr-3 text-right text-rose-700">{money(n(b.pensionVoluntary))}</td>
         <td className="py-2 pr-3 text-right text-rose-700">{money(n(b.advance))}</td>
+        <td className="py-2 pr-3 text-right text-rose-700">{money(n(b.leaveDeduction))}</td>
+        <td className="py-2 pr-3 text-right text-rose-700">{money(n(b.lateEarlyDeduction))}</td>
         <td className="py-2 pr-3 text-right">{money(n(b.expenses))}</td>
         <td className="py-2 pr-3 text-right font-semibold text-emerald-700">{money(netOf(p))}</td>
         <td className="py-2 pr-3">
@@ -351,7 +362,7 @@ function PayslipRow({
       </tr>
       {open && (
         <tr className="border-b border-gray-100 bg-gray-50/60">
-          <td colSpan={15} className="px-4 py-3">
+          <td colSpan={18} className="px-4 py-3">
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               {ot.length > 0 && (
                 <div>

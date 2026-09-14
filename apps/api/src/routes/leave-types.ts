@@ -7,11 +7,16 @@ import { supabaseAdmin } from "../lib/supabase.js"
 
 export const leaveTypesRouter = Router()
 
+// deductRate 0–1（DB numeric(3,2)）：null = 依 paid 推算（見 packages/db 的
+// leave_types schema 註解），故顯式允許 null（清空覆寫、退回用 paid 推算）。
+const deductRateSchema = z.number().min(0).max(1).nullable()
+
 const createSchema = z.object({
   code: z.string().trim().min(1, "code is required"),
   name: z.string().trim().min(1, "name is required"),
   paid: z.boolean().optional(),
   special: z.boolean().optional(),
+  deductRate: deductRateSchema.optional(),
 })
 
 // PATCH allows any subset; at least one field must be present.
@@ -21,6 +26,7 @@ const updateSchema = z
     name: z.string().trim().min(1).optional(),
     paid: z.boolean().optional(),
     special: z.boolean().optional(),
+    deductRate: deductRateSchema.optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 
@@ -32,7 +38,7 @@ const listQuerySchema = z.object({
     .optional(),
 })
 
-const SELECT_COLS = "id, tenant_id, code, name, paid, special, created_at"
+const SELECT_COLS = "id, tenant_id, code, name, paid, special, deduct_rate, created_at"
 
 /**
  * Leave-type routes are HR-admin-only and tenant-scoped. The tenant boundary is
@@ -97,6 +103,7 @@ leaveTypesRouter.post(
           name: parsed.data.name,
           paid: parsed.data.paid ?? true,
           special: parsed.data.special ?? false,
+          deduct_rate: parsed.data.deductRate ?? null,
         })
         .select("id")
         .single()
@@ -137,6 +144,7 @@ leaveTypesRouter.patch(
     if (parsed.data.name !== undefined) patch.name = parsed.data.name
     if (parsed.data.paid !== undefined) patch.paid = parsed.data.paid
     if (parsed.data.special !== undefined) patch.special = parsed.data.special
+    if (parsed.data.deductRate !== undefined) patch.deduct_rate = parsed.data.deductRate
 
     try {
       const { data, error } = await supabaseAdmin

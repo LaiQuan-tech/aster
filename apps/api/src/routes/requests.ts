@@ -461,7 +461,7 @@ async function decide(
     const { data: lr, error: lrErr } = await supabaseAdmin
       .from("leave_requests")
       .select(
-        "id, status, current_step, employee_id, kind, leave_type_id, hours, start_at, end_at, payout, advance_requested",
+        "id, status, current_step, employee_id, kind, leave_type_id, hours, start_at, end_at, payout, advance_requested, segments, reason",
       )
       .eq("tenant_id", tenantId)
       .is("deleted_at", null)
@@ -580,6 +580,8 @@ async function decide(
       start_at: lr.start_at as string,
       end_at: lr.end_at as string,
       payout: (lr.payout as string | null) ?? null,
+      segments: (lr.segments as Array<Record<string, unknown>> | null) ?? null,
+      reason: (lr.reason as string | null) ?? null,
     })
 
     res.status(200).json({ status: "approved", currentStep: lr.current_step })
@@ -606,7 +608,7 @@ async function decideOneRequest(params: {
 
   const { data: lr, error: lrErr } = await supabaseAdmin
     .from("leave_requests")
-    .select("id, status, current_step, employee_id, kind, leave_type_id, hours, start_at, end_at, payout, advance_requested")
+    .select("id, status, current_step, employee_id, kind, leave_type_id, hours, start_at, end_at, payout, advance_requested, segments, reason")
     .eq("tenant_id", tenantId)
     .is("deleted_at", null)
     .eq("id", requestId)
@@ -689,6 +691,8 @@ async function decideOneRequest(params: {
     start_at: lr.start_at as string,
     end_at: lr.end_at as string,
     payout: (lr.payout as string | null) ?? null,
+    segments: (lr.segments as Array<Record<string, unknown>> | null) ?? null,
+    reason: (lr.reason as string | null) ?? null,
   })
 
   return { ok: true, id: requestId, status: "approved", currentStep: lr.current_step as number }
