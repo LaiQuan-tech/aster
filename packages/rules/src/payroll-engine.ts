@@ -2,30 +2,31 @@
  * payroll-engine — 純函式。把一個月的 AttendanceDay[] + 員工薪資結構 + 規則,
  * 結算成可稽核的 PayslipBreakdown。無 IO。
  *
- * gross = 本俸 + 加班費 + 夜間加給 + 全勤獎金(已淨額化:base − 階梯扣款)。
- * net   = gross − 應扣(勞保/健保/自願提繳/預支) + 代墊支出。
+ * gross = 本俸 + 加班費 + 夜間加給 + 全勤獎金(已淨額化:base − 階梯扣款) + 定額補貼。
+ * net   = gross − 應扣(勞保/健保/自願提繳/預支/請假扣款/遲到早退扣款) + 代墊支出。
+ *
+ * 時薪:員工明示 hourlyWage (>0) 優先;否則 本薪 ÷ payroll.hourlyWageDivisor
+ * (預設 240,四捨五入到小數 4 位;亞斯特 37000 ÷ 240 = 154.1667)。
  *
  * 代墊支出刻意不進 gross:那是代收代付、非薪資所得,課稅基礎不同。
  */
 
 import { nhiEmployeePremium } from "./tw-tax.js";
-import type { OvertimeWhen, RuleConfig } from "./rules-schema.js";
-import type {
-  AttendanceDay,
-  DayType,
-  OvertimeSegment,
-  PayrollMethod,
-  PayslipBreakdown,
-  PayslipLine,
-  SalaryStructure,
+import {
+  resolveHourlyWageDivisor,
+  resolveLateEarlyDeductionEnabled,
+  type OvertimeWhen,
+  type RuleConfig,
+} from "./rules-schema.js";
+import {
+  DAY_TYPE_TO_OVERTIME_WHEN,
+  type AttendanceDay,
+  type OvertimeSegment,
+  type PayrollMethod,
+  type PayslipBreakdown,
+  type PayslipLine,
+  type SalaryStructure,
 } from "./types.js";
-
-/** DayType → 加班規則 when 的對應 (閉集合)。 */
-const DAY_TYPE_TO_WHEN: Record<DayType, OvertimeWhen> = {
-  workday: "weekday_ot",
-  rest_day: "rest_day",
-  fixed_holiday: "fixed_holiday",
-};
 
 /**
  * 四捨五入到「分」(小數 2 位) 以消除浮點殘差,同時保留客戶既有薪資表的精度 ——
@@ -34,6 +35,24 @@ const DAY_TYPE_TO_WHEN: Record<DayType, OvertimeWhen> = {
  */
 function round(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/** 時薪專用:四捨五入到小數 4 位 (客戶薪資表「平日每小時工資額」的精度)。 */
+function round4(n: number): number {
+  return Math.round(n * 10000) / 10000;
+}
+
+/**
+ * 決定本次計算的基準時薪:員工明示的 hourlyWage (>0) 優先;否則以月薪本俸 ÷
+ * hourlyWageDivisor 推算。兩者都沒有就無法折算加班/夜間/請假 → 丟錯,不猜。
+ * (API 層對沒填時薪的員工會傳 0 進來,所以 0 視同「未明示」。)
+ */
+function resolveHourlyWage(salary: SalaryStructure, rules: RuleConfig): number {
+  if (salary.hourlyWage !== undefined && salary.hourlyWage > 0) return salary.hourlyWage;
+  if (salary.baseSalary !== undefined && salary.baseSalary > 0) {
+    return round4(salary.baseSalary / resolveHourlyWageDivisor(rules));
+  }
+  throw new Error("payroll-engine: hourlyWage or baseSalary required");
 }
 
 /**
@@ -83,7 +102,7 @@ export function computePayslip(
   allowances = 0,
 ): PayslipBreakdown {
   const method: PayrollMethod = salary.method ?? rules.payroll.method;
-  const hourlyWage = salary.hourlyWage;
+  const hourlyWage = resolveHourlyWage(salary, rules);
   const flatHourly = rules.payroll.overtimeFlatHourly;
 
   // --- 本俸 -------------------------------------------------------------
@@ -115,7 +134,7 @@ export function computePayslip(
 
   for (const day of days) {
     if (day.overtimeMinutes <= 0) continue;
-    const when = DAY_TYPE_TO_WHEN[day.dayType];
+    const when = DAY_TYPE_TO_OVERTIME_WHEN[day.dayType];
     const rule = rules.overtime.rules.find((r) => r.when === when);
     if (!rule) continue; // 無對應規則 → 不計加班(亦不補休)
     if (rule.compTime) {
@@ -193,6 +212,46 @@ export function computePayslip(
 
   const gross = round(base + overtimePay + nightPay + attendanceBonus + allowancesTotal);
 
+  // --- 請假扣款 / 遲到早退扣款 (扣項,不動 gross) ---------------------------
+  // 請假扣款 = Σ 請假分鐘 ÷ 60 × 時薪 × deductRate;比例由呼叫端隨每筆帶入
+  // (事假 1、病假 0.5…),同 code 合併成一條明細。總額以未取整的合計四捨五入到分,
+  // 逐 code 明細各自取整後,若與總額差 1 分則調整最後一條,確保 lines 加總對得上。
+  const leaveByCode = new Map<string, number>();
+  let leaveRaw = 0;
+  for (const day of days) {
+    for (const leave of day.leaves ?? []) {
+      const amount = (leave.minutes / 60) * hourlyWage * leave.deductRate;
+      if (amount === 0) continue;
+      leaveRaw += amount;
+      leaveByCode.set(leave.code, (leaveByCode.get(leave.code) ?? 0) + amount);
+    }
+  }
+  const leaveDeduction = round(leaveRaw);
+  const leaveLines: PayslipLine[] = [];
+  for (const [code, amount] of leaveByCode) {
+    const rounded = round(amount);
+    if (rounded === 0) continue; // 不足 1 分的碎數併進下方 drift 調整,不出空行
+    leaveLines.push({ label: `請假扣款(${code})`, amount: -rounded });
+  }
+  if (leaveLines.length > 0) {
+    const linesSum = round(leaveLines.reduce((acc, l) => acc + l.amount, 0));
+    const drift = round(-leaveDeduction - linesSum);
+    if (drift !== 0) {
+      const last = leaveLines[leaveLines.length - 1]!;
+      last.amount = round(last.amount + drift);
+    }
+  }
+
+  // 遲到早退扣款 = Σ(遲到 + 早退分鐘) ÷ 60 × 時薪;只在規則開啟時計。
+  // (與全勤階梯扣款是兩回事:那個扣的是全勤獎金,這個扣的是本俸。)
+  const lateEarlyMinutes = days.reduce(
+    (acc, d) => acc + d.lateMinutes + (d.earlyLeaveMinutes ?? 0),
+    0,
+  );
+  const lateEarlyDeduction = resolveLateEarlyDeductionEnabled(rules)
+    ? round((lateEarlyMinutes / 60) * hourlyWage)
+    : 0;
+
   // --- 應扣項目 ----------------------------------------------------------
   // 保費以「投保薪資」為基數(非本俸)。缺任一設定就當 0,不臆測。
   const ins = rules.insurance;
@@ -218,7 +277,12 @@ export function computePayslip(
   );
   const advance = round(salary.advance ?? 0);
   const totalDeductions = round(
-    laborInsurance + healthInsurance + pensionVoluntary + advance,
+    laborInsurance +
+      healthInsurance +
+      pensionVoluntary +
+      advance +
+      leaveDeduction +
+      lateEarlyDeduction,
   );
 
   // 代墊支出是「代收代付」,不是薪資所得 → 不進 gross,直接加在實發。
@@ -230,11 +294,15 @@ export function computePayslip(
   if (pensionVoluntary !== 0)
     lines.push({ label: "勞工自願提繳退休金", amount: -pensionVoluntary });
   if (advance !== 0) lines.push({ label: "預支", amount: -advance });
+  if (leaveDeduction !== 0) lines.push(...leaveLines);
+  if (lateEarlyDeduction !== 0)
+    lines.push({ label: "遲到早退扣款", amount: -lateEarlyDeduction });
   if (expensesTotal !== 0) lines.push({ label: "支出(代墊)", amount: expensesTotal });
 
   return {
     base,
     regularPay: base,
+    hourlyWage,
     overtimePay,
     nightPay,
     attendanceBonus,
@@ -247,6 +315,8 @@ export function computePayslip(
     healthInsurance,
     pensionVoluntary,
     advance,
+    leaveDeduction,
+    lateEarlyDeduction,
     totalDeductions,
     expenses: expensesTotal,
     net,

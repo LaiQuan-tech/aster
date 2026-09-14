@@ -1,14 +1,21 @@
 /**
  * worktime-engine — 純函式。把一天的打卡 + 班別 + 規則 + 日屬性,結算成
- * AttendanceDay(工時 / 遲到 / 加班 / 夜間,皆以分鐘計)。無 IO。
+ * AttendanceDay(工時 / 遲到 / 早退 / 加班 / 夜間,皆以分鐘計)。無 IO。
  */
 
-import type { RuleConfig } from "./rules-schema.js";
-import type {
-  AttendanceDay,
-  DayContext,
-  PunchPair,
-  ShiftDef,
+import {
+  resolveOvertimeMealBreak,
+  resolveOvertimeRounding,
+  type OvertimeRoundingMode,
+  type RuleConfig,
+} from "./rules-schema.js";
+import {
+  DAY_TYPE_TO_OVERTIME_WHEN,
+  type AttendanceDay,
+  type DayContext,
+  type DayType,
+  type PunchPair,
+  type ShiftDef,
 } from "./types.js";
 
 const MS_PER_MIN = 60_000;
@@ -90,11 +97,73 @@ function nightOverlapMinutes(
   return Math.round(total);
 }
 
+/** 依 mode 把分鐘數對 unit 取整 (unit <= 0 視為不取整)。 */
+function roundToUnit(
+  minutes: number,
+  unit: number,
+  mode: OvertimeRoundingMode,
+): number {
+  if (unit <= 0) return minutes;
+  const q = minutes / unit;
+  const n =
+    mode === "floor" ? Math.floor(q) : mode === "ceil" ? Math.ceil(q) : Math.round(q);
+  return n * unit;
+}
+
+/**
+ * 加班分鐘管線 (順序固定,對應亞斯特出勤表的人工規則):
+ *   raw → 用餐扣除 (「延長工時」> afterMinutes 時扣 deductMinutes,不低於 0)
+ *       → 取整 (rounding.mode 對 unitMinutes;預設 30 分無條件捨去)
+ *       → 最低分鐘 (取整後 < minimumMinutes → 0)
+ *       → 保底時數 (該 dayType 的加班規則有 minChargeHours 且結果 > 0 時取 max,
+ *                  國定假日「做 1 給 8」)
+ *
+ * 「延長工時」= 超過每日正常工時 (payroll.dailyRegularHours) 的部分:平日的 raw
+ * 本身就是延長工時;例假/固定假的 raw 是整日工時,其中午休已由 shift.breakMinutes
+ * 扣過,故只有再超過正常工時 afterMinutes 以上才扣晚餐 (例假日做滿 8h 不會被扣
+ * 30 分 —— 這也是規則二黃金測試「例假日 8h → 480 分」的前提)。
+ *
+ * 匯出供 API 在人工調整 raw 分鐘後重跑同一條管線;dailyCapMinutes 刻意不在此裁切
+ * (只回傳實際分鐘,超過與否由 API 判異常)。
+ */
+export function applyOvertimePipeline(
+  rawMinutes: number,
+  rules: RuleConfig,
+  dayType: DayType,
+): number {
+  if (rawMinutes <= 0) return 0;
+  let minutes = rawMinutes;
+
+  const meal = resolveOvertimeMealBreak(rules);
+  if (meal) {
+    const regularMinutes = rules.payroll.dailyRegularHours * 60;
+    const extendedMinutes =
+      dayType === "workday" ? minutes : Math.max(0, minutes - regularMinutes);
+    if (extendedMinutes > meal.afterMinutes) {
+      minutes = Math.max(0, minutes - meal.deductMinutes);
+    }
+  }
+
+  const rounding = resolveOvertimeRounding(rules);
+  minutes = roundToUnit(minutes, rounding.unitMinutes, rounding.mode);
+  if (minutes < rounding.minimumMinutes) minutes = 0;
+
+  if (minutes > 0) {
+    const rule = rules.overtime.rules.find(
+      (r) => r.when === DAY_TYPE_TO_OVERTIME_WHEN[dayType],
+    );
+    const minCharge = rule?.minChargeHours ?? 0;
+    if (minCharge > 0) minutes = Math.max(minutes, Math.round(minCharge * 60));
+  }
+  return minutes;
+}
+
 /**
  * 結算一天。
  * @param punches 一個 in/out 對,或多段 (含中離)。
  * @param shift   班別 (start/end 'HH:MM'、breakMinutes)。
- * @param rules   RuleConfig (取 night.window 與 payroll.dailyRegularHours)。
+ * @param rules   RuleConfig (取 night.window、payroll.dailyRegularHours、
+ *                overtime.rounding / mealBreak / rules[].minChargeHours)。
  * @param ctx     該日屬性 (date + dayType)。
  */
 export function computeAttendanceDay(
@@ -109,7 +178,9 @@ export function computeAttendanceDay(
       date: ctx.date,
       workedMinutes: 0,
       lateMinutes: 0,
+      earlyLeaveMinutes: 0,
       overtimeMinutes: 0,
+      overtimeMinutesComputed: 0,
       nightMinutes: 0,
       dayType: ctx.dayType,
     };
@@ -125,19 +196,39 @@ export function computeAttendanceDay(
 
   // 遲到:最早一段 inAt 相對「班表 start 投影到該 inAt 當天」的差。
   const earliestIn = Math.min(...intervals.map((iv) => iv.start));
-  const shiftStartMs =
-    startOfLocalDay(earliestIn) + hhmmToMinutes(shift.start) * MS_PER_MIN;
+  const dayBase = startOfLocalDay(earliestIn);
+  const shiftStartMin = hhmmToMinutes(shift.start);
+  const shiftStartMs = dayBase + shiftStartMin * MS_PER_MIN;
   const lateMinutes = Math.max(
     0,
     Math.round((earliestIn - shiftStartMs) / MS_PER_MIN),
   );
 
+  // 早退:最晚一段 outAt 相對「班表 end 投影到同一基準日」的差;跨日班
+  // (end < start) 的 end 投影到隔天。例假/固定假沒有「應到班到幾點」→ 0。
+  const latestOut = Math.max(...intervals.map((iv) => iv.end));
+  const shiftEndMin = hhmmToMinutes(shift.end);
+  const shiftEndMs =
+    dayBase +
+    (shiftEndMin < shiftStartMin ? shiftEndMin + MIN_PER_DAY : shiftEndMin) *
+      MS_PER_MIN;
+  const earlyLeaveMinutes =
+    ctx.dayType === "workday"
+      ? Math.max(0, Math.round((shiftEndMs - latestOut) / MS_PER_MIN))
+      : 0;
+
   // 加班:平日 = 超過 dailyRegularHours 的部分;例假/固定假 = 全部工時。
+  // 這是 raw 值,再走 用餐扣除 → 取整 → 最低分鐘 → 保底 的管線。
   const regularMinutes = rules.payroll.dailyRegularHours * 60;
-  const overtimeMinutes =
+  const rawOvertimeMinutes =
     ctx.dayType === "workday"
       ? Math.max(0, workedMinutes - regularMinutes)
       : workedMinutes;
+  const overtimeMinutes = applyOvertimePipeline(
+    rawOvertimeMinutes,
+    rules,
+    ctx.dayType,
+  );
 
   // 夜間:工作區間與 night.window 的重疊,再上限到實際工時(避免把休息算進
   // 夜間;當整班都在夜間視窗時,休息分鐘自然從夜間時數扣除)。
@@ -152,7 +243,10 @@ export function computeAttendanceDay(
     date: ctx.date,
     workedMinutes,
     lateMinutes,
+    earlyLeaveMinutes,
     overtimeMinutes,
+    // 稽核用:引擎輸出時恆等於 overtimeMinutes,人工覆寫後才會分岔。
+    overtimeMinutesComputed: overtimeMinutes,
     nightMinutes,
     dayType: ctx.dayType,
   };

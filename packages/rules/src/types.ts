@@ -28,10 +28,29 @@ export interface ShiftDef {
 /** 該日屬性 (例假/固定假由呼叫端判定，引擎不需國定假日表)。 */
 export type DayType = "workday" | "rest_day" | "fixed_holiday";
 
+/** DayType → 加班規則 when 的對應 (閉集合;worktime 與 payroll 兩個引擎共用)。 */
+export const DAY_TYPE_TO_OVERTIME_WHEN: Record<DayType, OvertimeWhen> = {
+  workday: "weekday_ot",
+  rest_day: "rest_day",
+  fixed_holiday: "fixed_holiday",
+};
+
 export interface DayContext {
   /** ISO date 'YYYY-MM-DD' — 用來定位這天 (純標籤，不參與工時運算)。 */
   date: string;
   dayType: DayType;
+}
+
+/**
+ * 當日一筆請假 (由呼叫端自假單/假別主檔帶入,引擎不判假別)。
+ *   code       假別代碼 (sick / personal / …),同 code 多筆在薪資單合併成一條
+ *   minutes    請假分鐘
+ *   deductRate 扣薪比例 0–1 (1 = 全扣、0.5 = 半薪、0 = 不扣薪但仍記錄)
+ */
+export interface LeaveEntry {
+  code: string;
+  minutes: number;
+  deductRate: number;
 }
 
 /**
@@ -44,10 +63,22 @@ export interface AttendanceDay {
   workedMinutes: number;
   /** 遲到分鐘 (相對班表 start;早到為 0)。 */
   lateMinutes: number;
-  /** 超過 dailyRegularHours 的加班分鐘。 */
+  /** 早退分鐘 (相對班表 end;晚走為 0;rest_day / fixed_holiday 一律 0)。 */
+  earlyLeaveMinutes?: number;
+  /**
+   * 當日加班分鐘 (計薪用)。worktime-engine 的輸出已經過
+   * 用餐扣除 → 取整 → 最低分鐘 → 保底時數 的管線;人工覆寫請直接改這欄。
+   */
   overtimeMinutes: number;
+  /**
+   * 稽核用：系統算出的加班分鐘 (覆寫前的值)。worktime-engine 輸出時恆等於
+   * overtimeMinutes;人工覆寫 overtimeMinutes 後兩者即出現差異。
+   */
+  overtimeMinutesComputed?: number;
   /** 落在 night.window 內的分鐘 (可與 overtime 重疊)。 */
   nightMinutes: number;
+  /** 當日請假 (呼叫端帶入;payroll-engine 據此算請假扣款)。 */
+  leaves?: LeaveEntry[];
   dayType: DayType;
 }
 
@@ -55,7 +86,10 @@ export interface AttendanceDay {
 export type PayrollMethod = "monthly" | "by_attendance_days";
 
 /**
- * 員工的薪資結構。hourlyWage 為加班/夜間折算的基準時薪 (必填)。
+ * 員工的薪資結構。
+ * hourlyWage 為加班/夜間/請假扣款折算的基準時薪;可省略 (或給 0),此時引擎以
+ * baseSalary ÷ rules.payroll.hourlyWageDivisor 推算 (預設 ÷ 240)。兩者都沒有
+ * 就無法折算 → computePayslip 丟錯。
  * baseSalary 供月薪制本俸;dailyWage 供按出勤天數制本俸。
  * method 若提供則覆蓋 rules.payroll.method (允許個別員工不同制)。
  */
@@ -63,7 +97,7 @@ export interface SalaryStructure {
   method?: PayrollMethod;
   baseSalary?: number;
   dailyWage?: number;
-  hourlyWage: number;
+  hourlyWage?: number;
   /** 勞保投保薪資 (已套級距的金額);未提供則不計勞保自付額。 */
   laborInsuredSalary?: number;
   /** 健保投保金額;未提供則不計健保自付額。 */
@@ -97,6 +131,11 @@ export interface PayslipBreakdown {
   base: number;
   /** 與 base 同義的別名,保留供報表使用。 */
   regularPay?: number;
+  /**
+   * 本次計算實際採用的基準時薪:員工明示的 hourlyWage,或 baseSalary ÷
+   * hourlyWageDivisor (四捨五入到小數 4 位,例 37000 ÷ 240 = 154.1667)。
+   */
+  hourlyWage: number;
   /** 加班費現金總額 (compTime 的部分不計入此)。 */
   overtimePay: number;
   /** 夜間加給總額。 */
@@ -121,7 +160,14 @@ export interface PayslipBreakdown {
   pensionVoluntary: number;
   /** 本期預支 (正值)。 */
   advance: number;
-  /** 應扣合計 = 勞保 + 健保 + 自願提繳 + 預支 (正值)。 */
+  /** 請假扣款 (正值) = Σ 請假分鐘 ÷ 60 × 時薪 × deductRate。 */
+  leaveDeduction: number;
+  /**
+   * 遲到早退扣款 (正值) = Σ(遲到 + 早退分鐘) ÷ 60 × 時薪;
+   * 僅 rules.leave_deduction.lateEarly.enabled 時計,否則 0。
+   */
+  lateEarlyDeduction: number;
+  /** 應扣合計 = 勞保 + 健保 + 自願提繳 + 預支 + 請假扣款 + 遲到早退扣款 (正值)。 */
   totalDeductions: number;
   /** 員工代墊支出 (加項;不計入 gross,直接加在實發)。 */
   expenses: number;
