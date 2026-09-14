@@ -309,6 +309,13 @@
       "when": 1789412089540,
       "tag": "0043_disbursement_client_leave_archive_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1789413385175,
+      "tag": "0044_period_closes_attendance_snapshots_effective_hourly",
+      "breakpoints": true
     }
   ]
 }
