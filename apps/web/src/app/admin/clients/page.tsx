@@ -3,8 +3,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Card, PageHeader, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import {
   listClients, createClient, updateClient, deleteClient, humanizeClientError,
-  INVOICE_TYPE_LABELS, PAYMENT_METHOD_LABELS,
-  type Client, type ClientInput, type InvoiceType, type PaymentMethod,
+  INVOICE_TYPE_LABELS, PAYMENT_METHOD_LABELS, CLIENT_CATEGORY_LABELS, CLIENT_CATEGORY_ORDER,
+  type Client, type ClientInput, type InvoiceType, type PaymentMethod, type ClientCategory,
 } from "@/lib/projects-ext-api";
 
 /**
@@ -13,23 +13,24 @@ import {
  * 的軟刪除慣例——刪除只是從列表收起來，往來紀錄不會消失。
  */
 type Form = {
-  name: string; taxId: string; phone: string; fax: string; invoiceAddress: string;
+  name: string; category: ClientCategory | ""; taxId: string; phone: string; fax: string; invoiceAddress: string;
   contactName: string; contactPhone: string; email: string;
   invoiceType: InvoiceType | ""; paymentMethod: PaymentMethod | ""; closingDay: string; paymentDay: string;
   note: string;
 };
 const emptyForm = (): Form => ({
-  name: "", taxId: "", phone: "", fax: "", invoiceAddress: "", contactName: "", contactPhone: "", email: "",
+  name: "", category: "", taxId: "", phone: "", fax: "", invoiceAddress: "", contactName: "", contactPhone: "", email: "",
   invoiceType: "", paymentMethod: "", closingDay: "", paymentDay: "", note: "",
 });
 const fromClient = (c: Client): Form => ({
-  name: c.name, taxId: c.taxId ?? "", phone: c.phone ?? "", fax: c.fax ?? "", invoiceAddress: c.invoiceAddress ?? "",
+  name: c.name, category: c.category ?? "", taxId: c.taxId ?? "", phone: c.phone ?? "", fax: c.fax ?? "", invoiceAddress: c.invoiceAddress ?? "",
   contactName: c.contactName ?? "", contactPhone: c.contactPhone ?? "", email: c.email ?? "",
   invoiceType: c.invoiceType ?? "", paymentMethod: c.paymentMethod ?? "", closingDay: c.closingDay ?? "", paymentDay: c.paymentDay ?? "",
   note: c.note ?? "",
 });
 const toInput = (f: Form): ClientInput => ({
   name: f.name.trim(),
+  category: f.category || null,
   taxId: f.taxId.trim() || null,
   phone: f.phone.trim() || null,
   fax: f.fax.trim() || null,
@@ -47,6 +48,7 @@ const toInput = (f: Form): ClientInput => ({
 export default function ClientsPage() {
   const [clients, setClients] = useState<Client[]>([]);
   const [q, setQ] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<ClientCategory | "">("");
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Client | "new" | null>(null);
   const [form, setForm] = useState<Form>(emptyForm());
@@ -75,6 +77,8 @@ export default function ClientsPage() {
     setForm(fromClient(c));
     setError(null);
   }
+
+  const shown = categoryFilter ? clients.filter((c) => c.category === categoryFilter) : clients;
 
   async function save() {
     if (!form.name.trim() || editing === null) return;
@@ -118,17 +122,28 @@ export default function ClientsPage() {
       <Card>
         <div className="mb-3 flex flex-wrap items-center gap-3">
           <input className={`${inputCls} max-w-xs`} value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜尋名稱 / 統編 / 承辦" />
+          <select
+            className="rounded-lg border border-gray-200 px-2 py-1.5 text-sm"
+            value={categoryFilter}
+            onChange={(e) => setCategoryFilter(e.target.value as ClientCategory | "")}
+          >
+            <option value="">全部分類</option>
+            {CLIENT_CATEGORY_ORDER.map((v) => (
+              <option key={v} value={v}>{CLIENT_CATEGORY_LABELS[v]}</option>
+            ))}
+          </select>
           <PrimaryButton type="button" onClick={startNew}>新增客戶</PrimaryButton>
-          <span className="text-sm text-gray-500">{clients.length} 家</span>
+          <span className="text-sm text-gray-500">{shown.length} 家{categoryFilter ? `（共 ${clients.length} 家）` : ""}</span>
         </div>
-        {clients.length === 0 ? (
-          <Empty>{q ? "沒有符合的客戶" : "尚無客戶，請先新增。"}</Empty>
+        {shown.length === 0 ? (
+          <Empty>{q || categoryFilter ? "沒有符合的客戶" : "尚無客戶，請先新增。"}</Empty>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b text-left text-xs text-gray-500">
                   <th className="py-2 pr-3">客戶</th>
+                  <th className="py-2 pr-3">分類</th>
                   <th className="py-2 pr-3">統編</th>
                   <th className="py-2 pr-3">採購承辦</th>
                   <th className="py-2 pr-3">電話</th>
@@ -138,9 +153,14 @@ export default function ClientsPage() {
                 </tr>
               </thead>
               <tbody>
-                {clients.map((c) => (
+                {shown.map((c) => (
                   <tr key={c.id} className="border-b last:border-0">
                     <td className="py-2 pr-3 font-medium text-gray-900">{c.name}</td>
+                    <td className="py-2 pr-3 text-gray-600">
+                      {c.category ? (
+                        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{CLIENT_CATEGORY_LABELS[c.category]}</span>
+                      ) : "—"}
+                    </td>
                     <td className="py-2 pr-3 text-gray-600">{c.taxId ?? "—"}</td>
                     <td className="py-2 pr-3 text-gray-600">{c.contactName ?? "—"}{c.contactPhone ? <span className="text-xs text-gray-400">・{c.contactPhone}</span> : null}</td>
                     <td className="py-2 pr-3 text-gray-600">{c.phone ?? "—"}</td>
@@ -163,6 +183,19 @@ export default function ClientsPage() {
           <h2 className="mb-3 text-sm font-semibold text-gray-700">{editing === "new" ? "新增客戶" : `編輯：${editing.name}`}</h2>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {F("name", "名稱 *")}
+            <div>
+              <label className={labelCls}>分類</label>
+              <select
+                className={inputCls}
+                value={form.category}
+                onChange={(e) => setForm((f) => ({ ...f, category: e.target.value as ClientCategory | "" }))}
+              >
+                <option value="">未分類</option>
+                {CLIENT_CATEGORY_ORDER.map((v) => (
+                  <option key={v} value={v}>{CLIENT_CATEGORY_LABELS[v]}</option>
+                ))}
+              </select>
+            </div>
             {F("taxId", "統一編號", "8 碼")}
             {F("phone", "電話")}
             {F("fax", "傳真")}

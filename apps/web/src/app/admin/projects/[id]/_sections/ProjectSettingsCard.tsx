@@ -1,9 +1,11 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Card, ErrorText, inputCls, labelCls } from "@/components/admin-ui";
+import { ClientCombo } from "@/components/ClientCombo";
 import type { Department, Employee } from "@/lib/admin-api";
 import type { ShareMode } from "@/lib/projects-api";
-import type { ProjectDetail, UpdateProjectExtBody } from "@/lib/projects-ext-api";
+import { listClients, type Client, type ProjectDetail, type UpdateProjectExtBody } from "@/lib/projects-ext-api";
 
 interface ProjectSettingsCardProps {
   project: ProjectDetail;
@@ -14,12 +16,25 @@ interface ProjectSettingsCardProps {
   error: string | null;
 }
 
-/** 專案設定（部門／負責人／分潤模式／年度／起迄日）。欄位即存，走 page.tsx 的 saveProjectField。 */
+/**
+ * 專案設定（客戶／部門／負責人／分潤模式／年度／起迄日）。欄位即存，走
+ * page.tsx 的 saveProjectField。客戶名冊自己抓（B4）——`[id]/page.tsx`
+ * 目前沒有載入 clients，改成外部傳入要動到那支檔案，這裡改成自給自足即可。
+ */
 export function ProjectSettingsCard({ project, depts, emps, isPool, saveProjectField, error }: ProjectSettingsCardProps) {
+  const [clients, setClients] = useState<Client[]>([]);
+  useEffect(() => {
+    listClients().then((r) => setClients(r.clients)).catch(() => {});
+  }, []);
+
   return (
     <Card>
       <h2 className="mb-3 text-sm font-semibold text-gray-700">專案設定</h2>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <label className={labelCls}>客戶</label>
+          <ClientCombo clients={clients} clientId={project.clientId} onChange={(id) => saveProjectField({ clientId: id })} />
+        </div>
         <div>
           <label className={labelCls}>所屬部門</label>
           <select

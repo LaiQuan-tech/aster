@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { ClientCombo } from "@/components/ClientCombo";
 import { getDepartments, getEmployees, type Department, type Employee } from "@/lib/admin-api";
 import {
   getProjectSettings,
@@ -10,9 +11,12 @@ import {
   statusLabel,
   PROJECT_STATUS_ORDER,
   PROJECT_STATUS_LABELS,
+  PROJECT_SORT_LABELS,
   type ShareMode,
   type ProjectStatus,
   type ProjectSettings,
+  type ProjectSort,
+  type SortDir,
 } from "@/lib/projects-api";
 import {
   listProjectsExt,
@@ -25,9 +29,12 @@ import {
   clientNameOf,
   PROJECT_KIND_LABELS,
   PROJECT_KIND_ORDER,
+  CLIENT_CATEGORY_LABELS,
+  CLIENT_CATEGORY_ORDER,
   type ProjectListItem,
   type ProjectKind,
   type Client,
+  type ClientCategory,
 } from "@/lib/projects-ext-api";
 
 /** 瀏覽器當地日期 'YYYY-MM-DD'——開案日期表單欄位的預設值（今天）。 */
@@ -58,6 +65,9 @@ export default function AdminProjectsPage() {
   const [includeArchived, setIncludeArchived] = useState(false);
   const [includeReserved, setIncludeReserved] = useState(false);
   const [statusFilter, setStatusFilter] = useState<ProjectStatus | "">("");
+  // B4：列表排序——欄位＋方向，換了就重打 GET /projects。
+  const [sort, setSort] = useState<ProjectSort>("created");
+  const [dir, setDir] = useState<SortDir>("desc");
 
   // 自動封存設定（模組四第 2 條）
   const [settings, setSettings] = useState<ProjectSettings | null>(null);
@@ -87,6 +97,7 @@ export default function AdminProjectsPage() {
   const [newClientName, setNewClientName] = useState("");
   const [newClientTaxId, setNewClientTaxId] = useState("");
   const [newClientPhone, setNewClientPhone] = useState("");
+  const [newClientCategory, setNewClientCategory] = useState<ClientCategory | "">("");
   const [creatingClient, setCreatingClient] = useState(false);
 
   // 預先取號（模組五）
@@ -99,7 +110,7 @@ export default function AdminProjectsPage() {
     setError(null);
     try {
       const [p, cl, d, e, st] = await Promise.all([
-        listProjectsExt({ includeArchived, includeReserved }),
+        listProjectsExt({ includeArchived, includeReserved, sort, dir }),
         listClients(),
         getDepartments(),
         getEmployees(),
@@ -120,7 +131,7 @@ export default function AdminProjectsPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [includeArchived, includeReserved]);
+  }, [includeArchived, includeReserved, sort, dir]);
 
   const mainProjects = projects.filter((p) => (p.kind ?? "main") === "main");
 
@@ -186,6 +197,7 @@ export default function AdminProjectsPage() {
     try {
       const res = await createClient({
         name: newClientName.trim(),
+        category: newClientCategory || null,
         taxId: newClientTaxId.trim() || null,
         phone: newClientPhone.trim() || null,
       });
@@ -195,6 +207,7 @@ export default function AdminProjectsPage() {
       setNewClientName("");
       setNewClientTaxId("");
       setNewClientPhone("");
+      setNewClientCategory("");
     } catch (err) {
       setError(humanizeClientError(err, "新增客戶失敗"));
     } finally {
@@ -276,12 +289,7 @@ export default function AdminProjectsPage() {
           <div className="sm:col-span-2">
             <label className={labelCls}>客戶</label>
             <div className="flex flex-wrap items-center gap-2">
-              <select className={`${inputCls} max-w-xs`} value={clientId} onChange={(e) => setClientId(e.target.value)}>
-                <option value="">不指定</option>
-                {clients.map((c) => (
-                  <option key={c.id} value={c.id}>{c.name}</option>
-                ))}
-              </select>
+              <ClientCombo clients={clients} clientId={clientId || null} onChange={(id) => setClientId(id ?? "")} />
               <button
                 type="button"
                 onClick={() => setShowNewClient((v) => !v)}
@@ -290,9 +298,20 @@ export default function AdminProjectsPage() {
                 {showNewClient ? "取消新增客戶" : "＋ 新增客戶"}
               </button>
             </div>
+            <p className="mt-1 text-xs text-gray-400">打字可過濾既有客戶；打不到符合的名字，用右邊「＋ 新增客戶」建檔。</p>
             {showNewClient && (
-              <div className="mt-2 grid grid-cols-1 gap-2 rounded-lg border border-dashed border-gray-300 p-3 sm:grid-cols-4">
+              <div className="mt-2 grid grid-cols-1 gap-2 rounded-lg border border-dashed border-gray-300 p-3 sm:grid-cols-5">
                 <input className={inputCls} value={newClientName} onChange={(e) => setNewClientName(e.target.value)} placeholder="客戶名稱 *" />
+                <select
+                  className={inputCls}
+                  value={newClientCategory}
+                  onChange={(e) => setNewClientCategory(e.target.value as ClientCategory | "")}
+                >
+                  <option value="">分類（選填）</option>
+                  {CLIENT_CATEGORY_ORDER.map((v) => (
+                    <option key={v} value={v}>{CLIENT_CATEGORY_LABELS[v]}</option>
+                  ))}
+                </select>
                 <input className={inputCls} value={newClientTaxId} onChange={(e) => setNewClientTaxId(e.target.value)} placeholder="統編（選填）" />
                 <input className={inputCls} value={newClientPhone} onChange={(e) => setNewClientPhone(e.target.value)} placeholder="電話（選填）" />
                 <PrimaryButton type="button" onClick={submitNewClient} disabled={creatingClient || !newClientName.trim()}>
@@ -394,6 +413,26 @@ export default function AdminProjectsPage() {
               <option key={v} value={v}>{PROJECT_STATUS_LABELS[v]}</option>
             ))}
           </select>
+          <label className="flex items-center gap-1.5 text-sm text-gray-600">
+            排序
+            <select
+              className="rounded-lg border border-gray-200 px-2 py-1 text-sm"
+              value={sort}
+              onChange={(e) => setSort(e.target.value as ProjectSort)}
+            >
+              {(Object.keys(PROJECT_SORT_LABELS) as ProjectSort[]).map((v) => (
+                <option key={v} value={v}>{PROJECT_SORT_LABELS[v]}</option>
+              ))}
+            </select>
+            <select
+              className="rounded-lg border border-gray-200 px-2 py-1 text-sm"
+              value={dir}
+              onChange={(e) => setDir(e.target.value as SortDir)}
+            >
+              <option value="desc">遞減</option>
+              <option value="asc">遞增</option>
+            </select>
+          </label>
           <label className="flex items-center gap-1.5 text-sm text-gray-600">
             <input
               type="checkbox"

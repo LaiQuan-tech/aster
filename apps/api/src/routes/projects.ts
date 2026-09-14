@@ -411,6 +411,19 @@ async function loadScope(
   return { ok: true, self: { id: self.id, role: self.role }, project, canManage }
 }
 
+/**
+ * B4：列表排序欄位。key 是 `?sort=` 收的值，value 是實際的 DB 欄位。
+ * 不合法的 sort／dir 一律 400（比照 GET /projects/annual 的 invalid_sort
+ * 慣例）——排序下拉傳錯值該讓人看見，不要默默退回預設排序。
+ */
+const PROJECT_SORT_COLUMNS: Record<string, string> = {
+  created: "created_at",
+  opened: "opened_on",
+  name: "name",
+  code: "code",
+  status: "status",
+}
+
 // ── GET /projects — 全員列所有專案（資訊，不含分潤金額） ────────────────
 projectsRouter.get(
   "/projects",
@@ -425,6 +438,22 @@ projectsRouter.get(
     // 預先取號的空列（reserved_at 非空）預設不進列表——它們還不是案子，
     // 只是佔了號。年度總表要看得到，帶 ?includeReserved=1。
     const includeReserved = req.query.includeReserved === "1"
+
+    // B4：?sort=created|opened|name|code|status&dir=asc|desc，預設 created desc
+    // （與改動前的固定排序相容）。
+    const sortParam = typeof req.query.sort === "string" ? req.query.sort : "created"
+    if (!Object.prototype.hasOwnProperty.call(PROJECT_SORT_COLUMNS, sortParam)) {
+      res.status(400).json({ error: "invalid_sort" })
+      return
+    }
+    const dirParam = typeof req.query.dir === "string" ? req.query.dir : "desc"
+    if (dirParam !== "asc" && dirParam !== "desc") {
+      res.status(400).json({ error: "invalid_dir" })
+      return
+    }
+    const sortColumn = PROJECT_SORT_COLUMNS[sortParam] as string
+    const ascending = dirParam === "asc"
+
     try {
       let query = supabaseAdmin
         .from("projects")
@@ -432,7 +461,10 @@ projectsRouter.get(
         .eq("tenant_id", tenantId)
       if (!includeArchived) query = query.is("archived_at", null)
       if (!includeReserved) query = query.is("reserved_at", null)
-      const { data, error } = await query.order("created_at", { ascending: false })
+      // 次要排序固定用 id：主排序值重複（同名／同狀態）時結果仍穩定可測。
+      const { data, error } = await query
+        .order(sortColumn, { ascending })
+        .order("id", { ascending: true })
       if (error) {
         next(new Error(`GET /projects: ${error.message}`))
         return

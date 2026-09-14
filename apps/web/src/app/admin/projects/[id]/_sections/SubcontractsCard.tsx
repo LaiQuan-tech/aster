@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment } from "react";
+import { Fragment, useMemo, useState } from "react";
 import Link from "next/link";
 import { Card, PrimaryButton, ErrorText, Empty, inputCls } from "@/components/admin-ui";
 import { VendorCombo } from "@/components/VendorCombo";
@@ -70,6 +70,25 @@ export function SubcontractsCard({
   setError,
   load,
 }: SubcontractsCardProps) {
+  // B4：廠商依類別篩（vendors.category 是自由文字，不是固定列舉——類別選項
+  // 就從目前名冊裡實際出現過的值取，不強加一份清單）。
+  const [vendorCategoryFilter, setVendorCategoryFilter] = useState("");
+  const vendorCategories = useMemo(
+    () => Array.from(new Set(vendors.map((v) => v.category).filter((c): c is string => !!c))).sort(),
+    [vendors],
+  );
+  /** 篩選後的廠商清單，但這列目前選的廠商一定留著——不然篩一下會讓已選的
+   * 廠商從下拉裡消失，看起來像選到的東西不見了。 */
+  function vendorsForRow(row: SubRow) {
+    if (!vendorCategoryFilter) return vendors;
+    const filtered = vendors.filter((v) => v.category === vendorCategoryFilter);
+    if (row.vendorId && !filtered.some((v) => v.id === row.vendorId)) {
+      const cur = vendors.find((v) => v.id === row.vendorId);
+      if (cur) return [cur, ...filtered];
+    }
+    return filtered;
+  }
+
   function patchSub(idx: number, patch: Partial<Subcontract>) {
     setSubDraft((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
   }
@@ -189,11 +208,26 @@ export function SubcontractsCard({
 
   return (
     <Card>
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-semibold text-gray-700">副委託與協力技師</h2>
-        <button type="button" onClick={addSubRow} className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50">
-          ＋ 新增一列
-        </button>
+        <div className="flex items-center gap-2">
+          {vendorCategories.length > 0 && (
+            <select
+              className="rounded-lg border border-gray-200 px-2 py-1.5 text-xs text-gray-600"
+              value={vendorCategoryFilter}
+              onChange={(e) => setVendorCategoryFilter(e.target.value)}
+              title="廠商下拉依類別篩選"
+            >
+              <option value="">廠商：全部類別</option>
+              {vendorCategories.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          )}
+          <button type="button" onClick={addSubRow} className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50">
+            ＋ 新增一列
+          </button>
+        </div>
       </div>
       {subDraft.length === 0 ? (
         <Empty>尚無下包或技師</Empty>
@@ -229,7 +263,7 @@ export function SubcontractsCard({
                       <input className={inputCls} list="discipline-suggestions" value={row.discipline ?? ""} onChange={(e) => patchSub(idx, { discipline: e.target.value })} />
                     </td>
                     <td className="py-1.5 pr-2">
-                      <VendorCombo vendors={vendors} vendorId={row.vendorId} name={row.vendorName} onChange={(v) => patchSub(idx, { vendorId: v.vendorId, vendorName: v.name })} />
+                      <VendorCombo vendors={vendorsForRow(row)} vendorId={row.vendorId} name={row.vendorName} onChange={(v) => patchSub(idx, { vendorId: v.vendorId, vendorName: v.name })} />
                     </td>
                     <td className="py-1.5 pr-2">
                       <input className={inputCls} value={row.contact ?? ""} onChange={(e) => patchSub(idx, { contact: e.target.value })} />

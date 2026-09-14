@@ -1,13 +1,21 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
 import Link from "next/link";
 import { Card, PageHeader, Empty, ErrorText } from "@/components/admin-ui";
-import { getProjectOverview, statusLabel, type OverviewProject, type ProjectStatus } from "@/lib/projects-api";
+import { getProjectOverview, updateProject, statusLabel, type OverviewProject, type ProjectStatus } from "@/lib/projects-api";
 
 /**
- * 專案總覽：看板（依案情狀態分欄）與甘特圖（預定起訖 + 分期請款里程碑）。
- * 資料來自 GET /projects/overview（一次撈齊，前端只排版）。沒填起訖日的案子在
- * 甘特圖上以建立日～今天畫虛線，並在卡片上標「未填日期」——不藏，讓人去補。
+ * 專案總覽：看板（依案情狀態分欄，可拖拉改狀態）與甘特圖（預定起訖 + 分期
+ * 請款里程碑）。資料來自 GET /projects/overview（一次撈齊，前端只排版）。
+ * 沒填起訖日的案子在甘特圖上以建立日～今天畫虛線，並在卡片上標「未填日期」
+ * ——不藏，讓人去補。
+ *
+ * B4 拖拉改狀態：HTML5 原生 drag-and-drop（不引第三方套件）。卡片拖進另一欄
+ * → `window.prompt` 填變更理由（比照這支 repo 其他「改狀態／作廢」流程的既有
+ * 慣例，見 SubcontractsCard／BillingsCard／ContractsCard 的 window.prompt）→
+ * 打既有的 `PATCH /projects/:id`（`updateProject` 帶 status／statusReason）→
+ * 成功就整包 reload 對齊後端（例如自動解除封存這類副作用）；失敗就把本地
+ * 樂觀搬動的卡片復原——「回彈」靠的是這裡的 revert，不是重新整理才看得到。
  */
 const STATUS_ORDER: ProjectStatus[] = ["active", "suspended", "closed", "terminated"];
 const STATUS_CLS: Record<ProjectStatus, string> = {
@@ -24,14 +32,47 @@ export default function ProjectOverviewPage() {
   const [today, setToday] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [showClosed, setShowClosed] = useState(false);
+  // 拖拉改狀態中：擋掉重疊的第二次拖放，卡片上疊一層半透明遮罩。
+  const [movingId, setMovingId] = useState<string | null>(null);
 
-  useEffect(() => {
-    getProjectOverview()
+  const load = useCallback(() => {
+    return getProjectOverview()
       .then((r) => { setProjects(r.projects); setToday(r.today); })
       .catch((err) => setError(err instanceof Error ? err.message : "載入失敗"));
   }, []);
 
+  useEffect(() => {
+    load();
+  }, [load]);
+
   const visible = useMemo(() => (showClosed ? projects : projects.filter((p) => p.status === "active" || p.status === "suspended")), [projects, showClosed]);
+
+  /**
+   * 看板拖拉改狀態：同欄放回原地不動；跨欄放下先跳 `window.prompt` 收變更
+   * 理由（比照既有「改狀態／作廢」的 window.prompt 慣例），取消或空白就整個
+   * 放棄，卡片留在原欄。理由填了才樂觀把卡片搬到新欄，同時打
+   * `PATCH /projects/:id`；成功後用 GET /projects/overview 整包 reload 對齊
+   * 後端（例如終止狀態可能觸發封存副作用）；失敗則把本地狀態改回原狀
+   * （＝失敗回彈），並把錯誤訊息秀出來。
+   */
+  async function handleDropStatus(id: string, from: ProjectStatus, to: ProjectStatus, name: string) {
+    if (from === to || movingId) return;
+    const reason = window.prompt(`把「${name}」從「${statusLabel(from)}」改成「${statusLabel(to)}」，請填變更理由：`);
+    if (!reason || !reason.trim()) return;
+    setMovingId(id);
+    setError(null);
+    const prevProjects = projects;
+    setProjects((ps) => ps.map((p) => (p.id === id ? { ...p, status: to } : p)));
+    try {
+      await updateProject(id, { status: to, statusReason: reason.trim() });
+      await load();
+    } catch (err) {
+      setProjects(prevProjects); // 失敗回彈：卡片退回原本的欄。
+      setError(err instanceof Error ? err.message : "變更狀態失敗");
+    } finally {
+      setMovingId(null);
+    }
+  }
 
   return (
     <>
@@ -55,7 +96,7 @@ export default function ProjectOverviewPage() {
       {projects.length === 0 ? (
         <Card><Empty>尚無專案</Empty></Card>
       ) : tab === "kanban" ? (
-        <Kanban projects={visible} />
+        <Kanban projects={visible} movingId={movingId} onDropStatus={handleDropStatus} />
       ) : (
         <Gantt projects={visible} today={today} />
       )}
@@ -74,12 +115,56 @@ function AlertBadges({ a }: { a: OverviewProject["alerts"] }) {
   );
 }
 
-function Kanban({ projects }: { projects: OverviewProject[] }) {
-  const cols = STATUS_ORDER.map((s) => ({ status: s, items: projects.filter((p) => p.status === s) })).filter((c) => c.items.length > 0 || c.status === "active");
+/** 拖拉時放進 dataTransfer 的內容——目的地欄只需要來源卡片的這三樣。 */
+type DragPayload = { id: string; status: ProjectStatus; name: string };
+const DRAG_MIME = "application/json";
+
+function Kanban({
+  projects,
+  movingId,
+  onDropStatus,
+}: {
+  projects: OverviewProject[];
+  movingId: string | null;
+  onDropStatus: (id: string, from: ProjectStatus, to: ProjectStatus, name: string) => void;
+}) {
+  // 四欄一律都顯示（即使目前是空的）——拖拉功能需要每一欄都是有效的放置目標，
+  // 不能像純瀏覽時那樣把沒有卡片、又不是「進行中」的欄隱藏起來。
+  const cols = STATUS_ORDER.map((s) => ({ status: s, items: projects.filter((p) => p.status === s) }));
+  const [dragOver, setDragOver] = useState<ProjectStatus | null>(null);
+
+  function readPayload(e: DragEvent): DragPayload | null {
+    const raw = e.dataTransfer.getData(DRAG_MIME);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as DragPayload;
+    } catch {
+      return null;
+    }
+  }
+
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
       {cols.map((c) => (
-        <div key={c.status} className="rounded-xl border border-gray-100 bg-gray-50 p-3">
+        <div
+          key={c.status}
+          onDragOver={(e) => {
+            e.preventDefault(); // 沒有這行瀏覽器不允許 drop。
+            e.dataTransfer.dropEffect = "move";
+            if (dragOver !== c.status) setDragOver(c.status);
+          }}
+          onDragLeave={() => setDragOver((s) => (s === c.status ? null : s))}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOver(null);
+            const payload = readPayload(e);
+            if (!payload) return;
+            onDropStatus(payload.id, payload.status, c.status, payload.name);
+          }}
+          className={`rounded-xl border p-3 transition-colors ${
+            dragOver === c.status ? "border-[var(--brand)] bg-blue-50/50" : "border-gray-100 bg-gray-50"
+          }`}
+        >
           <div className="mb-2 flex items-center gap-2">
             <span className={`h-2.5 w-2.5 rounded-full ${STATUS_CLS[c.status]}`} />
             <span className="text-sm font-semibold text-gray-700">{statusLabel(c.status)}</span>
@@ -90,7 +175,19 @@ function Kanban({ projects }: { projects: OverviewProject[] }) {
             {c.items.map((p) => {
               const pct = p.contractTotal ? Math.min(100, Math.round((p.billedTotal / p.contractTotal) * 100)) : null;
               return (
-                <Link key={p.id} href={`/admin/projects/${p.id}`} className="block rounded-lg border border-gray-100 bg-white p-3 hover:border-gray-300">
+                <Link
+                  key={p.id}
+                  href={`/admin/projects/${p.id}`}
+                  draggable
+                  onDragStart={(e) => {
+                    const payload: DragPayload = { id: p.id, status: p.status, name: p.name };
+                    e.dataTransfer.setData(DRAG_MIME, JSON.stringify(payload));
+                    e.dataTransfer.effectAllowed = "move";
+                  }}
+                  className={`block cursor-grab rounded-lg border border-gray-100 bg-white p-3 hover:border-gray-300 active:cursor-grabbing ${
+                    movingId === p.id ? "opacity-50" : ""
+                  }`}
+                >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <p className="truncate text-sm font-medium text-gray-900">{p.name}</p>

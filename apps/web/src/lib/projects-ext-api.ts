@@ -13,6 +13,7 @@
 import { apiFetch, apiDownload } from "./api-client"
 import type {
   Project, ProjectStatus, ShareMode, Installment, InstallmentInput, DocType, OurRole,
+  ProjectSort, SortDir,
 } from "./projects-api"
 
 /* ============================================================== 通用列舉 == */
@@ -34,9 +35,23 @@ export const COMMON_DISCIPLINES = ["電機", "空調", "消防", "汙水"] as co
 
 /* ================================================================ 客戶 == */
 
+/** B4：客戶分類。合法值與後端 `clients_category_chk`（sql/0032）一致。 */
+export type ClientCategory = "architect" | "engineer" | "owner" | "gov" | "other"
+
+export const CLIENT_CATEGORY_LABELS: Record<ClientCategory, string> = {
+  architect: "建築師",
+  engineer: "技師",
+  owner: "業主",
+  gov: "政府機關",
+  other: "其他",
+}
+export const CLIENT_CATEGORY_ORDER: ClientCategory[] = ["architect", "engineer", "owner", "gov", "other"]
+
 export interface Client {
   id: string
   name: string
+  /** 分類：可空，既有名冊未必補得回。 */
+  category: ClientCategory | null
   taxId: string | null
   phone: string | null
   fax: string | null
@@ -213,10 +228,18 @@ export interface ProjectListItem extends Project {
   reservedAt?: string | null
 }
 
-export function listProjectsExt(opts?: { includeArchived?: boolean; includeReserved?: boolean }) {
+/** B4：`sort`／`dir` 省略＝後端預設（created desc），行為與改動前相容。 */
+export function listProjectsExt(opts?: {
+  includeArchived?: boolean
+  includeReserved?: boolean
+  sort?: ProjectSort
+  dir?: SortDir
+}) {
   const q = new URLSearchParams()
   if (opts?.includeArchived) q.set("includeArchived", "1")
   if (opts?.includeReserved) q.set("includeReserved", "1")
+  if (opts?.sort) q.set("sort", opts.sort)
+  if (opts?.dir) q.set("dir", opts.dir)
   const qs = q.toString()
   return apiFetch<{ projects: ProjectListItem[] }>(`/projects${qs ? `?${qs}` : ""}`)
 }

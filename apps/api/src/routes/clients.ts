@@ -12,6 +12,18 @@ import { CLIENT_COLS, serializeClient, type ClientRow } from "../services/projec
 export const clientsRouter = Router()
 
 /**
+ * B4：`category` 欄位獨立加在這裡，不動 `services/project-application-store.ts`
+ * 的 `CLIENT_COLS`／`serializeClient`／`ClientRow`（該檔另一批任務同時在改，
+ * 這裡改了容易互相打架）。做法：select 時在共用欄位清單後面多接一欄，
+ * 序列化時在共用序列化結果外面再疊一層。
+ */
+const CLIENT_COLS_WITH_CATEGORY = `${CLIENT_COLS}, category`
+type ClientRowWithCategory = ClientRow & { category: string | null }
+function serializeClientWithCategory(r: ClientRowWithCategory) {
+  return { ...serializeClient(r), category: r.category ?? null }
+}
+
+/**
  * 客戶／業主名冊（P3 專案申請單），比照 vendors.ts 的廠商名冊。
  *
  * - 讀：登入即可（開票對象是全公司都會查的資料）。
@@ -25,8 +37,13 @@ export const clientsRouter = Router()
 
 const dayField = z.string().trim().max(40).nullable().optional()
 
+/** B4：客戶分類。合法值與 DB 的 `clients_category_chk` 一致（見 sql/0032）。 */
+const CLIENT_CATEGORIES = ["architect", "engineer", "owner", "gov", "other"] as const
+
 const clientBody = z.object({
   name: z.string().trim().min(1).max(200),
+  /** 分類：建築師／技師／業主／政府機關／其他。可空——既有名冊未必補得回。 */
+  category: z.enum(CLIENT_CATEGORIES).nullable().optional(),
   taxId: z
     .string()
     .trim()
@@ -51,7 +68,7 @@ const clientBody = z.object({
 function toRow(b: Partial<z.infer<typeof clientBody>>): Record<string, unknown> {
   const row: Record<string, unknown> = {}
   const map: Array<[keyof z.infer<typeof clientBody>, string]> = [
-    ["name", "name"], ["taxId", "tax_id"], ["phone", "phone"], ["fax", "fax"],
+    ["name", "name"], ["category", "category"], ["taxId", "tax_id"], ["phone", "phone"], ["fax", "fax"],
     ["invoiceAddress", "invoice_address"], ["contactName", "contact_name"], ["contactPhone", "contact_phone"],
     ["email", "email"], ["invoiceType", "invoice_type"], ["paymentMethod", "payment_method"],
     ["closingDay", "closing_day"], ["paymentDay", "payment_day"], ["note", "note"],
@@ -70,7 +87,7 @@ clientsRouter.get("/clients", requireAuth, requireTenant, async (req: Request, r
   const tenantId = res.locals.tenantId as string
   const q = typeof req.query.q === "string" ? req.query.q.trim() : ""
   try {
-    let query = supabaseAdmin.from("clients").select(CLIENT_COLS).eq("tenant_id", tenantId).is("deleted_at", null)
+    let query = supabaseAdmin.from("clients").select(CLIENT_COLS_WITH_CATEGORY).eq("tenant_id", tenantId).is("deleted_at", null)
     if (q) {
       const like = `%${q.replace(/[%_,()]/g, "")}%`
       query = query.or(`name.ilike.${like},contact_name.ilike.${like},tax_id.ilike.${like},phone.ilike.${like}`)
@@ -80,7 +97,7 @@ clientsRouter.get("/clients", requireAuth, requireTenant, async (req: Request, r
       next(new Error(`GET /clients: ${error.message}`))
       return
     }
-    res.status(200).json({ clients: (data ?? []).map((r) => serializeClient(r as ClientRow)) })
+    res.status(200).json({ clients: (data ?? []).map((r) => serializeClientWithCategory(r as ClientRowWithCategory)) })
   } catch (err) {
     next(err)
   }
@@ -100,7 +117,7 @@ clientsRouter.post("/clients", requireAuth, requireTenant, requireHrAdmin, async
     const { data, error } = await supabaseAdmin
       .from("clients")
       .insert({ tenant_id: tenantId, created_by_emp_id: self?.id ?? null, ...toRow(parsed.data) })
-      .select(CLIENT_COLS)
+      .select(CLIENT_COLS_WITH_CATEGORY)
       .single()
     if (error || !data) {
       if (isTaxIdConflict(error)) {
@@ -110,7 +127,7 @@ clientsRouter.post("/clients", requireAuth, requireTenant, requireHrAdmin, async
       next(new Error(`POST /clients: ${error?.message}`))
       return
     }
-    res.status(201).json({ client: serializeClient(data as ClientRow) })
+    res.status(201).json({ client: serializeClientWithCategory(data as ClientRowWithCategory) })
   } catch (err) {
     next(err)
   }
@@ -137,7 +154,7 @@ clientsRouter.patch("/clients/:id", requireAuth, requireTenant, requireHrAdmin, 
       .eq("tenant_id", tenantId)
       .eq("id", id)
       .is("deleted_at", null)
-      .select(CLIENT_COLS)
+      .select(CLIENT_COLS_WITH_CATEGORY)
       .maybeSingle()
     if (error) {
       if (isTaxIdConflict(error)) {
@@ -151,7 +168,7 @@ clientsRouter.patch("/clients/:id", requireAuth, requireTenant, requireHrAdmin, 
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(200).json({ client: serializeClient(data as ClientRow) })
+    res.status(200).json({ client: serializeClientWithCategory(data as ClientRowWithCategory) })
   } catch (err) {
     next(err)
   }
