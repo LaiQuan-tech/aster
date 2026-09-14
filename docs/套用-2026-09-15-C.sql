@@ -43,7 +43,8 @@
 --        set_updated_at
 --   [23] sql/0033 —— period_closes_status_chk
 --   [24] sql/0033 —— attendance_sheet_snapshots 掛 no_hard_delete
---   [25] sql/0033 —— storage bucket tenant-snapshots
+--   [25] sql/0033 —— storage bucket tenant-snapshots／request-attachments
+--        （後者是正式庫既有缺口的補紀錄，見下方 [25] 段說明）
 --
 -- 冪等，可重複執行：CREATE TABLE 一律 IF NOT EXISTS，ADD COLUMN 一律
 -- IF NOT EXISTS，FK 用 DO $$ ... EXCEPTION WHEN duplicate_object 包起來
@@ -342,20 +343,26 @@ CREATE TRIGGER no_hard_delete
   FOR EACH ROW EXECUTE FUNCTION public.forbid_hard_delete();
 
 -- ─────────────────────────────────────────────────────────────────
--- [25] sql/0033 — storage bucket tenant-snapshots
+-- [25] sql/0033 — storage bucket tenant-snapshots／request-attachments
+-- （request-attachments 是正式庫既有缺口：2026-09-15 發現這個 bucket
+-- 從未建立過，假單附件上傳因此一直是 Bucket not found，已直接在正式庫
+-- 手動補建；這裡補紀錄讓 PGlite／未來重建環境也能建出來，ON CONFLICT
+-- DO NOTHING 對已存在的 bucket 是無害的 no-op）
 -- ─────────────────────────────────────────────────────────────────
 insert into storage.buckets (id, name, public)
-values ('tenant-snapshots', 'tenant-snapshots', false)
+values
+  ('tenant-snapshots',    'tenant-snapshots',    false),
+  ('request-attachments', 'request-attachments', false)
 on conflict (id) do nothing;
 
 update storage.buckets
    set public = false
- where id = 'tenant-snapshots'
+ where id in ('tenant-snapshots', 'request-attachments')
    and public is distinct from false;
 
 -- ── 還原 ────────────────────────────────────────────────────────────
--- delete from storage.objects where bucket_id = 'tenant-snapshots';
--- delete from storage.buckets where id = 'tenant-snapshots';
+-- delete from storage.objects where bucket_id in ('tenant-snapshots', 'request-attachments');
+-- delete from storage.buckets where id in ('tenant-snapshots', 'request-attachments');
 -- DROP TRIGGER IF EXISTS no_hard_delete ON public.attendance_sheet_snapshots;
 -- ALTER TABLE public.period_closes DROP CONSTRAINT IF EXISTS period_closes_status_chk;
 -- DROP TRIGGER IF EXISTS set_updated_at ON public.period_closes;

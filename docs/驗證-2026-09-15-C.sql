@@ -174,9 +174,18 @@ select tgname from pg_trigger t join pg_class c on c.oid=t.tgrelid
  where not t.tgisinternal and c.relname='attendance_sheet_snapshots'
  order by 1;
 
--- ── 25. [25] storage bucket tenant-snapshots 已建（private）──────────
--- 預期 1 row：public=false
-select id, name, public from storage.buckets where id = 'tenant-snapshots';
+-- ── 25. [25] storage bucket tenant-snapshots／request-attachments
+-- 已建（皆 private）。request-attachments 是正式庫既有缺口的補紀錄
+-- （2026-09-15 發現從未建立，假單附件上傳一直 Bucket not found，已在
+-- 正式庫手動補建，此處確認 repo 重建也建得出來）──────────────────────
+-- 預期 2 rows：public 皆為 false
+select id, name, public from storage.buckets
+ where id in ('tenant-snapshots', 'request-attachments')
+ order by 1;
+
+-- ── 25b. 座標同上、依 coordinator 指定的精簡查詢再核一次 ─────────────
+-- 預期 2 rows：public 皆為 false
+select id, public from storage.buckets where id in ('request-attachments','tenant-snapshots');
 
 -- ── 26. 交叉確認：salary_adjustments 的 audit_all 仍在（0019 原始清單
 -- 掛的，本批次只加欄位、未動 trigger，這裡只是確認狀態沒被誤動）───────

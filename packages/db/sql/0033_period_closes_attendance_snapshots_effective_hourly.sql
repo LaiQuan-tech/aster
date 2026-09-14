@@ -67,9 +67,16 @@
 --     不稽核自己、改用 forbid_audit_mutation 把關的理由）。
 --   • period_closes_status_chk：'closed' | 'reopened'。
 --
--- ── [F] storage bucket tenant-snapshots ──────────────────────────────
+-- ── [F] storage bucket tenant-snapshots／request-attachments ─────────
 -- 比照 sql/0020／0029：private（public=false）。月結產生的快照清單檔／
--- 匯出檔放這裡，讀取一律走短效期 signed URL，不加 anon 可讀 policy。
+-- 匯出檔放 tenant-snapshots，讀取一律走短效期 signed URL，不加 anon
+-- 可讀 policy。
+--
+-- request-attachments 是本次順手補的既有缺口：2026-09-15 在正式庫發現
+-- 這個 bucket 從未建立過（`request_attachments` 表早就存在，但 bucket
+-- 本體漏了），假單附件上傳因此一直是 `Bucket not found`。已直接在正式庫
+-- 手動補建，這裡補上紀錄（ON CONFLICT DO NOTHING 冪等）讓 PGlite／未來
+-- 重建環境也能建出這個 bucket，不必再靠手動操作。
 --
 -- 前提：sql/0018 forbid_hard_delete()、sql/0019 audit_row()、sql/0027
 -- set_updated_at() 已存在；drizzle migration 0044 已套用（本檔用到的欄位
@@ -217,24 +224,29 @@ CREATE TRIGGER no_hard_delete
 
 -- =====================================================================
 -- storage bucket：tenant-snapshots（月結／快照匯出檔，比照 sql/0020／0029）
+--               ＋ request-attachments（假單附件；正式庫 2026-09-15 發現
+--               從未建立，已手動補建，本檔補紀錄讓其他環境重建得出來）
 --
--- private（public = false）：月結快照涉及薪資與出勤個資，不可公開讀取。
--- API 以 service_role 上傳，讀取一律走短效期 signed URL。RLS：
--- storage.objects 預設啟用且無 policy＝一律拒絕，service_role 繞過 RLS，
--- 前端 anon key 讀不到——不要為了「方便」加 anon 可讀的 policy。
+-- 皆為 private（public = false）：月結快照涉及薪資與出勤個資，假單附件是
+-- 請假證明文件，都不可公開讀取。API 以 service_role 上傳，讀取一律走
+-- 短效期 signed URL。RLS：storage.objects 預設啟用且無 policy＝一律拒絕，
+-- service_role 繞過 RLS，前端 anon key 讀不到——不要為了「方便」加
+-- anon 可讀的 policy。
 -- =====================================================================
 insert into storage.buckets (id, name, public)
-values ('tenant-snapshots', 'tenant-snapshots', false)
+values
+  ('tenant-snapshots',    'tenant-snapshots',    false),
+  ('request-attachments', 'request-attachments', false)
 on conflict (id) do nothing;
 
 update storage.buckets
    set public = false
- where id = 'tenant-snapshots'
+ where id in ('tenant-snapshots', 'request-attachments')
    and public is distinct from false;
 
 -- ── 還原 ────────────────────────────────────────────────────────────
--- delete from storage.objects where bucket_id = 'tenant-snapshots';
--- delete from storage.buckets where id = 'tenant-snapshots';
+-- delete from storage.objects where bucket_id in ('tenant-snapshots', 'request-attachments');
+-- delete from storage.buckets where id in ('tenant-snapshots', 'request-attachments');
 -- DROP TRIGGER IF EXISTS no_hard_delete ON public.attendance_sheet_snapshots;
 -- ALTER TABLE public.period_closes DROP CONSTRAINT IF EXISTS period_closes_status_chk;
 -- DROP TRIGGER IF EXISTS set_updated_at ON public.period_closes;
