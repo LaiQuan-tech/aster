@@ -84,10 +84,24 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "000000"
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY
 
-const PERIOD = "2026-06"
-const YEAR = 2026
+// DATE_SHIFT_DAYS：把 fixture（115-06）的所有日期整體平移 N 天（請用 7 的倍數，週幾才對得上）。
+// 預設 91 天 → 6/1(一) 落在 8/31(一)，整月資料落在 2026-09；設 0 就是原本的 2026-06。
+const DATE_SHIFT_DAYS = Number(process.env.DATE_SHIFT_DAYS ?? "91")
+function shiftKey(dateKey) {
+  const [y, m, d] = dateKey.split("-").map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, d + DATE_SHIFT_DAYS))
+  return dt.toISOString().slice(0, 10)
+}
+// 月份＝平移後「6/15」所在的月份（避免月初落在前一個月的 1 天決定期別）
+const PERIOD = process.env.PERIOD ?? shiftKey("2026-06-15").slice(0, 7)
+const [PERIOD_Y, PERIOD_M] = PERIOD.split("-").map(Number)
+const PERIOD_FROM = `${PERIOD}-01`
+const PERIOD_TO = new Date(Date.UTC(PERIOD_Y, PERIOD_M, 0)).toISOString().slice(0, 10)
+const YEAR = PERIOD_Y
+// 國定假日（115 年）：seed 只需要知道哪些平日不排班
+const HOLIDAYS = new Set(["2026-06-19", "2026-09-25", "2026-09-28", "2026-10-09", "2026-10-26"])
 const FIXTURE_DIR = resolve(__dirname, "fixtures/attendance-115-06")
-const XLSX_OUT = "/tmp/aster-115-06-出勤統計表-全員.xlsx"
+const XLSX_OUT = `/tmp/aster-${PERIOD}-出勤統計表-全員.xlsx`
 const DEMO_PASSWORD = "Aster-Demo-2026!"
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
@@ -195,7 +209,7 @@ function weekdayOfKey(dateKey) {
 }
 function isJuneWorkday(dateKey) {
   const wd = weekdayOfKey(dateKey)
-  return wd >= 1 && wd <= 5 && dateKey !== "2026-06-19" // 週一至五，扣端午
+  return wd >= 1 && wd <= 5 && !HOLIDAYS.has(dateKey) // 週一至五，扣國定假日
 }
 function normIso(s) {
   return new Date(s).toISOString()
@@ -214,7 +228,9 @@ function m2h(min) {
 // Fixtures + 灌資料計畫
 // ---------------------------------------------------------------------------
 function loadFixture(file) {
-  return JSON.parse(readFileSync(join(FIXTURE_DIR, file), "utf8"))
+  const fx = JSON.parse(readFileSync(join(FIXTURE_DIR, file), "utf8"))
+  if (DATE_SHIFT_DAYS !== 0) fx.days = fx.days.map((d) => ({ ...d, date: shiftKey(d.date) }))
+  return fx
 }
 
 const EMP_PLAN_BASE = [
@@ -395,7 +411,7 @@ function fixtureWorkdaysOf(p) {
   const covered = new Set(p.fixture.days.map((d) => d.date))
   const out = []
   for (let day = 1; day <= 30; day++) {
-    const dateKey = `2026-06-${String(day).padStart(2, "0")}`
+    const dateKey = `${PERIOD}-${String(day).padStart(2, "0")}`
     if (isJuneWorkday(dateKey) && covered.has(dateKey)) out.push(dateKey)
   }
   return out
@@ -421,7 +437,7 @@ async function reportStraySchedules(plan, empIdByName) {
   for (const p of plan) {
     const empId = empIdByName.get(p.name)
     const wanted = new Set(fixtureWorkdaysOf(p))
-    const got = await api("GET", `/schedules?employeeId=${empId}&from=2026-06-01&to=2026-06-30`)
+    const got = await api("GET", `/schedules?employeeId=${empId}&from=${PERIOD_FROM}&to=${PERIOD_TO}`)
     const stray = (got.body.schedules ?? []).map((s) => s.work_date).filter((d) => !wanted.has(d))
     if (stray.length === 0) continue
     stray.sort()
@@ -436,7 +452,7 @@ async function reportStraySchedules(plan, empIdByName) {
 }
 
 async function existingPunchKeys(empId) {
-  const res = await api("GET", `/punch?employeeId=${empId}&from=2026-06-01&to=2026-07-02`)
+  const res = await api("GET", `/punch?employeeId=${empId}&from=${addDaysKey(PERIOD_FROM, -2)}&to=${addDaysKey(PERIOD_TO, 2)}`)
   return new Set((res.body.records ?? []).map((r) => `${r.type}@${new Date(r.punch_at).toISOString().slice(0, 16)}`))
 }
 
@@ -645,8 +661,8 @@ function runSpotChecks(plan, sheets) {
   const checks = []
 
   const liu = sheets.get("劉皇佑")
-  const d0601 = dayOf(liu, "2026-06-01")
-  const d0602 = dayOf(liu, "2026-06-02")
+  const d0601 = dayOf(liu, shiftKey("2026-06-01"))
+  const d0602 = dayOf(liu, shiftKey("2026-06-02"))
   checks.push(["劉皇佑 6/1 tier1=2h", d0601?.overtime?.tier1 === 120, `tier1=${d0601?.overtime?.tier1}分`])
   checks.push([
     "劉皇佑 6/2 有效加班3h",
@@ -655,7 +671,7 @@ function runSpotChecks(plan, sheets) {
   ])
 
   const ming = sheets.get("劉明哲")
-  const dMing = dayOf(ming, "2026-06-01")
+  const dMing = dayOf(ming, shiftKey("2026-06-01"))
   checks.push([
     "明哲 6/1 跨午夜歸6/1",
     !!dMing && (dMing.anomalies ?? []).some((a) => a.code === "cross_midnight"),
@@ -663,7 +679,7 @@ function runSpotChecks(plan, sheets) {
   ])
 
   const zhuang = sheets.get("莊子葶")
-  const d0617 = dayOf(zhuang, "2026-06-17")
+  const d0617 = dayOf(zhuang, shiftKey("2026-06-17"))
   checks.push([
     "莊子葶 6/17 leave4h worked0 無absent類error",
     d0617?.leaveMinutes === 240 && d0617?.workedMinutes === 0 && !(d0617?.anomalies ?? []).some((a) => a.code === "absent_scheduled"),
