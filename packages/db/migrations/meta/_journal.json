@@ -302,6 +302,13 @@
       "when": 1789410934508,
       "tag": "0042_account_flags_approval_mode_opened_on",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1789412089540,
+      "tag": "0043_disbursement_client_leave_archive_fields",
+      "breakpoints": true
     }
   ]
 }

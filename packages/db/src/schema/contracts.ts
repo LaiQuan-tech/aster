@@ -48,7 +48,9 @@ export const contracts = pgTable(
     clientId: uuid("client_id").references(() => clients.id),
     /** 'contract' 合約 | 'quotation' 報價單 | 'change_order' 追加減帳 */
     docType: text("doc_type").notNull(),
-    /** 我方角色：'contractor' 承攬人（我方貼花）| 'client' 定作人（對方貼花） */
+    /** 我方角色：'contractor' 承攬人（我方貼花）| 'client' 定作人（對方貼花）
+     * | 'both' 雙重身分（我方與對方互為承攬與定作，兩邊都要貼花；B 批次
+     * 新增，合法值見 sql/0032）。 */
     ourRole: text("our_role").notNull().default("contractor"),
     title: text("title").notNull(),
     counterparty: text("counterparty"),

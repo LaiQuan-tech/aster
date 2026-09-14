@@ -30,6 +30,10 @@ export const clients = pgTable(
     contactName: text("contact_name"),
     contactPhone: text("contact_phone"),
     email: text("email"),
+    /** 客戶分類：'architect' 建築師 | 'engineer' 技師 | 'owner' 業主 |
+     * 'gov' 政府機關 | 'other' 其他。可空：既有名冊未必補得回分類。
+     * 合法值見 sql/0032。 */
+    category: text("category"),
     /** 'duplicate' 二聯式 | 'triplicate' 三聯式。合法值見 sql/0028。 */
     invoiceType: text("invoice_type"),
     /** 'transfer' 匯款 | 'check' 支票。合法值見 sql/0028。 */

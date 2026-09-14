@@ -27,6 +27,8 @@ export const leaveTypes = pgTable(
     name: text("name").notNull(),
     paid: boolean("paid").notNull().default(true),
     special: boolean("special").notNull().default(false),
+    /** 假別必附憑證：申請此假別時 ESS 端要求至少一筆附件（如病假的診斷證明）。 */
+    requiresAttachment: boolean("requires_attachment").notNull().default(false),
     deductRate: numeric("deduct_rate", { precision: 3, scale: 2 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, integer, numeric, jsonb } from "drizzle-orm/pg-core"
+import { pgTable, uuid, text, timestamp, integer, numeric, jsonb, index } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 import { employees } from "./employees"
 import { leaveTypes } from "./leave-types"
@@ -16,6 +16,12 @@ import { leaveTypes } from "./leave-types"
  * 「刪除」改為軟刪除：`deletedAt` / `deletedByEmpId` / `deleteReason` 三欄
  * 同時寫入，列表與動作端點以 `deleted_at IS NULL` 過濾，附件與簽核軌跡
  * 一併保留。`deleteReason` 為必填 —— 無理由的刪除正是本機制要防的事。
+ *
+ * ── 假單核銷（B 批次）─────────────────────────────────────────────
+ * `settledAt`／`settledByEmpId`／`settledPeriod` 記錄這張假單何時、由誰
+ * 併入哪一個薪資計算期間核銷（比照 `advances` 核銷的凍結概念：核銷後
+ * 這張單就從「待核銷」清單消失）。`settledPeriod` 為 'YYYY-MM' 字串，
+ * 三欄同時寫入；未核銷時皆為 null。
  */
 export const leaveRequests = pgTable("leave_requests", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -73,4 +79,14 @@ export const leaveRequests = pgTable("leave_requests", {
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   deletedByEmpId: uuid("deleted_by_emp_id").references(() => employees.id),
   deleteReason: text("delete_reason"),
-})
+  // 假單核銷（見上方說明）。三欄一起寫，null 代表尚未核銷。
+  settledAt: timestamp("settled_at", { withTimezone: true }),
+  settledByEmpId: uuid("settled_by_emp_id").references(() => employees.id),
+  /** 核銷所屬薪資期間，'YYYY-MM'。 */
+  settledPeriod: text("settled_period"),
+}, (table) => ({
+  tenantSettledPeriodIdx: index("leave_requests_tenant_settled_period_idx").on(
+    table.tenantId,
+    table.settledPeriod,
+  ),
+}))

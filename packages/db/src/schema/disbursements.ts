@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, numeric, date, timestamp, uniqueIndex, index,
+  pgTable, uuid, text, boolean, numeric, date, timestamp, uniqueIndex, index,
 } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 import { vendors } from "./vendors"
@@ -26,6 +26,11 @@ import { companies } from "./companies"
  *
  * `paidByEmpId`／`createdByEmpId` 比照 `project_subcontracts.createdByEmpId`：
  * 刻意不設 FK，只留痕操作者、非強關聯。
+ *
+ * `hasInvoice`／`invoiceNo`／`payeeBankCode`：B 批次「放款發票欄」。收款方
+ * 若有開立發票（多為 vendor 廠商），`hasInvoice=true` 且填 `invoiceNo`；
+ * `payeeBankCode` 是銀行代碼，與既有 `payeeBankName`／`payeeBankAccount`
+ * 快照同組，一起描述收款帳戶。三者皆與其餘欄位同樣是寫入當下的快照。
  */
 export const disbursements = pgTable(
   "disbursements",
@@ -45,6 +50,8 @@ export const disbursements = pgTable(
     payeeName: text("payee_name").notNull(),
     payeeBankName: text("payee_bank_name"),
     payeeBankAccount: text("payee_bank_account"),
+    /** 收款方銀行代碼，與 payeeBankName／payeeBankAccount 同組快照。 */
+    payeeBankCode: text("payee_bank_code"),
     payingCompanyId: uuid("paying_company_id")
       .notNull()
       .references(() => companies.id),
@@ -63,6 +70,10 @@ export const disbursements = pgTable(
     /** 收據開給誰家，可能與 payingCompanyId 不同家（集團客戶情境）。 */
     receiptIssuerCompanyId: uuid("receipt_issuer_company_id").references(() => companies.id),
     receiptRef: text("receipt_ref"),
+    /** 收款方是否已開立發票。 */
+    hasInvoice: boolean("has_invoice").notNull().default(false),
+    /** 發票號碼，hasInvoice=true 時填。 */
+    invoiceNo: text("invoice_no"),
     purpose: text("purpose"),
     note: text("note"),
     voidReason: text("void_reason"),
