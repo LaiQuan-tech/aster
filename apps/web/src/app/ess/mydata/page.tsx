@@ -25,6 +25,7 @@ import {
   type ProfileAggregate,
   type SaveProfileBody,
 } from "@/lib/ess-api";
+import { accountErrorMessage, changeMyPassword } from "@/lib/auth-api";
 
 const input =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
@@ -635,8 +636,75 @@ function MyDataInner() {
             )}
           </section>
         )}
+        <ChangePasswordCard />
       </main>
     </div>
+  );
+}
+
+/** 修改密碼：用目前密碼驗證身分，再設新密碼（POST /me/password）。 */
+function ChangePasswordCard() {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function onSubmit(e: FormEvent) {
+    e.preventDefault();
+    setMsg(null);
+    setErr(null);
+    if (next.length < 8) {
+      setErr("新密碼至少 8 碼");
+      return;
+    }
+    if (next !== confirm) {
+      setErr("兩次輸入的新密碼不一致");
+      return;
+    }
+    if (next === current) {
+      setErr("新密碼不可與目前密碼相同");
+      return;
+    }
+    setBusy(true);
+    try {
+      await changeMyPassword(current, next);
+      setMsg("密碼已更新，下次登入請使用新密碼。");
+      setCurrent("");
+      setNext("");
+      setConfirm("");
+    } catch (e) {
+      setErr(accountErrorMessage(e, "修改密碼失敗"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:p-6">
+      <h2 className="mb-1 text-base font-semibold text-gray-800">修改密碼</h2>
+      <p className="mb-4 text-xs text-gray-500">請先輸入目前密碼確認身分；新密碼至少 8 碼。忘記目前密碼可登出後在登入頁點「忘記密碼？」。</p>
+      <form onSubmit={onSubmit} className="grid max-w-md grid-cols-1 gap-3">
+        <div>
+          <label className={label} htmlFor="pw-current">目前密碼</label>
+          <input id="pw-current" type="password" autoComplete="current-password" required className={input} value={current} onChange={(e) => setCurrent(e.target.value)} />
+        </div>
+        <div>
+          <label className={label} htmlFor="pw-next">新密碼</label>
+          <input id="pw-next" type="password" autoComplete="new-password" required minLength={8} className={input} value={next} onChange={(e) => setNext(e.target.value)} />
+        </div>
+        <div>
+          <label className={label} htmlFor="pw-confirm">再輸入一次新密碼</label>
+          <input id="pw-confirm" type="password" autoComplete="new-password" required minLength={8} className={input} value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+        </div>
+        {err && <p className="text-sm text-red-600" role="alert">{err}</p>}
+        {msg && <p className="text-sm text-green-700" role="status">{msg}</p>}
+        <button type="submit" disabled={busy} className="rounded-md px-4 py-2 text-sm font-medium text-white disabled:opacity-60 sm:w-auto" style={{ backgroundColor: "var(--brand)" }}>
+          {busy ? "更新中…" : "更新密碼"}
+        </button>
+      </form>
+    </section>
   );
 }
 

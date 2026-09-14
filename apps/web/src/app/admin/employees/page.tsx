@@ -29,6 +29,19 @@ import {
   type ProfileAggregate,
   type SaveProfileBody,
 } from "@/lib/admin-api";
+import {
+  accountErrorMessage,
+  bulkInviteEmployees,
+  sendEmployeeInvite,
+  sendEmployeeReset,
+  toInviteCsv,
+  type AccountLinkResult,
+  type BulkInviteResult,
+} from "@/lib/auth-api";
+
+const CSV_EXAMPLE = `name,email,empNo,deptName,employmentType,hireDate,role
+王小明,ming@example.com,A001,設計部,regular,2026-09-15,employee
+"陳, 美玲",mei@example.com,,,intern,,`;
 
 const ROLES: { value: string; label: string }[] = [
   { value: "employee", label: "一般員工" },
@@ -143,6 +156,18 @@ export default function EmployeesPage() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  // 帳號信件結果（單筆）：寄出／dryRun 連結／備援暫時密碼，取代原本的 window.alert 明碼。
+  const [linkResult, setLinkResult] = useState<{ empName: string; result: AccountLinkResult } | null>(null);
+  const [tempPassword, setTempPassword] = useState<{ empName: string; password: string } | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  // 批次邀請（CSV）。
+  const [csvText, setCsvText] = useState("");
+  const [csvDryRun, setCsvDryRun] = useState(false);
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
+  const [bulkResult, setBulkResult] = useState<BulkInviteResult | null>(null);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editRole, setEditRole] = useState("employee");
@@ -226,22 +251,59 @@ export default function EmployeesPage() {
   async function onInvite(event: FormEvent) {
     event.preventDefault();
     setFormError(null);
-    if (!email.trim() || !name.trim() || password.length < 8) {
-      setFormError("請填寫 Email、姓名，密碼至少 8 碼");
+    if (!email.trim() || !name.trim()) {
+      setFormError("請填寫 Email 與姓名");
+      return;
+    }
+    if (password && password.length < 8) {
+      setFormError("初始密碼至少 8 碼；留空則改寄邀請信讓員工自設密碼");
       return;
     }
     setSubmitting(true);
     try {
-      await inviteEmployee({
-        email: email.trim(),
-        name: name.trim(),
-        password,
-        role,
-        deptId: deptId || undefined,
-        empNo: empNo.trim() || undefined,
-        employmentType,
-        hireDate: hireDate || undefined,
-      });
+      if (password) {
+        await inviteEmployee({
+          email: email.trim(),
+          name: name.trim(),
+          password,
+          role,
+          deptId: deptId || undefined,
+          empNo: empNo.trim() || undefined,
+          employmentType,
+          hireDate: hireDate || undefined,
+        });
+        setMessage(`已建立 ${name.trim()} 的帳號（配發初始密碼，首次登入會被要求改密碼）`);
+      } else {
+        // 不填密碼：走批次邀請的單行 CSV，建 auth user＋寄邀請信（或 dryRun 回連結）。
+        const res = await bulkInviteEmployees(
+          toInviteCsv({
+            name: name.trim(),
+            email: email.trim(),
+            empNo: empNo.trim() || undefined,
+            deptName: deptId ? deptNameMap.get(deptId) : undefined,
+            employmentType,
+            hireDate: hireDate || undefined,
+            role,
+          }),
+        );
+        const row = res.rows[0];
+        if (!row || row.action === "skipped") {
+          setFormError(row?.error ?? "邀請失敗");
+          return;
+        }
+        setLinkResult({
+          empName: name.trim(),
+          result: {
+            sent: row.sent === true,
+            dryRun: res.dryRun,
+            type: row.type ?? "invite",
+            email: row.email ?? email.trim(),
+            action: row.action,
+            link: row.link,
+          },
+        });
+        setMessage(res.dryRun ? `已建立 ${name.trim()} 的帳號（未寄信，請複製下方連結轉交）` : `已建立 ${name.trim()} 的帳號並寄出邀請信`);
+      }
       setEmail("");
       setName("");
       setPassword("");
@@ -388,29 +450,98 @@ export default function EmployeesPage() {
     }
   }
 
-  async function onResetPassword(id: string, empName: string) {
-    const custom = window.prompt(
-      `為「${empName}」設定新密碼（至少 8 碼）。\n留空則由系統產生隨機密碼。`,
-      "",
-    );
-    if (custom === null) return; // 取消
-    const password = custom.trim();
-    if (password && password.length < 8) {
-      setError("密碼至少 8 碼");
-      return;
-    }
+  async function onSendInvite(id: string, empName: string) {
+    setBusyId(id);
+    setError(null);
     try {
-      const res = await resetEmployeePassword(id, password || undefined);
-      setError(null);
+      let res: AccountLinkResult;
+      try {
+        res = await sendEmployeeInvite(id);
+      } catch (err) {
+        // 員工沒 Email（My Data 未填）→ 讓 HR 直接輸入要寄的信箱再試一次。
+        if (!(err instanceof Error && err.message.includes("no_email"))) throw err;
+        const typed = window.prompt(`「${empName}」尚未有 Email，請輸入要寄送邀請信的信箱：`, "");
+        if (!typed || !typed.trim()) return;
+        res = await sendEmployeeInvite(id, { email: typed.trim() });
+      }
+      setTempPassword(null);
+      setLinkResult({ empName, result: res });
+      setMessage(
+        res.dryRun
+          ? `未寄信（API 尚未設定寄信金鑰），請複製下方連結轉交 ${empName}`
+          : `已寄出${res.type === "recovery" ? "重設密碼信" : "邀請信"}給 ${empName}（${res.email}）`,
+      );
+      await load();
+    } catch (err) {
+      setError(accountErrorMessage(err, "寄送邀請信失敗"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function onSendReset(id: string, empName: string) {
+    setBusyId(id);
+    setError(null);
+    try {
+      const res = await sendEmployeeReset(id);
+      setTempPassword(null);
+      setLinkResult({ empName, result: res });
+      setMessage(
+        res.dryRun
+          ? `未寄信（API 尚未設定寄信金鑰），請複製下方連結轉交 ${empName}`
+          : `已寄出重設密碼信給 ${empName}（${res.email}）`,
+      );
+    } catch (err) {
+      setError(accountErrorMessage(err, "寄送重設密碼信失敗"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  /** 備援：寄不了信時由系統產生暫時密碼（員工首次登入會被強制改密碼）。 */
+  async function onTempPassword(id: string, empName: string) {
+    if (!window.confirm(`為「${empName}」產生一組暫時密碼？\n（正常情況請用「寄重設密碼信」；此為寄不了信時的備援）`)) return;
+    setBusyId(id);
+    setError(null);
+    try {
+      const res = await resetEmployeePassword(id);
+      setLinkResult(null);
       if (res.password) {
-        window.alert(`已配發新密碼給「${empName}」：\n\n${res.password}\n\n請複製後轉交員工（僅顯示這一次）。`);
-        setMessage(`已為 ${empName} 產生新密碼（請即時轉交）`);
-      } else {
-        setMessage(`已更新 ${empName} 的密碼`);
+        setTempPassword({ empName, password: res.password });
+        setMessage(`已為 ${empName} 產生暫時密碼（只顯示這一次，請複製後轉交；員工首次登入會被要求改密碼）`);
       }
     } catch (err) {
-      const status = (err as { status?: number }).status;
-      setError(status === 409 ? "此員工尚未綁定登入帳號" : err instanceof Error ? err.message : "重設密碼失敗");
+      setError(accountErrorMessage(err, "產生暫時密碼失敗"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function copyText(text: string, what = "連結") {
+    try {
+      await navigator.clipboard.writeText(text);
+      setMessage(`已複製${what}`);
+    } catch {
+      setError(`無法自動複製，請手動選取${what}`);
+    }
+  }
+
+  async function onBulkInvite(event: FormEvent) {
+    event.preventDefault();
+    setBulkError(null);
+    if (!csvText.trim()) {
+      setBulkError("請先貼上 CSV 內容");
+      return;
+    }
+    setBulkSubmitting(true);
+    try {
+      const res = await bulkInviteEmployees(csvText, csvDryRun || undefined);
+      setBulkResult(res);
+      await load();
+    } catch (err) {
+      setBulkError(accountErrorMessage(err, "批次邀請失敗"));
+    } finally {
+      setBulkSubmitting(false);
     }
   }
 
@@ -421,8 +552,51 @@ export default function EmployeesPage() {
       <PageHeader title="員工主檔" desc="帳號、組織、到離職、My Data、學歷證照、工作經歷與年資" />
       {message && <p className="rounded-lg bg-green-50 px-4 py-2 text-sm text-green-700">{message}</p>}
 
+      {linkResult && (
+        <Card>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <h2 className="text-sm font-medium text-gray-500">
+                {linkResult.result.type === "recovery" ? "重設密碼信" : "邀請信"} — {linkResult.empName}（{linkResult.result.email}）
+              </h2>
+              {linkResult.result.dryRun && linkResult.result.link ? (
+                <>
+                  <p className="mt-1 text-sm text-amber-700">
+                    API 尚未設定寄信金鑰（RESEND_API_KEY），信件沒有寄出。請複製下方連結用 LINE／口頭轉交給同仁，連結 24 小時內有效、只能用一次。
+                  </p>
+                  <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                    <input readOnly className={`${inputCls} font-mono text-xs`} value={linkResult.result.link} onFocus={(event) => event.currentTarget.select()} />
+                    <button type="button" onClick={() => void copyText(linkResult.result.link ?? "")} className="shrink-0 rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">複製連結</button>
+                  </div>
+                </>
+              ) : (
+                <p className="mt-1 text-sm text-gray-600">已寄出，請同仁收信後點連結設定密碼（連結 24 小時內有效）。</p>
+              )}
+            </div>
+            <button type="button" onClick={() => setLinkResult(null)} className="text-sm text-gray-400 hover:underline">關閉</button>
+          </div>
+        </Card>
+      )}
+
+      {tempPassword && (
+        <Card>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <h2 className="text-sm font-medium text-gray-500">暫時密碼 — {tempPassword.empName}</h2>
+              <p className="mt-1 text-sm text-amber-700">只顯示這一次。請複製後轉交同仁；同仁首次登入會被要求改成自己的密碼。</p>
+              <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                <input readOnly className={`${inputCls} font-mono`} value={tempPassword.password} onFocus={(event) => event.currentTarget.select()} />
+                <button type="button" onClick={() => void copyText(tempPassword.password, "密碼")} className="shrink-0 rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">複製密碼</button>
+              </div>
+            </div>
+            <button type="button" onClick={() => setTempPassword(null)} className="text-sm text-gray-400 hover:underline">關閉</button>
+          </div>
+        </Card>
+      )}
+
       <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">邀請員工</h2>
+        <h2 className="mb-1 text-sm font-medium text-gray-500">新增員工帳號</h2>
+        <p className="mb-4 text-xs text-gray-400">填姓名＋Email 即可：初始密碼留空會寄邀請信讓同仁自設密碼；填了則直接配發（同仁首次登入須改密碼）。</p>
         <form onSubmit={onInvite} className="space-y-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
             <div>
@@ -442,8 +616,8 @@ export default function EmployeesPage() {
               <input type="date" className={inputCls} value={hireDate} onChange={(event) => setHireDate(event.target.value)} />
             </div>
             <div>
-              <label className={labelCls}>初始密碼</label>
-              <input type="text" className={inputCls} value={password} onChange={(event) => setPassword(event.target.value)} />
+              <label className={labelCls}>初始密碼（選填）</label>
+              <input type="text" className={inputCls} placeholder="留空＝寄邀請信" value={password} onChange={(event) => setPassword(event.target.value)} />
             </div>
             <div>
               <label className={labelCls}>角色</label>
@@ -466,8 +640,82 @@ export default function EmployeesPage() {
             </div>
           </div>
           {formError && <ErrorText>{formError}</ErrorText>}
-          <PrimaryButton type="submit" disabled={submitting}>{submitting ? "邀請中…" : "邀請員工"}</PrimaryButton>
+          <PrimaryButton type="submit" disabled={submitting}>{submitting ? "處理中…" : password ? "建立帳號（配發密碼）" : "建立帳號並寄邀請信"}</PrimaryButton>
         </form>
+      </Card>
+
+      <Card>
+        <h2 className="mb-1 text-sm font-medium text-gray-500">批次邀請（CSV）</h2>
+        <p className="mb-3 text-xs text-gray-400">
+          從 Excel 複製貼上即可（第一列是表頭；只有 name、email 必填）。工號或姓名對得上「尚未開通帳號」的既有員工會直接綁定，否則新建；同名多人請補工號。
+        </p>
+        <form onSubmit={onBulkInvite} className="space-y-3">
+          <textarea
+            className={`${inputCls} min-h-40 font-mono text-xs`}
+            placeholder={CSV_EXAMPLE}
+            value={csvText}
+            onChange={(event) => setCsvText(event.target.value)}
+          />
+          <div className="flex flex-wrap items-center gap-4">
+            <button type="button" onClick={() => setCsvText(CSV_EXAMPLE)} className="text-xs text-gray-500 hover:underline">帶入範例格式</button>
+            <label className="flex items-center gap-2 text-sm text-gray-600 select-none cursor-pointer">
+              <input type="checkbox" checked={csvDryRun} onChange={(event) => setCsvDryRun(event.target.checked)} className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]" />
+              只建帳號、不寄信（取得連結手動轉交）
+            </label>
+          </div>
+          {bulkError && <ErrorText>{bulkError}</ErrorText>}
+          <PrimaryButton type="submit" disabled={bulkSubmitting}>{bulkSubmitting ? "處理中…" : "批次建立並寄邀請信"}</PrimaryButton>
+        </form>
+        {bulkResult && (
+          <div className="mt-4 space-y-3">
+            <p className="text-sm text-gray-700">
+              新建 <span className="font-medium">{bulkResult.created}</span>、綁定既有員工 <span className="font-medium">{bulkResult.bound}</span>、
+              寄出 <span className="font-medium">{bulkResult.sent}</span>、略過 <span className="font-medium">{bulkResult.skipped}</span>
+              {bulkResult.dryRun && <span className="ml-2 text-amber-700">（未寄信：請逐列複製連結轉交）</span>}
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 text-xs text-gray-500">
+                    <th className="py-2 pr-4">行</th>
+                    <th className="py-2 pr-4">姓名</th>
+                    <th className="py-2 pr-4">Email</th>
+                    <th className="py-2 pr-4">結果</th>
+                    <th className="py-2">連結 / 訊息</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bulkResult.rows.map((row) => (
+                    <tr key={row.line} className="border-b border-gray-50 align-top">
+                      <td className="py-2 pr-4 text-gray-500">{row.line}</td>
+                      <td className="py-2 pr-4">{row.name ?? "—"}</td>
+                      <td className="py-2 pr-4 text-gray-600">{row.email ?? "—"}</td>
+                      <td className="py-2 pr-4">
+                        {row.action === "skipped" ? (
+                          <span className="rounded-full bg-red-100 px-2 py-1 text-xs text-red-600">略過</span>
+                        ) : (
+                          <span className="rounded-full bg-green-100 px-2 py-1 text-xs text-green-700">
+                            {row.action === "created" ? "新建" : "綁定"}{row.sent ? "・已寄信" : row.link ? "・待轉交" : ""}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2">
+                        {row.error && <p className="text-xs text-red-600">{row.error}</p>}
+                        {row.warning && <p className="text-xs text-amber-700">{row.warning}</p>}
+                        {row.link && (
+                          <div className="flex flex-col gap-1 sm:flex-row sm:items-center">
+                            <input readOnly className="w-full min-w-64 rounded-md border border-gray-200 px-2 py-1 font-mono text-xs" value={row.link} onFocus={(event) => event.currentTarget.select()} />
+                            <button type="button" onClick={() => void copyText(row.link ?? "")} className="shrink-0 text-xs text-gray-600 hover:underline">複製</button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </Card>
 
       <Card>
@@ -530,6 +778,7 @@ export default function EmployeesPage() {
                         <td className="py-3 pr-4">
                           <span className="rounded-full bg-gray-100 px-2 py-1 text-xs text-gray-600">{roleLabel(employee.role)}</span>
                           {employee.status !== "active" && <span className="ml-2 rounded-full bg-red-100 px-2 py-1 text-xs text-red-600">{employee.status}</span>}
+                          {!employee.user_id && <span className="ml-2 rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-700">未開通帳號</span>}
                         </td>
                         <td className="py-3">
                           <div className="flex gap-3">
@@ -550,7 +799,14 @@ export default function EmployeesPage() {
                               編輯
                             </button>
                             <button onClick={() => void openProfile(employee.id)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>My Data</button>
-                            <button onClick={() => void onResetPassword(employee.id, employee.name)} className="text-sm text-gray-600 hover:underline">重設密碼</button>
+                            {employee.user_id ? (
+                              <>
+                                <button disabled={busyId === employee.id} onClick={() => void onSendReset(employee.id, employee.name)} className="text-sm text-gray-600 hover:underline disabled:opacity-50">寄重設密碼信</button>
+                                <button disabled={busyId === employee.id} onClick={() => void onTempPassword(employee.id, employee.name)} className="text-sm text-gray-400 hover:underline disabled:opacity-50" title="寄不了信時的備援：產生暫時密碼">暫時密碼</button>
+                              </>
+                            ) : (
+                              <button disabled={busyId === employee.id} onClick={() => void onSendInvite(employee.id, employee.name)} className="text-sm font-medium hover:underline disabled:opacity-50" style={{ color: "var(--brand)" }}>寄邀請信</button>
+                            )}
                             {employee.status === "active" && <button onClick={() => void onDeactivate(employee.id)} className="text-sm text-red-600 hover:underline">停用</button>}
                           </div>
                         </td>

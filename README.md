@@ -37,6 +37,23 @@ Monorepo（npm workspace + Turbo）｜`apps/web` Next.js 16｜`apps/api` Express
 > 舊的 `hr-theta-peach.vercel.app`（更名前的 HRLink 版本）與 Railway 上的 API
 > 皆已停用（API 現在只在 Vercel）。上面三個才是現行環境。
 
+## 環境變數
+
+完整清單與說明見 [`.env.example`](.env.example)（複製成 repo 根目錄 `.env`；web／api／worker 三邊都讀同一份）。
+線上由 Vercel／Railway 各自注入。與帳號／寄信相關的幾個：
+
+| 變數 | 誰用 | 說明 |
+|---|---|---|
+| `RESEND_API_KEY` | API | Resend 金鑰。**未設時邀請信／重設密碼信改走 dryRun**：不寄信，API 把設密碼連結回給 HR 手動轉交（後台會顯示可複製的連結）。 |
+| `NOTIFICATION_EMAIL_FROM` | API | 寄件人（需為 Resend 已驗證網域）。有 `RESEND_API_KEY` 卻缺這個會直接報錯。 |
+| `WEB_URL` | API | 邀請信／重設密碼信裡連結指向的前台網址。未設預設 `https://aster-system.vercel.app`；本機開發填 `http://localhost:3000`。 |
+| `WEB_ORIGINS` | API | CORS 白名單（逗號分隔），改前台網域要同步更新並重新部署 API。 |
+| `NEXT_PUBLIC_API_URL` | web | 前台打的 API 位址（build 時 inline 進 bundle）。 |
+
+帳號流程（A1）：HR 在後台「員工主檔」單筆或貼 CSV 批次建帳號 → 系統寄邀請信（`/auth/set-password?token_hash=…&type=invite`）→ 員工自設密碼；
+HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼」）會把 `employees.must_change_password` 設為 true，員工首次登入會被導去強制改密碼；
+員工可在「我的資料」改密碼、在登入頁「忘記密碼？」自助重設。
+
 ## Demo 租戶灌測試資料
 
 正式站的 demo 租戶（`admin@kimihr.app`）給老闆看後台用，本身沒有員工/出勤資料。兩支

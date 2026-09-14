@@ -4,6 +4,7 @@ import { logger } from "./lib/logger.js"
 import { adminTenantsRouter } from "./routes/admin-tenants.js"
 import { tenantRouter } from "./routes/tenant.js"
 import { employeesRouter } from "./routes/employees.js"
+import { authAccountsRouter } from "./routes/auth-accounts.js"
 import { departmentsRouter } from "./routes/departments.js"
 import { shiftsRouter } from "./routes/shifts.js"
 import { schedulesRouter } from "./routes/schedules.js"
@@ -81,6 +82,7 @@ app.get("/health", (_req: Request, res: Response) => {
 // Feature routes.
 app.use(adminTenantsRouter)
 app.use(tenantRouter)
+app.use(authAccountsRouter) // /employees/bulk-invite、/employees/:id/invite|send-reset、/auth/forgot-password、/me/password*
 app.use(employeesRouter)
 app.use(departmentsRouter)
 app.use(shiftsRouter)

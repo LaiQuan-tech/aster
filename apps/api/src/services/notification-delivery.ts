@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { sendMail } from "../lib/resend.js"
 
 type DeliveryChannel = "email" | "line"
 
@@ -83,27 +84,8 @@ async function authEmail(userId: string | null): Promise<string | null> {
 }
 
 async function sendEmail(to: string, row: NotificationRow): Promise<void> {
-  const apiKey = process.env.RESEND_API_KEY
-  const from = process.env.NOTIFICATION_EMAIL_FROM
-  if (!apiKey || !from) throw new Error("RESEND_API_KEY or NOTIFICATION_EMAIL_FROM missing")
-
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      from,
-      to,
-      subject: row.title,
-      text: messageText(row),
-    }),
-  })
-  if (!response.ok) {
-    const text = await response.text()
-    throw new Error(`Resend ${response.status}: ${text.slice(0, 300)}`)
-  }
+  // 走 lib/resend.ts 的唯一 Resend 呼叫點（帳號邀請信也用同一個）。
+  await sendMail({ to, subject: row.title, text: messageText(row) })
 }
 
 async function sendLine(to: string, row: NotificationRow): Promise<void> {

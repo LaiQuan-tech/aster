@@ -123,6 +123,7 @@ employeesRouter.post(
           employment_type: employmentType ?? "regular",
           hire_date: hireDate ?? null,
           status: "active",
+          must_change_password: true, // HR 配發的初始密碼：首次登入強制改密碼
         })
         .select("id")
         .single()
@@ -239,6 +240,8 @@ employeesRouter.post(
         next(new Error(`reset-password (update): ${updErr.message}`))
         return
       }
+      // 暫時密碼是 HR 知道的 → 員工首次登入強制改密碼（前端 AuthGate 讀 /me 的 mustChangePassword）。
+      await supabaseAdmin.from("employees").update({ must_change_password: true }).eq("tenant_id", tenantId).eq("id", id)
       // 只有後端產生時才回傳明碼（供 HR 配發）；HR 自填則不回傳。
       res.status(200).json({ id, password: parsed.data.password ? undefined : password })
     } catch (err) {

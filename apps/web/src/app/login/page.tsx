@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
 import { useSession } from "@/lib/use-session";
@@ -25,20 +26,27 @@ export default function LoginPage() {
     if (!loading && session) router.replace("/ess");
   }, [loading, session, router]);
 
-  // 若之前勾選「記住帳號密碼」，載入時自動帶入並勾起。
-  // 註：帳密以明碼存在瀏覽器 localStorage（內部工具、使用者要求），
-  // 在共用電腦上請勿勾選。
+  // 若之前勾選「記住帳號」，載入時自動帶入 email 並勾起。
+  // 只存 { email }；舊版曾把密碼明碼一起存進 localStorage，讀到舊格式
+  // 立刻改寫成只剩 email（主動把密碼清掉）。
   useEffect(() => {
     try {
       const saved = localStorage.getItem(REMEMBER_KEY);
       if (saved) {
-        const { email: e, password: p } = JSON.parse(saved) as { email?: string; password?: string };
-        if (e) setEmail(e);
-        if (p) setPassword(p);
+        const parsed = JSON.parse(saved) as { email?: string; password?: string };
+        if (parsed.email) setEmail(parsed.email);
         setRemember(true);
+        if ("password" in parsed) {
+          localStorage.setItem(REMEMBER_KEY, JSON.stringify({ email: parsed.email ?? "" }));
+        }
       }
     } catch {
       /* 壞資料忽略 */
+      try {
+        localStorage.removeItem(REMEMBER_KEY);
+      } catch {
+        /* ignore */
+      }
     }
   }, []);
 
@@ -56,10 +64,10 @@ export default function LoginPage() {
         setError(signInError.message);
         return;
       }
-      // 記住帳密：勾選則存入 localStorage，取消則清除。
+      // 記住帳號：勾選則只存 email 到 localStorage（絕不存密碼），取消則清除。
       try {
         if (remember) {
-          localStorage.setItem(REMEMBER_KEY, JSON.stringify({ email, password }));
+          localStorage.setItem(REMEMBER_KEY, JSON.stringify({ email: email.trim() }));
         } else {
           localStorage.removeItem(REMEMBER_KEY);
         }
@@ -102,9 +110,14 @@ export default function LoginPage() {
         />
         <p className="-mt-2 mb-4 text-xs text-gray-400">Demo 可直接輸入 demo。</p>
 
-        <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="password">
-          密碼
-        </label>
+        <div className="mb-1 flex items-center justify-between">
+          <label className="block text-sm font-medium text-gray-700" htmlFor="password">
+            密碼
+          </label>
+          <Link href="/forgot-password" className="text-xs hover:underline" style={{ color: "var(--brand)" }}>
+            忘記密碼？
+          </Link>
+        </div>
         <input
           id="password"
           type="password"
@@ -122,7 +135,7 @@ export default function LoginPage() {
             onChange={(e) => setRemember(e.target.checked)}
             className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
           />
-          記住帳號密碼
+          記住帳號
         </label>
 
         {error && (
