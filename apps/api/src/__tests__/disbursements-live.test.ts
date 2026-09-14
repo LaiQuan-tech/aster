@@ -41,6 +41,8 @@ let employeeToken: string
 const YEAR = Number(taipeiToday().slice(0, 4))
 const ROC = YEAR - 1911
 const TODAY = taipeiToday()
+/** 一年多前，超出一般列表的近 90 天預設窗，用來驗補單模式不設下限。 */
+const OLD_PAID_ON = `${YEAR - 1}-03-10`
 
 async function signIn(email: string, password: string): Promise<string> {
   const anon = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false } })
@@ -427,8 +429,9 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
 
   describe("舊路徑手動標記 vs 放款專區", () => {
     it("B#1 舊 PUT 標 paid（無匯款單）→ POST 分攤 B#1 → 409 manual:true；manualPaid=1 列得到", async () => {
+      // 故意標在 90 天以前：補單模式的重點就是挖舊期款，不能被一般列表的近 90 天預設濾掉
       const manual = await asAdmin(request(app).put(`/projects/${projectBId}/subcontracts/${subBId}/payments`)).send({
-        payments: [{ id: payB1Id, installmentNo: 1, percentage: 100, paidOn: TODAY }],
+        payments: [{ id: payB1Id, installmentNo: 1, percentage: 100, paidOn: OLD_PAID_ON }],
       })
       expect(manual.status).toBe(200)
       expect(manual.body.subcontract.payments[0].paidAmount).toBe(22_500)
@@ -453,12 +456,20 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
       const list = await asAdmin(request(app).get("/disbursements?manualPaid=1"))
       expect(list.status).toBe(200)
       expect(list.body.mode).toBe("manualPaid")
+      expect(list.body.from).toBe("1900-01-01") // 不帶 from 就是全部，不是近 90 天
       const item = list.body.items.find((i: { subcontractPaymentId: string }) => i.subcontractPaymentId === payB1Id)
       expect(item).toBeDefined()
+      expect(item.paidOn).toBe(OLD_PAID_ON)
       expect(item.paidAmount).toBe(22_500)
       expect(item.projectName).toBe("惠特總部")
       // 連動付清的 A#1 不在「無匯款單」清單裡
       expect(list.body.items.map((i: { subcontractPaymentId: string }) => i.subcontractPaymentId)).not.toContain(payA[0].id)
+
+      // 明確給 from 才收窄：從今天起算就不該再看到那筆舊期款
+      const narrowed = await asAdmin(request(app).get(`/disbursements?manualPaid=1&from=${TODAY}`))
+      expect(narrowed.status).toBe(200)
+      expect(narrowed.body.from).toBe(TODAY)
+      expect(narrowed.body.items.map((i: { subcontractPaymentId: string }) => i.subcontractPaymentId)).not.toContain(payB1Id)
     })
   })
 

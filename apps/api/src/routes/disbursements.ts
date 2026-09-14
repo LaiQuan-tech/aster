@@ -151,7 +151,8 @@ const guards = [requireAuth, requireTenant, requireHrAdmin] as const
 // ── GET /disbursements?from=&to=&vendorId=&projectId=&companyId=&status=&q=&manualPaid=1 ──
 /**
  * 匯款紀錄列表（預設近 90 天、排除 void 除非 status=void）。`manualPaid=1` 改列
- * 「已付但無匯款單」的期款（舊路徑手動標記的），讓老闆補單。
+ * 「已付但無匯款單」的期款（舊路徑手動標記的），讓老闆補單——這個模式不帶 from
+ * 就是全部年份，不套近 90 天（要挖的正是很久以前的舊期款）。
  */
 disbursementsRouter.get("/disbursements", ...guards, async (req: Request, res: Response, next: NextFunction) => {
   const tenantId = res.locals.tenantId as string

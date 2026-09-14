@@ -999,13 +999,20 @@ export type ManualPaidRow = {
   receiptRef: string | null
 }
 
-/** 已付（paid_on 有值）但沒有匯款單（disbursement_id 空）的期款——老闆補單用。 */
+/** 補單模式不設下限：這清單就是要挖很久以前手動標記的舊期款，近 90 天預設會把它們濾掉。 */
+export const MANUAL_PAID_ALL_TIME_FROM = "1900-01-01"
+
+/**
+ * 已付（paid_on 有值）但沒有匯款單（disbursement_id 空）的期款——老闆補單用。
+ * 日期預設「全部」（只補上限 today），跟一般列表的近 90 天不同；呼叫端明確給 from 才收窄。
+ */
 export async function listManualPaidPayments(
   tenantId: string,
   filters: { from?: string; to?: string; vendorId?: string; projectId?: string },
 ): Promise<{ from: string; to: string; items: ManualPaidRow[] }> {
   const today = await tenantToday(tenantId)
-  const { from, to } = defaultRange(today, filters.from, filters.to)
+  const to = filters.to ?? today
+  const from = filters.from ?? MANUAL_PAID_ALL_TIME_FROM
   const scope = await loadPayableScope(tenantId, { vendorId: filters.vendorId, projectId: filters.projectId })
   const projectById = new Map(scope.projects.map((p) => [p.id, p]))
   const subById = new Map(scope.subcontracts.map((s) => [s.id, s]))
