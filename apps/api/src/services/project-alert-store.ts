@@ -3,6 +3,7 @@
  * 引擎本身在 project-alerts.ts，純函式。
  */
 import { supabaseAdmin } from "../lib/supabase.js"
+import { isOurContract } from "../lib/contract-role.js"
 import { resolveStampDutyRequired } from "./stamp-duty.js"
 import { computeProjectAlerts, type AlertInput, type AlertProject, type ProjectAlert } from "./project-alerts.js"
 
@@ -60,8 +61,9 @@ export async function loadAlertInput(tenantId: string): Promise<AlertInput> {
       projectId: c.project_id as string,
       docType: c.doc_type as string,
       signedOn: (c.signed_on as string | null) ?? null,
-      // 分母只算我方承攬的合約與追加減（與 billing-store.contractTotal 一致）
-      amount: c.our_role === "contractor" ? num(c.amount) : 0,
+      // 分母只算我方的合約與追加減（our_role !== "client"，both 一樣算，
+      // 與 billing-store.contractTotal 一致）
+      amount: isOurContract(c.our_role as string) ? num(c.amount) : 0,
       dutiable: resolveStampDutyRequired({ docType: c.doc_type as string, ourRole: c.our_role as string, flag: c.stamp_duty_required as string }),
       stampDutyPaidOn: (c.stamp_duty_paid_on as string | null) ?? null,
     }

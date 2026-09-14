@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { OUR_CONTRACT_ROLES } from "../lib/contract-role.js"
 import type { InstallmentInput } from "./billing-schedule.js"
 import { computeSchedule, type ScheduleRowInput } from "./project-money.js"
 
@@ -56,7 +57,8 @@ export type ContractTotal = {
  *
  * = 我方**承攬**的合約 + 追加減帳（未作廢）：
  *   • 報價單不算——還沒成案
- *   • 我方是定作人的不算——那是應付，不是應收
+ *   • 我方是定作人（our_role="client"）的不算——那是應付，不是應收
+ *   • our_role="both"（印花稅各自貼）我方仍是承攬方，一樣算
  *   • 追加減帳**要算**，否則追加的款永遠請不到
  *
  * 一張合約都沒有時回 `null` 而不是 0：0 會讓每期算出 0 元、看起來像算過了，
@@ -71,7 +73,7 @@ export async function contractTotal(
     .select("doc_type, amount")
     .eq("tenant_id", tenantId)
     .eq("project_id", projectId)
-    .eq("our_role", "contractor")
+    .in("our_role", OUR_CONTRACT_ROLES)
     .in("doc_type", ["contract", "change_order"])
     .is("deleted_at", null)
   if (error) throw new Error(`contractTotal: ${error.message}`)
@@ -105,7 +107,7 @@ export function toScheduleInput(row: BillingRow): ScheduleRowInput {
 }
 
 /**
- * 沒有合約時的分母後備：最新的報價單（我方承攬、未作廢）。
+ * 沒有合約時的分母後備：最新的報價單（我方承攬或各自貼、未作廢）。
  * 先看簽訂日最新，沒簽訂日的排後面，再看建立時間。
  */
 export async function latestQuotationAmount(
@@ -117,7 +119,7 @@ export async function latestQuotationAmount(
     .select("amount")
     .eq("tenant_id", tenantId)
     .eq("project_id", projectId)
-    .eq("our_role", "contractor")
+    .in("our_role", OUR_CONTRACT_ROLES)
     .eq("doc_type", "quotation")
     .is("deleted_at", null)
     .order("signed_on", { ascending: false, nullsFirst: false })

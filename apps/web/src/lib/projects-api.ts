@@ -28,6 +28,18 @@ export const PROJECT_STATUS_ORDER: ProjectStatus[] = [
   "terminated",
 ]
 
+/** B4：`GET /projects` 列表排序。未帶＝ created desc（後端預設）。 */
+export type ProjectSort = "created" | "opened" | "name" | "code" | "status"
+export type SortDir = "asc" | "desc"
+
+export const PROJECT_SORT_LABELS: Record<ProjectSort, string> = {
+  created: "建立日期",
+  opened: "開案日期",
+  name: "名稱",
+  code: "編號",
+  status: "狀態",
+}
+
 /** 終止狀態：案子已結束（正常完工或中途解約）。 */
 export function isTerminalStatus(s: string): boolean {
   return s === "closed" || s === "terminated"
@@ -158,6 +170,17 @@ export const OUR_ROLE_SHORT_LABELS: Record<OurRole, string> = {
   contractor: "我方貼",
   client: "對方貼",
   both: "各自貼",
+}
+
+/**
+ * 這張合約／報價單算不算我方承攬。both（各自貼）我方仍是承攬方，一樣算；
+ * 只有 client（我方是定作人，對方才是承攬人）不算。跟 API 端
+ * apps/api/src/lib/contract-role.ts 的 isOurContract 同一條規則——前台要判斷
+ * 「這是我方的合約嗎」（例如訂單類型沿用合約）時用這個，不要重新寫
+ * `=== "contractor"`。
+ */
+export function isOurContract(ourRole: OurRole | string): boolean {
+  return ourRole !== "client"
 }
 
 export interface Contract {
@@ -384,11 +407,17 @@ export function updateProjectSettings(body: Partial<ProjectSettings>) {
 
 /* --------------------------------------------------------------- projects -- */
 
-/** 預設不回已封存的專案——封存的目的就是從列表收起來。 */
-export function listProjects(includeArchived = false) {
-  return apiFetch<{ projects: Project[] }>(
-    includeArchived ? "/projects?includeArchived=1" : "/projects",
-  )
+/**
+ * 預設不回已封存的專案——封存的目的就是從列表收起來。
+ * B4：第二參數可選排序（欄位／方向），省略＝後端預設 created desc。
+ */
+export function listProjects(includeArchived = false, opts?: { sort?: ProjectSort; dir?: SortDir }) {
+  const q = new URLSearchParams()
+  if (includeArchived) q.set("includeArchived", "1")
+  if (opts?.sort) q.set("sort", opts.sort)
+  if (opts?.dir) q.set("dir", opts.dir)
+  const qs = q.toString()
+  return apiFetch<{ projects: Project[] }>(`/projects${qs ? `?${qs}` : ""}`)
 }
 
 export function getProject(id: string) {

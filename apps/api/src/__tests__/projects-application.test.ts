@@ -107,18 +107,20 @@ describe("money — 分母來源：合約優先，沒合約才退用報價單", 
     expect(resolveAmountUntaxed(null, null)).toEqual({ amountUntaxed: null, amountSource: null })
   })
 
-  it("summarizeContracts：合約＋追加減、報價單另計、我方是定作人的不算、作廢的不算", () => {
+  it("summarizeContracts：合約＋追加減、報價單另計、我方是定作人的不算、作廢的不算、both 一樣算我方的", () => {
     const s = summarizeContracts([
       { doc_type: "quotation", our_role: "contractor", amount: "2800000", signed_on: "2026-01-05", created_at: "2026-01-05T00:00:00Z" },
       { doc_type: "quotation", our_role: "contractor", amount: "2900000", signed_on: "2026-01-20", created_at: "2026-01-20T00:00:00Z" },
       { doc_type: "contract", our_role: "contractor", amount: "3000000", signed_on: "2026-02-01", created_at: "2026-02-01T00:00:00Z" },
       { doc_type: "change_order", our_role: "contractor", amount: "43645", signed_on: "2026-05-01", created_at: "2026-05-01T00:00:00Z" },
+      // C1：our_role=both（印花稅各自貼）我方仍是承攬方，追加減一樣要併入分母。
+      { doc_type: "change_order", our_role: "both", amount: "10000", signed_on: "2026-06-01", created_at: "2026-06-01T00:00:00Z" },
       { doc_type: "contract", our_role: "client", amount: "800000", signed_on: "2026-03-01", created_at: "2026-03-01T00:00:00Z" },
       { doc_type: "contract", our_role: "contractor", amount: "9999999", signed_on: "2026-03-01", created_at: "2026-03-01T00:00:00Z", deleted_at: "2026-03-02T00:00:00Z" },
     ])
-    expect(s.total).toBe(3_043_645)
+    expect(s.total).toBe(3_053_645)
     expect(s.base).toBe(3_000_000)
-    expect(s.changeOrders).toBe(43_645)
+    expect(s.changeOrders).toBe(53_645)
     expect(s.latestQuotation).toBe(2_900_000)
     // 申請單上的最新文件：有合約就是合約。
     expect(s.latest?.doc_type).toBe("contract")

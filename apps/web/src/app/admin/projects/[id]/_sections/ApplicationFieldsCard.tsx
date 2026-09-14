@@ -3,7 +3,7 @@
 import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import { VendorCombo } from "@/components/VendorCombo";
 import type { Vendor } from "@/lib/company-api";
-import { DOC_TYPE_LABELS, type Contract } from "@/lib/projects-api";
+import { DOC_TYPE_LABELS, isOurContract, type Contract } from "@/lib/projects-api";
 import {
   updateProjectFields,
   humanizeProjectExtError,
@@ -34,7 +34,7 @@ function latestDocumentOf(list: Contract[]): Contract | null {
   let latestContract: Contract | null = null;
   let latestQuotation: Contract | null = null;
   for (const c of list) {
-    if (c.ourRole !== "contractor") continue;
+    if (!isOurContract(c.ourRole)) continue;
     if (c.docType === "quotation") {
       if (!latestQuotation || isNewerDoc(c, latestQuotation)) latestQuotation = c;
     } else if (c.docType === "contract") {
