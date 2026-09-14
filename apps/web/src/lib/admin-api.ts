@@ -1108,11 +1108,22 @@ export function computeTax(body: TaxComputeBody) {
 
 /* ------------------------------------------------------ approval-flows ----- */
 
+/** 可設定簽核流程的表單類別（API kindSchema；比 RequestKind 多零用金預支）。 */
+export type ApprovalFlowKind = RequestKind | "petty_cash";
+
+/**
+ * 簽核模式（approval_flows.mode）：
+ *   manager — 直屬主管單關（找不到主管 → tenant features.approval.fallbackApproverEmpId → 第一位 HR）
+ *   list    — 固定名單依序多關；名單為空時行為同 manager
+ */
+export type ApprovalFlowMode = "manager" | "list";
+
 export interface ApprovalFlow {
   id: string;
   tenant_id: string;
-  applies_to: RequestKind;
+  applies_to: ApprovalFlowKind;
   approver_emp_ids: string[];
+  mode: ApprovalFlowMode;
   created_at: string;
 }
 
@@ -1120,11 +1131,18 @@ export function getApprovalFlows() {
   return apiFetch<{ flows: ApprovalFlow[] }>("/approval-flows");
 }
 
-export function setApprovalFlow(kind: RequestKind, approverEmpIds: string[]) {
-  return apiFetch<{ id: string; appliesTo: RequestKind; approverEmpIds: string[] }>(
+/** 省略 mode 時後端保留既有列的 mode（新列預設 list）。 */
+export function setApprovalFlow(kind: ApprovalFlowKind, approverEmpIds: string[], mode?: ApprovalFlowMode) {
+  return apiFetch<{ id: string; appliesTo: ApprovalFlowKind; approverEmpIds: string[]; mode: ApprovalFlowMode }>(
     `/approval-flows/${kind}`,
-    { method: "PUT", body: JSON.stringify({ approverEmpIds }) },
+    { method: "PUT", body: JSON.stringify(mode ? { approverEmpIds, mode } : { approverEmpIds }) },
   );
+}
+
+/** tenants.features.approval（簽核退路設定）；讀寫走 getBranding / saveTenantSettings。 */
+export interface ApprovalFeatureSettings {
+  /** 找不到直屬主管時的簽核者（老闆）；null＝未設定。 */
+  fallbackApproverEmpId?: string | null;
 }
 
 /* ------------------------------------------------------------ branding ----- */

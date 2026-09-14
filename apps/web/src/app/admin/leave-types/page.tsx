@@ -10,18 +10,26 @@ import {
   getApprovalFlows,
   setApprovalFlow,
   getEmployees,
+  getBranding,
+  saveTenantSettings,
   type LeaveType,
   type ApprovalFlow,
+  type ApprovalFlowKind,
+  type ApprovalFlowMode,
+  type ApprovalFeatureSettings,
   type Employee,
-  type RequestKind,
 } from "@/lib/admin-api";
 
-const KINDS: { kind: RequestKind; label: string }[] = [
+const KINDS: { kind: ApprovalFlowKind; label: string }[] = [
   { kind: "leave", label: "請假" },
   { kind: "ot", label: "加班" },
   { kind: "fix_punch", label: "補卡" },
   { kind: "business_trip", label: "公出/出差" },
+  { kind: "petty_cash", label: "零用金預支" },
 ];
+
+/** 沒有 flow 列時系統的實際行為就是直屬主管鏈，畫面預設也顯示「直屬主管」。 */
+const DEFAULT_MODE: ApprovalFlowMode = "manager";
 
 /** 扣薪比例顯示用：deduct_rate 為 null 時依 paid 推算（有薪 0、無薪 1），與 DB 欄位註解一致。 */
 function effectiveDeductRate(lt: Pick<LeaveType, "deduct_rate" | "paid">): number {
@@ -55,9 +63,15 @@ export default function LeaveTypesPage() {
   const [editSpecial, setEditSpecial] = useState(false);
   const [editDeductRate, setEditDeductRate] = useState("");
 
-  // approval flows: kind -> selected approver emp ids (ordered by employee list)
+  // approval flows: kind -> selected approver emp ids (ordered by employee list) + 簽核模式
   const [flowDraft, setFlowDraft] = useState<Record<string, string[]>>({});
+  const [flowMode, setFlowMode] = useState<Record<string, ApprovalFlowMode>>({});
   const [flowMsg, setFlowMsg] = useState<string | null>(null);
+  // 找不到主管時的簽核者（老闆）：tenants.features.approval.fallbackApproverEmpId
+  const [fallbackEmpId, setFallbackEmpId] = useState("");
+  const [fallbackSaved, setFallbackSaved] = useState("");
+  const [fallbackMsg, setFallbackMsg] = useState<string | null>(null);
+  const [fallbackSaving, setFallbackSaving] = useState(false);
 
   const empName = useMemo(() => {
     const m = new Map<string, string>();
@@ -68,17 +82,27 @@ export default function LeaveTypesPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [ltRes, flowRes, empRes] = await Promise.all([
+      const [ltRes, flowRes, empRes, brandRes] = await Promise.all([
         getLeaveTypes(),
         getApprovalFlows(),
         getEmployees(),
+        getBranding(),
       ]);
       setTypes(ltRes.leaveTypes);
       setFlows(flowRes.flows);
       setEmployees(empRes.employees);
       const draft: Record<string, string[]> = {};
-      for (const f of flowRes.flows) draft[f.applies_to] = f.approver_emp_ids ?? [];
+      const modes: Record<string, ApprovalFlowMode> = {};
+      for (const f of flowRes.flows) {
+        draft[f.applies_to] = f.approver_emp_ids ?? [];
+        modes[f.applies_to] = f.mode === "list" ? "list" : "manager";
+      }
       setFlowDraft(draft);
+      setFlowMode(modes);
+      const approval = (brandRes.features?.approval ?? null) as ApprovalFeatureSettings | null;
+      const fallback = approval?.fallbackApproverEmpId ?? "";
+      setFallbackEmpId(fallback);
+      setFallbackSaved(fallback);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入失敗");
@@ -146,7 +170,7 @@ export default function LeaveTypesPage() {
     }
   }
 
-  function toggleApprover(kind: RequestKind, empId: string) {
+  function toggleApprover(kind: ApprovalFlowKind, empId: string) {
     setFlowDraft((prev) => {
       const cur = prev[kind] ?? [];
       const next = cur.includes(empId) ? cur.filter((x) => x !== empId) : [...cur, empId];
@@ -154,16 +178,51 @@ export default function LeaveTypesPage() {
     });
   }
 
-  async function saveFlow(kind: RequestKind) {
+  function modeOf(kind: ApprovalFlowKind): ApprovalFlowMode {
+    return flowMode[kind] ?? DEFAULT_MODE;
+  }
+
+  async function saveFlow(kind: ApprovalFlowKind) {
     setFlowMsg(null);
+    const mode = modeOf(kind);
+    const selected = flowDraft[kind] ?? [];
+    if (mode === "list" && selected.length === 0) {
+      setError("固定名單模式至少要勾選一位簽核者；若要依部門主管簽核請改選「直屬主管」。");
+      return;
+    }
     try {
-      await setApprovalFlow(kind, flowDraft[kind] ?? []);
-      setFlowMsg(`${KINDS.find((k) => k.kind === kind)?.label} 簽核流程已儲存`);
+      await setApprovalFlow(kind, selected, mode);
+      setFlowMsg(
+        `${KINDS.find((k) => k.kind === kind)?.label} 簽核流程已儲存（${mode === "list" ? "固定名單" : "直屬主管"}）`,
+      );
+      setError(null);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存簽核流程失敗");
     }
   }
+
+  async function saveFallback() {
+    setFallbackMsg(null);
+    setFallbackSaving(true);
+    try {
+      const res = await saveTenantSettings({
+        features: { approval: { fallbackApproverEmpId: fallbackEmpId || null } },
+      });
+      const approval = (res.features?.approval ?? null) as ApprovalFeatureSettings | null;
+      const saved = approval?.fallbackApproverEmpId ?? "";
+      setFallbackEmpId(saved);
+      setFallbackSaved(saved);
+      setFallbackMsg(saved ? `已設定：${empName.get(saved) ?? saved}` : "已清除（找不到主管時退回 HR 管理員）");
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "儲存簽核退路設定失敗");
+    } finally {
+      setFallbackSaving(false);
+    }
+  }
+
+  const activeEmployees = employees.filter((e) => e.status === "active");
 
   return (
     <>
@@ -322,15 +381,17 @@ export default function LeaveTypesPage() {
       <Card>
         <h2 className="mb-1 text-sm font-medium text-gray-500">簽核流程</h2>
         <p className="mb-4 text-xs text-gray-400">
-          勾選的員工即為各類別的簽核者，依勾選順序逐關簽核；未設定則退回任一 HR 管理員單關簽核。
+          每類申請可選「直屬主管」（依員工所屬部門的主管簽核，主管是本人或未設定時往上層部門找）或
+          「固定名單」（勾選的員工依勾選順序逐關簽核）。直屬主管找不到時退回下方設定的簽核者，再沒有就退回第一位 HR 管理員。
         </p>
         {flowMsg && <p className="mb-3 text-sm text-green-600">{flowMsg}</p>}
         <div className="space-y-6">
           {KINDS.map(({ kind, label }) => {
             const selected = flowDraft[kind] ?? [];
             const flow = flows.find((f) => f.applies_to === kind);
+            const mode = modeOf(kind);
             return (
-              <div key={kind} className="rounded-lg border border-gray-100 p-4">
+              <div key={kind} className="rounded-lg border border-gray-100 p-4" data-flow-kind={kind}>
                 <div className="mb-3 flex items-center justify-between">
                   <h3 className="font-medium text-gray-800">{label}</h3>
                   <button
@@ -341,7 +402,37 @@ export default function LeaveTypesPage() {
                     儲存
                   </button>
                 </div>
-                {employees.length === 0 ? (
+                <fieldset className="mb-3">
+                  <legend className="mb-1 text-xs font-medium text-gray-500">簽核模式</legend>
+                  <div className="flex flex-wrap gap-4">
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="radio"
+                        name={`mode-${kind}`}
+                        value="manager"
+                        checked={mode === "manager"}
+                        onChange={() => setFlowMode((prev) => ({ ...prev, [kind]: "manager" }))}
+                      />
+                      直屬主管
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="radio"
+                        name={`mode-${kind}`}
+                        value="list"
+                        checked={mode === "list"}
+                        onChange={() => setFlowMode((prev) => ({ ...prev, [kind]: "list" }))}
+                      />
+                      固定名單
+                    </label>
+                  </div>
+                </fieldset>
+                {mode === "manager" ? (
+                  <p className="text-xs text-gray-500">
+                    依申請人所屬部門的主管單關簽核；找不到主管 → 下方「找不到主管時的簽核者」→ 第一位 HR 管理員。
+                    {selected.length > 0 && "（已勾選的固定名單會保留，切回「固定名單」時沿用。）"}
+                  </p>
+                ) : employees.length === 0 ? (
                   <Empty>尚無員工可指派</Empty>
                 ) : (
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -357,17 +448,50 @@ export default function LeaveTypesPage() {
                     ))}
                   </div>
                 )}
-                {selected.length > 0 && (
+                {mode === "list" && selected.length > 0 && (
                   <p className="mt-3 text-xs text-gray-500">
                     順序：{selected.map((id, i) => `${i + 1}. ${empName.get(id) ?? id}`).join("　")}
                   </p>
                 )}
-                {!flow && selected.length === 0 && (
-                  <p className="mt-2 text-xs text-gray-400">尚未設定（將退回 HR 單關）。</p>
+                {!flow && (
+                  <p className="mt-2 text-xs text-gray-400">尚未儲存過設定（目前依直屬主管簽核）。</p>
                 )}
               </div>
             );
           })}
+        </div>
+      </Card>
+
+      {/* Fallback approver（老闆） */}
+      <Card>
+        <h2 className="mb-1 text-sm font-medium text-gray-500">找不到主管時的簽核者（老闆）</h2>
+        <p className="mb-4 text-xs text-gray-400">
+          「直屬主管」模式下，申請人沒有部門、部門沒設主管、或主管就是本人且上層也找不到時，改由這位簽核；
+          未設定則退回第一位 HR 管理員。
+        </p>
+        {fallbackMsg && <p className="mb-3 text-sm text-green-600">{fallbackMsg}</p>}
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+          <div className="flex-1">
+            <label className={labelCls} htmlFor="fallback-approver">
+              簽核者
+            </label>
+            <select
+              id="fallback-approver"
+              className={inputCls}
+              value={fallbackEmpId}
+              onChange={(e) => setFallbackEmpId(e.target.value)}
+            >
+              <option value="">（未設定：退回 HR 管理員）</option>
+              {activeEmployees.map((emp) => (
+                <option key={emp.id} value={emp.id}>
+                  {emp.emp_no ? `${emp.emp_no} · ${emp.name}` : emp.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <PrimaryButton type="button" onClick={saveFallback} disabled={fallbackSaving || fallbackEmpId === fallbackSaved}>
+            {fallbackSaving ? "儲存中…" : "儲存"}
+          </PrimaryButton>
         </div>
       </Card>
     </>

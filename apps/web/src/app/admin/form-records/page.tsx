@@ -131,7 +131,8 @@ export default function FormRecordsPage() {
   }, [deptName, employees]);
 
   const approvalFlowByKind = useMemo(() => {
-    const map = new Map<RequestKind, string[]>();
+    // approval_flows.applies_to 含 petty_cash（ApprovalFlowKind ⊃ RequestKind），key 放寬成 string。
+    const map = new Map<string, string[]>();
     for (const flow of approvalFlows) {
       map.set(flow.applies_to, flow.approver_emp_ids ?? []);
     }

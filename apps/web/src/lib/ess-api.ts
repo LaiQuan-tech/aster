@@ -18,6 +18,16 @@ export interface Me {
   empNo: string | null;
   status: string;
   email: string | null;
+  /** 身分類別（employees.employment_type）；舊版 API 沒有這個欄位，讀取要 optional。 */
+  employmentType?: string | null;
+  /**
+   * 可見的 ESS 分頁 key 清單（tenants.features.essTabs[employment_type]）；
+   * null／undefined＝全部可見。過濾邏輯在 lib/ess-tabs.ts。
+   */
+  essTabs?: string[] | null;
+  /** 是否為任一部門主管（後端可選欄位；沒有時前端改用「待我簽核」筆數判斷）。 */
+  isManager?: boolean;
+  mustChangePassword?: boolean;
 }
 
 /** The caller's own employee profile; used to detect HR admins in the ESS. */
@@ -319,6 +329,47 @@ export function cancelRequest(id: string) {
   return apiFetch<{ status: RequestStatus }>(`/requests/${id}/cancel`, {
     method: "POST",
     body: JSON.stringify({}),
+  });
+}
+
+/* ------------------------------------------------- 待我簽核（主管 ESS）--- */
+
+/**
+ * GET /requests/pending-approvals 的列：leave_requests 欄位＋伺服器附上的申請人／
+ * 假別／附件數／關卡進度（非 HR 拿不到 GET /employees，名稱只能由這裡來）。
+ */
+export interface PendingApproval extends LeaveRequest {
+  current_approver_emp_id: string | null;
+  employee_name: string | null;
+  employee_emp_no: string | null;
+  department_name: string | null;
+  leave_type_name: string | null;
+  attachment_count: number;
+  total_steps: number;
+  segments?: LeaveSegment[] | null;
+  payout?: "pay" | "comp_time" | null;
+  location?: string | null;
+  remark?: string | null;
+  advance_requested?: string | number | null;
+}
+
+/** 「輪到我簽」的單；任何角色都可呼叫，沒有就是空陣列。 */
+export function getPendingApprovals() {
+  return apiFetch<{ requests: PendingApproval[] }>("/requests/pending-approvals");
+}
+
+export function approveRequest(id: string, comment?: string) {
+  return apiFetch<{ status: RequestStatus; currentStep: number }>(`/requests/${id}/approve`, {
+    method: "POST",
+    body: JSON.stringify(comment ? { comment } : {}),
+  });
+}
+
+/** 駁回；理由由 UI 強制必填（API 端 comment 仍為 optional，與舊呼叫端相容）。 */
+export function rejectRequest(id: string, comment: string) {
+  return apiFetch<{ status: RequestStatus; currentStep: number }>(`/requests/${id}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ comment }),
   });
 }
 

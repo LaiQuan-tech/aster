@@ -83,6 +83,22 @@ const tenantSettingsSchema = z.object({
           provider: z.enum(["google", "microsoft", "other"]).optional(),
         })
         .optional(),
+      /**
+       * 簽核（A2）：找不到直屬主管時的簽核者（老闆）。簽核鏈順序見
+       * services/approval-chain.ts：固定名單 → 直屬主管 → 這裡 → 第一位 hr_admin。
+       * null＝清除設定。
+       */
+      approval: z
+        .object({
+          fallbackApproverEmpId: z.string().uuid().nullable().optional(),
+        })
+        .optional(),
+      /**
+       * ESS 分頁限縮：employment_type → 可見的分頁 key 清單（例如
+       * { intern: ["home","schedule","punches","requests","notifications","mydata"] }）。
+       * 沒列的身分類別＝全部可見；tab key 定義見 apps/web/src/components/EssHeader.tsx。
+       */
+      essTabs: z.record(z.string().trim().min(1), z.array(z.string().trim().min(1))).optional(),
     })
     .optional(),
 })

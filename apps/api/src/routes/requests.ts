@@ -4,6 +4,10 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { applyApprovalEffects } from "../services/ledger.js"
+import { resolveApproverChain } from "../services/approval-chain.js"
+import { enqueue } from "../services/notify.js"
+import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { logger } from "../lib/logger.js"
 
 export const requestsRouter = Router()
 
@@ -121,6 +125,186 @@ async function withCurrentApprovers<T extends { id: string; current_step: number
   }))
 }
 
+/* ── 簽核通知（A2）─────────────────────────────────────────────────────
+ * 三個出口都發站內通知（notifications，type='approval'）：
+ *   submitted / advanced → 該關簽核者（內文含申請人／假別／期間，讓主管不用點進去就知道是什麼單）
+ *   approved / rejected  → 申請人
+ * 投遞交給既有每 5 分鐘 job；這裡只入列。
+ */
+const KIND_LABEL: Record<string, string> = {
+  leave: "請假",
+  ot: "加班",
+  fix_punch: "補卡",
+  business_trip: "公出/出差",
+  petty_cash: "零用金預支",
+}
+
+function kindLabel(kind: string): string {
+  return KIND_LABEL[kind] ?? kind
+}
+
+const TAIPEI_FMT = new Intl.DateTimeFormat("zh-TW", {
+  timeZone: "Asia/Taipei",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+})
+
+function fmtTaipei(iso: string | null | undefined): string {
+  if (!iso) return "—"
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return String(iso)
+  return TAIPEI_FMT.format(d)
+}
+
+function periodText(startAt: string | null | undefined, endAt: string | null | undefined, hours: unknown): string {
+  const h = hours == null || hours === "" ? null : Number(hours)
+  const hoursText = h != null && Number.isFinite(h) ? `（${h} 小時）` : ""
+  return `${fmtTaipei(startAt)} ～ ${fmtTaipei(endAt)}${hoursText}`
+}
+
+interface RequestContext {
+  applicantName: string
+  applicantEmpNo: string | null
+  leaveTypeName: string | null
+  /** leave_types.requires_attachment；欄位尚未套用時視為 false。 */
+  requiresAttachment: boolean
+}
+
+/** 申請人姓名／工號＋假別名稱（通知內文與附件必要檢查都要用）。 */
+async function loadRequestContext(
+  tenantId: string,
+  employeeId: string,
+  leaveTypeId: string | null,
+): Promise<RequestContext> {
+  const { data: emp, error: empErr } = await supabaseAdmin
+    .from("employees")
+    .select("name, emp_no")
+    .eq("tenant_id", tenantId)
+    .eq("id", employeeId)
+    .maybeSingle()
+  if (empErr) throw new Error(`request context (employee): ${empErr.message}`)
+
+  let leaveTypeName: string | null = null
+  let requiresAttachment = false
+  if (leaveTypeId) {
+    // requires_attachment 是下一批 migration 才加的欄位：先用容錯 select，
+    // 欄位不存在就退回只讀名稱（schema-compat 慣例）。
+    let { data: lt, error: ltErr } = await supabaseAdmin
+      .from("leave_types")
+      .select("name, requires_attachment")
+      .eq("tenant_id", tenantId)
+      .eq("id", leaveTypeId)
+      .maybeSingle()
+    if (ltErr && isMissingColumnError(ltErr)) {
+      warnSchemaGapOnce("leave_types.requires_attachment", ltErr)
+      ;({ data: lt, error: ltErr } = await supabaseAdmin
+        .from("leave_types")
+        .select("name")
+        .eq("tenant_id", tenantId)
+        .eq("id", leaveTypeId)
+        .maybeSingle())
+    }
+    if (ltErr) throw new Error(`request context (leave type): ${ltErr.message}`)
+    leaveTypeName = (lt?.name as string | null) ?? null
+    requiresAttachment = ((lt as Record<string, unknown> | null)?.requires_attachment as boolean | undefined) ?? false
+  }
+
+  return {
+    applicantName: (emp?.name as string | null) ?? "同仁",
+    applicantEmpNo: (emp?.emp_no as string | null) ?? null,
+    leaveTypeName,
+    requiresAttachment,
+  }
+}
+
+interface ApprovalNoticeRequest {
+  id: string
+  kind: string
+  employee_id: string
+  leave_type_id: string | null
+  start_at: string
+  end_at: string
+  hours: unknown
+  reason: string | null
+}
+
+function applicantLabel(ctx: RequestContext): string {
+  return ctx.applicantEmpNo ? `${ctx.applicantName}（${ctx.applicantEmpNo}）` : ctx.applicantName
+}
+
+function subjectLabel(lr: ApprovalNoticeRequest, ctx: RequestContext): string {
+  return ctx.leaveTypeName ? `${kindLabel(lr.kind)}（${ctx.leaveTypeName}）` : kindLabel(lr.kind)
+}
+
+function basePayload(lr: ApprovalNoticeRequest, extra: Record<string, unknown>): Record<string, unknown> {
+  return {
+    requestId: lr.id,
+    requestKind: lr.kind,
+    employeeId: lr.employee_id,
+    leaveTypeId: lr.leave_type_id,
+    startAt: lr.start_at,
+    endAt: lr.end_at,
+    hours: lr.hours ?? null,
+    ...extra,
+  }
+}
+
+/** 通知某一關的簽核者：送出（第 1 關）或前一關核准後推進（下一關）。 */
+async function notifyStepApprover(params: {
+  tenantId: string
+  lr: ApprovalNoticeRequest
+  ctx: RequestContext
+  approverEmpId: string
+  step: number
+  totalSteps: number
+  event: "submitted" | "advanced"
+  actedByEmpId?: string
+}): Promise<number> {
+  const { tenantId, lr, ctx, approverEmpId, step, totalSteps, event } = params
+  const reason = lr.reason ? `，事由：${lr.reason}` : ""
+  const stepText = totalSteps > 1 ? `（第 ${step} 關，共 ${totalSteps} 關）` : ""
+  return enqueue({
+    tenantId,
+    employeeIds: [approverEmpId],
+    type: "approval",
+    title: `待簽核：${ctx.applicantName} 的${kindLabel(lr.kind)}申請`,
+    body: `${applicantLabel(ctx)} 申請${subjectLabel(lr, ctx)}，期間 ${periodText(lr.start_at, lr.end_at, lr.hours)}${reason}。請至「待我簽核」處理${stepText}。`,
+    payload: basePayload(lr, {
+      event,
+      currentStep: step,
+      totalSteps,
+      approverEmpId,
+      actedByEmpId: params.actedByEmpId ?? null,
+    }),
+  })
+}
+
+/** 通知申請人：最終核准或駁回。 */
+async function notifyApplicant(params: {
+  tenantId: string
+  lr: ApprovalNoticeRequest
+  ctx: RequestContext
+  event: "approved" | "rejected"
+  step: number
+  actedByEmpId: string
+  comment?: string | null
+}): Promise<number> {
+  const { tenantId, lr, ctx, event, step, actedByEmpId, comment } = params
+  const verdict = event === "approved" ? "已核准" : "已駁回"
+  const commentText = comment ? `${event === "approved" ? "簽核意見" : "駁回理由"}：${comment}` : ""
+  return enqueue({
+    tenantId,
+    employeeIds: [lr.employee_id],
+    type: "approval",
+    title: `你的${kindLabel(lr.kind)}申請${verdict}`,
+    body: `${subjectLabel(lr, ctx)} 期間 ${periodText(lr.start_at, lr.end_at, lr.hours)} ${verdict}。${commentText}`.trim(),
+    payload: basePayload(lr, { event, currentStep: step, actedByEmpId, comment: comment ?? null }),
+  })
+}
+
 /**
  * POST /requests — the authenticated employee files a request for THEMSELVES.
  *
@@ -201,44 +385,16 @@ requestsRouter.post(
         filedForId = onBehalfOfEmployeeId
       }
 
-      // Resolve the approver chain for this kind.
-      const { data: flow, error: flowErr } = await supabaseAdmin
-        .from("approval_flows")
-        .select("approver_emp_ids")
-        .eq("tenant_id", tenantId)
-        .eq("applies_to", kind)
-        .maybeSingle()
-      if (flowErr) {
-        next(new Error(`POST /requests (flow): ${flowErr.message}`))
+      // Resolve the approver chain for this kind (services/approval-chain.ts):
+      // 固定名單 → 直屬主管 → 老闆（tenant features）→ 第一位 hr_admin → 409。
+      const chain = await resolveApproverChain(tenantId, kind, filedForId)
+      if (!chain.ok) {
+        // No approver can be determined — refuse rather than create a request
+        // nobody can ever action.
+        res.status(409).json({ error: chain.error })
         return
       }
-
-      let approverIds: string[] = Array.isArray(flow?.approver_emp_ids)
-        ? (flow!.approver_emp_ids as string[])
-        : []
-
-      // No configured flow → fall back to a single step approved by any HR admin.
-      if (approverIds.length === 0) {
-        const { data: hr, error: hrErr } = await supabaseAdmin
-          .from("employees")
-          .select("id")
-          .eq("tenant_id", tenantId)
-          .eq("role", "hr_admin")
-          .order("created_at", { ascending: true })
-          .limit(1)
-          .maybeSingle()
-        if (hrErr) {
-          next(new Error(`POST /requests (fallback hr): ${hrErr.message}`))
-          return
-        }
-        if (!hr) {
-          // No approver can be determined — refuse rather than create a request
-          // nobody can ever action.
-          res.status(409).json({ error: "no_approver_available" })
-          return
-        }
-        approverIds = [hr.id as string]
-      }
+      const approverIds = chain.approverEmpIds
 
       // Create the request (pending, step 1).
       const { data: created, error: reqErr } = await supabaseAdmin
@@ -303,8 +459,37 @@ requestsRouter.post(
         return
       }
 
+      // 通知第 1 關簽核者（best-effort：入列失敗只記 log，不影響 201）。
+      let notified = 0
+      try {
+        const ctx = await loadRequestContext(tenantId, filedForId, leaveTypeId ?? null)
+        notified = await notifyStepApprover({
+          tenantId,
+          lr: {
+            id: requestId,
+            kind,
+            employee_id: filedForId,
+            leave_type_id: leaveTypeId ?? null,
+            start_at: startAt,
+            end_at: endAt,
+            hours: hours ?? null,
+            reason: reason ?? null,
+          },
+          ctx,
+          approverEmpId: approverIds[0],
+          step: 1,
+          totalSteps: approverIds.length,
+          event: "submitted",
+          actedByEmpId: self.id,
+        })
+      } catch (notifyErr) {
+        logger.warn({ err: notifyErr, requestId }, "POST /requests: submit notification failed")
+      }
+
       res.status(201).json({
         requestId,
+        approvalSource: chain.source,
+        notified,
         steps: steps.map((s) => ({
           stepOrder: s.step_order,
           approverEmpId: s.approver_emp_id,
@@ -427,7 +612,140 @@ requestsRouter.get(
   },
 )
 
-// Shared decision handler for approve/reject.
+/**
+ * GET /requests/pending-approvals — 「輪到我簽」的單，任何角色都可呼叫，只回
+ * 自己是**現行關卡**簽核者的 pending 單（HR 也只拿自己被指派的，整租戶清單走
+ * GET /requests）。主管端 ESS 簽核頁（/ess/approvals）與 EssHeader 的「待我簽核」
+ * 徽章用。每列附申請人姓名／工號／部門、假別名稱、附件數與關卡進度——非 HR
+ * 拿不到 GET /employees，這些名稱必須由這裡一併帶出。
+ */
+requestsRouter.get(
+  "/requests/pending-approvals",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
+    try {
+      const self = await resolveSelf(tenantId, userId)
+      if (!self) {
+        res.status(200).json({ requests: [] })
+        return
+      }
+
+      const { data: mySteps, error: stepErr } = await supabaseAdmin
+        .from("approval_steps")
+        .select("request_id, step_order")
+        .eq("tenant_id", tenantId)
+        .eq("approver_emp_id", self.id)
+        .eq("decision", "pending")
+      if (stepErr) {
+        next(new Error(`GET /requests/pending-approvals (steps): ${stepErr.message}`))
+        return
+      }
+      const stepByRequest = new Map<string, Set<number>>()
+      for (const s of mySteps ?? []) {
+        const set = stepByRequest.get(s.request_id as string) ?? new Set<number>()
+        set.add(s.step_order as number)
+        stepByRequest.set(s.request_id as string, set)
+      }
+      const candidateIds = Array.from(stepByRequest.keys())
+      if (candidateIds.length === 0) {
+        res.status(200).json({ requests: [] })
+        return
+      }
+
+      const { data: rows, error: rowErr } = await supabaseAdmin
+        .from("leave_requests")
+        .select(REQUEST_COLS)
+        .eq("tenant_id", tenantId)
+        .is("deleted_at", null)
+        .eq("status", "pending")
+        .in("id", candidateIds)
+        .order("created_at", { ascending: true })
+      if (rowErr) {
+        next(new Error(`GET /requests/pending-approvals (requests): ${rowErr.message}`))
+        return
+      }
+      const mine = (rows ?? []).filter((r) => stepByRequest.get(r.id as string)?.has(r.current_step as number))
+      if (mine.length === 0) {
+        res.status(200).json({ requests: [] })
+        return
+      }
+
+      const requestIds = mine.map((r) => r.id as string)
+      const employeeIds = Array.from(new Set(mine.map((r) => r.employee_id as string)))
+      const leaveTypeIds = Array.from(
+        new Set(mine.map((r) => r.leave_type_id as string | null).filter((v): v is string => !!v)),
+      )
+      const [emps, depts, lts, atts, allSteps] = await Promise.all([
+        supabaseAdmin.from("employees").select("id, name, emp_no, dept_id").eq("tenant_id", tenantId).in("id", employeeIds),
+        supabaseAdmin.from("departments").select("id, name").eq("tenant_id", tenantId),
+        leaveTypeIds.length > 0
+          ? supabaseAdmin.from("leave_types").select("id, name").eq("tenant_id", tenantId).in("id", leaveTypeIds)
+          : Promise.resolve({ data: [] as Array<Record<string, unknown>>, error: null }),
+        supabaseAdmin.from("request_attachments").select("request_id").eq("tenant_id", tenantId).in("request_id", requestIds),
+        supabaseAdmin.from("approval_steps").select("request_id, step_order").eq("tenant_id", tenantId).in("request_id", requestIds),
+      ])
+      for (const r of [emps, depts, lts, atts, allSteps]) {
+        if (r.error) {
+          next(new Error(`GET /requests/pending-approvals (enrich): ${r.error.message}`))
+          return
+        }
+      }
+      const empById = new Map((emps.data ?? []).map((e) => [e.id as string, e]))
+      const deptName = new Map((depts.data ?? []).map((d) => [d.id as string, d.name as string]))
+      const ltName = new Map((lts.data ?? []).map((t) => [t.id as string, t.name as string]))
+      const attachmentCount = new Map<string, number>()
+      for (const a of atts.data ?? []) {
+        const id = a.request_id as string
+        attachmentCount.set(id, (attachmentCount.get(id) ?? 0) + 1)
+      }
+      const totalSteps = new Map<string, number>()
+      for (const s of allSteps.data ?? []) {
+        const id = s.request_id as string
+        totalSteps.set(id, Math.max(totalSteps.get(id) ?? 0, s.step_order as number))
+      }
+
+      res.status(200).json({
+        requests: mine.map((r) => {
+          const emp = empById.get(r.employee_id as string)
+          return {
+            ...r,
+            current_approver_emp_id: self.id,
+            employee_name: (emp?.name as string | null) ?? null,
+            employee_emp_no: (emp?.emp_no as string | null) ?? null,
+            department_name: emp?.dept_id ? (deptName.get(emp.dept_id as string) ?? null) : null,
+            leave_type_name: r.leave_type_id ? (ltName.get(r.leave_type_id as string) ?? null) : null,
+            attachment_count: attachmentCount.get(r.id as string) ?? 0,
+            total_steps: totalSteps.get(r.id as string) ?? (r.current_step as number),
+          }
+        }),
+      })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// Shared decision handler for the single approve/reject endpoints. Delegates to
+// decideOneRequest — the same engine the batch endpoint uses — so the three exits
+// (reject / advance / final approve) post the same notifications and write the
+// same acted_by_emp_id audit column regardless of entry point. HR/platform
+// admins may act in place of the current approver (代簽); approval_steps.
+// acted_by_emp_id then records the HR, not the nominal approver.
+const DECISION_ERROR_STATUS: Record<string, number> = {
+  not_found: 404,
+  not_pending: 409,
+  current_step_not_found: 409,
+  not_current_approver: 403,
+  attachment_required: 409,
+}
+
 async function decide(
   action: "approve" | "reject",
   req: Request,
@@ -440,13 +758,12 @@ async function decide(
     res.status(401).json({ error: "unauthorized" })
     return
   }
-  const requestId = req.params.id
+  const requestId = req.params.id as string
   const parsed = decisionSchema.safeParse(req.body)
   if (!parsed.success) {
     res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
     return
   }
-  const { comment } = parsed.data
 
   try {
     const self = await resolveSelf(tenantId, userId)
@@ -455,136 +772,24 @@ async function decide(
       return
     }
 
-    // Load the request (tenant-scoped). We pull the ledger-relevant fields too
-    // (kind/leave_type_id/hours/start_at/end_at/employee_id) so a final approval
-    // can post the comp-time / leave-balance effects without a second read.
-    const { data: lr, error: lrErr } = await supabaseAdmin
-      .from("leave_requests")
-      .select(
-        "id, status, current_step, employee_id, kind, leave_type_id, hours, start_at, end_at, payout, advance_requested, segments, reason",
-      )
-      .eq("tenant_id", tenantId)
-      .is("deleted_at", null)
-      .eq("id", requestId)
-      .maybeSingle()
-    if (lrErr) {
-      next(new Error(`POST /requests/${requestId}/${action} (load): ${lrErr.message}`))
-      return
-    }
-    if (!lr) {
-      res.status(404).json({ error: "not_found" })
-      return
-    }
-    if (lr.status !== "pending") {
-      res.status(409).json({ error: "not_pending" })
-      return
-    }
-
-    // Find the current step and verify the caller is its approver.
-    const { data: step, error: stepErr } = await supabaseAdmin
-      .from("approval_steps")
-      .select("id, approver_emp_id, step_order")
-      .eq("tenant_id", tenantId)
-      .eq("request_id", requestId)
-      .eq("step_order", lr.current_step)
-      .maybeSingle()
-    if (stepErr) {
-      next(new Error(`POST /requests/${requestId}/${action} (step): ${stepErr.message}`))
-      return
-    }
-    if (!step || step.approver_emp_id !== self.id) {
-      // Not the current approver (or no such step) → forbidden.
-      res.status(403).json({ error: "not_current_approver" })
-      return
-    }
-
-    const actedAt = new Date().toISOString()
-
-    if (action === "reject") {
-      const { error: upStepErr } = await supabaseAdmin
-        .from("approval_steps")
-        .update({ decision: "rejected", comment: comment ?? null, acted_at: actedAt })
-        .eq("id", step.id)
-      if (upStepErr) {
-        next(new Error(`POST /requests/${requestId}/reject (step): ${upStepErr.message}`))
-        return
-      }
-      const { error: upReqErr } = await supabaseAdmin
-        .from("leave_requests")
-        .update({ status: "rejected" })
-        .eq("id", requestId)
-      if (upReqErr) {
-        next(new Error(`POST /requests/${requestId}/reject (request): ${upReqErr.message}`))
-        return
-      }
-      res.status(200).json({ status: "rejected", currentStep: lr.current_step })
-      return
-    }
-
-    // approve: mark this step approved.
-    const { error: upStepErr } = await supabaseAdmin
-      .from("approval_steps")
-      .update({ decision: "approved", comment: comment ?? null, acted_at: actedAt })
-      .eq("id", step.id)
-    if (upStepErr) {
-      next(new Error(`POST /requests/${requestId}/approve (step): ${upStepErr.message}`))
-      return
-    }
-
-    // Is there a next step?
-    const { count, error: cntErr } = await supabaseAdmin
-      .from("approval_steps")
-      .select("id", { count: "exact", head: true })
-      .eq("tenant_id", tenantId)
-      .eq("request_id", requestId)
-      .gt("step_order", lr.current_step)
-    if (cntErr) {
-      next(new Error(`POST /requests/${requestId}/approve (next): ${cntErr.message}`))
-      return
-    }
-
-    if ((count ?? 0) > 0) {
-      // Advance to the next step; request stays pending.
-      const nextStep = (lr.current_step as number) + 1
-      const { error: upReqErr } = await supabaseAdmin
-        .from("leave_requests")
-        .update({ current_step: nextStep })
-        .eq("id", requestId)
-      if (upReqErr) {
-        next(new Error(`POST /requests/${requestId}/approve (advance): ${upReqErr.message}`))
-        return
-      }
-      res.status(200).json({ status: "pending", currentStep: nextStep })
-      return
-    }
-
-    // Last step approved → request approved.
-    const { error: upReqErr } = await supabaseAdmin
-      .from("leave_requests")
-      .update({ status: "approved" })
-      .eq("id", requestId)
-    if (upReqErr) {
-      next(new Error(`POST /requests/${requestId}/approve (final): ${upReqErr.message}`))
-      return
-    }
-
-    // Final approval side-effects: debit leave balance / credit comp-time.
-    // Best-effort — applyApprovalEffects swallows its own errors so a ledger
-    // hiccup can never undo the approval the caller just succeeded at.
-    await applyApprovalEffects(supabaseAdmin, tenantId, {
-      id: lr.id as string,
-      employee_id: lr.employee_id as string,
-      kind: lr.kind as string,
-      leave_type_id: (lr.leave_type_id as string | null) ?? null,
-      hours: lr.hours as string | number | null,
-      start_at: lr.start_at as string,
-      end_at: lr.end_at as string,
-      payout: (lr.payout as string | null) ?? null,
-      segments: (lr.segments as Array<Record<string, unknown>> | null) ?? null,
-      reason: (lr.reason as string | null) ?? null,
+    const outcome = await decideOneRequest({
+      action,
+      tenantId,
+      requestId,
+      actor: self,
+      comment: parsed.data.comment,
+      allowHrOverride: true,
     })
-
-    res.status(200).json({ status: "approved", currentStep: lr.current_step })
+    if (!outcome.ok) {
+      const status = DECISION_ERROR_STATUS[outcome.error]
+      if (status) {
+        res.status(status).json({ error: outcome.error })
+        return
+      }
+      next(new Error(`POST /requests/${requestId}/${action}: ${outcome.error}`))
+      return
+    }
+    res.status(200).json({ status: outcome.status, currentStep: outcome.currentStep, notified: outcome.notified ?? 0 })
   } catch (err) {
     next(err)
   }
@@ -593,8 +798,26 @@ async function decide(
 type DecisionActor = { id: string; role: string }
 
 type DecisionOutcome =
-  | { ok: true; id: string; status: "pending" | "approved" | "rejected"; currentStep: number }
+  | { ok: true; id: string; status: "pending" | "approved" | "rejected"; currentStep: number; notified?: number }
   | { ok: false; id: string; error: string }
+
+/** 寫簽核關卡結果；acted_by_emp_id 記「實際按下核准／駁回的人」（HR 代簽時是 HR）。
+ *  欄位尚未套用（migration 0042）時退回不寫該欄，不擋簽核。回錯誤訊息或 null。 */
+async function markStep(
+  stepId: string,
+  patch: Record<string, unknown>,
+  actedByEmpId: string,
+): Promise<string | null> {
+  const { error } = await supabaseAdmin
+    .from("approval_steps")
+    .update({ ...patch, acted_by_emp_id: actedByEmpId })
+    .eq("id", stepId)
+  if (!error) return null
+  if (!isMissingColumnError(error)) return error.message
+  warnSchemaGapOnce("approval_steps.acted_by_emp_id", error)
+  const retry = await supabaseAdmin.from("approval_steps").update(patch).eq("id", stepId)
+  return retry.error ? retry.error.message : null
+}
 
 async function decideOneRequest(params: {
   action: "approve" | "reject"
@@ -632,14 +855,42 @@ async function decideOneRequest(params: {
     return { ok: false, id: requestId, error: "not_current_approver" }
   }
 
+  // 通知內文（申請人／假別）與「附件必要」檢查共用的上下文。
+  let ctx: RequestContext
+  try {
+    ctx = await loadRequestContext(tenantId, lr.employee_id as string, (lr.leave_type_id as string | null) ?? null)
+  } catch (err) {
+    return { ok: false, id: requestId, error: err instanceof Error ? err.message : "request_context_failed" }
+  }
+
+  // 該假別要求附件（leave_types.requires_attachment）而這張單一個附件都沒有 →
+  // 不准核准（駁回不受此限）。欄位尚未套用時 requiresAttachment 恆為 false。
+  if (action === "approve" && lr.kind === "leave" && ctx.requiresAttachment) {
+    const { count, error: attErr } = await supabaseAdmin
+      .from("request_attachments")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId)
+      .eq("request_id", requestId)
+    if (attErr) return { ok: false, id: requestId, error: attErr.message }
+    if ((count ?? 0) === 0) return { ok: false, id: requestId, error: "attachment_required" }
+  }
+
+  const notice: ApprovalNoticeRequest = {
+    id: lr.id as string,
+    kind: lr.kind as string,
+    employee_id: lr.employee_id as string,
+    leave_type_id: (lr.leave_type_id as string | null) ?? null,
+    start_at: lr.start_at as string,
+    end_at: lr.end_at as string,
+    hours: lr.hours ?? null,
+    reason: (lr.reason as string | null) ?? null,
+  }
+  const currentStep = lr.current_step as number
   const actedAt = new Date().toISOString()
 
   if (action === "reject") {
-    const { error: upStepErr } = await supabaseAdmin
-      .from("approval_steps")
-      .update({ decision: "rejected", comment: comment ?? null, acted_at: actedAt })
-      .eq("id", step.id)
-    if (upStepErr) return { ok: false, id: requestId, error: upStepErr.message }
+    const stepFail = await markStep(step.id as string, { decision: "rejected", comment: comment ?? null, acted_at: actedAt }, actor.id)
+    if (stepFail) return { ok: false, id: requestId, error: stepFail }
 
     const { error: upReqErr } = await supabaseAdmin
       .from("leave_requests")
@@ -647,32 +898,48 @@ async function decideOneRequest(params: {
       .eq("tenant_id", tenantId)
       .eq("id", requestId)
     if (upReqErr) return { ok: false, id: requestId, error: upReqErr.message }
-    return { ok: true, id: requestId, status: "rejected", currentStep: lr.current_step as number }
+
+    const notified = await notifyApplicant({ tenantId, lr: notice, ctx, event: "rejected", step: currentStep, actedByEmpId: actor.id, comment })
+    return { ok: true, id: requestId, status: "rejected", currentStep, notified }
   }
 
-  const { error: upStepErr } = await supabaseAdmin
-    .from("approval_steps")
-    .update({ decision: "approved", comment: comment ?? null, acted_at: actedAt })
-    .eq("id", step.id)
-  if (upStepErr) return { ok: false, id: requestId, error: upStepErr.message }
+  const stepFail = await markStep(step.id as string, { decision: "approved", comment: comment ?? null, acted_at: actedAt }, actor.id)
+  if (stepFail) return { ok: false, id: requestId, error: stepFail }
 
-  const { count, error: cntErr } = await supabaseAdmin
+  const { data: laterSteps, error: cntErr } = await supabaseAdmin
     .from("approval_steps")
-    .select("id", { count: "exact", head: true })
+    .select("step_order, approver_emp_id")
     .eq("tenant_id", tenantId)
     .eq("request_id", requestId)
-    .gt("step_order", lr.current_step)
+    .gt("step_order", currentStep)
+    .order("step_order", { ascending: true })
   if (cntErr) return { ok: false, id: requestId, error: cntErr.message }
 
-  if ((count ?? 0) > 0) {
-    const nextStep = (lr.current_step as number) + 1
+  if ((laterSteps ?? []).length > 0) {
+    // 推進到下一關；單子仍是 pending。通知下一關簽核者（內文與送出時相同）。
+    const nextStep = currentStep + 1
     const { error: upReqErr } = await supabaseAdmin
       .from("leave_requests")
       .update({ current_step: nextStep })
       .eq("tenant_id", tenantId)
       .eq("id", requestId)
     if (upReqErr) return { ok: false, id: requestId, error: upReqErr.message }
-    return { ok: true, id: requestId, status: "pending", currentStep: nextStep }
+
+    const nextApprover = (laterSteps ?? []).find((s) => (s.step_order as number) === nextStep)
+    const totalSteps = currentStep + (laterSteps ?? []).length
+    const notified = nextApprover
+      ? await notifyStepApprover({
+          tenantId,
+          lr: notice,
+          ctx,
+          approverEmpId: nextApprover.approver_emp_id as string,
+          step: nextStep,
+          totalSteps,
+          event: "advanced",
+          actedByEmpId: actor.id,
+        })
+      : 0
+    return { ok: true, id: requestId, status: "pending", currentStep: nextStep, notified }
   }
 
   const { error: upReqErr } = await supabaseAdmin
@@ -682,6 +949,9 @@ async function decideOneRequest(params: {
     .eq("id", requestId)
   if (upReqErr) return { ok: false, id: requestId, error: upReqErr.message }
 
+  // Final approval side-effects: debit leave balance / credit comp-time.
+  // Best-effort — applyApprovalEffects swallows its own errors so a ledger
+  // hiccup can never undo the approval the caller just succeeded at.
   await applyApprovalEffects(supabaseAdmin, tenantId, {
     id: lr.id as string,
     employee_id: lr.employee_id as string,
@@ -695,7 +965,8 @@ async function decideOneRequest(params: {
     reason: (lr.reason as string | null) ?? null,
   })
 
-  return { ok: true, id: requestId, status: "approved", currentStep: lr.current_step as number }
+  const notified = await notifyApplicant({ tenantId, lr: notice, ctx, event: "approved", step: currentStep, actedByEmpId: actor.id, comment })
+  return { ok: true, id: requestId, status: "approved", currentStep, notified }
 }
 
 /**

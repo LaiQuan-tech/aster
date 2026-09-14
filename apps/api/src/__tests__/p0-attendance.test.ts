@@ -68,6 +68,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("notifications").delete().eq("tenant_id", tid) // 送單／簽核通知（FK → employees）
     await supabaseAdmin.from("attendance_days").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("punch_records").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("approval_steps").delete().eq("tenant_id", tid)

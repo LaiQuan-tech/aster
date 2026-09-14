@@ -137,6 +137,10 @@ afterAll(async () => {
   // The ledger rows are written by approval side-effects (a final approval of a
   // leave/OT request) and reference leave_requests/leave_types/employees, so
   // they must be cleared before those parents.
+  // 送單／簽核會寫 notifications（FK → employees），要先於 employees 清掉。
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("notifications").delete().eq("tenant_id", tid)
+  }
   for (const tid of createdTenantIds) {
     await supabaseAdmin.from("comp_time_ledger").delete().eq("tenant_id", tid)
   }

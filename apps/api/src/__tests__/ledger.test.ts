@@ -163,6 +163,10 @@ beforeAll(async () => {
 afterAll(async () => {
   // comp_time_ledger → leave_balances → approval_steps → leave_requests →
   // approval_flows → leave_types → rule_configs → employees → tenants → auth users.
+  // 送單／簽核會寫 notifications（FK → employees），要先於 employees 清掉。
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("notifications").delete().eq("tenant_id", tid)
+  }
   for (const tid of createdTenantIds) {
     await supabaseAdmin.from("comp_time_ledger").delete().eq("tenant_id", tid)
   }
