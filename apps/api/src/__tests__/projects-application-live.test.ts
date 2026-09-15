@@ -146,6 +146,11 @@ describe("P3-1 預先取號", () => {
     expect(res.status).toBe(201)
     reserved = res.body.projects
     expect(reserved.map((p) => p.code)).toEqual([3, 4, 5, 6, 7].map((n) => `AT-${ROC}-00${n}`))
+
+    // A5 修法：預先取號要跟正式建案一樣補租戶今天，不能等填真名才補開案日期——
+    // 不然填真名之前，申請單抬頭與年度總表都會退回用（其實不存在的）建立日。
+    const got = await asAdmin(request(app).get(`/projects/${reserved[0].id}`))
+    expect(got.body.project.openedOn).toBe(taipeiToday())
   })
 
   it("count 超過 20 或非 HR 都擋", async () => {
@@ -175,6 +180,19 @@ describe("P3-1 預先取號", () => {
     expect(got.body.project.code).toBe(`AT-${ROC}-003`)
     const list = await asAdmin(request(app).get("/projects"))
     expect(list.body.projects.map((p: { id: string }) => p.id)).toContain(reserved[0].id)
+
+    // 詳情頁的「開案日期」欄位（B4）：PATCH openedOn 早就支援，缺的是 UI——
+    // 這裡直接打 API 驗 PATCH → GET 一致，事後補 K 單的案子才改得了這欄。
+    // 改完隨即還原成今天：這個值也是年度總表的建立月份分區依據
+    // （project-application-store.ts buildAnnualTable），改成舊日期會讓這筆
+    // 跑進更早的月份區塊、排到 P3-6 的總表最前面，弄壞後面「第一列是 001」
+    // 那些不相干的斷言——這裡只驗 PATCH／GET 這條路本身，不該留副作用。
+    const patched = await asAdmin(request(app).patch(`/projects/${reserved[0].id}`)).send({ openedOn: "2024-05-20" })
+    expect(patched.status).toBe(200)
+    const got2 = await asAdmin(request(app).get(`/projects/${reserved[0].id}`))
+    expect(got2.body.project.openedOn).toBe("2024-05-20")
+    const restored = await asAdmin(request(app).patch(`/projects/${reserved[0].id}`)).send({ openedOn: taipeiToday() })
+    expect(restored.status).toBe(200)
   })
 
   it("取號之後建案繼續往下編（008），不會回頭用到保留的號", async () => {

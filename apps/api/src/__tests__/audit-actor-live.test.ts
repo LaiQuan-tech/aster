@@ -114,6 +114,8 @@ describe.skipIf(!ready)("C1 稽核記操作者 — live", () => {
 
   afterAll(async () => {
     for (const tid of createdTenantIds) {
+      await supabaseAdmin.from("expense_claims").delete().eq("tenant_id", tid)
+      await supabaseAdmin.from("expense_categories").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("tenants").delete().eq("id", tid)
@@ -185,6 +187,28 @@ describe.skipIf(!ready)("C1 稽核記操作者 — live", () => {
       expect(appRows![0].actor_emp_id).toBe(hrEmpId)
       expect(appRows![0].context).toBe("POST /employees — 建立員工帳號")
       expect((appRows![0].new_row as Record<string, unknown>).email).toBe(c.email)
+    })
+
+    it("員工自助路由的私有 resolveSelf 複本也補了 setActor（POST /expenses 建單，非 middleware/scope.ts 那條路）→ trigger 列 actor_emp_id＝該員工本人", async () => {
+      const catRes = await as(adminToken, request(app).put("/expense-categories")).send({
+        code: `AUDIT-${stamp}`,
+        name: `稽核測試類別-${stamp}`,
+        nature: "reimbursement",
+      })
+      expect(catRes.status).toBe(200)
+      const categoryId = catRes.body.category.id as string
+
+      const claimRes = await as(empToken, request(app).post("/expenses")).send({
+        categoryId,
+        amount: 123,
+        incurredOn: "2026-02-10",
+      })
+      expect(claimRes.status).toBe(201)
+
+      const log = await latestTriggerLog("expense_claims", claimRes.body.id as string)
+      expect(log.action).toBe("INSERT")
+      expect(log.actor_emp_id).toBe(targetId)
+      expect(log.context).toBe("POST /expenses")
     })
   })
 

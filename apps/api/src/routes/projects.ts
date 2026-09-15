@@ -648,6 +648,9 @@ projectsRouter.post(
     }
     try {
       const year = await taipeiYear(tenantId)
+      // A5：預先取號跟正式建案一樣要補租戶今天，不然填真名轉正式案子後
+      // opened_on 永遠是 null——申請單抬頭與年度總表會退回用建立日。
+      const openedOn = await tenantToday(tenantId)
       const nowIso = new Date().toISOString()
       const projects: Array<{ id: string; code: string }> = []
       for (let i = 0; i < parsed.data.count; i++) {
@@ -657,6 +660,7 @@ projectsRouter.post(
           fiscal_year: year,
           status: "active",
           kind: "main",
+          opened_on: openedOn,
           reserved_at: nowIso,
           design_scope: [],
           engineers: {},

@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { setActor } from "../lib/request-context.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { buildAttendanceWorkbook, workbookToBuffer, toRocYear } from "../lib/xlsx/index.js"
 import { getSheetView, listSheets, SheetError } from "../services/attendance-sheets.js"
@@ -64,6 +65,7 @@ async function resolveSelf(tenantId: string, userId: string): Promise<{ id: stri
     .eq("user_id", userId)
     .maybeSingle()
   if (error) throw new Error(`exports (resolve self): ${error.message}`)
+  if (data) setActor(data.id as string) // 稽核：本請求後續 DB 寫入由 trigger 記 actor
   return data ? { id: data.id as string, role: data.role as string } : null
 }
 

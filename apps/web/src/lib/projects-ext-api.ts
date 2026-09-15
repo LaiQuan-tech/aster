@@ -579,6 +579,8 @@ export interface UpdateProjectExtBody {
   archived?: boolean
   startsOn?: string | null
   endsOn?: string | null
+  /** 開案日期（A5）。省略＝不動；帶 null 會清空。 */
+  openedOn?: string | null
   deptId?: string | null
   leadEmpId?: string | null
   shareMode?: ShareMode

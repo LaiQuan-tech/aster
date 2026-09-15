@@ -105,6 +105,21 @@ export function ProjectSettingsCard({ project, depts, emps, isPool, saveProjectF
           </p>
         </div>
         <div>
+          <label className={labelCls}>開案日期</label>
+          <input
+            className={inputCls}
+            type="date"
+            defaultValue={project.openedOn ?? ""}
+            onBlur={(e) => {
+              const v = e.target.value || null;
+              if (v !== (project.openedOn ?? null)) saveProjectField({ openedOn: v });
+            }}
+          />
+          <p className="mt-1 text-xs text-gray-400">
+            申請單抬頭與年度總表的建立日期依據；預先取號的舊案子若這裡是空的可手動補。
+          </p>
+        </div>
+        <div>
           <label className={labelCls}>預定起始日</label>
           <input
             className={inputCls}

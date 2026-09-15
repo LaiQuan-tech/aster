@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { setActor } from "../lib/request-context.js"
 
 export const leaveBalancesRouter = Router()
 
@@ -37,6 +38,7 @@ async function resolveSelf(
     .eq("user_id", userId)
     .maybeSingle()
   if (error) throw new Error(`resolve self employee: ${error.message}`)
+  if (data) setActor(data.id as string) // 稽核：本請求後續 DB 寫入由 trigger 記 actor
   return data ? { id: data.id as string, role: data.role as string } : null
 }
 
