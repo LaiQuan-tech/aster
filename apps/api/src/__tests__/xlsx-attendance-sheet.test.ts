@@ -210,6 +210,7 @@ const view: SheetView = {
   money,
   anomalyCount: { error: 1, warn: 1, info: 0 },
   frozen: true,
+  ruleConfigVersion: 1,
 }
 
 const OPTS = {
@@ -399,6 +400,7 @@ function minimalView(id: string, employeeName: string): SheetView {
     money: null,
     anomalyCount: { error: 0, warn: 0, info: 0 },
     frozen: false,
+    ruleConfigVersion: null,
   }
 }
 

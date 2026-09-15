@@ -1406,6 +1406,7 @@ function liveHeader(sheet: SheetRow): Pick<
   | "returnReason"
   | "computedAt"
   | "frozen"
+  | "ruleConfigVersion"
 > {
   return {
     status: sheet.status,
@@ -1418,6 +1419,12 @@ function liveHeader(sheet: SheetRow): Pick<
     returnReason: sheet.return_reason,
     computedAt: sheet.computed_at,
     frozen: isFrozenStatus(sheet.status),
+    // C4：兩處呼叫端（composeLiveView 的即時視圖、sheetViewFromRow 的凍結快照
+    // 視圖）都靠這個共用 header 帶出去，直接讀 DB 欄位——不讀凍結快照裡的
+    // snap.ruleConfigVersion，因為 rule_config_version 這個 row 欄位在 generate/
+    // recompute 當下就已經寫定，凍結後也不會再變，兩處用同一個來源比較不會
+    // 兩邊各自實作出不一致的結果。
+    ruleConfigVersion: sheet.rule_config_version,
   }
 }
 

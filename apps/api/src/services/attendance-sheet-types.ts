@@ -144,6 +144,13 @@ export interface SheetView {
   anomalyCount: { error: number; warn: number; info: number }
   /** True once status is 'locked' — UI should render read-only. */
   frozen: boolean
+  /**
+   * C4：這張月表被計算/凍結當下實際套用的規則版本號（來自 rule_configs.version，
+   * 依 effective_from 依「這張表的 period」選版——不是「今天」的版本）。凍結
+   * 後永久不變；尚未算過一次的全新草稿可能是 null。前端顯示「本月適用規則」
+   * 要用這個權威值，不要自己依 period 重新推導 GET /rule-config/versions。
+   */
+  ruleConfigVersion: number | null
 }
 
 /**
