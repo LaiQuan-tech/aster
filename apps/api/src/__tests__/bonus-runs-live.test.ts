@@ -331,7 +331,7 @@ describe.skipIf(!migrated)("獎金季發放批次 — live", () => {
     expect(res.headers["content-type"]).toContain("spreadsheetml")
     expect(decodeURIComponent(res.headers["content-disposition"] ?? "")).toContain(`獎金季發放-${Q2}.xlsx`)
     const wb = new ExcelJS.Workbook()
-    await wb.xlsx.load(res.body as Buffer)
+    await wb.xlsx.load(new Uint8Array(res.body as Buffer) as unknown as ExcelJS.Buffer)
     const ws = wb.getWorksheet(Q2)
     expect(ws).toBeTruthy()
     expect(ws!.rowCount).toBe(3 + 2 + 1)
