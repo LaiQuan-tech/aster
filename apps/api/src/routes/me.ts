@@ -20,15 +20,27 @@ async function resolveEssTabs(tenantId: string, employmentType: string | null): 
   return null
 }
 
+/** B7：是否為任一部門的 manager_emp_id（前台據此判斷要不要顯示「待我簽核」等主管功能）。 */
+async function isDeptManager(tenantId: string, empId: string): Promise<boolean> {
+  const { count, error } = await supabaseAdmin
+    .from("departments")
+    .select("id", { count: "exact", head: true })
+    .eq("tenant_id", tenantId)
+    .eq("manager_emp_id", empId)
+  if (error) throw new Error(`isDeptManager: ${error.message}`)
+  return (count ?? 0) > 0
+}
+
 /**
  * GET /me — the authenticated caller's own employee profile in their tenant.
  *
  * Resolves the employees row from req.auth.userId + res.locals.tenantId (both
  * derived from the JWT, so a user can only ever read themselves). Returns
  * { id, name, role, deptId, empNo, status, email, mustChangePassword,
- *   employmentType, essTabs } — email comes from the auth user, the rest from
- * the employees row. 404 when the token's user has no employee row in this
- * tenant (e.g. a platform operator with no staff record).
+ *   employmentType, essTabs, isManager } — email comes from the auth user,
+ * the rest from the employees row (isManager 另查 departments，見 isDeptManager)．
+ * 404 when the token's user has no employee row in this tenant (e.g. a
+ * platform operator with no staff record).
  *
  * `mustChangePassword`：HR 配發暫時密碼時為 true，前端 AuthGate 據此把人導去
  * /auth/set-password?mode=change。`essTabs`：由 `tenants.features.essTabs[employment_type]`
@@ -78,6 +90,7 @@ meRouter.get(
         mustChangePassword: data.must_change_password === true,
         employmentType,
         essTabs: await resolveEssTabs(tenantId, employmentType),
+        isManager: await isDeptManager(tenantId, data.id as string),
       })
     } catch (err) {
       next(err)

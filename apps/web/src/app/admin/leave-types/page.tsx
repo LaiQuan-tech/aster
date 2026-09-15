@@ -53,6 +53,7 @@ export default function LeaveTypesPage() {
   const [paid, setPaid] = useState(true);
   const [special, setSpecial] = useState(false);
   const [deductRate, setDeductRate] = useState("");
+  const [requiresAttachment, setRequiresAttachment] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -62,6 +63,7 @@ export default function LeaveTypesPage() {
   const [editPaid, setEditPaid] = useState(true);
   const [editSpecial, setEditSpecial] = useState(false);
   const [editDeductRate, setEditDeductRate] = useState("");
+  const [editRequiresAttachment, setEditRequiresAttachment] = useState(false);
 
   // approval flows: kind -> selected approver emp ids (ordered by employee list) + 簽核模式
   const [flowDraft, setFlowDraft] = useState<Record<string, string[]>>({});
@@ -130,12 +132,14 @@ export default function LeaveTypesPage() {
         paid,
         special,
         deductRate: deductRate.trim() === "" ? null : Number(deductRate),
+        requiresAttachment,
       });
       setCode("");
       setName("");
       setPaid(true);
       setSpecial(false);
       setDeductRate("");
+      setRequiresAttachment(false);
       await load();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "新增失敗（代碼可能重複）");
@@ -152,6 +156,7 @@ export default function LeaveTypesPage() {
         paid: editPaid,
         special: editSpecial,
         deductRate: editDeductRate.trim() === "" ? null : Number(editDeductRate),
+        requiresAttachment: editRequiresAttachment,
       });
       setEditingId(null);
       await load();
@@ -264,6 +269,14 @@ export default function LeaveTypesPage() {
                 <input type="checkbox" checked={special} onChange={(e) => setSpecial(e.target.checked)} />
                 特殊假別
               </label>
+              <label className="flex items-center gap-2 pb-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={requiresAttachment}
+                  onChange={(e) => setRequiresAttachment(e.target.checked)}
+                />
+                必附憑證
+              </label>
             </div>
           </div>
           {formError && <ErrorText>{formError}</ErrorText>}
@@ -322,6 +335,14 @@ export default function LeaveTypesPage() {
                         />
                         特殊假別
                       </label>
+                      <label className="flex shrink-0 items-center gap-1 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={editRequiresAttachment}
+                          onChange={(e) => setEditRequiresAttachment(e.target.checked)}
+                        />
+                        必附憑證
+                      </label>
                     </div>
                     <div className="flex shrink-0 gap-2">
                       <button onClick={() => saveEdit(lt.id)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
@@ -345,6 +366,9 @@ export default function LeaveTypesPage() {
                       {lt.special && (
                         <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-700">特殊假別</span>
                       )}
+                      {lt.requiresAttachment && (
+                        <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700">必附憑證</span>
+                      )}
                       <span
                         className="rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700"
                         title={lt.deduct_rate !== null && lt.deduct_rate !== undefined ? "已明確設定" : "依「支薪」推算"}
@@ -360,6 +384,7 @@ export default function LeaveTypesPage() {
                           setEditPaid(lt.paid);
                           setEditSpecial(lt.special);
                           setEditDeductRate(lt.deduct_rate ?? "");
+                          setEditRequiresAttachment(lt.requiresAttachment ?? false);
                         }}
                         className="text-sm text-gray-600 hover:underline"
                       >

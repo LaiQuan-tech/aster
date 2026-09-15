@@ -17,6 +17,9 @@ const createSchema = z.object({
   paid: z.boolean().optional(),
   special: z.boolean().optional(),
   deductRate: deductRateSchema.optional(),
+  // B7：該假別是否要求附件（例如病假須附診所收據）；requests.ts 核准時已在檢查
+  // leave_types.requires_attachment，這裡補上讓 HR 能經 API 設定它。
+  requiresAttachment: z.boolean().optional(),
 })
 
 // PATCH allows any subset; at least one field must be present.
@@ -27,6 +30,7 @@ const updateSchema = z
     paid: z.boolean().optional(),
     special: z.boolean().optional(),
     deductRate: deductRateSchema.optional(),
+    requiresAttachment: z.boolean().optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 
@@ -38,7 +42,7 @@ const listQuerySchema = z.object({
     .optional(),
 })
 
-const SELECT_COLS = "id, tenant_id, code, name, paid, special, deduct_rate, created_at"
+const SELECT_COLS = "id, tenant_id, code, name, paid, special, deduct_rate, requires_attachment, created_at"
 
 /**
  * Leave-type routes are HR-admin-only and tenant-scoped. The tenant boundary is
@@ -74,7 +78,12 @@ leaveTypesRouter.get(
         next(new Error(`GET /leave-types: ${error.message}`))
         return
       }
-      res.status(200).json({ leaveTypes: data ?? [] })
+      // requires_attachment (DB) → requiresAttachment (API)，其餘欄位維持原樣。
+      const leaveTypes = (data ?? []).map((row) => {
+        const { requires_attachment, ...rest } = row as Record<string, unknown>
+        return { ...rest, requiresAttachment: requires_attachment === true }
+      })
+      res.status(200).json({ leaveTypes })
     } catch (err) {
       next(err)
     }
@@ -104,6 +113,7 @@ leaveTypesRouter.post(
           paid: parsed.data.paid ?? true,
           special: parsed.data.special ?? false,
           deduct_rate: parsed.data.deductRate ?? null,
+          requires_attachment: parsed.data.requiresAttachment ?? false,
         })
         .select("id")
         .single()
@@ -145,6 +155,7 @@ leaveTypesRouter.patch(
     if (parsed.data.paid !== undefined) patch.paid = parsed.data.paid
     if (parsed.data.special !== undefined) patch.special = parsed.data.special
     if (parsed.data.deductRate !== undefined) patch.deduct_rate = parsed.data.deductRate
+    if (parsed.data.requiresAttachment !== undefined) patch.requires_attachment = parsed.data.requiresAttachment
 
     try {
       const { data, error } = await supabaseAdmin

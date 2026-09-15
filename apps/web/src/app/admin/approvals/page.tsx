@@ -6,6 +6,7 @@ import {
   batchDecideRequests,
   getDepartments,
   getEmployees,
+  getRequestAttachments,
   getRequests,
   rejectRequest,
   approveRequest,
@@ -15,6 +16,8 @@ import {
   type RequestStatus,
   type Employee,
 } from "@/lib/admin-api";
+
+type RequestAttachment = { id: string; fileName: string; sizeBytes: number; contentType: string; url: string };
 
 const KIND_LABEL: Record<RequestKind, string> = {
   leave: "請假",
@@ -81,6 +84,11 @@ export default function ApprovalsPage() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // 附件清單：展開哪一張單 + 各單已抓到的附件（用 id 當 key 快取，避免重複打 API）
+  const [expandedAttachmentsId, setExpandedAttachmentsId] = useState<string | null>(null);
+  const [attachmentsById, setAttachmentsById] = useState<Record<string, RequestAttachment[]>>({});
+  const [attachmentsLoadingId, setAttachmentsLoadingId] = useState<string | null>(null);
+  const [attachmentsError, setAttachmentsError] = useState<Record<string, string>>({});
 
   const employeeById = useMemo(() => {
     const map = new Map<string, Employee>();
@@ -150,6 +158,33 @@ export default function ApprovalsPage() {
   function departmentLabel(employee: Employee | undefined) {
     if (!employee?.dept_id) return "—";
     return deptName.get(employee.dept_id) ?? "未命名單位";
+  }
+
+  /** 展開/收合附件清單；展開時才現拉 signed URL，並用 attachmentsById 快取。 */
+  async function toggleAttachments(requestId: string) {
+    if (expandedAttachmentsId === requestId) {
+      setExpandedAttachmentsId(null);
+      return;
+    }
+    setExpandedAttachmentsId(requestId);
+    if (attachmentsById[requestId]) return;
+    setAttachmentsLoadingId(requestId);
+    try {
+      const res = await getRequestAttachments(requestId);
+      setAttachmentsById((prev) => ({ ...prev, [requestId]: res.attachments }));
+      setAttachmentsError((prev) => {
+        const next = { ...prev };
+        delete next[requestId];
+        return next;
+      });
+    } catch (err) {
+      setAttachmentsError((prev) => ({
+        ...prev,
+        [requestId]: err instanceof Error ? err.message : "載入附件失敗",
+      }));
+    } finally {
+      setAttachmentsLoadingId((cur) => (cur === requestId ? null : cur));
+    }
   }
 
   async function decide(id: string, action: "approve" | "reject") {
@@ -302,6 +337,7 @@ export default function ApprovalsPage() {
                   <th className="py-2 pr-4">內容</th>
                   <th className="py-2 pr-4">狀態</th>
                   <th className="py-2 pr-4">目前關卡</th>
+                  <th className="py-2 pr-4">附件</th>
                   <th className="py-2">操作</th>
                 </tr>
               </thead>
@@ -346,6 +382,44 @@ export default function ApprovalsPage() {
                         <span className="rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-700">
                           第 {row.current_step} 關
                         </span>
+                      </td>
+                      <td className="py-3 pr-4">
+                        <button
+                          type="button"
+                          onClick={() => void toggleAttachments(row.id)}
+                          className="text-xs font-medium underline underline-offset-2"
+                          style={{ color: "var(--brand)" }}
+                        >
+                          {expandedAttachmentsId === row.id ? "收合附件" : "查看附件"}
+                        </button>
+                        {expandedAttachmentsId === row.id && (
+                          <div className="mt-1 max-w-[12rem]">
+                            {attachmentsLoadingId === row.id ? (
+                              <p className="text-xs text-gray-400">載入中…</p>
+                            ) : attachmentsError[row.id] ? (
+                              <p className="text-xs text-red-600">{attachmentsError[row.id]}</p>
+                            ) : (attachmentsById[row.id] ?? []).length === 0 ? (
+                              <p className="text-xs text-gray-400">無附件</p>
+                            ) : (
+                              <ul className="space-y-0.5">
+                                {(attachmentsById[row.id] ?? []).map((att) => (
+                                  <li key={att.id} className="truncate">
+                                    <a
+                                      href={att.url ?? "#"}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="text-xs underline"
+                                      style={{ color: "var(--brand)" }}
+                                      title={att.fileName}
+                                    >
+                                      {att.fileName}
+                                    </a>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3">
                         <div className="flex gap-2">

@@ -3,6 +3,7 @@ import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { managerOfEmployee } from "../middleware/scope.js"
 
 export const attachmentsRouter = Router()
 
@@ -18,8 +19,14 @@ const uploadSchema = z.object({
 })
 
 /**
- * Authorise the caller against a request: they must be its filer or an
- * HR/platform admin of the tenant. Returns the request row or null.
+ * Authorise the caller against a request (B7：附件對簽核者可見). ok when ANY of:
+ *   - HR/platform admin of the tenant
+ *   - the filer themself
+ *   - the caller has any approval_steps row on this request (any step_order /
+ *     decision — a former or current-step approver, incl. fixed-list mode)
+ *   - the caller is the filer's direct manager (managerOfEmployee), even if
+ *     not on the approval chain itself (e.g. fixed-list mode bypassed them)
+ * Returns the request row or null.
  */
 async function authorizeRequestAccess(
   tenantId: string,
@@ -46,14 +53,28 @@ async function authorizeRequestAccess(
   if (!lr) return { ok: false, notFound: true }
 
   const isHr = ["hr_admin", "platform_admin"].includes(me.role as string)
-  return { ok: isHr || lr.employee_id === me.id }
+  if (isHr || lr.employee_id === me.id) return { ok: true }
+
+  const { data: steps, error: stepsErr } = await supabaseAdmin
+    .from("approval_steps")
+    .select("approver_emp_id")
+    .eq("tenant_id", tenantId)
+    .eq("request_id", requestId)
+  if (stepsErr) throw new Error(`attachments authorize (steps): ${stepsErr.message}`)
+  if ((steps ?? []).some((s) => s.approver_emp_id === me.id)) return { ok: true }
+
+  const managerEmpId = await managerOfEmployee(tenantId, lr.employee_id as string)
+  if (managerEmpId === me.id) return { ok: true }
+
+  return { ok: false }
 }
 
 /**
- * POST /requests/:id/attachments — the filer (or HR) uploads one attachment
- * (base64 body). Enforces Apollo's limits: ≤3 files per request, ≤3MB each.
- * Binary goes to the private bucket at <tenant>/<request>/<uuid>-<name>; a
- * request_attachments row indexes it.
+ * POST /requests/:id/attachments — the filer, HR, an approver on this request,
+ * or the filer's direct manager uploads one attachment (base64 body; see
+ * authorizeRequestAccess above). Enforces Apollo's limits: ≤3 files per
+ * request, ≤3MB each. Binary goes to the private bucket at
+ * <tenant>/<request>/<uuid>-<name>; a request_attachments row indexes it.
  */
 attachmentsRouter.post(
   "/requests/:id/attachments",
@@ -148,7 +169,9 @@ attachmentsRouter.post(
 
 /**
  * GET /requests/:id/attachments — list the request's attachments with 1-hour
- * signed download URLs. Filer-or-HR only.
+ * signed download URLs. Visible to the filer, HR, any approver on this
+ * request's approval_steps, or the filer's direct manager (B7：主管簽核時
+ * 要看得到附件，含病假憑證) — see authorizeRequestAccess above.
  */
 attachmentsRouter.get(
   "/requests/:id/attachments",

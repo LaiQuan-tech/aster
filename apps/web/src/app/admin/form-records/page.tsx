@@ -9,6 +9,7 @@ import {
   getApprovalFlows,
   getDepartments,
   getEmployees,
+  getRequestAttachments,
   getRequests,
   remindRequest,
   type ApprovalFlow,
@@ -18,6 +19,8 @@ import {
   type RequestKind,
   type RequestStatus,
 } from "@/lib/admin-api";
+
+type RequestAttachment = { id: string; fileName: string; sizeBytes: number; contentType: string; url: string };
 
 const KIND_LABEL: Record<RequestKind, string> = {
   leave: "請假",
@@ -97,6 +100,11 @@ export default function FormRecordsPage() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  // 附件清單：展開哪一張單 + 各單已抓到的附件（用 id 當 key 快取，避免重複打 API）
+  const [expandedAttachmentsId, setExpandedAttachmentsId] = useState<string | null>(null);
+  const [attachmentsById, setAttachmentsById] = useState<Record<string, RequestAttachment[]>>({});
+  const [attachmentsLoadingId, setAttachmentsLoadingId] = useState<string | null>(null);
+  const [attachmentsError, setAttachmentsError] = useState<Record<string, string>>({});
 
   const employeeName = useMemo(() => {
     const map = new Map<string, string>();
@@ -314,6 +322,33 @@ export default function FormRecordsPage() {
     }
   }
 
+  /** 展開/收合附件清單；展開時才現拉 signed URL，並用 attachmentsById 快取。 */
+  async function toggleAttachments(requestId: string) {
+    if (expandedAttachmentsId === requestId) {
+      setExpandedAttachmentsId(null);
+      return;
+    }
+    setExpandedAttachmentsId(requestId);
+    if (attachmentsById[requestId]) return;
+    setAttachmentsLoadingId(requestId);
+    try {
+      const res = await getRequestAttachments(requestId);
+      setAttachmentsById((prev) => ({ ...prev, [requestId]: res.attachments }));
+      setAttachmentsError((prev) => {
+        const next = { ...prev };
+        delete next[requestId];
+        return next;
+      });
+    } catch (err) {
+      setAttachmentsError((prev) => ({
+        ...prev,
+        [requestId]: err instanceof Error ? err.message : "載入附件失敗",
+      }));
+    } finally {
+      setAttachmentsLoadingId((cur) => (cur === requestId ? null : cur));
+    }
+  }
+
   return (
     <>
       <PageHeader title="表單紀錄管理" desc="查詢、催簽、註銷與匯出請假、加班、補卡、公出/出差表單" />
@@ -443,6 +478,7 @@ export default function FormRecordsPage() {
                   <th className="py-2 pr-4">內容</th>
                   <th className="py-2 pr-4">目前簽核人</th>
                   <th className="py-2 pr-4">狀態</th>
+                  <th className="py-2 pr-4">附件</th>
                   <th className="py-2">管理</th>
                 </tr>
               </thead>
@@ -470,6 +506,44 @@ export default function FormRecordsPage() {
                       <span className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-700">
                         {STATUS_LABEL[record.status]}
                       </span>
+                    </td>
+                    <td className="py-3 pr-4">
+                      <button
+                        type="button"
+                        onClick={() => void toggleAttachments(record.id)}
+                        className="text-xs font-medium underline underline-offset-2"
+                        style={{ color: "var(--brand)" }}
+                      >
+                        {expandedAttachmentsId === record.id ? "收合附件" : "查看附件"}
+                      </button>
+                      {expandedAttachmentsId === record.id && (
+                        <div className="mt-1 max-w-[12rem]">
+                          {attachmentsLoadingId === record.id ? (
+                            <p className="text-xs text-gray-400">載入中…</p>
+                          ) : attachmentsError[record.id] ? (
+                            <p className="text-xs text-red-600">{attachmentsError[record.id]}</p>
+                          ) : (attachmentsById[record.id] ?? []).length === 0 ? (
+                            <p className="text-xs text-gray-400">無附件</p>
+                          ) : (
+                            <ul className="space-y-0.5">
+                              {(attachmentsById[record.id] ?? []).map((att) => (
+                                <li key={att.id} className="truncate">
+                                  <a
+                                    href={att.url ?? "#"}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-xs underline"
+                                    style={{ color: "var(--brand)" }}
+                                    title={att.fileName}
+                                  >
+                                    {att.fileName}
+                                  </a>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      )}
                     </td>
                     <td className="py-3">
                       <div className="flex flex-wrap gap-2">

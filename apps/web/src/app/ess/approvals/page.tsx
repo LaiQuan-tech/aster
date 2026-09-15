@@ -8,12 +8,15 @@ import {
   getBranding,
   getMe,
   getPendingApprovals,
+  getRequestAttachments,
   isAdminRole,
   rejectRequest,
   type Branding,
   type PendingApproval,
   type RequestKind,
 } from "@/lib/ess-api";
+
+type RequestAttachment = { id: string; fileName: string; sizeBytes: number; contentType: string; url: string };
 
 /**
  * /ess/approvals — 主管（或任何被指派為簽核者的人）的「待我簽核」頁。
@@ -72,6 +75,11 @@ function ApprovalsView() {
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState("");
   const [approveComment, setApproveComment] = useState<Record<string, string>>({});
+  // 附件清單：展開哪一張單 + 各單已抓到的附件（用 id 當 key 快取，避免重複打 API）
+  const [expandedAttachmentsId, setExpandedAttachmentsId] = useState<string | null>(null);
+  const [attachmentsById, setAttachmentsById] = useState<Record<string, RequestAttachment[]>>({});
+  const [attachmentsLoadingId, setAttachmentsLoadingId] = useState<string | null>(null);
+  const [attachmentsError, setAttachmentsError] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     const res = await getPendingApprovals();
@@ -154,6 +162,33 @@ function ApprovalsView() {
     if (row.employee_emp_no) parts.push(row.employee_emp_no);
     if (row.department_name) parts.push(row.department_name);
     return parts.join(" · ");
+  }
+
+  /** 展開/收合附件清單；展開時才現拉 signed URL，並用 attachmentsById 快取。 */
+  async function toggleAttachments(row: PendingApproval) {
+    if (expandedAttachmentsId === row.id) {
+      setExpandedAttachmentsId(null);
+      return;
+    }
+    setExpandedAttachmentsId(row.id);
+    if (attachmentsById[row.id]) return;
+    setAttachmentsLoadingId(row.id);
+    try {
+      const res = await getRequestAttachments(row.id);
+      setAttachmentsById((prev) => ({ ...prev, [row.id]: res.attachments }));
+      setAttachmentsError((prev) => {
+        const next = { ...prev };
+        delete next[row.id];
+        return next;
+      });
+    } catch (err) {
+      setAttachmentsError((prev) => ({
+        ...prev,
+        [row.id]: err instanceof Error ? err.message : "載入附件失敗",
+      }));
+    } finally {
+      setAttachmentsLoadingId((cur) => (cur === row.id ? null : cur));
+    }
   }
 
   return (
@@ -265,7 +300,47 @@ function ApprovalsView() {
                         </>
                       )}
                       <dt className="text-gray-400">附件</dt>
-                      <dd>{row.attachment_count > 0 ? `${row.attachment_count} 個檔案` : <span className="text-gray-400">無</span>}</dd>
+                      <dd>
+                        {row.attachment_count > 0 ? (
+                          <div>
+                            <button
+                              type="button"
+                              onClick={() => void toggleAttachments(row)}
+                              className="text-sm font-medium underline underline-offset-2"
+                              style={{ color: "var(--brand)" }}
+                            >
+                              {row.attachment_count} 個檔案{expandedAttachmentsId === row.id ? "（收合）" : "（展開）"}
+                            </button>
+                            {expandedAttachmentsId === row.id && (
+                              <div className="mt-1">
+                                {attachmentsLoadingId === row.id ? (
+                                  <p className="text-xs text-gray-400">載入中…</p>
+                                ) : attachmentsError[row.id] ? (
+                                  <p className="text-xs text-red-600">{attachmentsError[row.id]}</p>
+                                ) : (
+                                  <ul className="space-y-0.5">
+                                    {(attachmentsById[row.id] ?? []).map((att) => (
+                                      <li key={att.id}>
+                                        <a
+                                          href={att.url ?? "#"}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="text-sm underline"
+                                          style={{ color: "var(--brand)" }}
+                                        >
+                                          {att.fileName}
+                                        </a>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-gray-400">無</span>
+                        )}
+                      </dd>
                     </dl>
 
                     {rejecting ? (

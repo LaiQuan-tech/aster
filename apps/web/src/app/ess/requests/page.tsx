@@ -187,6 +187,9 @@ function RequestsView() {
   }
   const fmtHours = (h: number) => `${Math.floor(h)} 時 ${Math.round((h - Math.floor(h)) * 60)} 分`;
 
+  // 目前選取的假別（用來判斷是否須附憑證，例如病假）。
+  const selectedLeaveType = leaveTypes.find((lt) => lt.id === leaveTypeId);
+
   const segHours = (a: string, b: string) => {
     const [ah, am] = a.split(":").map(Number);
     const [bh, bm] = b.split(":").map(Number);
@@ -678,7 +681,15 @@ function RequestsView() {
 
             {(kind === "leave" || kind === "business_trip") && (
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">附件（最多 3 個，單檔 3 MB）</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  附件（最多 3 個，單檔 3 MB）
+                  {kind === "leave" && selectedLeaveType?.requiresAttachment && (
+                    <span className="ml-1 text-red-600">＊必附憑證</span>
+                  )}
+                </label>
+                {kind === "leave" && selectedLeaveType?.requiresAttachment && (
+                  <p className="mb-1 text-xs font-medium text-red-600">此假別核准前需附憑證（診所收據）</p>
+                )}
                 <input
                   type="file"
                   multiple

@@ -126,6 +126,8 @@ export interface LeaveType {
   code: string;
   name: string;
   paid: boolean;
+  /** 核准前是否須附憑證（例如病假須附診所收據）。舊版 API 沒有這個欄位，讀取要 optional。 */
+  requiresAttachment?: boolean;
   created_at: string;
 }
 
@@ -685,6 +687,13 @@ export async function uploadAttachment(requestId: string, file: File): Promise<v
     method: "POST",
     body: JSON.stringify({ fileName: file.name, contentType: file.type || "application/octet-stream", dataBase64 }),
   });
+}
+
+/** 列出某張單的附件（signed URL 清單），供簽核者/HR 檢視與下載。 */
+export function getRequestAttachments(requestId: string) {
+  return apiFetch<{ attachments: Array<{ id: string; fileName: string; sizeBytes: number; contentType: string; url: string }> }>(
+    `/requests/${requestId}/attachments`
+  );
 }
 
 /* ------------------------------------------------------- 報銷（模組三） */
