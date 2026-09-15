@@ -5,6 +5,8 @@ import ExcelJS from "exceljs"
 import { supabaseAdmin } from "../lib/supabase"
 import { provisionTenant } from "../services/tenants"
 import { taipeiToday } from "../services/project-status"
+import { loadPaidBefore, buildSummary } from "../services/bonus-run-store"
+import { paidBeforeKey } from "../services/bonus-run"
 import { app } from "../app"
 
 /**
@@ -366,5 +368,163 @@ describe.skipIf(!migrated)("獎金季發放批次 — live", () => {
     expect(a).toMatchObject({ entitledCumulative: 3_500, paidBefore: 7_000, amount: 0, overpaid: true, overpaidBy: 3_500 })
     expect(pv.body.totals.overpaidCount).toBe(1)
     expect(byEmp(pv.body.items, empBId).amount).toBe(0)
+  })
+})
+
+/**
+ * D 批次驗收追加案 1／2——正式庫 PostgREST max-rows=1000，bonus-run-store.ts
+ * 有 5 處查詢（loadInputs 的成員／合約／入帳、loadPaidBefore、summary／ESS 的
+ * items）原本沒有 `.range()`，筆數一旦超過 1000 就被靜默截斷。改用共用的
+ * fetchAll 分頁後在這裡補案：直接用 supabaseAdmin 灌 1 專案＋1200 個員工、
+ * 各掛一列 bonus_run_items（amount 都是 1），跳過 preview／members／
+ * contracts／billings 整條業務流程（撐出 1200 個真實成員太貴，考驗的是查詢
+ * 撈不撈得全，不是分潤算法本身）。
+ */
+describe.skipIf(!migrated)("查詢分頁：>1000 筆 paid items 不再靜默截斷", () => {
+  const stamp2 = `${stamp}p`
+  const ROWS = 1200
+  let tid: string
+  let uid: string
+  let pageProjectId: string
+  let pageRunId: string
+  const empIds: string[] = []
+
+  beforeAll(async () => {
+    const name = `BONUSPAGE ${stamp2}`
+    const adminEmail = `bonus-${stamp2}-admin@example.com`
+    const adminPassword = `Pw-${stamp2}-Aa1!`
+    const provisioned = await provisionTenant({ name, adminEmail, adminPassword })
+    tid = provisioned.tenantId
+    uid = provisioned.userId
+
+    const { data: proj, error: projErr } = await supabaseAdmin
+      .from("projects")
+      .insert({ tenant_id: tid, name: "分頁測試案", share_mode: "fixed_amount" })
+      .select("id")
+      .single()
+    if (projErr || !proj) throw new Error(`page project: ${projErr?.message}`)
+    pageProjectId = proj.id as string
+
+    for (let i = 0; i < ROWS; i += 500) {
+      const chunk = Array.from({ length: Math.min(500, ROWS - i) }, (_, j) => ({
+        tenant_id: tid,
+        name: `分頁員工${i + j}`,
+        emp_no: `PG${i + j}`,
+        role: "employee",
+        employment_type: "regular",
+        status: "active",
+      }))
+      const { data: rows, error } = await supabaseAdmin.from("employees").insert(chunk).select("id")
+      if (error || !rows) throw new Error(`page employees chunk ${i}: ${error?.message}`)
+      empIds.push(...rows.map((r) => r.id as string))
+    }
+    expect(empIds).toHaveLength(ROWS)
+
+    const { data: run, error: runErr } = await supabaseAdmin
+      .from("bonus_runs")
+      .insert({ tenant_id: tid, label: `分頁測試-${stamp2}`, as_of: TODAY, status: "paid", paid_on: TODAY, totals: {} })
+      .select("id")
+      .single()
+    if (runErr || !run) throw new Error(`page run: ${runErr?.message}`)
+    pageRunId = run.id as string
+
+    for (let i = 0; i < empIds.length; i += 500) {
+      const chunk = empIds.slice(i, i + 500).map((employeeId, j) => ({
+        tenant_id: tid,
+        run_id: pageRunId,
+        project_id: pageProjectId,
+        employee_id: employeeId,
+        share_mode: "fixed_amount",
+        amount: 1,
+        snapshot: { employeeName: `分頁員工${i + j}`, empNo: `PG${i + j}` },
+      }))
+      const { error } = await supabaseAdmin.from("bonus_run_items").insert(chunk)
+      if (error) throw new Error(`page items chunk ${i}: ${error.message}`)
+    }
+  }, 120_000)
+
+  afterAll(async () => {
+    await supabaseAdmin.from("bonus_run_items").delete().eq("tenant_id", tid)
+    await supabaseAdmin.from("bonus_runs").delete().eq("tenant_id", tid)
+    await supabaseAdmin.from("projects").delete().eq("tenant_id", tid)
+    await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
+    await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
+    await supabaseAdmin.from("tenants").delete().eq("id", tid)
+    await supabaseAdmin.auth.admin.deleteUser(uid)
+  }, 120_000)
+
+  it(`loadPaidBefore：${ROWS} 筆 paid items 全部撈到、每人 amount=1 加總正確`, async () => {
+    const map = await loadPaidBefore(tid)
+    expect(map.size).toBe(ROWS)
+    let total = 0
+    for (const empId of empIds) total += map.get(paidBeforeKey(pageProjectId, empId)) ?? 0
+    expect(total).toBe(ROWS)
+  })
+
+  it(`summary／ESS：${ROWS} 筆 items 的年度合計與人數不因分頁被截斷`, async () => {
+    const summary = await buildSummary(tid, {})
+    expect(summary.allTimeTotal).toBe(ROWS)
+    expect(summary.byEmployee).toHaveLength(ROWS)
+    expect(summary.byEmployee.reduce((s, e) => s + e.amountAllTime, 0)).toBe(ROWS)
+  })
+})
+
+/**
+ * D 批次驗收追加案 2／2——payRun 先前是 check-then-update：兩個併發 pay 都能
+ * 通過「current.status === draft」的檢查，最後的 UPDATE 雖帶 `.eq("status",
+ * "draft")` 卻沒確認真的改到列，後到的那個 WHERE 完全不命中也不算 error，
+ * 於是兩個都拿 200、重複記一次 audit log。改成 UPDATE 後 `.select("id")`
+ * 檢查受影響列數，0 列即視同「已經不是 draft」，回 409 not_draft。
+ *
+ * 直接塞一筆空白 draft（不掛任何專案／成員，items 天生 0 筆，pay 前的
+ * stale_paid_before 檢查對空陣列必過）單純考驗這個原子更新本身。
+ */
+describe.skipIf(!migrated)("pay 併發：同一 run 兩次同時 pay 只有一次成功", () => {
+  const stamp3 = `${stamp}r`
+  let tid: string
+  let uid: string
+  let token: string
+  let runId: string
+
+  beforeAll(async () => {
+    const name = `BONUSRACE ${stamp3}`
+    const adminEmail = `bonus-${stamp3}-admin@example.com`
+    const adminPassword = `Pw-${stamp3}-Aa1!`
+    const provisioned = await provisionTenant({ name, adminEmail, adminPassword })
+    tid = provisioned.tenantId
+    uid = provisioned.userId
+    token = await signIn(adminEmail, adminPassword)
+
+    const { data: run, error } = await supabaseAdmin
+      .from("bonus_runs")
+      .insert({ tenant_id: tid, label: `race-${stamp3}`, as_of: TODAY, status: "draft", totals: {} })
+      .select("id")
+      .single()
+    if (error || !run) throw new Error(`race draft: ${error?.message}`)
+    runId = run.id as string
+  }, 30_000)
+
+  afterAll(async () => {
+    await supabaseAdmin.from("bonus_run_items").delete().eq("tenant_id", tid)
+    await supabaseAdmin.from("bonus_runs").delete().eq("tenant_id", tid)
+    await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
+    await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
+    await supabaseAdmin.from("tenants").delete().eq("id", tid)
+    await supabaseAdmin.auth.admin.deleteUser(uid)
+  }, 30_000)
+
+  it("兩個併發 POST /bonus-runs/:id/pay：一個 200 一個 409 not_draft，不會兩個都成功", async () => {
+    const [a, b] = await Promise.all([
+      request(app).post(`/bonus-runs/${runId}/pay`).set("Authorization", `Bearer ${token}`).send({ paidOn: TODAY }),
+      request(app).post(`/bonus-runs/${runId}/pay`).set("Authorization", `Bearer ${token}`).send({ paidOn: TODAY }),
+    ])
+    const statuses = [a.status, b.status].sort((x, y) => x - y)
+    expect(statuses).toEqual([200, 409])
+    const failed = a.status === 409 ? a : b
+    expect(failed.body.error).toBe("not_draft")
+
+    const got = await request(app).get(`/bonus-runs/${runId}`).set("Authorization", `Bearer ${token}`)
+    expect(got.body.run.status).toBe("paid")
+    expect(got.body.run.paidByEmpId).toBeTruthy()
   })
 })

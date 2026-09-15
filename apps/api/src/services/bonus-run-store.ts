@@ -159,6 +159,36 @@ export function num(v: string | number | null | undefined): number | null {
   return Number.isFinite(n) ? n : null
 }
 
+const RANGE_PAGE_SIZE = 1000
+
+/**
+ * 共用分頁 fetcher：正式庫 PostgREST 設定 max-rows=1000，單次 `.select()` 超過
+ * 這個數字會被「靜默」截斷（不是 error，`data` 就是只剩 1000 列）。任何筆數
+ * 會隨資料量長大的查詢（跨專案／跨批次彙總，不是單一 run 的明細）都要繞過這
+ * 個上限——樣板同 routes/disbursement-reports.ts 的 loadYearPaidDisbursements：
+ * 用 `.range(offset, offset+999)` 一頁一頁撈，回傳 < 1000 列才算撈完。
+ *
+ * `build` 必須自己下穩定的 `.order()`（沒有明確排序，跨頁 `.range()` 不保證
+ * 涵蓋所有列）＋`.range(from, to)`；這裡只負責分頁迴圈與錯誤訊息前綴
+ * （context，方便看是哪個呼叫端出錯）。
+ */
+async function fetchAll<T>(
+  build: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+  context: string,
+): Promise<T[]> {
+  const rows: T[] = []
+  let offset = 0
+  for (;;) {
+    const { data, error } = await build(offset, offset + RANGE_PAGE_SIZE - 1)
+    if (error) throw new Error(`${context}: ${error.message}`)
+    const batch = data ?? []
+    rows.push(...batch)
+    if (batch.length < RANGE_PAGE_SIZE) break
+    offset += RANGE_PAGE_SIZE
+  }
+  return rows
+}
+
 const EMPTY_TOTALS: BonusTotals = {
   amount: 0,
   entitledCumulative: 0,
@@ -253,58 +283,74 @@ async function loadInputs(tenantId: string, asOf: string): Promise<LoadedInputs>
   if (projects.length === 0) return { projects: [], projectMeta, employeeMeta: new Map() }
   const ids = projects.map((p) => p.id)
 
-  const { data: memberRows, error: memErr } = await supabaseAdmin
-    .from("project_members")
-    .select("project_id, employee_id, role_in_project, share_pct, share_amount")
-    .eq("tenant_id", tenantId)
-    .in("project_id", ids)
-  if (memErr) throw new Error(`bonus-run loadInputs (members): ${memErr.message}`)
+  type MemberRow = { project_id: string; employee_id: string; role_in_project: string | null; share_pct: string | number | null; share_amount: string | number | null }
+  const memberRows = await fetchAll<MemberRow>(
+    (from, to) =>
+      supabaseAdmin
+        .from("project_members")
+        .select("project_id, employee_id, role_in_project, share_pct, share_amount")
+        .eq("tenant_id", tenantId)
+        .in("project_id", ids)
+        .order("id", { ascending: true })
+        .range(from, to),
+    "bonus-run loadInputs (members)",
+  )
   const membersByProject = new Map<string, Array<{ employeeId: string; roleInProject: string | null; sharePct: number | null; shareAmount: number | null }>>()
-  for (const m of memberRows ?? []) {
-    const arr = membersByProject.get(m.project_id as string) ?? []
+  for (const m of memberRows) {
+    const arr = membersByProject.get(m.project_id) ?? []
     arr.push({
-      employeeId: m.employee_id as string,
-      roleInProject: (m.role_in_project as string | null) ?? null,
-      sharePct: num(m.share_pct as string | null),
-      shareAmount: num(m.share_amount as string | null),
+      employeeId: m.employee_id,
+      roleInProject: m.role_in_project ?? null,
+      sharePct: num(m.share_pct),
+      shareAmount: num(m.share_amount),
     })
-    membersByProject.set(m.project_id as string, arr)
+    membersByProject.set(m.project_id, arr)
   }
   const withMembers = projects.filter((p) => (membersByProject.get(p.id) ?? []).length > 0)
   if (withMembers.length === 0) return { projects: [], projectMeta, employeeMeta: new Map() }
   const scopedIds = withMembers.map((p) => p.id)
 
-  const { data: contractRows, error: cErr } = await supabaseAdmin
-    .from("contracts")
-    .select("project_id, doc_type, amount")
-    .eq("tenant_id", tenantId)
-    .in("project_id", scopedIds)
-    .in("our_role", OUR_CONTRACT_ROLES)
-    .in("doc_type", ["contract", "change_order"])
-    .is("deleted_at", null)
-  if (cErr) throw new Error(`bonus-run loadInputs (contracts): ${cErr.message}`)
+  type ContractRow = { project_id: string; doc_type: string; amount: string | number | null }
+  const contractRows = await fetchAll<ContractRow>(
+    (from, to) =>
+      supabaseAdmin
+        .from("contracts")
+        .select("project_id, doc_type, amount")
+        .eq("tenant_id", tenantId)
+        .in("project_id", scopedIds)
+        .in("our_role", OUR_CONTRACT_ROLES)
+        .in("doc_type", ["contract", "change_order"])
+        .is("deleted_at", null)
+        .order("id", { ascending: true })
+        .range(from, to),
+    "bonus-run loadInputs (contracts)",
+  )
   const contractTotal = new Map<string, number>()
-  for (const c of contractRows ?? []) {
-    const pid = c.project_id as string
-    contractTotal.set(pid, (contractTotal.get(pid) ?? 0) + (num(c.amount as string | null) ?? 0))
+  for (const c of contractRows) {
+    contractTotal.set(c.project_id, (contractTotal.get(c.project_id) ?? 0) + (num(c.amount) ?? 0))
   }
 
-  const { data: billingRows, error: bErr } = await supabaseAdmin
-    .from("project_billings")
-    .select("project_id, received_amount, received_on")
-    .eq("tenant_id", tenantId)
-    .in("project_id", scopedIds)
-    .is("deleted_at", null)
-    .not("received_amount", "is", null)
-    .or(`received_on.is.null,received_on.lte.${asOf}`)
-  if (bErr) throw new Error(`bonus-run loadInputs (billings): ${bErr.message}`)
+  type BillingRow = { project_id: string; received_amount: string | number | null; received_on: string | null }
+  const billingRows = await fetchAll<BillingRow>(
+    (from, to) =>
+      supabaseAdmin
+        .from("project_billings")
+        .select("project_id, received_amount, received_on")
+        .eq("tenant_id", tenantId)
+        .in("project_id", scopedIds)
+        .is("deleted_at", null)
+        .not("received_amount", "is", null)
+        .or(`received_on.is.null,received_on.lte.${asOf}`)
+        .order("id", { ascending: true })
+        .range(from, to),
+    "bonus-run loadInputs (billings)",
+  )
   const receivedTotal = new Map<string, number>()
-  for (const b of billingRows ?? []) {
-    const pid = b.project_id as string
-    receivedTotal.set(pid, (receivedTotal.get(pid) ?? 0) + (num(b.received_amount as string | null) ?? 0))
+  for (const b of billingRows) {
+    receivedTotal.set(b.project_id, (receivedTotal.get(b.project_id) ?? 0) + (num(b.received_amount) ?? 0))
   }
 
-  const empIds = [...new Set((memberRows ?? []).map((m) => m.employee_id as string))]
+  const empIds = [...new Set(memberRows.map((m) => m.employee_id))]
   const { data: empRows, error: eErr } = await supabaseAdmin
     .from("employees")
     .select("id, name, emp_no")
@@ -335,15 +381,21 @@ export async function loadPaidBefore(tenantId: string, excludeRunId?: string | n
   const runIds = (runs ?? []).map((r) => r.id as string)
   const map = new Map<string, number>()
   if (runIds.length === 0) return map
-  const { data: items, error: iErr } = await supabaseAdmin
-    .from("bonus_run_items")
-    .select("run_id, project_id, employee_id, amount")
-    .eq("tenant_id", tenantId)
-    .in("run_id", runIds)
-  if (iErr) throw new Error(`bonus-run loadPaidBefore (items): ${iErr.message}`)
-  for (const it of items ?? []) {
-    const key = paidBeforeKey(it.project_id as string, it.employee_id as string)
-    map.set(key, (map.get(key) ?? 0) + (num(it.amount as string | null) ?? 0))
+  type PaidBeforeItemRow = { run_id: string; project_id: string; employee_id: string; amount: string | number | null }
+  const items = await fetchAll<PaidBeforeItemRow>(
+    (from, to) =>
+      supabaseAdmin
+        .from("bonus_run_items")
+        .select("run_id, project_id, employee_id, amount")
+        .eq("tenant_id", tenantId)
+        .in("run_id", runIds)
+        .order("id", { ascending: true })
+        .range(from, to),
+    "bonus-run loadPaidBefore (items)",
+  )
+  for (const it of items) {
+    const key = paidBeforeKey(it.project_id, it.employee_id)
+    map.set(key, (map.get(key) ?? 0) + (num(it.amount) ?? 0))
   }
   return map
 }
@@ -649,13 +701,24 @@ export async function payRun(tenantId: string, actor: Actor, id: string, paidOn:
     })
   }
 
-  const { error } = await supabaseAdmin
+  // 原子更新：WHERE 帶 status='draft' 且用 .select() 拿回受影響列數，取代先前的
+  // 「check-then-update」——兩個併發 pay 都通過前面的 current.status 檢查後，
+  // 只有先落地的那個真的把列從 draft 改成 paid；另一個的 WHERE 子句因為列已經
+  // 不是 draft 而完全不命中，Postgres 回 0 列、不是 error（DB trigger
+  // forbid_paid_bonus_mutation 也不會被觸發——它只在「有列被改」時才跑），
+  // 舊碼沒檢查受影響列數，等於讓後到的那個併發請求也拿到 200、重複記一次
+  // audit log。回 0 列視同「已經不是 draft」，一律 409 not_draft。
+  const { data: updated, error } = await supabaseAdmin
     .from("bonus_runs")
     .update({ status: "paid", paid_on: paidOn, paid_by_emp_id: actor.empId })
     .eq("tenant_id", tenantId)
     .eq("id", id)
     .eq("status", "draft")
+    .select("id")
   if (error) throw new Error(`bonus-run payRun: ${error.message}`)
+  if (!updated || updated.length === 0) {
+    throw new BonusRunError(409, "not_draft", { status: "paid" })
+  }
   await writeAuditLog({
     tenantId,
     tableName: "bonus_runs",
@@ -710,18 +773,16 @@ async function loadPaidRunsWithItems(tenantId: string, employeeId?: string | nul
   if (error) throw new Error(`bonus-run loadPaidRuns: ${error.message}`)
   const runs = (runRows ?? []) as RunRow[]
   if (runs.length === 0) return { runs, items: [] }
-  let q = supabaseAdmin
-    .from("bonus_run_items")
-    .select(ITEM_COLS)
-    .eq("tenant_id", tenantId)
-    .in(
-      "run_id",
-      runs.map((r) => r.id),
-    )
-  if (employeeId) q = q.eq("employee_id", employeeId)
-  const { data: itemRows, error: iErr } = await q
-  if (iErr) throw new Error(`bonus-run loadPaidRuns (items): ${iErr.message}`)
-  return { runs, items: ((itemRows ?? []) as ItemRow[]).filter((r) => !isStale(r)) }
+  const runIds = runs.map((r) => r.id)
+  const itemRows = await fetchAll<ItemRow>(
+    (from, to) => {
+      let q = supabaseAdmin.from("bonus_run_items").select(ITEM_COLS).eq("tenant_id", tenantId).in("run_id", runIds)
+      if (employeeId) q = q.eq("employee_id", employeeId)
+      return q.order("id", { ascending: true }).range(from, to)
+    },
+    "bonus-run loadPaidRuns (items)",
+  )
+  return { runs, items: itemRows.filter((r) => !isStale(r)) }
 }
 
 export async function buildSummary(tenantId: string, filter: { year?: number | null; employeeId?: string | null }): Promise<BonusSummary> {
