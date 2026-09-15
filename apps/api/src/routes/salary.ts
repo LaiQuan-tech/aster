@@ -34,6 +34,13 @@ const upsertSchema = z
     agreedDaysPerWeek: z.number().nonnegative().nullable().optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
+  // C5：時薪制的本俸基準就是 hourlyWage，引擎對 hourlyWage<=0 直接丟錯（不猜）。
+  // 在 API 層就擋：改成 hourly 的那次 PUT 必須同時帶 >0 的時薪，否則存進去的是
+  // 一個結算時必炸的設定。錯誤碼由 handler 轉成 400 hourly_wage_required。
+  .refine((b) => b.method !== "hourly" || (typeof b.hourlyWage === "number" && b.hourlyWage > 0), {
+    message: "hourly_wage_required",
+    path: ["hourlyWage"],
+  })
 
 /**
  * Salary structures are HR-admin-only and tenant-scoped. The tenant filter on
@@ -86,7 +93,8 @@ salaryRouter.put(
     const { employeeId } = req.params
     const parsed = upsertSchema.safeParse(req.body)
     if (!parsed.success) {
-      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      const hourlyWageMissing = parsed.error.issues.some((i) => i.message === "hourly_wage_required")
+      res.status(400).json({ error: hourlyWageMissing ? "hourly_wage_required" : "invalid_body", details: parsed.error.flatten() })
       return
     }
 

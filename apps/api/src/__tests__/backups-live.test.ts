@@ -5,7 +5,7 @@ import { createHash } from "node:crypto"
 import request from "supertest"
 import { supabaseAdmin } from "../lib/supabase"
 import { provisionTenant } from "../services/tenants"
-import { SNAPSHOT_BUCKET, SNAPSHOT_TABLES, type SnapshotManifest } from "../services/backup-snapshot"
+import { PREVIOUS_MANIFEST_FILE, SNAPSHOT_BUCKET, SNAPSHOT_PAGE_SIZE, SNAPSHOT_TABLES, type SnapshotManifest } from "../services/backup-snapshot"
 import { app } from "../app"
 
 /**
@@ -18,6 +18,11 @@ import { app } from "../app"
  * → 內部端點（INTERNAL_JOB_TOKEN）迴圈到 done：Storage 有各表 gz＋manifest、三張表列數
  * 與 count(*) 相符、gz 解開列數／sha256 相符、單次呼叫 <20 秒 → HR /backups 端點列表
  * ／run／signed URL，非 HR 403。
+ *
+ * C3 驗收修正補案：先灌 >1000 列 audit_logs（超過 PostgREST max-rows），manifest 該表
+ * rows＝count(*)、拆成多個 part 檔、拼回列數相符、status 仍 complete（以前 5000 一頁被
+ * 截到 1000 列還標 complete）；重跑前塞一個不在 manifest 裡的殘檔，完成後被清掉、
+ * manifest.prev.json 也不留。
  *
  * 正式庫尚未套 0044（period_closes 不存在）時整組 describe.skipIf 跳過。
  */
@@ -164,8 +169,11 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
       await supabaseAdmin.from("attendance_sheets").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("notifications").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("attendance_days").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
+      // audit_logs 最後才刪（employees 之後、tenants 之前）：刪員工會再觸發 audit
+      // trigger 寫新列，先刪 audit_logs 會留孤兒；tenants 刪掉後 is_disposable_tenant
+      // 回 false，append-only trigger 就不放行了。
       await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
+      await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("tenants").delete().eq("id", tid)
     }
     for (const uid of createdUserIds) await supabaseAdmin.auth.admin.deleteUser(uid)
@@ -266,6 +274,27 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
   describe("月度快照（內部端點）", () => {
     let manifest: SnapshotManifest
     const timings: number[] = []
+    // 灌到超過一頁（PostgREST max-rows＝SNAPSHOT_PAGE_SIZE＝1000）的 audit_logs，
+    // 逼分頁真的翻到第 2 頁；以前 pageSize 5000 在這裡會只備到 1000 列。
+    const BULK_AUDIT_ROWS = SNAPSHOT_PAGE_SIZE + 200
+    let auditCount = 0
+
+    beforeAll(async () => {
+      const rows = Array.from({ length: BULK_AUDIT_ROWS }, (_, i) => ({
+        tenant_id: tenantId,
+        table_name: "bk_bulk",
+        record_id: crypto.randomUUID(),
+        action: "INSERT",
+        new_row: { i },
+        context: "backups-live bulk",
+      }))
+      for (let i = 0; i < rows.length; i += 400) {
+        const { error } = await supabaseAdmin.from("audit_logs").insert(rows.slice(i, i + 400))
+        if (error) throw new Error(`bulk audit_logs insert: ${error.message}`)
+      }
+      auditCount = await countRows("audit_logs")
+      expect(auditCount).toBeGreaterThan(SNAPSHOT_PAGE_SIZE)
+    }, 60_000)
 
     it("帶 INTERNAL_JOB_TOKEN 迴圈到 done；每段 <20 秒", async () => {
       const bad = await request(app).post("/internal/backups/monthly-snapshot").set("x-internal-job-token", "wrong").send({ tenantId })
@@ -332,6 +361,33 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
       expect(closes.rows).toBe(2)
     }, 120_000)
 
+    it("★ >1000 列的表（audit_logs）：manifest rows＝count(*)、拆成多個 part 檔、拼回列數相符、status 仍 complete", async () => {
+      expect(manifest.pageSize).toBe(SNAPSHOT_PAGE_SIZE)
+      expect(manifest.incompleteTables).toEqual([])
+      const entry = manifest.tables.find((t) => t.name === "audit_logs")!
+      expect(entry.skipped).toBeUndefined()
+      expect(entry.incomplete).toBeFalsy()
+      expect(entry.expectedRows).toBe(auditCount)
+      expect(entry.rows).toBe(auditCount)
+      expect(entry.rows).toBeGreaterThan(SNAPSHOT_PAGE_SIZE)
+      expect(entry.files.length).toBe(Math.ceil(auditCount / SNAPSHOT_PAGE_SIZE))
+      expect(entry.pages).toBe(entry.files.length)
+      expect(entry.files.map((f) => f.path)).toEqual(entry.files.map((_, i) => `audit_logs.part-${String(i + 1).padStart(4, "0")}.json.gz`))
+      let reassembled = 0
+      const ids = new Set<string>()
+      for (const f of entry.files) {
+        const got = await downloadJsonGz(`${tenantId}/${SNAPSHOT_PERIOD}/${f.path}`)
+        expect(got.rows, f.path).toHaveLength(f.rows)
+        expect(got.sha256, f.path).toBe(f.sha256)
+        reassembled += got.rows.length
+        for (const r of got.rows as Array<{ id: string }>) ids.add(r.id)
+      }
+      expect(reassembled).toBe(auditCount)
+      expect(ids.size).toBe(auditCount) // 逐頁不重疊、不漏
+      // 表清單補了 bonus_runs／bonus_run_items（正式庫未套 0045 的環境會記 skipped，但一定有這兩列）
+      expect(manifest.tables.map((t) => t.name)).toEqual(expect.arrayContaining(["bonus_runs", "bonus_run_items"]))
+    }, 120_000)
+
     it("HR 端點：GET /backups 列出 2026-09 與 manifest；signed URL 可下載；非 HR 403", async () => {
       const list = await asAdmin(request(app).get("/backups"))
       expect(list.status).toBe(200)
@@ -357,7 +413,12 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
       expect((await asEmployee(request(app).post("/backups/run")).send({ period: SNAPSHOT_PERIOD })).status).toBe(403)
     }, 60_000)
 
-    it("HR POST /backups/run 前端式迴圈重跑同月份 → 覆蓋且 manifest 仍 complete", async () => {
+    it("HR POST /backups/run 前端式迴圈重跑同月份 → 覆蓋且 manifest 仍 complete；不在新 manifest 的殘檔完成後才被清掉", async () => {
+      // 模擬上一輪多出來的 part 檔：重跑不先清資料夾（中途失敗上一份仍在），完成後才 prune。
+      const stale = `${tenantId}/${SNAPSHOT_PERIOD}/audit_logs.part-0099.json.gz`
+      const { error: staleErr } = await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).upload(stale, Buffer.from("stale"), { contentType: "application/gzip", upsert: true })
+      expect(staleErr).toBeNull()
+
       let body: Record<string, unknown> = { period: SNAPSHOT_PERIOD }
       let calls = 0
       let last: Record<string, unknown> = {}
@@ -371,12 +432,29 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
         body = { period: SNAPSHOT_PERIOD, table: res.body.nextTable, offset: res.body.nextOffset }
       }
       expect(last.tenantId).toBe(tenantId)
+      console.log(`[backups-live] HR rerun: ${calls} call(s), last=${JSON.stringify(last)}`)
+      // 同路徑覆寫後 Supabase Storage 的 CDN 失效會慢 16～34 秒（物件先前被 signed URL 抓過時）：
+      // service 端完成前會用 list() 的 ETag 核對回讀並等 CDN 追上，所以這裡的 GET /backups
+      // 必須直接拿到新一輪的 manifest（generatedAt 較晚、多了 backups/run 那筆稽核列）。
       const after = await asAdmin(request(app).get("/backups"))
       const entry = after.body.periods.find((p: { period: string }) => p.period === SNAPSHOT_PERIOD)
+      expect(entry.manifestStale).toBeUndefined()
       expect(entry.manifest.status).toBe("complete")
       expect(new Date(entry.manifest.generatedAt).getTime()).toBeGreaterThan(new Date(manifest.generatedAt!).getTime())
       const { data: audit } = await supabaseAdmin.from("audit_logs").select("id").eq("tenant_id", tenantId).eq("context", "backups/run")
       expect((audit ?? []).length).toBeGreaterThanOrEqual(1)
+
+      // 完成後：殘檔與 manifest.prev.json 都不在了；資料夾＝manifest.json＋manifest 列出的檔案
+      const names = (entry.files as Array<{ name: string }>).map((f) => f.name)
+      expect(names).not.toContain("audit_logs.part-0099.json.gz")
+      expect(names).not.toContain(PREVIOUS_MANIFEST_FILE)
+      const listed = new Set<string>(["manifest.json"])
+      for (const t of (entry.manifest as SnapshotManifest).tables) for (const f of t.files) listed.add(f.path)
+      expect([...names].sort()).toEqual([...listed].sort())
+      // 重跑後 audit_logs 多了這輪 backups/run 的稽核列，仍等於 count(*)（>1000）
+      const auditEntry = (entry.manifest as SnapshotManifest).tables.find((t) => t.name === "audit_logs")!
+      expect(auditEntry.rows).toBe(await countRows("audit_logs"))
+      expect(auditEntry.incomplete).toBeFalsy()
     }, 300_000)
   })
 })

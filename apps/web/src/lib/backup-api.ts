@@ -35,19 +35,25 @@ export interface SnapshotTableEntry {
   pages: number | null;
   completedAt: string | null;
   skipped?: string;
+  /** 寫出列數 < 開始時 count(*)（有列沒備到）。 */
+  incomplete?: boolean;
 }
+
+export type SnapshotManifestStatus = "running" | "complete" | "incomplete";
 
 export interface SnapshotManifest {
   manifestVersion: 1;
   tenantId: string;
   period: string;
-  status: "running" | "complete";
+  /** incomplete＝至少一張表 rows < expectedRows，不可當完整備份用（見 incompleteTables）。 */
+  status: SnapshotManifestStatus;
   startedAt: string;
   generatedAt: string | null;
   schemaVersion: { drizzle: string | null; sql: string | null };
   pageSize: number;
   tables: SnapshotTableEntry[];
   totals: { tables: number; rows: number; bytes: number };
+  incompleteTables?: string[];
 }
 
 export interface SnapshotStoredFile {
@@ -59,6 +65,8 @@ export interface SnapshotStoredFile {
 export interface SnapshotPeriodSummary {
   period: string;
   manifest: SnapshotManifest | null;
+  /** 剛重跑完、CDN 還沒更新：這份 manifest 是上一輪的，幾十秒後重新整理即可。 */
+  manifestStale?: boolean;
   files: SnapshotStoredFile[];
 }
 

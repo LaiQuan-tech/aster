@@ -152,6 +152,8 @@ export interface Payable {
   /** 收款進度%的分子／分母，可做 tooltip。 */
   projectReceivedTotal?: number
   projectAmountUntaxed?: number | null
+  /** 該案已封存但期款未付（C2 複製封存原案後仍要付）；列上打灰標。 */
+  archived?: boolean
 }
 
 /** 依廠商分組的應付清單彙總（GET /disbursements/payables 的 groups）。 */

@@ -18,7 +18,10 @@ import type { SheetStatus } from "./attendance-sheet-types.js"
  *       把租戶的業務表（SNAPSHOT_TABLES，寫死在本檔）逐表分頁讀出、gzip、上傳
  *       Storage `tenant-snapshots/{tenantId}/{period}/{table}.json.gz`，最後寫
  *       `manifest.json`（每表列數／bytes／sha256、產生時間、schema 版本）。
- *       **全表快照、非增量**；同 period 重跑會先清掉該資料夾再重寫（覆蓋）。
+ *       **全表快照、非增量**；同 period 重跑＝新檔蓋舊檔、上一份 manifest 暫存成
+ *       manifest.prev.json，全部完成後才刪不在新 manifest 裡的舊檔（中途失敗上一份仍在）。
+ *       每頁最多 1000 列（PostgREST max-rows），翻頁以表開始時的 count(*) 為完整性
+ *       判準：寫出列數少於它 → 該表與整份 manifest 標 incomplete，不寫 complete。
  *       serverless 沒有背景執行緒（Vercel maxDuration 60），所以設計成
  *       「一次呼叫做一小段、回游標、呼叫端續打」：每次呼叫在
  *       SNAPSHOT_STEP_BUDGET_MS 的軟預算內盡量多做幾頁／幾表，超過就把
@@ -44,12 +47,28 @@ import type { SheetStatus } from "./attendance-sheet-types.js"
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const SNAPSHOT_BUCKET = "tenant-snapshots"
-export const SNAPSHOT_PAGE_SIZE = 5000
+/**
+ * 每頁列數上限＝PostgREST 的 max-rows（Supabase 預設 1000）。以前設 5000：
+ * `.range(0, 4999)` 被 PostgREST 靜默截到 1000 列，`rows.length < pageSize`
+ * 被當成「到底了」→ 第 1001 列起不備份、manifest 仍寫 complete（C3 驗收抓到）。
+ * 表級 pageSize 覆寫只能往下調，不能超過這個上限。
+ */
+export const SNAPSHOT_MAX_PAGE_SIZE = 1000
+export const SNAPSHOT_PAGE_SIZE = SNAPSHOT_MAX_PAGE_SIZE
 /**
  * 單次呼叫的軟預算：到了就把游標交回，下一次續。規格要求單次 <20 秒、Vercel
  * maxDuration 60；12 秒留足夠餘裕給「最後一頁＋manifest 上傳」。
  */
 export const SNAPSHOT_STEP_BUDGET_MS = 12_000
+/**
+ * 單次呼叫的硬上限（Vercel maxDuration 60 留 10 秒餘裕）：完成後「等 CDN 追上」的
+ * 回讀只能用到這個上限以內的剩餘時間。
+ */
+export const SNAPSHOT_STEP_HARD_LIMIT_MS = 50_000
+/** 續打時回讀 manifest 最多等 CDN 多久（實測失效延遲 16～34 秒）。 */
+export const MANIFEST_FRESH_WAIT_RESUME_MS = 40_000
+/** 後台清單回讀 manifest 最多等多久；超時就回舊版並標 manifestStale。 */
+export const MANIFEST_FRESH_WAIT_LIST_MS = 8_000
 export const MANIFEST_FILE = "manifest.json"
 /** 應用層保留月數（之後手動清；見 README「備份政策」）。 */
 export const SNAPSHOT_RETENTION_MONTHS = 24
@@ -122,6 +141,8 @@ export const SNAPSHOT_TABLES: readonly SnapshotTableSpec[] = [
   { name: "disbursements" },
   { name: "disbursement_allocations" },
   { name: "disbursement_attachments" },
+  { name: "bonus_runs" },
+  { name: "bonus_run_items" },
   { name: "announcements" },
   { name: "announcement_versions" },
   { name: "announcement_acknowledgements" },
@@ -141,7 +162,7 @@ export const SNAPSHOT_TABLES: readonly SnapshotTableSpec[] = [
 const periodRe = /^\d{4}-(0[1-9]|1[0-2])$/
 const fileNameRe = /^[A-Za-z0-9_.-]+$/
 
-export type BackupErrorCode = "invalid_period" | "unknown_table" | "invalid_offset" | "invalid_file" | "file_not_found"
+export type BackupErrorCode = "invalid_period" | "unknown_table" | "invalid_offset" | "invalid_file" | "file_not_found" | "manifest_stale"
 
 export class BackupError extends Error {
   readonly code: BackupErrorCode
@@ -172,19 +193,31 @@ export interface SnapshotTableEntry {
   /** 單檔＝該檔 sha256；多檔（分頁）＝各檔 sha256 以 "\n" 串起再 sha256。 */
   sha256: string
   files: SnapshotFileEntry[]
-  /** 表開始時 count(*)；之後若列數增加，仍會多寫 part 檔（rows 以實際寫入為準）。 */
+  /**
+   * 表開始時 count(*)。翻頁以它為完整性判準：短頁但還沒蓋到 expectedRows 就繼續翻
+   * （PostgREST max-rows 截頁時才會發生）；完成時 rows < expectedRows → incomplete。
+   * 之後若列數增加（id 是隨機 uuid，翻頁中插入會讓邊界列被讀兩次），rows 可能大於
+   * expectedRows，那是「多」不是「漏」，仍算 complete。
+   */
   expectedRows: number | null
+  /** 開始時預估頁數；完成後改成實際寫出的檔數。 */
   pages: number | null
   completedAt: string | null
   /** 該環境沒有這張表（migration 未套）→ 'table_missing'。 */
   skipped?: string
+  /** 完成時 rows < expectedRows（有列沒備到）→ true；整份 manifest 連帶 status='incomplete'。 */
+  incomplete?: boolean
 }
 
 export interface SnapshotManifest {
   manifestVersion: 1
   tenantId: string
   period: string
-  status: "running" | "complete"
+  /**
+   * running → 進行中；complete → 每張表 rows ≥ expectedRows；
+   * incomplete → 至少一張表 rows < expectedRows（見 incompleteTables），不可當完整備份用。
+   */
+  status: "running" | "complete" | "incomplete"
   startedAt: string
   /** 全部表完成的時間；running 時為 null。 */
   generatedAt: string | null
@@ -192,6 +225,8 @@ export interface SnapshotManifest {
   pageSize: number
   tables: SnapshotTableEntry[]
   totals: { tables: number; rows: number; bytes: number }
+  /** rows < expectedRows 的表名；空陣列＝全部完整。舊 manifest 沒有這個欄位。 */
+  incompleteTables?: string[]
 }
 
 export interface SnapshotStepInput {
@@ -285,6 +320,7 @@ function newManifest(tenantId: string, period: string): SnapshotManifest {
     pageSize: SNAPSHOT_PAGE_SIZE,
     tables: [],
     totals: { tables: 0, rows: 0, bytes: 0 },
+    incompleteTables: [],
   }
 }
 
@@ -294,18 +330,89 @@ function recomputeTotals(manifest: SnapshotManifest): void {
     rows: manifest.tables.reduce((s, t) => s + t.rows, 0),
     bytes: manifest.tables.reduce((s, t) => s + t.bytes, 0),
   }
+  manifest.incompleteTables = manifest.tables.filter((t) => t.incomplete).map((t) => t.name)
 }
 
-export async function readManifest(tenantId: string, period: string): Promise<SnapshotManifest | null> {
-  const { data, error } = await storage().download(manifestPathOf(tenantId, period))
-  if (error || !data) return null
+function md5(buf: Buffer): string {
+  return createHash("md5").update(buf).digest("hex")
+}
+
+function parseManifest(buf: Buffer): SnapshotManifest | null {
   try {
-    const parsed = JSON.parse(await data.text()) as SnapshotManifest
+    const parsed = JSON.parse(buf.toString("utf8")) as SnapshotManifest
     if (parsed && parsed.manifestVersion === 1 && Array.isArray(parsed.tables)) return parsed
     return null
   } catch {
     return null
   }
+}
+
+/**
+ * 物件目前的 ETag（單段上傳＝內容 md5），走 Storage 的 list()——那是查 DB 的
+ * storage.objects，不經 CDN，永遠是最新。物件不存在 → null；multipart 的
+ * ETag 不是純 md5（帶 -N）→ 回 null 代表無法比對。
+ */
+async function objectContentMd5(prefix: string, name: string): Promise<string | null | undefined> {
+  const { data, error } = await storage().list(prefix, { limit: 1000, search: name })
+  if (error) throw new Error(`backup-snapshot (list ${prefix}/${name}): ${error.message}`)
+  const f = (data ?? []).find((x) => x.name === name && x.id !== null)
+  if (!f) return null
+  const raw = (f.metadata as { eTag?: string } | null | undefined)?.eTag
+  const cleaned = raw ? raw.replace(/^W\//, "").replace(/"/g, "") : ""
+  return /^[0-9a-f]{32}$/.test(cleaned) ? cleaned : undefined
+}
+
+export interface ReadManifestOptions {
+  /**
+   * 最多等多久讓 CDN 追上（毫秒）。Supabase Storage 的 `/object/` 下載走 Cloudflare
+   * 快取（cache-control: public, max-age=3600）；同路徑覆寫後，若該物件先前被 signed
+   * URL 抓過，快取失效會慢 16～34 秒（2026-09-15 實測，先刪再寫也一樣）。這段時間
+   * download() 會拿到上一版。這裡用 list() 的 ETag（查 DB、不經 CDN）核對下載內容的
+   * md5，不一致就每 2 秒重讀，直到一致或超時。0 ＝ 只讀一次。
+   */
+  freshWaitMs?: number
+  /** 超時仍不一致時：'throw' 丟 BackupError manifest_stale（503）；'stale' 照回舊版（預設）。 */
+  onStale?: "throw" | "stale"
+}
+
+export interface ReadManifestResult {
+  manifest: SnapshotManifest | null
+  /** true ＝ 超時仍是舊版（download 內容 md5 ≠ list() 的 ETag）。 */
+  stale: boolean
+}
+
+/**
+ * 讀 manifest.json 並核對它是不是最新版（見 ReadManifestOptions）。沒有 manifest → null。
+ * 續打／完成後的回讀一定要用有 freshWaitMs 的版本：拿到上一輪的舊 manifest 接著寫，
+ * 等於把這一輪前面幾張表的紀錄蓋掉。
+ */
+export async function readManifestChecked(tenantId: string, period: string, opts: ReadManifestOptions = {}): Promise<ReadManifestResult> {
+  const prefix = periodPrefix(tenantId, period)
+  const path = manifestPathOf(tenantId, period)
+  const deadline = Date.now() + (opts.freshWaitMs ?? 0)
+  let lastStale: SnapshotManifest | null = null
+  for (let attempt = 1; ; attempt++) {
+    const expected = await objectContentMd5(prefix, MANIFEST_FILE)
+    if (expected === null) return { manifest: null, stale: false }
+    const { data, error } = await storage().download(path)
+    if (!error && data) {
+      const buf = Buffer.from(await data.arrayBuffer())
+      const parsed = parseManifest(buf)
+      if (expected === undefined || md5(buf) === expected) return { manifest: parsed, stale: false }
+      lastStale = parsed
+    }
+    // list() 說有、download 卻拿不到（CDN 負向快取）或內容是舊版 → 等 CDN 追上
+    if (Date.now() >= deadline) {
+      logger.warn({ tenantId, period, attempt, expected, hadBody: !error && !!data }, "backup-snapshot: manifest.json read is stale (CDN lag) — timed out waiting")
+      if (opts.onStale === "throw") throw new BackupError("manifest_stale", 503, { tenantId, period })
+      return { manifest: lastStale, stale: true }
+    }
+    await new Promise((r) => setTimeout(r, 2000))
+  }
+}
+
+export async function readManifest(tenantId: string, period: string, opts: ReadManifestOptions = {}): Promise<SnapshotManifest | null> {
+  return (await readManifestChecked(tenantId, period, opts)).manifest
 }
 
 async function writeManifest(manifest: SnapshotManifest): Promise<string> {
@@ -317,15 +424,38 @@ async function writeManifest(manifest: SnapshotManifest): Promise<string> {
   return path
 }
 
-/** 同 period 重跑＝覆蓋：先把資料夾清空，舊 run 的多餘 part 檔才不會殘留。 */
-async function clearPeriodFolder(tenantId: string, period: string): Promise<void> {
-  const prefix = periodPrefix(tenantId, period)
+/** 上一輪的 manifest 在新一輪跑完之前的暫存名（新一輪中途失敗時，上一份還對得出來）。 */
+export const PREVIOUS_MANIFEST_FILE = "manifest.prev.json"
+
+/**
+ * 同 period 重跑＝覆蓋，但**不先清資料夾**：新檔用 upsert 直接蓋過同名舊檔，
+ * 中途失敗（Vercel 逾時、呼叫端沒續打）時上一份的資料檔還在。上一輪的
+ * manifest.json 會被進行中的 manifest 蓋掉，所以先另存成 manifest.prev.json，
+ * 讓上一份仍可核對（rows／sha256）。真正的清理在 pruneStaleFiles（完成後才做）。
+ */
+async function stashPreviousManifest(tenantId: string, period: string): Promise<void> {
+  const prev = await readManifest(tenantId, period)
+  if (!prev) return
+  const path = `${periodPrefix(tenantId, period)}/${PREVIOUS_MANIFEST_FILE}`
+  const { error } = await storage().upload(path, Buffer.from(JSON.stringify(prev, null, 2)), { contentType: "application/json", upsert: true })
+  if (error) throw new Error(`backup-snapshot (stash previous manifest ${path}): ${error.message}`)
+}
+
+/**
+ * 本輪完成後才刪「不在新 manifest 裡的舊檔」（上一輪多出來的 part 檔、
+ * manifest.prev.json）。資料夾裡剩下的就是 manifest.json＋它列出的檔案。
+ */
+async function pruneStaleFiles(manifest: SnapshotManifest): Promise<string[]> {
+  const prefix = periodPrefix(manifest.tenantId, manifest.period)
   const { data, error } = await storage().list(prefix, { limit: 1000 })
   if (error) throw new Error(`backup-snapshot (list ${prefix}): ${error.message}`)
-  const paths = (data ?? []).filter((f) => f.id !== null).map((f) => `${prefix}/${f.name}`)
-  if (paths.length === 0) return
-  const { error: rmErr } = await storage().remove(paths)
-  if (rmErr) throw new Error(`backup-snapshot (clear ${prefix}): ${rmErr.message}`)
+  const keep = new Set<string>([MANIFEST_FILE])
+  for (const t of manifest.tables) for (const f of t.files) keep.add(f.path)
+  const stale = (data ?? []).filter((f) => f.id !== null && !keep.has(f.name)).map((f) => f.name)
+  if (stale.length === 0) return []
+  const { error: rmErr } = await storage().remove(stale.map((name) => `${prefix}/${name}`))
+  if (rmErr) throw new Error(`backup-snapshot (prune ${prefix}): ${rmErr.message}`)
+  return stale
 }
 
 /** count(*)；表不存在 → null。 */
@@ -370,7 +500,8 @@ async function snapshotTable(
   manifest: SnapshotManifest,
   hasBudget: () => boolean,
 ): Promise<TableOutcome> {
-  const pageSize = spec.pageSize ?? SNAPSHOT_PAGE_SIZE
+  // 表級覆寫只准往下調：超過 PostgREST max-rows 的頁會被靜默截短（C3 驗收的根因）。
+  const pageSize = Math.min(spec.pageSize ?? SNAPSHOT_PAGE_SIZE, SNAPSHOT_MAX_PAGE_SIZE)
   const prefix = periodPrefix(tenantId, period)
   let entry = manifest.tables.find((t) => t.name === spec.name)
   if (!entry || startOffset === 0) {
@@ -388,13 +519,17 @@ async function snapshotTable(
     entry.expectedRows = count
     entry.pages = Math.max(1, Math.ceil(count / pageSize))
   }
+  const expectedRows = entry.expectedRows ?? 0
 
   let offset = startOffset
   let rowsWritten = 0
   for (;;) {
     const rows = await fetchPage(spec, tenantId, offset, pageSize)
     if (rows.length === 0 && offset > 0) break
-    const pageNo = Math.floor(offset / pageSize)
+    // 檔名依「這張表已寫出幾個檔」流水編號（不是 offset ÷ pageSize）：游標是按實際
+    // 拿到的列數前進的，就算某頁被截短也不會跳號或漏列。續打時 entry.files 從
+    // manifest 讀回，接著往下編；同一游標重送會蓋掉同名檔，不會多出一份。
+    const pageNo = entry.files.length
     const fileName = entry.pages === 1 && pageNo === 0 ? `${spec.name}.json.gz` : `${spec.name}.part-${String(pageNo + 1).padStart(4, "0")}.json.gz`
     const gz = gzipSync(Buffer.from(JSON.stringify(rows)))
     const { error } = await storage().upload(`${prefix}/${fileName}`, gz, { contentType: "application/gzip", upsert: true })
@@ -404,11 +539,21 @@ async function snapshotTable(
     entry.rows = entry.files.reduce((s, f) => s + f.rows, 0)
     entry.bytes = entry.files.reduce((s, f) => s + f.bytes, 0)
     rowsWritten += rows.length
-    offset += pageSize
-    if (rows.length < pageSize) break
+    offset += rows.length
+    // 短頁通常代表到底了；但只有「已蓋到 count(*)」才算數——PostgREST max-rows 比
+    // pageSize 小時頁會被截短，這時 offset 還沒到 expectedRows，要繼續翻，直到蓋滿
+    // 或真的沒資料（下一頁 0 列，迴圈頂端 break）。
+    if (rows.length < pageSize && (rows.length === 0 || offset >= expectedRows)) break
     if (!hasBudget()) return { completed: false, rowsWritten, nextOffset: offset }
   }
   entry.sha256 = entry.files.length === 1 ? entry.files[0].sha256 : sha256(Buffer.from(entry.files.map((f) => f.sha256).join("\n")))
+  entry.pages = entry.files.length
+  // 完整性：實際寫出的列數少於開始時的 count(*) → 有列沒備到，這張表與整份
+  // manifest 都不可標 complete。多於 count(*)（翻頁中有新列插入）不算漏。
+  entry.incomplete = entry.rows < expectedRows
+  if (entry.incomplete) {
+    logger.error({ table: spec.name, tenantId, rows: entry.rows, expectedRows }, "backup-snapshot: rows written < count(*) — table incomplete")
+  }
   entry.completedAt = new Date().toISOString()
   return { completed: true, rowsWritten, nextOffset: 0 }
 }
@@ -452,10 +597,15 @@ export async function runSnapshotStep(input: SnapshotStepInput): Promise<Snapsho
   const fresh = tableIdx === 0 && offset === 0
   let manifest: SnapshotManifest
   if (fresh) {
-    await clearPeriodFolder(tenantId, period)
+    // 不清資料夾：新檔直接蓋舊檔，完成後才 pruneStaleFiles；上一份 manifest 先暫存。
+    await stashPreviousManifest(tenantId, period)
     manifest = newManifest(tenantId, period)
   } else {
-    manifest = (await readManifest(tenantId, period)) ?? newManifest(tenantId, period)
+    // 續打：一定要拿到上一步剛寫的 manifest（ETag 核對＋等 CDN），拿到上一輪的舊版
+    // 接著寫會把這一輪前面幾張表的紀錄蓋掉；等不到就 503，呼叫端稍後再續打同一游標。
+    manifest =
+      (await readManifest(tenantId, period, { freshWaitMs: MANIFEST_FRESH_WAIT_RESUME_MS, onStale: "throw" })) ??
+      newManifest(tenantId, period)
     manifest.status = "running"
   }
 
@@ -482,13 +632,26 @@ export async function runSnapshotStep(input: SnapshotStepInput): Promise<Snapsho
     }
   }
 
-  manifest.status = "complete"
+  // 任一表 rows < expectedRows → 整份 incomplete，絕不寫 complete（C3 驗收：以前
+  // PostgREST 截頁後仍標 complete，等於用一份缺資料的備份騙自己）。
+  const incompleteTables = manifest.tables.filter((t) => t.incomplete).map((t) => t.name)
+  manifest.status = incompleteTables.length > 0 ? "incomplete" : "complete"
   manifest.generatedAt = new Date().toISOString()
   const manifestPath = await writeManifest(manifest)
-  logger.info(
-    { tenantId, period, tables: manifest.totals.tables, rows: manifest.totals.rows, bytes: manifest.totals.bytes },
-    "backup-snapshot: tenant snapshot complete",
+  // 完成後才清掉不在新 manifest 裡的舊檔（上一輪多出來的 part 檔、manifest.prev.json）。
+  const pruned = await pruneStaleFiles(manifest)
+  logger[manifest.status === "complete" ? "info" : "error"](
+    { tenantId, period, status: manifest.status, incompleteTables, pruned, tables: manifest.totals.tables, rows: manifest.totals.rows, bytes: manifest.totals.bytes },
+    manifest.status === "complete" ? "backup-snapshot: tenant snapshot complete" : "backup-snapshot: tenant snapshot INCOMPLETE — rows < count(*) on some tables",
   )
+  // 同月重跑＝覆寫同路徑：呼叫端下一秒就會 GET /backups 看結果，先在這裡把 CDN 等到
+  // 追上（剩餘的硬上限時間內），清單才不會顯示上一輪的 manifest。等不到只記 log，
+  // 不影響 done——資料已經寫對了，清單端 readManifestChecked 會再等一段並標 stale。
+  const remaining = SNAPSHOT_STEP_HARD_LIMIT_MS - (Date.now() - started)
+  if (remaining > 0) {
+    const check = await readManifestChecked(tenantId, period, { freshWaitMs: remaining })
+    if (check.stale) logger.warn({ tenantId, period, waitedMs: remaining }, "backup-snapshot: manifest.json still stale on CDN after completion")
+  }
 
   if (input.allTenants) {
     const next = await nextActiveTenantId(tenantId)
@@ -508,6 +671,8 @@ export interface SnapshotStoredFile {
 export interface SnapshotPeriodSummary {
   period: string
   manifest: SnapshotManifest | null
+  /** true ＝ 回的是 CDN 上的舊版 manifest（剛重跑完、失效還沒追上），幾十秒後再讀就是新的。 */
+  manifestStale?: boolean
   files: SnapshotStoredFile[]
 }
 
@@ -526,8 +691,11 @@ export async function listSnapshotPeriods(tenantId: string): Promise<SnapshotPer
   const periods = (data ?? []).filter((e) => e.id === null && periodRe.test(e.name)).map((e) => e.name)
   const out: SnapshotPeriodSummary[] = []
   for (const period of periods) {
-    const [manifest, files] = await Promise.all([readManifest(tenantId, period), listPeriodFiles(tenantId, period)])
-    out.push({ period, manifest, files })
+    const [checked, files] = await Promise.all([
+      readManifestChecked(tenantId, period, { freshWaitMs: MANIFEST_FRESH_WAIT_LIST_MS }),
+      listPeriodFiles(tenantId, period),
+    ])
+    out.push({ period, manifest: checked.manifest, ...(checked.stale ? { manifestStale: true } : {}), files })
   }
   return out
 }

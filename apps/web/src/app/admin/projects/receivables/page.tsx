@@ -144,7 +144,14 @@ export default function ReceivablesPage() {
                         {r.code ?? "—"}
                       </Link>
                     </td>
-                    <td className="py-1.5 pr-2 font-medium text-gray-900">{r.projectName}</td>
+                    <td className="py-1.5 pr-2 font-medium text-gray-900">
+                      {r.projectName}
+                      {r.archived && (
+                        <span className="ml-1 rounded bg-gray-100 px-1 text-[10px] font-normal text-gray-500" title="此案已封存（例如已被追加減案取代），但這期還沒收到款，仍要追">
+                          已封存
+                        </span>
+                      )}
+                    </td>
                     <td className="py-1.5 pr-2 text-gray-600">{r.clientName ?? "—"}</td>
                     <td className="py-1.5 pr-2">
                       <span className={`rounded-full px-2 py-0.5 text-xs ${RECEIVABLE_STATE_BADGE_CLASS[r.state]}`}>

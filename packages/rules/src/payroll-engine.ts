@@ -9,8 +9,15 @@
  * (預設 240,四捨五入到小數 4 位;亞斯特 37000 ÷ 240 = 154.1667)。
  *
  * 本俸依 method 三選一:'monthly' 本薪固定;'by_attendance_days' 出勤天數×日薪;
- * 'hourly'(工讀生/Part-time,C5) Σ當月工作分鐘÷60×時薪——此制的 hourlyWage
+ * 'hourly'(工讀生/Part-time,C5) Σ當月「正常工時分鐘」÷60×時薪——此制的 hourlyWage
  * 必須明示且 >0,不接受用 baseSalary÷divisor 反推,沒填直接丟錯。
+ *
+ * 時薪制不重複給付、不重複扣款 (C5 驗收修正):
+ *   • 正常工時分鐘 = workedMinutes − overtimeMinutes (下限 0)。worktime-engine 在
+ *     例假/固定假把整天工時都放進 overtimeMinutes,所以假日出勤在本俸裡是 0 分鐘,
+ *     只走下面「加班費」那條倍率一次;平日超過 dailyRegularHours 的段同理。
+ *   • 請假扣款/遲到早退扣款對時薪制一律 0:本俸本來就只付有做的分鐘,沒做的分鐘
+ *     沒付過,再扣一次就是雙扣。(月薪制/出勤天數制照舊。)
  *
  * 代墊支出刻意不進 gross:那是代收代付、非薪資所得,課稅基礎不同。
  */
@@ -115,16 +122,24 @@ export function computePayslip(
   const hourlyWage = resolveHourlyWage(salary, rules);
   const flatHourly = rules.payroll.overtimeFlatHourly;
 
+  const isHourly = method === "hourly";
+
   // --- 本俸 -------------------------------------------------------------
   // 出勤天數 = 當天有實際工時的天數 (by_attendance_days 制用)。
   const attendanceDays = days.filter((d) => d.workedMinutes > 0).length;
-  // 時薪制本俸 = Σ 當月工作分鐘 ÷ 60 × 時薪 (無條件依實際打卡工時計,不折算天數)。
-  const totalWorkedMinutes = days.reduce((acc, d) => acc + d.workedMinutes, 0);
+  // 時薪制本俸 = Σ 當月「正常工時分鐘」÷ 60 × 時薪。正常工時 = workedMinutes −
+  // overtimeMinutes:加班段 (平日超時、例假/固定假整天) 只在下面加班費那條以倍率
+  // 付一次,不可再以 1 倍算進本俸 (否則 10h 平日 = 10h×1 + 2h×1.34,雙重給付)。
+  // overtimeMinutes 經最低分鐘/保底管線後可能大於 workedMinutes → 下限 0。
+  const totalRegularMinutes = days.reduce(
+    (acc, d) => acc + Math.max(0, d.workedMinutes - d.overtimeMinutes),
+    0,
+  );
   const base =
     method === "by_attendance_days"
       ? round(attendanceDays * (salary.dailyWage ?? 0))
-      : method === "hourly"
-        ? round((totalWorkedMinutes / 60) * hourlyWage)
+      : isHourly
+        ? round((totalRegularMinutes / 60) * hourlyWage)
         : round(salary.baseSalary ?? 0);
 
   // --- 加班費 / 補休 -----------------------------------------------------
@@ -230,9 +245,10 @@ export function computePayslip(
   // 請假扣款 = Σ 請假分鐘 ÷ 60 × 時薪 × deductRate;比例由呼叫端隨每筆帶入
   // (事假 1、病假 0.5…),同 code 合併成一條明細。總額以未取整的合計四捨五入到分,
   // 逐 code 明細各自取整後,若與總額差 1 分則調整最後一條,確保 lines 加總對得上。
+  // 時薪制 (isHourly) 不扣:本俸只付實際工作分鐘,請假的分鐘從未付過,再扣即雙扣。
   const leaveByCode = new Map<string, number>();
   let leaveRaw = 0;
-  for (const day of days) {
+  for (const day of isHourly ? [] : days) {
     for (const leave of day.leaves ?? []) {
       const amount = (leave.minutes / 60) * hourlyWage * leave.deductRate;
       if (amount === 0) continue;
@@ -258,13 +274,15 @@ export function computePayslip(
 
   // 遲到早退扣款 = Σ(遲到 + 早退分鐘) ÷ 60 × 時薪;只在規則開啟時計。
   // (與全勤階梯扣款是兩回事:那個扣的是全勤獎金,這個扣的是本俸。)
+  // 時薪制不扣:遲到/早退的分鐘不在 workedMinutes 裡,本俸已經少付了,不再扣。
   const lateEarlyMinutes = days.reduce(
     (acc, d) => acc + d.lateMinutes + (d.earlyLeaveMinutes ?? 0),
     0,
   );
-  const lateEarlyDeduction = resolveLateEarlyDeductionEnabled(rules)
-    ? round((lateEarlyMinutes / 60) * hourlyWage)
-    : 0;
+  const lateEarlyDeduction =
+    !isHourly && resolveLateEarlyDeductionEnabled(rules)
+      ? round((lateEarlyMinutes / 60) * hourlyWage)
+      : 0;
 
   // --- 應扣項目 ----------------------------------------------------------
   // 保費以「投保薪資」為基數(非本俸)。缺任一設定就當 0,不臆測。

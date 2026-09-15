@@ -47,7 +47,7 @@ export const projectsRouter = Router()
 // ⚠️ 必須是單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別，
 // 相接後會退化成 GenericStringError，下游的 as ProjectRow 全數失效。
 const PROJECT_COLS =
-  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, starts_on, ends_on, opened_on, dept_id, lead_emp_id, share_mode, bonus_pool, created_at, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers"
+  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, archive_reason, starts_on, ends_on, opened_on, dept_id, lead_emp_id, share_mode, bonus_pool, created_at, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers"
 
 /** 預先取號的專案名稱——之後 PATCH 填真名時自動清掉 reserved_at。 */
 export const RESERVED_NAME = "（預先取號）"
@@ -169,6 +169,8 @@ type ProjectRow = {
   status_effective_on: string | null
   status_changed_at: string | null
   archived_at: string | null
+  /** 封存理由（C2 複製封存原案時寫「已由 {新 code} 取代：{理由}」；自動封存／手動封存亦可填）。 */
+  archive_reason: string | null
   starts_on: string | null
   ends_on: string | null
   /** 開案日（A5）。可空：既有資料由 sql/0031 backfill；新案由 API 預設今天。 */
@@ -245,6 +247,7 @@ function serializeProject(row: ProjectRow, opts: { finance: boolean; hasSignedCo
     statusEffectiveOn: row.status_effective_on,
     statusChangedAt: row.status_changed_at,
     archivedAt: row.archived_at,
+    archiveReason: row.archive_reason ?? null,
     startsOn: row.starts_on,
     endsOn: row.ends_on,
     /** 開案日期（A5）。全員可見，不受 finance 收斂——跟起訖日同一類。 */

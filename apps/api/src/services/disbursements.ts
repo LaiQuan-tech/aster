@@ -796,6 +796,8 @@ export type PayableRow = {
   projectReceiptProgressPct: number | null
   projectReceivedTotal: number
   projectAmountUntaxed: number | null
+  /** 該案已封存（C2 複製封存原案後，未付期款仍列，前端灰標）。 */
+  archived: boolean
 }
 
 export type PayableGroup = {
@@ -822,9 +824,14 @@ type PayableScope = {
   payments: PaymentRow[]
 }
 
-/** 未封存專案 → 未刪副委託 → 期款，一次批次撈。 */
+/**
+ * 專案（含已封存）→ 未刪副委託 → 期款，一次批次撈。
+ * 封存案不濾：C2 複製案預設封存原案，原案還沒付的副委託期款不能因此從應付清單消失
+ * （封存是可見性，不是「錢不用付了」）。buildPayables 只列未付期款，所以已付完的封存案
+ * 自然不會出現；每列帶 archived 讓前端打灰標。
+ */
 async function loadPayableScope(tenantId: string, opts: { vendorId?: string; projectId?: string }): Promise<PayableScope> {
-  let pq = supabaseAdmin.from("projects").select(PROJECT_LITE_COLS).eq("tenant_id", tenantId).is("archived_at", null)
+  let pq = supabaseAdmin.from("projects").select(PROJECT_LITE_COLS).eq("tenant_id", tenantId)
   if (opts.projectId) pq = pq.eq("id", opts.projectId)
   const { data: projData, error: projErr } = await pq
   if (projErr) throw new Error(`payables (projects): ${projErr.message}`)
@@ -951,6 +958,7 @@ export async function buildPayables(
         projectReceiptProgressPct: prog?.pct ?? null,
         projectReceivedTotal: prog?.received ?? 0,
         projectAmountUntaxed: prog?.amountUntaxed ?? null,
+        archived: project.archived_at !== null,
       })
     }
   }

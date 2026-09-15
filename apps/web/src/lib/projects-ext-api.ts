@@ -771,6 +771,8 @@ export interface ReceivableRow {
   /** 該筆所屬專案整體的未收比例，用於解讀為何排序在前面。 */
   projectUnreceivedPct: number | null
   projectCode: string | null
+  /** 該案已封存但仍有未收（C2 複製封存原案後，未收期別照追）；列上打灰標。 */
+  archived?: boolean
 }
 
 export interface ReceivablesResponse {

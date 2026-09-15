@@ -50,6 +50,12 @@ attendanceRouter.post(
       return
     }
     const { employeeId, from, to } = parsed.data
+    // C4：規則版本是「依計算月份」選的（payroll-inputs.pickRuleConfigVersion），一次結算
+    // 跨兩個月會讓兩個月份混用同一版規則。手動結算限同月；每日 cron 是 from=to，不受影響。
+    if (from.slice(0, 7) !== to.slice(0, 7)) {
+      res.status(400).json({ error: "range_must_be_same_month", from, to })
+      return
+    }
 
     try {
       const result = await settleAttendance({ tenantId, from, to, employeeId })

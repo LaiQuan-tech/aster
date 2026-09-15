@@ -92,7 +92,8 @@ export type PayrollMethod = "monthly" | "by_attendance_days" | "hourly";
  * 就無法折算 → computePayslip 丟錯。
  * baseSalary 供月薪制本俸;dailyWage 供按出勤天數制本俸。
  * method='hourly'(工讀生/Part-time,C5) 時 hourlyWage 兼作本俸基準:
- * 本俸 = Σ當月 AttendanceDay.workedMinutes ÷ 60 × hourlyWage。此制不接受
+ * 本俸 = Σ當月 (workedMinutes − overtimeMinutes) ÷ 60 × hourlyWage,加班/假日
+ * 段只走加班費倍率一次;請假與遲到早退不另扣 (那些分鐘本俸沒付過)。此制不接受
  * 用 baseSalary ÷ divisor 反推時薪——未明示 hourlyWage(>0) 直接丟錯,不猜。
  * method 若提供則覆蓋 rules.payroll.method (允許個別員工不同制)。
  */

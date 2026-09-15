@@ -1018,10 +1018,15 @@ describe("規則五 亞斯特 115-06 五份出勤表", () => {
 
 // =========================================================================
 // 規則六：時薪制 (hourly；工讀生/Part-time，C5)
-//   本俸 = Σ 當月工作分鐘 ÷ 60 × 時薪 (不看 baseSalary/dailyWage)
+//   本俸 = Σ 當月「正常工時分鐘」÷ 60 × 時薪 (不看 baseSalary/dailyWage)
 //   時薪 200、8h×20 天 → 本俸 = 160h × 200 = 32000
 //   0 天出勤 → 本俸 0
 //   hourlyWage <= 0 (含 undefined) 時直接丟錯，不得以 baseSalary÷divisor 反推
+//   驗收修正 (C5 雙重給付/雙扣)：
+//     平日 10h → 本俸 8h×200=1600 + 加班 2h×200×1.34=536 = 2136 (不是 2000+536)
+//     例假日 8h → 本俸 0、只付假日倍率一次 8h×200×1.67=2672
+//     請 4h 事假 → 本俸只算有做的 4h=800，不再扣 800
+//     遲到 30 分 (規則開啟) → 不扣遲到早退 (本俸已少付那 30 分)
 // =========================================================================
 describe("規則六 時薪制(工讀生/Part-time)", () => {
   const rules: RuleConfig = parseRuleConfig({
@@ -1081,5 +1086,109 @@ describe("規則六 時薪制(工讀生/Part-time)", () => {
     const salary: SalaryStructure = { hourlyWage: 150 }; // 不覆寫 method，吃租戶預設
     const slip = computePayslip(daysOf8h(10), salary, hourlyDefaultRules);
     expect(slip.base).toBe(150 * 8 * 10); // 80h × 150 = 12000
+  });
+
+  // ── 驗收修正：加班／假日不重複給付、請假／遲到不重複扣 ──────────────────
+  describe("加班／假日只走倍率一次；請假／遲到早退不再扣 (C5 驗收修正)", () => {
+    const otRules: RuleConfig = parseRuleConfig({
+      attendance_bonus: { base: 0, tiers: [{ lateMinutesUpTo: null, deduct: 0 }] },
+      overtime: {
+        rules: [
+          {
+            when: "weekday_ot",
+            multiplier: 1.34,
+            tiers: [{ uptoHours: 2, multiplier: 1.34 }, { multiplier: 1.67 }],
+          },
+          { when: "rest_day", multiplier: 1.67 },
+        ],
+      },
+      night: { window: { from: "00:00", to: "08:30" }, multiplier: 2 },
+      payroll: { method: "monthly", dailyRegularHours: 8 },
+      leave_deduction: { lateEarly: { enabled: true } },
+    });
+    const salary: SalaryStructure = { method: "hourly", hourlyWage: 200 };
+
+    it("平日 10h (加班 2h) → 本俸 1600 + 加班費 536 = 2136；本俸不含加班段", () => {
+      const day: AttendanceDay = {
+        date: "2026-05-04",
+        workedMinutes: 600,
+        lateMinutes: 0,
+        overtimeMinutes: 120,
+        nightMinutes: 0,
+        dayType: "workday",
+      };
+      const slip = computePayslip([day], salary, otRules);
+      expect(slip.base).toBe(1600); // 8h × 200，不是 10h × 200 = 2000
+      expect(slip.overtimePay).toBe(536); // 2h × 200 × 1.34
+      expect(slip.gross).toBe(2136);
+      expect(slip.lines.find((l) => l.label === "本俸(時薪)")?.amount).toBe(1600);
+      expect(slip.lines.find((l) => l.label === "加班費")?.amount).toBe(536);
+    });
+
+    it("例假日 8h → 本俸 0、只付假日倍率一次 8h × 200 × 1.67 = 2672", () => {
+      const day: AttendanceDay = {
+        date: "2026-05-03",
+        workedMinutes: 480,
+        lateMinutes: 0,
+        overtimeMinutes: 480, // worktime-engine：例假日整天工時都是加班分鐘
+        nightMinutes: 0,
+        dayType: "rest_day",
+      };
+      const slip = computePayslip([day], salary, otRules);
+      expect(slip.base).toBe(0);
+      expect(slip.overtimePay).toBe(2672);
+      expect(slip.gross).toBe(2672);
+      expect(slip.overtimeSegments).toEqual([{ when: "rest_day", multiplier: 1.67, hours: 8, amount: 2672 }]);
+    });
+
+    it("保底管線讓 overtimeMinutes > workedMinutes 時，正常工時下限 0 (不出負本俸)", () => {
+      const day: AttendanceDay = {
+        date: "2026-05-05",
+        workedMinutes: 60,
+        lateMinutes: 0,
+        overtimeMinutes: 480, // 固定假日做 1 給 8 的保底
+        nightMinutes: 0,
+        dayType: "fixed_holiday",
+      };
+      const slip = computePayslip([day], salary, otRules);
+      expect(slip.base).toBe(0);
+    });
+
+    it("請 4h 事假 (deductRate 1) → 本俸只算有做的 4h = 800，請假扣款 0 (不再扣 800)", () => {
+      const day: AttendanceDay = {
+        date: "2026-05-06",
+        workedMinutes: 240,
+        lateMinutes: 0,
+        overtimeMinutes: 0,
+        nightMinutes: 0,
+        dayType: "workday",
+        leaves: [{ code: "personal", minutes: 240, deductRate: 1 }],
+      };
+      const slip = computePayslip([day], salary, otRules);
+      expect(slip.base).toBe(800);
+      expect(slip.leaveDeduction).toBe(0);
+      expect(slip.lines.some((l) => l.label.startsWith("請假扣款"))).toBe(false);
+      expect(slip.net).toBe(800);
+      // 對照組：同一天換成月薪制，請假扣款照扣 4h × 200 = 800 (舊行為不受影響)
+      const monthly = computePayslip([day], { method: "monthly", baseSalary: 36000, hourlyWage: 200 }, otRules);
+      expect(monthly.leaveDeduction).toBe(800);
+    });
+
+    it("遲到 30 分 (lateEarly 規則開啟) → 遲到早退扣款 0；月薪制對照組扣 100", () => {
+      const day: AttendanceDay = {
+        date: "2026-05-07",
+        workedMinutes: 450, // 8h 班少做 30 分
+        lateMinutes: 30,
+        overtimeMinutes: 0,
+        nightMinutes: 0,
+        dayType: "workday",
+      };
+      const slip = computePayslip([day], salary, otRules);
+      expect(slip.base).toBe(1500); // 7.5h × 200
+      expect(slip.lateEarlyDeduction).toBe(0);
+      expect(slip.lines.some((l) => l.label === "遲到早退扣款")).toBe(false);
+      const monthly = computePayslip([day], { method: "monthly", baseSalary: 36000, hourlyWage: 200 }, otRules);
+      expect(monthly.lateEarlyDeduction).toBe(100); // 0.5h × 200
+    });
   });
 });

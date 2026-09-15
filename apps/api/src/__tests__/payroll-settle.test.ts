@@ -275,6 +275,28 @@ describe("F2 salary structures — HR upsert + read", () => {
       .send({ hourlyWage: 999 })
     expect(res.status).toBe(403)
   })
+
+  it("★ C5：method=hourly 沒帶 hourlyWage 或 <=0 → 400 hourly_wage_required；帶 >0 → 200", async () => {
+    const put = (body: Record<string, unknown>) =>
+      request(app).put(`/salary/${aEmployeeId}`).set("Authorization", `Bearer ${A.adminToken}`).send(body)
+    const missing = await put({ method: "hourly" })
+    expect(missing.status).toBe(400)
+    expect(missing.body.error).toBe("hourly_wage_required")
+    const zero = await put({ method: "hourly", hourlyWage: 0 })
+    expect(zero.status).toBe(400)
+    expect(zero.body.error).toBe("hourly_wage_required")
+    // 沒寫進去：method 仍是上面存的 monthly
+    const { data: before } = await supabaseAdmin.from("salary_structures").select("method").eq("tenant_id", A.tenantId).eq("employee_id", aEmployeeId).single()
+    expect(before!.method).toBe("monthly")
+
+    const ok = await put({ method: "hourly", hourlyWage: 190 })
+    expect(ok.status).toBe(200)
+    const { data: after } = await supabaseAdmin.from("salary_structures").select("method, hourly_wage").eq("tenant_id", A.tenantId).eq("employee_id", aEmployeeId).single()
+    expect(after!.method).toBe("hourly")
+    expect(Number(after!.hourly_wage)).toBe(190)
+    // 還原成月薪制，後面的案例不受影響
+    expect((await put({ method: "monthly", hourlyWage: 200 })).status).toBe(200)
+  })
 })
 
 describe("F2 worktime settlement — wired @hr/rules engine", () => {
@@ -391,6 +413,21 @@ describe("F2 authorization & cross-tenant isolation", () => {
       .set("Authorization", `Bearer ${aEmployeeToken}`)
       .send({ from: "2026-08-01", to: "2026-08-31" })
     expect(res.status).toBe(403)
+  })
+
+  it("★ C4：手動結算 from/to 跨月 → 400 range_must_be_same_month（規則版本依月份選，不可跨月混版）；同月照常 200", async () => {
+    const cross = await request(app)
+      .post("/attendance/settle")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ from: "2026-08-31", to: "2026-09-01" })
+    expect(cross.status).toBe(400)
+    expect(cross.body.error).toBe("range_must_be_same_month")
+    // 每日 cron 是 from=to，同月單日不受影響
+    const sameDay = await request(app)
+      .post("/attendance/settle")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ from: "2026-08-31", to: "2026-08-31" })
+    expect(sameDay.status).toBe(200)
   })
 
   it("A's HR GET /attendance-days never sees tenant B's rows", async () => {

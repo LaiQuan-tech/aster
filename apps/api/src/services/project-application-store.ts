@@ -833,6 +833,12 @@ export type ReceivableRow = {
   overdueDays: number | null
   projectUnreceivedPct: number | null
   projectCode: string | null
+  /**
+   * 該案已封存（archived_at 非 null）。C2 複製案預設封存原案，但原案已請款未收的
+   * 期別還是要追——封存是「列表要不要看到」，不是「錢不用收了」。未封存 ∪ 封存但
+   * 仍有未收的專案都列，前端以灰標區分。
+   */
+  archived: boolean
 }
 
 export async function buildReceivables(
@@ -843,9 +849,8 @@ export async function buildReceivables(
     .from("projects")
     .select("id, name, code, client_id, archived_at")
     .eq("tenant_id", tenantId)
-    .is("archived_at", null)
   if (projErr) throw new Error(`buildReceivables (projects): ${projErr.message}`)
-  const projects = ((projData ?? []) as Array<{ id: string; name: string; code: string | null; client_id: string | null }>)
+  const projects = ((projData ?? []) as Array<{ id: string; name: string; code: string | null; client_id: string | null; archived_at: string | null }>)
     .filter((p) => opts.projectIds === null || opts.projectIds.has(p.id))
   const ids = projects.map((p) => p.id)
   if (ids.length === 0) return []
@@ -863,6 +868,18 @@ export async function buildReceivables(
   for (const p of projects) {
     const pb = billingsBy.get(p.id) ?? []
     if (pb.length === 0) continue
+    const archived = p.archived_at !== null
+    // 封存案只在「仍有未收」時列（open 期別＝未入帳或部分入帳）；已收完的封存案照舊不出現，
+    // 不管 status=open|all——封存本來就是要它從清單消失，例外只給還沒收到的錢。
+    if (archived) {
+      const hasOpen = pb.some((b) => {
+        const amount = effectiveBillingAmount(b)
+        const received = b.received_on ? (num(b.received_amount) ?? 0) : 0
+        const unreceived = amount === null ? null : Math.max(0, amount - received)
+        return b.received_on === null || (unreceived !== null && unreceived > 0)
+      })
+      if (!hasOpen) continue
+    }
     const summary = summarizeContracts(contractsBy.get(p.id) ?? [])
     const { amountUntaxed, amountSource } = resolveAmountUntaxed(summary.total, summary.latestQuotation)
     const money = computeMoney({
@@ -902,6 +919,7 @@ export async function buildReceivables(
         overdueDays: overdueDays(b.invoiced_on ?? null, b.received_on ?? null, opts.today, "invoiced", null, unreceived),
         projectUnreceivedPct: projectPct,
         projectCode: p.code,
+        archived,
       })
     }
   }

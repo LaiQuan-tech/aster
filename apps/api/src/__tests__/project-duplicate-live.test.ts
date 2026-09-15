@@ -107,8 +107,10 @@ afterAll(async () => {
     await supabaseAdmin.from("clients").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("companies").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("vendors").delete().eq("tenant_id", tid)
-    await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
+    // audit_logs 放在 employees 之後、tenants 之前：刪員工會再觸發 audit trigger 寫新列（employees 掛 audit_all），
+    // 先刪 audit_logs 會留孤兒；tenants 刪掉後 is_disposable_tenant 回 false，append-only trigger 就不放行了。
+    await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("tenants").delete().eq("id", tid)
   }
   for (const uid of createdUserIds) await supabaseAdmin.auth.admin.deleteUser(uid)
@@ -309,6 +311,34 @@ describe("C2-1 複製為追加減（change 120 萬）", () => {
     const all = await asAdmin(request(app).get("/projects?includeArchived=1"))
     expect(all.body.projects.map((p: { id: string }) => p.id)).toContain(mainId)
   })
+
+  it("★ 封存的原案第 1 期已請款未收 → GET /projects/receivables 仍列該期且 archived:true；原案未付的副委託款也仍在 /disbursements/payables 且 archived:true", async () => {
+    const recv = await asAdmin(request(app).get("/projects/receivables"))
+    expect(recv.status).toBe(200)
+    const rows = recv.body.receivables as Array<{ projectId: string; installmentNo: number; archived: boolean; billedOn: string | null; receivedOn: string | null; unreceived: number | null }>
+    const orig1 = rows.find((r) => r.projectId === mainId && r.installmentNo === 1)
+    expect(orig1, "封存原案的第 1 期（已請款未收）必須還在未收清單").toBeDefined()
+    expect(orig1!.archived).toBe(true)
+    expect(orig1!.billedOn).toBe(`${YEAR}-02-01`)
+    expect(orig1!.receivedOn).toBeNull()
+    expect(orig1!.unreceived).toBe(400_000)
+    // 原案第 2 期未請款未收 → 同案仍有未收，一併列（open）；新案 -1 的期別 archived:false
+    expect(rows.find((r) => r.projectId === mainId && r.installmentNo === 2)?.archived).toBe(true)
+    expect(rows.some((r) => r.projectId === dup1Id && r.archived === false)).toBe(true)
+    // GET /projects/:id 回 archiveReason（B4／C 批次：serializeProject 補 archive_reason）
+    const got = await getProject(mainId)
+    expect(got.body.project.archivedAt).not.toBeNull()
+    expect(got.body.project.archiveReason).toBe(`已由 ${dup1Code} 取代：合約由 100 萬變更為 120 萬`)
+    expect((await getProject(dup1Id)).body.project.archiveReason).toBeNull()
+
+    const pay = await asAdmin(request(app).get("/disbursements/payables"))
+    expect(pay.status).toBe(200)
+    const payables = pay.body.payables as Array<{ projectId: string; installmentNo: number; archived: boolean; grossAmount: number }>
+    const origPay = payables.find((p) => p.projectId === mainId)
+    expect(origPay, "封存原案未付的副委託期款必須還在應付清單").toBeDefined()
+    expect(origPay!.archived).toBe(true)
+    expect(origPay!.grossAmount).toBe(300_000)
+  })
 })
 
 describe("C2-2 從新案再複製一次（addition 5 萬，不封存原案）", () => {
@@ -449,5 +479,49 @@ describe("C2-4 變更歷史 GET /projects/:id/lineage", () => {
     const archive = rows.find((r) => r.record_id === mainId && r.action === "UPDATE" && r.new_row?.replaced_by === dup1Id)
     expect(archive).toBeDefined()
     expect(String(archive!.new_row!.archive_reason)).toContain(dup1Code)
+  })
+})
+
+describe("C2-5 封存原案只有 HR 能做：非 HR 的 finance lead 複製 → 原案不封存、回 warnings", () => {
+  it("一般員工設為 -2 的 lead（取得 finance）→ duplicate 預設封存被強制成不封存，archived:null＋warnings:['archive_requires_hr']", async () => {
+    const { error } = await supabaseAdmin.from("projects").update({ lead_emp_id: employeeEmpId }).eq("tenant_id", tenantId).eq("id", dup2Id)
+    expect(error).toBeNull()
+    const res = await asEmployee(request(app).post(`/projects/${dup2Id}/duplicate`)).send({
+      kind: "addition",
+      amount: 1_000,
+      reason: "lead 自己加做一小段",
+      copy: { subcontracts: false, members: false },
+    })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(res.body.archived).toBeNull()
+    expect(res.body.warnings).toEqual(["archive_requires_hr"])
+    expect(res.body.project.code).toBe(`${mainCode}-3`)
+    // 原案 -2 沒被封存
+    const { data: orig } = await supabaseAdmin.from("projects").select("archived_at, archive_reason").eq("id", dup2Id).single()
+    expect(orig!.archived_at).toBeNull()
+    expect(orig!.archive_reason).toBeNull()
+  })
+
+  it("非 HR 明講 archiveOriginal:false → 沒有 warnings；HR 複製時 warnings 為空且照常封存", async () => {
+    const quiet = await asEmployee(request(app).post(`/projects/${dup2Id}/duplicate`)).send({
+      kind: "addition",
+      amount: 1_000,
+      reason: "再加做",
+      archiveOriginal: false,
+      copy: { subcontracts: false, members: false },
+    })
+    expect(quiet.status, JSON.stringify(quiet.body)).toBe(201)
+    expect(quiet.body.warnings).toEqual([])
+    expect(quiet.body.archived).toBeNull()
+
+    const hr = await asAdmin(request(app).post(`/projects/${quiet.body.project.id}/duplicate`)).send({
+      kind: "addition",
+      amount: 500,
+      reason: "HR 複製並封存",
+      copy: { subcontracts: false, members: false },
+    })
+    expect(hr.status, JSON.stringify(hr.body)).toBe(201)
+    expect(hr.body.warnings).toEqual([])
+    expect(hr.body.archived).toEqual({ id: quiet.body.project.id, code: quiet.body.project.code })
   })
 })

@@ -173,8 +173,10 @@ describe.skipIf(!migrated)("獎金季發放批次 — live", () => {
       await supabaseAdmin.from("contracts").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("project_settings").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("projects").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
+      // audit_logs 放在 employees 之後、tenants 之前：刪員工會再觸發 audit trigger 寫新列（employees 掛 audit_all），
+      // 先刪 audit_logs 會留孤兒；tenants 刪掉後 is_disposable_tenant 回 false，append-only trigger 就不放行了。
+      await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("tenants").delete().eq("id", tid)
     }
     for (const uid of createdUserIds) await supabaseAdmin.auth.admin.deleteUser(uid)
@@ -447,8 +449,9 @@ describe.skipIf(!migrated)("查詢分頁：>1000 筆 paid items 不再靜默截�
     await supabaseAdmin.from("bonus_run_items").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("bonus_runs").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("projects").delete().eq("tenant_id", tid)
-    await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
+    // audit_logs 在 employees 之後、tenants 之前（同上方 afterAll 的理由）。
+    await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("tenants").delete().eq("id", tid)
     await supabaseAdmin.auth.admin.deleteUser(uid)
   }, 120_000)
@@ -507,8 +510,9 @@ describe.skipIf(!migrated)("pay 併發：同一 run 兩次同時 pay 只有一�
   afterAll(async () => {
     await supabaseAdmin.from("bonus_run_items").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("bonus_runs").delete().eq("tenant_id", tid)
-    await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
+    // audit_logs 在 employees 之後、tenants 之前（同上方 afterAll 的理由）。
+    await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
     await supabaseAdmin.from("tenants").delete().eq("id", tid)
     await supabaseAdmin.auth.admin.deleteUser(uid)
   }, 30_000)

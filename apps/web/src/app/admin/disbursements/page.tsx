@@ -276,6 +276,11 @@ export default function DisbursementsPage() {
                               <Link href={`/admin/projects/${r.projectId}`} className="hover:underline" style={{ color: "var(--brand)" }}>
                                 {r.projectCode ? `${r.projectCode} ` : ""}{r.projectName}
                               </Link>
+                              {r.archived && (
+                                <span className="ml-1 rounded bg-gray-100 px-1 text-[10px] text-gray-500" title="此案已封存（例如已被追加減案取代），但這期副委託款還沒付，仍要付">
+                                  已封存
+                                </span>
+                              )}
                             </td>
                             <td className="py-1.5 pr-2 text-gray-600">第 {r.installmentNo} 期</td>
                             <td className="py-1.5 pr-2 text-gray-500">{r.dueWhen ?? "—"}</td>

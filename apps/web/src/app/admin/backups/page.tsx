@@ -8,6 +8,7 @@ import {
   runBackupLoop,
   openBackupFile,
   formatBytes,
+  type SnapshotManifestStatus,
   type SnapshotPeriodSummary,
   type SnapshotTableEntry,
 } from "@/lib/backup-api";
@@ -203,8 +204,14 @@ export default function BackupsPage() {
   );
 }
 
-function StatusPill({ status }: { status: "running" | "complete" | null }) {
+function StatusPill({ status }: { status: SnapshotManifestStatus | null }) {
   if (status === "complete") return <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700">完成</span>;
+  if (status === "incomplete")
+    return (
+      <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs text-red-700" title="有資料表寫出的列數少於快照開始時的 count(*)，這份不能當完整備份用，請重跑">
+        不完整（列數不符）
+      </span>
+    );
   if (status === "running") return <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">進行中／未完成</span>;
   return <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500">無 manifest</span>;
 }
@@ -222,7 +229,7 @@ function PeriodRows({
   onToggle: () => void;
   onDownload: (name: string) => void;
   downloading: string | null;
-  manifestStatus: "running" | "complete" | null;
+  manifestStatus: SnapshotManifestStatus | null;
 }) {
   const m = entry.manifest;
   const sizeOnDisk = entry.files.reduce((s, f) => s + f.size, 0);
@@ -232,6 +239,11 @@ function PeriodRows({
         <td className="py-2 pr-3 font-medium text-gray-800">{entry.period}</td>
         <td className="py-2 pr-3">
           <StatusPill status={manifestStatus} />
+          {entry.manifestStale && (
+            <span className="ml-1 text-[10px] text-gray-400" title="剛重跑完，CDN 快取還沒更新，顯示的是上一輪的 manifest；幾十秒後重新整理即可">
+              （更新中）
+            </span>
+          )}
         </td>
         <td className="py-2 pr-3 text-gray-600">{fmtDateTime(m?.generatedAt ?? m?.startedAt ?? entry.files[0]?.updatedAt)}</td>
         <td className="py-2 pr-3 text-right tabular-nums text-gray-700">{m ? m.totals.tables : entry.files.length}</td>
@@ -307,7 +319,14 @@ function TableDetails({
         {tables.map((t) => (
           <tr key={t.name} className="border-t border-gray-100">
             <td className="py-1 pr-3 font-mono text-gray-800">{t.name}</td>
-            <td className="py-1 pr-3 text-right tabular-nums text-gray-700">{t.skipped ? "略過（表不存在）" : t.rows.toLocaleString()}</td>
+            <td className="py-1 pr-3 text-right tabular-nums text-gray-700">
+              {t.skipped ? "略過（表不存在）" : t.rows.toLocaleString()}
+              {t.incomplete && (
+                <span className="ml-1 rounded bg-red-100 px-1 text-[10px] text-red-700" title={`寫出 ${t.rows.toLocaleString()} 列，開始時 count(*) 為 ${(t.expectedRows ?? 0).toLocaleString()} 列`}>
+                  不完整
+                </span>
+              )}
+            </td>
             <td className="py-1 pr-3 text-right tabular-nums text-gray-700">{formatBytes(t.bytes)}</td>
             <td className="py-1 pr-3 font-mono text-gray-400" title={t.sha256}>
               {t.sha256 ? `${t.sha256.slice(0, 12)}…` : "—"}

@@ -11,6 +11,7 @@ import {
   todayDateString,
 } from "../services/payroll-inputs.js"
 import { writeAuditLog } from "../services/audit.js"
+import { insertRuleConfigVersion } from "../services/rule-config-version.js"
 
 export const ruleConfigRouter = Router()
 
@@ -178,44 +179,58 @@ ruleConfigRouter.put(
       // active 只代表「最後存的那版」，跟「現在生效的那版」在生效日之前必然
       // 不同——若還用 active 篩，一旦曾經發生過下面 insert 失敗、active 被清空
       // 的情況，下一次 PUT 會把 nextVersion 算回 1，造成 version 重複。
-      const { data: current, error: curErr } = await supabaseAdmin
-        .from("rule_configs")
-        .select("id, version")
-        .eq("tenant_id", tenantId)
-        .order("version", { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      if (curErr) {
-        next(new Error(`PUT /rule-config (current): ${curErr.message}`))
-        return
-      }
-
-      const nextVersion = (current?.version ?? 0) + 1
-
+      //
       // 先 insert 新版、成功了才停用舊版（順序刻意反過來）：effective_from 驗證
       // 再嚴謹也難保 insert 不會因為其他原因失敗（DB 暫斷線等）；若先停用舊版
       // 才 insert、insert 又失敗，這個租戶會落到「零個 active」，且上面的
       // nextVersion 已經不看 active 了，不會被這個狀態污染，但畫面/舊版
       // consumer 若還在讀 active 會短暫看不到任何生效規則。insert 優先可以讓
       // 失敗時舊版原封不動、什麼都沒發生。
-      const { data: inserted, error: insErr } = await supabaseAdmin
-        .from("rule_configs")
-        .insert({
-          tenant_id: tenantId,
-          scope: "all",
-          config,
-          version: nextVersion,
-          active: true,
-          // 不給就會落回 schema default '1900-01-01'，等於「從古至今都適用」，
-          // 選版邏輯就永遠選到最新版——生效日必須明寫。
-          effective_from: resolvedEffectiveFrom,
-        })
-        .select("id, version, effective_from")
-        .single()
-      if (insErr || !inserted) {
-        next(new Error(`PUT /rule-config (insert): ${insErr?.message}`))
+      //
+      // (tenant_id, version) 自 migration 0046 起唯一：兩個 PUT 同時算到同一號時
+      // 第二個撞 23505，services/rule-config-version 會重讀 max 再 +1 重試（最多 3 次）。
+      type CurrentRow = { id: string; version: number }
+      type InsertedRow = { id: string; version: number; effective_from: string | null }
+      const attempt = await insertRuleConfigVersion<InsertedRow, CurrentRow>({
+        readCurrent: async () => {
+          const { data, error } = await supabaseAdmin
+            .from("rule_configs")
+            .select("id, version")
+            .eq("tenant_id", tenantId)
+            .order("version", { ascending: false })
+            .limit(1)
+            .maybeSingle()
+          if (error) throw new Error(`PUT /rule-config (current): ${error.message}`)
+          return (data as CurrentRow | null) ?? null
+        },
+        insertVersion: async (version) => {
+          const { data, error } = await supabaseAdmin
+            .from("rule_configs")
+            .insert({
+              tenant_id: tenantId,
+              scope: "all",
+              config,
+              version,
+              active: true,
+              // 不給就會落回 schema default '1900-01-01'，等於「從古至今都適用」，
+              // 選版邏輯就永遠選到最新版——生效日必須明寫。
+              effective_from: resolvedEffectiveFrom,
+            })
+            .select("id, version, effective_from")
+            .single()
+          return { data: (data as InsertedRow | null) ?? null, error }
+        },
+      })
+      if (!attempt.ok) {
+        if (attempt.reason === "conflict_exhausted") {
+          // 連續 4 次都被搶號——同租戶有人狂按儲存；請他重送，不硬寫。
+          res.status(409).json({ error: "version_conflict", attempts: attempt.attempts })
+          return
+        }
+        next(new Error(`PUT /rule-config (insert): ${attempt.error?.message}`))
         return
       }
+      const { row: inserted, current } = attempt
 
       // Deactivate every other row for this tenant now that the new one exists
       // (exclude the row we just inserted — belt-and-braces, it's already the

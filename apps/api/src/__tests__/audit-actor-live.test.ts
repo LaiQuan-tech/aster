@@ -116,8 +116,10 @@ describe.skipIf(!ready)("C1 稽核記操作者 — live", () => {
     for (const tid of createdTenantIds) {
       await supabaseAdmin.from("expense_claims").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("expense_categories").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
+      // audit_logs 放在 employees 之後、tenants 之前：刪員工會再觸發 audit trigger 寫新列（employees 掛 audit_all），
+      // 先刪 audit_logs 會留孤兒；tenants 刪掉後 is_disposable_tenant 回 false，append-only trigger 就不放行了。
+      await supabaseAdmin.from("audit_logs").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("tenants").delete().eq("id", tid)
     }
     for (const uid of createdUserIds) await supabaseAdmin.auth.admin.deleteUser(uid)

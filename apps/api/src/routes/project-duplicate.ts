@@ -5,6 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { todayKey } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { loadProjectScope } from "../services/project-scope.js"
+import { isHrRole } from "../middleware/scope.js"
 import {
   duplicateProject,
   loadLineage,
@@ -69,6 +70,14 @@ projectDuplicateRouter.post(
       }
       const b = parsed.data
       const tz = await getTenantTimezone(tenantId)
+      // 封存原案只有 HR 能做（C2 驗收）：封存會讓原案從列表消失，finance lead／部門主管
+      // 只該有「複製」的權限，不該順手把原案藏起來。非 HR 一律強制不封存並回 warnings，
+      // 讓前端提示「原案未封存，請 HR 處理」；預設值（HR）仍是封存。
+      const wantsArchive = b.archiveOriginal ?? true
+      const canArchive = isHrRole(scope.self.role)
+      const archiveOriginal = wantsArchive && canArchive
+      const warnings: string[] = []
+      if (wantsArchive && !canArchive) warnings.push("archive_requires_hr")
       const result = await duplicateProject({
         tenantId,
         sourceProjectId: scope.project.id,
@@ -76,7 +85,7 @@ projectDuplicateRouter.post(
         kind: b.kind,
         amount: b.amount,
         reason: b.reason,
-        archiveOriginal: b.archiveOriginal ?? true,
+        archiveOriginal,
         copy: { ...DEFAULT_COPY_OPTIONS, ...(b.copy ?? {}) },
         openedOn: todayKey(tz),
       })
@@ -84,7 +93,7 @@ projectDuplicateRouter.post(
         res.status(result.status).json({ error: result.error })
         return
       }
-      res.status(201).json({ project: result.project, archived: result.archived })
+      res.status(201).json({ project: result.project, archived: result.archived, warnings })
     } catch (err) {
       next(err)
     }
