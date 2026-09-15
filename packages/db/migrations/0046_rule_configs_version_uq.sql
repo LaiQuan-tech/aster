@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "rule_configs_tenant_version_uq" ON "rule_configs" USING btree ("tenant_id","version");

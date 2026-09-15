@@ -1,0 +1,32 @@
+-- =====================================================================
+-- 亞斯特 — 2026-09-15 E 批次（C4 驗收修正：rule_configs 版本號唯一）
+-- 增量 SQL
+--
+-- 前提：正式庫已套到 migration 0045 + sql/0034（即
+-- docs/套用-2026-09-15-D.sql 套用後的狀態）。不相依任何其他待套增量。
+-- 內容：
+--   [1]  migration 0046 —— rule_configs 新增 unique index
+--        rule_configs_tenant_version_uq (tenant_id, version)
+--
+-- 為什麼要：PUT /rule-config 的版本號是「該租戶目前最大 version + 1」算的，
+-- 兩個 PUT 同時進來會算到同一號；沒有唯一約束時兩列都寫得進去，「依計算月份
+-- 選版」（payroll-inputs.pickRuleConfigVersion）就會選到不確定的那一版。套了
+-- 索引之後第二個會撞 23505，API（services/rule-config-version.ts）會重取
+-- max+1 重試 3 次，還撞就回 409 version_conflict。
+--
+-- ⚠️ 套用前先跑 docs/驗證-2026-09-15-E.sql 的第 0 條：既有資料若已有重複的
+-- (tenant_id, version)，CREATE UNIQUE INDEX 會失敗（整檔回滾、什麼都不會變），
+-- 得先人工決定留哪一列（通常留 created_at 較晚、active 的那列，另一列改
+-- version）再套。截至 2026-09-15 正式庫查無重複（見交接紀錄）。
+--
+-- 冪等，可重複執行：CREATE UNIQUE INDEX IF NOT EXISTS（比照 migration 0045、
+-- docs/套用-2026-09-15-D.sql 的既有寫法）。
+--
+-- 套用方式：Supabase SQL Editor 整段貼上即可（只有一段）。
+-- 驗證見 docs/驗證-2026-09-15-E.sql（SQL Editor 一次貼一條）。
+-- =====================================================================
+
+-- ─────────────────────────────────────────────────────────────────
+-- [1] migration 0046 — rule_configs 新增 unique index（tenant_id, version）
+-- ─────────────────────────────────────────────────────────────────
+CREATE UNIQUE INDEX IF NOT EXISTS "rule_configs_tenant_version_uq" ON "rule_configs" USING btree ("tenant_id","version");
