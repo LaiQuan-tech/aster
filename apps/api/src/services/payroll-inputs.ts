@@ -81,7 +81,12 @@ export type AttendanceDayInput = AttendanceDay & { outingMinutes?: number }
  */
 export function toSalaryStructure(row: SalaryRow, nhiDependents = 0, advance = 0): SalaryStructure {
   return {
-    method: row.method === "by_attendance_days" ? "by_attendance_days" : "monthly",
+    // C5：row.method 現在有三種合法值('monthly'/'by_attendance_days'/'hourly'，
+    // 由 apps/api/src/routes/salary.ts 的 zod enum 與 DB CHECK 共同把關)。先前這裡
+    // 把非 by_attendance_days 一律塌成 monthly，會把 method='hourly' 的工讀生
+    // 誤判成月薪制(改用 baseSalary 算本俸、時薪淪為純折算基準)——原樣傳遞三值。
+    method:
+      row.method === "by_attendance_days" || row.method === "hourly" ? row.method : "monthly",
     baseSalary: row.base_salary != null ? Number(row.base_salary) : undefined,
     dailyWage: row.daily_wage != null ? Number(row.daily_wage) : undefined,
     // 空或 0 → undefined：讓引擎以 本薪 ÷ payroll.hourlyWageDivisor（預設 240）

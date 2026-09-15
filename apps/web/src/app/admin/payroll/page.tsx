@@ -30,10 +30,13 @@ export default function PayrollAdminPage() {
 
   // 員工薪資保險資料
   const [empId, setEmpId] = useState("");
-  const [method, setMethod] = useState<"monthly" | "by_attendance_days">("monthly");
+  const [method, setMethod] = useState<"monthly" | "by_attendance_days" | "hourly">("monthly");
   const [baseSalary, setBaseSalary] = useState("");
   const [dailyWage, setDailyWage] = useState("");
   const [hourlyWage, setHourlyWage] = useState("");
+  // 工讀生時薪制(C5)的約定每週工時／工天數；純參考用途，不影響薪資試算。
+  const [agreedHoursPerWeek, setAgreedHoursPerWeek] = useState("");
+  const [agreedDaysPerWeek, setAgreedDaysPerWeek] = useState("");
   const [laborGrade, setLaborGrade] = useState("");
   const [healthGrade, setHealthGrade] = useState("");
   // 畫面用「%」(0–6)，API 用比例 (0–0.06)
@@ -109,6 +112,8 @@ export default function PayrollAdminPage() {
       setBaseSalary(salary.base_salary ?? "");
       setDailyWage(salary.daily_wage ?? "");
       setHourlyWage(salary.hourly_wage ?? "");
+      setAgreedHoursPerWeek(salary.agreed_hours_per_week ?? "");
+      setAgreedDaysPerWeek(salary.agreed_days_per_week ?? "");
       setLaborGrade(salary.labor_insured_salary ?? "");
       setHealthGrade(salary.health_insured_salary ?? "");
       setPensionPct(
@@ -121,6 +126,8 @@ export default function PayrollAdminPage() {
       setBaseSalary("");
       setDailyWage("");
       setHourlyWage("");
+      setAgreedHoursPerWeek("");
+      setAgreedDaysPerWeek("");
       setLaborGrade("");
       setHealthGrade("");
       setPensionPct("");
@@ -148,6 +155,8 @@ export default function PayrollAdminPage() {
         baseSalary: baseSalary ? Number(baseSalary) : null,
         dailyWage: dailyWage ? Number(dailyWage) : null,
         hourlyWage: hourlyWage ? Number(hourlyWage) : 0,
+        agreedHoursPerWeek: agreedHoursPerWeek ? Number(agreedHoursPerWeek) : null,
+        agreedDaysPerWeek: agreedDaysPerWeek ? Number(agreedDaysPerWeek) : null,
         laborInsuredSalary: laborGrade ? Number(laborGrade) : null,
         healthInsuredSalary: healthGrade ? Number(healthGrade) : null,
         pensionVoluntaryRate: pensionPct ? Number(pensionPct) / 100 : null,
@@ -252,10 +261,11 @@ export default function PayrollAdminPage() {
                   <select
                     className={inputCls}
                     value={method}
-                    onChange={(e) => setMethod(e.target.value as "monthly" | "by_attendance_days")}
+                    onChange={(e) => setMethod(e.target.value as "monthly" | "by_attendance_days" | "hourly")}
                   >
                     <option value="monthly">月薪</option>
                     <option value="by_attendance_days">按出勤天數</option>
+                    <option value="hourly">時薪制</option>
                   </select>
                 </div>
                 <div>
@@ -267,9 +277,35 @@ export default function PayrollAdminPage() {
                   <input type="number" className={inputCls} value={dailyWage} onChange={(event) => setDailyWage(event.target.value)} />
                 </div>
                 <div>
-                  <label className={labelCls}>時薪（加班費基準）</label>
+                  <label className={labelCls}>{method === "hourly" ? "時薪（本俸＋加班費基準）" : "時薪（加班費基準）"}</label>
                   <input type="number" className={inputCls} value={hourlyWage} onChange={(e) => setHourlyWage(e.target.value)} />
                 </div>
+                {method === "hourly" && (
+                  <>
+                    <div>
+                      <label className={labelCls}>約定每週工時（小時）</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step="any"
+                        className={inputCls}
+                        value={agreedHoursPerWeek}
+                        onChange={(e) => setAgreedHoursPerWeek(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>約定每週工天數</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step="any"
+                        className={inputCls}
+                        value={agreedDaysPerWeek}
+                        onChange={(e) => setAgreedDaysPerWeek(e.target.value)}
+                      />
+                    </div>
+                  </>
+                )}
                 <div>
                   <label className={labelCls}>勞保投保級距</label>
                   <input type="number" className={inputCls} value={laborGrade} onChange={(e) => setLaborGrade(e.target.value)} />

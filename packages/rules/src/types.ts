@@ -83,7 +83,7 @@ export interface AttendanceDay {
 }
 
 /** 計薪方式 (與 RuleConfig.payroll.method 對齊)。 */
-export type PayrollMethod = "monthly" | "by_attendance_days";
+export type PayrollMethod = "monthly" | "by_attendance_days" | "hourly";
 
 /**
  * 員工的薪資結構。
@@ -91,6 +91,9 @@ export type PayrollMethod = "monthly" | "by_attendance_days";
  * baseSalary ÷ rules.payroll.hourlyWageDivisor 推算 (預設 ÷ 240)。兩者都沒有
  * 就無法折算 → computePayslip 丟錯。
  * baseSalary 供月薪制本俸;dailyWage 供按出勤天數制本俸。
+ * method='hourly'(工讀生/Part-time,C5) 時 hourlyWage 兼作本俸基準:
+ * 本俸 = Σ當月 AttendanceDay.workedMinutes ÷ 60 × hourlyWage。此制不接受
+ * 用 baseSalary ÷ divisor 反推時薪——未明示 hourlyWage(>0) 直接丟錯,不猜。
  * method 若提供則覆蓋 rules.payroll.method (允許個別員工不同制)。
  */
 export interface SalaryStructure {

@@ -1015,3 +1015,71 @@ describe("規則五 亞斯特 115-06 五份出勤表", () => {
     });
   });
 });
+
+// =========================================================================
+// 規則六：時薪制 (hourly；工讀生/Part-time，C5)
+//   本俸 = Σ 當月工作分鐘 ÷ 60 × 時薪 (不看 baseSalary/dailyWage)
+//   時薪 200、8h×20 天 → 本俸 = 160h × 200 = 32000
+//   0 天出勤 → 本俸 0
+//   hourlyWage <= 0 (含 undefined) 時直接丟錯，不得以 baseSalary÷divisor 反推
+// =========================================================================
+describe("規則六 時薪制(工讀生/Part-time)", () => {
+  const rules: RuleConfig = parseRuleConfig({
+    attendance_bonus: { base: 0, tiers: [{ lateMinutesUpTo: null, deduct: 0 }] },
+    overtime: { rules: [] },
+    night: { window: { from: "00:00", to: "08:30" }, multiplier: 2 },
+    payroll: { method: "monthly", dailyRegularHours: 8 },
+  });
+
+  function daysOf8h(n: number): AttendanceDay[] {
+    return Array.from({ length: n }, (_, i) => ({
+      date: `2026-05-${String(i + 1).padStart(2, "0")}`,
+      workedMinutes: 8 * 60,
+      lateMinutes: 0,
+      overtimeMinutes: 0,
+      nightMinutes: 0,
+      dayType: "workday" as const,
+    }));
+  }
+
+  it("時薪 200、8h×20 天 → 本俸 = 160h × 200 = 32000", () => {
+    const salary: SalaryStructure = { method: "hourly", hourlyWage: 200 };
+    const slip = computePayslip(daysOf8h(20), salary, rules);
+    expect(slip.base).toBe(32000);
+    expect(slip.regularPay).toBe(32000);
+    expect(slip.hourlyWage).toBe(200);
+    expect(slip.lines[0]).toEqual({ label: "本俸(時薪)", amount: 32000 });
+  });
+
+  it("0 天出勤 → 本俸 0", () => {
+    const salary: SalaryStructure = { method: "hourly", hourlyWage: 200 };
+    const slip = computePayslip([], salary, rules);
+    expect(slip.base).toBe(0);
+  });
+
+  it("時薪 0 → 丟錯，不得退而求其次用 baseSalary÷divisor 猜", () => {
+    const salary: SalaryStructure = { method: "hourly", hourlyWage: 0, baseSalary: 37000 };
+    expect(() => computePayslip(daysOf8h(20), salary, rules)).toThrow(
+      /hourly method requires salary\.hourlyWage/,
+    );
+  });
+
+  it("未給 hourlyWage(undefined) 同樣丟錯，即使有 baseSalary 可猜", () => {
+    const salary: SalaryStructure = { method: "hourly", baseSalary: 37000 };
+    expect(() => computePayslip(daysOf8h(20), salary, rules)).toThrow(
+      /hourly method requires salary\.hourlyWage/,
+    );
+  });
+
+  it("rules.payroll.method='hourly'(租戶預設) 時，員工不覆寫 method 也套用時薪本俸公式", () => {
+    const hourlyDefaultRules: RuleConfig = parseRuleConfig({
+      attendance_bonus: { base: 0, tiers: [{ lateMinutesUpTo: null, deduct: 0 }] },
+      overtime: { rules: [] },
+      night: { window: { from: "00:00", to: "08:30" }, multiplier: 2 },
+      payroll: { method: "hourly", dailyRegularHours: 8 },
+    });
+    const salary: SalaryStructure = { hourlyWage: 150 }; // 不覆寫 method，吃租戶預設
+    const slip = computePayslip(daysOf8h(10), salary, hourlyDefaultRules);
+    expect(slip.base).toBe(150 * 8 * 10); // 80h × 150 = 12000
+  });
+});

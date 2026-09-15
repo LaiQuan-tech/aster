@@ -116,15 +116,17 @@ const NightSchema = z.object({
 });
 
 // 計薪設定：
-//   method              'monthly' 月薪 / 'by_attendance_days' 按出勤天數
+//   method              'monthly' 月薪 / 'by_attendance_days' 按出勤天數 /
+//                       'hourly' 時薪 (工讀生/Part-time,C5;本俸=Σ工作分鐘÷60×時薪)
 //   overtimeFlatHourly  若設定，加班一律以此固定時薪計 (覆蓋倍率制)
 //   dailyRegularHours   每日正常工時 (超過即算加班;折算時薪用)。預設 8。
 //   hourlyWageDivisor   時薪除數:員工未明示 hourlyWage 時,時薪 = 本薪 ÷ divisor
 //                       (亞斯特：37000 ÷ 240 = 154.1667)。省略 = 240。
+//                       ('hourly' 制不適用此推算,見 payroll-engine 的丟錯規則。)
 //   requireApprovedSheet 結算薪資前是否要求出勤表已核准 (API 用;省略 = false)。
 //   requireAnomalyAck   結算薪資前是否要求異常已確認 (API 用;省略 = true)。
 const PayrollSchema = z.object({
-  method: z.enum(["monthly", "by_attendance_days"]),
+  method: z.enum(["monthly", "by_attendance_days", "hourly"]),
   overtimeFlatHourly: z.number().optional(),
   dailyRegularHours: z.number().default(8),
   hourlyWageDivisor: z.number().positive().optional(),

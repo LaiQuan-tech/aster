@@ -8,6 +8,10 @@
  * 時薪:員工明示 hourlyWage (>0) 優先;否則 本薪 ÷ payroll.hourlyWageDivisor
  * (預設 240,四捨五入到小數 4 位;亞斯特 37000 ÷ 240 = 154.1667)。
  *
+ * 本俸依 method 三選一:'monthly' 本薪固定;'by_attendance_days' 出勤天數×日薪;
+ * 'hourly'(工讀生/Part-time,C5) Σ當月工作分鐘÷60×時薪——此制的 hourlyWage
+ * 必須明示且 >0,不接受用 baseSalary÷divisor 反推,沒填直接丟錯。
+ *
  * 代墊支出刻意不進 gross:那是代收代付、非薪資所得,課稅基礎不同。
  */
 
@@ -102,16 +106,26 @@ export function computePayslip(
   allowances = 0,
 ): PayslipBreakdown {
   const method: PayrollMethod = salary.method ?? rules.payroll.method;
+  // 時薪制(工讀生/Part-time,C5)不可退而求其次用 baseSalary÷divisor 猜時薪——
+  // 明示時薪就是這個制度的定義本身,沒填視同設定錯誤,直接丟錯,不要讓薪資單
+  // 默默算出一個「猜的」本俸。(一般制度仍走下面 resolveHourlyWage 的既有 fallback。)
+  if (method === "hourly" && !(salary.hourlyWage !== undefined && salary.hourlyWage > 0)) {
+    throw new Error("payroll-engine: hourly method requires salary.hourlyWage > 0");
+  }
   const hourlyWage = resolveHourlyWage(salary, rules);
   const flatHourly = rules.payroll.overtimeFlatHourly;
 
   // --- 本俸 -------------------------------------------------------------
-  // 出勤天數 = 當天有實際工時的天數。
+  // 出勤天數 = 當天有實際工時的天數 (by_attendance_days 制用)。
   const attendanceDays = days.filter((d) => d.workedMinutes > 0).length;
+  // 時薪制本俸 = Σ 當月工作分鐘 ÷ 60 × 時薪 (無條件依實際打卡工時計,不折算天數)。
+  const totalWorkedMinutes = days.reduce((acc, d) => acc + d.workedMinutes, 0);
   const base =
     method === "by_attendance_days"
       ? round(attendanceDays * (salary.dailyWage ?? 0))
-      : round(salary.baseSalary ?? 0);
+      : method === "hourly"
+        ? round((totalWorkedMinutes / 60) * hourlyWage)
+        : round(salary.baseSalary ?? 0);
 
   // --- 加班費 / 補休 -----------------------------------------------------
   // 分段倍率是「逐日」套用的:勞基法的前 2 小時是指「當日」前 2 小時,不是當月。
@@ -195,9 +209,9 @@ export function computePayslip(
   const attendanceBonus = bonusBase - attendanceDeduction;
 
   // --- gross + 逐項稽核明細 ---------------------------------------------
-  const lines: PayslipLine[] = [
-    { label: method === "by_attendance_days" ? "本俸(出勤天數)" : "本俸(月薪)", amount: base },
-  ];
+  const baseLabel =
+    method === "by_attendance_days" ? "本俸(出勤天數)" : method === "hourly" ? "本俸(時薪)" : "本俸(月薪)";
+  const lines: PayslipLine[] = [{ label: baseLabel, amount: base }];
   if (overtimePay !== 0) lines.push({ label: "加班費", amount: overtimePay });
   if (nightPay !== 0) lines.push({ label: "夜間加給", amount: nightPay });
   // 全勤以「基準 − 扣款」兩條呈現,淨額即 attendanceBonus,且 lines 加總 = gross。

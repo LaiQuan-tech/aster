@@ -10,12 +10,12 @@ import { writeAuditLog } from "../services/audit.js"
 export const salaryRouter = Router()
 
 const SELECT_COLS =
-  "id, tenant_id, employee_id, method, base_salary, daily_wage, hourly_wage, allowances, labor_insured_salary, health_insured_salary, pension_voluntary_rate, created_at"
+  "id, tenant_id, employee_id, method, base_salary, daily_wage, hourly_wage, allowances, labor_insured_salary, health_insured_salary, pension_voluntary_rate, agreed_hours_per_week, agreed_days_per_week, created_at"
 
 // Numeric columns are returned by PostgREST as strings; the client coerces.
 const upsertSchema = z
   .object({
-    method: z.enum(["monthly", "by_attendance_days"]).optional(),
+    method: z.enum(["monthly", "by_attendance_days", "hourly"]).optional(),
     baseSalary: z.number().nullable().optional(),
     dailyWage: z.number().nullable().optional(),
     hourlyWage: z.number().optional(),
@@ -29,6 +29,9 @@ const upsertSchema = z
       .max(PENSION_VOLUNTARY_RATE_MAX)
       .nullable()
       .optional(),
+    // 工讀生時薪制(C5)的約定每週工時／工天數；可空，無關聯限制(不要求兩者同填)。
+    agreedHoursPerWeek: z.number().nonnegative().nullable().optional(),
+    agreedDaysPerWeek: z.number().nonnegative().nullable().optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 
@@ -102,6 +105,10 @@ salaryRouter.put(
       row.health_insured_salary = parsed.data.healthInsuredSalary
     if (parsed.data.pensionVoluntaryRate !== undefined)
       row.pension_voluntary_rate = parsed.data.pensionVoluntaryRate
+    if (parsed.data.agreedHoursPerWeek !== undefined)
+      row.agreed_hours_per_week = parsed.data.agreedHoursPerWeek
+    if (parsed.data.agreedDaysPerWeek !== undefined)
+      row.agreed_days_per_week = parsed.data.agreedDaysPerWeek
 
     try {
       const { data, error } = await supabaseAdmin
