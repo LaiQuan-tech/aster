@@ -27,8 +27,22 @@ const effectiveFromRe = /^\d{4}-\d{2}-\d{2}$/
 function resolveEffectiveFrom(input: unknown): string | null {
   if (input === "now") return todayDateString()
   if (input === undefined || input === null || input === "") return nextPeriodFirstDay(currentPeriod())
-  if (typeof input === "string" && effectiveFromRe.test(input)) return input
+  if (typeof input === "string" && isValidCalendarDate(input)) return input
   return null
+}
+
+/**
+ * `/^\d{4}-\d{2}-\d{2}$/` 只驗形狀，"2026-13-99"／"2026-02-30" 這種日曆上不存在
+ * 的日期會通過 regex，insert 到 DB 時才炸——但那時「停用舊版」可能已經跑完，
+ * 會把 nextVersion 的計算基準搞爛（見 PUT handler 內的註解）。這裡用往返驗證：
+ * 組回 UTC Date 再比對三個欄位有沒有被瀏覽器式的「進位」（例如 13 月變成隔年 1
+ * 月）吃掉，比單純 regex 嚴謹。
+ */
+function isValidCalendarDate(input: string): boolean {
+  if (!effectiveFromRe.test(input)) return false
+  const [y, m, d] = input.split("-").map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, d))
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d
 }
 
 /** GET /rule-config/versions 的一列。`summary` 目前 schema 無對應欄位，故不回。 */
@@ -160,12 +174,14 @@ ruleConfigRouter.put(
     }
 
     try {
-      // Current active version (if any) → next version number.
+      // nextVersion 取這個租戶「所有版本」（不篩 active）的最大值＋1。C4 之後
+      // active 只代表「最後存的那版」，跟「現在生效的那版」在生效日之前必然
+      // 不同——若還用 active 篩，一旦曾經發生過下面 insert 失敗、active 被清空
+      // 的情況，下一次 PUT 會把 nextVersion 算回 1，造成 version 重複。
       const { data: current, error: curErr } = await supabaseAdmin
         .from("rule_configs")
         .select("id, version")
         .eq("tenant_id", tenantId)
-        .eq("active", true)
         .order("version", { ascending: false })
         .limit(1)
         .maybeSingle()
@@ -176,17 +192,12 @@ ruleConfigRouter.put(
 
       const nextVersion = (current?.version ?? 0) + 1
 
-      // Deactivate any currently-active rows for this tenant.
-      const { error: deactErr } = await supabaseAdmin
-        .from("rule_configs")
-        .update({ active: false })
-        .eq("tenant_id", tenantId)
-        .eq("active", true)
-      if (deactErr) {
-        next(new Error(`PUT /rule-config (deactivate): ${deactErr.message}`))
-        return
-      }
-
+      // 先 insert 新版、成功了才停用舊版（順序刻意反過來）：effective_from 驗證
+      // 再嚴謹也難保 insert 不會因為其他原因失敗（DB 暫斷線等）；若先停用舊版
+      // 才 insert、insert 又失敗，這個租戶會落到「零個 active」，且上面的
+      // nextVersion 已經不看 active 了，不會被這個狀態污染，但畫面/舊版
+      // consumer 若還在讀 active 會短暫看不到任何生效規則。insert 優先可以讓
+      // 失敗時舊版原封不動、什麼都沒發生。
       const { data: inserted, error: insErr } = await supabaseAdmin
         .from("rule_configs")
         .insert({
@@ -203,6 +214,23 @@ ruleConfigRouter.put(
         .single()
       if (insErr || !inserted) {
         next(new Error(`PUT /rule-config (insert): ${insErr?.message}`))
+        return
+      }
+
+      // Deactivate every other row for this tenant now that the new one exists
+      // (exclude the row we just inserted — belt-and-braces, it's already the
+      // only one with this id). A failure here leaves an extra active=true row
+      // behind but does NOT corrupt version numbering or the new row's
+      // effective_from, so it's safe to surface as an error without rolling
+      // back the insert (there is nothing destructive to roll back).
+      const { error: deactErr } = await supabaseAdmin
+        .from("rule_configs")
+        .update({ active: false })
+        .eq("tenant_id", tenantId)
+        .eq("active", true)
+        .neq("id", inserted.id as string)
+      if (deactErr) {
+        next(new Error(`PUT /rule-config (deactivate): ${deactErr.message}`))
         return
       }
 

@@ -149,6 +149,46 @@ function hydrateOvertimeForm(config: RuleConfig): OvertimeParamsForm {
   };
 }
 
+/* --------------------------------------------- 勞健保費率（C5，工讀生時薪制配套） --- */
+/**
+ * config.insurance 在 admin-api.ts 維持 `insurance?: unknown`（該檔本次只動
+ * salary 區段，不動 RuleConfig 型別區），形狀在這裡自行 narrow。
+ *
+ * 留白（任一欄位空白）＝不計勞健保——payroll-engine 的判斷是
+ * `ins && salary.laborInsuredSalary ? ... : 0`，沒有 insurance 整段就是 0,
+ * 這跟「費率填 0」意義不同（後者仍會走保費公式，只是算出 0 元；前者是
+ * 完全不進這條計算路徑）。所以表單用「四個欄位是否都有值」決定要不要送出
+ * 整段 insurance，而不是把空白存成數字 0。
+ */
+interface InsuranceRatePair {
+  rate: string;
+  employeeShare: string;
+}
+
+interface InsuranceParamsForm {
+  labor: InsuranceRatePair;
+  health: InsuranceRatePair;
+}
+
+const DEFAULT_INSURANCE_FORM: InsuranceParamsForm = {
+  labor: { rate: "", employeeShare: "" },
+  health: { rate: "", employeeShare: "" },
+};
+
+/** 由目前 config.insurance（unknown）安全解析表單初值；形狀不對或缺省一律回退成空白（=未設定）。 */
+function hydrateInsuranceForm(insurance: unknown): InsuranceParamsForm {
+  if (!insurance || typeof insurance !== "object") return DEFAULT_INSURANCE_FORM;
+  const ins = insurance as {
+    labor?: { rate?: unknown; employeeShare?: unknown };
+    health?: { rate?: unknown; employeeShare?: unknown };
+  };
+  const toStr = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? String(v) : "");
+  return {
+    labor: { rate: toStr(ins.labor?.rate), employeeShare: toStr(ins.labor?.employeeShare) },
+    health: { rate: toStr(ins.health?.rate), employeeShare: toStr(ins.health?.employeeShare) },
+  };
+}
+
 function buildTieredRule(
   when: OvertimeWhen,
   tiers: [TierFormRow, TierFormRow, TierFormRow],
@@ -382,6 +422,9 @@ export default function ModuleSettingsPage() {
   const [jsonEffectiveDate, setJsonEffectiveDate] = useState("");
   const [otEffectiveMode, setOtEffectiveMode] = useState<EffectiveMode>("nextMonth");
   const [otEffectiveDate, setOtEffectiveDate] = useState("");
+  const [insuranceForm, setInsuranceForm] = useState<InsuranceParamsForm>(DEFAULT_INSURANCE_FORM);
+  const [insuranceEffectiveMode, setInsuranceEffectiveMode] = useState<EffectiveMode>("nextMonth");
+  const [insuranceEffectiveDate, setInsuranceEffectiveDate] = useState("");
 
   const parsedEditableFields = useMemo(
     () =>
@@ -400,6 +443,7 @@ export default function ModuleSettingsPage() {
         setRuleConfig(res);
         setDraft(JSON.stringify(res.config, null, 2));
         setOtForm(hydrateOvertimeForm(res.config));
+        setInsuranceForm(hydrateInsuranceForm(res.config.insurance));
       })
       .catch((err) => setError(err instanceof Error ? err.message : "載入模組設定失敗"));
     getBranding()
@@ -433,23 +477,34 @@ export default function ModuleSettingsPage() {
       .catch(() => null);
   }, []);
 
+  /** 版本歷史非關鍵路徑：拿不到就顯示錯誤字樣，不擋頁面其餘內容。 */
+  async function reloadRuleVersions() {
+    try {
+      setRuleVersions(await getRuleConfigVersions());
+      setRuleVersionsError(null);
+    } catch (err) {
+      setRuleVersionsError(err instanceof Error ? err.message : "版本歷史載入失敗");
+    }
+  }
+
   useEffect(() => {
-    // 版本歷史非關鍵路徑：拿不到就顯示錯誤字樣，不擋頁面其餘內容。
-    getRuleConfigVersions()
-      .then((rows) => setRuleVersions(rows))
-      .catch((err) => setRuleVersionsError(err instanceof Error ? err.message : "版本歷史載入失敗"));
+    void reloadRuleVersions();
   }, []);
 
   /**
    * 重新載入「現在實際生效」的規則狀態。存檔成功後改呼叫這個，不要用剛存的 config
    * 手動兜一個 RuleConfigResponse——這次存檔若選的是未來生效（下個月或指定日期），
    * 存檔當下真正生效的其實還是舊版本，直接把新版本標成「目前生效」會誤導畫面。
+   *
+   * （審查修正）刻意只更新 ruleConfig，不要跟著 setDraft／setOtForm：這兩個是
+   * 編輯器目前的內容，本來就等於「剛剛送出的那筆」。若存的是未來生效版，這裡拿
+   * 回來的 res.config 是還沒換版的舊內容，setDraft/setOtForm 進去等於把使用者
+   * 剛存的改動從畫面上悄悄復原——下次他再存一次，就會把這次的調整蓋掉重存成
+   * 舊值（相當於靜默遺失這次的修改）。
    */
   async function reloadRuleConfig() {
     const res = await getRuleConfig();
     setRuleConfig(res);
-    setDraft(JSON.stringify(res.config, null, 2));
-    setOtForm(hydrateOvertimeForm(res.config));
     return res;
   }
 
@@ -467,6 +522,7 @@ export default function ModuleSettingsPage() {
       await reloadRuleConfig().catch(() => {
         // 存檔已成功；重新整理「目前生效」狀態失敗不影響這次存檔結果。
       });
+      void reloadRuleVersions(); // 版本歷史表格同步補上剛存的這一版，不 await（非關鍵路徑）。
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存失敗");
     }
@@ -558,8 +614,60 @@ export default function ModuleSettingsPage() {
       await reloadRuleConfig().catch(() => {
         // 存檔已成功；重新整理「目前生效」狀態失敗不影響這次存檔結果。
       });
+      void reloadRuleVersions(); // 版本歷史表格同步補上剛存的這一版，不 await（非關鍵路徑）。
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存加班與計薪參數失敗");
+    }
+  }
+
+  function patchInsurance(kind: "labor" | "health", field: keyof InsuranceRatePair, value: string) {
+    setInsuranceForm((prev) => ({ ...prev, [kind]: { ...prev[kind], [field]: value } }));
+  }
+
+  /**
+   * 把表單覆蓋進 config.insurance，其餘欄位（attendance_bonus / overtime / night /
+   * payroll / leave_deduction）原樣保留後整包 PUT。四個欄位任一空白就整段存
+   * undefined（JSON.stringify 會省略該鍵，後端 parseRuleConfig 視為未設定）——
+   * 留白＝不計勞健保，不是「費率 0」，兩者對員工實際扣款的意義不同，不能只送 0。
+   */
+  async function onSaveInsuranceParams() {
+    if (!ruleConfig) return;
+    setError(null);
+    setMessage(null);
+    if (insuranceEffectiveMode === "custom" && !insuranceEffectiveDate) {
+      setError("請選擇指定生效日期");
+      return;
+    }
+    const allFilled =
+      insuranceForm.labor.rate.trim() !== "" &&
+      insuranceForm.labor.employeeShare.trim() !== "" &&
+      insuranceForm.health.rate.trim() !== "" &&
+      insuranceForm.health.employeeShare.trim() !== "";
+    try {
+      const base = ruleConfig.config;
+      const merged: RuleConfig = {
+        ...base,
+        insurance: allFilled
+          ? {
+              labor: {
+                rate: Number(insuranceForm.labor.rate) || 0,
+                employeeShare: Number(insuranceForm.labor.employeeShare) || 0,
+              },
+              health: {
+                rate: Number(insuranceForm.health.rate) || 0,
+                employeeShare: Number(insuranceForm.health.employeeShare) || 0,
+              },
+            }
+          : undefined,
+      };
+      const res = await saveRuleConfig(merged, toEffectiveOpts(insuranceEffectiveMode, insuranceEffectiveDate));
+      setMessage(describeSaveResult(res.version, res.effectiveFrom));
+      await reloadRuleConfig().catch(() => {
+        // 存檔已成功；重新整理「目前生效」狀態失敗不影響這次存檔結果。
+      });
+      void reloadRuleVersions(); // 版本歷史表格同步補上剛存的這一版，不 await（非關鍵路徑）。
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "儲存勞健保費率失敗");
     }
   }
 
@@ -944,6 +1052,100 @@ export default function ModuleSettingsPage() {
 
             <div>
               <PrimaryButton onClick={onSaveOvertimeParams}>儲存加班與計薪參數</PrimaryButton>
+            </div>
+          </div>
+        ) : (
+          <Empty>載入中…</Empty>
+        )}
+      </Card>
+
+      <Card>
+        <div className="mb-4">
+          <h2 className="text-base font-semibold text-gray-900">勞健保費率</h2>
+          <p className="mt-1 text-sm text-gray-500">
+            員工的勞保／健保自付額 = 投保薪資 × 費率 × 自付比例（詳見員工「薪資作業」的投保級距）。
+            2026 費率請依勞保局／健保署公告確認；四欄留白視同不設定，薪資試算不扣勞健保。
+          </p>
+        </div>
+
+        {ruleConfig ? (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="rounded-md border border-gray-200 p-3">
+                <p className="mb-2 text-sm font-medium text-gray-700">勞保（普通事故＋就保合計）</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className={labelCls}>費率</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="any"
+                      placeholder="例 0.125"
+                      className={inputCls}
+                      value={insuranceForm.labor.rate}
+                      onChange={(e) => patchInsurance("labor", "rate", e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={labelCls}>員工自付比例</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={1}
+                      step="any"
+                      placeholder="例 0.2"
+                      className={inputCls}
+                      value={insuranceForm.labor.employeeShare}
+                      onChange={(e) => patchInsurance("labor", "employeeShare", e.target.value)}
+                    />
+                  </div>
+                </div>
+              </div>
+              <div className="rounded-md border border-gray-200 p-3">
+                <p className="mb-2 text-sm font-medium text-gray-700">健保</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className={labelCls}>費率</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="any"
+                      placeholder="例 0.0517"
+                      className={inputCls}
+                      value={insuranceForm.health.rate}
+                      onChange={(e) => patchInsurance("health", "rate", e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={labelCls}>員工自付比例</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={1}
+                      step="any"
+                      placeholder="例 0.3"
+                      className={inputCls}
+                      value={insuranceForm.health.employeeShare}
+                      onChange={(e) => patchInsurance("health", "employeeShare", e.target.value)}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p className="text-xs text-gray-400">
+              四個欄位需全部填寫才會計費；任一欄留白＝整段不設定（薪資試算不扣勞健保），不是「費率 0」。
+            </p>
+
+            <EffectiveDateFields
+              mode={insuranceEffectiveMode}
+              date={insuranceEffectiveDate}
+              onModeChange={setInsuranceEffectiveMode}
+              onDateChange={setInsuranceEffectiveDate}
+              groupName="insurance-effective-mode"
+            />
+
+            <div>
+              <PrimaryButton onClick={onSaveInsuranceParams}>儲存勞健保費率</PrimaryButton>
             </div>
           </div>
         ) : (

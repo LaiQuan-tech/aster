@@ -1,10 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
-import { parseRuleConfig, type RuleConfig } from "@hr/rules"
+import { type RuleConfig } from "@hr/rules"
 import { logger } from "../lib/logger.js"
-import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { zonedTimeToUtc } from "../lib/tz.js"
 import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { loadRuleConfigFor } from "./payroll-inputs.js"
 
 /**
  * The fields of a leave_requests row the ledger effects need. Numerics arrive
@@ -49,28 +49,6 @@ function resolveHours(req: ApprovedRequest): number {
 function requestYear(req: ApprovedRequest): number {
   const y = new Date(req.start_at).getUTCFullYear()
   return Number.isFinite(y) ? y : new Date().getUTCFullYear()
-}
-
-/**
- * Load the tenant's active rule config (parsed) or the default. A missing or
- * malformed stored config must never break approval — fall back safely.
- */
-async function loadRules(supabase: SupabaseClient, tenantId: string): Promise<RuleConfig> {
-  const { data, error } = await supabase
-    .from("rule_configs")
-    .select("config")
-    .eq("tenant_id", tenantId)
-    .eq("active", true)
-    .order("version", { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  if (error) throw new Error(`ledger loadRules: ${error.message}`)
-  if (!data?.config) return DEFAULT_RULE_CONFIG
-  try {
-    return parseRuleConfig(data.config)
-  } catch {
-    return DEFAULT_RULE_CONFIG
-  }
 }
 
 /**
@@ -344,7 +322,12 @@ export async function applyApprovalEffects(
         return
       }
       if (req.payout === "pay") return
-      const rules = await loadRules(supabase, tenantId)
+      // C4：現金 vs 補休的判斷要用「這筆加班發生的那個月」當時生效的規則，不是
+      // 「今天」的規則——否則 HR 調整 compTime 設定（即使排了下個月才生效）會讓
+      // 這個月已經用舊規則發過現金的加班，核准時又被新規則判定要再記一次補休，
+      // 造成雙重給付。period 取 start_at 的月份（UTC，簡化同本檔 getYearFromReq）。
+      const period = req.start_at.slice(0, 7)
+      const { rules } = await loadRuleConfigFor(tenantId, period)
       if (overtimeIsCompTime(rules)) {
         await creditCompTime(supabase, tenantId, req, hours)
       }

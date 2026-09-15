@@ -141,6 +141,13 @@ export interface SheetView {
   money: SheetMoney | null;
   anomalyCount: { error: number; warn: number; info: number };
   frozen: boolean;
+  /**
+   * 這張月表實際被算出來時用的規則版本號（後端 rule_config_version，計算/凍結
+   * 當下寫死，不會因為之後 HR 改規則而變動）。C4：畫面顯示「本月適用規則」要
+   * 用這個權威值，不要自己依 period 重新推導——推導值只代表「現在看起來應該是
+   * 哪版」，回填生效日等情境下會跟這張月表實際算出來的數字對不上。
+   */
+  ruleConfigVersion: number | null;
 }
 
 /** 合法狀態轉移（用來決定按鈕 disabled，不是本檔案唯一真相——後端仍會再擋一次）。 */

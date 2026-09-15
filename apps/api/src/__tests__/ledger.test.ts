@@ -153,10 +153,14 @@ beforeAll(async () => {
   }
 
   // HR saves the comp-time rule config (weekday_ot → compTime).
+  // C4：ledger.ts 現在依「加班發生的那個月」選版，這批 OT 請求固定寫死在 YEAR
+  // 年7月（見下方 startAt），不是「今天」——effectiveFrom 要對齊 7/1，不能用
+  // "now"，否則今天（測試實跑當下的月份）生效的版本蓋不到 7 月的請求，會落回
+  // DEFAULT_RULE_CONFIG（沒有 compTime），comp-time 判斷就失準。
   const rules = await request(app)
     .put("/rule-config")
     .set("Authorization", `Bearer ${A.adminToken}`)
-    .send(COMP_DSL)
+    .send({ ...COMP_DSL, effectiveFrom: `${YEAR}-07-01` })
   if (rules.status !== 200) throw new Error(`beforeAll: PUT rule-config (${rules.status})`)
 }, 90_000)
 

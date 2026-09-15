@@ -1216,7 +1216,7 @@ export function saveTenantSettings(body: {
 export interface SalaryStructure {
   id: string;
   employee_id: string;
-  method: "monthly" | "by_attendance_days";
+  method: "monthly" | "by_attendance_days" | "hourly";
   base_salary: string | null;
   daily_wage: string | null;
   hourly_wage: string;
@@ -1225,6 +1225,9 @@ export interface SalaryStructure {
   health_insured_salary?: string | null;
   /** 勞退自提比例 (0–0.06)，PostgREST 回字串。 */
   pension_voluntary_rate?: string | null;
+  /** 工讀生時薪制(C5)的約定每週工時／工天數；PostgREST 回字串，可能為 null。 */
+  agreed_hours_per_week?: string | null;
+  agreed_days_per_week?: string | null;
 }
 
 export function getSalaryStructure(employeeId: string) {
@@ -1234,13 +1237,15 @@ export function getSalaryStructure(employeeId: string) {
 export function putSalaryStructure(
   employeeId: string,
   body: {
-    method?: "monthly" | "by_attendance_days";
+    method?: "monthly" | "by_attendance_days" | "hourly";
     baseSalary?: number | null;
     dailyWage?: number | null;
     hourlyWage?: number;
     laborInsuredSalary?: number | null;
     healthInsuredSalary?: number | null;
     pensionVoluntaryRate?: number | null;
+    agreedHoursPerWeek?: number | null;
+    agreedDaysPerWeek?: number | null;
   },
 ) {
   return apiFetch<{ id: string }>(`/salary/${employeeId}`, {
@@ -1658,8 +1663,9 @@ export interface RuleConfigResponse {
  */
 export interface RuleConfigVersion {
   version: number;
-  effectiveFrom: string;
-  createdAt: string;
+  /** 後端 rule_configs.effective_from 是 NOT NULL，但路由回應仍用 `?? null` 兜底，型別要如實反映。 */
+  effectiveFrom: string | null;
+  createdAt: string | null;
   active: boolean;
   summary?: string;
 }

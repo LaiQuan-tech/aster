@@ -19,7 +19,7 @@ import {
   type SheetView,
   type SheetDayPatch,
 } from "@/lib/attendance-sheets-api";
-import { getRuleConfigVersions, pickRuleConfigVersion, type RuleConfigVersion } from "@/lib/admin-api";
+import { getRuleConfigVersions, type RuleConfigVersion } from "@/lib/admin-api";
 
 function fmtDateTime(iso: string | null): string {
   if (!iso) return "—";
@@ -189,12 +189,23 @@ export default function AttendanceSheetDetailPage() {
   const canReopen = sheet.status === "approved";
   const canRecompute = sheet.status === "draft" || sheet.status === "returned";
 
-  const pickedRuleVersion = ruleVersions ? pickRuleConfigVersion(ruleVersions, sheet.period) : null;
+  // C4（審查修正）：版本號一定要用 sheet.ruleConfigVersion——這是計算/凍結當下
+  // 寫死的權威值。不要用 pickRuleConfigVersion(ruleVersions, sheet.period) 現場
+  // 推導：HR 事後用「指定日期」回填一個更早生效的新版時，推導值會變成新版，
+  // 但畫面上的加班費／獎金其實還是舊版算出來的數字，標籤會說謊。effectiveFrom
+  // 這個日期本身 sheet 沒有帶，才需要拿權威版本號去 ruleVersions 清單裡查一次。
+  const authoritativeVersion = sheet.ruleConfigVersion;
+  const matchedRuleVersion =
+    authoritativeVersion != null && ruleVersions
+      ? (ruleVersions.find((v) => v.version === authoritativeVersion) ?? null)
+      : null;
   const ruleVersionLabel = !ruleVersions
     ? null
-    : pickedRuleVersion
-      ? `本月適用規則 v${pickedRuleVersion.version}（生效 ${pickedRuleVersion.effectiveFrom}）`
-      : "本月適用規則：預設規則";
+    : authoritativeVersion == null
+      ? null // 找不到權威版本號（舊資料或尚未計算過），不顯示，避免用推導值誤導
+      : matchedRuleVersion
+        ? `本月適用規則 v${matchedRuleVersion.version}（生效 ${matchedRuleVersion.effectiveFrom}）`
+        : "本月適用規則：預設規則"; // version 0（DEFAULT_RULE_CONFIG）或該版本已從歷史中查無
 
   return (
     <>
