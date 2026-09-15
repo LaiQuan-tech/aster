@@ -29,7 +29,7 @@ export default function ForgotPasswordPage() {
   }
 
   return (
-    <main className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+    <main className="min-h-dvh flex items-center justify-center bg-gray-50 p-4">
       <form onSubmit={onSubmit} className="w-full max-w-sm rounded-xl bg-white p-8 shadow-sm border border-gray-100">
         <h1 className="text-2xl font-bold mb-1" style={{ color: "var(--brand)" }}>
           忘記密碼

@@ -18,7 +18,7 @@ export default function Home() {
   }, [loading, session, router]);
 
   return (
-    <main className="min-h-screen flex items-center justify-center">
+    <main className="min-h-dvh flex items-center justify-center">
       <p className="text-gray-500">載入中…</p>
     </main>
   );

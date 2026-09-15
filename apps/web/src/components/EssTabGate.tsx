@@ -57,7 +57,7 @@ function Guard({
   if (allowed === null) {
     if (optimistic) return <>{children}</>;
     return (
-      <main className="min-h-screen flex items-center justify-center">
+      <main className="min-h-dvh flex items-center justify-center">
         <p className="text-gray-500">載入中…</p>
       </main>
     );
@@ -65,7 +65,7 @@ function Guard({
 
   if (!allowed) {
     return (
-      <main className="min-h-screen flex flex-col items-center justify-center gap-4 p-6 text-center">
+      <main className="min-h-dvh flex flex-col items-center justify-center gap-4 p-6 text-center">
         <h1 className="text-xl font-bold text-gray-800">此帳號未開放此功能</h1>
         <p className="text-gray-500">請聯絡人資調整可用功能，或返回打卡首頁。</p>
         <Link

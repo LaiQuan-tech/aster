@@ -41,7 +41,7 @@ function EssAiPageInner() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-dvh bg-gray-50">
       <EssHeader
         appName={branding?.appName}
         primaryColor={branding?.primaryColor}

@@ -105,7 +105,7 @@ function SetPasswordInner() {
 
   if (phase === "verifying") {
     return (
-      <main className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+      <main className="min-h-dvh flex items-center justify-center bg-gray-50 p-4">
         <p className="text-gray-500">驗證連結中…</p>
       </main>
     );
@@ -113,7 +113,7 @@ function SetPasswordInner() {
 
   if (phase === "need-login") {
     return (
-      <main className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+      <main className="min-h-dvh flex items-center justify-center bg-gray-50 p-4">
         <div className={card}>
           <h1 className="text-xl font-bold mb-2" style={{ color: "var(--brand)" }}>
             請先登入
@@ -129,7 +129,7 @@ function SetPasswordInner() {
 
   if (phase === "invalid") {
     return (
-      <main className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+      <main className="min-h-dvh flex items-center justify-center bg-gray-50 p-4">
         <div className={card}>
           <h1 className="text-xl font-bold mb-2" style={{ color: "var(--brand)" }}>
             連結無效或已過期
@@ -153,7 +153,7 @@ function SetPasswordInner() {
   }
 
   return (
-    <main className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+    <main className="min-h-dvh flex items-center justify-center bg-gray-50 p-4">
       <form onSubmit={onSubmit} className={card}>
         <h1 className="text-2xl font-bold mb-1" style={{ color: "var(--brand)" }}>
           {title}
@@ -219,7 +219,7 @@ export default function SetPasswordPage() {
   return (
     <Suspense
       fallback={
-        <main className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+        <main className="min-h-dvh flex items-center justify-center bg-gray-50 p-4">
           <p className="text-gray-500">載入中…</p>
         </main>
       }

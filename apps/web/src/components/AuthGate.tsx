@@ -75,7 +75,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (loading) {
     return (
-      <main className="min-h-screen flex items-center justify-center">
+      <main className="min-h-dvh flex items-center justify-center">
         <p className="text-gray-500">載入中…</p>
       </main>
     );
@@ -83,7 +83,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (!session) {
     return (
-      <main className="min-h-screen flex items-center justify-center">
+      <main className="min-h-dvh flex items-center justify-center">
         <p className="text-gray-500">導向登入…</p>
       </main>
     );
@@ -91,7 +91,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (!checked || checked.userId !== userId) {
     return (
-      <main className="min-h-screen flex items-center justify-center">
+      <main className="min-h-dvh flex items-center justify-center">
         <p className="text-gray-500">載入中…</p>
       </main>
     );
@@ -99,7 +99,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (mustRedirect) {
     return (
-      <main className="min-h-screen flex items-center justify-center">
+      <main className="min-h-dvh flex items-center justify-center">
         <p className="text-gray-500">請先設定新密碼…</p>
       </main>
     );

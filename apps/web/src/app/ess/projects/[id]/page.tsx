@@ -79,7 +79,7 @@ function ProjectDetailInner() {
   const canManage = membersRes?.canManage ?? false;
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-dvh bg-gray-50">
       <EssHeader appName={branding?.appName} primaryColor={branding?.primaryColor} active="projects" isAdmin={isAdmin} />
       <main className="mx-auto max-w-3xl space-y-4 px-3 pb-6 pt-4 sm:px-4">
         <Link href="/ess/projects" className="text-sm text-gray-500 hover:underline">← 專案列表</Link>

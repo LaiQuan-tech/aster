@@ -50,7 +50,7 @@ function Guard({ children }: { children: (me: Me) => React.ReactNode }) {
 
   if (state === "loading") {
     return (
-      <main className="min-h-screen flex items-center justify-center">
+      <main className="min-h-dvh flex items-center justify-center">
         <p className="text-gray-500">載入中…</p>
       </main>
     );
@@ -58,7 +58,7 @@ function Guard({ children }: { children: (me: Me) => React.ReactNode }) {
 
   if (state === "denied") {
     return (
-      <main className="min-h-screen flex flex-col items-center justify-center gap-4 p-6 text-center">
+      <main className="min-h-dvh flex flex-col items-center justify-center gap-4 p-6 text-center">
         <h1 className="text-xl font-bold text-gray-800">無權限</h1>
         <p className="text-gray-500">此頁面僅限 HR 管理員存取。</p>
         <Link
@@ -74,7 +74,7 @@ function Guard({ children }: { children: (me: Me) => React.ReactNode }) {
 
   if (state === "error") {
     return (
-      <main className="min-h-screen flex flex-col items-center justify-center gap-3 p-6 text-center">
+      <main className="min-h-dvh flex flex-col items-center justify-center gap-3 p-6 text-center">
         <p className="text-red-600" role="alert">
           {error}
         </p>

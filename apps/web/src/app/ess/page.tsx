@@ -199,7 +199,7 @@ function EssHome() {
   const nextAction = status === "working" ? "下班打卡" : "上班打卡";
 
   return (
-    <div className="min-h-screen bg-gray-50 safe-t">
+    <div className="min-h-dvh bg-gray-50 safe-t">
       <EssHeader
         appName={branding?.appName}
         primaryColor={branding?.primaryColor}

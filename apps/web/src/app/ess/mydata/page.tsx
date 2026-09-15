@@ -315,7 +315,7 @@ function MyDataInner() {
   const yearsLabel = (y: number | null) => (y == null ? "N/A" : y.toFixed(1));
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-dvh bg-gray-50">
       <EssHeader appName={branding?.appName} primaryColor={branding?.primaryColor} active="mydata" isAdmin={isAdmin} />
       <main className="mx-auto max-w-3xl space-y-4 px-3 pb-6 pt-4 sm:px-4">
         {error && <p className="text-sm text-red-600">{error}</p>}

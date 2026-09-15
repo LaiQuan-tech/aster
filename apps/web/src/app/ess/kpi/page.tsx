@@ -53,7 +53,7 @@ function KpiInner() {
   const mine = me ? reviews.filter((r) => r.employee_id === me.id && r.status === "finalized") : [];
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-dvh bg-gray-50">
       <EssHeader appName={branding?.appName} primaryColor={branding?.primaryColor} active="kpi" isAdmin={me ? isAdminRole(me.role) : false} />
       <main className="mx-auto max-w-3xl space-y-4 px-3 pb-6 pt-4 sm:px-4">
         {error && <p className="text-sm text-red-600">{error}</p>}

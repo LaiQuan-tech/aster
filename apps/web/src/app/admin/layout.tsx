@@ -172,9 +172,9 @@ function Shell({ me, children }: { me: Me; children: React.ReactNode }) {
   const activeItem = flatNav.find((item) => item.href === activeHref);
 
   return (
-    <div style={brandStyle} className="admin-shell min-h-screen bg-gray-50 md:flex">
+    <div style={brandStyle} className="admin-shell min-h-dvh bg-gray-50 md:flex">
       {/* Sidebar */}
-      <aside className="hidden shrink-0 border-b border-gray-100 bg-white md:block md:min-h-screen md:w-60 md:border-b-0 md:border-r">
+      <aside className="hidden shrink-0 border-b border-gray-100 bg-white md:block md:min-h-dvh md:w-60 md:border-b-0 md:border-r">
         <div className="flex items-center justify-between px-5 py-4">
           <span className="text-base font-bold leading-snug" style={{ color: "var(--brand)" }}>
             {branding?.appName ?? "亞斯特設計顧問 數位化系統"}
