@@ -59,6 +59,7 @@ import { disbursementsRouter } from "./routes/disbursements.js"
 import { disbursementReportsRouter } from "./routes/disbursement-reports.js"
 import { leaveSettlementRouter } from "./routes/leave-settlement.js"
 import { auditLogsRouter } from "./routes/audit-logs.js"
+import { bonusRunsRouter } from "./routes/bonus-runs.js"
 import { runWithRequestContext } from "./lib/request-context.js"
 
 const WEB_ORIGINS = (process.env.WEB_ORIGINS ?? "http://localhost:3000")
@@ -160,6 +161,7 @@ app.use(disbursementReportsRouter) // /disbursements/pivot、/disbursements/pivo
 app.use(disbursementsRouter)
 app.use(leaveSettlementRouter)
 app.use(auditLogsRouter)
+app.use(bonusRunsRouter) // /bonus-runs/preview、/bonus-runs/summary 要在 /bonus-runs/:id 之前（D1 獎金季發放批次）
 
 // 404 fallback.
 app.use((_req: Request, res: Response) => {
