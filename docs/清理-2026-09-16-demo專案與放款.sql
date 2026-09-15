@@ -26,6 +26,9 @@ BEGIN
   DELETE FROM public.project_share_adjustments WHERE tenant_id = t;
   DELETE FROM public.project_members           WHERE tenant_id = t;
 
+  -- 副委託付款列有 FK 指向放款單（disbursement_id），要先於放款單刪
+  DELETE FROM public.project_subcontract_payments WHERE tenant_id = t;
+
   -- 放款：paid／void 先退回 draft，分攤列才過得了 no_hard_delete_unless_draft
   UPDATE public.disbursements SET status = 'draft' WHERE tenant_id = t AND status <> 'draft';
   DELETE FROM public.disbursement_attachments  WHERE tenant_id = t;
@@ -33,7 +36,6 @@ BEGIN
   DELETE FROM public.disbursements             WHERE tenant_id = t;
 
   -- 專案（子案先刪）
-  DELETE FROM public.project_subcontract_payments WHERE tenant_id = t;
   DELETE FROM public.project_subcontracts      WHERE tenant_id = t;
   DELETE FROM public.project_billings          WHERE tenant_id = t;
   DELETE FROM public.contracts                 WHERE tenant_id = t;
