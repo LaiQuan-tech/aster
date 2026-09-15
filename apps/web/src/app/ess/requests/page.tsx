@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import { getEmployees, type Employee } from "@/lib/admin-api";
 import {
@@ -789,8 +789,8 @@ function RequestsView() {
 
 export default function RequestsPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="requests" optimistic>
       <RequestsView />
-    </AuthGate>
+    </EssTabGate>
   );
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import {
   getBranding,
@@ -444,8 +444,8 @@ function ScheduleInner() {
 
 export default function SchedulePage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="schedule" optimistic>
       <ScheduleInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

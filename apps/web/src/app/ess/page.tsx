@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AuthGate } from "@/components/AuthGate";
-import { EssHeader } from "@/components/EssHeader";
+import { EssHeader, type EssTabKey } from "@/components/EssHeader";
+import { visibleTabs } from "@/lib/ess-tabs";
 import {
   getBranding,
   getPunchToday,
@@ -26,6 +27,27 @@ interface InternalLink {
   enabled?: boolean;
   sort?: number;
 }
+
+/**
+ * 「我的快捷」格子；依 essTabs 過濾用（見 EssHome 內的 visibleTabs 呼叫）。
+ * `key` 對應該格子連去的分頁在 lib/ess-tabs.ts／EssHeader 的 tab key——
+ * 同一個 tab（如「我的申請」底下的請假/加班/忘打卡/公出）可以有多個格子
+ * 共用同一個 key，過濾時視為一體被藏起或放行。
+ */
+const QUICK_LINKS: ReadonlyArray<{ key: EssTabKey; label: string; href: string }> = [
+  { key: "requests", label: "請假", href: "/ess/requests" },
+  { key: "requests", label: "加班", href: "/ess/requests" },
+  { key: "requests", label: "忘打卡申請", href: "/ess/requests" },
+  { key: "requests", label: "公出/出差", href: "/ess/requests" },
+  { key: "schedule", label: "個人班表", href: "/ess/schedule" },
+  { key: "punches", label: "打卡紀錄", href: "/ess/punches" },
+  { key: "balances", label: "剩餘假別", href: "/ess/balances" },
+  { key: "payslips", label: "我的薪資單", href: "/ess/payslips" },
+  { key: "jobs", label: "內部職缺", href: "/ess/jobs" },
+  { key: "notifications", label: "通知中心", href: "/ess/notifications" },
+  { key: "ai", label: "AI 問答", href: "/ess/ai" },
+  { key: "mydata", label: "我的資料", href: "/ess/mydata" },
+];
 
 function timeOf(iso: string): string {
   const d = new Date(iso);
@@ -59,6 +81,9 @@ function EssHome() {
   const noteSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const router = useRouter();
   const [isAdmin, setIsAdmin] = useState(false);
+  // null＝不限縮（預設狀態，/me 回來前也是這個值，快捷格子先全部顯示，等
+  // essTabs 若真的有限縮清單再收斂——跟 EssTabGate optimistic 同一種取捨）。
+  const [essTabs, setEssTabs] = useState<string[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [punching, setPunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -116,7 +141,10 @@ function EssHome() {
           setNoteStatus("local");
         }
       }
-      if (meRes.status === "fulfilled") setIsAdmin(isAdminRole(meRes.value.role));
+      if (meRes.status === "fulfilled") {
+        setIsAdmin(isAdminRole(meRes.value.role));
+        setEssTabs(Array.isArray(meRes.value.essTabs) ? meRes.value.essTabs : null);
+      }
       try {
         await loadPunch();
       } catch (err) {
@@ -255,20 +283,7 @@ function EssHome() {
         <section className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:p-6">
           <h2 className="mb-4 text-lg font-semibold text-gray-800">我的快捷</h2>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            {[
-              { label: "請假", href: "/ess/requests" },
-              { label: "加班", href: "/ess/requests" },
-              { label: "忘打卡申請", href: "/ess/requests" },
-              { label: "公出/出差", href: "/ess/requests" },
-              { label: "個人班表", href: "/ess/schedule" },
-              { label: "打卡紀錄", href: "/ess/punches" },
-              { label: "剩餘假別", href: "/ess/balances" },
-              { label: "我的薪資單", href: "/ess/payslips" },
-              { label: "內部職缺", href: "/ess/jobs" },
-              { label: "通知中心", href: "/ess/notifications" },
-              { label: "AI 問答", href: "/ess/ai" },
-              { label: "我的資料", href: "/ess/mydata" },
-            ].map((q) => (
+            {visibleTabs(QUICK_LINKS, essTabs).map((q) => (
               <button
                 key={q.label}
                 onClick={() => router.push(q.href)}

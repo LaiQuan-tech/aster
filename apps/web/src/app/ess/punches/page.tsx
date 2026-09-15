@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import {
   getBranding,
@@ -437,8 +437,8 @@ function PunchesInner() {
 
 export default function PunchesPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="punches" optimistic>
       <PunchesInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

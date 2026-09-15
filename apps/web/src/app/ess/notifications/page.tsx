@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import {
   getBranding,
@@ -217,8 +217,8 @@ function NotificationsInner() {
 
 export default function NotificationsPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="notifications" optimistic>
       <NotificationsInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }

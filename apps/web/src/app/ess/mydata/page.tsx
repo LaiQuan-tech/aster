@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { AuthGate } from "@/components/AuthGate";
+import { EssTabGate } from "@/components/EssTabGate";
 import { EssHeader } from "@/components/EssHeader";
 import {
   getBranding,
@@ -710,8 +710,8 @@ function ChangePasswordCard() {
 
 export default function MyDataPage() {
   return (
-    <AuthGate>
+    <EssTabGate tab="mydata" optimistic>
       <MyDataInner />
-    </AuthGate>
+    </EssTabGate>
   );
 }
