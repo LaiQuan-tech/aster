@@ -220,15 +220,21 @@ export function BillingsCard({
               const received = !!saved?.receivedOn;
               const locked = billed || received;
               // B5：同一套三段狀態＋逾期 badge（跟 /admin/projects/receivables 共用顏色）。
-              // 這支 schedule API 沒有租戶逾期基準，固定用 'billed'（見 computeReceivableState 註解）。
+              // API 有回 state 就用 API 的（後端依租戶逾期基準＋收足規則算好）；沒有才在前端算，
+              // 前端版固定 'billed' 基準，並帶實收／有效金額讓部分入帳不被當成已收
+              // （見 computeReceivableState 註解）。
               // today 用 localTodayKey()，不是這檔案原本的 todayKey()——後者取 UTC 日期，
               // 在 UTC+8 每天凌晨會少算一天，會把「逾期一天」誤判成「還沒逾期」。
-              const rowState = computeReceivableState({
-                billedOn: saved?.billedOn ?? null,
-                invoicedOn: saved?.invoicedOn ?? null,
-                receivedOn: saved?.receivedOn ?? null,
-                today: localTodayKey(),
-              });
+              const rowState =
+                saved?.state ??
+                computeReceivableState({
+                  billedOn: saved?.billedOn ?? null,
+                  invoicedOn: saved?.invoicedOn ?? null,
+                  receivedOn: saved?.receivedOn ?? null,
+                  receivedAmount: saved?.receivedAmount ?? null,
+                  effectiveAmount: saved?.effectiveAmount ?? null,
+                  today: localTodayKey(),
+                });
               return (
                 <Fragment key={rowDraft.id ?? `new-${idx}`}>
                   <tr className="border-b last:border-0">

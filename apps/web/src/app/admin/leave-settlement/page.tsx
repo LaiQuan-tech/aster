@@ -349,7 +349,17 @@ export default function LeaveSettlementPage() {
                         <span className="text-xs font-normal text-gray-400">{item.employee.departmentName ?? "—"}</span>
                       </td>
                       <td className="py-2 pr-3 text-gray-700">{item.leaveType.name}</td>
-                      <td className="py-2 pr-3 text-gray-600">{fmtDateRange(item.startDate, item.endDate)}</td>
+                      <td className="py-2 pr-3 text-gray-600">
+                        {fmtDateRange(item.startDate, item.endDate)}
+                        {item.crossMonth && (
+                          <span
+                            className="ml-1 rounded-full bg-sky-100 px-2 py-0.5 text-xs text-sky-700"
+                            title="假單期間跨越月份：兩個月的清單都會列出，核銷一次即可（核銷月份以按下核銷時選的月份為準）"
+                          >
+                            跨月
+                          </span>
+                        )}
+                      </td>
                       <td className="py-2 pr-3 text-right tabular-nums">{item.hours}</td>
                       <td className="py-2 pr-3 text-right tabular-nums">{fmtDeductRate(item.leaveType.deductRate)}</td>
                       <td className="py-2 pr-3">
@@ -368,6 +378,9 @@ export default function LeaveSettlementPage() {
                           <div className="flex flex-col items-start gap-1">
                             <span className="text-xs text-gray-600">
                               {item.settledBy?.name ?? "—"} · {fmtDateTime(item.settledAt)}
+                              {item.settledPeriod && item.settledPeriod !== period && (
+                                <span className="ml-1 text-gray-400">（於 {item.settledPeriod} 核銷）</span>
+                              )}
                             </span>
                             <button
                               type="button"

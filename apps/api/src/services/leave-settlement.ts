@@ -22,8 +22,14 @@ import { writeAuditLog } from "./audit.js"
  * status='approved'——「核銷狀態」（settled_at 是否為 null）是另一回事，
  * 跟 leave_requests.status 的 pending/approved/rejected 不要混淆。
  *
- * 「哪個月」的判斷：leave_requests 的**起日**（start_at 的租戶當地日期）落在
- * 該月就算該月的（跨月的假單以起日歸屬，不管結束日）。
+ * 「哪個月」的判斷：**期間重疊**——假單的 [start_at, end_at) 與該月（租戶當地
+ * 日曆月）有交集就列在該月。跨月的假單（例如 1/28–2/3）因此 1 月與 2 月的清單
+ * 都看得到，item 上標 `crossMonth: true`；HR 在哪個月核銷，`settled_period` 就記
+ * 哪個月（核銷 body 的 period），另一個月的清單看到的是「已核銷（於 YYYY-MM）」。
+ * 之前清單以起日歸屬、而月表 approve 阻擋（hasUnsettledApprovedLeaveOverlapping）
+ * 與月級異常（services/attendance-sheets.ts）都以期間重疊判斷——兩套判準讓
+ * 1/28–2/3 的假單在 2 月清單看不到、2 月月表卻被它擋住核准，HR 無從核銷
+ * （驗收抓到的 B 批次問題 5）。現在三處統一為期間重疊。
  *
  * 查詢風格比照 services/attendance-sheets.ts / services/settlement.ts：
  * supabaseAdmin 直查、每句自帶 tenant_id 過濾、批次抓關聯資料後在記憶體
@@ -64,6 +70,10 @@ export interface LeaveSettlementItem {
   attachmentCount: number
   settledAt: string | null
   settledBy: { id: string; name: string } | null
+  /** 核銷時 HR 選的月份（'YYYY-MM'）；跨月假單可能不等於目前查詢的 period。 */
+  settledPeriod: string | null
+  /** 假單期間有一部分落在查詢月份之外（起日早於月初或迄日晚於月底）。 */
+  crossMonth: boolean
 }
 
 export interface LeaveSettlementSummary {
@@ -88,6 +98,7 @@ interface LeaveRequestRow {
   hours: string | number | null
   settled_at: string | null
   settled_by_emp_id: string | null
+  settled_period: string | null
 }
 
 interface LeaveTypeFullRow {
@@ -132,15 +143,17 @@ export async function listLeaveSettlement(tenantId: string, filter: LeaveSettlem
     if (deptEmployeeIds.length === 0) return EMPTY_LIST_RESULT(filter.period)
   }
 
+  // 期間重疊（start_at < 月底、end_at > 月初），與 hasUnsettledApprovedLeaveOverlapping／
+  // services/attendance-sheets.ts 的月級異常同一套判準（見檔頭「哪個月」）。
   let query = supabaseAdmin
     .from("leave_requests")
-    .select("id, employee_id, leave_type_id, start_at, end_at, hours, settled_at, settled_by_emp_id")
+    .select("id, employee_id, leave_type_id, start_at, end_at, hours, settled_at, settled_by_emp_id, settled_period")
     .eq("tenant_id", tenantId)
     .eq("kind", "leave")
     .eq("status", "approved")
     .is("deleted_at", null)
-    .gte("start_at", rangeStart)
     .lt("start_at", rangeEnd)
+    .gt("end_at", rangeStart)
     .order("start_at", { ascending: true })
   if (deptEmployeeIds) query = query.in("employee_id", deptEmployeeIds)
 
@@ -201,6 +214,8 @@ export async function listLeaveSettlement(tenantId: string, filter: LeaveSettlem
     const lt = r.leave_type_id ? ltById.get(r.leave_type_id) : undefined
     const emp = empById.get(r.employee_id)
     const settledByEmp = r.settled_by_emp_id ? empById.get(r.settled_by_emp_id) : undefined
+    const startDate = localDateKey(r.start_at, tz)
+    const endDate = localDateKey(r.end_at, tz)
     return {
       id: r.id,
       employee: {
@@ -214,13 +229,16 @@ export async function listLeaveSettlement(tenantId: string, filter: LeaveSettlem
         name: lt?.name ?? "",
         deductRate: leaveDeductRate(lt ? { id: lt.id, code: lt.code, paid: lt.paid, deduct_rate: lt.deduct_rate } : undefined),
       },
-      startDate: localDateKey(r.start_at, tz),
-      endDate: localDateKey(r.end_at, tz),
+      startDate,
+      endDate,
       hours: r.hours != null ? Number(r.hours) : 0,
       requiresAttachment: lt?.requires_attachment ?? false,
       attachmentCount: attachmentCountById.get(r.id) ?? 0,
       settledAt: r.settled_at ?? null,
       settledBy: r.settled_by_emp_id ? { id: r.settled_by_emp_id, name: settledByEmp?.name ?? "" } : null,
+      settledPeriod: r.settled_period ?? null,
+      // 'YYYY-MM-DD' 字串可直接比大小；from／to 是該月的第一天／最後一天。
+      crossMonth: startDate < from || endDate > to,
     }
   })
 
@@ -260,12 +278,19 @@ interface SettleCandidateRow {
  * settleLeaveRequests — POST /leave-settlement/settle。逐筆判斷（見檔頭
  * 註解的規則），可核銷的一次 UPDATE 批次寫入（同一批 ids 共用同一個
  * settled_at/settled_period），每筆成功核銷各寫一筆 audit log。
+ *
+ * 併發：UPDATE 帶 `settled_at IS NULL` 條件並回傳實際改到的列——兩個 HR 同時
+ * 對同一張假單按核銷，只有先到的那句 UPDATE 改得到列，後到的拿到 0 列、回
+ * `already_settled`，不會用自己的 settled_at/settled_by 蓋掉前者（驗收抓到的
+ * B 批次問題 4）。光靠前面 SELECT 看到 settled_at 為 null 不夠——兩邊 SELECT
+ * 都在對方 UPDATE 之前就會各自認為自己是第一個。
  */
 export async function settleLeaveRequests(tenantId: string, actorEmpId: string | null, input: SettleLeaveInput): Promise<SettleLeaveResult> {
   const { data, error } = await supabaseAdmin
     .from("leave_requests")
     .select("id, kind, status, settled_at, leave_type_id")
     .eq("tenant_id", tenantId)
+    .is("deleted_at", null)
     .in("id", input.ids)
   if (error) throw new Error(`settleLeaveRequests (load): ${error.message}`)
   const byId = new Map(((data ?? []) as SettleCandidateRow[]).map((r) => [r.id, r]))
@@ -319,17 +344,26 @@ export async function settleLeaveRequests(tenantId: string, actorEmpId: string |
     toSettle.push(id)
   }
 
+  let settledIds: string[] = []
   if (toSettle.length > 0) {
     const nowIso = new Date().toISOString()
-    const { error: updErr } = await supabaseAdmin
+    const { data: updated, error: updErr } = await supabaseAdmin
       .from("leave_requests")
       .update({ settled_at: nowIso, settled_by_emp_id: actorEmpId, settled_period: input.period })
       .eq("tenant_id", tenantId)
+      .is("settled_at", null)
       .in("id", toSettle)
+      .select("id")
     if (updErr) throw new Error(`settleLeaveRequests (update): ${updErr.message}`)
+    settledIds = ((updated ?? []) as Array<{ id: string }>).map((r) => r.id)
+    const settledSet = new Set(settledIds)
+    // SELECT 之後、UPDATE 之前被別人搶先核銷的：UPDATE 沒改到列，照實回 already_settled。
+    for (const id of toSettle) {
+      if (!settledSet.has(id)) skipped.push({ id, reason: "already_settled" })
+    }
 
     await Promise.all(
-      toSettle.map((id) =>
+      settledIds.map((id) =>
         writeAuditLog({
           tenantId,
           tableName: "leave_requests",
@@ -352,7 +386,7 @@ export async function settleLeaveRequests(tenantId: string, actorEmpId: string |
     )
   }
 
-  return { settled: toSettle.length, skipped }
+  return { settled: settledIds.length, skipped }
 }
 
 export interface UnsettleLeaveInput {
@@ -426,13 +460,13 @@ export async function leaveSettlementWorkbookBuffer(result: LeaveSettlementListR
   wb.creator = "aster-hr"
   const ws = wb.addWorksheet("假單核銷", { views: [{ state: "frozen", ySplit: 1 }] })
 
-  const headers = ["員工姓名", "工號", "部門", "假別", "起日", "迄日", "時數", "需附件", "附件數", "核銷狀態", "核銷時間", "核銷人"]
+  const headers = ["員工姓名", "工號", "部門", "假別", "起日", "迄日", "時數", "需附件", "附件數", "核銷狀態", "核銷時間", "核銷人", "跨月", "核銷月份"]
   const headerRow = ws.getRow(1)
   headers.forEach((h, i) => {
     headerRow.getCell(i + 1).value = h
   })
   applyHeaderStyle(headerRow)
-  const widths = [12, 10, 14, 12, 12, 12, 8, 8, 8, 10, 20, 12]
+  const widths = [12, 10, 14, 12, 12, 12, 8, 8, 8, 10, 20, 12, 8, 10]
   widths.forEach((w, i) => {
     ws.getColumn(i + 1).width = w
   })
@@ -452,6 +486,8 @@ export async function leaveSettlementWorkbookBuffer(result: LeaveSettlementListR
     row.getCell(10).value = item.settledAt ? "已核銷" : "未核銷"
     row.getCell(11).value = item.settledAt ?? ""
     row.getCell(12).value = item.settledBy?.name ?? ""
+    row.getCell(13).value = item.crossMonth ? "是" : "否"
+    row.getCell(14).value = item.settledPeriod ?? ""
     r += 1
   }
 
@@ -492,6 +528,21 @@ export async function hasUnsettledApprovedLeaveOverlapping(
   rangeStartIso: string,
   rangeEndIso: string,
 ): Promise<boolean> {
+  const ids = await unsettledApprovedLeaveIdsOverlapping(tenantId, employeeId, rangeStartIso, rangeEndIso)
+  return ids.length > 0
+}
+
+/**
+ * 同上，但回傳全部命中的假單 id（起日排序）——approve 409 的 body 要帶
+ * `unsettledIds`／`count`，HR 才知道要去核銷哪幾張（跨月的假單在月表那個月的
+ * 清單也看得到了，見檔頭「哪個月」）。
+ */
+export async function unsettledApprovedLeaveIdsOverlapping(
+  tenantId: string,
+  employeeId: string,
+  rangeStartIso: string,
+  rangeEndIso: string,
+): Promise<string[]> {
   const { data, error } = await supabaseAdmin
     .from("leave_requests")
     .select("id")
@@ -503,7 +554,7 @@ export async function hasUnsettledApprovedLeaveOverlapping(
     .is("deleted_at", null)
     .lt("start_at", rangeEndIso)
     .gt("end_at", rangeStartIso)
-    .limit(1)
-  if (error) throw new Error(`hasUnsettledApprovedLeaveOverlapping: ${error.message}`)
-  return (data ?? []).length > 0
+    .order("start_at", { ascending: true })
+  if (error) throw new Error(`unsettledApprovedLeaveIdsOverlapping: ${error.message}`)
+  return ((data ?? []) as Array<{ id: string }>).map((r) => r.id)
 }

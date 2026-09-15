@@ -897,7 +897,9 @@ export async function buildReceivables(
         receivedOn: b.received_on ?? null,
         receivedAmount: b.received_on ? num(b.received_amount) : null,
         unreceived,
-        overdueDays: overdueDays(b.invoiced_on ?? null, b.received_on ?? null, opts.today),
+        // 這裡的基準固定 'invoiced'（routes/projects-annual.ts 會依租戶設定再算一次覆蓋）；
+        // unreceived 要帶：部分入帳的期別不算已收，逾期照算（B 批次問題 2）。
+        overdueDays: overdueDays(b.invoiced_on ?? null, b.received_on ?? null, opts.today, "invoiced", null, unreceived),
         projectUnreceivedPct: projectPct,
         projectCode: p.code,
       })

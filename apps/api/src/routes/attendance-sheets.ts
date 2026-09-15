@@ -25,7 +25,7 @@ import {
   type SheetRow,
 } from "../services/attendance-sheets.js"
 import type { SheetStatus } from "../services/attendance-sheet-types.js"
-import { hasUnsettledApprovedLeaveOverlapping, tenantBlocksApproveOnUnsettledLeave } from "../services/leave-settlement.js"
+import { unsettledApprovedLeaveIdsOverlapping, tenantBlocksApproveOnUnsettledLeave } from "../services/leave-settlement.js"
 import { PeriodCloseError, closePeriod, listPeriodCloses, listSheetSnapshots, reopenPeriod } from "../services/backup-snapshot.js"
 
 export const attendanceSheetsRouter = Router()
@@ -174,13 +174,18 @@ async function canRead(tenantId: string, caller: Caller, sheet: SheetRow): Promi
  * 該機制擋下。因此這裡在 HTTP 層另外补一個 409 檢查，不去動
  * services/attendance-sheets.ts 的 approveSheet（避開該檔案受保護的區域）。
  */
-async function blockedByUnsettledLeave(tenantId: string, sheet: SheetRow): Promise<boolean> {
-  if (!(await tenantBlocksApproveOnUnsettledLeave(tenantId))) return false
+/**
+ * 回擋下 approve 的假單 id（空陣列＝不擋）。409 body 要帶 `unsettledIds`／`count`，
+ * HR 才知道去核銷哪幾張——跨月假單現在在月表那個月的核銷清單也看得到（期間重疊，
+ * 見 services/leave-settlement.ts 檔頭），不會再出現「被擋卻找不到那張假單」。
+ */
+async function unsettledLeaveBlockingApprove(tenantId: string, sheet: SheetRow): Promise<string[]> {
+  if (!(await tenantBlocksApproveOnUnsettledLeave(tenantId))) return []
   const tz = await getTenantTimezone(tenantId)
   const { from, to } = monthRangeKeys(sheet.period)
   const rangeStart = dayWindowUtc(from, tz).startIso
   const rangeEnd = dayWindowUtc(to, tz).endIso
-  return hasUnsettledApprovedLeaveOverlapping(tenantId, sheet.employee_id, rangeStart, rangeEnd)
+  return unsettledApprovedLeaveIdsOverlapping(tenantId, sheet.employee_id, rangeStart, rangeEnd)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -456,8 +461,9 @@ attendanceSheetsRouter.post(
       const caller = await requireCaller(req, res)
       if (!caller) return
       const sheet = await loadSheet(tenantId, id)
-      if (await blockedByUnsettledLeave(tenantId, sheet)) {
-        res.status(409).json({ error: "unsettled_leave" })
+      const unsettledIds = await unsettledLeaveBlockingApprove(tenantId, sheet)
+      if (unsettledIds.length > 0) {
+        res.status(409).json({ error: "unsettled_leave", unsettledIds, count: unsettledIds.length })
         return
       }
       const next_ = await approveSheet(tenantId, id, caller.self.id)

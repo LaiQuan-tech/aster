@@ -284,6 +284,12 @@ export interface BillingExt extends Installment {
   invoicedOn: string | null
   receivedOn: string | null
   receivedAmount: number | null
+  /**
+   * 三段狀態＋逾期。schedule API 目前**沒有**回這個欄位（只有 /projects/receivables 有），
+   * 先留成 optional：哪天後端補上，BillingsCard 會直接優先用它、不再自己算
+   * （見 computeReceivableState 註解）。
+   */
+  state?: ReceivableState
 }
 
 export interface BillingScheduleExt {
@@ -800,9 +806,29 @@ export function localTodayKey(): string {
 }
 
 /**
- * BillingsCard（專案詳情頁的請款卡）用：那支 schedule API 沒有 basis／state 欄位，
- * 這裡固定用 'billed' 基準——目前系統唯一的預設（逾期基準設定 UI 還沒做，見 B5 交付說明）。
- * 之後若要讓詳情頁也吃租戶自訂的基準，這裡要改成多收一個 basis 參數。
+ * 「已收足」——前端版，規則同後端 `services/project-money.isFullyReceived`：
+ * `/billings/:id/receive` 支援部分入帳，有入帳日不等於收完。實收 ≥ 有效金額才算收足；
+ * 有效金額未知（沒合約也沒報價單、算不出該期金額）時有入帳日就當收足——本來就無從標欠多少。
+ */
+export function isFullyReceived(input: { receivedOn: string | null; receivedAmount: number | null; effectiveAmount: number | null }): boolean {
+  if (!input.receivedOn) return false
+  if (input.effectiveAmount === null) return true
+  return (input.receivedAmount ?? 0) >= input.effectiveAmount
+}
+
+/**
+ * BillingsCard（專案詳情頁的請款卡）用的**退路**：那支 schedule API 目前沒有 basis／state
+ * 欄位，這裡在前端算一份。**API 若有回 `state` 就優先用 API 的**（後端已依租戶的逾期
+ * 基準與收足規則算好，兩處算出不同結論時以後端為準），這支只在沒有 `state` 時用。
+ *
+ * 規則對齊後端 `services/project-money.overdueDays`／`receivableState`：
+ *   • `basis` 預設 'billed'（目前系統唯一的預設；逾期基準設定 UI 還沒做，見 B5 交付說明），
+ *     可傳 'invoiced' 改從開票日起算。之後詳情頁要吃租戶自訂基準，呼叫端傳進來即可。
+ *   • basis='billed' 但沒有請款日時退回開票日（先開票才補請款、或請款撤銷但開票沒撤——
+ *     同後端 c6bef9c 的修正），不能讓已經跑出去的錢從逾期消失。
+ *   • 部分入帳（有入帳日但實收 < 有效金額）不算 received，維持 billed／invoiced／overdue
+ *     的判斷，逾期起算日不變；`receivedAmount`／`effectiveAmount` 沒帶時相容舊呼叫
+ *     （有入帳日即 received）。
  * `today` 請傳 `localTodayKey()`，不要傳 shared.tsx 的 `todayKey()`（見上方註解）。
  */
 export function computeReceivableState(input: {
@@ -810,9 +836,20 @@ export function computeReceivableState(input: {
   invoicedOn: string | null
   receivedOn: string | null
   today: string
+  /** 逾期起算基準；省略＝'billed'。 */
+  basis?: "billed" | "invoiced"
+  /** 實收與該期有效金額（未稅）；兩者都帶才會套「部分入帳不算已收」的規則。 */
+  receivedAmount?: number | null
+  effectiveAmount?: number | null
 }): ReceivableState {
-  if (input.receivedOn) return "received"
-  const overdue = !!input.billedOn && daysBetween(input.billedOn, input.today) > 0
+  const fullyReceived =
+    input.receivedAmount === undefined || input.effectiveAmount === undefined
+      ? !!input.receivedOn
+      : isFullyReceived({ receivedOn: input.receivedOn, receivedAmount: input.receivedAmount, effectiveAmount: input.effectiveAmount })
+  if (fullyReceived) return "received"
+  const basis = input.basis ?? "billed"
+  const startOn = basis === "billed" ? (input.billedOn ?? input.invoicedOn) : input.invoicedOn
+  const overdue = !!startOn && daysBetween(startOn, input.today) > 0
   if (overdue) return "overdue"
   if (input.invoicedOn) return "invoiced"
   if (input.billedOn) return "billed"

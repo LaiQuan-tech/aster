@@ -134,11 +134,19 @@ projectsAnnualRouter.get(
       const today = todayKey(tz)
       const built = await buildReceivables(tenantId, { projectIds, status, today, settings })
       let rows = built.map((r) => {
-        const od = overdueDays(r.invoicedOn, r.receivedOn, today, basis, r.billedOn)
+        // unreceived 一併傳入：部分入帳（有入帳日但未收足）的期別仍要算逾期、
+        // 狀態不是 received（B 批次問題 2；判讀規則見 project-money.isFullyReceived）。
+        const od = overdueDays(r.invoicedOn, r.receivedOn, today, basis, r.billedOn, r.unreceived)
         return {
           ...r,
           overdueDays: od,
-          state: receivableState({ billedOn: r.billedOn, invoicedOn: r.invoicedOn, receivedOn: r.receivedOn, overdueDays: od }),
+          state: receivableState({
+            billedOn: r.billedOn,
+            invoicedOn: r.invoicedOn,
+            receivedOn: r.receivedOn,
+            overdueDays: od,
+            unreceived: r.unreceived,
+          }),
         }
       })
       // buildReceivables 內部已經排序過，但用的是舊基準（永遠 invoiced-only）算出的

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { overdueDays, receivableState, summarizeContracts } from "../services/project-money"
+import { isFullyReceived, overdueDays, receivableState, summarizeContracts } from "../services/project-money"
 
 /**
  * B5：請款三段狀態顏色／未收款篩選／逾期基準可設定——純函式部分。
@@ -114,5 +114,68 @@ describe("summarizeContracts：our_role=both 視為我方承攬", () => {
       { doc_type: "contract", our_role: "client", amount: "800000", signed_on: "2026-01-01", created_at: "2026-01-01T00:00:00Z" },
     ])
     expect(s.total).toBeNull()
+  })
+})
+
+/**
+ * B 批次驗收修正問題 2：部分入帳仍可逾期。
+ * `/billings/:id/receive` 支援部分入帳，所以「有入帳日」≠「收完」；只有收足
+ * （unreceived <= 0）才是 received，部分入帳的列維持 billed／invoiced／overdue
+ * 判斷、逾期起算日不變。
+ */
+describe("isFullyReceived：收足才算收完", () => {
+  it("沒有入帳日一律 false", () => {
+    expect(isFullyReceived(null)).toBe(false)
+    expect(isFullyReceived(null, 0)).toBe(false)
+  })
+
+  it("有入帳日且 unreceived <= 0 → true；> 0（部分入帳）→ false", () => {
+    expect(isFullyReceived("2025-10-01", 0)).toBe(true)
+    expect(isFullyReceived("2025-10-01", -5)).toBe(true)
+    expect(isFullyReceived("2025-10-01", 700_000)).toBe(false)
+  })
+
+  it("unreceived 沒帶（舊呼叫）或 null（分母未知）：有入帳日就當收足", () => {
+    expect(isFullyReceived("2025-10-01")).toBe(true)
+    expect(isFullyReceived("2025-10-01", null)).toBe(true)
+  })
+})
+
+describe("overdueDays／receivableState：部分入帳仍可逾期（B 批次問題 2）", () => {
+  const billedOn = "2025-09-15" // 一年前請款
+  const receivedOn = "2025-10-01" // 收了 30 萬
+  const today = "2026-09-15"
+
+  it("收 30 萬／應收 100 萬（未收 70 萬）、billed 一年前 → overdueDays=365、state=overdue", () => {
+    const od = overdueDays(null, receivedOn, today, "billed", billedOn, 700_000)
+    expect(od).toBe(365)
+    expect(receivableState({ billedOn, invoicedOn: null, receivedOn, overdueDays: od, unreceived: 700_000 })).toBe("overdue")
+  })
+
+  it("部分入帳但今天才請款（overdueDays=0）→ 仍是 billed／invoiced，不是 received", () => {
+    const od = overdueDays(null, today, today, "billed", today, 700_000)
+    expect(od).toBe(0)
+    expect(receivableState({ billedOn: today, invoicedOn: null, receivedOn: today, overdueDays: od, unreceived: 700_000 })).toBe("billed")
+    expect(receivableState({ billedOn: today, invoicedOn: today, receivedOn: today, overdueDays: od, unreceived: 700_000 })).toBe("invoiced")
+  })
+
+  it("收足（unreceived=0）→ overdueDays=null、state=received", () => {
+    expect(overdueDays(null, receivedOn, today, "billed", billedOn, 0)).toBeNull()
+    expect(receivableState({ billedOn, invoicedOn: null, receivedOn, overdueDays: null, unreceived: 0 })).toBe("received")
+  })
+
+  it("basis='invoiced' 同一套規則：部分入帳從開票日起算", () => {
+    expect(overdueDays("2025-12-01", receivedOn, today, "invoiced", billedOn, 700_000)).toBe(288)
+    expect(overdueDays("2025-12-01", receivedOn, today, "invoiced", billedOn, 0)).toBeNull()
+  })
+
+  it("分母未知（unreceived=null）：有入帳日就當收足——算不出未收，無從催", () => {
+    expect(overdueDays(null, receivedOn, today, "billed", billedOn, null)).toBeNull()
+    expect(receivableState({ billedOn, invoicedOn: null, receivedOn, overdueDays: null, unreceived: null })).toBe("received")
+  })
+
+  it("向下相容：不帶 unreceived 的舊呼叫，有入帳日即視為已收", () => {
+    expect(overdueDays(null, receivedOn, today, "billed", billedOn)).toBeNull()
+    expect(receivableState({ billedOn, invoicedOn: null, receivedOn, overdueDays: 365 })).toBe("received")
   })
 })

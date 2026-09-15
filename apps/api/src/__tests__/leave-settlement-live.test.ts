@@ -436,4 +436,128 @@ describe.skipIf(!ready)("B8 假單月底核銷 — live", () => {
       expect(approveAgain.status).toBe(200)
     }, 20_000)
   })
+
+  // ─── B 批次驗收修正（fresh-context 驗收抓到的問題 4／5）──────────────────
+  describe("B 批次驗收修正：核銷併發不互相覆蓋 ＋ 跨月假單兩套判準統一", () => {
+    it("問題 4：同一張假單兩個併發 settle → 合計 settled=1、輸的那次 skipped already_settled，且只留一筆 app 層 audit log", async () => {
+      const id = await insertLeaveRequest({
+        employeeId: empId,
+        leaveTypeId: leaveTypePlainId,
+        startAt: "2026-09-20T01:00:00.000Z",
+        endAt: "2026-09-20T09:00:00.000Z",
+        hours: 8,
+        status: "approved",
+      })
+      const [a, b] = await Promise.all([
+        as(adminToken, request(app).post("/leave-settlement/settle")).send({ period: PERIOD, ids: [id] }),
+        as(adminToken, request(app).post("/leave-settlement/settle")).send({ period: PERIOD, ids: [id] }),
+      ])
+      expect(a.status).toBe(200)
+      expect(b.status).toBe(200)
+      expect(a.body.settled + b.body.settled).toBe(1)
+      const loser = a.body.settled === 0 ? a : b
+      expect(loser.body.skipped).toEqual([{ id, reason: "already_settled" }])
+      const row = await leaveRow(id)
+      expect(row.settled_at).not.toBeNull()
+      expect(row.settled_period).toBe(PERIOD)
+
+      // 輸的那次不能再寫 audit log（.contains 用 camelCase 的 settledPeriod 只挑 app 層那列，
+      // sql/0019 trigger 那列的 new_row 是整列 snake_case，不會被挑到）。
+      const { data: logs, error } = await supabaseAdmin
+        .from("audit_logs")
+        .select("id")
+        .eq("tenant_id", tenantId)
+        .eq("table_name", "leave_requests")
+        .eq("record_id", id)
+        .eq("context", "POST /leave-settlement/settle")
+        .contains("new_row", { settledPeriod: PERIOD })
+      expect(error).toBeNull()
+      expect(logs).toHaveLength(1)
+    })
+
+    it("問題 4：軟刪除（deleted_at）的 approved 假單不是核銷候選 → not_approved", async () => {
+      const id = await insertLeaveRequest({
+        employeeId: empId,
+        leaveTypeId: leaveTypePlainId,
+        startAt: "2026-09-21T01:00:00.000Z",
+        endAt: "2026-09-21T09:00:00.000Z",
+        hours: 8,
+        status: "approved",
+      })
+      const { error } = await supabaseAdmin.from("leave_requests").update({ deleted_at: new Date().toISOString() }).eq("id", id)
+      expect(error).toBeNull()
+      const res = await as(adminToken, request(app).post("/leave-settlement/settle")).send({ period: PERIOD, ids: [id] })
+      expect(res.status).toBe(200)
+      expect(res.body.settled).toBe(0)
+      expect(res.body.skipped).toEqual([{ id, reason: "not_approved" }])
+      expect((await leaveRow(id)).settled_at).toBeNull()
+    })
+
+    it("問題 5：1/28–2/3 的假單在 1 月與 2 月清單都看得到（crossMonth）；2 月月表 approve 409 帶 unsettledIds／count；用 2 月核銷後 settled_period=2026-02、approve 200", async () => {
+      // 上一個 describe 已把 flag 設 true；這裡再設一次，不依賴測試順序。
+      const setFlag = await as(adminToken, request(app).put("/api/tenant/settings")).send({
+        features: { attendance: { blockApproveOnUnsettledLeave: true } },
+      })
+      expect(setFlag.status).toBe(200)
+
+      const crossId = await insertLeaveRequest({
+        employeeId: empId,
+        leaveTypeId: leaveTypePlainId,
+        startAt: "2026-01-28T01:00:00.000Z",
+        endAt: "2026-02-03T09:00:00.000Z",
+        hours: 40,
+        status: "approved",
+      })
+
+      type Item = { id: string; crossMonth: boolean; startDate: string; endDate: string; settledPeriod: string | null }
+      const feb = await as(adminToken, request(app).get("/leave-settlement?period=2026-02&status=unsettled"))
+      expect(feb.status).toBe(200)
+      const febItem = (feb.body.items as Item[]).find((i) => i.id === crossId)
+      expect(febItem).toBeDefined() // 舊邏輯以起日歸屬 → 2 月看不到，這就是問題 5
+      expect(febItem!.crossMonth).toBe(true)
+      expect(febItem!.startDate).toBe("2026-01-28")
+      expect(febItem!.endDate).toBe("2026-02-03")
+      expect(febItem!.settledPeriod).toBeNull()
+      const jan = await as(adminToken, request(app).get("/leave-settlement?period=2026-01&status=unsettled"))
+      const janItem = (jan.body.items as Item[]).find((i) => i.id === crossId)
+      expect(janItem).toBeDefined()
+      expect(janItem!.crossMonth).toBe(true)
+      // 沒碰到的月份看不到；單月假單不標跨月。
+      const mar = await as(adminToken, request(app).get("/leave-settlement?period=2026-03&status=all"))
+      expect((mar.body.items as Item[]).some((i) => i.id === crossId)).toBe(false)
+      const sep = await as(adminToken, request(app).get("/leave-settlement?period=2026-09&status=all"))
+      const sepPlain = (sep.body.items as Item[]).find((i) => i.id === leaveNoAttachment)
+      expect(sepPlain).toBeDefined()
+      expect(sepPlain!.crossMonth).toBe(false)
+
+      // 2 月月表：approve 被這張跨月假單擋下，body 要指名是哪一張。
+      const gen = await as(adminToken, request(app).post("/attendance-sheets/generate")).send({ period: "2026-02", employeeId: empId })
+      expect(gen.status).toBe(200)
+      const sheet = await sheetRow(empId, "2026-02")
+      const submit = await as(adminToken, request(app).post(`/attendance-sheets/${sheet.id}/submit`)).send({})
+      expect(submit.status).toBe(200)
+      expect(submit.body.status).toBe("manager_reviewed") // empId 無部門 → 跳過主管關
+      const blocked = await as(adminToken, request(app).post(`/attendance-sheets/${sheet.id}/approve`)).send({})
+      expect(blocked.status).toBe(409)
+      expect(blocked.body.error).toBe("unsettled_leave")
+      expect(blocked.body.unsettledIds).toEqual([crossId])
+      expect(blocked.body.count).toBe(1)
+
+      // HR 在 2 月清單核銷 → settled_period 記 2 月；1 月清單的 settled 分頁看得到同一張並標示核銷月份。
+      const settle = await as(adminToken, request(app).post("/leave-settlement/settle")).send({ period: "2026-02", ids: [crossId] })
+      expect(settle.status).toBe(200)
+      expect(settle.body.settled).toBe(1)
+      const row = await leaveRow(crossId)
+      expect(row.settled_period).toBe("2026-02")
+      const janSettled = await as(adminToken, request(app).get("/leave-settlement?period=2026-01&status=settled"))
+      const janSettledItem = (janSettled.body.items as Item[]).find((i) => i.id === crossId)
+      expect(janSettledItem).toBeDefined()
+      expect(janSettledItem!.settledPeriod).toBe("2026-02")
+      const janUnsettled = await as(adminToken, request(app).get("/leave-settlement?period=2026-01&status=unsettled"))
+      expect((janUnsettled.body.items as Item[]).some((i) => i.id === crossId)).toBe(false)
+
+      const approve = await as(adminToken, request(app).post(`/attendance-sheets/${sheet.id}/approve`)).send({})
+      expect(approve.status).toBe(200)
+    }, 30_000)
+  })
 })

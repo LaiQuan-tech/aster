@@ -972,3 +972,140 @@ describe("A5 開案日期", () => {
     expect(application.body.application.openedOn).toBe("2024-03-01")
   })
 })
+
+// ─── B 批次驗收修正（fresh-context 驗收抓到的問題 1／2／6）─────────────────
+// 一樣放在檔案最後：會另外 createProject，插在中段會位移前面依賴精確流水號的斷言。
+describe("B 批次驗收修正：改角色重算期程／部分入帳可逾期／缺簽訂日排除不用貼", () => {
+  it("問題 1：PATCH 合約 ourRole client→both，期程的 calculated_amount 跟著重算（分母從 null 變合約額）；改回 client 再清掉", async () => {
+    const proj = await createProject({ name: "B 批次：改角色重算期程" })
+    expect(proj.status).toBe(201)
+    const projId = proj.body.id as string
+
+    // 先標成「我方定作」（下包合約）：不算我方營收，分母 null、各期試算 null。
+    const c = await asAdmin(request(app).post(`/projects/${projId}/contracts`)).send({
+      docType: "contract",
+      ourRole: "client",
+      title: "先標成下包合約",
+      amount: 2_000_000,
+      signedOn: `${YEAR}-02-01`,
+    })
+    expect(c.status).toBe(201)
+    const contractId = c.body.contract.id as string
+    const sch = await asAdmin(request(app).put(`/projects/${projId}/billings`)).send({
+      installments: [
+        { installmentNo: 1, percentage: 60, milestone: "簽約款" },
+        { installmentNo: 2, percentage: 40, milestone: "驗收款" },
+      ],
+    })
+    expect(sch.status).toBe(200)
+    expect(sch.body.contract.total).toBeNull()
+    expect(sch.body.installments.map((i: { calculatedAmount: number | null }) => i.calculatedAmount)).toEqual([null, null])
+
+    // 改成 both（印花稅各自貼，我方仍是承攬方）：分母變 2,000,000，存在 DB 的試算值要跟著變。
+    const toBoth = await asAdmin(request(app).patch(`/contracts/${contractId}`)).send({ ourRole: "both" })
+    expect(toBoth.status).toBe(200)
+    expect(toBoth.body.contract.ourRole).toBe("both")
+    const after = await asAdmin(request(app).get(`/projects/${projId}/billings`))
+    expect(after.status).toBe(200)
+    expect(after.body.contract.total).toBe(2_000_000)
+    expect(after.body.installments.map((i: { calculatedAmount: number | null }) => i.calculatedAmount)).toEqual([1_200_000, 800_000])
+
+    // 改回 client：分母回 null，不能留著 both 時算出的數字。
+    const toClient = await asAdmin(request(app).patch(`/contracts/${contractId}`)).send({ ourRole: "client" })
+    expect(toClient.status).toBe(200)
+    const back = await asAdmin(request(app).get(`/projects/${projId}/billings`))
+    expect(back.body.contract.total).toBeNull()
+    expect(back.body.installments.map((i: { calculatedAmount: number | null }) => i.calculatedAmount)).toEqual([null, null])
+  })
+
+  it("問題 2：部分入帳（收 30 萬／應收 100 萬、一年前請款）仍在未收款清單、state=overdue；撤銷後收足才是 received 並離開 open 清單", async () => {
+    const proj = await createProject({ name: "B 批次：部分入帳仍可逾期" })
+    expect(proj.status).toBe(201)
+    const projId = proj.body.id as string
+    const c = await asAdmin(request(app).post(`/projects/${projId}/contracts`)).send({
+      docType: "contract",
+      title: "承攬契約",
+      amount: 1_000_000,
+      signedOn: `${YEAR - 1}-01-15`,
+    })
+    expect(c.status).toBe(201)
+    const sch = await asAdmin(request(app).put(`/projects/${projId}/billings`)).send({
+      installments: [{ installmentNo: 1, percentage: 100, milestone: "全額" }],
+    })
+    expect(sch.status).toBe(200)
+    const billingId = sch.body.installments[0].id as string
+
+    // 一年前的今天請款（2/29 退一天，免得去年沒這天）。
+    const mmdd = taipeiToday().slice(5) === "02-29" ? "02-28" : taipeiToday().slice(5)
+    const billedOn = `${YEAR - 1}-${mmdd}`
+    expect((await asAdmin(request(app).post(`/billings/${billingId}/bill`)).send({ billedOn })).status).toBe(200)
+    const partial = await asAdmin(request(app).post(`/billings/${billingId}/receive`)).send({ receivedOn: billedOn, receivedAmount: 300_000 })
+    expect(partial.status).toBe(200)
+    expect(partial.body.installments[0].receivedAmount).toBe(300_000)
+
+    const open = await asAdmin(request(app).get("/projects/receivables"))
+    expect(open.status).toBe(200)
+    const row = (open.body.receivables as Array<Record<string, unknown>>).find((r) => r.billingId === billingId)!
+    expect(row).toBeDefined() // 部分入帳仍是 open
+    expect(row.receivedOn).toBe(billedOn)
+    expect(row.receivedAmount).toBe(300_000)
+    expect(row.unreceived).toBe(700_000)
+    expect(row.overdueDays as number).toBeGreaterThanOrEqual(365)
+    expect(row.state).toBe("overdue")
+    const overdueOnly = await asAdmin(request(app).get("/projects/receivables?state=overdue"))
+    expect((overdueOnly.body.receivables as Array<Record<string, unknown>>).some((r) => r.billingId === billingId)).toBe(true)
+    const receivedOnly = await asAdmin(request(app).get("/projects/receivables?status=all&state=received"))
+    expect((receivedOnly.body.receivables as Array<Record<string, unknown>>).some((r) => r.billingId === billingId)).toBe(false)
+
+    // 撤銷後收足（省略 receivedAmount ＝ 該期有效金額）→ received、逾期 null、open 清單不含。
+    expect((await asAdmin(request(app).post(`/billings/${billingId}/unreceive`)).send({ reason: "改為收足" })).status).toBe(200)
+    const full = await asAdmin(request(app).post(`/billings/${billingId}/receive`)).send({ receivedOn: billedOn })
+    expect(full.status).toBe(200)
+    expect(full.body.installments[0].receivedAmount).toBe(1_000_000)
+    const all = await asAdmin(request(app).get("/projects/receivables?status=all"))
+    const rowAll = (all.body.receivables as Array<Record<string, unknown>>).find((r) => r.billingId === billingId)!
+    expect(rowAll.state).toBe("received")
+    expect(rowAll.overdueDays).toBeNull()
+    expect(rowAll.unreceived).toBe(0)
+    const openAgain = await asAdmin(request(app).get("/projects/receivables"))
+    expect((openAgain.body.receivables as Array<Record<string, unknown>>).some((r) => r.billingId === billingId)).toBe(false)
+  })
+
+  it("問題 6：印花稅報表的 missingSignedOn 不計 stamp_duty_required='no' 的合約；auto 的沒簽訂日才計", async () => {
+    const proj = await createProject({ name: "B 批次：缺簽訂日排除不用貼" })
+    expect(proj.status).toBe(201)
+    const projId = proj.body.id as string
+    const before = await asAdmin(request(app).get("/reports/stamp-duty"))
+    expect(before.status).toBe(200)
+    const base = before.body.summary.missingSignedOn as number
+
+    const no = await asAdmin(request(app).post(`/projects/${projId}/contracts`)).send({
+      docType: "contract",
+      title: "免稅憑證（不用貼）",
+      amount: 500_000,
+      stampDutyRequired: "no",
+    })
+    expect(no.status).toBe(201)
+    expect(no.body.contract.dutiable).toBe(false)
+    const afterNo = await asAdmin(request(app).get("/reports/stamp-duty"))
+    expect(afterNo.body.summary.missingSignedOn).toBe(base)
+
+    const auto = await asAdmin(request(app).post(`/projects/${projId}/contracts`)).send({
+      docType: "contract",
+      title: "還沒補簽訂日",
+      amount: 500_000,
+    })
+    expect(auto.status).toBe(201)
+    expect(auto.body.contract.dutiable).toBe(true)
+    const afterAuto = await asAdmin(request(app).get("/reports/stamp-duty"))
+    expect(afterAuto.body.summary.missingSignedOn).toBe(base + 1)
+
+    // 把 auto 那張改成 no → 又從這格消失；改回 auto → 回來。
+    const flip = await asAdmin(request(app).patch(`/contracts/${auto.body.contract.id}`)).send({ stampDutyRequired: "no" })
+    expect(flip.status).toBe(200)
+    expect((await asAdmin(request(app).get("/reports/stamp-duty"))).body.summary.missingSignedOn).toBe(base)
+    const flipBack = await asAdmin(request(app).patch(`/contracts/${auto.body.contract.id}`)).send({ stampDutyRequired: "auto" })
+    expect(flipBack.status).toBe(200)
+    expect((await asAdmin(request(app).get("/reports/stamp-duty"))).body.summary.missingSignedOn).toBe(base + 1)
+  })
+})

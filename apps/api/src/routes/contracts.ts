@@ -366,7 +366,12 @@ contractsRouter.patch(
         next(new Error(`PATCH /contracts/${req.params.id}: ${error?.message}`))
         return
       }
-      if (b.amount !== undefined) await recomputeBillings(tenantId, row.project_id)
+      // 期程分母（contractTotal）取決於金額**和**我方角色（lib/contract-role.ts：
+      // client 不算我方營收、contractor／both 才算）——B1 開放 ourRole 可改之後，
+      // client→both 會讓分母從 null 變成合約額，只在改金額時重算就會讓
+      // project_billings.calculated_amount 停在舊值（驗收抓到的 B 批次問題 1）。
+      // docType 也是分母條件，但 PATCH 刻意不開放改（見 updateSchema），不必列。
+      if (b.amount !== undefined || b.ourRole !== undefined) await recomputeBillings(tenantId, row.project_id)
       // 稽核（應用層）：只記這次改的欄位（前後值），整列由 trigger 記。
       const before: Record<string, unknown> = {}
       for (const k of Object.keys(patch)) before[k] = (row as unknown as Record<string, unknown>)[k] ?? null
@@ -528,12 +533,17 @@ contractsRouter.get(
 
       // 應貼花卻沒有簽訂日的合約：它們不在期間查詢裡，但正是最該被追的。
       // our_role 包含 both——雙重身分我方仍須貼，漏掉會讓這格靜默低估。
+      // stamp_duty_required='no'（人工判定免貼：§6 免稅憑證等）的不算——那份
+      // 本來就不用追簽訂日去算稅，列進來只會讓這格永遠清不掉（B 批次問題 6）。
+      // 'yes' 強制課稅但 doc_type 是報價單的，仍受下面 doc_type 篩選排除：報價單
+      // 沒有「書立」時點可追，跟清單本體（items）同一套 signed_on 前提。
       const { count: missingSignedOn } = await supabaseAdmin
         .from("contracts")
         .select("id", { count: "exact", head: true })
         .eq("tenant_id", tenantId)
         .is("deleted_at", null)
         .is("signed_on", null)
+        .neq("stamp_duty_required", "no")
         .in("our_role", ["contractor", "both"])
         .in("doc_type", ["contract", "change_order"])
 

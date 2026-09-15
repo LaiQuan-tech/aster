@@ -45,6 +45,14 @@ export interface SettlementItem {
   attachmentCount: number;
   settledAt: string | null;
   settledBy: { id: string; name: string } | null;
+  /** 核銷時 HR 選的月份（YYYY-MM）；跨月假單可能不等於目前查詢的 period。 */
+  settledPeriod: string | null;
+  /**
+   * 假單期間有一部分落在查詢月份之外。清單改成「期間重疊」歸屬後（後端
+   * services/leave-settlement.ts 檔頭），1/28–2/3 的假單 1 月與 2 月都會出現，
+   * 靠這個旗標標示「跨月」，避免 HR 以為兩個月各有一張。
+   */
+  crossMonth: boolean;
 }
 
 export interface HoursByLeaveType {

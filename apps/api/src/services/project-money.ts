@@ -306,6 +306,26 @@ export function computeSubcontractPayments(
 export type OverdueBasis = "billed" | "invoiced"
 
 /**
+ * 「已收足」——這一期算不算收完了。
+ *
+ * `/billings/:id/receive` 支援部分入帳（實收可以小於該期有效金額：分批匯、折讓
+ * 待補），所以「有入帳日」不等於「收完了」：收 30 萬／應收 100 萬的期別還有
+ * 70 萬要催，逾期清單與狀態 badge 不能因為 received_on 有值就把它當 received
+ * （驗收抓到的 B 批次問題 2）。
+ *
+ * `unreceived` 是呼叫端算好的未收（有效金額 − 實收，未稅；見 buildReceivables）：
+ *   • `undefined`（沒帶）：相容舊呼叫，退回「有入帳日就算收完」。
+ *   • `null`：有效金額未知（沒合約也沒報價單），算不出未收——有入帳日就當收完，
+ *     清單上本來就無從標它欠多少。
+ *   • 數字：<= 0 才是收足；> 0 是部分入帳，仍要追。
+ */
+export function isFullyReceived(receivedOn: string | null, unreceived?: number | null): boolean {
+  if (!receivedOn) return false
+  if (unreceived === undefined || unreceived === null) return true
+  return unreceived <= 0
+}
+
+/**
  * 逾期天數。`basis` 決定起算日：
  * - `'invoiced'`（省略時的預設，相容舊呼叫）：已開票且未入帳，從開票日起算——原本唯一的行為。
  * - `'billed'`（B5 新增）：已請款且未入帳，從請款日起算，不需要已開票。這是 B5 的重點：
@@ -314,7 +334,8 @@ export type OverdueBasis = "billed" | "invoiced"
  *   routes/billings.ts 的 `invoiced_before_billed` 警告與 `unbill` 保留 invoiced_on）
  *   時退回用 `invoicedOn`：這兩種情形都代表錢已經跑出去該收了，不能因為
  *   請款日剛好沒登記就讓這筆錢從逾期清單消失。
- * 已入帳一律 null；兩個起算日都不存在也是 null。
+ * 已收足一律 null（`unreceived` 的判讀見 `isFullyReceived`：部分入帳不算收足，
+ * 逾期起算日不變、繼續從請款／開票日算）；兩個起算日都不存在也是 null。
  */
 export function overdueDays(
   invoicedOn: string | null,
@@ -322,8 +343,9 @@ export function overdueDays(
   today: string,
   basis: OverdueBasis = "invoiced",
   billedOn: string | null = null,
+  unreceived?: number | null,
 ): number | null {
-  if (receivedOn) return null
+  if (isFullyReceived(receivedOn, unreceived)) return null
   const startOn = basis === "billed" ? (billedOn ?? invoicedOn) : invoicedOn
   if (!startOn) return null
   const days = diffDays(startOn, today)
@@ -339,17 +361,22 @@ function diffDays(a: string, b: string): number {
 export type ReceivableState = "unbilled" | "billed" | "invoiced" | "overdue" | "received"
 
 /**
- * 請款三段狀態＋逾期（B5）：已入帳 > 逾期 > 已開票未入帳 > 已請款未開票 > 未請款。
+ * 請款三段狀態＋逾期（B5）：已收足 > 逾期 > 已開票未入帳 > 已請款未開票 > 未請款。
  * 「逾期」的優先序蓋掉 billed／invoiced，跟 `/projects/receivables` 的 `overdueCount`
- * 定義一致（未入帳且 overdueDays > 0，起算基準由呼叫端解析後傳入 `overdueDays`）。
+ * 定義一致（未收足且 overdueDays > 0，起算基準由呼叫端解析後傳入 `overdueDays`）。
+ *
+ * `received` 只給**已收足**的期別（`isFullyReceived`）：部分入帳的列維持
+ * billed／invoiced／overdue 的判斷，`unreceived` 沒帶時相容舊行為（有入帳日即 received）。
  */
 export function receivableState(input: {
   billedOn: string | null
   invoicedOn: string | null
   receivedOn: string | null
   overdueDays: number | null
+  /** 未收（有效金額 − 實收）；見 `isFullyReceived` 對 undefined／null／數字的判讀。 */
+  unreceived?: number | null
 }): ReceivableState {
-  if (input.receivedOn) return "received"
+  if (isFullyReceived(input.receivedOn, input.unreceived)) return "received"
   if (input.overdueDays !== null && input.overdueDays > 0) return "overdue"
   if (input.invoicedOn) return "invoiced"
   if (input.billedOn) return "billed"

@@ -195,7 +195,18 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
       if (paths.length > 0) await supabaseAdmin.storage.from("disbursement-vouchers").remove(paths)
       await supabaseAdmin.from("disbursement_attachments").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("project_subcontract_payments").update({ disbursement_id: null }).eq("tenant_id", tid)
-      await supabaseAdmin.from("disbursement_allocations").delete().eq("tenant_id", tid)
+      // sql/0030：母單非 draft（paid／void）的分攤列有 BEFORE DELETE trigger 擋硬刪，
+      // 而本檔案例會留下 paid 與 void 的單。先把租戶所有放款單退回 draft（test 租戶
+      // 允許；paid_on 一併清空才過 disbursements_paid_on_chk），分攤才刪得掉——
+      // 否則 allocations 留著，接著 disbursements／projects／tenants 全部因 FK 刪不掉，
+      // 正式庫就會累積 DISBTEST 殘留租戶（驗收抓到的 B 批次問題 7）。
+      const { error: draftErr } = await supabaseAdmin
+        .from("disbursements")
+        .update({ status: "draft", paid_on: null })
+        .eq("tenant_id", tid)
+      if (draftErr) throw new Error(`afterAll: reset disbursements to draft: ${draftErr.message}`)
+      const { error: allocErr } = await supabaseAdmin.from("disbursement_allocations").delete().eq("tenant_id", tid)
+      if (allocErr) throw new Error(`afterAll: delete disbursement_allocations: ${allocErr.message}`)
       await supabaseAdmin.from("disbursements").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("notifications").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("project_subcontract_payments").delete().eq("tenant_id", tid)
