@@ -154,6 +154,8 @@ export function accountErrorMessage(err: unknown, fallback = "操作失敗"): st
     auth_user_missing: "員工綁定的登入帳號已不存在",
     invalid_current_password: "目前密碼不正確",
     same_password: "新密碼不可與目前密碼相同",
+    weak_password: "這組密碼太常見或已在外洩名單（Supabase 弱密碼防護擋下），請換一組",
+    email_exists: "此 Email 已有登入帳號",
     not_found: "找不到這位員工",
   };
   for (const [code, text] of Object.entries(table)) {

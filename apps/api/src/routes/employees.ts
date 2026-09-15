@@ -108,6 +108,16 @@ employeesRouter.post(
         app_metadata: { tenant_id: tenantId },
       })
       if (userErr || !created?.user) {
+        // Supabase Auth 的弱密碼／外洩密碼防護、或 email 已存在，都是呼叫方能處理的 4xx，不要包成 500。
+        const code = (userErr as { code?: string } | null)?.code
+        if (code === "weak_password") {
+          res.status(422).json({ error: "weak_password", message: userErr?.message })
+          return
+        }
+        if (code === "email_exists") {
+          res.status(409).json({ error: "email_exists" })
+          return
+        }
         next(new Error(`POST /employees: failed to create auth user: ${userErr?.message}`))
         return
       }
@@ -261,6 +271,11 @@ employeesRouter.post(
         password,
       })
       if (updErr) {
+        // GoTrue 開著弱密碼／外洩密碼防護時會回 422 weak_password（HR 自填密碼才會遇到；後端亂數產生的不會）
+        if ((updErr as { code?: string }).code === "weak_password") {
+          res.status(422).json({ error: "weak_password", message: updErr.message })
+          return
+        }
         next(new Error(`reset-password (update): ${updErr.message}`))
         return
       }
