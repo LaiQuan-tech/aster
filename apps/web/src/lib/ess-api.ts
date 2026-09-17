@@ -64,6 +64,23 @@ export interface PunchResult {
   id: string;
   type: "in" | "out";
   punchAt: string;
+  /** 以下為 2026-09 新版 POST /punch 才回的欄位（舊 API 沒有，讀取要 optional）。 */
+  source?: string | null;
+  lat?: number | null;
+  lng?: number | null;
+  deviceId?: string | null;
+  /** 完整的 punch_records 列，讓首頁可以樂觀更新今日紀錄再對齊 GET /punch/today。 */
+  record?: PunchRecord;
+}
+
+/**
+ * POST /punch 冷卻期內重複打卡 → `409 punch_too_soon`（伺服器端防呆，預設 60 秒）。
+ * apiFetch 會把 status 與 error code 收進 Error（`[409] punch_too_soon`），這裡判斷用。
+ */
+export function isPunchTooSoon(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const status = (err as Error & { status?: number }).status;
+  return status === 409 && err.message.includes("punch_too_soon");
 }
 
 export interface Announcement {
@@ -80,6 +97,8 @@ export interface Announcement {
   /** 現行版是否需簽收；只有需簽收的規章才記錄查閱。 */
   requires_signature: boolean;
   version_no: number | null;
+  /** 我第一次查閱現行版的時間；null＝尚未查閱。舊 API 沒有這個欄位（undefined＝未知）。 */
+  viewed_at?: string | null;
 }
 
 /**
@@ -118,6 +137,30 @@ export interface LeaveRequest {
   status: RequestStatus;
   current_step: number;
   created_at: string;
+  /* ── 以下皆為 optional：舊 API／舊列缺席時前端要優雅退化 ─────────────── */
+  /** 逐日切段（請假多日、補卡 `type`）。 */
+  segments?: LeaveSegment[] | null;
+  /** 加班給付方式。 */
+  payout?: "pay" | "comp_time" | null;
+  /** 公出／出差。 */
+  trip_type?: "outing" | "business_trip" | null;
+  location?: string | null;
+  remark?: string | null;
+  trip_scope?: "local" | "domestic_intercity" | "overseas" | string | null;
+  estimated_cost?: string | number | null;
+  advance_requested?: string | number | null;
+  agent_name?: string | null;
+  /** GET /requests?scope=mine 的 enrich 欄位（2026-09 新版 API 才有）。 */
+  employee_name?: string | null;
+  leave_type_name?: string | null;
+  requires_attachment?: boolean | null;
+  attachment_count?: number | null;
+  total_steps?: number | null;
+  current_approver_emp_id?: string | null;
+  current_approver_name?: string | null;
+  /** 最後一次簽核決定的意見（駁回理由）與時間。 */
+  decision_comment?: string | null;
+  decided_at?: string | null;
 }
 
 export interface LeaveType {
@@ -136,6 +179,8 @@ export interface LeaveSegment {
   startTime: string;
   endTime: string;
   hours: number;
+  /** 補卡（fix_punch）用：補的是上班還是下班；其他種類不帶。 */
+  type?: "in" | "out";
 }
 
 export interface CreateRequestBody {
@@ -212,10 +257,28 @@ export interface Shift {
   name: string;
   start_time: string;
   end_time: string;
+  /** 休息分鐘數（請假時數計算用）；舊 API 沒有時視為 0。 */
+  break_minutes?: number | null;
+  is_night_shift?: boolean | null;
+  created_at?: string;
 }
 
 export function getShifts() {
   return apiFetch<{ shifts: Shift[] }>("/shifts");
+}
+
+/* ------------------------------------------------- 行事曆（假日表）--- */
+
+/** GET /calendar?year= 的一列：rest_day（例假／休息日）、fixed_holiday（國定假日）、workday（補班）。 */
+export interface CalendarDay {
+  date: string;
+  day_type: "rest_day" | "fixed_holiday" | "workday" | string;
+  label: string | null;
+}
+
+/** 登入即可讀（非 HR 也可），請假多日切段時用來跳過假日。 */
+export function getCalendar(year: number) {
+  return apiFetch<{ year: number; days: CalendarDay[] }>(`/calendar?year=${year}`);
 }
 
 export function acknowledgeSchedule(id: string) {
@@ -283,13 +346,46 @@ export interface NotificationItem {
   sent_at: string | null;
 }
 
-export function getNotifications(status?: NotificationStatus) {
-  const qs = status ? `?status=${status}` : "";
-  return apiFetch<{ notifications: NotificationItem[] }>(`/notifications${qs}`);
+export interface NotificationQuery {
+  status?: NotificationStatus;
+  /** "mine"：HR 帳號在 ESS 也只看自己的通知（2026-09 新版 API；舊 API 忽略此參數）。 */
+  scope?: "mine";
+  /** 只要未讀。 */
+  unread?: boolean;
+}
+
+/**
+ * GET /notifications。相容舊呼叫法（只傳 status 字串）；新呼叫法傳物件
+ * `{ status?, scope?: "mine", unread? }`。
+ */
+export function getNotifications(opts?: NotificationStatus | NotificationQuery) {
+  const query: NotificationQuery = typeof opts === "string" ? { status: opts } : (opts ?? {});
+  const params = new URLSearchParams();
+  if (query.status) params.set("status", query.status);
+  if (query.scope) params.set("scope", query.scope);
+  if (query.unread) params.set("unread", "1");
+  const qs = params.toString();
+  return apiFetch<{ notifications: NotificationItem[] }>(`/notifications${qs ? `?${qs}` : ""}`);
 }
 
 export function markNotificationRead(id: string) {
   return apiFetch<{ id: string; read: true }>(`/notifications/${id}/read`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+/**
+ * GET /notifications/unread-count → `{ count }`（2026-09 新端點）。
+ * 舊 API 回 404：呼叫端要 catch 並當作 0（徽章不顯示），不要擋頁面。
+ */
+export function getUnreadNotificationCount() {
+  return apiFetch<{ count: number }>("/notifications/unread-count");
+}
+
+/** POST /notifications/read-all → `{ updated }`（2026-09 新端點；只標自己的）。 */
+export function markAllNotificationsRead() {
+  return apiFetch<{ updated: number }>("/notifications/read-all", {
     method: "POST",
     body: JSON.stringify({}),
   });
@@ -315,13 +411,40 @@ export function savePersonalNote(body: string) {
   });
 }
 
-export function getRequests(status?: RequestStatus) {
-  const qs = status ? `?status=${status}` : "";
-  return apiFetch<{ requests: LeaveRequest[] }>(`/requests${qs}`);
+export interface RequestQuery {
+  status?: RequestStatus;
+  kind?: RequestKind;
+  /** "mine"：HR 帳號在 ESS 也只看自己的單（2026-09 新版 API；舊 API 忽略此參數）。 */
+  scope?: "mine";
+}
+
+/**
+ * GET /requests。相容舊呼叫法（只傳 status 字串）；新呼叫法傳物件
+ * `{ status?, kind?, scope?: "mine" }`。
+ */
+export function getRequests(opts?: RequestStatus | RequestQuery) {
+  const query: RequestQuery = typeof opts === "string" ? { status: opts } : (opts ?? {});
+  const params = new URLSearchParams();
+  if (query.status) params.set("status", query.status);
+  if (query.kind) params.set("kind", query.kind);
+  if (query.scope) params.set("scope", query.scope);
+  const qs = params.toString();
+  return apiFetch<{ requests: LeaveRequest[] }>(`/requests${qs ? `?${qs}` : ""}`);
+}
+
+/** POST /requests 的回應；除了 requestId 之外都是 2026-09 新版 API 才有的 optional 欄位。 */
+export interface CreateRequestResult {
+  requestId: string;
+  /** 簽核流程來源（例如 "leave_type" / "department" / "none"），純顯示用。 */
+  approvalSource?: string;
+  /** 是否已通知第一關簽核者。 */
+  notified?: boolean;
+  /** 簽核關卡（依 stepOrder 排序）；送出成功畫面用 steps[0].approverName。 */
+  steps?: Array<{ stepOrder: number; approverEmpId: string; approverName?: string | null }>;
 }
 
 export function createRequest(body: CreateRequestBody) {
-  return apiFetch<{ requestId: string }>("/requests", {
+  return apiFetch<CreateRequestResult>("/requests", {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -804,7 +927,7 @@ export interface MyAdvance {
 /** 我已核准的出差單 —— 出差軌報銷填報時要綁其中一張。 */
 export function getMyApprovedTrips() {
   return apiFetch<{ requests: MyTrip[] }>(
-    "/requests?kind=business_trip&status=approved",
+    "/requests?kind=business_trip&status=approved&scope=mine",
   );
 }
 

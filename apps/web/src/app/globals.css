@@ -83,3 +83,69 @@ body {
 .pb-safe-16 {
   padding-bottom: calc(env(safe-area-inset-bottom) + 4rem);
 }
+
+/* ESS 共用頁框（components/EssShell.tsx）：手機底部分頁列是 fixed，內容區用這個
+   class 預留「底列高度＋home indicator」，桌機（lg+）沒有底列只留一般底部留白，
+   列印時歸零（底列本身是 .no-print）。 */
+.pb-tabbar {
+  padding-bottom: calc(env(safe-area-inset-bottom) + 4.75rem);
+}
+
+@media (min-width: 1024px) {
+  .pb-tabbar {
+    padding-bottom: 2rem;
+  }
+}
+
+@media print {
+  .pb-tabbar {
+    padding-bottom: 0;
+  }
+}
+
+/* ESS Toast 疊放位置（components/ess-ui.tsx）：手機要浮在底部分頁列之上，桌機貼近右下。 */
+.ess-toast-stack {
+  bottom: calc(env(safe-area-inset-bottom) + 5.5rem);
+}
+
+@media (min-width: 1024px) {
+  .ess-toast-stack {
+    bottom: 1.5rem;
+  }
+}
+
+/* ESS BottomSheet／Toast 進場動畫（components/ess-ui.tsx）。 */
+@keyframes ess-sheet-in {
+  from {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@keyframes ess-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.ess-sheet-in {
+  animation: ess-sheet-in 180ms ease-out;
+}
+
+.ess-fade-in {
+  animation: ess-fade-in 150ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ess-sheet-in,
+  .ess-fade-in {
+    animation: none;
+  }
+}

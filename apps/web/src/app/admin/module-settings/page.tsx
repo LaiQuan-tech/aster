@@ -17,10 +17,11 @@ import {
   type OvertimeRoundingMode,
   type TenantFeatures,
 } from "@/lib/admin-api";
-import { ESS_TABS } from "@/components/EssHeader";
 import {
+  ALWAYS_VISIBLE_TAB_KEYS,
   EMPLOYMENT_TYPES,
   EMPLOYMENT_TYPE_LABELS,
+  ESS_TABS,
   INTERN_DEFAULT_ESS_TABS,
   type EmploymentType,
 } from "@/lib/ess-tabs";
@@ -1306,7 +1307,7 @@ export default function ModuleSettingsPage() {
             <div key={type}>
               <p className="mb-2 text-sm font-medium text-gray-700">{EMPLOYMENT_TYPE_LABELS[type]}</p>
               <div className="flex flex-wrap gap-2">
-                {ESS_TABS.filter((t) => t.key !== "home").map((t) => {
+                {ESS_TABS.filter((t) => !ALWAYS_VISIBLE_TAB_KEYS.has(t.key)).map((t) => {
                   const checked = essTabsCfg[type]?.includes(t.key) ?? false;
                   return (
                     <label

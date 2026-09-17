@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { usePathname } from "next/navigation";
 import { apiFetch } from "@/lib/api-client";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
 
@@ -27,6 +28,9 @@ const EXAMPLES = [
 ];
 
 export function FloatingAiChat() {
+  const pathname = usePathname();
+  // ESS（員工前台）手機版有固定底部分頁列，浮球會疊在打卡列上：/ess* 只在桌機（lg+）顯示。
+  const inEss = pathname === "/ess" || pathname?.startsWith("/ess/") === true;
   const [ready, setReady] = useState(false);
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState("");
@@ -85,7 +89,7 @@ export function FloatingAiChat() {
   if (!ready) return null;
 
   return (
-    <div className="fixed bottom-24 right-3 z-50 print:hidden lg:bottom-5 lg:right-5">
+    <div className={`fixed bottom-24 right-3 z-50 print:hidden lg:bottom-5 lg:right-5${inEss ? " hidden lg:block" : ""}`}>
       {open && (
         <section className="mb-3 flex h-[min(70vh,560px)] w-[min(94vw,420px)] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl lg:h-[560px]">
           <header className="flex items-start justify-between gap-3 bg-slate-950 px-4 py-3 text-white">
