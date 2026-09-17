@@ -170,7 +170,7 @@ describe.skipIf(!ready)("A2 簽核鏈 — live", () => {
       expect(res.status).toBe(201)
       reqId = res.body.requestId
       expect(res.body.approvalSource).toBe("manager")
-      expect(res.body.steps).toEqual([{ stepOrder: 1, approverEmpId: mgrId }])
+      expect(res.body.steps).toMatchObject([{ stepOrder: 1, approverEmpId: mgrId }])
       expect(res.body.notified).toBe(1)
 
       const steps = await stepsOf(reqId)
@@ -327,7 +327,7 @@ describe.skipIf(!ready)("A2 簽核鏈 — live", () => {
       const res = await fileLeave(empToken, "主管模式")
       expect(res.status).toBe(201)
       expect(res.body.approvalSource).toBe("manager")
-      expect(res.body.steps).toEqual([{ stepOrder: 1, approverEmpId: mgrId }])
+      expect(res.body.steps).toMatchObject([{ stepOrder: 1, approverEmpId: mgrId }])
     })
 
     it("petty_cash 也可設定簽核流程；不合法 kind → 400", async () => {

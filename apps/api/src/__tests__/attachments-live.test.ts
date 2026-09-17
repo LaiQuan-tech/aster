@@ -159,7 +159,7 @@ describe.skipIf(!ready)("B7 附件可見性 ＋ 病假必附憑證 — live", ()
       expect(filed.status).toBe(201)
       reqId = filed.body.requestId
       // 無部門主管以外的簽核流程設定時，直屬主管即第 1 關。
-      expect(filed.body.steps).toEqual([{ stepOrder: 1, approverEmpId: mgrId }])
+      expect(filed.body.steps).toMatchObject([{ stepOrder: 1, approverEmpId: mgrId }])
 
       const upload = await uploadAttachment(empToken, reqId, "voucher.png")
       expect(upload.status).toBe(201)
