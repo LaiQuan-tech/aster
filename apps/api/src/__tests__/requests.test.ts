@@ -1014,3 +1014,339 @@ describe("F4 DELETE /requests/:id — 軟刪除，紀錄不滅失", () => {
     expect(res.body.error).toBe("approved_request_cannot_be_deleted")
   })
 })
+
+/* ── WP2（ESS 簡化）：scope=mine、列表補齊欄位、segments.type、approverName、通知 ── */
+
+describe("WP2 GET /requests?scope=mine — 任何角色只看自己申請的單", () => {
+  let hrOwnReqId: string
+  let emp1PendingId: string
+
+  it("HR 自己送一張加班單（flow [mgr]）；POST 回傳 steps[0].approverName", async () => {
+    await request(app)
+      .put("/approval-flows/ot")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId] })
+
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({
+        kind: "ot",
+        startAt: "2027-09-01T10:00:00.000Z",
+        endAt: "2027-09-01T11:00:00.000Z",
+        hours: 1,
+        payout: "pay",
+      })
+    expect(filed.status).toBe(201)
+    hrOwnReqId = filed.body.requestId
+    const steps = filed.body.steps as Array<{ stepOrder: number; approverEmpId: string; approverName: string | null }>
+    expect(steps.length).toBe(1)
+    expect(steps[0].approverEmpId).toBe(mgrId)
+    expect(steps[0].approverName).toBe("Mona Manager")
+  })
+
+  it("HR 不帶 scope 看全租戶；帶 scope=mine 只剩 employee_id = 自己", async () => {
+    const all = await request(app).get("/requests").set("Authorization", `Bearer ${A.adminToken}`)
+    expect(all.status).toBe(200)
+    const allRows = all.body.requests as Array<{ id: string; employee_id: string }>
+    expect(allRows.some((r) => r.employee_id === emp1Id)).toBe(true)
+
+    const mine = await request(app).get("/requests?scope=mine").set("Authorization", `Bearer ${A.adminToken}`)
+    expect(mine.status).toBe(200)
+    const mineRows = mine.body.requests as Array<{ id: string; employee_id: string }>
+    expect(mineRows.length).toBeGreaterThan(0)
+    expect(mineRows.every((r) => r.employee_id === A.hrEmpId)).toBe(true)
+    expect(mineRows.some((r) => r.id === hrOwnReqId)).toBe(true)
+    expect(mineRows.length).toBeLessThan(allRows.length)
+  })
+
+  it("主管帶 scope=mine 看不到「輪到我簽」的單，不帶 scope 才看得到；status 篩選仍生效", async () => {
+    await request(app)
+      .put("/approval-flows/leave")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId] })
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        startAt: "2027-09-02T01:00:00.000Z",
+        endAt: "2027-09-02T09:00:00.000Z",
+        hours: 8,
+        reason: "WP2 pending",
+      })
+    expect(filed.status).toBe(201)
+    emp1PendingId = filed.body.requestId
+
+    const mgrMine = await request(app).get("/requests?scope=mine").set("Authorization", `Bearer ${mgrToken}`)
+    expect(mgrMine.status).toBe(200)
+    const mgrMineRows = mgrMine.body.requests as Array<{ id: string; employee_id: string }>
+    expect(mgrMineRows.some((r) => r.id === emp1PendingId)).toBe(false)
+    expect(mgrMineRows.every((r) => r.employee_id === mgrId)).toBe(true)
+
+    const mgrAll = await request(app).get("/requests").set("Authorization", `Bearer ${mgrToken}`)
+    expect((mgrAll.body.requests as Array<{ id: string }>).some((r) => r.id === emp1PendingId)).toBe(true)
+
+    const pendingOnly = await request(app)
+      .get("/requests?scope=mine&status=pending")
+      .set("Authorization", `Bearer ${emp1Token}`)
+    expect(pendingOnly.status).toBe(200)
+    const pendingRows = pendingOnly.body.requests as Array<{ id: string; status: string; employee_id: string }>
+    expect(pendingRows.some((r) => r.id === emp1PendingId)).toBe(true)
+    expect(pendingRows.every((r) => r.status === "pending" && r.employee_id === emp1Id)).toBe(true)
+  })
+
+  it("scope=mine 帶不合法值 → 400", async () => {
+    const res = await request(app).get("/requests?scope=all").set("Authorization", `Bearer ${A.adminToken}`)
+    expect(res.status).toBe(400)
+  })
+
+  it("列表每列補齊：employee_name／leave_type_name／current_approver_name／total_steps／attachment_count／requires_attachment", async () => {
+    const res = await request(app).get("/requests?scope=mine").set("Authorization", `Bearer ${emp1Token}`)
+    expect(res.status).toBe(200)
+    const row = (res.body.requests as Array<Record<string, unknown>>).find((r) => r.id === emp1PendingId)
+    expect(row).toBeTruthy()
+    expect(row?.employee_name).toBe("Alice One")
+    expect(row?.leave_type_name).toBe("特休")
+    expect(row?.requires_attachment).toBe(false)
+    expect(row?.attachment_count).toBe(0)
+    expect(row?.total_steps).toBe(1)
+    expect(row?.current_step).toBe(1)
+    expect(row?.current_approver_emp_id).toBe(mgrId)
+    expect(row?.current_approver_name).toBe("Mona Manager")
+    expect(row?.decision_comment).toBeNull()
+    expect(row?.decided_at).toBeNull()
+    // 舊欄位仍在（後台 form-records 依賴）
+    expect(row?.reason).toBe("WP2 pending")
+    expect(row?.kind).toBe("leave")
+    expect(typeof row?.created_at).toBe("string")
+  })
+
+  it("附件上傳一筆後 attachment_count = 1", async () => {
+    const up = await request(app)
+      .post(`/requests/${emp1PendingId}/attachments`)
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({ fileName: "wp2.txt", contentType: "text/plain", dataBase64: Buffer.from("wp2").toString("base64") })
+    expect(up.status).toBe(201)
+
+    const res = await request(app).get("/requests?scope=mine").set("Authorization", `Bearer ${emp1Token}`)
+    const row = (res.body.requests as Array<Record<string, unknown>>).find((r) => r.id === emp1PendingId)
+    expect(row?.attachment_count).toBe(1)
+  })
+
+  it("駁回後 decision_comment／decided_at 帶駁回理由；早前核准的單帶簽核意見與時間", async () => {
+    const rejected = await request(app)
+      .post(`/requests/${emp1PendingId}/reject`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({ comment: "資料不齊" })
+    expect(rejected.status).toBe(200)
+
+    const res = await request(app)
+      .get("/requests?scope=mine&status=rejected")
+      .set("Authorization", `Bearer ${emp1Token}`)
+    expect(res.status).toBe(200)
+    const row = (res.body.requests as Array<Record<string, unknown>>).find((r) => r.id === emp1PendingId)
+    expect(row?.status).toBe("rejected")
+    expect(row?.decision_comment).toBe("資料不齊")
+    expect(typeof row?.decided_at).toBe("string")
+    expect(row?.current_approver_name).toBe("Mona Manager")
+
+    // 第一個 describe 裡 mgr 以 comment "ok" 核准的那張單
+    const approved = await request(app)
+      .get("/requests?scope=mine&status=approved")
+      .set("Authorization", `Bearer ${emp1Token}`)
+    const okRow = (approved.body.requests as Array<Record<string, unknown>>).find((r) => r.decision_comment === "ok")
+    expect(okRow).toBeTruthy()
+    expect(typeof okRow?.decided_at).toBe("string")
+    expect(approved.body.requests.every((r: Record<string, unknown>) => r.status === "approved")).toBe(true)
+  })
+
+  it("HR 全租戶列表（後台既有呼叫）同樣帶補齊欄位且舊欄位不變", async () => {
+    const res = await request(app).get("/requests").set("Authorization", `Bearer ${A.adminToken}`)
+    expect(res.status).toBe(200)
+    const row = (res.body.requests as Array<Record<string, unknown>>).find((r) => r.id === emp1PendingId)
+    expect(row?.employee_name).toBe("Alice One")
+    expect(row?.current_approver_emp_id).toBe(mgrId)
+    expect(row?.decision_comment).toBe("資料不齊")
+    expect(row?.tenant_id).toBe(A.tenantId)
+  })
+})
+
+describe("WP2 POST /requests — segments[].type 放行（補卡指定上／下班）", () => {
+  it("fix_punch 帶 segments[{type:'out'}] → 201；GET 讀回仍有 type", async () => {
+    await request(app)
+      .put("/approval-flows/fix_punch")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId] })
+
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "fix_punch",
+        startAt: "2027-08-01T10:05:00.000Z",
+        endAt: "2027-08-01T10:05:00.000Z",
+        reason: "忘了打下班卡",
+        segments: [{ date: "2027-08-01", startTime: "18:05", endTime: "18:05", hours: 0, type: "out" }],
+      })
+    expect(filed.status).toBe(201)
+    const reqId = filed.body.requestId as string
+    expect((filed.body.steps as Array<{ approverName: string | null }>)[0].approverName).toBe("Mona Manager")
+
+    const list = await request(app)
+      .get("/requests?scope=mine&kind=fix_punch")
+      .set("Authorization", `Bearer ${emp1Token}`)
+    expect(list.status).toBe(200)
+    const row = (list.body.requests as Array<Record<string, unknown>>).find((r) => r.id === reqId)
+    const segments = row?.segments as Array<Record<string, unknown>>
+    expect(Array.isArray(segments)).toBe(true)
+    expect(segments[0].type).toBe("out")
+    expect(segments[0].date).toBe("2027-08-01")
+    expect(segments[0].startTime).toBe("18:05")
+    expect(row?.leave_type_name).toBeNull()
+
+    const { data } = await supabaseAdmin.from("leave_requests").select("segments").eq("id", reqId).single()
+    expect((data?.segments as Array<Record<string, unknown>>)[0].type).toBe("out")
+  })
+
+  it("segments[].type 不在允許清單 → 400", async () => {
+    const res = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "fix_punch",
+        startAt: "2027-08-02T10:05:00.000Z",
+        endAt: "2027-08-02T10:05:00.000Z",
+        segments: [{ date: "2027-08-02", startTime: "18:05", endTime: "18:05", hours: 0, type: "lunch" }],
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("invalid_body")
+  })
+
+  it("不帶 type 的舊格式仍可送（向後相容）", async () => {
+    const res = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "fix_punch",
+        startAt: "2027-08-03T01:00:00.000Z",
+        endAt: "2027-08-03T10:00:00.000Z",
+        segments: [{ date: "2027-08-03", startTime: "09:00", endTime: "18:00", hours: 8 }],
+      })
+    expect(res.status).toBe(201)
+  })
+})
+
+describe("WP2 notifications — scope=mine／unread=1／unread-count／read-all", () => {
+  let submittedReqId: string
+  let mgrUnreadBefore: number
+  let emp1UnreadBefore: number
+
+  it("送單後 mgr 有未讀通知：?unread=1 看得到，unread-count 與其筆數一致", async () => {
+    await request(app)
+      .put("/approval-flows/leave")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId] })
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        startAt: "2027-09-10T01:00:00.000Z",
+        endAt: "2027-09-10T09:00:00.000Z",
+        hours: 8,
+      })
+    expect(filed.status).toBe(201)
+    expect(filed.body.notified).toBe(1)
+    submittedReqId = filed.body.requestId
+
+    const unread = await request(app).get("/notifications?unread=1").set("Authorization", `Bearer ${mgrToken}`)
+    expect(unread.status).toBe(200)
+    const rows = unread.body.notifications as Array<{ employee_id: string; payload: Record<string, unknown> }>
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows.every((n) => n.employee_id === mgrId)).toBe(true)
+    expect(rows.every((n) => n.payload?.read !== true)).toBe(true)
+    expect(rows.some((n) => n.payload?.requestId === submittedReqId && n.payload?.event === "submitted")).toBe(true)
+
+    const count = await request(app).get("/notifications/unread-count").set("Authorization", `Bearer ${mgrToken}`)
+    expect(count.status).toBe(200)
+    expect(count.body.count).toBe(rows.length)
+    mgrUnreadBefore = count.body.count
+
+    const emp1Count = await request(app).get("/notifications/unread-count").set("Authorization", `Bearer ${emp1Token}`)
+    expect(emp1Count.status).toBe(200)
+    // emp1 早前收過核准／駁回通知
+    expect(emp1Count.body.count).toBeGreaterThan(0)
+    emp1UnreadBefore = emp1Count.body.count
+  })
+
+  it("unread=1 排除已讀：單筆 /read 後該筆不再出現，unread-count 減 1", async () => {
+    const unread = await request(app).get("/notifications?unread=1").set("Authorization", `Bearer ${mgrToken}`)
+    const target = (unread.body.notifications as Array<{ id: string }>)[0]
+    const read = await request(app).post(`/notifications/${target.id}/read`).set("Authorization", `Bearer ${mgrToken}`).send({})
+    expect(read.status).toBe(200)
+
+    const after = await request(app).get("/notifications?unread=1").set("Authorization", `Bearer ${mgrToken}`)
+    expect((after.body.notifications as Array<{ id: string }>).some((n) => n.id === target.id)).toBe(false)
+    const count = await request(app).get("/notifications/unread-count").set("Authorization", `Bearer ${mgrToken}`)
+    expect(count.body.count).toBe(mgrUnreadBefore - 1)
+    mgrUnreadBefore = count.body.count
+
+    // 不帶 unread 仍列出該筆（已讀不等於刪除）
+    const all = await request(app).get("/notifications").set("Authorization", `Bearer ${mgrToken}`)
+    const row = (all.body.notifications as Array<{ id: string; payload: Record<string, unknown> }>).find((n) => n.id === target.id)
+    expect(row?.payload.read).toBe(true)
+  })
+
+  it("HR 不帶 scope 看全租戶（含 mgr 的）；帶 scope=mine 只看自己", async () => {
+    const all = await request(app).get("/notifications").set("Authorization", `Bearer ${A.adminToken}`)
+    expect(all.status).toBe(200)
+    const allRows = all.body.notifications as Array<{ employee_id: string }>
+    expect(allRows.some((n) => n.employee_id === mgrId)).toBe(true)
+
+    const mine = await request(app).get("/notifications?scope=mine").set("Authorization", `Bearer ${A.adminToken}`)
+    expect(mine.status).toBe(200)
+    const mineRows = mine.body.notifications as Array<{ employee_id: string }>
+    // HR 曾是 fallback／第 2 關簽核者，自己一定有通知
+    expect(mineRows.length).toBeGreaterThan(0)
+    expect(mineRows.every((n) => n.employee_id === A.hrEmpId)).toBe(true)
+    expect(mineRows.length).toBeLessThan(allRows.length)
+
+    // unread-count 對 HR 也只算自己的，不是全租戶
+    const count = await request(app).get("/notifications/unread-count").set("Authorization", `Bearer ${A.adminToken}`)
+    expect(count.body.count).toBeLessThanOrEqual(mineRows.length)
+  })
+
+  it("read-all：updated = 自己的未讀數；之後 unread-count = 0、?unread=1 空；別人的未讀不動；再跑一次 updated = 0", async () => {
+    const res = await request(app).post("/notifications/read-all").set("Authorization", `Bearer ${mgrToken}`).send({})
+    expect(res.status).toBe(200)
+    expect(res.body.updated).toBe(mgrUnreadBefore)
+    expect(res.body.updated).toBeGreaterThan(0)
+
+    const count = await request(app).get("/notifications/unread-count").set("Authorization", `Bearer ${mgrToken}`)
+    expect(count.body.count).toBe(0)
+    const unread = await request(app).get("/notifications?unread=1").set("Authorization", `Bearer ${mgrToken}`)
+    expect(unread.body.notifications).toEqual([])
+
+    const all = await request(app).get("/notifications").set("Authorization", `Bearer ${mgrToken}`)
+    const rows = all.body.notifications as Array<{ payload: Record<string, unknown> }>
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows.every((n) => n.payload?.read === true)).toBe(true)
+
+    const emp1Count = await request(app).get("/notifications/unread-count").set("Authorization", `Bearer ${emp1Token}`)
+    expect(emp1Count.body.count).toBe(emp1UnreadBefore)
+
+    const again = await request(app).post("/notifications/read-all").set("Authorization", `Bearer ${mgrToken}`).send({})
+    expect(again.status).toBe(200)
+    expect(again.body.updated).toBe(0)
+  })
+
+  it("unread 帶不合法值 → 400；未登入 → 401", async () => {
+    const bad = await request(app).get("/notifications?unread=yes").set("Authorization", `Bearer ${mgrToken}`)
+    expect(bad.status).toBe(400)
+    const anon = await request(app).get("/notifications/unread-count")
+    expect(anon.status).toBe(401)
+  })
+})

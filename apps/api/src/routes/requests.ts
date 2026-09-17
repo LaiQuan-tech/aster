@@ -6,6 +6,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
 import { applyApprovalEffects } from "../services/ledger.js"
 import { resolveApproverChain } from "../services/approval-chain.js"
+import { enrichRequestRows } from "../services/request-enrich.js"
 import { enqueue } from "../services/notify.js"
 import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { logger } from "../lib/logger.js"
@@ -19,6 +20,9 @@ export const requestsRouter = Router()
 // 'petty_cash' 零用金預支（模組三第 3 條）走同一條簽核管線：與出差預支
 // 是同一個機制，差別只在授權來源，沒有理由另建一套簽核。
 const KINDS = ["leave", "ot", "fix_punch", "business_trip", "petty_cash"] as const
+
+// 與 services/ledger.ts PUNCH_TYPES 及 punch_records.type 同一組值。
+const PUNCH_SEGMENT_TYPES = ["in", "out", "break_in", "break_out", "outing_in", "outing_out"] as const
 
 const createSchema = z.object({
   kind: z.enum(KINDS),
@@ -37,6 +41,11 @@ const createSchema = z.object({
         startTime: z.string().regex(/^\d{2}:\d{2}$/),
         endTime: z.string().regex(/^\d{2}:\d{2}$/),
         hours: z.number().nonnegative(),
+        // 補卡（fix_punch）指定補哪一種卡：'in' 上班／'out' 下班／休息與外出
+        // 對。核准時 services/ledger.fixPunchCandidates 逐段依 type + date +
+        // startTime 產生 punch_records；不帶 type 則退回 start_at→in／end_at→out
+        // 的推斷。zod 預設會 strip 未宣告的鍵，所以這裡必須明列才會寫進 jsonb。
+        type: z.enum(PUNCH_SEGMENT_TYPES).optional(),
       }),
     )
     .min(1)
@@ -67,6 +76,9 @@ const querySchema = z.object({
   employeeId: z.string().uuid().optional(),
   from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  // scope=mine：任何角色（含 HR）都只回自己申請的單——ESS「我的申請」用。
+  // 沒帶就是舊行為（HR 全租戶／非 HR 自己 ∪ 輪到我簽）。
+  scope: z.enum(["mine"]).optional(),
 })
 
 const batchDecisionSchema = z.object({
@@ -105,26 +117,18 @@ function isHrRole(role: string | undefined): boolean {
   return !!role && ["hr_admin", "platform_admin"].includes(role)
 }
 
-async function withCurrentApprovers<T extends { id: string; current_step: number }>(
-  tenantId: string,
-  rows: T[],
-): Promise<Array<T & { current_approver_emp_id: string | null }>> {
-  if (rows.length === 0) return []
-  const requestIds = rows.map((row) => row.id)
-  const { data, error } = await supabaseAdmin
-    .from("approval_steps")
-    .select("request_id, step_order, approver_emp_id")
-    .eq("tenant_id", tenantId)
-    .in("request_id", requestIds)
-  if (error) throw new Error(`GET /requests (current approvers): ${error.message}`)
-  const approverByRequestStep = new Map<string, string>()
-  for (const step of data ?? []) {
-    approverByRequestStep.set(`${step.request_id}:${step.step_order}`, step.approver_emp_id as string)
+/** 簽核者姓名對照（POST /requests 回傳 steps[].approverName 用）；查不到給 null，不擋 201。 */
+async function approverNamesById(tenantId: string, approverIds: string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>()
+  const ids = Array.from(new Set(approverIds))
+  if (ids.length === 0) return names
+  const { data, error } = await supabaseAdmin.from("employees").select("id, name").eq("tenant_id", tenantId).in("id", ids)
+  if (error) {
+    logger.warn({ error: error.message }, "POST /requests: approver name lookup failed")
+    return names
   }
-  return rows.map((row) => ({
-    ...row,
-    current_approver_emp_id: approverByRequestStep.get(`${row.id}:${row.current_step}`) ?? null,
-  }))
+  for (const e of data ?? []) names.set(e.id as string, e.name as string)
+  return names
 }
 
 /* ── 簽核通知（A2）─────────────────────────────────────────────────────
@@ -488,6 +492,9 @@ requestsRouter.post(
         logger.warn({ err: notifyErr, requestId }, "POST /requests: submit notification failed")
       }
 
+      // 送出後前端要顯示「等待 ○○○ 簽核」：非 HR 拿不到 GET /employees，姓名由這裡帶。
+      const approverNames = await approverNamesById(tenantId, approverIds)
+
       res.status(201).json({
         requestId,
         approvalSource: chain.source,
@@ -495,6 +502,7 @@ requestsRouter.post(
         steps: steps.map((s) => ({
           stepOrder: s.step_order,
           approverEmpId: s.approver_emp_id,
+          approverName: approverNames.get(s.approver_emp_id as string) ?? null,
         })),
       })
     } catch (err) {
@@ -507,11 +515,16 @@ requestsRouter.post(
  * GET /requests?status= — list requests visible to the caller.
  *
  * Role-based scoping (on top of the always-on tenant filter):
+ *   • ?scope=mine → any role, only the requests I filed (ESS「我的申請」；HR
+ *     帳號在員工前台也只看自己，不再看到全公司)。
  *   • HR admin / platform admin → the whole tenant.
  *   • Any other role → the union of "requests I filed" and "requests where it is
  *     currently my turn to approve" (a pending request whose current_step's
  *     approver is me).
- * Optional ?status= narrows by request status.
+ * Optional ?status= / ?kind= / ?from= / ?to= narrow further. Every branch returns
+ * rows through services/request-enrich (申請人／假別名／附件數／關卡進度／
+ * 現行簽核者姓名／駁回理由)——a superset of the old shape, so admin callers
+ * (/admin/form-records, /admin/approvals, leave-balances) are unaffected.
  */
 requestsRouter.get(
   "/requests",
@@ -530,11 +543,32 @@ requestsRouter.get(
       res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
       return
     }
-    const { status, kind, employeeId, from, to } = parsed.data
+    const { status, kind, employeeId, from, to, scope } = parsed.data
 
     try {
       const self = await resolveSelf(tenantId, userId)
       const isHr = isHrRole(self?.role)
+
+      if (scope === "mine") {
+        // 任何角色都釘在自己；沒有員工列 → 不可能的 id → 空陣列（不外洩）。
+        let query = supabaseAdmin
+          .from("leave_requests")
+          .select(REQUEST_COLS)
+          .eq("tenant_id", tenantId)
+          .is("deleted_at", null)
+          .eq("employee_id", self?.id ?? NIL_UUID)
+        if (status) query = query.eq("status", status)
+        if (kind) query = query.eq("kind", kind)
+        if (from) query = query.gte("start_at", `${from}T00:00:00.000Z`)
+        if (to) query = query.lte("start_at", `${to}T23:59:59.999Z`)
+        const { data, error } = await query.order("created_at", { ascending: false })
+        if (error) {
+          next(new Error(`GET /requests (mine): ${error.message}`))
+          return
+        }
+        res.status(200).json({ requests: await enrichRequestRows(tenantId, data ?? []) })
+        return
+      }
 
       if (isHr) {
         let query = supabaseAdmin
@@ -552,7 +586,7 @@ requestsRouter.get(
           next(new Error(`GET /requests (hr): ${error.message}`))
           return
         }
-        res.status(200).json({ requests: await withCurrentApprovers(tenantId, data ?? []) })
+        res.status(200).json({ requests: await enrichRequestRows(tenantId, data ?? []) })
         return
       }
 
@@ -607,7 +641,7 @@ requestsRouter.get(
         return !!myStepOrders && myStepOrders.has(r.current_step as number)
       })
 
-      res.status(200).json({ requests: await withCurrentApprovers(tenantId, visible) })
+      res.status(200).json({ requests: await enrichRequestRows(tenantId, visible) })
     } catch (err) {
       next(err)
     }
