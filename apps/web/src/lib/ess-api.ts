@@ -391,26 +391,6 @@ export function markAllNotificationsRead() {
   });
 }
 
-export interface PersonalNote {
-  id: string | null;
-  tenant_id: string;
-  employee_id: string;
-  body: string;
-  created_at: string | null;
-  updated_at: string | null;
-}
-
-export function getPersonalNote() {
-  return apiFetch<{ note: PersonalNote }>("/personal-note");
-}
-
-export function savePersonalNote(body: string) {
-  return apiFetch<{ note: PersonalNote }>("/personal-note", {
-    method: "PUT",
-    body: JSON.stringify({ body }),
-  });
-}
-
 export interface RequestQuery {
   status?: RequestStatus;
   kind?: RequestKind;

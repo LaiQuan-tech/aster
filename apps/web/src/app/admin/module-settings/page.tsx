@@ -1300,7 +1300,7 @@ export default function ModuleSettingsPage() {
       <Card>
         <h2 className="mb-1 text-base font-semibold text-gray-900">員工端功能開放</h2>
         <p className="mb-4 text-sm text-gray-500">
-          依身分類別限縮 ESS 可見／可進入的分頁；未勾＝該類別看不到，直接打網址也會被擋。打卡首頁一律開放、不受此設定影響，所以不列在下方；實習生預設只另外開放五個（班表／打卡紀錄／申請／通知／我的資料）。
+          依身分類別限縮 ESS 可見／可進入的分頁；未勾＝該類別看不到，直接打網址也會被擋。打卡首頁與公告一律開放，不列在下方；實習生預設只另外開放五個（班表／打卡紀錄／申請／通知／我的資料）。
         </p>
         <div className="space-y-5">
           {EMPLOYMENT_TYPES.map((type) => (
