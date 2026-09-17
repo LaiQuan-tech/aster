@@ -1,29 +1,42 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { EssTabGate } from "@/components/EssTabGate";
-import { EssHeader, invalidateEssHeaderState } from "@/components/EssHeader";
 import {
   approveRequest,
-  getBranding,
-  getMe,
   getPendingApprovals,
   getRequestAttachments,
-  isAdminRole,
   rejectRequest,
-  type Branding,
   type PendingApproval,
   type RequestKind,
 } from "@/lib/ess-api";
+import { invalidateEssState } from "@/lib/ess-state";
+import { fmtDateTime, fmtHours, fmtMoney, relativeTime } from "@/lib/ess-format";
+import { summarizeSegments } from "@/lib/ess-notifications";
+import {
+  BottomSheet,
+  Button,
+  Card,
+  EmptyState,
+  Field,
+  Icon,
+  InlineError,
+  Input,
+  Pill,
+  SectionTitle,
+  Skeleton,
+  Textarea,
+  useToast,
+} from "@/components/ess-ui";
 
 type RequestAttachment = { id: string; fileName: string; sizeBytes: number; contentType: string; url: string };
 
 /**
  * /ess/approvals — 主管（或任何被指派為簽核者的人）的「待我簽核」頁。
  *
- * 只列 GET /requests/pending-approvals 回的單（輪到我簽的 pending 單）；核准一鍵、
- * 駁回必填理由。HR 走後台 /admin/approvals 批次處理，這頁給沒有後台權限的
- * 直屬主管／老闆用，手機優先（客戶主管多半在手機上按）。
+ * 只列 GET /requests/pending-approvals 回的單（輪到我簽的 pending 單）。一屏一張卡：
+ * 核准一步（意見選填、預設收起）、駁回開底部面板填理由（必填）。做完決定 Toast 回饋
+ * ＋ `invalidateEssState()` 讓底列徽章立刻減 1。頁框（頂部列／底列／gate）由
+ * ess/layout.tsx 提供，這裡只負責內容。
  */
 
 const KIND_LABEL: Record<RequestKind, string> = {
@@ -39,20 +52,6 @@ const PAYOUT_LABEL: Record<"pay" | "comp_time", string> = {
   comp_time: "補休",
 };
 
-function fmt(iso: string): string {
-  return new Date(iso).toLocaleString("zh-TW", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-}
-
-function fmtDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("zh-TW", { month: "2-digit", day: "2-digit" });
-}
-
 /** 把 API 的錯誤碼翻成主管看得懂的話；其他照原文。 */
 function friendlyError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -63,18 +62,35 @@ function friendlyError(err: unknown): string {
   return msg || "處理失敗";
 }
 
-function ApprovalsView() {
-  const [branding, setBranding] = useState<Branding | null>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
+function kindLabel(kind: RequestKind): string {
+  return KIND_LABEL[kind] ?? kind;
+}
+
+function applicantName(row: PendingApproval): string {
+  return row.employee_name ?? row.employee_id.slice(0, 8);
+}
+
+/** 期間文字：有分段用 summarizeSegments（≤3 段逐行、>3 段壓縮），否則起訖＋時數。 */
+function periodText(row: PendingApproval): string {
+  const segs = summarizeSegments(row.segments);
+  if (segs) return segs;
+  const hours = row.hours != null ? ` · ${fmtHours(row.hours)}` : "";
+  return `${fmtDateTime(row.start_at)} ～ ${fmtDateTime(row.end_at)}${hours}`;
+}
+
+export default function ApprovalsPage() {
+  const toast = useToast();
   const [rows, setRows] = useState<PendingApproval[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  // 駁回：展開理由框的那張單 + 理由；核准意見（選填）
-  const [rejectingId, setRejectingId] = useState<string | null>(null);
-  const [rejectReason, setRejectReason] = useState("");
+  // 核准意見（選填）：預設收起，「加註意見」才展開單行輸入
+  const [commentOpenId, setCommentOpenId] = useState<string | null>(null);
   const [approveComment, setApproveComment] = useState<Record<string, string>>({});
+  // 駁回：底部面板開在哪張單 + 理由（必填）
+  const [rejecting, setRejecting] = useState<PendingApproval | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
+  const [rejectError, setRejectError] = useState<string | null>(null);
   // 附件清單：展開哪一張單 + 各單已抓到的附件（用 id 當 key 快取，避免重複打 API）
   const [expandedAttachmentsId, setExpandedAttachmentsId] = useState<string | null>(null);
   const [attachmentsById, setAttachmentsById] = useState<Record<string, RequestAttachment[]>>({});
@@ -89,12 +105,9 @@ function ApprovalsView() {
   useEffect(() => {
     let active = true;
     (async () => {
-      const [brandRes, meRes] = await Promise.allSettled([getBranding(), getMe()]);
-      if (!active) return;
-      if (brandRes.status === "fulfilled") setBranding(brandRes.value.branding);
-      if (meRes.status === "fulfilled") setIsAdmin(isAdminRole(meRes.value.role));
       try {
         await load();
+        if (active) setError(null);
       } catch (err) {
         if (active) setError(friendlyError(err));
       } finally {
@@ -106,8 +119,9 @@ function ApprovalsView() {
     };
   }, [load]);
 
-  async function refresh() {
-    invalidateEssHeaderState();
+  /** 決定做完：徽章重抓＋列表重抓（列表失敗只顯示錯誤，不影響已成功的決定）。 */
+  async function afterDecision() {
+    invalidateEssState();
     try {
       await load();
     } catch (err) {
@@ -115,19 +129,30 @@ function ApprovalsView() {
     }
   }
 
+  async function retry() {
+    setLoading(true);
+    setError(null);
+    try {
+      await load();
+    } catch (err) {
+      setError(friendlyError(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function onApprove(row: PendingApproval) {
     setBusyId(row.id);
     setError(null);
-    setMessage(null);
     try {
       const comment = (approveComment[row.id] ?? "").trim();
       const res = await approveRequest(row.id, comment || undefined);
-      setMessage(
-        res.status === "approved"
-          ? `已核准 ${row.employee_name ?? "同仁"} 的${KIND_LABEL[row.kind] ?? row.kind}申請，系統已通知申請人。`
-          : `已簽核，單子已送往第 ${res.currentStep} 關。`,
+      toast.show(
+        res.status === "approved" ? `已核准，已通知 ${applicantName(row)}` : `已送往第 ${res.currentStep} 關`,
+        "success",
       );
-      await refresh();
+      setCommentOpenId((cur) => (cur === row.id ? null : cur));
+      await afterDecision();
     } catch (err) {
       setError(friendlyError(err));
     } finally {
@@ -135,33 +160,41 @@ function ApprovalsView() {
     }
   }
 
-  async function onReject(row: PendingApproval) {
+  function openReject(row: PendingApproval) {
+    setRejecting(row);
+    setRejectReason("");
+    setRejectError(null);
+    setError(null);
+  }
+
+  function closeReject() {
+    if (busyId) return;
+    setRejecting(null);
+    setRejectReason("");
+    setRejectError(null);
+  }
+
+  async function onConfirmReject() {
+    const row = rejecting;
+    if (!row) return;
     const reason = rejectReason.trim();
     if (!reason) {
-      setError("駁回必須填寫理由，申請人會在通知裡看到。");
+      setRejectError("駁回必須填寫理由，申請人會在通知裡看到。");
       return;
     }
     setBusyId(row.id);
-    setError(null);
-    setMessage(null);
+    setRejectError(null);
     try {
       await rejectRequest(row.id, reason);
-      setMessage(`已駁回 ${row.employee_name ?? "同仁"} 的${KIND_LABEL[row.kind] ?? row.kind}申請，系統已通知申請人。`);
-      setRejectingId(null);
+      toast.show(`已駁回，已通知 ${applicantName(row)}`, "success");
+      setRejecting(null);
       setRejectReason("");
-      await refresh();
+      await afterDecision();
     } catch (err) {
-      setError(friendlyError(err));
+      setRejectError(friendlyError(err));
     } finally {
       setBusyId(null);
     }
-  }
-
-  function applicantLine(row: PendingApproval): string {
-    const parts = [row.employee_name ?? row.employee_id.slice(0, 8)];
-    if (row.employee_emp_no) parts.push(row.employee_emp_no);
-    if (row.department_name) parts.push(row.department_name);
-    return parts.join(" · ");
   }
 
   /** 展開/收合附件清單；展開時才現拉 signed URL，並用 attachmentsById 快取。 */
@@ -192,240 +225,215 @@ function ApprovalsView() {
   }
 
   return (
-    <div className="min-h-dvh bg-gray-50">
-      <EssHeader
-        appName={branding?.appName}
-        primaryColor={branding?.primaryColor}
-        active="approvals"
-        isAdmin={isAdmin}
-      />
-      <main className="mx-auto max-w-2xl space-y-4 px-3 pb-6 pt-4 sm:px-4">
-        <section className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:p-6">
-          <div className="mb-1 flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold text-gray-800">待我簽核</h2>
-            <button
-              type="button"
-              onClick={() => void refresh()}
-              className="text-sm text-gray-500 hover:underline"
-              disabled={loading}
-            >
-              重新整理
-            </button>
-          </div>
-          <p className="mb-4 text-xs text-gray-400">
-            這裡只列輪到你簽的單。核准後單子會送往下一關或直接生效；駁回要填理由，申請人會收到通知。
-          </p>
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3 px-1">
+        <SectionTitle>待我簽核</SectionTitle>
+        {!loading && rows.length > 0 && <span className="text-xs text-gray-400">{rows.length} 張</span>}
+      </div>
 
-          {message && (
-            <p className="mb-3 rounded-md bg-green-50 px-3 py-2 text-sm text-green-700" role="status">
-              {message}
-            </p>
-          )}
-          {error && (
-            <p className="mb-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-600" role="alert">
-              {error}
-            </p>
-          )}
+      {error && (
+        <Card>
+          <InlineError>{error}</InlineError>
+          <Button variant="secondary" size="sm" className="mt-2" onClick={() => void retry()} disabled={loading}>
+            重新整理
+          </Button>
+        </Card>
+      )}
 
-          {loading ? (
-            <p className="py-6 text-center text-sm text-gray-400">載入中…</p>
-          ) : rows.length === 0 ? (
-            <p className="py-6 text-center text-sm text-gray-400">目前沒有待你簽核的單。</p>
-          ) : (
-            <ul className="space-y-3">
-              {rows.map((row) => {
-                const busy = busyId === row.id;
-                const rejecting = rejectingId === row.id;
-                return (
-                  <li key={row.id} className="rounded-xl border border-gray-200 p-4">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span
-                        className="rounded-full px-2.5 py-0.5 text-xs font-semibold text-white"
-                        style={{ backgroundColor: "var(--brand)" }}
-                      >
-                        {KIND_LABEL[row.kind] ?? row.kind}
-                      </span>
-                      {row.leave_type_name && (
-                        <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">{row.leave_type_name}</span>
-                      )}
-                      {row.kind === "ot" && row.payout && (
-                        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{PAYOUT_LABEL[row.payout]}</span>
-                      )}
-                      {row.total_steps > 1 && (
-                        <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700">
-                          第 {row.current_step} 關／共 {row.total_steps} 關
-                        </span>
-                      )}
-                      <span className="ml-auto text-xs text-gray-400">送出 {fmt(row.created_at)}</span>
+      {loading ? (
+        <Card>
+          <Skeleton lines={5} />
+        </Card>
+      ) : rows.length === 0 ? (
+        !error && (
+          <Card>
+            <EmptyState title="目前沒有待你簽核的單" hint="有同仁送單給你時會收到通知。" />
+          </Card>
+        )
+      ) : (
+        <ul className="space-y-3">
+          {rows.map((row) => {
+            const busy = busyId === row.id;
+            const commentOpen = commentOpenId === row.id;
+            const attachmentCount = row.attachment_count;
+            const attachmentsOpen = expandedAttachmentsId === row.id;
+            const reason = row.reason?.trim();
+            const advance = row.advance_requested != null ? Number(row.advance_requested) : 0;
+            return (
+              <li key={row.id}>
+                <Card>
+                  {/* 頭：申請人·部門｜種類＋假別｜相對時間 */}
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="truncate text-base font-semibold text-gray-900">
+                        {applicantName(row)}
+                        {row.department_name && (
+                          <span className="font-normal text-gray-500"> · {row.department_name}</span>
+                        )}
+                      </p>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <Pill tone="brand">{kindLabel(row.kind)}</Pill>
+                        {row.leave_type_name && <Pill tone="blue">{row.leave_type_name}</Pill>}
+                        {row.kind === "ot" && row.payout && <Pill tone="gray">{PAYOUT_LABEL[row.payout]}</Pill>}
+                        {row.total_steps > 1 && (
+                          <Pill tone="amber">
+                            第 {row.current_step}／{row.total_steps} 關
+                          </Pill>
+                        )}
+                      </div>
                     </div>
+                    <time dateTime={row.created_at} className="shrink-0 pt-0.5 text-xs text-gray-400">
+                      {relativeTime(row.created_at)}
+                    </time>
+                  </div>
 
-                    <p className="mt-2 text-base font-medium text-gray-900">{applicantLine(row)}</p>
-
-                    <dl className="mt-2 grid grid-cols-[4.5rem_1fr] gap-y-1 text-sm text-gray-700">
-                      <dt className="text-gray-400">期間</dt>
-                      <dd>
-                        {row.segments && row.segments.length > 0 ? (
-                          <ul className="space-y-0.5">
-                            {row.segments.map((seg, i) => (
-                              <li key={i}>
-                                {seg.date} {seg.startTime}–{seg.endTime}（{seg.hours} 小時）
-                              </li>
-                            ))}
-                          </ul>
-                        ) : (
-                          <>
-                            {fmt(row.start_at)} ～ {fmt(row.end_at)}
-                            {row.hours != null && <span className="text-gray-500">（{row.hours} 小時）</span>}
-                          </>
-                        )}
-                      </dd>
-                      {row.location && (
-                        <>
-                          <dt className="text-gray-400">地點</dt>
-                          <dd>{row.location}</dd>
-                        </>
-                      )}
-                      {row.advance_requested != null && Number(row.advance_requested) > 0 && (
-                        <>
-                          <dt className="text-gray-400">預支</dt>
-                          <dd>NT$ {Number(row.advance_requested).toLocaleString("zh-TW")}</dd>
-                        </>
-                      )}
-                      <dt className="text-gray-400">事由</dt>
-                      <dd className="whitespace-pre-wrap">{row.reason?.trim() ? row.reason : <span className="text-gray-400">（未填）</span>}</dd>
-                      {row.remark && (
-                        <>
-                          <dt className="text-gray-400">備註</dt>
-                          <dd className="whitespace-pre-wrap">{row.remark}</dd>
-                        </>
-                      )}
-                      <dt className="text-gray-400">附件</dt>
-                      <dd>
-                        {row.attachment_count > 0 ? (
-                          <div>
-                            <button
-                              type="button"
-                              onClick={() => void toggleAttachments(row)}
-                              className="text-sm font-medium underline underline-offset-2"
-                              style={{ color: "var(--brand)" }}
-                            >
-                              {row.attachment_count} 個檔案{expandedAttachmentsId === row.id ? "（收合）" : "（展開）"}
-                            </button>
-                            {expandedAttachmentsId === row.id && (
-                              <div className="mt-1">
-                                {attachmentsLoadingId === row.id ? (
-                                  <p className="text-xs text-gray-400">載入中…</p>
-                                ) : attachmentsError[row.id] ? (
-                                  <p className="text-xs text-red-600">{attachmentsError[row.id]}</p>
-                                ) : (
-                                  <ul className="space-y-0.5">
-                                    {(attachmentsById[row.id] ?? []).map((att) => (
-                                      <li key={att.id}>
-                                        <a
-                                          href={att.url ?? "#"}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          className="text-sm underline"
-                                          style={{ color: "var(--brand)" }}
-                                        >
-                                          {att.fileName}
-                                        </a>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-gray-400">無</span>
-                        )}
-                      </dd>
-                    </dl>
-
-                    {rejecting ? (
-                      <div className="mt-3 space-y-2 rounded-lg bg-red-50 p-3">
-                        <label className="block text-sm font-medium text-red-700" htmlFor={`reject-${row.id}`}>
-                          駁回理由（必填，申請人會看到）
-                        </label>
-                        <textarea
-                          id={`reject-${row.id}`}
-                          className="w-full rounded-md border border-red-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-300"
-                          rows={2}
-                          value={rejectReason}
-                          onChange={(e) => setRejectReason(e.target.value)}
-                          placeholder="例：當日人力不足，請改期"
-                          autoFocus
-                        />
-                        <div className="flex gap-2">
-                          <button
-                            type="button"
-                            onClick={() => onReject(row)}
-                            disabled={busy || !rejectReason.trim()}
-                            className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-                          >
-                            {busy ? "處理中…" : "確認駁回"}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setRejectingId(null);
-                              setRejectReason("");
-                            }}
-                            disabled={busy}
-                            className="rounded-md px-4 py-2 text-sm text-gray-600 hover:bg-gray-100"
-                          >
-                            取消
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="mt-3 flex flex-wrap items-center gap-2">
-                        <input
-                          className="min-w-0 flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand)]"
-                          value={approveComment[row.id] ?? ""}
-                          onChange={(e) => setApproveComment((prev) => ({ ...prev, [row.id]: e.target.value }))}
-                          placeholder="簽核意見（選填）"
-                          aria-label="簽核意見"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => onApprove(row)}
-                          disabled={busy}
-                          className="rounded-md px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-                          style={{ backgroundColor: "var(--brand)" }}
-                        >
-                          {busy ? "處理中…" : "核准"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setRejectingId(row.id);
-                            setRejectReason("");
-                            setError(null);
-                          }}
-                          disabled={busy}
-                          className="rounded-md border border-red-200 px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
-                        >
-                          駁回
-                        </button>
-                      </div>
+                  {/* 身：期間、事由、地點／預支（有才顯示）、附件 */}
+                  <dl className="mt-3 grid grid-cols-[3.25rem_1fr] gap-x-2 gap-y-1.5 text-sm text-gray-700">
+                    <dt className="text-gray-400">期間</dt>
+                    <dd className="whitespace-pre-line">{periodText(row)}</dd>
+                    <dt className="text-gray-400">事由</dt>
+                    <dd className="whitespace-pre-wrap break-words">
+                      {reason ? reason : <span className="text-gray-400">（未填）</span>}
+                    </dd>
+                    {row.location && (
+                      <>
+                        <dt className="text-gray-400">地點</dt>
+                        <dd className="break-words">{row.location}</dd>
+                      </>
                     )}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </section>
-      </main>
-    </div>
-  );
-}
+                    {advance > 0 && (
+                      <>
+                        <dt className="text-gray-400">預支</dt>
+                        <dd>{fmtMoney(advance)}</dd>
+                      </>
+                    )}
+                    {row.remark && (
+                      <>
+                        <dt className="text-gray-400">備註</dt>
+                        <dd className="whitespace-pre-wrap break-words">{row.remark}</dd>
+                      </>
+                    )}
+                    {attachmentCount > 0 && (
+                      <>
+                        <dt className="text-gray-400">附件</dt>
+                        <dd>
+                          <button
+                            type="button"
+                            onClick={() => void toggleAttachments(row)}
+                            aria-expanded={attachmentsOpen}
+                            className="inline-flex items-center gap-1 font-medium underline underline-offset-2"
+                            style={{ color: "var(--brand)" }}
+                          >
+                            <Icon name="paperclip" className="h-4 w-4" />
+                            附件 {attachmentCount} · {attachmentsOpen ? "收合" : "查看"}
+                          </button>
+                          {attachmentsOpen && (
+                            <div className="mt-1">
+                              {attachmentsLoadingId === row.id ? (
+                                <p className="text-xs text-gray-400">載入中…</p>
+                              ) : attachmentsError[row.id] ? (
+                                <InlineError className="text-xs">{attachmentsError[row.id]}</InlineError>
+                              ) : (
+                                <ul className="space-y-1">
+                                  {(attachmentsById[row.id] ?? []).map((att) => (
+                                    <li key={att.id}>
+                                      <a
+                                        href={att.url ?? "#"}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="break-all underline underline-offset-2"
+                                        style={{ color: "var(--brand)" }}
+                                      >
+                                        {att.fileName}
+                                      </a>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+                          )}
+                        </dd>
+                      </>
+                    )}
+                  </dl>
 
-export default function ApprovalsPage() {
-  return (
-    <EssTabGate tab="approvals">
-      <ApprovalsView />
-    </EssTabGate>
+                  {/* 動作：核准一步＋駁回（開面板）；「加註意見」展開單行輸入 */}
+                  {commentOpen && (
+                    <div className="mt-3">
+                      <Input
+                        value={approveComment[row.id] ?? ""}
+                        onChange={(e) => setApproveComment((prev) => ({ ...prev, [row.id]: e.target.value }))}
+                        placeholder="簽核意見（選填，申請人看得到）"
+                        aria-label="簽核意見"
+                        maxLength={250}
+                        autoFocus
+                      />
+                    </div>
+                  )}
+                  <div className="mt-3 flex gap-2">
+                    <Button variant="primary" className="flex-1" loading={busy} onClick={() => void onApprove(row)}>
+                      核准
+                    </Button>
+                    <Button variant="secondary" className="flex-1" disabled={busy} onClick={() => openReject(row)}>
+                      駁回
+                    </Button>
+                  </div>
+                  {!commentOpen && (
+                    <button
+                      type="button"
+                      onClick={() => setCommentOpenId(row.id)}
+                      disabled={busy}
+                      className="mt-2 text-sm text-gray-500 underline underline-offset-2 disabled:opacity-50"
+                    >
+                      加註意見
+                    </button>
+                  )}
+                </Card>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <BottomSheet open={rejecting !== null} onClose={closeReject} title="駁回這張單">
+        {rejecting && (
+          <div className="space-y-4">
+            <p className="text-sm text-gray-600">
+              {applicantName(rejecting)} 的{kindLabel(rejecting.kind)}
+              {rejecting.leave_type_name ? `（${rejecting.leave_type_name}）` : ""}申請
+            </p>
+            <Field
+              label="駁回理由"
+              required
+              htmlFor="reject-reason"
+              hint="申請人會在通知裡看到這段話。"
+              error={rejectError ?? undefined}
+            >
+              <Textarea
+                id="reject-reason"
+                value={rejectReason}
+                onChange={(e) => {
+                  setRejectReason(e.target.value);
+                  if (rejectError) setRejectError(null);
+                }}
+                placeholder="例：當日人力不足，請改期"
+                maxLength={250}
+                aria-invalid={rejectError ? "true" : undefined}
+              />
+            </Field>
+            <Button
+              variant="danger"
+              block
+              size="lg"
+              loading={busyId === rejecting.id}
+              disabled={!rejectReason.trim()}
+              onClick={() => void onConfirmReject()}
+            >
+              確認駁回
+            </Button>
+          </div>
+        )}
+      </BottomSheet>
+    </div>
   );
 }
