@@ -1,12 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { EssTabGate } from "@/components/EssTabGate";
-import { EssHeader } from "@/components/EssHeader";
+import { Card, InlineError } from "@/components/ess-ui";
+import { getMeCached } from "@/lib/ess-state";
 import {
-  getBranding,
-  getMe,
-  isAdminRole,
   getProfile,
   saveProfile,
   uploadProfilePhoto,
@@ -21,7 +18,6 @@ import {
   deleteEducationAttachment,
   uploadCertificationAttachment,
   deleteCertificationAttachment,
-  type Branding,
   type ProfileAggregate,
   type SaveProfileBody,
 } from "@/lib/ess-api";
@@ -174,9 +170,7 @@ function ProfileFieldsForm({
   );
 }
 
-function MyDataInner() {
-  const [branding, setBranding] = useState<Branding | null>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
+export default function MyDataPage() {
   const [empId, setEmpId] = useState<string | null>(null);
   const [data, setData] = useState<ProfileAggregate | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -222,10 +216,8 @@ function MyDataInner() {
     let active = true;
     (async () => {
       try {
-        const [b, me] = await Promise.all([getBranding().catch(() => null), getMe()]);
+        const me = await getMeCached();
         if (!active) return;
-        setBranding(b?.branding ?? null);
-        setIsAdmin(isAdminRole(me.role));
         setEmpId(me.id);
         await load(me.id);
       } catch (err) {
@@ -315,255 +307,188 @@ function MyDataInner() {
   const yearsLabel = (y: number | null) => (y == null ? "N/A" : y.toFixed(1));
 
   return (
-    <div className="min-h-dvh bg-gray-50">
-      <EssHeader appName={branding?.appName} primaryColor={branding?.primaryColor} active="mydata" isAdmin={isAdmin} />
-      <main className="mx-auto max-w-3xl space-y-4 px-3 pb-6 pt-4 sm:px-4">
-        {error && <p className="text-sm text-red-600">{error}</p>}
-        {!data ? (
-          <p className="text-sm text-gray-400">載入中…</p>
-        ) : (
-          <section className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:p-6">
-            {/* Apollo 六分頁 */}
-            <nav className="-mx-1 mb-5 flex gap-1 overflow-x-auto border-b border-gray-100 px-1 pb-2 sm:flex-wrap sm:overflow-visible">
-              {TABS.map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setTab(t)}
-                  className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium sm:rounded-md sm:px-3 sm:py-1.5 ${tab === t ? "text-white" : "text-gray-600 hover:bg-gray-100"}`}
-                  style={tab === t ? { backgroundColor: "var(--brand)" } : undefined}
-                >
-                  {t}
-                </button>
-              ))}
-            </nav>
+    <div className="space-y-4">
+      {error && <InlineError>{error}</InlineError>}
+      {!data ? (
+        <p className="text-sm text-gray-400">載入中…</p>
+      ) : (
+        <Card>
+          {/* Apollo 六分頁 */}
+          <nav className="-mx-1 mb-5 flex gap-1 overflow-x-auto border-b border-gray-100 px-1 pb-2 sm:flex-wrap sm:overflow-visible">
+            {TABS.map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium sm:rounded-md sm:px-3 sm:py-1.5 ${tab === t ? "text-white" : "text-gray-600 hover:bg-gray-100"}`}
+                style={tab === t ? { backgroundColor: "var(--brand)" } : undefined}
+              >
+                {t}
+              </button>
+            ))}
+          </nav>
 
-            {tab === "基本資料" && empId && (
-              <>
-                <div className="mb-4 flex flex-wrap items-center gap-4 rounded-xl bg-gray-50 p-4">
-                  <div className="flex h-20 w-20 items-center justify-center overflow-hidden rounded-2xl bg-white text-lg font-semibold text-gray-500 ring-1 ring-gray-200">
-                    {data.profile?.photo_url ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={data.profile.photo_url} alt="員工照片" className="h-full w-full object-cover" />
-                    ) : (
-                      data.basic.name.slice(0, 1)
-                    )}
-                  </div>
-                  <dl className="grid flex-1 grid-cols-2 gap-2 text-sm sm:grid-cols-4">
-                    <dt className="text-gray-500">姓名</dt>
-                    <dd className="font-medium">{data.basic.name}</dd>
-                    <dt className="text-gray-500">員工編號</dt>
-                    <dd>{data.basic.emp_no ?? "—"}</dd>
-                    <dt className="text-gray-500">照片</dt>
-                    <dd>{data.profile?.photo_file_name ?? "尚未上傳"}</dd>
-                  </dl>
-                  <div className="flex flex-wrap gap-2">
-                    <label className="cursor-pointer rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700">
-                      上傳照片
-                      <input type="file" accept="image/*" className="hidden" onChange={(e) => void onPhotoFile(e.target.files?.[0] ?? null)} />
-                    </label>
-                    {data.profile?.photo_url && (
-                      <button type="button" onClick={() => void removePhoto()} className="rounded-md border border-red-200 px-3 py-2 text-sm text-red-600">
-                        刪除照片
-                      </button>
-                    )}
-                  </div>
-                </div>
-                <ProfileFieldsForm empId={empId} data={data} fields={BASIC_FIELDS} onSaved={() => load(empId)} />
-              </>
-            )}
-
-            {tab === "通訊資料" && empId && (
-              <ProfileFieldsForm empId={empId} data={data} fields={CONTACT_FIELDS} onSaved={() => load(empId)} />
-            )}
-
-            {tab === "學歷證照" && (
-              <div className="space-y-6">
-                <div>
-                  <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <h3 className="font-semibold text-gray-800">學歷資料</h3>
-                    <button onClick={() => setShowEduForm((s) => !s)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
-                      {showEduForm ? "收合" : "＋ 新增學歷"}
-                    </button>
-                  </div>
-                  {showEduForm && (
-                    <form onSubmit={submitEdu} className="mb-4 space-y-3 rounded-lg bg-gray-50 p-4">
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                        <div>
-                          <label className={label}>學校</label>
-                          <input className={input} value={edu.school} onChange={(e) => setEdu({ ...edu, school: e.target.value })} />
-                        </div>
-                        <div>
-                          <label className={label}>學歷類別</label>
-                          <input className={input} placeholder="學士/碩士…" value={edu.degree} onChange={(e) => setEdu({ ...edu, degree: e.target.value })} />
-                        </div>
-                        <div>
-                          <label className={label}>科系類別</label>
-                          <input className={input} value={edu.majorCategory} onChange={(e) => setEdu({ ...edu, majorCategory: e.target.value })} />
-                        </div>
-                        <div>
-                          <label className={label}>科系名稱</label>
-                          <input className={input} value={edu.major} onChange={(e) => setEdu({ ...edu, major: e.target.value })} />
-                        </div>
-                        <div>
-                          <label className={label}>就學類別</label>
-                          <select className={input} value={edu.studyType} onChange={(e) => setEdu({ ...edu, studyType: e.target.value })}>
-                            <option>日間部</option>
-                            <option>夜間部</option>
-                            <option>其他(進修部或在職專班)</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label className={label}>就學狀態</label>
-                          <select className={input} value={edu.studyStatus} onChange={(e) => setEdu({ ...edu, studyStatus: e.target.value })}>
-                            <option>畢業</option>
-                            <option>就學中</option>
-                            <option>肄業</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label className={label}>就學開始時間</label>
-                          <input type="date" className={input} value={edu.startDate} onChange={(e) => setEdu({ ...edu, startDate: e.target.value })} />
-                        </div>
-                        <div>
-                          <label className={label}>就學結束時間</label>
-                          <input type="date" className={input} value={edu.endDate} onChange={(e) => setEdu({ ...edu, endDate: e.target.value })} />
-                        </div>
-                        <div>
-                          <label className={label}>學校所在地區</label>
-                          <input className={input} value={edu.region} onChange={(e) => setEdu({ ...edu, region: e.target.value })} />
-                        </div>
-                        <div>
-                          <label className={label}>證明文件</label>
-                          <input type="file" className={input} onChange={(e) => setEduProofFile(e.target.files?.[0] ?? null)} />
-                        </div>
-                      </div>
-                      <label className="flex items-center gap-2 text-sm text-gray-700">
-                        <input type="checkbox" checked={edu.isHighest} onChange={(e) => setEdu({ ...edu, isHighest: e.target.checked })} />
-                        最高學歷
-                      </label>
-                      <button type="submit" className="rounded-md px-4 py-2 text-sm font-medium text-white" style={{ backgroundColor: "var(--brand)" }}>
-                        新增
-                      </button>
-                    </form>
+          {tab === "基本資料" && empId && (
+            <>
+              <div className="mb-4 flex flex-wrap items-center gap-4 rounded-xl bg-gray-50 p-4">
+                <div className="flex h-20 w-20 items-center justify-center overflow-hidden rounded-2xl bg-white text-lg font-semibold text-gray-500 ring-1 ring-gray-200">
+                  {data.profile?.photo_url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={data.profile.photo_url} alt="員工照片" className="h-full w-full object-cover" />
+                  ) : (
+                    data.basic.name.slice(0, 1)
                   )}
-                  <ul className="divide-y divide-gray-100">
-                    {data.educations.map((e) => (
-                      <li key={e.id} className="flex flex-col gap-2 py-2 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-                        <span>
-                          <span className="font-medium text-gray-800">{e.school}</span>{" "}
-                          <span className="text-gray-500">{[e.degree, e.major, e.study_status].filter(Boolean).join(" · ")}</span>
-                          {e.is_highest && <span className="ml-2 rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-700">最高學歷</span>}
-                          {e.proof_url && (
-                            <a className="ml-2 text-xs font-medium" style={{ color: "var(--brand)" }} href={e.proof_url} target="_blank" rel="noreferrer">
-                              證明文件
-                            </a>
-                          )}
-                        </span>
-                        <div className="flex gap-2">
-                          {e.proof_url && <button onClick={() => empId && deleteEducationAttachment(e.id).then(() => load(empId))} className="text-gray-500 hover:underline">刪附件</button>}
-                          <button onClick={() => removeItem("edu", e.id)} className="text-red-600 hover:underline">
-                            刪除
-                          </button>
-                        </div>
-                      </li>
-                    ))}
-                    {data.educations.length === 0 && !showEduForm && <li className="py-2 text-sm text-gray-400">尚無學歷資料</li>}
-                  </ul>
                 </div>
-                <div>
-                  <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <h3 className="font-semibold text-gray-800">證照資料</h3>
-                    <button onClick={() => setShowCertForm((s) => !s)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
-                      {showCertForm ? "收合" : "＋ 新增證照"}
+                <dl className="grid flex-1 grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+                  <dt className="text-gray-500">姓名</dt>
+                  <dd className="font-medium">{data.basic.name}</dd>
+                  <dt className="text-gray-500">員工編號</dt>
+                  <dd>{data.basic.emp_no ?? "—"}</dd>
+                  <dt className="text-gray-500">照片</dt>
+                  <dd>{data.profile?.photo_file_name ?? "尚未上傳"}</dd>
+                </dl>
+                <div className="flex flex-wrap gap-2">
+                  <label className="cursor-pointer rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700">
+                    上傳照片
+                    <input type="file" accept="image/*" className="hidden" onChange={(e) => void onPhotoFile(e.target.files?.[0] ?? null)} />
+                  </label>
+                  {data.profile?.photo_url && (
+                    <button type="button" onClick={() => void removePhoto()} className="rounded-md border border-red-200 px-3 py-2 text-sm text-red-600">
+                      刪除照片
                     </button>
-                  </div>
-                  {showCertForm && (
-                    <form onSubmit={submitCert} className="mb-4 space-y-3 rounded-lg bg-gray-50 p-4">
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                        <div>
-                          <label className={label}>證照名稱</label>
-                          <input className={input} value={cert.name} onChange={(e) => setCert({ ...cert, name: e.target.value })} />
-                        </div>
-                        <div>
-                          <label className={label}>發證單位</label>
-                          <input className={input} value={cert.issuer} onChange={(e) => setCert({ ...cert, issuer: e.target.value })} />
-                        </div>
-                        <div>
-                          <label className={label}>發證日期</label>
-                          <input type="date" className={input} value={cert.issuedDate} onChange={(e) => setCert({ ...cert, issuedDate: e.target.value })} />
-                        </div>
-                        <div>
-                          <label className={label}>到期日期</label>
-                          <input type="date" className={input} value={cert.expiryDate} onChange={(e) => setCert({ ...cert, expiryDate: e.target.value })} />
-                        </div>
-                        <div>
-                          <label className={label}>附件</label>
-                          <input type="file" className={input} onChange={(e) => setCertAttachmentFile(e.target.files?.[0] ?? null)} />
-                        </div>
-                      </div>
-                      <button type="submit" className="rounded-md px-4 py-2 text-sm font-medium text-white" style={{ backgroundColor: "var(--brand)" }}>
-                        新增
-                      </button>
-                    </form>
                   )}
-                  <ul className="divide-y divide-gray-100">
-                    {data.certifications.map((c) => (
-                      <li key={c.id} className="flex flex-col gap-2 py-2 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-                        <span>
-                          <span className="font-medium text-gray-800">{c.name}</span>{" "}
-                          <span className="text-gray-500">
-                            {[c.issuer, [c.issued_date, c.expiry_date].filter(Boolean).join(" ~ ")].filter(Boolean).join(" · ")}
-                          </span>
-                          {c.attachment_url && (
-                            <a className="ml-2 text-xs font-medium" style={{ color: "var(--brand)" }} href={c.attachment_url} target="_blank" rel="noreferrer">
-                              附件
-                            </a>
-                          )}
-                        </span>
-                        <div className="flex gap-2">
-                          {c.attachment_url && <button onClick={() => empId && deleteCertificationAttachment(c.id).then(() => load(empId))} className="text-gray-500 hover:underline">刪附件</button>}
-                          <button onClick={() => removeItem("cert", c.id)} className="text-red-600 hover:underline">
-                            刪除
-                          </button>
-                        </div>
-                      </li>
-                    ))}
-                    {data.certifications.length === 0 && <li className="py-2 text-sm text-gray-400">尚無證照資料</li>}
-                  </ul>
                 </div>
               </div>
-            )}
+              <ProfileFieldsForm empId={empId} data={data} fields={BASIC_FIELDS} onSaved={() => load(empId)} />
+            </>
+          )}
 
-            {tab === "工作經歷" && (
+          {tab === "通訊資料" && empId && (
+            <ProfileFieldsForm empId={empId} data={data} fields={CONTACT_FIELDS} onSaved={() => load(empId)} />
+          )}
+
+          {tab === "學歷證照" && (
+            <div className="space-y-6">
               <div>
                 <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <h3 className="font-semibold text-gray-800">工作經歷</h3>
-                  <button onClick={() => setShowWorkForm((s) => !s)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
-                    {showWorkForm ? "收合" : "＋ 新增經歷"}
+                  <h3 className="font-semibold text-gray-800">學歷資料</h3>
+                  <button onClick={() => setShowEduForm((s) => !s)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
+                    {showEduForm ? "收合" : "＋ 新增學歷"}
                   </button>
                 </div>
-                {showWorkForm && (
-                  <form onSubmit={submitWork} className="mb-4 space-y-3 rounded-lg bg-gray-50 p-4">
+                {showEduForm && (
+                  <form onSubmit={submitEdu} className="mb-4 space-y-3 rounded-lg bg-gray-50 p-4">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                      <div>
+                        <label className={label}>學校</label>
+                        <input className={input} value={edu.school} onChange={(e) => setEdu({ ...edu, school: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className={label}>學歷類別</label>
+                        <input className={input} placeholder="學士/碩士…" value={edu.degree} onChange={(e) => setEdu({ ...edu, degree: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className={label}>科系類別</label>
+                        <input className={input} value={edu.majorCategory} onChange={(e) => setEdu({ ...edu, majorCategory: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className={label}>科系名稱</label>
+                        <input className={input} value={edu.major} onChange={(e) => setEdu({ ...edu, major: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className={label}>就學類別</label>
+                        <select className={input} value={edu.studyType} onChange={(e) => setEdu({ ...edu, studyType: e.target.value })}>
+                          <option>日間部</option>
+                          <option>夜間部</option>
+                          <option>其他(進修部或在職專班)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className={label}>就學狀態</label>
+                        <select className={input} value={edu.studyStatus} onChange={(e) => setEdu({ ...edu, studyStatus: e.target.value })}>
+                          <option>畢業</option>
+                          <option>就學中</option>
+                          <option>肄業</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className={label}>就學開始時間</label>
+                        <input type="date" className={input} value={edu.startDate} onChange={(e) => setEdu({ ...edu, startDate: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className={label}>就學結束時間</label>
+                        <input type="date" className={input} value={edu.endDate} onChange={(e) => setEdu({ ...edu, endDate: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className={label}>學校所在地區</label>
+                        <input className={input} value={edu.region} onChange={(e) => setEdu({ ...edu, region: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className={label}>證明文件</label>
+                        <input type="file" className={input} onChange={(e) => setEduProofFile(e.target.files?.[0] ?? null)} />
+                      </div>
+                    </div>
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input type="checkbox" checked={edu.isHighest} onChange={(e) => setEdu({ ...edu, isHighest: e.target.checked })} />
+                      最高學歷
+                    </label>
+                    <button type="submit" className="rounded-md px-4 py-2 text-sm font-medium text-white" style={{ backgroundColor: "var(--brand)" }}>
+                      新增
+                    </button>
+                  </form>
+                )}
+                <ul className="divide-y divide-gray-100">
+                  {data.educations.map((e) => (
+                    <li key={e.id} className="flex flex-col gap-2 py-2 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                      <span>
+                        <span className="font-medium text-gray-800">{e.school}</span>{" "}
+                        <span className="text-gray-500">{[e.degree, e.major, e.study_status].filter(Boolean).join(" · ")}</span>
+                        {e.is_highest && <span className="ml-2 rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-700">最高學歷</span>}
+                        {e.proof_url && (
+                          <a className="ml-2 text-xs font-medium" style={{ color: "var(--brand)" }} href={e.proof_url} target="_blank" rel="noreferrer">
+                            證明文件
+                          </a>
+                        )}
+                      </span>
+                      <div className="flex gap-2">
+                        {e.proof_url && <button onClick={() => empId && deleteEducationAttachment(e.id).then(() => load(empId))} className="text-gray-500 hover:underline">刪附件</button>}
+                        <button onClick={() => removeItem("edu", e.id)} className="text-red-600 hover:underline">
+                          刪除
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                  {data.educations.length === 0 && !showEduForm && <li className="py-2 text-sm text-gray-400">尚無學歷資料</li>}
+                </ul>
+              </div>
+              <div>
+                <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <h3 className="font-semibold text-gray-800">證照資料</h3>
+                  <button onClick={() => setShowCertForm((s) => !s)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
+                    {showCertForm ? "收合" : "＋ 新增證照"}
+                  </button>
+                </div>
+                {showCertForm && (
+                  <form onSubmit={submitCert} className="mb-4 space-y-3 rounded-lg bg-gray-50 p-4">
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <div>
-                        <label className={label}>公司</label>
-                        <input className={input} value={work.company} onChange={(e) => setWork({ ...work, company: e.target.value })} />
+                        <label className={label}>證照名稱</label>
+                        <input className={input} value={cert.name} onChange={(e) => setCert({ ...cert, name: e.target.value })} />
                       </div>
                       <div>
-                        <label className={label}>職稱</label>
-                        <input className={input} value={work.title} onChange={(e) => setWork({ ...work, title: e.target.value })} />
+                        <label className={label}>發證單位</label>
+                        <input className={input} value={cert.issuer} onChange={(e) => setCert({ ...cert, issuer: e.target.value })} />
                       </div>
                       <div>
-                        <label className={label}>開始日期</label>
-                        <input type="date" className={input} value={work.startDate} onChange={(e) => setWork({ ...work, startDate: e.target.value })} />
+                        <label className={label}>發證日期</label>
+                        <input type="date" className={input} value={cert.issuedDate} onChange={(e) => setCert({ ...cert, issuedDate: e.target.value })} />
                       </div>
                       <div>
-                        <label className={label}>結束日期</label>
-                        <input type="date" className={input} value={work.endDate} onChange={(e) => setWork({ ...work, endDate: e.target.value })} />
+                        <label className={label}>到期日期</label>
+                        <input type="date" className={input} value={cert.expiryDate} onChange={(e) => setCert({ ...cert, expiryDate: e.target.value })} />
                       </div>
-                      <div className="sm:col-span-2">
-                        <label className={label}>說明</label>
-                        <textarea className={input} rows={3} value={work.description} onChange={(e) => setWork({ ...work, description: e.target.value })} />
+                      <div>
+                        <label className={label}>附件</label>
+                        <input type="file" className={input} onChange={(e) => setCertAttachmentFile(e.target.files?.[0] ?? null)} />
                       </div>
                     </div>
                     <button type="submit" className="rounded-md px-4 py-2 text-sm font-medium text-white" style={{ backgroundColor: "var(--brand)" }}>
@@ -572,72 +497,136 @@ function MyDataInner() {
                   </form>
                 )}
                 <ul className="divide-y divide-gray-100">
-                  {data.workHistory.map((w) => (
-                    <li key={w.id} className="flex flex-col gap-2 py-2 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                  {data.certifications.map((c) => (
+                    <li key={c.id} className="flex flex-col gap-2 py-2 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3">
                       <span>
-                        <span className="font-medium text-gray-800">{w.company}</span>{" "}
+                        <span className="font-medium text-gray-800">{c.name}</span>{" "}
                         <span className="text-gray-500">
-                          {[w.title, [w.start_date, w.end_date].filter(Boolean).join(" ~ ")].filter(Boolean).join(" · ")}
+                          {[c.issuer, [c.issued_date, c.expiry_date].filter(Boolean).join(" ~ ")].filter(Boolean).join(" · ")}
                         </span>
+                        {c.attachment_url && (
+                          <a className="ml-2 text-xs font-medium" style={{ color: "var(--brand)" }} href={c.attachment_url} target="_blank" rel="noreferrer">
+                            附件
+                          </a>
+                        )}
                       </span>
-                      <button onClick={() => removeItem("work", w.id)} className="text-red-600 hover:underline">
-                        刪除
-                      </button>
+                      <div className="flex gap-2">
+                        {c.attachment_url && <button onClick={() => empId && deleteCertificationAttachment(c.id).then(() => load(empId))} className="text-gray-500 hover:underline">刪附件</button>}
+                        <button onClick={() => removeItem("cert", c.id)} className="text-red-600 hover:underline">
+                          刪除
+                        </button>
+                      </div>
                     </li>
                   ))}
-                  {data.workHistory.length === 0 && <li className="py-2 text-sm text-gray-400">尚無工作經歷</li>}
+                  {data.certifications.length === 0 && <li className="py-2 text-sm text-gray-400">尚無證照資料</li>}
                 </ul>
               </div>
-            )}
+            </div>
+          )}
 
-            {tab === "年資" && (
-              <dl className="grid max-w-sm grid-cols-2 gap-3 text-sm">
-                <dt className="text-gray-500">內部年資</dt>
-                <dd className="font-medium">{yearsLabel(data.seniority.internalYears)}</dd>
-                <dt className="text-gray-500">職等年資</dt>
-                <dd className="font-medium">{yearsLabel(data.seniority.gradeYears)}</dd>
-                <dt className="text-gray-500">單位年資</dt>
-                <dd className="font-medium">{yearsLabel(data.seniority.unitYears)}</dd>
-              </dl>
-            )}
-
-            {tab === "職務經歷" && (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
-                  <thead>
-                    <tr className="border-b border-gray-200 text-xs text-gray-500">
-                      <th className="py-2 pr-4">生效日期</th>
-                      <th className="py-2 pr-4">異動行為</th>
-                      <th className="py-2 pr-4">直屬單位</th>
-                      <th className="py-2 pr-4">職等</th>
-                      <th className="py-2">職稱</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.jobHistory.map((j) => (
-                      <tr key={j.id} className="border-b border-gray-50">
-                        <td className="py-2 pr-4">{j.effective_date}</td>
-                        <td className="py-2 pr-4">{j.action}</td>
-                        <td className="py-2 pr-4">{j.dept_name ?? "—"}</td>
-                        <td className="py-2 pr-4">{j.grade ?? "—"}</td>
-                        <td className="py-2">{j.title ?? "—"}</td>
-                      </tr>
-                    ))}
-                    {data.jobHistory.length === 0 && (
-                      <tr>
-                        <td colSpan={5} className="py-3 text-gray-400">
-                          尚無職務異動紀錄
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+          {tab === "工作經歷" && (
+            <div>
+              <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <h3 className="font-semibold text-gray-800">工作經歷</h3>
+                <button onClick={() => setShowWorkForm((s) => !s)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
+                  {showWorkForm ? "收合" : "＋ 新增經歷"}
+                </button>
               </div>
-            )}
-          </section>
-        )}
-        <ChangePasswordCard />
-      </main>
+              {showWorkForm && (
+                <form onSubmit={submitWork} className="mb-4 space-y-3 rounded-lg bg-gray-50 p-4">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className={label}>公司</label>
+                      <input className={input} value={work.company} onChange={(e) => setWork({ ...work, company: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className={label}>職稱</label>
+                      <input className={input} value={work.title} onChange={(e) => setWork({ ...work, title: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className={label}>開始日期</label>
+                      <input type="date" className={input} value={work.startDate} onChange={(e) => setWork({ ...work, startDate: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className={label}>結束日期</label>
+                      <input type="date" className={input} value={work.endDate} onChange={(e) => setWork({ ...work, endDate: e.target.value })} />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className={label}>說明</label>
+                      <textarea className={input} rows={3} value={work.description} onChange={(e) => setWork({ ...work, description: e.target.value })} />
+                    </div>
+                  </div>
+                  <button type="submit" className="rounded-md px-4 py-2 text-sm font-medium text-white" style={{ backgroundColor: "var(--brand)" }}>
+                    新增
+                  </button>
+                </form>
+              )}
+              <ul className="divide-y divide-gray-100">
+                {data.workHistory.map((w) => (
+                  <li key={w.id} className="flex flex-col gap-2 py-2 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                    <span>
+                      <span className="font-medium text-gray-800">{w.company}</span>{" "}
+                      <span className="text-gray-500">
+                        {[w.title, [w.start_date, w.end_date].filter(Boolean).join(" ~ ")].filter(Boolean).join(" · ")}
+                      </span>
+                    </span>
+                    <button onClick={() => removeItem("work", w.id)} className="text-red-600 hover:underline">
+                      刪除
+                    </button>
+                  </li>
+                ))}
+                {data.workHistory.length === 0 && <li className="py-2 text-sm text-gray-400">尚無工作經歷</li>}
+              </ul>
+            </div>
+          )}
+
+          {tab === "年資" && (
+            <dl className="grid max-w-sm grid-cols-2 gap-3 text-sm">
+              <dt className="text-gray-500">內部年資</dt>
+              <dd className="font-medium">{yearsLabel(data.seniority.internalYears)}</dd>
+              <dt className="text-gray-500">職等年資</dt>
+              <dd className="font-medium">{yearsLabel(data.seniority.gradeYears)}</dd>
+              <dt className="text-gray-500">單位年資</dt>
+              <dd className="font-medium">{yearsLabel(data.seniority.unitYears)}</dd>
+            </dl>
+          )}
+
+          {tab === "職務經歷" && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 text-xs text-gray-500">
+                    <th className="py-2 pr-4">生效日期</th>
+                    <th className="py-2 pr-4">異動行為</th>
+                    <th className="py-2 pr-4">直屬單位</th>
+                    <th className="py-2 pr-4">職等</th>
+                    <th className="py-2">職稱</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.jobHistory.map((j) => (
+                    <tr key={j.id} className="border-b border-gray-50">
+                      <td className="py-2 pr-4">{j.effective_date}</td>
+                      <td className="py-2 pr-4">{j.action}</td>
+                      <td className="py-2 pr-4">{j.dept_name ?? "—"}</td>
+                      <td className="py-2 pr-4">{j.grade ?? "—"}</td>
+                      <td className="py-2">{j.title ?? "—"}</td>
+                    </tr>
+                  ))}
+                  {data.jobHistory.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="py-3 text-gray-400">
+                        尚無職務異動紀錄
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      )}
+      <ChangePasswordCard />
     </div>
   );
 }
@@ -682,8 +671,7 @@ function ChangePasswordCard() {
   }
 
   return (
-    <section className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:p-6">
-      <h2 className="mb-1 text-base font-semibold text-gray-800">修改密碼</h2>
+    <Card title="修改密碼">
       <p className="mb-4 text-xs text-gray-500">請先輸入目前密碼確認身分；新密碼至少 8 碼。忘記目前密碼可登出後在登入頁點「忘記密碼？」。</p>
       <form onSubmit={onSubmit} className="grid max-w-md grid-cols-1 gap-3">
         <div>
@@ -704,14 +692,6 @@ function ChangePasswordCard() {
           {busy ? "更新中…" : "更新密碼"}
         </button>
       </form>
-    </section>
-  );
-}
-
-export default function MyDataPage() {
-  return (
-    <EssTabGate tab="mydata" optimistic>
-      <MyDataInner />
-    </EssTabGate>
+    </Card>
   );
 }

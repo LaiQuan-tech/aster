@@ -1,12 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { EssTabGate } from "@/components/EssTabGate";
-import { EssHeader } from "@/components/EssHeader";
+import { Button, Card, Field, InlineError, Input, Select } from "@/components/ess-ui";
 import {
-  getBranding,
-  getMe,
-  isAdminRole,
   getMyExpenseCategories,
   getMyExpenses,
   fileExpense,
@@ -14,7 +10,6 @@ import {
   uploadExpenseReceipt,
   getMyApprovedTrips,
   getMyAdvances,
-  type Branding,
   type MyExpenseCategory,
   type MyExpenseClaim,
   type MyTrip,
@@ -40,9 +35,7 @@ const STATUS_LABEL: Record<string, string> = {
   rejected: "已退件",
 };
 
-function ExpensesInner() {
-  const [branding, setBranding] = useState<Branding | null>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
+export default function EssExpensesPage() {
   const [categories, setCategories] = useState<MyExpenseCategory[]>([]);
   const [claims, setClaims] = useState<MyExpenseClaim[]>([]);
   const [period, setPeriod] = useState(thisPeriod);
@@ -77,11 +70,6 @@ function ExpensesInner() {
       setError(err instanceof Error ? err.message : "載入失敗");
     }
   }, [period]);
-
-  useEffect(() => {
-    getBranding().then((b) => setBranding(b.branding)).catch(() => null);
-    getMe().then((m) => setIsAdmin(isAdminRole(m.role))).catch(() => null);
-  }, []);
 
   useEffect(() => {
     void load();
@@ -137,34 +125,23 @@ function ExpensesInner() {
     .reduce((a, c) => a + Number(c.amount), 0);
 
   return (
-    <div className="min-h-dvh bg-gray-50">
-      <EssHeader
-        appName={branding?.appName}
-        primaryColor={branding?.primaryColor}
-        active="expenses"
-        isAdmin={isAdmin}
-      />
-      <main className="mx-auto max-w-2xl space-y-4 px-3 pb-6 pt-4 sm:px-4">
-        <section className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:p-6">
-          <h2 className="mb-1 text-lg font-semibold text-gray-800">填報日常支出</h2>
-          <p className="mb-4 text-xs text-gray-500">
-            送出後不需逐筆審核，由管理者於月結時一次核銷。請附上憑證。
-          </p>
+    <div className="space-y-4">
+      <Card title="填報日常支出">
+        <p className="mb-4 text-xs text-gray-500">
+          送出後不需逐筆審核，由管理者於月結時一次核銷。請附上憑證。
+        </p>
 
-          {error && <p className="mb-3 text-sm text-red-600">{error}</p>}
-          {message && <p className="mb-3 text-sm text-green-700">{message}</p>}
+        {error && <InlineError className="mb-3">{error}</InlineError>}
+        {message && <p className="mb-3 text-sm text-green-700">{message}</p>}
 
-          <form onSubmit={onSubmit} className="space-y-4">
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700" htmlFor="cat">
-                類別
-              </label>
-              <select
+        <form onSubmit={onSubmit} className="space-y-4">
+          <div>
+            <Field label="類別" htmlFor="cat">
+              <Select
                 id="cat"
                 value={categoryId}
                 onChange={(e) => setCategoryId(e.target.value)}
                 required
-                className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
               >
                 <option value="">請選擇</option>
                 {categories.map((c) => (
@@ -172,243 +149,209 @@ function ExpensesInner() {
                     {c.name}
                   </option>
                 ))}
-              </select>
-              {selected?.nature === "allowance" && (
-                <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                  此類別為<strong>定額補貼</strong>，屬薪資所得，會併入當月薪資扣繳。
-                </p>
-              )}
-              {selected && selected.nature === "reimbursement" && selected.requires_receipt && (
-                <p className="mt-2 text-xs text-gray-500">此類別需附憑證。</p>
-              )}
-            </div>
+              </Select>
+            </Field>
+            {selected?.nature === "allowance" && (
+              <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                此類別為<strong>定額補貼</strong>，屬薪資所得，會併入當月薪資扣繳。
+              </p>
+            )}
+            {selected && selected.nature === "reimbursement" && selected.requires_receipt && (
+              <p className="mt-2 text-xs text-gray-500">此類別需附憑證。</p>
+            )}
+          </div>
 
-            {/* 出差軌：日常費用不必事前審核，長途出差必須先核准。 */}
-            {selected?.requires_trip_approval && (
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700" htmlFor="trip">
-                  綁定出差單
-                </label>
-                {trips.length === 0 ? (
+          {/* 出差軌：日常費用不必事前審核，長途出差必須先核准。 */}
+          {selected?.requires_trip_approval && (
+            <div>
+              {trips.length === 0 ? (
+                <Field label="綁定出差單">
                   <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
                     你目前沒有已核准的出差單。此類別的費用必須先提出「公出/出差」
                     申請並經簽核，核准後才能報銷。
                   </p>
-                ) : (
-                  <>
-                    <select
-                      id="trip"
-                      value={tripRequestId}
-                      onChange={(e) => setTripRequestId(e.target.value)}
-                      required
-                      className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                    >
-                      <option value="">請選擇</option>
-                      {trips.map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.start_at.slice(0, 10)}
-                          {t.location ? ` · ${t.location}` : ""}
-                        </option>
-                      ))}
-                    </select>
-                    <p className="mt-1 text-xs text-gray-400">
-                      此類別的費用須掛在已核准的出差之下。
-                    </p>
-                  </>
-                )}
-              </div>
-            )}
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700" htmlFor="amt">
-                  金額
-                </label>
-                <input
-                  id="amt"
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                  required
-                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700" htmlFor="date">
-                  發生日期
-                </label>
-                <input
-                  id="date"
-                  type="date"
-                  value={incurredOn}
-                  onChange={(e) => setIncurredOn(e.target.value)}
-                  required
-                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                />
-                <p className="mt-1 text-xs text-gray-400">
-                  填實際發生日。上月的單這月才交也沒關係，會歸到本月月結。
-                </p>
-              </div>
-            </div>
-
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700" htmlFor="note">
-                備註（選填）
-              </label>
-              <input
-                id="note"
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                maxLength={250}
-                className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
-              />
-            </div>
-
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700" htmlFor="receipt">
-                憑證（發票／收據／乘車明細）
-              </label>
-              <input
-                id="receipt"
-                type="file"
-                accept="image/*,application/pdf"
-                onChange={(e) => setReceipt(e.target.files?.[0] ?? null)}
-                className="w-full text-sm"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={
-                busy ||
-                !categoryId ||
-                (selected?.requires_trip_approval === true && !tripRequestId)
-              }
-              className="w-full rounded-xl px-4 py-3 text-sm font-semibold text-white disabled:opacity-50"
-              style={{ backgroundColor: "var(--brand)" }}
-            >
-              {busy ? "送出中…" : "送出"}
-            </button>
-          </form>
-        </section>
-
-        {advances.length > 0 && (
-          <section className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:p-6">
-            <h2 className="mb-1 text-lg font-semibold text-gray-800">我的預支</h2>
-            <p className="mb-4 text-xs text-gray-500">
-              已撥款但尚未核銷的金額，請憑單據報銷後由公司沖抵，多退少補。
-            </p>
-            <ul className="space-y-2">
-              {advances.map((a) => {
-                const bal = a.balance === null ? null : Number(a.balance);
-                return (
-                  <li
-                    key={a.id}
-                    className="rounded-2xl border border-gray-100 bg-gray-50 p-3 text-sm"
+                </Field>
+              ) : (
+                <Field label="綁定出差單" htmlFor="trip" hint="此類別的費用須掛在已核准的出差之下。">
+                  <Select
+                    id="trip"
+                    value={tripRequestId}
+                    onChange={(e) => setTripRequestId(e.target.value)}
+                    required
                   >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="font-medium text-gray-900">
-                          {money(Number(a.amount))} 元
-                        </div>
-                        <div className="text-xs text-gray-500">
-                          {a.status === "requested"
-                            ? "已核准，尚未撥款"
-                            : a.status === "paid"
-                              ? `已撥款 ${a.paid_at?.slice(0, 10) ?? ""}・待核銷`
-                              : a.status === "settled"
-                                ? `已核銷 ${a.settled_at?.slice(0, 10) ?? ""}`
-                                : a.status}
-                        </div>
-                      </div>
-                      {a.status === "settled" && bal !== null && (
-                        <span className="text-xs text-gray-600">
-                          {bal === 0
-                            ? "剛好結清"
-                            : bal > 0
-                              ? `公司補你 ${money(bal)}`
-                              : `應退回 ${money(Math.abs(bal))}`}
-                        </span>
-                      )}
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          </section>
-        )}
+                    <option value="">請選擇</option>
+                    {trips.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.start_at.slice(0, 10)}
+                        {t.location ? ` · ${t.location}` : ""}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              )}
+            </div>
+          )}
 
-        <section className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:p-6">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold text-gray-800">我的報銷</h2>
-            <input
-              type="month"
-              value={period}
-              onChange={(e) => setPeriod(e.target.value)}
-              className="rounded-xl border border-gray-200 px-3 py-1.5 text-sm"
-            />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="金額" htmlFor="amt">
+              <Input
+                id="amt"
+                type="number"
+                min="1"
+                step="1"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                required
+              />
+            </Field>
+            <Field label="發生日期" htmlFor="date" hint="填實際發生日。上月的單這月才交也沒關係，會歸到本月月結。">
+              <Input
+                id="date"
+                type="date"
+                value={incurredOn}
+                onChange={(e) => setIncurredOn(e.target.value)}
+                required
+              />
+            </Field>
           </div>
 
-          {claims.length === 0 ? (
-            <p className="py-6 text-center text-sm text-gray-400">本期沒有報銷紀錄。</p>
-          ) : (
-            <>
-              <p className="mb-3 text-sm text-gray-600">
-                本期合計 <strong>{money(total)}</strong> 元
-              </p>
-              <ul className="space-y-2">
-                {claims.map((c) => (
-                  <li
-                    key={c.id}
-                    className="rounded-2xl border border-gray-100 bg-gray-50 p-3 text-sm"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="font-medium text-gray-900">
-                          {money(Number(c.amount))} 元
-                          {c.nature === "allowance" && (
-                            <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-900">
-                              補貼
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-xs text-gray-500">
-                          {c.incurred_on}
-                          {c.note ? ` · ${c.note}` : ""}
-                        </div>
+          <Field label="備註（選填）" htmlFor="note">
+            <Input
+              id="note"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              maxLength={250}
+            />
+          </Field>
+
+          <Field label="憑證（發票／收據／乘車明細）" htmlFor="receipt">
+            <input
+              id="receipt"
+              type="file"
+              accept="image/*,application/pdf"
+              onChange={(e) => setReceipt(e.target.files?.[0] ?? null)}
+              className="w-full text-sm"
+            />
+          </Field>
+
+          <Button
+            type="submit"
+            block
+            size="lg"
+            loading={busy}
+            disabled={!categoryId || (selected?.requires_trip_approval === true && !tripRequestId)}
+          >
+            {busy ? "送出中…" : "送出"}
+          </Button>
+        </form>
+      </Card>
+
+      {advances.length > 0 && (
+        <Card title="我的預支">
+          <p className="mb-4 text-xs text-gray-500">
+            已撥款但尚未核銷的金額，請憑單據報銷後由公司沖抵，多退少補。
+          </p>
+          <ul className="space-y-2">
+            {advances.map((a) => {
+              const bal = a.balance === null ? null : Number(a.balance);
+              return (
+                <li
+                  key={a.id}
+                  className="rounded-2xl border border-gray-100 bg-gray-50 p-3 text-sm"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="font-medium text-gray-900">
+                        {money(Number(a.amount))} 元
                       </div>
-                      <div className="text-right">
-                        <span className="text-xs text-gray-500">
-                          {STATUS_LABEL[c.status] ?? c.status}
-                        </span>
-                        {c.status === "submitted" && (
-                          <button
-                            type="button"
-                            onClick={() => void onCancel(c.id)}
-                            className="mt-1 block text-xs text-red-600 underline"
-                          >
-                            撤回
-                          </button>
-                        )}
+                      <div className="text-xs text-gray-500">
+                        {a.status === "requested"
+                          ? "已核准，尚未撥款"
+                          : a.status === "paid"
+                            ? `已撥款 ${a.paid_at?.slice(0, 10) ?? ""}・待核銷`
+                            : a.status === "settled"
+                              ? `已核銷 ${a.settled_at?.slice(0, 10) ?? ""}`
+                              : a.status}
                       </div>
                     </div>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-        </section>
-      </main>
-    </div>
-  );
-}
+                    {a.status === "settled" && bal !== null && (
+                      <span className="text-xs text-gray-600">
+                        {bal === 0
+                          ? "剛好結清"
+                          : bal > 0
+                            ? `公司補你 ${money(bal)}`
+                            : `應退回 ${money(Math.abs(bal))}`}
+                      </span>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </Card>
+      )}
 
-export default function EssExpensesPage() {
-  return (
-    <EssTabGate tab="expenses">
-      <ExpensesInner />
-    </EssTabGate>
+      <Card
+        title="我的報銷"
+        action={
+          <input
+            type="month"
+            value={period}
+            onChange={(e) => setPeriod(e.target.value)}
+            className="rounded-xl border border-gray-200 px-3 py-1.5 text-sm"
+          />
+        }
+      >
+
+        {claims.length === 0 ? (
+          <p className="py-6 text-center text-sm text-gray-400">本期沒有報銷紀錄。</p>
+        ) : (
+          <>
+            <p className="mb-3 text-sm text-gray-600">
+              本期合計 <strong>{money(total)}</strong> 元
+            </p>
+            <ul className="space-y-2">
+              {claims.map((c) => (
+                <li
+                  key={c.id}
+                  className="rounded-2xl border border-gray-100 bg-gray-50 p-3 text-sm"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="font-medium text-gray-900">
+                        {money(Number(c.amount))} 元
+                        {c.nature === "allowance" && (
+                          <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-900">
+                            補貼
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-gray-500">
+                        {c.incurred_on}
+                        {c.note ? ` · ${c.note}` : ""}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-xs text-gray-500">
+                        {STATUS_LABEL[c.status] ?? c.status}
+                      </span>
+                      {c.status === "submitted" && (
+                        <button
+                          type="button"
+                          onClick={() => void onCancel(c.id)}
+                          className="mt-1 block text-xs text-red-600 underline"
+                        >
+                          撤回
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </Card>
+    </div>
   );
 }
