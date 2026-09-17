@@ -8,6 +8,7 @@ import { setActor } from "../lib/request-context.js"
 import { writeAuditLog } from "../services/audit.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { dayWindowUtc, todayKey } from "../lib/tz.js"
+import { checkPunchCooldown, cooldownSeconds, statusFromRecords } from "../services/punch-guard.js"
 
 export const punchRouter = Router()
 
@@ -79,6 +80,19 @@ function isHrRole(role: string | undefined): boolean {
  * If `type` is omitted it is inferred from the employee's last punch today:
  * no punch yet / last was 'out' → 'in'; last was 'in' → 'out'. Optional
  * source/lat/lng/deviceId are stored as given (source defaults to 'web').
+ *
+ * Cooldown（連按防呆）: before inferring or writing anything we load the
+ * employee's most recent punch (any type, any day). If it is younger than
+ * `PUNCH_COOLDOWN_SECONDS` (default 60; see services/punch-guard.ts) the
+ * request is refused with
+ *   409 { error: "punch_too_soon", retryAfterSeconds, last: { id, type, punchAt } }
+ * so a double tap on the front page yields exactly one row. HR back-fills
+ * (`/punch/manual`, `/punch/manual/import`) are NOT subject to the cooldown.
+ *
+ * 201 body: `{ id, type, punchAt, source, lat, lng, deviceId, record }` —
+ * the original three fields keep their names and types; `record` is the full
+ * stored row (snake_case, as `GET /punch/today` lists it) so the client can
+ * optimistically append it without a refetch.
  */
 punchRouter.post(
   "/punch",
@@ -106,6 +120,40 @@ punchRouter.post(
         // cannot punch for anyone else).
         res.status(403).json({ error: "not_an_employee" })
         return
+      }
+
+      // Cooldown check against the employee's most recent punch of ANY type on
+      // ANY day (a double tap does not care about the tenant's day boundary).
+      // Runs before inference so a refused request never reads as "out".
+      // Skipped entirely when the window is 0 (disabled / test setup).
+      const seconds = cooldownSeconds()
+      if (seconds > 0) {
+        const { data: recent, error: recentErr } = await supabaseAdmin
+          .from("punch_records")
+          .select("id, type, punch_at")
+          .eq("tenant_id", tenantId)
+          .eq("employee_id", self.id)
+          .order("punch_at", { ascending: false })
+          .limit(1)
+          .maybeSingle()
+        if (recentErr) {
+          next(new Error(`POST /punch (cooldown): ${recentErr.message}`))
+          return
+        }
+        const guard = checkPunchCooldown(
+          recent ? { punch_at: recent.punch_at as string } : null,
+          new Date(),
+          seconds,
+        )
+        if (!guard.ok && recent) {
+          res.set("Retry-After", String(guard.retryAfterSeconds))
+          res.status(409).json({
+            error: "punch_too_soon",
+            retryAfterSeconds: guard.retryAfterSeconds,
+            last: { id: recent.id, type: recent.type, punchAt: recent.punch_at },
+          })
+          return
+        }
       }
 
       // Infer in/out from today's last punch when the client didn't specify.
@@ -141,14 +189,23 @@ punchRouter.post(
           lng: lng ?? null,
           device_id: deviceId ?? null,
         })
-        .select("id, type, punch_at")
+        .select("*")
         .single()
 
       if (error || !data) {
         next(new Error(`POST /punch: ${error?.message}`))
         return
       }
-      res.status(201).json({ id: data.id, type: data.type, punchAt: data.punch_at })
+      res.status(201).json({
+        id: data.id,
+        type: data.type,
+        punchAt: data.punch_at,
+        source: data.source,
+        lat: data.lat,
+        lng: data.lng,
+        deviceId: data.device_id,
+        record: data,
+      })
     } catch (err) {
       next(err)
     }
@@ -157,8 +214,10 @@ punchRouter.post(
 
 /**
  * GET /punch/today — the caller's own punches for today (chronological) plus a
- * derived status: 'working' if the last punch today was 'in', else 'off'.
- * A caller with no employee row returns an empty list and status 'off'.
+ * derived status: 'working' if the most recent work in/out punch today was
+ * 'in', else 'off'. break_* / outing_* punches are ignored for the status
+ * (see statusFromRecords) so a break never reads as "已下班" on the front
+ * page. A caller with no employee row returns an empty list and status 'off'.
  */
 punchRouter.get(
   "/punch/today",
@@ -194,8 +253,7 @@ punchRouter.get(
         return
       }
       const records = data ?? []
-      const lastType = records.length ? records[records.length - 1].type : null
-      const status = lastType === "in" ? "working" : "off"
+      const status = statusFromRecords(records as Array<{ type: string }>)
       res.status(200).json({ records, status })
     } catch (err) {
       next(err)

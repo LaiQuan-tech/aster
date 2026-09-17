@@ -138,7 +138,18 @@ beforeAll(async () => {
 }, 60_000)
 
 afterAll(async () => {
-  // punch_records → employees → tenants → auth users (respect FK order).
+  // announcement acks → versions → announcements → punch_records → employees
+  // → tenants → auth users (respect FK order; announcements/punch_records
+  // carry the no_hard_delete trigger, which lets status='test' tenants through).
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("announcement_acknowledgements").delete().eq("tenant_id", tid)
+  }
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("announcement_versions").delete().eq("tenant_id", tid)
+  }
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("announcements").delete().eq("tenant_id", tid)
+  }
   for (const tid of createdTenantIds) {
     await supabaseAdmin.from("punch_records").delete().eq("tenant_id", tid)
   }
@@ -164,6 +175,18 @@ describe("F3 punch in/out — auto-inferred type", () => {
     expect(res.body.type).toBe("in")
     expect(typeof res.body.id).toBe("string")
     expect(typeof res.body.punchAt).toBe("string")
+
+    // WP1: the 201 body also carries source/lat/lng/deviceId and the full
+    // stored row (`record`, snake_case) so the client can render it at once.
+    expect(res.body.source).toBe("web")
+    expect(res.body.lat).toBeNull()
+    expect(res.body.lng).toBeNull()
+    expect(res.body.deviceId).toBeNull()
+    expect(res.body.record.id).toBe(res.body.id)
+    expect(res.body.record.type).toBe("in")
+    expect(res.body.record.punch_at).toBe(res.body.punchAt)
+    expect(res.body.record.employee_id).toBe(emp1Id)
+    expect(res.body.record.tenant_id).toBe(A.tenantId)
 
     // The stored row belongs to emp1, in tenant A.
     const { data } = await supabaseAdmin
@@ -322,5 +345,189 @@ describe("F3 cross-tenant isolation", () => {
     const records = res.body.records as Array<{ tenant_id: string }>
     expect(records.every((r) => r.tenant_id === A.tenantId)).toBe(true)
     expect(records.some((r) => r.tenant_id === B.tenantId)).toBe(false)
+  })
+})
+
+// ── WP1: 連按冷卻、完整回傳、today 狀態只看 in/out、公告 viewed_at ──────────
+//
+// A third employee (emp3) so the cooldown cases start from a clean punch
+// history — the cooldown looks at the employee's LAST punch of any type on
+// ANY day, so emp1/emp2's earlier punches must not leak into these cases.
+let emp3Id: string
+let emp3Token: string
+
+function withCooldownSeconds(value: string): () => void {
+  const prev = process.env.PUNCH_COOLDOWN_SECONDS
+  process.env.PUNCH_COOLDOWN_SECONDS = value
+  return () => {
+    if (prev === undefined) delete process.env.PUNCH_COOLDOWN_SECONDS
+    else process.env.PUNCH_COOLDOWN_SECONDS = prev
+  }
+}
+
+describe("WP1 punch cooldown — PUNCH_COOLDOWN_SECONDS blocks a double tap", () => {
+  beforeAll(async () => {
+    const e3 = await createEmployee(
+      A.adminToken,
+      `punch-${stamp}-a-emp3@example.com`,
+      `Pw-${stamp}-emp3-Dd4!`,
+      "Carol Three",
+    )
+    emp3Id = e3.employeeId
+    emp3Token = e3.token
+  }, 60_000)
+
+  it("env=60: first punch 201 (with record.punch_at); second within 60s → 409 punch_too_soon; HR manual back-fill exempt", async () => {
+    // The setupFile pins PUNCH_COOLDOWN_SECONDS=0 for every suite; this case
+    // turns the cooldown on for its own duration only and restores it after.
+    const restore = withCooldownSeconds("60")
+    try {
+      const first = await request(app)
+        .post("/punch")
+        .set("Authorization", `Bearer ${emp3Token}`)
+        .send({ type: "in" })
+      expect(first.status).toBe(201)
+      expect(first.body.type).toBe("in")
+      expect(typeof first.body.record?.punch_at).toBe("string")
+      expect(first.body.record.punch_at).toBe(first.body.punchAt)
+      expect(first.body.record.employee_id).toBe(emp3Id)
+      expect(first.body.record.source).toBe("web")
+
+      const second = await request(app)
+        .post("/punch")
+        .set("Authorization", `Bearer ${emp3Token}`)
+        .send({ type: "out" })
+      expect(second.status).toBe(409)
+      expect(second.body.error).toBe("punch_too_soon")
+      expect(Number.isInteger(second.body.retryAfterSeconds)).toBe(true)
+      expect(second.body.retryAfterSeconds).toBeGreaterThan(0)
+      expect(second.body.retryAfterSeconds).toBeLessThanOrEqual(60)
+      expect(second.headers["retry-after"]).toBe(String(second.body.retryAfterSeconds))
+      // `last` points at the punch that triggered the cooldown.
+      expect(second.body.last).toEqual({
+        id: first.body.id,
+        type: "in",
+        punchAt: first.body.punchAt,
+      })
+
+      // Exactly one row was written for emp3 — the double tap did not land.
+      const { data: rows } = await supabaseAdmin
+        .from("punch_records")
+        .select("id, type")
+        .eq("tenant_id", A.tenantId)
+        .eq("employee_id", emp3Id)
+      expect(rows).toHaveLength(1)
+      expect(rows?.[0].id).toBe(first.body.id)
+
+      // HR back-fill for the same employee moments later is NOT subject to the
+      // cooldown (explicit timestamp, not a double tap). A break_in "now" also
+      // sets up the today-status case below.
+      const manual = await request(app)
+        .post("/punch/manual")
+        .set("Authorization", `Bearer ${A.adminToken}`)
+        .send({ employeeId: emp3Id, punchAt: new Date().toISOString(), type: "break_in" })
+      expect(manual.status).toBe(201)
+    } finally {
+      restore()
+    }
+  })
+
+  it("with the cooldown back at 0 (setup default) an immediate punch is accepted again", async () => {
+    expect(process.env.PUNCH_COOLDOWN_SECONDS).toBe("0")
+    const res = await request(app)
+      .post("/punch")
+      .set("Authorization", `Bearer ${emp3Token}`)
+      .send({ type: "break_out" })
+    expect(res.status).toBe(201)
+    expect(res.body.type).toBe("break_out")
+    expect(res.body.record.punch_at).toBe(res.body.punchAt)
+  })
+})
+
+describe("WP1 GET /punch/today — status derives from in/out only", () => {
+  it("break_in/break_out after an 'in' keep status 'working'", async () => {
+    const res = await request(app)
+      .get("/punch/today")
+      .set("Authorization", `Bearer ${emp3Token}`)
+    expect(res.status).toBe(200)
+    const types = (res.body.records as Array<{ type: string }>).map((r) => r.type)
+    expect(types).toEqual(["in", "break_in", "break_out"])
+    // Old logic looked at the last row (break_out) and answered 'off'.
+    expect(res.body.status).toBe("working")
+  })
+
+  it("after an 'out' → 'off', and a later outing_in does not flip it back", async () => {
+    const out = await request(app)
+      .post("/punch")
+      .set("Authorization", `Bearer ${emp3Token}`)
+      .send({ type: "out" })
+    expect(out.status).toBe(201)
+
+    const afterOut = await request(app)
+      .get("/punch/today")
+      .set("Authorization", `Bearer ${emp3Token}`)
+    expect(afterOut.body.status).toBe("off")
+
+    const outing = await request(app)
+      .post("/punch")
+      .set("Authorization", `Bearer ${emp3Token}`)
+      .send({ type: "outing_in" })
+    expect(outing.status).toBe(201)
+
+    const afterOuting = await request(app)
+      .get("/punch/today")
+      .set("Authorization", `Bearer ${emp3Token}`)
+    expect(afterOuting.body.status).toBe("off")
+    const types = (afterOuting.body.records as Array<{ type: string }>).map((r) => r.type)
+    expect(types).toEqual(["in", "break_in", "break_out", "out", "outing_in"])
+  })
+})
+
+describe("WP1 GET /announcements — viewed_at is the caller's own acknowledgement", () => {
+  let annId: string
+  let versionId: string
+
+  beforeAll(async () => {
+    const res = await request(app)
+      .post("/announcements")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ title: `WP1 規章 ${stamp}`, body: "需簽收的規章內容", requiresSignature: true })
+    if (res.status !== 201) {
+      throw new Error(`POST /announcements failed (${res.status}): ${JSON.stringify(res.body)}`)
+    }
+    annId = res.body.id
+    versionId = res.body.versionId
+  }, 30_000)
+
+  type AnnRow = { id: string; requires_signature: boolean; viewed_at: string | null }
+  const findAnn = async (token: string): Promise<AnnRow | undefined> => {
+    const res = await request(app).get("/announcements").set("Authorization", `Bearer ${token}`)
+    expect(res.status).toBe(200)
+    return (res.body.announcements as AnnRow[]).find((a) => a.id === annId)
+  }
+
+  it("not yet viewed → viewed_at present and null", async () => {
+    const row = await findAnn(emp1Token)
+    expect(row).toBeDefined()
+    expect(row).toHaveProperty("viewed_at", null)
+    expect(row?.requires_signature).toBe(true)
+  })
+
+  it("after the employee acknowledges → viewed_at set for them, still null for everyone else", async () => {
+    const ack = await request(app)
+      .post(`/announcement-versions/${versionId}/acknowledge`)
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({})
+    expect(ack.status).toBe(200)
+    expect(typeof ack.body.acknowledgement.viewed_at).toBe("string")
+
+    const mine = await findAnn(emp1Token)
+    expect(mine?.viewed_at).toBe(ack.body.acknowledgement.viewed_at)
+
+    // Per caller: emp2 and HR have not viewed it.
+    const other = await findAnn(emp2Token)
+    expect(other?.viewed_at).toBeNull()
+    const hr = await findAnn(A.adminToken)
+    expect(hr?.viewed_at).toBeNull()
   })
 })

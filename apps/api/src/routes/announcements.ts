@@ -139,6 +139,11 @@ async function loadVersion(tenantId: string, versionId: string) {
  * **需簽收的規章**記錄查閱（`viewed_at`），一般佈告不記。規章少、佈告多，
  * 對每則公告都寫一次查閱紀錄既無意義也浪費。
  *
+ * 每列另附 `viewed_at`：**呼叫者本人**對現行版在 `announcement_acknowledgements`
+ * 的查閱時間，沒有就 null。員工首頁據此只在「需簽收且自己還沒看過」時顯示
+ * 提示；一次 `in()` 查完所有現行版，不逐則查。呼叫者無員工列（或公告尚無
+ * 現行版）→ 一律 null。
+ *
  * 沒有用 foreign-table select —— `current_version_id` 刻意無 FK（與
  * announcement_versions.announcement_id 互為環狀參照），故分兩次查詢再併。
  */
@@ -146,9 +151,11 @@ announcementsRouter.get(
   "/announcements",
   requireAuth,
   requireTenant,
-  async (_req: Request, res: Response, next: NextFunction) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {
+      const selfEmpId = await resolveEmpId(tenantId, req.auth?.userId)
+
       const { data, error } = await supabaseAdmin
         .from("announcements")
         .select(SELECT_COLS)
@@ -184,14 +191,32 @@ announcementsRouter.get(
         }
       }
 
+      // 呼叫者自己對各現行版的查閱時間（一次 in() 查詢，非 N+1）。
+      const viewedAtByVersion = new Map<string, string | null>()
+      if (selfEmpId && versionIds.length > 0) {
+        const { data: acks, error: ackErr } = await supabaseAdmin
+          .from("announcement_acknowledgements")
+          .select("version_id, viewed_at")
+          .eq("tenant_id", tenantId)
+          .eq("employee_id", selfEmpId)
+          .in("version_id", versionIds)
+        if (ackErr) {
+          next(new Error(`GET /announcements (acknowledgements): ${ackErr.message}`))
+          return
+        }
+        for (const a of acks ?? []) {
+          viewedAtByVersion.set(a.version_id as string, (a.viewed_at as string | null) ?? null)
+        }
+      }
+
       const announcements = rows.map((r) => {
-        const v = r.current_version_id
-          ? versionById.get(r.current_version_id as string)
-          : undefined
+        const versionId = (r.current_version_id as string | null) ?? null
+        const v = versionId ? versionById.get(versionId) : undefined
         return {
           ...r,
           requires_signature: v?.requires_signature ?? false,
           version_no: v?.version_no ?? null,
+          viewed_at: versionId ? (viewedAtByVersion.get(versionId) ?? null) : null,
         }
       })
       res.status(200).json({ announcements })

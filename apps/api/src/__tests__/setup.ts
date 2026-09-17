@@ -13,3 +13,6 @@ dotenv.config({ path: resolve(__dirname, "../../../../.env") })
 // trigger 放行本檔案案例結束後的資料清理。正式環境不會設這個變數
 // （provisionTenant 另要求 NODE_ENV=test，兩個條件都成立才生效）。
 process.env.ASTER_PROVISION_TEST_TENANTS = "true"
+// 打卡連按冷卻（services/punch-guard.ts，預設 60 秒）在整合測試關掉：live
+// 案例會在幾秒內連打 in → out。要驗冷卻本身的案例自行在單一 it 內暫設後還原。
+process.env.PUNCH_COOLDOWN_SECONDS ??= "0"
