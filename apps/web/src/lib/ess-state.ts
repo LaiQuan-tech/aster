@@ -11,6 +11,8 @@
  *     立刻重抓，徽章在同一頁就會更新。
  *   - `getMeCached()`／`getBrandingCached()` 給頁面直接拿資料用，in-flight 去重
  *     （同時多個呼叫只打一次）。
+ *   - `invalidateBranding()`：後台存完站台設定／進階功能（adminModules）後清 branding 快取
+ *     並重抓，AdminShell 的側欄 appName 與分頁列同一頁就更新。
  * 所有 API 都是 best-effort：失敗一律退化（essTabs null＝不限縮、isAdmin false、
  * 計數 0），不擋頁面。
  *
@@ -195,6 +197,26 @@ export function invalidateEssState() {
   meCache = null;
   meInflight = null;
   if (listeners.size > 0) void load(true);
+}
+
+/**
+ * 後台改了站台名稱／隱藏模組（tenants.features.adminModules）後呼叫：清掉 branding 快取並
+ * （有訂閱者時）立刻重抓 GET /api/tenant/branding，快照裡的 branding／features 同步更新，
+ * AdminShell 的側欄 appName 與分頁列同一頁就會反映。me／計數不動；沒有任何訂閱者時只清快取。
+ */
+export function invalidateBranding() {
+  brandingCache = null;
+  brandingInflight = null;
+  if (listeners.size === 0) return;
+  const gen = generation;
+  void getBrandingCached()
+    .then((res) => {
+      if (gen !== generation) return; // 已登出：丟棄
+      setSnapshot({ branding: res.branding ?? null, features: res.features ?? null });
+    })
+    .catch(() => {
+      /* best-effort：失敗保留舊值 */
+    });
 }
 
 /** 登出時呼叫：清空所有快取與狀態、作廢在途回應，不重抓（接著會導去 /login）。 */

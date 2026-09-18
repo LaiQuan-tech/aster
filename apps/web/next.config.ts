@@ -10,6 +10,22 @@ import dotenv from "dotenv";
 // 線上（Vercel）由平台注入環境變數，讀不到此檔也不影響。
 dotenv.config({ path: resolve(process.cwd(), "../../.env") });
 
-const nextConfig: NextConfig = {};
+/**
+ * 後台舊網址轉址（2026-09 後台簡化：表單紀錄併入簽核頁、組織圖併入部門頁）。
+ * 必須與 src/lib/admin-nav.ts 的 ADMIN_REDIRECTS 一致——Next 只單獨編譯 next.config.ts，
+ * 相對 import 的 .ts 檔在執行期會 Cannot find module，所以這裡不能直接 import，
+ * 改由 src/lib/__tests__/admin-nav.test.ts 對照兩份。permanent:false（307）：舊頁面
+ * 刪除前後都還能回頭調整，瀏覽器不會把轉址快取死。
+ */
+const ADMIN_REDIRECTS = [
+  { source: "/admin/form-records", destination: "/admin/approvals?status=all" },
+  { source: "/admin/org-chart", destination: "/admin/departments" },
+];
+
+const nextConfig: NextConfig = {
+  async redirects() {
+    return ADMIN_REDIRECTS.map((redirect) => ({ ...redirect, permanent: false }));
+  },
+};
 
 export default nextConfig;

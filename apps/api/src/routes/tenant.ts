@@ -110,6 +110,11 @@ const tenantSettingsSchema = z.object({
        */
       essTabs: z.record(z.string().trim().min(1), z.array(z.string().trim().min(1))).optional(),
       /**
+       * 後台導覽的隱藏模組開關：module key → 是否列在分頁列（true 才顯示，缺席＝隱藏，直開網址不擋）。
+       * key 定義見 apps/web/src/lib/admin-nav.ts 的 ADMIN_MODULES（前端只讀認得的 key）。
+       */
+      adminModules: z.record(z.string().trim().min(1), z.boolean()).optional(),
+      /**
        * 出勤月表（B8 假單月底核銷）approve 關卡：預設 false（月表異常
        * unsettled_leave_in_period 只是 warn）；true 時升級為 error，approve
        * 前必須先核銷完當月已核准假單。見 routes/attendance-sheets.ts 的

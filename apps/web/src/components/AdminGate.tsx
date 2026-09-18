@@ -3,12 +3,14 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AuthGate } from "@/components/AuthGate";
-import { getMe, type Me } from "@/lib/admin-api";
+import type { Me } from "@/lib/admin-api";
+import { getMeCached } from "@/lib/ess-state";
 import { ADMIN_ROLES } from "@/lib/roles";
 
 /**
  * Back-office gate. Sits inside AuthGate (so an unauthenticated visitor is
- * already bounced to /login), then calls GET /me: only hr_admin / platform_admin
+ * already bounced to /login), then reads GET /me（走 lib/ess-state 的 getMeCached：
+ * 與 AdminShell／員工端共用同一份模組層快取，整個後台只打一次）: only hr_admin / platform_admin
  * may proceed; everyone else sees a "no permission" panel with a link back to
  * the ESS. The resolved profile is handed to children via a render prop so the
  * layout can show the signed-in admin without re-fetching.
@@ -22,7 +24,7 @@ function Guard({ children }: { children: (me: Me) => React.ReactNode }) {
     let active = true;
     (async () => {
       try {
-        const profile = await getMe();
+        const profile = await getMeCached();
         if (!active) return;
         if (ADMIN_ROLES.includes(profile.role)) {
           setMe(profile);

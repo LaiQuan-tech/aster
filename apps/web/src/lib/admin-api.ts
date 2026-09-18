@@ -9,6 +9,7 @@
  * member may read) and is tenant-scoped server-side.
  */
 import { apiFetch } from "./api-client";
+import type { AdminModulesConfig } from "./admin-nav";
 
 /* ------------------------------------------------------------------ me ----- */
 
@@ -1192,6 +1193,13 @@ export interface TenantFeatures {
     rule?: "emp_no" | "manual";
     provider?: "google" | "microsoft" | "other";
   };
+  /**
+   * 後台導覽的隱藏模組開關（recruitment／kpi／ai／knowledge／dashboard／employeeMail／
+   * attendanceSettlement）：true 才列在分頁列與首頁，缺席＝隱藏；直開網址不擋。
+   * key 定義與讀法見 lib/admin-nav.ts（ADMIN_MODULES／adminModulesOf）；存檔後呼叫
+   * lib/ess-state.ts 的 invalidateBranding() 讓側欄即時更新。
+   */
+  adminModules?: AdminModulesConfig;
   [key: string]: unknown;
 }
 
