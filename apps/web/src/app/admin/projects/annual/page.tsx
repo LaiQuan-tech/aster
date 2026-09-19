@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import { statusLabel } from "@/lib/projects-api";
 import {
   getAnnualProjects,
@@ -84,8 +84,6 @@ export default function AnnualProjectsPage() {
 
   return (
     <>
-      <PageHeader title="年度專案申請單總表" desc="一列一案，依開案月份分區塊小計，最後年度總計；科別欄依租戶設定的順序排列" />
-
       <Card>
         <div className="flex flex-wrap items-end gap-3">
           <div>

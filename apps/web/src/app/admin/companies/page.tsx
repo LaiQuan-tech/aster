@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import { listCompanies, putCompanies, humanizeCompanyError, type Company } from "@/lib/projects-ext-api";
 
 /**
@@ -83,7 +83,6 @@ export default function CompaniesPage() {
 
   return (
     <>
-      <PageHeader title="我方公司主體" desc="開票／收款可能用不同主體（例如工程款與技師費分屬不同公司），下包分期的放款公司／收據抬頭會用到這裡的清單" />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
 
       <Card>

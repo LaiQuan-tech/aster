@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import { ItemsTable, SkippedList, Stat, StatusBadge } from "./_components";
 import {
   createBonusRun,
@@ -110,7 +110,6 @@ export default function BonusRunsPage() {
 
   return (
     <div className="space-y-4">
-      <PageHeader title="獎金季發放" desc="專案獎金隨請款入帳進度同比例拆發、按季發放；每季存成獨立快照，已發放不可覆蓋，歷年可累計對比" />
       {error && (
         <Card>
           <ErrorText>{error}</ErrorText>

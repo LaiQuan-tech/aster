@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import {
   listVendors, createVendor, updateVendor, deleteVendor, getVendorCardUrl, scanVendorCard,
   type Vendor, type VendorInput,
@@ -135,7 +135,6 @@ export default function VendorsPage() {
 
   return (
     <>
-      <PageHeader title="廠商名冊 · 名片建檔" desc="往來廠商與窗口；拍名片自動帶入欄位，核對後建檔" />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
 
       <Card>

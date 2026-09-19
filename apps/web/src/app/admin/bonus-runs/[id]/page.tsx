@@ -1,9 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, DetailHeading, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import AuditDrawer from "@/components/AuditDrawer";
 import {
   deleteBonusRun,
@@ -113,7 +112,6 @@ export default function BonusRunDetailPage() {
   if (loading && !detail) {
     return (
       <div className="space-y-4">
-        <PageHeader title="獎金季發放" />
         <Card>
           <Empty>載入中…</Empty>
         </Card>
@@ -123,14 +121,8 @@ export default function BonusRunDetailPage() {
   if (!run || !detail) {
     return (
       <div className="space-y-4">
-        <PageHeader title="獎金季發放" />
         <Card>
           <ErrorText>{error ?? "找不到這筆批次"}</ErrorText>
-          <p className="mt-2 text-sm">
-            <Link href="/admin/bonus-runs" style={{ color: "var(--brand)" }}>
-              ← 回批次列表
-            </Link>
-          </p>
         </Card>
       </div>
     );
@@ -140,36 +132,32 @@ export default function BonusRunDetailPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div>
-          <p className="text-sm">
-            <Link href="/admin/bonus-runs" style={{ color: "var(--brand)" }}>
-              ← 回批次列表
-            </Link>
-          </p>
-          <div className="mt-1 flex items-center gap-2">
-            <h1 className="text-2xl font-bold text-gray-900 md:text-xl">獎金季發放 {run.label}</h1>
+      <DetailHeading
+        title={
+          <span className="inline-flex flex-wrap items-center gap-2">
+            獎金季發放 {run.label}
             <StatusBadge status={run.status} />
-          </div>
-          <p className="mt-1 text-sm text-gray-500">
+          </span>
+        }
+        desc={
+          <>
             基準日 {run.asOf}（入帳截至此日）　發放日 {run.paidOn ?? "—"}
             {run.note ? `　備註：${run.note}` : ""}
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 md:rounded-md"
-            onClick={() => void act("export", () => exportBonusRunXlsx(run))}
-            disabled={busy !== null}
-          >
-            匯出 Excel
-          </button>
-          <button type="button" className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 md:rounded-md" onClick={() => setAuditOpen(true)}>
-            異動紀錄
-          </button>
-        </div>
-      </div>
+          </>
+        }
+      >
+        <button
+          type="button"
+          className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 md:rounded-md"
+          onClick={() => void act("export", () => exportBonusRunXlsx(run))}
+          disabled={busy !== null}
+        >
+          匯出 Excel
+        </button>
+        <button type="button" className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 md:rounded-md" onClick={() => setAuditOpen(true)}>
+          異動紀錄
+        </button>
+      </DetailHeading>
       {auditOpen && <AuditDrawer table="bonus_runs" recordId={run.id} title={`批次 ${run.label} 的異動紀錄`} onClose={() => setAuditOpen(false)} />}
 
       {error && (

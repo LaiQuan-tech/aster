@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getDisbursementPivot,
   exportDisbursementPivotXlsx,
@@ -73,8 +73,6 @@ export default function DisbursementPivotPage() {
 
   return (
     <>
-      <PageHeader title="放款年度總覽" desc="一眼看今年給每家廠商／付款公司／專案多少錢，年底報稅用；只算已匯款（不含草稿／作廢）" />
-
       <Card>
         <div className="flex flex-wrap items-end gap-3">
           <div>

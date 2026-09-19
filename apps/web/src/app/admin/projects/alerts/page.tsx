@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { SimpleMarkdown } from "@/components/SimpleMarkdown";
 import { getProjectAlerts, getProjectAlertDigest, type ProjectAlert, type AlertSeverity } from "@/lib/projects-api";
 
@@ -65,7 +65,6 @@ export default function ProjectAlertsPage() {
 
   return (
     <>
-      <PageHeader title="AI 進度示警" desc={`依規則掃描所有未封存專案（${today || "今天"}）；急／注意等級每天早上推進通知中心`} />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
 
       <Card>

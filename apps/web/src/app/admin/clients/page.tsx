@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import {
   listClients, createClient, updateClient, deleteClient, humanizeClientError,
   INVOICE_TYPE_LABELS, PAYMENT_METHOD_LABELS, CLIENT_CATEGORY_LABELS, CLIENT_CATEGORY_ORDER,
@@ -116,7 +116,6 @@ export default function ClientsPage() {
 
   return (
     <>
-      <PageHeader title="客戶名冊" desc="業主／開票對象；建案時可直接選用，發票聯式與付款方式會預填到新專案" />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
 
       <Card>

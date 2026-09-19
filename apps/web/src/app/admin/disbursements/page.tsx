@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton, Segmented, inputCls, labelCls } from "@/components/admin-ui";
 import { listVendors, type Vendor } from "@/lib/company-api";
 import { listCompanies, type Company } from "@/lib/projects-ext-api";
 import { listProjects } from "@/lib/projects-api";
@@ -203,8 +203,6 @@ export default function DisbursementsPage() {
 
   return (
     <>
-      <PageHeader title="放款專區" desc="放款的單一真相：什麼時候、匯了多少、給誰；期款的已付狀態由這裡連動" />
-
       {summary && (
         <Card>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
@@ -220,12 +218,16 @@ export default function DisbursementsPage() {
 
       <Card>
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" onClick={() => setTab("payables")} className={`rounded-full px-4 py-1.5 text-sm font-medium ${tab === "payables" ? "text-white" : "bg-gray-100 text-gray-600"}`} style={tab === "payables" ? { backgroundColor: "var(--brand)" } : undefined}>
-            應付清單
-          </button>
-          <button type="button" onClick={() => setTab("records")} className={`rounded-full px-4 py-1.5 text-sm font-medium ${tab === "records" ? "text-white" : "bg-gray-100 text-gray-600"}`} style={tab === "records" ? { backgroundColor: "var(--brand)" } : undefined}>
-            匯款紀錄
-          </button>
+          <Segmented
+            options={[
+              { value: "payables", label: "應付清單" },
+              { value: "records", label: "匯款紀錄" },
+            ]}
+            value={tab}
+            onChange={setTab}
+            className="w-full md:w-auto"
+            aria-label="放款檢視切換"
+          />
           <div className="grow" />
           {tab === "records" && (
             <PrimaryButton onClick={openCreateBlank}>＋ 新增匯款</PrimaryButton>

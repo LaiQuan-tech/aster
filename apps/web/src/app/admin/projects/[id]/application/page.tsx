@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import Link from "next/link";
 import { useParams } from "next/navigation";
 import { DOC_TYPE_LABELS } from "@/lib/projects-api";
 import {
@@ -344,9 +343,6 @@ export default function ProjectApplicationPrintPage() {
         >
           列印
         </button>
-        <Link href={`/admin/projects/${projectId}`} className="text-sm text-gray-500 hover:underline">
-          ← 返回專案
-        </Link>
         <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600">
           <span className="text-gray-400">列印區塊：</span>
           {PRINT_BLOCKS.map(({ key, label }) => (

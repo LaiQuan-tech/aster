@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Card, PageHeader, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getStampDutyReport,
   getProjectSettings,
@@ -74,11 +74,6 @@ export default function StampDutyPage() {
 
   return (
     <>
-      <PageHeader
-        title="印花稅計算與申報備查清單"
-        desc="凡我方為承攬人或雙重身分（各自貼）且已簽訂的合約與追加減帳，自動納入本清單。報價單不是契據，不課印花稅。"
-      />
-
       <Card>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
           <div>

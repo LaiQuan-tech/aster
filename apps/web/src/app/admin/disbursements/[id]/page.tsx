@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { useParams } from "next/navigation";
+import { Card, DetailHeading, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import AuditDrawer from "@/components/AuditDrawer";
 import { listVendors, type Vendor } from "@/lib/company-api";
 import { listCompanies, type Company } from "@/lib/projects-ext-api";
@@ -38,7 +38,6 @@ function todayKey(): string {
  */
 export default function DisbursementDetailPage() {
   const params = useParams<{ id: string }>();
-  const router = useRouter();
   const id = params.id;
 
   const [disbursement, setDisbursement] = useState<Disbursement | null>(null);
@@ -244,16 +243,12 @@ export default function DisbursementDetailPage() {
 
   return (
     <>
-      <div className="no-print flex items-center justify-between">
-        <PageHeader title={`匯款單 ${d.disbursementNo}`} desc={`收款方：${d.payeeName}（${PAYEE_KIND_LABELS[d.payeeKind]}）`} />
-        <div className="flex items-center gap-4">
+      <div className="no-print">
+        <DetailHeading title={`匯款單 ${d.disbursementNo}`} desc={`收款方：${d.payeeName}（${PAYEE_KIND_LABELS[d.payeeKind]}）`}>
           <button type="button" onClick={() => setAuditOpen(true)} className="text-sm text-gray-600 hover:underline" title="誰在什麼時候改了這張匯款單">
             異動紀錄
           </button>
-          <button type="button" onClick={() => router.push("/admin/disbursements")} className="text-sm text-gray-500 hover:underline">
-            ← 回放款專區
-          </button>
-        </div>
+        </DetailHeading>
       </div>
       {auditOpen && <AuditDrawer table="disbursements" recordId={d.id} title={`匯款單 ${d.disbursementNo} 的異動紀錄`} onClose={() => setAuditOpen(false)} />}
 

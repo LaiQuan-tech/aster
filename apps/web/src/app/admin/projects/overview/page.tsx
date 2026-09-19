@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
 import Link from "next/link";
-import { Card, PageHeader, Empty, ErrorText } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, Segmented } from "@/components/admin-ui";
 import { getProjectOverview, updateProject, statusLabel, type OverviewProject, type ProjectStatus } from "@/lib/projects-api";
 
 /**
@@ -76,16 +76,18 @@ export default function ProjectOverviewPage() {
 
   return (
     <>
-      <PageHeader title="專案總覽" desc="看板依案情狀態分欄；甘特圖看預定期程與請款里程碑。點卡片進專案。" />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        {(["kanban", "gantt"] as const).map((t) => (
-          <button key={t} type="button" onClick={() => setTab(t)}
-            className={`rounded-full px-4 py-1.5 text-sm font-medium ${tab === t ? "text-white" : "border border-gray-200 bg-white text-gray-600"}`}
-            style={tab === t ? { backgroundColor: "var(--brand)" } : undefined}>
-            {t === "kanban" ? "看板" : "甘特圖"}
-          </button>
-        ))}
+        <Segmented
+          options={[
+            { value: "kanban", label: "看板" },
+            { value: "gantt", label: "甘特圖" },
+          ]}
+          value={tab}
+          onChange={setTab}
+          className="w-full md:w-auto"
+          aria-label="總覽檢視切換"
+        />
         <label className="ml-auto flex items-center gap-2 text-sm text-gray-600">
           <input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} /> 含結案／解約
         </label>

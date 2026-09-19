@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { PageHeader, ErrorText, Empty } from "@/components/admin-ui";
+import { DetailHeading, ErrorText, Empty } from "@/components/admin-ui";
 import { getDepartments, getEmployees, type Department, type Employee } from "@/lib/admin-api";
 import { listVendors, type Vendor } from "@/lib/company-api";
 import {
@@ -247,25 +247,21 @@ export default function AdminProjectDetailPage() {
 
   return (
     <>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <PageHeader title={project.name} desc={headerDesc || undefined} />
-        <div className="flex items-center gap-3">
-          {canFinance && !project.reservedAt && (
-            <button
-              type="button"
-              onClick={() => setDupOpen(true)}
-              className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
-              data-testid="duplicate-project-button"
-            >
-              複製為追加減／加做
-            </button>
-          )}
-          <Link href={`/admin/projects/${project.id}/application`} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
-            列印申請單 →
-          </Link>
-          <Link href="/admin/projects" className="text-sm text-gray-500 hover:underline">← 專案列表</Link>
-        </div>
-      </div>
+      <DetailHeading title={project.name} desc={headerDesc || undefined}>
+        {canFinance && !project.reservedAt && (
+          <button
+            type="button"
+            onClick={() => setDupOpen(true)}
+            className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            data-testid="duplicate-project-button"
+          >
+            複製為追加減／加做
+          </button>
+        )}
+        <Link href={`/admin/projects/${project.id}/application`} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
+          列印申請單 →
+        </Link>
+      </DetailHeading>
 
       {/* C2 複製對話框：成功後導到新案（同一個 page 元件換 id 重新 load） */}
       <DuplicateProjectDialog

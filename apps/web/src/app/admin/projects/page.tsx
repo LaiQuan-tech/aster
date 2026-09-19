@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import { ClientCombo } from "@/components/ClientCombo";
 import { getDepartments, getEmployees, type Department, type Employee } from "@/lib/admin-api";
 import {
@@ -255,8 +255,6 @@ export default function AdminProjectsPage() {
 
   return (
     <>
-      <PageHeader title="專案獎金分潤" desc="建立專案、指派成員與分潤比例／金額，並上傳專案文件。組員彼此看不到分潤，負責人與部門主管可見全部。" />
-
       <Card>
         <h2 className="mb-3 text-sm font-semibold text-gray-700">建立專案</h2>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

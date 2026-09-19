@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Card, PageHeader, Empty, ErrorText } from "@/components/admin-ui";
+import { Card, Empty, ErrorText } from "@/components/admin-ui";
 import {
   getReceivables,
   BILLING_KIND_LABELS,
@@ -55,8 +55,6 @@ export default function ReceivablesPage() {
 
   return (
     <>
-      <PageHeader title="未收款追蹤" desc="每期一列的應收／未收清單；排序看的是專案未收比例與逾期天數，不是金額大小" />
-
       <Card>
         <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-1.5 text-sm text-gray-600">
