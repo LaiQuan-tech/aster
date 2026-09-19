@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import {
   getPunchRecordsAdmin,
   createManualPunch,
@@ -193,8 +193,6 @@ export default function PunchRecordsPage() {
 
   return (
     <>
-      <PageHeader title="打卡紀錄維護" desc="查詢全公司打卡並進行補登" />
-
       <Card>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>

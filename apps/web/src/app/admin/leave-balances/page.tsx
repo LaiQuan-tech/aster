@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, Empty, Segmented, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getEmployees,
   getLeaveBalancesAdmin,
@@ -134,24 +134,13 @@ export default function LeaveBalancesPage() {
 
   return (
     <>
-      <PageHeader title="假別時數管理" desc="特殊假確認、剩餘時數查詢、年度給假與全員批次給假" />
-
-      <Card>
-        <div className="flex flex-wrap gap-2">
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setActiveTab(tab.id)}
-              className={`rounded-full px-4 py-2 text-sm font-medium ${
-                activeTab === tab.id ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-      </Card>
+      <Segmented<TabId>
+        aria-label="假別時數管理檢視"
+        options={tabs.map((tab) => ({ value: tab.id, label: tab.label }))}
+        value={activeTab}
+        onChange={setActiveTab}
+        className="w-full md:w-auto"
+      />
 
       <Card>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import {
   getEmployees,
   getEmployeeProfile,
@@ -224,7 +224,6 @@ export default function PayrollAdminPage() {
 
   return (
     <>
-      <PageHeader title="薪資作業" desc="員工薪資保險資料與執行薪資作業；薪資單查詢與定案在薪資明細表" />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
 
       <Card>

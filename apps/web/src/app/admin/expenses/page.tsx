@@ -3,7 +3,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Card,
-  PageHeader,
   ErrorText,
   Empty,
   PrimaryButton,
@@ -124,11 +123,6 @@ export default function AdminExpensesPage() {
 
   return (
     <>
-      <PageHeader
-        title="日常費用月結"
-        desc="同仁線上填報、月結一次性核銷。省的是逐筆事前審核，不是憑證。"
-      />
-
       <Card>
         <div className="flex flex-wrap items-end gap-3">
           <div>

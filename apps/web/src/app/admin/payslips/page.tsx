@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { apiDownload } from "@/lib/api-client";
 import {
   getEmployees,
@@ -169,7 +169,6 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
 
   return (
     <>
-      <PageHeader title="薪資明細表" desc="工資清冊：各期薪資單的應發、應扣與實發，逐列明細、列印與定案" />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
 
       <Card>

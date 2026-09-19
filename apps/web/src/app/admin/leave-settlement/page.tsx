@@ -18,7 +18,7 @@
  */
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { Card, PageHeader, PrimaryButton, ErrorText, Empty } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, Empty } from "@/components/admin-ui";
 import { MonthPicker } from "@/components/MonthPicker";
 import { getDepartments, type Department } from "@/lib/admin-api";
 import {
@@ -210,8 +210,6 @@ export default function LeaveSettlementPage() {
 
   return (
     <>
-      <PageHeader title="假單月底核銷" desc="每月月底檢視當月已核准假單、核對憑證，逐筆或整批標記已核銷" />
-
       <Card>
         <div className="mb-4 flex flex-wrap items-end gap-3">
           <div>

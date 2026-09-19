@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getEmployees,
   getAttendanceDays,
@@ -228,8 +228,6 @@ export default function AttendanceSettlementPage() {
 
   return (
     <>
-      <PageHeader title="結算作業" desc="依薪資年月、資料類型、結算狀態與截止日完成設定、全數拋轉與下載" />
-
       <Card>
         <form onSubmit={onSettle} className="space-y-4">
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-8">

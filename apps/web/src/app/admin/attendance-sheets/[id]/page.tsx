@@ -1,9 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import { useParams } from "next/navigation";
-import { Card, PageHeader, ErrorText, Empty } from "@/components/admin-ui";
+import { Card, DetailHeading, ErrorText, Empty } from "@/components/admin-ui";
 import { AttendanceSheetTable } from "@/components/AttendanceSheetTable";
 import {
   getAttendanceSheet,
@@ -165,7 +164,6 @@ export default function AttendanceSheetDetailPage() {
   if (loading) {
     return (
       <>
-        <PageHeader title="出勤月表" />
         <Card>
           <Empty>載入中…</Empty>
         </Card>
@@ -176,7 +174,6 @@ export default function AttendanceSheetDetailPage() {
   if (!sheet) {
     return (
       <>
-        <PageHeader title="出勤月表" />
         <Card>
           <ErrorText>{error ?? "查無資料"}</ErrorText>
         </Card>
@@ -209,14 +206,11 @@ export default function AttendanceSheetDetailPage() {
 
   return (
     <>
-      <div className="no-print mb-2 flex items-start justify-between gap-3">
-        <PageHeader
+      <div className="no-print mb-2">
+        <DetailHeading
           title={`出勤月表 · ${sheet.employeeName}`}
           desc={`${sheet.period}　工號 ${sheet.employeeNo ?? "—"}　部門 ${sheet.department ?? "—"}　狀態 ${SHEET_STATUS_LABEL[sheet.status]}`}
         />
-        <Link href="/admin/attendance-sheets" className="shrink-0 text-sm text-gray-500 hover:underline">
-          ← 回列表
-        </Link>
       </div>
 
       <Card>

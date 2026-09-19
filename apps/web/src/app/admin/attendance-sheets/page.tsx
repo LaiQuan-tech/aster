@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { MonthPicker } from "@/components/MonthPicker";
 import { getDepartments, type Department } from "@/lib/admin-api";
 import {
@@ -209,8 +209,6 @@ export default function AttendanceSheetsPage() {
 
   return (
     <>
-      <PageHeader title="出勤月表 · 月結簽核" desc="依月份彙整全員出勤月表，追蹤送出／審核進度、產生本月與匯出" />
-
       <Card>
         <div className="mb-4 flex flex-wrap items-end gap-3">
           <div>

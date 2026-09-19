@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getDepartments,
   getEmployees,
@@ -264,8 +264,6 @@ export default function SchedulesPage() {
 
   return (
     <>
-      <PageHeader title="排班與班表審核" desc="支援單日排班、區間批次、CSV 匯入、單位/工時制篩選與員工確認/爭議狀態管理。" />
-
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         <Card>
           <h2 className="mb-4 text-base font-semibold text-gray-900">單日指派</h2>

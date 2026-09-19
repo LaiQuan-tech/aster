@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { apiDownload } from "@/lib/api-client";
 import {
   getEmployees,
@@ -149,7 +149,6 @@ export default function PayrollTaxPage() {
 
   return (
     <>
-      <PageHeader title="薪資法規" desc="批次調薪、非員工所得、二代健保補充保費試算、申報匯出" />
       <Card>
         <h2 className="mb-3 text-sm font-medium text-gray-500">申報作業匯出</h2>
         <div className="flex gap-3">

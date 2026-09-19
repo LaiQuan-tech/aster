@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Card,
-  PageHeader,
   ErrorText,
   Empty,
   PrimaryButton,
@@ -133,11 +132,6 @@ export default function AdminAdvancesPage() {
 
   return (
     <>
-      <PageHeader
-        title="員工預支"
-        desc="出差預支與零用金預支共用同一條流程：核准 → 撥款 → 以實際報銷沖抵。核准與撥款是兩件事。"
-      />
-
       {(error || message) && (
         <Card>
           {error && <ErrorText>{error}</ErrorText>}
