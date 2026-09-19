@@ -74,10 +74,7 @@ export default function AdvancedFeaturesPage() {
   const disabled = modules === null || savingKey !== null;
 
   return (
-    <Card title="進階功能">
-      <p className="text-sm text-gray-500">
-        以下模組預設不在導覽列；勾選後出現在對應分區的分頁列，未勾選仍可直接輸入網址開啟。
-      </p>
+    <Card>
 
       {loadError && <InlineError className="mt-3">載入設定失敗：{loadError}（請重新整理後再試）</InlineError>}
 

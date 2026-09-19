@@ -467,7 +467,7 @@ function ApprovalsView() {
               <p className="mt-1 text-2xl font-semibold text-slate-900">{stats.total}</p>
             </div>
             <div className="rounded-xl bg-amber-50 p-4">
-              <p className="text-xs text-amber-700">簽核中</p>
+              <p className="text-xs text-amber-700">待處理（含簽核中）</p>
               <p className="mt-1 text-2xl font-semibold text-amber-800">{stats.pending}</p>
             </div>
             <div className="rounded-xl bg-green-50 p-4">

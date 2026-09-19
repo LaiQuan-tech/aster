@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { ApprovalFlow, Department, Employee, LeaveRequest } from "../admin-api";
+import { fmtHm, localDateKey } from "../ess-format";
 import {
   APPROVAL_VIEWS,
   CSV_HEADER,
@@ -329,19 +330,20 @@ describe("csvMatrix／csvText", () => {
     }
   });
 
-  it("各欄取值：日期切 10 碼、起迄切 16 碼去 T、時數空值→空字串、地點/代理/給付用「 / 」串、原因退回備註、狀態依桶", () => {
+  it("各欄取值：日期與起迄時間都轉成「當地」時間（不是 UTC 切字串）、時數空值→空字串、地點/代理/給付用「 / 」串、原因退回備註、狀態依桶", () => {
+    const local = (iso: string) => `${localDateKey(iso)} ${fmtHm(iso)}`;
     const [, mineExplicit, , , , fallback, approved] = csvMatrix(
       [MINE_EXPLICIT, MINE_BY_FLOW, OTHERS_EXPLICIT, OTHERS_BY_FLOW, MINE_FALLBACK, APPROVED],
       LOOKUP,
       CTX,
     );
     expect(mineExplicit).toEqual([
-      "2026-09-17",
+      localDateKey("2026-09-17T08:30:00+00:00"),
       "工程部",
       "E010 · 王小美",
       "補卡",
-      "2026-09-18 01:00",
-      "2026-09-18 10:00",
+      local("2026-09-18T01:00:00+00:00"),
+      local("2026-09-18T10:00:00+00:00"),
       "8",
       "",
       "忘記打卡",
@@ -352,6 +354,8 @@ describe("csvMatrix／csvText", () => {
     expect(fallback.slice(1, 4)).toEqual(["管理部", "B001 · 老闆", "加班"]);
     expect(fallback[7]).toBe("台中廠 / pay");
     expect(approved[11]).toBe("已核准");
+    // 明確釘 Asia/Taipei：UTC 01:00 → 當地 09:00，證明不是 UTC 切字串
+    expect(`${localDateKey("2026-09-18T01:00:00+00:00", "Asia/Taipei")} ${fmtHm("2026-09-18T01:00:00+00:00", "Asia/Taipei")}`).toBe("2026-09-18 09:00");
     expect(approved[9]).toBe("—");
 
     const noHours = request({ hours: null, remark: "只有備註", employee_id: "nobody", current_approver_emp_id: BOSS });

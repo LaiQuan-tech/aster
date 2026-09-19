@@ -11,6 +11,13 @@
  *   `row.current_approver_emp_id ?? flowByKind.get(row.kind)?.[row.current_step-1] ?? fallbackHrId ?? null`
  */
 import type { ApprovalFlow, Department, Employee, LeaveRequest, RequestKind, RequestStatus } from "./admin-api";
+import { localDateKey, fmtHm } from "./ess-format";
+
+/** ISO → 當地 `YYYY-MM-DD HH:mm`（CSV 用；原本直接切 ISO 字串會變成 UTC，與畫面差 8 小時）。 */
+function csvLocalDateTime(iso: string): string {
+  const day = localDateKey(iso);
+  return day ? `${day} ${fmtHm(iso)}` : iso;
+}
 
 /* ------------------------------------------------------------- view ----- */
 
@@ -309,12 +316,12 @@ export function csvMatrix(
   ctx: BucketContext,
 ): string[][] {
   const body = rows.map((row) => [
-    row.created_at.slice(0, 10),
+    localDateKey(row.created_at) || row.created_at.slice(0, 10),
     lookup.employeeDept(row.employee_id) ?? "—",
     lookup.employeeName(row.employee_id) ?? row.employee_id,
     KIND_LABEL[row.kind],
-    row.start_at.slice(0, 16).replace("T", " "),
-    row.end_at.slice(0, 16).replace("T", " "),
+    csvLocalDateTime(row.start_at),
+    csvLocalDateTime(row.end_at),
     row.hours != null ? String(row.hours) : "",
     [row.location, row.agent_name, row.payout].filter(Boolean).join(" / "),
     row.reason ?? row.remark ?? "",
