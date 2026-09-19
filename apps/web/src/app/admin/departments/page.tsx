@@ -1,20 +1,25 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, EmptyState, InlineError, PrimaryButton, Skeleton, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import {
   createDepartment,
   deleteDepartment,
   getDepartments,
   getEmployees,
+  getOrgChart,
   updateDepartment,
   type Department,
   type Employee,
+  type OrgNode,
 } from "@/lib/admin-api";
+import { OrgTree } from "./_components/OrgTree";
 
 export default function DepartmentsPage() {
+  const toast = useToast();
   const [rows, setRows] = useState<Department[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [tree, setTree] = useState<OrgNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -61,12 +66,14 @@ export default function DepartmentsPage() {
     return department.manager_label ?? (department.manager_emp_id ? employeeName.get(department.manager_emp_id) : null) ?? "—";
   }
 
+  /** 部門、員工、組織圖一起抓；三者共用 loading／error，CRUD 後呼叫即同步重畫右側組織圖。 */
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [deptRes, employeeRes] = await Promise.all([getDepartments(), getEmployees()]);
+      const [deptRes, employeeRes, orgRes] = await Promise.all([getDepartments(), getEmployees(), getOrgChart()]);
       setRows(deptRes.departments);
       setEmployees(employeeRes.employees);
+      setTree(orgRes.tree);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入失敗");
@@ -96,6 +103,7 @@ export default function DepartmentsPage() {
       setName("");
       setParentId("");
       setManagerEmpId("");
+      toast.show("已新增單位", "success");
       await load();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "新增失敗");
@@ -113,9 +121,10 @@ export default function DepartmentsPage() {
         managerEmpId: editManagerEmpId || null,
       });
       setEditingId(null);
+      toast.show("已更新單位", "success");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "更新失敗");
+      toast.show(err instanceof Error ? err.message : "更新失敗", "error");
     }
   }
 
@@ -123,18 +132,16 @@ export default function DepartmentsPage() {
     if (!window.confirm("確定刪除此部門？")) return;
     try {
       await deleteDepartment(id);
+      toast.show("已刪除單位", "success");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "刪除失敗（可能仍有員工歸屬此部門）");
+      toast.show(err instanceof Error ? err.message : "刪除失敗（可能仍有員工歸屬此部門）", "error");
     }
   }
 
   return (
     <>
-      <PageHeader title="組織單位" desc="維護單位名稱、上層單位、主管與組織圖資料來源" />
-
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">新增單位</h2>
+      <Card title="新增單位">
         <form onSubmit={onCreate} className="grid grid-cols-1 gap-4 lg:grid-cols-4">
           <div>
             <label className={labelCls}>單位名稱</label>
@@ -158,83 +165,88 @@ export default function DepartmentsPage() {
             <PrimaryButton type="submit" disabled={submitting}>{submitting ? "新增中…" : "新增"}</PrimaryButton>
           </div>
         </form>
-        {formError && <div className="mt-2"><ErrorText>{formError}</ErrorText></div>}
+        {formError && <InlineError className="mt-2">{formError}</InlineError>}
       </Card>
 
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">單位列表</h2>
-        {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
-        {loading ? (
-          <Empty>載入中…</Empty>
-        ) : rows.length === 0 ? (
-          <Empty>尚無單位</Empty>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead>
-                <tr className="border-b border-gray-200 text-xs text-gray-500">
-                  <th className="py-2 pr-4">單位代碼</th>
-                  <th className="py-2 pr-4">單位名稱</th>
-                  <th className="py-2 pr-4">上層單位</th>
-                  <th className="py-2 pr-4">主管</th>
-                  <th className="py-2">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((department) => (
-                  <tr key={department.id} className="border-b border-gray-50">
-                    {editingId === department.id ? (
-                      <td colSpan={5} className="py-3">
-                        <div className="grid grid-cols-1 gap-3 lg:grid-cols-5">
-                          <div className="rounded-md bg-gray-50 px-3 py-2 text-sm font-medium text-gray-500">{department.code}</div>
-                          <input className={inputCls} value={editName} onChange={(event) => setEditName(event.target.value)} />
-                          <select className={inputCls} value={editParentId} onChange={(event) => setEditParentId(event.target.value)}>
-                            <option value="">根節點</option>
-                            {rows
-                              .filter((row) => row.id !== department.id && !isDescendant(row.id, department.id))
-                              .map((row) => <option key={row.id} value={row.id}>{row.code} · {row.name}</option>)}
-                          </select>
-                          <select className={inputCls} value={editManagerEmpId} onChange={(event) => setEditManagerEmpId(event.target.value)}>
-                            <option value="">未指定</option>
-                            {employees.map((employee) => <option key={employee.id} value={employee.id}>{employeeName.get(employee.id)}</option>)}
-                          </select>
-                          <div className="flex items-center gap-3">
-                            <button onClick={() => void saveEdit(department.id)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>儲存</button>
-                            <button onClick={() => setEditingId(null)} className="text-sm text-gray-500 hover:underline">取消</button>
-                          </div>
-                        </div>
-                      </td>
-                    ) : (
-                      <>
-                        <td className="py-3 pr-4 font-mono text-xs text-gray-500">{department.code}</td>
-                        <td className="py-3 pr-4 font-medium text-gray-800">{department.name}</td>
-                        <td className="py-3 pr-4 text-gray-600">{department.parent_id ? deptName.get(department.parent_id) : "根節點"}</td>
-                        <td className="py-3 pr-4 text-gray-600">{managerDisplay(department)}</td>
-                        <td className="py-3">
-                          <div className="flex gap-3">
-                            <button
-                              onClick={() => {
-                                setEditingId(department.id);
-                                setEditName(department.name);
-                                setEditParentId(department.parent_id ?? "");
-                                setEditManagerEmpId(department.manager_emp_id ?? "");
-                              }}
-                              className="text-sm text-gray-600 hover:underline"
-                            >
-                              編輯
-                            </button>
-                            <button onClick={() => void onDelete(department.id)} className="text-sm text-red-600 hover:underline">刪除</button>
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,24rem)]">
+        <Card title="單位列表">
+          {error && <InlineError className="mb-3">{error}</InlineError>}
+          {loading ? (
+            <Skeleton lines={4} />
+          ) : rows.length === 0 ? (
+            <EmptyState title="尚無單位" hint="請先用上方表單新增第一個單位" />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 text-xs text-gray-500">
+                    <th className="py-2 pr-4">單位代碼</th>
+                    <th className="py-2 pr-4">單位名稱</th>
+                    <th className="py-2 pr-4">上層單位</th>
+                    <th className="py-2 pr-4">主管</th>
+                    <th className="py-2">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((department) => (
+                    <tr key={department.id} className="border-b border-gray-50">
+                      {editingId === department.id ? (
+                        <td colSpan={5} className="py-3">
+                          <div className="grid grid-cols-1 gap-3 lg:grid-cols-5">
+                            <div className="rounded-md bg-gray-50 px-3 py-2 text-sm font-medium text-gray-500">{department.code}</div>
+                            <input className={inputCls} value={editName} onChange={(event) => setEditName(event.target.value)} />
+                            <select className={inputCls} value={editParentId} onChange={(event) => setEditParentId(event.target.value)}>
+                              <option value="">根節點</option>
+                              {rows
+                                .filter((row) => row.id !== department.id && !isDescendant(row.id, department.id))
+                                .map((row) => <option key={row.id} value={row.id}>{row.code} · {row.name}</option>)}
+                            </select>
+                            <select className={inputCls} value={editManagerEmpId} onChange={(event) => setEditManagerEmpId(event.target.value)}>
+                              <option value="">未指定</option>
+                              {employees.map((employee) => <option key={employee.id} value={employee.id}>{employeeName.get(employee.id)}</option>)}
+                            </select>
+                            <div className="flex items-center gap-3">
+                              <button onClick={() => void saveEdit(department.id)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>儲存</button>
+                              <button onClick={() => setEditingId(null)} className="text-sm text-gray-500 hover:underline">取消</button>
+                            </div>
                           </div>
                         </td>
-                      </>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
+                      ) : (
+                        <>
+                          <td className="py-3 pr-4 font-mono text-xs text-gray-500">{department.code}</td>
+                          <td className="py-3 pr-4 font-medium text-gray-800">{department.name}</td>
+                          <td className="py-3 pr-4 text-gray-600">{department.parent_id ? deptName.get(department.parent_id) : "根節點"}</td>
+                          <td className="py-3 pr-4 text-gray-600">{managerDisplay(department)}</td>
+                          <td className="py-3">
+                            <div className="flex gap-3">
+                              <button
+                                onClick={() => {
+                                  setEditingId(department.id);
+                                  setEditName(department.name);
+                                  setEditParentId(department.parent_id ?? "");
+                                  setEditManagerEmpId(department.manager_emp_id ?? "");
+                                }}
+                                className="text-sm text-gray-600 hover:underline"
+                              >
+                                編輯
+                              </button>
+                              <button onClick={() => void onDelete(department.id)} className="text-sm text-red-600 hover:underline">刪除</button>
+                            </div>
+                          </td>
+                        </>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+
+        <Card title="組織圖">
+          <OrgTree tree={tree} loading={loading} error={error} />
+        </Card>
+      </div>
     </>
   );
 }
