@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getAnnouncements,
   createAnnouncement,
@@ -93,8 +93,6 @@ export default function AnnouncementsPage() {
 
   return (
     <>
-      <PageHeader title="公佈欄" desc="發佈內部公告" />
-
       <Card>
         <h2 className="mb-4 text-sm font-medium text-gray-500">發佈公告</h2>
         <form onSubmit={onCreate} className="space-y-4">

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getShifts,
   createShift,
@@ -160,8 +160,6 @@ export default function ShiftsPage() {
 
   return (
     <>
-      <PageHeader title="班別" desc="設定上下班時間" />
-
       <Card>
         <h2 className="mb-4 text-sm font-medium text-gray-500">新增班別</h2>
         <form onSubmit={onCreate} className="space-y-4">

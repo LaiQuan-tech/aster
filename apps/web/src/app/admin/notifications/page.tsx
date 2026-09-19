@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Card, Empty, ErrorText, PageHeader } from "@/components/admin-ui";
+import { Card, Empty, ErrorText } from "@/components/admin-ui";
 import {
   deliverPendingNotifications,
   getNotifications,
@@ -111,8 +111,6 @@ export default function AdminNotificationsPage() {
 
   return (
     <>
-      <PageHeader title="通知中心" desc="全租戶通知佇列、未讀狀態與 Apollo LinkUp 提醒追蹤。" />
-
       <Card>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>

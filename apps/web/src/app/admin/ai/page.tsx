@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Card, PageHeader, PrimaryButton, ErrorText, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, inputCls, labelCls } from "@/components/admin-ui";
 import {
   askAiQuestion,
   generateAiReportSummary,
@@ -62,11 +62,6 @@ export default function AdminAiPage() {
 
   return (
     <>
-      <PageHeader
-        title="AI 助理"
-        desc="Gemini 依同租戶報表、偵測與通知資料產生月報摘要，也可用自然語言詢問 HR 資料。"
-      />
-
       {error && <ErrorText>{error}</ErrorText>}
 
       <Card>

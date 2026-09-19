@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, Empty, Segmented, inputCls, labelCls } from "@/components/admin-ui";
 import AuditDrawer from "@/components/AuditDrawer";
 import {
   addEmployeeCertification,
@@ -552,7 +552,6 @@ export default function EmployeesPage() {
 
   return (
     <>
-      <PageHeader title="員工主檔" desc="帳號、組織、到離職、My Data、學歷證照、工作經歷與年資" />
       {message && <p className="rounded-lg bg-green-50 px-4 py-2 text-sm text-green-700">{message}</p>}
 
       {linkResult && (
@@ -879,10 +878,17 @@ export default function EmployeesPage() {
               </div>
 
               <form onSubmit={saveProfileFields} className="space-y-4">
-                <div className="flex gap-2">
-                  <button type="button" onClick={() => setProfileTab("basic")} className={`rounded-full px-4 py-2 text-sm ${profileTab === "basic" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600"}`}>基本資料</button>
-                  <button type="button" onClick={() => setProfileTab("contact")} className={`rounded-full px-4 py-2 text-sm ${profileTab === "contact" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600"}`}>通訊資料</button>
-                </div>
+                <Segmented
+                  size="sm"
+                  options={[
+                    { value: "basic", label: "基本資料" },
+                    { value: "contact", label: "通訊資料" },
+                  ]}
+                  value={profileTab}
+                  onChange={setProfileTab}
+                  className="w-full md:w-auto"
+                  aria-label="My Data 分頁"
+                />
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                   {profileFields.map((field) => (
                     <div key={field.key}>

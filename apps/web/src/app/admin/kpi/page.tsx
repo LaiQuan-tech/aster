@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton, Segmented, inputCls, labelCls } from "@/components/admin-ui";
 import { KpiScoreForm } from "@/components/KpiScoreForm";
 import { getEmployees, type Employee } from "@/lib/admin-api";
 import {
@@ -69,21 +69,17 @@ export default function KpiAdminPage() {
 
   return (
     <>
-      <PageHeader title="績效考核" desc="設定考核範本、按期間指派考核、追蹤評分進度並定案" />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
-      <div className="mb-4 flex gap-2">
-        {(["reviews", "templates"] as const).map((t) => (
-          <button
-            key={t}
-            type="button"
-            onClick={() => setTab(t)}
-            className={`rounded-full px-4 py-1.5 text-sm font-medium ${tab === t ? "text-white" : "border border-gray-200 bg-white text-gray-600"}`}
-            style={tab === t ? { backgroundColor: "var(--brand)" } : undefined}
-          >
-            {t === "reviews" ? "考核" : "範本"}
-          </button>
-        ))}
-      </div>
+      <Segmented
+        options={[
+          { value: "reviews", label: "考核" },
+          { value: "templates", label: "範本" },
+        ]}
+        value={tab}
+        onChange={setTab}
+        className="w-full md:w-auto"
+        aria-label="績效考核檢視"
+      />
       {tab === "templates" ? (
         <TemplatesTab templates={templates} reload={loadTemplates} onError={setError} />
       ) : (

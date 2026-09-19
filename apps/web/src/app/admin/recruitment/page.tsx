@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import {
   createAnnouncement,
   createCandidate,
@@ -319,7 +319,6 @@ export default function RecruitmentPage() {
 
   return (
     <>
-      <PageHeader title="招募" desc="職缺需求、職缺公告、人才庫、面試行事曆、錄用申請與通知狀態" />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
       {message && <p className="rounded-lg bg-green-50 px-4 py-2 text-sm text-green-700">{message}</p>}
 

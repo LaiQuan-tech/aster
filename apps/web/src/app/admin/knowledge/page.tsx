@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import {
   listKnowledgeDocuments, createKnowledgeText, uploadKnowledgeFile, linkProjectDocument, reindexKnowledgeDocument,
   deleteKnowledgeDocument, knowledgeDownloadUrl, searchKnowledge, type KnowledgeDocument, type SearchHit,
@@ -141,7 +141,6 @@ export default function KnowledgePage() {
 
   return (
     <>
-      <PageHeader title="文件庫 · 語意搜尋" desc="把 SOP、規章、合約範本、專案文件放進來，用意思找、不用記關鍵字" />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
       {!aiAvailable && <p className="mb-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">未設定 GEMINI_API_KEY：文件仍可建檔與關鍵字搜尋，但沒有語意搜尋與問答。設定後對每份文件按「重建索引」。</p>}
 

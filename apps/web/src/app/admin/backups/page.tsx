@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { MonthPicker } from "@/components/MonthPicker";
 import {
   listBackups,
@@ -105,11 +105,6 @@ export default function BackupsPage() {
 
   return (
     <>
-      <PageHeader
-        title="資料快照備份"
-        desc="每月 1 日 06:00 自動把上個月的全系統資料（人事／出勤／薪資／專案／放款／稽核 log）快照進私有儲存空間，作為 Final 版備查；也可隨時手動產生。"
-      />
-
       <Card>
         <div className="flex flex-wrap items-end gap-3">
           <div>

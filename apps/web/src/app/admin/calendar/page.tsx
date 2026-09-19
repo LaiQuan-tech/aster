@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Card, PageHeader, PrimaryButton, ErrorText, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, labelCls } from "@/components/admin-ui";
 import {
   getCalendar,
   putCalendarDays,
@@ -206,11 +206,6 @@ export default function CalendarPage() {
 
   return (
     <>
-      <PageHeader
-        title="行事曆 / 假日表"
-        desc="維護年度工作日曆：一般工作日、例假日、國定假日；沒有覆寫的日期預設週六日為例假日、其餘為工作日"
-      />
-
       <Card>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">

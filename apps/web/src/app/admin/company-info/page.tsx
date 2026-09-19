@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Card, PageHeader, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, ErrorText, PrimaryButton, Segmented, inputCls, labelCls } from "@/components/admin-ui";
 import { getCompanyPages, putCompanyPage, type CompanyPage } from "@/lib/company-api";
 import { SimpleMarkdown } from "@/components/SimpleMarkdown";
 
@@ -63,17 +63,16 @@ export default function CompanyInfoAdminPage() {
   const current = pages.find((p) => p.slug === slug);
   return (
     <>
-      <PageHeader title="公司福利 / 職安資訊" desc="長期有效的說明頁：員工在 ESS「公司資訊」讀取。公告類請用最新消息。" />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
-      <div className="mb-4 flex gap-2">
-        {pages.map((p) => (
-          <button key={p.slug} type="button" onClick={() => pick(p.slug)}
-            className={`rounded-full px-4 py-1.5 text-sm font-medium ${slug === p.slug ? "text-white" : "border border-gray-200 bg-white text-gray-600"}`}
-            style={slug === p.slug ? { backgroundColor: "var(--brand)" } : undefined}>
-            {p.defaultTitle}{!p.exists && <span className="ml-1 text-xs opacity-70">（未建）</span>}
-          </button>
-        ))}
-      </div>
+      {pages.length > 0 && (
+        <Segmented
+          options={pages.map((p) => ({ value: p.slug, label: `${p.defaultTitle}${p.exists ? "" : "（未建）"}` }))}
+          value={slug}
+          onChange={pick}
+          className="w-full md:w-auto"
+          aria-label="公司資訊頁面"
+        />
+      )}
       <Card>
         <div className="mb-3">
           <label className={labelCls}>頁面標題</label>

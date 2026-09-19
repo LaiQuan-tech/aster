@@ -1,11 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
   Card,
-  PageHeader,
   PrimaryButton,
   ErrorText,
   Empty,
@@ -89,18 +87,12 @@ export default function AnnouncementDetailPage() {
 
   return (
     <>
-      <PageHeader
-        title="公告版本與簽收"
-        desc="內容版本與簽署快照是兩條獨立的軸：有人補簽不會讓規章進版。"
-      />
-
-      <Card>
-        <Link href="/admin/announcements" className="text-sm text-blue-600 underline">
-          ← 回公告列表
-        </Link>
-        {error && <ErrorText>{error}</ErrorText>}
-        {message && <p className="mt-3 text-sm text-green-700">{message}</p>}
-      </Card>
+      {(error || message) && (
+        <Card>
+          {error && <ErrorText>{error}</ErrorText>}
+          {message && <p className="mt-3 text-sm text-green-700">{message}</p>}
+        </Card>
+      )}
 
       <Card>
         <h2 className="mb-1 text-sm font-medium text-gray-500">內容版本鏈</h2>

@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import { apiDownload } from "@/lib/api-client";
 import { getEmployees, getBranding, saveTenantSettings, type Employee, type TenantFeatures } from "@/lib/admin-api";
 import { getMailboxes, putMailbox, MAILBOX_STATUS_LABEL, type Mailbox, type MailboxStatus } from "@/lib/company-api";
@@ -124,7 +124,6 @@ export default function EmployeeMailPage() {
 
   return (
     <>
-      <PageHeader title="專屬 Email 配發" desc="每位員工一個公司網域信箱：配發、匯出給郵件供應商建立、回填狀態" />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
 
       <Card>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import {
   getOnboardings,
   createOnboarding,
@@ -158,8 +158,6 @@ export default function OnboardingPage() {
 
   return (
     <>
-      <PageHeader title="報到管理" desc="新進人員報到，完成後建立正式員工資料" />
-
       <Card>
         <h2 className="mb-4 text-sm font-medium text-gray-500">新增報到</h2>
         <form onSubmit={onCreate} className="space-y-4">

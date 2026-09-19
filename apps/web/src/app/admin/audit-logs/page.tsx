@@ -6,7 +6,7 @@
  * 篩選：資料表（多選）／動作／操作者／日期範圍／關鍵字；列可展開看欄位前後值；keyset 翻頁。
  */
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import { AuditActionBadge, AuditDiffTable, actorLabel } from "@/components/AuditDrawer";
 import { getEmployees, type Employee } from "@/lib/admin-api";
 import {
@@ -154,8 +154,6 @@ export default function AuditLogsPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="稽核紀錄" desc="誰在什麼時候改了什麼。由資料庫層自動記錄，任何人（含系統管理員）都無法修改或刪除。" />
-
       <Card>
         <form onSubmit={onSearch} className="space-y-4">
           <ErrorText>{metaError}</ErrorText>

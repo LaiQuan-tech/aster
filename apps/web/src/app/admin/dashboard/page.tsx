@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Card, PageHeader, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import {
   getHeadcount,
   getDepartments,
@@ -298,8 +298,6 @@ export default function DashboardPage() {
 
   return (
     <>
-      <PageHeader title="Dashboard" desc="全公司在職人數分析，支援自訂 widget 排版與個人化儲存。" />
-
       <Card>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>

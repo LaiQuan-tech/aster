@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getLeaveTypes,
   createLeaveType,
@@ -231,8 +231,6 @@ export default function LeaveTypesPage() {
 
   return (
     <>
-      <PageHeader title="假別與簽核流程" desc="維護假別並設定各申請類別的簽核者" />
-
       {/* Leave types */}
       <Card>
         <h2 className="mb-4 text-sm font-medium text-gray-500">新增假別</h2>

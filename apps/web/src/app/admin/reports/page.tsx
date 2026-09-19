@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiDownload } from "@/lib/api-client";
-import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getAttendanceReport,
   getDepartments,
@@ -164,11 +164,6 @@ export default function ReportsPage() {
 
   return (
     <>
-      <PageHeader
-        title="報表中心"
-        desc="對齊 Apollo 的出勤、請假/表單、薪資與人力快照報表：可篩選、可預覽表格、可下載 CSV。"
-      />
-
       {error && <ErrorText>{error}</ErrorText>}
 
       <Card>

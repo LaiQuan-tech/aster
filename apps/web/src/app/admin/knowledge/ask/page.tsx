@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Card, PageHeader, ErrorText, PrimaryButton, inputCls } from "@/components/admin-ui";
+import { Card, ErrorText, PrimaryButton, inputCls } from "@/components/admin-ui";
 import { SimpleMarkdown } from "@/components/SimpleMarkdown";
 import { askKnowledge, listKnowledgeDocuments, type SearchHit } from "@/lib/knowledge-api";
 
@@ -57,7 +57,6 @@ export default function KnowledgeAskPage() {
 
   return (
     <>
-      <PageHeader title="AI 文件問答" desc="只依知識庫裡的文件回答，每句附引用；文件裡沒有的會直說" />
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
       {!aiAvailable && <p className="mb-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">未設定 GEMINI_API_KEY，問答不可用；<Link href="/admin/knowledge" className="underline">文件庫</Link>的關鍵字搜尋仍可用。</p>}
       {docCount === 0 && <p className="mb-3 rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">知識庫還是空的——先到 <Link href="/admin/knowledge" className="underline">文件庫</Link> 放文件。</p>}
