@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useEffect, useState } from "react";
-import { Card, PageHeader, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, Empty, Segmented, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getBranding,
   getRuleConfig,
@@ -17,19 +17,20 @@ import {
   type OvertimeRoundingMode,
   type TenantFeatures,
 } from "@/lib/admin-api";
-import {
-  ALWAYS_VISIBLE_TAB_KEYS,
-  EMPLOYMENT_TYPES,
-  EMPLOYMENT_TYPE_LABELS,
-  ESS_TABS,
-  INTERN_DEFAULT_ESS_TABS,
-  type EmploymentType,
-} from "@/lib/ess-tabs";
 
-const CALENDARS = [
-  { name: "台灣行事曆", owner: "全公司", years: ["2025 已發佈", "2026 已發佈", "2027 待新增"] },
-  { name: "門市排班行事曆", owner: "門市", years: ["2025 已發佈", "2026 已發佈", "2027 待新增"] },
-  { name: "總部行事曆", owner: "總部", years: ["2025 已發佈", "2026 已發佈", "2027 待新增"] },
+/**
+ * 頁內分頁（2026-09 後台簡化）：八張卡拆成五個面板，一次只畫一個；所有 state／handler 仍在同一個
+ * 元件裡（切換面板不會丟掉未存的表單內容）。三筆假行事曆的清單卡已移除，逐日假日請至「行事曆」分頁；
+ * 「員工端功能開放」另立 /admin/module-settings/ess-tabs。頁面標題與說明由 AdminShell 依路由表渲染。
+ */
+type Panel = "attendance" | "insurance" | "versions" | "form" | "json";
+
+const PANEL_OPTIONS: { value: Panel; label: string }[] = [
+  { value: "attendance", label: "差勤參數" },
+  { value: "insurance", label: "勞健保" },
+  { value: "versions", label: "規則版本" },
+  { value: "form", label: "表單參數" },
+  { value: "json", label: "原始 JSON" },
 ];
 
 type YearStatus = "draft" | "published" | "locked";
@@ -282,32 +283,6 @@ function TierEditor({
   );
 }
 
-/** essTabsCfg 的形狀：身分類別 → 目前勾選（可見）的 tab key 清單，順序不重要（存檔時會重排）。 */
-type EssTabsConfig = Record<EmploymentType, string[]>;
-
-/** 某身分類別完全沒有設定時的預設勾選狀態：intern 只給六個，其餘全勾。 */
-function defaultEssTabsFor(type: EmploymentType): string[] {
-  return type === "intern" ? [...INTERN_DEFAULT_ESS_TABS] : ESS_TABS.map((t) => t.key);
-}
-
-function defaultEssTabsConfig(): EssTabsConfig {
-  const cfg = {} as EssTabsConfig;
-  for (const type of EMPLOYMENT_TYPES) cfg[type] = defaultEssTabsFor(type);
-  return cfg;
-}
-
-/** 由 tenants.features.essTabs 還原表單狀態；缺欄位或格式不對都退回預設值。 */
-function hydrateEssTabsConfig(raw: unknown): EssTabsConfig {
-  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-  const cfg = {} as EssTabsConfig;
-  for (const type of EMPLOYMENT_TYPES) {
-    const list = source[type];
-    cfg[type] =
-      Array.isArray(list) && list.every((v) => typeof v === "string") ? (list as string[]) : defaultEssTabsFor(type);
-  }
-  return cfg;
-}
-
 /* --------------------------------------------- 規則版本生效日（C4） --- */
 /**
  * 存規則時可選「這次改動何時生效」，對應 saveRuleConfig 的 opts.effectiveFrom：
@@ -401,10 +376,10 @@ function EffectiveDateFields({
 }
 
 export default function ModuleSettingsPage() {
+  const [panel, setPanel] = useState<Panel>("attendance");
   const [ruleConfig, setRuleConfig] = useState<RuleConfigResponse | null>(null);
   const [otForm, setOtForm] = useState<OvertimeParamsForm>(DEFAULT_OT_FORM);
   const [features, setFeatures] = useState<TenantFeatures>({});
-  const [essTabsCfg, setEssTabsCfg] = useState<EssTabsConfig>(() => defaultEssTabsConfig());
   const [myDataRequiresApproval, setMyDataRequiresApproval] = useState(true);
   const [editableFields, setEditableFields] = useState("basic,contact,education,certification,workHistory");
   const [attachmentLimitKb, setAttachmentLimitKb] = useState("300");
@@ -464,7 +439,6 @@ export default function ModuleSettingsPage() {
           enableAutoSettlement?: boolean;
         } | undefined) ?? {};
         setFeatures(nextFeatures);
-        setEssTabsCfg(hydrateEssTabsConfig(nextFeatures.essTabs));
         setMyDataRequiresApproval(formParameters.myDataRequiresApproval ?? true);
         setEditableFields((formParameters.editableFields ?? ["basic", "contact", "education", "certification", "workHistory"]).join(","));
         setAttachmentLimitKb(String(formParameters.attachmentLimitKb ?? 300));
@@ -718,31 +692,6 @@ export default function ModuleSettingsPage() {
     }
   }
 
-  /** 切換某身分類別對某個 tab 的勾選；存回去時永遠照 ESS_TABS 原本順序排列。 */
-  function toggleEssTab(type: EmploymentType, tab: string) {
-    setEssTabsCfg((prev) => {
-      const current = new Set(prev[type]);
-      if (current.has(tab)) current.delete(tab);
-      else current.add(tab);
-      const next = ESS_TABS.map((t) => t.key).filter((key) => current.has(key));
-      return { ...prev, [type]: next };
-    });
-  }
-
-  /** A3：員工端功能開放——四類身分各自可見的 ESS 分頁，存到 tenants.features.essTabs。 */
-  async function onSaveEssTabs() {
-    setError(null);
-    setMessage(null);
-    try {
-      const nextFeatures: TenantFeatures = { ...features, essTabs: essTabsCfg };
-      const saved = await saveTenantSettings({ features: nextFeatures });
-      setFeatures(saved.features ?? nextFeatures);
-      setMessage("員工端功能開放設定已儲存");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "儲存員工端功能開放設定失敗");
-    }
-  }
-
   function toggleEditableField(field: string) {
     const next = new Set(parsedEditableFields);
     if (next.has(field)) next.delete(field);
@@ -752,581 +701,505 @@ export default function ModuleSettingsPage() {
 
   return (
     <>
-      <PageHeader title="模組設定" desc="對齊 Apollo：行事曆、差勤薪資規則與功能參數" />
+      <Segmented<Panel>
+        aria-label="規則參數分頁"
+        options={PANEL_OPTIONS}
+        value={panel}
+        onChange={setPanel}
+        className="w-full md:w-auto"
+      />
 
-      <Card>
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold text-gray-900">行事曆管理</h2>
-            <p className="mt-1 text-sm text-gray-500">維護年度行事曆、適用單位與年度狀態。</p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setMessage("新增行事曆目前以設定入口呈現；正式新增需接後端行事曆 API。")}
-            className="rounded-md border px-3 py-1.5 text-sm text-gray-600"
-          >
-            新增行事曆
-          </button>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-gray-200 text-xs text-gray-500">
-                <th className="py-2 pr-4">行事曆名稱</th>
-                <th className="py-2 pr-4">適用單位</th>
-                <th className="py-2 pr-4">2025</th>
-                <th className="py-2 pr-4">2026</th>
-                <th className="py-2 pr-4">2027</th>
-                <th className="py-2">設定</th>
-              </tr>
-            </thead>
-            <tbody>
-              {CALENDARS.map((calendar) => (
-                <tr key={calendar.name} className="border-b border-gray-50">
-                  <td className="py-2 pr-4 font-medium text-gray-800">{calendar.name}</td>
-                  <td className="py-2 pr-4 text-gray-600">{calendar.owner}</td>
-                  {calendar.years.map((year, index) => (
-                    <td key={year} className="py-2 pr-4">
-                      <span className={`rounded-full px-2 py-1 text-xs ${index === 2 ? "bg-amber-50 text-amber-700" : "bg-green-50 text-green-700"}`}>
-                        {year}
-                      </span>
-                    </td>
-                  ))}
-                  <td className="py-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setWorkCalendar(calendar.name);
-                        setMessage(`已選擇 ${calendar.name} 作為目前差勤行事曆`);
-                      }}
-                      className="text-sm text-gray-600 hover:underline"
-                    >
-                      套用
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p className="mt-3 text-xs text-gray-400">
-          逐日的例假日／國定假日覆寫請至「人事差勤 · 差勤管理 → 行事曆 / 假日表」維護。
-        </p>
-      </Card>
+      {message && <p className="text-sm text-green-600">{message}</p>}
+      {error && <ErrorText>{error}</ErrorText>}
 
-      <Card>
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold text-gray-900">年度狀態與差勤參數</h2>
-            <p className="mt-1 text-sm text-gray-500">對齊 Apollo 的年度狀態、行事曆、截止日與員工異議設定。</p>
-          </div>
-          <span className={`rounded-full px-3 py-1 text-xs font-medium ${YEAR_STATUS_META[yearStatus].cls}`}>
-            {activeYear} {YEAR_STATUS_META[yearStatus].label}
-          </span>
-        </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <div>
-            <label className={labelCls}>年度</label>
-            <input className={inputCls} value={activeYear} onChange={(event) => setActiveYear(event.target.value)} placeholder="2026" />
-          </div>
-          <div>
-            <label className={labelCls}>年度狀態</label>
-            <select className={inputCls} value={yearStatus} onChange={(event) => setYearStatus(event.target.value as YearStatus)}>
-              <option value="draft">草稿</option>
-              <option value="published">已發佈</option>
-              <option value="locked">已鎖定</option>
-            </select>
-          </div>
-          <div>
-            <label className={labelCls}>預設行事曆</label>
-            <select className={inputCls} value={workCalendar} onChange={(event) => setWorkCalendar(event.target.value)}>
-              {CALENDARS.map((calendar) => (
-                <option key={calendar.name} value={calendar.name}>{calendar.name}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className={labelCls}>差勤截止日</label>
-            <input type="number" min={1} max={31} className={inputCls} value={attendanceCutoffDay} onChange={(event) => setAttendanceCutoffDay(event.target.value)} />
-          </div>
-          <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
-            <input type="checkbox" checked={allowEmployeeDispute} onChange={(event) => setAllowEmployeeDispute(event.target.checked)} />
-            允許員工班表/出勤異議
-          </label>
-          <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
-            <input type="checkbox" checked={enableAutoSettlement} onChange={(event) => setEnableAutoSettlement(event.target.checked)} />
-            啟用自動結算提醒
-          </label>
-        </div>
-        <div className="mt-4">
-          <PrimaryButton onClick={onSaveAttendanceModule}>儲存差勤模組設定</PrimaryButton>
-        </div>
-      </Card>
-
-      <Card>
-        <div className="mb-4">
-          <h2 className="text-base font-semibold text-gray-900">加班與計薪參數</h2>
-          <p className="mt-1 text-sm text-gray-500">
-            對應客戶「出勤統計表」Excel 的加班取整、用餐扣除、分段倍率與計薪規則（來源：亞斯特 115-06 出勤表案例）。
-          </p>
-        </div>
-
-        {ruleConfig ? (
-          <div className="space-y-6">
+      {panel === "attendance" && (
+        <>
+          <Card>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-base font-semibold text-gray-900">年度狀態與差勤參數</h2>
+                <p className="mt-1 text-sm text-gray-500">對齊 Apollo 的年度狀態、行事曆、截止日與員工異議設定。</p>
+              </div>
+              <span className={`rounded-full px-3 py-1 text-xs font-medium ${YEAR_STATUS_META[yearStatus].cls}`}>
+                {activeYear} {YEAR_STATUS_META[yearStatus].label}
+              </span>
+            </div>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div>
-                <label className={labelCls}>取整單位（分）</label>
-                <input
-                  type="number"
-                  min={1}
-                  className={inputCls}
-                  value={otForm.unitMinutes}
-                  onChange={(e) => patchOt({ unitMinutes: e.target.value })}
-                />
-                <p className="mt-1 text-xs text-gray-400">Excel：30 分為單位無條件捨去</p>
+                <label className={labelCls}>年度</label>
+                <input className={inputCls} value={activeYear} onChange={(event) => setActiveYear(event.target.value)} placeholder="2026" />
               </div>
               <div>
-                <label className={labelCls}>取整模式</label>
-                <select
-                  className={inputCls}
-                  value={otForm.mode}
-                  onChange={(e) => patchOt({ mode: e.target.value as OvertimeRoundingMode })}
-                >
-                  <option value="floor">無條件捨去 floor</option>
-                  <option value="nearest">四捨五入 nearest</option>
-                  <option value="ceil">無條件進位 ceil</option>
+                <label className={labelCls}>年度狀態</label>
+                <select className={inputCls} value={yearStatus} onChange={(event) => setYearStatus(event.target.value as YearStatus)}>
+                  <option value="draft">草稿</option>
+                  <option value="published">已發佈</option>
+                  <option value="locked">已鎖定</option>
                 </select>
               </div>
               <div>
-                <label className={labelCls}>最低計入（分）</label>
-                <input
-                  type="number"
-                  min={0}
-                  className={inputCls}
-                  value={otForm.minimumMinutes}
-                  onChange={(e) => patchOt({ minimumMinutes: e.target.value })}
-                />
-                <p className="mt-1 text-xs text-gray-400">Excel：未滿 30 分不計加班</p>
+                <label className={labelCls}>預設行事曆</label>
+                <input className={inputCls} value={workCalendar} onChange={(event) => setWorkCalendar(event.target.value)} placeholder="台灣行事曆" />
               </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <div>
+                <label className={labelCls}>差勤截止日</label>
+                <input type="number" min={1} max={31} className={inputCls} value={attendanceCutoffDay} onChange={(event) => setAttendanceCutoffDay(event.target.value)} />
+              </div>
               <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
-                <input
-                  type="checkbox"
-                  checked={otForm.mealBreakEnabled}
-                  onChange={(e) => patchOt({ mealBreakEnabled: e.target.checked })}
-                />
-                啟用晚餐扣除
-              </label>
-              <div>
-                <label className={labelCls}>延長工時超過幾分鐘扣（門檻分）</label>
-                <input
-                  type="number"
-                  min={0}
-                  disabled={!otForm.mealBreakEnabled}
-                  className={`${inputCls} disabled:bg-gray-50 disabled:text-gray-400`}
-                  value={otForm.mealAfterMinutes}
-                  onChange={(e) => patchOt({ mealAfterMinutes: e.target.value })}
-                />
-              </div>
-              <div>
-                <label className={labelCls}>扣除分鐘</label>
-                <input
-                  type="number"
-                  min={0}
-                  disabled={!otForm.mealBreakEnabled}
-                  className={`${inputCls} disabled:bg-gray-50 disabled:text-gray-400`}
-                  value={otForm.mealDeductMinutes}
-                  onChange={(e) => patchOt({ mealDeductMinutes: e.target.value })}
-                />
-                <p className="mt-1 text-xs text-gray-400">Excel：延長工時超過 3 小時（180 分）扣 30 分晚餐</p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div>
-                <label className={labelCls}>單日加班上限（分）</label>
-                <input
-                  type="number"
-                  min={0}
-                  className={inputCls}
-                  value={otForm.dailyCapMinutes}
-                  onChange={(e) => patchOt({ dailyCapMinutes: e.target.value })}
-                />
-                <p className="mt-1 text-xs text-gray-400">
-                  Excel：單日加班上限 240 分（4 小時）；引擎只回傳不裁切，供結算頁判異常
-                </p>
-              </div>
-              <div>
-                <label className={labelCls}>月加班警示門檻（小時，由小到大）</label>
-                <div className="flex gap-2">
-                  {([0, 1, 2] as const).map((i) => (
-                    <input
-                      key={i}
-                      type="number"
-                      min={0}
-                      className={inputCls}
-                      value={otForm.monthlyAlertHours[i]}
-                      onChange={(e) => setAlertHour(i, e.target.value)}
-                    />
-                  ))}
-                </div>
-                <p className="mt-1 text-xs text-gray-400">預設 36 / 40 / 46 小時，供結算頁分級提醒</p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <TierEditor
-                title="加班分段倍率 · 平日延長工時（weekday_ot）"
-                hint="Excel：前 2 小時 ×1.334、2–8 小時 ×1.666667、8 小時以上 ×2.666667"
-                tiers={otForm.weekdayTiers}
-                onChange={(i, f, v) => setTierField("weekdayTiers", i, f, v)}
-              />
-              <TierEditor
-                title="加班分段倍率 · 例假日出勤（rest_day）"
-                hint="Excel：與平日延長工時共用同一組分段倍率"
-                tiers={otForm.restDayTiers}
-                onChange={(i, f, v) => setTierField("restDayTiers", i, f, v)}
-              />
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div>
-                <label className={labelCls}>國定假日做 1 給 8（小時）</label>
-                <input
-                  type="number"
-                  min={0}
-                  className={inputCls}
-                  value={otForm.fixedHolidayMinChargeHours}
-                  onChange={(e) => patchOt({ fixedHolidayMinChargeHours: e.target.value })}
-                />
-                <p className="mt-1 text-xs text-gray-400">Excel：固定假日出勤 ×1，當日不足 8 小時仍以 8 小時計</p>
-              </div>
-              <div>
-                <label className={labelCls}>時薪除數</label>
-                <input
-                  type="number"
-                  min={1}
-                  className={inputCls}
-                  value={otForm.hourlyWageDivisor}
-                  onChange={(e) => patchOt({ hourlyWageDivisor: e.target.value })}
-                />
-                <p className="mt-1 text-xs text-gray-400">Excel：時薪 = 本薪 ÷ 240</p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
-                <input
-                  type="checkbox"
-                  checked={otForm.lateEarlyEnabled}
-                  onChange={(e) => patchOt({ lateEarlyEnabled: e.target.checked })}
-                />
-                遲到早退扣款
+                <input type="checkbox" checked={allowEmployeeDispute} onChange={(event) => setAllowEmployeeDispute(event.target.checked)} />
+                允許員工班表/出勤異議
               </label>
               <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
-                <input
-                  type="checkbox"
-                  checked={otForm.requireApprovedSheet}
-                  onChange={(e) => patchOt({ requireApprovedSheet: e.target.checked })}
-                />
-                結算薪資前須出勤表已核准
-              </label>
-              <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
-                <input
-                  type="checkbox"
-                  checked={otForm.requireAnomalyAck}
-                  onChange={(e) => patchOt({ requireAnomalyAck: e.target.checked })}
-                />
-                結算薪資前須異常已確認
+                <input type="checkbox" checked={enableAutoSettlement} onChange={(event) => setEnableAutoSettlement(event.target.checked)} />
+                啟用自動結算提醒
               </label>
             </div>
-
-            <EffectiveDateFields
-              mode={otEffectiveMode}
-              date={otEffectiveDate}
-              onModeChange={setOtEffectiveMode}
-              onDateChange={setOtEffectiveDate}
-              groupName="ot-effective-mode"
-            />
-
-            <div>
-              <PrimaryButton onClick={onSaveOvertimeParams}>儲存加班與計薪參數</PrimaryButton>
+            <div className="mt-4">
+              <PrimaryButton onClick={onSaveAttendanceModule}>儲存差勤模組設定</PrimaryButton>
             </div>
-          </div>
-        ) : (
-          <Empty>載入中…</Empty>
-        )}
-      </Card>
+          </Card>
 
-      <Card>
-        <div className="mb-4">
-          <h2 className="text-base font-semibold text-gray-900">勞健保費率</h2>
-          <p className="mt-1 text-sm text-gray-500">
-            員工的勞保／健保自付額 = 投保薪資 × 費率 × 自付比例（詳見員工「薪資作業」的投保級距）。
-            2026 費率請依勞保局／健保署公告確認；四欄留白視同不設定，薪資試算不扣勞健保。
-          </p>
-        </div>
+          <Card>
+            <div className="mb-4">
+              <h2 className="text-base font-semibold text-gray-900">加班與計薪參數</h2>
+              <p className="mt-1 text-sm text-gray-500">
+                對應客戶「出勤統計表」Excel 的加班取整、用餐扣除、分段倍率與計薪規則（來源：亞斯特 115-06 出勤表案例）。
+              </p>
+            </div>
 
-        {ruleConfig ? (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div className="rounded-md border border-gray-200 p-3">
-                <p className="mb-2 text-sm font-medium text-gray-700">勞保（普通事故＋就保合計）</p>
-                <div className="grid grid-cols-2 gap-3">
+            {ruleConfig ? (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                   <div>
-                    <label className={labelCls}>費率</label>
+                    <label className={labelCls}>取整單位（分）</label>
                     <input
                       type="number"
-                      min={0}
-                      step="any"
-                      placeholder="例 0.125"
+                      min={1}
                       className={inputCls}
-                      value={insuranceForm.labor.rate}
-                      onChange={(e) => patchInsurance("labor", "rate", e.target.value)}
+                      value={otForm.unitMinutes}
+                      onChange={(e) => patchOt({ unitMinutes: e.target.value })}
                     />
+                    <p className="mt-1 text-xs text-gray-400">Excel：30 分為單位無條件捨去</p>
                   </div>
                   <div>
-                    <label className={labelCls}>員工自付比例</label>
+                    <label className={labelCls}>取整模式</label>
+                    <select
+                      className={inputCls}
+                      value={otForm.mode}
+                      onChange={(e) => patchOt({ mode: e.target.value as OvertimeRoundingMode })}
+                    >
+                      <option value="floor">無條件捨去 floor</option>
+                      <option value="nearest">四捨五入 nearest</option>
+                      <option value="ceil">無條件進位 ceil</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className={labelCls}>最低計入（分）</label>
                     <input
                       type="number"
                       min={0}
-                      max={1}
-                      step="any"
-                      placeholder="例 0.2"
                       className={inputCls}
-                      value={insuranceForm.labor.employeeShare}
-                      onChange={(e) => patchInsurance("labor", "employeeShare", e.target.value)}
+                      value={otForm.minimumMinutes}
+                      onChange={(e) => patchOt({ minimumMinutes: e.target.value })}
                     />
+                    <p className="mt-1 text-xs text-gray-400">Excel：未滿 30 分不計加班</p>
                   </div>
                 </div>
-              </div>
-              <div className="rounded-md border border-gray-200 p-3">
-                <p className="mb-2 text-sm font-medium text-gray-700">健保</p>
-                <div className="grid grid-cols-2 gap-3">
+
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                  <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={otForm.mealBreakEnabled}
+                      onChange={(e) => patchOt({ mealBreakEnabled: e.target.checked })}
+                    />
+                    啟用晚餐扣除
+                  </label>
                   <div>
-                    <label className={labelCls}>費率</label>
+                    <label className={labelCls}>延長工時超過幾分鐘扣（門檻分）</label>
                     <input
                       type="number"
                       min={0}
-                      step="any"
-                      placeholder="例 0.0517"
-                      className={inputCls}
-                      value={insuranceForm.health.rate}
-                      onChange={(e) => patchInsurance("health", "rate", e.target.value)}
+                      disabled={!otForm.mealBreakEnabled}
+                      className={`${inputCls} disabled:bg-gray-50 disabled:text-gray-400`}
+                      value={otForm.mealAfterMinutes}
+                      onChange={(e) => patchOt({ mealAfterMinutes: e.target.value })}
                     />
                   </div>
                   <div>
-                    <label className={labelCls}>員工自付比例</label>
+                    <label className={labelCls}>扣除分鐘</label>
                     <input
                       type="number"
                       min={0}
-                      max={1}
-                      step="any"
-                      placeholder="例 0.3"
-                      className={inputCls}
-                      value={insuranceForm.health.employeeShare}
-                      onChange={(e) => patchInsurance("health", "employeeShare", e.target.value)}
+                      disabled={!otForm.mealBreakEnabled}
+                      className={`${inputCls} disabled:bg-gray-50 disabled:text-gray-400`}
+                      value={otForm.mealDeductMinutes}
+                      onChange={(e) => patchOt({ mealDeductMinutes: e.target.value })}
                     />
+                    <p className="mt-1 text-xs text-gray-400">Excel：延長工時超過 3 小時（180 分）扣 30 分晚餐</p>
                   </div>
                 </div>
+
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className={labelCls}>單日加班上限（分）</label>
+                    <input
+                      type="number"
+                      min={0}
+                      className={inputCls}
+                      value={otForm.dailyCapMinutes}
+                      onChange={(e) => patchOt({ dailyCapMinutes: e.target.value })}
+                    />
+                    <p className="mt-1 text-xs text-gray-400">
+                      Excel：單日加班上限 240 分（4 小時）；引擎只回傳不裁切，供結算頁判異常
+                    </p>
+                  </div>
+                  <div>
+                    <label className={labelCls}>月加班警示門檻（小時，由小到大）</label>
+                    <div className="flex gap-2">
+                      {([0, 1, 2] as const).map((i) => (
+                        <input
+                          key={i}
+                          type="number"
+                          min={0}
+                          className={inputCls}
+                          value={otForm.monthlyAlertHours[i]}
+                          onChange={(e) => setAlertHour(i, e.target.value)}
+                        />
+                      ))}
+                    </div>
+                    <p className="mt-1 text-xs text-gray-400">預設 36 / 40 / 46 小時，供結算頁分級提醒</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  <TierEditor
+                    title="加班分段倍率 · 平日延長工時（weekday_ot）"
+                    hint="Excel：前 2 小時 ×1.334、2–8 小時 ×1.666667、8 小時以上 ×2.666667"
+                    tiers={otForm.weekdayTiers}
+                    onChange={(i, f, v) => setTierField("weekdayTiers", i, f, v)}
+                  />
+                  <TierEditor
+                    title="加班分段倍率 · 例假日出勤（rest_day）"
+                    hint="Excel：與平日延長工時共用同一組分段倍率"
+                    tiers={otForm.restDayTiers}
+                    onChange={(i, f, v) => setTierField("restDayTiers", i, f, v)}
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className={labelCls}>國定假日做 1 給 8（小時）</label>
+                    <input
+                      type="number"
+                      min={0}
+                      className={inputCls}
+                      value={otForm.fixedHolidayMinChargeHours}
+                      onChange={(e) => patchOt({ fixedHolidayMinChargeHours: e.target.value })}
+                    />
+                    <p className="mt-1 text-xs text-gray-400">Excel：固定假日出勤 ×1，當日不足 8 小時仍以 8 小時計</p>
+                  </div>
+                  <div>
+                    <label className={labelCls}>時薪除數</label>
+                    <input
+                      type="number"
+                      min={1}
+                      className={inputCls}
+                      value={otForm.hourlyWageDivisor}
+                      onChange={(e) => patchOt({ hourlyWageDivisor: e.target.value })}
+                    />
+                    <p className="mt-1 text-xs text-gray-400">Excel：時薪 = 本薪 ÷ 240</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={otForm.lateEarlyEnabled}
+                      onChange={(e) => patchOt({ lateEarlyEnabled: e.target.checked })}
+                    />
+                    遲到早退扣款
+                  </label>
+                  <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={otForm.requireApprovedSheet}
+                      onChange={(e) => patchOt({ requireApprovedSheet: e.target.checked })}
+                    />
+                    結算薪資前須出勤表已核准
+                  </label>
+                  <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={otForm.requireAnomalyAck}
+                      onChange={(e) => patchOt({ requireAnomalyAck: e.target.checked })}
+                    />
+                    結算薪資前須異常已確認
+                  </label>
+                </div>
+
+                <EffectiveDateFields
+                  mode={otEffectiveMode}
+                  date={otEffectiveDate}
+                  onModeChange={setOtEffectiveMode}
+                  onDateChange={setOtEffectiveDate}
+                  groupName="ot-effective-mode"
+                />
+
+                <div>
+                  <PrimaryButton onClick={onSaveOvertimeParams}>儲存加班與計薪參數</PrimaryButton>
+                </div>
               </div>
-            </div>
-            <p className="text-xs text-gray-400">
-              四個欄位需全部填寫才會計費；任一欄留白＝整段不設定（薪資試算不扣勞健保），不是「費率 0」。
-            </p>
+            ) : (
+              <Empty>載入中…</Empty>
+            )}
+          </Card>
+        </>
+      )}
 
-            <EffectiveDateFields
-              mode={insuranceEffectiveMode}
-              date={insuranceEffectiveDate}
-              onModeChange={setInsuranceEffectiveMode}
-              onDateChange={setInsuranceEffectiveDate}
-              groupName="insurance-effective-mode"
-            />
-
-            <div>
-              <PrimaryButton onClick={onSaveInsuranceParams}>儲存勞健保費率</PrimaryButton>
-            </div>
-          </div>
-        ) : (
-          <Empty>載入中…</Empty>
-        )}
-      </Card>
-
-      <Card>
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold text-gray-900">差勤 / 薪資規則（原始 JSON）</h2>
+      {panel === "insurance" && (
+        <Card>
+          <div className="mb-4">
+            <h2 className="text-base font-semibold text-gray-900">勞健保費率</h2>
             <p className="mt-1 text-sm text-gray-500">
-              完整規則 DSL，供進階調整；上方「加班與計薪參數」儲存後會同步更新這裡的內容。
+              員工的勞保／健保自付額 = 投保薪資 × 費率 × 自付比例（詳見員工「薪資作業」的投保級距）。
+              2026 費率請依勞保局／健保署公告確認；四欄留白視同不設定，薪資試算不扣勞健保。
             </p>
           </div>
-          {ruleConfig && (
-            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">
-              版本 {ruleConfig.version}
-            </span>
-          )}
-        </div>
-        {ruleConfig ? (
-          <>
-            <p className="mb-2 text-xs text-gray-500">
-              目前版本：{ruleConfig.version} {ruleConfig.isDefault ? "（預設值）" : ""}
-            </p>
-            <textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              className="h-96 w-full rounded-md border border-gray-300 p-3 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand)]"
-            />
-            <div className="mt-4">
-              <EffectiveDateFields
-                mode={jsonEffectiveMode}
-                date={jsonEffectiveDate}
-                onModeChange={setJsonEffectiveMode}
-                onDateChange={setJsonEffectiveDate}
-                groupName="json-effective-mode"
-              />
-            </div>
-            <div className="mt-4">
-              <PrimaryButton onClick={onSave}>儲存規則</PrimaryButton>
-            </div>
-          </>
-        ) : (
-          <Empty>載入中…</Empty>
-        )}
-        {message && <p className="mt-3 text-sm text-green-600">{message}</p>}
-        {error && <div className="mt-3"><ErrorText>{error}</ErrorText></div>}
-      </Card>
 
-      <Card>
-        <div className="mb-4">
-          <h2 className="text-base font-semibold text-gray-900">規則版本歷史</h2>
-          <p className="mt-1 text-sm text-gray-500">
-            每次儲存規則都會建立一個新版本；「目前生效」比對的是上方目前載入的版本號，與後端依生效日選版的結果一致。
-          </p>
-        </div>
-        {ruleVersions ? (
-          ruleVersions.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-gray-200 text-xs text-gray-500">
-                    <th className="py-2 pr-4">版本</th>
-                    <th className="py-2 pr-4">生效日</th>
-                    <th className="py-2 pr-4">建立時間</th>
-                    <th className="py-2">目前生效</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {ruleVersions.map((v) => (
-                    <tr key={v.version} className="border-b border-gray-50">
-                      <td className="py-2 pr-4 font-medium text-gray-800">v{v.version}</td>
-                      <td className="py-2 pr-4 text-gray-600">{v.effectiveFrom}</td>
-                      <td className="py-2 pr-4 text-gray-600">{fmtDateTime(v.createdAt)}</td>
-                      <td className="py-2">
-                        {ruleConfig?.version === v.version ? (
-                          <span className="rounded-full bg-green-50 px-2 py-1 text-xs text-green-700">目前生效</span>
-                        ) : (
-                          <span className="text-xs text-gray-300">—</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          {ruleConfig ? (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div className="rounded-md border border-gray-200 p-3">
+                  <p className="mb-2 text-sm font-medium text-gray-700">勞保（普通事故＋就保合計）</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className={labelCls}>費率</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step="any"
+                        placeholder="例 0.125"
+                        className={inputCls}
+                        value={insuranceForm.labor.rate}
+                        onChange={(e) => patchInsurance("labor", "rate", e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>員工自付比例</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={1}
+                        step="any"
+                        placeholder="例 0.2"
+                        className={inputCls}
+                        value={insuranceForm.labor.employeeShare}
+                        onChange={(e) => patchInsurance("labor", "employeeShare", e.target.value)}
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div className="rounded-md border border-gray-200 p-3">
+                  <p className="mb-2 text-sm font-medium text-gray-700">健保</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className={labelCls}>費率</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step="any"
+                        placeholder="例 0.0517"
+                        className={inputCls}
+                        value={insuranceForm.health.rate}
+                        onChange={(e) => patchInsurance("health", "rate", e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>員工自付比例</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={1}
+                        step="any"
+                        placeholder="例 0.3"
+                        className={inputCls}
+                        value={insuranceForm.health.employeeShare}
+                        onChange={(e) => patchInsurance("health", "employeeShare", e.target.value)}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p className="text-xs text-gray-400">
+                四個欄位需全部填寫才會計費；任一欄留白＝整段不設定（薪資試算不扣勞健保），不是「費率 0」。
+              </p>
+
+              <EffectiveDateFields
+                mode={insuranceEffectiveMode}
+                date={insuranceEffectiveDate}
+                onModeChange={setInsuranceEffectiveMode}
+                onDateChange={setInsuranceEffectiveDate}
+                groupName="insurance-effective-mode"
+              />
+
+              <div>
+                <PrimaryButton onClick={onSaveInsuranceParams}>儲存勞健保費率</PrimaryButton>
+              </div>
             </div>
           ) : (
-            <Empty>尚無版本紀錄</Empty>
-          )
-        ) : ruleVersionsError ? (
-          <ErrorText>{ruleVersionsError}</ErrorText>
-        ) : (
-          <Empty>載入中…</Empty>
-        )}
-      </Card>
+            <Empty>載入中…</Empty>
+          )}
+        </Card>
+      )}
 
-      <Card>
-        <h2 className="mb-4 text-base font-semibold text-gray-900">表單參數設定</h2>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
-            <input
-              type="checkbox"
-              checked={myDataRequiresApproval}
-              onChange={(event) => setMyDataRequiresApproval(event.target.checked)}
-            />
-            My Data 修改需送審
-          </label>
-          <div className="sm:col-span-2">
-            <label className={labelCls}>可編輯資料區塊</label>
-            <div className="flex flex-wrap gap-2">
-              {FIELD_OPTIONS.map((field) => (
-                <button
-                  key={field.value}
-                  type="button"
-                  onClick={() => toggleEditableField(field.value)}
-                  className={`rounded-full px-3 py-1.5 text-sm font-medium ${
-                    parsedEditableFields.has(field.value)
-                      ? "text-white"
-                      : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-                  }`}
-                  style={parsedEditableFields.has(field.value) ? { backgroundColor: "var(--brand)" } : undefined}
-                >
-                  {field.label}
-                </button>
-              ))}
+      {panel === "json" && (
+        <Card>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-gray-900">差勤 / 薪資規則（原始 JSON）</h2>
+              <p className="mt-1 text-sm text-gray-500">
+                完整規則 DSL，供進階調整；「差勤參數」分頁的「加班與計薪參數」儲存後會同步更新這裡的內容。
+              </p>
             </div>
-            <input
-              className={`${inputCls} mt-2`}
-              value={editableFields}
-              onChange={(event) => setEditableFields(event.target.value)}
-              placeholder="basic,contact,education"
-            />
+            {ruleConfig && (
+              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">
+                版本 {ruleConfig.version}
+              </span>
+            )}
           </div>
-          <div>
-            <label className={labelCls}>附件上限 KB</label>
-            <input
-              type="number"
-              className={inputCls}
-              value={attachmentLimitKb}
-              onChange={(event) => setAttachmentLimitKb(event.target.value)}
-            />
-          </div>
-        </div>
-        <div className="mt-4">
-          <PrimaryButton onClick={onSaveFormParameters}>儲存表單參數</PrimaryButton>
-        </div>
-      </Card>
-
-      <Card>
-        <h2 className="mb-1 text-base font-semibold text-gray-900">員工端功能開放</h2>
-        <p className="mb-4 text-sm text-gray-500">
-          依身分類別限縮 ESS 可見／可進入的分頁；未勾＝該類別看不到，直接打網址也會被擋。打卡首頁與公告一律開放，不列在下方；實習生預設只另外開放五個（班表／打卡紀錄／申請／通知／我的資料）。
-        </p>
-        <div className="space-y-5">
-          {EMPLOYMENT_TYPES.map((type) => (
-            <div key={type}>
-              <p className="mb-2 text-sm font-medium text-gray-700">{EMPLOYMENT_TYPE_LABELS[type]}</p>
-              <div className="flex flex-wrap gap-2">
-                {ESS_TABS.filter((t) => !ALWAYS_VISIBLE_TAB_KEYS.has(t.key)).map((t) => {
-                  const checked = essTabsCfg[type]?.includes(t.key) ?? false;
-                  return (
-                    <label
-                      key={t.key}
-                      className="flex items-center gap-1.5 rounded-full border border-gray-200 px-3 py-1.5 text-sm text-gray-700"
-                    >
-                      <input type="checkbox" checked={checked} onChange={() => toggleEssTab(type, t.key)} />
-                      {t.label}
-                    </label>
-                  );
-                })}
+          {ruleConfig ? (
+            <>
+              <p className="mb-2 text-xs text-gray-500">
+                目前版本：{ruleConfig.version} {ruleConfig.isDefault ? "（預設值）" : ""}
+              </p>
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                className="h-96 w-full rounded-md border border-gray-300 p-3 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand)]"
+              />
+              <div className="mt-4">
+                <EffectiveDateFields
+                  mode={jsonEffectiveMode}
+                  date={jsonEffectiveDate}
+                  onModeChange={setJsonEffectiveMode}
+                  onDateChange={setJsonEffectiveDate}
+                  groupName="json-effective-mode"
+                />
               </div>
+              <div className="mt-4">
+                <PrimaryButton onClick={onSave}>儲存規則</PrimaryButton>
+              </div>
+            </>
+          ) : (
+            <Empty>載入中…</Empty>
+          )}
+        </Card>
+      )}
+
+      {panel === "versions" && (
+        <Card>
+          <div className="mb-4">
+            <h2 className="text-base font-semibold text-gray-900">規則版本歷史</h2>
+            <p className="mt-1 text-sm text-gray-500">
+              每次儲存規則都會建立一個新版本；「目前生效」比對的是目前載入的版本號（「原始 JSON」分頁顯示），與後端依生效日選版的結果一致。
+            </p>
+          </div>
+          {ruleVersions ? (
+            ruleVersions.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-200 text-xs text-gray-500">
+                      <th className="py-2 pr-4">版本</th>
+                      <th className="py-2 pr-4">生效日</th>
+                      <th className="py-2 pr-4">建立時間</th>
+                      <th className="py-2">目前生效</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ruleVersions.map((v) => (
+                      <tr key={v.version} className="border-b border-gray-50">
+                        <td className="py-2 pr-4 font-medium text-gray-800">v{v.version}</td>
+                        <td className="py-2 pr-4 text-gray-600">{v.effectiveFrom}</td>
+                        <td className="py-2 pr-4 text-gray-600">{fmtDateTime(v.createdAt)}</td>
+                        <td className="py-2">
+                          {ruleConfig?.version === v.version ? (
+                            <span className="rounded-full bg-green-50 px-2 py-1 text-xs text-green-700">目前生效</span>
+                          ) : (
+                            <span className="text-xs text-gray-300">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <Empty>尚無版本紀錄</Empty>
+            )
+          ) : ruleVersionsError ? (
+            <ErrorText>{ruleVersionsError}</ErrorText>
+          ) : (
+            <Empty>載入中…</Empty>
+          )}
+        </Card>
+      )}
+
+      {panel === "form" && (
+        <Card>
+          <h2 className="mb-4 text-base font-semibold text-gray-900">表單參數設定</h2>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={myDataRequiresApproval}
+                onChange={(event) => setMyDataRequiresApproval(event.target.checked)}
+              />
+              My Data 修改需送審
+            </label>
+            <div className="sm:col-span-2">
+              <label className={labelCls}>可編輯資料區塊</label>
+              <div className="flex flex-wrap gap-2">
+                {FIELD_OPTIONS.map((field) => (
+                  <button
+                    key={field.value}
+                    type="button"
+                    onClick={() => toggleEditableField(field.value)}
+                    className={`rounded-full px-3 py-1.5 text-sm font-medium ${
+                      parsedEditableFields.has(field.value)
+                        ? "text-white"
+                        : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                    }`}
+                    style={parsedEditableFields.has(field.value) ? { backgroundColor: "var(--brand)" } : undefined}
+                  >
+                    {field.label}
+                  </button>
+                ))}
+              </div>
+              <input
+                className={`${inputCls} mt-2`}
+                value={editableFields}
+                onChange={(event) => setEditableFields(event.target.value)}
+                placeholder="basic,contact,education"
+              />
             </div>
-          ))}
-        </div>
-        <div className="mt-4">
-          <PrimaryButton onClick={onSaveEssTabs}>儲存員工端功能開放設定</PrimaryButton>
-        </div>
-      </Card>
+            <div>
+              <label className={labelCls}>附件上限 KB</label>
+              <input
+                type="number"
+                className={inputCls}
+                value={attachmentLimitKb}
+                onChange={(event) => setAttachmentLimitKb(event.target.value)}
+              />
+            </div>
+          </div>
+          <div className="mt-4">
+            <PrimaryButton onClick={onSaveFormParameters}>儲存表單參數</PrimaryButton>
+          </div>
+        </Card>
+      )}
     </>
   );
 }
