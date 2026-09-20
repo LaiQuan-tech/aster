@@ -455,7 +455,8 @@ describe.skipIf(!migrated)("P1 attendance sheets — live", () => {
       .send({ reason: "x" })
     expect(reopen.status).toBe(409)
     expect(reopen.body.error).toBe("locked")
-  })
+  
+  }, 60_000) // 10 次以上的往返（送出→退回→再送→審→核→薪資 run→定稿→查），從台灣打東京 Supabase 實測 18 秒，預設 15 秒必炸
 })
 
 describe.skipIf(migrated)("P1 attendance sheets — schema not migrated (0039)", () => {
