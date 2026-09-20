@@ -189,6 +189,15 @@ async function fetchAll<T>(
   return rows
 }
 
+/**
+ * 併發時的 DB 層防線：forbid_paid_bonus_mutation（sql/0034）用 ERRCODE restrict_violation
+ * （23001）擋住對已 paid 批次的寫入。updateRun 的「查狀態 → 寫 items → 寫 run」之間若被
+ * 另一個 payRun 搶先，items 的寫入會撞到這個 trigger——那不是 500，是「已經不是 draft」。
+ */
+function isPaidFrozen(err: { code?: string; message?: string } | null | undefined): boolean {
+  return err?.code === "23001" || /已發放（paid）/.test(err?.message ?? "")
+}
+
 const EMPTY_TOTALS: BonusTotals = {
   amount: 0,
   entitledCumulative: 0,
@@ -533,14 +542,20 @@ export async function loadRun(tenantId: string, id: string): Promise<RunRow | nu
   return (data as RunRow | null) ?? null
 }
 
+// 單一 run 的明細也走分頁：PostgREST 預設 1000 列上限，超過會**靜默截斷**——
+// getRun／updateRun／payRun 都靠這支，截斷等於少發錢還看不出來。
 async function loadItemRows(tenantId: string, runId: string): Promise<ItemRow[]> {
-  const { data, error } = await supabaseAdmin
-    .from("bonus_run_items")
-    .select(ITEM_COLS)
-    .eq("tenant_id", tenantId)
-    .eq("run_id", runId)
-  if (error) throw new Error(`bonus-run loadItemRows: ${error.message}`)
-  return (data ?? []) as ItemRow[]
+  return fetchAll<ItemRow>(
+    (from, to) =>
+      supabaseAdmin
+        .from("bonus_run_items")
+        .select(ITEM_COLS)
+        .eq("tenant_id", tenantId)
+        .eq("run_id", runId)
+        .order("id", { ascending: true })
+        .range(from, to),
+    "bonus-run loadItemRows",
+  )
 }
 
 export async function listRuns(tenantId: string): Promise<SerializedRun[]> {
@@ -643,7 +658,10 @@ export async function updateRun(
       const { error: upErr } = await supabaseAdmin
         .from("bonus_run_items")
         .upsert(rows, { onConflict: "run_id,project_id,employee_id" })
-      if (upErr) throw new Error(`bonus-run updateRun (upsert items): ${upErr.message}`)
+      if (upErr) {
+        if (isPaidFrozen(upErr)) throw new BonusRunError(409, "not_draft", { status: "paid" })
+        throw new Error(`bonus-run updateRun (upsert items): ${upErr.message}`)
+      }
     }
     // 不在新結果裡的舊列：正式租戶刪不掉（no_hard_delete），就地歸零＋標 stale。
     const keep = new Set(rows.map((r) => paidBeforeKey(r.project_id, r.employee_id)))
@@ -662,17 +680,30 @@ export async function updateRun(
           snapshot: { ...(r.snapshot ?? {}), overpaidBy: 0, stale: true },
         })
         .eq("id", r.id)
-      if (sErr) throw new Error(`bonus-run updateRun (stale item): ${sErr.message}`)
+      if (sErr) {
+        if (isPaidFrozen(sErr)) throw new BonusRunError(409, "not_draft", { status: "paid" })
+        throw new Error(`bonus-run updateRun (stale item): ${sErr.message}`)
+      }
     }
     patch.totals = preview.totals
     patch.snapshot = preview.snapshot
   }
 
-  const { error } = await supabaseAdmin.from("bonus_runs").update(patch).eq("tenant_id", tenantId).eq("id", id)
+  // 與 payRun 同一套原子更新：WHERE status='draft' ＋ 受影響列數。併發的 payRun 先落地時
+  // 這裡命中 0 列（不是 error），回 409 not_draft，而不是讓 trigger 丟 500。
+  const { data: updated, error } = await supabaseAdmin
+    .from("bonus_runs")
+    .update(patch)
+    .eq("tenant_id", tenantId)
+    .eq("id", id)
+    .eq("status", "draft")
+    .select("id")
   if (error) {
     if (isUniqueViolation(error)) throw new BonusRunError(409, "label_exists", { label })
+    if (isPaidFrozen(error)) throw new BonusRunError(409, "not_draft", { status: "paid" })
     throw new Error(`bonus-run updateRun: ${error.message}`)
   }
+  if (!updated || updated.length === 0) throw new BonusRunError(409, "not_draft", { status: "paid" })
   await writeAuditLog({
     tenantId,
     tableName: "bonus_runs",
