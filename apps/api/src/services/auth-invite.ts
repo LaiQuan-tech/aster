@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js"
+import { createHash } from "node:crypto"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { isMailConfigured, sendMail } from "../lib/resend.js"
 import { parseCsv } from "../lib/csv.js"
@@ -77,7 +78,21 @@ function liteUser(user: { id: string; email?: string | null; app_metadata?: Reco
   return { id: user.id, email: user.email ?? null, appMetadata: user.app_metadata ?? {} }
 }
 
-/** 既有 auth user → recovery token；查無（404 user_not_found）→ null。 */
+/**
+ * 依 email 查 auth user，**不產生任何 token**（sql/0035 的 auth_user_by_email）。
+ * 用在所有「先看看這個 email 是誰的」的地方——generateLink 探測會輪替該帳號的
+ * recovery token，對不屬於本租戶的帳號造成副作用（見 resolveAuthUserForEmail）。
+ */
+export async function findAuthUserByEmail(email: string): Promise<AuthUserLite | null> {
+  const { data, error } = await supabaseAdmin.rpc("auth_user_by_email", { p_email: email })
+  if (error) throw new Error(`auth_user_by_email: ${error.message}`)
+  const row = (Array.isArray(data) ? data[0] : data) as { id: string; email: string | null; app_metadata: Record<string, unknown> | null } | undefined
+  if (!row?.id) return null
+  return { id: row.id, email: row.email ?? null, appMetadata: row.app_metadata ?? {} }
+}
+
+/** 既有 auth user → recovery token；查無（404 user_not_found）→ null。
+ * ⚠️ 會輪替該帳號的 recovery token：只在已確認歸屬／綁定、真的要寄之後呼叫。 */
 export async function recoveryLinkFor(email: string): Promise<LinkToken | null> {
   const { data, error } = await supabaseAdmin.auth.admin.generateLink({ type: "recovery", email })
   if (error) {
@@ -150,19 +165,24 @@ export async function resolveAuthUserForEmail(
 ): Promise<LinkToken & { fresh: boolean }> {
   // 先擋白名單，連 recovery token 都不替平台操作員產生。
   if (isPlatformAdminEmail(email)) throw new AccountError("email_in_other_tenant", 409, OTHER_TENANT_MESSAGE)
-  const existing = await recoveryLinkFor(email)
-  if (existing) {
-    assertOwnedByTenant(existing.user, tenantId)
+  // 順序刻意：查帳號（無副作用）→ 驗歸屬 → 驗綁定 → **最後**才 generateLink。
+  // 2026-09-20 前是先 generateLink 再驗歸屬，別租戶的 email 被拿來試一次，
+  // 對方帳號的 recovery token 就被輪替一次。
+  const found = await findAuthUserByEmail(email)
+  if (found) {
+    assertOwnedByTenant(found, tenantId)
     const { data: bound, error: boundErr } = await supabaseAdmin
       .from("employees")
       .select("id, name")
       .eq("tenant_id", tenantId)
-      .eq("user_id", existing.user.id)
+      .eq("user_id", found.id)
       .maybeSingle()
     if (boundErr) throw new Error(`resolveAuthUserForEmail (bound): ${boundErr.message}`)
     if (bound) {
       throw new AccountError("email_already_bound", 409, `此 Email 已綁定員工「${bound.name as string}」`)
     }
+    const existing = await recoveryLinkFor(email)
+    if (!existing) throw new AccountError("auth_user_missing", 409, "登入帳號在查詢後消失，請重試")
     return { ...existing, fresh: false }
   }
   const created = await inviteLinkFor(email, tenantId)
@@ -646,8 +666,15 @@ export async function bulkInviteFromCsv(opts: {
 
 /* ── 忘記密碼（未登入） ─────────────────────────────────────────────── */
 
-const forgotLastSent = new Map<string, number>()
-const FORGOT_WINDOW_MS = 60_000
+/** 同一 email 60 秒內只處理一次。節流狀態在 DB（rate_limits，sql/0035），跨 instance 有效。 */
+const FORGOT_WINDOW_SECONDS = 60
+
+async function allowForgot(email: string): Promise<boolean> {
+  const key = `forgot:${createHash("sha256").update(email).digest("hex")}`
+  const { data, error } = await supabaseAdmin.rpc("rate_limit_touch", { p_key: key, p_window_seconds: FORGOT_WINDOW_SECONDS })
+  if (error) throw new Error(`rate_limit_touch: ${error.message}`)
+  return data === true
+}
 
 export interface PasswordResetOutcome {
   sent: boolean
@@ -666,21 +693,16 @@ export interface PasswordResetOutcome {
  */
 export async function requestPasswordReset(emailRaw: string): Promise<PasswordResetOutcome> {
   const email = emailRaw.trim().toLowerCase()
-  const now = Date.now()
-  const last = forgotLastSent.get(email) ?? 0
-  if (now - last < FORGOT_WINDOW_MS) return { sent: false, found: false, throttled: true, eligible: false }
-  forgotLastSent.set(email, now)
-  // 簡單防止 Map 無限成長。
-  if (forgotLastSent.size > 5000) {
-    for (const [k, t] of forgotLastSent) if (now - t > FORGOT_WINDOW_MS) forgotLastSent.delete(k)
-  }
+  if (!(await allowForgot(email))) return { sent: false, found: false, throttled: true, eligible: false }
 
   // 平台操作員不走這條（沒有 tenant_id、沒有 employees 列）；連 token 都不產生。
   if (isPlatformAdminEmail(email)) return { sent: false, found: false, throttled: false, eligible: false }
 
-  const token = await recoveryLinkFor(email)
-  if (!token) return { sent: false, found: false, throttled: false, eligible: false }
-  const tenantId = token.user.appMetadata.tenant_id
+  // 先查（無副作用）、確認有資格寄，最後才產 recovery token——
+  // 不然「不存在／沒 tenant／沒綁定」這些不會寄信的情況也會白白輪替對方的 token。
+  const found = await findAuthUserByEmail(email)
+  if (!found) return { sent: false, found: false, throttled: false, eligible: false }
+  const tenantId = found.appMetadata.tenant_id
   if (typeof tenantId !== "string" || !tenantId) {
     return { sent: false, found: true, throttled: false, eligible: false }
   }
@@ -688,10 +710,13 @@ export async function requestPasswordReset(emailRaw: string): Promise<PasswordRe
     .from("employees")
     .select("id")
     .eq("tenant_id", tenantId)
-    .eq("user_id", token.user.id)
+    .eq("user_id", found.id)
     .maybeSingle()
   if (boundErr) throw new Error(`requestPasswordReset (bound): ${boundErr.message}`)
   if (!bound) return { sent: false, found: true, throttled: false, eligible: false }
+
+  const token = await recoveryLinkFor(email)
+  if (!token) return { sent: false, found: false, throttled: false, eligible: false }
 
   const appName = await tenantAppName(tenantId)
   const delivered = await deliverAccountLink({
