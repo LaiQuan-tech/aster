@@ -4,6 +4,7 @@ import request from "supertest"
 // .env is loaded by the vitest setupFile (src/__tests__/setup.ts) before this
 // module is imported, so the eagerly-constructed clients below have real creds.
 import { supabaseAdmin } from "../lib/supabase"
+import { purgeTestTenant } from "./helpers/purge"
 import { provisionTenant } from "../services/tenants"
 import { app } from "../app"
 
@@ -90,16 +91,9 @@ beforeAll(async () => {
 }, 60_000)
 
 afterAll(async () => {
-  // announcements → employees → tenants → auth users (respect FK order).
-  for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("announcements").delete().eq("tenant_id", tid)
-  }
-  for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
-  }
-  for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("tenants").delete().eq("id", tid)
-  }
+  // 09-20 前逐表手刪，模組二加的 announcement_versions／signature_sheets／acknowledgements
+  // 沒列到 → FK 擋住 → 每跑一次留一個租戶。改用 purge_test_tenant（所有有 tenant_id 的表一次清）。
+  for (const tid of createdTenantIds) await purgeTestTenant(tid)
   for (const uid of createdUserIds) {
     await supabaseAdmin.auth.admin.deleteUser(uid)
   }
