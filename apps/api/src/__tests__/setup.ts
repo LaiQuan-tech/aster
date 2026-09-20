@@ -17,9 +17,7 @@ process.env.ASTER_PROVISION_TEST_TENANTS = "true"
 // 案例會在幾秒內連打 in → out。要驗冷卻本身的案例自行在單一 it 內暫設後還原。
 process.env.PUNCH_COOLDOWN_SECONDS ??= "0"
 
-// /internal/* 端點（auto-archive、alert-notify…）要 INTERNAL_JOB_TOKEN 且 ENABLE_INTERNAL_JOBS=true；
-// 沒設 token 時路由回 404、沒開 jobs 回 409。projects.test 的自動封存案例只容忍 409，
-// 在沒設 token 的環境會拿到 404 而失敗（2026-09-15 交接記的「3＋1 個既有失敗」就是這個）。
-// 測試自己給一組值，不依賴機器上的 .env——這兩個變數在 request 時才被讀，setupFile 設定來得及。
-process.env.INTERNAL_JOB_TOKEN ??= "test-internal-job-token"
-process.env.ENABLE_INTERNAL_JOBS ??= "true"
+// ⚠️ 刻意**不**在這裡替測試補 INTERNAL_JOB_TOKEN／ENABLE_INTERNAL_JOBS：
+// /internal/* 排程端點是對「所有 active 租戶」跑的（auto-archive、alert-notify、
+// daily-settle…），整合測試打正式庫，開了就等於讓測試對正式租戶動手。
+// 要驗排程邏輯的測試請直接呼叫服務並指定 throwaway 租戶（見 projects.test 的 runJob）。
