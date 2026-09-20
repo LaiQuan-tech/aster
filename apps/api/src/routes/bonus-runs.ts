@@ -9,6 +9,7 @@ import { defaultRunLabel } from "../services/bonus-run.js"
 import {
   BonusRunError,
   buildSummary,
+  createReversalRun,
   createRun,
   deleteRun,
   getRun,
@@ -35,9 +36,11 @@ export const bonusRunsRouter = Router()
  * 路由順序：`/bonus-runs/preview`、`/bonus-runs/summary` 這些靜態路徑先註冊，`/:id`
  * 在後，且 `:id` 不是 uuid 時 `next()`——同 routes/disbursements.ts 的理由。
  *
- * **不做 void**：paid 批次是凍結快照（DB trigger 擋 UPDATE/DELETE）。發錯了的修正
- * 路徑是「再開一批」——下一季重算時累計口徑會自動把多發／少發的差額算回來
- * （少發補發、多發標 overpaid 不自動追討）。v1 不提供手動負數調整批次。
+ * **不做 void、改做紅字沖銷**（2026-09-20）：paid 批次是凍結快照（DB trigger 擋
+ * UPDATE/DELETE），不回頭改。`POST /bonus-runs/:id/reverse` 開一批 kind='reversal'
+ * 的 draft：每列金額取負、paid_before 接在原批之後；走既有的 pay 才生效，發放後
+ * 累計口徑對原批歸零，下一季重算等於原批沒發生過。只能沖銷最新一批 paid、一批只能
+ * 沖一次、沖銷批不能再被沖銷（services/bonus-run-store.ts createReversalRun）。
  */
 
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
@@ -263,6 +266,33 @@ bonusRunsRouter.post("/bonus-runs/:id/pay", ...guards, async (req: Request, res:
       return
     }
     res.status(200).json(detail)
+  } catch (err) {
+    handleError(err, res, next)
+  }
+})
+
+// ── POST /bonus-runs/:id/reverse {reason} — 對 paid 批次開紅字沖銷 draft ──
+const reverseBody = z.object({ reason: z.string().trim().min(1).max(2000) })
+bonusRunsRouter.post("/bonus-runs/:id/reverse", ...guards, async (req: Request, res: Response, next: NextFunction) => {
+  const tenantId = res.locals.tenantId as string
+  const id = req.params.id as string
+  if (!UUID_RE.test(id)) {
+    next()
+    return
+  }
+  const parsed = reverseBody.safeParse(req.body ?? {})
+  if (!parsed.success) {
+    res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+    return
+  }
+  try {
+    const actor = await actorOf(tenantId, req)
+    const detail = await createReversalRun(tenantId, actor, id, parsed.data.reason)
+    if (!detail) {
+      res.status(404).json({ error: "not_found" })
+      return
+    }
+    res.status(201).json(detail)
   } catch (err) {
     handleError(err, res, next)
   }

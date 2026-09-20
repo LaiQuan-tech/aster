@@ -247,13 +247,19 @@ export default function BonusRunsPage() {
                       <Link href={`/admin/bonus-runs/${r.id}`} className="font-medium" style={{ color: "var(--brand)" }}>
                         {r.label}
                       </Link>
+                      {r.kind === "reversal" && <span className="ml-1 rounded-full bg-rose-50 px-1.5 py-0.5 text-[11px] font-medium text-rose-700">沖銷</span>}
+                      {r.reversedByRunId && (
+                        <span className="ml-1 rounded-full bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600">
+                          {r.reversedByStatus === "paid" ? "已沖銷" : "沖銷中"}
+                        </span>
+                      )}
                     </td>
                     <td className="py-1.5 pr-2">
                       <StatusBadge status={r.status} />
                     </td>
                     <td className="py-1.5 pr-2 text-gray-600">{r.asOf}</td>
                     <td className="py-1.5 pr-2 text-gray-600">{r.paidOn ?? "—"}</td>
-                    <td className="py-1.5 pr-2 text-right font-medium text-gray-900">{fmtMoney(r.totals.amount)}</td>
+                    <td className={`py-1.5 pr-2 text-right font-medium ${r.totals.amount < 0 ? "text-rose-700" : "text-gray-900"}`}>{fmtMoney(r.totals.amount)}</td>
                     <td className="py-1.5 pr-2 text-right text-gray-600">{r.totals.employeeCount}</td>
                     <td className="py-1.5 pr-2 text-right text-gray-600">{r.totals.projectCount}</td>
                     <td className={`py-1.5 pr-2 text-right ${r.totals.overpaidCount > 0 ? "font-medium text-red-600" : "text-gray-400"}`}>

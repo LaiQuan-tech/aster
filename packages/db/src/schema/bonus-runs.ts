@@ -38,6 +38,15 @@ export const bonusRuns = pgTable(
     asOf: date("as_of").notNull(),
     /** 'draft' | 'paid'。合法值見 sql/0034 的 bonus_runs_status_chk。 */
     status: text("status").notNull().default("draft"),
+    /**
+     * 'regular'（季批次）| 'reversal'（沖銷批次，sql/0036）。
+     * paid 批次不可改、不可刪，「發錯了」的修正路徑是開一批**紅字沖銷**：
+     * 金額逐列取負、發放後累計口徑自動歸零，下一季重算等於原批次沒發生過。
+     * 沖銷批次自己也是 paid 即凍結；一批只能被沖銷一次（partial unique）。
+     */
+    kind: text("kind").notNull().default("regular"),
+    /** kind='reversal' 時指向被沖銷的那一批（同租戶、必為 paid regular）。 */
+    reversesRunId: uuid("reverses_run_id"),
     /** 實際發放日。status='paid' 時必填（CHECK 見 sql/0034）。 */
     paidOn: date("paid_on"),
     /** 本批次彙總金額，形狀由應用層定義。 */
@@ -59,6 +68,10 @@ export const bonusRuns = pgTable(
   (table) => ({
     tenantLabelUnique: uniqueIndex("bonus_runs_tenant_label_uq")
       .on(table.tenantId, table.label)
+      .where(sql`${table.deletedAt} is null`),
+    /** 一批只能被有效沖銷一次（軟刪的沖銷草稿不算）。 */
+    reversesUnique: uniqueIndex("bonus_runs_reverses_uq")
+      .on(table.reversesRunId)
       .where(sql`${table.deletedAt} is null`),
     tenantStatusIdx: index("bonus_runs_tenant_status_idx").on(table.tenantId, table.status),
   }),

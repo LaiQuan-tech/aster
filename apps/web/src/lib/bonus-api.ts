@@ -27,11 +27,19 @@ export interface BonusTotals {
   skipped: BonusSkipped[]
 }
 
+export type BonusRunKind = "regular" | "reversal"
+
 export interface BonusRun {
   id: string
   label: string
   asOf: string
   status: BonusRunStatus
+  /** regular＝季批次；reversal＝紅字沖銷（金額為負） */
+  kind: BonusRunKind
+  reversesRunId: string | null
+  /** 被哪個有效沖銷批次沖掉了（含草稿＝沖銷中） */
+  reversedByRunId: string | null
+  reversedByStatus: BonusRunStatus | null
   paidOn: string | null
   totals: BonusTotals
   note: string | null
@@ -172,6 +180,11 @@ export function payBonusRun(id: string, body: { paidOn?: string } = {}) {
   return apiFetch<BonusRunDetail>(`/bonus-runs/${id}/pay`, { method: "POST", body: JSON.stringify(body) })
 }
 
+/** 對 paid 批次開紅字沖銷草稿；之後走 payBonusRun 才生效。 */
+export function reverseBonusRun(id: string, reason: string) {
+  return apiFetch<BonusRunDetail>(`/bonus-runs/${id}/reverse`, { method: "POST", body: JSON.stringify({ reason }) })
+}
+
 export function deleteBonusRun(id: string, reason: string) {
   return apiFetch<{ ok: true; id: string }>(`/bonus-runs/${id}`, { method: "DELETE", body: JSON.stringify({ reason }) })
 }
@@ -207,6 +220,11 @@ const BONUS_ERRORS: Record<string, string> = {
   label_exists: "這個期別已經有一筆批次（同期別只能一筆；先刪掉舊草稿再建）",
   not_draft: "已發放的批次是凍結快照，不能修改或刪除",
   stale_paid_before: "這份草稿建立後又有別的批次發放了，累計已發已過期——請先「重算」再發放",
+  not_paid: "只有已發放的批次才能沖銷；草稿直接刪除即可",
+  already_reversed: "這批已經有沖銷批次了（可能還是草稿，到批次列表找「-沖銷」那筆）",
+  not_latest_paid: "只能沖銷最新一批已發放的批次——後面已經有別批發放了，要沖就從最新的往回沖",
+  reversal_of_reversal: "沖銷批次不能再被沖銷",
+  reversal_not_editable: "沖銷批次的內容是原批取負，不能重算或改期別；只能改備註",
   invalid_body: "欄位格式不正確",
   invalid_query: "查詢參數不正確",
   not_found: "找不到這筆批次（可能已刪除）",

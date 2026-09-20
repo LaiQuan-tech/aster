@@ -12,9 +12,11 @@ import {
   humanizeBonusError,
   patchBonusRun,
   payBonusRun,
+  reverseBonusRun,
   todayKey,
   type BonusRunDetail,
 } from "@/lib/bonus-api";
+import Link from "next/link";
 import { ItemsTable, SkippedList, Stat, StatusBadge } from "../_components";
 
 /**
@@ -95,6 +97,21 @@ export default function BonusRunDetailPage() {
       setShowPay(false);
     });
   }
+  async function reverse() {
+    if (!run) return;
+    const reason = prompt(
+      `對 ${run.label} 開沖銷批次？\n會建立一批金額全部取負的草稿（${fmtMoney(-run.totals.amount)} 元），你確認後再「發放」才生效；發放後這批在累計口徑上歸零。\n請填沖銷理由（會留在稽核紀錄）：`,
+    );
+    if (reason === null) return;
+    if (!reason.trim()) {
+      setError("沖銷理由必填");
+      return;
+    }
+    await act("reverse", async () => {
+      const d = await reverseBonusRun(id, reason.trim());
+      router.push(`/admin/bonus-runs/${d.run.id}`);
+    });
+  }
   async function remove() {
     if (!run) return;
     const reason = prompt(`刪除草稿 ${run.label}？請填理由（會留在稽核紀錄）：`);
@@ -173,17 +190,31 @@ export default function BonusRunDetailPage() {
         <Stat label="超發列" value={run.totals.overpaidCount > 0 ? `${run.totals.overpaidCount} 列（不自動追討）` : "無"} tone={run.totals.overpaidCount > 0 ? "down" : undefined} />
       </div>
 
+      {run.kind === "reversal" && (
+        <Card>
+          <p className="text-sm text-rose-800">
+            這是<b>沖銷批次</b>：內容是{" "}
+            {run.reversesRunId ? (
+              <Link href={`/admin/bonus-runs/${run.reversesRunId}`} className="underline">被沖銷批次</Link>
+            ) : (
+              "被沖銷批次"
+            )}{" "}
+            的每一列金額取負。{isDraft ? "發放後" : "已發放，"}該批在累計口徑上歸零，下一季重算等於它沒發生過。沖銷批次不能重算、不能改期別。
+          </p>
+        </Card>
+      )}
+
       {isDraft ? (
         <Card>
           <h2 className="mb-3 text-base font-semibold text-gray-800">草稿設定</h2>
           <div className="grid gap-3 md:grid-cols-3">
             <div>
               <label className={labelCls}>期別</label>
-              <input className={inputCls} value={fLabel} onChange={(e) => setFLabel(e.target.value)} />
+              <input className={inputCls} value={fLabel} onChange={(e) => setFLabel(e.target.value)} disabled={run.kind === "reversal"} />
             </div>
             <div>
               <label className={labelCls}>試算基準日</label>
-              <input type="date" className={inputCls} value={fAsOf} onChange={(e) => setFAsOf(e.target.value)} />
+              <input type="date" className={inputCls} value={fAsOf} onChange={(e) => setFAsOf(e.target.value)} disabled={run.kind === "reversal"} />
             </div>
             <div>
               <label className={labelCls}>備註</label>
@@ -191,21 +222,23 @@ export default function BonusRunDetailPage() {
             </div>
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-2">
+            {run.kind !== "reversal" && (
+              <button
+                type="button"
+                className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60 md:rounded-md"
+                onClick={recompute}
+                disabled={busy !== null || !fAsOf}
+              >
+                {busy === "recompute" ? "重算中…" : "重算明細（用最新入帳／成員）"}
+              </button>
+            )}
             <button
               type="button"
               className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60 md:rounded-md"
-              onClick={recompute}
-              disabled={busy !== null || !fAsOf}
-            >
-              {busy === "recompute" ? "重算中…" : "重算明細（用最新入帳／成員）"}
-            </button>
-            <button
-              type="button"
-              className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60 md:rounded-md"
-              onClick={saveNote}
+              onClick={run.kind === "reversal" ? () => void act("note", async () => setDetail(await patchBonusRun(id, { note: fNote.trim() || null }))) : saveNote}
               disabled={busy !== null}
             >
-              {busy === "note" ? "儲存中…" : "儲存期別／備註"}
+              {busy === "note" ? "儲存中…" : run.kind === "reversal" ? "儲存備註" : "儲存期別／備註"}
             </button>
             <PrimaryButton onClick={() => setShowPay((v) => !v)} disabled={busy !== null}>
               標記已發放…
@@ -234,9 +267,27 @@ export default function BonusRunDetailPage() {
         </Card>
       ) : (
         <Card>
-          <p className="text-sm text-gray-600">
-            已發放批次是凍結快照：不能修改或刪除。發錯了請在下一季重算——累計口徑會自動補發少發的、標出多發的（不自動追討）。
-          </p>
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="text-sm text-gray-600">
+              已發放批次是凍結快照：不能修改或刪除。
+              {run.kind === "regular" && !run.reversedByRunId && "發錯了可以「沖銷」：另開一批金額取負的批次，發放後這批在累計口徑上歸零。"}
+            </p>
+            {run.kind === "regular" && !run.reversedByRunId && (
+              <button
+                type="button"
+                className="ml-auto rounded-xl border border-rose-200 px-4 py-2 text-sm font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-60 md:rounded-md"
+                onClick={reverse}
+                disabled={busy !== null}
+              >
+                {busy === "reverse" ? "建立中…" : "沖銷這一批…"}
+              </button>
+            )}
+            {run.reversedByRunId && (
+              <Link href={`/admin/bonus-runs/${run.reversedByRunId}`} className="ml-auto text-sm underline" style={{ color: "var(--brand)" }}>
+                {run.reversedByStatus === "paid" ? "已被沖銷 → 看沖銷批次" : "沖銷草稿建立中 → 前往發放"}
+              </Link>
+            )}
+          </div>
         </Card>
       )}
 

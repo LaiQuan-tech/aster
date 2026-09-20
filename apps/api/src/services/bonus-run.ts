@@ -90,6 +90,54 @@ export type BonusTotals = {
 
 export type BonusRunCalc = { items: BonusItemCalc[]; totals: BonusTotals }
 
+export const BONUS_RUN_KINDS = ["regular", "reversal"] as const
+export type BonusRunKind = (typeof BONUS_RUN_KINDS)[number]
+
+/* ──────────────────────────────────────────────────────────────────
+ * 紅字沖銷（reversal）
+ *
+ * paid 批次凍結不可改。要「作廢」一批已發放的獎金，開一批 reversal：
+ *   • 每列 amount 取負（-0 正規化成 0）
+ *   • paidBefore 接在原批之後（原 paidBefore + 原 amount）——沖銷當下的
+ *     「已發放累計」就是這個數，payRun 的 stale_paid_before 一致性檢查照樣有效
+ *   • entitledCumulative／received／share 等事實欄位原樣複製（那是原批當時的世界）
+ *   • overpaid 一律 false：沖銷不是新的發放判斷
+ * 發放後 loadPaidBefore 對同 (project, employee) 的加總 = 原 amount + (−原 amount) = 0，
+ * 下一季重算等於原批沒發生過（少發的補發回來、多發的不再標 overpaid）。
+ * ────────────────────────────────────────────────────────────────── */
+
+const negate = (n: number): number => (n === 0 ? 0 : -n)
+
+export function reversalItemsOf(items: BonusItemCalc[]): BonusItemCalc[] {
+  return items.map((it) => ({
+    ...it,
+    paidBefore: round2(it.paidBefore + it.amount),
+    amount: negate(round2(it.amount)),
+    overpaid: false,
+    overpaidBy: 0,
+  }))
+}
+
+export function reversalTotalsOf(totals: BonusTotals, items: BonusItemCalc[]): BonusTotals {
+  const reversed = reversalItemsOf(items)
+  return {
+    // 沖銷列本身已是負數，直接加總；negate 只用來把 -0 正規化
+    amount: negate(negate(round2(reversed.reduce((s, i) => s + i.amount, 0)))),
+    // 沖銷批次的「累計應發／已發放」沿用原批口徑，讓詳情頁對得上原批
+    entitledCumulative: totals.entitledCumulative,
+    paidBefore: round2(reversed.reduce((s, i) => s + i.paidBefore, 0)),
+    itemCount: reversed.length,
+    employeeCount: new Set(reversed.map((i) => i.employeeId)).size,
+    projectCount: new Set(reversed.map((i) => i.projectId)).size,
+    overpaidCount: 0,
+    skipped: [],
+  }
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100
+}
+
 /** paid_before 的 Map key：同 (project, employee) 一格。 */
 export function paidBeforeKey(projectId: string, employeeId: string): string {
   return `${projectId}:${employeeId}`
