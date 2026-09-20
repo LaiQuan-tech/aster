@@ -36,7 +36,7 @@ tenantRouter.get(
   },
 )
 
-const tenantSettingsSchema = z.object({
+export const tenantSettingsSchema = z.object({
   branding: z
     .object({
       appName: z.string().trim().min(1).optional(),
@@ -123,6 +123,28 @@ const tenantSettingsSchema = z.object({
       attendance: z
         .object({
           blockApproveOnUnsettledLeave: z.boolean().optional(),
+        })
+        .optional(),
+      /**
+       * 規則參數頁「表單參數」與「差勤模組設定」兩張卡（module-settings/page.tsx）。
+       * 2026-09-20 前這兩個鍵沒宣告在這裡，zod 會整個 strip 掉——前端存了、畫面顯示成功、
+       * DB 裡卻沒有，下次進頁面又變回預設值。目前只有前端讀，API 端沒有邏輯依賴。
+       */
+      formParameters: z
+        .object({
+          myDataRequiresApproval: z.boolean().optional(),
+          editableFields: z.array(z.string().trim().min(1)).max(50).optional(),
+          attachmentLimitKb: z.number().int().min(1).max(50_000).optional(),
+        })
+        .optional(),
+      attendanceModule: z
+        .object({
+          activeYear: z.string().trim().regex(/^\d{4}$/).optional(),
+          yearStatus: z.enum(["draft", "published", "locked"]).optional(),
+          workCalendar: z.string().trim().max(60).optional(),
+          attendanceCutoffDay: z.number().int().min(1).max(31).optional(),
+          allowEmployeeDispute: z.boolean().optional(),
+          enableAutoSettlement: z.boolean().optional(),
         })
         .optional(),
     })
