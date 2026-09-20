@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest"
+import { TW_HOLIDAYS } from "../lib/tw-holidays"
 import { createClient } from "@supabase/supabase-js"
 import request from "supertest"
 import { supabaseAdmin } from "../lib/supabase"
@@ -138,11 +139,26 @@ describe("P0 /calendar", () => {
     expect(put.status).toBe(200)
     expect(put.body.upserted).toBe(2)
     expect(gen.status).toBe(200)
-    // 2026 has 104 weekend days; 6/20 (Sat) was set manually → skipped; 6/19 is
-    // both manual and a built-in holiday → skipped by the import step.
-    expect(gen.body.generated).toBe(103)
-    expect(gen.body.imported).toBe(20)
-    expect(gen.body.skipped).toBe(2)
+    // 期望值從假日表算出來，不寫死：generate 對「本身就是國定假日的週末」不產 rest_day
+    // （留給 import 步驟寫成 fixed_holiday——國定假日出勤的計薪倍率不同，不能被
+    // rest_day 蓋掉）。2026：104 個週末 − 1 個人工（6/20）− 落在週末的假日數；
+    // 假日 21 筆 − 1 個人工（6/19）＝ import 20；skipped ＝ 1 + 1。
+    // 舊斷言寫死 103 是在「週末不排除假日」的舊行為下算的，實作改了測試沒跟上。
+    const holidays2026 = (TW_HOLIDAYS[2026] ?? []).map((h) => h.date)
+    const weekends2026: string[] = []
+    for (let d = new Date(Date.UTC(2026, 0, 1)); d.getUTCFullYear() === 2026; d.setUTCDate(d.getUTCDate() + 1)) {
+      const dow = d.getUTCDay()
+      if (dow === 0 || dow === 6) weekends2026.push(d.toISOString().slice(0, 10))
+    }
+    const manual = new Set(["2026-06-19", "2026-06-20"])
+    const holidaySet = new Set(holidays2026)
+    const expectedGenerated = weekends2026.filter((d) => !manual.has(d) && !holidaySet.has(d)).length
+    const expectedImported = holidays2026.filter((d) => !manual.has(d)).length
+    const expectedSkipped = weekends2026.filter((d) => manual.has(d)).length + (holidays2026.length - expectedImported)
+    expect(weekends2026.length).toBe(104)
+    expect(gen.body.generated).toBe(expectedGenerated)
+    expect(gen.body.imported).toBe(expectedImported)
+    expect(gen.body.skipped).toBe(expectedSkipped)
     expect(get.status).toBe(200)
     const days = get.body.days as Array<{ date: string; day_type: string; source: string; label: string | null }>
     expect(days.find((d) => d.date === "2026-06-19")).toMatchObject({ day_type: "fixed_holiday", source: "manual", label: "端午節" })
