@@ -8,6 +8,9 @@ import {
   buildBonusSummary,
   computeBonusRun,
   paidBeforeKey,
+  reversalItemsOf,
+  reversalTotalsOf,
+  type BonusRunKind,
   type BonusItemCalc,
   type BonusProjectInput,
   type BonusRunStatus,
@@ -59,7 +62,7 @@ export type Actor = { empId: string | null }
  * ────────────────────────────────────────────────────────────────── */
 
 const RUN_COLS =
-  "id, tenant_id, label, as_of, status, paid_on, totals, snapshot, note, created_by_emp_id, paid_by_emp_id, created_at, updated_at, deleted_at, deleted_by_emp_id, delete_reason"
+  "id, tenant_id, label, as_of, status, kind, reverses_run_id, paid_on, totals, snapshot, note, created_by_emp_id, paid_by_emp_id, created_at, updated_at, deleted_at, deleted_by_emp_id, delete_reason"
 
 type RunRow = {
   id: string
@@ -67,6 +70,8 @@ type RunRow = {
   label: string
   as_of: string
   status: string
+  kind: string
+  reverses_run_id: string | null
   paid_on: string | null
   totals: BonusTotals | Record<string, never> | null
   snapshot: Record<string, unknown> | null
@@ -120,6 +125,13 @@ export type SerializedRun = {
   label: string
   asOf: string
   status: BonusRunStatus
+  /** regular＝季批次；reversal＝紅字沖銷批次（金額為負）。 */
+  kind: BonusRunKind
+  /** kind=reversal 時：被沖銷的批次。 */
+  reversesRunId: string | null
+  /** 這一批被哪個（有效的）沖銷批次沖掉了；含草稿——草稿代表「沖銷中」。 */
+  reversedByRunId: string | null
+  reversedByStatus: BonusRunStatus | null
   paidOn: string | null
   totals: BonusTotals
   note: string | null
@@ -189,6 +201,15 @@ async function fetchAll<T>(
   return rows
 }
 
+/**
+ * 併發時的 DB 層防線：forbid_paid_bonus_mutation（sql/0034）用 ERRCODE restrict_violation
+ * （23001）擋住對已 paid 批次的寫入。updateRun 的「查狀態 → 寫 items → 寫 run」之間若被
+ * 另一個 payRun 搶先，items 的寫入會撞到這個 trigger——那不是 500，是「已經不是 draft」。
+ */
+function isPaidFrozen(err: { code?: string; message?: string } | null | undefined): boolean {
+  return err?.code === "23001" || /已發放（paid）/.test(err?.message ?? "")
+}
+
 const EMPTY_TOTALS: BonusTotals = {
   amount: 0,
   entitledCumulative: 0,
@@ -200,13 +221,17 @@ const EMPTY_TOTALS: BonusTotals = {
   skipped: [],
 }
 
-function serializeRun(row: RunRow): SerializedRun {
+function serializeRun(row: RunRow, reversedBy?: { id: string; status: string } | null): SerializedRun {
   const t = (row.totals ?? {}) as Partial<BonusTotals>
   return {
     id: row.id,
     label: row.label,
     asOf: row.as_of,
     status: row.status as BonusRunStatus,
+    kind: (row.kind === "reversal" ? "reversal" : "regular") as BonusRunKind,
+    reversesRunId: row.reverses_run_id,
+    reversedByRunId: reversedBy?.id ?? null,
+    reversedByStatus: (reversedBy?.status as BonusRunStatus | undefined) ?? null,
     paidOn: row.paid_on,
     totals: { ...EMPTY_TOTALS, ...t, skipped: Array.isArray(t.skipped) ? t.skipped : [] },
     note: row.note,
@@ -533,14 +558,20 @@ export async function loadRun(tenantId: string, id: string): Promise<RunRow | nu
   return (data as RunRow | null) ?? null
 }
 
+// 單一 run 的明細也走分頁：PostgREST 預設 1000 列上限，超過會**靜默截斷**——
+// getRun／updateRun／payRun 都靠這支，截斷等於少發錢還看不出來。
 async function loadItemRows(tenantId: string, runId: string): Promise<ItemRow[]> {
-  const { data, error } = await supabaseAdmin
-    .from("bonus_run_items")
-    .select(ITEM_COLS)
-    .eq("tenant_id", tenantId)
-    .eq("run_id", runId)
-  if (error) throw new Error(`bonus-run loadItemRows: ${error.message}`)
-  return (data ?? []) as ItemRow[]
+  return fetchAll<ItemRow>(
+    (from, to) =>
+      supabaseAdmin
+        .from("bonus_run_items")
+        .select(ITEM_COLS)
+        .eq("tenant_id", tenantId)
+        .eq("run_id", runId)
+        .order("id", { ascending: true })
+        .range(from, to),
+    "bonus-run loadItemRows",
+  )
 }
 
 export async function listRuns(tenantId: string): Promise<SerializedRun[]> {
@@ -552,7 +583,23 @@ export async function listRuns(tenantId: string): Promise<SerializedRun[]> {
     .order("as_of", { ascending: false })
     .order("created_at", { ascending: false })
   if (error) throw new Error(`bonus-run listRuns: ${error.message}`)
-  return ((data ?? []) as RunRow[]).map(serializeRun)
+  const rows = (data ?? []) as RunRow[]
+  const reversedBy = new Map<string, { id: string; status: string }>()
+  for (const r of rows) if (r.kind === "reversal" && r.reverses_run_id) reversedBy.set(r.reverses_run_id, { id: r.id, status: r.status })
+  return rows.map((r) => serializeRun(r, reversedBy.get(r.id) ?? null))
+}
+
+/** 有效的（未軟刪）沖銷批次，指向 runId 的那一筆；沒有回 null。 */
+async function reversalOf(tenantId: string, runId: string): Promise<{ id: string; status: string } | null> {
+  const { data, error } = await supabaseAdmin
+    .from("bonus_runs")
+    .select("id, status")
+    .eq("tenant_id", tenantId)
+    .eq("reverses_run_id", runId)
+    .is("deleted_at", null)
+    .maybeSingle()
+  if (error) throw new Error(`bonus-run reversalOf: ${error.message}`)
+  return data ? { id: data.id as string, status: data.status as string } : null
 }
 
 export type RunDetail = { run: SerializedRun; items: SerializedItem[]; snapshot: Record<string, unknown> | null }
@@ -562,7 +609,7 @@ export async function getRun(tenantId: string, id: string): Promise<RunDetail | 
   if (!row) return null
   const items = (await loadItemRows(tenantId, id)).filter((r) => !isStale(r)).map(serializeItem)
   items.sort(compareItems)
-  return { run: serializeRun(row), items, snapshot: row.snapshot }
+  return { run: serializeRun(row, await reversalOf(tenantId, id)), items, snapshot: row.snapshot }
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -629,6 +676,10 @@ export async function updateRun(
   const current = await loadRun(tenantId, id)
   if (!current) return null
   if (current.status !== "draft") throw new BonusRunError(409, "not_draft", { status: current.status })
+  // 沖銷批次的內容是原批取負，不是試算結果：重算會把它覆蓋成一般季批次。只准改備註。
+  if (current.kind === "reversal" && (opts.recompute === true || input.asOf !== undefined || input.label !== undefined)) {
+    throw new BonusRunError(409, "reversal_not_editable")
+  }
 
   const asOf = input.asOf ?? current.as_of
   const label = input.label ?? current.label
@@ -643,7 +694,10 @@ export async function updateRun(
       const { error: upErr } = await supabaseAdmin
         .from("bonus_run_items")
         .upsert(rows, { onConflict: "run_id,project_id,employee_id" })
-      if (upErr) throw new Error(`bonus-run updateRun (upsert items): ${upErr.message}`)
+      if (upErr) {
+        if (isPaidFrozen(upErr)) throw new BonusRunError(409, "not_draft", { status: "paid" })
+        throw new Error(`bonus-run updateRun (upsert items): ${upErr.message}`)
+      }
     }
     // 不在新結果裡的舊列：正式租戶刪不掉（no_hard_delete），就地歸零＋標 stale。
     const keep = new Set(rows.map((r) => paidBeforeKey(r.project_id, r.employee_id)))
@@ -662,17 +716,30 @@ export async function updateRun(
           snapshot: { ...(r.snapshot ?? {}), overpaidBy: 0, stale: true },
         })
         .eq("id", r.id)
-      if (sErr) throw new Error(`bonus-run updateRun (stale item): ${sErr.message}`)
+      if (sErr) {
+        if (isPaidFrozen(sErr)) throw new BonusRunError(409, "not_draft", { status: "paid" })
+        throw new Error(`bonus-run updateRun (stale item): ${sErr.message}`)
+      }
     }
     patch.totals = preview.totals
     patch.snapshot = preview.snapshot
   }
 
-  const { error } = await supabaseAdmin.from("bonus_runs").update(patch).eq("tenant_id", tenantId).eq("id", id)
+  // 與 payRun 同一套原子更新：WHERE status='draft' ＋ 受影響列數。併發的 payRun 先落地時
+  // 這裡命中 0 列（不是 error），回 409 not_draft，而不是讓 trigger 丟 500。
+  const { data: updated, error } = await supabaseAdmin
+    .from("bonus_runs")
+    .update(patch)
+    .eq("tenant_id", tenantId)
+    .eq("id", id)
+    .eq("status", "draft")
+    .select("id")
   if (error) {
     if (isUniqueViolation(error)) throw new BonusRunError(409, "label_exists", { label })
+    if (isPaidFrozen(error)) throw new BonusRunError(409, "not_draft", { status: "paid" })
     throw new Error(`bonus-run updateRun: ${error.message}`)
   }
+  if (!updated || updated.length === 0) throw new BonusRunError(409, "not_draft", { status: "paid" })
   await writeAuditLog({
     tenantId,
     tableName: "bonus_runs",
@@ -730,6 +797,123 @@ export async function payRun(tenantId: string, actor: Actor, id: string, paidOn:
     context: "POST /bonus-runs/:id/pay",
   })
   return getRun(tenantId, id)
+}
+
+/**
+ * 開一批紅字沖銷（draft）。規則：
+ *   • 原批必須是 paid 的 regular（draft 直接刪就好；沖銷批不能再被沖銷）
+ *   • 一批只能被有效沖銷一次（DB partial unique 兜底，這裡先給明確錯誤）
+ *   • 只能沖銷**最新一批** paid regular：後面若已有別批發放，那批的 paid_before
+ *     是建立在原批之上的，回頭沖掉前一批會讓後批的數字失真——要沖就從最新的往回沖
+ * 建好是 draft，走既有的 pay 才生效（pay 前的 stale_paid_before 檢查照樣保護）。
+ */
+export async function createReversalRun(tenantId: string, actor: Actor, runId: string, reason: string): Promise<RunDetail | null> {
+  const original = await loadRun(tenantId, runId)
+  if (!original) return null
+  if (original.status !== "paid") throw new BonusRunError(409, "not_paid", { status: original.status })
+  if (original.kind === "reversal") throw new BonusRunError(409, "reversal_of_reversal")
+  const existing = await reversalOf(tenantId, runId)
+  if (existing) throw new BonusRunError(409, "already_reversed", { runId: existing.id, status: existing.status })
+
+  const { data: later, error: laterErr } = await supabaseAdmin
+    .from("bonus_runs")
+    .select("id, label, paid_on")
+    .eq("tenant_id", tenantId)
+    .eq("status", "paid")
+    .eq("kind", "regular")
+    .is("deleted_at", null)
+    .neq("id", runId)
+    .or(`paid_on.gt.${original.paid_on},and(paid_on.eq.${original.paid_on},created_at.gt.${original.created_at})`)
+    .limit(1)
+  if (laterErr) throw new Error(`bonus-run createReversalRun (later): ${laterErr.message}`)
+  if (later && later.length > 0) {
+    throw new BonusRunError(409, "not_latest_paid", { laterRunId: later[0].id as string, laterLabel: later[0].label as string })
+  }
+
+  const sourceItems = (await loadItemRows(tenantId, runId)).filter((r) => !isStale(r))
+  const calc = sourceItems.map((r) => ({
+    projectId: r.project_id,
+    employeeId: r.employee_id,
+    roleInProject: (r.snapshot?.roleInProject as string | null | undefined) ?? null,
+    shareMode: r.share_mode,
+    sharePct: num(r.share_pct),
+    shareAmount: num(r.share_amount),
+    bonusPool: num(r.bonus_pool),
+    contractTotal: num(r.contract_total) ?? 0,
+    receivedTotal: num(r.received_total) ?? 0,
+    receivedPct: num(r.received_pct) ?? 0,
+    entitledCumulative: num(r.entitled_cumulative) ?? 0,
+    paidBefore: num(r.paid_before) ?? 0,
+    amount: num(r.amount) ?? 0,
+    overpaid: r.overpaid,
+    overpaidBy: typeof r.snapshot?.overpaidBy === "number" ? (r.snapshot.overpaidBy as number) : 0,
+  }))
+  const reversed = reversalItemsOf(calc)
+  const totals = reversalTotalsOf((original.totals ?? EMPTY_TOTALS) as BonusTotals, calc)
+  const label = `${original.label}-沖銷`
+
+  const { data: run, error } = await supabaseAdmin
+    .from("bonus_runs")
+    .insert({
+      tenant_id: tenantId,
+      label,
+      as_of: original.as_of,
+      status: "draft",
+      kind: "reversal",
+      reverses_run_id: runId,
+      totals,
+      snapshot: { reversalOf: runId, reversalOfLabel: original.label, reason, originalPaidOn: original.paid_on },
+      note: reason,
+      created_by_emp_id: actor.empId,
+    })
+    .select(RUN_COLS)
+    .single()
+  if (error || !run) {
+    if (error && isUniqueViolation(error)) {
+      // 撞到 bonus_runs_reverses_uq（併發重複沖銷）或 label 唯一
+      throw new BonusRunError(409, "already_reversed", { label })
+    }
+    throw new Error(`bonus-run createReversalRun: ${error?.message}`)
+  }
+  const newRunId = run.id as string
+  const rows = reversed.map((i, idx) => ({
+    tenant_id: tenantId,
+    run_id: newRunId,
+    project_id: i.projectId,
+    employee_id: i.employeeId,
+    share_mode: i.shareMode,
+    share_pct: i.sharePct,
+    share_amount: i.shareAmount,
+    bonus_pool: i.bonusPool,
+    contract_total: i.contractTotal,
+    received_total: i.receivedTotal,
+    received_pct: i.receivedPct,
+    entitled_cumulative: i.entitledCumulative,
+    paid_before: i.paidBefore,
+    amount: i.amount,
+    overpaid: false,
+    snapshot: { ...(sourceItems[idx].snapshot ?? {}), overpaidBy: 0, stale: false, reversalOfItemId: sourceItems[idx].id },
+  }))
+  if (rows.length > 0) {
+    const { error: iErr } = await supabaseAdmin.from("bonus_run_items").insert(rows)
+    if (iErr) {
+      await supabaseAdmin
+        .from("bonus_runs")
+        .update({ deleted_at: new Date().toISOString(), deleted_by_emp_id: actor.empId, delete_reason: `reversal items insert failed: ${iErr.message}` })
+        .eq("id", newRunId)
+      throw new Error(`bonus-run createReversalRun (items): ${iErr.message}`)
+    }
+  }
+  await writeAuditLog({
+    tenantId,
+    tableName: "bonus_runs",
+    recordId: newRunId,
+    action: "INSERT",
+    newRow: { kind: "reversal", reverses_run_id: runId, label, reason, totals },
+    actorEmpId: actor.empId,
+    context: "POST /bonus-runs/:id/reverse",
+  })
+  return getRun(tenantId, newRunId)
 }
 
 /** draft 軟刪（paid → 409 not_draft）。 */

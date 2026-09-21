@@ -29,7 +29,6 @@ import { tenantBlocksApproveOnUnsettledLeave } from "./leave-settlement.js"
 import { pairPunchesTz } from "./punch-pairing.js"
 import {
   buildPayrollInputs,
-  loadRuleConfig,
   loadRuleConfigFor,
   toAttendanceDay,
   type AttendanceDayInput,
@@ -1819,7 +1818,9 @@ export async function submitSheet(tenantId: string, sheetId: string, actorEmpId:
   assertTransition(sheet, "submitted")
 
   sheet = await recomputeSheet(tenantId, sheetId, { settle: true })
-  const { rules } = await loadRuleConfig(tenantId)
+  // 用月表自己那個月的規則版本（C4 生效日），不是「今天」的：補送舊月份時，
+  // 異常已讀關卡要看當月的設定。recomputeSheet 早就這樣做了，這裡是漏掉的呼叫點。
+  const { rules } = await loadRuleConfigFor(tenantId, sheet.period)
   if (resolvePayrollGates(rules).requireAnomalyAck) {
     const days = await loadDays(tenantId, sheet.id)
     const unacked: Array<{ date: string; code: string; message: string }> = []

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest"
 import { createClient } from "@supabase/supabase-js"
 import request from "supertest"
 import { supabaseAdmin } from "../lib/supabase"
+import { purgeTestTenant } from "./helpers/purge"
 import { provisionTenant } from "../services/tenants"
 import { zonedTimeToUtc } from "../lib/tz"
 import { app } from "../app"
@@ -123,20 +124,9 @@ describe.skipIf(!migrated)("P1 attendance sheets — live", () => {
   }, 60_000)
 
   afterAll(async () => {
-    for (const tid of createdTenantIds) {
-      await supabaseAdmin.from("attendance_sheet_days").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("attendance_sheets").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("payslips").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("notifications").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("attendance_days").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("punch_records").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("schedules").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("shifts").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("salary_structures").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("departments").delete().eq("tenant_id", tid)
-      await supabaseAdmin.from("tenants").delete().eq("id", tid)
-    }
+    // 09-20 前逐表手刪，漏了 attendance_sheet_snapshots（C3 新表）→ FK 擋住 → 每跑一次留一個租戶。
+    // 改用 purge_test_tenant（所有有 tenant_id 的表一次清），新表自動涵蓋。
+    for (const tid of createdTenantIds) await purgeTestTenant(tid)
     for (const uid of createdUserIds) await supabaseAdmin.auth.admin.deleteUser(uid)
   }, 60_000)
 
@@ -455,7 +445,8 @@ describe.skipIf(!migrated)("P1 attendance sheets — live", () => {
       .send({ reason: "x" })
     expect(reopen.status).toBe(409)
     expect(reopen.body.error).toBe("locked")
-  })
+  
+  }, 60_000) // 10 次以上的往返（送出→退回→再送→審→核→薪資 run→定稿→查），從台灣打東京 Supabase 實測 18 秒，預設 15 秒必炸
 })
 
 describe.skipIf(migrated)("P1 attendance sheets — schema not migrated (0039)", () => {

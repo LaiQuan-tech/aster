@@ -1,6 +1,11 @@
 -- =====================================================================
 -- 亞斯特 — 2026-09-15 清理「租戶已不存在」的孤兒 audit_logs（一次性，非 migration）
 --
+-- ✅ 2026-09-20 已由業主在 SQL Editor 執行（當時 20,811 列／702 個租戶）。之後不需要再跑：
+--    sql/0037 讓 forbid_audit_mutation 對「租戶列已不存在」的稽核列放行 DELETE，
+--    並新增 purge_test_tenant()；整合測試的安全網（__tests__/setup.ts）每檔跑完會清掉
+--    殘留的 test 租戶連同稽核列。本檔保留作紀錄。
+--
 -- 背景（C 批次驗收第 8 項順手發現）：整合測試的 afterAll 以前是
 --   delete audit_logs → delete employees → delete tenants
 -- 但 employees 自 sql/0031 起掛了 audit_all，刪員工會再寫 audit_logs；租戶接著被

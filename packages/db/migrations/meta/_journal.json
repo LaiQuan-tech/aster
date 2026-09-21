@@ -330,6 +330,20 @@
       "when": 1789435029710,
       "tag": "0046_rule_configs_version_uq",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1789907635387,
+      "tag": "0047_rate_limits",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1789907908688,
+      "tag": "0048_bonus_run_reversal",
+      "breakpoints": true
     }
   ]
 }

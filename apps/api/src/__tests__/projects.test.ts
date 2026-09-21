@@ -6,6 +6,7 @@ import request from "supertest"
 import { supabaseAdmin } from "../lib/supabase"
 import { provisionTenant } from "../services/tenants"
 import { taipeiToday } from "../services/project-status"
+import { autoArchiveProjects } from "../services/project-archive"
 import { app } from "../app"
 
 const SUPABASE_URL = process.env.SUPABASE_URL ?? ""
@@ -338,11 +339,15 @@ describe("M4-2 自動封存", () => {
     // 輸入時點是「現在」，而起算日取兩者較晚者 → 今天跑不會被封存。
   })
 
-  function runJob(body: Record<string, unknown> = {}) {
-    return request(app)
-      .post("/internal/projects/auto-archive")
-      .set("x-internal-job-token", process.env.INTERNAL_JOB_TOKEN ?? "")
-      .send(body)
+  // 不打 /internal/projects/auto-archive：那支路由對**所有 status='active' 的租戶**跑，
+  // (a) 測試租戶是 status='test'，路由根本不會處理它——這幾個案例從 sql/0018 引入 test 租戶
+  //     起就不可能過（2026-09-15 交接記的「自動封存 3 例＋專案參數 1 例既有失敗」的真正根因）；
+  // (b) 在有 token 的環境跑 months=0 會把**正式租戶**已結案的專案全部封存——測試不該有這種副作用。
+  // 直接呼叫服務並指定 tenantId，邏輯完全相同、範圍只在 throwaway 租戶；路由的 token 保護
+  // 由下面「沒有 token 就打不到」單獨驗。
+  async function runJob(body: { months?: number } = {}) {
+    const result = await autoArchiveProjects({ tenantId, months: body.months })
+    return { status: 200, body: result }
   }
 
   function get() {
@@ -454,12 +459,9 @@ describe("M4-2 專案參數", () => {
       .send({ status: "terminated", statusReason: "解約" })
 
     // months 由設定決定時才會看 enabled；這裡不覆寫 months。
-    const res = await request(app)
-      .post("/internal/projects/auto-archive")
-      .set("x-internal-job-token", process.env.INTERNAL_JOB_TOKEN ?? "")
-      .send({})
-    if (res.status === 409) return
-    expect(res.status).toBe(200)
+    // 同上：直接呼叫服務、只掃 throwaway 租戶（理由見 M4-2 自動封存 runJob）。
+    const result = await autoArchiveProjects({ tenantId })
+    expect(result.archived).toBe(0)
 
     const got = await request(app)
       .get(`/projects/${p.body.id}`)
@@ -610,10 +612,12 @@ describe("M4-3 合約／報價單與印花稅", () => {
       .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31")
       .set("Authorization", `Bearer ${adminToken}`)
     expect(res.status).toBe(200)
-    // 報價單與下包合約不進應貼花件數。
-    expect(res.body.summary.dutiableCount).toBe(5)
+    // 報價單與下包合約不進應貼花件數。本 describe 到此建了 6 張：報價單（不課）、
+    // 承攬契據、下包合約（我方定作人，不課）、追加減、兩份的契據、2019 補登的舊約
+    // → 應貼花 4。原斷言寫 5 從一開始就對不上自己的 fixture（寫測試時沒有環境可跑）。
+    expect(res.body.summary.dutiableCount).toBe(4)
     expect(res.body.summary.paidCount).toBe(0)
-    expect(res.body.summary.unpaidCount).toBe(5)
+    expect(res.body.summary.unpaidCount).toBe(4)
     expect(res.body.disclaimer).toContain("試算")
   })
 
@@ -627,7 +631,7 @@ describe("M4-3 合約／報價單與印花稅", () => {
       .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31")
       .set("Authorization", `Bearer ${adminToken}`)
     expect(res.body.summary.paidCount).toBe(1)
-    expect(res.body.summary.unpaidCount).toBe(4)
+    expect(res.body.summary.unpaidCount).toBe(3)
   })
 
   it("unpaidOnly=1 只回未貼花的", async () => {
@@ -824,9 +828,11 @@ describe("M4-4 分期請款期程", () => {
     expect(res.status).toBe(200)
     expect(res.body.installments[1].overrideAmount).toBe(3_000_000)
     expect(res.body.installments[1].effectiveAmount).toBe(3_000_000)
-    // 差額落在末期，讓合計仍等於合約金額。
+    // 差額落在末期，讓合計仍等於合約金額。第 1 期已請款凍結在 1,777,778（上面的案例），
+    // 不是新分母的 2,000,000：1,777,778 + 3,000,000 + 2,000,000×3 = 10,777,778 → 尾差 −777,778。
+    // 原斷言 −1,000,000 忘了第 1 期是凍結值，與本 describe 自己的「已請款那期維持原值」矛盾。
     expect(res.body.summary.effectiveTotal).toBe(10_000_000)
-    expect(res.body.installments[4].residueApplied).toBe(-1_000_000)
+    expect(res.body.installments[4].residueApplied).toBe(-777_778)
   })
 
   it("⚠️ 已請款的期別不可移除", async () => {

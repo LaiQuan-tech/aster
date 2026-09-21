@@ -192,3 +192,48 @@ describe("bonus-run：歷年累計與上季對比", () => {
     expect(s.comparison.delta).toBeNull()
   })
 })
+
+import { reversalItemsOf, reversalTotalsOf, type BonusItemCalc, type BonusTotals } from "../services/bonus-run"
+
+describe("bonus-run：紅字沖銷", () => {
+  const item = (over: Partial<BonusItemCalc> = {}): BonusItemCalc => ({
+    projectId: "p1", employeeId: "e1", roleInProject: "member", shareMode: "pool_pct", sharePct: 10, shareAmount: null,
+    bonusPool: 100_000, contractTotal: 1_000_000, receivedTotal: 200_000, receivedPct: 0.2,
+    entitledCumulative: 2_000, paidBefore: 500, amount: 1_500, overpaid: false, overpaidBy: 0, ...over,
+  })
+  const totals = (items: BonusItemCalc[]): BonusTotals => ({
+    amount: items.reduce((s, i) => s + i.amount, 0), entitledCumulative: items.reduce((s, i) => s + i.entitledCumulative, 0),
+    paidBefore: items.reduce((s, i) => s + i.paidBefore, 0), itemCount: items.length, employeeCount: 1, projectCount: 1, overpaidCount: 0, skipped: [],
+  })
+
+  it("每列金額取負，paidBefore 接在原批之後，事實欄位原樣", () => {
+    const [r] = reversalItemsOf([item()])
+    expect(r.amount).toBe(-1_500)
+    expect(r.paidBefore).toBe(2_000) // 500 + 1500
+    expect(r.entitledCumulative).toBe(2_000)
+    expect(r.receivedPct).toBe(0.2)
+    expect(r.overpaid).toBe(false)
+  })
+  it("★ 原批 + 沖銷批的 amount 加總為 0——這就是下一季重算「等於沒發生」的依據", () => {
+    const orig = [item(), item({ employeeId: "e2", amount: 320.5, paidBefore: 0 })]
+    const rev = reversalItemsOf(orig)
+    const net = orig.reduce((s, i) => s + i.amount, 0) + rev.reduce((s, i) => s + i.amount, 0)
+    expect(net).toBe(0)
+  })
+  it("0 元列取負仍是 0（不是 -0），overpaid 列沖銷後不再 overpaid", () => {
+    const [zero, over] = reversalItemsOf([item({ amount: 0 }), item({ overpaid: true, overpaidBy: 300, amount: 0 })])
+    expect(Object.is(zero.amount, -0)).toBe(false)
+    expect(zero.amount).toBe(0)
+    expect(over.overpaid).toBe(false)
+    expect(over.overpaidBy).toBe(0)
+  })
+  it("totals：amount 為負、人數案數照沖銷列算、overpaid 0", () => {
+    const orig = [item(), item({ employeeId: "e2", projectId: "p2", amount: 500, paidBefore: 100 })]
+    const t = reversalTotalsOf(totals(orig), orig)
+    expect(t.amount).toBe(-2_000)
+    expect(t.paidBefore).toBe(2_000 + 600)
+    expect(t.employeeCount).toBe(2)
+    expect(t.projectCount).toBe(2)
+    expect(t.overpaidCount).toBe(0)
+  })
+})
