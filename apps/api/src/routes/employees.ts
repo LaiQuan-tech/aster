@@ -6,6 +6,7 @@ import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
 import { belongsToTenant } from "../services/auth-invite.js"
+import { createUserPasswordAttributes } from "../services/password-policy.js"
 
 export const employeesRouter = Router()
 
@@ -101,9 +102,11 @@ employeesRouter.post(
     const { email, name, password, role, deptId, empNo, employmentType, hireDate } = parsed.data
 
     try {
+      // 租戶允許簡單初始密碼時改帶 bcrypt 的 password_hash（GoTrue createUser 不對雜湊做 HIBP 檢查），
+      // 否則維持明文 password（受 GoTrue 弱密碼防護）。見 services/password-policy.ts。
       const { data: created, error: userErr } = await supabaseAdmin.auth.admin.createUser({
         email,
-        password,
+        ...(await createUserPasswordAttributes(tenantId, password)),
         email_confirm: true,
         app_metadata: { tenant_id: tenantId },
       })
@@ -111,7 +114,8 @@ employeesRouter.post(
         // Supabase Auth 的弱密碼／外洩密碼防護、或 email 已存在，都是呼叫方能處理的 4xx，不要包成 500。
         const code = (userErr as { code?: string } | null)?.code
         if (code === "weak_password") {
-          res.status(422).json({ error: "weak_password", message: userErr?.message })
+          // hint：前端據此提示「到設定 → 進階功能 → 帳號安全 開啟允許簡單初始密碼」；message 保留 GoTrue 原文。
+          res.status(422).json({ error: "weak_password", message: userErr?.message, hint: "allow_weak_initial_password" })
           return
         }
         if (code === "email_exists") {
@@ -267,13 +271,17 @@ employeesRouter.post(
         return
       }
       const password = parsed.data.password ?? generatePassword()
+      // 這裡刻意不看 tenants.features.accounts.allowWeakInitialPassword：GoTrue 的 updateUserById
+      // 不吃 password_hash（回 200 但密碼不變），沒有略過 HIBP 的重設路徑。HR 自填的密碼一律受
+      // GoTrue 檢查；要配發簡單初始密碼只有 POST /employees（建帳號）做得到。見 services/password-policy.ts。
       const { error: updErr } = await supabaseAdmin.auth.admin.updateUserById(emp.user_id as string, {
         password,
       })
       if (updErr) {
         // GoTrue 開著弱密碼／外洩密碼防護時會回 422 weak_password（HR 自填密碼才會遇到；後端亂數產生的不會）
         if ((updErr as { code?: string }).code === "weak_password") {
-          res.status(422).json({ error: "weak_password", message: updErr.message })
+          // hint：不帶 password 讓後端產生隨機暫時密碼即可繞過（那條路不受 HIBP 影響）；message 保留 GoTrue 原文。
+          res.status(422).json({ error: "weak_password", message: updErr.message, hint: "use_generated_password" })
           return
         }
         next(new Error(`reset-password (update): ${updErr.message}`))

@@ -1156,6 +1156,17 @@ export interface ApprovalFeatureSettings {
   fallbackApproverEmpId?: string | null;
 }
 
+/**
+ * tenants.features.accounts（帳號安全；設定 → 進階功能 → 帳號安全）。
+ * allowWeakInitialPassword=true：HR 新增員工帳號時可以用常見密碼當初始密碼（API 改以 bcrypt
+ * hash 交給 GoTrue createUser，略過外洩密碼名單檢查）；重設密碼沒有這條路（GoTrue 更新不吃 hash，
+ * 請用系統產生的暫時密碼）。員工首次登入仍強制自設新密碼，自設的密碼一樣受檢查。
+ * 讀法見 lib/auth-api.ts 的 accountsFeatureOf。
+ */
+export interface AccountsFeatureSettings {
+  allowWeakInitialPassword?: boolean;
+}
+
 /* ------------------------------------------------------------ branding ----- */
 
 export interface Branding {
@@ -1200,6 +1211,8 @@ export interface TenantFeatures {
    * lib/ess-state.ts 的 invalidateBranding() 讓側欄即時更新。
    */
   adminModules?: AdminModulesConfig;
+  /** 帳號安全（允許 HR 配發簡單初始密碼）；後端對 accounts 是整鍵覆蓋，存檔時送完整物件。 */
+  accounts?: AccountsFeatureSettings;
   [key: string]: unknown;
 }
 

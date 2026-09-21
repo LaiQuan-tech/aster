@@ -7,6 +7,7 @@
  * 部署前後都不會炸。
  */
 import { apiFetch } from "./api-client";
+import type { AccountsFeatureSettings } from "./admin-api";
 
 /* ------------------------------------------------------------------ me ----- */
 
@@ -141,7 +142,22 @@ export function toInviteCsv(row: {
   return `${header}\n${line}`;
 }
 
-/** API 回的 409 錯誤碼 → 給 HR 看的中文。 */
+/* ------------------------------------------------- tenant: 帳號安全設定 ----- */
+
+/**
+ * 從 tenants.features 讀 accounts（帳號安全）設定：只收 boolean 的 allowWeakInitialPassword，
+ * 其餘忽略；沒有／格式不對 → {}（＝維持 GoTrue 弱密碼檢查）。仿 lib/admin-nav.ts 的 adminModulesOf。
+ */
+export function accountsFeatureOf(features: Record<string, unknown> | null | undefined): AccountsFeatureSettings {
+  const raw = features?.accounts;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: AccountsFeatureSettings = {};
+  const allow = (raw as Record<string, unknown>).allowWeakInitialPassword;
+  if (typeof allow === "boolean") out.allowWeakInitialPassword = allow;
+  return out;
+}
+
+/** API 回的 4xx 錯誤碼（409／422／404）→ 給 HR 看的中文；apiFetch 的訊息格式是 `[status] code`。 */
 export function accountErrorMessage(err: unknown, fallback = "操作失敗"): string {
   const message = err instanceof Error ? err.message : "";
   const table: Record<string, string> = {
@@ -154,7 +170,8 @@ export function accountErrorMessage(err: unknown, fallback = "操作失敗"): st
     auth_user_missing: "員工綁定的登入帳號已不存在",
     invalid_current_password: "目前密碼不正確",
     same_password: "新密碼不可與目前密碼相同",
-    weak_password: "這組密碼太常見或已在外洩名單（Supabase 弱密碼防護擋下），請換一組",
+    weak_password:
+      "這組密碼太常見或在外洩名單中，Supabase 弱密碼防護擋下。若要允許簡單的初始密碼，請到「設定 → 進階功能 → 帳號安全」開啟（僅適用於新增員工帳號；重設密碼請改用系統產生的暫時密碼）。",
     email_exists: "此 Email 已有登入帳號",
     not_found: "找不到這位員工",
   };
