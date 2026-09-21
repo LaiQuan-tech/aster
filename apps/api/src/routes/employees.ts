@@ -6,6 +6,7 @@ import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
 import { belongsToTenant } from "../services/auth-invite.js"
+import { emailsByUserId } from "../services/employee-emails.js"
 import { createUserPasswordAttributes } from "../services/password-policy.js"
 
 export const employeesRouter = Router()
@@ -74,7 +75,15 @@ employeesRouter.get(
         next(new Error(`GET /employees: ${error.message}`))
         return
       }
-      res.status(200).json({ employees: data ?? [] })
+      // email 在 auth.users 不在 employees 表：一次撈回本租戶員工綁定的帳號 email 補到每列，
+      // user_id 為 null 或帳號已不存在 → null。
+      const rows = data ?? []
+      const emails = await emailsByUserId(rows.map((row) => row.user_id as string | null).filter((id): id is string => !!id))
+      const employees = rows.map((row) => ({
+        ...row,
+        email: row.user_id ? (emails.get(row.user_id as string) ?? null) : null,
+      }))
+      res.status(200).json({ employees })
     } catch (err) {
       next(err)
     }

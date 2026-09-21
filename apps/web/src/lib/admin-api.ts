@@ -88,6 +88,8 @@ export interface Employee {
   terminated_at: string | null;
   status: string;
   created_at: string;
+  /** 綁定的登入帳號 email（來自 auth.users）；未開通帳號或帳號已刪 → null。 */
+  email: string | null;
 }
 
 export function getEmployees() {

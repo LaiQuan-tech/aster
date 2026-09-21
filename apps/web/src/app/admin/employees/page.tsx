@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, PrimaryButton, ErrorText, Empty, Segmented, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText, Empty, Segmented, inputCls, labelCls, useToast } from "@/components/admin-ui";
+import { ActionMenu } from "@/components/ActionMenu";
 import AuditDrawer from "@/components/AuditDrawer";
 import {
   addEmployeeCertification,
@@ -39,6 +40,8 @@ import {
   type AccountLinkResult,
   type BulkInviteResult,
 } from "@/lib/auth-api";
+import { employeeActionsFor, parseApiErrorCode, type EmployeeActionKey } from "@/lib/employee-actions";
+import { useSession } from "@/lib/use-session";
 
 const CSV_EXAMPLE = `name,email,empNo,deptName,employmentType,hireDate,role
 王小明,ming@example.com,A001,設計部,regular,2026-09-15,employee
@@ -128,6 +131,20 @@ function employmentTypeLabel(value: string | null) {
   return EMPLOYMENT_TYPES.find((item) => item.value === value)?.label ?? value ?? "—";
 }
 
+/**
+ * 新增帳號／重設密碼的 API 錯誤 → 中文。`apiFetch` 的訊息形如 `[422] weak_password`：
+ * 先抽出代碼再查 `accountErrorMessage` 對照表；查不到就維持原字串（保留狀態碼方便回報），
+ * 原字串也是空的才用 fallback。
+ */
+function describeError(err: unknown, fallback: string): string {
+  const raw = err instanceof Error ? err.message : "";
+  const code = parseApiErrorCode(raw);
+  const probe = code ?? raw;
+  const translated = accountErrorMessage(new Error(probe), "");
+  if (translated && translated !== probe) return translated;
+  return raw || fallback;
+}
+
 function profileInitial(profile: ProfileAggregate | null) {
   const values: Record<string, string> = {};
   for (const field of PROFILE_FIELDS) {
@@ -140,6 +157,10 @@ function profileInitial(profile: ProfileAggregate | null) {
 }
 
 export default function EmployeesPage() {
+  const toast = useToast();
+  // 登入者的 auth user id：拿來算 isSelf 給 employeeActionsFor（目前沒有「不能停用自己」的規則，只是傳真值）。
+  const { session } = useSession();
+  const selfUserId = session?.user.id ?? null;
   const [rows, setRows] = useState<Employee[]>([]);
   const [depts, setDepts] = useState<Department[]>([]);
   const [loading, setLoading] = useState(true);
@@ -291,7 +312,7 @@ export default function EmployeesPage() {
         );
         const row = res.rows[0];
         if (!row || row.action === "skipped") {
-          setFormError(row?.error ?? "邀請失敗");
+          setFormError(row?.error ? describeError(new Error(row.error), "邀請失敗") : "邀請失敗");
           return;
         }
         setLinkResult({
@@ -317,7 +338,7 @@ export default function EmployeesPage() {
       setHireDate("");
       await load();
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : "邀請失敗");
+      setFormError(describeError(err, "邀請失敗"));
     } finally {
       setSubmitting(false);
     }
@@ -495,7 +516,7 @@ export default function EmployeesPage() {
           : `已寄出重設密碼信給 ${empName}（${res.email}）`,
       );
     } catch (err) {
-      setError(accountErrorMessage(err, "寄送重設密碼信失敗"));
+      setError(describeError(err, "寄送重設密碼信失敗"));
     } finally {
       setBusyId(null);
     }
@@ -514,7 +535,7 @@ export default function EmployeesPage() {
         setMessage(`已為 ${empName} 產生暫時密碼（只顯示這一次，請複製後轉交；員工首次登入會被要求改密碼）`);
       }
     } catch (err) {
-      setError(accountErrorMessage(err, "產生暫時密碼失敗"));
+      setError(describeError(err, "產生暫時密碼失敗"));
     } finally {
       setBusyId(null);
     }
@@ -526,6 +547,52 @@ export default function EmployeesPage() {
       setMessage(`已複製${what}`);
     } catch {
       setError(`無法自動複製，請手動選取${what}`);
+    }
+  }
+
+  async function copyEmail(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.show("已複製 Email", "success");
+    } catch {
+      toast.show("無法自動複製，請手動選取 Email", "error");
+    }
+  }
+
+  /** 進入列內編輯：把該列現值帶進編輯欄位（原本寫在「編輯」按鈕的 onClick 裡）。 */
+  function beginEdit(employee: Employee) {
+    setEditingId(employee.id);
+    setEditName(employee.name);
+    setEditRole(employee.role);
+    setEditDeptId(employee.dept_id ?? "");
+    setEditEmpNo(employee.emp_no ?? "");
+    setEditEmploymentType(employee.employment_type ?? "regular");
+    setEditHireDate(employee.hire_date ?? "");
+    setEditTerminatedAt(employee.terminated_at ?? "");
+    setEditStatus(employee.status);
+  }
+
+  /** 「⋯」選單的項目 → 各自既有的 handler（顯示規則在 lib/employee-actions.ts）。 */
+  function runAction(key: EmployeeActionKey, employee: Employee) {
+    switch (key) {
+      case "profile":
+        void openProfile(employee.id);
+        break;
+      case "send-reset":
+        void onSendReset(employee.id, employee.name);
+        break;
+      case "temp-password":
+        void onTempPassword(employee.id, employee.name);
+        break;
+      case "send-invite":
+        void onSendInvite(employee.id, employee.name);
+        break;
+      case "deactivate":
+        void onDeactivate(employee.id);
+        break;
+      case "audit":
+        setAuditTarget({ id: employee.id, name: employee.name });
+        break;
     }
   }
 
@@ -733,17 +800,18 @@ export default function EmployeesPage() {
               <thead>
                 <tr className="border-b border-gray-200 text-xs text-gray-500">
                   <th className="py-2 pr-4">員工</th>
+                  <th className="hidden py-2 pr-4 sm:table-cell">Email</th>
                   <th className="py-2 pr-4">單位/身分</th>
                   <th className="py-2 pr-4">到離職</th>
                   <th className="py-2 pr-4">角色/狀態</th>
-                  <th className="py-2">操作</th>
+                  <th className="py-2 text-right">操作</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((employee) => (
                   <tr key={employee.id} className="border-b border-gray-50 align-top">
                     {editingId === employee.id ? (
-                      <td colSpan={5} className="py-3">
+                      <td colSpan={6} className="py-3">
                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-8">
                           <input className={inputCls} value={editName} onChange={(event) => setEditName(event.target.value)} />
                           <input className={inputCls} value={editEmpNo} onChange={(event) => setEditEmpNo(event.target.value)} />
@@ -774,43 +842,55 @@ export default function EmployeesPage() {
                         <td className="py-3 pr-4">
                           <p className="font-medium text-gray-800">{employee.name}</p>
                           <p className="text-xs text-gray-500">工號 {employee.emp_no ?? "—"}</p>
+                          {/* 窄螢幕沒有 Email 欄，補在名字下方 */}
+                          <p className="text-xs text-gray-500 break-all sm:hidden">{employee.email ?? "—"}</p>
+                        </td>
+                        <td className="hidden py-3 pr-4 sm:table-cell">
+                          <div className="flex items-start gap-1.5">
+                            <span className="text-sm text-gray-600 break-all">{employee.email ?? "—"}</span>
+                            {employee.email && (
+                              <button
+                                type="button"
+                                onClick={() => void copyEmail(employee.email ?? "")}
+                                className="shrink-0 text-xs text-gray-400 hover:text-gray-700 hover:underline"
+                                aria-label={`複製 ${employee.name} 的 Email`}
+                              >
+                                複製
+                              </button>
+                            )}
+                          </div>
                         </td>
                         <td className="py-3 pr-4 text-gray-600">{deptNameMap.get(employee.dept_id ?? "") ?? "—"} / {employmentTypeLabel(employee.employment_type)}</td>
-                        <td className="py-3 pr-4 text-gray-600">{employee.hire_date ?? "—"} → {employee.terminated_at ?? "在職"}</td>
+                        <td className="whitespace-nowrap py-3 pr-4 text-gray-600">{employee.hire_date ?? "—"} → {employee.terminated_at ?? "在職"}</td>
                         <td className="py-3 pr-4">
                           <span className="rounded-full bg-gray-100 px-2 py-1 text-xs text-gray-600">{roleLabel(employee.role)}</span>
                           {employee.status !== "active" && <span className="ml-2 rounded-full bg-red-100 px-2 py-1 text-xs text-red-600">{employee.status}</span>}
                           {!employee.user_id && <span className="ml-2 rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-700">未開通帳號</span>}
                         </td>
-                        <td className="py-3">
-                          <div className="flex gap-3">
+                        <td className="whitespace-nowrap py-2 text-right">
+                          {/* 只留「編輯」＋「⋯」；其餘動作收進選單，顯示／disabled 規則在 lib/employee-actions.ts */}
+                          <div className="flex items-center justify-end gap-1">
                             <button
-                              onClick={() => {
-                                setEditingId(employee.id);
-                                setEditName(employee.name);
-                                setEditRole(employee.role);
-                                setEditDeptId(employee.dept_id ?? "");
-                                setEditEmpNo(employee.emp_no ?? "");
-                                setEditEmploymentType(employee.employment_type ?? "regular");
-                                setEditHireDate(employee.hire_date ?? "");
-                                setEditTerminatedAt(employee.terminated_at ?? "");
-                                setEditStatus(employee.status);
-                              }}
-                              className="text-sm text-gray-600 hover:underline"
+                              type="button"
+                              onClick={() => beginEdit(employee)}
+                              className="rounded-md px-2 py-1.5 text-sm text-gray-600 hover:bg-gray-100 hover:text-gray-800"
                             >
                               編輯
                             </button>
-                            <button onClick={() => void openProfile(employee.id)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>My Data</button>
-                            {employee.user_id ? (
-                              <>
-                                <button disabled={busyId === employee.id} onClick={() => void onSendReset(employee.id, employee.name)} className="text-sm text-gray-600 hover:underline disabled:opacity-50">寄重設密碼信</button>
-                                <button disabled={busyId === employee.id} onClick={() => void onTempPassword(employee.id, employee.name)} className="text-sm text-gray-400 hover:underline disabled:opacity-50" title="寄不了信時的備援：產生暫時密碼">暫時密碼</button>
-                              </>
-                            ) : (
-                              <button disabled={busyId === employee.id} onClick={() => void onSendInvite(employee.id, employee.name)} className="text-sm font-medium hover:underline disabled:opacity-50" style={{ color: "var(--brand)" }}>寄邀請信</button>
-                            )}
-                            {employee.status === "active" && <button onClick={() => void onDeactivate(employee.id)} className="text-sm text-red-600 hover:underline">停用</button>}
-                            <button onClick={() => setAuditTarget({ id: employee.id, name: employee.name })} className="text-sm text-gray-600 hover:underline" title="誰在什麼時候改了這位員工的資料">異動紀錄</button>
+                            <ActionMenu
+                              label={`${employee.name} 的更多操作`}
+                              items={employeeActionsFor(employee, {
+                                isSelf: selfUserId !== null && employee.user_id === selfUserId,
+                                busy: busyId === employee.id,
+                              }).map((spec) => ({
+                                key: spec.key,
+                                label: spec.label,
+                                tone: spec.tone,
+                                disabled: spec.disabled,
+                                title: spec.title,
+                                onSelect: () => runAction(spec.key, employee),
+                              }))}
+                            />
                           </div>
                         </td>
                       </>
