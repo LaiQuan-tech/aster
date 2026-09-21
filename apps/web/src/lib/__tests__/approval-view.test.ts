@@ -4,6 +4,8 @@ import { fmtHm, localDateKey } from "../ess-format";
 import {
   APPROVAL_VIEWS,
   CSV_HEADER,
+  KIND_LABEL,
+  KIND_OPTIONS,
   actionsFor,
   applyClientFilters,
   bucketOf,
@@ -134,6 +136,15 @@ const ALL_ROWS = [MINE_EXPLICIT, MINE_BY_FLOW, OTHERS_EXPLICIT, OTHERS_BY_FLOW, 
 const PENDING_ROWS = ALL_ROWS.filter((r) => r.status === "pending");
 
 /* ---------------------------------------------------------------- view --- */
+
+describe("KIND_LABEL／KIND_OPTIONS 涵蓋五種表單（零用金預支曾漏掉→後台類型欄空白）", () => {
+  it("五種 kind 都有中文標籤，且篩選選項一致", () => {
+    const kinds = ["leave", "ot", "fix_punch", "business_trip", "petty_cash"] as const;
+    for (const k of kinds) expect(KIND_LABEL[k]).toBeTruthy();
+    expect(KIND_LABEL.petty_cash).toBe("零用金預支");
+    expect(KIND_OPTIONS.map((o) => o.value)).toEqual([...kinds]);
+  });
+});
 
 describe("parseApprovalView／statusParamFor", () => {
   it("五個合法值原樣回；空／null／未知一律 pending", () => {

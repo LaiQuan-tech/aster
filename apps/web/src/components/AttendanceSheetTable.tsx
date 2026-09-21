@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { fmtHm } from "@/lib/ess-format";
 import {
   friendlyError,
   type SheetAnomaly,
@@ -29,7 +30,8 @@ function weekdayLabel(date: string): string {
 /** firstIn/lastOut 的實際格式（純 HH:MM 或完整 ISO）目前後端尚未定案，兩種都接。 */
 function hhmm(value: string | null): string {
   if (!value) return "—";
-  return value.length > 5 && value.includes("T") ? value.slice(11, 16) : value;
+  // ISO 一律轉當地時區顯示（原本 slice(11,16) 是 UTC，會比台北少 8 小時）；純 HH:MM 原樣
+  return value.length > 5 && value.includes("T") ? fmtHm(value) : value;
 }
 
 function hours(minutes: number, digits = 1): string {

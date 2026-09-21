@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { fmtHm, localDateKey } from "@/lib/ess-format";
 import {
   getPunchRecordsAdmin,
   createManualPunch,
@@ -173,8 +174,8 @@ export default function PunchRecordsPage() {
     const rows = records.map((record) => [
       deptName(record.employee_id),
       empLabel(record.employee_id),
-      record.punch_at.slice(0, 10),
-      record.punch_at.slice(11, 16),
+      localDateKey(record.punch_at) || record.punch_at.slice(0, 10),
+      fmtHm(record.punch_at),
       TYPE_LABEL[record.type],
       SOURCE_LABEL[record.source ?? ""] ?? record.source ?? "",
       record.lat,
@@ -392,8 +393,8 @@ export default function PunchRecordsPage() {
                   <tr key={r.id} className="border-b border-gray-50">
                     <td className="py-2 pr-4">{deptName(r.employee_id)}</td>
                     <td className="py-2 pr-4 font-medium text-gray-800">{empLabel(r.employee_id)}</td>
-                    <td className="py-2 pr-4">{r.punch_at.slice(0, 10)}</td>
-                    <td className="py-2 pr-4">{r.punch_at.slice(11, 16)}</td>
+                    <td className="py-2 pr-4">{localDateKey(r.punch_at) || r.punch_at.slice(0, 10)}</td>
+                    <td className="py-2 pr-4">{fmtHm(r.punch_at)}</td>
                     <td className="py-2 pr-4">{TYPE_LABEL[r.type]}</td>
                     <td className="py-2 pr-4">{locationText(r)}</td>
                     <td className="py-2 pr-4">{SOURCE_LABEL[r.source ?? ""] ?? r.source ?? "—"}</td>

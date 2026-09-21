@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { fmtHm, localDateKey } from "@/lib/ess-format";
 import {
   createAnnouncement,
   createCandidate,
@@ -575,7 +576,7 @@ export default function RecruitmentPage() {
               <li key={interview.id} className="flex flex-col gap-2 py-3 lg:flex-row lg:items-center lg:justify-between">
                 <div>
                   <p className="font-medium text-gray-800">
-                    {candidateLabel(interview.candidate_id)}｜{interview.scheduled_at ? interview.scheduled_at.replace("T", " ").slice(0, 16) : "未定時間"}
+                    {candidateLabel(interview.candidate_id)}｜{interview.scheduled_at ? `${localDateKey(interview.scheduled_at)} ${fmtHm(interview.scheduled_at)}` : "未定時間"}
                   </p>
                   <p className="text-xs text-gray-500">
                     {interview.stage ?? "未指定階段"}｜面試官 {interview.interviewer_emp_id ? employeeName.get(interview.interviewer_emp_id) : "未指定"}

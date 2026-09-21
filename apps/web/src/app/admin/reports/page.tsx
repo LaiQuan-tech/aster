@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiDownload } from "@/lib/api-client";
+import { fmtHm, localDateKey } from "@/lib/ess-format";
 import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getAttendanceReport,
@@ -29,8 +30,11 @@ function money(value: number) {
   return `$${numberFmt.format(value)}`;
 }
 
+/** ISO → 當地「YYYY-MM-DD HH:mm」；原本直接切 ISO 字串會變成 UTC，比台北少 8 小時。 */
 function fmtDateTime(value: string) {
-  return value ? value.slice(0, 16).replace("T", " ") : "—";
+  if (!value) return "—";
+  const day = localDateKey(value);
+  return day ? `${day} ${fmtHm(value)}` : value.slice(0, 16).replace("T", " ");
 }
 
 function kindLabel(kind: string) {

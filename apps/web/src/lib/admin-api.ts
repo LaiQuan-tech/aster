@@ -543,7 +543,7 @@ export function reviewSchedule(id: string, decision: "acknowledge" | "dispute") 
 /* ------------------------------------------------------------ requests ----- */
 
 export type RequestStatus = "pending" | "approved" | "rejected" | "cancelled";
-export type RequestKind = "leave" | "ot" | "fix_punch" | "business_trip";
+export type RequestKind = "leave" | "ot" | "fix_punch" | "business_trip" | "petty_cash";
 
 export interface LeaveRequest {
   id: string;
