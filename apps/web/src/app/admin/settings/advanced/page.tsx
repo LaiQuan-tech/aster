@@ -171,7 +171,7 @@ export default function AdvancedFeaturesPage() {
                 {savingAccounts && <span className="text-xs text-gray-400">儲存中…</span>}
               </span>
               <span className="mt-0.5 block text-sm text-gray-500">
-                開啟後，HR 在新增員工帳號時可以用像 asterbest 這種常見密碼當初始密碼（略過外洩密碼名單檢查）。
+                開啟後，HR 在新增員工帳號時可以用像 password123 這種常見密碼當初始密碼（略過外洩密碼名單檢查）。
                 同仁首次登入仍會被要求自設新密碼，自設的密碼一樣會做檢查。重設密碼沒有這條路（Supabase 不提供略過檢查的重設方式），請改用「產生暫時密碼」。
               </span>
             </label>

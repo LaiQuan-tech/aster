@@ -9,7 +9,7 @@ import { app } from "../app"
  * 租戶「允許 HR 配發簡單初始密碼」— live 合約測試（仿 auth-accounts-live.test.ts）。
  *
  * 前提：Supabase 專案開著 password_hibp_enabled（外洩密碼名單），GoTrue 連 admin API 的
- * createUser／updateUserById 帶明文 password 都會回 422 weak_password。本檔用 asterbest
+ * createUser／updateUserById 帶明文 password 都會回 422 weak_password。本檔用 password123
  * 這種常見密碼驗證：
  *   預設（未開）→ POST /employees 帶弱密碼 422 weak_password＋hint=allow_weak_initial_password
  *   → PUT /api/tenant/settings 開 features.accounts.allowWeakInitialPassword（既有 features 鍵保留）
@@ -28,7 +28,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL ?? ""
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ?? ""
 
 /** 常見密碼：在 HIBP 名單上（業主實際踩到的那組）。長度 ≥ 8 才過得了 zod。 */
-const WEAK_PASSWORD = "asterbest"
+const WEAK_PASSWORD = "password123"
 /** 第二組常見密碼，reset／自設用（要跟上一組不同才證明「沒被改掉」）。 */
 const WEAK_PASSWORD_2 = "qwerty123456"
 

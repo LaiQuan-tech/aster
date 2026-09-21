@@ -10,20 +10,20 @@ import { allowWeakInitialPasswordFrom, hashPasswordForGoTrue } from "../services
  */
 describe("hashPasswordForGoTrue", () => {
   it("輸出 bcrypt 格式（$2a$ 或 $2b$ 開頭）且 cost 為 10", async () => {
-    const hash = await hashPasswordForGoTrue("asterbest")
+    const hash = await hashPasswordForGoTrue("password123")
     expect(hash).toMatch(/^\$2[ab]\$10\$/)
     expect(hash.length).toBe(60)
   })
 
   it("bcrypt.compare 對原文為 true、對別的密碼為 false", async () => {
-    const hash = await hashPasswordForGoTrue("asterbest")
-    await expect(bcrypt.compare("asterbest", hash)).resolves.toBe(true)
-    await expect(bcrypt.compare("asterbest2", hash)).resolves.toBe(false)
+    const hash = await hashPasswordForGoTrue("password123")
+    await expect(bcrypt.compare("password123", hash)).resolves.toBe(true)
+    await expect(bcrypt.compare("password1234", hash)).resolves.toBe(false)
   })
 
   it("同一密碼連 hash 兩次結果不同（salt 隨機）", async () => {
-    const a = await hashPasswordForGoTrue("asterbest")
-    const b = await hashPasswordForGoTrue("asterbest")
+    const a = await hashPasswordForGoTrue("password123")
+    const b = await hashPasswordForGoTrue("password123")
     expect(a).not.toBe(b)
   })
 })

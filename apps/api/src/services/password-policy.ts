@@ -9,7 +9,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
  * admin API 的 createUser({ password }) / updateUserById({ password }) 都會擋
  * （422 weak_password）。但 createUser 若改帶 `password_hash`（bcrypt），GoTrue
  * 視為「從別的系統搬進來的雜湊」直接寫入，不做 HIBP／長度檢查，之後用該密碼登入
- * 正常。租戶若明確允許，HR 就能用像 asterbest 這種簡單密碼當初始密碼——初始密碼
+ * 正常。租戶若明確允許，HR 就能用像 password123 這種簡單密碼當初始密碼——初始密碼
  * 本來就會被 employees.must_change_password=true 在首次登入時強制改掉。
  *
  * 🔴 只有 createUser 吃 password_hash。GoTrue 的 adminUserUpdate（updateUserById）
