@@ -14,3 +14,6 @@ coverage/
 
 # Claude desktop browser-preview launch config (local only)
 .claude/
+
+# 後台測試資料 seed 的執行紀錄（本機產物）
+docs/test/seed-test/last-run.json
