@@ -997,6 +997,9 @@ async function decideOneRequest(params: {
     start_at: lr.start_at as string,
     end_at: lr.end_at as string,
     payout: (lr.payout as string | null) ?? null,
+    // 出差／零用金的預支金額：漏傳這個欄位 ledger.openAdvance 會讀到 0 而不建 advances 列
+    // （2026-09-22 seed 正式站實測抓到：三張核准單都沒開預支）。
+    advance_requested: (lr.advance_requested as string | number | null) ?? null,
     segments: (lr.segments as Array<Record<string, unknown>> | null) ?? null,
     reason: (lr.reason as string | null) ?? null,
   })
