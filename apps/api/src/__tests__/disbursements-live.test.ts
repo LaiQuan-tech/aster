@@ -18,7 +18,8 @@ import { app } from "../app"
  * → 附件 5 檔上限、第 6 檔 409、>5MB 413 → 列表／summary／export.xlsx。
  *
  * 正式庫尚未套 0041（disbursements 三張表不存在）時整組 describe.skipIf 跳過。
- * 2026-09-23 起所有直接建 `status:'paid'` 的呼叫都帶 `FORCE_PAID`（見下方說明）。
+ * 2026-09-23 起所有直接建 `status:'paid'` 的呼叫都帶 `FORCE_PAID`；分攤到未驗收期款的
+ * 草稿帶 `FORCE_ACCEPT`（M5 的驗收檢查建單就跑，見下方說明）。
  */
 
 const SUPABASE_URL = process.env.SUPABASE_URL ?? ""
@@ -48,6 +49,12 @@ let employeeToken: string
  * （簽核鏈本身在 disbursement-approval-live.test.ts、驗收在 subcontract-acceptance-live.test.ts）。
  */
 const FORCE_PAID = { forceReason: "測試：HR 略過簽核直接建已匯款單", forceAcceptance: true } as const
+/**
+ * M5 的驗收檢查在**建單**就跑（不是只在付款），所以連 `status:'draft'` 只要分攤到
+ * 未驗收期款一樣 409 `acceptance_required`（契約：subcontract-acceptance-live.test.ts
+ *「未驗收 → 建單分攤該期 409」）。草稿用這組：只放行驗收，不碰簽核鏈。
+ */
+const FORCE_ACCEPT = { forceAcceptance: true, forceReason: "測試：HR 放行未驗收期款" } as const
 
 const YEAR = Number(taipeiToday().slice(0, 4))
 const ROC = YEAR - 1911
@@ -512,6 +519,7 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
         amount: 300_000,
         withheldAmount: 36_000,
         status: "draft",
+        ...FORCE_ACCEPT,
         allocations: [{ projectId: projectAId, subcontractPaymentId: payA[2].id, amount: 336_000, withheldAmount: 36_000 }],
       })
       expect(res.status).toBe(201)
