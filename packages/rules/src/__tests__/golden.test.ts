@@ -808,6 +808,40 @@ describe("規則五 亞斯特 115-06 五份出勤表", () => {
   });
 
   // -----------------------------------------------------------------------
+  // W9 加班起算基準 (overtime.basis)：ctx.regularMinutes 決定「超過多少才算加班」
+  // -----------------------------------------------------------------------
+  describe("加班起算基準 (W9)", () => {
+    // 下午班 14:00–22:00 休 60 分 → 班表淨工時 7 小時 (420 分)。
+    const afternoon: ShiftDef = { start: "14:00", end: "22:00", breakMinutes: 60 };
+    const punch = { inAt: "2026-06-03T14:00:00", outAt: "2026-06-03T23:00:00" };
+
+    it("打 14:00–23:00 (淨 480 分)：basis='shift' (420) → 60 分加班", () => {
+      const day = computeAttendanceDay(punch, afternoon, rules, {
+        date: "2026-06-03",
+        dayType: "workday",
+        regularMinutes: 420,
+      });
+      expect(day.workedMinutes).toBe(480);
+      expect(day.overtimeMinutes).toBe(60);
+    });
+
+    it("同一天 basis='regularHours' (法定 8 小時) → 0 分加班", () => {
+      const day = computeAttendanceDay(punch, afternoon, rules, {
+        date: "2026-06-03",
+        dayType: "workday",
+      });
+      expect(day.workedMinutes).toBe(480);
+      expect(day.overtimeMinutes).toBe(0);
+    });
+
+    it("晚餐扣除也吃同一個基準：例假日淨 660 分、基準 420 → 延長 240 > 180 故扣 30", () => {
+      expect(applyOvertimePipeline(660, rules, "rest_day", 420)).toBe(630);
+      // 基準 480 (法定) 時延長只有 180，不到 afterMinutes → 不扣。
+      expect(applyOvertimePipeline(660, rules, "rest_day", 480)).toBe(660);
+    });
+  });
+
+  // -----------------------------------------------------------------------
   describe("早退", () => {
     const shift: ShiftDef = { start: "09:00", end: "18:00", breakMinutes: 60 };
 

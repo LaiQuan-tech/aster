@@ -1,12 +1,91 @@
 "use client";
 
+import { useEffect, useState } from "react";
+import { Card } from "@/components/ess-ui";
+import { getMyOvertimeCap, type OvertimeCap } from "@/lib/overtime-api";
+
 /**
- * 「本月加班累計」卡（M1 月加班上限）——**WP0 stub，回 null**；由 WP1 填：
- * 讀 `GET /my/overtime-cap?period=`（{ period, capMinutes, settledMinutes,
- * approvedRequestMinutes, beyondCapMinutes, alertHours }）顯示「本月加班累計 X／40 小時」
- * ＋進度條（≥36 橘、≥上限 紅），超額時加註「超過部分另行給付」。
- * 掛在 /ess 首頁「今日」卡之後（app/ess/page.tsx）。
+ * 「本月加班累計」卡（M1 月加班上限，2026-09-22 業主決策 1／2）。
+ *
+ * 讀 `GET /my/overtime-cap`：本月已結算的加班分鐘 vs 月上限（規則
+ * `overtime.monthlyCapHours`，預設 40 小時）。進度條顏色依法定警示門檻：
+ * 未達第一階（36h）綠、達第一階橘、達上限紅。超過上限時加註「超過的部分將另行
+ * 給付」——出勤月表與薪資單維持合規版，超額只記在「加班超額另計」帳上。
+ *
+ * 載入失敗或後端還沒有這支端點（舊版 API）→ 整張卡不顯示（回 null），
+ * 不干擾首頁最重要的打卡動線。
  */
-export function OvertimeCapCard(): null {
-  return null;
+
+function hours(minutes: number): string {
+  const h = minutes / 60;
+  return Number.isInteger(h) ? String(h) : h.toFixed(1);
+}
+
+/** 依「已達哪一階警示門檻」決定顏色：未達 → 綠、第一階 → 橘、上限（含）→ 紅。 */
+function toneOf(cap: OvertimeCap): { bar: string; text: string; ring: string } {
+  const usedMinutes = Math.max(cap.settledMinutes, cap.approvedRequestMinutes);
+  const usedHours = usedMinutes / 60;
+  const capHours = cap.capMinutes / 60;
+  const firstAlert = [...(cap.alertHours ?? [])].sort((a, b) => a - b)[0];
+  if (usedHours >= capHours) return { bar: "bg-red-500", text: "text-red-700", ring: "bg-red-100" };
+  if (firstAlert != null && usedHours >= firstAlert) {
+    return { bar: "bg-orange-500", text: "text-orange-700", ring: "bg-orange-100" };
+  }
+  return { bar: "bg-emerald-500", text: "text-emerald-700", ring: "bg-emerald-100" };
+}
+
+export function OvertimeCapCard() {
+  const [cap, setCap] = useState<OvertimeCap | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void getMyOvertimeCap()
+      .then((data) => {
+        if (active) setCap(data);
+      })
+      .catch(() => {
+        // 加分項：拿不到就不顯示（舊版 API、離線、403 皆同）。
+        if (active) setCap(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (!cap || cap.capMinutes <= 0) return null;
+
+  const usedMinutes = Math.max(cap.settledMinutes, cap.approvedRequestMinutes);
+  const pct = Math.min(100, Math.round((usedMinutes / cap.capMinutes) * 100));
+  const tone = toneOf(cap);
+  const remaining = cap.capMinutes - usedMinutes;
+
+  return (
+    <Card title="本月加班累計">
+      <p className={`text-2xl font-semibold tabular-nums ${tone.text}`}>
+        {hours(usedMinutes)}
+        <span className="ml-1 text-base font-normal text-gray-400">／{hours(cap.capMinutes)} 小時</span>
+      </p>
+      <div className={`mt-3 h-2 w-full overflow-hidden rounded-full ${tone.ring}`}>
+        <div
+          className={`h-full rounded-full transition-[width] ${tone.bar}`}
+          style={{ width: `${pct}%` }}
+          role="progressbar"
+          aria-valuenow={pct}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-label="本月加班累計佔月上限比例"
+        />
+      </div>
+      <p className="mt-2 text-sm text-gray-500">
+        {cap.beyondCapMinutes > 0
+          ? `已超過月上限 ${hours(cap.beyondCapMinutes)} 小時，超過的部分將另行給付`
+          : `距離月上限還有 ${hours(remaining)} 小時`}
+      </p>
+      {cap.approvedRequestMinutes > cap.settledMinutes && (
+        <p className="mt-1 text-xs text-gray-400">
+          含已核准但尚未結算的加班單 {hours(cap.approvedRequestMinutes - cap.settledMinutes)} 小時
+        </p>
+      )}
+    </Card>
+  );
 }

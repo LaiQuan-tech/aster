@@ -1,5 +1,6 @@
 import {
   computeAttendanceDay,
+  resolveOvertimeBasis,
   resolveOvertimeDailyCapMinutes,
   type DayType,
   type ShiftDef,
@@ -28,6 +29,8 @@ import { pairPunchesTz, type PairedDay } from "./punch-pairing.js"
  *   • the employee's schedule → shift (start/end/break) for the day,
  *   • the day's type from tenant_calendar_days (fallback: Sat/Sun rest_day),
  *   • approved leave minutes sliced onto that local day (by leave-type code),
+ *   • approved 在家工作（kind='wfh'）單覆蓋到的日子（M2：沒打卡的那天仍以班表
+ *     淨工時認列出勤，遲到/早退歸零，anomaly.wfh 留痕），
  *   • the rule_config version in effect for the settled month (falling back to
  *     the default template),
  * then calls computeAttendanceDay and upserts the result into attendance_days.
@@ -221,6 +224,61 @@ function sliceLeave(
   return out
 }
 
+/**
+ * M2 在家工作：把一張已核准的 kind='wfh' 單攤成覆蓋到的本地日（與
+ * attendance-sheets.loadMonthFacts 的切法一致：end_at 剛好落在當地午夜時算前一天）。
+ * 純函式，窗外的日子不收。
+ */
+function sliceWfhDates(
+  req: { start_at: string; end_at: string },
+  ctx: { tz: string; from: DateKey; to: DateKey },
+): DateKey[] {
+  const startMs = new Date(req.start_at).getTime()
+  if (!Number.isFinite(startMs)) return []
+  const first = localDateKey(req.start_at, ctx.tz)
+  const endMs = new Date(req.end_at).getTime() - 1
+  const last = localDateKey(new Date(Math.max(Number.isFinite(endMs) ? endMs : startMs, startMs)), ctx.tz)
+  const out: DateKey[] = []
+  for (let d = first; d <= last; d = addDaysKey(d, 1)) {
+    if (d >= ctx.from && d <= ctx.to) out.push(d)
+  }
+  return out
+}
+
+/**
+ * W9 加班起算基準：這一天要用哪個「正常工時」當加班門檻。
+ *   basis='regularHours'（預設）→ 法定 payroll.dailyRegularHours（8 小時）
+ *   basis='shift'              → 該日班表淨工時（span − 班別原始 breakMinutes）；
+ *                                 沒有排班就退回法定值。
+ * 注意這裡一定要用**班別原始的** breakMinutes：settleAttendance 為了避免把「打卡
+ * 外出／休息」扣兩次，會把傳給引擎的 shift.breakMinutes 歸零，那份不能拿來當基準。
+ */
+function regularMinutesForDay(
+  basis: "regularHours" | "shift",
+  scheduledShift: ShiftDef | null,
+  date: DateKey,
+  tz: string,
+  fallbackMinutes: number,
+): number {
+  if (basis !== "shift" || !scheduledShift) return fallbackMinutes
+  const net = shiftWindowUtc(date, scheduledShift, tz).workMinutes
+  return net > 0 ? net : fallbackMinutes
+}
+
+/**
+ * M2：在家工作那天「沒有打卡」時要認列多少工時——有排班就用班表淨工時
+ * （span − 班別原始 breakMinutes），沒排班（或班表淨工時 0）退回該日的正常工時。
+ */
+function wfhWorkedMinutes(
+  scheduledShift: ShiftDef | null,
+  date: DateKey,
+  tz: string,
+  fallbackMinutes: number,
+): number {
+  const shiftNet = scheduledShift ? shiftWindowUtc(date, scheduledShift, tz).workMinutes : 0
+  return shiftNet > 0 ? shiftNet : fallbackMinutes
+}
+
 /** tenant_calendar_days in [from, to] → date → DayType (empty until 0038). */
 async function loadCalendar(tenantId: string, from: DateKey, to: DateKey): Promise<Map<DateKey, DayType>> {
   const map = new Map<DateKey, DayType>()
@@ -296,6 +354,9 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   const { rules } = await loadRuleConfigFor(tenantId, to.slice(0, 7))
   const regularMinutes = Math.round(rules.payroll.dailyRegularHours * 60)
   const dailyCap = resolveOvertimeDailyCapMinutes(rules)
+  // W9：加班起算基準（法定 8 小時 vs 班表淨工時）。規則依「結算的是哪個月」選版，
+  // 所以改成 'shift' 只對新版生效日之後的月份生效（重跑舊月份仍用當時的設定）。
+  const basis = resolveOvertimeBasis(rules)
 
   // --- punches: local-day window widened by one day each side so a pair that
   //     crosses midnight at either edge can still be closed -------------------
@@ -385,6 +446,25 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     }
   }
 
+  // --- approved 在家工作單（M2）：攤成本地日 ------------------------------------
+  // kind='wfh' 是 2026-09 才加的假單種類；舊資料查不到列，wfhByKey 就是空的。
+  let wfhQuery = supabaseAdmin
+    .from("leave_requests")
+    .select("employee_id, start_at, end_at")
+    .eq("tenant_id", tenantId)
+    .eq("kind", "wfh")
+    .eq("status", "approved")
+    .is("deleted_at", null)
+    .lt("start_at", rangeEnd)
+    .gt("end_at", rangeStart)
+  if (employeeId) wfhQuery = wfhQuery.eq("employee_id", employeeId)
+  const { data: wfhData, error: wfhErr } = await wfhQuery
+  if (wfhErr) throw new Error(`settleAttendance (wfh): ${wfhErr.message}`)
+  const wfhByKey = new Set<string>()
+  for (const req of (wfhData ?? []) as Array<{ employee_id: string; start_at: string; end_at: string }>) {
+    for (const d of sliceWfhDates(req, { tz, from, to })) wfhByKey.add(`${req.employee_id}|${d}`)
+  }
+
   // --- pair punches per employee (tz-aware, cross-midnight) ---------------------
   const punchesByEmp = new Map<string, PunchRow[]>()
   for (const p of punches) {
@@ -401,7 +481,12 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   }
 
   // --- the set of (employee, day) to settle -------------------------------------
-  const keys = new Set<string>([...pairedByKey.keys(), ...shiftByKey.keys(), ...leaveByKey.keys()])
+  const keys = new Set<string>([
+    ...pairedByKey.keys(),
+    ...shiftByKey.keys(),
+    ...leaveByKey.keys(),
+    ...wfhByKey,
+  ])
 
   const rows: Array<Record<string, unknown>> = []
   for (const key of keys) {
@@ -420,9 +505,15 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
         }
       : UNSCHEDULED_SHIFT
 
-    const result = computeAttendanceDay(day?.pairs ?? [], shift, rules, { date: workDate, dayType })
-    const lateMinutes = scheduledShift ? result.lateMinutes : 0
-    const earlyLeaveMinutes = scheduledShift ? (result.earlyLeaveMinutes ?? 0) : 0
+    const dayRegularMinutes = regularMinutesForDay(basis, scheduledShift, workDate, tz, regularMinutes)
+    const result = computeAttendanceDay(day?.pairs ?? [], shift, rules, {
+      date: workDate,
+      dayType,
+      regularMinutes: dayRegularMinutes,
+    })
+    let workedMinutes = result.workedMinutes
+    let lateMinutes = scheduledShift ? result.lateMinutes : 0
+    let earlyLeaveMinutes = scheduledShift ? (result.earlyLeaveMinutes ?? 0) : 0
 
     const leave = leaveByKey.get(key)
     const anomaly: Record<string, unknown> = {}
@@ -431,6 +522,19 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
       if (day.unpairedOutings > 0) anomaly.unpairedOutings = day.unpairedOutings
       if (day.unpairedBreaks > 0) anomaly.unpairedBreaks = day.unpairedBreaks
     }
+
+    // M2 在家工作：核准的 wfh 單覆蓋、當天又完全沒有打卡段 → 以班表淨工時（無班表
+    // 則法定正常工時）認列出勤，遲到／早退歸零（在家沒有「應到班時間」），加班仍是
+    // 0（要加班請另外送加班單）。有打卡就照打卡算，不動。例假／固定假不認列。
+    const wfh = wfhByKey.has(key)
+    const punchedAny = !!day && day.pairs.length > 0
+    if (wfh && !punchedAny && dayType === "workday") {
+      workedMinutes = wfhWorkedMinutes(scheduledShift, workDate, tz, dayRegularMinutes)
+      lateMinutes = 0
+      earlyLeaveMinutes = 0
+      anomaly.wfh = true
+    }
+
     if (result.overtimeMinutes > dailyCap) {
       anomaly.overtimeCapExceeded = { minutes: result.overtimeMinutes, capMinutes: dailyCap }
     }
@@ -439,7 +543,7 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
       tenant_id: tenantId,
       employee_id: empId,
       work_date: workDate,
-      worked_minutes: result.workedMinutes,
+      worked_minutes: workedMinutes,
       late_minutes: lateMinutes,
       overtime_minutes: result.overtimeMinutes,
       night_minutes: result.nightMinutes,
@@ -477,4 +581,10 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
 }
 
 /** Exposed for the settlement unit tests (pure, no IO). */
-export const __internal = { sliceLeave, shiftWindowUtc }
+export const __internal = {
+  sliceLeave,
+  shiftWindowUtc,
+  sliceWfhDates,
+  regularMinutesForDay,
+  wfhWorkedMinutes,
+}

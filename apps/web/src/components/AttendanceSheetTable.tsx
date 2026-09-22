@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { fmtHm } from "@/lib/ess-format";
 import {
   friendlyError,
+  otTierLabelsOf,
   type SheetAnomaly,
   type SheetDayPatch,
   type SheetDayView,
@@ -17,6 +18,10 @@ import {
  * `showMoney` 兩個 flag 決定是否可編輯、是否顯示薪資試算卡。欄位順序對齊
  * docs/test/fixtures/attendance-115-06/README.md 描述的 Excel 版面（日期｜星期｜
  * 起｜迄｜請假｜加班≤2h｜3-8h｜9-12h｜內容｜外出／專案｜備註），異常欄是新增的。
+ *
+ * 2026-09-23：三個加班欄名改吃 `totals.otTierLabels`（M24，後端依規則的 tiers 產生）；
+ * 多一欄「超額(另計)」（M1 月加班上限之外、改為另行給付的分鐘）；在家工作的日子
+ * 在「內容」欄前面掛一個「在家」標籤（M2）。三者都與匯出的 xlsx 版面一致。
  */
 
 const WEEKDAY_LABEL = ["日", "一", "二", "三", "四", "五", "六"];
@@ -93,6 +98,7 @@ export function AttendanceSheetTable({
 }) {
   const { year, month } = minguoPeriod(sheet.period);
   const [overrideOpenFor, setOverrideOpenFor] = useState<string | null>(null);
+  const tierLabels = otTierLabelsOf(sheet.totals);
 
   async function patch(date: string, value: SheetDayPatch) {
     if (!onPatchDay) return;
@@ -114,9 +120,12 @@ export function AttendanceSheetTable({
               <th className="py-2 pr-2">起</th>
               <th className="py-2 pr-2">迄</th>
               <th className="py-2 pr-2">請假(h)／假別</th>
-              <th className="py-2 pr-2 text-right">加班 ≤2h</th>
-              <th className="py-2 pr-2 text-right">3-8h</th>
-              <th className="py-2 pr-2 text-right">9-12h</th>
+              <th className="py-2 pr-2 text-right">加班 {tierLabels[0]}</th>
+              <th className="py-2 pr-2 text-right">{tierLabels[1]}</th>
+              <th className="py-2 pr-2 text-right">{tierLabels[2]}</th>
+              <th className="py-2 pr-2 text-right" title="超過月加班上限、改為另行給付的時數">
+                超額(另計)
+              </th>
               <th className="py-2 pr-2">內容</th>
               <th className="py-2 pr-2">外出／專案</th>
               <th className="py-2 pr-2">備註</th>
@@ -137,7 +146,7 @@ export function AttendanceSheetTable({
             ))}
             {sheet.days.length === 0 && (
               <tr>
-                <td colSpan={12} className="py-6 text-center text-gray-400">
+                <td colSpan={13} className="py-6 text-center text-gray-400">
                   本期尚無資料
                 </td>
               </tr>
@@ -146,11 +155,11 @@ export function AttendanceSheetTable({
         </table>
       </div>
 
-      <SummaryRow totals={sheet.totals} />
+      <SummaryRow totals={sheet.totals} tierLabels={tierLabels} />
 
       {showMoney &&
         (sheet.money ? (
-          <MoneyCard money={sheet.money} />
+          <MoneyCard money={sheet.money} tierLabels={tierLabels} />
         ) : (
           <div className="rounded-xl border border-gray-100 bg-gray-50 p-4 text-sm text-gray-400">
             此帳號無薪資試算權限，或本表尚未計算薪資
@@ -176,6 +185,7 @@ function DayRow({
   onPatch: (patch: SheetDayPatch) => Promise<void>;
 }) {
   const hasOverride = day.overtime.override != null;
+  const beyondCap = day.overtime.beyondCap ?? 0;
   return (
     <tr className={`border-b border-gray-50 align-top ${rowTone(day)}`}>
       <td className="py-2 pl-3 pr-2 tabular-nums">{day.date}</td>
@@ -213,7 +223,18 @@ function DayRow({
       </td>
       <td className="py-2 pr-2 text-right tabular-nums">{hours(day.overtime.tier2)}</td>
       <td className="py-2 pr-2 text-right tabular-nums">{hours(day.overtime.tier3)}</td>
+      <td
+        className={`py-2 pr-2 text-right tabular-nums ${beyondCap > 0 ? "font-medium text-orange-600" : "text-gray-300"}`}
+        title={beyondCap > 0 ? "超過月加班上限，這些時數不計加班費，改另行給付" : undefined}
+      >
+        {beyondCap > 0 ? hours(beyondCap) : "—"}
+      </td>
       <td className="py-2 pr-2">
+        {day.wfh && (
+          <span className="mr-1 rounded-full border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[11px] text-sky-700">
+            在家
+          </span>
+        )}
         <InlineTextCell value={day.content} editable={editable} placeholder="內容" onSave={(v) => onPatch({ content: v })} />
       </td>
       <td className="py-2 pr-2">
@@ -439,10 +460,11 @@ function AnomalyCell({
   );
 }
 
-function SummaryRow({ totals }: { totals: SheetTotals }) {
+function SummaryRow({ totals, tierLabels }: { totals: SheetTotals; tierLabels: [string, string, string] }) {
   const leaveTypeEntries = Object.entries(totals.leaveByType).filter(([, minutes]) => minutes > 0);
+  const beyondCap = totals.overtimeBeyondCapMinutes ?? 0;
   return (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
       <div className="rounded-xl bg-slate-50 p-4">
         <p className="text-xs text-slate-500">出勤天數</p>
         <p className="mt-1 text-xl font-semibold text-slate-900">{totals.attendanceDays} 天</p>
@@ -465,11 +487,20 @@ function SummaryRow({ totals }: { totals: SheetTotals }) {
         )}
       </div>
       <div className="rounded-xl bg-blue-50 p-4">
-        <p className="text-xs text-blue-600">加班（≤2h／3-8h／9-12h）與總計</p>
+        <p className="text-xs text-blue-600">
+          加班（{tierLabels[0]}／{tierLabels[1]}／{tierLabels[2]}）與總計
+        </p>
         <p className="mt-1 text-xl font-semibold text-blue-700">
           {hours(totals.otTier1)} / {hours(totals.otTier2)} / {hours(totals.otTier3)}
         </p>
         <p className="mt-1 text-xs text-blue-500">總計 {hours(totals.otTotal)} 小時</p>
+      </div>
+      <div className={`rounded-xl p-4 ${beyondCap > 0 ? "bg-orange-50" : "bg-gray-50"}`}>
+        <p className={`text-xs ${beyondCap > 0 ? "text-orange-600" : "text-gray-500"}`}>超額（另行給付）</p>
+        <p className={`mt-1 text-xl font-semibold ${beyondCap > 0 ? "text-orange-700" : "text-gray-400"}`}>
+          {hours(beyondCap)} 小時
+        </p>
+        {beyondCap > 0 && <p className="mt-1 text-[11px] text-orange-500">超過月上限，不計加班費</p>}
       </div>
       <div className={`rounded-xl p-4 ${ALERT_STYLE[totals.overtimeMonthlyAlert]}`}>
         <p className="text-xs opacity-80">月累計加班警示</p>
@@ -479,15 +510,15 @@ function SummaryRow({ totals }: { totals: SheetTotals }) {
   );
 }
 
-function MoneyCard({ money: m }: { money: SheetMoney }) {
+function MoneyCard({ money: m, tierLabels }: { money: SheetMoney; tierLabels: [string, string, string] }) {
   return (
     <div className="rounded-xl border border-gray-100 bg-white p-4 shadow-sm">
       <p className="mb-3 text-sm font-semibold text-gray-700">薪資試算</p>
       <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm md:grid-cols-4">
         <MoneyRow label="時薪" value={money(m.hourlyWage)} />
-        <MoneyRow label="加班費 ≤2h" value={money(m.otPayByTier.tier1)} />
-        <MoneyRow label="加班費 3-8h" value={money(m.otPayByTier.tier2)} />
-        <MoneyRow label="加班費 9-12h" value={money(m.otPayByTier.tier3)} />
+        <MoneyRow label={`加班費 ${tierLabels[0]}`} value={money(m.otPayByTier.tier1)} />
+        <MoneyRow label={`加班費 ${tierLabels[1]}`} value={money(m.otPayByTier.tier2)} />
+        <MoneyRow label={`加班費 ${tierLabels[2]}`} value={money(m.otPayByTier.tier3)} />
         <MoneyRow label="加班費合計" value={money(m.otPay)} strong />
         <MoneyRow label="請假扣款" value={`-${money(m.leaveDeduction)}`} negative />
         <MoneyRow label="遲到早退扣款" value={`-${money(m.lateEarlyDeduction)}`} negative />

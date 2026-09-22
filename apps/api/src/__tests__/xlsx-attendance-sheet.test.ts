@@ -18,7 +18,8 @@ import type {
  * attendance-115-06/yu-yuzhe.json（余裕哲，23 天有加班、其餘天無資料，見該
  * 目錄的 README）造一個假的 SheetView，人工加註 1 筆 override（6/9）＋
  * 2 筆異常（6/10 error、6/16 warn，fixture 本身沒有異常欄，這兩筆是純粹為了
- * 驗收條件而加的）、money 採 fixture 的 summaryExcel 數字。
+ * 驗收條件而加的）、1 筆超額另計（6/24）、1 天在家工作（6/25）、money 採 fixture
+ * 的 summaryExcel 數字。
  *
  * 每一個小節（起迄、加班、override 註解、彙總、money、假日底色）都跑一次
  * write → workbookToBuffer → 用 exceljs 重新 load，斷言的是「真的寫進 xlsx
@@ -92,6 +93,11 @@ const ERROR_DATE = "2026-06-10"
 const ERROR_ANOMALY: SheetAnomaly = { code: "missing_out", severity: "error", message: "測試用 error 異常" }
 const WARN_DATE = "2026-06-16"
 const WARN_ANOMALY: SheetAnomaly = { code: "manual_punch", severity: "warn", message: "測試用 warn 異常" }
+// M1 超額（另計）與 M2 在家工作也不在 fixture 裡，同樣固定指定到某兩天上，
+// 純粹為了驗收「超額欄有值」「在家工作日的內容欄有前綴」。
+const BEYOND_DATE = "2026-06-24"
+const BEYOND_MINUTES = 120
+const WFH_DATE = "2026-06-25"
 // 平日但整月無打卡資料的 gap（6/19 端午節，週五）：驗證「缺資料的日期只靠
 // weekday 推假日」這個 fallback 的已知限制——見任務回報的取捨說明，這裡不
 // 應該被誤判成假日淡灰（builder 沒有國定假日行事曆可查）。
@@ -122,7 +128,7 @@ function toDayView(d: FixtureDay): SheetDayView {
     outingMinutes: 0,
     leaveMinutes: hoursToMinutes(d.leaveHours),
     leaveSummary: null,
-    wfh: false,
+    wfh: d.date === WFH_DATE,
     overtime: {
       computed,
       override,
@@ -131,6 +137,7 @@ function toDayView(d: FixtureDay): SheetDayView {
       tier1,
       tier2,
       tier3,
+      beyondCap: d.date === BEYOND_DATE ? BEYOND_MINUTES : 0,
     },
     content: d.content,
     outingNote: d.outing,
@@ -155,6 +162,7 @@ const totals: SheetTotals = {
   otTier2: hoursToMinutes(fixture.summaryExcel.otH3to8),
   otTier3: hoursToMinutes(fixture.summaryExcel.otH9to12),
   otTotal: hoursToMinutes(fixture.summaryExcel.otTotal),
+  overtimeBeyondCapMinutes: BEYOND_MINUTES,
   overtimeMonthlyAlert: "46",
 }
 
@@ -264,9 +272,9 @@ describe("buildAttendanceWorkbook — 余裕哲 115-06 fixture", () => {
     expect(title).toContain("余裕哲")
   })
 
-  it("列 5 表頭 12 欄依序", () => {
+  it("列 5 表頭 13 欄依序（加班欄名＝預設規則產出，與手工 Excel 相同）", () => {
     const row = ws.getRow(5)
-    const labels = Array.from({ length: 12 }, (_, i) => row.getCell(i + 1).value)
+    const labels = Array.from({ length: 13 }, (_, i) => row.getCell(i + 1).value)
     expect(labels).toEqual([
       "日期",
       "星期",
@@ -276,11 +284,33 @@ describe("buildAttendanceWorkbook — 余裕哲 115-06 fixture", () => {
       "加班(≤2h)",
       "3-8h",
       "9-12h",
+      "超額(另計)",
       "內容",
       "外出／專案",
       "備註",
       "異常",
     ])
+  })
+
+  it("M24：totals.otTierLabels 帶什麼，表頭與彙總／薪資欄名就跟著換", async () => {
+    const custom: SheetView = {
+      ...view,
+      totals: { ...view.totals, otTierLabels: ["≤1h", "2-4h", "5h 以上"] },
+    }
+    const wb = buildAttendanceWorkbook([custom], OPTS)
+    const buffer = await workbookToBuffer(wb)
+    const reloaded = new ExcelJS.Workbook()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await reloaded.xlsx.load(buffer as any)
+    const sheet = reloaded.getWorksheet("余裕哲")!
+    const header = sheet.getRow(5)
+    expect([header.getCell(6).value, header.getCell(7).value, header.getCell(8).value]).toEqual([
+      "加班(≤1h)",
+      "2-4h",
+      "5h 以上",
+    ])
+    expect(sheet.getRow(37).getCell(2).value).toBe("加班≤1h 合計")
+    expect(sheet.getRow(40).getCell(2).value).toBe("加班費(≤1h)")
   })
 
   it("第 6 列（6/1）日期／星期／起迄／加班值", () => {
@@ -307,17 +337,27 @@ describe("buildAttendanceWorkbook — 余裕哲 115-06 fixture", () => {
 
   it("6/10 有外出地點、且 error 異常把整列填成淡紅底", () => {
     const row = ws.getRow(rowOfJuneDay(10))
-    expect(row.getCell(10).value).toBe("高雄")
-    expect(row.getCell(12).value).toBe("測試用 error 異常")
+    expect(row.getCell(11).value).toBe("高雄")
+    expect(row.getCell(13).value).toBe("測試用 error 異常")
     expect(argbOf(row.getCell(1))).toBe("FFFFC7CE")
-    expect(argbOf(row.getCell(12))).toBe("FFFFC7CE")
+    expect(argbOf(row.getCell(13))).toBe("FFFFC7CE")
   })
 
   it("6/16 有外出地點、且 warn 異常把整列填成淡黃底", () => {
     const row = ws.getRow(rowOfJuneDay(16))
-    expect(row.getCell(10).value).toBe("屏東")
-    expect(row.getCell(12).value).toBe("測試用 warn 異常")
+    expect(row.getCell(11).value).toBe("屏東")
+    expect(row.getCell(13).value).toBe("測試用 warn 異常")
     expect(argbOf(row.getCell(1))).toBe("FFFFEB9C")
+  })
+
+  it("M1：6/24 超額(另計) 欄寫 2.0 小時；沒超額的日子是 0", () => {
+    expect(ws.getRow(rowOfJuneDay(24)).getCell(9).value).toBeCloseTo(2, 5)
+    expect(ws.getRow(rowOfJuneDay(23)).getCell(9).value).toBeCloseTo(0, 5)
+  })
+
+  it("M2：6/25 是在家工作 → 內容欄前綴「在家工作」", () => {
+    expect(ws.getRow(rowOfJuneDay(25)).getCell(10).value).toBe("在家工作")
+    expect(ws.getRow(rowOfJuneDay(23)).getCell(10).value ?? "").toBe("")
   })
 
   it("6/9 override：欄位仍顯示系統試算，(≤2h) 格帶註解", () => {
@@ -344,11 +384,13 @@ describe("buildAttendanceWorkbook — 余裕哲 115-06 fixture", () => {
     expect(argbOf(row.getCell(1))).not.toBe("FFF2F2F2")
   })
 
-  it("彙總區：加班總時數 55（40+15 小時）", () => {
+  it("彙總區：加班總時數 55（40+15 小時），第 6 欄是超額(另計)合計 2.0", () => {
     const labelRow = ws.getRow(37)
     expect(labelRow.getCell(5).value).toBe("加班總時數")
+    expect(labelRow.getCell(6).value).toBe("超額(另計)合計")
     const valueRow = ws.getRow(38)
     expect(valueRow.getCell(5).value).toBeCloseTo(55, 5)
+    expect(valueRow.getCell(6).value).toBeCloseTo(2, 5)
   })
 
   it("money 區：實領 47533.5", () => {
@@ -395,6 +437,7 @@ function minimalView(id: string, employeeName: string): SheetView {
       otTier2: 0,
       otTier3: 0,
       otTotal: 0,
+      overtimeBeyondCapMinutes: 0,
       overtimeMonthlyAlert: "none",
     },
     money: null,

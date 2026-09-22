@@ -40,6 +40,10 @@ export type AnomalyCode =
   | "cross_midnight"
   | "meal_deducted"
   | "monthly_ot_threshold"
+  /** M1：本月累計加班已超過 `overtime.monthlyCapHours`，這一天有分鐘落在上限外（info）。 */
+  | "overtime_beyond_cap"
+  /** M1：同上，且該日沒有已核准的加班單 → 超額時數不該逕自計入（error）。 */
+  | "overtime_beyond_cap_unapproved"
   | "consecutive_late"
   | "pending_leave_in_period"
   | "no_salary_structure"
@@ -74,6 +78,12 @@ export interface SheetDayView {
     tier1: number
     tier2: number
     tier3: number
+    /**
+     * M1：這一天有多少有效加班分鐘落在「月加班上限」之外（依日期序歸給月底那幾天）。
+     * `overtime.beyondCap='settle_separately'` 時這些分鐘不進薪資單的加班費，改記在
+     * overtime_settlements 另行給付。核准前的舊快照沒有這欄，讀取端請當 0。
+     */
+    beyondCap: number
   }
   content: string | null
   outingNote: string | null
@@ -96,8 +106,19 @@ export interface SheetTotals {
   otTier2: number
   otTier3: number
   otTotal: number
+  /**
+   * M1：本月落在月加班上限之外的分鐘合計（= Σ days[].overtime.beyondCap）。
+   * 舊快照沒有這欄，讀取端請當 0。
+   */
+  overtimeBeyondCapMinutes: number
   /** Which statutory monthly OT cap threshold this sheet is at/over, if any. */
   overtimeMonthlyAlert: "none" | "36" | "40" | "46"
+  /**
+   * M24：三個加班級距的欄名（由 `overtime.rules[when='weekday_ot'].tiers` 產生，
+   * 預設規則＝`["≤2h", "3-8h", "9-12h"]`）。匯出 xlsx 與前端表頭都讀這裡，規則改了
+   * 欄名就跟著改。舊快照／舊版 API 沒有這欄 → 讀取端退回預設字串。
+   */
+  otTierLabels?: string[]
 }
 
 /** Money breakdown for the sheet (payroll-adjacent, but this module only carries the shape). */

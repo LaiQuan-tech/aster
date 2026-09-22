@@ -27,6 +27,7 @@ import { dayPatchSchema } from "../routes/attendance-sheets.js"
  * 出勤月表 — 純函式驗收（不連 DB）：
  *   • computeAnomalies：用 115-06 fixture 的真實情境（劉皇佑／鄧文琳／莊子葶）
  *   • 月累計加班門檻 36 warn / 40 error / 46 error
+ *   • M1 月加班上限超額（info ＋ 無加班單時的 error）
  *   • 加班三級切分（有效加班依規則 tiers 累進）
  *   • PATCH body：override 非 null 而無 reason 被 zod 擋
  *   • SHEET_TRANSITIONS 全部合法／非法轉移
@@ -304,6 +305,72 @@ describe("computeAnomalies — 日級規則逐條", () => {
     expect(mealDeducted(480 + 181, "workday", RULES)).toBe(true)
     expect(mealDeducted(480 + 181, "rest_day", RULES)).toBe(true)
     expect(mealDeducted(600, "rest_day", RULES)).toBe(false)
+  })
+
+  it("W9：mealDeducted 吃得到班表淨工時當基準（basis='shift'）", () => {
+    // 平日 raw = worked − 基準；基準 420（下午班淨 7h）時 660 分工時的延長是 240 > 180。
+    expect(mealDeducted(660, "workday", RULES, 420)).toBe(true)
+    // 同樣工時、法定 480 基準 → 延長只有 180，不到門檻。
+    expect(mealDeducted(660, "workday", RULES, 480)).toBe(false)
+  })
+})
+
+describe("computeAnomalies — M1 月加班上限超額（overtime_beyond_cap）", () => {
+  const CAP = 40 * 60
+  const HOURS = [10, 10, 10, 8, 6] // 共 44h → 第 5 天超額 4h
+  const DATES = ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05"]
+  const rows = DATES.map((d, i) =>
+    dayRow(d, { day_type: "workday", worked_minutes: 480 + HOURS[i] * 60, overtime_minutes_computed: HOURS[i] * 60 }),
+  )
+
+  it("超額日沒有已核准加班單 → info ＋ error 兩條；其餘日子都沒有", () => {
+    const r = computeAnomalies({ period: "2026-06" }, rows, ctx({}, { capMinutes: CAP, approvedOtDates: new Set() }))
+    const last = r.days.get("2026-06-05") ?? []
+    const info = last.find((a) => a.code === "overtime_beyond_cap")
+    expect(info).toMatchObject({ severity: "info", detail: { beyondCapMinutes: 4 * 60, capMinutes: CAP } })
+    expect(info?.message).toContain("另行給付")
+    expect(last.find((a) => a.code === "overtime_beyond_cap_unapproved")).toMatchObject({ severity: "error" })
+    for (const d of DATES.slice(0, 4)) {
+      expect(codes(r.days.get(d))).not.toContain("overtime_beyond_cap")
+      expect(codes(r.days.get(d))).not.toContain("overtime_beyond_cap_unapproved")
+    }
+  })
+
+  it("超額日有已核准加班單 → 只剩 info，沒有 error", () => {
+    const r = computeAnomalies(
+      { period: "2026-06" },
+      rows,
+      ctx({}, { capMinutes: CAP, approvedOtDates: new Set(["2026-06-05"]) }),
+    )
+    const last = r.days.get("2026-06-05") ?? []
+    expect(codes(last)).toContain("overtime_beyond_cap")
+    expect(codes(last)).not.toContain("overtime_beyond_cap_unapproved")
+    expect(last.some((a) => a.severity === "error")).toBe(false)
+  })
+
+  it("剛好等於上限不算超；beyondCap='warn' 時訊息不提另行給付", () => {
+    const exact = DATES.slice(0, 4).map((d, i) =>
+      dayRow(d, { day_type: "workday", overtime_minutes_computed: [10, 10, 10, 10][i] * 60 }),
+    )
+    const r = computeAnomalies({ period: "2026-06" }, exact, ctx({}, { capMinutes: CAP, approvedOtDates: new Set() }))
+    for (const d of DATES.slice(0, 4)) expect(codes(r.days.get(d))).not.toContain("overtime_beyond_cap")
+
+    const warn = computeAnomalies(
+      { period: "2026-06" },
+      rows,
+      ctx({}, { capMinutes: CAP, beyondCap: "warn", approvedOtDates: new Set(["2026-06-05"]) }),
+    )
+    expect((warn.days.get("2026-06-05") ?? []).find((a) => a.code === "overtime_beyond_cap")?.message).not.toContain(
+      "另行給付",
+    )
+  })
+
+  it("沒帶 capMinutes 時由規則推（預設 40 小時），行為相同", () => {
+    const r = computeAnomalies({ period: "2026-06" }, rows, ctx())
+    expect(codes(r.days.get("2026-06-05"))).toContain("overtime_beyond_cap")
+    expect((r.days.get("2026-06-05") ?? []).find((a) => a.code === "overtime_beyond_cap")?.detail).toMatchObject({
+      beyondCapMinutes: 4 * 60,
+    })
   })
 })
 

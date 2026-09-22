@@ -39,6 +39,10 @@ export type AnomalyCode =
   | "cross_midnight"
   | "meal_deducted"
   | "monthly_ot_threshold"
+  /** M1：本月累計加班超過月上限，這天有分鐘落在上限外（info）。 */
+  | "overtime_beyond_cap"
+  /** M1：同上，且當日沒有已核准的加班單（error，送出前要填說明）。 */
+  | "overtime_beyond_cap_unapproved"
   | "consecutive_late"
   | "pending_leave_in_period"
   | "no_salary_structure";
@@ -73,6 +77,12 @@ export interface SheetDayView {
     tier1: number;
     tier2: number;
     tier3: number;
+    /**
+     * M1：這天有多少有效加班分鐘落在「月加班上限」之外（依日期序歸給月底那幾天）。
+     * 規則 `overtime.beyondCap='settle_separately'` 時這些分鐘不算加班費，改記在
+     * 「加班超額另計」帳上另行給付。舊版 API／舊快照沒有這欄 → 讀取端請當 0。
+     */
+    beyondCap?: number;
   };
   content: string | null;
   outingNote: string | null;
@@ -95,7 +105,28 @@ export interface SheetTotals {
   otTier2: number;
   otTier3: number;
   otTotal: number;
+  /** M1：本月落在月加班上限之外的分鐘合計；舊版 API 沒有這欄 → 當 0。 */
+  overtimeBeyondCapMinutes?: number;
   overtimeMonthlyAlert: "none" | "36" | "40" | "46";
+  /**
+   * M24：三個加班級距的欄名（後端依規則的 tiers 產生，預設
+   * `["≤2h", "3-8h", "9-12h"]`）。舊版 API 沒有這欄 → 用 DEFAULT_OT_TIER_LABELS。
+   */
+  otTierLabels?: string[];
+}
+
+/** `totals.otTierLabels` 缺漏時的預設欄名（＝亞斯特手工 Excel 的三欄）。 */
+export const DEFAULT_OT_TIER_LABELS: [string, string, string] = ["≤2h", "3-8h", "9-12h"];
+
+/** 從 totals 取三個加班級距欄名（缺漏或不足三個 → 預設值）。 */
+export function otTierLabelsOf(totals: Pick<SheetTotals, "otTierLabels">): [string, string, string] {
+  const raw = totals.otTierLabels;
+  if (!Array.isArray(raw) || raw.length < 3) return DEFAULT_OT_TIER_LABELS;
+  return [
+    String(raw[0] ?? DEFAULT_OT_TIER_LABELS[0]),
+    String(raw[1] ?? DEFAULT_OT_TIER_LABELS[1]),
+    String(raw[2] ?? DEFAULT_OT_TIER_LABELS[2]),
+  ];
 }
 
 /** 薪資試算（只有 HR 看得到；本人查詢自己的表時是 null）。 */
@@ -221,6 +252,9 @@ export function mergeDayPatch(day: SheetDayView, raw: SheetDayPatchResult): Shee
       tier1: raw.otTier1,
       tier2: raw.otTier2,
       tier3: raw.otTier3,
+      // PATCH day 不回 beyondCap（超額是「整個月的分配」，改一天要整月重算）：
+      // 先留著舊值，呼叫端重新 GET 整張表時才會更新。
+      beyondCap: day.overtime.beyondCap,
     },
   };
 }
@@ -363,6 +397,8 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   invalid_query: "查詢參數不正確",
   invalid_date: "日期格式不正確",
   invalid_period: "月份格式不正確，請用 YYYY-MM",
+  overtime_settlements_not_migrated: "此租戶尚未啟用加班超額另計功能",
+  settlement_paid: "這筆超額另計已標記付款，不可再修改",
 };
 
 /** 把 apiFetch 丟出的 Error（訊息格式 `[status] code或訊息`）轉成中文提示；辨識不出來就用原文。 */

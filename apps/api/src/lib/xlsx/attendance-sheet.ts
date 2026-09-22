@@ -27,6 +27,10 @@ import { addDaysKey, diffDaysKey, localParts, monthRangeKeys, weekdayOfKey } fro
  *     hh/mm 當時間部份；numFmt 是純 "h:mm"（無日期部份）時 Excel 只看小數部份，
  *     所以哪一天當底完全不影響顯示。
  * 兩者皆已用一支探測腳本實際 write→reload 驗證過往返正確（見任務回報）。
+ *
+ * M24（2026-09-23）：三個加班級距的欄名改由 `view.totals.otTierLabels` 帶進來
+ * （規則的 tiers 決定，預設仍是 ≤2h／3-8h／9-12h）；逐日列多一欄「超額(另計)」
+ * （M1 月加班上限之外、改為另行給付的分鐘），「內容」欄對在家工作日加前綴。
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -85,22 +89,44 @@ const OT_ALERT_LABELS: Record<SheetView["totals"]["overtimeMonthlyAlert"], strin
 
 const WEEKDAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"] // weekdayOfKey(): 0=日…6=六
 
-const HEADERS = [
-  "日期",
-  "星期",
-  "起",
-  "迄",
-  "請假",
-  "加班(≤2h)",
-  "3-8h",
-  "9-12h",
-  "內容",
-  "外出／專案",
-  "備註",
-  "異常",
-] as const
-const COLUMN_COUNT = HEADERS.length // 12
-const COLUMN_WIDTHS = [8, 5, 8, 8, 9, 9, 9, 9, 16, 14, 18, 20]
+/**
+ * M24：三個加班級距的欄名不再寫死，改由 `SheetView.totals.otTierLabels` 帶進來
+ * （後端依規則的 `overtime.rules[weekday_ot].tiers` 產生）。舊快照／舊版 API 沒有
+ * 這欄時退回預設值，輸出與手工 Excel 完全相同。
+ */
+const DEFAULT_OT_TIER_LABELS: [string, string, string] = ["≤2h", "3-8h", "9-12h"]
+
+function otTierLabelsOf(view: SheetView): [string, string, string] {
+  const raw = view.totals.otTierLabels
+  if (!Array.isArray(raw) || raw.length < 3) return DEFAULT_OT_TIER_LABELS
+  return [
+    String(raw[0] ?? DEFAULT_OT_TIER_LABELS[0]),
+    String(raw[1] ?? DEFAULT_OT_TIER_LABELS[1]),
+    String(raw[2] ?? DEFAULT_OT_TIER_LABELS[2]),
+  ]
+}
+
+/** 逐日列的表頭（13 欄）。第 6–8 欄是加班級距、第 9 欄是 M1 的超額（另計）。 */
+function headersFor(labels: [string, string, string]): string[] {
+  return [
+    "日期",
+    "星期",
+    "起",
+    "迄",
+    "請假",
+    `加班(${labels[0]})`,
+    labels[1],
+    labels[2],
+    "超額(另計)",
+    "內容",
+    "外出／專案",
+    "備註",
+    "異常",
+  ]
+}
+
+const COLUMN_COUNT = 13
+const COLUMN_WIDTHS = [8, 5, 8, 8, 9, 9, 9, 9, 10, 16, 14, 18, 20]
 
 const FILL_HOLIDAY = "FFF2F2F2" // 假日列淡灰底
 const FILL_WARN = "FFFFEB9C" // warn 淡黃底（Excel 內建「注意」色）
@@ -159,7 +185,7 @@ function fallbackDay(date: string): SheetDayView {
     leaveMinutes: 0,
     leaveSummary: null,
     wfh: false,
-    overtime: { computed: 0, override: null, overrideReason: null, effective: 0, tier1: 0, tier2: 0, tier3: 0 },
+    overtime: { computed: 0, override: null, overrideReason: null, effective: 0, tier1: 0, tier2: 0, tier3: 0, beyondCap: 0 },
     content: null,
     outingNote: null,
     projectId: null,
@@ -240,9 +266,9 @@ function writeLetterhead(
   titleCell.alignment = { horizontal: "center" }
 }
 
-function writeHeaderRow(ws: ExcelJS.Worksheet): void {
+function writeHeaderRow(ws: ExcelJS.Worksheet, labels: [string, string, string]): void {
   const row = ws.getRow(5)
-  HEADERS.forEach((label, idx) => {
+  headersFor(labels).forEach((label, idx) => {
     row.getCell(idx + 1).value = label
   })
   applyHeaderStyle(row)
@@ -309,11 +335,17 @@ function writeDayRows(ws: ExcelJS.Worksheet, view: SheetView, tz: string): numbe
     const tier3Cell = row.getCell(8)
     tier3Cell.value = minutesToHours(ot.tier3)
     tier3Cell.numFmt = "0.0"
+    // M1 超額（另計）：已含在左邊三欄的加班時數裡，但不計加班費、另行給付。
+    const beyondCell = row.getCell(9)
+    beyondCell.value = minutesToHours(ot.beyondCap ?? 0)
+    beyondCell.numFmt = "0.0"
 
-    row.getCell(9).value = day.content ?? ""
-    row.getCell(10).value = day.outingNote ?? day.projectName ?? ""
-    row.getCell(11).value = crossedMidnight ? `${day.note ?? ""}(隔日)`.trim() : (day.note ?? "")
-    row.getCell(12).value = day.anomalies.map((a) => a.message).join("; ")
+    // M2：在家工作的日子在「內容」欄前面標出來（工時是認列的，不是打卡來的）。
+    const content = day.content ?? ""
+    row.getCell(10).value = day.wfh ? (content ? `在家工作／${content}` : "在家工作") : content
+    row.getCell(11).value = day.outingNote ?? day.projectName ?? ""
+    row.getCell(12).value = crossedMidnight ? `${day.note ?? ""}(隔日)`.trim() : (day.note ?? "")
+    row.getCell(13).value = day.anomalies.map((a) => a.message).join("; ")
 
     fillRow(row, rowFill(day), COLUMN_COUNT)
     r += 1
@@ -322,20 +354,26 @@ function writeDayRows(ws: ExcelJS.Worksheet, view: SheetView, tz: string): numbe
 }
 
 /** 彙總區：一列標籤（bold）＋一列數值，回傳下一個可用的空白列號。 */
-function writeSummarySection(ws: ExcelJS.Worksheet, startRow: number, totals: SheetView["totals"]): number {
-  const labels = [
+function writeSummarySection(
+  ws: ExcelJS.Worksheet,
+  startRow: number,
+  totals: SheetView["totals"],
+  labels: [string, string, string],
+): number {
+  const headerLabels = [
     "請假合計",
-    "加班≤2h 合計",
-    "3-8h 合計",
-    "9-12h 合計",
+    `加班${labels[0]} 合計`,
+    `${labels[1]} 合計`,
+    `${labels[2]} 合計`,
     "加班總時數",
+    "超額(另計)合計",
     "出勤天數",
     "遲到分鐘",
     "早退分鐘",
     "月累計加班警示",
   ]
   const labelRow = ws.getRow(startRow)
-  labels.forEach((label, idx) => (labelRow.getCell(idx + 1).value = label))
+  headerLabels.forEach((label, idx) => (labelRow.getCell(idx + 1).value = label))
   applyHeaderStyle(labelRow)
 
   const valueRow = ws.getRow(startRow + 1)
@@ -345,35 +383,41 @@ function writeSummarySection(ws: ExcelJS.Worksheet, startRow: number, totals: Sh
     minutesToHours(totals.otTier2),
     minutesToHours(totals.otTier3),
     minutesToHours(totals.otTotal),
+    minutesToHours(totals.overtimeBeyondCapMinutes ?? 0),
   ]
   hourCols.forEach((v, idx) => {
     const c = valueRow.getCell(idx + 1)
     c.value = v
     c.numFmt = "0.0"
   })
-  const daysCell = valueRow.getCell(6)
+  const daysCell = valueRow.getCell(7)
   daysCell.value = totals.attendanceDays
   daysCell.numFmt = "0"
-  const lateCell = valueRow.getCell(7)
+  const lateCell = valueRow.getCell(8)
   lateCell.value = totals.lateMinutes
   lateCell.numFmt = "0"
-  const earlyCell = valueRow.getCell(8)
+  const earlyCell = valueRow.getCell(9)
   earlyCell.value = totals.earlyLeaveMinutes
   earlyCell.numFmt = "0"
-  valueRow.getCell(9).value = OT_ALERT_LABELS[totals.overtimeMonthlyAlert]
+  valueRow.getCell(10).value = OT_ALERT_LABELS[totals.overtimeMonthlyAlert]
 
   return startRow + 2
 }
 
 /** 薪資明細（只有 money 非 null 才輸出）；回傳下一個可用的空白列號。 */
-function writeMoneySection(ws: ExcelJS.Worksheet, startRow: number, money: SheetMoney | null): number {
+function writeMoneySection(
+  ws: ExcelJS.Worksheet,
+  startRow: number,
+  money: SheetMoney | null,
+  tierLabels: [string, string, string],
+): number {
   if (!money) return startRow
 
   const labels = [
     "時薪",
-    "加班費(≤2h)",
-    "加班費(3-8h)",
-    "加班費(9-12h)",
+    `加班費(${tierLabels[0]})`,
+    `加班費(${tierLabels[1]})`,
+    `加班費(${tierLabels[2]})`,
     "加班費合計",
     "請假扣款",
     "遲到早退扣款",
@@ -471,11 +515,12 @@ export function buildAttendanceWorkbook(
       fitToHeight: 0,
     }
 
+    const tierLabels = otTierLabelsOf(view)
     writeLetterhead(ws, view, opts)
-    writeHeaderRow(ws)
+    writeHeaderRow(ws, tierLabels)
     const afterDays = writeDayRows(ws, view, opts.tz)
-    const afterSummary = writeSummarySection(ws, afterDays + 1, view.totals)
-    const afterMoney = writeMoneySection(ws, afterSummary + 1, view.money)
+    const afterSummary = writeSummarySection(ws, afterDays + 1, view.totals, tierLabels)
+    const afterMoney = writeMoneySection(ws, afterSummary + 1, view.money, tierLabels)
     writeFooter(ws, afterMoney + 1, view, opts.tz)
   }
 

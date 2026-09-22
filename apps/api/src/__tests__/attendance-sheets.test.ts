@@ -8,7 +8,8 @@ import { zonedTimeToUtc } from "../lib/tz"
 import { app } from "../app"
 
 /**
- * 出勤月表（P1）— live 合約測試：generate → GET → PATCH（override 無 reason 400）
+ * 出勤月表（P1）— live 合約測試：generate → GET（含 M1 超額欄與 M24 欄名）
+ * → PATCH（override 無 reason 400）
  * → submit（error 異常未確認 400 → ack → 200）→ review → approve（snapshot 存在）
  * → PATCH 409 → payroll run 讀快照 → reopen → 重算不覆蓋 note → 再送出 → 退回
  * → 再核准 → 薪資定稿鎖定 → locked 後 PATCH / return 皆 409。
@@ -196,6 +197,10 @@ describe.skipIf(!migrated)("P1 attendance sheets — live", () => {
     const d1 = sheet.days.find((d: { date: string }) => d.date === "2026-08-01")
     expect(d1.dayType).toBe("rest_day")
     expect(sheet.totals).toMatchObject({ attendanceDays: 2, workedMinutes: 1200, otTotal: 210, otTier1: 120, otTier2: 90, overtimeMonthlyAlert: "none" })
+    // M1／M24：加班遠低於月上限 → 逐日與合計的超額都是 0；欄名由規則產出（預設同手工 Excel）。
+    expect(sheet.totals.overtimeBeyondCapMinutes).toBe(0)
+    expect(sheet.totals.otTierLabels).toEqual(["≤2h", "3-8h", "9-12h"])
+    expect(d4.overtime.beyondCap).toBe(0)
     expect(sheet.money).not.toBeNull()
     expect(sheet.money.hourlyWage).toBe(200) // 48000 ÷ 240
     expect(sheet.money.otPay).toBeGreaterThan(0)

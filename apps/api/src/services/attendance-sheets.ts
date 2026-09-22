@@ -1,11 +1,15 @@
 import {
   computePayslip,
+  resolveOvertimeBasis,
+  resolveOvertimeBeyondCap,
   resolveOvertimeDailyCapMinutes,
   resolveOvertimeMonthlyAlertHours,
+  resolveOvertimeMonthlyCapHours,
   resolvePayrollGates,
   resolveOvertimeMealBreak,
   DAY_TYPE_TO_OVERTIME_WHEN,
   type DayType,
+  type OvertimeBeyondCap,
   type OvertimeSegment,
   type RuleConfig,
   type SalaryStructure,
@@ -27,6 +31,8 @@ import { managerOfEmployee } from "../middleware/scope.js"
 import { settleAttendance } from "./settlement.js"
 import { tenantBlocksApproveOnUnsettledLeave } from "./leave-settlement.js"
 import { pairPunchesTz } from "./punch-pairing.js"
+import { capMinutesFor } from "./overtime-cap.js"
+import { writeAuditLog } from "./audit.js"
 import {
   buildPayrollInputs,
   loadRuleConfigFor,
@@ -261,6 +267,57 @@ export function overtimeMonthlyAlert(totalMinutes: number): SheetTotals["overtim
   return level
 }
 
+/**
+ * M24：三個加班級距的欄名，由規則的平日加班 tiers 產生（月表畫面、xlsx 表頭與
+ * 彙總列共用同一份）。tier 界線是「累計加班小時」：
+ *   第 1 段 → `≤{upto}h`；中間段 → `{前一段上限+1}-{本段上限}h`；
+ *   最後一段沒有上限 → 收在「當日工時法定上限」= 正常工時 + 單日加班上限。
+ * 預設規則（tiers 2h / 8h / 無上限、正常工時 8h、單日上限 4h）產出
+ * `["≤2h", "3-8h", "9-12h"]`——與手工 Excel 完全相同。規則沒有 tiers（單一倍率）
+ * 時只有第一欄有意義，後兩欄標「—」。
+ */
+export function otTierLabels(rules: RuleConfig): [string, string, string] {
+  const rule = rules.overtime.rules.find((r) => r.when === "weekday_ot")
+  const tiers = rule?.tiers ?? []
+  const openEndHours = Math.round(rules.payroll.dailyRegularHours + resolveOvertimeDailyCapMinutes(rules) / 60)
+  const labels: string[] = []
+  let prev = 0
+  for (let i = 0; i < 3; i += 1) {
+    const tier = tiers[i]
+    if (!tier) {
+      labels.push("—")
+      continue
+    }
+    const upto = tier.uptoHours != null ? tier.uptoHours : Math.max(openEndHours, prev + 1)
+    labels.push(i === 0 ? `≤${trimHours(upto)}h` : `${trimHours(prev + 1)}-${trimHours(upto)}h`)
+    prev = upto
+  }
+  return [labels[0], labels[1], labels[2]]
+}
+
+/**
+ * M1：把月加班上限之外的分鐘依「日期序」歸給最後那幾天（純函式）。
+ * 逐日累計有效加班，累計一超過 `capMinutes`，超出的部分就算在當天頭上
+ * （剛好等於上限不算超）；後面每一天則整天都是超額。
+ * 例：上限 40h、日序 10/10/10/8/6 小時 → 只有第 5 天有 4 小時超額。
+ * `capMinutes <= 0` 視為沒有上限（回空 Map）。
+ */
+export function allocateBeyondCap(
+  days: Array<{ date: string; effective: number }>,
+  capMinutes: number,
+): Map<string, number> {
+  const out = new Map<string, number>()
+  if (!Number.isFinite(capMinutes) || capMinutes <= 0) return out
+  let cumulative = 0
+  for (const day of [...days].sort((a, b) => a.date.localeCompare(b.date))) {
+    const effective = Math.max(0, Math.round(day.effective))
+    cumulative += effective
+    const beyond = Math.min(Math.max(0, cumulative - capMinutes), effective)
+    if (beyond > 0) out.set(day.date, beyond)
+  }
+  return out
+}
+
 /** `{sick: 90, annual: 480}` → `病假 1.5h；特休 8h`（code 找不到名稱就用 code）。 */
 export function formatLeaveSummary(
   breakdown: Record<string, number> | null | undefined,
@@ -282,11 +339,20 @@ function trimHours(h: number): string {
  * 但引擎的 raw 加班可由 worked_minutes 反推（平日 = worked − 正常工時；
  * 例假／固定假 = 全部工時），扣餐條件是 extended > mealBreak.afterMinutes。
  * 這裡照 worktime-engine.applyOvertimePipeline 的同一條式子重算判斷。
+ * `regularMinutes` 省略 = 法定正常工時；W9 的 basis='shift' 由呼叫端帶班表淨工時，
+ * 與 settlement.ts 當時算加班用的基準一致（否則「有沒有扣晚餐」會判錯）。
  */
-export function mealDeducted(workedMinutes: number, dayType: DayType, rules: RuleConfig): boolean {
+export function mealDeducted(
+  workedMinutes: number,
+  dayType: DayType,
+  rules: RuleConfig,
+  regularMinutes?: number,
+): boolean {
   const meal = resolveOvertimeMealBreak(rules)
   if (!meal) return false
-  const regular = Math.round(rules.payroll.dailyRegularHours * 60)
+  const regular = regularMinutes != null && regularMinutes > 0
+    ? Math.round(regularMinutes)
+    : Math.round(rules.payroll.dailyRegularHours * 60)
   const raw = dayType === "workday" ? Math.max(0, workedMinutes - regular) : workedMinutes
   if (raw <= 0) return false
   const extended = dayType === "workday" ? raw : Math.max(0, raw - regular)
@@ -337,6 +403,16 @@ export interface AnomalyContext {
   /** B8：tenants.features.attendance.blockApproveOnUnsettledLeave——true 時上面那條異常升級為 error。 */
   blockApproveOnUnsettledLeave?: boolean
   hasSalaryStructure: boolean
+  /**
+   * M1 月加班上限（分）。省略 → 由 `overtime.monthlyCapHours` 推（預設 40h）。
+   * 三個欄位都做成 optional 是為了不破壞既有手工建構 AnomalyContext 的測試
+   * fixture；生產路徑（anomalyContextFor）一定會填。
+   */
+  capMinutes?: number
+  /** M1 超過上限的處理方式（預設 settle_separately）；只影響訊息措辭，異常一律照發。 */
+  beyondCap?: OvertimeBeyondCap
+  /** M1：該月「有已核准加班單」的日期集合——超額日不在集合裡就升級成 error。 */
+  approvedOtDates?: Set<DateKey>
 }
 
 export interface AnomalyResult {
@@ -368,7 +444,8 @@ function fmtHm(minutes: number): string {
  * 日級 error：missing_in / missing_out / unpaired_punch / absent_scheduled /
  *   leave_overlap_work；warn：late / early_leave / overtime_override /
  *   overtime_over_daily_cap / holiday_work / outing_unpaired / manual_punch /
- *   cross_midnight；info：meal_deducted。
+ *   cross_midnight；info：meal_deducted、overtime_beyond_cap；
+ *   error（M1）：overtime_beyond_cap_unapproved。
  * 月級：monthly_ot_threshold（規則門檻由小到大，第一階 warn、其後 error）、
  *   consecutive_late（連續 ≥3 個日曆日遲到，同 detection.ts）、
  *   pending_leave_in_period、no_salary_structure。
@@ -380,6 +457,9 @@ function fmtHm(minutes: number): string {
  *     （與 detection.ts frequent_missing 相同立場——沒有「應到」就沒有「未到」）。
  *   • `leave_overlap_work` 只在當日有請假分鐘時檢查；沒有班表就以規則的
  *     每日正常工時當淨工時。
+ *   • M1 超額（`overtime_beyond_cap`）依**日期序**歸屬：累計超過上限的那天起，
+ *     超出的分鐘算在當天（見 allocateBeyondCap）。超額日若沒有已核准的加班單，
+ *     另發一條 error（業主決策 1：超過門檻後要先送加班單經主管核准才計入）。
  */
 export function computeAnomalies(
   sheet: { period: string },
@@ -389,6 +469,13 @@ export function computeAnomalies(
   const result: AnomalyResult = { days: new Map(), month: [] }
   const dailyCap = resolveOvertimeDailyCapMinutes(ctx.rules)
   const regularMinutes = Math.round(ctx.rules.payroll.dailyRegularHours * 60)
+  // W9：basis='shift' 時「正常工時」逐日看班表淨工時（與 settlement.ts 同一條規則）。
+  const shiftBasis = resolveOvertimeBasis(ctx.rules) === "shift"
+  // M1：月加班上限與超額處理。
+  const capMinutes = ctx.capMinutes ?? Math.round(resolveOvertimeMonthlyCapHours(ctx.rules) * 60)
+  const capHours = Math.round((capMinutes / 60) * 100) / 100
+  const beyondCapMode = ctx.beyondCap ?? resolveOvertimeBeyondCap(ctx.rules)
+  const approvedOtDates = ctx.approvedOtDates ?? new Set<DateKey>()
   const sorted = [...days].sort((a, b) => a.work_date.localeCompare(b.work_date))
 
   let totalEffective = 0
@@ -404,7 +491,11 @@ export function computeAnomalies(
     const computed = day.overtime_minutes_computed ?? 0
     const override = day.overtime_minutes_override
     const effective = effectiveOvertime(day)
+    const dayRegularMinutes = shiftBasis ? (facts.shiftNetMinutes ?? regularMinutes) : regularMinutes
     totalEffective += effective
+    // 日期序歸屬：累計跨過上限的那天起，超出的分鐘算在當天（同 allocateBeyondCap）。
+    const beyondCapMinutes =
+      capMinutes > 0 ? Math.min(Math.max(0, totalEffective - capMinutes), effective) : 0
 
     // ── error ──
     if (facts.unpairedOut > 0) {
@@ -458,9 +549,30 @@ export function computeAnomalies(
     }
 
     // ── info ──
-    if (mealDeducted(worked, dayType, ctx.rules)) {
+    if (mealDeducted(worked, dayType, ctx.rules, dayRegularMinutes)) {
       const meal = resolveOvertimeMealBreak(ctx.rules)
       push({ code: "meal_deducted", severity: "info", detail: { deductMinutes: meal?.deductMinutes ?? 0 }, message: `延長工時已扣除晚餐 ${meal?.deductMinutes ?? 0} 分` })
+    }
+
+    // ── M1 月加班上限超額 ──
+    if (beyondCapMinutes > 0) {
+      push({
+        code: "overtime_beyond_cap",
+        severity: "info",
+        detail: { beyondCapMinutes, capMinutes, mode: beyondCapMode },
+        message:
+          beyondCapMode === "settle_separately"
+            ? `本月加班累計已超過 ${capHours} 小時上限，這天有 ${fmtHm(beyondCapMinutes)} 屬超額，不計加班費、改另行給付`
+            : `本月加班累計已超過 ${capHours} 小時上限，這天有 ${fmtHm(beyondCapMinutes)} 屬超額`,
+      })
+      if (!approvedOtDates.has(day.work_date)) {
+        push({
+          code: "overtime_beyond_cap_unapproved",
+          severity: "error",
+          detail: { beyondCapMinutes, capMinutes },
+          message: `超額加班 ${fmtHm(beyondCapMinutes)} 當日沒有已核准的加班單，請先補送加班單經主管核准`,
+        })
+      }
     }
 
     if (list.length > 0) result.days.set(day.work_date, list)
@@ -639,6 +751,8 @@ interface MonthFacts {
   punchFactsByEmp: Map<string, Map<DateKey, PunchFacts>>
   scheduleByKey: Map<string, { shiftNetMinutes: number | null }>
   wfhByKey: Set<string>
+  /** M1：已核准加班單覆蓋到的 `empId|date`（判「超額日有沒有加班單」用）。 */
+  approvedOtByKey: Set<string>
   calendar: Map<DateKey, DayType>
   leaveNameByCode: Map<string, string>
   pendingLeaveByEmp: Map<string, number>
@@ -690,6 +804,7 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     punchFactsByEmp: new Map(),
     scheduleByKey: new Map(),
     wfhByKey: new Set(),
+    approvedOtByKey: new Set(),
     calendar: new Map(),
     leaveNameByCode: new Map(),
     pendingLeaveByEmp: new Map(),
@@ -806,6 +921,28 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     const last = localDateKey(new Date(Math.max(endMs, new Date(r.start_at).getTime())), tz)
     for (let d = first; d <= last; d = addDaysKey(d, 1)) {
       if (d >= from && d <= to) facts.wfhByKey.add(`${r.employee_id}|${d}`)
+    }
+  }
+
+  // M1：已核准的加班單（kind='ot'），切成覆蓋到的本地日——月表用它判斷「超過月上限
+  // 的那幾天有沒有事先送加班單」。切法與上面的 wfh 相同（加班單幾乎都是單日）。
+  const { data: otData, error: otErr } = await supabaseAdmin
+    .from("leave_requests")
+    .select("employee_id, start_at, end_at")
+    .eq("tenant_id", tenantId)
+    .eq("kind", "ot")
+    .eq("status", "approved")
+    .is("deleted_at", null)
+    .in("employee_id", employeeIds)
+    .lt("start_at", rangeEnd)
+    .gt("end_at", rangeStart)
+  if (otErr) throw new Error(`attendance-sheets (approved ot): ${otErr.message}`)
+  for (const r of (otData ?? []) as Array<{ employee_id: string; start_at: string; end_at: string }>) {
+    const first = localDateKey(r.start_at, tz)
+    const endMs = new Date(r.end_at).getTime() - 1
+    const last = localDateKey(new Date(Math.max(endMs, new Date(r.start_at).getTime())), tz)
+    for (let d = first; d <= last; d = addDaysKey(d, 1)) {
+      if (d >= from && d <= to) facts.approvedOtByKey.add(`${r.employee_id}|${d}`)
     }
   }
 
@@ -927,6 +1064,10 @@ function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContex
       manualPunch: pf?.manualPunch ?? false,
     })
   }
+  const approvedOtDates = new Set<DateKey>()
+  for (let d = facts.from; d <= facts.to; d = addDaysKey(d, 1)) {
+    if (facts.approvedOtByKey.has(`${employeeId}|${d}`)) approvedOtDates.add(d)
+  }
   return {
     tz: facts.tz,
     rules: facts.rules,
@@ -935,6 +1076,9 @@ function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContex
     unsettledLeaveCount: facts.unsettledLeaveByEmp.get(employeeId) ?? 0,
     blockApproveOnUnsettledLeave: facts.blockApproveOnUnsettledLeave,
     hasSalaryStructure: facts.salaryEmpIds.has(employeeId),
+    capMinutes: capMinutesFor(facts.rules),
+    beyondCap: resolveOvertimeBeyondCap(facts.rules),
+    approvedOtDates,
   }
 }
 
@@ -1201,7 +1345,7 @@ function isoOrNull(value: string | null): string | null {
   return Number.isNaN(t) ? value : new Date(t).toISOString()
 }
 
-function toDayView(row: SheetDayRow, projectName: string | null): SheetDayView {
+function toDayView(row: SheetDayRow, projectName: string | null, beyondCapMinutes = 0): SheetDayView {
   const computed = row.overtime_minutes_computed ?? 0
   const override = row.overtime_minutes_override ?? null
   return {
@@ -1225,6 +1369,7 @@ function toDayView(row: SheetDayRow, projectName: string | null): SheetDayView {
       tier1: row.ot_tier1_minutes ?? 0,
       tier2: row.ot_tier2_minutes ?? 0,
       tier3: row.ot_tier3_minutes ?? 0,
+      beyondCap: beyondCapMinutes,
     },
     content: row.content,
     outingNote: row.outing_note,
@@ -1236,11 +1381,16 @@ function toDayView(row: SheetDayRow, projectName: string | null): SheetDayView {
   }
 }
 
-/** Month rollups. `leaveByType` is keyed by leave-type *name* (display; falls back to code). */
+/**
+ * Month rollups. `leaveByType` is keyed by leave-type *name* (display; falls back to code).
+ * `rules` 選填：有帶就產出 M24 的加班級距欄名（`otTierLabels`），沒帶就省略該欄
+ * （讀取端退回預設字串）。
+ */
 export function buildTotals(
   days: SheetDayView[],
   leaveBreakdownByDate: Map<string, Record<string, number>>,
   leaveNameByCode: Map<string, string>,
+  rules?: RuleConfig,
 ): SheetTotals {
   const totals: SheetTotals = {
     attendanceDays: 0,
@@ -1253,7 +1403,9 @@ export function buildTotals(
     otTier2: 0,
     otTier3: 0,
     otTotal: 0,
+    overtimeBeyondCapMinutes: 0,
     overtimeMonthlyAlert: "none",
+    ...(rules ? { otTierLabels: otTierLabels(rules) } : {}),
   }
   for (const d of days) {
     if (d.workedMinutes > 0 || d.wfh) totals.attendanceDays += 1
@@ -1265,6 +1417,7 @@ export function buildTotals(
     totals.otTier2 += d.overtime.tier2
     totals.otTier3 += d.overtime.tier3
     totals.otTotal += d.overtime.effective
+    totals.overtimeBeyondCapMinutes += d.overtime.beyondCap ?? 0
     const bd = leaveBreakdownByDate.get(d.date)
     if (bd) {
       for (const [code, m] of Object.entries(bd)) {
@@ -1303,11 +1456,16 @@ function round2(n: number): number {
  * 有效加班版的 AttendanceDay[]：以 attendance_days 為底（夜間分鐘、假別 code
  * 與扣薪比例都在那裡），加班分鐘換成月表的有效值（override ?? computed）。
  * 月表沒有對應 attendance_days 列的日子（無打卡無假）不需要進引擎。
+ *
+ * M1：`beyondCapByDate` 有帶（＝規則 `overtime.beyondCap='settle_separately'`）時，
+ * 超過月上限的分鐘從當天的加班分鐘扣掉——薪資單的加班費只算到上限為止，超額改走
+ * overtime_settlements 另行給付。`warn` 模式呼叫端不帶這個參數 → 一分不扣。
  */
 export function buildPayrollDays(
   days: SheetDayRow[],
   attendanceRows: AttendanceDayRow[],
   deductRateByCode: Map<string, number>,
+  beyondCapByDate?: Map<string, number>,
 ): AttendanceDayInput[] {
   const byDate = new Map<string, SheetDayRow>()
   for (const d of days) byDate.set(d.work_date, d)
@@ -1316,7 +1474,12 @@ export function buildPayrollDays(
     const base = toAttendanceDay(row, deductRateByCode)
     const sheetDay = byDate.get(row.work_date)
     const effective = sheetDay ? effectiveOvertime(sheetDay) : base.overtimeMinutes
-    out.push({ ...base, overtimeMinutes: effective, overtimeMinutesComputed: base.overtimeMinutes })
+    const beyond = beyondCapByDate?.get(row.work_date) ?? 0
+    out.push({
+      ...base,
+      overtimeMinutes: Math.max(0, effective - beyond),
+      overtimeMinutesComputed: base.overtimeMinutes,
+    })
   }
   return out
 }
@@ -1433,24 +1596,42 @@ async function composeLiveView(
   sheet: SheetRow,
   opts: { includeMoney: boolean },
 ): Promise<{ view: SheetView; payrollDays: AttendanceDayInput[]; inputs: EmployeePayrollInputs | null }> {
-  const [dayRows, empInfo, attendanceRows, leaveNames] = await Promise.all([
+  const [dayRows, empInfo, attendanceRows, leaveNames, ruleConfig] = await Promise.all([
     loadDays(tenantId, sheet.id),
     loadEmployeeInfo(tenantId, [sheet.employee_id, ...(sheet.manager_emp_id ? [sheet.manager_emp_id] : [])]),
     loadAttendanceRowsForSheet(tenantId, sheet),
     loadLeaveNames(tenantId),
+    // M1／M24 都要規則：月加班上限（超額歸屬）與加班級距欄名。依「這張表的
+    // period」選版，與 generate/recompute 當時用的版本一致。
+    loadRuleConfigFor(tenantId, sheet.period),
   ])
   const projectIds = Array.from(new Set(dayRows.map((d) => d.project_id).filter((id): id is string => !!id)))
   const projectNames = await loadProjectNames(tenantId, projectIds)
-  const days = dayRows.map((r) => toDayView(r, r.project_id ? (projectNames.get(r.project_id) ?? null) : null))
+  const rules = ruleConfig.rules
+  // M1：超額分鐘依日期序歸屬（畫面／匯出兩種模式都顯示；只有 settle_separately
+  // 才從薪資的加班分鐘扣掉）。
+  const beyondCapByDate = allocateBeyondCap(
+    dayRows.map((r) => ({ date: r.work_date, effective: effectiveOvertime(r) })),
+    capMinutesFor(rules),
+  )
+  const days = dayRows.map((r) =>
+    toDayView(r, r.project_id ? (projectNames.get(r.project_id) ?? null) : null, beyondCapByDate.get(r.work_date) ?? 0),
+  )
   const breakdownByDate = new Map<string, Record<string, number>>()
   for (const r of attendanceRows) {
     if (r.leave_breakdown && typeof r.leave_breakdown === "object") breakdownByDate.set(r.work_date, r.leave_breakdown)
   }
-  const totals = buildTotals(days, breakdownByDate, leaveNames)
+  const totals = buildTotals(days, breakdownByDate, leaveNames, rules)
   const monthAnomalies = Array.isArray(sheet.month_anomalies) ? sheet.month_anomalies : []
 
   const inputs = opts.includeMoney ? await buildPayrollInputs(tenantId, sheet.employee_id, sheet.period) : null
-  const payrollDays = buildPayrollDays(dayRows, attendanceRows, inputs?.deductRateByCode ?? new Map())
+  const settleSeparately = resolveOvertimeBeyondCap(rules) === "settle_separately"
+  const payrollDays = buildPayrollDays(
+    dayRows,
+    attendanceRows,
+    inputs?.deductRateByCode ?? new Map(),
+    settleSeparately ? beyondCapByDate : undefined,
+  )
   let money: SheetMoney | null = null
   if (inputs?.salary) {
     try {
@@ -1943,6 +2124,96 @@ async function appendSheetSnapshot(
 }
 
 /**
+ * M1：月表核准時把「超過月加班上限」的分鐘寫進 overtime_settlements（另行給付帳）。
+ *
+ *   規則 `overtime.beyondCap='warn'`  → 只警示，不建帳（既有列也不動）。
+ *   無列          → insert 一列 draft（source='beyond_cap'，每人每月至多一列）。
+ *   已有 draft    → 更新分鐘（reopen 重算後再核准會走到這裡）。
+ *   已有 paid     → **不動**（DB trigger 也擋），只記 warn log ＋ audit，讓 HR 知道
+ *                   重算後的分鐘與已付的不同，要自己開一列 manual 補差額。
+ *
+ * 永不讓核准失敗：表還沒遷移（overtime_settlements 不存在）或寫入出錯都只記錄。
+ */
+async function upsertBeyondCapSettlement(
+  tenantId: string,
+  sheet: SheetRow,
+  totals: SheetTotals,
+  actorEmpId: string,
+): Promise<void> {
+  const minutes = Math.max(0, Math.round(totals.overtimeBeyondCapMinutes ?? 0))
+  try {
+    const { rules } = await loadRuleConfigFor(tenantId, sheet.period)
+    if (resolveOvertimeBeyondCap(rules) !== "settle_separately") return
+
+    const { data: existing, error: selErr } = await supabaseAdmin
+      .from("overtime_settlements")
+      .select("id, status, minutes")
+      .eq("tenant_id", tenantId)
+      .eq("employee_id", sheet.employee_id)
+      .eq("period", sheet.period)
+      .eq("source", "beyond_cap")
+      .maybeSingle()
+    if (selErr) {
+      if (isMissingTableError(selErr)) {
+        warnSchemaGapOnce("overtime_settlements", selErr)
+        return
+      }
+      throw new Error(selErr.message)
+    }
+
+    if (!existing) {
+      if (minutes <= 0) return
+      const { error } = await supabaseAdmin.from("overtime_settlements").insert({
+        tenant_id: tenantId,
+        employee_id: sheet.employee_id,
+        period: sheet.period,
+        source: "beyond_cap",
+        minutes,
+        status: "draft",
+        sheet_id: sheet.id,
+        created_by_emp_id: actorEmpId,
+        note: "月表核准自動產生（超過月加班上限，另行給付）",
+      })
+      if (error) throw new Error(error.message)
+      return
+    }
+
+    if ((existing.status as string) === "paid") {
+      if ((existing.minutes as number) !== minutes) {
+        logger.warn(
+          { sheetId: sheet.id, period: sheet.period, paidMinutes: existing.minutes, recomputedMinutes: minutes },
+          "attendance-sheets: 超額另計已付款，重算後分鐘不同，未覆蓋",
+        )
+        await writeAuditLog({
+          tenantId,
+          tableName: "overtime_settlements",
+          recordId: existing.id as string,
+          action: "UPDATE",
+          oldRow: { minutes: existing.minutes, status: "paid" },
+          newRow: { recomputedMinutes: minutes, applied: false },
+          actorEmpId,
+          context: "月表重新核准：超額另計已付款，分鐘未覆蓋（請另開 manual 列補差額）",
+        })
+      }
+      return
+    }
+
+    if ((existing.minutes as number) === minutes) return
+    const { error } = await supabaseAdmin
+      .from("overtime_settlements")
+      .update({ minutes, sheet_id: sheet.id })
+      .eq("tenant_id", tenantId)
+      .eq("id", existing.id as string)
+    if (error) throw new Error(error.message)
+  } catch (err) {
+    logger.error(
+      { err: err instanceof Error ? err.message : err, sheetId: sheet.id, period: sheet.period },
+      "attendance-sheets: 超額另計寫入失敗（核准不回滾）",
+    )
+  }
+}
+
+/**
  * approveSheet — manager_reviewed → approved，並把完整 SheetView（含 money）＋
  * 規則版本＋薪資結構＋引擎用逐日資料寫進 snapshot。之後薪資結算讀快照。
  * 同時 append 一列 attendance_sheet_snapshots（reason 'approve'）留歷史。
@@ -1970,6 +2241,8 @@ export async function approveSheet(tenantId: string, sheetId: string, actorEmpId
     snapshot,
   })
   await appendSheetSnapshot(tenantId, next, snapshot, actorEmpId, "approve")
+  // M1：核准 = 數字定稿，超額分鐘這時才落成另行給付的帳。
+  await upsertBeyondCapSettlement(tenantId, next, view.totals, actorEmpId)
   await notify(tenantId, [sheet.employee_id], next, "approved", `出勤月表已核准（${sheet.period}）`, `你的 ${sheet.period} 出勤月表已由 HR 核准。`)
   return next
 }
@@ -2043,4 +2316,4 @@ export function previousPeriod(today: DateKey): string {
 }
 
 /** Exposed for unit tests. */
-export const __internal = { buildDayRows, anomalyContextFor }
+export const __internal = { buildDayRows, anomalyContextFor, upsertBeyondCapSettlement }

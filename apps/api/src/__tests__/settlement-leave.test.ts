@@ -3,9 +3,9 @@ import type { DayType, ShiftDef } from "@hr/rules"
 import { __internal, leaveDeductRate } from "../services/settlement.js"
 import { zonedTimeToUtc } from "../lib/tz.js"
 
-// Pure — exercises the leave → per-local-day slicing used by settleAttendance
-// (no DB; supabaseAdmin is imported but never called here).
-const { sliceLeave, shiftWindowUtc } = __internal
+// Pure — exercises the leave → per-local-day slicing、在家工作切日（M2）與加班
+// 起算基準（W9）用的純函式（no DB; supabaseAdmin is imported but never called here）。
+const { sliceLeave, shiftWindowUtc, sliceWfhDates, regularMinutesForDay, wfhWorkedMinutes } = __internal
 const TPE = "Asia/Taipei"
 const at = (date: string, hhmm: string) => {
   const [h, m] = hhmm.split(":").map(Number)
@@ -107,6 +107,53 @@ describe("settlement — sliceLeave", () => {
     expect(new Date(w.start).toISOString()).toBe("2026-06-01T14:00:00.000Z")
     expect(new Date(w.end).toISOString()).toBe("2026-06-01T22:00:00.000Z")
     expect(w.workMinutes).toBe(480)
+  })
+})
+
+describe("settlement — 在家工作（M2）", () => {
+  const wfhCtx = { tz: TPE, from: "2026-06-01", to: "2026-06-30" }
+
+  it("單日 wfh 單 → 只有那一天；跨日單 → 逐日展開，窗外不收", () => {
+    const oneDay = { start_at: at("2026-06-03", "09:00"), end_at: at("2026-06-03", "18:00") }
+    expect(sliceWfhDates(oneDay, wfhCtx)).toEqual(["2026-06-03"])
+
+    const span = { start_at: at("2026-06-29", "09:00"), end_at: at("2026-07-02", "18:00") }
+    expect(sliceWfhDates(span, wfhCtx)).toEqual(["2026-06-29", "2026-06-30"])
+  })
+
+  it("end_at 剛好落在當地午夜 → 算前一天（與月表 loadMonthFacts 的切法一致）", () => {
+    const req = { start_at: at("2026-06-03", "00:00"), end_at: at("2026-06-04", "00:00") }
+    expect(sliceWfhDates(req, wfhCtx)).toEqual(["2026-06-03"])
+  })
+
+  it("wfh 當日無打卡 → worked = 班表淨工時（09:00–18:00 休 60 → 480）", () => {
+    expect(wfhWorkedMinutes(DAY, "2026-06-03", TPE, 480)).toBe(480)
+    // 半天班 09:00–13:00 無休息 → 240，不是法定 8 小時。
+    const halfDay: ShiftDef = { start: "09:00", end: "13:00", breakMinutes: 0 }
+    expect(wfhWorkedMinutes(halfDay, "2026-06-03", TPE, 480)).toBe(240)
+  })
+
+  it("wfh 當日無打卡也沒排班 → 退回該日正常工時", () => {
+    expect(wfhWorkedMinutes(null, "2026-06-03", TPE, 480)).toBe(480)
+    expect(wfhWorkedMinutes(null, "2026-06-03", TPE, 420)).toBe(420)
+  })
+})
+
+describe("settlement — 加班起算基準（W9）", () => {
+  const afternoon: ShiftDef = { start: "14:00", end: "22:00", breakMinutes: 60 }
+
+  it("basis='shift' 且有排班 → 班表淨工時（420）；沒排班 → 法定 480", () => {
+    expect(regularMinutesForDay("shift", afternoon, "2026-06-03", TPE, 480)).toBe(420)
+    expect(regularMinutesForDay("shift", null, "2026-06-03", TPE, 480)).toBe(480)
+  })
+
+  it("basis='regularHours' → 一律法定值，即使有排班", () => {
+    expect(regularMinutesForDay("regularHours", afternoon, "2026-06-03", TPE, 480)).toBe(480)
+  })
+
+  it("跨午夜班 22:00–06:00 休 0 → 480", () => {
+    const night: ShiftDef = { start: "22:00", end: "06:00", breakMinutes: 0 }
+    expect(regularMinutesForDay("shift", night, "2026-06-03", TPE, 480)).toBe(480)
   })
 })
 

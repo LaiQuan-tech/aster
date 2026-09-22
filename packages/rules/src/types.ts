@@ -39,6 +39,14 @@ export interface DayContext {
   /** ISO date 'YYYY-MM-DD' — 用來定位這天 (純標籤，不參與工時運算)。 */
   date: string;
   dayType: DayType;
+  /**
+   * W9 加班起算基準：這一天的「正常工時分鐘」。省略 = `payroll.dailyRegularHours
+   * × 60`（法定 8 小時，`overtime.basis='regularHours'` 的行為）。
+   * `overtime.basis='shift'` 時由呼叫端填「班表淨工時」(span − breakMinutes)，
+   * 例如 14:00–22:00 休 60 分的班 → 420：做到 23:00 (淨 480) 就有 60 分加班，
+   * 而不是照 8 小時算成 0。無排班的日子呼叫端仍應留空（退回法定 8 小時）。
+   */
+  regularMinutes?: number;
 }
 
 /**
