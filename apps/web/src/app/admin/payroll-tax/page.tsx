@@ -2,10 +2,10 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { BatchImportButton } from "@/components/BatchImport";
 import { apiDownload } from "@/lib/api-client";
 import {
   getEmployees,
-  importSalaryAdjustments,
   getSalaryAdjustments,
   getNonEmployeeIncome,
   createNonEmployeeIncome,
@@ -23,12 +23,9 @@ export default function PayrollTaxPage() {
   const [error, setError] = useState<string | null>(null);
   const [employees, setEmployees] = useState<Employee[]>([]);
 
-  // 批次調薪
-  const [csv, setCsv] = useState("employeeId,effectiveDate,newSalary,reason\n");
+  // 調薪紀錄（批次調薪改走 BatchImportButton 的 Excel 範本面板）
   const [adjustments, setAdjustments] = useState<SalaryAdjustment[]>([]);
   const [adjustmentEmployeeId, setAdjustmentEmployeeId] = useState("");
-  const [importErrors, setImportErrors] = useState<{ line: number; error: string }[]>([]);
-  const [importMsg, setImportMsg] = useState<string | null>(null);
 
   // 非員工所得
   const [nei, setNei] = useState<NonEmployeeIncome[]>([]);
@@ -78,20 +75,6 @@ export default function PayrollTaxPage() {
   useEffect(() => {
     void loadAdjustments();
   }, [loadAdjustments]);
-
-  async function onImport(e: FormEvent) {
-    e.preventDefault();
-    setImportMsg(null);
-    setImportErrors([]);
-    try {
-      const res = await importSalaryAdjustments(csv);
-      setImportErrors(res.errors);
-      setImportMsg(`匯入 ${res.count} 筆，錯誤 ${res.errors.length} 筆`);
-      await loadAdjustments();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "匯入失敗");
-    }
-  }
 
   async function onCreateNei(e: FormEvent) {
     e.preventDefault();
@@ -163,32 +146,11 @@ export default function PayrollTaxPage() {
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
 
       <Card>
-        <h2 className="mb-2 text-sm font-medium text-gray-500">批次調薪匯入 (CSV)</h2>
-        <p className="mb-3 text-xs text-gray-400">
-          標題列：employeeId,effectiveDate,newSalary,reason（effectiveDate 為 YYYY-MM-DD）
-        </p>
-        <form onSubmit={onImport} className="space-y-3">
-          <textarea
-            className={`${inputCls} h-32 font-mono`}
-            value={csv}
-            onChange={(e) => setCsv(e.target.value)}
-          />
-          <div className="flex items-center gap-3">
-            <PrimaryButton type="submit">匯入</PrimaryButton>
-            {importMsg && <span className="text-sm text-green-600">{importMsg}</span>}
-          </div>
-        </form>
-        {importErrors.length > 0 && (
-          <ul className="mt-3 rounded-lg bg-red-50 p-3 text-xs text-red-700">
-            {importErrors.map((row) => (
-              <li key={`${row.line}-${row.error}`}>第 {row.line} 行：{row.error}</li>
-            ))}
-          </ul>
-        )}
-      </Card>
-
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">調薪紀錄查詢</h2>
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="text-sm font-medium text-gray-500">調薪紀錄查詢</h2>
+          {/* 批次調薪改成「下載 Excel 範本 → 填完上傳」的面板（原本是一張貼 CSV 的卡片）。 */}
+          <BatchImportButton kind="salary-adjustments" label="批次調薪" onDone={loadAdjustments} />
+        </div>
         <div className="mb-4 flex flex-wrap items-end gap-3">
           <div>
             <label className={labelCls}>員工</label>

@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { BatchImportButton } from "@/components/BatchImport";
 import { fmtHm, localDateKey } from "@/lib/ess-format";
 import {
   getPunchRecordsAdmin,
   createManualPunch,
-  importManualPunches,
   getEmployees,
   getDepartments,
   type PunchRecord,
@@ -72,9 +72,6 @@ export default function PunchRecordsPage() {
   const [mAt, setMAt] = useState("");
   const [mType, setMType] = useState<PunchRecord["type"]>("in");
   const [mMsg, setMMsg] = useState<string | null>(null);
-  const [csv, setCsv] = useState("");
-  const [csvMsg, setCsvMsg] = useState<string | null>(null);
-  const [importing, setImporting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -146,26 +143,6 @@ export default function PunchRecordsPage() {
       await load();
     } catch (err) {
       setMMsg(err instanceof Error ? err.message : "補登失敗");
-    }
-  }
-
-  async function onImport(e: FormEvent) {
-    e.preventDefault();
-    setCsvMsg(null);
-    if (!csv.trim()) {
-      setCsvMsg("請貼上 CSV 內容");
-      return;
-    }
-    setImporting(true);
-    try {
-      const res = await importManualPunches(csv);
-      const errors = res.errors.length ? `，${res.errors.length} 筆需修正` : "";
-      setCsvMsg(`已批次補登 ${res.count} 筆${errors}`);
-      await load();
-    } catch (err) {
-      setCsvMsg(err instanceof Error ? err.message : "批次補登失敗");
-    } finally {
-      setImporting(false);
     }
   }
 
@@ -241,30 +218,12 @@ export default function PunchRecordsPage() {
       <Card>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-base font-semibold text-gray-900">批次打卡補登</h2>
-            <p className="mt-1 text-sm text-gray-500">欄位：employeeId,punchAt,type；punchAt 請使用 ISO 時間。</p>
-          </div>
-          <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">CSV import</span>
-        </div>
-        <form onSubmit={onImport} className="space-y-3">
-          <textarea
-            className={`${inputCls} min-h-32 font-mono`}
-            value={csv}
-            onChange={(e) => setCsv(e.target.value)}
-            placeholder={"employeeId,punchAt,type\n員工UUID,2026-07-06T09:00:00.000Z,in\n員工UUID,2026-07-06T18:00:00.000Z,out"}
-          />
-          <PrimaryButton type="submit" disabled={importing}>{importing ? "匯入中…" : "批次補登"}</PrimaryButton>
-          {csvMsg && <p className="text-sm text-gray-600">{csvMsg}</p>}
-        </form>
-      </Card>
-
-      <Card>
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
             <h2 className="text-base font-semibold text-gray-900">打卡紀錄</h2>
             <p className="mt-1 text-sm text-gray-500">資料類型、日期、單位、工號姓名、地點與打卡方式皆可查詢。</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {/* 批次補登改成「下載 Excel 範本 → 填完上傳」的面板，不再在頁面放大貼文字框。 */}
+            <BatchImportButton kind="punches" label="批次補登" onDone={load} />
             <button
               type="button"
               onClick={exportCsv}

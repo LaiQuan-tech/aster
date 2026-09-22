@@ -9,6 +9,9 @@ import { getSupabaseBrowser } from "./supabase-browser";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
+/** apiFetch 丟出的錯誤：message 是 `[status] code`，code／detail 是 API 回的 { error, message }。 */
+export type ApiError = Error & { status?: number; code?: string; detail?: string };
+
 /**
  * Resolve the auth token from the live Supabase session (browser only).
  * Returns null when there is no session (caller goes out unauthenticated and
@@ -44,8 +47,12 @@ export async function apiFetch<T>(
   if (!res.ok) {
     const body = await res.json().catch(() => ({ message: res.statusText }));
     const message = body.error ?? body.message ?? res.statusText;
-    const err = new Error(`[${res.status}] ${message}`) as Error & { status?: number };
+    const err = new Error(`[${res.status}] ${message}`) as ApiError;
     err.status = res.status;
+    // 訊息維持 `[status] code` 不變（既有呼叫端靠這個字串判斷）；另外把錯誤碼與 API 的
+    // 補充說明（例如 invalid_header 缺哪個欄）掛在物件上，讓需要細節的呼叫端拿得到。
+    if (typeof body.error === "string") err.code = body.error;
+    if (typeof body.message === "string" && body.message !== message) err.detail = body.message;
     throw err;
   }
 

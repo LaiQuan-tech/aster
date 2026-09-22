@@ -2,20 +2,18 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { BatchImportButton } from "@/components/BatchImport";
 import {
   getOnboardings,
   createOnboarding,
   completeOnboarding,
   deleteOnboarding,
-  importOnboardings,
   getDepartments,
   getEmployees,
   type Onboarding,
   type Department,
   type Employee,
 } from "@/lib/admin-api";
-
-const CSV_TEMPLATE = "name,reportDate,identityType,region,employmentType\n王小明,2026-08-01,全職,台北,regular\n";
 
 const inputCls =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
@@ -44,10 +42,6 @@ export default function OnboardingPage() {
   const [fTo, setFTo] = useState("");
   const [fKeyword, setFKeyword] = useState("");
 
-  // 批次匯入
-  const [csv, setCsv] = useState("");
-  const [importMsg, setImportMsg] = useState<string | null>(null);
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -65,30 +59,6 @@ export default function OnboardingPage() {
       setLoading(false);
     }
   }, [fStatus, fFrom, fTo, fKeyword]);
-
-  function downloadTemplate() {
-    const blob = new Blob(["﻿" + CSV_TEMPLATE], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "onboarding-template.csv";
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  async function onImport(e: FormEvent) {
-    e.preventDefault();
-    setImportMsg(null);
-    if (!csv.trim()) return;
-    try {
-      const res = await importOnboardings(csv);
-      setImportMsg(`匯入 ${res.count} 筆，錯誤 ${res.errors.length} 筆${res.errors.length ? `（第 ${res.errors.map((x) => x.line).join(", ")} 行）` : ""}`);
-      setCsv("");
-      await load();
-    } catch (err) {
-      setImportMsg(err instanceof Error ? err.message : "匯入失敗");
-    }
-  }
 
   useEffect(() => {
     Promise.all([getDepartments(), getEmployees()])
@@ -213,28 +183,11 @@ export default function OnboardingPage() {
       </Card>
 
       <Card>
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-sm font-medium text-gray-500">批次匯入</h2>
-          <button onClick={downloadTemplate} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
-            ⬇ 範本下載 (CSV)
-          </button>
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="text-sm font-medium text-gray-500">報到清單</h2>
+          {/* 批次匯入改成「下載 Excel 範本 → 填完上傳」的面板（原本是一張貼 CSV 的卡片＋前端產 CSV 範本）。 */}
+          <BatchImportButton kind="onboardings" label="批次匯入" onDone={load} />
         </div>
-        <form onSubmit={onImport} className="space-y-3">
-          <textarea
-            className={`${inputCls} h-24 font-mono`}
-            placeholder={CSV_TEMPLATE}
-            value={csv}
-            onChange={(e) => setCsv(e.target.value)}
-          />
-          <div className="flex items-center gap-3">
-            <PrimaryButton type="submit">批次匯入</PrimaryButton>
-            {importMsg && <span className="text-sm text-green-600">{importMsg}</span>}
-          </div>
-        </form>
-      </Card>
-
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">報到清單</h2>
         {/* 報到管理篩選列：狀態 / 報到區間 / 關鍵字 */}
         <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
           <div>

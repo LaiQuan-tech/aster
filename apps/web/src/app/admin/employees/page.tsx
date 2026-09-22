@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { BottomSheet, Button, Card, Empty, ErrorText, Field, Input, PrimaryButton, Segmented, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import { ActionMenu } from "@/components/ActionMenu";
+import { BatchImportButton } from "@/components/BatchImport";
 import AuditDrawer from "@/components/AuditDrawer";
 import {
   addEmployeeCertification,
@@ -41,11 +42,8 @@ import {
   type BulkInviteResult,
 } from "@/lib/auth-api";
 import { employeeActionsFor, generateRandomPassword, parseApiErrorCode, type EmployeeActionKey } from "@/lib/employee-actions";
+import { isBulkInviteResult } from "@/lib/import-view";
 import { useSession } from "@/lib/use-session";
-
-const CSV_EXAMPLE = `name,email,empNo,deptName,employmentType,hireDate,role
-王小明,ming@example.com,A001,設計部,regular,2026-09-15,employee
-"陳, 美玲",mei@example.com,,,intern,,`;
 
 const ROLES: { value: string; label: string }[] = [
   { value: "employee", label: "一般員工" },
@@ -199,12 +197,8 @@ export default function EmployeesPage() {
   // C1 稽核：右側抽屜顯示該員工 employees 列的異動時間線
   const [auditTarget, setAuditTarget] = useState<{ id: string; name: string } | null>(null);
 
-  // 批次邀請（CSV）。
-  const [csvText, setCsvText] = useState("");
-  const [csvDryRun, setCsvDryRun] = useState(false);
-  const [bulkSubmitting, setBulkSubmitting] = useState(false);
-  const [bulkResult, setBulkResult] = useState<BulkInviteResult | null>(null);
-  const [bulkError, setBulkError] = useState<string | null>(null);
+  // 批次建立帳號改走 BatchImportButton（Excel 範本面板）；這裡只留「只建帳號、不寄信」的選項。
+  const [bulkNoEmail, setBulkNoEmail] = useState(false);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -654,23 +648,58 @@ export default function EmployeesPage() {
     }
   }
 
-  async function onBulkInvite(event: FormEvent) {
-    event.preventDefault();
-    setBulkError(null);
-    if (!csvText.trim()) {
-      setBulkError("請先貼上 CSV 內容");
-      return;
-    }
-    setBulkSubmitting(true);
-    try {
-      const res = await bulkInviteEmployees(csvText, csvDryRun || undefined);
-      setBulkResult(res);
-      await load();
-    } catch (err) {
-      setBulkError(accountErrorMessage(err, "批次邀請失敗"));
-    } finally {
-      setBulkSubmitting(false);
-    }
+  /** 批次建立帳號的結果表（顯示在匯入面板內）：行／姓名／Email／結果／連結＋複製。 */
+  function renderBulkInviteResult(bulkResult: BulkInviteResult) {
+    return (
+      <div className="space-y-3">
+        <p className="text-sm text-gray-700">
+          新建 <span className="font-medium">{bulkResult.created}</span>、綁定既有員工 <span className="font-medium">{bulkResult.bound}</span>、
+          寄出 <span className="font-medium">{bulkResult.sent}</span>、略過 <span className="font-medium">{bulkResult.skipped}</span>
+          {bulkResult.dryRun && <span className="ml-2 text-amber-700">（未寄信：請逐列複製連結轉交）</span>}
+        </p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 text-xs text-gray-500">
+                <th className="py-2 pr-4">行</th>
+                <th className="py-2 pr-4">姓名</th>
+                <th className="py-2 pr-4">Email</th>
+                <th className="py-2 pr-4">結果</th>
+                <th className="py-2">連結 / 訊息</th>
+              </tr>
+            </thead>
+            <tbody>
+              {bulkResult.rows.map((row) => (
+                <tr key={row.line} className="border-b border-gray-50 align-top">
+                  <td className="py-2 pr-4 text-gray-500">{row.line}</td>
+                  <td className="py-2 pr-4">{row.name ?? "—"}</td>
+                  <td className="py-2 pr-4 text-gray-600">{row.email ?? "—"}</td>
+                  <td className="py-2 pr-4">
+                    {row.action === "skipped" ? (
+                      <span className="rounded-full bg-red-100 px-2 py-1 text-xs text-red-600">略過</span>
+                    ) : (
+                      <span className="rounded-full bg-green-100 px-2 py-1 text-xs text-green-700">
+                        {row.action === "created" ? "新建" : "綁定"}{row.sent ? "・已寄信" : row.link ? "・待轉交" : ""}
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-2">
+                    {row.error && <p className="text-xs text-red-600">{row.error}</p>}
+                    {row.warning && <p className="text-xs text-amber-700">{row.warning}</p>}
+                    {row.link && (
+                      <div className="flex flex-col gap-1 sm:flex-row sm:items-center">
+                        <input readOnly className="w-full min-w-64 rounded-md border border-gray-200 px-2 py-1 font-mono text-xs" value={row.link} onFocus={(event) => event.currentTarget.select()} />
+                        <button type="button" onClick={() => void copyText(row.link ?? "")} className="shrink-0 text-xs text-gray-600 hover:underline">複製</button>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
   }
 
   const profileFields = PROFILE_FIELDS.filter((field) => field.group === profileTab);
@@ -772,81 +801,30 @@ export default function EmployeesPage() {
       </Card>
 
       <Card>
-        <h2 className="mb-1 text-sm font-medium text-gray-500">批次邀請（CSV）</h2>
-        <p className="mb-3 text-xs text-gray-400">
-          從 Excel 複製貼上即可（第一列是表頭；只有 name、email 必填）。工號或姓名對得上「尚未開通帳號」的既有員工會直接綁定，否則新建；同名多人請補工號。
-        </p>
-        <form onSubmit={onBulkInvite} className="space-y-3">
-          <textarea
-            className={`${inputCls} min-h-40 font-mono text-xs`}
-            placeholder={CSV_EXAMPLE}
-            value={csvText}
-            onChange={(event) => setCsvText(event.target.value)}
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="text-sm font-medium text-gray-500">員工列表</h2>
+          {/* 批次建立帳號改成「下載 Excel 範本 → 填完上傳」的面板（原本是一張貼 CSV 的卡片）；
+              「只建帳號、不寄信」放在面板的確認步驟，對應 API 的 options.dryRunInvite。 */}
+          <BatchImportButton
+            kind="employees"
+            label="批次建立帳號"
+            description="只有姓名與 Email 必填。工號或姓名對得上「尚未開通帳號」的既有員工會直接綁定，否則新建；同名多人請補工號。"
+            options={{ dryRunInvite: bulkNoEmail || undefined }}
+            onDone={load}
+            extra={
+              <label className="flex cursor-pointer select-none items-center gap-2 text-sm text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={bulkNoEmail}
+                  onChange={(event) => setBulkNoEmail(event.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
+                />
+                只建帳號、不寄信（取得連結手動轉交）
+              </label>
+            }
+            renderResult={(res) => (isBulkInviteResult(res.result) ? renderBulkInviteResult(res.result) : null)}
           />
-          <div className="flex flex-wrap items-center gap-4">
-            <button type="button" onClick={() => setCsvText(CSV_EXAMPLE)} className="text-xs text-gray-500 hover:underline">帶入範例格式</button>
-            <label className="flex items-center gap-2 text-sm text-gray-600 select-none cursor-pointer">
-              <input type="checkbox" checked={csvDryRun} onChange={(event) => setCsvDryRun(event.target.checked)} className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]" />
-              只建帳號、不寄信（取得連結手動轉交）
-            </label>
-          </div>
-          {bulkError && <ErrorText>{bulkError}</ErrorText>}
-          <PrimaryButton type="submit" disabled={bulkSubmitting}>{bulkSubmitting ? "處理中…" : "批次建立並寄邀請信"}</PrimaryButton>
-        </form>
-        {bulkResult && (
-          <div className="mt-4 space-y-3">
-            <p className="text-sm text-gray-700">
-              新建 <span className="font-medium">{bulkResult.created}</span>、綁定既有員工 <span className="font-medium">{bulkResult.bound}</span>、
-              寄出 <span className="font-medium">{bulkResult.sent}</span>、略過 <span className="font-medium">{bulkResult.skipped}</span>
-              {bulkResult.dryRun && <span className="ml-2 text-amber-700">（未寄信：請逐列複製連結轉交）</span>}
-            </p>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-gray-200 text-xs text-gray-500">
-                    <th className="py-2 pr-4">行</th>
-                    <th className="py-2 pr-4">姓名</th>
-                    <th className="py-2 pr-4">Email</th>
-                    <th className="py-2 pr-4">結果</th>
-                    <th className="py-2">連結 / 訊息</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {bulkResult.rows.map((row) => (
-                    <tr key={row.line} className="border-b border-gray-50 align-top">
-                      <td className="py-2 pr-4 text-gray-500">{row.line}</td>
-                      <td className="py-2 pr-4">{row.name ?? "—"}</td>
-                      <td className="py-2 pr-4 text-gray-600">{row.email ?? "—"}</td>
-                      <td className="py-2 pr-4">
-                        {row.action === "skipped" ? (
-                          <span className="rounded-full bg-red-100 px-2 py-1 text-xs text-red-600">略過</span>
-                        ) : (
-                          <span className="rounded-full bg-green-100 px-2 py-1 text-xs text-green-700">
-                            {row.action === "created" ? "新建" : "綁定"}{row.sent ? "・已寄信" : row.link ? "・待轉交" : ""}
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-2">
-                        {row.error && <p className="text-xs text-red-600">{row.error}</p>}
-                        {row.warning && <p className="text-xs text-amber-700">{row.warning}</p>}
-                        {row.link && (
-                          <div className="flex flex-col gap-1 sm:flex-row sm:items-center">
-                            <input readOnly className="w-full min-w-64 rounded-md border border-gray-200 px-2 py-1 font-mono text-xs" value={row.link} onFocus={(event) => event.currentTarget.select()} />
-                            <button type="button" onClick={() => void copyText(row.link ?? "")} className="shrink-0 text-xs text-gray-600 hover:underline">複製</button>
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-      </Card>
-
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">員工列表</h2>
+        </div>
         {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
         {loading ? (
           <Empty>載入中…</Empty>

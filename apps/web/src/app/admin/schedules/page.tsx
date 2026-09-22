@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { BatchImportButton } from "@/components/BatchImport";
 import {
   getDepartments,
   getEmployees,
@@ -9,7 +10,6 @@ import {
   getSchedules,
   assignSchedule,
   assignSchedulesBatch,
-  importSchedules,
   reviewSchedule,
   type Department,
   type Employee,
@@ -81,10 +81,6 @@ export default function SchedulesPage() {
   const [batchTo, setBatchTo] = useState(plusDaysIso(6));
   const [batchShift, setBatchShift] = useState("");
   const [batchStatus, setBatchStatus] = useState("scheduled");
-
-  const [csv, setCsv] = useState("");
-  const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<string | null>(null);
 
   const [from, setFrom] = useState(todayIso());
   const [to, setTo] = useState(plusDaysIso(14));
@@ -229,26 +225,6 @@ export default function SchedulesPage() {
     }
   }
 
-  async function onImport(e: FormEvent) {
-    e.preventDefault();
-    setImportResult(null);
-    if (!csv.trim()) {
-      setImportResult("請貼上 CSV 內容");
-      return;
-    }
-    setImporting(true);
-    try {
-      const res = await importSchedules(csv);
-      const errors = res.errors.length ? `，${res.errors.length} 筆需修正` : "";
-      setImportResult(`已匯入 ${res.count} 筆${errors}`);
-      await runQuery();
-    } catch (err) {
-      setImportResult(err instanceof Error ? err.message : "匯入失敗");
-    } finally {
-      setImporting(false);
-    }
-  }
-
   async function onReview(id: string, decision: "acknowledge" | "dispute") {
     setReviewingId(id);
     setError(null);
@@ -264,7 +240,7 @@ export default function SchedulesPage() {
 
   return (
     <>
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Card>
           <h2 className="mb-4 text-base font-semibold text-gray-900">單日指派</h2>
           <form onSubmit={onAssign} className="space-y-4">
@@ -355,20 +331,6 @@ export default function SchedulesPage() {
           </form>
         </Card>
 
-        <Card>
-          <h2 className="mb-3 text-base font-semibold text-gray-900">CSV 匯入班表</h2>
-          <p className="mb-3 text-sm text-gray-500">欄位：employeeId,workDate,shiftId,status；shiftId 可留空。</p>
-          <form onSubmit={onImport} className="space-y-3">
-            <textarea
-              className={`${inputCls} min-h-32 font-mono`}
-              value={csv}
-              onChange={(e) => setCsv(e.target.value)}
-              placeholder={"employeeId,workDate,shiftId,status\n員工UUID,2026-07-06,班別UUID,scheduled"}
-            />
-            <PrimaryButton type="submit" disabled={importing}>{importing ? "匯入中…" : "匯入"}</PrimaryButton>
-          </form>
-          {importResult && <p className="mt-3 text-sm text-gray-600">{importResult}</p>}
-        </Card>
       </div>
 
       {(formError || okMsg) && (
@@ -384,12 +346,14 @@ export default function SchedulesPage() {
             <h2 className="text-base font-semibold text-gray-900">班表清單與審核</h2>
             <p className="mt-1 text-sm text-gray-500">可依日期、單位、工時制、員工與狀態查詢，並由 HR 代為確認或標記爭議。</p>
           </div>
-          <div className="flex flex-wrap gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
             {STATUS_OPTIONS.map((item) => (
               <span key={item.value} className="rounded-full bg-gray-100 px-3 py-1 text-gray-600">
                 {item.label} {summary.get(item.value) ?? 0}
               </span>
             ))}
+            {/* 班表匯入改成「下載 Excel 範本 → 填完上傳」的面板（原本是第三張貼 CSV 的卡片）。 */}
+            <BatchImportButton kind="schedules" label="批次排班" onDone={runQuery} />
           </div>
         </div>
 

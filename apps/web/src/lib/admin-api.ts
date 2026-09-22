@@ -9,6 +9,7 @@
  * member may read) and is tenant-scoped server-side.
  */
 import { apiFetch } from "./api-client";
+import { fileToBase64 } from "./files";
 import type { AdminModulesConfig } from "./admin-nav";
 
 /* ------------------------------------------------------------------ me ----- */
@@ -307,15 +308,6 @@ export function saveEmployeeProfile(employeeId: string, body: SaveProfileBody) {
   });
 }
 
-async function fileToBase64(file: File): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
-    reader.onerror = () => reject(new Error("讀取檔案失敗"));
-    reader.readAsDataURL(file);
-  });
-}
-
 function uploadBody(file: File, dataBase64: string) {
   return JSON.stringify({
     fileName: file.name,
@@ -522,16 +514,6 @@ export function assignSchedulesBatch(
     method: "POST",
     body: JSON.stringify({ assignments }),
   });
-}
-
-export function importSchedules(csv: string) {
-  return apiFetch<{ imported: string[]; count: number; errors: Array<{ line: number; error: string }> }>(
-    "/schedules/import",
-    {
-      method: "POST",
-      body: JSON.stringify({ csv }),
-    },
-  );
 }
 
 export function reviewSchedule(id: string, decision: "acknowledge" | "dispute") {
@@ -845,13 +827,6 @@ export function getOnboardings(filters?: {
   return apiFetch<{ onboardings: Onboarding[] }>(`/onboardings${qs ? `?${qs}` : ""}`);
 }
 
-export function importOnboardings(csv: string) {
-  return apiFetch<{ count: number; errors: { line: number; error: string }[] }>(
-    "/onboardings/import",
-    { method: "POST", body: JSON.stringify({ csv }) },
-  );
-}
-
 export function createOnboarding(body: {
   name: string;
   deptId?: string | null;
@@ -1042,16 +1017,6 @@ export function createManualPunch(body: {
   });
 }
 
-export function importManualPunches(csv: string) {
-  return apiFetch<{ imported: string[]; count: number; errors: Array<{ line: number; error: string }> }>(
-    "/punch/manual/import",
-    {
-      method: "POST",
-      body: JSON.stringify({ csv }),
-    },
-  );
-}
-
 /* ------------------------------------------------- payroll tax / 法規 --- */
 
 export interface NonEmployeeIncome {
@@ -1065,13 +1030,6 @@ export interface NonEmployeeIncome {
   pay_date: string | null;
   note: string | null;
   created_at: string;
-}
-
-export function importSalaryAdjustments(csv: string) {
-  return apiFetch<{ count: number; errors: { line: number; error: string }[] }>(
-    "/salary-adjustments/import",
-    { method: "POST", body: JSON.stringify({ csv }) },
-  );
 }
 
 export interface SalaryAdjustment {

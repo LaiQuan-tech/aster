@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Card, PrimaryButton, ErrorText, labelCls } from "@/components/admin-ui";
+import { Card, PrimaryButton, ErrorText } from "@/components/admin-ui";
+import { BatchImportButton } from "@/components/BatchImport";
 import {
   getCalendar,
   putCalendarDays,
@@ -80,7 +81,6 @@ export default function CalendarPage() {
   const [savingDates, setSavingDates] = useState<Set<string>>(new Set());
   const [editingDate, setEditingDate] = useState<string | null>(null);
   const [labelDraft, setLabelDraft] = useState("");
-  const [importText, setImportText] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -173,12 +173,12 @@ export default function CalendarPage() {
     void saveDay(date, "fixed_holiday", trimmed || null);
   }
 
-  async function onGenerate(holidays?: { date: string; label: string }[]) {
+  async function onGenerate() {
     setBusy(true);
     setError(null);
     setMessage(null);
     try {
-      const res = await generateCalendar({ year, holidays });
+      const res = await generateCalendar({ year });
       setMessage(`已產生 ${res.generated} 筆（匯入 ${res.imported}、略過 ${res.skipped}）`);
       await load();
     } catch (err) {
@@ -186,22 +186,6 @@ export default function CalendarPage() {
     } finally {
       setBusy(false);
     }
-  }
-
-  function onImport() {
-    setError(null);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(importText);
-    } catch (err) {
-      setError(`JSON 格式錯誤：${err instanceof Error ? err.message : String(err)}`);
-      return;
-    }
-    if (!Array.isArray(parsed) || !parsed.every((item) => typeof (item as { date?: unknown })?.date === "string")) {
-      setError("需為 [{date, label}] 格式的陣列");
-      return;
-    }
-    void onGenerate(parsed as { date: string; label: string }[]);
   }
 
   return (
@@ -237,27 +221,21 @@ export default function CalendarPage() {
         )}
         {message && <p className="mb-3 text-sm text-green-600">{message}</p>}
 
-        <div className="mb-5 flex flex-wrap items-end gap-3 rounded-lg border border-gray-100 bg-gray-50/60 p-3">
+        <div className="mb-5 flex flex-wrap items-center gap-3 rounded-lg border border-gray-100 bg-gray-50/60 p-3">
           <PrimaryButton type="button" onClick={() => void onGenerate()} disabled={busy}>
             {busy ? "產生中…" : `產生週末＋國定假日（${year} 內建）`}
           </PrimaryButton>
-          <div className="min-w-[240px] flex-1">
-            <label className={labelCls}>{"或貼上國定假日清單 JSON 匯入（[{date,label}] ）"}</label>
-            <textarea
-              value={importText}
-              onChange={(e) => setImportText(e.target.value)}
-              placeholder={`[{"date":"${year}-01-01","label":"元旦"}]`}
-              className="h-20 w-full rounded-md border border-gray-300 p-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand)]"
-            />
-          </div>
-          <button
-            type="button"
-            onClick={onImport}
-            disabled={busy || !importText.trim()}
-            className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 disabled:opacity-50"
-          >
-            以清單產生
-          </button>
+          {/* 自訂假日清單改成「下載 Excel 範本 → 填完上傳」的面板（原本是貼 JSON 的框）；年份由檔案內的日期決定。 */}
+          <BatchImportButton
+            kind="holidays"
+            label="匯入假日清單"
+            onDone={(res) => {
+              // API 回 { year, generated, imported, skipped }：檔案是別的年份就切過去看（切年份會自動重載）。
+              const imported = (res.result as { year?: number } | undefined)?.year;
+              if (typeof imported === "number" && imported !== year) setYear(imported);
+              else void load();
+            }}
+          />
         </div>
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
