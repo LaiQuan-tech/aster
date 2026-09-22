@@ -24,6 +24,14 @@ const inputCls =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 const labelCls = "mb-1 block text-xs font-medium text-gray-500";
 
+/** `PUT /salary/:employeeId` 在自動選級距時多回的欄位（M12；lib/admin-api.ts 是 WP0 的檔，不改）。 */
+interface InsuredSuggested {
+  base: number;
+  labor: number | null;
+  health: number | null;
+  effectiveFrom: string;
+}
+
 export default function PayrollAdminPage() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -44,6 +52,8 @@ export default function PayrollAdminPage() {
   const [employeeKeyword, setEmployeeKeyword] = useState("");
   const [employeeIdentityById, setEmployeeIdentityById] = useState<Record<string, string>>({});
   const [salaryMsg, setSalaryMsg] = useState<string | null>(null);
+  // M12：API 依投保級距表自動選出來的級距（留空投保薪資時才會回）。
+  const [insuredHint, setInsuredHint] = useState<string | null>(null);
   const [nhiDeps, setNhiDeps] = useState<NhiDependent[]>([]);
   const [taxDeps, setTaxDeps] = useState<TaxDependent[]>([]);
   const [nhiName, setNhiName] = useState("");
@@ -102,6 +112,7 @@ export default function PayrollAdminPage() {
 
   const loadEmployee = useCallback(async (id: string) => {
     setSalaryMsg(null);
+    setInsuredHint(null);
     setNhiDeps([]);
     setTaxDeps([]);
     if (!id) return;
@@ -149,19 +160,33 @@ export default function PayrollAdminPage() {
     e.preventDefault();
     if (!empId) return;
     setSalaryMsg(null);
+    setInsuredHint(null);
     try {
-      await putSalaryStructure(empId, {
+      // M12：投保級距留空＝不帶欄位，API 會依「投保級距表」以投保基數自動選一級
+      //（月薪制基數＝本薪；時薪制＝時薪 × 每週約定時數 × 52 ÷ 12），並把選到的值回來。
+      // 填了就完全照填的存，手動覆寫永遠優先。
+      const res = (await putSalaryStructure(empId, {
         method,
         baseSalary: baseSalary ? Number(baseSalary) : null,
         dailyWage: dailyWage ? Number(dailyWage) : null,
         hourlyWage: hourlyWage ? Number(hourlyWage) : 0,
         agreedHoursPerWeek: agreedHoursPerWeek ? Number(agreedHoursPerWeek) : null,
         agreedDaysPerWeek: agreedDaysPerWeek ? Number(agreedDaysPerWeek) : null,
-        laborInsuredSalary: laborGrade ? Number(laborGrade) : null,
-        healthInsuredSalary: healthGrade ? Number(healthGrade) : null,
+        ...(laborGrade ? { laborInsuredSalary: Number(laborGrade) } : {}),
+        ...(healthGrade ? { healthInsuredSalary: Number(healthGrade) } : {}),
         pensionVoluntaryRate: pensionPct ? Number(pensionPct) / 100 : null,
-      });
+      })) as { id: string; insuredSuggested?: InsuredSuggested };
       setSalaryMsg("已儲存");
+      const s = res.insuredSuggested;
+      if (s) {
+        if (!laborGrade && s.labor !== null) setLaborGrade(String(s.labor));
+        if (!healthGrade && s.health !== null) setHealthGrade(String(s.health));
+        setInsuredHint(
+          `已依投保級距表（${s.effectiveFrom} 生效）自動選級距：投保基數 ${s.base.toLocaleString("zh-TW")}` +
+            `　勞保 ${s.labor === null ? "—" : s.labor.toLocaleString("zh-TW")}` +
+            `　健保 ${s.health === null ? "—" : s.health.toLocaleString("zh-TW")}。要改就直接覆寫欄位再存一次。`,
+        );
+      }
     } catch (err) {
       setSalaryMsg(err instanceof Error ? err.message : "儲存失敗");
     }
@@ -306,11 +331,11 @@ export default function PayrollAdminPage() {
                   </>
                 )}
                 <div>
-                  <label className={labelCls}>勞保投保級距</label>
+                  <label className={labelCls}>勞保投保級距（留空＝依級距表自動選）</label>
                   <input type="number" className={inputCls} value={laborGrade} onChange={(e) => setLaborGrade(e.target.value)} />
                 </div>
                 <div>
-                  <label className={labelCls}>健保投保級距</label>
+                  <label className={labelCls}>健保投保級距（留空＝依級距表自動選）</label>
                   <input type="number" className={inputCls} value={healthGrade} onChange={(e) => setHealthGrade(e.target.value)} />
                 </div>
                 <div>
@@ -318,10 +343,13 @@ export default function PayrollAdminPage() {
                   <input type="number" min={0} max={6} step={0.5} className={inputCls} value={pensionPct} onChange={(e) => setPensionPct(e.target.value)} />
                 </div>
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <PrimaryButton type="submit">儲存薪資資料</PrimaryButton>
                 {salaryMsg && <span className="text-sm text-green-600">{salaryMsg}</span>}
               </div>
+              {insuredHint && (
+                <p className="rounded-md bg-sky-50 px-3 py-2 text-xs text-sky-800">{insuredHint}</p>
+              )}
             </form>
 
             <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2">

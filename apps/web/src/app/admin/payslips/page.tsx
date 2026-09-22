@@ -11,6 +11,31 @@ import {
   type Payslip,
   type PayslipBreakdown,
 } from "@/lib/admin-api";
+import {
+  sendPayslip,
+  sendPayslipsBatch,
+  type PayslipSendFields,
+} from "@/lib/cash-payouts-api";
+
+/** M3：`sent_at`／`sent_to` 在 migration 0050 之後才有（lib/admin-api.ts 是 WP0 的檔，不改）。 */
+type PayslipRow = Payslip & PayslipSendFields;
+
+function fmtSentAt(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("zh-TW", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+const SEND_SKIP_LABEL: Record<string, string> = {
+  not_finalized: "尚未定案",
+  no_recipient: "沒有 email",
+  send_failed: "寄送失敗",
+};
 
 /**
  * 薪資明細表（工資清冊）。勞基法 §23 II 要求工資清冊記到「各項目計算方式明細」並
@@ -49,10 +74,11 @@ export default function PayslipsPage() {
   const currentPeriod = new Date().toISOString().slice(0, 7);
   const [period, setPeriod] = useState(currentPeriod);
   const [employees, setEmployees] = useState<Employee[]>([]);
-  const [payslips, setPayslips] = useState<Payslip[]>([]);
+  const [payslips, setPayslips] = useState<PayslipRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [sendMsg, setSendMsg] = useState<string | null>(null);
 
   useEffect(() => {
     getEmployees()
@@ -63,7 +89,7 @@ export default function PayslipsPage() {
   const load = useCallback(async () => {
     try {
       const res = await getPayslips(period || undefined);
-      setPayslips(res.payslips);
+      setPayslips(res.payslips as PayslipRow[]);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入薪資單失敗");
@@ -87,13 +113,15 @@ export default function PayslipsPage() {
   );
 
   const totals = useMemo(() => {
-    const t = { gross: 0, deductions: 0, expenses: 0, net: 0, draft: 0 };
+    const t = { gross: 0, deductions: 0, expenses: 0, net: 0, draft: 0, finalized: 0, sent: 0 };
     for (const p of payslips) {
       t.gross += n(p.gross);
       t.deductions += n(bd(p).totalDeductions);
       t.expenses += n(bd(p).expenses);
       t.net += netOf(p);
       if (p.status !== "finalized") t.draft += 1;
+      else t.finalized += 1;
+      if (p.sent_at) t.sent += 1;
     }
     return t;
   }, [payslips]);
@@ -120,6 +148,46 @@ export default function PayslipsPage() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "定案失敗");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendOne(p: PayslipRow) {
+    setBusy(true);
+    try {
+      await sendPayslip(p.id);
+      await load();
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "寄送失敗");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 批次寄送：只寄已定案的，未寄成功的逐筆列出原因（HR 照清單補）。 */
+  async function sendBatch() {
+    const finalized = payslips.filter((p) => p.status === "finalized");
+    if (finalized.length === 0) return;
+    if (!confirm(`確定把 ${period} 的 ${finalized.length} 張已定案薪資單寄給本人？`)) return;
+    setBusy(true);
+    setSendMsg(null);
+    try {
+      const res = await sendPayslipsBatch(period);
+      const skipped = res.skipped.filter((s) => s.reason !== "not_finalized");
+      setSendMsg(
+        `已寄出 ${res.sent} 張` +
+          (skipped.length > 0
+            ? `；未寄出 ${skipped.length} 張（${skipped
+                .map((s) => `${empName(s.employeeId)}：${SEND_SKIP_LABEL[s.reason] ?? s.reason}`)
+                .join("、")}）`
+            : ""),
+      );
+      await load();
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "批次寄送失敗");
     } finally {
       setBusy(false);
     }
@@ -193,6 +261,16 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
           >
             全部定案（{totals.draft}）
           </button>
+          <button
+            type="button"
+            onClick={() => void sendBatch()}
+            disabled={busy || totals.finalized === 0}
+            title="把本期已定案的薪資單寄到每位同仁的公司信箱（無則個人信箱／登入信箱）"
+            className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 disabled:opacity-50"
+          >
+            批次寄送 Email（{totals.finalized}）
+          </button>
+          {sendMsg && <span className="text-sm text-gray-600">{sendMsg}</span>}
           <Link href="/admin/payroll" className="ml-auto text-sm text-gray-500 hover:underline">
             沒有本期薪資單？到薪資作業執行結算 →
           </Link>
@@ -241,6 +319,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                   <th className="py-2 pr-3 text-right">代墊</th>
                   <th className="py-2 pr-3 text-right font-semibold">實發</th>
                   <th className="py-2 pr-3">狀態</th>
+                  <th className="py-2 pr-3">寄送</th>
                   <th className="py-2">操作</th>
                 </tr>
               </thead>
@@ -259,6 +338,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                       onToggle={() => setOpenId(open ? null : p.id)}
                       onPrint={() => printOne(p)}
                       onFinalize={() => void finalizeOne(p.id)}
+                      onSend={() => void sendOne(p)}
                     />
                   );
                 })}
@@ -279,7 +359,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).lateEarlyDeduction), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(totals.expenses)}</td>
                   <td className="py-2 pr-3 text-right">{money(totals.net)}</td>
-                  <td colSpan={2} />
+                  <td colSpan={3} />
                 </tr>
               </tbody>
             </table>
@@ -303,8 +383,9 @@ function PayslipRow({
   onToggle,
   onPrint,
   onFinalize,
+  onSend,
 }: {
-  p: Payslip;
+  p: PayslipRow;
   b: PayslipBreakdown;
   open: boolean;
   name: string;
@@ -312,6 +393,7 @@ function PayslipRow({
   onToggle: () => void;
   onPrint: () => void;
   onFinalize: () => void;
+  onSend: () => void;
 }) {
   const lines = b.lines ?? [];
   const ot = b.overtimeSegments ?? [];
@@ -348,10 +430,30 @@ function PayslipRow({
             {p.status === "finalized" ? "已定案" : "草稿"}
           </span>
         </td>
+        <td className="py-2 pr-3 whitespace-nowrap text-xs">
+          {p.sent_at ? (
+            <span className="text-emerald-700" title={p.sent_to ?? undefined}>
+              已寄送 {fmtSentAt(p.sent_at)}
+            </span>
+          ) : (
+            <span className="text-gray-400">未寄送</span>
+          )}
+        </td>
         <td className="py-2 whitespace-nowrap">
           <button type="button" onClick={onPrint} className="mr-3 text-sm text-gray-600 hover:underline">
             列印
           </button>
+          {p.status === "finalized" && (
+            <button
+              type="button"
+              onClick={onSend}
+              disabled={busy}
+              title={p.sent_at ? "再寄一次（會覆蓋寄送時間）" : "寄到本人信箱"}
+              className="mr-3 text-sm text-gray-600 hover:underline disabled:opacity-50"
+            >
+              {p.sent_at ? "重寄" : "寄送"}
+            </button>
+          )}
           {p.status !== "finalized" && (
             <button type="button" onClick={onFinalize} disabled={busy} className="text-sm font-medium disabled:opacity-50" style={{ color: "var(--brand)" }}>
               定案
@@ -361,7 +463,7 @@ function PayslipRow({
       </tr>
       {open && (
         <tr className="border-b border-gray-100 bg-gray-50/60">
-          <td colSpan={18} className="px-4 py-3">
+          <td colSpan={19} className="px-4 py-3">
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               {ot.length > 0 && (
                 <div>

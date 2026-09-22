@@ -7,8 +7,20 @@ import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
 import { writeAuditLog } from "../services/audit.js"
-import { isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import {
+  columnsExist,
+  isMissingColumnError,
+  isMissingTableError,
+  warnSchemaGapOnce,
+} from "../lib/schema-compat.js"
 import { logger } from "../lib/logger.js"
+import { isMailConfigured, sendMail } from "../lib/resend.js"
+import {
+  payslipMailSubject,
+  renderPayslipHtml,
+  renderPayslipText,
+  type PayslipBreakdownLike,
+} from "../services/payslip-html.js"
 import {
   loadAttendanceDays,
   loadPayrollInputs,
@@ -32,8 +44,19 @@ const listQuerySchema = z.object({
   period: z.string().regex(periodRe).optional(),
 })
 
-const SELECT_COLS =
+const BASE_SELECT_COLS =
   "id, tenant_id, employee_id, period, base, overtime_pay, night_pay, attendance_bonus, gross, breakdown, status, version, created_at, updated_at"
+/** M3（migration 0050）：薪資條寄送痕跡。正式庫套遷移前不存在 → 探測後才帶。 */
+const SEND_COLS = "sent_at, sent_to"
+
+/**
+ * payslips 的 select 欄位：`sent_at/sent_to` 已套用就帶上，沒套用就退回舊欄位集
+ * （部署順序是「遷移先、程式後」，但 API 可能先上；select 不存在的欄位 PostgREST
+ * 直接 500，會把整個薪資單頁打掛——比照 loadAttendanceDays 的 0038 降級寫法）。
+ */
+async function payslipSelectCols(): Promise<string> {
+  return (await columnsExist("payslips", SEND_COLS)) ? `${BASE_SELECT_COLS}, ${SEND_COLS}` : BASE_SELECT_COLS
+}
 
 /** Inclusive [first, lastExclusive) day bounds for a 'YYYY-MM' period, used to
  * filter attendance_days by work_date. lastExclusive is the 1st of next month so
@@ -305,7 +328,7 @@ payrollRouter.get(
       const self = await resolveSelf(tenantId, userId)
       const isHr = isHrRole(self?.role)
 
-      let query = supabaseAdmin.from("payslips").select(SELECT_COLS).eq("tenant_id", tenantId)
+      let query = supabaseAdmin.from("payslips").select(await payslipSelectCols()).eq("tenant_id", tenantId)
 
       if (isHr) {
         if (employeeId) query = query.eq("employee_id", employeeId)
@@ -355,7 +378,7 @@ payrollRouter.get(
 
       const { data, error } = await supabaseAdmin
         .from("payslips")
-        .select(SELECT_COLS)
+        .select(await payslipSelectCols())
         .eq("tenant_id", tenantId)
         .eq("id", id)
         .maybeSingle()
@@ -365,11 +388,13 @@ payrollRouter.get(
       }
 
       // Not found, or found but not the caller's and caller isn't HR → 404.
-      if (!data || (!isHr && data.employee_id !== self?.id)) {
+      // （select 欄位是執行期字串，PostgREST 的型別推不出來 → 轉成已知形狀。）
+      const payslip = data as unknown as { employee_id: string } | null
+      if (!payslip || (!isHr && payslip.employee_id !== self?.id)) {
         res.status(404).json({ error: "not_found" })
         return
       }
-      res.status(200).json({ payslip: data })
+      res.status(200).json({ payslip })
     } catch (err) {
       next(err)
     }
@@ -443,6 +468,264 @@ payrollRouter.post(
         context: "POST /payslips/:id/finalize — 薪資單定稿",
       })
       res.status(200).json({ id: updated.id, status: updated.status, sheetLocked })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/* ──────────────────────────────────────────────────────────────────────
+ * M3 薪資條 Email 一鍵寄送（2026-09-23）
+ *
+ * 只寄**已定稿**的薪資單（draft 還會被重算，寄出去就收不回來）；Resend 未設定
+ * （`RESEND_API_KEY` 沒給）→ 409 `mail_not_configured`，不要假裝寄成功。
+ * 收件地址解析與通知投遞同一條：`employee_profiles.company_email ??
+ * personal_email ?? auth email`（services/notification-delivery.ts:189-193）；
+ * 三者皆無 → 這張跳過（單張 409 `no_recipient`、批次列在 skipped）。
+ * 寄出後寫 `sent_at`／`sent_to`（migration 0050），ESS 端顯示「已寄至 …」。
+ * ────────────────────────────────────────────────────────────────────── */
+
+const sendBatchSchema = z.object({
+  period: z.string().regex(periodRe, "period must be YYYY-MM"),
+})
+
+interface PayslipRow {
+  id: string
+  employee_id: string
+  period: string
+  base: string | number | null
+  overtime_pay: string | number | null
+  night_pay: string | number | null
+  attendance_bonus: string | number | null
+  gross: string | number | null
+  status: string
+  breakdown: PayslipBreakdownLike | null
+}
+
+interface RecipientInfo {
+  to: string | null
+  name: string
+  empNo: string | null
+}
+
+/**
+ * 一次解出多位員工的收件資訊（姓名／工號／email）。auth email 要逐人查
+ * （`auth.admin.getUserById` 沒有批次版），只有在 profile 兩個信箱都沒有時才查。
+ */
+async function resolveRecipients(
+  tenantId: string,
+  employeeIds: string[],
+): Promise<Map<string, RecipientInfo>> {
+  const out = new Map<string, RecipientInfo>()
+  if (employeeIds.length === 0) return out
+
+  const { data: empData, error: empErr } = await supabaseAdmin
+    .from("employees")
+    .select("id, name, emp_no, user_id")
+    .eq("tenant_id", tenantId)
+    .in("id", employeeIds)
+  if (empErr) throw new Error(`resolveRecipients (employees): ${empErr.message}`)
+  const employees = (empData ?? []) as Array<{ id: string; name: string | null; emp_no: string | null; user_id: string | null }>
+
+  const { data: profData, error: profErr } = await supabaseAdmin
+    .from("employee_profiles")
+    .select("employee_id, company_email, personal_email")
+    .eq("tenant_id", tenantId)
+    .in("employee_id", employeeIds)
+  if (profErr && !isMissingTableError(profErr)) {
+    throw new Error(`resolveRecipients (profiles): ${profErr.message}`)
+  }
+  const profiles = new Map<string, { company_email: string | null; personal_email: string | null }>()
+  for (const p of (profData ?? []) as Array<{ employee_id: string; company_email: string | null; personal_email: string | null }>) {
+    profiles.set(p.employee_id, { company_email: p.company_email, personal_email: p.personal_email })
+  }
+
+  for (const e of employees) {
+    const p = profiles.get(e.id)
+    let to = p?.company_email ?? p?.personal_email ?? null
+    if (!to && e.user_id) {
+      const { data, error } = await supabaseAdmin.auth.admin.getUserById(e.user_id)
+      if (!error) to = data.user?.email ?? null
+    }
+    out.set(e.id, { to, name: e.name ?? e.id.slice(0, 8), empNo: e.emp_no })
+  }
+  return out
+}
+
+/** 寄一張並回寫 sent_at／sent_to；回傳實際收件地址。 */
+async function sendOnePayslip(
+  tenantId: string,
+  row: PayslipRow,
+  recipient: RecipientInfo,
+  tenantName: string | null,
+): Promise<{ sentAt: string; sentTo: string }> {
+  const input = {
+    payslip: row,
+    employeeName: recipient.name,
+    empNo: recipient.empNo,
+    breakdown: row.breakdown ?? {},
+    appName: tenantName,
+  }
+  await sendMail({
+    to: recipient.to as string,
+    subject: payslipMailSubject(row.period),
+    text: renderPayslipText(input),
+    html: renderPayslipHtml(input),
+  })
+  const sentAt = new Date().toISOString()
+  const { error } = await supabaseAdmin
+    .from("payslips")
+    .update({ sent_at: sentAt, sent_to: recipient.to, updated_at: sentAt })
+    .eq("tenant_id", tenantId)
+    .eq("id", row.id)
+  // 欄位還沒套遷移：信已經寄出去了，不要因此回 500；記一次 log 就好。
+  if (error && !isMissingColumnError(error)) throw new Error(`payslip send (mark sent): ${error.message}`)
+  if (error) warnSchemaGapOnce("payslips.sent_at", error)
+  return { sentAt, sentTo: recipient.to as string }
+}
+
+/** 租戶名稱（信尾署名）；查不到就不署名。 */
+async function tenantNameOf(tenantId: string): Promise<string | null> {
+  const { data, error } = await supabaseAdmin.from("tenants").select("name").eq("id", tenantId).maybeSingle()
+  if (error) return null
+  return (data?.name as string | undefined) ?? null
+}
+
+const payslipSendCols =
+  "id, employee_id, period, base, overtime_pay, night_pay, attendance_bonus, gross, status, breakdown"
+
+/**
+ * POST /payslips/:id/send — 把一張已定稿的薪資單寄給本人。
+ * 404 查無／跨租戶；409 `not_finalized`（草稿）；409 `mail_not_configured`
+ * （Resend 未設）；409 `no_recipient`（三種信箱都沒有）。
+ */
+payrollRouter.post(
+  "/payslips/:id/send",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const { id } = req.params
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("payslips")
+        .select(payslipSendCols)
+        .eq("tenant_id", tenantId)
+        .eq("id", id)
+        .maybeSingle()
+      if (error) {
+        next(new Error(`POST /payslips/${id}/send (select): ${error.message}`))
+        return
+      }
+      if (!data) {
+        res.status(404).json({ error: "not_found" })
+        return
+      }
+      const row = data as unknown as PayslipRow
+      if (row.status !== "finalized") {
+        res.status(409).json({ error: "not_finalized", message: "只有已定案的薪資單可以寄送" })
+        return
+      }
+      if (!isMailConfigured()) {
+        res.status(409).json({ error: "mail_not_configured", message: "尚未設定 RESEND_API_KEY" })
+        return
+      }
+      const recipients = await resolveRecipients(tenantId, [row.employee_id])
+      const recipient = recipients.get(row.employee_id)
+      if (!recipient?.to) {
+        res.status(409).json({ error: "no_recipient", message: "這位同仁沒有可用的 email（公司／個人／登入帳號皆無）" })
+        return
+      }
+      const sent = await sendOnePayslip(tenantId, row, recipient, await tenantNameOf(tenantId))
+      await writeAuditLog({
+        tenantId,
+        tableName: "payslips",
+        recordId: row.id,
+        action: "UPDATE",
+        oldRow: { sent_at: null },
+        newRow: { sent_at: sent.sentAt, sent_to: sent.sentTo, period: row.period, employee_id: row.employee_id },
+        context: "POST /payslips/:id/send — 薪資條 Email 寄送",
+      })
+      res.status(200).json({ id: row.id, sentAt: sent.sentAt, sentTo: sent.sentTo })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * POST /payslips/send-batch {period} — 該期別所有已定稿薪資單逐張寄送。
+ * 回 `{ sent, skipped:[{id, employeeId, reason}] }`；reason：`not_finalized`
+ * （草稿）、`no_recipient`（沒有信箱）、`send_failed`（Resend 回錯，含訊息）。
+ * 一張失敗不影響其他張——HR 拿 skipped 清單補寄。
+ */
+payrollRouter.post(
+  "/payslips/send-batch",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const parsed = sendBatchSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    const { period } = parsed.data
+    if (!isMailConfigured()) {
+      res.status(409).json({ error: "mail_not_configured", message: "尚未設定 RESEND_API_KEY" })
+      return
+    }
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("payslips")
+        .select(payslipSendCols)
+        .eq("tenant_id", tenantId)
+        .eq("period", period)
+      if (error) {
+        next(new Error(`POST /payslips/send-batch (select): ${error.message}`))
+        return
+      }
+      const rows = (data ?? []) as unknown as PayslipRow[]
+      const skipped: Array<{ id: string; employeeId: string; reason: string; message?: string }> = []
+      const finalized = rows.filter((r) => {
+        if (r.status === "finalized") return true
+        skipped.push({ id: r.id, employeeId: r.employee_id, reason: "not_finalized" })
+        return false
+      })
+
+      const recipients = await resolveRecipients(tenantId, finalized.map((r) => r.employee_id))
+      const tenantName = await tenantNameOf(tenantId)
+      const sentIds: string[] = []
+      for (const row of finalized) {
+        const recipient = recipients.get(row.employee_id)
+        if (!recipient?.to) {
+          skipped.push({ id: row.id, employeeId: row.employee_id, reason: "no_recipient" })
+          continue
+        }
+        try {
+          await sendOnePayslip(tenantId, row, recipient, tenantName)
+          sentIds.push(row.id)
+        } catch (err) {
+          logger.warn({ err, tenantId, payslipId: row.id, period }, "payslip send-batch: 一張寄送失敗")
+          skipped.push({
+            id: row.id,
+            employeeId: row.employee_id,
+            reason: "send_failed",
+            message: err instanceof Error ? err.message.slice(0, 200) : String(err),
+          })
+        }
+      }
+
+      await writeAuditLog({
+        tenantId,
+        tableName: "payslips",
+        action: "UPDATE",
+        newRow: { period, sent: sentIds.length, skipped: skipped.length },
+        context: "POST /payslips/send-batch — 薪資條批次 Email 寄送",
+      })
+      res.status(200).json({ period, sent: sentIds.length, sentIds, skipped })
     } catch (err) {
       next(err)
     }
