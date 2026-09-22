@@ -5,6 +5,7 @@ import {
   KIND_ORDER,
   KIND_SHORT,
   approvalLine,
+  balanceBucketFor,
   buildCreateBody,
   describeBody,
   describeRequest,
@@ -20,6 +21,7 @@ import {
   type OvertimeFormValues,
   type PettyCashFormValues,
   type TripFormValues,
+  type WfhFormValues,
 } from "../request-forms";
 
 /** 本地時間字串 → epoch，讓斷言不依賴跑測試機器的時區。 */
@@ -69,21 +71,23 @@ const TRIP: TripFormValues = {
 
 const PETTY: PettyCashFormValues = { amount: "3,000", reason: "採買文具" };
 
-describe("KIND_LABEL／KIND_SHORT／KIND_ORDER（2026-09-23 加 wfh 標籤，表單由 WP2 補）", () => {
-  it("六種 kind 都有中文標籤與短標；切換列仍是五種（wfh 表單未補前不出現）", () => {
+const WFH: WfhFormValues = { startDate: "2026-09-18", endDate: "2026-09-19", hours: "", reason: "  在家趕結案  " };
+
+describe("KIND_LABEL／KIND_SHORT／KIND_ORDER（2026-09-23 起含 wfh）", () => {
+  it("六種 kind 都有中文標籤與短標；切換列六種、在家排在加班之後", () => {
     for (const k of ["leave", "fix_punch", "ot", "business_trip", "petty_cash", "wfh"] as const) {
       expect(KIND_LABEL[k]).toBeTruthy();
       expect(KIND_SHORT[k]).toBeTruthy();
     }
     expect(KIND_LABEL.wfh).toBe("在家工作");
     expect(KIND_SHORT.wfh).toBe("在家");
-    expect(KIND_ORDER).toEqual(["leave", "fix_punch", "ot", "business_trip", "petty_cash"]);
-    expect(isRequestKind("wfh")).toBe(false);
+    expect(KIND_ORDER).toEqual(["leave", "fix_punch", "ot", "wfh", "business_trip", "petty_cash"]);
+    expect(isRequestKind("wfh")).toBe(true);
     expect(requestTitle(row({ kind: "wfh" }))).toBe("在家工作");
   });
 });
 
-describe("buildCreateBody（五種 kind）", () => {
+describe("buildCreateBody（六種 kind）", () => {
   it("請假：segments＋startAt/endAt 取首尾段、hours 加總、reason trim、假別帶上", () => {
     const body = ok(buildCreateBody("leave", LEAVE));
     expect(body.kind).toBe("leave");
@@ -190,6 +194,38 @@ describe("buildCreateBody（五種 kind）", () => {
     expect(buildCreateBody("petty_cash", { amount: "", reason: "x" })).toEqual({ error: "請填寫預支金額" });
     expect(buildCreateBody("petty_cash", { amount: "0", reason: "x" })).toEqual({ error: "請填寫預支金額" });
     expect(buildCreateBody("petty_cash", { amount: "500", reason: " " })).toEqual({ error: "請填寫用途" });
+  });
+
+  it("在家工作：起日 00:00 到迄日 23:59、時數留空就不帶、事由 trim", () => {
+    const body = ok(buildCreateBody("wfh", WFH));
+    expect(body.kind).toBe("wfh");
+    expect(at(body.startAt)).toBe(local("2026-09-18T00:00:00"));
+    expect(at(body.endAt)).toBe(local("2026-09-19T23:59:00"));
+    expect(body).not.toHaveProperty("hours");
+    expect(body.reason).toBe("在家趕結案");
+    expect(body).not.toHaveProperty("onBehalfOfEmployeeId");
+  });
+
+  it("在家工作：填了時數就帶（四捨五入 2 位）；HR 代申請帶 onBehalfOfEmployeeId", () => {
+    const body = ok(
+      buildCreateBody("wfh", {
+        ...WFH,
+        hours: "6.755",
+        reason: "",
+        onBehalfOfEmployeeId: "22222222-2222-2222-2222-222222222222",
+      }),
+    );
+    expect(body.hours).toBe(6.76);
+    expect(body).not.toHaveProperty("reason");
+    expect(body.onBehalfOfEmployeeId).toBe("22222222-2222-2222-2222-222222222222");
+  });
+
+  it("在家工作：日期不合法／迄早於起／時數 0 或負數 → error", () => {
+    expect(buildCreateBody("wfh", { ...WFH, startDate: "" })).toEqual({ error: "請選擇起迄日期" });
+    expect(buildCreateBody("wfh", { ...WFH, endDate: "2026-09-17" })).toEqual({ error: "結束日期不可早於開始日期" });
+    expect(buildCreateBody("wfh", { ...WFH, hours: "0" })).toEqual({ error: "時數請填正數，或留空由班表計算" });
+    expect(buildCreateBody("wfh", { ...WFH, hours: "-3" })).toEqual({ error: "時數請填正數，或留空由班表計算" });
+    expect(buildCreateBody("wfh", { ...WFH, reason: "很".repeat(251) })).toEqual({ error: "事由請在 250 字以內" });
   });
 
   it("缺必填 → error：請假沒日期、事由超過 250 字、出差迄早於起", () => {
@@ -301,11 +337,30 @@ describe("describeRequest（清單第 2 行，五種）", () => {
     expect(describeRequest(row({ kind: "petty_cash" }))).toBe("—");
   });
 
+  it("在家工作：單日「09/18（五）全天」、跨日「09/18–09/19」；有時數才加時數", () => {
+    const oneDay = row({
+      kind: "wfh",
+      hours: null,
+      start_at: "2026-09-17T16:00:00Z", // 台北 09/18 00:00
+      end_at: "2026-09-18T15:59:00Z", // 台北 09/18 23:59
+    });
+    expect(describeRequest(oneDay, { tz: TZ })).toBe("09/18（五）全天");
+    const span = row({
+      kind: "wfh",
+      hours: 12,
+      start_at: "2026-09-17T16:00:00Z",
+      end_at: "2026-09-19T15:59:00Z",
+    });
+    expect(describeRequest(span, { tz: TZ })).toBe("09/18–09/19 · 12 小時");
+  });
+
   it("describeBody：剛送出的 body 反推同款摘要（成功畫面用）", () => {
     const body = ok(buildCreateBody("ot", OT));
     expect(describeBody(body)).toBe("09/18（五）18:00–20:30 · 2 小時 · 補休");
     const leave = ok(buildCreateBody("leave", LEAVE));
     expect(describeBody(leave, { shift: DAY_SHIFT })).toBe("09/18–09/21 · 2 天 · 16 小時");
+    const wfh = ok(buildCreateBody("wfh", WFH));
+    expect(describeBody(wfh)).toBe("09/18–09/19");
   });
 });
 
@@ -316,6 +371,7 @@ describe("requestTitle / approvalLine / needsAttachment / remainingHours", () =>
     expect(requestTitle(row({ kind: "business_trip", trip_type: "outing" }))).toBe("公出");
     expect(requestTitle(row({ kind: "business_trip" }))).toBe("公出／出差");
     expect(requestTitle(row({ kind: "petty_cash" }))).toBe("零用金預支");
+    expect(requestTitle(row({ kind: "wfh" }))).toBe("在家工作");
   });
 
   it("approvalLine 三態：pending 等待誰（第幾關）、rejected 駁回理由、approved 已核准時間", () => {
@@ -376,15 +432,64 @@ describe("requestTitle / approvalLine / needsAttachment / remainingHours", () =>
     expect(needsAttachment(row({}))).toBe(false);
   });
 
-  it("remainingHours 跨年度加總 entitled + deferred − used；沒有列 → null", () => {
+  it("remainingHours（週年制，W1）：兩個桶只取含申請起日那一個，不再全部加總", () => {
+    // 到職 05-10：2025-05-10～2026-05-09 舊期（已用完）、2026-05-10～2027-05-09 新期
     const balances = [
-      { leave_type_id: "a", entitled: "56", used: "8", deferred: "0" },
-      { leave_type_id: "a", entitled: 16, used: 0, deferred: 8 },
-      { leave_type_id: "b", entitled: 30, used: 30, deferred: 0 },
+      {
+        leave_type_id: "a",
+        entitled: "56",
+        used: "56",
+        deferred: "0",
+        year: 2025,
+        period_start: "2025-05-10",
+        period_end: "2026-05-09",
+      },
+      {
+        leave_type_id: "a",
+        entitled: 120,
+        used: 8,
+        deferred: 8,
+        year: 2026,
+        period_start: "2026-05-10",
+        period_end: "2027-05-09",
+      },
     ];
-    expect(remainingHours(balances, "a")).toBe(72);
-    expect(remainingHours(balances, "b")).toBe(0);
-    expect(remainingHours(balances, "zzz")).toBeNull();
+    expect(remainingHours(balances, "a", "2026-09-22")).toBe(120); // 新期：120 + 8 − 8
+    expect(remainingHours(balances, "a", "2026-01-10")).toBe(0); // 舊期：56 + 0 − 56
+    // 兩個期間都沒涵蓋（還沒發放）→ null，畫面顯示「尚未設定額度」而不是錯的數字
+    expect(remainingHours(balances, "a", "2027-06-01")).toBeNull();
+    expect(remainingHours(balances, "zzz", "2026-09-22")).toBeNull();
+  });
+
+  it("remainingHours：沒有 period 欄的舊列退回用 year 對申請起日的年份", () => {
+    const legacy = [
+      { leave_type_id: "a", entitled: "56", used: "8", deferred: "0", year: 2025 },
+      { leave_type_id: "a", entitled: 16, used: 0, deferred: 8, year: 2026 },
+      { leave_type_id: "b", entitled: 30, used: 30, deferred: 0, year: 2026 },
+    ];
+    expect(remainingHours(legacy, "a", "2026-09-22")).toBe(24); // 16 + 8 − 0
+    expect(remainingHours(legacy, "a", "2025-12-31")).toBe(48); // 56 + 0 − 8
+    expect(remainingHours(legacy, "b", "2026-03-01")).toBe(0);
+    expect(remainingHours(legacy, "a", "2024-01-01")).toBeNull();
+  });
+
+  it("balanceBucketFor：有期間的列優先；都沒中才退回 year；同假別無列 → null", () => {
+    const mixed = [
+      { leave_type_id: "a", entitled: 8, used: 0, deferred: 0, year: 2026 },
+      {
+        leave_type_id: "a",
+        entitled: 80,
+        used: 0,
+        deferred: 0,
+        year: 2026,
+        period_start: "2026-05-10",
+        period_end: "2027-05-09",
+      },
+    ];
+    expect(balanceBucketFor(mixed, "a", "2026-09-22")?.entitled).toBe(80);
+    // 期間外 → 退回沒有 period 欄的曆年列（year 2026）
+    expect(balanceBucketFor(mixed, "a", "2026-01-05")?.entitled).toBe(8);
+    expect(balanceBucketFor(mixed, "b", "2026-09-22")).toBeNull();
   });
 
   it("requestErrorCode 剝掉 [status] 前綴", () => {

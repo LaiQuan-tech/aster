@@ -156,7 +156,12 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
               />
             </Field>
           </div>
-          <Field label="出差範圍" required htmlFor={ids.scope} hint={tripScope !== "local" ? "跨縣市以上的長途出差需經簽核同意後才成立" : undefined}>
+          <Field
+            label="出差範圍"
+            required
+            htmlFor={ids.scope}
+            hint={tripScope !== "local" ? "跨縣市／海外出差將送老闆簽核，核准後才成立" : "市內公出只需主管簽核"}
+          >
             <Select
               id={ids.scope}
               value={tripScope}

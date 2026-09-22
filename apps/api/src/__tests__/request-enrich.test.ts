@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { mergeEnrichment, emptyLookups, formatApproverNames, type EnrichLookups, type EnrichStep } from "../services/request-enrich.js"
+import { mergeEnrichment, emptyLookups, formatApproverNames, type EnrichableRow, type EnrichLookups, type EnrichStep } from "../services/request-enrich.js"
 
 // Pure — no DB. 申請單列表補齊欄位的對照邏輯（ESS「我的申請」要顯示假別名、
 // 等待誰簽／第幾關、駁回理由、附件數；多級簽核後還有現行關卡的候選與姓名）。
@@ -258,5 +258,37 @@ describe("mergeEnrichment — 申請單列表補齊", () => {
     expect(out[1].decision_comment).toBe("no")
     expect(out[1].leave_type_name).toBe("病假")
     expect(out[1].current_approver_name).toBe("HR Admin")
+  })
+
+  /* ── M1 月加班上限標記（migration 0050 的兩欄）────────────────────── */
+
+  it("beyond_cap：欄位缺席（0050 未套）或非加班單 → false／null，不是 undefined", () => {
+    const [row] = mergeEnrichment([baseRow], lookups())
+    expect(row.beyond_cap).toBe(false)
+    expect(row.beyond_cap_detail).toBeNull()
+  })
+
+  it("beyond_cap：加班單帶旗標與明細時原樣帶出（前端據此顯示「另行給付」）", () => {
+    const detail = { approvedBeforeMinutes: 2340, requestedMinutes: 180, capMinutes: 2400, beyondCapMinutes: 120, beyondCap: true }
+    const [row] = mergeEnrichment(
+      [{ ...baseRow, id: "ot-1", kind: "ot", leave_type_id: null, beyond_cap: true, beyond_cap_detail: detail }],
+      lookups(),
+    )
+    expect(row.beyond_cap).toBe(true)
+    expect(row.beyond_cap_detail).toEqual(detail)
+  })
+
+  it("beyond_cap_detail 不是物件（舊列寫成字串／null）→ null，不讓前端拿到怪東西", () => {
+    // 刻意寫成 EnrichableRow（欄位宣告成寬型別）：字面值 null／string 與回傳型別
+    // 交集後會變 never，那是 TS 的事，不是這個案例要驗的行為。
+    const strRow: EnrichableRow = { ...baseRow, beyond_cap: false, beyond_cap_detail: "oops" }
+    const [a] = mergeEnrichment([strRow], lookups())
+    expect(a.beyond_cap).toBe(false)
+    expect(a.beyond_cap_detail).toBeNull()
+
+    const arrRow: EnrichableRow = { ...baseRow, beyond_cap: null, beyond_cap_detail: [1, 2] }
+    const [b] = mergeEnrichment([arrRow], lookups())
+    expect(b.beyond_cap).toBe(false)
+    expect(b.beyond_cap_detail).toBeNull()
   })
 })

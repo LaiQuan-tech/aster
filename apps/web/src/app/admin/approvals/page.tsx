@@ -57,6 +57,8 @@ import {
   type RequestKind,
 } from "@/lib/admin-api";
 import { getMeCached, invalidateEssState } from "@/lib/ess-state";
+// 標記文案與 ESS「我的申請」共用一份（純字串常數，不牽連 ESS 的資料層）。
+import { BEYOND_CAP_LABEL } from "@/lib/request-forms";
 import {
   BUCKET_LABEL,
   KIND_LABEL,
@@ -661,6 +663,12 @@ function ApprovalsView() {
                       </td>
                       <td className="py-3 pr-4">
                         <Pill tone="gray">{KIND_LABEL[row.kind]}</Pill>
+                        {/* M1：加班單送出時已超過月加班上限；超額部分不入薪資加班費，改由「現金給付」另行支付 */}
+                        {row.beyond_cap === true && (
+                          <span className="mt-1 block">
+                            <Pill tone="red">{BEYOND_CAP_LABEL}</Pill>
+                          </span>
+                        )}
                       </td>
                       <td className="max-w-sm py-3 pr-4 text-gray-600">
                         {contentLines(row).map((line, index) => (

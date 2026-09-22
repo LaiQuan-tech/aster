@@ -11,7 +11,7 @@
  *   - 零用金預支 `advanceRequested` 必填、`reason` 必填、`startAt = endAt = now`。
  */
 import type { CreateRequestBody, LeaveRequest, LeaveSegment, RequestKind, RequestStatus } from "./ess-api";
-import { fmtDateShort, fmtDateTime, fmtDateWithWeekday, fmtHm, fmtHours, fmtMoney, localDateKey } from "./ess-format";
+import { fmtDateShort, fmtDateTime, fmtDateWithWeekday, fmtHm, fmtHours, fmtMoney, localDateKey, todayKey } from "./ess-format";
 import { DEFAULT_SHIFT, addDaysIfCrossesMidnight, halfDayWindow, normalizeHm, parseHm, type ShiftLike } from "./leave-hours";
 
 /* ------------------------------------------------------------ 標籤 --- */
@@ -36,10 +36,13 @@ export const KIND_SHORT: Record<RequestKind, string> = {
 };
 
 /**
- * 種類切換列的順序＝可送出的種類。`wfh`（在家工作，M2）的標籤已在上面，但表單
- * （WfhForm／buildWfhBody）由 WP2 補；補完再把 "wfh" 加進這裡，切換列才會出現。
+ * 種類切換列的順序＝可送出的種類。`wfh`（在家工作／加做申報，M2）排在加班之後：
+ * 兩者都是「在正常班表之外的工作」，心智模型接近。
  */
-export const KIND_ORDER: RequestKind[] = ["leave", "fix_punch", "ot", "business_trip", "petty_cash"];
+export const KIND_ORDER: RequestKind[] = ["leave", "fix_punch", "ot", "wfh", "business_trip", "petty_cash"];
+
+/** 加班單超過月上限時列上的標記（M1；送出即標記，不擋單）。 */
+export const BEYOND_CAP_LABEL = "超過月上限，另行給付";
 
 export function isRequestKind(value: string | null | undefined): value is RequestKind {
   return !!value && (KIND_ORDER as string[]).includes(value);
@@ -146,12 +149,21 @@ export interface PettyCashFormValues extends CommonFormValues {
   amount: string | number;
 }
 
+/** 在家工作／加做申報（M2）：日期區間（全天）＋選填時數＋事由。 */
+export interface WfhFormValues extends CommonFormValues {
+  startDate: string;
+  endDate: string;
+  /** 選填總時數；空＝不帶，由出勤引擎以當日班表淨工時計。 */
+  hours: string | number;
+}
+
 export interface FormValuesByKind {
   leave: LeaveFormValues;
   fix_punch: FixPunchFormValues;
   ot: OvertimeFormValues;
   business_trip: TripFormValues;
   petty_cash: PettyCashFormValues;
+  wfh: WfhFormValues;
 }
 
 export type BuildResult = CreateRequestBody | { error: string };
@@ -371,6 +383,35 @@ function buildPettyCash(form: PettyCashFormValues, now: Date): BuildResult {
 }
 
 /**
+ * 在家工作（M2）：`startAt`＝起日 00:00、`endAt`＝迄日 23:59（全天，與出差同慣例）。
+ * 時數選填——沒填時後端與出勤引擎以當日班表淨工時計；填了代表「加做」的實際時數。
+ */
+export function buildWfhBody(form: WfhFormValues): BuildResult {
+  if (!DATE_RE.test(form.startDate ?? "") || !DATE_RE.test(form.endDate ?? "")) return { error: "請選擇起迄日期" };
+  if (form.endDate < form.startDate) return { error: "結束日期不可早於開始日期" };
+  const reason = cleanReason(form.reason);
+  if (reasonTooLong(reason)) return { error: `事由請在 ${REASON_MAX} 字以內` };
+  const rawHours = String(form.hours ?? "").trim();
+  let hours: number | undefined;
+  if (rawHours !== "") {
+    const n = toNumber(rawHours);
+    if (n == null || n <= 0) return { error: "時數請填正數，或留空由班表計算" };
+    if (n > 24 * 31) return { error: "時數超過合理範圍，請確認" };
+    hours = round2(n);
+  }
+  const body: CreateRequestBody = {
+    kind: "wfh",
+    startAt: localIso(form.startDate, "00:00"),
+    endAt: localIso(form.endDate, "23:59"),
+  };
+  if (hours != null) body.hours = hours;
+  if (reason) body.reason = reason;
+  const behalf = proxy(form);
+  if (behalf) body.onBehalfOfEmployeeId = behalf;
+  return body;
+}
+
+/**
  * 表單值 → `POST /requests` body；驗證不過回 `{ error }`。
  * 請假的「必選假別」與「需憑證假別必附檔」由頁面層檢查（這裡不知道假別清單與檔案）。
  */
@@ -390,6 +431,8 @@ export function buildCreateBody<K extends keyof FormValuesByKind>(
       return buildTrip(form as TripFormValues);
     case "petty_cash":
       return buildPettyCash(form as PettyCashFormValues, opts.now ?? new Date());
+    case "wfh":
+      return buildWfhBody(form as WfhFormValues);
     default:
       return { error: "未知的申請種類" };
   }
@@ -486,6 +529,15 @@ export function describeRequest(
       const amount = r.advance_requested;
       return amount == null || amount === "" ? "—" : fmtMoney(amount);
     }
+    case "wfh": {
+      const hours = hoursOf(r);
+      const hoursText = hours == null ? "" : ` · ${fmtHours(hours)}`;
+      const sd = localDateKey(r.start_at, tz);
+      const ed = localDateKey(r.end_at, tz);
+      if (!sd || !ed) return `${rangeFromIso(r.start_at, r.end_at, tz)}${hoursText}`;
+      if (sd === ed) return `${fmtDateWithWeekday(sd)}全天${hoursText}`;
+      return `${fmtDateShort(sd)}–${fmtDateShort(ed)}${hoursText}`;
+    }
     default:
       return rangeFromIso(r.start_at, r.end_at, tz);
   }
@@ -578,12 +630,62 @@ export function needsAttachment(
   return r.status === "pending" && r.kind === "leave" && r.requires_attachment === true && r.attachment_count === 0;
 }
 
-/** 假別剩餘時數：跨年度加總 entitled + deferred − used；沒有任何列 → null（尚未設定額度）。 */
-export function remainingHours(
-  balances: Array<{ leave_type_id: string; entitled: number | string; used: number | string; deferred: number | string }>,
+/** 餘額桶（`GET /leave-balances` 的一列）判斷期間用得到的最小形狀。 */
+export interface BalanceBucketLike {
+  leave_type_id: string;
+  entitled: number | string;
+  used: number | string;
+  deferred: number | string;
+  /** 特休週年制（W1，2026-09-23）：桶的期間；舊 API／舊列沒有這兩欄。 */
+  period_start?: string | null;
+  period_end?: string | null;
+  /** 曆年桶的年份（＝period_start 的年）；沒有 period 欄時用它對申請起日的年份。 */
+  year?: number | null;
+}
+
+/**
+ * 找出「含這個日期」的那一個餘額桶。
+ *
+ * 週年制（W1）之後，同一個人同一假別會同時存在**兩個以上**的桶（去年週年期、
+ * 今年週年期），全部加總會把已經過期的額度也算進來 → 畫面顯示的剩餘時數偏多，
+ * 送單前的「超過剩餘時數」提醒就失效。所以改成挑一個：
+ *   1. 有 `period_start`／`period_end` 的列：`period_start <= date <= period_end`。
+ *   2. 都沒中、且有沒帶 period 欄的舊列：用 `year` 對 `date` 的年份。
+ *   3. 還是沒有 → null（呼叫端顯示「尚未設定額度」，不擋送單）。
+ * 日期一律是 `YYYY-MM-DD`，字串比較即可。
+ */
+export function balanceBucketFor<T extends BalanceBucketLike>(
+  balances: readonly T[],
   leaveTypeId: string,
-): number | null {
+  date: string,
+): T | null {
   const rows = balances.filter((b) => b.leave_type_id === leaveTypeId);
   if (rows.length === 0) return null;
-  return round2(rows.reduce((sum, b) => sum + (Number(b.entitled) || 0) + (Number(b.deferred) || 0) - (Number(b.used) || 0), 0));
+  const inPeriod = rows.find(
+    (b) =>
+      typeof b.period_start === "string" &&
+      typeof b.period_end === "string" &&
+      b.period_start <= date &&
+      date <= b.period_end,
+  );
+  if (inPeriod) return inPeriod;
+  const year = Number(date.slice(0, 4));
+  const legacy = rows.find((b) => !b.period_start && !b.period_end && Number(b.year) === year);
+  return legacy ?? null;
+}
+
+/**
+ * 假別剩餘時數＝**含申請起日那一個桶**的 entitled + deferred − used。
+ * 找不到對應的桶 → null（尚未設定額度／不在任何期間內），呼叫端不顯示也不擋送單。
+ *
+ * `asOf` 省略時用今天——呼叫端能拿到申請起日的話請傳進來（跨週年期的單才會算對）。
+ */
+export function remainingHours(
+  balances: readonly BalanceBucketLike[],
+  leaveTypeId: string,
+  asOf: string = todayKey(),
+): number | null {
+  const bucket = balanceBucketFor(balances, leaveTypeId, asOf);
+  if (!bucket) return null;
+  return round2((Number(bucket.entitled) || 0) + (Number(bucket.deferred) || 0) - (Number(bucket.used) || 0));
 }

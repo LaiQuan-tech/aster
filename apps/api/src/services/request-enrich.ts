@@ -41,6 +41,15 @@ export interface EnrichLookups {
   departmentNameById?: Map<string, string>
 }
 
+/** 月加班上限標記（M1；leave_requests.beyond_cap_detail，migration 0050）。 */
+export interface BeyondCapDetail {
+  approvedBeforeMinutes?: number
+  requestedMinutes?: number
+  capMinutes?: number
+  beyondCapMinutes?: number
+  beyondCap?: boolean
+}
+
 /** 列表列至少要有這些欄位才能補齊（REQUEST_COLS 一定有）。 */
 export interface EnrichableRow {
   id: string
@@ -48,6 +57,9 @@ export interface EnrichableRow {
   leave_type_id: string | null
   status: string
   current_step: number
+  /** 加班單超過月上限（migration 0050 之前的列沒有這兩欄）。 */
+  beyond_cap?: boolean | null
+  beyond_cap_detail?: unknown
 }
 
 /** 列表列裡的每一關（snake_case 與列欄位一致；POST /requests 201 的 steps[] 是 camelCase）。 */
@@ -99,6 +111,13 @@ export interface EnrichedFields {
   decision_comment: string | null
   /** 同上，對應關卡的 acted_at。 */
   decided_at: string | null
+  /**
+   * M1 月加班上限：這張加班單是否有分鐘落在月上限之外（送單時標記，只標不擋）。
+   * 欄位尚未套用（migration 0050）／非加班單一律 false，前端據此顯示「另行給付」標記。
+   */
+  beyond_cap: boolean
+  /** 標記當下的判定明細（已核准分鐘／本張分鐘／上限／超額分鐘）；沒有就 null。 */
+  beyond_cap_detail: BeyondCapDetail | null
 }
 
 export type EnrichedRow<T> = T & EnrichedFields
@@ -189,8 +208,16 @@ export function mergeEnrichment<T extends EnrichableRow>(
       }),
       decision_comment: decided?.comment ?? null,
       decided_at: decided?.acted_at ?? null,
+      beyond_cap: row.beyond_cap === true,
+      beyond_cap_detail: normaliseBeyondCapDetail(row.beyond_cap_detail),
     }
   })
+}
+
+/** jsonb 讀回來是 unknown：非物件（null／字串／陣列）一律當成沒有明細。 */
+function normaliseBeyondCapDetail(value: unknown): BeyondCapDetail | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  return value as BeyondCapDetail
 }
 
 /* ── IO ─────────────────────────────────────────────────────────────── */

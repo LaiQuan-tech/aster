@@ -9,7 +9,18 @@ import { resolveApproverChain, type StepKind } from "../services/approval-chain.
 import { enrichRequestRows } from "../services/request-enrich.js"
 import { isStepCandidate, stepCandidates, stepSelectCols } from "../services/approval-steps.js"
 import { enqueue } from "../services/notify.js"
-import { approvalStepsHaveCandidates, isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { writeAuditLog } from "../services/audit.js"
+import {
+  approvedOtMinutesInPeriod,
+  beyondCapCheck,
+  capMinutesFor,
+  requestMinutesOf,
+  type BeyondCapResult,
+} from "../services/overtime-cap.js"
+import { loadRuleConfigFor } from "../services/payroll-inputs.js"
+import { getTenantTimezone } from "../lib/tenant-tz.js"
+import { localDateKey } from "../lib/tz.js"
+import { approvalStepsHaveCandidates, columnsExist, isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { logger } from "../lib/logger.js"
 
 export const requestsRouter = Router()
@@ -20,7 +31,9 @@ export const requestsRouter = Router()
 // marks the trip authorised.
 // 'petty_cash' 零用金預支（模組三第 3 條）走同一條簽核管線：與出差預支
 // 是同一個機制，差別只在授權來源，沒有理由另建一套簽核。
-const KINDS = ["leave", "ot", "fix_punch", "business_trip", "petty_cash"] as const
+// 'wfh' 在家工作／加做申報（M2，2026-09-23）：同樣走簽核管線，核准後由
+// services/settlement.ts 把該日視為在家工作（無打卡即以班表淨工時計）。
+const KINDS = ["leave", "ot", "fix_punch", "business_trip", "petty_cash", "wfh"] as const
 
 // 與 services/ledger.ts PUNCH_TYPES 及 punch_records.type 同一組值。
 const PUNCH_SEGMENT_TYPES = ["in", "out", "break_in", "break_out", "outing_in", "outing_out"] as const
@@ -93,8 +106,50 @@ const changeApproverSchema = z.object({
   comment: z.string().trim().max(250).optional(),
 })
 
+/** 撤回自己的單；`reason` 選填（W10：有填就寫進稽核的 new_row.comment）。 */
+const cancelSchema = z.object({
+  reason: z.string().trim().min(1).max(250).optional(),
+})
+
 const REQUEST_COLS =
   "id, tenant_id, employee_id, kind, leave_type_id, start_at, end_at, hours, reason, agent_name, payout, trip_type, location, trip_scope, estimated_cost, advance_requested, trip_report, remark, segments, status, current_step, created_at"
+
+/** 月加班上限標記欄位（migration 0050）；未套用時所有 select／insert 都不帶。 */
+const BEYOND_CAP_COLS = "beyond_cap, beyond_cap_detail"
+
+/** 兩份都寫成字面值常數：supabase-js 以 select 字串的**字面型別**推列型別，組出來的字串會被寬化成 string。 */
+const REQUEST_COLS_WITH_BEYOND_CAP =
+  "id, tenant_id, employee_id, kind, leave_type_id, start_at, end_at, hours, reason, agent_name, payout, trip_type, location, trip_scope, estimated_cost, advance_requested, trip_report, remark, segments, status, current_step, created_at, beyond_cap, beyond_cap_detail"
+
+function leaveRequestsHaveBeyondCap(): Promise<boolean> {
+  return columnsExist("leave_requests", BEYOND_CAP_COLS)
+}
+
+/**
+ * 列表欄位：正式庫套完 0050 後自動帶上 `beyond_cap`／`beyond_cap_detail`
+ * （schema-compat 探測，「沒有」只快取 60 秒，遷移套完不必重啟 API）。
+ */
+async function requestCols(): Promise<string> {
+  return (await leaveRequestsHaveBeyondCap()) ? REQUEST_COLS_WITH_BEYOND_CAP : REQUEST_COLS
+}
+
+/**
+ * 列表列的最小形狀。select 字串是執行期決定的（欄位探測），supabase-js 只會從
+ * **字面型別**推列型別，拿到變數就推不出來 → 沿用 `stepSelectCols` 的
+ * `as unknown as` 慣例，在這裡集中轉一次。
+ */
+interface RequestListRow {
+  id: string
+  employee_id: string
+  leave_type_id: string | null
+  status: string
+  current_step: number
+  [key: string]: unknown
+}
+
+function asRequestRows(data: unknown): RequestListRow[] {
+  return (data ?? []) as RequestListRow[]
+}
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000"
 
@@ -157,10 +212,26 @@ const KIND_LABEL: Record<string, string> = {
   fix_punch: "補卡",
   business_trip: "公出/出差",
   petty_cash: "零用金預支",
+  wfh: "在家工作",
 }
 
 function kindLabel(kind: string): string {
   return KIND_LABEL[kind] ?? kind
+}
+
+/**
+ * W2 跨縣市出差走老闆關：`approval_flows` 查 'business_trip_intercity'，且鏈的最後
+ * 一關一定是老闆（`features.approval.fallbackApproverEmpId`）。市內公出（tripScope
+ * 'local' 或沒帶）維持原本的 kind='business_trip' 流程。
+ */
+export function flowRouteFor(
+  kind: string,
+  tripScope: string | null | undefined,
+): { flowKind: string; requireBossFinal: boolean } {
+  if (kind === "business_trip" && tripScope && tripScope !== "local") {
+    return { flowKind: "business_trip_intercity", requireBossFinal: true }
+  }
+  return { flowKind: kind, requireBossFinal: false }
 }
 
 const TAIPEI_FMT = new Intl.DateTimeFormat("zh-TW", {
@@ -287,17 +358,21 @@ async function notifyStepApprover(params: {
   totalSteps: number
   event: "submitted" | "advanced"
   actedByEmpId?: string
+  /** M1：加班單超過月上限時附在內文最後的提醒（見 beyondCapNote）。 */
+  extraNote?: string | null
+  beyondCap?: BeyondCapResult | null
 }): Promise<number> {
   const { tenantId, lr, ctx, approverEmpIds, step, totalSteps, event } = params
   const reason = lr.reason ? `，事由：${lr.reason}` : ""
   const stepText = totalSteps > 1 ? `（第 ${step} 關，共 ${totalSteps} 關）` : ""
   const hrText = params.stepKind === "hr" ? "本關為 HR 覆核，任一位 HR 管理員簽核即可。" : ""
+  const extra = params.extraNote ? params.extraNote : ""
   return enqueue({
     tenantId,
     employeeIds: approverEmpIds,
     type: "approval",
     title: `待簽核：${ctx.applicantName} 的${kindLabel(lr.kind)}申請`,
-    body: `${applicantLabel(ctx)} 申請${subjectLabel(lr, ctx)}，期間 ${periodText(lr.start_at, lr.end_at, lr.hours)}${reason}。請至「待我簽核」處理${stepText}。${hrText}`,
+    body: `${applicantLabel(ctx)} 申請${subjectLabel(lr, ctx)}，期間 ${periodText(lr.start_at, lr.end_at, lr.hours)}${reason}。請至「待我簽核」處理${stepText}。${hrText}${extra}`,
     payload: basePayload(lr, {
       event,
       currentStep: step,
@@ -306,8 +381,17 @@ async function notifyStepApprover(params: {
       candidateEmpIds: approverEmpIds,
       stepKind: params.stepKind ?? null,
       actedByEmpId: params.actedByEmpId ?? null,
+      ...(params.beyondCap ? { beyondCap: params.beyondCap.beyondCap, beyondCapDetail: params.beyondCap } : {}),
     }),
   })
+}
+
+/** M1：加班單超過月上限時的通知附註（超額部分走 overtime_settlements「另行給付」）。 */
+export function beyondCapNote(result: BeyondCapResult | null | undefined): string | null {
+  if (!result || !result.beyondCap) return null
+  const capHours = Math.round((result.capMinutes / 60) * 10) / 10
+  const beyondHours = Math.round((result.beyondCapMinutes / 60) * 10) / 10
+  return `本月累計將超過上限（${capHours} 小時），超過的 ${beyondHours} 小時將另行給付。`
 }
 
 /** 通知申請人：最終核准或駁回。 */
@@ -416,7 +500,9 @@ requestsRouter.post(
 
       // Resolve the approver chain for this kind (services/approval-chain.ts):
       // 固定名單／直屬主管／主管逐級＋HR 覆核 → 老闆（tenant features）→ 第一位 hr_admin → 409。
-      const chain = await resolveApproverChain(tenantId, kind, filedForId)
+      // W2：跨縣市／海外出差改查 'business_trip_intercity' flow，且老闆必須是最後一關。
+      const { flowKind, requireBossFinal } = flowRouteFor(kind, kind === "business_trip" ? (tripScope ?? null) : null)
+      const chain = await resolveApproverChain(tenantId, kind, filedForId, { flowKind, requireBossFinal })
       if (!chain.ok) {
         // No approver can be determined — refuse rather than create a request
         // nobody can ever action.
@@ -427,6 +513,27 @@ requestsRouter.post(
       // candidate_emp_ids／step_kind 是 migration 0049 的欄位：未套用時只寫
       // approver_emp_id（＝第一候選），201 回應仍以記憶體中的鏈回完整候選。
       const multi = await approvalStepsHaveCandidates()
+
+      // M1 月加班上限：kind='ot' 才算。只**標記**不擋單——出勤紀錄照實、超額部分
+      // 由月表核准時歸入 overtime_settlements「另行給付」（WP1）。算不出來（規則讀
+      // 失敗、時區查不到…）只記 log，不讓一張加班單送不出去。
+      let beyondCap: BeyondCapResult | null = null
+      if (kind === "ot") {
+        try {
+          const tz = await getTenantTimezone(tenantId)
+          const period = localDateKey(startAt, tz).slice(0, 7)
+          const { rules } = await loadRuleConfigFor(tenantId, period)
+          beyondCap = beyondCapCheck({
+            approvedBeforeMinutes: await approvedOtMinutesInPeriod(tenantId, filedForId, period),
+            requestedMinutes: requestMinutesOf({ hours: hours ?? null, start_at: startAt, end_at: endAt }),
+            capMinutes: capMinutesFor(rules),
+          })
+        } catch (capErr) {
+          logger.warn({ err: capErr, tenantId, employeeId: filedForId }, "POST /requests: beyond-cap check failed")
+          beyondCap = null
+        }
+      }
+      const hasBeyondCapCols = await leaveRequestsHaveBeyondCap()
 
       // Create the request (pending, step 1).
       const { data: created, error: reqErr } = await supabaseAdmin
@@ -454,6 +561,9 @@ requestsRouter.post(
           segments: segments ?? null,
           status: "pending",
           current_step: 1,
+          ...(hasBeyondCapCols && beyondCap
+            ? { beyond_cap: beyondCap.beyondCap, beyond_cap_detail: beyondCap }
+            : {}),
         })
         .select("id")
         .single()
@@ -515,6 +625,8 @@ requestsRouter.post(
           totalSteps: chainSteps.length,
           event: "submitted",
           actedByEmpId: self.id,
+          extraNote: beyondCapNote(beyondCap),
+          beyondCap,
         })
       } catch (notifyErr) {
         logger.warn({ err: notifyErr, requestId }, "POST /requests: submit notification failed")
@@ -530,6 +642,8 @@ requestsRouter.post(
         requestId,
         approvalSource: chain.source,
         notified,
+        // M1：非加班單一律 null；加班單回整份判定（前端可據此即時提示「將另行給付」）。
+        beyondCap,
         steps: steps.map((s) => {
           const chainStep = chainSteps[(s.step_order as number) - 1]
           const candidateEmpIds = chainStep?.candidateEmpIds ?? [s.approver_emp_id as string]
@@ -591,7 +705,7 @@ requestsRouter.get(
         // 任何角色都釘在自己；沒有員工列 → 不可能的 id → 空陣列（不外洩）。
         let query = supabaseAdmin
           .from("leave_requests")
-          .select(REQUEST_COLS)
+          .select(await requestCols())
           .eq("tenant_id", tenantId)
           .is("deleted_at", null)
           .eq("employee_id", self?.id ?? NIL_UUID)
@@ -604,14 +718,14 @@ requestsRouter.get(
           next(new Error(`GET /requests (mine): ${error.message}`))
           return
         }
-        res.status(200).json({ requests: await enrichRequestRows(tenantId, data ?? []) })
+        res.status(200).json({ requests: await enrichRequestRows(tenantId, asRequestRows(data)) })
         return
       }
 
       if (isHr) {
         let query = supabaseAdmin
           .from("leave_requests")
-          .select(REQUEST_COLS)
+          .select(await requestCols())
           .eq("tenant_id", tenantId)
           .is("deleted_at", null)
         if (status) query = query.eq("status", status)
@@ -624,7 +738,7 @@ requestsRouter.get(
           next(new Error(`GET /requests (hr): ${error.message}`))
           return
         }
-        res.status(200).json({ requests: await enrichRequestRows(tenantId, data ?? []) })
+        res.status(200).json({ requests: await enrichRequestRows(tenantId, asRequestRows(data)) })
         return
       }
 
@@ -653,7 +767,7 @@ requestsRouter.get(
 
       let query = supabaseAdmin
         .from("leave_requests")
-        .select(REQUEST_COLS)
+        .select(await requestCols())
         .eq("tenant_id", tenantId)
         .is("deleted_at", null)
         .or(orParts.join(","))
@@ -668,11 +782,11 @@ requestsRouter.get(
       }
 
       // Keep: my own requests, OR a pending request where my step == current_step.
-      const visible = (data ?? []).filter((r) => {
+      const visible = asRequestRows(data).filter((r) => {
         if (r.employee_id === selfId) return true
         if (r.status !== "pending") return false
         const myStepOrders = stepByRequest.get(r.id)
-        return !!myStepOrders && myStepOrders.has(r.current_step as number)
+        return !!myStepOrders && myStepOrders.has(r.current_step)
       })
 
       res.status(200).json({ requests: await enrichRequestRows(tenantId, visible) })
@@ -726,7 +840,7 @@ requestsRouter.get(
 
       const { data: rows, error: rowErr } = await supabaseAdmin
         .from("leave_requests")
-        .select(REQUEST_COLS)
+        .select(await requestCols())
         .eq("tenant_id", tenantId)
         .is("deleted_at", null)
         .eq("status", "pending")
@@ -736,7 +850,7 @@ requestsRouter.get(
         next(new Error(`GET /requests/pending-approvals (requests): ${rowErr.message}`))
         return
       }
-      const mine = (rows ?? []).filter((r) => stepByRequest.get(r.id as string)?.has(r.current_step as number))
+      const mine = asRequestRows(rows).filter((r) => stepByRequest.get(r.id)?.has(r.current_step))
       if (mine.length === 0) {
         res.status(200).json({ requests: [] })
         return
@@ -843,6 +957,14 @@ async function markStep(
   return retry.error ? retry.error.message : null
 }
 
+/* ── W10：申請單狀態異動的**應用層**稽核（「為什麼」）─────────────────
+ * DB trigger（sql/0019 audit_all）已經會記下 leave_requests 整列前後值與操作者，
+ * 但記不到簽核意見／駁回理由／是第幾關／是不是 HR 代簽、撤回與註銷的理由——那些
+ * 只存在於這些端點的參數裡。以下六個出口（核准推進／最終核准／駁回／撤回／
+ * 變更簽核人／註銷）各寫一列 `writeAuditLog`；它永不 throw，所以一律擺在業務
+ * 寫入成功之後、回應之前。查核時以 (table_name, record_id) 與 trigger 的列拼起來看。
+ */
+
 async function decideOneRequest(params: {
   action: "approve" | "reject"
   tenantId: string
@@ -929,6 +1051,26 @@ async function decideOneRequest(params: {
       .eq("id", requestId)
     if (upReqErr) return { ok: false, id: requestId, error: upReqErr.message }
 
+    await writeAuditLog({
+      tenantId,
+      tableName: "leave_requests",
+      recordId: requestId,
+      action: "UPDATE",
+      actorEmpId: actor.id,
+      context: `駁回申請單（第 ${currentStep} 關${takeOver ? "，候選代簽" : ""}${!isCandidate && canOverride ? "，HR 代簽" : ""}）`,
+      oldRow: { status: "pending", current_step: currentStep },
+      newRow: {
+        status: "rejected",
+        current_step: currentStep,
+        decision: "rejected",
+        comment: comment ?? null,
+        step_kind: step.step_kind ?? null,
+        acted_by: actor.id,
+        takeOver,
+        hrOverride: !isCandidate && canOverride,
+      },
+    })
+
     const notified = await notifyApplicant({ tenantId, lr: notice, ctx, event: "rejected", step: currentStep, actedByEmpId: actor.id, comment })
     return { ok: true, id: requestId, status: "rejected", currentStep, notified }
   }
@@ -956,6 +1098,26 @@ async function decideOneRequest(params: {
       .eq("id", requestId)
     if (upReqErr) return { ok: false, id: requestId, error: upReqErr.message }
 
+    await writeAuditLog({
+      tenantId,
+      tableName: "leave_requests",
+      recordId: requestId,
+      action: "UPDATE",
+      actorEmpId: actor.id,
+      context: `核准並推進到第 ${nextStep} 關（共 ${currentStep + laterSteps.length} 關${takeOver ? "，候選代簽" : ""}${!isCandidate && canOverride ? "，HR 代簽" : ""}）`,
+      oldRow: { status: "pending", current_step: currentStep },
+      newRow: {
+        status: "pending",
+        current_step: nextStep,
+        decision: "approved",
+        comment: comment ?? null,
+        step_kind: step.step_kind ?? null,
+        acted_by: actor.id,
+        takeOver,
+        hrOverride: !isCandidate && canOverride,
+      },
+    })
+
     const nextApprover = laterSteps.find((s) => s.step_order === nextStep)
     const totalSteps = currentStep + laterSteps.length
     const notified = nextApprover
@@ -980,6 +1142,26 @@ async function decideOneRequest(params: {
     .eq("tenant_id", tenantId)
     .eq("id", requestId)
   if (upReqErr) return { ok: false, id: requestId, error: upReqErr.message }
+
+  await writeAuditLog({
+    tenantId,
+    tableName: "leave_requests",
+    recordId: requestId,
+    action: "UPDATE",
+    actorEmpId: actor.id,
+    context: `最終核准（第 ${currentStep} 關${takeOver ? "，候選代簽" : ""}${!isCandidate && canOverride ? "，HR 代簽" : ""}）`,
+    oldRow: { status: "pending", current_step: currentStep },
+    newRow: {
+      status: "approved",
+      current_step: currentStep,
+      decision: "approved",
+      comment: comment ?? null,
+      step_kind: step.step_kind ?? null,
+      acted_by: actor.id,
+      takeOver,
+      hrOverride: !isCandidate && canOverride,
+    },
+  })
 
   // Final approval side-effects: debit leave balance / credit comp-time.
   // Best-effort — applyApprovalEffects swallows its own errors so a ledger
@@ -1102,7 +1284,7 @@ requestsRouter.post(
       res.status(401).json({ error: "unauthorized" })
       return
     }
-    const requestId = req.params.id
+    const requestId = req.params.id as string
     const parsed = changeApproverSchema.safeParse(req.body)
     if (!parsed.success) {
       res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
@@ -1184,6 +1366,30 @@ requestsRouter.post(
         return
       }
 
+      await writeAuditLog({
+        tenantId,
+        tableName: "leave_requests",
+        recordId: requestId,
+        action: "UPDATE",
+        actorEmpId: self?.id ?? null,
+        context: `HR 變更第 ${lr.current_step} 關簽核人`,
+        oldRow: {
+          status: "pending",
+          current_step: lr.current_step,
+          approver_emp_id: step.approver_emp_id,
+          candidate_emp_ids: previousCandidateEmpIds,
+        },
+        newRow: {
+          status: "pending",
+          current_step: lr.current_step,
+          decision: "change_approver",
+          approver_emp_id: parsed.data.approverEmpId,
+          candidate_emp_ids: [parsed.data.approverEmpId],
+          comment: parsed.data.comment ?? null,
+          acted_by: self?.id ?? null,
+        },
+      })
+
       await supabaseAdmin.from("notifications").insert({
         tenant_id: tenantId,
         employee_id: parsed.data.approverEmpId,
@@ -1232,7 +1438,7 @@ requestsRouter.post(
       res.status(401).json({ error: "unauthorized" })
       return
     }
-    const requestId = req.params.id
+    const requestId = req.params.id as string
 
     try {
       const self = await resolveSelf(tenantId, userId)
@@ -1330,7 +1536,13 @@ requestsRouter.post(
       res.status(401).json({ error: "unauthorized" })
       return
     }
-    const requestId = req.params.id
+    const requestId = req.params.id as string
+    // 撤回理由選填：空 body／沒帶 reason 都合法（舊前端不帶 body）。
+    const parsed = cancelSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
 
     try {
       const self = await resolveSelf(tenantId, userId)
@@ -1341,7 +1553,7 @@ requestsRouter.post(
 
       const { data: lr, error: lrErr } = await supabaseAdmin
         .from("leave_requests")
-        .select("id, employee_id, status")
+        .select("id, employee_id, status, current_step, kind")
         .eq("tenant_id", tenantId)
         .is("deleted_at", null)
         .eq("id", requestId)
@@ -1372,6 +1584,24 @@ requestsRouter.post(
         next(new Error(`POST /requests/${requestId}/cancel (update): ${upErr.message}`))
         return
       }
+
+      await writeAuditLog({
+        tenantId,
+        tableName: "leave_requests",
+        recordId: requestId,
+        action: "UPDATE",
+        actorEmpId: self.id,
+        context: "申請人撤回",
+        oldRow: { status: "pending", current_step: lr.current_step ?? null },
+        newRow: {
+          status: "cancelled",
+          current_step: lr.current_step ?? null,
+          decision: "cancelled",
+          comment: parsed.data.reason ?? null,
+          acted_by: self.id,
+        },
+      })
+
       res.status(200).json({ status: "cancelled" })
     } catch (err) {
       next(err)
@@ -1488,7 +1718,7 @@ requestsRouter.delete(
       res.status(401).json({ error: "unauthorized" })
       return
     }
-    const requestId = req.params.id
+    const requestId = req.params.id as string
 
     const parsed = deleteRequestSchema.safeParse(req.body)
     if (!parsed.success) {
@@ -1505,7 +1735,7 @@ requestsRouter.delete(
 
       const { data: lr, error: lrErr } = await supabaseAdmin
         .from("leave_requests")
-        .select("id, status, deleted_at")
+        .select("id, status, deleted_at, current_step, kind")
         .eq("tenant_id", tenantId)
         .eq("id", requestId)
         .maybeSingle()
@@ -1539,6 +1769,23 @@ requestsRouter.delete(
         next(new Error(`DELETE /requests/${requestId}: ${delErr.message}`))
         return
       }
+
+      await writeAuditLog({
+        tenantId,
+        tableName: "leave_requests",
+        recordId: requestId,
+        action: "UPDATE",
+        actorEmpId: self?.id ?? null,
+        context: "HR 註銷申請單（軟刪除）",
+        oldRow: { status: lr.status, current_step: lr.current_step ?? null, deleted_at: null },
+        newRow: {
+          status: lr.status,
+          current_step: lr.current_step ?? null,
+          decision: "deleted",
+          comment: parsed.data.reason,
+          acted_by: self?.id ?? null,
+        },
+      })
 
       res.status(200).json({ id: requestId })
     } catch (err) {

@@ -11,7 +11,15 @@ import { Button, Card, ConfirmDialog, EmptyState, Icon, InlineError, Pill, Segme
 import { cancelRequest, uploadAttachment, type LeaveRequest } from "@/lib/ess-api";
 import { invalidateEssState } from "@/lib/ess-state";
 import type { ShiftLike } from "@/lib/leave-hours";
-import { STATUS_LABEL, STATUS_TONE, approvalLine, describeRequest, needsAttachment, requestTitle } from "@/lib/request-forms";
+import {
+  BEYOND_CAP_LABEL,
+  STATUS_LABEL,
+  STATUS_TONE,
+  approvalLine,
+  describeRequest,
+  needsAttachment,
+  requestTitle,
+} from "@/lib/request-forms";
 import { MAX_FILE_BYTES, describeError } from "./form-shared";
 
 type Filter = "all" | "pending" | "approved" | "rejected";
@@ -212,6 +220,12 @@ function RequestRow({
         <Pill tone={STATUS_TONE[r.status] ?? "gray"}>{STATUS_LABEL[r.status] ?? r.status}</Pill>
       </div>
       <p className="mt-0.5 text-sm text-gray-600">{describeRequest(r, { shift: defaultShift })}</p>
+      {/* M1：送單時就標記的月加班上限旗標（只標不擋；超額部分由公司另行給付） */}
+      {r.beyond_cap === true && (
+        <p className="mt-1">
+          <Pill tone="amber">{BEYOND_CAP_LABEL}</Pill>
+        </p>
+      )}
       {line && <p className={`mt-0.5 text-sm ${r.status === "rejected" ? "text-red-600" : "text-gray-500"}`}>{line}</p>}
       {showFooter && (
         <div className="mt-2 flex flex-wrap items-center gap-2">

@@ -3,7 +3,7 @@
 /**
  * 請假／申請 `/ess/requests?kind=…&date=…&id=…`
  *
- * 由上而下：①種類切換（請假｜補卡｜加班｜公出｜預支）②該種類的表單卡（只顯示該種類欄位；
+ * 由上而下：①種類切換（請假｜補卡｜加班｜在家｜公出｜預支）②該種類的表單卡（只顯示該種類欄位；
  * HR 另有收合的「代同仁申請」）③送出後成功畫面取代表單（等待誰簽核＋摘要＋再填一張／查看我的申請）
  * ④「我的申請」清單（`GET /requests?scope=mine`）。
  *
@@ -23,6 +23,7 @@ import {
   getShifts,
   uploadAttachment,
   type CreateRequestBody,
+  type CreateRequestResult,
   type LeaveBalance,
   type LeaveRequest,
   type LeaveType,
@@ -41,6 +42,7 @@ import { OvertimeForm } from "./_components/OvertimeForm";
 import { PettyCashForm } from "./_components/PettyCashForm";
 import { SubmitSuccess } from "./_components/SubmitSuccess";
 import { TripForm } from "./_components/TripForm";
+import { WfhForm } from "./_components/WfhForm";
 import { describeError, useProxy } from "./_components/form-shared";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -49,6 +51,26 @@ interface SuccessInfo {
   approverName: string | null;
   summary: string;
   uploadWarning: string | null;
+}
+
+type CreatedStep = NonNullable<CreateRequestResult["steps"]>[number];
+
+/** 一關的顯示名：多位候選用「／」串；查不到姓名就略過該關。 */
+function stepName(step: CreatedStep): string {
+  const names = (step.candidateNames ?? []).map((n) => n.trim()).filter(Boolean);
+  if (names.length > 0) return names.join("／");
+  return (step.approverName ?? "").trim();
+}
+
+/**
+ * 兩關以上時的簽核鏈摘要：「簽核關卡：王小明 → 陳老闆（共 2 關）」。
+ * 一關（絕大多數的單）回空字串，成功畫面維持原樣。
+ */
+function chainSummary(steps: readonly CreatedStep[]): string {
+  if (steps.length < 2) return "";
+  const names = steps.map(stepName).filter(Boolean);
+  if (names.length === 0) return `簽核關卡：共 ${steps.length} 關`;
+  return `簽核關卡：${names.join(" → ")}（共 ${steps.length} 關）`;
 }
 
 /** 租戶的預設班別＝ created_at 最早的 shift；沒有 shift → DEFAULT_SHIFT。 */
@@ -158,7 +180,13 @@ function RequestsView() {
         const steps = [...(created.steps ?? [])].sort((a, b) => a.stepOrder - b.stepOrder);
         // 第一關可能有多位候選（任一人簽即過）：有 candidateNames 就用「／」串，舊 API 退回 approverName
         const firstNames = (steps[0]?.candidateNames ?? []).map((n) => n.trim()).filter(Boolean);
-        setSuccess({ approverName: firstNames.length > 0 ? firstNames.join("／") : (steps[0]?.approverName ?? null), summary, uploadWarning });
+        setSuccess({
+          approverName: firstNames.length > 0 ? firstNames.join("／") : (steps[0]?.approverName ?? null),
+          // 兩關以上（例如跨縣市出差＝主管 → 老闆）把整條鏈附在摘要後，
+          // 讓申請人一眼看到「還要誰簽」，不必等列表載入。
+          summary: [summary, chainSummary(steps)].filter(Boolean).join("｜"),
+          uploadWarning,
+        });
         if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
         void loadRequests();
       } catch (err) {
@@ -194,6 +222,8 @@ function RequestsView() {
         return <TripForm key={`trip-${formKey}`} {...common} advanceThreshold={advanceThreshold} />;
       case "petty_cash":
         return <PettyCashForm key={`pc-${formKey}`} {...common} advanceThreshold={advanceThreshold} />;
+      case "wfh":
+        return <WfhForm key={`wfh-${formKey}`} {...common} />;
       default:
         return null;
     }

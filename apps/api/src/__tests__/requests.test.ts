@@ -5,6 +5,7 @@ import request from "supertest"
 // module is imported, so the eagerly-constructed clients below have real creds.
 import { supabaseAdmin } from "../lib/supabase"
 import { provisionTenant } from "../services/tenants"
+import { purgeTestTenant } from "./helpers/purge"
 import { app } from "../app"
 
 const SUPABASE_URL = process.env.SUPABASE_URL ?? ""
@@ -132,47 +133,19 @@ beforeAll(async () => {
 }, 60_000)
 
 afterAll(async () => {
-  // comp_time_ledger / leave_balances → approval_steps → leave_requests →
-  // approval_flows → leave_types → employees → tenants → auth users (FK order).
-  // The ledger rows are written by approval side-effects (a final approval of a
-  // leave/OT request) and reference leave_requests/leave_types/employees, so
-  // they must be cleared before those parents.
-  // 送單／簽核會寫 notifications（FK → employees），要先於 employees 清掉。
+  // 改用 sql/0037 的 purge_test_tenant（helpers/purge）：手寫逐表 delete 只清
+  // 這個檔案「當初知道的」十張表，2026-09-23 起本檔還會建部門與寫稽核列，漏一張
+  // 就 FK 擋住 → 租戶刪不掉、正式庫累積 test 租戶（見 helpers/purge.ts 檔頭）。
+  // auth.users 不在 purge 範圍，照舊自己刪。
   for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("notifications").delete().eq("tenant_id", tid)
-  }
-  for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("comp_time_ledger").delete().eq("tenant_id", tid)
-  }
-  for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("leave_balances").delete().eq("tenant_id", tid)
-  }
-  for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("request_attachments").delete().eq("tenant_id", tid)
-  }
-  for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("approval_steps").delete().eq("tenant_id", tid)
-  }
-  for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("leave_requests").delete().eq("tenant_id", tid)
-  }
-  for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("approval_flows").delete().eq("tenant_id", tid)
-  }
-  for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("leave_types").delete().eq("tenant_id", tid)
-  }
-  for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("punch_records").delete().eq("tenant_id", tid)
-  }
-  for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
-  }
-  for (const tid of createdTenantIds) {
-    await supabaseAdmin.from("tenants").delete().eq("id", tid)
+    try {
+      await purgeTestTenant(tid)
+    } catch (err) {
+      console.warn(`[requests] purge ${tid} 失敗：${err instanceof Error ? err.message : String(err)}`)
+    }
   }
   for (const uid of createdUserIds) {
-    await supabaseAdmin.auth.admin.deleteUser(uid)
+    await supabaseAdmin.auth.admin.deleteUser(uid).catch(() => undefined)
   }
 }, 60_000)
 
@@ -1348,5 +1321,355 @@ describe("WP2 notifications — scope=mine／unread=1／unread-count／read-all"
     expect(bad.status).toBe(400)
     const anon = await request(app).get("/notifications/unread-count")
     expect(anon.status).toBe(401)
+  })
+})
+
+/* ────────────────────────────────────────────────────────────────────────
+ * WP2（2026-09-23）：在家工作、跨縣市出差走老闆關、加班單月上限標記。
+ *
+ * 這一段自己建「出差部」與兩位同仁（部門主管＝mgr、老闆＝features.approval.
+ * fallbackApproverEmpId），不動前面案例用到的 emp1／emp2，也不留固定名單
+ * （business_trip／business_trip_intercity／wfh 的 flow 一律清空，走預設鏈）。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/** leave_requests.beyond_cap（migration 0050）是否已套到正式庫。 */
+async function beyondCapMigrated(): Promise<boolean> {
+  const probe = await supabaseAdmin.from("leave_requests").select("beyond_cap, beyond_cap_detail").limit(1)
+  return !probe.error
+}
+const beyondCapReady = await beyondCapMigrated()
+
+describe("WP2 wfh／跨縣市出差／市內公出 — 簽核鏈", () => {
+  let bossId: string
+  let tripEmpId: string
+  let tripToken: string
+
+  beforeAll(async () => {
+    const boss = await createEmployee(
+      A.adminToken,
+      `req-${stamp}-a-boss@example.com`,
+      `Pw-${stamp}-boss-Ee5!`,
+      "Bella Boss",
+      "employee",
+    )
+    bossId = boss.employeeId
+
+    const dept = await request(app)
+      .post("/departments")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ name: `出差部 ${stamp}`, managerEmpId: mgrId })
+    expect(dept.status).toBe(201)
+
+    const emp = await createEmployee(
+      A.adminToken,
+      `req-${stamp}-a-trip@example.com`,
+      `Pw-${stamp}-trip-Ff6!`,
+      "Tina Trip",
+      "employee",
+    )
+    tripEmpId = emp.employeeId
+    tripToken = emp.token
+    const moved = await request(app)
+      .patch(`/employees/${tripEmpId}`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ deptId: dept.body.id })
+    expect(moved.status).toBe(200)
+
+    // 老闆＝備援簽核人（跨縣市出差的最後一關）。
+    const settings = await request(app)
+      .put("/api/tenant/settings")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ features: { approval: { fallbackApproverEmpId: bossId } } })
+    expect(settings.status).toBe(200)
+
+    // 三種 kind 都不設固定名單 → 走主管／老闆預設鏈。
+    for (const kind of ["business_trip", "business_trip_intercity", "wfh"]) {
+      const res = await request(app)
+        .put(`/approval-flows/${kind}`)
+        .set("Authorization", `Bearer ${A.adminToken}`)
+        .send({ approverEmpIds: [], mode: "manager" })
+      expect(res.status).toBe(200)
+    }
+  }, 120_000)
+
+  it("kind=wfh 走直屬主管單關；主管核准 → approved，且沒有 ledger 副作用", async () => {
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${tripToken}`)
+      .send({
+        kind: "wfh",
+        startAt: "2027-10-05T00:00:00.000Z",
+        endAt: "2027-10-06T15:59:00.000Z",
+        hours: 8,
+        reason: "在家趕結案",
+      })
+    expect(filed.status).toBe(201)
+    expect(filed.body.approvalSource).toBe("manager")
+    expect(filed.body.beyondCap).toBeNull()
+    const steps = filed.body.steps as Array<{ approverEmpId: string }>
+    expect(steps.length).toBe(1)
+    expect(steps[0].approverEmpId).toBe(mgrId)
+
+    const reqId = filed.body.requestId as string
+    const approved = await request(app)
+      .post(`/requests/${reqId}/approve`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({ comment: "同意" })
+    expect(approved.status).toBe(200)
+    expect(approved.body.status).toBe("approved")
+
+    // applyApprovalEffects 只處理 leave／ot：wfh 不應開補休、不應扣假、不應開預支。
+    const { count: comp } = await supabaseAdmin
+      .from("comp_time_ledger")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", A.tenantId)
+      .eq("employee_id", tripEmpId)
+    expect(comp ?? 0).toBe(0)
+    const { count: balances } = await supabaseAdmin
+      .from("leave_balances")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", A.tenantId)
+      .eq("employee_id", tripEmpId)
+    expect(balances ?? 0).toBe(0)
+    const { count: advances } = await supabaseAdmin
+      .from("advances")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", A.tenantId)
+      .eq("employee_id", tripEmpId)
+    expect(advances ?? 0).toBe(0)
+  })
+
+  it("wfh 列表帶得出來（kind=wfh 過濾、GET 回同一張單）", async () => {
+    const res = await request(app).get("/requests?scope=mine&kind=wfh").set("Authorization", `Bearer ${tripToken}`)
+    expect(res.status).toBe(200)
+    const rows = res.body.requests as Array<{ kind: string; employee_id: string }>
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows.every((r) => r.kind === "wfh" && r.employee_id === tripEmpId)).toBe(true)
+  })
+
+  it("跨縣市出差（沒有固定名單）→ 兩關：主管 → 老闆；老闆簽完才 approved", async () => {
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${tripToken}`)
+      .send({
+        kind: "business_trip",
+        tripType: "business_trip",
+        tripScope: "domestic_intercity",
+        location: "台中客戶端",
+        startAt: "2027-10-11T00:00:00.000Z",
+        endAt: "2027-10-12T15:59:00.000Z",
+      })
+    expect(filed.status).toBe(201)
+    expect(filed.body.approvalSource).toBe("boss_final")
+    const steps = filed.body.steps as Array<{ stepOrder: number; approverEmpId: string; kind: string | null }>
+    expect(steps.map((s) => s.approverEmpId)).toEqual([mgrId, bossId])
+    expect(steps.map((s) => s.kind)).toEqual(["manager", "fallback"])
+
+    const reqId = filed.body.requestId as string
+    const first = await request(app)
+      .post(`/requests/${reqId}/approve`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({ comment: "主管同意" })
+    expect(first.status).toBe(200)
+    expect(first.body.status).toBe("pending")
+    expect(first.body.currentStep).toBe(2)
+
+    // 老闆尚未簽 → 還不是 approved。
+    const mid = await request(app).get("/requests?scope=mine").set("Authorization", `Bearer ${tripToken}`)
+    const midRow = (mid.body.requests as Array<Record<string, unknown>>).find((r) => r.id === reqId)
+    expect(midRow?.status).toBe("pending")
+    expect(midRow?.total_steps).toBe(2)
+    expect(midRow?.current_approver_emp_id).toBe(bossId)
+  })
+
+  it("市內公出 → 只有主管一關（不經老闆）", async () => {
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${tripToken}`)
+      .send({
+        kind: "business_trip",
+        tripType: "outing",
+        tripScope: "local",
+        location: "市政府",
+        startAt: "2027-10-13T01:00:00.000Z",
+        endAt: "2027-10-13T05:00:00.000Z",
+        hours: 4,
+      })
+    expect(filed.status).toBe(201)
+    expect(filed.body.approvalSource).toBe("manager")
+    const steps = filed.body.steps as Array<{ approverEmpId: string }>
+    expect(steps.length).toBe(1)
+    expect(steps[0].approverEmpId).toBe(mgrId)
+  })
+
+  it("海外出差也走老闆關（tripScope 只要不是 local）", async () => {
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${tripToken}`)
+      .send({
+        kind: "business_trip",
+        tripType: "business_trip",
+        tripScope: "overseas",
+        location: "東京",
+        startAt: "2027-10-20T00:00:00.000Z",
+        endAt: "2027-10-22T15:59:00.000Z",
+      })
+    expect(filed.status).toBe(201)
+    expect(filed.body.approvalSource).toBe("boss_final")
+    expect((filed.body.steps as Array<{ approverEmpId: string }>).map((s) => s.approverEmpId)).toEqual([mgrId, bossId])
+  })
+
+  it("跨縣市出差設了固定名單 → 名單優先（HR 明訂勝過預設老闆關）", async () => {
+    const set = await request(app)
+      .put("/approval-flows/business_trip_intercity")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [A.hrEmpId], mode: "list" })
+    expect(set.status).toBe(200)
+
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${tripToken}`)
+      .send({
+        kind: "business_trip",
+        tripType: "business_trip",
+        tripScope: "domestic_intercity",
+        location: "高雄",
+        startAt: "2027-10-25T00:00:00.000Z",
+        endAt: "2027-10-25T15:59:00.000Z",
+      })
+    expect(filed.status).toBe(201)
+    expect(filed.body.approvalSource).toBe("list")
+    expect((filed.body.steps as Array<{ approverEmpId: string }>).map((s) => s.approverEmpId)).toEqual([A.hrEmpId])
+
+    // 還原，不影響後續案例
+    await request(app)
+      .put("/approval-flows/business_trip_intercity")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [], mode: "manager" })
+  })
+})
+
+describe.skipIf(!beyondCapReady)("WP2 加班單月上限標記（M1；需 migration 0050）", () => {
+  let capEmpId: string
+  let capToken: string
+
+  beforeAll(async () => {
+    const emp = await createEmployee(
+      A.adminToken,
+      `req-${stamp}-a-cap@example.com`,
+      `Pw-${stamp}-cap-Gg7!`,
+      "Cathy Cap",
+      "employee",
+    )
+    capEmpId = emp.employeeId
+    capToken = emp.token
+    await request(app)
+      .put("/approval-flows/ot")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId], mode: "list" })
+  }, 60_000)
+
+  it("第 1 張 38 小時（未過 40 上限）→ beyond_cap=false", async () => {
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${capToken}`)
+      .send({
+        kind: "ot",
+        startAt: "2027-11-02T10:00:00.000Z",
+        endAt: "2027-11-03T00:00:00.000Z",
+        hours: 38,
+        payout: "pay",
+      })
+    expect(filed.status).toBe(201)
+    expect(filed.body.beyondCap).toMatchObject({
+      approvedBeforeMinutes: 0,
+      requestedMinutes: 38 * 60,
+      capMinutes: 40 * 60,
+      beyondCap: false,
+      beyondCapMinutes: 0,
+    })
+
+    const approved = await request(app)
+      .post(`/requests/${filed.body.requestId}/approve`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({})
+    expect(approved.status).toBe(200)
+    expect(approved.body.status).toBe("approved")
+  })
+
+  it("第 2 張 4 小時使本月累計 42 小時 → beyond_cap=true，明細記超額 120 分鐘", async () => {
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${capToken}`)
+      .send({
+        kind: "ot",
+        startAt: "2027-11-05T10:00:00.000Z",
+        endAt: "2027-11-05T14:00:00.000Z",
+        hours: 4,
+        payout: "pay",
+      })
+    expect(filed.status).toBe(201)
+    expect(filed.body.beyondCap).toMatchObject({
+      approvedBeforeMinutes: 38 * 60,
+      requestedMinutes: 4 * 60,
+      capMinutes: 40 * 60,
+      beyondCap: true,
+      beyondCapMinutes: 120,
+    })
+
+    const { data: row, error } = await supabaseAdmin
+      .from("leave_requests")
+      .select("beyond_cap, beyond_cap_detail")
+      .eq("id", filed.body.requestId)
+      .single()
+    expect(error).toBeNull()
+    expect(row?.beyond_cap).toBe(true)
+    expect((row?.beyond_cap_detail as Record<string, unknown>)?.beyondCapMinutes).toBe(120)
+
+    // 列表也帶得出來（ESS「我的申請」顯示「超過月上限，另行給付」）
+    const list = await request(app).get("/requests?scope=mine&kind=ot").set("Authorization", `Bearer ${capToken}`)
+    const listRow = (list.body.requests as Array<Record<string, unknown>>).find((r) => r.id === filed.body.requestId)
+    expect(listRow?.beyond_cap).toBe(true)
+    expect((listRow?.beyond_cap_detail as Record<string, unknown>)?.capMinutes).toBe(40 * 60)
+  })
+
+  it("下個月重新累計 → beyond_cap 回到 false", async () => {
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${capToken}`)
+      .send({
+        kind: "ot",
+        startAt: "2027-12-02T10:00:00.000Z",
+        endAt: "2027-12-02T14:00:00.000Z",
+        hours: 4,
+        payout: "pay",
+      })
+    expect(filed.status).toBe(201)
+    expect(filed.body.beyondCap).toMatchObject({ approvedBeforeMinutes: 0, beyondCap: false })
+  })
+
+  it("非加班單（請假）不做上限判定 → beyondCap 為 null、beyond_cap 欄位 false", async () => {
+    await request(app)
+      .put("/approval-flows/leave")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId], mode: "list" })
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${capToken}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        startAt: "2027-11-06T01:00:00.000Z",
+        endAt: "2027-11-06T09:00:00.000Z",
+        hours: 8,
+      })
+    expect(filed.status).toBe(201)
+    expect(filed.body.beyondCap).toBeNull()
+    const { data: row } = await supabaseAdmin
+      .from("leave_requests")
+      .select("beyond_cap")
+      .eq("id", filed.body.requestId)
+      .single()
+    expect(row?.beyond_cap).toBe(false)
   })
 })

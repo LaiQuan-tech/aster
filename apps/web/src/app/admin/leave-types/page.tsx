@@ -20,12 +20,31 @@ import {
   type Employee,
 } from "@/lib/admin-api";
 
-const KINDS: { kind: ApprovalFlowKind; label: string }[] = [
+/**
+ * 可設定簽核流程的申請種類。
+ *
+ * `business_trip_intercity`（跨縣市出差）不是新的表單種類，而是**同一張出差單**
+ * 在 `tripScope ≠ 市內` 時改查的流程：沒有設定就走「主管逐關 → 老闆」的預設鏈
+ * （老闆＝下方「找不到主管時的簽核者」）。`disbursement` 是放款單（不是員工表單，
+ * 但簽核鏈同一套設定，放在這裡一起維護）。
+ */
+const KINDS: { kind: ApprovalFlowKind; label: string; hint?: string }[] = [
   { kind: "leave", label: "請假" },
   { kind: "ot", label: "加班" },
   { kind: "fix_punch", label: "補卡" },
-  { kind: "business_trip", label: "公出/出差" },
+  { kind: "wfh", label: "在家工作" },
+  { kind: "business_trip", label: "公出/出差（市內）" },
+  {
+    kind: "business_trip_intercity",
+    label: "跨縣市出差",
+    hint: "出差範圍選「跨縣市」或「海外」時走這條；不設定＝主管逐關簽完後由老闆最後簽核。",
+  },
   { kind: "petty_cash", label: "零用金預支" },
+  {
+    kind: "disbursement",
+    label: "放款單",
+    hint: "對廠商的印刷費／快遞費等放款；不設定＝建單人主管逐關 → 會計 → 老闆。",
+  },
 ];
 
 /** 沒有 flow 列時系統的實際行為就是直屬主管鏈，畫面預設也顯示「直屬主管」。 */
@@ -427,14 +446,17 @@ export default function LeaveTypesPage() {
         </p>
         {flowMsg && <p className="mb-3 text-sm text-green-600">{flowMsg}</p>}
         <div className="space-y-6">
-          {KINDS.map(({ kind, label }) => {
+          {KINDS.map(({ kind, label, hint }) => {
             const selected = flowDraft[kind] ?? [];
             const flow = flows.find((f) => f.applies_to === kind);
             const mode = modeOf(kind);
             return (
               <div key={kind} className="rounded-lg border border-gray-100 p-4" data-flow-kind={kind}>
                 <div className="mb-3 flex items-center justify-between">
-                  <h3 className="font-medium text-gray-800">{label}</h3>
+                  <div>
+                    <h3 className="font-medium text-gray-800">{label}</h3>
+                    {hint && <p className="mt-0.5 text-xs text-gray-400">{hint}</p>}
+                  </div>
                   <button
                     onClick={() => saveFlow(kind)}
                     className="text-sm font-medium"
