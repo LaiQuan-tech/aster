@@ -32,12 +32,19 @@ describe("accountsFeatureOf（tenants.features.accounts 讀法）", () => {
 });
 
 describe("accountErrorMessage（API 錯誤碼 → 中文）", () => {
-  it("weak_password：指引到設定 → 進階功能 → 帳號安全，不再露出原始碼", () => {
+  it("weak_password：指引到設定 → 進階功能 → 帳號安全，不再露出原始碼；文案同時適用新增帳號與設定密碼", () => {
     const text = accountErrorMessage(new Error("[422] weak_password"));
-    expect(text).toContain("弱密碼防護");
+    expect(text).toContain("外洩名單");
     expect(text).toContain("設定 → 進階功能 → 帳號安全");
     expect(text).not.toContain("[422]");
     expect(text).not.toContain("weak_password");
+    // 後台「設定密碼」現在也走同一個開關，不能再叫 HR「改用暫時密碼」或說「僅適用於新增」
+    expect(text).not.toContain("僅適用於新增");
+    expect(text).not.toContain("暫時密碼");
+  });
+
+  it("set_password_failed（設定密碼時帳號已消失）→ 中文說明", () => {
+    expect(accountErrorMessage(new Error("[500] set_password_failed"))).toContain("找不到該員工的登入帳號");
   });
 
   it("email_exists／no_account 等既有碼照表翻譯", () => {

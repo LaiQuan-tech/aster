@@ -170,8 +170,9 @@ export function accountErrorMessage(err: unknown, fallback = "操作失敗"): st
     auth_user_missing: "員工綁定的登入帳號已不存在",
     invalid_current_password: "目前密碼不正確",
     same_password: "新密碼不可與目前密碼相同",
-    weak_password:
-      "這組密碼太常見或在外洩名單中，Supabase 弱密碼防護擋下。若要允許簡單的初始密碼，請到「設定 → 進階功能 → 帳號安全」開啟（僅適用於新增員工帳號；重設密碼請改用系統產生的暫時密碼）。",
+    // 新增帳號與後台「設定密碼」共用同一句（兩條路都吃 features.accounts.allowWeakInitialPassword）。
+    weak_password: "這組密碼太常見或在外洩名單中。若要允許簡單密碼，請到「設定 → 進階功能 → 帳號安全」開啟。",
+    set_password_failed: "設定密碼失敗：找不到該員工的登入帳號（可能剛被刪除），請重新整理後再試",
     email_exists: "此 Email 已有登入帳號",
     not_found: "找不到這位員工",
   };

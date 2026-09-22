@@ -7,7 +7,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
 import { belongsToTenant } from "../services/auth-invite.js"
 import { emailsByUserId } from "../services/employee-emails.js"
-import { createUserPasswordAttributes } from "../services/password-policy.js"
+import { allowWeakInitialPassword, createUserPasswordAttributes, setPasswordDirect } from "../services/password-policy.js"
 
 export const employeesRouter = Router()
 
@@ -36,7 +36,7 @@ const updateSchema = z
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 
 const resetPasswordSchema = z.object({
-  // 未帶則後端產生隨機密碼。
+  // 帶了＝管理員指定這組密碼（後台「設定密碼」）；未帶則後端產生隨機暫時密碼。長度下限與建帳號一致。
   password: z.string().min(8, "password must be at least 8 characters").optional(),
 })
 
@@ -231,9 +231,15 @@ employeesRouter.patch(
 )
 
 /**
- * POST /employees/:id/reset-password — HR 配發/重設某員工的登入密碼。若未帶
- * password 則後端產生一組隨機密碼並回傳一次（供 HR 轉交員工）。更新的是該
- * employee 對應的 Supabase auth user；查無 user_id（尚未綁定帳號）回 409。
+ * POST /employees/:id/reset-password — HR 配發/重設某員工的登入密碼。
+ *   - 帶 password（後台「設定密碼」）：租戶開著 features.accounts.allowWeakInitialPassword
+ *     → 繞過 GoTrue 直接寫 auth.users（sql/0038 auth_set_user_password，見
+ *     services/password-policy.ts setPasswordDirect），不做 HIBP 檢查；沒開 → GoTrue
+ *     updateUserById，太常見的密碼回 422 weak_password＋hint=allow_weak_initial_password
+ *     （與 POST /employees 建帳號一致，前端據此提示到設定開啟）。密碼不回傳（HR 自己知道）。
+ *   - 未帶 password：後端產生一組隨機密碼並回傳一次（供 HR 轉交員工）；這條路不受開關影響。
+ * 兩條路成功後都把 employees.must_change_password 設 true（員工下次登入被 AuthGate 要求改密碼）。
+ * 更新的是該 employee 對應的 Supabase auth user；查無 user_id（尚未綁定帳號）回 409。
  */
 employeesRouter.post(
   "/employees/:id/reset-password",
@@ -279,27 +285,52 @@ employeesRouter.post(
         res.status(409).json({ error: "email_in_other_tenant" })
         return
       }
+      const hrProvided = parsed.data.password !== undefined
       const password = parsed.data.password ?? generatePassword()
-      // 這裡刻意不看 tenants.features.accounts.allowWeakInitialPassword：GoTrue 的 updateUserById
-      // 不吃 password_hash（回 200 但密碼不變），沒有略過 HIBP 的重設路徑。HR 自填的密碼一律受
-      // GoTrue 檢查；要配發簡單初始密碼只有 POST /employees（建帳號）做得到。見 services/password-policy.ts。
-      const { error: updErr } = await supabaseAdmin.auth.admin.updateUserById(emp.user_id as string, {
-        password,
-      })
-      if (updErr) {
-        // GoTrue 開著弱密碼／外洩密碼防護時會回 422 weak_password（HR 自填密碼才會遇到；後端亂數產生的不會）
-        if ((updErr as { code?: string }).code === "weak_password") {
-          // hint：不帶 password 讓後端產生隨機暫時密碼即可繞過（那條路不受 HIBP 影響）；message 保留 GoTrue 原文。
-          res.status(422).json({ error: "weak_password", message: updErr.message, hint: "use_generated_password" })
+      // 管理員指定密碼＋租戶允許簡單密碼 → 繞過 GoTrue（updateUserById 不吃 password_hash、帶明文又必過 HIBP）
+      // 直接寫 auth.users。後端產生的隨機密碼本來就過得了 HIBP，維持走 GoTrue 不看開關。
+      const direct = hrProvided && (await allowWeakInitialPassword(tenantId))
+      if (direct) {
+        const ok = await setPasswordDirect(emp.user_id as string, password)
+        if (!ok) {
+          // getUserById 剛查到人、DB 函式卻沒更新到列：只可能是同時被刪／軟刪除。直接回清楚訊息，不包成 internal_server_error。
+          res.status(500).json({ error: "set_password_failed", message: "找不到該員工的登入帳號（可能剛被刪除），密碼未變更" })
           return
         }
-        next(new Error(`reset-password (update): ${updErr.message}`))
-        return
+      } else {
+        const { error: updErr } = await supabaseAdmin.auth.admin.updateUserById(emp.user_id as string, {
+          password,
+        })
+        if (updErr) {
+          // GoTrue 開著弱密碼／外洩密碼防護時會回 422 weak_password（HR 自填密碼才會遇到；後端亂數產生的不會）
+          if ((updErr as { code?: string }).code === "weak_password") {
+            // hint 與 POST /employees 一致：前端據此提示「到設定 → 進階功能 → 帳號安全 開啟允許簡單密碼」；message 保留 GoTrue 原文。
+            res.status(422).json({ error: "weak_password", message: updErr.message, hint: "allow_weak_initial_password" })
+            return
+          }
+          next(new Error(`reset-password (update): ${updErr.message}`))
+          return
+        }
       }
-      // 暫時密碼是 HR 知道的 → 員工首次登入強制改密碼（前端 AuthGate 讀 /me 的 mustChangePassword）。
+      // 密碼是 HR 知道的 → 員工下次登入強制改密碼（前端 AuthGate 讀 /me 的 mustChangePassword）。
       await supabaseAdmin.from("employees").update({ must_change_password: true }).eq("tenant_id", tenantId).eq("id", id)
+      // 稽核（應用層補「為什麼」；不記密碼）：reason 區分「管理員指定」與「系統產生暫時密碼」，method 記走哪條路。
+      await writeAuditLog({
+        tenantId,
+        tableName: "employees",
+        recordId: emp.id as string,
+        action: "UPDATE",
+        newRow: {
+          must_change_password: true,
+          reason: hrProvided ? "hr_set_password" : "hr_temp_password",
+          method: direct ? "auth_set_user_password" : "gotrue",
+        },
+        context: hrProvided
+          ? "POST /employees/:id/reset-password — 管理員設定員工密碼"
+          : "POST /employees/:id/reset-password — 產生暫時密碼",
+      })
       // 只有後端產生時才回傳明碼（供 HR 配發）；HR 自填則不回傳。
-      res.status(200).json({ id, password: parsed.data.password ? undefined : password })
+      res.status(200).json({ id, password: hrProvided ? undefined : password })
     } catch (err) {
       next(err)
     }

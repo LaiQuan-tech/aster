@@ -14,8 +14,8 @@ import { app } from "../app"
  *   預設（未開）→ POST /employees 帶弱密碼 422 weak_password＋hint=allow_weak_initial_password
  *   → PUT /api/tenant/settings 開 features.accounts.allowWeakInitialPassword（既有 features 鍵保留）
  *   → 再建 201（走 password_hash）、用該弱密碼走 password grant 登入 200、must_change_password=true
- *   → reset-password 自填弱密碼：即使開關開著也 422＋hint=use_generated_password、密碼沒變
- *     （GoTrue updateUserById 不吃 password_hash，沒有略過 HIBP 的重設路徑；見 services/password-policy.ts）
+ *   → reset-password 自填另一組弱密碼：開關開著 → 200（繞過 GoTrue 走 sql/0038 auth_set_user_password），
+ *     新密碼可登入、舊的失效、must_change_password=true（完整案例在 employees-set-password-live.test.ts）
  *   → 員工自己走 /me/password 改成弱密碼仍被 GoTrue 擋（自設路徑不受此開關影響）
  *   → reset-password 不帶 body 仍回一組後端產生的密碼且可登入
  *   → 關掉開關後 POST /employees 弱密碼又回 422＋hint=allow_weak_initial_password。
@@ -143,17 +143,17 @@ describe.skipIf(!ready)("租戶允許 HR 配發簡單初始密碼 — live", () 
     await expect(mustChangePasswordOf(empId)).resolves.toBe(true)
   })
 
-  it("開啟後：reset-password 自填常見密碼 → 仍 422 weak_password＋hint=use_generated_password，密碼沒變", async () => {
+  it("開啟後：reset-password 自填另一組常見密碼 → 200（繞過 GoTrue 走 auth_set_user_password），新密碼可登入、舊的失效", async () => {
     const res = await as(adminToken, request(app).post(`/employees/${empId}/reset-password`)).send({
       password: WEAK_PASSWORD_2,
     })
-    expect(res.status).toBe(422)
-    expect(res.body.error).toBe("weak_password")
-    expect(res.body.hint).toBe("use_generated_password")
-    expect(typeof res.body.message).toBe("string")
+    expect(res.status).toBe(200)
+    // HR 自填的密碼不回傳（HR 自己知道）
+    expect(res.body.password).toBeUndefined()
 
-    expect(await passwordGrant(EMP_EMAIL, empPassword)).not.toBeNull()
-    expect(await passwordGrant(EMP_EMAIL, WEAK_PASSWORD_2)).toBeNull()
+    expect(await passwordGrant(EMP_EMAIL, WEAK_PASSWORD_2)).not.toBeNull()
+    expect(await passwordGrant(EMP_EMAIL, empPassword)).toBeNull()
+    empPassword = WEAK_PASSWORD_2
     await expect(mustChangePasswordOf(empId)).resolves.toBe(true)
   })
 
@@ -161,12 +161,12 @@ describe.skipIf(!ready)("租戶允許 HR 配發簡單初始密碼 — live", () 
     const empToken = await signIn(EMP_EMAIL, empPassword)
     const res = await as(empToken, request(app).post("/me/password")).send({
       currentPassword: empPassword,
-      newPassword: WEAK_PASSWORD_2,
+      newPassword: WEAK_PASSWORD,
     })
     expect(res.status).not.toBe(200)
     // 密碼沒被換掉、旗標沒被清
     expect(await passwordGrant(EMP_EMAIL, empPassword)).not.toBeNull()
-    expect(await passwordGrant(EMP_EMAIL, WEAK_PASSWORD_2)).toBeNull()
+    expect(await passwordGrant(EMP_EMAIL, WEAK_PASSWORD)).toBeNull()
     await expect(mustChangePasswordOf(empId)).resolves.toBe(true)
   })
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { employeeActionsFor, parseApiErrorCode, type ActionSpec } from "../employee-actions";
+import { employeeActionsFor, generateRandomPassword, parseApiErrorCode, type ActionSpec } from "../employee-actions";
 
 const keys = (list: ActionSpec[]) => list.map((a) => a.key);
 const byKey = (list: ActionSpec[], key: ActionSpec["key"]) => list.find((a) => a.key === key);
@@ -9,10 +9,11 @@ const noAccount = { status: "active", user_id: null };
 const inactive = { status: "inactive", user_id: "user-1" };
 
 describe("employeeActionsFor — 對應原頁那排連結的條件", () => {
-  it("在職＋已綁帳號：My Data／寄重設密碼信／暫時密碼／停用／異動紀錄，且沒有寄邀請信", () => {
+  it("在職＋已綁帳號：My Data／寄重設密碼信／設定密碼／暫時密碼／停用／異動紀錄，且沒有寄邀請信", () => {
     expect(keys(employeeActionsFor(active, { isSelf: false }))).toEqual([
       "profile",
       "send-reset",
+      "set-password",
       "temp-password",
       "deactivate",
       "audit",
@@ -29,7 +30,7 @@ describe("employeeActionsFor — 對應原頁那排連結的條件", () => {
 
   it("inactive 員工：不出現「停用」，也沒有另發明的「啟用」（原頁走編輯裡的狀態下拉）", () => {
     const list = employeeActionsFor(inactive, { isSelf: false });
-    expect(keys(list)).toEqual(["profile", "send-reset", "temp-password", "audit"]);
+    expect(keys(list)).toEqual(["profile", "send-reset", "set-password", "temp-password", "audit"]);
     expect(list.some((a) => a.label === "啟用")).toBe(false);
   });
 
@@ -59,6 +60,27 @@ describe("employeeActionsFor — 對應原頁那排連結的條件", () => {
     expect(byKey(employeeActionsFor(active, { isSelf: true }), "deactivate")).toBeDefined();
   });
 
+  it("設定密碼：已綁帳號（user_id 有值）才出現，位在寄重設密碼信之後、暫時密碼之前，帶說明 title", () => {
+    const list = employeeActionsFor(active, { isSelf: false });
+    const spec = byKey(list, "set-password");
+    expect(spec).toBeDefined();
+    expect(spec?.label).toBe("設定密碼");
+    expect(spec?.disabled).toBeFalsy();
+    expect(spec?.title).toContain("下次登入");
+    expect(keys(list).indexOf("set-password")).toBe(keys(list).indexOf("send-reset") + 1);
+    expect(keys(list).indexOf("set-password")).toBe(keys(list).indexOf("temp-password") - 1);
+  });
+
+  it("設定密碼：未綁帳號（user_id 為 null／空字串）不出現——沒有 auth user 可改密碼", () => {
+    expect(byKey(employeeActionsFor(noAccount, { isSelf: false }), "set-password")).toBeUndefined();
+    expect(byKey(employeeActionsFor({ status: "active", user_id: "" }, { isSelf: false }), "set-password")).toBeUndefined();
+  });
+
+  it("設定密碼：該列請求進行中（busy）時 disabled；不 busy 時可按", () => {
+    expect(byKey(employeeActionsFor(active, { isSelf: false, busy: true }), "set-password")?.disabled).toBe(true);
+    expect(byKey(employeeActionsFor(active, { isSelf: false, busy: false }), "set-password")?.disabled).toBeFalsy();
+  });
+
   it("user_id 為空字串視同未綁帳號", () => {
     expect(keys(employeeActionsFor({ status: "active", user_id: "" }, { isSelf: false }))).toContain("send-invite");
   });
@@ -82,5 +104,30 @@ describe("parseApiErrorCode — 解析 apiFetch 的 `[狀態碼] 代碼` 格式"
     expect(parseApiErrorCode("weak_password")).toBeNull();
     expect(parseApiErrorCode("邀請失敗")).toBeNull();
     expect(parseApiErrorCode("")).toBeNull();
+  });
+});
+
+describe("generateRandomPassword — 「設定密碼」面板的產生隨機密碼", () => {
+  it("預設 12 碼，且大寫、小寫、數字、符號各至少一個", () => {
+    for (let i = 0; i < 50; i += 1) {
+      const pw = generateRandomPassword();
+      expect(pw).toHaveLength(12);
+      expect(pw).toMatch(/[A-Z]/);
+      expect(pw).toMatch(/[a-z]/);
+      expect(pw).toMatch(/[0-9]/);
+      expect(pw).toMatch(/[!@#$%&*?\-_]/);
+    }
+  });
+
+  it("不含 0／O、1／l／I 這類易混淆字，且連產兩次不同", () => {
+    const a = generateRandomPassword();
+    const b = generateRandomPassword();
+    expect(a).not.toMatch(/[0O1lI]/);
+    expect(a).not.toBe(b);
+  });
+
+  it("長度可指定，但最短 8 碼（API 的 zod 下限）", () => {
+    expect(generateRandomPassword(16)).toHaveLength(16);
+    expect(generateRandomPassword(4)).toHaveLength(8);
   });
 });

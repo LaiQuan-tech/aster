@@ -6,8 +6,8 @@
  *      tenants.features.adminModules（key → boolean），勾選即存：先樂觀更新，再 PUT
  *      /api/tenant/settings（永遠送完整 map，後端對 adminModules 是整鍵覆蓋不是深合併），
  *      成功後 invalidateBranding() 讓 AdminShell 的分頁列同頁反映；失敗回滾＋錯誤 toast。
- *   2. 帳號安全：tenants.features.accounts.allowWeakInitialPassword（允許 HR 建帳號時配發簡單
- *      初始密碼，API 改用 password_hash 略過 Supabase 外洩密碼名單檢查；重設密碼沒有這條路）。
+ *   2. 帳號安全：tenants.features.accounts.allowWeakInitialPassword（允許 HR 配發簡單密碼：建帳號時
+ *      API 改用 password_hash、後台「設定密碼」時直接寫 auth.users，都略過 Supabase 外洩密碼名單檢查）。
  *      同一套勾選即存／回滾／toast；讀法在 lib/auth-api.ts 的 accountsFeatureOf。
  * 兩張卡共用同一次 getBrandingCached() 載入。頁首標題／說明由 AdminShell 依路由表提供，
  * 這裡不包 header／main。
@@ -171,8 +171,8 @@ export default function AdvancedFeaturesPage() {
                 {savingAccounts && <span className="text-xs text-gray-400">儲存中…</span>}
               </span>
               <span className="mt-0.5 block text-sm text-gray-500">
-                開啟後，HR 在新增員工帳號時可以用像 password123 這種常見密碼當初始密碼（略過外洩密碼名單檢查）。
-                同仁首次登入仍會被要求自設新密碼，自設的密碼一樣會做檢查。重設密碼沒有這條路（Supabase 不提供略過檢查的重設方式），請改用「產生暫時密碼」。
+                開啟後，HR 在「新增員工帳號」與員工列表的「設定密碼」可以用像 password123 這種常見密碼（略過外洩密碼名單檢查）。
+                同仁下次登入仍會被要求自設新密碼，自設的密碼一樣會做檢查。
               </span>
             </label>
           </div>

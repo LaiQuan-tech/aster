@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, PrimaryButton, ErrorText, Empty, Segmented, inputCls, labelCls, useToast } from "@/components/admin-ui";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { BottomSheet, Button, Card, Empty, ErrorText, Field, Input, PrimaryButton, Segmented, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import { ActionMenu } from "@/components/ActionMenu";
 import AuditDrawer from "@/components/AuditDrawer";
 import {
@@ -40,7 +40,7 @@ import {
   type AccountLinkResult,
   type BulkInviteResult,
 } from "@/lib/auth-api";
-import { employeeActionsFor, parseApiErrorCode, type EmployeeActionKey } from "@/lib/employee-actions";
+import { employeeActionsFor, generateRandomPassword, parseApiErrorCode, type EmployeeActionKey } from "@/lib/employee-actions";
 import { useSession } from "@/lib/use-session";
 
 const CSV_EXAMPLE = `name,email,empNo,deptName,employmentType,hireDate,role
@@ -182,6 +182,20 @@ export default function EmployeesPage() {
   const [linkResult, setLinkResult] = useState<{ empName: string; result: AccountLinkResult } | null>(null);
   const [tempPassword, setTempPassword] = useState<{ empName: string; password: string } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // 「設定密碼」面板：HR 直接指定一組密碼（API 帶 password 的 reset-password）。
+  // done 有值＝已成功，面板改顯示那組密碼讓 HR 抄給同仁（比照「暫時密碼」結果卡）。
+  const [setPwTarget, setSetPwTarget] = useState<{ id: string; name: string } | null>(null);
+  const [setPwValue, setSetPwValue] = useState("");
+  const [setPwShow, setSetPwShow] = useState(false);
+  const [setPwError, setSetPwError] = useState<string | null>(null);
+  const [setPwBusy, setSetPwBusy] = useState(false);
+  const [setPwDone, setSetPwDone] = useState<{ empName: string; password: string } | null>(null);
+  const setPwInputRef = useRef<HTMLInputElement>(null);
+  // 面板開啟時把焦點放進密碼框。不能用 autoFocus：BottomSheet 開啟時會在自己的 effect 裡 focus 面板
+  // （比 autoFocus 晚），這裡的 effect 屬於父層、跑在它之後，才搶得回來。
+  useEffect(() => {
+    if (setPwTarget && !setPwDone) setPwInputRef.current?.focus();
+  }, [setPwTarget, setPwDone]);
   // C1 稽核：右側抽屜顯示該員工 employees 列的異動時間線
   const [auditTarget, setAuditTarget] = useState<{ id: string; name: string } | null>(null);
 
@@ -541,6 +555,47 @@ export default function EmployeesPage() {
     }
   }
 
+  /** 開「設定密碼」面板（選單只在有 user_id 時顯示這個動作；沒帳號的員工走寄邀請信）。 */
+  function openSetPassword(employee: Employee) {
+    setSetPwTarget({ id: employee.id, name: employee.name });
+    setSetPwValue("");
+    setSetPwShow(false);
+    setSetPwError(null);
+    setSetPwDone(null);
+  }
+
+  function closeSetPassword() {
+    if (setPwBusy) return;
+    setSetPwTarget(null);
+    setSetPwValue("");
+    setSetPwDone(null);
+    setSetPwError(null);
+  }
+
+  /** 送出：API 依租戶開關決定走 GoTrue（太常見的密碼會 422）或直接寫 auth.users；成功後同仁下次登入須改密碼。 */
+  async function confirmSetPassword() {
+    if (!setPwTarget || setPwBusy) return;
+    const password = setPwValue;
+    if (password.length < 8) {
+      setSetPwError("密碼至少 8 碼");
+      return;
+    }
+    setSetPwBusy(true);
+    setBusyId(setPwTarget.id);
+    setSetPwError(null);
+    try {
+      await resetEmployeePassword(setPwTarget.id, password);
+      setSetPwDone({ empName: setPwTarget.name, password });
+      setSetPwValue("");
+      toast.show(`已設定 ${setPwTarget.name} 的密碼`, "success");
+    } catch (err) {
+      setSetPwError(describeError(err, "設定密碼失敗"));
+    } finally {
+      setSetPwBusy(false);
+      setBusyId(null);
+    }
+  }
+
   async function copyText(text: string, what = "連結") {
     try {
       await navigator.clipboard.writeText(text);
@@ -580,6 +635,9 @@ export default function EmployeesPage() {
         break;
       case "send-reset":
         void onSendReset(employee.id, employee.name);
+        break;
+      case "set-password":
+        openSetPassword(employee);
         break;
       case "temp-password":
         void onTempPassword(employee.id, employee.name);
@@ -1145,6 +1203,94 @@ export default function EmployeesPage() {
           onClose={() => setAuditTarget(null)}
         />
       )}
+      <BottomSheet open={setPwTarget !== null} onClose={closeSetPassword} title="設定密碼">
+        {setPwTarget && setPwDone && (
+          <div className="space-y-4" data-testid="set-password-done">
+            <p className="text-sm leading-6 text-gray-600">
+              已設定 <span className="font-medium text-gray-800">{setPwDone.empName}</span> 的密碼。只顯示這一次，請複製後轉交同仁；
+              同仁下次登入會被要求改成自己的密碼，舊裝置的登入已失效。
+            </p>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <input
+                readOnly
+                aria-label="已設定的密碼"
+                className={`${inputCls} font-mono`}
+                value={setPwDone.password}
+                onFocus={(event) => event.currentTarget.select()}
+              />
+              <Button variant="secondary" size="md" className="shrink-0" onClick={() => void copyText(setPwDone.password, "密碼")}>
+                複製密碼
+              </Button>
+            </div>
+            <Button variant="primary" size="lg" block onClick={closeSetPassword}>
+              關閉
+            </Button>
+          </div>
+        )}
+        {setPwTarget && !setPwDone && (
+          <form
+            className="space-y-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void confirmSetPassword();
+            }}
+          >
+            <p className="text-sm leading-6 text-gray-600">
+              請輸入要配發給 <span className="font-medium text-gray-800">{setPwTarget.name}</span> 的密碼（至少 8 碼）。
+              同仁下次登入會被要求自設新密碼；舊裝置的登入會失效。
+            </p>
+            <Field label="密碼" required htmlFor="employees-set-password-input" error={setPwError ?? undefined} hint="至少 8 碼。">
+              <div className="flex gap-2">
+                <Input
+                  ref={setPwInputRef}
+                  id="employees-set-password-input"
+                  type={setPwShow ? "text" : "password"}
+                  autoComplete="new-password"
+                  minLength={8}
+                  className="font-mono"
+                  value={setPwValue}
+                  aria-invalid={setPwError ? "true" : undefined}
+                  disabled={setPwBusy}
+                  onChange={(event) => {
+                    setSetPwValue(event.target.value);
+                    if (setPwError) setSetPwError(null);
+                  }}
+                />
+                <Button
+                  variant="secondary"
+                  size="md"
+                  className="shrink-0"
+                  aria-pressed={setPwShow}
+                  onClick={() => setSetPwShow((show) => !show)}
+                >
+                  {setPwShow ? "隱藏" : "顯示"}
+                </Button>
+              </div>
+            </Field>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={setPwBusy}
+              onClick={() => {
+                // 產生後直接切成明碼，HR 才看得到要抄給同仁的是什麼。
+                setSetPwValue(generateRandomPassword());
+                setSetPwShow(true);
+                setSetPwError(null);
+              }}
+            >
+              產生隨機密碼
+            </Button>
+            <div className="grid grid-cols-2 gap-3">
+              <Button variant="secondary" size="lg" onClick={closeSetPassword} disabled={setPwBusy}>
+                取消
+              </Button>
+              <Button type="submit" variant="primary" size="lg" loading={setPwBusy} disabled={setPwValue.length < 8}>
+                設定密碼
+              </Button>
+            </div>
+          </form>
+        )}
+      </BottomSheet>
     </>
   );
 }

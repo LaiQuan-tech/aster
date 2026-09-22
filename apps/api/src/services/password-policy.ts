@@ -14,8 +14,12 @@ import { supabaseAdmin } from "../lib/supabase.js"
  *
  * 🔴 只有 createUser 吃 password_hash。GoTrue 的 adminUserUpdate（updateUserById）
  * 完全不讀 password_hash：回 200 但密碼不變（2026-09-22 用 throwaway 帳號實測＋
- * 對照 supabase/auth internal/api/admin.go）。所以 reset-password 仍走明文 password、
- * 仍受 GoTrue 檢查；HR 要略過 HIBP 只能用後端產生的隨機暫時密碼（不帶 body）。
+ * 對照 supabase/auth internal/api/admin.go），帶明文 password 又一定過 HIBP。所以
+ * 「管理員直接設定員工密碼」（POST /employees/:id/reset-password 帶 password）在租戶
+ * 允許簡單密碼時**繞過 GoTrue**：API 端算好 bcrypt，交給 sql/0038 的
+ * `auth_set_user_password`（SECURITY DEFINER，直接寫 auth.users.encrypted_password
+ * 並刪掉該使用者所有 auth.sessions），見下方 setPasswordDirect。租戶沒開開關時仍走
+ * updateUserById({ password })、仍受 GoTrue 檢查。
  *
  * 員工自設的新密碼（services/auth-invite.ts changeOwnPassword、set-password）走
  * `password` 明文路徑、仍受 GoTrue 檢查，這裡不碰。
@@ -56,4 +60,22 @@ export type CreateUserPasswordAttributes = { password: string } | { password_has
 export async function createUserPasswordAttributes(tenantId: string, plain: string): Promise<CreateUserPasswordAttributes> {
   if (await allowWeakInitialPassword(tenantId)) return { password_hash: await hashPasswordForGoTrue(plain) }
   return { password: plain }
+}
+
+/**
+ * 繞過 GoTrue 直接設定某 auth user 的密碼（sql/0038 `auth_set_user_password`）：
+ * bcrypt 由這裡算、DB 函式只認 $2a$/$2b$/$2y$ 雜湊，寫完會刪掉該使用者所有 auth.sessions
+ * （舊裝置的 refresh 立刻失效，手上的 access token 最多再活到到期）。
+ *
+ * 只給「租戶允許簡單密碼」的重設路徑用——GoTrue admin 沒有能略過 HIBP 的重設方式（見檔頭）。
+ * 回 false＝找不到該 user（或已軟刪除），沒有寫入；RPC 本身出錯（含 anon 呼叫被 42501 擋、
+ * 雜湊格式不對的 invalid_password_hash）直接 throw。
+ * ⚠️ 呼叫端必須先確認該 user 屬於本租戶（routes/employees.ts 的 belongsToTenant）；DB 函式
+ * 只擋「誰能呼叫」（service_role），不擋「改誰」。
+ */
+export async function setPasswordDirect(userId: string, plain: string): Promise<boolean> {
+  const hash = await hashPasswordForGoTrue(plain)
+  const { data, error } = await supabaseAdmin.rpc("auth_set_user_password", { p_user_id: userId, p_password_hash: hash })
+  if (error) throw new Error(`auth_set_user_password: ${error.message}`)
+  return data === true
 }

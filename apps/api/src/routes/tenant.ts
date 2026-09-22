@@ -126,11 +126,12 @@ export const tenantSettingsSchema = z.object({
         })
         .optional(),
       /**
-       * 帳號安全：allowWeakInitialPassword=true 時，HR 在 POST /employees（建帳號、帶 password）
-       * 配發的初始密碼改以 bcrypt hash 交給 GoTrue createUser（password_hash），略過 Supabase
-       * 的弱密碼／外洩密碼（HIBP）檢查。只影響 HR 建帳號時配發、首次登入就會被強制改掉的
-       * 初始密碼；reset-password（GoTrue updateUserById 不吃 password_hash）與員工自設密碼
-       * （/me/password、set-password）仍走 GoTrue 檢查。見 services/password-policy.ts。
+       * 帳號安全：allowWeakInitialPassword=true 時，HR 配發的密碼略過 Supabase 的弱密碼／外洩
+       * 密碼（HIBP）檢查——POST /employees（建帳號、帶 password）改以 bcrypt hash 交給 GoTrue
+       * createUser（password_hash）；POST /employees/:id/reset-password 帶 password（後台「設定
+       * 密碼」）則繞過 GoTrue 直接寫 auth.users（sql/0038 auth_set_user_password）。兩者都是
+       * HR 知道、員工下次登入就會被強制改掉的密碼；員工自設密碼（/me/password、set-password）
+       * 仍走 GoTrue 檢查。見 services/password-policy.ts。
        */
       accounts: z
         .object({
