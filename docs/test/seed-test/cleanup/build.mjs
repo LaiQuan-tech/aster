@@ -7,7 +7,7 @@
  *                                                          看到 DRY_RUN_ROLLBACK 就代表每一句都能過）
  *
  * 順序（子表先、父表後；理由寫在各片段檔頭）：
- *   30-payroll → 20-attendance → 10-finance → 40-people → 00-base
+ *   50-requirements → 30-payroll → 20-attendance → 10-finance → 40-people → 00-base
  *   payroll 的 expense_claims 綁 advances／出差單，所以要先於 attendance；
  *   attendance／finance／people 都掛在測試員工身上，所以 base（刪 employees）最後。
  *
@@ -19,7 +19,7 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const here = dirname(fileURLToPath(import.meta.url))
-const ORDER = ["30-payroll.sql", "20-attendance.sql", "10-finance.sql", "40-people.sql", "00-base.sql"]
+const ORDER = ["50-requirements.sql", "30-payroll.sql", "20-attendance.sql", "10-finance.sql", "40-people.sql", "00-base.sql"]
 const TENANT = "0507ad78-27f4-480e-b99f-a72db2aee50c"
 const dry = process.argv.includes("--dry-run")
 const outPath = process.argv.find((a) => a.startsWith("--out="))?.slice(6)

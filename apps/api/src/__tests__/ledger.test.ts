@@ -396,6 +396,9 @@ describe("F4 ledger visibility & cross-tenant isolation", () => {
       employee_id: B.hrEmpId,
       leave_type_id: ltB.body.id,
       year: YEAR,
+      // 0050 起 period_start/period_end NOT NULL（曆年桶＝整年）
+      period_start: `${YEAR}-01-01`,
+      period_end: `${YEAR}-12-31`,
       entitled: 50,
     })
     if (balErr) throw new Error(`seed B balance failed: ${balErr.message}`)

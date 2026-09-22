@@ -29,6 +29,16 @@ BEGIN
   -- 只對 status IN ('test','demo') 的租戶放行實體刪除：同一交易內切 demo → 刪 → 切回 active。
   UPDATE public.tenants SET status = 'demo' WHERE id = t;
 
+  -- ───────────────────────── 50-requirements.sql ─────────────────────────
+  DELETE FROM overtime_settlements WHERE tenant_id = t AND employee_id = ANY(test_emp);
+  DELETE FROM festival_bonuses WHERE tenant_id = t AND employee_id = ANY(test_emp);
+  DELETE FROM birthday_gifts WHERE tenant_id = t AND employee_id = ANY(test_emp);
+  DELETE FROM duty_rosters WHERE tenant_id = t AND employee_id = ANY(test_emp);
+  DELETE FROM employee_profile_change_requests WHERE tenant_id = t AND employee_id = ANY(test_emp);
+  DELETE FROM disbursement_approval_steps
+    WHERE tenant_id = t
+      AND disbursement_id IN (SELECT id FROM disbursements WHERE tenant_id = t AND purpose LIKE '【測試】%');
+
   -- ───────────────────────── 30-payroll.sql ─────────────────────────
   -- 1. 憑證附件列（Storage 檔案見檔頭，另外刪）
   DELETE FROM expense_claim_attachments

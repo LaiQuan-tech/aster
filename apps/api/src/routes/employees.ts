@@ -20,7 +20,7 @@ const createSchema = z.object({
   deptId: z.string().uuid().nullish(),
   empNo: z.string().trim().min(1).optional(),
   employmentType: z.string().trim().min(1).optional(),
-  hireDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  hireDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(), // null＝未填到職日（與 PATCH 一致）
 })
 
 const updateSchema = z
@@ -179,7 +179,7 @@ employeesRouter.post(
       // W5：新人補簽——現行生效且需簽收的規章，到職即建待簽列。
       // 原本只有 `onboardings/:id/complete` 會觸發，直接從後台建的員工（正式租戶
       // 19 人就是這樣建的）永遠不在待簽名單裡。best-effort，永不 throw。
-      const seeded = await seedHireAcknowledgements(tenantId, emp.id as string, hireDate)
+      const seeded = await seedHireAcknowledgements(tenantId, emp.id as string, hireDate ?? undefined)
 
       res.status(201).json({ employeeId: emp.id, userId, seeded })
     } catch (err) {

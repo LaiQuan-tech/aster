@@ -55,6 +55,9 @@ if (testEmp.length) {
   if (claimIds.length) add("expense-receipts", must(await admin.from("expense_claim_attachments").select("storage_path").eq("tenant_id", TENANT).in("claim_id", claimIds)).map((r) => r.storage_path))
 }
 
+// 生日紅包照片（2026-09-23 需求補齊）：掛在測試員工的 birthday_gifts
+if (testEmp.length) add("birthday-photos", must(await admin.from("birthday_gifts").select("photo_path").eq("tenant_id", TENANT).in("employee_id", testEmp)).map((r) => r.photo_path))
+
 // seed 沒上傳、但順手檢查：公告簽名單掃描檔、知識庫檔案、廠商名片
 const testAnn = must(await admin.from("announcements").select("id").eq("tenant_id", TENANT).like("title", `${TAG}%`)).map((r) => r.id)
 if (testAnn.length) {
