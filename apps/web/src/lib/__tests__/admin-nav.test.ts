@@ -12,6 +12,7 @@ import {
   ADMIN_TABS,
   adminModulesOf,
   homeEntries,
+  isAdminPathAllowed,
   isModuleEnabled,
   normalizeAdminPath,
   parentPathFor,
@@ -484,6 +485,98 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
       sections: NAV.sections,
       tabs: { people: ["employees", "departments"] },
     });
+  });
+});
+
+describe("isAdminPathAllowed：直開網址的角色守門（2026-09-23 驗收修正）", () => {
+  const NAV = ACCOUNTANT_DEFAULT_NAV;
+  const allowed = (pathname: string, roleNav = NAV) => isAdminPathAllowed({ pathname, roleNav });
+
+  it("會計：bonus-runs／payroll／payslips 與其他未開放分區 → false", () => {
+    for (const path of [
+      "/admin/bonus-runs",
+      "/admin/bonus-runs/2026-q1",
+      "/admin/payroll",
+      "/admin/payslips",
+      "/admin/payroll-tax",
+      "/admin/festival-bonuses",
+      "/admin/overtime-settlements",
+      "/admin/approvals",
+      "/admin/punch-records",
+      "/admin/departments",
+      "/admin/birthday-gifts",
+      "/admin/announcements",
+      "/admin/leave-types",
+      "/admin/backups",
+      "/admin/reports",
+      "/admin/whatever",
+    ]) {
+      expect(allowed(path), path).toBe(false);
+    }
+  });
+
+  it("會計：首頁、projects/[id]、disbursements/approvals、employees 與其他開放分頁（含子路徑）→ true", () => {
+    for (const path of [
+      "/admin",
+      "/admin/",
+      "/admin?x=1",
+      "/admin/projects",
+      "/admin/projects/abc-123",
+      "/admin/projects/abc-123/application",
+      "/admin/projects/overview",
+      "/admin/projects/receivables",
+      "/admin/projects/annual",
+      "/admin/projects/alerts",
+      "/admin/stamp-duty",
+      "/admin/disbursements",
+      "/admin/disbursements/approvals",
+      "/admin/disbursements/pivot",
+      "/admin/disbursements/9f",
+      "/admin/clients",
+      "/admin/vendors",
+      "/admin/companies",
+      "/admin/attendance-sheets",
+      "/admin/attendance-sheets/9f",
+      "/admin/expenses",
+      "/admin/advances",
+      "/admin/employees",
+      "/admin/employees/zzz",
+    ]) {
+      expect(allowed(path), path).toBe(true);
+    }
+  });
+
+  it("hr_admin／platform_admin（roleNav null）→ 一律 true，含隱藏模組與未知路徑", () => {
+    expect(isAdminPathAllowed({ pathname: "/admin/bonus-runs", roleNav: roleNavOf("hr_admin", null) })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/payroll", roleNav: roleNavOf("platform_admin", {}) })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/kpi", roleNav: null, modules: {} })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/whatever", roleNav: undefined })).toBe(true);
+  });
+
+  it("自訂範圍：分區沒列 tabs＝整區開放（module 開關照舊）；不在分頁清單的子分頁不因前綴放行", () => {
+    const nav = roleNavOf("accountant", {
+      roles: { accountant: { sections: ["finance", "system"], tabs: { finance: ["projects"] } } },
+    });
+    expect(isAdminPathAllowed({ pathname: "/admin/projects/abc", roleNav: nav })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/projects/overview", roleNav: nav })).toBe(false);
+    expect(isAdminPathAllowed({ pathname: "/admin/disbursements", roleNav: nav })).toBe(false);
+    expect(isAdminPathAllowed({ pathname: "/admin/reports", roleNav: nav })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/audit-logs", roleNav: nav })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/ai", roleNav: nav })).toBe(false);
+    expect(isAdminPathAllowed({ pathname: "/admin/ai", roleNav: nav, modules: { ai: true } })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/employees", roleNav: nav })).toBe(false);
+  });
+
+  it("首頁老闆看板：會計看不到獎金／快照／壽星三張（目標頁未開放），放款／未收款／年度總額看得到", () => {
+    expect(allowed("/admin/bonus-runs")).toBe(false);
+    expect(allowed("/admin/backups")).toBe(false);
+    expect(allowed("/admin/birthday-gifts")).toBe(false);
+    expect(allowed("/admin/disbursements")).toBe(true);
+    expect(allowed("/admin/projects/receivables")).toBe(true);
+    expect(allowed("/admin/projects/annual")).toBe(true);
+    for (const href of ["/admin/bonus-runs", "/admin/backups", "/admin/birthday-gifts", "/admin/approvals", "/admin/company-info"]) {
+      expect(isAdminPathAllowed({ pathname: href, roleNav: null }), href).toBe(true);
+    }
   });
 });
 

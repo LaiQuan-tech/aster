@@ -19,6 +19,8 @@
  *     會計只看得到「專案與財務／出勤月表／報銷預支／員工」，範圍可由
  *     tenants.features.roles.accountant 覆蓋（設定 → 進階功能）。這只是導覽可見性，
  *     真正的守門在 API（requireFinance／canSeeBonus）。
+ *   - `isAdminPathAllowed({ pathname, roleNav, modules })`（2026-09-23 驗收修正）：直開網址時
+ *     這個角色能不能看這一頁；AdminShell 不渲染未開放的頁、首頁卡片依它隱藏。HR 一律 true。
  */
 
 export type AdminSectionKey =
@@ -888,4 +890,38 @@ export function sectionsForRole(roleNav: RoleNavConfig | null | undefined, modul
 /** 首頁的分區入口（排除 home）：不帶 roleNav＝8 格；帶 roleNav＝該角色可見的分區。 */
 export function homeEntries(roleNav?: RoleNavConfig | null, modules?: AdminModulesConfig | null): AdminSection[] {
   return sectionsForRole(roleNav ?? null, modules).filter((section) => section.key !== "home");
+}
+
+/* ---------------------------------------------------------- 路徑守門 --- */
+
+/**
+ * 這個角色能不能開這個後台網址（2026-09-23 正式站驗收：會計直開 /admin/bonus-runs 只得到
+ * 403 toast＋空殼頁、直開 /admin/payroll 整頁照常渲染）。AdminShell 對回 false 的路徑不渲染
+ * children、改畫「此頁未開放給會計」；首頁的老闆看板卡片也用它決定要不要畫。
+ *
+ *   - `roleNav` 為 null（HR／平台管理員與其他非會計角色）→ 一律 true：隱藏模組「直接輸入
+ *     網址可開」是既有行為，不擋 HR。
+ *   - `/admin` 首頁永遠 true。
+ *   - 其餘路徑先用 resolveAdminPath 對回所屬分區／分頁（detail 頁 /admin/projects/[id]、
+ *     pattern 路由 /admin/projects/[id]/application 都跟著父分頁走），分區要在 roleNav.sections、
+ *     分頁要在 tabsForSection(…, { roleNav }) 的可見清單（分區沒列 tabs＝該區全部分頁，
+ *     module 開關照舊套用）。等於分頁 href、或以 `href + "/"` 開頭的子路徑都算該分頁。
+ *   - 找不到路由的未知路徑 → false。
+ *
+ * 這只是導覽層的守門（少掉 403 toast 與空殼頁），真正的防線仍在 API（requireFinance／requireHrAdmin）。
+ */
+export function isAdminPathAllowed(opts: {
+  pathname: string;
+  roleNav: RoleNavConfig | null | undefined;
+  modules?: AdminModulesConfig | null;
+}): boolean {
+  const { roleNav } = opts;
+  if (!roleNav) return true;
+  const path = normalizeAdminPath(opts.pathname);
+  if (path === "/admin") return true;
+  const resolved = resolveAdminPath(path);
+  // 未知路徑會退回首頁路由（exact），但 path 不是 /admin → 不放行。
+  if (resolved.route.exact || resolved.tab === null) return false;
+  if (!roleNav.sections.includes(resolved.section)) return false;
+  return tabsForSection(resolved.section, opts.modules ?? null, { roleNav }).some((tab) => tab.key === resolved.tab);
 }

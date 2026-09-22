@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Card } from "@/components/admin-ui";
 import { SectionIcon } from "@/components/AdminShell";
 import { getRequests, getAnnouncements, type Announcement } from "@/lib/admin-api";
-import { adminModulesOf, homeEntries, roleNavOf } from "@/lib/admin-nav";
+import { adminModulesOf, homeEntries, isAdminPathAllowed, roleNavOf } from "@/lib/admin-nav";
 import { getDisbursementSummary, type DisbursementSummary } from "@/lib/disbursements-api";
 import {
   getReceivables,
@@ -79,17 +79,25 @@ function rootCodeOf(code: string | null | undefined): string | null {
   return m ? m[1] : null;
 }
 
+/**
+ * 老闆看板的一張卡。`href` 就是這張卡所屬的後台頁（點卡片會去那裡）；`canOpen(href)` 回 false
+ * （這個角色開不了那一頁，例如會計對 /admin/bonus-runs、/admin/backups、/admin/birthday-gifts）
+ * 整張卡不畫——2026-09-23 正式站驗收：會計首頁三張卡顯示「載入失敗」（API 403）而不是隱藏。
+ */
 function BossCard({
   href,
   label,
   state,
+  canOpen,
   children,
 }: {
   href: string;
   label: string;
   state: { loading: boolean; error: string | null };
+  canOpen: (href: string) => boolean;
   children: ReactNode;
 }) {
+  if (!canOpen(href)) return null;
   return (
     <Link href={href} className="block rounded-xl bg-slate-50 p-4 transition hover:bg-slate-100">
       <p className="text-xs font-medium text-gray-500">{label}</p>
@@ -113,10 +121,21 @@ export default function AdminOverview() {
   // 以前是模組層常數＝寫死 8 格，會計會看到自己進不去的分區、隱藏模組也照列；
   // 改成跟 AdminShell 側欄同一套算法：roleNavOf(角色, features) ＋ adminModulesOf(features)。
   const essState = useEssState();
-  const homeSections = useMemo(
-    () => homeEntries(roleNavOf(essState.me?.role, essState.features), adminModulesOf(essState.features)),
-    [essState.me?.role, essState.features],
+  const roleNav = useMemo(() => roleNavOf(essState.me?.role, essState.features), [essState.me?.role, essState.features]);
+  const modules = useMemo(() => adminModulesOf(essState.features), [essState.features]);
+  const homeSections = useMemo(() => homeEntries(roleNav, modules), [roleNav, modules]);
+  // 老闆看板：每張卡標了自己的後台路徑（BossCard href），開不了那一頁的角色就不畫那張卡，
+  // 也不打它的 API（會計對獎金／快照／壽星會 403）。HR／平台管理員 roleNav 為 null＝全部可開。
+  const canOpen = useMemo(
+    () => (href: string) => isAdminPathAllowed({ pathname: href, roleNav, modules }),
+    [roleNav, modules],
   );
+  // 下面的載入 effect 只在掛載時跑一次；用 ref 讀「當下」的 canOpen（/me 走 AdminGate 的共用快取，
+  // 掛載時多半已知）。萬一 me 還沒回來就全打，卡片仍會在渲染時依角色隱藏，只是多幾個 403。
+  const canOpenRef = useRef(canOpen);
+  useEffect(() => {
+    canOpenRef.current = canOpen;
+  }, [canOpen]);
   const [disb, setDisb] = useState<Loadable<DisbursementSummary>>(initLoadable<DisbursementSummary>());
   const [recv, setRecv] = useState<Loadable<ReceivablesCardData>>(initLoadable<ReceivablesCardData>());
   const [annual, setAnnual] = useState<Loadable<AnnualCardData>>(initLoadable<AnnualCardData>());
@@ -269,19 +288,21 @@ export default function AdminOverview() {
       }
     }
 
-    void Promise.allSettled([
-      loadDisbursement(),
-      loadReceivables(),
-      loadAnnual(),
-      loadBonus(),
-      loadPending(),
-      loadAlerts(),
-      loadAnnouncements(),
-      loadChanges(),
-      loadSnapshot(),
-      loadBirthdays(),
-      loadBenefits(),
-    ]);
+    // 卡片 href 與下面 JSX 裡的 BossCard href 一一對應；開不了那一頁就不打那支 API。
+    const loaders: Array<[href: string, load: () => Promise<void>]> = [
+      ["/admin/disbursements", loadDisbursement],
+      ["/admin/projects/receivables", loadReceivables],
+      ["/admin/projects/annual", loadAnnual],
+      ["/admin/bonus-runs", loadBonus],
+      ["/admin/approvals", loadPending],
+      ["/admin/projects/alerts", loadAlerts],
+      ["/admin/announcements", loadAnnouncements],
+      ["/admin/projects", loadChanges],
+      ["/admin/backups", loadSnapshot],
+      ["/admin/birthday-gifts", loadBirthdays],
+      ["/admin/company-info", loadBenefits],
+    ];
+    void Promise.allSettled(loaders.filter(([href]) => canOpenRef.current(href)).map(([, load]) => load()));
 
     return () => {
       active = false;
@@ -293,40 +314,40 @@ export default function AdminOverview() {
       <Card>
         <h2 className="mb-4 text-sm font-medium text-gray-500">老闆看板</h2>
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <BossCard href="/admin/disbursements" label="放款" state={disb}>
+          <BossCard href="/admin/disbursements" label="放款" canOpen={canOpen} state={disb}>
             <p className="text-xl font-semibold text-gray-900">{fmtMoney(disb.data?.monthTotal)}</p>
             <p className="mt-0.5 text-xs text-gray-500">
               本年 {fmtMoney(disb.data?.yearTotal)}・應付未付 {fmtMoney(disb.data?.unpaidPayableTotal)}
             </p>
           </BossCard>
 
-          <BossCard href="/admin/projects/receivables" label="未收款總額" state={recv}>
+          <BossCard href="/admin/projects/receivables" label="未收款總額" canOpen={canOpen} state={recv}>
             <p className="text-xl font-semibold text-amber-600">{fmtMoney(recv.data?.unreceivedTotal)}</p>
             <p className="mt-0.5 text-xs text-gray-500">逾期 {recv.data?.overdueCount ?? "—"} 筆</p>
           </BossCard>
 
-          <BossCard href="/admin/projects/annual" label={`本年合約總額（民國${currentRocYear()}）`} state={annual}>
+          <BossCard href="/admin/projects/annual" label={`本年合約總額（民國${currentRocYear()}）`} canOpen={canOpen} state={annual}>
             <p className="text-xl font-semibold text-gray-900">{fmtMoney(annual.data?.amountTotal)}</p>
             <p className="mt-0.5 text-xs text-gray-500">已收 {annual.data?.pct == null ? "—" : `${annual.data.pct}%`}</p>
           </BossCard>
 
-          <BossCard href="/admin/bonus-runs" label="獎金本年已發放" state={bonus}>
+          <BossCard href="/admin/bonus-runs" label="獎金本年已發放" canOpen={canOpen} state={bonus}>
             <p className="text-xl font-semibold text-gray-900">{fmtMoney(bonus.data?.yearTotal)}</p>
             <p className="mt-0.5 text-xs text-gray-500">最近批次 {bonus.data?.latestLabel ?? "—"}</p>
           </BossCard>
 
-          <BossCard href="/admin/approvals" label="待簽核假單" state={pendingReq}>
+          <BossCard href="/admin/approvals" label="待簽核假單" canOpen={canOpen} state={pendingReq}>
             <p className="text-xl font-semibold text-gray-900">{pendingReq.data ?? 0}</p>
           </BossCard>
 
-          <BossCard href="/admin/projects/alerts" label="專案示警數" state={alerts}>
+          <BossCard href="/admin/projects/alerts" label="專案示警數" canOpen={canOpen} state={alerts}>
             <p className="text-xl font-semibold text-gray-900">{alerts.data?.total ?? 0}</p>
             <p className="mt-0.5 text-xs text-gray-500">
               {alerts.data && alerts.data.high > 0 ? `高風險 ${alerts.data.high} 件` : "—"}
             </p>
           </BossCard>
 
-          <BossCard href="/admin/announcements" label="最新公告" state={announcements}>
+          <BossCard href="/admin/announcements" label="最新公告" canOpen={canOpen} state={announcements}>
             {announcements.data && announcements.data.length > 0 ? (
               <ul className="space-y-0.5">
                 {announcements.data.map((a) => (
@@ -340,7 +361,7 @@ export default function AdminOverview() {
             )}
           </BossCard>
 
-          <BossCard href="/admin/projects" label="最近變更案" state={changes}>
+          <BossCard href="/admin/projects" label="最近變更案" canOpen={canOpen} state={changes}>
             {changes.data && changes.data.length > 0 ? (
               <ul className="space-y-0.5">
                 {changes.data.map((p) => {
@@ -360,7 +381,7 @@ export default function AdminOverview() {
             )}
           </BossCard>
 
-          <BossCard href="/admin/birthday-gifts" label="本月壽星" state={birthdays}>
+          <BossCard href="/admin/birthday-gifts" label="本月壽星" canOpen={canOpen} state={birthdays}>
             <p className="text-xl font-semibold text-gray-900">{birthdays.data?.people.length ?? 0}</p>
             <p className="mt-0.5 text-xs text-gray-500">
               {birthdays.data && birthdays.data.people.length > 0
@@ -371,7 +392,7 @@ export default function AdminOverview() {
             </p>
           </BossCard>
 
-          <BossCard href="/admin/company-info" label="福利" state={benefits}>
+          <BossCard href="/admin/company-info" label="福利" canOpen={canOpen} state={benefits}>
             {benefits.data?.exists ? (
               <>
                 <p className="truncate text-base font-semibold text-gray-900">{benefits.data.title}</p>
@@ -384,7 +405,7 @@ export default function AdminOverview() {
             )}
           </BossCard>
 
-          <BossCard href="/admin/backups" label="最近快照" state={snapshot}>
+          <BossCard href="/admin/backups" label="最近快照" canOpen={canOpen} state={snapshot}>
             {snapshot.data ? (
               <>
                 <p className="text-xl font-semibold text-gray-900">{snapshot.data.period}</p>

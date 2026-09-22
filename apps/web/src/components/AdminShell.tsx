@@ -14,9 +14,11 @@
  *   塞回列上並標「未啟用」。
  * - 角色範圍（W4，2026-09-23）：會計（employees.role='accountant'）的側欄只列開放的分區、
  *   分頁列只列開放的分頁（lib/admin-nav.ts 的 roleNavOf／sectionsForRole／tabsForSection；
- *   範圍可在「設定 → 進階功能 → 會計可用範圍」調整）。直開未開放的網址仍會渲染該頁——
- *   真正的防線在 API（requireFinance／requireHrAdmin），這裡只把該 tab 標成「未開放」，
- *   不做前端擋門，免得給人「前端擋住就安全了」的錯覺。
+ *   範圍可在「設定 → 進階功能 → 會計可用範圍」調整）。直開未開放的網址（2026-09-23 驗收修正）：
+ *   isAdminPathAllowed 回 false 就不渲染 children，改畫整頁「此頁未開放給會計」＋回首頁——以前照常
+ *   渲染該頁，結果是 403 toast＋空殼頁（bonus-runs）或整頁正常（payroll）。HR／平台管理員不受影響
+ *   （隱藏模組直開網址仍可用）。真正的防線仍在 API（requireFinance／requireHrAdmin），這裡只是
+ *   導覽層守門，別把它當安全邊界。
  * - 共用資料（appName／features／待簽筆數）走 useEssState()（模組層快取，換頁不重打）；
  *   ToastProvider 在最外層，頁面用 useToast()。
  * - 保留 `admin-shell` class：globals.css 的手機表格 min-width 與列印隱藏 aside/header 都靠它。
@@ -29,6 +31,7 @@ import { useEssState } from "@/lib/ess-state";
 import {
   ADMIN_TABS,
   adminModulesOf,
+  isAdminPathAllowed,
   isModuleEnabled,
   resolveAdminPath,
   roleNavOf,
@@ -283,6 +286,9 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
     ? new Set<string>(roleNav.tabs[resolved.section] as string[])
     : null;
   const subTabs = subTabsFor(resolved.section, resolved.tab);
+  // 直開未開放給這個角色的網址：不渲染頁面本體（見檔頭說明）。HR／平台管理員永遠 true。
+  const pathAllowed = isAdminPathAllowed({ pathname, roleNav, modules });
+  const roleLabel = me.role === "accountant" ? "會計" : "此角色";
   const isHome = resolved.title === "";
   const appName = state.branding?.appName ?? DEFAULT_APP_NAME;
   const brandStyle = state.branding?.primaryColor
@@ -388,30 +394,50 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
           </header>
 
           <div className={`mx-auto w-full px-3 py-4 sm:px-4 md:px-8 md:py-6 ${resolved.narrow ? "max-w-4xl" : "max-w-7xl"}`}>
-            {/* 桌機頁首：返回鍵／h1／desc／分頁列；首頁整塊不畫 */}
-            {!isHome && (
-              <header className="no-print mb-4 hidden md:block">
+            {!pathAllowed ? (
+              <main className="py-12 text-center" aria-labelledby="admin-off-limits-title">
+                <h1 id="admin-off-limits-title" className="text-xl font-bold text-gray-900">
+                  此頁未開放給{roleLabel}
+                </h1>
+                <p className="mt-2 text-sm text-gray-500">
+                  這個功能不在{roleLabel}的後台範圍內；需要的話請 HR 到「設定 → 進階功能」調整可用範圍。
+                </p>
+                <Link
+                  href="/admin"
+                  className="mt-6 inline-flex min-h-10 items-center justify-center rounded-xl px-5 text-sm font-medium text-white"
+                  style={{ backgroundColor: "var(--brand)" }}
+                >
+                  回首頁
+                </Link>
+              </main>
+            ) : (
+              <>
+                {/* 桌機頁首：返回鍵／h1／desc／分頁列；首頁整塊不畫 */}
+                {!isHome && (
+                  <header className="no-print mb-4 hidden md:block">
+                    {resolved.parentPath && backLabel !== null && (
+                      <div className="mb-2">
+                        <BackLink href={resolved.parentPath} label={backLabel} />
+                      </div>
+                    )}
+                    <h1 className="text-xl font-bold text-gray-900">{resolved.title}</h1>
+                    {resolved.desc && <p className="mt-1 text-sm text-gray-500">{resolved.desc}</p>}
+                    {tabs.length >= 2 && (
+                      <div className="mt-4">
+                        <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} allowedTabKeys={allowedTabKeys} />
+                      </div>
+                    )}
+                    {subTabs.length > 0 && <SubTabBar subTabs={subTabs} activeKey={resolved.sub} />}
+                  </header>
+                )}
                 {resolved.parentPath && backLabel !== null && (
-                  <div className="mb-2">
+                  <div className="no-print mb-3 md:hidden">
                     <BackLink href={resolved.parentPath} label={backLabel} />
                   </div>
                 )}
-                <h1 className="text-xl font-bold text-gray-900">{resolved.title}</h1>
-                {resolved.desc && <p className="mt-1 text-sm text-gray-500">{resolved.desc}</p>}
-                {tabs.length >= 2 && (
-                  <div className="mt-4">
-                    <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} allowedTabKeys={allowedTabKeys} />
-                  </div>
-                )}
-                {subTabs.length > 0 && <SubTabBar subTabs={subTabs} activeKey={resolved.sub} />}
-              </header>
+                <main className="space-y-4 md:space-y-6">{children}</main>
+              </>
             )}
-            {resolved.parentPath && backLabel !== null && (
-              <div className="no-print mb-3 md:hidden">
-                <BackLink href={resolved.parentPath} label={backLabel} />
-              </div>
-            )}
-            <main className="space-y-4 md:space-y-6">{children}</main>
           </div>
         </div>
 
