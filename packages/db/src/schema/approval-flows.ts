@@ -11,8 +11,10 @@ import { tenants } from "./tenants"
  *
  * `mode`：'list'（預設，現況）沿用上述 approverEmpIds 固定清單；'manager'
  * 供「假單直屬主管簽核」WP 使用——由 API 動態解出申請人的直屬主管作為簽核人，
- * approverEmpIds 在此模式下不生效。合法值 CHECK（approval_flows_mode_chk）
- * 見 sql/0031。
+ * approverEmpIds 在此模式下不生效；'manager_hr'（多級簽核，2026-09-22）＝
+ * 部門主管依 departments.manager_emp_ids 順序逐關（小主管→大主管…），最後加一關
+ * 由任一在職 hr_admin 覆核（services/approval-chain.ts）。合法值 CHECK
+ * （approval_flows_mode_chk）見 sql/0031，改含 manager_hr 見 sql/0039。
  */
 export const approvalFlows = pgTable(
   "approval_flows",

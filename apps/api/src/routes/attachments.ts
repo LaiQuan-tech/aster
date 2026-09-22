@@ -3,7 +3,9 @@ import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { managerOfEmployee } from "../middleware/scope.js"
+import { managerChainOfEmployee } from "../middleware/scope.js"
+import { approvalStepsHaveCandidates } from "../lib/schema-compat.js"
+import { isStepCandidate, stepSelectCols } from "../services/approval-steps.js"
 
 export const attachmentsRouter = Router()
 
@@ -23,9 +25,11 @@ const uploadSchema = z.object({
  *   - HR/platform admin of the tenant
  *   - the filer themself
  *   - the caller has any approval_steps row on this request (any step_order /
- *     decision — a former or current-step approver, incl. fixed-list mode)
- *   - the caller is the filer's direct manager (managerOfEmployee), even if
- *     not on the approval chain itself (e.g. fixed-list mode bypassed them)
+ *     decision — a former or current-step approver or candidate, incl.
+ *     fixed-list mode and the multi-level HR-review step)
+ *   - the caller is on the filer's manager chain (managerChainOfEmployee:
+ *     小主管→大主管→…), even if not on the approval chain itself (e.g.
+ *     fixed-list mode bypassed them)
  * Returns the request row or null.
  */
 async function authorizeRequestAccess(
@@ -55,16 +59,19 @@ async function authorizeRequestAccess(
   const isHr = ["hr_admin", "platform_admin"].includes(me.role as string)
   if (isHr || lr.employee_id === me.id) return { ok: true }
 
+  // 任一關的簽核者或候選（多級簽核的 HR 覆核關）都可看附件。
   const { data: steps, error: stepsErr } = await supabaseAdmin
     .from("approval_steps")
-    .select("approver_emp_id")
+    .select(stepSelectCols("approver_emp_id", await approvalStepsHaveCandidates()))
     .eq("tenant_id", tenantId)
     .eq("request_id", requestId)
   if (stepsErr) throw new Error(`attachments authorize (steps): ${stepsErr.message}`)
-  if ((steps ?? []).some((s) => s.approver_emp_id === me.id)) return { ok: true }
+  const stepRows = (steps ?? []) as unknown as Array<{ approver_emp_id: string; candidate_emp_ids?: unknown }>
+  if (stepRows.some((s) => isStepCandidate(s, me.id))) return { ok: true }
 
-  const managerEmpId = await managerOfEmployee(tenantId, lr.employee_id as string)
-  if (managerEmpId === me.id) return { ok: true }
+  // 申請人的主管鏈（小主管→大主管→…）都可看：主管即使還沒輪到也要能先看憑證。
+  const managerChain = await managerChainOfEmployee(tenantId, lr.employee_id as string)
+  if (managerChain.includes(me.id)) return { ok: true }
 
   return { ok: false }
 }

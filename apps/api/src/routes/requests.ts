@@ -5,10 +5,11 @@ import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
 import { applyApprovalEffects } from "../services/ledger.js"
-import { resolveApproverChain } from "../services/approval-chain.js"
+import { resolveApproverChain, type StepKind } from "../services/approval-chain.js"
 import { enrichRequestRows } from "../services/request-enrich.js"
+import { isStepCandidate, stepCandidates, stepSelectCols } from "../services/approval-steps.js"
 import { enqueue } from "../services/notify.js"
-import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { approvalStepsHaveCandidates, isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { logger } from "../lib/logger.js"
 
 export const requestsRouter = Router()
@@ -129,6 +130,19 @@ async function approverNamesById(tenantId: string, approverIds: string[]): Promi
   }
   for (const e of data ?? []) names.set(e.id as string, e.name as string)
   return names
+}
+
+/**
+ * 「我有份的關卡」：approver_emp_id 是我、或我在 candidate_emp_ids 內（多級簽核的
+ * HR 覆核關）。欄位尚未套用（migration 0049）時退回只看 approver_emp_id。
+ */
+function myStepsQuery(tenantId: string, empId: string, opts: { pendingOnly?: boolean } = {}) {
+  return approvalStepsHaveCandidates().then((multi) => {
+    let q = supabaseAdmin.from("approval_steps").select("request_id, step_order").eq("tenant_id", tenantId)
+    q = multi ? q.or(`approver_emp_id.eq.${empId},candidate_emp_ids.cs.{${empId}}`) : q.eq("approver_emp_id", empId)
+    if (opts.pendingOnly) q = q.eq("decision", "pending")
+    return q
+  })
 }
 
 /* ── 簽核通知（A2）─────────────────────────────────────────────────────
@@ -258,31 +272,39 @@ function basePayload(lr: ApprovalNoticeRequest, extra: Record<string, unknown>):
   }
 }
 
-/** 通知某一關的簽核者：送出（第 1 關）或前一關核准後推進（下一關）。 */
+/**
+ * 通知某一關的簽核者：送出（第 1 關）或前一關核准後推進（下一關）。
+ * 多級簽核：同一關的**全部候選**都收到（HR 覆核關＝全部 hr_admin，任一人簽即過）；
+ * payload.approverEmpId 保留＝第一候選（相容），candidateEmpIds 帶整組。
+ */
 async function notifyStepApprover(params: {
   tenantId: string
   lr: ApprovalNoticeRequest
   ctx: RequestContext
-  approverEmpId: string
+  approverEmpIds: string[]
+  stepKind?: string | null
   step: number
   totalSteps: number
   event: "submitted" | "advanced"
   actedByEmpId?: string
 }): Promise<number> {
-  const { tenantId, lr, ctx, approverEmpId, step, totalSteps, event } = params
+  const { tenantId, lr, ctx, approverEmpIds, step, totalSteps, event } = params
   const reason = lr.reason ? `，事由：${lr.reason}` : ""
   const stepText = totalSteps > 1 ? `（第 ${step} 關，共 ${totalSteps} 關）` : ""
+  const hrText = params.stepKind === "hr" ? "本關為 HR 覆核，任一位 HR 管理員簽核即可。" : ""
   return enqueue({
     tenantId,
-    employeeIds: [approverEmpId],
+    employeeIds: approverEmpIds,
     type: "approval",
     title: `待簽核：${ctx.applicantName} 的${kindLabel(lr.kind)}申請`,
-    body: `${applicantLabel(ctx)} 申請${subjectLabel(lr, ctx)}，期間 ${periodText(lr.start_at, lr.end_at, lr.hours)}${reason}。請至「待我簽核」處理${stepText}。`,
+    body: `${applicantLabel(ctx)} 申請${subjectLabel(lr, ctx)}，期間 ${periodText(lr.start_at, lr.end_at, lr.hours)}${reason}。請至「待我簽核」處理${stepText}。${hrText}`,
     payload: basePayload(lr, {
       event,
       currentStep: step,
       totalSteps,
-      approverEmpId,
+      approverEmpId: approverEmpIds[0] ?? null,
+      candidateEmpIds: approverEmpIds,
+      stepKind: params.stepKind ?? null,
       actedByEmpId: params.actedByEmpId ?? null,
     }),
   })
@@ -315,11 +337,12 @@ async function notifyApplicant(params: {
  * POST /requests — the authenticated employee files a request for THEMSELVES.
  *
  * The employee_id is always derived from the token (anti-spoofing); any
- * employeeId in the body is ignored. The approval chain is materialised from the
- * tenant's approval_flow for this kind: if it has approver ids we create one
- * approval_steps row per id in order; if it's missing/empty we fall back to a
- * single step approved by any hr_admin in the tenant. The request starts
- * status='pending', current_step=1.
+ * employeeId in the body is ignored. The approval chain is materialised by
+ * services/approval-chain.ts（list 固定名單／manager 直屬主管單關／manager_hr
+ * 主管逐級 → HR 覆核）: one approval_steps row per step; a step may carry
+ * several candidates (candidate_emp_ids, any one of them may act) with
+ * approver_emp_id = candidates[0]. The request starts status='pending',
+ * current_step=1.
  */
 requestsRouter.post(
   "/requests",
@@ -392,7 +415,7 @@ requestsRouter.post(
       }
 
       // Resolve the approver chain for this kind (services/approval-chain.ts):
-      // 固定名單 → 直屬主管 → 老闆（tenant features）→ 第一位 hr_admin → 409。
+      // 固定名單／直屬主管／主管逐級＋HR 覆核 → 老闆（tenant features）→ 第一位 hr_admin → 409。
       const chain = await resolveApproverChain(tenantId, kind, filedForId)
       if (!chain.ok) {
         // No approver can be determined — refuse rather than create a request
@@ -400,7 +423,10 @@ requestsRouter.post(
         res.status(409).json({ error: chain.error })
         return
       }
-      const approverIds = chain.approverEmpIds
+      const chainSteps = chain.steps
+      // candidate_emp_ids／step_kind 是 migration 0049 的欄位：未套用時只寫
+      // approver_emp_id（＝第一候選），201 回應仍以記憶體中的鏈回完整候選。
+      const multi = await approvalStepsHaveCandidates()
 
       // Create the request (pending, step 1).
       const { data: created, error: reqErr } = await supabaseAdmin
@@ -438,12 +464,13 @@ requestsRouter.post(
       const requestId = created.id as string
 
       // Materialise the ordered approval steps.
-      const stepRows = approverIds.map((approverEmpId, i) => ({
+      const stepRows = chainSteps.map((step, i) => ({
         tenant_id: tenantId,
         request_id: requestId,
         step_order: i + 1,
-        approver_emp_id: approverEmpId,
+        approver_emp_id: step.candidateEmpIds[0],
         decision: "pending",
+        ...(multi ? { candidate_emp_ids: step.candidateEmpIds, step_kind: step.kind } : {}),
       }))
       const { data: steps, error: stepErr } = await supabaseAdmin
         .from("approval_steps")
@@ -482,9 +509,10 @@ requestsRouter.post(
             reason: reason ?? null,
           },
           ctx,
-          approverEmpId: approverIds[0],
+          approverEmpIds: chainSteps[0].candidateEmpIds,
+          stepKind: chainSteps[0].kind,
           step: 1,
-          totalSteps: approverIds.length,
+          totalSteps: chainSteps.length,
           event: "submitted",
           actedByEmpId: self.id,
         })
@@ -493,17 +521,27 @@ requestsRouter.post(
       }
 
       // 送出後前端要顯示「等待 ○○○ 簽核」：非 HR 拿不到 GET /employees，姓名由這裡帶。
-      const approverNames = await approverNamesById(tenantId, approverIds)
+      const approverNames = await approverNamesById(
+        tenantId,
+        chainSteps.flatMap((step) => step.candidateEmpIds),
+      )
 
       res.status(201).json({
         requestId,
         approvalSource: chain.source,
         notified,
-        steps: steps.map((s) => ({
-          stepOrder: s.step_order,
-          approverEmpId: s.approver_emp_id,
-          approverName: approverNames.get(s.approver_emp_id as string) ?? null,
-        })),
+        steps: steps.map((s) => {
+          const chainStep = chainSteps[(s.step_order as number) - 1]
+          const candidateEmpIds = chainStep?.candidateEmpIds ?? [s.approver_emp_id as string]
+          return {
+            stepOrder: s.step_order,
+            approverEmpId: s.approver_emp_id,
+            approverName: approverNames.get(s.approver_emp_id as string) ?? null,
+            candidateEmpIds,
+            candidateNames: candidateEmpIds.map((id) => approverNames.get(id)).filter((n): n is string => !!n),
+            kind: (chainStep?.kind ?? null) as StepKind | null,
+          }
+        }),
       })
     } catch (err) {
       next(err)
@@ -593,12 +631,8 @@ requestsRouter.get(
       // Non-HR: own requests ∪ requests currently awaiting my approval.
       const selfId = self?.id ?? NIL_UUID
 
-      // (a) Steps where I am the approver → which requests, at which step.
-      const { data: mySteps, error: stepErr } = await supabaseAdmin
-        .from("approval_steps")
-        .select("request_id, step_order")
-        .eq("tenant_id", tenantId)
-        .eq("approver_emp_id", selfId)
+      // (a) Steps where I am the approver or one of the candidates → which requests, at which step.
+      const { data: mySteps, error: stepErr } = await myStepsQuery(tenantId, selfId)
       if (stepErr) {
         next(new Error(`GET /requests (steps): ${stepErr.message}`))
         return
@@ -673,12 +707,7 @@ requestsRouter.get(
         return
       }
 
-      const { data: mySteps, error: stepErr } = await supabaseAdmin
-        .from("approval_steps")
-        .select("request_id, step_order")
-        .eq("tenant_id", tenantId)
-        .eq("approver_emp_id", self.id)
-        .eq("decision", "pending")
+      const { data: mySteps, error: stepErr } = await myStepsQuery(tenantId, self.id, { pendingOnly: true })
       if (stepErr) {
         next(new Error(`GET /requests/pending-approvals (steps): ${stepErr.message}`))
         return
@@ -713,55 +742,10 @@ requestsRouter.get(
         return
       }
 
-      const requestIds = mine.map((r) => r.id as string)
-      const employeeIds = Array.from(new Set(mine.map((r) => r.employee_id as string)))
-      const leaveTypeIds = Array.from(
-        new Set(mine.map((r) => r.leave_type_id as string | null).filter((v): v is string => !!v)),
-      )
-      const [emps, depts, lts, atts, allSteps] = await Promise.all([
-        supabaseAdmin.from("employees").select("id, name, emp_no, dept_id").eq("tenant_id", tenantId).in("id", employeeIds),
-        supabaseAdmin.from("departments").select("id, name").eq("tenant_id", tenantId),
-        leaveTypeIds.length > 0
-          ? supabaseAdmin.from("leave_types").select("id, name").eq("tenant_id", tenantId).in("id", leaveTypeIds)
-          : Promise.resolve({ data: [] as Array<Record<string, unknown>>, error: null }),
-        supabaseAdmin.from("request_attachments").select("request_id").eq("tenant_id", tenantId).in("request_id", requestIds),
-        supabaseAdmin.from("approval_steps").select("request_id, step_order").eq("tenant_id", tenantId).in("request_id", requestIds),
-      ])
-      for (const r of [emps, depts, lts, atts, allSteps]) {
-        if (r.error) {
-          next(new Error(`GET /requests/pending-approvals (enrich): ${r.error.message}`))
-          return
-        }
-      }
-      const empById = new Map((emps.data ?? []).map((e) => [e.id as string, e]))
-      const deptName = new Map((depts.data ?? []).map((d) => [d.id as string, d.name as string]))
-      const ltName = new Map((lts.data ?? []).map((t) => [t.id as string, t.name as string]))
-      const attachmentCount = new Map<string, number>()
-      for (const a of atts.data ?? []) {
-        const id = a.request_id as string
-        attachmentCount.set(id, (attachmentCount.get(id) ?? 0) + 1)
-      }
-      const totalSteps = new Map<string, number>()
-      for (const s of allSteps.data ?? []) {
-        const id = s.request_id as string
-        totalSteps.set(id, Math.max(totalSteps.get(id) ?? 0, s.step_order as number))
-      }
-
-      res.status(200).json({
-        requests: mine.map((r) => {
-          const emp = empById.get(r.employee_id as string)
-          return {
-            ...r,
-            current_approver_emp_id: self.id,
-            employee_name: (emp?.name as string | null) ?? null,
-            employee_emp_no: (emp?.emp_no as string | null) ?? null,
-            department_name: emp?.dept_id ? (deptName.get(emp.dept_id as string) ?? null) : null,
-            leave_type_name: r.leave_type_id ? (ltName.get(r.leave_type_id as string) ?? null) : null,
-            attachment_count: attachmentCount.get(r.id as string) ?? 0,
-            total_steps: totalSteps.get(r.id as string) ?? (r.current_step as number),
-          }
-        }),
-      })
+      // 與 GET /requests 同一套補齊（申請人姓名／工號／部門、假別名、附件數、關卡進度、
+      // 現行關卡候選與姓名）；current_approver_emp_id＝該關 approver_emp_id（第一候選），
+      // 「輪到我」請看 current_candidate_emp_ids 是否含自己。
+      res.status(200).json({ requests: await enrichRequestRows(tenantId, mine) })
     } catch (err) {
       next(err)
     }
@@ -838,20 +822,24 @@ type DecisionOutcome =
   | { ok: false; id: string; error: string }
 
 /** 寫簽核關卡結果；acted_by_emp_id 記「實際按下核准／駁回的人」（HR 代簽時是 HR）。
- *  欄位尚未套用（migration 0042）時退回不寫該欄，不擋簽核。回錯誤訊息或 null。 */
+ *  候選之一簽核時（多級簽核）同時把 approver_emp_id 改寫成實際簽的人；HR 代簽
+ *  不改寫（approver_emp_id 仍是名義簽核者，代簽者只記在 acted_by_emp_id）。
+ *  acted_by_emp_id 欄位尚未套用（migration 0042）時退回不寫該欄，不擋簽核。回錯誤訊息或 null。 */
 async function markStep(
   stepId: string,
   patch: Record<string, unknown>,
   actedByEmpId: string,
+  opts: { takeOver?: boolean } = {},
 ): Promise<string | null> {
+  const base = opts.takeOver ? { ...patch, approver_emp_id: actedByEmpId } : patch
   const { error } = await supabaseAdmin
     .from("approval_steps")
-    .update({ ...patch, acted_by_emp_id: actedByEmpId })
+    .update({ ...base, acted_by_emp_id: actedByEmpId })
     .eq("id", stepId)
   if (!error) return null
   if (!isMissingColumnError(error)) return error.message
   warnSchemaGapOnce("approval_steps.acted_by_emp_id", error)
-  const retry = await supabaseAdmin.from("approval_steps").update(patch).eq("id", stepId)
+  const retry = await supabaseAdmin.from("approval_steps").update(base).eq("id", stepId)
   return retry.error ? retry.error.message : null
 }
 
@@ -876,20 +864,26 @@ async function decideOneRequest(params: {
   if (!lr) return { ok: false, id: requestId, error: "not_found" }
   if (lr.status !== "pending") return { ok: false, id: requestId, error: "not_pending" }
 
-  const { data: step, error: stepErr } = await supabaseAdmin
+  const multi = await approvalStepsHaveCandidates()
+  const { data: stepRow, error: stepErr } = await supabaseAdmin
     .from("approval_steps")
-    .select("id, approver_emp_id, step_order")
+    .select(stepSelectCols("id, approver_emp_id, step_order", multi))
     .eq("tenant_id", tenantId)
     .eq("request_id", requestId)
     .eq("step_order", lr.current_step)
     .maybeSingle()
   if (stepErr) return { ok: false, id: requestId, error: stepErr.message }
-  if (!step) return { ok: false, id: requestId, error: "current_step_not_found" }
+  if (!stepRow) return { ok: false, id: requestId, error: "current_step_not_found" }
+  const step = stepRow as unknown as { id: string; approver_emp_id: string; step_order: number; candidate_emp_ids?: unknown; step_kind?: string | null }
 
+  // 輪到我：是該關 approver_emp_id 或候選之一（多級簽核的 HR 覆核關任一 HR 皆可）。
+  const isCandidate = isStepCandidate(step, actor.id)
   const canOverride = allowHrOverride && isHrRole(actor.role)
-  if (step.approver_emp_id !== actor.id && !canOverride) {
+  if (!isCandidate && !canOverride) {
     return { ok: false, id: requestId, error: "not_current_approver" }
   }
+  // 候選之一簽核 → approver_emp_id 改寫成實際簽的人（HR 代簽不改寫，見 markStep）。
+  const takeOver = isCandidate && step.approver_emp_id !== actor.id
 
   // 通知內文（申請人／假別）與「附件必要」檢查共用的上下文。
   let ctx: RequestContext
@@ -925,7 +919,7 @@ async function decideOneRequest(params: {
   const actedAt = new Date().toISOString()
 
   if (action === "reject") {
-    const stepFail = await markStep(step.id as string, { decision: "rejected", comment: comment ?? null, acted_at: actedAt }, actor.id)
+    const stepFail = await markStep(step.id, { decision: "rejected", comment: comment ?? null, acted_at: actedAt }, actor.id, { takeOver })
     if (stepFail) return { ok: false, id: requestId, error: stepFail }
 
     const { error: upReqErr } = await supabaseAdmin
@@ -939,20 +933,21 @@ async function decideOneRequest(params: {
     return { ok: true, id: requestId, status: "rejected", currentStep, notified }
   }
 
-  const stepFail = await markStep(step.id as string, { decision: "approved", comment: comment ?? null, acted_at: actedAt }, actor.id)
+  const stepFail = await markStep(step.id, { decision: "approved", comment: comment ?? null, acted_at: actedAt }, actor.id, { takeOver })
   if (stepFail) return { ok: false, id: requestId, error: stepFail }
 
-  const { data: laterSteps, error: cntErr } = await supabaseAdmin
+  const { data: laterRows, error: cntErr } = await supabaseAdmin
     .from("approval_steps")
-    .select("step_order, approver_emp_id")
+    .select(stepSelectCols("step_order, approver_emp_id", multi))
     .eq("tenant_id", tenantId)
     .eq("request_id", requestId)
     .gt("step_order", currentStep)
     .order("step_order", { ascending: true })
   if (cntErr) return { ok: false, id: requestId, error: cntErr.message }
+  const laterSteps = (laterRows ?? []) as unknown as Array<{ step_order: number; approver_emp_id: string; candidate_emp_ids?: unknown; step_kind?: string | null }>
 
-  if ((laterSteps ?? []).length > 0) {
-    // 推進到下一關；單子仍是 pending。通知下一關簽核者（內文與送出時相同）。
+  if (laterSteps.length > 0) {
+    // 推進到下一關；單子仍是 pending。通知下一關**全部候選**（內文與送出時相同）。
     const nextStep = currentStep + 1
     const { error: upReqErr } = await supabaseAdmin
       .from("leave_requests")
@@ -961,14 +956,15 @@ async function decideOneRequest(params: {
       .eq("id", requestId)
     if (upReqErr) return { ok: false, id: requestId, error: upReqErr.message }
 
-    const nextApprover = (laterSteps ?? []).find((s) => (s.step_order as number) === nextStep)
-    const totalSteps = currentStep + (laterSteps ?? []).length
+    const nextApprover = laterSteps.find((s) => s.step_order === nextStep)
+    const totalSteps = currentStep + laterSteps.length
     const notified = nextApprover
       ? await notifyStepApprover({
           tenantId,
           lr: notice,
           ctx,
-          approverEmpId: nextApprover.approver_emp_id as string,
+          approverEmpIds: stepCandidates(nextApprover),
+          stepKind: nextApprover.step_kind ?? null,
           step: nextStep,
           totalSteps,
           event: "advanced",
@@ -1092,7 +1088,8 @@ requestsRouter.post(
 /**
  * POST /requests/:id/change-approver — HR changes the approver of the current
  * pending step. This does not rewrite completed steps or global approval flows;
- * it only reassigns the live step for this one form record.
+ * it only reassigns the live step for this one form record. 多級簽核：候選清單
+ * 一併改成只剩新簽核者（candidate_emp_ids = [new]，舊候選不再能簽）。
  */
 requestsRouter.post(
   "/requests/:id/change-approver",
@@ -1154,9 +1151,10 @@ requestsRouter.post(
         return
       }
 
-      const { data: step, error: stepErr } = await supabaseAdmin
+      const multi = await approvalStepsHaveCandidates()
+      const { data: stepRow, error: stepErr } = await supabaseAdmin
         .from("approval_steps")
-        .select("id, approver_emp_id, step_order")
+        .select(stepSelectCols("id, approver_emp_id, step_order", multi))
         .eq("tenant_id", tenantId)
         .eq("request_id", requestId)
         .eq("step_order", lr.current_step)
@@ -1165,16 +1163,19 @@ requestsRouter.post(
         next(new Error(`POST /requests/${requestId}/change-approver (step): ${stepErr.message}`))
         return
       }
-      if (!step) {
+      if (!stepRow) {
         res.status(409).json({ error: "current_step_not_found" })
         return
       }
+      const step = stepRow as unknown as { id: string; approver_emp_id: string; step_order: number; candidate_emp_ids?: unknown }
+      const previousCandidateEmpIds = stepCandidates(step)
 
       const { error: updateErr } = await supabaseAdmin
         .from("approval_steps")
         .update({
           approver_emp_id: parsed.data.approverEmpId,
           comment: parsed.data.comment ?? null,
+          ...(multi ? { candidate_emp_ids: [parsed.data.approverEmpId] } : {}),
         })
         .eq("tenant_id", tenantId)
         .eq("id", step.id)
@@ -1197,6 +1198,7 @@ requestsRouter.post(
           currentStep: lr.current_step,
           changedBy: self?.id,
           previousApproverEmpId: step.approver_emp_id,
+          previousCandidateEmpIds,
         },
       })
 
@@ -1204,7 +1206,9 @@ requestsRouter.post(
         id: requestId,
         currentStep: lr.current_step,
         previousApproverEmpId: step.approver_emp_id,
+        previousCandidateEmpIds,
         approverEmpId: parsed.data.approverEmpId,
+        candidateEmpIds: [parsed.data.approverEmpId],
       })
     } catch (err) {
       next(err)
@@ -1214,8 +1218,8 @@ requestsRouter.post(
 
 /**
  * POST /requests/:id/remind — enqueue an in-app approval reminder to the
- * current approver. HR/platform admins may remind any tenant request; the filer
- * may remind their own pending request.
+ * current approver（多級簽核：該關**全部候選**都收到）. HR/platform admins may
+ * remind any tenant request; the filer may remind their own pending request.
  */
 requestsRouter.post(
   "/requests/:id/remind",
@@ -1261,9 +1265,10 @@ requestsRouter.post(
         return
       }
 
-      const { data: step, error: stepErr } = await supabaseAdmin
+      const multi = await approvalStepsHaveCandidates()
+      const { data: stepRow, error: stepErr } = await supabaseAdmin
         .from("approval_steps")
-        .select("approver_emp_id")
+        .select(stepSelectCols("approver_emp_id", multi))
         .eq("tenant_id", tenantId)
         .eq("request_id", requestId)
         .eq("step_order", lr.current_step)
@@ -1272,32 +1277,38 @@ requestsRouter.post(
         next(new Error(`POST /requests/${requestId}/remind (step): ${stepErr.message}`))
         return
       }
-      if (!step) {
+      if (!stepRow) {
         res.status(409).json({ error: "current_step_not_found" })
         return
       }
+      const step = stepRow as unknown as { approver_emp_id: string; candidate_emp_ids?: unknown }
+      const recipients = stepCandidates(step)
 
-      const { error: insertErr } = await supabaseAdmin.from("notifications").insert({
-        tenant_id: tenantId,
-        employee_id: step.approver_emp_id,
-        type: "approval",
-        title: "待簽核提醒",
-        body: `有一張 ${lr.kind} 表單正在等待第 ${lr.current_step} 關簽核。`,
-        channel: "inapp",
-        status: "pending",
-        payload: {
-          requestId,
-          requestKind: lr.kind,
-          currentStep: lr.current_step,
-          remindedBy: self.id,
-        },
-      })
+      const { error: insertErr } = await supabaseAdmin.from("notifications").insert(
+        recipients.map((employeeId) => ({
+          tenant_id: tenantId,
+          employee_id: employeeId,
+          type: "approval",
+          title: "待簽核提醒",
+          body: `有一張 ${lr.kind} 表單正在等待第 ${lr.current_step} 關簽核。`,
+          channel: "inapp",
+          status: "pending",
+          payload: {
+            requestId,
+            requestKind: lr.kind,
+            currentStep: lr.current_step,
+            remindedBy: self.id,
+            candidateEmpIds: recipients,
+          },
+        })),
+      )
       if (insertErr) {
         next(new Error(`POST /requests/${requestId}/remind (notification): ${insertErr.message}`))
         return
       }
 
-      res.status(200).json({ notified: 1, employeeId: step.approver_emp_id })
+      // employeeId 保留＝第一候選（相容）；employeeIds 是這次通知到的全部候選。
+      res.status(200).json({ notified: recipients.length, employeeId: step.approver_emp_id, employeeIds: recipients })
     } catch (err) {
       next(err)
     }

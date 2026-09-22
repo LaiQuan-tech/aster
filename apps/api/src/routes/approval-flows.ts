@@ -4,22 +4,34 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { normaliseMode, type ApprovalFlowMode } from "../services/approval-chain.js"
 
 export const approvalFlowsRouter = Router()
 
 // The request kinds an approval flow can apply to (mirrors KINDS in requests.ts).
 const kindSchema = z.enum(["leave", "ot", "fix_punch", "business_trip", "petty_cash"])
 
-// 簽核模式（migration 0042 approval_flows.mode，CHECK in ('manager','list')）：
-//   manager — 直屬主管單關（employees.dept_id → departments.manager_emp_id，往上找；
-//             找不到 → tenant features.approval.fallbackApproverEmpId → 第一位 hr_admin）
-//   list    — 固定名單依序多關；名單為空時行為同 manager（見 services/approval-chain.ts）
-const modeSchema = z.enum(["manager", "list"])
+// 簽核模式（migration 0042 approval_flows.mode，CHECK in ('manager','list','manager_hr')，
+// 'manager_hr' 由 sql/0039 加入）：
+//   manager    — 直屬主管單關（employees.dept_id → departments.manager_emp_ids[0]，往上找；
+//                找不到 → tenant features.approval.fallbackApproverEmpId → 第一位 hr_admin）
+//   list       — 固定名單依序多關；名單為空時行為同 manager（見 services/approval-chain.ts）
+//   manager_hr — 部門主管依順序逐關（小主管 → 大主管 → …），最後由任一在職 hr_admin 覆核
+const modeSchema = z.enum(["manager", "list", "manager_hr"])
+// 與 services/approval-chain.ts 的 ApprovalFlowMode 同步（少一個值這裡會編譯失敗）。
+type _ModeSync = [z.infer<typeof modeSchema>] extends [ApprovalFlowMode]
+  ? [ApprovalFlowMode] extends [z.infer<typeof modeSchema>]
+    ? true
+    : never
+  : never
+const _modeSync: _ModeSync = true
+void _modeSync
 
 const putSchema = z.object({
   // Ordered list of approver employee ids; [] means "no list → manager chain".
   approverEmpIds: z.array(z.string().uuid()).default([]),
-  // 省略時保留既有列的 mode；新列預設 'list'（與舊行為相容：有名單就走名單）。
+  // 省略時保留既有列的 mode（三個值都保留，不再打回 list）；新列預設 'list'
+  // （與舊行為相容：有名單就走名單）。
   mode: modeSchema.optional(),
 })
 
@@ -91,7 +103,7 @@ approvalFlowsRouter.put(
           next(new Error(`PUT /approval-flows/${kind} (existing): ${existingErr.message}`))
           return
         }
-        mode = existing?.mode === "manager" ? "manager" : "list"
+        mode = existing ? normaliseMode(existing.mode) : "list"
       }
 
       const { data, error } = await supabaseAdmin
@@ -109,6 +121,11 @@ approvalFlowsRouter.put(
         .single()
 
       if (error || !data) {
+        // 23514 check_violation：正式庫還沒套 sql/0039（approval_flows_mode_chk 未含 manager_hr）。
+        if (error?.code === "23514") {
+          res.status(409).json({ error: "mode_not_supported", details: { mode, hint: "資料庫尚未套用 sql/0039（approval_flows_mode_chk）" } })
+          return
+        }
         next(new Error(`PUT /approval-flows/${kind}: ${error?.message}`))
         return
       }

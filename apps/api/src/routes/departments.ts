@@ -4,13 +4,25 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { departmentsHaveManagerList } from "../lib/schema-compat.js"
+import { loadDepartments } from "../middleware/scope.js"
 
 export const departmentsRouter = Router()
+
+/**
+ * 主管（多級簽核，2026-09-22）：`managerEmpIds` 是**有序**清單——第 1 位＝小主管
+ * （簽核第一關），之後依序往上（大主管…）；最多 MAX_MANAGERS 位。仍接受舊欄位
+ * `managerEmpId`（＝ [id]；null＝[]）；兩者都給以 `managerEmpIds` 為準。
+ */
+const MAX_MANAGERS = 10
+
+const managerIdsSchema = z.array(z.string().uuid()).max(MAX_MANAGERS)
 
 const createSchema = z.object({
   name: z.string().trim().min(1, "name is required"),
   parentId: z.string().uuid().nullish(),
   managerEmpId: z.string().uuid().nullish(),
+  managerEmpIds: managerIdsSchema.optional(),
 })
 
 // PATCH allows any subset; at least one field must be present.
@@ -19,6 +31,7 @@ const updateSchema = z
     name: z.string().trim().min(1).optional(),
     parentId: z.string().uuid().nullable().optional(),
     managerEmpId: z.string().uuid().nullable().optional(),
+    managerEmpIds: managerIdsSchema.optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 
@@ -26,9 +39,48 @@ function departmentCode(id: string): string {
   return `D-${id.replace(/-/g, "").slice(0, 8).toUpperCase()}`
 }
 
-function managerLabel(employee: { name?: string | null; emp_no?: string | null } | undefined): string | null {
+interface EmployeeLite {
+  name: string | null
+  emp_no: string | null
+}
+
+function managerLabel(employee: EmployeeLite | undefined): string | null {
   if (!employee?.name) return null
   return employee.emp_no ? `${employee.emp_no} · ${employee.name}` : employee.name
+}
+
+/** 有序主管清單 → 顯示用：`managers[]`（每位 {id,name,emp_no,label}）與「A → B」串。 */
+function describeManagers(managerEmpIds: string[], employees: Map<string, EmployeeLite>) {
+  const managers = managerEmpIds.map((id) => {
+    const e = employees.get(id)
+    return { id, name: e?.name ?? null, emp_no: e?.emp_no ?? null, label: managerLabel(e) }
+  })
+  const labels = managers.map((m) => m.label).filter((l): l is string => !!l)
+  return { managers, label: labels.length > 0 ? labels.join(" → ") : null }
+}
+
+/**
+ * body 的 managerEmpIds／managerEmpId → 正規化後的有序清單（去重、保序）；
+ * 兩者都沒給回 undefined（PATCH 不動主管）。
+ */
+function resolveManagerIds(body: { managerEmpIds?: string[]; managerEmpId?: string | null }): string[] | undefined {
+  if (body.managerEmpIds !== undefined) return Array.from(new Set(body.managerEmpIds))
+  if (body.managerEmpId !== undefined) return body.managerEmpId ? [body.managerEmpId] : []
+  return undefined
+}
+
+/** 主管都必須是本租戶員工；回不在租戶內的 id（空陣列＝全部合法）。 */
+async function unknownManagerIds(tenantId: string, ids: string[]): Promise<string[]> {
+  if (ids.length === 0) return []
+  const { data, error } = await supabaseAdmin.from("employees").select("id").eq("tenant_id", tenantId).in("id", ids)
+  if (error) throw new Error(`departments (manager check): ${error.message}`)
+  const known = new Set((data ?? []).map((e) => e.id as string))
+  return ids.filter((id) => !known.has(id))
+}
+
+/** 寫入用：manager_emp_id 永遠＝第 1 位（舊讀點相容）；manager_emp_ids 欄位已套用才寫。 */
+function managerPatch(ids: string[], multi: boolean): Record<string, unknown> {
+  return multi ? { manager_emp_id: ids[0] ?? null, manager_emp_ids: ids } : { manager_emp_id: ids[0] ?? null }
 }
 
 /**
@@ -47,40 +99,36 @@ departmentsRouter.get(
   async (_req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {
-      const [deptRes, employeeRes] = await Promise.all([
-        supabaseAdmin
-        .from("departments")
-        .select("id, tenant_id, parent_id, name, manager_emp_id, created_at")
-        .eq("tenant_id", tenantId)
-          .order("created_at", { ascending: true }),
+      const [rows, employeeRes] = await Promise.all([
+        loadDepartments(tenantId),
         supabaseAdmin
           .from("employees")
           .select("id, name, emp_no")
           .eq("tenant_id", tenantId),
       ])
 
-      if (deptRes.error) {
-        next(new Error(`GET /departments: ${deptRes.error.message}`))
-        return
-      }
       if (employeeRes.error) {
         next(new Error(`GET /departments employees: ${employeeRes.error.message}`))
         return
       }
-      const employees = new Map(
+      const employees = new Map<string, EmployeeLite>(
         (employeeRes.data ?? []).map((employee) => [
           employee.id as string,
           { name: employee.name as string | null, emp_no: employee.emp_no as string | null },
         ]),
       )
-      const departments = (deptRes.data ?? []).map((department) => {
-        const manager = employees.get((department.manager_emp_id as string | null) ?? "")
+      // manager_name／manager_emp_no＝第 1 位（相容）；manager_label 多人用「 → 」串；
+      // managers[] 依簽核順序。
+      const departments = rows.map((department) => {
+        const first = employees.get(department.manager_emp_ids[0] ?? "")
+        const { managers, label } = describeManagers(department.manager_emp_ids, employees)
         return {
           ...department,
-          code: departmentCode(department.id as string),
-          manager_name: manager?.name ?? null,
-          manager_emp_no: manager?.emp_no ?? null,
-          manager_label: managerLabel(manager),
+          code: departmentCode(department.id),
+          manager_name: first?.name ?? null,
+          manager_emp_no: first?.emp_no ?? null,
+          manager_label: label,
+          managers,
         }
       })
       res.status(200).json({ departments })
@@ -95,10 +143,14 @@ interface OrgNode {
   id: string
   code: string
   name: string
+  /** 第 1 位主管（相容）。 */
   managerEmpId: string | null
   managerName: string | null
   managerEmpNo: string | null
+  /** 多位主管用「 → 」串（依簽核順序）。 */
   managerLabel: string | null
+  managerEmpIds: string[]
+  managers: Array<{ id: string; name: string | null; emp_no: string | null; label: string | null }>
   children: OrgNode[]
 }
 
@@ -118,46 +170,40 @@ departmentsRouter.get(
   async (_req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {
-      const [deptRes, employeeRes] = await Promise.all([
-        supabaseAdmin
-        .from("departments")
-        .select("id, parent_id, name, manager_emp_id")
-        .eq("tenant_id", tenantId)
-          .order("created_at", { ascending: true }),
+      const [rows, employeeRes] = await Promise.all([
+        loadDepartments(tenantId),
         supabaseAdmin
           .from("employees")
           .select("id, name, emp_no")
           .eq("tenant_id", tenantId),
       ])
 
-      if (deptRes.error) {
-        next(new Error(`GET /org-chart: ${deptRes.error.message}`))
-        return
-      }
       if (employeeRes.error) {
         next(new Error(`GET /org-chart employees: ${employeeRes.error.message}`))
         return
       }
 
-      const rows = deptRes.data ?? []
-      const employees = new Map(
+      const employees = new Map<string, EmployeeLite>(
         (employeeRes.data ?? []).map((employee) => [
           employee.id as string,
           { name: employee.name as string | null, emp_no: employee.emp_no as string | null },
         ]),
       )
-      const parentById = new Map(rows.map((r) => [r.id as string, (r.parent_id as string | null) ?? null]))
+      const parentById = new Map(rows.map((r) => [r.id, r.parent_id]))
       const nodes = new Map<string, OrgNode>()
       for (const r of rows) {
-        const manager = employees.get((r.manager_emp_id as string | null) ?? "")
-        nodes.set(r.id as string, {
-          id: r.id as string,
-          code: departmentCode(r.id as string),
-          name: r.name as string,
-          managerEmpId: (r.manager_emp_id as string | null) ?? null,
-          managerName: manager?.name ?? null,
-          managerEmpNo: manager?.emp_no ?? null,
-          managerLabel: managerLabel(manager),
+        const first = employees.get(r.manager_emp_ids[0] ?? "")
+        const { managers, label } = describeManagers(r.manager_emp_ids, employees)
+        nodes.set(r.id, {
+          id: r.id,
+          code: departmentCode(r.id),
+          name: r.name,
+          managerEmpId: r.manager_emp_ids[0] ?? null,
+          managerName: first?.name ?? null,
+          managerEmpNo: first?.emp_no ?? null,
+          managerLabel: label,
+          managerEmpIds: r.manager_emp_ids,
+          managers,
           children: [],
         })
       }
@@ -175,11 +221,11 @@ departmentsRouter.get(
 
       const roots: OrgNode[] = []
       for (const r of rows) {
-        const node = nodes.get(r.id as string)!
-        const parentId = r.parent_id as string | null
+        const node = nodes.get(r.id)!
+        const parentId = r.parent_id
         const parent = parentId ? nodes.get(parentId) : undefined
         // Self-parenting, cross-tenant/missing parents, or longer cycles are roots.
-        if (parentId && parent && parentId !== r.id && !parentWouldCycle(r.id as string, parentId)) parent.children.push(node)
+        if (parentId && parent && parentId !== r.id && !parentWouldCycle(r.id, parentId)) parent.children.push(node)
         else roots.push(node)
       }
 
@@ -204,13 +250,19 @@ departmentsRouter.post(
       return
     }
     try {
+      const managerIds = resolveManagerIds(parsed.data) ?? []
+      const unknown = await unknownManagerIds(tenantId, managerIds)
+      if (unknown.length > 0) {
+        res.status(400).json({ error: "manager_not_in_tenant", details: { managerEmpIds: unknown } })
+        return
+      }
       const { data, error } = await supabaseAdmin
         .from("departments")
         .insert({
           tenant_id: tenantId,
           name: parsed.data.name,
           parent_id: parsed.data.parentId ?? null,
-          manager_emp_id: parsed.data.managerEmpId ?? null,
+          ...managerPatch(managerIds, await departmentsHaveManagerList()),
         })
         .select("id")
         .single()
@@ -226,7 +278,7 @@ departmentsRouter.post(
   },
 )
 
-// PATCH /departments/:id — update name/parentId/managerEmpId (this tenant only).
+// PATCH /departments/:id — update name/parentId/managerEmpIds（或舊欄位 managerEmpId）(this tenant only).
 departmentsRouter.patch(
   "/departments/:id",
   requireAuth,
@@ -244,9 +296,17 @@ departmentsRouter.patch(
     const patch: Record<string, unknown> = {}
     if (parsed.data.name !== undefined) patch.name = parsed.data.name
     if (parsed.data.parentId !== undefined) patch.parent_id = parsed.data.parentId
-    if (parsed.data.managerEmpId !== undefined) patch.manager_emp_id = parsed.data.managerEmpId
 
     try {
+      const managerIds = resolveManagerIds(parsed.data)
+      if (managerIds !== undefined) {
+        const unknown = await unknownManagerIds(tenantId, managerIds)
+        if (unknown.length > 0) {
+          res.status(400).json({ error: "manager_not_in_tenant", details: { managerEmpIds: unknown } })
+          return
+        }
+        Object.assign(patch, managerPatch(managerIds, await departmentsHaveManagerList()))
+      }
       const { data, error } = await supabaseAdmin
         .from("departments")
         .update(patch)

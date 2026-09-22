@@ -2,6 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { departmentsHaveManagerList } from "../lib/schema-compat.js"
 
 export const meRouter = Router()
 
@@ -20,13 +21,16 @@ async function resolveEssTabs(tenantId: string, employmentType: string | null): 
   return null
 }
 
-/** B7：是否為任一部門的 manager_emp_id（前台據此判斷要不要顯示「待我簽核」等主管功能）。 */
+/**
+ * B7：是否為任一部門的主管（manager_emp_id，或在多級簽核的 manager_emp_ids 任一順位）；
+ * 前台據此判斷要不要顯示「待我簽核」等主管功能。manager_emp_ids 欄位尚未套用
+ * （migration 0049）時退回只看 manager_emp_id。
+ */
 async function isDeptManager(tenantId: string, empId: string): Promise<boolean> {
-  const { count, error } = await supabaseAdmin
-    .from("departments")
-    .select("id", { count: "exact", head: true })
-    .eq("tenant_id", tenantId)
-    .eq("manager_emp_id", empId)
+  const multi = await departmentsHaveManagerList()
+  let q = supabaseAdmin.from("departments").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId)
+  q = multi ? q.or(`manager_emp_id.eq.${empId},manager_emp_ids.cs.{${empId}}`) : q.eq("manager_emp_id", empId)
+  const { count, error } = await q
   if (error) throw new Error(`isDeptManager: ${error.message}`)
   return (count ?? 0) > 0
 }
