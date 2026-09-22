@@ -10,10 +10,12 @@ import { ADMIN_ROLES } from "@/lib/roles";
 /**
  * Back-office gate. Sits inside AuthGate (so an unauthenticated visitor is
  * already bounced to /login), then reads GET /me（走 lib/ess-state 的 getMeCached：
- * 與 AdminShell／員工端共用同一份模組層快取，整個後台只打一次）: only hr_admin / platform_admin
- * may proceed; everyone else sees a "no permission" panel with a link back to
- * the ESS. The resolved profile is handed to children via a render prop so the
- * layout can show the signed-in admin without re-fetching.
+ * 與 AdminShell／員工端共用同一份模組層快取，整個後台只打一次）: only ADMIN_ROLES
+ * （hr_admin / platform_admin，2026-09-23 起加 accountant 會計——會計看到的分區由
+ * lib/admin-nav.ts roleNavOf 限縮，API 端另有 requireFinance 守門）may proceed;
+ * everyone else sees a "no permission" panel with a link back to the ESS. The
+ * resolved profile is handed to children via a render prop so the layout can
+ * show the signed-in admin without re-fetching.
  */
 function Guard({ children }: { children: (me: Me) => React.ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
@@ -62,7 +64,7 @@ function Guard({ children }: { children: (me: Me) => React.ReactNode }) {
     return (
       <main className="min-h-dvh flex flex-col items-center justify-center gap-4 p-6 text-center">
         <h1 className="text-xl font-bold text-gray-800">無權限</h1>
-        <p className="text-gray-500">此頁面僅限 HR 管理員存取。</p>
+        <p className="text-gray-500">此頁面僅限 HR 管理員與會計存取。</p>
         <Link
           href="/ess"
           className="rounded-md px-4 py-2 text-sm font-medium text-white"

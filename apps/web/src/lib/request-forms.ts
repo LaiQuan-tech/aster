@@ -22,6 +22,7 @@ export const KIND_LABEL: Record<RequestKind, string> = {
   ot: "加班",
   business_trip: "公出／出差",
   petty_cash: "零用金預支",
+  wfh: "在家工作",
 };
 
 /** 種類切換列的短標（手機 390px 五顆要放得下）。 */
@@ -31,8 +32,13 @@ export const KIND_SHORT: Record<RequestKind, string> = {
   ot: "加班",
   business_trip: "公出",
   petty_cash: "預支",
+  wfh: "在家",
 };
 
+/**
+ * 種類切換列的順序＝可送出的種類。`wfh`（在家工作，M2）的標籤已在上面，但表單
+ * （WfhForm／buildWfhBody）由 WP2 補；補完再把 "wfh" 加進這裡，切換列才會出現。
+ */
 export const KIND_ORDER: RequestKind[] = ["leave", "fix_punch", "ot", "business_trip", "petty_cash"];
 
 export function isRequestKind(value: string | null | undefined): value is RequestKind {
@@ -368,7 +374,7 @@ function buildPettyCash(form: PettyCashFormValues, now: Date): BuildResult {
  * 表單值 → `POST /requests` body；驗證不過回 `{ error }`。
  * 請假的「必選假別」與「需憑證假別必附檔」由頁面層檢查（這裡不知道假別清單與檔案）。
  */
-export function buildCreateBody<K extends RequestKind>(
+export function buildCreateBody<K extends keyof FormValuesByKind>(
   kind: K,
   form: FormValuesByKind[K],
   opts: { now?: Date } = {},

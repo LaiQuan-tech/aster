@@ -8,8 +8,22 @@ import { normaliseMode, type ApprovalFlowMode } from "../services/approval-chain
 
 export const approvalFlowsRouter = Router()
 
-// The request kinds an approval flow can apply to (mirrors KINDS in requests.ts).
-const kindSchema = z.enum(["leave", "ot", "fix_punch", "business_trip", "petty_cash"])
+// The request kinds an approval flow can apply to (mirrors KINDS in requests.ts)，
+// 加上三個「不是表單種類、但各走自己流程」的 applies_to（2026-09-23）：
+//   business_trip_intercity — 跨縣市／海外出差（tripScope ≠ local）；無 flow 時預設鏈＝
+//                             主管逐關 → 老闆最後一關（services/approval-chain.ts requireBossFinal）
+//   wfh                     — 在家工作申請單（新 kind）
+//   disbursement            — 放款單送簽（主管鏈 → 會計 → 老闆；list 模式照名單）
+const kindSchema = z.enum([
+  "leave",
+  "ot",
+  "fix_punch",
+  "business_trip",
+  "petty_cash",
+  "business_trip_intercity",
+  "wfh",
+  "disbursement",
+])
 
 // 簽核模式（migration 0042 approval_flows.mode，CHECK in ('manager','list','manager_hr')，
 // 'manager_hr' 由 sql/0039 加入）：

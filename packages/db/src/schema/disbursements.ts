@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, boolean, numeric, date, timestamp, uniqueIndex, index,
+  pgTable, uuid, text, boolean, integer, numeric, date, timestamp, uniqueIndex, index,
 } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 import { vendors } from "./vendors"
@@ -16,9 +16,18 @@ import { companies } from "./companies"
  * `payingCompanyId`／`receiptIssuerCompanyId` 分開存，理由同
  * `project_subcontract_payments`：付款主體與收據開立主體不一定相同。
  *
- * `status`：'draft' 草稿（尚未連動期款）| 'paid' 已匯款（連動見
+ * `status`：'draft' 草稿（尚未連動期款）| 'pending_approval' 送簽中 |
+ * 'approved' 已核准（可付款）| 'paid' 已匯款（連動見
  * `disbursement_allocations` → `project_subcontract_payments`）| 'void' 作廢
- * （反向清期款）。本輪不做簽核（見計畫 Context 段）。
+ * （反向清期款）。合法值 CHECK 見 sql/0029（sql/0040 起含簽核兩態）。
+ *
+ * ── 放款簽核鏈（M4，2026-09-23）──────────────────────────────────────
+ * 承辦送簽（draft → pending_approval）時依 services/approval-chain.ts
+ * pickDisbursementChain 建 `disbursement_approval_steps`（主管鏈逐關 → 會計關
+ * → 老闆），`currentStep` 指向待簽關卡、`approvalRound` 為第幾輪（駁回回
+ * draft 後再送 +1，舊輪關卡保留）。最後一關核准 → approved＋`approvedAt`；
+ * 付款只接受 approved（HR 帶 forceReason 例外，寫 audit）。
+ * `submittedAt`／`submittedByEmpId`：最近一次送簽；只留痕、不設 FK。
  *
  * `amount` 為實際匯出的淨額，`withheldAmount` 為代扣合計；毛額
  * （`amount + withheldAmount`）由應用層計算、回應時提供 `grossAmount`，
@@ -41,8 +50,16 @@ export const disbursements = pgTable(
       .references(() => tenants.id),
     /** 自動產號 D-{民國年}-{NNN}，由 API 層 services/disbursement-no.ts 產生。 */
     disbursementNo: text("disbursement_no").notNull(),
-    /** 'draft' 草稿 | 'paid' 已匯款 | 'void' 作廢。合法值見 sql/0029。 */
+    /** 'draft' | 'pending_approval' | 'approved' | 'paid' | 'void'。合法值見 sql/0029／0040。 */
     status: text("status").notNull().default("draft"),
+    // ── 簽核鏈（見上方說明）──
+    /** 目前待簽關卡（disbursement_approval_steps.step_order）；不在簽核中為 null。 */
+    currentStep: integer("current_step"),
+    /** 送簽輪次；0＝從未送簽。 */
+    approvalRound: integer("approval_round").notNull().default(0),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }),
+    submittedByEmpId: uuid("submitted_by_emp_id"),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
     /** 'vendor' 廠商 | 'other' 其他（自由文字收款方，無主檔）。 */
     payeeKind: text("payee_kind").notNull(),
     vendorId: uuid("vendor_id").references(() => vendors.id),

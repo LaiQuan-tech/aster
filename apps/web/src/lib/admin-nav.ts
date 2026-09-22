@@ -14,6 +14,11 @@
  *   - `tabsForSection()`／`subTabsFor()`／`homeEntries()`：AdminShell 分頁列與首頁分區入口。
  *   - `adminModulesOf()`／`isModuleEnabled()`：隱藏模組開關的讀法。
  *   - `ADMIN_REDIRECTS`：舊網址轉址；apps/web/next.config.ts 維持同一份（單元測試對照）。
+ *   - 角色導覽（2026-09-23 W4 會計角色）：`RoleNavConfig`／`ACCOUNTANT_DEFAULT_NAV`／
+ *     `roleNavOf(role, features)`／`sectionsForRole()`／`tabsForSection(…, { roleNav })`——
+ *     會計只看得到「專案與財務／出勤月表／報銷預支／員工」，範圍可由
+ *     tenants.features.roles.accountant 覆蓋（設定 → 進階功能）。這只是導覽可見性，
+ *     真正的守門在 API（requireFinance／canSeeBonus）。
  */
 
 export type AdminSectionKey =
@@ -181,6 +186,13 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
           detail: { title: "匯款單" },
         },
         {
+          key: "approvals",
+          label: "待簽核",
+          href: "/admin/disbursements/approvals",
+          title: "放款單簽核",
+          desc: "送簽中的放款單：承辦主管 → 會計 → 老闆逐關簽核；輪到我簽的與全租戶待簽清單",
+        },
+        {
           key: "pivot",
           label: "年度總覽",
           href: "/admin/disbursements/pivot",
@@ -300,6 +312,13 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       desc: "支援單日排班、區間批次、CSV 匯入、單位/工時制篩選與員工確認/爭議狀態管理。",
     },
     {
+      key: "duty",
+      label: "值日／總機",
+      href: "/admin/duty-rosters",
+      title: "值日生／總機輪播排班",
+      desc: "選參與者與起訖日一鍵輪播排班（只排工作日），點格子可換人；員工端首頁顯示今日值日與總機",
+    },
+    {
       key: "settlement",
       label: "結算作業",
       href: "/admin/attendance-settlement",
@@ -328,6 +347,28 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       href: "/admin/payroll-tax",
       title: "薪資法規",
       desc: "批次調薪、非員工所得、二代健保補充保費試算、申報匯出",
+    },
+    {
+      key: "cash",
+      label: "現金給付",
+      href: "/admin/festival-bonuses",
+      desc: "不進薪資單的現金給付：三節獎金與加班超額另計；只有老闆與 HR 看得到",
+      children: [
+        {
+          key: "festival",
+          label: "三節獎金",
+          href: "/admin/festival-bonuses",
+          title: "三節／節慶獎金",
+          desc: "選節日、年份與基準日一鍵產生全員建議金額（去年同期優先、到職未滿一年按月折算），逐人加減後一次發放並凍結",
+        },
+        {
+          key: "otSettlements",
+          label: "加班超額另計",
+          href: "/admin/overtime-settlements",
+          title: "加班超額另計",
+          desc: "月加班超過上限的分鐘不進薪資單，月表核准時自動列在這裡；逐筆標記以現金／補休／併薪資給付，付款後凍結",
+        },
+      ],
     },
     {
       key: "expenses",
@@ -364,6 +405,13 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       href: "/admin/onboarding",
       title: "報到管理",
       desc: "新進人員報到，完成後建立正式員工資料",
+    },
+    {
+      key: "birthdays",
+      label: "生日紅包",
+      href: "/admin/birthday-gifts",
+      title: "生日紅包登記",
+      desc: "本月壽星清單（到期前三天與當天通知 HR）；發了紅包登記金額、日期、備註並拍照留存",
     },
     {
       key: "recruitment",
@@ -726,19 +774,87 @@ export function adminModulesOf(features: Record<string, unknown> | null | undefi
   return out;
 }
 
+/* ---------------------------------------------------------- 角色導覽 --- */
+
+/**
+ * 某個角色的後台可見範圍（2026-09-23 W4）。null＝全部（HR／平台管理員）。
+ *   sections  可見分區（順序不拘，輸出永遠照 ADMIN_SECTIONS；home 永遠可見）
+ *   tabs      分區 key → 可見分頁 key 清單；分區沒列＝該區全部分頁（module 開關照舊套用）
+ */
+export interface RoleNavConfig {
+  sections: AdminSectionKey[];
+  tabs: Partial<Record<AdminSectionKey, string[]>>;
+}
+
+/**
+ * 會計預設範圍（業主決策 3）：專案與財務（發票／請款／入帳／放款／複委託付款；**不含**
+ * 獎金季發放）、出勤月表、報銷與預支（**不含**薪資作業／薪資單／稅務／現金給付）、
+ * 員工基本資料。tenants.features.roles.accountant 可整鍵覆蓋（roleNavOf）。
+ */
+export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
+  sections: ["home", "finance", "attendance", "payroll", "people"],
+  tabs: {
+    finance: ["projects", "overview", "receivables", "disbursements", "reports", "directory"],
+    attendance: ["sheets"],
+    payroll: ["expenses", "advances"],
+    people: ["employees"],
+  },
+};
+
+const SECTION_KEY_SET: ReadonlySet<string> = new Set<string>(ADMIN_SECTIONS.map((s) => s.key));
+
+function isSectionKey(key: string): key is AdminSectionKey {
+  return SECTION_KEY_SET.has(key);
+}
+
+/** 只收認得的分區 key（去重、補 home）；tabs 只收認得的分區且值是字串陣列。 */
+function sanitizeRoleNav(raw: { sections?: unknown; tabs?: unknown }, fallback: RoleNavConfig): RoleNavConfig {
+  const sections = new Set<AdminSectionKey>(["home"]);
+  if (Array.isArray(raw.sections)) {
+    for (const key of raw.sections) if (typeof key === "string" && isSectionKey(key)) sections.add(key);
+  } else {
+    for (const key of fallback.sections) sections.add(key);
+  }
+  const tabs: Partial<Record<AdminSectionKey, string[]>> = {};
+  if (raw.tabs && typeof raw.tabs === "object" && !Array.isArray(raw.tabs)) {
+    for (const [key, value] of Object.entries(raw.tabs as Record<string, unknown>)) {
+      if (!isSectionKey(key) || !Array.isArray(value)) continue;
+      tabs[key] = value.filter((v): v is string => typeof v === "string");
+    }
+  }
+  return { sections: ADMIN_SECTIONS.map((s) => s.key).filter((k) => sections.has(k)), tabs };
+}
+
+/**
+ * 角色 → 導覽範圍：hr_admin／platform_admin（與任何非會計角色）→ null（全部）；
+ * accountant → tenants.features.roles.accountant（格式不對的部分退回預設）→ 沒設定＝ACCOUNTANT_DEFAULT_NAV。
+ */
+export function roleNavOf(role: string | null | undefined, features: Record<string, unknown> | null | undefined): RoleNavConfig | null {
+  if (role !== "accountant") return null;
+  const roles = features?.roles;
+  const raw = roles && typeof roles === "object" && !Array.isArray(roles) ? (roles as Record<string, unknown>).accountant : null;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return ACCOUNTANT_DEFAULT_NAV;
+  return sanitizeRoleNav(raw as { sections?: unknown; tabs?: unknown }, ACCOUNTANT_DEFAULT_NAV);
+}
+
 /* ------------------------------------------------------ 分頁列與首頁 --- */
 
 /**
- * 分區的可見分頁：module 未啟用的剔除；`includeTab`（目前所在分頁 key）強制保留，
- * 讓直開隱藏模組網址時分頁列仍看得到自己（AdminShell 會標「未啟用」）。順序照表。
+ * 分區的可見分頁：module 未啟用的剔除；`roleNav` 有列這個分區時只留清單內的分頁；
+ * `includeTab`（目前所在分頁 key）強制保留，讓直開隱藏模組／未開放給該角色的網址時
+ * 分頁列仍看得到自己（AdminShell 會標「未啟用」／「未開放」）。順序照表。
  */
 export function tabsForSection(
   section: AdminSectionKey,
   modules: AdminModulesConfig | null | undefined,
-  opts?: { includeTab?: string | null },
+  opts?: { includeTab?: string | null; roleNav?: RoleNavConfig | null },
 ): AdminTab[] {
   const keep = opts?.includeTab ?? null;
-  return ADMIN_TABS[section].filter((tab) => tab.key === keep || isModuleEnabled(modules, tab.module));
+  const allowed = opts?.roleNav?.tabs[section];
+  const allowedSet = allowed ? new Set(allowed) : null;
+  return ADMIN_TABS[section].filter(
+    (tab) => tab.key === keep || (isModuleEnabled(modules, tab.module) && (!allowedSet || allowedSet.has(tab.key))),
+  );
 }
 
 /** 某分頁的子分頁（沒有 children／找不到 → []）。 */
@@ -747,7 +863,29 @@ export function subTabsFor(section: AdminSectionKey, tab: string | null | undefi
   return [...(ADMIN_TABS[section].find((candidate) => candidate.key === tab)?.children ?? [])];
 }
 
-/** 首頁的 8 個分區入口（排除 home）。 */
-export function homeEntries(): AdminSection[] {
-  return ADMIN_SECTIONS.filter((section) => section.key !== "home");
+/**
+ * 某角色可見的分區（順序照側欄）：null＝全部。有限縮時每個分區的 href 改成該角色
+ * 在該區**第一個可見分頁**（會計的「薪資與費用」入口是 /admin/expenses 而不是 /admin/payroll）；
+ * 一個分頁都不剩的分區不列。home 永遠在。
+ */
+export function sectionsForRole(roleNav: RoleNavConfig | null | undefined, modules?: AdminModulesConfig | null): AdminSection[] {
+  if (!roleNav) return [...ADMIN_SECTIONS];
+  const allowed = new Set<AdminSectionKey>(["home", ...roleNav.sections]);
+  const out: AdminSection[] = [];
+  for (const section of ADMIN_SECTIONS) {
+    if (!allowed.has(section.key)) continue;
+    if (section.key === "home") {
+      out.push(section);
+      continue;
+    }
+    const first = tabsForSection(section.key, modules ?? null, { roleNav })[0];
+    if (!first) continue;
+    out.push(first.href === section.href ? section : { ...section, href: first.href });
+  }
+  return out;
+}
+
+/** 首頁的分區入口（排除 home）：不帶 roleNav＝8 格；帶 roleNav＝該角色可見的分區。 */
+export function homeEntries(roleNav?: RoleNavConfig | null, modules?: AdminModulesConfig | null): AdminSection[] {
+  return sectionsForRole(roleNav ?? null, modules).filter((section) => section.key !== "home");
 }

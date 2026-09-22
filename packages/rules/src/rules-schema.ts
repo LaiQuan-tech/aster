@@ -92,18 +92,39 @@ const OvertimeMealBreakSchema = z.object({
 });
 export type OvertimeMealBreak = z.infer<typeof OvertimeMealBreakSchema>;
 
+// 加班起算基準 (W9,2026-09-23):
+//   regularHours  超過 payroll.dailyRegularHours (法定 8 小時) 才算加班 (舊行為,預設)
+//   shift         超過**當日班表淨工時** (班別時段 − 休息) 即算加班 (亞斯特 Excel 語意:
+//                 14:00–22:00 班淨 7 小時,打到 23:00 算 1 小時加班);無排班退回 regularHours
+export const OvertimeBasisSchema = z.enum(["regularHours", "shift"]);
+export type OvertimeBasis = z.infer<typeof OvertimeBasisSchema>;
+
+// 月加班超過上限後的處理 (M1,2026-09-22 業主決策 1):
+//   settle_separately  超額分鐘不進薪資單加班費,月表核准時歸入 overtime_settlements
+//                      另行給付 (現金/補休;只有老闆與 HR 看得到)。預設。
+//   warn               只在月表標異常,薪資照算 (法定 46 小時內合規的租戶用)
+export const OvertimeBeyondCapSchema = z.enum(["settle_separately", "warn"]);
+export type OvertimeBeyondCap = z.infer<typeof OvertimeBeyondCapSchema>;
+
 // 加班設定：
 //   rules             逐情境倍率規則 (見上)
 //   rounding          加班分鐘取整 (省略 = DEFAULT_OVERTIME_ROUNDING)
 //   mealBreak         用餐扣除 (省略 = DEFAULT_OVERTIME_MEAL_BREAK;null = 不扣)
 //   dailyCapMinutes   單日加班上限 (分)。引擎**只回傳、不裁切**,由 API 拿來判異常。
 //   monthlyAlertHours 月累計加班警示門檻 (小時),由小到大;同樣只供 API 判異常。
+//   basis             加班起算基準 (省略 = regularHours)
+//   monthlyCapHours   月加班上限 (小時;省略 = 40。法定 46)。送加班單時超過即標 beyond_cap;
+//                     月表核准時超額依 beyondCap 處理。
+//   beyondCap         超過上限的處理 (省略 = settle_separately)
 const OvertimeSchema = z.object({
   rules: z.array(OvertimeRuleSchema),
   rounding: OvertimeRoundingSchema.optional(),
   mealBreak: OvertimeMealBreakSchema.nullable().optional(),
   dailyCapMinutes: z.number().int().positive().optional(),
   monthlyAlertHours: z.array(z.number().nonnegative()).optional(),
+  basis: OvertimeBasisSchema.optional(),
+  monthlyCapHours: z.number().positive().optional(),
+  beyondCap: OvertimeBeyondCapSchema.optional(),
 });
 
 // 夜間加給：window 時段視窗 ("HH:MM"，允許跨午夜如 00:00–08:30)，multiplier 倍率。
@@ -134,16 +155,66 @@ const PayrollSchema = z.object({
   requireAnomalyAck: z.boolean().optional(),
 });
 
+// 勞健保投保級距表 (M12,2026-09-23):一組級距含生效日,勞保與健保各一串**由小到大**的
+// 投保薪資級距金額 (例 labor: [28590, 28800, 30300, 31800, …])。HR 設定薪資未帶投保
+// 薪資時,API 以 bracketFor() 自動選「≥ 基數的最小級距」(超過最高級距取最高;時薪制
+// 基數 = 時薪 × 每週約定時數 × 52 ÷ 12)。整串可省略 = 不自動選。
+// 生效日 (effectiveFrom 'YYYY-MM-DD') 供逐年調整:resolveInsuranceBrackets(rules, date)
+// 取生效日 ≤ date 的最新一組,陣列順序不拘。
+const InsuranceBracketSetSchema = z.object({
+  effectiveFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected 'YYYY-MM-DD'"),
+  labor: z.array(z.number().positive()),
+  health: z.array(z.number().positive()),
+});
+export type InsuranceBracketSet = z.infer<typeof InsuranceBracketSetSchema>;
+
 // 勞健保自付額：以員工的投保薪資為基數。費率逐年調整，故放在租戶規則設定裡而非寫死。
 //   labor.rate         勞保普通事故＋就保合計費率 (例 0.125)
 //   labor.employeeShare 員工自付比例 (例 0.2)
 //   health.rate        健保費率 (例 0.0517)
 //   health.employeeShare 員工自付比例 (例 0.3)
+//   brackets           投保級距表 (含生效日;見上。省略 = 不自動選級距)
 // 整段可省略；省略時不計保費（引擎回 0），既有租戶設定不會因此解析失敗。
 const InsuranceSchema = z
   .object({
     labor: z.object({ rate: z.number(), employeeShare: z.number() }),
     health: z.object({ rate: z.number(), employeeShare: z.number() }),
+    brackets: z.array(InsuranceBracketSetSchema).optional(),
+  })
+  .optional();
+
+// 特休週年制 (W1,2026-09-23):特休桶以**到職日週年**為期間,由年度給假排程自動發放。
+//   annualLeaveBasis      'anniversary' 週年制 (預設) / 'calendar' 曆年制 (排程只 skip,
+//                         餘額桶維持 HR 手動)
+//   annualLeaveTable      年資→天數表 [{minMonths, days}] (預設勞基法 §38:滿 6 個月 3 天、
+//                         1 年 7、2 年 10、3 年 14、5 年 15、10 年 16);以「日」設定,發放時
+//                         × payroll.dailyRegularHours 轉小時 (leave_balances 是小時)
+//   annualLeaveIncrement  滿 afterMonths 後每滿一年 +perYearDays,上限 maxDays
+//                         (預設 10 年後每年 +1、最多 30)
+//   annualLeaveTypeCode   特休對應的 leave_types.code (預設 'annual')
+// 整段可省略 = 全部預設 (見 resolveAnnualLeavePolicy)。
+const AnnualLeaveTierSchema = z.object({
+  minMonths: z.number().int().nonnegative(),
+  days: z.number().nonnegative(),
+});
+export type AnnualLeaveTier = z.infer<typeof AnnualLeaveTierSchema>;
+
+const AnnualLeaveIncrementSchema = z.object({
+  afterMonths: z.number().int().nonnegative(),
+  perYearDays: z.number().nonnegative(),
+  maxDays: z.number().nonnegative(),
+});
+export type AnnualLeaveIncrement = z.infer<typeof AnnualLeaveIncrementSchema>;
+
+export const AnnualLeaveBasisSchema = z.enum(["anniversary", "calendar"]);
+export type AnnualLeaveBasis = z.infer<typeof AnnualLeaveBasisSchema>;
+
+const LeaveSchema = z
+  .object({
+    annualLeaveBasis: AnnualLeaveBasisSchema.optional(),
+    annualLeaveTable: z.array(AnnualLeaveTierSchema).optional(),
+    annualLeaveIncrement: AnnualLeaveIncrementSchema.optional(),
+    annualLeaveTypeCode: z.string().trim().min(1).optional(),
   })
   .optional();
 
@@ -164,6 +235,7 @@ export const RuleConfigSchema = z.object({
   payroll: PayrollSchema,
   insurance: InsuranceSchema,
   leave_deduction: LeaveDeductionSchema,
+  leave: LeaveSchema,
 });
 
 export type RuleConfig = z.infer<typeof RuleConfigSchema>;
@@ -234,4 +306,91 @@ export function resolvePayrollGates(rules: RuleConfig): {
 /** 遲到早退是否扣款 (省略 → false)。 */
 export function resolveLateEarlyDeductionEnabled(rules: RuleConfig): boolean {
   return rules.leave_deduction?.lateEarly?.enabled ?? false;
+}
+
+/* ------------------------------------ 2026-09-23 需求補齊:加班上限/特休/級距 ----- */
+
+export const DEFAULT_OVERTIME_BASIS: OvertimeBasis = "regularHours";
+/** 月加班上限 (小時);業主決策 2:預設 40,法定 46。 */
+export const DEFAULT_OVERTIME_MONTHLY_CAP_HOURS = 40;
+export const DEFAULT_OVERTIME_BEYOND_CAP: OvertimeBeyondCap = "settle_separately";
+export const DEFAULT_ANNUAL_LEAVE_BASIS: AnnualLeaveBasis = "anniversary";
+/** 勞基法 §38 年資→特休天數 (以「日」計)。 */
+export const DEFAULT_ANNUAL_LEAVE_TABLE: readonly AnnualLeaveTier[] = [
+  { minMonths: 6, days: 3 },
+  { minMonths: 12, days: 7 },
+  { minMonths: 24, days: 10 },
+  { minMonths: 36, days: 14 },
+  { minMonths: 60, days: 15 },
+  { minMonths: 120, days: 16 },
+];
+/** 滿 10 年後每滿一年 +1 日,上限 30 日 (勞基法 §38 ①六)。 */
+export const DEFAULT_ANNUAL_LEAVE_INCREMENT: AnnualLeaveIncrement = {
+  afterMonths: 120,
+  perYearDays: 1,
+  maxDays: 30,
+};
+export const DEFAULT_ANNUAL_LEAVE_TYPE_CODE = "annual";
+
+/** 加班起算基準 (省略 → regularHours)。 */
+export function resolveOvertimeBasis(rules: RuleConfig): OvertimeBasis {
+  return rules.overtime.basis ?? DEFAULT_OVERTIME_BASIS;
+}
+
+/** 月加班上限 (小時;省略 → 40)。 */
+export function resolveOvertimeMonthlyCapHours(rules: RuleConfig): number {
+  return rules.overtime.monthlyCapHours ?? DEFAULT_OVERTIME_MONTHLY_CAP_HOURS;
+}
+
+/** 超過月上限的處理 (省略 → settle_separately)。 */
+export function resolveOvertimeBeyondCap(rules: RuleConfig): OvertimeBeyondCap {
+  return rules.overtime.beyondCap ?? DEFAULT_OVERTIME_BEYOND_CAP;
+}
+
+export interface AnnualLeavePolicy {
+  basis: AnnualLeaveBasis;
+  /** 已依 minMonths 升冪排序 (設定端不必排)。 */
+  table: readonly AnnualLeaveTier[];
+  increment: AnnualLeaveIncrement;
+  typeCode: string;
+}
+
+/** 特休政策 (每個鍵各自補預設;table 依 minMonths 升冪)。 */
+export function resolveAnnualLeavePolicy(rules: RuleConfig): AnnualLeavePolicy {
+  const leave = rules.leave;
+  const table = [...(leave?.annualLeaveTable ?? DEFAULT_ANNUAL_LEAVE_TABLE)].sort(
+    (a, b) => a.minMonths - b.minMonths,
+  );
+  return {
+    basis: leave?.annualLeaveBasis ?? DEFAULT_ANNUAL_LEAVE_BASIS,
+    table,
+    increment: leave?.annualLeaveIncrement ?? DEFAULT_ANNUAL_LEAVE_INCREMENT,
+    typeCode: leave?.annualLeaveTypeCode ?? DEFAULT_ANNUAL_LEAVE_TYPE_CODE,
+  };
+}
+
+/**
+ * 某日適用的投保級距表:生效日 ≤ date ('YYYY-MM-DD') 的最新一組 (陣列順序不拘);
+ * 沒設定、或全部都晚於 date → null (＝不自動選級距)。
+ */
+export function resolveInsuranceBrackets(rules: RuleConfig, date: string): InsuranceBracketSet | null {
+  const sets = rules.insurance?.brackets;
+  if (!sets || sets.length === 0) return null;
+  let picked: InsuranceBracketSet | null = null;
+  for (const s of sets) {
+    if (s.effectiveFrom > date) continue;
+    if (!picked || s.effectiveFrom > picked.effectiveFrom) picked = s;
+  }
+  return picked;
+}
+
+/**
+ * 純函式:基數 → 級距 (≥ amount 的最小級距;超過最高級距取最高;空清單 → null)。
+ * 30,300 → 30,300;30,301 → 31,800 (勞保級距表);清單順序不拘。
+ */
+export function bracketFor(amount: number, list: readonly number[]): number | null {
+  const sorted = list.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (sorted.length === 0) return null;
+  for (const v of sorted) if (v >= amount) return v;
+  return sorted[sorted.length - 1];
 }

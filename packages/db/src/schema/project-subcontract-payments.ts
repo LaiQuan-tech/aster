@@ -17,6 +17,12 @@ import { disbursements } from "./disbursements"
  * 時才算得出來，故落在期款列而非母表）。`payingCompanyId`／
  * `receiptIssuerCompanyId` 分開存：付款主體與收據/憑證的開立主體不一定
  * 相同（集團客戶常見情境），`companies` 表存在的理由之一即為此。
+ *
+ * ── 驗收確認（M5，2026-09-23）────────────────────────────────────────
+ * `acceptedOn`／`acceptedByEmpId`／`acceptanceNote`：這一期的工作已驗收。
+ * 放款單分攤到**未驗收**的期款一律 409 `acceptance_required`（HR 帶
+ * forceAcceptance＋理由才放行並寫 audit）；已付期別的驗收欄不可清。
+ * `acceptedByEmpId` 只留痕、不設 FK。
  */
 export const projectSubcontractPayments = pgTable(
   "project_subcontract_payments",
@@ -50,6 +56,10 @@ export const projectSubcontractPayments = pgTable(
     receiptRef: text("receipt_ref"),
     /** 放款專區連動寫入；null＝尚未經放款專區處理（含舊路徑手動標記已付）。 */
     disbursementId: uuid("disbursement_id").references(() => disbursements.id),
+    // ── 驗收確認（見上方說明）；三欄一起寫，null＝尚未驗收。 ──
+    acceptedOn: date("accepted_on"),
+    acceptedByEmpId: uuid("accepted_by_emp_id"),
+    acceptanceNote: text("acceptance_note"),
     note: text("note"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

@@ -122,7 +122,17 @@ export type RequestKind =
   | "fix_punch"
   | "business_trip"
   /** 零用金預支（模組三第 3 條），走與出差預支相同的簽核管線。 */
-  | "petty_cash";
+  | "petty_cash"
+  /** 在家工作（M2，2026-09-23）：只用 startAt／endAt／hours／reason；核准日無打卡以班表淨工時計。 */
+  | "wfh";
+
+/** 加班單超過月上限的標記明細（M1；services/overtime-cap.ts beyondCapCheck）。 */
+export interface BeyondCapDetail {
+  approvedBeforeMinutes: number;
+  requestedMinutes: number;
+  capMinutes: number;
+  beyondCapMinutes?: number;
+}
 
 export interface LeaveRequest {
   id: string;
@@ -170,6 +180,9 @@ export interface LeaveRequest {
   /** 最後一次簽核決定的意見（駁回理由）與時間。 */
   decision_comment?: string | null;
   decided_at?: string | null;
+  /* ── 月加班上限（M1，2026-09-23）：kind=ot 送單時累計超過上限即標記「超過月上限，另行給付」 ── */
+  beyond_cap?: boolean;
+  beyond_cap_detail?: BeyondCapDetail | null;
 }
 
 export interface LeaveType {
@@ -236,10 +249,16 @@ export function getPunchRecords(from?: string, to?: string) {
 export interface LeaveBalance {
   id: string;
   leave_type_id: string;
+  /** ＝period_start 的年；週年制（W1）後保留給舊讀點。 */
   year: number;
   entitled: number | string;
   used: number | string;
   deferred: number | string;
+  /* ── 特休週年制（W1，2026-09-23）：餘額桶期間與來源；舊 API 沒回時缺席，畫面退回顯示 year ── */
+  period_start?: string;
+  period_end?: string;
+  source?: "manual" | "auto" | "migrated" | string;
+  note?: string | null;
 }
 
 export function getLeaveBalances() {

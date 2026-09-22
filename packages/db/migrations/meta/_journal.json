@@ -351,6 +351,13 @@
       "when": 1790045628035,
       "tag": "0049_multi_level_approval",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1790076764155,
+      "tag": "0050_requirements_2026_09_23",
+      "breakpoints": true
     }
   ]
 }

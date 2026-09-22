@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest"
-import { pickApproverChain, normaliseMode, type ChainCandidates } from "../services/approval-chain"
+import {
+  pickApproverChain,
+  pickDisbursementChain,
+  normaliseMode,
+  STEP_KINDS,
+  type ChainCandidates,
+} from "../services/approval-chain"
 import { managerChainFromDepartments } from "../middleware/scope"
 import { stepCandidates, isStepCandidate } from "../services/approval-steps"
 import { buildNotificationRows } from "../services/notify"
@@ -158,6 +164,152 @@ describe("pickApproverChain — manager_hr（主管逐級 → HR 覆核）", () 
   it("mode=manager 對同一組資料只取第一位主管（單關）", () => {
     const r = pickApproverChain(base({ flow: { mode: "manager", approverEmpIds: [] }, managerEmpIds: [MGR, MGR2], hrAdminEmpIds: [HR1, HR2] }))
     expect(r).toEqual({ ok: true, steps: [one(MGR, "manager")], source: "manager" })
+  })
+})
+
+describe("pickApproverChain — requireBossFinal（跨縣市出差：老闆最後一關）", () => {
+  const ACC1 = "00000000-0000-4000-8000-00000000f001"
+
+  it("主管×2＋老闆 → 3 關：小主管、大主管各一關（manager）＋老闆最後一關（fallback）；source=boss_final", () => {
+    const r = pickApproverChain(base({ requireBossFinal: true, managerEmpIds: [MGR, MGR2], fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1] }))
+    expect(r).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager"), one(MGR2, "manager"), one(BOSS, "fallback")],
+      source: "boss_final",
+    })
+  })
+
+  it("老闆已在主管鏈內（部門根主管就是老闆）→ 不重複加最後一關", () => {
+    const r = pickApproverChain(base({ requireBossFinal: true, managerEmpIds: [MGR, BOSS], fallbackApproverEmpId: BOSS }))
+    expect(r).toEqual({ ok: true, steps: [one(MGR, "manager"), one(BOSS, "manager")], source: "boss_final" })
+  })
+
+  it("無主管 → 只有老闆一關；老闆是申請人本人 → 跳過老闆、退回 hr_admin", () => {
+    expect(pickApproverChain(base({ requireBossFinal: true, fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1] }))).toEqual({
+      ok: true,
+      steps: [one(BOSS, "fallback")],
+      source: "boss_final",
+    })
+    expect(
+      pickApproverChain(base({ employeeId: BOSS, requireBossFinal: true, fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1, HR2] })),
+    ).toEqual({ ok: true, steps: [one(HR1, "hr_admin")], source: "hr_admin" })
+  })
+
+  it("無主管無老闆 → 第一位 hr_admin（避開本人）；連 HR 也沒有 → no_approver_available", () => {
+    expect(pickApproverChain(base({ requireBossFinal: true, hrAdminEmpIds: [HR1, HR2] }))).toEqual({
+      ok: true,
+      steps: [one(HR1, "hr_admin")],
+      source: "hr_admin",
+    })
+    expect(pickApproverChain(base({ employeeId: HR1, requireBossFinal: true, hrAdminEmpIds: [HR1, HR2] }))).toEqual({
+      ok: true,
+      steps: [one(HR2, "hr_admin")],
+      source: "hr_admin",
+    })
+    expect(pickApproverChain(base({ requireBossFinal: true }))).toEqual({ ok: false, error: "no_approver_available" })
+  })
+
+  it("list 名單非空時名單優先（requireBossFinal 不改變 HR 明訂的名單）；mode=manager 走 boss_final", () => {
+    expect(
+      pickApproverChain(base({ requireBossFinal: true, flow: { mode: "list", approverEmpIds: [L1] }, managerEmpIds: [MGR], fallbackApproverEmpId: BOSS })),
+    ).toEqual({ ok: true, steps: [one(L1, "list")], source: "list" })
+    expect(
+      pickApproverChain(base({ requireBossFinal: true, flow: { mode: "manager", approverEmpIds: [] }, managerEmpIds: [MGR, MGR2], fallbackApproverEmpId: BOSS })),
+    ).toEqual({ ok: true, steps: [one(MGR, "manager"), one(MGR2, "manager"), one(BOSS, "fallback")], source: "boss_final" })
+  })
+
+  it("manager_hr＋requireBossFinal：主管逐關 → 老闆（不在鏈內時插入）→ HR 覆核維持最後", () => {
+    const flow = { mode: "manager_hr" as const, approverEmpIds: [] }
+    expect(
+      pickApproverChain(base({ requireBossFinal: true, flow, managerEmpIds: [MGR], fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1] })),
+    ).toEqual({ ok: true, steps: [one(MGR, "manager"), one(BOSS, "fallback"), { candidateEmpIds: [HR1], kind: "hr" }], source: "manager_hr" })
+  })
+
+  it("requireBossFinal 未帶／false 時既有行為不變（manager 模式只取主管鏈第一位）", () => {
+    expect(pickApproverChain(base({ requireBossFinal: false, managerEmpIds: [MGR, MGR2], fallbackApproverEmpId: BOSS }))).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager")],
+      source: "manager",
+    })
+    // accountantEmpIds 對假單鏈沒有作用
+    expect(pickApproverChain(base({ managerEmpIds: [MGR], accountantEmpIds: [ACC1] }))).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager")],
+      source: "manager",
+    })
+  })
+})
+
+describe("pickDisbursementChain — 放款鏈（主管逐關 → 會計 → 老闆）", () => {
+  const ACC1 = "00000000-0000-4000-8000-00000000f001"
+  const ACC2 = "00000000-0000-4000-8000-00000000f002"
+
+  it("主管×1＋會計×2＋老闆 → 3 關；第 2 關候選 2 人（kind=accountant）；source=disbursement", () => {
+    const r = pickDisbursementChain(base({ managerEmpIds: [MGR], accountantEmpIds: [ACC1, ACC2], fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1] }))
+    expect(r).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager"), { candidateEmpIds: [ACC1, ACC2], kind: "accountant" }, one(BOSS, "fallback")],
+      source: "disbursement",
+    })
+  })
+
+  it("無會計 → 略過會計關（主管 → 老闆）；會計就是建單人 → 排除本人，只剩本人就略過", () => {
+    expect(pickDisbursementChain(base({ managerEmpIds: [MGR], fallbackApproverEmpId: BOSS }))).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager"), one(BOSS, "fallback")],
+      source: "disbursement",
+    })
+    expect(pickDisbursementChain(base({ employeeId: ACC1, managerEmpIds: [MGR], accountantEmpIds: [ACC1], fallbackApproverEmpId: BOSS }))).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager"), one(BOSS, "fallback")],
+      source: "disbursement",
+    })
+    expect(pickDisbursementChain(base({ employeeId: ACC1, managerEmpIds: [MGR], accountantEmpIds: [ACC1, ACC2], fallbackApproverEmpId: BOSS }))).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager"), { candidateEmpIds: [ACC2], kind: "accountant" }, one(BOSS, "fallback")],
+      source: "disbursement",
+    })
+  })
+
+  it("建單人是老闆 → 老闆關跳過；老闆同時是主管鏈上的人 → 不重複；會計同時是主管 → 會計關排除他", () => {
+    expect(pickDisbursementChain(base({ employeeId: BOSS, managerEmpIds: [MGR], accountantEmpIds: [ACC1], fallbackApproverEmpId: BOSS }))).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager"), { candidateEmpIds: [ACC1], kind: "accountant" }],
+      source: "disbursement",
+    })
+    expect(pickDisbursementChain(base({ managerEmpIds: [MGR, BOSS], accountantEmpIds: [ACC1], fallbackApproverEmpId: BOSS }))).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager"), one(BOSS, "manager"), { candidateEmpIds: [ACC1], kind: "accountant" }],
+      source: "disbursement",
+    })
+    expect(pickDisbursementChain(base({ managerEmpIds: [ACC1], accountantEmpIds: [ACC1, ACC2], fallbackApproverEmpId: BOSS }))).toEqual({
+      ok: true,
+      steps: [one(ACC1, "manager"), { candidateEmpIds: [ACC2], kind: "accountant" }, one(BOSS, "fallback")],
+      source: "disbursement",
+    })
+  })
+
+  it("list 模式名單非空 → 照名單逐關（去重、kind=list），其餘來源忽略；名單空 → 走預設鏈", () => {
+    expect(
+      pickDisbursementChain(base({ flow: { mode: "list", approverEmpIds: [L1, L2, L1] }, managerEmpIds: [MGR], accountantEmpIds: [ACC1], fallbackApproverEmpId: BOSS })),
+    ).toEqual({ ok: true, steps: [one(L1, "list"), one(L2, "list")], source: "list" })
+    expect(
+      pickDisbursementChain(base({ flow: { mode: "list", approverEmpIds: [] }, managerEmpIds: [MGR], accountantEmpIds: [ACC1], fallbackApproverEmpId: BOSS })),
+    ).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager"), { candidateEmpIds: [ACC1], kind: "accountant" }, one(BOSS, "fallback")],
+      source: "disbursement",
+    })
+  })
+
+  it("主管、會計、老闆全空 → 第一位 hr_admin 退路（避開本人）；連 HR 也沒有 → no_approver_available", () => {
+    expect(pickDisbursementChain(base({ hrAdminEmpIds: [HR1, HR2] }))).toEqual({ ok: true, steps: [one(HR1, "hr_admin")], source: "hr_admin" })
+    expect(pickDisbursementChain(base({ employeeId: HR1, hrAdminEmpIds: [HR1, HR2] }))).toEqual({ ok: true, steps: [one(HR2, "hr_admin")], source: "hr_admin" })
+    expect(pickDisbursementChain(base())).toEqual({ ok: false, error: "no_approver_available" })
+  })
+
+  it("STEP_KINDS 含 accountant（落 step_kind 用）", () => {
+    expect(STEP_KINDS).toContain("accountant")
   })
 })
 

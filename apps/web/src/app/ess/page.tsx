@@ -16,9 +16,12 @@ import {
   type PunchSummary,
 } from "@/lib/punch-state";
 import { Button, Card, Icon, InlineError, useToast } from "@/components/ess-ui";
+import { OvertimeCapCard } from "./_components/OvertimeCapCard";
+import { DutyTodayCard } from "./_components/DutyTodayCard";
 
 /**
- * 打卡首頁 `/ess`：只剩四塊——日期時鐘、大打卡鈕、今日上下班時間、需簽收公告提示。
+ * 打卡首頁 `/ess`：日期時鐘、大打卡鈕、今日上下班時間、本月加班累計（M1，WP1 填）、
+ * 今日值日／總機（M8，WP8 填）、需簽收公告提示。
  * 頁框（頂部列、底部分頁、登入守門、ToastProvider）由 `ess/layout.tsx` 提供，這裡不再包。
  *
  * 載入順序：`GET /punch/today` 最先且獨立（失敗 → InlineError＋重試，鈕 disabled）；
@@ -397,6 +400,8 @@ export default function EssHome() {
         onRetryLoad={() => void loadPunch()}
       />
       <TodayTimes summary={summary} loading={loading} />
+      <OvertimeCapCard />
+      <DutyTodayCard />
       <AnnouncementHint count={hintCount} />
     </div>
   );

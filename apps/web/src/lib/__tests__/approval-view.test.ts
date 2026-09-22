@@ -144,11 +144,12 @@ const PENDING_ROWS = ALL_ROWS.filter((r) => r.status === "pending");
 
 /* ---------------------------------------------------------------- view --- */
 
-describe("KIND_LABEL／KIND_OPTIONS 涵蓋五種表單（零用金預支曾漏掉→後台類型欄空白）", () => {
-  it("五種 kind 都有中文標籤，且篩選選項一致", () => {
-    const kinds = ["leave", "ot", "fix_punch", "business_trip", "petty_cash"] as const;
+describe("KIND_LABEL／KIND_OPTIONS 涵蓋六種表單（零用金預支曾漏掉→後台類型欄空白；2026-09-23 加在家工作）", () => {
+  it("六種 kind 都有中文標籤，且篩選選項一致", () => {
+    const kinds = ["leave", "ot", "fix_punch", "business_trip", "petty_cash", "wfh"] as const;
     for (const k of kinds) expect(KIND_LABEL[k]).toBeTruthy();
     expect(KIND_LABEL.petty_cash).toBe("零用金預支");
+    expect(KIND_LABEL.wfh).toBe("在家工作");
     expect(KIND_OPTIONS.map((o) => o.value)).toEqual([...kinds]);
   });
 });

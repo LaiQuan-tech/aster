@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   ALWAYS_VISIBLE_TAB_KEYS,
   BOTTOM_TAB_KEYS,
+  EMPLOYMENT_TYPES,
+  EMPLOYMENT_TYPE_LABELS,
   ESS_ROUTES,
   ESS_TABS,
   INTERN_DEFAULT_ESS_TABS,
@@ -13,6 +15,14 @@ import {
   routeForPath,
   visibleTabs,
 } from "../ess-tabs";
+
+describe("EMPLOYMENT_TYPES／EMPLOYMENT_TYPE_LABELS（身分類別）", () => {
+  it("四種身分不變；parttime 標籤寫明「工讀／兼職（時薪）」（M12 工讀生不另開值域）", () => {
+    expect(EMPLOYMENT_TYPES).toEqual(["regular", "parttime", "contract", "intern"]);
+    expect(EMPLOYMENT_TYPE_LABELS.parttime).toBe("工讀／兼職（時薪）");
+    for (const type of EMPLOYMENT_TYPES) expect(EMPLOYMENT_TYPE_LABELS[type].length).toBeGreaterThan(0);
+  });
+});
 
 const TABS = [
   { key: "home", label: "今日打卡" },

@@ -14,7 +14,8 @@ import type { AdminModulesConfig } from "./admin-nav";
 
 /* ------------------------------------------------------------------ me ----- */
 
-export type Role = "platform_admin" | "hr_admin" | "employee" | string;
+/** 會計（accountant，2026-09-23 W4）：可進後台，範圍見 lib/admin-nav.ts roleNavOf。 */
+export type Role = "platform_admin" | "hr_admin" | "accountant" | "employee" | string;
 
 export interface Me {
   id: string;
@@ -548,7 +549,16 @@ export function reviewSchedule(id: string, decision: "acknowledge" | "dispute") 
 /* ------------------------------------------------------------ requests ----- */
 
 export type RequestStatus = "pending" | "approved" | "rejected" | "cancelled";
-export type RequestKind = "leave" | "ot" | "fix_punch" | "business_trip" | "petty_cash";
+/** `wfh`＝在家工作（M2，2026-09-23）：只用 start_at／end_at／hours／reason。 */
+export type RequestKind = "leave" | "ot" | "fix_punch" | "business_trip" | "petty_cash" | "wfh";
+
+/** 加班單超過月上限的標記明細（services/overtime-cap.ts beyondCapCheck）。 */
+export interface BeyondCapDetail {
+  approvedBeforeMinutes: number;
+  requestedMinutes: number;
+  capMinutes: number;
+  beyondCapMinutes?: number;
+}
 
 export interface LeaveRequest {
   id: string;
@@ -578,6 +588,9 @@ export interface LeaveRequest {
   current_approver_names?: string[];
   /** 目前關卡種類：manager｜hr｜list｜fallback｜hr_admin。 */
   current_step_kind?: string;
+  /* ── 月加班上限（M1，2026-09-23）：kind=ot 送單時累計超過上限即標記；舊 API 沒回時缺席 ── */
+  beyond_cap?: boolean;
+  beyond_cap_detail?: BeyondCapDetail | null;
 }
 
 export interface RequestQuery {
@@ -1115,8 +1128,13 @@ export function computeTax(body: TaxComputeBody) {
 
 /* ------------------------------------------------------ approval-flows ----- */
 
-/** 可設定簽核流程的表單類別（API kindSchema；比 RequestKind 多零用金預支）。 */
-export type ApprovalFlowKind = RequestKind | "petty_cash";
+/**
+ * 可設定簽核流程的表單類別（API kindSchema）：RequestKind（含 petty_cash、wfh）之外，
+ * 2026-09-23 再加兩個「不是表單種類、但各走自己流程」的 applies_to：
+ *   business_trip_intercity — 跨縣市／海外出差（無 flow 時預設鏈＝主管逐關 → 老闆最後一關）
+ *   disbursement            — 放款單送簽（主管鏈 → 會計 → 老闆；list 模式照名單）
+ */
+export type ApprovalFlowKind = RequestKind | "petty_cash" | "business_trip_intercity" | "disbursement";
 
 /**
  * 簽核模式（approval_flows.mode）：
@@ -1563,10 +1581,19 @@ export interface LeaveBalance {
   id: string;
   employee_id: string;
   leave_type_id: string;
+  /** ＝period_start 的年；週年制（W1）後保留給舊讀點。 */
   year: number;
   entitled: number | string;
   used: number | string;
   deferred: number | string;
+  /* ── 特休週年制（W1，2026-09-23）：餘額桶期間與來源；舊 API 沒回時缺席 ── */
+  /** 'YYYY-MM-DD'（含）。 */
+  period_start?: string;
+  /** 'YYYY-MM-DD'（含）。 */
+  period_end?: string;
+  /** manual HR 手動｜auto 年度給假｜migrated 由曆年列搬遷。 */
+  source?: "manual" | "auto" | "migrated" | string;
+  note?: string | null;
 }
 
 export function getLeaveBalancesAdmin(params: { employeeId?: string; year?: number } = {}) {

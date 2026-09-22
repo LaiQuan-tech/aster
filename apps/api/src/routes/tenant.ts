@@ -160,6 +160,24 @@ export const tenantSettingsSchema = z.object({
           enableAutoSettlement: z.boolean().optional(),
         })
         .optional(),
+      /**
+       * 角色可用範圍（W4 會計角色；2026-09-22 業主決策 3「範圍做成進階功能可勾選」）。
+       * `accountant.sections`：後台可見分區 key 清單；`accountant.tabs`：分區 key →
+       * 可見分頁 key 清單（分區沒列＝該區全部）。key 定義見 apps/web/src/lib/admin-nav.ts
+       * 的 ADMIN_SECTIONS／ADMIN_TABS（roleNavOf 只讀認得的 key）；沒設定時前端用
+       * ACCOUNTANT_DEFAULT_NAV。設定頁整鍵覆蓋。API 端守門不讀這裡（requireFinance／
+       * canSeeBonus 是寫死的），這只影響導覽可見性。
+       */
+      roles: z
+        .object({
+          accountant: z
+            .object({
+              sections: z.array(z.string().trim().min(1)).max(20).optional(),
+              tabs: z.record(z.string().trim().min(1), z.array(z.string().trim().min(1)).max(40)).optional(),
+            })
+            .optional(),
+        })
+        .optional(),
     })
     .optional(),
 })

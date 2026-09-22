@@ -15,6 +15,9 @@ import { employees } from "./employees"
  * finalized payslip is locked and a re-run skips it rather than overwriting.
  * `version` bumps on each non-finalized re-run. The unique (tenant_id,
  * employee_id, period) index makes the run idempotent and is the upsert key.
+ *
+ * `sentAt`／`sentTo`（M3，2026-09-23）：薪資條 Email 一鍵寄送後記寄出時間與
+ * 收件地址（只寄 finalized；ESS 端顯示「已寄至 …」）。null＝尚未寄送。
  */
 export const payslips = pgTable(
   "payslips",
@@ -35,6 +38,9 @@ export const payslips = pgTable(
     breakdown: jsonb("breakdown").notNull().default({}),
     status: text("status").notNull().default("draft"),
     version: integer("version").notNull().default(1),
+    /** 薪資條 Email 寄出時間／收件地址；null＝未寄送。 */
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    sentTo: text("sent_to"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

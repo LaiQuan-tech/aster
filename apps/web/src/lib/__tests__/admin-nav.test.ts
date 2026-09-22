@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import nextConfig from "../../../next.config";
 import {
+  ACCOUNTANT_DEFAULT_NAV,
   ADMIN_MODULES,
   ADMIN_REDIRECTS,
   ADMIN_ROUTES,
@@ -15,7 +16,9 @@ import {
   normalizeAdminPath,
   parentPathFor,
   resolveAdminPath,
+  roleNavOf,
   sectionForPath,
+  sectionsForRole,
   subTabsFor,
   tabsForSection,
   type AdminSectionKey,
@@ -115,7 +118,7 @@ describe("resolveAdminPath：最長前綴", () => {
     expect(resolveAdminPath("/admin/projects/alerts")).toMatchObject({ tab: "reports", sub: "alerts", title: "AI 進度示警" });
   });
 
-  it("/admin/disbursements/pivot → disbursements 分頁 sub pivot；/admin/disbursements → sub list", () => {
+  it("/admin/disbursements/pivot → disbursements 分頁 sub pivot；/admin/disbursements → sub list；/approvals → sub approvals（不是匯款單 detail）", () => {
     expect(resolveAdminPath("/admin/disbursements/pivot")).toMatchObject({
       section: "finance",
       tab: "disbursements",
@@ -124,6 +127,23 @@ describe("resolveAdminPath：最長前綴", () => {
       isDetail: false,
     });
     expect(resolveAdminPath("/admin/disbursements")).toMatchObject({ tab: "disbursements", sub: "list", title: "放款專區" });
+    expect(resolveAdminPath("/admin/disbursements/approvals")).toMatchObject({
+      tab: "disbursements",
+      sub: "approvals",
+      title: "放款單簽核",
+      isDetail: false,
+    });
+  });
+
+  it("2026-09-23 新分頁：現金給付（三節獎金／加班超額另計）、生日紅包、值日／總機", () => {
+    expect(resolveAdminPath("/admin/festival-bonuses")).toMatchObject({ section: "payroll", tab: "cash", sub: "festival", title: "三節／節慶獎金" });
+    expect(resolveAdminPath("/admin/overtime-settlements")).toMatchObject({ section: "payroll", tab: "cash", sub: "otSettlements", title: "加班超額另計" });
+    expect(resolveAdminPath("/admin/birthday-gifts")).toMatchObject({ section: "people", tab: "birthdays", title: "生日紅包登記" });
+    expect(resolveAdminPath("/admin/duty-rosters")).toMatchObject({ section: "attendance", tab: "duty", title: "值日生／總機輪播排班" });
+    for (const path of ["/admin/festival-bonuses", "/admin/overtime-settlements", "/admin/birthday-gifts", "/admin/duty-rosters"]) {
+      expect(resolveAdminPath(path).module, path).toBeUndefined();
+      expect(resolveAdminPath(path).narrow, path).toBe(false);
+    }
   });
 
   it("名冊三頁都是 directory 分頁的子分頁", () => {
@@ -336,25 +356,35 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
     expect(ADMIN_TABS.home).toEqual([]);
   });
 
-  it("tabsForSection('people')：預設 3 個；{recruitment:true} 加進來且順序照表", () => {
-    expect(tabsForSection("people", null).map((t) => t.key)).toEqual(["employees", "departments", "onboarding"]);
-    expect(tabsForSection("people", {}).map((t) => t.key)).toEqual(["employees", "departments", "onboarding"]);
+  it("payroll 分頁順序：薪資 → 薪資單 → 稅務 → 現金給付（三節／加班超額）→ 報銷 → 預支", () => {
+    expect(ADMIN_TABS.payroll.map((t) => t.key)).toEqual(["payroll", "payslips", "tax", "cash", "expenses", "advances"]);
+    expect(subTabsFor("payroll", "cash").map((s) => `${s.key}:${s.href}`)).toEqual([
+      "festival:/admin/festival-bonuses",
+      "otSettlements:/admin/overtime-settlements",
+    ]);
+  });
+
+  it("tabsForSection('people')：預設 4 個（含生日紅包）；{recruitment:true} 加進來且順序照表", () => {
+    expect(tabsForSection("people", null).map((t) => t.key)).toEqual(["employees", "departments", "onboarding", "birthdays"]);
+    expect(tabsForSection("people", {}).map((t) => t.key)).toEqual(["employees", "departments", "onboarding", "birthdays"]);
     expect(tabsForSection("people", { recruitment: true }).map((t) => t.key)).toEqual([
       "employees",
       "departments",
       "onboarding",
+      "birthdays",
       "recruitment",
     ]);
     expect(tabsForSection("people", { employeeMail: true, kpi: true, recruitment: true }).map((t) => t.key)).toEqual([
       "employees",
       "departments",
       "onboarding",
+      "birthdays",
       "recruitment",
       "kpi",
       "employeeMail",
     ]);
     // false／非 boolean 都算未啟用
-    expect(tabsForSection("people", { kpi: false }).map((t) => t.key)).toEqual(["employees", "departments", "onboarding"]);
+    expect(tabsForSection("people", { kpi: false }).map((t) => t.key)).toEqual(["employees", "departments", "onboarding", "birthdays"]);
   });
 
   it("includeTab 強制保留目前所在的隱藏分頁；不認得的 key／null 沒作用", () => {
@@ -362,10 +392,11 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
       "employees",
       "departments",
       "onboarding",
+      "birthdays",
       "kpi",
     ]);
-    expect(tabsForSection("people", {}, { includeTab: null }).map((t) => t.key)).toEqual(["employees", "departments", "onboarding"]);
-    expect(tabsForSection("people", {}, { includeTab: "nope" })).toHaveLength(3);
+    expect(tabsForSection("people", {}, { includeTab: null }).map((t) => t.key)).toEqual(["employees", "departments", "onboarding", "birthdays"]);
+    expect(tabsForSection("people", {}, { includeTab: "nope" })).toHaveLength(4);
     expect(tabsForSection("system", null, { includeTab: "ai" }).map((t) => t.key)).toEqual([
       "reports",
       "audit",
@@ -374,12 +405,13 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
       "ai",
     ]);
     expect(tabsForSection("announce", { knowledge: true }).map((t) => t.key)).toEqual(["announcements", "companyInfo", "knowledge"]);
-    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "sheets", "schedules"]);
+    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "sheets", "schedules", "duty"]);
   });
 
   it("subTabsFor：有 children 回子分頁（含 href）、沒有回 []、null 回 []", () => {
     expect(subTabsFor("finance", "disbursements")).toEqual([
       expect.objectContaining({ key: "list", label: "放款作業", href: "/admin/disbursements" }),
+      expect.objectContaining({ key: "approvals", label: "待簽核", href: "/admin/disbursements/approvals" }),
       expect.objectContaining({ key: "pivot", label: "年度總覽", href: "/admin/disbursements/pivot" }),
     ]);
     expect(subTabsFor("finance", "reports").map((s) => s.key)).toEqual(["annual", "stampDuty", "alerts"]);
@@ -400,6 +432,58 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
     ]);
     expect(resolveAdminPath("/admin/shifts").narrow).toBe(true);
     expect(resolveAdminPath("/admin/employees").narrow).toBe(false);
+  });
+});
+
+describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／tabsForSection({ roleNav })", () => {
+  const NAV = ACCOUNTANT_DEFAULT_NAV;
+
+  it("會計預設範圍不含 bonus／payroll／payslips／tax／cash；分區只有 首頁、專案與財務、出勤、薪資與費用、人員", () => {
+    expect(NAV.sections).toEqual(["home", "finance", "attendance", "payroll", "people"]);
+    const finance = tabsForSection("finance", null, { roleNav: NAV }).map((t) => t.key);
+    expect(finance).not.toContain("bonus");
+    expect(finance).toEqual(["projects", "overview", "receivables", "disbursements", "reports", "directory"]);
+    const payroll = tabsForSection("payroll", null, { roleNav: NAV }).map((t) => t.key);
+    expect(payroll).toEqual(["expenses", "advances"]);
+    for (const key of ["payroll", "payslips", "tax", "cash"]) expect(payroll).not.toContain(key);
+    expect(tabsForSection("attendance", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["sheets"]);
+    expect(tabsForSection("people", { recruitment: true }, { roleNav: NAV }).map((t) => t.key)).toEqual(["employees"]);
+    // 沒列在 tabs 的分區＝該區全部（module 開關照舊）
+    expect(tabsForSection("system", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["reports", "audit", "backups", "notifications"]);
+    // includeTab 仍強制保留（直開未開放網址時分頁列標「未開放」）
+    expect(tabsForSection("payroll", null, { roleNav: NAV, includeTab: "payslips" }).map((t) => t.key)).toEqual(["payslips", "expenses", "advances"]);
+  });
+
+  it("sectionsForRole：null → 9 個分區原樣；會計 → 5 個且 href 改成該區第一個可見分頁", () => {
+    expect(sectionsForRole(null)).toEqual([...ADMIN_SECTIONS]);
+    expect(sectionsForRole(undefined).map((s) => s.key)).toEqual(SECTION_KEYS);
+    const acc = sectionsForRole(NAV);
+    expect(acc.map((s) => s.key)).toEqual(["home", "finance", "attendance", "payroll", "people"]);
+    expect(acc.map((s) => s.href)).toEqual(["/admin", "/admin/projects", "/admin/attendance-sheets", "/admin/expenses", "/admin/employees"]);
+    // 分區被列了但一個分頁都不剩 → 不列
+    expect(sectionsForRole({ sections: ["home", "system"], tabs: { system: ["nope"] } }).map((s) => s.key)).toEqual(["home"]);
+    // homeEntries 帶 roleNav → 排除 home 的可見分區
+    expect(homeEntries(NAV).map((s) => s.key)).toEqual(["finance", "attendance", "payroll", "people"]);
+    expect(homeEntries()).toHaveLength(8);
+  });
+
+  it("roleNavOf：非會計 → null；會計沒設定 → 預設；features.roles.accountant 有效時整鍵覆蓋（只收認得的 key、補 home）", () => {
+    expect(roleNavOf("hr_admin", { roles: { accountant: { sections: ["finance"] } } })).toBeNull();
+    expect(roleNavOf("platform_admin", null)).toBeNull();
+    expect(roleNavOf("employee", {})).toBeNull();
+    expect(roleNavOf(null, {})).toBeNull();
+    expect(roleNavOf("accountant", null)).toBe(NAV);
+    expect(roleNavOf("accountant", {})).toBe(NAV);
+    expect(roleNavOf("accountant", { roles: { accountant: "finance" } })).toBe(NAV);
+    expect(roleNavOf("accountant", { roles: { accountant: { sections: ["system", "finance", "bogus"], tabs: { finance: ["projects"], bogus: ["x"], system: "all" } } } })).toEqual({
+      sections: ["home", "finance", "system"],
+      tabs: { finance: ["projects"] },
+    });
+    // 只帶 tabs → sections 退回預設的分區清單
+    expect(roleNavOf("accountant", { roles: { accountant: { tabs: { people: ["employees", "departments"] } } } })).toEqual({
+      sections: NAV.sections,
+      tabs: { people: ["employees", "departments"] },
+    });
   });
 });
 
@@ -513,9 +597,17 @@ describe("檔案系統覆蓋（app/admin/**/page.tsx）", () => {
     expect(missing).toEqual([]);
   });
 
-  it("路由表裡的每個 prefix 都有頁面（兩個尚未建立的新頁除外）", () => {
+  it("路由表裡的每個 prefix 都有頁面（尚未建立的新頁除外：2026-09-23 五頁由 WP6／WP7／WP8 建立）", () => {
     const pages = new Set(staticAdminPages(ADMIN_APP_DIR, "/admin"));
-    const pending = new Set(["/admin/settings/advanced", "/admin/module-settings/ess-tabs"]);
+    const pending = new Set([
+      "/admin/settings/advanced",
+      "/admin/module-settings/ess-tabs",
+      "/admin/disbursements/approvals",
+      "/admin/festival-bonuses",
+      "/admin/overtime-settlements",
+      "/admin/birthday-gifts",
+      "/admin/duty-rosters",
+    ]);
     const orphan = ADMIN_ROUTES.filter((r) => !r.pattern && !pages.has(r.prefix) && !pending.has(r.prefix)).map((r) => r.prefix);
     expect(orphan).toEqual([]);
   });

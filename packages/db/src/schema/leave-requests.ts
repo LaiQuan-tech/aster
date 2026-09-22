@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, integer, numeric, jsonb, index } from "drizzle-orm/pg-core"
+import { pgTable, uuid, text, timestamp, integer, numeric, jsonb, boolean, index } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 import { employees } from "./employees"
 import { leaveTypes } from "./leave-types"
@@ -22,6 +22,14 @@ import { leaveTypes } from "./leave-types"
  * 併入哪一個薪資計算期間核銷（比照 `advances` 核銷的凍結概念：核銷後
  * 這張單就從「待核銷」清單消失）。`settledPeriod` 為 'YYYY-MM' 字串，
  * 三欄同時寫入；未核銷時皆為 null。
+ *
+ * ── 月加班上限標記（M1，2026-09-23）─────────────────────────────────
+ * kind='ot' 送單時，若「本月已核准加班分鐘＋本張分鐘」超過規則
+ * `overtime.monthlyCapHours`（預設 40 小時），`beyondCap` 為 true、
+ * `beyondCapDetail` 存 `{ approvedBeforeMinutes, requestedMinutes, capMinutes }`
+ * （services/overtime-cap.ts beyondCapCheck 的輸出）。只是標記，不擋單：
+ * 超額分鐘在月表核准時歸入 overtime_settlements 另行給付。
+ * kind='wfh'（在家工作）同樣走本表，只用 startAt／endAt／hours／reason。
  */
 export const leaveRequests = pgTable("leave_requests", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -84,6 +92,9 @@ export const leaveRequests = pgTable("leave_requests", {
   settledByEmpId: uuid("settled_by_emp_id").references(() => employees.id),
   /** 核銷所屬薪資期間，'YYYY-MM'。 */
   settledPeriod: text("settled_period"),
+  // 月加班上限標記（見上方說明）；只對 kind='ot' 有意義。
+  beyondCap: boolean("beyond_cap").notNull().default(false),
+  beyondCapDetail: jsonb("beyond_cap_detail"),
 }, (table) => ({
   tenantSettledPeriodIdx: index("leave_requests_tenant_settled_period_idx").on(
     table.tenantId,

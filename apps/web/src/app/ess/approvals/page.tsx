@@ -45,6 +45,7 @@ const KIND_LABEL: Record<RequestKind, string> = {
   fix_punch: "補卡",
   business_trip: "公出/出差",
   petty_cash: "零用金預支",
+  wfh: "在家工作",
 };
 
 const PAYOUT_LABEL: Record<"pay" | "comp_time", string> = {

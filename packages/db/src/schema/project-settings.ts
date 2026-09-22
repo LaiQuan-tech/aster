@@ -57,6 +57,13 @@ export const projectSettings = pgTable(
     vatRate: numeric("vat_rate", { precision: 5, scale: 4 }).notNull().default("0.05"),
     /** 專案設計範圍可選項目（供 UI 下拉，租戶可自行增減）。 */
     disciplines: jsonb("disciplines").notNull().default(["電機", "空調", "消防", "汙水"]),
+    /**
+     * 成員角色的預設分潤趴數（W3）：`{ manager?: number, lead?: number,
+     * support?: number, member?: number }`，pool_pct 模式新增成員未帶
+     * sharePct 時預帶；空物件＝不預帶。key 與 project_members.role_in_project
+     * 值域同步（見 schema/project-members.ts）。
+     */
+    defaultSharePctByRole: jsonb("default_share_pct_by_role").notNull().default({}),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

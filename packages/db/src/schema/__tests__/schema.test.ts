@@ -24,7 +24,24 @@ import {
   contracts,
   projectBillings,
   leaveRequests as leaveRequestsTable,
+  leaveBalances,
+  disbursements,
+  projectSubcontractPayments,
+  payslips,
+  overtimeSettlements,
+  festivalBonuses,
+  birthdayGifts,
+  dutyRosters,
+  employeeProfileChangeRequests,
+  disbursementApprovalSteps,
 } from "../index"
+
+/** 某表某 unique index 的欄位名（找不到回 null）。 */
+function uniqueIndexColumns(table: Parameters<typeof getTableConfig>[0], name: string): string[] | null {
+  const idx = getTableConfig(table).indexes.find((i) => i.config.name === name)
+  if (!idx || !idx.config.unique) return null
+  return idx.config.columns.map((c) => (c as { name: string }).name)
+}
 
 describe("tenants table", () => {
   const cols = getTableColumns(tenants)
@@ -583,5 +600,197 @@ describe("兩軌政策的接點（模組三第 1、2 條）", () => {
     expect(Object.keys(reqCols)).toEqual(
       expect.arrayContaining(["tripScope", "estimatedCost", "advanceRequested", "tripReport"]),
     )
+  })
+})
+
+/* ───────────────────────── 2026-09-23 需求補齊（migration 0050）───────────────────────── */
+
+describe("leaveBalances table — 特休桶改期間制（W1）", () => {
+  const cols = getTableColumns(leaveBalances)
+
+  // 曆年制 → 到職日週年制：期間由 period_start／period_end 表示；year 保留給舊讀點。
+  it("有 periodStart／periodEnd／source／note 四欄；期間 NOT NULL、source 預設 manual", () => {
+    expect(Object.keys(cols)).toEqual(expect.arrayContaining(["periodStart", "periodEnd", "source", "note", "year"]))
+    expect(cols.periodStart.notNull).toBe(true)
+    expect(cols.periodEnd.notNull).toBe(true)
+    expect(cols.periodStart.columnType).toBe("PgDateString")
+    expect(cols.source.default).toBe("manual")
+    expect(cols.note.notNull).toBe(false)
+  })
+
+  // 舊唯一鍵以 year 為準，同一人同假別一年只能一桶；週年期跨年，改以 period_start 為準。
+  it("唯一鍵改為 (tenant_id, employee_id, leave_type_id, period_start)，舊的 year 唯一鍵已移除", () => {
+    expect(uniqueIndexColumns(leaveBalances, "leave_balances_tenant_emp_type_period_uq")).toEqual([
+      "tenant_id",
+      "employee_id",
+      "leave_type_id",
+      "period_start",
+    ])
+    expect(uniqueIndexColumns(leaveBalances, "leave_balances_tenant_emp_type_year_uq")).toBeNull()
+  })
+})
+
+describe("leaveRequests／disbursements／payslips／project_subcontract_payments — 加欄（M1／M4／M3／M5）", () => {
+  it("leave_requests：beyondCap 預設 false、beyondCapDetail 可空", () => {
+    const cols = getTableColumns(leaveRequestsTable)
+    expect(cols.beyondCap.notNull).toBe(true)
+    expect(cols.beyondCap.default).toBe(false)
+    expect(cols.beyondCapDetail.notNull).toBe(false)
+  })
+
+  // 放款簽核鏈：送簽輪次從 0 起算（從未送簽），待簽關卡可空。
+  it("disbursements：簽核五欄；approvalRound 預設 0、currentStep 可空", () => {
+    const cols = getTableColumns(disbursements)
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining(["currentStep", "approvalRound", "submittedAt", "submittedByEmpId", "approvedAt"]),
+    )
+    expect(cols.approvalRound.notNull).toBe(true)
+    expect(cols.approvalRound.default).toBe(0)
+    expect(cols.currentStep.notNull).toBe(false)
+  })
+
+  it("payslips：sentAt／sentTo 可空（null＝未寄送）", () => {
+    const cols = getTableColumns(payslips)
+    expect(cols.sentAt.notNull).toBe(false)
+    expect(cols.sentTo.notNull).toBe(false)
+  })
+
+  it("project_subcontract_payments：驗收三欄可空（null＝未驗收）", () => {
+    const cols = getTableColumns(projectSubcontractPayments)
+    expect(Object.keys(cols)).toEqual(expect.arrayContaining(["acceptedOn", "acceptedByEmpId", "acceptanceNote"]))
+    expect(cols.acceptedOn.notNull).toBe(false)
+    expect(cols.acceptedOn.columnType).toBe("PgDateString")
+  })
+
+  it("project_settings：defaultSharePctByRole 預設 {}", () => {
+    const cols = getTableColumns(projectSettings)
+    expect(cols.defaultSharePctByRole.notNull).toBe(true)
+    expect(cols.defaultSharePctByRole.default).toEqual({})
+  })
+})
+
+describe("overtimeSettlements table — 加班超額另計（M1）", () => {
+  const cols = getTableColumns(overtimeSettlements)
+
+  it("欄位齊全；source 預設 beyond_cap、channel 預設 cash、status 預設 draft、minutes 預設 0", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining([
+        "tenantId", "employeeId", "period", "source", "minutes", "amount", "channel", "status",
+        "paidOn", "sheetId", "note", "createdByEmpId", "paidByEmpId", "createdAt", "updatedAt",
+      ]),
+    )
+    expect(cols.source.default).toBe("beyond_cap")
+    expect(cols.channel.default).toBe("cash")
+    expect(cols.status.default).toBe("draft")
+    expect(cols.minutes.default).toBe(0)
+    expect(cols.amount.notNull).toBe(false)
+  })
+
+  // 每人每月只有一列「自動產生」的超額列；HR 手動補的列不受限——所以必須是 partial unique。
+  it("(tenant_id, employee_id, period) partial unique（where source = 'beyond_cap'）＋ (tenant_id, period) index", () => {
+    const uq = getTableConfig(overtimeSettlements).indexes.find((i) => i.config.name === "overtime_settlements_beyond_cap_uq")
+    expect(uq).toBeDefined()
+    expect(uq!.config.unique).toBe(true)
+    expect(uq!.config.where).toBeDefined()
+    expect(uq!.config.columns.map((c) => (c as { name: string }).name)).toEqual(["tenant_id", "employee_id", "period"])
+    const idx = getTableConfig(overtimeSettlements).indexes.find((i) => i.config.name === "overtime_settlements_tenant_period_idx")
+    expect(idx).toBeDefined()
+    expect(idx!.config.unique).toBe(false)
+  })
+})
+
+describe("festivalBonuses table — 三節獎金（M6）", () => {
+  const cols = getTableColumns(festivalBonuses)
+
+  it("欄位齊全；status 預設 draft；一人一節一年一列", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining([
+        "tenantId", "employeeId", "festival", "year", "referenceDate", "suggestedAmount",
+        "prorateMonths", "finalAmount", "status", "paidOn", "note", "createdByEmpId", "paidByEmpId",
+      ]),
+    )
+    expect(cols.status.default).toBe("draft")
+    expect(cols.festival.notNull).toBe(true)
+    expect(cols.year.notNull).toBe(true)
+    expect(uniqueIndexColumns(festivalBonuses, "festival_bonuses_tenant_emp_festival_year_uq")).toEqual([
+      "tenant_id", "employee_id", "festival", "year",
+    ])
+  })
+})
+
+describe("birthdayGifts table — 生日紅包（M7）", () => {
+  const cols = getTableColumns(birthdayGifts)
+
+  it("欄位齊全（含照片路徑）；一人一年一列", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining(["tenantId", "employeeId", "year", "givenOn", "amount", "photoPath", "photoFileName", "note", "createdByEmpId"]),
+    )
+    expect(cols.photoPath.notNull).toBe(false)
+    expect(uniqueIndexColumns(birthdayGifts, "birthday_gifts_tenant_emp_year_uq")).toEqual(["tenant_id", "employee_id", "year"])
+  })
+})
+
+describe("dutyRosters table — 值日／總機輪播（M8）", () => {
+  const cols = getTableColumns(dutyRosters)
+
+  // 一天一職務一人；重新產生會刪該區間再插入（batch_id 標同批），所以本表不掛 no_hard_delete。
+  it("欄位齊全；(tenant_id, duty_type, work_date) unique ＋ (tenant_id, work_date) index；沒有 updated_at", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining(["tenantId", "dutyType", "workDate", "employeeId", "batchId", "note", "createdByEmpId", "createdAt"]),
+    )
+    expect(Object.keys(cols)).not.toContain("updatedAt")
+    expect(cols.dutyType.notNull).toBe(true)
+    expect(cols.workDate.columnType).toBe("PgDateString")
+    expect(uniqueIndexColumns(dutyRosters, "duty_rosters_tenant_type_date_uq")).toEqual(["tenant_id", "duty_type", "work_date"])
+    const idx = getTableConfig(dutyRosters).indexes.find((i) => i.config.name === "duty_rosters_tenant_date_idx")
+    expect(idx).toBeDefined()
+  })
+})
+
+describe("employeeProfileChangeRequests table — 員工改資料審核（W6）", () => {
+  const cols = getTableColumns(employeeProfileChangeRequests)
+
+  it("changes jsonb 預設 {}、status 預設 pending、審核三欄可空；(tenant_id, status) index", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining(["tenantId", "employeeId", "requestedByEmpId", "changes", "status", "reviewedByEmpId", "reviewedAt", "reviewComment"]),
+    )
+    expect(cols.changes.notNull).toBe(true)
+    expect(cols.changes.default).toEqual({})
+    expect(cols.status.default).toBe("pending")
+    expect(cols.reviewedAt.notNull).toBe(false)
+    const idx = getTableConfig(employeeProfileChangeRequests).indexes.find(
+      (i) => i.config.name === "employee_profile_change_requests_tenant_status_idx",
+    )
+    expect(idx).toBeDefined()
+  })
+})
+
+describe("disbursementApprovalSteps table — 放款簽核關卡（M4）", () => {
+  const cols = getTableColumns(disbursementApprovalSteps)
+
+  // 與假單 approval_steps 分表：那張的 request_id NOT NULL FK 到 leave_requests。
+  it("欄位比照 approval_steps（approverEmpId NOT NULL、candidateEmpIds／stepKind、decision 預設 pending）＋ round 預設 1", () => {
+    expect(Object.keys(cols)).toEqual(
+      expect.arrayContaining([
+        "tenantId", "disbursementId", "round", "stepOrder", "approverEmpId", "candidateEmpIds",
+        "stepKind", "decision", "comment", "actedAt", "actedByEmpId", "createdAt",
+      ]),
+    )
+    expect(cols.approverEmpId.notNull).toBe(true)
+    expect(cols.disbursementId.notNull).toBe(true)
+    expect(cols.round.default).toBe(1)
+    expect(cols.decision.default).toBe("pending")
+    expect(cols.candidateEmpIds.notNull).toBe(false)
+  })
+
+  // 一張放款單可送簽多輪（駁回 → 改 → 再送），舊輪關卡保留作軌跡。
+  it("(disbursement_id, round, step_order) unique ＋ (tenant_id, disbursement_id) index", () => {
+    expect(uniqueIndexColumns(disbursementApprovalSteps, "disbursement_approval_steps_disb_round_step_uq")).toEqual([
+      "disbursement_id", "round", "step_order",
+    ])
+    const idx = getTableConfig(disbursementApprovalSteps).indexes.find(
+      (i) => i.config.name === "disbursement_approval_steps_tenant_disb_idx",
+    )
+    expect(idx).toBeDefined()
   })
 })

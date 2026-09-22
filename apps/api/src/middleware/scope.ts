@@ -18,6 +18,21 @@ export function isHrRole(role: string | null | undefined): boolean {
   return role === "hr_admin" || role === "platform_admin"
 }
 
+/**
+ * 財務層角色（W4）：HR／平台管理員＋會計。與 middleware/role.ts 的 requireFinance 同一份清單。
+ * 會計看得到專案金流、報銷、預支、月表（不含金額試算）與人員基本資料，**看不到**
+ * 薪資、獎金批次、分潤趴數與獎金池——那些讀點另判 isHrRole／canSeeBonus。
+ */
+export const FINANCE_ROLES: readonly string[] = ["hr_admin", "platform_admin", "accountant"] as const
+
+export function isFinanceRole(role: string | null | undefined): boolean {
+  return !!role && FINANCE_ROLES.includes(role)
+}
+
+export function isAccountantRole(role: string | null | undefined): boolean {
+  return role === "accountant"
+}
+
 /** 由 (tenantId, userId) 解出呼叫者的 employee {id, role, deptId}；查無回 null。 */
 export async function resolveSelf(tenantId: string, userId: string): Promise<SelfEmployee | null> {
   const { data, error } = await supabaseAdmin

@@ -61,6 +61,14 @@ import { leaveSettlementRouter } from "./routes/leave-settlement.js"
 import { auditLogsRouter } from "./routes/audit-logs.js"
 import { bonusRunsRouter } from "./routes/bonus-runs.js"
 import { importsRouter } from "./routes/imports.js"
+// 2026-09-23 需求補齊（WP0 先掛空 router 與 no-op middleware，功能 WP 只填檔案內容）
+import { overtimeSettlementsRouter } from "./routes/overtime-settlements.js"
+import { festivalBonusesRouter } from "./routes/festival-bonuses.js"
+import { birthdayGiftsRouter } from "./routes/birthday-gifts.js"
+import { dutyRostersRouter } from "./routes/duty-rosters.js"
+import { profileChangeRequestsRouter } from "./routes/profile-change-requests.js"
+import { internalCronRouter } from "./routes/internal-cron.js"
+import { essTabGuard } from "./middleware/ess-tab-guard.js"
 import { runWithRequestContext } from "./lib/request-context.js"
 
 const WEB_ORIGINS = (process.env.WEB_ORIGINS ?? "http://localhost:3000")
@@ -102,6 +110,9 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "ok" })
 })
+
+// ESS 分頁限縮的 API 層守門（M20）：所有 feature router 之前；WP0 為 no-op，WP2 填實。
+app.use(essTabGuard)
 
 // Feature routes.
 app.use(adminTenantsRouter)
@@ -164,6 +175,13 @@ app.use(leaveSettlementRouter)
 app.use(auditLogsRouter)
 app.use(bonusRunsRouter) // /bonus-runs/preview、/bonus-runs/summary 要在 /bonus-runs/:id 之前（D1 獎金季發放批次）
 app.use(importsRouter) // /imports/:kind/template、/imports/:kind（批次匯入：Excel 範本下載＋上傳）
+// 2026-09-23 需求補齊
+app.use(overtimeSettlementsRouter) // /my/overtime-cap、/overtime-settlements*（M1 加班超額另計；WP1）
+app.use(festivalBonusesRouter) // /festival-bonuses*（M6 三節獎金；WP7）
+app.use(birthdayGiftsRouter) // /birthday-gifts*（M7 生日紅包；WP8）
+app.use(dutyRostersRouter) // /duty-rosters*（M8 值日／總機；WP8）
+app.use(profileChangeRequestsRouter) // /profile-change-requests*（W6 員工改資料審核；WP8）
+app.use(internalCronRouter) // /internal/leave/annual-grant、/internal/people/birthday-reminder（WP9）
 
 // 404 fallback.
 app.use((_req: Request, res: Response) => {

@@ -46,3 +46,10 @@ export function requireRole(roles: string[]) {
 
 export const requirePlatformAdmin = requireRole(["platform_admin"])
 export const requireHrAdmin = requireRole(["hr_admin", "platform_admin"])
+/**
+ * 財務層（W4，2026-09-22 業主決策 3）：HR／平台管理員＋會計（employees.role='accountant'）。
+ * 會計可用專案與財務（發票／請款／入帳／放款／複委託付款）、報銷、預支、出勤月表
+ * 與人員基本資料；薪資作業／薪資單／獎金批次／租戶設定／規則參數／備份／員工寫入
+ * 維持 requireHrAdmin。清單與 middleware/scope.ts 的 FINANCE_ROLES 同步。
+ */
+export const requireFinance = requireRole(["hr_admin", "platform_admin", "accountant"])

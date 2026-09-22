@@ -69,6 +69,7 @@ export const KIND_LABEL: Record<RequestKind, string> = {
   fix_punch: "補卡",
   business_trip: "公出/出差",
   petty_cash: "零用金預支",
+  wfh: "在家工作",
 };
 
 export const KIND_OPTIONS: ReadonlyArray<{ value: RequestKind; label: string }> = [
@@ -77,6 +78,7 @@ export const KIND_OPTIONS: ReadonlyArray<{ value: RequestKind; label: string }> 
   { value: "fix_punch", label: "補卡" },
   { value: "business_trip", label: "公出/出差" },
   { value: "petty_cash", label: "零用金預支" },
+  { value: "wfh", label: "在家工作" },
 ];
 
 /** 「工號 · 姓名」；沒有工號只顯示姓名。 */

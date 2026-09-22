@@ -1,11 +1,15 @@
 import { describe, it, expect } from "vitest";
 import type { CreateRequestBody, LeaveRequest } from "../ess-api";
 import {
+  KIND_LABEL,
+  KIND_ORDER,
+  KIND_SHORT,
   approvalLine,
   buildCreateBody,
   describeBody,
   describeRequest,
   isBuildError,
+  isRequestKind,
   needsAttachment,
   overtimeHours,
   remainingHours,
@@ -64,6 +68,20 @@ const TRIP: TripFormValues = {
 };
 
 const PETTY: PettyCashFormValues = { amount: "3,000", reason: "採買文具" };
+
+describe("KIND_LABEL／KIND_SHORT／KIND_ORDER（2026-09-23 加 wfh 標籤，表單由 WP2 補）", () => {
+  it("六種 kind 都有中文標籤與短標；切換列仍是五種（wfh 表單未補前不出現）", () => {
+    for (const k of ["leave", "fix_punch", "ot", "business_trip", "petty_cash", "wfh"] as const) {
+      expect(KIND_LABEL[k]).toBeTruthy();
+      expect(KIND_SHORT[k]).toBeTruthy();
+    }
+    expect(KIND_LABEL.wfh).toBe("在家工作");
+    expect(KIND_SHORT.wfh).toBe("在家");
+    expect(KIND_ORDER).toEqual(["leave", "fix_punch", "ot", "business_trip", "petty_cash"]);
+    expect(isRequestKind("wfh")).toBe(false);
+    expect(requestTitle(row({ kind: "wfh" }))).toBe("在家工作");
+  });
+});
 
 describe("buildCreateBody（五種 kind）", () => {
   it("請假：segments＋startAt/endAt 取首尾段、hours 加總、reason trim、假別帶上", () => {
