@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireFinance, requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { departmentsHaveManagerList } from "../lib/schema-compat.js"
 import { loadDepartments } from "../middleware/scope.js"
@@ -84,10 +84,12 @@ function managerPatch(ids: string[], multi: boolean): Record<string, unknown> {
 }
 
 /**
- * All department routes are HR-admin-only and tenant-scoped. The tenant boundary
- * is the load-bearing guard: every query is forced to res.locals.tenantId (from
- * the JWT) so an HR admin can only ever touch their own tenant's departments,
- * even though supabaseAdmin bypasses RLS.
+ * 部門的**寫入**端點一律 HR admin；讀取（GET /departments）開放到財務層
+ * （requireFinance＝HR／平台管理員＋會計），因為會計的專案／放款／出勤月表畫面
+ * 都要拿部門清單做篩選與顯示。
+ *
+ * 所有端點都 tenant-scoped，租戶邊界才是真正的防線：每一筆查詢都強制套用
+ * res.locals.tenantId（來自 JWT），所以即使 supabaseAdmin 繞過 RLS，也只碰得到自己租戶的部門。
  */
 
 // GET /departments — list this tenant's departments.
@@ -95,7 +97,7 @@ departmentsRouter.get(
   "/departments",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (_req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {

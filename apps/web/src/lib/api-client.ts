@@ -9,8 +9,12 @@ import { getSupabaseBrowser } from "./supabase-browser";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
-/** apiFetch 丟出的錯誤：message 是 `[status] code`，code／detail 是 API 回的 { error, message }。 */
-export type ApiError = Error & { status?: number; code?: string; detail?: string };
+/**
+ * apiFetch 丟出的錯誤：message 是 `[status] code`，code／detail 是 API 回的 { error, message }。
+ * `body` 是整包回應 JSON（解析失敗時是 `{ message: statusText }`），給需要額外欄位的呼叫端用——
+ * 例如放款的 409 `acceptance_required` 會附 `installmentNo`，錯誤訊息才寫得出是哪一期沒驗收。
+ */
+export type ApiError = Error & { status?: number; code?: string; detail?: string; body?: unknown };
 
 /**
  * Resolve the auth token from the live Supabase session (browser only).
@@ -53,6 +57,7 @@ export async function apiFetch<T>(
     // 補充說明（例如 invalid_header 缺哪個欄）掛在物件上，讓需要細節的呼叫端拿得到。
     if (typeof body.error === "string") err.code = body.error;
     if (typeof body.message === "string" && body.message !== message) err.detail = body.message;
+    err.body = body;
     throw err;
   }
 

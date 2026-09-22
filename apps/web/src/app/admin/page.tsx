@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Card } from "@/components/admin-ui";
 import { SectionIcon } from "@/components/AdminShell";
 import { getRequests, getAnnouncements, type Announcement } from "@/lib/admin-api";
-import { homeEntries } from "@/lib/admin-nav";
+import { adminModulesOf, homeEntries, roleNavOf } from "@/lib/admin-nav";
 import { getDisbursementSummary, type DisbursementSummary } from "@/lib/disbursements-api";
 import {
   getReceivables,
@@ -20,9 +20,7 @@ import { getBonusSummary } from "@/lib/bonus-api";
 import { listBackups, type SnapshotPeriodSummary } from "@/lib/backup-api";
 import { getCompanyPages, type CompanyPage } from "@/lib/company-api";
 import { getUpcomingBirthdays, type BirthdayPerson } from "@/lib/people-extras-api";
-
-/** 首頁下半的 8 個分區入口（排除 home；順序與側欄一致，來源 lib/admin-nav.ts）。 */
-const HOME_ENTRIES = homeEntries();
+import { useEssState } from "@/lib/ess-state";
 
 /* -------------------------------------------------------------- 老闆看板 -- */
 // B9：每張卡各自獨立讀取、獨立失敗——用 Promise.allSettled 平行打 9 支既有端點
@@ -111,6 +109,14 @@ function BossCard({
 }
 
 export default function AdminOverview() {
+  // 首頁下半的分區入口（排除 home；順序與側欄一致，來源 lib/admin-nav.ts）。
+  // 以前是模組層常數＝寫死 8 格，會計會看到自己進不去的分區、隱藏模組也照列；
+  // 改成跟 AdminShell 側欄同一套算法：roleNavOf(角色, features) ＋ adminModulesOf(features)。
+  const essState = useEssState();
+  const homeSections = useMemo(
+    () => homeEntries(roleNavOf(essState.me?.role, essState.features), adminModulesOf(essState.features)),
+    [essState.me?.role, essState.features],
+  );
   const [disb, setDisb] = useState<Loadable<DisbursementSummary>>(initLoadable<DisbursementSummary>());
   const [recv, setRecv] = useState<Loadable<ReceivablesCardData>>(initLoadable<ReceivablesCardData>());
   const [annual, setAnnual] = useState<Loadable<AnnualCardData>>(initLoadable<AnnualCardData>());
@@ -401,7 +407,7 @@ export default function AdminOverview() {
 
       <Card title="功能分區">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {HOME_ENTRIES.map((s) => (
+          {homeSections.map((s) => (
             <Link
               key={s.key}
               href={s.href}

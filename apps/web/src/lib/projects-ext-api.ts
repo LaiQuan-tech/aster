@@ -427,6 +427,13 @@ export interface SubcontractPayment {
   /** 放款專區連動：這期是由哪筆匯款單付的（唯讀，null＝舊路徑手動標記或尚未付）。 */
   disbursementId?: string | null
   disbursementNo?: string | null
+  /**
+   * 複委託驗收（API routes/subcontracts.ts 的 withAcceptance 掛上；唯讀）。
+   * 未驗收＝null；驗收資料表還沒套遷移時三欄一併缺席，所以是 optional。
+   */
+  acceptedOn?: string | null
+  acceptedByEmpId?: string | null
+  acceptanceNote?: string | null
 }
 
 export interface SubcontractSummary {

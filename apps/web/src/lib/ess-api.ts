@@ -461,6 +461,17 @@ export interface CreateRequestResult {
     /** manager｜hr｜list｜fallback｜hr_admin */
     kind?: string;
   }>;
+  /**
+   * M1：加班單超過月上限的判定（非加班單一律 null）；送出成功畫面可據此提示「超出部分另行給付」。
+   * 對照 API routes/requests.ts 的 201 回應（services/overtime-cap.ts 的 BeyondCapResult）。
+   */
+  beyondCap?: {
+    approvedBeforeMinutes: number;
+    requestedMinutes: number;
+    capMinutes: number;
+    beyondCap: boolean;
+    beyondCapMinutes: number;
+  } | null;
 }
 
 export function createRequest(body: CreateRequestBody) {
@@ -799,6 +810,12 @@ export interface MyPayslip {
   attendance_bonus: string;
   gross: string;
   status: string;
+  /**
+   * 薪資條 Email 寄出紀錄（migration 0050）；API 探測不到欄位會退回舊欄位集，
+   * 所以兩欄都是 optional，未寄出＝null。
+   */
+  sent_at?: string | null;
+  sent_to?: string | null;
 }
 
 export function getMyPayslips() {

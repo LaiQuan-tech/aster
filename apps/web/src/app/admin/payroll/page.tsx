@@ -24,14 +24,6 @@ const inputCls =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 const labelCls = "mb-1 block text-xs font-medium text-gray-500";
 
-/** `PUT /salary/:employeeId` 在自動選級距時多回的欄位（M12；lib/admin-api.ts 是 WP0 的檔，不改）。 */
-interface InsuredSuggested {
-  base: number;
-  labor: number | null;
-  health: number | null;
-  effectiveFrom: string;
-}
-
 export default function PayrollAdminPage() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -165,7 +157,7 @@ export default function PayrollAdminPage() {
       // M12：投保級距留空＝不帶欄位，API 會依「投保級距表」以投保基數自動選一級
       //（月薪制基數＝本薪；時薪制＝時薪 × 每週約定時數 × 52 ÷ 12），並把選到的值回來。
       // 填了就完全照填的存，手動覆寫永遠優先。
-      const res = (await putSalaryStructure(empId, {
+      const res = await putSalaryStructure(empId, {
         method,
         baseSalary: baseSalary ? Number(baseSalary) : null,
         dailyWage: dailyWage ? Number(dailyWage) : null,
@@ -175,7 +167,7 @@ export default function PayrollAdminPage() {
         ...(laborGrade ? { laborInsuredSalary: Number(laborGrade) } : {}),
         ...(healthGrade ? { healthInsuredSalary: Number(healthGrade) } : {}),
         pensionVoluntaryRate: pensionPct ? Number(pensionPct) / 100 : null,
-      })) as { id: string; insuredSuggested?: InsuredSuggested };
+      });
       setSalaryMsg("已儲存");
       const s = res.insuredSuggested;
       if (s) {

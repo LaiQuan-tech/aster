@@ -376,6 +376,9 @@ async function main() {
         { projectId: huiteHQ.id, subcontractPaymentId: p2.id, amount: 300000, withheldAmount: 30000 },
         { projectId: huiteHQ.id, subcontractPaymentId: p3.id, amount: 300000, withheldAmount: 30000 },
       ],
+      // seed 直接建已匯款單：跳過簽核鏈＋放行未驗收期款（API 要求 HR ＋ forceReason，會寫稽核）。
+      forceReason: "seed：略過簽核",
+      forceAcceptance: true,
     })
     d1 = created.body.disbursement
     COUNTS.disbursementsCreated++
@@ -400,6 +403,9 @@ async function main() {
       purpose: PURPOSE_D2,
       status: "paid",
       allocations: [],
+      // seed 直接建已匯款單：跳過簽核鏈＋放行未驗收期款（API 要求 HR ＋ forceReason，會寫稽核）。
+      forceReason: "seed：略過簽核",
+      forceAcceptance: true,
     })
     d2 = created.body.disbursement
     COUNTS.disbursementsCreated++
@@ -544,6 +550,10 @@ async function main() {
     withheldAmount: 30000,
     purpose: "驗收用：預期409，不應建立成功",
     status: "paid",
+    // 帶 force：要讓它一路走到「期款已付」那一關才被擋，否則會先 409 approval_required／
+    // acceptance_required，斷言就變成因為別的理由而通過。
+    forceReason: "seed：略過簽核",
+    forceAcceptance: true,
     allocations: [{ projectId: huiteHQ.id, subcontractPaymentId: p2.id, amount: 300000, withheldAmount: 30000 }],
   })
   record(

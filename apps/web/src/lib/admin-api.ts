@@ -1229,6 +1229,17 @@ export interface TenantFeatures {
   adminModules?: AdminModulesConfig;
   /** 帳號安全（允許 HR 配發簡單初始密碼）；後端對 accounts 是整鍵覆蓋，存檔時送完整物件。 */
   accounts?: AccountsFeatureSettings;
+  /**
+   * 角色導覽覆蓋：目前只有 accountant（會計）。`sections` 是可見分區 key 清單、
+   * `tabs` 是各分區的可見分頁 key 清單；缺席＝用 lib/admin-nav.ts 的 ACCOUNTANT_DEFAULT_NAV。
+   * 讀法見 admin-nav.ts 的 roleNavOf()／sectionsForRole()。
+   */
+  roles?: {
+    accountant?: {
+      sections?: string[];
+      tabs?: Record<string, string[]>;
+    };
+  };
   [key: string]: unknown;
 }
 
@@ -1285,7 +1296,19 @@ export function putSalaryStructure(
     agreedDaysPerWeek?: number | null;
   },
 ) {
-  return apiFetch<{ id: string }>(`/salary/${employeeId}`, {
+  return apiFetch<{
+    id: string;
+    /**
+     * 勞健保級距自動選的結果（API routes/salary.ts 的 InsuredSuggestion）；只有這次 PUT
+     * 真的自動選了才回，沒有級距表時 labor／health 會是 null。
+     */
+    insuredSuggested?: {
+      base: number;
+      labor: number | null;
+      health: number | null;
+      effectiveFrom: string;
+    } | null;
+  }>(`/salary/${employeeId}`, {
     method: "PUT",
     body: JSON.stringify(body),
   });
@@ -1303,6 +1326,12 @@ export interface Payslip {
   status: string;
   /** 列表也帶 breakdown（API SELECT_COLS 含它）；舊資料可能沒有。 */
   breakdown?: PayslipBreakdown | null;
+  /**
+   * 薪資條 Email 寄出紀錄（migration 0050）；還沒套遷移的庫 API 會退回舊欄位集，
+   * 所以兩欄都是 optional，未寄出＝null。
+   */
+  sent_at?: string | null;
+  sent_to?: string | null;
 }
 
 export function runPayroll(period: string, employeeId?: string) {

@@ -42,12 +42,16 @@ export function todayKey(): string {
 export type EngineerFormValue = { vendorId: string | null; name: string | null };
 export type EngineersForm = Record<EngineerDiscipline, EngineerFormValue>;
 
+/**
+ * 空的技師表單：科別不再寫死三個英文 key（W8 後 key ＝租戶自訂的中文科別），
+ * 改由 `ENGINEER_DISCIPLINES`（預設 電機／空調／消防／汙水）動態產生。
+ * ⚠️ 這只是「還沒拿到租戶設定」時的骨架；page.tsx 載入完會用 `engineersFormOf(engineers,
+ * disciplineList)` 依實際 project_settings.disciplines ＋專案上既有的 key 整份重算並覆蓋。
+ */
 export function emptyEngineersForm(): EngineersForm {
-  return {
-    electrical: { vendorId: null, name: null },
-    hvac: { vendorId: null, name: null },
-    fire: { vendorId: null, name: null },
-  };
+  const out: EngineersForm = {};
+  for (const discipline of ENGINEER_DISCIPLINES) out[discipline] = { vendorId: null, name: null };
+  return out;
 }
 
 export interface AppForm {

@@ -3,22 +3,22 @@
  *   • 三節／節慶獎金 `festival_bonuses`（M6，API 由 WP7 實作）
  *   • 加班超額另計 `overtime_settlements`（M1，**API 由 WP1 實作**，這裡照 §3.2 的
  *     端點契約寫；WP1 若調整回應形狀，只要改這個檔的型別即可，頁面不動）
- * 另外補上薪資條寄送（M3）的兩支端點與 `payslips.sent_at/sent_to` 的型別擴充——
- * `lib/admin-api.ts`／`lib/ess-api.ts` 是 WP0 的檔案，這一輪不再動它們。
+ * 另外補上薪資條寄送（M3）的兩支端點。`payslips.sent_at/sent_to` 現在已經在
+ * `lib/admin-api.ts` 的 `Payslip`／`lib/ess-api.ts` 的 `MyPayslip` 上（WP10 補齊），
+ * 這裡的 `PayslipSendFields` 只留成對它的引用，供既有呼叫端沿用。
  *
  * 新 feature 一律另開 `lib/<feature>-api.ts`（§3.4 檔案互斥原則），不擠 admin-api.ts。
  */
 import { apiFetch } from "./api-client";
+import type { Payslip } from "./admin-api";
 
 /* ── 薪資條寄送（M3）────────────────────────────────────────────────── */
 
-/** `payslips` 在 migration 0050 之後多出來的兩欄（遷移前 API 不回，故全 optional）。 */
-export interface PayslipSendFields {
-  /** 寄出時間（ISO）；null／缺＝尚未寄送。 */
-  sent_at?: string | null;
-  /** 實際收件地址。 */
-  sent_to?: string | null;
-}
+/**
+ * `payslips` 在 migration 0050 之後多出來的兩欄（遷移前 API 不回，故全 optional）。
+ * 型別本體已在 `Payslip` 上，這裡只做引用，不再各自維護一份。
+ */
+export type PayslipSendFields = Pick<Payslip, "sent_at" | "sent_to">;
 
 export interface SendPayslipResult {
   id: string;

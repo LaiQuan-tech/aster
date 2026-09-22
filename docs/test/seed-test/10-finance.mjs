@@ -694,6 +694,8 @@ async function seedDisbursements(ctx) {
       body: {
         payeeKind: "vendor", vendorId: V.B.id, payingCompanyId, method: "transfer", amount: 40000, withheldAmount: 0, paidOn: "2026-08-20",
         hasInvoice: true, invoiceNo: "TEST00002", purpose: T("放款B"), note: T("已付款、連動空調第1期"), status: "paid",
+        // seed 直接建已匯款單：跳過簽核鏈（API 要求 HR ＋ forceReason）＋放行未驗收的期款。
+        forceReason: "seed：略過簽核", forceAcceptance: true,
         allocations: [{ projectId: P.A.id, subcontractId: S.HVAC.id, subcontractPaymentId: hvac1.id, amount: 40000, withheldAmount: 0, note: T("空調第1期") }],
       },
     },
@@ -705,6 +707,8 @@ async function seedDisbursements(ctx) {
       body: {
         payeeKind: "other", payeeName: T("其他受款人"), payingCompanyId, method: "cash", amount: 10000, withheldAmount: 0, paidOn: "2026-09-10",
         hasInvoice: false, purpose: T("放款C"), note: T("非廠商、無副委託，直接分攤到專案B"), status: "paid",
+        // 同上：直接建 paid 一定要帶 forceReason，否則 409 approval_required。
+        forceReason: "seed：略過簽核", forceAcceptance: true,
         allocations: [{ projectId: P.B.id, amount: 10000, withheldAmount: 0, note: T("雜項支出") }],
       },
     },

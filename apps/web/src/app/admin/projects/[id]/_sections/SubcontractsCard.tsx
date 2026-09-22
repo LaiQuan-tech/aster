@@ -19,15 +19,6 @@ import {
 import { acceptSubcontractPayment } from "@/lib/disbursements-api";
 import { fmtMoney, newSubKey, toSubRows, type SubRow, type Setter } from "./shared";
 
-/**
- * M5 驗收確認：`SubcontractPayment`（lib/projects-ext-api.ts，WP5 的檔）還沒有
- * 這三個欄位，後端已經會回；這裡用結構型別讀，不動別人的型別定義。
- */
-type WithAcceptance = { acceptedOn?: string | null; acceptedByEmpId?: string | null; acceptanceNote?: string | null };
-function acceptedOnOf(p: SubcontractPayment): string | null {
-  return (p as SubcontractPayment & WithAcceptance).acceptedOn ?? null;
-}
-
 interface SubcontractsCardProps {
   projectId: string;
   subDraft: SubRow[];
@@ -236,8 +227,8 @@ export function SubcontractsCard({
     setError(null);
     try {
       const res = await acceptSubcontractPayment(projectId, subId, p.installmentNo);
-      const stamp = (row: SubcontractPayment) =>
-        row.installmentNo === p.installmentNo ? ({ ...row, acceptedOn: res.acceptedOn } as SubcontractPayment) : row;
+      const stamp = (row: SubcontractPayment): SubcontractPayment =>
+        row.installmentNo === p.installmentNo ? { ...row, acceptedOn: res.acceptedOn } : row;
       setPaymentsDraft((d) => ({ ...d, [subId]: (d[subId] ?? []).map(stamp) }));
       setOriginalPayments((d) => ({ ...d, [subId]: (d[subId] ?? []).map(stamp) }));
     } catch (err) {
@@ -389,9 +380,9 @@ export function SubcontractsCard({
                                       <input className="w-24 rounded border border-gray-300 px-1 py-0.5" value={p.dueWhen ?? ""} onChange={(e) => patchPayment(row.id as string, pIdx, { dueWhen: e.target.value })} />
                                     </td>
                                     <td className="py-1 pr-2">
-                                      {acceptedOnOf(p) ? (
+                                      {(p.acceptedOn ?? null) ? (
                                         <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-700" title="已驗收確認">
-                                          {acceptedOnOf(p)}
+                                          {(p.acceptedOn ?? null)}
                                         </span>
                                       ) : p.id ? (
                                         <button

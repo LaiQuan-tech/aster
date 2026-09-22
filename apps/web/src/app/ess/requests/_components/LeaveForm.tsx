@@ -109,7 +109,8 @@ export function LeaveForm({
   const selectedType = leaveTypes?.find((lt) => lt.id === leaveTypeId) ?? null;
   const requiresAttachment = selectedType?.requiresAttachment === true;
   const isProxy = proxy.enabled && proxy.expanded;
-  const remaining = leaveTypeId && !isProxy ? remainingHours(balances, leaveTypeId) : null;
+  // 餘額桶依到職週年切期間，所以要用「申請起日」去找桶，跨週年期的單才算得對。
+  const remaining = leaveTypeId && !isProxy ? remainingHours(balances, leaveTypeId, startDate) : null;
   const overBalance = remaining != null && !result.error && result.totalHours > remaining;
   const skippedReasons = Array.from(new Set(result.skipped.map((s) => skipReasonLabel(s.reason)))).join("／");
 

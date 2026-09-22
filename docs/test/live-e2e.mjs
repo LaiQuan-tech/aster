@@ -126,6 +126,9 @@ async function provisionTenant(label, roleSpecs) {
     .from("tenants")
     .insert({
       name,
+      // 必須是 'test'：sql/0018 的硬刪防護只放行 status IN ('test','demo') 的租戶，
+      // 預設值 'active' 會讓下面 TEARDOWN 的 delete 全數被 trigger 擋掉、資料留在正式庫。
+      status: "test",
       branding: { logoUrl: null, primaryColor: "#1F4E79", appName: name },
       features: { payroll: true, kpi: true, ai_assistant: true },
     })

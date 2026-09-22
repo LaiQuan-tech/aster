@@ -2,7 +2,8 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireFinance } from "../middleware/role.js"
+import { isFinanceRole, isHrRole } from "../middleware/scope.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
@@ -55,8 +56,8 @@ async function resolveLetterhead(tenantId: string): Promise<Letterhead> {
 }
 
 // Resolve the caller's own employee row (id + role) in this tenant, or null.
-// Same shape as routes/payroll.ts's resolveSelf/isHrRole — kept local (this is
-// the only other route that needs "HR or self" for a money-bearing resource).
+// 保留本地版（不用 middleware/scope.js 的 resolveSelf）是因為這裡順手 setActor；
+// 角色判斷則一律用 scope.js 的 isFinanceRole／isHrRole，不再自己複製一份清單。
 async function resolveSelf(tenantId: string, userId: string): Promise<{ id: string; role: string } | null> {
   const { data, error } = await supabaseAdmin
     .from("employees")
@@ -67,10 +68,6 @@ async function resolveSelf(tenantId: string, userId: string): Promise<{ id: stri
   if (error) throw new Error(`exports (resolve self): ${error.message}`)
   if (data) setActor(data.id as string) // 稽核：本請求後續 DB 寫入由 trigger 記 actor
   return data ? { id: data.id as string, role: data.role as string } : null
-}
-
-function isHrRole(role: string | undefined): boolean {
-  return !!role && ["hr_admin", "platform_admin"].includes(role)
 }
 
 /** 'YYYY-MM' → '115-06'（民國年，檔名用）。 */
@@ -96,10 +93,11 @@ function handleError(err: unknown, res: Response, next: NextFunction): void {
 }
 
 /**
- * GET /attendance-sheets/:id/export.xlsx — 單一員工的月表。HR 或本人皆可下載；
- * 非 HR 一律不含 money（includeMoney: isHr），且只能下載自己的月表——非本人、
- * 非 HR 一律 404（不是 403，跟 routes/payroll.ts 的 /payslips/:id 一樣，不用
- * 403 洩漏「這張月表存在」）。
+ * GET /attendance-sheets/:id/export.xlsx — 單一員工的月表。**兩道各自獨立的判斷**：
+ * ①看得到誰＝財務層（HR／平台管理員／會計，isFinanceRole）可下載任何人的，其他人只能下載
+ * 自己的——非本人又非財務層一律 404（不是 403，跟 routes/payroll.ts 的 /payslips/:id 一樣，
+ * 不用 403 洩漏「這張月表存在」）；②看不看得到金額＝只有 HR／平台管理員（isHrRole），
+ * 會計拿到的檔案不含 money 欄位（比照 routes/attendance-sheets.ts 的 canSeeMoney）。
  */
 exportsRouter.get(
   "/attendance-sheets/:id/export.xlsx",
@@ -120,10 +118,11 @@ exportsRouter.get(
 
     try {
       const self = await resolveSelf(tenantId, userId)
-      const isHr = isHrRole(self?.role)
+      const canSeeAll = isFinanceRole(self?.role)
+      const canSeeMoney = isHrRole(self?.role)
 
-      const view = await getSheetView(tenantId, id, { includeMoney: isHr })
-      if (!isHr && view.employeeId !== self?.id) {
+      const view = await getSheetView(tenantId, id, { includeMoney: canSeeMoney })
+      if (!canSeeAll && view.employeeId !== self?.id) {
         res.status(404).json({ error: "not_found" })
         return
       }
@@ -147,17 +146,23 @@ const listQuerySchema = z.object({
 })
 
 /**
- * GET /attendance-sheets/export.xlsx?period=YYYY-MM&status= — HR 專用，全員
- * 一檔：listSheets 篩出這個月份（＋可選狀態）的月表，逐張 getSheetView（含
- * money）組成同一個 workbook，一人一 sheet。
+ * GET /attendance-sheets/export.xlsx?period=YYYY-MM&status= — 財務層（HR／平台管理員／
+ * 會計）可匯出全員一檔：listSheets 篩出這個月份（＋可選狀態）的月表，逐張 getSheetView
+ * 組成同一個 workbook，一人一 sheet。**金額另判**：只有 HR／平台管理員拿得到 money 欄位，
+ * 會計匯出的檔案不含金額（includeMoney: canSeeMoney）。
  */
 exportsRouter.get(
   "/attendance-sheets/export.xlsx",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
     const parsed = listQuerySchema.safeParse(req.query)
     if (!parsed.success) {
       res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
@@ -166,10 +171,12 @@ exportsRouter.get(
     const { period, status } = parsed.data
 
     try {
+      const self = await resolveSelf(tenantId, userId)
+      const canSeeMoney = isHrRole(self?.role)
       const items = await listSheets(tenantId, { period, status })
       const views: SheetView[] = []
       for (const item of items) {
-        views.push(await getSheetView(tenantId, item.id, { includeMoney: true }))
+        views.push(await getSheetView(tenantId, item.id, { includeMoney: canSeeMoney }))
       }
 
       const letterhead = await resolveLetterhead(tenantId)

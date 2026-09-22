@@ -13,8 +13,7 @@ import {
 } from "@/lib/projects-api";
 import {
   getProjectDetail,
-  ENGINEER_DISCIPLINE_LABELS,
-  ENGINEER_DISCIPLINES,
+  disciplineLabel,
   type ProjectDetail,
 } from "@/lib/projects-ext-api";
 
@@ -72,6 +71,13 @@ export default function EssProjectDetailPage() {
   const isPool = membersRes?.shareMode === "pool_pct";
   const canManage = membersRes?.canManage ?? false;
 
+  // 技師：直接走專案上實際存在的科別 key（不打 project-settings 拿清單），所以舊專案的
+  // 英文 key（electrical／hvac／fire）與租戶自訂科別都列得出來；顯示名交給
+  // disciplineLabel()（＝ENGINEER_DISCIPLINE_LABELS 對照，中文／自訂 key 原樣顯示）。
+  const engineerRows = Object.entries(project?.engineers ?? {}).flatMap(([discipline, assignment]) =>
+    assignment?.name ? [{ discipline, label: disciplineLabel(discipline), name: assignment.name }] : [],
+  );
+
   return (
     <div className="space-y-4">
       <Link href="/ess/projects" className="text-sm text-gray-500 hover:underline">← 專案列表</Link>
@@ -95,12 +101,12 @@ export default function EssProjectDetailPage() {
             {project.code && <p className="font-mono text-xs text-gray-400">{project.code}</p>}
             {project.client?.name && <p className="mt-1 text-sm text-gray-600">客戶：{project.client.name}</p>}
             {project.description && <p className="mt-2 whitespace-pre-wrap text-sm text-gray-600">{project.description}</p>}
-            {ENGINEER_DISCIPLINES.some((d) => project.engineers?.[d]?.name) && (
+            {engineerRows.length > 0 && (
               <div className="mt-3 flex flex-wrap gap-3 border-t border-gray-100 pt-3 text-sm">
-                {ENGINEER_DISCIPLINES.filter((d) => project.engineers?.[d]?.name).map((d) => (
-                  <span key={d} className="text-gray-600">
-                    <span className="text-gray-400">{ENGINEER_DISCIPLINE_LABELS[d]}：</span>
-                    {project.engineers?.[d]?.name}
+                {engineerRows.map((row) => (
+                  <span key={row.discipline} className="text-gray-600">
+                    <span className="text-gray-400">{row.label}：</span>
+                    {row.name}
                   </span>
                 ))}
               </div>

@@ -597,16 +597,13 @@ describe("檔案系統覆蓋（app/admin/**/page.tsx）", () => {
     expect(missing).toEqual([]);
   });
 
-  it("路由表裡的每個 prefix 都有頁面（尚未建立的新頁除外：2026-09-23 五頁由 WP6／WP7／WP8 建立）", () => {
+  it("路由表裡的每個 prefix 都有頁面（尚未建立的新頁除外）", () => {
     const pages = new Set(staticAdminPages(ADMIN_APP_DIR, "/admin"));
+    // 2026-09-23：WP6／WP7／WP8 的五頁（disbursements/approvals、festival-bonuses、
+    // overtime-settlements、birthday-gifts、duty-rosters）已建，從豁免名單移除，讓本案例真的檢查它們。
     const pending = new Set([
       "/admin/settings/advanced",
       "/admin/module-settings/ess-tabs",
-      "/admin/disbursements/approvals",
-      "/admin/festival-bonuses",
-      "/admin/overtime-settlements",
-      "/admin/birthday-gifts",
-      "/admin/duty-rosters",
     ]);
     const orphan = ADMIN_ROUTES.filter((r) => !r.pattern && !pages.has(r.prefix) && !pending.has(r.prefix)).map((r) => r.prefix);
     expect(orphan).toEqual([]);

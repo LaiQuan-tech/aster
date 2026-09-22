@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * 五種申請表單共用的小件：錯誤翻譯、事由欄、附件欄、HR 代同仁申請、送出列。
- * 表單本身各自一檔（LeaveForm／FixPunchForm／OvertimeForm／TripForm／PettyCashForm），
+ * 六種申請表單共用的小件：錯誤翻譯、事由欄、附件欄、HR 代同仁申請、送出列。
+ * 表單本身各自一檔（LeaveForm／FixPunchForm／OvertimeForm／TripForm／PettyCashForm／WfhForm），
  * 只顯示該種類的欄位；送出一律交給頁面層的 `onSubmit(body, files, summary)`。
  */
 import { useCallback, useId, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
