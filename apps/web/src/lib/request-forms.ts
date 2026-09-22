@@ -516,24 +516,40 @@ export function requestTitle(r: Pick<LeaveRequest, "kind" | "leave_type_name" | 
   return KIND_LABEL[r.kind] ?? r.kind;
 }
 
+/** 多位候選簽核人的連接符（與後端 `current_approver_name` 相同）。 */
+const APPROVER_JOINER = "／";
+
 /**
  * 清單每列第 3 行：pending「等待 王小明 簽核（第 1／2 關）」、rejected「駁回理由：…」、
  * approved「已核准 · 09/17 10:21」、cancelled → null。欄位缺席時退化成 null（舊 API）。
+ * 多級簽核（2026-09-22）起同一關可有多位候選：有 `current_approver_names` 就用它串「／」，
+ * `current_step_kind === "hr"`（HR 覆核關）加註 →「等待 王小明／李小華（HR 覆核）簽核（第 3／3 關）」；
+ * 沒有新欄位時維持原樣（用 `current_approver_name`）。
  */
 export function approvalLine(
   r: Pick<
     LeaveRequest,
-    "status" | "current_step" | "total_steps" | "current_approver_name" | "decision_comment" | "decided_at"
+    | "status"
+    | "current_step"
+    | "total_steps"
+    | "current_approver_name"
+    | "current_approver_names"
+    | "current_step_kind"
+    | "decision_comment"
+    | "decided_at"
   >,
   opts: { tz?: string } = {},
 ): string | null {
   switch (r.status) {
     case "pending": {
-      const name = (r.current_approver_name ?? "").trim();
+      const names = (r.current_approver_names ?? []).map((n) => n.trim()).filter(Boolean);
+      const name = names.length > 0 ? names.join(APPROVER_JOINER) : (r.current_approver_name ?? "").trim();
+      const hrNote = r.current_step_kind === "hr" ? "（HR 覆核）" : "";
       const total = r.total_steps != null && Number(r.total_steps) > 0 ? Number(r.total_steps) : null;
       const step = r.current_step != null && Number(r.current_step) > 0 ? Number(r.current_step) : 1;
       const stepText = total && total > 1 ? `（第 ${step}／${total} 關）` : "";
-      if (name) return `等待 ${name} 簽核${stepText}`;
+      // 有加註時全形括號後直接接「簽核」，不再留半形空白
+      if (name) return `等待 ${name}${hrNote || " "}簽核${stepText}`;
       if (total) return `等待簽核${stepText}`;
       return null;
     }

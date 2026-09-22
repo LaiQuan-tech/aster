@@ -7,7 +7,7 @@
 import { Button, Card, Icon } from "@/components/ess-ui";
 
 export interface SubmitSuccessProps {
-  /** `steps[0].approverName`；沒有 → 「等待主管簽核」。 */
+  /** `steps[0]` 的候選姓名（多位用「／」串）或 `approverName`；沒有 → 「等待主管簽核」。 */
   approverName: string | null;
   summary: string;
   /** 附件沒傳成功時的提醒（null＝全部成功）。 */

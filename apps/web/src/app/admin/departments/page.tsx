@@ -13,6 +13,8 @@ import {
   type Employee,
   type OrgNode,
 } from "@/lib/admin-api";
+import { managerIdsOf, managerLabelOf } from "@/lib/manager-order";
+import { ManagerOrderEditor } from "./_components/ManagerOrderEditor";
 import { OrgTree } from "./_components/OrgTree";
 
 export default function DepartmentsPage() {
@@ -25,14 +27,15 @@ export default function DepartmentsPage() {
 
   const [name, setName] = useState("");
   const [parentId, setParentId] = useState("");
-  const [managerEmpId, setManagerEmpId] = useState("");
+  /** 有序主管（index 0＝小主管）；送出時整批以 managerEmpIds 給後端。 */
+  const [managerEmpIds, setManagerEmpIds] = useState<readonly string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editParentId, setEditParentId] = useState("");
-  const [editManagerEmpId, setEditManagerEmpId] = useState("");
+  const [editManagerEmpIds, setEditManagerEmpIds] = useState<readonly string[]>([]);
 
   const employeeName = useMemo(() => {
     return new Map(employees.map((employee) => [employee.id, employee.emp_no ? `${employee.emp_no} · ${employee.name}` : employee.name]));
@@ -62,8 +65,12 @@ export default function DepartmentsPage() {
     return false;
   }
 
+  /** 「主管」欄：多位用「A → B」（後端 managers）；舊 API 沒回 managers 時退回 manager_label，再退回用員工表查 id。 */
   function managerDisplay(department: Department) {
-    return department.manager_label ?? (department.manager_emp_id ? employeeName.get(department.manager_emp_id) : null) ?? "—";
+    const label = managerLabelOf(department);
+    if (label) return label;
+    const ids = managerIdsOf(department);
+    return ids.length > 0 ? ids.map((id) => employeeName.get(id) ?? id.slice(0, 8)).join(" → ") : "—";
   }
 
   /** 部門、員工、組織圖一起抓；三者共用 loading／error，CRUD 後呼叫即同步重畫右側組織圖。 */
@@ -98,11 +105,11 @@ export default function DepartmentsPage() {
       await createDepartment({
         name: name.trim(),
         parentId: parentId || null,
-        managerEmpId: managerEmpId || null,
+        managerEmpIds: [...managerEmpIds],
       });
       setName("");
       setParentId("");
-      setManagerEmpId("");
+      setManagerEmpIds([]);
       toast.show("已新增單位", "success");
       await load();
     } catch (err) {
@@ -118,7 +125,7 @@ export default function DepartmentsPage() {
       await updateDepartment(id, {
         name: editName.trim(),
         parentId: editParentId || null,
-        managerEmpId: editManagerEmpId || null,
+        managerEmpIds: [...editManagerEmpIds],
       });
       setEditingId(null);
       toast.show("已更新單位", "success");
@@ -154,14 +161,18 @@ export default function DepartmentsPage() {
               {rows.map((row) => <option key={row.id} value={row.id}>{row.code} · {row.name}</option>)}
             </select>
           </div>
-          <div>
-            <label className={labelCls}>主管</label>
-            <select className={inputCls} value={managerEmpId} onChange={(event) => setManagerEmpId(event.target.value)}>
-              <option value="">未指定</option>
-              {employees.map((employee) => <option key={employee.id} value={employee.id}>{employeeName.get(employee.id)}</option>)}
-            </select>
+          <div className="lg:col-span-2">
+            <label className={labelCls}>主管（依簽核順序：第 1 位＝小主管）</label>
+            <ManagerOrderEditor
+              idPrefix="create"
+              value={managerEmpIds}
+              onChange={setManagerEmpIds}
+              employees={employees}
+              employeeName={(id) => employeeName.get(id)}
+              disabled={submitting}
+            />
           </div>
-          <div className="flex items-end">
+          <div className="flex items-end lg:col-span-4">
             <PrimaryButton type="submit" disabled={submitting}>{submitting ? "新增中…" : "新增"}</PrimaryButton>
           </div>
         </form>
@@ -192,19 +203,27 @@ export default function DepartmentsPage() {
                     <tr key={department.id} className="border-b border-gray-50">
                       {editingId === department.id ? (
                         <td colSpan={5} className="py-3">
-                          <div className="grid grid-cols-1 gap-3 lg:grid-cols-5">
-                            <div className="rounded-md bg-gray-50 px-3 py-2 text-sm font-medium text-gray-500">{department.code}</div>
-                            <input className={inputCls} value={editName} onChange={(event) => setEditName(event.target.value)} />
-                            <select className={inputCls} value={editParentId} onChange={(event) => setEditParentId(event.target.value)}>
-                              <option value="">根節點</option>
-                              {rows
-                                .filter((row) => row.id !== department.id && !isDescendant(row.id, department.id))
-                                .map((row) => <option key={row.id} value={row.id}>{row.code} · {row.name}</option>)}
-                            </select>
-                            <select className={inputCls} value={editManagerEmpId} onChange={(event) => setEditManagerEmpId(event.target.value)}>
-                              <option value="">未指定</option>
-                              {employees.map((employee) => <option key={employee.id} value={employee.id}>{employeeName.get(employee.id)}</option>)}
-                            </select>
+                          <div className="space-y-3" data-editing-department={department.id}>
+                            <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+                              <div className="rounded-md bg-gray-50 px-3 py-2 text-sm font-medium text-gray-500">{department.code}</div>
+                              <input className={inputCls} aria-label="單位名稱" value={editName} onChange={(event) => setEditName(event.target.value)} />
+                              <select className={inputCls} aria-label="上層單位" value={editParentId} onChange={(event) => setEditParentId(event.target.value)}>
+                                <option value="">根節點</option>
+                                {rows
+                                  .filter((row) => row.id !== department.id && !isDescendant(row.id, department.id))
+                                  .map((row) => <option key={row.id} value={row.id}>{row.code} · {row.name}</option>)}
+                              </select>
+                            </div>
+                            <div>
+                              <label className={labelCls}>主管（依簽核順序：第 1 位＝小主管）</label>
+                              <ManagerOrderEditor
+                                idPrefix={`edit-${department.id}`}
+                                value={editManagerEmpIds}
+                                onChange={setEditManagerEmpIds}
+                                employees={employees}
+                                employeeName={(id) => employeeName.get(id)}
+                              />
+                            </div>
                             <div className="flex items-center gap-3">
                               <button onClick={() => void saveEdit(department.id)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>儲存</button>
                               <button onClick={() => setEditingId(null)} className="text-sm text-gray-500 hover:underline">取消</button>
@@ -224,7 +243,7 @@ export default function DepartmentsPage() {
                                   setEditingId(department.id);
                                   setEditName(department.name);
                                   setEditParentId(department.parent_id ?? "");
-                                  setEditManagerEmpId(department.manager_emp_id ?? "");
+                                  setEditManagerEmpIds(managerIdsOf(department));
                                 }}
                                 className="text-sm text-gray-600 hover:underline"
                               >

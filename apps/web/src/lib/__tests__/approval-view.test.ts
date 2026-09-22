@@ -15,6 +15,7 @@ import {
   csvMatrix,
   csvText,
   currentApproverLabel,
+  currentCandidateIds,
   fallbackHrIdOf,
   flowByKindOf,
   hasBatchRow,
@@ -72,6 +73,8 @@ const DEPARTMENTS: Department[] = [
     manager_name: "老闆",
     manager_emp_no: "B001",
     manager_label: "B001 · 老闆",
+    manager_emp_ids: [BOSS],
+    managers: [{ id: BOSS, name: "老闆", emp_no: "B001", label: "B001 · 老闆" }],
     created_at: "2026-01-01T00:00:00+00:00",
   },
   {
@@ -84,6 +87,8 @@ const DEPARTMENTS: Department[] = [
     manager_name: null,
     manager_emp_no: null,
     manager_label: null,
+    manager_emp_ids: [],
+    managers: [],
     created_at: "2026-01-01T00:00:00+00:00",
   },
 ];
@@ -91,6 +96,8 @@ const DEPARTMENTS: Department[] = [
 const FLOWS: ApprovalFlow[] = [
   { id: "f1", tenant_id: "t", applies_to: "leave", approver_emp_ids: [BOSS, ME], mode: "list", created_at: "" },
   { id: "f2", tenant_id: "t", applies_to: "ot", approver_emp_ids: [], mode: "manager", created_at: "" },
+  // manager_hr：名單裡雖然留著 ME（切模式前勾的），但這個模式的簽核者由後端依部門主管鏈算，名單不能當退路
+  { id: "f3", tenant_id: "t", applies_to: "fix_punch", approver_emp_ids: [ME], mode: "manager_hr", created_at: "" },
 ];
 
 let seq = 0;
@@ -213,6 +220,79 @@ describe("resolveApproverId 三段退路", () => {
     );
     expect(LOOKUP.approverLabel(APPROVED)).toBe("—");
     expect(LOOKUP.approverLabel(REJECTED)).toBe("—");
+  });
+});
+
+/* ----------------------------------------------- 多級簽核：候選簽核人 --- */
+
+describe("currentCandidateIds／bucketOf：同一關多位候選（manager_hr 的 HR 覆核關）", () => {
+  const flowByKind = flowByKindOf(FLOWS);
+  /** 第 3 關 HR 覆核：候選 ME＋HR2，後端相容欄位 current_approver_emp_id＝第一位 */
+  const HR_STEP = request({
+    kind: "fix_punch",
+    current_step: 3,
+    current_approver_emp_id: HR2,
+    current_candidate_emp_ids: [HR2, ME],
+    current_approver_names: ["二號HR", "Kimi"],
+    current_step_kind: "hr",
+    employee_id: AMY,
+  });
+
+  it("候選含我 → pending_mine（即使 current_approver_emp_id 是別人）", () => {
+    expect(currentCandidateIds(HR_STEP, flowByKind, null)).toEqual([HR2, ME]);
+    expect(resolveApproverId(HR_STEP, flowByKind, null)).toBe(HR2);
+    expect(bucketOf(HR_STEP, CTX)).toBe("pending_mine");
+  });
+
+  it("候選不含我 → in_progress；me 尚未載入時也是 in_progress", () => {
+    const others = request({ ...HR_STEP, current_candidate_emp_ids: [HR2, BOSS], current_approver_emp_id: HR2 });
+    expect(bucketOf(others, CTX)).toBe("in_progress");
+    expect(bucketOf(HR_STEP, { ...CTX, meId: null })).toBe("in_progress");
+  });
+
+  it("沒有候選欄位（舊 API／空陣列）→ 退回 current_approver_emp_id → 名單 → fallback 三段邏輯", () => {
+    expect(currentCandidateIds(request({ current_approver_emp_id: BOSS, current_candidate_emp_ids: [] }), flowByKind, HR2)).toEqual([BOSS]);
+    expect(currentCandidateIds(request({ kind: "leave", current_step: 2 }), flowByKind, HR2)).toEqual([ME]);
+    expect(currentCandidateIds(request({ kind: "ot" }), flowByKind, HR2)).toEqual([HR2]);
+    expect(currentCandidateIds(request({ kind: "ot" }), flowByKind, null)).toEqual([]);
+    expect(bucketOf(request({ kind: "ot" }), { ...CTX, flowByKind, fallbackHrId: null })).toBe("pending_mine");
+  });
+
+  it("manager_hr（與 manager）模式的名單不當退路：flowByKindOf 只收 list 模式", () => {
+    expect([...flowByKind.keys()]).toEqual(["leave"]);
+    // fix_punch 是 manager_hr、名單有 ME：沒有候選欄位時不能因為名單就判成待我簽
+    const noCandidate = request({ kind: "fix_punch", current_step: 1, employee_id: AMY });
+    expect(currentCandidateIds(noCandidate, flowByKind, BOSS)).toEqual([BOSS]);
+    expect(bucketOf(noCandidate, { ...CTX, flowByKind, fallbackHrId: BOSS })).toBe("in_progress");
+    // 舊行為對照：若把 manager_hr 的名單也收進表，同一張單會被誤判成待我簽
+    const legacyMap = new Map<string, string[]>([["fix_punch", [ME]]]);
+    expect(bucketOf(noCandidate, { ...CTX, flowByKind: legacyMap, fallbackHrId: BOSS })).toBe("pending_mine");
+  });
+
+  it("多人標籤：有 current_approver_names 直接串「／」、HR 覆核關加註；只有候選 id 時查員工表", () => {
+    expect(LOOKUP.approverLabel(HR_STEP)).toBe("第 3 關 · 二號HR／Kimi（HR 覆核）");
+    const managerStep = request({ ...HR_STEP, current_step: 1, current_step_kind: "manager", current_approver_names: ["老闆"] });
+    expect(LOOKUP.approverLabel(managerStep)).toBe("第 1 關 · 老闆");
+    const idsOnly = request({ ...HR_STEP, current_approver_names: undefined });
+    expect(LOOKUP.approverLabel(idsOnly)).toBe("第 3 關 · A002 · 二號HR／A001 · Kimi（HR 覆核）");
+    const unknownIds = request({ ...HR_STEP, current_approver_names: [], current_candidate_emp_ids: ["nobody", "ghost"] });
+    expect(LOOKUP.approverLabel(unknownIds)).toBe("第 3 關 · 依後端簽核鏈");
+    expect(LOOKUP.approverLabel({ ...HR_STEP, status: "approved" })).toBe("—");
+  });
+
+  it("CSV 的「目前簽核人」與「狀態」欄跟著候選走", () => {
+    const [, cells] = csvMatrix([HR_STEP], LOOKUP, CTX);
+    expect(cells[9]).toBe("第 3 關 · 二號HR／Kimi（HR 覆核）");
+    expect(cells[10]).toBe("第 3 關");
+    expect(cells[11]).toBe("待簽核");
+    const [, othersCells] = csvMatrix([request({ ...HR_STEP, current_candidate_emp_ids: [HR2, BOSS] })], LOOKUP, CTX);
+    expect(othersCells[11]).toBe("簽核中");
+  });
+
+  it("pendingCounts／rowsForView 用候選分桶：候選含我算待簽核", () => {
+    const rows = [HR_STEP, request({ ...HR_STEP, current_candidate_emp_ids: [HR2, BOSS] })];
+    expect(pendingCounts(rows, CTX)).toEqual({ pending_mine: 1, in_progress: 1 });
+    expect(rowsForView(rows, "pending", CTX).map((r) => r.id)).toEqual([HR_STEP.id]);
   });
 });
 

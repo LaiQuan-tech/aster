@@ -2,9 +2,14 @@
 
 import { EmptyState, InlineError, Skeleton } from "@/components/admin-ui";
 import type { OrgNode } from "@/lib/admin-api";
+import { orgNodeManagerLabel } from "@/lib/manager-order";
 
-/** 單一節點：每層縮排 20px，圓點＋代碼＋名稱＋（有主管時）主管標籤；遞迴畫子節點。 */
+/**
+ * 單一節點：每層縮排 20px，圓點＋代碼＋名稱＋（有主管時）主管標籤；遞迴畫子節點。
+ * 多位主管顯示「A → B」（順序＝簽核順序，第 1 位＝小主管）；舊 API 沒回 managers 時退回 managerLabel。
+ */
 function TreeNode({ node, depth }: { node: OrgNode; depth: number }) {
+  const managerLabel = orgNodeManagerLabel(node);
   return (
     <li>
       <div
@@ -18,9 +23,9 @@ function TreeNode({ node, depth }: { node: OrgNode; depth: number }) {
         />
         <span className="font-mono text-xs text-gray-400">{node.code}</span>
         <span className="font-medium text-gray-800">{node.name}</span>
-        {node.managerLabel && (
-          <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500">
-            {node.managerLabel}
+        {managerLabel && (
+          <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500" title="主管（依簽核順序）">
+            {managerLabel}
           </span>
         )}
       </div>

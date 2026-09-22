@@ -156,7 +156,9 @@ function RequestsView() {
         }
         invalidateEssState();
         const steps = [...(created.steps ?? [])].sort((a, b) => a.stepOrder - b.stepOrder);
-        setSuccess({ approverName: steps[0]?.approverName ?? null, summary, uploadWarning });
+        // 第一關可能有多位候選（任一人簽即過）：有 candidateNames 就用「／」串，舊 API 退回 approverName
+        const firstNames = (steps[0]?.candidateNames ?? []).map((n) => n.trim()).filter(Boolean);
+        setSuccess({ approverName: firstNames.length > 0 ? firstNames.join("／") : (steps[0]?.approverName ?? null), summary, uploadWarning });
         if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
         void loadRequests();
       } catch (err) {

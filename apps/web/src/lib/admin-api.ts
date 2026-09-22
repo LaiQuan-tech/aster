@@ -32,6 +32,20 @@ export function getMe() {
 
 /* --------------------------------------------------------- departments ----- */
 
+/** 部門的一位主管（`departments.manager_emp_ids` 展開後的員工摘要；label＝「工號 · 姓名」）。 */
+export interface DepartmentManager {
+  id: string;
+  name: string;
+  emp_no: string | null;
+  label: string;
+}
+
+/**
+ * 部門列。2026-09-22 多級簽核起主管改成**有序多位**：`manager_emp_ids[0]`＝小主管（第一關），
+ * 之後依序往上；`manager_emp_id`／`manager_name`／`manager_emp_no` 保留＝第 1 位（相容舊讀點），
+ * `manager_label` 多人時後端用「 → 」串。畫面顯示請走 `lib/manager-order.ts` 的 `managerLabelOf`
+ * （舊 API 沒回 `managers` 時會退回 `manager_label`）。
+ */
 export interface Department {
   id: string;
   tenant_id: string;
@@ -42,6 +56,10 @@ export interface Department {
   manager_name: string | null;
   manager_emp_no: string | null;
   manager_label: string | null;
+  /** 有序：index 0＝小主管。 */
+  manager_emp_ids: string[];
+  /** 與 `manager_emp_ids` 同序的員工摘要。 */
+  managers: DepartmentManager[];
   created_at: string;
 }
 
@@ -49,21 +67,26 @@ export function getDepartments() {
   return apiFetch<{ departments: Department[] }>("/departments");
 }
 
-export function createDepartment(body: {
-  name: string;
+/**
+ * 主管欄位：新碼一律送 `managerEmpIds`（有序、去重、皆須為本租戶員工）；
+ * `managerEmpId` 只為相容舊呼叫端保留（＝`[id]`，null＝`[]`），兩者都給時後端以 `managerEmpIds` 為準。
+ */
+export interface DepartmentWriteBody {
+  name?: string;
   parentId?: string | null;
+  managerEmpIds?: string[];
+  /** @deprecated 改用 managerEmpIds。 */
   managerEmpId?: string | null;
-}) {
+}
+
+export function createDepartment(body: DepartmentWriteBody & { name: string }) {
   return apiFetch<{ id: string }>("/departments", {
     method: "POST",
     body: JSON.stringify(body),
   });
 }
 
-export function updateDepartment(
-  id: string,
-  body: { name?: string; parentId?: string | null; managerEmpId?: string | null },
-) {
+export function updateDepartment(id: string, body: DepartmentWriteBody) {
   return apiFetch<{ id: string }>(`/departments/${id}`, {
     method: "PATCH",
     body: JSON.stringify(body),
@@ -545,8 +568,16 @@ export interface LeaveRequest {
   segments: unknown;
   status: RequestStatus;
   current_step: number;
+  /** 目前關卡的第一位候選簽核人（相容欄位）；多人候選請看 `current_candidate_emp_ids`。 */
   current_approver_emp_id: string | null;
   created_at: string;
+  /* ── 多級簽核（2026-09-22）新增的 enrich 欄位，皆 optional：舊 API 沒回時退回 current_approver_emp_id ── */
+  /** 目前關卡全部候選簽核人（任一人簽即過）；空／缺席＝只有 current_approver_emp_id 一人。 */
+  current_candidate_emp_ids?: string[];
+  /** 與 `current_candidate_emp_ids` 同序的姓名。 */
+  current_approver_names?: string[];
+  /** 目前關卡種類：manager｜hr｜list｜fallback｜hr_admin。 */
+  current_step_kind?: string;
 }
 
 export interface RequestQuery {
@@ -784,10 +815,15 @@ export interface OrgNode {
   id: string;
   code: string;
   name: string;
+  /** 第 1 位主管（相容舊讀點）；多位主管請看 `managerEmpIds`／`managers`。 */
   managerEmpId: string | null;
   managerName: string | null;
   managerEmpNo: string | null;
+  /** 多人時後端用「 → 」串；畫面請走 `lib/manager-order.ts` 的 `orgNodeManagerLabel`。 */
   managerLabel: string | null;
+  /** 有序：index 0＝小主管。 */
+  managerEmpIds: string[];
+  managers: DepartmentManager[];
   children: OrgNode[];
 }
 
@@ -1084,10 +1120,12 @@ export type ApprovalFlowKind = RequestKind | "petty_cash";
 
 /**
  * 簽核模式（approval_flows.mode）：
- *   manager — 直屬主管單關（找不到主管 → tenant features.approval.fallbackApproverEmpId → 第一位 HR）
- *   list    — 固定名單依序多關；名單為空時行為同 manager
+ *   manager    — 直屬主管單關（找不到主管 → tenant features.approval.fallbackApproverEmpId → 第一位 HR）
+ *   list       — 固定名單依序多關；名單為空時行為同 manager
+ *   manager_hr — 主管逐級簽核（部門 manager_emp_ids 依序、子部門簽完接母部門）→ 最後任一在職 HR 管理員覆核；
+ *                沒有任何主管時以備援簽核人（老闆）代替主管關。approver_emp_ids 在此模式不使用。
  */
-export type ApprovalFlowMode = "manager" | "list";
+export type ApprovalFlowMode = "manager" | "list" | "manager_hr";
 
 export interface ApprovalFlow {
   id: string;

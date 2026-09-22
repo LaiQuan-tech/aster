@@ -31,6 +31,23 @@ const KINDS: { kind: ApprovalFlowKind; label: string }[] = [
 /** 沒有 flow 列時系統的實際行為就是直屬主管鏈，畫面預設也顯示「直屬主管」。 */
 const DEFAULT_MODE: ApprovalFlowMode = "manager";
 
+/** 三種簽核模式的 radio 標籤（順序即畫面順序）。 */
+const MODE_OPTIONS: ReadonlyArray<{ value: ApprovalFlowMode; label: string }> = [
+  { value: "manager", label: "直屬主管" },
+  { value: "manager_hr", label: "主管逐級簽核 → HR 覆核" },
+  { value: "list", label: "固定名單" },
+];
+
+const MODE_LABEL: Record<ApprovalFlowMode, string> = Object.fromEntries(MODE_OPTIONS.map((o) => [o.value, o.label])) as Record<
+  ApprovalFlowMode,
+  string
+>;
+
+/** API 回來的 mode 正規化：認得的三種原樣保留（不再把 manager_hr 打回 manager），其他一律視為直屬主管。 */
+function normalizeMode(mode: string | null | undefined): ApprovalFlowMode {
+  return mode === "list" || mode === "manager_hr" ? mode : "manager";
+}
+
 /** 扣薪比例顯示用：deduct_rate 為 null 時依 paid 推算（有薪 0、無薪 1），與 DB 欄位註解一致。 */
 function effectiveDeductRate(lt: Pick<LeaveType, "deduct_rate" | "paid">): number {
   if (lt.deduct_rate !== null && lt.deduct_rate !== undefined && lt.deduct_rate !== "") {
@@ -97,7 +114,7 @@ export default function LeaveTypesPage() {
       const modes: Record<string, ApprovalFlowMode> = {};
       for (const f of flowRes.flows) {
         draft[f.applies_to] = f.approver_emp_ids ?? [];
-        modes[f.applies_to] = f.mode === "list" ? "list" : "manager";
+        modes[f.applies_to] = normalizeMode(f.mode);
       }
       setFlowDraft(draft);
       setFlowMode(modes);
@@ -191,15 +208,14 @@ export default function LeaveTypesPage() {
     setFlowMsg(null);
     const mode = modeOf(kind);
     const selected = flowDraft[kind] ?? [];
+    // 只有固定名單模式需要名單；manager／manager_hr 的簽核者由後端依部門主管鏈算，名單可以是空的
     if (mode === "list" && selected.length === 0) {
-      setError("固定名單模式至少要勾選一位簽核者；若要依部門主管簽核請改選「直屬主管」。");
+      setError("固定名單模式至少要勾選一位簽核者；若要依部門主管簽核請改選「直屬主管」或「主管逐級簽核 → HR 覆核」。");
       return;
     }
     try {
       await setApprovalFlow(kind, selected, mode);
-      setFlowMsg(
-        `${KINDS.find((k) => k.kind === kind)?.label} 簽核流程已儲存（${mode === "list" ? "固定名單" : "直屬主管"}）`,
-      );
+      setFlowMsg(`${KINDS.find((k) => k.kind === kind)?.label} 簽核流程已儲存（${MODE_LABEL[mode]}）`);
       setError(null);
       await load();
     } catch (err) {
@@ -404,8 +420,10 @@ export default function LeaveTypesPage() {
       <Card>
         <h2 className="mb-1 text-sm font-medium text-gray-500">簽核流程</h2>
         <p className="mb-4 text-xs text-gray-400">
-          每類申請可選「直屬主管」（依員工所屬部門的主管簽核，主管是本人或未設定時往上層部門找）或
-          「固定名單」（勾選的員工依勾選順序逐關簽核）。直屬主管找不到時退回下方設定的簽核者，再沒有就退回第一位 HR 管理員。
+          每類申請可選「直屬主管」（依員工所屬部門的第 1 位主管單關簽核，主管是本人或未設定時往上層部門找）、
+          「主管逐級簽核 → HR 覆核」（部門主管依順序逐關簽核，最後由任一 HR 管理員覆核）或
+          「固定名單」（勾選的員工依勾選順序逐關簽核）。主管找不到時退回下方設定的簽核者，再沒有就退回第一位 HR 管理員。
+          部門主管的順序在「單位」頁設定（第 1 位＝小主管）。
         </p>
         {flowMsg && <p className="mb-3 text-sm text-green-600">{flowMsg}</p>}
         <div className="space-y-6">
@@ -428,31 +446,30 @@ export default function LeaveTypesPage() {
                 <fieldset className="mb-3">
                   <legend className="mb-1 text-xs font-medium text-gray-500">簽核模式</legend>
                   <div className="flex flex-wrap gap-4">
-                    <label className="flex items-center gap-2 text-sm text-gray-700">
-                      <input
-                        type="radio"
-                        name={`mode-${kind}`}
-                        value="manager"
-                        checked={mode === "manager"}
-                        onChange={() => setFlowMode((prev) => ({ ...prev, [kind]: "manager" }))}
-                      />
-                      直屬主管
-                    </label>
-                    <label className="flex items-center gap-2 text-sm text-gray-700">
-                      <input
-                        type="radio"
-                        name={`mode-${kind}`}
-                        value="list"
-                        checked={mode === "list"}
-                        onChange={() => setFlowMode((prev) => ({ ...prev, [kind]: "list" }))}
-                      />
-                      固定名單
-                    </label>
+                    {MODE_OPTIONS.map((option) => (
+                      <label key={option.value} className="flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="radio"
+                          name={`mode-${kind}`}
+                          value={option.value}
+                          checked={mode === option.value}
+                          onChange={() => setFlowMode((prev) => ({ ...prev, [kind]: option.value }))}
+                        />
+                        {option.label}
+                      </label>
+                    ))}
                   </div>
                 </fieldset>
+                {/* 名單勾選區只有固定名單模式會用到；其他模式隱藏（已勾的名單保留，切回時沿用） */}
                 {mode === "manager" ? (
                   <p className="text-xs text-gray-500">
-                    依申請人所屬部門的主管單關簽核；找不到主管 → 下方「找不到主管時的簽核者」→ 第一位 HR 管理員。
+                    依申請人所屬部門的第 1 位主管單關簽核；找不到主管 → 下方「找不到主管時的簽核者」→ 第一位 HR 管理員。
+                    {selected.length > 0 && "（已勾選的固定名單會保留，切回「固定名單」時沿用。）"}
+                  </p>
+                ) : mode === "manager_hr" ? (
+                  <p className="text-xs text-gray-500">
+                    依部門主管的順序逐關簽核（第 1 位主管→第 2 位…，子部門簽完接母部門），最後由任一 HR 管理員覆核。
+                    沒有設主管的部門會由備援簽核人（老闆）代替主管關。
                     {selected.length > 0 && "（已勾選的固定名單會保留，切回「固定名單」時沿用。）"}
                   </p>
                 ) : employees.length === 0 ? (

@@ -312,6 +312,33 @@ describe("requestTitle / approvalLine / needsAttachment / remainingHours", () =>
     expect(approvalLine(row({ status: "cancelled" }))).toBeNull();
   });
 
+  it("approvalLine 多級簽核：多位候選用「／」串、HR 覆核關加註；有 names 時不看舊的 current_approver_name", () => {
+    expect(
+      approvalLine(
+        row({
+          current_approver_name: "HR 覆核：王小明／李小華",
+          current_approver_names: ["王小明", "李小華"],
+          current_step_kind: "hr",
+          current_step: 3,
+          total_steps: 3,
+        }),
+      ),
+    ).toBe("等待 王小明／李小華（HR 覆核）簽核（第 3／3 關）");
+    expect(
+      approvalLine(row({ current_approver_names: ["王小明"], current_step_kind: "manager", current_step: 1, total_steps: 3 })),
+    ).toBe("等待 王小明 簽核（第 1／3 關）");
+  });
+
+  it("approvalLine 新欄位空陣列／空白 → 退回 current_approver_name；只有 kind=hr 沒名字 → 不加註", () => {
+    expect(approvalLine(row({ current_approver_names: [], current_approver_name: "王小明", total_steps: 1 }))).toBe(
+      "等待 王小明 簽核",
+    );
+    expect(approvalLine(row({ current_approver_names: ["  "], current_approver_name: "王小明", current_step_kind: "hr" }))).toBe(
+      "等待 王小明（HR 覆核）簽核",
+    );
+    expect(approvalLine(row({ current_step_kind: "hr", current_step: 2, total_steps: 2 }))).toBe("等待簽核（第 2／2 關）");
+  });
+
   it("approvalLine 缺欄位（舊 API）退化成 null；只有關數沒名字 → 等待簽核（第 N／M 關）", () => {
     expect(approvalLine(row({}))).toBeNull();
     expect(approvalLine(row({ status: "rejected" }))).toBeNull();

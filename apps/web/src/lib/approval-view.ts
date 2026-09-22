@@ -5,10 +5,13 @@
  *
  * 狀態機（URL 是唯一真相）：
  *   pending（預設）／in_progress → 都抓 `status=pending` 同一份，再用 `bucketOf` 切桶：
- *     pending_mine ＝ 目前簽核者是我（或解析不到簽核者）；in_progress ＝ 簽核者是別人。
+ *     pending_mine ＝ 目前關卡的候選簽核人含我（或解析不到簽核者）；in_progress ＝ 候選都是別人。
  *   approved／rejected → 各抓自己的 status；all → 不帶 status（含 cancelled）。
- * 簽核者解析（原 form-records `currentApproverLabel` 規則）：
- *   `row.current_approver_emp_id ?? flowByKind.get(row.kind)?.[row.current_step-1] ?? fallbackHrId ?? null`
+ * 候選簽核人解析（`currentCandidateIds`；多級簽核起同一關可有多位候選，任一人簽即過）：
+ *   `row.current_candidate_emp_ids`（有值）→ `[row.current_approver_emp_id]` →
+ *   固定名單模式的 `flowByKind.get(row.kind)?.[row.current_step-1]` → `fallbackHrId` → `[]`。
+ *   名單退路只在 `mode === "list"` 才建（`flowByKindOf`）：manager／manager_hr 模式的簽核者由後端依部門主管鏈算，
+ *   名單對它們沒有意義，拿來當退路會把別人的單誤判成「待我簽」。
  */
 import type { ApprovalFlow, Department, Employee, LeaveRequest, RequestKind, RequestStatus } from "./admin-api";
 import { localDateKey, fmtHm } from "./ess-format";
@@ -86,9 +89,13 @@ export function employeeLabel(employee: Pick<Employee, "name" | "emp_no">): stri
 /** kind → 依序簽核者 id 清單（approval_flows.applies_to 含 petty_cash，key 放寬成 string）。 */
 export type FlowByKind = ReadonlyMap<string, readonly string[]>;
 
+/** 只有固定名單模式（`mode === "list"`）的流程才進表；manager／manager_hr 的名單不當退路。 */
 export function flowByKindOf(flows: readonly ApprovalFlow[]): Map<string, string[]> {
   const map = new Map<string, string[]>();
-  for (const flow of flows) map.set(flow.applies_to, flow.approver_emp_ids ?? []);
+  for (const flow of flows) {
+    if (flow.mode !== "list") continue;
+    map.set(flow.applies_to, flow.approver_emp_ids ?? []);
+  }
   return map;
 }
 
@@ -97,12 +104,29 @@ export function fallbackHrIdOf(employees: readonly Employee[]): string | null {
   return employees.find((e) => e.role === "hr_admin" || e.role === "platform_admin")?.id ?? null;
 }
 
-export function resolveApproverId(
-  row: Pick<LeaveRequest, "kind" | "current_step" | "current_approver_emp_id">,
-  flowByKind: FlowByKind,
-  fallbackHrId: string | null | undefined,
-): string | null {
-  return row.current_approver_emp_id ?? flowByKind.get(row.kind)?.[row.current_step - 1] ?? fallbackHrId ?? null;
+/** `currentCandidateIds`／`resolveApproverId` 只看這幾欄（測試可以只給部分列）。 */
+export type ApproverRow = Pick<
+  LeaveRequest,
+  "kind" | "current_step" | "current_approver_emp_id" | "current_candidate_emp_ids" | "current_approver_names" | "current_step_kind"
+>;
+
+/**
+ * 目前關卡的候選簽核人（任一人簽即過）：
+ *   ① `current_candidate_emp_ids` 有值就用它（去掉空字串）；
+ *   ② 沒有 → `[current_approver_emp_id]`；
+ *   ③ 再沒有 → 固定名單模式的流程表第 current_step-1 位 → fallbackHrId；
+ *   都沒有 → `[]`（畫面顯示「依後端簽核鏈」、分桶視同待我簽）。
+ */
+export function currentCandidateIds(row: ApproverRow, flowByKind: FlowByKind, fallbackHrId: string | null | undefined): string[] {
+  const candidates = (row.current_candidate_emp_ids ?? []).filter((id) => typeof id === "string" && id.length > 0);
+  if (candidates.length > 0) return candidates;
+  const legacy = row.current_approver_emp_id ?? flowByKind.get(row.kind)?.[row.current_step - 1] ?? fallbackHrId ?? null;
+  return legacy ? [legacy] : [];
+}
+
+/** 第一位候選（＝後端的 `current_approver_emp_id`）；變更簽核人下拉的預設值用。找不到 → null。 */
+export function resolveApproverId(row: ApproverRow, flowByKind: FlowByKind, fallbackHrId: string | null | undefined): string | null {
+  return currentCandidateIds(row, flowByKind, fallbackHrId)[0] ?? null;
 }
 
 export type ApprovalBucket = "pending_mine" | "in_progress" | "approved" | "rejected" | "cancelled";
@@ -123,8 +147,9 @@ export function bucketOf(row: LeaveRequest, ctx: BucketContext): ApprovalBucket 
     case "cancelled":
       return "cancelled";
     default: {
-      const approverId = resolveApproverId(row, ctx.flowByKind, ctx.fallbackHrId);
-      return approverId === null || approverId === ctx.meId ? "pending_mine" : "in_progress";
+      const candidates = currentCandidateIds(row, ctx.flowByKind, ctx.fallbackHrId);
+      if (candidates.length === 0) return "pending_mine";
+      return ctx.meId !== null && candidates.includes(ctx.meId) ? "pending_mine" : "in_progress";
     }
   }
 }
@@ -192,10 +217,19 @@ export interface ApprovalLookup {
   employeeName(employeeId: string): string | undefined;
   /** 單位名；沒單位 →「—」、單位查不到 →「未命名單位」、找不到員工 → undefined。 */
   employeeDept(employeeId: string): string | undefined;
-  /** 「第 N 關 · 簽核者」／「第 N 關 · 依後端簽核鏈」；非 pending →「—」。 */
+  /** 「第 N 關 · 簽核者」（多位候選用「／」串、HR 覆核關加註）／「第 N 關 · 依後端簽核鏈」；非 pending →「—」。 */
   approverLabel(row: LeaveRequest): string;
 }
 
+/** 多位候選姓名的連接符（與後端 `current_approver_name` 相同）。 */
+export const CANDIDATE_JOINER = "／";
+
+/**
+ * 「目前簽核人」欄：
+ *   有 `current_approver_names` → 「第 N 關 · 王小明／李小華」（後端已算好姓名，不必查員工表）；
+ *   否則用候選 id 查員工表（查得到的才列，多人一樣用「／」串）；一個都查不到 → 「第 N 關 · 依後端簽核鏈」。
+ *   `current_step_kind === "hr"`（manager_hr 模式最後一關）再加註「（HR 覆核）」，與 ESS 我的申請一致。
+ */
 export function currentApproverLabel(
   row: LeaveRequest,
   employeeName: (employeeId: string) => string | undefined,
@@ -203,9 +237,16 @@ export function currentApproverLabel(
   fallbackHrId: string | null,
 ): string {
   if (row.status !== "pending") return "—";
-  const approverId = resolveApproverId(row, flowByKind, fallbackHrId);
-  const label = approverId ? employeeName(approverId) : undefined;
-  return label ? `第 ${row.current_step} 關 · ${label}` : `第 ${row.current_step} 關 · 依後端簽核鏈`;
+  const fromApi = (row.current_approver_names ?? []).map((name) => name.trim()).filter(Boolean);
+  const names =
+    fromApi.length > 0
+      ? fromApi
+      : currentCandidateIds(row, flowByKind, fallbackHrId)
+          .map((id) => employeeName(id))
+          .filter((name): name is string => Boolean(name));
+  if (names.length === 0) return `第 ${row.current_step} 關 · 依後端簽核鏈`;
+  const hrSuffix = row.current_step_kind === "hr" ? "（HR 覆核）" : "";
+  return `第 ${row.current_step} 關 · ${names.join(CANDIDATE_JOINER)}${hrSuffix}`;
 }
 
 export function buildApprovalLookup(

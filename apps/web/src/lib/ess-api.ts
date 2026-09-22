@@ -156,8 +156,17 @@ export interface LeaveRequest {
   requires_attachment?: boolean | null;
   attachment_count?: number | null;
   total_steps?: number | null;
+  /** 目前關卡第一位候選簽核人（相容欄位）。 */
   current_approver_emp_id?: string | null;
+  /** 相容欄位：多人用「／」串、HR 關前綴「HR 覆核：」；有 `current_approver_names` 時優先用它組字。 */
   current_approver_name?: string | null;
+  /* ── 多級簽核（2026-09-22）：同一關可有多位候選（任一人簽即過），舊 API 沒回時退回上面兩欄 ── */
+  /** 目前關卡全部候選簽核人。 */
+  current_candidate_emp_ids?: string[];
+  /** 與 `current_candidate_emp_ids` 同序的姓名。 */
+  current_approver_names?: string[];
+  /** 目前關卡種類：manager｜hr｜list｜fallback｜hr_admin；`hr` 時畫面加註「（HR 覆核）」。 */
+  current_step_kind?: string;
   /** 最後一次簽核決定的意見（駁回理由）與時間。 */
   decision_comment?: string | null;
   decided_at?: string | null;
@@ -419,8 +428,20 @@ export interface CreateRequestResult {
   approvalSource?: string;
   /** 是否已通知第一關簽核者。 */
   notified?: boolean;
-  /** 簽核關卡（依 stepOrder 排序）；送出成功畫面用 steps[0].approverName。 */
-  steps?: Array<{ stepOrder: number; approverEmpId: string; approverName?: string | null }>;
+  /**
+   * 簽核關卡（依 stepOrder 排序）；送出成功畫面用 steps[0] 的候選姓名（`candidateNames`，
+   * 舊 API 沒回時退回 `approverName`）。多級簽核起每關可有多位候選（任一人簽即過）。
+   */
+  steps?: Array<{
+    stepOrder: number;
+    /** 第一位候選（相容欄位）。 */
+    approverEmpId: string;
+    approverName?: string | null;
+    candidateEmpIds?: string[];
+    candidateNames?: string[];
+    /** manager｜hr｜list｜fallback｜hr_admin */
+    kind?: string;
+  }>;
 }
 
 export function createRequest(body: CreateRequestBody) {
@@ -444,6 +465,7 @@ export function cancelRequest(id: string) {
  * 假別／附件數／關卡進度（非 HR 拿不到 GET /employees，名稱只能由這裡來）。
  */
 export interface PendingApproval extends LeaveRequest {
+  /** 第一位候選（相容欄位）；`current_candidate_emp_ids`／`current_approver_names`／`current_step_kind` 自 LeaveRequest 繼承。 */
   current_approver_emp_id: string | null;
   employee_name: string | null;
   employee_emp_no: string | null;

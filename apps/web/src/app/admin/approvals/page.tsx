@@ -7,7 +7,9 @@
  * 現 307 → `?status=all`）合併成一頁，用 Segmented 切換狀態，URL 是唯一真相。
  *
  * 取資料：pending／in_progress 都抓 `GET /requests?status=pending` 同一份再依簽核者切桶
- * （`bucketOf`：簽核者是我＝待簽核、是別人＝簽核中）；approved／rejected 各抓自己的；all 不帶 status。
+ * （`bucketOf`：目前關卡的候選簽核人含我＝待簽核、都是別人＝簽核中；多級簽核起同一關可有多位候選，
+ * 例如 manager_hr 模式最後的 HR 覆核關）；approved／rejected 各抓自己的；all 不帶 status。
+ * 「變更簽核人」下拉預設值＝第一位候選（`resolveApproverId`），改掉後該關只剩新簽核人一位能簽。
  * 篩選列＝兩頁聯集（表單類型｜單位｜工號/姓名｜起迄日｜關鍵字｜搜尋｜匯出 CSV），單位與關鍵字在 client 端。
  * 各桶列操作（`actionsFor`）：待簽核＝核准／駁回／變更簽核人／註銷；簽核中＝催簽／代理簽核（confirm）／
  * 變更簽核人／註銷；已核准＝註銷 disabled；已駁回／已取消＝註銷；附件每桶都有（展開才抓、依 id 快取）。
@@ -71,6 +73,7 @@ import {
   hasBatchRow,
   parseApprovalView,
   pendingCounts,
+  resolveApproverId,
   rowsForView,
   statsOf,
   statusParamFor,
@@ -339,13 +342,19 @@ function ApprovalsView() {
     }
   }
 
+  /** 下拉預設值：第一位候選簽核人（後端相容欄位 current_approver_emp_id 也是它）；沒有候選 → 空。 */
+  function defaultApproverId(row: LeaveRequest): string {
+    return resolveApproverId(row, ctx.flowByKind, ctx.fallbackHrId) ?? "";
+  }
+
   async function changeApprover(row: LeaveRequest) {
-    const approverEmpId = approverDrafts[row.id] ?? row.current_approver_emp_id ?? "";
+    const currentId = defaultApproverId(row);
+    const approverEmpId = approverDrafts[row.id] ?? currentId;
     if (!approverEmpId) {
       setError("請先選擇新的簽核人");
       return;
     }
-    if (approverEmpId === row.current_approver_emp_id) {
+    if (approverEmpId === currentId) {
       toast.show("目前簽核人未變更", "info");
       return;
     }
@@ -760,7 +769,7 @@ function ApprovalsView() {
                                     <select
                                       className="rounded-md border border-gray-300 px-2 py-1.5 text-xs"
                                       aria-label="新的簽核人"
-                                      value={approverDrafts[row.id] ?? row.current_approver_emp_id ?? ""}
+                                      value={approverDrafts[row.id] ?? defaultApproverId(row)}
                                       disabled={busy}
                                       onChange={(event) =>
                                         setApproverDrafts((drafts) => ({ ...drafts, [row.id]: event.target.value }))
