@@ -1,3 +1,4 @@
+import http from "node:http"
 import { describe, it, expect, beforeAll, afterAll } from "vitest"
 import { createClient } from "@supabase/supabase-js"
 import request from "supertest"
@@ -8,6 +9,24 @@ import { provisionTenant } from "../services/tenants"
 import { taipeiToday } from "../services/project-status"
 import { autoArchiveProjects } from "../services/project-archive"
 import { app } from "../app"
+
+/**
+ * 整份測試共用**一台**常駐 HTTP server。
+ *
+ * 為什麼不直接 `request(app)`：supertest 收到 express app（一個 function）時，
+ * **每一次呼叫**都 `http.createServer(app).listen(0)` 開一台新 server、回應收完再關
+ * （supertest `Test.serverAddress`：`app.address()` 沒值才 listen）。這個檔案一輪要打
+ * 上百次請求，整包測試上千次，macOS 的 ephemeral port 會在大量 TIME_WAIT 連線
+ * 還沒過期時就被回收；新連線偶爾收到上一輪同四元組的殘留位元組，client 端的 llhttp
+ * 就在狀態列爆 `Parse Error: Expected HTTP/, RTSP/ or ICE/`（HPE_INVALID_CONSTANT），
+ * 看起來像某個端點「偶爾回傳壞掉的回應」，其實跟本專案程式無關——拿一支空的 express
+ * app 照樣重現：每次 listen(0) 跑 24,000 次請求錯 3 次，改成常駐 server 跑 24,000 次
+ * 錯 0 次（2026-09-22 實測）。
+ *
+ * 傳「已經在 listen 的 server」給 supertest，它就沿用同一個 port、不再開關 socket，
+ * 這條 flake 隨之消失。新增案例請一律用 `request(server)`，不要寫回 `request(app)`。
+ */
+const server = http.createServer(app)
 
 const SUPABASE_URL = process.env.SUPABASE_URL ?? ""
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ?? ""
@@ -34,13 +53,14 @@ async function signIn(email: string, password: string): Promise<string> {
 }
 
 function createProject(body: Record<string, unknown>) {
-  return request(app)
+  return request(server)
     .post("/projects")
     .set("Authorization", `Bearer ${adminToken}`)
     .send(body)
 }
 
 beforeAll(async () => {
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()))
   const name = `PROJTEST ${stamp}`
   const adminEmail = `proj-${stamp}-admin@example.com`
   const adminPassword = `Pw-${stamp}-Aa1!`
@@ -65,6 +85,8 @@ afterAll(async () => {
     await supabaseAdmin.from("tenants").delete().eq("id", tid)
   }
   for (const uid of createdUserIds) await supabaseAdmin.auth.admin.deleteUser(uid)
+  server.closeAllConnections()
+  await new Promise<void>((resolve) => server.close(() => resolve()))
 }, 60_000)
 
 describe("M4-1 專案編號 — 系統產號", () => {
@@ -84,7 +106,7 @@ describe("M4-1 專案編號 — 系統產號", () => {
   })
 
   it("歸屬年度未指定時預設為建立年", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .get(`/projects/${firstId}`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(res.status).toBe(200)
@@ -97,7 +119,7 @@ describe("M4-1 專案編號 — 系統產號", () => {
     // 編號仍是建立年——編號不表達歸屬。
     expect(res.body.code).toBe(`AT-${ROC}-003`)
 
-    const got = await request(app)
+    const got = await request(server)
       .get(`/projects/${res.body.id}`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(got.body.project.fiscalYear).toBe(YEAR - 1)
@@ -142,7 +164,7 @@ describe("M4-1 專案編號 — 不可變更", () => {
   })
 
   it("PATCH 帶 code 回 409，不是靜默忽略", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .patch(`/projects/${projectId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ code: "NEW-001" })
@@ -151,33 +173,33 @@ describe("M4-1 專案編號 — 不可變更", () => {
   })
 
   it("編號確實沒被改掉", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .get(`/projects/${projectId}`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(res.body.project.code).toBe(originalCode)
   })
 
   it("同一次請求裡夾帶 code，其餘欄位也不會被寫入（整筆拒絕）", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .patch(`/projects/${projectId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ code: "NEW-002", name: "改過的名字" })
     expect(res.status).toBe(409)
 
-    const got = await request(app)
+    const got = await request(server)
       .get(`/projects/${projectId}`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(got.body.project.name).toBe("已出合約的案子")
   })
 
   it("歸屬年度可以改，編號不動", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .patch(`/projects/${projectId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ fiscalYear: YEAR - 1 })
     expect(res.status).toBe(200)
 
-    const got = await request(app)
+    const got = await request(server)
       .get(`/projects/${projectId}`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(got.body.project.fiscalYear).toBe(YEAR - 1)
@@ -198,7 +220,7 @@ describe("M4-1 專案編號 — 租戶隔離", () => {
     createdUserIds.push(other.userId)
     const otherToken = await signIn(otherEmail, otherPassword)
 
-    const res = await request(app)
+    const res = await request(server)
       .post("/projects")
       .set("Authorization", `Bearer ${otherToken}`)
       .send({ name: "別家的第一個案子" })
@@ -217,14 +239,14 @@ describe("M4-2 案情狀態", () => {
   })
 
   function patch(body: Record<string, unknown>) {
-    return request(app)
+    return request(server)
       .patch(`/projects/${projectId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send(body)
   }
 
   function get(id = projectId) {
-    return request(app).get(`/projects/${id}`).set("Authorization", `Bearer ${adminToken}`)
+    return request(server).get(`/projects/${id}`).set("Authorization", `Bearer ${adminToken}`)
   }
 
   it("新建的專案是進行中", async () => {
@@ -284,13 +306,13 @@ describe("M4-2 案情狀態", () => {
   })
 
   it("已封存的專案預設不出現在列表", async () => {
-    const res = await request(app).get("/projects").set("Authorization", `Bearer ${adminToken}`)
+    const res = await request(server).get("/projects").set("Authorization", `Bearer ${adminToken}`)
     expect(res.status).toBe(200)
     expect(res.body.projects.map((p: { id: string }) => p.id)).not.toContain(projectId)
   })
 
   it("?includeArchived=1 才看得到", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .get("/projects?includeArchived=1")
       .set("Authorization", `Bearer ${adminToken}`)
     expect(res.status).toBe(200)
@@ -328,7 +350,7 @@ describe("M4-2 自動封存", () => {
   beforeAll(async () => {
     const res = await createProject({ name: "自動封存測試案" })
     projectId = res.body.id
-    await request(app)
+    await request(server)
       .patch(`/projects/${projectId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({
@@ -351,13 +373,13 @@ describe("M4-2 自動封存", () => {
   }
 
   function get() {
-    return request(app)
+    return request(server)
       .get(`/projects/${projectId}`)
       .set("Authorization", `Bearer ${adminToken}`)
   }
 
   it("沒有 token 就打不到", async () => {
-    const res = await request(app).post("/internal/projects/auto-archive").send({})
+    const res = await request(server).post("/internal/projects/auto-archive").send({})
     expect([401, 404]).toContain(res.status)
   })
 
@@ -390,7 +412,7 @@ describe("M4-2 自動封存", () => {
   })
 
   it("人工拉回來之後，排程不會再把它收起來", async () => {
-    const unarchive = await request(app)
+    const unarchive = await request(server)
       .patch(`/projects/${projectId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ archived: false })
@@ -406,7 +428,7 @@ describe("M4-2 自動封存", () => {
 
   it("暫停的專案永遠不會被自動封存", async () => {
     const other = await createProject({ name: "暫停中的案子" })
-    await request(app)
+    await request(server)
       .patch(`/projects/${other.body.id}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ status: "suspended", statusReason: "等都審" })
@@ -414,7 +436,7 @@ describe("M4-2 自動封存", () => {
     const res = await runJob({ months: 0 })
     if (res.status === 409) return
 
-    const got = await request(app)
+    const got = await request(server)
       .get(`/projects/${other.body.id}`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(got.body.project.status).toBe("suspended")
@@ -424,7 +446,7 @@ describe("M4-2 自動封存", () => {
 
 describe("M4-2 專案參數", () => {
   it("沒有設定列時回預設值", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .get("/project-settings")
       .set("Authorization", `Bearer ${adminToken}`)
     expect(res.status).toBe(200)
@@ -433,27 +455,27 @@ describe("M4-2 專案參數", () => {
   })
 
   it("HR 可以調整並讀回", async () => {
-    const put = await request(app)
+    const put = await request(server)
       .put("/project-settings")
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ autoArchiveMonths: 12 })
     expect(put.status).toBe(200)
     expect(put.body.settings.autoArchiveMonths).toBe(12)
 
-    const get = await request(app)
+    const get = await request(server)
       .get("/project-settings")
       .set("Authorization", `Bearer ${adminToken}`)
     expect(get.body.settings.autoArchiveMonths).toBe(12)
   })
 
   it("關掉之後排程完全不動手", async () => {
-    await request(app)
+    await request(server)
       .put("/project-settings")
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ autoArchiveEnabled: false })
 
     const p = await createProject({ name: "關掉自動封存後的案子" })
-    await request(app)
+    await request(server)
       .patch(`/projects/${p.body.id}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ status: "terminated", statusReason: "解約" })
@@ -463,7 +485,7 @@ describe("M4-2 專案參數", () => {
     const result = await autoArchiveProjects({ tenantId })
     expect(result.archived).toBe(0)
 
-    const got = await request(app)
+    const got = await request(server)
       .get(`/projects/${p.body.id}`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(got.body.project.archivedAt).toBeNull()
@@ -480,7 +502,7 @@ describe("M4-3 合約／報價單與印花稅", () => {
   })
 
   function addContract(body: Record<string, unknown>) {
-    return request(app)
+    return request(server)
       .post(`/projects/${projectId}/contracts`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send(body)
@@ -499,7 +521,7 @@ describe("M4-3 合約／報價單與印花稅", () => {
   })
 
   it("只有報價單時，專案不算已簽約", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .get(`/projects/${projectId}`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(res.body.project.hasSignedContract).toBe(false)
@@ -522,7 +544,7 @@ describe("M4-3 合約／報價單與印花稅", () => {
   })
 
   it("有合約且有簽訂日 → 專案算已簽約（衍生，不另存旗標）", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .get(`/projects/${projectId}`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(res.body.project.hasSignedContract).toBe(true)
@@ -565,7 +587,7 @@ describe("M4-3 合約／報價單與印花稅", () => {
   })
 
   it("改金額會重算稅額", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .patch(`/contracts/${contractId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ amount: 5_000_000 })
@@ -575,12 +597,12 @@ describe("M4-3 合約／報價單與印花稅", () => {
 
   it("重算用列上凍結的費率，不抓當下設定", async () => {
     // 把租戶設定改掉，既有合約的費率不該跟著變。
-    await request(app)
+    await request(server)
       .put("/project-settings")
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ stampDutyRate: 0.004 })
 
-    const res = await request(app)
+    const res = await request(server)
       .patch(`/contracts/${contractId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ amount: 2_000_000 })
@@ -588,7 +610,7 @@ describe("M4-3 合約／報價單與印花稅", () => {
     expect(res.body.contract.stampDutyRate).toBe(0.001)
     expect(res.body.contract.stampDutyAmount).toBe(2000)
 
-    await request(app)
+    await request(server)
       .put("/project-settings")
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ stampDutyRate: 0.001 })
@@ -608,7 +630,7 @@ describe("M4-3 合約／報價單與印花稅", () => {
   })
 
   it("清單只收應貼花的，並分出已貼／未貼", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31")
       .set("Authorization", `Bearer ${adminToken}`)
     expect(res.status).toBe(200)
@@ -622,12 +644,12 @@ describe("M4-3 合約／報價單與印花稅", () => {
   })
 
   it("標記已貼花後移到已貼那一側", async () => {
-    await request(app)
+    await request(server)
       .patch(`/contracts/${contractId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ stampDutyPaidOn: "2024-04-15" })
 
-    const res = await request(app)
+    const res = await request(server)
       .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31")
       .set("Authorization", `Bearer ${adminToken}`)
     expect(res.body.summary.paidCount).toBe(1)
@@ -635,7 +657,7 @@ describe("M4-3 合約／報價單與印花稅", () => {
   })
 
   it("unpaidOnly=1 只回未貼花的", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31&unpaidOnly=1")
       .set("Authorization", `Bearer ${adminToken}`)
     expect(res.body.items.every((i: { stampDutyPaidOn: string | null }) => !i.stampDutyPaidOn)).toBe(true)
@@ -644,34 +666,34 @@ describe("M4-3 合約／報價單與印花稅", () => {
   it("⚠️ 應貼花但缺簽訂日的另外計數——不在任何區間查詢裡", async () => {
     await addContract({ docType: "contract", title: "還沒填簽訂日的約", amount: 1_000_000 })
 
-    const res = await request(app)
+    const res = await request(server)
       .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31")
       .set("Authorization", `Bearer ${adminToken}`)
     expect(res.body.summary.missingSignedOn).toBeGreaterThanOrEqual(1)
   })
 
   it("預設區間回溯 7 年，不是 5 年", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .get("/reports/stamp-duty")
       .set("Authorization", `Bearer ${adminToken}`)
     expect(res.body.range.lookbackYears).toBe(7)
   })
 
   it("作廢要理由，且是軟刪除", async () => {
-    const noReason = await request(app)
+    const noReason = await request(server)
       .delete(`/contracts/${contractId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({})
     expect(noReason.status).toBe(400)
     expect(noReason.body.error).toBe("reason_required")
 
-    const ok = await request(app)
+    const ok = await request(server)
       .delete(`/contracts/${contractId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ reason: "重複建檔" })
     expect(ok.status).toBe(200)
 
-    const again = await request(app)
+    const again = await request(server)
       .delete(`/contracts/${contractId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ reason: "再刪一次" })
@@ -679,7 +701,7 @@ describe("M4-3 合約／報價單與印花稅", () => {
   })
 
   it("作廢後不出現在清單也不出現在專案文件裡", async () => {
-    const list = await request(app)
+    const list = await request(server)
       .get(`/projects/${projectId}/contracts`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(list.body.contracts.map((c: { id: string }) => c.id)).not.toContain(contractId)
@@ -696,20 +718,20 @@ describe("M4-4 分期請款期程", () => {
   })
 
   function saveSchedule(installments: Array<Record<string, unknown>>) {
-    return request(app)
+    return request(server)
       .put(`/projects/${projectId}/billings`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ installments })
   }
 
   function getSchedule() {
-    return request(app)
+    return request(server)
       .get(`/projects/${projectId}/billings`)
       .set("Authorization", `Bearer ${adminToken}`)
   }
 
   function addContract(body: Record<string, unknown>) {
-    return request(app)
+    return request(server)
       .post(`/projects/${projectId}/contracts`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send(body)
@@ -752,7 +774,7 @@ describe("M4-4 分期請款期程", () => {
   })
 
   it("標記請款會凍結該期金額", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .post(`/billings/${installmentIds[0]}/bill`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ billedOn: "2026-02-01" })
@@ -764,7 +786,7 @@ describe("M4-4 分期請款期程", () => {
   })
 
   it("重複標記回 409", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .post(`/billings/${installmentIds[0]}/bill`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({})
@@ -866,14 +888,14 @@ describe("M4-4 分期請款期程", () => {
   })
 
   it("取消請款要理由，取消後該期回到試算", async () => {
-    const noReason = await request(app)
+    const noReason = await request(server)
       .post(`/billings/${installmentIds[0]}/unbill`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({})
     expect(noReason.status).toBe(400)
     expect(noReason.body.error).toBe("reason_required")
 
-    const res = await request(app)
+    const res = await request(server)
       .post(`/billings/${installmentIds[0]}/unbill`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ reason: "業主退件重開" })
@@ -884,12 +906,12 @@ describe("M4-4 分期請款期程", () => {
   })
 
   it("作廢合約後分母跟著變", async () => {
-    const list = await request(app)
+    const list = await request(server)
       .get(`/projects/${projectId}/contracts`)
       .set("Authorization", `Bearer ${adminToken}`)
     const changeOrder = list.body.contracts.find((c: { docType: string }) => c.docType === "change_order")
 
-    await request(app)
+    await request(server)
       .delete(`/contracts/${changeOrder.id}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ reason: "追加取消" })
@@ -937,30 +959,30 @@ describe("W3 專案成員四角色（manager／lead／support／member）", () =
   })
 
   it("roleInProject:'support' 可以新增（支援）", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .post(`/projects/${projectId}/members`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ employeeId: empId, roleInProject: "support", sharePct: 5 })
     expect(res.status, JSON.stringify(res.body)).toBe(201)
 
-    const list = await request(app)
+    const list = await request(server)
       .get(`/projects/${projectId}/members`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(list.body.members[0].roleInProject).toBe("support")
   })
 
   it("角色可改成 manager（經理）", async () => {
-    const list = await request(app)
+    const list = await request(server)
       .get(`/projects/${projectId}/members`)
       .set("Authorization", `Bearer ${adminToken}`)
     const memberId = list.body.members[0].id
-    const res = await request(app)
+    const res = await request(server)
       .patch(`/projects/${projectId}/members/${memberId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ roleInProject: "manager" })
     expect(res.status, JSON.stringify(res.body)).toBe(200)
 
-    const after = await request(app)
+    const after = await request(server)
       .get(`/projects/${projectId}/members`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(after.body.members[0].roleInProject).toBe("manager")
@@ -968,7 +990,7 @@ describe("W3 專案成員四角色（manager／lead／support／member）", () =
 
   it("不在值域的角色（owner）回 400", async () => {
     const other = await createProject({ name: "角色值域測試案" })
-    const res = await request(app)
+    const res = await request(server)
       .post(`/projects/${other.body.id}/members`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ employeeId: empId, roleInProject: "owner" })
@@ -984,7 +1006,7 @@ describe.skipIf(!shareDefaultsReady)("W3 角色預設分潤趴數（pool_pct 未
   let empId: string
 
   beforeAll(async () => {
-    await request(app)
+    await request(server)
       .put("/project-settings")
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ defaultSharePctByRole: { manager: 12, lead: 8, support: 3, member: 1 } })
@@ -994,19 +1016,19 @@ describe.skipIf(!shareDefaultsReady)("W3 角色預設分潤趴數（pool_pct 未
   })
 
   it("GET /project-settings 回得出剛存的四角色預設", async () => {
-    const res = await request(app).get("/project-settings").set("Authorization", `Bearer ${adminToken}`)
+    const res = await request(server).get("/project-settings").set("Authorization", `Bearer ${adminToken}`)
     expect(res.status).toBe(200)
     expect(res.body.settings.defaultSharePctByRole).toEqual({ manager: 12, lead: 8, support: 3, member: 1 })
   })
 
   it("新增成員沒帶 sharePct → 套該角色的預設（manager=12）", async () => {
-    const res = await request(app)
+    const res = await request(server)
       .post(`/projects/${projectId}/members`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ employeeId: empId, roleInProject: "manager" })
     expect(res.status, JSON.stringify(res.body)).toBe(201)
 
-    const list = await request(app)
+    const list = await request(server)
       .get(`/projects/${projectId}/members`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(list.body.members[0].sharePct).toBe(12)
@@ -1016,13 +1038,13 @@ describe.skipIf(!shareDefaultsReady)("W3 角色預設分潤趴數（pool_pct 未
 
   it("明確帶 sharePct 時不被預設值蓋掉", async () => {
     const other = await createProject({ name: "預設趴數覆寫案", shareMode: "pool_pct", bonusPool: 500_000 })
-    const res = await request(app)
+    const res = await request(server)
       .post(`/projects/${other.body.id}/members`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ employeeId: empId, roleInProject: "manager", sharePct: 30 })
     expect(res.status).toBe(201)
 
-    const list = await request(app)
+    const list = await request(server)
       .get(`/projects/${other.body.id}/members`)
       .set("Authorization", `Bearer ${adminToken}`)
     expect(list.body.members[0].sharePct).toBe(30)
@@ -1032,7 +1054,7 @@ describe.skipIf(!shareDefaultsReady)("W3 角色預設分潤趴數（pool_pct 未
 describe("W4 列表不回獎金池 ＋ M14 年度篩選", () => {
   it("GET /projects 每一列的 bonusPool 都是 null（列表沒有逐案算權限）", async () => {
     await createProject({ name: "有獎金池的案", shareMode: "pool_pct", bonusPool: 999_000 })
-    const res = await request(app).get("/projects").set("Authorization", `Bearer ${adminToken}`)
+    const res = await request(server).get("/projects").set("Authorization", `Bearer ${adminToken}`)
     expect(res.status).toBe(200)
     expect(res.body.projects.length).toBeGreaterThan(0)
     for (const p of res.body.projects) expect(p.bonusPool).toBeNull()
@@ -1040,7 +1062,7 @@ describe("W4 列表不回獎金池 ＋ M14 年度篩選", () => {
 
   it("GET /projects/:id 仍看得到獎金池（HR 有 bonus 權限）", async () => {
     const created = await createProject({ name: "詳情看得到池", shareMode: "pool_pct", bonusPool: 123_000 })
-    const res = await request(app).get(`/projects/${created.body.id}`).set("Authorization", `Bearer ${adminToken}`)
+    const res = await request(server).get(`/projects/${created.body.id}`).set("Authorization", `Bearer ${adminToken}`)
     expect(res.status).toBe(200)
     expect(res.body.project.bonusPool).toBe(123_000)
     expect(res.body.access).toEqual({ finance: true, bonus: true })
@@ -1049,19 +1071,19 @@ describe("W4 列表不回獎金池 ＋ M14 年度篩選", () => {
   it("?year= 只回該歸屬年度的案子", async () => {
     const target = YEAR - 3
     const created = await createProject({ name: `${target} 年度案`, fiscalYear: target })
-    const res = await request(app).get(`/projects?year=${target}`).set("Authorization", `Bearer ${adminToken}`)
+    const res = await request(server).get(`/projects?year=${target}`).set("Authorization", `Bearer ${adminToken}`)
     expect(res.status).toBe(200)
     const ids = res.body.projects.map((p: { id: string }) => p.id)
     expect(ids).toContain(created.body.id)
     for (const p of res.body.projects) expect(p.fiscalYear).toBe(target)
 
     // 不帶 year 時那一案仍在（篩選沒有黏住）
-    const all = await request(app).get("/projects").set("Authorization", `Bearer ${adminToken}`)
+    const all = await request(server).get("/projects").set("Authorization", `Bearer ${adminToken}`)
     expect(all.body.projects.map((p: { id: string }) => p.id)).toContain(created.body.id)
   })
 
   it("?year= 不是合法年度 → 400 invalid_year（不默默忽略）", async () => {
-    const res = await request(app).get("/projects?year=abc").set("Authorization", `Bearer ${adminToken}`)
+    const res = await request(server).get("/projects?year=abc").set("Authorization", `Bearer ${adminToken}`)
     expect(res.status).toBe(400)
     expect(res.body.error).toBe("invalid_year")
   })
@@ -1071,13 +1093,13 @@ describe("W8 技師科別依租戶設定（不再是 electrical／hvac／fire）
   it("中文科別 key 存得進去、讀得回來", async () => {
     const created = await createProject({ name: "科別測試案", engineers: { 空調: { name: "李技師" } } })
     expect(created.status, JSON.stringify(created.body)).toBe(201)
-    const res = await request(app).get(`/projects/${created.body.id}`).set("Authorization", `Bearer ${adminToken}`)
+    const res = await request(server).get(`/projects/${created.body.id}`).set("Authorization", `Bearer ${adminToken}`)
     expect(res.body.project.engineers["空調"].name).toBe("李技師")
   })
 
   it("不在 project_settings.disciplines 裡的 key → 400 unknown_discipline", async () => {
     const created = await createProject({ name: "科別值域測試案" })
-    const res = await request(app)
+    const res = await request(server)
       .patch(`/projects/${created.body.id}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ engineers: { electrical: { name: "王技師" } } })
@@ -1087,7 +1109,7 @@ describe("W8 技師科別依租戶設定（不再是 electrical／hvac／fire）
   })
 
   it("租戶把科別改成自訂清單後，新的科別就過得了", async () => {
-    await request(app)
+    await request(server)
       .put("/project-settings")
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ disciplines: ["電機", "空調", "消防", "汙水", "弱電"] })
