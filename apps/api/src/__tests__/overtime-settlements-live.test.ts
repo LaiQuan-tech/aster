@@ -115,6 +115,13 @@ async function beyondCapRow() {
   return data ?? []
 }
 
+function binaryParser(res: request.Response, cb: (err: Error | null, body: unknown) => void) {
+  const chunks: Buffer[] = []
+  const stream = res as unknown as NodeJS.ReadableStream
+  stream.on("data", (c: Buffer) => chunks.push(c))
+  stream.on("end", () => cb(null, Buffer.concat(chunks)))
+}
+
 describe.skipIf(!ready)("加班超額另計（M1）— live", () => {
   beforeAll(async () => {
     const adminEmail = `ot-${stamp}-admin@example.com`
@@ -226,10 +233,11 @@ describe.skipIf(!ready)("加班超額另計（M1）— live", () => {
     const denied = await asEmp(request(app).get(`/overtime-settlements?period=${PERIOD}`))
     expect(denied.status).toBe(403)
 
-    const xlsx = await asHr(request(app).get(`/overtime-settlements/export.xlsx?period=${PERIOD}`))
+    // superagent 對 xlsx 沒有 parser，要 .buffer(true).parse(binaryParser) 才讀得到 body（同 festival-bonuses-live）
+    const xlsx = await asHr(request(app).get(`/overtime-settlements/export.xlsx?period=${PERIOD}`)).buffer(true).parse(binaryParser)
     expect(xlsx.status).toBe(200)
     expect(xlsx.headers["content-type"]).toContain("spreadsheetml")
-    expect(xlsx.body.length ?? 0).toBeGreaterThan(0)
+    expect((xlsx.body as Buffer).length).toBeGreaterThan(0)
   }, 60_000)
 
   it("reopen → 把超額日覆寫成 600 分 → 再核准 → 同一列的分鐘更新（不新增列）", async () => {
