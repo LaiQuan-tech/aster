@@ -24,6 +24,11 @@ import { app } from "../app"
  * 截到 1000 列還標 complete）；重跑前塞一個不在 manifest 裡的殘檔，完成後被清掉、
  * manifest.prev.json 也不留。
  *
+ * W7／M9 補案（2026-09-23）：路徑改成 `{tenantId}/{period}/r{seq:03}/`，同月重跑
+ * **不覆蓋**（r001 與 r002 並存、各自的 manifest 都在）、retentionMonths 84；
+ * `GET /backups` 回 `periods[].runs[]`；新的 rows 端點可直接翻某次快照的表內容
+ * （offset／limit 正確、未知表 404）。
+ *
  * 正式庫尚未套 0044（period_closes 不存在）時整組 describe.skipIf 跳過。
  */
 
@@ -103,6 +108,29 @@ async function countRows(table: string): Promise<number> {
   return count ?? 0
 }
 
+/**
+ * 直接從 Storage 讀 manifest，並等到它是「這一輪完成後的那一份」。
+ * Supabase Storage 的下載走 Cloudflare 快取，同路徑覆寫後失效會慢十幾到數十秒
+ * （service 端已經等過一段，但預算有上限），測試這邊再多等一會兒，才不會拿到
+ * 中途那份 status='running' 的版本誤判成失敗。
+ */
+async function downloadManifestWhenComplete(path: string, maxWaitMs = 90_000): Promise<SnapshotManifest> {
+  const deadline = Date.now() + maxWaitMs
+  let last: SnapshotManifest | null = null
+  for (;;) {
+    const { data, error } = await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).download(path)
+    if (!error && data) {
+      last = JSON.parse(await data.text()) as SnapshotManifest
+      if (last.status !== "running") return last
+    }
+    if (Date.now() >= deadline) {
+      if (last) return last
+      throw new Error(`download ${path}: ${error?.message}`)
+    }
+    await new Promise((r) => setTimeout(r, 3000))
+  }
+}
+
 async function downloadJsonGz(path: string): Promise<{ rows: unknown[]; sha256: string; bytes: number }> {
   const { data, error } = await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).download(path)
   if (error || !data) throw new Error(`download ${path}: ${error?.message}`)
@@ -160,8 +188,13 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
 
   afterAll(async () => {
     for (const tid of createdTenantIds) {
-      const { data: files } = await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).list(`${tid}/${SNAPSHOT_PERIOD}`, { limit: 1000 })
-      const paths = (files ?? []).filter((f) => f.id !== null).map((f) => `${tid}/${SNAPSHOT_PERIOD}/${f.name}`)
+      // W7 之後檔案在 `{period}/r00N/` 底下，清理要逐個 run 資料夾掃（順手也清舊式的直放檔案）。
+      const { data: entries } = await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).list(`${tid}/${SNAPSHOT_PERIOD}`, { limit: 1000 })
+      const paths = (entries ?? []).filter((f) => f.id !== null).map((f) => `${tid}/${SNAPSHOT_PERIOD}/${f.name}`)
+      for (const dir of (entries ?? []).filter((f) => f.id === null)) {
+        const { data: inner } = await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).list(`${tid}/${SNAPSHOT_PERIOD}/${dir.name}`, { limit: 1000 })
+        for (const f of inner ?? []) if (f.id !== null) paths.push(`${tid}/${SNAPSHOT_PERIOD}/${dir.name}/${f.name}`)
+      }
       if (paths.length > 0) await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).remove(paths)
       await supabaseAdmin.from("attendance_sheet_snapshots").delete().eq("tenant_id", tid)
       await supabaseAdmin.from("period_closes").delete().eq("tenant_id", tid)
@@ -273,6 +306,10 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
 
   describe("月度快照（內部端點）", () => {
     let manifest: SnapshotManifest
+    /** 第一輪配到的 run 序號（新租戶 → 必為 1）。 */
+    let run = 0
+    /** 重跑後的第二輪 run 序號（必為 2，且第一輪的檔案仍在）。 */
+    let rerunRun = 0
     const timings: number[] = []
     // 灌到超過一頁（PostgREST max-rows＝SNAPSHOT_PAGE_SIZE＝1000）的 audit_logs，
     // 逼分頁真的翻到第 2 頁；以前 pageSize 5000 在這裡會只備到 1000 列。
@@ -312,13 +349,17 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
         expect(res.body.tenantId).toBe(tenantId)
         expect(res.body.period).toBe(SNAPSHOT_PERIOD)
         rowsWritten += res.body.rowsWritten as number
+        // W7：每一段都回 run（這是新租戶的第一輪 → r001），續打要原樣帶回去。
+        expect(res.body.run).toBe(1)
+        run = res.body.run as number
         if (res.body.done) {
-          expect(res.body.manifestPath).toBe(`${tenantId}/${SNAPSHOT_PERIOD}/manifest.json`)
+          expect(res.body.manifestPath).toBe(`${tenantId}/${SNAPSHOT_PERIOD}/r001/manifest.json`)
           expect(res.body.nextTenantId).toBeUndefined()
           break
         }
+        expect(res.body.nextRun).toBe(run)
         expect(calls).toBeLessThan(300)
-        body = { tenantId, period: SNAPSHOT_PERIOD, table: res.body.nextTable, offset: res.body.nextOffset }
+        body = { tenantId, period: SNAPSHOT_PERIOD, run: res.body.nextRun, table: res.body.nextTable, offset: res.body.nextOffset }
       }
       const max = Math.max(...timings)
       console.log(`[backups-live] monthly-snapshot: ${calls} call(s), rows=${rowsWritten}, per-call ms=${timings.join(",")}, max=${max}`)
@@ -326,8 +367,13 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
       expect(rowsWritten).toBeGreaterThan(0)
     }, 300_000)
 
-    it("Storage 有各表 gz＋manifest；manifest 列數＝count(*)（抽三張表）；gz 解開列數／sha256 相符", async () => {
-      const { data: files, error } = await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).list(`${tenantId}/${SNAPSHOT_PERIOD}`, { limit: 1000 })
+    it("Storage 有各表 gz＋manifest（在 r001 底下）；manifest 列數＝count(*)（抽三張表）；gz 解開列數／sha256 相符", async () => {
+      // W7：period 資料夾底下現在只有 run 資料夾，檔案都在 r001/ 裡。
+      const { data: periodEntries } = await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).list(`${tenantId}/${SNAPSHOT_PERIOD}`, { limit: 1000 })
+      expect((periodEntries ?? []).map((e) => e.name)).toContain("r001")
+      expect((periodEntries ?? []).filter((e) => e.id !== null)).toHaveLength(0)
+
+      const { data: files, error } = await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).list(`${tenantId}/${SNAPSHOT_PERIOD}/r001`, { limit: 1000 })
       expect(error).toBeNull()
       const names = (files ?? []).map((f) => f.name)
       expect(names).toContain("manifest.json")
@@ -335,8 +381,8 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
       expect(names).toContain("attendance_sheets.json.gz")
       expect(names).toContain("attendance_sheet_snapshots.json.gz")
 
-      const { data: mf } = await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).download(`${tenantId}/${SNAPSHOT_PERIOD}/manifest.json`)
-      manifest = JSON.parse(await mf!.text()) as SnapshotManifest
+      manifest = await downloadManifestWhenComplete(`${tenantId}/${SNAPSHOT_PERIOD}/r001/manifest.json`)
+      expect(manifest.run).toBe(1)
       expect(manifest.status).toBe("complete")
       expect(manifest.generatedAt).toBeTruthy()
       expect(manifest.tenantId).toBe(tenantId)
@@ -350,7 +396,7 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
         const expected = await countRows(table)
         expect(entry.rows, table).toBe(expected)
         expect(expected, table).toBeGreaterThan(0)
-        const got = await downloadJsonGz(`${tenantId}/${SNAPSHOT_PERIOD}/${entry.files[0].path}`)
+        const got = await downloadJsonGz(`${tenantId}/${SNAPSHOT_PERIOD}/r001/${entry.files[0].path}`)
         expect(got.rows, table).toHaveLength(expected)
         expect(got.sha256, table).toBe(entry.sha256)
         expect(got.bytes, table).toBe(entry.bytes)
@@ -376,7 +422,7 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
       let reassembled = 0
       const ids = new Set<string>()
       for (const f of entry.files) {
-        const got = await downloadJsonGz(`${tenantId}/${SNAPSHOT_PERIOD}/${f.path}`)
+        const got = await downloadJsonGz(`${tenantId}/${SNAPSHOT_PERIOD}/r001/${f.path}`)
         expect(got.rows, f.path).toHaveLength(f.rows)
         expect(got.sha256, f.path).toBe(f.sha256)
         reassembled += got.rows.length
@@ -388,37 +434,91 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
       expect(manifest.tables.map((t) => t.name)).toEqual(expect.arrayContaining(["bonus_runs", "bonus_run_items"]))
     }, 120_000)
 
-    it("HR 端點：GET /backups 列出 2026-09 與 manifest；signed URL 可下載；非 HR 403", async () => {
+    it("HR 端點：GET /backups 列出 2026-09 的 runs[]＋manifest、retentionMonths 84；signed URL 可下載；非 HR 403", async () => {
       const list = await asAdmin(request(app).get("/backups"))
       expect(list.status).toBe(200)
       expect(list.body.tables).toEqual(SNAPSHOT_TABLES.map((t) => t.name))
-      expect(list.body.retentionMonths).toBe(24)
+      expect(list.body.retentionMonths).toBe(84)
       const entry = list.body.periods.find((p: { period: string }) => p.period === SNAPSHOT_PERIOD)
       expect(entry).toBeTruthy()
+      // period 層的 manifest／files ＝ 最新一次執行（相容欄位）；runs[] 是完整歷次清單。
       expect(entry.manifest.status).toBe("complete")
       expect(entry.manifest.totals.rows).toBe(manifest.totals.rows)
       expect(entry.files.some((f: { name: string }) => f.name === "employees.json.gz")).toBe(true)
+      expect(entry.runs.map((r: { run: number }) => r.run)).toEqual([1])
+      expect(entry.runs[0].manifest.run).toBe(1)
+      expect(entry.runs[0].files.some((f: { name: string }) => f.name === "manifest.json")).toBe(true)
 
-      const url = await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/files/manifest.json/url`))
+      const url = await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/${run}/files/manifest.json/url`))
       expect(url.status).toBe(200)
+      expect(url.body).toMatchObject({ expiresIn: 900, run })
       expect(url.body.url).toMatch(/^https?:\/\//)
       const fetched = await fetch(url.body.url as string)
       expect(fetched.status).toBe(200)
       const viaUrl = (await fetched.json()) as SnapshotManifest
       expect(viaUrl.totals.rows).toBe(manifest.totals.rows)
-      expect((await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/files/nope.json.gz/url`))).status).toBe(404)
-      expect((await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/files/..%2Fx/url`))).status).toBe(400)
+      expect((await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/${run}/files/nope.json.gz/url`))).status).toBe(404)
+      expect((await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/${run}/files/..%2Fx/url`))).status).toBe(400)
+      expect((await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/abc/files/manifest.json/url`))).status).toBe(400)
+      // 舊路徑＝run 0（舊快照直接放在 period 底下）；這個租戶沒有舊資料 → 404。
+      expect((await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/files/manifest.json/url`))).status).toBe(404)
 
       expect((await asEmployee(request(app).get("/backups"))).status).toBe(403)
       expect((await asEmployee(request(app).post("/backups/run")).send({ period: SNAPSHOT_PERIOD })).status).toBe(403)
+      expect((await asEmployee(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/${run}/tables/employees/rows`))).status).toBe(403)
     }, 60_000)
 
-    it("HR POST /backups/run 前端式迴圈重跑同月份 → 覆蓋且 manifest 仍 complete；不在新 manifest 的殘檔完成後才被清掉", async () => {
-      // 模擬上一輪多出來的 part 檔：重跑不先清資料夾（中途失敗上一份仍在），完成後才 prune。
-      const stale = `${tenantId}/${SNAPSHOT_PERIOD}/audit_logs.part-0099.json.gz`
-      const { error: staleErr } = await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).upload(stale, Buffer.from("stale"), { contentType: "application/gzip", upsert: true })
-      expect(staleErr).toBeNull()
+    it("★ M9 備份內容瀏覽：rows 端點分頁正確（含跨 part 檔）、未知表 404", async () => {
+      const employeeCount = await countRows("employees")
+      const first = await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/${run}/tables/employees/rows?offset=0&limit=2`))
+      expect(first.status, JSON.stringify(first.body)).toBe(200)
+      expect(first.body).toMatchObject({ period: SNAPSHOT_PERIOD, run, table: "employees", offset: 0, limit: 2, total: employeeCount })
+      expect(first.body.rows).toHaveLength(Math.min(2, employeeCount))
+      expect(first.body.columns).toContain("id")
+      expect(first.body.columns).toContain("name")
 
+      const second = await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/${run}/tables/employees/rows?offset=2&limit=2`))
+      expect(second.status).toBe(200)
+      // 第二頁不能跟第一頁重疊（切片是連續的，不是每次都從頭拿）
+      const firstIds = (first.body.rows as Array<{ id: string }>).map((r) => r.id)
+      const secondIds = (second.body.rows as Array<{ id: string }>).map((r) => r.id)
+      expect(secondIds.filter((id) => firstIds.includes(id))).toHaveLength(0)
+
+      // 翻到底：nextOffset 逐頁前進，最後一頁為 null，累計列數＝total、id 不重複
+      const seen = new Set<string>()
+      let offset: number | null = 0
+      let guard = 0
+      while (offset !== null) {
+        const page = await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/${run}/tables/employees/rows?offset=${offset}&limit=2`))
+        expect(page.status).toBe(200)
+        for (const r of page.body.rows as Array<{ id: string }>) seen.add(r.id)
+        offset = page.body.nextOffset as number | null
+        expect((guard += 1)).toBeLessThan(50)
+      }
+      expect(seen.size).toBe(employeeCount)
+
+      // 跨 part 檔（audit_logs 有 >1000 列、拆成多個檔）：接在第一個檔尾巴的那一頁
+      const across = await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/${run}/tables/audit_logs/rows?offset=990&limit=20`))
+      expect(across.status, JSON.stringify(across.body)).toBe(200)
+      expect(across.body.rows).toHaveLength(20)
+      expect(across.body.total).toBe(auditCount)
+      expect(new Set((across.body.rows as Array<{ id: string }>).map((r) => r.id)).size).toBe(20)
+
+      // offset 超出 → 空頁；未知表 → 404；不存在的 run → 404
+      const beyond = await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/${run}/tables/employees/rows?offset=99999&limit=10`))
+      expect(beyond.status).toBe(200)
+      expect(beyond.body.rows).toEqual([])
+      expect(beyond.body.nextOffset).toBeNull()
+      const unknown = await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/${run}/tables/no_such_table/rows`))
+      expect(unknown.status).toBe(404)
+      expect(unknown.body.error).toBe("unknown_table")
+      const noRun = await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/99/tables/employees/rows`))
+      expect(noRun.status).toBe(404)
+      expect(noRun.body.error).toBe("run_not_found")
+      expect((await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/${run}/tables/employees/rows?limit=500`))).status).toBe(400)
+    }, 120_000)
+
+    it("★ W7 HR POST /backups/run 重跑同月份 → 配到 r002，r001 原封不動（不覆蓋）；殘檔完成後才被清掉", async () => {
       let body: Record<string, unknown> = { period: SNAPSHOT_PERIOD }
       let calls = 0
       let last: Record<string, unknown> = {}
@@ -426,23 +526,42 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
         calls += 1
         const res = await asAdmin(request(app).post("/backups/run")).send(body)
         expect(res.status, JSON.stringify(res.body)).toBe(200)
+        // 新一輪配到 r002（第一輪是 r001），整輪都留在同一個 run。
+        expect(res.body.run).toBe(2)
+        if (calls === 1) {
+          // 模擬中途失敗殘留的 part 檔：塞進這一輪自己的資料夾（不能在開跑前塞，
+          // 那會先把 r002 這個資料夾變出來、害 allocateRun 跳號到 r003）。完成後才 prune。
+          const stale = `${tenantId}/${SNAPSHOT_PERIOD}/r002/audit_logs.part-0099.json.gz`
+          const { error: staleErr } = await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).upload(stale, Buffer.from("stale"), { contentType: "application/gzip", upsert: true })
+          expect(staleErr).toBeNull()
+        }
         last = res.body
         if (res.body.done) break
         expect(calls).toBeLessThan(300)
-        body = { period: SNAPSHOT_PERIOD, table: res.body.nextTable, offset: res.body.nextOffset }
+        body = { period: SNAPSHOT_PERIOD, run: res.body.nextRun, table: res.body.nextTable, offset: res.body.nextOffset }
       }
       expect(last.tenantId).toBe(tenantId)
+      expect(last.manifestPath).toBe(`${tenantId}/${SNAPSHOT_PERIOD}/r002/manifest.json`)
+      rerunRun = last.run as number
       console.log(`[backups-live] HR rerun: ${calls} call(s), last=${JSON.stringify(last)}`)
-      // 同路徑覆寫後 Supabase Storage 的 CDN 失效會慢 16～34 秒（物件先前被 signed URL 抓過時）：
-      // service 端完成前會用 list() 的 ETag 核對回讀並等 CDN 追上，所以這裡的 GET /backups
-      // 必須直接拿到新一輪的 manifest（generatedAt 較晚、多了 backups/run 那筆稽核列）。
+
       const after = await asAdmin(request(app).get("/backups"))
       const entry = after.body.periods.find((p: { period: string }) => p.period === SNAPSHOT_PERIOD)
+      // runs[] 新到舊；period 層的 manifest／files 指向最新那次（r002）
+      expect(entry.runs.map((r: { run: number }) => r.run)).toEqual([2, 1])
       expect(entry.manifestStale).toBeUndefined()
+      expect(entry.manifest.run).toBe(2)
       expect(entry.manifest.status).toBe("complete")
       expect(new Date(entry.manifest.generatedAt).getTime()).toBeGreaterThan(new Date(manifest.generatedAt!).getTime())
       const { data: audit } = await supabaseAdmin.from("audit_logs").select("id").eq("tenant_id", tenantId).eq("context", "backups/run")
       expect((audit ?? []).length).toBeGreaterThanOrEqual(1)
+
+      // ★ 不覆蓋：第一輪的 manifest 與資料檔原封不動還在 r001，內容＝當時那一份
+      const r001 = entry.runs.find((r: { run: number }) => r.run === 1)
+      expect(r001.manifest.generatedAt).toBe(manifest.generatedAt)
+      expect(r001.manifest.totals.rows).toBe(manifest.totals.rows)
+      const { data: stillThere } = await supabaseAdmin.storage.from(SNAPSHOT_BUCKET).list(`${tenantId}/${SNAPSHOT_PERIOD}/r001`, { limit: 1000 })
+      expect((stillThere ?? []).map((f) => f.name)).toContain("employees.json.gz")
 
       // 完成後：殘檔與 manifest.prev.json 都不在了；資料夾＝manifest.json＋manifest 列出的檔案
       const names = (entry.files as Array<{ name: string }>).map((f) => f.name)
@@ -455,6 +574,13 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
       const auditEntry = (entry.manifest as SnapshotManifest).tables.find((t) => t.name === "audit_logs")!
       expect(auditEntry.rows).toBe(await countRows("audit_logs"))
       expect(auditEntry.incomplete).toBeFalsy()
+
+      // 兩次執行各自都能翻內容，且 r001 那份還是舊的列數
+      const rowsR1 = await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/1/tables/audit_logs/rows?offset=0&limit=1`))
+      const rowsR2 = await asAdmin(request(app).get(`/backups/${SNAPSHOT_PERIOD}/runs/${rerunRun}/tables/audit_logs/rows?offset=0&limit=1`))
+      expect(rowsR1.status).toBe(200)
+      expect(rowsR2.status).toBe(200)
+      expect(rowsR2.body.total).toBeGreaterThan(rowsR1.body.total)
     }, 300_000)
   })
 })

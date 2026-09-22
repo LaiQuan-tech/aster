@@ -19,6 +19,7 @@ import {
   type SheetDayPatch,
 } from "@/lib/attendance-sheets-api";
 import { getRuleConfigVersions, type RuleConfigVersion } from "@/lib/admin-api";
+import { listSheetSnapshots, type SheetSnapshotSummary } from "@/lib/backup-api";
 
 function fmtDateTime(iso: string | null): string {
   if (!iso) return "—";
@@ -42,6 +43,10 @@ export default function AttendanceSheetDetailPage() {
   const [message, setMessage] = useState<string | null>(null);
   // 本月適用規則版本清單；null = 還在載入或拿不到，此時上方顯示直接跳過，不擋月表其餘內容。
   const [ruleVersions, setRuleVersions] = useState<RuleConfigVersion[] | null>(null);
+  // M9 歷次核准快照：每次核准都會凍結一份（退回／重開不刪），這裡讓 HR 開得出舊版。
+  const [snapshots, setSnapshots] = useState<SheetSnapshotSummary[] | null>(null);
+  const [openSnapshot, setOpenSnapshot] = useState<SheetSnapshotSummary | null>(null);
+  const [snapshotBusy, setSnapshotBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -68,6 +73,42 @@ export default function AttendanceSheetDetailPage() {
         // 忽略——ruleVersions 維持 null，畫面上該區塊直接不顯示。
       });
   }, []);
+
+  /**
+   * 歷次核准快照清單（不帶 full，只要中繼資料；點開才抓整份快照）。
+   * 同樣是非關鍵路徑——舊環境沒有 attendance_sheet_snapshots 時後端回空陣列。
+   */
+  const loadSnapshots = useCallback(async () => {
+    try {
+      const res = await listSheetSnapshots(sheetId);
+      setSnapshots(res.snapshots);
+    } catch {
+      setSnapshots([]);
+    }
+  }, [sheetId]);
+
+  useEffect(() => {
+    void loadSnapshots();
+  }, [loadSnapshots]);
+
+  /** 點「檢視」才去抓整份快照（列表刻意不帶 snapshot，一張月表 30 天的 JSON 不小）。 */
+  async function onOpenSnapshot(seq: number) {
+    setSnapshotBusy(true);
+    setError(null);
+    try {
+      const res = await listSheetSnapshots(sheetId, true);
+      const found = res.snapshots.find((s) => s.seq === seq) ?? null;
+      if (!found?.snapshot) {
+        setError("這份快照沒有內容可顯示");
+        return;
+      }
+      setOpenSnapshot(found);
+    } catch (err) {
+      setError(friendlyError(err, "載入快照失敗"));
+    } finally {
+      setSnapshotBusy(false);
+    }
+  }
 
   async function handlePatchDay(date: string, patch: SheetDayPatch) {
     if (!sheet) return;
@@ -282,6 +323,74 @@ export default function AttendanceSheetDetailPage() {
 
         <AttendanceSheetTable sheet={sheet} editable={sheet.status !== "locked"} showMoney onPatchDay={handlePatchDay} />
       </Card>
+
+      {snapshots && snapshots.length > 0 && (
+        <Card>
+          <div className="no-print mb-3">
+            <h2 className="text-base font-semibold text-gray-800">歷次核准快照</h2>
+            <p className="mt-1 text-sm text-gray-500">
+              每次核准都會把當下的月表（含薪資試算）凍結成一份；退回／重開不會刪掉既有紀錄。點「檢視」可開出當時那一版。
+            </p>
+          </div>
+          <div className="no-print overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-gray-200 text-xs text-gray-500">
+                  <th className="py-2 pr-4">次序</th>
+                  <th className="py-2 pr-4">核准時間</th>
+                  <th className="py-2 pr-4">操作者</th>
+                  <th className="py-2 pr-4">規則版本</th>
+                  <th className="py-2 pr-4 text-right">試算淨額</th>
+                  <th className="py-2">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {snapshots.map((s) => (
+                  <tr key={s.id} className="border-b border-gray-50">
+                    <td className="py-2 pr-4 font-medium text-gray-800">第 {s.seq} 次</td>
+                    <td className="py-2 pr-4 text-gray-600">{fmtDateTime(s.takenAt)}</td>
+                    <td className="py-2 pr-4 text-gray-600">{s.takenByName ?? "—"}</td>
+                    <td className="py-2 pr-4 text-gray-600">{s.ruleConfigVersion != null ? `v${s.ruleConfigVersion}` : "—"}</td>
+                    <td className="py-2 pr-4 text-right tabular-nums text-gray-700">
+                      {s.net != null ? Math.round(s.net).toLocaleString("zh-TW") : "—"}
+                    </td>
+                    <td className="py-2">
+                      <button
+                        type="button"
+                        onClick={() => void onOpenSnapshot(s.seq)}
+                        disabled={snapshotBusy}
+                        className="text-sm hover:underline disabled:opacity-50"
+                        style={{ color: "var(--brand)" }}
+                      >
+                        {openSnapshot?.seq === s.seq ? "重新載入" : "檢視"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {openSnapshot?.snapshot ? (
+            <div className="mt-4 border-t border-gray-100 pt-4">
+              <div className="no-print mb-3 flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm text-gray-600">
+                  第 {openSnapshot.seq} 次核准（{fmtDateTime(openSnapshot.takenAt)}）當時的月表 — 唯讀
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setOpenSnapshot(null)}
+                  className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700"
+                >
+                  關閉
+                </button>
+              </div>
+              {/* 快照本體就是當時的 SheetView（後端 SheetSnapshot extends SheetView），直接餵同一個表格元件。 */}
+              <AttendanceSheetTable sheet={openSnapshot.snapshot as SheetView} editable={false} showMoney />
+            </div>
+          ) : null}
+        </Card>
+      )}
     </>
   );
 }

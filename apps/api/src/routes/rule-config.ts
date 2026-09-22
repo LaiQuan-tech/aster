@@ -53,6 +53,14 @@ interface RuleConfigVersionRow {
   createdAt: string | null
   active: boolean
   summary?: string
+  /**
+   * `?full=1` 才有：該版的規則內容（M9 歷史版本檢視／兩版比對用）。
+   * 一律跑過 parseRuleConfig，前端拿到的形狀與 GET /rule-config 一致（預設值已填）；
+   * 舊版內容若已不合現行 schema（欄位改名／收斂過），parse 失敗就回原始 jsonb 並標
+   * `configValid:false`——歷史就是歷史，不能因為現在驗不過就讓整個清單 500。
+   */
+  config?: unknown
+  configValid?: boolean
 }
 
 /**
@@ -89,36 +97,51 @@ ruleConfigRouter.get(
  * /rule-config），不需要看得到異動軌跡。
  *
  * 查無資料回空陣列（不是 404）：沒存過規則的租戶是正常狀態，不是錯誤。
+ *
+ * `?full=1`（M9 歷史版本檢視）：每一版多帶 `config`（規則內容全文，parseRuleConfig
+ * 過的形狀）。預設不帶——版本一多、每版一整包 DSL，清單會肥好幾倍，而多數呼叫端
+ * （月表頁只要生效日標籤）根本用不到。
  */
 ruleConfigRouter.get(
   "/rule-config/versions",
   requireAuth,
   requireTenant,
   requireHrAdmin,
-  async (_req: Request, res: Response, next: NextFunction) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
+    const full = req.query.full === "1" || req.query.full === "true"
     try {
       const { data, error } = await supabaseAdmin
         .from("rule_configs")
-        .select("version, effective_from, created_at, active")
+        .select(full ? "version, effective_from, created_at, active, config" : "version, effective_from, created_at, active")
         .eq("tenant_id", tenantId)
         .order("version", { ascending: false })
       if (error) {
         next(new Error(`GET /rule-config/versions: ${error.message}`))
         return
       }
-      const rows = (data ?? []) as Array<{
+      const rows = (data ?? []) as unknown as Array<{
         version: number | null
         effective_from: string | null
         created_at: string | null
         active: boolean | null
+        config?: unknown
       }>
-      const versions: RuleConfigVersionRow[] = rows.map((r) => ({
-        version: typeof r.version === "number" ? r.version : 0,
-        effectiveFrom: r.effective_from ?? null,
-        createdAt: r.created_at ?? null,
-        active: r.active === true,
-      }))
+      const versions: RuleConfigVersionRow[] = rows.map((r) => {
+        const base: RuleConfigVersionRow = {
+          version: typeof r.version === "number" ? r.version : 0,
+          effectiveFrom: r.effective_from ?? null,
+          createdAt: r.created_at ?? null,
+          active: r.active === true,
+        }
+        if (!full) return base
+        try {
+          return { ...base, config: parseRuleConfig(r.config), configValid: true }
+        } catch {
+          // 舊版 DSL 不合現行 schema：照原樣回去，前端只做顯示／比對，不會拿去算薪。
+          return { ...base, config: r.config ?? null, configValid: false }
+        }
+      })
       res.status(200).json(versions)
     } catch (err) {
       next(err)

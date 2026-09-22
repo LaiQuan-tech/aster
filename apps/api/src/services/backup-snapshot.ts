@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { gzipSync } from "node:zlib"
+import { gzipSync, gunzipSync } from "node:zlib"
 import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
@@ -16,18 +16,24 @@ import type { SheetStatus } from "./attendance-sheet-types.js"
  *
  *   [A] 月度全表快照（runSnapshotStep）
  *       把租戶的業務表（SNAPSHOT_TABLES，寫死在本檔）逐表分頁讀出、gzip、上傳
- *       Storage `tenant-snapshots/{tenantId}/{period}/{table}.json.gz`，最後寫
- *       `manifest.json`（每表列數／bytes／sha256、產生時間、schema 版本）。
- *       **全表快照、非增量**；同 period 重跑＝新檔蓋舊檔、上一份 manifest 暫存成
- *       manifest.prev.json，全部完成後才刪不在新 manifest 裡的舊檔（中途失敗上一份仍在）。
+ *       Storage `tenant-snapshots/{tenantId}/{period}/r{run:03}/{table}.json.gz`，最後
+ *       寫同資料夾的 `manifest.json`（每表列數／bytes／sha256、產生時間、schema 版本）。
+ *       **全表快照、非增量**；W7（2026-09-23）起**同 period 重跑不覆蓋**：每次新一輪
+ *       配一個新的 run 序號（`allocateRun`＝現有最大值＋1），各自一個資料夾，保留
+ *       84 個月。2026-09-23 之前的舊快照檔案直接躺在 `{period}/` 下，一律當 run 0：
+ *       讀得到、列得出來，但不再往裡面寫。
  *       每頁最多 1000 列（PostgREST max-rows），翻頁以表開始時的 count(*) 為完整性
  *       判準：寫出列數少於它 → 該表與整份 manifest 標 incomplete，不寫 complete。
  *       serverless 沒有背景執行緒（Vercel maxDuration 60），所以設計成
  *       「一次呼叫做一小段、回游標、呼叫端續打」：每次呼叫在
  *       SNAPSHOT_STEP_BUDGET_MS 的軟預算內盡量多做幾頁／幾表，超過就把
- *       `nextTable/nextOffset`（跨租戶模式另有 `nextTenantId`）交回去。進度
+ *       `nextRun/nextTable/nextOffset`（跨租戶模式另有 `nextTenantId`）交回去。進度
  *       存在 Storage 上的 manifest（status: running → complete），呼叫端不必
- *       保存任何狀態，只要把 next* 原樣帶回來。
+ *       保存任何狀態，只要把 next* 原樣帶回來（`run` 尤其要帶，否則續打會找不到
+ *       這一輪的資料夾）。
+ *
+ *       另有 [D] M9 備份內容瀏覽（readSnapshotRows／planRowSlice）：後台可直接翻
+ *       某次快照裡某張表的列，不必下載 .json.gz 自己解壓。
  *
  *   [B] 整公司月結 Final（closePeriod / reopenPeriod / listPeriodCloses）
  *       該月所有在職員工的月表都 approved／locked 才准月結；月結＝把 approved
@@ -70,8 +76,19 @@ export const MANIFEST_FRESH_WAIT_RESUME_MS = 40_000
 /** 後台清單回讀 manifest 最多等多久；超時就回舊版並標 manifestStale。 */
 export const MANIFEST_FRESH_WAIT_LIST_MS = 8_000
 export const MANIFEST_FILE = "manifest.json"
-/** 應用層保留月數（之後手動清；見 README「備份政策」）。 */
-export const SNAPSHOT_RETENTION_MONTHS = 24
+/**
+ * 應用層保留月數（之後手動清；見 README「備份政策」）。
+ * W7（2026-09-23 需求補齊）：客戶要「不覆蓋、5–7 年」→ 7 年＝84 個月。
+ */
+export const SNAPSHOT_RETENTION_MONTHS = 84
+/**
+ * 單一資料檔（gz）可供「後台瀏覽列內容」下載的大小上限；超過就回 413 too_large，
+ * 請改用下載連結自行解壓。瀏覽是分頁讀，但每頁都要把整個 gz 抓下來解壓，
+ * 太大的檔在 serverless 上會吃光記憶體與時間。
+ */
+export const SNAPSHOT_ROWS_MAX_FILE_BYTES = 20 * 1024 * 1024
+/** 瀏覽列內容單頁上限。 */
+export const SNAPSHOT_ROWS_MAX_LIMIT = 200
 
 export interface SnapshotTableSpec {
   name: string
@@ -161,8 +178,19 @@ export const SNAPSHOT_TABLES: readonly SnapshotTableSpec[] = [
 
 const periodRe = /^\d{4}-(0[1-9]|1[0-2])$/
 const fileNameRe = /^[A-Za-z0-9_.-]+$/
+/** run 資料夾名：`r001`…`r999`。run 0 ＝ 舊版（檔案直接落在 `{period}/`），沒有資料夾。 */
+const runFolderRe = /^r(\d{3})$/
 
-export type BackupErrorCode = "invalid_period" | "unknown_table" | "invalid_offset" | "invalid_file" | "file_not_found" | "manifest_stale"
+export type BackupErrorCode =
+  | "invalid_period"
+  | "unknown_table"
+  | "invalid_offset"
+  | "invalid_file"
+  | "file_not_found"
+  | "manifest_stale"
+  | "invalid_run"
+  | "run_not_found"
+  | "too_large"
 
 export class BackupError extends Error {
   readonly code: BackupErrorCode
@@ -214,6 +242,12 @@ export interface SnapshotManifest {
   tenantId: string
   period: string
   /**
+   * 這個月份的第幾次執行（W7）：1 起跳，每次「重新開跑」配一個新號、寫進
+   * `{tenantId}/{period}/r{seq:03}/`，同月不再互相覆蓋。舊資料（檔案直接落在
+   * `{period}/` 下）沒有這個欄位，一律當 run 0。
+   */
+  run?: number
+  /**
    * running → 進行中；complete → 每張表 rows ≥ expectedRows；
    * incomplete → 至少一張表 rows < expectedRows（見 incompleteTables），不可當完整備份用。
    */
@@ -234,6 +268,11 @@ export interface SnapshotStepInput {
   period: string
   table?: string
   offset?: number
+  /**
+   * 續打時把上一段回的 `run` 原樣帶回來（同一次執行要寫進同一個 r 資料夾）。
+   * 新一輪（沒帶 table／offset）一律忽略這個值、另配新號——同月重跑不覆蓋。
+   */
+  run?: number
   /** 跨租戶模式（worker 排程）：本租戶做完自動指向下一個 active 租戶。 */
   allTenants?: boolean
   budgetMs?: number
@@ -243,6 +282,8 @@ export interface SnapshotStepResult {
   done: boolean
   tenantId: string
   period: string
+  /** 這一段寫進哪一次執行（`{period}/r{run:03}/`）。續打要原樣帶回來。 */
+  run: number
   /** 本次最後處理到的表。 */
   table: string | null
   rowsWritten: number
@@ -253,6 +294,11 @@ export interface SnapshotStepResult {
   nextTenantId?: string
   nextTable?: string
   nextOffset?: number
+  /**
+   * 續打時要帶回來的 run。指向下一個租戶（`nextTenantId`）時不回——那是新一輪，
+   * 由 service 自己配號。
+   */
+  nextRun?: number
 }
 
 function sha256(buf: Buffer): string {
@@ -263,12 +309,64 @@ function storage() {
   return supabaseAdmin.storage.from(SNAPSHOT_BUCKET)
 }
 
-function periodPrefix(tenantId: string, period: string): string {
-  return `${tenantId}/${period}`
+/** `1` → `r001`。 */
+export function runFolder(run: number): string {
+  return `r${String(Math.trunc(run)).padStart(3, "0")}`
 }
 
-export function manifestPathOf(tenantId: string, period: string): string {
-  return `${periodPrefix(tenantId, period)}/${MANIFEST_FILE}`
+/**
+ * 一次執行的資料夾（W7）：run ≥ 1 → `{tenantId}/{period}/r{run:03}`；
+ * run 0 ＝ 2026-09-23 之前的舊快照，檔案直接落在 `{tenantId}/{period}`（不搬、可讀不可寫）。
+ */
+function periodPrefix(tenantId: string, period: string, run: number): string {
+  return run > 0 ? `${tenantId}/${period}/${runFolder(run)}` : `${tenantId}/${period}`
+}
+
+export function manifestPathOf(tenantId: string, period: string, run: number): string {
+  return `${periodPrefix(tenantId, period, run)}/${MANIFEST_FILE}`
+}
+
+function assertPeriod(period: string): void {
+  if (!periodRe.test(period)) throw new BackupError("invalid_period", 400, { period })
+}
+
+function assertRun(run: number): void {
+  if (!Number.isInteger(run) || run < 0 || run > 999) throw new BackupError("invalid_run", 400, { run })
+}
+
+/**
+ * 這個 period 底下已有的 run 序號（大到小）。0 代表「舊版快照」——`{period}/` 底下
+ * 直接躺著檔案（manifest.json／*.json.gz），那是 2026-09-23 之前的產物。
+ */
+export async function listRuns(tenantId: string, period: string): Promise<number[]> {
+  assertPeriod(period)
+  const { data, error } = await storage().list(`${tenantId}/${period}`, { limit: 1000, sortBy: { column: "name", order: "asc" } })
+  if (error) throw new Error(`backup-snapshot (list runs ${period}): ${error.message}`)
+  const entries = data ?? []
+  const runs = entries
+    .filter((e) => e.id === null && runFolderRe.test(e.name))
+    .map((e) => Number(runFolderRe.exec(e.name)![1]))
+  // 舊版：資料夾裡直接有檔案（id 非 null）→ 視為 run 0。
+  if (entries.some((e) => e.id !== null)) runs.push(0)
+  return [...new Set(runs)].sort((a, b) => b - a)
+}
+
+/** 最新一次執行的序號；完全沒有快照 → null。 */
+export async function latestRun(tenantId: string, period: string): Promise<number | null> {
+  const runs = await listRuns(tenantId, period)
+  return runs.length > 0 ? runs[0] : null
+}
+
+/**
+ * 配一個新的 run 序號＝現有最大值＋1（沒有任何快照 → 1）。同月重跑一定落在新
+ * 資料夾，既有那份原封不動（W7：不覆蓋、保留 7 年）。
+ */
+export async function allocateRun(tenantId: string, period: string): Promise<number> {
+  const runs = await listRuns(tenantId, period)
+  const max = runs.length > 0 ? Math.max(...runs) : 0
+  const next = max + 1
+  if (next > 999) throw new BackupError("invalid_run", 409, { period, run: next })
+  return next
 }
 
 let schemaVersionCache: SnapshotManifest["schemaVersion"] | null = null
@@ -308,11 +406,12 @@ export function resolveSchemaVersion(): SnapshotManifest["schemaVersion"] {
   return schemaVersionCache
 }
 
-function newManifest(tenantId: string, period: string): SnapshotManifest {
+function newManifest(tenantId: string, period: string, run: number): SnapshotManifest {
   return {
     manifestVersion: 1,
     tenantId,
     period,
+    run,
     status: "running",
     startedAt: new Date().toISOString(),
     generatedAt: null,
@@ -362,6 +461,44 @@ async function objectContentMd5(prefix: string, name: string): Promise<string | 
   return /^[0-9a-f]{32}$/.test(cleaned) ? cleaned : undefined
 }
 
+/**
+ * 讀一個 Storage 物件的**原始內容**，盡量繞過 CDN 快取。
+ *
+ * 背景：Supabase Storage 的下載走 Cloudflare（`cache-control: public, max-age=3600`），
+ * 同路徑覆寫後失效會慢十幾到數十秒，`storage().download()` 這段時間拿到的是上一版。
+ * 續打快照時讀到舊 manifest ＝ 把這一輪前面幾張表的紀錄蓋掉，所以原本的做法是
+ * 「用 list() 的 ETag 核對＋每 2 秒重讀、最多等 40 秒」，等不到就 503。實測（尤其多條
+ * live 測試同時打同一個專案時）會超過 40 秒 → 月度備份整輪失敗。
+ *
+ * 這裡改成直接打 Storage 的 REST 端點並加一個每次都不同的查詢參數：CDN 以完整 URL
+ * 為快取鍵，帶著沒看過的參數必定回源，拿到的就是最新內容。查詢參數不參與
+ * `/object/authenticated/` 的授權（授權在 Authorization header），所以加它是安全的。
+ * 任何非預期的回應（端點形狀變了、env 沒設）都退回 `storage().download()`，行為與以前相同。
+ */
+async function downloadObject(path: string, opts: { bustCache?: boolean } = {}): Promise<Buffer | null> {
+  if (opts.bustCache) {
+    const base = process.env.SUPABASE_URL ?? ""
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? ""
+    if (base && key) {
+      const encoded = path.split("/").map(encodeURIComponent).join("/")
+      const url = `${base.replace(/\/$/, "")}/storage/v1/object/authenticated/${SNAPSHOT_BUCKET}/${encoded}?cb=${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+      try {
+        const res = await fetch(url, {
+          headers: { Authorization: `Bearer ${key}`, apikey: key, "cache-control": "no-cache" },
+        })
+        if (res.ok) return Buffer.from(await res.arrayBuffer())
+        if (res.status === 404) return null
+        logger.warn({ path, status: res.status }, "backup-snapshot: cache-busted object read failed — falling back to storage().download()")
+      } catch (err) {
+        logger.warn({ path, err: err instanceof Error ? err.message : String(err) }, "backup-snapshot: cache-busted object read threw — falling back")
+      }
+    }
+  }
+  const { data, error } = await storage().download(path)
+  if (error || !data) return null
+  return Buffer.from(await data.arrayBuffer())
+}
+
 export interface ReadManifestOptions {
   /**
    * 最多等多久讓 CDN 追上（毫秒）。Supabase Storage 的 `/object/` 下載走 Cloudflare
@@ -386,67 +523,67 @@ export interface ReadManifestResult {
  * 續打／完成後的回讀一定要用有 freshWaitMs 的版本：拿到上一輪的舊 manifest 接著寫，
  * 等於把這一輪前面幾張表的紀錄蓋掉。
  */
-export async function readManifestChecked(tenantId: string, period: string, opts: ReadManifestOptions = {}): Promise<ReadManifestResult> {
-  const prefix = periodPrefix(tenantId, period)
-  const path = manifestPathOf(tenantId, period)
+export async function readManifestChecked(
+  tenantId: string,
+  period: string,
+  run: number,
+  opts: ReadManifestOptions = {},
+): Promise<ReadManifestResult> {
+  const prefix = periodPrefix(tenantId, period, run)
+  const path = manifestPathOf(tenantId, period, run)
   const deadline = Date.now() + (opts.freshWaitMs ?? 0)
   let lastStale: SnapshotManifest | null = null
   for (let attempt = 1; ; attempt++) {
     const expected = await objectContentMd5(prefix, MANIFEST_FILE)
     if (expected === null) return { manifest: null, stale: false }
-    const { data, error } = await storage().download(path)
-    if (!error && data) {
-      const buf = Buffer.from(await data.arrayBuffer())
+    // bustCache：帶不重複的查詢參數回源，正常情況一次就拿到最新內容，不必等 CDN。
+    const buf = await downloadObject(path, { bustCache: true })
+    if (buf) {
       const parsed = parseManifest(buf)
       if (expected === undefined || md5(buf) === expected) return { manifest: parsed, stale: false }
       lastStale = parsed
     }
     // list() 說有、download 卻拿不到（CDN 負向快取）或內容是舊版 → 等 CDN 追上
     if (Date.now() >= deadline) {
-      logger.warn({ tenantId, period, attempt, expected, hadBody: !error && !!data }, "backup-snapshot: manifest.json read is stale (CDN lag) — timed out waiting")
-      if (opts.onStale === "throw") throw new BackupError("manifest_stale", 503, { tenantId, period })
+      logger.warn({ tenantId, period, run, attempt, expected, hadBody: !!buf }, "backup-snapshot: manifest.json read is stale (CDN lag) — timed out waiting")
+      if (opts.onStale === "throw") throw new BackupError("manifest_stale", 503, { tenantId, period, run })
       return { manifest: lastStale, stale: true }
     }
     await new Promise((r) => setTimeout(r, 2000))
   }
 }
 
-export async function readManifest(tenantId: string, period: string, opts: ReadManifestOptions = {}): Promise<SnapshotManifest | null> {
-  return (await readManifestChecked(tenantId, period, opts)).manifest
+export async function readManifest(
+  tenantId: string,
+  period: string,
+  run: number,
+  opts: ReadManifestOptions = {},
+): Promise<SnapshotManifest | null> {
+  return (await readManifestChecked(tenantId, period, run, opts)).manifest
 }
 
 async function writeManifest(manifest: SnapshotManifest): Promise<string> {
   recomputeTotals(manifest)
-  const path = manifestPathOf(manifest.tenantId, manifest.period)
+  const path = manifestPathOf(manifest.tenantId, manifest.period, manifest.run ?? 0)
   const body = Buffer.from(JSON.stringify(manifest, null, 2))
   const { error } = await storage().upload(path, body, { contentType: "application/json", upsert: true })
   if (error) throw new Error(`backup-snapshot (manifest upload ${path}): ${error.message}`)
   return path
 }
 
-/** 上一輪的 manifest 在新一輪跑完之前的暫存名（新一輪中途失敗時，上一份還對得出來）。 */
-export const PREVIOUS_MANIFEST_FILE = "manifest.prev.json"
-
 /**
- * 同 period 重跑＝覆蓋，但**不先清資料夾**：新檔用 upsert 直接蓋過同名舊檔，
- * 中途失敗（Vercel 逾時、呼叫端沒續打）時上一份的資料檔還在。上一輪的
- * manifest.json 會被進行中的 manifest 蓋掉，所以先另存成 manifest.prev.json，
- * 讓上一份仍可核對（rows／sha256）。真正的清理在 pruneStaleFiles（完成後才做）。
+ * 舊版（run 0）同 period 重跑時，上一份 manifest 的暫存名。W7 之後每次執行各有
+ * 自己的 `r{seq}` 資料夾、不再互相覆蓋，所以不再產生這個檔；保留常數是為了
+ * 讀得懂舊資料夾裡殘留的這一份（清單會列出，pruneStaleFiles 仍會清掉）。
  */
-async function stashPreviousManifest(tenantId: string, period: string): Promise<void> {
-  const prev = await readManifest(tenantId, period)
-  if (!prev) return
-  const path = `${periodPrefix(tenantId, period)}/${PREVIOUS_MANIFEST_FILE}`
-  const { error } = await storage().upload(path, Buffer.from(JSON.stringify(prev, null, 2)), { contentType: "application/json", upsert: true })
-  if (error) throw new Error(`backup-snapshot (stash previous manifest ${path}): ${error.message}`)
-}
+export const PREVIOUS_MANIFEST_FILE = "manifest.prev.json"
 
 /**
  * 本輪完成後才刪「不在新 manifest 裡的舊檔」（上一輪多出來的 part 檔、
  * manifest.prev.json）。資料夾裡剩下的就是 manifest.json＋它列出的檔案。
  */
 async function pruneStaleFiles(manifest: SnapshotManifest): Promise<string[]> {
-  const prefix = periodPrefix(manifest.tenantId, manifest.period)
+  const prefix = periodPrefix(manifest.tenantId, manifest.period, manifest.run ?? 0)
   const { data, error } = await storage().list(prefix, { limit: 1000 })
   if (error) throw new Error(`backup-snapshot (list ${prefix}): ${error.message}`)
   const keep = new Set<string>([MANIFEST_FILE])
@@ -495,6 +632,7 @@ interface TableOutcome {
 async function snapshotTable(
   tenantId: string,
   period: string,
+  run: number,
   spec: SnapshotTableSpec,
   startOffset: number,
   manifest: SnapshotManifest,
@@ -502,7 +640,7 @@ async function snapshotTable(
 ): Promise<TableOutcome> {
   // 表級覆寫只准往下調：超過 PostgREST max-rows 的頁會被靜默截短（C3 驗收的根因）。
   const pageSize = Math.min(spec.pageSize ?? SNAPSHOT_PAGE_SIZE, SNAPSHOT_MAX_PAGE_SIZE)
-  const prefix = periodPrefix(tenantId, period)
+  const prefix = periodPrefix(tenantId, period, run)
   let entry = manifest.tables.find((t) => t.name === spec.name)
   if (!entry || startOffset === 0) {
     entry = { name: spec.name, rows: 0, bytes: 0, sha256: "", files: [], expectedRows: null, pages: null, completedAt: null }
@@ -578,57 +716,67 @@ async function nextActiveTenantId(afterTenantId: string): Promise<string | null>
 }
 
 /**
- * 一次呼叫做一段。從 `table/offset` 開始（省略＝第一張表從頭，並視為新一輪：
- * 清資料夾、重建 manifest），在預算內連續處理；回 `nextTable/nextOffset`
- * 讓呼叫端續打；本租戶全做完 → 寫 complete manifest；`allTenants` 再指向下一個
- * active 租戶（`nextTenantId`）。`done: true` 只在完全沒有下一步時。
+ * 一次呼叫做一段。從 `table/offset` 開始（省略＝第一張表從頭，並視為**新一輪**：
+ * 配一個新的 run 序號、開新的 `{period}/r{run:03}/` 資料夾、重建 manifest），在
+ * 預算內連續處理；回 `run`＋`nextTable/nextOffset` 讓呼叫端續打（`run` 要原樣帶
+ * 回來）；本租戶全做完 → 寫 complete manifest；`allTenants` 再指向下一個 active
+ * 租戶（`nextTenantId`，那是新一輪 → 不回 `nextRun`）。`done: true` 只在完全沒有
+ * 下一步時。
+ *
+ * W7（2026-09-23）：同月重跑不再覆蓋——每次新一輪各自落在自己的 r 資料夾，
+ * 舊的那份原封不動（保留 84 個月）。
  */
 export async function runSnapshotStep(input: SnapshotStepInput): Promise<SnapshotStepResult> {
   const started = Date.now()
   const budgetMs = input.budgetMs ?? SNAPSHOT_STEP_BUDGET_MS
   const hasBudget = () => Date.now() - started < budgetMs
   const { tenantId, period } = input
-  if (!periodRe.test(period)) throw new BackupError("invalid_period", 400, { period })
+  assertPeriod(period)
   let tableIdx = input.table ? SNAPSHOT_TABLES.findIndex((t) => t.name === input.table) : 0
   if (tableIdx < 0) throw new BackupError("unknown_table", 400, { table: input.table })
   let offset = input.offset ?? 0
   if (!Number.isInteger(offset) || offset < 0) throw new BackupError("invalid_offset", 400, { offset })
+  if (input.run !== undefined) assertRun(input.run)
 
   const fresh = tableIdx === 0 && offset === 0
   let manifest: SnapshotManifest
+  let run: number
   if (fresh) {
-    // 不清資料夾：新檔直接蓋舊檔，完成後才 pruneStaleFiles；上一份 manifest 先暫存。
-    await stashPreviousManifest(tenantId, period)
-    manifest = newManifest(tenantId, period)
+    // 新一輪一律配新號（就算呼叫端帶了 run 也忽略）：這是「同月不覆蓋」的保證所在。
+    run = await allocateRun(tenantId, period)
+    manifest = newManifest(tenantId, period, run)
   } else {
-    // 續打：一定要拿到上一步剛寫的 manifest（ETag 核對＋等 CDN），拿到上一輪的舊版
-    // 接著寫會把這一輪前面幾張表的紀錄蓋掉；等不到就 503，呼叫端稍後再續打同一游標。
+    // 續打：run 由呼叫端帶回（沒帶就取最新一次，舊 worker 相容）。一定要拿到上一步
+    // 剛寫的 manifest（ETag 核對＋等 CDN），拿到舊版接著寫會把這一輪前面幾張表的
+    // 紀錄蓋掉；等不到就 503，呼叫端稍後再續打同一游標。
+    run = input.run ?? (await latestRun(tenantId, period)) ?? 1
     manifest =
-      (await readManifest(tenantId, period, { freshWaitMs: MANIFEST_FRESH_WAIT_RESUME_MS, onStale: "throw" })) ??
-      newManifest(tenantId, period)
+      (await readManifest(tenantId, period, run, { freshWaitMs: MANIFEST_FRESH_WAIT_RESUME_MS, onStale: "throw" })) ??
+      newManifest(tenantId, period, run)
+    manifest.run = run
     manifest.status = "running"
   }
 
   let rowsWritten = 0
   let tablesCompleted = 0
   let lastTable: string | null = null
-  const base = () => ({ tenantId, period, table: lastTable, rowsWritten, tablesCompleted, elapsedMs: Date.now() - started })
+  const base = () => ({ tenantId, period, run, table: lastTable, rowsWritten, tablesCompleted, elapsedMs: Date.now() - started })
 
   while (tableIdx < SNAPSHOT_TABLES.length) {
     const spec = SNAPSHOT_TABLES[tableIdx]
     lastTable = spec.name
-    const outcome = await snapshotTable(tenantId, period, spec, offset, manifest, hasBudget)
+    const outcome = await snapshotTable(tenantId, period, run, spec, offset, manifest, hasBudget)
     rowsWritten += outcome.rowsWritten
     if (!outcome.completed) {
       await writeManifest(manifest)
-      return { done: false, ...base(), nextTable: spec.name, nextOffset: outcome.nextOffset }
+      return { done: false, ...base(), nextTable: spec.name, nextOffset: outcome.nextOffset, nextRun: run }
     }
     tablesCompleted += 1
     tableIdx += 1
     offset = 0
     if (tableIdx < SNAPSHOT_TABLES.length && !hasBudget()) {
       await writeManifest(manifest)
-      return { done: false, ...base(), nextTable: SNAPSHOT_TABLES[tableIdx].name, nextOffset: 0 }
+      return { done: false, ...base(), nextTable: SNAPSHOT_TABLES[tableIdx].name, nextOffset: 0, nextRun: run }
     }
   }
 
@@ -641,16 +789,16 @@ export async function runSnapshotStep(input: SnapshotStepInput): Promise<Snapsho
   // 完成後才清掉不在新 manifest 裡的舊檔（上一輪多出來的 part 檔、manifest.prev.json）。
   const pruned = await pruneStaleFiles(manifest)
   logger[manifest.status === "complete" ? "info" : "error"](
-    { tenantId, period, status: manifest.status, incompleteTables, pruned, tables: manifest.totals.tables, rows: manifest.totals.rows, bytes: manifest.totals.bytes },
+    { tenantId, period, run, status: manifest.status, incompleteTables, pruned, tables: manifest.totals.tables, rows: manifest.totals.rows, bytes: manifest.totals.bytes },
     manifest.status === "complete" ? "backup-snapshot: tenant snapshot complete" : "backup-snapshot: tenant snapshot INCOMPLETE — rows < count(*) on some tables",
   )
-  // 同月重跑＝覆寫同路徑：呼叫端下一秒就會 GET /backups 看結果，先在這裡把 CDN 等到
-  // 追上（剩餘的硬上限時間內），清單才不會顯示上一輪的 manifest。等不到只記 log，
-  // 不影響 done——資料已經寫對了，清單端 readManifestChecked 會再等一段並標 stale。
+  // 續打期間 manifest.json 被覆寫過多次：呼叫端下一秒就會 GET /backups 看結果，先在
+  // 這裡把 CDN 等到追上（剩餘的硬上限時間內），清單才不會顯示中途那一版。等不到只記
+  // log，不影響 done——資料已經寫對了，清單端 readManifestChecked 會再等一段並標 stale。
   const remaining = SNAPSHOT_STEP_HARD_LIMIT_MS - (Date.now() - started)
   if (remaining > 0) {
-    const check = await readManifestChecked(tenantId, period, { freshWaitMs: remaining })
-    if (check.stale) logger.warn({ tenantId, period, waitedMs: remaining }, "backup-snapshot: manifest.json still stale on CDN after completion")
+    const check = await readManifestChecked(tenantId, period, run, { freshWaitMs: remaining })
+    if (check.stale) logger.warn({ tenantId, period, run, waitedMs: remaining }, "backup-snapshot: manifest.json still stale on CDN after completion")
   }
 
   if (input.allTenants) {
@@ -668,46 +816,217 @@ export interface SnapshotStoredFile {
   updatedAt: string | null
 }
 
-export interface SnapshotPeriodSummary {
-  period: string
+/** 一個 period 底下的一次執行（W7）。 */
+export interface SnapshotRunSummary {
+  /** 0 ＝ 2026-09-23 之前的舊快照（檔案直接在 `{period}/` 下）。 */
+  run: number
   manifest: SnapshotManifest | null
-  /** true ＝ 回的是 CDN 上的舊版 manifest（剛重跑完、失效還沒追上），幾十秒後再讀就是新的。 */
+  /** true ＝ 回的是 CDN 上的舊版 manifest（剛跑完、失效還沒追上），幾十秒後再讀就是新的。 */
   manifestStale?: boolean
   files: SnapshotStoredFile[]
 }
 
-async function listPeriodFiles(tenantId: string, period: string): Promise<SnapshotStoredFile[]> {
-  const { data, error } = await storage().list(periodPrefix(tenantId, period), { limit: 1000, sortBy: { column: "name", order: "asc" } })
-  if (error) throw new Error(`backup-snapshot (list files ${period}): ${error.message}`)
+export interface SnapshotPeriodSummary {
+  period: string
+  /** 這個月份的歷次執行，新到舊（run 大的在前）。 */
+  runs: SnapshotRunSummary[]
+  /** 最新一次執行的 manifest（＝`runs[0]`；相容舊呼叫端）。 */
+  manifest: SnapshotManifest | null
+  manifestStale?: boolean
+  /** 最新一次執行的檔案清單（＝`runs[0].files`；相容舊呼叫端）。 */
+  files: SnapshotStoredFile[]
+}
+
+async function listPeriodFiles(tenantId: string, period: string, run: number): Promise<SnapshotStoredFile[]> {
+  const { data, error } = await storage().list(periodPrefix(tenantId, period, run), { limit: 1000, sortBy: { column: "name", order: "asc" } })
+  if (error) throw new Error(`backup-snapshot (list files ${period}/r${run}): ${error.message}`)
   return (data ?? [])
     .filter((f) => f.id !== null)
     .map((f) => ({ name: f.name, size: f.metadata?.size ?? 0, updatedAt: f.updated_at ?? null }))
 }
 
-/** 租戶底下所有 period 資料夾（新到舊）＋各自的 manifest 與檔案清單。 */
+/** 有限併發的 map：清單要讀 84 個月×每月數次執行的 manifest，逐筆串起來會太慢。 */
+async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length)
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const i = cursor++
+      if (i >= items.length) return
+      out[i] = await fn(items[i], i)
+    }
+  })
+  await Promise.all(workers)
+  return out
+}
+
+async function readRunSummary(tenantId: string, period: string, run: number, freshWaitMs: number): Promise<SnapshotRunSummary> {
+  const [checked, files] = await Promise.all([
+    readManifestChecked(tenantId, period, run, { freshWaitMs }),
+    listPeriodFiles(tenantId, period, run),
+  ])
+  return { run, manifest: checked.manifest, ...(checked.stale ? { manifestStale: true } : {}), files }
+}
+
+/**
+ * 租戶底下所有 period 資料夾（新到舊），每個月份再列出歷次執行（run 新到舊）。
+ * 只有「每個月份最新的那次」會等 CDN 追上（剛跑完的那份才可能是舊版）；更早的
+ * 執行不再變動，直接讀，免得清單被 84 個月 × 每月數次的等待拖垮。
+ */
 export async function listSnapshotPeriods(tenantId: string): Promise<SnapshotPeriodSummary[]> {
   const { data, error } = await storage().list(tenantId, { limit: 500, sortBy: { column: "name", order: "desc" } })
   if (error) throw new Error(`backup-snapshot (list periods): ${error.message}`)
   const periods = (data ?? []).filter((e) => e.id === null && periodRe.test(e.name)).map((e) => e.name)
-  const out: SnapshotPeriodSummary[] = []
-  for (const period of periods) {
-    const [checked, files] = await Promise.all([
-      readManifestChecked(tenantId, period, { freshWaitMs: MANIFEST_FRESH_WAIT_LIST_MS }),
-      listPeriodFiles(tenantId, period),
-    ])
-    out.push({ period, manifest: checked.manifest, ...(checked.stale ? { manifestStale: true } : {}), files })
-  }
-  return out
+  return mapLimit(periods, 4, async (period) => {
+    const runs = await listRuns(tenantId, period)
+    const summaries = await mapLimit(runs, 4, (run, idx) =>
+      readRunSummary(tenantId, period, run, idx === 0 ? MANIFEST_FRESH_WAIT_LIST_MS : 0),
+    )
+    const latest = summaries[0]
+    return {
+      period,
+      runs: summaries,
+      manifest: latest?.manifest ?? null,
+      ...(latest?.manifestStale ? { manifestStale: true } : {}),
+      files: latest?.files ?? [],
+    }
+  })
 }
 
-/** 短效 signed URL（預設 15 分鐘）；檔名只准 `[A-Za-z0-9_.-]`，不接受路徑。 */
-export async function signedSnapshotUrl(tenantId: string, period: string, fileName: string, expiresIn = 900): Promise<string> {
-  if (!periodRe.test(period)) throw new BackupError("invalid_period", 400, { period })
+/**
+ * 短效 signed URL（預設 15 分鐘）；檔名只准 `[A-Za-z0-9_.-]`，不接受路徑。
+ * `run` 省略＝0（舊版快照，檔案直接在 `{period}/` 下）。
+ */
+export async function signedSnapshotUrl(
+  tenantId: string,
+  period: string,
+  fileName: string,
+  run = 0,
+  expiresIn = 900,
+): Promise<string> {
+  assertPeriod(period)
+  assertRun(run)
   if (!fileNameRe.test(fileName)) throw new BackupError("invalid_file", 400, { file: fileName })
-  const path = `${periodPrefix(tenantId, period)}/${fileName}`
+  const path = `${periodPrefix(tenantId, period, run)}/${fileName}`
   const { data, error } = await storage().createSignedUrl(path, expiresIn, { download: fileName })
-  if (error || !data?.signedUrl) throw new BackupError("file_not_found", 404, { file: fileName })
+  if (error || !data?.signedUrl) throw new BackupError("file_not_found", 404, { file: fileName, run })
   return data.signedUrl
+}
+
+// ── M9 備份內容瀏覽（後台直接翻資料，不必下載解壓） ──────────────────────────
+
+/** `planRowSlice` 的一段：從哪個檔的第幾列起、拿幾列。 */
+export interface RowSlicePick {
+  path: string
+  /** 該檔內要跳過的列數。 */
+  skip: number
+  /** 該檔內要取的列數。 */
+  take: number
+}
+
+export interface RowSlicePlan {
+  picks: RowSlicePick[]
+  /** 這張表的總列數（manifest 各檔 rows 相加）。 */
+  total: number
+  /** 還有下一頁時的起始 offset；沒有就 null。 */
+  nextOffset: number | null
+}
+
+/**
+ * 純函式：依 manifest 的分頁檔（每檔知道自己有幾列）算出「第 offset 列起取 limit 列」
+ * 要下載哪幾個檔、各自跳過／取幾列。大表拆成 part-0001…，逐檔累加列數就能定位，
+ * 不必把整張表抓下來。offset 超出總列數 → picks 空陣列（呼叫端回空頁，不是錯誤）。
+ */
+export function planRowSlice(files: readonly { path: string; rows: number }[], offset: number, limit: number): RowSlicePlan {
+  const total = files.reduce((s, f) => s + f.rows, 0)
+  const picks: RowSlicePick[] = []
+  let remaining = Math.max(0, limit)
+  let cursor = 0 // 已掃過的列數（各檔累加）
+  for (const f of files) {
+    if (remaining <= 0) break
+    const fileStart = cursor
+    const fileEnd = cursor + f.rows
+    cursor = fileEnd
+    if (offset >= fileEnd) continue // 整個檔都在 offset 之前
+    const skip = Math.max(0, offset - fileStart)
+    const take = Math.min(f.rows - skip, remaining)
+    if (take <= 0) continue
+    picks.push({ path: f.path, skip, take })
+    remaining -= take
+  }
+  const taken = picks.reduce((s, p) => s + p.take, 0)
+  const nextOffset = offset + taken < total ? offset + taken : null
+  return { picks, total, nextOffset }
+}
+
+export interface SnapshotRowsPage {
+  tenantId: string
+  period: string
+  run: number
+  table: string
+  offset: number
+  limit: number
+  /** 這張表在該次快照裡的總列數。 */
+  total: number
+  rows: Record<string, unknown>[]
+  /** 下一頁的 offset；null ＝ 已到底。 */
+  nextOffset: number | null
+  /** 欄位名（取自本頁第一列，供表頭用）。 */
+  columns: string[]
+}
+
+async function downloadRows(prefix: string, file: { path: string; bytes: number }): Promise<Record<string, unknown>[]> {
+  if (file.bytes > SNAPSHOT_ROWS_MAX_FILE_BYTES) {
+    throw new BackupError("too_large", 413, { file: file.path, bytes: file.bytes, maxBytes: SNAPSHOT_ROWS_MAX_FILE_BYTES })
+  }
+  const { data, error } = await storage().download(`${prefix}/${file.path}`)
+  if (error || !data) throw new BackupError("file_not_found", 404, { file: file.path })
+  const gz = Buffer.from(await data.arrayBuffer())
+  const parsed = JSON.parse(gunzipSync(gz).toString("utf8")) as unknown
+  return Array.isArray(parsed) ? (parsed as Record<string, unknown>[]) : []
+}
+
+/**
+ * M9：直接在後台翻某次快照裡某張表的資料。下載該分頁檔 → gunzip → JSON.parse → 切片。
+ * 未知的表（不在 manifest 裡、或該環境沒這張表被略過）→ 404 unknown_table；
+ * 單檔 >20 MB → 413 too_large（請改用下載連結）。limit 上限 200。
+ */
+export async function readSnapshotRows(
+  tenantId: string,
+  period: string,
+  run: number,
+  table: string,
+  offset = 0,
+  limit = 50,
+): Promise<SnapshotRowsPage> {
+  assertPeriod(period)
+  assertRun(run)
+  if (!Number.isInteger(offset) || offset < 0) throw new BackupError("invalid_offset", 400, { offset })
+  const cappedLimit = Math.min(Math.max(1, Math.trunc(limit)), SNAPSHOT_ROWS_MAX_LIMIT)
+  const manifest = await readManifest(tenantId, period, run)
+  if (!manifest) throw new BackupError("run_not_found", 404, { period, run })
+  const entry = manifest.tables.find((t) => t.name === table)
+  if (!entry || entry.skipped) throw new BackupError("unknown_table", 404, { table, run })
+  const plan = planRowSlice(entry.files, offset, cappedLimit)
+  const prefix = periodPrefix(tenantId, period, run)
+  const rows: Record<string, unknown>[] = []
+  for (const pick of plan.picks) {
+    const file = entry.files.find((f) => f.path === pick.path)!
+    const all = await downloadRows(prefix, file)
+    rows.push(...all.slice(pick.skip, pick.skip + pick.take))
+  }
+  return {
+    tenantId,
+    period,
+    run,
+    table,
+    offset,
+    limit: cappedLimit,
+    total: plan.total,
+    rows,
+    nextOffset: plan.nextOffset,
+    columns: rows.length > 0 ? Object.keys(rows[0]) : [],
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -835,7 +1154,9 @@ export async function closePeriod(
   }
   const lockedCount = sheets.filter((s) => s.status === "locked").length + lockedNow
 
-  const manifest = await readManifest(tenantId, period).catch(() => null)
+  // 月結紀錄指向「該月最新一次快照」的 manifest（W7 之後同月可能有多次執行）。
+  const manifestRun = await latestRun(tenantId, period).catch(() => null)
+  const manifest = manifestRun === null ? null : await readManifest(tenantId, period, manifestRun).catch(() => null)
   const now = new Date().toISOString()
   const note =
     opts.force && notReady.length > 0
@@ -852,7 +1173,7 @@ export async function closePeriod(
         closed_by_emp_id: actorEmpId,
         sheet_count: sheets.length,
         locked_count: lockedCount,
-        snapshot_manifest_path: manifest ? manifestPathOf(tenantId, period) : null,
+        snapshot_manifest_path: manifest ? manifestPathOf(tenantId, period, manifestRun ?? 0) : null,
         note,
       },
       { onConflict: "tenant_id,period" },

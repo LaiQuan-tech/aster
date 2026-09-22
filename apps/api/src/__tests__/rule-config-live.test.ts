@@ -372,6 +372,31 @@ describe.skipIf(!migrated)("C4 規則版本生效日 — live", () => {
       expect(rows.filter((r) => r.active)).toHaveLength(1)
     })
 
+    it("★ M9 GET /rule-config/versions?full=1 → 每一版都附 config（內容可看、可比對）；不帶 full 就沒有", async () => {
+      const lean = await asVAdmin(request(app).get("/rule-config/versions"))
+      expect(lean.status).toBe(200)
+      expect(lean.body.every((r: { config?: unknown }) => r.config === undefined)).toBe(true)
+
+      const full = await asVAdmin(request(app).get("/rule-config/versions?full=1"))
+      expect(full.status).toBe(200)
+      expect(full.body).toHaveLength(2)
+      for (const row of full.body as Array<{ version: number; config: RuleConfig; configValid: boolean }>) {
+        expect(row.configValid).toBe(true)
+        // parseRuleConfig 過的完整形狀（預設值已填），前端才能逐鍵比對兩版差異
+        expect(row.config).toBeTruthy()
+        expect(Array.isArray(row.config.overtime.rules)).toBe(true)
+        expect(typeof row.config.payroll.dailyRegularHours).toBe("number")
+      }
+      // 兩版的差異看得出來：v1 是 OT_OLD、v2 是 OT_NEXT（比對面板就是靠這個）
+      const byVersion = new Map((full.body as Array<{ version: number; config: RuleConfig }>).map((r) => [r.version, r.config]))
+      const mult = (v: number) => byVersion.get(v)!.overtime.rules.find((r) => r.when === "weekday_ot")!.multiplier
+      expect(mult(1)).toBe(OT_OLD)
+      expect(mult(2)).toBe(OT_NEXT)
+
+      // full=1 也是 HR 限定
+      expect((await asVEmployee(request(app).get("/rule-config/versions?full=1"))).status).toBe(403)
+    })
+
     it("權限分層：/versions 是 requireHrAdmin（員工 403），/rule-config 一般成員讀得到", async () => {
       const denied = await asVEmployee(request(app).get("/rule-config/versions"))
       expect(denied.status).toBe(403)

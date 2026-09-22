@@ -1,22 +1,33 @@
 "use client";
 
-import { useMemo, useEffect, useState } from "react";
+import { Fragment, useMemo, useEffect, useState } from "react";
 import { Card, PrimaryButton, ErrorText, Empty, Segmented, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getBranding,
+  getLeaveTypes,
   getRuleConfig,
-  getRuleConfigVersions,
   saveRuleConfig,
   saveTenantSettings,
+  type LeaveType,
   type RuleConfig,
   type RuleConfigResponse,
-  type RuleConfigVersion,
   type OvertimeRule,
   type OvertimeTier,
   type OvertimeWhen,
   type OvertimeRoundingMode,
   type TenantFeatures,
 } from "@/lib/admin-api";
+import {
+  asExtConfig,
+  getRuleConfigVersionsFull,
+  type AnnualLeaveBasis,
+  type InsuranceBracketSet,
+  type OvertimeBasis,
+  type OvertimeBeyondCap,
+  type RuleConfigExt,
+  type RuleConfigVersionFull,
+} from "@/lib/rule-config-api";
+import { RuleConfigDiff } from "@/components/RuleConfigDiff";
 
 /**
  * 頁內分頁（2026-09 後台簡化）：八張卡拆成五個面板，一次只畫一個；所有 state／handler 仍在同一個
@@ -88,6 +99,10 @@ interface OvertimeParamsForm {
   lateEarlyEnabled: boolean;
   requireApprovedSheet: boolean;
   requireAnomalyAck: boolean;
+  /* 2026-09-23 需求補齊（M1／W9）*/
+  basis: OvertimeBasis;
+  monthlyCapHours: string;
+  beyondCap: OvertimeBeyondCap;
 }
 
 const DEFAULT_OT_FORM: OvertimeParamsForm = {
@@ -106,6 +121,9 @@ const DEFAULT_OT_FORM: OvertimeParamsForm = {
   lateEarlyEnabled: false,
   requireApprovedSheet: false,
   requireAnomalyAck: true,
+  basis: "regularHours",
+  monthlyCapHours: "40",
+  beyondCap: "settle_separately",
 };
 
 function tiersToForm(tiers: OvertimeTier[] | undefined): [TierFormRow, TierFormRow, TierFormRow] {
@@ -126,7 +144,7 @@ function alertHoursToForm(hours: number[] | undefined): [string, string, string]
 
 /** 由目前 config 推算表單初值；config 缺的欄位一律套引擎 resolve* 的同一組預設值。 */
 function hydrateOvertimeForm(config: RuleConfig): OvertimeParamsForm {
-  const ot = config.overtime;
+  const ot = asExtConfig(config).overtime;
   const weekday = ot.rules.find((r) => r.when === "weekday_ot");
   const rest = ot.rules.find((r) => r.when === "rest_day");
   const fixed = ot.rules.find((r) => r.when === "fixed_holiday");
@@ -148,6 +166,67 @@ function hydrateOvertimeForm(config: RuleConfig): OvertimeParamsForm {
     lateEarlyEnabled: config.leave_deduction?.lateEarly?.enabled ?? false,
     requireApprovedSheet: config.payroll.requireApprovedSheet ?? false,
     requireAnomalyAck: config.payroll.requireAnomalyAck ?? true,
+    // 預設值與 @hr/rules 的 resolveOvertimeBasis／MonthlyCapHours／BeyondCap 同一組。
+    basis: ot.basis ?? "regularHours",
+    monthlyCapHours: String(ot.monthlyCapHours ?? 40),
+    beyondCap: ot.beyondCap ?? "settle_separately",
+  };
+}
+
+/* --------------------------------------------- 特休（週年制）W1 --- */
+/**
+ * 年資→天數表以「日」設定（勞基法 §38 的級距），發放時由排程 ×
+ * payroll.dailyRegularHours 轉成小時寫進 leave_balances（餘額桶存的是小時）。
+ * 整段留空＝全部用引擎預設（見 @hr/rules resolveAnnualLeavePolicy），
+ * 所以表單只在「與預設不同」時才送出——這樣租戶設定裡不會塞一堆等同預設的值。
+ */
+interface AnnualTierRow {
+  minMonths: string;
+  days: string;
+}
+
+interface AnnualLeaveForm {
+  basis: AnnualLeaveBasis;
+  tiers: AnnualTierRow[];
+  afterMonths: string;
+  perYearDays: string;
+  maxDays: string;
+  typeCode: string;
+}
+
+const DEFAULT_ANNUAL_TIERS: AnnualTierRow[] = [
+  { minMonths: "6", days: "3" },
+  { minMonths: "12", days: "7" },
+  { minMonths: "24", days: "10" },
+  { minMonths: "36", days: "14" },
+  { minMonths: "60", days: "15" },
+  { minMonths: "120", days: "16" },
+];
+
+const DEFAULT_ANNUAL_FORM: AnnualLeaveForm = {
+  basis: "anniversary",
+  tiers: DEFAULT_ANNUAL_TIERS,
+  afterMonths: "120",
+  perYearDays: "1",
+  maxDays: "30",
+  typeCode: "annual",
+};
+
+function hydrateAnnualLeaveForm(config: RuleConfig): AnnualLeaveForm {
+  const leave = asExtConfig(config).leave;
+  const tiers = leave?.annualLeaveTable;
+  return {
+    basis: leave?.annualLeaveBasis ?? "anniversary",
+    tiers:
+      tiers && tiers.length > 0
+        ? [...tiers]
+            .sort((a, b) => a.minMonths - b.minMonths)
+            .map((t) => ({ minMonths: String(t.minMonths), days: String(t.days) }))
+        : DEFAULT_ANNUAL_TIERS,
+    afterMonths: String(leave?.annualLeaveIncrement?.afterMonths ?? 120),
+    perYearDays: String(leave?.annualLeaveIncrement?.perYearDays ?? 1),
+    maxDays: String(leave?.annualLeaveIncrement?.maxDays ?? 30),
+    typeCode: leave?.annualLeaveTypeCode ?? "annual",
   };
 }
 
@@ -167,15 +246,37 @@ interface InsuranceRatePair {
   employeeShare: string;
 }
 
+/**
+ * 投保級距表（M12，2026-09-23）：一組級距含生效日，勞保／健保各一串由小到大的
+ * 投保薪資。HR 設定薪資沒帶投保薪資時，API 自動選「≥ 基數的最小級距」。
+ * 表單用字串收，存檔時才切成數字（逗號／空白／換行都當分隔）。
+ */
+interface BracketSetForm {
+  effectiveFrom: string;
+  labor: string;
+  health: string;
+}
+
 interface InsuranceParamsForm {
   labor: InsuranceRatePair;
   health: InsuranceRatePair;
+  brackets: BracketSetForm[];
 }
 
 const DEFAULT_INSURANCE_FORM: InsuranceParamsForm = {
   labor: { rate: "", employeeShare: "" },
   health: { rate: "", employeeShare: "" },
+  brackets: [],
 };
+
+/** "28590, 28800 30300" → [28590, 28800, 30300]（由小到大，去掉非數字）。 */
+function parseBracketList(input: string): number[] {
+  return input
+    .split(/[\s,、]+/)
+    .map((v) => Number(v.replace(/[^0-9.]/g, "")))
+    .filter((v) => Number.isFinite(v) && v > 0)
+    .sort((a, b) => a - b);
+}
 
 /** 由目前 config.insurance（unknown）安全解析表單初值；形狀不對或缺省一律回退成空白（=未設定）。 */
 function hydrateInsuranceForm(insurance: unknown): InsuranceParamsForm {
@@ -183,11 +284,23 @@ function hydrateInsuranceForm(insurance: unknown): InsuranceParamsForm {
   const ins = insurance as {
     labor?: { rate?: unknown; employeeShare?: unknown };
     health?: { rate?: unknown; employeeShare?: unknown };
+    brackets?: unknown;
   };
   const toStr = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? String(v) : "");
+  const nums = (v: unknown) => (Array.isArray(v) ? v.filter((n): n is number => typeof n === "number").join(", ") : "");
+  const brackets = Array.isArray(ins.brackets)
+    ? (ins.brackets as Array<{ effectiveFrom?: unknown; labor?: unknown; health?: unknown }>)
+        .map((b) => ({
+          effectiveFrom: typeof b.effectiveFrom === "string" ? b.effectiveFrom : "",
+          labor: nums(b.labor),
+          health: nums(b.health),
+        }))
+        .sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom))
+    : [];
   return {
     labor: { rate: toStr(ins.labor?.rate), employeeShare: toStr(ins.labor?.employeeShare) },
     health: { rate: toStr(ins.health?.rate), employeeShare: toStr(ins.health?.employeeShare) },
+    brackets,
   };
 }
 
@@ -392,8 +505,12 @@ export default function ModuleSettingsPage() {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [ruleVersions, setRuleVersions] = useState<RuleConfigVersion[] | null>(null);
+  const [ruleVersions, setRuleVersions] = useState<RuleConfigVersionFull[] | null>(null);
   const [ruleVersionsError, setRuleVersionsError] = useState<string | null>(null);
+  // M9 版本比對：選兩版看差異；null = 還沒選（預設挑最新兩版）。
+  const [diffBase, setDiffBase] = useState<number | null>(null);
+  const [diffTarget, setDiffTarget] = useState<number | null>(null);
+  const [viewVersion, setViewVersion] = useState<number | null>(null);
   const [jsonEffectiveMode, setJsonEffectiveMode] = useState<EffectiveMode>("nextMonth");
   const [jsonEffectiveDate, setJsonEffectiveDate] = useState("");
   const [otEffectiveMode, setOtEffectiveMode] = useState<EffectiveMode>("nextMonth");
@@ -401,6 +518,18 @@ export default function ModuleSettingsPage() {
   const [insuranceForm, setInsuranceForm] = useState<InsuranceParamsForm>(DEFAULT_INSURANCE_FORM);
   const [insuranceEffectiveMode, setInsuranceEffectiveMode] = useState<EffectiveMode>("nextMonth");
   const [insuranceEffectiveDate, setInsuranceEffectiveDate] = useState("");
+  const [annualForm, setAnnualForm] = useState<AnnualLeaveForm>(DEFAULT_ANNUAL_FORM);
+  const [annualEffectiveMode, setAnnualEffectiveMode] = useState<EffectiveMode>("nextMonth");
+  const [annualEffectiveDate, setAnnualEffectiveDate] = useState("");
+  const [leaveTypes, setLeaveTypes] = useState<LeaveType[] | null>(null);
+
+  /** 版本比對的兩個版本；任一個找不到（清單重載過）就不畫比對表。 */
+  const diffPair = useMemo(() => {
+    if (!ruleVersions || diffBase == null || diffTarget == null) return null;
+    const base = ruleVersions.find((v) => v.version === diffBase);
+    const target = ruleVersions.find((v) => v.version === diffTarget);
+    return base && target ? { base, target } : null;
+  }, [ruleVersions, diffBase, diffTarget]);
 
   const parsedEditableFields = useMemo(
     () =>
@@ -420,8 +549,13 @@ export default function ModuleSettingsPage() {
         setDraft(JSON.stringify(res.config, null, 2));
         setOtForm(hydrateOvertimeForm(res.config));
         setInsuranceForm(hydrateInsuranceForm(res.config.insurance));
+        setAnnualForm(hydrateAnnualLeaveForm(res.config));
       })
       .catch((err) => setError(err instanceof Error ? err.message : "載入模組設定失敗"));
+    // 特休卡的「對應假別」下拉；拿不到就退回純文字輸入（見該卡）。
+    getLeaveTypes()
+      .then((res) => setLeaveTypes(res.leaveTypes))
+      .catch(() => setLeaveTypes([]));
     getBranding()
       .then((res) => {
         const nextFeatures = res.features ?? {};
@@ -452,10 +586,17 @@ export default function ModuleSettingsPage() {
       .catch(() => null);
   }, []);
 
-  /** 版本歷史非關鍵路徑：拿不到就顯示錯誤字樣，不擋頁面其餘內容。 */
+  /**
+   * 版本歷史非關鍵路徑：拿不到就顯示錯誤字樣，不擋頁面其餘內容。
+   * M9 之後用 `?full=1`（每版附內容）才比對得出兩版差在哪；比對的預設選擇跟著
+   * 更新成「最新兩版」，但使用者已經自己選過就不動他的選擇。
+   */
   async function reloadRuleVersions() {
     try {
-      setRuleVersions(await getRuleConfigVersions());
+      const rows = await getRuleConfigVersionsFull();
+      setRuleVersions(rows);
+      setDiffTarget((prev) => (prev != null && rows.some((r) => r.version === prev) ? prev : (rows[0]?.version ?? null)));
+      setDiffBase((prev) => (prev != null && rows.some((r) => r.version === prev) ? prev : (rows[1]?.version ?? null)));
       setRuleVersionsError(null);
     } catch (err) {
       setRuleVersionsError(err instanceof Error ? err.message : "版本歷史載入失敗");
@@ -551,8 +692,8 @@ export default function ModuleSettingsPage() {
       const restRule = buildTieredRule("rest_day", otForm.restDayTiers, existingRest);
       const fixedRule = buildFixedHolidayRule(existingFixed, otForm.fixedHolidayMinChargeHours);
 
-      const merged: RuleConfig = {
-        ...base,
+      const merged: RuleConfigExt = {
+        ...asExtConfig(base),
         overtime: {
           rules: [weekdayRule, restRule, fixedRule],
           rounding: {
@@ -570,6 +711,11 @@ export default function ModuleSettingsPage() {
           monthlyAlertHours: otForm.monthlyAlertHours
             .map((v) => Number(v))
             .filter((v) => Number.isFinite(v) && v > 0),
+          // M1／W9：起算基準、月上限、超額處理。留空的月上限＝不寫這個鍵（引擎預設 40）。
+          basis: otForm.basis,
+          monthlyCapHours:
+            otForm.monthlyCapHours.trim() === "" ? undefined : Number(otForm.monthlyCapHours) || undefined,
+          beyondCap: otForm.beyondCap,
         },
         payroll: {
           ...base.payroll,
@@ -618,10 +764,23 @@ export default function ModuleSettingsPage() {
       insuranceForm.labor.employeeShare.trim() !== "" &&
       insuranceForm.health.rate.trim() !== "" &&
       insuranceForm.health.employeeShare.trim() !== "";
+    // 級距表：只收「有生效日且兩串都有數字」的組；一組都沒有就整個鍵不送（＝不自動選級距）。
+    const brackets: InsuranceBracketSet[] = insuranceForm.brackets
+      .map((b) => ({ effectiveFrom: b.effectiveFrom.trim(), labor: parseBracketList(b.labor), health: parseBracketList(b.health) }))
+      .filter((b) => /^\d{4}-\d{2}-\d{2}$/.test(b.effectiveFrom) && b.labor.length > 0 && b.health.length > 0)
+      .sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
+    if (insuranceForm.brackets.length > 0 && brackets.length !== insuranceForm.brackets.length) {
+      setError("投保級距表：每一組都要有生效日（YYYY-MM-DD）與至少一個勞保／健保級距金額");
+      return;
+    }
+    if (brackets.length > 0 && !allFilled) {
+      setError("投保級距表要與四個費率欄位一起設定（級距表存在 insurance 區段底下）");
+      return;
+    }
     try {
       const base = ruleConfig.config;
-      const merged: RuleConfig = {
-        ...base,
+      const merged: RuleConfigExt = {
+        ...asExtConfig(base),
         insurance: allFilled
           ? {
               labor: {
@@ -632,6 +791,7 @@ export default function ModuleSettingsPage() {
                 rate: Number(insuranceForm.health.rate) || 0,
                 employeeShare: Number(insuranceForm.health.employeeShare) || 0,
               },
+              ...(brackets.length > 0 ? { brackets } : {}),
             }
           : undefined,
       };
@@ -643,6 +803,67 @@ export default function ModuleSettingsPage() {
       void reloadRuleVersions(); // 版本歷史表格同步補上剛存的這一版，不 await（非關鍵路徑）。
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存勞健保費率失敗");
+    }
+  }
+
+  function patchAnnual(partial: Partial<AnnualLeaveForm>) {
+    setAnnualForm((prev) => ({ ...prev, ...partial }));
+  }
+
+  function setAnnualTier(index: number, field: keyof AnnualTierRow, value: string) {
+    setAnnualForm((prev) => {
+      const tiers = prev.tiers.map((t, i) => (i === index ? { ...t, [field]: value } : t));
+      return { ...prev, tiers };
+    });
+  }
+
+  /**
+   * 特休（週年制）W1：把 config.leave 整段覆蓋後存新版。年資表以「日」設定，
+   * 發放時由排程 × payroll.dailyRegularHours 轉小時；曆年制只是把自動發放關掉，
+   * 餘額桶維持 HR 手動維護。
+   */
+  async function onSaveAnnualLeave() {
+    if (!ruleConfig) return;
+    setError(null);
+    setMessage(null);
+    if (annualEffectiveMode === "custom" && !annualEffectiveDate) {
+      setError("請選擇指定生效日期");
+      return;
+    }
+    const tiers = annualForm.tiers
+      .map((t) => ({ minMonths: Number(t.minMonths), days: Number(t.days) }))
+      .filter((t) => Number.isFinite(t.minMonths) && t.minMonths >= 0 && Number.isFinite(t.days) && t.days >= 0)
+      .sort((a, b) => a.minMonths - b.minMonths);
+    if (tiers.length === 0) {
+      setError("年資對照表至少要有一列（年資滿幾個月 → 給幾天）");
+      return;
+    }
+    if (!annualForm.typeCode.trim()) {
+      setError("請指定特休對應的假別代碼");
+      return;
+    }
+    try {
+      const merged: RuleConfigExt = {
+        ...asExtConfig(ruleConfig.config),
+        leave: {
+          annualLeaveBasis: annualForm.basis,
+          annualLeaveTable: tiers,
+          annualLeaveIncrement: {
+            afterMonths: Number(annualForm.afterMonths) || 0,
+            perYearDays: Number(annualForm.perYearDays) || 0,
+            maxDays: Number(annualForm.maxDays) || 0,
+          },
+          annualLeaveTypeCode: annualForm.typeCode.trim(),
+        },
+      };
+      const res = await saveRuleConfig(merged, toEffectiveOpts(annualEffectiveMode, annualEffectiveDate));
+      setMessage(describeSaveResult(res.version, res.effectiveFrom));
+      await reloadRuleConfig().catch(() => {
+        // 存檔已成功；重新整理「目前生效」狀態失敗不影響這次存檔結果。
+      });
+      void reloadRuleVersions();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "儲存特休設定失敗");
     }
   }
 
@@ -872,6 +1093,50 @@ export default function ModuleSettingsPage() {
                   </div>
                 </div>
 
+                {/* M1／W9（2026-09-23 需求補齊）：加班起算基準、月上限、超額處理 */}
+                <div className="grid grid-cols-1 gap-4 rounded-md border border-gray-200 p-3 sm:grid-cols-3">
+                  <div>
+                    <label className={labelCls}>加班起算</label>
+                    <select
+                      className={inputCls}
+                      value={otForm.basis}
+                      onChange={(e) => patchOt({ basis: e.target.value as OvertimeBasis })}
+                    >
+                      <option value="regularHours">法定 8 小時</option>
+                      <option value="shift">班表淨工時</option>
+                    </select>
+                    <p className="mt-1 text-xs text-gray-400">
+                      客戶 Excel 的語意是「超過班表淨工時即加班」；14:00–22:00 這類班別選「法定 8 小時」每天會少算 1 小時
+                    </p>
+                  </div>
+                  <div>
+                    <label className={labelCls}>月加班上限（小時）</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="any"
+                      className={inputCls}
+                      value={otForm.monthlyCapHours}
+                      onChange={(e) => patchOt({ monthlyCapHours: e.target.value })}
+                    />
+                    <p className="mt-1 text-xs text-gray-400">預設 40（法定上限 46）；送加班單超過即標記，月表核准時處理超額</p>
+                  </div>
+                  <div>
+                    <label className={labelCls}>超過上限</label>
+                    <select
+                      className={inputCls}
+                      value={otForm.beyondCap}
+                      onChange={(e) => patchOt({ beyondCap: e.target.value as OvertimeBeyondCap })}
+                    >
+                      <option value="settle_separately">另行給付（不進薪資單）</option>
+                      <option value="warn">僅警示（薪資照算）</option>
+                    </select>
+                    <p className="mt-1 text-xs text-gray-400">
+                      「另行給付」＝超額時數歸入加班另行給付帳（現金／補休），出勤月表與薪資單維持合規版
+                    </p>
+                  </div>
+                </div>
+
                 <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                   <TierEditor
                     title="加班分段倍率 · 平日延長工時（weekday_ot）"
@@ -949,6 +1214,173 @@ export default function ModuleSettingsPage() {
 
                 <div>
                   <PrimaryButton onClick={onSaveOvertimeParams}>儲存加班與計薪參數</PrimaryButton>
+                </div>
+              </div>
+            ) : (
+              <Empty>載入中…</Empty>
+            )}
+          </Card>
+
+          <Card>
+            <div className="mb-4">
+              <h2 className="text-base font-semibold text-gray-900">特休（週年制）</h2>
+              <p className="mt-1 text-sm text-gray-500">
+                特休餘額桶要以「到職日週年」還是「曆年」計算，以及年資對應天數。週年制時排程會在每位員工的到職週年日自動發放
+                當期天數；曆年制則只保留 HR 手動維護。
+              </p>
+            </div>
+
+            {ruleConfig ? (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className={labelCls}>制度</label>
+                    <select
+                      className={inputCls}
+                      value={annualForm.basis}
+                      onChange={(e) => patchAnnual({ basis: e.target.value as AnnualLeaveBasis })}
+                    >
+                      <option value="anniversary">到職日週年制（自動發放）</option>
+                      <option value="calendar">曆年制（不自動發放）</option>
+                    </select>
+                    <p className="mt-1 text-xs text-gray-400">勞基法 §38 以到職日起算；曆年制需另與員工約定</p>
+                  </div>
+                  <div>
+                    <label className={labelCls}>對應假別</label>
+                    {leaveTypes && leaveTypes.length > 0 ? (
+                      <select className={inputCls} value={annualForm.typeCode} onChange={(e) => patchAnnual({ typeCode: e.target.value })}>
+                        {/* 目前值若不在清單裡（假別被改過代碼）也要看得到，否則會靜默跳成第一個 */}
+                        {!leaveTypes.some((t) => t.code === annualForm.typeCode) && (
+                          <option value={annualForm.typeCode}>{annualForm.typeCode}（清單中查無此代碼）</option>
+                        )}
+                        {leaveTypes.map((t) => (
+                          <option key={t.id} value={t.code}>
+                            {t.name}（{t.code}）
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input className={inputCls} value={annualForm.typeCode} onChange={(e) => patchAnnual({ typeCode: e.target.value })} placeholder="annual" />
+                    )}
+                    <p className="mt-1 text-xs text-gray-400">發放時要寫進哪一個假別的餘額桶（leave_types.code）</p>
+                  </div>
+                </div>
+
+                <div>
+                  <p className="mb-2 text-sm font-medium text-gray-700">年資對照表（以「日」設定）</p>
+                  <div className="overflow-x-auto rounded-lg border border-gray-100">
+                    <table className="w-full text-left text-sm">
+                      <thead>
+                        <tr className="border-b border-gray-100 text-xs text-gray-500">
+                          <th className="py-1.5 pl-3">年資滿（月）</th>
+                          <th className="py-1.5">給假（日）</th>
+                          <th className="py-1.5 pr-3" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {annualForm.tiers.map((row, i) => (
+                          <tr key={i} className="border-t border-gray-50">
+                            <td className="py-1.5 pl-3">
+                              <input
+                                type="number"
+                                min={0}
+                                className="w-24 rounded-md border border-gray-300 px-2 py-1 text-sm"
+                                value={row.minMonths}
+                                onChange={(e) => setAnnualTier(i, "minMonths", e.target.value)}
+                              />
+                            </td>
+                            <td className="py-1.5">
+                              <input
+                                type="number"
+                                min={0}
+                                step="any"
+                                className="w-24 rounded-md border border-gray-300 px-2 py-1 text-sm"
+                                value={row.days}
+                                onChange={(e) => setAnnualTier(i, "days", e.target.value)}
+                              />
+                            </td>
+                            <td className="py-1.5 pr-3 text-right">
+                              <button
+                                type="button"
+                                onClick={() => patchAnnual({ tiers: annualForm.tiers.filter((_, idx) => idx !== i) })}
+                                className="text-xs text-red-600 hover:underline"
+                              >
+                                刪除
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => patchAnnual({ tiers: [...annualForm.tiers, { minMonths: "", days: "" }] })}
+                      className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700"
+                    >
+                      新增一列
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => patchAnnual({ tiers: DEFAULT_ANNUAL_TIERS })}
+                      className="text-xs text-gray-500 hover:underline"
+                    >
+                      還原勞基法 §38 預設（6 個月 3 日、1 年 7 日、2 年 10 日、3 年 14 日、5 年 15 日、10 年 16 日）
+                    </button>
+                  </div>
+                  <p className="mt-1 text-xs text-gray-400">
+                    發放時會 × 每日正常工時換算成小時寫進餘額（特休餘額以小時儲存），畫面上再除回天數顯示
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                  <div>
+                    <label className={labelCls}>滿幾個月後逐年遞增</label>
+                    <input
+                      type="number"
+                      min={0}
+                      className={inputCls}
+                      value={annualForm.afterMonths}
+                      onChange={(e) => patchAnnual({ afterMonths: e.target.value })}
+                    />
+                    <p className="mt-1 text-xs text-gray-400">預設 120（滿 10 年）</p>
+                  </div>
+                  <div>
+                    <label className={labelCls}>每滿一年加給（日）</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="any"
+                      className={inputCls}
+                      value={annualForm.perYearDays}
+                      onChange={(e) => patchAnnual({ perYearDays: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label className={labelCls}>加給上限（日）</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="any"
+                      className={inputCls}
+                      value={annualForm.maxDays}
+                      onChange={(e) => patchAnnual({ maxDays: e.target.value })}
+                    />
+                    <p className="mt-1 text-xs text-gray-400">勞基法上限 30 日</p>
+                  </div>
+                </div>
+
+                <EffectiveDateFields
+                  mode={annualEffectiveMode}
+                  date={annualEffectiveDate}
+                  onModeChange={setAnnualEffectiveMode}
+                  onDateChange={setAnnualEffectiveDate}
+                  groupName="annual-effective-mode"
+                />
+
+                <div>
+                  <PrimaryButton onClick={onSaveAnnualLeave}>儲存特休設定</PrimaryButton>
                 </div>
               </div>
             ) : (
@@ -1036,6 +1468,97 @@ export default function ModuleSettingsPage() {
                 四個欄位需全部填寫才會計費；任一欄留白＝整段不設定（薪資試算不扣勞健保），不是「費率 0」。
               </p>
 
+              {/* M12（2026-09-23）：投保級距表，HR 設定薪資沒帶投保薪資時自動選級距 */}
+              <div className="rounded-md border border-gray-200 p-3">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium text-gray-700">投保級距表（含生效日）</p>
+                    <p className="mt-1 text-xs text-gray-400">
+                      由小到大填投保薪資金額，逗號或空白分隔。HR 設定員工薪資時沒填投保薪資 → 自動選「≥ 基數的最小級距」
+                      （時薪制基數 ＝ 時薪 × 每週約定時數 × 52 ÷ 12）。整段留空＝不自動選，維持人工填寫。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setInsuranceForm((prev) => ({
+                        ...prev,
+                        brackets: [...prev.brackets, { effectiveFrom: `${new Date().getFullYear()}-01-01`, labor: "", health: "" }],
+                      }))
+                    }
+                    className="shrink-0 rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700"
+                  >
+                    新增一組
+                  </button>
+                </div>
+
+                {insuranceForm.brackets.length === 0 ? (
+                  <p className="text-xs text-gray-400">尚未設定任何級距表。</p>
+                ) : (
+                  <div className="space-y-3">
+                    {insuranceForm.brackets.map((b, i) => (
+                      <div key={i} className="rounded-md bg-gray-50 p-3">
+                        <div className="mb-2 flex flex-wrap items-end gap-3">
+                          <div>
+                            <label className={labelCls}>生效日</label>
+                            <input
+                              type="date"
+                              className="rounded-md border border-gray-300 px-2 py-1.5 text-sm"
+                              value={b.effectiveFrom}
+                              onChange={(e) =>
+                                setInsuranceForm((prev) => ({
+                                  ...prev,
+                                  brackets: prev.brackets.map((x, idx) => (idx === i ? { ...x, effectiveFrom: e.target.value } : x)),
+                                }))
+                              }
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setInsuranceForm((prev) => ({ ...prev, brackets: prev.brackets.filter((_, idx) => idx !== i) }))}
+                            className="mb-1.5 text-xs text-red-600 hover:underline"
+                          >
+                            刪除這一組
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          <div>
+                            <label className={labelCls}>勞保投保薪資級距</label>
+                            <textarea
+                              className="h-20 w-full rounded-md border border-gray-300 p-2 font-mono text-xs"
+                              placeholder="28590, 28800, 30300, 31800…"
+                              value={b.labor}
+                              onChange={(e) =>
+                                setInsuranceForm((prev) => ({
+                                  ...prev,
+                                  brackets: prev.brackets.map((x, idx) => (idx === i ? { ...x, labor: e.target.value } : x)),
+                                }))
+                              }
+                            />
+                            <p className="mt-1 text-xs text-gray-400">{parseBracketList(b.labor).length} 級</p>
+                          </div>
+                          <div>
+                            <label className={labelCls}>健保投保金額級距</label>
+                            <textarea
+                              className="h-20 w-full rounded-md border border-gray-300 p-2 font-mono text-xs"
+                              placeholder="28590, 30300, 31800…"
+                              value={b.health}
+                              onChange={(e) =>
+                                setInsuranceForm((prev) => ({
+                                  ...prev,
+                                  brackets: prev.brackets.map((x, idx) => (idx === i ? { ...x, health: e.target.value } : x)),
+                                }))
+                              }
+                            />
+                            <p className="mt-1 text-xs text-gray-400">{parseBracketList(b.health).length} 級</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <EffectiveDateFields
                 mode={insuranceEffectiveMode}
                 date={insuranceEffectiveDate}
@@ -1099,52 +1622,130 @@ export default function ModuleSettingsPage() {
       )}
 
       {panel === "versions" && (
-        <Card>
-          <div className="mb-4">
-            <h2 className="text-base font-semibold text-gray-900">規則版本歷史</h2>
-            <p className="mt-1 text-sm text-gray-500">
-              每次儲存規則都會建立一個新版本；「目前生效」比對的是目前載入的版本號（「原始 JSON」分頁顯示），與後端依生效日選版的結果一致。
-            </p>
-          </div>
-          {ruleVersions ? (
-            ruleVersions.length > 0 ? (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
-                  <thead>
-                    <tr className="border-b border-gray-200 text-xs text-gray-500">
-                      <th className="py-2 pr-4">版本</th>
-                      <th className="py-2 pr-4">生效日</th>
-                      <th className="py-2 pr-4">建立時間</th>
-                      <th className="py-2">目前生效</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {ruleVersions.map((v) => (
-                      <tr key={v.version} className="border-b border-gray-50">
-                        <td className="py-2 pr-4 font-medium text-gray-800">v{v.version}</td>
-                        <td className="py-2 pr-4 text-gray-600">{v.effectiveFrom}</td>
-                        <td className="py-2 pr-4 text-gray-600">{fmtDateTime(v.createdAt)}</td>
-                        <td className="py-2">
-                          {ruleConfig?.version === v.version ? (
-                            <span className="rounded-full bg-green-50 px-2 py-1 text-xs text-green-700">目前生效</span>
-                          ) : (
-                            <span className="text-xs text-gray-300">—</span>
-                          )}
-                        </td>
+        <>
+          <Card>
+            <div className="mb-4">
+              <h2 className="text-base font-semibold text-gray-900">規則版本歷史</h2>
+              <p className="mt-1 text-sm text-gray-500">
+                每次儲存規則都會建立一個新版本；「目前生效」比對的是目前載入的版本號（「原始 JSON」分頁顯示），與後端依生效日選版的結果一致。
+                點「檢視內容」可以看到那一版當時存的完整規則。
+              </p>
+            </div>
+            {ruleVersions ? (
+              ruleVersions.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-gray-200 text-xs text-gray-500">
+                        <th className="py-2 pr-4">版本</th>
+                        <th className="py-2 pr-4">生效日</th>
+                        <th className="py-2 pr-4">建立時間</th>
+                        <th className="py-2 pr-4">目前生效</th>
+                        <th className="py-2">內容</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {ruleVersions.map((v) => (
+                        <Fragment key={v.version}>
+                          <tr className="border-b border-gray-50">
+                            <td className="py-2 pr-4 font-medium text-gray-800">v{v.version}</td>
+                            <td className="py-2 pr-4 text-gray-600">{v.effectiveFrom}</td>
+                            <td className="py-2 pr-4 text-gray-600">{fmtDateTime(v.createdAt)}</td>
+                            <td className="py-2 pr-4">
+                              {ruleConfig?.version === v.version ? (
+                                <span className="rounded-full bg-green-50 px-2 py-1 text-xs text-green-700">目前生效</span>
+                              ) : (
+                                <span className="text-xs text-gray-300">—</span>
+                              )}
+                            </td>
+                            <td className="py-2">
+                              <button
+                                type="button"
+                                onClick={() => setViewVersion(viewVersion === v.version ? null : v.version)}
+                                className="text-sm hover:underline"
+                                style={{ color: "var(--brand)" }}
+                              >
+                                {viewVersion === v.version ? "收合" : "檢視內容"}
+                              </button>
+                              {!v.configValid && (
+                                <span className="ml-2 text-xs text-amber-600" title="這一版的內容已不合目前的規則格式，僅供查閱">
+                                  舊格式
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                          {viewVersion === v.version && (
+                            <tr className="border-b border-gray-100 bg-gray-50/60">
+                              <td colSpan={5} className="px-3 py-3">
+                                <pre className="max-h-96 overflow-auto rounded-md border border-gray-200 bg-white p-3 font-mono text-xs text-gray-700">
+                                  {JSON.stringify(v.config, null, 2)}
+                                </pre>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <Empty>尚無版本紀錄</Empty>
+              )
+            ) : ruleVersionsError ? (
+              <ErrorText>{ruleVersionsError}</ErrorText>
+            ) : (
+              <Empty>載入中…</Empty>
+            )}
+          </Card>
+
+          <Card>
+            <div className="mb-4">
+              <h2 className="text-base font-semibold text-gray-900">版本比對</h2>
+              <p className="mt-1 text-sm text-gray-500">選兩個版本，列出實際有差異的設定項（不是整包 JSON 並排）。</p>
+            </div>
+            {ruleVersions && ruleVersions.length >= 2 ? (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-end gap-3">
+                  <div>
+                    <label className={labelCls}>基準版本</label>
+                    <select
+                      className={inputCls}
+                      value={diffBase ?? ""}
+                      onChange={(e) => setDiffBase(e.target.value === "" ? null : Number(e.target.value))}
+                    >
+                      {ruleVersions.map((v) => (
+                        <option key={v.version} value={v.version}>
+                          v{v.version}（生效 {v.effectiveFrom ?? "—"}）
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className={labelCls}>比較版本</label>
+                    <select
+                      className={inputCls}
+                      value={diffTarget ?? ""}
+                      onChange={(e) => setDiffTarget(e.target.value === "" ? null : Number(e.target.value))}
+                    >
+                      {ruleVersions.map((v) => (
+                        <option key={v.version} value={v.version}>
+                          v{v.version}（生效 {v.effectiveFrom ?? "—"}）
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                {diffPair ? (
+                  <RuleConfigDiff base={diffPair.base} target={diffPair.target} />
+                ) : (
+                  <p className="text-sm text-gray-500">請選兩個版本。</p>
+                )}
               </div>
             ) : (
-              <Empty>尚無版本紀錄</Empty>
-            )
-          ) : ruleVersionsError ? (
-            <ErrorText>{ruleVersionsError}</ErrorText>
-          ) : (
-            <Empty>載入中…</Empty>
-          )}
-        </Card>
+              <Empty>至少要有兩個版本才能比對。</Empty>
+            )}
+          </Card>
+        </>
       )}
 
       {panel === "form" && (
