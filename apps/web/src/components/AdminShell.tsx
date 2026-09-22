@@ -3,7 +3,7 @@
 /**
  * 後台共用頁框（由 app/admin/layout.tsx 掛，包住所有 /admin 底下的頁面）。
  *
- * - 桌機（md+）：左側固定側欄只列 9 個分區（lib/admin-nav.ts 的 ADMIN_SECTIONS）；分區內的分頁
+ * - 桌機（md+）：左側固定側欄只列該角色可見的分區（lib/admin-nav.ts 的 sectionsForRole，HR 是全部 9 個）；分區內的分頁
  *   在內容區頂部以 tab 列切換，有 children 的分頁再多一列子分頁膠囊——全部依路由表渲染。
  * - 手機（<md）：頂列「漢堡／頁標題／員工端」＋橫捲 tab 列（＋子分頁列）；漢堡開 BottomSheet
  *   抽屜列 9 個分區，pathname 一變就自動關。
@@ -12,6 +12,11 @@
  *   首頁（title ""）不畫頁首。
  * - 隱藏模組（features.adminModules）未啟用的分頁不列在 tab 列；直開網址仍可用，該 tab 會被
  *   塞回列上並標「未啟用」。
+ * - 角色範圍（W4，2026-09-23）：會計（employees.role='accountant'）的側欄只列開放的分區、
+ *   分頁列只列開放的分頁（lib/admin-nav.ts 的 roleNavOf／sectionsForRole／tabsForSection；
+ *   範圍可在「設定 → 進階功能 → 會計可用範圍」調整）。直開未開放的網址仍會渲染該頁——
+ *   真正的防線在 API（requireFinance／requireHrAdmin），這裡只把該 tab 標成「未開放」，
+ *   不做前端擋門，免得給人「前端擋住就安全了」的錯覺。
  * - 共用資料（appName／features／待簽筆數）走 useEssState()（模組層快取，換頁不重打）；
  *   ToastProvider 在最外層，頁面用 useToast()。
  * - 保留 `admin-shell` class：globals.css 的手機表格 min-width 與列印隱藏 aside/header 都靠它。
@@ -22,17 +27,20 @@ import { usePathname, useRouter } from "next/navigation";
 import type { Me } from "@/lib/admin-api";
 import { useEssState } from "@/lib/ess-state";
 import {
-  ADMIN_SECTIONS,
   ADMIN_TABS,
   adminModulesOf,
   isModuleEnabled,
   resolveAdminPath,
+  roleNavOf,
+  sectionsForRole,
   subTabsFor,
   tabsForSection,
   type AdminIconName,
   type AdminModulesConfig,
+  type AdminSection,
   type AdminSubTab,
   type AdminTab,
+  type RoleNavConfig,
 } from "@/lib/admin-nav";
 import { BottomSheet, Button, Icon, Pill, ToastProvider } from "@/components/ess-ui";
 import { essLogout } from "@/components/EssShell";
@@ -162,7 +170,21 @@ function Badge({ count, label, className = "" }: { count: number; label: string;
 const BRAND_OUTLINE: CSSProperties = { borderColor: "var(--brand)", color: "var(--brand)" };
 
 /** 分區分頁列（桌機在內容區頁首、手機在頂列）；detail 頁父分頁算 active；未啟用模組標「未啟用」。 */
-function TabBar({ tabs, activeKey, modules }: { tabs: AdminTab[]; activeKey: string | null; modules: AdminModulesConfig }) {
+/**
+ * `allowedTabKeys` null＝不限縮（HR／平台管理員）；有值時不在集合裡的分頁只會因為
+ * 「直開網址」才被 tabsForSection 的 includeTab 塞回列上，標「未開放給會計」。
+ */
+function TabBar({
+  tabs,
+  activeKey,
+  modules,
+  allowedTabKeys,
+}: {
+  tabs: AdminTab[];
+  activeKey: string | null;
+  modules: AdminModulesConfig;
+  allowedTabKeys: ReadonlySet<string> | null;
+}) {
   return (
     <nav
       aria-label="分區分頁"
@@ -171,6 +193,7 @@ function TabBar({ tabs, activeKey, modules }: { tabs: AdminTab[]; activeKey: str
       {tabs.map((tab) => {
         const active = tab.key === activeKey;
         const disabled = !isModuleEnabled(modules, tab.module);
+        const offLimits = !disabled && !!allowedTabKeys && !allowedTabKeys.has(tab.key);
         return (
           <Link
             key={tab.key}
@@ -185,6 +208,11 @@ function TabBar({ tabs, activeKey, modules }: { tabs: AdminTab[]; activeKey: str
             {disabled && (
               <Pill tone="gray" className="ml-1.5">
                 未啟用
+              </Pill>
+            )}
+            {offLimits && (
+              <Pill tone="gray" className="ml-1.5">
+                未開放給會計
               </Pill>
             )}
           </Link>
@@ -247,7 +275,13 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
 
   const resolved = resolveAdminPath(pathname);
   const modules = adminModulesOf(state.features);
-  const tabs = tabsForSection(resolved.section, modules, { includeTab: resolved.tab });
+  // W4：角色範圍。roleNav 為 null＝不限縮（HR／平台管理員與其他角色）。
+  const roleNav = roleNavOf(me.role, state.features);
+  const sections: AdminSection[] = sectionsForRole(roleNav, modules);
+  const tabs = tabsForSection(resolved.section, modules, { includeTab: resolved.tab, roleNav });
+  const allowedTabKeys = roleNav?.tabs[resolved.section]
+    ? new Set<string>(roleNav.tabs[resolved.section] as string[])
+    : null;
   const subTabs = subTabsFor(resolved.section, resolved.tab);
   const isHome = resolved.title === "";
   const appName = state.branding?.appName ?? DEFAULT_APP_NAME;
@@ -281,7 +315,7 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
             </Link>
           </div>
           <nav aria-label="後台分區" className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-3 pb-3">
-            {ADMIN_SECTIONS.map((section) => {
+            {sections.map((section) => {
               const active = section.key === resolved.section;
               return (
                 <Link
@@ -343,7 +377,7 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
             </div>
             {tabs.length >= 2 && (
               <div className="px-3 pb-2">
-                <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} />
+                <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} allowedTabKeys={allowedTabKeys} />
               </div>
             )}
             {subTabs.length > 0 && (
@@ -366,7 +400,7 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
                 {resolved.desc && <p className="mt-1 text-sm text-gray-500">{resolved.desc}</p>}
                 {tabs.length >= 2 && (
                   <div className="mt-4">
-                    <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} />
+                    <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} allowedTabKeys={allowedTabKeys} />
                   </div>
                 )}
                 {subTabs.length > 0 && <SubTabBar subTabs={subTabs} activeKey={resolved.sub} />}
@@ -385,7 +419,7 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
         <BottomSheet open={drawerOpen} onClose={closeDrawer} title="功能選單">
           <nav aria-label="後台分區">
             <ul className="-my-1 divide-y divide-gray-100">
-              {ADMIN_SECTIONS.map((section) => {
+              {sections.map((section) => {
                 const active = section.key === resolved.section;
                 return (
                   <li key={section.key}>

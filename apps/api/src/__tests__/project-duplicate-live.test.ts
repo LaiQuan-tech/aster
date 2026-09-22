@@ -137,7 +137,8 @@ describe("C2-0 主案：2 期款、1 副委託、1 合約 100 萬、1 成員", (
       siteAddress: "新竹縣竹北市",
       siteAreaM2: 3200,
       designScope: [{ discipline: "電機", item: "高低壓", amount: 600000 }],
-      engineers: { electrical: { name: "王技師" } },
+      // W8：技師的 key ＝租戶設定的科別（中文），不再是 electrical／hvac／fire。
+      engineers: { 電機: { name: "王技師" } },
       otherExpenses: 12345,
       bonusPool: 100000,
     })
@@ -263,7 +264,7 @@ describe("C2-1 複製為追加減（change 120 萬）", () => {
     expect(p.siteAddress).toBe("新竹縣竹北市")
     expect(p.siteAreaM2).toBe(3200)
     expect(p.designScope[0].discipline).toBe("電機")
-    expect(p.engineers.electrical.name).toBe("王技師")
+    expect(p.engineers["電機"].name).toBe("王技師")
     // 不帶的：其他支出從零、分潤池不帶、編號另產
     expect(p.otherExpenses).toBe(0)
     expect(p.bonusPool).toBeNull()
@@ -482,10 +483,11 @@ describe("C2-4 變更歷史 GET /projects/:id/lineage", () => {
   })
 })
 
-describe("C2-5 封存原案只有 HR 能做：非 HR 的 finance lead 複製 → 原案不封存、回 warnings", () => {
-  it("一般員工設為 -2 的 lead（取得 finance）→ duplicate 預設封存被強制成不封存，archived:null＋warnings:['archive_requires_hr']", async () => {
+describe("M23 複製即封存：非 HR 的 finance lead 也會封存原案（不再回 archive_requires_hr）", () => {
+  it("一般員工設為 -2 的 lead（取得 finance）→ duplicate 預設就把原案封存，archived 非 null＋warnings 空陣列", async () => {
     const { error } = await supabaseAdmin.from("projects").update({ lead_emp_id: employeeEmpId }).eq("tenant_id", tenantId).eq("id", dup2Id)
     expect(error).toBeNull()
+    const { data: before } = await supabaseAdmin.from("projects").select("code").eq("id", dup2Id).single()
     const res = await asEmployee(request(app).post(`/projects/${dup2Id}/duplicate`)).send({
       kind: "addition",
       amount: 1_000,
@@ -493,16 +495,28 @@ describe("C2-5 封存原案只有 HR 能做：非 HR 的 finance lead 複製 →
       copy: { subcontracts: false, members: false },
     })
     expect(res.status, JSON.stringify(res.body)).toBe(201)
-    expect(res.body.archived).toBeNull()
-    expect(res.body.warnings).toEqual(["archive_requires_hr"])
+    expect(res.body.archived).toEqual({ id: dup2Id, code: before!.code })
+    expect(res.body.warnings).toEqual([])
     expect(res.body.project.code).toBe(`${mainCode}-3`)
-    // 原案 -2 沒被封存
+    // 原案 -2 已封存，理由帶新編號
     const { data: orig } = await supabaseAdmin.from("projects").select("archived_at, archive_reason").eq("id", dup2Id).single()
-    expect(orig!.archived_at).toBeNull()
-    expect(orig!.archive_reason).toBeNull()
+    expect(orig!.archived_at).not.toBeNull()
+    expect(String(orig!.archive_reason)).toContain(res.body.project.code)
+
+    // 封存動作有 audit，而且記得下手的人是那位 lead（不是 HR）
+    const { data: rows } = await supabaseAdmin
+      .from("audit_logs")
+      .select("record_id, action, new_row, actor_emp_id")
+      .eq("tenant_id", tenantId)
+      .eq("table_name", "projects")
+      .eq("record_id", dup2Id)
+      .eq("action", "UPDATE")
+    const archiveLog = (rows ?? []).find((r) => (r.new_row as Record<string, unknown> | null)?.archived_by_duplicate === res.body.project.id)
+    expect(archiveLog, "封存原案要留一筆 audit").toBeDefined()
+    expect(archiveLog!.actor_emp_id).toBe(employeeEmpId)
   })
 
-  it("非 HR 明講 archiveOriginal:false → 沒有 warnings；HR 複製時 warnings 為空且照常封存", async () => {
+  it("明講 archiveOriginal:false 仍然不封存（demo／要保留兩案時的退路）", async () => {
     const quiet = await asEmployee(request(app).post(`/projects/${dup2Id}/duplicate`)).send({
       kind: "addition",
       amount: 1_000,

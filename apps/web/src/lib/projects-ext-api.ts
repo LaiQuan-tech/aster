@@ -155,15 +155,42 @@ export interface EngineerAssignment {
   vendorId?: string | null
   name: string | null
 }
-export type EngineerDiscipline = "electrical" | "hvac" | "fire"
-export type ProjectEngineers = Partial<Record<EngineerDiscipline, EngineerAssignment | null>>
+/**
+ * W8（2026-09-23）：科別不再寫死三個英文 key。engineers 的 key ＝租戶自訂的科別
+ * 名稱（`project_settings.disciplines`，中文，預設 電機／空調／消防／汙水），與
+ * 設計範圍用的科別同一份清單。舊資料的 electrical／hvac／fire 由 sql/0040 backfill
+ * 成中文；`ENGINEER_DISCIPLINE_LABELS` 仍保留那三個英文 key 的中文對照，讓 backfill
+ * 之前（或尚未套遷移的環境）讀到舊資料時不會顯示成原始英文。
+ */
+export type EngineerDiscipline = string
+export type ProjectEngineers = Record<string, EngineerAssignment | null>
 
-export const ENGINEER_DISCIPLINE_LABELS: Record<EngineerDiscipline, string> = {
+export const ENGINEER_DISCIPLINE_LABELS: Record<string, string> = {
+  電機: "電機",
+  空調: "空調",
+  消防: "消防",
+  汙水: "汙水",
+  // 舊 key（sql/0040 backfill 前的專案）
   electrical: "電機",
   hvac: "空調",
   fire: "消防",
 }
-export const ENGINEER_DISCIPLINES = Object.keys(ENGINEER_DISCIPLINE_LABELS) as EngineerDiscipline[]
+
+/** 科別的顯示名稱：認得的用對照表，租戶自訂的科別就是它自己。 */
+export function disciplineLabel(discipline: string): string {
+  return ENGINEER_DISCIPLINE_LABELS[discipline] ?? discipline
+}
+
+/**
+ * 沒有租戶設定可用時的預設科別（與後端 serializeSettings 的預設值一致）。
+ * ⚠️ 有 `project_settings.disciplines` 時一律用那份——這只是 fallback。
+ */
+export const ENGINEER_DISCIPLINES: string[] = ["電機", "空調", "消防", "汙水"]
+
+/** 從專案設定取科別清單；沒設定／空陣列時退回 ENGINEER_DISCIPLINES。 */
+export function engineerDisciplinesOf(disciplines: string[] | null | undefined): string[] {
+  return disciplines && disciplines.length > 0 ? disciplines : ENGINEER_DISCIPLINES
+}
 
 export interface DesignScopeItem {
   discipline: string
@@ -234,12 +261,15 @@ export function listProjectsExt(opts?: {
   includeReserved?: boolean
   sort?: ProjectSort
   dir?: SortDir
+  /** M14：歸屬年度（fiscal_year）；省略＝全部年度。 */
+  year?: number | null
 }) {
   const q = new URLSearchParams()
   if (opts?.includeArchived) q.set("includeArchived", "1")
   if (opts?.includeReserved) q.set("includeReserved", "1")
   if (opts?.sort) q.set("sort", opts.sort)
   if (opts?.dir) q.set("dir", opts.dir)
+  if (opts?.year != null) q.set("year", String(opts.year))
   const qs = q.toString()
   return apiFetch<{ projects: ProjectListItem[] }>(`/projects${qs ? `?${qs}` : ""}`)
 }
@@ -252,7 +282,9 @@ export function clientNameOf(p: { client?: { name: string } | null; clientName?:
 /* ------------------------------------------------------------ 專案明細 -- */
 
 export interface ProjectAccess {
+  /** 錢：金額試算、請款、副委託、合約。HR／會計／該案負責人（lead｜manager）／部門主管。 */
   finance: boolean
+  /** 分潤：獎金池、成員趴數、實得金額、分潤異動史。**不含會計**（W4 業主決策 3）。 */
   bonus: boolean
 }
 
@@ -620,6 +652,9 @@ export function humanizeProjectExtError(err: unknown, fallback: string): string 
   if (msg.includes("invalid_parent")) return "母案不合法（必須是同租戶的主案，且不能是自己）。"
   if (msg.includes("invalid_client")) return "選到的客戶不存在或已刪除。"
   if (msg.includes("code_immutable")) return "專案編號不可變更。"
+  if (msg.includes("unknown_discipline")) return "協力技師的科別不在專案設定的科別清單裡。請先到「專案設定 → 科別」新增。"
+  if (msg.includes("forbidden_bonus")) return "分潤（獎金池／成員趴數）不在您的權限範圍內。"
+  if (msg.includes("migration_required")) return "這個欄位需要先套用資料庫遷移（0050）才能儲存。"
   return msg
 }
 
@@ -970,7 +1005,7 @@ export function humanizeDuplicateError(err: unknown, fallback: string): string {
   if (msg.includes("reserved_project")) return "預先取號的空案還沒有內容，無法複製。"
   if (msg.includes("root_code_missing")) return "根案沒有編號，無法產生複製案編號。"
   if (msg.includes("code_generation_failed")) return "編號產生失敗（併發撞號），請再試一次。"
-  if (msg.includes("forbidden")) return "沒有權限複製此專案（需 HR 或本案負責人／部門主管）。"
+  if (msg.includes("forbidden")) return "沒有權限複製此專案（需 HR／會計，或本案負責人／部門主管）。"
   if (msg.includes("invalid_body")) return "請確認類型、金額與理由都有填。"
   return msg
 }

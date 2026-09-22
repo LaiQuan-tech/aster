@@ -85,12 +85,38 @@ export interface Project {
   createdAt: string
 }
 
+/**
+ * W3（2026-09-23）：專案成員四角色。manager 經理／lead 主辦屬「負責人層」
+ * （看得到全案分潤、對該案有 finance 權限）；support 支援／member 組員只看自己那筆。
+ * 每個角色可在專案設定裡預設一組分潤趴數（ProjectSettings.defaultSharePctByRole）。
+ */
+export type ProjectMemberRole = "manager" | "lead" | "support" | "member"
+
+export const PROJECT_MEMBER_ROLE_LABELS: Record<ProjectMemberRole, string> = {
+  manager: "經理",
+  lead: "主辦",
+  support: "支援",
+  member: "組員",
+}
+/** 下拉選單順序：由高到低。 */
+export const PROJECT_MEMBER_ROLE_ORDER: ProjectMemberRole[] = ["manager", "lead", "support", "member"]
+
+export function memberRoleLabel(role: string): string {
+  return PROJECT_MEMBER_ROLE_LABELS[role as ProjectMemberRole] ?? role
+}
+
 export interface ProjectMember {
   id: string
   employeeId: string
   name: string | null
   empNo: string | null
-  roleInProject: "member" | "lead"
+  roleInProject: ProjectMemberRole
+  /**
+   * 分潤數字。⚠️ 執行期可能**整個鍵不存在**：後端對「看得到全名單但沒有分潤權限」的
+   * 呼叫者（會計，W4）省略這三個欄位。型別上維持 `number | null` 讓既有讀點不必全改
+   * ——所有讀點都用 `!= null` ／ `?? "—"` 判斷，undefined 與 null 表現一致。
+   * 本人那一列永遠帶得到自己的數字（ESS 專案頁靠這個顯示「我的分潤」）。
+   */
   sharePct: number | null
   shareAmount: number | null
   computedAmount: number | null
@@ -98,6 +124,8 @@ export interface ProjectMember {
 
 export interface MembersResponse {
   canManage: boolean
+  /** W4：分潤區（趴數／金額／獎金池）的可見性；舊版後端沒有這個鍵時視為與 canManage 相同。 */
+  canSeeBonus?: boolean
   shareMode: ShareMode
   bonusPool: number | null
   members: ProjectMember[]
@@ -130,7 +158,7 @@ export interface MyProjectShare {
   projectId: string
   projectName: string | null
   status: string | null
-  roleInProject: "member" | "lead"
+  roleInProject: ProjectMemberRole
   shareMode: ShareMode | null
   sharePct: number | null
   shareAmount: number | null
@@ -145,6 +173,11 @@ export interface ProjectSettings {
   stampDutyRate: number
   /** 印花稅清單回溯年數。預設 7——未申報的核課期間是 7 年。 */
   stampDutyLookbackYears: number
+  /**
+   * W3：四個專案角色的預設分潤趴數（0–100）。沒設定的角色不出現在這個物件裡。
+   * 整鍵覆蓋：PUT 要送完整的四鍵，少帶等於清掉。後端 migration 0050 之前一律 {}。
+   */
+  defaultSharePctByRole?: Partial<Record<ProjectMemberRole, number>>
 }
 
 /* -------------------------------------------------------------- contracts -- */
@@ -489,7 +522,7 @@ export function addProjectMember(
   projectId: string,
   body: {
     employeeId: string
-    roleInProject?: "member" | "lead"
+    roleInProject?: ProjectMemberRole
     sharePct?: number | null
     shareAmount?: number | null
   },
@@ -504,7 +537,7 @@ export function updateProjectMember(
   projectId: string,
   memberId: string,
   body: {
-    roleInProject?: "member" | "lead"
+    roleInProject?: ProjectMemberRole
     sharePct?: number | null
     shareAmount?: number | null
     reason?: string

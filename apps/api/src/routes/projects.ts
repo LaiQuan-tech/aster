@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireHrAdmin, requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import {
   nextProjectCode,
@@ -16,7 +16,8 @@ import {
   resolveStatusPatch,
   taipeiToday,
 } from "../services/project-status.js"
-import { resolveSelf, isHrRole, managedDeptIds } from "../middleware/scope.js"
+import { resolveSelf } from "../middleware/scope.js"
+import { resolveProjectAccess } from "../services/project-scope.js"
 import { writeAuditLog } from "../services/audit.js"
 import { DEFAULT_AUTO_ARCHIVE_MONTHS } from "../services/project-archive.js"
 import {
@@ -24,6 +25,7 @@ import {
   DEFAULT_LOOKBACK_YEARS,
 } from "../services/stamp-duty.js"
 import { todayKey, localDateKey } from "../lib/tz.js"
+import { columnsExist } from "../lib/schema-compat.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import {
   PROJECT_KINDS,
@@ -65,7 +67,14 @@ const engineerRef = z.object({
   vendorId: z.string().uuid().nullish(),
   name: z.string().trim().max(120).nullish(),
 })
-const engineersSchema = z.record(z.enum(["electrical", "hvac", "fire"]), engineerRef.nullable())
+/**
+ * W8（2026-09-23）：科別不再寫死三個英文 key。key 是**租戶自訂的科別名稱**
+ * （`project_settings.disciplines`，預設 電機／空調／消防／汙水），值域由
+ * `assertKnownDisciplines()` 在執行期比對——zod 這層只管形狀，因為設定是
+ * 租戶級資料、不是編譯期常數。舊資料的 electrical／hvac／fire 由 sql/0040
+ * backfill 成中文 key。
+ */
+const engineersSchema = z.record(z.string().trim().min(1).max(40), engineerRef.nullable())
 
 const dayField = z.string().trim().max(40).nullish()
 
@@ -141,16 +150,24 @@ const updateSchema = z
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
   .refine((b) => !(b.startsOn && b.endsOn) || b.startsOn <= b.endsOn, { message: "endsOn must not be before startsOn" })
 
+/**
+ * W3（2026-09-23）：專案成員四角色——manager 經理／lead 主辦／support 支援／
+ * member 組員，各自可有不同的預設分潤趴數（`project_settings.default_share_pct_by_role`）。
+ * manager 與 lead 屬「負責人層」（services/project-scope.ts 的 PROJECT_LEAD_ROLES）：
+ * 看得到全案分潤、也取得該案 finance 權限。值域與 RLS `is_project_lead()` 同步。
+ */
+export const PROJECT_MEMBER_ROLES = ["manager", "lead", "support", "member"] as const
+
 const memberCreateSchema = z.object({
   employeeId: z.string().uuid(),
-  roleInProject: z.enum(["member", "lead"]).optional(),
+  roleInProject: z.enum(PROJECT_MEMBER_ROLES).optional(),
   sharePct: z.number().min(0).max(100).nullish(),
   shareAmount: z.number().nonnegative().nullish(),
 })
 
 const memberUpdateSchema = z
   .object({
-    roleInProject: z.enum(["member", "lead"]).optional(),
+    roleInProject: z.enum(PROJECT_MEMBER_ROLES).optional(),
     sharePct: z.number().min(0).max(100).nullable().optional(),
     shareAmount: z.number().nonnegative().nullable().optional(),
     reason: z.string().trim().max(250).optional(),
@@ -233,8 +250,58 @@ function engineersOf(v: unknown): Record<string, { vendorId: string | null; name
   return out
 }
 
-/** 專案基本資料（basic 段）。`finance=false` 時不帶任何金額欄位。 */
-function serializeProject(row: ProjectRow, opts: { finance: boolean; hasSignedContract: boolean }) {
+/**
+ * W8：技師 key 必須是租戶設定裡的科別（`project_settings.disciplines`）。
+ * 回第一個不認得的 key，全部合法回 null。zod 只驗形狀，值域是租戶資料 →
+ * 只能在執行期比對；不認得就 400 `unknown_discipline`，不默默存進去
+ * （存了會在申請單與年度總表上變成一欄查無此科別的鬼資料）。
+ */
+async function unknownDiscipline(
+  tenantId: string,
+  engineers: Record<string, unknown> | undefined,
+): Promise<string | null> {
+  if (!engineers) return null
+  const keys = Object.keys(engineers)
+  if (keys.length === 0) return null
+  const { disciplines } = await loadP3Settings(tenantId)
+  const known = new Set(disciplines)
+  for (const key of keys) if (!known.has(key)) return key
+  return null
+}
+
+/**
+ * W3：`project_settings.default_share_pct_by_role`（四角色 → 預設分潤趴數）。
+ * 欄位尚未套用（migration 0050）時探測一次後退回 `{}`，行為與改動前相同——
+ * 部署順序是「先遷移再上碼」，但本機／測試可能在遷移前就跑到這裡。
+ */
+async function defaultSharePctByRole(tenantId: string): Promise<Record<string, number>> {
+  if (!(await columnsExist("project_settings", "default_share_pct_by_role"))) return {}
+  const { data, error } = await supabaseAdmin
+    .from("project_settings")
+    .select("default_share_pct_by_role")
+    .eq("tenant_id", tenantId)
+    .maybeSingle()
+  if (error) throw new Error(`defaultSharePctByRole: ${error.message}`)
+  const raw = (data as { default_share_pct_by_role?: unknown } | null)?.default_share_pct_by_role
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+  const out: Record<string, number> = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const n = typeof value === "number" ? value : Number(value)
+    if (Number.isFinite(n) && n >= 0 && n <= 100) out[key] = n
+  }
+  return out
+}
+
+/**
+ * 專案基本資料（basic 段）。`finance=false` 時不帶申請單的金額欄位；
+ * `bonus=false` 時不帶獎金池（W4：會計看得到金流但看不到分潤）。
+ * `bonus` 省略時預設跟著 finance——舊呼叫端的行為不變。
+ */
+function serializeProject(
+  row: ProjectRow,
+  opts: { finance: boolean; bonus?: boolean; hasSignedContract: boolean },
+) {
+  const bonus = opts.bonus ?? opts.finance
   return {
     hasSignedContract: opts.hasSignedContract,
     id: row.id,
@@ -255,8 +322,8 @@ function serializeProject(row: ProjectRow, opts: { finance: boolean; hasSignedCo
     deptId: row.dept_id,
     leadEmpId: row.lead_emp_id,
     shareMode: row.share_mode,
-    // 分潤池維持既有可見性（bonus 段照舊）；finance 只收斂申請單的金額欄。
-    bonusPool: num(row.bonus_pool),
+    // 分潤池屬 bonus 段：會計與一般員工一律 null（W4）；列表端點一律不回。
+    bonusPool: bonus ? num(row.bonus_pool) : null,
     createdAt: row.created_at,
     // P3
     clientId: row.client_id,
@@ -372,15 +439,25 @@ async function clientNamesById(tenantId: string, ids: Array<string | null>): Pro
 }
 
 /**
- * 載入專案並判定呼叫者對「分潤」的可見/可管理範圍。
- * canManage（＝可見全部分潤）＝ HR / 該專案 lead(欄位或成員角色) / 該專案所屬部門主管。
+ * 載入專案並判定呼叫者的兩段權限（W4，2026-09-23 起 finance 與 bonus 分家）：
+ *   • canManage（finance）＝ HR／**會計**／該案 lead（欄位或成員角色 lead｜manager）／
+ *     該案所屬部門主管。可讀寫錢與申請單欄位。
+ *   • canSeeBonus         ＝ 同上但**不含會計**。獎金池、成員趴數、實得金額與分潤異動史
+ *     都只給這一群人。
+ * 兩者由 resolveProjectAccess() 一次算完，HR 走零查詢的捷徑（見該函式說明）。
  */
 async function loadScope(
   tenantId: string,
   userId: string,
   projectId: string,
 ): Promise<
-  | { ok: true; self: { id: string; role: string }; project: ProjectRow; canManage: boolean }
+  | {
+      ok: true
+      self: { id: string; role: string }
+      project: ProjectRow
+      canManage: boolean
+      canSeeBonus: boolean
+    }
   | { ok: false; status: number; error: string }
 > {
   const self = await resolveSelf(tenantId, userId)
@@ -396,22 +473,18 @@ async function loadScope(
   if (!proj) return { ok: false, status: 404, error: "not_found" }
   const project = proj as ProjectRow
 
-  let canManage = isHrRole(self.role) || project.lead_emp_id === self.id
-  if (!canManage && project.dept_id) {
-    const managed = await managedDeptIds(tenantId, self.id)
-    if (managed.includes(project.dept_id)) canManage = true
+  const access = await resolveProjectAccess(tenantId, self, {
+    id: project.id,
+    dept_id: project.dept_id,
+    lead_emp_id: project.lead_emp_id,
+  })
+  return {
+    ok: true,
+    self: { id: self.id, role: self.role },
+    project,
+    canManage: access.finance,
+    canSeeBonus: access.bonus,
   }
-  if (!canManage) {
-    const { data: membership } = await supabaseAdmin
-      .from("project_members")
-      .select("role_in_project")
-      .eq("tenant_id", tenantId)
-      .eq("project_id", projectId)
-      .eq("employee_id", self.id)
-      .maybeSingle()
-    if (membership?.role_in_project === "lead") canManage = true
-  }
-  return { ok: true, self: { id: self.id, role: self.role }, project, canManage }
 }
 
 /**
@@ -441,6 +514,17 @@ projectsRouter.get(
     // 預先取號的空列（reserved_at 非空）預設不進列表——它們還不是案子，
     // 只是佔了號。年度總表要看得到，帶 ?includeReserved=1。
     const includeReserved = req.query.includeReserved === "1"
+    // M14：?year= 依**歸屬年度**（fiscal_year）篩；不帶＝全部。年度是分析維度，
+    // 跟編號裡的建立年刻意分開（見 fiscalYear 的說明）。值不合法一律 400，不默默忽略。
+    let year: number | null = null
+    if (typeof req.query.year === "string" && req.query.year !== "") {
+      const n = Number(req.query.year)
+      if (!Number.isInteger(n) || n < 2000 || n > 2100) {
+        res.status(400).json({ error: "invalid_year" })
+        return
+      }
+      year = n
+    }
 
     // B4：?sort=created|opened|name|code|status&dir=asc|desc，預設 created desc
     // （與改動前的固定排序相容）。
@@ -464,6 +548,7 @@ projectsRouter.get(
         .eq("tenant_id", tenantId)
       if (!includeArchived) query = query.is("archived_at", null)
       if (!includeReserved) query = query.is("reserved_at", null)
+      if (year !== null) query = query.eq("fiscal_year", year)
       // 次要排序固定用 id：主排序值重複（同名／同狀態）時結果仍穩定可測。
       const { data, error } = await query
         .order(sortColumn, { ascending })
@@ -482,7 +567,8 @@ projectsRouter.get(
       ])
 
       const projects = rows.map((row) => ({
-        ...serializeProject(row, { finance: false, hasSignedContract: signed.has(row.id) }),
+        // 列表一律不回獎金池（W4）：列表沒有逐案算權限，回了等於全租戶都看得到。
+        ...serializeProject(row, { finance: false, bonus: false, hasSignedContract: signed.has(row.id) }),
         clientName: row.client_id ? (clientNames.get(row.client_id) ?? null) : null,
       }))
       res.status(200).json({ projects })
@@ -492,12 +578,12 @@ projectsRouter.get(
   },
 )
 
-// ── POST /projects — HR 建立專案 ──────────────────────────────────────
+// ── POST /projects — HR／會計 建立專案 ────────────────────────────────
 projectsRouter.post(
   "/projects",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const parsed = createSchema.safeParse(req.body)
@@ -519,6 +605,12 @@ projectsRouter.post(
       const parentError = await validateParent(tenantId, kind, b.parentProjectId ?? null, null)
       if (parentError) {
         res.status(400).json({ error: parentError })
+        return
+      }
+      // W8：技師的科別 key 必須在租戶設定裡。
+      const badDiscipline = await unknownDiscipline(tenantId, b.engineers)
+      if (badDiscipline) {
+        res.status(400).json({ error: "unknown_discipline", discipline: badDiscipline })
         return
       }
       // 業主：要存在且未刪。請款慣例（開票聯式／付款方式／結帳日／付款日）
@@ -641,7 +733,7 @@ projectsRouter.post(
   "/projects/reserve",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const parsed = reserveSchema.safeParse(req.body ?? {})
@@ -685,8 +777,8 @@ projectsRouter.post(
 
 /**
  * 專案詳情的三段：basic（全員）／finance（錢）／bonus（分潤）。
- * finance＝HR／該案 lead／該案部門主管（`loadScope().canManage`）；bonus 維持
- * 既有分潤區的邏輯（目前與 finance 同一條規則，但分開回傳，前端別綁在一起）。
+ * finance＝HR／會計／該案 lead（欄位或成員角色 lead｜manager）／該案部門主管
+ * （`loadScope().canManage`）；bonus＝同上但**不含會計**（`loadScope().canSeeBonus`）。
  * 非 finance：`money:null, billings:[], subcontracts:[], contracts:[]`，
  * 且 project 裡的金額欄位（designScope.amount／otherExpenses）也不帶。
  */
@@ -695,16 +787,17 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
   if (!scope.ok) return scope
   const row = scope.project
   const finance = scope.canManage
+  const bonus = scope.canSeeBonus
   const [signed, client, settings] = await Promise.all([
     signedProjectIds(tenantId, [row.id]),
     loadClient(tenantId, row.client_id),
     loadP3Settings(tenantId),
   ])
   const project = {
-    ...serializeProject(row, { finance, hasSignedContract: signed.has(row.id) }),
+    ...serializeProject(row, { finance, bonus, hasSignedContract: signed.has(row.id) }),
     client: client ? serializeClient(client) : null,
   }
-  const access = { finance, bonus: scope.canManage }
+  const access = { finance, bonus }
   if (!finance) {
     return {
       ok: true as const,
@@ -860,6 +953,12 @@ projectsRouter.patch(
         return
       }
 
+      // 獎金池屬 bonus 段：會計有 finance 權限但不得改（也看不到）分潤數字。
+      if ((b.bonusPool !== undefined || b.shareMode !== undefined) && !scope.canSeeBonus) {
+        res.status(403).json({ error: "forbidden_bonus" })
+        return
+      }
+
       const patch: Record<string, unknown> = {}
       if (b.name !== undefined) {
         patch.name = b.name
@@ -904,7 +1003,14 @@ projectsRouter.patch(
       if (b.closingDay !== undefined) patch.closing_day = b.closingDay
       if (b.paymentDay !== undefined) patch.payment_day = b.paymentDay
       if (b.otherExpenses !== undefined) patch.other_expenses = b.otherExpenses ?? 0
-      if (b.engineers !== undefined) patch.engineers = b.engineers
+      if (b.engineers !== undefined) {
+        const badDiscipline = await unknownDiscipline(tenantId, b.engineers)
+        if (badDiscipline) {
+          res.status(400).json({ error: "unknown_discipline", discipline: badDiscipline })
+          return
+        }
+        patch.engineers = b.engineers
+      }
 
       // 案情與封存的規則全在 services/project-status.ts，這裡只搬運。
       const status = resolveStatusPatch({
@@ -988,7 +1094,7 @@ projectsRouter.get(
         .eq("tenant_id", tenantId)
         .eq("project_id", req.params.id)
         .order("created_at", { ascending: true })
-      // 非管理者（HR/lead/部門主管）只看自己那筆。
+      // 非管理者只看自己那筆；會計（canManage 但非 bonus）看得到全名單，只是沒有數字。
       if (!scope.canManage) query = query.eq("employee_id", scope.self.id)
 
       const { data, error } = await query
@@ -996,18 +1102,25 @@ projectsRouter.get(
         next(new Error(`GET /projects/${req.params.id}/members: ${error.message}`))
         return
       }
+      // 分潤數字只給 bonus（W4：會計拿得到成員名單，拿不到趴數／金額／獎金池）。
       const members = (data ?? []).map((m) => {
         const emp = rel1<{ name: string; emp_no: string | null }>(
           (m as { employees: unknown }).employees,
         )
         const pct = num(m.share_pct as string | null)
         const amount = num(m.share_amount as string | null)
-        return {
+        const base = {
           id: m.id,
           employeeId: m.employee_id,
           name: emp?.name ?? null,
           empNo: emp?.emp_no ?? null,
           roleInProject: m.role_in_project,
+        }
+        // 本人那一列一律帶自己的數字——那是他自己的錢，ESS 專案頁靠這個顯示。
+        // 只有「看得到全名單但沒有分潤權限」的人（會計）拿到的是純名單。
+        if (!scope.canSeeBonus && m.employee_id !== scope.self.id) return base
+        return {
+          ...base,
           sharePct: pct,
           shareAmount: amount,
           computedAmount: computeAmount(scope.project, pct, amount),
@@ -1015,8 +1128,9 @@ projectsRouter.get(
       })
       res.status(200).json({
         canManage: scope.canManage,
+        canSeeBonus: scope.canSeeBonus,
         shareMode: scope.project.share_mode,
-        bonusPool: num(scope.project.bonus_pool),
+        bonusPool: scope.canSeeBonus ? num(scope.project.bonus_pool) : null,
         members,
       })
     } catch (err) {
@@ -1025,7 +1139,13 @@ projectsRouter.get(
   },
 )
 
-// ── POST /projects/:id/members — HR/lead/部門主管 新增成員 ─────────────
+// ── POST /projects/:id/members — HR/lead(含 manager)/部門主管 新增成員 ────
+/**
+ * W3：`roleInProject` 四值（manager 經理／lead 主辦／support 支援／member 組員）。
+ * pool_pct 模式下沒帶 `sharePct` 時，依角色套 `project_settings.default_share_pct_by_role`
+ * ——業主的做法是「經理幾趴、主辦幾趴」先講好，每次加人不必重打。
+ * 守門用 canSeeBonus（**不含會計**）：成員分潤是獎金區。
+ */
 projectsRouter.post(
   "/projects/:id/members",
   requireAuth,
@@ -1048,19 +1168,27 @@ projectsRouter.post(
         res.status(scope.status).json({ error: scope.error })
         return
       }
-      if (!scope.canManage) {
+      // 成員與分潤是獎金區：會計（finance 但非 bonus）不得異動。
+      if (!scope.canSeeBonus) {
         res.status(403).json({ error: "forbidden" })
         return
       }
       const b = parsed.data
+      const roleInProject = b.roleInProject ?? "member"
+      // pool_pct 且未指定趴數 → 帶該角色的預設值（沒設定就維持 null）。
+      let sharePct = b.sharePct ?? null
+      if (sharePct === null && scope.project.share_mode === "pool_pct") {
+        const defaults = await defaultSharePctByRole(tenantId)
+        sharePct = defaults[roleInProject] ?? null
+      }
       const { data, error } = await supabaseAdmin
         .from("project_members")
         .insert({
           tenant_id: tenantId,
           project_id: req.params.id,
           employee_id: b.employeeId,
-          role_in_project: b.roleInProject ?? "member",
-          share_pct: b.sharePct ?? null,
+          role_in_project: roleInProject,
+          share_pct: sharePct,
           share_amount: b.shareAmount ?? null,
         })
         .select("id")
@@ -1080,7 +1208,7 @@ projectsRouter.post(
         employee_id: b.employeeId,
         field: scope.project.share_mode === "pool_pct" ? "pct" : "amount",
         old_value: null,
-        new_value: scope.project.share_mode === "pool_pct" ? b.sharePct ?? null : b.shareAmount ?? null,
+        new_value: scope.project.share_mode === "pool_pct" ? sharePct : b.shareAmount ?? null,
         changed_by_emp_id: scope.self.id,
       })
       res.status(201).json({ id: data.id })
@@ -1113,7 +1241,8 @@ projectsRouter.patch(
         res.status(scope.status).json({ error: scope.error })
         return
       }
-      if (!scope.canManage) {
+      // 成員與分潤是獎金區：會計（finance 但非 bonus）不得異動。
+      if (!scope.canSeeBonus) {
         res.status(403).json({ error: "forbidden" })
         return
       }
@@ -1211,7 +1340,8 @@ projectsRouter.delete(
         res.status(scope.status).json({ error: scope.error })
         return
       }
-      if (!scope.canManage) {
+      // 成員與分潤是獎金區：會計（finance 但非 bonus）不得異動。
+      if (!scope.canSeeBonus) {
         res.status(403).json({ error: "forbidden" })
         return
       }
@@ -1262,8 +1392,8 @@ projectsRouter.get(
         .eq("tenant_id", tenantId)
         .eq("project_id", req.params.id)
         .order("created_at", { ascending: false })
-      // 非管理者只看與自己相關的異動。
-      if (!scope.canManage) query = query.eq("employee_id", scope.self.id)
+      // 分潤異動史是 bonus 段：非 bonus（含會計）只看與自己相關的異動。
+      if (!scope.canSeeBonus) query = query.eq("employee_id", scope.self.id)
 
       const { data, error } = await query
       if (error) {
@@ -1379,11 +1509,35 @@ const projectSettingsSchema = z
     codeSeqDigits: z.number().int().min(1).max(6).optional(),
     vatRate: z.number().min(0).max(1).optional(),
     disciplines: z.array(z.string().trim().min(1).max(40)).max(30).optional(),
+    /**
+     * W3：四角色的預設分潤趴數（0–100）。整鍵覆蓋，不是深合併——少帶一個角色
+     * 就是把那個角色的預設清掉，UI 一律送完整四鍵。
+     */
+    defaultSharePctByRole: z
+      .record(z.enum(PROJECT_MEMBER_ROLES), z.number().min(0).max(100))
+      .optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 
 const SETTINGS_COLS =
   "auto_archive_enabled, auto_archive_months, stamp_duty_rate, stamp_duty_lookback_years, code_prefix, code_year_style, code_seq_digits, vat_rate, disciplines"
+/**
+ * migration 0050 之後才有 default_share_pct_by_role。⚠️ 與 PROJECT_COLS 同一個坑：
+ * 這兩份都必須是**單一字串常值**（不可用 + 或樣板字串相接），否則 supabase-js
+ * 推不出列型別，下游的 as SettingsRow 會整個失效。
+ */
+const SETTINGS_COLS_WITH_SHARE =
+  "auto_archive_enabled, auto_archive_months, stamp_duty_rate, stamp_duty_lookback_years, code_prefix, code_year_style, code_seq_digits, vat_rate, disciplines, default_share_pct_by_role"
+
+/** 讀租戶的專案設定列（欄位未套用時退回舊欄位清單）。 */
+async function loadSettingsRow(tenantId: string): Promise<SettingsRow | null> {
+  const withShare = await columnsExist("project_settings", "default_share_pct_by_role")
+  const { data, error } = withShare
+    ? await supabaseAdmin.from("project_settings").select(SETTINGS_COLS_WITH_SHARE).eq("tenant_id", tenantId).maybeSingle()
+    : await supabaseAdmin.from("project_settings").select(SETTINGS_COLS).eq("tenant_id", tenantId).maybeSingle()
+  if (error) throw new Error(`loadSettingsRow: ${error.message}`)
+  return (data as SettingsRow | null) ?? null
+}
 
 type SettingsRow = {
   auto_archive_enabled: boolean | null
@@ -1395,6 +1549,7 @@ type SettingsRow = {
   code_seq_digits: number | string | null
   vat_rate: number | string | null
   disciplines: unknown
+  default_share_pct_by_role?: unknown
 }
 
 function serializeSettings(data: SettingsRow | null) {
@@ -1410,7 +1565,22 @@ function serializeSettings(data: SettingsRow | null) {
     disciplines: Array.isArray(data?.disciplines)
       ? (data!.disciplines as unknown[]).filter((d): d is string => typeof d === "string")
       : ["電機", "空調", "消防", "汙水"],
+    // 欄位未套用（或沒設定）時回 {}：前端顯示成四格空白，不是 0。
+    defaultSharePctByRole: sharePctMapOf(data?.default_share_pct_by_role),
   }
+}
+
+/** jsonb → {角色: 趴數}；非四角色的 key、非 0–100 的值一律丟掉。 */
+function sharePctMapOf(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+  const roles = new Set<string>(PROJECT_MEMBER_ROLES)
+  const out: Record<string, number> = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!roles.has(key)) continue
+    const n = typeof value === "number" ? value : Number(value)
+    if (Number.isFinite(n) && n >= 0 && n <= 100) out[key] = n
+  }
+  return out
 }
 
 // ── GET /project-settings — 全員可讀（UI 要顯示「N 個月後自動封存」）──
@@ -1421,17 +1591,9 @@ projectsRouter.get(
   async (_req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {
-      const { data, error } = await supabaseAdmin
-        .from("project_settings")
-        .select(SETTINGS_COLS)
-        .eq("tenant_id", tenantId)
-        .maybeSingle()
-      if (error) {
-        next(new Error(`GET /project-settings: ${error.message}`))
-        return
-      }
+      const data = await loadSettingsRow(tenantId)
       // 沒有設定列就回預設值，讓租戶不必先設定就能用。
-      res.status(200).json({ settings: serializeSettings(data as SettingsRow | null) })
+      res.status(200).json({ settings: serializeSettings(data) })
     } catch (err) {
       next(err)
     }
@@ -1475,16 +1637,24 @@ projectsRouter.put(
       if (parsed.data.codeSeqDigits !== undefined) row.code_seq_digits = parsed.data.codeSeqDigits
       if (parsed.data.vatRate !== undefined) row.vat_rate = parsed.data.vatRate
       if (parsed.data.disciplines !== undefined) row.disciplines = parsed.data.disciplines
+      if (parsed.data.defaultSharePctByRole !== undefined) {
+        if (!(await columnsExist("project_settings", "default_share_pct_by_role"))) {
+          res.status(409).json({ error: "migration_required", column: "default_share_pct_by_role" })
+          return
+        }
+        row.default_share_pct_by_role = parsed.data.defaultSharePctByRole
+      }
 
-      const { data, error } = await supabaseAdmin
+      const { error } = await supabaseAdmin
         .from("project_settings")
         .upsert(row, { onConflict: "tenant_id" })
-        .select(SETTINGS_COLS)
+        .select("tenant_id")
         .single()
-      if (error || !data) {
-        next(new Error(`PUT /project-settings: ${error?.message}`))
+      if (error) {
+        next(new Error(`PUT /project-settings: ${error.message}`))
         return
       }
+      const data = await loadSettingsRow(tenantId)
 
       await writeAuditLog({
         tenantId,
@@ -1495,7 +1665,7 @@ projectsRouter.put(
         context: "PUT /project-settings",
       })
 
-      res.status(200).json({ settings: serializeSettings(data as SettingsRow) })
+      res.status(200).json({ settings: serializeSettings(data) })
     } catch (err) {
       next(err)
     }

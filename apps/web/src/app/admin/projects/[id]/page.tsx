@@ -19,6 +19,7 @@ import {
   type Contract,
   type DocType,
   type OurRole,
+  type ProjectMemberRole,
 } from "@/lib/projects-api";
 import {
   getProjectDetail,
@@ -26,6 +27,8 @@ import {
   getBillingSchedule,
   getProjectSubcontracts,
   listCompanies,
+  getP3SettingsLite,
+  engineerDisciplinesOf,
   PROJECT_KIND_LABELS,
   type ProjectDetail,
   type ProjectAccess,
@@ -61,6 +64,25 @@ import { LineageCard, DuplicateProjectDialog } from "./_sections/LineageCard";
  * 專案詳情頁。B0 拆檔後這裡只留：資料載入、共用 state、header、各 Card 的組裝；
  * 每張 Card 的 JSX 與專屬 handler 在 ./_sections/*Card.tsx，state 與 setter 以 props 傳下去。
  */
+
+/**
+ * W8：把專案的 engineers（jsonb）攤成表單狀態。欄位＝租戶設定的科別；專案上
+ * 已經有值、但設定裡沒有的科別（改過設定、或 sql/0040 backfill 前的舊英文 key）
+ * 一律保留在後面，免得一開畫面就把既有資料弄丟。
+ */
+function engineersFormOf(
+  engineers: Record<string, { vendorId?: string | null; name: string | null } | null> | null | undefined,
+  disciplines: string[],
+): Record<string, { vendorId: string | null; name: string | null }> {
+  const keys = [...disciplines];
+  for (const key of Object.keys(engineers ?? {})) if (!keys.includes(key)) keys.push(key);
+  const out: Record<string, { vendorId: string | null; name: string | null }> = {};
+  for (const key of keys) {
+    const a = engineers?.[key];
+    out[key] = { vendorId: a?.vendorId ?? null, name: a?.name ?? null };
+  }
+  return out;
+}
 export default function AdminProjectDetailPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
@@ -83,6 +105,11 @@ export default function AdminProjectDetailPage() {
   const [emps, setEmps] = useState<Employee[]>([]);
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
+  /**
+   * W8：協力技師的科別欄位依租戶設定（`project_settings.disciplines`）動態產生，
+   * 不再是寫死的電機／空調／消防三欄。
+   */
+  const [disciplines, setDisciplines] = useState<string[]>(() => engineerDisciplinesOf(null));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -108,7 +135,7 @@ export default function AdminProjectDetailPage() {
 
   // add-member form
   const [newEmp, setNewEmp] = useState("");
-  const [newRole, setNewRole] = useState<"member" | "lead">("member");
+  const [newRole, setNewRole] = useState<ProjectMemberRole>("member");
   const [newValue, setNewValue] = useState("");
 
   // 申請單資料（模組五）
@@ -138,7 +165,7 @@ export default function AdminProjectDetailPage() {
     setLoading(true);
     setError(null);
     try {
-      const [detail, m, adj, docs, cs, bs, subs, d, e, ven, comp] = await Promise.all([
+      const [detail, m, adj, docs, cs, bs, subs, d, e, ven, comp, p3] = await Promise.all([
         getProjectDetail(projectId),
         getProjectMembers(projectId),
         getProjectAdjustments(projectId),
@@ -146,11 +173,16 @@ export default function AdminProjectDetailPage() {
         getContracts(projectId),
         getBillingSchedule(projectId).catch(() => emptyBillingSchedule()),
         getProjectSubcontracts(projectId).catch(() => emptySubcontractsResponse()),
-        getDepartments(),
+        // GET /departments 目前仍是 requireHrAdmin（routes/departments.ts 不在 WP5 範圍）。
+        // 會計進得來這一頁，但拿不到部門清單——整頁不該因此掛掉，「所屬部門」下拉空著就好。
+        getDepartments().catch(() => ({ departments: [] as Department[] })),
         getEmployees(),
         listVendors(),
         listCompanies(),
+        getP3SettingsLite().catch(() => null),
       ]);
+      const disciplineList = engineerDisciplinesOf(p3?.settings.disciplines ?? null);
+      setDisciplines(disciplineList);
       setProject(detail.project);
       setAccess(detail.access);
       setMoney(detail.money);
@@ -174,7 +206,10 @@ export default function AdminProjectDetailPage() {
       setOriginalSubIds(subRows.map((r) => r.id).filter((x): x is string => !!x));
       setPaymentsDraft(Object.fromEntries(subRows.filter((r) => r.id).map((r) => [r.id as string, r.payments ?? []])));
       setOriginalPayments(Object.fromEntries(subRows.filter((r) => r.id).map((r) => [r.id as string, r.payments ?? []])));
-      setAppForm(appFormFrom(detail.project));
+      // shared.tsx 的 appFormFrom 只認得舊的三個英文 key；科別動態化之後改在這裡
+      // 依設定＋專案既有 key 重建 engineers 表單（舊 key 的資料仍看得到，存檔時
+      // 會以設定裡的科別為準改寫）。
+      setAppForm({ ...appFormFrom(detail.project), engineers: engineersFormOf(detail.project.engineers, disciplineList) });
       setMembers(m.members);
       setAdjustments(adj.adjustments);
       setDocuments(docs.documents);
@@ -196,6 +231,8 @@ export default function AdminProjectDetailPage() {
 
   const isPool = project?.shareMode === "pool_pct";
   const canFinance = access.finance;
+  /** W4：分潤區（獎金池／成員趴數／異動史）。會計有 finance 但沒有 bonus。 */
+  const canBonus = access.bonus;
 
   // pool 模式的 % 加總（提示是否超過 100）。
   const pctTotal = members.reduce((s, m) => s + (m.sharePct ?? 0), 0);
@@ -275,7 +312,7 @@ export default function AdminProjectDetailPage() {
       />
 
       {/* 專案設定 */}
-      <ProjectSettingsCard project={project} depts={depts} emps={emps} isPool={isPool} saveProjectField={saveProjectField} error={error} />
+      <ProjectSettingsCard project={project} depts={depts} emps={emps} isPool={isPool} canBonus={canBonus} saveProjectField={saveProjectField} error={error} />
 
       {/* C2 變更歷史：根案 → -1 → -2…，本案高亮、封存案灰字＋理由 */}
       <LineageCard projectId={projectId} />
@@ -288,6 +325,7 @@ export default function AdminProjectDetailPage() {
           savingApp={savingApp} setSavingApp={setSavingApp}
           appSavedAt={appSavedAt} setAppSavedAt={setAppSavedAt}
           contracts={contracts} vendors={vendors} canFinance={canFinance}
+          disciplines={disciplines}
           error={error} setError={setError} load={load}
         />
       )}
@@ -356,7 +394,7 @@ export default function AdminProjectDetailPage() {
 
       {/* 成員分潤 */}
       <MembersCard
-        projectId={projectId} members={members} emps={emps} isPool={isPool} pctTotal={pctTotal}
+        projectId={projectId} members={members} emps={emps} isPool={isPool} canBonus={canBonus} pctTotal={pctTotal}
         newEmp={newEmp} setNewEmp={setNewEmp}
         newRole={newRole} setNewRole={setNewRole}
         newValue={newValue} setNewValue={setNewValue}

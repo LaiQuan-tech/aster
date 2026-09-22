@@ -2,9 +2,9 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { resolveSelf, isHrRole, managedDeptIds } from "../middleware/scope.js"
+import { resolveSelf, isFinanceRole, managedDeptIds } from "../middleware/scope.js"
 import { writeAuditLog } from "../services/audit.js"
 import {
   DOC_TYPES,
@@ -137,7 +137,7 @@ async function loadProjectScope(tenantId: string, userId: string, projectId: str
   if (error) throw new Error(`contracts loadProjectScope: ${error.message}`)
   if (!proj) return { ok: false as const, status: 404, error: "not_found" }
 
-  let canManage = isHrRole(self.role) || proj.lead_emp_id === self.id
+  let canManage = isFinanceRole(self.role) || proj.lead_emp_id === self.id
   if (!canManage && proj.dept_id) {
     const managed = await managedDeptIds(tenantId, self.id)
     if (managed.includes(proj.dept_id)) canManage = true
@@ -467,7 +467,7 @@ contractsRouter.get(
   "/reports/stamp-duty",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const parsed = reportSchema.safeParse(req.query)

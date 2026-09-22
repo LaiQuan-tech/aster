@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireHrAdmin, requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { isValidTaiwanTaxId, TAX_ID_RE } from "../services/tax-id.js"
@@ -104,7 +104,7 @@ clientsRouter.get("/clients", requireAuth, requireTenant, async (req: Request, r
 })
 
 // ── POST /clients — HR ─────────────────────────────────────────────────
-clientsRouter.post("/clients", requireAuth, requireTenant, requireHrAdmin, async (req: Request, res: Response, next: NextFunction) => {
+clientsRouter.post("/clients", requireAuth, requireTenant, requireFinance, async (req: Request, res: Response, next: NextFunction) => {
   const tenantId = res.locals.tenantId as string
   const userId = req.auth?.userId
   const parsed = clientBody.safeParse(req.body)
@@ -134,7 +134,7 @@ clientsRouter.post("/clients", requireAuth, requireTenant, requireHrAdmin, async
 })
 
 // ── PATCH /clients/:id — HR ────────────────────────────────────────────
-clientsRouter.patch("/clients/:id", requireAuth, requireTenant, requireHrAdmin, async (req: Request, res: Response, next: NextFunction) => {
+clientsRouter.patch("/clients/:id", requireAuth, requireTenant, requireFinance, async (req: Request, res: Response, next: NextFunction) => {
   const tenantId = res.locals.tenantId as string
   const id = req.params.id as string
   const parsed = clientBody.partial().safeParse(req.body)

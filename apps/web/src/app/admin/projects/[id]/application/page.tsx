@@ -2,14 +2,14 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { useParams } from "next/navigation";
-import { DOC_TYPE_LABELS } from "@/lib/projects-api";
+import { DOC_TYPE_LABELS, OUR_ROLE_SHORT_LABELS, getContracts, type Contract } from "@/lib/projects-api";
 import {
   getProjectApplication,
   formatRocDate,
   INVOICE_TYPE_LABELS,
   PAYMENT_METHOD_LABELS,
-  ENGINEER_DISCIPLINE_LABELS,
-  ENGINEER_DISCIPLINES,
+  disciplineLabel,
+  engineerDisciplinesOf,
   BILLING_KIND_LABELS,
   type ApplicationData,
   type BillingExt,
@@ -18,6 +18,13 @@ import {
 
 function fmtMoney(n: number | null | undefined): string {
   return n == null ? "—" : n.toLocaleString();
+}
+
+/** 印花稅率以千分率呈現（承攬契據法定 1‰＝rate 0.001）；沒有費率回破折號。 */
+function formatDutyRate(rate: number | null | undefined): string {
+  if (rate == null) return "—";
+  const permille = rate * 1000;
+  return `${Number.isInteger(permille) ? permille : permille.toFixed(2)}‰`;
 }
 
 /** label/value 一格，客戶資料區用；長欄位（地址、內容）整列獨吞。 */
@@ -32,7 +39,7 @@ function Field({ label, value, full }: { label: string; value: string; full?: bo
 
 /** B6 分區列印：頁面上實際會出現的區塊 key／中文標籤，操作列勾選清單與各區塊
  * <section data-print-block> 都靠這份清單對起來。新增/移除可勾選的區塊只改這裡。 */
-export type PrintBlockKey = "customer" | "sales" | "payment" | "engineers" | "subcontract";
+export type PrintBlockKey = "customer" | "sales" | "payment" | "engineers" | "subcontract" | "contracts";
 
 export const PRINT_BLOCKS: { key: PrintBlockKey; label: string }[] = [
   { key: "customer", label: "客戶資料" },
@@ -40,6 +47,8 @@ export const PRINT_BLOCKS: { key: PrintBlockKey; label: string }[] = [
   { key: "payment", label: "付款階段" },
   { key: "engineers", label: "協力技師" },
   { key: "subcontract", label: "發包單位" },
+  // M17（2026-09-23）：合約區塊原本只在專案明細頁的 ContractsCard，申請單印不出來。
+  { key: "contracts", label: "合約與印花稅" },
 ];
 
 const PRINT_BLOCKS_STORAGE_KEY = "print-blocks:project-application";
@@ -76,12 +85,22 @@ function SectionTitle({ children, hidden }: { children: ReactNode; hidden?: bool
 export function ApplicationDocument({
   data,
   printChecked,
+  contracts,
 }: {
   data: ApplicationData;
   printChecked?: Partial<Record<PrintBlockKey, boolean>>;
+  /** M17：合約與印花稅區塊的資料；省略＝不畫那一區（純排版預覽用）。 */
+  contracts?: Contract[];
 }) {
   const { project, client, latestDocument, designScope, engineers, billings, subcontracts, money } = data;
   const isChecked = (key: PrintBlockKey) => printChecked?.[key] ?? true;
+  /**
+   * 未勾選的區塊直接掛 `no-print`（globals.css 既有的全域規則），不必替每個
+   * 新區塊在 CSS 裡多寫一條 `body.print-hide-<key>`。螢幕上仍淡化顯示。
+   */
+  const blockCls = (key: PrintBlockKey) => (isChecked(key) ? undefined : "no-print opacity-40");
+  /** W8：協力技師欄位依租戶設定的科別；沒設定就用預設四科。 */
+  const disciplines = engineerDisciplinesOf(data.settings?.disciplines);
 
   const installmentRows = billings
     .filter((b) => b.kind === "installment")
@@ -121,7 +140,7 @@ export function ApplicationDocument({
         <span className="font-mono">專案序號：{data.code ?? "—"}</span>
       </div>
 
-      <section data-print-block="customer" className={isChecked("customer") ? undefined : "opacity-40"}>
+      <section data-print-block="customer" className={blockCls("customer")}>
         <SectionTitle hidden={!isChecked("customer")}>客戶資料</SectionTitle>
         <div className="grid grid-cols-2 gap-y-0 border-l border-t border-gray-400 [&>*]:border-r [&>*]:border-b">
           <Field label="設計地點" value={project.siteAddress ?? ""} full />
@@ -140,7 +159,7 @@ export function ApplicationDocument({
         </div>
       </section>
 
-      <section data-print-block="sales" className={isChecked("sales") ? undefined : "opacity-40"}>
+      <section data-print-block="sales" className={blockCls("sales")}>
         <SectionTitle hidden={!isChecked("sales")}>銷售金額</SectionTitle>
         <table className="w-full border-collapse border border-gray-400 text-center text-[11px]">
           <thead>
@@ -160,7 +179,7 @@ export function ApplicationDocument({
         </table>
       </section>
 
-      <section data-print-block="payment" className={isChecked("payment") ? undefined : "opacity-40"}>
+      <section data-print-block="payment" className={blockCls("payment")}>
         <SectionTitle hidden={!isChecked("payment")}>付款階段</SectionTitle>
         <table className="w-full border-collapse border border-gray-400 text-center text-[11px]">
           <thead>
@@ -190,19 +209,19 @@ export function ApplicationDocument({
         </table>
       </section>
 
-      <section data-print-block="engineers" className={isChecked("engineers") ? undefined : "opacity-40"}>
+      <section data-print-block="engineers" className={blockCls("engineers")}>
         <SectionTitle hidden={!isChecked("engineers")}>協力技師</SectionTitle>
         <table className="w-full border-collapse border border-gray-400 text-center text-[11px]">
           <thead>
             <tr className="bg-gray-50 print:bg-gray-100">
-              {ENGINEER_DISCIPLINES.map((d) => (
-                <th key={d} className="border border-gray-400 px-2 py-1">{ENGINEER_DISCIPLINE_LABELS[d]}</th>
+              {disciplines.map((d) => (
+                <th key={d} className="border border-gray-400 px-2 py-1">{disciplineLabel(d)}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             <tr>
-              {ENGINEER_DISCIPLINES.map((d) => (
+              {disciplines.map((d) => (
                 <td key={d} className="border border-gray-400 px-2 py-1">{engineers?.[d]?.name || "—"}</td>
               ))}
             </tr>
@@ -210,7 +229,7 @@ export function ApplicationDocument({
         </table>
       </section>
 
-      <section data-print-block="subcontract" className={isChecked("subcontract") ? undefined : "opacity-40"}>
+      <section data-print-block="subcontract" className={blockCls("subcontract")}>
         <SectionTitle hidden={!isChecked("subcontract")}>發包單位</SectionTitle>
         <table className="w-full border-collapse border border-gray-400 text-center text-[11px]">
           <thead>
@@ -257,6 +276,50 @@ export function ApplicationDocument({
           </tbody>
         </table>
       </section>
+
+      {/* M17：合約與印花稅。合約本體在專案明細頁維護，這裡只印摘要——
+          老闆用這張申請單對帳時要看得到「這案簽了什麼、印花稅貼了沒」。 */}
+      {contracts && (
+        <section data-print-block="contracts" className={blockCls("contracts")}>
+          <SectionTitle hidden={!isChecked("contracts")}>合約與印花稅</SectionTitle>
+          {contracts.length === 0 ? (
+            <p className="text-[11px] text-gray-500">尚無合約或報價單。</p>
+          ) : (
+            <table className="w-full border-collapse border border-gray-400 text-center text-[11px]">
+              <thead>
+                <tr className="bg-gray-50 print:bg-gray-100">
+                  <th className="border border-gray-400 px-2 py-1">類型</th>
+                  <th className="border border-gray-400 px-2 py-1">名稱</th>
+                  <th className="border border-gray-400 px-2 py-1">對方</th>
+                  <th className="border border-gray-400 px-2 py-1">我方角色</th>
+                  <th className="border border-gray-400 px-2 py-1 text-right">金額</th>
+                  <th className="border border-gray-400 px-2 py-1">簽訂日</th>
+                  <th className="border border-gray-400 px-2 py-1">印花稅率</th>
+                  <th className="border border-gray-400 px-2 py-1 text-right">印花稅額</th>
+                  <th className="border border-gray-400 px-2 py-1">貼花</th>
+                </tr>
+              </thead>
+              <tbody>
+                {contracts.map((c) => (
+                  <tr key={c.id}>
+                    <td className="border border-gray-400 px-2 py-1">{DOC_TYPE_LABELS[c.docType]}</td>
+                    <td className="border border-gray-400 px-2 py-1 text-left">{c.title || "—"}</td>
+                    <td className="border border-gray-400 px-2 py-1">{c.counterparty || "—"}</td>
+                    <td className="border border-gray-400 px-2 py-1">{OUR_ROLE_SHORT_LABELS[c.ourRole]}</td>
+                    <td className="border border-gray-400 px-2 py-1 text-right">{fmtMoney(c.amount)}</td>
+                    <td className="border border-gray-400 px-2 py-1">{c.signedOn ?? "—"}</td>
+                    <td className="border border-gray-400 px-2 py-1">{c.dutiable ? formatDutyRate(c.stampDutyRate) : "不課"}</td>
+                    <td className="border border-gray-400 px-2 py-1 text-right">{c.dutiable ? fmtMoney(c.stampDutyAmount) : "—"}</td>
+                    <td className="border border-gray-400 px-2 py-1">
+                      {!c.dutiable ? "—" : c.stampDutyPaidOn ? `已貼 ${c.stampDutyPaidOn}` : "未貼"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+      )}
     </div>
   );
 }
@@ -265,6 +328,8 @@ export default function ProjectApplicationPrintPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
   const [data, setData] = useState<ApplicationData | null>(null);
+  /** M17：合約區塊的資料。合約讀不到（沒有 finance 權限）時留空陣列，區塊仍在但顯示「尚無合約」。 */
+  const [contracts, setContracts] = useState<Contract[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [printChecked, setPrintChecked] = useState<Record<PrintBlockKey, boolean>>(defaultPrintChecked);
@@ -275,6 +340,13 @@ export default function ProjectApplicationPrintPage() {
   useEffect(() => {
     let active = true;
     setLoading(true);
+    getContracts(projectId)
+      .then((res) => {
+        if (active) setContracts(res.contracts);
+      })
+      .catch(() => {
+        if (active) setContracts([]);
+      });
     getProjectApplication(projectId)
       .then((res) => {
         if (active) setData(res.application);
@@ -365,7 +437,7 @@ export default function ProjectApplicationPrintPage() {
       ) : error || !data ? (
         <p className="text-sm text-red-600">{error ?? "找不到專案"}</p>
       ) : (
-        <ApplicationDocument data={data} printChecked={printChecked} />
+        <ApplicationDocument data={data} printChecked={printChecked} contracts={contracts} />
       )}
     </div>
   );

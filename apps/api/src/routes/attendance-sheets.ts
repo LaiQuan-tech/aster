@@ -2,8 +2,8 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
-import { isHrRole, managedDeptIds, resolveSelf, type SelfEmployee } from "../middleware/scope.js"
+import { requireHrAdmin, requireFinance } from "../middleware/role.js"
+import { isHrRole, isFinanceRole, managedDeptIds, resolveSelf, type SelfEmployee } from "../middleware/scope.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { todayKey, monthRangeKeys, dayWindowUtc } from "../lib/tz.js"
@@ -112,7 +112,16 @@ function sendSheetError(res: Response, err: unknown, next: NextFunction): void {
 
 interface Caller {
   self: SelfEmployee
+  /**
+   * 月表的「HR 操作視角」：列全員、核准、退回、匯出。W4（業主決策 3 + §3.0 E）
+   * 起**包含會計**——會計要做月底核對。
+   */
   isHr: boolean
+  /**
+   * 月表 view 的 `money`（薪資試算）可見性。**只有真正的 HR**——會計看得到出勤
+   * 數字但看不到薪資，這是決策 3 的分界線，不可以跟 isHr 合併。
+   */
+  canSeeMoney: boolean
 }
 
 /** Resolve the caller's employee row; 403 not_an_employee when none. */
@@ -128,7 +137,7 @@ async function requireCaller(req: Request, res: Response): Promise<Caller | null
     res.status(403).json({ error: "not_an_employee" })
     return null
   }
-  return { self, isHr: isHrRole(self.role) }
+  return { self, isHr: isFinanceRole(self.role), canSeeMoney: isHrRole(self.role) }
 }
 
 /** Employee ids a non-HR caller may see: own + everyone in the departments they manage. */
@@ -194,7 +203,7 @@ attendanceSheetsRouter.post(
   "/attendance-sheets/generate",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const parsed = generateSchema.safeParse(req.body ?? {})
@@ -278,7 +287,7 @@ attendanceSheetsRouter.get(
         }
       }
       // 本人不回 money（薪資由薪資單呈現，月表只給出勤數字）。
-      const view = await sheetViewFromRow(tenantId, sheet, { includeMoney: caller.isHr })
+      const view = await sheetViewFromRow(tenantId, sheet, { includeMoney: caller.canSeeMoney })
       res.status(200).json({ sheet: view })
     } catch (err) {
       sendSheetError(res, err, next)
@@ -305,7 +314,7 @@ attendanceSheetsRouter.get(
         res.status(404).json({ error: "not_found" })
         return
       }
-      const view = await getSheetView(tenantId, id, { includeMoney: caller.isHr })
+      const view = await getSheetView(tenantId, id, { includeMoney: caller.canSeeMoney })
       res.status(200).json({ sheet: view })
     } catch (err) {
       sendSheetError(res, err, next)
@@ -449,7 +458,7 @@ attendanceSheetsRouter.post(
   "/attendance-sheets/:id/approve",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const id = String(req.params.id)
@@ -510,7 +519,7 @@ attendanceSheetsRouter.post(
   "/attendance-sheets/:id/reopen",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const id = String(req.params.id)
@@ -538,7 +547,7 @@ attendanceSheetsRouter.post(
   "/attendance-sheets/:id/recompute",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const id = String(req.params.id)
@@ -649,7 +658,7 @@ attendanceSheetsRouter.get(
   "/attendance-sheets/period-closes",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const parsed = periodClosesQuerySchema.safeParse(req.query)

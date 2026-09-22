@@ -191,7 +191,9 @@ export function DuplicateProjectDialog({ open, project, onClose, onDone }: Dupli
         </h2>
         <p className="mt-1 text-sm text-gray-500">
           原案 <span className="font-medium text-gray-700">{project.code ?? project.name}</span> 不會被修改：系統複製成新案
-          「根案編號-n」，依下方金額新建一筆合約；勾選封存時原案會收進封存（年度總表不再採計，仍可查）。
+          「根案編號-n」，依下方金額新建一筆合約，並<span className="font-medium text-gray-700">將原案封存</span>
+          （年度總表不再採計，仍可查）。原案與新案同時有效會讓同一份合約被採計兩次，所以預設封存；
+          要保留兩案都在列表上，取消下方勾選。
         </p>
 
         <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -230,7 +232,7 @@ export function DuplicateProjectDialog({ open, project, onClose, onDone }: Dupli
         <div className="mt-4 space-y-2 text-sm text-gray-700">
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={archiveOriginal} onChange={(e) => setArchiveOriginal(e.target.checked)} className="h-4 w-4 rounded border-gray-300" />
-            封存原案（年度總帳不再採計，保留供查）
+            將原案封存（年度總帳不再採計，保留供查）
           </label>
           <p className="text-xs text-gray-400">複製項目（合約不複製，一律依上方金額新建；請款／開票／入帳與付款紀錄不會帶過去）：</p>
           <div className="grid grid-cols-2 gap-x-4 gap-y-1">

@@ -328,7 +328,8 @@ describe("P3-3 申請單欄位與三段權限", () => {
       siteAddress: "台北市信義區",
       siteAreaM2: 1234.5,
       designScope: [{ discipline: "電機", item: "高低壓", amount: 800000 }],
-      engineers: { electrical: { name: "王技師" } },
+      // W8：技師的 key ＝租戶設定的科別（中文），不再是 electrical／hvac／fire。
+      engineers: { 電機: { name: "王技師" } },
       otherExpenses: 18645,
     })
     expect(res.status).toBe(201)
@@ -338,7 +339,7 @@ describe("P3-3 申請單欄位與三段權限", () => {
     expect(got.body.project.closingDay).toBe("每月 25 日")
     expect(got.body.project.client.name).toBe("某某建設股份有限公司")
     expect(got.body.project.designScope[0].amount).toBe(800000)
-    expect(got.body.project.engineers.electrical.name).toBe("王技師")
+    expect(got.body.project.engineers["電機"].name).toBe("王技師")
     expect(got.body.project.otherExpenses).toBe(18645)
     expect(got.body.access).toEqual({ finance: true, bonus: true })
     expect(got.body.money).not.toBeNull()

@@ -17,6 +17,8 @@ import { loadProjectScope } from "../services/project-scope.js"
 import { BILLING_KINDS, computeSchedule, effectiveBillingAmount } from "../services/project-money.js"
 import { serializeBilling } from "../services/project-application-store.js"
 import { writeAuditLog } from "../services/audit.js"
+import { recomputeDraftRegularRuns } from "../services/bonus-run-store.js"
+import { logger } from "../lib/logger.js"
 
 export const billingsRouter = Router()
 
@@ -74,11 +76,29 @@ const receiveSchema = z.object({
 
 type Warning = "invoiced_before_billed" | "received_before_invoiced" | "received_before_billed"
 
+/**
+ * M22：入帳／撤銷入帳成功後，把該租戶所有 draft 的一般獎金批次重算一次。
+ * best-effort——錢已經入帳了，獎金重算失敗不能讓入帳看起來沒成功；失敗只 log，
+ * 回應裡的 `bonusRunsRecomputed` 讓前端（與測試）看得到重算了幾批。
+ */
+async function recomputeBonusRuns(tenantId: string, context: string): Promise<string[]> {
+  try {
+    const result = await recomputeDraftRegularRuns(tenantId)
+    if (result.failed.length > 0) {
+      logger.warn({ tenantId, context, failed: result.failed }, "draft 獎金批次重算失敗（入帳已完成）")
+    }
+    return result.recomputed
+  } catch (err) {
+    logger.warn({ tenantId, context, err }, "draft 獎金批次重算失敗（入帳已完成）")
+    return []
+  }
+}
+
 async function respondSchedule(
   tenantId: string,
   projectId: string,
   res: Response,
-  extra: { status?: number; warnings?: Warning[] } = {},
+  extra: { status?: number; warnings?: Warning[]; bonusRunsRecomputed?: string[] } = {},
 ) {
   const [{ total, base, changeOrders }, rows] = await Promise.all([
     contractTotal(tenantId, projectId),
@@ -112,6 +132,8 @@ async function respondSchedule(
       unreceivedTotal: billedTotal - receivedTotal,
     },
     warnings: extra.warnings ?? [],
+    /** M22：這次入帳事件連帶重算的 draft 獎金批次 id（非入帳端點一律空陣列）。 */
+    bonusRunsRecomputed: extra.bonusRunsRecomputed ?? [],
   })
 }
 
@@ -598,7 +620,9 @@ billingsRouter.post(
         actorEmpId: loaded.self.id,
         context: "POST /billings/:id/receive",
       })
-      await respondSchedule(tenantId, row.project_id, res, { warnings })
+      // M22：入帳改變了每個人的應得金額，draft 獎金批次跟著重算（best-effort）。
+      const bonusRunsRecomputed = await recomputeBonusRuns(tenantId, "POST /billings/:id/receive")
+      await respondSchedule(tenantId, row.project_id, res, { warnings, bonusRunsRecomputed })
     } catch (err) {
       next(err)
     }
@@ -656,7 +680,9 @@ billingsRouter.post(
         actorEmpId: loaded.self.id,
         context: "POST /billings/:id/unreceive",
       })
-      await respondSchedule(tenantId, row.project_id, res)
+      // M22：撤銷入帳同樣要讓 draft 批次退回去（不然帳撤了、獎金還照舊算）。
+      const bonusRunsRecomputed = await recomputeBonusRuns(tenantId, "POST /billings/:id/unreceive")
+      await respondSchedule(tenantId, row.project_id, res, { bonusRunsRecomputed })
     } catch (err) {
       next(err)
     }

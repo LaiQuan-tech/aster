@@ -2,9 +2,10 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
+import { isFinanceRole } from "../middleware/scope.js"
 import { writeAuditLog } from "../services/audit.js"
 
 export const advancesRouter = Router()
@@ -61,8 +62,13 @@ async function resolveSelf(
   return data ? { id: data.id as string, role: data.role as string } : null
 }
 
-function isHr(role?: string): boolean {
-  return !!role && ["hr_admin", "platform_admin"].includes(role)
+/**
+ * 管理端視角（W4，2026-09-23）：HR／平台管理員**＋會計**。業主決策 3 明訂會計
+ * 可用報銷與預支，所以這裡不再只看 HR——名稱保留 `isHr` 會誤導，改叫 isFinance。
+ * 清單集中在 middleware/scope.ts 的 FINANCE_ROLES。
+ */
+function isFinance(role?: string): boolean {
+  return isFinanceRole(role)
 }
 
 /** GET /advances?status=&employeeId= — 非 HR 一律鎖定本人。 */
@@ -76,7 +82,7 @@ advancesRouter.get(
       const self = await resolveSelf(tenantId, req.auth?.userId)
       let query = supabaseAdmin.from("advances").select(ADV_COLS).eq("tenant_id", tenantId)
 
-      if (isHr(self?.role)) {
+      if (isFinance(self?.role)) {
         const employeeId = typeof req.query.employeeId === "string" ? req.query.employeeId : null
         if (employeeId) query = query.eq("employee_id", employeeId)
       } else {
@@ -112,7 +118,7 @@ advancesRouter.get(
   "/advances/outstanding",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (_req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {
@@ -160,7 +166,7 @@ advancesRouter.post(
   "/advances/:id/pay",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const id = req.params.id as string
@@ -242,7 +248,7 @@ advancesRouter.post(
   "/advances/:id/settle",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const id = req.params.id as string

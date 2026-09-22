@@ -3,9 +3,10 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireHrAdmin, requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
+import { isFinanceRole } from "../middleware/scope.js"
 import { writeAuditLog } from "../services/audit.js"
 
 export const expensesRouter = Router()
@@ -98,8 +99,13 @@ async function resolveSelf(
   return data ? { id: data.id as string, role: data.role as string } : null
 }
 
-function isHr(role?: string): boolean {
-  return !!role && ["hr_admin", "platform_admin"].includes(role)
+/**
+ * 管理端視角（W4，2026-09-23）：HR／平台管理員**＋會計**。業主決策 3 明訂會計
+ * 可用報銷與預支，所以這裡不再只看 HR——名稱保留 `isHr` 會誤導，改叫 isFinance。
+ * 清單集中在 middleware/scope.ts 的 FINANCE_ROLES。
+ */
+function isFinance(role?: string): boolean {
+  return isFinanceRole(role)
 }
 
 /** 該期是否已核銷（已核銷即鎖定，不得再增減）。 */
@@ -239,7 +245,7 @@ expensesRouter.post(
         res.status(403).json({ error: "not_an_employee" })
         return
       }
-      if (parsed.data.onBehalfOfEmployeeId && !isHr(self.role)) {
+      if (parsed.data.onBehalfOfEmployeeId && !isFinance(self.role)) {
         res.status(403).json({ error: "hr_admin_required" })
         return
       }
@@ -367,7 +373,7 @@ expensesRouter.get(
       const self = await resolveSelf(tenantId, req.auth?.userId)
       let query = supabaseAdmin.from("expense_claims").select(CLAIM_COLS).eq("tenant_id", tenantId)
 
-      if (isHr(self?.role)) {
+      if (isFinance(self?.role)) {
         if (q.data.employeeId) query = query.eq("employee_id", q.data.employeeId)
       } else {
         // 非 HR：無論傳什麼 employeeId 都鎖定本人。
@@ -425,7 +431,7 @@ expensesRouter.patch(
         res.status(404).json({ error: "not_found" })
         return
       }
-      const hr = isHr(self.role)
+      const hr = isFinance(self.role)
       if (!hr && claim.employee_id !== self.id) {
         res.status(403).json({ error: "forbidden" })
         return
@@ -516,7 +522,7 @@ expensesRouter.post(
         res.status(404).json({ error: "not_found" })
         return
       }
-      if (!isHr(self.role) && claim.employee_id !== self.id) {
+      if (!isFinance(self.role) && claim.employee_id !== self.id) {
         res.status(403).json({ error: "forbidden" })
         return
       }
@@ -592,7 +598,7 @@ expensesRouter.get(
         res.status(404).json({ error: "not_found" })
         return
       }
-      if (!isHr(self?.role) && claim.employee_id !== self?.id) {
+      if (!isFinance(self?.role) && claim.employee_id !== self?.id) {
         res.status(403).json({ error: "forbidden" })
         return
       }
@@ -650,7 +656,7 @@ expensesRouter.get(
   "/expense-settlements/:period/review",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const period = req.params.period as string
@@ -790,7 +796,7 @@ expensesRouter.post(
   "/expense-settlements/:period/settle",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const period = req.params.period as string
@@ -893,7 +899,7 @@ expensesRouter.get(
   "/expense-settlements",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {

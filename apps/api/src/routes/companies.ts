@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { writeAuditLog } from "../services/audit.js"
@@ -92,7 +92,7 @@ companiesRouter.get("/companies", requireAuth, requireTenant, async (_req: Reque
 })
 
 // ── PUT /companies — HR 整批 upsert ────────────────────────────────────
-companiesRouter.put("/companies", requireAuth, requireTenant, requireHrAdmin, async (req: Request, res: Response, next: NextFunction) => {
+companiesRouter.put("/companies", requireAuth, requireTenant, requireFinance, async (req: Request, res: Response, next: NextFunction) => {
   const tenantId = res.locals.tenantId as string
   const userId = req.auth?.userId
   const parsed = putBody.safeParse(req.body)

@@ -10,8 +10,7 @@ import {
   type ProjectDetail,
   type DesignScopeItem,
   type ProjectEngineers,
-  ENGINEER_DISCIPLINE_LABELS,
-  ENGINEER_DISCIPLINES,
+  disciplineLabel,
   INVOICE_TYPE_LABELS,
   PAYMENT_METHOD_LABELS,
   type InvoiceType,
@@ -55,6 +54,8 @@ interface ApplicationFieldsCardProps {
   contracts: Contract[];
   vendors: Vendor[];
   canFinance: boolean;
+  /** W8：協力技師的科別欄位（租戶設定 `project_settings.disciplines`），由 page.tsx 傳入。 */
+  disciplines: string[];
   error: string | null;
   setError: Setter<string | null>;
   load: () => Promise<void>;
@@ -72,10 +73,19 @@ export function ApplicationFieldsCard({
   contracts,
   vendors,
   canFinance,
+  disciplines,
   error,
   setError,
   load,
 }: ApplicationFieldsCardProps) {
+  /**
+   * 畫面上要出現的科別欄位＝租戶設定的科別；表單裡已經有值但設定裡沒有的
+   * （改過科別設定、或尚未 backfill 的舊英文 key）接在後面，讓人看得到也刪得掉。
+   */
+  const engineerKeys = [
+    ...disciplines,
+    ...Object.keys(appForm.engineers).filter((k) => !disciplines.includes(k) && (appForm.engineers[k]?.vendorId || appForm.engineers[k]?.name)),
+  ];
   function patchScopeRow(idx: number, patch: Partial<DesignScopeItem>) {
     setAppForm((f) => (f ? { ...f, designScope: f.designScope.map((r, i) => (i === idx ? { ...r, ...patch } : r)) } : f));
   }
@@ -91,10 +101,12 @@ export function ApplicationFieldsCard({
     setSavingApp(true);
     setError(null);
     try {
+      // 只送設定裡的科別——被移除的科別（或 backfill 前的舊 key）不再寫回去，
+      // 後端對不認得的 key 會回 unknown_discipline。
       const engineers: ProjectEngineers = {};
-      for (const d of ENGINEER_DISCIPLINES) {
+      for (const d of disciplines) {
         const v = appForm.engineers[d];
-        engineers[d] = v.vendorId || (v.name && v.name.trim()) ? { vendorId: v.vendorId, name: v.name } : null;
+        engineers[d] = v && (v.vendorId || (v.name && v.name.trim())) ? { vendorId: v.vendorId ?? null, name: v.name } : null;
       }
       await updateProjectFields(project.id, {
         siteAddress: appForm.siteAddress.trim() || null,
@@ -203,18 +215,28 @@ export function ApplicationFieldsCard({
 
       <div className="mt-4 border-t pt-4">
         <label className={labelCls}>協力技師</label>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          {ENGINEER_DISCIPLINES.map((d) => (
-            <div key={d}>
-              <p className="mb-1 text-xs text-gray-500">{ENGINEER_DISCIPLINE_LABELS[d]}</p>
-              <VendorCombo
-                vendors={vendors}
-                vendorId={appForm.engineers[d].vendorId}
-                name={appForm.engineers[d].name}
-                onChange={(v) => setAppForm((f) => f && { ...f, engineers: { ...f.engineers, [d]: v } })}
-              />
-            </div>
-          ))}
+        <p className="-mt-1 mb-2 text-xs text-gray-400">
+          欄位依「專案設定 → 科別」而定（目前 {disciplines.length} 個）。要增減科別請改租戶設定，這裡會跟著變。
+        </p>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {engineerKeys.map((d) => {
+            const v = appForm.engineers[d] ?? { vendorId: null, name: null };
+            const stale = !disciplines.includes(d);
+            return (
+              <div key={d}>
+                <p className="mb-1 text-xs text-gray-500">
+                  {disciplineLabel(d)}
+                  {stale && <span className="ml-1 text-amber-700">（已不在科別設定，儲存後會清掉）</span>}
+                </p>
+                <VendorCombo
+                  vendors={vendors}
+                  vendorId={v.vendorId}
+                  name={v.name}
+                  onChange={(nv) => setAppForm((f) => f && { ...f, engineers: { ...f.engineers, [d]: nv } })}
+                />
+              </div>
+            );
+          })}
         </div>
       </div>
 

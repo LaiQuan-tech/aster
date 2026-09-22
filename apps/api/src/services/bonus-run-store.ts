@@ -997,3 +997,56 @@ export async function myBonusHistory(tenantId: string, employeeId: string): Prom
     .sort((a, b) => (b.paidOn ?? b.asOf).localeCompare(a.paidOn ?? a.asOf) || b.label.localeCompare(a.label) || compareItems(a, b))
   return { rows, total: rows.reduce((s, r) => s + r.amount, 0) }
 }
+
+/* ──────────────────────────────────────────────────────────────────
+ * M22：入帳後自動重算 draft 批次
+ * ────────────────────────────────────────────────────────────────── */
+
+export interface RecomputeDraftRunsResult {
+  /** 重算成功的批次 id。 */
+  recomputed: string[]
+  /** 重算失敗的批次（不擋呼叫端的主流程，只回報）。 */
+  failed: Array<{ id: string; error: string }>
+}
+
+/**
+ * M22：把該租戶所有 **draft 且 kind='regular'** 的獎金批次重算一次。
+ *
+ * 獎金是「依請款入帳進度同比例拆發」，所以每一次 `POST /billings/:id/receive`
+ * ／`/unreceive` 都會改變每個人的應得金額；但重算原本只有手動（preview 或
+ * `PATCH /bonus-runs/:id?recompute=1`）。忘記按＝依舊資料發錢。這支在入帳事件
+ * 成功後 best-effort 跑一次，讓 draft 永遠跟著最新入帳走。
+ *
+ * 刻意排除：
+ *   • paid 批次——已發放就凍結（DB trigger 也會擋），不是這裡的事。
+ *   • kind='reversal'——沖銷批次的內容是原批取負，重算會把它蓋成一般季批次
+ *     （updateRun 本來就會丟 reversal_not_editable）。
+ *
+ * 失敗不丟例外：入帳已經寫進 DB 了，不能因為獎金重算失敗就讓入帳看起來沒成功。
+ * 呼叫端把結果放進回應（`bonusRunsRecomputed`）並自行 log。
+ */
+export async function recomputeDraftRegularRuns(tenantId: string): Promise<RecomputeDraftRunsResult> {
+  const { data, error } = await supabaseAdmin
+    .from("bonus_runs")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("status", "draft")
+    .eq("kind", "regular")
+    .is("deleted_at", null)
+    .order("as_of", { ascending: true })
+  if (error) throw new Error(`recomputeDraftRegularRuns (list): ${error.message}`)
+
+  const recomputed: string[] = []
+  const failed: Array<{ id: string; error: string }> = []
+  for (const row of (data ?? []) as Array<{ id: string }>) {
+    try {
+      // actor 留 null：這不是某個人「編輯了批次」，是入帳事件連動的系統重算；
+      // 誰入的帳由 project_billings 那筆 audit 記著。
+      await updateRun(tenantId, { empId: null }, row.id, {}, { recompute: true })
+      recomputed.push(row.id)
+    } catch (err) {
+      failed.push({ id: row.id, error: err instanceof Error ? err.message : String(err) })
+    }
+  }
+  return { recomputed, failed }
+}

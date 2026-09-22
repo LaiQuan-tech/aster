@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { todayKey } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
@@ -29,7 +29,7 @@ projectsAnnualRouter.get(
   "/projects/annual",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {

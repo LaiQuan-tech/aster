@@ -900,3 +900,198 @@ describe("M4-4 分期請款期程", () => {
     expect(res.body.summary.effectiveTotal).toBe(8_888_888)
   })
 })
+
+/* ────────────────────────────────────────────────────────────────────
+ * WP5（2026-09-23）：W3 成員四角色＋角色預設趴數、W4 列表不回獎金池、M14 年度篩選
+ * ──────────────────────────────────────────────────────────────────── */
+
+/** 租戶管理員自己的 employees 列——測試要有一個真實的 employeeId 當成員。 */
+async function adminEmpId(): Promise<string> {
+  const { data, error } = await supabaseAdmin
+    .from("employees")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .single()
+  if (error) throw new Error(`adminEmpId: ${error.message}`)
+  return data!.id as string
+}
+
+/** migration 0050 的 project_settings.default_share_pct_by_role 是否已在正式庫。 */
+async function shareDefaultsMigrated(): Promise<boolean> {
+  const { error } = await supabaseAdmin.from("project_settings").select("default_share_pct_by_role").limit(1)
+  return !error
+}
+const shareDefaultsReady = await shareDefaultsMigrated()
+
+describe("W3 專案成員四角色（manager／lead／support／member）", () => {
+  let projectId: string
+  let empId: string
+
+  beforeAll(async () => {
+    const res = await createProject({ name: "四角色測試案", shareMode: "pool_pct", bonusPool: 1_000_000 })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    projectId = res.body.id
+    empId = await adminEmpId()
+  })
+
+  it("roleInProject:'support' 可以新增（支援）", async () => {
+    const res = await request(app)
+      .post(`/projects/${projectId}/members`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ employeeId: empId, roleInProject: "support", sharePct: 5 })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+
+    const list = await request(app)
+      .get(`/projects/${projectId}/members`)
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(list.body.members[0].roleInProject).toBe("support")
+  })
+
+  it("角色可改成 manager（經理）", async () => {
+    const list = await request(app)
+      .get(`/projects/${projectId}/members`)
+      .set("Authorization", `Bearer ${adminToken}`)
+    const memberId = list.body.members[0].id
+    const res = await request(app)
+      .patch(`/projects/${projectId}/members/${memberId}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ roleInProject: "manager" })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+
+    const after = await request(app)
+      .get(`/projects/${projectId}/members`)
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(after.body.members[0].roleInProject).toBe("manager")
+  })
+
+  it("不在值域的角色（owner）回 400", async () => {
+    const other = await createProject({ name: "角色值域測試案" })
+    const res = await request(app)
+      .post(`/projects/${other.body.id}/members`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ employeeId: empId, roleInProject: "owner" })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("invalid_body")
+  })
+})
+
+// 需要 migration 0050 的 default_share_pct_by_role；正式庫未套時整組跳過。
+// 套完後執行：npx vitest run src/__tests__/projects.test.ts
+describe.skipIf(!shareDefaultsReady)("W3 角色預設分潤趴數（pool_pct 未帶 sharePct 時預帶）", () => {
+  let projectId: string
+  let empId: string
+
+  beforeAll(async () => {
+    await request(app)
+      .put("/project-settings")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ defaultSharePctByRole: { manager: 12, lead: 8, support: 3, member: 1 } })
+    const res = await createProject({ name: "預設趴數測試案", shareMode: "pool_pct", bonusPool: 500_000 })
+    projectId = res.body.id
+    empId = await adminEmpId()
+  })
+
+  it("GET /project-settings 回得出剛存的四角色預設", async () => {
+    const res = await request(app).get("/project-settings").set("Authorization", `Bearer ${adminToken}`)
+    expect(res.status).toBe(200)
+    expect(res.body.settings.defaultSharePctByRole).toEqual({ manager: 12, lead: 8, support: 3, member: 1 })
+  })
+
+  it("新增成員沒帶 sharePct → 套該角色的預設（manager=12）", async () => {
+    const res = await request(app)
+      .post(`/projects/${projectId}/members`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ employeeId: empId, roleInProject: "manager" })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+
+    const list = await request(app)
+      .get(`/projects/${projectId}/members`)
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(list.body.members[0].sharePct).toBe(12)
+    // 獎金池 500,000 × 12% ＝ 60,000
+    expect(list.body.members[0].computedAmount).toBe(60_000)
+  })
+
+  it("明確帶 sharePct 時不被預設值蓋掉", async () => {
+    const other = await createProject({ name: "預設趴數覆寫案", shareMode: "pool_pct", bonusPool: 500_000 })
+    const res = await request(app)
+      .post(`/projects/${other.body.id}/members`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ employeeId: empId, roleInProject: "manager", sharePct: 30 })
+    expect(res.status).toBe(201)
+
+    const list = await request(app)
+      .get(`/projects/${other.body.id}/members`)
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(list.body.members[0].sharePct).toBe(30)
+  })
+})
+
+describe("W4 列表不回獎金池 ＋ M14 年度篩選", () => {
+  it("GET /projects 每一列的 bonusPool 都是 null（列表沒有逐案算權限）", async () => {
+    await createProject({ name: "有獎金池的案", shareMode: "pool_pct", bonusPool: 999_000 })
+    const res = await request(app).get("/projects").set("Authorization", `Bearer ${adminToken}`)
+    expect(res.status).toBe(200)
+    expect(res.body.projects.length).toBeGreaterThan(0)
+    for (const p of res.body.projects) expect(p.bonusPool).toBeNull()
+  })
+
+  it("GET /projects/:id 仍看得到獎金池（HR 有 bonus 權限）", async () => {
+    const created = await createProject({ name: "詳情看得到池", shareMode: "pool_pct", bonusPool: 123_000 })
+    const res = await request(app).get(`/projects/${created.body.id}`).set("Authorization", `Bearer ${adminToken}`)
+    expect(res.status).toBe(200)
+    expect(res.body.project.bonusPool).toBe(123_000)
+    expect(res.body.access).toEqual({ finance: true, bonus: true })
+  })
+
+  it("?year= 只回該歸屬年度的案子", async () => {
+    const target = YEAR - 3
+    const created = await createProject({ name: `${target} 年度案`, fiscalYear: target })
+    const res = await request(app).get(`/projects?year=${target}`).set("Authorization", `Bearer ${adminToken}`)
+    expect(res.status).toBe(200)
+    const ids = res.body.projects.map((p: { id: string }) => p.id)
+    expect(ids).toContain(created.body.id)
+    for (const p of res.body.projects) expect(p.fiscalYear).toBe(target)
+
+    // 不帶 year 時那一案仍在（篩選沒有黏住）
+    const all = await request(app).get("/projects").set("Authorization", `Bearer ${adminToken}`)
+    expect(all.body.projects.map((p: { id: string }) => p.id)).toContain(created.body.id)
+  })
+
+  it("?year= 不是合法年度 → 400 invalid_year（不默默忽略）", async () => {
+    const res = await request(app).get("/projects?year=abc").set("Authorization", `Bearer ${adminToken}`)
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("invalid_year")
+  })
+})
+
+describe("W8 技師科別依租戶設定（不再是 electrical／hvac／fire）", () => {
+  it("中文科別 key 存得進去、讀得回來", async () => {
+    const created = await createProject({ name: "科別測試案", engineers: { 空調: { name: "李技師" } } })
+    expect(created.status, JSON.stringify(created.body)).toBe(201)
+    const res = await request(app).get(`/projects/${created.body.id}`).set("Authorization", `Bearer ${adminToken}`)
+    expect(res.body.project.engineers["空調"].name).toBe("李技師")
+  })
+
+  it("不在 project_settings.disciplines 裡的 key → 400 unknown_discipline", async () => {
+    const created = await createProject({ name: "科別值域測試案" })
+    const res = await request(app)
+      .patch(`/projects/${created.body.id}`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ engineers: { electrical: { name: "王技師" } } })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("unknown_discipline")
+    expect(res.body.discipline).toBe("electrical")
+  })
+
+  it("租戶把科別改成自訂清單後，新的科別就過得了", async () => {
+    await request(app)
+      .put("/project-settings")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ disciplines: ["電機", "空調", "消防", "汙水", "弱電"] })
+    const created = await createProject({ name: "自訂科別案", engineers: { 弱電: { name: "陳技師" } } })
+    expect(created.status, JSON.stringify(created.body)).toBe(201)
+  })
+})

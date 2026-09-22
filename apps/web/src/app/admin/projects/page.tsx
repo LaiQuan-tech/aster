@@ -68,6 +68,8 @@ export default function AdminProjectsPage() {
   // B4：列表排序——欄位＋方向，換了就重打 GET /projects。
   const [sort, setSort] = useState<ProjectSort>("created");
   const [dir, setDir] = useState<SortDir>("desc");
+  // M14：歸屬年度篩選（後端 ?year=），""＝全部年度（預設）。
+  const [yearFilter, setYearFilter] = useState<string>("");
 
   // 自動封存設定（模組四第 2 條）
   const [settings, setSettings] = useState<ProjectSettings | null>(null);
@@ -110,9 +112,11 @@ export default function AdminProjectsPage() {
     setError(null);
     try {
       const [p, cl, d, e, st] = await Promise.all([
-        listProjectsExt({ includeArchived, includeReserved, sort, dir }),
+        listProjectsExt({ includeArchived, includeReserved, sort, dir, year: yearFilter ? Number(yearFilter) : null }),
         listClients(),
-        getDepartments(),
+        // 同 [id]/page.tsx：GET /departments 還是 HR 限定，會計拿不到就給空清單，
+        // 不要讓整個專案列表因為一個下拉選單掛掉。
+        getDepartments().catch(() => ({ departments: [] as Department[] })),
         getEmployees(),
         getProjectSettings(),
       ]);
@@ -131,7 +135,7 @@ export default function AdminProjectsPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [includeArchived, includeReserved, sort, dir]);
+  }, [includeArchived, includeReserved, sort, dir, yearFilter]);
 
   const mainProjects = projects.filter((p) => (p.kind ?? "main") === "main");
 
@@ -236,6 +240,17 @@ export default function AdminProjectsPage() {
   }
 
   const shown = statusFilter ? projects.filter((p) => p.status === statusFilter) : projects;
+  /**
+   * 年度下拉的選項：目前列表上出現過的年度 ∪ 今年 ∪ 已選的年度（篩到只剩自己時
+   * 才不會把選項弄不見），由新到舊。刻意不另外打 API——年度就是資料裡的維度。
+   */
+  const yearOptions = [
+    ...new Set<number>([
+      new Date().getFullYear(),
+      ...(yearFilter ? [Number(yearFilter)] : []),
+      ...projects.map((p) => p.fiscalYear).filter((y): y is number => typeof y === "number"),
+    ]),
+  ].sort((a, b) => b - a);
 
   async function saveSettings(patch: Partial<ProjectSettings>) {
     setSavingSettings(true);
@@ -409,6 +424,18 @@ export default function AdminProjectsPage() {
             <option value="">全部案情</option>
             {PROJECT_STATUS_ORDER.map((v) => (
               <option key={v} value={v}>{PROJECT_STATUS_LABELS[v]}</option>
+            ))}
+          </select>
+          {/* M14：年度篩選。用的是「歸屬年度」（fiscalYear），不是編號裡的建立年。 */}
+          <select
+            className="rounded-lg border border-gray-200 px-2 py-1 text-sm"
+            value={yearFilter}
+            onChange={(e) => setYearFilter(e.target.value)}
+            aria-label="歸屬年度"
+          >
+            <option value="">全部年度</option>
+            {yearOptions.map((y) => (
+              <option key={y} value={y}>{y} 年</option>
             ))}
           </select>
           <label className="flex items-center gap-1.5 text-sm text-gray-600">

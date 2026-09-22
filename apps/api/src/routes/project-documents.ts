@@ -3,7 +3,7 @@ import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { resolveSelf, isHrRole, managedDeptIds } from "../middleware/scope.js"
+import { resolveSelf, isFinanceRole, managedDeptIds } from "../middleware/scope.js"
 
 export const projectDocumentsRouter = Router()
 
@@ -37,7 +37,7 @@ async function canManageContracts(
   self: { id: string; role: string },
   project: { dept_id: string | null; lead_emp_id: string | null },
 ): Promise<boolean> {
-  if (isHrRole(self.role) || project.lead_emp_id === self.id) return true
+  if (isFinanceRole(self.role) || project.lead_emp_id === self.id) return true
   if (project.dept_id) {
     const managed = await managedDeptIds(tenantId, self.id)
     if (managed.includes(project.dept_id)) return true
@@ -66,7 +66,7 @@ async function canWriteDocs(
   project: { dept_id: string | null; lead_emp_id: string | null },
   projectId: string,
 ): Promise<boolean> {
-  if (isHrRole(self.role) || project.lead_emp_id === self.id) return true
+  if (isFinanceRole(self.role) || project.lead_emp_id === self.id) return true
   const { data: membership } = await supabaseAdmin
     .from("project_members")
     .select("id")

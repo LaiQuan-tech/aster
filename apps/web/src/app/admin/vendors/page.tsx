@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls, useToast } from "@/components/admin-ui";
+import { buildRemittanceText, copyText } from "@/lib/remittance";
 import {
   listVendors, createVendor, updateVendor, deleteVendor, getVendorCardUrl, scanVendorCard,
   type Vendor, type VendorInput,
@@ -10,6 +11,10 @@ import {
  * 廠商名冊 · 名片建檔。
  * 名片流程：選影像 → API 存檔並送 Gemini 抽欄位 → 帶進表單 → 人確認後才「新增廠商」。
  * 辨識只給建議值，永遠不會自己建檔；沒設 AI 金鑰時名片按鈕會說明，手動建檔照常。
+ *
+ * M15（2026-09-23）：每列一個「複製帳號」——戶名／銀行（代號）／帳號三行，貼進網銀
+ * 轉帳頁剛好對應欄位。戶名優先用 accountHolder（帳戶開戶名），沒填才退回廠商名稱；
+ * 文字組裝與剪貼簿三段式退路共用 lib/remittance.ts（與放款單明細頁同一份）。
  */
 type Form = {
   name: string; category: string; contactName: string; title: string; phone: string; mobile: string;
@@ -34,6 +39,7 @@ const toInput = (f: Form): VendorInput => ({
 });
 
 export default function VendorsPage() {
+  const toast = useToast();
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [q, setQ] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -121,6 +127,18 @@ export default function VendorsPage() {
     }
   }
 
+  /** M15：把該廠商的匯款資訊放進剪貼簿。沒有帳號就不給按，免得貼出三行破折號。 */
+  async function copyRemittance(v: Vendor) {
+    const text = buildRemittanceText({
+      payeeName: v.accountHolder ?? v.name,
+      payeeBankName: v.bankName,
+      payeeBankCode: v.bankCode,
+      payeeBankAccount: v.bankAccount,
+    });
+    const ok = await copyText(text);
+    if (ok) toast.show("已複製匯款資訊", "success");
+  }
+
   async function remove(v: Vendor) {
     if (!confirm(`刪除廠商「${v.name}」？（軟刪除，紀錄仍保留）`)) return;
     try { await deleteVendor(v.id); await load(); } catch (err) { setError(err instanceof Error ? err.message : "刪除失敗"); }
@@ -187,6 +205,15 @@ export default function VendorsPage() {
                     <td className="py-2 pr-3 text-gray-600">{v.bankAccount ?? "—"}</td>
                     <td className="py-2 pr-3 text-gray-600">{v.accountHolder ?? "—"}</td>
                     <td className="py-2 text-right whitespace-nowrap">
+                      <button
+                        type="button"
+                        onClick={() => void copyRemittance(v)}
+                        disabled={!v.bankAccount}
+                        title={v.bankAccount ? "複製戶名／銀行／帳號" : "這家廠商還沒填帳號"}
+                        className="mr-3 text-xs text-gray-600 hover:underline disabled:cursor-not-allowed disabled:text-gray-300 disabled:no-underline"
+                      >
+                        複製帳號
+                      </button>
                       <button type="button" onClick={() => void startEdit(v)} className="mr-3 text-xs text-gray-600 hover:underline">編輯</button>
                       <button type="button" onClick={() => void remove(v)} className="text-xs text-gray-400 hover:text-red-600">刪除</button>
                     </td>

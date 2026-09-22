@@ -5,7 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { todayKey } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { loadProjectScope } from "../services/project-scope.js"
-import { isHrRole } from "../middleware/scope.js"
+import { writeAuditLog } from "../services/audit.js"
 import {
   duplicateProject,
   loadLineage,
@@ -19,9 +19,14 @@ export const projectDuplicateRouter = Router()
  * C2 複製專案（追加減／加做）＋變更歷史。邏輯全在 services/project-duplicate.ts，
  * 這裡只做驗證、權限與搬運。
  *
- * 權限：HR，或對該案有 finance 權限的人（該案 lead／所屬部門主管，
+ * 權限：對該案有 finance 權限的人（HR／會計／該案 lead 或 manager／所屬部門主管，
  * services/project-scope.ts）——複製會建合約與期程，跟能新增合約的是同一群人。
  * 變更歷史（lineage）全員可讀，但合約總額只給 finance。
+ *
+ * M23（2026-09-23）：封存原案**不再限 HR**。原本非 HR 會被強制改成不封存並回
+ * `warnings:['archive_requires_hr']`，留下「原案與新案同時有效」的縫——年度總帳
+ * 會把同一份合約採計兩次，而真正會去複製的就是專案負責人。現在 finance 使用者
+ * 一律照 `archiveOriginal`（預設 true）執行，並另寫一筆 audit 記下是誰封的。
  */
 
 const copySchema = z.object({
@@ -70,14 +75,10 @@ projectDuplicateRouter.post(
       }
       const b = parsed.data
       const tz = await getTenantTimezone(tenantId)
-      // 封存原案只有 HR 能做（C2 驗收）：封存會讓原案從列表消失，finance lead／部門主管
-      // 只該有「複製」的權限，不該順手把原案藏起來。非 HR 一律強制不封存並回 warnings，
-      // 讓前端提示「原案未封存，請 HR 處理」；預設值（HR）仍是封存。
-      const wantsArchive = b.archiveOriginal ?? true
-      const canArchive = isHrRole(scope.self.role)
-      const archiveOriginal = wantsArchive && canArchive
+      // M23：封存原案不再限 HR——有 finance 權限就能複製，也就該能把被取代的原案收起來。
+      // `warnings` 保留在回應裡（型別不變，前端不必改），只是現在永遠是空陣列。
+      const archiveOriginal = b.archiveOriginal ?? true
       const warnings: string[] = []
-      if (wantsArchive && !canArchive) warnings.push("archive_requires_hr")
       const result = await duplicateProject({
         tenantId,
         sourceProjectId: scope.project.id,
@@ -92,6 +93,25 @@ projectDuplicateRouter.post(
       if (!result.ok) {
         res.status(result.status).json({ error: result.error })
         return
+      }
+      // 誰在什麼時候把原案封掉：duplicateProject 內部已對 projects 寫一筆 UPDATE 稽核，
+      // 這裡再記一筆「這個動作是由誰、用什麼理由觸發的」——非 HR 也能封存之後，
+      // 「原案為什麼不見了」要查得到人。
+      if (result.archived) {
+        await writeAuditLog({
+          tenantId,
+          tableName: "projects",
+          recordId: result.archived.id,
+          action: "UPDATE",
+          newRow: {
+            archived_by_duplicate: result.project.id,
+            replaced_by_code: result.project.code,
+            reason: b.reason,
+            actor_role: scope.self.role,
+          },
+          actorEmpId: scope.self.id,
+          context: "POST /projects/:id/duplicate (archive original)",
+        })
       }
       res.status(201).json({ project: result.project, archived: result.archived, warnings })
     } catch (err) {
