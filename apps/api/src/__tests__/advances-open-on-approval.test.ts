@@ -156,8 +156,9 @@ beforeAll(async () => {
   mgrId = m.employeeId
   mgrToken = m.token
 
-  // HR routes both business_trip and petty_cash approvals to mgr (single step).
-  for (const kind of ["business_trip", "petty_cash"]) {
+  // HR routes business_trip / petty_cash approvals to mgr (single step). The trip below is filed with
+  // tripScope=domestic_intercity, which (W2) looks up the business_trip_intercity flow instead — set it too.
+  for (const kind of ["business_trip", "business_trip_intercity", "petty_cash"]) {
     const flow = await request(app)
       .put(`/approval-flows/${kind}`)
       .set("Authorization", `Bearer ${A.adminToken}`)

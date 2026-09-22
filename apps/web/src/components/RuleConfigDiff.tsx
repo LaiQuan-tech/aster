@@ -34,7 +34,7 @@ export function RuleConfigDiff({ base, target }: { base: RuleConfigVersionFull; 
     <div>
       <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-gray-500">
         <span>
-          基準 v{base.version}（生效 {base.effectiveFrom ?? "—"}）→ 比較 v{target.version}（生效 {target.effectiveFrom ?? "—"}）
+          基準 v{base.version}（{base.effectiveFrom ? `生效 ${base.effectiveFrom}` : "系統預設"}）→ 比較 v{target.version}（{target.effectiveFrom ? `生效 ${target.effectiveFrom}` : "系統預設"}）
         </span>
         {(!base.configValid || !target.configValid) && (
           <span className="rounded-full bg-amber-50 px-2 py-0.5 text-amber-700" title="該版內容已不合目前的規則格式（欄位改過），仍照原樣列出供查閱">

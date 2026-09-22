@@ -242,7 +242,9 @@ export default function AttendanceSheetDetailPage() {
     : authoritativeVersion == null
       ? null // 找不到權威版本號（舊資料或尚未計算過），不顯示，避免用推導值誤導
       : matchedRuleVersion
-        ? `本月適用規則 v${matchedRuleVersion.version}（生效 ${matchedRuleVersion.effectiveFrom}）`
+        ? matchedRuleVersion.effectiveFrom
+          ? `本月適用規則 v${matchedRuleVersion.version}（生效 ${matchedRuleVersion.effectiveFrom}）`
+          : `本月適用規則 v${matchedRuleVersion.version}（系統預設）`
         : "本月適用規則：預設規則"; // version 0（DEFAULT_RULE_CONFIG）或該版本已從歷史中查無
 
   return (
