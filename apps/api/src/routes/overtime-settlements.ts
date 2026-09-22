@@ -9,7 +9,7 @@ import { isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { addDaysKey, monthRangeKeys, todayKey } from "../lib/tz.js"
 import { loadRuleConfigFor } from "../services/payroll-inputs.js"
-import { approvedOtMinutesInPeriod, capMinutesFor } from "../services/overtime-cap.js"
+import { capMinutesFor, otMinutesInPeriod } from "../services/overtime-cap.js"
 import { resolveOvertimeMonthlyAlertHours } from "@hr/rules"
 import {
   overtimeSettlementsFilename,
@@ -208,7 +208,8 @@ const hrGuards = [requireAuth, requireTenant, requireHrAdmin] as const
  * ESS 首頁「本月加班累計 X／40 小時」卡的資料來源。
  *   settledMinutes        已結算的加班分鐘（attendance_days.overtime_minutes 當月合計）
  *   approvedRequestMinutes 已核准加班單分鐘（月上限的判準，與送單時的 beyondCapCheck 同源）
- *   beyondCapMinutes      兩者取大者超過上限的部分（先看到警示，不必等月結）
+ *   pendingRequestMinutes 待簽加班單分鐘（送單時的超額判定會把它併入累計基準；卡片下方小字）
+ *   beyondCapMinutes      settled／approved 取大者超過上限的部分（先看到警示，不必等月結；待簽不計）
  *   alertHours            法定警示門檻 [36, 40, 46]，前端決定顏色
  */
 overtimeSettlementsRouter.get(
@@ -252,13 +253,16 @@ overtimeSettlementsRouter.get(
         settledMinutes += Number(r.overtime_minutes) || 0
       }
 
-      const approvedRequestMinutes = await approvedOtMinutesInPeriod(tenantId, self.id, period)
+      const otRequests = await otMinutesInPeriod(tenantId, self.id, period, { statuses: ["approved", "pending"] })
+      const approvedRequestMinutes = otRequests.approvedMinutes
+      const pendingRequestMinutes = otRequests.pendingMinutes
       const usedMinutes = Math.max(settledMinutes, approvedRequestMinutes)
       res.status(200).json({
         period,
         capMinutes,
         settledMinutes,
         approvedRequestMinutes,
+        pendingRequestMinutes,
         beyondCapMinutes: Math.max(0, usedMinutes - capMinutes),
         alertHours: [...resolveOvertimeMonthlyAlertHours(rules)],
       })

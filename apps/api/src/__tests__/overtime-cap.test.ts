@@ -5,15 +5,17 @@ import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
 
 /**
  * 月加班上限純函式（services/overtime-cap.ts）：邊界＝累計剛好等於上限不算超，
- * +1 分鐘算超；beyondCapMinutes 只算本張落在上限外的部分。不碰 DB。
+ * +1 分鐘算超；beyondCapMinutes 只算本張落在上限外的部分。累計基準＝已核准＋待簽
+ * （2026-09-23 起待簽也併入；核准時重算 pendingBeforeMinutes 帶 0）。不碰 DB。
  */
 
 const CAP_40H = 40 * 60
 
 describe("beyondCapCheck — 邊界", () => {
-  it("已核准 38h ＋ 本張 2h ＝ 剛好 40h → 不算超、beyondCapMinutes 0", () => {
+  it("已核准 38h ＋ 本張 2h ＝ 剛好 40h → 不算超、beyondCapMinutes 0（沒帶 pending 視同 0）", () => {
     expect(beyondCapCheck({ approvedBeforeMinutes: 38 * 60, requestedMinutes: 120, capMinutes: CAP_40H })).toEqual({
       approvedBeforeMinutes: 2280,
+      pendingBeforeMinutes: 0,
       requestedMinutes: 120,
       capMinutes: 2400,
       beyondCap: false,
@@ -38,8 +40,9 @@ describe("beyondCapCheck — 邊界", () => {
   })
 
   it("負數／小數輸入被正規化（取整、不低於 0）；本張 0 分鐘永遠不算超", () => {
-    expect(beyondCapCheck({ approvedBeforeMinutes: -5, requestedMinutes: 30.4, capMinutes: 2400 })).toMatchObject({
+    expect(beyondCapCheck({ approvedBeforeMinutes: -5, pendingBeforeMinutes: -3, requestedMinutes: 30.4, capMinutes: 2400 })).toMatchObject({
       approvedBeforeMinutes: 0,
+      pendingBeforeMinutes: 0,
       requestedMinutes: 30,
       beyondCap: false,
     })
@@ -47,6 +50,38 @@ describe("beyondCapCheck — 邊界", () => {
       beyondCap: false,
       beyondCapMinutes: 0,
     })
+  })
+})
+
+describe("beyondCapCheck — 待簽（pending）併入累計基準", () => {
+  it("已核准 20h ＋ 待簽 18h ＋ 本張 2h ＝ 剛好 40h → 不算超", () => {
+    expect(
+      beyondCapCheck({ approvedBeforeMinutes: 20 * 60, pendingBeforeMinutes: 18 * 60, requestedMinutes: 120, capMinutes: CAP_40H }),
+    ).toEqual({
+      approvedBeforeMinutes: 1200,
+      pendingBeforeMinutes: 1080,
+      requestedMinutes: 120,
+      capMinutes: 2400,
+      beyondCap: false,
+      beyondCapMinutes: 0,
+    })
+  })
+
+  it("同樣的基準再多 1 分鐘（本張 2h1m）→ 超、beyondCapMinutes 1", () => {
+    const r = beyondCapCheck({ approvedBeforeMinutes: 20 * 60, pendingBeforeMinutes: 18 * 60, requestedMinutes: 121, capMinutes: CAP_40H })
+    expect(r).toMatchObject({ beyondCap: true, beyondCapMinutes: 1 })
+  })
+
+  it("一張都還沒核准、只靠待簽就撐到上限：待簽 32h ＋ 本張 16h → 超 8h（連送多張未核准大單會被標）", () => {
+    const r = beyondCapCheck({ approvedBeforeMinutes: 0, pendingBeforeMinutes: 32 * 60, requestedMinutes: 16 * 60, capMinutes: CAP_40H })
+    expect(r).toMatchObject({ approvedBeforeMinutes: 0, pendingBeforeMinutes: 1920, beyondCap: true, beyondCapMinutes: 480 })
+  })
+
+  it("核准時重算（pending 帶 0）：已核准（排除本單）0h ＋ 本張 16h → 不超；同一張送單時因待簽而超", () => {
+    const atFiling = beyondCapCheck({ approvedBeforeMinutes: 0, pendingBeforeMinutes: 32 * 60, requestedMinutes: 16 * 60, capMinutes: CAP_40H })
+    const atApproval = beyondCapCheck({ approvedBeforeMinutes: 0, pendingBeforeMinutes: 0, requestedMinutes: 16 * 60, capMinutes: CAP_40H })
+    expect(atFiling.beyondCap).toBe(true)
+    expect(atApproval).toMatchObject({ beyondCap: false, beyondCapMinutes: 0 })
   })
 })
 

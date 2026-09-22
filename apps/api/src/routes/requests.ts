@@ -14,6 +14,7 @@ import {
   approvedOtMinutesInPeriod,
   beyondCapCheck,
   capMinutesFor,
+  otMinutesInPeriod,
   requestMinutesOf,
   type BeyondCapResult,
 } from "../services/overtime-cap.js"
@@ -386,12 +387,16 @@ async function notifyStepApprover(params: {
   })
 }
 
-/** M1：加班單超過月上限時的通知附註（超額部分走 overtime_settlements「另行給付」）。 */
-export function beyondCapNote(result: BeyondCapResult | null | undefined): string | null {
+/**
+ * M1：加班單超過月上限時的通知附註（超額部分走 overtime_settlements「另行給付」）。
+ * `phase`：送單時「將超過」（累計含待簽，還沒定案）；最終核准時「已超過」（以已核准重算過）。
+ */
+export function beyondCapNote(result: BeyondCapResult | null | undefined, phase: "filed" | "approved" = "filed"): string | null {
   if (!result || !result.beyondCap) return null
   const capHours = Math.round((result.capMinutes / 60) * 10) / 10
   const beyondHours = Math.round((result.beyondCapMinutes / 60) * 10) / 10
-  return `本月累計將超過上限（${capHours} 小時），超過的 ${beyondHours} 小時將另行給付。`
+  const verb = phase === "approved" ? "已超過" : "將超過"
+  return `本月累計${verb}上限（${capHours} 小時），超過的 ${beyondHours} 小時將另行給付。`
 }
 
 /** 通知申請人：最終核准或駁回。 */
@@ -403,17 +408,27 @@ async function notifyApplicant(params: {
   step: number
   actedByEmpId: string
   comment?: string | null
+  /** M1：加班單最終核准時重算仍超過月上限 → 內文末尾加「超額部分將另行給付」（見 beyondCapNote）。 */
+  extraNote?: string | null
+  beyondCap?: BeyondCapResult | null
 }): Promise<number> {
   const { tenantId, lr, ctx, event, step, actedByEmpId, comment } = params
   const verdict = event === "approved" ? "已核准" : "已駁回"
   const commentText = comment ? `${event === "approved" ? "簽核意見" : "駁回理由"}：${comment}` : ""
+  const extra = params.extraNote ? `${commentText ? " " : ""}${params.extraNote}` : ""
   return enqueue({
     tenantId,
     employeeIds: [lr.employee_id],
     type: "approval",
     title: `你的${kindLabel(lr.kind)}申請${verdict}`,
-    body: `${subjectLabel(lr, ctx)} 期間 ${periodText(lr.start_at, lr.end_at, lr.hours)} ${verdict}。${commentText}`.trim(),
-    payload: basePayload(lr, { event, currentStep: step, actedByEmpId, comment: comment ?? null }),
+    body: `${subjectLabel(lr, ctx)} 期間 ${periodText(lr.start_at, lr.end_at, lr.hours)} ${verdict}。${commentText}${extra}`.trim(),
+    payload: basePayload(lr, {
+      event,
+      currentStep: step,
+      actedByEmpId,
+      comment: comment ?? null,
+      ...(params.beyondCap ? { beyondCap: params.beyondCap.beyondCap, beyondCapDetail: params.beyondCap } : {}),
+    }),
   })
 }
 
@@ -517,14 +532,18 @@ requestsRouter.post(
       // M1 月加班上限：kind='ot' 才算。只**標記**不擋單——出勤紀錄照實、超額部分
       // 由月表核准時歸入 overtime_settlements「另行給付」（WP1）。算不出來（規則讀
       // 失敗、時區查不到…）只記 log，不讓一張加班單送不出去。
+      // 累計基準＝本月「已核准＋待簽」加班單（2026-09-23 起；原本只算已核准，員工連送
+      // 多張未核准的大單一張都不會被標）。最終核准時再以已核准重算一次（decideOneRequest）。
       let beyondCap: BeyondCapResult | null = null
       if (kind === "ot") {
         try {
           const tz = await getTenantTimezone(tenantId)
           const period = localDateKey(startAt, tz).slice(0, 7)
           const { rules } = await loadRuleConfigFor(tenantId, period)
+          const before = await otMinutesInPeriod(tenantId, filedForId, period, { statuses: ["approved", "pending"] })
           beyondCap = beyondCapCheck({
-            approvedBeforeMinutes: await approvedOtMinutesInPeriod(tenantId, filedForId, period),
+            approvedBeforeMinutes: before.approvedMinutes,
+            pendingBeforeMinutes: before.pendingMinutes,
             requestedMinutes: requestMinutesOf({ hours: hours ?? null, start_at: startAt, end_at: endAt }),
             capMinutes: capMinutesFor(rules),
           })
@@ -965,6 +984,76 @@ async function markStep(
  * 寫入成功之後、回應之前。查核時以 (table_name, record_id) 與 trigger 的列拼起來看。
  */
 
+/** decideOneRequest 讀單的欄位（beyond_cap 兩欄只在 migration 0050 已套時帶）。 */
+const DECIDE_COLS =
+  "id, status, current_step, employee_id, kind, leave_type_id, hours, start_at, end_at, payout, advance_requested, segments, reason"
+const DECIDE_COLS_WITH_BEYOND_CAP = `${DECIDE_COLS}, ${BEYOND_CAP_COLS}`
+
+/** decideOneRequest 讀回的列（對應 DECIDE_COLS；beyond_cap 兩欄可能缺席）。 */
+interface DecideRow {
+  id: string
+  status: string
+  current_step: number
+  employee_id: string
+  kind: string
+  leave_type_id: string | null
+  hours: unknown
+  start_at: string
+  end_at: string
+  payout: string | null
+  advance_requested: string | number | null
+  segments: unknown
+  reason: string | null
+  beyond_cap?: boolean | null
+  beyond_cap_detail?: unknown
+}
+
+/**
+ * M1：加班單走到**最終核准**那一刻，用「本月已核准（排除本單）＋本單」重算 beyond_cap。
+ * 送單時的判定把待簽也算進去（可能之後被駁回／撤回），核准時才是定案：flag 依重算結果改寫，
+ * detail 保留送單時的數字、另加 `atApproval: { …BeyondCapResult, at }`。算不出來（規則讀失敗…）
+ * 只記 log 回 null——核准已經成立，標記不該把它變 500。欄位未遷移（0050）時只算不寫。
+ */
+async function recomputeBeyondCapAtApproval(
+  tenantId: string,
+  lr: { id: string; employee_id: string; start_at: string; end_at: string; hours: unknown; beyond_cap?: unknown; beyond_cap_detail?: unknown },
+  opts: { hasBeyondCapCols: boolean; at: string },
+): Promise<BeyondCapResult | null> {
+  try {
+    const tz = await getTenantTimezone(tenantId)
+    const period = localDateKey(lr.start_at, tz).slice(0, 7)
+    const { rules } = await loadRuleConfigFor(tenantId, period)
+    const result = beyondCapCheck({
+      approvedBeforeMinutes: await approvedOtMinutesInPeriod(tenantId, lr.employee_id, period, { excludeRequestId: lr.id }),
+      pendingBeforeMinutes: 0,
+      requestedMinutes: requestMinutesOf({ hours: lr.hours ?? null, start_at: lr.start_at, end_at: lr.end_at }),
+      capMinutes: capMinutesFor(rules),
+    })
+    if (opts.hasBeyondCapCols) {
+      const prevDetail =
+        lr.beyond_cap_detail && typeof lr.beyond_cap_detail === "object" && !Array.isArray(lr.beyond_cap_detail)
+          ? (lr.beyond_cap_detail as Record<string, unknown>)
+          : {}
+      const { error } = await supabaseAdmin
+        .from("leave_requests")
+        .update({
+          beyond_cap: result.beyondCap,
+          beyond_cap_detail: { ...prevDetail, atApproval: { ...result, at: opts.at } },
+        })
+        .eq("tenant_id", tenantId)
+        .eq("id", lr.id)
+      if (error) throw new Error(error.message)
+      if ((lr.beyond_cap === true) !== result.beyondCap) {
+        logger.info({ tenantId, requestId: lr.id, was: lr.beyond_cap === true, now: result.beyondCap }, "beyond_cap re-evaluated at final approval")
+      }
+    }
+    return result
+  } catch (err) {
+    logger.warn({ err, tenantId, requestId: lr.id }, "final approval: beyond-cap recheck failed")
+    return null
+  }
+}
+
 async function decideOneRequest(params: {
   action: "approve" | "reject"
   tenantId: string
@@ -975,14 +1064,19 @@ async function decideOneRequest(params: {
 }): Promise<DecisionOutcome> {
   const { action, tenantId, requestId, actor, comment, allowHrOverride = false } = params
 
-  const { data: lr, error: lrErr } = await supabaseAdmin
+  // beyond_cap／beyond_cap_detail（migration 0050）只在欄位存在時一起讀：最終核准時要拿舊值重算。
+  // select 字串是動態的（supabase-js 只會從字面值推列型別）→ 讀回來自己標成 DecideRow。
+  const hasBeyondCapCols = await leaveRequestsHaveBeyondCap()
+  const decideCols: string = hasBeyondCapCols ? DECIDE_COLS_WITH_BEYOND_CAP : DECIDE_COLS
+  const { data: lrRow, error: lrErr } = await supabaseAdmin
     .from("leave_requests")
-    .select("id, status, current_step, employee_id, kind, leave_type_id, hours, start_at, end_at, payout, advance_requested, segments, reason")
+    .select(decideCols)
     .eq("tenant_id", tenantId)
     .is("deleted_at", null)
     .eq("id", requestId)
     .maybeSingle()
   if (lrErr) return { ok: false, id: requestId, error: lrErr.message }
+  const lr = lrRow as unknown as DecideRow | null
   if (!lr) return { ok: false, id: requestId, error: "not_found" }
   if (lr.status !== "pending") return { ok: false, id: requestId, error: "not_pending" }
 
@@ -1182,7 +1276,35 @@ async function decideOneRequest(params: {
     reason: (lr.reason as string | null) ?? null,
   })
 
-  const notified = await notifyApplicant({ tenantId, lr: notice, ctx, event: "approved", step: currentStep, actedByEmpId: actor.id, comment })
+  // M1：加班單最終核准 → 以已核准重算月上限標記；仍超額就在核准通知加一句「另行給付」。
+  const approvalBeyondCap =
+    lr.kind === "ot"
+      ? await recomputeBeyondCapAtApproval(
+          tenantId,
+          {
+            id: lr.id as string,
+            employee_id: lr.employee_id as string,
+            start_at: lr.start_at as string,
+            end_at: lr.end_at as string,
+            hours: lr.hours,
+            beyond_cap: lr.beyond_cap,
+            beyond_cap_detail: lr.beyond_cap_detail,
+          },
+          { hasBeyondCapCols, at: actedAt },
+        )
+      : null
+
+  const notified = await notifyApplicant({
+    tenantId,
+    lr: notice,
+    ctx,
+    event: "approved",
+    step: currentStep,
+    actedByEmpId: actor.id,
+    comment,
+    extraNote: beyondCapNote(approvalBeyondCap, "approved"),
+    beyondCap: approvalBeyondCap,
+  })
   return { ok: true, id: requestId, status: "approved", currentStep, notified }
 }
 

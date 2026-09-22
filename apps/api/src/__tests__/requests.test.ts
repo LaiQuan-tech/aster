@@ -1672,4 +1672,148 @@ describe.skipIf(!beyondCapReady)("WP2 加班單月上限標記（M1；需 migrat
       .single()
     expect(row?.beyond_cap).toBe(false)
   })
+
+  /* ── 2026-09-23：累計基準含待簽；最終核准時以已核准重算（另一個月 2028-01，不碰上面的 2027-11） ── */
+
+  type CapRow = { beyond_cap: boolean; beyond_cap_detail: Record<string, unknown> | null }
+  async function capRow(requestId: string): Promise<CapRow> {
+    const { data, error } = await supabaseAdmin.from("leave_requests").select("beyond_cap, beyond_cap_detail").eq("id", requestId).single()
+    expect(error).toBeNull()
+    return data as CapRow
+  }
+  /** 2028-01 某日的加班單（UTC 10:00 起 = 台北 18:00，同一天歸月）。 */
+  async function fileOt(day: string, otHours: number) {
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${capToken}`)
+      .send({
+        kind: "ot",
+        startAt: `2028-01-${day}T10:00:00.000Z`,
+        endAt: `2028-01-${day}T${String(10 + Math.min(otHours, 13)).padStart(2, "0")}:00:00.000Z`,
+        hours: otHours,
+        payout: "pay",
+      })
+    expect(filed.status, JSON.stringify(filed.body)).toBe(201)
+    return filed.body as { requestId: string; beyondCap: Record<string, unknown> | null }
+  }
+  async function decideAsMgr(requestId: string, action: "approve" | "reject") {
+    const res = await request(app).post(`/requests/${requestId}/${action}`).set("Authorization", `Bearer ${mgrToken}`).send({})
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    return res.body as { status: string }
+  }
+  /** 申請人收到的「最終核准」通知（payload.requestId 對得上的那筆）。 */
+  async function approvalNoticeFor(requestId: string) {
+    const { data, error } = await supabaseAdmin
+      .from("notifications")
+      .select("title, body, payload")
+      .eq("tenant_id", A.tenantId)
+      .eq("employee_id", capEmpId)
+      .eq("type", "approval")
+    expect(error).toBeNull()
+    const rows = (data ?? []) as Array<{ title: string; body: string | null; payload: Record<string, unknown> | null }>
+    return rows.find((n) => n.payload?.requestId === requestId && n.payload?.event === "approved") ?? null
+  }
+
+  let p1: string
+  let p2: string
+  let p3: string
+  let p4: string
+
+  it("待簽併入累計：先送兩張 16h 都不核准 → 第三張 16h 就標超額（approvedBefore 0、pendingBefore 1920）", async () => {
+    const f1 = await fileOt("03", 16)
+    expect(f1.beyondCap).toMatchObject({ approvedBeforeMinutes: 0, pendingBeforeMinutes: 0, beyondCap: false })
+    const f2 = await fileOt("04", 16)
+    expect(f2.beyondCap).toMatchObject({ approvedBeforeMinutes: 0, pendingBeforeMinutes: 960, beyondCap: false })
+    const f3 = await fileOt("05", 16)
+    expect(f3.beyondCap).toMatchObject({
+      approvedBeforeMinutes: 0,
+      pendingBeforeMinutes: 1920,
+      requestedMinutes: 960,
+      capMinutes: 40 * 60,
+      beyondCap: true,
+      beyondCapMinutes: 480,
+    })
+    p1 = f1.requestId
+    p2 = f2.requestId
+    p3 = f3.requestId
+
+    const row = await capRow(p3)
+    expect(row.beyond_cap).toBe(true)
+    expect(row.beyond_cap_detail).toMatchObject({ pendingBeforeMinutes: 1920, approvedBeforeMinutes: 0, beyondCap: true })
+  })
+
+  it("前兩張駁回後核准第三張 → 最終核准以已核准重算：beyond_cap 翻回 false、detail 加 atApproval、核准通知不提另行給付", async () => {
+    expect((await decideAsMgr(p1, "reject")).status).toBe("rejected")
+    expect((await decideAsMgr(p2, "reject")).status).toBe("rejected")
+    expect((await decideAsMgr(p3, "approve")).status).toBe("approved")
+
+    const row = await capRow(p3)
+    expect(row.beyond_cap).toBe(false)
+    // 送單時的數字保留，核准時的判定另記 atApproval
+    expect(row.beyond_cap_detail).toMatchObject({ pendingBeforeMinutes: 1920, beyondCap: true })
+    expect(row.beyond_cap_detail?.atApproval).toMatchObject({
+      approvedBeforeMinutes: 0,
+      pendingBeforeMinutes: 0,
+      requestedMinutes: 960,
+      capMinutes: 40 * 60,
+      beyondCap: false,
+      beyondCapMinutes: 0,
+    })
+    expect(typeof (row.beyond_cap_detail?.atApproval as Record<string, unknown>).at).toBe("string")
+
+    const notice = await approvalNoticeFor(p3)
+    expect(notice).not.toBeNull()
+    expect(notice?.title).toContain("已核准")
+    expect(notice?.body ?? "").not.toContain("另行給付")
+    expect(notice?.payload?.beyondCap).toBe(false)
+  })
+
+  it("核准時才超額：第 4 張送單不超、第 5 張因待簽超；先核准第 5 張 → 翻 false；再核准第 4 張 → 翻 true 且通知加註另行給付", async () => {
+    const f4 = await fileOt("06", 16)
+    expect(f4.beyondCap).toMatchObject({ approvedBeforeMinutes: 960, pendingBeforeMinutes: 0, beyondCap: false })
+    const f5 = await fileOt("07", 16)
+    expect(f5.beyondCap).toMatchObject({ approvedBeforeMinutes: 960, pendingBeforeMinutes: 960, beyondCap: true, beyondCapMinutes: 480 })
+    p4 = f4.requestId
+
+    // 第 5 張先核准：已核准（排除本單）960 ＋ 本單 960 ＝ 1920 ≤ 2400 → 不超
+    expect((await decideAsMgr(f5.requestId, "approve")).status).toBe("approved")
+    const r5 = await capRow(f5.requestId)
+    expect(r5.beyond_cap).toBe(false)
+    expect(r5.beyond_cap_detail?.atApproval).toMatchObject({ approvedBeforeMinutes: 960, beyondCap: false, beyondCapMinutes: 0 })
+
+    // 第 4 張再核准：已核准 1920 ＋ 本單 960 ＝ 2880 > 2400 → 超 480（送單時是 false）
+    expect((await decideAsMgr(p4, "approve")).status).toBe("approved")
+    const r4 = await capRow(p4)
+    expect(r4.beyond_cap).toBe(true)
+    expect(r4.beyond_cap_detail).toMatchObject({ beyondCap: false, approvedBeforeMinutes: 960 })
+    expect(r4.beyond_cap_detail?.atApproval).toMatchObject({ approvedBeforeMinutes: 1920, beyondCap: true, beyondCapMinutes: 480 })
+
+    const notice = await approvalNoticeFor(p4)
+    expect(notice).not.toBeNull()
+    expect(notice?.body ?? "").toContain("本月累計已超過上限（40 小時）")
+    expect(notice?.body ?? "").toContain("超過的 8 小時將另行給付")
+    expect(notice?.payload?.beyondCap).toBe(true)
+    expect((notice?.payload?.beyondCapDetail as Record<string, unknown>)?.beyondCapMinutes).toBe(480)
+  })
+
+  it("GET /my/overtime-cap 分開回 approvedRequestMinutes／pendingRequestMinutes（已核准 48h；再送一張 2h 待簽）", async () => {
+    const before = await request(app).get("/my/overtime-cap?period=2028-01").set("Authorization", `Bearer ${capToken}`)
+    expect(before.status, JSON.stringify(before.body)).toBe(200)
+    expect(before.body).toMatchObject({
+      period: "2028-01",
+      capMinutes: 40 * 60,
+      settledMinutes: 0,
+      approvedRequestMinutes: 2880,
+      pendingRequestMinutes: 0,
+      beyondCapMinutes: 480,
+    })
+
+    const f6 = await fileOt("10", 2)
+    expect(f6.beyondCap).toMatchObject({ approvedBeforeMinutes: 2880, pendingBeforeMinutes: 0, beyondCap: true, beyondCapMinutes: 120 })
+
+    const after = await request(app).get("/my/overtime-cap?period=2028-01").set("Authorization", `Bearer ${capToken}`)
+    expect(after.status).toBe(200)
+    // 待簽只顯示不計入 beyondCapMinutes（那是已結算／已核准取大者超過上限的部分）
+    expect(after.body).toMatchObject({ approvedRequestMinutes: 2880, pendingRequestMinutes: 120, beyondCapMinutes: 480 })
+  })
 })

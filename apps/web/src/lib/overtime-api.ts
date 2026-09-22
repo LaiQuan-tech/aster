@@ -18,7 +18,12 @@ export interface OvertimeCap {
   settledMinutes: number;
   /** 已核准加班單的分鐘合計（送單當下判超額用的同一個數）。 */
   approvedRequestMinutes: number;
-  /** 上面兩者取大者超過上限的部分（0 = 還沒超）。 */
+  /**
+   * 待簽（pending）加班單的分鐘合計；送單時的超額判定會把它併入累計基準（2026-09-23）。
+   * 舊版 API 沒有這個欄位（undefined＝視同 0）。
+   */
+  pendingRequestMinutes?: number;
+  /** settled／approved 兩者取大者超過上限的部分（0 = 還沒超；待簽不計）。 */
   beyondCapMinutes: number;
   /** 法定警示門檻（小時），例如 [36, 40, 46]；前端用來決定顏色。 */
   alertHours: number[];
