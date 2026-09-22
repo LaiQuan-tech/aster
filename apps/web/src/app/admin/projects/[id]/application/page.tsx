@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { useParams } from "next/navigation";
+import { listVendors, type Vendor } from "@/lib/company-api";
 import { DOC_TYPE_LABELS, OUR_ROLE_SHORT_LABELS, getContracts, type Contract } from "@/lib/projects-api";
 import {
   getProjectApplication,
@@ -86,14 +87,30 @@ export function ApplicationDocument({
   data,
   printChecked,
   contracts,
+  vendors,
 }: {
   data: ApplicationData;
   printChecked?: Partial<Record<PrintBlockKey, boolean>>;
   /** M17：合約與印花稅區塊的資料；省略＝不畫那一區（純排版預覽用）。 */
   contracts?: Contract[];
+  /**
+   * 廠商名冊（GET /vendors）：協力技師只存 `vendorId` 時（專案頁用 VendorCombo 選名冊廠商，
+   * API 存下來的 `name` 是 null）靠它對回名稱——2026-09-23 正式站驗收：已選廠商的四個科別欄全印「—」。
+   * 省略＝只看 `name`。
+   */
+  vendors?: Vendor[];
 }) {
   const { project, client, latestDocument, designScope, engineers, billings, subcontracts, money } = data;
   const isChecked = (key: PrintBlockKey) => printChecked?.[key] ?? true;
+  /** 協力技師顯示名稱：有 name 用 name；沒有就用 vendorId 對回名冊；兩者皆無才是「—」（與專案頁 VendorCombo 一致：選了名冊廠商就顯示廠商名）。 */
+  const vendorNameById = new Map((vendors ?? []).map((v) => [v.id, v.name]));
+  const engineerName = (discipline: string): string => {
+    const assignment = engineers?.[discipline];
+    if (!assignment) return "—";
+    const name = assignment.name?.trim();
+    if (name) return name;
+    return (assignment.vendorId && vendorNameById.get(assignment.vendorId)) || "—";
+  };
   /**
    * 未勾選的區塊直接掛 `no-print`（globals.css 既有的全域規則），不必替每個
    * 新區塊在 CSS 裡多寫一條 `body.print-hide-<key>`。螢幕上仍淡化顯示。
@@ -222,7 +239,7 @@ export function ApplicationDocument({
           <tbody>
             <tr>
               {disciplines.map((d) => (
-                <td key={d} className="border border-gray-400 px-2 py-1">{engineers?.[d]?.name || "—"}</td>
+                <td key={d} className="border border-gray-400 px-2 py-1">{engineerName(d)}</td>
               ))}
             </tr>
           </tbody>
@@ -330,6 +347,8 @@ export default function ProjectApplicationPrintPage() {
   const [data, setData] = useState<ApplicationData | null>(null);
   /** M17：合約區塊的資料。合約讀不到（沒有 finance 權限）時留空陣列，區塊仍在但顯示「尚無合約」。 */
   const [contracts, setContracts] = useState<Contract[]>([]);
+  /** 廠商名冊：協力技師的 vendorId → 名稱（GET /vendors 只要登入即可讀）；讀不到就留空，欄位退回只看 name。 */
+  const [vendors, setVendors] = useState<Vendor[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [printChecked, setPrintChecked] = useState<Record<PrintBlockKey, boolean>>(defaultPrintChecked);
@@ -346,6 +365,13 @@ export default function ProjectApplicationPrintPage() {
       })
       .catch(() => {
         if (active) setContracts([]);
+      });
+    listVendors()
+      .then((res) => {
+        if (active) setVendors(res.vendors);
+      })
+      .catch(() => {
+        if (active) setVendors([]);
       });
     getProjectApplication(projectId)
       .then((res) => {
@@ -437,7 +463,7 @@ export default function ProjectApplicationPrintPage() {
       ) : error || !data ? (
         <p className="text-sm text-red-600">{error ?? "找不到專案"}</p>
       ) : (
-        <ApplicationDocument data={data} printChecked={printChecked} contracts={contracts} />
+        <ApplicationDocument data={data} printChecked={printChecked} contracts={contracts} vendors={vendors} />
       )}
     </div>
   );
