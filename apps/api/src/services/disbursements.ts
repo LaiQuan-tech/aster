@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "../lib/supabase.js"
 import { logger } from "../lib/logger.js"
-import { addDaysKey, todayKey } from "../lib/tz.js"
+import { addDaysKey, dayWindowUtc, todayKey } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { BILLING_COLS, num, type BillingRow } from "./billing-store.js"
 import {
@@ -724,15 +724,21 @@ export function defaultRange(today: string, from?: string, to?: string): { from:
 
 /**
  * 匯款紀錄列表。日期範圍看 `paid_on`；草稿沒有匯款日也要看得到（不然存了草稿
- * 就消失），所以 `status.eq.draft` 一律放行日期條件。預設排除作廢，除非
- * 明確 `status=void`。`q` 找單號／收款方／收據編號／用途。
+ * 就消失），所以 `status.eq.draft` 一律放行日期條件。作廢的草稿同樣沒有 `paid_on`
+ * （作廢只改 status，不補匯款日），但不能像草稿那樣無條件放行——作廢單只會累積——
+ * 所以改拿 `updated_at` 套日期窗：作廢後所有寫入路徑都擋（PATCH／pay／void／
+ * 附件皆 409），`updated_at` 就是作廢時點。from／to 是租戶當地日，比對 timestamptz
+ * 要先換成 UTC 半開區間 [當日 00:00, 隔日 00:00)。預設排除作廢，除非明確
+ * `status=void`。`q` 找單號／收款方／收據編號／用途。
  */
 export async function listDisbursements(
   tenantId: string,
   filters: ListFilters,
 ): Promise<{ from: string; to: string; disbursements: SerializedDisbursement[] }> {
-  const today = await tenantToday(tenantId)
-  const { from, to } = defaultRange(today, filters.from, filters.to)
+  const tz = await getTenantTimezone(tenantId)
+  const { from, to } = defaultRange(todayKey(tz), filters.from, filters.to)
+  const voidedSince = dayWindowUtc(from, tz).startIso
+  const voidedBefore = dayWindowUtc(to, tz).endIso
 
   let ids: string[] | null = null
   if (filters.projectId) {
@@ -750,7 +756,13 @@ export async function listDisbursements(
     .from("disbursements")
     .select(DISBURSEMENT_COLS)
     .eq("tenant_id", tenantId)
-    .or(`and(paid_on.gte.${from},paid_on.lte.${to}),status.eq.draft`)
+    .or(
+      [
+        `and(paid_on.gte.${from},paid_on.lte.${to})`,
+        "status.eq.draft",
+        `and(status.eq.void,paid_on.is.null,updated_at.gte.${voidedSince},updated_at.lt.${voidedBefore})`,
+      ].join(","),
+    )
   if (filters.status) q = q.eq("status", filters.status)
   else q = q.neq("status", "void")
   if (filters.vendorId) q = q.eq("vendor_id", filters.vendorId)

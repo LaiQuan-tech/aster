@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js"
 import request from "supertest"
 import ExcelJS from "exceljs"
 import { supabaseAdmin } from "../lib/supabase"
+import { addDaysKey } from "../lib/tz"
 import { provisionTenant } from "../services/tenants"
 import { taipeiToday } from "../services/project-status"
 import { app } from "../app"
@@ -660,6 +661,42 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
 
       expect((await asAdmin(request(app).get("/disbursements?from=2026-13-01"))).status).toBe(400)
       expect((await asEmployee(request(app).get("/disbursements"))).status).toBe(403)
+    })
+
+    it("作廢沒有 paid_on 的草稿 → ?status=void 列得到（日期窗改看 updated_at）；預設列表仍排除", async () => {
+      const created = await asAdmin(request(app).post("/disbursements")).send({
+        payeeKind: "other",
+        payeeName: "先開單後決定不付",
+        payingCompanyId: payerId,
+        method: "cash",
+        amount: 1_200,
+        purpose: "作廢草稿",
+        status: "draft",
+        allocations: [],
+      })
+      expect(created.status).toBe(201)
+      const id: string = created.body.disbursement.id
+      const no: string = created.body.disbursement.disbursementNo
+      expect(created.body.disbursement.paidOn).toBeNull()
+
+      const voided = await asAdmin(request(app).post(`/disbursements/${id}/void`)).send({ reason: "不用付了" })
+      expect(voided.status).toBe(200)
+      expect(voided.body.disbursement.status).toBe("void")
+      expect(voided.body.disbursement.paidOn).toBeNull()
+
+      // 修前：日期窗只看 paid_on、放行只認 status=draft，作廢後兩邊都不成立 → 永遠列不到。
+      // 作廢的 paid 單（D-001／D-002）仍靠 paid_on 進窗，兩種一起列。
+      const voids = await asAdmin(request(app).get("/disbursements?status=void"))
+      expect(voids.status).toBe(200)
+      expect(voids.body.disbursements.map((d: { disbursementNo: string }) => d.disbursementNo).sort()).toEqual([`D-${ROC}-001`, `D-${ROC}-002`, no])
+
+      // 日期窗仍有效（不是無條件放行）：只查到昨天 → 今天作廢的草稿與今天付的作廢單都不在。
+      const earlier = await asAdmin(request(app).get(`/disbursements?status=void&from=${YEAR - 1}-01-01&to=${addDaysKey(TODAY, -1)}`))
+      expect(earlier.status).toBe(200)
+      expect(earlier.body.disbursements).toEqual([])
+
+      const list = await asAdmin(request(app).get("/disbursements"))
+      expect(list.body.disbursements.map((d: { id: string }) => d.id)).not.toContain(id)
     })
 
     it("GET /:id 明細；不存在 404；非 uuid 不會吃掉 summary", async () => {
