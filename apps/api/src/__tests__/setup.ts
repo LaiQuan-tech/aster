@@ -23,17 +23,21 @@ process.env.PUNCH_COOLDOWN_SECONDS ??= "0"
 // daily-settle…），整合測試打正式庫，開了就等於讓測試對正式租戶動手。
 // 要驗排程邏輯的測試請直接呼叫服務並指定 throwaway 租戶（見 projects.test 的 runJob）。
 
-// 安全網：每個測試檔跑完，把正式庫裡還在的 status='test' 租戶全部清掉（sql/0037
+// 安全網：每個測試檔跑完，清掉正式庫裡殘留的 status='test' 租戶（sql/0037
 // purge_test_tenant，只准 test/demo）。各檔自己的 afterAll 照跑；這裡兜住漏網的——
 // 沒有這道網，任何一張新表沒被手寫的 teardown 列到，租戶就永遠留在正式庫。
+// 只清「本檔自己 provisionTenant 建的」和「created_at 早於 ASTER_TEST_PURGE_STALE_MINUTES
+// （預設 30 分鐘）的過期殘留」兩種（helpers/purge.ts）；**不再**清掉庫裡所有 test 租戶——
+// 兩個 vitest 程序同時跑（兩個 agent、或本機＋CI）會互相刪掉對方還在用的 throwaway
+// 租戶，測試中途爆 403／404（09-22 employees-weak-password-live 對上 projects 實際踩到）。
 // 只在有真憑證（能打 DB）時做；純函式測試檔什麼都不會發生。
 afterAll(async () => {
   if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) return
   if (process.env.SUPABASE_SERVICE_ROLE_KEY === "placeholder") return
   const { purgeLeftoverTestTenants } = await import("./helpers/purge")
   try {
-    const { purged, failed } = await purgeLeftoverTestTenants()
-    if (purged.length > 0) console.log(`[setup] 清掉殘留 test 租戶 ${purged.length} 個：${purged.join("、")}`)
+    const { purged, failed, cutoff } = await purgeLeftoverTestTenants()
+    if (purged.length > 0) console.log(`[setup] 清掉殘留 test 租戶 ${purged.length} 個（本檔自建或早於 ${cutoff}）：${purged.join("、")}`)
     for (const f of failed) console.warn(`[setup] test 租戶 ${f.id} 清不掉：${f.error}`)
   } catch (err) {
     console.warn(`[setup] purgeLeftoverTestTenants 失敗：${err instanceof Error ? err.message : String(err)}`)

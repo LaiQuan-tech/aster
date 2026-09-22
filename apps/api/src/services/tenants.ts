@@ -39,17 +39,26 @@ function provisionStatus(): string {
   return isTest ? "test" : "active"
 }
 
+/**
+ * 本程序透過 provisionTenant 建出的 'test' 租戶 id（正式環境永遠是空集合）。
+ * 給 __tests__/setup.ts 的安全網用：檔案跑完後只清「自己建的」與「明顯過期」的 test
+ * 租戶，不會誤刪同時在跑的另一個 vitest 程序的租戶。vitest 每個測試檔各自載入模組，
+ * 所以這裡的範圍就是「目前這個測試檔」。
+ */
+export const provisionedTestTenantIds = new Set<string>()
+
 export async function provisionTenant({
   name,
   adminEmail,
   adminPassword,
 }: ProvisionTenantInput): Promise<ProvisionTenantResult> {
   // 1. tenant
+  const status = provisionStatus()
   const { data: tenant, error: tenantErr } = await supabaseAdmin
     .from("tenants")
     .insert({
       name,
-      status: provisionStatus(),
+      status,
       branding: { logoUrl: null, primaryColor: "#1F4E79", appName: name },
       features: { payroll: true, kpi: true, ai_assistant: true },
     })
@@ -60,6 +69,7 @@ export async function provisionTenant({
     throw new Error(`provisionTenant: failed to create tenant: ${tenantErr?.message}`)
   }
   const tenantId = tenant.id as string
+  if (status === "test") provisionedTestTenantIds.add(tenantId)
 
   // 2. auth user (carries tenant_id in app_metadata → drives JWT → RLS)
   const { data: created, error: userErr } = await supabaseAdmin.auth.admin.createUser({
