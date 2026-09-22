@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
-import { apiDownload } from "@/lib/api-client";
+import { apiDownload, apiErrorMessage } from "@/lib/api-client";
 import {
   getEmployees,
   getPayslips,
@@ -153,6 +153,16 @@ export default function PayslipsPage() {
     }
   }
 
+  /**
+   * 寄送失敗的訊息：優先顯示 API 附的中文說明（例如 409 mail_not_configured 的
+   * 「尚未設定 RESEND_API_KEY」），沒有才退回 `[409] mail_not_configured` 這種代碼——
+   * 2026-09-23 正式站驗收：HR 只看到代碼、看不懂要去設什麼。
+   */
+  function describeSendError(err: unknown, fallback: string): string {
+    const msg = apiErrorMessage(err, fallback);
+    return msg === fallback ? msg : `${fallback}：${msg}`;
+  }
+
   async function sendOne(p: PayslipRow) {
     setBusy(true);
     try {
@@ -160,7 +170,7 @@ export default function PayslipsPage() {
       await load();
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "寄送失敗");
+      setError(describeSendError(err, "寄送失敗"));
     } finally {
       setBusy(false);
     }
@@ -187,7 +197,7 @@ export default function PayslipsPage() {
       await load();
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "批次寄送失敗");
+      setError(describeSendError(err, "批次寄送失敗"));
     } finally {
       setBusy(false);
     }

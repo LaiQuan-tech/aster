@@ -13,8 +13,23 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
  * apiFetch 丟出的錯誤：message 是 `[status] code`，code／detail 是 API 回的 { error, message }。
  * `body` 是整包回應 JSON（解析失敗時是 `{ message: statusText }`），給需要額外欄位的呼叫端用——
  * 例如放款的 409 `acceptance_required` 會附 `installmentNo`，錯誤訊息才寫得出是哪一期沒驗收。
+ * `serverMessage`（2026-09-23）＝伺服器 JSON body 的 `message` 原文（有帶就有，不管它是否等於 error
+ * 碼）；給想直接把 API 的中文說明秀給使用者的頁面用（例如薪資單寄送的 409 mail_not_configured 附的
+ * 「尚未設定 RESEND_API_KEY」）。既有欄位與 message 格式完全不變。
  */
-export type ApiError = Error & { status?: number; code?: string; detail?: string; body?: unknown };
+export type ApiError = Error & { status?: number; code?: string; detail?: string; serverMessage?: string; body?: unknown };
+
+/**
+ * 給人看的錯誤訊息：優先用伺服器附的 `message` 原文（serverMessage），沒有就退回 Error.message
+ * （`[status] code`），不是 Error 就用 fallback。
+ */
+export function apiErrorMessage(err: unknown, fallback = "操作失敗"): string {
+  if (err instanceof Error) {
+    const server = (err as ApiError).serverMessage;
+    return server && server.trim() ? server : err.message || fallback;
+  }
+  return fallback;
+}
 
 /**
  * Resolve the auth token from the live Supabase session (browser only).
@@ -57,6 +72,7 @@ export async function apiFetch<T>(
     // 補充說明（例如 invalid_header 缺哪個欄）掛在物件上，讓需要細節的呼叫端拿得到。
     if (typeof body.error === "string") err.code = body.error;
     if (typeof body.message === "string" && body.message !== message) err.detail = body.message;
+    if (typeof body.message === "string" && body.message.trim()) err.serverMessage = body.message;
     err.body = body;
     throw err;
   }
