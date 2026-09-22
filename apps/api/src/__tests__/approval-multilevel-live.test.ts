@@ -417,9 +417,21 @@ describe.skipIf(!ready)("多級簽核 — live", () => {
     })
 
     it("小主管自己送單：跳過本人 → 鏈是 大主管 → HR", async () => {
+      // m2 原本沒有部門（主管鏈為空 → 只剩 HR 關）；把他放進自己管的部門，才會走「跳過本人」這條路
+      const move = await as(adminToken, request(app).patch(`/employees/${m2Id}`)).send({ deptId })
+      expect(move.status).toBe(200)
       const res = await fileFixPunch(m2Token, "主管自己補卡")
       expect(res.status).toBe(201)
       expect((res.body.steps as StepView[]).map((s) => s.candidateEmpIds)).toEqual([[m1Id], [hr1Id, hr2Id]])
+    })
+
+    it("沒有部門的主管自己送單：主管鏈空、租戶沒設老闆 → 只剩 HR 覆核一關", async () => {
+      const move = await as(adminToken, request(app).patch(`/employees/${m2Id}`)).send({ deptId: null })
+      expect(move.status).toBe(200)
+      const res = await fileFixPunch(m2Token, "無部門主管補卡")
+      expect(res.status).toBe(201)
+      expect((res.body.steps as StepView[]).map((s) => s.candidateEmpIds)).toEqual([[hr1Id, hr2Id]])
+      expect((res.body.steps as StepView[])[0].kind).toBe("hr")
     })
 
     it("舊寫法 PATCH {managerEmpId: m1} → manager_emp_ids=[m1]；{managerEmpId: null} → []；兩者都給以 managerEmpIds 為準", async () => {
