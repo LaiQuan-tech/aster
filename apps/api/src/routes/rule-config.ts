@@ -12,6 +12,7 @@ import {
 } from "../services/payroll-inputs.js"
 import { writeAuditLog } from "../services/audit.js"
 import { insertRuleConfigVersion } from "../services/rule-config-version.js"
+import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
 
 export const ruleConfigRouter = Router()
 
@@ -52,6 +53,11 @@ interface RuleConfigVersionRow {
   effectiveFrom: string | null
   createdAt: string | null
   active: boolean
+  /**
+   * true 只有清單末尾那筆合成的 v0（系統預設 DEFAULT_RULE_CONFIG；月表快照的
+   * rule_config_version=0 指的就是它）。租戶存過的版本一律 false。
+   */
+  isDefault: boolean
   summary?: string
   /**
    * `?full=1` 才有：該版的規則內容（M9 歷史版本檢視／兩版比對用）。
@@ -101,6 +107,13 @@ ruleConfigRouter.get(
  * `?full=1`（M9 歷史版本檢視）：每一版多帶 `config`（規則內容全文，parseRuleConfig
  * 過的形狀）。預設不帶——版本一多、每版一整包 DSL，清單會肥好幾倍，而多數呼叫端
  * （月表頁只要生效日標籤）根本用不到。
+ *
+ * 清單**末尾**永遠多一筆合成的 v0（2026-09-23）：`{ version: 0, isDefault: true,
+ * effectiveFrom: null, createdAt: null, active: <租戶沒有任何版本才 true> }`，`full=1`
+ * 時帶 `config`＝系統預設（DEFAULT_RULE_CONFIG，與 loadRuleConfigFor 查無版本時的退路同一份）、
+ * `configValid: true`。只有 v1 時 UI 才有東西可比對；月表快照顯示 v0 也查得到它。放末尾
+ * 而不是開頭：清單維持「新版在前」，既有呼叫端拿 `[0]` 當最新版、`[1]` 當前一版的預設不變。
+ * 「沒存過規則」的租戶因此不再回空陣列，而是只有 v0 那一筆。
  */
 ruleConfigRouter.get(
   "/rule-config/versions",
@@ -133,6 +146,7 @@ ruleConfigRouter.get(
           effectiveFrom: r.effective_from ?? null,
           createdAt: r.created_at ?? null,
           active: r.active === true,
+          isDefault: false,
         }
         if (!full) return base
         try {
@@ -142,6 +156,16 @@ ruleConfigRouter.get(
           return { ...base, config: r.config ?? null, configValid: false }
         }
       })
+      // 系統預設 v0 永遠墊在末尾（見上方註解）。config 也跑 parseRuleConfig，形狀與其他列一致。
+      const systemDefault: RuleConfigVersionRow = {
+        version: 0,
+        effectiveFrom: null,
+        createdAt: null,
+        active: versions.length === 0,
+        isDefault: true,
+        ...(full ? { config: parseRuleConfig(DEFAULT_RULE_CONFIG), configValid: true } : {}),
+      }
+      versions.push(systemDefault)
       res.status(200).json(versions)
     } catch (err) {
       next(err)

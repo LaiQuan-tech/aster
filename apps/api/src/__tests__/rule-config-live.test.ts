@@ -3,8 +3,9 @@ import { createClient } from "@supabase/supabase-js"
 import request from "supertest"
 // .env 由 vitest setupFile（src/__tests__/setup.ts）在任何模組 import 前載入，
 // 底下 eager 建立的 supabase client 才拿得到真的憑證。
-import type { RuleConfig } from "@hr/rules"
+import { parseRuleConfig, type RuleConfig } from "@hr/rules"
 import { supabaseAdmin } from "../lib/supabase"
+import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config"
 import { provisionTenant } from "../services/tenants"
 import { zonedTimeToUtc } from "../lib/tz"
 import { app } from "../app"
@@ -320,10 +321,11 @@ describe.skipIf(!migrated)("C4 規則版本生效日 — live", () => {
       expect(res.body.effectiveFrom).toBeNull()
       expect(res.body.config?.payroll).toBeTruthy()
 
-      // 沒存過規則的租戶是正常狀態 → 空陣列，不是 404。
+      // 沒存過規則的租戶是正常狀態 → 200，不是 404。2026-09-23 起清單永遠墊一筆合成的 v0
+      // （系統預設；租戶沒有任何版本時它就是 active），UI 只有 v1 時才有基準可比對。
       const versions = await asVAdmin(request(app).get("/rule-config/versions"))
       expect(versions.status).toBe(200)
-      expect(versions.body).toEqual([])
+      expect(versions.body).toEqual([{ version: 0, isDefault: true, effectiveFrom: null, createdAt: null, active: true }])
     })
 
     it("v1：effectiveFrom 'now' → 存成今天（Asia/Taipei）", async () => {
@@ -358,13 +360,14 @@ describe.skipIf(!migrated)("C4 規則版本生效日 — live", () => {
       expect(weekday?.multiplier).toBe(OT_OLD)
     })
 
-    it("★ GET /rule-config/versions → 兩筆、新到舊、active 只在最後存的 v2", async () => {
+    it("★ GET /rule-config/versions → 兩筆、新到舊、active 只在最後存的 v2；末尾墊 v0 系統預設（isDefault、不 active）", async () => {
       const res = await asVAdmin(request(app).get("/rule-config/versions"))
       expect(res.status).toBe(200)
       expect(Array.isArray(res.body)).toBe(true)
-      expect(res.body).toHaveLength(2)
-      expect(res.body[0]).toMatchObject({ version: 2, effectiveFrom: NEXT_MONTH_FIRST, active: true })
-      expect(res.body[1]).toMatchObject({ version: 1, effectiveFrom: TODAY, active: false })
+      expect(res.body).toHaveLength(3)
+      expect(res.body[0]).toMatchObject({ version: 2, effectiveFrom: NEXT_MONTH_FIRST, active: true, isDefault: false })
+      expect(res.body[1]).toMatchObject({ version: 1, effectiveFrom: TODAY, active: false, isDefault: false })
+      expect(res.body[2]).toEqual({ version: 0, isDefault: true, effectiveFrom: null, createdAt: null, active: false })
       expect(typeof res.body[0].createdAt).toBe("string")
       // 交叉驗證 DB：PUT 每存一版就把舊列翻 false，只留一筆 active。
       const rows = await dbVersions(vTenantId)
@@ -379,7 +382,7 @@ describe.skipIf(!migrated)("C4 規則版本生效日 — live", () => {
 
       const full = await asVAdmin(request(app).get("/rule-config/versions?full=1"))
       expect(full.status).toBe(200)
-      expect(full.body).toHaveLength(2)
+      expect(full.body).toHaveLength(3)
       for (const row of full.body as Array<{ version: number; config: RuleConfig; configValid: boolean }>) {
         expect(row.configValid).toBe(true)
         // parseRuleConfig 過的完整形狀（預設值已填），前端才能逐鍵比對兩版差異
@@ -392,6 +395,10 @@ describe.skipIf(!migrated)("C4 規則版本生效日 — live", () => {
       const mult = (v: number) => byVersion.get(v)!.overtime.rules.find((r) => r.when === "weekday_ot")!.multiplier
       expect(mult(1)).toBe(OT_OLD)
       expect(mult(2)).toBe(OT_NEXT)
+      // v0 ＝ 系統預設（DEFAULT_RULE_CONFIG 跑過 parseRuleConfig，與 loadRuleConfigFor 查無版本時的退路同一份）
+      expect(full.body[2]).toMatchObject({ version: 0, isDefault: true, configValid: true })
+      expect(byVersion.get(0)).toEqual(parseRuleConfig(DEFAULT_RULE_CONFIG))
+      expect(mult(0)).toBe(DEFAULT_RULE_CONFIG.overtime.rules.find((r) => r.when === "weekday_ot")!.multiplier)
 
       // full=1 也是 HR 限定
       expect((await asVEmployee(request(app).get("/rule-config/versions?full=1"))).status).toBe(403)
@@ -442,7 +449,7 @@ describe.skipIf(!migrated)("C4 規則版本生效日 — live", () => {
       expect(v3.body).toMatchObject({ version: 3, effectiveFrom: NEXT_MONTH_FIRST })
 
       const versions = await asSAdmin(request(app).get("/rule-config/versions"))
-      expect(versions.body.map((r: { version: number }) => r.version)).toEqual([3, 2, 1])
+      expect(versions.body.map((r: { version: number }) => r.version)).toEqual([3, 2, 1, 0])
     })
 
     it("★ generate 上個月 → rule_config_version = 1（不是剛存的 3，也不是本月的 2）", async () => {
