@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest"
 import { createClient } from "@supabase/supabase-js"
 import request from "supertest"
+import ExcelJS from "exceljs"
 import { supabaseAdmin } from "../lib/supabase"
 import { provisionTenant } from "../services/tenants"
 import { purgeTestTenant } from "./helpers/purge"
@@ -16,7 +17,7 @@ import { app } from "../app"
  *   ④ PATCH 改 final_amount／備註（draft 才可）
  *   ⑤ pay 之後 PATCH → 409（API 擋 + DB trigger forbid_paid_row_mutation 兜底）
  *   ⑥ prepare 再跑一次，paid 的那些列列在 skipped、不被覆蓋
- *   ⑦ export.xlsx 回 200 且是 xlsx content-type
+ *   ⑦ export.xlsx 回 200、xlsx content-type，且 buffer 讀得回工作表（列數＝3＋人數＋1）
  *
  * 正式庫尚未套 migration 0050（festival_bonuses）時整組 describe.skipIf 跳過；
  * 套完後直接 `npx vitest run src/__tests__/festival-bonuses-live.test.ts` 即可。
@@ -53,6 +54,18 @@ async function signIn(email: string, password: string): Promise<string> {
 }
 function as(token: string, req: request.Test) {
   return req.set("Authorization", `Bearer ${token}`)
+}
+/**
+ * superagent 對 xlsx（application/vnd.openxmlformats-…）沒有內建 parser，預設既不緩衝
+ * 也不讀完 body，`res.body` 會是空物件 `{}`（`.length` undefined），而且未讀完的 socket
+ * 還可能讓後續請求踩到 HTTP parser 錯。下載二進位一律 `.buffer(true).parse(binaryParser)`
+ * ——同 bonus-runs-live／disbursements-live。
+ */
+function binaryParser(res: request.Response, cb: (err: Error | null, body: unknown) => void) {
+  const chunks: Buffer[] = []
+  const stream = res as unknown as NodeJS.ReadableStream
+  stream.on("data", (c: Buffer) => chunks.push(c))
+  stream.on("end", () => cb(null, Buffer.concat(chunks)))
 }
 async function createEmployee(label: string, hireDate: string) {
   const email = `fest-${stamp}-${label}@example.com`
@@ -171,11 +184,23 @@ describe.skipIf(!ready)("三節獎金 — live", () => {
     expect(byEmployee(await listBonuses(), seniorId).final_amount).toBe(13000)
   })
 
-  it("export.xlsx 回 xlsx", async () => {
+  it("export.xlsx 回 xlsx：檔名帶節日年度、列數＝表頭 3＋人數＋合計 1", async () => {
+    const rows = await listBonuses()
     const res = await as(adminToken, request(app).get(`/festival-bonuses/export.xlsx?festival=${FESTIVAL}&year=${YEAR}`))
+      .buffer(true)
+      .parse(binaryParser)
     expect(res.status).toBe(200)
     expect(res.headers["content-type"]).toContain("spreadsheetml")
-    expect(res.body.length ?? 0).toBeGreaterThan(0)
+    expect(decodeURIComponent(res.headers["content-disposition"] ?? "")).toContain(`三節獎金-${YEAR}-中秋.xlsx`)
+    const buf = res.body as Buffer
+    expect(buf.length).toBeGreaterThan(0)
+
+    const wb = new ExcelJS.Workbook()
+    await wb.xlsx.load(new Uint8Array(buf) as unknown as ExcelJS.Buffer)
+    const ws = wb.getWorksheet(`${YEAR} 中秋`)
+    expect(ws).toBeTruthy()
+    expect(ws!.rowCount).toBe(3 + rows.length + 1)
+    expect(ws!.getRow(3).getCell(6).value).toBe("實發金額")
   })
 
   it("pay 一次把該節全部 draft 轉 paid 並寫發放日", async () => {
@@ -215,10 +240,22 @@ describe.skipIf(!ready)("三節獎金 — live", () => {
       .update({ final_amount: 99999 })
       .eq("tenant_id", tenantId)
       .eq("id", paid.id)
-    // test/demo 租戶被 trigger 放行是設計（sql/0040），所以這裡只要求「擋了或沒改成」二選一。
+    // test/demo 租戶被 trigger 放行是設計（sql/0040 is_disposable_tenant），所以這裡只
+    // 要求「擋了或沒改成」二選一。
     if (!error) {
       const after = byEmployee(await listBonuses(), seniorId)
       expect([13000, 99999]).toContain(after.final_amount)
+      // 放行的話這列真的被改成 99999 了 → 還原成 13,000 再往下走：下一個測試要用這列
+      // 當「去年同節的實發金額」，留著 99999 會讓那個斷言驗到的是本測試的髒資料。
+      if (after.final_amount !== 13000) {
+        const restore = await supabaseAdmin
+          .from("festival_bonuses")
+          .update({ final_amount: 13000 })
+          .eq("tenant_id", tenantId)
+          .eq("id", paid.id)
+        expect(restore.error).toBeNull()
+        expect(byEmployee(await listBonuses(), seniorId).final_amount).toBe(13000)
+      }
     } else {
       expect(error.message).toContain("paid")
     }
