@@ -11,10 +11,15 @@ import { localDateKey } from "../lib/tz"
 /**
  * 特休週年制（W1）— live 合約測試（throwaway 租戶）。
  *
- * 流程：HR＋主管＋四位員工（年資 6 年／1 年／1 個月／3 年）＋假別 code 'annual' →
+ * 流程：HR＋主管＋四位員工（年資 6 年／1 年／1 個月／待搬遷的 3 年）＋假別 code 'annual' →
  * dryRun 不寫入 → 正式發放（兩列 auto、一列 skip）→ 再跑 0 新增 →
  * 曆年列 migrate 成週年期（entitled／used 不變）→ 核准假單扣到週年桶 →
  * `?year=` 是「期間與該年重疊」。
+ *
+ * ⚠️ 待搬遷的那位（legacy）在 beforeAll **不帶到職日**，到 migrate 那支才補。
+ * grantAnnualLeave 是對「租戶內所有在職且有到職日的員工」發放，他要是一開始就有
+ * 到職日，前兩支自動發放會先幫他開好 auto 桶（3 年年資＝14 日），migrate 那支就只會
+ * 拿到 already_granted，「曆年列→週年期」這條路徑永遠測不到。
  *
  * 正式庫尚未套 migration 0050（leave_balances.period_start／period_end／source／note）
  * 時整組 describe.skipIf 跳過；套完後直接
@@ -41,6 +46,8 @@ const createdTenantIds: string[] = []
 /** 基準日固定成「租戶時區的今天」，所有到職日都由它往回推，跑在哪一天都成立。 */
 const ASOF = localDateKey(new Date(), "Asia/Taipei")
 const DAILY_HOURS = 8
+/** 待搬遷那位的到職日（年資 3 年）；建帳號時刻意不帶，migrate 測試才 PATCH 進去。 */
+const LEGACY_HIRE = addMonthsKey(ASOF, -36)
 
 let tenantId: string
 let adminToken: string
@@ -134,7 +141,8 @@ describe.skipIf(!ready)("特休週年制 — live", () => {
     seniorToken = senior.token
     juniorId = (await createEmployee({ label: "junior", role: "employee", hireDate: addMonthsKey(ASOF, -12) })).id
     newbieId = (await createEmployee({ label: "newbie", role: "employee", hireDate: addMonthsKey(ASOF, -1) })).id
-    legacyId = (await createEmployee({ label: "legacy", role: "employee", hireDate: addMonthsKey(ASOF, -36) })).id
+    // 到職日留白＝不在自動發放的名單內（見檔頭 ⚠️），migrate 那支再 PATCH 補上。
+    legacyId = (await createEmployee({ label: "legacy", role: "employee" })).id
 
     const lt = await as(adminToken, request(app).post("/leave-types")).send({ code: "annual", name: "特休", paid: true })
     if (lt.status !== 201) throw new Error(`beforeAll: create leave type (${lt.status})`)
@@ -201,6 +209,9 @@ describe.skipIf(!ready)("特休週年制 — live", () => {
 
   it("migrate：曆年列改成週年期、source='migrated'、entitled／used 原封不動", async () => {
     const year = Number(ASOF.slice(0, 4))
+    // 補上到職日：從這裡起他才進得了發放名單，且手上只有一列曆年桶 → 走 migrate 而非 grant。
+    const hire = await as(adminToken, request(app).patch(`/employees/${legacyId}`)).send({ hireDate: LEGACY_HIRE })
+    expect(hire.status).toBe(200)
     const put = await as(adminToken, request(app).put("/leave-balances")).send({
       employeeId: legacyId,
       leaveTypeId: annualTypeId,
@@ -227,7 +238,7 @@ describe.skipIf(!ready)("特休週年制 — live", () => {
     expect(res.migrated[0].fromYear).toBe(year)
     expect(res.migrated[0].usedHours).toBe(16)
 
-    const expected = anniversaryPeriod(addMonthsKey(ASOF, -36), ASOF)!
+    const expected = anniversaryPeriod(LEGACY_HIRE, ASOF)!
     const after = await balancesOf(legacyId)
     expect(after).toHaveLength(1)
     expect(after[0].id).toBe(put.body.id)
