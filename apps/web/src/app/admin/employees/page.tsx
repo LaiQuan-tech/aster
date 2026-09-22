@@ -49,6 +49,7 @@ import {
   type ProfileChangeRequest,
 } from "@/lib/people-extras-api";
 import { isBulkInviteResult } from "@/lib/import-view";
+import { EMPLOYMENT_TYPES as EMPLOYMENT_TYPE_VALUES, EMPLOYMENT_TYPE_LABELS } from "@/lib/ess-tabs";
 import { useSession } from "@/lib/use-session";
 
 const ROLES: { value: string; label: string }[] = [
@@ -60,12 +61,15 @@ const ROLES: { value: string; label: string }[] = [
   { value: "hr_admin", label: "HR 管理員" },
 ];
 
-const EMPLOYMENT_TYPES = [
-  { value: "regular", label: "正職" },
-  { value: "parttime", label: "兼職" },
-  { value: "contract", label: "約聘" },
-  { value: "intern", label: "實習" },
-];
+/**
+ * 身分類別下拉與列表顯示共用 lib/ess-tabs.ts 的 EMPLOYMENT_TYPES／EMPLOYMENT_TYPE_LABELS
+ * （值域四種不變；`parttime` 的標籤是「工讀／兼職（時薪）」——2026-09-23 正式站驗收發現
+ * 這裡的下拉還寫死「兼職」，客戶找不到「工讀」）。
+ */
+const EMPLOYMENT_TYPES: { value: string; label: string }[] = EMPLOYMENT_TYPE_VALUES.map((value) => ({
+  value,
+  label: EMPLOYMENT_TYPE_LABELS[value],
+}));
 
 const PROFILE_FIELDS: { key: keyof SaveProfileBody; label: string; type?: "date"; group: "basic" | "contact" }[] = [
   { key: "lastName", label: "姓", group: "basic" },

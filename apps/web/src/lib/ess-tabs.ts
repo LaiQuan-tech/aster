@@ -254,9 +254,9 @@ export function isBottomRootPath(pathname: string): boolean {
 /* ------------------------------------------------- 身分類別（後台用）--- */
 
 /**
- * 身分類別（employees.employment_type）：目前系統只有這四種可指派值（來源：
- * app/admin/employees/page.tsx 新增員工表單的下拉選單），後台「員工端功能
- * 開放」（module-settings 頁）只針對這四類各給一排 checkbox。
+ * 身分類別（employees.employment_type）：目前系統只有這四種可指派值。這裡是值域與標籤的
+ * 單一來源：app/admin/employees/page.tsx 的新增／編輯下拉與列表顯示、後台「員工端功能
+ * 開放」（module-settings/ess-tabs 頁）的四排 checkbox 都從這裡取。
  *
  * `parttime` 同時涵蓋客戶說的「工讀生」（M12，2026-09-23）：時薪制、勞健保依級距表
  * 自動選級（規則 insurance.brackets）；不另開值域，標籤寫明即可。
