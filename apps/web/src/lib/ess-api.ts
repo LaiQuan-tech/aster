@@ -126,12 +126,29 @@ export type RequestKind =
   /** 在家工作（M2，2026-09-23）：只用 startAt／endAt／hours／reason；核准日無打卡以班表淨工時計。 */
   | "wfh";
 
-/** 加班單超過月上限的標記明細（M1；services/overtime-cap.ts beyondCapCheck）。 */
+/**
+ * 加班單超過月上限的標記明細（M1；services/overtime-cap.ts beyondCapCheck）。
+ * 頂層是**送單時**的判定（累計基準＝已核准＋待簽，2026-09-23 起）；`atApproval` 是最終核准
+ * 那一刻以「已核准（排除本單）＋本單」重算的結果（`beyond_cap` 旗標以它為準），舊單沒有。
+ */
 export interface BeyondCapDetail {
   approvedBeforeMinutes: number;
+  /** 送單時本月待簽加班單分鐘；2026-09-23 之前送的單沒有這個欄位。 */
+  pendingBeforeMinutes?: number;
   requestedMinutes: number;
   capMinutes: number;
+  beyondCap?: boolean;
   beyondCapMinutes?: number;
+  atApproval?: {
+    approvedBeforeMinutes: number;
+    pendingBeforeMinutes: number;
+    requestedMinutes: number;
+    capMinutes: number;
+    beyondCap: boolean;
+    beyondCapMinutes: number;
+    /** 核准時間（ISO）。 */
+    at: string;
+  } | null;
 }
 
 export interface LeaveRequest {
@@ -196,13 +213,19 @@ export interface LeaveType {
   created_at: string;
 }
 
+/** 補卡段的卡別；與 API routes/requests.ts 的 PUNCH_SEGMENT_TYPES／punch_records.type 同一組值。 */
+export type PunchSegmentType = "in" | "out" | "break_in" | "break_out" | "outing_in" | "outing_out";
+
 export interface LeaveSegment {
   date: string;
   startTime: string;
   endTime: string;
   hours: number;
-  /** 補卡（fix_punch）用：補的是上班還是下班；其他種類不帶。 */
-  type?: "in" | "out";
+  /**
+   * 補卡（fix_punch）用：補的是哪一種卡；其他種類不帶。ESS 表單只送 in／out，
+   * 但 API 也收休息／外出對（後台代申請、匯入），顯示端要全部認得。
+   */
+  type?: PunchSegmentType;
 }
 
 export interface CreateRequestBody {
@@ -467,6 +490,8 @@ export interface CreateRequestResult {
    */
   beyondCap?: {
     approvedBeforeMinutes: number;
+    /** 本月待簽加班單分鐘（2026-09-23 起併入累計基準）。 */
+    pendingBeforeMinutes?: number;
     requestedMinutes: number;
     capMinutes: number;
     beyondCap: boolean;

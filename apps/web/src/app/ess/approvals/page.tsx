@@ -84,12 +84,17 @@ function applicantName(row: PendingApproval): string {
   return row.employee_name ?? row.employee_id.slice(0, 8);
 }
 
-/** 期間文字：有分段用 summarizeSegments（≤3 段逐行、>3 段壓縮），否則起訖＋時數。 */
+/**
+ * 期間文字：有分段用 summarizeSegments（≤3 段逐行、>3 段壓縮），否則起訖＋時數。
+ * 結束時間缺席／無效，或與起始同一分鐘（補卡單 startAt = endAt）→ 只顯示起始，不印「～ —」。
+ */
 function periodText(row: PendingApproval): string {
   const segs = summarizeSegments(row.segments);
   if (segs) return segs;
   const hours = row.hours != null ? ` · ${fmtHours(row.hours)}` : "";
-  return `${fmtDateTime(row.start_at)} ～ ${fmtDateTime(row.end_at)}${hours}`;
+  const start = fmtDateTime(row.start_at);
+  const end = row.end_at ? fmtDateTime(row.end_at) : "—";
+  return end === "—" || end === start ? `${start}${hours}` : `${start} ～ ${end}${hours}`;
 }
 
 export default function ApprovalsPage() {

@@ -522,4 +522,26 @@ describe("contentLines（內容欄）", () => {
     expect(remarkOnly.slice(1)).toEqual(["備註而已", "類型：公出", "加班給付：加班費"]);
     expect(contentLines(request({ hours: null }))).toHaveLength(1);
   });
+
+  it("結束時間缺席／無效或與起始相同（補卡單）→ 只顯示起始，不印「→」也不印 1970", () => {
+    // 時間文字走 toLocaleString（zh-TW 會印「下午03:00」），用同一支函式算出的「起始」當基準，不寫死格式。
+    const startOf = (row: LeaveRequest) => contentLines({ ...row, end_at: "2026-12-31T10:00:00+00:00", hours: null })[0].split(" → ")[0];
+
+    const punch = request({ kind: "fix_punch", hours: null, start_at: "2026-09-17T07:00:00+00:00", end_at: "2026-09-17T07:00:00+00:00" });
+    expect(contentLines(punch)[0]).toBe(startOf(punch));
+    expect(contentLines(punch)[0]).not.toContain("→");
+
+    const missing = request({ kind: "fix_punch", hours: null, end_at: null as unknown as string });
+    expect(contentLines(missing)[0]).toBe(startOf(missing));
+    expect(contentLines(missing)[0]).not.toContain("1970");
+    expect(contentLines(missing)[0]).not.toContain("undefined");
+
+    const invalid = request({ hours: 2, end_at: "not-a-date" });
+    expect(contentLines(invalid)[0]).toBe(`${startOf(invalid)}（2 小時）`);
+
+    // 正常起訖仍是「起 → 迄」
+    const normal = request({ hours: 8 });
+    expect(contentLines(normal)[0]).toContain(" → ");
+    expect(contentLines(normal)[0]).toMatch(/（8 小時）$/);
+  });
 });

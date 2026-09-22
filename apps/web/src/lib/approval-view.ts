@@ -414,13 +414,22 @@ export function actionsFor(bucket: ApprovalBucket): RowActionSpec[] {
 
 /* --------------------------------------------------------- content ----- */
 
-function fmtDateTime(iso: string): string {
-  return new Date(iso).toLocaleString("zh-TW", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+/** ISO → `MM/DD HH:mm`；缺席／無效 → null（`new Date(null)` 會變成 1970 年，不能直接印）。 */
+function fmtDateTime(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString("zh-TW", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
-/** 「內容」欄（原 approvals `contentLines`）：第一行期間＋時數，之後原因／地點／代理人／類型／給付。 */
+/**
+ * 「內容」欄（原 approvals `contentLines`）：第一行期間＋時數，之後原因／地點／代理人／類型／給付。
+ * 結束時間缺席／無效，或與起始同一分鐘（補卡單 startAt = endAt）→ 只顯示起始。
+ */
 export function contentLines(row: LeaveRequest): string[] {
-  const period = `${fmtDateTime(row.start_at)} → ${fmtDateTime(row.end_at)}`;
+  const start = fmtDateTime(row.start_at) ?? "—";
+  const end = fmtDateTime(row.end_at);
+  const period = end && end !== start ? `${start} → ${end}` : start;
   const lines = [row.hours != null ? `${period}（${row.hours} 小時）` : period];
   const main = row.reason || row.remark;
   if (main) lines.push(main);

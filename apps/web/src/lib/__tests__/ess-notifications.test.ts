@@ -136,4 +136,17 @@ describe("summarizeSegments", () => {
     // 0 小時不顯示「· 0 小時」
     expect(summarizeSegment(seg("2026-09-18", "09:00", "09:00", 0))).toBe("09/18 09:00–09:00");
   });
+
+  it("休息／外出對的補卡段也認得（2026-09-23 正式站曾顯示「09/17 15:00 · undefined」）；未知值退回「補卡（原值）」", () => {
+    expect(summarizeSegment(seg("2026-09-17", "15:00", "15:00", 0, "outing_out"))).toBe("09/17 15:00 · 補外出結束卡");
+    expect(summarizeSegment(seg("2026-09-17", "16:00", "16:00", 0, "outing_in"))).toBe("09/17 16:00 · 補外出開始卡");
+    expect(summarizeSegment(seg("2026-09-17", "12:00", "12:00", 0, "break_in"))).toBe("09/17 12:00 · 補休息開始卡");
+    expect(summarizeSegment(seg("2026-09-17", "13:00", "13:00", 0, "break_out"))).toBe("09/17 13:00 · 補休息結束卡");
+    const unknown = { ...seg("2026-09-17", "15:00", "15:00", 0), type: "weird" } as unknown as LeaveSegment;
+    expect(summarizeSegment(unknown)).toBe("09/17 15:00 · 補卡（weird）");
+    expect(summarizeSegment(unknown)).not.toContain("undefined");
+    expect(summarizeSegments([seg("2026-09-17", "15:00", "15:00", 0, "outing_out"), seg("2026-09-17", "16:00", "16:00", 0, "outing_in")])).toBe(
+      "09/17 15:00 · 補外出結束卡\n09/17 16:00 · 補外出開始卡",
+    );
+  });
 });

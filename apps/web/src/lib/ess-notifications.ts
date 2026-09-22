@@ -99,16 +99,29 @@ export function notificationLink(n: NotificationLike): string | null {
 
 /* ------------------------------------------------------- 請假分段 --- */
 
+/**
+ * 補卡段卡別 → 顯示文字。六種都要列（與 API PUNCH_SEGMENT_TYPES 同組）：2026-09-23 正式站
+ * 一張補「外出開始／結束」的單在 /ess/approvals 顯示成「09/17 15:00 · undefined」，就是這張表
+ * 當時只有 in／out。認不得的值退回「補卡（原值）」，永遠不再印 undefined。
+ */
 const PUNCH_TYPE_LABEL: Record<NonNullable<LeaveSegment["type"]>, string> = {
   in: "補上班卡",
   out: "補下班卡",
+  break_in: "補休息開始卡",
+  break_out: "補休息結束卡",
+  outing_in: "補外出開始卡",
+  outing_out: "補外出結束卡",
 };
+
+export function punchTypeLabel(type: string): string {
+  return (PUNCH_TYPE_LABEL as Record<string, string | undefined>)[type] ?? `補卡（${type}）`;
+}
 
 /** 單段：`09/18 09:00–18:00 · 8 小時`；補卡段：`09/18 09:00 · 補上班卡`。 */
 export function summarizeSegment(seg: LeaveSegment): string {
   const date = fmtDateShort(seg.date);
   if (seg.type) {
-    return `${date} ${seg.startTime} · ${PUNCH_TYPE_LABEL[seg.type]}`;
+    return `${date} ${seg.startTime} · ${punchTypeLabel(seg.type)}`;
   }
   const hours = Number(seg.hours);
   const hoursText = Number.isFinite(hours) && hours > 0 ? ` · ${fmtHours(hours)}` : "";
