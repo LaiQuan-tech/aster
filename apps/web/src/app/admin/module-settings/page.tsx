@@ -20,6 +20,8 @@ import {
 import {
   asExtConfig,
   getRuleConfigVersionsFull,
+  isDefaultRuleVersion,
+  ruleVersionLabel,
   type AnnualLeaveBasis,
   type InsuranceBracketSet,
   type OvertimeBasis,
@@ -45,6 +47,18 @@ const PANEL_OPTIONS: { value: Panel; label: string }[] = [
 ];
 
 type YearStatus = "draft" | "published" | "locked";
+
+/**
+ * 假單附件上限的預設值（KB）。必須與伺服器預設一致：apps/api/src/services/profile-fields.ts 的
+ * `DEFAULT_ATTACHMENT_BYTES = 3 * 1024 * 1024`（3 MB ＝ 3072 KB）——2026-09-23 正式站驗收發現這裡
+ * 原本寫 300，租戶沒設過表單參數的話按一次「儲存表單參數」就把上限靜默縮成 300 KB（小 10 倍）。
+ */
+const DEFAULT_ATTACHMENT_LIMIT_KB = 3072;
+
+/** 版本比對下拉的選項文字：v0 不寫生效日（它沒有），其餘寫「v3（生效 2026-10-01）」。 */
+function ruleVersionOptionLabel(v: RuleConfigVersionFull): string {
+  return isDefaultRuleVersion(v) ? ruleVersionLabel(v) : `${ruleVersionLabel(v)}（生效 ${v.effectiveFrom ?? "—"}）`;
+}
 
 const YEAR_STATUS_META: Record<YearStatus, { label: string; cls: string }> = {
   draft: { label: "草稿", cls: "bg-amber-50 text-amber-700" },
@@ -495,7 +509,7 @@ export default function ModuleSettingsPage() {
   const [features, setFeatures] = useState<TenantFeatures>({});
   const [myDataRequiresApproval, setMyDataRequiresApproval] = useState(true);
   const [editableFields, setEditableFields] = useState("basic,contact,education,certification,workHistory");
-  const [attachmentLimitKb, setAttachmentLimitKb] = useState("300");
+  const [attachmentLimitKb, setAttachmentLimitKb] = useState(String(DEFAULT_ATTACHMENT_LIMIT_KB));
   const [activeYear, setActiveYear] = useState(String(new Date().getFullYear()));
   const [yearStatus, setYearStatus] = useState<YearStatus>("published");
   const [workCalendar, setWorkCalendar] = useState("台灣行事曆");
@@ -575,7 +589,7 @@ export default function ModuleSettingsPage() {
         setFeatures(nextFeatures);
         setMyDataRequiresApproval(formParameters.myDataRequiresApproval ?? true);
         setEditableFields((formParameters.editableFields ?? ["basic", "contact", "education", "certification", "workHistory"]).join(","));
-        setAttachmentLimitKb(String(formParameters.attachmentLimitKb ?? 300));
+        setAttachmentLimitKb(String(formParameters.attachmentLimitKb ?? DEFAULT_ATTACHMENT_LIMIT_KB));
         setActiveYear(attendanceModule.activeYear ?? String(new Date().getFullYear()));
         setYearStatus(attendanceModule.yearStatus ?? "published");
         setWorkCalendar(attendanceModule.workCalendar ?? "台灣行事曆");
@@ -590,6 +604,8 @@ export default function ModuleSettingsPage() {
    * 版本歷史非關鍵路徑：拿不到就顯示錯誤字樣，不擋頁面其餘內容。
    * M9 之後用 `?full=1`（每版附內容）才比對得出兩版差在哪；比對的預設選擇跟著
    * 更新成「最新兩版」，但使用者已經自己選過就不動他的選擇。
+   * rows 已由 getRuleConfigVersionsFull 排成新版在前、v0（系統預設）在最後，所以只有 v1 時
+   * 預設就是 v0 ↔ v1；沒有 v0 的舊回應也照樣運作（只有一版就顯示「至少要有兩個版本」）。
    */
   async function reloadRuleVersions() {
     try {
@@ -879,7 +895,7 @@ export default function ModuleSettingsPage() {
             .split(",")
             .map((field) => field.trim())
             .filter(Boolean),
-          attachmentLimitKb: Number(attachmentLimitKb) || 300,
+          attachmentLimitKb: Number(attachmentLimitKb) || DEFAULT_ATTACHMENT_LIMIT_KB,
         },
       };
       const saved = await saveTenantSettings({ features: nextFeatures });
@@ -1628,7 +1644,8 @@ export default function ModuleSettingsPage() {
               <h2 className="text-base font-semibold text-gray-900">規則版本歷史</h2>
               <p className="mt-1 text-sm text-gray-500">
                 每次儲存規則都會建立一個新版本；「目前生效」比對的是目前載入的版本號（「原始 JSON」分頁顯示），與後端依生效日選版的結果一致。
-                點「檢視內容」可以看到那一版當時存的完整規則。
+                點「檢視內容」可以看到那一版當時存的完整規則。v0（系統預設）是還沒存過任何版本時套用的內建規則，
+                同樣可以檢視、也可以拿來比對（只有 v1 時就跟 v0 比）。
               </p>
             </div>
             {ruleVersions ? (
@@ -1648,11 +1665,11 @@ export default function ModuleSettingsPage() {
                       {ruleVersions.map((v) => (
                         <Fragment key={v.version}>
                           <tr className="border-b border-gray-50">
-                            <td className="py-2 pr-4 font-medium text-gray-800">v{v.version}</td>
-                            <td className="py-2 pr-4 text-gray-600">{v.effectiveFrom}</td>
+                            <td className="py-2 pr-4 font-medium text-gray-800">{ruleVersionLabel(v)}</td>
+                            <td className="py-2 pr-4 text-gray-600">{v.effectiveFrom ?? "—"}</td>
                             <td className="py-2 pr-4 text-gray-600">{fmtDateTime(v.createdAt)}</td>
                             <td className="py-2 pr-4">
-                              {ruleConfig?.version === v.version ? (
+                              {(isDefaultRuleVersion(v) ? ruleConfig?.isDefault === true : ruleConfig?.version === v.version && !ruleConfig.isDefault) ? (
                                 <span className="rounded-full bg-green-50 px-2 py-1 text-xs text-green-700">目前生效</span>
                               ) : (
                                 <span className="text-xs text-gray-300">—</span>
@@ -1715,7 +1732,7 @@ export default function ModuleSettingsPage() {
                     >
                       {ruleVersions.map((v) => (
                         <option key={v.version} value={v.version}>
-                          v{v.version}（生效 {v.effectiveFrom ?? "—"}）
+                          {ruleVersionOptionLabel(v)}
                         </option>
                       ))}
                     </select>
@@ -1729,7 +1746,7 @@ export default function ModuleSettingsPage() {
                     >
                       {ruleVersions.map((v) => (
                         <option key={v.version} value={v.version}>
-                          v{v.version}（生效 {v.effectiveFrom ?? "—"}）
+                          {ruleVersionOptionLabel(v)}
                         </option>
                       ))}
                     </select>
@@ -1794,6 +1811,9 @@ export default function ModuleSettingsPage() {
                 value={attachmentLimitKb}
                 onChange={(event) => setAttachmentLimitKb(event.target.value)}
               />
+              <p className="mt-1 text-xs text-gray-400">
+                假單附件的大小上限；預設 {DEFAULT_ATTACHMENT_LIMIT_KB} KB（3 MB，與伺服器預設相同）。
+              </p>
             </div>
           </div>
           <div className="mt-4">

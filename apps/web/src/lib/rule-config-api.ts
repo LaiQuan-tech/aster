@@ -87,13 +87,45 @@ export interface RuleConfigVersionFull extends RuleConfigVersion {
   /** 該版的規則內容；`configValid: false` 代表舊版 DSL 已不合現行 schema，內容原樣回傳。 */
   config: RuleConfig | null;
   configValid: boolean;
+  /**
+   * v0（系統預設）：2026-09-23 起後端在清單最前面多回一筆
+   * `{ version: 0, isDefault: true, effectiveFrom: null, createdAt: null, active: <沒有任何版本時 true>, config: <系統預設規則> }`，
+   * 讓只有 v1 的租戶也比對得出「改了什麼」。舊回應沒有這個欄位（normalizeRuleVersions 會補）。
+   */
+  isDefault?: boolean;
+}
+
+/** v0（系統預設）判定：後端標 isDefault，或 version 是 0（舊回應不會有 0 版）。 */
+export function isDefaultRuleVersion(v: Pick<RuleConfigVersionFull, "version" | "isDefault">): boolean {
+  return v.isDefault === true || v.version === 0;
+}
+
+/** 清單／下拉的版本標籤：`v3`；系統預設是 `v0（系統預設）`。 */
+export function ruleVersionLabel(v: Pick<RuleConfigVersionFull, "version" | "isDefault">): string {
+  return isDefaultRuleVersion(v) ? "v0（系統預設）" : `v${v.version}`;
+}
+
+/**
+ * 整理版本清單：一律新版在前（v0 系統預設排最後，不管後端把它放在陣列哪裡）、補 isDefault、
+ * v0 沒帶 configValid 時視為有效（有 config 就能檢視／比對）。對沒有 v0 的舊回應也同樣適用。
+ */
+export function normalizeRuleVersions(rows: RuleConfigVersionFull[]): RuleConfigVersionFull[] {
+  return rows
+    .map((row) => ({
+      ...row,
+      isDefault: isDefaultRuleVersion(row),
+      configValid: typeof row.configValid === "boolean" ? row.configValid : row.config != null,
+    }))
+    .sort((a, b) => b.version - a.version);
 }
 
 /**
  * 版本歷史＋每一版的內容（M9）。後端預設不帶 config（版本一多會很肥），要比對才加 full。
+ * 回傳已經過 normalizeRuleVersions（新版在前、v0 在最後）。
  */
-export function getRuleConfigVersionsFull() {
-  return apiFetch<RuleConfigVersionFull[]>("/rule-config/versions?full=1");
+export async function getRuleConfigVersionsFull() {
+  const rows = await apiFetch<RuleConfigVersionFull[]>("/rule-config/versions?full=1");
+  return normalizeRuleVersions(Array.isArray(rows) ? rows : []);
 }
 
 /* ---------------------------------------------------------- 版本比對 --- */
