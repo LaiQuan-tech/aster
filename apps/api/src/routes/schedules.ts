@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { upsertScheduleAssignments } from "../services/imports/writers.js"
 
 export const schedulesRouter = Router()
 
@@ -33,15 +34,8 @@ const querySchema = z.object({
 
 type Assignment = z.infer<typeof assignmentSchema>
 
-function toRow(tenantId: string, a: Assignment) {
-  return {
-    tenant_id: tenantId,
-    employee_id: a.employeeId,
-    work_date: a.workDate,
-    shift_id: a.shiftId ?? null,
-    status: a.status ?? "scheduled",
-  }
-}
+// 列的形狀與 upsert 都在 services/imports/writers.ts 的 upsertScheduleAssignments
+// （xlsx 匯入 POST /imports/schedules 共用）。
 
 // Body for POST /schedules/import — a raw CSV blob (as pasted from a spreadsheet
 // export). Header row is required; recognised columns are employeeId/employee_id,
@@ -139,19 +133,10 @@ schedulesRouter.post(
 
     const assignments: Assignment[] =
       "assignments" in parsed.data ? parsed.data.assignments : [parsed.data]
-    const rows = assignments.map((a) => toRow(tenantId, a))
 
     try {
-      const { data, error } = await supabaseAdmin
-        .from("schedules")
-        .upsert(rows, { onConflict: "tenant_id,employee_id,work_date" })
-        .select("id")
-
-      if (error) {
-        next(new Error(`POST /schedules: ${error.message}`))
-        return
-      }
-      res.status(201).json({ ids: (data ?? []).map((r) => r.id), count: data?.length ?? 0 })
+      const { ids } = await upsertScheduleAssignments(tenantId, assignments, "POST /schedules")
+      res.status(201).json({ ids, count: ids.length })
     } catch (err) {
       next(err)
     }
@@ -186,21 +171,9 @@ schedulesRouter.post(
       return
     }
 
-    const rows = assignments.map((a) => toRow(tenantId, a))
     try {
-      const { data, error } = await supabaseAdmin
-        .from("schedules")
-        .upsert(rows, { onConflict: "tenant_id,employee_id,work_date" })
-        .select("id")
-      if (error) {
-        next(new Error(`POST /schedules/import: ${error.message}`))
-        return
-      }
-      res.status(201).json({
-        imported: (data ?? []).map((r) => r.id),
-        count: data?.length ?? 0,
-        errors,
-      })
+      const { ids } = await upsertScheduleAssignments(tenantId, assignments, "POST /schedules/import")
+      res.status(201).json({ imported: ids, count: ids.length, errors })
     } catch (err) {
       next(err)
     }

@@ -60,6 +60,7 @@ import { disbursementReportsRouter } from "./routes/disbursement-reports.js"
 import { leaveSettlementRouter } from "./routes/leave-settlement.js"
 import { auditLogsRouter } from "./routes/audit-logs.js"
 import { bonusRunsRouter } from "./routes/bonus-runs.js"
+import { importsRouter } from "./routes/imports.js"
 import { runWithRequestContext } from "./lib/request-context.js"
 
 const WEB_ORIGINS = (process.env.WEB_ORIGINS ?? "http://localhost:3000")
@@ -162,6 +163,7 @@ app.use(disbursementsRouter)
 app.use(leaveSettlementRouter)
 app.use(auditLogsRouter)
 app.use(bonusRunsRouter) // /bonus-runs/preview、/bonus-runs/summary 要在 /bonus-runs/:id 之前（D1 獎金季發放批次）
+app.use(importsRouter) // /imports/:kind/template、/imports/:kind（批次匯入：Excel 範本下載＋上傳）
 
 // 404 fallback.
 app.use((_req: Request, res: Response) => {

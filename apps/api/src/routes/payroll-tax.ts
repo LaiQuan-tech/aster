@@ -10,6 +10,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { insertSalaryAdjustments, type SalaryAdjustmentInput } from "../services/imports/writers.js"
 
 export const payrollTaxRouter = Router()
 
@@ -238,7 +239,7 @@ payrollTaxRouter.post(
       return
     }
     const headers = lines[0].split(",").map((h) => h.trim())
-    const rows: Record<string, unknown>[] = []
+    const rows: SalaryAdjustmentInput[] = []
     const errors: { line: number; error: string }[] = []
     lines.slice(1).forEach((line, i) => {
       const cells = line.split(",")
@@ -253,10 +254,9 @@ payrollTaxRouter.post(
         return
       }
       rows.push({
-        tenant_id: tenantId,
-        employee_id: r.data.employeeId,
-        effective_date: r.data.effectiveDate,
-        new_salary: r.data.newSalary,
+        employeeId: r.data.employeeId,
+        effectiveDate: r.data.effectiveDate,
+        newSalary: r.data.newSalary,
         reason: r.data.reason ?? null,
       })
     })
@@ -265,12 +265,9 @@ payrollTaxRouter.post(
       return
     }
     try {
-      const { data, error } = await supabaseAdmin.from("salary_adjustments").insert(rows).select("id")
-      if (error) {
-        next(new Error(`POST /salary-adjustments/import: ${error.message}`))
-        return
-      }
-      res.status(201).json({ count: data?.length ?? 0, errors })
+      // 寫入段在 services/imports/writers.ts（xlsx 匯入 POST /imports/salary-adjustments 共用）。
+      const { ids } = await insertSalaryAdjustments(tenantId, rows, "POST /salary-adjustments/import")
+      res.status(201).json({ count: ids.length, errors })
     } catch (err) {
       next(err)
     }

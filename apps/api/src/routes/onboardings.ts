@@ -5,6 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { seedHireAcknowledgements } from "../services/onboarding-signatures.js"
+import { insertOnboardings, type OnboardingInput } from "../services/imports/writers.js"
 
 export const onboardingsRouter = Router()
 
@@ -116,7 +117,7 @@ onboardingsRouter.post(
       return
     }
     const headers = lines[0].split(",").map((h) => h.trim())
-    const rows: Record<string, unknown>[] = []
+    const rows: OnboardingInput[] = []
     const errors: { line: number; error: string }[] = []
     lines.slice(1).forEach((line, i) => {
       const cells = line.split(",")
@@ -131,13 +132,11 @@ onboardingsRouter.post(
         return
       }
       rows.push({
-        tenant_id: tenantId,
         name: r.data.name,
-        report_date: r.data.reportDate ?? null,
-        identity_type: r.data.identityType ?? null,
+        reportDate: r.data.reportDate ?? null,
+        identityType: r.data.identityType ?? null,
         region: r.data.region ?? null,
-        employment_type: r.data.employmentType ?? "regular",
-        status: "pending",
+        employmentType: r.data.employmentType ?? "regular",
       })
     })
     if (rows.length === 0) {
@@ -145,12 +144,9 @@ onboardingsRouter.post(
       return
     }
     try {
-      const { data, error } = await supabaseAdmin.from("onboardings").insert(rows).select("id")
-      if (error) {
-        next(new Error(`POST /onboardings/import: ${error.message}`))
-        return
-      }
-      res.status(201).json({ count: data?.length ?? 0, errors })
+      // 寫入段在 services/imports/writers.ts（xlsx 匯入 POST /imports/onboardings 共用）。
+      const { ids } = await insertOnboardings(tenantId, rows, "POST /onboardings/import")
+      res.status(201).json({ count: ids.length, errors })
     } catch (err) {
       next(err)
     }

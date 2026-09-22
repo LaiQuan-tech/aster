@@ -9,6 +9,7 @@ import { writeAuditLog } from "../services/audit.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { dayWindowUtc, todayKey } from "../lib/tz.js"
 import { checkPunchCooldown, cooldownSeconds, statusFromRecords } from "../services/punch-guard.js"
+import { importManualPunches } from "../services/imports/writers.js"
 
 export const punchRouter = Router()
 
@@ -432,51 +433,20 @@ punchRouter.post(
     }
 
     try {
-      const employeeIds = Array.from(new Set(records.map((record) => record.employeeId)))
-      const { data: employees, error: empErr } = await supabaseAdmin
-        .from("employees")
-        .select("id")
-        .eq("tenant_id", tenantId)
-        .in("id", employeeIds)
-      if (empErr) {
-        next(new Error(`POST /punch/manual/import (employees): ${empErr.message}`))
-        return
-      }
-
-      const validEmployees = new Set((employees ?? []).map((employee) => employee.id as string))
-      const rows = records
-        .map((record, index) => ({ record, line: index + 2 }))
-        .filter(({ record, line }) => {
-          if (validEmployees.has(record.employeeId)) return true
-          errors.push({ line, error: "employee_not_found" })
-          return false
-        })
-        .map(({ record }) => ({
-          tenant_id: tenantId,
-          employee_id: record.employeeId,
-          punch_at: record.punchAt,
-          type: record.type,
-          source: "manual",
-        }))
-
-      if (rows.length === 0) {
+      // 寫入段抽到 services/imports/writers.ts（xlsx 匯入 POST /imports/punches 共用）：
+      // 先驗同租戶員工、逐筆 employee_not_found、source='manual'。行號沿用原本的
+      // 「有效紀錄序 + 2」（parser 已把壞行剔掉，這是既有行為）。
+      const { ids, errors: writeErrors } = await importManualPunches(
+        tenantId,
+        records.map((record, index) => ({ ...record, line: index + 2 })),
+        "POST /punch/manual/import",
+      )
+      errors.push(...writeErrors)
+      if (ids.length === 0) {
         res.status(400).json({ error: "no_valid_rows", errors })
         return
       }
-
-      const { data, error } = await supabaseAdmin
-        .from("punch_records")
-        .insert(rows)
-        .select("id")
-      if (error) {
-        next(new Error(`POST /punch/manual/import: ${error.message}`))
-        return
-      }
-      res.status(201).json({
-        imported: (data ?? []).map((record) => record.id),
-        count: data?.length ?? 0,
-        errors,
-      })
+      res.status(201).json({ imported: ids, count: ids.length, errors })
     } catch (err) {
       next(err)
     }

@@ -5,8 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { isMissingTableError } from "../lib/schema-compat.js"
-import { TW_HOLIDAYS } from "../lib/tw-holidays.js"
-import { addDaysKey, weekdayOfKey } from "../lib/tz.js"
+import { CalendarNotMigratedError, generateTenantCalendar } from "../services/imports/writers.js"
 
 export const calendarRouter = Router()
 
@@ -66,17 +65,6 @@ function notMigrated(res: Response, err: { code?: string | null; message?: strin
   if (!isMissingTableError(err)) return false
   res.status(503).json({ error: "calendar_not_migrated", detail: "tenant_calendar_days is not available yet (packages/db migration 0038)" })
   return true
-}
-
-/** Every Saturday and Sunday of `year` as 'YYYY-MM-DD'. */
-function weekendsOf(year: number): string[] {
-  const out: string[] = []
-  const last = `${year}-12-31`
-  for (let d = `${year}-01-01`; d <= last; d = addDaysKey(d, 1)) {
-    const wd = weekdayOfKey(d)
-    if (wd === 0 || wd === 6) out.push(d)
-  }
-  return out
 }
 
 calendarRouter.get(
@@ -166,67 +154,16 @@ calendarRouter.post(
     const { year } = parsed.data
     // Caller's list wins; otherwise the built-in 行政機關 calendar for years we
     // ship (2026). A year we have no list for imports nothing (not an error —
-    // HR can PUT the days later).
-    const holidaySource = parsed.data.holidays ?? TW_HOLIDAYS[year] ?? []
-    const holidays = holidaySource.filter((h) => h.date.startsWith(`${year}-`))
-
+    // HR can PUT the days later). 週末→rest_day、假日→fixed_holiday 的邏輯在
+    // services/imports/writers.ts 的 generateTenantCalendar（xlsx 匯入 POST /imports/holidays 共用）。
     try {
-      const { data: existingData, error: existingErr } = await supabaseAdmin
-        .from("tenant_calendar_days")
-        .select("date, source")
-        .eq("tenant_id", tenantId)
-        .gte("date", `${year}-01-01`)
-        .lte("date", `${year}-12-31`)
-      if (existingErr) {
-        if (notMigrated(res, existingErr)) return
-        next(new Error(`POST /calendar/generate (existing): ${existingErr.message}`))
+      const result = await generateTenantCalendar(tenantId, year, parsed.data.holidays, "POST /calendar/generate")
+      res.status(200).json(result)
+    } catch (err) {
+      if (err instanceof CalendarNotMigratedError) {
+        res.status(503).json({ error: "calendar_not_migrated", detail: err.message })
         return
       }
-      const existing = new Map<string, string>()
-      for (const row of (existingData ?? []) as Array<{ date: string; source: string }>) {
-        existing.set(row.date, row.source)
-      }
-
-      // 1) weekends → rest_day, never overwriting any existing ruling. A
-      //    weekend that is also a listed holiday is left to step 2.
-      const holidayDates = new Set(holidays.map((h) => h.date))
-      const weekends = weekendsOf(year)
-      const skippedWeekends = weekends.filter((d) => existing.has(d)).length
-      const weekendRows = weekends
-        .filter((d) => !existing.has(d) && !holidayDates.has(d))
-        .map((d) => ({ tenant_id: tenantId, date: d, day_type: "rest_day", label: null, source: "generated" }))
-      if (weekendRows.length > 0) {
-        const { error } = await supabaseAdmin.from("tenant_calendar_days").insert(weekendRows)
-        if (error) {
-          next(new Error(`POST /calendar/generate (weekends): ${error.message}`))
-          return
-        }
-      }
-
-      // 2) holidays → fixed_holiday (source 'import'). A manual ruling on the
-      //    same date is kept; generated/imported rows are refreshed.
-      const importRows = holidays
-        .filter((h) => existing.get(h.date) !== "manual")
-        .map((h) => ({
-          tenant_id: tenantId,
-          date: h.date,
-          day_type: "fixed_holiday",
-          label: h.label ?? null,
-          source: "import",
-        }))
-      const skipped = skippedWeekends + (holidays.length - importRows.length)
-      if (importRows.length > 0) {
-        const { error } = await supabaseAdmin
-          .from("tenant_calendar_days")
-          .upsert(importRows, { onConflict: "tenant_id,date" })
-        if (error) {
-          next(new Error(`POST /calendar/generate (holidays): ${error.message}`))
-          return
-        }
-      }
-
-      res.status(200).json({ year, generated: weekendRows.length, imported: importRows.length, skipped })
-    } catch (err) {
       next(err)
     }
   },
