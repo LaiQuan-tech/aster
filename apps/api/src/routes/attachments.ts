@@ -6,12 +6,18 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { managerChainOfEmployee } from "../middleware/scope.js"
 import { approvalStepsHaveCandidates } from "../lib/schema-compat.js"
 import { isStepCandidate, stepSelectCols } from "../services/approval-steps.js"
+import { attachmentLimitBytes } from "../services/profile-fields.js"
 
 export const attachmentsRouter = Router()
 
 const BUCKET = "request-attachments"
 const MAX_FILES = 3
-const MAX_BYTES = 3 * 1024 * 1024 // 上限 3 MB
+/**
+ * 單檔上限：原本硬編 3 MB，改讀租戶的「模組設定 → 表單參數 → 附件上限 KB」
+ * （`features.formParameters.attachmentLimitKb`，W6——那個設定存了一直不生效）。
+ * 讀法與 3 MB 預設收在 services/profile-fields.ts 的 attachmentLimitBytes()，
+ * 設定缺漏或讀取失敗一律退回預設，不讓上傳整條路壞掉。
+ */
 
 const uploadSchema = z.object({
   fileName: z.string().trim().min(1).max(200),
@@ -132,8 +138,9 @@ attachmentsRouter.post(
         res.status(400).json({ error: "invalid_base64" })
         return
       }
-      if (bytes.length === 0 || bytes.length > MAX_BYTES) {
-        res.status(413).json({ error: "file_too_large", maxBytes: MAX_BYTES })
+      const maxBytes = await attachmentLimitBytes(tenantId)
+      if (bytes.length === 0 || bytes.length > maxBytes) {
+        res.status(413).json({ error: "file_too_large", maxBytes })
         return
       }
 

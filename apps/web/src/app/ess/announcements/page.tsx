@@ -1,13 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getAnnouncements, recordAnnouncementView, type Announcement } from "@/lib/ess-api";
+import { recordAnnouncementView, type Announcement } from "@/lib/ess-api";
 import { localDateKey } from "@/lib/ess-format";
-import { Button, Card, EmptyState, InlineError, Pill, Skeleton } from "@/components/ess-ui";
+import { Button, Card, EmptyState, InlineError, Pill, Segmented, Skeleton } from "@/components/ess-ui";
+import { getAnnouncementYears, listAnnouncementsBy } from "@/lib/people-extras-api";
 
 /**
  * 公告頁 `/ess/announcements`（從舊首頁的「最新公告」區獨立出來；標題由 EssShell 路由表提供）。
  * 列表：標題、日期、需簽收 Pill、內文預設收合 3 行、點一下展開。
+ *
+ * M10 年度分區：公告放久了是一長串平鋪清單，這裡用年份切換（租戶時區歸年）；
+ * 預設「全部」維持原本的行為，切到某一年只打該年的資料。
  *
  * 被動查閱紀錄（從舊首頁搬來）：mount 時只對**需簽收且尚未查閱**的現行版呼叫
  * `recordAnnouncementView`——伺服器只保留第一次，所以已查閱（viewed_at 有值）的不重打；
@@ -51,15 +55,19 @@ function AnnouncementItem({ a }: { a: Announcement }) {
   );
 }
 
+const ALL = "all";
+
 export default function AnnouncementsPage() {
   const [list, setList] = useState<Announcement[] | null>(null);
+  const [years, setYears] = useState<number[]>([]);
+  const [year, setYear] = useState<string>(ALL);
   const [error, setError] = useState<string | null>(null);
   const activeRef = useRef(true);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const res = await getAnnouncements();
+      const res = await listAnnouncementsBy(year === ALL ? {} : { year: Number(year) });
       if (!activeRef.current) return;
       setList(res.announcements);
       for (const a of res.announcements) {
@@ -82,8 +90,32 @@ export default function AnnouncementsPage() {
     };
   }, [load]);
 
+  useEffect(() => {
+    getAnnouncementYears()
+      .then((r) => setYears(r.years))
+      .catch(() => setYears([]));
+  }, []);
+
+  const yearOptions = [
+    { value: ALL, label: "全部" },
+    ...years.map((y) => ({ value: String(y), label: `${y}` })),
+  ];
+
   return (
-    <Card>
+    <Card
+      action={
+        yearOptions.length > 1 ? (
+          <Segmented
+            aria-label="年度"
+            size="sm"
+            className="w-auto"
+            options={yearOptions}
+            value={year}
+            onChange={setYear}
+          />
+        ) : undefined
+      }
+    >
       {list === null ? (
         <Skeleton lines={4} />
       ) : error ? (
@@ -94,7 +126,10 @@ export default function AnnouncementsPage() {
           </Button>
         </div>
       ) : list.length === 0 ? (
-        <EmptyState title="目前沒有公告" hint="公司發布公告後會顯示在這裡" />
+        <EmptyState
+          title={year === ALL ? "目前沒有公告" : `${year} 年沒有公告`}
+          hint="公司發布公告後會顯示在這裡"
+        />
       ) : (
         <ul className="divide-y divide-gray-100">
           {list.map((a) => (

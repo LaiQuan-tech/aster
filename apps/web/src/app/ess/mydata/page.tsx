@@ -22,6 +22,7 @@ import {
   type SaveProfileBody,
 } from "@/lib/ess-api";
 import { accountErrorMessage, changeMyPassword } from "@/lib/auth-api";
+import { listProfileChangeRequests, type ProfileChangeRequest } from "@/lib/people-extras-api";
 
 const input =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
@@ -99,6 +100,18 @@ const SNAKE: Record<string, string> = {
   emergencyPhone: "emergency_phone",
 };
 
+/**
+ * 送審模式下的兩種回應（W6）：
+ *   202 `{ changeRequestId }` → 已送出待 HR 核准，profile 還沒變；
+ *   403 `field_not_editable`  → 這幾欄公司規定只能由 HR 改。
+ * 沒開審核的租戶完全走原本的 200 路徑，畫面不變。
+ */
+function saveOutcomeMessage(res: { id?: string | null; changeRequestId?: string; changed?: number }): string {
+  if (res.changeRequestId) return "已送出，等 HR 核准後才會更新";
+  if (res.changed === 0) return "沒有變更";
+  return "已儲存";
+}
+
 function ProfileFieldsForm({
   empId,
   data,
@@ -133,11 +146,20 @@ function ProfileFieldsForm({
       (body as Record<string, string | null>)[f.key as string] = v || null;
     }
     try {
-      await saveProfile(empId, body);
-      setMsg("已儲存");
+      const res = (await saveProfile(empId, body)) as unknown as {
+        id?: string | null;
+        changeRequestId?: string;
+        changed?: number;
+      };
+      setMsg(saveOutcomeMessage(res));
       await onSaved();
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : "儲存失敗");
+      const message = err instanceof Error ? err.message : "儲存失敗";
+      setMsg(
+        message.includes("field_not_editable")
+          ? "這個分頁有欄位公司規定只能由 HR 修改，請洽人資"
+          : message,
+      );
     }
   }
 
@@ -167,6 +189,47 @@ function ProfileFieldsForm({
         {msg && <span className="text-sm text-green-600">{msg}</span>}
       </div>
     </form>
+  );
+}
+
+/**
+ * 「資料異動待審」橫幅（W6）：送出後到 HR 核准之前，員工看到的是**舊資料**——
+ * 沒有這條橫幅會以為自己沒存成功、然後一直重送。列出每一筆待審的欄位與新值。
+ * `refreshKey` 變動（每次重新載入 profile）就重查一次。
+ */
+function PendingChangesBanner({ refreshKey }: { refreshKey: unknown }) {
+  const [rows, setRows] = useState<ProfileChangeRequest[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    listProfileChangeRequests("pending")
+      .then((r) => {
+        if (active) setRows(r.requests);
+      })
+      .catch(() => {
+        if (active) setRows([]); // 表還沒建或沒開審核 → 當作沒有待審
+      });
+    return () => {
+      active = false;
+    };
+  }, [refreshKey]);
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+      <p className="text-sm font-medium text-amber-900">資料異動待 HR 核准</p>
+      <ul className="mt-1 space-y-0.5 text-sm text-amber-800">
+        {rows.flatMap((row) =>
+          row.fields.map((field) => (
+            <li key={`${row.id}-${field.column}`}>
+              {field.label} → {String(field.to ?? "（清空）")}
+            </li>
+          )),
+        )}
+      </ul>
+      <p className="mt-1 text-xs text-amber-700">核准之前，下方顯示的仍是原本的資料。</p>
+    </div>
   );
 }
 
@@ -309,6 +372,7 @@ export default function MyDataPage() {
   return (
     <div className="space-y-4">
       {error && <InlineError>{error}</InlineError>}
+      <PendingChangesBanner refreshKey={data} />
       {!data ? (
         <p className="text-sm text-gray-400">載入中…</p>
       ) : (

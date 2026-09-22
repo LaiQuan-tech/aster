@@ -3,6 +3,13 @@ import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import {
+  columnLabel,
+  diffProfile,
+  editableColumns,
+  loadFormParameters,
+} from "../services/profile-fields.js"
+import { enqueue } from "../services/notify.js"
 
 export const employeeProfileRouter = Router()
 
@@ -314,6 +321,82 @@ employeeProfileRouter.get(
   },
 )
 
+/**
+ * 員工自改資料的審核路徑（W6）。
+ *
+ * `features.formParameters.myDataRequiresApproval` 存在設定裡卻一次都沒被讀過
+ * （計畫 §1b W6）。開啟後，**非 HR** 對自己 profile 的異動不再直接落庫：
+ *   1. 只比對**真的有變**的欄位（送了但沒改的欄不算，前端整個分頁送出很正常）；
+ *   2. 有變的欄不在 `editableFields` 白名單內 → 403 `field_not_editable`；
+ *   3. 其餘存成一列 pending 的 `employee_profile_change_requests` 並通知 HR → 202。
+ * HR 自己改（含代員工改）不受影響：審核的是「員工自填」，不是 HR 的維護動作。
+ */
+async function submitProfileChangeRequest(opts: {
+  tenantId: string
+  empId: string
+  requestedByEmpId: string
+  next: Record<string, unknown>
+}): Promise<
+  | { kind: "forbidden"; fields: string[] }
+  | { kind: "no_changes" }
+  | { kind: "queued"; changeRequestId: string; fields: string[] }
+> {
+  const { tenantId, empId, next } = opts
+
+  const { data: current } = await supabaseAdmin
+    .from("employee_profiles")
+    .select("*")
+    .eq("tenant_id", tenantId)
+    .eq("employee_id", empId)
+    .maybeSingle()
+
+  const changes = diffProfile((current as Record<string, unknown> | null) ?? {}, next)
+  const changed = Object.keys(changes)
+  if (changed.length === 0) return { kind: "no_changes" }
+
+  const { editableFields } = await loadFormParameters(tenantId)
+  const allowed = editableColumns(editableFields)
+  const blocked = changed.filter((col) => !allowed.has(col))
+  if (blocked.length > 0) return { kind: "forbidden", fields: blocked }
+
+  const { data: row, error } = await supabaseAdmin
+    .from("employee_profile_change_requests")
+    .insert({
+      tenant_id: tenantId,
+      employee_id: empId,
+      requested_by_emp_id: opts.requestedByEmpId,
+      changes,
+      status: "pending",
+    })
+    .select("id")
+    .single()
+  if (error || !row) throw new Error(`submit profile change request: ${error?.message}`)
+
+  const { data: hr } = await supabaseAdmin
+    .from("employees")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("status", "active")
+    .in("role", ["hr_admin", "platform_admin"])
+  const { data: who } = await supabaseAdmin
+    .from("employees")
+    .select("name")
+    .eq("tenant_id", tenantId)
+    .eq("id", empId)
+    .maybeSingle()
+
+  await enqueue({
+    tenantId,
+    employeeIds: (hr ?? []).map((e) => e.id as string),
+    type: "profile_change_request",
+    title: `${(who?.name as string) ?? "員工"} 送出資料異動待審`,
+    body: `異動欄位：${changed.map(columnLabel).join("、")}`,
+    payload: { changeRequestId: row.id, employeeId: empId, fields: changed },
+  })
+
+  return { kind: "queued", changeRequestId: row.id as string, fields: changed }
+}
+
 // PUT /employees/:empId/profile — upsert the 1:1 contact profile (self-or-HR).
 employeeProfileRouter.put(
   "/employees/:empId/profile",
@@ -373,14 +456,41 @@ employeeProfileRouter.put(
         emergencyPhone: "emergency_phone",
         note: "note",
       }
+      const patch: Record<string, unknown> = {}
+      for (const [field, col] of Object.entries(FIELD_TO_COL)) {
+        const v = (d as Record<string, unknown>)[field]
+        if (v !== undefined) patch[col] = v
+      }
+
+      // W6：非 HR＋租戶開了審核 → 轉成待審單，profile 本身不動。
+      if (!auth.isHr && (await loadFormParameters(tenantId)).myDataRequiresApproval) {
+        const outcome = await submitProfileChangeRequest({
+          tenantId,
+          empId,
+          requestedByEmpId: auth.selfId,
+          next: patch,
+        })
+        if (outcome.kind === "forbidden") {
+          res.status(403).json({
+            error: "field_not_editable",
+            fields: outcome.fields,
+            message: `這些欄位需由 HR 修改：${outcome.fields.map(columnLabel).join("、")}`,
+          })
+          return
+        }
+        if (outcome.kind === "no_changes") {
+          res.status(200).json({ id: null, changed: 0 })
+          return
+        }
+        res.status(202).json({ changeRequestId: outcome.changeRequestId, fields: outcome.fields })
+        return
+      }
+
       const row: Record<string, unknown> = {
+        ...patch,
         tenant_id: tenantId,
         employee_id: empId,
         updated_at: new Date().toISOString(),
-      }
-      for (const [field, col] of Object.entries(FIELD_TO_COL)) {
-        const v = (d as Record<string, unknown>)[field]
-        if (v !== undefined) row[col] = v
       }
       let { data, error } = await supabaseAdmin
         .from("employee_profiles")

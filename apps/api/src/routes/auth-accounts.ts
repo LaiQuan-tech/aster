@@ -13,6 +13,7 @@ import {
   requestPasswordReset,
   sendEmployeeAccountLink,
 } from "../services/auth-invite.js"
+import { seedHireAcknowledgements } from "../services/onboarding-signatures.js"
 
 /**
  * A1 帳號與邀請信：
@@ -70,6 +71,13 @@ async function actorEmpId(tenantId: string, userId: string | undefined): Promise
   return self?.id ?? null
 }
 
+/** 本租戶現有的員工 id（批次匯入前後各取一次，差集＝這次新建的人）。 */
+async function employeeIdsOf(tenantId: string): Promise<Set<string>> {
+  const { data, error } = await supabaseAdmin.from("employees").select("id").eq("tenant_id", tenantId)
+  if (error) throw new Error(`bulk-invite snapshot employees: ${error.message}`)
+  return new Set((data ?? []).map((row) => row.id as string))
+}
+
 // POST /employees/bulk-invite — 要在 /employees/:id/* 之前註冊（雖然路徑不同段數，
 // 但保險起見放前面）。
 authAccountsRouter.post(
@@ -85,6 +93,10 @@ authAccountsRouter.post(
       return
     }
     try {
+      // W5：批次建的新人也要進「待簽」名單。`bulkInviteFromCsv` 的 summary 沒有
+      // 逐列的 employeeId（服務層屬別的 WP，不在本輪改動範圍），所以在這裡前後各
+      // 取一次 id 集合取差集——比起讓服務層回傳新結構，這個作法完全不動共用碼。
+      const before = parsed.data.dryRun ? new Set<string>() : await employeeIdsOf(tenantId)
       const summary = await bulkInviteFromCsv({
         tenantId,
         csv: parsed.data.csv,
@@ -92,7 +104,14 @@ authAccountsRouter.post(
         actorEmpId: await actorEmpId(tenantId, req.auth?.userId),
         context: "POST /employees/bulk-invite",
       })
-      res.status(200).json(summary)
+      let seeded = 0
+      if (!parsed.data.dryRun && summary.created > 0) {
+        for (const id of await employeeIdsOf(tenantId)) {
+          if (before.has(id)) continue
+          seeded += await seedHireAcknowledgements(tenantId, id)
+        }
+      }
+      res.status(200).json({ ...summary, seeded })
     } catch (err) {
       if (sendAccountError(res, err)) return
       next(err)

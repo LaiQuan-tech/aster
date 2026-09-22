@@ -6,6 +6,9 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
+import { activeEmployeeIds, seedVersionAcknowledgements } from "../services/onboarding-signatures.js"
+import { getTenantTimezone } from "../lib/tenant-tz.js"
+import { dayWindowUtc } from "../lib/tz.js"
 
 export const announcementsRouter = Router()
 
@@ -102,6 +105,41 @@ async function resolveEmpId(tenantId: string, userId?: string): Promise<string |
   return (data?.id as string | undefined) ?? null
 }
 
+/**
+ * `?year=YYYY`／`?year=YYYY&month=MM` → created_at 的 UTC 區間（M10）。
+ *
+ * 年度分區必須以**租戶時區**切：台灣 1/1 00:00 是 UTC 前一年 12/31 16:00，
+ * 直接拿 `created_at >= '2026-01-01'` 會把跨年那幾小時的公告歸錯年。
+ * 參數不合法（非四位年／月不在 1-12）→ 回 null，呼叫端當作沒篩。
+ */
+function yearWindow(
+  tz: string,
+  year: string | null,
+  month: string | null,
+): { startIso: string; endIso: string } | null {
+  if (!year || !/^\d{4}$/.test(year)) return null
+  const y = Number(year)
+  if (month) {
+    if (!/^\d{1,2}$/.test(month)) return null
+    const m = Number(month)
+    if (m < 1 || m > 12) return null
+    const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate()
+    const mm = String(m).padStart(2, "0")
+    return {
+      startIso: dayWindowUtc(`${year}-${mm}-01`, tz).startIso,
+      endIso: dayWindowUtc(`${year}-${mm}-${String(lastDay).padStart(2, "0")}`, tz).endIso,
+    }
+  }
+  return {
+    startIso: dayWindowUtc(`${year}-01-01`, tz).startIso,
+    endIso: dayWindowUtc(`${year}-12-31`, tz).endIso,
+  }
+}
+
+function queryString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null
+}
+
 /** 內容 hash：證明某一版的文字未被事後替換。 */
 function contentHashOf(title: string, body: string, audience: string): string {
   return crypto.createHash("sha256").update(`${title}\n${body}\n${audience}`).digest("hex")
@@ -156,12 +194,22 @@ announcementsRouter.get(
     try {
       const selfEmpId = await resolveEmpId(tenantId, req.auth?.userId)
 
-      const { data, error } = await supabaseAdmin
+      // M10：年度／月份分區（租戶時區）。沒帶或帶壞 → 不篩，維持舊行為。
+      const window = yearWindow(
+        await getTenantTimezone(tenantId),
+        queryString(req.query.year),
+        queryString(req.query.month),
+      )
+      let listQuery = supabaseAdmin
         .from("announcements")
         .select(SELECT_COLS)
         .eq("tenant_id", tenantId)
         .is("deleted_at", null)
         .order("created_at", { ascending: false })
+      if (window) {
+        listQuery = listQuery.gte("created_at", window.startIso).lte("created_at", window.endIso)
+      }
+      const { data, error } = await listQuery
 
       if (error) {
         next(new Error(`GET /announcements: ${error.message}`))
@@ -227,6 +275,46 @@ announcementsRouter.get(
 )
 
 /**
+ * GET /announcements/years — 有公告的年度清單（新到舊，租戶時區；M10）。
+ *
+ * 前端的年份切換器要先知道有哪些年才畫得出來。年份在 SQL 端用 `date_trunc`
+ * 會綁到 DB 時區，這裡改成把 created_at 撈回來在 API 端依租戶時區歸年——
+ * 公告量級（一間公司數十到數百則）撈整份完全可接受，換到的是與列表一致的
+ * 歸年規則（同一份 `yearWindow` 邏輯的反函式）。
+ */
+announcementsRouter.get(
+  "/announcements/years",
+  requireAuth,
+  requireTenant,
+  async (_req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    try {
+      const tz = await getTenantTimezone(tenantId)
+      const { data, error } = await supabaseAdmin
+        .from("announcements")
+        .select("created_at")
+        .eq("tenant_id", tenantId)
+        .is("deleted_at", null)
+      if (error) {
+        next(new Error(`GET /announcements/years: ${error.message}`))
+        return
+      }
+      const years = new Set<number>()
+      for (const row of data ?? []) {
+        const local = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric" }).format(
+          new Date(row.created_at as string),
+        )
+        const y = Number(local)
+        if (Number.isFinite(y)) years.add(y)
+      }
+      res.status(200).json({ years: [...years].sort((a, b) => b - a) })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
  * GET /announcements/:id/versions — 內容版本鏈，版號由小到大。
  * 這是勞檢／訴訟時「請提出當時生效的第幾版」的答案來源。
  */
@@ -268,6 +356,11 @@ announcementsRouter.get(
  * `consentRate` 只計 kind='consent_to_change' 者：新人到職補簽
  * （'accept_on_hire'）不是「同意變更」的對象，既不進分母也不進分子。
  * 混算會讓同意率失真，而該比率正是不利益變更是否生效的關鍵事實。
+ *
+ * **W5（2026-09-23）**：`pending` 與 `consentRate` 只算**在職**員工——離職者
+ * 沒簽是既成事實，追不回來也不該讓「還差幾個人」永遠歸不了零。已簽的列一律
+ * 保留在 `signed`（那是證據，不因離職而消失）。另回 `activeEmployeeCount`
+ * 讓前端能顯示客戶要的「20 個人 5 個沒簽」分母。
  */
 announcementsRouter.get(
   "/announcements/:id/acknowledgements",
@@ -286,7 +379,13 @@ announcementsRouter.get(
         (typeof req.query.versionId === "string" ? req.query.versionId : null) ??
         (ann.current_version_id as string | null)
       if (!versionId) {
-        res.status(200).json({ versionId: null, signed: [], pending: [], consentRate: null })
+        res.status(200).json({
+          versionId: null,
+          signed: [],
+          pending: [],
+          consentRate: null,
+          activeEmployeeCount: (await activeEmployeeIds(tenantId)).length,
+        })
         return
       }
 
@@ -301,11 +400,15 @@ announcementsRouter.get(
       }
 
       const rows = acks ?? []
-      const signed = rows.filter((r) => r.signed_at !== null)
-      const pending = rows.filter((r) => r.signed_at === null)
+      const activeIds = new Set(await activeEmployeeIds(tenantId))
+      const isActive = (r: { employee_id: string }) => activeIds.has(r.employee_id as string)
 
-      // 同意率只看「同意變更」那一類（見上方說明）。
-      const consentRows = rows.filter((r) => r.kind === "consent_to_change")
+      const signed = rows.filter((r) => r.signed_at !== null)
+      // 只有在職者才算「還沒簽」。
+      const pending = rows.filter((r) => r.signed_at === null && isActive(r))
+
+      // 同意率只看在職者的「同意變更」那一類（見上方說明）。
+      const consentRows = rows.filter((r) => r.kind === "consent_to_change" && isActive(r))
       const consentRate =
         consentRows.length === 0
           ? null
@@ -314,7 +417,71 @@ announcementsRouter.get(
               total: consentRows.length,
             }
 
-      res.status(200).json({ versionId, signed, pending, consentRate })
+      res
+        .status(200)
+        .json({ versionId, signed, pending, consentRate, activeEmployeeCount: activeIds.size })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * POST /announcements/:id/acknowledgements/seed — 對既有版本補建待簽列（HR；W5）。
+ *
+ * 上線一次性的補救端點：2026-09-23 之前發佈的需簽收公告，待簽列只在「報到完成／
+ * 員工自己開過／HR 登錄」時才長出來，所以分母是錯的。這支對指定版本（預設現行版）
+ * 的**全體在職員工**補齊 `consent_to_change` 待簽列，已存在的列不動（ignoreDuplicates）。
+ * 不需簽收的版本回 409，免得誤建一堆永遠不會簽的列。
+ */
+announcementsRouter.post(
+  "/announcements/:id/acknowledgements/seed",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const id = req.params.id as string
+    try {
+      const ann = await loadAnnouncement(tenantId, id)
+      if (!ann) {
+        res.status(404).json({ error: "not_found" })
+        return
+      }
+      const versionId =
+        (typeof req.body?.versionId === "string" ? req.body.versionId : null) ??
+        (ann.current_version_id as string | null)
+      if (!versionId) {
+        res.status(409).json({ error: "no_version" })
+        return
+      }
+      const version = (await loadVersion(tenantId, versionId)) as unknown as {
+        announcement_id: string
+        requires_signature: boolean
+      } | null
+      if (!version || version.announcement_id !== id) {
+        res.status(404).json({ error: "version_not_found" })
+        return
+      }
+      if (!version.requires_signature) {
+        res.status(409).json({ error: "signature_not_required" })
+        return
+      }
+
+      const seeded = await seedVersionAcknowledgements(tenantId, versionId)
+      const activeEmployeeCount = (await activeEmployeeIds(tenantId)).length
+      if (seeded > 0) {
+        await writeAuditLog({
+          tenantId,
+          tableName: "announcement_acknowledgements",
+          recordId: versionId,
+          action: "INSERT",
+          newRow: { versionId, seeded, activeEmployeeCount },
+          actorEmpId: await resolveEmpId(tenantId, req.auth?.userId),
+          context: "POST /announcements/:id/acknowledgements/seed — 補建待簽名單",
+        })
+      }
+      res.status(200).json({ versionId, seeded, activeEmployeeCount })
     } catch (err) {
       next(err)
     }
@@ -390,6 +557,12 @@ announcementsRouter.post(
         .eq("tenant_id", tenantId)
         .eq("id", announcementId)
 
+      // W5：需簽收的版本一發佈就把**全體在職員工**的待簽列建出來，
+      // 「20 個人 5 個沒簽」才有分母。best-effort，失敗不影響發佈本身。
+      const seeded = (parsed.data.requiresSignature ?? false)
+        ? await seedVersionAcknowledgements(tenantId, version.id as string)
+        : 0
+
       await writeAuditLog({
         tenantId,
         tableName: "announcements",
@@ -404,6 +577,7 @@ announcementsRouter.post(
         id: announcementId,
         versionId: version.id,
         versionNo: version.version_no,
+        seeded,
       })
     } catch (err) {
       next(err)
@@ -458,6 +632,8 @@ announcementsRouter.patch(
       const nextNo = (latest?.version_no ?? 0) + 1
       const effectiveFrom = parsed.data.effectiveFrom ?? null
 
+      const requiresSignature = parsed.data.requiresSignature ?? (latest?.requires_signature ?? false)
+
       const { data: version, error: verErr } = await supabaseAdmin
         .from("announcement_versions")
         .insert({
@@ -471,8 +647,7 @@ announcementsRouter.patch(
           change_note: parsed.data.changeNote ?? null,
           effective_from: effectiveFrom,
           // 未指定時沿用前一版：這兩個旗標是文件的性質，不會因為改一行字就消失。
-          requires_signature:
-            parsed.data.requiresSignature ?? (latest?.requires_signature ?? false),
+          requires_signature: requiresSignature,
           is_adverse_change: parsed.data.isAdverseChange ?? false,
           content_hash: contentHashOf(title, body, audience),
           created_by_emp_id: actorEmpId,
@@ -510,18 +685,24 @@ announcementsRouter.patch(
         return
       }
 
+      // W5：新版是新的簽收對象——待簽列要對新版重建（舊版的簽名不會自動繼承，
+      // 這正是「進版＝重新徵求同意」的意思）。
+      const seeded = requiresSignature
+        ? await seedVersionAcknowledgements(tenantId, version.id as string)
+        : 0
+
       await writeAuditLog({
         tenantId,
         tableName: "announcements",
         recordId: id,
         action: "UPDATE",
         oldRow: { title: ann.title, body: ann.body, audience: ann.audience },
-        newRow: { title, body, audience, versionNo: nextNo },
+        newRow: { title, body, audience, versionNo: nextNo, seeded },
         actorEmpId,
         context: "PATCH /announcements/:id",
       })
 
-      res.status(200).json({ id, versionId: version.id, versionNo: version.version_no })
+      res.status(200).json({ id, versionId: version.id, versionNo: version.version_no, seeded })
     } catch (err) {
       next(err)
     }

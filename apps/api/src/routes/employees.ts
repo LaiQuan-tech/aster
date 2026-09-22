@@ -2,12 +2,13 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireFinance, requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
 import { belongsToTenant } from "../services/auth-invite.js"
 import { emailsByUserId } from "../services/employee-emails.js"
 import { allowWeakInitialPassword, createUserPasswordAttributes, setPasswordDirect } from "../services/password-policy.js"
+import { seedHireAcknowledgements } from "../services/onboarding-signatures.js"
 
 export const employeesRouter = Router()
 
@@ -50,7 +51,12 @@ function generatePassword(): string {
 }
 
 /**
- * GET /employees — list the calling HR admin's own-tenant employees.
+ * GET /employees — list this tenant's employees (HR／平台管理員／會計)。
+ *
+ * W4（2026-09-22 業主決策 3）：會計要填金流單據就得挑得到人（放款收款人、
+ * 複委託承辦、報銷申請人…），所以**讀**人員基本資料放行到 requireFinance；
+ * 建立／改角色／改狀態／重設密碼等**寫入**仍是 requireHrAdmin。本清單不含
+ * 薪資、投保薪資或分潤趴數，放行不等於看得到錢。
  *
  * Tenant boundary is enforced TWICE: the API filters by res.locals.tenantId
  * (derived from the JWT) here, and DB RLS enforces it again at the row level
@@ -61,7 +67,7 @@ employeesRouter.get(
   "/employees",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
+  requireFinance,
   async (_req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {
@@ -170,7 +176,12 @@ employeesRouter.post(
         context: "POST /employees — 建立員工帳號",
       })
 
-      res.status(201).json({ employeeId: emp.id, userId })
+      // W5：新人補簽——現行生效且需簽收的規章，到職即建待簽列。
+      // 原本只有 `onboardings/:id/complete` 會觸發，直接從後台建的員工（正式租戶
+      // 19 人就是這樣建的）永遠不在待簽名單裡。best-effort，永不 throw。
+      const seeded = await seedHireAcknowledgements(tenantId, emp.id as string, hireDate)
+
+      res.status(201).json({ employeeId: emp.id, userId, seeded })
     } catch (err) {
       next(err)
     }

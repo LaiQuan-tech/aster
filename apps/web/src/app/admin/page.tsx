@@ -18,6 +18,8 @@ import {
 import { getProjectAlerts } from "@/lib/projects-api";
 import { getBonusSummary } from "@/lib/bonus-api";
 import { listBackups, type SnapshotPeriodSummary } from "@/lib/backup-api";
+import { getCompanyPages, type CompanyPage } from "@/lib/company-api";
+import { getUpcomingBirthdays, type BirthdayPerson } from "@/lib/people-extras-api";
 
 /** 首頁下半的 8 個分區入口（排除 home；順序與側欄一致，來源 lib/admin-nav.ts）。 */
 const HOME_ENTRIES = homeEntries();
@@ -58,6 +60,13 @@ interface BonusCardData {
 interface AlertsCardData {
   total: number;
   high: number;
+}
+
+interface BirthdayCardData {
+  month: string;
+  people: BirthdayPerson[];
+  /** 還沒登記紅包的人數——這張卡的重點是「別漏發」。 */
+  unrecorded: number;
 }
 
 /**
@@ -111,6 +120,8 @@ export default function AdminOverview() {
   const [announcements, setAnnouncements] = useState<Loadable<Announcement[]>>(initLoadable<Announcement[]>());
   const [changes, setChanges] = useState<Loadable<ProjectListItem[]>>(initLoadable<ProjectListItem[]>());
   const [snapshot, setSnapshot] = useState<Loadable<SnapshotPeriodSummary | null>>(initLoadable<SnapshotPeriodSummary | null>());
+  const [birthdays, setBirthdays] = useState<Loadable<BirthdayCardData>>(initLoadable<BirthdayCardData>());
+  const [benefits, setBenefits] = useState<Loadable<CompanyPage | null>>(initLoadable<CompanyPage | null>());
 
   useEffect(() => {
     let active = true;
@@ -218,6 +229,40 @@ export default function AdminOverview() {
       }
     }
 
+    async function loadBirthdays() {
+      try {
+        const r = await getUpcomingBirthdays();
+        if (active) {
+          setBirthdays({
+            loading: false,
+            error: null,
+            data: {
+              month: r.month,
+              people: r.birthdays,
+              unrecorded: r.birthdays.filter((b) => !b.gift).length,
+            },
+          });
+        }
+      } catch (err) {
+        if (active) setBirthdays({ loading: false, error: errMsg(err), data: null });
+      }
+    }
+
+    async function loadBenefits() {
+      try {
+        const r = await getCompanyPages();
+        if (active) {
+          setBenefits({
+            loading: false,
+            error: null,
+            data: r.pages.find((p) => p.slug === "benefits") ?? null,
+          });
+        }
+      } catch (err) {
+        if (active) setBenefits({ loading: false, error: errMsg(err), data: null });
+      }
+    }
+
     void Promise.allSettled([
       loadDisbursement(),
       loadReceivables(),
@@ -228,6 +273,8 @@ export default function AdminOverview() {
       loadAnnouncements(),
       loadChanges(),
       loadSnapshot(),
+      loadBirthdays(),
+      loadBenefits(),
     ]);
 
     return () => {
@@ -304,6 +351,30 @@ export default function AdminOverview() {
               </ul>
             ) : (
               <p className="text-sm text-gray-400">近期無變更案</p>
+            )}
+          </BossCard>
+
+          <BossCard href="/admin/birthday-gifts" label="本月壽星" state={birthdays}>
+            <p className="text-xl font-semibold text-gray-900">{birthdays.data?.people.length ?? 0}</p>
+            <p className="mt-0.5 text-xs text-gray-500">
+              {birthdays.data && birthdays.data.people.length > 0
+                ? birthdays.data.unrecorded > 0
+                  ? `${birthdays.data.unrecorded} 位尚未登記紅包`
+                  : "紅包都登記了"
+                : "本月沒有壽星"}
+            </p>
+          </BossCard>
+
+          <BossCard href="/admin/company-info" label="福利" state={benefits}>
+            {benefits.data?.exists ? (
+              <>
+                <p className="truncate text-base font-semibold text-gray-900">{benefits.data.title}</p>
+                <p className="mt-0.5 text-xs text-gray-500">
+                  更新於 {benefits.data.updatedAt ? benefits.data.updatedAt.slice(0, 10) : "—"}
+                </p>
+              </>
+            ) : (
+              <p className="text-sm text-gray-400">尚未填寫公司福利</p>
             )}
           </BossCard>
 

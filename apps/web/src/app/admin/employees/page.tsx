@@ -42,12 +42,21 @@ import {
   type BulkInviteResult,
 } from "@/lib/auth-api";
 import { employeeActionsFor, generateRandomPassword, parseApiErrorCode, type EmployeeActionKey } from "@/lib/employee-actions";
+import {
+  approveProfileChange,
+  listProfileChangeRequests,
+  rejectProfileChange,
+  type ProfileChangeRequest,
+} from "@/lib/people-extras-api";
 import { isBulkInviteResult } from "@/lib/import-view";
 import { useSession } from "@/lib/use-session";
 
 const ROLES: { value: string; label: string }[] = [
   { value: "employee", label: "一般員工" },
   { value: "manager", label: "主管" },
+  // W4：會計可進後台，但只看得到專案與財務／報銷／預支／出勤月表／人員基本資料，
+  // 薪資作業、薪資單、獎金批次與分潤趴數一律看不到（守門在 API 的 requireFinance）。
+  { value: "accountant", label: "會計" },
   { value: "hr_admin", label: "HR 管理員" },
 ];
 
@@ -88,6 +97,98 @@ const PROFILE_FIELDS: { key: keyof SaveProfileBody; label: string; type?: "date"
   { key: "emergencyRelationship", label: "關係", group: "contact" },
   { key: "emergencyPhone", label: "緊急聯絡電話", group: "contact" },
 ];
+
+/**
+ * 資料異動待審（W6）。租戶在「模組設定 → 表單參數」打開
+ * `myDataRequiresApproval` 後，員工在 ESS 改自己的資料不會直接落庫，而是排在
+ * 這裡等 HR 核准。**沒有待審就整張不顯示**——這是一張只有在有事時才該出現的卡。
+ */
+function ProfileChangeQueue({ onApplied }: { onApplied: () => void }) {
+  const toast = useToast();
+  const [rows, setRows] = useState<ProfileChangeRequest[]>([]);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const reload = useCallback(() => {
+    listProfileChangeRequests("pending")
+      .then((r) => setRows(r.requests))
+      .catch(() => setRows([])); // 表還沒建（migration 0050 未套）就當作沒有待審
+  }, []);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  async function decide(row: ProfileChangeRequest, approve: boolean) {
+    let reason = "";
+    if (!approve) {
+      const input = window.prompt(`退回 ${row.employeeName ?? "員工"} 的資料異動。請輸入理由（必填）：`);
+      if (input === null) return;
+      if (!input.trim()) {
+        toast.show("退回理由為必填", "error");
+        return;
+      }
+      reason = input.trim();
+    }
+    setBusyId(row.id);
+    try {
+      if (approve) {
+        await approveProfileChange(row.id);
+        toast.show("已核准並套用", "success");
+        onApplied();
+      } else {
+        await rejectProfileChange(row.id, reason);
+        toast.show("已退回", "success");
+      }
+      reload();
+    } catch (err) {
+      toast.show(err instanceof Error ? err.message : "處理失敗", "error");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (rows.length === 0) return null;
+
+  return (
+    <Card>
+      <h2 className="mb-1 text-sm font-medium text-gray-500">資料異動待審（{rows.length}）</h2>
+      <p className="mb-3 text-xs text-gray-400">員工在「我的資料」送出的修改，核准後才會寫進人事資料。</p>
+      <ul className="divide-y divide-gray-100">
+        {rows.map((row) => (
+          <li key={row.id} className="flex flex-wrap items-start justify-between gap-3 py-3">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium text-gray-800">{row.employeeName ?? row.employee_id.slice(0, 8)}</p>
+              <ul className="mt-1 space-y-0.5 text-sm text-gray-600">
+                {row.fields.map((field) => (
+                  <li key={field.column}>
+                    {field.label}：
+                    <span className="text-gray-400">{String(field.from ?? "（空）")}</span>
+                    <span className="mx-1">→</span>
+                    <span className="text-gray-900">{String(field.to ?? "（清空）")}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1 text-xs text-gray-400">{new Date(row.created_at).toLocaleString("zh-TW")}</p>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              <Button size="sm" onClick={() => void decide(row, true)} loading={busyId === row.id}>
+                核准
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => void decide(row, false)}
+                disabled={busyId === row.id}
+              >
+                退回
+              </Button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
 
 const SNAKE: Record<keyof SaveProfileBody, string> = {
   firstName: "first_name",
@@ -707,6 +808,8 @@ export default function EmployeesPage() {
   return (
     <>
       {message && <p className="rounded-lg bg-green-50 px-4 py-2 text-sm text-green-700">{message}</p>}
+
+      <ProfileChangeQueue onApplied={() => void load()} />
 
       {linkResult && (
         <Card>

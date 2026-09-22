@@ -12,7 +12,6 @@ import {
 } from "@/components/admin-ui";
 import {
   getAnnouncementVersions,
-  getAnnouncementAcks,
   getSignatureSheets,
   recordPaperSignature,
   uploadSignatureSheet,
@@ -22,6 +21,7 @@ import {
   type SignatureSheet,
   type Employee,
 } from "@/lib/admin-api";
+import { getAnnouncementAckSummary, seedAnnouncementAcks } from "@/lib/people-extras-api";
 
 const CHANGE_LABEL: Record<AnnouncementVersion["change_type"], string> = {
   initial: "首版",
@@ -38,6 +38,9 @@ export default function AnnouncementDetailPage() {
   const [signed, setSigned] = useState<AnnouncementAck[]>([]);
   const [pending, setPending] = useState<AnnouncementAck[]>([]);
   const [consentRate, setConsentRate] = useState<{ signed: number; total: number } | null>(null);
+  /** W5：在職員工數＝客戶說的「20 個人 5 個沒簽」的那個 20。 */
+  const [activeCount, setActiveCount] = useState<number | null>(null);
+  const [seeding, setSeeding] = useState(false);
   const [sheets, setSheets] = useState<SignatureSheet[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -58,12 +61,13 @@ export default function AnnouncementDetailPage() {
     if (!selectedVersionId) return;
     try {
       const [acks, sh] = await Promise.all([
-        getAnnouncementAcks(announcementId, selectedVersionId),
+        getAnnouncementAckSummary(announcementId, selectedVersionId),
         getSignatureSheets(selectedVersionId),
       ]);
       setSigned(acks.signed);
       setPending(acks.pending);
       setConsentRate(acks.consentRate);
+      setActiveCount(acks.activeEmployeeCount);
       setSheets(sh.sheets);
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入簽收失敗");
@@ -82,6 +86,30 @@ export default function AnnouncementDetailPage() {
   }, [loadVersionDetail]);
 
   const selected = versions.find((v) => v.id === selectedVersionId) ?? null;
+
+  /**
+   * 補建待簽名單（W5）：2026-09-23 之前發佈的需簽收公告，待簽列只在「報到完成／
+   * 員工自己開過／HR 登錄」時才長出來，分母是錯的。這顆按鈕對現行版補齊全體在職員工。
+   */
+  async function seedAcks() {
+    if (!selected) return;
+    setSeeding(true);
+    setError(null);
+    try {
+      const res = await seedAnnouncementAcks(announcementId, selected.id);
+      setMessage(
+        res.seeded > 0
+          ? `已補建 ${res.seeded} 筆待簽（在職 ${res.activeEmployeeCount} 人）。`
+          : `名單已經齊全（在職 ${res.activeEmployeeCount} 人）。`,
+      );
+      await loadVersionDetail();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "補建失敗";
+      setError(msg.includes("signature_not_required") ? "這一版不需簽收，無需補建名單。" : msg);
+    } finally {
+      setSeeding(false);
+    }
+  }
   const empName = (id: string) =>
     employees.find((e) => e.id === id)?.name ?? id.slice(0, 8);
 
@@ -178,18 +206,40 @@ export default function AnnouncementDetailPage() {
               </p>
             ) : null}
 
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm text-gray-600">
+                已簽 <span className="font-semibold text-gray-900">{signed.length}</span>
+                {activeCount !== null && (
+                  <>
+                    {" "}／ 在職 <span className="font-semibold text-gray-900">{activeCount}</span> 人
+                  </>
+                )}
+              </p>
+              {selected.requires_signature && (
+                <button
+                  type="button"
+                  onClick={() => void seedAcks()}
+                  disabled={seeding}
+                  className="text-sm text-blue-600 hover:underline disabled:opacity-50"
+                  title="對全體在職員工補齊這一版的待簽列（已簽的不會被覆蓋）"
+                >
+                  {seeding ? "補建中…" : "補建待簽名單"}
+                </button>
+              )}
+            </div>
+
             <div className="mb-4 grid gap-4 md:grid-cols-3">
               <div className="rounded-lg border border-gray-200 p-4">
                 <div className="text-xs text-gray-500">已簽</div>
                 <div className="mt-1 text-2xl font-semibold">{signed.length}</div>
               </div>
               <div className="rounded-lg border border-amber-300 bg-amber-50 p-4">
-                <div className="text-xs text-amber-800">尚未簽</div>
+                <div className="text-xs text-amber-800">尚未簽（在職）</div>
                 <div className="mt-1 text-2xl font-semibold text-amber-900">
                   {pending.length}
                 </div>
                 <p className="mt-2 text-xs text-amber-800">
-                  一張紙本傳閱單傳完，沒人知道少了誰。這裡知道。
+                  一張紙本傳閱單傳完，沒人知道少了誰。這裡知道。離職同仁不列入。
                 </p>
               </div>
               <div className="rounded-lg border border-gray-200 p-4">
