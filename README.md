@@ -15,11 +15,23 @@ Monorepo（npm workspace + Turbo）｜`apps/web` Next.js 16｜`apps/api` Express
 ## 線上環境
 - Web（Vercel）: https://aster-system.vercel.app
 - API（Vercel）: https://aster-hr-api.vercel.app/health
-- Worker（Railway，2026-09-14 上線）: `apps/worker`，排程時鐘（台北時間：每日出勤結算 02:00、
-  異常偵測 03:00、專案自動封存 04:00、專案示警 04:30、通知投遞每 5 分鐘、每月 1 日 05:00 產生上月出勤月表、
-  每月 1 日 06:00 月度資料快照），本身不碰 DB，
+- Worker（Railway，2026-09-14 上線）: `apps/worker`，排程時鐘，本身不碰 DB，
   全部透過 API 的 `/internal/*` 端點執行。Railway 專案 `aster`（帳號 gathertaiwan@gmail.com）
   底下兩個服務：`Redis`（BullMQ 用）與 `worker`。
+
+  **9 支排程**（台北時間；啟動 log 會把 `SCHEDULER_IDS` 整串印出來，數量對不上就是沒部署新版）：
+
+  | 排程 id | 時間 | 打的端點 |
+  |---|---|---|
+  | `annual-leave-grant` | 每日 01:30 | `/internal/leave/annual-grant`（特休週年制自動給假，W1） |
+  | `daily-attendance-settle` | 每日 02:00 | `/internal/attendance/daily-settle` |
+  | `detect-and-notify-attendance` | 每日 03:00 | `/internal/attendance/detect-and-notify` |
+  | `auto-archive-projects` | 每日 04:00 | `/internal/projects/auto-archive` |
+  | `project-alerts` | 每日 04:30 | `/internal/projects/alert-notify` |
+  | `birthday-reminder` | 每日 08:00 | `/internal/people/birthday-reminder`（生日紅包提醒，M7） |
+  | `deliver-pending-notifications` | 每 5 分鐘 | `/internal/notifications/deliver-pending` |
+  | `generate-attendance-sheets` | 每月 1 日 05:00 | `/internal/attendance-sheets/generate` |
+  | `monthly-snapshot` | 每月 1 日 06:00 | `/internal/backups/monthly-snapshot`（分頁續打，帶 run 序號） |
 
   - **部署方式是 `railway up`，不是 GitHub 自動部署**：這個 Railway 帳號沒接 LaiQuan-tech 這個
     GitHub 組織（`railway add --repo` 回 repo not found），所以改 worker 程式後要在 repo 根目錄跑
@@ -34,6 +46,8 @@ Monorepo（npm workspace + Turbo）｜`apps/web` Next.js 16｜`apps/api` Express
     API 端（Vercel）要對應開 `ENABLE_INTERNAL_JOBS=true` 並設同一把 `INTERNAL_JOB_TOKEN`。
   - 通知投遞的 email／LINE 管道尚未設定（API 沒有 `RESEND_API_KEY`／`NOTIFICATION_EMAIL_FROM`／
     `LINE_CHANNEL_ACCESS_TOKEN`／`NOTIFICATION_DEFAULT_CHANNELS`），目前排程只會產生站內通知。
+    2026-09-23 補齊批次把薪資條 Email 一鍵寄送也接上 Resend，上線前要補設這三個
+    （見 `docs/交接-2026-09-23-需求補齊.md` §4 env 清單）。
 
 > 舊的 `hr-theta-peach.vercel.app`（更名前的 HRLink 版本）與 Railway 上的 API
 > 皆已停用（API 現在只在 Vercel）。上面三個才是現行環境。
@@ -50,6 +64,10 @@ Monorepo（npm workspace + Turbo）｜`apps/web` Next.js 16｜`apps/api` Express
 | `WEB_URL` | API | 邀請信／重設密碼信裡連結指向的前台網址。未設預設 `https://aster-system.vercel.app`；本機開發填 `http://localhost:3000`。 |
 | `WEB_ORIGINS` | API | CORS 白名單（逗號分隔），改前台網域要同步更新並重新部署 API。 |
 | `NEXT_PUBLIC_API_URL` | web | 前台打的 API 位址（build 時 inline 進 bundle）。 |
+| `NOTIFICATION_DEFAULT_CHANNELS` | API | 通知預設投遞管道（逗號分隔，如 `email`）。未設＝只產生站內通知。員工可在 ESS 逐管道關閉（`user_preferences` 的 `notify.channels.v1`）。 |
+| `ENABLE_INTERNAL_JOBS` | API | `true` 才開 `/internal/*` 排程端點。非 true 時一律 409 `internal_jobs_paused`。 |
+| `INTERNAL_JOB_TOKEN` | API + worker | 排程端點的共用密鑰（header `x-internal-job-token`）。**API 端沒設＝所有 `/internal/*` 回 404**（對外裝作沒這條路由）；兩邊必須是同一把。 |
+| `ENABLE_WORKER_SCHEDULERS` | worker | `true` 才註冊上面 9 支排程；非 true 會把已註冊的移除（暫停用）。 |
 
 帳號流程（A1）：HR 在後台「員工主檔」單筆或貼 CSV 批次建帳號 → 系統寄邀請信（`/auth/set-password?token_hash=…&type=invite`）→ 員工自設密碼；
 HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼」）會把 `employees.must_change_password` 設為 true，員工首次登入會被導去強制改密碼；
@@ -80,13 +98,20 @@ HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼�
    打 `POST /internal/backups/monthly-snapshot`，對每個 active 租戶把 `apps/api/src/services/backup-snapshot.ts`
    裡 `SNAPSHOT_TABLES` 列的業務表（人事／出勤／月表／請假／薪資／專案／放款／公告／招募／稽核 log 等 60 餘張；
    刻意不收 notifications、knowledge_chunks、personal_notes、user_preferences）**全表**（非增量）逐表分頁讀出、gzip
-   後上傳私有 bucket `tenant-snapshots/{tenantId}/{period}/{table}.json.gz`，最後寫 `manifest.json`
-   （每表列數／bytes／sha256、產生時間、drizzle／sql schema 版本）。同一 period 重跑＝先清資料夾再覆蓋。
-   - API 端一次呼叫只做一段（12 秒軟預算，Vercel maxDuration 60），回 `nextTenantId/nextTable/nextOffset`，
-     worker 端 `while(!done)` 續打（上限 300 次）；進度存在 Storage 的 manifest（`status: running → complete`）。
-   - 後台「系統設定 › 資料快照備份」（`/admin/backups`）：看每月快照的 manifest（各表列數、大小）、
-     「立即產生本月快照」（前端迴圈續打並顯示進度）、下載 manifest／各表 gz（15 分鐘 signed URL）。
-   - **保留 24 個月**，超過的由維護人員手動從 Storage 清（目前沒有自動清除，避免誤刪）。
+   後上傳私有 bucket `tenant-snapshots/{tenantId}/{period}/r{run:03}/{table}.json.gz`，最後寫 `manifest.json`
+   （每表列數／bytes／sha256、產生時間、drizzle／sql schema 版本）。
+   - **同月重跑不覆蓋（W7，2026-09-23）**：每一輪配一個新的 run 序號（該月現有最大值＋1）、各自一個
+     `r{run:03}` 資料夾。2026-09-23 之前的舊檔直接躺在 `{period}/` 下，一律視為 **run 0**——不搬、
+     可讀可下載，但不再往裡面寫。
+   - API 端一次呼叫只做一段（12 秒軟預算，Vercel maxDuration 60），回 `run` 與
+     `nextRun/nextTenantId/nextTable/nextOffset`，worker 端 `while(!done)` 續打（上限 300 次）並把
+     `nextRun` 原樣帶回；換下一個租戶時 API 不回 `nextRun`（那是新一輪，由 API 自己配號）。
+     完整契約寫在 `apps/api/src/routes/internal-jobs.ts` 檔頭。進度存在 Storage 的 manifest
+     （`status: running → complete`）。
+   - 後台「系統設定 › 資料快照備份」（`/admin/backups`）：看每月各次執行的 manifest（各表列數、大小）、
+     「立即產生本月快照」（前端迴圈續打並顯示進度）、下載 manifest／各表 gz（15 分鐘 signed URL）、
+     **直接在頁面上翻該次快照的表內容**（`/backups/:period/runs/:run/tables/:table/rows`，每頁 ≤ 200 列）。
+   - **保留 84 個月（7 年）**，超過的由維護人員手動從 Storage 清（目前沒有自動清除，避免誤刪）。
 2. **整公司月結 Final** — `POST /attendance-sheets/close-period {period, force?}`（HR）：該月所有在職員工的月表都要
    approved／locked，否則 409 `sheets_not_approved` 附清單（含「尚未產生月表」）；通過就把 approved 全部轉
    locked（沿用 `lockSheet`）並寫 `period_closes`（unique(tenant, period)，記 sheet_count／locked_count／
@@ -100,7 +125,8 @@ HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼�
 備份（保留 7 天），PITR（時間點還原）是 Pro 以上的付費加購、要另外開啟才有。**目前這個專案用哪個方案、
 有沒有開 PITR，請以 Supabase dashboard 為準（待確認）**——上面的應用層快照是「不管平台方案為何都一定有的」那一層。
 
-**還原方式（人工，不做一鍵還原）**：從 `/admin/backups` 或直接從 Storage 下載該月的 `manifest.json` 與各表
+**還原方式（人工，不做一鍵還原）**：從 `/admin/backups` 或直接從 Storage 下載該月**某一次執行**（`r{run:03}/`；
+2026-09-23 之前的舊檔在 `{period}/` 根下＝run 0）的 `manifest.json` 與各表
 `.json.gz`；`gunzip` 後每個檔案是該表整份列陣列（PostgREST 原始欄位名，含 id／tenant_id）。先比對 manifest 的
 `schemaVersion` 與現行 migration 是否一致（不一致要先處理欄位差異），再由維護人員用 service_role 對目標表
 `upsert`（以 id 為鍵；只還原確認要救回的那幾張表／那幾列），還原前先對現況再做一次快照。多頁的表會拆成

@@ -26,6 +26,8 @@ const SCHEDULER_IDS = [
   "project-alerts",
   "generate-attendance-sheets",
   "monthly-snapshot",
+  "annual-leave-grant",
+  "birthday-reminder",
 ];
 
 /** 月度快照是「一次呼叫做一段、帶游標續打」的分頁 API；這是續打次數上限（防迴圈跑不完）。 */
@@ -118,6 +120,21 @@ async function registerSchedulers() {
     { pattern: "0 6 1 * *", tz: "Asia/Taipei" },
     { name: "monthly-snapshot", data: {} },
   );
+  // 特休週年制年度給假（W1）：每日 01:30 台北，對每個 active 租戶補發當天到職週年
+  // 該給的特休。排在每日結算（02:00）之前——當天新發的餘額桶，當天的假單就用得到。
+  // service 冪等（同期間已有列就 skip），所以每天跑、補跑都安全。
+  await attendanceQueue.upsertJobScheduler(
+    "annual-leave-grant",
+    { pattern: "30 1 * * *", tz: "Asia/Taipei" },
+    { name: "annual-leave-grant", data: {} },
+  );
+  // 生日紅包提醒（M7）：每日 08:00 台北，提醒 HR 今天與三天後的壽星。排在上班時間，
+  // 通知投遞（每 5 分鐘）很快就會把它送出去。同日同 key 不重發。
+  await attendanceQueue.upsertJobScheduler(
+    "birthday-reminder",
+    { pattern: "0 8 * * *", tz: "Asia/Taipei" },
+    { name: "birthday-reminder", data: {} },
+  );
 
   attendanceWorker = new Worker(
     "attendance",
@@ -141,12 +158,20 @@ async function registerSchedulers() {
         "project-alerts": "/internal/projects/alert-notify",
         "generate-attendance-sheets": "/internal/attendance-sheets/generate",
         "monthly-snapshot": "/internal/backups/monthly-snapshot",
+        "annual-leave-grant": "/internal/leave/annual-grant",
+        "birthday-reminder": "/internal/people/birthday-reminder",
       };
       const endpoint = endpointByJob[job.name] ?? "/internal/attendance/daily-settle";
 
       if (job.name === "monthly-snapshot") {
-        // 分頁續打：API 回 nextTenantId/nextTable/nextOffset 就原樣帶回去，直到 done。
+        // 分頁續打：API 回 nextTenantId/nextTable/nextOffset/nextRun 就原樣帶回去，直到 done。
         // 跨租戶（allTenants）由 API 端依 active 租戶 id 排序逐一往下指。
+        //
+        // run 序號（W7，2026-09-23；契約見 apps/api/src/routes/internal-jobs.ts 檔頭）：
+        // 同月重跑不再覆蓋，每一輪配一個新的 `r{run:03}` 資料夾。**續打必須把上一段回的
+        // `nextRun` 原樣帶回**，否則 API 會退而取「該月最新一次」，有人同時重跑時會寫錯
+        // 資料夾。跨租戶換下一個租戶時 API 不回 `nextRun`（那是新一輪，由 API 自己配號）
+        // → 下面的展開式剛好不帶 `run`，正是契約要的行為。
         let body: Record<string, unknown> = {
           ...(typeof job.data?.period === "string" ? { period: job.data.period } : {}),
           ...(typeof job.data?.tenantId === "string" ? { tenantId: job.data.tenantId, allTenants: false } : {}),
@@ -154,7 +179,7 @@ async function registerSchedulers() {
         let calls = 0;
         let rowsWritten = 0;
         let tablesCompleted = 0;
-        const tenantsDone: string[] = [];
+        const tenantsDone: Array<{ tenantId: string; run: number }> = [];
         for (;;) {
           calls += 1;
           const r = await postInternal(baseUrl, token, endpoint, body);
@@ -165,6 +190,7 @@ async function registerSchedulers() {
             done?: boolean;
             tenantId?: string | null;
             period?: string;
+            run?: number;
             table?: string | null;
             rowsWritten?: number;
             tablesCompleted?: number;
@@ -172,12 +198,13 @@ async function registerSchedulers() {
             nextTenantId?: string;
             nextTable?: string;
             nextOffset?: number;
+            nextRun?: number;
           };
           rowsWritten += p.rowsWritten ?? 0;
           tablesCompleted += p.tablesCompleted ?? 0;
-          if (p.manifestPath && p.tenantId) tenantsDone.push(p.tenantId);
+          if (p.manifestPath && p.tenantId) tenantsDone.push({ tenantId: p.tenantId, run: p.run ?? 0 });
           logger.debug(
-            { jobId: job.id, call: calls, tenantId: p.tenantId, table: p.table, rowsWritten: p.rowsWritten, next: p.nextTable ?? p.nextTenantId ?? null },
+            { jobId: job.id, call: calls, tenantId: p.tenantId, run: p.run, table: p.table, rowsWritten: p.rowsWritten, next: p.nextTable ?? p.nextTenantId ?? null },
             "monthly-snapshot step",
           );
           if (p.done) break;
@@ -189,6 +216,7 @@ async function registerSchedulers() {
             tenantId: p.nextTenantId ?? p.tenantId,
             ...(p.nextTable ? { table: p.nextTable } : {}),
             ...(typeof p.nextOffset === "number" ? { offset: p.nextOffset } : {}),
+            ...(typeof p.nextRun === "number" ? { run: p.nextRun } : {}),
             allTenants: typeof job.data?.tenantId === "string" ? false : true,
           };
         }
@@ -209,6 +237,9 @@ async function registerSchedulers() {
                 ...(typeof job.data?.date === "string" ? { date: job.data.date } : {}),
                 anomalyDays: typeof job.data?.anomalyDays === "number" ? job.data.anomalyDays : 7,
               }
+          : job.name === "annual-leave-grant"
+            ? // 基準日這支叫 asOf 不叫 date；排程不帶，API 端對每個租戶用該租戶時區的今天。
+              (typeof job.data?.asOf === "string" ? { asOf: job.data.asOf } : {})
             : typeof job.data?.date === "string"
               ? { date: job.data.date }
               : {};
@@ -255,7 +286,9 @@ if (process.env.REDIS_URL) {
     logger.error({ err: err.message }, "failed to register job schedulers");
     process.exit(1);
   });
-  logger.info("Worker process started (attendance + detection + notifications + monthly snapshot)");
+  logger.info(
+    "Worker process started (attendance + detection + notifications + monthly snapshot + annual leave + birthdays)",
+  );
 } else {
   // Skeleton mode: no broker, so we only run the health server. This keeps the
   // worker bootable on a bare laptop without Redis.
