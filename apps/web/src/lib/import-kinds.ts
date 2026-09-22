@@ -45,7 +45,7 @@ export const IMPORT_KINDS: Record<ImportKind, ImportKindMeta> = {
   holidays: {
     label: "假日清單",
     columns: ["日期", "名稱"],
-    note: "所有日期須同一年（年份由資料決定），會連同週末例假一併產生該年行事曆；已存在的日期會略過。",
+    note: "所有日期須同一年（年份由資料決定），會連同週末例假一併產生該年行事曆；手動設定過的日期不動，先前匯入的假日會更新。",
   },
 };
 

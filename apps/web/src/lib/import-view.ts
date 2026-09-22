@@ -16,6 +16,9 @@ const IMPORT_ERROR_TEXT: Record<string, string> = {
   invalid_header: "表頭對不上範本，請重新下載範本填寫",
   unsupported_file: "只接受 .xlsx 檔",
   file_too_large: "檔案超過 4MB",
+  too_many_rows: "一次最多 5000 列，請分批上傳",
+  unknown_kind: "不支援的匯入類型",
+  calendar_not_migrated: "行事曆功能尚未啟用，請聯絡系統維護",
 };
 
 /** 範本檔名：`匯入範本-{label}.xlsx`。 */

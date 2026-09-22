@@ -186,7 +186,7 @@ export function BatchImportButton({
                 <StepBadge n={1} />
                 <div className="min-w-0 flex-1 space-y-2">
                   <p className="text-sm font-medium text-gray-800">下載 Excel 範本</p>
-                  <p className="text-xs leading-5 text-gray-500">用 Excel 填好後回到這裡上傳；表頭與範例列請勿改動欄位順序，範例列請刪除。</p>
+                  <p className="text-xs leading-5 text-gray-500">用 Excel 填好後回到這裡上傳；表頭文字請保持與範本相同（順序可調），範例列請刪除。</p>
                   <Button type="button" variant="secondary" size="sm" loading={downloading} onClick={() => void onDownloadTemplate()}>
                     下載範本
                   </Button>
