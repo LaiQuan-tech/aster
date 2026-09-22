@@ -56,7 +56,7 @@ export default function PunchRecordsPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Apollo 打卡紀錄維護 filters: 資料類型/日期/單位/工號姓名/地點/打卡方式.
+  // 打卡紀錄維護 filters: 資料類型/日期/單位/工號姓名/地點/打卡方式.
   const today = new Date().toISOString().slice(0, 10);
   const weekAgo = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10);
   const [fEmp, setFEmp] = useState("");
@@ -198,7 +198,7 @@ export default function PunchRecordsPage() {
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-gray-900">打卡補登</h2>
-            <p className="mt-1 text-sm text-gray-500">支援 Apollo 的忘打卡補登與休息/外出紀錄補登。</p>
+            <p className="mt-1 text-sm text-gray-500">支援忘打卡補登與休息/外出紀錄補登。</p>
           </div>
           <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700">
             source = manual

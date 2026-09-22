@@ -618,7 +618,7 @@ describe("F4 公出/出差 — business_trip rides the same approval pipeline", 
   })
 })
 
-describe("F4 Apollo form-parity — payout / trip extras", () => {
+describe("F4 表單延伸欄位 — payout / trip extras", () => {
   it("business_trip stores tripType/location/remark/agentName and returns them on GET", async () => {
     await request(app)
       .put("/approval-flows/business_trip")

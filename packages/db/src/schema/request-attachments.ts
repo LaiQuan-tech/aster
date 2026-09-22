@@ -3,7 +3,7 @@ import { tenants } from "./tenants"
 import { leaveRequests } from "./leave-requests"
 
 /**
- * Request attachments — 附件 on 請假/公出 requests (Apollo: ≤3 files ≤3MB).
+ * Request attachments — 附件 on 請假/公出 requests (≤3 files ≤3MB).
  * Binary lives in the private 'request-attachments' storage bucket at
  * `storagePath`; this table is the tenant-scoped index the API lists/authorises
  * against (filer or HR). Served via short-lived signed URLs.

@@ -718,7 +718,7 @@ export default function ModuleSettingsPage() {
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-base font-semibold text-gray-900">年度狀態與差勤參數</h2>
-                <p className="mt-1 text-sm text-gray-500">對齊 Apollo 的年度狀態、行事曆、截止日與員工異議設定。</p>
+                <p className="mt-1 text-sm text-gray-500">年度狀態、行事曆、截止日與員工異議設定。</p>
               </div>
               <span className={`rounded-full px-3 py-1 text-xs font-medium ${YEAR_STATUS_META[yearStatus].cls}`}>
                 {activeYear} {YEAR_STATUS_META[yearStatus].label}

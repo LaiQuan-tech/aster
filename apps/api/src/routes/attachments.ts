@@ -9,7 +9,7 @@ export const attachmentsRouter = Router()
 
 const BUCKET = "request-attachments"
 const MAX_FILES = 3
-const MAX_BYTES = 3 * 1024 * 1024 // Apollo: 3 MB
+const MAX_BYTES = 3 * 1024 * 1024 // 上限 3 MB
 
 const uploadSchema = z.object({
   fileName: z.string().trim().min(1).max(200),
@@ -72,7 +72,7 @@ async function authorizeRequestAccess(
 /**
  * POST /requests/:id/attachments — the filer, HR, an approver on this request,
  * or the filer's direct manager uploads one attachment (base64 body; see
- * authorizeRequestAccess above). Enforces Apollo's limits: ≤3 files per
+ * authorizeRequestAccess above). Enforces upload limits: ≤3 files per
  * request, ≤3MB each. Binary goes to the private bucket at
  * <tenant>/<request>/<uuid>-<name>; a request_attachments row indexes it.
  */

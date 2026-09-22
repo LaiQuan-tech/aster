@@ -37,7 +37,7 @@ export const leaveRequests = pgTable("leave_requests", {
   endAt: timestamp("end_at", { withTimezone: true }).notNull(),
   hours: numeric("hours"),
   reason: text("reason"),
-  // Apollo form-parity extras (all optional, per kind):
+  // 表單延伸欄位 (all optional, per kind):
   //   leave: agentName 代理人.  ot: payout 給付方式 ('pay'|'comp_time').
   //   business_trip: tripType 類型 ('trip'|'business_trip' 公出/出差),
   //   location 地點, remark 備註 (+agentName).
@@ -69,7 +69,7 @@ export const leaveRequests = pgTable("leave_requests", {
    * 滿足該憑證要求。客戶未要求，但幾乎不用多做。
    */
   tripReport: text("trip_report"),
-  // 多段日期 (Apollo 新增列)：[{date, startTime, endTime, hours}]; null → 單段
+  // 多段日期 (新增列)：[{date, startTime, endTime, hours}]; null → 單段
   // (start_at/end_at 為整體範圍，hours 為各段加總)。
   segments: jsonb("segments"),
   status: text("status").notNull().default("pending"),

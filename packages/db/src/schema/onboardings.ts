@@ -8,7 +8,7 @@ import { employees } from "./employees"
  * who has been hired but not yet turned into an `employees` row. `status` is
  * 'pending' (未報到) until POST /onboardings/:id/complete provisions the employee
  * and flips it to 'completed' (已報到), stamping `employeeId`. `identityType`
- * (身分別) and `region` (地區) mirror the Apollo Hire list columns. `managerEmpId`
+ * (身分別) and `region` (地區) mirror the 報到管理 list columns. `managerEmpId`
  * has no DB FK (mirrors employees.managerEmpId style) to stay flexible.
  */
 export const onboardings = pgTable("onboardings", {

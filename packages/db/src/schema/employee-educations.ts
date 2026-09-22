@@ -3,7 +3,7 @@ import { tenants } from "./tenants"
 import { employees } from "./employees"
 
 /**
- * Employee education records — 學歷 (My Data ▸ 學歷證照), aligned with Apollo's
+ * Employee education records — 學歷 (My Data ▸ 學歷證照). Fields mirror the
  * add-education form: isHighest 最高學歷, degree 學歷類別, school 學校,
  * majorCategory 科系類別, major 科系名稱, studyType 就學類別(day/night/other),
  * studyStatus 就學狀態(graduated/enrolled/incomplete), start/end 就學起訖,

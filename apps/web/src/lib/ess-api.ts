@@ -192,7 +192,7 @@ export interface CreateRequestBody {
   reason?: string;
   onBehalfOfEmployeeId?: string;
   segments?: LeaveSegment[];
-  // Apollo form-parity extras
+  // 表單延伸欄位
   agentName?: string;
   payout?: "pay" | "comp_time";
   tripType?: "outing" | "business_trip";
@@ -485,7 +485,7 @@ export function rejectRequest(id: string, comment: string) {
  */
 /* ------------------------------------------------------- my data / 履歷 --- */
 
-// DB-shape (snake_case) of the 1:1 profile as returned by GET — Apollo 基本+通訊.
+// DB-shape (snake_case) of the 1:1 profile as returned by GET — 基本+通訊.
 export interface EmployeeProfile {
   first_name: string | null;
   last_name: string | null;

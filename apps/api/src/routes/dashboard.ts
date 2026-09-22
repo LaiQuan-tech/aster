@@ -45,7 +45,7 @@ function monthsBetween(from: string, to: string): string[] {
 
 /**
  * GET /dashboard/headcount?from=YYYY-MM&to=YYYY-MM[&deptId=&employmentType=]
- * — Apollo 全公司在職人數分析. For each month in the range:
+ * — 全公司在職人數分析. For each month in the range:
  *   opening 期初在職 (hired before the month, not yet terminated),
  *   hires 新進 (hire_date within the month),
  *   exits 離職 (terminated_at within the month),

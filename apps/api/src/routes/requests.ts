@@ -31,9 +31,9 @@ const createSchema = z.object({
   endAt: z.string().datetime(),
   hours: z.number().optional(),
   reason: z.string().trim().min(1).max(250).optional(),
-  // 代申請 (Apollo 本人/代申請): HR files FOR this employee. Non-HR callers 403.
+  // 代申請 (本人/代申請): HR files FOR this employee. Non-HR callers 403.
   onBehalfOfEmployeeId: z.string().uuid().optional(),
-  // 多段日期 (Apollo 新增列): individual day segments; hours should be their sum.
+  // 多段日期 (新增列): individual day segments; hours should be their sum.
   segments: z
     .array(
       z.object({
@@ -51,7 +51,7 @@ const createSchema = z.object({
     .min(1)
     .max(31)
     .optional(),
-  // Apollo form-parity extras (validated per kind below):
+  // 表單延伸欄位 (validated per kind below):
   agentName: z.string().trim().min(1).optional(),
   payout: z.enum(["pay", "comp_time"]).optional(),
   tripType: z.enum(["outing", "business_trip"]).optional(),
@@ -1033,7 +1033,7 @@ requestsRouter.post(
 )
 
 /**
- * POST /requests/batch-decision — Apollo-style back-office batch approve/reject.
+ * POST /requests/batch-decision — back-office batch approve/reject.
  *
  * The current approver may batch-action their own queue. HR/platform admins can
  * also override tenant requests from the admin console, with each result

@@ -135,7 +135,7 @@ function shiftWindowUtc(
 
 /**
  * Slice one approved leave request into minutes per local day. Precedence:
- *   1. `segments` (Apollo 多段) — each row is already a local day.
+ *   1. `segments` (多段) — each row is already a local day.
  *   2. single-day request — its declared `hours` (what the filer asked for);
  *      without `hours`, the overlap with that day's shift window.
  *   3. multi-day request — per day, the overlap with that day's shift window;

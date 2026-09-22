@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { Card, InlineError } from "@/components/ess-ui";
 import { getLeaveBalances, getLeaveTypes, type LeaveBalance, type LeaveType } from "@/lib/ess-api";
 
-// "X 時 Y 分" from decimal hours (Apollo displays hours+minutes).
+// "X 時 Y 分" from decimal hours (display as hours+minutes).
 function fmt(hours: number): string {
   const h = Math.floor(hours);
   const m = Math.round((hours - h) * 60);

@@ -22,7 +22,7 @@ export interface ApprovedRequest {
   payout?: string | null
   /** 申請的預支金額（模組三第 2、3 條）；核准時據此建立 advances 一列。 */
   advance_requested?: string | number | null
-  /** 多段日期（Apollo 新增列）；fix_punch 若某段帶 `type` 則直接指定補卡種類。 */
+  /** 多段日期（新增列）；fix_punch 若某段帶 `type` 則直接指定補卡種類。 */
   segments?: Array<Record<string, unknown>> | null
   reason?: string | null
 }
@@ -315,7 +315,7 @@ export async function applyApprovalEffects(
 
     if (req.kind === "ot") {
       if (hours <= 0) return
-      // Explicit 給付方式 on the request wins (Apollo's 加班費/補休 choice);
+      // Explicit 給付方式 on the request wins (加班費/補休 choice);
       // only when the filer didn't choose do we fall back to the rule config.
       if (req.payout === "comp_time") {
         await creditCompTime(supabase, tenantId, req, hours)

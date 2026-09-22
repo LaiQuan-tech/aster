@@ -38,7 +38,7 @@ export default function OnboardingPage() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  // Apollo Hire filters: 狀態 / 報到區間 / 關鍵字.
+  // 報到管理 filters: 狀態 / 報到區間 / 關鍵字.
   const [fStatus, setFStatus] = useState<"" | "pending" | "completed">("");
   const [fFrom, setFFrom] = useState("");
   const [fTo, setFTo] = useState("");
@@ -235,7 +235,7 @@ export default function OnboardingPage() {
 
       <Card>
         <h2 className="mb-4 text-sm font-medium text-gray-500">報到清單</h2>
-        {/* Apollo Hire 篩選列：狀態 / 報到區間 / 關鍵字 */}
+        {/* 報到管理篩選列：狀態 / 報到區間 / 關鍵字 */}
         <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
           <div>
             <label className={labelCls}>狀態</label>

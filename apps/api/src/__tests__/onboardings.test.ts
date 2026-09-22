@@ -140,7 +140,7 @@ describe("F-Hire 報到管理 — HR manages onboardings", () => {
     expect(create.status).toBe(403)
   })
 
-  it("Apollo filters: 報到區間 from/to + 關鍵字 keyword narrow the list", async () => {
+  it("報到管理 filters: 報到區間 from/to + 關鍵字 keyword narrow the list", async () => {
     await request(app)
       .post("/onboardings")
       .set("Authorization", `Bearer ${adminToken}`)

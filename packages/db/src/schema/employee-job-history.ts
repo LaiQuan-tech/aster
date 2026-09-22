@@ -4,7 +4,7 @@ import { departments } from "./departments"
 import { employees } from "./employees"
 
 /**
- * Employee job-change history — 職務經歷 (My Data), aligned with Apollo's
+ * Employee job-change history — 職務經歷 (My Data). Fields in this
  * read-only table: effectiveDate 生效日期, action 異動行為 (新進/資料調整/晉升/
  * 調部門…), deptId/deptName 直屬單位 (deptName denormalised so history survives
  * dept renames/deletes), grade 職等, title 職稱. HR-written, employee-readable.

@@ -18,7 +18,7 @@ const dateRe = /^\d{4}-\d{2}-\d{2}$/
 const punchSchema = z.object({
   // type is optional — when omitted we infer it from the employee's last punch
   // today (none / last 'out' → 'in'; last 'in' → 'out').
-  // Work in/out plus Apollo's 休息/外出 pairs. Inference (omitted type) only
+  // Work in/out plus 休息/外出 pairs. Inference (omitted type) only
   // applies to work in/out; break/outing must be explicit.
   type: z.enum(["in", "out", "break_in", "break_out", "outing_in", "outing_out"]).optional(),
   source: z.enum(["gps", "web", "line"]).optional(),
@@ -340,7 +340,7 @@ punchRouter.get(
   },
 )
 
-// 補登 body — HR back-fills a punch for an employee (Apollo 打卡紀錄維護's
+// 補登 body — HR back-fills a punch for an employee (打卡紀錄維護的
 // 批次打卡補登/忘打卡補登). Explicit employeeId + timestamp + type.
 const manualSchema = z.object({
   employeeId: z.string().uuid(),

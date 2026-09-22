@@ -483,7 +483,7 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       key: "reports",
       label: "報表中心",
       href: "/admin/reports",
-      desc: "對齊 Apollo 的出勤、請假/表單、薪資與人力快照報表：可篩選、可預覽表格、可下載 CSV。",
+      desc: "出勤、請假/表單、薪資與人力快照報表：可篩選、可預覽表格、可下載 CSV。",
     },
     {
       key: "dashboard",
@@ -509,7 +509,7 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       key: "notifications",
       label: "通知中心",
       href: "/admin/notifications",
-      desc: "全租戶通知佇列、未讀狀態與 Apollo LinkUp 提醒追蹤。",
+      desc: "全租戶通知佇列、未讀狀態與提醒追蹤。",
     },
     {
       key: "ai",

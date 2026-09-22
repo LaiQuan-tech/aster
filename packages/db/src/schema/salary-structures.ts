@@ -36,7 +36,7 @@ export const salaryStructures = pgTable(
     dailyWage: numeric("daily_wage"),
     hourlyWage: numeric("hourly_wage").notNull().default("0"),
     allowances: jsonb("allowances").notNull().default({}),
-    // 投保級距 (Apollo 保險資料): 勞保/健保投保金額 per government brackets.
+    // 投保級距 (保險資料): 勞保/健保投保金額 per government brackets.
     laborInsuredSalary: numeric("labor_insured_salary"),
     healthInsuredSalary: numeric("health_insured_salary"),
     // 勞工自願提繳退休金比例 (0–0.06，勞退條例 §14 III)。NULL/0 = 不自提。

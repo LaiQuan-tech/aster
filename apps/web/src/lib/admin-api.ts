@@ -1524,7 +1524,7 @@ export function exportTaxFilingUrl(type: "withholding" | "supplementary") {
   return `/tax-filing/export?type=${type}`;
 }
 
-/* --------------------------------------------------------- Apollo admin --- */
+/* --------------------------------------------------------- attendance & rules --- */
 
 export interface AttendanceDay {
   id: string;

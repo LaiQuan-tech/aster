@@ -32,7 +32,7 @@ const updateSchema = z
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 
-// Apollo Hire list filters: 狀態 / 報到區間(from~to) / 關鍵字(姓名).
+// 報到管理 list filters: 狀態 / 報到區間(from~to) / 關鍵字(姓名).
 const listQuerySchema = z.object({
   status: z.enum(["pending", "completed"]).optional(),
   from: z.string().regex(dateRe).optional(),
@@ -81,7 +81,7 @@ onboardingsRouter.get(
 )
 
 /**
- * POST /onboardings/import — 批次匯入 (Apollo Hire's Excel batch import, CSV
+ * POST /onboardings/import — 批次匯入 (報到管理的 Excel batch import, CSV
  * form). Header: name,reportDate[,identityType][,region][,employmentType].
  * Per-line validated; valid rows inserted as pending, bad rows reported with
  * their line number so one typo never sinks the batch. HR-only.

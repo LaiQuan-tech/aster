@@ -130,15 +130,15 @@ describe("F-MyData 履歷 — employee profile aggregate + sub-resources", () =>
     expect(res.body.workHistory.length).toBe(1)
     // seniorityDays is a number or null (hire_date may be unset).
     expect(res.body).toHaveProperty("seniorityDays")
-    // Apollo-parity additions: jobHistory list + seniority breakdown.
+    // Extended fields: jobHistory list + seniority breakdown.
     expect(Array.isArray(res.body.jobHistory)).toBe(true)
     expect(res.body.seniority).toHaveProperty("internalYears")
     expect(res.body.seniority).toHaveProperty("gradeYears")
     expect(res.body.seniority).toHaveProperty("unitYears")
   })
 
-  it("Apollo 基本/通訊 fields roundtrip; partial PUT leaves other fields intact", async () => {
-    // Fill Apollo 基本資料 fields.
+  it("基本/通訊 fields roundtrip; partial PUT leaves other fields intact", async () => {
+    // Fill 基本資料 fields.
     const put1 = await request(app)
       .put(`/employees/${empId}/profile`)
       .set("Authorization", `Bearer ${empToken}`)
@@ -172,7 +172,7 @@ describe("F-MyData 履歷 — employee profile aggregate + sub-resources", () =>
     expect(res.body.profile.phone).toBe("0911222333")
   })
 
-  it("education accepts Apollo fields (isHighest/studyType/studyStatus/region)", async () => {
+  it("education accepts extended fields (isHighest/studyType/studyStatus/region)", async () => {
     const res = await request(app)
       .post(`/employees/${empId}/educations`)
       .set("Authorization", `Bearer ${empToken}`)

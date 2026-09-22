@@ -27,11 +27,11 @@ const input =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 const label = "mb-1 block text-xs font-medium text-gray-500";
 
-// Apollo My Data 六分頁.
+// My Data 六分頁.
 const TABS = ["基本資料", "通訊資料", "學歷證照", "工作經歷", "年資", "職務經歷"] as const;
 type Tab = (typeof TABS)[number];
 
-// 基本資料 fields (Apollo field-for-field; key = SaveProfileBody camelCase).
+// 基本資料 fields (key = SaveProfileBody camelCase).
 const BASIC_FIELDS: { key: keyof SaveProfileBody; label: string; type?: "date" }[] = [
   { key: "lastName", label: "姓" },
   { key: "firstName", label: "名" },
@@ -176,7 +176,7 @@ export default function MyDataPage() {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("基本資料");
 
-  // 學歷 add-form state (Apollo fields)
+  // 學歷 add-form state
   const [showEduForm, setShowEduForm] = useState(false);
   const [eduProofFile, setEduProofFile] = useState<File | null>(null);
   const [edu, setEdu] = useState({
@@ -313,7 +313,7 @@ export default function MyDataPage() {
         <p className="text-sm text-gray-400">載入中…</p>
       ) : (
         <Card>
-          {/* Apollo 六分頁 */}
+          {/* 六分頁 */}
           <nav className="-mx-1 mb-5 flex gap-1 overflow-x-auto border-b border-gray-100 px-1 pb-2 sm:flex-wrap sm:overflow-visible">
             {TABS.map((t) => (
               <button

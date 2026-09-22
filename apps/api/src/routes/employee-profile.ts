@@ -52,7 +52,7 @@ async function authorize(
 }
 
 const profileSchema = z.object({
-  // 基本資料 (Apollo field-for-field)
+  // 基本資料
   firstName: z.string().trim().nullish(),
   lastName: z.string().trim().nullish(),
   englishName: z.string().trim().nullish(),
@@ -121,7 +121,7 @@ function seniorityDays(hireDate: string | null): number | null {
   return Math.floor(ms / 86_400_000)
 }
 
-// Tenure in years to 1 decimal (Apollo 年資 style, e.g. 1.3), or null.
+// Tenure in years to 1 decimal (年資 style, e.g. 1.3), or null.
 function seniorityYears(hireDate: string | null): number | null {
   const days = seniorityDays(hireDate)
   if (days == null) return null

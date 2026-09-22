@@ -3,7 +3,7 @@ import { tenants } from "./tenants"
 import { employees } from "./employees"
 
 /**
- * Personal notes — Apollo LinkUp 便利貼. One note per employee per tenant so the
+ * Personal notes — 便利貼. One note per employee per tenant so the
  * ESS home memo follows the user across browsers and devices.
  */
 export const personalNotes = pgTable(

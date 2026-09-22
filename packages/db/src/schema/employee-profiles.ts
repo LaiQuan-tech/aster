@@ -4,7 +4,7 @@ import { employees } from "./employees"
 
 /**
  * Employee profiles — 1:1 contact / personal extension of an employee, aligned
- * field-for-field with Apollo My Data ▸ 基本資料 + 通訊資料:
+ * field-for-field with My Data ▸ 基本資料 + 通訊資料:
  *   基本: firstName/lastName 姓名拆欄, englishName 英文姓名, nationality 國籍,
  *   idType/idNumber/idExpiry ×3 (證件三組), entryDate 入境時間, birthday 生日,
  *   gender 性別, maritalStatus 婚姻, photo 員工照片.

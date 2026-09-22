@@ -181,7 +181,7 @@ export default function DashboardPage() {
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
               <h2 className="text-base font-semibold text-gray-900">關鍵指標</h2>
-              <p className="mt-1 text-sm text-gray-500">Apollo Dashboard 常用 headcount 指標。</p>
+              <p className="mt-1 text-sm text-gray-500">常用人力指標。</p>
             </div>
             <span className={`rounded-full px-3 py-1 text-xs font-medium ${closingDelta >= 0 ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>
               期末變化 {closingDelta >= 0 ? "+" : ""}{closingDelta}
@@ -241,7 +241,7 @@ export default function DashboardPage() {
       return (
         <Card key={id}>
           <h2 className="mb-1 text-base font-semibold text-gray-900">月度異動明細</h2>
-          <p className="mb-4 text-sm text-gray-500">可直接對照 Apollo 的期初、新進、離職、期末欄位。</p>
+          <p className="mb-4 text-sm text-gray-500">期初、新進、離職、期末四欄。</p>
           {series.length === 0 ? (
             <Empty>無資料</Empty>
           ) : (

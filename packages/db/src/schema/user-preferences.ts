@@ -3,7 +3,7 @@ import { tenants } from "./tenants"
 import { employees } from "./employees"
 
 /**
- * User preferences — tenant-scoped per-employee UI settings such as Apollo-style
+ * User preferences — tenant-scoped per-employee UI settings such as
  * Dashboard widget layout. `key` is a stable namespace (for example
  * "admin.dashboard.widgets.v1") and `value` stores the typed preference payload.
  */
