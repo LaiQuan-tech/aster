@@ -2,9 +2,10 @@ import type { SupabaseClient } from "@supabase/supabase-js"
 import { type RuleConfig } from "@hr/rules"
 import { logger } from "../lib/logger.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
-import { zonedTimeToUtc } from "../lib/tz.js"
+import { localDateKey, zonedTimeToUtc } from "../lib/tz.js"
 import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { loadRuleConfigFor } from "./payroll-inputs.js"
+import { leaveBalancesHavePeriod } from "./annual-leave.js"
 
 /**
  * The fields of a leave_requests row the ledger effects need. Numerics arrive
@@ -45,12 +46,6 @@ function resolveHours(req: ApprovedRequest): number {
   return hoursBetween(req.start_at, req.end_at)
 }
 
-/** The calendar year of a request's start, used as the leave_balances bucket. */
-function requestYear(req: ApprovedRequest): number {
-  const y = new Date(req.start_at).getUTCFullYear()
-  return Number.isFinite(y) ? y : new Date().getUTCFullYear()
-}
-
 /**
  * Does this tenant convert the given overtime to comp-time? P2 simplifies the
  * OT request to weekday overtime: prefer the explicit 'weekday_ot' rule, but if
@@ -82,10 +77,59 @@ async function creditCompTime(
 }
 
 /**
- * Debit a leave balance: add `hours` to leave_balances.used for the
- * (tenant, employee, leave_type, year) bucket, creating the row at
- * used=hours / entitled=0 when it does not exist yet. Done read-then-write
- * (no DB trigger) — acceptable because approval is single-writer per request.
+ * 找這張假單該扣的餘額桶（W1 週年制，2026-09-23）。
+ *
+ * 舊制一個人一個假別一年一個桶（`year` ＝假單起日的西曆年）；週年制改成看期間：
+ * 起日（**租戶時區**的日曆日，不是 UTC）落在哪一列的 `period_start`..`period_end`
+ * 就扣哪一列。找不到期間桶（還沒發放、或欄位還沒套）→ 退回曆年桶，行為與舊制相同。
+ *
+ * 同一個 `year` 底下可能同時存在曆年列與週年列（唯一鍵已改成 period_start），
+ * 所以退回曆年桶那一段用 limit(1) 取最早建立的一列，不用 maybeSingle（會因多列報錯）。
+ */
+export async function resolveBalanceBucket(
+  supabase: SupabaseClient,
+  tenantId: string,
+  employeeId: string,
+  leaveTypeId: string,
+  startAtLocalDate: string,
+): Promise<{ id: string; used: number } | null> {
+  if (await leaveBalancesHavePeriod()) {
+    const { data, error } = await supabase
+      .from("leave_balances")
+      .select("id, used")
+      .eq("tenant_id", tenantId)
+      .eq("employee_id", employeeId)
+      .eq("leave_type_id", leaveTypeId)
+      .lte("period_start", startAtLocalDate)
+      .gte("period_end", startAtLocalDate)
+      .order("period_start", { ascending: false })
+      .limit(1)
+    if (error) throw new Error(`ledger resolveBalanceBucket (period): ${error.message}`)
+    const row = (data ?? [])[0] as { id: string; used: string | number | null } | undefined
+    if (row) return { id: row.id, used: Number(row.used ?? 0) }
+  }
+
+  const year = Number(startAtLocalDate.slice(0, 4))
+  const { data, error } = await supabase
+    .from("leave_balances")
+    .select("id, used")
+    .eq("tenant_id", tenantId)
+    .eq("employee_id", employeeId)
+    .eq("leave_type_id", leaveTypeId)
+    .eq("year", year)
+    .order("created_at", { ascending: true })
+    .limit(1)
+  if (error) throw new Error(`ledger resolveBalanceBucket (year): ${error.message}`)
+  const row = (data ?? [])[0] as { id: string; used: string | number | null } | undefined
+  return row ? { id: row.id, used: Number(row.used ?? 0) } : null
+}
+
+/**
+ * Debit a leave balance: add `hours` to leave_balances.used for the bucket the
+ * request's start day falls in (see resolveBalanceBucket), creating a 曆年 row at
+ * used=hours / entitled=0 when the employee has no bucket at all. Done
+ * read-then-write (no DB trigger) — acceptable because approval is single-writer
+ * per request.
  */
 async function debitLeaveBalance(
   supabase: SupabaseClient,
@@ -94,29 +138,23 @@ async function debitLeaveBalance(
   leaveTypeId: string,
   hours: number,
 ): Promise<void> {
-  const year = requestYear(req)
+  const tz = await getTenantTimezone(tenantId)
+  const startDate = localDateKey(req.start_at, tz)
 
-  const { data: existing, error: selErr } = await supabase
-    .from("leave_balances")
-    .select("id, used")
-    .eq("tenant_id", tenantId)
-    .eq("employee_id", req.employee_id)
-    .eq("leave_type_id", leaveTypeId)
-    .eq("year", year)
-    .maybeSingle()
-  if (selErr) throw new Error(`ledger debitLeaveBalance (select): ${selErr.message}`)
-
-  if (existing) {
-    const nextUsed = Number(existing.used ?? 0) + hours
+  const bucket = await resolveBalanceBucket(supabase, tenantId, req.employee_id, leaveTypeId, startDate)
+  if (bucket) {
     const { error: upErr } = await supabase
       .from("leave_balances")
-      .update({ used: nextUsed, updated_at: new Date().toISOString() })
-      .eq("id", existing.id)
+      .update({ used: bucket.used + hours, updated_at: new Date().toISOString() })
+      .eq("id", bucket.id)
     if (upErr) throw new Error(`ledger debitLeaveBalance (update): ${upErr.message}`)
     return
   }
 
-  const { error: insErr } = await supabase.from("leave_balances").insert({
+  // 一個桶都沒有 → 建曆年桶（舊行為）。期間欄已套就順手補上，這一列之後才搬得動
+  // （年度給假的 migrate 認的就是 source='manual' 的曆年列）。
+  const year = Number(startDate.slice(0, 4))
+  const row: Record<string, unknown> = {
     tenant_id: tenantId,
     employee_id: req.employee_id,
     leave_type_id: leaveTypeId,
@@ -124,7 +162,12 @@ async function debitLeaveBalance(
     entitled: 0,
     used: hours,
     deferred: 0,
-  })
+  }
+  if (await leaveBalancesHavePeriod()) {
+    row.period_start = `${year}-01-01`
+    row.period_end = `${year}-12-31`
+  }
+  const { error: insErr } = await supabase.from("leave_balances").insert(row)
   if (insErr) throw new Error(`ledger debitLeaveBalance (insert): ${insErr.message}`)
 }
 
@@ -285,8 +328,8 @@ async function materializeFixPunch(
  * Apply the ledger side-effects of FINAL approval of a request.
  *
  *   • kind='leave' with a leave_type_id → debit that leave balance by the
- *     request's hours (auto-creating the year bucket if needed). Settlement
- *     reads the approved request itself for per-day leave minutes.
+ *     request's hours（扣起日落在的那一段週年期間；沒有桶就自動建曆年桶）。
+ *     Settlement reads the approved request itself for per-day leave minutes.
  *   • kind='ot' whose tenant rule converts overtime to comp-time → credit a
  *     comp_time_ledger block of the request's hours.
  *   • kind='fix_punch' → insert the corrected punch_records (see

@@ -3,6 +3,13 @@
 import { useEffect, useState } from "react";
 import { Card, InlineError } from "@/components/ess-ui";
 import { getLeaveBalances, getLeaveTypes, type LeaveBalance, type LeaveType } from "@/lib/ess-api";
+import { balancePeriodLabel } from "@/lib/leave-balances-api";
+
+/**
+ * 我的假別額度：`leave_balances` 一列一個「期間桶」。特休週年制（W1，2026-09-23）後
+ * 期間是到職日週年（例：2026-05-10 ～ 2027-05-09），不再是曆年，所以顯示期間而不是年度；
+ * API 還沒回期間欄的舊資料由 balancePeriodLabel 退回顯示年度。
+ */
 
 // "X 時 Y 分" from decimal hours (display as hours+minutes).
 function fmt(hours: number): string {
@@ -42,7 +49,7 @@ export default function BalancesPage() {
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <h3 className="font-semibold text-gray-900">{typeName(b.leave_type_id)}</h3>
-                    <p className="text-xs text-gray-400">{b.year}</p>
+                    <p className="text-xs text-gray-400">{balancePeriodLabel(b)}</p>
                   </div>
                   <span className="rounded-full bg-white px-3 py-1 text-sm font-semibold" style={{ color: "var(--brand)" }}>
                     剩 {fmt(remaining)}
@@ -64,6 +71,7 @@ export default function BalancesPage() {
           <thead>
             <tr className="border-b border-gray-200 text-xs text-gray-500">
               <th className="py-2 pr-4">假別</th>
+              <th className="py-2 pr-4">期間</th>
               <th className="py-2 pr-4">可用</th>
               <th className="py-2 pr-4">已用</th>
               <th className="py-2">剩餘</th>
@@ -75,10 +83,8 @@ export default function BalancesPage() {
               const used = Number(b.used);
               return (
                 <tr key={b.id} className="border-b border-gray-50">
-                  <td className="py-2 pr-4 font-medium text-gray-800">
-                    {typeName(b.leave_type_id)}
-                    <span className="ml-1 text-xs text-gray-400">{b.year}</span>
-                  </td>
+                  <td className="py-2 pr-4 font-medium text-gray-800">{typeName(b.leave_type_id)}</td>
+                  <td className="py-2 pr-4 whitespace-nowrap text-xs text-gray-500">{balancePeriodLabel(b)}</td>
                   <td className="py-2 pr-4">{fmt(entitled)}</td>
                   <td className="py-2 pr-4">{fmt(used)}</td>
                   <td className="py-2 font-medium">{fmt(Math.max(0, entitled - used))}</td>
@@ -87,7 +93,7 @@ export default function BalancesPage() {
             })}
             {balances.length === 0 && (
               <tr>
-                <td colSpan={4} className="py-3 text-gray-400">尚無假別額度資料</td>
+                <td colSpan={5} className="py-3 text-gray-400">尚無假別額度資料</td>
               </tr>
             )}
           </tbody>

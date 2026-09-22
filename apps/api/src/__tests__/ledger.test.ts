@@ -10,6 +10,18 @@ import { app } from "../app"
 const SUPABASE_URL = process.env.SUPABASE_URL ?? ""
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ?? ""
 
+/**
+ * 特休週年制（W1，migration 0050）：`leave_balances` 加了 period_start／period_end／
+ * source／note，唯一鍵改成 (tenant, employee, leave_type, period_start)。正式庫還沒套
+ * 之前 API 會退回曆年語意，所以期間斷言用探測結果分支——套完自動改跑週年斷言。
+ */
+async function leaveBalancePeriodReady(): Promise<boolean> {
+  if (!SUPABASE_URL) return false
+  const r = await supabaseAdmin.from("leave_balances").select("period_start, period_end, source").limit(1)
+  return !r.error
+}
+const PERIOD_READY = await leaveBalancePeriodReady()
+
 const stamp = Date.now()
 const createdUserIds: string[] = []
 const createdTenantIds: string[] = []
@@ -220,11 +232,20 @@ describe("F4 leave_balances — HR sets entitlement", () => {
       year: number
       entitled: string
       used: string
+      period_start?: string
+      period_end?: string
+      source?: string
     }>
     const annual = balances.find((b) => b.leave_type_id === annualTypeId && b.year === YEAR)
     expect(annual).toBeTruthy()
     expect(Number(annual!.entitled)).toBe(80)
     expect(Number(annual!.used)).toBe(0)
+    if (PERIOD_READY) {
+      // PUT 沒帶 periodStart → 沿用曆年桶，且來源是 HR 手動（年度給假才是 auto）。
+      expect(annual!.period_start).toBe(`${YEAR}-01-01`)
+      expect(annual!.period_end).toBe(`${YEAR}-12-31`)
+      expect(annual!.source).toBe("manual")
+    }
   }, 15_000)
 
   it("a normal employee cannot set balances → 403", async () => {
@@ -263,11 +284,25 @@ describe("F4 approve leave → debits leave_balances.used", () => {
       .get(`/leave-balances?employeeId=${emp1Id}&year=${YEAR}`)
       .set("Authorization", `Bearer ${A.adminToken}`)
     expect(get.status).toBe(200)
-    const annual = (get.body.balances as Array<{ leave_type_id: string; used: string; entitled: string }>).find(
-      (b) => b.leave_type_id === annualTypeId,
+    const rows = get.body.balances as Array<{
+      leave_type_id: string
+      used: string
+      entitled: string
+      period_start?: string
+      period_end?: string
+    }>
+    // 週年制下用期間找桶：假單起日（7/1）落在哪一列的 period_start..period_end 就扣哪一列。
+    const annual = rows.find(
+      (b) =>
+        b.leave_type_id === annualTypeId &&
+        (!PERIOD_READY ||
+          (b.period_start! <= `${YEAR}-07-01` && b.period_end! >= `${YEAR}-07-01`)),
     )
+    expect(annual).toBeTruthy()
     expect(Number(annual!.used)).toBe(8)
     expect(Number(annual!.entitled) - Number(annual!.used)).toBe(72)
+    // 扣在既有的桶上，不會另開一列。
+    expect(rows.filter((b) => b.leave_type_id === annualTypeId)).toHaveLength(1)
   }, 20_000)
 })
 
