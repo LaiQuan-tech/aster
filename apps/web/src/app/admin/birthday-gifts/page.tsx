@@ -38,6 +38,52 @@ function monthKey(d = new Date()): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
+/** `YYYY-MM` 往前／往後 delta 個月（跨年自動進位）。 */
+function shiftMonth(month: string, delta: number): string {
+  const [y, m] = month.split("-").map(Number);
+  if (!y || !m) return monthKey();
+  return monthKey(new Date(y, m - 1 + delta, 1));
+}
+
+/** `2026-09` → `2026 年 9 月`（清單標題與空狀態用）。 */
+function monthLabel(month: string): string {
+  const [y, m] = month.split("-").map(Number);
+  return y && m ? `${y} 年 ${m} 月` : month;
+}
+
+/**
+ * 照片連結（2026-09-23 正式站驗收：年度登記列的「有照片」只是文字、點不開）。
+ * `photoUrl` 是 API 每次載入時簽的 900 秒 signed URL（GET /birthday-gifts、/birthday-gifts/upcoming
+ * 都經 decorate() 帶出來；照片本體在私有 bucket，沒有永久公開連結）。有 photo_path 但簽不出
+ * URL 時退回純文字，並提示重新整理。
+ */
+function PhotoLink({ gift }: { gift: BirthdayGift }) {
+  if (gift.photoUrl) {
+    return (
+      <a
+        href={gift.photoUrl}
+        target="_blank"
+        rel="noreferrer"
+        className="inline-flex items-center gap-1.5 text-blue-600 hover:underline"
+        title={gift.photo_file_name ?? "看照片（另開新分頁；連結 15 分鐘內有效）"}
+      >
+        {/* 短效 signed URL（私有 bucket），不走 next/image 的 remotePatterns。 */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={gift.photoUrl} alt="" loading="lazy" className="h-8 w-8 rounded object-cover" />
+        看照片
+      </a>
+    );
+  }
+  if (gift.photo_path) {
+    return (
+      <span className="text-gray-500" title="照片連結已過期，請重新整理頁面">
+        有照片
+      </span>
+    );
+  }
+  return null;
+}
+
 function fmtMoney(n: number | null | undefined): string {
   return n == null ? "—" : Math.round(n).toLocaleString("zh-TW");
 }
@@ -175,20 +221,34 @@ export default function BirthdayGiftsPage() {
       <Card>
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <h2 className="text-sm font-medium text-gray-500">當月壽星</h2>
+            <h2 className="text-sm font-medium text-gray-500">{monthLabel(month)}壽星</h2>
             <p className="mt-1 text-xs text-gray-400">
-              到期前三天與當天各發一次通知給 HR；2/29 出生者在平年以 2/28 計。
+              到期前三天與當天各發一次通知給 HR；2/29 出生者在平年以 2/28 計。切換月份可對任一月份的壽星登記（含補登過去月份）。
             </p>
           </div>
-          <label className="text-sm text-gray-600">
-            月份
-            <Input
-              type="month"
-              value={month}
-              onChange={(e) => setMonth(e.target.value || monthKey())}
-              className="ml-2 inline-block w-40"
-            />
-          </label>
+          {/* 月份切換：上／下個月按鈕＋月份輸入（型別 month 的瀏覽器有原生選單，其他瀏覽器可直接打 YYYY-MM）。 */}
+          <div className="flex items-center gap-2 text-sm text-gray-600">
+            <Button variant="secondary" size="sm" onClick={() => setMonth((m) => shiftMonth(m, -1))} aria-label="上個月">
+              ‹ 上個月
+            </Button>
+            <label className="flex items-center gap-2">
+              <span>月份</span>
+              <Input
+                type="month"
+                value={month}
+                onChange={(e) => setMonth(e.target.value || monthKey())}
+                className="inline-block w-40"
+              />
+            </label>
+            <Button variant="secondary" size="sm" onClick={() => setMonth((m) => shiftMonth(m, 1))} aria-label="下個月">
+              下個月 ›
+            </Button>
+            {month !== monthKey() && (
+              <Button variant="ghost" size="sm" onClick={() => setMonth(monthKey())}>
+                回本月
+              </Button>
+            )}
+          </div>
         </div>
 
         {error && (
@@ -200,7 +260,7 @@ export default function BirthdayGiftsPage() {
         {people === null ? (
           <Empty>載入中…</Empty>
         ) : people.length === 0 ? (
-          <Empty>這個月沒有壽星。</Empty>
+          <Empty>{monthLabel(month)}沒有壽星。用上方「上個月／下個月」或月份欄切到有壽星的月份即可登記。</Empty>
         ) : (
           <>
             <p className="mt-3 text-sm text-gray-600">
@@ -241,14 +301,7 @@ export default function BirthdayGiftsPage() {
                         <td className="py-2">
                           {gift?.photoUrl ? (
                             <span className="flex items-center gap-2">
-                              <a
-                                href={gift.photoUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-blue-600 hover:underline"
-                              >
-                                檢視
-                              </a>
+                              <PhotoLink gift={gift} />
                               <button
                                 type="button"
                                 className="text-xs text-gray-500 hover:underline"
@@ -301,9 +354,16 @@ export default function BirthdayGiftsPage() {
               {yearGifts.gifts.map((gift) => (
                 <li key={gift.id} className="flex items-center justify-between gap-3 py-2">
                   <span className="text-gray-800">{gift.employeeName ?? gift.employee_id.slice(0, 8)}</span>
-                  <span className="text-gray-500">
-                    {gift.given_on ?? "未填日期"} · {fmtMoney(gift.amount)} 元
-                    {gift.photo_path ? " · 有照片" : ""}
+                  <span className="flex items-center gap-2 text-gray-500">
+                    <span>
+                      {gift.given_on ?? "未填日期"} · {fmtMoney(gift.amount)} 元
+                    </span>
+                    {gift.photo_path && (
+                      <>
+                        <span>·</span>
+                        <PhotoLink gift={gift} />
+                      </>
+                    )}
                   </span>
                 </li>
               ))}
