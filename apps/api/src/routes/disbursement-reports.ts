@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { todayKey } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
@@ -30,7 +30,8 @@ export const disbursementReportsRouter = Router()
  * 沿用它，直接查表＋自己分頁撈全部（見 loadYearPaidDisbursements）。
  */
 
-const guards = [requireAuth, requireTenant, requireHrAdmin] as const
+// W4：放款樞紐屬「專案與財務」，會計看得到（同 routes/disbursements.ts 的 requireFinance）。
+const guards = [requireAuth, requireTenant, requireFinance] as const
 const PAGE_SIZE = 1000
 
 function parseGroupBy(v: unknown): DisbursementPivotGroupBy | null {

@@ -135,10 +135,15 @@ function initFromDisbursement(d?: DisbursementFormInitial): {
 }
 
 /**
- * 放款單表單：新增／編輯（draft 全欄；paid 只開放 note／receiptRef／purpose，見
- * `restrictedFields`）。分攤列支援「從應付清單帶入」與「手動：專案＋金額」兩種；
+ * 放款單表單：新增／編輯（draft 全欄；paid／approved 只開放 note／receiptRef／purpose，
+ * 見 `restrictedFields`）。分攤列支援「從應付清單帶入」與「手動：專案＋金額」兩種；
  * 實付／代扣／毛額三欄互算；分攤合計 vs 毛額即時檢核，不符時鎖住儲存鈕
  * （payeeKind='other' 且無分攤列可以直接存，例如印刷／快遞等非專案支出）。
+ *
+ * M5（2026-09-23）：後端對「分攤到未驗收期款」回 409 `acceptance_required`。
+ * 呼叫端把 `acceptanceBlocked` 打開，這裡就列出本單分攤到的期別並提示去專案頁
+ * 按「驗收確認」；`canForceAcceptance`（HR）時另給一個「未驗收仍要放款」勾選＋
+ * 理由欄，勾了才會把 `forceAcceptance` / `forceReason` 一起送出（後端寫稽核）。
  */
 export default function DisbursementForm({
   vendors,
@@ -147,6 +152,8 @@ export default function DisbursementForm({
   payables,
   initial,
   restrictedFields = false,
+  acceptanceBlocked = false,
+  canForceAcceptance = false,
   submitLabel = "儲存",
   busy = false,
   error,
@@ -158,8 +165,12 @@ export default function DisbursementForm({
   projects: ProjectOption[];
   payables: Payable[];
   initial?: DisbursementFormInitial;
-  /** 已匯款（paid）的編輯限制：只能改 note / receiptRef / purpose。 */
+  /** 已匯款（paid）／已核准（approved）的編輯限制：只能改 note / receiptRef / purpose。 */
   restrictedFields?: boolean;
+  /** M5：上一次送出被 409 acceptance_required 擋下（顯示期別提示與 HR 強制選項）。 */
+  acceptanceBlocked?: boolean;
+  /** M5：HR 才看得到「未驗收仍要放款」勾選。 */
+  canForceAcceptance?: boolean;
   submitLabel?: string;
   busy?: boolean;
   error?: string | null;
@@ -170,6 +181,9 @@ export default function DisbursementForm({
   const [pickProjectId, setPickProjectId] = useState("");
   const [pickPaymentId, setPickPaymentId] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
+  // M5：HR 勾「未驗收仍要放款」＋理由（只在被 acceptance_required 擋下來時出現）。
+  const [forceAcceptance, setForceAcceptance] = useState(false);
+  const [forceReason, setForceReason] = useState("");
 
   const set = <K extends keyof typeof state>(k: K, v: (typeof state)[K]) => setState((s) => ({ ...s, [k]: v }));
 
@@ -274,6 +288,7 @@ export default function DisbursementForm({
       note: state.note.trim() || null,
       status: state.status,
       allocations,
+      ...(forceAcceptance ? { forceAcceptance: true, forceReason: forceReason.trim() } : {}),
     };
   }
 
@@ -292,6 +307,10 @@ export default function DisbursementForm({
     }
     if (!allocMatches) {
       setLocalError("分攤合計與毛額不符，請調整。");
+      return;
+    }
+    if (forceAcceptance && !forceReason.trim()) {
+      setLocalError("勾選「未驗收仍要放款」時必須填理由（會寫進稽核紀錄）。");
       return;
     }
     void onSubmit(buildBody());
@@ -564,6 +583,34 @@ export default function DisbursementForm({
           {hasNonPositiveRow && <div>有分攤列金額是 0 或空白，請填金額或移除該列。</div>}
         </div>
       </div>
+
+      {acceptanceBlocked && (
+        <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+          <p className="font-medium">複委託期款尚未驗收確認，暫時不能放款。</p>
+          <p className="mt-1">
+            本單分攤到的期別：
+            {state.allocations.filter((r) => r.installmentNo != null).map((r) => `第 ${r.installmentNo} 期`).join("、") || "（無期款分攤）"}
+            。請到專案頁的「副委託與協力技師 → 期款」按「驗收確認」後再送出。
+          </p>
+          {canForceAcceptance && (
+            <div className="mt-2 space-y-2">
+              <label className="flex items-center gap-1.5">
+                <input type="checkbox" checked={forceAcceptance} onChange={(e) => setForceAcceptance(e.target.checked)} />
+                未驗收仍要放款（HR 專用，會寫進稽核紀錄）
+              </label>
+              {forceAcceptance && (
+                <input
+                  className={inputCls}
+                  value={forceReason}
+                  onChange={(e) => setForceReason(e.target.value)}
+                  placeholder="強制放行的理由（必填）"
+                  maxLength={500}
+                />
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <ErrorText>{error ?? localError}</ErrorText>
       <div className="flex items-center gap-3">

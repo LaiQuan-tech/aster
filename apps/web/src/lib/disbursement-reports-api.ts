@@ -16,6 +16,10 @@ export interface DisbursementPivotRow {
   total: number
   withheld: number
   count: number
+  /** M16：已取得發票／收據的匯款筆數（舊版 API 沒有這欄，讀取要 optional）。 */
+  invoicedCount?: number
+  /** M16：沒發票也沒收據編號的金額合計。 */
+  noReceiptAmount?: number
 }
 
 export interface DisbursementPivotTotals {
@@ -23,6 +27,8 @@ export interface DisbursementPivotTotals {
   total: number
   withheld: number
   count: number
+  invoicedCount?: number
+  noReceiptAmount?: number
 }
 
 export interface DisbursementPivotResult {

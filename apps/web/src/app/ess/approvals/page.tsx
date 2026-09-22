@@ -10,6 +10,14 @@ import {
   type RequestKind,
 } from "@/lib/ess-api";
 import { invalidateEssState } from "@/lib/ess-state";
+import {
+  approveDisbursement,
+  getPendingDisbursementApprovals,
+  humanizeDisbursementError,
+  rejectDisbursement,
+  DISBURSEMENT_STEP_KIND_LABELS,
+  type PendingDisbursementApproval,
+} from "@/lib/disbursements-api";
 import { fmtDateTime, fmtHours, fmtMoney, relativeTime } from "@/lib/ess-format";
 import { summarizeSegments } from "@/lib/ess-notifications";
 import {
@@ -33,10 +41,15 @@ type RequestAttachment = { id: string; fileName: string; sizeBytes: number; cont
 /**
  * /ess/approvals — 主管（或任何被指派為簽核者的人）的「待我簽核」頁。
  *
- * 只列 GET /requests/pending-approvals 回的單（輪到我簽的 pending 單）。一屏一張卡：
- * 核准一步（意見選填、預設收起）、駁回開底部面板填理由（必填）。做完決定 Toast 回饋
- * ＋ `invalidateEssState()` 讓底列徽章立刻減 1。頁框（頂部列／底列／gate）由
- * ess/layout.tsx 提供，這裡只負責內容。
+ * 兩段資料源（M4 起）：
+ *   申請單   GET /requests/pending-approvals（假單／加班／補卡／出差／零用金／WFH）
+ *   放款單   GET /disbursements/pending-approvals（獨立表 disbursement_approval_steps，
+ *            見計畫 §3.0 B；沒有簽核表或沒輪到我就是空陣列，該段不顯示）
+ * 一屏一張卡：核准一步（意見選填、預設收起）、駁回開底部面板填理由（必填）。做完決定
+ * Toast 回饋 ＋ `invalidateEssState()` 讓底列徽章立刻減 1（徽章目前只算申請單）。
+ * 頁框（頂部列／底列／gate）由 ess/layout.tsx 提供，這裡只負責內容。
+ *
+ * M1：加班單超過月上限時卡片上多一顆「超過月上限」pill（超額時數另行給付）。
  */
 
 const KIND_LABEL: Record<RequestKind, string> = {
@@ -82,6 +95,7 @@ function periodText(row: PendingApproval): string {
 export default function ApprovalsPage() {
   const toast = useToast();
   const [rows, setRows] = useState<PendingApproval[]>([]);
+  const [disbursements, setDisbursements] = useState<PendingDisbursementApproval[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -97,10 +111,20 @@ export default function ApprovalsPage() {
   const [attachmentsById, setAttachmentsById] = useState<Record<string, RequestAttachment[]>>({});
   const [attachmentsLoadingId, setAttachmentsLoadingId] = useState<string | null>(null);
   const [attachmentsError, setAttachmentsError] = useState<Record<string, string>>({});
+  // 放款單：核准／駁回（駁回同樣開底部面板填理由）
+  const [disbBusyId, setDisbBusyId] = useState<string | null>(null);
+  const [rejectingDisb, setRejectingDisb] = useState<PendingDisbursementApproval | null>(null);
+  const [disbReason, setDisbReason] = useState("");
+  const [disbReasonError, setDisbReasonError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const res = await getPendingApprovals();
+    const [res, disb] = await Promise.all([
+      getPendingApprovals(),
+      // 放款簽核是獨立表；還沒套遷移或沒權限時回空陣列，不該讓整頁掛掉。
+      getPendingDisbursementApprovals().catch(() => ({ scope: "mine" as const, disbursements: [] })),
+    ]);
     setRows(res.requests);
+    setDisbursements(disb.disbursements);
   }, []);
 
   useEffect(() => {
@@ -198,6 +222,53 @@ export default function ApprovalsPage() {
     }
   }
 
+  async function onApproveDisbursement(row: PendingDisbursementApproval) {
+    setDisbBusyId(row.id);
+    setError(null);
+    try {
+      const res = await approveDisbursement(row.id);
+      toast.show(
+        res.status === "approved" ? `已核准，${row.disbursementNo} 可以付款了` : `已送往第 ${res.currentStep} 關`,
+        "success",
+      );
+      await afterDecision();
+    } catch (err) {
+      setError(humanizeDisbursementError(err, "核准失敗"));
+    } finally {
+      setDisbBusyId(null);
+    }
+  }
+
+  function openRejectDisbursement(row: PendingDisbursementApproval) {
+    setRejectingDisb(row);
+    setDisbReason("");
+    setDisbReasonError(null);
+    setError(null);
+  }
+
+  async function onConfirmRejectDisbursement() {
+    const row = rejectingDisb;
+    if (!row) return;
+    const reason = disbReason.trim();
+    if (!reason) {
+      setDisbReasonError("駁回必須填寫理由，建單人會在通知裡看到。");
+      return;
+    }
+    setDisbBusyId(row.id);
+    setDisbReasonError(null);
+    try {
+      await rejectDisbursement(row.id, reason);
+      toast.show(`已駁回 ${row.disbursementNo}，已通知建單人`, "success");
+      setRejectingDisb(null);
+      setDisbReason("");
+      await afterDecision();
+    } catch (err) {
+      setDisbReasonError(humanizeDisbursementError(err, "駁回失敗"));
+    } finally {
+      setDisbBusyId(null);
+    }
+  }
+
   /** 展開/收合附件清單；展開時才現拉 signed URL，並用 attachmentsById 快取。 */
   async function toggleAttachments(row: PendingApproval) {
     if (expandedAttachmentsId === row.id) {
@@ -229,7 +300,9 @@ export default function ApprovalsPage() {
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3 px-1">
         <SectionTitle>待我簽核</SectionTitle>
-        {!loading && rows.length > 0 && <span className="text-xs text-gray-400">{rows.length} 張</span>}
+        {!loading && rows.length + disbursements.length > 0 && (
+          <span className="text-xs text-gray-400">{rows.length + disbursements.length} 張</span>
+        )}
       </div>
 
       {error && (
@@ -245,13 +318,13 @@ export default function ApprovalsPage() {
         <Card>
           <Skeleton lines={5} />
         </Card>
-      ) : rows.length === 0 ? (
+      ) : rows.length === 0 && disbursements.length === 0 ? (
         !error && (
           <Card>
             <EmptyState title="目前沒有待你簽核的單" hint="有同仁送單給你時會收到通知。" />
           </Card>
         )
-      ) : (
+      ) : rows.length === 0 ? null : (
         <ul className="space-y-3">
           {rows.map((row) => {
             const busy = busyId === row.id;
@@ -276,6 +349,14 @@ export default function ApprovalsPage() {
                         <Pill tone="brand">{kindLabel(row.kind)}</Pill>
                         {row.leave_type_name && <Pill tone="blue">{row.leave_type_name}</Pill>}
                         {row.kind === "ot" && row.payout && <Pill tone="gray">{PAYOUT_LABEL[row.payout]}</Pill>}
+                        {row.beyond_cap && (
+                          <Pill tone="red">
+                            超過月上限
+                            {row.beyond_cap_detail?.capMinutes
+                              ? `（${Math.round((row.beyond_cap_detail.capMinutes / 60) * 10) / 10} 小時）`
+                              : ""}
+                          </Pill>
+                        )}
                         {row.total_steps > 1 && (
                           <Pill tone="amber">
                             第 {row.current_step}／{row.total_steps} 關
@@ -395,6 +476,116 @@ export default function ApprovalsPage() {
           })}
         </ul>
       )}
+
+      {!loading && disbursements.length > 0 && (
+        <>
+          <div className="flex items-center justify-between gap-3 px-1 pt-2">
+            <SectionTitle>放款單</SectionTitle>
+            <span className="text-xs text-gray-400">{disbursements.length} 張</span>
+          </div>
+          <ul className="space-y-3">
+            {disbursements.map((d) => {
+              const busy = disbBusyId === d.id;
+              const kindLabelText = d.stepKindLabel ?? (d.stepKind ? (DISBURSEMENT_STEP_KIND_LABELS[d.stepKind] ?? d.stepKind) : null);
+              return (
+                <li key={d.id}>
+                  <Card>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-base font-semibold text-gray-900">{d.payeeName}</p>
+                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                          <Pill tone="brand">放款</Pill>
+                          <Pill tone="gray">{d.disbursementNo}</Pill>
+                          {kindLabelText && <Pill tone="blue">{kindLabelText}關</Pill>}
+                          {d.totalSteps > 1 && (
+                            <Pill tone="amber">
+                              第 {d.currentStepOrder}／{d.totalSteps} 關
+                            </Pill>
+                          )}
+                        </div>
+                      </div>
+                      <time dateTime={d.submittedAt ?? d.createdAt} className="shrink-0 pt-0.5 text-xs text-gray-400">
+                        {relativeTime(d.submittedAt ?? d.createdAt)}
+                      </time>
+                    </div>
+
+                    <dl className="mt-3 grid grid-cols-[3.25rem_1fr] gap-x-2 gap-y-1.5 text-sm text-gray-700">
+                      <dt className="text-gray-400">實付</dt>
+                      <dd>
+                        {fmtMoney(d.amount)}
+                        {d.withheldAmount > 0 && <span className="text-gray-400">（代扣 {fmtMoney(d.withheldAmount)}）</span>}
+                      </dd>
+                      <dt className="text-gray-400">用途</dt>
+                      <dd className="whitespace-pre-wrap break-words">
+                        {d.purpose ? d.purpose : <span className="text-gray-400">（未填）</span>}
+                      </dd>
+                      {d.allocationLabel && (
+                        <>
+                          <dt className="text-gray-400">專案</dt>
+                          <dd className="break-words">{d.allocationLabel}</dd>
+                        </>
+                      )}
+                      <dt className="text-gray-400">建單</dt>
+                      <dd>{d.createdByName ?? "—"}</dd>
+                    </dl>
+
+                    <div className="mt-3 flex gap-2">
+                      <Button variant="primary" className="flex-1" loading={busy} onClick={() => void onApproveDisbursement(d)}>
+                        核准
+                      </Button>
+                      <Button variant="secondary" className="flex-1" disabled={busy} onClick={() => openRejectDisbursement(d)}>
+                        駁回
+                      </Button>
+                    </div>
+                  </Card>
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
+
+      <BottomSheet
+        open={rejectingDisb !== null}
+        onClose={() => {
+          if (disbBusyId) return;
+          setRejectingDisb(null);
+          setDisbReason("");
+          setDisbReasonError(null);
+        }}
+        title="駁回這張放款單"
+      >
+        {rejectingDisb && (
+          <div className="space-y-4">
+            <p className="text-sm text-gray-600">
+              {rejectingDisb.disbursementNo}｜{rejectingDisb.payeeName}｜實付 {fmtMoney(rejectingDisb.amount)}
+            </p>
+            <Field label="駁回理由" required htmlFor="disb-reject-reason" hint="建單人會在通知裡看到這段話，單子會退回草稿。" error={disbReasonError ?? undefined}>
+              <Textarea
+                id="disb-reject-reason"
+                value={disbReason}
+                onChange={(e) => {
+                  setDisbReason(e.target.value);
+                  if (disbReasonError) setDisbReasonError(null);
+                }}
+                placeholder="例：金額與報價不符，請確認後重送"
+                maxLength={250}
+                aria-invalid={disbReasonError ? "true" : undefined}
+              />
+            </Field>
+            <Button
+              variant="danger"
+              block
+              size="lg"
+              loading={disbBusyId === rejectingDisb.id}
+              disabled={!disbReason.trim()}
+              onClick={() => void onConfirmRejectDisbursement()}
+            >
+              確認駁回
+            </Button>
+          </div>
+        )}
+      </BottomSheet>
 
       <BottomSheet open={rejecting !== null} onClose={closeReject} title="駁回這張單">
         {rejecting && (

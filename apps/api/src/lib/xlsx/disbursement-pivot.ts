@@ -4,8 +4,13 @@ import type { DisbursementPivotResult } from "../../services/disbursement-pivot.
 
 /**
  * xlsx「放款年度樞紐」——一張表：分組（廠商／付款公司／專案）× 1~12 月 +
- * 合計／代扣／筆數，最後合計列（純函式，不連 DB；模板參考 lib/xlsx/disbursements.ts）。
- * 數字格式 `#,##0`——老闆看的是整年給每家廠商多少錢、年底報稅用，不需要小數。
+ * 合計／代扣／筆數／有發票／無憑證金額，最後合計列（純函式，不連 DB；模板參考
+ * lib/xlsx/disbursements.ts）。數字格式 `#,##0`——老闆看的是整年給每家廠商多少
+ * 錢、年底報稅用，不需要小數。
+ *
+ * M16（2026-09-23）加「有發票」（已取得發票／收據的筆數）與「無憑證金額」
+ * （沒發票也沒收據編號的金額合計）兩欄——年底報稅要追憑證就看這兩欄；口徑見
+ * services/disbursement-pivot.ts。
  */
 
 const MONEY_FMT = "#,##0"
@@ -27,7 +32,7 @@ export function buildDisbursementPivotWorkbook(pivot: DisbursementPivotResult): 
   const groupLabel = GROUP_BY_LABEL[pivot.groupBy]
   const ws = wb.addWorksheet(`${pivot.year}放款樞紐`, { views: [{ state: "frozen", ySplit: 4, xSplit: 1 }] })
 
-  const headers = [groupLabel, ...Array.from({ length: 12 }, (_, i) => `${i + 1}月`), "合計", "代扣", "筆數"]
+  const headers = [groupLabel, ...Array.from({ length: 12 }, (_, i) => `${i + 1}月`), "合計", "代扣", "筆數", "有發票", "無憑證金額"]
   ws.getCell("A1").value = `${pivot.year} 年放款總覽 · 依${groupLabel}`
   ws.getCell("A1").font = { bold: true, size: 16 }
   ws.mergeCells(1, 1, 1, headers.length)
@@ -45,6 +50,8 @@ export function buildDisbursementPivotWorkbook(pivot: DisbursementPivotResult): 
   ws.getColumn(14).width = 13
   ws.getColumn(15).width = 11
   ws.getColumn(16).width = 8
+  ws.getColumn(17).width = 9
+  ws.getColumn(18).width = 13
 
   let r = 5
   for (const row of pivot.rows) {
@@ -55,6 +62,9 @@ export function buildDisbursementPivotWorkbook(pivot: DisbursementPivotResult): 
     money(wsRow.getCell(15), row.withheld)
     wsRow.getCell(16).value = row.count
     wsRow.getCell(16).alignment = { horizontal: "center" }
+    wsRow.getCell(17).value = row.invoicedCount
+    wsRow.getCell(17).alignment = { horizontal: "center" }
+    money(wsRow.getCell(18), row.noReceiptAmount)
     r += 1
   }
 
@@ -65,6 +75,9 @@ export function buildDisbursementPivotWorkbook(pivot: DisbursementPivotResult): 
   money(totalRow.getCell(15), pivot.totals.withheld)
   totalRow.getCell(16).value = pivot.totals.count
   totalRow.getCell(16).alignment = { horizontal: "center" }
+  totalRow.getCell(17).value = pivot.totals.invoicedCount
+  totalRow.getCell(17).alignment = { horizontal: "center" }
+  money(totalRow.getCell(18), pivot.totals.noReceiptAmount)
   totalRow.eachCell({ includeEmpty: true }, (cell) => {
     cell.font = { bold: true }
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFDDEBF7" } }

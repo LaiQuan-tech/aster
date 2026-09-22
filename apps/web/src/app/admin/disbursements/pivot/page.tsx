@@ -28,6 +28,9 @@ function yearOptions(center: number): number[] {
 /**
  * B3：放款年度總覽——老闆年底報稅一眼看「今年給每家廠商／付款公司／專案
  * 多少錢」。純讀取＋匯出，沒有寫入動作；對應 routes/disbursement-reports.ts。
+ *
+ * M16（2026-09-23）加「有發票」（已取得發票／收據的筆數）與「無憑證金額」
+ * （沒發票也沒收據編號的金額合計，>0 標紅——年底報稅要追的就是這格）兩欄。
  */
 export default function DisbursementPivotPage() {
   const thisYear = new Date().getFullYear();
@@ -127,6 +130,8 @@ export default function DisbursementPivotPage() {
                   <th className="py-2 pr-2 text-right">合計</th>
                   <th className="py-2 pr-2 text-right">代扣</th>
                   <th className="py-2 pr-2 text-right">筆數</th>
+                  <th className="py-2 pr-2 text-right" title="已取得發票／收據的匯款筆數">有發票</th>
+                  <th className="py-2 pr-2 text-right" title="沒發票也沒收據編號的金額合計">無憑證金額</th>
                 </tr>
               </thead>
               <tbody>
@@ -141,6 +146,12 @@ export default function DisbursementPivotPage() {
                     <td className="py-1.5 pr-2 text-right font-medium text-gray-900">{fmtCell(row.total)}</td>
                     <td className="py-1.5 pr-2 text-right text-gray-500">{fmtCell(row.withheld)}</td>
                     <td className="py-1.5 pr-2 text-right text-gray-500">{row.count}</td>
+                    <td className="py-1.5 pr-2 text-right text-gray-500">
+                      {row.invoicedCount ?? 0}／{row.count}
+                    </td>
+                    <td className={`py-1.5 pr-2 text-right ${(row.noReceiptAmount ?? 0) > 0 ? "font-medium text-red-600" : "text-gray-400"}`}>
+                      {fmtCell(row.noReceiptAmount ?? 0)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -155,6 +166,12 @@ export default function DisbursementPivotPage() {
                   <td className="py-2 pr-2 text-right">{fmtCell(pivot.totals.total)}</td>
                   <td className="py-2 pr-2 text-right">{fmtCell(pivot.totals.withheld)}</td>
                   <td className="py-2 pr-2 text-right">{pivot.totals.count}</td>
+                  <td className="py-2 pr-2 text-right">
+                    {pivot.totals.invoicedCount ?? 0}／{pivot.totals.count}
+                  </td>
+                  <td className={`py-2 pr-2 text-right ${(pivot.totals.noReceiptAmount ?? 0) > 0 ? "text-red-600" : ""}`}>
+                    {fmtCell(pivot.totals.noReceiptAmount ?? 0)}
+                  </td>
                 </tr>
               </tfoot>
             </table>

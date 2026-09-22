@@ -16,7 +16,17 @@ import {
   type ProjectMoney,
   type Company,
 } from "@/lib/projects-ext-api";
+import { acceptSubcontractPayment } from "@/lib/disbursements-api";
 import { fmtMoney, newSubKey, toSubRows, type SubRow, type Setter } from "./shared";
+
+/**
+ * M5 驗收確認：`SubcontractPayment`（lib/projects-ext-api.ts，WP5 的檔）還沒有
+ * 這三個欄位，後端已經會回；這裡用結構型別讀，不動別人的型別定義。
+ */
+type WithAcceptance = { acceptedOn?: string | null; acceptedByEmpId?: string | null; acceptanceNote?: string | null };
+function acceptedOnOf(p: SubcontractPayment): string | null {
+  return (p as SubcontractPayment & WithAcceptance).acceptedOn ?? null;
+}
 
 interface SubcontractsCardProps {
   projectId: string;
@@ -44,7 +54,14 @@ interface SubcontractsCardProps {
   load: () => Promise<void>;
 }
 
-/** 副委託與協力技師（模組五）：下包／技師列表、每列展開的期款表，以及發包小計／利潤。 */
+/**
+ * 副委託與協力技師（模組五）：下包／技師列表、每列展開的期款表，以及發包小計／利潤。
+ *
+ * M5（2026-09-23）期款表多一欄「驗收」：沒驗收的期別按「驗收確認」才會記
+ * `accepted_on`，**沒驗收就不能放款**（放款專區建單／送簽／付款都會 409
+ * `acceptance_required`）。驗收走獨立端點（不經整批「儲存期款」），所以表格上
+ * 還沒存的編輯不會被它蓋掉。
+ */
 export function SubcontractsCard({
   projectId,
   subDraft,
@@ -73,6 +90,8 @@ export function SubcontractsCard({
   // B4：廠商依類別篩（vendors.category 是自由文字，不是固定列舉——類別選項
   // 就從目前名冊裡實際出現過的值取，不強加一份清單）。
   const [vendorCategoryFilter, setVendorCategoryFilter] = useState("");
+  /** 正在送驗收確認的那一期（`subId:installmentNo`）。 */
+  const [acceptingKey, setAcceptingKey] = useState<string | null>(null);
   const vendorCategories = useMemo(
     () => Array.from(new Set(vendors.map((v) => v.category).filter((c): c is string => !!c))).sort(),
     [vendors],
@@ -206,6 +225,28 @@ export function SubcontractsCard({
     }
   }
 
+  /** M5：單期驗收確認（獨立端點，只改這一期的驗收欄位，不動其他未存的編輯）。 */
+  async function acceptPayment(subId: string, p: SubcontractPayment) {
+    if (!p.id) {
+      setError("這一期還沒儲存，請先按「儲存期款」再做驗收確認。");
+      return;
+    }
+    const key = `${subId}:${p.installmentNo}`;
+    setAcceptingKey(key);
+    setError(null);
+    try {
+      const res = await acceptSubcontractPayment(projectId, subId, p.installmentNo);
+      const stamp = (row: SubcontractPayment) =>
+        row.installmentNo === p.installmentNo ? ({ ...row, acceptedOn: res.acceptedOn } as SubcontractPayment) : row;
+      setPaymentsDraft((d) => ({ ...d, [subId]: (d[subId] ?? []).map(stamp) }));
+      setOriginalPayments((d) => ({ ...d, [subId]: (d[subId] ?? []).map(stamp) }));
+    } catch (err) {
+      setError(humanizeSubcontractError(err, "驗收確認失敗"));
+    } finally {
+      setAcceptingKey(null);
+    }
+  }
+
   return (
     <Card>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -320,6 +361,7 @@ export function SubcontractsCard({
                                 <th className="py-1 pr-2">%</th>
                                 <th className="py-1 pr-2 text-right">金額</th>
                                 <th className="py-1 pr-2">應付時機</th>
+                                <th className="py-1 pr-2" title="沒驗收確認就不能放款（M5）">驗收</th>
                                 <th className="py-1 pr-2">匯款單</th>
                                 <th className="py-1 pr-2">放款日</th>
                                 <th className="py-1 pr-2 text-right">實付</th>
@@ -345,6 +387,24 @@ export function SubcontractsCard({
                                     <td className="py-1 pr-2 text-right text-gray-600">{fmtMoney(p.effectiveAmount ?? p.amount ?? null)}</td>
                                     <td className="py-1 pr-2">
                                       <input className="w-24 rounded border border-gray-300 px-1 py-0.5" value={p.dueWhen ?? ""} onChange={(e) => patchPayment(row.id as string, pIdx, { dueWhen: e.target.value })} />
+                                    </td>
+                                    <td className="py-1 pr-2">
+                                      {acceptedOnOf(p) ? (
+                                        <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-700" title="已驗收確認">
+                                          {acceptedOnOf(p)}
+                                        </span>
+                                      ) : p.id ? (
+                                        <button
+                                          type="button"
+                                          className="rounded border border-amber-300 px-1.5 py-0.5 text-amber-700 hover:bg-amber-50 disabled:opacity-50"
+                                          disabled={acceptingKey === `${row.id}:${p.installmentNo}`}
+                                          onClick={() => void acceptPayment(row.id as string, p)}
+                                        >
+                                          {acceptingKey === `${row.id}:${p.installmentNo}` ? "處理中…" : "驗收確認"}
+                                        </button>
+                                      ) : (
+                                        <span className="text-gray-300" title="存檔後才能驗收">—</span>
+                                      )}
                                     </td>
                                     <td className="py-1 pr-2">
                                       {p.disbursementNo ? (

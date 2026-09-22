@@ -30,6 +30,8 @@ import {
 import { isUniqueViolation, MAX_CODE_ATTEMPTS } from "./project-code.js"
 import { loadDisbursementNoFormat, nextDisbursementNo } from "./disbursement-no.js"
 import { writeAuditLog } from "./audit.js"
+import { columnsExist } from "../lib/schema-compat.js"
+import { isHrRole } from "../middleware/scope.js"
 
 /**
  * 放款專區——匯款紀錄（disbursements）× 分攤（disbursement_allocations）×
@@ -37,13 +39,25 @@ import { writeAuditLog } from "./audit.js"
  * 專案頁期款的「已付」由匯款紀錄連動產生（舊的整批 PUT 保留相容，見
  * routes/subcontracts.ts）。
  *
- * ── 狀態機 ────────────────────────────────────────────────────────
- *   draft ──pay──▶ paid ──void──▶ void
- *     └────────────void───────────▶ void
- *   • draft：不動期款；全部欄位可改（allocations 整批覆蓋）。
+ * ── 狀態機（M4 放款簽核鏈；2026-09-23 起）──────────────────────────
+ *   draft ──submit──▶ pending_approval ──最後一關 approve──▶ approved ──pay──▶ paid
+ *     ▲                     │ reject／withdraw（HR）                       │
+ *     └─────────────────────┘                                    任何狀態 ──void──▶ void
+ *   • draft：不動期款；全部欄位可改（allocations 整批覆蓋）。**不能直接付款**——
+ *     要 HR 且帶 `forceReason` 才放行（409 `approval_required`／400
+ *     `force_reason_required`），並寫稽核。
+ *   • pending_approval：送簽中，不可編輯（409 `pending_approval`）；要改先撤回。
+ *     關卡在 disbursement_approval_steps（services/disbursement-approval.ts）。
+ *   • approved：簽核完成，只可改 `PAID_EDITABLE` 那幾欄（409 `approved`）；可 pay。
  *   • paid：連動期款（`syncPaymentsOnPay`）；只可改 note／receiptRef／purpose／
  *     hasInvoice／invoiceNo（已匯款後補發票號是常態）。
  *   • void：反向清期款（`unsyncPaymentsOnVoid`）；之後不能再改。
+ *
+ * ── 複委託驗收（M5）───────────────────────────────────────────────
+ *   分攤到「未驗收」（`project_subcontract_payments.accepted_on` 為 null）的期款
+ *   時 409 `acceptance_required`；HR 可帶 `forceAcceptance:true` ＋ `forceReason`
+ *   放行並寫稽核。建單／改分攤／送簽／付款四個點都檢查（`assertPaymentsAccepted`）。
+ *   驗收欄位尚未套用（migration 0050）時整條檢查略過＝維持上線前行為。
  *
  * ── 金額口徑 ──────────────────────────────────────────────────────
  *   `amount`＝實際匯出的淨額、`withheldAmount`＝代扣合計、毛額＝兩者相加
@@ -66,7 +80,7 @@ import { writeAuditLog } from "./audit.js"
  * 純函式（金額檢核、聚合、單號格式）集中在檔案上半段，供單元測試。
  */
 
-export const DISBURSEMENT_STATUSES = ["draft", "paid", "void"] as const
+export const DISBURSEMENT_STATUSES = ["draft", "pending_approval", "approved", "paid", "void"] as const
 export type DisbursementStatus = (typeof DISBURSEMENT_STATUSES)[number]
 export const DISBURSEMENT_METHODS = ["transfer", "check", "cash"] as const
 export type DisbursementMethod = (typeof DISBURSEMENT_METHODS)[number]
@@ -85,6 +99,22 @@ export const AMOUNT_TOLERANCE = 0.01
 // ⚠️ 單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別。
 export const DISBURSEMENT_COLS =
   "id, tenant_id, disbursement_no, status, payee_kind, vendor_id, payee_name, payee_bank_name, payee_bank_account, payee_bank_code, paying_company_id, paying_company_name, paying_bank_account, method, paid_on, amount, withheld_amount, receipt_issuer_company_id, receipt_ref, has_invoice, invoice_no, purpose, note, void_reason, paid_by_emp_id, created_by_emp_id, created_at, updated_at"
+/** 加上 M4 簽核欄位（migration 0050）；欄位尚未套用時退回 `DISBURSEMENT_COLS`。 */
+export const DISBURSEMENT_COLS_APPROVAL =
+  "id, tenant_id, disbursement_no, status, payee_kind, vendor_id, payee_name, payee_bank_name, payee_bank_account, payee_bank_code, paying_company_id, paying_company_name, paying_bank_account, method, paid_on, amount, withheld_amount, receipt_issuer_company_id, receipt_ref, has_invoice, invoice_no, purpose, note, void_reason, paid_by_emp_id, created_by_emp_id, created_at, updated_at, current_step, approval_round, submitted_at, submitted_by_emp_id, approved_at"
+
+/** disbursements 的簽核欄位（migration 0050）是否已套用（探測一次、之後分支）。 */
+export function disbursementsHaveApproval(): Promise<boolean> {
+  return columnsExist("disbursements", "current_step, approval_round, submitted_at, submitted_by_emp_id, approved_at")
+}
+/** 讀 disbursements 時要帶的欄位（已套用簽核欄位就一起帶回來）。 */
+export async function disbursementCols(): Promise<string> {
+  return (await disbursementsHaveApproval()) ? DISBURSEMENT_COLS_APPROVAL : DISBURSEMENT_COLS
+}
+/** `project_subcontract_payments` 的驗收欄位（migration 0050）是否已套用。 */
+export function paymentsHaveAcceptance(): Promise<boolean> {
+  return columnsExist("project_subcontract_payments", "accepted_on, accepted_by_emp_id, acceptance_note")
+}
 export const ALLOCATION_COLS =
   "id, disbursement_id, project_id, subcontract_id, subcontract_payment_id, amount, withheld_amount, note, created_at"
 export const ATTACHMENT_COLS =
@@ -119,6 +149,12 @@ export type DisbursementRow = {
   created_by_emp_id: string | null
   created_at: string
   updated_at: string
+  /* ── M4 簽核欄位（migration 0050；未套用時 loadDisbursement 不會帶回來）── */
+  current_step?: number | null
+  approval_round?: number | null
+  submitted_at?: string | null
+  submitted_by_emp_id?: string | null
+  approved_at?: string | null
 }
 
 export type AllocationRow = {
@@ -221,6 +257,10 @@ export type DisbursementInput = {
   note?: string | null
   status: "draft" | "paid"
   allocations: AllocationInput[]
+  /** HR 跳過簽核（status:'paid'）或強制放行未驗收期款的理由；寫稽核。 */
+  forceReason?: string | null
+  /** HR 勾「未驗收仍要放款」（M5）。 */
+  forceAcceptance?: boolean
 }
 
 export type DisbursementPatch = Partial<Omit<DisbursementInput, "status">>
@@ -502,9 +542,34 @@ export type SerializedDisbursement = {
   createdByEmpId: string | null
   createdAt: string
   updatedAt: string
+  /* ── M4 簽核（欄位未套用時一律 null／0）── */
+  currentStep: number | null
+  approvalRound: number
+  submittedAt: string | null
+  submittedByEmpId: string | null
+  approvedAt: string | null
   allocations: SerializedAllocation[]
   allocationLabel: string
   attachments?: SerializedAttachment[]
+  /** 簽核軌跡（只有 GET /disbursements/:id 帶；services/disbursement-approval.ts 填）。 */
+  approvalSteps?: SerializedApprovalStep[]
+}
+
+/** 一關簽核（disbursement_approval_steps 序列化後的形狀；明細頁與 ESS 簽核頁共用）。 */
+export type SerializedApprovalStep = {
+  id: string
+  round: number
+  stepOrder: number
+  stepKind: string | null
+  approverEmpId: string
+  approverName: string | null
+  candidateEmpIds: string[]
+  candidateNames: string[]
+  decision: "pending" | "approved" | "rejected"
+  comment: string | null
+  actedAt: string | null
+  actedByEmpId: string | null
+  actedByName: string | null
 }
 
 type AllocationContext = {
@@ -598,6 +663,11 @@ export function serializeDisbursement(
     createdByEmpId: d.created_by_emp_id,
     createdAt: d.created_at,
     updatedAt: d.updated_at,
+    currentStep: d.current_step ?? null,
+    approvalRound: d.approval_round ?? 0,
+    submittedAt: d.submitted_at ?? null,
+    submittedByEmpId: d.submitted_by_emp_id ?? null,
+    approvedAt: d.approved_at ?? null,
     allocations: allocs,
     allocationLabel: allocationLabel(allocs),
   }
@@ -616,7 +686,7 @@ export async function tenantToday(tenantId: string): Promise<string> {
 export async function loadDisbursement(tenantId: string, id: string): Promise<DisbursementRow | null> {
   const { data, error } = await supabaseAdmin
     .from("disbursements")
-    .select(DISBURSEMENT_COLS)
+    .select(await disbursementCols())
     .eq("tenant_id", tenantId)
     .eq("id", id)
     .maybeSingle()
@@ -754,12 +824,16 @@ export async function listDisbursements(
 
   let q = supabaseAdmin
     .from("disbursements")
-    .select(DISBURSEMENT_COLS)
+    .select(await disbursementCols())
     .eq("tenant_id", tenantId)
     .or(
       [
         `and(paid_on.gte.${from},paid_on.lte.${to})`,
         "status.eq.draft",
+        // 送簽中／已核准但還沒付款的單沒有 paid_on，跟草稿一樣無條件列出，
+        // 不然送簽之後單子會從列表上消失（M4）。
+        "status.eq.pending_approval",
+        "status.eq.approved",
         `and(status.eq.void,paid_on.is.null,updated_at.gte.${voidedSince},updated_at.lt.${voidedBefore})`,
       ].join(","),
     )
@@ -1097,7 +1171,7 @@ export async function buildSummary(tenantId: string, opts: { from?: string; to?:
 
   const { data, error } = await supabaseAdmin
     .from("disbursements")
-    .select(DISBURSEMENT_COLS)
+    .select(await disbursementCols())
     .eq("tenant_id", tenantId)
     .eq("status", "paid")
     .gte("paid_on", lo)
@@ -1327,6 +1401,115 @@ async function assertPaymentsPayable(tenantId: string, selfId: string | null, pa
     disbursementNo: otherNo,
     manual: !conflict.disbursement_id,
   })
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * M5 複委託驗收（accepted_on）
+ * ────────────────────────────────────────────────────────────────── */
+
+export type PaymentAcceptanceRow = {
+  id: string
+  subcontract_id: string
+  installment_no: number
+  accepted_on: string | null
+  accepted_by_emp_id: string | null
+  acceptance_note: string | null
+}
+export const PAYMENT_ACCEPTANCE_COLS = "id, subcontract_id, installment_no, accepted_on, accepted_by_emp_id, acceptance_note"
+
+/**
+ * 批次載入期款的驗收狀態。刻意**不**動 `project-application-store.ts` 的
+ * `PAYMENT_COLS`（那是好幾個模組共用的字串常值，加欄位會牽動範圍外的檔案），
+ * 改在這裡自己查三個驗收欄位。欄位尚未套用（migration 0050）回 `null`＝
+ * 「這個庫還沒有驗收概念」，呼叫端據此整條略過檢查。
+ */
+export async function loadPaymentAcceptance(
+  tenantId: string,
+  paymentIds: string[],
+): Promise<Map<string, PaymentAcceptanceRow> | null> {
+  const ids = uniq(paymentIds)
+  if (ids.length === 0) return new Map()
+  if (!(await paymentsHaveAcceptance())) return null
+  const rows = await batch<PaymentAcceptanceRow>(
+    "project_subcontract_payments",
+    PAYMENT_ACCEPTANCE_COLS,
+    tenantId,
+    ids,
+    "id",
+    false,
+  )
+  return new Map(rows.map((r) => [r.id, r]))
+}
+
+export type AcceptanceGuardOpts = {
+  /** HR 勾了「強制放行未驗收」。 */
+  force?: boolean
+  /** 強制放行的理由（HR 必填）。 */
+  reason?: string | null
+  /** 寫稽核用的來源標記，例如 'POST /disbursements'。 */
+  context: string
+}
+
+/**
+ * M5：分攤到未驗收期款 → 409 `acceptance_required`（details 帶第一筆與全部待驗收
+ * 期別，前端顯示「第 N 期尚未驗收」）。HR 帶 `force` ＋ `reason` 放行並寫稽核；
+ * 非 HR 帶 force 一律 403 `acceptance_force_forbidden`。
+ */
+export async function assertPaymentsAccepted(
+  tenantId: string,
+  actor: Actor,
+  paymentIds: string[],
+  opts: AcceptanceGuardOpts,
+): Promise<void> {
+  const ids = uniq(paymentIds)
+  if (ids.length === 0) return
+  const acceptance = await loadPaymentAcceptance(tenantId, ids)
+  if (acceptance === null) return // 驗收欄位還沒套用：維持上線前行為
+  const pending = ids.map((id) => acceptance.get(id)).filter((r): r is PaymentAcceptanceRow => !!r && !r.accepted_on)
+  if (pending.length === 0) return
+  if (!opts.force) {
+    const first = pending[0]
+    throw new DisbursementError(409, "acceptance_required", {
+      subcontractPaymentId: first.id,
+      subcontractId: first.subcontract_id,
+      installmentNo: first.installment_no,
+      pending: pending.map((p) => ({
+        subcontractPaymentId: p.id,
+        subcontractId: p.subcontract_id,
+        installmentNo: p.installment_no,
+      })),
+    })
+  }
+  if (!isHrRole(actor.role)) throw new DisbursementError(403, "acceptance_force_forbidden")
+  const reason = opts.reason?.trim()
+  if (!reason) throw new DisbursementError(400, "force_reason_required")
+  await writeAuditLog({
+    tenantId,
+    tableName: "project_subcontract_payments",
+    recordId: pending[0].id,
+    action: "UPDATE",
+    newRow: {
+      forcedAcceptance: true,
+      reason,
+      installmentNos: pending.map((p) => p.installment_no),
+      subcontractPaymentIds: pending.map((p) => p.id),
+    },
+    actorEmpId: actor.empId,
+    context: opts.context,
+  })
+}
+
+/**
+ * M4：跳過簽核直接付款／直接建已匯款單＝HR 專屬例外，一定要留理由（稽核）。
+ * 其餘角色 409 `approval_required`（前端提示「請先送簽」）。
+ */
+export function assertForcePayAllowed(actor: Actor, reason: string | null | undefined): string {
+  if (!isHrRole(actor.role)) {
+    throw new DisbursementError(409, "approval_required", { hint: "放款需經簽核核准後才能付款，請先送簽。" })
+  }
+  const trimmed = reason?.trim()
+  if (!trimmed) throw new DisbursementError(400, "force_reason_required")
+  return trimmed
 }
 
 /**
@@ -1586,7 +1769,8 @@ async function replaceAllocations(tenantId: string, disbursementId: string, next
   await insertAllocations(tenantId, disbursementId, next.slice(keep))
 }
 
-export type Actor = { empId: string | null }
+/** 呼叫者：`role` 是 employees.role（`isHrRole` 判斷強制放行用；省略＝非 HR）。 */
+export type Actor = { empId: string | null; role?: string | null }
 
 /**
  * 建立匯款單。`status:'paid'` 立即連動期款（先驗證期款可付，再寫）。
@@ -1596,13 +1780,19 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
   const header = await resolveHeader(tenantId, input)
   const allocations = await resolveAllocations(tenantId, input.allocations)
   assertTotals(header.payee_kind, header.amount, header.withheld_amount, allocations)
+  const payments = allocations.map((a) => a.payment).filter((p): p is PaymentRow => !!p)
+  // M5：分攤到未驗收期款一律擋（HR 可帶 forceAcceptance＋forceReason 放行）。
+  await assertPaymentsAccepted(tenantId, actor, payments.map((p) => p.id), {
+    force: input.forceAcceptance === true,
+    reason: input.forceReason,
+    context: "POST /disbursements",
+  })
+  let forcedPayReason: string | null = null
   if (input.status === "paid") {
+    // M4：不經簽核直接建「已匯款」＝HR 專屬例外，必須留理由。
+    forcedPayReason = assertForcePayAllowed(actor, input.forceReason)
     if (!header.paid_on) throw new DisbursementError(400, "paid_on_required")
-    await assertPaymentsPayable(
-      tenantId,
-      null,
-      allocations.map((a) => a.payment).filter((p): p is PaymentRow => !!p),
-    )
+    await assertPaymentsPayable(tenantId, null, payments)
   }
 
   const today = await tenantToday(tenantId)
@@ -1621,7 +1811,7 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
         paid_by_emp_id: input.status === "paid" ? actor.empId : null,
         created_by_emp_id: actor.empId,
       })
-      .select(DISBURSEMENT_COLS)
+      .select(await disbursementCols())
       .single()
     if (error) {
       if (isUniqueViolation(error)) continue
@@ -1652,7 +1842,11 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
     tableName: "disbursements",
     recordId: row.id,
     action: "INSERT",
-    newRow: { ...row, allocations: input.allocations },
+    newRow: {
+      ...row,
+      allocations: input.allocations,
+      ...(forcedPayReason ? { forcedPaid: true, forceReason: forcedPayReason } : {}),
+    },
     actorEmpId: actor.empId,
     context: "POST /disbursements",
   })
@@ -1660,6 +1854,8 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
 }
 
 const PAID_EDITABLE = new Set<keyof DisbursementPatch>(["note", "receiptRef", "purpose", "hasInvoice", "invoiceNo"])
+/** 不是單據欄位、只是這次呼叫的旗標，比對「有沒有被改動」時要跳過。 */
+const CONTROL_KEYS = new Set<keyof DisbursementPatch>(["forceReason", "forceAcceptance"])
 
 function headerToInput(d: DisbursementRow): Omit<DisbursementInput, "status" | "allocations"> {
   return {
@@ -1684,10 +1880,11 @@ function headerToInput(d: DisbursementRow): Omit<DisbursementInput, "status" | "
 }
 
 /**
- * PATCH：draft 全部可改（allocations 整批覆蓋、快照重抓）；paid 只可改
+ * PATCH：draft 全部可改（allocations 整批覆蓋、快照重抓）；paid／approved 只可改
  * note／receiptRef／purpose／hasInvoice／invoiceNo（已匯款後補發票號是常態）——
- * 其他欄位若出現且與現值不同 → 409 `paid`（UI 送整份表單但值沒動的情況放行）；
- * void → 409 `void`。
+ * 其他欄位若出現且與現值不同 → 409 `paid`／`approved`（UI 送整份表單但值沒動的
+ * 情況放行；要真的改就先撤回簽核）；pending_approval → 409 `pending_approval`；
+ * void → 409 `void`。改分攤時一併檢查複委託驗收（M5）。
  */
 export async function updateDisbursement(
   tenantId: string,
@@ -1698,22 +1895,28 @@ export async function updateDisbursement(
   const current = await loadDisbursement(tenantId, id)
   if (!current) return null
   if (current.status === "void") throw new DisbursementError(409, "void")
+  if (current.status === "pending_approval") {
+    throw new DisbursementError(409, "pending_approval", { hint: "送簽中的放款單不可修改；要改請先撤回簽核。" })
+  }
   const nowIso = new Date().toISOString()
 
-  if (current.status === "paid") {
+  // approved 與 paid 同一套限縮：已核准的內容不能再偷改（要改先撤回）。
+  const frozen = current.status === "paid" || current.status === "approved"
+  const frozenCode = current.status === "approved" ? "approved" : "paid"
+  if (frozen) {
     const base = headerToInput(current)
     for (const key of Object.keys(patch) as Array<keyof DisbursementPatch>) {
-      if (PAID_EDITABLE.has(key)) continue
+      if (PAID_EDITABLE.has(key) || CONTROL_KEYS.has(key)) continue
       if (key === "allocations") {
-        // 分攤已連動期款，paid 之後不再收；值一樣就放行（表單整份回送）。
+        // 分攤已連動期款（或已被簽核核准），之後不再收；值一樣就放行（表單整份回送）。
         const same = await allocationsUnchanged(tenantId, id, patch.allocations ?? [])
-        if (!same) throw new DisbursementError(409, "paid", { field: key })
+        if (!same) throw new DisbursementError(409, frozenCode, { field: key })
         continue
       }
       const nextVal = (patch as Record<string, unknown>)[key]
       const curVal = (base as Record<string, unknown>)[key]
       if (nextVal !== undefined && normalize(nextVal) !== normalize(curVal)) {
-        throw new DisbursementError(409, "paid", { field: key })
+        throw new DisbursementError(409, frozenCode, { field: key })
       }
     }
     const fields: Record<string, unknown> = { updated_at: nowIso }
@@ -1723,8 +1926,8 @@ export async function updateDisbursement(
     if (patch.hasInvoice !== undefined) fields.has_invoice = patch.hasInvoice
     if (patch.invoiceNo !== undefined) fields.invoice_no = patch.invoiceNo?.trim() || null
     const { error } = await supabaseAdmin.from("disbursements").update(fields).eq("tenant_id", tenantId).eq("id", id)
-    if (error) throw new Error(`updateDisbursement (paid): ${error.message}`)
-    if (fields.receipt_ref !== undefined && fields.receipt_ref !== current.receipt_ref) {
+    if (error) throw new Error(`updateDisbursement (${frozenCode}): ${error.message}`)
+    if (current.status === "paid" && fields.receipt_ref !== undefined && fields.receipt_ref !== current.receipt_ref) {
       // 收據編號是連動寫進期款的，改了要跟著走。
       const { error: pErr } = await supabaseAdmin
         .from("project_subcontract_payments")
@@ -1759,6 +1962,15 @@ export async function updateDisbursement(
           }))
     const allocations = await resolveAllocations(tenantId, allocInputs)
     assertTotals(header.payee_kind, header.amount, header.withheld_amount, allocations)
+    if (patch.allocations !== undefined) {
+      // M5：改了分攤才重查驗收（只改備註的 PATCH 不該被未驗收期款擋下來）。
+      await assertPaymentsAccepted(
+        tenantId,
+        actor,
+        allocations.map((a) => a.payment?.id).filter((v): v is string => !!v),
+        { force: patch.forceAcceptance === true, reason: patch.forceReason, context: "PATCH /disbursements/:id" },
+      )
+    }
     // 分攤先寫：唯一預期中的失敗（409 allocation_not_removable）發生在還沒動到單頭之前。
     if (patch.allocations !== undefined) await replaceAllocations(tenantId, id, allocations)
     const { error } = await supabaseAdmin
@@ -1807,21 +2019,36 @@ async function allocationsUnchanged(tenantId: string, id: string, next: Allocati
   return a.every((x, i) => x === b[i])
 }
 
-/** draft → paid：連動期款、通知 lead。`paidOn` 省略時用單上既有的匯款日。 */
+/**
+ * approved → paid：連動期款、通知 lead。`paidOn` 省略時用單上既有的匯款日。
+ * M4：`draft` 直接付款＝HR 專屬例外（`forceReason` 必填、寫稽核），其餘角色
+ * 409 `approval_required`；`pending_approval` 一律 409（要嘛簽完、要嘛先撤回）。
+ */
 export async function payDisbursement(
   tenantId: string,
   actor: Actor,
   id: string,
-  input: { paidOn?: string | null },
+  input: { paidOn?: string | null; forceReason?: string | null; forceAcceptance?: boolean },
 ): Promise<SerializedDisbursement | null> {
   const current = await loadDisbursement(tenantId, id)
   if (!current) return null
   if (current.status === "void") throw new DisbursementError(409, "void")
   if (current.status === "paid") throw new DisbursementError(409, "already_paid")
+  if (current.status === "pending_approval") {
+    throw new DisbursementError(409, "approval_required", { hint: "簽核尚未完成；要直接付款請先撤回簽核。" })
+  }
+  const forcedPayReason = current.status === "approved" ? null : assertForcePayAllowed(actor, input.forceReason)
   const paidOn = input.paidOn ?? current.paid_on
   if (!paidOn) throw new DisbursementError(400, "paid_on_required")
 
   const allocations = await loadAllocations(tenantId, [id])
+  // M5：付款前再確認一次期款都已驗收（建單之後才被取消驗收的情況）。
+  await assertPaymentsAccepted(
+    tenantId,
+    actor,
+    allocations.map((a) => a.subcontract_payment_id).filter((v): v is string => !!v),
+    { force: input.forceAcceptance === true, reason: input.forceReason, context: "POST /disbursements/:id/pay" },
+  )
   await syncPaymentsOnPay(
     tenantId,
     {
@@ -1843,7 +2070,7 @@ export async function payDisbursement(
     .update({ status: "paid", paid_on: paidOn, paid_by_emp_id: actor.empId, updated_at: new Date().toISOString() })
     .eq("tenant_id", tenantId)
     .eq("id", id)
-    .select(DISBURSEMENT_COLS)
+    .select(await disbursementCols())
     .single()
   if (error || !data) throw new Error(`payDisbursement: ${error?.message}`)
   const row = data as unknown as DisbursementRow
@@ -1854,7 +2081,7 @@ export async function payDisbursement(
     recordId: id,
     action: "UPDATE",
     oldRow: current,
-    newRow: row,
+    newRow: { ...row, ...(forcedPayReason ? { forcedPaid: true, forceReason: forcedPayReason } : {}) },
     actorEmpId: actor.empId,
     context: "POST /disbursements/:id/pay",
   })
@@ -1877,7 +2104,7 @@ export async function voidDisbursement(
     .update({ status: "void", void_reason: reason, updated_at: new Date().toISOString() })
     .eq("tenant_id", tenantId)
     .eq("id", id)
-    .select(DISBURSEMENT_COLS)
+    .select(await disbursementCols())
     .single()
   if (error || !data) throw new Error(`voidDisbursement: ${error?.message}`)
   await writeAuditLog({
@@ -1886,7 +2113,7 @@ export async function voidDisbursement(
     recordId: id,
     action: "UPDATE",
     oldRow: current,
-    newRow: { ...(data as Record<string, unknown>), clearedPaymentIds: cleared },
+    newRow: { ...(data as unknown as Record<string, unknown>), clearedPaymentIds: cleared },
     actorEmpId: actor.empId,
     context: "POST /disbursements/:id/void",
   })

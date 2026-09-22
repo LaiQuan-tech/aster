@@ -1,13 +1,18 @@
 /**
  * 放款專區（匯款紀錄 × 專案連動）的 typed API 呼叫。
- * 後端見 apps/api/src/routes/disbursements.ts（新檔，開發中——本檔依規劃文件
- * 的 API 合約撰寫，尚未逐一對過實際回應形狀，見呼叫端註記）。
+ * 後端見 apps/api/src/routes/disbursements.ts、services/disbursement-approval.ts。
  * 刻意獨立成新檔、不改 admin-api.ts（後者已經很大，且此模組是獨立團隊在做）。
+ *
+ * M4（2026-09-23）加簽核鏈：`submit` → `approve`／`reject` → `pay`，
+ * 以及 HR 的 `change-approver`／`withdraw`；「複製匯款資訊」的純函式已抽到
+ * `lib/remittance.ts`（廠商頁也在用），這裡只 re-export 方便既有呼叫端。
  */
 import { apiFetch, apiDownload } from "./api-client"
 
+export { buildRemittanceText, copyText, formatBankLine, type RemittanceInfo } from "./remittance"
+
 /* ---------------------------------------------------------------- 基本型別 -- */
-export type DisbursementStatus = "draft" | "paid" | "void"
+export type DisbursementStatus = "draft" | "pending_approval" | "approved" | "paid" | "void"
 export type PayeeKind = "vendor" | "other"
 export type DisbursementMethod = "transfer" | "check" | "cash"
 
@@ -90,10 +95,50 @@ export interface Disbursement {
   createdByEmpId?: string | null
   createdAt: string
   updatedAt?: string
+  /* ── M4 簽核（欄位尚未套用時後端一律回 null／0）── */
+  currentStep?: number | null
+  approvalRound?: number
+  submittedAt?: string | null
+  submittedByEmpId?: string | null
+  approvedAt?: string | null
+  /** 簽核軌跡（含舊輪）；只有 GET /disbursements/:id 會帶。 */
+  approvalSteps?: DisbursementApprovalStep[]
   /** 「AT-115-001 第1,2期」這類分攤摘要字串，列表／明細／匯出共用。 */
   allocationLabel?: string
   allocations: Allocation[]
   attachments?: Attachment[]
+}
+
+/** 一關簽核（disbursement_approval_steps）。 */
+export interface DisbursementApprovalStep {
+  id: string
+  round: number
+  stepOrder: number
+  /** 'manager' | 'accountant' | 'fallback'（老闆）| 'list' | 'hr_admin'。 */
+  stepKind: string | null
+  approverEmpId: string
+  approverName: string | null
+  candidateEmpIds: string[]
+  candidateNames: string[]
+  decision: "pending" | "approved" | "rejected"
+  comment: string | null
+  actedAt: string | null
+  actedByEmpId: string | null
+  actedByName: string | null
+}
+
+/** GET /disbursements/pending-approvals 的一列（匯款單本身 ＋ 現行關卡資訊）。 */
+export interface PendingDisbursementApproval extends Disbursement {
+  currentStepOrder: number
+  totalSteps: number
+  stepKind: string | null
+  stepKindLabel: string | null
+  candidateEmpIds: string[]
+  candidateNames: string[]
+  createdByName: string | null
+  submittedByName: string | null
+  /** 是否輪到「我」簽（scope=all 時才可能 false）。 */
+  mine: boolean
 }
 
 /** POST /disbursements、PATCH /disbursements/:id 的 body。 */
@@ -118,6 +163,10 @@ export interface DisbursementInput {
   note?: string | null
   status: "draft" | "paid"
   allocations: AllocationInput[]
+  /** HR 跳過簽核直接建已匯款單，或強制放行未驗收期款的理由（寫稽核）。 */
+  forceReason?: string | null
+  /** HR 勾「未驗收仍要放款」（M5）。 */
+  forceAcceptance?: boolean
 }
 
 /** PATCH：draft 全欄可改（allocations 整批覆蓋，列數變少可能 409
@@ -299,11 +348,86 @@ export function patchDisbursement(id: string, body: DisbursementPatchInput) {
   })
 }
 
-export function payDisbursement(id: string, body: { paidOn?: string } = {}) {
+/** approved → paid。draft 直接付款要 HR ＋ `forceReason`（否則 409 approval_required）。 */
+export function payDisbursement(
+  id: string,
+  body: { paidOn?: string; forceReason?: string; forceAcceptance?: boolean } = {},
+) {
   return apiFetch<{ disbursement: Disbursement }>(`/disbursements/${id}/pay`, {
     method: "POST",
     body: JSON.stringify(body),
   })
+}
+
+/* ------------------------------------------------------------ M4 簽核鏈 -- */
+
+/** draft → pending_approval：建單人主管鏈 → 會計 → 老闆，通知第 1 關。 */
+export function submitDisbursement(id: string, body: { forceReason?: string; forceAcceptance?: boolean } = {}) {
+  return apiFetch<{
+    disbursement: Disbursement
+    approvalSource: string
+    steps: Array<{ stepOrder: number; kind: string; candidateEmpIds: string[]; candidateNames: string[] }>
+    notified: number
+  }>(`/disbursements/${id}/submit`, { method: "POST", body: JSON.stringify(body) })
+}
+
+export interface DisbursementDecisionResult {
+  status: "pending_approval" | "approved" | "draft"
+  currentStep: number | null
+  notified: number
+  disbursement: Disbursement
+}
+
+export function approveDisbursement(id: string, comment?: string) {
+  return apiFetch<DisbursementDecisionResult>(`/disbursements/${id}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ comment: comment ?? null }),
+  })
+}
+
+export function rejectDisbursement(id: string, comment: string) {
+  return apiFetch<DisbursementDecisionResult>(`/disbursements/${id}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ comment }),
+  })
+}
+
+/** HR：把現行關卡換人。 */
+export function changeDisbursementApprover(id: string, approverEmpId: string) {
+  return apiFetch<{ stepOrder: number; previousApproverEmpId: string; notified: number }>(
+    `/disbursements/${id}/change-approver`,
+    { method: "POST", body: JSON.stringify({ approverEmpId }) },
+  )
+}
+
+/** HR：撤回送簽（pending_approval → draft，理由必填）。 */
+export function withdrawDisbursement(id: string, reason: string) {
+  return apiFetch<{ disbursement: Disbursement }>(`/disbursements/${id}/withdraw`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  })
+}
+
+/** 輪到我簽的放款單；`scope='all'`（限 finance 角色）改列全租戶送簽中的單。 */
+export function getPendingDisbursementApprovals(params: { scope?: "mine" | "all" } = {}) {
+  return apiFetch<{ scope: "mine" | "all"; disbursements: PendingDisbursementApproval[] }>(
+    `/disbursements/pending-approvals${buildQuery(params)}`,
+  )
+}
+
+/* ------------------------------------------------------- M5 複委託驗收 -- */
+
+/** 專案頁每期的「驗收確認」；`acceptedOn` 省略＝今天。回傳整個副委託（含期款）。 */
+export function acceptSubcontractPayment(
+  projectId: string,
+  subcontractId: string,
+  installmentNo: number,
+  body: { acceptedOn?: string; note?: string } = {},
+) {
+  return apiFetch<{ subcontract: unknown; acceptedOn: string }>(
+    `/projects/${projectId}/subcontracts/${subcontractId}/payments/${installmentNo}/accept`,
+    { method: "POST", body: JSON.stringify(body) },
+  )
 }
 
 export function voidDisbursement(id: string, reason: string) {
@@ -347,8 +471,29 @@ export function exportDisbursementsXlsx(params: DisbursementListParams = {}, fil
 /* -------------------------------------------------------------------- 顯示 -- */
 export const DISBURSEMENT_STATUS_LABELS: Record<DisbursementStatus, string> = {
   draft: "草稿",
+  pending_approval: "待簽核",
+  approved: "已核准",
   paid: "已匯款",
   void: "作廢",
+}
+
+/** 列表／明細的狀態色（草稿與待簽核都是「還沒付錢」，但待簽核不能再改）。 */
+export const DISBURSEMENT_STATUS_TONE: Record<DisbursementStatus, string> = {
+  draft: "text-amber-700",
+  pending_approval: "text-blue-700",
+  approved: "text-emerald-700",
+  paid: "text-green-700",
+  void: "text-gray-400",
+}
+
+/** 簽核關卡的中文（stepKind → 標籤）。 */
+export const DISBURSEMENT_STEP_KIND_LABELS: Record<string, string> = {
+  manager: "主管",
+  accountant: "會計",
+  fallback: "老闆",
+  hr: "HR 覆核",
+  hr_admin: "HR",
+  list: "指定簽核人",
 }
 export const PAYEE_KIND_LABELS: Record<PayeeKind, string> = {
   vendor: "廠商",
@@ -365,6 +510,22 @@ export const DISBURSEMENT_METHOD_LABELS: Record<DisbursementMethod, string> = {
 // 必須排在會被它們的字串「包含」的較短 code（如 already_paid、paid）前面，
 // 否則短 code 會先誤判命中。新增 code 時請留意這點，別直接塞在最前面。
 export const DISBURSEMENT_ERRORS: Record<string, string> = {
+  // M4／M5（放在最前面：都是完整字串，不會被其他 code 包含）
+  acceptance_force_forbidden: "只有 HR 可以強制放行未驗收的期款。",
+  acceptance_not_available: "驗收功能所需的資料庫欄位尚未套用，請聯絡管理員。",
+  acceptance_required: "分攤到的複委託期款還沒驗收確認，請先在專案頁按「驗收確認」。",
+  approval_not_available: "放款簽核所需的資料表尚未套用，請聯絡管理員。",
+  force_reason_required: "這個動作需要填寫理由（會寫進稽核紀錄）。",
+  no_approver_available: "找不到可以簽核的人，請先在「簽核流程」設定或指定老闆。",
+  not_current_approver: "這張放款單目前不是輪到你簽核。",
+  current_step_not_found: "找不到目前的簽核關卡，請重新整理。",
+  invalid_approver: "選到的簽核人不存在或已離職。",
+  acceptance_locked: "已付款的期別不能取消驗收。",
+  approval_required: "放款要先送簽核准才能付款（HR 可填理由直接付款）。",
+  pending_approval: "送簽中的放款單不可修改，要改請先撤回簽核。",
+  not_pending: "這張單目前不在送簽中，請重新整理。",
+  not_draft: "只有草稿可以送簽，請重新整理。",
+  approved: "已核准的單只能改用途／收據編號／發票資訊／備註；要改其他欄位請先撤回簽核。",
   allocation_mismatch: "分攤合計金額與毛額不符。",
   payment_already_paid: "選到的期款已由其他匯款標記為已付。",
   invalid_vendor: "選到的廠商不存在或已刪除。",
@@ -397,33 +558,4 @@ export function humanizeDisbursementError(err: unknown, fallback: string): strin
     if (msg.includes(code)) return text
   }
   return msg
-}
-
-/* ------------------------------------------------------------ 匯款資訊複製 -- */
-/** 銀行顯示字串：後端 vendor 快照慣例會把代碼內嵌進 bankName（如「國泰世華（013）」，
- * 見 services/disbursements.ts vendorBankName）；已內嵌就照原樣顯示，否則把
- * bankCode 用括號補在後面，避免「國泰世華（013）（013）」重複。純函式。 */
-function formatBankLine(bankName: string | null, bankCode: string | null): string {
-  const name = (bankName ?? "").trim()
-  const code = (bankCode ?? "").trim()
-  if (!code) return name
-  if (name.includes(code)) return name
-  return name ? `${name}（${code}）` : code
-}
-
-/** 「複製匯款資訊」按鈕的文字組裝（純函式，不碰 DOM／clipboard，方便單元測試）：
- * 戶名／銀行（代號）／帳號／金額，一行一項，貼進網銀 APP 轉帳頁面剛好對應四個欄位。 */
-export function buildRemittanceText(d: {
-  payeeName: string
-  payeeBankName: string | null
-  payeeBankCode: string | null
-  payeeBankAccount: string | null
-  amount: number
-}): string {
-  return [
-    `戶名：${d.payeeName || "—"}`,
-    `銀行：${formatBankLine(d.payeeBankName, d.payeeBankCode) || "—"}`,
-    `帳號：${d.payeeBankAccount || "—"}`,
-    `金額：${d.amount.toLocaleString()}`,
-  ].join("\n")
 }

@@ -19,6 +19,14 @@ import { roundMoney, type SerializedDisbursement } from "./disbursements.js"
  *     withheldAmount（該分攤列代扣）按 projectId 拆；一筆分攤兩個專案就拆兩份、
  *     完全沒有分攤列的整筆（payeeKind='other' 常見，例如印刷、快遞）歸「未指定
  *     專案」，用該筆 disbursement 的 grossAmount／withheldAmount（沒有分攤列可拆）。
+ *
+ * M16（2026-09-23）年度樞紐補兩欄（憑證狀態一律看整筆匯款單，不按分攤列判斷）：
+ *   `invoicedCount`   該組已取得發票／收據的匯款**筆數**（`hasInvoice=true`）。
+ *   `noReceiptAmount` 該組「沒發票**也**沒收據編號」的金額合計（`hasInvoice=false`
+ *     且 `receiptRef` 為空）——年底報稅時要追憑證的就是這一格。金額用該組這一列
+ *     本來就在用的口徑：vendor／company 分組＝實付淨額；project 分組＝該筆的
+ *     毛額（一筆匯款分攤到兩個專案時，兩個專案各認一次整筆的毛額會重複計算，
+ *     所以 project 分組改用「該分攤列的毛額」，與 months／total 同一把尺）。
  */
 
 export const DISBURSEMENT_PIVOT_GROUP_BYS = ["vendor", "company", "project"] as const
@@ -32,6 +40,10 @@ export type DisbursementPivotRow = {
   total: number
   withheld: number
   count: number
+  /** M16：已取得發票／收據的匯款筆數。 */
+  invoicedCount: number
+  /** M16：沒發票也沒收據編號的金額合計。 */
+  noReceiptAmount: number
 }
 
 export type DisbursementPivotTotals = {
@@ -39,6 +51,8 @@ export type DisbursementPivotTotals = {
   total: number
   withheld: number
   count: number
+  invoicedCount: number
+  noReceiptAmount: number
 }
 
 export type DisbursementPivotResult = {
@@ -72,19 +86,40 @@ function monthIndexOf(paidOn: string | null): number | null {
   return Number.isInteger(m) && m >= 1 && m <= 12 ? m - 1 : null
 }
 
-type Bucket = { label: string; months: number[]; total: number; withheld: number; count: number }
+type Bucket = {
+  label: string
+  months: number[]
+  total: number
+  withheld: number
+  count: number
+  invoicedCount: number
+  noReceiptAmount: number
+}
 
 function newBucket(label: string): Bucket {
-  return { label, months: emptyMonths(), total: 0, withheld: 0, count: 0 }
+  return { label, months: emptyMonths(), total: 0, withheld: 0, count: 0, invoicedCount: 0, noReceiptAmount: 0 }
+}
+
+/** M16：這筆匯款「沒發票也沒收據編號」＝憑證缺口。純判斷，不看金額。 */
+export function isMissingReceipt(d: Pick<SerializedDisbursement, "hasInvoice" | "receiptRef">): boolean {
+  return !d.hasInvoice && !(d.receiptRef ?? "").trim()
 }
 
 /** 累加一筆金額到桶子裡；每次加完就 roundMoney，避免累加多筆後浮點誤差變大
  * （同 summarizeDisbursements 的 `c.total = roundMoney(c.total + r.amount)` 慣例）。 */
-function add(b: Bucket, monthIndex: number, amount: number, withheld: number): void {
+function add(b: Bucket, monthIndex: number, amount: number, withheld: number, receipt: ReceiptFacts): void {
   b.months[monthIndex] = roundMoney(b.months[monthIndex] + amount)
   b.total = roundMoney(b.total + amount)
   b.withheld = roundMoney(b.withheld + withheld)
   b.count += 1
+  if (receipt.invoiced) b.invoicedCount += 1
+  if (receipt.missingReceipt) b.noReceiptAmount = roundMoney(b.noReceiptAmount + amount)
+}
+
+/** 一筆匯款的憑證狀態（同一筆匯款拆成多列分攤時，每列都沿用整筆的狀態）。 */
+type ReceiptFacts = { invoiced: boolean; missingReceipt: boolean }
+function receiptFactsOf(d: SerializedDisbursement): ReceiptFacts {
+  return { invoiced: d.hasInvoice === true, missingReceipt: isMissingReceipt(d) }
 }
 
 export function pivotDisbursements(
@@ -101,20 +136,22 @@ export function pivotDisbursements(
     const mi = monthIndexOf(d.paidOn)
     if (mi === null) continue
 
+    const receipt = receiptFactsOf(d)
+
     if (groupBy === "project") {
       if (d.allocations.length === 0) {
         const b = buckets.get(UNASSIGNED_PROJECT_KEY) ?? newBucket(UNASSIGNED_PROJECT_LABEL)
-        add(b, mi, d.grossAmount, d.withheldAmount)
+        add(b, mi, d.grossAmount, d.withheldAmount, receipt)
         buckets.set(UNASSIGNED_PROJECT_KEY, b)
-        add(totals, mi, d.grossAmount, d.withheldAmount)
+        add(totals, mi, d.grossAmount, d.withheldAmount, receipt)
         continue
       }
       for (const a of d.allocations) {
         const label = a.projectCode ? `${a.projectCode} ${a.projectName}` : a.projectName || a.projectId
         const b = buckets.get(a.projectId) ?? newBucket(label)
-        add(b, mi, a.amount, a.withheldAmount)
+        add(b, mi, a.amount, a.withheldAmount, receipt)
         buckets.set(a.projectId, b)
-        add(totals, mi, a.amount, a.withheldAmount)
+        add(totals, mi, a.amount, a.withheldAmount, receipt)
       }
       continue
     }
@@ -122,19 +159,35 @@ export function pivotDisbursements(
     const key = groupBy === "vendor" ? (d.vendorId ?? `other:${d.payeeName}`) : d.payingCompanyId
     const label = groupBy === "vendor" ? d.payeeName : (d.payingCompanyName ?? "")
     const b = buckets.get(key) ?? newBucket(label)
-    add(b, mi, d.amount, d.withheldAmount)
+    add(b, mi, d.amount, d.withheldAmount, receipt)
     buckets.set(key, b)
-    add(totals, mi, d.amount, d.withheldAmount)
+    add(totals, mi, d.amount, d.withheldAmount, receipt)
   }
 
   const outRows: DisbursementPivotRow[] = Array.from(buckets.entries())
-    .map(([key, b]) => ({ key, label: b.label, months: b.months, total: b.total, withheld: b.withheld, count: b.count }))
+    .map(([key, b]) => ({
+      key,
+      label: b.label,
+      months: b.months,
+      total: b.total,
+      withheld: b.withheld,
+      count: b.count,
+      invoicedCount: b.invoicedCount,
+      noReceiptAmount: b.noReceiptAmount,
+    }))
     .sort((a, b) => b.total - a.total || a.label.localeCompare(b.label))
 
   return {
     year,
     groupBy,
     rows: outRows,
-    totals: { months: totals.months, total: totals.total, withheld: totals.withheld, count: totals.count },
+    totals: {
+      months: totals.months,
+      total: totals.total,
+      withheld: totals.withheld,
+      count: totals.count,
+      invoicedCount: totals.invoicedCount,
+      noReceiptAmount: totals.noReceiptAmount,
+    },
   }
 }

@@ -15,8 +15,10 @@ import {
   humanizeDisbursementError,
   listDisbursements,
   listManualPaidPayments,
+  submitDisbursement,
   DISBURSEMENT_METHOD_LABELS,
   DISBURSEMENT_STATUS_LABELS,
+  DISBURSEMENT_STATUS_TONE,
   type Disbursement,
   type DisbursementInput,
   type DisbursementStatus,
@@ -24,6 +26,9 @@ import {
   type ManualPaidPayment,
   type Payable,
 } from "@/lib/disbursements-api";
+import { buildRemittanceText, copyText } from "@/lib/remittance";
+import { getMe } from "@/lib/admin-api";
+import type { ApiError } from "@/lib/api-client";
 
 function fmtMoney(n: number | null | undefined): string {
   return n == null ? "—" : n.toLocaleString();
@@ -35,6 +40,9 @@ type Tab = "payables" | "records";
  * 放款專區：老闆卡（本月／本年放款、應付未付、本年代扣）＋兩個 tab——
  * 「應付清單」依廠商分組勾選建立匯款、「匯款紀錄」篩選＋匯出＋新增。
  * 對應規劃文件 §四；表單邏輯在 DisbursementForm。
+ *
+ * M4／M15（2026-09-23）匯款紀錄每列多了狀態 pill（草稿／待簽核／已核准／已匯款）、
+ * 「複製帳號」（`lib/remittance.ts`，不用點進明細頁就能貼進網銀）與草稿的「送簽」。
  */
 export default function DisbursementsPage() {
   const [tab, setTab] = useState<Tab>("payables");
@@ -60,10 +68,17 @@ export default function DisbursementsPage() {
   const [fQ, setFQ] = useState("");
 
   const [selected, setSelected] = useState<Record<string, boolean>>({});
+  /** 剛按過「複製帳號」的那一列（2 秒內顯示「已複製」）。 */
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [submittingId, setSubmittingId] = useState<string | null>(null);
+  const [submitMsg, setSubmitMsg] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [formInitial, setFormInitial] = useState<DisbursementFormInitial | undefined>(undefined);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /** M5：上一次建單被 409 acceptance_required 擋下 → 表單顯示期別提示與 HR 強制選項。 */
+  const [acceptanceBlocked, setAcceptanceBlocked] = useState(false);
+  const [isHr, setIsHr] = useState(false);
 
   const loadBase = useCallback(async () => {
     setLoading(true);
@@ -118,6 +133,16 @@ export default function DisbursementsPage() {
     void loadBase();
   }, [loadBase]);
   useEffect(() => {
+    void (async () => {
+      try {
+        const me = await getMe();
+        setIsHr(me.role === "hr_admin" || me.role === "platform_admin");
+      } catch {
+        /* 取不到就當非 HR，少一個強制放行選項 */
+      }
+    })();
+  }, []);
+  useEffect(() => {
     if (tab === "records") void loadRecords();
   }, [tab, loadRecords]);
 
@@ -155,6 +180,7 @@ export default function DisbursementsPage() {
       status: "draft",
     });
     setSaveError(null);
+    setAcceptanceBlocked(false);
     setFormOpen(true);
   }
 
@@ -162,6 +188,7 @@ export default function DisbursementsPage() {
     const defaultCompany = companies.find((c) => c.isDefault) ?? companies[0];
     setFormInitial({ payeeKind: "vendor", payingCompanyId: defaultCompany?.id ?? null, status: "draft", allocations: [] });
     setSaveError(null);
+    setAcceptanceBlocked(false);
     setFormOpen(true);
   }
 
@@ -173,13 +200,47 @@ export default function DisbursementsPage() {
       setFormOpen(false);
       setFormInitial(undefined);
       setSelected({});
+      setAcceptanceBlocked(false);
       await loadBase();
       setTab("records");
       await loadRecords();
     } catch (err) {
+      setAcceptanceBlocked((err as ApiError)?.code === "acceptance_required");
       setSaveError(humanizeDisbursementError(err, "建立失敗"));
     } finally {
       setSaving(false);
+    }
+  }
+
+  /** M15：不用點進明細頁，列表直接把戶名／銀行／帳號／金額複製走。 */
+  async function handleCopyAccount(d: Disbursement) {
+    await copyText(
+      buildRemittanceText({
+        payeeName: d.payeeName,
+        payeeBankName: d.payeeBankName,
+        payeeBankCode: d.payeeBankCode,
+        payeeBankAccount: d.payeeBankAccount,
+        amount: d.amount,
+      }),
+    );
+    setCopiedId(d.id);
+    setTimeout(() => setCopiedId((cur) => (cur === d.id ? null : cur)), 2000);
+  }
+
+  /** M4：草稿送簽（承辦 → 主管 → 會計 → 老闆）。 */
+  async function handleSubmit(d: Disbursement) {
+    setSubmittingId(d.id);
+    setError(null);
+    setSubmitMsg(null);
+    try {
+      const res = await submitDisbursement(d.id);
+      const first = res.steps[0];
+      setSubmitMsg(`${d.disbursementNo} 已送簽：第 1 關 ${first?.candidateNames.join("、") || "簽核人"}（共 ${res.steps.length} 關）`);
+      await loadRecords();
+    } catch (err) {
+      setError(humanizeDisbursementError(err, "送簽失敗"));
+    } finally {
+      setSubmittingId(null);
     }
   }
 
@@ -215,6 +276,7 @@ export default function DisbursementsPage() {
       )}
 
       <ErrorText>{error}</ErrorText>
+      {submitMsg && <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{submitMsg}</p>}
 
       <Card>
         <div className="flex flex-wrap items-center gap-2">
@@ -427,6 +489,7 @@ export default function DisbursementsPage() {
                       <th className="py-2 pr-2">分攤專案</th>
                       <th className="py-2 pr-2 text-center">發票</th>
                       <th className="py-2 pr-2">狀態</th>
+                      <th className="py-2 pr-2"></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -447,9 +510,31 @@ export default function DisbursementsPage() {
                         </td>
                         <td className="py-1.5 pr-2 text-center">{d.hasInvoice ? "✓" : "—"}</td>
                         <td className="py-1.5 pr-2">
-                          <span className={d.status === "void" ? "text-gray-400" : d.status === "paid" ? "text-green-700" : "text-amber-700"}>
+                          <span className={`rounded-full bg-gray-50 px-2 py-0.5 text-xs ${DISBURSEMENT_STATUS_TONE[d.status]}`}>
                             {DISBURSEMENT_STATUS_LABELS[d.status]}
+                            {d.status === "pending_approval" && d.currentStep ? ` · 第 ${d.currentStep} 關` : ""}
                           </span>
+                        </td>
+                        <td className="py-1.5 pr-2 whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyAccount(d)}
+                            className="text-xs text-gray-600 hover:underline"
+                            title="複製戶名／銀行／帳號／金額，貼進網銀"
+                          >
+                            {copiedId === d.id ? "已複製" : "複製帳號"}
+                          </button>
+                          {d.status === "draft" && (
+                            <button
+                              type="button"
+                              onClick={() => void handleSubmit(d)}
+                              disabled={submittingId === d.id}
+                              className="ml-2 text-xs font-medium disabled:opacity-50"
+                              style={{ color: "var(--brand)" }}
+                            >
+                              {submittingId === d.id ? "送簽中…" : "送簽"}
+                            </button>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -473,11 +558,13 @@ export default function DisbursementsPage() {
             projects={projects}
             payables={payables}
             initial={formInitial}
+            acceptanceBlocked={acceptanceBlocked}
+            canForceAcceptance={isHr}
             submitLabel="建立匯款"
             busy={saving}
             error={saveError}
             onSubmit={handleCreate}
-            onCancel={() => { setFormOpen(false); setFormInitial(undefined); }}
+            onCancel={() => { setFormOpen(false); setFormInitial(undefined); setAcceptanceBlocked(false); }}
           />
         </Card>
       )}

@@ -18,6 +18,7 @@ import { app } from "../app"
  * → 附件 5 檔上限、第 6 檔 409、>5MB 413 → 列表／summary／export.xlsx。
  *
  * 正式庫尚未套 0041（disbursements 三張表不存在）時整組 describe.skipIf 跳過。
+ * 2026-09-23 起所有直接建 `status:'paid'` 的呼叫都帶 `FORCE_PAID`（見下方說明）。
  */
 
 const SUPABASE_URL = process.env.SUPABASE_URL ?? ""
@@ -38,6 +39,15 @@ let tenantId: string
 let adminToken: string
 let adminEmpId: string
 let employeeToken: string
+
+/**
+ * M4／M5（2026-09-23）：`status:'paid'` 直接建已匯款單改成 HR 專屬例外，要帶
+ * `forceReason`（否則 409 `approval_required`／400 `force_reason_required`）；
+ * 分攤到未驗收期款要帶 `forceAcceptance`（否則 409 `acceptance_required`）。
+ * 本檔全部用租戶管理員（hr_admin）呼叫，所以一律帶這組旗標，維持原本的測試意圖
+ * （簽核鏈本身在 disbursement-approval-live.test.ts、驗收在 subcontract-acceptance-live.test.ts）。
+ */
+const FORCE_PAID = { forceReason: "測試：HR 略過簽核直接建已匯款單", forceAcceptance: true } as const
 
 const YEAR = Number(taipeiToday().slice(0, 4))
 const ROC = YEAR - 1911
@@ -277,6 +287,7 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
         amount: 756_000,
         withheldAmount: 84_000,
         status: "paid",
+        ...FORCE_PAID,
         allocations: [
           { projectId: projectAId, subcontractPaymentId: payA[0].id, amount: 480_000, withheldAmount: 48_000 },
           { projectId: projectAId, subcontractPaymentId: payA[1].id, amount: 360_001, withheldAmount: 36_000 },
@@ -300,6 +311,7 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
       res = await asAdmin(request(app).post("/disbursements")).send({
         ...base,
         status: "paid",
+        ...FORCE_PAID,
         allocations: [{ projectId: projectAId, subcontractPaymentId: payA[0].id, amount: 1 }],
       })
       expect([res.status, res.body.error]).toEqual([400, "paid_on_required"])
@@ -324,6 +336,7 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
         withheldAmount: 84_000,
         purpose: "廣修三期第 1、2 期",
         status: "paid",
+        ...FORCE_PAID,
         allocations: [
           { projectId: projectAId, subcontractPaymentId: payA[0].id, amount: 480_000, withheldAmount: 48_000 },
           { projectId: projectAId, subcontractPaymentId: payA[1].id, amount: 360_000, withheldAmount: 36_000 },
@@ -389,6 +402,7 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
         amount: 432_000,
         withheldAmount: 48_000,
         status: "paid",
+        ...FORCE_PAID,
         allocations: [{ projectId: projectAId, subcontractPaymentId: payA[0].id, amount: 480_000, withheldAmount: 48_000 }],
       })
       expect(res.status).toBe(409)
@@ -458,6 +472,7 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
         amount: 22_500,
         withheldAmount: 2_500,
         status: "paid",
+        ...FORCE_PAID,
         allocations: [{ projectId: projectBId, subcontractPaymentId: payB1Id, amount: 25_000, withheldAmount: 2_500 }],
       })
       expect(res.status).toBe(409)
@@ -511,6 +526,7 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
         amount: 324_000,
         note: "改成全額",
         allocations: [{ projectId: projectAId, subcontractPaymentId: payA[2].id, amount: 360_000, withheldAmount: 36_000 }],
+        ...FORCE_PAID,
       })
       expect(patched.status).toBe(200)
       expect(patched.body.disbursement.amount).toBe(324_000)
@@ -522,13 +538,13 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
       expect(bad.status).toBe(400)
       expect(bad.body.error).toBe("allocation_mismatch")
 
-      const noDate = await asAdmin(request(app).post(`/disbursements/${draftId}/pay`)).send({})
+      const noDate = await asAdmin(request(app).post(`/disbursements/${draftId}/pay`)).send({ ...FORCE_PAID })
       expect(noDate.status).toBe(400)
       expect(noDate.body.error).toBe("paid_on_required")
     })
 
     it("pay → 期款 A#3 paid；paid 之後只准改 note/receiptRef/purpose", async () => {
-      const paid = await asAdmin(request(app).post(`/disbursements/${draftId}/pay`)).send({ paidOn: TODAY })
+      const paid = await asAdmin(request(app).post(`/disbursements/${draftId}/pay`)).send({ paidOn: TODAY, ...FORCE_PAID })
       expect(paid.status).toBe(200)
       expect(paid.body.disbursement.status).toBe("paid")
       expect(paid.body.disbursement.paidOn).toBe(TODAY)
@@ -598,6 +614,7 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
         amount: 432_000,
         withheldAmount: 48_000,
         status: "paid",
+        ...FORCE_PAID,
         allocations: [{ projectId: projectAId, subcontractPaymentId: payA[0].id, amount: 480_000, withheldAmount: 48_000 }],
       })
       expect(res.status).toBe(201)
@@ -619,6 +636,7 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
         amount: 5_000,
         purpose: "圖說印刷",
         status: "paid",
+        ...FORCE_PAID,
         allocations: [],
       })
       expect(res.status).toBe(201)
@@ -807,6 +825,7 @@ describe.skipIf(!migrated)("放款專區 — live", () => {
         amount: 0,
         withheldAmount: 0,
         status: "paid",
+        ...FORCE_PAID,
         allocations: [],
       })
       expect(res.status).toBe(201)

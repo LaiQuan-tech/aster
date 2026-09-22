@@ -68,6 +68,11 @@ function makeDisbursement(over: Partial<SerializedDisbursement> = {}): Serialize
     createdByEmpId: null,
     createdAt: "2026-01-15T00:00:00.000Z",
     updatedAt: "2026-01-15T00:00:00.000Z",
+    currentStep: null,
+    approvalRound: 0,
+    submittedAt: null,
+    submittedByEmpId: null,
+    approvedAt: null,
     allocations: [],
     allocationLabel: "",
     ...over,
@@ -209,5 +214,72 @@ describe("pivotDisbursements — groupBy=project", () => {
     expect(result.rows[0].key).toBe("__unassigned__")
     expect(result.rows[0].label).toBe("未指定專案")
     expect(result.rows[0].months[8]).toBe(23800)
+  })
+})
+
+describe("M16 — 發票筆數與無憑證金額", () => {
+  it("vendor 分組：invoicedCount 只數 hasInvoice=true；noReceiptAmount 只加「沒發票也沒收據編號」的實付淨額", () => {
+    const rows = [
+      // 有發票 → 算進 invoicedCount，不算無憑證
+      makeDisbursement({ vendorId: "v1", payeeName: "廠商A", paidOn: "2026-03-01", amount: 1000, hasInvoice: true, invoiceNo: "AB-1" }),
+      // 沒發票但有收據編號 → 兩欄都不算（憑證是收據）
+      makeDisbursement({ vendorId: "v1", payeeName: "廠商A", paidOn: "2026-03-02", amount: 500, hasInvoice: false, receiptRef: "R-9" }),
+      // 沒發票也沒收據 → 無憑證金額
+      makeDisbursement({ vendorId: "v1", payeeName: "廠商A", paidOn: "2026-03-03", amount: 300, hasInvoice: false, receiptRef: null }),
+      // 收據編號只有空白＝沒填
+      makeDisbursement({ vendorId: "v2", payeeName: "廠商B", paidOn: "2026-04-01", amount: 200, hasInvoice: false, receiptRef: "   " }),
+    ]
+    const result = pivotDisbursements(rows, { groupBy: "vendor", year: 2026 })
+    const a = result.rows.find((r) => r.key === "v1")!
+    const b = result.rows.find((r) => r.key === "v2")!
+    expect([a.count, a.invoicedCount, a.noReceiptAmount]).toEqual([3, 1, 300])
+    expect([b.count, b.invoicedCount, b.noReceiptAmount]).toEqual([1, 0, 200])
+    expect(result.totals.invoicedCount).toBe(1)
+    expect(result.totals.noReceiptAmount).toBe(500)
+    // 兩個新欄位不影響原本的合計口徑
+    expect(result.totals.total).toBe(2000)
+  })
+
+  it("project 分組：憑證狀態看整筆匯款，金額照分攤毛額拆（兩案各認自己那半）", () => {
+    const rows = [
+      makeDisbursement({
+        paidOn: "2026-06-10",
+        amount: 540000,
+        withheldAmount: 60000,
+        grossAmount: 600000,
+        hasInvoice: false,
+        receiptRef: null,
+        allocations: [
+          makeAllocation({ projectId: "p1", projectCode: "AT-115-001", projectName: "甲案", amount: 400000, withheldAmount: 40000, netAmount: 360000 }),
+          makeAllocation({ projectId: "p2", projectCode: "AT-115-002", projectName: "乙案", amount: 200000, withheldAmount: 20000, netAmount: 180000 }),
+        ],
+      }),
+      makeDisbursement({
+        paidOn: "2026-06-20",
+        amount: 100000,
+        withheldAmount: 0,
+        grossAmount: 100000,
+        hasInvoice: true,
+        allocations: [makeAllocation({ projectId: "p1", projectCode: "AT-115-001", projectName: "甲案", amount: 100000, withheldAmount: 0, netAmount: 100000 })],
+      }),
+    ]
+    const result = pivotDisbursements(rows, { groupBy: "project", year: 2026 })
+    const p1 = result.rows.find((r) => r.key === "p1")!
+    const p2 = result.rows.find((r) => r.key === "p2")!
+    expect([p1.invoicedCount, p1.noReceiptAmount]).toEqual([1, 400000])
+    expect([p2.invoicedCount, p2.noReceiptAmount]).toEqual([0, 200000])
+    expect(result.totals.noReceiptAmount).toBe(600000)
+  })
+
+  it("作廢／非本年度的列不進兩個新欄位（與 months／total 同一組過濾）", () => {
+    const rows = [
+      makeDisbursement({ vendorId: "v1", payeeName: "廠商A", paidOn: "2026-02-01", amount: 100, hasInvoice: false, receiptRef: null }),
+      makeDisbursement({ vendorId: "v1", payeeName: "廠商A", paidOn: "2026-02-02", amount: 999, status: "void", hasInvoice: false, receiptRef: null }),
+      makeDisbursement({ vendorId: "v1", payeeName: "廠商A", paidOn: "2025-02-03", amount: 888, hasInvoice: true }),
+    ]
+    const result = pivotDisbursements(rows, { groupBy: "vendor", year: 2026 })
+    expect(result.totals.count).toBe(1)
+    expect(result.totals.invoicedCount).toBe(0)
+    expect(result.totals.noReceiptAmount).toBe(100)
   })
 })
