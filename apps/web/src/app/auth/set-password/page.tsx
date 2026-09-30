@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
 import { markPasswordDone } from "@/lib/auth-api";
+import type { ApiError } from "@/lib/api-client";
 import { resetMustChangeCache } from "@/components/AuthGate";
 
 /**
@@ -33,6 +34,8 @@ function SetPasswordInner() {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // 密碼已經改好、只差清 must_change_password 那一步失敗時為 true：再按按鈕只重送那一步。
+  const [passwordSaved, setPasswordSaved] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -70,27 +73,42 @@ function SetPasswordInner() {
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
-    if (password.length < 8) {
-      setError("密碼至少 8 碼");
-      return;
-    }
-    if (password !== confirm) {
-      setError("兩次輸入的密碼不一致");
-      return;
+    if (!passwordSaved) {
+      if (password.length < 8) {
+        setError("密碼至少 8 碼");
+        return;
+      }
+      if (password !== confirm) {
+        setError("兩次輸入的密碼不一致");
+        return;
+      }
     }
     setPhase("saving");
     try {
-      const supabase = getSupabaseBrowser();
-      const { error: updErr } = await supabase.auth.updateUser({ password });
-      if (updErr) {
-        setError(
-          /different from the old password/i.test(updErr.message) ? "新密碼不可與舊密碼相同" : updErr.message,
-        );
-        setPhase("form");
-        return;
+      if (!passwordSaved) {
+        const supabase = getSupabaseBrowser();
+        const { error: updErr } = await supabase.auth.updateUser({ password });
+        if (updErr) {
+          setError(
+            /different from the old password/i.test(updErr.message) ? "新密碼不可與舊密碼相同" : updErr.message,
+          );
+          setPhase("form");
+          return;
+        }
+        setPasswordSaved(true);
       }
-      // 清 must_change_password（沒員工列的平台帳號會 404，不擋流程）。
-      await markPasswordDone().catch(() => undefined);
+      // 清 must_change_password。沒員工列的平台帳號會 404，不擋流程；其他失敗（網路、5xx）停在
+      // 這頁讓人重試——密碼已經改好，重試只重送這一步。以前吞掉錯誤直接進系統，會被導回設定
+      // 密碼頁，再輸入同一組密碼還會被拒（新密碼不可與舊密碼相同）。
+      try {
+        await markPasswordDone();
+      } catch (err) {
+        if ((err as ApiError).status !== 404) {
+          setError("密碼已更新，但系統狀態沒有存成功，請再按一次按鈕重試。");
+          setPhase("form");
+          return;
+        }
+      }
       resetMustChangeCache();
       setPhase("done");
       router.replace("/ess");
@@ -208,7 +226,7 @@ function SetPasswordInner() {
           className="w-full rounded-md py-2.5 font-medium text-white disabled:opacity-60"
           style={{ backgroundColor: "var(--brand)" }}
         >
-          {phase === "saving" ? "儲存中…" : phase === "done" ? "完成，前往系統…" : "設定密碼並登入"}
+          {phase === "saving" ? "儲存中…" : phase === "done" ? "完成，前往系統…" : passwordSaved ? "重試" : "設定密碼並登入"}
         </button>
       </form>
     </main>

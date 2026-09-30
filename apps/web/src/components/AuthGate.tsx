@@ -12,6 +12,9 @@ const SET_PASSWORD_PATH = "/auth/set-password";
 // 讓下一次重新查。整頁重載自然清空。
 let cachedUserId: string | null = null;
 let cachedMustChange = false;
+// ess-state 模組快取（/me、branding）目前屬於哪個使用者。在 check「開始」就寫入，不等 /me
+// 回來：第一支 /me 還在途時就換了人，也會被偵測到並整包清掉（2026-09-30 審查發現的競態）。
+let essOwner: string | null = null;
 
 export function resetMustChangeCache() {
   cachedUserId = null;
@@ -46,31 +49,42 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!loading && !session) {
+      // 登出（含別的分頁登出的廣播）：AuthGate 自己的快取與 ess-state 一起清。不清的話，
+      // 同一分頁之後換人，或同一人拿 HR 配發的暫時密碼重登，會沿用舊的 mustChangePassword。
+      resetMustChangeCache();
+      essOwner = null;
       router.replace("/login");
     }
   }, [loading, session, router]);
 
   useEffect(() => {
     if (!userId) return;
+    // 換了使用者（含第一支 /me 還在途時就換、沒經過 essLogout 的換人）：先把 AuthGate 與
+    // ess-state 的快取整包清掉再查，免得守門與頁框拿到上一位的角色、姓名或 mustChangePassword。
+    // 首次整頁載入 essOwner 是 null，不清（根 layout 的 TenantBranding 那支在途請求要保留）。
+    if (essOwner !== null && essOwner !== userId) resetMustChangeCache();
+    essOwner = userId;
     if (cachedUserId === userId) {
       setChecked({ userId, mustChange: cachedMustChange });
       return;
     }
-    // 換了使用者卻沒經過 essLogout（例如 session 失效後在同一分頁改登別的帳號）：ess-state 的
-    // 模組快取可能還是上一位的 /me／branding，先整包清掉再查，免得守門拿到別人的角色。
-    if (cachedUserId !== null) resetEssState();
     let active = true;
     (async () => {
       let mustChange = false;
+      let ok = false;
       try {
         const me = await getMeCached();
         mustChange = me.mustChangePassword === true;
+        ok = true;
       } catch {
-        /* 404 / 網路錯誤：不擋 */
+        /* 404 / 網路錯誤：這次不擋 */
       }
       if (!active) return;
-      cachedUserId = userId;
-      cachedMustChange = mustChange;
+      // 只有成功才寫模組快取：失敗（網路錯誤、5xx、401）不能被記成「不用改密碼」，下次掛載要重試。
+      if (ok) {
+        cachedUserId = userId;
+        cachedMustChange = mustChange;
+      }
       setChecked({ userId, mustChange });
     })();
     return () => {
