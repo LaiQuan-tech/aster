@@ -284,8 +284,8 @@ export default function AdminProjectsPage() {
           </div>
           <div>
             <label className={labelCls}>歸屬年度</label>
-            <input className={inputCls} type="number" min="2000" max="2100" value={fiscalYear} onChange={(e) => setFiscalYear(e.target.value)} placeholder={`留空＝${new Date().getFullYear()}`} />
-            <p className="mt-1 text-xs text-gray-400">報表與獎金歸在哪一年。12 月談成、1 月才立案的案子可設回前一年。</p>
+            <input className={inputCls} type="number" min="1" max="2100" value={fiscalYear} onChange={(e) => setFiscalYear(e.target.value)} placeholder={`留空＝${new Date().getFullYear()}（民國 ${new Date().getFullYear() - 1911}）`} />
+            <p className="mt-1 text-xs text-gray-400">報表與獎金歸在哪一年，西元或民國年都可以填（115＝2026）。12 月談成、1 月才立案的案子可設回前一年。</p>
           </div>
           <div className="sm:col-span-2">
             <label className={labelCls}>專案編號</label>

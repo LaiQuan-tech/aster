@@ -78,6 +78,15 @@ const engineersSchema = z.record(z.string().trim().min(1).max(40), engineerRef.n
 
 const dayField = z.string().trim().max(40).nullish()
 
+/**
+ * 歸屬年度：存西元年（2000～2100）。也接受民國年——編號用民國年（例如 AE-115-005），
+ * 使用者常照著填 115；小於 1000 的整數一律視為民國年 +1911。原本這種值直接 400 invalid_body。
+ */
+const fiscalYearSchema = z.preprocess(
+  (v) => (typeof v === "number" && Number.isInteger(v) && v > 0 && v < 1000 ? v + 1911 : v),
+  z.number().int().min(2000).max(2100),
+)
+
 const applicationFields = {
   /**
    * 開案日期（A5）。事後補 K 單的案子不該用建立日／K 單當天當日期，
@@ -107,7 +116,7 @@ const createSchema = z.object({
    */
   code: z.string().trim().min(1).max(60).nullish(),
   /** 歸屬年度（分析維度）。省略時預設為編號的年度，即建立年。 */
-  fiscalYear: z.number().int().min(2000).max(2100).nullish(),
+  fiscalYear: fiscalYearSchema.nullish(),
   description: z.string().trim().max(4000).nullish(),
   deptId: z.string().uuid().nullish(),
   leadEmpId: z.string().uuid().nullish(),
@@ -130,7 +139,7 @@ const updateSchema = z
     // 發票與往來文件上。要調整歸屬請改 `fiscalYear`，那是分析維度。
     // 帶了 code 會回 409，不是靜默忽略——靜默忽略會讓人以為改成功了。
     code: z.string().trim().min(1).max(60).nullable().optional(),
-    fiscalYear: z.number().int().min(2000).max(2100).nullable().optional(),
+    fiscalYear: fiscalYearSchema.nullable().optional(),
     description: z.string().trim().max(4000).nullable().optional(),
     // 案情（模組四第 2 條）。改狀態一律要 statusReason，否則 400。
     status: z.enum(PROJECT_STATUSES).optional(),
