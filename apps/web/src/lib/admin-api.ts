@@ -795,7 +795,6 @@ export function getLeaveTypes() {
 }
 
 export function createLeaveType(body: {
-  code: string;
   name: string;
   paid?: boolean;
   special?: boolean;
@@ -2068,7 +2067,8 @@ export function getExpenseCategories() {
 }
 
 export function upsertExpenseCategory(body: {
-  code: string;
+  id?: string;
+  code?: string;
   name: string;
   nature?: "reimbursement" | "allowance";
   requiresReceipt?: boolean;

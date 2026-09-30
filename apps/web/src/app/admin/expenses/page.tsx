@@ -427,7 +427,7 @@ function CategoryManager({
   categories: ExpenseCategory[];
   onChanged: () => void;
 }) {
-  const [code, setCode] = useState("");
+  const [categoryId, setCategoryId] = useState("");
   const [name, setName] = useState("");
   const [nature, setNature] = useState<"reimbursement" | "allowance">("reimbursement");
   const [requiresReceipt, setRequiresReceipt] = useState(true);
@@ -436,6 +436,25 @@ function CategoryManager({
   const [cap, setCap] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  function selectCategory(id: string) {
+    setCategoryId(id);
+    const selected = categories.find((category) => category.id === id);
+    if (!selected) {
+      setName("");
+      setNature("reimbursement");
+      setRequiresReceipt(true);
+      setCrossCheck(false);
+      setRequiresTrip(false);
+      setCap("");
+      return;
+    }
+    setName(selected.name);
+    setNature(selected.nature);
+    setRequiresReceipt(selected.requires_receipt);
+    setCrossCheck(selected.cross_check_attendance);
+    setRequiresTrip(selected.requires_trip_approval);
+    setCap(selected.monthly_cap ?? "");
+  }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -443,7 +462,7 @@ function CategoryManager({
     setError(null);
     try {
       await upsertExpenseCategory({
-        code: code.trim(),
+        ...(categoryId ? { id: categoryId } : {}),
         name: name.trim(),
         nature,
         requiresReceipt,
@@ -451,8 +470,11 @@ function CategoryManager({
         requiresTripApproval: requiresTrip,
         monthlyCap: cap.trim() ? Number(cap) : undefined,
       });
-      setCode("");
+      setCategoryId("");
       setName("");
+      setNature("reimbursement");
+      setRequiresReceipt(true);
+      setCrossCheck(false);
       setCap("");
       setRequiresTrip(false);
       onChanged();
@@ -474,7 +496,6 @@ function CategoryManager({
           <table className="w-full min-w-[640px] text-sm">
             <thead>
               <tr className="border-b border-gray-200 text-left text-xs text-gray-500">
-                <th className="py-2">代碼</th>
                 <th className="py-2">名稱</th>
                 <th className="py-2">稅務性質</th>
                 <th className="py-2">憑證</th>
@@ -486,9 +507,6 @@ function CategoryManager({
             <tbody>
               {categories.map((c) => (
                 <tr key={c.id} className="border-b border-gray-100">
-                  <td className="py-2">
-                    <code className="text-xs">{c.code}</code>
-                  </td>
                   <td className="py-2">{c.name}</td>
                   <td className="py-2">
                     {c.nature === "allowance" ? (
@@ -525,17 +543,13 @@ function CategoryManager({
       <form onSubmit={onSubmit} className="space-y-4 border-t border-gray-200 pt-4">
         <div className="grid gap-4 md:grid-cols-2">
           <div>
-            <label className={labelCls} htmlFor="cat-code">
-              代碼
+            <label className={labelCls} htmlFor="cat-choice">
+              選擇既有類別
             </label>
-            <input
-              id="cat-code"
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              required
-              placeholder="night_taxi"
-              className={inputCls}
-            />
+            <select id="cat-choice" value={categoryId} onChange={(e) => selectCategory(e.target.value)} className={inputCls}>
+              <option value="">新增類別</option>
+              {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+            </select>
           </div>
           <div>
             <label className={labelCls} htmlFor="cat-name">

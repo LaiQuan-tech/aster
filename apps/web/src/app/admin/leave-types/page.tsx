@@ -84,7 +84,6 @@ export default function LeaveTypesPage() {
   const [error, setError] = useState<string | null>(null);
 
   // create leave type
-  const [code, setCode] = useState("");
   const [name, setName] = useState("");
   const [paid, setPaid] = useState(true);
   const [special, setSpecial] = useState(false);
@@ -156,21 +155,19 @@ export default function LeaveTypesPage() {
   async function onCreate(e: FormEvent) {
     e.preventDefault();
     setFormError(null);
-    if (!code.trim() || !name.trim()) {
-      setFormError("請輸入代碼與名稱");
+    if (!name.trim()) {
+      setFormError("請輸入名稱");
       return;
     }
     setSubmitting(true);
     try {
       await createLeaveType({
-        code: code.trim(),
         name: name.trim(),
         paid,
         special,
         deductRate: deductRate.trim() === "" ? null : Number(deductRate),
         requiresAttachment,
       });
-      setCode("");
       setName("");
       setPaid(true);
       setSpecial(false);
@@ -178,7 +175,7 @@ export default function LeaveTypesPage() {
       setRequiresAttachment(false);
       await load();
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : "新增失敗（代碼可能重複）");
+      setFormError(err instanceof Error ? err.message : "新增失敗");
     } finally {
       setSubmitting(false);
     }
@@ -270,11 +267,7 @@ export default function LeaveTypesPage() {
       <Card>
         <h2 className="mb-4 text-sm font-medium text-gray-500">新增假別</h2>
         <form onSubmit={onCreate} className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
-            <div>
-              <label className={labelCls}>代碼</label>
-              <input className={inputCls} value={code} onChange={(e) => setCode(e.target.value)} placeholder="annual" />
-            </div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div>
               <label className={labelCls}>名稱</label>
               <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="特休" />

@@ -8,6 +8,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
 import { isFinanceRole } from "../middleware/scope.js"
 import { writeAuditLog } from "../services/audit.js"
+import { catalogCode } from "../services/catalog-code.js"
 
 export const expensesRouter = Router()
 
@@ -20,7 +21,9 @@ const dateRe = /^\d{4}-\d{2}-\d{2}$/
 const periodRe = /^\d{4}-\d{2}$/
 
 const categorySchema = z.object({
-  code: z.string().trim().min(1).max(40),
+  id: z.string().uuid().optional(),
+  /** Legacy clients may still provide code; new admin forms only send a label. */
+  code: z.string().trim().min(1).max(40).optional(),
   name: z.string().trim().min(1).max(100),
   nature: z.enum(NATURES).optional(),
   requiresReceipt: z.boolean().optional(),
@@ -147,7 +150,7 @@ expensesRouter.get(
 )
 
 /**
- * PUT /expense-categories — HR 建立或更新一個類別（以 code 為鍵）。
+ * PUT /expense-categories — HR 建立或更新一個類別；新選項的內部鍵由系統產生。
  *
  * `nature` 是本模組最關鍵的欄位：'reimbursement' 實報實銷（非所得、
  * 不計投保薪資、不進 gross）vs 'allowance' 定額補貼（屬薪資所得、
@@ -170,14 +173,19 @@ expensesRouter.put(
       const self = await resolveSelf(tenantId, req.auth?.userId)
       const { data: before } = await supabaseAdmin
         .from("expense_categories")
-        .select("id, nature")
+        .select("id, nature, code")
         .eq("tenant_id", tenantId)
-        .eq("code", parsed.data.code)
+        .match(parsed.data.id ? { id: parsed.data.id } : { code: parsed.data.code ?? catalogCode(parsed.data.name) })
         .maybeSingle()
+
+      if (parsed.data.id && !before) {
+        res.status(404).json({ error: "not_found" })
+        return
+      }
 
       const row: Record<string, unknown> = {
         tenant_id: tenantId,
-        code: parsed.data.code,
+        code: before?.code ?? parsed.data.code ?? catalogCode(parsed.data.name),
         name: parsed.data.name,
       }
       if (parsed.data.nature !== undefined) row.nature = parsed.data.nature
@@ -189,11 +197,10 @@ expensesRouter.put(
       if (parsed.data.monthlyCap !== undefined) row.monthly_cap = parsed.data.monthlyCap
       if (parsed.data.active !== undefined) row.active = parsed.data.active
 
-      const { data, error } = await supabaseAdmin
-        .from("expense_categories")
-        .upsert(row, { onConflict: "tenant_id,code" })
-        .select("id, code, nature")
-        .single()
+      const write = before
+        ? supabaseAdmin.from("expense_categories").update(row).eq("tenant_id", tenantId).eq("id", before.id)
+        : supabaseAdmin.from("expense_categories").upsert(row, { onConflict: "tenant_id,code" })
+      const { data, error } = await write.select("id, code, nature").single()
       if (error || !data) {
         next(new Error(`PUT /expense-categories: ${error?.message}`))
         return

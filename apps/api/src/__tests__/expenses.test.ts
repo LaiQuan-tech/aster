@@ -66,6 +66,21 @@ afterAll(async () => {
 }, 60_000)
 
 describe("M3-1 類別目錄 — nature 決定課稅與投保歸屬", () => {
+  it("HR can create a category from its display name without entering an internal code", async () => {
+    const label = `自訂交通 ${stamp}`
+    const res = await request(app)
+      .put("/expense-categories")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ name: label })
+    expect(res.status).toBe(200)
+    expect(res.body.category.code).toMatch(/^option_[a-f0-9]{12}$/)
+
+    const listed = await request(app)
+      .get("/expense-categories")
+      .set("Authorization", `Bearer ${adminToken}`)
+    expect(listed.body.categories.some((category: { name: string }) => category.name === label)).toBe(true)
+  })
+
   it("HR 建立實報實銷類別（夜間計程車，要憑證、與出勤交叉檢核）", async () => {
     const res = await request(app)
       .put("/expense-categories")

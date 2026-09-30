@@ -153,6 +153,21 @@ afterAll(async () => {
 let annualTypeId: string
 
 describe("F4 leave_types — HR manages the catalogue", () => {
+  it("HR can maintain a leave option by its label without entering an internal code", async () => {
+    const created = await request(app)
+      .post("/leave-types")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ name: "補休自訂假別", paid: true })
+
+    expect(created.status).toBe(201)
+    const list = await request(app)
+      .get("/leave-types")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+    const option = (list.body.leaveTypes as Array<{ id: string; code: string; name: string }>).find((type) => type.id === created.body.id)
+    expect(option?.name).toBe("補休自訂假別")
+    expect(option?.code).toMatch(/^option_[a-f0-9]{12}$/)
+  })
+
   it("HR POST /leave-types creates 'annual'; GET lists it", async () => {
     const res = await request(app)
       .post("/leave-types")

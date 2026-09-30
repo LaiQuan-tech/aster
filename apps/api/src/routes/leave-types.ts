@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { catalogCode } from "../services/catalog-code.js"
 
 export const leaveTypesRouter = Router()
 
@@ -12,7 +13,8 @@ export const leaveTypesRouter = Router()
 const deductRateSchema = z.number().min(0).max(1).nullable()
 
 const createSchema = z.object({
-  code: z.string().trim().min(1, "code is required"),
+  /** Kept optional for older API clients; new admin UI lets the server create it. */
+  code: z.string().trim().min(1).optional(),
   name: z.string().trim().min(1, "name is required"),
   paid: z.boolean().optional(),
   special: z.boolean().optional(),
@@ -108,7 +110,7 @@ leaveTypesRouter.post(
         .from("leave_types")
         .insert({
           tenant_id: tenantId,
-          code: parsed.data.code,
+          code: parsed.data.code ?? catalogCode(parsed.data.name),
           name: parsed.data.name,
           paid: parsed.data.paid ?? true,
           special: parsed.data.special ?? false,

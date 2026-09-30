@@ -854,8 +854,8 @@ export default function ModuleSettingsPage() {
       setError("年資對照表至少要有一列（年資滿幾個月 → 給幾天）");
       return;
     }
-    if (!annualForm.typeCode.trim()) {
-      setError("請指定特休對應的假別代碼");
+    if (!leaveTypes?.some((type) => type.code === annualForm.typeCode)) {
+      setError("請從清單選擇有效的特休假別");
       return;
     }
     try {
@@ -1263,22 +1263,21 @@ export default function ModuleSettingsPage() {
                   </div>
                   <div>
                     <label className={labelCls}>對應假別</label>
-                    {leaveTypes && leaveTypes.length > 0 ? (
-                      <select className={inputCls} value={annualForm.typeCode} onChange={(e) => patchAnnual({ typeCode: e.target.value })}>
-                        {/* 目前值若不在清單裡（假別被改過代碼）也要看得到，否則會靜默跳成第一個 */}
-                        {!leaveTypes.some((t) => t.code === annualForm.typeCode) && (
-                          <option value={annualForm.typeCode}>{annualForm.typeCode}（清單中查無此代碼）</option>
-                        )}
-                        {leaveTypes.map((t) => (
-                          <option key={t.id} value={t.code}>
-                            {t.name}（{t.code}）
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input className={inputCls} value={annualForm.typeCode} onChange={(e) => patchAnnual({ typeCode: e.target.value })} placeholder="annual" />
+                    <select
+                      className={inputCls}
+                      value={leaveTypes?.some((t) => t.code === annualForm.typeCode) ? annualForm.typeCode : ""}
+                      onChange={(e) => patchAnnual({ typeCode: e.target.value })}
+                      disabled={!leaveTypes?.length}
+                    >
+                      <option value="">{leaveTypes?.length ? "請選擇假別" : "請先新增假別"}</option>
+                      {leaveTypes?.map((t) => (
+                        <option key={t.id} value={t.code}>{t.name}</option>
+                      ))}
+                    </select>
+                    {leaveTypes && annualForm.typeCode && !leaveTypes.some((t) => t.code === annualForm.typeCode) && (
+                      <p className="mt-1 text-xs text-amber-700">原設定的假別已不存在，請重新選擇有效假別。</p>
                     )}
-                    <p className="mt-1 text-xs text-gray-400">發放時要寫進哪一個假別的餘額桶（leave_types.code）</p>
+                    <p className="mt-1 text-xs text-gray-400">發放時會計入所選假別的餘額</p>
                   </div>
                 </div>
 
