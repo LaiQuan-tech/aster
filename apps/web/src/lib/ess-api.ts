@@ -265,6 +265,9 @@ export function getPunchRecords(from?: string, to?: string) {
   const params = new URLSearchParams();
   if (from) params.set("from", from);
   if (to) params.set("to", to);
+  // 修 bug：員工端一律只看自己。API 的 isHr 分支過去只在帶 employeeId 時才過濾，
+  // 導致 hr_admin/platform_admin 在這支員工自己的打卡紀錄頁反而看到全公司資料。
+  params.set("mine", "1");
   const qs = params.toString();
   return apiFetch<{ records: PunchHistoryRecord[] }>(`/punch${qs ? `?${qs}` : ""}`);
 }

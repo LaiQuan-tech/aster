@@ -1051,6 +1051,10 @@ export function getPunchRecordsAdmin(filters?: {
   if (filters?.source) params.set("source", filters.source);
   if (filters?.from) params.set("from", filters.from);
   if (filters?.to) params.set("to", filters.to);
+  // 打卡紀錄要最新的排最上面：伺服器端排序（Supabase 單次最多回 1000 列，若在前端排序，
+  // 區間一大最新的資料反而會被截掉），員工端 /ess/punches 靠升冪建每日列不能動，所以由
+  // 後台這支呼叫固定帶 desc。
+  params.set("order", "desc");
   const qs = params.toString();
   return apiFetch<{ records: PunchRecord[] }>(`/punch${qs ? `?${qs}` : ""}`);
 }

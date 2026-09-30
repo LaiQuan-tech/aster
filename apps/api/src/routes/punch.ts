@@ -38,6 +38,11 @@ const querySchema = z.object({
   source: z.enum(["gps", "web", "line", "manual"]).optional(),
   from: z.string().regex(dateRe).optional(),
   to: z.string().regex(dateRe).optional(),
+  // punch_at 排序；預設 asc（員工端 /ess/punches 靠升冪建每日列，不可改預設）。
+  order: z.enum(["asc", "desc"]).optional(),
+  // 帶了就不論角色一律鎖回呼叫者自己（忽略 employeeId/deptId）。給 ESS 打卡紀錄頁用，
+  // 修 hr_admin/platform_admin 在員工端反而看到全公司資料的 bug。
+  mine: z.enum(["1", "true"]).optional(),
 })
 
 const SELECT_COLS = "id, tenant_id, employee_id, punch_at, type, source, lat, lng, device_id"
@@ -263,13 +268,23 @@ punchRouter.get(
 )
 
 /**
- * GET /punch?employeeId=&from=&to= — list punch records.
+ * GET /punch?employeeId=&from=&to=&mine=&order= — list punch records.
  *
  * Role-based scoping (on top of the always-on tenant filter):
- *   • HR admin / platform admin → may see the whole tenant; honours an optional
- *     employeeId filter and from/to (YYYY-MM-DD) date window.
+ *   • `mine=1`/`mine=true` → forced to the CALLER's own employee row regardless
+ *     of role, ignoring employeeId/deptId. Used by the ESS 打卡紀錄 page so an
+ *     hr_admin/platform_admin looking at their OWN history doesn't fall through
+ *     to the HR branch below and see the whole tenant's punches.
+ *   • HR admin / platform admin (no `mine`) → may see the whole tenant; honours
+ *     an optional employeeId filter and from/to (YYYY-MM-DD) date window.
  *   • Any other role → forced to their OWN employee row regardless of the
  *     employeeId param (passing someone else's id reveals nothing).
+ *
+ * `order` (default "asc", or "desc") sorts by punch_at server-side — Supabase
+ * caps a single query at 1000 rows, so sorting client-side after the fact could
+ * silently drop the newest rows once from/to spans a large range. The admin
+ * 打卡紀錄 page always requests desc; ESS's daily-list building relies on the
+ * asc default and must not change it.
  *
  * Uses supabaseAdmin (bypasses RLS); the explicit filters are the load-bearing
  * guard. from/to are inclusive calendar days on the tenant's clock (`to` is
@@ -292,7 +307,7 @@ punchRouter.get(
       res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
       return
     }
-    const { employeeId, deptId, type, source, from, to } = parsed.data
+    const { employeeId, deptId, type, source, from, to, order, mine } = parsed.data
 
     try {
       const self = await resolveSelf(tenantId, userId)
@@ -300,7 +315,12 @@ punchRouter.get(
 
       let query = supabaseAdmin.from("punch_records").select(SELECT_COLS).eq("tenant_id", tenantId)
 
-      if (isHr) {
+      if (mine) {
+        // Caller explicitly asked for "my own" — pin to self no matter the role,
+        // and ignore employeeId/deptId entirely (an HR admin's own history page
+        // must never fall through to the whole-tenant branch below).
+        query = query.eq("employee_id", self?.id ?? "00000000-0000-0000-0000-000000000000")
+      } else if (isHr) {
         if (employeeId) query = query.eq("employee_id", employeeId)
         if (deptId) {
           const { data: deptEmployees, error: deptErr } = await supabaseAdmin
@@ -329,7 +349,7 @@ punchRouter.get(
         if (to) query = query.lt("punch_at", dayWindowUtc(to, tz).endIso)
       }
 
-      const { data, error } = await query.order("punch_at", { ascending: true })
+      const { data, error } = await query.order("punch_at", { ascending: order !== "desc" })
       if (error) {
         next(new Error(`GET /punch: ${error.message}`))
         return

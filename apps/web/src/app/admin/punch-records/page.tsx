@@ -34,14 +34,12 @@ const TYPE_LABEL: Record<PunchRecord["type"], string> = {
   outing_out: "外出結束",
 };
 
+// 2026-09-30：業主要求補登只留上班/下班，休息/外出四種移除（舊資料仍可能有這些
+// type，顯示照樣吃 TYPE_LABEL；只是這裡的篩選 pill 與補登表單不再讓人選）。
 const TYPE_GROUPS: { label: string; value: "" | PunchRecord["type"] }[] = [
   { label: "全部", value: "" },
   { label: "上班", value: "in" },
   { label: "下班", value: "out" },
-  { label: "休息開始", value: "break_in" },
-  { label: "休息結束", value: "break_out" },
-  { label: "外出開始", value: "outing_in" },
-  { label: "外出結束", value: "outing_out" },
 ];
 
 function csvCell(value: string | number | null | undefined): string {
@@ -201,10 +199,6 @@ export default function PunchRecordsPage() {
               <select className={inputCls} value={mType} onChange={(e) => setMType(e.target.value as PunchRecord["type"])}>
                 <option value="in">上班</option>
                 <option value="out">下班</option>
-                <option value="break_in">休息開始</option>
-                <option value="break_out">休息結束</option>
-                <option value="outing_in">外出開始</option>
-                <option value="outing_out">外出結束</option>
               </select>
             </div>
             <div className="flex items-end">

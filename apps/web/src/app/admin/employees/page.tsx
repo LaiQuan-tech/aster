@@ -259,6 +259,14 @@ function profileInitial(profile: ProfileAggregate | null) {
   return values;
 }
 
+/**
+ * 員工列表表頭釘選共用 class。底線改用 th 自己的 inset 陰影（不是 tr 的 border-b）：
+ * Tailwind v4 preflight 把 table 設成 border-collapse:collapse，collapse 後 tr 的邊框
+ * 畫在表格「原位」，th 變 sticky 浮動捲動後底線就留在原地不會跟著走；兩者都留在窄螢幕
+ * 未捲動時會疊成 2px。z-10 蓋過 tbody 內容，bg-white 對齊 Card 本身的白底。
+ */
+const STICKY_TH = "sticky top-0 z-10 bg-white shadow-[inset_0_-1px_0_var(--color-gray-200)]";
+
 export default function EmployeesPage() {
   const toast = useToast();
   // 登入者的 auth user id：拿來算 isSelf 給 employeeActionsFor（目前沒有「不能停用自己」的規則，只是傳真值）。
@@ -938,16 +946,16 @@ export default function EmployeesPage() {
         ) : rows.length === 0 ? (
           <Empty>尚無員工</Empty>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="max-h-[calc(100dvh-12rem)] overflow-auto">
             <table className="w-full text-left text-sm">
               <thead>
-                <tr className="border-b border-gray-200 text-xs text-gray-500">
-                  <th className="py-2 pr-4">員工</th>
-                  <th className="hidden py-2 pr-4 sm:table-cell">Email</th>
-                  <th className="py-2 pr-4">單位/身分</th>
-                  <th className="py-2 pr-4">到離職</th>
-                  <th className="py-2 pr-4">角色/狀態</th>
-                  <th className="py-2 text-right">操作</th>
+                <tr className="text-xs text-gray-500">
+                  <th className={`${STICKY_TH} py-2 pr-4`}>員工</th>
+                  <th className={`${STICKY_TH} hidden py-2 pr-4 sm:table-cell`}>Email</th>
+                  <th className={`${STICKY_TH} py-2 pr-4`}>單位/身分</th>
+                  <th className={`${STICKY_TH} py-2 pr-4`}>到離職</th>
+                  <th className={`${STICKY_TH} py-2 pr-4`}>角色/狀態</th>
+                  <th className={`${STICKY_TH} py-2 text-right`}>操作</th>
                 </tr>
               </thead>
               <tbody>
