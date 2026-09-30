@@ -202,7 +202,8 @@ function PendingChangesBanner({ refreshKey }: { refreshKey: unknown }) {
 
   useEffect(() => {
     let active = true;
-    listProfileChangeRequests("pending")
+    // scope=mine：HR 帳號在員工端也只看自己的待審異動（不列出別人的電話地址）。
+    listProfileChangeRequests("pending", { scope: "mine" })
       .then((r) => {
         if (active) setRows(r.requests);
       })

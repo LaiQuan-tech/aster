@@ -29,7 +29,8 @@ export default function KpiPage() {
 
   const load = useCallback(async () => {
     try {
-      const [t, r] = await Promise.all([listKpiTemplates(), listKpiReviews()]);
+      // scope=mine：HR 帳號在員工端也只拿自己的考核（不回全公司分數）；下方仍照原樣再分兩塊。
+      const [t, r] = await Promise.all([listKpiTemplates(), listKpiReviews({ scope: "mine" })]);
       setTemplates(t.templates);
       setReviews(r.reviews);
     } catch (err) {

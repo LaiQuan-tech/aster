@@ -42,6 +42,9 @@ const runSchema = z.object({
 const listQuerySchema = z.object({
   employeeId: z.string().uuid().optional(),
   period: z.string().regex(periodRe).optional(),
+  // scope=mine：任何角色（含 HR）都只回自己的薪資單——ESS「我的薪資單」用。
+  // 沒帶就是舊行為（HR 全租戶含草稿、可帶 employeeId；後台靠這個）。
+  scope: z.enum(["mine"]).optional(),
 })
 
 const BASE_SELECT_COLS =
@@ -295,9 +298,11 @@ payrollRouter.post(
 )
 
 /**
- * GET /payslips?employeeId=&period= — list payslips.
+ * GET /payslips?employeeId=&period=&scope= — list payslips.
  *
  * Role-based scoping on top of the always-on tenant filter:
+ *   • ?scope=mine → any role, only the caller's OWN payslips（走下面「其他角色」
+ *     同一條路徑、忽略 employeeId；HR 帳號在員工前台不再看到全公司的薪資單）。
  *   • HR admin / platform admin → whole tenant; honours an optional employeeId.
  *   • Any other role → forced to their OWN employee row regardless of the
  *     employeeId param (passing someone else's id reveals nothing).
@@ -322,7 +327,7 @@ payrollRouter.get(
       res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
       return
     }
-    const { employeeId, period } = parsed.data
+    const { employeeId, period, scope } = parsed.data
 
     try {
       const self = await resolveSelf(tenantId, userId)
@@ -330,11 +335,11 @@ payrollRouter.get(
 
       let query = supabaseAdmin.from("payslips").select(await payslipSelectCols()).eq("tenant_id", tenantId)
 
-      if (isHr) {
+      if (isHr && scope !== "mine") {
         if (employeeId) query = query.eq("employee_id", employeeId)
       } else {
-        // Non-HR: always pinned to self. No employee row → impossible filter →
-        // empty result (never another user's data).
+        // Non-HR (or scope=mine): always pinned to self. No employee row →
+        // impossible filter → empty result (never another user's data).
         query = query.eq("employee_id", self?.id ?? "00000000-0000-0000-0000-000000000000")
       }
 

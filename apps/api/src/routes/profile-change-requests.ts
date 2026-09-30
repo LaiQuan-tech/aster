@@ -13,6 +13,7 @@ import { columnLabel, type ProfileChanges } from "../services/profile-fields.js"
  * 員工自改資料的審核（W6；表 `employee_profile_change_requests`）。
  *
  *   GET  /profile-change-requests?status=        HR 看全部；一般員工只看自己的
+ *                                     &scope=mine 任何角色（含 HR）都只看自己的（ESS 橫幅用）
  *   POST /profile-change-requests/:id/approve    HR：把 diff 套回 employee_profiles
  *   POST /profile-change-requests/:id/reject     HR：留退回理由
  *
@@ -115,8 +116,10 @@ profileChangeRequestsRouter.get(
         const status = (STATUSES as readonly string[]).includes(statusParam) ? statusParam : "pending"
         query = query.eq("status", status)
       }
-      // 一般員工只看得到自己的（ESS 的「待審中」橫幅）。
-      if (!isHrRole(self.role)) query = query.eq("employee_id", self.id)
+      // 一般員工只看得到自己的（ESS 的「待審中」橫幅）。scope=mine：HR 在員工端也一樣
+      // 只看自己的（沒帶就是舊行為，HR 看全部；後台靠這個）。
+      const scopeMine = req.query.scope === "mine"
+      if (!isHrRole(self.role) || scopeMine) query = query.eq("employee_id", self.id)
 
       const { data, error } = await query
       if (error) {

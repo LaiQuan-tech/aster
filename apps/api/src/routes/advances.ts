@@ -71,7 +71,11 @@ function isFinance(role?: string): boolean {
   return isFinanceRole(role)
 }
 
-/** GET /advances?status=&employeeId= — 非 HR 一律鎖定本人。 */
+/**
+ * GET /advances?status=&employeeId=&scope= — 非財務角色一律鎖定本人。
+ * `scope=mine`（ESS「我的預支」用）：任何角色（含 HR／會計）都走「鎖定本人」那條路徑、
+ * 忽略 employeeId；沒帶就是舊行為（財務角色全租戶、可帶 employeeId；後台靠這個）。
+ */
 advancesRouter.get(
   "/advances",
   requireAuth,
@@ -82,10 +86,12 @@ advancesRouter.get(
       const self = await resolveSelf(tenantId, req.auth?.userId)
       let query = supabaseAdmin.from("advances").select(ADV_COLS).eq("tenant_id", tenantId)
 
-      if (isFinance(self?.role)) {
+      const scopeMine = req.query.scope === "mine"
+      if (isFinance(self?.role) && !scopeMine) {
         const employeeId = typeof req.query.employeeId === "string" ? req.query.employeeId : null
         if (employeeId) query = query.eq("employee_id", employeeId)
       } else {
+        // 非財務角色（或 scope=mine）：無論傳什麼 employeeId 都鎖定本人。
         query = query.eq("employee_id", self?.id ?? "00000000-0000-0000-0000-000000000000")
       }
       const status = typeof req.query.status === "string" ? req.query.status : null

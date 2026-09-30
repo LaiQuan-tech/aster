@@ -287,8 +287,12 @@ export interface LeaveBalance {
   note?: string | null;
 }
 
+/**
+ * 我的假別額度（ESS 專用；後台用 admin-api 的 getLeaveBalancesAdmin）。一律帶 `scope=mine`：
+ * HR／會計帳號在員工端也只拿自己的桶——請假表單的「剩餘時數」才不會拿到別人的額度。
+ */
 export function getLeaveBalances() {
-  return apiFetch<{ balances: LeaveBalance[] }>("/leave-balances");
+  return apiFetch<{ balances: LeaveBalance[] }>("/leave-balances?scope=mine");
 }
 
 export interface ScheduleRow {
@@ -298,12 +302,18 @@ export interface ScheduleRow {
   status: string;
 }
 
-export function getMySchedules(from?: string, to?: string) {
+/**
+ * GET /schedules（ESS 專用）。預設帶 `scope=mine`：HR 帳號在員工端也只拿自己的班表
+ * （「確認／異議」按鈕才不會動到別人的班）。只有 HR「代同仁申請」算請假時數時傳
+ * `employeeId`：改送 employeeId、不送 scope（API 對非 HR 一律忽略 employeeId、只回本人）。
+ */
+export function getMySchedules(from?: string, to?: string, opts: { employeeId?: string } = {}) {
   const params = new URLSearchParams();
   if (from) params.set("from", from);
   if (to) params.set("to", to);
-  const qs = params.toString();
-  return apiFetch<{ schedules: ScheduleRow[] }>(`/schedules${qs ? `?${qs}` : ""}`);
+  if (opts.employeeId) params.set("employeeId", opts.employeeId);
+  else params.set("scope", "mine");
+  return apiFetch<{ schedules: ScheduleRow[] }>(`/schedules?${params.toString()}`);
 }
 
 export interface Shift {
@@ -835,8 +845,9 @@ export interface MyPayslip {
   sent_to?: string | null;
 }
 
+/** 我的薪資單（ESS 專用）。一律帶 `scope=mine`：HR 帳號在員工端不再拿到全公司的薪資單。 */
 export function getMyPayslips() {
-  return apiFetch<{ payslips: MyPayslip[] }>("/payslips");
+  return apiFetch<{ payslips: MyPayslip[] }>("/payslips?scope=mine");
 }
 
 export interface InternalJob {
@@ -903,10 +914,12 @@ export function getMyExpenseCategories() {
   return apiFetch<{ categories: MyExpenseCategory[] }>("/expense-categories");
 }
 
+/** 我的報銷（ESS 專用）。一律帶 `scope=mine`：HR／會計在員工端也只看自己的單（「撤回」才不會動到別人的）。 */
 export function getMyExpenses(period?: string) {
-  return apiFetch<{ claims: MyExpenseClaim[] }>(
-    `/expenses${period ? `?period=${period}` : ""}`,
-  );
+  const params = new URLSearchParams();
+  if (period) params.set("period", period);
+  params.set("scope", "mine");
+  return apiFetch<{ claims: MyExpenseClaim[] }>(`/expenses?${params.toString()}`);
 }
 
 export function fileExpense(body: {
@@ -986,9 +999,12 @@ export function getMyApprovedTrips() {
   );
 }
 
-/** 我的預支（出差＋零用金）：看得到「核准了但還沒撥款」與「撥了還沒核銷」。 */
+/**
+ * 我的預支（出差＋零用金）：看得到「核准了但還沒撥款」與「撥了還沒核銷」。
+ * 一律帶 `scope=mine`：HR／會計在員工端也只看自己的預支。
+ */
 export function getMyAdvances() {
-  return apiFetch<{ advances: MyAdvance[] }>("/advances");
+  return apiFetch<{ advances: MyAdvance[] }>("/advances?scope=mine");
 }
 
 /**

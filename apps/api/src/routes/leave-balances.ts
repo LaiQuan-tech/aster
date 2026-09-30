@@ -21,6 +21,9 @@ const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/
 const listQuerySchema = z.object({
   employeeId: z.string().uuid().optional(),
   year: z.coerce.number().int().optional(),
+  // scope=mine：任何角色（含 HR／會計）都只回自己的額度——ESS「我的假別額度」與請假表單
+  // 「剩餘時數」用。沒帶就是舊行為（HR 全租戶、可帶 employeeId；後台靠這個）。
+  scope: z.enum(["mine"]).optional(),
 })
 
 /**
@@ -73,6 +76,8 @@ function isHrRole(role: string | undefined): boolean {
  * GET /leave-balances?employeeId=&year= — list leave-balance rows.
  *
  * Role-based scoping on top of the always-on tenant filter:
+ *   • ?scope=mine → any role, only the caller's OWN rows（走下面「其他角色」同一條
+ *     路徑、忽略 employeeId；HR 帳號在員工前台也只看自己，不再看到全公司）。
  *   • HR admin / platform admin → the whole tenant; honours an optional
  *     employeeId.
  *   • Any other role → forced to their OWN employee row regardless of any
@@ -102,7 +107,7 @@ leaveBalancesRouter.get(
       res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
       return
     }
-    const { employeeId, year } = parsed.data
+    const { employeeId, year, scope } = parsed.data
 
     try {
       const self = await resolveSelf(tenantId, userId)
@@ -114,11 +119,11 @@ leaveBalancesRouter.get(
         .select(hasPeriod ? PERIOD_COLS : BASE_COLS)
         .eq("tenant_id", tenantId)
 
-      if (isHr) {
+      if (isHr && scope !== "mine") {
         if (employeeId) query = query.eq("employee_id", employeeId)
       } else {
-        // Non-HR: always pinned to self. No employee row → impossible filter →
-        // empty result (never another user's data).
+        // Non-HR (or scope=mine): always pinned to self. No employee row →
+        // impossible filter → empty result (never another user's data).
         query = query.eq("employee_id", self?.id ?? NIL_UUID)
       }
 

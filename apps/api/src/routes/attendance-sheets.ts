@@ -34,8 +34,9 @@ export const attendanceSheetsRouter = Router()
  * 出勤月表（亞斯特 P1）— 月結流程的 HTTP 面。
  *
  *   POST  /attendance-sheets/generate            HR：結算＋產生／重算整月月表
- *   GET   /attendance-sheets?period=&status=&deptId=&anomaly=1
+ *   GET   /attendance-sheets?period=&status=&deptId=&anomaly=1&scope=mine
  *                                                HR 全部；主管：所管部門的員工（＋自己）；員工：自己
+ *                                                （scope=mine：任何角色都走主管／員工範圍、忽略 deptId）
  *   GET   /attendance-sheets/:id                 同上範圍；`money` 只給 HR
  *   GET   /my/attendance-sheet?period=           本人；不存在且 period ≤ 當月 → 即時產生
  *   PATCH /attendance-sheets/:id/days/:date      本人（draft/returned）；HR（locked 前；approved 只能改註記）
@@ -69,6 +70,9 @@ const listQuerySchema = z.object({
   status: z.enum(STATUSES).optional(),
   deptId: z.string().uuid().optional(),
   anomaly: z.enum(["1", "0", "true", "false"]).optional(),
+  // scope=mine：不論角色（含 HR／會計）都當成非財務角色——只列本人＋所管部門的員工，
+  // 並忽略 deptId；ESS「待我審核」用。沒帶就是舊行為（財務角色全租戶；後台靠這個）。
+  scope: z.enum(["mine"]).optional(),
 })
 
 const myQuerySchema = z.object({
@@ -234,12 +238,13 @@ attendanceSheetsRouter.get(
     try {
       const caller = await requireCaller(req, res)
       if (!caller) return
-      const { period, status, deptId, anomaly } = parsed.data
-      const employeeIds = caller.isHr ? undefined : await visibleEmployeeIds(tenantId, caller.self)
+      const { period, status, deptId, anomaly, scope } = parsed.data
+      const mine = scope === "mine"
+      const employeeIds = caller.isHr && !mine ? undefined : await visibleEmployeeIds(tenantId, caller.self)
       const sheets = await listSheets(tenantId, {
         period,
         status: status as SheetStatus | undefined,
-        deptId,
+        deptId: mine ? undefined : deptId,
         anomaly: anomaly === "1" || anomaly === "true",
         employeeIds,
       })

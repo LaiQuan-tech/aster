@@ -65,7 +65,8 @@ export default function AttendanceSheetPage() {
 
   useEffect(() => {
     let active = true;
-    listAttendanceSheets({ period, status: "submitted" })
+    // scope=mine：HR／會計在員工端也只列本人＋所管部門的月表（不再列全公司、誤核到別人的）。
+    listAttendanceSheets({ period, status: "submitted", scope: "mine" })
       .then((res) => {
         if (active) setPending(res.sheets);
       })

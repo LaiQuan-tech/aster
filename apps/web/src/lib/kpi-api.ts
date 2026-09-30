@@ -60,10 +60,15 @@ export function deleteKpiTemplate(id: string) {
   return apiFetch<{ id: string }>(`/kpi-templates/${id}`, { method: "DELETE" })
 }
 
-export function listKpiReviews(params: { period?: string; status?: KpiReviewStatus } = {}) {
+/**
+ * `scope: "mine"`（ESS「我的考核」用）：不論角色都只回「指派給我評的（任何狀態）」與
+ * 「我自己已定案的」考核，HR 帳號在員工端不再拿到全公司的分數；後台不帶（HR 看全租戶）。
+ */
+export function listKpiReviews(params: { period?: string; status?: KpiReviewStatus; scope?: "mine" } = {}) {
   const qs = new URLSearchParams()
   if (params.period) qs.set("period", params.period)
   if (params.status) qs.set("status", params.status)
+  if (params.scope) qs.set("scope", params.scope)
   const q = qs.toString()
   return apiFetch<{ reviews: KpiReview[] }>(`/kpi-reviews${q ? `?${q}` : ""}`)
 }

@@ -84,7 +84,10 @@ export function LeaveForm({
   }, [leaveTypes, leaveTypeId]);
 
   const effectiveEnd = mode === "range" ? endDate : startDate;
-  const calendar = useLeaveCalendar(startDate, effectiveEnd, shifts, proxy.value || employeeId);
+  const isProxy = proxy.enabled && proxy.expanded;
+  // 班表只抓申請人的：本人 → scope=mine；代同仁申請且已選人 → 該同仁（見 use-leave-calendar）。
+  const proxyEmployeeId = isProxy && proxy.value ? proxy.value : null;
+  const calendar = useLeaveCalendar(startDate, effectiveEnd, shifts, employeeId, proxyEmployeeId);
 
   // 自訂時段的預設值＝當天班別的起訖（使用者沒改過才跟著班別走）。
   const startShift = calendar.shiftByDate[startDate] ?? defaultShift;
@@ -108,7 +111,6 @@ export function LeaveForm({
 
   const selectedType = leaveTypes?.find((lt) => lt.id === leaveTypeId) ?? null;
   const requiresAttachment = selectedType?.requiresAttachment === true;
-  const isProxy = proxy.enabled && proxy.expanded;
   // 餘額桶依到職週年切期間，所以要用「申請起日」去找桶，跨週年期的單才算得對。
   const remaining = leaveTypeId && !isProxy ? remainingHours(balances, leaveTypeId, startDate) : null;
   const overBalance = remaining != null && !result.error && result.totalHours > remaining;

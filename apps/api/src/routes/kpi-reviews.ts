@@ -33,6 +33,9 @@ const scoreSchema = z.object({
 const listQuery = z.object({
   period: z.string().trim().min(1).optional(),
   status: z.enum(["draft", "submitted", "finalized"]).optional(),
+  // scope=mine：任何角色（含 HR）都走下面「考核者／受評者」的過濾——ESS「我的考核」用。
+  // 沒帶就是舊行為（HR 全租戶；後台靠這個）。
+  scope: z.enum(["mine"]).optional(),
 })
 
 /** Resolve the caller's own employee row (id + role) in this tenant, or null. */
@@ -167,9 +170,11 @@ kpiReviewsRouter.post(
 )
 
 /**
- * GET /kpi-reviews?period=&status= — list reviews visible to the caller.
+ * GET /kpi-reviews?period=&status=&scope= — list reviews visible to the caller.
  *
  * Role-based scoping on top of the always-on tenant filter:
+ *   • ?scope=mine → any role gets the appraiser/reviewee filtering below（HR 帳號
+ *     在員工前台不再拿到全公司的分數）。
  *   • HR admin / platform admin → the whole tenant.
  *   • The appraiser → reviews assigned to them (reviewer_emp_id = me), any status.
  *   • The reviewee → their own reviews but ONLY once finalized
@@ -193,7 +198,7 @@ kpiReviewsRouter.get(
       res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
       return
     }
-    const { period, status } = parsed.data
+    const { period, status, scope } = parsed.data
 
     try {
       const self = await resolveSelf(tenantId, userId)
@@ -209,7 +214,7 @@ kpiReviewsRouter.get(
       }
 
       let rows = data ?? []
-      if (!isHr) {
+      if (!isHr || scope === "mine") {
         const selfId = self?.id
         rows = rows.filter((r) => {
           if (!selfId) return false

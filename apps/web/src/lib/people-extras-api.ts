@@ -182,10 +182,17 @@ export interface ProfileChangeRequest {
   fields: ProfileChangeField[];
 }
 
-/** HR 拿全部；一般員工只拿到自己的（後端依角色過濾，ESS 橫幅用同一支）。 */
-export function listProfileChangeRequests(status: ProfileChangeStatus | "all" = "pending") {
+/**
+ * HR 拿全部；一般員工只拿到自己的（後端依角色過濾）。ESS 橫幅帶 `{ scope: "mine" }`：
+ * 不論角色都只回自己的待審異動（HR 帳號在員工端不再看到別人的電話地址）；後台不帶。
+ */
+export function listProfileChangeRequests(
+  status: ProfileChangeStatus | "all" = "pending",
+  opts: { scope?: "mine" } = {},
+) {
+  const scope = opts.scope ? `&scope=${opts.scope}` : "";
   return apiFetch<{ requests: ProfileChangeRequest[] }>(
-    `/profile-change-requests?status=${status}`,
+    `/profile-change-requests?status=${status}${scope}`,
   );
 }
 

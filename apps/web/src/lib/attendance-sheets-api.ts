@@ -284,13 +284,24 @@ export const SHEET_STATUS_LABEL: Record<SheetStatus, string> = {
 // ---------------------------------------------------------------------------
 
 export function listAttendanceSheets(
-  params: { period?: string; status?: string; deptId?: string; anomaly?: boolean } = {},
+  params: {
+    period?: string;
+    status?: string;
+    deptId?: string;
+    anomaly?: boolean;
+    /**
+     * "mine"：不論角色（含 HR／會計）都只列本人＋所管部門員工的月表、忽略 deptId——
+     * ESS「待我審核」用；後台不帶（財務角色看全租戶）。
+     */
+    scope?: "mine";
+  } = {},
 ) {
   const qs = new URLSearchParams();
   if (params.period) qs.set("period", params.period);
   if (params.status) qs.set("status", params.status);
   if (params.deptId) qs.set("deptId", params.deptId);
   if (params.anomaly) qs.set("anomaly", "1");
+  if (params.scope) qs.set("scope", params.scope);
   const suffix = qs.toString();
   return apiFetch<{ sheets: SheetListItem[] }>(`/attendance-sheets${suffix ? `?${suffix}` : ""}`);
 }

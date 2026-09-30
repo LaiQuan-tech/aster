@@ -351,7 +351,11 @@ expensesRouter.post(
   },
 )
 
-/** GET /expenses?period=&employeeId=&status= — 非 HR 一律鎖定本人。 */
+/**
+ * GET /expenses?period=&employeeId=&status=&scope= — 非財務角色一律鎖定本人。
+ * `scope=mine`（ESS「我的報銷」用）：任何角色（含 HR／會計）都走「鎖定本人」那條路徑、
+ * 忽略 employeeId；沒帶就是舊行為（財務角色全租戶、可帶 employeeId；後台靠這個）。
+ */
 expensesRouter.get(
   "/expenses",
   requireAuth,
@@ -363,6 +367,7 @@ expensesRouter.get(
         period: z.string().regex(periodRe).optional(),
         employeeId: z.string().uuid().optional(),
         status: z.string().trim().optional(),
+        scope: z.enum(["mine"]).optional(),
       })
       .safeParse(req.query)
     if (!q.success) {
@@ -373,10 +378,10 @@ expensesRouter.get(
       const self = await resolveSelf(tenantId, req.auth?.userId)
       let query = supabaseAdmin.from("expense_claims").select(CLAIM_COLS).eq("tenant_id", tenantId)
 
-      if (isFinance(self?.role)) {
+      if (isFinance(self?.role) && q.data.scope !== "mine") {
         if (q.data.employeeId) query = query.eq("employee_id", q.data.employeeId)
       } else {
-        // 非 HR：無論傳什麼 employeeId 都鎖定本人。
+        // 非 HR（或 scope=mine）：無論傳什麼 employeeId 都鎖定本人。
         query = query.eq("employee_id", self?.id ?? "00000000-0000-0000-0000-000000000000")
       }
       if (q.data.period) query = query.eq("period", q.data.period)

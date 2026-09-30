@@ -30,6 +30,9 @@ const querySchema = z.object({
   employeeId: z.string().uuid().optional(),
   from: z.string().regex(dateRe).optional(),
   to: z.string().regex(dateRe).optional(),
+  // scope=mine：任何角色（含 HR）都只回自己的班表——ESS「我的班表」與請假表單用。
+  // 沒帶就是舊行為（HR 全租戶、可帶 employeeId；後台靠這個）。
+  scope: z.enum(["mine"]).optional(),
 })
 
 type Assignment = z.infer<typeof assignmentSchema>
@@ -274,9 +277,11 @@ schedulesRouter.post(
 )
 
 /**
- * GET /schedules?employeeId=&from=&to= — list schedules.
+ * GET /schedules?employeeId=&from=&to=&scope= — list schedules.
  *
  * Role-based scoping (in addition to the always-on tenant filter):
+ *   • ?scope=mine → any role, only the caller's OWN rows（走下面「其他角色」同一條
+ *     路徑、忽略 employeeId；HR 帳號在員工前台也只看自己的班表）。
  *   • HR admin / platform admin → may see the whole tenant; honours an optional
  *     employeeId filter.
  *   • Any other role → forced to their OWN employee row(s) regardless of the
@@ -302,7 +307,7 @@ schedulesRouter.get(
       res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
       return
     }
-    const { employeeId, from, to } = parsed.data
+    const { employeeId, from, to, scope } = parsed.data
 
     try {
       // Resolve the caller's own employee identity + role in this tenant.
@@ -324,12 +329,12 @@ schedulesRouter.get(
         .select("id, tenant_id, employee_id, work_date, shift_id, status, created_at")
         .eq("tenant_id", tenantId)
 
-      if (isHr) {
+      if (isHr && scope !== "mine") {
         // HR may optionally narrow to one employee.
         if (employeeId) query = query.eq("employee_id", employeeId)
       } else {
-        // Non-HR: always pinned to self. If they have no employee row, they get
-        // an impossible filter → empty result (never another user's data).
+        // Non-HR (or scope=mine): always pinned to self. If they have no employee
+        // row, they get an impossible filter → empty result (never another user's data).
         query = query.eq("employee_id", me?.id ?? "00000000-0000-0000-0000-000000000000")
       }
 
