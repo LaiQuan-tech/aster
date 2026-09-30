@@ -1290,6 +1290,7 @@ interface EmployeeInfo {
   id: string
   name: string
   empNo: string | null
+  hireDate: string | null
   deptId: string | null
   deptName: string | null
   title: string | null
@@ -1300,14 +1301,14 @@ async function loadEmployeeInfo(tenantId: string, employeeIds: string[]): Promis
   if (employeeIds.length === 0) return map
   const { data, error } = await supabaseAdmin
     .from("employees")
-    .select("id, name, emp_no, dept_id")
+    .select("id, name, emp_no, hire_date, dept_id")
     .eq("tenant_id", tenantId)
     .in("id", employeeIds)
   if (error) throw new Error(`attendance-sheets (employees): ${error.message}`)
   const deptIds = new Set<string>()
-  for (const e of (data ?? []) as Array<{ id: string; name: string; emp_no: string | null; dept_id: string | null }>) {
+  for (const e of (data ?? []) as Array<{ id: string; name: string; emp_no: string | null; hire_date: string | null; dept_id: string | null }>) {
     if (e.dept_id) deptIds.add(e.dept_id)
-    map.set(e.id, { id: e.id, name: e.name, empNo: e.emp_no ?? null, deptId: e.dept_id ?? null, deptName: null, title: null })
+    map.set(e.id, { id: e.id, name: e.name, empNo: e.emp_no ?? null, hireDate: e.hire_date ?? null, deptId: e.dept_id ?? null, deptName: null, title: null })
   }
   if (deptIds.size > 0) {
     const { data: depts, error: dErr } = await supabaseAdmin
@@ -1653,6 +1654,7 @@ async function composeLiveView(
     employeeId: sheet.employee_id,
     employeeName: emp?.name ?? "",
     employeeNo: emp?.empNo ?? null,
+    hireDate: emp?.hireDate ?? null,
     department: emp?.deptName ?? null,
     title: emp?.title ?? null,
     period: sheet.period,
@@ -1694,6 +1696,7 @@ export async function sheetViewFromRow(
       employeeId: sheet.employee_id,
       employeeName: snap.employeeName,
       employeeNo: snap.employeeNo ?? null,
+      hireDate: snap.hireDate ?? null,
       department: snap.department ?? null,
       title: snap.title ?? null,
       period: sheet.period,

@@ -31,9 +31,9 @@ const ITEMS = [
     empNo: "A001",
     roleInProject: "manager",
     shareMode: "pool_pct",
-    sharePct: 30,
+    sharePct: 1,
     shareAmount: null,
-    bonusRatePct: 5,
+    bonusRatePct: 0.5,
     bonusPool: 50_000,
     contractTotal: 1_000_000,
     previousReceived: 400_000,
@@ -45,7 +45,7 @@ const ITEMS = [
     entitledCumulative: 9_000,
     paidBefore: 6_000,
     amount: 3_000,
-    unallocatedPct: 0.1,
+    unallocatedPct: 1,
     projectNote: "機電設計服務費",
     overpaid: false,
     overpaidBy: 0,
@@ -61,9 +61,9 @@ const ITEMS = [
     empNo: "A002",
     roleInProject: "lead",
     shareMode: "pool_pct",
-    sharePct: 60,
+    sharePct: 98,
     shareAmount: null,
-    bonusRatePct: 5,
+    bonusRatePct: 0.5,
     bonusPool: 50_000,
     contractTotal: 1_000_000,
     previousReceived: 400_000,
@@ -75,7 +75,7 @@ const ITEMS = [
     entitledCumulative: 18_000,
     paidBefore: 12_000,
     amount: 6_000,
-    unallocatedPct: 0.1,
+    unallocatedPct: 1,
     projectNote: "機電設計服務費",
     overpaid: false,
     overpaidBy: 0,
@@ -106,12 +106,12 @@ describe("bonus run xlsx", () => {
     expect(row.getCell(6).value).toBe(400_000)
     expect(row.getCell(8).value).toBe(200_000)
     expect(row.getCell(10).value).toBe(0.6)
-    expect(row.getCell(11).value).toBe(0.05)
+    expect(row.getCell(11).value).toBe(0.005)
     expect(row.getCell(12).value).toBe(50_000)
     expect(row.getCell(13).value).toBe(9_000)
     expect([row.getCell(14).value, row.getCell(16).value]).toEqual(["子葶", "amber"])
-    expect([row.getCell(15).value, row.getCell(17).value]).toEqual([0.3, 0.6])
-    expect(row.getCell(26).value).toBeCloseTo(0.1)
+    expect([row.getCell(15).value, row.getCell(17).value]).toEqual([0.01, 0.98])
+    expect(row.getCell(26).value).toBeCloseTo(0.01)
     expect(row.getCell(27).value).toBe("機電設計服務費")
     expect(ws.getRow(4).getCell(13).value).toBe(9_000)
   })

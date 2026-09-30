@@ -150,6 +150,8 @@ export interface SheetView {
   employeeId: string
   employeeName: string
   employeeNo: string | null
+  /** Employee master hire date; optional for backward-compatible frozen snapshots. */
+  hireDate?: string | null
   department: string | null
   title: string | null
   period: string

@@ -74,6 +74,7 @@ export function ItemsTable({ items, label = "" }: { items: BonusRunPreview["item
               <td className={`border border-black px-2 py-1.5 text-right ${unallocatedPct > 0 ? "font-semibold text-red-600" : ""}`}>{unallocatedPct}%</td>
               <td className="border border-black px-2 py-1.5">
                 {overpaid > 0 ? <span className="font-medium text-red-600">超發 {fmtMoney(overpaid)}</span> : (it.projectNote ?? "—")}
+                {register.overflowMembers.length > 0 && <div className="mt-1 text-amber-700">其他分配：{register.overflowMembers.map((member) => `${member.employeeName ?? member.employeeId} ${member.shareMode === "pool_pct" ? `${member.sharePct ?? 0}%` : fmtMoney(member.shareAmount)}`).join("、")}</div>}
               </td>
             </tr>
           )})}

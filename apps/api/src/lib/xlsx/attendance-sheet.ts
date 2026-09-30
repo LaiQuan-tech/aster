@@ -425,12 +425,12 @@ function writeMoneySection(
   ws.getCell("O5").font = { bold: true, size: 12 }
   ws.getCell("O5").alignment = { horizontal: "center" }
   const metadata = [
-    ["職稱", view.title ?? "—", "工號", view.employeeNo ?? "—", "月份", view.period],
-    ["姓名", view.employeeName, "部門", view.department ?? "—", "基準時薪", money.hourlyWage],
+    ["職稱", view.title ?? "—", "姓名", view.employeeName, "月份", view.period, "到職日", view.hireDate ?? "—"],
+    ["工號", view.employeeNo ?? "—", "部門", view.department ?? "—", "基準時薪", money.hourlyWage],
   ]
   metadata.forEach((values, rowIndex) => {
     const rowNumber = 6 + rowIndex
-    const columns = [15, 16, 18, 19, 21, 22]
+    const columns = rowIndex === 0 ? [15, 16, 17, 18, 19, 20, 21, 22] : [15, 16, 18, 19, 21, 22]
     values.forEach((value, index) => {
       const cell = ws.getRow(rowNumber).getCell(columns[index])
       cell.value = value

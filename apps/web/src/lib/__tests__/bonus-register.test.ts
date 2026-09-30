@@ -22,4 +22,13 @@ describe("bonus register rows", () => {
     expect(rows[0].team).toHaveLength(4);
     expect(rows[0].support).toBeNull();
   });
+
+  it("keeps members beyond the six reference slots visible as overflow", () => {
+    const items = Array.from({ length: 6 }, (_, index) => ({
+      ...base, employeeId: `e${index}`, employeeName: `組員${index + 1}`, roleInProject: "member", sharePct: 10, amount: 100,
+    }));
+    const [row] = buildBonusRegisterRows(items);
+    expect(row.team.filter(Boolean)).toHaveLength(4);
+    expect(row.overflowMembers.map((item) => item.employeeName)).toEqual(["組員5", "組員6"]);
+  });
 });

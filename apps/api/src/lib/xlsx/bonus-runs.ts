@@ -21,19 +21,21 @@ type ExportItem = SerializedItem & {
 
 const WIDTHS = [6, 9, 15, 25, 13, 13, 9, 13, 9, 9, 9, 13, 13, 10, 9, 10, 9, 10, 9, 10, 9, 10, 9, 10, 9, 11, 24]
 
-function pct(value: number | null | undefined): number | null {
-  if (value === null || value === undefined) return null
-  return Math.abs(value) > 1 ? value / 100 : value
-}
-
 function money(cell: ExcelJS.Cell, value: number | null | undefined): void {
   cell.value = value === null || value === undefined ? null : Math.round(value)
   cell.numFmt = MONEY_FMT
   cell.alignment = { horizontal: "right", vertical: "middle" }
 }
 
-function percentage(cell: ExcelJS.Cell, value: number | null | undefined): void {
-  cell.value = pct(value)
+function fractionPercentage(cell: ExcelJS.Cell, value: number | null | undefined): void {
+  cell.value = value ?? null
+  cell.numFmt = PCT_FMT
+  cell.alignment = { horizontal: "right", vertical: "middle" }
+}
+
+/** bonusRatePct/sharePct/unallocatedPct are stored as percentage points (1 = 1%). */
+function pointPercentage(cell: ExcelJS.Cell, value: number | null | undefined): void {
+  cell.value = value === null || value === undefined ? null : value / 100
   cell.numFmt = PCT_FMT
   cell.alignment = { horizontal: "right", vertical: "middle" }
 }
@@ -111,6 +113,8 @@ export async function buildBonusRunWorkbook(run: SerializedRun, items: Serialize
     const allocated = projectItems.reduce((sum, item) => sum + (item.shareMode === "pool_pct" ? (item.sharePct ?? 0) / 100 : 0), 0)
     const unallocated = first.unallocatedPct ?? Math.max(0, 1 - allocated)
     const slots = memberSlots(projectItems)
+    const visibleIds = new Set(slots.flatMap((member) => member ? [member.employeeId] : []))
+    const overflowMembers = projectItems.filter((member) => !visibleIds.has(member.employeeId))
     const row = ws.getRow(rowNo)
 
     row.getCell(1).value = index + 1
@@ -119,22 +123,26 @@ export async function buildBonusRunWorkbook(run: SerializedRun, items: Serialize
     row.getCell(4).value = first.projectName ?? ""
     money(row.getCell(5), first.contractTotal)
     money(row.getCell(6), previousReceived)
-    percentage(row.getCell(7), previousPct)
+    fractionPercentage(row.getCell(7), previousPct)
     money(row.getCell(8), currentReceived)
-    percentage(row.getCell(9), currentPct)
-    percentage(row.getCell(10), first.receivedPct)
-    percentage(row.getCell(11), first.bonusRatePct)
+    fractionPercentage(row.getCell(9), currentPct)
+    fractionPercentage(row.getCell(10), first.receivedPct)
+    pointPercentage(row.getCell(11), first.bonusRatePct)
     money(row.getCell(12), first.bonusPool)
     money(row.getCell(13), projectItems.reduce((sum, item) => sum + item.amount, 0))
     slots.forEach((member, slotIndex) => {
       const nameCol = 14 + slotIndex * 2
       row.getCell(nameCol).value = member?.employeeName ?? ""
-      if (member?.shareMode === "pool_pct") percentage(row.getCell(nameCol + 1), member.sharePct)
+      if (member?.shareMode === "pool_pct") pointPercentage(row.getCell(nameCol + 1), member.sharePct)
       else money(row.getCell(nameCol + 1), member?.shareAmount)
     })
-    percentage(row.getCell(26), unallocated)
+    pointPercentage(row.getCell(26), unallocated)
     const overpaid = projectItems.filter((i) => i.overpaid).reduce((sum, i) => sum + i.overpaidBy, 0)
-    row.getCell(27).value = [first.projectNote, overpaid > 0 ? `超發 ${Math.round(overpaid).toLocaleString("zh-TW")}` : null].filter(Boolean).join("；")
+    row.getCell(27).value = [
+      first.projectNote,
+      overflowMembers.length > 0 ? `其他分配：${overflowMembers.map((member) => `${member.employeeName ?? member.employeeId} ${member.shareMode === "pool_pct" ? `${member.sharePct ?? 0}%` : Math.round(member.shareAmount ?? 0).toLocaleString("zh-TW")}`).join("、")}` : null,
+      overpaid > 0 ? `超發 ${Math.round(overpaid).toLocaleString("zh-TW")}` : null,
+    ].filter(Boolean).join("；")
     row.eachCell({ includeEmpty: true }, (cell) => {
       cell.font = { name: "新細明體", size: 10, color: Number(cell.col) === 26 && unallocated > 0 ? { argb: "FFFF0000" } : undefined }
       cell.border = BORDER
