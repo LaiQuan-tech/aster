@@ -1034,6 +1034,8 @@ export interface PunchRecord {
   lat: number | null;
   lng: number | null;
   device_id: string | null;
+  /** 2026-09-30：只在沒有 lat/lng 時才有值；有座標一律 null。舊資料（欄位新增前）也是 null。 */
+  geo_status: "denied" | "unavailable" | "timeout" | "unsupported" | null;
 }
 
 export function getPunchRecordsAdmin(filters?: {

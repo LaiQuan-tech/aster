@@ -360,6 +360,8 @@ export function postPunch(body: {
   source?: "gps" | "web";
   lat?: number;
   lng?: number;
+  /** 沒有 lat/lng 時，定位失敗的原因（見 apps/api/src/routes/punch.ts querySchema）。 */
+  geoStatus?: "denied" | "unavailable" | "timeout" | "unsupported";
 }) {
   return apiFetch<PunchResult>("/punch", {
     method: "POST",

@@ -26,6 +26,9 @@ const punchSchema = z.object({
   lat: z.number().optional(),
   lng: z.number().optional(),
   deviceId: z.string().trim().min(1).optional(),
+  // 2026-09-30：沒拿到座標時，前端帶來的定位失敗原因（見 punch_records.geo_status
+  // 的 CHECK，migrations/0051）。有 lat/lng 時就算帶了也會被忽略（見下方 insert）。
+  geoStatus: z.enum(["denied", "unavailable", "timeout", "unsupported"]).optional(),
   // NOTE: we deliberately do NOT read employeeId from the body. The punch is
   // always recorded for the token owner (anti-proxy-punch). Any employeeId a
   // client sends is ignored — kept lax here so a stray field doesn't 400.
@@ -45,7 +48,7 @@ const querySchema = z.object({
   mine: z.enum(["1", "true"]).optional(),
 })
 
-const SELECT_COLS = "id, tenant_id, employee_id, punch_at, type, source, lat, lng, device_id"
+const SELECT_COLS = "id, tenant_id, employee_id, punch_at, type, source, lat, lng, device_id, geo_status"
 
 // [start, end) UTC instants covering "today" on the TENANT's clock
 // (tenants.timezone, default Asia/Taipei) — used to scope today's punches and
@@ -117,7 +120,7 @@ punchRouter.post(
       res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
       return
     }
-    const { type, source, lat, lng, deviceId } = parsed.data
+    const { type, source, lat, lng, deviceId, geoStatus } = parsed.data
 
     try {
       const self = await resolveSelf(tenantId, userId)
@@ -194,6 +197,8 @@ punchRouter.post(
           lat: lat ?? null,
           lng: lng ?? null,
           device_id: deviceId ?? null,
+          // 有座標就不需要原因（一律 null，蓋掉任何亂帶的值）；沒座標才寫 geoStatus。
+          geo_status: lat != null && lng != null ? null : (geoStatus ?? null),
         })
         .select("*")
         .single()

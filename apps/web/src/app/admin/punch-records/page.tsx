@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { BatchImportButton } from "@/components/BatchImport";
 import { fmtHm, localDateKey } from "@/lib/ess-format";
+import { punchLocationReason } from "@/lib/punch-location-reason";
 import {
   getPunchRecordsAdmin,
   createManualPunch,
@@ -110,10 +111,11 @@ export default function PunchRecordsPage() {
     if (!employee) return id.slice(0, 8);
     return employee.emp_no ? `${employee.emp_no} / ${employee.name}` : employee.name;
   };
+  // 2026-09-30：沒座標時不能只顯示「—」，要看得出為什麼（業主追加需求 F）。
   const locationText = (record: PunchRecord) =>
     record.lat != null && record.lng != null
       ? `${record.lat.toFixed(5)}, ${record.lng.toFixed(5)}`
-      : "—";
+      : `—（${punchLocationReason(record)}）`;
 
   const sourceSummary = useMemo(() => {
     const totals = new Map<string, number>();

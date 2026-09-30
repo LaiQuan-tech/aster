@@ -38,6 +38,20 @@ interface GeoFix {
   at: number;
 }
 
+/**
+ * 定位失敗原因；沒拿到座標時隨打卡送給後端記錄（punch_records.geo_status，
+ * migrations/0051），後台打卡紀錄的「地點」欄靠這個顯示「—（原因）」
+ * （lib/punch-location-reason.ts）而不是只顯示一個「—」。
+ */
+type GeoStatus = "denied" | "unavailable" | "timeout" | "unsupported";
+
+/** GeolocationPositionError.code → GeoStatus：1 拒絕權限｜3 逾時｜其餘（含 2）歸「裝置拿不到位置」。 */
+function geoErrorStatus(err: GeolocationPositionError): GeoStatus {
+  if (err.code === err.PERMISSION_DENIED) return "denied";
+  if (err.code === err.TIMEOUT) return "timeout";
+  return "unavailable";
+}
+
 /** 按下打卡時，ref 裡 ≤2 分鐘的定位直接用，不再等。 */
 const FIX_FRESH_MS = 2 * 60_000;
 /** 沒有新鮮定位時，按下後最多再等這麼久；逾時就以 web 來源送出。 */
@@ -53,26 +67,32 @@ const ON_PUNCH_OPTS: PositionOptions = { maximumAge: FIX_FRESH_MS, timeout: PUNC
  * `hardTimeoutMs`：瀏覽器的 `timeout` 在使用者還沒回答權限提示前不會起算，
  * 按下打卡時另外用自己的計時器保證最多只等這麼久；預抓不設。
  * `onFix`：任何一次成功定位（包含逾時後才到的）都會呼叫，讓晚到的結果仍能存進 ref 供下次用。
+ * `onFail`：拿不到定位時回報一次原因（2026-09-30 起打卡要把原因存進
+ * punch_records.geo_status）；純粹是多一個 side-channel，「絕不 reject」的契約不變，
+ * resolve 值仍然只有 fix 或 null。
  */
 function requestFix(
   opts: PositionOptions,
   hardTimeoutMs?: number,
   onFix?: (fix: GeoFix) => void,
+  onFail?: (status: GeoStatus) => void,
 ): Promise<GeoFix | null> {
   return new Promise((resolve) => {
     if (typeof navigator === "undefined" || !navigator.geolocation) {
+      onFail?.("unsupported");
       resolve(null);
       return;
     }
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const finish = (fix: GeoFix | null) => {
+    const finish = (fix: GeoFix | null, status?: GeoStatus) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (!fix) onFail?.(status ?? "unavailable");
       resolve(fix);
     };
-    if (hardTimeoutMs && hardTimeoutMs > 0) timer = setTimeout(() => finish(null), hardTimeoutMs);
+    if (hardTimeoutMs && hardTimeoutMs > 0) timer = setTimeout(() => finish(null, "timeout"), hardTimeoutMs);
     try {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
@@ -84,11 +104,11 @@ function requestFix(
           onFix?.(fix);
           finish(fix);
         },
-        () => finish(null),
+        (err) => finish(null, geoErrorStatus(err)),
         opts,
       );
     } catch {
-      finish(null);
+      finish(null, "unavailable");
     }
   });
 }
@@ -268,6 +288,8 @@ export default function EssHome() {
   const [hintCount, setHintCount] = useState(0);
 
   const fixRef = useRef<GeoFix | null>(null);
+  /** 最近一次定位失敗的原因；預抓或按下打卡任一次失敗都會覆蓋，送出打卡時撈最新值。 */
+  const geoStatusRef = useRef<GeoStatus | null>(null);
   const lockTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeRef = useRef(true);
 
@@ -295,10 +317,17 @@ export default function EssHome() {
 
   useEffect(() => {
     activeRef.current = true;
-    // GPS 預抓：結果（含晚到的）直接進 ref，按下時就不用等。
-    void requestFix(PREFETCH_OPTS, undefined, (fix) => {
-      fixRef.current = fix;
-    });
+    // GPS 預抓：結果（含晚到的）直接進 ref，按下時就不用等；失敗原因也記下來。
+    void requestFix(
+      PREFETCH_OPTS,
+      undefined,
+      (fix) => {
+        fixRef.current = fix;
+      },
+      (status) => {
+        geoStatusRef.current = status;
+      },
+    );
     (async () => {
       await loadPunch();
       // 公告是加分項：在打卡狀態之後才抓，失敗不影響首頁。
@@ -337,12 +366,22 @@ export default function EssHome() {
       const fix =
         cached && Date.now() - cached.at <= FIX_FRESH_MS
           ? cached
-          : await requestFix(ON_PUNCH_OPTS, PUNCH_FIX_WAIT_MS, (late) => {
-              fixRef.current = late;
-            });
+          : await requestFix(
+              ON_PUNCH_OPTS,
+              PUNCH_FIX_WAIT_MS,
+              (late) => {
+                fixRef.current = late;
+              },
+              (status) => {
+                geoStatusRef.current = status;
+              },
+            );
 
+      // 沒拿到座標才帶 geoStatus；沒有新結果（這次也失敗）就用最近一次記下的原因。
       const res = await postPunch(
-        fix ? { type, source: "gps", lat: fix.lat, lng: fix.lng } : { type, source: "web" },
+        fix
+          ? { type, source: "gps", lat: fix.lat, lng: fix.lng }
+          : { type, source: "web", geoStatus: geoStatusRef.current ?? undefined },
       );
       if (!activeRef.current) return;
 
