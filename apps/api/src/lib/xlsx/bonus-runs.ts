@@ -136,7 +136,7 @@ export async function buildBonusRunWorkbook(run: SerializedRun, items: Serialize
     const overpaid = projectItems.filter((i) => i.overpaid).reduce((sum, i) => sum + i.overpaidBy, 0)
     row.getCell(27).value = [first.projectNote, overpaid > 0 ? `超發 ${Math.round(overpaid).toLocaleString("zh-TW")}` : null].filter(Boolean).join("；")
     row.eachCell({ includeEmpty: true }, (cell) => {
-      cell.font = { name: "新細明體", size: 10, color: cell.col === 26 && unallocated > 0 ? { argb: "FFFF0000" } : undefined }
+      cell.font = { name: "新細明體", size: 10, color: Number(cell.col) === 26 && unallocated > 0 ? { argb: "FFFF0000" } : undefined }
       cell.border = BORDER
     })
     rowNo += 1
