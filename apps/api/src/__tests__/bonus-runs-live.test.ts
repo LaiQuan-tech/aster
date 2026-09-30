@@ -329,7 +329,7 @@ describe.skipIf(!migrated)("獎金季發放批次 — live", () => {
     expect((await asAdmin(request(app).get("/bonus-runs/summary?year=abc"))).status).toBe(400)
   })
 
-  it("export.xlsx：200、列數＝表頭 3＋items＋合計 1，合計格＝本季應發總額", async () => {
+  it("export.xlsx：200、比照 115 7-9 雙層表頭、一案一列、合計為本次獎金", async () => {
     const res = await asAdmin(request(app).get(`/bonus-runs/${q2Id}/export.xlsx`)).buffer(true).parse(binaryParser)
     expect(res.status).toBe(200)
     expect(res.headers["content-type"]).toContain("spreadsheetml")
@@ -338,8 +338,9 @@ describe.skipIf(!migrated)("獎金季發放批次 — live", () => {
     await wb.xlsx.load(new Uint8Array(res.body as Buffer) as unknown as ExcelJS.Buffer)
     const ws = wb.getWorksheet(Q2)
     expect(ws).toBeTruthy()
-    expect(ws!.rowCount).toBe(3 + 2 + 1)
-    expect(ws!.getRow(3).getCell(13).value).toBe("本季應發")
+    expect(ws!.rowCount).toBe(2 + 1 + 1)
+    expect(ws!.getRow(1).getCell(11).value).toBe("獎金比例")
+    expect(ws!.getRow(2).getCell(13).value).toBe("本次獎金")
     expect(ws!.getRow(ws!.rowCount).getCell(13).value).toBe(9_000)
     expect((await asAdmin(request(app).get(`/bonus-runs/00000000-0000-0000-0000-000000000000/export.xlsx`))).status).toBe(404)
   })
