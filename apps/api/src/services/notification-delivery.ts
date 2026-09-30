@@ -85,6 +85,29 @@ function alreadyDelivered(row: NotificationRow, channel: DeliveryChannel): boole
   return status === "sent" || status === "skipped"
 }
 
+/**
+ * 一列處理完（本輪送出／失敗／收件人關掉／先前已送）之後在佇列裡的最終狀態。
+ * 看的是合併後的 payload.delivery：任一通道 sent → 'sent'；否則有 failed → 'failed'；
+ * 其餘（全部 skipped，或這列根本沒有外部通道）→ 'skipped'。
+ *
+ * 2026-09-30 修：原本只有 channel='email'／'line' 的列會離開 pending，站內通知列
+ * （channel='inapp'）寄完 Email 仍停在 pending；掃描只取最舊 50 筆，結果每 5 分鐘
+ * 都卡在同一批已寄過的列（already_delivered），之後的新通知一封都沒寄出去。
+ * 站內顯示與未讀數看的是 payload.read，不看這個狀態欄，所以改狀態不影響員工端。
+ */
+export function queueStatusFor(
+  channels: readonly string[],
+  delivery: Record<string, unknown> | undefined,
+): "sent" | "failed" | "skipped" {
+  const states = channels.map((channel) => {
+    const entry = delivery?.[channel]
+    return entry && typeof entry === "object" ? (entry as Record<string, unknown>).status : undefined
+  })
+  if (states.some((status) => status === "sent")) return "sent"
+  if (states.some((status) => status === "failed")) return "failed"
+  return "skipped"
+}
+
 /** 依收件人偏好過濾通道：只有明示 false 的才拿掉。 */
 export function allowedChannels(
   channels: DeliveryChannel[],
@@ -207,18 +230,12 @@ async function updateDeliveryState(
   }
   const payload = { ...(row.payload ?? {}), delivery }
 
-  const isExternalRow = row.channel === "email" || row.channel === "line"
-  const patch: Record<string, unknown> = { payload }
-  if (isExternalRow) {
-    // 整列都被收件人關掉時不能標 'sent'（什麼都沒送出去），標 'skipped' 讓它
-    // 離開 pending 佇列；只要有一個通道送出去就照舊算 sent。
-    patch.status =
-      result.failed.length > 0
-        ? "failed"
-        : result.sent.length === 0 && optedOut.length > 0
-          ? "skipped"
-          : "sent"
-    patch.sent_at = now
+  // 不分 channel（email／line／inapp），處理過就離開 pending 佇列（見 queueStatusFor）。
+  // 整列都被收件人關掉時不能標 'sent'（什麼都沒送出去），會落在 'skipped'。
+  const patch: Record<string, unknown> = {
+    payload,
+    status: queueStatusFor(deliveryChannels(row), delivery),
+    sent_at: now,
   }
 
   const { error } = await supabaseAdmin
@@ -246,7 +263,14 @@ export async function deliverPendingNotifications(
   const { data, error } = await query
   if (error) throw new Error(`deliver pending notifications: ${error.message}`)
 
-  const rows = ((data ?? []) as NotificationRow[]).filter((row) => deliveryChannels(row).length > 0)
+  const scanned = (data ?? []) as NotificationRow[]
+  const rows = scanned.filter((row) => deliveryChannels(row).length > 0)
+  // 沒有任何外部通道的列也要離開 pending，否則會永遠佔住最舊那一批的名額。
+  for (const row of scanned) {
+    if (deliveryChannels(row).length === 0) {
+      await updateDeliveryState(row, { id: row.id, channels: [], sent: [], failed: [] })
+    }
+  }
   const { employees, profiles, prefs } = await resolveRecipients(rows)
   const results: DeliveryResult[] = []
 
@@ -258,7 +282,8 @@ export async function deliverPendingNotifications(
     const result: DeliveryResult = { id: row.id, channels, sent: [], failed: [] }
     if (channels.length === 0) {
       result.skipped = optedOut.length > 0 ? "opted_out" : "already_delivered"
-      if (optedOut.length > 0) await updateDeliveryState(row, result, optedOut)
+      // 先前已送過的列也要寫回狀態離開佇列（原本只寫 opted_out，already_delivered 會每輪重掃）。
+      await updateDeliveryState(row, result, optedOut)
       results.push(result)
       continue
     }
