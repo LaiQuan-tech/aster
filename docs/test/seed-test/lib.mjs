@@ -114,6 +114,8 @@ async function parseResponse(res) {
 // ---------------------------------------------------------------------------
 /**
  * 建立 seed 上下文。opts.apiUrl 可覆寫 API_URL。
+ * opts.requireTestPassword === false → 不要求 SEED_TEST_PASSWORD（lqtech-ess.mjs 只用 HR 與
+ * service role、不登入測試員工；安全閘與 HR 登入完全相同）。
  *
  * ctx 形狀（契約，各模組依此寫）：
  *   apiUrl, tenantId
@@ -144,7 +146,7 @@ export async function createContext(opts = {}) {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) die("缺少 .env 的 SUPABASE_URL／SUPABASE_ANON_KEY（只檢查存在，值不印出）")
   if (!SUPABASE_SERVICE_ROLE_KEY) die("缺少 .env 的 SUPABASE_SERVICE_ROLE_KEY（00-base 要用它把測試員工的 must_change_password 關掉）")
   if (!hrEmail || !hrPassword) die("缺少環境變數 SEED_HR_EMAIL／SEED_HR_PASSWORD（HR 帳密，不要寫進程式碼）")
-  if (!testPassword) die("缺少環境變數 SEED_TEST_PASSWORD（三位測試員工的登入密碼）")
+  if (!testPassword && opts.requireTestPassword !== false) die("缺少環境變數 SEED_TEST_PASSWORD（三位測試員工的登入密碼）")
 
   // ── 登入 ────────────────────────────────────────────────────────────
   async function loginAs(email, password) {

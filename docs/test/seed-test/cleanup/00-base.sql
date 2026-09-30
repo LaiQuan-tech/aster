@@ -65,6 +65,6 @@ UPDATE tenants
   )
   WHERE id = t AND features ? 'internalLinks';
 
--- 2'. auth 帳號：employees.user_id 對 auth.users 沒有 FK（schema/employees.ts 只是 uuid 欄位），
---     employees 列已刪，這裡直接清掉三個測試登入帳號。
-DELETE FROM auth.users WHERE email LIKE '%@test.aster.local';
+-- 2'. auth 帳號：不在 SQL 裡刪（2026-09-30 起改用 Supabase admin API 逐一刪，GoTrue 會一併清
+--     identities／sessions）。employees.user_id 對 auth.users 沒有 FK，employees 列先刪不會被擋；
+--     要刪的帳號清單由 build.mjs 乾跑版列出（被本交易刪掉的 employees 列的 user_id）。

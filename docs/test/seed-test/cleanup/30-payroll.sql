@@ -17,9 +17,9 @@
 --   2. expense_claims             settlement_id → expense_settlements、category_id →
 --                                 expense_categories、advance_id → advances、
 --                                 trip_request_id → leave_requests（皆 FK）
---   3. expense_settlements        只刪 period='2026-08' **且**該期已沒有非測試員工的單
---                                 （條件式 DELETE：月結批次是整期一張，若真實員工的單也在
---                                 這批裡就不能刪，刪了他們的 settlement_id 會懸空）
+--   3. expense_settlements        只刪 period='2026-08' 的【測試】月結，**且**沒有單掛在它上面、
+--                                 該期也沒有真實員工的單（條件式 DELETE：月結批次是整期一張，若真實
+--                                 員工的單也在這批裡就不能刪，刪了他們的 settlement_id 會懸空）
 --   4. expense_categories         code LIKE 'test\_%'；加 NOT EXISTS 保護：若業主用真實員工
 --                                 填了測試類別的單（不在 test_emp 內），保留類別不刪
 --   5. payslips                   employee_id = ANY(test_emp)（含 A 已 finalized 那張；
@@ -60,15 +60,17 @@ DELETE FROM expense_claim_attachments
 DELETE FROM expense_claims
   WHERE tenant_id = t AND employee_id = ANY(test_emp);
 
--- 3. 月結批次：只刪 2026-08，且該期已沒有非測試員工的單才刪（條件式）
+-- 3. 月結批次：只刪 2026-08 的【測試】月結，且沒有任何單還掛在它上面、該期也沒有真實員工的單才刪
+--    （條件式；萊乾資訊 2026-08 的測試報銷不掛月結、也不算真實員工——外層宣告的 lq）
 DELETE FROM expense_settlements s
   WHERE s.tenant_id = t
     AND s.period = '2026-08'
+    AND s.note LIKE '【測試】%'
     AND NOT EXISTS (
       SELECT 1 FROM expense_claims c
        WHERE c.tenant_id = t
-         AND c.period = '2026-08'
-         AND NOT (c.employee_id = ANY(test_emp))
+         AND (c.settlement_id = s.id
+              OR (c.period = '2026-08' AND NOT (c.employee_id = ANY(test_emp)) AND c.employee_id <> lq))
     );
 
 -- 4. 費用類別（code test_a／test_b／test_c；'\_' 逃脫底線萬用字元）；仍被別人的單引用就保留

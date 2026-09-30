@@ -1,0 +1,904 @@
+{
+  "tool": "docs/test/seed-test/lqtech-ess.mjs",
+  "ranAt": "2026-09-30T05:00:11.629Z",
+  "runStartedAt": "2026-09-30T05:00:05.191Z",
+  "apiUrl": "https://aster-hr-api.vercel.app",
+  "tenantId": "0507ad78-27f4-480e-b99f-a72db2aee50c",
+  "targetEmployeeId": "9b9ffd9d-f25d-4e26-9b36-d5f1afa9196d",
+  "targetName": "萊乾資訊",
+  "status": "ok",
+  "counts": {
+    "schedules": {
+      "created": 0,
+      "reused": 21
+    },
+    "leave_requests": {
+      "created": 3,
+      "reused": 19
+    },
+    "approval_steps": {
+      "created": 3,
+      "reused": 19
+    },
+    "punch_records": {
+      "created": 0,
+      "reused": 38
+    },
+    "comp_time_ledger": {
+      "created": 0,
+      "reused": 1
+    },
+    "advances": {
+      "created": 0,
+      "reused": 2
+    },
+    "leave_balances": {
+      "created": 1,
+      "reused": 3
+    },
+    "payslips": {
+      "created": 0,
+      "reused": 1
+    },
+    "expense_claims": {
+      "created": 0,
+      "reused": 4
+    },
+    "kpi_templates": {
+      "created": 0,
+      "reused": 1
+    },
+    "kpi_reviews": {
+      "created": 0,
+      "reused": 1
+    },
+    "projects": {
+      "created": 0,
+      "reused": 1
+    },
+    "project_members": {
+      "created": 0,
+      "reused": 1
+    },
+    "bonus_runs": {
+      "created": 0,
+      "reused": 1
+    },
+    "bonus_run_items": {
+      "created": 0,
+      "reused": 1
+    },
+    "employee_profiles": {
+      "created": 0,
+      "reused": 1
+    },
+    "employee_educations": {
+      "created": 0,
+      "reused": 1
+    },
+    "employee_certifications": {
+      "created": 0,
+      "reused": 1
+    },
+    "employee_work_history": {
+      "created": 0,
+      "reused": 1
+    },
+    "employee_job_history": {
+      "created": 0,
+      "reused": 1
+    },
+    "align:approval_steps": {
+      "updated": 0
+    },
+    "align:kpi_reviews": {
+      "updated": 0
+    },
+    "align:expense_claims": {
+      "updated": 0
+    },
+    "align:notifications": {
+      "updated": 0
+    },
+    "notifications": {
+      "created": 0,
+      "reused": 4
+    }
+  },
+  "restore": {
+    "employees": "萊乾資訊的 employees 列沒有被修改（密碼／角色／名字／狀態／部門／到職日都不碰）",
+    "employee_profiles": {
+      "originallyExisted": false,
+      "action": "cleanup 刪除本工具建的列＝還原成沒有列"
+    }
+  },
+  "derived": {
+    "sheetId": "ef2102b0-0626-4359-a7dc-1f74814fab40",
+    "sheetDays": 31,
+    "attendanceDayDates": [
+      "2026-08-03",
+      "2026-08-04",
+      "2026-08-05",
+      "2026-08-06",
+      "2026-08-07",
+      "2026-08-10",
+      "2026-08-11",
+      "2026-08-12",
+      "2026-08-13",
+      "2026-08-14",
+      "2026-08-17",
+      "2026-08-18",
+      "2026-08-19",
+      "2026-08-20",
+      "2026-08-21",
+      "2026-08-24",
+      "2026-08-25",
+      "2026-08-26",
+      "2026-08-27",
+      "2026-08-28",
+      "2026-08-31"
+    ]
+  },
+  "skipped": [
+    {
+      "page": "/ess（今日打卡）",
+      "feature": "今日值日卡",
+      "reason": "值日生是全租戶共用的今日資料，依規矩不建；今天沒有排值日 → 卡片不顯示"
+    },
+    {
+      "page": "/ess（今日打卡）",
+      "feature": "需簽收公告提示",
+      "reason": "公告全租戶可見，依規矩不新增；原本唯一需簽收的【測試】公告A 萊乾資訊也已讀過，且隨其他測試資料移除"
+    },
+    {
+      "page": "/ess（今日打卡）",
+      "feature": "今日打卡",
+      "reason": "業主今天正在實際打卡，依規矩不新增今天的打卡（今日卡顯示業主自己的真實打卡）"
+    },
+    {
+      "page": "/ess/approvals",
+      "feature": "待我簽核的放款單",
+      "reason": "放款單需要付款公司主體與建單人；第一版的【測試】放款E 依賴要移除的【測試】公司主體A／測試員工A，已交接給總清理檔刪除。用正式公司主體建測試放款單會混進真實放款清單，不做"
+    },
+    {
+      "page": "/ess/jobs",
+      "feature": "內部職缺",
+      "reason": "職缺全租戶可見，依規矩不新增；原本沿用的【測試】職缺A 隨其他測試資料移除"
+    },
+    {
+      "page": "/ess/company-info",
+      "feature": "公司資訊",
+      "reason": "公司資訊頁全租戶共用（固定兩個 slug），依規矩不新增；原本沿用的【測試】頁隨其他測試資料移除"
+    },
+    {
+      "page": "/ess/announcements",
+      "feature": "公告",
+      "reason": "公告全租戶可見，依規矩不發；原本沿用的【測試】公告A／B／C 隨其他測試資料移除"
+    }
+  ],
+  "handedOver": [
+    {
+      "table": "leave_requests",
+      "ids": [
+        "5ad44e6a-e650-5bb7-b895-93ebd1d2dfc1",
+        "46588c3c-8998-5a1d-9d2b-4d4b820e9b9e",
+        "14968fbc-532e-5be0-a00b-738c372cb1ca"
+      ],
+      "note": "第一版 B／C 送給萊乾資訊簽的單（第 1 張的第 1 關簽核者是要移除的測試員工A；改建新的 3 張 QB-*）"
+    },
+    {
+      "table": "approval_steps",
+      "ids": [
+        "3fddfe23-5c6b-5cdd-8f93-73e3a31c4959",
+        "8eb1169f-380d-5ab8-bc59-181f8fca3bdc",
+        "51af550e-a2e3-554f-a5a0-fb4b8ff8dc20",
+        "13434362-d42d-54c8-a7fa-bd309c1aad0e"
+      ],
+      "note": "上面 3 張單的簽核關卡"
+    },
+    {
+      "table": "disbursements",
+      "ids": [
+        "fd4c15f6-62e2-52be-8be8-8776803cb0ce"
+      ],
+      "note": "【測試】放款E（建單人【測試】測試員工A、付款主體【測試】公司主體A）"
+    },
+    {
+      "table": "disbursement_approval_steps",
+      "ids": [
+        "dc534e91-8511-5402-bd02-9a351f367785"
+      ],
+      "note": "放款E 的簽核關卡"
+    },
+    {
+      "table": "kpi_reviews",
+      "ids": [
+        "399e4043-23e0-5741-9696-31411b63a8f8"
+      ],
+      "note": "萊乾資訊評【測試】測試員工C 的考核"
+    },
+    {
+      "table": "project_members",
+      "ids": [
+        "f473d649-f09e-5054-a082-be9ecc3c8671"
+      ],
+      "note": "萊乾資訊在【測試】專案C 的成員列"
+    },
+    {
+      "table": "bonus_runs",
+      "ids": [
+        "15dd391f-d91c-5636-875e-f1d0d648eb01"
+      ],
+      "note": "掛在【測試】專案A 的已發放批次（paid 列不可改，改建新批次）"
+    },
+    {
+      "table": "bonus_run_items",
+      "ids": [
+        "d3088690-970a-5ced-b90d-98d7c3b4b16c"
+      ],
+      "note": "上面批次的明細"
+    },
+    {
+      "table": "notifications",
+      "ids": [
+        "a93d44ef-a691-59e1-9fec-557d6c2ae5f6",
+        "7e8560e6-623f-5ff2-bbac-e0fa9f7c128d",
+        "4efd989a-6808-511a-ba89-90740b32b58b",
+        "754c3639-c710-509e-8fe1-171437869afd"
+      ],
+      "note": "指向上面交接單據的通知"
+    }
+  ],
+  "colleague": {
+    "employeeId": "6d7ceda1-d5c8-411c-80d1-841b5ccbf96d",
+    "userId": "5082c7a0-2005-446d-9e03-cd6bb12782d4",
+    "departmentId": "66091721-b4e7-4c61-9033-05fe76e0e135",
+    "keptLeaveBalanceIds": [
+      "3241aaf3-f758-467f-bc6c-aad36f215e5d"
+    ],
+    "departmentManagerAtRun": {
+      "manager_emp_id": "8e315d25-066d-496a-b863-db9b8520b36c",
+      "manager_emp_ids": [
+        "8e315d25-066d-496a-b863-db9b8520b36c"
+      ],
+      "readAt": "2026-09-30T05:00:11.630Z"
+    },
+    "manifestRows": {
+      "leave_requests": [
+        "fe812890-9ebf-5972-a7b7-0956c3f93aab",
+        "16967ffd-d704-53cd-b8fa-698bd54bc256",
+        "26fc23c3-5e4e-538b-aa74-67d8544d05be"
+      ],
+      "approval_steps": [
+        "eb419ae7-588a-5e45-94c2-a433636c3ef9",
+        "3cf87001-9317-5834-87a8-a150f5838837",
+        "3238f487-59da-5373-8d5e-ff7db434b774"
+      ],
+      "leave_balances": [
+        "3c41c4c5-3553-59f3-a25e-8e4a678cd50e"
+      ]
+    },
+    "note": "T002【測試】測試員工B：員工列＋登入帳號、所在【測試】部門、原有特休餘額列由總清理檔保護（build.mjs 讀這一段）；B 其他 seed-test 資料照清。部門主管只記錄、本工具不改。"
+  },
+  "ids": {
+    "schedules": [
+      "ed1d3f69-d003-5e2a-9caa-597fbe83ce23",
+      "80c16420-aa45-5ae7-924d-4d4d25f82225",
+      "6a1a8583-0a1f-58ab-88dd-02bc72940e3d",
+      "844fef13-b27b-5391-99ee-db6facebfddc",
+      "830cab1a-82a1-5174-a244-34c71f1cd0dd",
+      "ded00324-94fb-513f-b0bc-055a97638350",
+      "5e8a9b13-485e-5331-97ea-e6adb74b2199",
+      "9d07b22e-729f-53b8-a91e-4884df6c91fd",
+      "db59b70a-33ac-556b-8d35-cc167615df1f",
+      "c07d34df-9c63-57e9-8e94-41660f88efc8",
+      "5f204c71-6984-57e5-88b5-82c6911d1fdf",
+      "c4921a8a-9e2d-52df-bd62-bca6a60d613f",
+      "ec84754c-94dd-556a-8f42-532558aec58e",
+      "1f154211-8587-5860-b63d-5f4a91eb9f2d",
+      "ddd9c602-2b7c-55c3-abe9-c433cfca878d",
+      "26d4b581-f407-5b3e-a5d8-f82f5aaaf14f",
+      "031838a0-94bd-5bea-9626-cbac0fb3c9b3",
+      "4146aea2-e9c3-5623-8097-f1975d0c99ba",
+      "c1e39026-9efe-5173-b7d1-0e49a7c51d2b",
+      "c4319de1-b041-50dc-ad54-0565f0d2e6c4",
+      "9d9c40a5-3a02-53bc-af6c-e658e628b56f"
+    ],
+    "punch_records": [
+      "b9bc27e0-62eb-5718-b8d2-b1b4e3fde044",
+      "b683b8d8-d100-54e5-ab3f-dc7225115611",
+      "4db7d0c8-be8d-5bdb-a722-7ea6ea2a96fc",
+      "b67a8de0-70ed-5f6d-9a49-7e1ae97caa30",
+      "55454070-0b69-55ca-baf5-9996b99aa090",
+      "3c19d6d3-09b1-572b-8cef-6098dcdd5d65",
+      "51fc8c73-cbec-5a53-83b9-7ec42fe9ef30",
+      "32a484c1-29d9-569c-8065-4b8c63f43a20",
+      "1553c253-ca80-5f6e-b6f5-d0a579484411",
+      "e148c5ee-e7a8-5318-8f0f-1a855002221d",
+      "ce17385b-c80c-5bbb-aa75-f42f946ba37f",
+      "e676d24d-4de9-54de-ae57-b2d9cb3d7ae6",
+      "6aa5505c-7bf9-5a3e-9b01-0603ef4a4f99",
+      "485f53dc-0c65-59a2-8d8c-fdd095c9ec9b",
+      "0260c213-4914-51b6-a584-3128405aef6b",
+      "6c5a7644-e8e7-5901-89b8-ae94bb22b18f",
+      "6690e3b4-9965-50fb-8ed9-b9cc1d718953",
+      "054643f9-8527-58dc-a775-752fc6fa14eb",
+      "8cf6b6c2-016b-5441-bf40-d033b8a77718",
+      "c8fe8237-2801-546e-899b-9ec7c4acf9bb",
+      "bae81980-57fa-530e-9d28-47516b3645f1",
+      "f1014174-89aa-5af1-80e9-e6f2e5677010",
+      "0134a98e-4f4c-55d5-9a54-8861bb4671f7",
+      "198fc7b1-a813-50c5-af38-23b08ce6f8b3",
+      "ee5a1e9b-95ba-5fb6-a05c-763812fd728d",
+      "3a4b89aa-6283-5d81-a61e-760fc4f219da",
+      "6d0c87de-e4e8-5660-97bb-2eb266b9f7ab",
+      "ca51e278-e664-54d6-ae78-75d6e3cc932f",
+      "925c90f6-6318-5acf-9880-cc8d0c30f2a3",
+      "70d5f629-86fe-58d6-b3d1-1b93654bc22e",
+      "0f414ef8-9205-533a-95a8-000c2a25b626",
+      "dd825f3a-328e-5bbf-8f66-e6a071005aba",
+      "329e8945-4b8e-5e29-959b-e7897a8652f1",
+      "075914e2-a411-57cd-adbf-221b54f6eea3",
+      "c854683c-6a52-5212-b939-32766a2ad157",
+      "8f9e841c-8b9d-579f-9ba1-6cef19d927c9",
+      "ae153b60-fcd3-56f2-8ae9-28cb5c43caeb",
+      "a307792d-7871-5419-83ca-704ba7acea06"
+    ],
+    "leave_requests": [
+      "40ba9b03-fba2-568a-bd0a-1f8820e040b6",
+      "17ff4ab1-2e60-5efe-94c5-baa66578a3e6",
+      "f03fde04-4605-52a0-8c3e-36414dfa61fe",
+      "e62fedad-d987-5a61-807f-3162642daf5e",
+      "3334918f-66b1-530c-bca8-d3b45838b5fe",
+      "463c82b9-e24e-50b3-b8f2-9eccfe3c3175",
+      "94d92d28-f742-5870-abdb-a157a8545976",
+      "d8a18604-ca59-5e4b-8cb0-d2ccf0c458f3",
+      "fa913fc3-6752-505d-b211-d7707615f090",
+      "50ea1cd8-c0f9-57f7-8a05-2a59afdf996a",
+      "6c5ddd02-0bb6-584d-a193-9489adb38a3d",
+      "647cc8f9-a39d-569c-8b85-32445c68b871",
+      "4918702b-c8be-5c98-910a-1ba8001a2277",
+      "27053b17-ed1c-5657-8832-79fef6024486",
+      "25e4b80a-db8e-54db-adfa-3eb5b84b0a6d",
+      "c0b4052d-e56c-58de-b5c7-bd3b05de802b",
+      "66658949-4282-5e1b-a640-112580ca7b1e",
+      "d07ff53e-7842-561c-a3ca-201040f67317",
+      "465e6974-e133-544f-8027-9d0ebc66bd51",
+      "fe812890-9ebf-5972-a7b7-0956c3f93aab",
+      "16967ffd-d704-53cd-b8fa-698bd54bc256",
+      "26fc23c3-5e4e-538b-aa74-67d8544d05be"
+    ],
+    "approval_steps": [
+      "4e8377b3-7367-523c-8633-fcc06e3c6278",
+      "3c1109e6-e84b-5baf-a7e1-f8904a7ed6e3",
+      "6fd69a35-4319-55fd-b787-fc2e15c9ddba",
+      "a3781fab-ab1f-54b5-bd02-b2b9f149a603",
+      "4507f9aa-2b33-59c8-84f0-23d9bd259d3f",
+      "db0f85f4-92e5-5f40-95f1-b6893e826a4c",
+      "1117f1a4-7c9d-5a6b-831c-97c41a40fc5a",
+      "3838961b-ac62-582f-bf50-64b757bec9b7",
+      "6903a818-8cba-5662-9603-c041e461d01f",
+      "b6ba3ca5-6d17-5a29-a422-21337dbd1a30",
+      "d5fab93f-5042-56db-952b-2a89efe679ee",
+      "3c6d446e-671c-56d6-938e-e23d4240a0fe",
+      "ede1d755-a998-53c1-a0bd-5d1d16139f30",
+      "fc7089f7-45d5-50ac-9c05-1cfdea23c0cc",
+      "86f63300-553c-53bd-b27b-2846bf113be5",
+      "edd0572e-aa98-511f-b90b-ad4b6d40cdb8",
+      "f4373dae-dad6-5a3a-8484-5fbea7e2c3ab",
+      "136ea37a-57ff-575f-8b9d-570d7dd11d9c",
+      "f1d392ac-2ed7-529c-a0be-cb778bfcd516",
+      "eb419ae7-588a-5e45-94c2-a433636c3ef9",
+      "3cf87001-9317-5834-87a8-a150f5838837",
+      "3238f487-59da-5373-8d5e-ff7db434b774"
+    ],
+    "comp_time_ledger": [
+      "72c52899-3a1c-5a82-9fde-e168cc6a40cb"
+    ],
+    "advances": [
+      "8c8d6480-3265-55cb-8e10-2b1a6c8d71e7",
+      "7aa62227-4d75-5cae-9213-8ef1e7df3ec1"
+    ],
+    "leave_balances": [
+      "28c51f55-416d-58d5-89e4-4255d60f8d7e",
+      "c3860ddb-5062-5a6e-8be6-50b03d4f4758",
+      "1ccd3e23-27b6-58a5-87f3-c9866fda67fb",
+      "3c41c4c5-3553-59f3-a25e-8e4a678cd50e"
+    ],
+    "payslips": [
+      "829efd15-7de9-54b2-bab8-48f354cb344d"
+    ],
+    "expense_claims": [
+      "ed24f19c-40e9-558a-aef2-1713ddf45a94",
+      "2143e163-085f-5d94-b39c-4e288642fc57",
+      "3b1ae296-01b4-5067-b44e-346422f490e0",
+      "e622a5e7-5c24-55eb-abdd-8a1d47c4f30d"
+    ],
+    "kpi_templates": [
+      "c2199bb5-03d3-5a33-af3e-8913ee026750"
+    ],
+    "kpi_reviews": [
+      "34cc6074-e4c0-5195-87c7-8b857d76c8eb"
+    ],
+    "projects": [
+      "324f8933-a7d9-5684-a582-fcdecfd6a5c5"
+    ],
+    "project_members": [
+      "096be1e2-9684-56cd-a958-fc96f8180edf"
+    ],
+    "bonus_runs": [
+      "93e67f24-f822-5802-8805-67a330062996"
+    ],
+    "bonus_run_items": [
+      "68c980d7-0b43-5f26-9125-33eb21e9c487"
+    ],
+    "employee_profiles": [
+      "3547b847-3d1a-50bf-91f8-68dbb27e6c5a"
+    ],
+    "employee_educations": [
+      "a96d296f-6a98-5198-9c41-44945243f75d"
+    ],
+    "employee_certifications": [
+      "01647e0e-6158-56d0-ba57-a84e254e8dc5"
+    ],
+    "employee_work_history": [
+      "1cfa5934-f892-5c7f-a6f0-2fc6dc699eeb"
+    ],
+    "employee_job_history": [
+      "152d1926-b11d-5004-8f8f-dbe9ba0681e9"
+    ],
+    "notifications": [
+      "5d6e7229-47e4-5fab-8b05-dea7935607c5",
+      "aba6fba5-8b7a-593b-88a3-b9898220dd84",
+      "5ce6dcbd-6d8d-50d7-bb97-a7c324d2d404",
+      "bdb3a819-043a-5b99-8d42-a9c04bdf7b08"
+    ],
+    "attendance_sheets": [
+      "ef2102b0-0626-4359-a7dc-1f74814fab40"
+    ],
+    "attendance_sheet_days": [
+      "5475da86-f2b9-4ef5-990a-9e97c24f7ab4",
+      "b60e55ba-3064-4cbb-9391-b3632a1ee2db",
+      "ed21cb8c-2860-421a-9237-79e1f18920a0",
+      "d09fd061-ad19-404c-842f-715cbc07400b",
+      "f1342e48-25ac-4e8b-8e2e-a6e3cacfb880",
+      "87619787-6ad8-49fe-9e6b-40cb5971023e",
+      "0c8d1d89-e76f-42b7-b5d9-01880a24c16b",
+      "ec6c091b-87a6-4142-99b8-ee9a3261d822",
+      "a75a4547-c81c-4e13-a6ca-659e98c9e4e8",
+      "56777b4c-549c-4d67-acea-85b9679f7b7f",
+      "42efcee9-8b75-4a67-9331-a5b3d2a800a3",
+      "67941ed6-8251-4f54-b321-757632a4905d",
+      "b2e0a997-7073-4fb4-8e19-0f8579c26fdd",
+      "d355745d-00e3-44b3-aac7-023e1191336f",
+      "e78d45ac-499a-4a48-b0ae-0afea5a5ccd2",
+      "2cc255e8-4213-4661-90e6-4fd271500bbf",
+      "a4a22676-318c-48f0-a577-d913e688cf4c",
+      "83feb7ff-5fe2-4279-9d7b-31f66d2b221f",
+      "79f8c347-76ea-4d97-afb9-399ecabe938c",
+      "ef09d84e-3aa2-47fa-b336-9342a08ca911",
+      "f3d16301-2eeb-4f84-84fb-ba16b92940e3",
+      "e823fad2-a122-4d5b-9106-a71714cc120b",
+      "e6dadf67-9ed9-4661-a620-bb34a26cfd64",
+      "96caed30-570f-4648-8025-cc9091d840c9",
+      "9dcccf9d-9f2c-4c62-ab2e-f94dba00c3bc",
+      "eec0c5ee-69e6-45c3-9414-5e405160de7f",
+      "b7d1b0ef-ba44-406d-bfe2-cef746635250",
+      "63e90d4e-f9e6-4fab-9b90-9821a4df5e65",
+      "5d639e01-5bf0-4fed-82df-f0ade8f1c362",
+      "3d5a4286-1622-4196-a063-d849f4a765de",
+      "d3d7bac5-3fb0-4024-b3a5-57d00557a375"
+    ],
+    "attendance_days": [
+      "283cca9d-d319-4a36-be6b-1ec291bbd920",
+      "149fc5d5-b031-4688-a13e-7b3cadef7e09",
+      "67790939-3384-4deb-9703-3ea008c1bb0e",
+      "bb4deac5-6d1b-4fce-bf7c-5bbfa6a26acf",
+      "36a1df4b-2b27-4faf-9829-e007551a76ab",
+      "d6128fbc-1784-4539-b69a-3dec16e7b899",
+      "47cccf8a-1a17-4a79-a202-c244a135f732",
+      "43015db5-2934-4fd9-af99-1dd769fe7d30",
+      "f0ae4d63-2725-4df0-bede-0033f31b10c7",
+      "153fbc9e-4940-4458-a104-a83137ed0780",
+      "a16cb8ac-14de-48e3-8678-52f10581c724",
+      "2a412e62-bb53-4e9a-bc30-3bc9cd6b7507",
+      "d54942b2-dae5-4092-a671-23d0311d2305",
+      "9269eff6-de1c-4ca9-9693-8d48fe7a84f0",
+      "c6eebdf8-75b7-4284-9f23-98c96a7e1ae8",
+      "3b763660-8fa8-4a05-8229-01fd3ef8a4fd",
+      "77c97ce2-1f62-4151-884f-3654de291e47",
+      "f3a3b217-88bf-4f13-a897-14be08ae2f62",
+      "360be0e6-96e7-4d73-b8d1-9b78f85faf85",
+      "36c0d2c1-567e-47f4-9326-4bcc64cdb1d1",
+      "aac0ff18-a4ca-43f1-b055-d416bc1ae45a"
+    ]
+  },
+  "manifest": [
+    {
+      "page": "/ess/schedule",
+      "feature": "個人班表（2026-08）",
+      "records": [
+        {
+          "id": "ed1d3f69-d003-5e2a-9caa-597fbe83ce23",
+          "name": "【測試】班表 日班 2026-08 ×21",
+          "note": "2026-08-03～2026-08-31 每個工作日；08-24 起 status=scheduled（待確認），其餘 confirmed。完整 id 見 ids.schedules"
+        }
+      ]
+    },
+    {
+      "page": "/ess/requests",
+      "feature": "我的申請（萊乾資訊自己的單；簽核者＝萊乾資訊自己）",
+      "records": [
+        {
+          "id": "40ba9b03-fba2-568a-bd0a-1f8820e040b6",
+          "name": "【測試】請假 特休 2026-08-14 approved",
+          "note": "進 2026-08 月表"
+        },
+        {
+          "id": "17ff4ab1-2e60-5efe-94c5-baa66578a3e6",
+          "name": "【測試】請假 事假 2026-08-19 approved",
+          "note": "進 2026-08 月表"
+        },
+        {
+          "id": "f03fde04-4605-52a0-8c3e-36414dfa61fe",
+          "name": "【測試】加班 2h 加班費 2026-08-20 approved",
+          "note": "進 2026-08 月表"
+        },
+        {
+          "id": "e62fedad-d987-5a61-807f-3162642daf5e",
+          "name": "【測試】補卡 2026-08-26 approved",
+          "note": "進 2026-08 月表"
+        },
+        {
+          "id": "3334918f-66b1-530c-bca8-d3b45838b5fe",
+          "name": "【測試】在家工作 2026-08-27 approved",
+          "note": "進 2026-08 月表"
+        },
+        {
+          "id": "463c82b9-e24e-50b3-b8f2-9eccfe3c3175",
+          "name": "【測試】出差／公出 2026-09-03 approved",
+          "note": "9 月（不進月表）"
+        },
+        {
+          "id": "94d92d28-f742-5870-abdb-a157a8545976",
+          "name": "【測試】加班 2h 加班費 2026-09-08 approved",
+          "note": "9 月（不進月表）"
+        },
+        {
+          "id": "d8a18604-ca59-5e4b-8cb0-d2ccf0c458f3",
+          "name": "【測試】加班 1.5h 加班費 2026-09-10 rejected",
+          "note": "9 月（不進月表）"
+        },
+        {
+          "id": "fa913fc3-6752-505d-b211-d7707615f090",
+          "name": "【測試】零用金 2026-09-14 approved",
+          "note": "9 月（不進月表）"
+        },
+        {
+          "id": "50ea1cd8-c0f9-57f7-8a05-2a59afdf996a",
+          "name": "【測試】請假 病假 2026-09-15 rejected",
+          "note": "9 月（不進月表）"
+        },
+        {
+          "id": "6c5ddd02-0bb6-584d-a193-9489adb38a3d",
+          "name": "【測試】加班 3h 補休 2026-09-16 approved",
+          "note": "9 月（不進月表）"
+        },
+        {
+          "id": "647cc8f9-a39d-569c-8b85-32445c68b871",
+          "name": "【測試】請假 事假 2026-09-17 cancelled",
+          "note": "9 月（不進月表）"
+        },
+        {
+          "id": "4918702b-c8be-5c98-910a-1ba8001a2277",
+          "name": "【測試】補卡 2026-09-18 rejected",
+          "note": "9 月（不進月表）"
+        },
+        {
+          "id": "27053b17-ed1c-5657-8832-79fef6024486",
+          "name": "【測試】出差／公出 2026-09-23 approved",
+          "note": "9 月（不進月表）"
+        },
+        {
+          "id": "25e4b80a-db8e-54db-adfa-3eb5b84b0a6d",
+          "name": "【測試】加班 2h 加班費 2026-09-24 pending",
+          "note": "9 月（不進月表）"
+        },
+        {
+          "id": "c0b4052d-e56c-58de-b5c7-bd3b05de802b",
+          "name": "【測試】在家工作 2026-09-29 rejected",
+          "note": "9 月（不進月表）"
+        },
+        {
+          "id": "66658949-4282-5e1b-a640-112580ca7b1e",
+          "name": "【測試】加班 2h 加班費 2026-10-02 approved",
+          "note": "10 月（事前申請）"
+        },
+        {
+          "id": "d07ff53e-7842-561c-a3ca-201040f67317",
+          "name": "【測試】請假 特休 2026-10-06 pending",
+          "note": "10 月（事前申請）"
+        },
+        {
+          "id": "465e6974-e133-544f-8027-9d0ebc66bd51",
+          "name": "【測試】出差／公出 2026-10-07 cancelled",
+          "note": "10 月（事前申請）"
+        }
+      ]
+    },
+    {
+      "page": "/ess/balances",
+      "feature": "剩餘假別（2026 曆年桶，單位小時）",
+      "records": [
+        {
+          "id": "28c51f55-416d-58d5-89e4-4255d60f8d7e",
+          "name": "【測試】特休 entitled 56 used 8",
+          "note": "used＝核准請假時數"
+        },
+        {
+          "id": "c3860ddb-5062-5a6e-8be6-50b03d4f4758",
+          "name": "【測試】事假 entitled 112 used 4",
+          "note": "used＝核准請假時數"
+        },
+        {
+          "id": "1ccd3e23-27b6-58a5-87f3-c9866fda67fb",
+          "name": "【測試】病假 entitled 240 used 0",
+          "note": "used＝核准請假時數"
+        }
+      ]
+    },
+    {
+      "page": "/ess/approvals",
+      "feature": "待我簽核（B 送來 3 張＋萊乾資訊自己 2 張）",
+      "records": [
+        {
+          "id": "fe812890-9ebf-5972-a7b7-0956c3f93aab",
+          "name": "【測試】測試員工B 請假 事假 2026-10-07 pending",
+          "note": "申請人＝測試同仁 B；目前關卡＝萊乾資訊（第 1／1 關）"
+        },
+        {
+          "id": "16967ffd-d704-53cd-b8fa-698bd54bc256",
+          "name": "【測試】測試員工B 加班 2h 加班費 2026-10-02 pending",
+          "note": "申請人＝測試同仁 B；目前關卡＝萊乾資訊（第 1／1 關）"
+        },
+        {
+          "id": "26fc23c3-5e4e-538b-aa74-67d8544d05be",
+          "name": "【測試】測試員工B 出差／公出 2026-10-05 pending",
+          "note": "申請人＝測試同仁 B；目前關卡＝萊乾資訊（第 1／1 關）"
+        },
+        {
+          "id": "25e4b80a-db8e-54db-adfa-3eb5b84b0a6d",
+          "name": "【測試】加班 2h 加班費 2026-09-24 pending（萊乾資訊自己的單）",
+          "note": "簽核者就是萊乾資訊自己"
+        },
+        {
+          "id": "d07ff53e-7842-561c-a3ca-201040f67317",
+          "name": "【測試】請假 特休 2026-10-06 pending（萊乾資訊自己的單）",
+          "note": "簽核者就是萊乾資訊自己"
+        }
+      ]
+    },
+    {
+      "page": "（測試同仁 B 的員工端）",
+      "feature": "測試同仁 B 送單所需的最小資料",
+      "records": [
+        {
+          "id": "6d7ceda1-d5c8-411c-80d1-841b5ccbf96d",
+          "name": "【測試】測試員工B（員工列＋登入帳號，保留）",
+          "note": "manifest.colleague；總清理檔保護"
+        },
+        {
+          "id": "66091721-b4e7-4c61-9033-05fe76e0e135",
+          "name": "【測試】測試部（B 的部門，保留）",
+          "note": "主管只讀回記錄，不改"
+        },
+        {
+          "id": "3241aaf3-f758-467f-bc6c-aad36f215e5d",
+          "name": "【測試】B 的特休餘額列（原有，保留）",
+          "note": "2026-08-02～2027-02-01"
+        },
+        {
+          "id": "3c41c4c5-3553-59f3-a25e-8e4a678cd50e",
+          "name": "【測試】B 的事假額度 2026 entitled 112",
+          "note": "本工具建；核准 B 的事假時扣這一列"
+        }
+      ]
+    },
+    {
+      "page": "/ess/payslips",
+      "feature": "我的薪資單",
+      "records": [
+        {
+          "id": "829efd15-7de9-54b2-bab8-48f354cb344d",
+          "name": "【測試】薪資單 2026-08 finalized",
+          "note": "gross 49,725／net 47,804（未寄送）"
+        }
+      ]
+    },
+    {
+      "page": "/ess/expenses",
+      "feature": "費用報銷＋預支",
+      "records": [
+        {
+          "id": "ed24f19c-40e9-558a-aef2-1713ddf45a94",
+          "name": "【測試】報銷 2026-08 420 settled",
+          "note": "【測試】客戶會議捷運往返"
+        },
+        {
+          "id": "2143e163-085f-5d94-b39c-4e288642fc57",
+          "name": "【測試】報銷 2026-08 380 rejected",
+          "note": "【測試】加班後搭計程車"
+        },
+        {
+          "id": "3b1ae296-01b4-5067-b44e-346422f490e0",
+          "name": "【測試】報銷 2026-08 150 submitted",
+          "note": "【測試】公車（待核銷示範）"
+        },
+        {
+          "id": "e622a5e7-5c24-55eb-abdd-8a1d47c4f30d",
+          "name": "【測試】報銷 2026-09 1200 cancelled",
+          "note": "【測試】台中出差油資"
+        },
+        {
+          "id": "8c8d6480-3265-55cb-8e10-2b1a6c8d71e7",
+          "name": "【測試】預支 trip 3000 paid",
+          "note": "【測試】台中出差預支撥款"
+        },
+        {
+          "id": "7aa62227-4d75-5cae-9213-8ef1e7df3ec1",
+          "name": "【測試】預支 petty_cash 1500 settled",
+          "note": "【測試】零用金核銷（餘額 180 元現金繳回）"
+        }
+      ]
+    },
+    {
+      "page": "/ess/kpi",
+      "feature": "我的考核",
+      "records": [
+        {
+          "id": "c2199bb5-03d3-5a33-af3e-8913ee026750",
+          "name": "【測試】考核範本（萊乾資訊）",
+          "note": "萊乾資訊專用範本"
+        },
+        {
+          "id": "34cc6074-e4c0-5195-87c7-8b857d76c8eb",
+          "name": "【測試】考核 2026-Q2 finalized 84 分",
+          "note": "我的考核結果（考核人＝萊乾資訊自己）"
+        }
+      ]
+    },
+    {
+      "page": "/ess/projects",
+      "feature": "專案知識庫",
+      "records": [
+        {
+          "id": "324f8933-a7d9-5684-a582-fcdecfd6a5c5",
+          "name": "【測試】專案（萊乾資訊）",
+          "note": "只有萊乾資訊一位成員（lead）；status closed"
+        }
+      ]
+    },
+    {
+      "page": "/ess/my-bonus",
+      "feature": "我的分潤",
+      "records": [
+        {
+          "id": "096be1e2-9684-56cd-a958-fc96f8180edf",
+          "name": "【測試】專案（萊乾資訊）成員 lead 100%",
+          "note": "GET /my/project-shares（獎金池 30,000）"
+        },
+        {
+          "id": "93e67f24-f822-5802-8805-67a330062996",
+          "name": "【測試】獎金批次（萊乾資訊專案）paid 2026-08-31",
+          "note": "GET /my/bonus-history；明細 1 筆 9,000（已收款 30%）"
+        }
+      ]
+    },
+    {
+      "page": "/ess/mydata",
+      "feature": "我的資料",
+      "records": [
+        {
+          "id": "3547b847-3d1a-50bf-91f8-68dbb27e6c5a",
+          "name": "【測試】個人檔案（基本／通訊）",
+          "note": "跑前沒有列；cleanup 整列刪除＝還原"
+        },
+        {
+          "id": "a96d296f-6a98-5198-9c41-44945243f75d",
+          "name": "【測試】學歷 測試大學",
+          "note": ""
+        },
+        {
+          "id": "01647e0e-6158-56d0-ba57-a84e254e8dc5",
+          "name": "【測試】證照",
+          "note": ""
+        },
+        {
+          "id": "1cfa5934-f892-5c7f-a6f0-2fc6dc699eeb",
+          "name": "【測試】工作經歷 前公司",
+          "note": ""
+        },
+        {
+          "id": "152d1926-b11d-5004-8f8f-dbe9ba0681e9",
+          "name": "【測試】職務經歷 新進",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "page": "/ess/attendance-sheet",
+      "feature": "出勤月表 2026-08（locked）",
+      "records": [
+        {
+          "id": "ef2102b0-0626-4359-a7dc-1f74814fab40",
+          "name": "【測試】月表 萊乾資訊 2026-08 locked",
+          "note": "逐日 31 列；出勤結算 attendance_days 21 列（generate 內建 settle）"
+        }
+      ]
+    },
+    {
+      "page": "/ess/punches",
+      "feature": "打卡紀錄（2026-08）",
+      "records": [
+        {
+          "id": "b9bc27e0-62eb-5718-b8d2-b1b4e3fde044",
+          "name": "【測試】打卡 2026-08 ×38",
+          "note": "source web ＋ 補卡核准 1 筆 manual；device_id=【測試】lqtech-ess；完整 id 見 ids.punch_records"
+        }
+      ]
+    },
+    {
+      "page": "/ess/notifications",
+      "feature": "通知中心",
+      "records": [
+        {
+          "id": "5d6e7229-47e4-5fab-8b05-dea7935607c5",
+          "name": "【測試】你的請假申請已核准",
+          "note": "approval（已讀）；status sent"
+        },
+        {
+          "id": "aba6fba5-8b7a-593b-88a3-b9898220dd84",
+          "name": "【測試】你的加班申請被駁回",
+          "note": "approval（未讀）；status sent"
+        },
+        {
+          "id": "5ce6dcbd-6d8d-50d7-bb97-a7c324d2d404",
+          "name": "【測試】出勤月表已鎖定（2026-08）",
+          "note": "attendance_sheet（已讀）；status sent"
+        },
+        {
+          "id": "bdb3a819-043a-5b99-8d42-a9c04bdf7b08",
+          "name": "【測試】2026-08 薪資單已定案",
+          "note": "payslip（未讀）；status sent"
+        }
+      ]
+    },
+    {
+      "page": "/ess（今日打卡）",
+      "feature": "本月加班累計卡",
+      "records": [
+        {
+          "id": "94d92d28-f742-5870-abdb-a157a8545976",
+          "name": "【測試】加班單 O-0908",
+          "note": "GET /my/overtime-cap 讀 leave_requests kind=ot（approved／pending）"
+        },
+        {
+          "id": "6c5ddd02-0bb6-584d-a193-9489adb38a3d",
+          "name": "【測試】加班單 O-0916",
+          "note": "GET /my/overtime-cap 讀 leave_requests kind=ot（approved／pending）"
+        },
+        {
+          "id": "25e4b80a-db8e-54db-adfa-3eb5b84b0a6d",
+          "name": "【測試】加班單 O-0924",
+          "note": "GET /my/overtime-cap 讀 leave_requests kind=ot（approved／pending）"
+        },
+        {
+          "id": "66658949-4282-5e1b-a640-112580ca7b1e",
+          "name": "【測試】加班單 O-1002",
+          "note": "GET /my/overtime-cap 讀 leave_requests kind=ot（approved／pending）"
+        }
+      ]
+    }
+  ],
+  "issues": []
+}
