@@ -36,8 +36,16 @@ export default function DisbursementPivotPage() {
   const thisYear = new Date().getFullYear();
   const years = useMemo(() => yearOptions(thisYear), [thisYear]);
 
-  const [year, setYear] = useState(thisYear);
-  const [groupBy, setGroupBy] = useState<DisbursementPivotGroupBy>("vendor");
+  const [year, setYear] = useState(() => {
+    if (typeof window === "undefined") return thisYear;
+    const value = Number(new URLSearchParams(window.location.search).get("year"));
+    return Number.isInteger(value) && value >= 2000 && value <= 2200 ? value : thisYear;
+  });
+  const [groupBy, setGroupBy] = useState<DisbursementPivotGroupBy>(() => {
+    if (typeof window === "undefined") return "vendor";
+    const value = new URLSearchParams(window.location.search).get("groupBy");
+    return DISBURSEMENT_PIVOT_GROUP_BYS.includes(value as DisbursementPivotGroupBy) ? value as DisbursementPivotGroupBy : "vendor";
+  });
   const [pivot, setPivot] = useState<DisbursementPivotResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);

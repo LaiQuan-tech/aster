@@ -276,6 +276,16 @@ export default function AdminProjectDetailPage() {
   return (
     <>
       <DetailHeading title={project.name} desc={headerDesc || undefined}>
+        {canBonus && (
+          <Link href="/admin/bonus-runs" className="text-sm font-medium" style={{ color: "var(--brand)" }}>
+            追蹤獎金撥款 →
+          </Link>
+        )}
+        {canFinance && (
+          <Link href={`/admin/disbursements/pivot?year=${project.fiscalYear}&groupBy=project`} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
+            查看年度專案放款 →
+          </Link>
+        )}
         {canFinance && !project.reservedAt && (
           <button
             type="button"
