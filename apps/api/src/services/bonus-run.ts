@@ -48,6 +48,9 @@ export type BonusProjectInput = {
   /** 'pool_pct' | 'fixed_amount'（未知值一律當 fixed_amount 的 0 處理，不丟例外）。 */
   shareMode: string
   bonusPool: number | null
+  /** 有值時以合約額乘此比例衍生獎金池；null 才沿用 bonusPool。 */
+  bonusRatePct: number | null
+  projectNote: string | null
   /** null＝沒有我方承攬合約 → 跳過。 */
   contractTotal: number | null
   receivedTotal: number
@@ -65,8 +68,15 @@ export type BonusItemCalc = {
   sharePct: number | null
   shareAmount: number | null
   bonusPool: number | null
+  bonusRatePct: number | null
   contractTotal: number
   receivedTotal: number
+  previousReceived: number
+  previousReceivedPct: number
+  currentReceived: number
+  currentReceivedPct: number
+  unallocatedPct: number
+  projectNote: string | null
   /** 0～1，四位小數（顯示用；拆算用未捨入值）。 */
   receivedPct: number
   entitledCumulative: number
@@ -167,6 +177,16 @@ export function entitledCumulativeOf(
   return round0(shareAmount * receivedPct)
 }
 
+export function effectiveBonusPoolOf(
+  contractTotal: number | null,
+  bonusRatePct: number | null,
+  legacyBonusPool: number | null,
+): number | null {
+  if (bonusRatePct === null) return legacyBonusPool
+  if (contractTotal === null || !(contractTotal > 0)) return null
+  return round0(contractTotal * bonusRatePct / 100)
+}
+
 function pct4(n: number): number {
   return Math.round(n * 10000) / 10000
 }
@@ -179,6 +199,7 @@ function pct4(n: number): number {
 export function computeBonusRun(
   projects: BonusProjectInput[],
   paidBefore: ReadonlyMap<string, number> | Record<string, number>,
+  previousReceived: ReadonlyMap<string, number> | Record<string, number> = new Map(),
 ): BonusRunCalc {
   const paidOf = (key: string): number => {
     const v = paidBefore instanceof Map ? paidBefore.get(key) : (paidBefore as Record<string, number>)[key]
@@ -196,13 +217,21 @@ export function computeBonusRun(
       skipped.push({ projectId: p.projectId, reason: "no_contract" })
       continue
     }
-    if (p.shareMode === "pool_pct" && (p.bonusPool === null || !(p.bonusPool > 0))) {
+    const effectiveBonusPool = effectiveBonusPoolOf(p.contractTotal, p.bonusRatePct, p.bonusPool)
+    if (p.shareMode === "pool_pct" && (effectiveBonusPool === null || !(effectiveBonusPool > 0))) {
       skipped.push({ projectId: p.projectId, reason: "no_pool" })
       continue
     }
     const rawPct = receivedPctOf(p.contractTotal, p.receivedTotal)
+    const previousRaw = previousReceived instanceof Map
+      ? previousReceived.get(p.projectId)
+      : (previousReceived as Record<string, number>)[p.projectId]
+    const previous = Math.max(0, Math.min(p.receivedTotal, typeof previousRaw === "number" && Number.isFinite(previousRaw) ? previousRaw : 0))
+    const current = Math.max(0, p.receivedTotal - previous)
+    const allocatedPct = p.members.reduce((sum, member) => sum + (member.sharePct ?? 0), 0)
+    const unallocatedPct = Math.max(0, Math.round((100 - allocatedPct) * 10000) / 10000)
     for (const m of p.members) {
-      const entitled = entitledCumulativeOf(p.shareMode, p.bonusPool, m.sharePct, m.shareAmount, rawPct)
+      const entitled = entitledCumulativeOf(p.shareMode, effectiveBonusPool, m.sharePct, m.shareAmount, rawPct)
       const paid = round0(paidOf(paidBeforeKey(p.projectId, m.employeeId)))
       const diff = entitled - paid
       const overpaid = diff < 0
@@ -213,9 +242,16 @@ export function computeBonusRun(
         shareMode: p.shareMode,
         sharePct: m.sharePct,
         shareAmount: m.shareAmount,
-        bonusPool: p.bonusPool,
+        bonusPool: effectiveBonusPool,
+        bonusRatePct: p.bonusRatePct,
         contractTotal: p.contractTotal,
         receivedTotal: p.receivedTotal,
+        previousReceived: previous,
+        previousReceivedPct: pct4(receivedPctOf(p.contractTotal, previous)),
+        currentReceived: current,
+        currentReceivedPct: pct4(receivedPctOf(p.contractTotal, current)),
+        unallocatedPct,
+        projectNote: p.projectNote,
         receivedPct: pct4(rawPct),
         entitledCumulative: entitled,
         paidBefore: paid,

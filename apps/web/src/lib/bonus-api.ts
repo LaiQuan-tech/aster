@@ -63,8 +63,17 @@ export interface BonusRunItem {
   sharePct: number | null
   shareAmount: number | null
   bonusPool: number | null
+  /** 專案獎金比例（百分數，例如 2 代表 2%）；舊快照可能沒有。 */
+  bonusRatePct?: number | null
   contractTotal: number | null
   receivedTotal: number
+  /** 前次已累積收款、本次新增收款；舊快照由 UI 相容回退。 */
+  previousReceived?: number
+  previousReceivedPct?: number
+  currentReceived?: number
+  currentReceivedPct?: number
+  unallocatedPct?: number
+  projectNote?: string | null
   /** 0～1。 */
   receivedPct: number
   entitledCumulative: number

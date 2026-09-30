@@ -702,6 +702,10 @@ export interface AnnualRow {
   technicianTotal: number
   billedTotal: number
   receivedTotal: number
+  invoicedTotal: number
+  invoiceStatus: "未開票" | "部分開票" | "已全開票"
+  contractStatus: "未簽約" | "已簽約"
+  engineerSignature: string
   billingProgressPct: number | null
   receiptProgressPct: number | null
   unreceived: number | null
@@ -721,6 +725,7 @@ export interface AnnualTotals {
   amountTotal: number
   billedTotal: number
   receivedTotal: number
+  invoicedTotal: number
   unreceived: number
   subcontractTotal: number
   subcontractByDiscipline: Record<string, number>

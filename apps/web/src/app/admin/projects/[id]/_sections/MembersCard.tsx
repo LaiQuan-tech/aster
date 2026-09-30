@@ -1,226 +1,126 @@
 "use client";
 
-import { Card, PrimaryButton, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { useEffect, useMemo, useState } from "react";
+import { Card, Empty, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import type { Employee } from "@/lib/admin-api";
-import {
-  addProjectMember,
-  updateProjectMember,
-  removeProjectMember,
-  memberRoleLabel,
-  PROJECT_MEMBER_ROLE_ORDER,
-  PROJECT_MEMBER_ROLE_LABELS,
-  type ProjectMember,
-  type ProjectMemberRole,
-} from "@/lib/projects-api";
+import { PROJECT_MEMBER_ROLE_LABELS, PROJECT_MEMBER_ROLE_ORDER, memberRoleLabel, saveProjectShareRevision, type ProjectMember, type ProjectMemberRole } from "@/lib/projects-api";
+import { calculateProjectShares, hydrateShareDraft, orderShareMembers, type ShareDraftMember } from "@/lib/project-share-calculation";
 import { fmtMoney, type Setter } from "./shared";
 
 interface MembersCardProps {
   projectId: string;
   members: ProjectMember[];
   emps: Employee[];
-  isPool: boolean;
-  /** W4：分潤區可見性。false（會計）＝只看得到成員名單，看不到也改不了分潤。 */
   canBonus: boolean;
-  /** pool 模式的 % 加總（提示是否超過 100）。 */
-  pctTotal: number;
-  newEmp: string;
-  setNewEmp: Setter<string>;
-  newRole: ProjectMemberRole;
-  setNewRole: Setter<ProjectMemberRole>;
-  newValue: string;
-  setNewValue: Setter<string>;
+  contractAmount: number | null;
+  receivedAmount: number;
+  bonusRatePct: number | null;
   setError: Setter<string | null>;
   load: () => Promise<void>;
 }
 
-/**
- * 成員分潤：成員列表（角色下拉／分潤即存／移除）＋新增成員表單。
- *
- * W3（2026-09-23）：角色四值——經理／主辦／支援／組員。經理與主辦屬「負責人層」，
- * 看得到全案分潤、也取得該案的財務權限；支援與組員只看得到自己那筆。新增成員時
- * 沒填趴數，後端會套專案設定裡該角色的預設趴數（見 ProjectSettingsCard）。
- *
- * W4：`canBonus=false`（會計）時整張卡變唯讀——分潤欄與新增成員表單都不畫，
- * 角色也不給改。API 端對這些動作一律 403，畫面先一致，免得按下去才吃閉門羹。
- */
-export function MembersCard({
-  projectId,
-  members,
-  emps,
-  isPool,
-  canBonus,
-  pctTotal,
-  newEmp,
-  setNewEmp,
-  newRole,
-  setNewRole,
-  newValue,
-  setNewValue,
-  setError,
-  load,
-}: MembersCardProps) {
-  async function addMember() {
-    if (!newEmp) {
-      setError("請選擇員工");
-      return;
-    }
+function columnTitle(member: ShareDraftMember, members: ShareDraftMember[]): string {
+  if (member.roleInProject === "member") {
+    const position = members.filter((item) => item.roleInProject === "member").findIndex((item) => item.employeeId === member.employeeId);
+    return `組員 ${position + 1}`;
+  }
+  return PROJECT_MEMBER_ROLE_LABELS[member.roleInProject];
+}
+
+/** Excel 橫向專案分潤編輯器：全部變更先留在本機，最後以一個 revision 原子儲存。 */
+export function MembersCard({ projectId, members, emps, canBonus, contractAmount, receivedAmount, bonusRatePct, setError, load }: MembersCardProps) {
+  const [draft, setDraft] = useState(() => hydrateShareDraft(members, bonusRatePct));
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => setDraft(hydrateShareDraft(members, bonusRatePct)), [members, bonusRatePct]);
+
+  const orderedMembers = useMemo(() => orderShareMembers(draft.members), [draft.members]);
+  const calculation = useMemo(() => calculateProjectShares({ contractAmount, bonusRatePct: draft.bonusRatePct, members: orderedMembers }), [contractAmount, draft.bonusRatePct, orderedMembers]);
+
+  function patchMember(employeeId: string, patch: Partial<ShareDraftMember>) {
+    setDraft((current) => ({ ...current, members: current.members.map((member) => member.employeeId === employeeId ? { ...member, ...patch } : member) }));
+  }
+
+  function addMember() {
+    const employee = emps.find((emp) => !draft.members.some((member) => member.employeeId === emp.id));
+    if (!employee) return setError("沒有其他可加入的在職員工");
+    setDraft((current) => ({
+      ...current,
+      members: [...current.members, { employeeId: employee.id, name: employee.name, empNo: employee.emp_no, roleInProject: "member", sharePct: 0 }],
+    }));
+  }
+
+  async function saveRevision() {
+    const trimmedReason = reason.trim();
+    if (!trimmedReason) return setError("請填寫本次分潤調整原因");
+    if (!calculation.isValid) return setError(calculation.sharePctTotal > 100 ? "分潤比例合計不可超過 100%" : "分潤比例不可小於 0");
+    if (draft.bonusRatePct != null && (draft.bonusRatePct < 0 || draft.bonusRatePct > 100)) return setError("專案獎金比例必須介於 0% 與 100% 之間");
+
+    setSaving(true);
     setError(null);
     try {
-      const val = newValue ? Number(newValue) : null;
-      // 分潤欄留空時**不送這個鍵**，讓後端套該角色的預設趴數；送 null 會被當成
-      // 「明確指定沒有分潤」，預設值就不會生效。
-      await addProjectMember(projectId, {
-        employeeId: newEmp,
-        roleInProject: newRole,
-        ...(isPool ? (val === null ? {} : { sharePct: val }) : { shareAmount: val }),
+      await saveProjectShareRevision(projectId, {
+        bonusRatePct: draft.bonusRatePct,
+        members: draft.members.map((member) => ({
+          ...(member.memberId ? { memberId: member.memberId } : {}), employeeId: member.employeeId, roleInProject: member.roleInProject, sharePct: member.sharePct,
+        })),
+        reason: trimmedReason,
       });
-      setNewEmp("");
-      setNewRole("member");
-      setNewValue("");
+      setReason("");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "新增成員失敗");
+      setError(err instanceof Error ? err.message : "儲存分潤版本失敗");
+    } finally {
+      setSaving(false);
     }
   }
 
-  async function saveMemberShare(m: ProjectMember, raw: string) {
-    const val = raw === "" ? null : Number(raw);
-    setError(null);
-    try {
-      await updateProjectMember(projectId, m.id, isPool ? { sharePct: val } : { shareAmount: val });
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "調整分潤失敗");
-    }
+  if (!canBonus) {
+    return <Card>
+      <div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold text-gray-700">專案成員</h2><span className="text-xs text-gray-400">分潤趴數與金額不在您的權限範圍內</span></div>
+      {members.length === 0 ? <Empty>尚無成員</Empty> : <div className="flex flex-wrap gap-2">{members.map((member) => <span key={member.id} className="rounded-full bg-gray-100 px-3 py-1 text-sm">{member.name ?? member.employeeId} · {memberRoleLabel(member.roleInProject)}</span>)}</div>}
+    </Card>;
   }
 
-  async function changeRole(m: ProjectMember, role: ProjectMemberRole) {
-    if (role === m.roleInProject) return;
-    setError(null);
-    try {
-      await updateProjectMember(projectId, m.id, { roleInProject: role });
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "更新失敗");
-    }
-  }
+  return <Card>
+    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+      <div><h2 className="text-sm font-semibold text-gray-700">專案獎金與分潤</h2><p className="mt-0.5 text-xs text-gray-500">修改比例後金額即時連動；已發放歷史不變，差額會在下一次撥款調整。</p></div>
+      <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${calculation.isValid ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>比例合計 {calculation.sharePctTotal}%</span>
+    </div>
 
-  async function removeMember(m: ProjectMember) {
-    if (!confirm(`確定移除成員「${m.name ?? m.employeeId}」？`)) return;
-    setError(null);
-    try {
-      await removeProjectMember(projectId, m.id);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "移除失敗");
-    }
-  }
+    <div className="overflow-x-auto rounded-lg border border-black">
+      <table className="min-w-max border-collapse text-center text-xs">
+        <thead className="bg-gray-100 font-semibold text-gray-800"><tr>
+          {['合約金額', '已收款', '獎金比例', '獎金總額'].map((title) => <th key={title} className="border border-black px-3 py-2">{title}</th>)}
+          {calculation.members.map((member) => <th key={member.employeeId} className="border border-black px-3 py-2">{columnTitle(member, orderedMembers)}</th>)}
+          <th className="border border-black px-3 py-2">尚未分配</th>
+        </tr></thead>
+        <tbody><tr>
+          <td className="border border-black px-3 py-3 text-right text-sm">{fmtMoney(contractAmount)}</td>
+          <td className="border border-black px-3 py-3 text-right text-sm">{fmtMoney(receivedAmount)}</td>
+          <td className="border border-black p-2"><div className="flex items-center justify-center gap-1"><input aria-label="專案獎金比例" className="w-20 rounded border border-gray-300 px-2 py-1 text-right" type="number" min="0" max="100" step="0.01" value={draft.bonusRatePct ?? ""} onChange={(event) => setDraft((current) => ({ ...current, bonusRatePct: event.target.value === "" ? null : Number(event.target.value) }))} />%</div></td>
+          <td className="border border-black px-3 py-3 text-right text-sm font-semibold">{fmtMoney(calculation.bonusTotal)}</td>
+          {calculation.members.map((member) => <td key={member.employeeId} className="min-w-44 border border-black p-2 align-top">
+            <select aria-label={`${columnTitle(member, orderedMembers)}員工`} className="w-full rounded border border-gray-300 px-2 py-1" value={member.employeeId} onChange={(event) => patchMember(member.employeeId, { employeeId: event.target.value, name: emps.find((emp) => emp.id === event.target.value)?.name ?? null })}>
+              {emps.filter((emp) => emp.id === member.employeeId || !draft.members.some((item) => item.employeeId === emp.id)).map((emp) => <option key={emp.id} value={emp.id}>{emp.name}{emp.emp_no ? `（${emp.emp_no}）` : ""}</option>)}
+            </select>
+            <select aria-label={`${member.name ?? member.employeeId}角色`} className="mt-1 w-full rounded border border-gray-300 px-2 py-1" value={member.roleInProject} onChange={(event) => patchMember(member.employeeId, { roleInProject: event.target.value as ProjectMemberRole })}>
+              {PROJECT_MEMBER_ROLE_ORDER.map((role) => <option key={role} value={role}>{PROJECT_MEMBER_ROLE_LABELS[role]}</option>)}
+            </select>
+            <div className="mt-1 flex items-center justify-center gap-1"><input aria-label={`${member.name ?? member.employeeId}分潤比例`} className="w-20 rounded border border-gray-300 px-2 py-1 text-right" type="number" min="0" max="100" step="0.01" value={member.sharePct} onChange={(event) => patchMember(member.employeeId, { sharePct: Number(event.target.value) })} />%</div>
+            <p className="mt-1 text-right text-sm font-medium">{fmtMoney(member.amount)}</p>
+            <button type="button" className="mt-1 text-[11px] text-red-600 hover:underline" onClick={() => setDraft((current) => ({ ...current, members: current.members.filter((item) => item.employeeId !== member.employeeId) }))}>移除</button>
+          </td>)}
+          <td className={`border border-black px-3 py-3 text-right text-sm font-semibold ${calculation.unallocatedPct < 0 ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-800"}`}><div>{calculation.unallocatedPct}%</div><div>{fmtMoney(calculation.unallocatedAmount)}</div></td>
+        </tr></tbody>
+      </table>
+    </div>
 
-  return (
-    <Card>
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-gray-700">{canBonus ? "成員分潤" : "專案成員"}</h2>
-        {!canBonus && <span className="text-xs text-gray-400">分潤趴數與金額不在您的權限範圍內</span>}
-        {isPool && canBonus && (
-          <span className={`text-xs ${pctTotal > 100 ? "text-red-600" : "text-gray-500"}`}>
-            百分比加總 {pctTotal}%{pctTotal > 100 ? "（超過 100%）" : ""}
-          </span>
-        )}
-      </div>
-
-      {members.length === 0 ? (
-        <Empty>尚無成員</Empty>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b text-left text-gray-500">
-                <th className="py-2 pr-3">成員</th>
-                <th className="py-2 pr-3">角色</th>
-                {canBonus && <th className="py-2 pr-3">{isPool ? "分潤 %" : "分潤金額"}</th>}
-                {canBonus && <th className="py-2 pr-3">實得金額</th>}
-                <th className="py-2 pr-3"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {members.map((m) => (
-                <tr key={m.id} className="border-b last:border-0">
-                  <td className="py-2 pr-3 font-medium text-gray-900">
-                    {m.name ?? m.employeeId}
-                    {m.empNo && <span className="ml-1 text-xs text-gray-400">{m.empNo}</span>}
-                  </td>
-                  <td className="py-2 pr-3">
-                    {canBonus ? (
-                      <select
-                        className="rounded-md border border-gray-300 px-2 py-1 text-xs"
-                        value={m.roleInProject}
-                        onChange={(e) => changeRole(m, e.target.value as ProjectMemberRole)}
-                        aria-label={`${m.name ?? m.employeeId} 的專案角色`}
-                        title="經理／主辦看得到全案分潤，支援／組員只看得到自己那筆"
-                      >
-                        {PROJECT_MEMBER_ROLE_ORDER.map((role) => (
-                          <option key={role} value={role}>{PROJECT_MEMBER_ROLE_LABELS[role]}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <span className="text-gray-600">{memberRoleLabel(m.roleInProject)}</span>
-                    )}
-                  </td>
-                  {canBonus && (
-                    <td className="py-2 pr-3">
-                      <input
-                        className="w-24 rounded-md border border-gray-300 px-2 py-1 text-sm"
-                        type="number"
-                        min="0"
-                        defaultValue={(isPool ? m.sharePct : m.shareAmount) ?? ""}
-                        onBlur={(e) => {
-                          const cur = isPool ? m.sharePct : m.shareAmount;
-                          const v = e.target.value === "" ? null : Number(e.target.value);
-                          if (v !== cur) saveMemberShare(m, e.target.value);
-                        }}
-                      />
-                    </td>
-                  )}
-                  {canBonus && <td className="py-2 pr-3 text-gray-700">{fmtMoney(m.computedAmount)}</td>}
-                  <td className="py-2 pr-3">
-                    {canBonus && (
-                      <button onClick={() => removeMember(m)} className="text-xs text-red-600 hover:underline">移除</button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* add member（分潤是獎金區：沒有 bonus 權限就不給加人） */}
-      <div className={`mt-4 flex flex-wrap items-end gap-3 border-t pt-4 ${canBonus ? "" : "hidden"}`}>
-        <div>
-          <label className={labelCls}>新增成員</label>
-          <select className={inputCls} value={newEmp} onChange={(e) => setNewEmp(e.target.value)}>
-            <option value="">選擇員工</option>
-            {emps
-              .filter((e) => !members.some((m) => m.employeeId === e.id))
-              .map((e) => (
-                <option key={e.id} value={e.id}>{e.name}{e.emp_no ? `（${e.emp_no}）` : ""}</option>
-              ))}
-          </select>
-        </div>
-        <div>
-          <label className={labelCls}>角色</label>
-          <select className={inputCls} value={newRole} onChange={(e) => setNewRole(e.target.value as ProjectMemberRole)}>
-            {PROJECT_MEMBER_ROLE_ORDER.map((role) => (
-              <option key={role} value={role}>{PROJECT_MEMBER_ROLE_LABELS[role]}</option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label className={labelCls}>{isPool ? "分潤 %" : "分潤金額"}</label>
-          <input className={inputCls} type="number" min="0" value={newValue} onChange={(e) => setNewValue(e.target.value)} placeholder={isPool ? "留空＝用角色預設" : ""} />
-        </div>
-        <PrimaryButton onClick={addMember}>新增</PrimaryButton>
-      </div>
-    </Card>
-  );
+    <div className="mt-4 flex flex-wrap items-end gap-3 border-t pt-4">
+      <button type="button" className="rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={addMember}>＋ 新增成員</button>
+      <div className="min-w-64 flex-1"><label className={labelCls}>變更原因（必填）</label><input className={inputCls} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="例：本期改由王員主辦，調整後續分潤" /></div>
+      <PrimaryButton onClick={saveRevision} disabled={saving || !calculation.isValid}>{saving ? "儲存中…" : "整批儲存分潤"}</PrimaryButton>
+    </div>
+  </Card>;
 }

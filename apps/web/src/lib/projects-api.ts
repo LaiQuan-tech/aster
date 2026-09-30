@@ -82,6 +82,8 @@ export interface Project {
   leadEmpId: string | null
   shareMode: ShareMode
   bonusPool: number | null
+  /** 合約未稅金額的專案獎金比例；有值時獎金池由後端依合約額連動計算。 */
+  bonusRatePct?: number | null
   createdAt: string
 }
 
@@ -128,6 +130,7 @@ export interface MembersResponse {
   canSeeBonus?: boolean
   shareMode: ShareMode
   bonusPool: number | null
+  bonusRatePct?: number | null
   members: ProjectMember[]
 }
 
@@ -135,11 +138,33 @@ export interface ShareAdjustment {
   id: string
   employeeId: string | null
   name: string | null
-  field: "pct" | "amount" | "pool"
-  oldValue: number | null
-  newValue: number | null
+  field: "pct" | "amount" | "pool" | "bonus_rate" | "role" | "member_added" | "member_removed" | string
+  oldValue: number | string | null
+  newValue: number | string | null
   reason: string | null
   createdAt: string
+  /** 同一次整批儲存共用；舊資料可能沒有。 */
+  changeSetId?: string | null
+  changedByName?: string | null
+}
+
+export interface ProjectShareRevisionMemberInput {
+  memberId?: string
+  employeeId: string
+  roleInProject: ProjectMemberRole
+  sharePct: number
+}
+
+export interface ProjectShareRevisionResponse {
+  changeSetId?: string
+  revision?: { changeSetId?: string; adjustments?: ShareAdjustment[] }
+  calculation?: {
+    bonusTotal?: number | null
+    sharePctTotal?: number
+    unallocatedPct?: number
+    unallocatedAmount?: number | null
+  }
+  members?: ProjectMember[]
 }
 
 export interface ProjectDocument {
@@ -557,6 +582,17 @@ export function removeProjectMember(projectId: string, memberId: string) {
 
 export function getProjectAdjustments(projectId: string) {
   return apiFetch<{ adjustments: ShareAdjustment[] }>(`/projects/${projectId}/adjustments`)
+}
+
+/** 一次儲存獎金比例與完整成員分配，後端在同一交易內寫入一組歷程。 */
+export function saveProjectShareRevision(
+  projectId: string,
+  body: { bonusRatePct: number | null; members: ProjectShareRevisionMemberInput[]; reason: string },
+) {
+  return apiFetch<ProjectShareRevisionResponse>(`/projects/${projectId}/share-revision`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  })
 }
 
 export function getMyProjectShares() {

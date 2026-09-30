@@ -19,7 +19,6 @@ import {
   type Contract,
   type DocType,
   type OurRole,
-  type ProjectMemberRole,
 } from "@/lib/projects-api";
 import {
   getProjectDetail,
@@ -133,11 +132,6 @@ export default function AdminProjectDetailPage() {
   const [statusEffectiveOn, setStatusEffectiveOn] = useState("");
   const [savingStatus, setSavingStatus] = useState(false);
 
-  // add-member form
-  const [newEmp, setNewEmp] = useState("");
-  const [newRole, setNewRole] = useState<ProjectMemberRole>("member");
-  const [newValue, setNewValue] = useState("");
-
   // 申請單資料（模組五）
   const [appForm, setAppForm] = useState<AppForm | null>(null);
   const [savingApp, setSavingApp] = useState(false);
@@ -233,9 +227,6 @@ export default function AdminProjectDetailPage() {
   const canFinance = access.finance;
   /** W4：分潤區（獎金池／成員趴數／異動史）。會計有 finance 但沒有 bonus。 */
   const canBonus = access.bonus;
-
-  // pool 模式的 % 加總（提示是否超過 100）。
-  const pctTotal = members.reduce((s, m) => s + (m.sharePct ?? 0), 0);
 
   async function saveProjectField(patch: Parameters<typeof updateProjectFields>[1]) {
     if (!project) return;
@@ -394,10 +385,9 @@ export default function AdminProjectDetailPage() {
 
       {/* 成員分潤 */}
       <MembersCard
-        projectId={projectId} members={members} emps={emps} isPool={isPool} canBonus={canBonus} pctTotal={pctTotal}
-        newEmp={newEmp} setNewEmp={setNewEmp}
-        newRole={newRole} setNewRole={setNewRole}
-        newValue={newValue} setNewValue={setNewValue}
+        projectId={projectId} members={members} emps={emps} canBonus={canBonus}
+        contractAmount={money?.amountUntaxed ?? null} receivedAmount={money?.receivedTotal ?? 0}
+        bonusRatePct={project.bonusRatePct ?? null}
         setError={setError} load={load}
       />
 

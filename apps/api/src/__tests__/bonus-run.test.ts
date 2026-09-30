@@ -16,6 +16,8 @@ function oneProject(overrides: Partial<BonusProjectInput> = {}): BonusProjectInp
     projectId: "P1",
     shareMode: "pool_pct",
     bonusPool: 1_000_000,
+    bonusRatePct: null,
+    projectNote: null,
     contractTotal: 10_000_000,
     receivedTotal: 4_000_000,
     members: [{ employeeId: "E1", sharePct: 10, shareAmount: null }],
@@ -24,6 +26,45 @@ function oneProject(overrides: Partial<BonusProjectInput> = {}): BonusProjectInp
 }
 
 describe("bonus-run：入帳幾成就發幾成", () => {
+  it("有專案獎金率時，獎金池＝合約額 × 比例，並取代舊 bonusPool", () => {
+    const { items } = computeBonusRun([
+      oneProject({ bonusRatePct: 2, bonusPool: 9_999_999, receivedTotal: 5_000_000 }),
+    ], new Map())
+    expect(items[0].bonusRatePct).toBe(2)
+    expect(items[0].bonusPool).toBe(200_000)
+    expect(items[0].entitledCumulative).toBe(10_000)
+  })
+
+  it("獎金率調高後，以新累計應得扣除歷史已發，只補發差額", () => {
+    const paid = new Map([[paidBeforeKey("P1", "E1"), 5_000]])
+    const { items } = computeBonusRun([
+      oneProject({ bonusRatePct: 2, receivedTotal: 5_000_000 }),
+    ], paid)
+    expect(items[0].entitledCumulative).toBe(10_000)
+    expect(items[0].paidBefore).toBe(5_000)
+    expect(items[0].amount).toBe(5_000)
+  })
+
+  it("帶出前次／本次請領、比例、尚未分配與專案備註", () => {
+    const p = oneProject({
+      receivedTotal: 5_000_000,
+      projectNote: "第二期請領",
+      members: [
+        { employeeId: "E1", sharePct: 10, shareAmount: null },
+        { employeeId: "E2", sharePct: 20, shareAmount: null },
+      ],
+    })
+    const { items } = computeBonusRun([p], new Map(), new Map([["P1", 4_000_000]]))
+    expect(items[0]).toMatchObject({
+      previousReceived: 4_000_000,
+      previousReceivedPct: 0.4,
+      currentReceived: 1_000_000,
+      currentReceivedPct: 0.1,
+      unallocatedPct: 70,
+      projectNote: "第二期請領",
+    })
+  })
+
   it("pool 100 萬／合約 1000 萬／已收 400 萬／pct 10% → 累計應得 40,000，首季全額發", () => {
     const { items, totals } = computeBonusRun([oneProject()], new Map())
     expect(items).toHaveLength(1)
@@ -198,7 +239,9 @@ import { reversalItemsOf, reversalTotalsOf, type BonusItemCalc, type BonusTotals
 describe("bonus-run：紅字沖銷", () => {
   const item = (over: Partial<BonusItemCalc> = {}): BonusItemCalc => ({
     projectId: "p1", employeeId: "e1", roleInProject: "member", shareMode: "pool_pct", sharePct: 10, shareAmount: null,
-    bonusPool: 100_000, contractTotal: 1_000_000, receivedTotal: 200_000, receivedPct: 0.2,
+    bonusRatePct: null, bonusPool: 100_000, contractTotal: 1_000_000, receivedTotal: 200_000, receivedPct: 0.2,
+    previousReceived: 0, previousReceivedPct: 0, currentReceived: 200_000, currentReceivedPct: 0.2,
+    unallocatedPct: 90, projectNote: null,
     entitledCumulative: 2_000, paidBefore: 500, amount: 1_500, overpaid: false, overpaidBy: 0, ...over,
   })
   const totals = (items: BonusItemCalc[]): BonusTotals => ({

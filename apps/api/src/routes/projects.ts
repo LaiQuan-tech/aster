@@ -43,13 +43,18 @@ import {
   serializeSubcontract,
   serializeContractLite,
 } from "../services/project-application-store.js"
+import {
+  applyProjectShareRevision,
+  ProjectShareRevisionError,
+  projectShareRevisionSchema,
+} from "../services/project-share-revision.js"
 
 export const projectsRouter = Router()
 
 // ⚠️ 必須是單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別，
 // 相接後會退化成 GenericStringError，下游的 as ProjectRow 全數失效。
 const PROJECT_COLS =
-  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, archive_reason, starts_on, ends_on, opened_on, dept_id, lead_emp_id, share_mode, bonus_pool, created_at, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers"
+  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, archive_reason, starts_on, ends_on, opened_on, dept_id, lead_emp_id, share_mode, bonus_pool, bonus_rate_pct, created_at, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers"
 
 /** 預先取號的專案名稱——之後 PATCH 填真名時自動清掉 reserved_at。 */
 export const RESERVED_NAME = "（預先取號）"
@@ -205,6 +210,7 @@ type ProjectRow = {
   lead_emp_id: string | null
   share_mode: string
   bonus_pool: string | null
+  bonus_rate_pct: string | null
   created_at: string
   // P3 專案申請單
   client_id: string | null
@@ -333,6 +339,7 @@ function serializeProject(
     shareMode: row.share_mode,
     // 分潤池屬 bonus 段：會計與一般員工一律 null（W4）；列表端點一律不回。
     bonusPool: bonus ? num(row.bonus_pool) : null,
+    bonusRatePct: bonus ? num(row.bonus_rate_pct) : null,
     createdAt: row.created_at,
     // P3
     clientId: row.client_id,
@@ -1163,6 +1170,7 @@ projectsRouter.get(
         canSeeBonus: scope.canSeeBonus,
         shareMode: scope.project.share_mode,
         bonusPool: scope.canSeeBonus ? num(scope.project.bonus_pool) : null,
+        bonusRatePct: scope.canSeeBonus ? num(scope.project.bonus_rate_pct) : null,
         members,
       })
     } catch (err) {
@@ -1400,6 +1408,50 @@ projectsRouter.delete(
   },
 )
 
+// ── PUT /projects/:id/share-revision — 原子儲存獎金率與整批成員分潤 ────
+projectsRouter.put(
+  "/projects/:id/share-revision",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
+    const parsed = projectShareRevisionSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const scope = await loadScope(tenantId, userId, req.params.id as string)
+      if (!scope.ok) {
+        res.status(scope.status).json({ error: scope.error })
+        return
+      }
+      if (!scope.canSeeBonus) {
+        res.status(403).json({ error: "forbidden" })
+        return
+      }
+      const result = await applyProjectShareRevision(
+        tenantId,
+        req.params.id as string,
+        scope.self.id,
+        parsed.data,
+      )
+      res.status(200).json(result)
+    } catch (err) {
+      if (err instanceof ProjectShareRevisionError) {
+        res.status(err.httpStatus).json({ error: err.code })
+        return
+      }
+      next(err)
+    }
+  },
+)
+
 // ── GET /projects/:id/adjustments — 分潤異動史（同成員可見規則） ────────
 projectsRouter.get(
   "/projects/:id/adjustments",
@@ -1420,7 +1472,7 @@ projectsRouter.get(
       }
       let query = supabaseAdmin
         .from("project_share_adjustments")
-        .select("id, employee_id, field, old_value, new_value, reason, changed_by_emp_id, created_at, employees(name)")
+        .select("id, employee_id, change_set_id, field, old_value, new_value, reason, changed_by_emp_id, created_at, employees(name)")
         .eq("tenant_id", tenantId)
         .eq("project_id", req.params.id)
         .order("created_at", { ascending: false })
@@ -1432,12 +1484,29 @@ projectsRouter.get(
         next(new Error(`GET /projects/${req.params.id}/adjustments: ${error.message}`))
         return
       }
+      const changedByIds = [...new Set((data ?? []).map((a) => a.changed_by_emp_id).filter((id): id is string => !!id))]
+      const changedByNames = new Map<string, string>()
+      if (changedByIds.length > 0) {
+        const { data: actors, error: actorError } = await supabaseAdmin
+          .from("employees")
+          .select("id, name")
+          .eq("tenant_id", tenantId)
+          .in("id", changedByIds)
+        if (actorError) {
+          next(new Error(`GET /projects/${req.params.id}/adjustments actors: ${actorError.message}`))
+          return
+        }
+        for (const actor of actors ?? []) changedByNames.set(actor.id as string, actor.name as string)
+      }
       const adjustments = (data ?? []).map((a) => {
         const emp = rel1<{ name: string }>((a as { employees: unknown }).employees)
         return {
           id: a.id,
           employeeId: a.employee_id,
+          changeSetId: a.change_set_id,
           name: emp?.name ?? null,
+          changedByEmpId: a.changed_by_emp_id,
+          changedByName: a.changed_by_emp_id ? (changedByNames.get(a.changed_by_emp_id) ?? null) : null,
           field: a.field,
           oldValue: num(a.old_value as string | null),
           newValue: num(a.new_value as string | null),

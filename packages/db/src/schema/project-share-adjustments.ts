@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, numeric, timestamp } from "drizzle-orm/pg-core"
+import { index, pgTable, uuid, text, numeric, timestamp } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 import { projects } from "./projects"
 import { employees } from "./employees"
@@ -19,10 +19,14 @@ export const projectShareAdjustments = pgTable("project_share_adjustments", {
     .notNull()
     .references(() => projects.id),
   employeeId: uuid("employee_id").references(() => employees.id),
+  /** 同一次整批儲存共用一個 id，歷程畫面可還原成一個版本。 */
+  changeSetId: uuid("change_set_id"),
   field: text("field").notNull(),
   oldValue: numeric("old_value"),
   newValue: numeric("new_value"),
   reason: text("reason"),
   changedByEmpId: uuid("changed_by_emp_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-})
+}, (table) => ({
+  changeSetIdx: index("project_share_adjustments_change_set_idx").on(table.changeSetId),
+}))

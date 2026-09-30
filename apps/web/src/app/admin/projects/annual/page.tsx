@@ -10,26 +10,63 @@ import {
   currentRocYear,
   type AnnualReport,
   type AnnualSort,
+  type AnnualTotals,
 } from "@/lib/projects-ext-api";
 
-function fmtMoney(n: number | null | undefined): string {
-  return n == null ? "—" : n.toLocaleString();
-}
-function fmtPct(n: number | null): string {
-  return n == null ? "—" : `${n}%`;
-}
-/** 'yyy.mm' → '115年03月'（區塊標題用）。 */
-function formatBlockMonth(m: string): string {
-  const [y, mm] = m.split(".");
-  return `${y}年${mm}月`;
+function fmtMoney(value: number | null | undefined): string {
+  return value == null ? "—" : value.toLocaleString("zh-TW");
 }
 
-/**
- * 年度專案申請單總表（模組五）：老闆 Excel「年度專案申請單總表」的線上版，
- * 一列一案（含預先取號的空列），依開案月份分區塊小計，最後年度總計。
- * 開案日（A5）：優先用 opened_on（客戶事後補 K 單常見），缺值才退回建立日。
- * 科別欄位是動態的（`disciplines[]`，租戶設定在前、資料裡冒出的新科別接後面）。
- */
+function fmtPct(value: number | null): string {
+  return value == null ? "—" : `${value}%`;
+}
+
+function formatRocToday(value: string): string {
+  const [year, month, day] = value.split("-").map(Number);
+  return `${year - 1911}.${month}.${day}`;
+}
+
+const borderCell = "border border-black px-2 py-1.5 align-middle";
+
+function TotalRow({
+  label,
+  totals,
+  disciplines,
+  annual = false,
+}: {
+  label: string;
+  totals: AnnualTotals;
+  disciplines: string[];
+  annual?: boolean;
+}) {
+  return (
+    <tr className={annual ? "font-bold" : ""}>
+      <td className={`${borderCell} text-center`} colSpan={5}>{label}</td>
+      <td className={`${borderCell} text-right`}>{fmtMoney(totals.amountUntaxed)}</td>
+      <td className={`${borderCell} text-right`}>{fmtMoney(totals.taxAmount)}</td>
+      <td className={`${borderCell} text-right`}>{fmtMoney(totals.amountTotal)}</td>
+      <td className={`${borderCell} text-right`}>{fmtMoney(totals.receivedTotal)}</td>
+      <td className={`${borderCell} text-right`}>{fmtMoney(totals.unreceived)}</td>
+      <td className={`${borderCell} text-right`}>{fmtMoney(totals.invoicedTotal)}</td>
+      <td className={borderCell}></td>
+      <td className={borderCell}></td>
+      <td className={`${borderCell} text-right`}>{fmtMoney(totals.subcontractTotal)}</td>
+      <td className={borderCell}></td>
+      <td className={borderCell}></td>
+      {disciplines.map((discipline) => (
+        <td key={discipline} className={`${borderCell} text-right`}>
+          {fmtMoney(totals.subcontractByDiscipline[discipline] ?? 0)}
+        </td>
+      ))}
+      <td className={borderCell}></td>
+      <td className={borderCell}></td>
+      <td className={borderCell}></td>
+      <td className={borderCell}></td>
+    </tr>
+  );
+}
+
+/** 年度專案申請單總表：固定 A:P 對齊原 Excel，科別與系統欄依序接在其後。 */
 export default function AnnualProjectsPage() {
   const [rocYear, setRocYear] = useState(String(currentRocYear()));
   const [sort, setSort] = useState<AnnualSort>("code");
@@ -40,18 +77,17 @@ export default function AnnualProjectsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const y = Number(rocYear);
-    if (!Number.isInteger(y) || y < 1) {
+    const year = Number(rocYear);
+    if (!Number.isInteger(year) || year < 1) {
       setError("請輸入合法的民國年度");
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const r = await getAnnualProjects({ year: y, sort, includeArchived });
-      setReport(r);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "載入失敗");
+      setReport(await getAnnualProjects({ year, sort, includeArchived }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "載入失敗");
     } finally {
       setLoading(false);
     }
@@ -62,25 +98,22 @@ export default function AnnualProjectsPage() {
   }, [load]);
 
   async function exportXlsx() {
-    const y = Number(rocYear);
-    if (!Number.isInteger(y) || y < 1) return;
+    const year = Number(rocYear);
+    if (!Number.isInteger(year) || year < 1) return;
     setExporting(true);
     setError(null);
     try {
-      await downloadAnnualProjectsXlsx({ year: y, sort, includeArchived });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "匯出失敗");
+      await downloadAnnualProjectsXlsx({ year, sort, includeArchived });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "匯出失敗");
     } finally {
       setExporting(false);
     }
   }
 
   const disciplines = report?.disciplines ?? [];
-  const rowsBySeq = new Map((report?.rows ?? []).map((r) => [r.seq, r]));
-  const fixedColsBefore = 5; // 序號/編號/日期/客戶/專案名稱
-  const fixedColsAfterNote = 2; // 負責人/備註
-  const fixedColsProgress = 2; // 請款%/收款%
-  const fixedColsTail = 2; // 狀態/期數
+  const rowsBySeq = new Map((report?.rows ?? []).map((row) => [row.seq, row]));
+  const columnCount = 20 + disciplines.length;
 
   return (
     <>
@@ -88,17 +121,17 @@ export default function AnnualProjectsPage() {
         <div className="flex flex-wrap items-end gap-3">
           <div>
             <label className={labelCls}>民國年度</label>
-            <input className={`${inputCls} w-28`} type="number" min="1" value={rocYear} onChange={(e) => setRocYear(e.target.value)} />
+            <input className={`${inputCls} w-28`} type="number" min="1" value={rocYear} onChange={(event) => setRocYear(event.target.value)} />
           </div>
           <div>
             <label className={labelCls}>排序</label>
-            <select className={inputCls} value={sort} onChange={(e) => setSort(e.target.value as AnnualSort)}>
+            <select className={inputCls} value={sort} onChange={(event) => setSort(event.target.value as AnnualSort)}>
               <option value="code">依單號</option>
               <option value="unreceived_pct">依未收比例</option>
             </select>
           </div>
           <label className="flex items-center gap-1.5 pb-2 text-sm text-gray-600">
-            <input type="checkbox" checked={includeArchived} onChange={(e) => setIncludeArchived(e.target.checked)} />
+            <input type="checkbox" checked={includeArchived} onChange={(event) => setIncludeArchived(event.target.checked)} />
             顯示已封存
           </label>
           <PrimaryButton onClick={() => void load()}>查詢</PrimaryButton>
@@ -111,20 +144,8 @@ export default function AnnualProjectsPage() {
             {exporting ? "匯出中…" : "匯出 xlsx"}
           </button>
         </div>
-        {report && <p className="mt-2 text-xs text-gray-400">西元 {report.year} 年（民國 {report.rocYear} 年）；資料時間 {report.today}</p>}
         <ErrorText>{error}</ErrorText>
       </Card>
-
-      {report && (
-        <Card>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <div><p className="text-xs text-gray-500">案件數</p><p className="text-xl font-semibold text-gray-900">{report.totals.count}</p></div>
-            <div><p className="text-xs text-gray-500">未稅合計</p><p className="text-lg font-semibold text-gray-900">{fmtMoney(report.totals.amountUntaxed)}</p></div>
-            <div><p className="text-xs text-gray-500">含稅合計</p><p className="text-lg font-semibold text-gray-900">{fmtMoney(report.totals.amountTotal)}</p></div>
-            <div><p className="text-xs text-gray-500">未收合計</p><p className="text-lg font-semibold text-red-600">{fmtMoney(report.totals.unreceived)}</p></div>
-          </div>
-        </Card>
-      )}
 
       <Card>
         {loading ? (
@@ -132,28 +153,34 @@ export default function AnnualProjectsPage() {
         ) : !report || report.rows.length === 0 ? (
           <Empty>此年度沒有資料</Empty>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full whitespace-nowrap text-sm">
+          <div className="overflow-x-auto pb-2">
+            <table
+              className="border-collapse whitespace-nowrap text-xs text-black"
+              style={{ fontFamily: "DFKai-SB, BiauKai, serif" }}
+            >
               <thead>
-                <tr className="border-b text-left text-xs text-gray-500">
-                  <th className="py-2 pr-2">序號</th>
-                  <th className="py-2 pr-2">編號</th>
-                  <th className="py-2 pr-2">日期</th>
-                  <th className="py-2 pr-2">客戶</th>
-                  <th className="py-2 pr-2">專案名稱</th>
-                  <th className="py-2 pr-2 text-right">未稅</th>
-                  <th className="py-2 pr-2 text-right">稅額</th>
-                  <th className="py-2 pr-2 text-right">含稅</th>
-                  <th className="py-2 pr-2">負責人</th>
-                  <th className="py-2 pr-2">備註</th>
-                  {disciplines.map((d) => (
-                    <th key={d} className="py-2 pr-2 text-right">{d}</th>
-                  ))}
-                  <th className="py-2 pr-2 text-right">請款%</th>
-                  <th className="py-2 pr-2 text-right">收款%</th>
-                  <th className="py-2 pr-2 text-right">未收</th>
-                  <th className="py-2 pr-2">狀態</th>
-                  <th className="py-2 pr-2">期數</th>
+                <tr>
+                  <th className="h-8 text-center text-lg font-normal" colSpan={columnCount}>專案申請單</th>
+                </tr>
+                <tr>
+                  <th className="h-8 text-left text-lg font-normal" colSpan={columnCount}>
+                    亞斯特設計顧問有限公司　{report.rocYear}年度總表
+                  </th>
+                </tr>
+                <tr>
+                  <th className="h-7 font-normal" colSpan={7}></th>
+                  <th className="h-7 text-center font-normal">日期：{formatRocToday(report.today)}</th>
+                  <th className="h-7 text-center font-normal">已入帳</th>
+                  <th className="h-7 text-center font-normal">未入帳</th>
+                  <th className="h-7 font-normal" colSpan={columnCount - 10}></th>
+                </tr>
+                <tr className="sticky top-0 z-20 bg-white text-center font-normal">
+                  {[
+                    "項次", "專案單號", "日期", "客戶", "工程名稱", "金額(未稅)", "稅金", "含稅",
+                    "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
+                    ...disciplines,
+                    "請款進度%", "收款進度%", "狀態", "期數",
+                  ].map((header) => <th key={header} className={`${borderCell} font-normal`}>{header}</th>)}
                 </tr>
               </thead>
               <tbody>
@@ -163,78 +190,49 @@ export default function AnnualProjectsPage() {
                       const row = rowsBySeq.get(seq);
                       if (!row) return null;
                       return (
-                        <tr key={row.seq} className="border-b last:border-0">
-                          <td className="py-1.5 pr-2 text-gray-400">{row.seq}</td>
-                          <td className="py-1.5 pr-2 font-mono text-xs text-gray-600">
-                            {row.code ?? "—"}
-                            {row.reserved && <span className="ml-1 rounded bg-blue-50 px-1 text-[10px] font-sans text-blue-700">預先取號</span>}
+                        <tr key={row.seq}>
+                          <td className={`${borderCell} text-center`}>{row.seq}</td>
+                          <td className={`${borderCell} text-center`}>
+                            <Link href={`/admin/projects/${row.projectId}`} className="hover:underline">{row.code ?? "—"}</Link>
                           </td>
-                          <td className="py-1.5 pr-2 text-gray-600">{row.dateRoc ?? "—"}</td>
-                          <td className="py-1.5 pr-2 text-gray-600">{row.clientName ?? "—"}</td>
-                          <td className="py-1.5 pr-2 font-medium">
-                            <Link href={`/admin/projects/${row.projectId}`} className="hover:underline" style={{ color: "var(--brand)" }}>
-                              {row.name || "（未命名）"}
-                            </Link>
+                          <td className={`${borderCell} text-center`}>{row.dateRoc ?? "—"}</td>
+                          <td className={`${borderCell} text-center`}>{row.clientName ?? "—"}</td>
+                          <td className={`${borderCell} min-w-64 whitespace-normal text-center`}>
+                            <Link href={`/admin/projects/${row.projectId}`} className="hover:underline">{row.reserved ? "（預先取號）" : row.name}</Link>
                           </td>
-                          <td className="py-1.5 pr-2 text-right text-gray-700">{fmtMoney(row.amountUntaxed)}</td>
-                          <td className="py-1.5 pr-2 text-right text-gray-700">{fmtMoney(row.taxAmount)}</td>
-                          <td className="py-1.5 pr-2 text-right text-gray-700">{fmtMoney(row.amountTotal)}</td>
-                          <td className="py-1.5 pr-2 text-gray-600">{row.leadName ?? "—"}</td>
-                          <td className="max-w-[220px] overflow-hidden text-ellipsis whitespace-normal py-1.5 pr-2 text-xs text-gray-500">{row.note || "—"}</td>
-                          {disciplines.map((d) => (
-                            <td key={d} className="py-1.5 pr-2 text-right text-gray-600">
-                              {row.subcontractByDiscipline[d] ? fmtMoney(row.subcontractByDiscipline[d]) : "—"}
+                          <td className={`${borderCell} text-right`}>{fmtMoney(row.amountUntaxed)}</td>
+                          <td className={`${borderCell} text-right`}>{fmtMoney(row.taxAmount)}</td>
+                          <td className={`${borderCell} text-right`}>{fmtMoney(row.amountTotal)}</td>
+                          <td className={`${borderCell} text-right`}>{fmtMoney(row.receivedTotal)}</td>
+                          <td className={`${borderCell} text-right`}>{fmtMoney(row.unreceived)}</td>
+                          <td className={`${borderCell} text-right`} title={row.invoiceStatus}>{fmtMoney(row.invoicedTotal)}</td>
+                          <td className={`${borderCell} text-center`}>{row.contractStatus}</td>
+                          <td className={`${borderCell} max-w-48 whitespace-normal text-center`}>{row.engineerSignature || "—"}</td>
+                          <td className={`${borderCell} text-right`}>{fmtMoney(row.subcontractTotal)}</td>
+                          <td className={`${borderCell} text-center`}>{row.leadName ?? "—"}</td>
+                          <td className={`${borderCell} max-w-64 whitespace-normal`}>{row.note || "—"}</td>
+                          {disciplines.map((discipline) => (
+                            <td key={discipline} className={`${borderCell} text-right`}>
+                              {fmtMoney(row.subcontractByDiscipline[discipline])}
                             </td>
                           ))}
-                          <td className="py-1.5 pr-2 text-right text-gray-600">{fmtPct(row.billingProgressPct)}</td>
-                          <td className="py-1.5 pr-2 text-right text-gray-600">{fmtPct(row.receiptProgressPct)}</td>
-                          <td className="py-1.5 pr-2 text-right text-red-600">{fmtMoney(row.unreceived)}</td>
-                          <td className="py-1.5 pr-2 text-gray-600">
-                            {statusLabel(row.status)}
-                            {row.archived && <span className="ml-1 text-[10px] text-gray-400">已封存</span>}
-                          </td>
-                          <td className="py-1.5 pr-2 text-gray-600">{row.installments}</td>
+                          <td className={`${borderCell} text-right`}>{fmtPct(row.billingProgressPct)}</td>
+                          <td className={`${borderCell} text-right`}>{fmtPct(row.receiptProgressPct)}</td>
+                          <td className={`${borderCell} text-center`}>{statusLabel(row.status)}{row.archived ? "（封存）" : ""}</td>
+                          <td className={`${borderCell} text-center`}>{row.installments}</td>
                         </tr>
                       );
                     })}
-                    <tr key={`${block.month}-subtotal`} className="border-b-2 bg-gray-50/70 font-medium last:border-0">
-                      <td className="py-1.5 pr-2" colSpan={fixedColsBefore}>
-                        {formatBlockMonth(block.month)} 小計（{block.subtotal.count} 案）
-                      </td>
-                      <td className="py-1.5 pr-2 text-right">{fmtMoney(block.subtotal.amountUntaxed)}</td>
-                      <td className="py-1.5 pr-2 text-right">{fmtMoney(block.subtotal.taxAmount)}</td>
-                      <td className="py-1.5 pr-2 text-right">{fmtMoney(block.subtotal.amountTotal)}</td>
-                      <td colSpan={fixedColsAfterNote}></td>
-                      {disciplines.map((d) => (
-                        <td key={d} className="py-1.5 pr-2 text-right">
-                          {block.subtotal.subcontractByDiscipline[d] ? fmtMoney(block.subtotal.subcontractByDiscipline[d]) : "—"}
-                        </td>
-                      ))}
-                      <td colSpan={fixedColsProgress}></td>
-                      <td className="py-1.5 pr-2 text-right text-red-700">{fmtMoney(block.subtotal.unreceived)}</td>
-                      <td colSpan={fixedColsTail}></td>
-                    </tr>
+                    <TotalRow
+                      label={`${rowsBySeq.get(block.seqs[0])?.code ?? block.month}~${rowsBySeq.get(block.seqs.at(-1) ?? -1)?.code ?? block.month} 小計`}
+                      totals={block.subtotal}
+                      disciplines={disciplines}
+                    />
                   </Fragment>
                 ))}
               </tbody>
               <tfoot>
-                <tr className="border-t-2 border-gray-800 font-semibold">
-                  <td className="py-2 pr-2" colSpan={fixedColsBefore}>
-                    年度總計（{report.totals.count} 案）
-                  </td>
-                  <td className="py-2 pr-2 text-right">{fmtMoney(report.totals.amountUntaxed)}</td>
-                  <td className="py-2 pr-2 text-right">{fmtMoney(report.totals.taxAmount)}</td>
-                  <td className="py-2 pr-2 text-right">{fmtMoney(report.totals.amountTotal)}</td>
-                  <td colSpan={fixedColsAfterNote}></td>
-                  {disciplines.map((d) => (
-                    <td key={d} className="py-2 pr-2 text-right">
-                      {report.totals.subcontractByDiscipline[d] ? fmtMoney(report.totals.subcontractByDiscipline[d]) : "—"}
-                    </td>
-                  ))}
-                  <td colSpan={fixedColsProgress}></td>
-                  <td className="py-2 pr-2 text-right text-red-700">{fmtMoney(report.totals.unreceived)}</td>
-                  <td colSpan={fixedColsTail}></td>
-                </tr>
+                <TotalRow label={`${report.rocYear} 年度總計`} totals={report.totals} disciplines={disciplines} annual />
               </tfoot>
             </table>
           </div>

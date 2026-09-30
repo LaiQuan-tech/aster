@@ -482,6 +482,8 @@ export type AnnualProjectRow = {
   created_at: string
   /** 開案日（A5）。可空：缺值時退回 created_at 的台北日期。 */
   opened_on: string | null
+  /** 各科別協力技師，年度總表「簽證」欄使用。 */
+  engineers: unknown
 }
 
 export type AnnualRow = {
@@ -507,6 +509,12 @@ export type AnnualRow = {
   technicianTotal: number
   billedTotal: number
   receivedTotal: number
+  /** 有開票號碼或開票日的期款有效金額合計。 */
+  invoicedTotal: number
+  invoiceStatus: "未開票" | "部分開票" | "已全開票"
+  contractStatus: "未簽約" | "已簽約"
+  /** `科別：技師`，依租戶科別順序串接。 */
+  engineerSignature: string
   billingProgressPct: number | null
   receiptProgressPct: number | null
   unreceived: number | null
@@ -526,6 +534,7 @@ export type AnnualTotals = {
   amountTotal: number
   billedTotal: number
   receivedTotal: number
+  invoicedTotal: number
   unreceived: number
   subcontractTotal: number
   subcontractByDiscipline: Record<string, number>
@@ -556,6 +565,7 @@ function emptyTotals(): AnnualTotals {
     amountTotal: 0,
     billedTotal: 0,
     receivedTotal: 0,
+    invoicedTotal: 0,
     unreceived: 0,
     subcontractTotal: 0,
     subcontractByDiscipline: {},
@@ -569,6 +579,7 @@ function addTotals(t: AnnualTotals, r: AnnualRow): void {
   t.amountTotal += r.amountTotal ?? 0
   t.billedTotal += r.billedTotal
   t.receivedTotal += r.receivedTotal
+  t.invoicedTotal += r.invoicedTotal
   t.unreceived += r.unreceived ?? 0
   t.subcontractTotal += r.subcontractTotal + r.technicianTotal
   for (const [k, v] of Object.entries(r.subcontractByDiscipline)) {
@@ -583,6 +594,42 @@ function fmtMoney(n: number): string {
 /** C2：母案追加減帳與子案同時存在時寫進年度總表備註的警告（前端／xlsx 都是原字串輸出）。 */
 export const ANNUAL_DUPLICATE_COUNT_WARNING = "⚠ 母案追加減帳與子案可能重複採計，請擇一"
 
+type AnnualInvoiceBilling = Pick<
+  BillingRow,
+  "billed_on" | "billed_amount" | "override_amount" | "calculated_amount" | "invoice_no" | "invoiced_on"
+>
+
+/** 年度總表的「已開發票」採金額口徑：只計有發票號碼或開票日的期款。 */
+export function annualInvoicedTotal(billings: AnnualInvoiceBilling[]): number {
+  return billings.reduce((total, billing) => {
+    if (!billing.invoice_no && !billing.invoiced_on) return total
+    return total + (effectiveBillingAmount(billing) ?? 0)
+  }, 0)
+}
+
+type AnnualContract = Pick<ContractLite, "doc_type" | "our_role" | "signed_on">
+
+/** 報價、我方定作或未簽日期都不算「已簽約」。 */
+export function annualContractStatus(contracts: AnnualContract[]): "未簽約" | "已簽約" {
+  return contracts.some((contract) => (
+    contract.doc_type === "contract" && isOurContract(contract.our_role) && contract.signed_on !== null
+  )) ? "已簽約" : "未簽約"
+}
+
+type AnnualEngineer = { name?: unknown } | null
+
+/** 將 projects.engineers 轉成原總表單一「簽證」欄，設定內科別優先、額外科別隨後。 */
+export function annualEngineerSignature(engineers: unknown, disciplines: string[]): string {
+  if (!engineers || typeof engineers !== "object" || Array.isArray(engineers)) return ""
+  const byDiscipline = engineers as Record<string, AnnualEngineer>
+  const ordered = [...disciplines, ...Object.keys(byDiscipline).filter((key) => !disciplines.includes(key))]
+  return ordered.flatMap((discipline) => {
+    const rawName = byDiscipline[discipline]?.name
+    const name = typeof rawName === "string" ? rawName.trim() : ""
+    return name ? [`${discipline}：${name}`] : []
+  }).join("、")
+}
+
 /**
  * 該歸屬年度的所有專案，一列一案，含 reserved 空列；封存的除非 includeArchived。
  * 分母／稅／進度全走 computeMoney，與單案頁一致。
@@ -596,7 +643,7 @@ export async function buildAnnualTable(
   let q = supabaseAdmin
     .from("projects")
     .select(
-      "id, name, code, fiscal_year, status, kind, reserved_at, archived_at, client_id, lead_emp_id, other_expenses, created_at, opened_on",
+      "id, name, code, fiscal_year, status, kind, reserved_at, archived_at, client_id, lead_emp_id, other_expenses, created_at, opened_on, engineers",
     )
     .eq("tenant_id", tenantId)
     .eq("fiscal_year", year)
@@ -665,6 +712,7 @@ export async function buildAnnualTable(
     // A5：客戶事後補 K 單，K 單／建立日那天不能當這欄的日期——優先用開案日
     // （opened_on），只有既有資料還沒補過才退回建立日的台北日期。
     const createdOn = p.opened_on ?? localDateKey(p.created_at, tz)
+    const invoicedTotal = annualInvoicedTotal(pb)
     return {
       seq: 0,
       projectId: p.id,
@@ -686,6 +734,14 @@ export async function buildAnnualTable(
       technicianTotal: money.technicianTotal,
       billedTotal: money.billedTotal,
       receivedTotal: money.receivedTotal,
+      invoicedTotal,
+      invoiceStatus: invoicedTotal <= 0
+        ? "未開票"
+        : money.amountUntaxed !== null && invoicedTotal >= money.amountUntaxed
+          ? "已全開票"
+          : "部分開票",
+      contractStatus: annualContractStatus(pc),
+      engineerSignature: annualEngineerSignature(p.engineers, opts.settings.disciplines),
       billingProgressPct: money.billingProgressPct,
       receiptProgressPct: money.receiptProgressPct,
       unreceived: money.unreceived,

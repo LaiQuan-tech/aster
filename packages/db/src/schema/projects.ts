@@ -89,6 +89,8 @@ export const projects = pgTable(
     leadEmpId: uuid("lead_emp_id"),
     shareMode: text("share_mode").notNull().default("pool_pct"),
     bonusPool: numeric("bonus_pool"),
+    /** 新制專案獎金率（%）；有值時獎金池由合約總額 × 比例衍生，null 相容舊 bonusPool。 */
+    bonusRatePct: numeric("bonus_rate_pct", { precision: 7, scale: 4 }),
     // ── P3 專案申請單（模組五）新增 ──────────────────────────────────
     /** 業主／客戶。可空：知識庫舊案未必補得回業主資料。 */
     clientId: uuid("client_id").references(() => clients.id),

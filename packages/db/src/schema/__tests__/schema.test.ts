@@ -89,6 +89,7 @@ describe("projects table", () => {
         "leadEmpId",
         "shareMode",
         "bonusPool",
+        "bonusRatePct",
         // 模組四第 1 條：歸屬年度與編號分開。
         "fiscalYear",
       ]),
@@ -98,6 +99,10 @@ describe("projects table", () => {
   it("tenantId is not null and shareMode defaults to pool_pct", () => {
     expect(cols.tenantId.notNull).toBe(true)
     expect(cols.shareMode.default).toBe("pool_pct")
+  })
+
+  it("專案獎金比例可空，供新制依合約額計算獎金池", () => {
+    expect(cols.bonusRatePct.notNull).toBe(false)
   })
 
   // 編號唯一性是 DB 的事，不是應用層的事：兩人同時建案時各自查都說沒重複。
@@ -287,8 +292,17 @@ describe("projectShareAdjustments table", () => {
         "oldValue",
         "newValue",
         "changedByEmpId",
+        "changeSetId",
       ]),
     )
+  })
+
+  it("整批分潤異動可依 changeSetId 聚合且有索引", () => {
+    expect(cols.changeSetId.notNull).toBe(false)
+    const idx = getTableConfig(projectShareAdjustments).indexes.find(
+      (i) => i.config.name === "project_share_adjustments_change_set_idx",
+    )
+    expect(idx).toBeDefined()
   })
 })
 

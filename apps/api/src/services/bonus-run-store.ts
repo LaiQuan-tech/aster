@@ -116,6 +116,13 @@ export type ItemSnapshot = {
   employeeName?: string | null
   empNo?: string | null
   roleInProject?: string | null
+  bonusRatePct?: number | null
+  previousReceived?: number
+  previousReceivedPct?: number
+  currentReceived?: number
+  currentReceivedPct?: number
+  unallocatedPct?: number
+  projectNote?: string | null
   overpaidBy?: number
   stale?: boolean
 }
@@ -155,9 +162,16 @@ export type SerializedItem = {
   sharePct: number | null
   shareAmount: number | null
   bonusPool: number | null
+  bonusRatePct: number | null
   contractTotal: number | null
   receivedTotal: number
   receivedPct: number
+  previousReceived: number
+  previousReceivedPct: number
+  currentReceived: number
+  currentReceivedPct: number
+  unallocatedPct: number
+  projectNote: string | null
   entitledCumulative: number
   paidBefore: number
   amount: number
@@ -262,9 +276,16 @@ function serializeItem(row: ItemRow): SerializedItem {
     sharePct: num(row.share_pct),
     shareAmount: num(row.share_amount),
     bonusPool: num(row.bonus_pool),
+    bonusRatePct: typeof s.bonusRatePct === "number" ? s.bonusRatePct : null,
     contractTotal: num(row.contract_total),
     receivedTotal: num(row.received_total) ?? 0,
     receivedPct: num(row.received_pct) ?? 0,
+    previousReceived: typeof s.previousReceived === "number" ? s.previousReceived : 0,
+    previousReceivedPct: typeof s.previousReceivedPct === "number" ? s.previousReceivedPct : 0,
+    currentReceived: typeof s.currentReceived === "number" ? s.currentReceived : (num(row.received_total) ?? 0),
+    currentReceivedPct: typeof s.currentReceivedPct === "number" ? s.currentReceivedPct : (num(row.received_pct) ?? 0),
+    unallocatedPct: typeof s.unallocatedPct === "number" ? s.unallocatedPct : 0,
+    projectNote: typeof s.projectNote === "string" ? s.projectNote : null,
     entitledCumulative: num(row.entitled_cumulative) ?? 0,
     paidBefore: num(row.paid_before) ?? 0,
     amount: num(row.amount) ?? 0,
@@ -299,11 +320,11 @@ export async function tenantToday(tenantId: string): Promise<string> {
 async function loadInputs(tenantId: string, asOf: string): Promise<LoadedInputs> {
   const { data: projRows, error: projErr } = await supabaseAdmin
     .from("projects")
-    .select("id, code, name, share_mode, bonus_pool")
+    .select("id, code, name, description, share_mode, bonus_pool, bonus_rate_pct")
     .eq("tenant_id", tenantId)
     .is("archived_at", null)
   if (projErr) throw new Error(`bonus-run loadInputs (projects): ${projErr.message}`)
-  const projects = (projRows ?? []) as Array<{ id: string; code: string | null; name: string; share_mode: string; bonus_pool: string | null }>
+  const projects = (projRows ?? []) as Array<{ id: string; code: string | null; name: string; description: string | null; share_mode: string; bonus_pool: string | null; bonus_rate_pct: string | null }>
   const projectMeta = new Map<string, ProjectMeta>(projects.map((p) => [p.id, { id: p.id, code: p.code, name: p.name }]))
   if (projects.length === 0) return { projects: [], projectMeta, employeeMeta: new Map() }
   const ids = projects.map((p) => p.id)
@@ -390,6 +411,8 @@ async function loadInputs(tenantId: string, asOf: string): Promise<LoadedInputs>
     projectId: p.id,
     shareMode: p.share_mode,
     bonusPool: num(p.bonus_pool),
+    bonusRatePct: num(p.bonus_rate_pct),
+    projectNote: p.description,
     contractTotal: contractTotal.has(p.id) ? (contractTotal.get(p.id) as number) : null,
     receivedTotal: receivedTotal.get(p.id) ?? 0,
     members: membersByProject.get(p.id) ?? [],
@@ -425,6 +448,45 @@ export async function loadPaidBefore(tenantId: string, excludeRunId?: string | n
   return map
 }
 
+/** 各專案最近一個已發放 regular 批次的凍結累計收款，供「之前／本次請領」拆分。 */
+export async function loadPreviousReceived(tenantId: string, excludeRunId?: string | null): Promise<Map<string, number>> {
+  let q = supabaseAdmin
+    .from("bonus_runs")
+    .select("id, paid_on, created_at")
+    .eq("tenant_id", tenantId)
+    .eq("status", "paid")
+    .eq("kind", "regular")
+    .is("deleted_at", null)
+    .order("paid_on", { ascending: false })
+    .order("created_at", { ascending: false })
+  if (excludeRunId) q = q.neq("id", excludeRunId)
+  const { data: runs, error } = await q
+  if (error) throw new Error(`bonus-run loadPreviousReceived (runs): ${error.message}`)
+  const runIds = (runs ?? []).map((run) => run.id as string)
+  if (runIds.length === 0) return new Map()
+  type PreviousItemRow = { run_id: string; project_id: string; received_total: string | number }
+  const rows = await fetchAll<PreviousItemRow>(
+    (from, to) => supabaseAdmin
+      .from("bonus_run_items")
+      .select("run_id, project_id, received_total")
+      .eq("tenant_id", tenantId)
+      .in("run_id", runIds)
+      .order("id", { ascending: true })
+      .range(from, to),
+    "bonus-run loadPreviousReceived (items)",
+  )
+  const rank = new Map(runIds.map((id, index) => [id, index]))
+  const selectedRank = new Map<string, number>()
+  const result = new Map<string, number>()
+  for (const row of rows) {
+    const candidateRank = rank.get(row.run_id) ?? Number.MAX_SAFE_INTEGER
+    if ((selectedRank.get(row.project_id) ?? Number.MAX_SAFE_INTEGER) <= candidateRank) continue
+    selectedRank.set(row.project_id, candidateRank)
+    result.set(row.project_id, num(row.received_total) ?? 0)
+  }
+  return result
+}
+
 /* ──────────────────────────────────────────────────────────────────
  * 試算（不寫入）
  * ────────────────────────────────────────────────────────────────── */
@@ -442,8 +504,12 @@ export type PreviewResult = {
 }
 
 export async function previewRun(tenantId: string, asOf: string, excludeRunId?: string | null): Promise<PreviewResult> {
-  const [inputs, paidBefore] = await Promise.all([loadInputs(tenantId, asOf), loadPaidBefore(tenantId, excludeRunId)])
-  const { items, totals } = computeBonusRun(inputs.projects, paidBefore)
+  const [inputs, paidBefore, previousReceived] = await Promise.all([
+    loadInputs(tenantId, asOf),
+    loadPaidBefore(tenantId, excludeRunId),
+    loadPreviousReceived(tenantId, excludeRunId),
+  ])
+  const { items, totals } = computeBonusRun(inputs.projects, paidBefore, previousReceived)
   const skippedIds = new Set(totals.skipped.map((s) => s.projectId))
   const snapshot = {
     asOf,
@@ -456,6 +522,8 @@ export async function previewRun(tenantId: string, asOf: string, excludeRunId?: 
         name: meta?.name ?? null,
         shareMode: p.shareMode,
         bonusPool: p.bonusPool,
+        bonusRatePct: p.bonusRatePct,
+        projectNote: p.projectNote,
         contractTotal: p.contractTotal,
         receivedTotal: p.receivedTotal,
         memberCount: p.members.length,
@@ -485,9 +553,16 @@ export async function previewRun(tenantId: string, asOf: string, excludeRunId?: 
       sharePct: i.sharePct,
       shareAmount: i.shareAmount,
       bonusPool: i.bonusPool,
+      bonusRatePct: i.bonusRatePct,
       contractTotal: i.contractTotal,
       receivedTotal: i.receivedTotal,
       receivedPct: i.receivedPct,
+      previousReceived: i.previousReceived,
+      previousReceivedPct: i.previousReceivedPct,
+      currentReceived: i.currentReceived,
+      currentReceivedPct: i.currentReceivedPct,
+      unallocatedPct: i.unallocatedPct,
+      projectNote: i.projectNote,
       entitledCumulative: i.entitledCumulative,
       paidBefore: i.paidBefore,
       amount: i.amount,
@@ -518,6 +593,13 @@ function itemRowsOf(tenantId: string, runId: string, preview: PreviewResult) {
       employeeName: e?.name ?? null,
       empNo: e?.emp_no ?? null,
       roleInProject: i.roleInProject,
+      bonusRatePct: i.bonusRatePct,
+      previousReceived: i.previousReceived,
+      previousReceivedPct: i.previousReceivedPct,
+      currentReceived: i.currentReceived,
+      currentReceivedPct: i.currentReceivedPct,
+      unallocatedPct: i.unallocatedPct,
+      projectNote: i.projectNote,
       overpaidBy: i.overpaidBy,
       stale: false,
     }
@@ -839,9 +921,16 @@ export async function createReversalRun(tenantId: string, actor: Actor, runId: s
     sharePct: num(r.share_pct),
     shareAmount: num(r.share_amount),
     bonusPool: num(r.bonus_pool),
+    bonusRatePct: typeof r.snapshot?.bonusRatePct === "number" ? r.snapshot.bonusRatePct : null,
     contractTotal: num(r.contract_total) ?? 0,
     receivedTotal: num(r.received_total) ?? 0,
     receivedPct: num(r.received_pct) ?? 0,
+    previousReceived: typeof r.snapshot?.previousReceived === "number" ? r.snapshot.previousReceived : 0,
+    previousReceivedPct: typeof r.snapshot?.previousReceivedPct === "number" ? r.snapshot.previousReceivedPct : 0,
+    currentReceived: typeof r.snapshot?.currentReceived === "number" ? r.snapshot.currentReceived : (num(r.received_total) ?? 0),
+    currentReceivedPct: typeof r.snapshot?.currentReceivedPct === "number" ? r.snapshot.currentReceivedPct : (num(r.received_pct) ?? 0),
+    unallocatedPct: typeof r.snapshot?.unallocatedPct === "number" ? r.snapshot.unallocatedPct : 0,
+    projectNote: typeof r.snapshot?.projectNote === "string" ? r.snapshot.projectNote : null,
     entitledCumulative: num(r.entitled_cumulative) ?? 0,
     paidBefore: num(r.paid_before) ?? 0,
     amount: num(r.amount) ?? 0,
