@@ -21,11 +21,17 @@ import {
   type AnnualGrantEntry,
   type AnnualGrantResult,
 } from "@/lib/leave-balances-api";
+import {
+  downloadEmployeeLeaveRegister,
+  getEmployeeLeaveRegister,
+  type EmployeeLeaveRegister,
+} from "@/lib/leave-register-api";
 
 const yearNow = new Date().getFullYear();
 const tabs = [
   { id: "special", label: "特殊假確認" },
   { id: "query", label: "剩餘假別時數" },
+  { id: "register", label: "年度請假表" },
   { id: "grant", label: "年度給假" },
 ] as const;
 
@@ -51,6 +57,7 @@ export default function LeaveBalancesPage() {
   const [leaveTypes, setLeaveTypes] = useState<LeaveType[]>([]);
   const [balances, setBalances] = useState<LeaveBalance[]>([]);
   const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
+  const [leaveRegister, setLeaveRegister] = useState<EmployeeLeaveRegister | null>(null);
   const [employeeId, setEmployeeId] = useState("");
   const [year, setYear] = useState(yearNow);
   const [editEmployeeId, setEditEmployeeId] = useState("");
@@ -112,23 +119,27 @@ export default function LeaveBalancesPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [balanceRes, employeeRes, leaveTypeRes, requestRes] = await Promise.all([
+      const [balanceRes, employeeRes, leaveTypeRes, requestRes, registerRes] = await Promise.all([
         getLeaveBalancesAdmin({ employeeId: employeeId || undefined, year }),
         getEmployees(),
         getLeaveTypes(),
         getRequests({ kind: "leave", employeeId: employeeId || undefined, from: `${year}-01-01`, to: `${year}-12-31` }),
+        activeTab === "register" && employeeId
+          ? getEmployeeLeaveRegister({ employeeId, year })
+          : Promise.resolve(null),
       ]);
       setBalances(balanceRes.balances);
       setEmployees(employeeRes.employees);
       setLeaveTypes(leaveTypeRes.leaveTypes);
       setLeaveRequests(requestRes.requests);
+      setLeaveRegister(registerRes);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入假別時數失敗");
     } finally {
       setLoading(false);
     }
-  }, [employeeId, year]);
+  }, [activeTab, employeeId, year]);
 
   useEffect(() => {
     void load();
@@ -332,6 +343,82 @@ export default function LeaveBalancesPage() {
                       </tr>
                     );
                   })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      )}
+
+      {activeTab === "register" && (
+        <Card>
+          <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-medium text-gray-700">年度請假表</h2>
+              {leaveRegister && (
+                <p className="mt-1 text-xs text-gray-500">
+                  {leaveRegister.employee.empNo ? `${leaveRegister.employee.empNo} · ` : ""}
+                  {leaveRegister.employee.name}　到職日：{leaveRegister.employee.hireDate || "未填"}　
+                  1日 = {leaveRegister.register.dailyRegularHours}小時
+                </p>
+              )}
+            </div>
+            {leaveRegister && (
+              <button
+                type="button"
+                className="rounded-xl border border-gray-200 px-4 py-2 text-sm text-gray-700 disabled:opacity-40"
+                onClick={() => void downloadEmployeeLeaveRegister({
+                  employeeId: leaveRegister.employee.id,
+                  year,
+                  employeeName: leaveRegister.employee.name,
+                })}
+              >
+                匯出 Excel
+              </button>
+            )}
+          </div>
+          {loading ? (
+            <Empty>載入中…</Empty>
+          ) : !employeeId ? (
+            <Empty>請先選擇員工，再查看年度請假表</Empty>
+          ) : !leaveRegister ? (
+            <Empty>查無員工資料</Empty>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full border-collapse text-sm">
+                <thead>
+                  <tr className="bg-gray-50 text-xs text-gray-700">
+                    <th className="border border-black px-3 py-2 text-center font-medium">月份</th>
+                    {leaveRegister.register.leaveTypes.map((type) => (
+                      <th key={type.id} className="border border-black px-3 py-2 text-center font-medium">{type.name}</th>
+                    ))}
+                    <th className="border border-black px-3 py-2 text-center font-medium">合計(hr)</th>
+                    <th className="border border-black px-3 py-2 text-center font-medium">合計(日)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {leaveRegister.register.months.map((month) => (
+                    <tr key={month.month}>
+                      <td className="border border-black px-3 py-2 text-center">{month.month}月</td>
+                      {leaveRegister.register.leaveTypes.map((type) => (
+                        <td key={type.id} className="border border-black px-3 py-2 text-center">
+                          {month.hoursByType[type.id] ?? 0}
+                        </td>
+                      ))}
+                      <td className="border border-black px-3 py-2 text-center font-medium">{month.totalHours}</td>
+                      <td className="border border-black px-3 py-2 text-center">{month.totalDays}</td>
+                    </tr>
+                  ))}
+                  <tr className="bg-gray-50 font-semibold">
+                    <td className="border border-black px-3 py-2 text-center">總計</td>
+                    {leaveRegister.register.leaveTypes.map((type) => (
+                      <td key={type.id} className="border border-black px-3 py-2 text-center">
+                        {leaveRegister.register.totals.hoursByType[type.id] ?? 0}
+                      </td>
+                    ))}
+                    <td className="border border-black px-3 py-2 text-center">{leaveRegister.register.totals.totalHours}</td>
+                    <td className="border border-black px-3 py-2 text-center">{leaveRegister.register.totals.totalDays}</td>
+                  </tr>
                 </tbody>
               </table>
             </div>

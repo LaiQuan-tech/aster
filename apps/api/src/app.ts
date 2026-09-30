@@ -22,6 +22,7 @@ import { exportsRouter } from "./routes/exports.js"
 import { calendarRouter } from "./routes/calendar.js"
 import { payrollRouter } from "./routes/payroll.js"
 import { leaveBalancesRouter } from "./routes/leave-balances.js"
+import { leaveRegisterRouter } from "./routes/leave-register.js"
 import { compTimeRouter } from "./routes/comp-time.js"
 import { reportsRouter } from "./routes/reports.js"
 import { detectionRouter } from "./routes/detection.js"
@@ -136,6 +137,7 @@ app.use(exportsRouter)
 app.use(calendarRouter)
 app.use(payrollRouter)
 app.use(leaveBalancesRouter)
+app.use(leaveRegisterRouter)
 app.use(compTimeRouter)
 app.use(reportsRouter)
 app.use(detectionRouter)
