@@ -1,4 +1,4 @@
-import ExcelJS from "exceljs"
+import type ExcelJS from "exceljs"
 import { applyHeaderStyle, workbookToBuffer } from "./index.js"
 import type { DisbursementPivotResult } from "../../services/disbursement-pivot.js"
 
@@ -26,8 +26,10 @@ function money(cell: ExcelJS.Cell, v: number): void {
   cell.alignment = { horizontal: "right" }
 }
 
-export function buildDisbursementPivotWorkbook(pivot: DisbursementPivotResult): ExcelJS.Workbook {
-  const wb = new ExcelJS.Workbook()
+export async function buildDisbursementPivotWorkbook(pivot: DisbursementPivotResult): Promise<ExcelJS.Workbook> {
+  // exceljs 動態載入：見 lib/xlsx/attendance-sheet.ts 檔頭同樣的冷啟動考量。
+  const { default: ExcelJSRuntime } = await import("exceljs")
+  const wb = new ExcelJSRuntime.Workbook()
   wb.creator = "aster-hr"
   const groupLabel = GROUP_BY_LABEL[pivot.groupBy]
   const ws = wb.addWorksheet(`${pivot.year}放款樞紐`, { views: [{ state: "frozen", ySplit: 4, xSplit: 1 }] })
@@ -93,5 +95,5 @@ export function disbursementPivotFilename(pivot: DisbursementPivotResult): strin
 }
 
 export async function disbursementPivotWorkbookBuffer(pivot: DisbursementPivotResult): Promise<Buffer> {
-  return workbookToBuffer(buildDisbursementPivotWorkbook(pivot))
+  return workbookToBuffer(await buildDisbursementPivotWorkbook(pivot))
 }

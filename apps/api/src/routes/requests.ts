@@ -94,6 +94,9 @@ const querySchema = z.object({
   // scope=mine：任何角色（含 HR）都只回自己申請的單——ESS「我的申請」用。
   // 沒帶就是舊行為（HR 全租戶／非 HR 自己 ∪ 輪到我簽）。
   scope: z.enum(["mine"]).optional(),
+  // countOnly=1（2026-09-30 效能）：權限與篩選條件完全相同，只回 { count }，不撈整批列、
+  // 不跑 enrichRequestRows——後台首頁「待簽核假單」卡只要筆數，原本整批列約 24KB。
+  countOnly: z.enum(["1"]).optional(),
 })
 
 const batchDecisionSchema = z.object({
@@ -714,13 +717,33 @@ requestsRouter.get(
       res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
       return
     }
-    const { status, kind, employeeId, from, to, scope } = parsed.data
+    const { status, kind, employeeId, from, to, scope, countOnly } = parsed.data
 
     try {
       const self = await resolveSelf(tenantId, userId)
       const isHr = isHrRole(self?.role)
 
       if (scope === "mine") {
+        if (countOnly) {
+          // 任何角色都釘在自己；沒有員工列 → 不可能的 id → 空陣列（不外洩）。
+          let cq = supabaseAdmin
+            .from("leave_requests")
+            .select("id", { count: "exact", head: true })
+            .eq("tenant_id", tenantId)
+            .is("deleted_at", null)
+            .eq("employee_id", self?.id ?? NIL_UUID)
+          if (status) cq = cq.eq("status", status)
+          if (kind) cq = cq.eq("kind", kind)
+          if (from) cq = cq.gte("start_at", `${from}T00:00:00.000Z`)
+          if (to) cq = cq.lte("start_at", `${to}T23:59:59.999Z`)
+          const { count, error } = await cq
+          if (error) {
+            next(new Error(`GET /requests (mine count): ${error.message}`))
+            return
+          }
+          res.status(200).json({ count: count ?? 0 })
+          return
+        }
         // 任何角色都釘在自己；沒有員工列 → 不可能的 id → 空陣列（不外洩）。
         let query = supabaseAdmin
           .from("leave_requests")
@@ -742,6 +765,25 @@ requestsRouter.get(
       }
 
       if (isHr) {
+        if (countOnly) {
+          let cq = supabaseAdmin
+            .from("leave_requests")
+            .select("id", { count: "exact", head: true })
+            .eq("tenant_id", tenantId)
+            .is("deleted_at", null)
+          if (status) cq = cq.eq("status", status)
+          if (kind) cq = cq.eq("kind", kind)
+          if (employeeId) cq = cq.eq("employee_id", employeeId)
+          if (from) cq = cq.gte("start_at", `${from}T00:00:00.000Z`)
+          if (to) cq = cq.lte("start_at", `${to}T23:59:59.999Z`)
+          const { count, error } = await cq
+          if (error) {
+            next(new Error(`GET /requests (hr count): ${error.message}`))
+            return
+          }
+          res.status(200).json({ count: count ?? 0 })
+          return
+        }
         let query = supabaseAdmin
           .from("leave_requests")
           .select(await requestCols())
@@ -784,6 +826,38 @@ requestsRouter.get(
         orParts.push(`id.in.(${candidateIds.join(",")})`)
       }
 
+      // Keep: my own requests, OR a pending request where my step == current_step.
+      // 這個判斷跨了兩份資料（DB 篩不出「current_step 剛好等於我的關卡」），countOnly
+      // 也一樣要照這個邏輯過濾才會跟不帶時的 requests.length 一致——差別只在只
+      // 選 4 個最小欄位、不跑 enrichRequestRows（多支查詢的補齊，是 24KB 的主因）。
+      function isVisible(r: { id: string; employee_id: string; status: string; current_step: number }): boolean {
+        if (r.employee_id === selfId) return true
+        if (r.status !== "pending") return false
+        const myStepOrders = stepByRequest.get(r.id)
+        return !!myStepOrders && myStepOrders.has(r.current_step)
+      }
+
+      if (countOnly) {
+        let cq = supabaseAdmin
+          .from("leave_requests")
+          .select("id, employee_id, status, current_step")
+          .eq("tenant_id", tenantId)
+          .is("deleted_at", null)
+          .or(orParts.join(","))
+        if (status) cq = cq.eq("status", status)
+        if (kind) cq = cq.eq("kind", kind)
+        if (from) cq = cq.gte("start_at", `${from}T00:00:00.000Z`)
+        if (to) cq = cq.lte("start_at", `${to}T23:59:59.999Z`)
+        const { data: rows, error } = await cq
+        if (error) {
+          next(new Error(`GET /requests (self count): ${error.message}`))
+          return
+        }
+        const minimalRows = (rows ?? []) as unknown as Array<{ id: string; employee_id: string; status: string; current_step: number }>
+        res.status(200).json({ count: minimalRows.filter(isVisible).length })
+        return
+      }
+
       let query = supabaseAdmin
         .from("leave_requests")
         .select(await requestCols())
@@ -800,13 +874,7 @@ requestsRouter.get(
         return
       }
 
-      // Keep: my own requests, OR a pending request where my step == current_step.
-      const visible = asRequestRows(data).filter((r) => {
-        if (r.employee_id === selfId) return true
-        if (r.status !== "pending") return false
-        const myStepOrders = stepByRequest.get(r.id)
-        return !!myStepOrders && myStepOrders.has(r.current_step)
-      })
+      const visible = asRequestRows(data).filter(isVisible)
 
       res.status(200).json({ requests: await enrichRequestRows(tenantId, visible) })
     } catch (err) {

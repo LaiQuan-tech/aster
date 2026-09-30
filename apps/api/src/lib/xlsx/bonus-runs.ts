@@ -1,4 +1,4 @@
-import ExcelJS from "exceljs"
+import type ExcelJS from "exceljs"
 import { applyHeaderStyle, toRocYear, workbookToBuffer } from "./index.js"
 import type { SerializedItem, SerializedRun } from "../../services/bonus-run-store.js"
 
@@ -40,8 +40,10 @@ function rocDate(day: string | null): string {
   return `${toRocYear(y)}.${m}.${d}`
 }
 
-export function buildBonusRunWorkbook(run: SerializedRun, items: SerializedItem[]): ExcelJS.Workbook {
-  const wb = new ExcelJS.Workbook()
+export async function buildBonusRunWorkbook(run: SerializedRun, items: SerializedItem[]): Promise<ExcelJS.Workbook> {
+  // exceljs 動態載入：見 lib/xlsx/attendance-sheet.ts 檔頭同樣的冷啟動考量。
+  const { default: ExcelJSRuntime } = await import("exceljs")
+  const wb = new ExcelJSRuntime.Workbook()
   wb.creator = "aster-hr"
   const ws = wb.addWorksheet(run.label, { views: [{ state: "frozen", ySplit: 3 }] })
 
@@ -128,5 +130,5 @@ export function bonusRunFilename(run: SerializedRun): string {
 }
 
 export async function bonusRunWorkbookBuffer(run: SerializedRun, items: SerializedItem[]): Promise<Buffer> {
-  return workbookToBuffer(buildBonusRunWorkbook(run, items))
+  return workbookToBuffer(await buildBonusRunWorkbook(run, items))
 }

@@ -27,7 +27,7 @@ import {
   type Payable,
 } from "@/lib/disbursements-api";
 import { buildRemittanceText, copyText } from "@/lib/remittance";
-import { getMe } from "@/lib/admin-api";
+import { getMeCached } from "@/lib/ess-state";
 import type { ApiError } from "@/lib/api-client";
 
 function fmtMoney(n: number | null | undefined): string {
@@ -135,7 +135,7 @@ export default function DisbursementsPage() {
   useEffect(() => {
     void (async () => {
       try {
-        const me = await getMe();
+        const me = await getMeCached();
         setIsHr(me.role === "hr_admin" || me.role === "platform_admin");
       } catch {
         /* 取不到就當非 HR，少一個強制放行選項 */

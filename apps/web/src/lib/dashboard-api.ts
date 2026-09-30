@@ -68,3 +68,15 @@ export async function getCompanyPageSummary(slug: string): Promise<CompanyPageSu
   const r = await apiFetch<{ pages: CompanyPageSummary[] }>(`/company-pages?${q.toString()}`);
   return r.pages.find((p) => p.slug === slug) ?? null;
 }
+
+/**
+ * 「待簽核假單」卡只要筆數：GET /requests?status=pending&countOnly=1 與
+ * GET /requests?status=pending 權限、篩選條件完全相同，只回 `{ count }`，不撈整批列、
+ * 不跑逐列補齊（原本這張卡拿整批 requests 只為了 .length，約 24KB）。
+ * 部署先後相容：舊 API 不認得 countOnly 會忽略、照樣回 `{ requests: [...] }`，這裡退回
+ * requests.length，卡片數字不受部署順序影響。
+ */
+export async function getPendingRequestsCount(): Promise<number> {
+  const r = await apiFetch<{ count?: number; requests?: unknown[] }>("/requests?status=pending&countOnly=1");
+  return r.count ?? r.requests?.length ?? 0;
+}

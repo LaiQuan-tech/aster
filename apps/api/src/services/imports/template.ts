@@ -1,4 +1,4 @@
-import ExcelJS from "exceljs"
+import type ExcelJS from "exceljs"
 import { applyHeaderStyle, workbookToBuffer } from "../../lib/xlsx/index.js"
 import { IMPORT_KIND_DEFS, type ImportColumn, type ImportKind } from "./kinds.js"
 import { DATA_SHEET_NAME } from "./parse.js"
@@ -134,9 +134,11 @@ export interface TemplateRefs {
 }
 
 /** 純函式：kind 定義＋參考資料 → Workbook（不連 DB）。 */
-export function buildImportWorkbook(kind: ImportKind, refs: TemplateRefs): ExcelJS.Workbook {
+export async function buildImportWorkbook(kind: ImportKind, refs: TemplateRefs): Promise<ExcelJS.Workbook> {
   const def = IMPORT_KIND_DEFS[kind]
-  const wb = new ExcelJS.Workbook()
+  // exceljs 動態載入：見 lib/xlsx/attendance-sheet.ts 檔頭同樣的冷啟動考量。
+  const { default: ExcelJSRuntime } = await import("exceljs")
+  const wb = new ExcelJSRuntime.Workbook()
   wb.creator = "aster"
   wb.created = new Date()
 
@@ -167,5 +169,5 @@ export async function loadTemplateRefs(kind: ImportKind, tenantId: string): Prom
 
 export async function buildImportTemplate(kind: ImportKind, tenantId: string): Promise<Buffer> {
   const refs = await loadTemplateRefs(kind, tenantId)
-  return workbookToBuffer(buildImportWorkbook(kind, refs))
+  return workbookToBuffer(await buildImportWorkbook(kind, refs))
 }

@@ -128,7 +128,7 @@ exportsRouter.get(
       }
 
       const letterhead = await resolveLetterhead(tenantId)
-      const wb = buildAttendanceWorkbook([view], letterhead)
+      const wb = await buildAttendanceWorkbook([view], letterhead)
       const buffer = await workbookToBuffer(wb)
 
       sendXlsx(res, buffer, `${periodLabel(view.period)} 出勤統計表-${view.employeeName}.xlsx`)
@@ -180,7 +180,7 @@ exportsRouter.get(
       }
 
       const letterhead = await resolveLetterhead(tenantId)
-      const wb = buildAttendanceWorkbook(views, letterhead)
+      const wb = await buildAttendanceWorkbook(views, letterhead)
       const buffer = await workbookToBuffer(wb)
 
       sendXlsx(res, buffer, `${periodLabel(period)} 出勤統計表-全員.xlsx`)

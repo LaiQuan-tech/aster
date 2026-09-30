@@ -1,4 +1,4 @@
-import ExcelJS from "exceljs"
+import type ExcelJS from "exceljs"
 import { applyHeaderStyle, toRocYear, workbookToBuffer } from "./index.js"
 import type { AnnualTable, AnnualTotals } from "../../services/project-application-store.js"
 
@@ -40,8 +40,10 @@ function rocToday(today: string): string {
   return `${toRocYear(y)}.${m}.${d}`
 }
 
-export function buildAnnualWorkbook(table: AnnualTable, opts: BuildAnnualWorkbookOptions): ExcelJS.Workbook {
-  const wb = new ExcelJS.Workbook()
+export async function buildAnnualWorkbook(table: AnnualTable, opts: BuildAnnualWorkbookOptions): Promise<ExcelJS.Workbook> {
+  // exceljs 動態載入：見 lib/xlsx/attendance-sheet.ts 檔頭同樣的冷啟動考量。
+  const { default: ExcelJSRuntime } = await import("exceljs")
+  const wb = new ExcelJSRuntime.Workbook()
   wb.creator = "aster-hr"
   const ws = wb.addWorksheet(`${table.rocYear}年度總表`, {
     views: [{ state: "frozen", ySplit: 5 }],
@@ -177,5 +179,5 @@ export async function annualWorkbookBuffer(
   table: AnnualTable,
   opts: BuildAnnualWorkbookOptions,
 ): Promise<Buffer> {
-  return workbookToBuffer(buildAnnualWorkbook(table, opts))
+  return workbookToBuffer(await buildAnnualWorkbook(table, opts))
 }

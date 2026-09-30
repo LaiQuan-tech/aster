@@ -1,4 +1,4 @@
-import ExcelJS from "exceljs"
+import type ExcelJS from "exceljs"
 import { applyHeaderStyle, toRocYear, workbookToBuffer } from "./index.js"
 import type { SerializedDisbursement } from "../../services/disbursements.js"
 
@@ -28,11 +28,13 @@ function rocDate(day: string): string {
   return `${toRocYear(y)}.${m}.${d}`
 }
 
-export function buildDisbursementsWorkbook(
+export async function buildDisbursementsWorkbook(
   rows: SerializedDisbursement[],
   opts: BuildDisbursementsWorkbookOptions,
-): ExcelJS.Workbook {
-  const wb = new ExcelJS.Workbook()
+): Promise<ExcelJS.Workbook> {
+  // exceljs 動態載入：見 lib/xlsx/attendance-sheet.ts 檔頭同樣的冷啟動考量。
+  const { default: ExcelJSRuntime } = await import("exceljs")
+  const wb = new ExcelJSRuntime.Workbook()
   wb.creator = "aster-hr"
   const ws = wb.addWorksheet("放款紀錄", { views: [{ state: "frozen", ySplit: 4 }] })
 
@@ -114,5 +116,5 @@ export async function disbursementsWorkbookBuffer(
   rows: SerializedDisbursement[],
   opts: BuildDisbursementsWorkbookOptions,
 ): Promise<Buffer> {
-  return workbookToBuffer(buildDisbursementsWorkbook(rows, opts))
+  return workbookToBuffer(await buildDisbursementsWorkbook(rows, opts))
 }

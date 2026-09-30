@@ -1,4 +1,4 @@
-import ExcelJS from "exceljs"
+import type ExcelJS from "exceljs"
 import { IMPORT_KIND_DEFS, type ImportKind } from "./kinds.js"
 
 /**
@@ -111,7 +111,9 @@ function fingerprintOf(values: string[]): string {
 
 export async function parseImportWorkbook(buffer: Buffer, kind: ImportKind): Promise<ParseImportResult> {
   const def = IMPORT_KIND_DEFS[kind]
-  const wb = new ExcelJS.Workbook()
+  // exceljs 動態載入：見 lib/xlsx/attendance-sheet.ts 檔頭同樣的冷啟動考量。
+  const { default: ExcelJSRuntime } = await import("exceljs")
+  const wb = new ExcelJSRuntime.Workbook()
   await wb.xlsx.load(buffer as unknown as ArrayBuffer)
   const ws = wb.getWorksheet(DATA_SHEET_NAME) ?? wb.worksheets[0]
   if (!ws) {

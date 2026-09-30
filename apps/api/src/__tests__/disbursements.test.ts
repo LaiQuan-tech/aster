@@ -249,7 +249,7 @@ describe("xlsx 放款紀錄", () => {
   }
 
   it("表頭 15 欄（含 B2 新增有發票／發票號碼）、一列一筆、合計不含作廢", async () => {
-    const wb = buildDisbursementsWorkbook(
+    const wb = await buildDisbursementsWorkbook(
       [
         d({}),
         d({ id: "y", disbursementNo: "D-115-002", status: "void", amount: 999, withheldAmount: 0, grossAmount: 999, hasInvoice: false, invoiceNo: null }),

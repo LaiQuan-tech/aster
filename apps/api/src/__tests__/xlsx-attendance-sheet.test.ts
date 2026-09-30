@@ -242,7 +242,7 @@ describe("buildAttendanceWorkbook — 余裕哲 115-06 fixture", () => {
   let ws: ExcelJS.Worksheet
 
   beforeAll(async () => {
-    const wb = buildAttendanceWorkbook([view], OPTS)
+    const wb = await buildAttendanceWorkbook([view], OPTS)
     expect(wb.worksheets).toHaveLength(1)
     expect(wb.worksheets[0].name).toBe("余裕哲")
 
@@ -297,7 +297,7 @@ describe("buildAttendanceWorkbook — 余裕哲 115-06 fixture", () => {
       ...view,
       totals: { ...view.totals, otTierLabels: ["≤1h", "2-4h", "5h 以上"] },
     }
-    const wb = buildAttendanceWorkbook([custom], OPTS)
+    const wb = await buildAttendanceWorkbook([custom], OPTS)
     const buffer = await workbookToBuffer(wb)
     const reloaded = new ExcelJS.Workbook()
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -449,14 +449,14 @@ function minimalView(id: string, employeeName: string): SheetView {
 
 describe("buildAttendanceWorkbook — edge cases", () => {
   it("views=[] 回傳空 workbook、不丟錯，且能正常序列化", async () => {
-    const wb = buildAttendanceWorkbook([], OPTS)
+    const wb = await buildAttendanceWorkbook([], OPTS)
     expect(wb.worksheets).toHaveLength(0)
     const buffer = await workbookToBuffer(wb)
     expect(buffer.length).toBeGreaterThan(0)
   })
 
-  it("兩個同名員工的 sheet 名不會相撞", () => {
-    const wb = buildAttendanceWorkbook(
+  it("兩個同名員工的 sheet 名不會相撞", async () => {
+    const wb = await buildAttendanceWorkbook(
       [minimalView("a", "測試員工"), minimalView("b", "測試員工")],
       OPTS,
     )

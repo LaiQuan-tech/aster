@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Card } from "@/components/admin-ui";
 import { SectionIcon } from "@/components/AdminShell";
-import { getRequests, getAnnouncements, type Announcement } from "@/lib/admin-api";
+import { getAnnouncements, type Announcement } from "@/lib/admin-api";
 import { adminModulesOf, homeEntries, isAdminPathAllowed, roleNavOf } from "@/lib/admin-nav";
 import { getDisbursementSummary, type DisbursementSummary } from "@/lib/disbursements-api";
 import {
@@ -21,6 +21,7 @@ import {
   getAnnualTotals,
   getCompanyPageSummary,
   getLatestBackupPeriod,
+  getPendingRequestsCount,
   listRecentChangeProjects,
   type CompanyPageSummary,
 } from "@/lib/dashboard-api";
@@ -217,8 +218,8 @@ export default function AdminOverview() {
 
     async function loadPending() {
       try {
-        const r = await getRequests("pending");
-        if (active) setPendingReq({ loading: false, error: null, data: r.requests.length });
+        const count = await getPendingRequestsCount();
+        if (active) setPendingReq({ loading: false, error: null, data: count });
       } catch (err) {
         if (active) setPendingReq({ loading: false, error: errMsg(err), data: null });
       }

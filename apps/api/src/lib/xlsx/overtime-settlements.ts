@@ -1,4 +1,4 @@
-import ExcelJS from "exceljs"
+import type ExcelJS from "exceljs"
 import { applyHeaderStyle, minutesToHours, toRocYear, workbookToBuffer } from "./index.js"
 import type { SerializedSettlement } from "../../routes/overtime-settlements.js"
 
@@ -31,11 +31,13 @@ function rocPeriod(period: string): string {
   return `${toRocYear(y)}年${m}月`
 }
 
-export function buildOvertimeSettlementsWorkbook(
+export async function buildOvertimeSettlementsWorkbook(
   period: string | undefined,
   rows: SerializedSettlement[],
-): ExcelJS.Workbook {
-  const wb = new ExcelJS.Workbook()
+): Promise<ExcelJS.Workbook> {
+  // exceljs 動態載入：見 lib/xlsx/attendance-sheet.ts 檔頭同樣的冷啟動考量。
+  const { default: ExcelJSRuntime } = await import("exceljs")
+  const wb = new ExcelJSRuntime.Workbook()
   wb.creator = "aster-hr"
   const ws = wb.addWorksheet(period ?? "全部期別", { views: [{ state: "frozen", ySplit: 3 }] })
 
@@ -99,5 +101,5 @@ export async function overtimeSettlementsWorkbookBuffer(
   period: string | undefined,
   rows: SerializedSettlement[],
 ): Promise<Buffer> {
-  return workbookToBuffer(buildOvertimeSettlementsWorkbook(period, rows))
+  return workbookToBuffer(await buildOvertimeSettlementsWorkbook(period, rows))
 }

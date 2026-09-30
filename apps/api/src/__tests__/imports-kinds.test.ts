@@ -25,7 +25,7 @@ const refs: TemplateRefs = {
 const SHEET_LABEL = { employees: "員工清單", shifts: "班別清單", departments: "部門清單" } as const
 
 async function reload(kind: (typeof IMPORT_KINDS)[number]): Promise<ExcelJS.Workbook> {
-  const buf = await workbookToBuffer(buildImportWorkbook(kind, refs))
+  const buf = await workbookToBuffer(await buildImportWorkbook(kind, refs))
   const wb = new ExcelJS.Workbook()
   await wb.xlsx.load(buf as unknown as ArrayBuffer)
   return wb
@@ -100,7 +100,7 @@ describe("buildImportWorkbook（write → reload）", () => {
 
   it("範本自己丟回 parseImportWorkbook：表頭吻合、範例列被當範例跳過、沒有資料列", async () => {
     for (const kind of IMPORT_KINDS) {
-      const buf = await workbookToBuffer(buildImportWorkbook(kind, refs))
+      const buf = await workbookToBuffer(await buildImportWorkbook(kind, refs))
       const r = await parseImportWorkbook(buf, kind)
       expect(r.headerErrors, kind).toEqual([])
       expect(r.rows, kind).toEqual([])

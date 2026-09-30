@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton, Segmented } from "@/components/admin-ui";
-import { getMe } from "@/lib/admin-api";
+import { getMeCached } from "@/lib/ess-state";
 import {
   approveDisbursement,
   getPendingDisbursementApprovals,
@@ -59,7 +59,7 @@ export default function DisbursementApprovalsPage() {
   useEffect(() => {
     void (async () => {
       try {
-        const me = await getMe();
+        const me = await getMeCached();
         setCanSeeAll(me.role === "hr_admin" || me.role === "platform_admin" || me.role === "accountant");
       } catch {
         /* 取不到就只給「輪到我簽」 */

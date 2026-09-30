@@ -1,4 +1,4 @@
-import ExcelJS from "exceljs"
+import type ExcelJS from "exceljs"
 import type {
   SheetAnomaly,
   SheetDayView,
@@ -494,11 +494,14 @@ export interface BuildAttendanceWorkbookOptions {
  * 一份 workbook，每個 SheetView 一個 worksheet（sheet 名＝姓名，重名加序號）。
  * 純函式：不吃 IO，`views` 為空陣列時回傳 0 個 worksheet 的空 workbook（不丟錯）。
  */
-export function buildAttendanceWorkbook(
+export async function buildAttendanceWorkbook(
   views: SheetView[],
   opts: BuildAttendanceWorkbookOptions,
-): ExcelJS.Workbook {
-  const wb = new ExcelJS.Workbook()
+): Promise<ExcelJS.Workbook> {
+  // exceljs 只在真的要產生 workbook 時才載入（動態 import）：靜態 import 會讓每次 API
+  // 冷啟動都付這筆載入成本，即使那次請求根本不需要 xlsx（見任務回報的冷啟動量測）。
+  const { default: ExcelJSRuntime } = await import("exceljs")
+  const wb = new ExcelJSRuntime.Workbook()
   wb.creator = opts.companyName
   wb.created = new Date()
 

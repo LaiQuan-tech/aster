@@ -1,4 +1,4 @@
-import ExcelJS from "exceljs"
+import type ExcelJS from "exceljs"
 import { applyHeaderStyle, toRocYear, workbookToBuffer } from "./index.js"
 import { festivalLabel } from "../../services/festival-bonus.js"
 
@@ -50,11 +50,13 @@ function rocDate(day: string | null): string {
   return `${toRocYear(y)}.${m}.${d}`
 }
 
-export function buildFestivalBonusWorkbook(
+export async function buildFestivalBonusWorkbook(
   meta: FestivalBonusXlsxMeta,
   rows: FestivalBonusXlsxRow[],
-): ExcelJS.Workbook {
-  const wb = new ExcelJS.Workbook()
+): Promise<ExcelJS.Workbook> {
+  // exceljs 動態載入：見 lib/xlsx/attendance-sheet.ts 檔頭同樣的冷啟動考量。
+  const { default: ExcelJSRuntime } = await import("exceljs")
+  const wb = new ExcelJSRuntime.Workbook()
   wb.creator = "aster-hr"
   const label = `${meta.year} ${festivalLabel(meta.festival)}`
   const ws = wb.addWorksheet(label, { views: [{ state: "frozen", ySplit: 3 }] })
@@ -135,5 +137,5 @@ export async function festivalBonusWorkbookBuffer(
   meta: FestivalBonusXlsxMeta,
   rows: FestivalBonusXlsxRow[],
 ): Promise<Buffer> {
-  return workbookToBuffer(buildFestivalBonusWorkbook(meta, rows))
+  return workbookToBuffer(await buildFestivalBonusWorkbook(meta, rows))
 }

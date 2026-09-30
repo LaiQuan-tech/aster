@@ -29,7 +29,8 @@ import {
   type DisbursementInput,
 } from "@/lib/disbursements-api";
 import { buildRemittanceText, copyText } from "@/lib/remittance";
-import { getEmployees, getMe, type Employee } from "@/lib/admin-api";
+import { getEmployees, type Employee } from "@/lib/admin-api";
+import { getMeCached } from "@/lib/ess-state";
 import type { ApiError } from "@/lib/api-client";
 
 function fmtMoney(n: number | null | undefined): string {
@@ -111,7 +112,7 @@ export default function DisbursementDetailPage() {
     let active = true;
     void (async () => {
       try {
-        const me = await getMe();
+        const me = await getMeCached();
         if (!active) return;
         const hr = me.role === "hr_admin" || me.role === "platform_admin";
         setIsHr(hr);

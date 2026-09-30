@@ -1,4 +1,4 @@
-import ExcelJS from "exceljs"
+import type ExcelJS from "exceljs"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { dayWindowUtc, localDateKey, monthRangeKeys } from "../lib/tz.js"
@@ -456,7 +456,9 @@ export function leaveSettlementFilename(period: string): string {
  * `items.length`（見 __tests__/leave-settlement-live.test.ts）。
  */
 export async function leaveSettlementWorkbookBuffer(result: LeaveSettlementListResult): Promise<Buffer> {
-  const wb = new ExcelJS.Workbook()
+  // exceljs 動態載入：見 lib/xlsx/attendance-sheet.ts 檔頭同樣的冷啟動考量。
+  const { default: ExcelJSRuntime } = await import("exceljs")
+  const wb = new ExcelJSRuntime.Workbook()
   wb.creator = "aster-hr"
   const ws = wb.addWorksheet("假單核銷", { views: [{ state: "frozen", ySplit: 1 }] })
 
