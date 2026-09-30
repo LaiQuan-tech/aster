@@ -37,6 +37,13 @@ export const punchRecords = pgTable(
     lat: doublePrecision("lat"),
     lng: doublePrecision("lng"),
     deviceId: text("device_id"),
+    /**
+     * 2026-09-30：定位失敗原因，只在「沒有 lat/lng」時才寫（有座標一律 null）。
+     * 'denied' 使用者拒絕權限｜'unavailable' 裝置拿不到位置｜'timeout' 定位逾時｜
+     * 'unsupported' 裝置/瀏覽器不支援 geolocation。合法值 CHECK 見
+     * packages/db/migrations（本欄新增的同一支 migration）。
+     */
+    geoStatus: text("geo_status"),
     requestId: uuid("request_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
