@@ -449,13 +449,14 @@ export async function loadPaidBefore(tenantId: string, excludeRunId?: string | n
 }
 
 /** 各專案最近一個已發放 regular 批次的凍結累計收款，供「之前／本次請領」拆分。 */
-export async function loadPreviousReceived(tenantId: string, excludeRunId?: string | null): Promise<Map<string, number>> {
+export async function loadPreviousReceived(tenantId: string, asOf: string, excludeRunId?: string | null): Promise<Map<string, number>> {
   let q = supabaseAdmin
     .from("bonus_runs")
     .select("id, paid_on, created_at")
     .eq("tenant_id", tenantId)
     .eq("status", "paid")
     .eq("kind", "regular")
+    .lte("as_of", asOf)
     .is("deleted_at", null)
     .order("paid_on", { ascending: false })
     .order("created_at", { ascending: false })
@@ -507,7 +508,7 @@ export async function previewRun(tenantId: string, asOf: string, excludeRunId?: 
   const [inputs, paidBefore, previousReceived] = await Promise.all([
     loadInputs(tenantId, asOf),
     loadPaidBefore(tenantId, excludeRunId),
-    loadPreviousReceived(tenantId, excludeRunId),
+    loadPreviousReceived(tenantId, asOf, excludeRunId),
   ])
   const { items, totals } = computeBonusRun(inputs.projects, paidBefore, previousReceived)
   const skippedIds = new Set(totals.skipped.map((s) => s.projectId))
