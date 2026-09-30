@@ -4,13 +4,24 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AuthGate } from "@/components/AuthGate";
 import type { Me } from "@/lib/admin-api";
-import { getMeCached } from "@/lib/ess-state";
+import { getMeCached, peekMeCached } from "@/lib/ess-state";
 import { ADMIN_ROLES } from "@/lib/roles";
+
+type GuardState = "loading" | "ok" | "denied" | "error";
+
+/** 掛載當下 /me 已在快取（AuthGate 剛抓過、或從員工端切過來）→ 直接決定，不先畫一輪「載入中」。 */
+function initialGuard(): { me: Me | null; state: GuardState } {
+  const cached = peekMeCached();
+  if (!cached) return { me: null, state: "loading" };
+  return ADMIN_ROLES.includes(cached.role) ? { me: cached, state: "ok" } : { me: null, state: "denied" };
+}
 
 /**
  * Back-office gate. Sits inside AuthGate (so an unauthenticated visitor is
  * already bounced to /login), then reads GET /me（走 lib/ess-state 的 getMeCached：
- * 與 AdminShell／員工端共用同一份模組層快取，整個後台只打一次）: only ADMIN_ROLES
+ * 與 AuthGate／AdminShell／員工端共用同一份模組層快取，整頁只打一次——AuthGate 放行時
+ * 快取已經有了，這裡同步 peek 就能在同一輪 render 畫出 AdminShell＋頁面，頁面資料立刻開打）:
+ * only ADMIN_ROLES
  * （hr_admin / platform_admin，2026-09-23 起加 accountant 會計——會計看到的分區由
  * lib/admin-nav.ts roleNavOf 限縮，API 端另有 requireFinance 守門）may proceed;
  * everyone else sees a "no permission" panel with a link back to the ESS. The
@@ -18,11 +29,13 @@ import { ADMIN_ROLES } from "@/lib/roles";
  * show the signed-in admin without re-fetching.
  */
 function Guard({ children }: { children: (me: Me) => React.ReactNode }) {
-  const [me, setMe] = useState<Me | null>(null);
-  const [state, setState] = useState<"loading" | "ok" | "denied" | "error">("loading");
+  const [initial] = useState(initialGuard);
+  const [me, setMe] = useState<Me | null>(initial.me);
+  const [state, setState] = useState<GuardState>(initial.state);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (initial.state !== "loading") return; // 已由快取決定
     let active = true;
     (async () => {
       try {
@@ -50,7 +63,7 @@ function Guard({ children }: { children: (me: Me) => React.ReactNode }) {
     return () => {
       active = false;
     };
-  }, []);
+  }, [initial.state]);
 
   if (state === "loading") {
     return (

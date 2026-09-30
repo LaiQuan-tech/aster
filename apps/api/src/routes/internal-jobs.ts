@@ -516,15 +516,29 @@ function parseRunParam(raw: unknown): number | null {
   return Number.isInteger(n) && n >= 0 && n <= 999 ? n : null
 }
 
+/**
+ * `?limit=N`（選填，2026-09-30 效能）：只回最新 N 個月份。後台首頁「最近快照」卡片只看
+ * `periods[0]`，帶 limit=1 就不必把每個月份的 manifest＋檔案清單都讀一遍（4 個月份時回應
+ * 約 250 KB）。省略＝全部月份（舊行為，備份頁用）。
+ */
+const backupsListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+})
+
 internalJobsRouter.get(
   "/backups",
   requireAuth,
   requireTenant,
   requireHrAdmin,
-  async (_req: Request, res: Response, next: NextFunction) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
+    const parsed = backupsListQuerySchema.safeParse(req.query ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
+      return
+    }
     try {
-      const periods = await listSnapshotPeriods(tenantId)
+      const periods = await listSnapshotPeriods(tenantId, { limit: parsed.data.limit })
       res.status(200).json({
         periods,
         tables: SNAPSHOT_TABLES.map((t) => t.name),

@@ -10,7 +10,11 @@
  *     （visibilitychange）時過期就重抓；簽核／標記已讀後呼叫 `invalidateEssState()`
  *     立刻重抓，徽章在同一頁就會更新。
  *   - `getMeCached()`／`getBrandingCached()` 給頁面直接拿資料用，in-flight 去重
- *     （同時多個呼叫只打一次）。
+ *     （同時多個呼叫只打一次）。整頁載入時 AuthGate（/me）與根 layout 的 TenantBranding
+ *     （branding）也走這兩個——它們最先發出請求，後面的 AdminGate／AdminShell／EssShell 都直接
+ *     命中快取，整頁只打一次 /me、一次 branding（2026-09-30 以前兩者各自直打，每頁各多一次，
+ *     而且 AdminGate 的 /me 要等 AuthGate 那次回來才開始，白等一輪）。
+ *   - `peekMeCached()`：同步讀目前的 /me 快取，給守門元件掛載當下決定要不要先畫「載入中」。
  *   - `invalidateBranding()`：後台存完站台設定／進階功能（adminModules）後清 branding 快取
  *     並重抓，AdminShell 的側欄 appName 與分頁列同一頁就更新。
  * 所有 API 都是 best-effort：失敗一律退化（essTabs null＝不限縮、isAdmin false、
@@ -111,6 +115,11 @@ export function getMeCached(): Promise<Me> {
     meInflight = p;
   }
   return meInflight;
+}
+
+/** 目前快取的 /me（還沒抓過、抓失敗或已被清掉 → null）；同步讀，不發請求。 */
+export function peekMeCached(): Me | null {
+  return meCache;
 }
 
 /** GET /api/tenant/branding，快取到 reset 為止；in-flight 去重。 */

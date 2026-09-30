@@ -19,11 +19,15 @@ export const projectsAnnualRouter = Router()
  * 之前，否則會被 /projects/:id 吃掉（同 project-overview.ts 的理由）。
  */
 
-// ── GET /projects/annual?year=115|2026&sort=code|unreceived_pct&format=json|xlsx ──
+// ── GET /projects/annual?year=115|2026&sort=code|unreceived_pct&format=json|xlsx&view=totals ──
 /**
  * 老闆的 Excel「年度專案申請單總表」：一列一案（含預先取號的空列），
  * 依建立月份分區塊小計，最後年度總計。HR 才能看——整年的金額都在上面。
  * year 省略時取租戶當地的今年；< 1911 視為民國年。
+ *
+ * `view=totals`（選填，2026-09-30 效能；後台首頁「本年合約總額」卡片用）：只回
+ * `{ today, year, rocYear, totals }`，不回每案明細與月份小計。合計照樣由同一個
+ * buildAnnualTable 算，數字與完整表保證一致；只能配 format=json（配 xlsx → 400）。
  */
 projectsAnnualRouter.get(
   "/projects/annual",
@@ -33,10 +37,9 @@ projectsAnnualRouter.get(
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {
-      const tz = await getTenantTimezone(tenantId)
-      const today = todayKey(tz)
-      const year = req.query.year === undefined ? Number(today.slice(0, 4)) : parseYearParam(req.query.year)
-      if (year === null) {
+      // 參數驗證全部在查 DB 之前（錯誤碼的先後與以前相同：year → sort → view）。
+      const explicitYear = req.query.year === undefined ? undefined : parseYearParam(req.query.year)
+      if (explicitYear === null) {
         res.status(400).json({ error: "invalid_year" })
         return
       }
@@ -46,11 +49,23 @@ projectsAnnualRouter.get(
         return
       }
       const format = req.query.format === "xlsx" ? "xlsx" : "json"
+      const totalsOnly = req.query.view === "totals"
+      if ((req.query.view !== undefined && !totalsOnly) || (totalsOnly && format === "xlsx")) {
+        res.status(400).json({ error: "invalid_view" })
+        return
+      }
       const includeArchived = req.query.includeArchived === "1"
 
-      const settings = await loadP3Settings(tenantId)
+      // 時區與 P3 設定互不相依：一起查（以前是串行兩趟，冷啟動時各要等一趟 DB）。
+      const [tz, settings] = await Promise.all([getTenantTimezone(tenantId), loadP3Settings(tenantId)])
+      const today = todayKey(tz)
+      const year = explicitYear ?? Number(today.slice(0, 4))
       const table = await buildAnnualTable(tenantId, year, { sort, includeArchived, settings })
 
+      if (totalsOnly) {
+        res.status(200).json({ today, year: table.year, rocYear: table.rocYear, totals: table.totals })
+        return
+      }
       if (format === "json") {
         res.status(200).json({ today, ...table })
         return

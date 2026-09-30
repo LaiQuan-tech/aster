@@ -21,6 +21,8 @@ export const COMPANY_PAGE_SLUGS = {
 export type CompanyPageSlug = keyof typeof COMPANY_PAGE_SLUGS
 
 const COLS = "id, tenant_id, slug, title, body, updated_by_emp_id, created_at, updated_at"
+/** `?fields=summary` 用：不含 body（內文最長 5 萬字，卡片只要標題與更新時間）。 */
+const SUMMARY_COLS = "id, tenant_id, slug, title, updated_by_emp_id, created_at, updated_at"
 
 const upsertSchema = z.object({
   title: z.string().trim().min(1).max(120),
@@ -32,28 +34,55 @@ function isSlug(s: string): s is CompanyPageSlug {
 }
 
 // ── GET /company-pages — 全員：每個 slug 一筆（沒建過的回預設標題、空內容）──
+// 2026-09-30 效能（後台首頁「福利」卡片）：兩個選填參數，不帶＝舊行為。
+//   ?slug=benefits      只回那一頁（不認得的 slug → 400 invalid_slug）
+//   ?fields=summary     不查、不回 body（其他欄位不變；其他值 → 400 invalid_fields）
 companyPagesRouter.get(
   "/company-pages",
   requireAuth,
   requireTenant,
-  async (_req: Request, res: Response, next: NextFunction) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
+    const slugParam = req.query.slug
+    if (slugParam !== undefined && (typeof slugParam !== "string" || !isSlug(slugParam))) {
+      res.status(400).json({ error: "invalid_slug", allowed: Object.keys(COMPANY_PAGE_SLUGS) })
+      return
+    }
+    const fieldsParam = req.query.fields
+    if (fieldsParam !== undefined && fieldsParam !== "summary") {
+      res.status(400).json({ error: "invalid_fields", allowed: ["summary"] })
+      return
+    }
+    const summary = fieldsParam === "summary"
     try {
-      const { data, error } = await supabaseAdmin.from("company_pages").select(COLS).eq("tenant_id", tenantId)
+      let query = supabaseAdmin
+        .from("company_pages")
+        .select(summary ? SUMMARY_COLS : COLS)
+        .eq("tenant_id", tenantId)
+      if (slugParam !== undefined) query = query.eq("slug", slugParam)
+      const { data, error } = await query
       if (error) {
         next(new Error(`GET /company-pages: ${error.message}`))
         return
       }
-      const bySlug = new Map((data ?? []).map((r) => [r.slug as string, r]))
-      const pages = (Object.keys(COMPANY_PAGE_SLUGS) as CompanyPageSlug[]).map((slug) => {
+      const rows = (data ?? []) as unknown as Array<Record<string, unknown>>
+      const bySlug = new Map(rows.map((r) => [r.slug as string, r]))
+      const slugs = slugParam !== undefined ? [slugParam as CompanyPageSlug] : (Object.keys(COMPANY_PAGE_SLUGS) as CompanyPageSlug[])
+      const pages = slugs.map((slug) => {
         const row = bySlug.get(slug)
+        const title = (row?.title as string | undefined) ?? COMPANY_PAGE_SLUGS[slug]
+        const updatedAt = (row?.updated_at as string | undefined) ?? null
+        const updatedByEmpId = (row?.updated_by_emp_id as string | undefined) ?? null
+        if (summary) {
+          return { slug, defaultTitle: COMPANY_PAGE_SLUGS[slug], title, updatedAt, updatedByEmpId, exists: !!row }
+        }
         return {
           slug,
           defaultTitle: COMPANY_PAGE_SLUGS[slug],
-          title: (row?.title as string | undefined) ?? COMPANY_PAGE_SLUGS[slug],
+          title,
           body: (row?.body as string | undefined) ?? "",
-          updatedAt: (row?.updated_at as string | undefined) ?? null,
-          updatedByEmpId: (row?.updated_by_emp_id as string | undefined) ?? null,
+          updatedAt,
+          updatedByEmpId,
           exists: !!row,
         }
       })

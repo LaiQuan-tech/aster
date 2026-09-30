@@ -9,22 +9,28 @@ import { adminModulesOf, homeEntries, isAdminPathAllowed, roleNavOf } from "@/li
 import { getDisbursementSummary, type DisbursementSummary } from "@/lib/disbursements-api";
 import {
   getReceivables,
-  getAnnualProjects,
   currentRocYear,
-  listProjectsExt,
   PROJECT_KIND_LABELS,
   type ProjectListItem,
 } from "@/lib/projects-ext-api";
 import { getProjectAlerts } from "@/lib/projects-api";
 import { getBonusSummary } from "@/lib/bonus-api";
-import { listBackups, type SnapshotPeriodSummary } from "@/lib/backup-api";
-import { getCompanyPages, type CompanyPage } from "@/lib/company-api";
+import type { SnapshotPeriodSummary } from "@/lib/backup-api";
 import { getUpcomingBirthdays, type BirthdayPerson } from "@/lib/people-extras-api";
+import {
+  getAnnualTotals,
+  getCompanyPageSummary,
+  getLatestBackupPeriod,
+  listRecentChangeProjects,
+  type CompanyPageSummary,
+} from "@/lib/dashboard-api";
 import { useEssState } from "@/lib/ess-state";
 
 /* -------------------------------------------------------------- 老闆看板 -- */
-// B9：每張卡各自獨立讀取、獨立失敗——用 Promise.allSettled 平行打 9 支既有端點
+// B9：每張卡各自獨立讀取、獨立失敗——用 Promise.allSettled 平行打既有端點
 // (不新增 API),任一支掛掉只讓那張卡顯示「載入失敗」,其餘照常顯示數字。
+// 2026-09-30 效能：每張卡只抓自己要顯示的欄位（lib/dashboard-api.ts：快照只讀最新月份、
+// 年度表只回合計、變更案在 DB 端篩＋取 5 筆、福利頁不回內文）；未收款兩個數字共用同一次請求。
 
 type Loadable<T> = { loading: boolean; error: string | null; data: T | null };
 
@@ -146,7 +152,7 @@ export default function AdminOverview() {
   const [changes, setChanges] = useState<Loadable<ProjectListItem[]>>(initLoadable<ProjectListItem[]>());
   const [snapshot, setSnapshot] = useState<Loadable<SnapshotPeriodSummary | null>>(initLoadable<SnapshotPeriodSummary | null>());
   const [birthdays, setBirthdays] = useState<Loadable<BirthdayCardData>>(initLoadable<BirthdayCardData>());
-  const [benefits, setBenefits] = useState<Loadable<CompanyPage | null>>(initLoadable<CompanyPage | null>());
+  const [benefits, setBenefits] = useState<Loadable<CompanyPageSummary | null>>(initLoadable<CompanyPageSummary | null>());
 
   useEffect(() => {
     let active = true;
@@ -162,13 +168,15 @@ export default function AdminOverview() {
 
     async function loadReceivables() {
       try {
-        // 未收款總額：不帶 state（預設 status=open）；逾期筆數：state=overdue。
-        const [all, overdue] = await Promise.all([getReceivables(), getReceivables("open", "overdue")]);
+        // 未收款總額與逾期筆數都從同一次 status=open（不篩 state）拿：summary.overdueCount 算的是
+        // overdueDays > 0 的列，而 API 的 state=overdue 正是「未收足且 overdueDays > 0」
+        // （project-money.receivableState），兩者是同一組列——以前多打一次 state=overdue 只為了這個數字。
+        const all = await getReceivables();
         if (active) {
           setRecv({
             loading: false,
             error: null,
-            data: { unreceivedTotal: all.summary.unreceivedTotal, overdueCount: overdue.summary.overdueCount },
+            data: { unreceivedTotal: all.summary.unreceivedTotal, overdueCount: all.summary.overdueCount },
           });
         }
       } catch (err) {
@@ -178,7 +186,7 @@ export default function AdminOverview() {
 
     async function loadAnnual() {
       try {
-        const r = await getAnnualProjects({ year: currentRocYear() });
+        const r = await getAnnualTotals(currentRocYear());
         const total = r.totals.amountTotal;
         const received = r.totals.receivedTotal;
         const pct = total > 0 ? Math.round((received / total) * 100) : null;
@@ -237,9 +245,8 @@ export default function AdminOverview() {
 
     async function loadChanges() {
       try {
-        const r = await listProjectsExt({ includeArchived: true, sort: "opened", dir: "desc" });
-        const filtered = r.projects.filter((p) => p.kind === "change" || p.kind === "addition").slice(0, 5);
-        if (active) setChanges({ loading: false, error: null, data: filtered });
+        const recent = await listRecentChangeProjects(5);
+        if (active) setChanges({ loading: false, error: null, data: recent });
       } catch (err) {
         if (active) setChanges({ loading: false, error: errMsg(err), data: null });
       }
@@ -247,8 +254,8 @@ export default function AdminOverview() {
 
     async function loadSnapshot() {
       try {
-        const r = await listBackups();
-        if (active) setSnapshot({ loading: false, error: null, data: r.periods[0] ?? null });
+        const latest = await getLatestBackupPeriod();
+        if (active) setSnapshot({ loading: false, error: null, data: latest });
       } catch (err) {
         if (active) setSnapshot({ loading: false, error: errMsg(err), data: null });
       }
@@ -275,14 +282,8 @@ export default function AdminOverview() {
 
     async function loadBenefits() {
       try {
-        const r = await getCompanyPages();
-        if (active) {
-          setBenefits({
-            loading: false,
-            error: null,
-            data: r.pages.find((p) => p.slug === "benefits") ?? null,
-          });
-        }
+        const page = await getCompanyPageSummary("benefits");
+        if (active) setBenefits({ loading: false, error: null, data: page });
       } catch (err) {
         if (active) setBenefits({ loading: false, error: errMsg(err), data: null });
       }

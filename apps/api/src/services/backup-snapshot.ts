@@ -872,11 +872,15 @@ async function readRunSummary(tenantId: string, period: string, run: number, fre
  * 租戶底下所有 period 資料夾（新到舊），每個月份再列出歷次執行（run 新到舊）。
  * 只有「每個月份最新的那次」會等 CDN 追上（剛跑完的那份才可能是舊版）；更早的
  * 執行不再變動，直接讀，免得清單被 84 個月 × 每月數次的等待拖垮。
+ *
+ * `opts.limit`（2026-09-30）：只讀最新 N 個月份，其餘月份連 run 清單都不列。後台首頁
+ * 「最近快照」卡片只看最新一個月份（GET /backups?limit=1）；省略＝全部（舊行為）。
  */
-export async function listSnapshotPeriods(tenantId: string): Promise<SnapshotPeriodSummary[]> {
+export async function listSnapshotPeriods(tenantId: string, opts: { limit?: number } = {}): Promise<SnapshotPeriodSummary[]> {
   const { data, error } = await storage().list(tenantId, { limit: 500, sortBy: { column: "name", order: "desc" } })
   if (error) throw new Error(`backup-snapshot (list periods): ${error.message}`)
-  const periods = (data ?? []).filter((e) => e.id === null && periodRe.test(e.name)).map((e) => e.name)
+  const all = (data ?? []).filter((e) => e.id === null && periodRe.test(e.name)).map((e) => e.name)
+  const periods = opts.limit !== undefined ? all.slice(0, opts.limit) : all
   return mapLimit(periods, 4, async (period) => {
     const runs = await listRuns(tenantId, period)
     const summaries = await mapLimit(runs, 4, (run, idx) =>

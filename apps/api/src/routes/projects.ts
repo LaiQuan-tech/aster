@@ -550,6 +550,28 @@ projectsRouter.get(
     const sortColumn = PROJECT_SORT_COLUMNS[sortParam] as string
     const ascending = dirParam === "asc"
 
+    // 2026-09-30 效能（後台首頁「最近變更案」卡片）：?kind=change,addition 在 DB 端篩類型、
+    // ?limit=5 只取排序後前 N 筆，不必把整份清單抓回前端再 filter／slice。兩者都選填，
+    // 不帶＝舊行為（全部類型、不限筆數）；值不合法一律 400，不默默忽略（同 year／sort）。
+    let kinds: string[] | null = null
+    if (req.query.kind !== undefined) {
+      const parts = typeof req.query.kind === "string" ? req.query.kind.split(",").map((s) => s.trim()) : []
+      if (parts.length === 0 || parts.some((k) => !(PROJECT_KINDS as readonly string[]).includes(k))) {
+        res.status(400).json({ error: "invalid_kind" })
+        return
+      }
+      kinds = [...new Set(parts)]
+    }
+    let limit: number | null = null
+    if (req.query.limit !== undefined) {
+      const n = typeof req.query.limit === "string" && req.query.limit !== "" ? Number(req.query.limit) : NaN
+      if (!Number.isInteger(n) || n < 1 || n > 1000) {
+        res.status(400).json({ error: "invalid_limit" })
+        return
+      }
+      limit = n
+    }
+
     try {
       let query = supabaseAdmin
         .from("projects")
@@ -558,10 +580,11 @@ projectsRouter.get(
       if (!includeArchived) query = query.is("archived_at", null)
       if (!includeReserved) query = query.is("reserved_at", null)
       if (year !== null) query = query.eq("fiscal_year", year)
+      if (kinds !== null) query = query.in("kind", kinds)
       // 次要排序固定用 id：主排序值重複（同名／同狀態）時結果仍穩定可測。
-      const { data, error } = await query
-        .order(sortColumn, { ascending })
-        .order("id", { ascending: true })
+      let ordered = query.order(sortColumn, { ascending }).order("id", { ascending: true })
+      if (limit !== null) ordered = ordered.limit(limit)
+      const { data, error } = await ordered
       if (error) {
         next(new Error(`GET /projects: ${error.message}`))
         return
