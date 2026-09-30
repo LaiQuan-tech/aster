@@ -983,9 +983,10 @@ export default function EmployeesPage() {
                             <option value="inactive">停用</option>
                           </select>
                         </div>
-                        <div className="mt-3 flex gap-3">
-                          <button onClick={() => void saveEdit(employee.id)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>儲存</button>
+                        {/* 儲存／取消放右下角；主要動作「儲存」在最右邊。 */}
+                        <div className="mt-3 flex justify-end gap-4">
                           <button onClick={() => setEditingId(null)} className="text-sm text-gray-500 hover:underline">取消</button>
+                          <button onClick={() => void saveEdit(employee.id)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>儲存</button>
                         </div>
                       </td>
                     ) : (
