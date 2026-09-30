@@ -336,9 +336,7 @@ export default function PunchRecordsPage() {
                   <th className="py-2 pr-4">日期</th>
                   <th className="py-2 pr-4">時間</th>
                   <th className="py-2 pr-4">資料類型</th>
-                  <th className="py-2 pr-4">地點</th>
-                  <th className="py-2 pr-4">打卡方式</th>
-                  <th className="py-2">裝置</th>
+                  <th className="py-2">地點</th>
                 </tr>
               </thead>
               <tbody>
@@ -349,9 +347,7 @@ export default function PunchRecordsPage() {
                     <td className="py-2 pr-4">{localDateKey(r.punch_at) || r.punch_at.slice(0, 10)}</td>
                     <td className="py-2 pr-4">{fmtHm(r.punch_at)}</td>
                     <td className="py-2 pr-4">{TYPE_LABEL[r.type]}</td>
-                    <td className="py-2 pr-4">{locationText(r)}</td>
-                    <td className="py-2 pr-4">{SOURCE_LABEL[r.source ?? ""] ?? r.source ?? "—"}</td>
-                    <td className="py-2">{r.device_id ?? "—"}</td>
+                    <td className="py-2">{locationText(r)}</td>
                   </tr>
                 ))}
               </tbody>
