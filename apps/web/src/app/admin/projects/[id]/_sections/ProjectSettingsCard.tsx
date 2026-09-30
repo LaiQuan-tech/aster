@@ -4,14 +4,7 @@ import { useEffect, useState } from "react";
 import { Card, ErrorText, inputCls, labelCls } from "@/components/admin-ui";
 import { ClientCombo } from "@/components/ClientCombo";
 import type { Department, Employee } from "@/lib/admin-api";
-import {
-  getProjectSettings,
-  updateProjectSettings,
-  PROJECT_MEMBER_ROLE_LABELS,
-  PROJECT_MEMBER_ROLE_ORDER,
-  type ProjectMemberRole,
-  type ShareMode,
-} from "@/lib/projects-api";
+import { type ShareMode } from "@/lib/projects-api";
 import { listClients, type Client, type ProjectDetail, type UpdateProjectExtBody } from "@/lib/projects-ext-api";
 
 interface ProjectSettingsCardProps {
@@ -30,37 +23,14 @@ interface ProjectSettingsCardProps {
  * page.tsx 的 saveProjectField。客戶名冊自己抓（B4）——`[id]/page.tsx`
  * 目前沒有載入 clients，改成外部傳入要動到那支檔案，這裡改成自給自足即可。
  *
- * W3（2026-09-23）另加「成員角色預設分潤」：四個角色各一個趴數，新增成員沒填
- * 趴數時後端會套上去。這是**租戶級**設定（`project_settings.default_share_pct_by_role`），
- * 不是這個專案的設定——改了會影響之後所有專案的新成員，所以卡片上寫明。
+ * 實際公司人員與個人分潤由緊接在本卡下方的「專案獎金與分潤」整批編輯器維護；
+ * 不把租戶級角色預設值混在單一專案頁，避免管理員誤以為正在設定本案人員。
  */
 export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, saveProjectField, error }: ProjectSettingsCardProps) {
   const [clients, setClients] = useState<Client[]>([]);
-  const [defaultShare, setDefaultShare] = useState<Partial<Record<ProjectMemberRole, number>> | null>(null);
-  const [shareError, setShareError] = useState<string | null>(null);
   useEffect(() => {
     listClients().then((r) => setClients(r.clients)).catch(() => {});
-    if (!canBonus) return;
-    getProjectSettings()
-      .then((r) => setDefaultShare(r.settings.defaultSharePctByRole ?? {}))
-      .catch(() => setDefaultShare({}));
-  }, [canBonus]);
-
-  /** 整鍵覆蓋：送完整四鍵，空白的角色不進物件（＝沒有預設）。 */
-  async function saveDefaultShare(role: ProjectMemberRole, raw: string) {
-    if (!defaultShare) return;
-    const next: Partial<Record<ProjectMemberRole, number>> = { ...defaultShare };
-    if (raw === "") delete next[role];
-    else next[role] = Number(raw);
-    setDefaultShare(next);
-    setShareError(null);
-    try {
-      const res = await updateProjectSettings({ defaultSharePctByRole: next });
-      setDefaultShare(res.settings.defaultSharePctByRole ?? {});
-    } catch (err) {
-      setShareError(err instanceof Error ? err.message : "儲存預設分潤失敗");
-    }
-  }
+  }, []);
 
   return (
     <Card>
@@ -183,37 +153,6 @@ export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, sa
           </p>
         </div>
       </div>
-
-      {isPool && canBonus && (
-        <div className="mt-4 border-t pt-4">
-          <label className={labelCls}>成員角色預設分潤 %</label>
-          <p className="-mt-1 mb-2 text-xs text-gray-400">
-            新增成員時沒填趴數就套這裡的值。這是<span className="font-medium text-gray-500">全租戶共用</span>的設定，
-            改了會影響之後所有專案的新成員，既有成員的趴數不動。留空＝該角色沒有預設。
-          </p>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            {PROJECT_MEMBER_ROLE_ORDER.map((role) => (
-              <div key={role}>
-                <p className="mb-1 text-xs text-gray-500">{PROJECT_MEMBER_ROLE_LABELS[role]}</p>
-                <input
-                  className={inputCls}
-                  type="number"
-                  min="0"
-                  max="100"
-                  disabled={defaultShare === null}
-                  defaultValue={defaultShare?.[role] ?? ""}
-                  onBlur={(e) => {
-                    const cur = defaultShare?.[role];
-                    const v = e.target.value === "" ? undefined : Number(e.target.value);
-                    if (v !== cur) void saveDefaultShare(role, e.target.value);
-                  }}
-                />
-              </div>
-            ))}
-          </div>
-          <ErrorText>{shareError}</ErrorText>
-        </div>
-      )}
 
       <ErrorText>{error}</ErrorText>
     </Card>

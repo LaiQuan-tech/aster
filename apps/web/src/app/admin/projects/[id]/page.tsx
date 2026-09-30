@@ -315,6 +315,14 @@ export default function AdminProjectDetailPage() {
       {/* 專案設定 */}
       <ProjectSettingsCard project={project} depts={depts} emps={emps} isPool={isPool} canBonus={canBonus} saveProjectField={saveProjectField} error={error} />
 
+      {/* 本案公司人員與個人分潤：放在專案設定正下方，避免和全租戶角色預設混淆。 */}
+      <MembersCard
+        projectId={projectId} members={members} emps={emps} canBonus={canBonus}
+        contractAmount={money?.amountUntaxed ?? null} receivedAmount={money?.receivedTotal ?? 0}
+        bonusRatePct={project.bonusRatePct ?? null}
+        setError={setError} load={load}
+      />
+
       {/* C2 變更歷史：根案 → -1 → -2…，本案高亮、封存案灰字＋理由 */}
       <LineageCard projectId={projectId} />
 
@@ -391,14 +399,6 @@ export default function AdminProjectDetailPage() {
         savingStatus={savingStatus} setSavingStatus={setSavingStatus}
         saveProjectField={saveProjectField}
         error={error} setError={setError} load={load}
-      />
-
-      {/* 成員分潤 */}
-      <MembersCard
-        projectId={projectId} members={members} emps={emps} canBonus={canBonus}
-        contractAmount={money?.amountUntaxed ?? null} receivedAmount={money?.receivedTotal ?? 0}
-        bonusRatePct={project.bonusRatePct ?? null}
-        setError={setError} load={load}
       />
 
       {/* 文件（知識庫） */}

@@ -32,10 +32,12 @@ export function MembersCard({ projectId, members, emps, canBonus, contractAmount
   const [draft, setDraft] = useState(() => hydrateShareDraft(members, bonusRatePct));
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
+  const [newEmployeeId, setNewEmployeeId] = useState("");
 
   useEffect(() => setDraft(hydrateShareDraft(members, bonusRatePct)), [members, bonusRatePct]);
 
   const orderedMembers = useMemo(() => orderShareMembers(draft.members), [draft.members]);
+  const availableEmployees = useMemo(() => emps.filter((emp) => !draft.members.some((member) => member.employeeId === emp.id)), [draft.members, emps]);
   const calculation = useMemo(() => calculateProjectShares({ contractAmount, bonusRatePct: draft.bonusRatePct, members: orderedMembers }), [contractAmount, draft.bonusRatePct, orderedMembers]);
 
   function patchMember(employeeId: string, patch: Partial<ShareDraftMember>) {
@@ -43,12 +45,15 @@ export function MembersCard({ projectId, members, emps, canBonus, contractAmount
   }
 
   function addMember() {
-    const employee = emps.find((emp) => !draft.members.some((member) => member.employeeId === emp.id));
-    if (!employee) return setError("沒有其他可加入的在職員工");
+    if (!newEmployeeId) return setError(availableEmployees.length === 0 ? "沒有其他可加入的在職員工" : "請先選擇公司人員");
+    const employee = availableEmployees.find((emp) => emp.id === newEmployeeId);
+    if (!employee) return setError("選擇的人員已在本專案中");
     setDraft((current) => ({
       ...current,
       members: [...current.members, { employeeId: employee.id, name: employee.name, empNo: employee.emp_no, roleInProject: "member", sharePct: 0 }],
     }));
+    setNewEmployeeId("");
+    setError(null);
   }
 
   async function saveRevision() {
@@ -118,7 +123,8 @@ export function MembersCard({ projectId, members, emps, canBonus, contractAmount
     </div>
 
     <div className="mt-4 flex flex-wrap items-end gap-3 border-t pt-4">
-      <button type="button" className="rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50" onClick={addMember}>＋ 新增成員</button>
+      <div className="min-w-60"><label className={labelCls}>選擇公司人員</label><select className={inputCls} value={newEmployeeId} onChange={(event) => setNewEmployeeId(event.target.value)} disabled={availableEmployees.length === 0}><option value="">{availableEmployees.length === 0 ? "沒有其他可加入人員" : "請選擇員工"}</option>{availableEmployees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}{employee.emp_no ? `（${employee.emp_no}）` : ""}</option>)}</select></div>
+      <button type="button" className="rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50" onClick={addMember} disabled={availableEmployees.length === 0}>＋ 加入本專案</button>
       <div className="min-w-64 flex-1"><label className={labelCls}>變更原因（必填）</label><input className={inputCls} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="例：本期改由王員主辦，調整後續分潤" /></div>
       <PrimaryButton onClick={saveRevision} disabled={saving || !calculation.isValid}>{saving ? "儲存中…" : "整批儲存分潤"}</PrimaryButton>
     </div>
