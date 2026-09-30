@@ -31,7 +31,9 @@ export default function ProjectOverviewPage() {
   const [projects, setProjects] = useState<OverviewProject[]>([]);
   const [today, setToday] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [showClosed, setShowClosed] = useState(false);
+  // 預設含結案／解約：專案列表本來就列出它們（封存前都看得到），總覽若預設藏起來，
+  // 看板「結案」欄會顯示 0、甘特圖少一列，看起來就像狀態沒有跟列表連動。
+  const [showClosed, setShowClosed] = useState(true);
   // 拖拉改狀態中：擋掉重疊的第二次拖放，卡片上疊一層半透明遮罩。
   const [movingId, setMovingId] = useState<string | null>(null);
 
@@ -46,6 +48,12 @@ export default function ProjectOverviewPage() {
   }, [load]);
 
   const visible = useMemo(() => (showClosed ? projects : projects.filter((p) => p.status === "active" || p.status === "suspended")), [projects, showClosed]);
+  // 不含結案／解約時，被藏起來的件數照樣算給看板欄位，欄頭數字才會和列表一致。
+  const hiddenByStatus = useMemo(() => {
+    const out: Partial<Record<ProjectStatus, number>> = {};
+    if (!showClosed) for (const p of projects) if (p.status === "closed" || p.status === "terminated") out[p.status] = (out[p.status] ?? 0) + 1;
+    return out;
+  }, [projects, showClosed]);
 
   /**
    * 看板拖拉改狀態：同欄放回原地不動；跨欄放下先跳 `window.prompt` 收變更
@@ -98,7 +106,7 @@ export default function ProjectOverviewPage() {
       {projects.length === 0 ? (
         <Card><Empty>尚無專案</Empty></Card>
       ) : tab === "kanban" ? (
-        <Kanban projects={visible} movingId={movingId} onDropStatus={handleDropStatus} />
+        <Kanban projects={visible} hiddenByStatus={hiddenByStatus} movingId={movingId} onDropStatus={handleDropStatus} />
       ) : (
         <Gantt projects={visible} today={today} />
       )}
@@ -123,16 +131,19 @@ const DRAG_MIME = "application/json";
 
 function Kanban({
   projects,
+  hiddenByStatus = {},
   movingId,
   onDropStatus,
 }: {
   projects: OverviewProject[];
+  /** 因為沒勾「含結案／解約」而沒畫出來的件數（依狀態）。 */
+  hiddenByStatus?: Partial<Record<ProjectStatus, number>>;
   movingId: string | null;
   onDropStatus: (id: string, from: ProjectStatus, to: ProjectStatus, name: string) => void;
 }) {
   // 四欄一律都顯示（即使目前是空的）——拖拉功能需要每一欄都是有效的放置目標，
   // 不能像純瀏覽時那樣把沒有卡片、又不是「進行中」的欄隱藏起來。
-  const cols = STATUS_ORDER.map((s) => ({ status: s, items: projects.filter((p) => p.status === s) }));
+  const cols = STATUS_ORDER.map((s) => ({ status: s, items: projects.filter((p) => p.status === s), hidden: hiddenByStatus[s] ?? 0 }));
   const [dragOver, setDragOver] = useState<ProjectStatus | null>(null);
 
   function readPayload(e: DragEvent): DragPayload | null {
@@ -170,10 +181,13 @@ function Kanban({
           <div className="mb-2 flex items-center gap-2">
             <span className={`h-2.5 w-2.5 rounded-full ${STATUS_CLS[c.status]}`} />
             <span className="text-sm font-semibold text-gray-700">{statusLabel(c.status)}</span>
-            <span className="text-xs text-gray-400">{c.items.length}</span>
+            <span className="text-xs text-gray-400">{c.items.length + c.hidden}</span>
           </div>
           <div className="space-y-2">
-            {c.items.length === 0 && <p className="py-3 text-center text-xs text-gray-400">無</p>}
+            {c.items.length === 0 && c.hidden === 0 && <p className="py-3 text-center text-xs text-gray-400">無</p>}
+            {c.hidden > 0 && (
+              <p className="py-3 text-center text-xs text-gray-400">{c.hidden} 件已隱藏（勾選「含結案／解約」顯示）</p>
+            )}
             {c.items.map((p) => {
               const pct = p.contractTotal ? Math.min(100, Math.round((p.billedTotal / p.contractTotal) * 100)) : null;
               return (
