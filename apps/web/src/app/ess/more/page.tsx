@@ -41,7 +41,10 @@ const rowCls =
   "flex min-h-12 items-center justify-between gap-3 px-1 py-2.5 text-base text-gray-800 active:bg-gray-50 sm:text-sm";
 
 /**
- * 通知偏好（M13）：站內通知一律照收，這裡只管**外部通道**（Email／LINE）。
+ * 通知偏好（M13）：站內通知一律照收，這裡只管**外部通道**。
+ *
+ * 2026-09-30 業主指示只留 Email：LINE 通道正式站沒接，開關拿掉不顯示；
+ * 設定鍵 `notify.channels.v1` 的 `line` 欄位保留，投遞端邏輯不動。
  *
  * 語意是「只有明示關掉才停送」——所以沒設過的人顯示為開啟，存的是明確的
  * true／false。設定存在 `user_preferences` 的 `notify.channels.v1`，投遞端
@@ -66,7 +69,7 @@ function NotifyChannelCard() {
     };
   }, []);
 
-  async function toggle(channel: "email" | "line") {
+  async function toggle(channel: "email") {
     if (!prefs) return;
     const next = { ...prefs, [channel]: prefs[channel] === false };
     setPrefs(next);
@@ -82,15 +85,14 @@ function NotifyChannelCard() {
     }
   }
 
-  const rows: Array<{ key: "email" | "line"; label: string; hint: string }> = [
+  const rows: Array<{ key: "email"; label: string; hint: string }> = [
     { key: "email", label: "Email 通知", hint: "簽核、公告、提醒寄到你的公司信箱" },
-    { key: "line", label: "LINE 通知", hint: "需要先在「我的資料」綁定 LINE" },
   ];
 
   return (
     <Card title="通知偏好">
       {prefs === null ? (
-        <Skeleton lines={2} />
+        <Skeleton lines={1} />
       ) : (
         <ul className="-my-1 divide-y divide-gray-100">
           {rows.map((row) => {
