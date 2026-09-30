@@ -3,6 +3,9 @@
   "buildCommand": "cd ../.. && npm run build -w @hr/rules && npm run build -w @hr/api",
   "installCommand": "cd ../.. && npm install",
   "framework": null,
+  "regions": [
+    "hnd1"
+  ],
   "outputDirectory": "public",
   "rewrites": [
     {
