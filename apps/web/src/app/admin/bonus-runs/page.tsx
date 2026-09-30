@@ -324,7 +324,7 @@ export default function BonusRunsPage() {
                   <Stat label="累計應發／已發" value={`${fmtMoney(preview.totals.entitledCumulative)}／${fmtMoney(preview.totals.paidBefore)}`} />
                   <Stat label="超發列" value={preview.totals.overpaidCount > 0 ? `${preview.totals.overpaidCount} 列` : "無"} tone={preview.totals.overpaidCount > 0 ? "down" : undefined} />
                 </div>
-                <ItemsTable items={preview.items} />
+                <ItemsTable items={preview.items} label={fLabel} />
                 <SkippedList skipped={preview.totals.skipped.map((s) => ({ ...s, ...(preview.snapshot.skipped ?? []).find((x) => x.projectId === s.projectId) }))} />
               </div>
             )}

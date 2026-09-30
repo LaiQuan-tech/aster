@@ -1,9 +1,10 @@
 "use client";
 
+import { Fragment } from "react";
 import Link from "next/link";
 import { Empty } from "@/components/admin-ui";
 import { BONUS_RUN_STATUS_LABELS, BONUS_SKIP_REASON_LABELS, fmtMoney, fmtPct, type BonusRun, type BonusRunPreview } from "@/lib/bonus-api";
-import { memberRoleLabel } from "@/lib/projects-api";
+import { buildBonusRegisterRows } from "@/lib/bonus-register";
 
 /**
  * 獎金季發放列表頁與明細頁共用的小元件（放這裡而不是 page.tsx：app router 的
@@ -26,51 +27,58 @@ export function StatusBadge({ status }: { status: BonusRun["status"] }) {
   return <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>{BONUS_RUN_STATUS_LABELS[status] ?? status}</span>;
 }
 
-export function ItemsTable({ items }: { items: BonusRunPreview["items"] }) {
+export function ItemsTable({ items, label = "" }: { items: BonusRunPreview["items"]; label?: string }) {
   if (items.length === 0) return <Empty>沒有可發放的明細（沒有「未封存、有成員、有合約」的專案）</Empty>;
+  const rows = buildBonusRegisterRows(items);
+  const slotHeaders = ["經理", "組員1", "組員2", "組員3", "組員4", "支援"];
   return (
     <div className="overflow-x-auto">
       <table className="min-w-max border-collapse whitespace-nowrap text-xs">
         <thead>
           <tr className="bg-gray-100 text-center font-semibold text-gray-700">
-            <th className="border border-black px-2 py-2" rowSpan={2}>專案單號</th><th className="border border-black px-2 py-2" rowSpan={2}>專案名稱</th><th className="border border-black px-2 py-2" rowSpan={2}>合約額</th>
-            <th className="border border-black px-2 py-1" colSpan={2}>之前請領</th><th className="border border-black px-2 py-1" colSpan={2}>本次請款</th>
-            <th className="border border-black px-2 py-2" rowSpan={2}>累積比例</th><th className="border border-black px-2 py-2" rowSpan={2}>獎金比例</th><th className="border border-black px-2 py-2" rowSpan={2}>總獎金</th><th className="border border-black px-2 py-2" rowSpan={2}>本次獎金</th>
-            <th className="border border-black px-2 py-1" colSpan={3}>成員分配</th><th className="border border-black px-2 py-2" rowSpan={2}>尚未分配</th><th className="border border-black px-2 py-2" rowSpan={2}>備註</th>
+            <th className="border border-black px-2 py-2" rowSpan={2}>序號</th><th className="border border-black px-2 py-2" rowSpan={2}>{label || "期別"}</th>
+            <th className="border border-black px-2 py-2" rowSpan={2}>專案單號</th><th className="border border-black px-2 py-2" rowSpan={2}>工程名稱</th><th className="border border-black px-2 py-2" rowSpan={2}>含稅</th>
+            <th className="border border-black px-2 py-2" rowSpan={2}>之前請領</th><th className="border border-black px-2 py-2" rowSpan={2}>之前請領%</th>
+            <th className="border border-black px-2 py-2" rowSpan={2}>本次請款</th><th className="border border-black px-2 py-2" rowSpan={2}>本次款%</th><th className="border border-black px-2 py-2" rowSpan={2}>累積 %</th>
+            <th className="border border-black px-2 py-1" colSpan={3}>獎金比例</th>
+            {slotHeaders.flatMap((header) => [<th key={`${header}-name`} className="border border-black px-2 py-2" rowSpan={2}>{header}</th>, <th key={`${header}-pct`} className="border border-black px-2 py-2" rowSpan={2} aria-label={`${header}比例`} />])}
+            <th className="border border-black px-2 py-2" rowSpan={2}>尚未分配</th><th className="border border-black px-2 py-2" rowSpan={2}>備註</th>
           </tr>
           <tr className="bg-gray-100 text-center font-semibold text-gray-700">
-            <th className="border border-black px-2 py-1">金額</th><th className="border border-black px-2 py-1">比例</th><th className="border border-black px-2 py-1">金額</th><th className="border border-black px-2 py-1">比例</th>
-            <th className="border border-black px-2 py-1">成員／角色</th><th className="border border-black px-2 py-1">比例</th><th className="border border-black px-2 py-1">金額</th>
+            <th className="border border-black px-2 py-1">%</th><th className="border border-black px-2 py-1">總獎金</th><th className="border border-black px-2 py-1">本次獎金</th>
           </tr>
         </thead>
         <tbody>
-          {items.map((it) => {
+          {rows.map((register, index) => {
+            const it = register.project;
             const previousReceived = it.previousReceived ?? 0;
             const currentReceived = it.currentReceived ?? Math.max(0, it.receivedTotal - previousReceived);
             const unallocatedPct = it.unallocatedPct ?? 0;
-            const unallocatedAmount = it.bonusPool == null ? null : Math.round(it.bonusPool * unallocatedPct / 100);
+            const members = [register.manager, ...register.team, register.support];
+            const overpaid = register.items.reduce((sum, item) => sum + (item.overpaid ? item.overpaidBy : 0), 0);
             return (
-            <tr key={`${it.projectId}:${it.employeeId}`} className={it.overpaid ? "bg-red-50/60" : "bg-white"}>
+            <tr key={it.projectId} className={overpaid > 0 ? "bg-red-50/60" : "bg-white"}>
+              <td className="border border-black px-2 py-1.5 text-center">{index + 1}</td><td className="border border-black px-2 py-1.5 text-center">{label || "—"}</td>
               <td className="border border-black px-2 py-1.5">
                 <Link href={`/admin/projects/${it.projectId}`} style={{ color: "var(--brand)" }}>
                   {it.projectCode ?? "—"}
                 </Link>
               </td>
               <td className="border border-black px-2 py-1.5 text-gray-800">{it.projectName ?? it.projectId}</td>
-              <td className="border border-black px-2 py-1.5 text-right">{fmtMoney(it.contractTotal)}</td>
-              <td className="border border-black px-2 py-1.5 text-right">{fmtMoney(previousReceived)}</td><td className="border border-black px-2 py-1.5 text-right">{fmtPct(it.previousReceivedPct ?? (it.contractTotal ? previousReceived / it.contractTotal : 0))}</td>
-              <td className="border border-black px-2 py-1.5 text-right">{fmtMoney(currentReceived)}</td><td className="border border-black px-2 py-1.5 text-right">{fmtPct(it.currentReceivedPct ?? (it.contractTotal ? currentReceived / it.contractTotal : 0))}</td>
-              <td className="border border-black px-2 py-1.5 text-right">{fmtPct(it.receivedPct)}</td><td className="border border-black px-2 py-1.5 text-right">{it.bonusRatePct == null ? "—" : `${it.bonusRatePct}%`}</td>
-              <td className="border border-black px-2 py-1.5 text-right">{fmtMoney(it.bonusPool)}</td><td className={`border border-black px-2 py-1.5 text-right font-semibold ${it.overpaid ? "text-red-600" : ""}`}>{fmtMoney(it.amount)}</td>
-              <td className="border border-black px-2 py-1.5 text-gray-800">{it.employeeName ?? it.employeeId}<span className="ml-1 text-gray-400">{it.roleInProject ? memberRoleLabel(it.roleInProject) : ""}</span></td>
-              <td className="border border-black px-2 py-1.5 text-right">{it.shareMode === "pool_pct" ? `${it.sharePct ?? 0}%` : "固定"}</td><td className="border border-black px-2 py-1.5 text-right">{fmtMoney(it.amount)}</td>
-              <td className="border border-black px-2 py-1.5 text-right"><div>{unallocatedPct}%</div><div className="text-gray-500">{fmtMoney(unallocatedAmount)}</div></td>
+              <td className="border border-black px-2 py-1.5 text-right">{fmtMoney(it.contractTotal)}</td><td className="border border-black px-2 py-1.5 text-right">{fmtMoney(previousReceived)}</td>
+              <td className="border border-black px-2 py-1.5 text-right">{fmtPct(it.previousReceivedPct ?? (it.contractTotal ? previousReceived / it.contractTotal : 0))}</td><td className="border border-black px-2 py-1.5 text-right">{fmtMoney(currentReceived)}</td>
+              <td className="border border-black px-2 py-1.5 text-right">{fmtPct(it.currentReceivedPct ?? (it.contractTotal ? currentReceived / it.contractTotal : 0))}</td><td className="border border-black px-2 py-1.5 text-right">{fmtPct(it.receivedPct)}</td>
+              <td className="border border-black px-2 py-1.5 text-right">{it.bonusRatePct == null ? "—" : `${it.bonusRatePct}%`}</td><td className="border border-black px-2 py-1.5 text-right">{fmtMoney(it.bonusPool)}</td>
+              <td className={`border border-black px-2 py-1.5 text-right font-semibold ${overpaid > 0 ? "text-red-600" : ""}`}>{fmtMoney(register.currentBonus)}</td>
+              {members.map((member, memberIndex) => <Fragment key={member?.employeeId ?? `empty-${memberIndex}`}><td className="border border-black px-2 py-1.5">{member?.employeeName ?? ""}</td><td className="border border-black px-2 py-1.5 text-right">{member ? (member.shareMode === "pool_pct" ? `${member.sharePct ?? 0}%` : fmtMoney(member.shareAmount)) : ""}</td></Fragment>)}
+              <td className={`border border-black px-2 py-1.5 text-right ${unallocatedPct > 0 ? "font-semibold text-red-600" : ""}`}>{unallocatedPct}%</td>
               <td className="border border-black px-2 py-1.5">
-                {it.overpaid ? <span className="font-medium text-red-600">超發 {fmtMoney(it.overpaidBy)}</span> : (it.projectNote ?? "—")}
+                {overpaid > 0 ? <span className="font-medium text-red-600">超發 {fmtMoney(overpaid)}</span> : (it.projectNote ?? "—")}
               </td>
             </tr>
           )})}
         </tbody>
+        <tfoot><tr className="bg-blue-50 font-semibold"><td className="border border-black px-2 py-2 text-right" colSpan={12}>合計（{rows.length} 案）</td><td className="border border-black px-2 py-2 text-right">{fmtMoney(rows.reduce((sum, row) => sum + row.currentBonus, 0))}</td><td className="border border-black" colSpan={14} /></tr></tfoot>
       </table>
     </div>
   );

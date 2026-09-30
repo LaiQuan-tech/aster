@@ -293,7 +293,7 @@ export default function BonusRunDetailPage() {
 
       <Card>
         <h2 className="mb-3 text-base font-semibold text-gray-800">明細（{detail.items.length} 列）</h2>
-        <ItemsTable items={detail.items} />
+        <ItemsTable items={detail.items} label={run.label} />
         <div className="mt-3">
           <SkippedList skipped={skipped} />
         </div>
