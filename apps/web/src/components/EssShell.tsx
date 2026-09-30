@@ -3,9 +3,11 @@
 /**
  * ESS 共用頁框（由 app/ess/layout.tsx 掛，包住所有 /ess/** 頁面）。
  *
- * - 手機（<lg）：頂部列（返回鍵／頁標題／後台 pill）＋固定底部分頁列
+ * - 手機（<lg）：頂部列（返回鍵／頁標題／登入者姓名／後台 pill）＋固定底部分頁列
  *   「打卡・請假・（簽核）・通知・更多」，內容區 `.pb-tabbar` 預留底列高度。
- * - 桌機（lg+）：頂部列左 appName、中同一組項目水平導覽、右「後台」＋「登出」；無底列。
+ * - 桌機（lg+）：頂部列左 appName、中同一組項目水平導覽、右「姓名」＋「後台」＋「登出」；無底列。
+ * - 右上角：姓名（/me 回來才顯示，點了進「更多」的帳號卡）一律顯示；「後台」只給
+ *   isAdmin（hr_admin／platform_admin／accountant，lib/roles.ts）的帳號，一般員工看不到。
  * - 頁面 gate：依 routeForPath(pathname).key 對 /me 的 essTabs 判斷，一律 optimistic
  *   （/me 未回先渲染），確定不允許才換成「此帳號未開放此功能」。home／更多／公告不 gate。
  * - 徽章：簽核＝待簽筆數（紅色，99+）、通知＝未讀數（API 沒回就不顯示）。
@@ -109,6 +111,7 @@ export function EssShell({ children }: { children: ReactNode }) {
     !state.essTabs.includes(route.key);
 
   const appName = state.branding?.appName ?? DEFAULT_APP_NAME;
+  const userName = state.me?.name?.trim() ?? "";
   const title = route.title || appName;
   const isHomeTitle = !route.title;
   const showBack = !isBottomRootPath(pathname);
@@ -171,7 +174,16 @@ export function EssShell({ children }: { children: ReactNode }) {
             >
               {title}
             </h1>
-            <div className="flex min-w-12 shrink-0 items-center justify-end">
+            <div className="flex min-w-12 shrink-0 items-center justify-end gap-1.5">
+              {userName && (
+                <Link
+                  href="/ess/more"
+                  className="max-w-[4.5rem] truncate text-sm font-medium text-gray-700"
+                  aria-label={`我的帳號：${userName}`}
+                >
+                  {userName}
+                </Link>
+              )}
               {state.isAdmin && (
                 <Link
                   href="/admin"
@@ -193,6 +205,15 @@ export function EssShell({ children }: { children: ReactNode }) {
               {tabs.map(desktopTab)}
             </nav>
             <div className="flex shrink-0 items-center gap-2">
+              {userName && (
+                <Link
+                  href="/ess/more"
+                  className="max-w-[10rem] truncate text-sm font-medium text-gray-700 hover:underline"
+                  aria-label={`我的帳號：${userName}`}
+                >
+                  {userName}
+                </Link>
+              )}
               {state.isAdmin && (
                 <Link
                   href="/admin"
