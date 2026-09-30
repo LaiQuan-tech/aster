@@ -178,9 +178,13 @@ const totalDeductionsAmount = round2(
 )
 
 const money: SheetMoney = {
+  base: fixture.employee.baseSalary,
   hourlyWage: fixture.summaryExcel.hourly,
   otPay: fixture.summaryExcel.otPay,
   otPayByTier: { tier1: 8785.82, tier2: 3294.68, tier3: 0 }, // 依 40:15 時數比例分攤 otPay
+  nightPay: 0,
+  attendanceBonus: 0,
+  allowances: 0,
   leaveDeduction: fixture.summaryExcel.leaveDeduction,
   lateEarlyDeduction: 0,
   laborInsurance: fixture.employee.laborInsurance,
@@ -310,7 +314,7 @@ describe("buildAttendanceWorkbook — 余裕哲 115-06 fixture", () => {
       "5h 以上",
     ])
     expect(sheet.getRow(37).getCell(2).value).toBe("加班≤1h 合計")
-    expect(sheet.getRow(40).getCell(2).value).toBe("加班費(≤1h)")
+    expect(sheet.getCell("O11").value).toBe("加班費(≤1h)")
   })
 
   it("第 6 列（6/1）日期／星期／起迄／加班值", () => {
@@ -393,11 +397,21 @@ describe("buildAttendanceWorkbook — 余裕哲 115-06 fixture", () => {
     expect(valueRow.getCell(6).value).toBeCloseTo(2, 5)
   })
 
-  it("money 區：實領 47533.5", () => {
-    const labelRow = ws.getRow(40)
-    expect(labelRow.getCell(14).value).toBe("實領")
-    const valueRow = ws.getRow(41)
-    expect(valueRow.getCell(14).value).toBeCloseTo(47533.5, 2)
+  it("薪資明細與出勤統計並列，包含薪資項目、扣項與代墊", () => {
+    expect(ws.getCell("O5").value).toBe("薪資明細表")
+    expect(ws.getCell("O6").value).toBe("職稱")
+    expect(ws.getCell("P6").value).toBe(fixture.employee.title)
+    expect(ws.getCell("O10").value).toBe("本薪")
+    expect(ws.getCell("P10").value).toBe(fixture.employee.baseSalary)
+    expect(ws.getCell("O11").value).toBe("加班費(≤2h)")
+    expect(ws.getCell("P11").value).toBeCloseTo(money.otPayByTier.tier1, 2)
+    expect(ws.getCell("P17").value).toBeCloseTo(money.gross, 2)
+    expect(ws.getCell("R10").value).toBe("勞保自付")
+    expect(ws.getCell("S10").value).toBe(fixture.employee.laborInsurance)
+    expect(ws.getCell("U10").value).toBe("實發金額")
+    expect(ws.getCell("V10").value).toBeCloseTo(47533.5, 2)
+    expect(ws.getCell("U11").value).toBe("代墊支出")
+    expect(ws.getCell("V11").value).toBe(fixture.summaryExcel.expenses)
   })
 })
 

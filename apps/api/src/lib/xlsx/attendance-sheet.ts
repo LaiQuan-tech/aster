@@ -126,7 +126,7 @@ function headersFor(labels: [string, string, string]): string[] {
 }
 
 const COLUMN_COUNT = 13
-const COLUMN_WIDTHS = [8, 5, 8, 8, 9, 9, 9, 9, 10, 16, 14, 18, 20]
+const COLUMN_WIDTHS = [8, 5, 8, 8, 9, 9, 9, 9, 10, 16, 14, 18, 20, 2, 14, 16, 2, 14, 16, 2, 14, 16]
 
 const FILL_HOLIDAY = "FFF2F2F2" // 假日列淡灰底
 const FILL_WARN = "FFFFEB9C" // warn 淡黃底（Excel 內建「注意」色）
@@ -359,6 +359,7 @@ function writeSummarySection(
   startRow: number,
   totals: SheetView["totals"],
   labels: [string, string, string],
+  outingMinutes: number,
 ): number {
   const headerLabels = [
     "請假合計",
@@ -371,6 +372,8 @@ function writeSummarySection(
     "遲到分鐘",
     "早退分鐘",
     "月累計加班警示",
+    "出勤工時",
+    "外出時數",
   ]
   const labelRow = ws.getRow(startRow)
   headerLabels.forEach((label, idx) => (labelRow.getCell(idx + 1).value = label))
@@ -400,6 +403,10 @@ function writeSummarySection(
   earlyCell.value = totals.earlyLeaveMinutes
   earlyCell.numFmt = "0"
   valueRow.getCell(10).value = OT_ALERT_LABELS[totals.overtimeMonthlyAlert]
+  valueRow.getCell(11).value = minutesToHours(totals.workedMinutes)
+  valueRow.getCell(11).numFmt = "0.0"
+  valueRow.getCell(12).value = minutesToHours(outingMinutes)
+  valueRow.getCell(12).numFmt = "0.0"
 
   return startRow + 2
 }
@@ -407,61 +414,79 @@ function writeSummarySection(
 /** 薪資明細（只有 money 非 null 才輸出）；回傳下一個可用的空白列號。 */
 function writeMoneySection(
   ws: ExcelJS.Worksheet,
-  startRow: number,
+  view: SheetView,
   money: SheetMoney | null,
   tierLabels: [string, string, string],
-): number {
-  if (!money) return startRow
+): void {
+  if (!money) return
 
-  const labels = [
-    "時薪",
-    `加班費(${tierLabels[0]})`,
-    `加班費(${tierLabels[1]})`,
-    `加班費(${tierLabels[2]})`,
-    "加班費合計",
-    "請假扣款",
-    "遲到早退扣款",
-    "勞保",
-    "健保",
-    "勞退自提",
-    "預支",
-    "應發",
-    "應扣合計",
-    "實領",
-    "支出（代墊）",
-    "薪資+支出",
+  ws.mergeCells("O5:V5")
+  ws.getCell("O5").value = "薪資明細表"
+  ws.getCell("O5").font = { bold: true, size: 12 }
+  ws.getCell("O5").alignment = { horizontal: "center" }
+  const metadata = [
+    ["職稱", view.title ?? "—", "工號", view.employeeNo ?? "—", "月份", view.period],
+    ["姓名", view.employeeName, "部門", view.department ?? "—", "基準時薪", money.hourlyWage],
   ]
-  const values = [
-    money.hourlyWage,
-    money.otPayByTier.tier1,
-    money.otPayByTier.tier2,
-    money.otPayByTier.tier3,
-    money.otPay,
-    money.leaveDeduction,
-    money.lateEarlyDeduction,
-    money.laborInsurance,
-    money.healthInsurance,
-    money.pensionVoluntary,
-    money.advance,
-    money.gross,
-    money.totalDeductions,
-    money.net,
-    money.expenses,
-    money.netPlusExpenses,
-  ]
-
-  const labelRow = ws.getRow(startRow)
-  labels.forEach((label, idx) => (labelRow.getCell(idx + 1).value = label))
-  applyHeaderStyle(labelRow)
-
-  const valueRow = ws.getRow(startRow + 1)
-  values.forEach((v, idx) => {
-    const c = valueRow.getCell(idx + 1)
-    c.value = v
-    c.numFmt = "#,##0.00"
+  metadata.forEach((values, rowIndex) => {
+    const rowNumber = 6 + rowIndex
+    const columns = [15, 16, 18, 19, 21, 22]
+    values.forEach((value, index) => {
+      const cell = ws.getRow(rowNumber).getCell(columns[index])
+      cell.value = value
+      if (index % 2 === 0) cell.font = { bold: true }
+    })
   })
+  ws.getCell("V7").numFmt = "#,##0.00"
 
-  return startRow + 2
+  const sections = [
+    { header: "應發項目", labelCol: 15, valueCol: 16, rows: [
+      ["本薪", money.base],
+      [`加班費(${tierLabels[0]})`, money.otPayByTier.tier1],
+      [`加班費(${tierLabels[1]})`, money.otPayByTier.tier2],
+      [`加班費(${tierLabels[2]})`, money.otPayByTier.tier3],
+      ["夜間加給", money.nightPay],
+      ["全勤獎金", money.attendanceBonus],
+      ["定額補貼", money.allowances],
+      ["應發合計", money.gross],
+    ] as Array<[string, number | undefined]> },
+    { header: "應扣項目", labelCol: 18, valueCol: 19, rows: [
+      ["勞保自付", money.laborInsurance],
+      ["健保自付", money.healthInsurance],
+      ["勞退自提", money.pensionVoluntary],
+      ["預支扣回", money.advance],
+      ["請假扣款", money.leaveDeduction],
+      ["遲到早退扣款", money.lateEarlyDeduction],
+      ["應扣合計", money.totalDeductions],
+    ] as Array<[string, number]> },
+    { header: "實發明細", labelCol: 21, valueCol: 22, rows: [
+      ["實發金額", money.net],
+      ["代墊支出", money.expenses],
+      ["薪資＋代墊", money.netPlusExpenses],
+    ] as Array<[string, number]> },
+  ]
+
+  for (const section of sections) {
+    const header = ws.getRow(9)
+    for (const [column, value] of [[section.labelCol, section.header], [section.valueCol, "金額"]] as const) {
+      const cell = header.getCell(column)
+      cell.value = value
+      cell.font = { bold: true }
+      cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true }
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE7E6E6" } }
+      cell.border = { top: { style: "thin" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } }
+    }
+    section.rows.forEach(([label, value], index) => {
+      const row = ws.getRow(10 + index)
+      row.getCell(section.labelCol).value = label
+      row.getCell(section.valueCol).value = value == null ? "—" : value
+      if (typeof value === "number") row.getCell(section.valueCol).numFmt = "#,##0.00"
+      if (["應發合計", "應扣合計", "實發金額", "薪資＋代墊"].includes(label)) {
+        row.getCell(section.labelCol).font = { bold: true }
+        row.getCell(section.valueCol).font = { bold: true }
+      }
+    })
+  }
 }
 
 function writeFooter(ws: ExcelJS.Worksheet, startRow: number, view: SheetView, tz: string): void {
@@ -512,7 +537,7 @@ export async function buildAttendanceWorkbook(
     ws.views = [{ state: "frozen", ySplit: 5 }]
     ws.pageSetup = {
       paperSize: 9, // A4
-      orientation: "portrait",
+      orientation: "landscape",
       fitToPage: true,
       fitToWidth: 1,
       fitToHeight: 0,
@@ -522,9 +547,10 @@ export async function buildAttendanceWorkbook(
     writeLetterhead(ws, view, opts)
     writeHeaderRow(ws, tierLabels)
     const afterDays = writeDayRows(ws, view, opts.tz)
-    const afterSummary = writeSummarySection(ws, afterDays + 1, view.totals, tierLabels)
-    const afterMoney = writeMoneySection(ws, afterSummary + 1, view.money, tierLabels)
-    writeFooter(ws, afterMoney + 1, view, opts.tz)
+    const outingMinutes = view.days.reduce((sum, day) => sum + day.outingMinutes, 0)
+    const afterSummary = writeSummarySection(ws, afterDays + 1, view.totals, tierLabels, outingMinutes)
+    writeMoneySection(ws, view, view.money, tierLabels)
+    writeFooter(ws, afterSummary + 1, view, opts.tz)
   }
 
   return wb

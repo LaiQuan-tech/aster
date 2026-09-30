@@ -131,9 +131,14 @@ export function otTierLabelsOf(totals: Pick<SheetTotals, "otTierLabels">): [stri
 
 /** 薪資試算（只有 HR 看得到；本人查詢自己的表時是 null）。 */
 export interface SheetMoney {
+  /** Missing in pre-parity approval snapshots; do not infer from gross. */
+  base?: number;
   hourlyWage: number;
   otPay: number;
   otPayByTier: { tier1: number; tier2: number; tier3: number };
+  nightPay?: number;
+  attendanceBonus?: number;
+  allowances?: number;
   leaveDeduction: number;
   lateEarlyDeduction: number;
   laborInsurance: number;

@@ -53,6 +53,10 @@ function money(value: number): string {
   return Math.round(value).toLocaleString("zh-TW");
 }
 
+function moneyIfAvailable(value: number | undefined): string {
+  return value == null ? "—" : money(value);
+}
+
 function minguoPeriod(period: string): { year: number; month: number } {
   const [y, m] = period.split("-").map(Number);
   return { year: (y || 1911) - 1911, month: m || 1 };
@@ -155,7 +159,11 @@ export function AttendanceSheetTable({
         </table>
       </div>
 
-      <SummaryRow totals={sheet.totals} tierLabels={tierLabels} />
+      <SummaryRow
+        totals={sheet.totals}
+        tierLabels={tierLabels}
+        outingMinutes={sheet.days.reduce((sum, day) => sum + day.outingMinutes, 0)}
+      />
 
       {showMoney &&
         (sheet.money ? (
@@ -460,14 +468,22 @@ function AnomalyCell({
   );
 }
 
-function SummaryRow({ totals, tierLabels }: { totals: SheetTotals; tierLabels: [string, string, string] }) {
+function SummaryRow({ totals, tierLabels, outingMinutes }: { totals: SheetTotals; tierLabels: [string, string, string]; outingMinutes: number }) {
   const leaveTypeEntries = Object.entries(totals.leaveByType).filter(([, minutes]) => minutes > 0);
   const beyondCap = totals.overtimeBeyondCapMinutes ?? 0;
   return (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-8">
       <div className="rounded-xl bg-slate-50 p-4">
         <p className="text-xs text-slate-500">出勤天數</p>
         <p className="mt-1 text-xl font-semibold text-slate-900">{totals.attendanceDays} 天</p>
+      </div>
+      <div className="rounded-xl bg-slate-50 p-4">
+        <p className="text-xs text-slate-500">出勤工時</p>
+        <p className="mt-1 text-xl font-semibold text-slate-900">{hours(totals.workedMinutes)} 小時</p>
+      </div>
+      <div className="rounded-xl bg-slate-50 p-4">
+        <p className="text-xs text-slate-500">外出時數</p>
+        <p className="mt-1 text-xl font-semibold text-slate-900">{hours(outingMinutes)} 小時</p>
       </div>
       <div className="rounded-xl bg-red-50 p-4">
         <p className="text-xs text-red-600">遲到</p>
@@ -511,24 +527,57 @@ function SummaryRow({ totals, tierLabels }: { totals: SheetTotals; tierLabels: [
 }
 
 function MoneyCard({ money: m, tierLabels }: { money: SheetMoney; tierLabels: [string, string, string] }) {
+  const sections = [
+    {
+      title: "應發",
+      rows: [
+        ["本薪", m.base],
+        [`加班費 ${tierLabels[0]}`, m.otPayByTier.tier1],
+        [`加班費 ${tierLabels[1]}`, m.otPayByTier.tier2],
+        [`加班費 ${tierLabels[2]}`, m.otPayByTier.tier3],
+        ["夜間加給", m.nightPay],
+        ["全勤獎金", m.attendanceBonus],
+        ["定額補貼", m.allowances],
+        ["應發合計", m.gross],
+      ] as Array<[string, number | undefined]>,
+    },
+    {
+      title: "應扣",
+      rows: [
+        ["勞保自付", m.laborInsurance],
+        ["健保自付", m.healthInsurance],
+        ["勞退自提", m.pensionVoluntary],
+        ["預支扣回", m.advance],
+        ["請假扣款", m.leaveDeduction],
+        ["遲到早退扣款", m.lateEarlyDeduction],
+        ["應扣合計", m.totalDeductions],
+      ] as Array<[string, number | undefined]>,
+    },
+    {
+      title: "實發",
+      rows: [
+        ["實發金額", m.net],
+        ["代墊支出（不計薪資所得）", m.expenses],
+        ["薪資＋代墊", m.netPlusExpenses],
+      ] as Array<[string, number]>,
+    },
+  ];
   return (
     <div className="rounded-xl border border-gray-100 bg-white p-4 shadow-sm">
       <p className="mb-3 text-sm font-semibold text-gray-700">薪資試算</p>
-      <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm md:grid-cols-4">
-        <MoneyRow label="時薪" value={money(m.hourlyWage)} />
-        <MoneyRow label={`加班費 ${tierLabels[0]}`} value={money(m.otPayByTier.tier1)} />
-        <MoneyRow label={`加班費 ${tierLabels[1]}`} value={money(m.otPayByTier.tier2)} />
-        <MoneyRow label={`加班費 ${tierLabels[2]}`} value={money(m.otPayByTier.tier3)} />
-        <MoneyRow label="加班費合計" value={money(m.otPay)} strong />
-        <MoneyRow label="請假扣款" value={`-${money(m.leaveDeduction)}`} negative />
-        <MoneyRow label="遲到早退扣款" value={`-${money(m.lateEarlyDeduction)}`} negative />
-        <MoneyRow label="勞保自付" value={`-${money(m.laborInsurance)}`} negative />
-        <MoneyRow label="健保自付" value={`-${money(m.healthInsurance)}`} negative />
-        <MoneyRow label="勞退自提" value={`-${money(m.pensionVoluntary)}`} negative />
-        <MoneyRow label="預支扣回" value={`-${money(m.advance)}`} negative />
-        <MoneyRow label="代墊支出" value={money(m.expenses)} />
-        <MoneyRow label="實領" value={money(m.net)} strong />
-        <MoneyRow label="薪資＋支出" value={money(m.netPlusExpenses)} strong />
+      <p className="mb-3 text-xs text-gray-500">基準時薪 {money(m.hourlyWage)}</p>
+      <div className="grid gap-4 text-sm md:grid-cols-3">
+        {sections.map((section) => (
+          <section key={section.title} aria-label={section.title}>
+            <h3 className="mb-2 border-b border-gray-200 pb-1 text-xs font-semibold text-gray-600">{section.title}</h3>
+            <div className="space-y-2">
+              {section.rows.map(([label, value]) => {
+                const strong = ["應發合計", "應扣合計", "實發金額", "薪資＋代墊"].includes(label);
+                return <MoneyRow key={label} label={label} value={moneyIfAvailable(value)} strong={strong} />;
+              })}
+            </div>
+          </section>
+        ))}
       </div>
     </div>
   );
@@ -538,17 +587,15 @@ function MoneyRow({
   label,
   value,
   strong,
-  negative,
 }: {
   label: string;
   value: string;
   strong?: boolean;
-  negative?: boolean;
 }) {
   return (
     <div>
       <p className="text-xs text-gray-400">{label}</p>
-      <p className={`mt-0.5 tabular-nums ${strong ? "font-semibold text-gray-900" : negative ? "text-rose-600" : "text-gray-700"}`}>
+      <p className={`mt-0.5 tabular-nums ${strong ? "font-semibold text-gray-900" : "text-gray-700"}`}>
         {value}
       </p>
     </div>

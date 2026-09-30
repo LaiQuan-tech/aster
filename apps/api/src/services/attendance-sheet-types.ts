@@ -123,9 +123,14 @@ export interface SheetTotals {
 
 /** Money breakdown for the sheet (payroll-adjacent, but this module only carries the shape). */
 export interface SheetMoney {
+  /** Missing in pre-parity approval snapshots; do not infer from gross. */
+  base?: number
   hourlyWage: number
   otPay: number
   otPayByTier: { tier1: number; tier2: number; tier3: number }
+  nightPay?: number
+  attendanceBonus?: number
+  allowances?: number
   leaveDeduction: number
   lateEarlyDeduction: number
   laborInsurance: number

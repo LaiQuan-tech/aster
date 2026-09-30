@@ -1486,9 +1486,13 @@ export function buildPayrollDays(
 
 function toMoney(breakdown: ReturnType<typeof computePayslip>, rules: RuleConfig): SheetMoney {
   return {
+    base: breakdown.base,
     hourlyWage: breakdown.hourlyWage,
     otPay: breakdown.overtimePay,
     otPayByTier: otPayByTierFromSegments(breakdown.overtimeSegments, rules),
+    nightPay: breakdown.nightPay,
+    attendanceBonus: breakdown.attendanceBonus,
+    allowances: breakdown.allowances,
     leaveDeduction: breakdown.leaveDeduction,
     lateEarlyDeduction: breakdown.lateEarlyDeduction,
     laborInsurance: breakdown.laborInsurance,
