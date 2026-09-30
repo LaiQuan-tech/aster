@@ -13,7 +13,11 @@
 ### Task 1: Define and test the complete creation payload
 
 **Files:**
+- Create: `packages/db/sql/0043_project_primary_contract.sql`
+- Modify: `packages/db/src/schema/contracts.ts`
 - Modify: `apps/api/src/routes/projects.ts`
+- Modify: `apps/api/src/routes/contracts.ts`
+- Create: `apps/api/src/services/main-contract.ts`
 - Modify: `apps/web/src/lib/projects-ext-api.ts`
 - Test: `apps/api/src/__tests__/projects-application.test.ts`
 
@@ -29,7 +33,7 @@ Expected: new payload cases fail because nested creation fields are not parsed o
 
 **Step 3: Add shared request types and validation**
 
-Extend `CreateProjectExtBody` with:
+Add an explicit primary-contract marker with a partial unique index for one active primary contract per project. Extend `CreateProjectExtBody` with:
 
 ```ts
 primaryContract?: {
@@ -48,7 +52,7 @@ In `projects.ts`, add matching Zod schemas and keep all existing fields backward
 
 **Step 4: Implement related-record creation**
 
-After the project insert succeeds, insert the main contract and replace the billing schedule using the existing contract/billing rules. Return `{ id, code }` only after all requested records succeed. On a related-write failure, remove the newly created unpublished project and return a clear `project_application_create_failed` error. Never delete a pre-existing project.
+After the project insert succeeds, insert the primary contract and replace the billing schedule using the existing contract/billing rules. Return `{ id, code }` only after all requested records succeed. On a related-write failure, remove the newly created unpublished project and return a clear `project_application_create_failed` error. Never delete a pre-existing project. Add a finance-authorized main-contract upsert endpoint, recompute dependent stamp-duty/billing values, and close the existing contracts-read authorization gap so non-finance users cannot read contract amounts.
 
 **Step 5: Run focused tests and typecheck**
 
@@ -237,4 +241,3 @@ Skip the commit if verification required no code changes.
 **Step 5: Merge and push**
 
 Fast-forward or merge `codex/project-application-register` into `main`, rerun the focused verification on `main`, and push `main` to `origin`.
-
