@@ -165,7 +165,7 @@ git commit -m "feat(projects): add application tab to project detail"
 
 **Step 1: Write failing projection/format tests**
 
-Assert the fixed Excel column order, dynamic discipline columns, ROC date display, money display, subtotal labels, and the detail URL for a row.
+Assert the exact Excel A:S column order (`項次` through `汙水`), ROC date display, accounting-style whole-number money display, subtotal labels in the engineering-name column, and the detail URL for a row.
 
 **Step 2: Run the test and confirm RED**
 
@@ -175,7 +175,7 @@ Expected: FAIL because the shared projection does not exist.
 
 **Step 3: Extract the existing annual table**
 
-Move the table from `annual/page.tsx` to `AnnualProjectRegister`. Preserve the spreadsheet-style title rows, black cell borders, Kai font, fixed Excel columns, dynamic discipline columns, monthly subtotals, and annual total.
+Move the table from `annual/page.tsx` to `AnnualProjectRegister`. Match the reference workbook: title merges only across A:P, Kai font, white background, black thin borders for A:P, column-width proportions, row heights, fixed `空調／消防／汙水` columns, monthly subtotals, and annual total. Use `金額`, not `金額(未稅)`. Do not append the four non-Excel system columns. Keep subtotal cells A:D separate and put the label only in E.
 
 **Step 4: Make every project row navigable**
 
