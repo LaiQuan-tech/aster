@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireFinance, requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import {
   GeminiNotConfiguredError,
@@ -73,10 +73,12 @@ aiRouter.post(
   },
 )
 
+// 2026-09-30 起員工端（/ess）不開放 AI 問答；只有 HR／平台管理員／會計（requireFinance）可呼叫此端點。
 aiRouter.post(
   "/ai/ask",
   requireAuth,
   requireTenant,
+  requireFinance,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const userId = req.auth?.userId

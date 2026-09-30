@@ -75,7 +75,7 @@ describe("visibleTabs（ESS 分頁限縮純函式）", () => {
 describe("ESS_TABS（key 順序與新分頁）", () => {
   it("舊 key 順序不變、announcements 追加在最後、請假／打卡短標", () => {
     const keys = ESS_TABS.map((t) => t.key);
-    expect(keys.slice(0, 17)).toEqual([
+    expect(keys.slice(0, 16)).toEqual([
       "home",
       "schedule",
       "punches",
@@ -89,7 +89,6 @@ describe("ESS_TABS（key 順序與新分頁）", () => {
       "expenses",
       "kpi",
       "jobs",
-      "ai",
       "company",
       "notifications",
       "mydata",

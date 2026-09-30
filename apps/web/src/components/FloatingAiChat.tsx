@@ -29,8 +29,8 @@ const EXAMPLES = [
 
 export function FloatingAiChat() {
   const pathname = usePathname();
-  // ESS（員工前台）手機版有固定底部分頁列，浮球會疊在打卡列上：/ess* 只在桌機（lg+）顯示。
-  const inEss = pathname === "/ess" || pathname?.startsWith("/ess/") === true;
+  // 2026-09-30 起員工端（/ess）不開放 AI 問答：浮動聊天球只在後台（/admin 或其子路徑）顯示，其餘頁面一律不渲染。
+  const inAdmin = pathname === "/admin" || pathname?.startsWith("/admin/") === true;
   const [ready, setReady] = useState(false);
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState("");
@@ -86,10 +86,11 @@ export function FloatingAiChat() {
     }
   }
 
+  if (!inAdmin) return null;
   if (!ready) return null;
 
   return (
-    <div className={`fixed bottom-24 right-3 z-50 print:hidden lg:bottom-5 lg:right-5${inEss ? " hidden lg:block" : ""}`}>
+    <div className="fixed bottom-24 right-3 z-50 print:hidden lg:bottom-5 lg:right-5">
       {open && (
         <section className="mb-3 flex h-[min(70vh,560px)] w-[min(94vw,420px)] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl lg:h-[560px]">
           <header className="flex items-start justify-between gap-3 bg-slate-950 px-4 py-3 text-white">

@@ -368,19 +368,6 @@ export function getAnnouncements() {
   return apiFetch<{ announcements: Announcement[] }>("/announcements");
 }
 
-export interface AiAskResponse {
-  answer: string;
-  model: string;
-  scope: "tenant" | "self";
-}
-
-export function askAiQuestion(body: { question: string; from: string; to: string; period: string }) {
-  return apiFetch<AiAskResponse>("/ai/ask", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-}
-
 export type NotificationStatus = "pending" | "sent" | "failed";
 
 export interface NotificationItem {

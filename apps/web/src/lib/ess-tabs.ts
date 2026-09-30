@@ -25,7 +25,6 @@ export type EssTabKey =
   | "expenses"
   | "kpi"
   | "jobs"
-  | "ai"
   | "company"
   | "notifications"
   | "mydata"
@@ -58,7 +57,6 @@ export const ESS_TABS: readonly EssTab[] = [
   { key: "expenses", label: "費用報銷", short: "報銷", href: "/ess/expenses" },
   { key: "kpi", label: "我的考核", short: "考核", href: "/ess/kpi" },
   { key: "jobs", label: "內部職缺", short: "職缺", href: "/ess/jobs" },
-  { key: "ai", label: "AI 問答", short: "AI", href: "/ess/ai" },
   { key: "company", label: "公司資訊", short: "公司", href: "/ess/company-info" },
   { key: "notifications", label: "通知中心", short: "通知", href: "/ess/notifications" },
   { key: "mydata", label: "我的資料", short: "資料", href: "/ess/mydata" },
@@ -152,7 +150,7 @@ export interface EssMoreGroupDef {
 export const MORE_GROUPS: readonly EssMoreGroupDef[] = [
   { title: "差勤", keys: ["punches", "schedule", "sheet", "balances"] },
   { title: "薪資與費用", keys: ["payslips", "expenses", "bonus"] },
-  { title: "公司", keys: ["announcements", "company", "jobs", "projects", "ai"] },
+  { title: "公司", keys: ["announcements", "company", "jobs", "projects"] },
   { title: "個人", keys: ["kpi", "mydata"] },
 ];
 
