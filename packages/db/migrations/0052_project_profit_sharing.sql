@@ -88,9 +88,12 @@ BEGIN
       v_share_pct := (v_member->>'sharePct')::numeric;
       IF v_current.role_in_project IS DISTINCT FROM v_role THEN
         INSERT INTO project_share_adjustments
-          (tenant_id, project_id, employee_id, change_set_id, field, reason, changed_by_emp_id)
+          (tenant_id, project_id, employee_id, change_set_id, field, old_value, new_value, reason, changed_by_emp_id)
         VALUES
-          (p_tenant_id, p_project_id, v_current.employee_id, v_change_set_id, 'role', btrim(p_reason), p_changed_by_emp_id);
+          (p_tenant_id, p_project_id, v_current.employee_id, v_change_set_id, 'role',
+           CASE v_current.role_in_project WHEN 'manager' THEN 1 WHEN 'lead' THEN 2 WHEN 'member' THEN 3 WHEN 'support' THEN 4 END,
+           CASE v_role WHEN 'manager' THEN 1 WHEN 'lead' THEN 2 WHEN 'member' THEN 3 WHEN 'support' THEN 4 END,
+           btrim(p_reason), p_changed_by_emp_id);
       END IF;
       IF v_current.share_pct IS DISTINCT FROM v_share_pct THEN
         INSERT INTO project_share_adjustments

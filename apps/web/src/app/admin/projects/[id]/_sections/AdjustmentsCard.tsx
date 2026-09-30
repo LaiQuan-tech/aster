@@ -19,12 +19,18 @@ export function AdjustmentsCard({ adjustments }: AdjustmentsCardProps) {
   }, []);
 
   function fieldLabel(field: string): string {
-    return ({ pct: "成員比例", amount: "固定金額", pool: "獎金池", bonus_rate: "獎金比例", role: "專案角色", member_added: "加入成員", member_removed: "移除成員" } as Record<string, string>)[field] ?? field;
+    return ({ pct: "成員比例", amount: "固定金額", pool: "獎金池", bonus_rate: "獎金比例", role: "專案角色", member_add: "加入成員", member_remove: "移除成員" } as Record<string, string>)[field] ?? field;
   }
 
   function valueText(value: number | string | null): string {
     if (value == null || value === "") return "—";
     return typeof value === "number" ? fmtMoney(value) : value;
+  }
+
+  function adjustmentValueText(field: string, value: number | string | null): string {
+    if (field === "role" && typeof value === "number") return ({ 1: "經理", 2: "主辦", 3: "組員", 4: "支援" } as Record<number, string>)[value] ?? String(value);
+    if ((field === "pct" || field === "bonus_rate" || field === "member_add" || field === "member_remove") && typeof value === "number") return `${value}%`;
+    return valueText(value);
   }
 
   return (
@@ -42,7 +48,7 @@ export function AdjustmentsCard({ adjustments }: AdjustmentsCardProps) {
                 <span className="text-gray-500">操作者：{head.changedByName ?? "—"}{head.changeSetId ? ` · ${items.length} 項變更` : " · 舊版紀錄"}</span>
               </div>
               <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b text-left text-xs text-gray-500"><th className="px-3 py-2">對象</th><th className="px-3 py-2">項目</th><th className="px-3 py-2">調整前</th><th className="px-3 py-2">調整後</th></tr></thead><tbody>
-                {items.map((item) => <tr key={item.id} className="border-b last:border-0"><td className="px-3 py-2 text-gray-700">{item.name ?? (item.employeeId ? item.employeeId : "專案")}</td><td className="px-3 py-2 text-gray-600">{fieldLabel(item.field)}</td><td className="px-3 py-2 text-gray-500">{valueText(item.oldValue)}</td><td className="px-3 py-2 font-medium text-gray-800">{valueText(item.newValue)}</td></tr>)}
+                {items.map((item) => <tr key={item.id} className="border-b last:border-0"><td className="px-3 py-2 text-gray-700">{item.name ?? (item.employeeId ? item.employeeId : "專案")}</td><td className="px-3 py-2 text-gray-600">{fieldLabel(item.field)}</td><td className="px-3 py-2 text-gray-500">{adjustmentValueText(item.field, item.oldValue)}</td><td className="px-3 py-2 font-medium text-gray-800">{adjustmentValueText(item.field, item.newValue)}</td></tr>)}
               </tbody></table></div>
             </section>;
           })}
