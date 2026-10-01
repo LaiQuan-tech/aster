@@ -1,6 +1,7 @@
 import {
-  pgTable, uuid, text, integer, numeric, date, timestamp, index,
+  pgTable, uuid, text, integer, numeric, date, timestamp, boolean, index, uniqueIndex,
 } from "drizzle-orm/pg-core"
+import { sql } from "drizzle-orm"
 import { tenants } from "./tenants"
 import { projects } from "./projects"
 import { clients } from "./clients"
@@ -55,6 +56,8 @@ export const contracts = pgTable(
     title: text("title").notNull(),
     counterparty: text("counterparty"),
     amount: numeric("amount"),
+    /** 專案正式金額的唯一來源。作廢列不占用主合約名額。 */
+    isPrimary: boolean("is_primary").notNull().default(false),
     /** 簽訂日。報價單通常沒有；沒有簽訂日就不算「已簽約」。 */
     signedOn: date("signed_on"),
 
@@ -86,5 +89,8 @@ export const contracts = pgTable(
     projectIdx: index("contracts_project_idx").on(table.tenantId, table.projectId),
     // 印花稅清單按簽訂日回溯 5～7 年，這是主要的查詢路徑。
     signedIdx: index("contracts_signed_idx").on(table.tenantId, table.signedOn),
+    activePrimaryUq: uniqueIndex("contracts_active_primary_uq")
+      .on(table.tenantId, table.projectId)
+      .where(sql`${table.isPrimary} = true AND ${table.deletedAt} IS NULL`),
   }),
 )

@@ -459,6 +459,7 @@ export type ContractLite = {
   our_role: string
   title?: string | null
   amount: number | string | null
+  is_primary?: boolean
   signed_on: string | null
   created_at: string
   deleted_at?: string | null
@@ -486,6 +487,9 @@ function newer(a: ContractLite, b: ContractLite): boolean {
 }
 
 export function summarizeContracts(rows: ContractLite[]): ContractSummary {
+  const hasPrimary = rows.some(
+    (row) => !row.deleted_at && isOurContract(row.our_role) && row.doc_type === "contract" && row.is_primary === true,
+  )
   let base = 0
   let changeOrders = 0
   let hasContract = false
@@ -505,6 +509,7 @@ export function summarizeContracts(rows: ContractLite[]): ContractSummary {
       continue
     }
     if (r.doc_type === "contract") {
+      if (hasPrimary && r.is_primary !== true) continue
       hasContract = true
       base += amount
       if (!latestContract || newer(r, latestContract)) latestContract = r

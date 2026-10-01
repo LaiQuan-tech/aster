@@ -135,6 +135,17 @@ describe("money — 分母來源：合約優先，沒合約才退用報價單", 
     expect(s.latestQuotation).toBe(200)
     expect(resolveAmountUntaxed(s.total, s.latestQuotation).amountSource).toBe("quotation")
   })
+
+  it("有主合約時只用主合約 amount 作為 base，其他一般合約不重複加總", () => {
+    const s = summarizeContracts([
+      { doc_type: "contract", our_role: "contractor", amount: "1000000", is_primary: true, signed_on: "2026-01-01", created_at: "2026-01-01T00:00:00Z" },
+      { doc_type: "contract", our_role: "contractor", amount: "800000", is_primary: false, signed_on: "2025-12-01", created_at: "2025-12-01T00:00:00Z" },
+      { doc_type: "change_order", our_role: "contractor", amount: "50000", is_primary: false, signed_on: "2026-02-01", created_at: "2026-02-01T00:00:00Z" },
+    ])
+    expect(s.base).toBe(1_000_000)
+    expect(s.changeOrders).toBe(50_000)
+    expect(s.total).toBe(1_050_000)
+  })
 })
 
 describe("money — 損益", () => {

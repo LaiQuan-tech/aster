@@ -48,6 +48,7 @@ import {
   ProjectShareRevisionError,
   projectShareRevisionSchema,
 } from "../services/project-share-revision.js"
+import { createMainContract, type MainContractInput } from "../services/main-contract.js"
 
 export const projectsRouter = Router()
 
@@ -113,6 +114,14 @@ const applicationFields = {
   engineers: engineersSchema.optional(),
 }
 
+const primaryContractSchema = z.object({
+  amount: z.number().finite().nonnegative().max(1e15),
+  title: z.string().trim().min(1).max(200).nullish(),
+  counterparty: z.string().trim().max(200).nullish(),
+  signedOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
+  copies: z.number().int().min(1).max(50).optional(),
+})
+
 const createSchema = z.object({
   name: z.string().trim().min(1).max(200),
   /**
@@ -130,7 +139,14 @@ const createSchema = z.object({
   /** 預定起訖日（甘特圖／示警）。 */
   startsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
   endsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
+  /** 建案表單簡寫；正式金額只寫 contracts.amount，不寫 projects。 */
+  contractAmount: z.number().finite().nonnegative().max(1e15).optional(),
+  primaryContract: primaryContractSchema.nullish(),
   ...applicationFields,
+}).superRefine((body, ctx) => {
+  if (body.contractAmount !== undefined && body.primaryContract != null) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "contractAmount and primaryContract are mutually exclusive" })
+  }
 })
 
 const reserveSchema = z.object({
@@ -631,6 +647,8 @@ projectsRouter.post(
       return
     }
     const b = parsed.data
+    const primaryContract: MainContractInput | null =
+      b.primaryContract ?? (b.contractAmount !== undefined ? { amount: b.contractAmount } : null)
     try {
       // 編號的年度一律取**建立年**（見 services/project-code.ts 的說明），
       // 而且是**台北當地**的年——12/31 深夜立的案不該拿到新年度的號。
@@ -691,6 +709,36 @@ projectsRouter.post(
         engineers: b.engineers ?? {},
       }
 
+      /**
+       * Supabase PostgREST 的兩次寫入無法共用 transaction；若主合約失敗，只補償刪除
+       * 本請求剛建立的 project id。既有專案永遠不會成為刪除條件。
+       */
+      const finishCreation = async (inserted: { id: string; code: string | null }): Promise<boolean> => {
+        if (!primaryContract) {
+          res.status(201).json(inserted)
+          return true
+        }
+        try {
+          const self = req.auth?.userId ? await resolveSelf(tenantId, req.auth.userId) : null
+          if (!self) throw new Error("creator employee not found")
+          await createMainContract(tenantId, inserted.id, self.id, primaryContract)
+          res.status(201).json(inserted)
+          return true
+        } catch (error) {
+          const { error: cleanupError } = await supabaseAdmin
+            .from("projects")
+            .delete()
+            .eq("tenant_id", tenantId)
+            .eq("id", inserted.id)
+          if (cleanupError) {
+            next(new Error(`project creation compensation failed: ${cleanupError.message}`))
+            return false
+          }
+          res.status(500).json({ error: "project_application_create_failed" })
+          return false
+        }
+      }
+
       // 人工指定編號：只試一次。撞號回 409——人工指定代表那個號有意義，
       // 不該被系統自動換掉。
       if (manualCode) {
@@ -707,7 +755,7 @@ projectsRouter.post(
           next(new Error(`POST /projects: ${error.message}`))
           return
         }
-        res.status(201).json({ id: data!.id, code: data!.code })
+        await finishCreation({ id: data!.id, code: data!.code })
         return
       }
 
@@ -718,7 +766,7 @@ projectsRouter.post(
         res.status(503).json({ error: "code_generation_failed", attempts: MAX_CODE_ATTEMPTS })
         return
       }
-      res.status(201).json(inserted)
+      await finishCreation(inserted)
     } catch (err) {
       next(err)
     }

@@ -55,7 +55,7 @@ export type ContractTotal = {
 /**
  * 專案的合約總額 —— 分期請款的分母。
  *
- * = 我方**承攬**的合約 + 追加減帳（未作廢）：
+ * = 主合約（若尚未標記主合約則相容既有資料，加總一般合約）+ 追加減帳（未作廢）：
  *   • 報價單不算——還沒成案
  *   • 我方是定作人（our_role="client"）的不算——那是應付，不是應收
  *   • our_role="both"（印花稅各自貼）我方仍是承攬方，一樣算
@@ -70,7 +70,7 @@ export async function contractTotal(
 ): Promise<ContractTotal> {
   const { data, error } = await supabaseAdmin
     .from("contracts")
-    .select("doc_type, amount")
+    .select("doc_type, amount, is_primary")
     .eq("tenant_id", tenantId)
     .eq("project_id", projectId)
     .in("our_role", OUR_CONTRACT_ROLES)
@@ -83,10 +83,11 @@ export async function contractTotal(
 
   let base = 0
   let changeOrders = 0
+  const hasPrimary = rows.some((row) => row.doc_type === "contract" && row.is_primary === true)
   for (const r of rows) {
     const amount = num(r.amount as string | null) ?? 0
     if (r.doc_type === "change_order") changeOrders += amount
-    else base += amount
+    else if (!hasPrimary || r.is_primary === true) base += amount
   }
   return { total: base + changeOrders, base, changeOrders }
 }

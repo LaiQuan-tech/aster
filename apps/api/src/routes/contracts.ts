@@ -4,8 +4,8 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { resolveSelf, isFinanceRole, managedDeptIds } from "../middleware/scope.js"
 import { writeAuditLog } from "../services/audit.js"
+import { loadProjectScope } from "../services/project-scope.js"
 import {
   DOC_TYPES,
   OUR_ROLES,
@@ -20,12 +20,17 @@ import {
 } from "../services/stamp-duty.js"
 import { taipeiToday } from "../services/project-status.js"
 import { recomputeBillings } from "../services/billing-store.js"
+import {
+  loadMainContract,
+  serializeMainContract,
+  upsertMainContract,
+} from "../services/main-contract.js"
 
 export const contractsRouter = Router()
 
 // ⚠️ 單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別。
 const CONTRACT_COLS =
-  "id, tenant_id, project_id, doc_type, our_role, title, counterparty, amount, signed_on, version, supersedes_id, copies, stamp_duty_required, stamp_duty_rate, stamp_duty_amount, stamp_duty_paid_on, stamp_duty_note, created_by_emp_id, created_at, deleted_at"
+  "id, tenant_id, project_id, doc_type, our_role, title, counterparty, amount, is_primary, signed_on, version, supersedes_id, copies, stamp_duty_required, stamp_duty_rate, stamp_duty_amount, stamp_duty_paid_on, stamp_duty_note, created_by_emp_id, created_at, deleted_at"
 
 type ContractRow = {
   id: string
@@ -35,6 +40,7 @@ type ContractRow = {
   title: string
   counterparty: string | null
   amount: string | null
+  is_primary: boolean
   signed_on: string | null
   version: number
   supersedes_id: string | null
@@ -104,6 +110,7 @@ function serialize(row: ContractRow) {
     title: row.title,
     counterparty: row.counterparty,
     amount: num(row.amount),
+    isPrimary: row.is_primary,
     signedOn: row.signed_on,
     version: row.version,
     supersedesId: row.supersedes_id,
@@ -121,28 +128,6 @@ function serialize(row: ContractRow) {
       flag: row.stamp_duty_required,
     }),
   }
-}
-
-/** 專案存在與否 + 管理權（比照 projects.ts 的 canManage）。 */
-async function loadProjectScope(tenantId: string, userId: string, projectId: string) {
-  const self = await resolveSelf(tenantId, userId)
-  if (!self) return { ok: false as const, status: 403, error: "forbidden" }
-
-  const { data: proj, error } = await supabaseAdmin
-    .from("projects")
-    .select("id, dept_id, lead_emp_id")
-    .eq("tenant_id", tenantId)
-    .eq("id", projectId)
-    .maybeSingle()
-  if (error) throw new Error(`contracts loadProjectScope: ${error.message}`)
-  if (!proj) return { ok: false as const, status: 404, error: "not_found" }
-
-  let canManage = isFinanceRole(self.role) || proj.lead_emp_id === self.id
-  if (!canManage && proj.dept_id) {
-    const managed = await managedDeptIds(tenantId, self.id)
-    if (managed.includes(proj.dept_id)) canManage = true
-  }
-  return { ok: true as const, self, canManage }
 }
 
 /** 租戶的印花稅預設值（新建合約時用）。沒有設定列就回內建預設。 */
@@ -166,7 +151,21 @@ contractsRouter.get(
   requireTenant,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
     try {
+      const scope = await loadProjectScope(tenantId, userId, req.params.id as string)
+      if (!scope.ok) {
+        res.status(scope.status).json({ error: scope.error })
+        return
+      }
+      if (!scope.finance) {
+        res.status(403).json({ error: "forbidden" })
+        return
+      }
       const { data, error } = await supabaseAdmin
         .from("contracts")
         .select(CONTRACT_COLS)
@@ -180,6 +179,57 @@ contractsRouter.get(
         return
       }
       res.status(200).json({ contracts: (data ?? []).map((r) => serialize(r as ContractRow)) })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+const mainContractSchema = z.object({
+  amount: z.number().finite().nonnegative().max(1e15),
+  title: z.string().trim().min(1).max(200).nullish(),
+  counterparty: z.string().trim().max(200).nullish(),
+  signedOn: z.string().regex(dateRe).nullish(),
+  copies: z.number().int().min(1).max(50).optional(),
+})
+
+// ── GET/PUT /projects/:id/main-contract — 專案正式合約金額唯一來源 ─────
+contractsRouter.get(
+  "/projects/:id/main-contract",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) return res.status(401).json({ error: "unauthorized" })
+    try {
+      const scope = await loadProjectScope(tenantId, userId, req.params.id as string)
+      if (!scope.ok) return res.status(scope.status).json({ error: scope.error })
+      if (!scope.finance) return res.status(403).json({ error: "forbidden" })
+      const contract = await loadMainContract(tenantId, req.params.id as string)
+      res.status(200).json({ contract: contract ? serializeMainContract(contract) : null })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+contractsRouter.put(
+  "/projects/:id/main-contract",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) return res.status(401).json({ error: "unauthorized" })
+    const parsed = mainContractSchema.safeParse(req.body)
+    if (!parsed.success) return res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+    try {
+      const scope = await loadProjectScope(tenantId, userId, req.params.id as string)
+      if (!scope.ok) return res.status(scope.status).json({ error: scope.error })
+      if (!scope.finance) return res.status(403).json({ error: "forbidden" })
+      const contract = await upsertMainContract(tenantId, req.params.id as string, scope.self.id, parsed.data)
+      res.status(200).json({ contract: serializeMainContract(contract) })
     } catch (err) {
       next(err)
     }
@@ -209,7 +259,7 @@ contractsRouter.post(
         res.status(scope.status).json({ error: scope.error })
         return
       }
-      if (!scope.canManage) {
+      if (!scope.finance) {
         res.status(403).json({ error: "forbidden" })
         return
       }
@@ -312,7 +362,7 @@ contractsRouter.patch(
         res.status(scope.status).json({ error: scope.error })
         return
       }
-      if (!scope.canManage) {
+      if (!scope.finance) {
         res.status(403).json({ error: "forbidden" })
         return
       }
@@ -428,7 +478,7 @@ contractsRouter.delete(
         res.status(scope.status).json({ error: scope.error })
         return
       }
-      if (!scope.canManage) {
+      if (!scope.finance) {
         res.status(403).json({ error: "forbidden" })
         return
       }

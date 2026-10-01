@@ -249,6 +249,7 @@ export interface Contract {
   title: string
   counterparty: string | null
   amount: number | null
+  isPrimary: boolean
   signedOn: string | null
   version: number
   supersedesId: string | null

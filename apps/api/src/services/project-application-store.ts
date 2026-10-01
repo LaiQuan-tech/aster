@@ -43,7 +43,7 @@ export const PAYMENT_COLS_LEGACY =
   "id, subcontract_id, installment_no, percentage, amount, override_amount, override_reason, due_when, paid_on, paid_amount, withheld_amount, paying_company_id, receipt_issuer_company_id, receipt_ref, note, created_at, updated_at"
 
 export const CONTRACT_LITE_COLS =
-  "id, project_id, doc_type, our_role, title, amount, signed_on, created_at, deleted_at"
+  "id, project_id, doc_type, our_role, title, amount, is_primary, signed_on, created_at, deleted_at"
 
 export type SubcontractRow = {
   id: string
@@ -458,6 +458,7 @@ export function serializeContractLite(c: ContractLite) {
     ourRole: c.our_role,
     title: c.title ?? null,
     amount: num(c.amount as string | null),
+    isPrimary: c.is_primary ?? false,
     signedOn: c.signed_on,
     createdAt: c.created_at,
   }

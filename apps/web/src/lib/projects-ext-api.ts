@@ -12,7 +12,7 @@
  */
 import { apiFetch, apiDownload } from "./api-client"
 import type {
-  Project, ProjectStatus, ShareMode, Installment, InstallmentInput, DocType, OurRole,
+  Project, ProjectStatus, ShareMode, Installment, InstallmentInput, DocType, OurRole, Contract,
   ProjectSort, SortDir,
 } from "./projects-api"
 
@@ -225,6 +225,30 @@ export interface CreateProjectExtBody {
   paymentDay?: string | null
   otherExpenses?: number | null
   engineers?: ProjectEngineers
+  /** 主合約金額簡寫；不可與 primaryContract 同時帶。 */
+  contractAmount?: number
+  primaryContract?: MainContractInput | null
+}
+
+export interface MainContractInput {
+  amount: number
+  title?: string | null
+  counterparty?: string | null
+  signedOn?: string | null
+  copies?: number
+}
+
+export type MainContract = Contract & { isPrimary: true }
+
+export function getMainContract(projectId: string) {
+  return apiFetch<{ contract: MainContract | null }>(`/projects/${projectId}/main-contract`)
+}
+
+export function upsertMainContract(projectId: string, body: MainContractInput) {
+  return apiFetch<{ contract: MainContract }>(`/projects/${projectId}/main-contract`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  })
 }
 
 export function createProjectExt(body: CreateProjectExtBody) {
@@ -564,6 +588,7 @@ export interface ContractLiteP3 {
   ourRole: OurRole
   title: string | null
   amount: number | null
+  isPrimary?: boolean
   signedOn: string | null
   createdAt: string
 }
