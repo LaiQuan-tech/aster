@@ -161,6 +161,7 @@ beforeEach(() => {
   h.db.employees = [
     { id: "aaaaaaaa-0000-4000-8000-000000000001", tenant_id: h.tenantId, user_id: "finance-user", role: "accountant", dept_id: null },
     { id: "aaaaaaaa-0000-4000-8000-000000000002", tenant_id: h.tenantId, user_id: "staff-user", role: "employee", dept_id: null },
+    { id: "aaaaaaaa-0000-4000-8000-000000000003", tenant_id: h.tenantId, user_id: "hr-user", role: "hr_admin", dept_id: null },
   ]
   h.db.projects = [{ id: h.projectId, tenant_id: h.tenantId, dept_id: null, lead_emp_id: null, code: "AT-115-001" }]
   h.db.project_members = []
@@ -255,6 +256,24 @@ describe("primary contract authorization", () => {
 })
 
 describe("POST /projects primary contract", () => {
+  it("rejects bonus fields from accountants but allows HR to set them", async () => {
+    h.db.projects = []
+    const forbidden = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer finance-user")
+      .send({ name: "會計不可碰獎金", code: "BONUS-NO", shareMode: "fixed_amount", bonusPool: 10_000 })
+    expect(forbidden.status).toBe(403)
+    expect(forbidden.body.error).toBe("forbidden_bonus")
+    expect(h.db.projects).toHaveLength(0)
+
+    const allowed = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer hr-user")
+      .send({ name: "HR 可設定獎金", code: "BONUS-YES", shareMode: "pool_pct", bonusPool: 10_000 })
+    expect(allowed.status).toBe(201)
+    expect(h.db.projects[0]).toMatchObject({ share_mode: "pool_pct", bonus_pool: 10_000 })
+  })
+
   it.each([
     [{ contractAmount: 880_000 }, 880_000],
     [{ primaryContract: { amount: 990_000, title: "專案主約", signedOn: "2026-09-30" } }, 990_000],
@@ -360,12 +379,15 @@ describe("POST /projects primary contract", () => {
     [[{ installmentNo: 1, overrideAmount: 10, overrideReason: "   " }], "override_reason_required"],
     [[{ installmentNo: 1, percentage: 50 }, { installmentNo: 1, percentage: 50 }], "duplicate_installment_no"],
     [[{ installmentNo: 1, kind: "guild_advance" }, { installmentNo: 2, kind: "guild_advance" }], "multiple_guild_advances"],
+    [[{ installmentNo: 1, percentage: 80 }, { installmentNo: 2, percentage: 30 }], "billing_percentage_total_exceeded"],
+    [[{ installmentNo: 1, overrideAmount: 120, overrideReason: "議價" }, { installmentNo: 2, percentage: 0 }], "negative_installment_amount"],
+    [[{ installmentNo: 1, overrideAmount: 60, overrideReason: "議價" }, { installmentNo: 2, overrideAmount: 30, overrideReason: "議價" }], "invalid_billing_total"],
   ])("rejects invalid creation billings %o", async (billings, error) => {
     h.db.projects = []
     const response = await request(app)
       .post("/projects")
       .set("Authorization", "Bearer finance-user")
-      .send({ name: "期程錯誤", code: `BAD-${error}`, billings })
+      .send({ name: "期程錯誤", code: `BAD-${error}`, contractAmount: 100, billings })
     expect(response.status).toBe(400)
     expect(response.body.error).toBe(error)
     expect(h.db.projects).toHaveLength(0)

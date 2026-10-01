@@ -16,7 +16,7 @@ import {
   resolveStatusPatch,
   taipeiToday,
 } from "../services/project-status.js"
-import { resolveSelf } from "../middleware/scope.js"
+import { isHrRole, resolveSelf } from "../middleware/scope.js"
 import { resolveProjectAccess } from "../services/project-scope.js"
 import { writeAuditLog } from "../services/audit.js"
 import { DEFAULT_AUTO_ARCHIVE_MONTHS } from "../services/project-archive.js"
@@ -32,6 +32,7 @@ import {
   INVOICE_TYPES,
   PAYMENT_METHODS,
   DEFAULT_VAT_RATE,
+  computeSchedule,
   rocDate,
 } from "../services/project-money.js"
 import {
@@ -131,7 +132,7 @@ const initialBillingSchema = z.object({
   percentage: z.number().min(0).max(100).nullish(),
   milestone: z.string().trim().max(200).nullish(),
   plannedOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
-  overrideAmount: z.number().nullish(),
+  overrideAmount: z.number().finite().nonnegative().max(1e15).nullish(),
   overrideReason: z.string().trim().max(1000).nullish(),
   note: z.string().trim().max(1000).nullish(),
 }).superRefine((billing, ctx) => {
@@ -673,6 +674,17 @@ projectsRouter.post(
       return
     }
     const b = parsed.data
+    const self = req.auth?.userId ? await resolveSelf(tenantId, req.auth.userId) : null
+    if (!self) {
+      res.status(403).json({ error: "forbidden" })
+      return
+    }
+    // 會計屬 finance，可建立合約與期款；但獎金池／分潤模式仍是 bonus 權限，
+    // 與 PATCH /projects/:id 的 canSeeBonus 規則一致，不可藉由建案端點繞過。
+    if ((b.shareMode !== undefined || b.bonusPool !== undefined) && !isHrRole(self.role)) {
+      res.status(403).json({ error: "forbidden_bonus" })
+      return
+    }
     const primaryContract: MainContractInput | null =
       b.primaryContract ?? (b.contractAmount !== undefined ? { amount: b.contractAmount } : null)
     const billings: NewBillingInput[] = b.billings ?? []
@@ -688,6 +700,26 @@ projectsRouter.post(
     }
     if (guildAdvances > 1) {
       res.status(400).json({ error: "multiple_guild_advances" })
+      return
+    }
+    const schedule = computeSchedule(billings.map((billing) => ({
+      installmentNo: billing.installmentNo,
+      kind: billing.kind ?? "installment",
+      percentage: billing.percentage ?? null,
+      overrideAmount: billing.overrideAmount ?? null,
+      billedAmount: null,
+      billed: false,
+    })), primaryContract?.amount ?? null)
+    if (schedule.percentageTotal > 100) {
+      res.status(400).json({ error: "billing_percentage_total_exceeded", percentageTotal: schedule.percentageTotal })
+      return
+    }
+    if (schedule.rows.some((row) => row.kind === "installment" && (row.effectiveAmount ?? 0) < 0)) {
+      res.status(400).json({ error: "negative_installment_amount" })
+      return
+    }
+    if (billings.length > 0 && schedule.unallocatedResidue !== 0) {
+      res.status(400).json({ error: "invalid_billing_total", unallocatedResidue: schedule.unallocatedResidue })
       return
     }
     try {
@@ -750,11 +782,6 @@ projectsRouter.post(
         engineers: b.engineers ?? {},
       }
 
-      const self = req.auth?.userId ? await resolveSelf(tenantId, req.auth.userId) : null
-      if (!self) {
-        res.status(403).json({ error: "forbidden" })
-        return
-      }
       const createWithCode = (code: string) => createProjectApplicationAtomic(
         tenantId,
         self.id,

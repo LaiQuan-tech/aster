@@ -3,6 +3,10 @@ import {
   emptyProjectApplicationDraft,
   projectApplicationAmounts,
   projectApplicationErrors,
+  projectApplicationSchedule,
+  projectApplicationVisibility,
+  createAndOpenProject,
+  toAuthorizedCreateProjectBody,
   toCreateProjectBody,
 } from "./project-application-form";
 
@@ -53,7 +57,7 @@ describe("project application form model", () => {
       { discipline: " 空調 ", item: " 設計及簽證 ", amount: "130000" },
       { discipline: "", item: "不應送出", amount: "" },
     ];
-    draft.engineers.電機 = { vendorId: "", name: " 維安 " };
+    draft.engineers.電機 = { vendorId: "", name: " 維安 ", amount: "" };
     draft.billings[0] = { ...draft.billings[0], percentage: "", plannedOn: "", overrideAmount: "", overrideReason: "" };
 
     const body = toCreateProjectBody(draft);
@@ -94,5 +98,58 @@ describe("project application form model", () => {
       "第 2 期百分比須介於 0 到 100",
       "第 3 期填寫指定金額時必須填理由",
     ]));
+  });
+
+  it("does not silently discard a partially filled design-scope row", () => {
+    const draft = emptyProjectApplicationDraft("2026-10-01", []);
+    draft.name = "案名";
+    draft.designScope = [{ discipline: "", item: "空調設計", amount: "5000" }];
+
+    expect(projectApplicationErrors(draft)).toContain("科別與服務項目第 1 列已填內容或金額，請選擇科別");
+  });
+
+  it("mirrors the formal tail-residue schedule and rejects totals over 100%", () => {
+    const draft = emptyProjectApplicationDraft("2026-10-01", []);
+    draft.name = "案名";
+    draft.contractAmount = "8888888";
+    draft.billings = [1, 2, 3, 4, 5].map((installmentNo) => ({
+      ...draft.billings[installmentNo - 1],
+      installmentNo,
+      percentage: "20",
+    }));
+
+    const schedule = projectApplicationSchedule(draft);
+    expect(schedule.percentageTotal).toBe(100);
+    expect(schedule.rows.map((row) => row.effectiveAmount)).toEqual([1_777_778, 1_777_778, 1_777_778, 1_777_778, 1_777_776]);
+    expect(schedule.rows[4].residueApplied).toBe(-2);
+
+    draft.billings[0].percentage = "80";
+    expect(projectApplicationErrors(draft)).toContain("一般期款百分比合計不可超過 100%（目前 160%）");
+  });
+
+  it("strips bonus fields from an accountant payload", () => {
+    const draft = emptyProjectApplicationDraft("2026-10-01", []);
+    draft.name = "會計建立的案子";
+    draft.shareMode = "fixed_amount";
+    draft.bonusPool = "99999";
+
+    const body = toAuthorizedCreateProjectBody(draft, { canFinance: true, canBonus: false });
+    expect(body).not.toHaveProperty("shareMode");
+    expect(body).not.toHaveProperty("bonusPool");
+    expect(projectApplicationVisibility({ canFinance: true, canBonus: false })).toEqual({
+      showFinanceFields: true,
+      showBonusFields: false,
+    });
+  });
+
+  it("opens the created project after the atomic create succeeds", async () => {
+    const navigated: string[] = [];
+    const body = { name: "新案" };
+    await createAndOpenProject(
+      body,
+      async (payload) => ({ id: payload.name === "新案" ? "project-1" : "wrong", code: "AT-115-001" }),
+      (href) => navigated.push(href),
+    );
+    expect(navigated).toEqual(["/admin/projects/project-1"]);
   });
 });

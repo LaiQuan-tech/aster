@@ -26,7 +26,9 @@ import {
   emptyProjectApplicationDraft,
   projectApplicationAmounts,
   projectApplicationErrors,
-  toCreateProjectBody,
+  projectApplicationSchedule,
+  projectApplicationVisibility,
+  toAuthorizedCreateProjectBody,
   type ProjectApplicationDraft,
 } from "./project-application-form";
 
@@ -54,6 +56,7 @@ interface ProjectApplicationFormProps {
   mainProjects: ProjectListItem[];
   vatRate: number;
   canFinance: boolean;
+  canBonus: boolean;
   saving: boolean;
   apiError: string | null;
   onSubmit: (body: CreateProjectExtBody) => Promise<void>;
@@ -69,6 +72,7 @@ export function ProjectApplicationForm({
   mainProjects,
   vatRate,
   canFinance,
+  canBonus,
   saving,
   apiError,
   onSubmit,
@@ -89,13 +93,15 @@ export function ProjectApplicationForm({
     setDraft((current) => ({
       ...current,
       engineers: Object.fromEntries(
-        disciplines.map((discipline) => [discipline, current.engineers[discipline] ?? { vendorId: "", name: "" }]),
+        disciplines.map((discipline) => [discipline, current.engineers[discipline] ?? { vendorId: "", name: "", amount: "" }]),
       ),
     }));
   }, [disciplines]);
 
   const selectedClient = clients.find((client) => client.id === draft.clientId) ?? null;
   const amounts = useMemo(() => projectApplicationAmounts(draft, vatRate), [draft, vatRate]);
+  const schedule = useMemo(() => projectApplicationSchedule(draft), [draft]);
+  const visibility = projectApplicationVisibility({ canFinance, canBonus });
 
   function patch<K extends keyof ProjectApplicationDraft>(key: K, value: ProjectApplicationDraft[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -106,7 +112,7 @@ export function ProjectApplicationForm({
     const errors = projectApplicationErrors(draft);
     setFormErrors(errors);
     if (errors.length > 0) return;
-    await onSubmit(toCreateProjectBody(draft));
+    await onSubmit(toAuthorizedCreateProjectBody(draft, { canFinance, canBonus }));
   }
 
   async function submitNewClient() {
@@ -179,7 +185,7 @@ export function ProjectApplicationForm({
               <div key={index} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_2fr_10rem_auto]">
                 <input className={inputCls} list="project-discipline-options" value={row.discipline} placeholder="科別" onChange={(event) => patch("designScope", draft.designScope.map((item, rowIndex) => rowIndex === index ? { ...item, discipline: event.target.value } : item))} />
                 <input className={inputCls} value={row.item} placeholder="服務項目" onChange={(event) => patch("designScope", draft.designScope.map((item, rowIndex) => rowIndex === index ? { ...item, item: event.target.value } : item))} />
-                {canFinance ? <input className={inputCls} type="number" min="0" value={row.amount} placeholder="金額" onChange={(event) => patch("designScope", draft.designScope.map((item, rowIndex) => rowIndex === index ? { ...item, amount: event.target.value } : item))} /> : <span />}
+                {visibility.showFinanceFields ? <input className={inputCls} type="number" min="0" value={row.amount} placeholder="金額" onChange={(event) => patch("designScope", draft.designScope.map((item, rowIndex) => rowIndex === index ? { ...item, amount: event.target.value } : item))} /> : <span />}
                 <button type="button" className="px-2 text-sm text-red-500" onClick={() => patch("designScope", draft.designScope.filter((_, rowIndex) => rowIndex !== index))}>移除</button>
               </div>
             ))}
@@ -217,7 +223,7 @@ export function ProjectApplicationForm({
         </div>
       </Section>
 
-      {canFinance ? (
+      {visibility.showFinanceFields ? (
         <Section title="銷售金額">
           <div className="grid grid-cols-1 overflow-hidden border border-slate-300 text-center sm:grid-cols-3">
             <label className="border-b border-slate-300 sm:border-b-0 sm:border-r"><span className="block bg-slate-50 px-3 py-2 font-semibold">合約金額（未稅）</span><input className="w-full border-t border-slate-300 px-3 py-3 text-right" type="number" min="0" value={draft.contractAmount} onChange={(event) => patch("contractAmount", event.target.value)} placeholder="可直接輸入" /></label>
@@ -227,35 +233,40 @@ export function ProjectApplicationForm({
         </Section>
       ) : null}
 
-      {canFinance ? (
+      {visibility.showFinanceFields ? (
         <Section title="付款階段">
+          <div className="mb-3 flex flex-wrap gap-3 text-sm">
+            <span className={`rounded-full px-3 py-1 font-medium ${schedule.percentageTotal > 100 ? "bg-red-50 text-red-700" : "bg-slate-100 text-slate-700"}`}>一般期款比例合計 {schedule.percentageTotal}%</span>
+            <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-700">一般期款合計 {money(schedule.effectiveTotal)}</span>
+            {schedule.rows.some((row) => row.residueApplied !== 0) ? <span className="rounded-full bg-amber-50 px-3 py-1 text-amber-700">末期已吸收尾差</span> : null}
+          </div>
           <div className="overflow-x-auto">
             <table className="min-w-[980px] w-full border-collapse text-sm">
               <thead><tr className="bg-slate-50"><th className="border border-slate-300 p-2">期別</th><th className="border border-slate-300 p-2">名稱</th><th className="border border-slate-300 p-2">%</th><th className="border border-slate-300 p-2">預估金額</th><th className="border border-slate-300 p-2">指定金額</th><th className="border border-slate-300 p-2">指定理由</th><th className="border border-slate-300 p-2">預計日</th><th className="border border-slate-300 p-2">備註</th></tr></thead>
               <tbody>{draft.billings.map((row, index) => {
-                const percentage = row.percentage.trim() === "" ? null : Number(row.percentage);
-                const estimated = row.overrideAmount.trim() !== "" ? Number(row.overrideAmount) : amounts.amountUntaxed != null && percentage != null ? Math.round(amounts.amountUntaxed * percentage / 100) : null;
+                const computed = schedule.rows.find((item) => item.installmentNo === row.installmentNo);
                 const update = (next: Partial<(typeof draft.billings)[number]>) => patch("billings", draft.billings.map((item, rowIndex) => rowIndex === index ? { ...item, ...next } : item));
-                return <tr key={row.installmentNo}><td className="border border-slate-300 p-2 text-center">{row.installmentNo}</td><td className="border border-slate-300 p-1"><input className={inputCls} value={row.milestone} onChange={(event) => update({ milestone: event.target.value })} /></td><td className="border border-slate-300 p-1"><input className={inputCls} type="number" min="0" max="100" step="any" value={row.percentage} onChange={(event) => update({ percentage: event.target.value })} /></td><td className="border border-slate-300 p-2 text-right tabular-nums">{money(estimated)}</td><td className="border border-slate-300 p-1"><input className={inputCls} type="number" min="0" value={row.overrideAmount} onChange={(event) => update({ overrideAmount: event.target.value })} /></td><td className="border border-slate-300 p-1"><input className={inputCls} value={row.overrideReason} onChange={(event) => update({ overrideReason: event.target.value })} /></td><td className="border border-slate-300 p-1"><input className={inputCls} type="date" value={row.plannedOn} onChange={(event) => update({ plannedOn: event.target.value })} /></td><td className="border border-slate-300 p-1"><input className={inputCls} value={row.note} onChange={(event) => update({ note: event.target.value })} /></td></tr>;
+                return <tr key={row.installmentNo}><td className="border border-slate-300 p-2 text-center">{row.installmentNo}</td><td className="border border-slate-300 p-1"><input className={inputCls} value={row.milestone} onChange={(event) => update({ milestone: event.target.value })} /></td><td className="border border-slate-300 p-1"><input className={inputCls} type="number" min="0" max="100" step="any" value={row.percentage} onChange={(event) => update({ percentage: event.target.value })} /></td><td className={`border border-slate-300 p-2 text-right tabular-nums ${(computed?.effectiveAmount ?? 0) < 0 ? "bg-red-50 text-red-700" : ""}`}>{money(computed?.effectiveAmount ?? null)}{computed?.residueApplied ? <span className="ml-1 block text-[10px] text-amber-700">尾差 {computed.residueApplied > 0 ? "+" : ""}{computed.residueApplied.toLocaleString()}</span> : null}</td><td className="border border-slate-300 p-1"><input className={inputCls} type="number" min="0" value={row.overrideAmount} onChange={(event) => update({ overrideAmount: event.target.value })} /></td><td className="border border-slate-300 p-1"><input className={inputCls} value={row.overrideReason} onChange={(event) => update({ overrideReason: event.target.value })} /></td><td className="border border-slate-300 p-1"><input className={inputCls} type="date" value={row.plannedOn} onChange={(event) => update({ plannedOn: event.target.value })} /></td><td className="border border-slate-300 p-1"><input className={inputCls} value={row.note} onChange={(event) => update({ note: event.target.value })} /></td></tr>;
               })}</tbody>
             </table>
           </div>
         </Section>
       ) : null}
 
-      <Section title="協力技師">
+      <Section title="協力技師／發包單位">
+        <p className="mb-3 text-sm text-slate-500">此處建立申請單上的科別、協力單位與預估金額；正式發包合約、付款與代扣歷程須在建案後於「專案明細」建立。</p>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {disciplines.map((discipline) => {
-            const assignment = draft.engineers[discipline] ?? { vendorId: "", name: "" };
-            return <div key={discipline}><p className="mb-1 text-sm font-medium text-slate-600">{disciplineLabel(discipline)}</p><VendorCombo vendors={vendors} vendorId={assignment.vendorId || null} name={assignment.name || null} onChange={(value) => patch("engineers", { ...draft.engineers, [discipline]: { vendorId: value.vendorId ?? "", name: value.name ?? "" } })} /></div>;
+            const assignment = draft.engineers[discipline] ?? { vendorId: "", name: "", amount: "" };
+            return <div key={discipline}><p className="mb-1 text-sm font-medium text-slate-600">{disciplineLabel(discipline)}</p><VendorCombo vendors={vendors} vendorId={assignment.vendorId || null} name={assignment.name || null} onChange={(value) => patch("engineers", { ...draft.engineers, [discipline]: { ...assignment, vendorId: value.vendorId ?? "", name: value.name ?? "" } })} />{visibility.showFinanceFields ? <input className={`${inputCls} mt-1 text-xs`} type="number" min="0" value={assignment.amount} onChange={(event) => patch("engineers", { ...draft.engineers, [discipline]: { ...assignment, amount: event.target.value } })} placeholder="預估發包／技師金額" /> : null}</div>;
           })}
         </div>
       </Section>
 
       <Section title="發包與費用摘要">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div className="rounded-lg bg-slate-50 p-3 text-sm text-slate-500">發包單位與下包期款請於建案後在「專案明細」管理，以保留付款與代扣歷程。</div>
-          {canFinance ? <div><label className={labelCls}>其他支出（差旅、規費等）</label><input className={inputCls} type="number" min="0" value={draft.otherExpenses} onChange={(event) => patch("otherExpenses", event.target.value)} /></div> : null}
+          <div className="rounded-lg bg-slate-50 p-3 text-sm text-slate-500">上方金額只會寫入申請單的科別與費用明細，不會宣稱已建立下包期款；正式發包與付款請於建案後建立。</div>
+          {visibility.showFinanceFields ? <div><label className={labelCls}>其他支出（差旅、規費等）</label><input className={inputCls} type="number" min="0" value={draft.otherExpenses} onChange={(event) => patch("otherExpenses", event.target.value)} /></div> : null}
         </div>
       </Section>
 
@@ -266,8 +277,8 @@ export function ProjectApplicationForm({
           {draft.kind !== "main" ? <div><label className={labelCls}>母案 *</label><select className={inputCls} value={draft.parentProjectId} onChange={(event) => patch("parentProjectId", event.target.value)}><option value="">請選擇母案</option>{mainProjects.map((project) => <option key={project.id} value={project.id}>{project.code ? `${project.code}　` : ""}{project.name}</option>)}</select></div> : null}
           <div><label className={labelCls}>所屬部門</label><select className={inputCls} value={draft.deptId} onChange={(event) => patch("deptId", event.target.value)}><option value="">不指定</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select></div>
           <div><label className={labelCls}>專案負責人</label><select className={inputCls} value={draft.leadEmpId} onChange={(event) => patch("leadEmpId", event.target.value)}><option value="">不指定</option>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}{employee.emp_no ? `（${employee.emp_no}）` : ""}</option>)}</select></div>
-          <div><label className={labelCls}>分潤模式</label><select className={inputCls} value={draft.shareMode} onChange={(event) => patch("shareMode", event.target.value as ProjectApplicationDraft["shareMode"])}><option value="pool_pct">獎金池 × 百分比</option><option value="fixed_amount">直接填每人金額</option></select></div>
-          {draft.shareMode === "pool_pct" && canFinance ? <div><label className={labelCls}>獎金池總額</label><input className={inputCls} type="number" min="0" value={draft.bonusPool} onChange={(event) => patch("bonusPool", event.target.value)} /></div> : null}
+          {visibility.showBonusFields ? <div><label className={labelCls}>分潤模式</label><select className={inputCls} value={draft.shareMode} onChange={(event) => patch("shareMode", event.target.value as ProjectApplicationDraft["shareMode"])}><option value="pool_pct">獎金池 × 百分比</option><option value="fixed_amount">直接填每人金額</option></select></div> : null}
+          {draft.shareMode === "pool_pct" && visibility.showBonusFields ? <div><label className={labelCls}>獎金池總額</label><input className={inputCls} type="number" min="0" value={draft.bonusPool} onChange={(event) => patch("bonusPool", event.target.value)} /></div> : null}
           <div><label className={labelCls}>預定開始日</label><input className={inputCls} type="date" value={draft.startsOn} onChange={(event) => patch("startsOn", event.target.value)} /></div>
           <div><label className={labelCls}>預定結束日</label><input className={inputCls} type="date" value={draft.endsOn} onChange={(event) => patch("endsOn", event.target.value)} /></div>
           <div className="sm:col-span-2"><label className={labelCls}>說明</label><textarea className={inputCls} rows={3} value={draft.description} onChange={(event) => patch("description", event.target.value)} /></div>

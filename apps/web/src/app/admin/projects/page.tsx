@@ -35,6 +35,7 @@ import {
   type CreateProjectExtBody,
 } from "@/lib/projects-ext-api";
 import { ProjectApplicationForm } from "./_components/ProjectApplicationForm";
+import { createAndOpenProject } from "./_components/project-application-form";
 
 const STATUS_BADGE: Record<ProjectStatus, string> = {
   active: "bg-green-50 text-green-700",
@@ -53,6 +54,7 @@ export default function AdminProjectsPage() {
   const [disciplines, setDisciplines] = useState<string[]>(() => engineerDisciplinesOf(null));
   const [vatRate, setVatRate] = useState(0.05);
   const [canFinance, setCanFinance] = useState(false);
+  const [canBonus, setCanBonus] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -102,6 +104,7 @@ export default function AdminProjectsPage() {
       setDisciplines(engineerDisciplinesOf(p3?.settings.disciplines));
       setVatRate(p3?.settings.vatRate ?? 0.05);
       setCanFinance(["hr_admin", "platform_admin", "accountant"].includes(me.role));
+      setCanBonus(["hr_admin", "platform_admin"].includes(me.role));
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入失敗");
     } finally {
@@ -120,8 +123,7 @@ export default function AdminProjectsPage() {
     setSaving(true);
     setError(null);
     try {
-      const created = await createProjectExt(body);
-      router.push(`/admin/projects/${created.id}`);
+      await createAndOpenProject(body, createProjectExt, (href) => router.push(href));
     } catch (err) {
       const msg = err instanceof Error ? err.message : "建立失敗";
       setError(
@@ -209,6 +211,7 @@ export default function AdminProjectsPage() {
           mainProjects={mainProjects}
           vatRate={vatRate}
           canFinance={canFinance}
+          canBonus={canBonus}
           saving={saving}
           apiError={error}
           onSubmit={submit}

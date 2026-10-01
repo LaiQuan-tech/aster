@@ -696,6 +696,9 @@ export function humanizeProjectExtError(err: unknown, fallback: string): string 
   if (msg.includes("code_immutable")) return "專案編號不可變更。"
   if (msg.includes("unknown_discipline")) return "協力技師的科別不在專案設定的科別清單裡。請先到「專案設定 → 科別」新增。"
   if (msg.includes("forbidden_bonus")) return "分潤（獎金池／成員趴數）不在您的權限範圍內。"
+  if (msg.includes("billing_percentage_total_exceeded")) return "一般期款百分比合計不可超過 100%。"
+  if (msg.includes("negative_installment_amount")) return "期款設定會使末期金額小於 0，請降低前期百分比或指定金額。"
+  if (msg.includes("invalid_billing_total")) return "期款有效金額合計與合約金額不一致。"
   if (msg.includes("migration_required")) return "這個欄位需要先套用資料庫遷移（0050）才能儲存。"
   return msg
 }
