@@ -379,6 +379,13 @@
       "when": 1790819168597,
       "tag": "0053_project_primary_contract",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1790856661000,
+      "tag": "0054_project_application_atomic",
+      "breakpoints": true
     }
   ]
 }

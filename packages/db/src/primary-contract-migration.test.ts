@@ -15,4 +15,19 @@ describe("primary contract Drizzle migration registration", () => {
     expect(migration).toContain("supersedes_id")
     expect(migration).toContain("HAVING count(*) = 1")
   })
+
+  it("registers an invoker-rights atomic project application RPC", () => {
+    const root = resolve(import.meta.dirname, "..")
+    const journal = JSON.parse(readFileSync(resolve(root, "migrations/meta/_journal.json"), "utf8")) as {
+      entries: Array<{ idx: number; tag: string }>
+    }
+    expect(journal.entries).toContainEqual(expect.objectContaining({ idx: 54, tag: "0054_project_application_atomic" }))
+
+    const migration = readFileSync(resolve(root, "migrations/0054_project_application_atomic.sql"), "utf8")
+    expect(migration).toContain("create_project_application_atomic")
+    expect(migration).toContain("SECURITY INVOKER")
+    expect(migration).not.toContain("SECURITY DEFINER")
+    expect(migration).toContain("REVOKE ALL")
+    expect(migration).toContain("p_tenant_id")
+  })
 })

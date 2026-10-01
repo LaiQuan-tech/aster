@@ -10,7 +10,6 @@ const h = vi.hoisted(() => {
   const operations: string[] = []
   let failPrimaryContractInsert = false
   let failBillingInsert = false
-  let failContractDelete = false
   let idSeq = 0
 
   function fakeFrom(table: string) {
@@ -48,11 +47,8 @@ const h = vi.hoisted(() => {
       }
       if (action === "delete") {
         operations.push(`delete:${table}`)
-        if (table === "project_billings") {
-          return { data: null, error: { message: "project_billings hard delete forbidden", code: "23001" } }
-        }
-        if (table === "contracts" && failContractDelete) {
-          return { data: null, error: { message: "contract cleanup failed", code: "XX000" } }
+        if (table === "project_billings" || table === "contracts") {
+          return { data: null, error: { message: `${table} hard delete forbidden`, code: "23001" } }
         }
         const doomed = new Set(filtered())
         db[table] = (db[table] ?? []).filter((row) => !doomed.has(row))
@@ -78,26 +74,64 @@ const h = vi.hoisted(() => {
     return builder
   }
 
+  async function fakeRpc(name: string, args: Row) {
+    operations.push(`rpc:${name}`)
+    if (name !== "create_project_application_atomic") return { data: null, error: { message: "unknown rpc" } }
+    if (failPrimaryContractInsert) return { data: null, error: { message: "contract insert failed", code: "XX000" } }
+    if (failBillingInsert) return { data: null, error: { message: "billing insert failed", code: "XX000" } }
+
+    const project = { id: projectId, created_at: "2026-10-01T00:00:00.000Z", ...args.p_project }
+    const contract = args.p_primary_contract
+      ? {
+          id: `00000000-0000-4000-8000-${String(++idSeq).padStart(12, "0")}`,
+          created_at: "2026-10-01T00:00:00.000Z",
+          deleted_at: null,
+          version: 1,
+          ...args.p_primary_contract,
+          tenant_id: args.p_tenant_id,
+          project_id: projectId,
+          is_primary: true,
+        }
+      : null
+    const billingRows = (args.p_billings ?? []).map((billing: Row) => ({
+      id: `00000000-0000-4000-8000-${String(++idSeq).padStart(12, "0")}`,
+      created_at: "2026-10-01T00:00:00.000Z",
+      ...billing,
+      tenant_id: args.p_tenant_id,
+      project_id: projectId,
+    }))
+    db.projects ??= []
+    db.projects.push(project)
+    if (contract) {
+      db.contracts ??= []
+      db.contracts.push(contract)
+    }
+    db.project_billings ??= []
+    db.project_billings.push(...billingRows)
+    return { data: { id: projectId, code: project.code }, error: null }
+  }
+
   return {
     tenantId,
     projectId,
     db,
     operations,
     fakeFrom,
+    fakeRpc,
     setFailPrimaryContractInsert(value: boolean) {
       failPrimaryContractInsert = value
     },
     setFailBillingInsert(value: boolean) {
       failBillingInsert = value
     },
-    setFailContractDelete(value: boolean) {
-      failContractDelete = value
-    },
   }
 })
 
 vi.mock("../lib/supabase.js", () => ({
-  supabaseAdmin: { from: (table: string) => h.fakeFrom(table) },
+  supabaseAdmin: {
+    from: (table: string) => h.fakeFrom(table),
+    rpc: (name: string, args: Record<string, unknown>) => h.fakeRpc(name, args),
+  },
   getUserFromToken: async (token: string) =>
     token ? { userId: token, email: null, appMetadata: { tenant_id: h.tenantId } } : null,
 }))
@@ -122,7 +156,6 @@ function auth(path: string, user = "finance-user") {
 beforeEach(() => {
   h.setFailPrimaryContractInsert(false)
   h.setFailBillingInsert(false)
-  h.setFailContractDelete(false)
   h.operations.length = 0
   h.db.tenants = [{ id: h.tenantId, timezone: "Asia/Taipei" }]
   h.db.employees = [
@@ -255,7 +288,7 @@ describe("POST /projects primary contract", () => {
     expect(h.db.projects).toHaveLength(0)
   })
 
-  it("removes created billings and only the just-created project when primary-contract creation fails", async () => {
+  it("atomically leaves no related rows when primary-contract creation fails", async () => {
     h.db.projects = [{ id: "99999999-9999-4999-8999-999999999999", tenant_id: h.tenantId, name: "既有專案" }]
     h.db.contracts = []
     h.db.project_billings = []
@@ -273,14 +306,11 @@ describe("POST /projects primary contract", () => {
     expect(response.body.error).toBe("project_application_create_failed")
     expect(h.db.projects.map((project) => project.id)).toEqual(["99999999-9999-4999-8999-999999999999"])
     expect(h.db.project_billings).toHaveLength(0)
-    expect(h.operations.filter((operation) => operation.startsWith("insert:"))).toEqual([
-      "insert:projects",
-      "insert:contracts",
-    ])
-    expect(h.operations.filter((operation) => operation.startsWith("delete:"))).toEqual(["delete:projects"])
+    expect(h.operations.filter((operation) => operation.startsWith("rpc:"))).toEqual(["rpc:create_project_application_atomic"])
+    expect(h.operations.filter((operation) => operation.startsWith("delete:"))).toEqual([])
   })
 
-  it("cleans up the just-created primary and project when atomic billing insert fails", async () => {
+  it("atomically leaves no project or primary when billing batch creation fails", async () => {
     h.db.projects = []
     h.db.contracts = []
     h.db.project_billings = []
@@ -299,37 +329,8 @@ describe("POST /projects primary contract", () => {
     expect(h.db.projects).toHaveLength(0)
     expect(h.db.contracts).toHaveLength(0)
     expect(h.db.project_billings).toHaveLength(0)
-    expect(h.operations.filter((operation) => operation.startsWith("insert:"))).toEqual([
-      "insert:projects",
-      "insert:contracts",
-      "insert:project_billings",
-    ])
-    expect(h.operations.filter((operation) => operation.startsWith("delete:"))).toEqual([
-      "delete:contracts",
-      "delete:projects",
-    ])
-  })
-
-  it("reports cleanup failure when a newly-created primary cannot be removed", async () => {
-    h.db.projects = []
-    h.db.contracts = []
-    h.db.project_billings = []
-    h.setFailBillingInsert(true)
-    h.setFailContractDelete(true)
-    const response = await request(app)
-      .post("/projects")
-      .set("Authorization", "Bearer finance-user")
-      .send({
-        name: "清理失敗專案",
-        code: "CLEANUP-FAIL",
-        contractAmount: 123_000,
-        billings: [{ installmentNo: 1, percentage: 100 }],
-      })
-    expect(response.status).toBe(500)
-    expect(response.body).toMatchObject({ error: "project_application_cleanup_failed", stage: "contract" })
-    expect(h.db.projects).toHaveLength(1)
-    expect(h.db.contracts).toHaveLength(1)
-    expect(h.operations.filter((operation) => operation.startsWith("delete:"))).toEqual(["delete:contracts"])
+    expect(h.operations.filter((operation) => operation.startsWith("rpc:"))).toEqual(["rpc:create_project_application_atomic"])
+    expect(h.operations.filter((operation) => operation.startsWith("delete:"))).toEqual([])
   })
 
   it("creates the requested billing schedule and recalculates it from the new primary amount", async () => {

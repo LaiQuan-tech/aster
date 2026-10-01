@@ -48,8 +48,9 @@ import {
   ProjectShareRevisionError,
   projectShareRevisionSchema,
 } from "../services/project-share-revision.js"
-import { createMainContract, type MainContractInput } from "../services/main-contract.js"
-import { createInitialBillings, type NewBillingInput } from "../services/billing-store.js"
+import type { MainContractInput } from "../services/main-contract.js"
+import type { NewBillingInput } from "../services/billing-store.js"
+import { AtomicProjectCreationError, createProjectApplicationAtomic } from "../services/project-creation.js"
 import { BILLING_KINDS } from "../services/project-money.js"
 
 export const projectsRouter = Router()
@@ -166,36 +167,6 @@ const createSchema = z.object({
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "contractAmount and primaryContract are mutually exclusive" })
   }
 })
-
-type ProjectCreationCleanupResult =
-  | { ok: true }
-  | { ok: false; stage: "contract" | "project"; message: string }
-
-/** PostgREST writes cannot share a transaction, so compensate in FK-safe order. */
-async function cleanupFailedProjectCreation(
-  tenantId: string,
-  projectId: string,
-  createdPrimaryContractId: string | null,
-): Promise<ProjectCreationCleanupResult> {
-  if (createdPrimaryContractId) {
-    const { error: contractError } = await supabaseAdmin
-      .from("contracts")
-      .delete()
-      .eq("tenant_id", tenantId)
-      .eq("project_id", projectId)
-      .eq("id", createdPrimaryContractId)
-      .eq("is_primary", true)
-    if (contractError) return { ok: false, stage: "contract", message: contractError.message }
-  }
-
-  const { error: projectError } = await supabaseAdmin
-    .from("projects")
-    .delete()
-    .eq("tenant_id", tenantId)
-    .eq("id", projectId)
-  if (projectError) return { ok: false, stage: "project", message: projectError.message }
-  return { ok: true }
-}
 
 const reserveSchema = z.object({
   count: z.number().int().min(1).max(20),
@@ -779,78 +750,51 @@ projectsRouter.post(
         engineers: b.engineers ?? {},
       }
 
-      /**
-       * Supabase PostgREST 的兩次寫入無法共用 transaction；若主合約失敗，只補償刪除
-       * 本請求剛建立的 project id。既有專案永遠不會成為刪除條件。
-       */
-      const finishCreation = async (inserted: { id: string; code: string | null }): Promise<boolean> => {
-        if (!primaryContract && billings.length === 0) {
-          res.status(201).json(inserted)
-          return true
-        }
-        let createdPrimaryContractId: string | null = null
-        try {
-          const self = req.auth?.userId ? await resolveSelf(tenantId, req.auth.userId) : null
-          if (!self) throw new Error("creator employee not found")
-          if (primaryContract) {
-            const contract = await createMainContract(tenantId, inserted.id, self.id, primaryContract)
-            createdPrimaryContractId = contract.id
-          }
-          await createInitialBillings(
-            tenantId,
-            inserted.id,
-            self.id,
-            billings,
-            primaryContract?.amount ?? null,
-          )
-          res.status(201).json(inserted)
-          return true
-        } catch (error) {
-          const cleanup = await cleanupFailedProjectCreation(tenantId, inserted.id, createdPrimaryContractId)
-          if (!cleanup.ok) {
-            console.error("project creation compensation failed", {
-              tenantId,
-              projectId: inserted.id,
-              stage: cleanup.stage,
-              message: cleanup.message,
-              cause: error instanceof Error ? error.message : String(error),
-            })
-            res.status(500).json({ error: "project_application_cleanup_failed", stage: cleanup.stage })
-            return false
-          }
-          res.status(500).json({ error: "project_application_create_failed" })
-          return false
-        }
+      const self = req.auth?.userId ? await resolveSelf(tenantId, req.auth.userId) : null
+      if (!self) {
+        res.status(403).json({ error: "forbidden" })
+        return
       }
+      const createWithCode = (code: string) => createProjectApplicationAtomic(
+        tenantId,
+        self.id,
+        { ...baseRow, code },
+        primaryContract,
+        billings,
+      )
 
       // 人工指定編號：只試一次。撞號回 409——人工指定代表那個號有意義，
       // 不該被系統自動換掉。
       if (manualCode) {
-        const { data, error } = await supabaseAdmin
-          .from("projects")
-          .insert({ ...baseRow, code: manualCode })
-          .select("id, code")
-          .single()
-        if (error) {
-          if (isUniqueViolation(error)) {
+        try {
+          const inserted = await createWithCode(manualCode)
+          res.status(201).json(inserted)
+        } catch (error) {
+          if (error instanceof AtomicProjectCreationError && isUniqueViolation(error)) {
             res.status(409).json({ error: "code_taken", code: manualCode })
             return
           }
-          next(new Error(`POST /projects: ${error.message}`))
-          return
+          res.status(500).json({ error: "project_application_create_failed" })
         }
-        await finishCreation({ id: data!.id, code: data!.code })
         return
       }
 
       // 系統產號：MAX(seq)+1 在併發時會撞號，unique index 是真正的保證，
       // 這裡碰到衝突就重算重試——讓 DB 當最後防線，不靠應用層搶。
-      const inserted = await insertWithGeneratedCode(tenantId, year, baseRow)
-      if (!inserted) {
-        res.status(503).json({ error: "code_generation_failed", attempts: MAX_CODE_ATTEMPTS })
-        return
+      const fmt = await loadCodeFormat(tenantId)
+      for (let attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt++) {
+        const code = await nextProjectCode(tenantId, year, fmt)
+        try {
+          const inserted = await createWithCode(code)
+          res.status(201).json(inserted)
+          return
+        } catch (error) {
+          if (error instanceof AtomicProjectCreationError && isUniqueViolation(error)) continue
+          res.status(500).json({ error: "project_application_create_failed" })
+          return
+        }
       }
-      await finishCreation(inserted)
+      res.status(503).json({ error: "code_generation_failed", attempts: MAX_CODE_ATTEMPTS })
     } catch (err) {
       next(err)
     }
