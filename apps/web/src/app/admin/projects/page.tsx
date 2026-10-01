@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
-import { ClientCombo } from "@/components/ClientCombo";
-import { getDepartments, getEmployees, type Department, type Employee } from "@/lib/admin-api";
+import { useRouter } from "next/navigation";
+import { Card, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { getDepartments, getEmployees, getMe, type Department, type Employee } from "@/lib/admin-api";
+import { listVendors, type Vendor } from "@/lib/company-api";
 import {
   getProjectSettings,
   updateProjectSettings,
@@ -12,7 +13,6 @@ import {
   PROJECT_STATUS_ORDER,
   PROJECT_STATUS_LABELS,
   PROJECT_SORT_LABELS,
-  type ShareMode,
   type ProjectStatus,
   type ProjectSettings,
   type ProjectSort,
@@ -24,27 +24,17 @@ import {
   reserveProjectCodes,
   listClients,
   createClient,
+  getP3SettingsLite,
+  engineerDisciplinesOf,
   humanizeClientError,
   humanizeProjectExtError,
   clientNameOf,
-  PROJECT_KIND_LABELS,
-  PROJECT_KIND_ORDER,
-  CLIENT_CATEGORY_LABELS,
-  CLIENT_CATEGORY_ORDER,
   type ProjectListItem,
-  type ProjectKind,
   type Client,
-  type ClientCategory,
+  type ClientInput,
+  type CreateProjectExtBody,
 } from "@/lib/projects-ext-api";
-
-/** 瀏覽器當地日期 'YYYY-MM-DD'——開案日期表單欄位的預設值（今天）。 */
-function todayLocalKey(): string {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
+import { ProjectApplicationForm } from "./_components/ProjectApplicationForm";
 
 const STATUS_BADGE: Record<ProjectStatus, string> = {
   active: "bg-green-50 text-green-700",
@@ -54,10 +44,15 @@ const STATUS_BADGE: Record<ProjectStatus, string> = {
 };
 
 export default function AdminProjectsPage() {
+  const router = useRouter();
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [depts, setDepts] = useState<Department[]>([]);
   const [emps, setEmps] = useState<Employee[]>([]);
+  const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [disciplines, setDisciplines] = useState<string[]>(() => engineerDisciplinesOf(null));
+  const [vatRate, setVatRate] = useState(0.05);
+  const [canFinance, setCanFinance] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -75,32 +70,7 @@ export default function AdminProjectsPage() {
   const [settings, setSettings] = useState<ProjectSettings | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
 
-  // create form
-  const [name, setName] = useState("");
-  // 編號留空＝系統產號（P{建立年}-{流水號}）。填了就是人工指定，撞號後端回 409。
-  const [code, setCode] = useState("");
-  const [fiscalYear, setFiscalYear] = useState("");
-  // 開案日期（A5）：預設今天，事後補 K 單的案子可以改成實際開案那天。
-  const [openedOn, setOpenedOn] = useState(todayLocalKey());
-  const [description, setDescription] = useState("");
-  const [deptId, setDeptId] = useState("");
-  const [leadEmpId, setLeadEmpId] = useState("");
-  const [shareMode, setShareMode] = useState<ShareMode>("pool_pct");
-  const [bonusPool, setBonusPool] = useState("");
-  const [clientId, setClientId] = useState("");
-  const [kind, setKind] = useState<ProjectKind>("main");
-  const [parentProjectId, setParentProjectId] = useState("");
   const [saving, setSaving] = useState(false);
-  /** 建立成功後回報系統產生的編號——使用者要知道拿到的是哪一個號。 */
-  const [createdCode, setCreatedCode] = useState<string | null>(null);
-
-  // 就地新增客戶（模組五）
-  const [showNewClient, setShowNewClient] = useState(false);
-  const [newClientName, setNewClientName] = useState("");
-  const [newClientTaxId, setNewClientTaxId] = useState("");
-  const [newClientPhone, setNewClientPhone] = useState("");
-  const [newClientCategory, setNewClientCategory] = useState<ClientCategory | "">("");
-  const [creatingClient, setCreatingClient] = useState(false);
 
   // 預先取號（模組五）
   const [reserveCount, setReserveCount] = useState("1");
@@ -111,7 +81,7 @@ export default function AdminProjectsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [p, cl, d, e, st] = await Promise.all([
+      const [p, cl, d, e, st, ven, p3, me] = await Promise.all([
         listProjectsExt({ includeArchived, includeReserved, sort, dir, year: yearFilter ? Number(yearFilter) : null }),
         listClients(),
         // 同 [id]/page.tsx：GET /departments 還是 HR 限定，會計拿不到就給空清單，
@@ -119,12 +89,19 @@ export default function AdminProjectsPage() {
         getDepartments().catch(() => ({ departments: [] as Department[] })),
         getEmployees(),
         getProjectSettings(),
+        listVendors(),
+        getP3SettingsLite().catch(() => null),
+        getMe(),
       ]);
       setSettings(st.settings);
       setProjects(p.projects);
       setClients(cl.clients);
       setDepts(d.departments);
       setEmps(e.employees.filter((x) => x.status === "active"));
+      setVendors(ven.vendors);
+      setDisciplines(engineerDisciplinesOf(p3?.settings.disciplines));
+      setVatRate(p3?.settings.vatRate ?? 0.05);
+      setCanFinance(["hr_admin", "platform_admin", "accountant"].includes(me.role));
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入失敗");
     } finally {
@@ -139,52 +116,17 @@ export default function AdminProjectsPage() {
 
   const mainProjects = projects.filter((p) => (p.kind ?? "main") === "main");
 
-  async function submit() {
-    if (!name.trim()) {
-      setError("請輸入專案名稱");
-      return;
-    }
-    if (kind !== "main" && !parentProjectId) {
-      setError("變更設計／追加／代墊必須選擇母案");
-      return;
-    }
+  async function submit(body: CreateProjectExtBody) {
     setSaving(true);
     setError(null);
-    setCreatedCode(null);
     try {
-      const created = await createProjectExt({
-        name: name.trim(),
-        code: code.trim() || null,
-        fiscalYear: fiscalYear ? Number(fiscalYear) : null,
-        openedOn: openedOn || null,
-        description: description.trim() || null,
-        deptId: deptId || null,
-        leadEmpId: leadEmpId || null,
-        shareMode,
-        bonusPool: shareMode === "pool_pct" && bonusPool ? Number(bonusPool) : null,
-        clientId: clientId || null,
-        kind,
-        parentProjectId: kind === "main" ? null : parentProjectId,
-      });
-      setCreatedCode(created.code);
-      setName("");
-      setCode("");
-      setFiscalYear("");
-      setOpenedOn(todayLocalKey());
-      setDescription("");
-      setDeptId("");
-      setLeadEmpId("");
-      setBonusPool("");
-      setShareMode("pool_pct");
-      setClientId("");
-      setKind("main");
-      setParentProjectId("");
-      await load();
+      const created = await createProjectExt(body);
+      router.push(`/admin/projects/${created.id}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "建立失敗";
       setError(
         msg.includes("code_taken")
-          ? `編號 ${code.trim()} 已被使用。請換一個，或清空讓系統自動產號。`
+          ? `編號 ${body.code ?? ""} 已被使用。請換一個，或清空讓系統自動產號。`
           : msg.includes("code_generation_failed")
             ? "系統產號連續碰撞，請稍候再試一次。"
             : humanizeProjectExtError(err, msg),
@@ -194,28 +136,15 @@ export default function AdminProjectsPage() {
     }
   }
 
-  async function submitNewClient() {
-    if (!newClientName.trim()) return;
-    setCreatingClient(true);
+  async function submitNewClient(body: ClientInput): Promise<Client> {
     setError(null);
     try {
-      const res = await createClient({
-        name: newClientName.trim(),
-        category: newClientCategory || null,
-        taxId: newClientTaxId.trim() || null,
-        phone: newClientPhone.trim() || null,
-      });
+      const res = await createClient(body);
       setClients((cs) => [...cs, res.client]);
-      setClientId(res.client.id);
-      setShowNewClient(false);
-      setNewClientName("");
-      setNewClientTaxId("");
-      setNewClientPhone("");
-      setNewClientCategory("");
+      return res.client;
     } catch (err) {
       setError(humanizeClientError(err, "新增客戶失敗"));
-    } finally {
-      setCreatingClient(false);
+      throw err;
     }
   }
 
@@ -270,129 +199,21 @@ export default function AdminProjectsPage() {
 
   return (
     <>
-      <Card>
-        <h2 className="mb-3 text-sm font-semibold text-gray-700">建立專案</h2>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div>
-            <label className={labelCls}>專案名稱 *</label>
-            <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：官網改版" />
-          </div>
-          <div>
-            <label className={labelCls}>開案日期</label>
-            <input className={inputCls} type="date" value={openedOn} onChange={(e) => setOpenedOn(e.target.value)} />
-            <p className="mt-1 text-xs text-gray-400">預設今天；事後補登的案子請改成實際開案那天，不要用建立日或補單當天。</p>
-          </div>
-          <div>
-            <label className={labelCls}>歸屬年度</label>
-            <input className={inputCls} type="number" min="1" max="2100" value={fiscalYear} onChange={(e) => setFiscalYear(e.target.value)} placeholder={`留空＝${new Date().getFullYear()}（民國 ${new Date().getFullYear() - 1911}）`} />
-            <p className="mt-1 text-xs text-gray-400">報表與獎金歸在哪一年，西元或民國年都可以填（115＝2026）。12 月談成、1 月才立案的案子可設回前一年。</p>
-          </div>
-          <div className="sm:col-span-2">
-            <label className={labelCls}>專案編號</label>
-            <input className={inputCls} value={code} onChange={(e) => setCode(e.target.value)} placeholder={`留空＝自動產生 P${new Date().getFullYear()}-001`} />
-            <p className="mt-1 text-xs text-gray-400">
-              只有匯入舊案才需要手填。編號會印在合約與請款單上，<span className="font-medium text-gray-500">建立後不可變更</span>；要改歸屬請改上面的歸屬年度。
-            </p>
-          </div>
-          <div className="sm:col-span-2">
-            <label className={labelCls}>說明</label>
-            <textarea className={inputCls} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="選填" />
-          </div>
-
-          <div className="sm:col-span-2">
-            <label className={labelCls}>客戶</label>
-            <div className="flex flex-wrap items-center gap-2">
-              <ClientCombo clients={clients} clientId={clientId || null} onChange={(id) => setClientId(id ?? "")} />
-              <button
-                type="button"
-                onClick={() => setShowNewClient((v) => !v)}
-                className="shrink-0 rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700"
-              >
-                {showNewClient ? "取消新增客戶" : "＋ 新增客戶"}
-              </button>
-            </div>
-            <p className="mt-1 text-xs text-gray-400">打字可過濾既有客戶；打不到符合的名字，用右邊「＋ 新增客戶」建檔。</p>
-            {showNewClient && (
-              <div className="mt-2 grid grid-cols-1 gap-2 rounded-lg border border-dashed border-gray-300 p-3 sm:grid-cols-5">
-                <input className={inputCls} value={newClientName} onChange={(e) => setNewClientName(e.target.value)} placeholder="客戶名稱 *" />
-                <select
-                  className={inputCls}
-                  value={newClientCategory}
-                  onChange={(e) => setNewClientCategory(e.target.value as ClientCategory | "")}
-                >
-                  <option value="">分類（選填）</option>
-                  {CLIENT_CATEGORY_ORDER.map((v) => (
-                    <option key={v} value={v}>{CLIENT_CATEGORY_LABELS[v]}</option>
-                  ))}
-                </select>
-                <input className={inputCls} value={newClientTaxId} onChange={(e) => setNewClientTaxId(e.target.value)} placeholder="統編（選填）" />
-                <input className={inputCls} value={newClientPhone} onChange={(e) => setNewClientPhone(e.target.value)} placeholder="電話（選填）" />
-                <PrimaryButton type="button" onClick={submitNewClient} disabled={creatingClient || !newClientName.trim()}>
-                  {creatingClient ? "建立中…" : "建立並選用"}
-                </PrimaryButton>
-              </div>
-            )}
-          </div>
-
-          <div>
-            <label className={labelCls}>案件類型</label>
-            <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value as ProjectKind)}>
-              {PROJECT_KIND_ORDER.map((k) => (
-                <option key={k} value={k}>{PROJECT_KIND_LABELS[k]}</option>
-              ))}
-            </select>
-          </div>
-          {kind !== "main" && (
-            <div>
-              <label className={labelCls}>母案 *</label>
-              <select className={inputCls} value={parentProjectId} onChange={(e) => setParentProjectId(e.target.value)}>
-                <option value="">請選擇母案</option>
-                {mainProjects.map((p) => (
-                  <option key={p.id} value={p.id}>{p.code ? `${p.code}　` : ""}{p.name}</option>
-                ))}
-              </select>
-              <p className="mt-1 text-xs text-gray-400">變更設計／追加／代墊都要掛回一個主案。</p>
-            </div>
-          )}
-
-          <div>
-            <label className={labelCls}>所屬部門（驅動部門主管可見分潤）</label>
-            <select className={inputCls} value={deptId} onChange={(e) => setDeptId(e.target.value)}>
-              <option value="">不指定</option>
-              {depts.map((d) => (
-                <option key={d.id} value={d.id}>{d.name}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className={labelCls}>專案負責人（可見／可調整全部分潤）</label>
-            <select className={inputCls} value={leadEmpId} onChange={(e) => setLeadEmpId(e.target.value)}>
-              <option value="">不指定</option>
-              {emps.map((e) => (
-                <option key={e.id} value={e.id}>{e.name}{e.emp_no ? `（${e.emp_no}）` : ""}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className={labelCls}>分潤模式</label>
-            <select className={inputCls} value={shareMode} onChange={(e) => setShareMode(e.target.value as ShareMode)}>
-              <option value="pool_pct">獎金池 × 百分比</option>
-              <option value="fixed_amount">直接填每人金額</option>
-            </select>
-          </div>
-          {shareMode === "pool_pct" && (
-            <div>
-              <label className={labelCls}>獎金池總額</label>
-              <input className={inputCls} type="number" min="0" value={bonusPool} onChange={(e) => setBonusPool(e.target.value)} placeholder="例如：100000" />
-            </div>
-          )}
-        </div>
-        <div className="mt-4 flex items-center gap-3">
-          <PrimaryButton onClick={submit} disabled={saving}>{saving ? "建立中…" : "建立專案"}</PrimaryButton>
-          {createdCode && <span className="text-sm text-green-700">已建立，編號 <span className="font-mono font-medium">{createdCode}</span></span>}
-          <ErrorText>{error}</ErrorText>
-        </div>
-
+      {canFinance ? <Card>
+        <ProjectApplicationForm
+          clients={clients}
+          departments={depts}
+          employees={emps}
+          vendors={vendors}
+          disciplines={disciplines}
+          mainProjects={mainProjects}
+          vatRate={vatRate}
+          canFinance={canFinance}
+          saving={saving}
+          apiError={error}
+          onSubmit={submit}
+          onCreateClient={submitNewClient}
+        />
         <div className="mt-4 flex flex-wrap items-end gap-3 border-t pt-4">
           <div>
             <label className={labelCls}>預先取號</label>
@@ -411,7 +232,7 @@ export default function AdminProjectsPage() {
           )}
           <span className="text-xs text-gray-400">立案前先掛號用；下方列表勾選「顯示預先取號」可見。</span>
         </div>
-      </Card>
+      </Card> : null}
 
       <Card>
         <div className="mb-3 flex flex-wrap items-center gap-3">
