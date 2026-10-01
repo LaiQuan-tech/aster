@@ -37,8 +37,6 @@ Add an explicit primary-contract marker with a partial unique index for one acti
 
 ```ts
 primaryContract?: {
-  docType: DocType
-  ourRole: OurRole
   title?: string | null
   counterparty?: string | null
   amount: number
@@ -47,6 +45,8 @@ primaryContract?: {
 } | null
 billings?: InstallmentInputExt[]
 ```
+
+`primaryContract` always represents our signed contractor contract (`docType='contract'`, `ourRole='contractor'`); callers cannot change those authority-defining values.
 
 In `projects.ts`, add matching Zod schemas and keep all existing fields backward compatible.
 
