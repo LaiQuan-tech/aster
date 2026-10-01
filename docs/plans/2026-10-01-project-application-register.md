@@ -19,6 +19,8 @@
 - Modify: `apps/api/src/routes/contracts.ts`
 - Create: `apps/api/src/services/main-contract.ts`
 - Modify: `apps/web/src/lib/projects-ext-api.ts`
+- Modify: `apps/api/src/lib/xlsx/projects-annual.ts`
+- Modify: `apps/api/src/__tests__/projects-annual-reference.test.ts`
 - Test: `apps/api/src/__tests__/projects-application.test.ts`
 
 **Step 1: Write the failing API contract tests**
@@ -176,6 +178,8 @@ Expected: FAIL because the shared projection does not exist.
 **Step 3: Extract the existing annual table**
 
 Move the table from `annual/page.tsx` to `AnnualProjectRegister`. Match the reference workbook: title merges only across A:P, Kai font, white background, black thin borders for A:P, column-width proportions, row heights, fixed `空調／消防／汙水` columns, monthly subtotals, and annual total. Use `金額`, not `金額(未稅)`. Do not append the four non-Excel system columns. Keep subtotal cells A:D separate and put the label only in E.
+
+Apply the same exact A:S projection to the annual XLSX exporter and its reference test. Reuse the ASTER logo embedded in the supplied workbook as a checked-in web/export asset so the header does not silently lose the source branding.
 
 **Step 4: Make every project row navigable**
 
