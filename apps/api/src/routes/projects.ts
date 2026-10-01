@@ -169,19 +169,24 @@ const createSchema = z.object({
 
 type ProjectCreationCleanupResult =
   | { ok: true }
-  | { ok: false; stage: "billings" | "project"; message: string }
+  | { ok: false; stage: "contract" | "project"; message: string }
 
 /** PostgREST writes cannot share a transaction, so compensate in FK-safe order. */
 async function cleanupFailedProjectCreation(
   tenantId: string,
   projectId: string,
+  createdPrimaryContractId: string | null,
 ): Promise<ProjectCreationCleanupResult> {
-  const { error: billingsError } = await supabaseAdmin
-    .from("project_billings")
-    .delete()
-    .eq("tenant_id", tenantId)
-    .eq("project_id", projectId)
-  if (billingsError) return { ok: false, stage: "billings", message: billingsError.message }
+  if (createdPrimaryContractId) {
+    const { error: contractError } = await supabaseAdmin
+      .from("contracts")
+      .delete()
+      .eq("tenant_id", tenantId)
+      .eq("project_id", projectId)
+      .eq("id", createdPrimaryContractId)
+      .eq("is_primary", true)
+    if (contractError) return { ok: false, stage: "contract", message: contractError.message }
+  }
 
   const { error: projectError } = await supabaseAdmin
     .from("projects")
@@ -783,9 +788,14 @@ projectsRouter.post(
           res.status(201).json(inserted)
           return true
         }
+        let createdPrimaryContractId: string | null = null
         try {
           const self = req.auth?.userId ? await resolveSelf(tenantId, req.auth.userId) : null
           if (!self) throw new Error("creator employee not found")
+          if (primaryContract) {
+            const contract = await createMainContract(tenantId, inserted.id, self.id, primaryContract)
+            createdPrimaryContractId = contract.id
+          }
           await createInitialBillings(
             tenantId,
             inserted.id,
@@ -793,11 +803,10 @@ projectsRouter.post(
             billings,
             primaryContract?.amount ?? null,
           )
-          if (primaryContract) await createMainContract(tenantId, inserted.id, self.id, primaryContract)
           res.status(201).json(inserted)
           return true
         } catch (error) {
-          const cleanup = await cleanupFailedProjectCreation(tenantId, inserted.id)
+          const cleanup = await cleanupFailedProjectCreation(tenantId, inserted.id, createdPrimaryContractId)
           if (!cleanup.ok) {
             console.error("project creation compensation failed", {
               tenantId,

@@ -375,8 +375,11 @@ contractsRouter.patch(
         return
       }
       if (row.is_primary) {
-        res.status(409).json({ error: "primary_contract_requires_main_endpoint" })
-        return
+        const primaryStampFields = new Set(["stampDutyRequired", "stampDutyPaidOn", "stampDutyNote"])
+        if (Object.keys(parsed.data).some((field) => !primaryStampFields.has(field))) {
+          res.status(409).json({ error: "primary_contract_requires_main_endpoint" })
+          return
+        }
       }
 
       const b = parsed.data

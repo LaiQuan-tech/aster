@@ -7,8 +7,10 @@ const h = vi.hoisted(() => {
   const tenantId = "11111111-1111-4111-8111-111111111111"
   const projectId = "22222222-2222-4222-8222-222222222222"
   const db: Record<string, Row[]> = {}
+  const operations: string[] = []
   let failPrimaryContractInsert = false
-  let failBillingDelete = false
+  let failBillingInsert = false
+  let failContractDelete = false
   let idSeq = 0
 
   function fakeFrom(table: string) {
@@ -18,8 +20,12 @@ const h = vi.hoisted(() => {
     const filtered = () => (db[table] ?? []).filter((row) => predicates.every((predicate) => predicate(row)))
     const execute = async (single: boolean) => {
       if (action === "insert") {
+        operations.push(`insert:${table}`)
         if (table === "contracts" && failPrimaryContractInsert) {
           return { data: null, error: { message: "contract insert failed", code: "XX000" } }
+        }
+        if (table === "project_billings" && failBillingInsert) {
+          return { data: null, error: { message: "billing insert failed", code: "XX000" } }
         }
         const inputs = Array.isArray(payload) ? payload : [payload]
         const rows = inputs.map((input) => ({
@@ -41,8 +47,12 @@ const h = vi.hoisted(() => {
         return { data: single ? rows[0] ?? null : rows, error: null }
       }
       if (action === "delete") {
-        if (table === "project_billings" && failBillingDelete) {
-          return { data: null, error: { message: "billing cleanup failed", code: "XX000" } }
+        operations.push(`delete:${table}`)
+        if (table === "project_billings") {
+          return { data: null, error: { message: "project_billings hard delete forbidden", code: "23001" } }
+        }
+        if (table === "contracts" && failContractDelete) {
+          return { data: null, error: { message: "contract cleanup failed", code: "XX000" } }
         }
         const doomed = new Set(filtered())
         db[table] = (db[table] ?? []).filter((row) => !doomed.has(row))
@@ -72,12 +82,16 @@ const h = vi.hoisted(() => {
     tenantId,
     projectId,
     db,
+    operations,
     fakeFrom,
     setFailPrimaryContractInsert(value: boolean) {
       failPrimaryContractInsert = value
     },
-    setFailBillingDelete(value: boolean) {
-      failBillingDelete = value
+    setFailBillingInsert(value: boolean) {
+      failBillingInsert = value
+    },
+    setFailContractDelete(value: boolean) {
+      failContractDelete = value
     },
   }
 })
@@ -107,7 +121,9 @@ function auth(path: string, user = "finance-user") {
 
 beforeEach(() => {
   h.setFailPrimaryContractInsert(false)
-  h.setFailBillingDelete(false)
+  h.setFailBillingInsert(false)
+  h.setFailContractDelete(false)
+  h.operations.length = 0
   h.db.tenants = [{ id: h.tenantId, timezone: "Asia/Taipei" }]
   h.db.employees = [
     { id: "aaaaaaaa-0000-4000-8000-000000000001", tenant_id: h.tenantId, user_id: "finance-user", role: "accountant", dept_id: null },
@@ -257,14 +273,18 @@ describe("POST /projects primary contract", () => {
     expect(response.body.error).toBe("project_application_create_failed")
     expect(h.db.projects.map((project) => project.id)).toEqual(["99999999-9999-4999-8999-999999999999"])
     expect(h.db.project_billings).toHaveLength(0)
+    expect(h.operations.filter((operation) => operation.startsWith("insert:"))).toEqual([
+      "insert:projects",
+      "insert:contracts",
+    ])
+    expect(h.operations.filter((operation) => operation.startsWith("delete:"))).toEqual(["delete:projects"])
   })
 
-  it("reports cleanup failure and retains the project when billing cleanup fails", async () => {
+  it("cleans up the just-created primary and project when atomic billing insert fails", async () => {
     h.db.projects = []
     h.db.contracts = []
     h.db.project_billings = []
-    h.setFailPrimaryContractInsert(true)
-    h.setFailBillingDelete(true)
+    h.setFailBillingInsert(true)
     const response = await request(app)
       .post("/projects")
       .set("Authorization", "Bearer finance-user")
@@ -275,10 +295,41 @@ describe("POST /projects primary contract", () => {
         billings: [{ installmentNo: 1, percentage: 100 }],
       })
     expect(response.status).toBe(500)
-    expect(response.body.error).toBe("project_application_cleanup_failed")
-    expect(response.body.stage).toBe("billings")
+    expect(response.body.error).toBe("project_application_create_failed")
+    expect(h.db.projects).toHaveLength(0)
+    expect(h.db.contracts).toHaveLength(0)
+    expect(h.db.project_billings).toHaveLength(0)
+    expect(h.operations.filter((operation) => operation.startsWith("insert:"))).toEqual([
+      "insert:projects",
+      "insert:contracts",
+      "insert:project_billings",
+    ])
+    expect(h.operations.filter((operation) => operation.startsWith("delete:"))).toEqual([
+      "delete:contracts",
+      "delete:projects",
+    ])
+  })
+
+  it("reports cleanup failure when a newly-created primary cannot be removed", async () => {
+    h.db.projects = []
+    h.db.contracts = []
+    h.db.project_billings = []
+    h.setFailBillingInsert(true)
+    h.setFailContractDelete(true)
+    const response = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer finance-user")
+      .send({
+        name: "清理失敗專案",
+        code: "CLEANUP-FAIL",
+        contractAmount: 123_000,
+        billings: [{ installmentNo: 1, percentage: 100 }],
+      })
+    expect(response.status).toBe(500)
+    expect(response.body).toMatchObject({ error: "project_application_cleanup_failed", stage: "contract" })
     expect(h.db.projects).toHaveLength(1)
-    expect(h.db.project_billings).toHaveLength(1)
+    expect(h.db.contracts).toHaveLength(1)
+    expect(h.operations.filter((operation) => operation.startsWith("delete:"))).toEqual(["delete:contracts"])
   })
 
   it("creates the requested billing schedule and recalculates it from the new primary amount", async () => {
@@ -321,6 +372,21 @@ describe("POST /projects primary contract", () => {
 })
 
 describe("generic contract routes protect the primary record", () => {
+  it("allows only stamp-duty workflow metadata on a primary contract", async () => {
+    const id = h.db.contracts[0].id
+    const response = await request(app)
+      .patch(`/contracts/${id}`)
+      .set("Authorization", "Bearer finance-user")
+      .send({ stampDutyPaidOn: "2026-10-02", stampDutyNote: "已貼花", stampDutyRequired: "yes" })
+    expect(response.status).toBe(200)
+    expect(response.body.contract).toMatchObject({
+      isPrimary: true,
+      stampDutyPaidOn: "2026-10-02",
+      stampDutyNote: "已貼花",
+      stampDutyRequired: "yes",
+    })
+  })
+
   it("rejects generic patch and delete for a primary contract", async () => {
     const id = h.db.contracts[0].id
     const patched = await request(app)
