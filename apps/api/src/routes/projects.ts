@@ -49,6 +49,8 @@ import {
   projectShareRevisionSchema,
 } from "../services/project-share-revision.js"
 import { createMainContract, type MainContractInput } from "../services/main-contract.js"
+import { createInitialBillings, type NewBillingInput } from "../services/billing-store.js"
+import { BILLING_KINDS } from "../services/project-money.js"
 
 export const projectsRouter = Router()
 
@@ -122,6 +124,17 @@ const primaryContractSchema = z.object({
   copies: z.number().int().min(1).max(50).optional(),
 })
 
+const initialBillingSchema = z.object({
+  installmentNo: z.number().int().min(1).max(999),
+  kind: z.enum(BILLING_KINDS).optional(),
+  percentage: z.number().min(0).max(100).nullish(),
+  milestone: z.string().trim().max(200).nullish(),
+  plannedOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
+  overrideAmount: z.number().nullish(),
+  overrideReason: z.string().trim().max(1000).nullish(),
+  note: z.string().trim().max(1000).nullish(),
+})
+
 const createSchema = z.object({
   name: z.string().trim().min(1).max(200),
   /**
@@ -142,6 +155,7 @@ const createSchema = z.object({
   /** 建案表單簡寫；正式金額只寫 contracts.amount，不寫 projects。 */
   contractAmount: z.number().finite().nonnegative().max(1e15).optional(),
   primaryContract: primaryContractSchema.nullish(),
+  billings: z.array(initialBillingSchema).max(100).optional(),
   ...applicationFields,
 }).superRefine((body, ctx) => {
   if (body.contractAmount !== undefined && body.primaryContract != null) {
@@ -649,6 +663,21 @@ projectsRouter.post(
     const b = parsed.data
     const primaryContract: MainContractInput | null =
       b.primaryContract ?? (b.contractAmount !== undefined ? { amount: b.contractAmount } : null)
+    const billings: NewBillingInput[] = b.billings ?? []
+    const seenInstallments = new Set<number>()
+    let guildAdvances = 0
+    for (const billing of billings) {
+      if (seenInstallments.has(billing.installmentNo)) {
+        res.status(400).json({ error: "duplicate_installment_no", installmentNo: billing.installmentNo })
+        return
+      }
+      seenInstallments.add(billing.installmentNo)
+      if (billing.kind === "guild_advance") guildAdvances += 1
+    }
+    if (guildAdvances > 1) {
+      res.status(400).json({ error: "multiple_guild_advances" })
+      return
+    }
     try {
       // 編號的年度一律取**建立年**（見 services/project-code.ts 的說明），
       // 而且是**台北當地**的年——12/31 深夜立的案不該拿到新年度的號。
@@ -714,17 +743,29 @@ projectsRouter.post(
        * 本請求剛建立的 project id。既有專案永遠不會成為刪除條件。
        */
       const finishCreation = async (inserted: { id: string; code: string | null }): Promise<boolean> => {
-        if (!primaryContract) {
+        if (!primaryContract && billings.length === 0) {
           res.status(201).json(inserted)
           return true
         }
         try {
           const self = req.auth?.userId ? await resolveSelf(tenantId, req.auth.userId) : null
           if (!self) throw new Error("creator employee not found")
-          await createMainContract(tenantId, inserted.id, self.id, primaryContract)
+          await createInitialBillings(
+            tenantId,
+            inserted.id,
+            self.id,
+            billings,
+            primaryContract?.amount ?? null,
+          )
+          if (primaryContract) await createMainContract(tenantId, inserted.id, self.id, primaryContract)
           res.status(201).json(inserted)
           return true
         } catch (error) {
+          await supabaseAdmin
+            .from("project_billings")
+            .delete()
+            .eq("tenant_id", tenantId)
+            .eq("project_id", inserted.id)
           const { error: cleanupError } = await supabaseAdmin
             .from("projects")
             .delete()

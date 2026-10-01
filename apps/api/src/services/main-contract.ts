@@ -76,6 +76,26 @@ export async function loadMainContract(tenantId: string, projectId: string): Pro
   return (data as MainContractRow | null) ?? null
 }
 
+/**
+ * 舊資料沒有 is_primary：只在承攬合約版本鏈恰有一個 active leaf 時採用。
+ * 多分支或多份無關合約都不猜，呼叫端會另建明確的主合約。
+ */
+async function adoptableLegacyContract(tenantId: string, projectId: string): Promise<MainContractRow | null> {
+  const { data, error } = await supabaseAdmin
+    .from("contracts")
+    .select(MAIN_CONTRACT_COLS)
+    .eq("tenant_id", tenantId)
+    .eq("project_id", projectId)
+    .eq("doc_type", "contract")
+    .eq("our_role", "contractor")
+    .is("deleted_at", null)
+  if (error) throw new Error(`adoptableLegacyContract: ${error.message}`)
+  const rows = (data ?? []) as MainContractRow[]
+  const superseded = new Set(rows.map((row) => row.supersedes_id).filter((id): id is string => !!id))
+  const leaves = rows.filter((row) => !superseded.has(row.id))
+  return leaves.length === 1 ? leaves[0] : null
+}
+
 async function stampDutyRate(tenantId: string): Promise<number> {
   const { data, error } = await supabaseAdmin
     .from("project_settings")
@@ -126,19 +146,35 @@ export async function upsertMainContract(
   input: MainContractInput,
 ): Promise<MainContractRow> {
   const current = await loadMainContract(tenantId, projectId)
-  if (!current) {
+  let target = current
+  if (!target) {
+    const legacy = await adoptableLegacyContract(tenantId, projectId)
+    if (legacy) {
+      const { data, error } = await supabaseAdmin
+        .from("contracts")
+        .update({ is_primary: true })
+        .eq("tenant_id", tenantId)
+        .eq("id", legacy.id)
+        .is("deleted_at", null)
+        .select(MAIN_CONTRACT_COLS)
+        .single()
+      if (error || !data) throw new Error(`adoptMainContract: ${error?.message ?? "missing row"}`)
+      target = data as MainContractRow
+    }
+  }
+  if (!target) {
     const created = await createMainContract(tenantId, projectId, createdByEmpId, input)
     await recomputeBillings(tenantId, projectId)
     return created
   }
 
-  const rate = num(current.stamp_duty_rate) ?? (await stampDutyRate(tenantId))
-  const copies = input.copies ?? current.copies
+  const rate = num(target.stamp_duty_rate) ?? (await stampDutyRate(tenantId))
+  const copies = input.copies ?? target.copies
   const patch = {
     amount: input.amount,
-    title: input.title === undefined ? current.title : (input.title?.trim() || "主合約"),
-    counterparty: input.counterparty === undefined ? current.counterparty : input.counterparty,
-    signed_on: input.signedOn === undefined ? current.signed_on : input.signedOn,
+    title: input.title === undefined ? target.title : (input.title?.trim() || "主合約"),
+    counterparty: input.counterparty === undefined ? target.counterparty : input.counterparty,
+    signed_on: input.signedOn === undefined ? target.signed_on : input.signedOn,
     copies,
     stamp_duty_rate: rate,
     stamp_duty_amount: computeStampDuty({ amount: input.amount, rate, copies }),
@@ -147,7 +183,7 @@ export async function upsertMainContract(
     .from("contracts")
     .update(patch)
     .eq("tenant_id", tenantId)
-    .eq("id", current.id)
+    .eq("id", target.id)
     .is("deleted_at", null)
     .select(MAIN_CONTRACT_COLS)
     .single()

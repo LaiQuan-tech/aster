@@ -169,6 +169,32 @@ describe("primary contract authorization", () => {
     expect(updated.status).toBe(200)
     expect(updated.body.contract).toMatchObject({ amount: 2_000_000, title: "統包主合約", stampDutyAmount: 4_000, isPrimary: true })
   })
+
+  it("adopts the sole active contractor leaf instead of inserting a second base contract", async () => {
+    h.db.contracts = [{ ...h.db.contracts[0], is_primary: false, amount: "750000" }]
+    const existingId = h.db.contracts[0].id
+    const response = await request(app)
+      .put(`/projects/${h.projectId}/main-contract`)
+      .set("Authorization", "Bearer finance-user")
+      .send({ amount: 900_000 })
+    expect(response.status).toBe(200)
+    expect(response.body.contract).toMatchObject({ id: existingId, amount: 900_000, isPrimary: true })
+    expect(h.db.contracts).toHaveLength(1)
+  })
+
+  it("does not guess among ambiguous legacy leaves and creates a dedicated primary", async () => {
+    h.db.contracts = [
+      { ...h.db.contracts[0], id: "33333333-3333-4333-8333-333333333331", is_primary: false },
+      { ...h.db.contracts[0], id: "33333333-3333-4333-8333-333333333332", is_primary: false },
+    ]
+    const response = await request(app)
+      .put(`/projects/${h.projectId}/main-contract`)
+      .set("Authorization", "Bearer finance-user")
+      .send({ amount: 900_000 })
+    expect(response.status).toBe(200)
+    expect(h.db.contracts).toHaveLength(3)
+    expect(h.db.contracts.filter((row) => row.is_primary)).toHaveLength(1)
+  })
 })
 
 describe("POST /projects primary contract", () => {
@@ -216,5 +242,76 @@ describe("POST /projects primary contract", () => {
     expect(response.status).toBe(500)
     expect(response.body.error).toBe("project_application_create_failed")
     expect(h.db.projects.map((project) => project.id)).toEqual(["99999999-9999-4999-8999-999999999999"])
+  })
+
+  it("creates the requested billing schedule and recalculates it from the new primary amount", async () => {
+    h.db.projects = []
+    h.db.contracts = []
+    h.db.project_billings = []
+    const response = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer finance-user")
+      .send({
+        name: "含期程專案",
+        code: "WITH-BILLINGS",
+        contractAmount: 1_000_000,
+        billings: [
+          { installmentNo: 1, percentage: 30, milestone: "簽約" },
+          { installmentNo: 2, percentage: 70, milestone: "完工" },
+          { installmentNo: 3, kind: "guild_advance", percentage: 10, milestone: "公會代墊" },
+        ],
+      })
+    expect(response.status).toBe(201)
+    expect(h.db.project_billings).toHaveLength(3)
+    expect(h.db.project_billings.map((row) => row.calculated_amount)).toEqual([300_000, 700_000, 100_000])
+  })
+
+  it.each([
+    [[{ installmentNo: 1, percentage: 101 }], "invalid_body"],
+    [[{ installmentNo: 1, percentage: 50 }, { installmentNo: 1, percentage: 50 }], "duplicate_installment_no"],
+    [[{ installmentNo: 1, kind: "guild_advance" }, { installmentNo: 2, kind: "guild_advance" }], "multiple_guild_advances"],
+  ])("rejects invalid creation billings %o", async (billings, error) => {
+    h.db.projects = []
+    const response = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer finance-user")
+      .send({ name: "期程錯誤", code: `BAD-${error}`, billings })
+    expect(response.status).toBe(400)
+    expect(response.body.error).toBe(error)
+    expect(h.db.projects).toHaveLength(0)
+  })
+})
+
+describe("generic contract routes protect the primary record", () => {
+  it("rejects generic patch and delete for a primary contract", async () => {
+    const id = h.db.contracts[0].id
+    const patched = await request(app)
+      .patch(`/contracts/${id}`)
+      .set("Authorization", "Bearer finance-user")
+      .send({ amount: 10 })
+    expect(patched.status).toBe(409)
+    expect(patched.body.error).toBe("primary_contract_requires_main_endpoint")
+
+    const deleted = await request(app)
+      .delete(`/contracts/${id}`)
+      .set("Authorization", "Bearer finance-user")
+      .send({ reason: "不應允許" })
+    expect(deleted.status).toBe(409)
+    expect(deleted.body.error).toBe("primary_contract_requires_main_endpoint")
+  })
+
+  it("rejects generic versioning from a primary contract", async () => {
+    const response = await request(app)
+      .post(`/projects/${h.projectId}/contracts`)
+      .set("Authorization", "Bearer finance-user")
+      .send({
+        docType: "contract",
+        title: "主約新版",
+        amount: 2_000_000,
+        supersedesId: h.db.contracts[0].id,
+      })
+    expect(response.status).toBe(409)
+    expect(response.body.error).toBe("primary_contract_requires_main_endpoint")
+    expect(h.db.contracts).toHaveLength(1)
   })
 })

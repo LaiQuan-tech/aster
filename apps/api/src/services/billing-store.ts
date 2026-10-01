@@ -183,3 +183,50 @@ export async function recomputeBillings(tenantId: string, projectId: string): Pr
     if (error) throw new Error(`recomputeBillings: ${error.message}`)
   }
 }
+
+export type NewBillingInput = {
+  installmentNo: number
+  kind?: "installment" | "guild_advance"
+  percentage?: number | null
+  milestone?: string | null
+  plannedOn?: string | null
+  overrideAmount?: number | null
+  overrideReason?: string | null
+  note?: string | null
+}
+
+/** 建案時一次寫入全新期程；試算直接使用同一 request 的主合約金額。 */
+export async function createInitialBillings(
+  tenantId: string,
+  projectId: string,
+  createdByEmpId: string,
+  inputs: NewBillingInput[],
+  total: number | null,
+): Promise<void> {
+  if (inputs.length === 0) return
+  const schedule = computeSchedule(inputs.map((item) => ({
+    installmentNo: item.installmentNo,
+    kind: item.kind ?? "installment",
+    percentage: item.percentage ?? null,
+    overrideAmount: item.overrideAmount ?? null,
+    billedAmount: null,
+    billed: false,
+  })), total)
+  const calculated = new Map(schedule.rows.map((row) => [row.installmentNo, row]))
+  const { error } = await supabaseAdmin.from("project_billings").insert(inputs.map((item) => ({
+    tenant_id: tenantId,
+    project_id: projectId,
+    installment_no: item.installmentNo,
+    kind: item.kind ?? "installment",
+    percentage: item.percentage ?? null,
+    milestone: item.milestone ?? null,
+    planned_on: item.plannedOn ?? null,
+    calculated_amount: calculated.get(item.installmentNo)?.calculatedAmount ?? null,
+    residue_applied: calculated.get(item.installmentNo)?.residueApplied ?? 0,
+    override_amount: item.overrideAmount ?? null,
+    override_reason: item.overrideReason ?? null,
+    note: item.note ?? null,
+    created_by_emp_id: createdByEmpId,
+  })))
+  if (error) throw new Error(`createInitialBillings: ${error.message}`)
+}

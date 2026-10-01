@@ -27,6 +27,7 @@ import {
   getProjectSubcontracts,
   listCompanies,
   getP3SettingsLite,
+  loadContractsForProjectAccess,
   engineerDisciplinesOf,
   PROJECT_KIND_LABELS,
   type ProjectDetail,
@@ -159,12 +160,14 @@ export default function AdminProjectDetailPage() {
     setLoading(true);
     setError(null);
     try {
-      const [detail, m, adj, docs, cs, bs, subs, d, e, ven, comp, p3] = await Promise.all([
-        getProjectDetail(projectId),
+      // access 由 detail 回應決定；先取得它，避免非 finance 使用者先打合約 API 收到 403，
+      // 進而讓整頁 Promise.all 失敗。
+      const detail = await getProjectDetail(projectId);
+      const [m, adj, docs, contractsForAccess, bs, subs, d, e, ven, comp, p3] = await Promise.all([
         getProjectMembers(projectId),
         getProjectAdjustments(projectId),
         getProjectDocuments(projectId),
-        getContracts(projectId),
+        loadContractsForProjectAccess(detail.access.finance, () => getContracts(projectId)),
         getBillingSchedule(projectId).catch(() => emptyBillingSchedule()),
         getProjectSubcontracts(projectId).catch(() => emptySubcontractsResponse()),
         // GET /departments 目前仍是 requireHrAdmin（routes/departments.ts 不在 WP5 範圍）。
@@ -180,7 +183,7 @@ export default function AdminProjectDetailPage() {
       setProject(detail.project);
       setAccess(detail.access);
       setMoney(detail.money);
-      setContracts(cs.contracts);
+      setContracts(contractsForAccess);
       setSchedule(bs);
       setDraft(
         bs.installments.map((i) => ({
@@ -343,20 +346,22 @@ export default function AdminProjectDetailPage() {
       {canFinance && money && <MoneyCard money={money} />}
 
       {/* 合約與報價單（模組四第 3 條）。文件類型決定課不課印花稅。 */}
-      <ContractsCard
-        projectId={projectId} project={project} contracts={contracts} scansByContract={scansByContract}
-        cDocType={cDocType} setCDocType={setCDocType}
-        cOurRole={cOurRole} setCOurRole={setCOurRole}
-        cTitle={cTitle} setCTitle={setCTitle}
-        cCounterparty={cCounterparty} setCCounterparty={setCCounterparty}
-        cAmount={cAmount} setCAmount={setCAmount}
-        cSignedOn={cSignedOn} setCSignedOn={setCSignedOn}
-        cCopies={cCopies} setCCopies={setCCopies}
-        savingContract={savingContract} setSavingContract={setSavingContract}
-        contractFileRef={contractFileRef} pendingContractId={pendingContractId}
-        removeDoc={removeDoc}
-        error={error} setError={setError} load={load}
-      />
+      {canFinance && (
+        <ContractsCard
+          projectId={projectId} project={project} contracts={contracts} scansByContract={scansByContract}
+          cDocType={cDocType} setCDocType={setCDocType}
+          cOurRole={cOurRole} setCOurRole={setCOurRole}
+          cTitle={cTitle} setCTitle={setCTitle}
+          cCounterparty={cCounterparty} setCCounterparty={setCCounterparty}
+          cAmount={cAmount} setCAmount={setCAmount}
+          cSignedOn={cSignedOn} setCSignedOn={setCSignedOn}
+          cCopies={cCopies} setCCopies={setCCopies}
+          savingContract={savingContract} setSavingContract={setSavingContract}
+          contractFileRef={contractFileRef} pendingContractId={pendingContractId}
+          removeDoc={removeDoc}
+          error={error} setError={setError} load={load}
+        />
+      )}
 
       {/* 請款期程（模組四第 4 條）＋ P3 開票／收款。金額一律系統算，不手動拉格。 */}
       <BillingsCard

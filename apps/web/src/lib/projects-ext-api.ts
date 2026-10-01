@@ -228,6 +228,7 @@ export interface CreateProjectExtBody {
   /** 主合約金額簡寫；不可與 primaryContract 同時帶。 */
   contractAmount?: number
   primaryContract?: MainContractInput | null
+  billings?: InstallmentInputExt[]
 }
 
 export interface MainContractInput {
@@ -249,6 +250,15 @@ export function upsertMainContract(projectId: string, body: MainContractInput) {
     method: "PUT",
     body: JSON.stringify(body),
   })
+}
+
+/** 先用專案 detail 的 access 判斷，非財務使用者完全不發出合約請求。 */
+export async function loadContractsForProjectAccess<T>(
+  finance: boolean,
+  loader: () => Promise<{ contracts: T[] }>,
+): Promise<T[]> {
+  if (!finance) return []
+  return (await loader()).contracts
 }
 
 export function createProjectExt(body: CreateProjectExtBody) {

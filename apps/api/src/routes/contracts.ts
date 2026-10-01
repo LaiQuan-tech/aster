@@ -264,6 +264,11 @@ contractsRouter.post(
         return
       }
       const b = parsed.data
+      const superseded = b.supersedesId ? await loadSupersededContract(tenantId, b.supersedesId) : null
+      if (superseded?.isPrimary) {
+        res.status(409).json({ error: "primary_contract_requires_main_endpoint" })
+        return
+      }
       const ourRole = b.ourRole ?? "contractor"
       const flag = b.stampDutyRequired ?? "auto"
       const dutiable = resolveStampDutyRequired({ docType: b.docType, ourRole, flag })
@@ -288,7 +293,7 @@ contractsRouter.post(
           copies,
           supersedes_id: b.supersedesId ?? null,
           // 改版：新列的 version = 被取代那列 + 1。
-          version: b.supersedesId ? await nextVersion(tenantId, b.supersedesId) : 1,
+          version: superseded ? superseded.version + 1 : 1,
           stamp_duty_required: flag,
           // 不應貼花就不存費率，免得清單誤以為算過。
           stamp_duty_rate: dutiable ? rate : null,
@@ -313,14 +318,17 @@ contractsRouter.post(
   },
 )
 
-async function nextVersion(tenantId: string, supersedesId: string): Promise<number> {
+async function loadSupersededContract(
+  tenantId: string,
+  supersedesId: string,
+): Promise<{ version: number; isPrimary: boolean } | null> {
   const { data } = await supabaseAdmin
     .from("contracts")
-    .select("version")
+    .select("version, is_primary")
     .eq("tenant_id", tenantId)
     .eq("id", supersedesId)
     .maybeSingle()
-  return data ? Number(data.version) + 1 : 1
+  return data ? { version: Number(data.version), isPrimary: data.is_primary === true } : null
 }
 
 // ── PATCH /contracts/:id ──────────────────────────────────────────────
@@ -364,6 +372,10 @@ contractsRouter.patch(
       }
       if (!scope.finance) {
         res.status(403).json({ error: "forbidden" })
+        return
+      }
+      if (row.is_primary) {
+        res.status(409).json({ error: "primary_contract_requires_main_endpoint" })
         return
       }
 
@@ -461,7 +473,7 @@ contractsRouter.delete(
     try {
       const { data: current } = await supabaseAdmin
         .from("contracts")
-        .select("id, project_id, deleted_at")
+        .select("id, project_id, deleted_at, is_primary")
         .eq("tenant_id", tenantId)
         .eq("id", req.params.id as string)
         .maybeSingle()
@@ -480,6 +492,10 @@ contractsRouter.delete(
       }
       if (!scope.finance) {
         res.status(403).json({ error: "forbidden" })
+        return
+      }
+      if (current.is_primary) {
+        res.status(409).json({ error: "primary_contract_requires_main_endpoint" })
         return
       }
       // 金額憑證不實體刪除（sql/0018 同一套理由）——已貼花的合約更是如此，
