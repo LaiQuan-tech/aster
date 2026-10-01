@@ -203,7 +203,40 @@ git add apps/web/src/app/admin/projects
 git commit -m "feat(projects): show Excel annual register on project index"
 ```
 
-### Task 5: Integrated verification, review, and delivery
+### Task 5: Match the attendance monthly sheet and show salary
+
+**Files:**
+- Modify: `apps/web/src/components/AttendanceSheetTable.tsx`
+- Modify: `apps/web/src/app/admin/attendance-sheets/[id]/page.tsx`
+- Modify: `apps/web/src/lib/attendance-sheets-api.ts` only if the shared projection needs typing changes
+- Modify: `apps/api/src/lib/xlsx/attendance-sheet.ts` only when parity tests expose a mapping mismatch
+- Test: `apps/web/src/components/attendance-sheet-table.test.tsx` or a pure projection test beside the component
+- Test: `apps/api/src/__tests__/xlsx-attendance-sheet.test.ts`
+
+**Step 1: Write failing layout/projection tests**
+
+Assert the Excel attendance column order, the salary section labels and values, the lower summary/expense rows, and that salary data is absent for unauthorized users.
+
+**Step 2: Implement the Excel-style sheet**
+
+Render one horizontally scrollable spreadsheet surface with daily attendance at A:I, salary details at O:Z, and the summary/expense rows below. Reuse `SheetMoney` for every salary figure. Keep system-only anomalies below the spreadsheet instead of adding a non-Excel column.
+
+**Step 3: Keep authorization server-backed**
+
+Use the existing API authorization result to decide whether the salary section is present. Do not fetch or serialize salary details for unauthorized roles.
+
+**Step 4: Verify UI and export parity**
+
+Run focused web/API tests and compare the rendered page and exported workbook with the reference `115.6` sheet.
+
+**Step 5: Commit**
+
+```bash
+git add apps/web/src/components/AttendanceSheetTable.tsx apps/web/src/app/admin/attendance-sheets apps/web/src/lib/attendance-sheets-api.ts apps/api/src/lib/xlsx/attendance-sheet.ts apps/api/src/__tests__/xlsx-attendance-sheet.test.ts
+git commit -m "feat(attendance): match monthly sheet with salary details"
+```
+
+### Task 6: Integrated verification, review, and delivery
 
 **Files:**
 - Modify as required by verified failures only.
