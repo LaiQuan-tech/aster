@@ -133,6 +133,10 @@ const initialBillingSchema = z.object({
   overrideAmount: z.number().nullish(),
   overrideReason: z.string().trim().max(1000).nullish(),
   note: z.string().trim().max(1000).nullish(),
+}).superRefine((billing, ctx) => {
+  if (billing.overrideAmount !== null && billing.overrideAmount !== undefined && !billing.overrideReason) {
+    ctx.addIssue({ code: "custom", path: ["overrideReason"], message: "override_reason_required" })
+  }
 })
 
 const createSchema = z.object({
@@ -162,6 +166,31 @@ const createSchema = z.object({
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "contractAmount and primaryContract are mutually exclusive" })
   }
 })
+
+type ProjectCreationCleanupResult =
+  | { ok: true }
+  | { ok: false; stage: "billings" | "project"; message: string }
+
+/** PostgREST writes cannot share a transaction, so compensate in FK-safe order. */
+async function cleanupFailedProjectCreation(
+  tenantId: string,
+  projectId: string,
+): Promise<ProjectCreationCleanupResult> {
+  const { error: billingsError } = await supabaseAdmin
+    .from("project_billings")
+    .delete()
+    .eq("tenant_id", tenantId)
+    .eq("project_id", projectId)
+  if (billingsError) return { ok: false, stage: "billings", message: billingsError.message }
+
+  const { error: projectError } = await supabaseAdmin
+    .from("projects")
+    .delete()
+    .eq("tenant_id", tenantId)
+    .eq("id", projectId)
+  if (projectError) return { ok: false, stage: "project", message: projectError.message }
+  return { ok: true }
+}
 
 const reserveSchema = z.object({
   count: z.number().int().min(1).max(20),
@@ -657,6 +686,13 @@ projectsRouter.post(
     const tenantId = res.locals.tenantId as string
     const parsed = createSchema.safeParse(req.body)
     if (!parsed.success) {
+      const reasonIssue = parsed.error.issues.find((issue) => issue.message === "override_reason_required")
+      if (reasonIssue) {
+        const index = reasonIssue.path.find((part) => typeof part === "number")
+        const installmentNo = typeof index === "number" ? req.body?.billings?.[index]?.installmentNo : undefined
+        res.status(400).json({ error: "override_reason_required", installmentNo })
+        return
+      }
       res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
       return
     }
@@ -761,18 +797,16 @@ projectsRouter.post(
           res.status(201).json(inserted)
           return true
         } catch (error) {
-          await supabaseAdmin
-            .from("project_billings")
-            .delete()
-            .eq("tenant_id", tenantId)
-            .eq("project_id", inserted.id)
-          const { error: cleanupError } = await supabaseAdmin
-            .from("projects")
-            .delete()
-            .eq("tenant_id", tenantId)
-            .eq("id", inserted.id)
-          if (cleanupError) {
-            next(new Error(`project creation compensation failed: ${cleanupError.message}`))
+          const cleanup = await cleanupFailedProjectCreation(tenantId, inserted.id)
+          if (!cleanup.ok) {
+            console.error("project creation compensation failed", {
+              tenantId,
+              projectId: inserted.id,
+              stage: cleanup.stage,
+              message: cleanup.message,
+              cause: error instanceof Error ? error.message : String(error),
+            })
+            res.status(500).json({ error: "project_application_cleanup_failed", stage: cleanup.stage })
             return false
           }
           res.status(500).json({ error: "project_application_create_failed" })

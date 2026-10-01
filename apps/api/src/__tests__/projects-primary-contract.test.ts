@@ -8,6 +8,7 @@ const h = vi.hoisted(() => {
   const projectId = "22222222-2222-4222-8222-222222222222"
   const db: Record<string, Row[]> = {}
   let failPrimaryContractInsert = false
+  let failBillingDelete = false
   let idSeq = 0
 
   function fakeFrom(table: string) {
@@ -40,6 +41,9 @@ const h = vi.hoisted(() => {
         return { data: single ? rows[0] ?? null : rows, error: null }
       }
       if (action === "delete") {
+        if (table === "project_billings" && failBillingDelete) {
+          return { data: null, error: { message: "billing cleanup failed", code: "XX000" } }
+        }
         const doomed = new Set(filtered())
         db[table] = (db[table] ?? []).filter((row) => !doomed.has(row))
         return { data: null, error: null }
@@ -72,6 +76,9 @@ const h = vi.hoisted(() => {
     setFailPrimaryContractInsert(value: boolean) {
       failPrimaryContractInsert = value
     },
+    setFailBillingDelete(value: boolean) {
+      failBillingDelete = value
+    },
   }
 })
 
@@ -100,6 +107,7 @@ function auth(path: string, user = "finance-user") {
 
 beforeEach(() => {
   h.setFailPrimaryContractInsert(false)
+  h.setFailBillingDelete(false)
   h.db.tenants = [{ id: h.tenantId, timezone: "Asia/Taipei" }]
   h.db.employees = [
     { id: "aaaaaaaa-0000-4000-8000-000000000001", tenant_id: h.tenantId, user_id: "finance-user", role: "accountant", dept_id: null },
@@ -231,17 +239,46 @@ describe("POST /projects primary contract", () => {
     expect(h.db.projects).toHaveLength(0)
   })
 
-  it("compensates only the just-created project when primary-contract creation fails", async () => {
+  it("removes created billings and only the just-created project when primary-contract creation fails", async () => {
     h.db.projects = [{ id: "99999999-9999-4999-8999-999999999999", tenant_id: h.tenantId, name: "既有專案" }]
     h.db.contracts = []
+    h.db.project_billings = []
     h.setFailPrimaryContractInsert(true)
     const response = await request(app)
       .post("/projects")
       .set("Authorization", "Bearer finance-user")
-      .send({ name: "會回滾的新專案", code: "ROLLBACK-1", contractAmount: 123_000 })
+      .send({
+        name: "會回滾的新專案",
+        code: "ROLLBACK-1",
+        contractAmount: 123_000,
+        billings: [{ installmentNo: 1, percentage: 100 }],
+      })
     expect(response.status).toBe(500)
     expect(response.body.error).toBe("project_application_create_failed")
     expect(h.db.projects.map((project) => project.id)).toEqual(["99999999-9999-4999-8999-999999999999"])
+    expect(h.db.project_billings).toHaveLength(0)
+  })
+
+  it("reports cleanup failure and retains the project when billing cleanup fails", async () => {
+    h.db.projects = []
+    h.db.contracts = []
+    h.db.project_billings = []
+    h.setFailPrimaryContractInsert(true)
+    h.setFailBillingDelete(true)
+    const response = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer finance-user")
+      .send({
+        name: "清理失敗專案",
+        code: "CLEANUP-FAIL",
+        contractAmount: 123_000,
+        billings: [{ installmentNo: 1, percentage: 100 }],
+      })
+    expect(response.status).toBe(500)
+    expect(response.body.error).toBe("project_application_cleanup_failed")
+    expect(response.body.stage).toBe("billings")
+    expect(h.db.projects).toHaveLength(1)
+    expect(h.db.project_billings).toHaveLength(1)
   })
 
   it("creates the requested billing schedule and recalculates it from the new primary amount", async () => {
@@ -268,6 +305,7 @@ describe("POST /projects primary contract", () => {
 
   it.each([
     [[{ installmentNo: 1, percentage: 101 }], "invalid_body"],
+    [[{ installmentNo: 1, overrideAmount: 10, overrideReason: "   " }], "override_reason_required"],
     [[{ installmentNo: 1, percentage: 50 }, { installmentNo: 1, percentage: 50 }], "duplicate_installment_no"],
     [[{ installmentNo: 1, kind: "guild_advance" }, { installmentNo: 2, kind: "guild_advance" }], "multiple_guild_advances"],
   ])("rejects invalid creation billings %o", async (billings, error) => {
