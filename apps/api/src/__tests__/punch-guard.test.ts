@@ -12,18 +12,18 @@ const NOW = new Date("2026-09-17T09:00:00.000Z")
 const secondsAgo = (s: number) => ({ punch_at: new Date(NOW.getTime() - s * 1000).toISOString() })
 
 describe("cooldownSeconds — PUNCH_COOLDOWN_SECONDS parsing", () => {
-  it("unset → default 60", () => {
-    expect(cooldownSeconds({})).toBe(60)
-    expect(DEFAULT_PUNCH_COOLDOWN_SECONDS).toBe(60)
+  it("unset → default 1", () => {
+    expect(cooldownSeconds({})).toBe(1)
+    expect(DEFAULT_PUNCH_COOLDOWN_SECONDS).toBe(1)
   })
 
-  it("blank / non-numeric / non-finite → default 60", () => {
-    expect(cooldownSeconds({ PUNCH_COOLDOWN_SECONDS: "" })).toBe(60)
-    expect(cooldownSeconds({ PUNCH_COOLDOWN_SECONDS: "   " })).toBe(60)
-    expect(cooldownSeconds({ PUNCH_COOLDOWN_SECONDS: "abc" })).toBe(60)
-    expect(cooldownSeconds({ PUNCH_COOLDOWN_SECONDS: "60s" })).toBe(60)
-    expect(cooldownSeconds({ PUNCH_COOLDOWN_SECONDS: "Infinity" })).toBe(60)
-    expect(cooldownSeconds({ PUNCH_COOLDOWN_SECONDS: "NaN" })).toBe(60)
+  it("blank / non-numeric / non-finite → default 1", () => {
+    expect(cooldownSeconds({ PUNCH_COOLDOWN_SECONDS: "" })).toBe(1)
+    expect(cooldownSeconds({ PUNCH_COOLDOWN_SECONDS: "   " })).toBe(1)
+    expect(cooldownSeconds({ PUNCH_COOLDOWN_SECONDS: "abc" })).toBe(1)
+    expect(cooldownSeconds({ PUNCH_COOLDOWN_SECONDS: "60s" })).toBe(1)
+    expect(cooldownSeconds({ PUNCH_COOLDOWN_SECONDS: "Infinity" })).toBe(1)
+    expect(cooldownSeconds({ PUNCH_COOLDOWN_SECONDS: "NaN" })).toBe(1)
   })
 
   it("negative → 0 (disabled)", () => {
@@ -67,6 +67,11 @@ describe("checkPunchCooldown — block only while 0 ≤ now − last < seconds",
 
   it("elapsed exactly equal to the window → ok (half-open interval)", () => {
     expect(checkPunchCooldown(secondsAgo(60), NOW, 60)).toEqual({ ok: true })
+  })
+
+  it("default one-second boundary blocks 0.999s and accepts 1.000s", () => {
+    expect(checkPunchCooldown(secondsAgo(0.999), NOW, 1)).toEqual({ ok: false, retryAfterSeconds: 1 })
+    expect(checkPunchCooldown(secondsAgo(1), NOW, 1)).toEqual({ ok: true })
   })
 
   it("window already passed → ok", () => {

@@ -92,7 +92,7 @@ function isHrRole(role: string | undefined): boolean {
  *
  * Cooldown（連按防呆）: before inferring or writing anything we load the
  * employee's most recent punch (any type, any day). If it is younger than
- * `PUNCH_COOLDOWN_SECONDS` (default 60; see services/punch-guard.ts) the
+ * `PUNCH_COOLDOWN_SECONDS` (default 1; see services/punch-guard.ts) the
  * request is refused with
  *   409 { error: "punch_too_soon", retryAfterSeconds, last: { id, type, punchAt } }
  * so a double tap on the front page yields exactly one row. HR back-fills

@@ -13,15 +13,15 @@
  *     must not make `GET /punch/today` report "off" while someone is on a
  *     break — the front page would otherwise offer "上班打卡" mid-shift.
  *
- * `PUNCH_COOLDOWN_SECONDS` tunes the window (default 60); the API test setup
+ * `PUNCH_COOLDOWN_SECONDS` tunes the window (default 1); the API test setup
  * pins it to 0 so live suites can punch in → out back-to-back.
  */
 
-export const DEFAULT_PUNCH_COOLDOWN_SECONDS = 60
+export const DEFAULT_PUNCH_COOLDOWN_SECONDS = 1
 
 /**
  * Cooldown window in seconds from `PUNCH_COOLDOWN_SECONDS`.
- * Unset / blank / not a finite number → 60. Negative → 0 (disabled).
+ * Unset / blank / not a finite number → 1. Negative → 0 (disabled).
  */
 export function cooldownSeconds(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.PUNCH_COOLDOWN_SECONDS
