@@ -74,7 +74,7 @@ export interface PunchResult {
 }
 
 /**
- * POST /punch 冷卻期內重複打卡 → `409 punch_too_soon`（伺服器端防呆，預設 60 秒）。
+ * POST /punch 冷卻期內重複打卡 → `409 punch_too_soon`（伺服器端防呆，預設 1 秒）。
  * apiFetch 會把 status 與 error code 收進 Error（`[409] punch_too_soon`），這裡判斷用。
  */
 export function isPunchTooSoon(err: unknown): boolean {
