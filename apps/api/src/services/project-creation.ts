@@ -1,7 +1,7 @@
 import { supabaseAdmin } from "../lib/supabase.js"
 import type { NewBillingInput } from "./billing-store.js"
 import type { MainContractInput } from "./main-contract.js"
-import { computeSchedule } from "./project-money.js"
+import { computeSchedule, DEFAULT_WITHHOLDING_RATE, DEFAULT_WITHHOLDING_THRESHOLD } from "./project-money.js"
 import { computeStampDuty, DEFAULT_STAMP_DUTY_RATE } from "./stamp-duty.js"
 
 export class AtomicProjectCreationError extends Error {
@@ -10,12 +10,29 @@ export class AtomicProjectCreationError extends Error {
   }
 }
 
+export type InitialSubcontractInput = {
+  kind?: "subcontract" | "technician"
+  discipline?: string | null
+  vendorId?: string | null
+  vendorName?: string | null
+  contact?: string | null
+  item?: string | null
+  amount: number
+  billingBasis?: string | null
+  orderType?: "quotation" | "contract" | null
+  withholdingRate?: number | null
+  withholdingThreshold?: number | null
+  sortOrder?: number
+  note?: string | null
+}
+
 export async function createProjectApplicationAtomic(
   tenantId: string,
   createdByEmpId: string,
   project: Record<string, unknown>,
   primary: MainContractInput | null,
   billings: NewBillingInput[],
+  subcontracts: InitialSubcontractInput[] = [],
 ): Promise<{ id: string; code: string | null }> {
   let primaryRow: Record<string, unknown> | null = null
   if (primary) {
@@ -64,6 +81,21 @@ export async function createProjectApplicationAtomic(
     override_reason: item.overrideReason ?? null,
     note: item.note ?? null,
   }))
+  const subcontractRows = subcontracts.map((item, index) => ({
+    kind: item.kind ?? "subcontract",
+    discipline: item.discipline ?? null,
+    vendor_id: item.vendorId ?? null,
+    vendor_name: item.vendorName ?? null,
+    contact: item.contact ?? null,
+    item: item.item ?? null,
+    amount: item.amount,
+    billing_basis: item.billingBasis ?? null,
+    order_type: item.orderType ?? null,
+    withholding_rate: item.withholdingRate ?? DEFAULT_WITHHOLDING_RATE,
+    withholding_threshold: item.withholdingThreshold ?? DEFAULT_WITHHOLDING_THRESHOLD,
+    sort_order: item.sortOrder ?? index,
+    note: item.note ?? null,
+  }))
 
   const { data, error } = await supabaseAdmin.rpc("create_project_application_atomic", {
     p_tenant_id: tenantId,
@@ -71,6 +103,7 @@ export async function createProjectApplicationAtomic(
     p_project: project,
     p_primary_contract: primaryRow,
     p_billings: billingRows,
+    p_subcontracts: subcontractRows,
   })
   if (error) throw new AtomicProjectCreationError(error.message, error.code)
   if (!data?.id) throw new AtomicProjectCreationError("atomic project creation returned no id")

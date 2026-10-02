@@ -386,6 +386,13 @@
       "when": 1790856661000,
       "tag": "0054_project_application_atomic",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1790899185000,
+      "tag": "0055_project_application_subcontracts",
+      "breakpoints": true
     }
   ]
 }

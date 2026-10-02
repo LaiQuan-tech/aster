@@ -31,6 +31,10 @@ import {
   PROJECT_KINDS,
   INVOICE_TYPES,
   PAYMENT_METHODS,
+  BILLING_KINDS,
+  SUBCONTRACT_KINDS,
+  DEFAULT_WITHHOLDING_RATE,
+  DEFAULT_WITHHOLDING_THRESHOLD,
   DEFAULT_VAT_RATE,
   computeSchedule,
   rocDate,
@@ -52,7 +56,6 @@ import {
 import type { MainContractInput } from "../services/main-contract.js"
 import type { NewBillingInput } from "../services/billing-store.js"
 import { AtomicProjectCreationError, createProjectApplicationAtomic } from "../services/project-creation.js"
-import { BILLING_KINDS } from "../services/project-money.js"
 
 export const projectsRouter = Router()
 
@@ -141,6 +144,22 @@ const initialBillingSchema = z.object({
   }
 })
 
+const initialSubcontractSchema = z.object({
+  kind: z.enum(SUBCONTRACT_KINDS).optional(),
+  discipline: z.string().trim().max(40).nullish(),
+  vendorId: z.string().uuid().nullish(),
+  vendorName: z.string().trim().max(120).nullish(),
+  contact: z.string().trim().max(120).nullish(),
+  item: z.string().trim().max(200).nullish(),
+  amount: z.number().finite().nonnegative().max(1e12),
+  billingBasis: z.string().trim().max(200).nullish(),
+  orderType: z.enum(["quotation", "contract"]).nullish(),
+  withholdingRate: z.number().min(0).max(1).nullish(),
+  withholdingThreshold: z.number().int().min(0).max(1e9).nullish(),
+  sortOrder: z.number().int().min(0).max(9999).optional(),
+  note: z.string().trim().max(2000).nullish(),
+})
+
 const createSchema = z.object({
   name: z.string().trim().min(1).max(200),
   /**
@@ -162,6 +181,7 @@ const createSchema = z.object({
   contractAmount: z.number().finite().nonnegative().max(1e15).optional(),
   primaryContract: primaryContractSchema.nullish(),
   billings: z.array(initialBillingSchema).max(100).optional(),
+  initialSubcontracts: z.array(initialSubcontractSchema).max(100).optional(),
   ...applicationFields,
 }).superRefine((body, ctx) => {
   if (body.contractAmount !== undefined && body.primaryContract != null) {
@@ -688,6 +708,7 @@ projectsRouter.post(
     const primaryContract: MainContractInput | null =
       b.primaryContract ?? (b.contractAmount !== undefined ? { amount: b.contractAmount } : null)
     const billings: NewBillingInput[] = b.billings ?? []
+    const initialSubcontracts = b.initialSubcontracts ?? []
     const seenInstallments = new Set<number>()
     let guildAdvances = 0
     for (const billing of billings) {
@@ -723,6 +744,23 @@ projectsRouter.post(
       return
     }
     try {
+      const vendorIds = [...new Set(initialSubcontracts.map((item) => item.vendorId).filter((id): id is string => !!id))]
+      if (vendorIds.length > 0) {
+        const { data: vendors, error: vendorError } = await supabaseAdmin
+          .from("vendors")
+          .select("id")
+          .eq("tenant_id", tenantId)
+          .in("id", vendorIds)
+          .is("deleted_at", null)
+        if (vendorError) throw new Error(`POST /projects vendor validation: ${vendorError.message}`)
+        const validVendorIds = new Set((vendors ?? []).map((vendor) => vendor.id as string))
+        const invalidVendorId = vendorIds.find((id) => !validVendorIds.has(id))
+        if (invalidVendorId) {
+          res.status(400).json({ error: "invalid_vendor", vendorId: invalidVendorId })
+          return
+        }
+      }
+
       // 編號的年度一律取**建立年**（見 services/project-code.ts 的說明），
       // 而且是**台北當地**的年——12/31 深夜立的案不該拿到新年度的號。
       const year = await taipeiYear(tenantId)
@@ -788,6 +826,13 @@ projectsRouter.post(
         { ...baseRow, code },
         primaryContract,
         billings,
+        initialSubcontracts.map((item, index) => ({
+          ...item,
+          kind: item.kind ?? "subcontract",
+          withholdingRate: item.withholdingRate ?? DEFAULT_WITHHOLDING_RATE,
+          withholdingThreshold: item.withholdingThreshold ?? DEFAULT_WITHHOLDING_THRESHOLD,
+          sortOrder: item.sortOrder ?? index,
+        })),
       )
 
       // 人工指定編號：只試一次。撞號回 409——人工指定代表那個號有意義，

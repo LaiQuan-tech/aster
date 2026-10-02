@@ -30,4 +30,18 @@ describe("primary contract Drizzle migration registration", () => {
     expect(migration).toContain("REVOKE ALL")
     expect(migration).toContain("p_tenant_id")
   })
+
+  it("extends atomic project creation with tenant-validated initial subcontracts", () => {
+    const root = resolve(import.meta.dirname, "..")
+    const journal = JSON.parse(readFileSync(resolve(root, "migrations/meta/_journal.json"), "utf8")) as {
+      entries: Array<{ idx: number; tag: string }>
+    }
+    expect(journal.entries).toContainEqual(expect.objectContaining({ idx: 55, tag: "0055_project_application_subcontracts" }))
+
+    const migration = readFileSync(resolve(root, "migrations/0055_project_application_subcontracts.sql"), "utf8")
+    expect(migration).toContain("p_subcontracts jsonb")
+    expect(migration).toContain("INSERT INTO project_subcontracts")
+    expect(migration).toContain("vendors")
+    expect(migration).toContain("SECURITY INVOKER")
+  })
 })

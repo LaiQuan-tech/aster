@@ -229,6 +229,23 @@ export interface CreateProjectExtBody {
   contractAmount?: number
   primaryContract?: MainContractInput | null
   billings?: InstallmentInputExt[]
+  initialSubcontracts?: InitialSubcontractInput[]
+}
+
+export type InitialSubcontractInput = {
+  kind?: SubcontractKind
+  discipline?: string | null
+  vendorId?: string | null
+  vendorName?: string | null
+  contact?: string | null
+  item?: string | null
+  amount: number
+  billingBasis?: string | null
+  orderType?: OrderType | null
+  withholdingRate?: number | null
+  withholdingThreshold?: number | null
+  sortOrder?: number
+  note?: string | null
 }
 
 export interface MainContractInput {

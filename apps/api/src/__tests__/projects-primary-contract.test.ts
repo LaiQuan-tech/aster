@@ -10,6 +10,7 @@ const h = vi.hoisted(() => {
   const operations: string[] = []
   let failPrimaryContractInsert = false
   let failBillingInsert = false
+  let failSubcontractInsert = false
   let idSeq = 0
 
   function fakeFrom(table: string) {
@@ -79,6 +80,9 @@ const h = vi.hoisted(() => {
     if (name !== "create_project_application_atomic") return { data: null, error: { message: "unknown rpc" } }
     if (failPrimaryContractInsert) return { data: null, error: { message: "contract insert failed", code: "XX000" } }
     if (failBillingInsert) return { data: null, error: { message: "billing insert failed", code: "XX000" } }
+    if (failSubcontractInsert && (args.p_subcontracts?.length ?? 0) > 0) {
+      return { data: null, error: { message: "subcontract insert failed", code: "XX000" } }
+    }
 
     const project = { id: projectId, created_at: "2026-10-01T00:00:00.000Z", ...args.p_project }
     const contract = args.p_primary_contract
@@ -100,6 +104,15 @@ const h = vi.hoisted(() => {
       tenant_id: args.p_tenant_id,
       project_id: projectId,
     }))
+    const subcontractRows = (args.p_subcontracts ?? []).map((subcontract: Row) => ({
+      id: `00000000-0000-4000-8000-${String(++idSeq).padStart(12, "0")}`,
+      created_at: "2026-10-01T00:00:00.000Z",
+      updated_at: "2026-10-01T00:00:00.000Z",
+      deleted_at: null,
+      ...subcontract,
+      tenant_id: args.p_tenant_id,
+      project_id: projectId,
+    }))
     db.projects ??= []
     db.projects.push(project)
     if (contract) {
@@ -108,6 +121,8 @@ const h = vi.hoisted(() => {
     }
     db.project_billings ??= []
     db.project_billings.push(...billingRows)
+    db.project_subcontracts ??= []
+    db.project_subcontracts.push(...subcontractRows)
     return { data: { id: projectId, code: project.code }, error: null }
   }
 
@@ -123,6 +138,9 @@ const h = vi.hoisted(() => {
     },
     setFailBillingInsert(value: boolean) {
       failBillingInsert = value
+    },
+    setFailSubcontractInsert(value: boolean) {
+      failSubcontractInsert = value
     },
   }
 })
@@ -141,6 +159,7 @@ vi.mock("../lib/schema-compat.js", () => ({ columnsExist: async () => false }))
 
 import { projectsRouter } from "../routes/projects.js"
 import { contractsRouter } from "../routes/contracts.js"
+import { loadSubcontracts } from "../services/project-application-store.js"
 
 const app = express()
 app.use(express.json())
@@ -156,6 +175,7 @@ function auth(path: string, user = "finance-user") {
 beforeEach(() => {
   h.setFailPrimaryContractInsert(false)
   h.setFailBillingInsert(false)
+  h.setFailSubcontractInsert(false)
   h.operations.length = 0
   h.db.tenants = [{ id: h.tenantId, timezone: "Asia/Taipei" }]
   h.db.employees = [
@@ -189,6 +209,13 @@ beforeEach(() => {
     is_primary: true,
   }]
   h.db.project_billings = []
+  h.db.project_subcontracts = []
+  h.db.vendors = [{
+    id: "44444444-4444-4444-8444-444444444444",
+    tenant_id: h.tenantId,
+    name: "合格廠商",
+    deleted_at: null,
+  }]
 })
 
 describe("primary contract authorization", () => {
@@ -372,6 +399,78 @@ describe("POST /projects primary contract", () => {
     expect(response.status).toBe(201)
     expect(h.db.project_billings).toHaveLength(3)
     expect(h.db.project_billings.map((row) => row.calculated_amount)).toEqual([300_000, 700_000, 100_000])
+  })
+
+  it("atomically creates initial subcontracts that the application and annual stores can read", async () => {
+    h.db.projects = []
+    h.db.contracts = []
+    h.db.project_subcontracts = []
+    const response = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer finance-user")
+      .send({
+        name: "含副委託專案",
+        code: "WITH-SUBCONTRACTS",
+        contractAmount: 1_000_000,
+        initialSubcontracts: [
+          { discipline: "機電", vendorId: h.db.vendors[0].id, amount: 300_000, item: "機電設計" },
+          { kind: "technician", discipline: "消防", vendorName: "未建檔技師", amount: 80_000 },
+        ],
+      })
+    expect(response.status).toBe(201)
+    const stored = await loadSubcontracts(h.tenantId, response.body.id)
+    expect(stored).toHaveLength(2)
+    expect(stored[0]).toMatchObject({ discipline: "機電", vendor_id: h.db.vendors[0].id, amount: 300_000 })
+    expect(stored[1]).toMatchObject({ kind: "technician", vendor_name: "未建檔技師", amount: 80_000 })
+  })
+
+  it("rejects invalid-tenant vendors before invoking the atomic RPC", async () => {
+    h.db.projects = []
+    const response = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer finance-user")
+      .send({
+        name: "錯誤廠商專案",
+        code: "BAD-VENDOR",
+        initialSubcontracts: [{ vendorId: "55555555-5555-4555-8555-555555555555", amount: 10_000 }],
+      })
+    expect(response.status).toBe(400)
+    expect(response.body.error).toBe("invalid_vendor")
+    expect(h.operations.filter((operation) => operation.startsWith("rpc:"))).toEqual([])
+  })
+
+  it("rolls back project, contract, billings, and subcontracts when subcontract insertion fails", async () => {
+    h.db.projects = []
+    h.db.contracts = []
+    h.db.project_billings = []
+    h.db.project_subcontracts = []
+    h.setFailSubcontractInsert(true)
+    const response = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer finance-user")
+      .send({
+        name: "副委託失敗專案",
+        code: "SUB-ROLLBACK",
+        contractAmount: 100_000,
+        billings: [{ installmentNo: 1, percentage: 100 }],
+        initialSubcontracts: [{ amount: 40_000 }],
+      })
+    expect(response.status).toBe(500)
+    expect(response.body.error).toBe("project_application_create_failed")
+    expect(h.db.projects).toHaveLength(0)
+    expect(h.db.contracts).toHaveLength(0)
+    expect(h.db.project_billings).toHaveLength(0)
+    expect(h.db.project_subcontracts).toHaveLength(0)
+    expect(h.operations.filter((operation) => operation.startsWith("delete:"))).toEqual([])
+  })
+
+  it("rejects non-finance creation with initial subcontracts", async () => {
+    const response = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer staff-user")
+      .send({ name: "無權限專案", code: "NO-FINANCE", initialSubcontracts: [{ amount: 10_000 }] })
+    expect(response.status).toBe(403)
+    expect(h.operations.filter((operation) => operation.startsWith("rpc:"))).toEqual([])
   })
 
   it.each([
