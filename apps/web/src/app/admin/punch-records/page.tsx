@@ -71,7 +71,8 @@ export default function PunchRecordsPage() {
   const [mEmp, setMEmp] = useState("");
   const [mAt, setMAt] = useState("");
   const [mType, setMType] = useState<PunchRecord["type"]>("in");
-  const [mMsg, setMMsg] = useState<string | null>(null);
+  // 補登結果：成功是綠字；失敗（含送出前的欄位檢查）走 ErrorText（紅字、role="alert"），不能共用綠字。
+  const [mMsg, setMMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -134,16 +135,16 @@ export default function PunchRecordsPage() {
     e.preventDefault();
     setMMsg(null);
     if (!mEmp || !mAt) {
-      setMMsg("請選擇員工與時間");
+      setMMsg({ ok: false, text: "請選擇員工與時間" });
       return;
     }
     try {
       await createManualPunch({ employeeId: mEmp, punchAt: new Date(mAt).toISOString(), type: mType });
-      setMMsg("補登完成");
+      setMMsg({ ok: true, text: "補登完成" });
       setMAt("");
       await load();
     } catch (err) {
-      setMMsg(err instanceof Error ? err.message : "補登失敗");
+      setMMsg({ ok: false, text: err instanceof Error ? err.message : "補登失敗" });
     }
   }
 
@@ -207,7 +208,12 @@ export default function PunchRecordsPage() {
               <PrimaryButton type="submit">補登</PrimaryButton>
             </div>
           </div>
-          {mMsg && <p className="text-sm text-green-600">{mMsg}</p>}
+          {mMsg &&
+            (mMsg.ok ? (
+              <p role="status" className="text-sm text-green-600">{mMsg.text}</p>
+            ) : (
+              <ErrorText>{mMsg.text}</ErrorText>
+            ))}
         </form>
       </CollapsibleCard>
 
