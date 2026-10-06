@@ -59,6 +59,8 @@ import {
 } from "@/lib/people-extras-api";
 import { isBulkInviteResult } from "@/lib/import-view";
 import { EMPLOYMENT_TYPES as EMPLOYMENT_TYPE_VALUES, EMPLOYMENT_TYPE_LABELS } from "@/lib/ess-tabs";
+import { getMeCached, peekMeCached } from "@/lib/ess-state";
+import { isHrRole } from "@/lib/roles";
 import { useSession } from "@/lib/use-session";
 
 const ROLES: { value: string; label: string }[] = [
@@ -320,6 +322,25 @@ export default function EmployeesPage() {
   // 登入者的 auth user id：拿來算 isSelf 給 employeeActionsFor（目前沒有「不能停用自己」的規則，只是傳真值）。
   const { session } = useSession();
   const selfUserId = session?.user.id ?? null;
+  // 登入者能不能「管理」員工名冊：建立帳號／改員工資料／重設密碼／停用／批次建立／異動紀錄在 API 都是 requireHrAdmin，
+  // My Data 維護是「本人或 HR」，資料異動核准也只有 HR——會計（可進後台、只能唯讀看名冊，GET /employees 放行 requireFinance）
+  // 按了只會 403，所以這些入口只給 HR／平台管理員（isHrRole，不是 isAdminRole：後者含會計）。
+  // 取不到角色就當不能：API 才是真正的守門，這裡只是不顯示按了必 403 的入口。/me 已由 AuthGate／AdminGate 先抓進快取，
+  // 同步 peek 讓 HR 第一個畫面就有按鈕，不會閃一下才長出來。
+  const [canManage, setCanManage] = useState(() => isHrRole(peekMeCached()?.role));
+  useEffect(() => {
+    let active = true;
+    getMeCached()
+      .then((me) => {
+        if (active) setCanManage(isHrRole(me.role));
+      })
+      .catch(() => {
+        if (active) setCanManage(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
   const [rows, setRows] = useState<EmployeeWithProfile[]>([]);
   const [depts, setDepts] = useState<Department[]>([]);
   const [loading, setLoading] = useState(true);
@@ -821,6 +842,7 @@ export default function EmployeesPage() {
 
   /** 進入列內編輯：把該列現值帶進編輯欄位（原本寫在「編輯」按鈕的 onClick 裡）。 */
   function beginEdit(employee: EmployeeWithProfile) {
+    if (!canManage) return; // 會計沒有編輯入口；保險起見這裡也擋（PATCH 員工與 PUT profile 只給 HR）
     setEditError(null);
     setEditPersonal(personalFormFrom(employee));
     setEditingId(employee.id);
@@ -921,7 +943,8 @@ export default function EmployeesPage() {
     <>
       {message && <p className="rounded-lg bg-green-50 px-4 py-2 text-sm text-green-700">{message}</p>}
 
-      <ProfileChangeQueue onApplied={() => void load()} />
+      {/* 資料異動待審是 HR 的核准佇列（核准／退回只有 HR 能打）；會計只會看到自己的待審單，按了必 403，所以不顯示。 */}
+      {canManage && <ProfileChangeQueue onApplied={() => void load()} />}
 
       {linkResult && (
         <Card>
@@ -965,81 +988,85 @@ export default function EmployeesPage() {
         </Card>
       )}
 
-      <CollapsibleCard
-        title="新增員工帳號"
-        hint="填姓名＋Email 即可：初始密碼留空會寄邀請信讓同仁自設密碼；填了則直接配發（同仁首次登入須改密碼）。"
-      >
-        <form onSubmit={onInvite} className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
-            <div>
-              <label className={labelCls}>Email</label>
-              <input type="email" className={inputCls} value={email} onChange={(event) => setEmail(event.target.value)} />
+      {canManage && (
+        <CollapsibleCard
+          title="新增員工帳號"
+          hint="填姓名＋Email 即可：初始密碼留空會寄邀請信讓同仁自設密碼；填了則直接配發（同仁首次登入須改密碼）。"
+        >
+          <form onSubmit={onInvite} className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
+              <div>
+                <label className={labelCls}>Email</label>
+                <input type="email" className={inputCls} value={email} onChange={(event) => setEmail(event.target.value)} />
+              </div>
+              <div>
+                <label className={labelCls}>姓名</label>
+                <input className={inputCls} value={name} onChange={(event) => setName(event.target.value)} />
+              </div>
+              <div>
+                <label className={labelCls}>工號</label>
+                <input className={inputCls} value={empNo} onChange={(event) => setEmpNo(event.target.value)} />
+              </div>
+              <div>
+                <label className={labelCls}>到職日</label>
+                <input type="date" className={inputCls} value={hireDate} onChange={(event) => setHireDate(event.target.value)} />
+              </div>
+              <div>
+                <label className={labelCls}>初始密碼（選填）</label>
+                <input type="text" className={inputCls} placeholder="留空＝寄邀請信" value={password} onChange={(event) => setPassword(event.target.value)} />
+              </div>
+              <div>
+                <label className={labelCls}>角色</label>
+                <select className={inputCls} value={role} onChange={(event) => setRole(event.target.value)}>
+                  {ROLES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className={labelCls}>單位</label>
+                <select className={inputCls} value={deptId} onChange={(event) => setDeptId(event.target.value)}>
+                  <option value="">不指定</option>
+                  {depts.map((dept) => <option key={dept.id} value={dept.id}>{dept.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className={labelCls}>身分類別</label>
+                <select className={inputCls} value={employmentType} onChange={(event) => setEmploymentType(event.target.value)}>
+                  {EMPLOYMENT_TYPES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                </select>
+              </div>
             </div>
-            <div>
-              <label className={labelCls}>姓名</label>
-              <input className={inputCls} value={name} onChange={(event) => setName(event.target.value)} />
-            </div>
-            <div>
-              <label className={labelCls}>工號</label>
-              <input className={inputCls} value={empNo} onChange={(event) => setEmpNo(event.target.value)} />
-            </div>
-            <div>
-              <label className={labelCls}>到職日</label>
-              <input type="date" className={inputCls} value={hireDate} onChange={(event) => setHireDate(event.target.value)} />
-            </div>
-            <div>
-              <label className={labelCls}>初始密碼（選填）</label>
-              <input type="text" className={inputCls} placeholder="留空＝寄邀請信" value={password} onChange={(event) => setPassword(event.target.value)} />
-            </div>
-            <div>
-              <label className={labelCls}>角色</label>
-              <select className={inputCls} value={role} onChange={(event) => setRole(event.target.value)}>
-                {ROLES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className={labelCls}>單位</label>
-              <select className={inputCls} value={deptId} onChange={(event) => setDeptId(event.target.value)}>
-                <option value="">不指定</option>
-                {depts.map((dept) => <option key={dept.id} value={dept.id}>{dept.name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className={labelCls}>身分類別</label>
-              <select className={inputCls} value={employmentType} onChange={(event) => setEmploymentType(event.target.value)}>
-                {EMPLOYMENT_TYPES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-              </select>
-            </div>
-          </div>
-          {formError && <ErrorText>{formError}</ErrorText>}
-          <PrimaryButton type="submit" disabled={submitting}>{submitting ? "處理中…" : password ? "建立帳號（配發密碼）" : "建立帳號並寄邀請信"}</PrimaryButton>
-        </form>
-      </CollapsibleCard>
+            {formError && <ErrorText>{formError}</ErrorText>}
+            <PrimaryButton type="submit" disabled={submitting}>{submitting ? "處理中…" : password ? "建立帳號（配發密碼）" : "建立帳號並寄邀請信"}</PrimaryButton>
+          </form>
+        </CollapsibleCard>
+      )}
 
       <Card>
         <div className="mb-4 flex items-center justify-between gap-3">
           <h2 className="text-sm font-medium text-gray-500">員工列表</h2>
           {/* 批次建立帳號改成「下載 Excel 範本 → 填完上傳」的面板（原本是一張貼 CSV 的卡片）；
               「只建帳號、不寄信」放在面板的確認步驟，對應 API 的 options.dryRunInvite。 */}
-          <BatchImportButton
-            kind="employees"
-            label="批次建立帳號"
-            description="只有姓名與 Email 必填。工號或姓名對得上「尚未開通帳號」的既有員工會直接綁定，否則新建；同名多人請補工號。"
-            options={{ dryRunInvite: bulkNoEmail || undefined }}
-            onDone={load}
-            extra={
-              <label className="flex cursor-pointer select-none items-center gap-2 text-sm text-gray-600">
-                <input
-                  type="checkbox"
-                  checked={bulkNoEmail}
-                  onChange={(event) => setBulkNoEmail(event.target.checked)}
-                  className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
-                />
-                只建帳號、不寄信（取得連結手動轉交）
-              </label>
-            }
-            renderResult={(res) => (isBulkInviteResult(res.result) ? renderBulkInviteResult(res.result) : null)}
-          />
+          {canManage && (
+            <BatchImportButton
+              kind="employees"
+              label="批次建立帳號"
+              description="只有姓名與 Email 必填。工號或姓名對得上「尚未開通帳號」的既有員工會直接綁定，否則新建；同名多人請補工號。"
+              options={{ dryRunInvite: bulkNoEmail || undefined }}
+              onDone={load}
+              extra={
+                <label className="flex cursor-pointer select-none items-center gap-2 text-sm text-gray-600">
+                  <input
+                    type="checkbox"
+                    checked={bulkNoEmail}
+                    onChange={(event) => setBulkNoEmail(event.target.checked)}
+                    className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
+                  />
+                  只建帳號、不寄信（取得連結手動轉交）
+                </label>
+              }
+              renderResult={(res) => (isBulkInviteResult(res.result) ? renderBulkInviteResult(res.result) : null)}
+            />
+          )}
         </div>
         {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
         {loading ? (
@@ -1062,7 +1089,7 @@ export default function EmployeesPage() {
                   <th className={`${STICKY_TH} min-w-[13rem] py-2 pr-4`}>戶籍地</th>
                   <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-4`}>匯款帳號</th>
                   <th className={`${STICKY_TH} min-w-[8rem] py-2 pr-4`}>角色/狀態</th>
-                  <th className={`${PIN_RIGHT_TH} py-2 pl-3 text-right`}>操作</th>
+                  {canManage && <th className={`${PIN_RIGHT_TH} py-2 pl-3 text-right`}>操作</th>}
                 </tr>
               </thead>
               <tbody>
@@ -1181,32 +1208,34 @@ export default function EmployeesPage() {
                           {employee.status !== "active" && <span className="ml-2 rounded-full bg-red-100 px-2 py-1 text-xs text-red-600">{employee.status}</span>}
                           {!employee.user_id && <span className="ml-2 rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-700">未開通帳號</span>}
                         </td>
-                        <td className={`${PIN_RIGHT_TD} whitespace-nowrap py-2 pl-3 text-right`}>
-                          {/* 只留「編輯」＋「⋯」；其餘動作收進選單，顯示／disabled 規則在 lib/employee-actions.ts */}
-                          <div className="flex items-center justify-end gap-1">
-                            <button
-                              type="button"
-                              onClick={() => beginEdit(employee)}
-                              className="rounded-md px-2 py-1.5 text-sm text-gray-600 hover:bg-gray-100 hover:text-gray-800"
-                            >
-                              編輯
-                            </button>
-                            <ActionMenu
-                              label={`${employee.name} 的更多操作`}
-                              items={employeeActionsFor(employee, {
-                                isSelf: selfUserId !== null && employee.user_id === selfUserId,
-                                busy: busyId === employee.id,
-                              }).map((spec) => ({
-                                key: spec.key,
-                                label: spec.label,
-                                tone: spec.tone,
-                                disabled: spec.disabled,
-                                title: spec.title,
-                                onSelect: () => runAction(spec.key, employee),
-                              }))}
-                            />
-                          </div>
-                        </td>
+                        {canManage && (
+                          <td className={`${PIN_RIGHT_TD} whitespace-nowrap py-2 pl-3 text-right`}>
+                            {/* 只留「編輯」＋「⋯」；其餘動作收進選單，顯示／disabled 規則在 lib/employee-actions.ts */}
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                type="button"
+                                onClick={() => beginEdit(employee)}
+                                className="rounded-md px-2 py-1.5 text-sm text-gray-600 hover:bg-gray-100 hover:text-gray-800"
+                              >
+                                編輯
+                              </button>
+                              <ActionMenu
+                                label={`${employee.name} 的更多操作`}
+                                items={employeeActionsFor(employee, {
+                                  isSelf: selfUserId !== null && employee.user_id === selfUserId,
+                                  busy: busyId === employee.id,
+                                }).map((spec) => ({
+                                  key: spec.key,
+                                  label: spec.label,
+                                  tone: spec.tone,
+                                  disabled: spec.disabled,
+                                  title: spec.title,
+                                  onSelect: () => runAction(spec.key, employee),
+                                }))}
+                              />
+                            </div>
+                          </td>
+                        )}
                       </>
                     )}
                   </tr>
