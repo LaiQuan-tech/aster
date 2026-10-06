@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { ClientCombo } from "@/components/ClientCombo";
 import { VendorCombo } from "@/components/VendorCombo";
 import { ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
@@ -32,41 +32,13 @@ import {
   type ProjectApplicationDraft,
 } from "./project-application-form";
 
-/**
- * 申請單的區塊：預設收起，點標題列展開、再點一下收起（業主 2026-10-07 指示「需要時才點開」）。
- * 收起只是 hidden，不卸載內容——已填的值在 draft，但 ClientCombo／VendorCombo 等元件自己的
- * 搜尋狀態也要保留。`openSignal` 每次遞增就強制展開（送出檢查沒過時，讓錯誤欄位看得到）。
- */
-function Section({ title, children, openSignal = 0 }: { title: string; children: ReactNode; openSignal?: number }) {
-  const [open, setOpen] = useState(false);
-  const contentId = useId();
-  useEffect(() => {
-    if (openSignal > 0) setOpen(true);
-  }, [openSignal]);
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="border border-slate-300">
-      <h3 className="m-0">
-        <button
-          type="button"
-          onClick={() => setOpen((current) => !current)}
-          aria-expanded={open}
-          aria-controls={contentId}
-          className={`relative flex w-full items-center justify-center bg-cyan-50 px-10 py-2 text-base font-bold tracking-[0.18em] text-slate-800 hover:bg-cyan-100 ${open ? "border-b border-slate-300" : ""}`}
-        >
-          <span>{title}</span>
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 20 20"
-            fill="currentColor"
-            className={`absolute right-4 h-5 w-5 text-slate-500 transition-transform ${open ? "rotate-180" : ""}`}
-          >
-            <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
-          </svg>
-        </button>
+      <h3 className="border-b border-slate-300 bg-cyan-50 px-4 py-2 text-center text-base font-bold tracking-[0.18em] text-slate-800">
+        {title}
       </h3>
-      <div id={contentId} hidden={!open} className="p-4">
-        {children}
-      </div>
+      <div className="p-4">{children}</div>
     </section>
   );
 }
@@ -110,8 +82,6 @@ export function ProjectApplicationForm({
     emptyProjectApplicationDraft(new Date().toLocaleDateString("sv-SE"), disciplines),
   );
   const [formErrors, setFormErrors] = useState<string[]>([]);
-  // 送出檢查沒過時遞增，所有收起的區塊會自動展開，錯誤欄位才看得到。
-  const [openSignal, setOpenSignal] = useState(0);
   const [showNewClient, setShowNewClient] = useState(false);
   const [newClientName, setNewClientName] = useState("");
   const [newClientTaxId, setNewClientTaxId] = useState("");
@@ -141,10 +111,7 @@ export function ProjectApplicationForm({
     event.preventDefault();
     const errors = projectApplicationErrors(draft);
     setFormErrors(errors);
-    if (errors.length > 0) {
-      setOpenSignal((current) => current + 1);
-      return;
-    }
+    if (errors.length > 0) return;
     await onSubmit(toAuthorizedCreateProjectBody(draft, { canFinance, canBonus }));
   }
 
@@ -197,7 +164,7 @@ export function ProjectApplicationForm({
         </div>
       </div>
 
-      <Section title="專案明細" openSignal={openSignal}>
+      <Section title="專案明細">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div>
             <label className={labelCls}>設計地點</label>
@@ -227,7 +194,7 @@ export function ProjectApplicationForm({
         </div>
       </Section>
 
-      <Section title="客戶與發票資料" openSignal={openSignal}>
+      <Section title="客戶與發票資料">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="sm:col-span-2">
             <label className={labelCls}>客戶名稱</label>
@@ -257,7 +224,7 @@ export function ProjectApplicationForm({
       </Section>
 
       {visibility.showFinanceFields ? (
-        <Section title="銷售金額" openSignal={openSignal}>
+        <Section title="銷售金額">
           <div className="grid grid-cols-1 overflow-hidden border border-slate-300 text-center sm:grid-cols-3">
             <label className="border-b border-slate-300 sm:border-b-0 sm:border-r"><span className="block bg-slate-50 px-3 py-2 font-semibold">合約金額（未稅）</span><input className="w-full border-t border-slate-300 px-3 py-3 text-right" type="number" min="0" value={draft.contractAmount} onChange={(event) => patch("contractAmount", event.target.value)} placeholder="可直接輸入" /></label>
             <div className="border-b border-slate-300 sm:border-b-0 sm:border-r"><span className="block bg-slate-50 px-3 py-2 font-semibold">營業稅（{vatRate * 100}%）</span><p className="px-3 py-3 text-right tabular-nums">{money(amounts.taxAmount)}</p></div>
@@ -267,7 +234,7 @@ export function ProjectApplicationForm({
       ) : null}
 
       {visibility.showFinanceFields ? (
-        <Section title="付款階段" openSignal={openSignal}>
+        <Section title="付款階段">
           <div className="mb-3 flex flex-wrap gap-3 text-sm">
             <span className={`rounded-full px-3 py-1 font-medium ${schedule.percentageTotal > 100 ? "bg-red-50 text-red-700" : "bg-slate-100 text-slate-700"}`}>一般期款比例合計 {schedule.percentageTotal}%</span>
             <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-700">一般期款合計 {money(schedule.effectiveTotal)}</span>
@@ -286,7 +253,7 @@ export function ProjectApplicationForm({
         </Section>
       ) : null}
 
-      <Section title="協力技師／發包單位" openSignal={openSignal}>
+      <Section title="協力技師／發包單位">
         <p className="mb-3 text-sm text-slate-500">此處選擇協力單位並填寫發包金額；建立專案時會同步建立正式發包資料，付款與代扣歷程可在「專案明細」繼續維護。</p>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {disciplines.map((discipline) => {
@@ -296,14 +263,14 @@ export function ProjectApplicationForm({
         </div>
       </Section>
 
-      <Section title="發包與費用摘要" openSignal={openSignal}>
+      <Section title="發包與費用摘要">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="rounded-lg bg-slate-50 p-3 text-sm text-slate-500">上方金額會同步建立各科別的正式發包資料；需要分期付款時，請於建案後在「專案明細」設定付款期程。</div>
           {visibility.showFinanceFields ? <div><label className={labelCls}>其他支出（差旅、規費等）</label><input className={inputCls} type="number" min="0" value={draft.otherExpenses} onChange={(event) => patch("otherExpenses", event.target.value)} /></div> : null}
         </div>
       </Section>
 
-      <Section title="內部專案設定" openSignal={openSignal}>
+      <Section title="內部專案設定">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div><label className={labelCls}>歸屬年度</label><input className={inputCls} type="number" min="1" max="2100" value={draft.fiscalYear} onChange={(event) => patch("fiscalYear", event.target.value)} placeholder="可填西元年或民國年" /></div>
           <div><label className={labelCls}>案件類型</label><select className={inputCls} value={draft.kind} onChange={(event) => patch("kind", event.target.value as ProjectApplicationDraft["kind"])}>{PROJECT_KIND_ORDER.map((kind) => <option key={kind} value={kind}>{PROJECT_KIND_LABELS[kind]}</option>)}</select></div>

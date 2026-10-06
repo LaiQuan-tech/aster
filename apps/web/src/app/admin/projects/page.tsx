@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Card, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, inputCls, labelCls } from "@/components/admin-ui";
 import { getDepartments, getEmployees, getMe, type Department, type Employee } from "@/lib/admin-api";
 import { listVendors, type Vendor } from "@/lib/company-api";
 import {
@@ -47,6 +47,9 @@ const STATUS_BADGE: Record<ProjectStatus, string> = {
 export default function AdminProjectsPage() {
   const router = useRouter();
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
+  // 專案申請單整張可收放（業主 2026-10-07）：預設收起，點標題列展開、再點一下收起。
+  // 收起只是 hidden，不卸載，填到一半的內容會保留。
+  const [formOpen, setFormOpen] = useState(false);
   const [clients, setClients] = useState<Client[]>([]);
   const [depts, setDepts] = useState<Department[]>([]);
   const [emps, setEmps] = useState<Employee[]>([]);
@@ -202,6 +205,29 @@ export default function AdminProjectsPage() {
   return (
     <>
       {canFinance ? <Card>
+        <button
+          type="button"
+          onClick={() => setFormOpen((open) => !open)}
+          aria-expanded={formOpen}
+          aria-controls="project-application-form"
+          className="flex w-full items-center justify-between gap-3 rounded-lg border border-cyan-200 bg-cyan-50 px-4 py-3 text-left hover:bg-cyan-100"
+        >
+          <span className="text-base font-bold tracking-[0.18em] text-slate-800">專案申請單</span>
+          <span className="flex items-center gap-1 text-sm text-slate-600">
+            {formOpen ? "收起" : "新增專案"}
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              className={`h-5 w-5 transition-transform ${formOpen ? "rotate-180" : ""}`}
+            >
+              <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
+            </svg>
+          </span>
+        </button>
+        {/* 錯誤（載入、預先取號、儲存設定）原本只顯示在申請單裡；收起時改顯示在這裡，免得被藏住。 */}
+        {!formOpen && error ? <div className="mt-3"><ErrorText>{error}</ErrorText></div> : null}
+        <div id="project-application-form" hidden={!formOpen} className="mt-4">
         <ProjectApplicationForm
           clients={clients}
           departments={depts}
@@ -217,6 +243,7 @@ export default function AdminProjectsPage() {
           onSubmit={submit}
           onCreateClient={submitNewClient}
         />
+        </div>
         <div className="mt-4 flex flex-wrap items-end gap-3 border-t pt-4">
           <div>
             <label className={labelCls}>預先取號</label>
