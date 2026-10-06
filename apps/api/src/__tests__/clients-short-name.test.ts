@@ -141,3 +141,59 @@ describe("GET /clients?q= — 搜尋也比對簡稱", () => {
     })
   })
 })
+
+describe("GET /clients?q= — 搜尋字串長度上限（超長 q 不會讓查詢字串爆長）", () => {
+  beforeEach(() => {
+    fake.db.clients = [seedClient(CLIENT_A, "甲方建設股份有限公司", "甲方")]
+  })
+
+  /** or() 條件裡每個 ilike 後面的 pattern（五個欄位各一個）。 */
+  const patternsOf = (filter: string) => filter.split(",").map((term) => term.slice(term.indexOf("ilike.") + "ilike.".length))
+  const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
+  // 長度取在 Node 的 header 上限（約 16 KB）以內：中文一字 percent-encode 後約 9 bytes，所以中文只能試到千字等級；
+  // 再長的請求根本進不了 Express（直接 431），這裡要證明的是「進得來的長 q」不會原樣複製進查詢。
+  it.each([
+    ["8000 個英文字", "a".repeat(8000), "a"],
+    ["1000 個中文字", "字".repeat(1000), "字"],
+  ])("%s的 q：被截成 100 字，五個欄位的 ilike 各只帶 100 字，整串查詢字串長度有上界", async (_label, q, ch) => {
+    const res = await authed(request(app).get("/clients")).query({ q })
+
+    expect(res.status).toBe(200)
+    const filter = fake.orFilters.at(-1) ?? ""
+    expect(patternsOf(filter)).toEqual(Array(5).fill(`%${ch.repeat(100)}%`))
+    // 五個欄位名＋運算子（72）＋五個 pattern（各 100 字＋兩個 %）＋四個逗號，與 q 原本多長無關。
+    expect(filter).toHaveLength(72 + 5 * 102 + 4)
+  })
+
+  it("剛好 100 字不動、101 字切成 100 字；前後空白先 trim 不佔額度", async () => {
+    await authed(request(app).get("/clients")).query({ q: "乙".repeat(100) })
+    expect(patternsOf(fake.orFilters.at(-1) ?? "")[0]).toBe(`%${"乙".repeat(100)}%`)
+
+    await authed(request(app).get("/clients")).query({ q: "乙".repeat(101) })
+    expect(patternsOf(fake.orFilters.at(-1) ?? "")[0]).toBe(`%${"乙".repeat(100)}%`)
+
+    await authed(request(app).get("/clients")).query({ q: `   ${"乙".repeat(100)}   ` })
+    expect(patternsOf(fake.orFilters.at(-1) ?? "")[0]).toBe(`%${"乙".repeat(100)}%`)
+  })
+
+  it("先剝除 % _ , ( ) 再算長度：被剝掉的字元不吃額度", async () => {
+    await authed(request(app).get("/clients")).query({ q: `%_,()${"丙".repeat(100)}%_,()` })
+    expect(patternsOf(fake.orFilters.at(-1) ?? "")[0]).toBe(`%${"丙".repeat(100)}%`)
+  })
+
+  it("以字元（code point）截斷，不會把 surrogate pair 切成一半", async () => {
+    const res = await authed(request(app).get("/clients")).query({ q: "😀".repeat(150) })
+
+    expect(res.status).toBe(200)
+    const filter = fake.orFilters.at(-1) ?? ""
+    expect(patternsOf(filter)[0]).toBe(`%${"😀".repeat(100)}%`)
+    expect(LONE_SURROGATE.test(filter)).toBe(false)
+  })
+
+  it("一般長度的搜尋不受影響（仍搜得到、仍比對簡稱）", async () => {
+    const byShort = await authed(request(app).get("/clients")).query({ q: "甲方" })
+    expect((byShort.body.clients as Array<{ id: string }>).map((c) => c.id)).toEqual([CLIENT_A])
+    expect(fake.orFilters.at(-1)).toContain("short_name.ilike.%甲方%")
+  })
+})
