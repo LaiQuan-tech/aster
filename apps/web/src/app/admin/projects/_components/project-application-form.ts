@@ -188,6 +188,17 @@ export function toCreateProjectBody(draft: ProjectApplicationDraft): CreateProje
     ]),
   );
   const contractAmount = optionalNumber(draft.contractAmount);
+  const initialSubcontracts = Object.entries(draft.engineers)
+    .filter(([, engineer]) => (engineer.amount ?? "").trim() !== "")
+    .map(([discipline, engineer], index) => ({
+      kind: "subcontract" as const,
+      discipline,
+      vendorId: engineer.vendorId || null,
+      vendorName: optionalText(engineer.name),
+      item: `${discipline}協力技師／發包`,
+      amount: optionalNumber(engineer.amount ?? "") ?? 0,
+      sortOrder: index,
+    }));
   return {
     name: draft.name.trim(),
     code: optionalText(draft.code),
@@ -199,22 +210,13 @@ export function toCreateProjectBody(draft: ProjectApplicationDraft): CreateProje
     parentProjectId: draft.kind === "main" ? null : draft.parentProjectId || null,
     siteAddress: optionalText(draft.siteAddress),
     siteAreaM2: optionalNumber(draft.siteAreaM2),
-    designScope: [
-      ...draft.designScope
+    designScope: draft.designScope
       .filter((row) => row.discipline.trim())
       .map((row) => ({
         discipline: row.discipline.trim(),
         item: optionalText(row.item),
         amount: optionalNumber(row.amount),
       })),
-      ...Object.entries(draft.engineers)
-        .filter(([, engineer]) => (engineer.amount ?? "").trim() !== "")
-        .map(([discipline, engineer]) => ({
-          discipline,
-          item: `協力技師／發包單位：${engineer.name.trim() || "未指定"}`,
-          amount: optionalNumber(engineer.amount ?? ""),
-        })),
-    ],
     invoiceType: draft.invoiceType || null,
     paymentMethod: draft.paymentMethod || null,
     closingDay: optionalText(draft.closingDay),
@@ -230,6 +232,7 @@ export function toCreateProjectBody(draft: ProjectApplicationDraft): CreateProje
       overrideReason: optionalText(row.overrideReason),
       note: optionalText(row.note),
     })),
+    initialSubcontracts,
     engineers,
     otherExpenses: optionalNumber(draft.otherExpenses),
     deptId: draft.deptId || null,
@@ -336,6 +339,7 @@ export function toAuthorizedCreateProjectBody(
         ...body,
         contractAmount: undefined,
         billings: undefined,
+        initialSubcontracts: undefined,
         otherExpenses: undefined,
         designScope: body.designScope?.map((row) => ({ ...row, amount: null })),
       };

@@ -254,7 +254,7 @@ export function ProjectApplicationForm({
       ) : null}
 
       <Section title="協力技師／發包單位">
-        <p className="mb-3 text-sm text-slate-500">此處建立申請單上的科別、協力單位與預估金額；正式發包合約、付款與代扣歷程須在建案後於「專案明細」建立。</p>
+        <p className="mb-3 text-sm text-slate-500">此處選擇協力單位並填寫發包金額；建立專案時會同步建立正式發包資料，付款與代扣歷程可在「專案明細」繼續維護。</p>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {disciplines.map((discipline) => {
             const assignment = draft.engineers[discipline] ?? { vendorId: "", name: "", amount: "" };
@@ -265,7 +265,7 @@ export function ProjectApplicationForm({
 
       <Section title="發包與費用摘要">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div className="rounded-lg bg-slate-50 p-3 text-sm text-slate-500">上方金額只會寫入申請單的科別與費用明細，不會宣稱已建立下包期款；正式發包與付款請於建案後建立。</div>
+          <div className="rounded-lg bg-slate-50 p-3 text-sm text-slate-500">上方金額會同步建立各科別的正式發包資料；需要分期付款時，請於建案後在「專案明細」設定付款期程。</div>
           {visibility.showFinanceFields ? <div><label className={labelCls}>其他支出（差旅、規費等）</label><input className={inputCls} type="number" min="0" value={draft.otherExpenses} onChange={(event) => patch("otherExpenses", event.target.value)} /></div> : null}
         </div>
       </Section>

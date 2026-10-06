@@ -85,6 +85,37 @@ describe("project application form model", () => {
     });
   });
 
+  it("creates formal initial subcontracts from the application vendor amounts", () => {
+    const draft = emptyProjectApplicationDraft("2026-10-01", ["電機", "空調"]);
+    draft.name = "惠特科技總部大樓";
+    draft.engineers.電機 = { vendorId: "vendor-1", name: "維安工程", amount: "250000" };
+    draft.engineers.空調 = { vendorId: "", name: "李廣修", amount: "130000" };
+
+    const body = toCreateProjectBody(draft);
+
+    expect(body.initialSubcontracts).toEqual([
+      {
+        kind: "subcontract",
+        discipline: "電機",
+        vendorId: "vendor-1",
+        vendorName: "維安工程",
+        item: "電機協力技師／發包",
+        amount: 250_000,
+        sortOrder: 0,
+      },
+      {
+        kind: "subcontract",
+        discipline: "空調",
+        vendorId: null,
+        vendorName: "李廣修",
+        item: "空調協力技師／發包",
+        amount: 130_000,
+        sortOrder: 1,
+      },
+    ]);
+    expect(body.designScope).toEqual([]);
+  });
+
   it("reports invalid percentages and required override reasons before submit", () => {
     const draft = emptyProjectApplicationDraft("2026-10-01", []);
     draft.name = "案名";
@@ -140,6 +171,19 @@ describe("project application form model", () => {
       showFinanceFields: true,
       showBonusFields: false,
     });
+  });
+
+  it("does not expose contract, billing, or subcontract amounts without finance access", () => {
+    const draft = emptyProjectApplicationDraft("2026-10-01", ["電機"]);
+    draft.name = "一般主管建立的案子";
+    draft.contractAmount = "100000";
+    draft.engineers.電機 = { vendorId: "vendor-1", name: "維安工程", amount: "50000" };
+
+    const body = toAuthorizedCreateProjectBody(draft, { canFinance: false, canBonus: true });
+
+    expect(body.contractAmount).toBeUndefined();
+    expect(body.billings).toBeUndefined();
+    expect(body.initialSubcontracts).toBeUndefined();
   });
 
   it("opens the created project after the atomic create succeeds", async () => {
