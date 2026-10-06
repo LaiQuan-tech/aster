@@ -26,6 +26,39 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'invalid_creator';
   END IF;
+  IF nullif(p_project->>'dept_id', '') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM departments
+       WHERE tenant_id = p_tenant_id
+         AND id = (p_project->>'dept_id')::uuid
+     ) THEN
+    RAISE EXCEPTION 'invalid_department';
+  END IF;
+  IF nullif(p_project->>'lead_emp_id', '') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM employees
+       WHERE tenant_id = p_tenant_id
+         AND id = (p_project->>'lead_emp_id')::uuid
+     ) THEN
+    RAISE EXCEPTION 'invalid_lead_employee';
+  END IF;
+  IF jsonb_typeof(coalesce(p_project->'engineers', '{}'::jsonb)) IS DISTINCT FROM 'object' THEN
+    RAISE EXCEPTION 'invalid_engineers';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_each(coalesce(p_project->'engineers', '{}'::jsonb)) AS engineer_entry(discipline, engineer)
+    WHERE jsonb_typeof(engineer) = 'object'
+      AND nullif(engineer->>'vendorId', '') IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM vendors
+        WHERE tenant_id = p_tenant_id
+          AND id = (engineer->>'vendorId')::uuid
+          AND deleted_at IS NULL
+      )
+  ) THEN
+    RAISE EXCEPTION 'invalid_vendor';
+  END IF;
   IF p_primary_contract IS NOT NULL
      AND (jsonb_typeof(p_primary_contract) IS DISTINCT FROM 'object'
           OR (p_primary_contract->>'amount')::numeric < 0) THEN
@@ -154,6 +187,8 @@ BEGIN
   RETURN jsonb_build_object('id', v_project_id, 'code', v_code);
 END;
 $$;
+
+DROP FUNCTION IF EXISTS public.create_project_application_atomic(uuid, uuid, jsonb, jsonb, jsonb);
 
 REVOKE ALL ON FUNCTION public.create_project_application_atomic(uuid, uuid, jsonb, jsonb, jsonb, jsonb) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.create_project_application_atomic(uuid, uuid, jsonb, jsonb, jsonb, jsonb) TO authenticated, service_role;

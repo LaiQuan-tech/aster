@@ -744,7 +744,39 @@ projectsRouter.post(
       return
     }
     try {
-      const vendorIds = [...new Set(initialSubcontracts.map((item) => item.vendorId).filter((id): id is string => !!id))]
+      if (b.deptId) {
+        const { data: department, error: departmentError } = await supabaseAdmin
+          .from("departments")
+          .select("id")
+          .eq("tenant_id", tenantId)
+          .eq("id", b.deptId)
+          .maybeSingle()
+        if (departmentError) throw new Error(`POST /projects department validation: ${departmentError.message}`)
+        if (!department) {
+          res.status(400).json({ error: "invalid_department" })
+          return
+        }
+      }
+      if (b.leadEmpId) {
+        const { data: leadEmployee, error: leadEmployeeError } = await supabaseAdmin
+          .from("employees")
+          .select("id")
+          .eq("tenant_id", tenantId)
+          .eq("id", b.leadEmpId)
+          .maybeSingle()
+        if (leadEmployeeError) throw new Error(`POST /projects lead employee validation: ${leadEmployeeError.message}`)
+        if (!leadEmployee) {
+          res.status(400).json({ error: "invalid_lead_employee" })
+          return
+        }
+      }
+      const engineerVendorIds = Object.values(b.engineers ?? {})
+        .map((engineer) => engineer?.vendorId)
+        .filter((id): id is string => !!id)
+      const vendorIds = [...new Set([
+        ...initialSubcontracts.map((item) => item.vendorId).filter((id): id is string => !!id),
+        ...engineerVendorIds,
+      ])]
       if (vendorIds.length > 0) {
         const { data: vendors, error: vendorError } = await supabaseAdmin
           .from("vendors")

@@ -439,6 +439,22 @@ describe("POST /projects primary contract", () => {
     expect(h.operations.filter((operation) => operation.startsWith("rpc:"))).toEqual([])
   })
 
+  it.each([
+    [{ deptId: "55555555-5555-4555-8555-555555555551" }, "invalid_department"],
+    [{ leadEmpId: "55555555-5555-4555-8555-555555555552" }, "invalid_lead_employee"],
+    [{ engineers: { 電機: { vendorId: "55555555-5555-4555-8555-555555555553", name: "跨租戶廠商" } } }, "invalid_vendor"],
+  ])("rejects cross-tenant project references %o", async (reference, error) => {
+    h.db.projects = []
+    const response = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer finance-user")
+      .send({ name: "跨租戶關聯專案", code: `BAD-${error}`, ...reference })
+
+    expect(response.status).toBe(400)
+    expect(response.body.error).toBe(error)
+    expect(h.operations.filter((operation) => operation.startsWith("rpc:"))).toEqual([])
+  })
+
   it("rolls back project, contract, billings, and subcontracts when subcontract insertion fails", async () => {
     h.db.projects = []
     h.db.contracts = []
