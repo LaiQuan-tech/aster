@@ -10,6 +10,7 @@
  */
 import { useEffect, useState, type FormEvent } from "react";
 import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import {
   getBranding,
   saveTenantSettings,
@@ -142,12 +143,15 @@ export default function CompanySpacePage() {
         </div>
       </Card>
 
-      <Card title="內部連結">
-        <form onSubmit={addLink} className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_auto]">
+      <CollapsibleCard title="新增內部連結">
+        <form onSubmit={addLink} className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_auto]">
           <input className={inputCls} placeholder="連結名稱" value={linkName} onChange={(event) => setLinkName(event.target.value)} />
           <input className={inputCls} placeholder="https://example.com" value={linkUrl} onChange={(event) => setLinkUrl(event.target.value)} />
           <PrimaryButton type="submit">新增</PrimaryButton>
         </form>
+      </CollapsibleCard>
+
+      <Card title="內部連結">
         {links.length === 0 ? (
           <Empty>尚無內部連結</Empty>
         ) : (

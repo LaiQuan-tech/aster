@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { BottomSheet, Button, Card, Empty, ErrorText, Field, Input, PrimaryButton, Segmented, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import { ActionMenu } from "@/components/ActionMenu";
 import { BatchImportButton } from "@/components/BatchImport";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import AuditDrawer from "@/components/AuditDrawer";
 import {
   addEmployeeCertification,
@@ -964,9 +965,10 @@ export default function EmployeesPage() {
         </Card>
       )}
 
-      <Card>
-        <h2 className="mb-1 text-sm font-medium text-gray-500">新增員工帳號</h2>
-        <p className="mb-4 text-xs text-gray-400">填姓名＋Email 即可：初始密碼留空會寄邀請信讓同仁自設密碼；填了則直接配發（同仁首次登入須改密碼）。</p>
+      <CollapsibleCard
+        title="新增員工帳號"
+        hint="填姓名＋Email 即可：初始密碼留空會寄邀請信讓同仁自設密碼；填了則直接配發（同仁首次登入須改密碼）。"
+      >
         <form onSubmit={onInvite} className="space-y-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
             <div>
@@ -1012,7 +1014,7 @@ export default function EmployeesPage() {
           {formError && <ErrorText>{formError}</ErrorText>}
           <PrimaryButton type="submit" disabled={submitting}>{submitting ? "處理中…" : password ? "建立帳號（配發密碼）" : "建立帳號並寄邀請信"}</PrimaryButton>
         </form>
-      </Card>
+      </CollapsibleCard>
 
       <Card>
         <div className="mb-4 flex items-center justify-between gap-3">

@@ -9,6 +9,7 @@ import {
   inputCls,
   labelCls,
 } from "@/components/admin-ui";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import {
   getExpenseCategories,
   getExpenseClaims,
@@ -486,175 +487,179 @@ function CategoryManager({
   }
 
   return (
-    <Card>
-      <h2 className="mb-4 text-sm font-medium text-gray-500">報銷類別</h2>
+    <>
+      <Card>
+        <h2 className="mb-4 text-sm font-medium text-gray-500">報銷類別</h2>
 
-      {categories.length === 0 ? (
-        <Empty>尚未建立任何類別。</Empty>
-      ) : (
-        <div className="mb-6 overflow-x-auto">
-          <table className="w-full min-w-[640px] text-sm">
-            <thead>
-              <tr className="border-b border-gray-200 text-left text-xs text-gray-500">
-                <th className="py-2">名稱</th>
-                <th className="py-2">稅務性質</th>
-                <th className="py-2">憑證</th>
-                <th className="py-2">出勤檢核</th>
-                <th className="py-2">軌道</th>
-                <th className="py-2">月限額</th>
-              </tr>
-            </thead>
-            <tbody>
-              {categories.map((c) => (
-                <tr key={c.id} className="border-b border-gray-100">
-                  <td className="py-2">{c.name}</td>
-                  <td className="py-2">
-                    {c.nature === "allowance" ? (
-                      <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-900">
-                        定額補貼 · 屬薪資所得
-                      </span>
-                    ) : (
-                      <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-700">
-                        實報實銷 · 非所得
-                      </span>
-                    )}
-                  </td>
-                  <td className="py-2 text-xs">{c.requires_receipt ? "必附" : "免附"}</td>
-                  <td className="py-2 text-xs">{c.cross_check_attendance ? "是" : "—"}</td>
-                  <td className="py-2 text-xs">
-                    {c.requires_trip_approval ? (
-                      <span className="rounded bg-blue-100 px-2 py-0.5 text-blue-900">
-                        出差軌 · 須先核准
-                      </span>
-                    ) : (
-                      <span className="text-gray-500">日常軌</span>
-                    )}
-                  </td>
-                  <td className="py-2 text-xs">
-                    {c.monthly_cap ? money(Number(c.monthly_cap)) : "無上限"}
-                  </td>
+        {categories.length === 0 ? (
+          <Empty>尚未建立任何類別。</Empty>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] text-sm">
+              <thead>
+                <tr className="border-b border-gray-200 text-left text-xs text-gray-500">
+                  <th className="py-2">名稱</th>
+                  <th className="py-2">稅務性質</th>
+                  <th className="py-2">憑證</th>
+                  <th className="py-2">出勤檢核</th>
+                  <th className="py-2">軌道</th>
+                  <th className="py-2">月限額</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <form onSubmit={onSubmit} className="space-y-4 border-t border-gray-200 pt-4">
-        <div className="grid gap-4 md:grid-cols-2">
-          <div>
-            <label className={labelCls} htmlFor="cat-choice">
-              選擇既有類別
-            </label>
-            <select id="cat-choice" value={categoryId} onChange={(e) => selectCategory(e.target.value)} className={inputCls}>
-              <option value="">新增類別</option>
-              {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
-            </select>
+              </thead>
+              <tbody>
+                {categories.map((c) => (
+                  <tr key={c.id} className="border-b border-gray-100">
+                    <td className="py-2">{c.name}</td>
+                    <td className="py-2">
+                      {c.nature === "allowance" ? (
+                        <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-900">
+                          定額補貼 · 屬薪資所得
+                        </span>
+                      ) : (
+                        <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-700">
+                          實報實銷 · 非所得
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-2 text-xs">{c.requires_receipt ? "必附" : "免附"}</td>
+                    <td className="py-2 text-xs">{c.cross_check_attendance ? "是" : "—"}</td>
+                    <td className="py-2 text-xs">
+                      {c.requires_trip_approval ? (
+                        <span className="rounded bg-blue-100 px-2 py-0.5 text-blue-900">
+                          出差軌 · 須先核准
+                        </span>
+                      ) : (
+                        <span className="text-gray-500">日常軌</span>
+                      )}
+                    </td>
+                    <td className="py-2 text-xs">
+                      {c.monthly_cap ? money(Number(c.monthly_cap)) : "無上限"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-          <div>
-            <label className={labelCls} htmlFor="cat-name">
-              名稱
-            </label>
-            <input
-              id="cat-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              required
-              placeholder="夜間計程車"
-              className={inputCls}
-            />
-          </div>
-        </div>
+        )}
+      </Card>
 
-        <fieldset>
-          <legend className={labelCls}>稅務性質</legend>
-          <div className="space-y-2">
-            <label className="flex items-start gap-2 rounded border border-gray-200 p-3 text-sm">
+      <CollapsibleCard title="新增／編輯類別">
+        <form onSubmit={onSubmit} className="space-y-4">
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <label className={labelCls} htmlFor="cat-choice">
+                選擇既有類別
+              </label>
+              <select id="cat-choice" value={categoryId} onChange={(e) => selectCategory(e.target.value)} className={inputCls}>
+                <option value="">新增類別</option>
+                {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={labelCls} htmlFor="cat-name">
+                名稱
+              </label>
               <input
-                type="radio"
-                name="nature"
-                checked={nature === "reimbursement"}
-                onChange={() => setNature("reimbursement")}
-                className="mt-1"
+                id="cat-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+                placeholder="夜間計程車"
+                className={inputCls}
               />
-              <span>
-                <strong>實報實銷</strong>（有憑證、金額＝實際支出）
-                <span className="mt-1 block text-xs text-gray-500">
-                  非所得，不課稅、不計入投保薪資。不進應發，直接加在實發。
+            </div>
+          </div>
+
+          <fieldset>
+            <legend className={labelCls}>稅務性質</legend>
+            <div className="space-y-2">
+              <label className="flex items-start gap-2 rounded border border-gray-200 p-3 text-sm">
+                <input
+                  type="radio"
+                  name="nature"
+                  checked={nature === "reimbursement"}
+                  onChange={() => setNature("reimbursement")}
+                  className="mt-1"
+                />
+                <span>
+                  <strong>實報實銷</strong>（有憑證、金額＝實際支出）
+                  <span className="mt-1 block text-xs text-gray-500">
+                    非所得，不課稅、不計入投保薪資。不進應發，直接加在實發。
+                  </span>
                 </span>
-              </span>
-            </label>
-            <label className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
+              </label>
+              <label className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
+                <input
+                  type="radio"
+                  name="nature"
+                  checked={nature === "allowance"}
+                  onChange={() => setNature("allowance")}
+                  className="mt-1"
+                />
+                <span>
+                  <strong>定額補貼</strong>（每月固定金額，不論實際花費）
+                  <span className="mt-1 block text-xs text-amber-800">
+                    <strong>屬薪資所得</strong>，須併入扣繳，且應計入勞健保投保薪資。
+                    設成「實報實銷」等於漏報薪資所得並高薪低報。
+                  </span>
+                </span>
+              </label>
+            </div>
+          </fieldset>
+
+          <p className="rounded-lg bg-gray-50 px-3 py-2 text-xs leading-relaxed text-gray-600">
+            <strong>兩軌政策</strong>：日常常態費用不需逐筆事前審核，月結一次核銷；
+            長途出差則須先經簽核同意。勾選「須綁已核准的出差單」的類別，
+            同仁填報時必須指定一張已核准的出差單——
+            <strong>沒有這道限制，出差費用可以拆成日常報銷繞過事前審核。</strong>
+          </p>
+
+          <div className="flex flex-wrap gap-6">
+            <label className="flex items-center gap-2 text-sm">
               <input
-                type="radio"
-                name="nature"
-                checked={nature === "allowance"}
-                onChange={() => setNature("allowance")}
-                className="mt-1"
+                type="checkbox"
+                checked={requiresReceipt}
+                onChange={(e) => setRequiresReceipt(e.target.checked)}
               />
-              <span>
-                <strong>定額補貼</strong>（每月固定金額，不論實際花費）
-                <span className="mt-1 block text-xs text-amber-800">
-                  <strong>屬薪資所得</strong>，須併入扣繳，且應計入勞健保投保薪資。
-                  設成「實報實銷」等於漏報薪資所得並高薪低報。
-                </span>
-              </span>
+              需附憑證
             </label>
-          </div>
-        </fieldset>
-
-        <p className="rounded-lg bg-gray-50 px-3 py-2 text-xs leading-relaxed text-gray-600">
-          <strong>兩軌政策</strong>：日常常態費用不需逐筆事前審核，月結一次核銷；
-          長途出差則須先經簽核同意。勾選「須綁已核准的出差單」的類別，
-          同仁填報時必須指定一張已核准的出差單——
-          <strong>沒有這道限制，出差費用可以拆成日常報銷繞過事前審核。</strong>
-        </p>
-
-        <div className="flex flex-wrap gap-6">
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={requiresReceipt}
-              onChange={(e) => setRequiresReceipt(e.target.checked)}
-            />
-            需附憑證
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={crossCheck}
-              onChange={(e) => setCrossCheck(e.target.checked)}
-            />
-            與出勤交叉檢核（夜間交通費類）
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={requiresTrip}
-              onChange={(e) => setRequiresTrip(e.target.checked)}
-            />
-            須綁已核准的出差單
-          </label>
-          <div>
-            <label className={labelCls} htmlFor="cat-cap">
-              月限額（留空＝無上限）
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={crossCheck}
+                onChange={(e) => setCrossCheck(e.target.checked)}
+              />
+              與出勤交叉檢核（夜間交通費類）
             </label>
-            <input
-              id="cat-cap"
-              type="number"
-              min="0"
-              value={cap}
-              onChange={(e) => setCap(e.target.value)}
-              className={inputCls}
-            />
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={requiresTrip}
+                onChange={(e) => setRequiresTrip(e.target.checked)}
+              />
+              須綁已核准的出差單
+            </label>
+            <div>
+              <label className={labelCls} htmlFor="cat-cap">
+                月限額（留空＝無上限）
+              </label>
+              <input
+                id="cat-cap"
+                type="number"
+                min="0"
+                value={cap}
+                onChange={(e) => setCap(e.target.value)}
+                className={inputCls}
+              />
+            </div>
           </div>
-        </div>
 
-        {error && <ErrorText>{error}</ErrorText>}
-        <PrimaryButton type="submit" disabled={busy}>
-          {busy ? "儲存中…" : "建立 / 更新類別"}
-        </PrimaryButton>
-      </form>
-    </Card>
+          {error && <ErrorText>{error}</ErrorText>}
+          <PrimaryButton type="submit" disabled={busy}>
+            {busy ? "儲存中…" : "建立 / 更新類別"}
+          </PrimaryButton>
+        </form>
+      </CollapsibleCard>
+    </>
   );
 }

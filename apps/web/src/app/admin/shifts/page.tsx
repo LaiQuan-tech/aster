@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import {
   getShifts,
   createShift,
@@ -160,8 +161,7 @@ export default function ShiftsPage() {
 
   return (
     <>
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">新增班別</h2>
+      <CollapsibleCard title="新增班別">
         <form onSubmit={onCreate} className="space-y-4">
           {fields(draft, setDraft)}
           {formError && <ErrorText>{formError}</ErrorText>}
@@ -169,7 +169,7 @@ export default function ShiftsPage() {
             {submitting ? "新增中…" : "新增班別"}
           </PrimaryButton>
         </form>
-      </Card>
+      </CollapsibleCard>
 
       <Card>
         <h2 className="mb-4 text-sm font-medium text-gray-500">班別列表</h2>

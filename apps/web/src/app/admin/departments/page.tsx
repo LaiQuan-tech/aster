@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Card, EmptyState, InlineError, PrimaryButton, Skeleton, inputCls, labelCls, useToast } from "@/components/admin-ui";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import {
   createDepartment,
   deleteDepartment,
@@ -148,7 +149,7 @@ export default function DepartmentsPage() {
 
   return (
     <>
-      <Card title="新增單位">
+      <CollapsibleCard title="新增單位">
         <form onSubmit={onCreate} className="grid grid-cols-1 gap-4 lg:grid-cols-4">
           <div>
             <label className={labelCls}>單位名稱</label>
@@ -177,7 +178,7 @@ export default function DepartmentsPage() {
           </div>
         </form>
         {formError && <InlineError className="mt-2">{formError}</InlineError>}
-      </Card>
+      </CollapsibleCard>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,24rem)]">
         <Card title="單位列表">
@@ -185,7 +186,7 @@ export default function DepartmentsPage() {
           {loading ? (
             <Skeleton lines={4} />
           ) : rows.length === 0 ? (
-            <EmptyState title="尚無單位" hint="請先用上方表單新增第一個單位" />
+            <EmptyState title="尚無單位" hint="請先展開上方「新增單位」，新增第一個單位" />
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">

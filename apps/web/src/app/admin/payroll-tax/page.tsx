@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { BatchImportButton } from "@/components/BatchImport";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { apiDownload } from "@/lib/api-client";
 import {
   getEmployees,
@@ -191,9 +192,8 @@ export default function PayrollTaxPage() {
         )}
       </Card>
 
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">非員工所得（自動計算補充保費）</h2>
-        <form onSubmit={onCreateNei} className="mb-4 space-y-3">
+      <CollapsibleCard title="新增非員工所得">
+        <form onSubmit={onCreateNei} className="space-y-3">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
             <div>
               <label className={labelCls}>受款人</label>
@@ -226,6 +226,10 @@ export default function PayrollTaxPage() {
           </div>
           <PrimaryButton type="submit">新增非員工所得</PrimaryButton>
         </form>
+      </CollapsibleCard>
+
+      <Card>
+        <h2 className="mb-4 text-sm font-medium text-gray-500">非員工所得（自動計算補充保費）</h2>
         {nei.length === 0 ? (
           <Empty>尚無資料</Empty>
         ) : (

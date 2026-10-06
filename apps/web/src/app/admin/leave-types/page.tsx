@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import {
   getLeaveTypes,
   createLeaveType,
@@ -264,8 +265,7 @@ export default function LeaveTypesPage() {
   return (
     <>
       {/* Leave types */}
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">新增假別</h2>
+      <CollapsibleCard title="新增假別">
         <form onSubmit={onCreate} className="space-y-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div>
@@ -310,7 +310,7 @@ export default function LeaveTypesPage() {
             {submitting ? "新增中…" : "新增假別"}
           </PrimaryButton>
         </form>
-      </Card>
+      </CollapsibleCard>
 
       <Card>
         <h2 className="mb-4 text-sm font-medium text-gray-500">假別列表</h2>

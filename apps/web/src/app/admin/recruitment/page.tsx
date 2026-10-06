@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { fmtHm, localDateKey } from "@/lib/ess-format";
 import {
   createAnnouncement,
@@ -346,8 +347,7 @@ export default function RecruitmentPage() {
         </div>
       </Card>
 
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">新增職缺需求單</h2>
+      <CollapsibleCard title="新增職缺需求單">
         <form onSubmit={onCreateReq} className="space-y-4">
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-6">
             <div className="lg:col-span-2">
@@ -393,7 +393,7 @@ export default function RecruitmentPage() {
             </label>
           </div>
         </form>
-      </Card>
+      </CollapsibleCard>
 
       <Card>
         <div className="mb-4 flex flex-wrap items-end gap-3">
@@ -456,8 +456,7 @@ export default function RecruitmentPage() {
         )}
       </Card>
 
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">新增人才 / 履歷資料</h2>
+      <CollapsibleCard title="新增人才 / 履歷資料">
         <form onSubmit={onCreateCand} className="grid grid-cols-1 gap-4 lg:grid-cols-6">
           <div>
             <label className={labelCls}>姓名</label>
@@ -494,7 +493,7 @@ export default function RecruitmentPage() {
             <input className={inputCls} value={candNote} onChange={(event) => setCandNote(event.target.value)} />
           </div>
         </form>
-      </Card>
+      </CollapsibleCard>
 
       <Card>
         <div className="mb-4 flex flex-wrap items-end gap-3">
@@ -530,9 +529,8 @@ export default function RecruitmentPage() {
         )}
       </Card>
 
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">面試紀錄表 / 面試行事曆</h2>
-        <form onSubmit={onCreateInterview} className="mb-5 grid grid-cols-1 gap-4 lg:grid-cols-5">
+      <CollapsibleCard title="安排面試">
+        <form onSubmit={onCreateInterview} className="grid grid-cols-1 gap-4 lg:grid-cols-5">
           <div>
             <label className={labelCls}>候選人</label>
             <select className={inputCls} value={interviewCandidateId} onChange={(event) => setInterviewCandidateId(event.target.value)}>
@@ -559,7 +557,10 @@ export default function RecruitmentPage() {
             <PrimaryButton type="submit">安排面試</PrimaryButton>
           </div>
         </form>
+      </CollapsibleCard>
 
+      <Card>
+        <h2 className="mb-4 text-sm font-medium text-gray-500">面試紀錄表 / 面試行事曆</h2>
         <div className="mb-4">
           <label className={labelCls}>行事曆篩選：面試官</label>
           <select className={inputCls} value={interviewerFilter} onChange={(event) => setInterviewerFilter(event.target.value)}>
@@ -600,9 +601,8 @@ export default function RecruitmentPage() {
         )}
       </Card>
 
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">錄用申請單 / 錄用通知單查詢</h2>
-        <form onSubmit={onCreateOffer} className="mb-5 grid grid-cols-1 gap-4 lg:grid-cols-5">
+      <CollapsibleCard title="建立錄用申請">
+        <form onSubmit={onCreateOffer} className="grid grid-cols-1 gap-4 lg:grid-cols-5">
           <div>
             <label className={labelCls}>候選人</label>
             <select className={inputCls} value={offerCandidateId} onChange={(event) => setOfferCandidateId(event.target.value)}>
@@ -626,6 +626,10 @@ export default function RecruitmentPage() {
             <PrimaryButton type="submit">建立錄用申請</PrimaryButton>
           </div>
         </form>
+      </CollapsibleCard>
+
+      <Card>
+        <h2 className="mb-4 text-sm font-medium text-gray-500">錄用申請單 / 錄用通知單查詢</h2>
         {offers.length === 0 ? (
           <Empty>尚無錄用單</Empty>
         ) : (

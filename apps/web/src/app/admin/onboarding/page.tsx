@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { BatchImportButton } from "@/components/BatchImport";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import {
   getOnboardings,
   createOnboarding,
@@ -128,8 +129,7 @@ export default function OnboardingPage() {
 
   return (
     <>
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">新增報到</h2>
+      <CollapsibleCard title="新增報到">
         <form onSubmit={onCreate} className="space-y-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
             <div>
@@ -180,7 +180,7 @@ export default function OnboardingPage() {
             {submitting ? "新增中…" : "新增報到"}
           </PrimaryButton>
         </form>
-      </Card>
+      </CollapsibleCard>
 
       <Card>
         <div className="mb-4 flex items-center justify-between gap-3">
