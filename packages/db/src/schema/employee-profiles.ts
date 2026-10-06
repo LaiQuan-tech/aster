@@ -60,6 +60,11 @@ export const employeeProfiles = pgTable(
     emergencyRelationship: text("emergency_relationship"),
     emergencyPhone: text("emergency_phone"),
     note: text("note"),
+    // 匯款（薪轉）帳號，欄位比照 vendors。
+    bankCode: text("bank_code"),
+    bankName: text("bank_name"),
+    bankAccount: text("bank_account"),
+    accountHolder: text("account_holder"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

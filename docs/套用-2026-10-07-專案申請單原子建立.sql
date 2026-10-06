@@ -1,0 +1,356 @@
+-- 2026-10-07 套用到正式庫：專案申請單建立改用原子函式後，正式庫漏套的三個遷移。
+-- 前提：已套到 migration 0052（sql/0042 分潤歷程）。內容依序為 sql/0043、sql/0044、sql/0045 全文，可重跑。
+-- 症狀：新增專案回 500 project_application_create_failed（函式 create_project_application_atomic 不存在）。
+
+-- ===== packages/db/sql/0043_project_primary_contract.sql =====
+-- 主合約是專案合約金額的唯一來源；作廢後可以另立新的主合約。
+ALTER TABLE public.contracts
+  ADD COLUMN IF NOT EXISTS is_primary boolean NOT NULL DEFAULT false;
+
+WITH contractor_contracts AS (
+  SELECT id, tenant_id, project_id, supersedes_id
+  FROM public.contracts
+  WHERE deleted_at IS NULL AND doc_type = 'contract' AND our_role = 'contractor'
+), leaves AS (
+  SELECT contract.*
+  FROM contractor_contracts contract
+  WHERE NOT EXISTS (
+    SELECT 1 FROM contractor_contracts child WHERE child.supersedes_id = contract.id
+  )
+), eligible AS (
+  SELECT tenant_id, project_id, max(id::text)::uuid AS primary_id
+  FROM leaves
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.contracts existing
+    WHERE existing.tenant_id = leaves.tenant_id
+      AND existing.project_id = leaves.project_id
+      AND existing.is_primary = true
+      AND existing.deleted_at IS NULL
+  )
+  GROUP BY tenant_id, project_id
+  HAVING count(*) = 1
+)
+UPDATE public.contracts
+SET is_primary = true
+FROM eligible
+WHERE contracts.id = eligible.primary_id;
+
+CREATE UNIQUE INDEX IF NOT EXISTS contracts_active_primary_uq
+  ON public.contracts (tenant_id, project_id)
+  WHERE is_primary = true AND deleted_at IS NULL;
+
+-- ===== packages/db/sql/0044_project_application_atomic.sql =====
+CREATE OR REPLACE FUNCTION public.create_project_application_atomic(
+  p_tenant_id uuid,
+  p_created_by_emp_id uuid,
+  p_project jsonb,
+  p_primary_contract jsonb,
+  p_billings jsonb
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public
+AS $$
+DECLARE
+  v_project_id uuid;
+  v_code text;
+BEGIN
+  IF jsonb_typeof(p_project) IS DISTINCT FROM 'object'
+     OR btrim(coalesce(p_project->>'name', '')) = '' THEN
+    RAISE EXCEPTION 'invalid_project';
+  END IF;
+  IF p_project ? 'tenant_id' AND (p_project->>'tenant_id')::uuid <> p_tenant_id THEN
+    RAISE EXCEPTION 'tenant_mismatch';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM employees WHERE tenant_id = p_tenant_id AND id = p_created_by_emp_id
+  ) THEN
+    RAISE EXCEPTION 'invalid_creator';
+  END IF;
+  IF p_primary_contract IS NOT NULL
+     AND (jsonb_typeof(p_primary_contract) IS DISTINCT FROM 'object'
+          OR (p_primary_contract->>'amount')::numeric < 0) THEN
+    RAISE EXCEPTION 'invalid_primary_contract';
+  END IF;
+  IF jsonb_typeof(coalesce(p_billings, '[]'::jsonb)) IS DISTINCT FROM 'array' THEN
+    RAISE EXCEPTION 'invalid_billings';
+  END IF;
+
+  INSERT INTO projects (
+    tenant_id, name, code, fiscal_year, description, dept_id, lead_emp_id,
+    share_mode, bonus_pool, starts_on, ends_on, opened_on, status, client_id,
+    parent_project_id, kind, site_address, site_area_m2, design_scope,
+    invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers
+  ) VALUES (
+    p_tenant_id,
+    p_project->>'name',
+    p_project->>'code',
+    nullif(p_project->>'fiscal_year', '')::integer,
+    p_project->>'description',
+    nullif(p_project->>'dept_id', '')::uuid,
+    nullif(p_project->>'lead_emp_id', '')::uuid,
+    coalesce(p_project->>'share_mode', 'pool_pct'),
+    nullif(p_project->>'bonus_pool', '')::numeric,
+    nullif(p_project->>'starts_on', '')::date,
+    nullif(p_project->>'ends_on', '')::date,
+    nullif(p_project->>'opened_on', '')::date,
+    coalesce(p_project->>'status', 'active'),
+    nullif(p_project->>'client_id', '')::uuid,
+    nullif(p_project->>'parent_project_id', '')::uuid,
+    coalesce(p_project->>'kind', 'main'),
+    p_project->>'site_address',
+    nullif(p_project->>'site_area_m2', '')::numeric,
+    coalesce(p_project->'design_scope', '[]'::jsonb),
+    p_project->>'invoice_type',
+    p_project->>'payment_method',
+    p_project->>'closing_day',
+    p_project->>'payment_day',
+    coalesce(nullif(p_project->>'other_expenses', '')::numeric, 0),
+    coalesce(p_project->'engineers', '{}'::jsonb)
+  )
+  RETURNING id, code INTO v_project_id, v_code;
+
+  IF p_primary_contract IS NOT NULL THEN
+    INSERT INTO contracts (
+      tenant_id, project_id, doc_type, our_role, title, counterparty, amount,
+      is_primary, signed_on, copies, stamp_duty_required, stamp_duty_rate,
+      stamp_duty_amount, created_by_emp_id
+    ) VALUES (
+      p_tenant_id, v_project_id, 'contract', 'contractor',
+      coalesce(nullif(btrim(p_primary_contract->>'title'), ''), '主合約'),
+      p_primary_contract->>'counterparty',
+      nullif(p_primary_contract->>'amount', '')::numeric,
+      true,
+      nullif(p_primary_contract->>'signed_on', '')::date,
+      coalesce(nullif(p_primary_contract->>'copies', '')::integer, 1),
+      'auto',
+      nullif(p_primary_contract->>'stamp_duty_rate', '')::numeric,
+      nullif(p_primary_contract->>'stamp_duty_amount', '')::numeric,
+      p_created_by_emp_id
+    );
+  END IF;
+
+  INSERT INTO project_billings (
+    tenant_id, project_id, installment_no, kind, percentage, milestone,
+    planned_on, calculated_amount, residue_applied, override_amount,
+    override_reason, note, created_by_emp_id
+  )
+  SELECT
+    p_tenant_id,
+    v_project_id,
+    (billing->>'installment_no')::integer,
+    coalesce(billing->>'kind', 'installment'),
+    nullif(billing->>'percentage', '')::numeric,
+    billing->>'milestone',
+    nullif(billing->>'planned_on', '')::date,
+    nullif(billing->>'calculated_amount', '')::numeric,
+    coalesce(nullif(billing->>'residue_applied', '')::numeric, 0),
+    nullif(billing->>'override_amount', '')::numeric,
+    billing->>'override_reason',
+    billing->>'note',
+    p_created_by_emp_id
+  FROM jsonb_array_elements(coalesce(p_billings, '[]'::jsonb)) AS billing;
+
+  RETURN jsonb_build_object('id', v_project_id, 'code', v_code);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.create_project_application_atomic(uuid, uuid, jsonb, jsonb, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.create_project_application_atomic(uuid, uuid, jsonb, jsonb, jsonb) TO authenticated, service_role;
+
+-- ===== packages/db/sql/0045_project_application_subcontracts.sql =====
+CREATE OR REPLACE FUNCTION public.create_project_application_atomic(
+  p_tenant_id uuid,
+  p_created_by_emp_id uuid,
+  p_project jsonb,
+  p_primary_contract jsonb,
+  p_billings jsonb,
+  p_subcontracts jsonb
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public
+AS $$
+DECLARE
+  v_project_id uuid;
+  v_code text;
+BEGIN
+  IF jsonb_typeof(p_project) IS DISTINCT FROM 'object'
+     OR btrim(coalesce(p_project->>'name', '')) = '' THEN
+    RAISE EXCEPTION 'invalid_project';
+  END IF;
+  IF p_project ? 'tenant_id' AND (p_project->>'tenant_id')::uuid <> p_tenant_id THEN
+    RAISE EXCEPTION 'tenant_mismatch';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM employees WHERE tenant_id = p_tenant_id AND id = p_created_by_emp_id
+  ) THEN
+    RAISE EXCEPTION 'invalid_creator';
+  END IF;
+  IF nullif(p_project->>'dept_id', '') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM departments
+       WHERE tenant_id = p_tenant_id
+         AND id = (p_project->>'dept_id')::uuid
+     ) THEN
+    RAISE EXCEPTION 'invalid_department';
+  END IF;
+  IF nullif(p_project->>'lead_emp_id', '') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM employees
+       WHERE tenant_id = p_tenant_id
+         AND id = (p_project->>'lead_emp_id')::uuid
+     ) THEN
+    RAISE EXCEPTION 'invalid_lead_employee';
+  END IF;
+  IF jsonb_typeof(coalesce(p_project->'engineers', '{}'::jsonb)) IS DISTINCT FROM 'object' THEN
+    RAISE EXCEPTION 'invalid_engineers';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_each(coalesce(p_project->'engineers', '{}'::jsonb)) AS engineer_entry(discipline, engineer)
+    WHERE jsonb_typeof(engineer) = 'object'
+      AND nullif(engineer->>'vendorId', '') IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM vendors
+        WHERE tenant_id = p_tenant_id
+          AND id = (engineer->>'vendorId')::uuid
+          AND deleted_at IS NULL
+      )
+  ) THEN
+    RAISE EXCEPTION 'invalid_vendor';
+  END IF;
+  IF p_primary_contract IS NOT NULL
+     AND (jsonb_typeof(p_primary_contract) IS DISTINCT FROM 'object'
+          OR (p_primary_contract->>'amount')::numeric < 0) THEN
+    RAISE EXCEPTION 'invalid_primary_contract';
+  END IF;
+  IF jsonb_typeof(coalesce(p_billings, '[]'::jsonb)) IS DISTINCT FROM 'array' THEN
+    RAISE EXCEPTION 'invalid_billings';
+  END IF;
+  IF jsonb_typeof(coalesce(p_subcontracts, '[]'::jsonb)) IS DISTINCT FROM 'array' THEN
+    RAISE EXCEPTION 'invalid_subcontracts';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(coalesce(p_subcontracts, '[]'::jsonb)) AS subcontract
+    WHERE nullif(subcontract->>'vendor_id', '') IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM vendors
+        WHERE tenant_id = p_tenant_id
+          AND id = (subcontract->>'vendor_id')::uuid
+          AND deleted_at IS NULL
+      )
+  ) THEN
+    RAISE EXCEPTION 'invalid_vendor';
+  END IF;
+
+  INSERT INTO projects (
+    tenant_id, name, code, fiscal_year, description, dept_id, lead_emp_id,
+    share_mode, bonus_pool, starts_on, ends_on, opened_on, status, client_id,
+    parent_project_id, kind, site_address, site_area_m2, design_scope,
+    invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers
+  ) VALUES (
+    p_tenant_id,
+    p_project->>'name',
+    p_project->>'code',
+    nullif(p_project->>'fiscal_year', '')::integer,
+    p_project->>'description',
+    nullif(p_project->>'dept_id', '')::uuid,
+    nullif(p_project->>'lead_emp_id', '')::uuid,
+    coalesce(p_project->>'share_mode', 'pool_pct'),
+    nullif(p_project->>'bonus_pool', '')::numeric,
+    nullif(p_project->>'starts_on', '')::date,
+    nullif(p_project->>'ends_on', '')::date,
+    nullif(p_project->>'opened_on', '')::date,
+    coalesce(p_project->>'status', 'active'),
+    nullif(p_project->>'client_id', '')::uuid,
+    nullif(p_project->>'parent_project_id', '')::uuid,
+    coalesce(p_project->>'kind', 'main'),
+    p_project->>'site_address',
+    nullif(p_project->>'site_area_m2', '')::numeric,
+    coalesce(p_project->'design_scope', '[]'::jsonb),
+    p_project->>'invoice_type',
+    p_project->>'payment_method',
+    p_project->>'closing_day',
+    p_project->>'payment_day',
+    coalesce(nullif(p_project->>'other_expenses', '')::numeric, 0),
+    coalesce(p_project->'engineers', '{}'::jsonb)
+  )
+  RETURNING id, code INTO v_project_id, v_code;
+
+  IF p_primary_contract IS NOT NULL THEN
+    INSERT INTO contracts (
+      tenant_id, project_id, doc_type, our_role, title, counterparty, amount,
+      is_primary, signed_on, copies, stamp_duty_required, stamp_duty_rate,
+      stamp_duty_amount, created_by_emp_id
+    ) VALUES (
+      p_tenant_id, v_project_id, 'contract', 'contractor',
+      coalesce(nullif(btrim(p_primary_contract->>'title'), ''), '主合約'),
+      p_primary_contract->>'counterparty',
+      nullif(p_primary_contract->>'amount', '')::numeric,
+      true,
+      nullif(p_primary_contract->>'signed_on', '')::date,
+      coalesce(nullif(p_primary_contract->>'copies', '')::integer, 1),
+      'auto',
+      nullif(p_primary_contract->>'stamp_duty_rate', '')::numeric,
+      nullif(p_primary_contract->>'stamp_duty_amount', '')::numeric,
+      p_created_by_emp_id
+    );
+  END IF;
+
+  INSERT INTO project_billings (
+    tenant_id, project_id, installment_no, kind, percentage, milestone,
+    planned_on, calculated_amount, residue_applied, override_amount,
+    override_reason, note, created_by_emp_id
+  )
+  SELECT
+    p_tenant_id,
+    v_project_id,
+    (billing->>'installment_no')::integer,
+    coalesce(billing->>'kind', 'installment'),
+    nullif(billing->>'percentage', '')::numeric,
+    billing->>'milestone',
+    nullif(billing->>'planned_on', '')::date,
+    nullif(billing->>'calculated_amount', '')::numeric,
+    coalesce(nullif(billing->>'residue_applied', '')::numeric, 0),
+    nullif(billing->>'override_amount', '')::numeric,
+    billing->>'override_reason',
+    billing->>'note',
+    p_created_by_emp_id
+  FROM jsonb_array_elements(coalesce(p_billings, '[]'::jsonb)) AS billing;
+
+  INSERT INTO project_subcontracts (
+    tenant_id, project_id, kind, discipline, vendor_id, vendor_name, contact,
+    item, amount, billing_basis, order_type, withholding_rate,
+    withholding_threshold, sort_order, note, created_by_emp_id
+  )
+  SELECT
+    p_tenant_id,
+    v_project_id,
+    coalesce(subcontract->>'kind', 'subcontract'),
+    subcontract->>'discipline',
+    nullif(subcontract->>'vendor_id', '')::uuid,
+    subcontract->>'vendor_name',
+    subcontract->>'contact',
+    subcontract->>'item',
+    coalesce(nullif(subcontract->>'amount', '')::numeric, 0),
+    subcontract->>'billing_basis',
+    subcontract->>'order_type',
+    coalesce(nullif(subcontract->>'withholding_rate', '')::numeric, 0.10),
+    coalesce(nullif(subcontract->>'withholding_threshold', '')::integer, 20000),
+    coalesce(nullif(subcontract->>'sort_order', '')::integer, 0),
+    subcontract->>'note',
+    p_created_by_emp_id
+  FROM jsonb_array_elements(coalesce(p_subcontracts, '[]'::jsonb)) AS subcontract;
+
+  RETURN jsonb_build_object('id', v_project_id, 'code', v_code);
+END;
+$$;
+
+DROP FUNCTION IF EXISTS public.create_project_application_atomic(uuid, uuid, jsonb, jsonb, jsonb);
+
+REVOKE ALL ON FUNCTION public.create_project_application_atomic(uuid, uuid, jsonb, jsonb, jsonb, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.create_project_application_atomic(uuid, uuid, jsonb, jsonb, jsonb, jsonb) TO authenticated, service_role;
+

@@ -23,6 +23,8 @@ export const clients = pgTable(
       .notNull()
       .references(() => tenants.id),
     name: text("name").notNull(),
+    /** 簡稱：列表與下拉顯示用，可空。 */
+    shortName: text("short_name"),
     taxId: text("tax_id"),
     phone: text("phone"),
     fax: text("fax"),

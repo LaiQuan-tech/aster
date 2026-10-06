@@ -4,6 +4,7 @@ import {
 import { tenants } from "./tenants"
 import { departments } from "./departments"
 import { clients } from "./clients"
+import { companies } from "./companies"
 
 /**
  * Projects — 專案，內部知識庫與獎金分潤的核心單位。
@@ -94,6 +95,8 @@ export const projects = pgTable(
     // ── P3 專案申請單（模組五）新增 ──────────────────────────────────
     /** 業主／客戶。可空：知識庫舊案未必補得回業主資料。 */
     clientId: uuid("client_id").references(() => clients.id),
+    /** 承接公司（公司主體）；null＝沿用租戶預設公司。 */
+    companyId: uuid("company_id").references(() => companies.id),
     /** 母專案，用於「追加減／加做／估驗」掛回主案。刻意不設 FK
      * （比照 departments.managerEmpId／projects.leadEmpId 的排除理由：
      * 這裡純粹是分類用的軟參照，不是完整性關鍵鏈）。 */

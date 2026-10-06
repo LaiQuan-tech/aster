@@ -393,6 +393,13 @@
       "when": 1790899185000,
       "tag": "0055_project_application_subcontracts",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1791300775424,
+      "tag": "0056_employee_bank_client_short_project_company",
+      "breakpoints": true
     }
   ]
 }
