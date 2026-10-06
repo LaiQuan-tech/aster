@@ -118,6 +118,21 @@ describe("projects table", () => {
     ])
   })
 
+  // 承接公司（company_id）的查詢用一般 index。正式庫已由 sql/0046（migrations/0056）建好，
+  // schema 補上宣告只是讓 drizzle 與實際 DB 一致，不需要新遷移。
+  it("(tenant_id, company_id) 有一般 index（承接公司；與 sql/0046 對齊）", () => {
+    const idx = getTableConfig(projects).indexes.find(
+      (i) => i.config.name === "projects_tenant_company_idx",
+    )
+    expect(idx).toBeDefined()
+    expect(idx!.config.unique).toBe(false)
+    expect(idx!.config.where).toBeUndefined()
+    expect(idx!.config.columns.map((c) => (c as { name: string }).name)).toEqual([
+      "tenant_id",
+      "company_id",
+    ])
+  })
+
   // 舊資料沒有編號；Postgres 的 unique index 視 NULL 互不相等，所以可空欄位
   // 不會讓多筆舊資料互撞。新建一律由 API 產號。
   it("code 與 fiscalYear 皆可空（相容既有資料）", () => {
