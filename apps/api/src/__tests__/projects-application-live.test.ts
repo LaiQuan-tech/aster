@@ -756,7 +756,7 @@ describe("P3-6 年度總表與未收款", () => {
     expect((await asAdmin(request(app).get(`/projects/annual?year=abc`))).status).toBe(400)
   })
 
-  it("xlsx：A1 專案申請單、A2 公司＋年度、表頭、總計列；檔名帶民國年", async () => {
+  it("xlsx：A1 專案申請單、A2 公司＋年度、H3 日期、第 4 列表頭、總計列；檔名帶民國年", async () => {
     const res = await asAdmin(request(app).get(`/projects/annual?year=${ROC}&format=xlsx`))
       .buffer(true)
       .parse(binaryParser)
@@ -770,19 +770,24 @@ describe("P3-6 年度總表與未收款", () => {
     expect(ws.getCell("A1").value).toBe("專案申請單")
     // A2 公司名：companies 的預設主體（上面切成了亞斯特工程）
     expect(String(ws.getCell("A2").value)).toBe(`亞斯特工程有限公司 ${ROC}年度總表`)
-    expect(String(ws.getCell("A3").value)).toMatch(/^日期：\d{3}\.\d{1,2}\.\d{1,2}$/)
-    const header = ws.getRow(5).values as unknown[]
-    expect(header.slice(1, 11)).toEqual(["項次", "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅", "業務", "備註"])
-    expect(header).toContain("電機發包")
+    // 版面比照參考表（a75ae04）：日期在 H3，表頭在第 4 列，資料從第 5 列起。
+    expect(String(ws.getCell("H3").value)).toMatch(/^日期：\d{3}\.\d{1,2}\.\d{1,2}$/)
+    const header = ws.getRow(4).values as unknown[]
+    expect(header.slice(1, 17)).toEqual([
+      "項次", "專案單號", "日期", "客戶", "工程名稱", "金額(未稅)", "稅金", "含稅",
+      "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
+    ])
+    // 科別欄直接用科別名（不再加「發包」後綴），接在固定 16 欄之後
+    expect(header).toContain("電機")
     expect(header).toContain("請款進度%")
     expect(header[header.length - 1]).toBe("期數")
     // 第一筆資料列是 AT-{ROC}-001，金額是數字不是字串
-    expect(ws.getCell("B6").value).toBe(`AT-${ROC}-001`)
-    expect(ws.getCell("F6").value).toBe(3_043_645)
-    expect(ws.getCell("G6").value).toBe(152_182)
-    // 最後一列是年度總計
+    expect(ws.getCell("B5").value).toBe(`AT-${ROC}-001`)
+    expect(ws.getCell("F5").value).toBe(3_043_645)
+    expect(ws.getCell("G5").value).toBe(152_182)
+    // 最後一列是年度總計；標籤寫在「工程名稱」欄（E），不再合併 A:E
     const last = ws.getRow(ws.rowCount)
-    expect(String(last.getCell(1).value)).toContain("年度總計")
+    expect(String(last.getCell(5).value)).toContain("年度總計")
     expect(last.getCell(6).value).toBeTypeOf("number")
   })
 
