@@ -50,6 +50,8 @@ export const CLIENT_CATEGORY_ORDER: ClientCategory[] = ["architect", "engineer",
 export interface Client {
   id: string
   name: string
+  /** 簡稱：列表與搜尋用，可空（最長 40 字）。 */
+  shortName?: string | null
   /** 分類：可空，既有名冊未必補得回。 */
   category: ClientCategory | null
   taxId: string | null

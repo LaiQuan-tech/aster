@@ -12,15 +12,15 @@ import { CLIENT_COLS, serializeClient, type ClientRow } from "../services/projec
 export const clientsRouter = Router()
 
 /**
- * B4：`category` 欄位獨立加在這裡，不動 `services/project-application-store.ts`
+ * B4：`category`、`short_name`（簡稱）欄位獨立加在這裡，不動 `services/project-application-store.ts`
  * 的 `CLIENT_COLS`／`serializeClient`／`ClientRow`（該檔另一批任務同時在改，
- * 這裡改了容易互相打架）。做法：select 時在共用欄位清單後面多接一欄，
+ * 這裡改了容易互相打架）。做法：select 時在共用欄位清單後面多接幾欄，
  * 序列化時在共用序列化結果外面再疊一層。
  */
-const CLIENT_COLS_WITH_CATEGORY = `${CLIENT_COLS}, category`
-type ClientRowWithCategory = ClientRow & { category: string | null }
-function serializeClientWithCategory(r: ClientRowWithCategory) {
-  return { ...serializeClient(r), category: r.category ?? null }
+const CLIENT_COLS_EXT = `${CLIENT_COLS}, category, short_name`
+type ClientRowExt = ClientRow & { category: string | null; short_name: string | null }
+function serializeClientExt(r: ClientRowExt) {
+  return { ...serializeClient(r), category: r.category ?? null, shortName: r.short_name ?? null }
 }
 
 /**
@@ -42,6 +42,8 @@ const CLIENT_CATEGORIES = ["architect", "engineer", "owner", "gov", "other"] as 
 
 const clientBody = z.object({
   name: z.string().trim().min(1).max(200),
+  /** 簡稱：列表／下拉顯示與搜尋用，最長 40 字，可空（空字串視為清除）。 */
+  shortName: z.string().trim().max(40).nullable().optional(),
   /** 分類：建築師／技師／業主／政府機關／其他。可空——既有名冊未必補得回。 */
   category: z.enum(CLIENT_CATEGORIES).nullable().optional(),
   taxId: z
@@ -68,7 +70,7 @@ const clientBody = z.object({
 function toRow(b: Partial<z.infer<typeof clientBody>>): Record<string, unknown> {
   const row: Record<string, unknown> = {}
   const map: Array<[keyof z.infer<typeof clientBody>, string]> = [
-    ["name", "name"], ["category", "category"], ["taxId", "tax_id"], ["phone", "phone"], ["fax", "fax"],
+    ["name", "name"], ["shortName", "short_name"], ["category", "category"], ["taxId", "tax_id"], ["phone", "phone"], ["fax", "fax"],
     ["invoiceAddress", "invoice_address"], ["contactName", "contact_name"], ["contactPhone", "contact_phone"],
     ["email", "email"], ["invoiceType", "invoice_type"], ["paymentMethod", "payment_method"],
     ["closingDay", "closing_day"], ["paymentDay", "payment_day"], ["note", "note"],
@@ -87,17 +89,17 @@ clientsRouter.get("/clients", requireAuth, requireTenant, async (req: Request, r
   const tenantId = res.locals.tenantId as string
   const q = typeof req.query.q === "string" ? req.query.q.trim() : ""
   try {
-    let query = supabaseAdmin.from("clients").select(CLIENT_COLS_WITH_CATEGORY).eq("tenant_id", tenantId).is("deleted_at", null)
+    let query = supabaseAdmin.from("clients").select(CLIENT_COLS_EXT).eq("tenant_id", tenantId).is("deleted_at", null)
     if (q) {
       const like = `%${q.replace(/[%_,()]/g, "")}%`
-      query = query.or(`name.ilike.${like},contact_name.ilike.${like},tax_id.ilike.${like},phone.ilike.${like}`)
+      query = query.or(`name.ilike.${like},short_name.ilike.${like},contact_name.ilike.${like},tax_id.ilike.${like},phone.ilike.${like}`)
     }
     const { data, error } = await query.order("name", { ascending: true })
     if (error) {
       next(new Error(`GET /clients: ${error.message}`))
       return
     }
-    res.status(200).json({ clients: (data ?? []).map((r) => serializeClientWithCategory(r as ClientRowWithCategory)) })
+    res.status(200).json({ clients: (data ?? []).map((r) => serializeClientExt(r as ClientRowExt)) })
   } catch (err) {
     next(err)
   }
@@ -117,7 +119,7 @@ clientsRouter.post("/clients", requireAuth, requireTenant, requireFinance, async
     const { data, error } = await supabaseAdmin
       .from("clients")
       .insert({ tenant_id: tenantId, created_by_emp_id: self?.id ?? null, ...toRow(parsed.data) })
-      .select(CLIENT_COLS_WITH_CATEGORY)
+      .select(CLIENT_COLS_EXT)
       .single()
     if (error || !data) {
       if (isTaxIdConflict(error)) {
@@ -127,7 +129,7 @@ clientsRouter.post("/clients", requireAuth, requireTenant, requireFinance, async
       next(new Error(`POST /clients: ${error?.message}`))
       return
     }
-    res.status(201).json({ client: serializeClientWithCategory(data as ClientRowWithCategory) })
+    res.status(201).json({ client: serializeClientExt(data as ClientRowExt) })
   } catch (err) {
     next(err)
   }
@@ -154,7 +156,7 @@ clientsRouter.patch("/clients/:id", requireAuth, requireTenant, requireFinance, 
       .eq("tenant_id", tenantId)
       .eq("id", id)
       .is("deleted_at", null)
-      .select(CLIENT_COLS_WITH_CATEGORY)
+      .select(CLIENT_COLS_EXT)
       .maybeSingle()
     if (error) {
       if (isTaxIdConflict(error)) {
@@ -168,7 +170,7 @@ clientsRouter.patch("/clients/:id", requireAuth, requireTenant, requireFinance, 
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(200).json({ client: serializeClientWithCategory(data as ClientRowWithCategory) })
+    res.status(200).json({ client: serializeClientExt(data as ClientRowExt) })
   } catch (err) {
     next(err)
   }

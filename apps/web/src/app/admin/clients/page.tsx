@@ -13,23 +13,24 @@ import {
  * 的軟刪除慣例——刪除只是從列表收起來，往來紀錄不會消失。
  */
 type Form = {
-  name: string; category: ClientCategory | ""; taxId: string; phone: string; fax: string; invoiceAddress: string;
+  name: string; shortName: string; category: ClientCategory | ""; taxId: string; phone: string; fax: string; invoiceAddress: string;
   contactName: string; contactPhone: string; email: string;
   invoiceType: InvoiceType | ""; paymentMethod: PaymentMethod | ""; closingDay: string; paymentDay: string;
   note: string;
 };
 const emptyForm = (): Form => ({
-  name: "", category: "", taxId: "", phone: "", fax: "", invoiceAddress: "", contactName: "", contactPhone: "", email: "",
+  name: "", shortName: "", category: "", taxId: "", phone: "", fax: "", invoiceAddress: "", contactName: "", contactPhone: "", email: "",
   invoiceType: "", paymentMethod: "", closingDay: "", paymentDay: "", note: "",
 });
 const fromClient = (c: Client): Form => ({
-  name: c.name, category: c.category ?? "", taxId: c.taxId ?? "", phone: c.phone ?? "", fax: c.fax ?? "", invoiceAddress: c.invoiceAddress ?? "",
+  name: c.name, shortName: c.shortName ?? "", category: c.category ?? "", taxId: c.taxId ?? "", phone: c.phone ?? "", fax: c.fax ?? "", invoiceAddress: c.invoiceAddress ?? "",
   contactName: c.contactName ?? "", contactPhone: c.contactPhone ?? "", email: c.email ?? "",
   invoiceType: c.invoiceType ?? "", paymentMethod: c.paymentMethod ?? "", closingDay: c.closingDay ?? "", paymentDay: c.paymentDay ?? "",
   note: c.note ?? "",
 });
 const toInput = (f: Form): ClientInput => ({
   name: f.name.trim(),
+  shortName: f.shortName.trim() || null,
   category: f.category || null,
   taxId: f.taxId.trim() || null,
   phone: f.phone.trim() || null,
@@ -107,10 +108,10 @@ export default function ClientsPage() {
     }
   }
 
-  const F = (k: keyof Form, label: string, ph?: string) => (
+  const F = (k: keyof Form, label: string, ph?: string, maxLength?: number) => (
     <div>
       <label className={labelCls}>{label}</label>
-      <input className={inputCls} value={form[k]} onChange={(e) => setForm((f) => ({ ...f, [k]: e.target.value }))} placeholder={ph} />
+      <input className={inputCls} value={form[k]} onChange={(e) => setForm((f) => ({ ...f, [k]: e.target.value }))} placeholder={ph} maxLength={maxLength} />
     </div>
   );
 
@@ -120,7 +121,7 @@ export default function ClientsPage() {
 
       <Card>
         <div className="mb-3 flex flex-wrap items-center gap-3">
-          <input className={`${inputCls} max-w-xs`} value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜尋名稱 / 統編 / 承辦" />
+          <input className={`${inputCls} max-w-xs`} value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜尋名稱 / 簡稱 / 統編 / 承辦" />
           <select
             className="rounded-lg border border-gray-200 px-2 py-1.5 text-sm"
             value={categoryFilter}
@@ -142,6 +143,7 @@ export default function ClientsPage() {
               <thead>
                 <tr className="border-b text-left text-xs text-gray-500">
                   <th className="py-2 pr-3">客戶</th>
+                  <th className="py-2 pr-3">簡稱</th>
                   <th className="py-2 pr-3">分類</th>
                   <th className="py-2 pr-3">統編</th>
                   <th className="py-2 pr-3">採購承辦</th>
@@ -155,6 +157,7 @@ export default function ClientsPage() {
                 {shown.map((c) => (
                   <tr key={c.id} className="border-b last:border-0">
                     <td className="py-2 pr-3 font-medium text-gray-900">{c.name}</td>
+                    <td className="py-2 pr-3 text-gray-600">{c.shortName || "—"}</td>
                     <td className="py-2 pr-3 text-gray-600">
                       {c.category ? (
                         <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{CLIENT_CATEGORY_LABELS[c.category]}</span>
@@ -182,6 +185,7 @@ export default function ClientsPage() {
           <h2 className="mb-3 text-sm font-semibold text-gray-700">{editing === "new" ? "新增客戶" : `編輯：${editing.name}`}</h2>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {F("name", "名稱 *")}
+            {F("shortName", "簡稱", "選填，最長 40 字", 40)}
             <div>
               <label className={labelCls}>分類</label>
               <select
