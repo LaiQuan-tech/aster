@@ -1,5 +1,8 @@
 # Project Application Creation and Excel Register Implementation Plan
 
+> **2026-10-07 業主決定移除「預先取號」**（c66be0d：拿掉 POST /projects/reserve、取號列、「顯示預先取號」勾選）。下文提到保留取號／reserved 控制項的步驟已作廢，請勿加回；`projects.reserved_at` 欄位與讀取端防護仍保留。
+
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Make project creation use the project-application form, synchronize contract and billing data, add project detail/application tabs, and replace the simplified project list with the Excel-style annual register whose rows open project detail.
