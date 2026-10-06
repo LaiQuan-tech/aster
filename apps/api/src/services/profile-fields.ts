@@ -14,7 +14,8 @@
  *
  * bank（匯款帳號）獨立成一個區塊而不併進 basic／contact：租戶若只開放
  * 「基本資料／通訊資料」給員工自改，匯款帳號仍須由 HR 維護（或另外勾選本區塊）；
- * 沒設過 editableFields 的租戶維持「全部可改」的既有語意。
+ * 沒設過 editableFields 的租戶維持「全部可改」的既有語意（審核開啟時；匯款帳號在
+ * 審核**關閉**的直接寫入路徑上例外——要 editableFields 明確勾 bank 才放行，見 `bankSelfEditable`）。
  *
  * 對照表與 diff 都是純函式（可直接單元測試）；檔案末端另有唯一一處 IO：
  * 讀租戶 `features.formParameters`，讓審核判斷與附件上限只有一份讀法。
@@ -160,6 +161,19 @@ export function editableColumns(sections: readonly string[] | undefined | null):
   return out
 }
 
+/**
+ * 非 HR 能不能「直接」自改匯款帳號（bank 區塊）——審核**關閉**時 `PUT /employees/:empId/profile`
+ * 的唯一一道閘（審核開啟時走 `editableColumns` 的白名單＋送審，不經這裡）。
+ *
+ * 與 `editableColumns` 刻意不同：那邊「沒設過（undefined）＝全部可改」，但匯款帳號預設由 HR 維護
+ * （改了就能把薪轉款項導到別的帳戶），所以這裡必須 `editableFields` **明確**列了 `bank` 才算可自改；
+ * 沒設過、空陣列、只勾別的區塊一律不可。key 的正規化（trim、大小寫敏感、只認區塊 key）與
+ * `editableColumns` 相同。
+ */
+export function bankSelfEditable(sections: readonly string[] | undefined | null): boolean {
+  return !!sections && sections.some((raw) => raw.trim() === "bank")
+}
+
 /** `{ col: { from, to } }` 的一筆變更。 */
 export interface FieldChange {
   from: unknown
@@ -205,7 +219,7 @@ const DEFAULT_ATTACHMENT_BYTES = 3 * 1024 * 1024
 export interface FormParameters {
   /** 員工自己改 My Data 要不要 HR 審核（預設 false＝直接寫入，維持既有行為）。 */
   myDataRequiresApproval: boolean
-  /** 可自行修改的區塊；undefined＝沒設過＝全部可改。 */
+  /** 可自行修改的區塊；undefined＝沒設過＝全部可改（匯款帳號例外：見 `bankSelfEditable`）。 */
   editableFields: string[] | undefined
   /** 假單附件上限 KB；undefined＝用預設 3 MB。 */
   attachmentLimitKb: number | undefined

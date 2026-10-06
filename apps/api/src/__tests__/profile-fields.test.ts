@@ -28,6 +28,7 @@ import {
   PROFILE_SECTIONS,
   SECTION_COLUMNS,
   SECTION_LABEL,
+  bankSelfEditable,
   columnLabel,
   diffProfile,
   editableColumns,
@@ -58,6 +59,39 @@ describe("bank（匯款帳號）區塊", () => {
   it("勾選 bank 才開放匯款欄，且不會連帶開放別的區塊", () => {
     const allowed = editableColumns(["bank"])
     expect([...allowed].sort()).toEqual([...BANK_COLUMNS].sort())
+  })
+
+  // 審核「關閉」時 PUT 的唯一一道閘：匯款帳號預設由 HR 維護，所以與 editableColumns 的
+  // 「沒設過＝全部可改」不同——必須「明確」勾了 bank 才算員工可自改。
+  describe("bankSelfEditable（審核關閉時員工能不能自改匯款帳號）", () => {
+    it.each([
+      ["沒設過（undefined）", undefined],
+      ["null", null],
+      ["空陣列", []],
+      ["只勾 basic／contact", ["basic", "contact"]],
+      ["勾了別的但沒有 bank", ["contact", "education", "certification", "workHistory"]],
+      ["區塊 key 必須精確（不是欄名）", ["bank_account"]],
+      ["區塊 key 大小寫要一致", ["BANK"]],
+    ])("%s → 不可自改", (_label, sections) => {
+      expect(bankSelfEditable(sections)).toBe(false)
+    })
+
+    it.each([
+      ["只勾 bank", ["bank"]],
+      ["與其他區塊一起勾", ["basic", "contact", "bank"]],
+      ["前後空白會 trim（與 editableColumns 同一套正規化）", [" bank "]],
+    ])("%s → 可自改", (_label, sections) => {
+      expect(bankSelfEditable(sections)).toBe(true)
+    })
+
+    it("明確清單時與 editableColumns 一致；差別只在 undefined（其他區塊全開、匯款仍歸 HR）", () => {
+      for (const sections of [[], ["basic"], ["contact", "bank"], ["bank"], ["basic", "contact", "education"]]) {
+        const columns = editableColumns(sections)
+        expect(bankSelfEditable(sections), JSON.stringify(sections)).toBe(BANK_COLUMNS.every((col) => columns.has(col)))
+      }
+      expect(editableColumns(undefined).has("bank_account")).toBe(true)
+      expect(bankSelfEditable(undefined)).toBe(false)
+    })
   })
 
   it("欄位 → 區塊反查、中文標籤（審核單與通知不會顯示英文欄名）", () => {

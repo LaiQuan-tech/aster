@@ -4,6 +4,8 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import {
+  SECTION_COLUMNS,
+  bankSelfEditable,
   columnLabel,
   diffProfile,
   editableColumns,
@@ -449,6 +451,46 @@ async function submitProfileChangeRequest(opts: {
   return { kind: "queued", changeRequestId: row.id as string, fields: changed }
 }
 
+/**
+ * 審核**關閉**時，非 HR 本人直接寫入 profile 前的匯款帳號把關。
+ *
+ * 審核關閉時 PUT 是整包直接落庫、不看 `editableFields`（只有審核開啟的送審路徑會比對白名單），
+ * 員工自己送 `{"bankAccount": …}` 就能改掉薪轉帳號。這裡只補**匯款四欄**：預設由 HR 維護，
+ * `editableFields` 必須明確勾 `bank`（見 `bankSelfEditable`）員工才能自改。
+ *
+ * 範圍刻意只到 bank，其餘欄位維持既有行為（審核關閉＝直接寫入、不受白名單限制）：ESS「我的資料」頁
+ * 不讀 `editableFields`，基本／通訊兩個分頁的欄位一律可編輯，把白名單套到全部欄位會讓那頁
+ * 的儲存突然 403。ESS 從不送匯款四欄，所以只擋 bank 不影響任何現有操作。
+ *
+ * 只擋**真的有變**的匯款欄（整份表單把原值送回來不算變更，與送審路徑的 diff 規則一致）；
+ * 沒變的匯款欄會從 `patch` 拿掉，不會被寫入。回傳被擋的欄位（DB 欄名），空陣列＝放行。
+ */
+async function guardBankColumns(opts: {
+  tenantId: string
+  empId: string
+  patch: Record<string, unknown>
+  editableFields: string[] | undefined
+}): Promise<string[]> {
+  const { tenantId, empId, patch, editableFields } = opts
+  if (bankSelfEditable(editableFields)) return []
+  const bankCols = SECTION_COLUMNS.bank.filter((col) => col in patch)
+  if (bankCols.length === 0) return []
+
+  const { data: current, error } = await supabaseAdmin
+    .from("employee_profiles")
+    .select(bankCols.join(", "))
+    .eq("tenant_id", tenantId)
+    .eq("employee_id", empId)
+    .maybeSingle()
+  if (error) throw new Error(`profile bank guard: ${error.message}`)
+
+  const next = Object.fromEntries(bankCols.map((col) => [col, patch[col]]))
+  const blocked = Object.keys(diffProfile((current as unknown as Record<string, unknown> | null) ?? {}, next))
+  if (blocked.length > 0) return blocked
+  for (const col of bankCols) delete patch[col]
+  return []
+}
+
 // PUT /employees/:empId/profile — upsert the 1:1 contact profile (self-or-HR).
 employeeProfileRouter.put(
   "/employees/:empId/profile",
@@ -484,8 +526,11 @@ employeeProfileRouter.put(
         if (v !== undefined) patch[col] = v
       }
 
+      // 租戶設定只有非 HR 用得到（HR 不受審核／白名單約束，也就不多一次查詢）。
+      const form = auth.isHr ? null : await loadFormParameters(tenantId)
+
       // W6：非 HR＋租戶開了審核 → 轉成待審單，profile 本身不動。
-      if (!auth.isHr && (await loadFormParameters(tenantId)).myDataRequiresApproval) {
+      if (form?.myDataRequiresApproval) {
         const outcome = await submitProfileChangeRequest({
           tenantId,
           empId,
@@ -506,6 +551,19 @@ employeeProfileRouter.put(
         }
         res.status(202).json({ changeRequestId: outcome.changeRequestId, fields: outcome.fields })
         return
+      }
+
+      // 審核關閉的直接寫入：非 HR 的匯款四欄預設由 HR 維護（editableFields 須明確勾 bank），其餘欄位不變。
+      if (form) {
+        const blocked = await guardBankColumns({ tenantId, empId, patch, editableFields: form.editableFields })
+        if (blocked.length > 0) {
+          res.status(403).json({
+            error: "field_not_editable",
+            fields: blocked,
+            message: `這些欄位需由 HR 修改：${blocked.map(columnLabel).join("、")}`,
+          })
+          return
+        }
       }
 
       const row: Record<string, unknown> = {

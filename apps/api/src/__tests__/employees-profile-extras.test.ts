@@ -506,6 +506,152 @@ describe("PUT /employees/:empId/profile — 匯款四欄", () => {
       expect(h.db.employee_profile_change_requests).toHaveLength(0)
     })
   })
+
+  /**
+   * 審核**關閉**時 PUT 一直是整包直接落庫、完全不看 editableFields：正式租戶（審核關、editableFields
+   * 已設且不含 bank）的員工只要直接打 API 送 `{"bankAccount": …}` 就能把自己的薪轉帳號改掉（獨立複查發現）。
+   * 匯款帳號預設由 HR 維護：非 HR 要改，editableFields 必須「明確」勾 bank。
+   *
+   * 範圍刻意只到 bank：ESS「我的資料」頁不讀 editableFields（基本／通訊兩個分頁的欄位一律可編輯，
+   * 也從不送匯款四欄），所以 bank 以外的欄位在審核關閉時維持「直接寫入、不受白名單限制」。
+   */
+  describe("非 HR 本人改自己 ＋ 審核關閉：匯款帳號預設由 HR 維護（editableFields 須明確勾 bank）", () => {
+    const setForm = (formParameters?: Record<string, unknown>) => {
+      h.db.tenants = [{ id: h.TENANT, features: formParameters ? { formParameters } : {} }]
+    }
+    const storedStaff = () => h.db.employee_profiles.find((r) => r.id === "prof-staff")
+    const BANK_COLS = ["bank_code", "bank_name", "bank_account", "account_holder"]
+
+    const notExplicitlyBank: Array<[string, Record<string, unknown> | undefined]> = [
+      ["正式租戶的設定（只開 basic／contact，沒勾 bank）", { myDataRequiresApproval: false, editableFields: ["basic", "contact"] }],
+      ["只開 contact（沒帶審核開關）", { editableFields: ["contact"] }],
+      ["沒設過 editableFields（預設）", { myDataRequiresApproval: false }],
+      ["editableFields 是空陣列", { myDataRequiresApproval: false, editableFields: [] }],
+      ["租戶完全沒設 formParameters", undefined],
+    ]
+
+    it.each(notExplicitlyBank)("%s：改匯款帳號 → 403 field_not_editable，profile 不動、不建審核單", async (_label, form) => {
+      setForm(form)
+      const res = await put(`/employees/${ids.staff}/profile`, "user-staff", { bankAccount: "1111111111" })
+      expect(res.status, JSON.stringify(res.body)).toBe(403)
+      expect(res.body.error).toBe("field_not_editable")
+      expect(res.body.fields).toEqual(["bank_account"])
+      expect(res.body.message).toContain("匯款帳號")
+      expect(profileWrites()).toHaveLength(0)
+      expect(storedStaff()?.bank_account).toBe("0000000000")
+      expect(h.db.employee_profile_change_requests).toHaveLength(0)
+      expect(h.enqueued).toHaveLength(0)
+    })
+
+    it("四個匯款欄任何一欄有變都擋（只回有變的欄位）", async () => {
+      setForm({ myDataRequiresApproval: false, editableFields: ["basic", "contact"] })
+      const res = await put(`/employees/${ids.staff}/profile`, "user-staff", {
+        bankCode: "700",
+        bankName: "測試銀行乙",
+        bankAccount: "0000000000", // 與現值相同＝沒變，不該出現在 fields
+        accountHolder: "測試戶名乙",
+      })
+      expect(res.status, JSON.stringify(res.body)).toBe(403)
+      expect([...res.body.fields].sort()).toEqual(["account_holder", "bank_code", "bank_name"])
+      expect(profileWrites()).toHaveLength(0)
+    })
+
+    it("同一個請求混了別的欄位：整包拒絕，連合法的欄位也不寫（不會半套）", async () => {
+      setForm({ myDataRequiresApproval: false, editableFields: ["contact"] })
+      const res = await put(`/employees/${ids.staff}/profile`, "user-staff", { phone: "0911111111", bankAccount: "1111111111" })
+      expect(res.status).toBe(403)
+      expect(res.body.fields).toEqual(["bank_account"])
+      expect(profileWrites()).toHaveLength(0)
+      expect(storedStaff()?.phone).toBe("0900000000")
+      expect(storedStaff()?.bank_account).toBe("0000000000")
+    })
+
+    it.each([
+      ["null", null],
+      ["空字串", ""],
+    ])("把匯款帳號清空（%s）也是變更：現值有帳號時被擋", async (_label, cleared) => {
+      setForm({ myDataRequiresApproval: false, editableFields: ["contact"] })
+      const res = await put(`/employees/${ids.staff}/profile`, "user-staff", { bankAccount: cleared })
+      expect(res.status, JSON.stringify(res.body)).toBe(403)
+      expect(res.body.fields).toEqual(["bank_account"])
+      expect(storedStaff()?.bank_account).toBe("0000000000")
+    })
+
+    it("整份表單把匯款欄原值送回來（沒變）：不算變更，200；合法欄位照寫，匯款欄不進 payload", async () => {
+      setForm({ myDataRequiresApproval: false, editableFields: ["contact"] })
+      const res = await put(`/employees/${ids.staff}/profile`, "user-staff", {
+        phone: "0922222222",
+        bankCode: "000",
+        bankName: "測試銀行",
+        bankAccount: "0000000000",
+        accountHolder: "測試戶名",
+      })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      const writes = profileWrites()
+      expect(writes).toHaveLength(1)
+      expect(writes[0].payload).toMatchObject({ phone: "0922222222" })
+      for (const col of BANK_COLS) expect(writes[0].payload, `不該寫 ${col}`).not.toHaveProperty(col)
+      expect(storedStaff()).toMatchObject({ phone: "0922222222", bank_account: "0000000000", account_holder: "測試戶名" })
+    })
+
+    it("還沒有 profile 列的員工：送空的匯款欄＝沒變（200，且不寫匯款欄）；送真的值才擋", async () => {
+      setForm({ myDataRequiresApproval: false, editableFields: ["contact"] })
+      const empty = await put(`/employees/${ids.other}/profile`, "user-other", { bankAccount: "", bankCode: null, phone: "0933333333" })
+      expect(empty.status, JSON.stringify(empty.body)).toBe(200)
+      const created = h.db.employee_profiles.find((r) => r.employee_id === ids.other && r.tenant_id === h.TENANT)
+      expect(created).toMatchObject({ phone: "0933333333" })
+      for (const col of BANK_COLS) expect(created, `不該寫 ${col}`).not.toHaveProperty(col)
+
+      const real = await put(`/employees/${ids.other}/profile`, "user-other", { bankAccount: "1111111111" })
+      expect(real.status).toBe(403)
+      expect(created?.bank_account).toBeUndefined()
+    })
+
+    it("editableFields 明確勾了 bank：直接寫入 200，沒有審核單、不通知 HR", async () => {
+      setForm({ myDataRequiresApproval: false, editableFields: ["bank"] })
+      const res = await put(`/employees/${ids.staff}/profile`, "user-staff", { bankAccount: "1111111111", bankName: "測試銀行乙" })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      expect(storedStaff()).toMatchObject({ bank_account: "1111111111", bank_name: "測試銀行乙", bank_code: "000" })
+      expect(h.db.employee_profile_change_requests).toHaveLength(0)
+      expect(h.enqueued).toHaveLength(0)
+    })
+
+    it("勾了 contact＋bank：同一個請求的通訊欄位與匯款欄位都寫入", async () => {
+      setForm({ myDataRequiresApproval: false, editableFields: ["contact", "bank"] })
+      const res = await put(`/employees/${ids.staff}/profile`, "user-staff", { phone: "0944444444", bankAccount: "3333333333" })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      expect(storedStaff()).toMatchObject({ phone: "0944444444", bank_account: "3333333333" })
+    })
+
+    it("bank 以外的欄位維持既有行為：審核關閉時不受 editableFields 限制（ESS 我的資料頁不讀白名單）", async () => {
+      setForm({ myDataRequiresApproval: false, editableFields: ["contact"] })
+      // gender／nationality 屬 basic 區塊，白名單只開 contact——審核關閉時仍直接寫入（與改動前一致）。
+      const res = await put(`/employees/${ids.staff}/profile`, "user-staff", { gender: "female", nationality: "測試國", phone: "0955555555" })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      expect(storedStaff()).toMatchObject({ gender: "female", nationality: "測試國", phone: "0955555555" })
+    })
+
+    it.each([
+      ["HR 管理員", "user-hr", ids.staff],
+      ["平台管理員", "user-platform", ids.staff],
+      ["HR 改自己", "user-hr", ids.hr],
+    ])("%s 不受影響：editableFields 不含 bank 照樣直接寫入 200", async (_label, caller, target) => {
+      setForm({ myDataRequiresApproval: false, editableFields: ["contact"] })
+      const res = await put(`/employees/${target}/profile`, caller, { bankAccount: "2222222222", accountHolder: "測試戶名丙" })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      const stored = h.db.employee_profiles.find((r) => r.employee_id === target && r.tenant_id === h.TENANT)
+      expect(stored).toMatchObject({ bank_account: "2222222222", account_holder: "測試戶名丙" })
+      expect(h.db.employee_profile_change_requests).toHaveLength(0)
+    })
+
+    it("別人的 profile 仍是 403 forbidden（不因這次改動變成 field_not_editable）", async () => {
+      setForm({ myDataRequiresApproval: false, editableFields: ["bank"] })
+      const res = await put(`/employees/${ids.other}/profile`, "user-staff", { bankAccount: "1111111111" })
+      expect(res.status).toBe(403)
+      expect(res.body.error).toBe("forbidden")
+      expect(profileWrites()).toHaveLength(0)
+    })
+  })
 })
 
 describe("GET /employees/:empId/profile — 匯款四欄隨「我的資料」一起回", () => {
