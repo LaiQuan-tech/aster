@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import { BatchImportButton } from "@/components/BatchImport";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import {
   getDepartments,
   getEmployees,
@@ -240,9 +241,9 @@ export default function SchedulesPage() {
 
   return (
     <>
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <Card>
-          <h2 className="mb-4 text-base font-semibold text-gray-900">單日指派</h2>
+      {/* items-start：兩張卡各自收放，收起的那張不要被拉到跟展開的一樣高。 */}
+      <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-2">
+        <CollapsibleCard title="單日指派">
           <form onSubmit={onAssign} className="space-y-4">
             <div>
               <label className={labelCls}>員工</label>
@@ -281,10 +282,9 @@ export default function SchedulesPage() {
               {submitting ? "處理中…" : "指派"}
             </PrimaryButton>
           </form>
-        </Card>
+        </CollapsibleCard>
 
-        <Card>
-          <h2 className="mb-4 text-base font-semibold text-gray-900">區間批次排班</h2>
+        <CollapsibleCard title="區間批次排班">
           <form onSubmit={onBatchAssign} className="space-y-4">
             <div>
               <label className={labelCls}>員工</label>
@@ -329,7 +329,7 @@ export default function SchedulesPage() {
               {submitting ? "處理中…" : "批次建立"}
             </PrimaryButton>
           </form>
-        </Card>
+        </CollapsibleCard>
 
       </div>
 

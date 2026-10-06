@@ -10,6 +10,7 @@ import {
   inputCls,
   labelCls,
 } from "@/components/admin-ui";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import {
   getAnnouncementVersions,
   getSignatureSheets,
@@ -407,13 +408,16 @@ function PaperSignatureForm({
   }
 
   return (
-    <Card>
-      <h2 className="mb-1 text-sm font-medium text-gray-500">登錄紙本簽署</h2>
-      <p className="mb-4 text-xs leading-relaxed text-gray-500">
-        簽署日期請填<strong>實際簽名那天</strong>，不是公告日期。
-        傳閱單頂上印的是公告日，補簽者何時簽那張紙看不出來；
-        而不利益變更需要證明「每個人何時同意」。
-      </p>
+    <CollapsibleCard
+      title="登錄紙本簽署"
+      hint={
+        <>
+          簽署日期請填<strong>實際簽名那天</strong>，不是公告日期。
+          傳閱單頂上印的是公告日，補簽者何時簽那張紙看不出來；
+          而不利益變更需要證明「每個人何時同意」。
+        </>
+      }
+    >
       <form onSubmit={onSubmit} className="space-y-4">
         <div className="grid gap-4 md:grid-cols-3">
           <div>
@@ -481,7 +485,7 @@ function PaperSignatureForm({
           {busy ? "登錄中…" : "登錄簽署"}
         </PrimaryButton>
       </form>
-    </Card>
+    </CollapsibleCard>
   );
 }
 

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Card, PrimaryButton, ErrorText, Empty, Segmented, inputCls, labelCls } from "@/components/admin-ui";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import {
   getEmployees,
   getLeaveBalancesAdmin,
@@ -67,6 +68,8 @@ export default function LeaveBalancesPage() {
   const [periodStart, setPeriodStart] = useState("");
   const [periodEnd, setPeriodEnd] = useState("");
   const [batchAll, setBatchAll] = useState(false);
+  // 「手動給假 / 調整」整張可收放；開合由這裡管，才能在收起時把 error 顯示在卡片外（error 同時是載入失敗的唯一出口）。
+  const [manualOpen, setManualOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -517,11 +520,12 @@ export default function LeaveBalancesPage() {
             )}
           </Card>
 
-          <Card>
-            <h2 className="mb-1 text-sm font-medium text-gray-500">手動給假 / 調整</h2>
-            <p className="mb-4 text-xs text-gray-400">
-              期間留白＝沿用曆年（上方「年度」的 1/1～12/31）；要調某一段週年期就填期間起日（迄日留白＝起日 + 1 年 − 1 天）。
-            </p>
+          <CollapsibleCard
+            title="手動給假 / 調整"
+            hint="期間留白＝沿用曆年（上方「年度」的 1/1～12/31）；要調某一段週年期就填期間起日（迄日留白＝起日 + 1 年 − 1 天）。"
+            open={manualOpen}
+            onOpenChange={setManualOpen}
+          >
             <form onSubmit={onSubmit} className="grid grid-cols-1 gap-4 sm:grid-cols-5">
               <div>
                 <label className={labelCls}>員工</label>
@@ -567,7 +571,9 @@ export default function LeaveBalancesPage() {
             </form>
             {message && <p className="mt-3 text-sm text-green-600">{message}</p>}
             {error && <div className="mt-3"><ErrorText>{error}</ErrorText></div>}
-          </Card>
+          </CollapsibleCard>
+          {/* 收起時錯誤（含載入失敗）不能被藏住：改顯示在卡片下方。 */}
+          {!manualOpen && error ? <ErrorText>{error}</ErrorText> : null}
         </>
       )}
     </>

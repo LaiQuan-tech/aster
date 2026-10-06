@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { Card, PrimaryButton, ErrorText, Empty, Pill, Segmented, inputCls, labelCls } from "@/components/admin-ui";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { updateAnnouncement, deleteAnnouncement } from "@/lib/admin-api";
 import {
   getAnnouncementYears,
@@ -150,8 +151,7 @@ export default function AnnouncementsPage() {
 
   return (
     <>
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">發佈公告</h2>
+      <CollapsibleCard title="發佈公告">
         <form onSubmit={onCreate} className="space-y-4">
           <div>
             <label className={labelCls}>標題</label>
@@ -204,7 +204,7 @@ export default function AnnouncementsPage() {
             {submitting ? "發佈中…" : "發佈"}
           </PrimaryButton>
         </form>
-      </Card>
+      </CollapsibleCard>
 
       <Card>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">

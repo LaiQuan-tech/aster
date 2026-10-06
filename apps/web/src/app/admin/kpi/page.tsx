@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, Empty, ErrorText, PrimaryButton, Segmented, inputCls, labelCls } from "@/components/admin-ui";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { KpiScoreForm } from "@/components/KpiScoreForm";
 import { getEmployees, type Employee } from "@/lib/admin-api";
 import {
@@ -309,7 +310,7 @@ function ReviewsTab({ employees, templates, empName, onError }: { employees: Emp
           </span>
         </div>
         {sorted.length === 0 ? (
-          <Empty>{period || "此期間"} 沒有考核。用下方「指派」開始。</Empty>
+          <Empty>{period || "此期間"} 沒有考核。展開下方「指派考核」開始。</Empty>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -341,8 +342,7 @@ function ReviewsTab({ employees, templates, empName, onError }: { employees: Emp
         )}
       </Card>
 
-      <Card>
-        <h2 className="mb-3 text-sm font-semibold text-gray-700">指派考核（{period || "—"}）</h2>
+      <CollapsibleCard title={`指派考核（${period || "—"}）`}>
         {activeTemplates.length === 0 ? (
           <Empty>沒有啟用中的範本，先到「範本」分頁建一份。</Empty>
         ) : (
@@ -377,7 +377,7 @@ function ReviewsTab({ employees, templates, empName, onError }: { employees: Emp
             <p className="mt-2 text-xs text-gray-400">同一受評者、同一範本、同一期間只能有一筆；重複指派會被略過。考核者到 ESS「我的考核」評分送出，HR 在這裡定案。</p>
           </>
         )}
-      </Card>
+      </CollapsibleCard>
     </>
   );
 }

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { MonthPicker } from "@/components/MonthPicker";
 import { apiDownload } from "@/lib/api-client";
 import { getEmployees, type Employee } from "@/lib/admin-api";
@@ -263,11 +264,10 @@ export default function OvertimeSettlementsPage() {
         )}
       </Card>
 
-      <Card>
-        <h2 className="mb-1 text-sm font-medium text-gray-500">手動補登一筆</h2>
-        <p className="mb-4 text-xs text-gray-400">
-          月表沒抓到、或另有協議要另行給付的加班時數，可以直接補一筆在 {period}。
-        </p>
+      <CollapsibleCard
+        title="手動補登一筆"
+        hint={<>月表沒抓到、或另有協議要另行給付的加班時數，可以直接補一筆在 {period}。</>}
+      >
         <div className="flex flex-wrap items-end gap-3">
           <div className="min-w-56">
             <label className={labelCls}>員工</label>
@@ -325,7 +325,7 @@ export default function OvertimeSettlementsPage() {
             補登
           </PrimaryButton>
         </div>
-      </Card>
+      </CollapsibleCard>
     </>
   );
 }

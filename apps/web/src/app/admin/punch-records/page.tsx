@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { BatchImportButton } from "@/components/BatchImport";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { fmtHm, localDateKey } from "@/lib/ess-format";
 import { punchLocationReason } from "@/lib/punch-location-reason";
 import {
@@ -171,16 +172,15 @@ export default function PunchRecordsPage() {
 
   return (
     <>
-      <Card>
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold text-gray-900">打卡補登</h2>
-            <p className="mt-1 text-sm text-gray-500">支援忘打卡補登與休息/外出紀錄補登。</p>
-          </div>
-          <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700">
-            source = manual
-          </span>
-        </div>
+      <CollapsibleCard
+        title="打卡補登"
+        hint={
+          <>
+            支援忘打卡補登與休息/外出紀錄補登。
+            <span className="ml-2 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">source = manual</span>
+          </>
+        }
+      >
         <form onSubmit={onManual} className="space-y-3">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
             <div>
@@ -209,7 +209,7 @@ export default function PunchRecordsPage() {
           </div>
           {mMsg && <p className="text-sm text-green-600">{mMsg}</p>}
         </form>
-      </Card>
+      </CollapsibleCard>
 
       <Card>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
