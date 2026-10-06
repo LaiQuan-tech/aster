@@ -21,7 +21,7 @@ export const projectsAnnualRouter = Router()
 
 // ── GET /projects/annual?year=115|2026&sort=code|unreceived_pct&format=json|xlsx&view=totals ──
 /**
- * 老闆的 Excel「年度專案申請單總表」：一列一案（含預先取號的空列），
+ * 老闆的 Excel「年度專案申請單總表」：一列一案（含舊的預先取號空列，若有），
  * 依建立月份分區塊小計，最後年度總計。HR 才能看——整年的金額都在上面。
  * year 省略時取租戶當地的今年；< 1911 視為民國年。
  *

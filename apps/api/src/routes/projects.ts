@@ -64,7 +64,10 @@ export const projectsRouter = Router()
 const PROJECT_COLS =
   "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, archive_reason, starts_on, ends_on, opened_on, dept_id, lead_emp_id, share_mode, bonus_pool, bonus_rate_pct, created_at, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers"
 
-/** 預先取號的專案名稱——之後 PATCH 填真名時自動清掉 reserved_at。 */
+/**
+ * 舊的預先取號空列的占位名稱。預先取號功能已移除（業主 2026-10-07），不再有建立途徑；
+ * 留著這個常數只為了讓 PATCH 填真名時仍會清掉舊資料的 reserved_at（見 PATCH /projects/:id）。
+ */
 export const RESERVED_NAME = "（預先取號）"
 
 /* ── P3 專案申請單的欄位（模組五） ──────────────────────────────────── */
@@ -187,10 +190,6 @@ const createSchema = z.object({
   if (body.contractAmount !== undefined && body.primaryContract != null) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "contractAmount and primaryContract are mutually exclusive" })
   }
-})
-
-const reserveSchema = z.object({
-  count: z.number().int().min(1).max(20),
 })
 
 const updateSchema = z
@@ -583,9 +582,6 @@ projectsRouter.get(
     // 案情（進行中／暫停／結案／解約）不在這裡篩——那是前端的檢視選擇，
     // 已解約的案子仍要出現在列表上。
     const includeArchived = req.query.includeArchived === "1"
-    // 預先取號的空列（reserved_at 非空）預設不進列表——它們還不是案子，
-    // 只是佔了號。年度總表要看得到，帶 ?includeReserved=1。
-    const includeReserved = req.query.includeReserved === "1"
     // M14：?year= 依**歸屬年度**（fiscal_year）篩；不帶＝全部。年度是分析維度，
     // 跟編號裡的建立年刻意分開（見 fiscalYear 的說明）。值不合法一律 400，不默默忽略。
     let year: number | null = null
@@ -641,7 +637,8 @@ projectsRouter.get(
         .select(PROJECT_COLS)
         .eq("tenant_id", tenantId)
       if (!includeArchived) query = query.is("archived_at", null)
-      if (!includeReserved) query = query.is("reserved_at", null)
+      // 舊的預先取號空列（reserved_at 非空）還不是案子，一律不進列表，沒有參數可以打開。
+      query = query.is("reserved_at", null)
       if (year !== null) query = query.eq("fiscal_year", year)
       if (kinds !== null) query = query.in("kind", kinds)
       // 次要排序固定用 id：主排序值重複（同名／同狀態）時結果仍穩定可測。
@@ -918,83 +915,6 @@ async function tenantToday(tenantId: string): Promise<string> {
 }
 
 /**
- * 系統產號＋插入，撞號重試。回 null 代表重試用盡（呼叫端回 503）。
- * 建案與預先取號共用——兩邊的併發與格式邏輯要一模一樣。
- */
-async function insertWithGeneratedCode(
-  tenantId: string,
-  year: number,
-  row: Record<string, unknown>,
-): Promise<{ id: string; code: string } | null> {
-  const fmt = await loadCodeFormat(tenantId)
-  for (let attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt++) {
-    const code = await nextProjectCode(tenantId, year, fmt)
-    const { data, error } = await supabaseAdmin
-      .from("projects")
-      .insert({ ...row, code })
-      .select("id, code")
-      .single()
-    if (!error) return { id: data!.id as string, code: data!.code as string }
-    if (!isUniqueViolation(error)) throw new Error(`insertWithGeneratedCode: ${error.message}`)
-    // 撞號 → 下一圈重算
-  }
-  return null
-}
-
-// ── POST /projects/reserve — HR 預先取號（連號） ─────────────────────
-/**
- * 老闆的做法：申請單編號先開好，案子談定再補內容。連續取 `count` 個號，
- * 每個都是一列 `name='（預先取號）'`、`reserved_at=now` 的空專案；之後
- * `PATCH /projects/:id` 填 name 時自動清掉 reserved_at，就變成正式的案子。
- * 列表預設不回 reserved 列（見 GET /projects 的 includeReserved）。
- */
-projectsRouter.post(
-  "/projects/reserve",
-  requireAuth,
-  requireTenant,
-  requireFinance,
-  async (req: Request, res: Response, next: NextFunction) => {
-    const tenantId = res.locals.tenantId as string
-    const parsed = reserveSchema.safeParse(req.body ?? {})
-    if (!parsed.success) {
-      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
-      return
-    }
-    try {
-      const year = await taipeiYear(tenantId)
-      // A5：預先取號跟正式建案一樣要補租戶今天，不然填真名轉正式案子後
-      // opened_on 永遠是 null——申請單抬頭與年度總表會退回用建立日。
-      const openedOn = await tenantToday(tenantId)
-      const nowIso = new Date().toISOString()
-      const projects: Array<{ id: string; code: string }> = []
-      for (let i = 0; i < parsed.data.count; i++) {
-        const inserted = await insertWithGeneratedCode(tenantId, year, {
-          tenant_id: tenantId,
-          name: RESERVED_NAME,
-          fiscal_year: year,
-          status: "active",
-          kind: "main",
-          opened_on: openedOn,
-          reserved_at: nowIso,
-          design_scope: [],
-          engineers: {},
-          other_expenses: 0,
-        })
-        if (!inserted) {
-          // 已經取到的號留著（它們是合法的空列），只回報取到幾個。
-          res.status(503).json({ error: "code_generation_failed", attempts: MAX_CODE_ATTEMPTS, projects })
-          return
-        }
-        projects.push(inserted)
-      }
-      res.status(201).json({ projects })
-    } catch (err) {
-      next(err)
-    }
-  },
-)
-
-/**
  * 專案詳情的三段：basic（全員）／finance（錢）／bonus（分潤）。
  * finance＝HR／會計／該案 lead（欄位或成員角色 lead｜manager）／該案部門主管
  * （`loadScope().canManage`）；bonus＝同上但**不含會計**（`loadScope().canSeeBonus`）。
@@ -1181,7 +1101,7 @@ projectsRouter.patch(
       const patch: Record<string, unknown> = {}
       if (b.name !== undefined) {
         patch.name = b.name
-        // 預先取號的空列一填上真名就是正式的案子了。
+        // 舊的預先取號空列（功能已移除，僅剩既有資料）一填上真名就是正式的案子了。
         if (scope.project.reserved_at && b.name !== RESERVED_NAME) patch.reserved_at = null
       }
       if (b.fiscalYear !== undefined) patch.fiscal_year = b.fiscalYear

@@ -198,7 +198,7 @@ export default function AnnualProjectsPage() {
                           <td className={`${borderCell} text-center`}>{row.dateRoc ?? "—"}</td>
                           <td className={`${borderCell} text-center`}>{row.clientName ?? "—"}</td>
                           <td className={`${borderCell} min-w-64 whitespace-normal text-center`}>
-                            <Link href={`/admin/projects/${row.projectId}`} className="hover:underline">{row.reserved ? "（預先取號）" : row.name}</Link>
+                            <Link href={`/admin/projects/${row.projectId}`} className="hover:underline">{row.name}</Link>
                           </td>
                           <td className={`${borderCell} text-right`}>{fmtMoney(row.amountUntaxed)}</td>
                           <td className={`${borderCell} text-right`}>{fmtMoney(row.taxAmount)}</td>

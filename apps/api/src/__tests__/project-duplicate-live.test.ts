@@ -7,6 +7,7 @@ import { supabaseAdmin } from "../lib/supabase"
 import { provisionTenant } from "../services/tenants"
 import { taipeiToday } from "../services/project-status"
 import { ANNUAL_DUPLICATE_COUNT_WARNING } from "../services/project-application-store"
+import { RESERVED_NAME } from "../routes/projects"
 import { app } from "../app"
 
 /**
@@ -208,10 +209,28 @@ describe("C2-1 複製為追加減（change 120 萬）", () => {
     expect(missing.status).toBe(404)
   })
 
-  it("預先取號的空列不能複製 → 409 reserved_project", async () => {
-    const reserved = await asAdmin(request(app).post("/projects/reserve")).send({ count: 1 })
-    expect(reserved.status).toBe(201)
-    const res = await asAdmin(request(app).post(`/projects/${reserved.body.projects[0].id}/duplicate`)).send({
+  it("舊的預先取號空列不能複製 → 409 reserved_project", async () => {
+    // 預先取號功能已移除（POST /projects/reserve 已刪），但「空列不能複製」的防護還在：
+    // 直接寫入舊資料形狀的空列來驗它。編號取 002（沿用移除前 reserve 取到的號），後面建案的流水號不位移。
+    const { data: reserved, error: rsvErr } = await supabaseAdmin
+      .from("projects")
+      .insert({
+        tenant_id: tenantId,
+        name: RESERVED_NAME,
+        code: `AT-${ROC}-002`,
+        fiscal_year: YEAR,
+        status: "active",
+        kind: "main",
+        opened_on: TODAY,
+        reserved_at: new Date().toISOString(),
+        design_scope: [],
+        engineers: {},
+        other_expenses: 0,
+      })
+      .select("id")
+      .single()
+    expect(rsvErr).toBeNull()
+    const res = await asAdmin(request(app).post(`/projects/${reserved!.id}/duplicate`)).send({
       kind: "change",
       amount: 1,
       reason: "x",

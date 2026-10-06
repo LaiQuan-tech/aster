@@ -285,31 +285,16 @@ export function createProjectExt(body: CreateProjectExtBody) {
   })
 }
 
-export interface ReservedProject {
-  id: string
-  code: string
-}
-
-/** 一次預先保留 N 個編號（成立前先掛號用）；上限 20（後端 zod）。 */
-export function reserveProjectCodes(count: number) {
-  return apiFetch<{ projects: ReservedProject[] }>("/projects/reserve", {
-    method: "POST",
-    body: JSON.stringify({ count }),
-  })
-}
-
 /** `GET /projects` 列表列——後端 serializeProject(finance:false) + 平面 clientName。 */
 export interface ProjectListItem extends Project {
   clientId?: string | null
   clientName?: string | null
   kind?: ProjectKind
-  reservedAt?: string | null
 }
 
 /** B4：`sort`／`dir` 省略＝後端預設（created desc），行為與改動前相容。 */
 export function listProjectsExt(opts?: {
   includeArchived?: boolean
-  includeReserved?: boolean
   sort?: ProjectSort
   dir?: SortDir
   /** M14：歸屬年度（fiscal_year）；省略＝全部年度。 */
@@ -317,7 +302,6 @@ export function listProjectsExt(opts?: {
 }) {
   const q = new URLSearchParams()
   if (opts?.includeArchived) q.set("includeArchived", "1")
-  if (opts?.includeReserved) q.set("includeReserved", "1")
   if (opts?.sort) q.set("sort", opts.sort)
   if (opts?.dir) q.set("dir", opts.dir)
   if (opts?.year != null) q.set("year", String(opts.year))
@@ -594,7 +578,7 @@ export interface ProjectDetail extends Project {
   clientId: string | null
   parentProjectId: string | null
   kind: ProjectKind
-  /** 預先取號、尚未真正立案的空列（填了 name 就會清掉）。 */
+  /** 舊的預先取號空列（功能已移除，不再有新增途徑）；有值＝尚未真正立案，填了 name 就會清掉。 */
   reservedAt: string | null
   siteAddress: string | null
   siteAreaM2: number | null
@@ -743,7 +727,7 @@ export interface AnnualRow {
   clientName: string | null
   name: string
   kind: ProjectKind
-  /** 預先取號、尚未真正立案的空列。 */
+  /** 舊的預先取號空列（功能已移除，不再有新增途徑）；true＝尚未真正立案。 */
   reserved: boolean
   amountUntaxed: number | null
   amountSource: "contract" | "quotation" | null
@@ -1069,7 +1053,7 @@ export function getProjectLineage(id: string) {
 
 export function humanizeDuplicateError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : fallback
-  if (msg.includes("reserved_project")) return "預先取號的空案還沒有內容，無法複製。"
+  if (msg.includes("reserved_project")) return "這是還沒有內容的空案，無法複製。"
   if (msg.includes("root_code_missing")) return "根案沒有編號，無法產生複製案編號。"
   if (msg.includes("code_generation_failed")) return "編號產生失敗（併發撞號），請再試一次。"
   if (msg.includes("forbidden")) return "沒有權限複製此專案（需 HR／會計，或本案負責人／部門主管）。"

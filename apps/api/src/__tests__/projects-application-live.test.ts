@@ -7,6 +7,7 @@ import ExcelJS from "exceljs"
 import { supabaseAdmin } from "../lib/supabase"
 import { provisionTenant } from "../services/tenants"
 import { taipeiToday } from "../services/project-status"
+import { RESERVED_NAME } from "../routes/projects"
 import { app } from "../app"
 
 /**
@@ -140,38 +141,51 @@ describe("P3-1 編號 AT-民國年-流水號", () => {
   })
 })
 
-describe("P3-1 預先取號", () => {
+// 預先取號功能已移除（業主 2026-10-07）：POST /projects/reserve 已刪，不再有建立途徑。
+// 但 projects.reserved_at 欄位與讀取端的防護都還在（列表一律排除、PATCH 填真名轉正式案、
+// 年度總表照列並標記 reserved），所以這裡直接寫入「舊資料形狀」的空列當 fixture 來守住它們。
+// 編號刻意取 003–007，與移除前「連號取 5 筆」的結果一致：後面依賴精確流水號的斷言
+// （008、改格式後的 012…）與年度總表那 4 筆 reserved 才不會位移。
+describe("P3-1 舊的預先取號空列（功能已移除，讀取端防護仍在）", () => {
   let reserved: Array<{ id: string; code: string }>
 
-  it("reserve 5 筆連號", async () => {
-    const res = await asAdmin(request(app).post("/projects/reserve")).send({ count: 5 })
-    expect(res.status).toBe(201)
-    reserved = res.body.projects
+  it("直接寫入 5 筆舊資料形狀的空列（003–007）", async () => {
+    const nowIso = new Date().toISOString()
+    const { data, error } = await supabaseAdmin
+      .from("projects")
+      .insert(
+        [3, 4, 5, 6, 7].map((n) => ({
+          tenant_id: tenantId,
+          name: RESERVED_NAME,
+          code: `AT-${ROC}-00${n}`,
+          fiscal_year: YEAR,
+          status: "active",
+          kind: "main",
+          opened_on: taipeiToday(),
+          reserved_at: nowIso,
+          design_scope: [],
+          engineers: {},
+          other_expenses: 0,
+        })),
+      )
+      .select("id, code")
+    expect(error).toBeNull()
+    reserved = ((data ?? []) as Array<{ id: string; code: string }>).sort((a, b) => a.code.localeCompare(b.code))
     expect(reserved.map((p) => p.code)).toEqual([3, 4, 5, 6, 7].map((n) => `AT-${ROC}-00${n}`))
-
-    // A5 修法：預先取號要跟正式建案一樣補租戶今天，不能等填真名才補開案日期——
-    // 不然填真名之前，申請單抬頭與年度總表都會退回用（其實不存在的）建立日。
-    const got = await asAdmin(request(app).get(`/projects/${reserved[0].id}`))
-    expect(got.body.project.openedOn).toBe(taipeiToday())
   })
 
-  it("count 超過 20 或非 HR 都擋", async () => {
-    expect((await asAdmin(request(app).post("/projects/reserve")).send({ count: 21 })).status).toBe(400)
-    expect((await asEmployee(request(app).post("/projects/reserve")).send({ count: 1 })).status).toBe(403)
-  })
-
-  it("列表預設不回 reserved 空列；?includeReserved=1 才回", async () => {
+  it("列表一律不回空列；includeReserved 參數已移除，帶了也一樣不回", async () => {
     const list = await asAdmin(request(app).get("/projects"))
     const ids = list.body.projects.map((p: { id: string }) => p.id)
     expect(ids).not.toContain(reserved[0].id)
     expect(ids).toContain(mainProjectId)
 
-    const all = await asAdmin(request(app).get("/projects?includeReserved=1"))
-    const allIds = all.body.projects.map((p: { id: string }) => p.id)
-    expect(allIds).toContain(reserved[0].id)
-    const row = all.body.projects.find((p: { id: string }) => p.id === reserved[0].id)
-    expect(row.name).toBe("（預先取號）")
-    expect(row.reservedAt).not.toBeNull()
+    // 以前帶 ?includeReserved=1 才會回空列；參數拿掉後後端不認得、直接忽略，仍然排除。
+    const withParam = await asAdmin(request(app).get("/projects?includeReserved=1"))
+    expect(withParam.status).toBe(200)
+    const withParamIds = withParam.body.projects.map((p: { id: string }) => p.id)
+    for (const r of reserved) expect(withParamIds).not.toContain(r.id)
+    expect(withParamIds).toContain(mainProjectId)
   })
 
   it("PATCH 填上名字就變成正式案子（reservedAt 清空、進列表）", async () => {
@@ -197,7 +211,7 @@ describe("P3-1 預先取號", () => {
     expect(restored.status).toBe(200)
   })
 
-  it("取號之後建案繼續往下編（008），不會回頭用到保留的號", async () => {
+  it("既有空列（003–007）之後建案繼續往下編（008），不會回頭用到保留的號", async () => {
     const res = await createProject({ name: "取號之後的案子" })
     expect(res.body.code).toBe(`AT-${ROC}-008`)
   })

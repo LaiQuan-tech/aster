@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Card, Empty, ErrorText, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText } from "@/components/admin-ui";
 import { getDepartments, getEmployees, getMe, type Department, type Employee } from "@/lib/admin-api";
 import { listVendors, type Vendor } from "@/lib/company-api";
 import {
@@ -21,7 +21,6 @@ import {
 import {
   listProjectsExt,
   createProjectExt,
-  reserveProjectCodes,
   listClients,
   createClient,
   getP3SettingsLite,
@@ -61,9 +60,8 @@ export default function AdminProjectsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 檢視選項：封存／預先取號的號碼要向後端要（預設不回），案情篩選在前端做就好。
+  // 檢視選項：封存的要向後端要（預設不回），案情篩選在前端做就好。
   const [includeArchived, setIncludeArchived] = useState(false);
-  const [includeReserved, setIncludeReserved] = useState(false);
   const [statusFilter, setStatusFilter] = useState<ProjectStatus | "">("");
   // B4：列表排序——欄位＋方向，換了就重打 GET /projects。
   const [sort, setSort] = useState<ProjectSort>("created");
@@ -77,17 +75,12 @@ export default function AdminProjectsPage() {
 
   const [saving, setSaving] = useState(false);
 
-  // 預先取號（模組五）
-  const [reserveCount, setReserveCount] = useState("1");
-  const [reserving, setReserving] = useState(false);
-  const [reservedCodes, setReservedCodes] = useState<string[] | null>(null);
-
   async function load() {
     setLoading(true);
     setError(null);
     try {
       const [p, cl, d, e, st, ven, p3, me] = await Promise.all([
-        listProjectsExt({ includeArchived, includeReserved, sort, dir, year: yearFilter ? Number(yearFilter) : null }),
+        listProjectsExt({ includeArchived, sort, dir, year: yearFilter ? Number(yearFilter) : null }),
         listClients(),
         // 同 [id]/page.tsx：GET /departments 還是 HR 限定，會計拿不到就給空清單，
         // 不要讓整個專案列表因為一個下拉選單掛掉。
@@ -118,7 +111,7 @@ export default function AdminProjectsPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [includeArchived, includeReserved, sort, dir, yearFilter]);
+  }, [includeArchived, sort, dir, yearFilter]);
 
   const mainProjects = projects.filter((p) => (p.kind ?? "main") === "main");
 
@@ -150,26 +143,6 @@ export default function AdminProjectsPage() {
     } catch (err) {
       setError(humanizeClientError(err, "新增客戶失敗"));
       throw err;
-    }
-  }
-
-  async function submitReserve() {
-    const n = Number(reserveCount);
-    if (!Number.isInteger(n) || n < 1) {
-      setError("預先取號筆數請填正整數");
-      return;
-    }
-    setReserving(true);
-    setError(null);
-    try {
-      const res = await reserveProjectCodes(n);
-      setReservedCodes(res.projects.map((p) => p.code));
-      setIncludeReserved(true);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "預先取號失敗");
-    } finally {
-      setReserving(false);
     }
   }
 
@@ -225,7 +198,7 @@ export default function AdminProjectsPage() {
             </svg>
           </span>
         </button>
-        {/* 錯誤（載入、預先取號、儲存設定）原本只顯示在申請單裡；收起時改顯示在這裡，免得被藏住。 */}
+        {/* 錯誤（載入、儲存設定）原本只顯示在申請單裡；收起時改顯示在這裡，免得被藏住。 */}
         {!formOpen && error ? <div className="mt-3"><ErrorText>{error}</ErrorText></div> : null}
         <div id="project-application-form" hidden={!formOpen} className="mt-4">
         <ProjectApplicationForm
@@ -243,24 +216,6 @@ export default function AdminProjectsPage() {
           onSubmit={submit}
           onCreateClient={submitNewClient}
         />
-        </div>
-        <div className="mt-4 flex flex-wrap items-end gap-3 border-t pt-4">
-          <div>
-            <label className={labelCls}>預先取號</label>
-            <input className={`${inputCls} w-24`} type="number" min="1" max="50" value={reserveCount} onChange={(e) => setReserveCount(e.target.value)} />
-          </div>
-          <button
-            type="button"
-            onClick={() => void submitReserve()}
-            disabled={reserving}
-            className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 disabled:opacity-50"
-          >
-            {reserving ? "取號中…" : `預先取號 ${reserveCount || "N"} 筆`}
-          </button>
-          {reservedCodes && (
-            <span className="text-sm text-green-700">已取號：{reservedCodes.join("、")}</span>
-          )}
-          <span className="text-xs text-gray-400">立案前先掛號用；下方列表勾選「顯示預先取號」可見。</span>
         </div>
       </Card> : null}
 
@@ -316,14 +271,6 @@ export default function AdminProjectsPage() {
               onChange={(e) => setIncludeArchived(e.target.checked)}
             />
             顯示已封存
-          </label>
-          <label className="flex items-center gap-1.5 text-sm text-gray-600">
-            <input
-              type="checkbox"
-              checked={includeReserved}
-              onChange={(e) => setIncludeReserved(e.target.checked)}
-            />
-            顯示預先取號
           </label>
 
           {settings && (
@@ -385,7 +332,6 @@ export default function AdminProjectsPage() {
                   <tr key={p.id} className="border-b last:border-0">
                     <td className="py-2 pr-3 font-mono text-xs text-gray-500">
                       {p.code ?? "—"}
-                      {p.reservedAt && <span className="ml-1 rounded bg-blue-50 px-1 py-0.5 text-[10px] font-sans text-blue-700">預先取號</span>}
                     </td>
                     <td className="py-2 pr-3 font-medium text-gray-900">{p.name || "（未命名）"}</td>
                     <td className="py-2 pr-3 text-gray-600">{clientNameOf(p)}</td>

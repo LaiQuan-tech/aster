@@ -207,7 +207,7 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
 
   const source = await loadSource(tenantId, input.sourceProjectId)
   if (!source) return { ok: false, status: 404, error: "not_found" }
-  // 預先取號的空列還不是案子，沒有東西可複製。
+  // 舊的預先取號空列（功能已移除，僅剩既有資料）還不是案子，沒有東西可複製。
   if (source.reserved_at) return { ok: false, status: 409, error: "reserved_project" }
 
   const root = await resolveRoot(tenantId, source)

@@ -120,7 +120,7 @@ export async function buildAnnualWorkbook(table: AnnualTable, opts: BuildAnnualW
       row.getCell(C.code).value = item.code ?? ""
       row.getCell(C.date).value = item.dateRoc ?? ""
       row.getCell(C.client).value = item.clientName ?? ""
-      row.getCell(C.name).value = item.reserved ? "（預先取號）" : item.name
+      row.getCell(C.name).value = item.name
       money(row.getCell(C.amount), item.amountUntaxed)
       money(row.getCell(C.tax), item.taxAmount)
       money(row.getCell(C.total), item.amountTotal)
