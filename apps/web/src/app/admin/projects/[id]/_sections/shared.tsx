@@ -55,6 +55,8 @@ export function emptyEngineersForm(): EngineersForm {
 }
 
 export interface AppForm {
+  /** 承接公司。"" ＝ 沿用租戶預設公司（專案上 company_id 為 null）；有值＝這案指定的公司。 */
+  companyId: string;
   siteAddress: string;
   siteAreaM2: string;
   designScope: DesignScopeItem[];
@@ -73,6 +75,7 @@ export function appFormFrom(p: ProjectDetail): AppForm {
     if (a) engineers[d] = { vendorId: a.vendorId ?? null, name: a.name ?? null };
   }
   return {
+    companyId: p.companyId ?? "",
     siteAddress: p.siteAddress ?? "",
     siteAreaM2: p.siteAreaM2 != null ? String(p.siteAreaM2) : "",
     designScope: p.designScope ?? [],

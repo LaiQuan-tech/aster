@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  defaultCompanyIdOf,
   emptyProjectApplicationDraft,
   projectApplicationAmounts,
   projectApplicationErrors,
   projectApplicationSchedule,
   projectApplicationVisibility,
   createAndOpenProject,
+  selectedCompanyId,
   toAuthorizedCreateProjectBody,
   toCreateProjectBody,
 } from "./project-application-form";
@@ -195,5 +197,45 @@ describe("project application form model", () => {
       (href) => navigated.push(href),
     );
     expect(navigated).toEqual(["/admin/projects/project-1"]);
+  });
+});
+
+describe("承接公司（申請單左上角下拉）", () => {
+  const companies = [
+    { id: "company-second", isDefault: false },
+    { id: "company-default", isDefault: true },
+  ];
+
+  it("預設選 isDefault 那間（不是清單第一間）；沒有標預設時退而取第一間；沒有公司回空字串", () => {
+    expect(defaultCompanyIdOf(companies)).toBe("company-default");
+    expect(defaultCompanyIdOf([{ id: "only-one", isDefault: false }])).toBe("only-one");
+    expect(defaultCompanyIdOf([{ id: "only-one", isDefault: true }])).toBe("only-one");
+    expect(defaultCompanyIdOf([])).toBe("");
+  });
+
+  it("使用者選過（且還在名冊裡）就用選的；沒動過或選的已不在名冊就用預設", () => {
+    expect(selectedCompanyId("company-second", companies)).toBe("company-second");
+    expect(selectedCompanyId("", companies)).toBe("company-default");
+    expect(selectedCompanyId("removed-company", companies)).toBe("company-default");
+    expect(selectedCompanyId("", [])).toBe("");
+  });
+
+  it("草稿預設沒選；送出內容帶 companyId，沒選就是 null（交給後端補預設公司）", () => {
+    const draft = emptyProjectApplicationDraft("2026-10-01", []);
+    draft.name = "案名";
+    expect(draft.companyId).toBe("");
+    expect(toCreateProjectBody(draft).companyId).toBeNull();
+
+    draft.companyId = "company-second";
+    expect(toCreateProjectBody(draft).companyId).toBe("company-second");
+  });
+
+  it("元件送出前把下拉實際選到的公司（含預設）寫進草稿，一般權限的 payload 也保留 companyId", () => {
+    const draft = emptyProjectApplicationDraft("2026-10-01", []);
+    draft.name = "案名";
+    const resolved = { ...draft, companyId: selectedCompanyId(draft.companyId, companies) };
+
+    expect(toAuthorizedCreateProjectBody(resolved, { canFinance: true, canBonus: false }).companyId).toBe("company-default");
+    expect(toAuthorizedCreateProjectBody(resolved, { canFinance: false, canBonus: false }).companyId).toBe("company-default");
   });
 });

@@ -2,10 +2,13 @@
  * 純測試（不連任何 DB）用的記憶體版 supabase-js。
  *
  * 只實作 API 路由實際用到的 PostgREST 子集：
- *   select / insert / update / delete、eq / neq / is / not / in / ilike / or（ilike／eq／is）、
- *   order / limit、single / maybeSingle、await（thenable），以及 rpc。
+ *   select / insert / update / delete、eq / neq / is / not / in / like / ilike / gt·gte·lt·lte /
+ *   or（ilike／eq／is）、order / limit、single / maybeSingle、await（thenable），以及 rpc。
  * 刻意仿真實行為的地方：`single()`／`maybeSingle()` 撞到多列回 PGRST116；
- * `select(cols)` 不裁欄（回整列的複本）；所有寫入都記在 `writes`，測試可直接斷言 payload。
+ * `select("a, b")` 只回有列名的欄位（沒列到的欄位拿不到，漏 select 欄位的 bug 才抓得到；
+ * `select()` 不帶參數或 `*` 回整列；內嵌關聯如 `vendors(name)` 不模擬）；
+ * 所有寫入記在 `writes`、所有讀取的資料表記在 `reads`（可斷言「只查了一次」），
+ * 測試可直接斷言 payload。
  *
  * 用法（每個測試檔）：
  *   vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
@@ -38,11 +41,13 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
-function matchesIlike(value: unknown, pattern: string): boolean {
+function matchesLike(value: unknown, pattern: string, flags: string): boolean {
   if (value === null || value === undefined) return false
-  const regex = new RegExp(`^${pattern.split("%").map(escapeRegExp).join(".*")}$`, "i")
+  const regex = new RegExp(`^${pattern.split("%").map(escapeRegExp).join(".*")}$`, flags)
   return regex.test(String(value))
 }
+
+const matchesIlike = (value: unknown, pattern: string) => matchesLike(value, pattern, "i")
 
 /** PostgREST `or=(a.ilike.%x%,b.eq.y,c.is.null)` 的子集。 */
 function parseOr(expression: string): (row: Row) => boolean {
@@ -63,6 +68,34 @@ function parseOr(expression: string): (row: Row) => boolean {
     })
 }
 
+/** 依 `select("a, b, alias:c")` 的欄位清單裁欄；括號內的內嵌關聯（`vendors(name)`）不模擬、略過。 */
+function projectColumns(row: Row, columns: string | null): Row {
+  if (columns === null) return { ...row }
+  const tokens: string[] = []
+  let depth = 0
+  let current = ""
+  for (const ch of columns) {
+    if (ch === "(") depth += 1
+    if (ch === ")") depth -= 1
+    if (ch === "," && depth === 0) {
+      tokens.push(current.trim())
+      current = ""
+    } else {
+      current += ch
+    }
+  }
+  if (current.trim()) tokens.push(current.trim())
+  if (tokens.includes("*")) return { ...row }
+  const out: Row = {}
+  for (const token of tokens) {
+    if (token.includes("(")) continue
+    const [aliasOrColumn, column] = token.split(":").map((part) => part.trim())
+    if (column) out[aliasOrColumn as string] = row[column]
+    else if (aliasOrColumn !== undefined && aliasOrColumn in row) out[aliasOrColumn] = row[aliasOrColumn]
+  }
+  return out
+}
+
 function compareValues(a: unknown, b: unknown): number {
   if (a === b) return 0
   if (a === null || a === undefined) return -1
@@ -74,6 +107,8 @@ function compareValues(a: unknown, b: unknown): number {
 export function createFakeSupabase() {
   const db: Record<string, Row[]> = {}
   const writes: FakeWrite[] = []
+  /** 每次 select 查詢的資料表名（依執行順序）。 */
+  const reads: string[] = []
   const orFilters: string[] = []
   const rpcCalls: Array<{ name: string; args: Row }> = []
   const rpcHandlers: Record<string, (args: Row) => RpcResult | Promise<RpcResult>> = {}
@@ -87,6 +122,8 @@ export function createFakeSupabase() {
     let action: "select" | "insert" | "update" | "delete" = "select"
     let payload: Row | Row[] | null = null
     let max: number | null = null
+    /** `select("a, b")` 的欄位清單；null＝沒呼叫過 select()（或不帶參數）→ 回整列。 */
+    let columns: string | null = null
 
     const matches = (row: Row) => predicates.every((predicate) => predicate(row))
 
@@ -110,13 +147,13 @@ export function createFakeSupabase() {
         const inserted = inputs.map((input) => ({ id: nextId(), created_at: NOW, updated_at: NOW, ...input }))
         stored.push(...inserted)
         writes.push({ table, action, payload })
-        return respond(inserted.map((row) => ({ ...row })))
+        return respond(inserted.map((row) => projectColumns(row, columns)))
       }
       if (action === "update") {
         const hit = stored.filter(matches)
         for (const row of hit) Object.assign(row, payload)
         writes.push({ table, action, payload, matched: hit.length })
-        return respond(hit.map((row) => ({ ...row })))
+        return respond(hit.map((row) => projectColumns(row, columns)))
       }
       if (action === "delete") {
         const doomed = new Set(stored.filter(matches))
@@ -125,6 +162,7 @@ export function createFakeSupabase() {
         return respond([])
       }
 
+      reads.push(table)
       let rows = stored.filter(matches)
       if (orders.length > 0) {
         rows = [...rows].sort((left, right) => {
@@ -136,12 +174,12 @@ export function createFakeSupabase() {
         })
       }
       if (max !== null) rows = rows.slice(0, max)
-      return respond(rows.map((row) => ({ ...row })))
+      return respond(rows.map((row) => projectColumns(row, columns)))
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const builder: any = {
-      select: () => builder,
+      select: (cols?: string) => ((columns = cols ?? null), builder),
       insert: (value: Row | Row[]) => ((action = "insert"), (payload = value), builder),
       update: (value: Row) => ((action = "update"), (payload = value), builder),
       delete: () => ((action = "delete"), builder),
@@ -154,7 +192,12 @@ export function createFakeSupabase() {
         return builder
       },
       in: (column: string, values: unknown[]) => (predicates.push((row) => values.includes(row[column])), builder),
+      like: (column: string, pattern: string) => (predicates.push((row) => matchesLike(row[column], pattern, "")), builder),
       ilike: (column: string, pattern: string) => (predicates.push((row) => matchesIlike(row[column], pattern)), builder),
+      gt: (column: string, value: unknown) => (predicates.push((row) => compareValues(row[column], value) > 0), builder),
+      gte: (column: string, value: unknown) => (predicates.push((row) => compareValues(row[column], value) >= 0), builder),
+      lt: (column: string, value: unknown) => (predicates.push((row) => compareValues(row[column], value) < 0), builder),
+      lte: (column: string, value: unknown) => (predicates.push((row) => compareValues(row[column], value) <= 0), builder),
       or: (expression: string) => {
         orFilters.push(expression)
         predicates.push(parseOr(expression))
@@ -179,13 +222,14 @@ export function createFakeSupabase() {
   function reset() {
     for (const key of Object.keys(db)) delete db[key]
     writes.length = 0
+    reads.length = 0
     orFilters.length = 0
     rpcCalls.length = 0
     for (const key of Object.keys(rpcHandlers)) delete rpcHandlers[key]
     idSeq = 0
   }
 
-  return { db, writes, orFilters, rpcCalls, rpcHandlers, from, rpc, reset }
+  return { db, writes, reads, orFilters, rpcCalls, rpcHandlers, from, rpc, reset }
 }
 
 export const fake = createFakeSupabase()

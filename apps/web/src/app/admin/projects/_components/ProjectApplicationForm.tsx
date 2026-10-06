@@ -17,6 +17,7 @@ import {
   type Client,
   type ClientCategory,
   type ClientInput,
+  type Company,
   type CreateProjectExtBody,
   type InvoiceType,
   type PaymentMethod,
@@ -28,6 +29,7 @@ import {
   projectApplicationErrors,
   projectApplicationSchedule,
   projectApplicationVisibility,
+  selectedCompanyId,
   toAuthorizedCreateProjectBody,
   type ProjectApplicationDraft,
 } from "./project-application-form";
@@ -49,6 +51,8 @@ function money(value: number | null): string {
 
 interface ProjectApplicationFormProps {
   clients: Client[];
+  /** 名冊 → 公司主體：申請單左上角「承接公司」下拉的選項；預設選 isDefault 那間。 */
+  companies: Company[];
   departments: Department[];
   employees: Employee[];
   vendors: Vendor[];
@@ -65,6 +69,7 @@ interface ProjectApplicationFormProps {
 
 export function ProjectApplicationForm({
   clients,
+  companies,
   departments,
   employees,
   vendors,
@@ -99,6 +104,8 @@ export function ProjectApplicationForm({
   }, [disciplines]);
 
   const selectedClient = clients.find((client) => client.id === draft.clientId) ?? null;
+  // 草稿的 companyId 留空＝沒動過；顯示與送出都用 selectedCompanyId 解成預設公司，名冊晚到也不會卡空值。
+  const companyId = selectedCompanyId(draft.companyId, companies);
   const amounts = useMemo(() => projectApplicationAmounts(draft, vatRate), [draft, vatRate]);
   const schedule = useMemo(() => projectApplicationSchedule(draft), [draft]);
   const visibility = projectApplicationVisibility({ canFinance, canBonus });
@@ -112,7 +119,7 @@ export function ProjectApplicationForm({
     const errors = projectApplicationErrors(draft);
     setFormErrors(errors);
     if (errors.length > 0) return;
-    await onSubmit(toAuthorizedCreateProjectBody(draft, { canFinance, canBonus }));
+    await onSubmit(toAuthorizedCreateProjectBody({ ...draft, companyId }, { canFinance, canBonus }));
   }
 
   async function submitNewClient() {
@@ -144,7 +151,23 @@ export function ProjectApplicationForm({
         <div className="flex flex-wrap items-end justify-between gap-2">
           <div>
             <p className="text-2xl font-black tracking-wide text-[#1f4f7a]">ASTER</p>
-            <p className="text-sm">亞斯特設計顧問有限公司</p>
+            {/* 左上角：這案由哪間公司承接（名冊 → 公司主體）。只有一間也照樣顯示成只有一個選項的下拉。 */}
+            <label className={`${labelCls} mt-1`} htmlFor="project-company">承接公司</label>
+            <select
+              id="project-company"
+              className={`${inputCls} min-w-[16rem] max-w-full text-sm font-medium`}
+              value={companyId}
+              onChange={(event) => patch("companyId", event.target.value)}
+              disabled={companies.length === 0}
+            >
+              {companies.length === 0 ? (
+                <option value="">尚未設定公司主體</option>
+              ) : (
+                companies.map((company) => (
+                  <option key={company.id} value={company.id}>{company.name}{company.isDefault ? "（預設）" : ""}</option>
+                ))
+              )}
+            </select>
           </div>
           <h2 className="text-xl font-bold tracking-[0.2em]">專案申請單</h2>
           <div className="grid grid-cols-[auto_12rem] items-center gap-2 text-sm">

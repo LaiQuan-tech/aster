@@ -137,6 +137,9 @@ export function ApplicationDocument({
       ? designScope.map((d) => `${d.discipline}${d.item ? `－${d.item}` : ""}`).join("、")
       : "—";
 
+  // 左上角的承接公司：後端已把 company_id 為 null 的案子解成租戶預設公司（project.companyName）。
+  const companyName = project.companyName?.trim() ?? "";
+
   const invoiceTypeLabel = project.invoiceType
     ? INVOICE_TYPE_LABELS[project.invoiceType]
     : client?.invoiceType
@@ -150,7 +153,12 @@ export function ApplicationDocument({
 
   return (
     <div className="print-sheet mx-auto max-w-3xl bg-white p-6 text-gray-900 print:max-w-none print:p-0">
-      <h1 className="text-center text-xl font-bold tracking-[0.3em]">專案申請單</h1>
+      {/* 抬頭：左上角承接公司、中間標題；右欄留空讓標題維持置中。 */}
+      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+        <p className="text-left text-sm font-bold" data-testid="application-company-name">{companyName}</p>
+        <h1 className="text-center text-xl font-bold tracking-[0.3em]">專案申請單</h1>
+        <span aria-hidden="true" />
+      </div>
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-b-2 border-gray-800 pb-2 text-xs">
         <span>開案日期：{formatRocDate(data.openedOn)}</span>
         <span>工程名稱：{project.name}</span>

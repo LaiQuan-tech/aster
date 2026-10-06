@@ -33,6 +33,8 @@ export interface ProjectApplicationEngineerDraft {
 export interface ProjectApplicationDraft {
   name: string;
   code: string;
+  /** 承接公司（申請單左上角）。"" ＝ 使用者還沒選，送出時用 `selectedCompanyId` 解出預設公司。 */
+  companyId: string;
   openedOn: string;
   fiscalYear: string;
   description: string;
@@ -76,6 +78,7 @@ export function emptyProjectApplicationDraft(
   return {
     name: "",
     code: "",
+    companyId: "",
     openedOn,
     fiscalYear: "",
     description: "",
@@ -107,6 +110,25 @@ export function emptyProjectApplicationDraft(
     shareMode: "pool_pct",
     bonusPool: "",
   };
+}
+
+/** 承接公司下拉可選的項目只需要這兩個欄位（名冊 → 公司主體）。 */
+export interface CompanyOption {
+  id: string;
+  isDefault: boolean;
+}
+
+/** 承接公司的預設選項：isDefault 那間；沒有任何一間標預設時取第一間；沒有公司回 ""。 */
+export function defaultCompanyIdOf(companies: readonly CompanyOption[]): string {
+  return (companies.find((company) => company.isDefault) ?? companies[0])?.id ?? "";
+}
+
+/**
+ * 下拉實際顯示／送出的公司：使用者選過的（且還在名冊裡）優先，否則預設公司。
+ * 草稿的 companyId 留 ""（＝沒動過），名冊晚一點才載入也不會卡在空值。
+ */
+export function selectedCompanyId(chosen: string, companies: readonly CompanyOption[]): string {
+  return chosen && companies.some((company) => company.id === chosen) ? chosen : defaultCompanyIdOf(companies);
 }
 
 function optionalNumber(value: string): number | null {
@@ -206,6 +228,7 @@ export function toCreateProjectBody(draft: ProjectApplicationDraft): CreateProje
     description: optionalText(draft.description),
     openedOn: optionalText(draft.openedOn),
     clientId: draft.clientId || null,
+    companyId: draft.companyId || null,
     kind: draft.kind,
     parentProjectId: draft.kind === "main" ? null : draft.parentProjectId || null,
     siteAddress: optionalText(draft.siteAddress),

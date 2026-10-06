@@ -15,8 +15,10 @@ import {
   PAYMENT_METHOD_LABELS,
   type InvoiceType,
   type PaymentMethod,
+  type Company,
   COMMON_DISCIPLINES,
 } from "@/lib/projects-ext-api";
+import { selectedCompanyId } from "../../_components/project-application-form";
 import { type AppForm, type Setter } from "./shared";
 
 /** 「訂單類型（沿用合約）」：跟後端 summarizeContracts() 同一套邏輯——
@@ -53,6 +55,8 @@ interface ApplicationFieldsCardProps {
   setAppSavedAt: Setter<number | null>;
   contracts: Contract[];
   vendors: Vendor[];
+  /** 名冊 → 公司主體：「承接公司」下拉的選項（申請單左上角那間公司）。 */
+  companies: Company[];
   canFinance: boolean;
   /** W8：協力技師的科別欄位（租戶設定 `project_settings.disciplines`），由 page.tsx 傳入。 */
   disciplines: string[];
@@ -72,6 +76,7 @@ export function ApplicationFieldsCard({
   setAppSavedAt,
   contracts,
   vendors,
+  companies,
   canFinance,
   disciplines,
   error,
@@ -109,6 +114,8 @@ export function ApplicationFieldsCard({
         engineers[d] = v && (v.vendorId || (v.name && v.name.trim())) ? { vendorId: v.vendorId ?? null, name: v.name } : null;
       }
       await updateProjectFields(project.id, {
+        // "" ＝ 沒指定、沿用租戶預設公司 → 送 null（不會把專案悄悄釘死在目前的預設公司）。
+        companyId: appForm.companyId || null,
         siteAddress: appForm.siteAddress.trim() || null,
         siteAreaM2: appForm.siteAreaM2 === "" ? null : Number(appForm.siteAreaM2),
         designScope: appForm.designScope
@@ -136,6 +143,24 @@ export function ApplicationFieldsCard({
     <Card>
       <h2 className="mb-3 text-sm font-semibold text-gray-700">申請單資料</h2>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <label className={labelCls}>承接公司</label>
+          <select
+            className={inputCls}
+            value={selectedCompanyId(appForm.companyId, companies)}
+            onChange={(e) => setAppForm((f) => f && { ...f, companyId: e.target.value })}
+            disabled={companies.length === 0}
+          >
+            {companies.length === 0 ? (
+              <option value="">尚未設定公司主體</option>
+            ) : (
+              companies.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}{c.isDefault ? "（預設）" : ""}</option>
+              ))
+            )}
+          </select>
+          <p className="mt-1 text-xs text-gray-400">申請單左上角印的公司。{appForm.companyId ? "" : "尚未指定，目前沿用預設公司。"}</p>
+        </div>
         <div>
           <label className={labelCls}>設計地點</label>
           <input className={inputCls} value={appForm.siteAddress} onChange={(e) => setAppForm((f) => f && { ...f, siteAddress: e.target.value })} />

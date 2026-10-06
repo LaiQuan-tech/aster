@@ -56,13 +56,19 @@ import {
 import type { MainContractInput } from "../services/main-contract.js"
 import type { NewBillingInput } from "../services/billing-store.js"
 import { AtomicProjectCreationError, createProjectApplicationAtomic } from "../services/project-creation.js"
+import {
+  defaultCompanyOf,
+  effectiveCompanyOf,
+  isTenantCompany,
+  loadTenantCompanies,
+} from "../services/project-company.js"
 
 export const projectsRouter = Router()
 
 // ⚠️ 必須是單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別，
 // 相接後會退化成 GenericStringError，下游的 as ProjectRow 全數失效。
 const PROJECT_COLS =
-  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, archive_reason, starts_on, ends_on, opened_on, dept_id, lead_emp_id, share_mode, bonus_pool, bonus_rate_pct, created_at, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers"
+  "id, tenant_id, name, code, fiscal_year, description, status, status_reason, status_effective_on, status_changed_at, archived_at, archive_reason, starts_on, ends_on, opened_on, dept_id, lead_emp_id, share_mode, bonus_pool, bonus_rate_pct, created_at, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, other_expenses, engineers, company_id"
 
 /**
  * 舊的預先取號空列的占位名稱。預先取號功能已移除（業主 2026-10-07），不再有建立途徑；
@@ -185,6 +191,8 @@ const createSchema = z.object({
   primaryContract: primaryContractSchema.nullish(),
   billings: z.array(initialBillingSchema).max(100).optional(),
   initialSubcontracts: z.array(initialSubcontractSchema).max(100).optional(),
+  /** 承接公司（申請單左上角）。省略／null＝租戶預設公司；不屬於本租戶回 400 invalid_company。 */
+  companyId: z.string().uuid().nullish(),
   ...applicationFields,
 }).superRefine((body, ctx) => {
   if (body.contractAmount !== undefined && body.primaryContract != null) {
@@ -214,6 +222,8 @@ const updateSchema = z
     bonusPool: z.number().nonnegative().nullable().optional(),
     startsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
     endsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+    /** 承接公司。帶 null＝改回沿用租戶預設公司；不屬於本租戶回 400 invalid_company。 */
+    companyId: z.string().uuid().nullable().optional(),
     ...applicationFields,
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
@@ -281,6 +291,8 @@ type ProjectRow = {
   payment_day: string | null
   other_expenses: string | null
   engineers: unknown
+  /** 承接公司（companies.id）；null＝沿用租戶預設公司（見 services/project-company.ts）。 */
+  company_id: string | null
 }
 
 type DesignScopeItem = z.infer<typeof designScopeItem>
@@ -410,6 +422,8 @@ function serializeProject(
     paymentDay: row.payment_day,
     otherExpenses: opts.finance ? (num(row.other_expenses) ?? 0) : null,
     engineers: engineersOf(row.engineers),
+    /** 承接公司：存的值（null＝沿用租戶預設公司）。顯示用的公司名稱由呼叫端以 `companyName` 另補。 */
+    companyId: row.company_id ?? null,
   }
 }
 
@@ -653,15 +667,18 @@ projectsRouter.get(
       // 整份列表一次查完，不做 N+1。
       const rows = (data ?? []) as ProjectRow[]
       const ids = rows.map((p) => p.id)
-      const [signed, clientNames] = await Promise.all([
+      const [signed, clientNames, companies] = await Promise.all([
         signedProjectIds(tenantId, ids),
         clientNamesById(tenantId, rows.map((p) => p.client_id)),
+        loadTenantCompanies(tenantId),
       ])
 
       const projects = rows.map((row) => ({
         // 列表一律不回獎金池（W4）：列表沒有逐案算權限，回了等於全租戶都看得到。
         ...serializeProject(row, { finance: false, bonus: false, hasSignedContract: signed.has(row.id) }),
         clientName: row.client_id ? (clientNames.get(row.client_id) ?? null) : null,
+        // 承接公司的有效名稱：company_id 為 null 的案子顯示租戶預設公司。
+        companyName: effectiveCompanyOf(row.company_id, companies)?.name ?? null,
       }))
       res.status(200).json({ projects })
     } catch (err) {
@@ -790,6 +807,15 @@ projectsRouter.post(
         }
       }
 
+      // 承接公司（申請單左上角）：帶了就必須是本租戶的公司主體，不屬於回 400 invalid_company
+      // （不讓它走到 RPC 才變成 500）；沒帶／帶 null → 租戶預設公司，沒有預設就 null。
+      const companies = await loadTenantCompanies(tenantId)
+      if (b.companyId && !isTenantCompany(companies, b.companyId)) {
+        res.status(400).json({ error: "invalid_company" })
+        return
+      }
+      const companyId = b.companyId ?? defaultCompanyOf(companies)?.id ?? null
+
       // 編號的年度一律取**建立年**（見 services/project-code.ts 的說明），
       // 而且是**台北當地**的年——12/31 深夜立的案不該拿到新年度的號。
       const year = await taipeiYear(tenantId)
@@ -847,6 +873,7 @@ projectsRouter.post(
         payment_day: b.paymentDay ?? client?.payment_day ?? null,
         other_expenses: b.otherExpenses ?? 0,
         engineers: b.engineers ?? {},
+        company_id: companyId,
       }
 
       const createWithCode = (code: string) => createProjectApplicationAtomic(
@@ -927,14 +954,17 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
   const row = scope.project
   const finance = scope.canManage
   const bonus = scope.canSeeBonus
-  const [signed, client, settings] = await Promise.all([
+  const [signed, client, settings, companies] = await Promise.all([
     signedProjectIds(tenantId, [row.id]),
     loadClient(tenantId, row.client_id),
     loadP3Settings(tenantId),
+    loadTenantCompanies(tenantId),
   ])
   const project = {
     ...serializeProject(row, { finance, bonus, hasSignedContract: signed.has(row.id) }),
     client: client ? serializeClient(client) : null,
+    // 承接公司的有效名稱（申請單／列印頁左上角用）：company_id 為 null 時是租戶預設公司。
+    companyName: effectiveCompanyOf(row.company_id, companies)?.name ?? null,
   }
   const access = { finance, bonus }
   if (!finance) {
@@ -1133,6 +1163,14 @@ projectsRouter.patch(
           return
         }
         patch.client_id = b.clientId
+      }
+      // 承接公司：帶 null＝改回沿用租戶預設公司；帶 id 必須是本租戶的公司主體。
+      if (b.companyId !== undefined) {
+        if (b.companyId !== null && !isTenantCompany(await loadTenantCompanies(tenantId), b.companyId)) {
+          res.status(400).json({ error: "invalid_company" })
+          return
+        }
+        patch.company_id = b.companyId
       }
       if (b.siteAddress !== undefined) patch.site_address = b.siteAddress
       if (b.siteAreaM2 !== undefined) patch.site_area_m2 = b.siteAreaM2

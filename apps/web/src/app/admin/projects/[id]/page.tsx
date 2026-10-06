@@ -336,7 +336,7 @@ export default function AdminProjectDetailPage() {
           appForm={appForm} setAppForm={setAppForm}
           savingApp={savingApp} setSavingApp={setSavingApp}
           appSavedAt={appSavedAt} setAppSavedAt={setAppSavedAt}
-          contracts={contracts} vendors={vendors} canFinance={canFinance}
+          contracts={contracts} vendors={vendors} companies={companies} canFinance={canFinance}
           disciplines={disciplines}
           error={error} setError={setError} load={load}
         />

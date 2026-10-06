@@ -22,6 +22,7 @@ import {
   listProjectsExt,
   createProjectExt,
   listClients,
+  listCompanies,
   createClient,
   getP3SettingsLite,
   engineerDisciplinesOf,
@@ -31,6 +32,7 @@ import {
   type ProjectListItem,
   type Client,
   type ClientInput,
+  type Company,
   type CreateProjectExtBody,
 } from "@/lib/projects-ext-api";
 import { ProjectApplicationForm } from "./_components/ProjectApplicationForm";
@@ -50,6 +52,8 @@ export default function AdminProjectsPage() {
   // 收起只是 hidden，不卸載，填到一半的內容會保留。
   const [formOpen, setFormOpen] = useState(false);
   const [clients, setClients] = useState<Client[]>([]);
+  // 名冊 → 公司主體：申請單左上角「承接公司」下拉的選項（預設選 isDefault 那間）。
+  const [companies, setCompanies] = useState<Company[]>([]);
   const [depts, setDepts] = useState<Department[]>([]);
   const [emps, setEmps] = useState<Employee[]>([]);
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -79,9 +83,11 @@ export default function AdminProjectsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [p, cl, d, e, st, ven, p3, me] = await Promise.all([
+      const [p, cl, comp, d, e, st, ven, p3, me] = await Promise.all([
         listProjectsExt({ includeArchived, sort, dir, year: yearFilter ? Number(yearFilter) : null }),
         listClients(),
+        // 公司名冊拿不到不該讓整個專案列表掛掉：退成空陣列，下拉會顯示「尚未設定公司主體」。
+        listCompanies().catch(() => ({ companies: [] as Company[] })),
         // 同 [id]/page.tsx：GET /departments 還是 HR 限定，會計拿不到就給空清單，
         // 不要讓整個專案列表因為一個下拉選單掛掉。
         getDepartments().catch(() => ({ departments: [] as Department[] })),
@@ -94,6 +100,7 @@ export default function AdminProjectsPage() {
       setSettings(st.settings);
       setProjects(p.projects);
       setClients(cl.clients);
+      setCompanies(comp.companies);
       setDepts(d.departments);
       setEmps(e.employees.filter((x) => x.status === "active"));
       setVendors(ven.vendors);
@@ -203,6 +210,7 @@ export default function AdminProjectsPage() {
         <div id="project-application-form" hidden={!formOpen} className="mt-4">
         <ProjectApplicationForm
           clients={clients}
+          companies={companies}
           departments={depts}
           employees={emps}
           vendors={vendors}

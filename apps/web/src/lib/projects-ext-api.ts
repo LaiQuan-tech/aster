@@ -232,6 +232,8 @@ export interface CreateProjectExtBody {
   primaryContract?: MainContractInput | null
   billings?: InstallmentInputExt[]
   initialSubcontracts?: InitialSubcontractInput[]
+  /** 承接公司（名冊 → 公司主體，申請單左上角）。省略／null＝後端補租戶預設公司。 */
+  companyId?: string | null
 }
 
 export type InitialSubcontractInput = {
@@ -292,6 +294,10 @@ export interface ProjectListItem extends Project {
   clientId?: string | null
   clientName?: string | null
   kind?: ProjectKind
+  /** 承接公司：存的值（null＝沿用租戶預設公司）。 */
+  companyId?: string | null
+  /** 承接公司的有效名稱（company_id 為 null 時是租戶預設公司）；租戶沒有任何公司主體時為 null。 */
+  companyName?: string | null
 }
 
 /** B4：`sort`／`dir` 省略＝後端預設（created desc），行為與改動前相容。 */
@@ -592,6 +598,10 @@ export interface ProjectDetail extends Project {
   otherExpenses: number | null
   engineers: ProjectEngineers
   client: Client | null
+  /** 承接公司：存的值（null＝沿用租戶預設公司）。 */
+  companyId?: string | null
+  /** 承接公司的有效名稱（company_id 為 null 時是租戶預設公司）；申請單／列印頁左上角顯示這個。 */
+  companyName?: string | null
 }
 
 /** 合約精簡版（年度總表／專案明細內嵌用），比完整 Contract 少幾欄。 */
@@ -680,6 +690,8 @@ export interface UpdateProjectExtBody {
   paymentDay?: string | null
   otherExpenses?: number | null
   engineers?: ProjectEngineers
+  /** 承接公司。帶 null＝改回沿用租戶預設公司；省略＝不動。 */
+  companyId?: string | null
 }
 
 /** 編輯專案（含 P3 新欄位）。code 一樣不在參數裡——不可變更（後端回 409 code_immutable）。 */
@@ -696,6 +708,7 @@ export function humanizeProjectExtError(err: unknown, fallback: string): string 
   if (msg.includes("parent_required")) return "變更設計／追加／代墊必須選擇母案。"
   if (msg.includes("invalid_parent")) return "母案不合法（必須是同租戶的主案，且不能是自己）。"
   if (msg.includes("invalid_client")) return "選到的客戶不存在或已刪除。"
+  if (msg.includes("invalid_company")) return "選到的承接公司不存在或不屬於本租戶，請重新選擇。"
   if (msg.includes("code_immutable")) return "專案編號不可變更。"
   if (msg.includes("unknown_discipline")) return "協力技師的科別不在專案設定的科別清單裡。請先到「專案設定 → 科別」新增。"
   if (msg.includes("forbidden_bonus")) return "分潤（獎金池／成員趴數）不在您的權限範圍內。"

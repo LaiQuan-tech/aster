@@ -102,7 +102,7 @@ export type DuplicateProjectResult =
 
 // ⚠️ 單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別。
 const SOURCE_COLS =
-  "id, name, code, fiscal_year, description, status, archived_at, starts_on, ends_on, dept_id, lead_emp_id, share_mode, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, engineers"
+  "id, name, code, fiscal_year, description, status, archived_at, starts_on, ends_on, dept_id, lead_emp_id, share_mode, client_id, parent_project_id, kind, reserved_at, site_address, site_area_m2, design_scope, invoice_type, payment_method, closing_day, payment_day, engineers, company_id"
 
 type SourceRow = {
   id: string
@@ -129,6 +129,8 @@ type SourceRow = {
   closing_day: string | null
   payment_day: string | null
   engineers: unknown
+  /** 承接公司；複製時原樣帶到新案（null＝沿用租戶預設公司，也原樣帶）。 */
+  company_id: string | null
 }
 
 const KIND_LABEL: Record<DuplicateKind, string> = { change: "追加減", addition: "加做" }
@@ -239,6 +241,8 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
     payment_day: source.payment_day,
     other_expenses: 0,
     engineers: copy.engineers ? (source.engineers ?? {}) : {},
+    // 同一家公司承接：追加減／加做的新案與原案是同一份業務，申請單抬頭不該變。
+    company_id: source.company_id,
   }
 
   let inserted: { id: string; code: string; name: string } | null = null
