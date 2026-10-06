@@ -3,6 +3,7 @@ import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireFinance, requireHrAdmin } from "../middleware/role.js"
+import { isFinanceRole, resolveSelf } from "../middleware/scope.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
 import { belongsToTenant } from "../services/auth-invite.js"
@@ -51,12 +52,100 @@ function generatePassword(): string {
 }
 
 /**
+ * GET /employees 可選帶出的個資欄位（`?include=profile`，僅 HR／平台管理員／會計）：
+ * `employee_profiles` 欄名 → 回應鍵名（camelCase，與 PUT /employees/:empId/profile 的請求鍵一致）。
+ * 全部是個資或金融帳號，**只有**下面 GET handler 的財務層分支會讀、會回。
+ */
+const PROFILE_EXTRA_FIELDS = {
+  id_number: "idNumber",
+  registered_address: "registeredAddress",
+  birthday: "birthday",
+  bank_code: "bankCode",
+  bank_name: "bankName",
+  bank_account: "bankAccount",
+  account_holder: "accountHolder",
+} as const
+
+type ProfileExtras = Record<(typeof PROFILE_EXTRA_FIELDS)[keyof typeof PROFILE_EXTRA_FIELDS], string | null>
+
+/** 沒有 employee_profiles 列（或該欄是空的）的員工：七個鍵照樣都在、值為 null——鍵存在＝呼叫者有權限，null＝沒資料。 */
+const EMPTY_PROFILE_EXTRAS: ProfileExtras = {
+  idNumber: null,
+  registeredAddress: null,
+  birthday: null,
+  bankCode: null,
+  bankName: null,
+  bankAccount: null,
+  accountHolder: null,
+}
+
+const PROFILE_EXTRA_SELECT = ["employee_id", ...Object.keys(PROFILE_EXTRA_FIELDS)].join(", ")
+
+/**
+ * `.in("employee_id", ids)` 每批上限。PostgREST 把 id 清單放在 URL 的 query string（每個 uuid 約 39 字元），
+ * 一次塞幾百個會撞反向代理的 URL 長度上限；一批 100 個（約 4 KB）安全，一般租戶就是一次查詢。
+ */
+const PROFILE_EXTRA_BATCH = 100
+
+/**
+ * 批次讀這批員工的個資欄位（每批一次查詢，不是每人一次）。tenant_id 條件是真正的租戶守門
+ * （supabaseAdmin 繞過 RLS）。回傳 employee_id → 七個欄位；沒有 profile 列的員工不在 Map 內。
+ */
+async function loadProfileExtras(tenantId: string, employeeIds: string[]): Promise<Map<string, ProfileExtras>> {
+  const batches: string[][] = []
+  for (let i = 0; i < employeeIds.length; i += PROFILE_EXTRA_BATCH) {
+    batches.push(employeeIds.slice(i, i + PROFILE_EXTRA_BATCH))
+  }
+  const results = await Promise.all(
+    batches.map((ids) =>
+      supabaseAdmin
+        .from("employee_profiles")
+        .select(PROFILE_EXTRA_SELECT)
+        .eq("tenant_id", tenantId)
+        .in("employee_id", ids),
+    ),
+  )
+  const byEmployee = new Map<string, ProfileExtras>()
+  for (const { data, error } of results) {
+    if (error) throw new Error(`GET /employees (profile extras): ${error.message}`)
+    for (const row of (data ?? []) as unknown as Array<Record<string, unknown>>) {
+      const extras = { ...EMPTY_PROFILE_EXTRAS }
+      for (const [col, key] of Object.entries(PROFILE_EXTRA_FIELDS)) {
+        const value = row[col]
+        extras[key] = typeof value === "string" && value !== "" ? value : null
+      }
+      byEmployee.set(row.employee_id as string, extras)
+    }
+  }
+  return byEmployee
+}
+
+/** `?include=profile`（可逗號分隔多個值）。 */
+function wantsProfileExtras(query: Request["query"]): boolean {
+  const raw = query.include
+  return (Array.isArray(raw) ? raw : [raw]).some(
+    (value) => typeof value === "string" && value.split(",").some((part) => part.trim() === "profile"),
+  )
+}
+
+/**
  * GET /employees — list this tenant's employees (HR／平台管理員／會計)。
  *
  * W4（2026-09-22 業主決策 3）：會計要填金流單據就得挑得到人（放款收款人、
  * 複委託承辦、報銷申請人…），所以**讀**人員基本資料放行到 requireFinance；
- * 建立／改角色／改狀態／重設密碼等**寫入**仍是 requireHrAdmin。本清單不含
+ * 建立／改角色／改狀態／重設密碼等**寫入**仍是 requireHrAdmin。本清單**預設**不含
  * 薪資、投保薪資或分潤趴數，放行不等於看得到錢。
+ *
+ * 個資欄位（`?include=profile`，2026-10-07）：員工管理頁要在列表顯示並列內編輯
+ * 生日／身分證／戶籍地／匯款帳號（idNumber、registeredAddress、birthday、bankCode、
+ * bankName、bankAccount、accountHolder，來自 employee_profiles）。
+ *   - **opt-in**：不帶 include 的回應跟以前完全一樣。後台其他二十幾個頁面與 ESS 的人員挑選
+ *     （代同仁申請、KPI 考核者姓名）都只是拿這支 GET 對照姓名，它們不會也不該順便拿到全員個資；
+ *     只有員工管理頁帶 `?include=profile`。
+ *   - **只有財務層回得出去**：路由層已有 requireFinance；handler 內再以 isFinanceRole 判一次
+ *     （縱深防禦——日後有人把路由放寬成「全員可列同事」，個資欄位仍然不外流）。非財務層帶了
+ *     include 也只得到不含個資的清單，整組鍵不存在。
+ *   - 一次批次查 employee_profiles（見 loadProfileExtras），不是每人一查。
  *
  * Tenant boundary is enforced TWICE: the API filters by res.locals.tenantId
  * (derived from the JWT) here, and DB RLS enforces it again at the row level
@@ -68,9 +157,17 @@ employeesRouter.get(
   requireAuth,
   requireTenant,
   requireFinance,
-  async (_req: Request, res: Response, next: NextFunction) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {
+      // 個資分支的唯一入口：呼叫者要求了 include=profile「且」是財務層角色。
+      let includeProfile = false
+      if (wantsProfileExtras(req.query)) {
+        const userId = req.auth?.userId
+        const self = userId ? await resolveSelf(tenantId, userId) : null
+        includeProfile = !!self && isFinanceRole(self.role)
+      }
+
       const { data, error } = await supabaseAdmin
         .from("employees")
         .select("id, tenant_id, user_id, name, role, dept_id, emp_no, employment_type, hire_date, terminated_at, status, created_at")
@@ -84,11 +181,18 @@ employeesRouter.get(
       // email 在 auth.users 不在 employees 表：一次撈回本租戶員工綁定的帳號 email 補到每列，
       // user_id 為 null 或帳號已不存在 → null。
       const rows = data ?? []
-      const emails = await emailsByUserId(rows.map((row) => row.user_id as string | null).filter((id): id is string => !!id))
+      const [emails, extras] = await Promise.all([
+        emailsByUserId(rows.map((row) => row.user_id as string | null).filter((id): id is string => !!id)),
+        includeProfile ? loadProfileExtras(tenantId, rows.map((row) => row.id as string)) : Promise.resolve(null),
+      ])
       const employees = rows.map((row) => ({
         ...row,
         email: row.user_id ? (emails.get(row.user_id as string) ?? null) : null,
+        // 財務層＋include=profile 才展開個資；其餘情況不加任何鍵。
+        ...(extras ? (extras.get(row.id as string) ?? EMPTY_PROFILE_EXTRAS) : {}),
       }))
+      // 帶了身分證／匯款帳號的回應不准被瀏覽器或中介快取落地。
+      if (extras) res.setHeader("Cache-Control", "no-store")
       res.status(200).json({ employees })
     } catch (err) {
       next(err)

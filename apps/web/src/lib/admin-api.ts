@@ -121,6 +121,36 @@ export function getEmployees() {
   return apiFetch<{ employees: Employee[] }>("/employees");
 }
 
+/**
+ * 員工列表多帶的個資欄位（來自 employee_profiles）。只有 HR／平台管理員／會計、且請求帶
+ * `?include=profile` 時 API 才會回（每位員工七個鍵齊全，沒資料＝null）；其餘情況整組不存在，
+ * 所以這裡全部是可選。
+ */
+export interface EmployeePersonalFields {
+  /** 身分證／居留證字號（原樣，不驗格式）。 */
+  idNumber?: string | null;
+  /** 戶籍地址。 */
+  registeredAddress?: string | null;
+  /** 生日 YYYY-MM-DD。 */
+  birthday?: string | null;
+  /** 匯款（薪轉）帳號四欄，欄位比照 vendors。 */
+  bankCode?: string | null;
+  bankName?: string | null;
+  bankAccount?: string | null;
+  accountHolder?: string | null;
+}
+
+export type EmployeeWithProfile = Employee & EmployeePersonalFields;
+
+/**
+ * 員工管理頁專用：同 `getEmployees()`，另外帶出每位員工的個資欄位（`?include=profile`）。
+ * 其他頁面只是拿清單對照姓名，一律用 `getEmployees()`——不要為了方便改成這支，
+ * 全員身分證／匯款帳號不該跟著每個頁面的請求流到瀏覽器。
+ */
+export function getEmployeesWithProfile() {
+  return apiFetch<{ employees: EmployeeWithProfile[] }>("/employees?include=profile");
+}
+
 /** Invite an employee: creates their Supabase Auth user + employees row. */
 export function inviteEmployee(body: {
   email: string;
@@ -212,6 +242,10 @@ export interface EmployeeProfile {
   emergency_relationship: string | null;
   emergency_phone: string | null;
   note: string | null;
+  bank_code: string | null;
+  bank_name: string | null;
+  bank_account: string | null;
+  account_holder: string | null;
 }
 
 export interface SaveProfileBody {
@@ -244,6 +278,10 @@ export interface SaveProfileBody {
   emergencyRelationship?: string | null;
   emergencyPhone?: string | null;
   note?: string | null;
+  bankCode?: string | null;
+  bankName?: string | null;
+  bankAccount?: string | null;
+  accountHolder?: string | null;
 }
 
 export interface Education {

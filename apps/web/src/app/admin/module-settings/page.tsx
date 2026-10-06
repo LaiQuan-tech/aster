@@ -66,9 +66,14 @@ const YEAR_STATUS_META: Record<YearStatus, { label: string; cls: string }> = {
   locked: { label: "已鎖定", cls: "bg-slate-100 text-slate-700" },
 };
 
+/**
+ * 員工可自行修改的資料區塊。key 必須與 apps/api/src/services/profile-fields.ts 的 PROFILE_SECTIONS
+ * 一致（順序也一致；api 的 __tests__/profile-fields.test.ts 會檢查）。
+ */
 const FIELD_OPTIONS = [
   { value: "basic", label: "基本資料" },
   { value: "contact", label: "通訊資料" },
+  { value: "bank", label: "匯款帳號" },
   { value: "education", label: "學歷" },
   { value: "certification", label: "證照" },
   { value: "workHistory", label: "工作經歷" },
@@ -508,7 +513,7 @@ export default function ModuleSettingsPage() {
   const [otForm, setOtForm] = useState<OvertimeParamsForm>(DEFAULT_OT_FORM);
   const [features, setFeatures] = useState<TenantFeatures>({});
   const [myDataRequiresApproval, setMyDataRequiresApproval] = useState(true);
-  const [editableFields, setEditableFields] = useState("basic,contact,education,certification,workHistory");
+  const [editableFields, setEditableFields] = useState("basic,contact,bank,education,certification,workHistory");
   const [attachmentLimitKb, setAttachmentLimitKb] = useState(String(DEFAULT_ATTACHMENT_LIMIT_KB));
   const [activeYear, setActiveYear] = useState(String(new Date().getFullYear()));
   const [yearStatus, setYearStatus] = useState<YearStatus>("published");
@@ -588,7 +593,7 @@ export default function ModuleSettingsPage() {
         } | undefined) ?? {};
         setFeatures(nextFeatures);
         setMyDataRequiresApproval(formParameters.myDataRequiresApproval ?? true);
-        setEditableFields((formParameters.editableFields ?? ["basic", "contact", "education", "certification", "workHistory"]).join(","));
+        setEditableFields((formParameters.editableFields ?? ["basic", "contact", "bank", "education", "certification", "workHistory"]).join(","));
         setAttachmentLimitKb(String(formParameters.attachmentLimitKb ?? DEFAULT_ATTACHMENT_LIMIT_KB));
         setActiveYear(attendanceModule.activeYear ?? String(new Date().getFullYear()));
         setYearStatus(attendanceModule.yearStatus ?? "published");

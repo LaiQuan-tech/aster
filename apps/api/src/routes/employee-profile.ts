@@ -18,7 +18,7 @@ const NIL = "00000000-0000-0000-0000-000000000000"
 const DOCUMENT_BUCKET = "employee-documents"
 const MAX_FILE_BYTES = 3 * 1024 * 1024
 const PROFILE_SELECT =
-  "id, first_name, last_name, english_name, nationality, id_type, id_number, id_expiry, id_type2, id_number2, id_expiry2, id_type3, id_number3, id_expiry3, entry_date, birthday, gender, marital_status, photo_file_name, photo_storage_path, photo_size_bytes, photo_content_type, phone, phone_mobile2, phone_landline, registered_address, address, company_email, personal_email, line_user_id, emergency_contact, emergency_relationship, emergency_phone, note, updated_at"
+  "id, first_name, last_name, english_name, nationality, id_type, id_number, id_expiry, id_type2, id_number2, id_expiry2, id_type3, id_number3, id_expiry3, entry_date, birthday, gender, marital_status, photo_file_name, photo_storage_path, photo_size_bytes, photo_content_type, phone, phone_mobile2, phone_landline, registered_address, address, company_email, personal_email, line_user_id, emergency_contact, emergency_relationship, emergency_phone, note, bank_code, bank_name, bank_account, account_holder, updated_at"
 const PROFILE_SELECT_BASE =
   "id, english_name, nationality, id_type, id_number, id_expiry, id_type2, id_number2, id_expiry2, id_type3, id_number3, id_expiry3, entry_date, birthday, gender, marital_status, phone, phone_mobile2, phone_landline, registered_address, address, company_email, personal_email, emergency_contact, emergency_relationship, emergency_phone, note, updated_at"
 const EDUCATION_SELECT =
@@ -58,6 +58,11 @@ async function authorize(
   return { isHr, selfId: data.id as string }
 }
 
+/** 空字串 → null；undefined 維持 undefined（partial 語意：沒帶的欄位不動）。 */
+function emptyToNull(v: string | null | undefined): string | null | undefined {
+  return v === "" ? null : v
+}
+
 const profileSchema = z.object({
   // 基本資料
   firstName: z.string().trim().nullish(),
@@ -90,7 +95,54 @@ const profileSchema = z.object({
   emergencyRelationship: z.string().trim().nullish(),
   emergencyPhone: z.string().trim().nullish(),
   note: z.string().trim().nullish(),
+  // 匯款（薪轉）帳號。長度上限與欄位命名比照 vendors（routes/vendors.ts）；空字串一律當「清空」存 null，
+  // 不做格式驗證（外幣帳號／郵局帳號格式各異）。undefined＝沒帶＝不動。
+  bankCode: z.string().trim().max(20).nullish().transform(emptyToNull),
+  bankName: z.string().trim().max(120).nullish().transform(emptyToNull),
+  bankAccount: z.string().trim().max(60).nullish().transform(emptyToNull),
+  accountHolder: z.string().trim().max(120).nullish().transform(emptyToNull),
 })
+
+/**
+ * 請求欄位（camelCase）→ `employee_profiles` 欄名。PUT 只寫這張表列到的欄位（白名單）。
+ * 與 services/profile-fields.ts 的 SECTION_COLUMNS 值域必須一致（少一欄＝該欄永遠擋在
+ * 員工自改的白名單外；__tests__/profile-fields.test.ts 有同步檢查）。
+ */
+export const PROFILE_FIELD_TO_COL: Record<string, string> = {
+  firstName: "first_name",
+  lastName: "last_name",
+  englishName: "english_name",
+  nationality: "nationality",
+  idType: "id_type",
+  idNumber: "id_number",
+  idExpiry: "id_expiry",
+  idType2: "id_type2",
+  idNumber2: "id_number2",
+  idExpiry2: "id_expiry2",
+  idType3: "id_type3",
+  idNumber3: "id_number3",
+  idExpiry3: "id_expiry3",
+  entryDate: "entry_date",
+  birthday: "birthday",
+  gender: "gender",
+  maritalStatus: "marital_status",
+  phone: "phone",
+  phoneMobile2: "phone_mobile2",
+  phoneLandline: "phone_landline",
+  registeredAddress: "registered_address",
+  address: "address",
+  companyEmail: "company_email",
+  personalEmail: "personal_email",
+  lineUserId: "line_user_id",
+  emergencyContact: "emergency_contact",
+  emergencyRelationship: "emergency_relationship",
+  emergencyPhone: "emergency_phone",
+  note: "note",
+  bankCode: "bank_code",
+  bankName: "bank_name",
+  bankAccount: "bank_account",
+  accountHolder: "account_holder",
+}
 
 const educationSchema = z.object({
   school: z.string().trim().min(1),
@@ -425,39 +477,9 @@ employeeProfileRouter.put(
       // Partial semantics: a key absent from the body (undefined) is left
       // untouched; an explicit null clears the column. Prevents a tab that only
       // edits 通訊資料 from wiping the 基本資料 fields (and vice versa).
-      const FIELD_TO_COL: Record<string, string> = {
-        firstName: "first_name",
-        lastName: "last_name",
-        englishName: "english_name",
-        nationality: "nationality",
-        idType: "id_type",
-        idNumber: "id_number",
-        idExpiry: "id_expiry",
-        idType2: "id_type2",
-        idNumber2: "id_number2",
-        idExpiry2: "id_expiry2",
-        idType3: "id_type3",
-        idNumber3: "id_number3",
-        idExpiry3: "id_expiry3",
-        entryDate: "entry_date",
-        birthday: "birthday",
-        gender: "gender",
-        maritalStatus: "marital_status",
-        phone: "phone",
-        phoneMobile2: "phone_mobile2",
-        phoneLandline: "phone_landline",
-        registeredAddress: "registered_address",
-        address: "address",
-        companyEmail: "company_email",
-        personalEmail: "personal_email",
-        lineUserId: "line_user_id",
-        emergencyContact: "emergency_contact",
-        emergencyRelationship: "emergency_relationship",
-        emergencyPhone: "emergency_phone",
-        note: "note",
-      }
+      // （欄位對照表 PROFILE_FIELD_TO_COL 在檔案上方，services/profile-fields.ts 的 SECTION_COLUMNS 要與它同步）
       const patch: Record<string, unknown> = {}
-      for (const [field, col] of Object.entries(FIELD_TO_COL)) {
+      for (const [field, col] of Object.entries(PROFILE_FIELD_TO_COL)) {
         const v = (d as Record<string, unknown>)[field]
         if (v !== undefined) patch[col] = v
       }

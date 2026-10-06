@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { BottomSheet, Button, Card, Empty, ErrorText, Field, Input, PrimaryButton, Segmented, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import { ActionMenu } from "@/components/ActionMenu";
 import { BatchImportButton } from "@/components/BatchImport";
@@ -19,7 +19,7 @@ import {
   deleteEmployeeWorkHistory,
   getDepartments,
   getEmployeeProfile,
-  getEmployees,
+  getEmployeesWithProfile,
   inviteEmployee,
   resetEmployeePassword,
   saveEmployeeProfile,
@@ -29,6 +29,7 @@ import {
   updateEmployee,
   type Department,
   type Employee,
+  type EmployeeWithProfile,
   type ProfileAggregate,
   type SaveProfileBody,
 } from "@/lib/admin-api";
@@ -42,6 +43,13 @@ import {
   type BulkInviteResult,
 } from "@/lib/auth-api";
 import { employeeActionsFor, generateRandomPassword, parseApiErrorCode, type EmployeeActionKey } from "@/lib/employee-actions";
+import {
+  bankDisplay,
+  personalChanges,
+  personalFormFrom,
+  type PersonalForm,
+  type PersonalKey,
+} from "@/lib/employee-personal";
 import {
   approveProfileChange,
   listProfileChangeRequests,
@@ -224,6 +232,10 @@ const SNAKE: Record<keyof SaveProfileBody, string> = {
   emergencyRelationship: "emergency_relationship",
   emergencyPhone: "emergency_phone",
   note: "note",
+  bankCode: "bank_code",
+  bankName: "bank_name",
+  bankAccount: "bank_account",
+  accountHolder: "account_holder",
 };
 
 function roleLabel(role: string): string {
@@ -232,6 +244,29 @@ function roleLabel(role: string): string {
 
 function employmentTypeLabel(value: string | null) {
   return EMPLOYMENT_TYPES.find((item) => item.value === value)?.label ?? value ?? "—";
+}
+
+/** 列表「匯款帳號」欄：第一行「代碼 銀行名稱」、第二行帳號、戶名與員工姓名不同才顯示第三行；全空＝「—」。 */
+function BankCell({ employee }: { employee: EmployeeWithProfile }) {
+  const { bank, account, holder } = bankDisplay(employee);
+  if (!bank && !account && !holder) return <>—</>;
+  return (
+    <div className="space-y-0.5">
+      {bank && <p>{bank}</p>}
+      {account && <p className="tabular-nums">{account}</p>}
+      {holder && <p className="text-xs text-gray-400">戶名 {holder}</p>}
+    </div>
+  );
+}
+
+/** 列內編輯第二排的欄位：小字標籤＋輸入框（第一排沿用原本的無標籤輸入框）。className 放欄寬（@3xl:col-span-*）。 */
+function PersonalField({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
+  return (
+    <label className={`block ${className ?? ""}`}>
+      <span className="mb-1 block text-xs text-gray-500">{label}</span>
+      {children}
+    </label>
+  );
 }
 
 /**
@@ -267,12 +302,24 @@ function profileInitial(profile: ProfileAggregate | null) {
  */
 const STICKY_TH = "sticky top-0 z-10 bg-white shadow-[inset_0_-1px_0_var(--color-gray-200)]";
 
+/**
+ * 操作欄（編輯／⋯）釘在表格右側。加了生日／身分證／戶籍地／匯款帳號後表格比外框寬，橫向捲動時
+ * 不釘住的話，要先捲到最右邊才找得到「編輯」。表頭那格同時釘上方與右側，z-20 蓋過其他表頭（z-10）；
+ * 內容格 z-[5] 低於表頭（直向捲動時從表頭下面穿過去）。左緣 1px 淡線標出「這欄是浮著的」。
+ */
+const PIN_RIGHT_TH =
+  "sticky top-0 right-0 z-20 bg-white shadow-[inset_0_-1px_0_var(--color-gray-200),inset_1px_0_0_var(--color-gray-100)]";
+const PIN_RIGHT_TD = "sticky right-0 z-[5] bg-white shadow-[inset_1px_0_0_var(--color-gray-100)]";
+
+/** 員工列表欄數（列內編輯時 td 要跨滿；Email 欄在手機隱藏，跨欄數多算無妨）。 */
+const COLUMN_COUNT = 10;
+
 export default function EmployeesPage() {
   const toast = useToast();
   // 登入者的 auth user id：拿來算 isSelf 給 employeeActionsFor（目前沒有「不能停用自己」的規則，只是傳真值）。
   const { session } = useSession();
   const selfUserId = session?.user.id ?? null;
-  const [rows, setRows] = useState<Employee[]>([]);
+  const [rows, setRows] = useState<EmployeeWithProfile[]>([]);
   const [depts, setDepts] = useState<Department[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -322,6 +369,11 @@ export default function EmployeesPage() {
   const [editHireDate, setEditHireDate] = useState("");
   const [editTerminatedAt, setEditTerminatedAt] = useState("");
   const [editStatus, setEditStatus] = useState("active");
+  // 列內編輯第二排：生日／身分證／戶籍地／匯款帳號（存在 employee_profiles，走 PUT profile，與上面的 PATCH employees 分開送）。
+  const [editPersonal, setEditPersonal] = useState<PersonalForm>(() => personalFormFrom({}));
+  const [editSaving, setEditSaving] = useState(false);
+  // 列內編輯儲存失敗的訊息：顯示在編輯區的「取消／儲存」上方（頁首的 error 在長清單裡可能不在視線內）。
+  const [editError, setEditError] = useState<string | null>(null);
 
   const [profileEmpId, setProfileEmpId] = useState<string | null>(null);
   const [profile, setProfile] = useState<ProfileAggregate | null>(null);
@@ -358,19 +410,24 @@ export default function EmployeesPage() {
   const deptNameMap = useMemo(() => new Map(depts.map((dept) => [dept.id, dept.name])), [depts]);
   const selectedEmployee = rows.find((employee) => employee.id === profileEmpId) ?? null;
 
+  // 只有這一頁帶 include=profile 拿全員個資欄位（其餘頁面的 getEmployees() 不帶，見 admin-api）。
+  const fetchRows = useCallback(async () => {
+    const [empRes, deptRes] = await Promise.all([getEmployeesWithProfile(), getDepartments()]);
+    setRows(empRes.employees);
+    setDepts(deptRes.departments);
+  }, []);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [empRes, deptRes] = await Promise.all([getEmployees(), getDepartments()]);
-      setRows(empRes.employees);
-      setDepts(deptRes.departments);
+      await fetchRows();
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入失敗");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchRows]);
 
   const loadProfile = useCallback(async (employeeId: string) => {
     const data = await getEmployeeProfile(employeeId);
@@ -465,7 +522,28 @@ export default function EmployeesPage() {
     }
   }
 
+  function cancelEdit() {
+    if (editSaving) return;
+    setEditingId(null);
+    setEditError(null);
+  }
+
+  function setPersonal(key: PersonalKey, value: string) {
+    setEditPersonal((form) => ({ ...form, [key]: value }));
+  }
+
+  /**
+   * 列內編輯的儲存：員工欄位（PATCH /employees/:id）照舊；個資欄位（生日／身分證／戶籍地／匯款帳號）
+   * 在 employee_profiles，**有變更才**打 PUT /employees/:id/profile，而且只送變更的欄位。
+   * 兩個請求不是同一個交易：PATCH 成功、PUT 失敗時員工欄位已生效，所以先重載列表再留在編輯列顯示錯誤，
+   * HR 修正後按儲存即可重送（PATCH 是冪等的）。成功後靜默重載（不經「載入中…」，橫向捲動位置才不會被洗掉）。
+   */
   async function saveEdit(id: string) {
+    if (editSaving) return;
+    const current = rows.find((row) => row.id === id);
+    const personal = current ? personalChanges(current, editPersonal) : {};
+    setEditSaving(true);
+    setEditError(null);
     try {
       await updateEmployee(id, {
         name: editName.trim() || undefined,
@@ -477,12 +555,31 @@ export default function EmployeesPage() {
         terminatedAt: editTerminatedAt || null,
         status: editStatus,
       });
-      setEditingId(null);
-      await load();
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : "更新失敗");
+      setEditSaving(false);
+      return;
+    }
+    let personalError: string | null = null;
+    if (Object.keys(personal).length > 0) {
+      try {
+        await saveEmployeeProfile(id, personal);
+      } catch (err) {
+        personalError = err instanceof Error ? err.message : "更新失敗";
+      }
+    }
+    try {
+      await fetchRows();
       if (profileEmpId === id) await loadProfile(id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "更新失敗");
+      setError(err instanceof Error ? err.message : "重新載入失敗");
     }
+    if (personalError) {
+      setEditError(`員工資料已儲存，但生日／身分證／戶籍地／匯款帳號沒有存成：${personalError}`);
+    } else {
+      setEditingId(null);
+    }
+    setEditSaving(false);
   }
 
   async function saveProfileFields(event: FormEvent) {
@@ -722,7 +819,9 @@ export default function EmployeesPage() {
   }
 
   /** 進入列內編輯：把該列現值帶進編輯欄位（原本寫在「編輯」按鈕的 onClick 裡）。 */
-  function beginEdit(employee: Employee) {
+  function beginEdit(employee: EmployeeWithProfile) {
+    setEditError(null);
+    setEditPersonal(personalFormFrom(employee));
     setEditingId(employee.id);
     setEditName(employee.name);
     setEditRole(employee.role);
@@ -946,47 +1045,100 @@ export default function EmployeesPage() {
         ) : rows.length === 0 ? (
           <Empty>尚無員工</Empty>
         ) : (
-          <div className="max-h-[calc(100dvh-12rem)] overflow-auto">
-            <table className="w-full text-left text-sm">
+          // 外框：直向超過視窗高度、橫向超過寬度都在框內捲（表頭釘上方、操作欄釘右側）。
+          // @container 讓下面的列內編輯區能用 100cqw 取得「外框可視寬度」。
+          <div className="@container max-h-[calc(100dvh-12rem)] overflow-auto">
+            <table className="w-full min-w-[84rem] text-left text-sm">
               <thead>
                 <tr className="text-xs text-gray-500">
-                  <th className={`${STICKY_TH} py-2 pr-4`}>員工</th>
-                  <th className={`${STICKY_TH} hidden py-2 pr-4 sm:table-cell`}>Email</th>
-                  <th className={`${STICKY_TH} py-2 pr-4`}>單位/身分</th>
-                  <th className={`${STICKY_TH} py-2 pr-4`}>到離職</th>
-                  <th className={`${STICKY_TH} py-2 pr-4`}>角色/狀態</th>
-                  <th className={`${STICKY_TH} py-2 text-right`}>操作</th>
+                  <th className={`${STICKY_TH} min-w-[7rem] py-2 pr-4`}>員工</th>
+                  <th className={`${STICKY_TH} hidden min-w-[12rem] py-2 pr-4 sm:table-cell`}>Email</th>
+                  <th className={`${STICKY_TH} min-w-[8rem] py-2 pr-4`}>單位/身分</th>
+                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-4`}>到離職</th>
+                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-4`}>生日</th>
+                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-4`}>身分證</th>
+                  <th className={`${STICKY_TH} min-w-[13rem] py-2 pr-4`}>戶籍地</th>
+                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-4`}>匯款帳號</th>
+                  <th className={`${STICKY_TH} min-w-[8rem] py-2 pr-4`}>角色/狀態</th>
+                  <th className={`${PIN_RIGHT_TH} py-2 pl-3 text-right`}>操作</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((employee) => (
                   <tr key={employee.id} className="border-b border-gray-50 align-top">
                     {editingId === employee.id ? (
-                      <td colSpan={6} className="py-3">
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-8">
-                          <input className={inputCls} value={editName} onChange={(event) => setEditName(event.target.value)} />
-                          <input className={inputCls} value={editEmpNo} onChange={(event) => setEditEmpNo(event.target.value)} />
-                          <select className={inputCls} value={editDeptId} onChange={(event) => setEditDeptId(event.target.value)}>
-                            <option value="">不指定</option>
-                            {depts.map((dept) => <option key={dept.id} value={dept.id}>{dept.name}</option>)}
-                          </select>
-                          <select className={inputCls} value={editEmploymentType} onChange={(event) => setEditEmploymentType(event.target.value)}>
-                            {EMPLOYMENT_TYPES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-                          </select>
-                          <input type="date" className={inputCls} value={editHireDate} onChange={(event) => setEditHireDate(event.target.value)} />
-                          <input type="date" className={inputCls} value={editTerminatedAt} onChange={(event) => setEditTerminatedAt(event.target.value)} />
-                          <select className={inputCls} value={editRole} onChange={(event) => setEditRole(event.target.value)}>
-                            {ROLES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-                          </select>
-                          <select className={inputCls} value={editStatus} onChange={(event) => setEditStatus(event.target.value)}>
-                            <option value="active">在職</option>
-                            <option value="inactive">停用</option>
-                          </select>
-                        </div>
-                        {/* 儲存／取消放右下角；主要動作「儲存」在最右邊。 */}
-                        <div className="mt-3 flex justify-end gap-4">
-                          <button onClick={() => setEditingId(null)} className="text-sm text-gray-500 hover:underline">取消</button>
-                          <button onClick={() => void saveEdit(employee.id)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>儲存</button>
+                      <td colSpan={COLUMN_COUNT} className="py-3">
+                        {/* 編輯區釘在外框可視範圍的左側、寬度＝外框寬（100cqw，扣 1rem 讓出直向捲軸）：
+                            個資欄位讓表格比外框寬，不釘住的話輸入框會攤到要橫捲才看得到的地方，
+                            右下角的「取消／儲存」也是。whitespace-normal 蓋掉手機版 td 的 nowrap（錯誤訊息要能換行）。 */}
+                        <div className="sticky left-0 w-[calc(100cqw-1rem)] max-w-full whitespace-normal">
+                          <div className="grid grid-cols-1 gap-3 sm:grid-cols-8">
+                            <input className={inputCls} value={editName} onChange={(event) => setEditName(event.target.value)} />
+                            <input className={inputCls} value={editEmpNo} onChange={(event) => setEditEmpNo(event.target.value)} />
+                            <select className={inputCls} value={editDeptId} onChange={(event) => setEditDeptId(event.target.value)}>
+                              <option value="">不指定</option>
+                              {depts.map((dept) => <option key={dept.id} value={dept.id}>{dept.name}</option>)}
+                            </select>
+                            <select className={inputCls} value={editEmploymentType} onChange={(event) => setEditEmploymentType(event.target.value)}>
+                              {EMPLOYMENT_TYPES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                            </select>
+                            <input type="date" className={inputCls} value={editHireDate} onChange={(event) => setEditHireDate(event.target.value)} />
+                            <input type="date" className={inputCls} value={editTerminatedAt} onChange={(event) => setEditTerminatedAt(event.target.value)} />
+                            <select className={inputCls} value={editRole} onChange={(event) => setEditRole(event.target.value)}>
+                              {ROLES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                            </select>
+                            <select className={inputCls} value={editStatus} onChange={(event) => setEditStatus(event.target.value)}>
+                              <option value="active">在職</option>
+                              <option value="inactive">停用</option>
+                            </select>
+                          </div>
+                          {/* 第二排：個資——生日／身分證／戶籍地址（寬欄）一列、匯款帳號四欄（銀行代碼／銀行名稱／帳號／戶名）一列。
+                              欄數跟著外框寬度走（@3xl＝外框 ≥ 48rem 才分 8 欄，與上一排的 8 欄上下對齊；較窄時 2 欄，
+                              免得身分證、日期在窄格裡被截掉）。身分證轉大寫、不驗格式（外籍居留證格式不同）。 */}
+                          <div className="mt-3 grid grid-cols-2 gap-3 @3xl:grid-cols-8">
+                            <PersonalField label="生日" className="@3xl:col-span-2">
+                              <input type="date" className={inputCls} value={editPersonal.birthday} onChange={(event) => setPersonal("birthday", event.target.value)} />
+                            </PersonalField>
+                            <PersonalField label="身分證字號" className="@3xl:col-span-2">
+                              <input
+                                className={inputCls}
+                                value={editPersonal.idNumber}
+                                onChange={(event) => setPersonal("idNumber", event.target.value.toUpperCase())}
+                                autoCapitalize="characters"
+                                autoComplete="off"
+                                spellCheck={false}
+                              />
+                            </PersonalField>
+                            <PersonalField label="戶籍地址" className="col-span-2 @3xl:col-span-4">
+                              <input className={inputCls} value={editPersonal.registeredAddress} onChange={(event) => setPersonal("registeredAddress", event.target.value)} autoComplete="off" />
+                            </PersonalField>
+                          </div>
+                          <div className="mt-3 grid grid-cols-2 gap-3 @3xl:grid-cols-8">
+                            <PersonalField label="銀行代碼">
+                              <input className={inputCls} value={editPersonal.bankCode} onChange={(event) => setPersonal("bankCode", event.target.value)} autoComplete="off" />
+                            </PersonalField>
+                            <PersonalField label="銀行名稱" className="@3xl:col-span-2">
+                              <input className={inputCls} value={editPersonal.bankName} onChange={(event) => setPersonal("bankName", event.target.value)} autoComplete="off" />
+                            </PersonalField>
+                            <PersonalField label="帳號" className="@3xl:col-span-3">
+                              <input className={inputCls} value={editPersonal.bankAccount} onChange={(event) => setPersonal("bankAccount", event.target.value)} autoComplete="off" />
+                            </PersonalField>
+                            <PersonalField label="戶名" className="@3xl:col-span-2">
+                              <input className={inputCls} value={editPersonal.accountHolder} onChange={(event) => setPersonal("accountHolder", event.target.value)} autoComplete="off" />
+                            </PersonalField>
+                          </div>
+                          {editError && (
+                            <div className="mt-3">
+                              <ErrorText>{editError}</ErrorText>
+                            </div>
+                          )}
+                          {/* 儲存／取消放右下角；主要動作「儲存」在最右邊。 */}
+                          <div className="mt-3 flex justify-end gap-4">
+                            <button onClick={cancelEdit} disabled={editSaving} className="text-sm text-gray-500 hover:underline disabled:opacity-50">取消</button>
+                            <button onClick={() => void saveEdit(employee.id)} disabled={editSaving} className="text-sm font-medium disabled:opacity-50" style={{ color: "var(--brand)" }}>
+                              {editSaving ? "儲存中…" : "儲存"}
+                            </button>
+                          </div>
                         </div>
                       </td>
                     ) : (
@@ -1014,12 +1166,20 @@ export default function EmployeesPage() {
                         </td>
                         <td className="py-3 pr-4 text-gray-600">{deptNameMap.get(employee.dept_id ?? "") ?? "—"} / {employmentTypeLabel(employee.employment_type)}</td>
                         <td className="whitespace-nowrap py-3 pr-4 text-gray-600">{employee.hire_date ?? "—"} → {employee.terminated_at ?? "在職"}</td>
+                        <td className="whitespace-nowrap py-3 pr-4 text-gray-600">{employee.birthday || "—"}</td>
+                        <td className="whitespace-nowrap py-3 pr-4 text-gray-600">{employee.idNumber || "—"}</td>
+                        <td className="py-3 pr-4 text-gray-600">
+                          <div className="min-w-[13rem] max-w-[20rem] whitespace-normal break-words">{employee.registeredAddress || "—"}</div>
+                        </td>
+                        <td className="whitespace-nowrap py-3 pr-4 text-gray-600">
+                          <BankCell employee={employee} />
+                        </td>
                         <td className="py-3 pr-4">
                           <span className="rounded-full bg-gray-100 px-2 py-1 text-xs text-gray-600">{roleLabel(employee.role)}</span>
                           {employee.status !== "active" && <span className="ml-2 rounded-full bg-red-100 px-2 py-1 text-xs text-red-600">{employee.status}</span>}
                           {!employee.user_id && <span className="ml-2 rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-700">未開通帳號</span>}
                         </td>
-                        <td className="whitespace-nowrap py-2 text-right">
+                        <td className={`${PIN_RIGHT_TD} whitespace-nowrap py-2 pl-3 text-right`}>
                           {/* 只留「編輯」＋「⋯」；其餘動作收進選單，顯示／disabled 規則在 lib/employee-actions.ts */}
                           <div className="flex items-center justify-end gap-1">
                             <button

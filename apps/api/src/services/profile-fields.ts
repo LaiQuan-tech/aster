@@ -2,15 +2,19 @@
  * 員工資料「區塊 → 欄位」對照（W6）。
  *
  * 租戶設定 `features.formParameters.editableFields` 存的是**區塊 key**
- * （basic／contact／education／certification／workHistory），不是欄位名——
- * key 的權威定義在後台設定頁 `apps/web/src/app/admin/module-settings/page.tsx`
- * 的 `FIELD_OPTIONS`（該頁屬 WP4，只讀不改）。本檔把區塊攤成
+ * （basic／contact／bank／education／certification／workHistory），不是欄位名——
+ * key 的清單要與後台設定頁 `apps/web/src/app/admin/module-settings/page.tsx`
+ * 的 `FIELD_OPTIONS` 一致（新增區塊兩邊一起改；2026-10 新增 bank）。本檔把區塊攤成
  * `employee_profiles` 的欄位清單，供 `PUT /employees/:empId/profile` 判斷
  * 「員工自己可不可以改這一欄」。
  *
  * 只涵蓋 1:1 的 `employee_profiles`：education／certification／workHistory 是
  * 各自的子表端點（本輪不納管），列在 SECTION_LABEL 只為了讓設定頁的 key 有
  * 完整對照、也讓未來擴充時不必再回頭改 key 命名。
+ *
+ * bank（匯款帳號）獨立成一個區塊而不併進 basic／contact：租戶若只開放
+ * 「基本資料／通訊資料」給員工自改，匯款帳號仍須由 HR 維護（或另外勾選本區塊）；
+ * 沒設過 editableFields 的租戶維持「全部可改」的既有語意。
  *
  * 對照表與 diff 都是純函式（可直接單元測試）；檔案末端另有唯一一處 IO：
  * 讀租戶 `features.formParameters`，讓審核判斷與附件上限只有一份讀法。
@@ -21,6 +25,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 export const PROFILE_SECTIONS = [
   "basic",
   "contact",
+  "bank",
   "education",
   "certification",
   "workHistory",
@@ -31,6 +36,7 @@ export type ProfileSection = (typeof PROFILE_SECTIONS)[number]
 export const SECTION_LABEL: Record<ProfileSection, string> = {
   basic: "基本資料",
   contact: "通訊資料",
+  bank: "匯款帳號",
   education: "學歷",
   certification: "證照",
   workHistory: "工作經歷",
@@ -38,8 +44,9 @@ export const SECTION_LABEL: Record<ProfileSection, string> = {
 
 /**
  * 區塊 → `employee_profiles` 欄位（DB 欄名）。
- * 兩份清單合起來＝`routes/employee-profile.ts` 的 `FIELD_TO_COL` 值域，
- * 少一欄就會讓那一欄永遠擋在白名單外，改動兩邊要同步。
+ * 各區塊合起來＝`routes/employee-profile.ts` 的 `PROFILE_FIELD_TO_COL` 值域，
+ * 少一欄就會讓那一欄永遠擋在白名單外，改動兩邊要同步
+ * （__tests__/profile-fields.test.ts 會檢查兩邊一致）。
  */
 export const SECTION_COLUMNS: Record<ProfileSection, readonly string[]> = {
   basic: [
@@ -75,6 +82,8 @@ export const SECTION_COLUMNS: Record<ProfileSection, readonly string[]> = {
     "emergency_phone",
     "note",
   ],
+  // 匯款（薪轉）帳號，欄位命名比照 vendors（packages/db 0056）。
+  bank: ["bank_code", "bank_name", "bank_account", "account_holder"],
   // 子表端點，不在 employee_profiles。
   education: [],
   certification: [],
@@ -112,6 +121,10 @@ export const COLUMN_LABEL: Record<string, string> = {
   emergency_relationship: "緊急聯絡人關係",
   emergency_phone: "緊急聯絡電話",
   note: "備註",
+  bank_code: "銀行代碼",
+  bank_name: "銀行名稱",
+  bank_account: "匯款帳號",
+  account_holder: "戶名",
 }
 
 export function columnLabel(col: string): string {
