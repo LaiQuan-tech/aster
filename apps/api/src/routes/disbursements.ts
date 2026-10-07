@@ -153,7 +153,8 @@ function parseListQuery(query: Request["query"]):
       projectId: ids.projectId,
       companyId: ids.companyId,
       status: status as DisbursementStatus | undefined,
-      q: str(query.q)?.slice(0, 100),
+      // 長度上限交給 listDisbursements 的 sanitizeSearchTerm（先剝再以 code point 截）；這裡先截會讓被剝字元佔名額、切半 emoji
+      q: str(query.q),
     },
   }
 }

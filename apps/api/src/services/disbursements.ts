@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "../lib/supabase.js"
 import { logger } from "../lib/logger.js"
+import { sanitizeSearchTerm } from "../lib/search-term.js"
 import { addDaysKey, dayWindowUtc, todayKey } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { BILLING_COLS, num, type BillingRow } from "./billing-store.js"
@@ -843,7 +844,7 @@ export async function listDisbursements(
   if (filters.companyId) q = q.eq("paying_company_id", filters.companyId)
   if (ids) q = q.in("id", ids.slice(0, 500))
   if (filters.q) {
-    const like = `%${filters.q.replace(/[%_,()]/g, "")}%`
+    const like = `%${sanitizeSearchTerm(filters.q)}%`
     q = q.or(`disbursement_no.ilike.${like},payee_name.ilike.${like},receipt_ref.ilike.${like},purpose.ilike.${like}`)
   }
   const { data, error } = await q
