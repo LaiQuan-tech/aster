@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { sanitizeSearchTerm } from "../lib/search-term.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { generateJson, GeminiNotConfiguredError, isGeminiConfigured } from "../lib/gemini.js"
 import { isValidTaiwanTaxId, TAX_ID_RE } from "../services/tax-id.js"
@@ -129,7 +130,7 @@ vendorsRouter.get("/vendors", requireAuth, requireTenant, async (req: Request, r
     const { data, error } = await withVendorCols((cols) => {
       let query = supabaseAdmin.from("vendors").select(cols).eq("tenant_id", tenantId).is("deleted_at", null)
       if (q) {
-        const like = `%${q.replace(/[%_]/g, "")}%`
+        const like = `%${sanitizeSearchTerm(q)}%`
         query = query.or(`name.ilike.${like},contact_name.ilike.${like},category.ilike.${like},tax_id.ilike.${like},phone.ilike.${like},mobile.ilike.${like}`)
       }
       return query.order("name", { ascending: true })
