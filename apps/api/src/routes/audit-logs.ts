@@ -51,12 +51,35 @@ function encodeCursor(c: Cursor): string {
   return Buffer.from(JSON.stringify(c), "utf8").toString("base64url")
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** PostgREST 回的 timestamptz 字串，例：`2026-10-07T01:39:31.123456+00:00`（小數秒可省略）。 */
+const CURSOR_AT_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(?:Z|[+-](\d{2}):(\d{2}))$/
+
+/**
+ * cursor 的 `at` 要是真的日曆日期時間。只看格式不夠：`2026-02-30`、`T24:00` 格式都對，
+ * 原樣進 `.or()` 會讓 PostgREST 轉型失敗（→ 500）。也不能交給 Date.parse——V8 會把
+ * 2/30、4/31、24:00 往後進位成別的日期而不是 NaN——所以逐欄自己檢查。
+ */
+function isCursorTimestamp(at: string): boolean {
+  const m = CURSOR_AT_RE.exec(at)
+  if (!m) return false
+  const [y, mo, d, h, mi, s] = m.slice(1, 7).map(Number)
+  const day = new Date(Date.UTC(y, mo - 1, d))
+  if (day.getUTCFullYear() !== y || day.getUTCMonth() !== mo - 1 || day.getUTCDate() !== d) return false
+  if (h > 23 || mi > 59 || s > 59) return false
+  // Z 沒有位移欄（群組為 undefined）；有位移時 時 0–14、分 0–59
+  if (m[7] !== undefined && (Number(m[7]) > 14 || Number(m[8]) > 59)) return false
+  return true
+}
+
+/** 解不出合法 cursor 回 null（呼叫端回 400 invalid_cursor）；`at` 保留原字串，不轉 Date（見檔頭）。 */
 function decodeCursor(raw: string): Cursor | null {
   try {
     const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Partial<Cursor>
     if (typeof parsed.at !== "string" || typeof parsed.id !== "string") return null
-    if (!/^[0-9T:.+\-Z]+$/.test(parsed.at)) return null
-    if (!/^[0-9a-f-]{36}$/i.test(parsed.id)) return null
+    if (!isCursorTimestamp(parsed.at)) return null
+    if (!UUID_RE.test(parsed.id)) return null
     return { at: parsed.at, id: parsed.id }
   } catch {
     return null
@@ -84,8 +107,6 @@ async function boundary(
 function keywordSafe(q: string): string {
   return q.replace(/[,()"'\\*%]/g, " ").replace(/\s+/g, " ").trim()
 }
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /**
  * GET /audit-logs?table=a,b&recordId=&action=&actorEmpId=&from=&to=&q=&limit=&cursor=
