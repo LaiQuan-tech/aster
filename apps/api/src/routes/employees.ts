@@ -3,7 +3,7 @@ import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireFinance, requireHrAdmin } from "../middleware/role.js"
-import { isFinanceRole, resolveSelf } from "../middleware/scope.js"
+import { isFinanceRole, isHrRole, resolveSelf } from "../middleware/scope.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
 import { belongsToTenant } from "../services/auth-invite.js"
@@ -55,6 +55,7 @@ function generatePassword(): string {
  * GET /employees 可選帶出的個資欄位（`?include=profile`，僅 HR／平台管理員／會計）：
  * `employee_profiles` 欄名 → 回應鍵名（camelCase，與 PUT /employees/:empId/profile 的請求鍵一致）。
  * 全部是個資或金融帳號，**只有**下面 GET handler 的財務層分支會讀、會回。
+ * 這七欄是財務層共用的；HR／平台管理員另外多 HR_PROFILE_EXTRA_FIELDS 兩欄。
  */
 const PROFILE_EXTRA_FIELDS = {
   id_number: "idNumber",
@@ -66,20 +67,36 @@ const PROFILE_EXTRA_FIELDS = {
   account_holder: "accountHolder",
 } as const
 
-type ProfileExtras = Record<(typeof PROFILE_EXTRA_FIELDS)[keyof typeof PROFILE_EXTRA_FIELDS], string | null>
+/**
+ * 只有 HR／平台管理員多拿的欄位：第二、三證號（薪資作業頁的證號搜尋要用）。單人的
+ * GET /employees/:empId/profile（routes/employee-profile.ts 的 authorize）只給本人或 HR，
+ * 看別人的第二、三證號本來就只限 HR（本人只看得到自己的）；清單照同一個權限矩陣——會計拿得到第一證號（上面七欄之一），
+ * 第二、三證號整組不給、連 select 都不讀。
+ */
+const HR_PROFILE_EXTRA_FIELDS = {
+  id_number2: "idNumber2",
+  id_number3: "idNumber3",
+} as const
 
-/** 沒有 employee_profiles 列（或該欄是空的）的員工：七個鍵照樣都在、值為 null——鍵存在＝呼叫者有權限，null＝沒資料。 */
-const EMPTY_PROFILE_EXTRAS: ProfileExtras = {
-  idNumber: null,
-  registeredAddress: null,
-  birthday: null,
-  bankCode: null,
-  bankName: null,
-  bankAccount: null,
-  accountHolder: null,
+/** HR／平台管理員的有效欄位對照：共用七欄＋第二、三證號。 */
+const HR_PROFILE_FIELDS = { ...PROFILE_EXTRA_FIELDS, ...HR_PROFILE_EXTRA_FIELDS }
+
+type ProfileExtraKey =
+  | (typeof PROFILE_EXTRA_FIELDS)[keyof typeof PROFILE_EXTRA_FIELDS]
+  | (typeof HR_PROFILE_EXTRA_FIELDS)[keyof typeof HR_PROFILE_EXTRA_FIELDS]
+
+/** 欄名 → 回應鍵名。依呼叫者角色二選一：會計＝PROFILE_EXTRA_FIELDS，HR／平台管理員＝HR_PROFILE_FIELDS。 */
+type ProfileFieldMap = Readonly<Record<string, ProfileExtraKey>>
+
+type ProfileExtras = Partial<Record<ProfileExtraKey, string | null>>
+
+/**
+ * 沒有 employee_profiles 列（或該欄是空的）的員工：欄位對照裡的鍵照樣都在、值為 null
+ * （會計七個、HR／平台管理員九個）——鍵存在＝呼叫者有權限，null＝沒資料。
+ */
+function emptyProfileExtras(fields: ProfileFieldMap): ProfileExtras {
+  return Object.fromEntries(Object.values(fields).map((key) => [key, null])) as ProfileExtras
 }
-
-const PROFILE_EXTRA_SELECT = ["employee_id", ...Object.keys(PROFILE_EXTRA_FIELDS)].join(", ")
 
 /**
  * `.in("employee_id", ids)` 每批上限。PostgREST 把 id 清單放在 URL 的 query string（每個 uuid 約 39 字元），
@@ -89,9 +106,15 @@ const PROFILE_EXTRA_BATCH = 100
 
 /**
  * 批次讀這批員工的個資欄位（每批一次查詢，不是每人一次）。tenant_id 條件是真正的租戶守門
- * （supabaseAdmin 繞過 RLS）。回傳 employee_id → 七個欄位；沒有 profile 列的員工不在 Map 內。
+ * （supabaseAdmin 繞過 RLS）。select 只列 `fields` 裡的欄（會計那份不含第二、三證號）。
+ * 回傳 employee_id → `fields` 的每個鍵；沒有 profile 列的員工不在 Map 內。
  */
-async function loadProfileExtras(tenantId: string, employeeIds: string[]): Promise<Map<string, ProfileExtras>> {
+async function loadProfileExtras(
+  tenantId: string,
+  employeeIds: string[],
+  fields: ProfileFieldMap,
+): Promise<Map<string, ProfileExtras>> {
+  const select = ["employee_id", ...Object.keys(fields)].join(", ")
   const batches: string[][] = []
   for (let i = 0; i < employeeIds.length; i += PROFILE_EXTRA_BATCH) {
     batches.push(employeeIds.slice(i, i + PROFILE_EXTRA_BATCH))
@@ -100,7 +123,7 @@ async function loadProfileExtras(tenantId: string, employeeIds: string[]): Promi
     batches.map((ids) =>
       supabaseAdmin
         .from("employee_profiles")
-        .select(PROFILE_EXTRA_SELECT)
+        .select(select)
         .eq("tenant_id", tenantId)
         .in("employee_id", ids),
     ),
@@ -109,8 +132,8 @@ async function loadProfileExtras(tenantId: string, employeeIds: string[]): Promi
   for (const { data, error } of results) {
     if (error) throw new Error(`GET /employees (profile extras): ${error.message}`)
     for (const row of (data ?? []) as unknown as Array<Record<string, unknown>>) {
-      const extras = { ...EMPTY_PROFILE_EXTRAS }
-      for (const [col, key] of Object.entries(PROFILE_EXTRA_FIELDS)) {
+      const extras = emptyProfileExtras(fields)
+      for (const [col, key] of Object.entries(fields)) {
         const value = row[col]
         extras[key] = typeof value === "string" && value !== "" ? value : null
       }
@@ -139,12 +162,17 @@ function wantsProfileExtras(query: Request["query"]): boolean {
  * 個資欄位（`?include=profile`，2026-10-07）：員工管理頁要在列表顯示並列內編輯
  * 生日／身分證／戶籍地／匯款帳號（idNumber、registeredAddress、birthday、bankCode、
  * bankName、bankAccount、accountHolder，來自 employee_profiles）。
+ * 薪資作業頁是第二個使用者：關鍵字搜尋與員工下拉下方的「證件號碼」原本是每位員工各打一次
+ * GET /employees/:empId/profile 組出來的（1+N 個請求，業主反映後台頁面慢），改成這裡一次帶回。
  *   - **opt-in**：不帶 include 的回應跟以前完全一樣。後台其他二十幾個頁面與 ESS 的人員挑選
  *     （代同仁申請、KPI 考核者姓名）都只是拿這支 GET 對照姓名，它們不會也不該順便拿到全員個資；
- *     只有員工管理頁帶 `?include=profile`。
+ *     只有員工管理頁與薪資作業頁帶 `?include=profile`。
  *   - **只有財務層回得出去**：路由層已有 requireFinance；handler 內再以 isFinanceRole 判一次
  *     （縱深防禦——日後有人把路由放寬成「全員可列同事」，個資欄位仍然不外流）。非財務層帶了
  *     include 也只得到不含個資的清單，整組鍵不存在。
+ *   - **HR／平台管理員多兩鍵 idNumber2、idNumber3**（第二、三證號）：單人 profile 端點只給
+ *     本人或 HR，看別人的第二、三證號本來就只限 HR，這裡照同一個權限矩陣——會計維持上面七鍵
+ *     （見 HR_PROFILE_EXTRA_FIELDS）。
  *   - 一次批次查 employee_profiles（見 loadProfileExtras），不是每人一查。
  *
  * Tenant boundary is enforced TWICE: the API filters by res.locals.tenantId
@@ -161,11 +189,14 @@ employeesRouter.get(
     const tenantId = res.locals.tenantId as string
     try {
       // 個資分支的唯一入口：呼叫者要求了 include=profile「且」是財務層角色。
-      let includeProfile = false
+      // 欄位範圍再依角色分：會計＝共用七欄；HR／平台管理員多第二、三證號（見 HR_PROFILE_EXTRA_FIELDS）。
+      let profileFields: ProfileFieldMap | null = null
       if (wantsProfileExtras(req.query)) {
         const userId = req.auth?.userId
         const self = userId ? await resolveSelf(tenantId, userId) : null
-        includeProfile = !!self && isFinanceRole(self.role)
+        if (self && isFinanceRole(self.role)) {
+          profileFields = isHrRole(self.role) ? HR_PROFILE_FIELDS : PROFILE_EXTRA_FIELDS
+        }
       }
 
       const { data, error } = await supabaseAdmin
@@ -183,13 +214,17 @@ employeesRouter.get(
       const rows = data ?? []
       const [emails, extras] = await Promise.all([
         emailsByUserId(rows.map((row) => row.user_id as string | null).filter((id): id is string => !!id)),
-        includeProfile ? loadProfileExtras(tenantId, rows.map((row) => row.id as string)) : Promise.resolve(null),
+        profileFields
+          ? loadProfileExtras(tenantId, rows.map((row) => row.id as string), profileFields)
+          : Promise.resolve(null),
       ])
+      // 沒有 profile 列的員工也是整組鍵、全 null；鍵集合跟著呼叫者角色的欄位對照走。
+      const noProfile = profileFields ? emptyProfileExtras(profileFields) : {}
       const employees = rows.map((row) => ({
         ...row,
         email: row.user_id ? (emails.get(row.user_id as string) ?? null) : null,
         // 財務層＋include=profile 才展開個資；其餘情況不加任何鍵。
-        ...(extras ? (extras.get(row.id as string) ?? EMPTY_PROFILE_EXTRAS) : {}),
+        ...(extras ? (extras.get(row.id as string) ?? noProfile) : {}),
       }))
       // 帶了身分證／匯款帳號的回應不准被瀏覽器或中介快取落地。
       if (extras) res.setHeader("Cache-Control", "no-store")

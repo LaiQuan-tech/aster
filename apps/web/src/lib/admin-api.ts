@@ -123,12 +123,15 @@ export function getEmployees() {
 
 /**
  * 員工列表多帶的個資欄位（來自 employee_profiles）。只有 HR／平台管理員／會計、且請求帶
- * `?include=profile` 時 API 才會回（每位員工七個鍵齊全，沒資料＝null）；其餘情況整組不存在，
- * 所以這裡全部是可選。
+ * `?include=profile` 時 API 才會回（每位員工的鍵齊全——會計七個、HR／平台管理員多第二、三證號共九個，
+ * 沒資料＝null）；其餘情況整組不存在，所以這裡全部是可選。
  */
 export interface EmployeePersonalFields {
   /** 身分證／居留證字號（原樣，不驗格式）。 */
   idNumber?: string | null;
+  /** 第二、三證號，只有 HR／平台管理員拿得到，會計整組不存在（比照單人 profile 只給本人或 HR）。 */
+  idNumber2?: string | null;
+  idNumber3?: string | null;
   /** 戶籍地址。 */
   registeredAddress?: string | null;
   /** 生日 YYYY-MM-DD。 */
@@ -143,7 +146,8 @@ export interface EmployeePersonalFields {
 export type EmployeeWithProfile = Employee & EmployeePersonalFields;
 
 /**
- * 員工管理頁專用：同 `getEmployees()`，另外帶出每位員工的個資欄位（`?include=profile`）。
+ * 員工管理頁＋薪資作業頁專用：同 `getEmployees()`，另外帶出每位員工的個資欄位（`?include=profile`）。
+ * 薪資作業頁是因為搜尋要比對證號（lib/payroll-employees.ts，一次請求取代原本每人一支 profile）。
  * 其他頁面只是拿清單對照姓名，一律用 `getEmployees()`——不要為了方便改成這支，
  * 全員身分證／匯款帳號不該跟著每個頁面的請求流到瀏覽器。
  */

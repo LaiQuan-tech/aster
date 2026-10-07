@@ -432,7 +432,7 @@ export default function EmployeesPage() {
   const deptNameMap = useMemo(() => new Map(depts.map((dept) => [dept.id, dept.name])), [depts]);
   const selectedEmployee = rows.find((employee) => employee.id === profileEmpId) ?? null;
 
-  // 只有這一頁帶 include=profile 拿全員個資欄位（其餘頁面的 getEmployees() 不帶，見 admin-api）。
+  // 只有這一頁與薪資作業頁（證號搜尋）帶 include=profile 拿全員個資欄位（其餘頁面的 getEmployees() 不帶，見 admin-api）。
   const fetchRows = useCallback(async () => {
     const [empRes, deptRes] = await Promise.all([getEmployeesWithProfile(), getDepartments()]);
     setRows(empRes.employees);

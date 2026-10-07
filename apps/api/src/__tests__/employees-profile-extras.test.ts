@@ -9,6 +9,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
  *
  *   GET /employees?include=profile
  *     • HR／平台管理員／會計拿得到七個欄位（每人一組，沒資料＝null）。
+ *     • HR／平台管理員另有第二、三證號 idNumber2／idNumber3（薪資作業頁的證號搜尋用）；會計沒有
+ *       這兩個鍵，employee_profiles 的 select 也不讀這兩欄（單人 profile 端點本來就只給本人或 HR）。
  *     • 不帶 include＝回應與以前完全一樣（後台約 30 個頁面、ESS 人員挑選都只拿來對照姓名）。
  *     • 一般員工／主管：路由層 requireFinance 直接 403；就算日後路由被放寬，handler 內
  *       的 isFinanceRole 判斷仍讓他們拿不到任何個資鍵，而且根本不去查 employee_profiles。
@@ -167,6 +169,9 @@ afterAll(async () => {
 const PERSONAL_KEYS = ["idNumber", "registeredAddress", "birthday", "bankCode", "bankName", "bankAccount", "accountHolder"] as const
 // 這些假值若出現在不該出現的回應裡，就是外洩。
 const SECRET_STRINGS = ["A123456789", "0000000000", "測試市測試區測試路1號", "測試銀行", "測試戶名"]
+// 只有 HR／平台管理員拿得到的第二、三證號：鍵與種子假值（會計的回應裡一個都不能有）。
+const HR_EXTRA_KEYS = ["idNumber2", "idNumber3"] as const
+const HR_ONLY_SECRETS = ["A100000002", "A100000003"]
 
 function get(path: string, userId: string) {
   return request(server).get(path).set("Authorization", `Bearer ${userId}`)
@@ -208,6 +213,8 @@ beforeEach(() => {
       tenant_id: t,
       employee_id: ids.staff,
       id_number: "A123456789",
+      id_number2: "A100000002", // 第二、三證號：只有 HR／平台管理員拿得到
+      id_number3: "A100000003",
       registered_address: "測試市測試區測試路1號",
       birthday: "2000-01-01",
       bank_code: "000",
@@ -216,14 +223,15 @@ beforeEach(() => {
       account_holder: "測試戶名",
       phone: "0900000000", // 不在清單的欄位，不得出現在 GET /employees
     },
-    // 只填了生日（其餘為 null／空字串）。
-    { id: "prof-hr", tenant_id: t, employee_id: ids.hr, birthday: "1990-05-05", id_number: "", bank_account: null },
+    // 只填了生日（其餘為 null／空字串；id_number3 整欄沒值）。
+    { id: "prof-hr", tenant_id: t, employee_id: ids.hr, birthday: "1990-05-05", id_number: "", id_number2: "", bank_account: null },
     // 別租戶、同一個 employee_id 的列：租戶條件擋不住就會把這組值帶出來。
     {
       id: "prof-other-tenant",
       tenant_id: h.OTHER_TENANT,
       employee_id: ids.staff,
       id_number: "Z999999999",
+      id_number2: "Z999999992",
       bank_account: "9999999999",
     },
   ]
@@ -239,7 +247,7 @@ describe("GET /employees?include=profile — 個資欄位只給 HR／財會", ()
     ["HR", "user-hr"],
     ["平台管理員", "user-platform"],
     ["會計", "user-accountant"],
-  ])("%s：每位員工都帶七個個資欄位（有資料的帶值，沒有的為 null）", async (_label, caller) => {
+  ])("%s：每位員工都帶七個共用個資欄位（有資料的帶值，沒有的為 null）", async (_label, caller) => {
     const res = await get("/employees?include=profile", caller)
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     const list = res.body.employees as any[]
@@ -301,6 +309,80 @@ describe("GET /employees?include=profile — 個資欄位只給 HR／財會", ()
     expect(none.body.employees[0]).not.toHaveProperty("idNumber")
     const multi = await get("/employees?include=foo,profile", "user-hr")
     expect(row(multi.body.employees, ids.staff).idNumber).toBe("A123456789")
+  })
+})
+
+describe("GET /employees?include=profile — 第二、三證號只給 HR／平台管理員（權限比照單人 profile）", () => {
+  /** 同一位呼叫者不帶 include 時每列的鍵（員工欄位＋email）＝「原本的鍵」基準。 */
+  async function plainKeys(caller: string): Promise<string[]> {
+    const res = await get("/employees", caller)
+    expect(res.status).toBe(200)
+    return Object.keys(res.body.employees[0])
+  }
+
+  it.each([
+    ["HR", "user-hr"],
+    ["平台管理員", "user-platform"],
+  ])("%s：每位員工多 idNumber2／idNumber3（有值照帶；空字串、沒值、沒有 profile 列＝null）", async (_label, caller) => {
+    const plain = await plainKeys(caller)
+    h.calls.length = 0
+    const res = await get("/employees?include=profile", caller)
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    const list = res.body.employees as any[]
+    // 鍵集合正好是：原本的鍵＋共用七欄＋第二、三證號。
+    const expected = [...plain, ...PERSONAL_KEYS, ...HR_EXTRA_KEYS].sort()
+    for (const e of list) expect(Object.keys(e).sort(), e.name).toEqual(expected)
+
+    expect(row(list, ids.staff)).toMatchObject({ idNumber: "A123456789", idNumber2: "A100000002", idNumber3: "A100000003" })
+    // prof-hr：id_number2 是空字串、id_number3 整欄沒值。
+    expect(row(list, ids.hr)).toMatchObject({ idNumber2: null, idNumber3: null })
+    // 沒有 employee_profiles 列的員工。
+    expect(row(list, ids.other)).toMatchObject({ idNumber2: null, idNumber3: null })
+    expect(res.headers["cache-control"]).toBe("no-store")
+
+    // 仍是同一次批次查詢（不是另外再查一輪）：select 多這兩欄，租戶條件照舊。
+    const reads = profileReads()
+    expect(reads).toHaveLength(1)
+    expect(reads[0].cols).toContain("id_number2")
+    expect(reads[0].cols).toContain("id_number3")
+    expect(reads[0].filters).toContainEqual({ kind: "eq", col: "tenant_id", val: h.TENANT })
+    expect(JSON.stringify(res.body)).not.toContain("Z999999992")
+  })
+
+  it("會計：正好原本七鍵（沒有 idNumber2／idNumber3），employee_profiles 的 select 也不讀這兩欄", async () => {
+    const plain = await plainKeys("user-accountant")
+    h.calls.length = 0
+    const res = await get("/employees?include=profile", "user-accountant")
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    const list = res.body.employees as any[]
+    const expected = [...plain, ...PERSONAL_KEYS].sort()
+    for (const e of list) {
+      expect(Object.keys(e).sort(), e.name).toEqual(expected)
+      for (const key of HR_EXTRA_KEYS) expect(e, e.name).not.toHaveProperty(key)
+    }
+    // 第一證號照給（共用七欄之一）；第二、三證號的值不在回應的任何地方。
+    expect(row(list, ids.staff).idNumber).toBe("A123456789")
+    for (const secret of HR_ONLY_SECRETS) expect(JSON.stringify(res.body)).not.toContain(secret)
+
+    const reads = profileReads()
+    expect(reads).toHaveLength(1)
+    expect(reads[0].cols).not.toContain("id_number2")
+    expect(reads[0].cols).not.toContain("id_number3")
+    expect(reads[0].cols.split(",").map((c) => c.trim()).sort()).toEqual(
+      ["employee_id", "id_number", "registered_address", "birthday", "bank_code", "bank_name", "bank_account", "account_holder"].sort(),
+    )
+  })
+
+  it("HR 不帶 include、或路由放寬時非財務層帶 include：都沒有 idNumber2／idNumber3", async () => {
+    const plain = await get("/employees", "user-hr")
+    for (const e of plain.body.employees) for (const key of HR_EXTRA_KEYS) expect(e).not.toHaveProperty(key)
+    h.guard.relaxFinance = true
+    for (const caller of ["user-staff", "user-manager"]) {
+      const res = await get("/employees?include=profile", caller)
+      expect(res.status, caller).toBe(200)
+      for (const e of res.body.employees) for (const key of HR_EXTRA_KEYS) expect(e, caller).not.toHaveProperty(key)
+      for (const secret of HR_ONLY_SECRETS) expect(JSON.stringify(res.body), caller).not.toContain(secret)
+    }
   })
 })
 

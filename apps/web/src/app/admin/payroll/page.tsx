@@ -4,8 +4,6 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react
 import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import {
-  getEmployees,
-  getEmployeeProfile,
   getSalaryStructure,
   putSalaryStructure,
   runPayroll,
@@ -19,6 +17,7 @@ import {
   type NhiDependent,
   type TaxDependent,
 } from "@/lib/admin-api";
+import { loadPayrollEmployees } from "@/lib/payroll-employees";
 
 const inputCls =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
@@ -75,26 +74,12 @@ export default function PayrollAdminPage() {
 
   useEffect(() => {
     let active = true;
-    getEmployees()
-      .then(async (r) => {
+    // 清單與證號一次批次請求帶回（以前是清單＋每位員工各一支 profile 的 1+N）。
+    loadPayrollEmployees()
+      .then((r) => {
         if (!active) return;
         setEmployees(r.employees);
-        const identities = await Promise.all(
-          r.employees.map(async (employee) => {
-            try {
-              const profile = await getEmployeeProfile(employee.id);
-              const values = [
-                profile.profile?.id_number,
-                profile.profile?.id_number2,
-                profile.profile?.id_number3,
-              ].filter(Boolean);
-              return [employee.id, values.join(" / ")] as const;
-            } catch {
-              return [employee.id, ""] as const;
-            }
-          }),
-        );
-        if (active) setEmployeeIdentityById(Object.fromEntries(identities));
+        setEmployeeIdentityById(r.identityById);
       })
       .catch((err) => setError(err instanceof Error ? err.message : "載入員工失敗"));
     return () => {
