@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin, requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { sanitizeSearchTerm } from "../lib/search-term.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { isValidTaiwanTaxId, TAX_ID_RE } from "../services/tax-id.js"
 import { INVOICE_TYPES, PAYMENT_METHODS } from "../services/project-money.js"
@@ -84,22 +85,6 @@ function isTaxIdConflict(err: { code?: string } | null): boolean {
   return err?.code === "23505"
 }
 
-/**
- * 搜尋字串（q）的字元上限。沒有上限時 q 可以長到 HTTP header 上限（約 16 KB），而且整串會原樣複製進
- * 五個 ilike 條件，查詢字串膨脹五倍以上。客戶名稱最長 200 字，截成前 100 字仍會命中同一筆
- * （子字串比對，前綴一定在名稱裡），不會漏掉結果。
- */
-const MAX_SEARCH_LEN = 100
-
-/**
- * 先剝除會破壞 PostgREST `or()` 語法／LIKE 萬用字元的 `% _ , ( )`，**再**截到 MAX_SEARCH_LEN：
- * 額度花在真的會拿去比對的字上，被剝掉的字元不佔名額。以字元（code point）截斷，
- * 不會把 surrogate pair（emoji、罕用字）切成一半。
- */
-function searchNeedle(q: string): string {
-  return Array.from(q.replace(/[%_,()]/g, "")).slice(0, MAX_SEARCH_LEN).join("")
-}
-
 // ── GET /clients?q= ────────────────────────────────────────────────────
 clientsRouter.get("/clients", requireAuth, requireTenant, async (req: Request, res: Response, next: NextFunction) => {
   const tenantId = res.locals.tenantId as string
@@ -107,7 +92,7 @@ clientsRouter.get("/clients", requireAuth, requireTenant, async (req: Request, r
   try {
     let query = supabaseAdmin.from("clients").select(CLIENT_COLS_EXT).eq("tenant_id", tenantId).is("deleted_at", null)
     if (q) {
-      const like = `%${searchNeedle(q)}%`
+      const like = `%${sanitizeSearchTerm(q)}%`
       query = query.or(`name.ilike.${like},short_name.ilike.${like},contact_name.ilike.${like},tax_id.ilike.${like},phone.ilike.${like}`)
     }
     const { data, error } = await query.order("name", { ascending: true })
