@@ -126,6 +126,9 @@ export default function AdminProjectDetailPage() {
   const [cSignedOn, setCSignedOn] = useState("");
   const [cCopies, setCCopies] = useState("1");
   const [savingContract, setSavingContract] = useState(false);
+  // 「＋ 新增文件」表單的展開狀態：放這裡是因為 load() 會整頁卸載重掛（見下方 `if (loading)`），
+  // 放在 ContractsCard 裡送出後會被重置成收起。預設收起。
+  const [showContractForm, setShowContractForm] = useState(false);
 
   // 案情狀態變更（模組四第 2 條）。改狀態要理由，所以不能是即存下拉。
   const [newStatus, setNewStatus] = useState<ProjectStatus | "">("");
@@ -357,6 +360,7 @@ export default function AdminProjectDetailPage() {
           cSignedOn={cSignedOn} setCSignedOn={setCSignedOn}
           cCopies={cCopies} setCCopies={setCCopies}
           savingContract={savingContract} setSavingContract={setSavingContract}
+          showAddForm={showContractForm} setShowAddForm={setShowContractForm}
           contractFileRef={contractFileRef} pendingContractId={pendingContractId}
           removeDoc={removeDoc}
           error={error} setError={setError} load={load}

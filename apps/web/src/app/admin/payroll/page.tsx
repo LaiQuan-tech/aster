@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import {
@@ -20,7 +20,7 @@ import {
 import { loadPayrollEmployees } from "@/lib/payroll-employees";
 
 const inputCls =
-  "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
+  "w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 const labelCls = "mb-1 block text-xs font-medium text-gray-500";
 
 export default function PayrollAdminPage() {
@@ -55,6 +55,12 @@ export default function PayrollAdminPage() {
   const [taxRelationship, setTaxRelationship] = useState("");
   const [taxIdNumber, setTaxIdNumber] = useState("");
   const [taxBirthYear, setTaxBirthYear] = useState("");
+  // 「＋ 新增」子表單預設收起（比照員工詳細資料的學歷／證照）。收合只是 hidden、不卸載，
+  // 填到一半的欄位會保留；送出成功後照舊清空欄位但維持展開，方便連續新增。
+  const [showNhiForm, setShowNhiForm] = useState(false);
+  const [showTaxForm, setShowTaxForm] = useState(false);
+  const nhiPanelId = useId();
+  const taxPanelId = useId();
 
   // 執行薪資作業（查詢／列印／定案在薪資明細表 /admin/payslips）
   const currentPeriod = new Date().toISOString().slice(0, 7);
@@ -331,19 +337,34 @@ export default function PayrollAdminPage() {
 
             <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2">
               <div>
-                <h3 className="mb-2 text-sm font-medium text-gray-600">健保眷屬投保資料</h3>
-                <form onSubmit={onAddNhi} className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  <input className={inputCls} value={nhiName} onChange={(event) => setNhiName(event.target.value)} placeholder="眷屬姓名" />
-                  <input className={inputCls} value={nhiRelationship} onChange={(event) => setNhiRelationship(event.target.value)} placeholder="關係" />
-                  <input className={inputCls} value={nhiIdNumber} onChange={(event) => setNhiIdNumber(event.target.value)} placeholder="身分證字號" />
-                  <label className="flex items-center gap-2 text-sm text-gray-600">
-                    <input type="checkbox" checked={nhiInsured} onChange={(event) => setNhiInsured(event.target.checked)} />
-                    投保中
-                  </label>
-                  <button type="submit" className="rounded-md border px-3 py-2 text-sm font-medium" style={{ color: "var(--brand)" }}>
-                    新增健保眷屬
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                  <h3 className="text-sm font-medium text-gray-600">健保眷屬投保資料</h3>
+                  <button
+                    type="button"
+                    onClick={() => setShowNhiForm((open) => !open)}
+                    aria-expanded={showNhiForm}
+                    aria-controls={nhiPanelId}
+                    className="text-sm font-medium"
+                    style={{ color: "var(--brand)" }}
+                  >
+                    {showNhiForm ? "收合" : "＋ 新增健保眷屬"}
                   </button>
-                </form>
+                </div>
+                {/* hidden 掛在不帶 display 類別的外層 div（form 本身是 grid，直接掛會被蓋掉）。 */}
+                <div id={nhiPanelId} hidden={!showNhiForm}>
+                  <form onSubmit={onAddNhi} className="mb-3 grid grid-cols-1 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-2">
+                    <input className={inputCls} value={nhiName} onChange={(event) => setNhiName(event.target.value)} placeholder="眷屬姓名" />
+                    <input className={inputCls} value={nhiRelationship} onChange={(event) => setNhiRelationship(event.target.value)} placeholder="關係" />
+                    <input className={inputCls} value={nhiIdNumber} onChange={(event) => setNhiIdNumber(event.target.value)} placeholder="身分證字號" />
+                    <label className="flex items-center gap-2 text-sm text-gray-600">
+                      <input type="checkbox" checked={nhiInsured} onChange={(event) => setNhiInsured(event.target.checked)} />
+                      投保中
+                    </label>
+                    <button type="submit" className="rounded-md border px-3 py-2 text-sm font-medium" style={{ color: "var(--brand)" }}>
+                      新增健保眷屬
+                    </button>
+                  </form>
+                </div>
                 <ul className="divide-y divide-gray-100 text-sm">
                   {nhiDeps.map((d) => (
                     <li key={d.id} className="flex items-center justify-between py-1.5">
@@ -360,16 +381,30 @@ export default function PayrollAdminPage() {
                 </ul>
               </div>
               <div>
-                <h3 className="mb-2 text-sm font-medium text-gray-600">所得稅扶養親屬資料</h3>
-                <form onSubmit={onAddTax} className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  <input className={inputCls} value={taxName} onChange={(event) => setTaxName(event.target.value)} placeholder="親屬姓名" />
-                  <input className={inputCls} value={taxRelationship} onChange={(event) => setTaxRelationship(event.target.value)} placeholder="關係" />
-                  <input className={inputCls} value={taxIdNumber} onChange={(event) => setTaxIdNumber(event.target.value)} placeholder="身分證字號" />
-                  <input className={inputCls} type="number" value={taxBirthYear} onChange={(event) => setTaxBirthYear(event.target.value)} placeholder="出生年" />
-                  <button type="submit" className="rounded-md border px-3 py-2 text-sm font-medium" style={{ color: "var(--brand)" }}>
-                    新增扶養親屬
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                  <h3 className="text-sm font-medium text-gray-600">所得稅扶養親屬資料</h3>
+                  <button
+                    type="button"
+                    onClick={() => setShowTaxForm((open) => !open)}
+                    aria-expanded={showTaxForm}
+                    aria-controls={taxPanelId}
+                    className="text-sm font-medium"
+                    style={{ color: "var(--brand)" }}
+                  >
+                    {showTaxForm ? "收合" : "＋ 新增扶養親屬"}
                   </button>
-                </form>
+                </div>
+                <div id={taxPanelId} hidden={!showTaxForm}>
+                  <form onSubmit={onAddTax} className="mb-3 grid grid-cols-1 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-2">
+                    <input className={inputCls} value={taxName} onChange={(event) => setTaxName(event.target.value)} placeholder="親屬姓名" />
+                    <input className={inputCls} value={taxRelationship} onChange={(event) => setTaxRelationship(event.target.value)} placeholder="關係" />
+                    <input className={inputCls} value={taxIdNumber} onChange={(event) => setTaxIdNumber(event.target.value)} placeholder="身分證字號" />
+                    <input className={inputCls} type="number" value={taxBirthYear} onChange={(event) => setTaxBirthYear(event.target.value)} placeholder="出生年" />
+                    <button type="submit" className="rounded-md border px-3 py-2 text-sm font-medium" style={{ color: "var(--brand)" }}>
+                      新增扶養親屬
+                    </button>
+                  </form>
+                </div>
                 <ul className="divide-y divide-gray-100 text-sm">
                   {taxDeps.map((d) => (
                     <li key={d.id} className="flex items-center justify-between py-1.5">

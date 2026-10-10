@@ -1,6 +1,6 @@
 "use client";
 
-import type { RefObject } from "react";
+import { useId, type RefObject } from "react";
 import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   uploadProjectDocument,
@@ -40,6 +40,12 @@ interface ContractsCardProps {
   setCCopies: Setter<string>;
   savingContract: boolean;
   setSavingContract: Setter<boolean>;
+  /**
+   * 「＋ 新增文件」表單是否展開。放在 page.tsx（和上面的草稿欄位一起）：那頁每次 `load()` 都會
+   * 把整頁卸載重掛，卡片自己的 state 會被重置，送出成功後就會自動收起，不利連續新增。
+   */
+  showAddForm: boolean;
+  setShowAddForm: Setter<boolean>;
   contractFileRef: RefObject<HTMLInputElement | null>;
   pendingContractId: RefObject<string | null>;
   removeDoc: (doc: ProjectDocument) => Promise<void>;
@@ -70,6 +76,8 @@ export function ContractsCard({
   setCCopies,
   savingContract,
   setSavingContract,
+  showAddForm,
+  setShowAddForm,
   contractFileRef,
   pendingContractId,
   removeDoc,
@@ -77,6 +85,8 @@ export function ContractsCard({
   setError,
   load,
 }: ContractsCardProps) {
+  const addPanelId = useId();
+
   async function addContract() {
     if (!cTitle.trim()) {
       setError("請輸入文件名稱");
@@ -338,55 +348,68 @@ export function ContractsCard({
       />
 
       <div className="mt-4 border-t pt-4">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <div>
-            <label className={labelCls}>類型</label>
-            <select className={inputCls} value={cDocType} onChange={(e) => setCDocType(e.target.value as DocType)}>
-              {(Object.keys(DOC_TYPE_LABELS) as DocType[]).map((v) => (
-                <option key={v} value={v}>{DOC_TYPE_LABELS[v]}</option>
-              ))}
-            </select>
-            <p className="mt-1 text-xs text-gray-400">報價單不是契據，不課印花稅。</p>
+        <button
+          type="button"
+          onClick={() => setShowAddForm((open) => !open)}
+          aria-expanded={showAddForm}
+          aria-controls={addPanelId}
+          className="text-sm font-medium"
+          style={{ color: "var(--brand)" }}
+        >
+          {showAddForm ? "收合" : "＋ 新增文件"}
+        </button>
+        {/* 預設收起；收合只是 hidden、不卸載。送出成功後照舊清空欄位但維持展開，方便連續新增。 */}
+        <div id={addPanelId} hidden={!showAddForm} className="mt-3 rounded-xl bg-slate-50 p-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div>
+              <label className={labelCls}>類型</label>
+              <select className={inputCls} value={cDocType} onChange={(e) => setCDocType(e.target.value as DocType)}>
+                {(Object.keys(DOC_TYPE_LABELS) as DocType[]).map((v) => (
+                  <option key={v} value={v}>{DOC_TYPE_LABELS[v]}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-gray-400">報價單不是契據，不課印花稅。</p>
+            </div>
+            <div>
+              <label className={labelCls}>我方角色</label>
+              <select className={inputCls} value={cOurRole} onChange={(e) => setCOurRole(e.target.value as OurRole)}>
+                {(Object.keys(OUR_ROLE_LABELS) as OurRole[]).map((v) => (
+                  <option key={v} value={v}>{OUR_ROLE_LABELS[v]}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-gray-400">承攬契據由承攬人貼花，發包出去的由下包貼；各自貼＝雙方各執一份、各自負責己方，我方仍需貼。</p>
+            </div>
+            <div>
+              <label className={labelCls}>文件名稱 *</label>
+              <input className={inputCls} value={cTitle} onChange={(e) => setCTitle(e.target.value)} placeholder="例如：官網改版承攬契約" />
+            </div>
+            <div>
+              <label className={labelCls}>對方（業主／下包）</label>
+              <input className={inputCls} value={cCounterparty} onChange={(e) => setCCounterparty(e.target.value)} placeholder="選填" />
+            </div>
+            <div>
+              <label className={labelCls}>金額</label>
+              <input className={inputCls} type="number" value={cAmount} onChange={(e) => setCAmount(e.target.value)} placeholder="追加減帳可填負數" />
+            </div>
+            <div>
+              <label className={labelCls}>簽訂日</label>
+              <input className={inputCls} type="date" value={cSignedOn} onChange={(e) => setCSignedOn(e.target.value)} />
+              <p className="mt-1 text-xs text-gray-400">沒有簽訂日就不算已簽約，也不會進印花稅清單。</p>
+            </div>
+            <div>
+              <label className={labelCls}>份數</label>
+              <input className={inputCls} type="number" min="1" value={cCopies} onChange={(e) => setCCopies(e.target.value)} />
+              <p className="mt-1 text-xs text-gray-400">同一憑證繕寫兩份以上，各份均應貼用。</p>
+            </div>
           </div>
-          <div>
-            <label className={labelCls}>我方角色</label>
-            <select className={inputCls} value={cOurRole} onChange={(e) => setCOurRole(e.target.value as OurRole)}>
-              {(Object.keys(OUR_ROLE_LABELS) as OurRole[]).map((v) => (
-                <option key={v} value={v}>{OUR_ROLE_LABELS[v]}</option>
-              ))}
-            </select>
-            <p className="mt-1 text-xs text-gray-400">承攬契據由承攬人貼花，發包出去的由下包貼；各自貼＝雙方各執一份、各自負責己方，我方仍需貼。</p>
+          <div className="mt-3 flex items-center gap-3">
+            <PrimaryButton onClick={addContract} disabled={savingContract}>
+              {savingContract ? "新增中…" : "新增文件"}
+            </PrimaryButton>
+            <span className="text-xs text-gray-400">
+              印花稅為系統試算，非申報值；承攬契據認定與免稅憑證請會計師確認。
+            </span>
           </div>
-          <div>
-            <label className={labelCls}>文件名稱 *</label>
-            <input className={inputCls} value={cTitle} onChange={(e) => setCTitle(e.target.value)} placeholder="例如：官網改版承攬契約" />
-          </div>
-          <div>
-            <label className={labelCls}>對方（業主／下包）</label>
-            <input className={inputCls} value={cCounterparty} onChange={(e) => setCCounterparty(e.target.value)} placeholder="選填" />
-          </div>
-          <div>
-            <label className={labelCls}>金額</label>
-            <input className={inputCls} type="number" value={cAmount} onChange={(e) => setCAmount(e.target.value)} placeholder="追加減帳可填負數" />
-          </div>
-          <div>
-            <label className={labelCls}>簽訂日</label>
-            <input className={inputCls} type="date" value={cSignedOn} onChange={(e) => setCSignedOn(e.target.value)} />
-            <p className="mt-1 text-xs text-gray-400">沒有簽訂日就不算已簽約，也不會進印花稅清單。</p>
-          </div>
-          <div>
-            <label className={labelCls}>份數</label>
-            <input className={inputCls} type="number" min="1" value={cCopies} onChange={(e) => setCCopies(e.target.value)} />
-            <p className="mt-1 text-xs text-gray-400">同一憑證繕寫兩份以上，各份均應貼用。</p>
-          </div>
-        </div>
-        <div className="mt-3 flex items-center gap-3">
-          <PrimaryButton onClick={addContract} disabled={savingContract}>
-            {savingContract ? "新增中…" : "新增文件"}
-          </PrimaryButton>
-          <span className="text-xs text-gray-400">
-            印花稅為系統試算，非申報值；承攬契據認定與免稅憑證請會計師確認。
-          </span>
         </div>
       </div>
       <ErrorText>{error}</ErrorText>

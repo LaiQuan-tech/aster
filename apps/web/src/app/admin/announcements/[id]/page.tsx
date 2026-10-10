@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { useParams } from "next/navigation";
 import {
   Card,
@@ -504,6 +504,10 @@ function SheetUploader({
 }) {
   const [file, setFile] = useState<File | null>(null);
   const [note, setNote] = useState("");
+  // 「＋ 新增一份掃描檔」預設收起（比照員工詳細資料的學歷／證照）。收合只是 hidden、不卸載：
+  // file input 是不受控的，卸載會讓選好的檔案從畫面消失、但 file state 還在，變成看不到卻能送出。
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -522,36 +526,50 @@ function SheetUploader({
   }
 
   return (
-    <form onSubmit={onSubmit} className="space-y-3 border-t border-gray-200 pt-4">
-      <div className="grid gap-4 md:grid-cols-2">
-        <div>
-          <label className={labelCls} htmlFor="sheet-file">
-            掃描檔
-          </label>
-          <input
-            id="sheet-file"
-            type="file"
-            accept="image/*,application/pdf"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            className="w-full text-sm"
-          />
-        </div>
-        <div>
-          <label className={labelCls} htmlFor="sheet-note">
-            說明（例：補入 3 位新進同仁簽名）
-          </label>
-          <input
-            id="sheet-note"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            maxLength={250}
-            className={inputCls}
-          />
-        </div>
+    <div className="border-t border-gray-200 pt-4">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls={panelId}
+        className="text-sm font-medium"
+        style={{ color: "var(--brand)" }}
+      >
+        {open ? "收合" : "＋ 新增一份掃描檔"}
+      </button>
+      <div id={panelId} hidden={!open} className="mt-3">
+        <form onSubmit={onSubmit} className="space-y-3 rounded-xl bg-slate-50 p-3">
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <label className={labelCls} htmlFor="sheet-file">
+                掃描檔
+              </label>
+              <input
+                id="sheet-file"
+                type="file"
+                accept="image/*,application/pdf"
+                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                className="w-full text-sm"
+              />
+            </div>
+            <div>
+              <label className={labelCls} htmlFor="sheet-note">
+                說明（例：補入 3 位新進同仁簽名）
+              </label>
+              <input
+                id="sheet-note"
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                maxLength={250}
+                className={inputCls}
+              />
+            </div>
+          </div>
+          <PrimaryButton type="submit" disabled={busy || !file}>
+            {busy ? "上傳中…" : "新增一份掃描檔"}
+          </PrimaryButton>
+        </form>
       </div>
-      <PrimaryButton type="submit" disabled={busy || !file}>
-        {busy ? "上傳中…" : "新增一份掃描檔"}
-      </PrimaryButton>
-    </form>
+    </div>
   );
 }
