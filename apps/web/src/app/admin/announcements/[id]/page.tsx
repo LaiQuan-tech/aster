@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import {
   Card,
@@ -504,6 +504,8 @@ function SheetUploader({
 }) {
   const [file, setFile] = useState<File | null>(null);
   const [note, setNote] = useState("");
+  // file input 是不受控的（值在 DOM 裡、不在 state），要清掉選好的檔案得直接動 DOM，所以留一個 ref。
+  const fileInputRef = useRef<HTMLInputElement>(null);
   // 「＋ 新增一份掃描檔」預設收起（比照員工詳細資料的學歷／證照）。收合只是 hidden、不卸載：
   // file input 是不受控的，卸載會讓選好的檔案從畫面消失、但 file state 還在，變成看不到卻能送出。
   const [open, setOpen] = useState(false);
@@ -517,6 +519,9 @@ function SheetUploader({
       const res = await uploadSignatureSheet(versionId, file, note.trim() || undefined);
       setFile(null);
       setNote("");
+      // 只清 state 的話，input 仍顯示舊檔名、按鈕卻因 file 為空變 disabled，看起來像壞掉；input 也要一併重設。
+      // 失敗（catch）不重設：已選的檔案留著，方便直接重試。
+      if (fileInputRef.current) fileInputRef.current.value = "";
       onDone(`已上傳第 ${res.sheetNo} 份掃描檔`);
     } catch (err) {
       onError(err instanceof Error ? err.message : "上傳失敗");
@@ -545,6 +550,7 @@ function SheetUploader({
                 掃描檔
               </label>
               <input
+                ref={fileInputRef}
                 id="sheet-file"
                 type="file"
                 accept="image/*,application/pdf"

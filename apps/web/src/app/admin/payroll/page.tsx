@@ -17,6 +17,7 @@ import {
   type NhiDependent,
   type TaxDependent,
 } from "@/lib/admin-api";
+import { buildNhiDependentBody, buildTaxDependentBody, dependentErrorMessage } from "@/lib/payroll-dependents";
 import { loadPayrollEmployees } from "@/lib/payroll-employees";
 
 const inputCls =
@@ -59,6 +60,12 @@ export default function PayrollAdminPage() {
   // 填到一半的欄位會保留；送出成功後照舊清空欄位但維持展開，方便連續新增。
   const [showNhiForm, setShowNhiForm] = useState(false);
   const [showTaxForm, setShowTaxForm] = useState(false);
+  // 兩個子表單各自的送出狀態與錯誤：錯誤顯示在各自面板裡（姓名空白的提示也走這裡）。改任何欄位、重新送出、
+  // 換員工時清掉；送出中停用按鈕防連點。失敗時欄位原樣保留，方便修正後重送。
+  const [nhiSubmitting, setNhiSubmitting] = useState(false);
+  const [nhiError, setNhiError] = useState<string | null>(null);
+  const [taxSubmitting, setTaxSubmitting] = useState(false);
+  const [taxError, setTaxError] = useState<string | null>(null);
   const nhiPanelId = useId();
   const taxPanelId = useId();
 
@@ -175,40 +182,74 @@ export default function PayrollAdminPage() {
     }
   }
 
+  // 換員工時順手清掉上一位的新增錯誤（錯誤描述的是那一位的送出，不該掛在這一位的面板上）。
+  function onPickEmployee(id: string) {
+    setEmpId(id);
+    setNhiError(null);
+    setTaxError(null);
+  }
+
   async function onAddNhi(e: FormEvent) {
     e.preventDefault();
-    if (!empId) return;
-    if (!nhiName.trim()) return;
-    await addNhiDependent({
-      employeeId: empId,
-      name: nhiName.trim(),
-      relationship: nhiRelationship.trim() || undefined,
-      idNumber: nhiIdNumber.trim() || undefined,
+    if (!empId || nhiSubmitting) return;
+    const built = buildNhiDependentBody(empId, {
+      name: nhiName,
+      relationship: nhiRelationship,
+      idNumber: nhiIdNumber,
       insured: nhiInsured,
     });
+    if (!built.ok) {
+      setNhiError(built.error);
+      return;
+    }
+    setNhiError(null);
+    setNhiSubmitting(true);
+    try {
+      await addNhiDependent(built.body);
+    } catch (err) {
+      // 面板若在送出途中被收起，錯誤掛在 hidden 的面板裡就看不到，所以失敗時順手展開。
+      setNhiError(dependentErrorMessage(err, "新增健保眷屬"));
+      setShowNhiForm(true);
+      setNhiSubmitting(false);
+      return;
+    }
     setNhiName("");
     setNhiRelationship("");
     setNhiIdNumber("");
     setNhiInsured(true);
     await loadEmployee(empId);
+    setNhiSubmitting(false);
   }
 
   async function onAddTax(e: FormEvent) {
     e.preventDefault();
-    if (!empId) return;
-    if (!taxName.trim()) return;
-    await addTaxDependent({
-      employeeId: empId,
-      name: taxName.trim(),
-      relationship: taxRelationship.trim() || undefined,
-      idNumber: taxIdNumber.trim() || undefined,
-      birthYear: taxBirthYear ? Number(taxBirthYear) : undefined,
+    if (!empId || taxSubmitting) return;
+    const built = buildTaxDependentBody(empId, {
+      name: taxName,
+      relationship: taxRelationship,
+      idNumber: taxIdNumber,
+      birthYear: taxBirthYear,
     });
+    if (!built.ok) {
+      setTaxError(built.error);
+      return;
+    }
+    setTaxError(null);
+    setTaxSubmitting(true);
+    try {
+      await addTaxDependent(built.body);
+    } catch (err) {
+      setTaxError(dependentErrorMessage(err, "新增扶養親屬"));
+      setShowTaxForm(true);
+      setTaxSubmitting(false);
+      return;
+    }
     setTaxName("");
     setTaxRelationship("");
     setTaxIdNumber("");
     setTaxBirthYear("");
     await loadEmployee(empId);
+    setTaxSubmitting(false);
   }
 
   async function onRun(e: FormEvent) {
@@ -248,7 +289,7 @@ export default function PayrollAdminPage() {
           </div>
           <div className="sm:col-span-2">
             <label className={labelCls}>員工</label>
-            <select className={inputCls} value={empId} onChange={(event) => setEmpId(event.target.value)}>
+            <select className={inputCls} value={empId} onChange={(event) => onPickEmployee(event.target.value)}>
               <option value="">請選擇</option>
               {visibleEmployees.map((employee) => (
                 <option key={employee.id} value={employee.id}>{empName(employee.id)}</option>
@@ -352,7 +393,12 @@ export default function PayrollAdminPage() {
                 </div>
                 {/* hidden 掛在不帶 display 類別的外層 div（form 本身是 grid，直接掛會被蓋掉）。 */}
                 <div id={nhiPanelId} hidden={!showNhiForm}>
-                  <form onSubmit={onAddNhi} className="mb-3 grid grid-cols-1 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-2">
+                  {/* form 的 onChange 會收到底下所有欄位冒泡上來的變更：改任何一欄就清掉錯誤。 */}
+                  <form
+                    onSubmit={onAddNhi}
+                    onChange={() => setNhiError(null)}
+                    className="mb-3 grid grid-cols-1 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-2"
+                  >
                     <input className={inputCls} value={nhiName} onChange={(event) => setNhiName(event.target.value)} placeholder="眷屬姓名" />
                     <input className={inputCls} value={nhiRelationship} onChange={(event) => setNhiRelationship(event.target.value)} placeholder="關係" />
                     <input className={inputCls} value={nhiIdNumber} onChange={(event) => setNhiIdNumber(event.target.value)} placeholder="身分證字號" />
@@ -360,9 +406,15 @@ export default function PayrollAdminPage() {
                       <input type="checkbox" checked={nhiInsured} onChange={(event) => setNhiInsured(event.target.checked)} />
                       投保中
                     </label>
-                    <button type="submit" className="rounded-md border px-3 py-2 text-sm font-medium" style={{ color: "var(--brand)" }}>
-                      新增健保眷屬
+                    <button
+                      type="submit"
+                      disabled={nhiSubmitting}
+                      className="rounded-md border px-3 py-2 text-sm font-medium disabled:opacity-50"
+                      style={{ color: "var(--brand)" }}
+                    >
+                      {nhiSubmitting ? "新增中…" : "新增健保眷屬"}
                     </button>
+                    {nhiError && <ErrorText className="sm:col-span-2">{nhiError}</ErrorText>}
                   </form>
                 </div>
                 <ul className="divide-y divide-gray-100 text-sm">
@@ -395,14 +447,24 @@ export default function PayrollAdminPage() {
                   </button>
                 </div>
                 <div id={taxPanelId} hidden={!showTaxForm}>
-                  <form onSubmit={onAddTax} className="mb-3 grid grid-cols-1 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-2">
+                  <form
+                    onSubmit={onAddTax}
+                    onChange={() => setTaxError(null)}
+                    className="mb-3 grid grid-cols-1 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-2"
+                  >
                     <input className={inputCls} value={taxName} onChange={(event) => setTaxName(event.target.value)} placeholder="親屬姓名" />
                     <input className={inputCls} value={taxRelationship} onChange={(event) => setTaxRelationship(event.target.value)} placeholder="關係" />
                     <input className={inputCls} value={taxIdNumber} onChange={(event) => setTaxIdNumber(event.target.value)} placeholder="身分證字號" />
                     <input className={inputCls} type="number" value={taxBirthYear} onChange={(event) => setTaxBirthYear(event.target.value)} placeholder="出生年" />
-                    <button type="submit" className="rounded-md border px-3 py-2 text-sm font-medium" style={{ color: "var(--brand)" }}>
-                      新增扶養親屬
+                    <button
+                      type="submit"
+                      disabled={taxSubmitting}
+                      className="rounded-md border px-3 py-2 text-sm font-medium disabled:opacity-50"
+                      style={{ color: "var(--brand)" }}
+                    >
+                      {taxSubmitting ? "新增中…" : "新增扶養親屬"}
                     </button>
+                    {taxError && <ErrorText className="sm:col-span-2">{taxError}</ErrorText>}
                   </form>
                 </div>
                 <ul className="divide-y divide-gray-100 text-sm">
