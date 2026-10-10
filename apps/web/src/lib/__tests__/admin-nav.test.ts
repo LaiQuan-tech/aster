@@ -174,6 +174,25 @@ describe("resolveAdminPath：最長前綴", () => {
     expect(resolveAdminPath("/admin/settings/advanced")).toMatchObject({ section: "settings", tab: "advanced", narrow: true });
   });
 
+  it("選項清單頁（2026-10-10）：/admin/option-lists 在設定區、narrow，標題「選項清單」、說明寫明用途；分區入口不變", () => {
+    const resolved = resolveAdminPath("/admin/option-lists");
+    expect(resolved).toMatchObject({ section: "settings", tab: "optionLists", title: "選項清單", narrow: true, isDetail: false });
+    expect(resolved.desc).toContain("客戶分類");
+    expect(resolved.desc).toContain("停用");
+    expect(ADMIN_TABS.settings.map((t) => t.key)).toEqual([
+      "leaveTypes",
+      "shifts",
+      "calendar",
+      "rules",
+      "essTabs",
+      "site",
+      "optionLists",
+      "advanced",
+    ]);
+    expect(ADMIN_SECTIONS.find((s) => s.key === "settings")?.href).toBe("/admin/leave-types");
+    expect(tabsForSection("settings", null).map((t) => t.key)).toContain("optionLists");
+  });
+
   it("相似前綴不互相污染：payroll-tax／leave-*／attendance-*", () => {
     expect(resolveAdminPath("/admin/payroll-tax")).toMatchObject({ section: "payroll", tab: "tax" });
     expect(resolveAdminPath("/admin/payroll")).toMatchObject({ section: "payroll", tab: "payroll" });
@@ -423,12 +442,13 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
     expect(subTabsFor("home", undefined)).toEqual([]);
   });
 
-  it("narrow 只有 shifts／essTabs／site／advanced 四頁", () => {
+  it("narrow 只有 shifts／essTabs／site／optionLists／advanced 五頁", () => {
     const narrowRoutes = ADMIN_ROUTES.filter((r) => r.narrow).map((r) => r.prefix);
     expect(narrowRoutes).toEqual([
       "/admin/shifts",
       "/admin/module-settings/ess-tabs",
       "/admin/company-space",
+      "/admin/option-lists",
       "/admin/settings/advanced",
     ]);
     expect(resolveAdminPath("/admin/shifts").narrow).toBe(true);
@@ -439,8 +459,8 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
 describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／tabsForSection({ roleNav })", () => {
   const NAV = ACCOUNTANT_DEFAULT_NAV;
 
-  it("會計預設範圍不含 bonus／payroll／payslips／tax／cash；分區只有 首頁、專案與財務、出勤、薪資與費用、人員", () => {
-    expect(NAV.sections).toEqual(["home", "finance", "attendance", "payroll", "people"]);
+  it("會計預設範圍不含 bonus／payroll／payslips／tax／cash；分區只有 首頁、專案與財務、出勤、薪資與費用、人員、設定（只有選項清單）", () => {
+    expect(NAV.sections).toEqual(["home", "finance", "attendance", "payroll", "people", "settings"]);
     const finance = tabsForSection("finance", null, { roleNav: NAV }).map((t) => t.key);
     expect(finance).not.toContain("bonus");
     expect(finance).toEqual(["projects", "overview", "receivables", "disbursements", "reports", "directory"]);
@@ -449,22 +469,31 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
     for (const key of ["payroll", "payslips", "tax", "cash"]) expect(payroll).not.toContain(key);
     expect(tabsForSection("attendance", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["sheets"]);
     expect(tabsForSection("people", { recruitment: true }, { roleNav: NAV }).map((t) => t.key)).toEqual(["employees"]);
+    // 設定區只開選項清單（客戶分類的管理權限比照客戶名冊的寫入）；假別、班別、規則參數、進階功能等仍是 HR 專屬
+    expect(tabsForSection("settings", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["optionLists"]);
     // 沒列在 tabs 的分區＝該區全部（module 開關照舊）
     expect(tabsForSection("system", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["reports", "audit", "backups", "notifications"]);
     // includeTab 仍強制保留（直開未開放網址時分頁列標「未開放」）
     expect(tabsForSection("payroll", null, { roleNav: NAV, includeTab: "payslips" }).map((t) => t.key)).toEqual(["payslips", "expenses", "advances"]);
   });
 
-  it("sectionsForRole：null → 9 個分區原樣；會計 → 5 個且 href 改成該區第一個可見分頁", () => {
+  it("sectionsForRole：null → 9 個分區原樣；會計 → 6 個且 href 改成該區第一個可見分頁", () => {
     expect(sectionsForRole(null)).toEqual([...ADMIN_SECTIONS]);
     expect(sectionsForRole(undefined).map((s) => s.key)).toEqual(SECTION_KEYS);
     const acc = sectionsForRole(NAV);
-    expect(acc.map((s) => s.key)).toEqual(["home", "finance", "attendance", "payroll", "people"]);
-    expect(acc.map((s) => s.href)).toEqual(["/admin", "/admin/projects", "/admin/attendance-sheets", "/admin/expenses", "/admin/employees"]);
+    expect(acc.map((s) => s.key)).toEqual(["home", "finance", "attendance", "payroll", "people", "settings"]);
+    expect(acc.map((s) => s.href)).toEqual([
+      "/admin",
+      "/admin/projects",
+      "/admin/attendance-sheets",
+      "/admin/expenses",
+      "/admin/employees",
+      "/admin/option-lists",
+    ]);
     // 分區被列了但一個分頁都不剩 → 不列
     expect(sectionsForRole({ sections: ["home", "system"], tabs: { system: ["nope"] } }).map((s) => s.key)).toEqual(["home"]);
     // homeEntries 帶 roleNav → 排除 home 的可見分區
-    expect(homeEntries(NAV).map((s) => s.key)).toEqual(["finance", "attendance", "payroll", "people"]);
+    expect(homeEntries(NAV).map((s) => s.key)).toEqual(["finance", "attendance", "payroll", "people", "settings"]);
     expect(homeEntries()).toHaveLength(8);
   });
 
@@ -507,6 +536,13 @@ describe("isAdminPathAllowed：直開網址的角色守門（2026-09-23 驗收�
       "/admin/birthday-gifts",
       "/admin/announcements",
       "/admin/leave-types",
+      // 設定區只開選項清單，其餘（班別、行事曆、規則參數、員工端功能開放、站台、進階功能）仍是 HR 專屬
+      "/admin/shifts",
+      "/admin/calendar",
+      "/admin/module-settings",
+      "/admin/module-settings/ess-tabs",
+      "/admin/company-space",
+      "/admin/settings/advanced",
       "/admin/backups",
       "/admin/reports",
       "/admin/whatever",
@@ -535,6 +571,8 @@ describe("isAdminPathAllowed：直開網址的角色守門（2026-09-23 驗收�
       "/admin/clients",
       "/admin/vendors",
       "/admin/companies",
+      // 客戶分類的管理權限比照客戶名冊的寫入：客戶名冊的「管理分類」連結會連到這裡
+      "/admin/option-lists",
       "/admin/attendance-sheets",
       "/admin/attendance-sheets/9f",
       "/admin/expenses",
@@ -565,6 +603,11 @@ describe("isAdminPathAllowed：直開網址的角色守門（2026-09-23 驗收�
     expect(isAdminPathAllowed({ pathname: "/admin/ai", roleNav: nav })).toBe(false);
     expect(isAdminPathAllowed({ pathname: "/admin/ai", roleNav: nav, modules: { ai: true } })).toBe(true);
     expect(isAdminPathAllowed({ pathname: "/admin/employees", roleNav: nav })).toBe(false);
+    // 租戶自訂範圍沒列 settings 的會計：選項清單也不開（直開網址只看到「未開放」，API 仍是 requireFinance 層）
+    expect(isAdminPathAllowed({ pathname: "/admin/option-lists", roleNav: nav })).toBe(false);
+    const withSettings = roleNavOf("accountant", { roles: { accountant: { sections: ["settings"], tabs: { settings: ["optionLists"] } } } });
+    expect(isAdminPathAllowed({ pathname: "/admin/option-lists", roleNav: withSettings })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/shifts", roleNav: withSettings })).toBe(false);
   });
 
   it("首頁老闆看板：會計看不到獎金／快照／壽星三張（目標頁未開放），放款／未收款／年度總額看得到", () => {

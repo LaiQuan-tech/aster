@@ -1,16 +1,22 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import {
   listClients, createClient, updateClient, deleteClient, humanizeClientError,
-  INVOICE_TYPE_LABELS, PAYMENT_METHOD_LABELS, CLIENT_CATEGORY_LABELS, CLIENT_CATEGORY_ORDER,
+  INVOICE_TYPE_LABELS, PAYMENT_METHOD_LABELS,
   type Client, type ClientInput, type InvoiceType, type PaymentMethod, type ClientCategory,
 } from "@/lib/projects-ext-api";
+import { OPTION_INACTIVE_MARK, optionChoices, optionLabel, useOptionList } from "@/lib/option-lists-api";
 
 /**
  * 客戶名冊（模組五）。建案表單的客戶下拉、專案申請單列印都吃這裡的資料。
  * 統編非必填（自然人業主或尚未取得統編的案子可以先建檔），比照廠商名冊
  * 的軟刪除慣例——刪除只是從列表收起來，往來紀錄不會消失。
+ *
+ * 分類（2026-10-10）：選項不再寫死，吃「設定 → 選項清單 → 客戶分類」（`useOptionList("client_category")`），
+ * 管理員可自行新增。篩選下拉列出全部項目（含已停用的——舊客戶可能還用著）；表單下拉只列啟用的項目，
+ * 外加這位客戶目前已選的停用項（標「（已停用）」，開舊客戶編輯時下拉不會悄悄換成「未分類」）。
  */
 type Form = {
   name: string; shortName: string; category: ClientCategory | ""; taxId: string; phone: string; fax: string; invoiceAddress: string;
@@ -47,6 +53,9 @@ const toInput = (f: Form): ClientInput => ({
 });
 
 export default function ClientsPage() {
+  const categories = useOptionList("client_category");
+  /** 分類 code → 名稱；清單載入中先顯示「…」，免得閃過原始代碼。 */
+  const categoryText = (code: string) => (categories.loading ? "…" : optionLabel(categories.items, code));
   const [clients, setClients] = useState<Client[]>([]);
   const [q, setQ] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<ClientCategory | "">("");
@@ -128,10 +137,16 @@ export default function ClientsPage() {
             onChange={(e) => setCategoryFilter(e.target.value as ClientCategory | "")}
           >
             <option value="">全部分類</option>
-            {CLIENT_CATEGORY_ORDER.map((v) => (
-              <option key={v} value={v}>{CLIENT_CATEGORY_LABELS[v]}</option>
+            {categories.items.map((item) => (
+              <option key={item.code} value={item.code}>{item.label}{item.isActive ? "" : OPTION_INACTIVE_MARK}</option>
             ))}
           </select>
+          {categories.canManage && (
+            <Link href="/admin/option-lists" className="text-xs text-gray-500 underline hover:text-gray-700">管理分類</Link>
+          )}
+          {categories.error && (
+            <button type="button" onClick={categories.reload} className="text-xs text-red-600 underline">分類載入失敗，點此重試</button>
+          )}
           <PrimaryButton type="button" onClick={startNew}>新增客戶</PrimaryButton>
           <span className="text-sm text-gray-500">{shown.length} 家{categoryFilter ? `（共 ${clients.length} 家）` : ""}</span>
         </div>
@@ -160,7 +175,7 @@ export default function ClientsPage() {
                     <td className="py-2 pr-3 text-gray-600">{c.shortName || "—"}</td>
                     <td className="py-2 pr-3 text-gray-600">
                       {c.category ? (
-                        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{CLIENT_CATEGORY_LABELS[c.category]}</span>
+                        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{categoryText(c.category)}</span>
                       ) : "—"}
                     </td>
                     <td className="py-2 pr-3 text-gray-600">{c.taxId ?? "—"}</td>
@@ -194,8 +209,8 @@ export default function ClientsPage() {
                 onChange={(e) => setForm((f) => ({ ...f, category: e.target.value as ClientCategory | "" }))}
               >
                 <option value="">未分類</option>
-                {CLIENT_CATEGORY_ORDER.map((v) => (
-                  <option key={v} value={v}>{CLIENT_CATEGORY_LABELS[v]}</option>
+                {optionChoices(categories.items, form.category).map((choice) => (
+                  <option key={choice.code} value={choice.code}>{choice.label}</option>
                 ))}
               </select>
             </div>

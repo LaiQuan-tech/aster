@@ -52,6 +52,7 @@ import { projectsAnnualRouter } from "./routes/projects-annual.js"
 import { subcontractsRouter } from "./routes/subcontracts.js"
 import { clientsRouter } from "./routes/clients.js"
 import { companiesRouter } from "./routes/companies.js"
+import { optionListsRouter } from "./routes/option-lists.js"
 import { companyPagesRouter } from "./routes/company-pages.js"
 import { employeeMailboxesRouter } from "./routes/employee-mailboxes.js"
 import { vendorsRouter } from "./routes/vendors.js"
@@ -167,6 +168,7 @@ app.use(billingsRouter)
 app.use(subcontractsRouter)
 app.use(clientsRouter)
 app.use(companiesRouter)
+app.use(optionListsRouter) // /option-lists*（全站共用的選項清單：客戶分類等，登記表在 services/option-lists.ts）
 app.use(companyPagesRouter)
 app.use(employeeMailboxesRouter)
 app.use(vendorsRouter)

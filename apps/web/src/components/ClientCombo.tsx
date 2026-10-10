@@ -2,7 +2,8 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import { inputCls } from "@/components/admin-ui";
-import { CLIENT_CATEGORY_LABELS, type Client } from "@/lib/projects-ext-api";
+import { optionLabel, useOptionList } from "@/lib/option-lists-api";
+import type { Client } from "@/lib/projects-ext-api";
 
 /**
  * 客戶挑選：可搜尋 combo（B4）。基礎精神抄 VendorCombo（select＋自由文字），
@@ -13,6 +14,8 @@ import { CLIENT_CATEGORY_LABELS, type Client } from "@/lib/projects-ext-api";
  *
  * 分類標籤：datalist 的 `label` 屬性是否顯示看瀏覽器（不保證），所以主要
  * 顯示方式是輸入框旁邊那顆分類 pill，取目前選到的客戶的 category。
+ * 分類 code → 名稱走「選項清單 → 客戶分類」（`useOptionList("client_category")`），
+ * 已停用的分類照樣翻得出名稱；清單載入中先不顯示分類字樣，免得閃過原始代碼。
  */
 export function ClientCombo({
   clients,
@@ -26,6 +29,9 @@ export function ClientCombo({
   placeholder?: string;
 }) {
   const listId = useId();
+  const categories = useOptionList("client_category");
+  /** 分類名稱；清單還沒載入完回 undefined（不顯示）。 */
+  const categoryName = (code: string | null | undefined) => (code && !categories.loading ? optionLabel(categories.items, code) : undefined);
   const selected = clients.find((c) => c.id === clientId) ?? null;
   const [text, setText] = useState(selected?.name ?? "");
   // 使用者正在這格打字時，外部 props 變動（例如 clients 非同步載入完成）
@@ -62,15 +68,15 @@ export function ClientCombo({
             setText(selected?.name ?? "");
           }}
         />
-        {selected?.category && (
+        {categoryName(selected?.category) && (
           <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
-            {CLIENT_CATEGORY_LABELS[selected.category]}
+            {categoryName(selected?.category)}
           </span>
         )}
       </div>
       <datalist id={listId}>
         {clients.map((c) => (
-          <option key={c.id} value={c.name} label={c.category ? CLIENT_CATEGORY_LABELS[c.category] : undefined} />
+          <option key={c.id} value={c.name} label={categoryName(c.category)} />
         ))}
       </datalist>
     </div>

@@ -4,7 +4,9 @@
  * 只實作 API 路由實際用到的 PostgREST 子集：
  *   select / insert / update / delete、eq / neq / is / not / in / like / ilike / gt·gte·lt·lte /
  *   or（ilike／eq／is）、order / limit、single / maybeSingle、await（thenable），以及 rpc。
- * 另外支援 `range(from, to)`（分頁，含上界）。
+ * 另外支援 `range(from, to)`（分頁，含上界）與
+ * `upsert(rows, { onConflict, ignoreDuplicates })`（`ignoreDuplicates` ＝ ON CONFLICT DO NOTHING，
+ * 衝突的列略過；沒設＝衝突的列合併更新）。
  * 刻意仿真實行為的地方：`single()`／`maybeSingle()` 撞到多列回 PGRST116；
  * `select("a, b")` 只回有列名的欄位（沒列到的欄位拿不到，漏 select 欄位的 bug 才抓得到；
  * `select()` 不帶參數或 `*` 回整列；內嵌關聯如 `vendors(name)` 不模擬）；
@@ -16,6 +18,10 @@
  *     （例如外鍵競態 23503），資料不動、不記進 `writes`；一次性，用完即失效。
  *   • `checks[table] = (row) => 違反訊息 | null`：仿 DB 的列級 CHECK。insert／update 套用後的
  *     列違反時整句失敗（code 23514、不動任何一列、不記進 `writes`），可驗證「寫入順序不會中途違反 CHECK」。
+ *   • `uniques[table] = [["a", "b"], …]`：仿 DB 的唯一索引（每組欄位一個索引；欄位值有 null 的列不算重複，
+ *     與 Postgres 相同）。insert／update／upsert 讓兩列的某組欄位完全相同時整句失敗（code 23505、
+ *     不動任何一列、不記進 `writes`）；upsert 的 `onConflict` 那組是仲裁索引，衝突時照 DO NOTHING／合併處理，
+ *     其餘組仍會 23505。可驗證「同一批改名不會在中途撞到唯一索引」。
  *   • delete 若先呼叫了 `select()`，回傳被刪掉的列（仿 PostgREST `Prefer: return=representation`）。
  *
  * 用法（每個測試檔）：
@@ -31,7 +37,7 @@ export type Row = Record<string, any>
 
 export type FakeWrite = {
   table: string
-  action: "insert" | "update" | "delete"
+  action: "insert" | "update" | "delete" | "upsert"
   payload: unknown
   /** update／delete 命中的列數。 */
   matched?: number
@@ -121,9 +127,11 @@ export function createFakeSupabase() {
   const rpcCalls: Array<{ name: string; args: Row }> = []
   const rpcHandlers: Record<string, (args: Row) => RpcResult | Promise<RpcResult>> = {}
   /** 一次性的錯誤注入（見檔頭）。 */
-  const injected: Array<{ table: string; action: "select" | "insert" | "update" | "delete"; error: PgError }> = []
+  const injected: Array<{ table: string; action: "select" | "insert" | "update" | "delete" | "upsert"; error: PgError }> = []
   /** 列級 CHECK（見檔頭）：回傳違反訊息，null＝通過。 */
   const checks: Record<string, (row: Row) => string | null> = {}
+  /** 唯一索引（見檔頭）：每個資料表一組一組的欄位。 */
+  const uniques: Record<string, string[][]> = {}
   let idSeq = 0
 
   const nextId = () => `00000000-0000-4000-8000-${String(++idSeq).padStart(12, "0")}`
@@ -131,8 +139,9 @@ export function createFakeSupabase() {
   function from(table: string) {
     const predicates: Array<(row: Row) => boolean> = []
     const orders: Array<{ column: string; ascending: boolean }> = []
-    let action: "select" | "insert" | "update" | "delete" = "select"
+    let action: "select" | "insert" | "update" | "delete" | "upsert" = "select"
     let payload: Row | Row[] | null = null
+    let upsertOptions: { onConflict?: string; ignoreDuplicates?: boolean } = {}
     let max: number | null = null
     let rangeFrom: number | null = null
     let rangeTo: number | null = null
@@ -171,23 +180,78 @@ export function createFakeSupabase() {
         return null
       }
       const checkFailure = (message: string) => ({ data: null, error: { message, code: "23514" } })
+      /**
+       * 唯一索引違反：`candidates` 每一列與 `others`（庫裡不在這句裡的列＋這句裡的其他列）比；
+       * `arbiter` 是 upsert 的 onConflict 那組（由呼叫端先處理衝突，這裡略過）。
+       */
+      const uniqueViolation = (candidates: Row[], others: Row[], arbiter?: string[]): string | null => {
+        for (const candidate of candidates) {
+          for (const columns of uniques[table] ?? []) {
+            if (arbiter && columns.length === arbiter.length && columns.every((c) => arbiter.includes(c))) continue
+            // Postgres 的唯一索引不把 null 當成相同。
+            if (columns.some((c) => candidate[c] === null || candidate[c] === undefined)) continue
+            const clash = others.some((other) => other !== candidate && columns.every((c) => other[c] === candidate[c]))
+            if (clash) return `duplicate key value violates unique constraint on (${columns.join(", ")})`
+          }
+        }
+        return null
+      }
+      const uniqueFailure = (message: string) => ({ data: null, error: { message, code: "23505" } })
 
       if (action === "insert") {
         const inputs = Array.isArray(payload) ? payload : [payload as Row]
         const inserted = inputs.map((input) => ({ id: nextId(), created_at: NOW, updated_at: NOW, ...input }))
         const broken = violation(inserted)
         if (broken) return checkFailure(broken)
+        const clash = uniqueViolation(inserted, [...stored, ...inserted])
+        if (clash) return uniqueFailure(clash)
         stored.push(...inserted)
         writes.push({ table, action, payload })
         return respond(inserted.map((row) => projectColumns(row, columns)))
       }
       if (action === "update") {
         const hit = stored.filter(matches)
-        const broken = violation(hit.map((row) => ({ ...row, ...payload })))
+        const merged = hit.map((row) => ({ ...row, ...payload }))
+        const broken = violation(merged)
         if (broken) return checkFailure(broken)
+        const hitSet = new Set(hit)
+        const clash = uniqueViolation(merged, [...stored.filter((row) => !hitSet.has(row)), ...merged])
+        if (clash) return uniqueFailure(clash)
         for (const row of hit) Object.assign(row, payload)
         writes.push({ table, action, payload, matched: hit.length })
         return respond(hit.map((row) => projectColumns(row, columns)))
+      }
+      if (action === "upsert") {
+        const inputs = Array.isArray(payload) ? payload : [payload as Row]
+        const keys = (upsertOptions.onConflict ?? "id")
+          .split(",")
+          .map((key) => key.trim())
+          .filter(Boolean)
+        const sameKey = (left: Row, right: Row) => keys.every((key) => (left[key] ?? null) === (right[key] ?? null))
+        const toInsert: Row[] = []
+        const toMerge: Array<{ row: Row; input: Row }> = []
+        for (const input of inputs) {
+          const existing = stored.find((row) => sameKey(row, input)) ?? toInsert.find((row) => sameKey(row, input))
+          if (existing) {
+            if (!upsertOptions.ignoreDuplicates) toMerge.push({ row: existing, input })
+            continue
+          }
+          toInsert.push({ id: nextId(), created_at: NOW, updated_at: NOW, ...input })
+        }
+        const mergedRows = toMerge.map(({ row, input }) => ({ ...row, ...input }))
+        const broken = violation([...toInsert, ...mergedRows])
+        if (broken) return checkFailure(broken)
+        const touched = new Set(toMerge.map(({ row }) => row))
+        const clash = uniqueViolation(
+          [...toInsert, ...mergedRows],
+          [...stored.filter((row) => !touched.has(row)), ...toInsert, ...mergedRows],
+          keys,
+        )
+        if (clash) return uniqueFailure(clash)
+        for (const { row, input } of toMerge) Object.assign(row, input)
+        stored.push(...toInsert)
+        writes.push({ table, action, payload })
+        return respond([...toInsert, ...toMerge.map(({ row }) => row)].map((row) => projectColumns(row, columns)))
       }
       if (action === "delete") {
         const doomed = new Set(stored.filter(matches))
@@ -216,6 +280,9 @@ export function createFakeSupabase() {
     const builder: any = {
       select: (cols?: string) => ((columns = cols ?? null), builder),
       insert: (value: Row | Row[]) => ((action = "insert"), (payload = value), builder),
+      upsert: (value: Row | Row[], opts?: { onConflict?: string; ignoreDuplicates?: boolean }) => (
+        (action = "upsert"), (payload = value), (upsertOptions = opts ?? {}), builder
+      ),
       update: (value: Row) => ((action = "update"), (payload = value), builder),
       delete: () => ((action = "delete"), builder),
       eq: (column: string, value: unknown) => (predicates.push((row) => (row[column] ?? null) === (value ?? null)), builder),
@@ -263,16 +330,17 @@ export function createFakeSupabase() {
     rpcCalls.length = 0
     for (const key of Object.keys(rpcHandlers)) delete rpcHandlers[key]
     for (const key of Object.keys(checks)) delete checks[key]
+    for (const key of Object.keys(uniques)) delete uniques[key]
     injected.length = 0
     idSeq = 0
   }
 
   /** 讓下一次對 `table` 的 `action` 回傳 `error`（一次性，見檔頭）。 */
-  function injectError(entry: { table: string; action: "select" | "insert" | "update" | "delete"; error: PgError }) {
+  function injectError(entry: { table: string; action: "select" | "insert" | "update" | "delete" | "upsert"; error: PgError }) {
     injected.push(entry)
   }
 
-  return { db, writes, reads, orFilters, rpcCalls, rpcHandlers, checks, injectError, from, rpc, reset }
+  return { db, writes, reads, orFilters, rpcCalls, rpcHandlers, checks, uniques, injectError, from, rpc, reset }
 }
 
 export const fake = createFakeSupabase()

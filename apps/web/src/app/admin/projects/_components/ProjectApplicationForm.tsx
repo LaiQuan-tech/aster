@@ -7,9 +7,8 @@ import { ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin
 import type { Department, Employee } from "@/lib/admin-api";
 import type { Vendor } from "@/lib/company-api";
 import { companyOptions, isCompanyActive } from "@/lib/company-options";
+import { optionChoices, useOptionList } from "@/lib/option-lists-api";
 import {
-  CLIENT_CATEGORY_LABELS,
-  CLIENT_CATEGORY_ORDER,
   INVOICE_TYPE_LABELS,
   PAYMENT_METHOD_LABELS,
   PROJECT_KIND_LABELS,
@@ -94,6 +93,8 @@ export function ProjectApplicationForm({
   const [newClientPhone, setNewClientPhone] = useState("");
   const [newClientCategory, setNewClientCategory] = useState<ClientCategory | "">("");
   const [creatingClient, setCreatingClient] = useState(false);
+  // 快速新增客戶的分類下拉：吃「選項清單 → 客戶分類」，新客戶只能選啟用的項目。
+  const clientCategories = useOptionList("client_category");
 
   useEffect(() => {
     setDraft((current) => ({
@@ -233,7 +234,7 @@ export function ProjectApplicationForm({
           {showNewClient ? (
             <div className="grid grid-cols-1 gap-2 rounded-lg border border-dashed border-slate-300 p-3 sm:col-span-2 sm:grid-cols-5">
               <input className={inputCls} value={newClientName} onChange={(event) => setNewClientName(event.target.value)} placeholder="客戶名稱 *" />
-              <select className={inputCls} value={newClientCategory} onChange={(event) => setNewClientCategory(event.target.value as ClientCategory | "")}><option value="">分類</option>{CLIENT_CATEGORY_ORDER.map((category) => <option key={category} value={category}>{CLIENT_CATEGORY_LABELS[category]}</option>)}</select>
+              <select className={inputCls} value={newClientCategory} onChange={(event) => setNewClientCategory(event.target.value as ClientCategory | "")}><option value="">分類</option>{optionChoices(clientCategories.items, newClientCategory).map((choice) => <option key={choice.code} value={choice.code}>{choice.label}</option>)}</select>
               <input className={inputCls} value={newClientTaxId} onChange={(event) => setNewClientTaxId(event.target.value)} placeholder="統編" />
               <input className={inputCls} value={newClientPhone} onChange={(event) => setNewClientPhone(event.target.value)} placeholder="電話" />
               <PrimaryButton type="button" onClick={() => void submitNewClient()} disabled={creatingClient || !newClientName.trim()}>{creatingClient ? "建立中…" : "建立並選用"}</PrimaryButton>

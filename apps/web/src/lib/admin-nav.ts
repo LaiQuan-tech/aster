@@ -16,7 +16,8 @@
  *   - `ADMIN_REDIRECTS`：舊網址轉址；apps/web/next.config.ts 維持同一份（單元測試對照）。
  *   - 角色導覽（2026-09-23 W4 會計角色）：`RoleNavConfig`／`ACCOUNTANT_DEFAULT_NAV`／
  *     `roleNavOf(role, features)`／`sectionsForRole()`／`tabsForSection(…, { roleNav })`——
- *     會計只看得到「專案與財務／出勤月表／報銷預支／員工」，範圍可由
+ *     會計只看得到「專案與財務／出勤月表／報銷預支／員工」，以及「設定」裡的「選項清單」
+ *     （2026-10-10：客戶分類的管理權限比照客戶名冊的寫入，會計也能管），範圍可由
  *     tenants.features.roles.accountant 覆蓋（設定 → 進階功能）。這只是導覽可見性，
  *     真正的守門在 API（requireFinance／canSeeBonus）。
  *   - `isAdminPathAllowed({ pathname, roleNav, modules })`（2026-09-23 驗收修正）：直開網址時
@@ -521,6 +522,13 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       narrow: true,
     },
     {
+      key: "optionLists",
+      label: "選項清單",
+      href: "/admin/option-lists",
+      desc: "後台各處「分類」類下拉的選項（目前：客戶名冊的客戶分類），可自行新增、改名、調整順序；用過的選項只能停用，沒用過的才能刪除",
+      narrow: true,
+    },
+    {
       key: "advanced",
       label: "進階功能",
       href: "/admin/settings/advanced",
@@ -791,15 +799,17 @@ export interface RoleNavConfig {
 /**
  * 會計預設範圍（業主決策 3）：專案與財務（發票／請款／入帳／放款／複委託付款；**不含**
  * 獎金季發放）、出勤月表、報銷與預支（**不含**薪資作業／薪資單／稅務／現金給付）、
- * 員工基本資料。tenants.features.roles.accountant 可整鍵覆蓋（roleNavOf）。
+ * 員工基本資料、設定區的「選項清單」（2026-10-10）。tenants.features.roles.accountant 可整鍵覆蓋（roleNavOf）。
  */
 export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
-  sections: ["home", "finance", "attendance", "payroll", "people"],
+  sections: ["home", "finance", "attendance", "payroll", "people", "settings"],
   tabs: {
     finance: ["projects", "overview", "receivables", "disbursements", "reports", "directory"],
     attendance: ["sheets"],
     payroll: ["expenses", "advances"],
     people: ["employees"],
+    // 設定區只開「選項清單」：客戶分類的管理權限比照客戶名冊的寫入（API 是 requireFinance 層）。
+    settings: ["optionLists"],
   },
 };
 

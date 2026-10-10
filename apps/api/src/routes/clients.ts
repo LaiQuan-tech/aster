@@ -9,6 +9,7 @@ import { resolveSelf } from "../middleware/scope.js"
 import { isValidTaiwanTaxId, TAX_ID_RE } from "../services/tax-id.js"
 import { INVOICE_TYPES, PAYMENT_METHODS } from "../services/project-money.js"
 import { CLIENT_COLS, serializeClient, type ClientRow } from "../services/project-application-store.js"
+import { CLIENT_CATEGORY_LIST_KEY, checkOptionPick, findOptionList } from "../services/option-lists.js"
 
 export const clientsRouter = Router()
 
@@ -38,15 +39,35 @@ function serializeClientExt(r: ClientRowExt) {
 
 const dayField = z.string().trim().max(40).nullable().optional()
 
-/** B4：客戶分類。合法值與 DB 的 `clients_category_chk` 一致（見 sql/0032）。 */
-const CLIENT_CATEGORIES = ["architect", "engineer", "owner", "gov", "other"] as const
+/**
+ * 客戶分類（B4）：合法值是租戶「選項清單 → 客戶分類」（`option_items`，list_key＝client_category）裡**啟用**的
+ * code，管理員可自行新增（見 services/option-lists.ts）。DB 的 `clients_category_chk` 已拿掉（sql/0048），
+ * 改在寫入時依清單驗證——`categoryProblem()`：
+ *   • 新選或改選到停用的項目 → 400 `category_inactive`；不存在的 code → 400 `invalid_category`；
+ *   • 沿用這個客戶已存的值不擋（即使該分類後來被停用），舊客戶才改得了別的欄位；
+ *   • 不選（null）永遠可以。
+ */
+const CATEGORY_LIST = findOptionList(CLIENT_CATEGORY_LIST_KEY)
+
+/** 這次寫入的分類有問題就回錯誤碼；沒問題回 null。`stored`＝這個客戶現在存的分類（新建客戶沒有＝null）。 */
+async function categoryProblem(
+  tenantId: string,
+  picked: string | null | undefined,
+  stored: string | null,
+): Promise<"invalid_category" | "category_inactive" | null> {
+  if (!CATEGORY_LIST) throw new Error(`option list ${CLIENT_CATEGORY_LIST_KEY} is not registered`)
+  const verdict = await checkOptionPick(tenantId, CATEGORY_LIST, picked, stored)
+  if (verdict === "unknown") return "invalid_category"
+  if (verdict === "inactive") return "category_inactive"
+  return null
+}
 
 const clientBody = z.object({
   name: z.string().trim().min(1).max(200),
   /** 簡稱：列表／下拉顯示與搜尋用，最長 40 字，可空（空字串視為清除）。 */
   shortName: z.string().trim().max(40).nullable().optional(),
-  /** 分類：建築師／技師／業主／政府機關／其他。可空——既有名冊未必補得回。 */
-  category: z.enum(CLIENT_CATEGORIES).nullable().optional(),
+  /** 分類 code（選項清單 client_category 的 code；預設有建築師／技師／業主／政府機關／其他）。可空——既有名冊未必補得回。 */
+  category: z.string().trim().min(1).max(100).nullable().optional(),
   taxId: z
     .string()
     .trim()
@@ -116,6 +137,11 @@ clientsRouter.post("/clients", requireAuth, requireTenant, requireFinance, async
     return
   }
   try {
+    const problem = await categoryProblem(tenantId, parsed.data.category, null)
+    if (problem) {
+      res.status(400).json({ error: problem, category: parsed.data.category })
+      return
+    }
     const self = userId ? await resolveSelf(tenantId, userId) : null
     const { data, error } = await supabaseAdmin
       .from("clients")
@@ -151,6 +177,26 @@ clientsRouter.patch("/clients/:id", requireAuth, requireTenant, requireFinance, 
     return
   }
   try {
+    // 改選分類才要比對清單；先讀這個客戶現在存的值，沿用原值（即使已停用）不擋。
+    if (parsed.data.category) {
+      const { data: current, error: currentError } = await supabaseAdmin
+        .from("clients")
+        .select("category")
+        .eq("tenant_id", tenantId)
+        .eq("id", id)
+        .is("deleted_at", null)
+        .maybeSingle()
+      if (currentError) {
+        next(new Error(`PATCH /clients/${id} (load category): ${currentError.message}`))
+        return
+      }
+      const stored = ((current as { category?: string | null } | null)?.category ?? null) as string | null
+      const problem = await categoryProblem(tenantId, parsed.data.category, stored)
+      if (problem) {
+        res.status(400).json({ error: problem, category: parsed.data.category })
+        return
+      }
+    }
     const { data, error } = await supabaseAdmin
       .from("clients")
       .update({ ...row, updated_at: new Date().toISOString() })

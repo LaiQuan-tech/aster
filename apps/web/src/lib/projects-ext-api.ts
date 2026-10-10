@@ -35,24 +35,19 @@ export const COMMON_DISCIPLINES = ["電機", "空調", "消防", "汙水"] as co
 
 /* ================================================================ 客戶 == */
 
-/** B4：客戶分類。合法值與後端 `clients_category_chk`（sql/0032）一致。 */
-export type ClientCategory = "architect" | "engineer" | "owner" | "gov" | "other"
-
-export const CLIENT_CATEGORY_LABELS: Record<ClientCategory, string> = {
-  architect: "建築師",
-  engineer: "技師",
-  owner: "業主",
-  gov: "政府機關",
-  other: "其他",
-}
-export const CLIENT_CATEGORY_ORDER: ClientCategory[] = ["architect", "engineer", "owner", "gov", "other"]
+/**
+ * B4：客戶分類的代碼。合法值不再寫死——是「設定 → 選項清單 → 客戶分類」（`client_category`）裡的項目 code，
+ * 管理員可自行新增；畫面用 `useOptionList("client_category")`／`optionLabel`／`optionChoices`
+ * （lib/option-lists-api.ts）取名稱與下拉選項。
+ */
+export type ClientCategory = string
 
 export interface Client {
   id: string
   name: string
   /** 簡稱：列表與搜尋用，可空（最長 40 字）。 */
   shortName?: string | null
-  /** 分類：可空，既有名冊未必補得回。 */
+  /** 分類 code（選項清單 client_category）：可空，既有名冊未必補得回。 */
   category: ClientCategory | null
   taxId: string | null
   phone: string | null
@@ -87,10 +82,12 @@ export function deleteClient(id: string) {
   return apiFetch<{ id: string }>(`/clients/${id}`, { method: "DELETE" })
 }
 
-/** 常見錯誤碼人性化——客戶名冊統編重複／檢查碼錯誤。 */
+/** 常見錯誤碼人性化——客戶名冊統編重複／檢查碼錯誤、分類已停用或不存在。 */
 export function humanizeClientError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : fallback
   if (msg.includes("tax_id_taken")) return "統一編號已被其他客戶使用。"
+  if (msg.includes("category_inactive")) return "這個分類已停用，請改選其他分類（或到「設定 → 選項清單」重新啟用）。"
+  if (msg.includes("invalid_category")) return "找不到這個分類，可能已被刪除，請重新整理後再選。"
   return msg
 }
 
