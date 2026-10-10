@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Card, PrimaryButton, ErrorText, Empty, inputCls } from "@/components/admin-ui";
 import { VendorCombo } from "@/components/VendorCombo";
 import type { Vendor } from "@/lib/company-api";
+import { companyOptions } from "@/lib/company-options";
 import {
   putProjectSubcontracts,
   putSubcontractPayments,
@@ -38,6 +39,7 @@ interface SubcontractsCardProps {
   savingPayments: string | null;
   setSavingPayments: Setter<string | null>;
   vendors: Vendor[];
+  /** 全部公司（含已停用）；期款的公司下拉只列啟用的，加上該期目前已選的。唯讀顯示（已連動放款單）照原名。 */
   companies: Company[];
   money: ProjectMoney | null;
   error: string | null;
@@ -427,7 +429,7 @@ export function SubcontractsCard({
                                       ) : (
                                         <select className="rounded border border-gray-300 px-1 py-0.5" value={p.payingCompanyId ?? ""} onChange={(e) => patchPayment(row.id as string, pIdx, { payingCompanyId: e.target.value || null })}>
                                           <option value="">—</option>
-                                          {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                          {companyOptions(companies, p.payingCompanyId).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
                                         </select>
                                       )}
                                     </td>
@@ -437,7 +439,7 @@ export function SubcontractsCard({
                                       ) : (
                                         <select className="rounded border border-gray-300 px-1 py-0.5" value={p.receiptIssuerCompanyId ?? ""} onChange={(e) => patchPayment(row.id as string, pIdx, { receiptIssuerCompanyId: e.target.value || null })}>
                                           <option value="">—</option>
-                                          {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                          {companyOptions(companies, p.receiptIssuerCompanyId).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
                                         </select>
                                       )}
                                     </td>

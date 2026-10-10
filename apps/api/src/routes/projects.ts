@@ -57,10 +57,11 @@ import type { MainContractInput } from "../services/main-contract.js"
 import type { NewBillingInput } from "../services/billing-store.js"
 import { AtomicProjectCreationError, createProjectApplicationAtomic } from "../services/project-creation.js"
 import {
+  checkProjectCompany,
   defaultCompanyOf,
   effectiveCompanyOf,
-  isTenantCompany,
   loadTenantCompanies,
+  type ProjectCompanyCheck,
 } from "../services/project-company.js"
 
 export const projectsRouter = Router()
@@ -572,6 +573,11 @@ async function loadScope(
   }
 }
 
+/** 承接公司檢查失敗的回應內容：invalid_company 維持舊格式（只有 error），company_inactive 多帶是哪間。 */
+function companyErrorBody(check: Extract<ProjectCompanyCheck, { ok: false }>) {
+  return check.error === "company_inactive" ? { error: check.error, companyId: check.companyId } : { error: check.error }
+}
+
 /**
  * B4：列表排序欄位。key 是 `?sort=` 收的值，value 是實際的 DB 欄位。
  * 不合法的 sort／dir 一律 400（比照 GET /projects/annual 的 invalid_sort
@@ -808,10 +814,12 @@ projectsRouter.post(
       }
 
       // 承接公司（申請單左上角）：帶了就必須是本租戶的公司主體，不屬於回 400 invalid_company
-      // （不讓它走到 RPC 才變成 500）；沒帶／帶 null → 租戶預設公司，沒有預設就 null。
+      // （不讓它走到 RPC 才變成 500）；已停用的公司不能新選，回 400 company_inactive；
+      // 沒帶／帶 null → 租戶預設公司（預設公司一定是啟用的），沒有預設就 null。
       const companies = await loadTenantCompanies(tenantId)
-      if (b.companyId && !isTenantCompany(companies, b.companyId)) {
-        res.status(400).json({ error: "invalid_company" })
+      const companyCheck = checkProjectCompany(companies, b.companyId)
+      if (!companyCheck.ok) {
+        res.status(400).json(companyErrorBody(companyCheck))
         return
       }
       const companyId = b.companyId ?? defaultCompanyOf(companies)?.id ?? null
@@ -1165,9 +1173,12 @@ projectsRouter.patch(
         patch.client_id = b.clientId
       }
       // 承接公司：帶 null＝改回沿用租戶預設公司；帶 id 必須是本租戶的公司主體。
+      // 改選到已停用的公司回 400 company_inactive；帶的 id 與專案上已存的相同＝沿用（編輯表單
+      // 每次存檔都會把目前的承接公司整份送回來，不能因為它後來被停用就連別的欄位都存不了）。
       if (b.companyId !== undefined) {
-        if (b.companyId !== null && !isTenantCompany(await loadTenantCompanies(tenantId), b.companyId)) {
-          res.status(400).json({ error: "invalid_company" })
+        const companyCheck = checkProjectCompany(await loadTenantCompanies(tenantId), b.companyId, scope.project.company_id)
+        if (!companyCheck.ok) {
+          res.status(400).json(companyErrorBody(companyCheck))
           return
         }
         patch.company_id = b.companyId

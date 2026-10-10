@@ -31,6 +31,7 @@ import {
 import { isUniqueViolation, MAX_CODE_ATTEMPTS } from "./project-code.js"
 import { loadDisbursementNoFormat, nextDisbursementNo } from "./disbursement-no.js"
 import { writeAuditLog } from "./audit.js"
+import { firstNewlyPickedInactive } from "./company-lifecycle.js"
 import { columnsExist } from "../lib/schema-compat.js"
 import { isHrRole } from "../middleware/scope.js"
 
@@ -192,8 +193,9 @@ export type ProjectLite = {
 }
 const PROJECT_LITE_COLS = "id, code, name, lead_emp_id, archived_at, reserved_at, client_id"
 
-type CompanyLite = { id: string; name: string; bank_name: string | null; bank_account: string | null }
-const COMPANY_LITE_COLS = "id, name, bank_name, bank_account"
+/** `is_active`：停用的公司不能被新選成付款公司／收據抬頭（見 resolveHeader）；缺值一律當啟用。 */
+type CompanyLite = { id: string; name: string; bank_name: string | null; bank_account: string | null; is_active?: boolean }
+const COMPANY_LITE_COLS = "id, name, bank_name, bank_account, is_active"
 
 type VendorLite = {
   id: string
@@ -1299,8 +1301,16 @@ function companyBankAccount(c: CompanyLite): string | null {
 /**
  * 收款方／付款公司的參照檢查與快照複製：廠商改名、公司換帳戶都不影響歷史匯款單。
  * 快照欄只在建立與 draft 修改時寫入（paid 之後不再碰）。
+ *
+ * 停用的公司（companies.is_active=false）不能被**新選或改選**成付款公司／收據抬頭
+ * （400 `company_inactive`）。`stored` 是單據上目前已存的兩個欄位（修改草稿時帶入）：
+ * 與已存值相同＝沿用，放行——不然舊草稿上的公司後來被停用，這張單連備註都改不了。
  */
-async function resolveHeader(tenantId: string, input: Omit<DisbursementInput, "status" | "allocations">): Promise<ResolvedHeader> {
+async function resolveHeader(
+  tenantId: string,
+  input: Omit<DisbursementInput, "status" | "allocations">,
+  stored?: { payingCompanyId?: string | null; receiptIssuerCompanyId?: string | null },
+): Promise<ResolvedHeader> {
   let vendor: VendorLite | null = null
   if (input.payeeKind === "vendor") {
     if (!input.vendorId) throw new DisbursementError(400, "invalid_vendor", { vendorId: null })
@@ -1325,6 +1335,15 @@ async function resolveHeader(tenantId: string, input: Omit<DisbursementInput, "s
   if (input.receiptIssuerCompanyId && !companies.has(input.receiptIssuerCompanyId)) {
     throw new DisbursementError(400, "invalid_company", { companyId: input.receiptIssuerCompanyId })
   }
+  const inactiveIds = new Set([...companies.values()].filter((c) => c.is_active === false).map((c) => c.id))
+  const inactiveId = firstNewlyPickedInactive(
+    [
+      { companyId: input.payingCompanyId, storedCompanyId: stored?.payingCompanyId },
+      { companyId: input.receiptIssuerCompanyId, storedCompanyId: stored?.receiptIssuerCompanyId },
+    ],
+    inactiveIds,
+  )
+  if (inactiveId) throw new DisbursementError(400, "company_inactive", { companyId: inactiveId })
   const amount = roundMoney(input.amount)
   const withheld = roundMoney(input.withheldAmount ?? 0)
   if (amount < 0 || withheld < 0) throw new DisbursementError(400, "invalid_amount")
@@ -1949,7 +1968,10 @@ export async function updateDisbursement(
       if (patch.payeeBankAccount === undefined) delete merged.payeeBankAccount
       if (patch.payeeBankCode === undefined) delete merged.payeeBankCode
     }
-    const header = await resolveHeader(tenantId, merged)
+    const header = await resolveHeader(tenantId, merged, {
+      payingCompanyId: current.paying_company_id,
+      receiptIssuerCompanyId: current.receipt_issuer_company_id,
+    })
     const allocInputs: AllocationInput[] =
       patch.allocations !== undefined
         ? patch.allocations

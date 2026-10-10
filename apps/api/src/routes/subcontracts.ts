@@ -23,6 +23,7 @@ import {
   type PaymentRow,
 } from "../services/project-application-store.js"
 import { loadPaymentAcceptance, paymentsHaveAcceptance } from "../services/disbursements.js"
+import { firstNewlyPickedInactive } from "../services/company-lifecycle.js"
 import { writeAuditLog } from "../services/audit.js"
 
 export const subcontractsRouter = Router()
@@ -176,6 +177,17 @@ async function idsExist(table: string, tenantId: string, ids: string[], extra?: 
   const { data, error } = await q
   if (error) throw new Error(`idsExist(${table}): ${error.message}`)
   return new Set((data ?? []).map((r: { id: string }) => r.id))
+}
+
+/**
+ * 這批公司 id 裡屬於本租戶的有哪些、各自是否啟用（停用的不能被新選成期款的付款公司／收據抬頭）。
+ * 缺 `is_active` 一律當啟用。
+ */
+async function companyActiveStates(tenantId: string, ids: string[]): Promise<Map<string, boolean>> {
+  if (ids.length === 0) return new Map()
+  const { data, error } = await supabaseAdmin.from("companies").select("id, is_active").eq("tenant_id", tenantId).in("id", ids)
+  if (error) throw new Error(`companyActiveStates: ${error.message}`)
+  return new Map((data ?? []).map((r: { id: string; is_active?: boolean | null }) => [r.id, r.is_active !== false]))
 }
 
 /**
@@ -472,7 +484,7 @@ subcontractsRouter.put(
             .filter((v): v is string => !!v),
         ),
       ]
-      const companies = await idsExist("companies", tenantId, companyIds)
+      const companies = await companyActiveStates(tenantId, companyIds)
       for (const p of payload) {
         for (const cid of [p.payingCompanyId, p.receiptIssuerCompanyId]) {
           if (cid && !companies.has(cid)) {
@@ -500,6 +512,24 @@ subcontractsRouter.put(
           row = byNo.get(item.installmentNo) ?? null
         }
         matched.set(item.installmentNo, row)
+      }
+
+      // 停用的公司不能被新選成付款公司／收據抬頭（400 company_inactive）。與這一期已存的值相同＝沿用，
+      // 放行：專案頁每次存檔都會整份送回期款的公司欄，不能因為舊期款上的公司後來被停用就整頁存不了。
+      const inactiveCompanyIds = new Set([...companies].filter(([, active]) => !active).map(([id]) => id))
+      for (const item of payload) {
+        const row = matched.get(item.installmentNo)
+        const inactiveId = firstNewlyPickedInactive(
+          [
+            { companyId: item.payingCompanyId, storedCompanyId: row?.paying_company_id },
+            { companyId: item.receiptIssuerCompanyId, storedCompanyId: row?.receipt_issuer_company_id },
+          ],
+          inactiveCompanyIds,
+        )
+        if (inactiveId) {
+          res.status(400).json({ error: "company_inactive", companyId: inactiveId, installmentNo: item.installmentNo })
+          return
+        }
       }
       const matchedIds = new Set([...matched.values()].filter((r): r is PaymentRow => !!r).map((r) => r.id))
       // 期別編號撞到另一列（改號撞到既有的）。

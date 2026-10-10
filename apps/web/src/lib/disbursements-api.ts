@@ -530,6 +530,7 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   payment_already_paid: "選到的期款已由其他匯款標記為已付。",
   invalid_vendor: "選到的廠商不存在或已刪除。",
   invalid_company: "選到的公司主體不存在。",
+  company_inactive: "選到的付款公司或收據抬頭已停用，請改選其他公司。",
   invalid_project: "選到的專案不存在。",
   paid_on_required: "標記已匯款必須填放款日。",
   void: "已作廢的匯款不能再修改。",

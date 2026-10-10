@@ -213,6 +213,29 @@ describe("承接公司（申請單左上角下拉）", () => {
     expect(defaultCompanyIdOf([])).toBe("");
   });
 
+  it("已停用的公司不會被當成預設或第一間：新表單預設只從啟用的公司挑", () => {
+    const withInactive = [
+      { id: "company-old", isDefault: false, isActive: false },
+      { id: "company-second", isDefault: false, isActive: true },
+      { id: "company-default", isDefault: true, isActive: true },
+    ];
+    expect(defaultCompanyIdOf(withInactive)).toBe("company-default");
+    // 沒有標預設：跳過排在最前面的停用公司，取第一間啟用的
+    expect(defaultCompanyIdOf(withInactive.filter((c) => !c.isDefault))).toBe("company-second");
+    expect(defaultCompanyIdOf([{ id: "company-old", isDefault: false, isActive: false }])).toBe("");
+    // 草稿沒動過 → 解成啟用的預設公司，不會落到停用的那間
+    expect(selectedCompanyId("", withInactive)).toBe("company-default");
+  });
+
+  it("編輯既有專案：專案上已存的公司就算已停用也保留，不會悄悄換成預設公司", () => {
+    const withInactive = [
+      { id: "company-old", isDefault: false, isActive: false },
+      { id: "company-default", isDefault: true, isActive: true },
+    ];
+    expect(selectedCompanyId("company-old", withInactive)).toBe("company-old");
+    expect(selectedCompanyId("removed-company", withInactive)).toBe("company-default");
+  });
+
   it("使用者選過（且還在名冊裡）就用選的；沒動過或選的已不在名冊就用預設", () => {
     expect(selectedCompanyId("company-second", companies)).toBe("company-second");
     expect(selectedCompanyId("", companies)).toBe("company-default");

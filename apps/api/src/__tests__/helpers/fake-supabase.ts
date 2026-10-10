@@ -4,11 +4,19 @@
  * 只實作 API 路由實際用到的 PostgREST 子集：
  *   select / insert / update / delete、eq / neq / is / not / in / like / ilike / gt·gte·lt·lte /
  *   or（ilike／eq／is）、order / limit、single / maybeSingle、await（thenable），以及 rpc。
+ * 另外支援 `range(from, to)`（分頁，含上界）。
  * 刻意仿真實行為的地方：`single()`／`maybeSingle()` 撞到多列回 PGRST116；
  * `select("a, b")` 只回有列名的欄位（沒列到的欄位拿不到，漏 select 欄位的 bug 才抓得到；
  * `select()` 不帶參數或 `*` 回整列；內嵌關聯如 `vendors(name)` 不模擬）；
  * 所有寫入記在 `writes`、所有讀取的資料表記在 `reads`（可斷言「只查了一次」），
  * 測試可直接斷言 payload。
+ *
+ * 測試專用的鉤子：
+ *   • `injectError({ table, action, error })`：讓下一次對該表的該動作回傳指定的 PG 錯誤
+ *     （例如外鍵競態 23503），資料不動、不記進 `writes`；一次性，用完即失效。
+ *   • `checks[table] = (row) => 違反訊息 | null`：仿 DB 的列級 CHECK。insert／update 套用後的
+ *     列違反時整句失敗（code 23514、不動任何一列、不記進 `writes`），可驗證「寫入順序不會中途違反 CHECK」。
+ *   • delete 若先呼叫了 `select()`，回傳被刪掉的列（仿 PostgREST `Prefer: return=representation`）。
  *
  * 用法（每個測試檔）：
  *   vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
@@ -112,6 +120,10 @@ export function createFakeSupabase() {
   const orFilters: string[] = []
   const rpcCalls: Array<{ name: string; args: Row }> = []
   const rpcHandlers: Record<string, (args: Row) => RpcResult | Promise<RpcResult>> = {}
+  /** 一次性的錯誤注入（見檔頭）。 */
+  const injected: Array<{ table: string; action: "select" | "insert" | "update" | "delete"; error: PgError }> = []
+  /** 列級 CHECK（見檔頭）：回傳違反訊息，null＝通過。 */
+  const checks: Record<string, (row: Row) => string | null> = {}
   let idSeq = 0
 
   const nextId = () => `00000000-0000-4000-8000-${String(++idSeq).padStart(12, "0")}`
@@ -122,6 +134,8 @@ export function createFakeSupabase() {
     let action: "select" | "insert" | "update" | "delete" = "select"
     let payload: Row | Row[] | null = null
     let max: number | null = null
+    let rangeFrom: number | null = null
+    let rangeTo: number | null = null
     /** `select("a, b")` 的欄位清單；null＝沒呼叫過 select()（或不帶參數）→ 回整列。 */
     let columns: string | null = null
 
@@ -142,15 +156,35 @@ export function createFakeSupabase() {
         return { data: rows[0], error: null }
       }
 
+      const injectedAt = injected.findIndex((entry) => entry.table === table && entry.action === action)
+      if (injectedAt >= 0) {
+        const [entry] = injected.splice(injectedAt, 1)
+        return { data: null, error: entry!.error }
+      }
+      const violation = (candidates: Row[]): string | null => {
+        const check = checks[table]
+        if (!check) return null
+        for (const candidate of candidates) {
+          const message = check(candidate)
+          if (message) return message
+        }
+        return null
+      }
+      const checkFailure = (message: string) => ({ data: null, error: { message, code: "23514" } })
+
       if (action === "insert") {
         const inputs = Array.isArray(payload) ? payload : [payload as Row]
         const inserted = inputs.map((input) => ({ id: nextId(), created_at: NOW, updated_at: NOW, ...input }))
+        const broken = violation(inserted)
+        if (broken) return checkFailure(broken)
         stored.push(...inserted)
         writes.push({ table, action, payload })
         return respond(inserted.map((row) => projectColumns(row, columns)))
       }
       if (action === "update") {
         const hit = stored.filter(matches)
+        const broken = violation(hit.map((row) => ({ ...row, ...payload })))
+        if (broken) return checkFailure(broken)
         for (const row of hit) Object.assign(row, payload)
         writes.push({ table, action, payload, matched: hit.length })
         return respond(hit.map((row) => projectColumns(row, columns)))
@@ -159,7 +193,7 @@ export function createFakeSupabase() {
         const doomed = new Set(stored.filter(matches))
         db[table] = stored.filter((row) => !doomed.has(row))
         writes.push({ table, action, payload: null, matched: doomed.size })
-        return respond([])
+        return respond(columns === null ? [] : [...doomed].map((row) => projectColumns(row, columns)))
       }
 
       reads.push(table)
@@ -173,6 +207,7 @@ export function createFakeSupabase() {
           return 0
         })
       }
+      if (rangeFrom !== null && rangeTo !== null) rows = rows.slice(rangeFrom, rangeTo + 1)
       if (max !== null) rows = rows.slice(0, max)
       return respond(rows.map((row) => projectColumns(row, columns)))
     }
@@ -205,6 +240,7 @@ export function createFakeSupabase() {
       },
       order: (column: string, opts?: { ascending?: boolean }) => (orders.push({ column, ascending: opts?.ascending ?? true }), builder),
       limit: (n: number) => ((max = n), builder),
+      range: (from: number, to: number) => ((rangeFrom = from), (rangeTo = to), builder),
       maybeSingle: () => execute("maybeSingle"),
       single: () => execute("single"),
       then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) => execute("many").then(resolve, reject),
@@ -226,10 +262,17 @@ export function createFakeSupabase() {
     orFilters.length = 0
     rpcCalls.length = 0
     for (const key of Object.keys(rpcHandlers)) delete rpcHandlers[key]
+    for (const key of Object.keys(checks)) delete checks[key]
+    injected.length = 0
     idSeq = 0
   }
 
-  return { db, writes, reads, orFilters, rpcCalls, rpcHandlers, from, rpc, reset }
+  /** 讓下一次對 `table` 的 `action` 回傳 `error`（一次性，見檔頭）。 */
+  function injectError(entry: { table: string; action: "select" | "insert" | "update" | "delete"; error: PgError }) {
+    injected.push(entry)
+  }
+
+  return { db, writes, reads, orFilters, rpcCalls, rpcHandlers, checks, injectError, from, rpc, reset }
 }
 
 export const fake = createFakeSupabase()

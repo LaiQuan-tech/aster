@@ -245,13 +245,13 @@ describe("讀取端 — companyId／companyName（company_id 為 null 時顯示�
 
 describe("services/project-company 純函式", () => {
   const companies: CompanyLite[] = [
-    { id: "a", name: "預設公司", isDefault: true },
-    { id: "b", name: "第二公司", isDefault: false },
+    { id: "a", name: "預設公司", isDefault: true, isActive: true },
+    { id: "b", name: "第二公司", isDefault: false, isActive: true },
   ]
 
   it("defaultCompanyOf／isTenantCompany", () => {
     expect(defaultCompanyOf(companies)?.id).toBe("a")
-    expect(defaultCompanyOf([{ id: "b", name: "第二公司", isDefault: false }])).toBeNull()
+    expect(defaultCompanyOf([{ id: "b", name: "第二公司", isDefault: false, isActive: true }])).toBeNull()
     expect(defaultCompanyOf([])).toBeNull()
     expect(isTenantCompany(companies, "b")).toBe(true)
     expect(isTenantCompany(companies, "zzz")).toBe(false)

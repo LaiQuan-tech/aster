@@ -6,6 +6,7 @@ import { VendorCombo } from "@/components/VendorCombo";
 import { ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import type { Department, Employee } from "@/lib/admin-api";
 import type { Vendor } from "@/lib/company-api";
+import { companyOptions, isCompanyActive } from "@/lib/company-options";
 import {
   CLIENT_CATEGORY_LABELS,
   CLIENT_CATEGORY_ORDER,
@@ -51,7 +52,7 @@ function money(value: number | null): string {
 
 interface ProjectApplicationFormProps {
   clients: Client[];
-  /** 名冊 → 公司主體：申請單左上角「承接公司」下拉的選項；預設選 isDefault 那間。 */
+  /** 名冊 → 公司主體：申請單左上角「承接公司」下拉的選項（已停用的不列）；預設選 isDefault 那間。 */
   companies: Company[];
   departments: Department[];
   employees: Employee[];
@@ -104,8 +105,11 @@ export function ProjectApplicationForm({
   }, [disciplines]);
 
   const selectedClient = clients.find((client) => client.id === draft.clientId) ?? null;
+  // 新專案只能選啟用的公司：已停用的不列（新表單沒有「原本已存」的公司要保留）。
+  const selectableCompanies = companies.filter(isCompanyActive);
   // 草稿的 companyId 留空＝沒動過；顯示與送出都用 selectedCompanyId 解成預設公司，名冊晚到也不會卡空值。
-  const companyId = selectedCompanyId(draft.companyId, companies);
+  const companyId = selectedCompanyId(draft.companyId, selectableCompanies);
+  const companyChoices = companyOptions(selectableCompanies, null, { markDefault: true });
   const amounts = useMemo(() => projectApplicationAmounts(draft, vatRate), [draft, vatRate]);
   const schedule = useMemo(() => projectApplicationSchedule(draft), [draft]);
   const visibility = projectApplicationVisibility({ canFinance, canBonus });
@@ -158,13 +162,13 @@ export function ProjectApplicationForm({
               className={`${inputCls} min-w-[16rem] max-w-full text-sm font-medium`}
               value={companyId}
               onChange={(event) => patch("companyId", event.target.value)}
-              disabled={companies.length === 0}
+              disabled={companyChoices.length === 0}
             >
-              {companies.length === 0 ? (
+              {companyChoices.length === 0 ? (
                 <option value="">尚未設定公司主體</option>
               ) : (
-                companies.map((company) => (
-                  <option key={company.id} value={company.id}>{company.name}{company.isDefault ? "（預設）" : ""}</option>
+                companyChoices.map((option) => (
+                  <option key={option.id} value={option.id}>{option.label}</option>
                 ))
               )}
             </select>

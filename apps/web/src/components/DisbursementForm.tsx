@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { inputCls, labelCls, PrimaryButton, ErrorText } from "@/components/admin-ui";
 import type { Vendor } from "@/lib/company-api";
+import { companyOptions } from "@/lib/company-options";
 import type { Company } from "@/lib/projects-ext-api";
 import {
   DISBURSEMENT_METHOD_LABELS,
@@ -161,6 +162,7 @@ export default function DisbursementForm({
   onCancel,
 }: {
   vendors: Vendor[];
+  /** 全部公司（含已停用）；下拉只列啟用的，加上這張單目前已選的（見 lib/company-options.ts）。 */
   companies: Company[];
   projects: ProjectOption[];
   payables: Payable[];
@@ -404,8 +406,8 @@ export default function DisbursementForm({
           <label className={labelCls}>付款公司 *</label>
           <select className={inputCls} value={state.payingCompanyId} onChange={(e) => set("payingCompanyId", e.target.value)}>
             <option value="">選擇付款公司…</option>
-            {companies.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}{c.isDefault ? "（預設）" : ""}</option>
+            {companyOptions(companies, state.payingCompanyId, { markDefault: true }).map((o) => (
+              <option key={o.id} value={o.id}>{o.label}</option>
             ))}
           </select>
         </div>
@@ -456,8 +458,8 @@ export default function DisbursementForm({
           <label className={labelCls}>收據抬頭</label>
           <select className={inputCls} value={state.receiptIssuerCompanyId} onChange={(e) => set("receiptIssuerCompanyId", e.target.value)}>
             <option value="">—</option>
-            {companies.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
+            {companyOptions(companies, state.receiptIssuerCompanyId).map((o) => (
+              <option key={o.id} value={o.id}>{o.label}</option>
             ))}
           </select>
         </div>

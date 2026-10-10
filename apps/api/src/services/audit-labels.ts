@@ -197,6 +197,7 @@ export const AUDIT_FIELD_LABELS: Record<string, string> = {
   published_at: "發布時間",
   current_version_id: "目前版本",
   is_default: "預設",
+  is_active: "啟用",
   features: "功能設定",
   branding: "品牌設定",
   timezone: "時區",

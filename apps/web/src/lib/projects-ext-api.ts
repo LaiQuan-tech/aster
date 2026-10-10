@@ -96,6 +96,14 @@ export function humanizeClientError(err: unknown, fallback: string): string {
 
 /* ============================================================ 我方主體 == */
 
+/** 公司被引用的筆數（含已作廢、已軟刪的紀錄）；`total` 為 0＝從沒被用過，可以刪除。 */
+export interface CompanyUsage {
+  projects: number
+  disbursements: number
+  subcontractPayments: number
+  total: number
+}
+
 export interface Company {
   id: string
   name: string
@@ -103,6 +111,10 @@ export interface Company {
   bankName: string | null
   bankAccount: string | null
   isDefault: boolean
+  /** 停用＝新專案／新放款／新下包付款的下拉不再出現；舊紀錄照常顯示原公司名稱。預設公司不能停用。 */
+  isActive: boolean
+  /** 被專案／放款／下包期款引用的筆數；後端 GET／PUT 都會帶。 */
+  usage: CompanyUsage
   note?: string | null
   createdAt?: string
   updatedAt?: string
@@ -113,9 +125,8 @@ export function listCompanies() {
 }
 
 /**
- * 整批 upsert：帶 id 更新、沒 id 新增，**不在陣列裡的不會被刪除**——主體被
- * 下包期款引用，後端刻意不刪（見 companies.ts 檔頭）。UI 移除一列只對「這次
- * 存檔前新增、還沒有 id」的列有意義；已存在的主體無法用這支端點刪掉。
+ * 整批 upsert：帶 id 更新、沒 id 新增，**不在陣列裡的不會被刪除**。可帶 `isActive` 停用／重新啟用；
+ * 停用預設公司回 400 `default_company_inactive`。刪除一律走 `deleteCompany`（只准刪沒被用過的）。
  */
 export function putCompanies(companies: Array<Partial<Company> & { name: string }>) {
   return apiFetch<{ companies: Company[] }>("/companies", {
@@ -124,11 +135,23 @@ export function putCompanies(companies: Array<Partial<Company> & { name: string 
   })
 }
 
+/**
+ * 刪除一間公司：只有從沒被用過、也不是預設的才刪得掉。
+ * 預設 409 `company_is_default`、被用過 409 `company_in_use`（`err.body.usage` 有明細）。
+ */
+export function deleteCompany(id: string) {
+  return apiFetch<{ id: string }>(`/companies/${id}`, { method: "DELETE" })
+}
+
 export function humanizeCompanyError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : fallback
   if (msg.includes("multiple_defaults")) return "預設主體只能勾一筆。"
   if (msg.includes("duplicate_name")) return "名稱重複，請改一下再存。"
   if (msg.includes("name_taken")) return "名稱已被其他主體使用。"
+  if (msg.includes("default_company_inactive")) return "預設公司不能停用，請先把預設改到其他公司。"
+  if (msg.includes("company_is_default")) return "預設公司不能刪除，請先把預設改到其他公司。"
+  if (msg.includes("company_in_use")) return "這間公司已被紀錄使用，無法刪除，可改為停用。"
+  if (msg.includes("not_found")) return "找不到這間公司，可能已被刪除，請重新整理。"
   return msg
 }
 
@@ -564,6 +587,7 @@ export const SUBCONTRACT_ERRORS: Record<string, string> = {
   invalid_vendor: "選到的廠商不存在或已刪除。",
   invalid_contract: "選到的合約不屬於本專案或已作廢。",
   invalid_company: "選到的公司主體不存在。",
+  company_inactive: "選到的付款公司或收據抬頭已停用，請改選其他公司。",
   delete_reason_required: "移除下包／技師列必須填理由。",
   paid: "已有付款紀錄的期別不能移除或改百分比／覆寫金額。",
   payment_not_removable: "期款列不能移除；要拿掉這期請把百分比改成 0。",
@@ -709,6 +733,7 @@ export function humanizeProjectExtError(err: unknown, fallback: string): string 
   if (msg.includes("invalid_parent")) return "母案不合法（必須是同租戶的主案，且不能是自己）。"
   if (msg.includes("invalid_client")) return "選到的客戶不存在或已刪除。"
   if (msg.includes("invalid_company")) return "選到的承接公司不存在或不屬於本租戶，請重新選擇。"
+  if (msg.includes("company_inactive")) return "選到的承接公司已停用，請改選其他公司。"
   if (msg.includes("code_immutable")) return "專案編號不可變更。"
   if (msg.includes("unknown_discipline")) return "協力技師的科別不在專案設定的科別清單裡。請先到「專案設定 → 科別」新增。"
   if (msg.includes("forbidden_bonus")) return "分潤（獎金池／成員趴數）不在您的權限範圍內。"

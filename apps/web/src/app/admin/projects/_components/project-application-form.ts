@@ -1,4 +1,6 @@
 import type { ShareMode } from "@/lib/projects-api";
+// 相對路徑：vitest 沒設 `@/` 別名，純函式測試要能直接載入這支檔案。
+import { defaultActiveCompanyId } from "../../../../lib/company-options";
 import type {
   BillingKind,
   CreateProjectExtBody,
@@ -112,20 +114,26 @@ export function emptyProjectApplicationDraft(
   };
 }
 
-/** 承接公司下拉可選的項目只需要這兩個欄位（名冊 → 公司主體）。 */
+/** 承接公司下拉可選的項目只需要這幾個欄位（名冊 → 公司主體）。`isActive` 缺值當啟用。 */
 export interface CompanyOption {
   id: string;
   isDefault: boolean;
+  isActive?: boolean;
 }
 
-/** 承接公司的預設選項：isDefault 那間；沒有任何一間標預設時取第一間；沒有公司回 ""。 */
+/**
+ * 承接公司的預設選項（新表單）：啟用公司裡 isDefault 那間；沒有標預設時取第一間啟用的；沒有可選的回 ""。
+ * 停用的公司不會被當預設（預設公司本來就不能停用；名冊裡排第一的也可能是停用的，要跳過）。
+ */
 export function defaultCompanyIdOf(companies: readonly CompanyOption[]): string {
-  return (companies.find((company) => company.isDefault) ?? companies[0])?.id ?? "";
+  return defaultActiveCompanyId(companies);
 }
 
 /**
  * 下拉實際顯示／送出的公司：使用者選過的（且還在名冊裡）優先，否則預設公司。
  * 草稿的 companyId 留 ""（＝沒動過），名冊晚一點才載入也不會卡在空值。
+ * 編輯既有專案時，專案上已存的公司就算已停用也算「選過的」——保留它，不要悄悄換成預設公司
+ * （選項怎麼列見 lib/company-options.ts 的 companyOptions）。
  */
 export function selectedCompanyId(chosen: string, companies: readonly CompanyOption[]): string {
   return chosen && companies.some((company) => company.id === chosen) ? chosen : defaultCompanyIdOf(companies);

@@ -3,6 +3,7 @@
 import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import { VendorCombo } from "@/components/VendorCombo";
 import type { Vendor } from "@/lib/company-api";
+import { companyOptions } from "@/lib/company-options";
 import { DOC_TYPE_LABELS, isOurContract, type Contract } from "@/lib/projects-api";
 import {
   updateProjectFields,
@@ -55,7 +56,7 @@ interface ApplicationFieldsCardProps {
   setAppSavedAt: Setter<number | null>;
   contracts: Contract[];
   vendors: Vendor[];
-  /** 名冊 → 公司主體：「承接公司」下拉的選項（申請單左上角那間公司）。 */
+  /** 名冊 → 公司主體：「承接公司」下拉的選項（申請單左上角那間公司）；已停用的只在這案原本就選它時才列。 */
   companies: Company[];
   canFinance: boolean;
   /** W8：協力技師的科別欄位（租戶設定 `project_settings.disciplines`），由 page.tsx 傳入。 */
@@ -138,6 +139,8 @@ export function ApplicationFieldsCard({
   }
 
   const latestDoc = latestDocumentOf(contracts);
+  // 承接公司下拉：啟用的公司＋這案目前選的公司（已停用的話標「（已停用）」，不要悄悄換成別間）。
+  const companyChoices = companyOptions(companies, appForm.companyId, { markDefault: true });
 
   return (
     <Card>
@@ -149,13 +152,13 @@ export function ApplicationFieldsCard({
             className={inputCls}
             value={selectedCompanyId(appForm.companyId, companies)}
             onChange={(e) => setAppForm((f) => f && { ...f, companyId: e.target.value })}
-            disabled={companies.length === 0}
+            disabled={companyChoices.length === 0}
           >
-            {companies.length === 0 ? (
+            {companyChoices.length === 0 ? (
               <option value="">尚未設定公司主體</option>
             ) : (
-              companies.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}{c.isDefault ? "（預設）" : ""}</option>
+              companyChoices.map((option) => (
+                <option key={option.id} value={option.id}>{option.label}</option>
               ))
             )}
           </select>

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton, Segmented, inputCls, labelCls } from "@/components/admin-ui";
 import { listVendors, type Vendor } from "@/lib/company-api";
+import { defaultActiveCompanyId } from "@/lib/company-options";
 import { listCompanies, type Company } from "@/lib/projects-ext-api";
 import { listProjects } from "@/lib/projects-api";
 import DisbursementForm, { allocRowFromPayable, type DisbursementFormInitial, type ProjectOption } from "@/components/DisbursementForm";
@@ -164,7 +165,8 @@ export default function DisbursementsPage() {
     const chosen = group.rows.filter((r) => selected[r.subcontractPaymentId]);
     if (chosen.length === 0) return;
     const vendor = group.vendorId ? vendors.find((v) => v.id === group.vendorId) : undefined;
-    const defaultCompany = companies.find((c) => c.isDefault) ?? companies[0];
+    // 新放款單的付款公司預設選啟用的預設公司（已停用的公司不會被當預設）。
+    const defaultCompanyId = defaultActiveCompanyId(companies);
     setFormInitial({
       // 沒有 vendorId（名冊沒建檔的廠商）就不能存成 payeeKind:'vendor'（後端會回
       // invalid_vendor），改預設「其他」，逼使用者在表單裡自己選一個真廠商或確認用其他收款方。
@@ -173,7 +175,7 @@ export default function DisbursementsPage() {
       payeeName: group.vendorName,
       payeeBankName: vendor?.bankName ?? null,
       payeeBankAccount: vendor?.bankAccount ?? null,
-      payingCompanyId: defaultCompany?.id ?? null,
+      payingCompanyId: defaultCompanyId || null,
       amount: chosen.reduce((s, r) => s + r.netAmount, 0),
       withheldAmount: chosen.reduce((s, r) => s + r.withheldAmount, 0),
       allocations: chosen.map(allocRowFromPayable),
@@ -185,8 +187,7 @@ export default function DisbursementsPage() {
   }
 
   function openCreateBlank() {
-    const defaultCompany = companies.find((c) => c.isDefault) ?? companies[0];
-    setFormInitial({ payeeKind: "vendor", payingCompanyId: defaultCompany?.id ?? null, status: "draft", allocations: [] });
+    setFormInitial({ payeeKind: "vendor", payingCompanyId: defaultActiveCompanyId(companies) || null, status: "draft", allocations: [] });
     setSaveError(null);
     setAcceptanceBlocked(false);
     setFormOpen(true);
