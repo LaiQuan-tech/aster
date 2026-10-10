@@ -400,6 +400,13 @@
       "when": 1791300775424,
       "tag": "0056_employee_bank_client_short_project_company",
       "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1791610848932,
+      "tag": "0057_company_active",
+      "breakpoints": true
     }
   ]
 }

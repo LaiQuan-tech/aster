@@ -23,6 +23,8 @@ export const companies = pgTable(
     bankName: text("bank_name"),
     bankAccount: text("bank_account"),
     isDefault: boolean("is_default").notNull().default(false),
+    /** 停用＝新單據的下拉不再出現，舊紀錄照常顯示；預設公司不可停用（DB CHECK）。 */
+    isActive: boolean("is_active").notNull().default(true),
     note: text("note"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
