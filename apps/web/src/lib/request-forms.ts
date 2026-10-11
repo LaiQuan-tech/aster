@@ -83,8 +83,9 @@ export const REASON_MAX = 250;
 /** API 錯誤碼 → 中文（找不到的碼由呼叫端退回 attendance-sheets-api 的 friendlyError）。 */
 export const REQUEST_ERROR_MESSAGES: Record<string, string> = {
   no_approver_available: "找不到可簽核的主管，請聯絡 HR 設定簽核流程",
-  proxy_filing_requires_hr: "只有 HR 可以代同仁申請",
-  target_employee_not_found: "找不到這位同仁",
+  // 代為申請功能已移除：API 對「代申請欄位且對象非本人」回 400。新版頁面不會送這個欄位，
+  // 這條只是保底（舊版頁面還開著時走的是舊程式碼，看不到這句）。
+  filing_on_behalf_removed: "代為申請功能已移除，申請單只能以本人身分送出，請重新整理頁面後再試",
   attachment_required: "此假別需要附上憑證",
   not_pending: "這張申請已不是待簽核狀態",
   not_found: "找不到這張申請",
@@ -102,8 +103,6 @@ export function requestErrorCode(err: unknown): string | null {
 
 interface CommonFormValues {
   reason: string;
-  /** HR 代同仁申請；空字串／undefined ＝ 本人。 */
-  onBehalfOfEmployeeId?: string;
 }
 
 export interface LeaveFormValues extends CommonFormValues {
@@ -206,11 +205,6 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-function proxy(values: CommonFormValues): string | undefined {
-  const id = (values.onBehalfOfEmployeeId ?? "").trim();
-  return id ? id : undefined;
-}
-
 /* ------------------------------------------------------- buildCreateBody --- */
 
 function buildLeave(form: LeaveFormValues): BuildResult {
@@ -239,8 +233,6 @@ function buildLeave(form: LeaveFormValues): BuildResult {
   const leaveTypeId = (form.leaveTypeId ?? "").trim();
   if (leaveTypeId) body.leaveTypeId = leaveTypeId;
   if (reason) body.reason = reason;
-  const behalf = proxy(form);
-  if (behalf) body.onBehalfOfEmployeeId = behalf;
   return body;
 }
 
@@ -260,8 +252,6 @@ function buildFixPunch(form: FixPunchFormValues): BuildResult {
     reason,
     segments: [{ date: form.date, startTime: time, endTime: time, hours: 0, type: form.type }],
   };
-  const behalf = proxy(form);
-  if (behalf) body.onBehalfOfEmployeeId = behalf;
   return body;
 }
 
@@ -298,8 +288,6 @@ function buildOvertime(form: OvertimeFormValues): BuildResult {
     reason,
     payout,
   };
-  const behalf = proxy(form);
-  if (behalf) body.onBehalfOfEmployeeId = behalf;
   return body;
 }
 
@@ -358,8 +346,6 @@ function buildTrip(form: TripFormValues): BuildResult {
   if (reason) body.reason = reason;
   if (estimatedCost != null && estimatedCost >= 0) body.estimatedCost = estimatedCost;
   if (advanceRequested != null) body.advanceRequested = advanceRequested;
-  const behalf = proxy(form);
-  if (behalf) body.onBehalfOfEmployeeId = behalf;
   return body;
 }
 
@@ -377,8 +363,6 @@ function buildPettyCash(form: PettyCashFormValues, now: Date): BuildResult {
     reason,
     advanceRequested: amount,
   };
-  const behalf = proxy(form);
-  if (behalf) body.onBehalfOfEmployeeId = behalf;
   return body;
 }
 
@@ -406,8 +390,6 @@ export function buildWfhBody(form: WfhFormValues): BuildResult {
   };
   if (hours != null) body.hours = hours;
   if (reason) body.reason = reason;
-  const behalf = proxy(form);
-  if (behalf) body.onBehalfOfEmployeeId = behalf;
   return body;
 }
 

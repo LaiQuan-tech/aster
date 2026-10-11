@@ -3,9 +3,10 @@
 /**
  * 請假／申請 `/ess/requests?kind=…&date=…&id=…`
  *
- * 由上而下：①種類切換（請假｜補卡｜加班｜在家｜公出｜預支）②該種類的表單卡（只顯示該種類欄位；
- * HR 另有收合的「代同仁申請」）③送出後成功畫面取代表單（等待誰簽核＋摘要＋再填一張／查看我的申請）
+ * 由上而下：①種類切換（請假｜補卡｜加班｜在家｜公出｜預支）②該種類的表單卡（只顯示該種類欄位）
+ * ③送出後成功畫面取代表單（等待誰簽核＋摘要＋再填一張／查看我的申請）
  * ④「我的申請」清單（`GET /requests?scope=mine`）。
+ * 申請人一律是登入者本人（沒有代為申請；API 對代申請欄位且對象非本人回 400 filing_on_behalf_removed）。
  *
  * 送出流程：`createRequest(body)` → 逐檔 `uploadAttachment` → `invalidateEssState()` → 成功畫面 → 列表重載。
  * 純函式（時數規則、body 組裝、清單文案）在 `@/lib/leave-hours` 與 `@/lib/request-forms`，有單元測試。
@@ -43,7 +44,7 @@ import { PettyCashForm } from "./_components/PettyCashForm";
 import { SubmitSuccess } from "./_components/SubmitSuccess";
 import { TripForm } from "./_components/TripForm";
 import { WfhForm } from "./_components/WfhForm";
-import { describeError, useProxy } from "./_components/form-shared";
+import { describeError } from "./_components/form-shared";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -87,8 +88,7 @@ function RequestsView() {
   const urlId = searchParams.get("id");
   const initialDate = urlDate && DATE_RE.test(urlDate) ? urlDate : todayKey();
 
-  const { isAdmin, me } = useEssState();
-  const proxy = useProxy(isAdmin, me?.id);
+  const { me } = useEssState();
 
   const [kind, setKind] = useState<RequestKind>(isRequestKind(urlKind) ? urlKind : "leave");
   // 外部改了網址（例如通知深連結）就跟著切；本頁自己切換時已先 setKind，這裡不會再觸發。
@@ -198,7 +198,7 @@ function RequestsView() {
     [loadRequests],
   );
 
-  const common = { initialDate, submitting, submitError, onSubmit: submit, proxy };
+  const common = { initialDate, submitting, submitError, onSubmit: submit };
 
   function renderForm() {
     switch (kind) {

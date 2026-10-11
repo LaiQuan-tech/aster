@@ -4,6 +4,7 @@ import {
   KIND_LABEL,
   KIND_ORDER,
   KIND_SHORT,
+  REQUEST_ERROR_MESSAGES,
   approvalLine,
   balanceBucketFor,
   buildCreateBody,
@@ -101,19 +102,17 @@ describe("buildCreateBody（六種 kind）", () => {
     expect(body).not.toHaveProperty("payout");
   });
 
-  it("請假：沒有假別清單時省略 leaveTypeId；空事由省略；HR 代申請帶 onBehalfOfEmployeeId；夜班跨日 endAt 落隔日", () => {
+  it("請假：沒有假別清單時省略 leaveTypeId；空事由省略；夜班跨日 endAt 落隔日", () => {
     const body = ok(
       buildCreateBody("leave", {
         leaveTypeId: "",
         segments: [{ date: "2026-09-18", startTime: "22:00", endTime: "06:00", hours: 7 }],
         hours: 7,
         reason: "   ",
-        onBehalfOfEmployeeId: "22222222-2222-2222-2222-222222222222",
       }),
     );
     expect(body).not.toHaveProperty("leaveTypeId");
     expect(body).not.toHaveProperty("reason");
-    expect(body.onBehalfOfEmployeeId).toBe("22222222-2222-2222-2222-222222222222");
     expect(at(body.endAt)).toBe(local("2026-09-19T06:00:00"));
   });
 
@@ -206,18 +205,16 @@ describe("buildCreateBody（六種 kind）", () => {
     expect(body).not.toHaveProperty("onBehalfOfEmployeeId");
   });
 
-  it("在家工作：填了時數就帶（四捨五入 2 位）；HR 代申請帶 onBehalfOfEmployeeId", () => {
+  it("在家工作：填了時數就帶（四捨五入 2 位）；空事由省略", () => {
     const body = ok(
       buildCreateBody("wfh", {
         ...WFH,
         hours: "6.755",
         reason: "",
-        onBehalfOfEmployeeId: "22222222-2222-2222-2222-222222222222",
       }),
     );
     expect(body.hours).toBe(6.76);
     expect(body).not.toHaveProperty("reason");
-    expect(body.onBehalfOfEmployeeId).toBe("22222222-2222-2222-2222-222222222222");
   });
 
   it("在家工作：日期不合法／迄早於起／時數 0 或負數 → error", () => {
@@ -496,5 +493,32 @@ describe("requestTitle / approvalLine / needsAttachment / remainingHours", () =>
     expect(requestErrorCode(new Error("[409] no_approver_available"))).toBe("no_approver_available");
     expect(requestErrorCode(new Error("送出失敗"))).toBe("送出失敗");
     expect(requestErrorCode("x")).toBeNull();
+  });
+});
+
+describe("代申請已移除（申請人一律是登入者本人）", () => {
+  // 代申請欄位已不在表單值型別裡；這裡用 spread 硬塞，模擬呼叫端（舊程式碼）還傳進來。
+  const STALE_PROXY = { onBehalfOfEmployeeId: "22222222-2222-2222-2222-222222222222" };
+
+  it("六種申請：就算呼叫端硬塞 onBehalfOfEmployeeId，送出的 body 也不會帶這個欄位", () => {
+    const bodies = [
+      ok(buildCreateBody("leave", { ...LEAVE, ...STALE_PROXY })),
+      ok(buildCreateBody("fix_punch", { ...FIX, ...STALE_PROXY })),
+      ok(buildCreateBody("ot", { ...OT, ...STALE_PROXY })),
+      ok(buildCreateBody("business_trip", { ...TRIP, ...STALE_PROXY })),
+      ok(buildCreateBody("petty_cash", { ...PETTY, ...STALE_PROXY })),
+      ok(buildCreateBody("wfh", { ...WFH, ...STALE_PROXY })),
+    ];
+    expect(bodies.map((body) => body.kind)).toEqual(["leave", "fix_punch", "ot", "business_trip", "petty_cash", "wfh"]);
+    for (const body of bodies) {
+      expect(body).not.toHaveProperty("onBehalfOfEmployeeId");
+      expect(JSON.stringify(body)).not.toContain(STALE_PROXY.onBehalfOfEmployeeId);
+    }
+  });
+
+  it("API 的 filing_on_behalf_removed 有中文保底訊息；舊的兩個代申請錯誤碼已拿掉", () => {
+    expect(REQUEST_ERROR_MESSAGES.filing_on_behalf_removed).toContain("代為申請功能已移除");
+    expect(REQUEST_ERROR_MESSAGES).not.toHaveProperty("proxy_filing_requires_hr");
+    expect(REQUEST_ERROR_MESSAGES).not.toHaveProperty("target_employee_not_found");
   });
 });

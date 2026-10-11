@@ -18,16 +18,7 @@ import {
   type ShiftLike,
 } from "@/lib/leave-hours";
 import { buildCreateBody, describeBody, isBuildError, remainingHours } from "@/lib/request-forms";
-import {
-  AttachmentField,
-  ProxyPicker,
-  ReasonField,
-  SubmitBar,
-  SummaryLine,
-  proxyTarget,
-  validateFiles,
-  type FormCommonProps,
-} from "./form-shared";
+import { AttachmentField, ReasonField, SubmitBar, SummaryLine, validateFiles, type FormCommonProps } from "./form-shared";
 import { useLeaveCalendar } from "./use-leave-calendar";
 
 type DateMode = "single" | "range";
@@ -64,7 +55,6 @@ export function LeaveForm({
   submitting,
   submitError,
   onSubmit,
-  proxy,
 }: LeaveFormProps) {
   const ids = { type: useId(), start: useId(), end: useId(), cStart: useId(), cEnd: useId() };
   const [leaveTypeId, setLeaveTypeId] = useState("");
@@ -84,10 +74,8 @@ export function LeaveForm({
   }, [leaveTypes, leaveTypeId]);
 
   const effectiveEnd = mode === "range" ? endDate : startDate;
-  const isProxy = proxy.enabled && proxy.expanded;
-  // 班表只抓申請人的：本人 → scope=mine；代同仁申請且已選人 → 該同仁（見 use-leave-calendar）。
-  const proxyEmployeeId = isProxy && proxy.value ? proxy.value : null;
-  const calendar = useLeaveCalendar(startDate, effectiveEnd, shifts, employeeId, proxyEmployeeId);
+  // 班表只抓本人的（scope=mine，見 use-leave-calendar）。
+  const calendar = useLeaveCalendar(startDate, effectiveEnd, shifts, employeeId);
 
   // 自訂時段的預設值＝當天班別的起訖（使用者沒改過才跟著班別走）。
   const startShift = calendar.shiftByDate[startDate] ?? defaultShift;
@@ -112,7 +100,7 @@ export function LeaveForm({
   const selectedType = leaveTypes?.find((lt) => lt.id === leaveTypeId) ?? null;
   const requiresAttachment = selectedType?.requiresAttachment === true;
   // 餘額桶依到職週年切期間，所以要用「申請起日」去找桶，跨週年期的單才算得對。
-  const remaining = leaveTypeId && !isProxy ? remainingHours(balances, leaveTypeId, startDate) : null;
+  const remaining = leaveTypeId ? remainingHours(balances, leaveTypeId, startDate) : null;
   const overBalance = remaining != null && !result.error && result.totalHours > remaining;
   const skippedReasons = Array.from(new Set(result.skipped.map((s) => skipReasonLabel(s.reason)))).join("／");
 
@@ -136,14 +124,11 @@ export function LeaveForm({
     if (requiresAttachment && files.length === 0) return setLocalError("此假別需要附上憑證");
     const fileError = validateFiles(files);
     if (fileError) return setLocalError(fileError);
-    const target = proxyTarget(proxy);
-    if ("error" in target) return setLocalError(target.error);
     const body = buildCreateBody("leave", {
       leaveTypeId,
       segments: result.segments,
       hours: result.totalHours,
       reason,
-      onBehalfOfEmployeeId: target.onBehalfOfEmployeeId,
     });
     if (isBuildError(body)) return setLocalError(body.error);
     const summary = `${selectedType?.name ?? "請假"} · ${describeBody(body, { shift: defaultShift })}`;
@@ -152,8 +137,6 @@ export function LeaveForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4" noValidate>
-      <ProxyPicker proxy={proxy} />
-
       <Field label="假別" required htmlFor={ids.type}>
         {leaveTypes === null ? (
           <Select id={ids.type} disabled>
@@ -269,7 +252,7 @@ export function LeaveForm({
           </SummaryLine>
         )}
         {result.warning && <SummaryLine tone="amber">{result.warning}</SummaryLine>}
-        {leaveTypeId && !isProxy && (
+        {leaveTypeId && (
           <SummaryLine>{remaining == null ? "此假別尚未設定額度" : `剩餘 ${fmtHours(Math.max(0, remaining))}`}</SummaryLine>
         )}
         {overBalance && <SummaryLine tone="red">申請時數超過剩餘額度</SummaryLine>}

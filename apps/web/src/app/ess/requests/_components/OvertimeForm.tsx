@@ -8,7 +8,7 @@ import { useId, useState, type FormEvent } from "react";
 import { Field, Input, Segmented } from "@/components/ess-ui";
 import { fmtHours } from "@/lib/ess-format";
 import { PAYOUT_LABEL, buildCreateBody, describeBody, isBuildError, overtimeHours } from "@/lib/request-forms";
-import { ProxyPicker, ReasonField, SubmitBar, SummaryLine, proxyTarget, type FormCommonProps } from "./form-shared";
+import { ReasonField, SubmitBar, SummaryLine, type FormCommonProps } from "./form-shared";
 
 type Payout = "pay" | "comp_time";
 
@@ -17,7 +17,7 @@ const PAYOUT_OPTIONS: { value: Payout; label: string }[] = [
   { value: "comp_time", label: PAYOUT_LABEL.comp_time },
 ];
 
-export function OvertimeForm({ initialDate, submitting, submitError, onSubmit, proxy }: FormCommonProps) {
+export function OvertimeForm({ initialDate, submitting, submitError, onSubmit }: FormCommonProps) {
   const ids = { date: useId(), start: useId(), end: useId(), brk: useId() };
   const [date, setDate] = useState(initialDate);
   const [startTime, setStartTime] = useState("18:00");
@@ -33,8 +33,6 @@ export function OvertimeForm({ initialDate, submitting, submitError, onSubmit, p
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setLocalError(null);
-    const target = proxyTarget(proxy);
-    if ("error" in target) return setLocalError(target.error);
     const body = buildCreateBody("ot", {
       date,
       startTime,
@@ -42,7 +40,6 @@ export function OvertimeForm({ initialDate, submitting, submitError, onSubmit, p
       breakMinutes,
       payout,
       reason,
-      onBehalfOfEmployeeId: target.onBehalfOfEmployeeId,
     });
     if (isBuildError(body)) return setLocalError(body.error);
     await onSubmit(body, [], `加班 · ${describeBody(body)}`);
@@ -50,8 +47,6 @@ export function OvertimeForm({ initialDate, submitting, submitError, onSubmit, p
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4" noValidate>
-      <ProxyPicker proxy={proxy} />
-
       <Field label="日期" required htmlFor={ids.date}>
         <Input
           id={ids.date}

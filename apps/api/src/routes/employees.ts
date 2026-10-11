@@ -165,7 +165,7 @@ function wantsProfileExtras(query: Request["query"]): boolean {
  * 薪資作業頁是第二個使用者：關鍵字搜尋與員工下拉下方的「證件號碼」原本是每位員工各打一次
  * GET /employees/:empId/profile 組出來的（1+N 個請求，業主反映後台頁面慢），改成這裡一次帶回。
  *   - **opt-in**：不帶 include 的回應跟以前完全一樣。後台其他二十幾個頁面與 ESS 的人員挑選
- *     （代同仁申請、KPI 考核者姓名）都只是拿這支 GET 對照姓名，它們不會也不該順便拿到全員個資；
+ *     （KPI 考核者姓名）都只是拿這支 GET 對照姓名，它們不會也不該順便拿到全員個資；
  *     只有員工管理頁與薪資作業頁帶 `?include=profile`。
  *   - **只有財務層回得出去**：路由層已有 requireFinance；handler 內再以 isFinanceRole 判一次
  *     （縱深防禦——日後有人把路由放寬成「全員可列同事」，個資欄位仍然不外流）。非財務層帶了

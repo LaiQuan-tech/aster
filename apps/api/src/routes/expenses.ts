@@ -40,7 +40,10 @@ const claimSchema = z.object({
   /** 省略時由 incurredOn 推導（發生月）。遲交的單可明確指定歸屬期。 */
   period: z.string().regex(periodRe).optional(),
   note: z.string().trim().max(250).optional(),
-  /** HR 代填；非 HR 給了會 403。 */
+  /**
+   * 代填已移除（2026-10-11，與 POST /requests 的代申請一起）。欄位留在 schema 只為了偵測：
+   * 對象不是本人 → 400 filing_on_behalf_removed（不分角色）；是本人或沒帶 → 照常。
+   */
   onBehalfOfEmployeeId: z.string().uuid().optional(),
   /**
    * 綁定的出差單（模組三第 2 條）。類別的 `requires_trip_approval` 為 true
@@ -252,11 +255,17 @@ expensesRouter.post(
         res.status(403).json({ error: "not_an_employee" })
         return
       }
-      if (parsed.data.onBehalfOfEmployeeId && !isFinance(self.role)) {
-        res.status(403).json({ error: "hr_admin_required" })
+      // 代填已移除：對象不是本人 → 一律 400（不分角色；舊版頁面不能把單默默記到填單人自己名下）。
+      // 對象就是本人（uuid 不分大小寫）或沒帶 → 照常；報銷人永遠是 token 的主人。
+      const onBehalf = parsed.data.onBehalfOfEmployeeId
+      if (onBehalf && onBehalf.toLowerCase() !== self.id.toLowerCase()) {
+        res.status(400).json({
+          error: "filing_on_behalf_removed",
+          message: "代為申請功能已移除，申請單只能以本人身分送出",
+        })
         return
       }
-      const employeeId = parsed.data.onBehalfOfEmployeeId ?? self.id
+      const employeeId = self.id
       const period = parsed.data.period ?? parsed.data.incurredOn.slice(0, 7)
 
       if (await periodIsSettled(tenantId, period)) {

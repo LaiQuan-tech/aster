@@ -9,7 +9,7 @@ import { useId, useState, type FormEvent } from "react";
 import { Field, Input, Segmented, Select } from "@/components/ess-ui";
 import { fmtMoney } from "@/lib/ess-format";
 import { TRIP_SCOPE_LABEL, TRIP_TYPE_LABEL, buildCreateBody, describeBody, isBuildError } from "@/lib/request-forms";
-import { ProxyPicker, ReasonField, SubmitBar, proxyTarget, type FormCommonProps } from "./form-shared";
+import { ReasonField, SubmitBar, type FormCommonProps } from "./form-shared";
 
 type TripType = "outing" | "business_trip";
 type TripScope = "local" | "domestic_intercity" | "overseas";
@@ -26,7 +26,7 @@ export interface TripFormProps extends FormCommonProps {
   advanceThreshold: number | null;
 }
 
-export function TripForm({ advanceThreshold, initialDate, submitting, submitError, onSubmit, proxy }: TripFormProps) {
+export function TripForm({ advanceThreshold, initialDate, submitting, submitError, onSubmit }: TripFormProps) {
   const ids = { date: useId(), start: useId(), end: useId(), sDate: useId(), eDate: useId(), scope: useId(), loc: useId(), cost: useId(), adv: useId() };
   const [tripType, setTripType] = useState<TripType>("outing");
   const [date, setDate] = useState(initialDate);
@@ -50,8 +50,6 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setLocalError(null);
-    const target = proxyTarget(proxy);
-    if ("error" in target) return setLocalError(target.error);
     const body = buildCreateBody("business_trip", {
       tripType,
       date,
@@ -65,7 +63,6 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
       advanceWanted,
       advanceRequested,
       reason,
-      onBehalfOfEmployeeId: target.onBehalfOfEmployeeId,
     });
     if (isBuildError(body)) return setLocalError(body.error);
     await onSubmit(body, [], `${TRIP_TYPE_LABEL[tripType]} · ${describeBody(body)}`);
@@ -73,8 +70,6 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4" noValidate>
-      <ProxyPicker proxy={proxy} />
-
       <Segmented<TripType>
         aria-label="公出或出差"
         options={TYPE_OPTIONS}

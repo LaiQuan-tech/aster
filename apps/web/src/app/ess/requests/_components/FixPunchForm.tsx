@@ -8,7 +8,7 @@ import { useId, useState, type FormEvent } from "react";
 import { Field, Input, Segmented } from "@/components/ess-ui";
 import { normalizeHm, type ShiftLike } from "@/lib/leave-hours";
 import { PUNCH_TYPE_LABEL, buildCreateBody, describeBody, isBuildError } from "@/lib/request-forms";
-import { ProxyPicker, ReasonField, SubmitBar, proxyTarget, type FormCommonProps } from "./form-shared";
+import { ReasonField, SubmitBar, type FormCommonProps } from "./form-shared";
 
 type PunchType = "in" | "out";
 
@@ -22,7 +22,7 @@ export interface FixPunchFormProps extends FormCommonProps {
   defaultShift: ShiftLike;
 }
 
-export function FixPunchForm({ defaultShift, initialDate, submitting, submitError, onSubmit, proxy }: FixPunchFormProps) {
+export function FixPunchForm({ defaultShift, initialDate, submitting, submitError, onSubmit }: FixPunchFormProps) {
   const ids = { date: useId(), time: useId() };
   const [date, setDate] = useState(initialDate);
   const [type, setType] = useState<PunchType>("in");
@@ -35,14 +35,11 @@ export function FixPunchForm({ defaultShift, initialDate, submitting, submitErro
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setLocalError(null);
-    const target = proxyTarget(proxy);
-    if ("error" in target) return setLocalError(target.error);
     const body = buildCreateBody("fix_punch", {
       date,
       type,
       time: timeValue,
       reason,
-      onBehalfOfEmployeeId: target.onBehalfOfEmployeeId,
     });
     if (isBuildError(body)) return setLocalError(body.error);
     await onSubmit(body, [], `補卡 · ${describeBody(body)}`);
@@ -50,8 +47,6 @@ export function FixPunchForm({ defaultShift, initialDate, submitting, submitErro
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4" noValidate>
-      <ProxyPicker proxy={proxy} />
-
       <Field label="日期" required htmlFor={ids.date}>
         <Input
           id={ids.date}

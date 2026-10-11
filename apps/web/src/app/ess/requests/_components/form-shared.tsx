@@ -1,16 +1,15 @@
 "use client";
 
 /**
- * 六種申請表單共用的小件：錯誤翻譯、事由欄、附件欄、HR 代同仁申請、送出列。
+ * 六種申請表單共用的小件：錯誤翻譯、事由欄、附件欄、送出列。
  * 表單本身各自一檔（LeaveForm／FixPunchForm／OvertimeForm／TripForm／PettyCashForm／WfhForm），
  * 只顯示該種類的欄位；送出一律交給頁面層的 `onSubmit(body, files, summary)`。
  */
-import { useCallback, useId, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
-import { getEmployees, type Employee } from "@/lib/admin-api";
+import { useId, useRef, type ChangeEvent, type ReactNode } from "react";
 import { friendlyError } from "@/lib/attendance-sheets-api";
 import type { CreateRequestBody } from "@/lib/ess-api";
 import { REASON_MAX, REQUEST_ERROR_MESSAGES, requestErrorCode } from "@/lib/request-forms";
-import { Button, Field, Icon, InlineError, Select, Textarea } from "@/components/ess-ui";
+import { Button, Field, Icon, InlineError, Textarea } from "@/components/ess-ui";
 
 /* ------------------------------------------------------------ 錯誤 --- */
 
@@ -147,90 +146,6 @@ export function ReasonField({
   );
 }
 
-/* ------------------------------------------------- HR 代同仁申請 --- */
-
-export interface ProxyState {
-  /** 是否顯示（isAdmin）。 */
-  enabled: boolean;
-  expanded: boolean;
-  employees: Employee[];
-  loading: boolean;
-  error: string | null;
-  /** 被代申請的員工 id；空字串＝本人。 */
-  value: string;
-  toggle: () => void;
-  setValue: (id: string) => void;
-}
-
-/** HR 才有的「代同仁申請」：收合狀態只顯示一行開關；展開時才抓員工清單（只抓一次）。 */
-export function useProxy(enabled: boolean, selfId: string | null | undefined): ProxyState {
-  const [expanded, setExpanded] = useState(false);
-  const [raw, setRaw] = useState<Employee[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [value, setValue] = useState("");
-  const fetched = useRef(false);
-
-  const toggle = useCallback(() => {
-    setExpanded((prev) => {
-      const next = !prev;
-      if (!next) setValue("");
-      return next;
-    });
-    if (fetched.current) return;
-    fetched.current = true;
-    setLoading(true);
-    getEmployees()
-      .then((res) => setRaw(res.employees ?? []))
-      .catch((err) => setError(describeError(err, "載入員工清單失敗")))
-      .finally(() => setLoading(false));
-  }, []);
-
-  // 自己與已離職的不列；/me 可能比員工清單晚到，所以在 render 期過濾而不是抓回來時。
-  const employees = useMemo(
-    () =>
-      raw
-        .filter((e) => e.id !== selfId && !e.terminated_at && e.status !== "terminated")
-        .sort((a, b) => (a.emp_no ?? "").localeCompare(b.emp_no ?? "") || a.name.localeCompare(b.name, "zh-Hant")),
-    [raw, selfId],
-  );
-
-  return { enabled, expanded, employees, loading, error, value, toggle, setValue };
-}
-
-export function ProxyPicker({ proxy }: { proxy: ProxyState }) {
-  const id = useId();
-  if (!proxy.enabled) return null;
-  return (
-    <div className="rounded-xl border border-dashed border-gray-200 px-3 py-2">
-      <label className="flex min-h-9 cursor-pointer items-center gap-2 text-sm text-gray-700">
-        <input type="checkbox" checked={proxy.expanded} onChange={proxy.toggle} className="h-4 w-4 accent-[var(--brand)]" />
-        代同仁申請（HR）
-      </label>
-      {proxy.expanded && (
-        <div className="mt-2">
-          <Field label="申請人" required htmlFor={id} error={proxy.error ?? undefined} hint="這張單會記在該同仁名下，並走他的簽核流程">
-            <Select id={id} value={proxy.value} onChange={(e) => proxy.setValue(e.target.value)} disabled={proxy.loading}>
-              <option value="">{proxy.loading ? "載入中…" : "請選擇同仁"}</option>
-              {proxy.employees.map((emp) => (
-                <option key={emp.id} value={emp.id}>
-                  {emp.emp_no ? `${emp.emp_no} ${emp.name}` : emp.name}
-                </option>
-              ))}
-            </Select>
-          </Field>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** 代申請已勾但沒選人 → 回錯誤字串；否則回 onBehalfOfEmployeeId（本人＝undefined）。 */
-export function proxyTarget(proxy: ProxyState): { error: string } | { onBehalfOfEmployeeId: string | undefined } {
-  if (proxy.enabled && proxy.expanded && !proxy.value) return { error: "請選擇要代為申請的同仁" };
-  return { onBehalfOfEmployeeId: proxy.enabled && proxy.expanded && proxy.value ? proxy.value : undefined };
-}
-
 /* ------------------------------------------------------------ 送出 --- */
 
 export type SubmitHandler = (body: CreateRequestBody, files: File[], summary: string) => Promise<void>;
@@ -243,7 +158,6 @@ export interface FormCommonProps {
   /** 頁面層（API）錯誤；表單自己的驗證錯誤放各自 state。 */
   submitError: string | null;
   onSubmit: SubmitHandler;
-  proxy: ProxyState;
 }
 
 export function SubmitBar({

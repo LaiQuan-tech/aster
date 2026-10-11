@@ -8,13 +8,13 @@ import { useId, useState, type FormEvent } from "react";
 import { Field, Input } from "@/components/ess-ui";
 import { fmtMoney } from "@/lib/ess-format";
 import { buildCreateBody, describeBody, isBuildError } from "@/lib/request-forms";
-import { ProxyPicker, ReasonField, SubmitBar, proxyTarget, type FormCommonProps } from "./form-shared";
+import { ReasonField, SubmitBar, type FormCommonProps } from "./form-shared";
 
 export interface PettyCashFormProps extends FormCommonProps {
   advanceThreshold: number | null;
 }
 
-export function PettyCashForm({ advanceThreshold, submitting, submitError, onSubmit, proxy }: PettyCashFormProps) {
+export function PettyCashForm({ advanceThreshold, submitting, submitError, onSubmit }: PettyCashFormProps) {
   const amountId = useId();
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
@@ -27,17 +27,13 @@ export function PettyCashForm({ advanceThreshold, submitting, submitError, onSub
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setLocalError(null);
-    const target = proxyTarget(proxy);
-    if ("error" in target) return setLocalError(target.error);
-    const body = buildCreateBody("petty_cash", { amount, reason, onBehalfOfEmployeeId: target.onBehalfOfEmployeeId });
+    const body = buildCreateBody("petty_cash", { amount, reason });
     if (isBuildError(body)) return setLocalError(body.error);
     await onSubmit(body, [], `零用金預支 · ${describeBody(body)}`);
   }
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4" noValidate>
-      <ProxyPicker proxy={proxy} />
-
       <Field
         label="預支金額（元）"
         required

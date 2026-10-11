@@ -5,9 +5,8 @@
  * 與年份行事曆（`GET /calendar?year=`，跨年抓兩年），結果快取在 ref（同一頁不重抓）；
  * 任一支失敗都退化成「沒排班／沒假日」，不擋表單。
  *
- * 班表只抓「這張單的申請人」的：本人 → `scope=mine`（HR 帳號也只回自己的，不再拿全公司
- * 回來前端過濾）；HR 代同仁申請且已選人 → `employeeId=<對象>`。快取 key 含申請人，換人會重抓。
- * 算時數用的列一律比對 employee_id＝申請人：本人 id 還沒載入時不採用任何一列（退回預設班別），
+ * 班表只抓本人的：一律 `scope=mine`（HR 帳號也只回自己的，不再拿全公司回來前端過濾）。
+ * 算時數用的列一律比對 employee_id＝本人：本人 id 還沒載入時不採用任何一列（退回預設班別），
  * 不會拿任意一人的班別算時數。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -38,11 +37,6 @@ function monthEnd(month: string): string {
   return addDays(nextFirst, -1);
 }
 
-/** 班表快取 key：申請人（本人＝self；代申請＝對象 id）＋月份。 */
-function scheduleKey(proxyEmployeeId: string | null, month: string): string {
-  return `${proxyEmployeeId ? `emp:${proxyEmployeeId}` : "self"}|${month}`;
-}
-
 export interface LeaveCalendar {
   shiftByDate: Record<string, ShiftLike | undefined>;
   dayTypeByDate: Record<string, DayType | undefined>;
@@ -54,10 +48,9 @@ export function useLeaveCalendar(
   shifts: Shift[],
   /** 本人 employee id（GET /me；還沒載入＝undefined）。 */
   selfId: string | null | undefined,
-  /** HR 代同仁申請且已選人 → 對象 employee id；本人申請 → null。 */
-  proxyEmployeeId: string | null,
 ): LeaveCalendar {
   const calendarCache = useRef(new Map<number, Record<string, DayType>>());
+  /** key＝月份 `YYYY-MM`。 */
   const scheduleCache = useRef(new Map<string, ScheduleWithEmployee[]>());
   const [version, setVersion] = useState(0);
 
@@ -84,13 +77,12 @@ export function useLeaveCalendar(
     }
 
     for (const month of monthsBetween(validStart, validEnd)) {
-      const key = scheduleKey(proxyEmployeeId, month);
-      if (scheduleCache.current.has(key)) continue;
+      if (scheduleCache.current.has(month)) continue;
       jobs.push(
-        // 本人 → scope=mine；代申請 → employeeId=<對象>（getMySchedules 內組 query）。
-        getMySchedules(`${month}-01`, monthEnd(month), proxyEmployeeId ? { employeeId: proxyEmployeeId } : {})
-          .then((res) => scheduleCache.current.set(key, (res.schedules ?? []) as ScheduleWithEmployee[]))
-          .catch(() => scheduleCache.current.set(key, [])),
+        // 一律 scope=mine（getMySchedules 內組 query）。
+        getMySchedules(`${month}-01`, monthEnd(month))
+          .then((res) => scheduleCache.current.set(month, (res.schedules ?? []) as ScheduleWithEmployee[]))
+          .catch(() => scheduleCache.current.set(month, [])),
       );
     }
 
@@ -101,7 +93,7 @@ export function useLeaveCalendar(
     return () => {
       active = false;
     };
-  }, [validStart, validEnd, proxyEmployeeId]);
+  }, [validStart, validEnd]);
 
   const shiftById = useMemo(() => new Map(shifts.map((s) => [s.id, s] as const)), [shifts]);
 
@@ -109,14 +101,14 @@ export function useLeaveCalendar(
     const shiftByDate: Record<string, ShiftLike | undefined> = {};
     const dayTypeByDate: Record<string, DayType | undefined> = {};
     if (!validStart) return { shiftByDate, dayTypeByDate };
-    // 這張單的申請人；本人 id 還沒載入 → null → 不採用任何班表列（退回預設班別）。
-    const applicantId = proxyEmployeeId || selfId || null;
+    // 本人 id 還沒載入 → null → 不採用任何班表列（退回預設班別）。
+    const applicantId = selfId || null;
     for (const date of listDates(validStart, validEnd)) {
       const year = Number(date.slice(0, 4));
       const dayType = calendarCache.current.get(year)?.[date];
       if (dayType) dayTypeByDate[date] = dayType;
       if (!applicantId) continue;
-      const rows = scheduleCache.current.get(scheduleKey(proxyEmployeeId, date.slice(0, 7))) ?? [];
+      const rows = scheduleCache.current.get(date.slice(0, 7)) ?? [];
       const row = rows.find((r) => r.work_date === date && r.shift_id && r.employee_id === applicantId);
       const shift = row?.shift_id ? shiftById.get(row.shift_id) : undefined;
       if (shift) shiftByDate[date] = shift;
@@ -124,5 +116,5 @@ export function useLeaveCalendar(
     return { shiftByDate, dayTypeByDate };
     // version 是快取版本號：ref 更新後靠它觸發重算。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [version, validStart, validEnd, shiftById, selfId, proxyEmployeeId]);
+  }, [version, validStart, validEnd, shiftById, selfId]);
 }

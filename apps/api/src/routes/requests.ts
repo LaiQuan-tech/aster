@@ -46,7 +46,8 @@ const createSchema = z.object({
   endAt: z.string().datetime(),
   hours: z.number().optional(),
   reason: z.string().trim().min(1).max(250).optional(),
-  // 代申請 (本人/代申請): HR files FOR this employee. Non-HR callers 403.
+  // 代申請已移除（2026-10-11，業主要求員工端不再提供「代同仁申請」）。欄位留在 schema 只為了偵測：
+  // 對象不是本人 → 400 filing_on_behalf_removed（見 POST /requests）；是本人或沒帶 → 照常。
   onBehalfOfEmployeeId: z.string().uuid().optional(),
   // 多段日期 (新增列): individual day segments; hours should be their sum.
   segments: z
@@ -439,7 +440,14 @@ async function notifyApplicant(params: {
  * POST /requests — the authenticated employee files a request for THEMSELVES.
  *
  * The employee_id is always derived from the token (anti-spoofing); any
- * employeeId in the body is ignored. The approval chain is materialised by
+ * employeeId in the body is ignored.
+ *
+ * 代申請已移除（2026-10-11）：body 帶 `onBehalfOfEmployeeId` 且不是本人 → 400
+ * `filing_on_behalf_removed`（不分角色，連 HR 也一樣）；是本人或沒帶 → 照常。刻意不是
+ * 「忽略欄位」：手機上可能還開著舊版頁面，HR 在舊頁面選了同仁送出，若忽略欄位，
+ * 這張單會默默記到 HR 自己名下，沒人知道。
+ *
+ * The approval chain is materialised by
  * services/approval-chain.ts（list 固定名單／manager 直屬主管單關／manager_hr
  * 主管逐級 → HR 覆核）: one approval_steps row per step; a step may carry
  * several candidates (candidate_emp_ids, any one of them may act) with
@@ -489,38 +497,22 @@ requestsRouter.post(
         return
       }
 
-      // 代申請: only HR may file on someone else's behalf; the target must be a
-      // real employee of THIS tenant. The request is then owned by the target
-      // (they see it under 我的申請; approvals notify their chain), while the
-      // anti-spoofing rule for normal users is unchanged.
-      let filedForId = self.id
-      if (onBehalfOfEmployeeId && onBehalfOfEmployeeId !== self.id) {
-        if (!isHrRole(self.role)) {
-          res.status(403).json({ error: "proxy_filing_requires_hr" })
-          return
-        }
-        const { data: target, error: targetErr } = await supabaseAdmin
-          .from("employees")
-          .select("id")
-          .eq("tenant_id", tenantId)
-          .eq("id", onBehalfOfEmployeeId)
-          .maybeSingle()
-        if (targetErr) {
-          next(new Error(`POST /requests (proxy target): ${targetErr.message}`))
-          return
-        }
-        if (!target) {
-          res.status(404).json({ error: "target_employee_not_found" })
-          return
-        }
-        filedForId = onBehalfOfEmployeeId
+      // 代申請已移除：對象不是本人 → 一律 400（不分角色、也不查對象存不存在）。不能只忽略
+      // 欄位——舊版頁面的 HR 選了同仁送出，忽略就會把單默默記到 HR 自己名下。
+      // 對象就是本人（uuid 不分大小寫）或沒帶 → 照常；申請人永遠是 token 的主人。
+      if (onBehalfOfEmployeeId && onBehalfOfEmployeeId.toLowerCase() !== self.id.toLowerCase()) {
+        res.status(400).json({
+          error: "filing_on_behalf_removed",
+          message: "代為申請功能已移除，申請單只能以本人身分送出",
+        })
+        return
       }
 
       // Resolve the approver chain for this kind (services/approval-chain.ts):
       // 固定名單／直屬主管／主管逐級＋HR 覆核 → 老闆（tenant features）→ 第一位 hr_admin → 409。
       // W2：跨縣市／海外出差改查 'business_trip_intercity' flow，且老闆必須是最後一關。
       const { flowKind, requireBossFinal } = flowRouteFor(kind, kind === "business_trip" ? (tripScope ?? null) : null)
-      const chain = await resolveApproverChain(tenantId, kind, filedForId, { flowKind, requireBossFinal })
+      const chain = await resolveApproverChain(tenantId, kind, self.id, { flowKind, requireBossFinal })
       if (!chain.ok) {
         // No approver can be determined — refuse rather than create a request
         // nobody can ever action.
@@ -543,7 +535,7 @@ requestsRouter.post(
           const tz = await getTenantTimezone(tenantId)
           const period = localDateKey(startAt, tz).slice(0, 7)
           const { rules } = await loadRuleConfigFor(tenantId, period)
-          const before = await otMinutesInPeriod(tenantId, filedForId, period, { statuses: ["approved", "pending"] })
+          const before = await otMinutesInPeriod(tenantId, self.id, period, { statuses: ["approved", "pending"] })
           beyondCap = beyondCapCheck({
             approvedBeforeMinutes: before.approvedMinutes,
             pendingBeforeMinutes: before.pendingMinutes,
@@ -551,7 +543,7 @@ requestsRouter.post(
             capMinutes: capMinutesFor(rules),
           })
         } catch (capErr) {
-          logger.warn({ err: capErr, tenantId, employeeId: filedForId }, "POST /requests: beyond-cap check failed")
+          logger.warn({ err: capErr, tenantId, employeeId: self.id }, "POST /requests: beyond-cap check failed")
           beyondCap = null
         }
       }
@@ -562,7 +554,7 @@ requestsRouter.post(
         .from("leave_requests")
         .insert({
           tenant_id: tenantId,
-          employee_id: filedForId,
+          employee_id: self.id,
           kind,
           leave_type_id: leaveTypeId ?? null,
           start_at: startAt,
@@ -627,13 +619,13 @@ requestsRouter.post(
       // 通知第 1 關簽核者（best-effort：入列失敗只記 log，不影響 201）。
       let notified = 0
       try {
-        const ctx = await loadRequestContext(tenantId, filedForId, leaveTypeId ?? null)
+        const ctx = await loadRequestContext(tenantId, self.id, leaveTypeId ?? null)
         notified = await notifyStepApprover({
           tenantId,
           lr: {
             id: requestId,
             kind,
-            employee_id: filedForId,
+            employee_id: self.id,
             leave_type_id: leaveTypeId ?? null,
             start_at: startAt,
             end_at: endAt,

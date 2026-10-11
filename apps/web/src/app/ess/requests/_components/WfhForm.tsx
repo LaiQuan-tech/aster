@@ -10,9 +10,9 @@
 import { useId, useState, type FormEvent } from "react";
 import { Field, Input } from "@/components/ess-ui";
 import { buildCreateBody, describeBody, isBuildError } from "@/lib/request-forms";
-import { ProxyPicker, ReasonField, SubmitBar, SummaryLine, proxyTarget, type FormCommonProps } from "./form-shared";
+import { ReasonField, SubmitBar, SummaryLine, type FormCommonProps } from "./form-shared";
 
-export function WfhForm({ initialDate, submitting, submitError, onSubmit, proxy }: FormCommonProps) {
+export function WfhForm({ initialDate, submitting, submitError, onSubmit }: FormCommonProps) {
   const ids = { sDate: useId(), eDate: useId(), hours: useId() };
   const [startDate, setStartDate] = useState(initialDate);
   const [endDate, setEndDate] = useState(initialDate);
@@ -25,14 +25,11 @@ export function WfhForm({ initialDate, submitting, submitError, onSubmit, proxy 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setLocalError(null);
-    const target = proxyTarget(proxy);
-    if ("error" in target) return setLocalError(target.error);
     const body = buildCreateBody("wfh", {
       startDate,
       endDate,
       hours,
       reason,
-      onBehalfOfEmployeeId: target.onBehalfOfEmployeeId,
     });
     if (isBuildError(body)) return setLocalError(body.error);
     await onSubmit(body, [], `在家工作 · ${describeBody(body)}`);
@@ -40,8 +37,6 @@ export function WfhForm({ initialDate, submitting, submitError, onSubmit, proxy 
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4" noValidate>
-      <ProxyPicker proxy={proxy} />
-
       <div className="grid grid-cols-2 gap-3">
         <Field label="開始日期" required htmlFor={ids.sDate}>
           <Input

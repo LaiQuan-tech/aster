@@ -223,7 +223,7 @@ export interface LeaveSegment {
   hours: number;
   /**
    * 補卡（fix_punch）用：補的是哪一種卡；其他種類不帶。ESS 表單只送 in／out，
-   * 但 API 也收休息／外出對（後台代申請、匯入），顯示端要全部認得。
+   * 但 API 也收休息／外出對（匯入），顯示端要全部認得。
    */
   type?: PunchSegmentType;
 }
@@ -235,7 +235,6 @@ export interface CreateRequestBody {
   endAt: string;
   hours?: number;
   reason?: string;
-  onBehalfOfEmployeeId?: string;
   segments?: LeaveSegment[];
   // 表單延伸欄位
   agentName?: string;
@@ -303,16 +302,14 @@ export interface ScheduleRow {
 }
 
 /**
- * GET /schedules（ESS 專用）。預設帶 `scope=mine`：HR 帳號在員工端也只拿自己的班表
- * （「確認／異議」按鈕才不會動到別人的班）。只有 HR「代同仁申請」算請假時數時傳
- * `employeeId`：改送 employeeId、不送 scope（API 對非 HR 一律忽略 employeeId、只回本人）。
+ * GET /schedules（ESS 專用）。一律帶 `scope=mine`：HR 帳號在員工端也只拿自己的班表
+ * （「確認／異議」按鈕才不會動到別人的班）。
  */
-export function getMySchedules(from?: string, to?: string, opts: { employeeId?: string } = {}) {
+export function getMySchedules(from?: string, to?: string) {
   const params = new URLSearchParams();
   if (from) params.set("from", from);
   if (to) params.set("to", to);
-  if (opts.employeeId) params.set("employeeId", opts.employeeId);
-  else params.set("scope", "mine");
+  params.set("scope", "mine");
   return apiFetch<{ schedules: ScheduleRow[] }>(`/schedules?${params.toString()}`);
 }
 

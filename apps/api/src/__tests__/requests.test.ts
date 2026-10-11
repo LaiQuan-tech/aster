@@ -735,8 +735,11 @@ describe("F3 打卡補登 — POST /punch/manual (HR only)", () => {
   })
 })
 
-describe("F4 代申請 + 多段日期 (gap A/C)", () => {
-  it("HR files a leave ON BEHALF of emp1 with segments → owned by emp1", async () => {
+describe("F4 多段日期 + 代申請已移除 (gap A/C)", () => {
+  // 2026-10-11 業主要求員工端移除「代同仁申請」：onBehalfOfEmployeeId 對象不是本人 → 一律 400
+  // filing_on_behalf_removed（不分角色）；是本人或沒帶 → 照常。純測試見 filing-on-behalf-removed.test.ts；
+  // 這裡是打真 DB 的版本（舊的 HR 代申請 201／一般員工 403／不存在 404 三個案例改成新行為）。
+  it("employee files a multi-day leave with segments → owned by the employee", async () => {
     await request(app)
       .put("/approval-flows/leave")
       .set("Authorization", `Bearer ${A.adminToken}`)
@@ -744,11 +747,10 @@ describe("F4 代申請 + 多段日期 (gap A/C)", () => {
 
     const filed = await request(app)
       .post("/requests")
-      .set("Authorization", `Bearer ${A.adminToken}`)
+      .set("Authorization", `Bearer ${emp1Token}`)
       .send({
         kind: "leave",
         leaveTypeId: annualTypeId,
-        onBehalfOfEmployeeId: emp1Id,
         startAt: "2027-06-01T01:00:00.000Z",
         endAt: "2027-06-02T09:00:00.000Z",
         hours: 16,
@@ -769,7 +771,30 @@ describe("F4 代申請 + 多段日期 (gap A/C)", () => {
     expect((data?.segments as unknown[]).length).toBe(2)
   })
 
-  it("a normal employee cannot file on behalf of others → 403", async () => {
+  it("HR naming another employee as the target → 400 filing_on_behalf_removed, nothing is filed under HR", async () => {
+    const res = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        onBehalfOfEmployeeId: emp1Id,
+        startAt: "2027-06-05T01:00:00.000Z",
+        endAt: "2027-06-05T09:00:00.000Z",
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("filing_on_behalf_removed")
+
+    // 不能默默記到 HR 自己名下（也沒有記到對象名下）。
+    const { data: filed } = await supabaseAdmin
+      .from("leave_requests")
+      .select("id")
+      .eq("tenant_id", A.tenantId)
+      .eq("start_at", "2027-06-05T01:00:00.000Z")
+    expect(filed ?? []).toEqual([])
+  })
+
+  it("a normal employee naming someone else as the target → 400 filing_on_behalf_removed (was 403)", async () => {
     const res = await request(app)
       .post("/requests")
       .set("Authorization", `Bearer ${emp1Token}`)
@@ -780,11 +805,11 @@ describe("F4 代申請 + 多段日期 (gap A/C)", () => {
         startAt: "2027-06-03T01:00:00.000Z",
         endAt: "2027-06-03T09:00:00.000Z",
       })
-    expect(res.status).toBe(403)
-    expect(res.body.error).toBe("proxy_filing_requires_hr")
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("filing_on_behalf_removed")
   })
 
-  it("HR proxy-filing for a non-existent employee → 404", async () => {
+  it("HR naming a non-existent employee → 400 filing_on_behalf_removed (was 404; the target is no longer looked up)", async () => {
     const res = await request(app)
       .post("/requests")
       .set("Authorization", `Bearer ${A.adminToken}`)
@@ -795,7 +820,29 @@ describe("F4 代申請 + 多段日期 (gap A/C)", () => {
         startAt: "2027-06-04T01:00:00.000Z",
         endAt: "2027-06-04T09:00:00.000Z",
       })
-    expect(res.status).toBe(404)
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("filing_on_behalf_removed")
+  })
+
+  it("naming oneself as the target is fine → 201, owned by the caller", async () => {
+    const res = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        onBehalfOfEmployeeId: emp1Id,
+        startAt: "2027-06-06T01:00:00.000Z",
+        endAt: "2027-06-06T09:00:00.000Z",
+      })
+    expect(res.status).toBe(201)
+
+    const { data } = await supabaseAdmin
+      .from("leave_requests")
+      .select("employee_id")
+      .eq("id", res.body.requestId)
+      .single()
+    expect(data?.employee_id).toBe(emp1Id)
   })
 })
 
