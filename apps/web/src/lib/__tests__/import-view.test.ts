@@ -113,8 +113,8 @@ describe("isBulkInviteResult", () => {
 });
 
 describe("IMPORT_KINDS", () => {
-  it("六種 kind 都有中文名、欄位與提示，欄位順序照契約", () => {
-    expect(IMPORT_KIND_LIST).toEqual(["punches", "schedules", "salary-adjustments", "onboardings", "employees", "holidays"]);
+  it("五種 kind 都有中文名、欄位與提示，欄位順序照契約（批次排班隨班表功能移除）", () => {
+    expect(IMPORT_KIND_LIST).toEqual(["punches", "salary-adjustments", "onboardings", "employees", "holidays"]);
     for (const kind of IMPORT_KIND_LIST) {
       expect(IMPORT_KINDS[kind].label).not.toBe("");
       expect(IMPORT_KINDS[kind].columns.length).toBeGreaterThan(0);

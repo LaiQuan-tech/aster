@@ -1,6 +1,6 @@
 /**
  * Typed HR-admin (back-office) API calls. Shapes mirror the @hr/api responses
- * exactly (see apps/api/src/routes/{me,departments,employees,shifts,schedules,
+ * exactly (see apps/api/src/routes/{me,departments,employees,shifts,
  * requests,announcements,leave-types,approval-flows}.ts).
  *
  * All calls go through apiFetch, which attaches the current Supabase access
@@ -541,58 +541,7 @@ export function deleteShift(id: string) {
   return apiFetch<{ id: string }>(`/shifts/${id}`, { method: "DELETE" });
 }
 
-/* ----------------------------------------------------------- schedules ----- */
-
-export interface Schedule {
-  id: string;
-  tenant_id: string;
-  employee_id: string;
-  work_date: string;
-  shift_id: string | null;
-  status: string;
-  created_at: string;
-}
-
-export function getSchedules(params: { employeeId?: string; from?: string; to?: string } = {}) {
-  const qs = new URLSearchParams();
-  if (params.employeeId) qs.set("employeeId", params.employeeId);
-  if (params.from) qs.set("from", params.from);
-  if (params.to) qs.set("to", params.to);
-  const suffix = qs.toString() ? `?${qs.toString()}` : "";
-  return apiFetch<{ schedules: Schedule[] }>(`/schedules${suffix}`);
-}
-
-export function assignSchedule(body: {
-  employeeId: string;
-  workDate: string;
-  shiftId?: string | null;
-  status?: string;
-}) {
-  return apiFetch<{ ids: string[]; count: number }>("/schedules", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-}
-
-export function assignSchedulesBatch(
-  assignments: Array<{
-    employeeId: string;
-    workDate: string;
-    shiftId?: string | null;
-    status?: string;
-  }>,
-) {
-  return apiFetch<{ ids: string[]; count: number }>("/schedules", {
-    method: "POST",
-    body: JSON.stringify({ assignments }),
-  });
-}
-
-export function reviewSchedule(id: string, decision: "acknowledge" | "dispute") {
-  return apiFetch<{ id: string; status: string }>(`/schedules/${id}/${decision}`, {
-    method: "POST",
-  });
-}
+/* 班表（/schedules）API 函式 2026-10-11 隨班表功能移除（業主：不需要）；班別（shifts）在上面保留。 */
 
 /* ------------------------------------------------------------ requests ----- */
 

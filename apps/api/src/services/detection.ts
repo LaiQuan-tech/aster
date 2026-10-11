@@ -88,6 +88,7 @@ export async function scanMissingPunches(
   const end = dayWindowUtc(addDaysKey(date, 1), tz).endIso
 
   // Employees scheduled on `date`.
+  // 班表功能已移除（2026-10-11，業主：不需要），此分支只對歷史資料生效：沒有新的班表列 → 這裡回空，缺卡掃描不會再找到人。
   const { data: schedData, error: schedErr } = await supabaseAdmin
     .from("schedules")
     .select("employee_id, shift_id")
@@ -380,6 +381,7 @@ export async function detectAnomalies(
 
   // Scheduled (employee, work_date) pairs in the window — used by
   // frequent_missing to tell "settled to 0 because absent" from "no schedule".
+  // 班表功能已移除（2026-10-11，業主：不需要），此分支只對歷史資料生效：沒有新的班表列 → frequent_missing 只會出現在舊資料的日子。
   const { data: schedData, error: schedErr } = await supabaseAdmin
     .from("schedules")
     .select("employee_id, work_date")

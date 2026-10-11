@@ -279,7 +279,7 @@ export interface CreateRequestBody {
   advanceRequested?: number;
 }
 
-/* ------------------------------------------------ punches / balances / 班表 */
+/* ------------------------------------------------ punches / balances / 班別 */
 
 export interface PunchHistoryRecord {
   id: string;
@@ -324,25 +324,6 @@ export function getLeaveBalances() {
   return apiFetch<{ balances: LeaveBalance[]; dailyRegularHours?: number }>("/leave-balances?scope=mine");
 }
 
-export interface ScheduleRow {
-  id: string;
-  work_date: string;
-  shift_id: string | null;
-  status: string;
-}
-
-/**
- * GET /schedules（ESS 專用）。一律帶 `scope=mine`：HR 帳號在員工端也只拿自己的班表
- * （「確認／異議」按鈕才不會動到別人的班）。
- */
-export function getMySchedules(from?: string, to?: string) {
-  const params = new URLSearchParams();
-  if (from) params.set("from", from);
-  if (to) params.set("to", to);
-  params.set("scope", "mine");
-  return apiFetch<{ schedules: ScheduleRow[] }>(`/schedules?${params.toString()}`);
-}
-
 export interface Shift {
   id: string;
   name: string;
@@ -372,18 +353,6 @@ export interface CalendarDay {
 /** 登入即可讀（非 HR 也可），請假多日切段時用來跳過假日。 */
 export function getCalendar(year: number) {
   return apiFetch<{ year: number; days: CalendarDay[] }>(`/calendar?year=${year}`);
-}
-
-export function acknowledgeSchedule(id: string) {
-  return apiFetch<{ id: string; status: string }>(`/schedules/${id}/acknowledge`, {
-    method: "POST",
-  });
-}
-
-export function disputeSchedule(id: string) {
-  return apiFetch<{ id: string; status: string }>(`/schedules/${id}/dispute`, {
-    method: "POST",
-  });
 }
 
 export function getBranding() {

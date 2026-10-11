@@ -108,7 +108,8 @@ demoRouter.post(
       for (const dept of Array.from(new Set(DEMO_EMPLOYEES.map((employee) => employee.dept)))) {
         deptIds.set(dept, await firstOrCreate("departments", tenantId, { name: dept }, { name: dept }))
       }
-      const dayShiftId = await firstOrCreate(
+      // 班別保留（定義標準工時與午休）；班表功能已移除（2026-10-11），demo 不再寫 schedules。
+      await firstOrCreate(
         "shifts",
         tenantId,
         { name: "Demo 日班 09:00-18:00" },
@@ -163,7 +164,6 @@ demoRouter.post(
         .eq("title", "Demo：七月營運公告")
       if (annCleanupErr) throw new Error(`demo cleanup announcements: ${annCleanupErr.message}`)
 
-      const scheduleRows: Record<string, unknown>[] = []
       const punchRows: Record<string, unknown>[] = []
       const attendanceRows: Record<string, unknown>[] = []
       const salaryRows: Record<string, unknown>[] = []
@@ -221,7 +221,6 @@ demoRouter.post(
         for (const [index, workDate] of workDates.entries()) {
           const late = index === 2 ? employee.late : 0
           const overtime = index === 4 ? employee.overtime : 0
-          scheduleRows.push({ tenant_id: tenantId, employee_id: employeeId, work_date: workDate, shift_id: dayShiftId, status: index === 0 ? "confirmed" : "scheduled" })
           punchRows.push({ tenant_id: tenantId, employee_id: employeeId, punch_at: atTaipei(workDate, late > 0 ? "09:15" : "09:00"), type: "in", source: "web", lat: 25.033, lng: 121.565, device_id: "demo-web" })
           punchRows.push({ tenant_id: tenantId, employee_id: employeeId, punch_at: atTaipei(workDate, overtime > 0 ? "19:30" : "18:00"), type: "out", source: "web", lat: 25.033, lng: 121.565, device_id: "demo-web" })
           attendanceRows.push({
@@ -253,7 +252,6 @@ demoRouter.post(
       }
 
       const upserts: Array<[string, Record<string, unknown>[], string]> = [
-        ["schedules", scheduleRows, "tenant_id,employee_id,work_date"],
         ["attendance_days", attendanceRows, "tenant_id,employee_id,work_date"],
         ["salary_structures", salaryRows, "tenant_id,employee_id"],
         ["leave_balances", balanceRows, "tenant_id,employee_id,leave_type_id,year"],

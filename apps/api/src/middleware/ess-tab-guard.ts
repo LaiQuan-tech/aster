@@ -34,8 +34,11 @@ import { isFinanceRole, isHrRole } from "./scope.js"
  * 放不放行，不同步就會出現「看得到但打不開」或反過來。
  */
 
-/** intern 沒另外設定時的 ESS 分頁清單（與 routes/me.ts INTERN_DEFAULT_ESS_TABS 同一份）。 */
-const INTERN_DEFAULT_ESS_TABS = ["home", "schedule", "punches", "requests", "notifications", "mydata"]
+/**
+ * intern 沒另外設定時的 ESS 分頁清單（與 routes/me.ts INTERN_DEFAULT_ESS_TABS 同一份）。
+ * 「個人班表」（schedule）2026-10-11 隨班表功能移除；租戶設定裡還存著也只是沒有路由對得上。
+ */
+const INTERN_DEFAULT_ESS_TABS = ["home", "punches", "requests", "notifications", "mydata"]
 
 /**
  * 路由 → ESS 分頁 key 的對照表（順序就是比對順序，**前綴長的排前面**）。
@@ -72,7 +75,7 @@ const ROUTE_TABS: readonly RouteTabRule[] = [
   { path: "/ai", tab: "ai" },
   { path: "/company-pages", tab: "company" },
   { path: "/notifications", tab: "notifications" },
-  { path: "/schedules", tab: "schedule" },
+  // /schedules（個人班表）2026-10-11 隨班表功能移除：端點已取消註冊（404），不再列在對照表。
 ]
 
 /** `/employees/:empId/profile`、`/certifications`、`/educations`、`/work-history` → 我的資料。 */

@@ -26,7 +26,7 @@ describe("EMPLOYMENT_TYPES／EMPLOYMENT_TYPE_LABELS（身分類別）", () => {
 
 const TABS = [
   { key: "home", label: "今日打卡" },
-  { key: "schedule", label: "個人班表" },
+  { key: "punches", label: "打卡紀錄" },
   { key: "requests", label: "我的申請" },
   { key: "approvals", label: "待我簽核" },
   { key: "payslips", label: "我的薪資單" },
@@ -40,9 +40,9 @@ describe("visibleTabs（ESS 分頁限縮純函式）", () => {
   });
 
   it("有清單 → 只留清單內的分頁，順序照原本分頁順序而非清單順序", () => {
-    expect(visibleTabs(TABS, ["mydata", "requests", "schedule"]).map((t) => t.key)).toEqual([
+    expect(visibleTabs(TABS, ["mydata", "requests", "punches"]).map((t) => t.key)).toEqual([
       "home",
-      "schedule",
+      "punches",
       "requests",
       "mydata",
     ]);
@@ -55,6 +55,16 @@ describe("visibleTabs（ESS 分頁限縮純函式）", () => {
 
   it("清單裡不認得的 key 忽略，不炸", () => {
     expect(visibleTabs(TABS, ["nope", "approvals"]).map((t) => t.key)).toEqual(["home", "approvals"]);
+  });
+
+  it("租戶設定還存著已移除的「個人班表」（schedule，2026-10-11 隨班表功能拿掉）→ 忽略，不炸也不多出分頁", () => {
+    expect(ESS_TABS.some((t) => t.key === ("schedule" as string))).toBe(false);
+    expect(visibleTabs(ESS_TABS, ["schedule", "punches"]).map((t) => t.key)).toEqual(["home", "punches", "announcements"]);
+    const groups = moreGroups(["schedule", "punches", "sheet"]);
+    expect(groups.find((g) => g.title === "差勤")?.items.map((i) => i.key)).toEqual(["punches", "sheet"]);
+    expect(bottomTabs({ essTabs: ["schedule"], isManager: false, pendingApprovals: 0 }).map((t) => t.key)).toEqual(["home", "more"]);
+    // /ess/schedule 不再是分頁路由：key null（layout 不 gate；頁面已刪，Next 回 404）
+    expect(routeForPath("/ess/schedule")).toMatchObject({ key: null });
   });
 
   it("回傳新陣列，不動原本的 tabs", () => {
@@ -75,9 +85,8 @@ describe("visibleTabs（ESS 分頁限縮純函式）", () => {
 describe("ESS_TABS（key 順序與新分頁）", () => {
   it("舊 key 順序不變、announcements 追加在最後、請假／打卡短標", () => {
     const keys = ESS_TABS.map((t) => t.key);
-    expect(keys.slice(0, 16)).toEqual([
+    expect(keys.slice(0, 15)).toEqual([
       "home",
-      "schedule",
       "punches",
       "sheet",
       "balances",
@@ -160,16 +169,16 @@ describe("moreGroups（更多頁分組）", () => {
 
   it("分組內順序照 MORE_GROUPS 定義，項目是完整的 EssTab（含 href／label）", () => {
     const groups = moreGroups(null);
-    expect(groups[0]?.items.map((i) => i.key)).toEqual(["punches", "schedule", "sheet", "balances"]);
+    expect(groups[0]?.items.map((i) => i.key)).toEqual(["punches", "sheet", "balances"]);
     expect(groups[0]?.items[0]).toMatchObject({ key: "punches", label: "打卡紀錄", href: "/ess/punches" });
     expect(MORE_GROUPS.flatMap((g) => g.keys)).not.toContain("home");
   });
 
   it("essTabs 限縮：空組整組消失、公告永遠在公司組", () => {
-    // intern 預設：punches／schedule／mydata 可見；薪資組整組沒有
+    // intern 預設：punches／mydata 可見；薪資組整組沒有
     const groups = moreGroups(INTERN_DEFAULT_ESS_TABS);
     expect(groups.map((g) => g.title)).toEqual(["差勤", "公司", "個人"]);
-    expect(groups.find((g) => g.title === "差勤")?.items.map((i) => i.key)).toEqual(["punches", "schedule"]);
+    expect(groups.find((g) => g.title === "差勤")?.items.map((i) => i.key)).toEqual(["punches"]);
     expect(groups.find((g) => g.title === "公司")?.items.map((i) => i.key)).toEqual(["announcements"]);
     expect(groups.find((g) => g.title === "個人")?.items.map((i) => i.key)).toEqual(["mydata"]);
     // 什麼都不開：只剩公告
@@ -188,13 +197,12 @@ describe("routeForPath（pathname → 路由）", () => {
     expect(routeForPath("/ess/requests?kind=leave")).toMatchObject({ key: "requests", title: "請假申請" });
   });
 
-  it("wide 只有月表與班表；其餘沒有 wide", () => {
+  it("wide 只有月表（班表已移除）；其餘沒有 wide", () => {
     expect(routeForPath("/ess/attendance-sheet").wide).toBe(true);
     expect(routeForPath("/ess/attendance-sheet/9f").wide).toBe(true);
-    expect(routeForPath("/ess/schedule").wide).toBe(true);
     expect(routeForPath("/ess/requests").wide).toBeUndefined();
     expect(routeForPath("/ess").wide).toBeUndefined();
-    expect(ESS_ROUTES.filter((r) => r.wide).map((r) => r.key)).toEqual(["schedule", "sheet"]);
+    expect(ESS_ROUTES.filter((r) => r.wide).map((r) => r.key)).toEqual(["sheet"]);
   });
 
   it("更多與公告有路由：更多 key 為 null（不 gate）、公告 key 為 announcements", () => {

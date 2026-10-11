@@ -2,8 +2,9 @@
  * 請假時數計算（純函式、不碰 React／DOM／API；全部有單元測試）。
  *
  * 規則（計畫 §1.3「時數規則」）：
- *   - 當日班別＝ `shiftByDate[date]`（schedules 的 shift_id 對 shifts）；沒排班 → `defaultShift`
- *     （租戶第一個 shift，created_at 最早）；連 shift 都沒有 → `DEFAULT_SHIFT`（09:00–18:00 休 60）。
+ *   - 當日班別＝ `shiftByDate[date]`；沒有 → `defaultShift`（租戶第一個 shift，created_at 最早）；
+ *     連 shift 都沒有 → `DEFAULT_SHIFT`（09:00–18:00 休 60）。班表功能已移除（2026-10-11），請假表單
+ *     一律傳空的 shiftByDate＝每天都用 defaultShift；參數保留給逐日不同班別的情境（測試仍涵蓋）。
  *   - `shiftWorkHours = (end − start − break) / 60`；end ≤ start 視為跨日（+24h）。
  *   - 午休（2026-10-11 業主決定：午休 12:00–13:00）＝ `lunchWindowMinutes` 的單一規則，與 API 結算
  *     （@hr/rules lunch-window）逐行相同：班別有 break_start → 用它；沒設且班別涵蓋 12:00 → 12:00 起；
@@ -431,7 +432,7 @@ export function endTimeForHours(shift: ShiftLike, start: string, hours: number):
 }
 
 /**
- * 使用者選的值不在選項裡（換了日期、班別不同、班表還沒載入）→ 退回預設：
+ * 使用者選的值不在選項裡（換了日期、班別不同）→ 退回預設：
  * `fallback`＝"first"（開始時間：上班時間）或 "last"（結束時間：下班時間）。選項為空 → ""。
  */
 export function pickOption(options: readonly string[], value: string | null | undefined, fallback: "first" | "last"): string {
@@ -646,7 +647,7 @@ export interface LeavePick {
 
 /**
  * 請假表單的「選項＋預設值＋時數」一次算完（純函式，表單元件只負責畫）：
- * 時間選項以各自那天的班別為準；使用者選的值不在選項裡（換了日期、班別不同、班表還沒載入）
+ * 時間選項以各自那天的班別為準；使用者選的值不在選項裡（換了日期、班別不同）
  * 就退回預設——開始＝上班時間、結束＝下班時間（＝整天）、時數 1 小時，且時數不超過
  * 該開始時間之後可請的上限。多日模式選到同一天＝那天的一段時間（開始時間到結束時間，扣午休）。
  */

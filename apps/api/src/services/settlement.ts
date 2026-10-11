@@ -452,7 +452,7 @@ export async function lateMinutesForArrival(input: {
   const workDate = localDateKey(arrivalIso, tz)
   const { rules } = await loadRuleConfigFor(tenantId, workDate.slice(0, 7))
 
-  // 當天班別
+  // 當天班別（班表功能已移除（2026-10-11，業主：不需要），此分支只對歷史資料生效；沒有班表列 → 工作日走彈性上班）
   const { data: schedRow, error: schedErr } = await supabaseAdmin
     .from("schedules")
     .select("shift_id")
@@ -632,6 +632,9 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   const punches = (punchData ?? []) as PunchRow[]
 
   // --- schedules in window + shift lookup --------------------------------------
+  // 班表功能已移除（2026-10-11，業主：不需要），此分支只對歷史資料生效：
+  // 已沒有新增班表的入口（後台／員工端頁面、POST /schedules、批次排班匯入都拿掉了），schedules 表只剩
+  // 舊資料（2026-08 測試資料）。沒有班表列 → 每天走「沒排班」：工作日＝彈性上班、例假日＝整天不扣午休。
   let schedQuery = supabaseAdmin
     .from("schedules")
     .select("employee_id, work_date, shift_id")

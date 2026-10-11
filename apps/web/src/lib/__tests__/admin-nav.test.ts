@@ -442,7 +442,8 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
       "ai",
     ]);
     expect(tabsForSection("announce", { knowledge: true }).map((t) => t.key)).toEqual(["announcements", "companyInfo", "knowledge"]);
-    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "sheets", "lateReports", "schedules", "duty"]);
+    // 班表（/admin/schedules）2026-10-11 移除；班別在設定區、值日／總機保留。
+    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "sheets", "lateReports", "duty"]);
   });
 
   it("subTabsFor：有 children 回子分頁（含 href）、沒有回 []、null 回 []", () => {

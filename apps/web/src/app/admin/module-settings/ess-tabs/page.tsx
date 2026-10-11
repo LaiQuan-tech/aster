@@ -66,7 +66,7 @@ export default function EssTabsSettingsPage() {
   return (
     <Card>
       <p className="mb-4 text-sm text-gray-500">
-        打卡首頁與公告一律開放，不列在下方；實習生預設只另外開放五個（班表／打卡紀錄／申請／通知／我的資料）。
+        打卡首頁與公告一律開放，不列在下方；實習生預設只另外開放四個（打卡紀錄／申請／通知／我的資料）。
       </p>
       {loaded ? (
         <div className="space-y-5">

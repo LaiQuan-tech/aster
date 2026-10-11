@@ -45,7 +45,8 @@ describe("tabForRoute（路由 → ESS 分頁對照表，純函式）", () => {
     expect(tabForRoute("POST", "/ai/ask")).toBe("ai")
     expect(tabForRoute("GET", "/company-pages")).toBe("company")
     expect(tabForRoute("GET", "/notifications/unread-count")).toBe("notifications")
-    expect(tabForRoute("GET", "/schedules")).toBe("schedule")
+    // 個人班表（/schedules）2026-10-11 隨班表功能移除：端點已取消註冊，不在對照表
+    expect(tabForRoute("GET", "/schedules")).toBeNull()
   })
 
   it("我的資料：/employees/:id/profile 與個人履歷子資源 → mydata；/employees 本身不擋", () => {
@@ -80,7 +81,7 @@ describe("tabForRoute（路由 → ESS 分頁對照表，純函式）", () => {
 describe("essTabsFor（身分類別 → 可用分頁，純函式；與 routes/me.ts 同義）", () => {
   it("有設定就用設定；intern 沒設定用預設清單；其他身分類別 null＝不限縮", () => {
     expect(essTabsFor({ intern: ["home", "requests"] }, "intern")).toEqual(["home", "requests"])
-    expect(essTabsFor(null, "intern")).toEqual(["home", "schedule", "punches", "requests", "notifications", "mydata"])
+    expect(essTabsFor(null, "intern")).toEqual(["home", "punches", "requests", "notifications", "mydata"])
     expect(essTabsFor(null, "regular")).toBeNull()
     expect(essTabsFor({ parttime: ["home"] }, "regular")).toBeNull()
     expect(essTabsFor({}, null)).toBeNull()
@@ -89,7 +90,6 @@ describe("essTabsFor（身分類別 → 可用分頁，純函式；與 routes/me
   it("設定值不是陣列（後台打錯）→ 當成沒設定；陣列裡的非字串忽略", () => {
     expect(essTabsFor({ intern: "home" }, "intern")).toEqual([
       "home",
-      "schedule",
       "punches",
       "requests",
       "notifications",
@@ -161,7 +161,7 @@ describe.skipIf(!ready)("essTabGuard — live（實習生只看得到預設分�
     const res = await as(internToken, request(app).get("/me"))
     expect(res.status).toBe(200)
     expect(res.body.employmentType).toBe("intern")
-    expect(res.body.essTabs).toEqual(["home", "schedule", "punches", "requests", "notifications", "mydata"])
+    expect(res.body.essTabs).toEqual(["home", "punches", "requests", "notifications", "mydata"])
   })
 
   it("實習生打 GET /payslips → 403 ess_tab_disabled；同一支 HR 200", async () => {

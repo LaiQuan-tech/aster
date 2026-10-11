@@ -6,8 +6,11 @@ import { departmentsHaveManagerList } from "../lib/schema-compat.js"
 
 export const meRouter = Router()
 
-/** intern 沒另外設定時的 ESS 分頁清單；其他身分類別預設全部（null）。 */
-const INTERN_DEFAULT_ESS_TABS = ["home", "schedule", "punches", "requests", "notifications", "mydata"]
+/**
+ * intern 沒另外設定時的 ESS 分頁清單；其他身分類別預設全部（null）。
+ * 「個人班表」（schedule）2026-10-11 隨班表功能移除（與 middleware/ess-tab-guard.ts、web ess-tabs.ts 同步）。
+ */
+const INTERN_DEFAULT_ESS_TABS = ["home", "punches", "requests", "notifications", "mydata"]
 
 async function resolveEssTabs(tenantId: string, employmentType: string | null): Promise<string[] | null> {
   const { data } = await supabaseAdmin.from("tenants").select("features").eq("id", tenantId).maybeSingle()

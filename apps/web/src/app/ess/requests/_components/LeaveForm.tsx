@@ -11,10 +11,11 @@
  * 時數由 `computeLeaveSegments` 即時算：單日摘要「09:00–12:00，共 3 小時」；多日逐日列出
  * 「10/13（二）14:00–18:00 4 小時」…再加「共 N 天 · X 小時」「已略過 N 天」「剩餘 X 小時」
  * 「申請時數超過剩餘額度」。畫面只用 1 小時步進，後端不強制最小單位。
+ * 班表功能已移除（2026-10-11）：每天都用預設班別（`defaultShift`，日班）算時數與時間選項。
  */
 import { useEffect, useId, useMemo, useState, type FormEvent } from "react";
 import { Field, Input, Segmented, Select } from "@/components/ess-ui";
-import type { LeaveBalance, LeaveType, Shift } from "@/lib/ess-api";
+import type { LeaveBalance, LeaveType } from "@/lib/ess-api";
 import { fmtDateShort, fmtHours, todayKey } from "@/lib/ess-format";
 import { describeHalfDays, resolveLeavePick, skipReasonLabel, type LeavePeriod, type ShiftLike } from "@/lib/leave-hours";
 import { buildCreateBody, describeBody, describeLeaveDay, isBuildError, remainingHours } from "@/lib/request-forms";
@@ -39,18 +40,17 @@ export interface LeaveFormProps extends FormCommonProps {
   /** null＝還在載入。空陣列＝租戶沒有假別（顯示單一「一般請假」）。 */
   leaveTypes: LeaveType[] | null;
   balances: LeaveBalance[];
-  shifts: Shift[];
+  /** 每天都用這個班別（請假頁傳租戶最早建立的班別＝日班；班表功能已移除）。 */
   defaultShift: ShiftLike;
-  /** 本人 employee id（篩選班表用）。 */
-  employeeId: string | null | undefined;
 }
+
+/** 班表功能已移除：沒有逐日班別，`resolveLeavePick` 一律退回 defaultShift。 */
+const NO_SCHEDULED_SHIFTS: Record<string, ShiftLike | undefined> = {};
 
 export function LeaveForm({
   leaveTypes,
   balances,
-  shifts,
   defaultShift,
-  employeeId,
   initialDate,
   submitting,
   submitError,
@@ -78,9 +78,9 @@ export function LeaveForm({
   }, [leaveTypes, leaveTypeId]);
 
   const effectiveEnd = mode === "range" ? endDate : startDate;
-  // 班表只抓本人的（scope=mine，見 use-leave-calendar）。
-  const calendar = useLeaveCalendar(startDate, effectiveEnd, shifts, employeeId);
-  const shiftOn = (date: string): ShiftLike => calendar.shiftByDate[date] ?? defaultShift;
+  // 行事曆（假日）按需載入；班別每天都是 defaultShift（班表功能已移除）。
+  const dayTypeByDate = useLeaveCalendar(startDate, effectiveEnd);
+  const shiftOn = (_date: string): ShiftLike => defaultShift;
 
   // 時間選項（1 小時一格、以各自那天的班別為準）、預設值與時數都由純函式算（見 resolveLeavePick）：
   // 選的值不在選項裡就退回預設——開始＝上班時間、結束＝下班時間（＝整天）、時數 1 小時。
@@ -88,9 +88,9 @@ export function LeaveForm({
     () =>
       resolveLeavePick(
         { mode, startDate, endDate, period, hoursStart, hoursCount, rangeStart, rangeEnd },
-        { shiftByDate: calendar.shiftByDate, defaultShift, dayTypeByDate: calendar.dayTypeByDate },
+        { shiftByDate: NO_SCHEDULED_SHIFTS, defaultShift, dayTypeByDate },
       ),
-    [mode, startDate, endDate, period, hoursStart, hoursCount, rangeStart, rangeEnd, calendar, defaultShift],
+    [mode, startDate, endDate, period, hoursStart, hoursCount, rangeStart, rangeEnd, dayTypeByDate, defaultShift],
   );
   const { startOptions, endOptions, hoursStartValue, maxHours, hoursCountValue, rangeStartValue, rangeEndValue, result } = pick;
   // 班別有休息才提「午休」（沒有休息的班別，時間選項就是連續的）。

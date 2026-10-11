@@ -6,6 +6,8 @@
  * 這個檔案負責：
  *   - `ESS_TABS`：所有分頁的 key／標籤／路徑（key 是穩定的公開字串，後台
  *     tenants.features.essTabs 用它限縮各身分類別可見的分頁，**不要改名**）。
+ *     「個人班表」（key `schedule`）2026-10-11 隨班表功能移除（業主：不需要）；租戶設定裡
+ *     還存著 `schedule` 也沒關係——不認得的 key 一律忽略（見 `visibleTabs`）。
  *   - `visibleTabs()`：依 GET /me 的 essTabs 過濾。
  *   - `bottomTabs()`／`moreGroups()`：底部分頁列與「更多」頁的內容。
  *   - `routeForPath()`／`parentPathFor()`：layout 依 pathname 決定標題、寬度、
@@ -13,7 +15,6 @@
  */
 export type EssTabKey =
   | "home"
-  | "schedule"
   | "punches"
   | "sheet"
   | "balances"
@@ -44,7 +45,6 @@ export interface EssTab {
  */
 export const ESS_TABS: readonly EssTab[] = [
   { key: "home", label: "今日打卡", short: "打卡", href: "/ess" },
-  { key: "schedule", label: "個人班表", short: "班表", href: "/ess/schedule" },
   { key: "punches", label: "打卡紀錄", short: "紀錄", href: "/ess/punches" },
   { key: "sheet", label: "出勤月表", short: "月表", href: "/ess/attendance-sheet" },
   { key: "balances", label: "剩餘假別", short: "假別", href: "/ess/balances" },
@@ -84,7 +84,7 @@ export interface EssTabLike {
  * 規則：
  *   - 順序永遠照 `tabs` 原本的順序，不照 allowedKeys 的順序（心智模型跟後台一致）。
  *   - `ALWAYS_VISIBLE_TAB_KEYS`（home、announcements）永遠保留。
- *   - allowedKeys 裡不認得的 key 直接忽略（後台打錯字不會炸畫面）。
+ *   - allowedKeys 裡不認得的 key 直接忽略（後台打錯字、或已移除的舊分頁如 `schedule` 都不會炸畫面）。
  */
 export function visibleTabs<T extends EssTabLike>(
   tabs: readonly T[],
@@ -148,7 +148,7 @@ export interface EssMoreGroupDef {
  * 由頁面自己接在後面。
  */
 export const MORE_GROUPS: readonly EssMoreGroupDef[] = [
-  { title: "差勤", keys: ["punches", "schedule", "sheet", "balances"] },
+  { title: "差勤", keys: ["punches", "sheet", "balances"] },
   { title: "薪資與費用", keys: ["payslips", "expenses", "bonus"] },
   { title: "公司", keys: ["announcements", "company", "jobs", "projects"] },
   { title: "個人", keys: ["kpi", "mydata"] },
@@ -185,11 +185,11 @@ export interface EssRoute {
   key: EssTabKey | null;
   /** 頂部列標題；空字串＝顯示租戶 appName（首頁與未知路徑）。 */
   title: string;
-  /** 寬版內容（月表、班表的桌機月曆）；layout 用 max-w-6xl 取代 max-w-3xl。 */
+  /** 寬版內容（月表的桌機版面）；layout 用 max-w-6xl 取代 max-w-3xl。 */
   wide?: boolean;
 }
 
-const WIDE_KEYS: ReadonlySet<EssTabKey> = new Set<EssTabKey>(["sheet", "schedule"]);
+const WIDE_KEYS: ReadonlySet<EssTabKey> = new Set<EssTabKey>(["sheet"]);
 
 const UNKNOWN_ROUTE: EssRoute = { prefix: "/ess", key: null, title: "" };
 
@@ -278,7 +278,6 @@ export const EMPLOYMENT_TYPE_LABELS: Record<EmploymentType, string> = {
  */
 export const INTERN_DEFAULT_ESS_TABS: readonly string[] = [
   "home",
-  "schedule",
   "punches",
   "requests",
   "notifications",

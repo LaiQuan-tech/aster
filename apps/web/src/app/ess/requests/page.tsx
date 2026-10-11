@@ -67,7 +67,8 @@ function RequestsView() {
   const urlId = searchParams.get("id");
   const initialDate = urlDate && DATE_RE.test(urlDate) ? urlDate : todayKey();
 
-  const { me } = useEssState();
+  // 進頁時確保 ESS 狀態新鮮（ensureFresh）；本頁不再需要 me（請假表單原本用它篩班表，班表功能已移除）。
+  useEssState();
 
   const [kind, setKind] = useState<RequestKind>(isRequestKind(urlKind) ? urlKind : "leave");
   // 外部改了網址（例如通知深連結）就跟著切；本頁自己切換時已先 setKind，這裡不會再觸發。
@@ -188,9 +189,7 @@ function RequestsView() {
             {...common}
             leaveTypes={leaveTypes}
             balances={balances}
-            shifts={shifts}
             defaultShift={defaultShift}
-            employeeId={me?.id}
           />
         );
       case "fix_punch":

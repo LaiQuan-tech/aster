@@ -44,14 +44,14 @@ describe("hydrateEssTabsConfig", () => {
   });
 
   it("清單裡混到非字串、或不是陣列的身分類別，只有該類別退回預設", () => {
-    const cfg = hydrateEssTabsConfig({ regular: ["home", 1], contract: "home", intern: ["schedule"] });
+    const cfg = hydrateEssTabsConfig({ regular: ["home", 1], contract: "home", intern: ["punches"] });
     expect(cfg.regular).toEqual(ALL_KEYS);
     expect(cfg.contract).toEqual(ALL_KEYS);
-    expect(cfg.intern).toEqual(["schedule"]);
+    expect(cfg.intern).toEqual(["punches"]);
   });
 
   it("不共用輸入陣列的參照（之後 toggle 不會改到後端回傳的物件）", () => {
-    const list = ["home", "schedule"];
+    const list = ["home", "punches"];
     const cfg = hydrateEssTabsConfig({ intern: list });
     expect(cfg.intern).toEqual(list);
     expect(cfg.intern).not.toBe(list);
@@ -60,8 +60,10 @@ describe("hydrateEssTabsConfig", () => {
 
 describe("sortedByEssTabs / configurableEssTabs", () => {
   it("照 ESS_TABS 順序重排；未知 key 丟掉、重複只留一個", () => {
-    expect(sortedByEssTabs(["mydata", "home", "nope", "schedule", "home"])).toEqual(["home", "schedule", "mydata"]);
+    expect(sortedByEssTabs(["mydata", "home", "nope", "punches", "home"])).toEqual(["home", "punches", "mydata"]);
     expect(sortedByEssTabs([])).toEqual([]);
+    // 已移除的「個人班表」（schedule，2026-10-11）當未知 key 丟掉
+    expect(sortedByEssTabs(["schedule", "mydata"])).toEqual(["mydata"]);
   });
 
   it("可勾選的 tab 排除永遠可見的 home／announcements，順序照 ESS_TABS", () => {
@@ -75,21 +77,24 @@ describe("sortedByEssTabs / configurableEssTabs", () => {
 describe("toggleEssTab", () => {
   it("新增：插進 ESS_TABS 的位置而不是尾巴；不改輸入、其他身分類別沿用同一參照", () => {
     const cfg = hydrateEssTabsConfig({ intern: ["home", "mydata"] });
-    const next = toggleEssTab(cfg, "intern", "schedule");
-    expect(next.intern).toEqual(["home", "schedule", "mydata"]);
+    const next = toggleEssTab(cfg, "intern", "punches");
+    expect(next.intern).toEqual(["home", "punches", "mydata"]);
     expect(cfg.intern).toEqual(["home", "mydata"]);
     expect(next).not.toBe(cfg);
     expect(next.regular).toBe(cfg.regular);
   });
 
   it("移除：已勾的再切一次就拿掉", () => {
-    const cfg = hydrateEssTabsConfig({ intern: ["home", "schedule", "mydata"] });
-    expect(toggleEssTab(cfg, "intern", "schedule").intern).toEqual(["home", "mydata"]);
+    const cfg = hydrateEssTabsConfig({ intern: ["home", "punches", "mydata"] });
+    expect(toggleEssTab(cfg, "intern", "punches").intern).toEqual(["home", "mydata"]);
   });
 
   it("切換時順便把不在 ESS_TABS 的 key 清掉", () => {
     const cfg = hydrateEssTabsConfig({ regular: ["ghost", "home"] });
     expect(toggleEssTab(cfg, "regular", "payslips").regular).toEqual(["home", "payslips"]);
+    // 舊設定存的 schedule（班表功能已移除）同樣在下次切換時清掉
+    const legacy = hydrateEssTabsConfig({ intern: ["home", "schedule", "mydata"] });
+    expect(toggleEssTab(legacy, "intern", "punches").intern).toEqual(["home", "punches", "mydata"]);
   });
 
   it("永遠可見的 home／announcements 不可切換：原物件原樣回傳", () => {

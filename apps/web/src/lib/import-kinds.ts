@@ -1,11 +1,12 @@
 /**
- * 批次匯入（Excel 範本）的六種 kind：純資料，給 BatchImport 面板底部的「範本欄位一覽」用。
+ * 批次匯入（Excel 範本）的五種 kind：純資料，給 BatchImport 面板底部的「範本欄位一覽」用。
+ * （「批次排班」2026-10-11 隨班表功能移除。）
  *
  * 欄位順序必須與 API 端產生的範本表頭一致（共同契約 batch-import-contract.md 的表格）；
  * 前後端各放一份，改欄位時兩邊一起改。
  */
 
-export type ImportKind = "punches" | "schedules" | "salary-adjustments" | "onboardings" | "employees" | "holidays";
+export type ImportKind = "punches" | "salary-adjustments" | "onboardings" | "employees" | "holidays";
 
 export interface ImportKindMeta {
   /** 中文名（範本檔名、面板標題用）。 */
@@ -21,11 +22,6 @@ export const IMPORT_KINDS: Record<ImportKind, ImportKindMeta> = {
     label: "批次打卡補登",
     columns: ["工號", "姓名", "日期", "時間", "類型"],
     note: "類型填「上班／下班／休息開始／休息結束／外出開始／外出結束」；日期 YYYY-MM-DD、時間 HH:mm（公司所在時區）；工號空白時以姓名比對。",
-  },
-  schedules: {
-    label: "批次排班",
-    columns: ["工號", "姓名", "日期", "班別", "狀態"],
-    note: "班別填班別名稱（範本附「班別清單」），空白＝休假；狀態選填，預設待確認。同一員工同一天重複上傳會覆蓋。",
   },
   "salary-adjustments": {
     label: "批次調薪",
