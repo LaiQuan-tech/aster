@@ -82,3 +82,4 @@ export { employeeProfileChangeRequests } from "./employee-profile-change-request
 export { disbursementApprovalSteps } from "./disbursement-approval-steps"
 export { optionItems } from "./option-items"
 export { lateReports } from "./late-reports"
+export { payrollAdjustments } from "./payroll-adjustments"
