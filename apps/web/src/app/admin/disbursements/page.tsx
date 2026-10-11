@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton, Segmented, inputCls, labelCls } from "@/components/admin-ui";
-import { listVendors, type Vendor } from "@/lib/company-api";
+import { listVendors, vendorOptionLabel, type Vendor } from "@/lib/company-api";
 import { defaultActiveCompanyId } from "@/lib/company-options";
 import { listCompanies, type Company } from "@/lib/projects-ext-api";
 import { listProjects } from "@/lib/projects-api";
@@ -386,7 +386,7 @@ export default function DisbursementsPage() {
                 <label className={labelCls}>廠商</label>
                 <select className={inputCls} value={fVendorId} onChange={(e) => setFVendorId(e.target.value)}>
                   <option value="">全部</option>
-                  {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                  {vendors.map((v) => <option key={v.id} value={v.id}>{vendorOptionLabel(v)}</option>)}
                 </select>
               </div>
               <div>
