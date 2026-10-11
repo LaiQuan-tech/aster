@@ -5,6 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
+import { clientIpOf } from "../lib/client-ip.js"
 import { writeAuditLog } from "../services/audit.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { dayWindowUtc, todayKey } from "../lib/tz.js"
@@ -49,6 +50,16 @@ const querySchema = z.object({
 })
 
 const SELECT_COLS = "id, tenant_id, employee_id, punch_at, type, source, lat, lng, device_id, geo_status"
+// 打卡來源 IP（0060 punch_records.ip_address）只給 HR 的後台列表：GET /punch 在 HR 且非 mine 時才多撈，
+// 序列化成 ipAddress（見 withIpAddress）。員工端查詢（/punch/today、mine=1、一般員工）一律用 SELECT_COLS，
+// 連欄位都不撈。
+const SELECT_COLS_WITH_IP = `${SELECT_COLS}, ip_address`
+
+/** 把 DB 的 ip_address 換成回應用的 ipAddress（沒有就 null），其餘欄位原樣。 */
+function withIpAddress(row: Record<string, unknown>): Record<string, unknown> {
+  const { ip_address: ipAddress, ...rest } = row
+  return { ...rest, ipAddress: typeof ipAddress === "string" ? ipAddress : null }
+}
 
 // [start, end) UTC instants covering "today" on the TENANT's clock
 // (tenants.timezone, default Asia/Taipei) — used to scope today's punches and
@@ -102,6 +113,10 @@ function isHrRole(role: string | undefined): boolean {
  * the original three fields keep their names and types; `record` is the full
  * stored row (snake_case, as `GET /punch/today` lists it) so the client can
  * optimistically append it without a refetch.
+ *
+ * 打卡 IP（0060）：寫入時記下 `ip_address`（lib/client-ip.ts：x-forwarded-for 第一段 →
+ * x-real-ip → req.ip，不合法存 null）。IP 只給 HR 在後台看，員工自己的 201 回應
+ * 不帶——`record` 也剝掉 ip_address。HR 補登（/punch/manual、匯入）不記 IP。
  */
 punchRouter.post(
   "/punch",
@@ -199,6 +214,8 @@ punchRouter.post(
           device_id: deviceId ?? null,
           // 有座標就不需要原因（一律 null，蓋掉任何亂帶的值）；沒座標才寫 geoStatus。
           geo_status: lat != null && lng != null ? null : (geoStatus ?? null),
+          // 來源 IP（只有員工自己打卡才記，見 lib/client-ip.ts；取不到或不合法 → null）。
+          ip_address: clientIpOf(req),
         })
         .select("*")
         .single()
@@ -207,6 +224,8 @@ punchRouter.post(
         next(new Error(`POST /punch: ${error?.message}`))
         return
       }
+      // IP 只給 HR（GET /punch 後台列表）看：員工自己的回應不帶，record 也剝掉。
+      const { ip_address: _ipAddress, ...record } = data
       res.status(201).json({
         id: data.id,
         type: data.type,
@@ -215,7 +234,7 @@ punchRouter.post(
         lat: data.lat,
         lng: data.lng,
         deviceId: data.device_id,
-        record: data,
+        record,
       })
     } catch (err) {
       next(err)
@@ -294,6 +313,10 @@ punchRouter.get(
  * Uses supabaseAdmin (bypasses RLS); the explicit filters are the load-bearing
  * guard. from/to are inclusive calendar days on the tenant's clock (`to` is
  * expanded to the end of that local day).
+ *
+ * 打卡 IP：只有 HR／平台管理員且沒帶 `mine` 時（＝後台打卡紀錄列表）每列多一個
+ * `ipAddress`（string｜null；補登／匯入／舊資料為 null）。`mine=1`（員工端「我的打卡」，
+ * HR 看自己也算）與一般員工的回應完全沒有 IP 欄位——連 DB 欄位都不撈。
  */
 punchRouter.get(
   "/punch",
@@ -318,7 +341,12 @@ punchRouter.get(
       const self = await resolveSelf(tenantId, userId)
       const isHr = isHrRole(self?.role)
 
-      let query = supabaseAdmin.from("punch_records").select(SELECT_COLS).eq("tenant_id", tenantId)
+      // IP 只回給後台列表（HR 且非 mine）；其餘情境不撈欄位。
+      const includeIp = isHr && !mine
+      let query = supabaseAdmin
+        .from("punch_records")
+        .select(includeIp ? SELECT_COLS_WITH_IP : SELECT_COLS)
+        .eq("tenant_id", tenantId)
 
       if (mine) {
         // Caller explicitly asked for "my own" — pin to self no matter the role,
@@ -359,7 +387,8 @@ punchRouter.get(
         next(new Error(`GET /punch: ${error.message}`))
         return
       }
-      res.status(200).json({ records: data ?? [] })
+      const rows = (data ?? []) as unknown as Array<Record<string, unknown>>
+      res.status(200).json({ records: includeIp ? rows.map(withIpAddress) : rows })
     } catch (err) {
       next(err)
     }
@@ -519,6 +548,7 @@ punchRouter.post(
           punch_at: punchAt,
           type,
           source: "manual",
+          // 不記 IP（ip_address 留 NULL）：IP 代表「本人打卡當下的來源」，HR 代填的沒有意義。
         })
         .select("id")
         .single()

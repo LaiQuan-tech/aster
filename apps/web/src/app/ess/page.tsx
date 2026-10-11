@@ -225,6 +225,8 @@ function PunchCard({
           </Button>
         </div>
       )}
+      {/* 告知：打卡會存座標（GPS）與來源 IP（後端 POST /punch 記 punch_records.ip_address），IP 只有 HR 看得到。 */}
+      <p className="mt-2 text-center text-xs text-gray-500">打卡時會記錄位置與網路 IP，供公司查核出勤</p>
     </Card>
   );
 }

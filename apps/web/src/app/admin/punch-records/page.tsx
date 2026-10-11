@@ -20,6 +20,13 @@ const inputCls =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 const labelCls = "mb-1 block text-xs font-medium text-gray-500";
 
+/**
+ * 後台列表（GET /punch，HR 且沒帶 mine）每列多一個 ipAddress：打卡當下的來源 IP，
+ * 補登／匯入／IP 功能上線前的舊資料為 null。PunchRecord（lib/admin-api.ts）尚未宣告這個鍵，
+ * 先在這裡擴充；其他呼叫端（員工端 mine=1 等）拿不到這個欄位。
+ */
+type AdminPunchRecord = PunchRecord & { ipAddress?: string | null };
+
 const SOURCE_LABEL: Record<string, string> = {
   gps: "定位打卡",
   web: "網頁打卡",
@@ -50,7 +57,7 @@ function csvCell(value: string | number | null | undefined): string {
 }
 
 export default function PunchRecordsPage() {
-  const [records, setRecords] = useState<PunchRecord[]>([]);
+  const [records, setRecords] = useState<AdminPunchRecord[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -149,7 +156,7 @@ export default function PunchRecordsPage() {
   }
 
   function exportCsv() {
-    const header = ["department", "employee", "date", "time", "type", "source", "lat", "lng", "deviceId"];
+    const header = ["department", "employee", "date", "time", "type", "source", "lat", "lng", "deviceId", "ip"];
     const rows = records.map((record) => [
       deptName(record.employee_id),
       empLabel(record.employee_id),
@@ -160,6 +167,7 @@ export default function PunchRecordsPage() {
       record.lat,
       record.lng,
       record.device_id,
+      record.ipAddress,
     ]);
     const content = [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\n");
     const blob = new Blob([content], { type: "text/csv;charset=utf-8" });
@@ -344,7 +352,8 @@ export default function PunchRecordsPage() {
                   <th className="py-2 pr-4">日期</th>
                   <th className="py-2 pr-4">時間</th>
                   <th className="py-2 pr-4">資料類型</th>
-                  <th className="py-2">地點</th>
+                  <th className="py-2 pr-4">地點</th>
+                  <th className="py-2">IP</th>
                 </tr>
               </thead>
               <tbody>
@@ -355,7 +364,11 @@ export default function PunchRecordsPage() {
                     <td className="py-2 pr-4">{localDateKey(r.punch_at) || r.punch_at.slice(0, 10)}</td>
                     <td className="py-2 pr-4">{fmtHm(r.punch_at)}</td>
                     <td className="py-2 pr-4">{TYPE_LABEL[r.type]}</td>
-                    <td className="py-2">{locationText(r)}</td>
+                    <td className="py-2 pr-4">{locationText(r)}</td>
+                    <td className="py-2">
+                      {/* IPv4 一行放得下；IPv6 很長，限寬後折行，免得手機版把表格撐得更寬。 */}
+                      <span className="block max-w-[11rem] break-all font-mono text-xs text-gray-600">{r.ipAddress || "—"}</span>
+                    </td>
                   </tr>
                 ))}
               </tbody>
