@@ -89,8 +89,8 @@ async function writeShift<T>(
  */
 
 // GET /shifts — list this tenant's shifts. Readable by ANY tenant member
-// (matches the shifts_tenant_read RLS policy): employees need shift names to
-// render their 個人班表.
+// (matches the shifts_tenant_read RLS policy): the ESS leave form reads the
+// default shift (個人班表 was removed 2026-10-11).
 shiftsRouter.get(
   "/shifts",
   requireAuth,

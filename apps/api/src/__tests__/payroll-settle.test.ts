@@ -312,12 +312,12 @@ describe("F2 worktime settlement — wired @hr/rules engine", () => {
     expect(shiftRes.status).toBe(201)
     shiftId = shiftRes.body.id
 
-    // 2) schedule that shift for the employee on workDate.
-    const schedRes = await request(app)
-      .post("/schedules")
-      .set("Authorization", `Bearer ${A.adminToken}`)
-      .send({ employeeId: aEmployeeId, workDate, shiftId })
-    expect(schedRes.status).toBe(201)
+    // 2) schedule that shift for the employee on workDate. 班表功能已移除（2026-10-11，POST /schedules 404）：
+    //    直接寫 schedules 表——結算「有排班照班別」的分支保留給歷史資料，這裡用它測。
+    const { error: schedErr } = await supabaseAdmin
+      .from("schedules")
+      .insert({ tenant_id: A.tenantId, employee_id: aEmployeeId, work_date: workDate, shift_id: shiftId, status: "scheduled" })
+    expect(schedErr).toBeNull()
 
     // 3) punches: in 09:10, out 19:00 on the tenant's clock (Asia/Taipei =
     //    UTC+8 → 01:10Z / 11:00Z). Insert directly so we control exact

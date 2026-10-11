@@ -58,8 +58,8 @@ function effectiveDayType(dayMap: Map<string, CalendarDay>, date: string): Calen
 }
 
 /**
- * 單月格網（週日起）：null = 補位（非當月，不可互動）。與 ess/schedule 頁
- * calendarCells 同款 UTC 算法，避開時區位移造成的日期偏一天。
+ * 單月格網（週日起）：null = 補位（非當月，不可互動）。UTC 算法（原與已移除的
+ * ess/schedule 頁 calendarCells 同款），避開時區位移造成的日期偏一天。
  */
 function monthCells(year: number, month: number): (string | null)[] {
   const first = new Date(Date.UTC(year, month - 1, 1));

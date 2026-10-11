@@ -124,16 +124,13 @@ beforeAll(async () => {
   dayShiftId = shiftRes.body.id
 
   // --- 忘打卡 seed: both A employees are scheduled on SCAN_DATE -----------------
-  const schRes = await request(app)
-    .post("/schedules")
-    .set("Authorization", `Bearer ${A.adminToken}`)
-    .send({
-      assignments: [
-        { employeeId: emp1Id, workDate: SCAN_DATE, shiftId: dayShiftId },
-        { employeeId: emp2Id, workDate: SCAN_DATE, shiftId: dayShiftId },
-      ],
-    })
-  if (schRes.status !== 201) throw new Error(`beforeAll: seed schedules (${schRes.status})`)
+  // 班表功能已移除（2026-10-11，POST /schedules 404）：直接寫 schedules 表——缺卡掃描讀班表的分支
+  // 保留給歷史資料，這裡用它測。
+  const { error: schErr } = await supabaseAdmin.from("schedules").insert([
+    { tenant_id: A.tenantId, employee_id: emp1Id, work_date: SCAN_DATE, shift_id: dayShiftId, status: "scheduled" },
+    { tenant_id: A.tenantId, employee_id: emp2Id, work_date: SCAN_DATE, shift_id: dayShiftId, status: "scheduled" },
+  ])
+  if (schErr) throw new Error(`beforeAll: seed schedules: ${schErr.message}`)
 
   // emp2 has a COMPLETE in/out on SCAN_DATE; emp1 has NONE (→ no_in).
   const { error: prErr } = await supabaseAdmin.from("punch_records").insert([
@@ -144,10 +141,10 @@ beforeAll(async () => {
 
   // B is scheduled on SCAN_DATE with no punches too — proves cross-tenant
   // isolation (A's scan must never enqueue for B).
-  await request(app)
-    .post("/schedules")
-    .set("Authorization", `Bearer ${B.adminToken}`)
-    .send({ employeeId: bEmpId, workDate: SCAN_DATE })
+  const { error: bSchErr } = await supabaseAdmin
+    .from("schedules")
+    .insert({ tenant_id: B.tenantId, employee_id: bEmpId, work_date: SCAN_DATE, shift_id: null, status: "scheduled" })
+  if (bSchErr) throw new Error(`beforeAll: seed B schedule: ${bSchErr.message}`)
 
   // --- anomaly seeds (attendance_days) ----------------------------------------
   // emp1: 3 consecutive late days (consecutive_late) AND a big OT month
