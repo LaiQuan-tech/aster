@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   approveRequest,
   getPendingApprovals,
@@ -9,6 +9,21 @@ import {
   type PendingApproval,
   type RequestKind,
 } from "@/lib/ess-api";
+import {
+  batchActionLabel,
+  batchActionVerb,
+  batchSummaryLine,
+  batchSummaryTitle,
+  batchToastMessage,
+  batchToastTone,
+  isAllSelected,
+  runBatchDecision,
+  selectedInOrder,
+  summarizeBatch,
+  toggleId,
+  type BatchAction,
+  type BatchSummary,
+} from "@/lib/ess-approval-batch";
 import { invalidateEssState } from "@/lib/ess-state";
 import {
   approveDisbursement,
@@ -24,6 +39,7 @@ import {
   BottomSheet,
   Button,
   Card,
+  ConfirmDialog,
   EmptyState,
   Field,
   Icon,
@@ -50,6 +66,12 @@ type RequestAttachment = { id: string; fileName: string; sizeBytes: number; cont
  * 頁框（頂部列／底列／gate）由 ess/layout.tsx 提供，這裡只負責內容。
  *
  * M1：加班單超過月上限時卡片上多一顆「超過月上限」pill（超額時數另行給付）。
+ *
+ * 2026-10-11（0930 會議）：申請單可「多選」批次簽核——每張卡有勾選框、頂部有「全選」，勾選後底部
+ * 固定列出現「核准（N）」「駁回（N）」；駁回要填一個共同理由，核准會先確認一次。走 POST
+ * /requests/batch-decision（逐張檢查是不是輪到我簽；不是的那張回錯誤、其他照常），送出後在頂部
+ * 顯示結果（成功 N、失敗 M 與各張原因）並重抓清單。放款單是另一套 API、沒有批次端點，維持逐張。
+ * 純函式與 API 呼叫在 lib/ess-approval-batch.ts。
  */
 
 const KIND_LABEL: Record<RequestKind, string> = {
@@ -82,6 +104,12 @@ function kindLabel(kind: RequestKind): string {
 
 function applicantName(row: PendingApproval): string {
   return row.employee_name ?? row.employee_id.slice(0, 8);
+}
+
+/** 批次結果裡認得出是哪一張：「王小明 · 請假（特休）· 10/13 09:00」（同一個人送了好幾張時靠起始時間分辨）。 */
+function rowLabel(row: PendingApproval): string {
+  const leaveType = row.leave_type_name ? `（${row.leave_type_name}）` : "";
+  return `${applicantName(row)} · ${kindLabel(row.kind)}${leaveType} · ${fmtDateTime(row.start_at)}`;
 }
 
 /**
@@ -121,6 +149,34 @@ export default function ApprovalsPage() {
   const [rejectingDisb, setRejectingDisb] = useState<PendingDisbursementApproval | null>(null);
   const [disbReason, setDisbReason] = useState("");
   const [disbReasonError, setDisbReasonError] = useState<string | null>(null);
+  // 多選批次簽核（申請單；放款單維持逐張）
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchApproveOpen, setBatchApproveOpen] = useState(false);
+  const [batchRejectOpen, setBatchRejectOpen] = useState(false);
+  const [batchReason, setBatchReason] = useState("");
+  const [batchReasonError, setBatchReasonError] = useState<string | null>(null);
+  const [batchResult, setBatchResult] = useState<BatchSummary | null>(null);
+  const batchResultRef = useRef<HTMLDivElement>(null);
+  const selectAllRef = useRef<HTMLInputElement>(null);
+
+  // 清單重抓後被處理掉的單自動從勾選裡消失；送出的順序＝畫面順序。清單空了就退出多選。
+  const rowIds = useMemo(() => rows.map((row) => row.id), [rows]);
+  const selected = useMemo(() => selectedInOrder(selectedIds, rowIds), [selectedIds, rowIds]);
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const selecting = selectMode && rows.length > 0;
+  const allSelected = isAllSelected(selected, rowIds);
+
+  // 「全選」勾選框的半選狀態（只能用 property 設，不能用 attribute）。
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = selected.length > 0 && !allSelected;
+  }, [selected.length, allSelected, selecting]);
+
+  // 結果面板在清單頂端，使用者剛按完底部固定列，要把它帶進視野。
+  useEffect(() => {
+    if (batchResult) batchResultRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [batchResult]);
 
   const load = useCallback(async () => {
     const [res, disb] = await Promise.all([
@@ -274,6 +330,81 @@ export default function ApprovalsPage() {
     }
   }
 
+  /* ---------------------------------------------------- 多選批次簽核 --- */
+
+  function enterSelectMode() {
+    setSelectMode(true);
+    setSelectedIds([]);
+    setBatchResult(null);
+    setError(null);
+  }
+
+  function exitSelectMode() {
+    if (batchBusy) return;
+    setSelectMode(false);
+    setSelectedIds([]);
+  }
+
+  function toggleRow(id: string) {
+    if (batchBusy) return;
+    setSelectedIds((cur) => toggleId(cur, id));
+  }
+
+  function toggleAllRows() {
+    if (batchBusy) return;
+    setSelectedIds(allSelected ? [] : rowIds);
+  }
+
+  function openBatchReject() {
+    setBatchReason("");
+    setBatchReasonError(null);
+    setBatchRejectOpen(true);
+  }
+
+  function closeBatchReject() {
+    if (batchBusy) return;
+    setBatchRejectOpen(false);
+    setBatchReason("");
+    setBatchReasonError(null);
+  }
+
+  /**
+   * 送出批次：核准（不帶意見）或駁回（共同理由）。runBatchDecision 不丟例外、分批依序送，
+   * 逐張結果彙整成結果面板（成功 N、失敗 M 與各張原因）；之後退出多選並重抓清單與徽章。
+   */
+  async function runBatch(action: BatchAction, comment?: string) {
+    const ids = selected;
+    if (ids.length === 0 || batchBusy) return;
+    const labels = new Map(rows.map((row) => [row.id, rowLabel(row)] as const));
+    setBatchBusy(true);
+    setError(null);
+    try {
+      const results = await runBatchDecision({ ids, action, comment });
+      const summary = summarizeBatch(action, results, (id) => labels.get(id) ?? "這張單");
+      setBatchResult(summary);
+      toast.show(batchToastMessage(summary), batchToastTone(summary));
+      setBatchApproveOpen(false);
+      setBatchRejectOpen(false);
+      setBatchReason("");
+      setSelectMode(false);
+      setSelectedIds([]);
+      await afterDecision();
+    } catch (err) {
+      setError(friendlyError(err));
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
+  async function onConfirmBatchReject() {
+    const reason = batchReason.trim();
+    if (!reason) {
+      setBatchReasonError("駁回必須填寫理由，申請人會在通知裡看到。");
+      return;
+    }
+    await runBatch("reject", reason);
+  }
+
   /** 展開/收合附件清單；展開時才現拉 signed URL，並用 attachmentsById 快取。 */
   async function toggleAttachments(row: PendingApproval) {
     if (expandedAttachmentsId === row.id) {
@@ -305,9 +436,16 @@ export default function ApprovalsPage() {
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3 px-1">
         <SectionTitle>待我簽核</SectionTitle>
-        {!loading && rows.length + disbursements.length > 0 && (
-          <span className="text-xs text-gray-400">{rows.length + disbursements.length} 張</span>
-        )}
+        <div className="flex items-center gap-3">
+          {!loading && rows.length + disbursements.length > 0 && (
+            <span className="text-xs text-gray-400">{rows.length + disbursements.length} 張</span>
+          )}
+          {!loading && !selecting && rows.length >= 2 && (
+            <Button variant="secondary" onClick={enterSelectMode}>
+              多選
+            </Button>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -317,6 +455,54 @@ export default function ApprovalsPage() {
             重新整理
           </Button>
         </Card>
+      )}
+
+      {batchResult && (
+        <div ref={batchResultRef} role="status" className="scroll-mt-20">
+          <Card>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-base font-semibold text-gray-900">{batchSummaryTitle(batchResult)}</p>
+                <p className="mt-1 text-sm text-gray-600">{batchSummaryLine(batchResult)}</p>
+              </div>
+              <Button variant="ghost" className="-mr-2 -mt-1 shrink-0" onClick={() => setBatchResult(null)}>
+                關閉
+              </Button>
+            </div>
+            {batchResult.failures.length > 0 && (
+              <ul className="mt-3 space-y-2">
+                {batchResult.failures.map((failure) => (
+                  <li key={failure.id} className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">
+                    <p className="break-words font-medium">{failure.label}</p>
+                    <p className="mt-0.5 text-xs">{failure.reason}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {batchResult.failures.length > 0 && batchResult.okCount > 0 && (
+              <p className="mt-2 text-xs text-gray-400">成功的那幾張已經處理完成；失敗的仍留在下方清單，可以逐張處理。</p>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {!loading && selecting && (
+        <div className="flex items-center justify-between gap-3 rounded-2xl border border-gray-100 bg-white px-3 shadow-sm">
+          <label className="inline-flex min-h-11 flex-1 cursor-pointer items-center gap-3">
+            <input
+              ref={selectAllRef}
+              type="checkbox"
+              checked={allSelected}
+              disabled={batchBusy}
+              onChange={toggleAllRows}
+              className="h-6 w-6 cursor-pointer accent-[var(--brand)]"
+            />
+            <span className="text-sm font-medium text-gray-800">全選（{rows.length} 張）</span>
+          </label>
+          <Button variant="ghost" onClick={exitSelectMode} disabled={batchBusy}>
+            取消多選
+          </Button>
+        </div>
       )}
 
       {loading ? (
@@ -338,40 +524,58 @@ export default function ApprovalsPage() {
             const attachmentsOpen = expandedAttachmentsId === row.id;
             const reason = row.reason?.trim();
             const advance = row.advance_requested != null ? Number(row.advance_requested) : 0;
+            const checked = selecting && selectedSet.has(row.id);
             return (
               <li key={row.id}>
-                <Card>
-                  {/* 頭：申請人·部門｜種類＋假別｜相對時間 */}
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="truncate text-base font-semibold text-gray-900">
-                        {applicantName(row)}
-                        {row.department_name && (
-                          <span className="font-normal text-gray-500"> · {row.department_name}</span>
-                        )}
-                      </p>
-                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                        <Pill tone="brand">{kindLabel(row.kind)}</Pill>
-                        {row.leave_type_name && <Pill tone="blue">{row.leave_type_name}</Pill>}
-                        {row.kind === "ot" && row.payout && <Pill tone="gray">{PAYOUT_LABEL[row.payout]}</Pill>}
-                        {row.beyond_cap && (
-                          <Pill tone="red">
-                            超過月上限
-                            {row.beyond_cap_detail?.capMinutes
-                              ? `（${Math.round((row.beyond_cap_detail.capMinutes / 60) * 10) / 10} 小時）`
-                              : ""}
-                          </Pill>
-                        )}
-                        {row.total_steps > 1 && (
-                          <Pill tone="amber">
-                            第 {row.current_step}／{row.total_steps} 關
-                          </Pill>
-                        )}
+                <Card className={checked ? "ring-2 ring-[var(--brand)]" : undefined}>
+                  {/* 頭：（多選時：勾選框，觸控區 44px）申請人·部門｜種類＋假別｜相對時間；多選時點頭部也能勾選 */}
+                  <div className="flex items-start gap-1">
+                    {selecting && (
+                      <label className="-ml-2 -mt-1 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={batchBusy}
+                          onChange={() => toggleRow(row.id)}
+                          aria-label={`選取 ${rowLabel(row)}`}
+                          className="h-6 w-6 cursor-pointer accent-[var(--brand)]"
+                        />
+                      </label>
+                    )}
+                    <div
+                      className={`flex min-w-0 flex-1 items-start justify-between gap-2${selecting ? " cursor-pointer" : ""}`}
+                      onClick={selecting ? () => toggleRow(row.id) : undefined}
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-base font-semibold text-gray-900">
+                          {applicantName(row)}
+                          {row.department_name && (
+                            <span className="font-normal text-gray-500"> · {row.department_name}</span>
+                          )}
+                        </p>
+                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                          <Pill tone="brand">{kindLabel(row.kind)}</Pill>
+                          {row.leave_type_name && <Pill tone="blue">{row.leave_type_name}</Pill>}
+                          {row.kind === "ot" && row.payout && <Pill tone="gray">{PAYOUT_LABEL[row.payout]}</Pill>}
+                          {row.beyond_cap && (
+                            <Pill tone="red">
+                              超過月上限
+                              {row.beyond_cap_detail?.capMinutes
+                                ? `（${Math.round((row.beyond_cap_detail.capMinutes / 60) * 10) / 10} 小時）`
+                                : ""}
+                            </Pill>
+                          )}
+                          {row.total_steps > 1 && (
+                            <Pill tone="amber">
+                              第 {row.current_step}／{row.total_steps} 關
+                            </Pill>
+                          )}
+                        </div>
                       </div>
+                      <time dateTime={row.created_at} className="shrink-0 pt-0.5 text-xs text-gray-400">
+                        {relativeTime(row.created_at)}
+                      </time>
                     </div>
-                    <time dateTime={row.created_at} className="shrink-0 pt-0.5 text-xs text-gray-400">
-                      {relativeTime(row.created_at)}
-                    </time>
                   </div>
 
                   {/* 身：期間、事由、地點／預支（有才顯示）、附件 */}
@@ -444,8 +648,8 @@ export default function ApprovalsPage() {
                     )}
                   </dl>
 
-                  {/* 動作：核准一步＋駁回（開面板）；「加註意見」展開單行輸入 */}
-                  {commentOpen && (
+                  {/* 動作：核准一步＋駁回（開面板）；「加註意見」展開單行輸入。多選時改由底部固定列批次處理 */}
+                  {!selecting && commentOpen && (
                     <div className="mt-3">
                       <Input
                         value={approveComment[row.id] ?? ""}
@@ -457,15 +661,17 @@ export default function ApprovalsPage() {
                       />
                     </div>
                   )}
-                  <div className="mt-3 flex gap-2">
-                    <Button variant="primary" className="flex-1" loading={busy} onClick={() => void onApprove(row)}>
-                      核准
-                    </Button>
-                    <Button variant="secondary" className="flex-1" disabled={busy} onClick={() => openReject(row)}>
-                      駁回
-                    </Button>
-                  </div>
-                  {!commentOpen && (
+                  {!selecting && (
+                    <div className="mt-3 flex gap-2">
+                      <Button variant="primary" className="flex-1" loading={busy} onClick={() => void onApprove(row)}>
+                        核准
+                      </Button>
+                      <Button variant="secondary" className="flex-1" disabled={busy} onClick={() => openReject(row)}>
+                        駁回
+                      </Button>
+                    </div>
+                  )}
+                  {!selecting && !commentOpen && (
                     <button
                       type="button"
                       onClick={() => setCommentOpenId(row.id)}
@@ -549,6 +755,84 @@ export default function ApprovalsPage() {
           </ul>
         </>
       )}
+
+      {/* 多選批次簽核：底部固定列（手機浮在底部分頁列之上，桌機貼底）＋預留空間，最後一張卡不會被蓋住 */}
+      {!loading && selecting && (
+        <>
+          <div className="h-24" aria-hidden="true" />
+          <div className="no-print fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)_+_3.6rem)] z-40 border-t border-gray-200 bg-white/95 px-3 py-2 shadow-[0_-4px_12px_rgba(0,0,0,0.06)] backdrop-blur lg:bottom-0">
+            <div className="mx-auto flex max-w-3xl items-center gap-2">
+              <p className="shrink-0 text-sm text-gray-600" aria-live="polite">
+                已選 {selected.length} 張
+              </p>
+              <Button
+                variant="secondary"
+                size="lg"
+                className="flex-1"
+                disabled={selected.length === 0 || batchBusy}
+                onClick={openBatchReject}
+              >
+                {batchActionLabel("reject", selected.length)}
+              </Button>
+              <Button
+                variant="primary"
+                size="lg"
+                className="flex-1"
+                disabled={selected.length === 0}
+                loading={batchBusy && !batchRejectOpen}
+                onClick={() => setBatchApproveOpen(true)}
+              >
+                {batchActionLabel("approve", selected.length)}
+              </Button>
+            </div>
+          </div>
+        </>
+      )}
+
+      <ConfirmDialog
+        open={batchApproveOpen}
+        title={`${batchActionVerb("approve")} ${selected.length} 張單`}
+        message={`確定核准已勾選的 ${selected.length} 張單嗎？\n申請人會各自收到通知；有多關的單會送往下一關。`}
+        confirmLabel={batchActionLabel("approve", selected.length)}
+        busy={batchBusy}
+        onConfirm={() => void runBatch("approve")}
+        onCancel={() => setBatchApproveOpen(false)}
+      />
+
+      <BottomSheet open={batchRejectOpen} onClose={closeBatchReject} title={`駁回 ${selected.length} 張單`}>
+        <div className="space-y-4">
+          <p className="text-sm text-gray-600">已勾選的 {selected.length} 張單會一起駁回，每位申請人都會收到同一段理由。</p>
+          <Field
+            label="共同駁回理由"
+            required
+            htmlFor="batch-reject-reason"
+            hint="申請人會在通知裡看到這段話。"
+            error={batchReasonError ?? undefined}
+          >
+            <Textarea
+              id="batch-reject-reason"
+              value={batchReason}
+              onChange={(e) => {
+                setBatchReason(e.target.value);
+                if (batchReasonError) setBatchReasonError(null);
+              }}
+              placeholder="例：本週人力不足，請改期"
+              maxLength={250}
+              aria-invalid={batchReasonError ? "true" : undefined}
+            />
+          </Field>
+          <Button
+            variant="danger"
+            block
+            size="lg"
+            loading={batchBusy}
+            disabled={!batchReason.trim() || selected.length === 0}
+            onClick={() => void onConfirmBatchReject()}
+          >
+            確認{batchActionLabel("reject", selected.length)}
+          </Button>
+        </div>
+      </BottomSheet>
 
       <BottomSheet
         open={rejectingDisb !== null}

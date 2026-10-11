@@ -1397,11 +1397,18 @@ requestsRouter.post(
 )
 
 /**
- * POST /requests/batch-decision — back-office batch approve/reject.
+ * POST /requests/batch-decision — 一次核准／駁回多張單（上限 100 張）。
  *
- * The current approver may batch-action their own queue. HR/platform admins can
- * also override tenant requests from the admin console, with each result
- * returned independently so one bad row does not discard the whole batch.
+ * 任何登入的員工都能呼叫，不限 HR：ESS「待我簽核」的主管多選批次簽核與後台批次列走同一支。
+ * 授權**逐張**判斷（decideOneRequest 與單筆 approve／reject 同一套）：只有該張單**目前關卡**的
+ * 候選簽核人（approver_emp_id 或 candidate_emp_ids 內）能決定；不是 → 該張回
+ * `{ ok:false, error:'not_current_approver' }`，其他張照常處理，整批 HTTP 仍是 200。
+ * 只有 HR／平台管理員可「代簽」不是自己關卡的單（allowHrOverride）。一般員工丟任意 id 進來，
+ * 每張都會因為不是候選人被拒，什麼都不會寫。
+ *
+ * 每張的結果各自獨立回傳（`results`，依去重後的 ids 順序）：某一張失敗、甚至丟例外，
+ * 只會讓那一張回 `internal_error`，不會讓整批 500，也不會回滾已處理好的其他張。
+ * 同一張單在 ids 裡出現多次只處理第一次（否則同一人若是兩關的候選，會被連簽兩關）。
  */
 requestsRouter.post(
   "/requests/batch-decision",
@@ -1428,18 +1435,33 @@ requestsRouter.post(
         return
       }
 
+      // uuid 大小寫不同仍是同一張（Postgres uuid 比對不分大小寫）：用小寫去重，保留第一次出現的寫法與順序。
+      const seen = new Set<string>()
+      const ids = parsed.data.ids.filter((id) => {
+        const key = id.toLowerCase()
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+
       const results: DecisionOutcome[] = []
-      for (const requestId of parsed.data.ids) {
-        results.push(
-          await decideOneRequest({
-            action: parsed.data.action,
-            tenantId,
-            requestId,
-            actor: self,
-            comment: parsed.data.comment,
-            allowHrOverride: true,
-          }),
-        )
+      for (const requestId of ids) {
+        try {
+          results.push(
+            await decideOneRequest({
+              action: parsed.data.action,
+              tenantId,
+              requestId,
+              actor: self,
+              comment: parsed.data.comment,
+              allowHrOverride: true,
+            }),
+          )
+        } catch (err) {
+          // 單張丟例外（連線中斷…）只讓這張失敗；已經決定好的張不會因此被當成沒處理、整批也不 500。
+          logger.error({ err, tenantId, requestId, actorEmpId: self.id }, "batch-decision: one request threw")
+          results.push({ ok: false, id: requestId, error: "internal_error" })
+        }
       }
 
       res.status(200).json({
