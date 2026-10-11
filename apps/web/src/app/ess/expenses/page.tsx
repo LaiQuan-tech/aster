@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Card, Field, InlineError, Input, Select } from "@/components/ess-ui";
 import {
   getMyExpenseCategories,
@@ -15,13 +15,29 @@ import {
   type MyTrip,
   type MyAdvance,
 } from "@/lib/ess-api";
+import {
+  advanceDate,
+  advanceOptionLabel,
+  advanceStatusLabel,
+  advanceSubject,
+  bindableAdvances,
+  expenseErrorMessage,
+  type AdvanceRequestInfo,
+} from "@/lib/advance-view";
+import { localDateKey, todayKey } from "@/lib/ess-format";
 
+/** GET /advances 每列附對應申請單的摘要（2026-10-11）；MyAdvance 沒宣告，這裡補。 */
+type AdvanceRow = MyAdvance & { request?: AdvanceRequestInfo | null; created_at?: string };
+/** GET /expenses 的列另外有 advance_id／trip_request_id；MyExpenseClaim 沒宣告，這裡補。 */
+type ClaimRow = MyExpenseClaim & { advance_id?: string | null; trip_request_id?: string | null };
+
+// 本地日期（不用 UTC 切片：台北每月 1 日 00:00–08:00 UTC 還在上個月，預設日期／月份會差一個月）。
 function thisPeriod(): string {
-  return new Date().toISOString().slice(0, 7);
+  return todayKey().slice(0, 7);
 }
 
 function today(): string {
-  return new Date().toISOString().slice(0, 10);
+  return todayKey();
 }
 
 function money(n: number): string {
@@ -37,7 +53,7 @@ const STATUS_LABEL: Record<string, string> = {
 
 export default function EssExpensesPage() {
   const [categories, setCategories] = useState<MyExpenseCategory[]>([]);
-  const [claims, setClaims] = useState<MyExpenseClaim[]>([]);
+  const [claims, setClaims] = useState<ClaimRow[]>([]);
   const [period, setPeriod] = useState(thisPeriod);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -52,7 +68,10 @@ export default function EssExpensesPage() {
   // 出差軌（模組三第 2 條）：這類報銷必須綁一張已核准的出差單。
   const [trips, setTrips] = useState<MyTrip[]>([]);
   const [tripRequestId, setTripRequestId] = useState("");
-  const [advances, setAdvances] = useState<MyAdvance[]>([]);
+  const [advances, setAdvances] = useState<AdvanceRow[]>([]);
+  // 這筆是哪次預支的花費（選填）：員工選了「先預支」的出差／零用金，回來報銷時在這裡選對應那一次，
+  // 公司核銷預支時才算得到這筆（多退少補）；自行墊付的留空，走月報銷。
+  const [advanceId, setAdvanceId] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -76,6 +95,22 @@ export default function EssExpensesPage() {
   }, [load]);
 
   const selected = categories.find((c) => c.id === categoryId);
+  // 尚未核銷（已核准待撥款、已撥款待核銷）的預支，新的在前。
+  const bindable = useMemo(() => bindableAdvances(advances), [advances]);
+  // 已核銷的預支：綁它的憑證已鎖（API 回 409 advance_settled），畫面不再給「撤回」。
+  const settledAdvanceIds = useMemo(
+    () => new Set(advances.filter((a) => a.status === "settled").map((a) => a.id)),
+    [advances],
+  );
+  // 定額補貼（屬薪資所得）不能綁預支：不顯示預支欄位、送出也不帶。
+  const allowanceSelected = selected?.nature === "allowance";
+  // 選的項目若已不在清單裡（例如頁面開著時那筆預支剛被核銷、重新載入後不見了），視為沒選——
+  // 否則 <select> 顯示「不是預支的花費」，送出卻還帶著舊 id 被 API 擋（invalid_advance）而且重送也一樣。
+  const effectiveAdvanceId = !allowanceSelected && bindable.some((a) => a.id === advanceId) ? advanceId : "";
+  const effectiveTripId = trips.some((t) => t.id === tripRequestId) ? tripRequestId : "";
+  // 選的出差單若已開了預支，送出時後端會自動綁上（沒選預支也一樣；定額補貼不綁）。
+  const tripAdvance =
+    effectiveTripId && !allowanceSelected ? bindable.find((a) => a.request_id === effectiveTripId) : undefined;
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -88,18 +123,27 @@ export default function EssExpensesPage() {
         amount: Number(amount),
         incurredOn,
         note: note.trim() || undefined,
-        tripRequestId: selected?.requires_trip_approval ? tripRequestId : undefined,
+        // 類別要求出差單時必帶；沒要求時選了就帶（自行墊付的出差憑證靠它對回哪一趟）。
+        tripRequestId: effectiveTripId || undefined,
+        advanceId: effectiveAdvanceId || undefined,
       });
       // 憑證跟著單子一起送：事前審核可以省，憑證不能省。
       if (receipt) await uploadExpenseReceipt(created.id, receipt);
-      setMessage(`已送出，歸屬 ${created.period} 月結`);
+      // 綁了預支（自己選的，或該趟出差的預支被自動綁上）→ 隨預支核銷；否則歸屬月結。
+      const boundAdvance = effectiveAdvanceId || (created as { advanceId?: string | null }).advanceId;
+      setMessage(
+        boundAdvance
+          ? "已送出，這筆會隨預支一起核銷（多退少補），不會再隨月結另外發放"
+          : `已送出，歸屬 ${created.period} 月結`,
+      );
       setAmount("");
       setNote("");
       setReceipt(null);
       setTripRequestId("");
+      setAdvanceId("");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "送出失敗");
+      setError(expenseErrorMessage(err, "送出失敗"));
     } finally {
       setBusy(false);
     }
@@ -116,7 +160,7 @@ export default function EssExpensesPage() {
       await cancelExpense(id, reason.trim());
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "撤回失敗");
+      setError(expenseErrorMessage(err, "撤回失敗"));
     }
   }
 
@@ -161,7 +205,8 @@ export default function EssExpensesPage() {
             )}
           </div>
 
-          {/* 出差軌：日常費用不必事前審核，長途出差必須先核准。 */}
+          {/* 出差軌：日常費用不必事前審核，長途出差必須先核准——類別要求時必選；沒要求時選填
+              （自行墊付的出差憑證靠它對回哪一趟；日常費用留空）。 */}
           {selected?.requires_trip_approval && (
             <div>
               {trips.length === 0 ? (
@@ -175,14 +220,14 @@ export default function EssExpensesPage() {
                 <Field label="綁定出差單" htmlFor="trip" hint="此類別的費用須掛在已核准的出差之下。">
                   <Select
                     id="trip"
-                    value={tripRequestId}
+                    value={effectiveTripId}
                     onChange={(e) => setTripRequestId(e.target.value)}
                     required
                   >
                     <option value="">請選擇</option>
                     {trips.map((t) => (
                       <option key={t.id} value={t.id}>
-                        {t.start_at.slice(0, 10)}
+                        {localDateKey(t.start_at)}
                         {t.location ? ` · ${t.location}` : ""}
                       </option>
                     ))}
@@ -190,6 +235,43 @@ export default function EssExpensesPage() {
                 </Field>
               )}
             </div>
+          )}
+          {selected && !selected.requires_trip_approval && trips.length > 0 && (
+            <Field label="綁定出差單（選填）" htmlFor="trip-optional" hint="這筆是出差的花費就選對應那一趟；日常費用留空。">
+              <Select id="trip-optional" value={effectiveTripId} onChange={(e) => setTripRequestId(e.target.value)}>
+                <option value="">不綁定</option>
+                {trips.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {localDateKey(t.start_at)}
+                    {t.location ? ` · ${t.location}` : ""}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
+
+          {/* 預支沖抵：有未核銷預支的人才會出現。選了，這筆在預支核銷時一起算（多退少補），不再隨月薪另外發放。 */}
+          {bindable.length > 0 && !allowanceSelected && (
+            <Field
+              label="這筆是哪次預支的花費？（選填）"
+              htmlFor="adv"
+              hint={
+                effectiveAdvanceId
+                  ? "這筆會跟著該次預支一起核銷（多退少補），不會再隨月結另外發放。"
+                  : tripAdvance
+                    ? "你選的出差單有預支，送出時會自動綁到該筆預支。"
+                    : "用預支的錢付的，請選對應那一次，公司核銷時才算得到；自行墊付的留空即可。"
+              }
+            >
+              <Select id="adv" value={effectiveAdvanceId} onChange={(e) => setAdvanceId(e.target.value)}>
+                <option value="">不是預支的花費（自行墊付，隨月結報銷）</option>
+                {bindable.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {advanceOptionLabel(a)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
           )}
 
           <div className="grid gap-4 sm:grid-cols-2">
@@ -204,7 +286,7 @@ export default function EssExpensesPage() {
                 required
               />
             </Field>
-            <Field label="發生日期" htmlFor="date" hint="填實際發生日。上月的單這月才交也沒關係，會歸到本月月結。">
+            <Field label="發生日期" htmlFor="date" hint="填實際發生日。該月份若已月結鎖定就不能再送出；用預支的錢付的（選了預支）會自動歸入本月。">
               <Input
                 id="date"
                 type="date"
@@ -239,7 +321,7 @@ export default function EssExpensesPage() {
             block
             size="lg"
             loading={busy}
-            disabled={!categoryId || (selected?.requires_trip_approval === true && !tripRequestId)}
+            disabled={!categoryId || (selected?.requires_trip_approval === true && !effectiveTripId)}
           >
             {busy ? "送出中…" : "送出"}
           </Button>
@@ -249,7 +331,8 @@ export default function EssExpensesPage() {
       {advances.length > 0 && (
         <Card title="我的預支">
           <p className="mb-4 text-xs text-gray-500">
-            已撥款但尚未核銷的金額，請憑單據報銷後由公司沖抵，多退少補。
+            已撥款但尚未核銷的金額，請憑單據報銷後由公司沖抵，多退少補。新增單據時，在「這筆是哪次預支的花費？」
+            選對應那一次。
           </p>
           <ul className="space-y-2">
             {advances.map((a) => {
@@ -263,15 +346,16 @@ export default function EssExpensesPage() {
                     <div>
                       <div className="font-medium text-gray-900">
                         {money(Number(a.amount))} 元
+                        <span className="ml-2 text-xs font-normal text-gray-500">
+                          {advanceDate(a)} {advanceSubject(a)}
+                        </span>
                       </div>
                       <div className="text-xs text-gray-500">
-                        {a.status === "requested"
-                          ? "已核准，尚未撥款"
-                          : a.status === "paid"
-                            ? `已撥款 ${a.paid_at?.slice(0, 10) ?? ""}・待核銷`
-                            : a.status === "settled"
-                              ? `已核銷 ${a.settled_at?.slice(0, 10) ?? ""}`
-                              : a.status}
+                        {a.status === "paid"
+                          ? `已撥款 ${a.paid_at?.slice(0, 10) ?? ""}・待核銷`
+                          : a.status === "settled"
+                            ? `已核銷 ${a.settled_at?.slice(0, 10) ?? ""}`
+                            : advanceStatusLabel(a.status)}
                       </div>
                     </div>
                     {a.status === "settled" && bal !== null && (
@@ -325,6 +409,11 @@ export default function EssExpensesPage() {
                             補貼
                           </span>
                         )}
+                        {c.advance_id && (
+                          <span className="ml-2 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-700">
+                            隨預支核銷
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs text-gray-500">
                         {c.incurred_on}
@@ -335,7 +424,7 @@ export default function EssExpensesPage() {
                       <span className="text-xs text-gray-500">
                         {STATUS_LABEL[c.status] ?? c.status}
                       </span>
-                      {c.status === "submitted" && (
+                      {c.status === "submitted" && !(c.advance_id && settledAdvanceIds.has(c.advance_id)) && (
                         <button
                           type="button"
                           onClick={() => void onCancel(c.id)}

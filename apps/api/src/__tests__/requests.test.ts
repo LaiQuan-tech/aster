@@ -1391,7 +1391,9 @@ describe("WP2 notifications — scope=mine／unread=1／unread-count／read-all"
  *
  * 這一段自己建「出差部」與兩位同仁（部門主管＝mgr、老闆＝features.approval.
  * fallbackApproverEmpId），不動前面案例用到的 emp1／emp2，也不留固定名單
- * （business_trip／business_trip_intercity／wfh 的 flow 一律清空，走預設鏈）。
+ * （business_trip／business_trip_intercity／petty_cash／wfh 的 flow 一律清空，走預設鏈）。
+ * 2026-10-11 起零用金與出差／公出（不分市內、跨縣市）一律「主管 → 老闆」兩層；
+ * emp1 沒有部門 → 沒有部門主管 → 只剩老闆一關。
  * ──────────────────────────────────────────────────────────────────────── */
 
 /** leave_requests.beyond_cap（migration 0050）是否已套到正式庫。 */
@@ -1401,8 +1403,9 @@ async function beyondCapMigrated(): Promise<boolean> {
 }
 const beyondCapReady = await beyondCapMigrated()
 
-describe("WP2 wfh／跨縣市出差／市內公出 — 簽核鏈", () => {
+describe("WP2 wfh／出差／公出／零用金 — 簽核鏈（2026-10-11 起零用金與出差／公出一律主管＋老闆）", () => {
   let bossId: string
+  let bossToken: string
   let tripEmpId: string
   let tripToken: string
 
@@ -1415,6 +1418,7 @@ describe("WP2 wfh／跨縣市出差／市內公出 — 簽核鏈", () => {
       "employee",
     )
     bossId = boss.employeeId
+    bossToken = boss.token
 
     const dept = await request(app)
       .post("/departments")
@@ -1444,8 +1448,8 @@ describe("WP2 wfh／跨縣市出差／市內公出 — 簽核鏈", () => {
       .send({ features: { approval: { fallbackApproverEmpId: bossId } } })
     expect(settings.status).toBe(200)
 
-    // 三種 kind 都不設固定名單 → 走主管／老闆預設鏈。
-    for (const kind of ["business_trip", "business_trip_intercity", "wfh"]) {
+    // 這幾種 kind 都不設固定名單 → 走主管／老闆預設鏈（出差／公出／零用金一律主管 → 老闆）。
+    for (const kind of ["business_trip", "business_trip_intercity", "petty_cash", "wfh"]) {
       const res = await request(app)
         .put(`/approval-flows/${kind}`)
         .set("Authorization", `Bearer ${A.adminToken}`)
@@ -1544,7 +1548,7 @@ describe("WP2 wfh／跨縣市出差／市內公出 — 簽核鏈", () => {
     expect(midRow?.current_approver_emp_id).toBe(bossId)
   })
 
-  it("市內公出 → 只有主管一關（不經老闆）", async () => {
+  it("市內公出 → 兩關：主管 → 老闆（2026-10-11 起一律主管＋老闆；以前只有主管一關）", async () => {
     const filed = await request(app)
       .post("/requests")
       .set("Authorization", `Bearer ${tripToken}`)
@@ -1558,10 +1562,81 @@ describe("WP2 wfh／跨縣市出差／市內公出 — 簽核鏈", () => {
         hours: 4,
       })
     expect(filed.status).toBe(201)
-    expect(filed.body.approvalSource).toBe("manager")
-    const steps = filed.body.steps as Array<{ approverEmpId: string }>
-    expect(steps.length).toBe(1)
-    expect(steps[0].approverEmpId).toBe(mgrId)
+    expect(filed.body.approvalSource).toBe("boss_final")
+    const steps = filed.body.steps as Array<{ approverEmpId: string; kind: string | null }>
+    expect(steps.map((s) => s.approverEmpId)).toEqual([mgrId, bossId])
+    expect(steps.map((s) => s.kind)).toEqual(["manager", "fallback"])
+  })
+
+  it("零用金 → 兩關：主管 → 老闆；沒有部門主管的人（emp1 沒有部門）→ 只剩老闆一關", async () => {
+    const withManager = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${tripToken}`)
+      .send({
+        kind: "petty_cash",
+        startAt: "2027-10-14T01:00:00.000Z",
+        endAt: "2027-10-14T01:00:00.000Z",
+        advanceRequested: 1500,
+        reason: "採買活動物資",
+      })
+    expect(withManager.status).toBe(201)
+    expect(withManager.body.approvalSource).toBe("boss_final")
+    expect((withManager.body.steps as Array<{ approverEmpId: string }>).map((s) => s.approverEmpId)).toEqual([mgrId, bossId])
+
+    const noManager = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "petty_cash",
+        startAt: "2027-10-14T02:00:00.000Z",
+        endAt: "2027-10-14T02:00:00.000Z",
+        advanceRequested: 800,
+        reason: "快遞費",
+      })
+    expect(noManager.status).toBe(201)
+    expect((noManager.body.steps as Array<{ approverEmpId: string }>).map((s) => s.approverEmpId)).toEqual([bossId])
+  })
+
+  it("費用方式：先預支（advanceRequested>0）核准後才開預支；自行墊付（沒帶）不開", async () => {
+    const send = (body: Record<string, unknown>) =>
+      request(app).post("/requests").set("Authorization", `Bearer ${tripToken}`).send(body)
+    const approveBoth = async (requestId: string) => {
+      const first = await request(app).post(`/requests/${requestId}/approve`).set("Authorization", `Bearer ${mgrToken}`).send({})
+      expect(first.status).toBe(200)
+      expect(first.body.status).toBe("pending")
+      const second = await request(app).post(`/requests/${requestId}/approve`).set("Authorization", `Bearer ${bossToken}`).send({})
+      expect(second.status).toBe(200)
+      expect(second.body.status).toBe("approved")
+    }
+    const advanceRows = async (requestId: string) => {
+      const { data } = await supabaseAdmin.from("advances").select("id, kind, amount, status").eq("request_id", requestId)
+      return data ?? []
+    }
+
+    const withAdvance = await send({
+      kind: "petty_cash",
+      startAt: "2027-10-15T01:00:00.000Z",
+      endAt: "2027-10-15T01:00:00.000Z",
+      advanceRequested: 2500,
+      reason: "先預支",
+    })
+    expect(withAdvance.status).toBe(201)
+    await approveBoth(withAdvance.body.requestId as string)
+    const opened = await advanceRows(withAdvance.body.requestId as string)
+    expect(opened).toHaveLength(1)
+    expect(opened[0]).toMatchObject({ kind: "petty_cash", status: "requested" })
+    expect(Number(opened[0].amount)).toBe(2500)
+
+    const selfPaid = await send({
+      kind: "petty_cash",
+      startAt: "2027-10-15T02:00:00.000Z",
+      endAt: "2027-10-15T02:00:00.000Z",
+      estimatedCost: 2500,
+      reason: "自行墊付",
+    })
+    expect(selfPaid.status).toBe(201)
+    await approveBoth(selfPaid.body.requestId as string)
+    expect(await advanceRows(selfPaid.body.requestId as string)).toHaveLength(0)
   })
 
   it("海外出差也走老闆關（tripScope 只要不是 local）", async () => {

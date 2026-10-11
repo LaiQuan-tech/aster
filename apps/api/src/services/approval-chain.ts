@@ -11,9 +11,11 @@
  *               覆核：候選＝全部在職 hr_admin，排除申請人本人與前面關卡已出現
  *               的人（排除後沒人就不排除）。整條鏈是空的 → no_approver_available。
  *
- * `requireBossFinal`（W2 跨縣市出差：老闆簽核才成立）：
+ * `requireBossFinal`（老闆簽核才成立；2026-10-11 起零用金與出差／公出一律帶上，
+ *   之前只有 W2 跨縣市出差，見 routes/requests.ts flowRouteFor）：
  *   無 flow／mode=manager／list 名單空 → 主管鏈**每人一關** → 老闆最後一關（老闆已在
- *   主管鏈內就不重複、老闆是本人就跳過）；主管與老闆都沒有 → 第一位 hr_admin 退路。
+ *   主管鏈內就不重複、老闆是本人就跳過）；沒有部門主管 → 只剩老闆一關；主管與老闆都沒有
+ *   （含「老闆本人送單、又沒有主管」）→ 第一位 hr_admin 退路（有第二位 HR 時避開本人）。
  *   list 名單非空 → 名單照走（HR 明訂名單優先）。manager_hr → 主管逐關 → 老闆（不在
  *   前面關卡時插入）→ HR 覆核（覆核關維持在最後，性質是覆核不是核准）。
  *
@@ -58,7 +60,7 @@ export interface ChainCandidates {
   hrAdminEmpIds: string[]
   /** 全部在職 accountant，created_at 升冪（放款鏈的會計關候選；假單鏈不用）。 */
   accountantEmpIds?: string[]
-  /** 老闆必須是最後一關（跨縣市出差）；見檔頭。 */
+  /** 老闆必須是最後一關（零用金、出差／公出）；見檔頭。 */
   requireBossFinal?: boolean
 }
 

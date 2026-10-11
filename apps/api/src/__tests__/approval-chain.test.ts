@@ -7,6 +7,7 @@ import {
   type ChainCandidates,
 } from "../services/approval-chain"
 import { managerChainFromDepartments } from "../middleware/scope"
+import { flowRouteFor } from "../routes/requests"
 import { stepCandidates, isStepCandidate } from "../services/approval-steps"
 import { buildNotificationRows } from "../services/notify"
 
@@ -237,6 +238,153 @@ describe("pickApproverChain — requireBossFinal（跨縣市出差：老闆最�
       steps: [one(MGR, "manager")],
       source: "manager",
     })
+  })
+})
+
+/**
+ * 2026-10-11 業主拍板：零用金（petty_cash）與出差／公出（business_trip，不分 trip_type、不分 tripScope）
+ * 一律「主管＋老闆」兩層。「哪個 kind 帶 requireBossFinal、查哪條 flow」由 routes/requests.ts 的
+ * flowRouteFor 決定；鏈怎麼組仍是 pickApproverChain（requireBossFinal）——這裡把兩者接起來驗。
+ * 路由層的整條送單流程（含建立 approval_steps、通知、核准後開預支）見 approval-boss-final.test.ts。
+ */
+describe("flowRouteFor — 哪些申請走老闆最後一關、查哪條流程", () => {
+  it.each([
+    // [kind, tripScope, flowKind, requireBossFinal]
+    ["petty_cash", null, "petty_cash", true],
+    ["business_trip", null, "business_trip", true], // 沒帶 tripScope ＝ 市內
+    ["business_trip", undefined, "business_trip", true],
+    ["business_trip", "local", "business_trip", true], // 市內公出也要老闆
+    ["business_trip", "domestic_intercity", "business_trip_intercity", true], // 跨縣市仍查 intercity 流程設定
+    ["business_trip", "overseas", "business_trip_intercity", true],
+  ] as const)("%s／%s → 查 %s、requireBossFinal=%s", (kind, scope, flowKind, requireBossFinal) => {
+    expect(flowRouteFor(kind, scope)).toEqual({ flowKind, requireBossFinal })
+  })
+
+  it.each(["leave", "ot", "fix_punch", "wfh"])("%s 不受影響：查自己的 flow、不加老闆關（即使誤帶 tripScope）", (kind) => {
+    expect(flowRouteFor(kind, null)).toEqual({ flowKind: kind, requireBossFinal: false })
+    expect(flowRouteFor(kind, "domestic_intercity")).toEqual({ flowKind: kind, requireBossFinal: false })
+  })
+})
+
+describe("零用金／出差／公出的簽核關卡：flowRouteFor ＋ pickApproverChain（2026-10-11 主管＋老闆兩層）", () => {
+  /** 與 POST /requests 相同的組法：kind＋tripScope → requireBossFinal → 鏈。 */
+  function chainOf(kind: string, tripScope: string | null, over: Partial<ChainCandidates> = {}) {
+    return pickApproverChain(base({ ...over, requireBossFinal: flowRouteFor(kind, tripScope).requireBossFinal }))
+  }
+
+  const withManager = { managerEmpIds: [MGR], fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1] }
+
+  it("零用金：有主管 → 兩關（主管、老闆）", () => {
+    expect(chainOf("petty_cash", null, withManager)).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager"), one(BOSS, "fallback")],
+      source: "boss_final",
+    })
+  })
+
+  it("零用金：沒有部門主管 → 一關（老闆）", () => {
+    expect(chainOf("petty_cash", null, { fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1] })).toEqual({
+      ok: true,
+      steps: [one(BOSS, "fallback")],
+      source: "boss_final",
+    })
+  })
+
+  it("市內公出（outing、tripScope=local）與沒帶 tripScope 的公出：兩關（主管、老闆）", () => {
+    const expected = { ok: true, steps: [one(MGR, "manager"), one(BOSS, "fallback")], source: "boss_final" }
+    expect(chainOf("business_trip", "local", withManager)).toEqual(expected)
+    expect(chainOf("business_trip", null, withManager)).toEqual(expected)
+  })
+
+  it("跨縣市／海外出差：兩關（主管、老闆），與以前相同", () => {
+    const expected = { ok: true, steps: [one(MGR, "manager"), one(BOSS, "fallback")], source: "boss_final" }
+    expect(chainOf("business_trip", "domestic_intercity", withManager)).toEqual(expected)
+    expect(chainOf("business_trip", "overseas", withManager)).toEqual(expected)
+  })
+
+  it("主管鏈有兩層 → 逐關簽完，老闆最後一關（共三關）", () => {
+    expect(chainOf("petty_cash", null, { ...withManager, managerEmpIds: [MGR, MGR2] })).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager"), one(MGR2, "manager"), one(BOSS, "fallback")],
+      source: "boss_final",
+    })
+  })
+
+  it("主管就是老闆 → 一關（不重複）", () => {
+    for (const [kind, scope] of [
+      ["petty_cash", null],
+      ["business_trip", "local"],
+      ["business_trip", "domestic_intercity"],
+    ] as const) {
+      expect(chainOf(kind, scope, { managerEmpIds: [BOSS], fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1] })).toEqual({
+        ok: true,
+        steps: [one(BOSS, "manager")],
+        source: "boss_final",
+      })
+    }
+  })
+
+  it("老闆本人送單：老闆關跳過本人——有上層主管只剩主管關；沒有主管就退到第一位 hr_admin；都沒有 → no_approver_available", () => {
+    // 老闆自己（employeeId = BOSS）在某部門、上面還有主管 → 只剩主管那一關
+    expect(chainOf("petty_cash", null, { employeeId: BOSS, managerEmpIds: [MGR], fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1] })).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager")],
+      source: "boss_final",
+    })
+    // 沒有主管（老闆通常是部門根主管，主管鏈排除本人後是空的）→ 退到 hr_admin（避開本人）
+    expect(chainOf("business_trip", "local", { employeeId: BOSS, fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1, HR2] })).toEqual({
+      ok: true,
+      steps: [one(HR1, "hr_admin")],
+      source: "hr_admin",
+    })
+    expect(chainOf("business_trip", "local", { employeeId: HR1, fallbackApproverEmpId: HR1, hrAdminEmpIds: [HR1, HR2] })).toEqual({
+      ok: true,
+      steps: [one(HR2, "hr_admin")],
+      source: "hr_admin",
+    })
+    expect(chainOf("petty_cash", null, { employeeId: BOSS, fallbackApproverEmpId: BOSS })).toEqual({
+      ok: false,
+      error: "no_approver_available",
+    })
+  })
+
+  it("HR 在後台設了固定名單（mode=list 且名單非空）→ 名單照走、優先於預設的主管＋老闆（既有行為不變）", () => {
+    for (const [kind, scope] of [
+      ["petty_cash", null],
+      ["business_trip", "local"],
+      ["business_trip", "overseas"],
+    ] as const) {
+      expect(chainOf(kind, scope, { ...withManager, flow: { mode: "list", approverEmpIds: [L1] } })).toEqual({
+        ok: true,
+        steps: [one(L1, "list")],
+        source: "list",
+      })
+    }
+  })
+
+  it("請假、加班、補卡、在家工作不受影響：仍是直屬主管單關（不加老闆）", () => {
+    for (const kind of ["leave", "ot", "fix_punch", "wfh"]) {
+      expect(chainOf(kind, null, { ...withManager, managerEmpIds: [MGR, MGR2] })).toEqual({
+        ok: true,
+        steps: [one(MGR, "manager")],
+        source: "manager",
+      })
+      // 沒有主管 → 老闆代主管關（一關，kind=fallback，source=fallback），與以前相同
+      expect(chainOf(kind, null, { fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1] })).toEqual({
+        ok: true,
+        steps: [one(BOSS, "fallback")],
+        source: "fallback",
+      })
+    }
+    // 補卡的 manager_hr 流程（正式租戶 fix_punch 的設定）：主管 → HR 覆核，沒有老闆關
+    expect(
+      chainOf("fix_punch", null, {
+        flow: { mode: "manager_hr", approverEmpIds: [] },
+        managerEmpIds: [MGR],
+        fallbackApproverEmpId: BOSS,
+        hrAdminEmpIds: [HR1],
+      }),
+    ).toEqual({ ok: true, steps: [one(MGR, "manager"), { candidateEmpIds: [HR1], kind: "hr" }], source: "manager_hr" })
   })
 })
 

@@ -8,7 +8,11 @@
  *   - 加班 reason 後綴「休息扣除：N 分鐘｜給付方式：X」、`hours = 差 − 休息`、`payout`。
  *   - 補卡 `segments:[{date,startTime:t,endTime:t,hours:0,type}]`、`startAt = endAt`。
  *   - 公出／出差沿用 `tripType / location / tripScope / estimatedCost / advanceRequested` 欄位名。
- *   - 零用金預支 `advanceRequested` 必填、`reason` 必填、`startAt = endAt = now`。
+ *   - 零用金 `reason`（用途）必填、`startAt = endAt = now`；費用方式（2026-10-11）二選一：
+ *     先預支（預設）→ `advanceRequested` 必填；自行墊付 → 不帶 `advanceRequested`，金額改記
+ *     `estimatedCost`（簽核者要核的金額），並在 `remark` 註明費用方式（簽核頁的「備註」會顯示）。
+ *   - 出差／公出的費用方式同一個二選一：選先預支才帶 `advanceRequested`（`advanceWanted`），
+ *     自行墊付就不帶（後端不開預支，憑證之後走月報銷）。
  */
 import type { CreateRequestBody, LeaveRequest, LeaveSegment, RequestKind, RequestStatus } from "./ess-api";
 import { fmtDateShort, fmtDateTime, fmtDateWithWeekday, fmtHm, fmtHours, fmtMoney, localDateKey, todayKey } from "./ess-format";
@@ -77,6 +81,38 @@ export const TRIP_SCOPE_LABEL: Record<string, string> = {
   overseas: "海外",
 };
 
+/**
+ * 費用方式（2026-10-11，出差／公出／零用金共用）：員工自選二選一。
+ *   advance   先預支：核准後公司先撥款，回來憑單據核銷、多退少補（送單帶 `advanceRequested`）。
+ *   self_paid 自行墊付：自己先付，回來憑單據報銷、隨月結給付（送單不帶 `advanceRequested`，不建預支）。
+ */
+export type ExpenseMethod = "advance" | "self_paid";
+
+export const EXPENSE_METHOD_FIELD_LABEL = "費用方式";
+
+/** 出差／公出表單的選項文字。 */
+export const TRIP_EXPENSE_METHOD_LABEL: Record<ExpenseMethod, string> = {
+  advance: "先預支（出發前撥款，回來核銷）",
+  self_paid: "自行墊付，回來報銷",
+};
+
+/** 零用金表單的選項文字（沒有「出發」，同樣的精神）。 */
+export const PETTY_EXPENSE_METHOD_LABEL: Record<ExpenseMethod, string> = {
+  advance: "先預支（核准後撥款，用完憑單據核銷）",
+  self_paid: "自行墊付，之後憑單據報銷",
+};
+
+/** 出差、公出、零用金一律送主管與老闆簽核（2026-10-11 業主拍板）；表單提示文字。 */
+export const BOSS_APPROVAL_HINT = "出差、公出與零用金都會送主管與老闆簽核";
+
+/**
+ * 預支金額欄的顯示值：員工還沒動過它（`touched` 為 false）→ 預設帶「預估花費」（可改）；
+ * 一旦改過（含清空）就是員工填的值，不再跟著預估花費走。
+ */
+export function advanceFieldValue(touched: boolean, advanceRequested: string, estimatedCost: string): string {
+  return touched ? advanceRequested : estimatedCost;
+}
+
 /** 事由上限（createSchema `reason.max(250)`）。 */
 export const REASON_MAX = 250;
 
@@ -140,12 +176,16 @@ export interface TripFormValues extends CommonFormValues {
   tripScope: "local" | "domestic_intercity" | "overseas";
   location: string;
   estimatedCost: string | number;
+  /** 費用方式選「先預支」＝ true；選「自行墊付，回來報銷」＝ false（不送 advanceRequested）。 */
   advanceWanted: boolean;
   advanceRequested: string | number;
 }
 
 export interface PettyCashFormValues extends CommonFormValues {
+  /** 先預支＝預支金額；自行墊付＝預估金額（簽核者要核的金額，不建預支）。 */
   amount: string | number;
+  /** 費用方式；沒帶＝先預支（舊行為）。 */
+  method?: ExpenseMethod;
 }
 
 /** 在家工作／加做申報（M2）：日期區間（全天）＋選填時數＋事由。 */
@@ -350,12 +390,26 @@ function buildTrip(form: TripFormValues): BuildResult {
 }
 
 function buildPettyCash(form: PettyCashFormValues, now: Date): BuildResult {
+  const method: ExpenseMethod = form.method === "self_paid" ? "self_paid" : "advance";
   const amount = toNumber(form.amount);
-  if (amount == null || amount <= 0) return { error: "請填寫預支金額" };
+  if (amount == null || amount <= 0) return { error: method === "self_paid" ? "請填寫預估金額" : "請填寫預支金額" };
   const reason = cleanReason(form.reason);
   if (!reason) return { error: "請填寫用途" };
   if (reasonTooLong(reason)) return { error: `事由請在 ${REASON_MAX} 字以內` };
   const at = toIso(now);
+  if (method === "self_paid") {
+    // 自行墊付：不預支（不送 advanceRequested，後端核准時不開 advances）。金額是簽核者要核的，
+    // 記在 estimatedCost（結構化，清單顯示用）並寫進 remark（簽核頁「備註」看得到）。
+    const body: CreateRequestBody = {
+      kind: "petty_cash",
+      startAt: at,
+      endAt: at,
+      reason,
+      estimatedCost: amount,
+      remark: `費用方式：自行墊付，回來報銷（預估 ${fmtMoney(amount)}）`,
+    };
+    return body;
+  }
   const body: CreateRequestBody = {
     kind: "petty_cash",
     startAt: at,
@@ -482,6 +536,7 @@ export function describeRequest(
     | "location"
     | "trip_scope"
     | "advance_requested"
+    | "estimated_cost"
   >,
   opts: { shift?: ShiftLike; tz?: string } = {},
 ): string {
@@ -534,6 +589,10 @@ export function describeRequest(
     }
     case "petty_cash": {
       const amount = r.advance_requested;
+      if (amount != null && amount !== "" && Number(amount) > 0) return fmtMoney(amount);
+      // 自行墊付（不預支）：顯示簽核者要核的預估金額，並標明沒有預支。
+      const estimated = r.estimated_cost;
+      if (estimated != null && estimated !== "" && Number(estimated) > 0) return `自行墊付 · 預估 ${fmtMoney(estimated)}`;
       return amount == null || amount === "" ? "—" : fmtMoney(amount);
     }
     case "wfh": {
@@ -564,6 +623,7 @@ export function describeBody(body: CreateRequestBody, opts: { shift?: ShiftLike;
       location: body.location ?? null,
       trip_scope: body.tripScope ?? null,
       advance_requested: body.advanceRequested ?? null,
+      estimated_cost: body.estimatedCost ?? null,
     },
     opts,
   );
@@ -583,6 +643,31 @@ export function requestTitle(r: Pick<LeaveRequest, "kind" | "leave_type_name" | 
 
 /** 多位候選簽核人的連接符（與後端 `current_approver_name` 相同）。 */
 const APPROVER_JOINER = "／";
+
+/** POST /requests 回應裡的一關（只取顯示姓名需要的欄位）。 */
+export interface CreatedStepName {
+  candidateNames?: readonly string[] | null;
+  approverName?: string | null;
+}
+
+/** 一關的顯示名：多位候選用「／」串；沒有姓名就空字串。 */
+export function approvalStepName(step: CreatedStepName): string {
+  const names = (step.candidateNames ?? []).map((n) => n.trim()).filter(Boolean);
+  if (names.length > 0) return names.join(APPROVER_JOINER);
+  return (step.approverName ?? "").trim();
+}
+
+/**
+ * 送出成功畫面的簽核鏈摘要：兩關以上才有，「簽核關卡：王小明 → 陳老闆（共 2 關）」。
+ * 2026-10-11 起零用金與出差／公出一律「主管 → 老闆」兩關，送出後一眼看到「還要誰簽」；
+ * 沒有部門主管的人只剩老闆一關、請假／加班／補卡也是單關 → 回空字串，成功畫面維持原樣。
+ */
+export function approvalChainSummary(steps: readonly CreatedStepName[]): string {
+  if (steps.length < 2) return "";
+  const names = steps.map(approvalStepName).filter(Boolean);
+  if (names.length === 0) return `簽核關卡：共 ${steps.length} 關`;
+  return `簽核關卡：${names.join(" → ")}（共 ${steps.length} 關）`;
+}
 
 /**
  * 清單每列第 3 行：pending「等待 王小明 簽核（第 1／2 關）」、rejected「駁回理由：…」、

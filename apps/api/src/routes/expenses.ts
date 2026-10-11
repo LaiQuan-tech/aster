@@ -9,6 +9,10 @@ import { setActor } from "../lib/request-context.js"
 import { isFinanceRole } from "../middleware/scope.js"
 import { writeAuditLog } from "../services/audit.js"
 import { catalogCode } from "../services/catalog-code.js"
+import { BINDABLE_ADVANCE_STATUSES, isBindableAdvance, isBindableTrip } from "../services/expense-binding.js"
+import { summariseClaimsForSettlement } from "../services/payroll-claims.js"
+import { getTenantTimezone } from "../lib/tenant-tz.js"
+import { localDateKey } from "../lib/tz.js"
 
 export const expensesRouter = Router()
 
@@ -46,13 +50,16 @@ const claimSchema = z.object({
    */
   onBehalfOfEmployeeId: z.string().uuid().optional(),
   /**
-   * 綁定的出差單（模組三第 2 條）。類別的 `requires_trip_approval` 為 true
-   * 時必填，且該單須為本人、已核准的 business_trip。
+   * 綁定的出差單（模組三第 2 條）。類別的 `requires_trip_approval` 為 true 時必填；
+   * 沒要求也可以選填（自行墊付的出差憑證靠它對回哪一趟）。**有帶就驗**：須為本人、
+   * 已核准的 business_trip，否則 400 `invalid_trip_request`。
    */
   tripRequestId: z.string().uuid().optional(),
   /**
-   * 這筆費用用哪一筆預支的錢付的（模組三第 2、3 條的沖抵連結）。
-   * 出差軌若該趟已有預支，省略時由系統自動綁上；零用金必須明指。
+   * 這筆費用用哪一筆預支的錢付的（模組三第 2、3 條的沖抵連結；員工在 ESS 報銷頁選
+   * 「這筆是哪次預支的花費？」）。**有帶就驗**：須為本人、同租戶、尚未核銷
+   * （requested／paid）的預支，否則 400 `invalid_advance`。綁了預支的憑證由預支核銷結算、
+   * 不再隨月薪報銷給付。出差軌若該趟已有預支，省略時由系統自動綁上；零用金必須明指。
    */
   advanceId: z.string().uuid().optional(),
 })
@@ -124,6 +131,13 @@ async function periodIsSettled(tenantId: string, period: string): Promise<boolea
     .maybeSingle()
   if (error) throw new Error(`expenses period status: ${error.message}`)
   return data?.status === "settled"
+}
+
+/** 租戶當地的「本月」（YYYY-MM）；已月結鎖定則回 null。 */
+async function currentOpenPeriod(tenantId: string): Promise<string | null> {
+  const tz = await getTenantTimezone(tenantId)
+  const current = localDateKey(new Date().toISOString(), tz).slice(0, 7)
+  return (await periodIsSettled(tenantId, current)) ? null : current
 }
 
 // ── 類別目錄 ─────────────────────────────────────────────────────────
@@ -237,6 +251,11 @@ expensesRouter.put(
  *
  * `period` 省略時由 `incurredOn` 推導。兩者刻意分開：上月的收據這月才交時，
  * 歸屬期是本月，但發生日仍是上月——發生日是「報銷 × 出勤交叉檢核」的比對鍵。
+ * 該期已月結鎖定 → 409 `period_settled`；**例外：綁了預支（advanceId，含出差單自動綁定）的憑證**，
+ * 它們走預支核銷、與歸屬期無關，改歸本月（本月也鎖了才 409）。
+ *
+ * 綁定（2026-10-11）：`advanceId`／`tripRequestId` 有帶就驗，見 claimSchema 的說明與
+ * services/expense-binding.ts；定額補貼不能綁預支；回應附 `advanceId`（最後綁到哪筆預支，沒有＝null）。
  */
 expensesRouter.post(
   "/expenses",
@@ -266,12 +285,9 @@ expensesRouter.post(
         return
       }
       const employeeId = self.id
-      const period = parsed.data.period ?? parsed.data.incurredOn.slice(0, 7)
-
-      if (await periodIsSettled(tenantId, period)) {
-        res.status(409).json({ error: "period_settled", period })
-        return
-      }
+      // 歸屬期；該月已月結鎖定時，綁預支的憑證可以改歸本月（見下面「鎖期」），其餘照舊 409。
+      let period = parsed.data.period ?? parsed.data.incurredOn.slice(0, 7)
+      const periodLocked = await periodIsSettled(tenantId, period)
 
       const { data: cat, error: catErr } = await supabaseAdmin
         .from("expense_categories")
@@ -291,14 +307,16 @@ expensesRouter.post(
       // ── 兩軌政策的閘門（模組三第 1 條 vs 第 2 條）────────────────────
       // 日常常態不事前審核；長途出差必須老闆簽核。**沒有這道檢查，出差費用
       // 可以拆成「日常」報銷繞過事前審核，第 2 條即形同虛設。**
-      if (cat.requires_trip_approval === true) {
-        if (!parsed.data.tripRequestId) {
-          res.status(400).json({ error: "trip_request_required" })
-          return
-        }
+      if (cat.requires_trip_approval === true && !parsed.data.tripRequestId) {
+        res.status(400).json({ error: "trip_request_required" })
+        return
+      }
+      // 出差單綁定：類別沒要求時也是選填，但**有帶就驗**（不再只在類別要求時才驗——
+      // 否則員工可以把憑證掛到別人的出差單上）。須為本人、已核准的 business_trip。
+      if (parsed.data.tripRequestId) {
         const { data: trip, error: tripErr } = await supabaseAdmin
           .from("leave_requests")
-          .select("id, kind, status, employee_id")
+          .select("id, tenant_id, kind, status, employee_id")
           .eq("tenant_id", tenantId)
           .eq("id", parsed.data.tripRequestId)
           .is("deleted_at", null)
@@ -309,13 +327,35 @@ expensesRouter.post(
         }
         // 不區分「不存在」「非出差單」「非本人」「未核准」——一律同一個錯誤，
         // 免得成為探測他人單號的管道。
-        if (
-          !trip ||
-          trip.kind !== "business_trip" ||
-          trip.status !== "approved" ||
-          trip.employee_id !== employeeId
-        ) {
+        if (!isBindableTrip(trip, { tenantId, employeeId })) {
           res.status(400).json({ error: "invalid_trip_request" })
+          return
+        }
+      }
+
+      // 預支綁定（2026-10-11）：明指的 advanceId 必須是本人、同租戶、尚未核銷的預支——
+      // 原本完全不驗，員工可以把憑證掛到別人的預支（別人的核銷多算一筆、自己的憑證又因為
+      // 綁了預支而被排除在月報銷之外）。同樣不區分原因，統一 400 invalid_advance。
+      // 定額補貼（allowance）不能綁預支：補貼屬薪資所得（進 gross、計入投保薪資），綁了預支就會改走
+      // 非所得的差額結算，等於把補貼轉成實報實銷。ESS 對這類別不顯示預支欄位，這裡是 API 層的保險。
+      const canBindAdvance = cat.nature !== "allowance"
+      if (parsed.data.advanceId) {
+        if (!canBindAdvance) {
+          res.status(400).json({ error: "invalid_advance", message: "定額補貼不能綁預支" })
+          return
+        }
+        const { data: adv, error: advErr } = await supabaseAdmin
+          .from("advances")
+          .select("id, tenant_id, employee_id, status")
+          .eq("tenant_id", tenantId)
+          .eq("id", parsed.data.advanceId)
+          .maybeSingle()
+        if (advErr) {
+          next(new Error(`POST /expenses (advance check): ${advErr.message}`))
+          return
+        }
+        if (!isBindableAdvance(adv, { tenantId, employeeId })) {
+          res.status(400).json({ error: "invalid_advance" })
           return
         }
       }
@@ -323,20 +363,38 @@ expensesRouter.post(
       // 沖抵連結：出差軌若該趟已開預支，未明指時自動綁上——同仁沒有理由
       // 記得自己的預支單號，而漏綁會讓核銷算不到這筆、差額算錯。
       let advanceId = parsed.data.advanceId ?? null
-      if (!advanceId && parsed.data.tripRequestId) {
+      if (!advanceId && parsed.data.tripRequestId && canBindAdvance) {
+        // limit(1)：預支沒有 request_id 的唯一索引，萬一併發核准開出兩列，maybeSingle() 會讓該趟的
+        // 所有報銷都 500；取最早那一列就好。
         const { data: adv, error: advErr } = await supabaseAdmin
           .from("advances")
           .select("id")
           .eq("tenant_id", tenantId)
           .eq("request_id", parsed.data.tripRequestId)
           .eq("employee_id", employeeId)
-          .in("status", ["requested", "paid"])
+          .in("status", [...BINDABLE_ADVANCE_STATUSES])
+          .order("created_at", { ascending: true })
+          .limit(1)
           .maybeSingle()
         if (advErr) {
           next(new Error(`POST /expenses (advance): ${advErr.message}`))
           return
         }
         advanceId = (adv?.id as string | undefined) ?? null
+      }
+
+      // ── 鎖期 ───────────────────────────────────────────────────────
+      // 該期已月結 → 不得再填報（409），**例外：綁了預支的憑證**。它們的付款路徑是預支核銷
+      // （POST /advances/:id/settle 合計綁定憑證），與歸屬期無關，月薪也不付它們；若連它們也被鎖期擋住，
+      // 跨月的出差（月底出差、HR 月初就月結上個月）員工就綁不上，核銷時整筆預支被算成員工應退全額。
+      // 所以改歸「本月」（發生日 incurred_on 維持實際日期）；本月也已鎖定就照舊 409。
+      if (periodLocked) {
+        const open = advanceId ? await currentOpenPeriod(tenantId) : null
+        if (!open) {
+          res.status(409).json({ error: "period_settled", period })
+          return
+        }
+        period = open
       }
 
       const { data, error } = await supabaseAdmin
@@ -354,13 +412,15 @@ expensesRouter.post(
           trip_request_id: parsed.data.tripRequestId ?? null,
           advance_id: advanceId,
         })
-        .select("id, period, nature")
+        .select("id, period, nature, advance_id")
         .single()
       if (error || !data) {
         next(new Error(`POST /expenses: ${error?.message}`))
         return
       }
-      res.status(201).json({ id: data.id, period: data.period, nature: data.nature })
+      // advanceId：這筆最後綁到哪筆預支（員工選的，或該趟出差的預支被自動綁上；沒有＝null）——
+      // ESS 據此告訴員工「這筆隨預支核銷」還是「歸屬月結」。
+      res.status(201).json({ id: data.id, period: data.period, nature: data.nature, advanceId: data.advance_id ?? null })
     } catch (err) {
       next(err)
     }
@@ -418,7 +478,8 @@ expensesRouter.get(
 /**
  * PATCH /expenses/:id — 修改或撤回自己尚未核銷的單；HR 可改任何人的，
  * 且只有 HR 能覆寫 `nature`（稅務性質，變更進 audit_logs）。
- * 已核銷（settled）的單一律不可改——那一期的錢已經結出去了。
+ * 已核銷（settled）的單一律不可改——那一期的錢已經結出去了。綁的預支已核銷（settled）的單也一律不可改
+ * （409 `advance_settled`）：核銷時的實支合計與差額已凍結，事後改金額或撤回會讓凍結的數字與憑證實況脫鉤。
  */
 expensesRouter.patch(
   "/expenses/:id",
@@ -440,7 +501,7 @@ expensesRouter.patch(
       }
       const { data: claim, error: loadErr } = await supabaseAdmin
         .from("expense_claims")
-        .select("id, employee_id, status, nature, amount")
+        .select("id, employee_id, status, nature, amount, advance_id")
         .eq("tenant_id", tenantId)
         .eq("id", id)
         .maybeSingle()
@@ -460,6 +521,25 @@ expensesRouter.patch(
       if (claim.status === "settled") {
         res.status(409).json({ error: "already_settled" })
         return
+      }
+      // 綁的預支已核銷 → 這筆也鎖了：核銷當下合計已凍結成 actual_total／balance（差額已結給員工或已從薪資扣），
+      // 事後改金額或撤回，凍結的數字與憑證實況就脫鉤（改小＝公司多付了、改大＝員工吃虧），
+      // 與月結後「已核銷的單一律不可改」同一個道理。
+      if (claim.advance_id) {
+        const { data: adv, error: advErr } = await supabaseAdmin
+          .from("advances")
+          .select("id, status")
+          .eq("tenant_id", tenantId)
+          .eq("id", claim.advance_id)
+          .maybeSingle()
+        if (advErr) {
+          next(new Error(`PATCH /expenses/${id} (advance): ${advErr.message}`))
+          return
+        }
+        if (adv?.status === "settled") {
+          res.status(409).json({ error: "advance_settled" })
+          return
+        }
       }
       if (parsed.data.nature !== undefined && !hr) {
         res.status(403).json({ error: "hr_admin_required" })
@@ -688,7 +768,7 @@ expensesRouter.get(
     try {
       const { data: claims, error } = await supabaseAdmin
         .from("expense_claims")
-        .select("id, employee_id, category_id, nature, amount, incurred_on, status")
+        .select("id, employee_id, category_id, nature, amount, incurred_on, status, advance_id")
         .eq("tenant_id", tenantId)
         .eq("period", period)
         .eq("status", "submitted")
@@ -703,6 +783,8 @@ expensesRouter.get(
           claimCount: 0,
           reimbursementTotal: 0,
           allowanceTotal: 0,
+          advanceBoundCount: 0,
+          advanceBoundTotal: 0,
           issues: { missingReceipt: [], overCap: [], attendanceMismatch: [] },
         })
         return
@@ -781,18 +863,19 @@ expensesRouter.get(
         }
       }
 
-      const reimbursementTotal = rows
-        .filter((r) => r.nature === "reimbursement")
-        .reduce((a, r) => a + Number(r.amount), 0)
-      const allowanceTotal = rows
-        .filter((r) => r.nature === "allowance")
-        .reduce((a, r) => a + Number(r.amount), 0)
+      // 合計只算「真的會隨月薪給付」的憑證；綁了預支的走預支核銷，另列 advanceBound*
+      // （claimCount 仍是這批全部憑證——它們同樣要在這次月結審視）。見 services/payroll-claims.ts。
+      const { reimbursementTotal, allowanceTotal, advanceBoundCount, advanceBoundTotal } = summariseClaimsForSettlement(
+        rows as unknown as Array<{ nature: string; amount: string | number; advance_id: string | null }>,
+      )
 
       res.status(200).json({
         period,
         claimCount: rows.length,
         reimbursementTotal,
         allowanceTotal,
+        advanceBoundCount,
+        advanceBoundTotal,
         issues: { missingReceipt, overCap, attendanceMismatch },
       })
     } catch (err) {
@@ -836,7 +919,7 @@ expensesRouter.post(
 
       const { data: claims, error } = await supabaseAdmin
         .from("expense_claims")
-        .select("id, nature, amount")
+        .select("id, nature, amount, advance_id")
         .eq("tenant_id", tenantId)
         .eq("period", period)
         .eq("status", "submitted")
@@ -845,12 +928,11 @@ expensesRouter.post(
         return
       }
       const rows = claims ?? []
-      const reimbursementTotal = rows
-        .filter((r) => r.nature === "reimbursement")
-        .reduce((a, r) => a + Number(r.amount), 0)
-      const allowanceTotal = rows
-        .filter((r) => r.nature === "allowance")
-        .reduce((a, r) => a + Number(r.amount), 0)
+      // 存下來的兩個合計＝真的會隨月薪給付的部分（loadPayrollInputs 用同一個判準）；
+      // 綁了預支的憑證走預支核銷，另記在稽核與回應的 advanceBound*，不混進這兩個合計。
+      const { reimbursementTotal, allowanceTotal, advanceBoundCount, advanceBoundTotal } = summariseClaimsForSettlement(
+        rows as unknown as Array<{ nature: string; amount: string | number; advance_id: string | null }>,
+      )
 
       const { data: settlement, error: setErr } = await supabaseAdmin
         .from("expense_settlements")
@@ -897,7 +979,14 @@ expensesRouter.post(
         tableName: "expense_settlements",
         recordId: settlement.id as string,
         action: "UPDATE",
-        newRow: { period, reimbursementTotal, allowanceTotal, claimCount: rows.length },
+        newRow: {
+          period,
+          reimbursementTotal,
+          allowanceTotal,
+          claimCount: rows.length,
+          advanceBoundCount,
+          advanceBoundTotal,
+        },
         actorEmpId: self?.id,
         context: "POST /expense-settlements/:period/settle",
       })
@@ -908,6 +997,8 @@ expensesRouter.post(
         claimCount: rows.length,
         reimbursementTotal,
         allowanceTotal,
+        advanceBoundCount,
+        advanceBoundTotal,
       })
     } catch (err) {
       next(err)

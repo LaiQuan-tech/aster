@@ -8,7 +8,13 @@
 import { useId, useRef, type ChangeEvent, type ReactNode } from "react";
 import { friendlyError } from "@/lib/attendance-sheets-api";
 import type { CreateRequestBody } from "@/lib/ess-api";
-import { REASON_MAX, REQUEST_ERROR_MESSAGES, requestErrorCode } from "@/lib/request-forms";
+import {
+  EXPENSE_METHOD_FIELD_LABEL,
+  REASON_MAX,
+  REQUEST_ERROR_MESSAGES,
+  requestErrorCode,
+  type ExpenseMethod,
+} from "@/lib/request-forms";
 import { Button, Field, Icon, InlineError, Textarea } from "@/components/ess-ui";
 
 /* ------------------------------------------------------------ 錯誤 --- */
@@ -143,6 +149,50 @@ export function ReasonField({
         placeholder={placeholder ?? (required ? "必填" : "選填")}
       />
     </Field>
+  );
+}
+
+/* -------------------------------------------------------- 費用方式 --- */
+
+/**
+ * 費用方式二選一（2026-10-11，出差／公出／零用金共用）：
+ *   ○ 先預支（核准後公司先撥款，回來核銷）　○ 自行墊付，回來報銷
+ * 一組 radio（fieldset＋legend「費用方式」，每列觸控高度 44px）；選項下方的內容由 `children`
+ * 放（例如「先預支」才出現的金額欄）。選項文字由表單傳入（出差說「出發前撥款」，零用金沒有出發）。
+ */
+export function ExpenseMethodField({
+  value,
+  onChange,
+  labels,
+  children,
+}: {
+  value: ExpenseMethod;
+  onChange: (value: ExpenseMethod) => void;
+  labels: Record<ExpenseMethod, string>;
+  children?: ReactNode;
+}) {
+  const name = useId();
+  const options: ExpenseMethod[] = ["advance", "self_paid"];
+  return (
+    <fieldset className="rounded-xl border border-gray-200 px-3 pb-3 pt-1">
+      <legend className="px-1 text-sm font-medium text-gray-700">{EXPENSE_METHOD_FIELD_LABEL}</legend>
+      <div className="space-y-0.5">
+        {options.map((option) => (
+          <label key={option} className="flex min-h-11 cursor-pointer items-center gap-2.5 text-sm text-gray-700">
+            <input
+              type="radio"
+              name={name}
+              value={option}
+              checked={value === option}
+              onChange={() => onChange(option)}
+              className="h-4 w-4 shrink-0 accent-[var(--brand)]"
+            />
+            <span>{labels[option]}</span>
+          </label>
+        ))}
+      </div>
+      {children}
+    </fieldset>
   );
 }
 

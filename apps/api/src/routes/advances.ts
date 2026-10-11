@@ -7,6 +7,12 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
 import { isFinanceRole } from "../middleware/scope.js"
 import { writeAuditLog } from "../services/audit.js"
+import {
+  buildSettlementPreview,
+  loadBoundClaims,
+  summariseAdvanceSettlement,
+  withRequestSummaries,
+} from "../services/advance-settlement.js"
 
 export const advancesRouter = Router()
 
@@ -23,6 +29,12 @@ const settleSchema = z.object({
   /** balanceHandling='payroll' 時必填：從哪一期薪資結算。 */
   recoveryPeriod: z.string().regex(periodRe).optional(),
   note: z.string().trim().max(250).optional(),
+  /**
+   * 核銷前預覽（GET /advances/:id/settlement-preview）看到的實支合計。有帶就比對：預覽之後
+   * 若員工又新增／撤回了綁定憑證，合計對不上 → 409 `claims_changed`（附最新數字），
+   * 財務人員確認的就是凍結進帳的那個數字。沒帶＝舊行為（直接以核銷當下的合計為準）。
+   */
+  expectedActualTotal: z.number().optional(),
 })
 
 const ADV_COLS =
@@ -38,6 +50,10 @@ const ADV_COLS =
  *   • `kind='petty_cash'` 零用金預支——單次高額費用，主管／老闆同意
  *
  * 流程：申請單核准（自動開 `requested`）→ 撥款（`paid`）→ 核銷沖抵（`settled`）
+ * 員工送單時選「費用方式」（2026-10-11）：**先預支**才有這條流程（送單帶 advanceRequested > 0，
+ * 核准時開預支列）；**自行墊付，回來報銷**不建預支，憑證走月報銷（services/payroll-claims.ts）。
+ * 預支的憑證靠報銷單的 `advance_id` 綁定（POST /expenses 驗證屬於本人、尚未核銷），
+ * 核銷前可先看 GET /advances/:id/settlement-preview。
  *
  * 核准與撥款刻意分開：只有分開才看得出「已核准但還沒拿到錢」與
  * 「已撥款但還沒核銷」是兩種不同的狀態，後者是公司對員工的債權。
@@ -102,7 +118,10 @@ advancesRouter.get(
         next(new Error(`GET /advances: ${error.message}`))
         return
       }
-      res.status(200).json({ advances: data ?? [] })
+      // 每列附上對應申請單的摘要（`request`：日期／地點／事由）——員工選「這筆是哪次預支的花費」、
+      // 財務認「這是哪一趟」都要用；ADV_COLS 是串接字串，supabase-js 推不出列型別 → 明確轉型。
+      const rows = (data ?? []) as unknown as Array<Record<string, unknown> & { request_id: unknown }>
+      res.status(200).json({ advances: await withRequestSummaries(tenantId, rows) })
     } catch (err) {
       next(err)
     }
@@ -147,9 +166,9 @@ advancesRouter.get(
       const overdueDays = cfg ? Number(cfg.advance_overdue_days) : 30
 
       // ADV_COLS 是串接字串，supabase-js 推不出列型別 → 明確轉型後再處理。
-      const rows = (data ?? []) as unknown as Array<Record<string, unknown>>
+      const rows = (data ?? []) as unknown as Array<Record<string, unknown> & { request_id: unknown }>
       const now = Date.now()
-      const advances = rows.map((a) => {
+      const advances = (await withRequestSummaries(tenantId, rows)).map((a) => {
         const days = a.paid_at
           ? Math.floor((now - new Date(a.paid_at as string).getTime()) / 86_400_000)
           : null
@@ -238,9 +257,59 @@ advancesRouter.post(
 )
 
 /**
+ * GET /advances/:id/settlement-preview — **核銷前預覽**（財務）。
+ *
+ * 後台按「核銷」之前先看：這筆預支綁了哪些憑證（日期／類別／金額／備註／有沒有附憑證）、
+ * 實支合計多少、與預支的差額多少、是公司補員工還是員工要退。算法與 settle 共用
+ * `summariseAdvanceSettlement`，預覽的數字就是按下核銷後凍結的數字。
+ * 沒有綁任何憑證時合計是 0（＝員工被算成要退全額），畫面據此提醒，免得漏綁而不自知。
+ * 只讀，不寫任何東西；非 `paid` 的預支也能預覽（`settleable=false`）。
+ */
+advancesRouter.get(
+  "/advances/:id/settlement-preview",
+  requireAuth,
+  requireTenant,
+  requireFinance,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const id = req.params.id as string
+    if (!z.string().uuid().safeParse(id).success) {
+      res.status(404).json({ error: "not_found" })
+      return
+    }
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("advances")
+        .select(ADV_COLS)
+        .eq("tenant_id", tenantId)
+        .eq("id", id)
+        .maybeSingle()
+      if (error) {
+        next(new Error(`GET settlement-preview (load): ${error.message}`))
+        return
+      }
+      if (!data) {
+        res.status(404).json({ error: "not_found" })
+        return
+      }
+      // ADV_COLS 是串接字串，supabase-js 推不出列型別 → 明確轉型後再處理。
+      const adv = data as unknown as Record<string, unknown> & { id: string; request_id: unknown; status: unknown; amount: unknown }
+      const [claims, [advance]] = await Promise.all([
+        loadBoundClaims(tenantId, adv.id),
+        withRequestSummaries(tenantId, [adv]),
+      ])
+      const preview = await buildSettlementPreview(tenantId, adv, claims)
+      res.status(200).json({ advance, ...preview })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
  * POST /advances/:id/settle — 回程核銷沖抵（`paid` → `settled`）。
  *
- * 把綁定此趟出差的報銷單合計成 `actualTotal`，算出
+ * 把綁定此預支（`expense_claims.advance_id`）的報銷單合計成 `actualTotal`，算出
  * `balance = actualTotal − amount`：
  *   • balance > 0 → 實支超過預支，**公司補給員工**
  *   • balance < 0 → 預支有餘，**員工應退**
@@ -248,7 +317,10 @@ advancesRouter.post(
  * `balance` 於此刻凍結存下（而非日後現算）：綁定的報銷單若之後有異動，
  * 核銷當下的結論不該跟著變。
  *
- * 只計 `submitted` / `settled` 的單——已撤回或退件的不算數。
+ * 只計 `submitted` / `settled` 的單——已撤回或退件的不算數（services/advance-settlement.ts，
+ * 與核銷前預覽共用）。核銷前請先看 GET /advances/:id/settlement-preview，並把看到的實支合計
+ * 帶成 `expectedActualTotal`：對不上（預覽後憑證有增減）→ 409 `claims_changed`，不動任何東西。
+ * 綁了預支的憑證不再隨月薪報銷給付（services/payroll-claims.ts），這裡的差額是它們唯一的付款路徑。
  */
 advancesRouter.post(
   "/advances/:id/settle",
@@ -291,20 +363,22 @@ advancesRouter.post(
 
       // 沖抵一律以 `advance_id` 為準——零用金預支沒有出差單可反推，
       // 兩種預支必須走同一條沖抵邏輯，否則又會是兩套規則。
-      const { data: claims, error: claimErr } = await supabaseAdmin
-        .from("expense_claims")
-        .select("amount, status")
-        .eq("tenant_id", tenantId)
-        .eq("advance_id", adv.id)
-        .in("status", ["submitted", "settled"])
-      if (claimErr) {
-        next(new Error(`POST settle (claims): ${claimErr.message}`))
+      const claims = await loadBoundClaims(tenantId, adv.id as string)
+      const { actualTotal, balance, direction, countedCount } = summariseAdvanceSettlement(
+        adv.amount as string | number,
+        claims,
+      )
+      if (
+        parsed.data.expectedActualTotal !== undefined &&
+        Math.abs(parsed.data.expectedActualTotal - actualTotal) > 0.005
+      ) {
+        res.status(409).json({ error: "claims_changed", actualTotal, balance, direction, claimCount: countedCount })
         return
       }
-      const actualTotal = (claims ?? []).reduce((sum, c) => sum + Number(c.amount), 0)
-      const balance = Number((actualTotal - Number(adv.amount)).toFixed(2))
 
-      const { error } = await supabaseAdmin
+      // 條件式更新：只有「還是 paid」才寫。兩位財務同時按核銷時，後到的不會蓋掉先到的（凍結的
+      // actual_total／balance 與稽核軌跡會對不上）；命中 0 列＝已被別人核銷 → 409，什麼都不寫。
+      const { data: updated, error } = await supabaseAdmin
         .from("advances")
         .update({
           status: "settled",
@@ -319,8 +393,14 @@ advancesRouter.post(
         })
         .eq("tenant_id", tenantId)
         .eq("id", id)
+        .eq("status", "paid")
+        .select("id")
       if (error) {
         next(new Error(`POST settle: ${error.message}`))
+        return
+      }
+      if (!updated || updated.length === 0) {
+        res.status(409).json({ error: "not_settleable", status: "settled" })
         return
       }
 
@@ -330,7 +410,13 @@ advancesRouter.post(
         recordId: id,
         action: "UPDATE",
         oldRow: { status: "paid", amount: adv.amount },
-        newRow: { status: "settled", actualTotal, balance, handling: parsed.data.balanceHandling },
+        newRow: {
+          status: "settled",
+          actualTotal,
+          balance,
+          handling: parsed.data.balanceHandling,
+          claimCount: countedCount,
+        },
         actorEmpId: self?.id,
         context: "POST /advances/:id/settle",
       })
@@ -341,7 +427,7 @@ advancesRouter.post(
         amount: Number(adv.amount),
         actualTotal,
         balance,
-        direction: balance > 0 ? "公司補給員工" : balance < 0 ? "員工應退" : "剛好結清",
+        direction,
       })
     } catch (err) {
       next(err)

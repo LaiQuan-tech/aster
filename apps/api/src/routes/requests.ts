@@ -79,9 +79,13 @@ const createSchema = z.object({
   // ── 出差申請（模組三第 2 條），僅 kind='business_trip' 採用 ──────────
   /** 出差範圍。用下拉而非從 location 猜文字：縣市字串比對不可靠。 */
   tripScope: z.enum(["local", "domestic_intercity", "overseas"]).optional(),
-  /** 預估此趟總花費，供簽核者判斷。 */
+  /** 預估此趟總花費，供簽核者判斷（零用金「自行墊付」時＝要核的金額）。 */
   estimatedCost: z.number().nonnegative().optional(),
-  /** 申請預支金額。核准後由 applyApprovalEffects 開出 advances 一列。 */
+  /**
+   * 申請預支金額（費用方式＝先預支）。核准後由 applyApprovalEffects 開出 advances 一列。
+   * 沒帶或 0＝費用方式是「自行墊付，回來報銷」：不開預支，憑證走月報銷（services/payroll-inputs）。
+   * 出差、公出、零用金共用（kind='business_trip'／'petty_cash'）。
+   */
   advanceRequested: z.number().nonnegative().optional(),
   remark: z.string().trim().max(250).optional(),
 })
@@ -229,16 +233,30 @@ function kindLabel(kind: string): string {
 }
 
 /**
- * W2 跨縣市出差走老闆關：`approval_flows` 查 'business_trip_intercity'，且鏈的最後
- * 一關一定是老闆（`features.approval.fallbackApproverEmpId`）。市內公出（tripScope
- * 'local' 或沒帶）維持原本的 kind='business_trip' 流程。
+ * 簽核路由：這張單查哪一條 `approval_flows`、老闆是不是最後一關。
+ *
+ * 2026-10-11 業主拍板：零用金（`petty_cash`）與出差／公出（`business_trip`，不分
+ * `trip_type`＝outing／business_trip、不分 `tripScope`）一律「主管＋老闆」兩層——
+ * `requireBossFinal` 一律 true，主管鏈逐關簽完後，老闆（`features.approval.
+ * fallbackApproverEmpId`）是最後一關（pickApproverChain：去重、跳過本人；沒有部門主管
+ * 就只剩老闆一關）。之前只有跨縣市／海外出差（W2）走老闆關，市內公出與零用金是單關。
+ *
+ * flowKind 維持原本的對應：跨縣市／海外出差（tripScope 有帶且不是 'local'）查
+ * `business_trip_intercity`；市內公出（'local' 或沒帶）查 `business_trip`；零用金查
+ * `petty_cash`；其餘種類（請假／加班／補卡／在家工作）查自己的 kind、不加老闆關。
+ * HR 在後台為某條流程設了固定名單（mode=list 且名單非空）時，名單照走、優先於預設鏈
+ * （requireBossFinal 一向不改 HR 明訂的名單，見 services/approval-chain.ts）。
+ *
+ * 只影響**新送出的單**：進行中的單，關卡在送單當下已寫進 approval_steps，不會回頭補老闆關。
  */
 export function flowRouteFor(
   kind: string,
   tripScope: string | null | undefined,
 ): { flowKind: string; requireBossFinal: boolean } {
-  if (kind === "business_trip" && tripScope && tripScope !== "local") {
-    return { flowKind: "business_trip_intercity", requireBossFinal: true }
+  if (kind === "petty_cash") return { flowKind: "petty_cash", requireBossFinal: true }
+  if (kind === "business_trip") {
+    const intercity = !!tripScope && tripScope !== "local"
+    return { flowKind: intercity ? "business_trip_intercity" : "business_trip", requireBossFinal: true }
   }
   return { flowKind: kind, requireBossFinal: false }
 }
@@ -514,7 +532,8 @@ requestsRouter.post(
 
       // Resolve the approver chain for this kind (services/approval-chain.ts):
       // 固定名單／直屬主管／主管逐級＋HR 覆核 → 老闆（tenant features）→ 第一位 hr_admin → 409。
-      // W2：跨縣市／海外出差改查 'business_trip_intercity' flow，且老闆必須是最後一關。
+      // 零用金與出差／公出一律「主管逐關 → 老闆最後一關」（flowRouteFor，2026-10-11）；
+      // 跨縣市／海外出差仍查 'business_trip_intercity' flow。
       const { flowKind, requireBossFinal } = flowRouteFor(kind, kind === "business_trip" ? (tripScope ?? null) : null)
       const chain = await resolveApproverChain(tenantId, kind, self.id, { flowKind, requireBossFinal })
       if (!chain.ok) {
@@ -570,7 +589,9 @@ requestsRouter.post(
           trip_type: kind === "business_trip" ? (tripType ?? null) : null,
           location: kind === "business_trip" ? (location ?? null) : null,
           trip_scope: kind === "business_trip" ? (tripScope ?? null) : null,
-          estimated_cost: kind === "business_trip" ? (estimatedCost ?? null) : null,
+          // 預估花費：出差給簽核者判斷；零用金「自行墊付」（不預支）時，這是簽核者要核的金額
+          // （預支金額則是 advance_requested，沒預支＝null／0，核准時不開 advances，見 services/ledger.openAdvance）。
+          estimated_cost: kind === "business_trip" || kind === "petty_cash" ? (estimatedCost ?? null) : null,
           advance_requested:
             kind === "business_trip" || kind === "petty_cash"
               ? (advanceRequested ?? null)

@@ -183,7 +183,9 @@ async function debitLeaveBalance(
  * 要記時間、經手人與管道（現金／匯款）。核准與撥款分開，才看得出
  * 「已核准但還沒拿到錢」與「已撥款但還沒核銷」這兩種不同的狀態。
  *
- * 未填或填 0 的預支金額不建列：不是每趟出差都要預支。
+ * 未填或填 0 的預支金額不建列：不是每趟出差都要預支——員工送單時可選「費用方式」
+ * （2026-10-11）：先預支（`advance_requested` > 0，這裡才開預支列）或自行墊付、回來報銷
+ * （`advance_requested` 沒帶或 0，不開預支；憑證之後走月報銷，見 services/payroll-inputs）。
  * 重複核准（理論上不會發生）由 (request_id) 的既有列擋下，不重複開。
  */
 async function openAdvance(

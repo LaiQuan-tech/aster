@@ -2,14 +2,28 @@
 
 /**
  * 公出／出差：「公出｜出差」切換（公出＝日期＋起訖時間；出差＝起迄日期全天＋出差範圍）
- * ＋ 地點（必填）＋ 預估花費（選填）＋「需要預支？」→ 金額 ＋ 事由（選填）。
+ * ＋ 地點（必填）＋ 預估花費（選填）＋「費用方式」二選一 ＋ 事由（選填）。
+ *
+ * 費用方式（2026-10-11）：○ 先預支（出發前撥款，回來核銷）→ 才出現預支金額（預設帶預估花費、可改）；
+ * ○ 自行墊付，回來報銷 → 不送 advanceRequested，後端核准時不開預支，憑證之後走月報銷。預設＝自行墊付
+ * （與舊版「沒勾需要預支」一樣）。
  * body 欄位名沿用舊頁面：tripType / location / tripScope / estimatedCost / advanceRequested。
  */
 import { useId, useState, type FormEvent } from "react";
 import { Field, Input, Segmented, Select } from "@/components/ess-ui";
 import { fmtMoney } from "@/lib/ess-format";
-import { TRIP_SCOPE_LABEL, TRIP_TYPE_LABEL, buildCreateBody, describeBody, isBuildError } from "@/lib/request-forms";
-import { ReasonField, SubmitBar, type FormCommonProps } from "./form-shared";
+import {
+  BOSS_APPROVAL_HINT,
+  TRIP_EXPENSE_METHOD_LABEL,
+  TRIP_SCOPE_LABEL,
+  TRIP_TYPE_LABEL,
+  advanceFieldValue,
+  buildCreateBody,
+  describeBody,
+  isBuildError,
+  type ExpenseMethod,
+} from "@/lib/request-forms";
+import { ExpenseMethodField, ReasonField, SubmitBar, type FormCommonProps } from "./form-shared";
 
 type TripType = "outing" | "business_trip";
 type TripScope = "local" | "domestic_intercity" | "overseas";
@@ -37,15 +51,19 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
   const [tripScope, setTripScope] = useState<TripScope>("domestic_intercity");
   const [location, setLocation] = useState("");
   const [estimatedCost, setEstimatedCost] = useState("");
-  const [advanceWanted, setAdvanceWanted] = useState(false);
+  const [method, setMethod] = useState<ExpenseMethod>("self_paid");
   const [advanceRequested, setAdvanceRequested] = useState("");
+  // 預支金額欄：沒動過就帶預估花費當預設（可改）；改過就是員工填的值。
+  const [advanceTouched, setAdvanceTouched] = useState(false);
   const [reason, setReason] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
 
   const clear = () => setLocalError(null);
-  const advanceAmount = Number(advanceRequested.replace(/,/g, ""));
+  const advanceWanted = method === "advance";
+  const advanceValue = advanceFieldValue(advanceTouched, advanceRequested, estimatedCost);
+  const advanceAmount = Number(advanceValue.replace(/,/g, ""));
   const belowThreshold =
-    advanceWanted && advanceThreshold != null && advanceRequested.trim() !== "" && Number.isFinite(advanceAmount) && advanceAmount < advanceThreshold;
+    advanceWanted && advanceThreshold != null && advanceValue.trim() !== "" && Number.isFinite(advanceAmount) && advanceAmount < advanceThreshold;
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -61,7 +79,7 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
       location,
       estimatedCost,
       advanceWanted,
-      advanceRequested,
+      advanceRequested: advanceValue,
       reason,
     });
     if (isBuildError(body)) return setLocalError(body.error);
@@ -120,6 +138,7 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
               />
             </Field>
           </div>
+          <p className="-mt-1 text-xs text-gray-400">{BOSS_APPROVAL_HINT}</p>
         </>
       ) : (
         <>
@@ -155,7 +174,7 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
             label="出差範圍"
             required
             htmlFor={ids.scope}
-            hint={tripScope !== "local" ? "跨縣市／海外出差將送老闆簽核，核准後才成立" : "市內公出只需主管簽核"}
+            hint={BOSS_APPROVAL_HINT}
           >
             <Select
               id={ids.scope}
@@ -205,21 +224,16 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
         />
       </Field>
 
-      <div className="rounded-xl border border-dashed border-gray-200 px-3 py-2">
-        <label className="flex min-h-9 cursor-pointer items-center gap-2 text-sm text-gray-700">
-          <input
-            type="checkbox"
-            checked={advanceWanted}
-            onChange={(e) => {
-              setAdvanceWanted(e.target.checked);
-              clear();
-            }}
-            className="h-4 w-4 accent-[var(--brand)]"
-          />
-          需要預支
-        </label>
-        {advanceWanted && (
-          <div className="mt-2">
+      <ExpenseMethodField
+        value={method}
+        labels={TRIP_EXPENSE_METHOD_LABEL}
+        onChange={(next) => {
+          setMethod(next);
+          clear();
+        }}
+      >
+        {advanceWanted ? (
+          <div className="mt-1">
             <Field
               label="預支金額（元）"
               required
@@ -227,7 +241,7 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
               hint={
                 belowThreshold
                   ? `此金額低於建議門檻 ${fmtMoney(advanceThreshold)}，仍可送出，但會在簽核時標示——請在事由說明原因`
-                  : "核准後由公司先撥款；回程再以實際報銷沖抵，多退少補"
+                  : "預設帶預估花費，可修改。核准後由公司先撥款；回來後到「報銷」頁新增單據並選這筆預支，由公司核銷、多退少補"
               }
             >
               <Input
@@ -235,8 +249,9 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
                 type="number"
                 inputMode="numeric"
                 min={0}
-                value={advanceRequested}
+                value={advanceValue}
                 onChange={(e) => {
+                  setAdvanceTouched(true);
                   setAdvanceRequested(e.target.value);
                   clear();
                 }}
@@ -244,8 +259,10 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
               />
             </Field>
           </div>
+        ) : (
+          <p className="mt-1 text-xs text-gray-400">不預支。回來後到「報銷」頁填報單據，隨月結一併給付。</p>
         )}
-      </div>
+      </ExpenseMethodField>
 
       <ReasonField value={reason} onChange={setReason} placeholder="選填，例如：客戶拜訪、展會" />
 

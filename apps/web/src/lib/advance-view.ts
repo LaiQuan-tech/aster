@@ -1,0 +1,216 @@
+/**
+ * 預支綁定與核銷的顯示用純函式（2026-10-11；不碰 React／DOM／API，全部有單元測試）。
+ *
+ *   • ESS 報銷頁：員工新增憑證時選「這筆是哪次預支的花費？」——列出自己**尚未核銷**的預支
+ *     （出差或零用金的日期、地點或事由、預支金額、狀態），送出帶 `advanceId`。
+ *   • 後台預支頁：核銷前的預覽（GET /advances/:id/settlement-preview）——這筆預支綁了哪些憑證、
+ *     合計多少、差額多少，取代原本只用 `prompt` 就直接核銷。
+ *
+ * 型別對應 API：GET /advances 每列附 `request`（services/advance-settlement.ts AdvanceRequestSummary）；
+ * 預覽的形狀是 SettlementPreview。ess-api.ts 的 `MyAdvance`、admin-api.ts 的 `Advance` 沒宣告 `request`，
+ * 這裡用結構型別（`AdvanceLike`）接，兩邊的列都收得進來。
+ */
+import { fmtDateShort, fmtMoney } from "./ess-format";
+
+/* ------------------------------------------------------------ 預支 --- */
+
+/** 預支對應的申請單摘要（GET /advances 每列的 `request`；查不到＝null）。 */
+export interface AdvanceRequestInfo {
+  id?: string;
+  /** 'business_trip' | 'petty_cash' */
+  kind: string;
+  start_at: string;
+  end_at: string;
+  location: string | null;
+  reason: string | null;
+  /** 'outing' 公出 | 'business_trip' 出差 */
+  trip_type: string | null;
+  trip_scope: string | null;
+}
+
+export interface AdvanceLike {
+  id: string;
+  /** 'trip' 出差預支 | 'petty_cash' 零用金預支 */
+  kind: string;
+  amount: string | number;
+  /** 'requested' 已核准待撥款 | 'paid' 已撥款待核銷 | 'settled' 已核銷 | 'cancelled' 已取消 */
+  status: string;
+  paid_at?: string | null;
+  created_at?: string;
+  request?: AdvanceRequestInfo | null;
+}
+
+/** 尚未核銷＝可以被報銷單綁定（與 API services/expense-binding.ts 的 BINDABLE_ADVANCE_STATUSES 同一組）。 */
+export const UNSETTLED_ADVANCE_STATUSES = ["requested", "paid"] as const;
+
+export function isUnsettledAdvance(a: Pick<AdvanceLike, "status">): boolean {
+  return (UNSETTLED_ADVANCE_STATUSES as readonly string[]).includes(a.status);
+}
+
+export function advanceStatusLabel(status: string): string {
+  switch (status) {
+    case "requested":
+      return "已核准，尚未撥款";
+    case "paid":
+      return "已撥款，待核銷";
+    case "settled":
+      return "已核銷";
+    case "cancelled":
+      return "已取消";
+    default:
+      return status;
+  }
+}
+
+function clip(text: string | null | undefined, max = 14): string {
+  const t = (text ?? "").trim();
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+}
+
+/** 預支背後那張單的名稱：「出差・台中客戶公司」「公出・市政府」「零用金・採買活動物資」。 */
+export function advanceSubject(a: AdvanceLike): string {
+  const r = a.request;
+  if (a.kind === "petty_cash") {
+    const reason = clip(r?.reason);
+    return reason ? `零用金・${reason}` : "零用金";
+  }
+  const type = r?.trip_type === "outing" ? "公出" : "出差";
+  const place = clip(r?.location) || clip(r?.reason);
+  return place ? `${type}・${place}` : type;
+}
+
+/** 預支的日期（MM/DD）：申請單的起日（出差日、零用金申請日）；沒有申請單摘要就退回撥款日、建立日。 */
+export function advanceDate(a: AdvanceLike, tz?: string): string {
+  const iso = a.request?.start_at ?? a.paid_at ?? a.created_at ?? "";
+  return iso ? fmtDateShort(iso, tz) : "—";
+}
+
+/** 下拉選項文字：「10/10 出差・台中客戶公司｜預支 NT$ 3,000（已撥款）」。 */
+export function advanceOptionLabel(a: AdvanceLike, tz?: string): string {
+  const state = a.status === "paid" ? "已撥款" : "尚未撥款";
+  return `${advanceDate(a, tz)} ${advanceSubject(a)}｜預支 ${fmtMoney(a.amount)}（${state}）`;
+}
+
+/** 可綁的預支（尚未核銷），新的在前（依申請單起日；沒有就依建立日）。 */
+export function bindableAdvances<T extends AdvanceLike>(advances: readonly T[]): T[] {
+  const key = (a: AdvanceLike) => a.request?.start_at ?? a.created_at ?? a.paid_at ?? "";
+  return advances.filter(isUnsettledAdvance).sort((x, y) => key(y).localeCompare(key(x)));
+}
+
+/* ------------------------------------------------------- 報銷頁錯誤 --- */
+
+/** POST /expenses 的錯誤碼 → 中文（找不到的碼由呼叫端退回 fallback）。 */
+export const EXPENSE_ERROR_MESSAGES: Record<string, string> = {
+  invalid_advance: "選的預支已不能綁定（已核銷、已取消，或不是你的預支），請重新整理頁面後再選",
+  invalid_trip_request: "選的出差單不能綁定（不是你的，或還沒核准），請重新整理頁面後再選",
+  trip_request_required: "這個類別的費用必須綁定一張已核准的出差單",
+  period_settled: "該月份已月結鎖定，不能再送出；請聯絡 HR",
+  advance_settled: "這筆已隨預支核銷結算，不能再修改或撤回；有誤請聯絡 HR",
+  invalid_category: "這個費用類別已停用，請重新選擇",
+  filing_on_behalf_removed: "代為填報功能已移除，只能以本人身分送出",
+  not_an_employee: "找不到你的員工資料，請聯絡 HR",
+};
+
+/** apiFetch 的錯誤碼（`.code`，沒有就從 `[status] code` 的 message 取）；不是 Error → null。 */
+export function apiErrorCode(err: unknown): string | null {
+  if (!(err instanceof Error)) return null;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === "string" && code) return code;
+  const fromMessage = err.message.replace(/^\[\d+\]\s*/, "").trim();
+  return fromMessage || null;
+}
+
+export function expenseErrorMessage(err: unknown, fallback: string): string {
+  const code = apiErrorCode(err);
+  if (code && EXPENSE_ERROR_MESSAGES[code]) return EXPENSE_ERROR_MESSAGES[code];
+  return err instanceof Error && err.message ? err.message : fallback;
+}
+
+/* ------------------------------------------------------ 核銷前預覽 --- */
+
+/** GET /advances/:id/settlement-preview 的一筆憑證（services/advance-settlement.ts SettlementPreviewClaim）。 */
+export interface PreviewClaim {
+  id: string;
+  amount: number;
+  incurredOn: string;
+  period: string;
+  status: string;
+  /** 計入實支（submitted／settled）；false＝已撤回／退件，只列出來不算數。 */
+  counted: boolean;
+  categoryId: string | null;
+  categoryName: string | null;
+  nature: string;
+  note: string | null;
+  tripRequestId: string | null;
+  /** 附了幾份單據檔案；0＝缺憑證。 */
+  receiptCount: number;
+}
+
+export interface SettlementPreview {
+  /** 預支列（含 `request` 摘要）。 */
+  advance: AdvanceLike & { employee_id: string };
+  amount: number;
+  claims: PreviewClaim[];
+  countedCount: number;
+  actualTotal: number;
+  /** actualTotal − amount；正＝公司補給員工、負＝員工應退。 */
+  balance: number;
+  direction: string;
+  /** 只有 `paid`（已撥款、未核銷）才能核銷。 */
+  settleable: boolean;
+}
+
+export type BalanceTone = "green" | "amber" | "gray";
+
+/**
+ * 差額一句話：「公司補給員工 NT$ 500」「員工應退 NT$ 1,000」「剛好結清」＋ 色調。
+ * `format` 可換金額寫法（後台用「500 元」）。
+ */
+export function describeBalance(
+  balance: number,
+  format: (amount: number) => string = fmtMoney,
+): { text: string; tone: BalanceTone } {
+  if (balance > 0) return { text: `公司補給員工 ${format(balance)}`, tone: "green" };
+  if (balance < 0) return { text: `員工應退 ${format(Math.abs(balance))}`, tone: "amber" };
+  return { text: "剛好結清", tone: "gray" };
+}
+
+/**
+ * 憑證狀態（核銷預覽用）：計入實支的 submitted／settled 都寫「已送出」——綁預支的憑證不走月結付款，
+ * 寫「待月結／已月結」會讓人以為它還會隨月薪另外發；「核銷」一詞留給預支本身。
+ */
+const CLAIM_STATUS_LABEL: Record<string, string> = {
+  submitted: "已送出",
+  settled: "已送出",
+  cancelled: "已撤回",
+  rejected: "已退件",
+};
+
+export function claimStatusLabel(status: string): string {
+  return CLAIM_STATUS_LABEL[status] ?? status;
+}
+
+/**
+ * 核銷前要請財務留意的事（空陣列＝沒有）：
+ *   • 沒有任何憑證 → 整筆預支會被算成員工應退（最常見的漏綁）；
+ *   • 計入的憑證裡有缺單據檔案的（稅上要主張非所得的代墊費用需要憑證）；
+ *   • 另有已撤回／退件而不計入的單（讓人知道它們在、但沒算）。
+ */
+export function settlementWarnings(preview: Pick<SettlementPreview, "claims" | "countedCount" | "amount">): string[] {
+  const warnings: string[] = [];
+  if (preview.countedCount === 0) {
+    warnings.push(
+      `這筆預支沒有綁定任何憑證，核銷會把整筆 ${fmtMoney(preview.amount)} 算成員工應退。請先確認員工已在「報銷」頁新增單據並選這筆預支。`,
+    );
+  }
+  const missingReceipt = preview.claims.filter((c) => c.counted && c.receiptCount === 0).length;
+  if (missingReceipt > 0) warnings.push(`有 ${missingReceipt} 筆憑證沒有附單據檔案。`);
+  const ignored = preview.claims.filter((c) => !c.counted).length;
+  if (ignored > 0) warnings.push(`另有 ${ignored} 筆已撤回或退件的單，不計入實支。`);
+  return warnings;
+}
+
+/** 薪資期別 `YYYY-MM`（月份 01–12）。 */
+export function isValidPeriod(value: string): boolean {
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(value.trim());
+}

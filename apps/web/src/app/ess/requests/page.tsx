@@ -24,7 +24,6 @@ import {
   getShifts,
   uploadAttachment,
   type CreateRequestBody,
-  type CreateRequestResult,
   type LeaveBalance,
   type LeaveRequest,
   type LeaveType,
@@ -34,7 +33,7 @@ import {
 import { todayKey } from "@/lib/ess-format";
 import { invalidateEssState, useEssState } from "@/lib/ess-state";
 import { DEFAULT_SHIFT, type ShiftLike } from "@/lib/leave-hours";
-import { KIND_LABEL, isRequestKind } from "@/lib/request-forms";
+import { KIND_LABEL, approvalChainSummary, isRequestKind } from "@/lib/request-forms";
 import { FixPunchForm } from "./_components/FixPunchForm";
 import { KindSwitcher } from "./_components/KindSwitcher";
 import { LeaveForm } from "./_components/LeaveForm";
@@ -52,26 +51,6 @@ interface SuccessInfo {
   approverName: string | null;
   summary: string;
   uploadWarning: string | null;
-}
-
-type CreatedStep = NonNullable<CreateRequestResult["steps"]>[number];
-
-/** 一關的顯示名：多位候選用「／」串；查不到姓名就略過該關。 */
-function stepName(step: CreatedStep): string {
-  const names = (step.candidateNames ?? []).map((n) => n.trim()).filter(Boolean);
-  if (names.length > 0) return names.join("／");
-  return (step.approverName ?? "").trim();
-}
-
-/**
- * 兩關以上時的簽核鏈摘要：「簽核關卡：王小明 → 陳老闆（共 2 關）」。
- * 一關（絕大多數的單）回空字串，成功畫面維持原樣。
- */
-function chainSummary(steps: readonly CreatedStep[]): string {
-  if (steps.length < 2) return "";
-  const names = steps.map(stepName).filter(Boolean);
-  if (names.length === 0) return `簽核關卡：共 ${steps.length} 關`;
-  return `簽核關卡：${names.join(" → ")}（共 ${steps.length} 關）`;
 }
 
 /** 租戶的預設班別＝ created_at 最早的 shift；沒有 shift → DEFAULT_SHIFT。 */
@@ -182,9 +161,9 @@ function RequestsView() {
         const firstNames = (steps[0]?.candidateNames ?? []).map((n) => n.trim()).filter(Boolean);
         setSuccess({
           approverName: firstNames.length > 0 ? firstNames.join("／") : (steps[0]?.approverName ?? null),
-          // 兩關以上（例如跨縣市出差＝主管 → 老闆）把整條鏈附在摘要後，
+          // 兩關以上（零用金與出差／公出一律主管 → 老闆）把整條鏈附在摘要後，
           // 讓申請人一眼看到「還要誰簽」，不必等列表載入。
-          summary: [summary, chainSummary(steps)].filter(Boolean).join("｜"),
+          summary: [summary, approvalChainSummary(steps)].filter(Boolean).join("｜"),
           uploadWarning,
         });
         if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });

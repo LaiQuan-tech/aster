@@ -10,6 +10,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
 import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { DEFAULT_TIMEZONE, todayKey } from "../lib/tz.js"
+import { sumClaimsForPayroll, type PayrollClaimRow } from "./payroll-claims.js"
 import { leaveDeductRate, loadLeaveTypes } from "./settlement.js"
 
 /**
@@ -395,30 +396,24 @@ export async function loadPayrollInputs(
   //   • allowance     定額補貼 → allowances，屬薪資所得，進 gross
   // 只取 status='settled'：未核銷的單不該進當期薪資（故核銷必須在本
   // 端點之前執行，見 expense-settlements 的說明）。
+  //
+  // ⚠️ **排除綁了預支（`advance_id`）的報銷單**（模組三第 2、3 條；2026-10-11 由
+  // `trip_request_id` 改成 `advance_id`）。有預支的花費是「先撥預支、回程沖抵」：員工已經先拿到
+  // amount，憑證只是用來算 actualTotal；若同時走這裡的加項，公司會付兩次——預支一次、報銷再一次。
+  // 那一軌只結差額（balance），見下方 advances 區塊。**自行墊付**的出差憑證（只綁出差單、
+  // 沒綁預支）沒有預支可沖抵，照常在這裡給付——舊的 trip_request_id 判準會讓它永遠不付。
+  // 判準與加總在 services/payroll-claims.ts（純函式，有單元測試）；這裡把 advance_id 一起讀回來。
   const { data: expData, error: expErr } = await supabaseAdmin
     .from("expense_claims")
-    .select("employee_id, nature, amount")
+    .select("employee_id, nature, amount, advance_id")
     .eq("tenant_id", tenantId)
     .eq("period", period)
     .eq("status", "settled")
-    // ⚠️ **排除綁定出差單的報銷**（模組三第 2 條）。
-    // 出差是「先撥預支、回程沖抵」：員工已經先拿到 amount，回程報的單
-    // 只是用來算 actualTotal。若這些單同時走一般 expenses 加項，
-    // 公司會付兩次——預支一次、報銷再一次。
-    // 出差那一軌只結差額（balance），見下方 advances 區塊。
-    .is("trip_request_id", null)
     .in("employee_id", scopeIds)
   if (expErr) throw new Error(`loadPayrollInputs (expense_claims): ${expErr.message}`)
-  const expensesByEmployee = new Map<string, number>()
-  const allowancesByEmployee = new Map<string, number>()
-  for (const row of (expData ?? []) as Array<{
-    employee_id: string
-    nature: string
-    amount: string | number
-  }>) {
-    const target = row.nature === "allowance" ? allowancesByEmployee : expensesByEmployee
-    target.set(row.employee_id, (target.get(row.employee_id) ?? 0) + Number(row.amount))
-  }
+  const { expensesByEmployee, allowancesByEmployee } = sumClaimsForPayroll(
+    (expData ?? []) as unknown as PayrollClaimRow[],
+  )
 
   // --- 本期要結算的預支差額（模組三第 2、3 條：出差與零用金共用）--------------------------
   // 只取 balance_handling='payroll' 且 recovery_period 指到本期的已核銷列，
