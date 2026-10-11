@@ -142,7 +142,13 @@ export default function AttendanceSheetPage() {
           <p className="text-sm text-gray-400">載入中…</p>
         ) : sheet ? (
           <>
-            <AttendanceSheetTable sheet={sheet} editable={editable} showMoney={false} onPatchDay={handlePatchDay} />
+            <AttendanceSheetTable
+              sheet={sheet}
+              editable={editable}
+              showMoney={false}
+              onPatchDay={handlePatchDay}
+              preferenceScope="ess"
+            />
             <div className="no-print mt-4 space-y-2">
               {editable && blockers.length > 0 && (
                 <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">

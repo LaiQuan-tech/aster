@@ -1,7 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { fmtHm } from "@/lib/ess-format";
+import {
+  SHEET_FILTER_TEXT,
+  SHEET_SHOW_ALL_STORAGE_KEY,
+  browserStorage,
+  partitionSheetDays,
+  readStoredFlag,
+  writeStoredFlag,
+  type SheetFilterScope,
+} from "@/lib/attendance-day-filter";
 import {
   friendlyError,
   otTierLabelsOf,
@@ -22,6 +31,12 @@ import {
  * 2026-09-23：三個加班欄名改吃 `totals.otTierLabels`（M24，後端依規則的 tiers 產生）；
  * 多一欄「超額(另計)」（M1 月加班上限之外、改為另行給付的分鐘）；在家工作的日子
  * 在「內容」欄前面掛一個「在家」標籤（M2）。三者都與匯出的 xlsx 版面一致。
+ *
+ * 2026-10-11（0930 會議）：預設只顯示「有事的日子」（請假、加班、異常、手動註記／審核覆寫；
+ * 判斷規則見 lib/attendance-day-filter.ts），平淡的正常出勤收起來，表格上方有「顯示全月」開關。
+ * 月表合計、總計列與薪資試算一律是全月數字，不受過濾影響；列印時收起來的日子仍會印出
+ * （`hidden print:table-row`），印出來的出勤統計表維持完整一個月。開關狀態用 localStorage
+ * 記在各自的瀏覽器裡（`preferenceScope`：ESS 與後台各記各的），沒記憶一律預設關。
  */
 
 const WEEKDAY_LABEL = ["日", "一", "二", "三", "四", "五", "六"];
@@ -94,15 +109,36 @@ export function AttendanceSheetTable({
   editable,
   showMoney,
   onPatchDay,
+  preferenceScope,
 }: {
   sheet: SheetView;
   editable: boolean;
   showMoney: boolean;
   onPatchDay?: (date: string, patch: SheetDayPatch) => void | Promise<void>;
+  /**
+   * 「顯示全月」開關的記憶範圍：員工前台 `"ess"`、後台 `"admin"` 各記各的。
+   * 不帶就不記憶（每次載入都預設關）。
+   */
+  preferenceScope?: SheetFilterScope;
 }) {
   const { year, month } = minguoPeriod(sheet.period);
   const [overrideOpenFor, setOverrideOpenFor] = useState<string | null>(null);
   const tierLabels = otTierLabelsOf(sheet.totals);
+
+  // 「顯示全月」：初始一律關；掛載後才讀 localStorage（不在 useState 初始值讀，避免 SSR 與掛載後內容對不上）。
+  // 只在使用者按開關時寫回，不在 effect 裡寫——避免 StrictMode 重複執行時用預設值蓋掉原本的記憶。
+  const storageKey = preferenceScope ? SHEET_SHOW_ALL_STORAGE_KEY[preferenceScope] : null;
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => {
+    if (storageKey) setShowAll(readStoredFlag(browserStorage(), storageKey));
+  }, [storageKey]);
+
+  function changeShowAll(next: boolean) {
+    setShowAll(next);
+    if (storageKey) writeStoredFlag(browserStorage(), storageKey, next);
+  }
+
+  const partition = useMemo(() => partitionSheetDays(sheet.days, showAll), [sheet.days, showAll]);
 
   async function patch(date: string, value: SheetDayPatch) {
     if (!onPatchDay) return;
@@ -114,6 +150,26 @@ export function AttendanceSheetTable({
       <div className="print-sheet-header">
         亞斯特設計顧問有限公司／{year}年{month}月 出勤統計表－{sheet.employeeName}
       </div>
+
+      {partition.total > 0 && (
+        <div className="no-print flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+          <label className="inline-flex min-h-11 cursor-pointer items-center gap-2 text-gray-700 sm:min-h-9">
+            <input
+              type="checkbox"
+              role="switch"
+              checked={showAll}
+              onChange={(event) => changeShowAll(event.target.checked)}
+              className="h-5 w-5 cursor-pointer rounded accent-[var(--brand)]"
+            />
+            <span className="font-medium">{SHEET_FILTER_TEXT.showAll(partition.total)}</span>
+          </label>
+          {!showAll && partition.hiddenCount > 0 && (
+            <span className="text-gray-500" aria-live="polite">
+              {SHEET_FILTER_TEXT.hidden(partition.hiddenCount)}
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="overflow-x-auto rounded-xl border border-gray-100">
         <table className="w-full min-w-[1180px] text-left text-sm">
@@ -137,10 +193,11 @@ export function AttendanceSheetTable({
             </tr>
           </thead>
           <tbody>
-            {sheet.days.map((day) => (
+            {partition.entries.map(({ item: day, hidden }) => (
               <DayRow
                 key={day.date}
                 day={day}
+                hidden={hidden}
                 editable={editable}
                 overridePopoverOpen={overrideOpenFor === day.date}
                 onOpenOverride={() => setOverrideOpenFor(day.date)}
@@ -148,10 +205,18 @@ export function AttendanceSheetTable({
                 onPatch={(value) => patch(day.date, value)}
               />
             ))}
-            {sheet.days.length === 0 && (
+            {partition.total === 0 && (
               <tr>
                 <td colSpan={13} className="py-6 text-center text-gray-400">
                   本期尚無資料
+                </td>
+              </tr>
+            )}
+            {partition.total > 0 && partition.visibleCount === 0 && (
+              <tr className="print:hidden">
+                <td colSpan={13} className="px-4 py-8 text-center">
+                  <p className="text-sm font-medium text-gray-600">{SHEET_FILTER_TEXT.emptyTitle}</p>
+                  <p className="mt-1 text-xs text-gray-400">{SHEET_FILTER_TEXT.emptyHint(partition.total)}</p>
                 </td>
               </tr>
             )}
@@ -179,6 +244,7 @@ export function AttendanceSheetTable({
 
 function DayRow({
   day,
+  hidden,
   editable,
   overridePopoverOpen,
   onOpenOverride,
@@ -186,6 +252,8 @@ function DayRow({
   onPatch,
 }: {
   day: SheetDayView;
+  /** 沒事的日子且沒開「顯示全月」：畫面上收起來，列印時仍印出（維持完整一個月）。 */
+  hidden: boolean;
   editable: boolean;
   overridePopoverOpen: boolean;
   onOpenOverride: () => void;
@@ -195,7 +263,7 @@ function DayRow({
   const hasOverride = day.overtime.override != null;
   const beyondCap = day.overtime.beyondCap ?? 0;
   return (
-    <tr className={`border-b border-gray-50 align-top ${rowTone(day)}`}>
+    <tr className={`border-b border-gray-50 align-top ${rowTone(day)}${hidden ? " hidden print:table-row" : ""}`}>
       <td className="py-2 pl-3 pr-2 tabular-nums">{day.date}</td>
       <td className="py-2 pr-2">{weekdayLabel(day.date)}</td>
       <td className="py-2 pr-2 tabular-nums">{hhmm(day.firstIn)}</td>

@@ -323,7 +323,13 @@ export default function AttendanceSheetDetailPage() {
           </button>
         </div>
 
-        <AttendanceSheetTable sheet={sheet} editable={sheet.status !== "locked"} showMoney onPatchDay={handlePatchDay} />
+        <AttendanceSheetTable
+          sheet={sheet}
+          editable={sheet.status !== "locked"}
+          showMoney
+          onPatchDay={handlePatchDay}
+          preferenceScope="admin"
+        />
       </Card>
 
       {snapshots && snapshots.length > 0 && (
@@ -388,7 +394,7 @@ export default function AttendanceSheetDetailPage() {
                 </button>
               </div>
               {/* 快照本體就是當時的 SheetView（後端 SheetSnapshot extends SheetView），直接餵同一個表格元件。 */}
-              <AttendanceSheetTable sheet={openSnapshot.snapshot as SheetView} editable={false} showMoney />
+              <AttendanceSheetTable sheet={openSnapshot.snapshot as SheetView} editable={false} showMoney preferenceScope="admin" />
             </div>
           ) : null}
         </Card>

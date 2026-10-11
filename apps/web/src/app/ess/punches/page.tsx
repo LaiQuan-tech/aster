@@ -5,6 +5,14 @@ import Link from "next/link";
 import { getPunchRecords } from "@/lib/ess-api";
 import { addDays, fmtDateWithWeekday, fmtHm, fmtHoursMinutes, todayKey } from "@/lib/ess-format";
 import { buildDayRows, type DayRow, type DayRowStatus, type PunchHistoryRecord } from "@/lib/punch-history";
+import {
+  PUNCHES_SHOW_ALL_STORAGE_KEY,
+  PUNCH_FILTER_TEXT,
+  browserStorage,
+  partitionPunchRows,
+  readStoredFlag,
+  writeStoredFlag,
+} from "@/lib/attendance-day-filter";
 import { Button, Card, EmptyState, Field, InlineError, Input, Pill, Skeleton, type PillTone } from "@/components/ess-ui";
 
 /** 查詢區間上限（天）；也擋掉 <input type=date> 打字打到一半吐出的 0202 年之類的值。 */
@@ -74,6 +82,17 @@ export default function PunchesPage() {
 
   const rangeError = useMemo(() => rangeErrorOf(from, to), [from, to]);
 
+  // 「顯示全部日期」：初始一律關；掛載後才讀 localStorage（避免 SSR 與掛載後內容對不上）。
+  // 只在按開關時寫回（見 changeShowAll），不在 effect 裡寫，StrictMode 重複執行也不會蓋掉記憶。
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => {
+    setShowAll(readStoredFlag(browserStorage(), PUNCHES_SHOW_ALL_STORAGE_KEY));
+  }, []);
+  function changeShowAll(next: boolean) {
+    setShowAll(next);
+    writeStoredFlag(browserStorage(), PUNCHES_SHOW_ALL_STORAGE_KEY, next);
+  }
+
   const load = useCallback(async (f: string, t: string) => {
     const seq = ++seqRef.current;
     setLoading(true);
@@ -105,6 +124,11 @@ export default function PunchesPage() {
     [loaded],
   );
 
+  // 預設只列需要留意的日子（缺卡、平日沒打卡、休息日有打卡、今天）；上下班都完整的平日收起來。
+  // 匯出 CSV 一律吃完整的 rows，不受這個開關影響。
+  const partition = useMemo(() => partitionPunchRows(rows, showAll, today), [rows, showAll, today]);
+  const visibleRows = useMemo(() => partition.entries.filter((entry) => !entry.hidden).map((entry) => entry.item), [partition]);
+
   const showSkeleton = loading && !loaded;
 
   return (
@@ -133,7 +157,9 @@ export default function PunchesPage() {
           </div>
         </div>
         <InlineError className="mt-2">{rangeError}</InlineError>
-        <p className="mt-2 text-xs text-gray-400">平日沒有打卡也會列出；週六日只列有紀錄的日子。時間為本地時間。</p>
+        <p className="mt-2 text-xs text-gray-400">
+          預設只列需要留意的日子（缺卡、平日沒打卡、休息日有打卡、今天），打開「顯示全部日期」可看每一天。平日沒有打卡也會列出；週六日只列有紀錄的日子。時間為本地時間。
+        </p>
       </Card>
 
       <Card
@@ -142,7 +168,9 @@ export default function PunchesPage() {
           loading && loaded ? (
             <span className="text-xs text-gray-400">更新中…</span>
           ) : rows.length > 0 ? (
-            <span className="text-xs text-gray-400">{rows.length} 天</span>
+            <span className="text-xs text-gray-400">
+              {partition.hiddenCount > 0 ? `${partition.visibleCount} 天（共 ${rows.length} 天）` : `${rows.length} 天`}
+            </span>
           ) : null
         }
       >
@@ -153,85 +181,109 @@ export default function PunchesPage() {
           <EmptyState title="這段期間沒有打卡紀錄" hint="調整上方的起迄日期再看看。" />
         ) : (
           <>
-            {/* 手機：卡片式 */}
-            <ul className="space-y-3 md:hidden" aria-busy={loading || undefined}>
-              {rows.map((row) => {
-                const pill = pillOf(row, today);
-                return (
-                  <li key={row.date} className="rounded-xl border border-gray-100 bg-gray-50 p-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm font-semibold text-gray-900">{fmtDateWithWeekday(row.date)}</p>
-                      <Pill tone={pill.tone}>{pill.label}</Pill>
-                    </div>
-                    <dl className="mt-2 grid grid-cols-3 gap-2 text-sm">
-                      <div className="rounded-lg bg-white px-3 py-2">
-                        <dt className="text-xs text-gray-400">上班</dt>
-                        <dd className="mt-0.5 font-semibold tabular-nums text-gray-800">{timeOf(row.in)}</dd>
-                      </div>
-                      <div className="rounded-lg bg-white px-3 py-2">
-                        <dt className="text-xs text-gray-400">下班</dt>
-                        <dd className="mt-0.5 font-semibold tabular-nums text-gray-800">{timeOf(row.out)}</dd>
-                      </div>
-                      <div className="rounded-lg bg-white px-3 py-2">
-                        <dt className="text-xs text-gray-400">時長</dt>
-                        <dd className="mt-0.5 font-semibold tabular-nums text-gray-800">{durationOf(row)}</dd>
-                      </div>
-                    </dl>
-                    {pill.fixable && (
-                      <Link
-                        href={fixPunchHref(row.date)}
-                        className="mt-1 inline-flex min-h-10 items-center text-sm font-medium hover:underline"
-                        style={{ color: "var(--brand)" }}
-                      >
-                        申請補卡
-                      </Link>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+            <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+              <label className="inline-flex min-h-11 cursor-pointer items-center gap-2 text-gray-700">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={showAll}
+                  onChange={(event) => changeShowAll(event.target.checked)}
+                  className="h-5 w-5 cursor-pointer rounded accent-[var(--brand)]"
+                />
+                <span className="font-medium">{PUNCH_FILTER_TEXT.showAll(rows.length)}</span>
+              </label>
+              {!showAll && partition.hiddenCount > 0 && (
+                <span className="text-gray-500" aria-live="polite">
+                  {PUNCH_FILTER_TEXT.hidden(partition.hiddenCount)}
+                </span>
+              )}
+            </div>
 
-            {/* 桌機：5 欄簡表 */}
-            <div className="hidden overflow-x-auto md:block">
-              <table className="w-full text-left text-sm" aria-busy={loading || undefined}>
-                <thead>
-                  <tr className="border-b border-gray-200 text-xs text-gray-500">
-                    <th className="py-2 pr-4 font-medium">日期</th>
-                    <th className="py-2 pr-4 font-medium">上班</th>
-                    <th className="py-2 pr-4 font-medium">下班</th>
-                    <th className="py-2 pr-4 font-medium">時長</th>
-                    <th className="py-2 font-medium">狀態</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((row) => {
+            {visibleRows.length === 0 ? (
+              <EmptyState title={PUNCH_FILTER_TEXT.emptyTitle} hint={PUNCH_FILTER_TEXT.emptyHint(rows.length)} />
+            ) : (
+              <>
+                {/* 手機：卡片式 */}
+                <ul className="space-y-3 md:hidden" aria-busy={loading || undefined}>
+                  {visibleRows.map((row) => {
                     const pill = pillOf(row, today);
                     return (
-                      <tr key={row.date} className="border-b border-gray-50">
-                        <td className="py-2.5 pr-4 font-medium text-gray-800">{fmtDateWithWeekday(row.date)}</td>
-                        <td className="py-2.5 pr-4 tabular-nums">{timeOf(row.in)}</td>
-                        <td className="py-2.5 pr-4 tabular-nums">{timeOf(row.out)}</td>
-                        <td className="py-2.5 pr-4 tabular-nums">{durationOf(row)}</td>
-                        <td className="py-2.5">
-                          <div className="flex items-center gap-3">
-                            <Pill tone={pill.tone}>{pill.label}</Pill>
-                            {pill.fixable && (
-                              <Link
-                                href={fixPunchHref(row.date)}
-                                className="text-xs font-medium hover:underline"
-                                style={{ color: "var(--brand)" }}
-                              >
-                                申請補卡
-                              </Link>
-                            )}
+                      <li key={row.date} className="rounded-xl border border-gray-100 bg-gray-50 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-sm font-semibold text-gray-900">{fmtDateWithWeekday(row.date)}</p>
+                          <Pill tone={pill.tone}>{pill.label}</Pill>
+                        </div>
+                        <dl className="mt-2 grid grid-cols-3 gap-2 text-sm">
+                          <div className="rounded-lg bg-white px-3 py-2">
+                            <dt className="text-xs text-gray-400">上班</dt>
+                            <dd className="mt-0.5 font-semibold tabular-nums text-gray-800">{timeOf(row.in)}</dd>
                           </div>
-                        </td>
-                      </tr>
+                          <div className="rounded-lg bg-white px-3 py-2">
+                            <dt className="text-xs text-gray-400">下班</dt>
+                            <dd className="mt-0.5 font-semibold tabular-nums text-gray-800">{timeOf(row.out)}</dd>
+                          </div>
+                          <div className="rounded-lg bg-white px-3 py-2">
+                            <dt className="text-xs text-gray-400">時長</dt>
+                            <dd className="mt-0.5 font-semibold tabular-nums text-gray-800">{durationOf(row)}</dd>
+                          </div>
+                        </dl>
+                        {pill.fixable && (
+                          <Link
+                            href={fixPunchHref(row.date)}
+                            className="mt-1 inline-flex min-h-10 items-center text-sm font-medium hover:underline"
+                            style={{ color: "var(--brand)" }}
+                          >
+                            申請補卡
+                          </Link>
+                        )}
+                      </li>
                     );
                   })}
-                </tbody>
-              </table>
-            </div>
+                </ul>
+
+                {/* 桌機：5 欄簡表 */}
+                <div className="hidden overflow-x-auto md:block">
+                  <table className="w-full text-left text-sm" aria-busy={loading || undefined}>
+                    <thead>
+                      <tr className="border-b border-gray-200 text-xs text-gray-500">
+                        <th className="py-2 pr-4 font-medium">日期</th>
+                        <th className="py-2 pr-4 font-medium">上班</th>
+                        <th className="py-2 pr-4 font-medium">下班</th>
+                        <th className="py-2 pr-4 font-medium">時長</th>
+                        <th className="py-2 font-medium">狀態</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleRows.map((row) => {
+                        const pill = pillOf(row, today);
+                        return (
+                          <tr key={row.date} className="border-b border-gray-50">
+                            <td className="py-2.5 pr-4 font-medium text-gray-800">{fmtDateWithWeekday(row.date)}</td>
+                            <td className="py-2.5 pr-4 tabular-nums">{timeOf(row.in)}</td>
+                            <td className="py-2.5 pr-4 tabular-nums">{timeOf(row.out)}</td>
+                            <td className="py-2.5 pr-4 tabular-nums">{durationOf(row)}</td>
+                            <td className="py-2.5">
+                              <div className="flex items-center gap-3">
+                                <Pill tone={pill.tone}>{pill.label}</Pill>
+                                {pill.fixable && (
+                                  <Link
+                                    href={fixPunchHref(row.date)}
+                                    className="text-xs font-medium hover:underline"
+                                    style={{ color: "var(--brand)" }}
+                                  >
+                                    申請補卡
+                                  </Link>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
           </>
         )}
       </Card>

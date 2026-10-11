@@ -92,7 +92,7 @@ export default function AttendanceSheetReviewPage() {
           <p className="text-sm text-gray-400">載入中…</p>
         ) : sheet ? (
           <>
-            <AttendanceSheetTable sheet={sheet} editable={false} showMoney={false} />
+            <AttendanceSheetTable sheet={sheet} editable={false} showMoney={false} preferenceScope="ess" />
             {sheet.status === "submitted" ? (
               <div className="no-print mt-4 space-y-2 rounded-xl border border-gray-100 bg-gray-50 p-4">
                 <label className="block text-xs font-medium text-gray-500">意見（退回時必填）</label>
