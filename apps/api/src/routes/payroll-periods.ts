@@ -30,6 +30,8 @@ import { PERIOD_RE, canReopenPeriod, getPeriodLockState, loadPeriodUnlockPolicy 
  *
  * 鎖住之後哪些寫入會回 409 `{ error: "period_closed", period }`：services/period-lock.ts 檔頭與各端點的註解。
  * 解鎖名單（periodUnlockEmpIds）只有老闆（或 platform_admin）能改：PUT /api/tenant/settings（routes/tenant.ts）。
+ * 同一份權限邊界（services/privileged-accounts.ts）還包括：換老闆設定、指派 platform_admin 角色、重設／接管老闆與其他
+ * 受保護帳號的密碼——這三件事同樣只有老闆或 platform_admin 能做，HR 無法靠它們變成老闆。
  */
 export const payrollPeriodsRouter = Router()
 

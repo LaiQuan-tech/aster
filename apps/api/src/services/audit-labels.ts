@@ -223,6 +223,8 @@ export const AUDIT_FIELD_LABELS: Record<string, string> = {
   unlockedSheets: "解鎖月表張數",
   revertedPayslips: "回復草稿的薪資單張數",
   payroll: "薪資設定（可重新開放月結的人）",
+  // 特權帳號邊界（2026-10-11）：換老闆的稽核 payload 是 { approval: { fallbackApproverEmpId } }
+  approval: "簽核設定（老闆）",
   created_at: "建立時間",
   updated_at: "更新時間",
 }

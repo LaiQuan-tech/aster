@@ -11,7 +11,8 @@ import { app } from "../app"
  * 流程：部門（manager_emp_id=主管）＋主管＋員工 → 員工送假單 → 第 1 關＝主管、主管
  * 收到 submitted 通知 → 主管核准 → 申請人收到 approved、acted_by_emp_id=主管
  * → 再送一張 → 主管駁回 → rejected
- * → 無部門員工送單 → fallback（老闆）→ 清掉 fallback → 第一位 hr_admin
+ * → 無部門員工送單 → fallback（老闆；尚無老闆時 HR 可做第一次設定）→ 已有老闆後 HR 換／清除 403 not_boss
+ *   （2026-10-11 權限邊界）→ 老闆交棒 → 直接改庫清掉 fallback → 第一位 hr_admin
  * → mode=list 兩關名單 → 名單優先、第 1 關核准後推進並通知第 2 關（advanced）
  * → mode=manager 有名單也走主管 → HR 代簽 200 且 acted_by_emp_id=HR
  * → GET /requests/pending-approvals 只回輪到我簽的單並附申請人／假別／附件數。
@@ -238,7 +239,35 @@ describe.skipIf(!ready)("A2 簽核鏈 — live", () => {
   })
 
   describe("找不到主管的退路", () => {
-    it("無部門員工 → fallback 簽核者（tenant features.approval.fallbackApproverEmpId）", async () => {
+    /**
+     * 測試夾具：用 service role 直接改 tenants.features.approval.fallbackApproverEmpId。
+     * 2026-10-11 起 HR 不能換／清除「已設定的老闆」（403 not_boss，誰是老闆＝誰能重新開放已結算月份），
+     * 所以要回到「沒有老闆」的初始狀態只能繞過 API 直接改庫。
+     */
+    async function setBossDirect(id: string | null): Promise<void> {
+      const { data, error } = await supabaseAdmin.from("tenants").select("features").eq("id", tenantId).single()
+      if (error) throw new Error(`read features: ${error.message}`)
+      const features = (data?.features as Record<string, unknown> | null) ?? {}
+      const approval = { ...((features.approval as Record<string, unknown> | undefined) ?? {}), fallbackApproverEmpId: id }
+      const { error: upErr } = await supabaseAdmin.from("tenants").update({ features: { ...features, approval } }).eq("id", tenantId)
+      if (upErr) throw new Error(`write features: ${upErr.message}`)
+    }
+    async function bossNow(): Promise<string | null> {
+      const { data, error } = await supabaseAdmin.from("tenants").select("features").eq("id", tenantId).single()
+      if (error) throw new Error(`read features: ${error.message}`)
+      const approval = ((data?.features as Record<string, unknown> | null)?.approval ?? {}) as { fallbackApproverEmpId?: string | null }
+      return approval.fallbackApproverEmpId ?? null
+    }
+
+    it("無部門員工 → fallback 簽核者（tenant features.approval.fallbackApproverEmpId）；尚無老闆時 HR 可做第一次設定", async () => {
+      // 還沒有老闆：設一個不存在的員工 → 400（新老闆必須是本租戶員工），設定不變。
+      const ghost = await as(adminToken, request(app).put("/api/tenant/settings")).send({
+        features: { approval: { fallbackApproverEmpId: "00000000-0000-4000-8000-000000000000" } },
+      })
+      expect(ghost.status).toBe(400)
+      expect(ghost.body.error).toBe("invalid_employee")
+      expect(await bossNow()).toBeNull()
+
       const set = await as(adminToken, request(app).put("/api/tenant/settings")).send({
         features: { approval: { fallbackApproverEmpId: bossId } },
       })
@@ -252,11 +281,58 @@ describe.skipIf(!ready)("A2 簽核鏈 — live", () => {
       expect(await notificationsFor(bossId, "submitted", res.body.requestId)).toHaveLength(1)
     })
 
-    it("fallback 也沒設 → 第一位 hr_admin", async () => {
+    it("已有老闆後：HR（不是老闆）換老闆、清除老闆都是 403 not_boss，設定不變；帶 approval: {} 也不會洗掉老闆", async () => {
+      expect(await bossNow()).toBe(bossId)
+
+      const swap = await as(adminToken, request(app).put("/api/tenant/settings")).send({
+        features: { approval: { fallbackApproverEmpId: mgrId } },
+      })
+      expect(swap.status).toBe(403)
+      expect(swap.body.error).toBe("not_boss")
+      expect(await bossNow()).toBe(bossId)
+
       const clear = await as(adminToken, request(app).put("/api/tenant/settings")).send({
         features: { approval: { fallbackApproverEmpId: null } },
       })
-      expect(clear.status).toBe(200)
+      expect(clear.status).toBe(403)
+      expect(clear.body.error).toBe("not_boss")
+      expect(await bossNow()).toBe(bossId)
+
+      // 老闆設定沒變（原值再送一次）→ 不算更換，照常 200；approval: {} 是巢狀合併，也不會把老闆洗掉。
+      const same = await as(adminToken, request(app).put("/api/tenant/settings")).send({
+        features: { approval: { fallbackApproverEmpId: bossId } },
+      })
+      expect(same.status).toBe(200)
+      const empty = await as(adminToken, request(app).put("/api/tenant/settings")).send({ features: { approval: {} } })
+      expect(empty.status).toBe(200)
+      expect(await bossNow()).toBe(bossId)
+    })
+
+    it("老闆本人可以交棒給別人；交棒後原老闆就不能再改回來", async () => {
+      // 夾具：回到沒有老闆 → HR 首次把自己設成老闆（初始狀態允許）→ 老闆（HR 自己）交棒給 bossId → HR 不再是老闆，改回來 403。
+      await setBossDirect(null)
+      const self = await as(adminToken, request(app).put("/api/tenant/settings")).send({
+        features: { approval: { fallbackApproverEmpId: hrEmpId } },
+      })
+      expect(self.status).toBe(200)
+      expect(await bossNow()).toBe(hrEmpId)
+
+      const handOver = await as(adminToken, request(app).put("/api/tenant/settings")).send({
+        features: { approval: { fallbackApproverEmpId: bossId } },
+      })
+      expect(handOver.status).toBe(200)
+      expect(await bossNow()).toBe(bossId)
+
+      const back = await as(adminToken, request(app).put("/api/tenant/settings")).send({
+        features: { approval: { fallbackApproverEmpId: hrEmpId } },
+      })
+      expect(back.status).toBe(403)
+      expect(back.body.error).toBe("not_boss")
+      expect(await bossNow()).toBe(bossId)
+    })
+
+    it("fallback 也沒設 → 第一位 hr_admin", async () => {
+      await setBossDirect(null)
 
       const res = await fileLeave(loneToken, "無部門無老闆")
       expect(res.status).toBe(201)

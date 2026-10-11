@@ -11,7 +11,13 @@ import {
   type ImportKind,
 } from "./kinds.js"
 import { normalizeToken, type ParsedImportRow } from "./parse.js"
-import { assertInstantsOpen } from "../period-lock.js"
+import { assertInstantsOpen, loadPeriodUnlockPolicy } from "../period-lock.js"
+import {
+  CREDENTIALS_MESSAGE,
+  canManageCredentialsOf,
+  isProtectedAccount,
+  loadActor,
+} from "../privileged-accounts.js"
 import { loadDepartments, loadShifts, NameResolver, resolveEmployees, type EmployeeRef } from "./resolve.js"
 import {
   generateTenantCalendar,
@@ -476,11 +482,27 @@ async function runEmployees(
     // 只驗證：照 bulkInviteFromCsv 的規則預判綁定對象與 Email 狀態，不建帳號、不產 token。
     const claimed = new Set<string>()
     const survivors: typeof valid = []
+    // 權限邊界（services/privileged-accounts.ts）也預判：綁到受保護的未綁帳號列（老闆、解鎖人、hr_admin、
+    // platform_admin）只有老闆或 platform_admin 能做，真跑時 bulkInviteFromCsv 會 skipped，這裡先講。
+    const [policy, actor, roleRows] = await Promise.all([
+      loadPeriodUnlockPolicy(tenantId),
+      loadActor(tenantId, actorEmpId),
+      supabaseAdmin.from("employees").select("id, role").eq("tenant_id", tenantId).is("user_id", null),
+    ])
+    if (roleRows.error) throw new Error(`POST /imports/employees (roles): ${roleRows.error.message}`)
+    const roleById = new Map(((roleRows.data ?? []) as Array<{ id: string; role: string }>).map((r) => [r.id, r.role]))
     for (const row of valid) {
       const bind = previewBindTarget(resolver.all, row.value.empNo, row.value.name, claimed)
       if (!bind.ok) {
         errors.push({ line: row.line, message: bind.message })
         continue
+      }
+      if (bind.targetId) {
+        const account = { id: bind.targetId, role: roleById.get(bind.targetId) ?? "employee" }
+        if (isProtectedAccount(account, policy) && !(actor && canManageCredentialsOf(actor, account, policy))) {
+          errors.push({ line: row.line, message: `not_boss: ${CREDENTIALS_MESSAGE}` })
+          continue
+        }
       }
       const emailProblem = await previewEmailStatus(tenantId, row.value.email)
       if (emailProblem) {

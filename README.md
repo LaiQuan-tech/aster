@@ -129,9 +129,22 @@ HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼�
      後台「設定 › 進階功能」只有老闆或 platform_admin 能改）；HR 不是就 403。成功後 locked 月表轉回 approved、
      finalized 薪資單轉回 draft、`period_closes` 標 `reopened`（誰／何時／理由，欄位 `reopened_*`）、寫 audit、通知老闆與 HR；
      之後要再鎖必須重新過一次檢查清單。已匯款的更正不要重新開放，改在下月薪資處理（目前系統沒有「前期更正」加減項入口）。
-     ⚠️ 權限的邊界：「誰是老闆」（`approval.fallbackApproverEmpId`，後台「假別與簽核流程」頁）與員工角色目前任何 HR 都能改，
-     所以這道鎖擋的是日常誤操作與一般 HR 的直接解鎖，**不是**對惡意內部人員的技術性防線（每一步都留 audit，重新開放時
-     老闆與 HR 都會收到通知）；是否把「換老闆」「指派 platform_admin」也收成專屬權限是尚未做的決定。
+   - **權限邊界：HR 不能靠三條路變成老闆**（2026-10-11 業主拍板，`apps/api/src/services/privileged-accounts.ts`；
+     誰是老闆＝誰能重新開放已結算月份，所以這三件事只有老闆或 platform_admin 能做，其他人含 HR 一律 403）：
+     ① **換老闆設定**（`PUT /api/tenant/settings` 的 `features.approval.fallbackApproverEmpId`，後台「假別與簽核流程」頁）——
+     目前有老闆 → 只有老闆本人（可以交棒給別人，交棒後自己就不能再改回來）或 platform_admin 能換／清除，403 `not_boss`；
+     **還沒有老闆**時任何 HR 可做第一次設定（否則沒人能設）。比對的是合併後的有效值（`approval: {}` 不會洗掉老闆）；
+     新老闆必須是本租戶員工（400 `invalid_employee`）。
+     ② **指派 platform_admin 角色**（`POST /employees`、`PATCH /employees/:id`、批次建立帳號 CSV 的 role 欄）——只有 platform_admin，
+     否則 403 `platform_admin_required`；HR 不能升自己。只擋「變成」：目標本來就是 platform_admin、帶原值存檔照常通過。
+     ③ **重設／接管受保護帳號的密碼**——受保護帳號＝老闆、老闆指定的解鎖人（`periodUnlockEmpIds`）、hr_admin、platform_admin；
+     範圍含 `POST /employees/:id/reset-password`、`/send-reset`、`/invite`（dryRun 或沒設信件服務時，連結會直接回給 HR，
+     拿到連結等於能替對方設新密碼）與批次建立／匯入時綁到「尚未開通的受保護列」（該列 skipped）。對自己例外（改自己的密碼走員工自助
+     `/me/password`）；HR 重設一般員工照舊。
+     剩下 HR 仍能做、但**不會**變成老闆的事：停用／改名等員工維護、建立新的 hr_admin 帳號、重設一般員工密碼。
+     前端對應：假別與簽核流程頁的老闆欄位、員工管理頁的角色下拉（「平台管理員」選項）與重設密碼／寄信動作，
+     非老闆／非 platform_admin 看到的是停用並附說明（`apps/web/src/lib/privileged-accounts.ts`）。
+     ⚠️ 仍然沒有堵的：有資料庫權限的人（直接改庫）與 platform_admin 本人；每一步都留 audit，重新開放時老闆與 HR 都會收到通知。
    - 舊的 `POST /attendance-sheets/close-period`／`reopen-period`（含 `force`）已移除，`GET /attendance-sheets/period-closes` 仍在。
 3. **月表快照歷史** — 每次 `approveSheet` 都往 `attendance_sheet_snapshots` 追加一列（seq 遞增、不可刪），
    return／reopen 只清 `attendance_sheets.snapshot`、歷史不動；`GET /attendance-sheets/:id/snapshots`（HR）列出。

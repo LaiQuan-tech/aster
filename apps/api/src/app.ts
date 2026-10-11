@@ -75,6 +75,7 @@ import { internalCronRouter } from "./routes/internal-cron.js"
 import { groupOverviewRouter } from "./routes/group-overview.js"
 import { essTabGuard } from "./middleware/ess-tab-guard.js"
 import { periodClosedErrorHandler } from "./middleware/period-closed.js"
+import { privilegeErrorHandler } from "./middleware/privilege-error.js"
 import { runWithRequestContext } from "./lib/request-context.js"
 
 const WEB_ORIGINS = (process.env.WEB_ORIGINS ?? "http://localhost:3000")
@@ -204,6 +205,8 @@ app.use((_req: Request, res: Response) => {
 // 發薪鎖定：任何寫入端點或服務層丟出的 PeriodClosedError 一律回 409 { error: "period_closed", period }
 // （services/period-lock.ts）；其他錯誤交給下面的 500。
 app.use(periodClosedErrorHandler)
+// 特權帳號邊界（services/privileged-accounts.ts）：PrivilegeError 一律回 403 { error: "not_boss" | "platform_admin_required", message }。
+app.use(privilegeErrorHandler)
 
 // Centralised error handler — must be last and have 4 args for Express to
 // recognise it as an error handler.

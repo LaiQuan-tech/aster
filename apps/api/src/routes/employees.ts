@@ -10,6 +10,12 @@ import { belongsToTenant } from "../services/auth-invite.js"
 import { emailsByUserId } from "../services/employee-emails.js"
 import { allowWeakInitialPassword, createUserPasswordAttributes, setPasswordDirect } from "../services/password-policy.js"
 import { seedHireAcknowledgements } from "../services/onboarding-signatures.js"
+import {
+  assertCanAssignRole,
+  assertCanManageCredentials,
+  isPlatformAdminPromotion,
+  type PrivilegeCaller,
+} from "../services/privileged-accounts.js"
 
 export const employeesRouter = Router()
 
@@ -49,6 +55,13 @@ function generatePassword(): string {
   let out = ""
   for (const b of bytes) out += alphabet[b % alphabet.length]
   return `Aster-${out}`
+}
+
+/** 呼叫者的 {id, role}（權限邊界要看是不是老闆／platform_admin，見 services/privileged-accounts.ts）；查無回 null。 */
+async function callerOf(req: Request, tenantId: string): Promise<PrivilegeCaller | null> {
+  const userId = req.auth?.userId
+  const self = userId ? await resolveSelf(tenantId, userId) : null
+  return self ? { id: self.id, role: self.role } : null
 }
 
 /**
@@ -240,6 +253,9 @@ employeesRouter.get(
  * app_metadata.tenant_id (drives the JWT → RLS), then insert the matching
  * employees row scoped to this tenant. Best-effort cleanup: if the row insert
  * fails we delete the just-created auth user so we don't leak orphaned accounts.
+ *
+ * 權限邊界（2026-10-11）：`role: "platform_admin"` 只有 platform_admin 能指派，其他人（含 HR）403
+ * `platform_admin_required`——在建 auth 帳號**之前**檢查，被擋時不留下孤兒帳號。
  */
 employeesRouter.post(
   "/employees",
@@ -256,6 +272,7 @@ employeesRouter.post(
     const { email, name, password, role, deptId, empNo, employmentType, hireDate } = parsed.data
 
     try {
+      assertCanAssignRole(await callerOf(req, tenantId), role ?? "employee")
       // 租戶允許簡單初始密碼時改帶 bcrypt 的 password_hash（GoTrue createUser 不對雜湊做 HIBP 檢查），
       // 否則維持明文 password（受 GoTrue 弱密碼防護）。見 services/password-policy.ts。
       const { data: created, error: userErr } = await supabaseAdmin.auth.admin.createUser({
@@ -331,6 +348,10 @@ employeesRouter.post(
  * PATCH /employees/:id — update deptId/role/status/name/empNo/employmentType for
  * one of this tenant's employees. Tenant-scoped; 404 when the id is not in this
  * tenant.
+ *
+ * 權限邊界（2026-10-11）：把角色**變成** platform_admin 只有 platform_admin 能做（HR 不能指派，也不能升自己），
+ * 其他人 403 `platform_admin_required`。目標本來就是 platform_admin、帶著原值存檔（員工管理頁每次儲存都會帶 role）
+ * 照常通過。
  */
 employeesRouter.patch(
   "/employees/:id",
@@ -357,6 +378,25 @@ employeesRouter.patch(
     if (parsed.data.terminatedAt !== undefined) patch.terminated_at = parsed.data.terminatedAt
 
     try {
+      if (parsed.data.role !== undefined) {
+        const { data: target, error: targetErr } = await supabaseAdmin
+          .from("employees")
+          .select("id, role")
+          .eq("tenant_id", tenantId)
+          .eq("id", id)
+          .maybeSingle()
+        if (targetErr) {
+          next(new Error(`PATCH /employees/${id} (load): ${targetErr.message}`))
+          return
+        }
+        if (!target) {
+          res.status(404).json({ error: "not_found" })
+          return
+        }
+        if (isPlatformAdminPromotion(parsed.data.role, target.role as string)) {
+          assertCanAssignRole(await callerOf(req, tenantId), parsed.data.role)
+        }
+      }
       const { data, error } = await supabaseAdmin
         .from("employees")
         .update(patch)
@@ -390,6 +430,10 @@ employeesRouter.patch(
  *   - 未帶 password：後端產生一組隨機密碼並回傳一次（供 HR 轉交員工）；這條路不受開關影響。
  * 兩條路成功後都把 employees.must_change_password 設 true（員工下次登入被 AuthGate 要求改密碼）。
  * 更新的是該 employee 對應的 Supabase auth user；查無 user_id（尚未綁定帳號）回 409。
+ *
+ * 權限邊界（2026-10-11）：目標若是老闆、老闆指定的解鎖人、hr_admin 或 platform_admin，只有老闆或 platform_admin
+ * 能重設（對自己例外），其他人（含 HR）403 `not_boss`；HR 重設一般員工照舊。HR 改自己的密碼走員工自助的
+ * /me/password。見 services/privileged-accounts.ts。
  */
 employeesRouter.post(
   "/employees/:id/reset-password",
@@ -407,7 +451,7 @@ employeesRouter.post(
     try {
       const { data: emp, error: empErr } = await supabaseAdmin
         .from("employees")
-        .select("id, user_id")
+        .select("id, user_id, role")
         .eq("tenant_id", tenantId)
         .eq("id", id)
         .maybeSingle()
@@ -419,6 +463,12 @@ employeesRouter.post(
         res.status(404).json({ error: "not_found" })
         return
       }
+      // 受保護帳號（老闆／解鎖人／hr_admin／platform_admin）的密碼只有老闆或 platform_admin 能重設——
+      // 在查 auth 帳號、動任何東西之前先擋（403 比 409 no_account 優先，免得被當成探測帳號的管道）。
+      await assertCanManageCredentials(tenantId, await callerOf(req, tenantId), {
+        id: emp.id as string,
+        role: emp.role as string,
+      })
       if (!emp.user_id) {
         res.status(409).json({ error: "no_account" })
         return

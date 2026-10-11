@@ -175,6 +175,9 @@ export function accountErrorMessage(err: unknown, fallback = "操作失敗"): st
     set_password_failed: "設定密碼失敗：找不到該員工的登入帳號（可能剛被刪除），請重新整理後再試",
     email_exists: "此 Email 已有登入帳號",
     not_found: "找不到這位員工",
+    // 特權帳號邊界（2026-10-11）：受保護帳號的密碼／連結只有老闆或平台管理員能動；平台管理員角色只有平台管理員能指派。
+    not_boss: "只有老闆或平台管理員可以重設老闆、HR 管理員、平台管理員（以及老闆指定的人）的密碼",
+    platform_admin_required: "「平台管理員」角色只有平台管理員可以指派",
   };
   for (const [code, text] of Object.entries(table)) {
     if (message.includes(code)) return text;

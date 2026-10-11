@@ -6,6 +6,9 @@
  *   - 已綁登入帳號（user_id 有值）→ 寄重設密碼信＋設定密碼（HR 直接指定一組密碼，2026-09-22 業主要求）
  *     ＋暫時密碼（寄不了信時的備援，灰字）；未綁帳號 → 改成寄邀請信。這四個在該列有請求進行中
  *     （`busy`）時 disabled。
+ *   - 目標是受保護帳號（老闆、老闆指定的解鎖人、hr_admin、platform_admin）而登入者不是老闆也不是 platform_admin
+ *     （`credentialsLocked`，2026-10-11 業主拍板；判斷在 lib/privileged-accounts.ts credentialsLockedFor）：
+ *     這四個帳號動作一律 disabled 並帶說明——後端同樣擋（403 not_boss），這裡只是不讓人按了才被拒。
  *   - 停用：只有 status === "active" 才出現（紅字）。inactive 員工沒有「啟用」動作——
  *     原頁是走「編輯」裡的狀態下拉切回在職，這裡不另發明。
  *   - 「編輯」是列上固定的主要按鈕，不在這個清單裡。
@@ -39,6 +42,9 @@ export interface EmployeeActionInput {
   user_id: string | null;
 }
 
+/** 帳號動作被鎖住時的說明（同 lib/privileged-accounts.ts 的 CREDENTIALS_LOCKED_NOTE；這裡不 import 它，保持本檔零依賴）。 */
+const CREDENTIALS_LOCKED_TITLE = "只有老闆或平台管理員可以重設老闆、HR 管理員、平台管理員（以及老闆指定的人）的密碼";
+
 export interface EmployeeActionContext {
   /**
    * 這一列就是登入者本人。原頁**沒有**「不能停用自己」的規則、API 也沒擋，
@@ -47,30 +53,46 @@ export interface EmployeeActionContext {
   isSelf: boolean;
   /** 該列有帳號相關請求進行中（寄信／產生暫時密碼），對應原頁的 `busyId === employee.id`。 */
   busy?: boolean;
+  /**
+   * 這位登入者不能動這一列的登入憑證（受保護帳號、且登入者不是老闆／platform_admin、也不是對自己）。
+   * true → 寄重設密碼信／設定密碼／暫時密碼／寄邀請信 disabled 並帶說明；其他動作不受影響。
+   */
+  credentialsLocked?: boolean;
 }
 
 export function employeeActionsFor(emp: EmployeeActionInput, ctx: EmployeeActionContext): ActionSpec[] {
   const busy = ctx.busy === true;
+  const locked = ctx.credentialsLocked === true;
   const hasAccount = Boolean(emp.user_id);
   const actions: ActionSpec[] = [{ key: "profile", label: "My Data" }];
 
   if (hasAccount) {
-    actions.push({ key: "send-reset", label: "寄重設密碼信", disabled: busy });
+    actions.push({
+      key: "send-reset",
+      label: "寄重設密碼信",
+      disabled: busy || locked,
+      ...(locked ? { title: CREDENTIALS_LOCKED_TITLE } : {}),
+    });
     actions.push({
       key: "set-password",
       label: "設定密碼",
-      disabled: busy,
-      title: "由 HR 直接指定一組密碼（同仁下次登入須改密碼）",
+      disabled: busy || locked,
+      title: locked ? CREDENTIALS_LOCKED_TITLE : "由 HR 直接指定一組密碼（同仁下次登入須改密碼）",
     });
     actions.push({
       key: "temp-password",
       label: "暫時密碼",
       tone: "muted",
-      disabled: busy,
-      title: "寄不了信時的備援：產生暫時密碼",
+      disabled: busy || locked,
+      title: locked ? CREDENTIALS_LOCKED_TITLE : "寄不了信時的備援：產生暫時密碼",
     });
   } else {
-    actions.push({ key: "send-invite", label: "寄邀請信", disabled: busy });
+    actions.push({
+      key: "send-invite",
+      label: "寄邀請信",
+      disabled: busy || locked,
+      ...(locked ? { title: CREDENTIALS_LOCKED_TITLE } : {}),
+    });
   }
 
   if (emp.status === "active") {

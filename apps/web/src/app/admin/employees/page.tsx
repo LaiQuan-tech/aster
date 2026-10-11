@@ -59,7 +59,17 @@ import {
 } from "@/lib/people-extras-api";
 import { isBulkInviteResult } from "@/lib/import-view";
 import { EMPLOYMENT_TYPES as EMPLOYMENT_TYPE_VALUES, EMPLOYMENT_TYPE_LABELS } from "@/lib/ess-tabs";
-import { getMeCached, peekMeCached } from "@/lib/ess-state";
+import { getBrandingCached, getMeCached, peekMeCached } from "@/lib/ess-state";
+import {
+  CREDENTIALS_LOCKED_NOTE,
+  PLATFORM_ADMIN_ASSIGN_NOTE,
+  canAssignPlatformAdmin,
+  credentialsLockedFor,
+  privilegePolicyOf,
+  roleOptionsFor,
+  type PrivilegePolicy,
+  type PrivilegeViewer,
+} from "@/lib/privileged-accounts";
 import { isHrRole } from "@/lib/roles";
 import { useSession } from "@/lib/use-session";
 
@@ -242,6 +252,8 @@ const SNAKE: Record<keyof SaveProfileBody, string> = {
 };
 
 function roleLabel(role: string): string {
+  // platform_admin 不在下拉的固定清單裡（只有 platform_admin 能指派，選項由 roleOptionsFor 依登入者補上），列表仍要顯示中文。
+  if (role === "platform_admin") return "平台管理員";
   return ROLES.find((item) => item.value === role)?.label ?? role;
 }
 
@@ -341,6 +353,31 @@ export default function EmployeesPage() {
       active = false;
     };
   }, []);
+  // 特權帳號邊界（2026-10-11，lib/privileged-accounts.ts）：登入者是誰、老闆與老闆指定的人是誰，決定
+  // 角色下拉能不能選「平台管理員」、哪幾列的重設密碼／寄信被停用。後端同樣擋（403），這裡只是不讓人按了才被拒；
+  // 還沒載入完＝不鎖（以後端為準）。
+  const [viewer, setViewer] = useState<PrivilegeViewer | null>(() => {
+    const cached = peekMeCached();
+    return cached ? { id: cached.id, role: cached.role } : null;
+  });
+  const [privilegePolicy, setPrivilegePolicy] = useState<PrivilegePolicy>({ bossEmpId: null, designated: [] });
+  useEffect(() => {
+    let active = true;
+    Promise.all([getMeCached(), getBrandingCached()])
+      .then(([me, brand]) => {
+        if (!active) return;
+        setViewer({ id: me.id, role: me.role });
+        setPrivilegePolicy(privilegePolicyOf(brand.features));
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+  const canAssignPlatform = canAssignPlatformAdmin(viewer);
+  const createRoleOptions = useMemo(() => roleOptionsFor(ROLES, viewer), [viewer]);
+  const credentialsLockedOf = (employee: { id: string; role: string }) =>
+    credentialsLockedFor(viewer, { id: employee.id, role: employee.role }, privilegePolicy);
   const [rows, setRows] = useState<EmployeeWithProfile[]>([]);
   const [depts, setDepts] = useState<Department[]>([]);
   const [loading, setLoading] = useState(true);
@@ -578,7 +615,7 @@ export default function EmployeesPage() {
         status: editStatus,
       });
     } catch (err) {
-      setEditError(err instanceof Error ? err.message : "更新失敗");
+      setEditError(describeError(err, "更新失敗"));
       setEditSaving(false);
       return;
     }
@@ -1018,8 +1055,9 @@ export default function EmployeesPage() {
               <div>
                 <label className={labelCls}>角色</label>
                 <select className={inputCls} value={role} onChange={(event) => setRole(event.target.value)}>
-                  {ROLES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                  {createRoleOptions.map((item) => <option key={item.value} value={item.value} disabled={item.disabled}>{item.label}</option>)}
                 </select>
+                {!canAssignPlatform && <p className="mt-1 text-xs text-gray-400" data-testid="platform-admin-note">{PLATFORM_ADMIN_ASSIGN_NOTE}</p>}
               </div>
               <div>
                 <label className={labelCls}>單位</label>
@@ -1113,14 +1151,22 @@ export default function EmployeesPage() {
                             </select>
                             <input type="date" className={inputCls} value={editHireDate} onChange={(event) => setEditHireDate(event.target.value)} />
                             <input type="date" className={inputCls} value={editTerminatedAt} onChange={(event) => setEditTerminatedAt(event.target.value)} />
-                            <select className={inputCls} value={editRole} onChange={(event) => setEditRole(event.target.value)}>
-                              {ROLES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                            <select
+                              className={inputCls}
+                              value={editRole}
+                              onChange={(event) => setEditRole(event.target.value)}
+                              title={canAssignPlatform ? undefined : PLATFORM_ADMIN_ASSIGN_NOTE}
+                            >
+                              {roleOptionsFor(ROLES, viewer, employee.role).map((item) => (
+                                <option key={item.value} value={item.value} disabled={item.disabled}>{item.label}</option>
+                              ))}
                             </select>
                             <select className={inputCls} value={editStatus} onChange={(event) => setEditStatus(event.target.value)}>
                               <option value="active">在職</option>
                               <option value="inactive">停用</option>
                             </select>
                           </div>
+                          {!canAssignPlatform && <p className="mt-2 text-xs text-gray-400">{PLATFORM_ADMIN_ASSIGN_NOTE}</p>}
                           {/* 第二排：個資——生日／身分證／戶籍地址（寬欄）一列、匯款帳號四欄（銀行代碼／銀行名稱／帳號／戶名）一列。
                               欄數跟著外框寬度走（@3xl＝外框 ≥ 48rem 才分 8 欄，與上一排的 8 欄上下對齊；較窄時 2 欄，
                               免得身分證、日期在窄格裡被截掉）。身分證轉大寫、不驗格式（外籍居留證格式不同）。 */}
@@ -1175,6 +1221,11 @@ export default function EmployeesPage() {
                         <td className="py-3 pr-4">
                           <p className="font-medium text-gray-800">{employee.name}</p>
                           <p className="text-xs text-gray-500">工號 {employee.emp_no ?? "—"}</p>
+                          {credentialsLockedOf(employee) && (
+                            <p className="text-xs text-amber-700" title={CREDENTIALS_LOCKED_NOTE} data-testid="credentials-locked-hint">
+                              密碼僅老闆／平台管理員可重設
+                            </p>
+                          )}
                           {/* 窄螢幕沒有 Email 欄，補在名字下方 */}
                           <p className="text-xs text-gray-500 break-all sm:hidden">{employee.email ?? "—"}</p>
                         </td>
@@ -1224,6 +1275,7 @@ export default function EmployeesPage() {
                                 items={employeeActionsFor(employee, {
                                   isSelf: selfUserId !== null && employee.user_id === selfUserId,
                                   busy: busyId === employee.id,
+                                  credentialsLocked: credentialsLockedOf(employee),
                                 }).map((spec) => ({
                                   key: spec.key,
                                   label: spec.label,

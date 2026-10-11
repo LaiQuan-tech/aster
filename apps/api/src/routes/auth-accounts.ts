@@ -14,6 +14,7 @@ import {
   sendEmployeeAccountLink,
 } from "../services/auth-invite.js"
 import { seedHireAcknowledgements } from "../services/onboarding-signatures.js"
+import { assertCanManageCredentials, type PrivilegeCaller } from "../services/privileged-accounts.js"
 
 /**
  * A1 帳號與邀請信：
@@ -25,6 +26,12 @@ import { seedHireAcknowledgements } from "../services/onboarding-signatures.js"
  *   POST /me/password-done            自設密碼完成 → 清 must_change_password
  *
  * 既有 employees.ts 的端點不動（reset-password 保留當備援）。
+ *
+ * 權限邊界（2026-10-11，services/privileged-accounts.ts）：invite／send-reset／bulk-invite 在 dryRun 或沒設信件
+ * 服務時會把設密碼連結直接回給 HR，拿到連結＝能替對方設新密碼。所以目標若是受保護帳號（老闆、老闆指定的解鎖人、
+ * hr_admin、platform_admin），只有老闆或 platform_admin 能發（對自己例外），其他人 403 `not_boss`；
+ * 一般員工照舊。bulk-invite 逐列檢查（見 bulkInviteFromCsv），另外 CSV 的角色欄是 platform_admin 時只有
+ * platform_admin 能指派（403 `platform_admin_required`，該列 skipped）。
  */
 export const authAccountsRouter = Router()
 
@@ -57,12 +64,19 @@ function sendAccountError(res: Response, err: unknown): boolean {
 async function loadEmployee(tenantId: string, id: string) {
   const { data, error } = await supabaseAdmin
     .from("employees")
-    .select("id, user_id, name")
+    .select("id, user_id, name, role")
     .eq("tenant_id", tenantId)
     .eq("id", id)
     .maybeSingle()
   if (error) throw new Error(`load employee ${id}: ${error.message}`)
-  return data as { id: string; user_id: string | null; name: string } | null
+  return data as { id: string; user_id: string | null; name: string; role: string } | null
+}
+
+/** 呼叫者的 {id, role}（權限邊界要看是不是老闆／platform_admin）；查無回 null。 */
+async function callerOf(tenantId: string, userId: string | undefined): Promise<PrivilegeCaller | null> {
+  if (!userId) return null
+  const self = await resolveSelf(tenantId, userId)
+  return self ? { id: self.id, role: self.role } : null
 }
 
 async function actorEmpId(tenantId: string, userId: string | undefined): Promise<string | null> {
@@ -139,6 +153,8 @@ authAccountsRouter.post(
         res.status(404).json({ error: "not_found" })
         return
       }
+      // 受保護帳號只有老闆或 platform_admin 能發連結／綁帳號——先於 sendEmployeeAccountLink（它會建帳號、輪替 token）。
+      await assertCanManageCredentials(tenantId, await callerOf(tenantId, req.auth?.userId), employee)
       const outcome = await sendEmployeeAccountLink({
         tenantId,
         employee,
@@ -175,6 +191,7 @@ authAccountsRouter.post(
         res.status(404).json({ error: "not_found" })
         return
       }
+      await assertCanManageCredentials(tenantId, await callerOf(tenantId, req.auth?.userId), employee)
       const outcome = await sendEmployeeAccountLink({
         tenantId,
         employee,

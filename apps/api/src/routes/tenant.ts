@@ -7,6 +7,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { writeAuditLog } from "../services/audit.js"
 import { canEditUnlockList, sameEmployeeSet, unlockPolicyOf } from "../services/period-lock.js"
+import { BOSS_SETTING_MESSAGE, bossChanged, canChangeBoss } from "../services/privileged-accounts.js"
 
 export const tenantRouter = Router()
 
@@ -38,6 +39,10 @@ tenantRouter.get(
     }
   },
 )
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+}
 
 export const tenantSettingsSchema = z.object({
   branding: z
@@ -99,7 +104,13 @@ export const tenantSettingsSchema = z.object({
       /**
        * 簽核（A2）：找不到直屬主管時的簽核者（老闆）。簽核鏈順序見
        * services/approval-chain.ts：固定名單 → 直屬主管 → 這裡 → 第一位 hr_admin。
-       * null＝清除設定。
+       * null＝清除設定；沒帶這個鍵（含 `approval: {}`）＝維持原值（巢狀合併，不會洗掉老闆）。
+       *
+       * **誰是老闆就是誰能重新開放已結算的月份，所以換老闆是特權操作**（2026-10-11 業主拍板）：
+       * 目前有老闆時，只有老闆本人（可以交棒給別人）或 platform_admin 能換／清除，其他人（含 HR）
+       * 403 `not_boss`；**還沒設定老闆**（null）時任何 HR 可以做第一次設定（否則沒人能設）。
+       * 判斷看合併後的有效值（不是只看請求有沒有帶這個鍵），見 PUT /api/tenant/settings。
+       * 新老闆必須是本租戶員工（400 invalid_employee）；存進去的 id 一律小寫。
        */
       approval: z
         .object({
@@ -134,9 +145,14 @@ export const tenantSettingsSchema = z.object({
        * **只有老闆（或 platform_admin）能改這份名單**——其他人（含 HR）帶了不同的名單 → 403 `not_boss`
        * （見 PUT /api/tenant/settings）。名單裡的人必須是本租戶的員工。
        * ⚠️ 這支端點本身是 requireHrAdmin：老闆要是 hr_admin／platform_admin 才進得了（本系統的老闆就是 hr_admin，
-       * 見 routes/group-overview.ts）。另外「誰是老闆」（approval.fallbackApproverEmpId）目前任何 HR 都能改，
-       * 所以 HR 並沒有被技術性地擋在解鎖之外。要不要把「換老闆」也收成老闆／platform_admin 專屬（以及限制誰能把角色
-       * 設成 platform_admin），是權限模型的決定，目前沒做（已回報業主）。
+       * 見 routes/group-overview.ts）。
+       *
+       * 權限邊界（2026-10-11 業主拍板，services/privileged-accounts.ts）——HR 不能靠下面三條路變成老闆：
+       *   ① 換老闆設定（approval.fallbackApproverEmpId）→ 只有老闆本人或 platform_admin（還沒有老闆時 HR 可做第一次設定）；
+       *   ② 指派 platform_admin 角色（POST/PATCH /employees、批次建立帳號）→ 只有 platform_admin；
+       *   ③ 重設／接管老闆、老闆指定的解鎖人、hr_admin、platform_admin 的密碼（重設密碼、寄重設／邀請信、
+       *      批次建立綁到既有列）→ 只有老闆或 platform_admin。
+       * 剩下 HR 能做、但**不會**變成老闆的事：停用／改名等員工維護、重設一般員工的密碼、建立新的 hr_admin 帳號。
        */
       payroll: z
         .object({
@@ -231,24 +247,70 @@ tenantRouter.put(
       const currentFeatures = (current.features as Record<string, unknown>) ?? {}
       const incomingFeatures = (parsed.data.features as Record<string, unknown> | undefined) ?? {}
       const features: Record<string, unknown> = { ...currentFeatures, ...incomingFeatures }
-      // payroll 是巢狀設定：合併而不是整鍵覆蓋，之後在裡面加別的設定不會被只帶 periodUnlockEmpIds 的請求洗掉。
-      if (incomingFeatures.payroll !== undefined) {
-        features.payroll = {
-          ...((currentFeatures.payroll as Record<string, unknown> | undefined) ?? {}),
-          ...(incomingFeatures.payroll as Record<string, unknown>),
+      // payroll、approval 是巢狀設定：合併而不是整鍵覆蓋。payroll：之後在裡面加別的設定不會被只帶 periodUnlockEmpIds 的
+      // 請求洗掉；approval：帶 `approval: {}` 不會把老闆洗成空（要清除老闆得明確帶 fallbackApproverEmpId: null）。
+      for (const key of ["payroll", "approval"] as const) {
+        if (incomingFeatures[key] !== undefined) {
+          features[key] = { ...asRecord(currentFeatures[key]), ...asRecord(incomingFeatures[key]) }
+        }
+      }
+      // 老闆 id 一律存小寫（簽核鏈與解鎖權限都拿它跟員工 id 比對；uuid 大小寫不影響 DB，但字串比對會）。
+      const incomingBoss = asRecord(incomingFeatures.approval).fallbackApproverEmpId
+      if (typeof incomingBoss === "string") {
+        features.approval = { ...asRecord(features.approval), fallbackApproverEmpId: incomingBoss.toLowerCase() }
+      }
+
+      // 呼叫者（員工列）：換老闆／改解鎖名單都要看是不是老闆或 platform_admin，最多查一次。
+      let selfLoaded = false
+      let selfRow: Awaited<ReturnType<typeof resolveSelf>> = null
+      const loadSelf = async () => {
+        if (!selfLoaded) {
+          const userId = req.auth?.userId
+          selfRow = userId ? await resolveSelf(tenantId, userId) : null
+          selfLoaded = true
+        }
+        return selfRow
+      }
+
+      // 以「合併後的有效值」比對目前的設定（不是只看請求有沒有帶某個鍵——否則帶 `payroll: {}` 之類的請求也能改到）。
+      const before = unlockPolicyOf(currentFeatures)
+      const after = unlockPolicyOf(features)
+
+      // 更換老闆設定（2026-10-11 業主拍板）：誰是老闆就是誰能重新開放已結算的月份，所以不能讓 HR 自己指定。
+      // 目前有老闆 → 只有老闆本人（可以交棒）或 platform_admin；還沒有老闆 → 任何 HR 可做第一次設定。否則 403 not_boss。
+      const bossIsChanging = bossChanged(before, after)
+      let bossActorId: string | null = null
+      if (bossIsChanging) {
+        const self = await loadSelf()
+        if (!self || !canChangeBoss(before, self)) {
+          res.status(403).json({ error: "not_boss", message: BOSS_SETTING_MESSAGE })
+          return
+        }
+        bossActorId = self.id
+        if (after.bossEmpId) {
+          const { data: boss, error: bossErr } = await supabaseAdmin
+            .from("employees")
+            .select("id")
+            .eq("tenant_id", tenantId)
+            .eq("id", after.bossEmpId)
+            .maybeSingle()
+          if (bossErr) {
+            next(new Error(`PUT /api/tenant/settings (boss employee): ${bossErr.message}`))
+            return
+          }
+          if (!boss) {
+            res.status(400).json({ error: "invalid_employee", employeeIds: [after.bossEmpId] })
+            return
+          }
         }
       }
 
-      // 發薪鎖定的解鎖名單（features.payroll.periodUnlockEmpIds）：比對「合併後」與目前的名單（不是只看請求有沒有帶
-      // 這個鍵——否則帶 `payroll: {}` 之類的請求也能改到）。名單有變更，呼叫者必須是老闆（或 platform_admin），
+      // 發薪鎖定的解鎖名單（features.payroll.periodUnlockEmpIds）：名單有變更，呼叫者必須是老闆（或 platform_admin），
       // 否則 403 not_boss；老闆是以**目前**設定的人為準（同一個請求不能一邊換老闆一邊改名單）。
-      const before = unlockPolicyOf(currentFeatures)
-      const after = unlockPolicyOf(features)
       const unlockListChanged = !sameEmployeeSet(before.designatedEmpIds, after.designatedEmpIds)
       let unlockActorId: string | null = null
       if (unlockListChanged) {
-        const userId = req.auth?.userId
-        const self = userId ? await resolveSelf(tenantId, userId) : null
+        const self = await loadSelf()
         if (!self || !canEditUnlockList(before, self)) {
           res.status(403).json({ error: "not_boss", message: "只有老闆可以指定誰能重新開放已結算的月份" })
           return
@@ -289,6 +351,18 @@ tenantRouter.put(
       if (error || !data) {
         next(new Error(`PUT /api/tenant/settings: ${error?.message}`))
         return
+      }
+      if (bossIsChanging) {
+        await writeAuditLog({
+          tenantId,
+          tableName: "tenants",
+          recordId: tenantId,
+          action: "UPDATE",
+          oldRow: { approval: { fallbackApproverEmpId: before.bossEmpId } },
+          newRow: { approval: { fallbackApproverEmpId: after.bossEmpId } },
+          actorEmpId: bossActorId,
+          context: before.bossEmpId === null ? "PUT /api/tenant/settings — 首次設定老闆" : "PUT /api/tenant/settings — 更換老闆設定",
+        })
       }
       if (unlockListChanged) {
         await writeAuditLog({

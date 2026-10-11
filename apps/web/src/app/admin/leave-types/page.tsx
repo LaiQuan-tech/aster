@@ -20,6 +20,14 @@ import {
   type ApprovalFeatureSettings,
   type Employee,
 } from "@/lib/admin-api";
+import { getMeCached } from "@/lib/ess-state";
+import {
+  bossSettingNote,
+  canChangeBossSetting,
+  needsBossHandoverConfirm,
+  privilegeErrorMessage,
+  type PrivilegeViewer,
+} from "@/lib/privileged-accounts";
 
 /**
  * 可設定簽核流程的申請種類。
@@ -110,6 +118,9 @@ export default function LeaveTypesPage() {
   const [fallbackSaved, setFallbackSaved] = useState("");
   const [fallbackMsg, setFallbackMsg] = useState<string | null>(null);
   const [fallbackSaving, setFallbackSaving] = useState(false);
+  // 誰能換老闆（2026-10-11 業主拍板，lib/privileged-accounts.ts）：還沒有老闆 → 任何 HR 可做第一次設定；
+  // 有老闆 → 只有老闆本人（可交棒）或平台管理員。後端同樣擋（403 not_boss），這裡只是不讓人按了才被拒。
+  const [viewer, setViewer] = useState<PrivilegeViewer | null>(null);
 
   const empName = useMemo(() => {
     const m = new Map<string, string>();
@@ -120,12 +131,14 @@ export default function LeaveTypesPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [ltRes, flowRes, empRes, brandRes] = await Promise.all([
+      const [ltRes, flowRes, empRes, brandRes, me] = await Promise.all([
         getLeaveTypes(),
         getApprovalFlows(),
         getEmployees(),
         getBranding(),
+        getMeCached().catch(() => null),
       ]);
+      setViewer(me ? { id: me.id, role: me.role } : null);
       setTypes(ltRes.leaveTypes);
       setFlows(flowRes.flows);
       setEmployees(empRes.employees);
@@ -242,6 +255,11 @@ export default function LeaveTypesPage() {
 
   async function saveFallback() {
     setFallbackMsg(null);
+    // 老闆本人把老闆換成別人（或清除）之後，自己就不能再改回來——先讓他確認。
+    if (needsBossHandoverConfirm(viewer, fallbackSaved, fallbackEmpId)) {
+      const next = fallbackEmpId ? (empName.get(fallbackEmpId) ?? fallbackEmpId) : "（未設定）";
+      if (!window.confirm(`把老闆換成「${next}」之後，你就不能再自己改回來，只有新的老闆或平台管理員能更換。確定嗎？`)) return;
+    }
     setFallbackSaving(true);
     try {
       const res = await saveTenantSettings({
@@ -254,11 +272,14 @@ export default function LeaveTypesPage() {
       setFallbackMsg(saved ? `已設定：${empName.get(saved) ?? saved}` : "已清除（找不到主管時退回 HR 管理員）");
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "儲存簽核退路設定失敗");
+      setError(privilegeErrorMessage(err, "boss") ?? (err instanceof Error ? err.message : "儲存簽核退路設定失敗"));
     } finally {
       setFallbackSaving(false);
     }
   }
+
+  const bossLocked = !canChangeBossSetting(viewer, fallbackSaved || null);
+  const bossNote = bossSettingNote(viewer, fallbackSaved || null);
 
   const activeEmployees = employees.filter((e) => e.status === "active");
 
@@ -525,6 +546,16 @@ export default function LeaveTypesPage() {
           未設定則退回第一位 HR 管理員。
         </p>
         {fallbackMsg && <p className="mb-3 text-sm text-green-600">{fallbackMsg}</p>}
+        {/* 誰是老闆＝誰能重新開放已結算的月份，所以換老闆是特權操作：不是老闆也不是平台管理員的人看到唯讀並附說明。 */}
+        {bossNote && (
+          <p
+            role="note"
+            data-testid={`boss-setting-${bossNote.tone}`}
+            className={`mb-3 rounded-lg px-3 py-2 text-sm ${bossNote.tone === "locked" ? "bg-amber-50 text-amber-800" : "bg-gray-50 text-gray-600"}`}
+          >
+            {bossNote.text}
+          </p>
+        )}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
           <div className="flex-1">
             <label className={labelCls} htmlFor="fallback-approver">
@@ -534,6 +565,7 @@ export default function LeaveTypesPage() {
               id="fallback-approver"
               className={inputCls}
               value={fallbackEmpId}
+              disabled={bossLocked}
               onChange={(e) => setFallbackEmpId(e.target.value)}
             >
               <option value="">（未設定：退回 HR 管理員）</option>
@@ -544,7 +576,7 @@ export default function LeaveTypesPage() {
               ))}
             </select>
           </div>
-          <PrimaryButton type="button" onClick={saveFallback} disabled={fallbackSaving || fallbackEmpId === fallbackSaved}>
+          <PrimaryButton type="button" onClick={saveFallback} disabled={bossLocked || fallbackSaving || fallbackEmpId === fallbackSaved}>
             {fallbackSaving ? "儲存中…" : "儲存"}
           </PrimaryButton>
         </div>

@@ -6,6 +6,16 @@ import { parseCsv } from "../lib/csv.js"
 import { logger } from "../lib/logger.js"
 import { writeAuditLog } from "./audit.js"
 import { isPlatformAdminEmail } from "../middleware/platform.js"
+import { loadPeriodUnlockPolicy } from "./period-lock.js"
+import {
+  CREDENTIALS_MESSAGE,
+  PLATFORM_ADMIN_ROLE,
+  assertCanAssignRole,
+  canManageCredentialsOf,
+  isProtectedAccount,
+  loadActor,
+  normalizeRole,
+} from "./privileged-accounts.js"
 
 /**
  * 帳號邀請／重設密碼／改密碼（A1）。
@@ -431,6 +441,7 @@ interface EmployeeLite {
   dept_id: string | null
   hire_date: string | null
   status: string
+  role: string
 }
 
 const HEADER_ALIASES: Record<string, string> = {
@@ -459,6 +470,17 @@ const HEADER_ALIASES: Record<string, string> = {
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
+/**
+ * 批次建立帳號（CSV）。
+ *
+ * 權限邊界（2026-10-11，services/privileged-accounts.ts），**在建任何 auth 帳號、輪替任何 token 之前**：
+ *   • CSV 任何一列的角色欄是 platform_admin → 只有 platform_admin 能指派，否則整份 CSV 丟 PrivilegeError
+ *     （403 `platform_admin_required`），一列都不處理（不留下做到一半的批次）；
+ *   • 綁到既有的未綁帳號列，而那一列是受保護帳號（老闆、老闆指定的解鎖人、hr_admin、platform_admin）→
+ *     只有老闆或 platform_admin 能綁，否則該列 skipped（`not_boss: …`），其餘列照常——不然 HR 填一個自己的
+ *     Email 就能認領「尚未開通的老闆列」。
+ * 操作者由 `actorEmpId` 查角色；沒帶（系統呼叫）視為沒有特權。
+ */
 export async function bulkInviteFromCsv(opts: {
   tenantId: string
   csv: string
@@ -475,18 +497,28 @@ export async function bulkInviteFromCsv(opts: {
     throw new AccountError("invalid_header", 400, "表頭至少要有 name 與 email 兩欄")
   }
 
-  const [{ data: empRows, error: empErr }, { data: deptRows, error: deptErr }] = await Promise.all([
+  const [{ data: empRows, error: empErr }, { data: deptRows, error: deptErr }, policy, actor] = await Promise.all([
     supabaseAdmin
       .from("employees")
-      .select("id, name, emp_no, user_id, dept_id, hire_date, status")
+      .select("id, name, emp_no, user_id, dept_id, hire_date, status, role")
       .eq("tenant_id", tenantId),
     supabaseAdmin.from("departments").select("id, name").eq("tenant_id", tenantId),
+    loadPeriodUnlockPolicy(tenantId),
+    loadActor(tenantId, opts.actorEmpId),
   ])
   if (empErr) throw new Error(`bulk-invite (employees): ${empErr.message}`)
   if (deptErr) throw new Error(`bulk-invite (departments): ${deptErr.message}`)
   const employees = (empRows ?? []) as EmployeeLite[]
   const deptByName = new Map<string, string>()
   for (const d of deptRows ?? []) deptByName.set((d.name as string).trim(), d.id as string)
+
+  // 角色欄含 platform_admin 而操作者不是 platform_admin → 整份拒絕（先於任何副作用）。
+  const roleCol = headers.indexOf("role")
+  if (roleCol >= 0) {
+    for (let i = headerIdx + 1; i < table.length; i++) {
+      if (normalizeRole(table[i][roleCol]) === PLATFORM_ADMIN_ROLE) assertCanAssignRole(actor, PLATFORM_ADMIN_ROLE)
+    }
+  }
 
   const appName = await tenantAppName(tenantId)
   const dryRun = !!opts.dryRun || !isMailConfigured()
@@ -562,6 +594,15 @@ export async function bulkInviteFromCsv(opts: {
         }
       }
 
+      // 權限邊界：綁到受保護的既有列要老闆或 platform_admin；先於 resolveAuthUserForEmail（它會建帳號／輪替 recovery token）。
+      if (target) {
+        const account = { id: target.id, role: target.role }
+        if (isProtectedAccount(account, policy) && !(actor && canManageCredentialsOf(actor, account, policy))) {
+          skip(line, name, email, `not_boss: ${CREDENTIALS_MESSAGE}`)
+          continue
+        }
+      }
+
       const resolved = await resolveAuthUserForEmail(tenantId, email)
       let action: "created" | "bound"
       try {
@@ -613,6 +654,7 @@ export async function bulkInviteFromCsv(opts: {
             dept_id: deptId,
             hire_date: raw.hireDate ?? null,
             status: "active",
+            role: insert.role,
           })
           await writeAuditLog({
             tenantId,
