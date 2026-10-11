@@ -10,9 +10,9 @@
  *     其他（午班、夜班…）沿用舊推算（工作時數中點起算，14:00–22:00 → 17:30–18:30）。
  *     日班 09:00–18:00 休 60 → 午休 12:00–13:00（以前推成 13:00–14:00）。
  *   - 全天＝ `[start, end]`，時數＝ shiftWorkHours。
- *   - 上午＝從上班起算工作時數的一半、下午＝倒數到下班的一半（都跳過午休），`half = shiftWorkHours / 2`
- *     （日班 → 上午 09:00–14:00／下午 14:00–18:00 各 4h，09–12＋13–14 ＝ 4h）。舊推算的班別午休剛好在
- *     中點，結果與以前的 `[start, start+half]`／`[end−half, end]` 相同。
+ *   - 上午／下午（2026-10-11 業主決定採 B：以午休為界）：上午＝上班到午休開始、下午＝午休結束到下班
+ *     （日班 → 上午 09:00–12:00 3h／下午 13:00–18:00 5h）。不涵蓋午休的班別（午班、夜班，午休是舊推算）
+ *     與沒有休息的班別維持各半，見 `halfDayWindow`。已送出的半天假不回溯，只影響新單。
  *   - 自訂＝牆鐘差，扣除與午休的重疊。
  *   - 指定時數（2026-10-11）＝從某個開始時間起請 N 小時（1 小時一格），結束時間由系統往後算、
  *     跳過午休（例：日班 09:00 起 5 小時 → 09:00–15:00，午休 12:00–13:00 不算請假）。
@@ -28,7 +28,7 @@
  * 日期字串一律 `YYYY-MM-DD`（dateKey，不做時區換算）。
  */
 import type { LeaveSegment } from "./ess-api";
-import { addDays, weekdayOf } from "./ess-format";
+import { addDays, fmtHours, weekdayOf } from "./ess-format";
 
 /** 班別最小集合（API 的 `Shift` 是它的超集）。 */
 export interface ShiftLike {
@@ -270,14 +270,37 @@ export function shiftWorkHours(shift: ShiftLike): number {
 const HALF_TOLERANCE = 0.5;
 
 /**
- * 上午＝從上班起算工作時數的一半、下午＝倒數到下班的一半，都跳過午休；half＝工作時數的一半。
- * 日班 09:00–18:00 休 60（午休 12:00–13:00）→ 上午 09:00–14:00、下午 14:00–18:00，各 4 小時。
+ * 上午／下午以這段午休為界：班別的午休是「真的午休」（明設 break_start，或沒設但涵蓋 12:00）、
+ * 且整段落在上班時間內（上午、下午都還有時間）→ 回午休區間；否則 null（改用各半）。
+ */
+function lunchSplitOf(w: ShiftWindow): LunchWindow | null {
+  const lunch = lunchWindowMinutes(w.start, w.end, w.breakMin, w.breakStart);
+  if (!lunch || lunch.source === "legacy") return null;
+  return lunch.start > w.start && lunch.end < w.end ? lunch : null;
+}
+
+/**
+ * 上午／下午的時段（2026-10-11 業主決定採 B：以午休為界）。
+ *   - 班別有午休可當分界（見 `lunchSplitOf`）→ 上午＝上班到午休開始、下午＝午休結束到下班：
+ *     日班 09:00–18:00（午休 12:00–13:00）→ 上午 09:00–12:00（3 小時）、下午 13:00–18:00（5 小時）；
+ *     晚到班 10:00–19:00（午休 12:00–13:00）→ 上午 10:00–12:00（2 小時）、下午 13:00–19:00（6 小時）。
+ *   - 不涵蓋午休的班別（午班 14:00–22:00、夜班 22:00–06:00…）與沒有休息的班別 → 維持各半：
+ *     上午＝從上班起算工作時數的一半、下午＝倒數到下班的一半（跳過推算的休息）。
+ *     理由：這些班別沒有真正的午休可當「上午／下午」的分界；舊推算的休息本來就擺在工時中點，
+ *     以它為界剛好就是各半（午班 → 14:00–17:30／18:30–22:00，各 3.5 小時），沒有休息的班別則根本沒有分界。
+ * 只影響新單：已送出的半天假照原本的起訖與時數，不回溯（清單上對不上就直接顯示時間）。
  */
 export function halfDayWindow(
   shift: ShiftLike,
   half: "am" | "pm",
 ): { startTime: string; endTime: string; hours: number } {
   const w = shiftWindow(shift);
+  const split = lunchSplitOf(w);
+  if (split) {
+    return half === "am"
+      ? { startTime: fmtMinutes(w.start), endTime: fmtMinutes(split.start), hours: round2((split.start - w.start) / 60) }
+      : { startTime: fmtMinutes(split.end), endTime: fmtMinutes(w.end), hours: round2((w.end - split.end) / 60) };
+  }
   const hours = round2(shiftWorkHours(shift) / 2);
   const halfMin = hours * 60;
   const bw = breakWindowOf(w);
@@ -290,6 +313,21 @@ export function halfDayWindow(
   let start = w.end - halfMin;
   if (hasBreak && w.end > bw.end && start < bw.end - HALF_TOLERANCE) start -= bw.end - bw.start;
   return { startTime: fmtMinutes(Math.max(start, w.start)), endTime: fmtMinutes(w.end), hours };
+}
+
+/**
+ * 請假表單選「上午／下午」時的說明（以起始日的班別）：
+ *   日班 →「以午休為界：上午 09:00–12:00（3 小時）、下午 13:00–18:00（5 小時）」
+ *   午班 →「這個班別沒有涵蓋午休，上午、下午各半：上午 14:00–17:30（3.5 小時）、下午 18:30–22:00（3.5 小時）」
+ *   沒有休息的班別 →「這個班別沒有午休，上午、下午各半：…」
+ */
+export function describeHalfDays(shift: ShiftLike): string {
+  const am = halfDayWindow(shift, "am");
+  const pm = halfDayWindow(shift, "pm");
+  const both = `上午 ${am.startTime}–${am.endTime}（${fmtHours(am.hours)}）、下午 ${pm.startTime}–${pm.endTime}（${fmtHours(pm.hours)}）`;
+  const w = shiftWindow(shift);
+  if (lunchSplitOf(w)) return `以午休為界：${both}`;
+  return `這個班別沒有${w.breakMin > 0 ? "涵蓋" : ""}午休，上午、下午各半：${both}`;
 }
 
 /**

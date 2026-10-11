@@ -264,9 +264,11 @@ describe("describeRequest（清單第 2 行，五種）", () => {
   it("請假單日：對得上班別 → 全天／上午／下午；自訂顯示時間；多日顯示天數", () => {
     const full = row({ segments: [{ date: "2026-09-18", startTime: "09:00", endTime: "18:00", hours: 8 }] });
     expect(describeRequest(full, { shift: DAY_SHIFT })).toBe("09/18（五）全天 · 8 小時");
-    // 日班午休 12:00–13:00（2026-10-11）→ 上午＝09:00–14:00（09–12＋13–14 ＝ 4 小時）。
-    const am = row({ hours: 4, segments: [{ date: "2026-09-18", startTime: "09:00", endTime: "14:00", hours: 4 }] });
-    expect(describeRequest(am, { shift: DAY_SHIFT })).toBe("09/18（五）上午 · 4 小時");
+    // 上午／下午以午休 12:00–13:00 為界（2026-10-11 業主採 B）→ 上午 09:00–12:00 3 小時、下午 13:00–18:00 5 小時。
+    const am = row({ hours: 3, segments: [{ date: "2026-09-18", startTime: "09:00", endTime: "12:00", hours: 3 }] });
+    expect(describeRequest(am, { shift: DAY_SHIFT })).toBe("09/18（五）上午 · 3 小時");
+    const pm = row({ hours: 5, segments: [{ date: "2026-09-18", startTime: "13:00", endTime: "18:00", hours: 5 }] });
+    expect(describeRequest(pm, { shift: DAY_SHIFT })).toBe("09/18（五）下午 · 5 小時");
     const custom = row({ hours: 3, segments: [{ date: "2026-09-18", startTime: "13:30", endTime: "17:00", hours: 3 }] });
     expect(describeRequest(custom, { shift: DAY_SHIFT })).toBe("09/18（五）13:30–17:00 · 3 小時");
     const multi = row({
@@ -590,11 +592,16 @@ describe("請假精細到小時：body 與顯示", () => {
     expect(describeRequest(three, { shift: DAY_SHIFT })).toBe("10/13（二）10:00–13:00 · 3 小時");
     const across = row({ hours: 3, segments: [{ date: "2026-10-13", startTime: "11:00", endTime: "15:00", hours: 3 }] });
     expect(describeRequest(across, { shift: DAY_SHIFT })).toBe("10/13（二）11:00–15:00 · 3 小時");
-    const am = row({ hours: 4, segments: [{ date: "2026-10-13", startTime: "09:00", endTime: "14:00", hours: 4 }] });
-    expect(describeRequest(am, { shift: DAY_SHIFT })).toBe("10/13（二）上午 · 4 小時");
-    // 午休改到 12:00–13:00 之前送出的舊上午單（09:00–13:00）不再對得上「上午」→ 照實顯示起訖。
+    const am = row({ hours: 3, segments: [{ date: "2026-10-13", startTime: "09:00", endTime: "12:00", hours: 3 }] });
+    expect(describeRequest(am, { shift: DAY_SHIFT })).toBe("10/13（二）上午 · 3 小時");
+    // 已送出的舊半天假不回溯改資料：對不上新的上午／下午 → 照實顯示起訖與當時的時數。
+    //   午休改到 12:00–13:00 之前的舊上午單（09:00–13:00）、各 4 小時版的上午／下午單（09:00–14:00／14:00–18:00）。
     const oldAm = row({ hours: 4, segments: [{ date: "2026-10-13", startTime: "09:00", endTime: "13:00", hours: 4 }] });
     expect(describeRequest(oldAm, { shift: DAY_SHIFT })).toBe("10/13（二）09:00–13:00 · 4 小時");
+    const fourHourAm = row({ hours: 4, segments: [{ date: "2026-10-13", startTime: "09:00", endTime: "14:00", hours: 4 }] });
+    expect(describeRequest(fourHourAm, { shift: DAY_SHIFT })).toBe("10/13（二）09:00–14:00 · 4 小時");
+    const fourHourPm = row({ hours: 4, segments: [{ date: "2026-10-13", startTime: "14:00", endTime: "18:00", hours: 4 }] });
+    expect(describeRequest(fourHourPm, { shift: DAY_SHIFT })).toBe("10/13（二）14:00–18:00 · 4 小時");
   });
 
   it("表單到成功畫面一條龍：computeLeaveSegments → buildCreateBody → describeBody（含午休與週末）", () => {

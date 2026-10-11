@@ -207,12 +207,15 @@ export function applyOvertimePipeline(
 }
 
 /**
- * 未排班日的「班別」:整天 00:00–23:59 (沒有應到/應退時間,遲到/早退由呼叫端歸零),
- * 午休 = 租戶預設午休 (attendance.defaultLunch,預設 12:00 起 60 分)→ 工時扣「在班區間
- * 與午休的重疊」:09:00–18:00 = 8h、加班 0;10:00–19:00 同樣 8h;13:30–18:00 不扣。
- * 未排班的**工作日**在彈性上班啟用時改用 flexShiftDef。
+ * 未排班日的「班別」:整天 00:00–23:59 (沒有應到/應退時間,遲到/早退由呼叫端歸零)。
+ *   • 工作日:午休 = 租戶預設午休 (attendance.defaultLunch,預設 12:00 起 60 分)→ 工時扣
+ *     「在班區間與午休的重疊」:09:00–18:00 = 8h、加班 0;10:00–19:00 同樣 8h;13:30–18:00 不扣。
+ *     彈性上班生效後改用 flexShiftDef。
+ *   • 例假日/國定假日 (業主 2026-10-11 確認):沒排班的加班**不扣午休**,在班多久算多久
+ *     (6 月 Excel 也是這樣算:週六 10:23–18:07 → 7.5 小時)。
  */
-export function unscheduledShiftDef(rules: RuleConfig): ShiftDef {
+export function unscheduledShiftDef(rules: RuleConfig, dayType: DayType = "workday"): ShiftDef {
+  if (dayType !== "workday") return { start: "00:00", end: "23:59", breakMinutes: 0 };
   const lunch = resolveDefaultLunch(rules);
   return { start: "00:00", end: "23:59", breakMinutes: lunch.minutes, breakStart: lunch.start };
 }
@@ -321,7 +324,8 @@ export function computeAttendanceDay(
     const fromMs = dayBase + hhmmToMinutes(flex.startFrom) * MS_PER_MIN;
     const untilMs = dayBase + hhmmToMinutes(flex.startUntil) * MS_PER_MIN;
     // 上班卡前若有已核准請假 (連同相接的午休) 一路接到上班卡,這天從請假開始就算「上班了」:
-    // 上午請 09:00–14:00、14:00 到 → 視為 09:00 起 → 應下班 18:00 (不會被算早退)。
+    // 上午請 09:00–12:00、13:00 到 (午休 12:00–13:00 接上請假) → 視為 09:00 起 → 應下班 18:00
+    // (不會被算早退);舊版上午單 09:00–14:00、14:00 到同理。
     let anchorMs = arrivalMinuteMs;
     for (let moved = true; moved; ) {
       moved = false;

@@ -63,10 +63,12 @@ const MS_PER_MIN = 60_000
 
 // 午休（2026-10-11 業主決定「做滿 8 小時不含午休 1 小時」）：
 //   • 有排班 → 班別自己的午休（@hr/rules lunch-window：break_start → 涵蓋 12:00 → 舊推算）。
-//   • 沒排班 → @hr/rules unscheduledShiftDef(rules)：整天 00:00–23:59、午休＝租戶預設
-//     （attendance.defaultLunch，預設 12:00 起 60 分），工時扣「在班區間與午休的重疊」——
+//   • 沒排班的工作日 → @hr/rules unscheduledShiftDef(rules, "workday")：整天 00:00–23:59、午休＝
+//     租戶預設（attendance.defaultLunch，預設 12:00 起 60 分），工時扣「在班區間與午休的重疊」——
 //     09:00–18:00 ＝ 8 小時、加班 0（以前這裡休息 0 分，會記成 9 小時、加班 60 分）。
 //     遲到／早退對它沒有意義，下面一律歸零。
+//   • 沒排班的例假日／國定假日（加班）→ 不扣午休，在班多久算多久（業主 2026-10-11 確認，與 6 月 Excel
+//     一致）。
 //   • 沒排班的**工作日** → 彈性上班（@hr/rules flexShiftDef，attendance.flex，預設 08:00–10:00、
 //     480 分、2026-10-12 起生效，2026-10-11 業主拍板）：08:00 前不算工時、10:00 後到算遲到、應下班＝
 //     clamp(上班卡, 08:00, 10:00)＋8 小時＋午休重疊。這種日子的遲到／早退照算（不歸零）。例假日／國定
@@ -188,7 +190,8 @@ function lunchOverlapMinutes(startMs: number, endMs: number, lunch: { start: num
  * distribute minutes (the per-day slicing is what the payslip must show).
  *
  * 午休（2026-10-11）：2、3 用「重疊」推分鐘時，扣掉與午休的重疊——有排班看班別的明確
- * 午休（explicitLunchUtc），沒排班看 `ctx.defaultLunch`（租戶預設，12:00 起 60 分）。
+ * 午休（explicitLunchUtc），沒排班的工作日看 `ctx.defaultLunch`（租戶預設，12:00 起 60 分；
+ * 沒排班的例假日／國定假日不扣，與結算一致）。
  * 例：日班單日 09:00–14:00、沒填 hours → 300 − 60 ＝ 240。segments（前端 leave-hours
  * 已算好 hours）不受影響。`defaultLunch` 省略＝沒排班的日子不扣（舊行為）。
  */
@@ -253,7 +256,9 @@ function sliceLeave(
         const lunch = hi > lo ? lunchOverlapMinutes(lo, hi, explicitLunchUtc(firstDay, shift, ctx.tz)) : 0
         minutes = Math.min(w.workMinutes, Math.round(overlap - lunch))
       } else {
-        const lunch = lunchOverlapMinutes(startMs, endMs, defaultLunchUtc(firstDay))
+        // 沒排班：工作日扣預設午休重疊；例假日／國定假日不扣（與結算一致）。
+        const lunch =
+          ctx.dayTypeFor(firstDay) === "workday" ? lunchOverlapMinutes(startMs, endMs, defaultLunchUtc(firstDay)) : 0
         minutes = Math.min(ctx.regularMinutes, Math.round((endMs - startMs) / MS_PER_MIN - lunch))
       }
     }
@@ -406,7 +411,7 @@ function wfhWorkedMinutes(
 
 /**
  * 某天要用哪個「班別」結算：有排班 → 該班；沒排班的工作日 → 彈性上班（attendance.flex 關閉時
- * 退回整天）；例假日／國定假日沒排班 → 整天＋預設午休（沒有應上下班時間）。純函式。
+ * 退回整天＋預設午休）；例假日／國定假日沒排班 → 整天、不扣午休（沒有應上下班時間）。純函式。
  */
 function pickDayShift(
   scheduledShift: ShiftDef | null,
@@ -483,7 +488,7 @@ export async function lateMinutesForArrival(input: {
   const wd = weekdayOfKey(workDate)
   const dayType: DayType = calendar.get(workDate) ?? (wd === 0 || wd === 6 ? "rest_day" : "workday")
 
-  const shift = pickDayShift(scheduledShift, dayType, flexShiftDef(rules, workDate), unscheduledShiftDef(rules))
+  const shift = pickDayShift(scheduledShift, dayType, flexShiftDef(rules, workDate), unscheduledShiftDef(rules, dayType))
   const mode: ArrivalLateness["mode"] = scheduledShift ? "shift" : shift.flex ? "flex" : "none"
   if (mode === "none") return { workDate, lateMinutes: 0, threshold: null, mode }
 
@@ -668,8 +673,9 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     )
   }
   const shiftFor = (empId: string, date: DateKey): ShiftDef | null => shiftByKey.get(`${empId}|${date}`) ?? null
-  // 沒排班的日子：整天＋租戶預設午休；工作日改彈性上班（見檔頭「午休」）。
-  const unscheduledShift = unscheduledShiftDef(rules)
+  // 沒排班的日子：工作日＝整天＋租戶預設午休（彈性上班生效後改彈性）；例假日／國定假日＝整天、不扣午休。
+  const unscheduledWorkday = unscheduledShiftDef(rules, "workday")
+  const unscheduledRestDay = unscheduledShiftDef(rules, "rest_day")
   const defaultLunch = resolveDefaultLunch(rules)
 
   // --- calendar → dayType ------------------------------------------------------
@@ -769,10 +775,15 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     const scheduledShift = shiftFor(empId, workDate)
     const dayType = dayTypeFor(workDate)
 
-    // 班別：有排班用該班（含午休設定）；沒排班的工作日用彈性上班；其他沒排班的日子用
-    // 「整天＋預設午休」。打卡的休息段已從 pairs 切掉 → punchedBreaks（只影響舊推算班別）。
+    // 班別：有排班用該班（含午休設定）；沒排班的工作日用彈性上班（未生效前＝「整天＋預設午休」）；
+    // 沒排班的例假日／國定假日＝整天、不扣午休。打卡的休息段已從 pairs 切掉 → punchedBreaks（只影響舊推算班別）。
     // 彈性上班有生效日（attendance.flex.effectiveFrom，預設 2026-10-12）：之前的日子 flexShiftDef 回 null。
-    const shift: ShiftDef = pickDayShift(scheduledShift, dayType, flexShiftDef(rules, workDate), unscheduledShift)
+    const shift: ShiftDef = pickDayShift(
+      scheduledShift,
+      dayType,
+      flexShiftDef(rules, workDate),
+      dayType === "workday" ? unscheduledWorkday : unscheduledRestDay,
+    )
     // 遲到／早退有意義＝有排班，或用彈性上班（有應上下班時間）；其餘歸零。
     const hasExpectedTimes = !!scheduledShift || !!shift.flex
 

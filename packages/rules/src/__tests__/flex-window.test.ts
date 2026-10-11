@@ -103,7 +103,18 @@ describe("彈性上班時窗（attendance.flex）", () => {
 
   it("上午請假後才到班：應上班從請假開始算，不會被誤算早退", () => {
     const leave = (a: string, b: string) => ({ from: at(a), to: at(b) });
-    // 上午請 09:00–14:00（預設班別的上午半天）、14:00–18:00 上班 → 視為 09:00 起 → 應下班 18:00 → 早退 0
+    // 上午半天（以午休為界，2026-10-11 業主採 B）09:00–12:00、13:00–18:00 上班 → 午休接上請假 → 視為 09:00 起
+    // → 應下班 18:00 → 遲到 0、早退 0
+    const amB = computeAttendanceDay(pair("13:00", "18:00"), flex, rules, { ...workday, leaveIntervals: [leave("09:00", "12:00")] });
+    expect(amB.lateMinutes).toBe(0);
+    expect(amB.earlyLeaveMinutes).toBe(0);
+    expect(amB.workedMinutes).toBe(300);
+    // 下午半天 13:00–18:00、09:00 到 12:00 走 → 午休 12:00–13:00 接上請假 → 早退 0；11:30 就走 → 早退 30
+    const pmB = computeAttendanceDay(pair("09:00", "12:00"), flex, rules, { ...workday, leaveIntervals: [leave("13:00", "18:00")] });
+    expect(pmB.earlyLeaveMinutes).toBe(0);
+    const pmEarly = computeAttendanceDay(pair("09:00", "11:30"), flex, rules, { ...workday, leaveIntervals: [leave("13:00", "18:00")] });
+    expect(pmEarly.earlyLeaveMinutes).toBe(30);
+    // 10/11 前送出的舊版上午半天 09:00–14:00、14:00–18:00 上班 → 視為 09:00 起 → 應下班 18:00 → 早退 0（舊單照算）
     const am = computeAttendanceDay(pair("14:00", "18:00"), flex, rules, { ...workday, leaveIntervals: [leave("09:00", "14:00")] });
     expect(am.lateMinutes).toBe(0);
     expect(am.earlyLeaveMinutes).toBe(0);
@@ -122,9 +133,13 @@ describe("彈性上班時窗（attendance.flex）", () => {
     expect(day.nightMinutes).toBe(0);
   });
 
-  it("例假日不套彈性（settlement 只在工作日用 flexShiftDef）：同一段打卡在例假日照整天算", () => {
-    const rest = computeAttendanceDay(pair("07:00", "12:00"), unscheduledShiftDef(rules), rules, { date: D, dayType: "rest_day" });
-    expect(rest.workedMinutes).toBe(300);
+  it("例假日不套彈性、也不扣午休（settlement 只在工作日用 flexShiftDef）：07:00–18:00 照整天算 660", () => {
+    const rest = computeAttendanceDay(pair("07:00", "18:00"), unscheduledShiftDef(rules, "rest_day"), rules, {
+      date: D,
+      dayType: "rest_day",
+    });
+    expect(rest.workedMinutes).toBe(660);
+    // 遲到：未排班的非工作日沒有「應到時間」，settlement 直接記 0（hasExpectedTimes=false），不看引擎這欄。
   });
 
   it("有排班的日子照班別起訖：09:00–18:00 班 09:01 到 → 遲到 1；09:00:59 → 0", () => {

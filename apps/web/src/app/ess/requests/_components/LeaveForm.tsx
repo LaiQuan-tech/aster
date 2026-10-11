@@ -4,9 +4,11 @@
  * 請假（單位精細到小時，2026-10-11）：假別 → 單日｜多日 → 事由 → （需憑證假別才出現附件且必填）→ 送出。
  *   單日：全天｜上午｜下午｜指定時數（開始時間＋請幾小時；開始時間從上班時間起每 1 小時一格、
  *         不能落在午休，時數 1 小時為單位、最多到下班前可請的時數；結束時間由系統算、跳過午休）。
+ *         上午／下午以午休為界（2026-10-11 業主決定）：日班上午 09:00–12:00、下午 13:00–18:00；
+ *         選了上午／下午會多一行說明（`describeHalfDays`），不涵蓋午休的班別維持各半。
  *   多日：開始日期＋開始時間、結束日期＋結束時間（時間 1 小時一格，預設＝上班／下班＝整天）。
  *         第一天從開始時間請到下班、中間整天、最後一天從上班請到結束時間；休息日／國定假日自動不計。
- * 時數由 `computeLeaveSegments` 即時算：單日摘要「09:00–13:00，共 4 小時」；多日逐日列出
+ * 時數由 `computeLeaveSegments` 即時算：單日摘要「09:00–12:00，共 3 小時」；多日逐日列出
  * 「10/13（二）14:00–18:00 4 小時」…再加「共 N 天 · X 小時」「已略過 N 天」「剩餘 X 小時」
  * 「申請時數超過剩餘額度」。畫面只用 1 小時步進，後端不強制最小單位。
  */
@@ -14,7 +16,7 @@ import { useEffect, useId, useMemo, useState, type FormEvent } from "react";
 import { Field, Input, Segmented, Select } from "@/components/ess-ui";
 import type { LeaveBalance, LeaveType, Shift } from "@/lib/ess-api";
 import { fmtDateShort, fmtHours, todayKey } from "@/lib/ess-format";
-import { resolveLeavePick, skipReasonLabel, type LeavePeriod, type ShiftLike } from "@/lib/leave-hours";
+import { describeHalfDays, resolveLeavePick, skipReasonLabel, type LeavePeriod, type ShiftLike } from "@/lib/leave-hours";
 import { buildCreateBody, describeBody, describeLeaveDay, isBuildError, remainingHours } from "@/lib/request-forms";
 import { AttachmentField, ReasonField, SubmitBar, SummaryLine, validateFiles, type FormCommonProps } from "./form-shared";
 import { useLeaveCalendar } from "./use-leave-calendar";
@@ -241,6 +243,7 @@ export function LeaveForm({
               setLocalError(null);
             }}
           />
+          {(period === "am" || period === "pm") && <p className="text-xs text-gray-400">{describeHalfDays(shiftOn(startDate))}</p>}
           {period === "hours" && (
             <div className="grid grid-cols-2 gap-3">
               <Field label="開始時間" required htmlFor={ids.hStart} hint={hasBreak ? "午休時段不能選" : undefined}>

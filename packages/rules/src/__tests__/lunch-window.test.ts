@@ -124,6 +124,16 @@ describe("未排班日（unscheduledShiftDef）：在班區間與 12:00–13:00 
     expect(day.workedMinutes).toBe(480);
   });
 
+  it("例假日／國定假日沒排班的加班不扣午休（業主確認）：09:00–18:00 → 540", () => {
+    expect(unscheduledShiftDef(rules, "rest_day")).toEqual({ start: "00:00", end: "23:59", breakMinutes: 0 });
+    expect(unscheduledShiftDef(rules, "fixed_holiday")).toEqual({ start: "00:00", end: "23:59", breakMinutes: 0 });
+    const rest = computeAttendanceDay(pair("09:00", "18:00"), unscheduledShiftDef(rules, "rest_day"), rules, {
+      date: D,
+      dayType: "rest_day",
+    });
+    expect(rest.workedMinutes).toBe(540);
+  });
+
   it("租戶把預設午休改成 12:30 起 30 分 → 09:00–18:00 扣 30 = 510", () => {
     const custom = parseRuleConfig({ ...rules, attendance: { defaultLunch: { start: "12:30", minutes: 30 } } });
     const day = computeAttendanceDay(pair("09:00", "18:00"), unscheduledShiftDef(custom), custom, workday);

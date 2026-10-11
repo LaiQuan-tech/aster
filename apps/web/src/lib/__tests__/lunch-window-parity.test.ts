@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { lunchFitsShift, lunchWindowMinutes, lunchWindowOfShift, describeLunch, type ShiftLike } from "../leave-hours";
+import {
+  describeLunch,
+  fmtMinutes,
+  halfDayWindow,
+  lunchFitsShift,
+  lunchWindowMinutes,
+  lunchWindowOfShift,
+  shiftWorkHours,
+  type ShiftLike,
+} from "../leave-hours";
 // API 結算（@hr/rules）用的那一份——web 不依賴 @hr/rules 套件（Next 不編譯 workspace 套件的 TS 原始碼），
 // 只能各寫一份；這裡直接 import 原始檔與共用案例表，在同一組輸入上比對兩份輸出（同 admin-nav.test.ts 對照
 // next.config.ts 的做法）。改任何一邊，這裡就會紅。
@@ -58,6 +67,52 @@ describe("午休規則：web（leave-hours）與 API（@hr/rules lunch-window）
         }
       }
     }
+  });
+});
+
+describe("請假上午／下午（web halfDayWindow）與 API 結算的午休窗接得上", () => {
+  // 結算判遲到／早退時把「已核准請假 ∪ 明確午休」當免計時段（@hr/rules worktime-engine）：上午假要剛好請到
+  // API 的午休開始、下午假要剛好從 API 的午休結束起請，13:00 到班／12:00 下班才不會被記遲到／早退。
+  it("以午休為界的班別：上午＝上班～API 午休開始、下午＝API 午休結束～下班；舊推算與沒有休息的班別 → 各半", () => {
+    let split = 0;
+    let halves = 0;
+    const mismatches: string[] = [];
+    for (let start = 0; start < 1440; start += 60) {
+      for (let len = 120; len <= 960; len += 60) {
+        const end = start + len;
+        for (const bm of [0, 30, 45, 60]) {
+          for (let bs = -60; bs < 1440; bs += 60) {
+            const breakStart = bs < 0 ? null : bs;
+            const shift: ShiftLike = {
+              start_time: fmtMinutes(start),
+              end_time: fmtMinutes(end),
+              break_minutes: bm,
+              break_start: breakStart == null ? null : fmtMinutes(breakStart),
+            };
+            const api = rulesLunchWindowMinutes(start, end, bm, breakStart);
+            const am = halfDayWindow(shift, "am");
+            const pm = halfDayWindow(shift, "pm");
+            const tag = `${shift.start_time}-${shift.end_time} 休${bm} 起${shift.break_start}`;
+            if (api && api.source !== "legacy" && api.start > start && api.end < end) {
+              split += 1;
+              const ok =
+                am.startTime === fmtMinutes(start) &&
+                am.endTime === fmtMinutes(api.start) &&
+                pm.startTime === fmtMinutes(api.end) &&
+                pm.endTime === fmtMinutes(end) &&
+                Math.abs(am.hours + pm.hours - shiftWorkHours(shift)) <= 0.011;
+              if (!ok && mismatches.length < 5) mismatches.push(`${tag}: am ${JSON.stringify(am)} pm ${JSON.stringify(pm)} api ${JSON.stringify(api)}`);
+            } else {
+              halves += 1;
+              if (am.hours !== pm.hours && mismatches.length < 5) mismatches.push(`${tag}: 各半卻不等長 am ${am.hours} pm ${pm.hours}`);
+            }
+          }
+        }
+      }
+    }
+    expect(mismatches).toEqual([]);
+    expect(split).toBeGreaterThan(1000);
+    expect(halves).toBeGreaterThan(1000);
   });
 });
 

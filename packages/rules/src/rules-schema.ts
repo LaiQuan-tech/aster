@@ -230,10 +230,10 @@ const LeaveDeductionSchema = z
   .optional();
 
 // 出勤設定 (2026-10-11 業主決定「做滿 8 小時不含午休 1 小時」):
-//   defaultLunch  未排班日的預設午休 { start 'HH:MM', minutes }。省略 = 12:00、60 分
-//                 (resolveDefaultLunch)。未排班的日子扣「在班區間與這段的重疊」:
-//                 09:00–18:00 扣 60 → 8h、加班 0;13:30–18:00 不扣。
-//                 有排班的日子看班別自己的午休 (lunch-window.ts 的三條規則)。
+//   defaultLunch  未排班工作日的預設午休 { start 'HH:MM', minutes }。省略 = 12:00、60 分
+//                 (resolveDefaultLunch)。未排班的工作日扣「在班區間與這段的重疊」:
+//                 09:00–18:00 扣 60 → 8h、加班 0;13:30–18:00 不扣。未排班的例假日／國定假日
+//                 不扣午休 (業主 2026-10-11 確認)。有排班的日子看班別自己的午休 (lunch-window.ts 的三條規則)。
 // 整段可省略。
 const DefaultLunchSchema = z.object({
   start: HHMM,
@@ -348,10 +348,10 @@ export function resolveLateEarlyDeductionEnabled(rules: RuleConfig): boolean {
   return rules.leave_deduction?.lateEarly?.enabled ?? false;
 }
 
-/** 未排班日的預設午休 (業主 2026-10-11 確認:12:00 起 60 分)。 */
+/** 未排班工作日的預設午休 (業主 2026-10-11 確認:12:00 起 60 分;例假日／國定假日不扣)。 */
 export const DEFAULT_LUNCH: DefaultLunch = { start: "12:00", minutes: 60 };
 
-/** 未排班日的預設午休 (省略 → 12:00、60 分)。 */
+/** 未排班工作日的預設午休 (省略 → 12:00、60 分)。 */
 export function resolveDefaultLunch(rules: RuleConfig): DefaultLunch {
   return rules.attendance?.defaultLunch ?? DEFAULT_LUNCH;
 }

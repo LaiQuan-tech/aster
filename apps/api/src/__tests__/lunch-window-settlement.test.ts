@@ -69,12 +69,14 @@ function seed(): void {
     sched("2026-09-08", DAY_SHIFT_SET),
     sched("2026-09-09", PM_SHIFT),
     sched("2026-09-11", DAY_SHIFT),
+    sched("2026-09-15", DAY_SHIFT),
   ]
   fake.db.leave_types = [{ id: LT_PERSONAL, tenant_id: TENANT_ID, code: "personal", name: "事假", paid: false, deduct_rate: null }]
   fake.db.leave_requests = [
     leave("r-am-approved", "approved", "2026-09-04", "09:00", "12:00", 3), // 上午請假、13:00 到班
     leave("r-am-pending", "pending", "2026-09-07", "09:00", "12:00", 3), // 同樣情境但還沒核准
     leave("r-pm-approved", "approved", "2026-09-08", "14:00", "18:00", 4), // 下午請假、14:00 下班
+    leave("r-pm-b", "approved", "2026-09-15", "13:00", "18:00", 5), // 新版下午半天（以午休為界）、12:00 下班
   ]
   fake.db.punch_records = [
     ...punches("2026-09-01", [["in", "09:00"], ["out", "18:00"]]), // 未排班 09–18
@@ -89,6 +91,9 @@ function seed(): void {
     ...punches("2026-09-11", [["in", "13:00"], ["out", "18:00"]]), // 日班、沒請假、13:00 才到
     // 未排班、下午打了 10 分鐘休息卡 15:00–15:10 → 午休 12:00–13:00 照扣
     ...punches("2026-09-14", [["in", "09:00"], ["break_in", "15:00"], ["break_out", "15:10"], ["out", "18:00"]]),
+    // 週六（例假日）沒排班加班 10:23–18:07 → 不扣午休
+    ...punches("2026-09-05", [["in", "10:23"], ["out", "18:07"]]),
+    ...punches("2026-09-15", [["in", "09:00"], ["out", "12:00"]]), // 日班＋下午半天 13:00–18:00
   ]
   fake.db.employees = [{ id: EMP, tenant_id: TENANT_ID, status: "active", hire_date: "2026-01-05", terminated_at: null }]
 }
@@ -132,6 +137,16 @@ describe("settleAttendance — 午休 12:00–13:00 與請假時段（記憶體�
     expect(dayRow("2026-09-08")).toMatchObject({ early_leave_minutes: 0, late_minutes: 0, worked_minutes: 240, leave_minutes: 240 })
   })
 
+  it("日班＋已核准下午半天 13:00–18:00（以午休為界）、12:00 下班 → 早退 0（午休接上請假）、工時 180、請假 300", () => {
+    expect(dayRow("2026-09-15")).toMatchObject({
+      early_leave_minutes: 0,
+      late_minutes: 0,
+      worked_minutes: 180,
+      leave_minutes: 300,
+      leave_breakdown: { personal: 300 },
+    })
+  })
+
   it("午班 14:00–22:00（不涵蓋 12:00）行為不變：只做 14:00–17:00 仍固定扣 60 → 120、早退 300", () => {
     expect(dayRow("2026-09-09")).toMatchObject({ worked_minutes: 120, early_leave_minutes: 300 })
   })
@@ -142,6 +157,10 @@ describe("settleAttendance — 午休 12:00–13:00 與請假時段（記憶體�
 
   it("未排班、下午打了 10 分鐘休息卡 15:00–15:10 → 午休 12:00–13:00 照扣 → 470、加班 0", () => {
     expect(dayRow("2026-09-14")).toMatchObject({ worked_minutes: 470, overtime_minutes: 0 })
+  })
+
+  it("週六沒排班加班 10:23–18:07 → 不扣午休：工時 464、加班 450（業主確認，與 6 月 Excel 一致）", () => {
+    expect(dayRow("2026-09-05")).toMatchObject({ day_type: "rest_day", worked_minutes: 464, overtime_minutes: 450, late_minutes: 0 })
   })
 
   it("日班沒請假、13:00 才到 → 遲到 180（12:00–13:00 是午休，以前記 240）", () => {
@@ -172,6 +191,8 @@ describe("generateSheets — 月表的遲到警示跟著結算走", () => {
     expect(codes("2026-09-04")).not.toContain("leave_overlap_work")
     expect(codes("2026-09-07")).toContain("late")
     expect(codes("2026-09-08")).not.toContain("early_leave")
+    expect(codes("2026-09-15")).not.toContain("early_leave")
+    expect(codes("2026-09-15")).not.toContain("leave_overlap_work")
   })
 })
 

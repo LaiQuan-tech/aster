@@ -194,6 +194,13 @@ describe("settlement — 午休 12:00–13:00（2026-10-11）在請假切片的�
     expect(sliceLeave(req, { ...ctx, shiftFor: () => null })).toEqual([{ date: "2026-06-08", minutes: 300 }])
   })
 
+  it("單日沒填 hours、沒排班的例假日：不扣預設午休（與結算一致）→ 09:00–14:00 ＝ 300", () => {
+    const noShift = { ...lunchCtx, shiftFor: () => null }
+    // 2026-06-13 是週六（rest_day）
+    const req = { ...base, start_at: at("2026-06-13", "09:00"), end_at: at("2026-06-13", "14:00"), hours: null }
+    expect(sliceLeave(req, noShift)).toEqual([{ date: "2026-06-13", minutes: 300 }])
+  })
+
   it("午班 14:00–22:00（不涵蓋 12:00）行為不變：14:00–19:00 → 300（不扣推算午休）", () => {
     const pmShift: ShiftDef = { start: "14:00", end: "22:00", breakMinutes: 60 }
     const req = { ...base, start_at: at("2026-06-08", "14:00"), end_at: at("2026-06-08", "19:00"), hours: null }

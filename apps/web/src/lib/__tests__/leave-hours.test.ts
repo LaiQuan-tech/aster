@@ -3,6 +3,7 @@ import {
   DEFAULT_SHIFT,
   computeLeaveSegments,
   customHours,
+  describeHalfDays,
   endTimeForHours,
   endTimeOptions,
   halfDayWindow,
@@ -47,30 +48,58 @@ describe("shiftWorkHours / halfDayWindow / customHours", () => {
     expect(normalizeHm("09:00:00")).toBe("09:00");
   });
 
-  it("上午 09:00–14:00（跳過午休 12:00–13:00：09–12＋13–14）／下午 14:00–18:00 各 4 小時", () => {
-    expect(halfDayWindow(DAY_SHIFT, "am")).toEqual({ startTime: "09:00", endTime: "14:00", hours: 4 });
-    expect(halfDayWindow(DAY_SHIFT, "pm")).toEqual({ startTime: "14:00", endTime: "18:00", hours: 4 });
-    expect(customHours(DAY_SHIFT, "09:00", "14:00")).toBe(4);
+  it("上午／下午以午休為界（2026-10-11 業主採 B）：日班上午 09:00–12:00 3 小時、下午 13:00–18:00 5 小時", () => {
+    expect(halfDayWindow(DAY_SHIFT, "am")).toEqual({ startTime: "09:00", endTime: "12:00", hours: 3 });
+    expect(halfDayWindow(DAY_SHIFT, "pm")).toEqual({ startTime: "13:00", endTime: "18:00", hours: 5 });
+    expect(halfDayWindow(DEFAULT_SHIFT, "am")).toEqual({ startTime: "09:00", endTime: "12:00", hours: 3 });
+    expect(halfDayWindow(DEFAULT_SHIFT, "pm")).toEqual({ startTime: "13:00", endTime: "18:00", hours: 5 });
+    // 時數與同一段的自訂起訖一致，上午＋下午＝全天
+    expect(customHours(DAY_SHIFT, "09:00", "12:00")).toBe(3);
+    expect(customHours(DAY_SHIFT, "13:00", "18:00")).toBe(5);
+    expect(halfDayWindow(DAY_SHIFT, "am").hours + halfDayWindow(DAY_SHIFT, "pm").hours).toBe(shiftWorkHours(DAY_SHIFT));
+    // 午休明設 12:00（正式租戶日班回填後的樣子）結果相同
+    const set12: ShiftLike = { ...DAY_SHIFT, break_start: "12:00" };
+    expect(halfDayWindow(set12, "am")).toEqual({ startTime: "09:00", endTime: "12:00", hours: 3 });
+    expect(halfDayWindow(set12, "pm")).toEqual({ startTime: "13:00", endTime: "18:00", hours: 5 });
   });
 
-  it("班別明設午休 13:00（break_start）→ 照設定：上午 09:00–13:00、下午 14:00–18:00", () => {
+  it("班別明設午休（break_start）→ 以它為界：13:00 起 → 上午 09:00–13:00 4、下午 14:00–18:00 4；12:30 起 → 3.5／4.5", () => {
     const set: ShiftLike = { ...DAY_SHIFT, break_start: "13:00" };
     expect(halfDayWindow(set, "am")).toEqual({ startTime: "09:00", endTime: "13:00", hours: 4 });
     expect(halfDayWindow(set, "pm")).toEqual({ startTime: "14:00", endTime: "18:00", hours: 4 });
     expect(customHours(set, "13:30", "17:00")).toBe(3);
+    const half: ShiftLike = { ...DAY_SHIFT, break_start: "12:30" };
+    expect(halfDayWindow(half, "am")).toEqual({ startTime: "09:00", endTime: "12:30", hours: 3.5 });
+    expect(halfDayWindow(half, "pm")).toEqual({ startTime: "13:30", endTime: "18:00", hours: 4.5 });
   });
 
-  it("晚到班 10:00–19:00 休 60（涵蓋 12:00）→ 午休 12:00–13:00；上午 10:00–15:00、下午 15:00–19:00", () => {
+  it("晚到班 10:00–19:00 休 60（涵蓋 12:00）→ 午休 12:00–13:00；上午 10:00–12:00 2 小時、下午 13:00–19:00 6 小時", () => {
     const late: ShiftLike = { start_time: "10:00", end_time: "19:00", break_minutes: 60 };
-    expect(halfDayWindow(late, "am")).toEqual({ startTime: "10:00", endTime: "15:00", hours: 4 });
-    expect(halfDayWindow(late, "pm")).toEqual({ startTime: "15:00", endTime: "19:00", hours: 4 });
+    expect(halfDayWindow(late, "am")).toEqual({ startTime: "10:00", endTime: "12:00", hours: 2 });
+    expect(halfDayWindow(late, "pm")).toEqual({ startTime: "13:00", endTime: "19:00", hours: 6 });
   });
 
-  it("午班 14:00–22:00 休 60（不涵蓋 12:00）沿用舊推算 17:30–18:30：上午 14:00–17:30、下午 18:30–22:00", () => {
+  it("午班 14:00–22:00 休 60（不涵蓋午休，舊推算 17:30–18:30）維持各半：上午 14:00–17:30、下午 18:30–22:00 各 3.5", () => {
     const pm: ShiftLike = { start_time: "14:00", end_time: "22:00", break_minutes: 60 };
     expect(halfDayWindow(pm, "am")).toEqual({ startTime: "14:00", endTime: "17:30", hours: 3.5 });
     expect(halfDayWindow(pm, "pm")).toEqual({ startTime: "18:30", endTime: "22:00", hours: 3.5 });
     expect(customHours(pm, "17:00", "19:00")).toBe(1);
+  });
+
+  it("沒有休息的班別 09:00–17:00 → 沒有分界，維持各半：上午 09:00–13:00、下午 13:00–17:00 各 4", () => {
+    const noBreak: ShiftLike = { start_time: "09:00", end_time: "17:00", break_minutes: 0 };
+    expect(halfDayWindow(noBreak, "am")).toEqual({ startTime: "09:00", endTime: "13:00", hours: 4 });
+    expect(halfDayWindow(noBreak, "pm")).toEqual({ startTime: "13:00", endTime: "17:00", hours: 4 });
+  });
+
+  it("表單說明 describeHalfDays：日班「以午休為界…」；午班／沒有休息的班別「…各半」", () => {
+    expect(describeHalfDays(DAY_SHIFT)).toBe("以午休為界：上午 09:00–12:00（3 小時）、下午 13:00–18:00（5 小時）");
+    expect(describeHalfDays({ start_time: "14:00", end_time: "22:00", break_minutes: 60 })).toBe(
+      "這個班別沒有涵蓋午休，上午、下午各半：上午 14:00–17:30（3.5 小時）、下午 18:30–22:00（3.5 小時）",
+    );
+    expect(describeHalfDays({ start_time: "09:00", end_time: "17:00", break_minutes: 0 })).toBe(
+      "這個班別沒有午休，上午、下午各半：上午 09:00–13:00（4 小時）、下午 13:00–17:00（4 小時）",
+    );
   });
 
   it("自訂 09:00–18:00 扣除午休 12:00–13:00 ＝ 8 小時", () => {
@@ -88,16 +117,30 @@ describe("shiftWorkHours / halfDayWindow / customHours", () => {
     expect(customHours(DAY_SHIFT, "abc", "14:00")).toBe(0);
   });
 
-  it("夜班跨日：22:00–06:00 休 60 → 7 小時；上午 22:00–01:30、下午 02:30–06:00；自訂 23:00–02:00 = 3 小時（休息窗 01:30–02:30 重疊 30 分 → 2.5）", () => {
+  it("夜班跨日：22:00–06:00 休 60 → 7 小時；沒設休息開始 → 維持各半：上午 22:00–01:30、下午 02:30–06:00；自訂 23:00–02:00 = 3 小時（休息窗 01:30–02:30 重疊 30 分 → 2.5）", () => {
     expect(shiftWorkHours(NIGHT_SHIFT)).toBe(7);
     expect(halfDayWindow(NIGHT_SHIFT, "am")).toEqual({ startTime: "22:00", endTime: "01:30", hours: 3.5 });
     expect(halfDayWindow(NIGHT_SHIFT, "pm")).toEqual({ startTime: "02:30", endTime: "06:00", hours: 3.5 });
     expect(customHours(NIGHT_SHIFT, "23:00", "02:00")).toBe(2.5);
   });
 
-  it("四捨五入 2 位：09:00–17:50 休 45 → 8.08，上下午各 4.04", () => {
+  it("夜班明設休息開始 02:00（管理員自己設的分界）→ 以它為界：上午 22:00–02:00 4、下午 03:00–06:00 3", () => {
+    const set: ShiftLike = { ...NIGHT_SHIFT, break_start: "02:00" };
+    expect(halfDayWindow(set, "am")).toEqual({ startTime: "22:00", endTime: "02:00", hours: 4 });
+    expect(halfDayWindow(set, "pm")).toEqual({ startTime: "03:00", endTime: "06:00", hours: 3 });
+  });
+
+  it("四捨五入 2 位：09:00–17:50 休 45 → 8.08；午休 12:00–12:45 為界 → 上午 3、下午 12:45–17:50 5.08", () => {
     expect(shiftWorkHours(ODD_SHIFT)).toBe(8.08);
-    expect(halfDayWindow(ODD_SHIFT, "am").hours).toBe(4.04);
+    expect(halfDayWindow(ODD_SHIFT, "am")).toEqual({ startTime: "09:00", endTime: "12:00", hours: 3 });
+    expect(halfDayWindow(ODD_SHIFT, "pm")).toEqual({ startTime: "12:45", endTime: "17:50", hours: 5.08 });
+  });
+
+  it("各半的四捨五入：午班 14:00–21:50 休 45 → 7.08，上下午各 3.54（推算休息在中點，差 0.3 分不算跨過）", () => {
+    const odd: ShiftLike = { start_time: "14:00", end_time: "21:50", break_minutes: 45 };
+    expect(shiftWorkHours(odd)).toBe(7.08);
+    expect(halfDayWindow(odd, "am")).toEqual({ startTime: "14:00", endTime: "17:32", hours: 3.54 });
+    expect(halfDayWindow(odd, "pm")).toEqual({ startTime: "18:18", endTime: "21:50", hours: 3.54 });
   });
 });
 
@@ -127,19 +170,17 @@ describe("computeLeaveSegments", () => {
     expect(r.skipped).toEqual([]);
   });
 
-  it("單日上午／下午各 4 小時（上午跳過午休 → 09:00–14:00）", () => {
-    expect(computeLeaveSegments(base({ period: "am" })).segments[0]).toEqual({
-      date: "2026-09-18",
-      startTime: "09:00",
-      endTime: "14:00",
-      hours: 4,
-    });
-    expect(computeLeaveSegments(base({ period: "pm" })).segments[0]).toEqual({
-      date: "2026-09-18",
-      startTime: "14:00",
-      endTime: "18:00",
-      hours: 4,
-    });
+  it("單日上午 09:00–12:00 · 3 小時、下午 13:00–18:00 · 5 小時（以午休為界）", () => {
+    const am = computeLeaveSegments(base({ period: "am" }));
+    expect(am.segments).toEqual([{ date: "2026-09-18", startTime: "09:00", endTime: "12:00", hours: 3 }]);
+    expect(am.totalHours).toBe(3);
+    const pm = computeLeaveSegments(base({ period: "pm" }));
+    expect(pm.segments).toEqual([{ date: "2026-09-18", startTime: "13:00", endTime: "18:00", hours: 5 }]);
+    expect(pm.totalHours).toBe(5);
+    // 有排班的日子用該日班別：午班仍各半
+    const pmShift: ShiftLike = { start_time: "14:00", end_time: "22:00", break_minutes: 60 };
+    const amOnPm = computeLeaveSegments(base({ period: "am", shiftByDate: { "2026-09-18": pmShift } }));
+    expect(amOnPm.segments).toEqual([{ date: "2026-09-18", startTime: "14:00", endTime: "17:30", hours: 3.5 }]);
   });
 
   it("單日自訂 12:30–17:00 → 4 小時（午休重疊 30 分不算）；缺時間或結束不晚於開始 → error", () => {
@@ -354,11 +395,13 @@ describe("computeLeaveSegments — 單日指定時數", () => {
     expect(two.segments).toEqual([{ date: TUE, startTime: "10:00", endTime: "12:00", hours: 2 }]);
   });
 
-  it("跨午休：11:00 起 3 小時 → 11:00–15:00（午休 12:00–13:00 不算）· 3 小時；09:00 起 4 小時 ＝ 上午", () => {
+  it("跨午休：11:00 起 3 小時 → 11:00–15:00（午休 12:00–13:00 不算）· 3 小時；09:00 起 3 小時 ＝ 上午、13:00 起 5 小時 ＝ 下午", () => {
     const across = computeLeaveSegments(base({ startDate: TUE, period: "hours", hoursStart: "11:00", hoursCount: 3 }));
     expect(across.segments).toEqual([{ date: TUE, startTime: "11:00", endTime: "15:00", hours: 3 }]);
-    const am = computeLeaveSegments(base({ startDate: TUE, period: "hours", hoursStart: "09:00", hoursCount: 4 }));
+    const am = computeLeaveSegments(base({ startDate: TUE, period: "hours", hoursStart: "09:00", hoursCount: 3 }));
     expect(am.segments[0]).toEqual({ ...halfDayWindow(DAY_SHIFT, "am"), date: TUE });
+    const pm = computeLeaveSegments(base({ startDate: TUE, period: "hours", hoursStart: "13:00", hoursCount: 5 }));
+    expect(pm.segments[0]).toEqual({ ...halfDayWindow(DAY_SHIFT, "pm"), date: TUE });
   });
 
   it("開始時間可帶 HH:mm:ss；有排班的日子用該日班別（夜班 23:00 起 3 小時 → 23:00–03:00）", () => {
