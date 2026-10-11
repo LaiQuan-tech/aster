@@ -152,6 +152,21 @@ describe("POST /knowledge/documents/upload-url — 取簽名上傳網址", () =>
     expect(h.uploadUrls).toHaveLength(0)
   })
 
+  it("執行檔／腳本不收：副檔名是 .exe 但自報成 PDF、或副檔名無害但 MIME 是執行檔——連網址都不發", async () => {
+    for (const [fileName, contentType] of [
+      ["tool.exe", "application/pdf"], // kindOf 只要 MIME 或副檔名其中一個支援就過，這個以前收得進來
+      ["run.sh", "text/plain"],
+      ["setup.msi", "application/octet-stream"],
+      ["a.pdf", "application/x-msdownload"],
+      ["notes.txt", "application/x-sh"],
+    ] as const) {
+      const res = await as(HR, request(app).post(url)).send({ fileName, contentType, sizeBytes: 1000 })
+      expect(res.status, fileName).toBe(400)
+      expect(res.body.error).toBe("unsupported_file_type")
+    }
+    expect(h.uploadUrls).toHaveLength(0)
+  })
+
   it("瀏覽器標 octet-stream 但副檔名是支援的（.docx）照發網址", async () => {
     const res = await as(HR, request(app).post(url)).send({ fileName: "SOP.docx", contentType: "application/octet-stream", sizeBytes: 4 * MiB })
     expect(res.status).toBe(200)
@@ -210,6 +225,19 @@ describe("POST /knowledge/documents（base64，小檔）", () => {
     expect(over.body).toEqual({ error: "file_too_large", maxBytes: BASE64_MAX_BYTES, directUploadMaxBytes: MAX_BYTES })
     expect(h.uploaded).toHaveLength(0)
     expect(h.indexCalls).toHaveLength(0)
+  })
+
+  it("執行檔／腳本不收（base64 路徑）：.exe 自報成 PDF 也 400，沒上傳、沒建檔", async () => {
+    for (const [fileName, contentType] of [
+      ["tool.exe", "application/pdf"],
+      ["notes.txt", "application/x-sh"],
+    ] as const) {
+      const res = await post({ kind: "file", fileName, contentType, dataBase64: b64(100) })
+      expect(res.status, fileName).toBe(400)
+      expect(res.body.error).toBe("unsupported_file_type")
+    }
+    expect(h.uploaded).toHaveLength(0)
+    expect(docInserts()).toHaveLength(0)
   })
 
   it("body 要二選一：dataBase64 與 storagePath 都沒帶、或都帶 → 400 invalid_body", async () => {
@@ -367,6 +395,43 @@ describe("POST /knowledge/documents（storagePath 登記，大檔直傳）", () 
     expect(res.body.error).toBe("unsupported_file_type")
     expect(h.removed).toEqual([path])
     expect(docInserts()).toHaveLength(0)
+  })
+
+  it("Storage 實際記下的是執行檔 MIME（檔名與自報都無害）→ 400，並把檔刪掉", async () => {
+    const stored = newPath(".pdf")
+    h.objects.set(stored, { size: 1000, contentType: "application/x-msdownload" })
+
+    const res = await post({ kind: "file", fileName: "a.pdf", contentType: "application/pdf", storagePath: stored })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("unsupported_file_type")
+    expect(h.removed).toEqual([stored])
+    expect(docInserts()).toHaveLength(0)
+  })
+
+  it("自報的類型就是執行檔 MIME → 400：在碰 Storage 之前就擋（路徑還沒驗過，不刪任何檔）", async () => {
+    const path = newPath(".txt")
+    h.objects.set(path, { size: 1000, contentType: "text/plain" })
+
+    const res = await post({ kind: "file", fileName: "b.txt", contentType: "application/x-sh", storagePath: path })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("unsupported_file_type")
+    expect(h.removed).toHaveLength(0)
+    expect(docInserts()).toHaveLength(0)
+  })
+
+  it("已登記過的路徑再帶「錯的副檔名」來登記 → 仍是 409（先擋重放），那個檔不會被刪（副檔名檢查會刪檔，不能排在重放檢查前面）", async () => {
+    const path = newPath(".pdf")
+    h.objects.set(path, { size: 1000, contentType: "application/pdf" })
+    fake.db.knowledge_documents = [{ id: "kkkkkkkk-0000-4000-8000-000000000002", tenant_id: TENANT_ID, kind: "file", storage_path: path }]
+
+    const res = await post({ kind: "file", fileName: "改名.docx", contentType: "application/pdf", storagePath: path })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("already_registered")
+    expect(h.removed).toHaveLength(0)
+    expect(h.objects.has(path)).toBe(true)
   })
 
   it("非 HR → 403：Storage 裡的檔不動、資料列沒寫", async () => {

@@ -7,6 +7,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { GeminiNotConfiguredError, isGeminiConfigured } from "../lib/gemini.js"
 import { kindOf } from "../services/knowledge-text.js"
+import { isBlockedDocument } from "../lib/blocked-upload-types.js"
 import {
   DOC_COLS, KNOWLEDGE_BUCKET, PROJECT_DOC_BUCKET, contractLinkedDocumentIds, indexDocument, searchKnowledge, askKnowledge, serializeDoc,
   type KnowledgeDocRow,
@@ -38,6 +39,16 @@ export const BASE64_MAX_BYTES = 3 * 1024 * 1024
 
 const SUPPORTED_EXTENSIONS = ["txt", "md", "csv", "json", "pdf", "docx"]
 const unsupportedFileTypeBody = { error: "unsupported_file_type", supported: SUPPORTED_EXTENSIONS }
+
+/**
+ * 檔案類型的把關有兩層：① `kindOf`（services/knowledge-text.ts）只要 MIME **或**副檔名其中一個是支援的就過；
+ * ② `isBlockedDocument`（lib/blocked-upload-types.ts，與專案文件同一份執行檔／腳本黑名單）。
+ * 只靠 ① 的話，`tool.exe` 自報成 application/pdf 就收得進來，而且存的路徑保留 .exe，全租戶經 download 都拿得到。
+ * 所以先過 ②：副檔名或任何一個 MIME 是執行檔／腳本就擋（回同一個 unsupported_file_type）。
+ */
+function isRejectedFileType(fileName: string, ...contentTypes: Array<string | null | undefined>): boolean {
+  return isBlockedDocument(fileName, ...contentTypes) || !kindOf(contentTypes[0] ?? "", fileName)
+}
 
 const fileFields = {
   fileName: z.string().trim().min(1).max(200),
@@ -122,7 +133,7 @@ knowledgeRouter.post("/knowledge/documents/upload-url", requireAuth, requireTena
   }
   try {
     const { fileName, contentType, sizeBytes } = parsed.data
-    if (!kindOf(contentType, fileName)) {
+    if (isRejectedFileType(fileName, contentType)) {
       res.status(400).json(unsupportedFileTypeBody)
       return
     }
@@ -162,7 +173,7 @@ knowledgeRouter.post("/knowledge/documents", requireAuth, requireTenant, require
       row.title = b.title
       row.body = b.body
     } else if (b.kind === "file") {
-      if (!kindOf(b.contentType, b.fileName)) {
+      if (isRejectedFileType(b.fileName, b.contentType)) {
         res.status(400).json(unsupportedFileTypeBody)
         return
       }
@@ -221,7 +232,8 @@ knowledgeRouter.post("/knowledge/documents", requireAuth, requireTenant, require
         // 以 Storage 記下的類型為準；它說不出來（octet-stream／空）才退回呼叫端自報的。
         const stored = normalizeContentType(info.contentType)
         contentType = stored && stored !== "application/octet-stream" ? stored : normalizeContentType(b.contentType)
-        if (!kindOf(contentType, b.fileName)) {
+        // Storage 實際記下的類型也要過黑名單（取網址時報一個無害的 MIME、直傳時實際送執行檔的 MIME，不能混過去）。
+        if (isRejectedFileType(b.fileName, contentType, stored, b.contentType)) {
           await removeKnowledgeObject(path)
           res.status(400).json(unsupportedFileTypeBody)
           return
