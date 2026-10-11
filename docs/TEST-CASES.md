@@ -25,6 +25,9 @@
 - 行程退出碼：`0`
 - 重跑穩定（多次 171/171）。
 
+> ⚠️ 以上數字是 2026-10-11 班表功能移除**之前**最後一次執行的結果。移除後腳本已改（拿掉 5-4～5-6、13-1 改成直接寫
+> `schedules` 列），**尚未重跑**——重跑後 PASS 總數會變（少 6 個斷言、13-1 前置多 1 個），其餘表格的「實際」欄也應以重跑結果為準。
+
 > 下表「實際」欄為最新一次執行的結果。`POST /attendance/settle` 一案在第一版腳本誤期望 201，經對照 `apps/api/src/routes/attendance.ts:51` 實際回傳 200 後修正腳本（屬腳本問題，非 API bug），現已 PASS。
 
 ---
@@ -72,16 +75,16 @@
 | 4-4 | 停用員工 | 已建 | `POST /employees/:id/deactivate` | 200；`status="inactive"` | PASS |
 | 4-5 | 員工不可建立員工 | emp token | `POST /employees` | 403 | PASS |
 
-### 5. 班別 shifts + 排班 schedules
+### 5. 班別 shifts
 
 | # | 測試案例 | 前置 | 步驟 | 預期 | 實際 |
 | --- | --- | --- | --- | --- | --- |
 | 5-1 | 建立班別 | hr token | `POST /shifts {name,startTime:"09:00",endTime:"18:00",breakMinutes:60}` | 201；`id` | PASS |
 | 5-2 | 列出班別 | 已建 | `GET /shifts` | 200；含新班別 | PASS |
 | 5-3 | 更新班別 | 已建 | `PATCH /shifts/:id {breakMinutes:45}` | 200 | PASS |
-| 5-4 | 指派排班（今日） | 班別+員工 | `POST /schedules {employeeId,workDate:今日,shiftId}` | 201；`count=1`、`ids[]` | PASS |
-| 5-5 | HR 查全部排班 | 已指派 | `GET /schedules` | 200；含該員工今日排班 | PASS |
-| 5-6 | 員工只見自己 | emp token | `GET /schedules` | 200；全部 `employee_id`==自己 | PASS |
+
+> 原 5-4～5-6（指派排班、HR 查全部排班、員工只見自己的排班；`POST`／`GET /schedules`）已刪除：班表（排班）功能
+> 2026-10-11 移除，端點現在是 404。`live-e2e.mjs` 對應的步驟（共 6 個斷言）一併拿掉。
 
 ### 6. 打卡 punch（含防代打）
 
@@ -184,7 +187,7 @@
 
 | # | 測試案例 | 前置 | 步驟 | 預期 | 實際 |
 | --- | --- | --- | --- | --- | --- |
-| 13-1 | 缺卡掃描（只 in 未 out） | 另建排班員工，今日只打 in | `POST /attendance/scan-missing-punch {date:今日}` | 200；`missing` 含該員工 `issue:"no_out"` | PASS |
+| 13-1 | 缺卡掃描（只 in 未 out） | 另建員工，用 service_role 直接寫一列當日 `schedules`（`POST /schedules` 已移除；缺卡掃描讀班表的分支保留給歷史資料），今日只打 in | `POST /attendance/scan-missing-punch {date:今日}` | 200；`missing` 含該員工 `issue:"no_out"` | PASS |
 | 13-2 | 產生通知 | 13-1 | 同上回應 | `queued>=1` | PASS |
 | 13-3 | 重掃冪等 | 13-1 已掃 | 再掃同日 | `queued==0` | PASS |
 | 13-4 | HR 看全部通知 | hr token | `GET /notifications` | 200；含該 `missing_punch` 通知 | PASS |
@@ -231,14 +234,12 @@
 - （待補）登入 / 登出
 - （待補）打卡（上下班、定位/裝置）
 - （待補）請假 / 加班 / 補卡申請與進度查詢
-- （待補）班表查詢
 - （待補）薪資單檢視
 - （待補）通知中心與已讀
 - （待補）KPI 考核結果檢視（定版後）
 
 ### 後台（HR / 管理員）UI 測試
 - （待補）員工 / 部門 / 班別管理介面
-- （待補）排班介面
 - （待補）簽核流程設定與簽核作業
 - （待補）規則設定（差勤 / 薪資 DSL）
 - （待補）出勤結算 / 薪資批次 / 定版

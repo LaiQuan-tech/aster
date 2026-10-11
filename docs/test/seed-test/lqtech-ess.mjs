@@ -365,14 +365,21 @@ function buildSpecs(ref) {
   }
   const manifest = []
 
-  // ── 班表（8 月每個工作日，日班；08-24 起留「待確認」讓業主試確認／異議按鈕）────────────────
+  // ── 班表（8 月每個工作日，日班）— 歷史資料，頁面已停用 ───────────────────────────────────
+  // 班表（排班）功能 2026-10-11 移除：/ess/schedule 頁、/schedules 端點、「確認／異議」按鈕都不存在了，
+  // 業主在 /ess 已看不到這批列。這支是直接寫 DB（service role），不呼叫已移除的端點，所以不需要「略過」；
+  // 仍照舊寫 schedules 表（表與歷史資料保留，月表／缺卡掃描讀班表的分支保留給歷史資料），原因：
+  //   ① 上一輪已寫進正式庫、cleanup 以 manifest.ids.schedules 精準刪——重跑要產生同一批 id（UUIDv5 固定），
+  //      新 manifest 才不會少掉它們、cleanup 才刪得乾淨；
+  //   ② 月表產生／重算（generate）會讀這些列，拿掉等於改變 8 月月表的結果。
+  // manifest 只改標示：不再指向已不存在的頁面（見下面的 page／feature）。
   for (const d of ref.workdays) {
     rows.schedules.push({ id: id(`schedule:${d}`), tenant_id: TENANT_ID, employee_id: LQ, work_date: d, shift_id: ref.dayShift.id, status: d >= "2026-08-24" ? "scheduled" : "confirmed" })
   }
   manifest.push({
-    page: "/ess/schedule",
-    feature: "個人班表（2026-08）",
-    records: [{ id: rows.schedules.map((r) => r.id)[0], name: T(`班表 日班 ${SHEET_PERIOD} ×${rows.schedules.length}`), note: `${ref.workdays[0]}～${ref.workdays.at(-1)} 每個工作日；08-24 起 status=scheduled（待確認），其餘 confirmed。完整 id 見 ids.schedules` }],
+    page: "（已停用）/ess/schedule 頁面已移除",
+    feature: "個人班表（2026-08）— 班表功能 2026-10-11 移除，僅留歷史資料",
+    records: [{ id: rows.schedules.map((r) => r.id)[0], name: T(`班表 日班 ${SHEET_PERIOD} ×${rows.schedules.length}`), note: `${ref.workdays[0]}～${ref.workdays.at(-1)} 每個工作日；08-24 起 status=scheduled，其餘 confirmed（現在沒有畫面看得到，只有月表／缺卡掃描讀班表的歷史分支會用）。完整 id 見 ids.schedules` }],
   })
 
   // ── 打卡（8 月；source=web、device_id=【測試】lqtech-ess）──────────────────────────────

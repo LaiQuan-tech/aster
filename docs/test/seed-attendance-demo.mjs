@@ -2,23 +2,34 @@
  * seed-attendance-demo.mjs — 灌五名員工 + 115 年 6 月出勤資料到 demo 租戶，
  * 產生 2026-06 出勤月表並跟 Excel 原始查核值並排比對。
  *
+ * ⚠️ 2026-10-11 兩項功能移除後的改動（本腳本沒有重跑，只改寫呼叫）：
+ *   • 班表（排班）已移除：POST/GET /schedules 現在是 404，所以這支**不再排班**、也不再檢查殘留班表
+ *     （原 ensureSchedules／reportStraySchedules 已刪）。沒有班表後，結算對每天都走「未排班」規則
+ *     （整天、不扣午休；見 apps/api/src/services/settlement.ts），本腳本原先「日班／晚到班／午班」各排給不同人
+ *     的前提不在了——[COMPARE]／[SPOTCHECK] 的數字（尤其晚到班的劉皇佑、午班的劉明哲）可能對不上 Excel，
+ *     僅供參考，FAIL 不代表系統有 bug。班別（shifts）本身還在，所以仍會建立三個班別定義。
+ *   • 代申請已移除：POST /requests 帶 onBehalfOfEmployeeId 不是本人 → 400 filing_on_behalf_removed。
+ *     請假單改成「員工本人登入送單」：用建立員工時的公司帳號（{slug}@demo.aster.local）＋ DEMO_PASSWORD
+ *     換出該員工自己的 JWT 再 POST /requests；核准仍由 admin（唯一 hr_admin）簽。員工帳號登入失敗
+ *     （例如密碼被改過）就記 [ISSUE] 並略過該員工的請假單，不中斷其他步驟。
+ *
  *   API:   https://aster-hr-api.vercel.app（可用 API_URL 覆寫）
  *   Auth:  admin@kimihr.app（可用 ADMIN_EMAIL／ADMIN_PASSWORD 覆寫）用密碼登入取 JWT
  *
  * 灌的東西（依序）：2026 年行事曆（含 6/19 端午）、部門（設計部／行政部）、
  * 假別（sick/personal/annual/parental）、班別（日班/晚到班/午班）、五名員工
  * （依 docs/test/fixtures/attendance-115-06/ 五份 fixture：余裕哲/劉皇佑/
- * 莊子葶/鄧文琳/劉明哲）、職務經歷（職稱）、薪資結構、健保眷屬、115年6月
- * 排班（週一至五，扣 6/19）、打卡（full_day 員工整天一段；overtime_only 員工
- * 〔余裕哲/劉明哲〕合成「班表時段」+「fixture 的加班段」兩段）、請假單
- * （莊子葶病假逐日單、鄧文琳育嬰假 segments 單＋特休整段單，皆由 admin
- * 以唯一 hr_admin 身分自簽核准）。跑完呼叫 attendance-sheets/generate，
+ * 莊子葶/鄧文琳/劉明哲）、職務經歷（職稱）、薪資結構、健保眷屬、
+ * 打卡（full_day 員工整天一段；overtime_only 員工
+ * 〔余裕哲/劉明哲〕合成「班別時段」+「fixture 的加班段」兩段）、請假單
+ * （莊子葶病假逐日單、鄧文琳育嬰假 segments 單＋特休整段單，皆由員工本人登入送單，
+ * admin 以唯一 hr_admin 身分簽核核准）。跑完呼叫 attendance-sheets/generate，
  * 逐一讀回五張月表、印出跟 fixture summaryExcel 的並排比較與四個指定錨點的
  * PASS/FAIL，最後匯出全員 xlsx 存到 /tmp 並驗證 sheet 數與 A4 表頭。
  *
  * ⚠️ 冪等：部門/假別/班別/員工以「名稱或代碼」判斷已存在就沿用（不重複
  * 建立）；打卡以 GET 既有紀錄（同 employeeId+type+同分鐘）去重後才送批次匯入；
- * 請假單以 (leaveTypeId, startAt, endAt) 三元組去重；排班／薪資走後端本身
+ * 請假單以 (leaveTypeId, startAt, endAt) 三元組去重；薪資走後端本身
  * 的 upsert（一律可重複呼叫）；行事曆 generate 端點本身「已存在的日期一律跳過」。
  * 重跑第二次應該不會建立任何新的部門/假別/班別/員工/打卡/請假單。
  *
@@ -52,17 +63,15 @@
  *     起點早於班表下班時間，兩段打卡會重疊——現在改成偵測 d.in < shift.end
  *     時只合成「一對」：in=班表開始、out=加班段結束，視為單一整段工時
  *     （不再合成會重疊的「班表下班」+「加班段起點」兩個中間點）。
- *   • 排班只排該員工 fixture 實際涵蓋到的日期，不再無條件排整月週一至五
- *     ——避免像劉明哲（fixture 只給 6 天樣本）被排到 21 天班表，其餘 15 天
- *     「有排班無打卡」被誤判 absent_scheduled。
+ *   • （已隨班表功能移除失效，留作歷史）排班只排該員工 fixture 實際涵蓋到的日期，
+ *     不再無條件排整月週一至五——避免像劉明哲（fixture 只給 6 天樣本）被排到 21 天班表，
+ *     其餘 15 天「有排班無打卡」被誤判 absent_scheduled。
  *
- * ⚠️ 殘留待清理：上一輪（2026-09-14 第一輪）已經把明哲多排的 15 天寫進
- * `schedules` 表；`schedules` 路由沒有 DELETE 端點（也不能用 upsert
- * shiftId:null 假裝清除——`scheduled` 判斷只看該列存不存在，不看 shift_id
- * 是否為 null），本腳本無法自己補這個洞。main() 執行到 ensureSchedules 後
- * 會呼叫 reportStraySchedules()，把任何「fixture 沒有涵蓋、但過去可能已經
- * 建過班表」的日期整理成 [ISSUE] 行＋一段可直接貼去 Supabase SQL editor 跑
- * 的 DELETE 陳述式；需要人工（或有 DB 寫入權限的一方）執行。
+ * ⚠️ 殘留待清理（班表功能移除後不再有工具能處理）：先前幾輪（2026-09-14 起）已把班表寫進 `schedules` 表，
+ * 表與歷史資料沒有動（結算／缺卡掃描讀班表的分支保留給歷史資料）。這些列還在的話，這五名 demo 員工
+ * 在月表上仍會被當成「有排班」（沒打卡的日子會判 absent_scheduled）。要清只能直接對 DB（沒有 API 了）：
+ *   DELETE FROM schedules WHERE employee_id IN (<五名 demo 員工的 id>);
+ * 本腳本不再嘗試偵測或清除。
  */
 
 import { readFileSync, writeFileSync } from "node:fs"
@@ -132,7 +141,6 @@ const COUNTS = {
   jobHistoryReused: 0,
   salariesUpserted: 0,
   nhiDependentsCreated: 0,
-  schedulesUpserted: 0,
   punchesPlanned: 0,
   punchesSkipped: 0,
   punchesImported: 0,
@@ -144,8 +152,8 @@ const COUNTS = {
 // ---------------------------------------------------------------------------
 // HTTP 小工具（風格對齊 docs/test/seed-projects-demo.mjs）
 // ---------------------------------------------------------------------------
-async function api(method, path, body) {
-  const headers = { Authorization: `Bearer ${TOKEN}` }
+async function api(method, path, body, token = TOKEN) {
+  const headers = { Authorization: `Bearer ${token}` }
   if (body !== undefined) headers["Content-Type"] = "application/json"
   const res = await fetch(`${API_URL}${path}`, {
     method,
@@ -176,17 +184,23 @@ async function downloadFile(path, destFile) {
   return buf.length
 }
 
-async function login() {
+/** 密碼登入換 JWT；沒給帳密＝admin。員工本人的帳密見 employeeLogin()。 */
+async function login(email = ADMIN_EMAIL, password = ADMIN_PASSWORD) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
     method: "POST",
     headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ email: ADMIN_EMAIL, password: ADMIN_PASSWORD }),
+    body: JSON.stringify({ email, password }),
   })
   const data = await res.json()
   if (!res.ok || !data.access_token) {
-    throw new Error(`登入失敗 → ${res.status}: ${JSON.stringify(data)}`)
+    throw new Error(`登入失敗（${email}）→ ${res.status}: ${JSON.stringify(data)}`)
   }
   return data.access_token
+}
+
+/** 員工本人的登入帳號：ensureEmployees 建立時用的公司帳號與 DEMO_PASSWORD。 */
+function employeeLogin(p) {
+  return login(`${p.slug}@demo.aster.local`, DEMO_PASSWORD)
 }
 
 // ---------------------------------------------------------------------------
@@ -405,51 +419,8 @@ async function ensureNhiDependents(p, empId) {
   }
 }
 
-// 該員工 fixture 實際涵蓋到的「六月工作日」清單（週一至五、扣 6/19）。
-// 大部分員工的 fixture 涵蓋整月工作日，只有明哲（只給 6 天樣本）會比較短。
-function fixtureWorkdaysOf(p) {
-  const covered = new Set(p.fixture.days.map((d) => d.date))
-  const out = []
-  for (let day = 1; day <= 30; day++) {
-    const dateKey = `${PERIOD}-${String(day).padStart(2, "0")}`
-    if (isJuneWorkday(dateKey) && covered.has(dateKey)) out.push(dateKey)
-  }
-  return out
-}
-
-async function ensureSchedules(plan, empIdByName, shiftIdByName) {
-  const assignments = []
-  for (const p of plan) {
-    const empId = empIdByName.get(p.name)
-    const shiftId = shiftIdByName.get(p.shiftName)
-    for (const dateKey of fixtureWorkdaysOf(p)) {
-      assignments.push({ employeeId: empId, workDate: dateKey, shiftId })
-    }
-  }
-  const res = await api("POST", "/schedules", { assignments })
-  COUNTS.schedulesUpserted = res.body.count ?? 0
-}
-
-// 只讀 GET /schedules 比對「這個月週一至五（扣 6/19）」跟「fixture 實際涵蓋
-// 到的工作日」的差集：非空代表過去某一輪曾經排過、但這次不會再排的日期，
-// 需要有人拿掉那些多餘的 schedules 列（沒有 DELETE 端點可用，見檔頭說明）。
-async function reportStraySchedules(plan, empIdByName) {
-  for (const p of plan) {
-    const empId = empIdByName.get(p.name)
-    const wanted = new Set(fixtureWorkdaysOf(p))
-    const got = await api("GET", `/schedules?employeeId=${empId}&from=${PERIOD_FROM}&to=${PERIOD_TO}`)
-    const stray = (got.body.schedules ?? []).map((s) => s.work_date).filter((d) => !wanted.has(d))
-    if (stray.length === 0) continue
-    stray.sort()
-    issue(
-      `${p.name}（empId=${empId}）目前在 schedules 表裡還有 ${stray.length} 天不在這次 fixture 範圍內的排班` +
-        `（${stray.join(", ")}）——多半是上一輪跑的殘留，會讓那幾天被判成「有排班無打卡」(absent_scheduled)。` +
-        `schedules 路由沒有 DELETE 端點，也不能用 upsert shiftId:null 假裝清除` +
-        `（scheduled 只看列存不存在），需要直接對 DB 清除，可貼進 Supabase SQL editor：` +
-        `DELETE FROM schedules WHERE employee_id = '${empId}' AND work_date IN ('${stray.join("','")}');`,
-    )
-  }
-}
+// （原 fixtureWorkdaysOf／ensureSchedules／reportStraySchedules 已刪：班表功能 2026-10-11 移除，
+// POST/GET /schedules 現在是 404。見檔頭說明。）
 
 async function existingPunchKeys(empId) {
   const res = await api("GET", `/punch?employeeId=${empId}&from=${addDaysKey(PERIOD_FROM, -2)}&to=${addDaysKey(PERIOD_TO, 2)}`)
@@ -509,7 +480,21 @@ async function ensurePunches(plan, empIdByName) {
   }
 }
 
-async function ensureLeaveRequest(cacheByEmp, leaveTypeIdByCode, empId, code, startIso, endIso, hours, segments, reason) {
+/** 員工本人登入拿 JWT；失敗回 null 並記 ISSUE（呼叫端略過該員工的請假單）。 */
+async function tryEmployeeLogin(p) {
+  try {
+    return await employeeLogin(p)
+  } catch (err) {
+    issue(`${p.name} 用本人帳號登入失敗，略過他的請假單（代申請已移除，只能本人送單）：${err.message}`)
+    return null
+  }
+}
+
+/**
+ * 以**員工本人**的身分送一張假單（代申請已移除，2026-10-11）：`empToken` 是該員工自己的 JWT，
+ * body 不帶 onBehalfOfEmployeeId。冪等檢查（GET /requests?employeeId=）用 admin 的 TOKEN 讀（HR 看得到全部）。
+ */
+async function ensureLeaveRequest(cacheByEmp, leaveTypeIdByCode, empId, empToken, code, startIso, endIso, hours, segments, reason) {
   let cache = cacheByEmp.get(empId)
   if (!cache) {
     const res = await api("GET", `/requests?employeeId=${empId}&kind=leave`)
@@ -522,9 +507,9 @@ async function ensureLeaveRequest(cacheByEmp, leaveTypeIdByCode, empId, code, st
     COUNTS.leaveRequestsSkipped++
     return null
   }
-  const body = { kind: "leave", onBehalfOfEmployeeId: empId, leaveTypeId, startAt: startIso, endAt: endIso, hours, reason }
+  const body = { kind: "leave", leaveTypeId, startAt: startIso, endAt: endIso, hours, reason }
   if (segments) body.segments = segments
-  const created = await api("POST", "/requests", body)
+  const created = await api("POST", "/requests", body, empToken)
   cache.add(key)
   COUNTS.leaveRequestsCreated++
   return created.body.requestId
@@ -534,9 +519,12 @@ async function ensureLeaveRequests(plan, empIdByName, leaveTypeIdByCode) {
   const cacheByEmp = new Map()
 
   // 莊子葶：病假逐日各自一張單（fixture 有標 leaveType='病假' 的日子）。
+  // 兩位請假員工都用「本人登入」送單；登入失敗（帳號被改過密碼等）→ 記 ISSUE、略過該員工，不中斷其他步驟。
   const zhuang = plan.find((p) => p.name === "莊子葶")
   const zhuangId = empIdByName.get("莊子葶")
-  for (const d of zhuang.fixture.days.filter((x) => x.leaveType === "病假" && x.leaveHours > 0)) {
+  const zhuangToken = await tryEmployeeLogin(zhuang)
+  const sickDays = zhuangToken ? zhuang.fixture.days.filter((x) => x.leaveType === "病假" && x.leaveHours > 0) : []
+  for (const d of sickDays) {
     let startHm, endHm
     if (d.in) {
       // 當天有出勤（如 6/8 13:13 才到）：假設請假落在到勤前。
@@ -551,6 +539,7 @@ async function ensureLeaveRequests(plan, empIdByName, leaveTypeIdByCode) {
       cacheByEmp,
       leaveTypeIdByCode,
       zhuangId,
+      zhuangToken,
       "sick",
       taipeiToIso(d.date, startHm),
       taipeiToIso(d.date, endHm),
@@ -563,7 +552,10 @@ async function ensureLeaveRequests(plan, empIdByName, leaveTypeIdByCode) {
   // 鄧文琳：育嬰假逐日 segments 併一張單；特休整段另一張單。
   const deng = plan.find((p) => p.name === "鄧文琳")
   const dengId = empIdByName.get("鄧文琳")
-  const parentalDays = deng.fixture.days.filter((x) => x.leaveHours > 0 && x.leaveType && x.leaveType.startsWith("育嬰假"))
+  const dengToken = await tryEmployeeLogin(deng)
+  const parentalDays = dengToken
+    ? deng.fixture.days.filter((x) => x.leaveHours > 0 && x.leaveType && x.leaveType.startsWith("育嬰假"))
+    : []
   if (parentalDays.length > 0) {
     const segments = parentalDays.map((d) => ({
       date: d.date,
@@ -576,6 +568,7 @@ async function ensureLeaveRequests(plan, empIdByName, leaveTypeIdByCode) {
       cacheByEmp,
       leaveTypeIdByCode,
       dengId,
+      dengToken,
       "parental",
       taipeiToIso(segments[0].date, segments[0].startTime),
       taipeiToIso(segments[segments.length - 1].date, segments[segments.length - 1].endTime),
@@ -584,7 +577,7 @@ async function ensureLeaveRequests(plan, empIdByName, leaveTypeIdByCode) {
       "育嬰假減少工時（seed，逐日 segments）",
     )
   }
-  const annualDays = deng.fixture.days
+  const annualDays = (dengToken ? deng.fixture.days : [])
     .filter((x) => x.leaveType === "特休")
     .map((x) => x.date)
     .sort()
@@ -593,6 +586,7 @@ async function ensureLeaveRequests(plan, empIdByName, leaveTypeIdByCode) {
       cacheByEmp,
       leaveTypeIdByCode,
       dengId,
+      dengToken,
       "annual",
       taipeiToIso(annualDays[0], deng.fixture.shift.start),
       taipeiToIso(annualDays[annualDays.length - 1], deng.fixture.shift.end),
@@ -603,7 +597,7 @@ async function ensureLeaveRequests(plan, empIdByName, leaveTypeIdByCode) {
   }
 
   // 核准所有待簽的 leave 單。approval-flows/leave 已在 main() 設成 [adminEmpId]，
-  // 而 admin 是這個 demo 租戶唯一的 hr_admin，所以可以自己簽核自己代送的單。
+  // 而 admin 是這個 demo 租戶唯一的 hr_admin，由它簽核員工本人送的單（HR 也可代簽不是自己關卡的單）。
   for (const empId of [zhuangId, dengId]) {
     const pending = (await api("GET", `/requests?employeeId=${empId}&kind=leave&status=pending`)).body.requests ?? []
     for (const r of pending) {
@@ -747,7 +741,8 @@ async function main() {
   }
 
   const leaveTypeIdByCode = await ensureLeaveTypes(LEAVE_TYPE_PLAN)
-  const shiftIdByName = await ensureShifts(SHIFT_PLAN)
+  // 班別定義照建（班別功能還在）；不再指派給人（班表功能已移除），所以不需要 id 對照。
+  await ensureShifts(SHIFT_PLAN)
   const empIdByName = await ensureEmployees(plan, dept.designId)
 
   await api("PATCH", `/departments/${dept.designId}`, { managerEmpId: empIdByName.get("劉明哲") })
@@ -761,8 +756,7 @@ async function main() {
 
   await api("PUT", "/approval-flows/leave", { approverEmpIds: [adminEmpId] })
 
-  await ensureSchedules(plan, empIdByName, shiftIdByName)
-  await reportStraySchedules(plan, empIdByName)
+  // （原本在這裡排班＋檢查殘留班表：班表功能 2026-10-11 移除，POST/GET /schedules 已 404，整段拿掉。）
   await ensurePunches(plan, empIdByName)
   await ensureLeaveRequests(plan, empIdByName, leaveTypeIdByCode)
 

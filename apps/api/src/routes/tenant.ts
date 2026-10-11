@@ -119,8 +119,10 @@ export const tenantSettingsSchema = z.object({
         .optional(),
       /**
        * ESS 分頁限縮：employment_type → 可見的分頁 key 清單（例如
-       * { intern: ["home","schedule","punches","requests","notifications","mydata"] }）。
-       * 沒列的身分類別＝全部可見；tab key 定義見 apps/web/src/components/EssHeader.tsx。
+       * { intern: ["home","punches","requests","notifications","mydata"] }）。
+       * 已移除的分頁 key（例如 2026-10-11 拿掉的個人班表 `schedule`）還存在設定裡也無妨：前端 visibleTabs
+       * 忽略不認得的 key，middleware/ess-tab-guard.ts 的路由對照表也沒有它，留著無害。
+       * 沒列的身分類別＝全部可見；tab key 定義見 apps/web/src/lib/ess-tabs.ts 的 ESS_TABS。
        */
       essTabs: z.record(z.string().trim().min(1), z.array(z.string().trim().min(1))).optional(),
       /**

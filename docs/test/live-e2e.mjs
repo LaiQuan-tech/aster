@@ -368,8 +368,10 @@ async function main() {
     eqStatus(empWrite, 403, "POST /employees as employee → forbidden")
   }
 
-  // ------------------------------------------------- 5) shifts + schedules
-  section("5) shifts CRUD + schedules assign/query")
+  // ------------------------------------------------- 5) shifts
+  // 原本這一節還有「排班指派／查詢」（POST/GET /schedules）：班表功能 2026-10-11 移除，端點已 404，
+  // 那三個步驟（TEST-CASES.md 5-4～5-6）整段拿掉。班別（shifts）本身還在。
+  section("5) shifts CRUD")
   let shiftId
   {
     const create = await api("POST", "/shifts", {
@@ -386,28 +388,6 @@ async function main() {
 
     const patch = await api("PATCH", `/shifts/${shiftId}`, { token: hr.token, body: { breakMinutes: 45 } })
     eqStatus(patch, 200, "PATCH /shifts/:id")
-
-    // assign employee a schedule today (used later by punch / detection / settle)
-    const wd = todayUTC()
-    const assign = await api("POST", "/schedules", {
-      token: hr.token,
-      body: { employeeId: emp.empId, workDate: wd, shiftId },
-    })
-    eqStatus(assign, 201, "POST /schedules (assign emp today)")
-    ok(assign.body?.count === 1 && Array.isArray(assign.body?.ids), "schedule created (count=1)", assign.body)
-
-    // HR sees all schedules
-    const hrView = await api("GET", "/schedules", { token: hr.token })
-    eqStatus(hrView, 200, "GET /schedules (hr)")
-    ok(hrView.body?.schedules?.some((s) => s.employee_id === emp.empId && s.work_date === wd), "hr sees emp schedule")
-
-    // employee sees only own
-    const empView = await api("GET", "/schedules", { token: emp.token })
-    eqStatus(empView, 200, "GET /schedules (employee)")
-    ok(
-      (empView.body?.schedules ?? []).every((s) => s.employee_id === emp.empId),
-      "employee schedule view scoped to self",
-    )
   }
 
   // ------------------------------------------------- 6) punch
@@ -788,6 +768,9 @@ async function main() {
     // The employee punched IN today on a scheduled day but we need a 'no_out'
     // scenario. They DID punch out in step 6, so today is healthy. Create a
     // fresh scheduled employee with an IN-only punch to force a missing punch.
+    // （班表端點 2026-10-11 已移除；缺卡掃描「讀班表」的分支保留給歷史資料，所以下面直接用 service_role
+    //   寫一列 schedules 當歷史班表——跟 apps/api/src/__tests__/detection.test.ts 同一作法。
+    //   清理時 sweepOrder 已含 schedules 表。）
     const ts = Date.now()
     const moEmail = `e2e-${ts}-missing@example.com`
     const moPass = `Pw-${ts}-mo-Aa1!`
@@ -801,7 +784,10 @@ async function main() {
       .select("id")
       .single()
     const wd = todayUTC()
-    await api("POST", "/schedules", { token: hr.token, body: { employeeId: moEmp.id, workDate: wd, shiftId } })
+    const { error: schErr } = await admin
+      .from("schedules")
+      .insert({ tenant_id: A.tenantId, employee_id: moEmp.id, work_date: wd, shift_id: shiftId, status: "scheduled" })
+    ok(!schErr, "seed schedules row via service_role (POST /schedules 已移除)", schErr?.message)
     const moTok = (await signIn(moEmail, moPass)).token
     await api("POST", "/punch", { token: moTok, body: { type: "in" } }) // in only, no out
 

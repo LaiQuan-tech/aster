@@ -512,7 +512,8 @@ describe.skipIf(!ready)("A1 帳號與邀請信 — live", () => {
       const me = await request(app).get("/me").set("Authorization", `Bearer ${iToken}`)
       expect(me.status).toBe(200)
       expect(me.body.employmentType).toBe("intern")
-      expect(me.body.essTabs).toEqual(["home", "schedule", "punches", "requests", "notifications", "mydata"])
+      // 個人班表（schedule）2026-10-11 隨班表功能移除，預設清單不再有它（routes/me.ts INTERN_DEFAULT_ESS_TABS）。
+      expect(me.body.essTabs).toEqual(["home", "punches", "requests", "notifications", "mydata"])
     })
   })
 

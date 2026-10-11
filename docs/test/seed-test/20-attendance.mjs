@@ -5,10 +5,11 @@
  * 身上，每個功能各 ≥3 筆、名稱一律【測試】開頭、可重跑（第二次 created=0）。
  *
  * 建的東西（依執行順序）：
- *   1. 排班 /admin/schedules：2026-08-01 ～ 昨天 之間的每個 workday（行事曆
- *      GET /calendar?year=2026 判斷；週末 rest_day、固定假日不排）。A→班別A、
- *      B→班別B；C 是兼職，只排週一三五→班別C。upsert 以 (employee, work_date) 冪等。
- *   2. 打卡 /admin/punch-records：每個排班日 in／out 各一筆（POST /punch/manual/import，
+ *   1.（已停用）排班：班表（排班）功能 2026-10-11 移除，/admin/schedules 與 POST/GET /schedules 都不存在，
+ *      這一步已拿掉、不再呼叫。「2026-08-01 ～ 昨天 之間的每個 workday（行事曆 GET /calendar?year=2026
+ *      判斷；週末 rest_day、固定假日不算；C 是兼職，只算週一三五）」這份出勤日清單仍保留，給第 2 步打卡用。
+ *      之前幾輪已寫進 schedules 表的列沒有動（表與歷史資料保留），cleanup/20-attendance.sql 仍會刪。
+ *   2. 打卡 /admin/punch-records：每個出勤日 in／out 各一筆（POST /punch/manual/import，
  *      source=manual）。in＝班表開始 −8～+8 分、out＝班表結束 +0～10 分，偏移量由
  *      日期算出（固定偽隨機，重跑結果相同）。特例：
  *        • B 09-02／09-09／09-16 加班到班表結束 +2 小時
@@ -58,7 +59,7 @@ const TINY_PNG_BASE64 =
 /** 三位測試員工的班別（對應 00-base 的 SHIFTS）。 */
 const SHIFT_OF = { A: "A", B: "B", C: "C" }
 const SHIFT_TIMES = { A: ["09:00", "18:00"], B: ["10:00", "19:00"], C: ["13:00", "22:00"] }
-/** C 是兼職，只排週一三五。 */
+/** C 是兼職，只有週一三五出勤。 */
 const PARTTIME_WEEKDAYS = new Set([1, 3, 5])
 
 const KIND_LABEL = { leave: "請假", ot: "加班", fix_punch: "補卡", business_trip: "公出/出差", petty_cash: "零用金預支" }
@@ -126,7 +127,7 @@ async function prepare(ctx) {
     return wd !== 0 && wd !== 6
   }
 
-  // 每位員工的排班日（2026-08-01 ～ 昨天）
+  // 每位員工的出勤日（2026-08-01 ～ 昨天；原本也是排班日，班表功能移除後只剩打卡用）
   const workDates = {}
   for (const key of ["A", "B", "C"]) {
     const list = []
@@ -138,54 +139,22 @@ async function prepare(ctx) {
     workDates[key] = list
   }
   ctx.log(
-    `  範圍 ${RANGE_FROM}～${yesterday}：排班日 A=${workDates.A.length} B=${workDates.B.length} C=${workDates.C.length}` +
+    `  範圍 ${RANGE_FROM}～${yesterday}：出勤日 A=${workDates.A.length} B=${workDates.B.length} C=${workDates.C.length}` +
       `（行事曆裁定 ${days.length} 天，含 09-25 中秋／09-28 教師節等固定假日）`,
   )
   return { as, today, yesterday, isWorkday, workDates }
 }
 
 // ---------------------------------------------------------------------------
-// 1. 排班
+// 1. 排班（已停用）
 // ---------------------------------------------------------------------------
-async function seedSchedules(ctx, env) {
-  const e = ctx.state.employees
-  const toUpsert = []
-  const records = []
-  for (const key of ["A", "B", "C"]) {
-    const emp = e[key]
-    const shiftId = ctx.state.shifts[SHIFT_OF[key]].id
-    const existing = (await ctx.api("GET", `/schedules?employeeId=${emp.id}&from=${RANGE_FROM}&to=${env.yesterday}`)).body.schedules
-    const byDate = new Map(existing.map((s) => [s.work_date, s]))
-    let reused = 0
-    for (const d of env.workDates[key]) {
-      const cur = byDate.get(d)
-      if (cur && cur.shift_id === shiftId) {
-        reused++
-        continue
-      }
-      toUpsert.push({ employeeId: emp.id, workDate: d, shiftId })
-    }
-    const created = env.workDates[key].length - reused
-    if (reused > 0) ctx.reused(`排班 ${emp.name} ×${reused}（${ctx.state.shifts[SHIFT_OF[key]].name}）`)
-    records.push({
-      id: emp.id,
-      name: T(`排班 ${emp.name.replace(T(""), "")} ${ctx.state.shifts[SHIFT_OF[key]].name.replace(T(""), "")}`),
-      note: `${env.workDates[key].length} 天（${RANGE_FROM}～${env.yesterday}${key === "C" ? "，只排週一三五" : ""}）`,
-    })
-    if (created > 0) ctx.log(`  ${emp.name}：待新增／更新 ${created} 天`)
-  }
-  if (toUpsert.length > 0) {
-    const r = (await ctx.api("POST", "/schedules", { assignments: toUpsert })).body
-    ctx.log(`  POST /schedules → count=${r.count}`)
-    for (const a of toUpsert) ctx.created(`排班 ${a.workDate}（${Object.values(e).find((x) => x.id === a.employeeId)?.name}）`)
-  }
-  ctx.manifest.push({ page: "/admin/schedules", feature: "排班", records })
-}
+// 班表（排班）功能 2026-10-11 移除：POST/GET /schedules 現在是 404，原本的 seedSchedules 已刪，seed() 也不再呼叫。
+// 出勤日清單（env.workDates）留給下面的打卡用。
 
 // ---------------------------------------------------------------------------
 // 2. 打卡
 // ---------------------------------------------------------------------------
-/** 某員工某排班日要打的卡（[type, "HH:MM"]）；回 [] 代表當天不打卡。 */
+/** 某員工某出勤日要打的卡（[type, "HH:MM"]）；回 [] 代表當天不打卡。 */
 function plannedPunches(key, dateKey) {
   const [start, end] = SHIFT_TIMES[key]
   const { inOffset, outOffset } = punchOffsets(key, dateKey)
@@ -284,7 +253,7 @@ async function seedLeaveBalances(ctx) {
 // ---------------------------------------------------------------------------
 /**
  * 派工單指定的日期若落在週末（2026-09-05／06／12／13／19 都是週末），改成最近的
- * 工作日並在 note 註明；C 是兼職（週一三五），C 的單也盡量落在她的排班日。
+ * 工作日並在 note 註明；C 是兼職（週一三五），C 的單也盡量落在她的出勤日。
  */
 function buildRequestSpecs(ctx) {
   const lt = ctx.state.leaveTypes
@@ -296,7 +265,7 @@ function buildRequestSpecs(ctx) {
     { id: "leave-c-0909", who: "C", kind: "leave", target: "approved", ...day("2026-09-09", "13:00", "17:00"), body: { leaveTypeId: lt.B.id, hours: 4, reason: T("假別B 前半班 4h") }, note: "測試假別B 13:00–17:00 4h → 核准（C 班別 13–22，派工單的「上午」改為前半班）" },
     { id: "leave-b-0910", who: "B", kind: "leave", target: "pending", attach: true, ...day("2026-09-10", "10:00", "19:00"), body: { leaveTypeId: lt.C.id, hours: 8, reason: T("假別C 需附件") }, note: "測試假別C（requiresAttachment）上傳 1 張 PNG 後留 pending" },
     real.annual
-      ? { id: "leave-c-0929", who: "C", kind: "leave", target: "pending", ...day("2026-09-29", "13:00", "22:00"), body: { leaveTypeId: real.annual.id, hours: 8, reason: T("特休 全天") }, note: "特休 全天 → pending（09-29 是週二，C 兼職未排班，仍照派工單日期）" }
+      ? { id: "leave-c-0929", who: "C", kind: "leave", target: "pending", ...day("2026-09-29", "13:00", "22:00"), body: { leaveTypeId: real.annual.id, hours: 8, reason: T("特休 全天") }, note: "特休 全天 → pending（09-29 是週二，C 兼職週一三五才出勤，仍照派工單日期）" }
       : null,
     real.sick
       ? { id: "leave-b-0911", who: "B", kind: "leave", target: "rejected", ...day("2026-09-11", "10:00", "19:00"), body: { leaveTypeId: real.sick.id, hours: 8, reason: T("病假 全天") }, note: "病假 全天 → 駁回（comment【測試】駁回示範）" }
@@ -637,7 +606,7 @@ async function seedSheets(ctx, env) {
 // ---------------------------------------------------------------------------
 export async function seed(ctx) {
   const env = await prepare(ctx)
-  await seedSchedules(ctx, env)
+  // （原 seedSchedules 已停用：班表功能 2026-10-11 移除）
   await seedPunches(ctx, env)
   await seedLeaveBalances(ctx)
   await seedRequests(ctx, env) // 先簽核：核准的假單／補卡要進到結算與月表
