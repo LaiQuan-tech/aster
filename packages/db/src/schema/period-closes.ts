@@ -33,6 +33,10 @@ export const periodCloses = pgTable(
     lockedCount: integer("locked_count").notNull().default(0),
     snapshotManifestPath: text("snapshot_manifest_path"),
     note: text("note"),
+    /** 重新開放（解鎖）紀錄：只有老闆或老闆指定的人可以，必填理由。 */
+    reopenedAt: timestamp("reopened_at", { withTimezone: true }),
+    reopenedByEmpId: uuid("reopened_by_emp_id"),
+    reopenReason: text("reopen_reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
