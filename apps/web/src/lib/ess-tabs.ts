@@ -113,17 +113,22 @@ export const MORE_TAB: BottomTab = { key: "more", label: "更多", href: "/ess/m
 
 /**
  * 底部分頁列的內容：
- *   home（永遠）→ requests（過 essTabs）→ approvals（過 essTabs 且 isManager 或有待簽單）
+ *   home（永遠）→ requests（過 essTabs）→ approvals（過 essTabs 且 isManager、有待簽單或是老闆）
  *   → notifications（過 essTabs）→ more（永遠）。
+ * 老闆（tenants.features.approval.fallbackApproverEmpId，`isBoss`）就算不是任何部門的主管、當下也沒有待簽單，
+ * 簽核分頁仍然顯示：遲到說明要老闆決定（簽核頁的「遲到說明」區塊），沒有這個分頁就進不去。`isBoss` 省略或拿不到
+ * ＝false，照舊；仍然要過 essTabs（租戶明確沒開「簽核」就不顯示）。
  * 徽章數字（待簽／未讀）由 shell 依 key 另外貼上，不放在這裡。
  */
 export function bottomTabs(input: {
   essTabs: readonly string[] | null | undefined;
   isManager: boolean;
   pendingApprovals: number;
+  /** 登入者是不是老闆（lib/payroll-periods-api.ts 的 isApprovalBoss）；省略＝false。 */
+  isBoss?: boolean;
 }): BottomTab[] {
   const allowed = new Set(visibleTabs(ESS_TABS, input.essTabs).map((t) => t.key));
-  const showApprovals = input.isManager || input.pendingApprovals > 0;
+  const showApprovals = input.isManager || input.pendingApprovals > 0 || input.isBoss === true;
   const out: BottomTab[] = [];
   for (const key of BOTTOM_TAB_KEYS) {
     if (!allowed.has(key)) continue;

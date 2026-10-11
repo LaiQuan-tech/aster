@@ -22,6 +22,7 @@ import {
   closeSuccessMessage,
   filterUnlockCandidates,
   getPeriodChecklist,
+  isApprovalBoss,
   isChecklistReady,
   isForbiddenError,
   isValidReopenReason,
@@ -565,6 +566,32 @@ describe("名單 helper：periodUnlockEmpIdsOf／approvalBossEmpIdOf", () => {
     expect(approvalBossEmpIdOf({ approval: {} })).toBeNull();
     expect(approvalBossEmpIdOf({})).toBeNull();
     expect(approvalBossEmpIdOf(null)).toBeNull();
+  });
+});
+
+describe("isApprovalBoss — 登入者是不是老闆（ESS 簽核分頁永遠顯示給老闆）", () => {
+  it("員工 id 等於 features.approval.fallbackApproverEmpId（不分大小寫）→ true", () => {
+    expect(isApprovalBoss({ approval: { fallbackApproverEmpId: BOSS } }, BOSS)).toBe(true);
+    expect(isApprovalBoss({ approval: { fallbackApproverEmpId: BOSS.toUpperCase() } }, BOSS)).toBe(true);
+    expect(isApprovalBoss({ approval: { fallbackApproverEmpId: BOSS } }, BOSS.toUpperCase())).toBe(true);
+    expect(isApprovalBoss({ approval: { fallbackApproverEmpId: ` ${BOSS} ` } }, BOSS)).toBe(true);
+  });
+
+  it("別人 → false（含 HR：HR 不等於老闆）", () => {
+    expect(isApprovalBoss({ approval: { fallbackApproverEmpId: BOSS } }, EMP_A)).toBe(false);
+  });
+
+  it("拿不到就照舊（false）：沒設定老闆、features 沒回、登入者 id 還沒取得", () => {
+    expect(isApprovalBoss({ approval: { fallbackApproverEmpId: null } }, BOSS)).toBe(false);
+    expect(isApprovalBoss({ approval: { fallbackApproverEmpId: "" } }, BOSS)).toBe(false);
+    expect(isApprovalBoss({ approval: {} }, BOSS)).toBe(false);
+    expect(isApprovalBoss({}, BOSS)).toBe(false);
+    expect(isApprovalBoss(null, BOSS)).toBe(false);
+    expect(isApprovalBoss(undefined, BOSS)).toBe(false);
+    expect(isApprovalBoss({ approval: { fallbackApproverEmpId: BOSS } }, null)).toBe(false);
+    expect(isApprovalBoss({ approval: { fallbackApproverEmpId: BOSS } }, undefined)).toBe(false);
+    expect(isApprovalBoss({ approval: { fallbackApproverEmpId: BOSS } }, "")).toBe(false);
+    expect(isApprovalBoss({ approval: "not-an-object" }, BOSS)).toBe(false);
   });
 });
 

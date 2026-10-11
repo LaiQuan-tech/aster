@@ -34,6 +34,7 @@ import {
   type BrandingResponse,
   type Me,
 } from "@/lib/ess-api";
+import { isApprovalBoss } from "@/lib/payroll-periods-api";
 
 export interface EssState {
   /** 第一輪載入（四支 API 全部 settle）是否完成；完成前所有欄位是退化預設值。 */
@@ -43,6 +44,8 @@ export interface EssState {
   isAdmin: boolean;
   /** 任一部門主管（顯示「簽核」分頁）。 */
   isManager: boolean;
+  /** 老闆（tenants.features.approval.fallbackApproverEmpId 就是我）：簽核分頁永遠顯示，遲到說明要老闆決定。拿不到＝false。 */
+  isBoss: boolean;
   /** 可見分頁 key；null＝不限縮（也是 /me 未回或失敗時的預設）。 */
   essTabs: string[] | null;
   branding: Branding | null;
@@ -57,6 +60,7 @@ const INITIAL_STATE: EssState = {
   me: null,
   isAdmin: false,
   isManager: false,
+  isBoss: false,
   essTabs: null,
   branding: null,
   features: null,
@@ -174,6 +178,7 @@ function load(force = false): Promise<void> {
       me,
       isAdmin: isAdminRole(me?.role),
       isManager: me?.isManager === true,
+      isBoss: isApprovalBoss(brand?.features ?? null, me?.id),
       essTabs: me && Array.isArray(me.essTabs) ? me.essTabs : null,
       branding: brand?.branding ?? null,
       features: brand?.features ?? null,

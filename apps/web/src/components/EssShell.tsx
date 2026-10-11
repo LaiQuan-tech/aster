@@ -97,6 +97,7 @@ export function EssShell({ children }: { children: ReactNode }) {
     essTabs: state.essTabs,
     isManager: state.isManager,
     pendingApprovals: state.pendingApprovals,
+    isBoss: state.isBoss,
   });
 
   // active：home 精準 /ess，其餘 prefix；不在底列上的路徑（含 /ess/more 與未知）全算「更多」。

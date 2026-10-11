@@ -140,6 +140,43 @@ describe("bottomTabs（底部分頁列）", () => {
     ]);
   });
 
+  it("老闆（isBoss）：不是任何部門主管、當下也沒有待簽單，「簽核」分頁仍然顯示（遲到說明要老闆決定）", () => {
+    expect(bottomTabs({ essTabs: null, isManager: false, pendingApprovals: 0, isBoss: true }).map((t) => t.key)).toEqual([
+      "home",
+      "requests",
+      "approvals",
+      "notifications",
+      "more",
+    ]);
+    // 老闆同時是主管、有待簽單：一樣只出現一次
+    expect(bottomTabs({ essTabs: null, isManager: true, pendingApprovals: 4, isBoss: true }).filter((t) => t.key === "approvals")).toHaveLength(1);
+  });
+
+  it("isBoss 省略或 false（拿不到老闆資料）＝照舊：非主管、無待簽單不顯示簽核", () => {
+    for (const isBoss of [undefined, false]) {
+      expect(bottomTabs({ essTabs: null, isManager: false, pendingApprovals: 0, isBoss }).map((t) => t.key)).toEqual([
+        "home",
+        "requests",
+        "notifications",
+        "more",
+      ]);
+    }
+  });
+
+  it("老闆仍受 essTabs 限縮：租戶明確沒開「簽核」就不顯示；開了才顯示", () => {
+    expect(bottomTabs({ essTabs: ["requests", "notifications"], isManager: false, pendingApprovals: 0, isBoss: true }).map((t) => t.key)).toEqual([
+      "home",
+      "requests",
+      "notifications",
+      "more",
+    ]);
+    expect(bottomTabs({ essTabs: ["approvals"], isManager: false, pendingApprovals: 0, isBoss: true }).map((t) => t.key)).toEqual([
+      "home",
+      "approvals",
+      "more",
+    ]);
+  });
+
   it("essTabs 限縮：後台取消 requests → 底列沒有請假；主管被限縮 approvals 也不顯示；home／更多永遠在", () => {
     expect(bottomTabs({ essTabs: ["notifications"], isManager: true, pendingApprovals: 3 }).map((t) => t.key)).toEqual([
       "home",

@@ -524,6 +524,16 @@ export function approvalBossEmpIdOf(features: Record<string, unknown> | null | u
 }
 
 /**
+ * 登入者是不是老闆：員工 id 等於 features.approval.fallbackApproverEmpId（不分大小寫）。
+ * 租戶沒設定老闆、features 拿不到、或登入者 id 還沒取得，一律 false（呼叫端「拿不到就照舊」）。
+ * ESS 殼用它決定老闆要不要永遠看得到「簽核」分頁（遲到說明要老闆決定，見 lib/ess-tabs.ts bottomTabs）。
+ */
+export function isApprovalBoss(features: Record<string, unknown> | null | undefined, meId: string | null | undefined): boolean {
+  const boss = approvalBossEmpIdOf(features);
+  return !!boss && !!meId && lower(boss) === lower(meId);
+}
+
+/**
  * 目前登入者能不能改「誰能重新開放」名單：**只有老闆**（員工 id 等於 fallbackApproverEmpId）或 platform_admin。
  * 與後端 canEditUnlockList 同一個判準（後端另外擋，這裡只決定畫面要不要讓人勾）。
  */
