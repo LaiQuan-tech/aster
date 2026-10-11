@@ -13,6 +13,7 @@ import {
 } from "@/lib/ess-api";
 import { fmtHm, todayKey, weekdayLabel } from "@/lib/ess-format";
 import { LATE_REASON_MAX, lateReasonError, lateReasonPrompt } from "@/lib/late-reason";
+import { describePeriodClosed } from "@/lib/period-closed";
 import {
   needsAnnouncementHint,
   summarizePunches,
@@ -130,8 +131,14 @@ const PUNCH_ERROR_MESSAGES: Record<string, string> = {
   invalid_body: "送出的內容格式不正確",
 };
 
-/** apiFetch 的錯誤訊息是 `[status] code`；認得的 code 轉中文，網路斷線另外講，其餘照原文。 */
+/**
+ * apiFetch 的錯誤訊息是 `[status] code`；認得的 code 轉中文，網路斷線另外講，其餘照原文。
+ * 當下所在的月份已發薪鎖定（提早結算的特例）→ POST /punch 回 409 period_closed →
+ * 「YYYY-MM 已結算，請洽管理者」，不顯示 `[409] period_closed`。
+ */
 function punchErrorMessage(err: unknown, fallback: string): string {
+  const closed = describePeriodClosed(err);
+  if (closed) return closed;
   if (err instanceof TypeError) return "連線失敗，請確認網路後再試一次";
   if (err instanceof Error && err.message) {
     const code = err.message.replace(/^\[\d+\]\s*/, "").trim();

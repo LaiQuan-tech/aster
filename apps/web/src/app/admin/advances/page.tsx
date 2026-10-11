@@ -30,6 +30,7 @@ import {
   type SettlementPreview,
 } from "@/lib/advance-view";
 import { todayKey } from "@/lib/ess-format";
+import { errorMessageOf } from "@/lib/period-closed";
 
 function money(n: number): string {
   return n.toLocaleString("zh-TW", { maximumFractionDigits: 0 });
@@ -181,7 +182,8 @@ export default function AdminAdvancesPage() {
           setSettleError(reloadErr instanceof Error ? reloadErr.message : "重新讀取預覽失敗");
         }
       } else {
-        setSettleError(err instanceof Error ? err.message : "核銷失敗");
+        // 差額要從某一期薪資扣回／補發、而那一期已發薪鎖定 → 409 period_closed →「YYYY-MM 已結算，請洽管理者」。
+        setSettleError(errorMessageOf(err, "核銷失敗"));
       }
     } finally {
       setSettleBusy(false);

@@ -3,7 +3,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Card, Empty, ErrorText, Pill, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import { fmtDateWithWeekday, fmtDateTime, fmtHm } from "@/lib/ess-format";
-import { decideLateReport, getLateReports, type LateDecisionFilter, type LateReport } from "@/lib/late-reports-api";
+import {
+  decideLateReport,
+  getLateReports,
+  lateDecisionErrorMessage,
+  type LateDecisionFilter,
+  type LateReport,
+} from "@/lib/late-reports-api";
 import { lateDecisionLabel, lateDecisionTone, periodOf, sortLateReports } from "@/lib/late-reason";
 
 /**
@@ -72,7 +78,7 @@ export default function LateReportsPage() {
       setNotes((prev) => ({ ...prev, [report.id]: "" }));
       toast.show(`${report.employeeName}：${next === "exempt" ? "不影響全勤" : "影響全勤"}`, "success");
     } catch (err) {
-      toast.show(err instanceof Error ? err.message : "決定失敗", "error");
+      toast.show(lateDecisionErrorMessage(err), "error");
     } finally {
       setBusyId(null);
     }

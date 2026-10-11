@@ -14,7 +14,10 @@
  *      一律送完整的 sections＋tabs。沒設定時用 lib/admin-nav.ts 的 ACCOUNTANT_DEFAULT_NAV。
  *      ⚠️ 這只管「看不看得見」，真正的權限在 API（requireFinance／requireHrAdmin）——把分頁勾回來
  *      不會讓會計拿到薪資資料，只會讓他點進去看到 403。
- * 三張卡共用同一次 getBrandingCached() 載入。頁首標題／說明由 AdminShell 依路由表提供，
+ *   4. 重新開放已結算月份的人（發薪鎖定，2026-10-11）：存 tenants.features.payroll.periodUnlockEmpIds，
+ *      本租戶在職員工的勾選清單，勾選即存；**只有老闆（或 platform_admin）能改**，其他人唯讀。這張卡自己
+ *      載入員工與目前登入者，見 _components/PeriodUnlockCard.tsx。
+ * 四張卡共用同一次 getBrandingCached() 載入（模組層快取＋in-flight 去重）。頁首標題／說明由 AdminShell 依路由表提供，
  * 這裡不包 header／main。
  */
 
@@ -24,6 +27,7 @@ import { Card, InlineError, Pill, Skeleton, useToast } from "@/components/admin-
 import { saveTenantSettings, type AccountsFeatureSettings } from "@/lib/admin-api";
 import { accountsFeatureOf } from "@/lib/auth-api";
 import { getBrandingCached, invalidateBranding } from "@/lib/ess-state";
+import { PeriodUnlockCard } from "./_components/PeriodUnlockCard";
 import {
   ACCOUNTANT_DEFAULT_NAV,
   ADMIN_MODULES,
@@ -302,6 +306,8 @@ export default function AdvancedFeaturesPage() {
         )}
         {savingRoleNav && <p className="mt-2 text-xs text-gray-400">儲存中…</p>}
       </Card>
+
+      <PeriodUnlockCard />
     </>
   );
 }

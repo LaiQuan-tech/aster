@@ -59,6 +59,7 @@ import {
 import { getMeCached, invalidateEssState } from "@/lib/ess-state";
 // 標記文案與 ESS「我的申請」共用一份（純字串常數，不牽連 ESS 的資料層）。
 import { BEYOND_CAP_LABEL } from "@/lib/request-forms";
+import { errorMessageOf, periodClosedMessage } from "@/lib/period-closed";
 import {
   BUCKET_LABEL,
   KIND_LABEL,
@@ -95,8 +96,9 @@ const BUCKET_TONE: Record<ApprovalBucket, PillTone> = {
   cancelled: "gray",
 };
 
+/** 核准／駁回／代理簽核／變更簽核人／註銷碰到已發薪鎖定的月份（409 period_closed）→「YYYY-MM 已結算，請洽管理者」。 */
 function errMsg(err: unknown, fallback: string): string {
-  return err instanceof Error && err.message ? err.message : fallback;
+  return errorMessageOf(err, fallback);
 }
 
 function dateOnly(iso: string): string {
@@ -331,7 +333,11 @@ function ApprovalsView() {
       });
       if (result.failed > 0) {
         const failed = result.results.find((item) => !item.ok);
-        throw new Error(failed && !failed.ok ? failed.error : "代理簽核失敗");
+        // period_closed 是整批 200、只有這張失敗；月份在逐張結果裡，不能只丟錯誤碼。
+        if (failed && !failed.ok) {
+          throw new Error(failed.error === "period_closed" ? periodClosedMessage(failed.period) : failed.error);
+        }
+        throw new Error("代理簽核失敗");
       }
       setProxyTarget(null);
       toast.show("已完成 HR 代理簽核", "success");

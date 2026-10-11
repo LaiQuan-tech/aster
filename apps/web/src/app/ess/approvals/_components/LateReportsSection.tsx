@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Card, InlineError, Pill, SectionTitle, useToast } from "@/components/ess-ui";
 import { fmtDateWithWeekday, fmtHm } from "@/lib/ess-format";
 import { useEssState } from "@/lib/ess-state";
-import { decideLateReport, getLateReports, type LateReport } from "@/lib/late-reports-api";
+import { decideLateReport, getLateReports, lateDecisionErrorMessage, type LateReport } from "@/lib/late-reports-api";
 import { lateDecisionLabel, lateDecisionTone, lateReportHeadline, periodOf, sortLateReports } from "@/lib/late-reason";
 
 /**
@@ -62,7 +62,7 @@ export function LateReportsSection() {
       setReports((prev) => prev.map((r) => (r.id === report.id ? res.lateReport : r)));
       toast.show(`${report.employeeName}：${decision === "exempt" ? "不影響全勤" : "影響全勤"}`, "success");
     } catch (err) {
-      toast.show(err instanceof Error ? err.message : "決定失敗", "error");
+      toast.show(lateDecisionErrorMessage(err), "error");
     } finally {
       setBusyId(null);
     }

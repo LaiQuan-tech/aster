@@ -5,6 +5,7 @@
  * Automatically attaches `Authorization: Bearer <token>` using the current
  * Supabase browser session, so callers don't have to thread the token through.
  */
+import { describePeriodClosed } from "./period-closed";
 import { getSupabaseBrowser } from "./supabase-browser";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
@@ -21,9 +22,12 @@ export type ApiError = Error & { status?: number; code?: string; detail?: string
 
 /**
  * 給人看的錯誤訊息：優先用伺服器附的 `message` 原文（serverMessage），沒有就退回 Error.message
- * （`[status] code`），不是 Error 就用 fallback。
+ * （`[status] code`），不是 Error 就用 fallback。碰到已結算月份（409 period_closed，發薪鎖定）一律是
+ * 「YYYY-MM 已結算，請洽管理者」（lib/period-closed.ts），不顯示 `[409] period_closed`。
  */
 export function apiErrorMessage(err: unknown, fallback = "操作失敗"): string {
+  const closed = describePeriodClosed(err);
+  if (closed) return closed;
   if (err instanceof Error) {
     const server = (err as ApiError).serverMessage;
     return server && server.trim() ? server : err.message || fallback;

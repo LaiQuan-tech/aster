@@ -7,6 +7,7 @@
  * 形狀手抄自 apps/api/src/services/late-reports.ts 的 LateReportView。
  */
 import { apiFetch } from "./api-client";
+import { errorMessageOf } from "./period-closed";
 
 export type LateDecision = "affects" | "exempt" | null;
 export type LateDecisionFilter = "undecided" | "affects" | "exempt" | "all";
@@ -50,4 +51,12 @@ export function decideLateReport(id: string, decision: "affects" | "exempt", not
     method: "POST",
     body: JSON.stringify({ decision, ...(note && note.trim() ? { note: note.trim() } : {}) }),
   });
+}
+
+/**
+ * 決定遲到說明失敗的訊息：那一天所在的月份已發薪鎖定（409 period_closed，要先由老闆重新開放整月）→
+ * 「YYYY-MM 已結算，請洽管理者」；其餘照 Error.message（例如 403 `[403] not_boss`），不是 Error 就用 fallback。
+ */
+export function lateDecisionErrorMessage(err: unknown, fallback = "決定失敗"): string {
+  return errorMessageOf(err, fallback);
 }

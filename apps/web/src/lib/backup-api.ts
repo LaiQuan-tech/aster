@@ -1,5 +1,5 @@
 /**
- * C3 資料快照備份／整公司月結 Final／月表快照歷史 — client＋型別。
+ * C3 資料快照備份／月結紀錄／月表快照歷史 — client＋型別。
  *
  * 對應後端：
  *   apps/api/src/routes/internal-jobs.ts
@@ -8,18 +8,16 @@
  *       GET /backups/:period/runs/:run/files/:name/url、
  *       GET /backups/:period/runs/:run/tables/:table/rows
  *   apps/api/src/routes/attendance-sheets.ts
- *       POST /attendance-sheets/close-period、POST /attendance-sheets/reopen-period、
  *       GET /attendance-sheets/period-closes、GET /attendance-sheets/:id/snapshots
+ * 月結本身（完成發薪並鎖定／重新開放）已搬到 apps/api/src/routes/payroll-periods.ts，client 在
+ * lib/payroll-periods-api.ts；這裡只留「月結紀錄」的唯讀查詢。
  * 型別手抄自 apps/api/src/services/backup-snapshot.ts（web 與 api 是各自的 build 邊界）。
  *
  * W7（2026-09-23）：同月份重跑**不再覆蓋**，每次執行各自一個 run（`r001`、`r002`…），
  * 保留 84 個月；`run: 0` ＝ 2026-09-23 之前的舊快照（檔案直接在 `{period}/` 底下）。
  */
 import { apiFetch } from "./api-client";
-import { getSupabaseBrowser } from "./supabase-browser";
 import type { SheetStatus } from "./attendance-sheets-api";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 // ---------------------------------------------------------------------------
 // 月度快照（Storage tenant-snapshots/{tenantId}/{period}/）
@@ -185,9 +183,13 @@ export function formatBytes(n: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// 整公司月結 Final（period_closes）
+// 月結紀錄（period_closes；唯讀）
 // ---------------------------------------------------------------------------
 
+/**
+ * GET /attendance-sheets/period-closes 的一筆月結紀錄。鎖定（完成發薪並鎖定）與重新開放都在薪資作業頁
+ * （lib/payroll-periods-api.ts）；`reopened*` 是重新開放的誰／何時／理由（status 為 reopened 時才有值）。
+ */
 export interface PeriodClose {
   id: string;
   period: string;
@@ -199,64 +201,11 @@ export interface PeriodClose {
   lockedCount: number;
   snapshotManifestPath: string | null;
   note: string | null;
+  reopenedAt: string | null;
+  reopenedByEmpId: string | null;
+  reopenedByName: string | null;
+  reopenReason: string | null;
   updatedAt: string;
-}
-
-export interface NotReadySheet {
-  employeeId: string;
-  employeeName: string;
-  sheetId: string | null;
-  /** 'missing' ＝ 在職但這個月連月表都還沒產生。 */
-  status: SheetStatus | "missing";
-}
-
-export interface ClosePeriodResult {
-  period: string;
-  status: "closed";
-  closedAt: string;
-  closedByEmpId: string | null;
-  sheetCount: number;
-  lockedCount: number;
-  lockedNow: number;
-  skipped: NotReadySheet[];
-  snapshotManifestPath: string | null;
-  note: string | null;
-}
-
-export type ClosePeriodOutcome =
-  | { ok: true; result: ClosePeriodResult }
-  | { ok: false; error: "sheets_not_approved"; sheets: NotReadySheet[] };
-
-/**
- * 409 sheets_not_approved 會附「哪些人的月表還沒核准」清單，apiFetch 只保留錯誤碼，
- * 所以這支自己 fetch 一次把 body 帶回來；其他錯誤照 apiFetch 慣例丟 Error。
- */
-export async function closePeriod(period: string, force = false): Promise<ClosePeriodOutcome> {
-  const { data } = await getSupabaseBrowser().auth.getSession();
-  const token = data.session?.access_token ?? null;
-  const res = await fetch(`${API_URL}/attendance-sheets/close-period`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify({ period, force }),
-  });
-  const body = await res.json().catch(() => ({}));
-  if (res.ok) return { ok: true, result: body as ClosePeriodResult };
-  if (res.status === 409 && body?.error === "sheets_not_approved") {
-    return { ok: false, error: "sheets_not_approved", sheets: (body.sheets ?? []) as NotReadySheet[] };
-  }
-  const err = new Error(`[${res.status}] ${body?.error ?? body?.message ?? res.statusText}`) as Error & { status?: number };
-  err.status = res.status;
-  throw err;
-}
-
-export function reopenPeriod(period: string, reason: string) {
-  return apiFetch<{ period: string; status: "reopened"; closedAt: string; note: string | null }>(
-    "/attendance-sheets/reopen-period",
-    { method: "POST", body: JSON.stringify({ period, reason }) },
-  );
 }
 
 export function listPeriodCloses(period?: string) {
@@ -289,13 +238,3 @@ export function listSheetSnapshots(sheetId: string, full = false) {
     `/attendance-sheets/${sheetId}/snapshots${full ? "?full=1" : ""}`,
   );
 }
-
-export const NOT_READY_STATUS_LABEL: Record<NotReadySheet["status"], string> = {
-  missing: "尚未產生月表",
-  draft: "草稿",
-  submitted: "已送出",
-  manager_reviewed: "經理已審",
-  approved: "已核准",
-  locked: "已鎖定",
-  returned: "已退回",
-};

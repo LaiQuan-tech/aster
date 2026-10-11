@@ -35,6 +35,7 @@ import {
 } from "@/lib/disbursements-api";
 import { fmtDateTime, fmtHours, fmtMoney, relativeTime } from "@/lib/ess-format";
 import { summarizeSegments } from "@/lib/ess-notifications";
+import { describePeriodClosed } from "@/lib/period-closed";
 import { LateReportsSection } from "./_components/LateReportsSection";
 import {
   BottomSheet,
@@ -89,8 +90,13 @@ const PAYOUT_LABEL: Record<"pay" | "comp_time", string> = {
   comp_time: "補休",
 };
 
-/** 把 API 的錯誤碼翻成主管看得懂的話；其他照原文。 */
+/**
+ * 把 API 的錯誤碼翻成主管看得懂的話；其他照原文。
+ * 這張單碰到已發薪鎖定的月份（409 period_closed，核准／駁回都不行）→「YYYY-MM 已結算，請洽管理者」。
+ */
 function friendlyError(err: unknown): string {
+  const closed = describePeriodClosed(err);
+  if (closed) return closed;
   const msg = err instanceof Error ? err.message : String(err);
   if (msg.includes("attachment_required")) return "此假別需要附件，申請人尚未上傳，無法核准（可駁回請其補件）。";
   if (msg.includes("not_current_approver")) return "這張單目前不是輪到你簽核。";

@@ -218,6 +218,40 @@ describe("batchDecideRequests（實際打 fetch 的那一層）", () => {
     expect(results).toEqual([fail("a", "ess_tab_disabled"), fail("b", "ess_tab_disabled")]);
   });
 
+  it("伺服器逐張回 period_closed（整批仍是 200）→ 結果原樣帶著月份，其他張照常成功", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify(
+              respond([ok("a"), { ok: false, id: "b", error: "period_closed", period: "2026-09" } as BatchItemResult]),
+            ),
+            { status: 200 },
+          ),
+      ),
+    );
+    const results = await runBatchDecision({ ids: ["a", "b"], action: "approve" });
+    expect(results).toEqual([ok("a"), { ok: false, id: "b", error: "period_closed", period: "2026-09" }]);
+  });
+
+  it("整批被 409 period_closed 擋下（保底）→ 每張記成 period_closed 並帶最早的月份", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "period_closed", period: "2026-08", periods: ["2026-08", "2026-09"] }), { status: 409 }),
+      ),
+    );
+    const results = await runBatchDecision({ ids: ["a", "b"], action: "approve" });
+    expect(results).toEqual([
+      { ok: false, id: "a", error: "period_closed", period: "2026-08" },
+      { ok: false, id: "b", error: "period_closed", period: "2026-08" },
+    ]);
+    const summary = summarizeBatch("approve", results, (id) => id);
+    expect(summary.failures.map((f) => f.reason)).toEqual(["2026-08 已結算，請洽管理者", "2026-08 已結算，請洽管理者"]);
+  });
+
   it("連線失敗（fetch 本身丟例外）→ network_error", async () => {
     vi.stubGlobal(
       "fetch",
@@ -263,6 +297,19 @@ describe("summarizeBatch／文案", () => {
     expect(reject.advancedCount).toBe(0);
     expect(batchSummaryTitle(reject)).toBe("批次駁回結果");
     expect(batchSummaryLine(reject)).toBe("成功 2 張");
+  });
+
+  it("發薪鎖定：這張單碰到已結算月 → 該張失敗，原因是「YYYY-MM 已結算，請洽管理者」，不是未知錯誤；其他張照常", () => {
+    const closed: BatchItemResult = { ok: false, id: "b", error: "period_closed", period: "2026-09" };
+    const closedNoPeriod: BatchItemResult = { ok: false, id: "c", error: "period_closed" };
+    const summary = summarizeBatch("approve", [ok("a"), closed, closedNoPeriod], labelOf);
+    expect(summary.okCount).toBe(1);
+    expect(summary.failures).toEqual([
+      { id: "b", label: labels.b, reason: "2026-09 已結算，請洽管理者" },
+      { id: "c", label: labels.c, reason: "該月份已結算，請洽管理者" },
+    ]);
+    expect(summary.failures.every((f) => !f.reason.includes("處理失敗"))).toBe(true);
+    expect(describeBatchError("period_closed", "2026-09")).toBe("2026-09 已結算，請洽管理者");
   });
 
   it("全部失敗 → error 語氣", () => {

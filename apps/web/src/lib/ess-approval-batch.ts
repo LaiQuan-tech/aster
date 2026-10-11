@@ -12,12 +12,19 @@
  * 一次丟太多可能撞到函式逾時；每批 {@link BATCH_CHUNK_SIZE} 張依序送，超過 100 張的「全選」也能處理。
  */
 import { apiFetch, type ApiError } from "./api-client";
+import { PERIOD_CLOSED_CODE, periodClosedMessage, periodClosedPeriod } from "./period-closed";
 
 export type BatchAction = "approve" | "reject";
 
 export type BatchItemResult =
   | { ok: true; id: string; status: "pending" | "approved" | "rejected"; currentStep: number; notified?: number }
-  | { ok: false; id: string; error: string };
+  | {
+      ok: false;
+      id: string;
+      error: string;
+      /** `error: "period_closed"`（這張單碰到已發薪鎖定的月份）時伺服器附的最早已結算月 'YYYY-MM'。 */
+      period?: string;
+    };
 
 export interface BatchDecisionResponse {
   ok: number;
@@ -82,7 +89,9 @@ export async function runBatchDecision(
       for (const id of part) results.push(byId.get(id) ?? { ok: false, id, error: "no_result" });
     } catch (err) {
       const error = errorCodeOf(err);
-      for (const id of part) results.push({ ok: false, id, error });
+      // 整批被 409 period_closed 擋下（正常是逐張回結果，這是保底）：月份一併帶著，畫面才寫得出「YYYY-MM 已結算」。
+      const period = periodClosedPeriod(err);
+      for (const id of part) results.push({ ok: false, id, error, ...(period ? { period } : {}) });
     }
   }
   return results;
@@ -126,9 +135,11 @@ const ERROR_TEXT: Record<string, string> = {
 
 /**
  * 錯誤代碼 → 主管看得懂的話。不認得的（例如伺服器附的原始 DB 訊息）一律用通用說明，
- * 不把內部錯誤文字秀給使用者。
+ * 不把內部錯誤文字秀給使用者。`period_closed`（發薪鎖定，整批仍是 HTTP 200、只有那一張失敗）
+ * 帶上伺服器附的月份 →「YYYY-MM 已結算，請洽管理者」，沒附月份就是「該月份已結算，請洽管理者」。
  */
-export function describeBatchError(code: string): string {
+export function describeBatchError(code: string, period?: string | null): string {
+  if (code === PERIOD_CLOSED_CODE) return periodClosedMessage(period);
   const known = ERROR_TEXT[code];
   if (known) return known;
   if (/^http_5\d\d$/.test(code)) return "伺服器暫時異常，這張單的結果不確定，請重新整理確認。";
@@ -167,7 +178,7 @@ export function summarizeBatch(
       okCount += 1;
       if (action === "approve" && result.status === "pending") advancedCount += 1;
     } else {
-      failures.push({ id: result.id, label: labelOf(result.id), reason: describeBatchError(result.error) });
+      failures.push({ id: result.id, label: labelOf(result.id), reason: describeBatchError(result.error, result.period) });
     }
   }
   return { action, total: results.length, okCount, failedCount: failures.length, advancedCount, failures };

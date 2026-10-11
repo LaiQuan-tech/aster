@@ -11,6 +11,7 @@
  * 這裡用結構型別（`AdvanceLike`）接，兩邊的列都收得進來。
  */
 import { fmtDateShort, fmtMoney } from "./ess-format";
+import { describePeriodClosed, periodClosedMessage } from "./period-closed";
 
 /* ------------------------------------------------------------ 預支 --- */
 
@@ -105,6 +106,9 @@ export const EXPENSE_ERROR_MESSAGES: Record<string, string> = {
   invalid_trip_request: "選的出差單不能綁定（不是你的，或還沒核准），請重新整理頁面後再選",
   trip_request_required: "這個類別的費用必須綁定一張已核准的出差單",
   period_settled: "該月份已月結鎖定，不能再送出；請聯絡 HR",
+  // 發薪鎖定（2026-10-11）：歸屬期已結算（送出、修改、撤回都會）。有月份時走 describePeriodClosed 的
+  // 「YYYY-MM 已結算，請洽管理者」；這條是只有錯誤碼時的通用說法。
+  period_closed: periodClosedMessage(),
   advance_settled: "這筆已隨預支核銷結算，不能再修改或撤回；有誤請聯絡 HR",
   invalid_category: "這個費用類別已停用，請重新選擇",
   filing_on_behalf_removed: "代為填報功能已移除，只能以本人身分送出",
@@ -120,7 +124,13 @@ export function apiErrorCode(err: unknown): string | null {
   return fromMessage || null;
 }
 
+/**
+ * 報銷送出／修改／撤回失敗的中文說明。歸屬期已發薪鎖定（409 period_closed）→「YYYY-MM 已結算，請洽管理者」；
+ * 其餘查 {@link EXPENSE_ERROR_MESSAGES}，再不然 Error.message，不是 Error 就用 fallback。
+ */
 export function expenseErrorMessage(err: unknown, fallback: string): string {
+  const closed = describePeriodClosed(err);
+  if (closed) return closed;
   const code = apiErrorCode(err);
   if (code && EXPENSE_ERROR_MESSAGES[code]) return EXPENSE_ERROR_MESSAGES[code];
   return err instanceof Error && err.message ? err.message : fallback;

@@ -392,6 +392,11 @@ export function getPunchToday() {
   return apiFetch<PunchTodayResponse>("/punch/today");
 }
 
+/**
+ * POST /punch。錯誤（apiFetch 丟 Error）：400 `late_reason_required`（見 {@link lateReasonRequiredOf}）、
+ * 409 `punch_too_soon`（{@link isPunchTooSoon}）、409 `period_closed`（當下所在的月份已發薪鎖定，
+ * 顯示文字走 lib/period-closed.ts 的 describePeriodClosed）。
+ */
 export function postPunch(body: {
   type?: "in" | "out";
   source?: "gps" | "web";

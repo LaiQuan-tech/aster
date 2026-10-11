@@ -17,6 +17,7 @@
 import type { CreateRequestBody, LeaveRequest, LeaveSegment, RequestKind, RequestStatus } from "./ess-api";
 import { fmtDateShort, fmtDateTime, fmtDateWithWeekday, fmtHm, fmtHours, fmtMoney, localDateKey, todayKey } from "./ess-format";
 import { DEFAULT_SHIFT, addDaysIfCrossesMidnight, halfDayWindow, normalizeHm, parseHm, type ShiftLike } from "./leave-hours";
+import { describePeriodClosed, periodClosedMessage } from "./period-closed";
 
 /* ------------------------------------------------------------ 標籤 --- */
 
@@ -127,12 +128,26 @@ export const REQUEST_ERROR_MESSAGES: Record<string, string> = {
   not_found: "找不到這張申請",
   invalid_body: "送出的內容格式不正確，請檢查日期與時間",
   payload_too_large: "附件太大，單檔限 3 MB",
+  // 發薪鎖定（2026-10-11）：申請單碰到已結算月（送出、撤回都會）。拿得到月份時走 describePeriodClosed 的
+  // 「YYYY-MM 已結算，請洽管理者」；這條是只有錯誤碼、沒有月份時的通用說法。
+  period_closed: periodClosedMessage(),
 };
 
 /** 從 apiFetch 的錯誤訊息（`[status] code`）取出錯誤碼；不是 Error → null。 */
 export function requestErrorCode(err: unknown): string | null {
   if (!(err instanceof Error) || !err.message) return null;
   return err.message.replace(/^\[\d+\]\s*/, "").trim() || null;
+}
+
+/**
+ * 申請單送出／撤回失敗的中文說明：該月已發薪鎖定（409 period_closed）→「YYYY-MM 已結算，請洽管理者」；
+ * 其餘認得的錯誤碼查 {@link REQUEST_ERROR_MESSAGES}；對不上回 null（呼叫端退回 attendance-sheets-api 的 friendlyError）。
+ */
+export function requestErrorText(err: unknown): string | null {
+  const closed = describePeriodClosed(err);
+  if (closed) return closed;
+  const code = requestErrorCode(err);
+  return code && REQUEST_ERROR_MESSAGES[code] ? REQUEST_ERROR_MESSAGES[code] : null;
 }
 
 /* --------------------------------------------------------- 表單型別 --- */

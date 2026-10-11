@@ -16,6 +16,7 @@
  * 清單的 typed wrapper 也放在這裡，不是新端點、回應形狀已對照後端程式碼確認。
  */
 import { apiFetch, apiDownload } from "./api-client";
+import { describePeriodClosed } from "./period-closed";
 
 /* ---------------------------------------------------------------- 型別 -- */
 
@@ -158,8 +159,14 @@ export const SETTLEMENT_SKIP_REASON_LABEL: Record<SettlementSkipReason, string> 
   attachment_missing: "缺附件",
 };
 
-/** 把 apiFetch 丟出的 Error（訊息格式 `[status] code或訊息`）轉成中文提示；照抄 attendance-sheets-api.ts 的 friendlyError 寫法。 */
+/**
+ * 把 apiFetch 丟出的 Error（訊息格式 `[status] code或訊息`）轉成中文提示；照抄 attendance-sheets-api.ts 的 friendlyError 寫法。
+ * 核銷／取消核銷碰到已發薪鎖定的月份（409 period_closed；跨月假單只要有一個月已結算就整批擋）→
+ * 「YYYY-MM 已結算，請洽管理者」。
+ */
 export function friendlySettlementError(err: unknown, fallback: string): string {
+  const closed = describePeriodClosed(err);
+  if (closed) return closed;
   if (err instanceof Error && err.message) {
     const code = err.message.replace(/^\[\d+\]\s*/, "").trim();
     const map: Record<string, string> = {

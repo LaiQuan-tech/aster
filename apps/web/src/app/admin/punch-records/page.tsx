@@ -5,6 +5,7 @@ import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { BatchImportButton } from "@/components/BatchImport";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { fmtHm, localDateKey } from "@/lib/ess-format";
+import { errorMessageOf } from "@/lib/period-closed";
 import { punchLocationReason } from "@/lib/punch-location-reason";
 import {
   getPunchRecordsAdmin,
@@ -151,7 +152,8 @@ export default function PunchRecordsPage() {
       setMAt("");
       await load();
     } catch (err) {
-      setMMsg({ ok: false, text: err instanceof Error ? err.message : "補登失敗" });
+      // 補登的打卡時間落在已發薪鎖定的月份 → 409 period_closed →「YYYY-MM 已結算，請洽管理者」。
+      setMMsg({ ok: false, text: errorMessageOf(err, "補登失敗") });
     }
   }
 

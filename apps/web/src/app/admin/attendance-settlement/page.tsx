@@ -9,6 +9,7 @@ import {
   type AttendanceDay,
   type Employee,
 } from "@/lib/admin-api";
+import { errorMessageOf } from "@/lib/period-closed";
 
 const monthNow = new Date().toISOString().slice(0, 7);
 
@@ -192,7 +193,8 @@ export default function AttendanceSettlementPage() {
       setMessage(`已結算 ${res.settled} 筆出勤日`);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "結算失敗");
+      // 結算區間碰到已發薪鎖定的月份 → 409 period_closed →「YYYY-MM 已結算，請洽管理者」。
+      setError(errorMessageOf(err, "結算失敗"));
     }
   }
 

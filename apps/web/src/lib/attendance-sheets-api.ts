@@ -8,6 +8,7 @@
  * 不一致，以後端實際回應為準回來改這裡（欄位命名、是否包一層 `sheet` 等）。
  */
 import { apiFetch, apiDownload } from "./api-client";
+import { describePeriodClosed } from "./period-closed";
 
 // ---------------------------------------------------------------------------
 // 型別（手抄自 attendance-sheet-types.ts，保持欄位順序與命名一致）
@@ -419,8 +420,14 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   settlement_paid: "這筆超額另計已標記付款，不可再修改",
 };
 
-/** 把 apiFetch 丟出的 Error（訊息格式 `[status] code或訊息`）轉成中文提示；辨識不出來就用原文。 */
+/**
+ * 把 apiFetch 丟出的 Error（訊息格式 `[status] code或訊息`）轉成中文提示；辨識不出來就用原文。
+ * 該月已發薪鎖定（409 period_closed）→「YYYY-MM 已結算，請洽管理者」（lib/period-closed.ts）；
+ * 出勤月表的產生／重算／逐日修改／送出／審核／核准／退回／重開都會碰到，這個函式是它們共用的出口。
+ */
 export function friendlyError(err: unknown, fallback: string): string {
+  const closed = describePeriodClosed(err);
+  if (closed) return closed;
   if (err instanceof Error && err.message) {
     const code = err.message.replace(/^\[\d+\]\s*/, "").trim();
     return API_ERROR_MESSAGES[code] ?? err.message;

@@ -4,6 +4,7 @@
  */
 import type { BulkInviteResult } from "./auth-api";
 import type { ImportError, ImportResponse } from "./import-api";
+import { describePeriodClosed } from "./period-closed";
 
 /** 上傳前在瀏覽器端先擋掉的限制，與 API 端一致（≤ 4MB、只收 .xlsx）。 */
 export const IMPORT_MAX_BYTES = 4 * 1024 * 1024;
@@ -67,8 +68,12 @@ export function validateImportFile(file: { name: string; size: number }): string
 /**
  * apiFetch 丟出的錯誤（`[400] invalid_header` 這種）轉成中文；API 有補充說明（例如缺哪個欄）就
  * 括在後面。對不上表的錯誤碼顯示原訊息；不是 Error 就回 fallback。
+ * 打卡補登匯入有任何一列落在已發薪鎖定的月份 → 整批 409 period_closed（預檢與正式匯入都擋）→
+ * 「YYYY-MM 已結算，請洽管理者」。
  */
 export function importErrorMessage(err: unknown, fallback = "匯入失敗"): string {
+  const closed = describePeriodClosed(err);
+  if (closed) return closed;
   if (!(err instanceof Error)) return fallback;
   const e = err as Error & { code?: string; detail?: string };
   const match = /^\[(\d{3})\]\s+([a-z][a-z0-9_]*)\s*$/i.exec(e.message.trim());

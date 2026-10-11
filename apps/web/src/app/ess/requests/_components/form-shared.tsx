@@ -8,22 +8,17 @@
 import { useId, useRef, type ChangeEvent, type ReactNode } from "react";
 import { friendlyError } from "@/lib/attendance-sheets-api";
 import type { CreateRequestBody } from "@/lib/ess-api";
-import {
-  EXPENSE_METHOD_FIELD_LABEL,
-  REASON_MAX,
-  REQUEST_ERROR_MESSAGES,
-  requestErrorCode,
-  type ExpenseMethod,
-} from "@/lib/request-forms";
+import { EXPENSE_METHOD_FIELD_LABEL, REASON_MAX, requestErrorText, type ExpenseMethod } from "@/lib/request-forms";
 import { Button, Field, Icon, InlineError, Textarea } from "@/components/ess-ui";
 
 /* ------------------------------------------------------------ 錯誤 --- */
 
-/** 申請頁專屬錯誤碼優先，其餘沿用出勤月表那套 friendlyError（unauthorized／forbidden…）。 */
+/**
+ * 申請頁專屬錯誤碼優先（含 409 period_closed →「YYYY-MM 已結算，請洽管理者」，送出與撤回都走這裡），
+ * 其餘沿用出勤月表那套 friendlyError（unauthorized／forbidden…）。
+ */
 export function describeError(err: unknown, fallback: string): string {
-  const code = requestErrorCode(err);
-  if (code && REQUEST_ERROR_MESSAGES[code]) return REQUEST_ERROR_MESSAGES[code];
-  return friendlyError(err, fallback);
+  return requestErrorText(err) ?? friendlyError(err, fallback);
 }
 
 /* ------------------------------------------------------------ 附件 --- */

@@ -686,7 +686,8 @@ export function batchDecideRequests(body: {
     failed: number;
     results: Array<
       | { ok: true; id: string; status: RequestStatus; currentStep: number }
-      | { ok: false; id: string; error: string }
+      // period_closed（這張單碰到已發薪鎖定的月份）時多帶最早已結算月 period；整批仍是 HTTP 200。
+      | { ok: false; id: string; error: string; period?: string }
     >;
   }>("/requests/batch-decision", {
     method: "POST",
@@ -1236,6 +1237,15 @@ export interface AccountsFeatureSettings {
   allowWeakInitialPassword?: boolean;
 }
 
+/**
+ * tenants.features.payroll（發薪鎖定；設定 → 進階功能 → 重新開放已結算月份的人）。
+ * 老闆（features.approval.fallbackApproverEmpId）本人永遠可以重新開放，不必列在名單裡；
+ * HR 不在名單上就不能重新開放。沒設定＝空陣列（讀法見 lib/payroll-periods-api.ts 的 periodUnlockEmpIdsOf）。
+ */
+export interface PayrollFeatureSettings {
+  periodUnlockEmpIds?: string[];
+}
+
 /* ------------------------------------------------------------ branding ----- */
 
 export interface Branding {
@@ -1282,6 +1292,12 @@ export interface TenantFeatures {
   adminModules?: AdminModulesConfig;
   /** 帳號安全（允許 HR 配發簡單初始密碼）；後端對 accounts 是整鍵覆蓋，存檔時送完整物件。 */
   accounts?: AccountsFeatureSettings;
+  /**
+   * 發薪鎖定（2026-10-11）：老闆指定「可以重新開放已結算月份」的人。只有老闆（或 platform_admin）能改這份名單，
+   * 其他人改了不同的名單 → 403 `not_boss`；名單含非本租戶員工 → 400 `invalid_employee`。
+   * 後端對 payroll 是深合併；讀名單與判斷誰能改的純函式在 lib/payroll-periods-api.ts。
+   */
+  payroll?: PayrollFeatureSettings;
   /**
    * 角色導覽覆蓋：目前只有 accountant（會計）。`sections` 是可見分區 key 清單、
    * `tabs` 是各分區的可見分頁 key 清單；缺席＝用 lib/admin-nav.ts 的 ACCOUNTANT_DEFAULT_NAV。

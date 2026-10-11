@@ -19,6 +19,8 @@ import {
 } from "@/lib/admin-api";
 import { buildNhiDependentBody, buildTaxDependentBody, dependentErrorMessage } from "@/lib/payroll-dependents";
 import { loadPayrollEmployees } from "@/lib/payroll-employees";
+import { errorMessageOf } from "@/lib/period-closed";
+import { PeriodLockCard } from "./_components/PeriodLockCard";
 
 const inputCls =
   "w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
@@ -73,7 +75,8 @@ export default function PayrollAdminPage() {
   const currentPeriod = new Date().toISOString().slice(0, 7);
   const [runPeriod, setRunPeriod] = useState(currentPeriod);
   const [runEmployeeId, setRunEmployeeId] = useState("");
-  const [runMsg, setRunMsg] = useState<string | null>(null);
+  // ok=false 是錯誤（紅字）：例如該月已發薪鎖定（409 period_closed）。
+  const [runMsg, setRunMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const visibleEmployees = useMemo(() => {
     const term = employeeKeyword.trim().toLowerCase();
@@ -259,12 +262,15 @@ export default function PayrollAdminPage() {
       const result = await runPayroll(runPeriod, runEmployeeId || undefined);
       // 遲到說明老闆還沒決定的人（視為影響全勤）一併提醒（2026-10-11）。
       const lateWarnings = (result.warnings ?? []).map((w) => `${empName(w.employeeId)} ${w.message}`);
-      setRunMsg(
-        `已執行 ${runPeriod} 薪資作業：產生 ${result.generated} 筆，略過已定案 ${result.skipped.length} 筆` +
+      setRunMsg({
+        ok: true,
+        text:
+          `已執行 ${runPeriod} 薪資作業：產生 ${result.generated} 筆，略過已定案 ${result.skipped.length} 筆` +
           (lateWarnings.length > 0 ? `；提醒：${lateWarnings.join("；")}` : ""),
-      );
+      });
     } catch (err) {
-      setRunMsg(err instanceof Error ? err.message : "執行失敗");
+      // 該月已發薪鎖定 → 409 period_closed →「YYYY-MM 已結算，請洽管理者」（要重算，先請老闆或老闆指定的人重新開放）。
+      setRunMsg({ ok: false, text: errorMessageOf(err, "執行失敗") });
     }
   }
 
@@ -492,6 +498,9 @@ export default function PayrollAdminPage() {
         )}
       </Card>
 
+      {/* 月結與發薪鎖定（2026-10-11）：每個月一個月結開關；先於「執行薪資」，因為鎖住的月份不能再執行。 */}
+      <PeriodLockCard />
+
       <Card>
         <h2 className="mb-4 text-sm font-medium text-gray-500">執行薪資/獎金作業</h2>
         <form onSubmit={onRun} className="flex flex-wrap items-end gap-3">
@@ -509,7 +518,11 @@ export default function PayrollAdminPage() {
             </select>
           </div>
           <PrimaryButton type="submit">執行</PrimaryButton>
-          {runMsg && <span className="text-sm text-green-600">{runMsg}</span>}
+          {runMsg && (
+            <span role={runMsg.ok ? "status" : "alert"} className={`text-sm ${runMsg.ok ? "text-green-600" : "text-red-600"}`}>
+              {runMsg.text}
+            </span>
+          )}
         </form>
       </Card>
 
