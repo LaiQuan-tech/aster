@@ -470,6 +470,13 @@
       "when": 1791730716584,
       "tag": "0066_employees_api_only_writes",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1791731184229,
+      "tag": "0067_drop_hr_direct_writes",
+      "breakpoints": true
     }
   ]
 }

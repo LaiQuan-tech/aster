@@ -1,0 +1,41 @@
+-- 2026-10-11 收掉其餘所有「HR 管理員經 PostgREST 直接寫入」的 RLS policy：寫入一律經 API（service role）。
+-- 正式庫以模擬 JWT 實測（交易回滾）：一般 HR（非老闆）可直接改薪資單、規則參數、補寫打卡，繞過發薪鎖定與 API 權限檢查。
+-- 網頁從不直連資料表（只有 storage 簽名網址），API 用 service role，收掉不影響功能；讀取 policy 不動。
+-- 員工本人的 personal_notes／user_preferences 自寫 policy 保留。前提：已套到 0066（sql/0056 employees）。可重跑。
+DROP POLICY IF EXISTS ann_hr_write ON public.announcements;
+DROP POLICY IF EXISTS approval_flows_hr_write ON public.approval_flows;
+DROP POLICY IF EXISTS as_hr_write ON public.approval_steps;
+DROP POLICY IF EXISTS att_hr_write ON public.attendance_days;
+DROP POLICY IF EXISTS candidates_hr_only ON public.candidates;
+DROP POLICY IF EXISTS comp_time_ledger_hr_write ON public.comp_time_ledger;
+DROP POLICY IF EXISTS departments_hr_write ON public.departments;
+DROP POLICY IF EXISTS employee_certifications_hr_write ON public.employee_certifications;
+DROP POLICY IF EXISTS employee_educations_hr_write ON public.employee_educations;
+DROP POLICY IF EXISTS employee_job_history_hr_write ON public.employee_job_history;
+DROP POLICY IF EXISTS employee_profiles_hr_write ON public.employee_profiles;
+DROP POLICY IF EXISTS employee_work_history_hr_write ON public.employee_work_history;
+DROP POLICY IF EXISTS income_tax_dependents_hr_write ON public.income_tax_dependents;
+DROP POLICY IF EXISTS interviews_hr_only ON public.interviews;
+DROP POLICY IF EXISTS job_requisitions_hr_all ON public.job_requisitions;
+DROP POLICY IF EXISTS kpi_hr_write ON public.kpi_reviews;
+DROP POLICY IF EXISTS kpi_templates_hr_write ON public.kpi_templates;
+DROP POLICY IF EXISTS leave_balances_hr_write ON public.leave_balances;
+DROP POLICY IF EXISTS lr_hr_write ON public.leave_requests;
+DROP POLICY IF EXISTS leave_types_hr_write ON public.leave_types;
+DROP POLICY IF EXISTS nhi_dependents_hr_write ON public.nhi_dependents;
+DROP POLICY IF EXISTS non_employee_income_hr_only ON public.non_employee_income;
+DROP POLICY IF EXISTS notif_hr_write ON public.notifications;
+DROP POLICY IF EXISTS offers_hr_only ON public.offers;
+DROP POLICY IF EXISTS onboardings_hr_write ON public.onboardings;
+DROP POLICY IF EXISTS ps_hr_write ON public.payslips;
+DROP POLICY IF EXISTS project_documents_hr_write ON public.project_documents;
+DROP POLICY IF EXISTS project_members_hr_write ON public.project_members;
+DROP POLICY IF EXISTS project_share_adj_hr_write ON public.project_share_adjustments;
+DROP POLICY IF EXISTS projects_hr_write ON public.projects;
+DROP POLICY IF EXISTS punch_hr_write ON public.punch_records;
+DROP POLICY IF EXISTS ra_hr_write ON public.request_attachments;
+DROP POLICY IF EXISTS rule_configs_hr_write ON public.rule_configs;
+DROP POLICY IF EXISTS salary_adjustments_hr_write ON public.salary_adjustments;
+DROP POLICY IF EXISTS sal_hr_write ON public.salary_structures;
+DROP POLICY IF EXISTS schedules_hr_write ON public.schedules;
+DROP POLICY IF EXISTS shifts_hr_write ON public.shifts;
