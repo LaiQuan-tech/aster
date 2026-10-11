@@ -11,6 +11,7 @@ import { writeAuditLog } from "../services/audit.js"
 import { catalogCode } from "../services/catalog-code.js"
 import { BINDABLE_ADVANCE_STATUSES, isBindableAdvance, isBindableTrip } from "../services/expense-binding.js"
 import { summariseClaimsForSettlement } from "../services/payroll-claims.js"
+import { PERIOD_RE, PeriodClosedError, assertPeriodOpen, isPeriodClosed } from "../services/period-lock.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { localDateKey } from "../lib/tz.js"
 
@@ -42,7 +43,7 @@ const claimSchema = z.object({
   amount: z.number().positive(),
   incurredOn: z.string().regex(dateRe),
   /** 省略時由 incurredOn 推導（發生月）。遲交的單可明確指定歸屬期。 */
-  period: z.string().regex(periodRe).optional(),
+  period: z.string().regex(PERIOD_RE).optional(),
   note: z.string().trim().max(250).optional(),
   /**
    * 代填已移除（2026-10-11，與 POST /requests 的代申請一起）。欄位留在 schema 只為了偵測：
@@ -133,11 +134,21 @@ async function periodIsSettled(tenantId: string, period: string): Promise<boolea
   return data?.status === "settled"
 }
 
-/** 租戶當地的「本月」（YYYY-MM）；已月結鎖定則回 null。 */
+/**
+ * 該期被什麼鎖住：'closed'＝發薪鎖定（period_closes，services/period-lock.ts），'settled'＝報銷月結
+ * （expense_settlements），沒鎖＝null。兩個都鎖時回 'closed'（發薪鎖定是更後面那一關）。
+ */
+async function periodLockReason(tenantId: string, period: string): Promise<"closed" | "settled" | null> {
+  if (await isPeriodClosed(tenantId, period)) return "closed"
+  if (await periodIsSettled(tenantId, period)) return "settled"
+  return null
+}
+
+/** 租戶當地的「本月」（YYYY-MM）；已月結鎖定（報銷月結或發薪鎖定）則回 null。 */
 async function currentOpenPeriod(tenantId: string): Promise<string | null> {
   const tz = await getTenantTimezone(tenantId)
   const current = localDateKey(new Date().toISOString(), tz).slice(0, 7)
-  return (await periodIsSettled(tenantId, current)) ? null : current
+  return (await periodLockReason(tenantId, current)) ? null : current
 }
 
 // ── 類別目錄 ─────────────────────────────────────────────────────────
@@ -251,7 +262,9 @@ expensesRouter.put(
  *
  * `period` 省略時由 `incurredOn` 推導。兩者刻意分開：上月的收據這月才交時，
  * 歸屬期是本月，但發生日仍是上月——發生日是「報銷 × 出勤交叉檢核」的比對鍵。
- * 該期已月結鎖定 → 409 `period_settled`；**例外：綁了預支（advanceId，含出差單自動綁定）的憑證**，
+ * 該期已報銷月結鎖定 → 409 `period_settled`；該期已發薪鎖定（period_closes）→ 409 `period_closed`
+ * （2026-10-11，兩道鎖並存；鎖的是**歸屬期** `period`，發生日在已結算月、歸屬期在本月的遲交單照常可以送）；
+ * **例外：綁了預支（advanceId，含出差單自動綁定）的憑證**，
  * 它們走預支核銷、與歸屬期無關，改歸本月（本月也鎖了才 409）。
  *
  * 綁定（2026-10-11）：`advanceId`／`tripRequestId` 有帶就驗，見 claimSchema 的說明與
@@ -287,7 +300,7 @@ expensesRouter.post(
       const employeeId = self.id
       // 歸屬期；該月已月結鎖定時，綁預支的憑證可以改歸本月（見下面「鎖期」），其餘照舊 409。
       let period = parsed.data.period ?? parsed.data.incurredOn.slice(0, 7)
-      const periodLocked = await periodIsSettled(tenantId, period)
+      const periodLocked = await periodLockReason(tenantId, period)
 
       const { data: cat, error: catErr } = await supabaseAdmin
         .from("expense_categories")
@@ -391,6 +404,7 @@ expensesRouter.post(
       if (periodLocked) {
         const open = advanceId ? await currentOpenPeriod(tenantId) : null
         if (!open) {
+          if (periodLocked === "closed") throw new PeriodClosedError([period])
           res.status(409).json({ error: "period_settled", period })
           return
         }
@@ -478,7 +492,8 @@ expensesRouter.get(
 /**
  * PATCH /expenses/:id — 修改或撤回自己尚未核銷的單；HR 可改任何人的，
  * 且只有 HR 能覆寫 `nature`（稅務性質，變更進 audit_logs）。
- * 已核銷（settled）的單一律不可改——那一期的錢已經結出去了。綁的預支已核銷（settled）的單也一律不可改
+ * 已核銷（settled）的單一律不可改——那一期的錢已經結出去了；歸屬期已發薪鎖定 → 409 `period_closed`。
+ * 綁的預支已核銷（settled）的單也一律不可改
  * （409 `advance_settled`）：核銷時的實支合計與差額已凍結，事後改金額或撤回會讓凍結的數字與憑證實況脫鉤。
  */
 expensesRouter.patch(
@@ -501,7 +516,7 @@ expensesRouter.patch(
       }
       const { data: claim, error: loadErr } = await supabaseAdmin
         .from("expense_claims")
-        .select("id, employee_id, status, nature, amount, advance_id")
+        .select("id, employee_id, status, nature, amount, advance_id, period")
         .eq("tenant_id", tenantId)
         .eq("id", id)
         .maybeSingle()
@@ -518,6 +533,8 @@ expensesRouter.patch(
         res.status(403).json({ error: "forbidden" })
         return
       }
+      // 發薪鎖定：這筆的歸屬期已結算 → 409 period_closed（先於 already_settled：月份已鎖就以「已結算」回答）。
+      await assertPeriodOpen(tenantId, claim.period as string)
       if (claim.status === "settled") {
         res.status(409).json({ error: "already_settled" })
         return

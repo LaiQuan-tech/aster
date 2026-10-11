@@ -12,6 +12,7 @@ import { addDaysKey, monthRangeKeys, type DateKey } from "../lib/tz.js"
 import { isHrRole, managedDeptIds, managerOfEmployee, type SelfEmployee } from "../middleware/scope.js"
 import { enqueue } from "./notify.js"
 import { writeAuditLog } from "./audit.js"
+import { assertPeriodOpen } from "./period-lock.js"
 
 /**
  * 遲到說明（late_reports，2026-10-11 業主拍板）。
@@ -297,7 +298,8 @@ const DECISION_LABEL: Record<"affects" | "exempt", string> = { affects: "影響�
 /**
  * 老闆決定（呼叫端已確認是老闆）。可改決定；寫 audit（old／new）。
  * note：undefined＝不動原本的備註（從員工端簽核頁按的不帶備註）；字串＝改成這段（空字串清掉）。
- * 那個月的出勤月表已核准／鎖定 → LateReportSheetFrozenError（要先退回或重開月表）。
+ * 那個月已結算（period_closes closed）→ PeriodClosedError（409 period_closed，要先由老闆重新開放整月）；
+ * 那個月的出勤月表已核准／鎖定（整月還沒結算）→ LateReportSheetFrozenError（要先退回或重開月表）。
  */
 export async function decideLateReport(input: {
   tenantId: string
@@ -315,6 +317,9 @@ export async function decideLateReport(input: {
   if (selErr) throw new Error(`late-reports (load): ${selErr.message}`)
   if (!current) throw new LateReportNotFoundError()
   const before = current as unknown as LateReportRow
+  // 發薪鎖定：那一天所在的月份已結算 → 409 period_closed（services/period-lock.ts）。先於下面的
+  // sheet_frozen：月份已鎖就以「已結算」回答；月表只是核准、整月還沒鎖時才是 sheet_frozen（薪資讀核准快照）。
+  await assertPeriodOpen(input.tenantId, before.work_date)
   const { data: sheet, error: sheetErr } = await supabaseAdmin
     .from("attendance_sheets")
     .select("status")

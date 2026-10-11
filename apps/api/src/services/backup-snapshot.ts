@@ -6,10 +6,11 @@ import { dirname, resolve } from "node:path"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { logger } from "../lib/logger.js"
 import { isMissingTableError } from "../lib/schema-compat.js"
-import { monthRangeKeys } from "../lib/tz.js"
 import { writeAuditLog } from "./audit.js"
-import { lockSheet } from "./attendance-sheets.js"
-import type { SheetStatus } from "./attendance-sheet-types.js"
+import { lockSheet, unlockSheetsForPeriod } from "./attendance-sheets.js"
+import { enqueue } from "./notify.js"
+import { loadPeriodUnlockPolicy } from "./period-lock.js"
+import { evaluatePeriodChecklist, revertFinalizedPayslips, type PeriodChecklist } from "./payroll-period.js"
 
 /**
  * C3 資料快照備份 — 三件事放同一支 service：
@@ -35,11 +36,14 @@ import type { SheetStatus } from "./attendance-sheet-types.js"
  *       另有 [D] M9 備份內容瀏覽（readSnapshotRows／planRowSlice）：後台可直接翻
  *       某次快照裡某張表的列，不必下載 .json.gz 自己解壓。
  *
- *   [B] 整公司月結 Final（closePeriod / reopenPeriod / listPeriodCloses）
- *       該月所有在職員工的月表都 approved／locked 才准月結；月結＝把 approved
- *       全部轉 locked（沿用 attendance-sheets.lockSheet）＋寫 period_closes 一列
- *       （unique(tenant, period)，重跑覆蓋）。reopen 只把 period_closes 標成
- *       reopened、留理由，**不解鎖月表**——要改哪張表再走該表自己的 reopen。
+ *   [B] 發薪鎖定＝整公司月結 Final（closePeriod / reopenPeriod / listPeriodCloses）
+ *       2026-10-11 業主拍板：每個月一個月結開關，HR 按「完成本月發薪」就鎖住該月（鎖的寫入守門員在
+ *       services/period-lock.ts）。closePeriod 先過四項檢查清單（月表／假單核銷／報銷月結／薪資單定稿，
+ *       services/payroll-period.ts；**沒有強制略過**），全過才把 approved 月表轉 locked（沿用
+ *       attendance-sheets.lockSheet）、寫 period_closes（status='closed'、該月最新快照 manifest 路徑）。
+ *       reopenPeriod 只有老闆與老闆指定的人能呼叫（權限在路由層）：locked 月表轉回 approved、
+ *       finalized 薪資單轉回 draft、period_closes 標 reopened（誰、何時、理由），並通知老闆與 HR；
+ *       之後要再鎖必須重新過一次檢查清單。
  *
  *   [C] 月表快照歷史（listSheetSnapshots）
  *       attendance_sheet_snapshots 的讀取端；寫入端在 attendance-sheets.approveSheet
@@ -1034,10 +1038,16 @@ export async function readSnapshotRows(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// [B] 整公司月結 Final（period_closes）
+// [B] 發薪鎖定＝整公司月結 Final（period_closes）
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type PeriodCloseErrorCode = "invalid_period" | "sheets_not_approved" | "period_not_closed" | "period_closes_not_migrated"
+export type PeriodCloseErrorCode =
+  | "invalid_period"
+  | "checklist_incomplete"
+  | "already_closed"
+  | "already_reopened"
+  | "period_not_closed"
+  | "period_closes_not_migrated"
 
 export class PeriodCloseError extends Error {
   readonly code: PeriodCloseErrorCode
@@ -1063,26 +1073,23 @@ export interface PeriodCloseRow {
   locked_count: number
   snapshot_manifest_path: string | null
   note: string | null
+  /** 重新開放紀錄（migration 0064）：只有 status='reopened' 時才是「目前這次」的，再鎖定後保留最近一次當歷史。 */
+  reopened_at: string | null
+  reopened_by_emp_id: string | null
+  reopen_reason: string | null
   created_at: string
   updated_at: string
 }
 
-const PERIOD_CLOSE_COLS = "id, tenant_id, period, status, closed_at, closed_by_emp_id, sheet_count, locked_count, snapshot_manifest_path, note, created_at, updated_at"
-
-export interface NotReadySheet {
-  employeeId: string
-  employeeName: string
-  sheetId: string | null
-  /** 月表目前狀態；'missing' ＝ 在職但這個月連月表都還沒產生。 */
-  status: SheetStatus | "missing"
-}
+const PERIOD_CLOSE_COLS =
+  "id, tenant_id, period, status, closed_at, closed_by_emp_id, sheet_count, locked_count, snapshot_manifest_path, note, reopened_at, reopened_by_emp_id, reopen_reason, created_at, updated_at"
 
 export interface ClosePeriodResult {
   periodClose: PeriodCloseRow
   /** 本次由 approved 轉 locked 的張數。 */
   lockedNow: number
-  /** force 模式下被略過（未核准）的月表；一般模式永遠是空陣列。 */
-  skipped: NotReadySheet[]
+  /** 鎖定當下過的檢查清單（四項全過）。 */
+  checklist: PeriodChecklist
 }
 
 function wrapPeriodCloseDbError(scope: string, err: { code?: string | null; message?: string | null }): Error {
@@ -1090,66 +1097,43 @@ function wrapPeriodCloseDbError(scope: string, err: { code?: string | null; mess
   return new Error(`${scope}: ${err.message ?? "unknown error"}`)
 }
 
-interface EmployeeLite {
-  id: string
-  name: string
-  status: string
-  hire_date: string | null
-  terminated_at: string | null
-}
-
-/** 該月份在職的員工（同 attendance-sheets.generateSheets 的判準）。 */
-async function employedInPeriod(tenantId: string, period: string): Promise<EmployeeLite[]> {
-  const { from, to } = monthRangeKeys(period)
-  const { data, error } = await supabaseAdmin.from("employees").select("id, name, status, hire_date, terminated_at").eq("tenant_id", tenantId)
-  if (error) throw new Error(`closePeriod (employees): ${error.message}`)
-  return ((data ?? []) as EmployeeLite[]).filter((e) => {
-    const employed = e.status === "active" || (e.terminated_at != null && e.terminated_at >= from)
-    const hired = e.hire_date == null || e.hire_date <= to
-    return employed && hired
-  })
+async function loadPeriodCloseRow(tenantId: string, period: string): Promise<PeriodCloseRow | null> {
+  const { data, error } = await supabaseAdmin
+    .from("period_closes")
+    .select(PERIOD_CLOSE_COLS)
+    .eq("tenant_id", tenantId)
+    .eq("period", period)
+    .maybeSingle()
+  if (error) throw wrapPeriodCloseDbError("period_closes (get)", error)
+  return (data as unknown as PeriodCloseRow | null) ?? null
 }
 
 /**
- * closePeriod — 整公司月結 Final。
- *   1. 該月在職員工每人都要有月表且 approved／locked；否則 409 sheets_not_approved
- *      附清單（含 'missing'）。`force: true` 略過未核准的，只鎖已核准的。
- *   2. approved → locked（lockSheet：會通知員工）。
- *   3. upsert period_closes（status closed、sheet_count／locked_count、
- *      snapshot_manifest_path＝該月已有的快照 manifest 路徑，否則 null）。
- * 重跑冪等：已 locked 的不動，period_closes 覆蓋成最新一次的數字。
+ * closePeriod — 「完成本月發薪」：整公司月結 Final，鎖住該月。
+ *   1. 已經是 closed → 409 already_closed（不覆蓋第一次鎖定的人與時間）。
+ *   2. 檢查清單四項（services/payroll-period.ts）必須全過，否則 409 checklist_incomplete 附整份清單；
+ *      **沒有 force、沒有強制略過**。
+ *   3. approved 的月表全部轉 locked（lockSheet：會通知員工；已 locked 的不動）。
+ *   4. 寫 period_closes（status closed、sheet_count／locked_count、snapshot_manifest_path＝該月已有的
+ *      最新快照 manifest 路徑，否則 null）。第一次鎖定是 insert；重新開放過的月份是「條件式」update
+ *      （只有還是 reopened 才寫），兩個人同時按時後到的拿到 409 already_closed，不會蓋掉先到的。
+ * 鎖定成功後該月所有薪資相關寫入一律 409 period_closed（services/period-lock.ts）。
  */
-export async function closePeriod(
-  tenantId: string,
-  period: string,
-  actorEmpId: string,
-  opts: { force?: boolean } = {},
-): Promise<ClosePeriodResult> {
+export async function closePeriod(tenantId: string, period: string, actorEmpId: string): Promise<ClosePeriodResult> {
   if (!periodRe.test(period)) throw new PeriodCloseError("invalid_period", 400, { period })
-  const employees = await employedInPeriod(tenantId, period)
+  const existing = await loadPeriodCloseRow(tenantId, period)
+  if (existing?.status === "closed") throw new PeriodCloseError("already_closed", 409, { period })
+
+  const checklist = await evaluatePeriodChecklist(tenantId, period)
+  if (!checklist.ready) throw new PeriodCloseError("checklist_incomplete", 409, { period, checklist })
+
   const { data: sheetData, error: sheetErr } = await supabaseAdmin
     .from("attendance_sheets")
     .select("id, employee_id, status")
     .eq("tenant_id", tenantId)
     .eq("period", period)
   if (sheetErr) throw new Error(`closePeriod (sheets): ${sheetErr.message}`)
-  const sheets = (sheetData ?? []) as Array<{ id: string; employee_id: string; status: SheetStatus }>
-  const sheetByEmp = new Map(sheets.map((s) => [s.employee_id, s]))
-  const nameByEmp = new Map(employees.map((e) => [e.id, e.name]))
-
-  const notReady: NotReadySheet[] = []
-  for (const e of employees) {
-    const s = sheetByEmp.get(e.id)
-    if (!s) notReady.push({ employeeId: e.id, employeeName: e.name, sheetId: null, status: "missing" })
-    else if (s.status !== "approved" && s.status !== "locked") notReady.push({ employeeId: e.id, employeeName: e.name, sheetId: s.id, status: s.status })
-  }
-  // 月份內有月表但已不在在職判準內（例如離職日在月初前才補的表）：一樣要核准才鎖。
-  for (const s of sheets) {
-    if (nameByEmp.has(s.employee_id)) continue
-    if (s.status !== "approved" && s.status !== "locked") notReady.push({ employeeId: s.employee_id, employeeName: "（非在職）", sheetId: s.id, status: s.status })
-  }
-  if (notReady.length > 0 && !opts.force) throw new PeriodCloseError("sheets_not_approved", 409, { period, sheets: notReady })
-
+  const sheets = (sheetData ?? []) as Array<{ id: string; employee_id: string; status: string }>
   let lockedNow = 0
   for (const s of sheets) {
     if (s.status !== "approved") continue
@@ -1161,74 +1145,147 @@ export async function closePeriod(
   // 月結紀錄指向「該月最新一次快照」的 manifest（W7 之後同月可能有多次執行）。
   const manifestRun = await latestRun(tenantId, period).catch(() => null)
   const manifest = manifestRun === null ? null : await readManifest(tenantId, period, manifestRun).catch(() => null)
-  const now = new Date().toISOString()
-  const note =
-    opts.force && notReady.length > 0
-      ? `強制月結：${notReady.length} 張未核准未鎖定（${notReady.map((n) => `${n.employeeName}:${n.status}`).join("、")}）`
-      : null
-  const { data: row, error: upErr } = await supabaseAdmin
-    .from("period_closes")
-    .upsert(
-      {
-        tenant_id: tenantId,
-        period,
-        status: "closed",
-        closed_at: now,
-        closed_by_emp_id: actorEmpId,
-        sheet_count: sheets.length,
-        locked_count: lockedCount,
-        snapshot_manifest_path: manifest ? manifestPathOf(tenantId, period, manifestRun ?? 0) : null,
-        note,
-      },
-      { onConflict: "tenant_id,period" },
-    )
-    .select(PERIOD_CLOSE_COLS)
-    .single()
-  if (upErr || !row) throw wrapPeriodCloseDbError("closePeriod (period_closes upsert)", upErr ?? { message: "no row" })
-  const periodClose = row as unknown as PeriodCloseRow
+  const fields = {
+    status: "closed" as const,
+    closed_at: new Date().toISOString(),
+    closed_by_emp_id: actorEmpId,
+    sheet_count: sheets.length,
+    locked_count: lockedCount,
+    snapshot_manifest_path: manifest ? manifestPathOf(tenantId, period, manifestRun ?? 0) : null,
+    note: null,
+  }
+
+  let periodClose: PeriodCloseRow
+  if (!existing) {
+    const { data, error } = await supabaseAdmin
+      .from("period_closes")
+      .insert({ tenant_id: tenantId, period, ...fields })
+      .select(PERIOD_CLOSE_COLS)
+      .single()
+    // 唯一鍵 (tenant, period)：兩個人同時第一次鎖，後到的撞 23505 → 已經被鎖了。
+    if (error?.code === "23505") throw new PeriodCloseError("already_closed", 409, { period })
+    if (error || !data) throw wrapPeriodCloseDbError("closePeriod (period_closes insert)", error ?? { message: "no row" })
+    periodClose = data as unknown as PeriodCloseRow
+  } else {
+    const { data, error } = await supabaseAdmin
+      .from("period_closes")
+      .update(fields)
+      .eq("tenant_id", tenantId)
+      .eq("period", period)
+      .eq("status", "reopened")
+      .select(PERIOD_CLOSE_COLS)
+    if (error) throw wrapPeriodCloseDbError("closePeriod (period_closes update)", error)
+    const rows = (data ?? []) as unknown as PeriodCloseRow[]
+    if (rows.length === 0) throw new PeriodCloseError("already_closed", 409, { period })
+    periodClose = rows[0] as PeriodCloseRow
+  }
+
   await writeAuditLog({
     tenantId,
     tableName: "period_closes",
     recordId: periodClose.id,
-    action: "UPDATE",
-    newRow: { ...periodClose, lockedNow, skipped: opts.force ? notReady : [] },
+    action: existing ? "UPDATE" : "INSERT",
+    oldRow: existing ?? undefined,
+    newRow: { ...periodClose, lockedNow },
     actorEmpId,
-    context: "attendance-sheets/close-period",
+    context: "POST /payroll-periods/:period/close — 完成發薪並鎖定",
   })
-  return { periodClose, lockedNow, skipped: opts.force ? notReady : [] }
+  return { periodClose, lockedNow, checklist }
 }
 
-/** reopenPeriod — 只把月結標成 reopened 並留理由；月表不解鎖。沒月結過 → 404 period_not_closed。 */
-export async function reopenPeriod(tenantId: string, period: string, actorEmpId: string, reason: string): Promise<PeriodCloseRow> {
+export interface ReopenPeriodResult {
+  periodClose: PeriodCloseRow
+  /** locked → approved 的月表張數。 */
+  unlockedSheets: number
+  /** finalized → draft 的薪資單張數。 */
+  revertedPayslips: number
+  /** 實際入列的通知筆數（老闆＋HR）。 */
+  notified: number
+}
+
+/**
+ * 通知老闆與 HR：「○○ 重新開放了 YYYY-MM，理由：…」（站內通知，投遞交給既有的每 5 分鐘 job）。
+ * 失敗只記 log、回 0——重新開放已經成立，通知寫不進去不該把它變成錯誤。
+ */
+async function notifyPeriodReopened(tenantId: string, period: string, actorEmpId: string, reason: string): Promise<number> {
+  try {
+    const policy = await loadPeriodUnlockPolicy(tenantId)
+    const { data: hr, error: hrErr } = await supabaseAdmin
+      .from("employees")
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .eq("role", "hr_admin")
+      .eq("status", "active")
+    if (hrErr) throw new Error(hrErr.message)
+    const recipients = [policy.bossEmpId, ...((hr ?? []) as Array<{ id: string }>).map((r) => r.id)].filter(
+      (id): id is string => typeof id === "string" && id.length > 0,
+    )
+    if (recipients.length === 0) return 0
+    const names = await employeeNames(tenantId, [actorEmpId])
+    const who = names.get(actorEmpId) ?? "同仁"
+    return await enqueue({
+      tenantId,
+      employeeIds: recipients,
+      type: "payroll_period",
+      title: `${period} 月結已重新開放`,
+      body: `${who} 重新開放了 ${period}，理由：${reason}`,
+      payload: { event: "reopened", period, reopenedByEmpId: actorEmpId, reason },
+    })
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : err, tenantId, period }, "reopenPeriod: notification not queued")
+    return 0
+  }
+}
+
+/**
+ * reopenPeriod — 重新開放已結算的月份（呼叫端已確認是老闆或老闆指定的人；權限在 routes/payroll-periods.ts）。
+ *   • 沒有月結紀錄 → 404 period_not_closed；已經是 reopened → 409 already_reopened。
+ *   • 該月 locked 的月表轉回 approved（HR 之後可依正常流程退回修改）；
+ *     該月 finalized 的薪資單轉回 draft（好重新試算與定稿）。
+ *   • period_closes 標 reopened，寫 reopened_at／reopened_by_emp_id／reopen_reason；寫 audit；通知老闆與 HR。
+ *   • 之後要再鎖定，closePeriod 會重新跑一次檢查清單。
+ * 順序刻意把「狀態翻成 reopened」放最後：前兩步都是冪等的，中途失敗時月份仍是 closed（寫入照擋），
+ * 重打一次就能補完；若先翻狀態，失敗後再打會被 already_reopened 擋住，剩下的月表／薪資單就沒人能解。
+ */
+export async function reopenPeriod(tenantId: string, period: string, actorEmpId: string, reason: string): Promise<ReopenPeriodResult> {
   if (!periodRe.test(period)) throw new PeriodCloseError("invalid_period", 400, { period })
-  const { data: existing, error: getErr } = await supabaseAdmin
-    .from("period_closes")
-    .select(PERIOD_CLOSE_COLS)
-    .eq("tenant_id", tenantId)
-    .eq("period", period)
-    .maybeSingle()
-  if (getErr) throw wrapPeriodCloseDbError("reopenPeriod (get)", getErr)
+  const existing = await loadPeriodCloseRow(tenantId, period)
   if (!existing) throw new PeriodCloseError("period_not_closed", 404, { period })
-  const { data: row, error } = await supabaseAdmin
+  if (existing.status !== "closed") throw new PeriodCloseError("already_reopened", 409, { period })
+
+  const unlockedSheets = await unlockSheetsForPeriod(tenantId, period)
+  const revertedPayslips = await revertFinalizedPayslips(tenantId, period)
+
+  const { data, error } = await supabaseAdmin
     .from("period_closes")
-    .update({ status: "reopened", note: reason })
+    .update({
+      status: "reopened",
+      reopened_at: new Date().toISOString(),
+      reopened_by_emp_id: actorEmpId,
+      reopen_reason: reason,
+    })
     .eq("tenant_id", tenantId)
     .eq("period", period)
+    .eq("status", "closed")
     .select(PERIOD_CLOSE_COLS)
-    .single()
-  if (error || !row) throw wrapPeriodCloseDbError("reopenPeriod (update)", error ?? { message: "no row" })
-  const periodClose = row as unknown as PeriodCloseRow
+  if (error) throw wrapPeriodCloseDbError("reopenPeriod (update)", error)
+  const rows = (data ?? []) as unknown as PeriodCloseRow[]
+  // 兩個人同時重開：後到的條件不成立（已經是 reopened）。
+  if (rows.length === 0) throw new PeriodCloseError("already_reopened", 409, { period })
+  const periodClose = rows[0] as PeriodCloseRow
+
   await writeAuditLog({
     tenantId,
     tableName: "period_closes",
     recordId: periodClose.id,
     action: "UPDATE",
     oldRow: existing,
-    newRow: periodClose,
+    newRow: { ...periodClose, unlockedSheets, revertedPayslips },
     actorEmpId,
-    context: "attendance-sheets/reopen-period",
+    context: `POST /payroll-periods/:period/reopen — 重新開放 ${period}（${reason}）`,
   })
-  return periodClose
+  const notified = await notifyPeriodReopened(tenantId, period, actorEmpId, reason)
+  return { periodClose, unlockedSheets, revertedPayslips, notified }
 }
 
 export interface PeriodCloseView {
@@ -1242,6 +1299,10 @@ export interface PeriodCloseView {
   lockedCount: number
   snapshotManifestPath: string | null
   note: string | null
+  reopenedAt: string | null
+  reopenedByEmpId: string | null
+  reopenedByName: string | null
+  reopenReason: string | null
   updatedAt: string
 }
 
@@ -1260,7 +1321,7 @@ export async function listPeriodCloses(tenantId: string, period?: string): Promi
   const rows = (data ?? []) as unknown as PeriodCloseRow[]
   const names = await employeeNames(
     tenantId,
-    rows.map((r) => r.closed_by_emp_id).filter((v): v is string => !!v),
+    rows.flatMap((r) => [r.closed_by_emp_id, r.reopened_by_emp_id]).filter((v): v is string => !!v),
   )
   return rows.map((r) => ({
     id: r.id,
@@ -1273,6 +1334,10 @@ export async function listPeriodCloses(tenantId: string, period?: string): Promi
     lockedCount: r.locked_count,
     snapshotManifestPath: r.snapshot_manifest_path,
     note: r.note,
+    reopenedAt: r.reopened_at ?? null,
+    reopenedByEmpId: r.reopened_by_emp_id ?? null,
+    reopenedByName: r.reopened_by_emp_id ? (names.get(r.reopened_by_emp_id) ?? null) : null,
+    reopenReason: r.reopen_reason ?? null,
     updatedAt: r.updated_at,
   }))
 }

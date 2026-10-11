@@ -5,6 +5,7 @@ import { dayWindowUtc, localDateKey, monthRangeKeys } from "../lib/tz.js"
 import { applyHeaderStyle, workbookToBuffer } from "../lib/xlsx/index.js"
 import { leaveDeductRate } from "./settlement.js"
 import { writeAuditLog } from "./audit.js"
+import { assertPeriodOpen, assertRequestsOpen } from "./period-lock.js"
 
 /**
  * B8 假單人資月底核銷 — 第二階段。
@@ -272,6 +273,8 @@ interface SettleCandidateRow {
   status: string
   settled_at: string | null
   leave_type_id: string | null
+  start_at: string
+  end_at: string
 }
 
 /**
@@ -286,9 +289,11 @@ interface SettleCandidateRow {
  * 都在對方 UPDATE 之前就會各自認為自己是第一個。
  */
 export async function settleLeaveRequests(tenantId: string, actorEmpId: string | null, input: SettleLeaveInput): Promise<SettleLeaveResult> {
+  // 發薪鎖定：核銷的月份已結算 → 409 period_closed（services/period-lock.ts）。
+  await assertPeriodOpen(tenantId, input.period)
   const { data, error } = await supabaseAdmin
     .from("leave_requests")
-    .select("id, kind, status, settled_at, leave_type_id")
+    .select("id, kind, status, settled_at, leave_type_id, start_at, end_at")
     .eq("tenant_id", tenantId)
     .is("deleted_at", null)
     .in("id", input.ids)
@@ -300,6 +305,8 @@ export async function settleLeaveRequests(tenantId: string, actorEmpId: string |
   const candidates = input.ids
     .map((id) => byId.get(id))
     .filter((r): r is SettleCandidateRow => !!r && r.kind === "leave" && r.status === "approved" && r.settled_at == null)
+  // 要核銷的假單只要有一張期間碰到已結算月（例如跨月假單的另一個月）就整批擋下。
+  await assertRequestsOpen(tenantId, candidates)
   const leaveTypeIds = Array.from(new Set(candidates.map((r) => r.leave_type_id).filter((v): v is string => !!v)))
   const candidateIds = candidates.map((r) => r.id)
 
@@ -407,13 +414,26 @@ export interface UnsettleLeaveResult {
 export async function unsettleLeaveRequests(tenantId: string, actorEmpId: string | null, input: UnsettleLeaveInput): Promise<UnsettleLeaveResult> {
   const { data, error } = await supabaseAdmin
     .from("leave_requests")
-    .select("id, settled_at, settled_by_emp_id, settled_period")
+    .select("id, settled_at, settled_by_emp_id, settled_period, start_at, end_at")
     .eq("tenant_id", tenantId)
     .in("id", input.ids)
     .not("settled_at", "is", null)
   if (error) throw new Error(`unsettleLeaveRequests (load): ${error.message}`)
-  const targets = (data ?? []) as Array<{ id: string; settled_at: string | null; settled_by_emp_id: string | null; settled_period: string | null }>
+  const targets = (data ?? []) as Array<{
+    id: string
+    settled_at: string | null
+    settled_by_emp_id: string | null
+    settled_period: string | null
+    start_at: string
+    end_at: string
+  }>
   if (targets.length === 0) return { unsettled: 0 }
+  // 發薪鎖定：核銷時記下的月份、或假單期間碰到的月份已結算 → 409 period_closed（要先由老闆重新開放整月）。
+  await assertRequestsOpen(
+    tenantId,
+    targets,
+    targets.map((t) => t.settled_period).filter((p): p is string => !!p),
+  )
   const ids = targets.map((r) => r.id)
 
   const { error: updErr } = await supabaseAdmin

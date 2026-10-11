@@ -4,6 +4,9 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { resolveSelf } from "../middleware/scope.js"
+import { writeAuditLog } from "../services/audit.js"
+import { canEditUnlockList, sameEmployeeSet, unlockPolicyOf } from "../services/period-lock.js"
 
 export const tenantRouter = Router()
 
@@ -126,6 +129,17 @@ export const tenantSettingsSchema = z.object({
         })
         .optional(),
       /**
+       * 發薪鎖定（2026-10-11）：`periodUnlockEmpIds`＝老闆指定「可以重新開放已結算月份」的員工（預設空陣列）。
+       * 老闆（features.approval.fallbackApproverEmpId）本人永遠能解鎖，不必列在名單裡。
+       * **只有老闆（或 platform_admin）能改這份名單**——其他人（含 HR）帶了不同的名單 → 403 `not_boss`
+       * （見 PUT /api/tenant/settings）。名單裡的人必須是本租戶的員工。
+       */
+      payroll: z
+        .object({
+          periodUnlockEmpIds: z.array(z.string().uuid()).max(50).optional(),
+        })
+        .optional(),
+      /**
        * 帳號安全：allowWeakInitialPassword=true 時，HR 配發的密碼略過 Supabase 的弱密碼／外洩
        * 密碼（HIBP）檢查——POST /employees（建帳號、帶 password）改以 bcrypt hash 交給 GoTrue
        * createUser（password_hash）；POST /employees/:id/reset-password 帶 password（後台「設定
@@ -210,9 +224,56 @@ tenantRouter.put(
         ...((current.branding as Record<string, unknown>) ?? {}),
         ...((parsed.data.branding as Record<string, unknown> | undefined) ?? {}),
       }
-      const features = {
-        ...((current.features as Record<string, unknown>) ?? {}),
-        ...((parsed.data.features as Record<string, unknown> | undefined) ?? {}),
+      const currentFeatures = (current.features as Record<string, unknown>) ?? {}
+      const incomingFeatures = (parsed.data.features as Record<string, unknown> | undefined) ?? {}
+      const features: Record<string, unknown> = { ...currentFeatures, ...incomingFeatures }
+      // payroll 是巢狀設定：合併而不是整鍵覆蓋，之後在裡面加別的設定不會被只帶 periodUnlockEmpIds 的請求洗掉。
+      if (incomingFeatures.payroll !== undefined) {
+        features.payroll = {
+          ...((currentFeatures.payroll as Record<string, unknown> | undefined) ?? {}),
+          ...(incomingFeatures.payroll as Record<string, unknown>),
+        }
+      }
+
+      // 發薪鎖定的解鎖名單（features.payroll.periodUnlockEmpIds）：比對「合併後」與目前的名單（不是只看請求有沒有帶
+      // 這個鍵——否則帶 `payroll: {}` 之類的請求也能改到）。名單有變更，呼叫者必須是老闆（或 platform_admin），
+      // 否則 403 not_boss；老闆是以**目前**設定的人為準（同一個請求不能一邊換老闆一邊改名單）。
+      const before = unlockPolicyOf(currentFeatures)
+      const after = unlockPolicyOf(features)
+      const unlockListChanged = !sameEmployeeSet(before.designatedEmpIds, after.designatedEmpIds)
+      let unlockActorId: string | null = null
+      if (unlockListChanged) {
+        const userId = req.auth?.userId
+        const self = userId ? await resolveSelf(tenantId, userId) : null
+        if (!self || !canEditUnlockList(before, self)) {
+          res.status(403).json({ error: "not_boss", message: "只有老闆可以指定誰能重新開放已結算的月份" })
+          return
+        }
+        unlockActorId = self.id
+        if (after.designatedEmpIds.length > 0) {
+          const { data: found, error: foundErr } = await supabaseAdmin
+            .from("employees")
+            .select("id")
+            .eq("tenant_id", tenantId)
+            .in("id", after.designatedEmpIds)
+          if (foundErr) {
+            next(new Error(`PUT /api/tenant/settings (unlock employees): ${foundErr.message}`))
+            return
+          }
+          const known = new Set(((found ?? []) as Array<{ id: string }>).map((r) => r.id.toLowerCase()))
+          const unknown = after.designatedEmpIds.filter((id) => !known.has(id))
+          if (unknown.length > 0) {
+            res.status(400).json({ error: "invalid_employee", employeeIds: unknown })
+            return
+          }
+        }
+      }
+      // 請求有帶名單就存成去重、小寫的 id（比對一律小寫）——沒變更時也一樣，不留大小寫不一的髒值。
+      if ((incomingFeatures.payroll as { periodUnlockEmpIds?: unknown } | undefined)?.periodUnlockEmpIds !== undefined) {
+        features.payroll = {
+          ...((features.payroll as Record<string, unknown> | undefined) ?? {}),
+          periodUnlockEmpIds: after.designatedEmpIds,
+        }
       }
 
       const { data, error } = await supabaseAdmin
@@ -224,6 +285,18 @@ tenantRouter.put(
       if (error || !data) {
         next(new Error(`PUT /api/tenant/settings: ${error?.message}`))
         return
+      }
+      if (unlockListChanged) {
+        await writeAuditLog({
+          tenantId,
+          tableName: "tenants",
+          recordId: tenantId,
+          action: "UPDATE",
+          oldRow: { payroll: { periodUnlockEmpIds: before.designatedEmpIds } },
+          newRow: { payroll: { periodUnlockEmpIds: after.designatedEmpIds } },
+          actorEmpId: unlockActorId,
+          context: "PUT /api/tenant/settings — 老闆指定可重新開放已結算月份的人",
+        })
       }
       res.status(200).json({ branding: data.branding, features: data.features })
     } catch (err) {

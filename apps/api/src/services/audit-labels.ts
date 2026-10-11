@@ -211,6 +211,18 @@ export const AUDIT_FIELD_LABELS: Record<string, string> = {
   sort_order: "排序",
   settled_at: "結算時間",
   sheet_locked: "月表已鎖",
+  // 發薪鎖定（period_closes；2026-10-11）
+  closed_at: "結算時間",
+  closed_by_emp_id: "結算者",
+  reopened_at: "重新開放時間",
+  reopened_by_emp_id: "重新開放者",
+  reopen_reason: "重新開放理由",
+  sheet_count: "月表張數",
+  locked_count: "已鎖定張數",
+  lockedNow: "本次鎖定月表張數",
+  unlockedSheets: "解鎖月表張數",
+  revertedPayslips: "回復草稿的薪資單張數",
+  payroll: "薪資設定（可重新開放月結的人）",
   created_at: "建立時間",
   updated_at: "更新時間",
 }

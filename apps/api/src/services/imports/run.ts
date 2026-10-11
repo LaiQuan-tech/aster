@@ -11,6 +11,7 @@ import {
   type ImportKind,
 } from "./kinds.js"
 import { normalizeToken, type ParsedImportRow } from "./parse.js"
+import { assertInstantsOpen } from "../period-lock.js"
 import { loadDepartments, loadShifts, NameResolver, resolveEmployees, type EmployeeRef } from "./resolve.js"
 import {
   generateTenantCalendar,
@@ -222,6 +223,11 @@ async function runPunches(tenantId: string, rows: ParsedImportRow[], dryRun: boo
     "與第 {line} 列重複（同一人、同一時間、同一類型）",
   )
   const out: Partial<ImportRunResult> = { valid: valid.length, errors }
+  // 發薪鎖定：試跑（dryRun）也要擋，預覽說「可匯入」、真的匯入卻 409 會讓人困惑；
+  // 真的寫入時由 importManualPunches 在寫入段擋（同一個 409 period_closed）。
+  if (dryRun && valid.length > 0) {
+    await assertInstantsOpen(tenantId, Array.from(new Set(valid.map((r) => r.value.punchAt))))
+  }
   if (!dryRun) {
     const { ids, errors: writeErrors } = await importManualPunches(
       tenantId,

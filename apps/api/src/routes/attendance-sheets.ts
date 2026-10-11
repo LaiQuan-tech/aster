@@ -26,7 +26,8 @@ import {
 } from "../services/attendance-sheets.js"
 import type { SheetStatus } from "../services/attendance-sheet-types.js"
 import { unsettledApprovedLeaveIdsOverlapping, tenantBlocksApproveOnUnsettledLeave } from "../services/leave-settlement.js"
-import { PeriodCloseError, closePeriod, listPeriodCloses, listSheetSnapshots, reopenPeriod } from "../services/backup-snapshot.js"
+import { PeriodCloseError, listPeriodCloses, listSheetSnapshots } from "../services/backup-snapshot.js"
+import { assertPeriodOpen, isPeriodClosed } from "../services/period-lock.js"
 
 export const attendanceSheetsRouter = Router()
 
@@ -46,6 +47,11 @@ export const attendanceSheetsRouter = Router()
  *   POST  /attendance-sheets/:id/return          主管或 HR
  *   POST  /attendance-sheets/:id/reopen          HR（approved → draft）
  *   POST  /attendance-sheets/:id/recompute       HR（僅 draft/returned）
+ *
+ * 發薪鎖定（2026-10-11）：該月已結算（period_closes closed）時，上面所有會寫入的動作（產生／重算／逐日修改／
+ * 送出／審核／核准／退回／重開）一律 409 `{ error: "period_closed", period }`——守門放在 services/attendance-sheets.ts
+ * 的各個函式（services/period-lock.ts），所以 cron、內部 job 也一樣。月結本身（鎖定／重新開放）已搬到
+ * routes/payroll-periods.ts（POST /payroll-periods/:period/close、/reopen），這裡不再有 close-period／reopen-period。
  *
  * 錯誤一律 `{ error: '<code>', ...details }`；service 層的 SheetError 由
  * `sendSheetError` 對應 HTTP 狀態（404 not_found、409 invalid_transition /
@@ -283,6 +289,11 @@ attendanceSheetsRouter.get(
           res.status(404).json({ error: "not_found" })
           return
         }
+        // 發薪鎖定：已結算的月份不再即時產生月表（結算前每位在職員工都有月表，沒有就是不在職）。
+        if (await isPeriodClosed(tenantId, period)) {
+          res.status(404).json({ error: "not_found" })
+          return
+        }
         await generateSheets({ tenantId, period, employeeId: caller.self.id })
         sheet = await findSheet(tenantId, caller.self.id, period)
         if (!sheet) {
@@ -368,6 +379,9 @@ attendanceSheetsRouter.patch(
         res.status(403).json({ error: "forbidden" })
         return
       }
+      // 發薪鎖定：已結算月的月表通常都是 locked，下面的 sheet_not_editable 會先答，所以這裡先擋、回
+      // period_closed（patchSheetDay 在服務層也擋，其他呼叫端一樣）。
+      await assertPeriodOpen(tenantId, sheet.period)
       if (sheet.status === "locked") {
         res.status(409).json({ error: "sheet_not_editable", status: sheet.status })
         return
@@ -570,25 +584,12 @@ attendanceSheetsRouter.post(
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// C3 整公司月結 Final ＋ 月表快照歷史（services/backup-snapshot.ts [B][C]）
-//   POST /attendance-sheets/close-period   {period, force?}  HR：全員月表 approved/locked
-//                                          → approved 全部 locked ＋ 寫 period_closes；
-//                                          否則 409 sheets_not_approved 附清單；force 只鎖已核准的
-//   POST /attendance-sheets/reopen-period  {period, reason}  HR：period_closes 標 reopened（月表不解鎖）
-//   GET  /attendance-sheets/period-closes?period=            HR：月結紀錄
+// C3 月結紀錄 ＋ 月表快照歷史（services/backup-snapshot.ts [B][C]）
+//   GET  /attendance-sheets/period-closes?period=            HR／會計：月結紀錄（含重新開放的誰、何時、理由）
 //   GET  /attendance-sheets/:id/snapshots?full=1             HR：該表每次核准的快照歷史（seq 遞增）
+// 月結本身（完成發薪並鎖定／重新開放）：routes/payroll-periods.ts。
 // 這幾條掛在 /:id 之後也沒關係：/:id 對非 uuid 的 id 會 next() 讓路。
 // ─────────────────────────────────────────────────────────────────────────────
-
-const closePeriodSchema = z.object({
-  period: z.string().regex(periodRe, "period must be YYYY-MM"),
-  force: z.boolean().optional(),
-})
-
-const reopenPeriodSchema = z.object({
-  period: z.string().regex(periodRe, "period must be YYYY-MM"),
-  reason: z.string().trim().min(1).max(500),
-})
 
 const periodClosesQuerySchema = z.object({
   period: z.string().regex(periodRe, "period must be YYYY-MM").optional(),
@@ -601,63 +602,6 @@ function sendPeriodCloseError(res: Response, err: unknown, next: NextFunction): 
   }
   sendSheetError(res, err, next)
 }
-
-attendanceSheetsRouter.post(
-  "/attendance-sheets/close-period",
-  requireAuth,
-  requireTenant,
-  requireHrAdmin,
-  async (req: Request, res: Response, next: NextFunction) => {
-    const tenantId = res.locals.tenantId as string
-    const parsed = closePeriodSchema.safeParse(req.body ?? {})
-    if (!parsed.success) {
-      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
-      return
-    }
-    try {
-      const caller = await requireCaller(req, res)
-      if (!caller) return
-      const result = await closePeriod(tenantId, parsed.data.period, caller.self.id, { force: parsed.data.force })
-      res.status(200).json({
-        period: result.periodClose.period,
-        status: result.periodClose.status,
-        closedAt: result.periodClose.closed_at,
-        closedByEmpId: result.periodClose.closed_by_emp_id,
-        sheetCount: result.periodClose.sheet_count,
-        lockedCount: result.periodClose.locked_count,
-        lockedNow: result.lockedNow,
-        skipped: result.skipped,
-        snapshotManifestPath: result.periodClose.snapshot_manifest_path,
-        note: result.periodClose.note,
-      })
-    } catch (err) {
-      sendPeriodCloseError(res, err, next)
-    }
-  },
-)
-
-attendanceSheetsRouter.post(
-  "/attendance-sheets/reopen-period",
-  requireAuth,
-  requireTenant,
-  requireHrAdmin,
-  async (req: Request, res: Response, next: NextFunction) => {
-    const tenantId = res.locals.tenantId as string
-    const parsed = reopenPeriodSchema.safeParse(req.body ?? {})
-    if (!parsed.success) {
-      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
-      return
-    }
-    try {
-      const caller = await requireCaller(req, res)
-      if (!caller) return
-      const row = await reopenPeriod(tenantId, parsed.data.period, caller.self.id, parsed.data.reason)
-      res.status(200).json({ period: row.period, status: row.status, closedAt: row.closed_at, note: row.note })
-    } catch (err) {
-      sendPeriodCloseError(res, err, next)
-    }
-  },
-)
 
 attendanceSheetsRouter.get(
   "/attendance-sheets/period-closes",

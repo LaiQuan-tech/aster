@@ -112,12 +112,24 @@ HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼�
      「立即產生本月快照」（前端迴圈續打並顯示進度）、下載 manifest／各表 gz（15 分鐘 signed URL）、
      **直接在頁面上翻該次快照的表內容**（`/backups/:period/runs/:run/tables/:table/rows`，每頁 ≤ 200 列）。
    - **保留 84 個月（7 年）**，超過的由維護人員手動從 Storage 清（目前沒有自動清除，避免誤刪）。
-2. **整公司月結 Final** — `POST /attendance-sheets/close-period {period, force?}`（HR）：該月所有在職員工的月表都要
-   approved／locked，否則 409 `sheets_not_approved` 附清單（含「尚未產生月表」）；通過就把 approved 全部轉
-   locked（沿用 `lockSheet`）並寫 `period_closes`（unique(tenant, period)，記 sheet_count／locked_count／
-   操作者／該月快照 manifest 路徑）。`force: true` 只鎖已核准的、略過其餘並記在 note。
-   `POST /attendance-sheets/reopen-period {period, reason}` 只把紀錄標成 reopened、留理由，**不解鎖月表**
-   （要改哪張表走該表自己的 reopen）。後台「出勤月表 · 月結簽核」頁有「本月 Final 月結」按鈕與已月結徽章。
+2. **發薪鎖定＝整公司月結 Final**（2026-10-11 業主拍板：每個月一個月結開關，HR 按「完成本月發薪」就鎖住該月）——
+   `POST /payroll-periods/:period/close`（HR；後台「薪資與費用 › 月結與發薪鎖定」卡）：**四項檢查全過才能鎖，沒有強制略過**——
+   ① 在職員工的月表全部 approved／locked ② 該月已核准假單全部核銷 ③ 該月報銷已月結 ④ 該月薪資單全部定稿
+   （`GET /payroll-periods/:period/checklist` 看每項完成數／應完成數與未完成清單）。未全過 → 409 `checklist_incomplete`
+   附整份清單；通過就把 approved 月表轉 locked（沿用 `lockSheet`）並寫 `period_closes`（status `closed`，記 sheet_count／
+   locked_count／操作者／該月快照 manifest 路徑）。
+   - **鎖住後擋什麼**：打卡（`POST /punch` 當下月份、`/punch/manual`、匯入）、申請單（新增、撤回、刪除、核准、駁回、批次簽核、
+     變更簽核人；日期／segment／跨月只要碰到已結算月）、出勤（`/attendance/settle`、月表產生／重算／逐日修改／送出／審核／
+     核准／退回／重開）、假單核銷（settle／unsettle）、報銷（新增／修改，鎖的是歸屬期）、預支核銷的扣回月份、
+     `POST /payroll/run`、遲到說明決定——一律 **409 `{ error: "period_closed", period }`**。守門員是
+     `apps/api/src/services/period-lock.ts` 的 `assertPeriodOpen`（日期歸月以租戶時區為準）；各端點只呼叫它，
+     全域錯誤處理 `middleware/period-closed.ts` 轉成回應。專案、獎金、公告、名冊等與薪資無關的資料不擋。
+   - **重新開放**：`POST /payroll-periods/:period/reopen {reason}`（理由至少 5 個字）——**只有老闆**
+     （`tenants.features.approval.fallbackApproverEmpId`）**與老闆指定的人**（`features.payroll.periodUnlockEmpIds`，
+     後台「設定 › 進階功能」只有老闆或 platform_admin 能改）；HR 不是就 403。成功後 locked 月表轉回 approved、
+     finalized 薪資單轉回 draft、`period_closes` 標 `reopened`（誰／何時／理由，欄位 `reopened_*`）、寫 audit、通知老闆與 HR；
+     之後要再鎖必須重新過一次檢查清單。已匯款的更正不要重新開放，改在下月薪資處理（目前系統沒有「前期更正」加減項入口）。
+   - 舊的 `POST /attendance-sheets/close-period`／`reopen-period`（含 `force`）已移除，`GET /attendance-sheets/period-closes` 仍在。
 3. **月表快照歷史** — 每次 `approveSheet` 都往 `attendance_sheet_snapshots` 追加一列（seq 遞增、不可刪），
    return／reopen 只清 `attendance_sheets.snapshot`、歷史不動；`GET /attendance-sheets/:id/snapshots`（HR）列出。
 

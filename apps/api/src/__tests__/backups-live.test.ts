@@ -13,8 +13,10 @@ import { app } from "../app"
  *
  * 流程：throwaway 租戶（HR＋兩名員工）→ generate 2026-08 月表（3 張）→ 員工甲
  * submit→approve（快照 seq 1）→ reopen→submit→approve（seq 2）→ GET /snapshots 列 2 筆
- * → close-period 在其他表仍 draft 時 409 附清單 → 全部核准後 200、月表全 locked、
- * period_closes 有列 → reopen-period 標 reopened（月表仍 locked）→ 另一月份 force 月結
+ * → 發薪鎖定（2026-10-11，POST /payroll-periods/:period/close）在月表仍 draft 時 409
+ * checklist_incomplete 附清單（force 不再有用）→ 全部核准後 200、月表全 locked、period_closes
+ * 有列 → 鎖住後寫入 409 period_closed → reopen 只有老闆（features.approval.fallbackApproverEmpId）
+ * 能做：月表回 approved、period_closes 標 reopened 並記誰／理由 → 另一月份同樣流程（月結紀錄共 2 列）
  * → 內部端點（INTERNAL_JOB_TOKEN）迴圈到 done：Storage 有各表 gz＋manifest、三張表列數
  * 與 count(*) 相符、gz 解開列數／sha256 相符、單次呼叫 <20 秒 → HR /backups 端點列表
  * ／run／signed URL，非 HR 403。
@@ -246,23 +248,26 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
     }, 60_000)
   })
 
-  describe("整公司月結 Final", () => {
-    it("有 draft 月表 → 409 sheets_not_approved 附清單（HR 本人＋員工乙）", async () => {
-      const res = await asAdmin(request(app).post("/attendance-sheets/close-period")).send({ period: PERIOD })
+  describe("整公司月結 Final（發薪鎖定）", () => {
+    it("有 draft 月表 → 409 checklist_incomplete 附清單（HR 本人＋員工乙）；force 沒有用；非 HR 403", async () => {
+      const res = await asAdmin(request(app).post(`/payroll-periods/${PERIOD}/close`)).send({ force: true })
       expect(res.status).toBe(409)
-      expect(res.body.error).toBe("sheets_not_approved")
-      const ids = (res.body.sheets as Array<{ employeeId: string; status: string }>).map((s) => s.employeeId).sort()
-      expect(ids).toEqual([hrEmpId, empBId].sort())
-      expect(res.body.sheets.every((s: { status: string }) => s.status === "draft")).toBe(true)
-      expect((await asEmployee(request(app).post("/attendance-sheets/close-period")).send({ period: PERIOD })).status).toBe(403)
+      expect(res.body.error).toBe("checklist_incomplete")
+      const sheetsItem = (res.body.checklist.items as Array<{ key: string; passed: boolean; pending: Array<{ employeeId: string; status: string }> }>).find((i) => i.key === "sheets")!
+      expect(sheetsItem.passed).toBe(false)
+      expect(sheetsItem.pending.map((p) => p.employeeId).sort()).toEqual([hrEmpId, empBId].sort())
+      expect(sheetsItem.pending.every((p) => p.status === "draft")).toBe(true)
+      // 這個租戶沒有假單、報銷、薪資結構：其餘三項 0／0 通過。
+      expect((res.body.checklist.items as Array<{ key: string; passed: boolean }>).filter((i) => i.key !== "sheets").every((i) => i.passed)).toBe(true)
+      expect((await asEmployee(request(app).post(`/payroll-periods/${PERIOD}/close`))).status).toBe(403)
     })
 
-    it("全部核准後 → 200、月表全 locked、period_closes 有列；GET /period-closes 看得到", async () => {
+    it("全部核准後 → 200、月表全 locked、period_closes 有列；GET /period-closes 看得到；再鎖 409 already_closed", async () => {
       await approveFlow((await sheetOf(hrEmpId, PERIOD)).id)
       await approveFlow((await sheetOf(empBId, PERIOD)).id)
-      const res = await asAdmin(request(app).post("/attendance-sheets/close-period")).send({ period: PERIOD })
+      const res = await asAdmin(request(app).post(`/payroll-periods/${PERIOD}/close`))
       expect(res.status, JSON.stringify(res.body)).toBe(200)
-      expect(res.body).toMatchObject({ period: PERIOD, status: "closed", sheetCount: 3, lockedCount: 3, lockedNow: 3, skipped: [] })
+      expect(res.body).toMatchObject({ period: PERIOD, status: "closed", sheetCount: 3, lockedCount: 3, lockedNow: 3, closedByEmpId: hrEmpId })
 
       const { data: sheets } = await supabaseAdmin.from("attendance_sheets").select("status").eq("tenant_id", tenantId).eq("period", PERIOD)
       expect(sheets!.map((s) => s.status)).toEqual(["locked", "locked", "locked"])
@@ -272,35 +277,71 @@ describe.skipIf(!migrated)("C3 快照備份／月結 Final／月表快照歷史 
       const listed = await asAdmin(request(app).get(`/attendance-sheets/period-closes?period=${PERIOD}`))
       expect(listed.status).toBe(200)
       expect(listed.body.closes).toHaveLength(1)
-      expect(listed.body.closes[0]).toMatchObject({ period: PERIOD, status: "closed", lockedCount: 3, closedByEmpId: hrEmpId })
+      expect(listed.body.closes[0]).toMatchObject({ period: PERIOD, status: "closed", lockedCount: 3, closedByEmpId: hrEmpId, reopenedAt: null })
 
-      // 重跑冪等：已 locked 不動、數字覆蓋
-      const again = await asAdmin(request(app).post("/attendance-sheets/close-period")).send({ period: PERIOD })
-      expect(again.status).toBe(200)
-      expect(again.body).toMatchObject({ lockedCount: 3, lockedNow: 0 })
+      const again = await asAdmin(request(app).post(`/payroll-periods/${PERIOD}/close`))
+      expect(again.status).toBe(409)
+      expect(again.body).toEqual({ error: "already_closed", period: PERIOD })
+      const states = await asAdmin(request(app).get("/payroll-periods?months=36"))
+      expect(states.status, JSON.stringify(states.body)).toBe(200)
+      expect(states.body.periods.find((p: { period: string }) => p.period === PERIOD)).toMatchObject({ status: "closed", closedByEmpId: hrEmpId })
     }, 60_000)
 
-    it("reopen-period → reopened（月表仍 locked）；未月結的月份 → 404 period_not_closed", async () => {
-      const res = await asAdmin(request(app).post("/attendance-sheets/reopen-period")).send({ period: PERIOD, reason: "老闆要補一筆加班" })
-      expect(res.status).toBe(200)
-      expect(res.body).toMatchObject({ period: PERIOD, status: "reopened", note: "老闆要補一筆加班" })
-      const { data: sheets } = await supabaseAdmin.from("attendance_sheets").select("status").eq("tenant_id", tenantId).eq("period", PERIOD)
-      expect(sheets!.every((s) => s.status === "locked")).toBe(true)
-      const listed = await asAdmin(request(app).get("/attendance-sheets/period-closes"))
-      expect(listed.body.closes.find((c: { period: string }) => c.period === PERIOD).status).toBe("reopened")
-      expect((await asAdmin(request(app).post("/attendance-sheets/reopen-period")).send({ period: "2025-01", reason: "x" })).status).toBe(404)
+    it("鎖住後：該月寫入 409 period_closed（月表產生、薪資執行、補登打卡）；沒鎖的月份照常", async () => {
+      const closed = { error: "period_closed", period: PERIOD }
+      const gen = await asAdmin(request(app).post("/attendance-sheets/generate")).send({ period: PERIOD })
+      expect(gen.status).toBe(409)
+      expect(gen.body).toEqual(closed)
+      const run = await asAdmin(request(app).post("/payroll/run")).send({ period: PERIOD })
+      expect(run.status).toBe(409)
+      expect(run.body).toEqual(closed)
+      const manual = await asAdmin(request(app).post("/punch/manual")).send({ employeeId: empAId, punchAt: "2026-08-15T01:00:00.000Z", type: "in" })
+      expect(manual.status).toBe(409)
+      expect(manual.body).toEqual(closed)
+      const sheet = await sheetOf(empAId, PERIOD)
+      const recompute = await asAdmin(request(app).post(`/attendance-sheets/${sheet.id}/recompute`))
+      expect(recompute.status).toBe(409)
+      expect(recompute.body).toEqual(closed)
+      const other = await asAdmin(request(app).post("/payroll/run")).send({ period: SNAPSHOT_PERIOD })
+      expect(other.status, JSON.stringify(other.body)).not.toBe(409)
     })
 
-    it("force：只鎖已核准的（1/3），略過的記在 note", async () => {
+    it("reopen：HR（不是老闆）403；老闆（features.approval.fallbackApproverEmpId）可以——月表回 approved、記誰／理由；未鎖過的月份 404；理由太短 400", async () => {
+      const denied = await asAdmin(request(app).post(`/payroll-periods/${PERIOD}/reopen`)).send({ reason: "老闆要補一筆加班" })
+      expect(denied.status).toBe(403)
+      expect(denied.body.error).toBe("unlock_forbidden")
+
+      const { data: tenantRow } = await supabaseAdmin.from("tenants").select("features").eq("id", tenantId).single()
+      const features = { ...((tenantRow?.features as Record<string, unknown> | null) ?? {}), approval: { fallbackApproverEmpId: hrEmpId } }
+      const { error: featErr } = await supabaseAdmin.from("tenants").update({ features }).eq("id", tenantId)
+      expect(featErr).toBeNull()
+
+      expect((await asAdmin(request(app).post(`/payroll-periods/${PERIOD}/reopen`)).send({ reason: "太短" })).status).toBe(400)
+      const res = await asAdmin(request(app).post(`/payroll-periods/${PERIOD}/reopen`)).send({ reason: "老闆要補一筆加班" })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      expect(res.body).toMatchObject({ period: PERIOD, status: "reopened", reopenedByEmpId: hrEmpId, reopenReason: "老闆要補一筆加班", unlockedSheets: 3, revertedPayslips: 0 })
+      const { data: sheets } = await supabaseAdmin.from("attendance_sheets").select("status, locked_at").eq("tenant_id", tenantId).eq("period", PERIOD)
+      expect(sheets!.every((s) => s.status === "approved" && s.locked_at === null)).toBe(true)
+      const listed = await asAdmin(request(app).get("/attendance-sheets/period-closes"))
+      expect(listed.body.closes.find((c: { period: string }) => c.period === PERIOD)).toMatchObject({ status: "reopened", reopenedByEmpId: hrEmpId, reopenReason: "老闆要補一筆加班" })
+      expect((await asAdmin(request(app).post(`/payroll-periods/${PERIOD}/reopen`)).send({ reason: "再重新開放一次" })).status).toBe(409)
+      expect((await asAdmin(request(app).post("/payroll-periods/2025-01/reopen")).send({ reason: "從沒鎖過的月份" })).status).toBe(404)
+      // 重新開放後該月可以寫了：月表可以重開成草稿。
+      const reopenedSheet = await asAdmin(request(app).post(`/attendance-sheets/${(await sheetOf(empAId, PERIOD)).id}/reopen`)).send({ reason: "補打卡後重算" })
+      expect(reopenedSheet.status, JSON.stringify(reopenedSheet.body)).toBe(200)
+    }, 60_000)
+
+    it("沒有 force：只核准一張時（帶 force:true）仍被檢查清單擋；全部核准後可以鎖（月結紀錄共 2 列，快照備份驗收會算）", async () => {
       await approveFlow((await sheetOf(empAId, FORCE_PERIOD)).id)
-      const blocked = await asAdmin(request(app).post("/attendance-sheets/close-period")).send({ period: FORCE_PERIOD })
+      const blocked = await asAdmin(request(app).post(`/payroll-periods/${FORCE_PERIOD}/close`)).send({ force: true })
       expect(blocked.status).toBe(409)
-      const forced = await asAdmin(request(app).post("/attendance-sheets/close-period")).send({ period: FORCE_PERIOD, force: true })
-      expect(forced.status, JSON.stringify(forced.body)).toBe(200)
-      expect(forced.body).toMatchObject({ sheetCount: 3, lockedCount: 1, lockedNow: 1 })
-      expect(forced.body.skipped).toHaveLength(2)
-      expect(forced.body.note).toContain("強制月結")
+      expect(blocked.body.error).toBe("checklist_incomplete")
       expect((await sheetOf(empBId, FORCE_PERIOD)).status).toBe("draft")
+      await approveFlow((await sheetOf(hrEmpId, FORCE_PERIOD)).id)
+      await approveFlow((await sheetOf(empBId, FORCE_PERIOD)).id)
+      const closed = await asAdmin(request(app).post(`/payroll-periods/${FORCE_PERIOD}/close`))
+      expect(closed.status, JSON.stringify(closed.body)).toBe(200)
+      expect(closed.body).toMatchObject({ sheetCount: 3, lockedCount: 3, lockedNow: 3 })
     }, 60_000)
   })
 

@@ -24,6 +24,7 @@ import {
 } from "../lib/tz.js"
 import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { loadRuleConfigFor } from "./payroll-inputs.js"
+import { assertDateRangeOpen } from "./period-lock.js"
 import { pairPunchesTz, type PairedDay } from "./punch-pairing.js"
 
 /**
@@ -594,6 +595,9 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     throw new Error("settleAttendance: from/to must be YYYY-MM-DD")
   }
   if (from > to) throw new Error("settleAttendance: from must be <= to")
+  // 發薪鎖定：結算區間碰到已結算月 → 409 period_closed（services/period-lock.ts）。每日 cron、POST /attendance/settle、
+  // 月表產生／重算／送出都走這支，所以守門放在這裡一處，不會漏掉任何一條路。
+  await assertDateRangeOpen(tenantId, from, to)
 
   const tz = await getTenantTimezone(tenantId)
   // 規則依「結算的是哪個月」選版（以結束日期所屬月份為準）——重跑舊月份的結算

@@ -10,6 +10,7 @@ import { enrichRequestRows } from "../services/request-enrich.js"
 import { isStepCandidate, stepCandidates, stepSelectCols } from "../services/approval-steps.js"
 import { enqueue } from "../services/notify.js"
 import { writeAuditLog } from "../services/audit.js"
+import { assertRequestOpen, closedPeriodsOfRequest } from "../services/period-lock.js"
 import {
   approvedOtMinutesInPeriod,
   beyondCapCheck,
@@ -530,6 +531,10 @@ requestsRouter.post(
         return
       }
 
+      // 發薪鎖定（2026-10-11）：任何日期或 segment 落在已結算月就擋，跨月單只要碰到已結算月也擋
+      // → 409 `{ error: "period_closed", period }`（services/period-lock.ts；全域錯誤處理轉成回應）。
+      await assertRequestOpen(tenantId, { start_at: startAt, end_at: endAt, segments })
+
       // Resolve the approver chain for this kind (services/approval-chain.ts):
       // 固定名單／直屬主管／主管逐級＋HR 覆核 → 老闆（tenant features）→ 第一位 hr_admin → 409。
       // 零用金與出差／公出一律「主管逐關 → 老闆最後一關」（flowRouteFor，2026-10-11）；
@@ -982,6 +987,8 @@ const DECISION_ERROR_STATUS: Record<string, number> = {
   current_step_not_found: 409,
   not_current_approver: 403,
   attachment_required: 409,
+  // 發薪鎖定：這張單碰到已結算月（回應多帶 period）。
+  period_closed: 409,
 }
 
 async function decide(
@@ -1021,7 +1028,7 @@ async function decide(
     if (!outcome.ok) {
       const status = DECISION_ERROR_STATUS[outcome.error]
       if (status) {
-        res.status(status).json({ error: outcome.error })
+        res.status(status).json(outcome.period ? { error: outcome.error, period: outcome.period } : { error: outcome.error })
         return
       }
       next(new Error(`POST /requests/${requestId}/${action}: ${outcome.error}`))
@@ -1037,7 +1044,7 @@ type DecisionActor = { id: string; role: string }
 
 type DecisionOutcome =
   | { ok: true; id: string; status: "pending" | "approved" | "rejected"; currentStep: number; notified?: number }
-  | { ok: false; id: string; error: string }
+  | { ok: false; id: string; error: string; period?: string }
 
 /** 寫簽核關卡結果；acted_by_emp_id 記「實際按下核准／駁回的人」（HR 代簽時是 HR）。
  *  候選之一簽核時（多級簽核）同時把 approver_emp_id 改寫成實際簽的人；HR 代簽
@@ -1183,6 +1190,10 @@ async function decideOneRequest(params: {
   if (!isCandidate && !canOverride) {
     return { ok: false, id: requestId, error: "not_current_approver" }
   }
+  // 發薪鎖定：這張單碰到已結算月（日期、segments、跨月區間）→ 不能核准也不能駁回。逐張回結果（批次簽核
+  // 其他張照常），不丟例外——批次那層會把例外吞成 internal_error。
+  const closedPeriods = await closedPeriodsOfRequest(tenantId, lr)
+  if (closedPeriods.length > 0) return { ok: false, id: requestId, error: "period_closed", period: closedPeriods[0] }
   // 候選之一簽核 → approver_emp_id 改寫成實際簽的人（HR 代簽不改寫，見 markStep）。
   const takeOver = isCandidate && step.approver_emp_id !== actor.id
 
@@ -1529,7 +1540,7 @@ requestsRouter.post(
 
       const { data: lr, error: lrErr } = await supabaseAdmin
         .from("leave_requests")
-        .select("id, kind, status, current_step")
+        .select("id, kind, status, current_step, start_at, end_at, segments")
         .eq("tenant_id", tenantId)
         .is("deleted_at", null)
         .eq("id", requestId)
@@ -1546,6 +1557,8 @@ requestsRouter.post(
         res.status(409).json({ error: "not_pending" })
         return
       }
+      // 發薪鎖定：這張單碰到已結算月 → 409 period_closed。
+      await assertRequestOpen(tenantId, lr)
 
       const { data: target, error: targetErr } = await supabaseAdmin
         .from("employees")
@@ -1782,7 +1795,7 @@ requestsRouter.post(
 
       const { data: lr, error: lrErr } = await supabaseAdmin
         .from("leave_requests")
-        .select("id, employee_id, status, current_step, kind")
+        .select("id, employee_id, status, current_step, kind, start_at, end_at, segments")
         .eq("tenant_id", tenantId)
         .is("deleted_at", null)
         .eq("id", requestId)
@@ -1804,6 +1817,8 @@ requestsRouter.post(
         res.status(409).json({ error: "not_pending" })
         return
       }
+      // 發薪鎖定：這張單碰到已結算月 → 撤回不得（409 period_closed）。
+      await assertRequestOpen(tenantId, lr)
 
       const { error: upErr } = await supabaseAdmin
         .from("leave_requests")
@@ -1964,7 +1979,7 @@ requestsRouter.delete(
 
       const { data: lr, error: lrErr } = await supabaseAdmin
         .from("leave_requests")
-        .select("id, status, deleted_at, current_step, kind")
+        .select("id, status, deleted_at, current_step, kind, start_at, end_at, segments")
         .eq("tenant_id", tenantId)
         .eq("id", requestId)
         .maybeSingle()
@@ -1984,6 +1999,8 @@ requestsRouter.delete(
         res.status(409).json({ error: "approved_request_cannot_be_deleted" })
         return
       }
+      // 發薪鎖定：這張單碰到已結算月 → 註銷不得（409 period_closed）。
+      await assertRequestOpen(tenantId, lr)
 
       const { error: delErr } = await supabaseAdmin
         .from("leave_requests")

@@ -36,6 +36,7 @@ import { tenantBlocksApproveOnUnsettledLeave } from "./leave-settlement.js"
 import { pairPunchesTz } from "./punch-pairing.js"
 import { capMinutesFor } from "./overtime-cap.js"
 import { writeAuditLog } from "./audit.js"
+import { assertPeriodOpen } from "./period-lock.js"
 import { exemptDatesOf, loadLateReportsForPeriod, undecidedCountOf, type LateReportRow } from "./late-reports.js"
 import {
   buildPayrollInputs,
@@ -1220,6 +1221,8 @@ export interface GenerateResult {
  */
 export async function generateSheets({ tenantId, period, employeeId }: GenerateInput): Promise<GenerateResult> {
   if (!periodRe.test(period)) throw new SheetError("invalid_period", 400)
+  // 發薪鎖定：該月已結算 → 409 period_closed（services/period-lock.ts）。
+  await assertPeriodOpen(tenantId, period)
   const { from, to } = monthRangeKeys(period)
 
   await settleAttendance({ tenantId, from, to, employeeId })
@@ -1291,6 +1294,7 @@ export async function generateSheets({ tenantId, period, employeeId }: GenerateI
  */
 export async function recomputeSheet(tenantId: string, sheetId: string, opts: { settle?: boolean } = {}): Promise<SheetRow> {
   const sheet = await loadSheet(tenantId, sheetId)
+  await assertPeriodOpen(tenantId, sheet.period)
   if (sheet.status !== "draft" && sheet.status !== "returned") {
     throw new SheetError("sheet_not_editable", 409, { status: sheet.status })
   }
@@ -1884,6 +1888,7 @@ export interface DayPatch {
  * (numbers are signed), annotations may (and are mirrored into the snapshot).
  */
 export async function patchSheetDay(tenantId: string, sheet: SheetRow, date: string, patch: DayPatch): Promise<SheetDayRow> {
+  await assertPeriodOpen(tenantId, sheet.period)
   const { from, to } = monthRangeKeys(sheet.period)
   if (date < from || date > to) throw new SheetError("day_not_found", 404)
   const { data: existing, error: selErr } = await supabaseAdmin
@@ -2058,6 +2063,7 @@ async function employeeName(tenantId: string, employeeId: string): Promise<strin
  */
 export async function submitSheet(tenantId: string, sheetId: string, actorEmpId: string): Promise<SheetRow> {
   let sheet = await loadSheet(tenantId, sheetId)
+  await assertPeriodOpen(tenantId, sheet.period)
   assertTransition(sheet, "submitted")
 
   sheet = await recomputeSheet(tenantId, sheetId, { settle: true })
@@ -2117,6 +2123,7 @@ export async function reviewSheet(
   comment?: string,
 ): Promise<SheetRow> {
   const sheet = await loadSheet(tenantId, sheetId)
+  await assertPeriodOpen(tenantId, sheet.period)
   if (decision === "return") return returnSheet(tenantId, sheetId, actorEmpId, comment ?? "主管退回")
   assertTransition(sheet, "manager_reviewed")
   const next = await transition(tenantId, sheet, {
@@ -2282,6 +2289,7 @@ async function upsertBeyondCapSettlement(
  */
 export async function approveSheet(tenantId: string, sheetId: string, actorEmpId: string): Promise<SheetRow> {
   const sheet = await loadSheet(tenantId, sheetId)
+  await assertPeriodOpen(tenantId, sheet.period)
   assertTransition(sheet, "approved")
   const { view, payrollDays, inputs } = await composeLiveView(tenantId, sheet, { includeMoney: true })
   const now = new Date().toISOString()
@@ -2315,6 +2323,7 @@ export async function approveSheet(tenantId: string, sheetId: string, actorEmpId
  */
 export async function returnSheet(tenantId: string, sheetId: string, actorEmpId: string, reason: string): Promise<SheetRow> {
   const sheet = await loadSheet(tenantId, sheetId)
+  await assertPeriodOpen(tenantId, sheet.period)
   assertTransition(sheet, "returned")
   const next = await transition(tenantId, sheet, {
     status: "returned",
@@ -2335,6 +2344,7 @@ export async function returnSheet(tenantId: string, sheetId: string, actorEmpId:
  */
 export async function reopenSheet(tenantId: string, sheetId: string, actorEmpId: string, reason: string): Promise<SheetRow> {
   const sheet = await loadSheet(tenantId, sheetId)
+  await assertPeriodOpen(tenantId, sheet.period)
   assertTransition(sheet, "draft")
   const next = await transition(tenantId, sheet, {
     status: "draft",
@@ -2367,6 +2377,25 @@ export async function lockApprovedSheetFor(tenantId: string, employeeId: string,
   const sheet = await findSheet(tenantId, employeeId, period)
   if (!sheet || sheet.status !== "approved") return sheet
   return lockSheet(tenantId, sheet.id)
+}
+
+/**
+ * unlockSheetsForPeriod — 重新開放已結算月份時，該月 locked 的月表全部轉回 approved（清掉 locked_at；
+ * 核准當時凍結的 snapshot 與歷史原封不動），之後 HR 可依正常流程退回修改。冪等：沒有 locked 的就是 0。
+ * 刻意**不**呼叫 assertPeriodOpen、也不通知員工（這是整月重新開放的連動，通知走 reopenPeriod 的老闆／HR 通知）。
+ * 樂觀鎖衝突（有人同時動了那張月表）丟 version_conflict，呼叫端重打一次即可（已轉回的不會再動）。
+ */
+export async function unlockSheetsForPeriod(tenantId: string, period: string): Promise<number> {
+  const { data, error } = await supabaseAdmin
+    .from("attendance_sheets")
+    .select(SHEET_COLS)
+    .eq("tenant_id", tenantId)
+    .eq("period", period)
+    .eq("status", "locked")
+  if (error) throw wrapDbError("unlockSheetsForPeriod (sheets)", error)
+  const locked = (data ?? []) as unknown as SheetRow[]
+  for (const sheet of locked) await transition(tenantId, sheet, { status: "approved", locked_at: null })
+  return locked.length
 }
 
 /** 'YYYY-MM' of the month before `todayKey` (tenant clock). */

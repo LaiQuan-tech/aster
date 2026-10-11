@@ -21,6 +21,7 @@ import { attendanceSheetsRouter } from "./routes/attendance-sheets.js"
 import { exportsRouter } from "./routes/exports.js"
 import { calendarRouter } from "./routes/calendar.js"
 import { payrollRouter } from "./routes/payroll.js"
+import { payrollPeriodsRouter } from "./routes/payroll-periods.js"
 import { leaveBalancesRouter } from "./routes/leave-balances.js"
 import { leaveRegisterRouter } from "./routes/leave-register.js"
 import { compTimeRouter } from "./routes/comp-time.js"
@@ -73,6 +74,7 @@ import { internalCronRouter } from "./routes/internal-cron.js"
 // 2026-10-11 集團總覽
 import { groupOverviewRouter } from "./routes/group-overview.js"
 import { essTabGuard } from "./middleware/ess-tab-guard.js"
+import { periodClosedErrorHandler } from "./middleware/period-closed.js"
 import { runWithRequestContext } from "./lib/request-context.js"
 
 const WEB_ORIGINS = (process.env.WEB_ORIGINS ?? "http://localhost:3000")
@@ -141,6 +143,7 @@ app.use(attendanceSheetsRouter)
 app.use(exportsRouter)
 app.use(calendarRouter)
 app.use(payrollRouter)
+app.use(payrollPeriodsRouter) // /payroll-periods*（發薪鎖定：完成本月發薪／重新開放；2026-10-11）
 app.use(leaveBalancesRouter)
 app.use(leaveRegisterRouter)
 app.use(compTimeRouter)
@@ -197,6 +200,10 @@ app.use(groupOverviewRouter) // /group-overview、/group-overview/detail（跨�
 app.use((_req: Request, res: Response) => {
   res.status(404).json({ error: "not_found" })
 })
+
+// 發薪鎖定：任何寫入端點或服務層丟出的 PeriodClosedError 一律回 409 { error: "period_closed", period }
+// （services/period-lock.ts）；其他錯誤交給下面的 500。
+app.use(periodClosedErrorHandler)
 
 // Centralised error handler — must be last and have 4 args for Express to
 // recognise it as an error handler.

@@ -11,6 +11,7 @@ import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { dayWindowUtc, localParts, todayKey } from "../lib/tz.js"
 import { logger } from "../lib/logger.js"
 import { checkPunchCooldown, cooldownSeconds, statusFromRecords } from "../services/punch-guard.js"
+import { assertInstantsOpen } from "../services/period-lock.js"
 import { importManualPunches } from "../services/imports/writers.js"
 import { lateMinutesForArrival, type ArrivalLateness } from "../services/settlement.js"
 import {
@@ -173,6 +174,9 @@ async function firstInLateness(tenantId: string, employeeId: string, now: Date):
  * 而且**不寫打卡**。帶了就先寫 late_reports（一人一天一筆，老闆的決定欄位不動）、再寫打卡、
  * 把打卡 id 掛回去，第一次寫入時通知直屬主管與老闆；201 多帶 `lateReport: { id, lateMinutes }`。
  * 手動補登（/punch/manual）與匯入不要求理由。
+ *
+ * 發薪鎖定（2026-10-11）：當下所在的月份（租戶時區）已結算 → 409 `{ error: "period_closed", period }`，
+ * 不寫打卡也不寫遲到說明（正常情況當月不會是已結算月，這是提早結算的特例）。
  */
 punchRouter.post(
   "/punch",
@@ -202,6 +206,9 @@ punchRouter.post(
         res.status(403).json({ error: "not_an_employee" })
         return
       }
+
+      // 發薪鎖定：當下所在的月份（租戶時區）已結算 → 409 period_closed（提早結算的特例；services/period-lock.ts）。
+      await assertInstantsOpen(tenantId, now.toISOString())
 
       // Cooldown check against the employee's most recent punch of ANY type on
       // ANY day (a double tap does not care about the tenant's day boundary).
@@ -598,6 +605,8 @@ function parseManualPunchCsv(csv: string): {
  * POST /punch/manual/import — HR-admin bulk back-fills manual punch records from
  * CSV. Header row: employeeId,punchAt,type. Invalid lines are skipped and
  * returned in errors so HR can fix only the failed rows.
+ * 發薪鎖定：任何一列的打卡時間落在已結算月 → 整批 409 period_closed（寫入段在
+ * services/imports/writers.ts importManualPunches，xlsx 匯入共用）。
  */
 punchRouter.post(
   "/punch/manual/import",
@@ -642,7 +651,8 @@ punchRouter.post(
 /**
  * POST /punch/manual — HR-admin creates a punch record on someone's behalf
  * (source='manual' so audits can tell back-fills from real punches). The target
- * employee must belong to this tenant → otherwise 404.
+ * employee must belong to this tenant → otherwise 404. 打卡時間（租戶時區）落在已結算月
+ * → 409 period_closed。
  */
 punchRouter.post(
   "/punch/manual",
@@ -672,6 +682,8 @@ punchRouter.post(
         res.status(404).json({ error: "employee_not_found" })
         return
       }
+      // 發薪鎖定：補登的打卡時間落在已結算月 → 409 period_closed（services/period-lock.ts）。
+      await assertInstantsOpen(tenantId, punchAt)
       const { data, error } = await supabaseAdmin
         .from("punch_records")
         .insert({

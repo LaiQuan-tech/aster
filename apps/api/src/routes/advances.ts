@@ -7,6 +7,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
 import { isFinanceRole } from "../middleware/scope.js"
 import { writeAuditLog } from "../services/audit.js"
+import { PERIOD_RE, assertPeriodOpen } from "../services/period-lock.js"
 import {
   buildSettlementPreview,
   loadBoundClaims,
@@ -15,8 +16,6 @@ import {
 } from "../services/advance-settlement.js"
 
 export const advancesRouter = Router()
-
-const periodRe = /^\d{4}-\d{2}$/
 
 const paySchema = z.object({
   payoutChannel: z.enum(["cash", "transfer"]),
@@ -27,7 +26,7 @@ const settleSchema = z.object({
   /** 差額處理方式：現金找補，或從薪資扣／補。 */
   balanceHandling: z.enum(["cash", "payroll"]),
   /** balanceHandling='payroll' 時必填：從哪一期薪資結算。 */
-  recoveryPeriod: z.string().regex(periodRe).optional(),
+  recoveryPeriod: z.string().regex(PERIOD_RE).optional(),
   note: z.string().trim().max(250).optional(),
   /**
    * 核銷前預覽（GET /advances/:id/settlement-preview）看到的實支合計。有帶就比對：預覽之後
@@ -321,6 +320,7 @@ advancesRouter.get(
  * 與核銷前預覽共用）。核銷前請先看 GET /advances/:id/settlement-preview，並把看到的實支合計
  * 帶成 `expectedActualTotal`：對不上（預覽後憑證有增減）→ 409 `claims_changed`，不動任何東西。
  * 綁了預支的憑證不再隨月薪報銷給付（services/payroll-claims.ts），這裡的差額是它們唯一的付款路徑。
+ * 發薪鎖定：`balanceHandling='payroll'` 且 `recoveryPeriod` 指到已結算的月份 → 409 `period_closed`。
  */
 advancesRouter.post(
   "/advances/:id/settle",
@@ -341,6 +341,11 @@ advancesRouter.post(
     }
 
     try {
+      // 發薪鎖定（2026-10-11）：差額要從某一期薪資扣回／補發，那一期已結算 → 409 period_closed
+      // （services/period-lock.ts）。現金找補（cash）不進薪資，不看月份。
+      if (parsed.data.balanceHandling === "payroll" && parsed.data.recoveryPeriod) {
+        await assertPeriodOpen(tenantId, parsed.data.recoveryPeriod)
+      }
       const self = await resolveSelf(tenantId, req.auth?.userId)
       const { data: adv, error: loadErr } = await supabaseAdmin
         .from("advances")

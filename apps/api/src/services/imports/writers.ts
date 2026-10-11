@@ -2,6 +2,7 @@ import { supabaseAdmin } from "../../lib/supabase.js"
 import { isMissingTableError } from "../../lib/schema-compat.js"
 import { TW_HOLIDAYS } from "../../lib/tw-holidays.js"
 import { addDaysKey, weekdayOfKey } from "../../lib/tz.js"
+import { assertInstantsOpen } from "../period-lock.js"
 
 /**
  * 批次寫入（既有的 CSV 匯入端點與新的 xlsx 匯入 POST /imports/:kind 共用）。
@@ -36,6 +37,7 @@ export interface ManualPunchRecord {
 /**
  * 先用 `.in("id", …)` 確認員工屬於本租戶，不屬於的逐筆回 employee_not_found，其餘
  * 以 source='manual' 寫入 punch_records。records 為空或全部無效時不碰 DB（ids 為空）。
+ * 任何一列落在已結算月 → 丟 PeriodClosedError（整批不寫）。
  */
 export async function importManualPunches(
   tenantId: string,
@@ -44,6 +46,10 @@ export async function importManualPunches(
 ): Promise<{ ids: string[]; errors: LineError[] }> {
   const errors: LineError[] = []
   if (records.length === 0) return { ids: [], errors }
+
+  // 發薪鎖定：任何一列的打卡時間（租戶時區）落在已結算月 → 整批 409 period_closed，一筆都不寫
+  // （部分匯入會讓 HR 搞不清楚哪些進去了）。POST /punch/manual/import 與 xlsx 匯入共用這裡。
+  await assertInstantsOpen(tenantId, Array.from(new Set(records.map((record) => record.punchAt))))
 
   const employeeIds = Array.from(new Set(records.map((record) => record.employeeId)))
   const { data: employees, error: empErr } = await supabaseAdmin

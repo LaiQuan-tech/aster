@@ -29,6 +29,7 @@ import {
 } from "../services/payroll-inputs.js"
 import { SheetError, lockApprovedSheetFor, type SheetSnapshot } from "../services/attendance-sheets.js"
 import { exemptDatesOf, loadLateReportsForPeriod, undecidedCountOf } from "../services/late-reports.js"
+import { PERIOD_RE, assertPeriodOpen } from "../services/period-lock.js"
 
 export const payrollRouter = Router()
 
@@ -37,7 +38,7 @@ const periodRe = /^\d{4}-\d{2}$/
 
 const runSchema = z.object({
   employeeId: z.string().uuid().optional(),
-  period: z.string().regex(periodRe, "period must be YYYY-MM"),
+  period: z.string().regex(PERIOD_RE, "period must be YYYY-MM"),
 })
 
 const listQuerySchema = z.object({
@@ -106,6 +107,8 @@ function isHrRole(role: string | undefined): boolean {
  * structure. An already-FINALIZED payslip for the (employee, period) is left
  * untouched and reported in `skipped` (a finalized slip is locked).
  *
+ * 發薪鎖定：該月已結算（period_closes closed）→ 409 period_closed，一張都不產生。
+ *
  * Returns { generated: N, skipped: string[], skippedDetails, missingInsuredSalary, warnings }
  * (skipped = employee ids skipped — payslip already finalized, or the engine
  * could not derive a wage (no hourly_wage and no base salary); skippedDetails
@@ -128,6 +131,10 @@ payrollRouter.post(
     const { first, nextFirst } = monthBounds(period)
 
     try {
+      // 發薪鎖定（2026-10-11）：該月已結算 → 409 `{ error: "period_closed", period }`，不重算任何人的薪資單
+      // （services/period-lock.ts）。要重算先由老闆（或老闆指定的人）重新開放該月。
+      await assertPeriodOpen(tenantId, period)
+
       // --- rule config / salary structures / 眷屬 / 報銷 / 預支 ----------------
       // 全部由 services/payroll-inputs.ts 組裝（與出勤月表的試算共用同一套輸入）。
       const inputs = await loadPayrollInputs(tenantId, period, employeeId ? [employeeId] : undefined)
