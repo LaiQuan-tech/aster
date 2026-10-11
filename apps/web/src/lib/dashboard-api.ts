@@ -52,6 +52,16 @@ export async function listRecentChangeProjects(limit = 5): Promise<ProjectListIt
   return r.projects.filter((p) => p.kind === "change" || p.kind === "addition").slice(0, limit);
 }
 
+/**
+ * 「最近變更案」卡上的「原案」編號：用母案（`parent_project_id`）那一列的編號（API 列表的 `parentCode`）。
+ * 母案是選填（2026-09-30 起）——沒有母案就沒有原案，**不再**從編號格式（`{原案 code}-{n}`）反推：
+ * 追加案可以先開案、之後才補母案，編號也不一定長那樣，反推會憑空掛上一個不存在的「原案」。
+ * 有母案 id 但編號查不到（母案列不見、或舊版 API 沒回 parentCode）→ null，卡片就不印「原案」。
+ */
+export function changeParentCodeOf(p: Pick<ProjectListItem, "parentProjectId" | "parentCode">): string | null {
+  return p.parentProjectId ? (p.parentCode ?? null) : null;
+}
+
 /** GET /company-pages?fields=summary 的一頁（沒有 body）。 */
 export interface CompanyPageSummary {
   slug: string;

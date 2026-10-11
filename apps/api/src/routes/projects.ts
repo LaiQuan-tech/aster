@@ -526,6 +526,27 @@ async function clientNamesById(tenantId: string, ids: Array<string | null>): Pro
 }
 
 /**
+ * 母案的專案編號（列表的 `parentCode`）：後台首頁「最近變更案」顯示「原案 {母案編號}」用，取代以前從編號格式
+ * （`{原案 code}-{n}`）反推——母案選填後，變更案的編號不一定長那樣，也可能根本沒有母案。
+ * 母案那列不一定在這次列表結果裡（列表可能只回變更案，母案是已封存的主案），所以另查；含已封存、限本租戶，
+ * 每 200 個一批（`.in()` 有 URL 長度上限）。查無（母案列不見）就不在 Map 裡。
+ */
+async function parentCodesById(tenantId: string, ids: Array<string | null>): Promise<Map<string, string | null>> {
+  const uniq = [...new Set(ids.filter((v): v is string => !!v))]
+  const out = new Map<string, string | null>()
+  for (let i = 0; i < uniq.length; i += 200) {
+    const { data, error } = await supabaseAdmin
+      .from("projects")
+      .select("id, code")
+      .eq("tenant_id", tenantId)
+      .in("id", uniq.slice(i, i + 200))
+    if (error) throw new Error(`parentCodesById: ${error.message}`)
+    for (const row of data ?? []) out.set(row.id as string, (row.code as string | null) ?? null)
+  }
+  return out
+}
+
+/**
  * 載入專案並判定呼叫者的兩段權限（W4，2026-09-23 起 finance 與 bonus 分家）：
  *   • canManage（finance）＝ HR／**會計**／該案 lead（欄位或成員角色 lead｜manager）／
  *     該案所屬部門主管。可讀寫錢與申請單欄位。
@@ -674,16 +695,19 @@ projectsRouter.get(
       // 整份列表一次查完，不做 N+1。
       const rows = (data ?? []) as ProjectRow[]
       const ids = rows.map((p) => p.id)
-      const [signed, clientNames, companies] = await Promise.all([
+      const [signed, clientNames, companies, parentCodes] = await Promise.all([
         signedProjectIds(tenantId, ids),
         clientNamesById(tenantId, rows.map((p) => p.client_id)),
         loadTenantCompanies(tenantId),
+        parentCodesById(tenantId, rows.map((p) => p.parent_project_id)),
       ])
 
       const projects = rows.map((row) => ({
         // 列表一律不回獎金池（W4）：列表沒有逐案算權限，回了等於全租戶都看得到。
         ...serializeProject(row, { finance: false, bonus: false, hasSignedContract: signed.has(row.id) }),
         clientName: row.client_id ? (clientNames.get(row.client_id) ?? null) : null,
+        // 母案的專案編號（母案選填：沒有母案或母案列不見＝null）。parentProjectId 在 serializeProject 裡。
+        parentCode: row.parent_project_id ? (parentCodes.get(row.parent_project_id) ?? null) : null,
         // 承接公司的有效名稱：company_id 為 null 的案子顯示租戶預設公司。
         companyName: effectiveCompanyOf(row.company_id, companies)?.name ?? null,
       }))

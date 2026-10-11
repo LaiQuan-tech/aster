@@ -316,6 +316,10 @@ export interface ProjectListItem extends Project {
   clientId?: string | null
   clientName?: string | null
   kind?: ProjectKind
+  /** 母案（選填，2026-09-30 起）：變更／追加／代墊案掛的主案 id；沒有母案＝null。 */
+  parentProjectId?: string | null
+  /** 母案的專案編號（後台首頁「最近變更案」顯示「原案 …」）；沒有母案、母案列不見＝null；舊版 API 沒回＝缺席。 */
+  parentCode?: string | null
   /** 承接公司：存的值（null＝沿用租戶預設公司）。 */
   companyId?: string | null
   /** 承接公司的有效名稱（company_id 為 null 時是租戶預設公司）；租戶沒有任何公司主體時為 null。 */

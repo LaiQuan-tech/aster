@@ -21,6 +21,7 @@ import {
   getAnnualTotals,
   getCompanyPageSummary,
   getLatestBackupPeriod,
+  changeParentCodeOf,
   getPendingRequestsCount,
   listRecentChangeProjects,
   type CompanyPageSummary,
@@ -72,18 +73,6 @@ interface BirthdayCardData {
   people: BirthdayPerson[];
   /** 還沒登記紅包的人數——這張卡的重點是「別漏發」。 */
   unrecorded: number;
-}
-
-/**
- * 變更／追加案的專案編號慣例是 `{原案 code}-{n}`（見 projects-ext-api.ts C2 段落
- * 的 duplicateProject 註解，如 `AT-115-013` → `AT-115-013-1`）。GET /projects
- * 清單（ProjectListItem）沒有回 parentProjectId，這裡直接從 code 反推「原案」，
- * 不用額外多打一支 lineage 端點（維持「不新增任何 API」的邊界）。
- */
-function rootCodeOf(code: string | null | undefined): string | null {
-  if (!code) return null;
-  const m = code.match(/^(.*)-\d+$/);
-  return m ? m[1] : null;
 }
 
 /**
@@ -367,7 +356,8 @@ export default function AdminOverview() {
             {changes.data && changes.data.length > 0 ? (
               <ul className="space-y-0.5">
                 {changes.data.map((p) => {
-                  const root = rootCodeOf(p.code);
+                  // 原案＝母案（parent_project_id）的編號；母案是選填，沒有就不印（不再從編號格式反推）。
+                  const root = changeParentCodeOf(p);
                   return (
                     <li key={p.id} className="truncate text-sm text-gray-800">
                       {p.code ?? p.name}
