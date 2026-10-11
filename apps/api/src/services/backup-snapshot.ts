@@ -7,7 +7,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { logger } from "../lib/logger.js"
 import { isMissingTableError } from "../lib/schema-compat.js"
 import { writeAuditLog } from "./audit.js"
-import { lockSheet, unlockSheetsForPeriod } from "./attendance-sheets.js"
+import { SheetError, lockSheet, unlockSheetsForPeriod } from "./attendance-sheets.js"
 import { enqueue } from "./notify.js"
 import { loadPeriodUnlockPolicy } from "./period-lock.js"
 import { evaluatePeriodChecklist, revertFinalizedPayslips, type PeriodChecklist } from "./payroll-period.js"
@@ -1138,21 +1138,35 @@ export async function closePeriod(tenantId: string, period: string, actorEmpId: 
   let lockedNow = 0
   for (const s of sheets) {
     if (s.status !== "approved") continue
-    await lockSheet(tenantId, s.id)
+    try {
+      await lockSheet(tenantId, s.id)
+    } catch (err) {
+      // 迴圈途中這張月表剛被退回／重開（invalid_transition）或被別人動過版本（version_conflict）：
+      // 清單變了就回最新的清單讓 HR 看到是哪裡變了，而不是一個難懂的狀態轉換錯誤。
+      if (err instanceof SheetError && (err.code === "invalid_transition" || err.code === "version_conflict")) {
+        const fresh = await evaluatePeriodChecklist(tenantId, period)
+        if (!fresh.ready) throw new PeriodCloseError("checklist_incomplete", 409, { period, checklist: fresh })
+      }
+      throw err
+    }
     lockedNow += 1
   }
   const lockedCount = sheets.filter((s) => s.status === "locked").length + lockedNow
 
+  // 月結紀錄指向「該月最新一次快照」的 manifest（W7 之後同月可能有多次執行）。這幾次 Storage 呼叫放在事後複查
+  // **之前**，讓「複查 → 寫下已結算」緊接在一起。
+  const manifestRun = await latestRun(tenantId, period).catch(() => null)
+  const manifest = manifestRun === null ? null : await readManifest(tenantId, period, manifestRun).catch(() => null)
+
   // 事後複查：鎖月表要花幾秒，這段時間主管可能又核准了一張假單、HR 又退回了一張月表、有人又改了報銷……
   // 寫下「已結算」之前再算一次，不通過就中止（回最新的清單）。已鎖的月表維持鎖定——它們本來就是已核准的，
-  // 與薪資單定稿時鎖單張月表的狀態相同；HR 處理完再按一次即可（鎖定冪等）。這一步把「檢查通過」到「寫下鎖」
-  // 之間的空窗從整個鎖月表迴圈縮到只剩一次查詢。
+  // 與薪資單定稿時鎖單張月表的狀態相同；HR 處理完再按一次即可（鎖定冪等）。這把「檢查通過」到「寫下鎖」之間的
+  // 空窗從整個鎖月表迴圈縮到只剩這次複查（約一次平行查詢）。**不是絕對的**：複查之後、寫鎖之前才落地的
+  // 在途請求（例如剛通過守門、還在寫入途中的核准）仍可能漏網；要完全杜絕只能在 DB 層（trigger／RPC 交易），
+  // 這裡不做。真的漏網了：該月多出一筆沒核銷的假單之類，由老闆重新開放修正。
   const recheck = await evaluatePeriodChecklist(tenantId, period)
   if (!recheck.ready) throw new PeriodCloseError("checklist_incomplete", 409, { period, checklist: recheck })
 
-  // 月結紀錄指向「該月最新一次快照」的 manifest（W7 之後同月可能有多次執行）。
-  const manifestRun = await latestRun(tenantId, period).catch(() => null)
-  const manifest = manifestRun === null ? null : await readManifest(tenantId, period, manifestRun).catch(() => null)
   const fields = {
     status: "closed" as const,
     closed_at: new Date().toISOString(),

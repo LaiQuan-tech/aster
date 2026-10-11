@@ -240,6 +240,34 @@ describe("POST /payroll-periods/:period/close — 完成本月發薪並鎖定", 
     expect(closeRowOf().status).toBe("closed")
   })
 
+  it("鎖月表的迴圈途中有一張月表剛被退回（invalid_transition）→ 回最新的檢查清單（月表那項沒過），不是難懂的狀態轉換錯誤；不寫已結算", async () => {
+    // 鎖第一張月表時，把第三張（approved）改成 returned：迴圈走到它時 lockSheet 會丟 invalid_transition。
+    const original = fake.from.bind(fake)
+    let flipped = false
+    const spy = vi.spyOn(fake, "from").mockImplementation((table: string) => {
+      const builder = original(table)
+      if (table === "attendance_sheets" && !flipped) {
+        const realUpdate = builder.update.bind(builder)
+        builder.update = (value: Row) => {
+          if (!flipped) {
+            flipped = true
+            fake.db.attendance_sheets = fake.db.attendance_sheets.map((sheet) => (sheet.id === "sheet-5" ? { ...sheet, status: "returned" } : sheet))
+          }
+          return realUpdate(value)
+        }
+      }
+      return builder
+    })
+    const res = await as(TOKENS.hr).post(`/payroll-periods/${PERIOD}/close`)
+    spy.mockRestore()
+    expect(res.status, JSON.stringify(res.body)).toBe(409)
+    expect(res.body.error).toBe("checklist_incomplete")
+    const sheets = res.body.checklist.items.find((i: { key: string }) => i.key === "sheets")
+    expect(sheets.passed).toBe(false)
+    expect(sheets.pending[0]).toMatchObject({ employeeId: EMP1, status: "returned" })
+    expect(closes()).toHaveLength(0)
+  })
+
   it("只有 HR 能鎖：員工、老闆（不是 HR 角色）、查無員工列的帳號都 403；期別格式不對 400", async () => {
     for (const token of [TOKENS.emp1, TOKENS.boss, TOKENS.designee, TOKENS.ghost]) {
       expect((await as(token).post(`/payroll-periods/${PERIOD}/close`)).status, token).toBe(403)

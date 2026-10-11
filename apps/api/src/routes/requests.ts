@@ -60,8 +60,9 @@ const createSchema = z.object({
       z.object({
         // 要是真的存在的日期（2026-08-32 會被補卡的 Date.UTC 進位到 9/1，發薪鎖定的月份歸屬就錯了）。
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isRealDateKey, "date must be a real calendar day"),
-        startTime: z.string().regex(/^\d{2}:\d{2}$/),
-        endTime: z.string().regex(/^\d{2}:\d{2}$/),
+        // 時間也要在範圍內（25:00、23:99 會被補卡的 Date.UTC 進位到隔天／別的月份）；endTime 允許 24:00（當天結束）。
+        startTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "startTime must be HH:MM (00:00–23:59)"),
+        endTime: z.string().regex(/^(?:([01]\d|2[0-3]):[0-5]\d|24:00)$/, "endTime must be HH:MM (00:00–24:00)"),
         hours: z.number().nonnegative(),
         // 補卡（fix_punch）指定補哪一種卡：'in' 上班／'out' 下班／休息與外出
         // 對。核准時 services/ledger.fixPunchCandidates 逐段依 type + date +

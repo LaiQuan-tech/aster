@@ -861,6 +861,32 @@ describe("申請單 segment 日期必須是真的存在的日期（不然補卡�
   })
 })
 
+describe("申請單 segment 的時間必須在範圍內（25:00 會被補卡的 Date.UTC 進位到隔天，鑽過月份的鎖）", () => {
+  it("補卡 segment 填 25:00／23:99／99:99 → 400 invalid_body，不建單；23:59 與 endTime 24:00 照常", async () => {
+    lock(SEP)
+    for (const startTime of ["25:00", "23:99", "99:99", "24:00"]) {
+      const res = await as(T.emp).post("/requests").send({
+        kind: "fix_punch",
+        startAt: tpe("2026-08-31", "23:00:00"),
+        endAt: tpe("2026-08-31", "23:00:00"),
+        segments: [{ date: "2026-08-31", startTime, endTime: startTime, hours: 0, type: "in" }],
+      })
+      expect(res.status, startTime).toBe(400)
+      expect(res.body.error, startTime).toBe("invalid_body")
+    }
+    expect(fake.db.leave_requests ?? []).toHaveLength(0)
+    // 合法的邊界值：startTime 最晚 23:59、endTime 可以是 24:00（當天結束）。
+    fake.db.approval_flows = [{ tenant_id: TENANT_ID, applies_to: "fix_punch", mode: "list", approver_emp_ids: [MGR] }]
+    const edge = await as(T.emp).post("/requests").send({
+      kind: "fix_punch",
+      startAt: tpe("2026-10-05", "23:59:00"),
+      endAt: tpe("2026-10-05", "23:59:00"),
+      segments: [{ date: "2026-10-05", startTime: "23:59", endTime: "24:00", hours: 0, type: "in" }],
+    })
+    expect(edge.status, JSON.stringify(edge.body)).toBe(201)
+  })
+})
+
 describe("月表核准：已結算月先答 period_closed，不讓 unsettled_leave 搶先回答", () => {
   const S_SEP = "50000000-0000-4000-8000-0000000000a1"
   beforeEach(() => {

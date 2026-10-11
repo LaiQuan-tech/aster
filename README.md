@@ -129,6 +129,9 @@ HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼�
      後台「設定 › 進階功能」只有老闆或 platform_admin 能改）；HR 不是就 403。成功後 locked 月表轉回 approved、
      finalized 薪資單轉回 draft、`period_closes` 標 `reopened`（誰／何時／理由，欄位 `reopened_*`）、寫 audit、通知老闆與 HR；
      之後要再鎖必須重新過一次檢查清單。已匯款的更正不要重新開放，改在下月薪資處理（目前系統沒有「前期更正」加減項入口）。
+     ⚠️ 權限的邊界：「誰是老闆」（`approval.fallbackApproverEmpId`，後台「假別與簽核流程」頁）與員工角色目前任何 HR 都能改，
+     所以這道鎖擋的是日常誤操作與一般 HR 的直接解鎖，**不是**對惡意內部人員的技術性防線（每一步都留 audit，重新開放時
+     老闆與 HR 都會收到通知）；是否把「換老闆」「指派 platform_admin」也收成專屬權限是尚未做的決定。
    - 舊的 `POST /attendance-sheets/close-period`／`reopen-period`（含 `force`）已移除，`GET /attendance-sheets/period-closes` 仍在。
 3. **月表快照歷史** — 每次 `approveSheet` 都往 `attendance_sheet_snapshots` 追加一列（seq 遞增、不可刪），
    return／reopen 只清 `attendance_sheets.snapshot`、歷史不動；`GET /attendance-sheets/:id/snapshots`（HR）列出。
