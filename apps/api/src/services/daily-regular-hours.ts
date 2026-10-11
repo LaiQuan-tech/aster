@@ -1,4 +1,5 @@
 import { DEFAULT_LEAVE_HOURS_PER_DAY, normalizeHoursPerDay } from "../lib/leave-duration.js"
+import { logger } from "../lib/logger.js"
 import { loadRuleConfig } from "./payroll-inputs.js"
 
 /**
@@ -14,7 +15,9 @@ export async function loadDailyRegularHours(tenantId: string): Promise<number> {
   try {
     const { rules } = await loadRuleConfig(tenantId)
     return normalizeHoursPerDay(rules.payroll.dailyRegularHours)
-  } catch {
+  } catch (err) {
+    // 不丟錯，但留 log：規則讀取持續失敗時營運端才看得到（畫面會一直用 8 換算）。
+    logger.warn({ err, tenantId }, "loadDailyRegularHours: 讀規則失敗，退回預設 8 小時")
     return DEFAULT_LEAVE_HOURS_PER_DAY
   }
 }

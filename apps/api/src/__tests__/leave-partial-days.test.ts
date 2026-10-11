@@ -11,6 +11,7 @@ import { periodText, requestsRouter } from "../routes/requests.js"
 import { buildLeaveRegister } from "../services/leave-register.js"
 import { __internal } from "../services/settlement.js"
 import { zonedTimeToUtc } from "../lib/tz.js"
+import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
 import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 /**
@@ -236,6 +237,62 @@ describe("通知內文的時數 — 請假寫成天＋時（2026-10-11），其�
     expect(toApplicant).toHaveLength(1)
     expect(toApplicant[0].body).toContain("（1 天 7 時）")
     expect(toApplicant[0].body).toContain("已駁回")
+  })
+
+  it("加班單的通知（送單給簽核者、核准給申請人）維持「（3 小時）」，不會被換成天＋時", async () => {
+    fake.db.approval_flows = [
+      { tenant_id: TENANT_ID, applies_to: "leave", mode: "list", approver_emp_ids: [MGR_ID] },
+      { tenant_id: TENANT_ID, applies_to: "ot", mode: "list", approver_emp_ids: [MGR_ID] },
+    ]
+    const created = await post("/requests", STAFF_TOKEN).send({
+      kind: "ot",
+      startAt: at("2027-06-08", "18:00"),
+      endAt: at("2027-06-08", "21:00"),
+      hours: 3,
+      payout: "pay",
+    })
+    expect(created.status, JSON.stringify(created.body)).toBe(201)
+    const toApprover = (fake.db.notifications ?? []).filter((n) => n.employee_id === MGR_ID)
+    expect(toApprover).toHaveLength(1)
+    expect(toApprover[0].body).toContain("（3 小時）")
+    expect(toApprover[0].body).not.toContain("天")
+
+    expect((await post(`/requests/${created.body.requestId}/approve`, MGR_TOKEN).send({})).status).toBe(200)
+    const toApplicant = (fake.db.notifications ?? []).filter((n) => n.employee_id === STAFF_ID)
+    expect(toApplicant).toHaveLength(1)
+    expect(toApplicant[0].body).toContain("（3 小時）")
+    expect(toApplicant[0].body).toContain("已核准")
+  })
+
+  it("租戶規則每日工時 7.5：15 小時的請假通知是（2 天）——送單、核准兩條路徑都吃規則值", async () => {
+    fake.db.rule_configs = [
+      {
+        tenant_id: TENANT_ID,
+        config: { ...DEFAULT_RULE_CONFIG, payroll: { ...DEFAULT_RULE_CONFIG.payroll, dailyRegularHours: 7.5 } },
+        version: 1,
+        effective_from: "1900-01-01",
+      },
+    ]
+    const created = await post("/requests", STAFF_TOKEN).send(PARTIAL)
+    expect(created.status, JSON.stringify(created.body)).toBe(201)
+    expect((fake.db.notifications ?? []).find((n) => n.employee_id === MGR_ID)?.body).toContain("（2 天）")
+    expect((await post(`/requests/${created.body.requestId}/approve`, MGR_TOKEN).send({})).status).toBe(200)
+    expect((fake.db.notifications ?? []).find((n) => n.employee_id === STAFF_ID)?.body).toContain("（2 天）")
+  })
+
+  it("沒填假別的請假單（後台會顯示「未指定」）一樣吃規則值：每日工時 7.5 → 15 小時是（2 天）", async () => {
+    fake.db.rule_configs = [
+      {
+        tenant_id: TENANT_ID,
+        config: { ...DEFAULT_RULE_CONFIG, payroll: { ...DEFAULT_RULE_CONFIG.payroll, dailyRegularHours: 7.5 } },
+        version: 1,
+        effective_from: "1900-01-01",
+      },
+    ]
+    const { leaveTypeId: _omit, ...withoutType } = PARTIAL
+    const created = await post("/requests", STAFF_TOKEN).send(withoutType)
+    expect(created.status, JSON.stringify(created.body)).toBe(201)
+    expect((fake.db.notifications ?? []).find((n) => n.employee_id === MGR_ID)?.body).toContain("（2 天）")
   })
 
   it("periodText：請假換算天＋時（每日工時可帶）；加班等其他類型仍是「N 小時」；沒有時數就不加括號", () => {

@@ -309,11 +309,15 @@ interface RequestContext {
   dailyRegularHours?: number
 }
 
-/** 申請人姓名／工號＋假別名稱（通知內文與附件必要檢查都要用）。 */
+/**
+ * 申請人姓名／工號＋假別名稱（通知內文與附件必要檢查都要用）。
+ * `kind`＝這張單的類型：請假單才多讀「1 天幾小時」（通知內文寫天＋時用）；沒帶時以有沒有假別判斷。
+ */
 async function loadRequestContext(
   tenantId: string,
   employeeId: string,
   leaveTypeId: string | null,
+  kind?: string,
 ): Promise<RequestContext> {
   const { data: emp, error: empErr } = await supabaseAdmin
     .from("employees")
@@ -353,8 +357,9 @@ async function loadRequestContext(
     applicantEmpNo: (emp?.emp_no as string | null) ?? null,
     leaveTypeName,
     requiresAttachment,
-    // 只有請假單（有 leaveTypeId）要換算天＋時；讀不到時 loadDailyRegularHours 退回 8、不丟錯。
-    dailyRegularHours: leaveTypeId ? await loadDailyRegularHours(tenantId) : undefined,
+    // 只有請假單要換算天＋時（沒填假別的請假單也要，所以看 kind 不看 leaveTypeId）；
+    // 讀不到時 loadDailyRegularHours 退回 8、不丟錯。
+    dailyRegularHours: (kind ? kind === "leave" : leaveTypeId != null) ? await loadDailyRegularHours(tenantId) : undefined,
   }
 }
 
@@ -668,7 +673,7 @@ requestsRouter.post(
       // 通知第 1 關簽核者（best-effort：入列失敗只記 log，不影響 201）。
       let notified = 0
       try {
-        const ctx = await loadRequestContext(tenantId, self.id, leaveTypeId ?? null)
+        const ctx = await loadRequestContext(tenantId, self.id, leaveTypeId ?? null, kind)
         notified = await notifyStepApprover({
           tenantId,
           lr: {
@@ -1219,7 +1224,7 @@ async function decideOneRequest(params: {
   // 通知內文（申請人／假別）與「附件必要」檢查共用的上下文。
   let ctx: RequestContext
   try {
-    ctx = await loadRequestContext(tenantId, lr.employee_id as string, (lr.leave_type_id as string | null) ?? null)
+    ctx = await loadRequestContext(tenantId, lr.employee_id as string, (lr.leave_type_id as string | null) ?? null, lr.kind as string)
   } catch (err) {
     return { ok: false, id: requestId, error: err instanceof Error ? err.message : "request_context_failed" }
   }

@@ -180,7 +180,7 @@ export function AttendanceSheetTable({
               <th className="py-2 pr-2">星期</th>
               <th className="py-2 pr-2">起</th>
               <th className="py-2 pr-2">迄</th>
-              <th className="py-2 pr-2">請假(h)／假別</th>
+              <th className="py-2 pr-2">請假／假別</th>
               <th className="py-2 pr-2 text-right">加班 {tierLabels[0]}</th>
               <th className="py-2 pr-2 text-right">{tierLabels[1]}</th>
               <th className="py-2 pr-2 text-right">{tierLabels[2]}</th>
