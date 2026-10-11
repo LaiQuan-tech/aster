@@ -5,6 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { resolveSelf, isFinanceRole, managedDeptIds } from "../middleware/scope.js"
 import { canSeeContractDocs } from "../services/project-scope.js"
+import { BLOCKED_DOCUMENT_EXTENSIONS, isBlockedDocument } from "../lib/blocked-upload-types.js"
 
 export const projectDocumentsRouter = Router()
 
@@ -30,7 +31,8 @@ export const BASE64_MAX_BYTES = 3 * 1024 * 1024
  * 合約掃描檔只收 PDF 與圖片（業主 2026-09-30 會議）。MIME 與副檔名**兩個都要在名單內**
  * （各自獨立檢查、不要求兩者互相對應：iOS Safari 會把 HEIC 轉成 JPEG 卻保留 .HEIC 檔名）。
  * 只限制合約掃描檔（帶 contractId 的上傳）；一般專案文件是知識庫的工作檔（docx／xlsx／dwg／zip…），
- * 不在這條限制內。
+ * 不在這條限制內——但**執行檔與腳本不收**（exe／bat／sh／js／apk…，名單與判斷見 lib/blocked-upload-types.ts），
+ * 一律回 400 `unsupported_file_type`（body 帶 `blocked`，與合約掃描檔的 `supported` 區分）。
  */
 export const CONTRACT_SCAN_CONTENT_TYPES: readonly string[] = [
   "application/pdf",
@@ -63,6 +65,12 @@ export function isAllowedContractScan(fileName: string, contentType: string | nu
 const unsupportedFileTypeBody = {
   error: "unsupported_file_type",
   supported: CONTRACT_SCAN_EXTENSIONS.map((ext) => ext.slice(1)),
+}
+
+/** 一般專案文件被擋（執行檔／腳本）：400 `unsupported_file_type`，`blocked` 列出不收的副檔名（不含點）。 */
+const blockedFileTypeBody = {
+  error: "unsupported_file_type",
+  blocked: BLOCKED_DOCUMENT_EXTENSIONS.map((ext) => ext.slice(1)),
 }
 
 const uploadFields = {
@@ -282,6 +290,11 @@ projectDocumentsRouter.post(
         res.status(400).json(unsupportedFileTypeBody)
         return
       }
+      // 一般專案文件不收執行檔與腳本：連網址都不發（合約掃描檔已被上面的白名單擋得更窄）。
+      if (!auth.contractId && isBlockedDocument(parsed.data.fileName, parsed.data.contentType)) {
+        res.status(400).json(blockedFileTypeBody)
+        return
+      }
       if (parsed.data.sizeBytes > MAX_BYTES) {
         res.status(413).json({ error: "file_too_large", maxBytes: MAX_BYTES })
         return
@@ -385,11 +398,23 @@ projectDocumentsRouter.post(
           res.status(400).json(unsupportedFileTypeBody)
           return
         }
+        // 一般專案文件：檔名、Storage 實際記下的類型、呼叫端自報的類型，任何一個是執行檔／腳本就擋（並刪掉已傳的檔）。
+        // 自報與實際分開看：不讓人用「取網址時報一個無害的 MIME、上傳時實際送執行檔的 MIME」混過去。
+        if (!isContractScan && isBlockedDocument(fileName, stored, claimed)) {
+          await removeObject(storagePath)
+          res.status(400).json(blockedFileTypeBody)
+          return
+        }
       } else {
         // ── 經 API 的 base64 上傳（小檔；Vercel 請求上限 4.5 MB 以內） ──
         // 檔案還沒進 Storage：先用呼叫端自報的類型擋（便宜、不碰 Storage）。
         if (isContractScan && !isAllowedContractScan(fileName, parsed.data.contentType)) {
           res.status(400).json(unsupportedFileTypeBody)
+          return
+        }
+        // 一般專案文件不收執行檔與腳本（還沒解碼、還沒碰 Storage）。
+        if (!isContractScan && isBlockedDocument(fileName, parsed.data.contentType)) {
+          res.status(400).json(blockedFileTypeBody)
           return
         }
         const bytes = Buffer.from(parsed.data.dataBase64 as string, "base64")

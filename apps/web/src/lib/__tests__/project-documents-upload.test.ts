@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * 專案文件上傳（業主 2026-09-30 會議 A 批）：
- *   • 合約掃描檔只收 PDF 與圖片；一般專案文件不限類型
+ *   • 合約掃描檔只收 PDF 與圖片；一般專案文件不限類型，但不收執行檔與腳本（2026-10-11：exe／bat／sh／js／apk…）
  *   • API 跑在 Vercel serverless，request body 上限約 4.5 MB → ≤ 3 MiB 走 base64、
  *     3～10 MiB 走簽名上傳網址直傳 Storage，> 10 MiB 直接擋
  *   • 錯誤訊息翻成中文
@@ -20,17 +20,28 @@ vi.mock("../supabase-browser", () => ({
 
 import {
   BASE64_UPLOAD_MAX_BYTES,
+  BLOCKED_DOCUMENT_CONTENT_TYPES,
+  BLOCKED_DOCUMENT_EXTENSIONS,
+  BLOCKED_FILE_TYPE_MESSAGE,
   CONTRACT_SCAN_ACCEPT,
   CONTRACT_SCAN_TYPE_MESSAGE,
   MAX_DOCUMENT_BYTES,
   getProjectDocuments,
   humanizeDocumentError,
+  isBlockedDocumentFile,
   isContractScanFile,
   uploadContentType,
   uploadProjectDocument,
   visibleProjectDocuments,
   type ProjectDocument,
 } from "../projects-api";
+// 後端用的那一份名單與判斷——web 與 api 是各自的 build 邊界，只能各寫一份；這裡 import 原始檔逐項比對
+// （同 leave-duration.test.ts 的做法）。改任何一邊，這裡就會紅。
+import {
+  BLOCKED_DOCUMENT_CONTENT_TYPES as API_BLOCKED_CONTENT_TYPES,
+  BLOCKED_DOCUMENT_EXTENSIONS as API_BLOCKED_EXTENSIONS,
+  isBlockedDocument as apiIsBlockedDocument,
+} from "../../../../api/src/lib/blocked-upload-types";
 
 const MiB = 1024 * 1024;
 const PROJECT = "project-1";
@@ -130,10 +141,35 @@ describe("uploadProjectDocument — 擋在送出前", () => {
     expect(h.uploadToSignedUrl).not.toHaveBeenCalled();
   });
 
-  it("一般文件不受類型限制（.exe 前端不擋；是否收由後端決定）", async () => {
+  it("一般文件不限類型：dwg／docx／zip 照送（只有執行檔與腳本不收）", async () => {
     h.apiFetch.mockResolvedValue({ id: "d1", sizeBytes: 10 });
     await uploadProjectDocument(PROJECT, fileOf("圖面.dwg", 10, ""));
-    expect(h.apiFetch).toHaveBeenCalledTimes(1);
+    await uploadProjectDocument(PROJECT, fileOf("報告.docx", 10, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"));
+    await uploadProjectDocument(PROJECT, fileOf("附件.zip", 10, "application/zip"));
+    expect(h.apiFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("一般文件選到執行檔／腳本（.exe、.sh、.js、.apk…）：不送任何請求，訊息友善、說明不收哪些", async () => {
+    for (const [name, type] of [
+      ["setup.exe", "application/x-msdownload"],
+      ["deploy.SH", ""],
+      ["tool.js", "text/javascript"],
+      ["app.apk", "application/vnd.android.package-archive"],
+      ["setup.exe.", "application/octet-stream"], // 結尾多打的點
+      ["data.bin", "application/x-sh"], // 副檔名無害、MIME 是 shell 腳本
+    ]) {
+      await expect(uploadProjectDocument(PROJECT, fileOf(name, 10, type))).rejects.toThrow(BLOCKED_FILE_TYPE_MESSAGE);
+    }
+    expect(h.apiFetch).not.toHaveBeenCalled();
+    expect(h.uploadToSignedUrl).not.toHaveBeenCalled();
+    expect(BLOCKED_FILE_TYPE_MESSAGE).toContain("執行檔");
+    expect(BLOCKED_FILE_TYPE_MESSAGE).toContain(".exe");
+    expect(BLOCKED_FILE_TYPE_MESSAGE).not.toContain("合約掃描");
+  });
+
+  it("大的執行檔也一樣在前端就擋（不會先去要簽名網址）", async () => {
+    await expect(uploadProjectDocument(PROJECT, fileOf("big.exe", 5 * MiB, "application/x-msdownload"))).rejects.toThrow(BLOCKED_FILE_TYPE_MESSAGE);
+    expect(h.apiFetch).not.toHaveBeenCalled();
   });
 
   it("超過 10 MiB：不送任何請求，訊息寫明上限", async () => {
@@ -213,14 +249,61 @@ describe("uploadProjectDocument — 大檔（3～10 MiB）簽名網址直傳 Sto
   });
 });
 
+describe("一般專案文件不收的類型 — 名單與判斷（與後端同一份）", () => {
+  it("副檔名與 MIME 名單跟後端 lib/blocked-upload-types.ts 逐項一致", () => {
+    expect([...BLOCKED_DOCUMENT_EXTENSIONS]).toEqual([...API_BLOCKED_EXTENSIONS]);
+    expect([...BLOCKED_DOCUMENT_CONTENT_TYPES]).toEqual([...API_BLOCKED_CONTENT_TYPES]);
+  });
+
+  it("isBlockedDocumentFile 與後端的 isBlockedDocument 在同一組輸入上結論相同", () => {
+    const cases: Array<[string, string]> = [
+      ...BLOCKED_DOCUMENT_EXTENSIONS.map((ext): [string, string] => [`setup${ext}`, "application/pdf"]),
+      ...BLOCKED_DOCUMENT_EXTENSIONS.map((ext): [string, string] => [`SETUP${ext.toUpperCase()}`, ""]),
+      ...BLOCKED_DOCUMENT_CONTENT_TYPES.map((type): [string, string] => ["data.bin", type]),
+      ["data.bin", "Application/X-SH; charset=binary"],
+      ["report.pdf.exe", "application/pdf"],
+      ["report.exe.pdf", "application/pdf"],
+      ["setup.exe.", ""],
+      ["setup.exe ", ""],
+      ["圖面.dwg", "application/octet-stream"],
+      ["報告.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+      ["設定.json", "application/json"],
+      ["Makefile", "application/octet-stream"],
+      ["附件.zip", "application/zip"],
+    ];
+    for (const [name, type] of cases) {
+      expect(isBlockedDocumentFile({ name, type }), `${name} ${type}`).toBe(apiIsBlockedDocument(name, type));
+    }
+  });
+
+  it("業主列的副檔名全部擋；圖面／文件／壓縮檔不擋", () => {
+    for (const ext of ["exe", "bat", "cmd", "com", "scr", "msi", "ps1", "vbs", "vbe", "js", "jse", "wsf", "jar", "apk", "dmg", "pkg", "sh", "app"]) {
+      expect(isBlockedDocumentFile({ name: `x.${ext}`, type: "" }), ext).toBe(true);
+    }
+    for (const name of ["圖面.dwg", "報告.docx", "預算.xlsx", "附件.zip", "照片.jpg", "設定.json", "說明.txt"]) {
+      expect(isBlockedDocumentFile({ name, type: "" }), name).toBe(false);
+    }
+  });
+});
+
 describe("humanizeDocumentError", () => {
   it("API 錯誤碼翻中文（認 .code，也認 [status] code 格式的訊息）；其他錯誤原樣；不是 Error 用備用訊息", () => {
     expect(humanizeDocumentError(apiError(413, "file_too_large"))).toContain("單檔上限 10 MB");
-    expect(humanizeDocumentError(apiError(400, "unsupported_file_type"))).toBe(CONTRACT_SCAN_TYPE_MESSAGE);
     expect(humanizeDocumentError(new Error("[400] contract_not_in_project"))).toContain("不屬於這個專案");
     expect(humanizeDocumentError(new Error("網路中斷"))).toBe("網路中斷");
     expect(humanizeDocumentError("字串", { fallback: "備用" })).toBe("備用");
     expect(humanizeDocumentError("字串")).toBe("上傳失敗");
+  });
+
+  it("unsupported_file_type 的說法跟著上傳的是什麼：一般文件 → 不收執行檔與腳本；合約掃描 → 只收 PDF 與圖片", () => {
+    expect(humanizeDocumentError(apiError(400, "unsupported_file_type"))).toBe(BLOCKED_FILE_TYPE_MESSAGE);
+    expect(humanizeDocumentError(new Error("[400] unsupported_file_type"))).toBe(BLOCKED_FILE_TYPE_MESSAGE);
+    expect(humanizeDocumentError(apiError(400, "unsupported_file_type"), { contract: true })).toBe(CONTRACT_SCAN_TYPE_MESSAGE);
+  });
+
+  it("後端回 400 unsupported_file_type（前端名單沒擋到、例如 Storage 實際記的 MIME 是執行檔）→ 一般文件顯示友善說明", async () => {
+    h.apiFetch.mockRejectedValue(apiError(400, "unsupported_file_type"));
+    await expect(uploadProjectDocument(PROJECT, fileOf("資料.dat", 10, "text/plain"))).rejects.toThrow(BLOCKED_FILE_TYPE_MESSAGE);
   });
 
   it("403 的說法跟著上傳的是什麼：一般專案文件不能講成「合約掃描檔只有經理…」，合約掃描才講窄的授權", () => {

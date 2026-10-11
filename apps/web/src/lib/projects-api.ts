@@ -649,6 +649,27 @@ export const CONTRACT_SCAN_ACCEPT =
   ".pdf,.jpg,.jpeg,.png,.heic,.heif,.webp,application/pdf,image/jpeg,image/png,image/heic,image/heif,image/webp"
 export const CONTRACT_SCAN_TYPE_MESSAGE = "合約掃描檔只收 PDF 與圖片（JPG、PNG、HEIC、WebP）。"
 
+/**
+ * 一般專案文件不收的類型：**執行檔與腳本**（2026-10-11；後端 apps/api/src/lib/blocked-upload-types.ts 同一份名單，
+ * web 與 api 是各自的 build 邊界，各抄一份，`__tests__/project-documents-upload.test.ts` 直接 import 後端那份逐項比對）。
+ * 合約掃描檔另有只收 PDF／圖片的白名單，不看這份。這裡只是上傳前的友善檢查（免得大檔傳完才被拒）；真正的把關在後端。
+ */
+export const BLOCKED_DOCUMENT_EXTENSIONS: readonly string[] = [
+  ".exe", ".bat", ".cmd", ".com", ".scr", ".msi", ".ps1", ".vbs", ".vbe",
+  ".js", ".jse", ".wsf", ".jar", ".apk", ".dmg", ".pkg", ".sh", ".app",
+]
+export const BLOCKED_DOCUMENT_CONTENT_TYPES: readonly string[] = [
+  "application/x-msdownload", "application/x-msdos-program", "application/x-dosexec", "application/x-ms-dos-executable",
+  "application/vnd.microsoft.portable-executable", "application/x-bat", "application/bat", "application/x-msi",
+  "application/x-executable", "application/x-mach-binary", "application/x-elf",
+  "application/x-sh", "application/x-shellscript", "application/x-csh", "text/x-shellscript", "text/x-sh",
+  "application/javascript", "application/x-javascript", "text/javascript",
+  "application/x-vbscript", "text/vbscript", "application/x-powershell", "text/x-powershell",
+  "application/java-archive", "application/vnd.android.package-archive", "application/x-apple-diskimage",
+]
+export const BLOCKED_FILE_TYPE_MESSAGE =
+  "專案文件不收執行檔與腳本（例如 .exe、.bat、.msi、.ps1、.js、.sh、.apk、.dmg）。請改傳文件、圖檔、表格或圖面等檔案；如果真的需要分享這類檔案，請洽管理員。"
+
 const CONTENT_TYPE_BY_EXT: Record<string, string> = {
   ".pdf": "application/pdf",
   ".jpg": "image/jpeg",
@@ -661,6 +682,18 @@ const CONTENT_TYPE_BY_EXT: Record<string, string> = {
 
 function extOf(fileName: string): string {
   return (fileName.match(/\.[A-Za-z0-9]{1,8}$/) ?? [""])[0].toLowerCase()
+}
+
+/** 結尾多打的點／空白先去掉（Windows 會自動拿掉：`setup.exe.` 其實就是 `setup.exe`），再取最後一段副檔名。 */
+function blockedCheckExtOf(fileName: string): string {
+  return extOf(fileName.trim().replace(/[.\s]+$/u, ""))
+}
+
+/** 這個檔案是不是一般專案文件不收的類型（執行檔／腳本）：副檔名在名單內，或瀏覽器標的 MIME 在名單內。 */
+export function isBlockedDocumentFile(file: { name: string; type?: string | null }): boolean {
+  if (BLOCKED_DOCUMENT_EXTENSIONS.includes(blockedCheckExtOf(file.name))) return true
+  const type = (file.type ?? "").split(";")[0]?.trim().toLowerCase() ?? ""
+  return BLOCKED_DOCUMENT_CONTENT_TYPES.includes(type)
 }
 
 /** 合約掃描檔的副檔名是否在名單內（上傳前的友善檢查；後端還會驗 MIME）。 */
@@ -681,7 +714,7 @@ export function uploadContentType(file: { name: string; type: string }): string 
 
 const DOCUMENT_ERRORS: Record<string, string> = {
   forbidden: "沒有上傳權限（專案文件只有該案成員、負責人、所屬部門主管與 HR／會計能上傳）。",
-  unsupported_file_type: CONTRACT_SCAN_TYPE_MESSAGE,
+  // unsupported_file_type 依上傳的是什麼而不同（合約掃描：只收 PDF／圖片；一般文件：不收執行檔），見 humanizeDocumentError。
   file_too_large: `檔案太大：單檔上限 ${MAX_DOCUMENT_BYTES / 1024 / 1024} MB，請壓縮或拆檔後再上傳。`,
   contract_not_in_project: "這份合約不屬於這個專案、或已經作廢。",
   upload_not_found: "檔案沒有傳完整，請重新上傳。",
@@ -701,6 +734,8 @@ export function humanizeDocumentError(err: unknown, opts: { fallback?: string; c
   // apiFetch 丟出的錯誤帶 `.code`；沒有時（例如測試／別處手組的 Error）從「[403] forbidden」格式的訊息裡取。
   const code = (err as ApiError).code ?? err.message.match(/^\[\d{3}\]\s+(\w+)$/)?.[1]
   if (code === "forbidden" && opts.contract) return CONTRACT_SCAN_FORBIDDEN_MESSAGE
+  // 同一個錯誤碼兩種意思：合約掃描 → 只收 PDF／圖片；一般專案文件 → 不收執行檔與腳本。
+  if (code === "unsupported_file_type") return opts.contract ? CONTRACT_SCAN_TYPE_MESSAGE : BLOCKED_FILE_TYPE_MESSAGE
   if (code && DOCUMENT_ERRORS[code]) return DOCUMENT_ERRORS[code]
   return err.message || (opts.fallback ?? "上傳失敗")
 }
@@ -729,6 +764,8 @@ async function fileToBase64(file: File): Promise<string> {
  */
 export async function uploadProjectDocument(projectId: string, file: File, contractId?: string) {
   if (contractId && !isContractScanFile(file)) throw new Error(CONTRACT_SCAN_TYPE_MESSAGE)
+  // 一般專案文件不收執行檔與腳本：選到就直接說，不必傳完才被後端拒（後端仍會再驗）。
+  if (!contractId && isBlockedDocumentFile(file)) throw new Error(BLOCKED_FILE_TYPE_MESSAGE)
   if (file.size > MAX_DOCUMENT_BYTES) throw new Error(DOCUMENT_ERRORS.file_too_large)
   const contentType = uploadContentType(file)
   try {
