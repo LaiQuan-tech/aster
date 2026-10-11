@@ -12,6 +12,7 @@ import {
   grantAnnualLeave,
   leaveBalancesHavePeriod,
 } from "../services/annual-leave.js"
+import { loadDailyRegularHours } from "../services/daily-regular-hours.js"
 
 export const leaveBalancesRouter = Router()
 
@@ -87,6 +88,10 @@ function isHrRole(role: string | undefined): boolean {
  * 2026 年的桶是 2026-05-10～2027-05-09，用 2026 或 2027 查都該看得到它。
  * 期間欄還沒套（migration 0050）時退回舊語意 `year = ?`。
  *
+ * 回應 `{ balances, dailyRegularHours }`：`balances` 的 entitled／used／deferred 一律是**小時**；
+ * `dailyRegularHours`（規則參數 payroll.dailyRegularHours，預設 8）只是讓前端把小時顯示成「天＋時」
+ * 的換算基準（2026-10-11），不影響任何資料與計算。
+ *
  * Uses supabaseAdmin (bypasses RLS); the explicit filters are the load-bearing
  * guard.
  */
@@ -142,7 +147,9 @@ leaveBalancesRouter.get(
         next(new Error(`GET /leave-balances: ${error.message}`))
         return
       }
-      res.status(200).json({ balances: data ?? [] })
+      // dailyRegularHours：只給前端把小時顯示成「天＋時」用（1 天 ＝ 幾小時，規則參數，預設 8）；
+      // balances 的數字仍是小時，這個欄位讀不到時退回 8、不影響回應。
+      res.status(200).json({ balances: data ?? [], dailyRegularHours: await loadDailyRegularHours(tenantId) })
     } catch (err) {
       next(err)
     }

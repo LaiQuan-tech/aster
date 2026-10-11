@@ -1,6 +1,7 @@
 import type ExcelJS from "exceljs"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
+import { formatLeaveDuration } from "../lib/leave-duration.js"
 import { dayWindowUtc, localDateKey, monthRangeKeys } from "../lib/tz.js"
 import { applyHeaderStyle, workbookToBuffer } from "../lib/xlsx/index.js"
 import { leaveDeductRate } from "./settlement.js"
@@ -474,21 +475,28 @@ export function leaveSettlementFilename(period: string): string {
  * leaveSettlementWorkbookBuffer — GET /leave-settlement/export.xlsx。刻意只有
  * 「表頭 1 列 + 每筆一列」，不加合計列：呼叫端要能拿列數直接比對
  * `items.length`（見 __tests__/leave-settlement-live.test.ts）。
+ *
+ * 請假時數顯示成天＋時（2026-10-11）：**「時數」欄維持數字（小時）**——HR 會篩選、加總這一欄，
+ * 文字會破壞可加總性——緊接著新增「時數(天時)」文字欄（例「1 天 7 時」）給人看。
+ * `opts.hoursPerDay`＝1 天幾小時（規則 payroll.dailyRegularHours，省略＝8）。
  */
-export async function leaveSettlementWorkbookBuffer(result: LeaveSettlementListResult): Promise<Buffer> {
+export async function leaveSettlementWorkbookBuffer(
+  result: LeaveSettlementListResult,
+  opts: { hoursPerDay?: number } = {},
+): Promise<Buffer> {
   // exceljs 動態載入：見 lib/xlsx/attendance-sheet.ts 檔頭同樣的冷啟動考量。
   const { default: ExcelJSRuntime } = await import("exceljs")
   const wb = new ExcelJSRuntime.Workbook()
   wb.creator = "aster-hr"
   const ws = wb.addWorksheet("假單核銷", { views: [{ state: "frozen", ySplit: 1 }] })
 
-  const headers = ["員工姓名", "工號", "部門", "假別", "起日", "迄日", "時數", "需附件", "附件數", "核銷狀態", "核銷時間", "核銷人", "跨月", "核銷月份"]
+  const headers = ["員工姓名", "工號", "部門", "假別", "起日", "迄日", "時數", "時數(天時)", "需附件", "附件數", "核銷狀態", "核銷時間", "核銷人", "跨月", "核銷月份"]
   const headerRow = ws.getRow(1)
   headers.forEach((h, i) => {
     headerRow.getCell(i + 1).value = h
   })
   applyHeaderStyle(headerRow)
-  const widths = [12, 10, 14, 12, 12, 12, 8, 8, 8, 10, 20, 12, 8, 10]
+  const widths = [12, 10, 14, 12, 12, 12, 8, 14, 8, 8, 10, 20, 12, 8, 10]
   widths.forEach((w, i) => {
     ws.getColumn(i + 1).width = w
   })
@@ -503,13 +511,14 @@ export async function leaveSettlementWorkbookBuffer(result: LeaveSettlementListR
     row.getCell(5).value = item.startDate
     row.getCell(6).value = item.endDate
     row.getCell(7).value = item.hours
-    row.getCell(8).value = item.requiresAttachment ? "是" : "否"
-    row.getCell(9).value = item.attachmentCount
-    row.getCell(10).value = item.settledAt ? "已核銷" : "未核銷"
-    row.getCell(11).value = item.settledAt ?? ""
-    row.getCell(12).value = item.settledBy?.name ?? ""
-    row.getCell(13).value = item.crossMonth ? "是" : "否"
-    row.getCell(14).value = item.settledPeriod ?? ""
+    row.getCell(8).value = formatLeaveDuration(item.hours, opts.hoursPerDay)
+    row.getCell(9).value = item.requiresAttachment ? "是" : "否"
+    row.getCell(10).value = item.attachmentCount
+    row.getCell(11).value = item.settledAt ? "已核銷" : "未核銷"
+    row.getCell(12).value = item.settledAt ?? ""
+    row.getCell(13).value = item.settledBy?.name ?? ""
+    row.getCell(14).value = item.crossMonth ? "是" : "否"
+    row.getCell(15).value = item.settledPeriod ?? ""
     r += 1
   }
 

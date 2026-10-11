@@ -6,6 +6,7 @@ import type {
   SheetStatus,
   SheetView,
 } from "../../services/attendance-sheet-types.js"
+import { formatLeaveDurationMinutes } from "../leave-duration.js"
 import { addDaysKey, diffDaysKey, localParts, monthRangeKeys, weekdayOfKey } from "../tz.js"
 
 /**
@@ -353,13 +354,20 @@ function writeDayRows(ws: ExcelJS.Worksheet, view: SheetView, tz: string): numbe
   return r
 }
 
-/** 彙總區：一列標籤（bold）＋一列數值，回傳下一個可用的空白列號。 */
+/**
+ * 彙總區：一列標籤（bold）＋一列數值，回傳下一個可用的空白列號。
+ *
+ * 請假時數顯示成天＋時（2026-10-11）：逐日「請假」欄與「請假合計」**維持數字（小時）**——這張表照手工 Excel
+ * 的版面做、數字會被拿去加總對帳，換成文字會破壞可加總性——另在第 13 欄加一格「請假合計(天時)」文字
+ * （例「3 天」「1 天 4 時」，1 天 ＝ `hoursPerDay` 小時，預設 8）給人看。
+ */
 function writeSummarySection(
   ws: ExcelJS.Worksheet,
   startRow: number,
   totals: SheetView["totals"],
   labels: [string, string, string],
   outingMinutes: number,
+  hoursPerDay?: number,
 ): number {
   const headerLabels = [
     "請假合計",
@@ -374,6 +382,7 @@ function writeSummarySection(
     "月累計加班警示",
     "出勤工時",
     "外出時數",
+    "請假合計(天時)",
   ]
   const labelRow = ws.getRow(startRow)
   headerLabels.forEach((label, idx) => (labelRow.getCell(idx + 1).value = label))
@@ -407,6 +416,7 @@ function writeSummarySection(
   valueRow.getCell(11).numFmt = "0.0"
   valueRow.getCell(12).value = minutesToHours(outingMinutes)
   valueRow.getCell(12).numFmt = "0.0"
+  valueRow.getCell(13).value = formatLeaveDurationMinutes(totals.leaveMinutes, hoursPerDay)
 
   return startRow + 2
 }
@@ -513,6 +523,8 @@ export interface BuildAttendanceWorkbookOptions {
   phone: string
   /** IANA tz，用來把 firstIn/lastOut（UTC ISO）與「製表」時間換算成當地 h:mm。 */
   tz: string
+  /** 1 天 ＝ 幾小時（規則 payroll.dailyRegularHours）：只用在彙總區「請假合計(天時)」；省略＝8。 */
+  hoursPerDay?: number
 }
 
 /**
@@ -548,7 +560,7 @@ export async function buildAttendanceWorkbook(
     writeHeaderRow(ws, tierLabels)
     const afterDays = writeDayRows(ws, view, opts.tz)
     const outingMinutes = view.days.reduce((sum, day) => sum + day.outingMinutes, 0)
-    const afterSummary = writeSummarySection(ws, afterDays + 1, view.totals, tierLabels, outingMinutes)
+    const afterSummary = writeSummarySection(ws, afterDays + 1, view.totals, tierLabels, outingMinutes, opts.hoursPerDay)
     writeMoneySection(ws, view, view.money, tierLabels)
     writeFooter(ws, afterSummary + 1, view, opts.tz)
   }

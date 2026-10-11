@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { resolveSelf } from "../middleware/scope.js"
+import { loadDailyRegularHours } from "../services/daily-regular-hours.js"
 import {
   leaveSettlementFilename,
   leaveSettlementWorkbookBuffer,
@@ -74,7 +75,7 @@ leaveSettlementRouter.get("/leave-settlement/export.xlsx", ...guards, async (req
   }
   try {
     const result = await listLeaveSettlement(tenantId, parsed.data)
-    const buffer = await leaveSettlementWorkbookBuffer(result)
+    const buffer = await leaveSettlementWorkbookBuffer(result, { hoursPerDay: await loadDailyRegularHours(tenantId) })
     sendXlsx(res, buffer, leaveSettlementFilename(result.period))
   } catch (err) {
     next(err)
@@ -91,7 +92,8 @@ leaveSettlementRouter.get("/leave-settlement", ...guards, async (req: Request, r
   }
   try {
     const result = await listLeaveSettlement(tenantId, parsed.data)
-    res.status(200).json(result)
+    // dailyRegularHours：1 天 ＝ 幾小時（規則參數，預設 8），只給前端把 hours（仍是小時）顯示成「天＋時」用。
+    res.status(200).json({ ...result, dailyRegularHours: await loadDailyRegularHours(tenantId) })
   } catch (err) {
     next(err)
   }

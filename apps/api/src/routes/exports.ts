@@ -9,6 +9,7 @@ import { setActor } from "../lib/request-context.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { buildAttendanceWorkbook, workbookToBuffer, toRocYear } from "../lib/xlsx/index.js"
 import { getSheetView, listSheets, SheetError } from "../services/attendance-sheets.js"
+import { loadDailyRegularHours } from "../services/daily-regular-hours.js"
 import { SHEET_TRANSITIONS, type SheetStatus, type SheetView } from "../services/attendance-sheet-types.js"
 
 export const exportsRouter = Router()
@@ -38,12 +39,15 @@ interface Letterhead {
   address: string
   phone: string
   tz: string
+  /** 1 天 ＝ 幾小時（規則 payroll.dailyRegularHours）：彙總區「請假合計(天時)」的換算基準，讀不到＝8。 */
+  hoursPerDay: number
 }
 
 async function resolveLetterhead(tenantId: string): Promise<Letterhead> {
-  const [tenantRes, tz] = await Promise.all([
+  const [tenantRes, tz, hoursPerDay] = await Promise.all([
     supabaseAdmin.from("tenants").select("name, branding").eq("id", tenantId).maybeSingle(),
     getTenantTimezone(tenantId),
+    loadDailyRegularHours(tenantId),
   ])
   if (tenantRes.error) throw new Error(`exports (tenant): ${tenantRes.error.message}`)
   const branding = (tenantRes.data?.branding ?? {}) as TenantBranding
@@ -52,6 +56,7 @@ async function resolveLetterhead(tenantId: string): Promise<Letterhead> {
     address: branding.address || DEFAULT_ADDRESS,
     phone: branding.phone || "",
     tz,
+    hoursPerDay,
   }
 }
 

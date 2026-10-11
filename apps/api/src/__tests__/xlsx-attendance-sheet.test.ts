@@ -469,6 +469,25 @@ describe("buildAttendanceWorkbook — edge cases", () => {
     expect(buffer.length).toBeGreaterThan(0)
   })
 
+  it("2026-10-11 請假合計：逐日「請假」欄與「請假合計」維持數字（小時），第 13 欄多一格「請假合計(天時)」文字", async () => {
+    const v = minimalView("leave", "請假員工")
+    v.totals.leaveMinutes = 108 * 60 // 事假 108 小時
+    const wb = await buildAttendanceWorkbook([v], OPTS)
+    const ws = wb.worksheets[0]
+    // 沒有逐日列時：表頭 5、彙總標籤列 6（空白月份補滿 30 天 → 找標籤所在列）
+    let labelRow = 0
+    for (let r = 1; r <= ws.rowCount; r += 1) if (ws.getRow(r).getCell(1).value === "請假合計") labelRow = r
+    expect(labelRow).toBeGreaterThan(0)
+    expect(ws.getRow(labelRow).getCell(13).value).toBe("請假合計(天時)")
+    expect(ws.getRow(labelRow + 1).getCell(1).value).toBe(108) // 數字版不動，還能加總
+    expect(ws.getRow(labelRow + 1).getCell(13).value).toBe("13 天 4 時")
+
+    // 每日工時不是 8 時：照傳入值換算
+    const wb2 = await buildAttendanceWorkbook([v], { ...OPTS, hoursPerDay: 7.5 })
+    const ws2 = wb2.worksheets[0]
+    expect(ws2.getRow(labelRow + 1).getCell(13).value).toBe("14 天 3 時") // 108 ÷ 7.5 = 14.4 天 ＝ 14 天 3 時
+  })
+
   it("兩個同名員工的 sheet 名不會相撞", async () => {
     const wb = await buildAttendanceWorkbook(
       [minimalView("a", "測試員工"), minimalView("b", "測試員工")],

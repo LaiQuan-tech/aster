@@ -7,7 +7,7 @@ import type { DayType, ShiftDef } from "@hr/rules"
 // 純測試：supabase 換成記憶體版（helpers/fake-supabase.ts），不連任何 DB。
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
 
-import { requestsRouter } from "../routes/requests.js"
+import { periodText, requestsRouter } from "../routes/requests.js"
 import { buildLeaveRegister } from "../services/leave-register.js"
 import { __internal } from "../services/settlement.js"
 import { zonedTimeToUtc } from "../lib/tz.js"
@@ -128,7 +128,10 @@ describe("POST /requests — 請假精細到小時（後端不要求整天）", 
 
     const notice = fake.db.notifications?.[0] as Row
     expect(notice.employee_id).toBe(MGR_ID)
-    expect(notice.body).toContain("（15 小時）")
+    // 請假時數寫成天＋時（2026-10-11 業主決定）：15 小時 ＝ 1 天 7 時；通知 payload 的 hours 仍是小時。
+    expect(notice.body).toContain("（1 天 7 時）")
+    expect(notice.body).not.toContain("15 小時")
+    expect((notice.payload as Record<string, unknown>).hours).toBe(15)
     expect(notice.body).toContain("14:00")
     expect(notice.body).toContain("12:00")
   })
@@ -207,6 +210,47 @@ describe("最終核准 → 扣假（以 hours 計）", () => {
     expect(fake.db.leave_balances?.[0]?.used).toBe(3)
     expect((await post(`/requests/${big.body.requestId}/approve`, MGR_TOKEN).send({})).status).toBe(200)
     expect(fake.db.leave_balances?.[0]?.used).toBe(18)
+  })
+})
+
+describe("通知內文的時數 — 請假寫成天＋時（2026-10-11），其他類型維持小時", () => {
+  it("核准通知給申請人：期間後面是（1 天 7 時），不是（15 小時）", async () => {
+    const created = await post("/requests", STAFF_TOKEN).send(PARTIAL)
+    const requestId = created.body.requestId as string
+    expect((await post(`/requests/${requestId}/approve`, MGR_TOKEN).send({})).status).toBe(200)
+    const toApplicant = (fake.db.notifications ?? []).filter((n) => n.employee_id === STAFF_ID)
+    expect(toApplicant).toHaveLength(1)
+    expect(toApplicant[0].body).toContain("（1 天 7 時）")
+    expect(toApplicant[0].body).toContain("已核准")
+    expect(toApplicant[0].body).not.toContain("15 小時")
+    // payload 給前端的 hours 仍是小時（只有內文是人看的文字）
+    expect((toApplicant[0].payload as Record<string, unknown>).hours).toBe(15)
+  })
+
+  it("駁回通知給申請人：同樣是天＋時", async () => {
+    const created = await post("/requests", STAFF_TOKEN).send(PARTIAL)
+    const requestId = created.body.requestId as string
+    const rejected = await post(`/requests/${requestId}/reject`, MGR_TOKEN).send({ comment: "人手不足" })
+    expect(rejected.status, JSON.stringify(rejected.body)).toBe(200)
+    const toApplicant = (fake.db.notifications ?? []).filter((n) => n.employee_id === STAFF_ID)
+    expect(toApplicant).toHaveLength(1)
+    expect(toApplicant[0].body).toContain("（1 天 7 時）")
+    expect(toApplicant[0].body).toContain("已駁回")
+  })
+
+  it("periodText：請假換算天＋時（每日工時可帶）；加班等其他類型仍是「N 小時」；沒有時數就不加括號", () => {
+    const a = "2027-06-08T06:00:00.000Z"
+    const b = "2027-06-10T04:00:00.000Z"
+    expect(periodText(a, b, 15, { leave: true })).toMatch(/（1 天 7 時）$/)
+    expect(periodText(a, b, "15.00", { leave: true })).toMatch(/（1 天 7 時）$/) // numeric 以字串回來
+    expect(periodText(a, b, 15, { leave: true, hoursPerDay: 7.5 })).toMatch(/（2 天）$/)
+    expect(periodText(a, b, 8, { leave: true })).toMatch(/（1 天）$/)
+    expect(periodText(a, b, 0, { leave: true })).toMatch(/（0 天）$/)
+    expect(periodText(a, b, 3, { leave: false })).toMatch(/（3 小時）$/)
+    expect(periodText(a, b, 3)).toMatch(/（3 小時）$/)
+    expect(periodText(a, b, null, { leave: true })).not.toContain("（")
+    expect(periodText(a, b, "", { leave: true })).not.toContain("（")
+    expect(periodText(a, b, "abc", { leave: true })).not.toContain("（")
   })
 })
 

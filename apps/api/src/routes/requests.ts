@@ -9,6 +9,7 @@ import { resolveApproverChain, type StepKind } from "../services/approval-chain.
 import { enrichRequestRows } from "../services/request-enrich.js"
 import { isStepCandidate, stepCandidates, stepSelectCols } from "../services/approval-steps.js"
 import { enqueue } from "../services/notify.js"
+import { loadDailyRegularHours } from "../services/daily-regular-hours.js"
 import { writeAuditLog } from "../services/audit.js"
 import { assertRequestOpen, closedPeriodsOfRequest, isRealDateKey } from "../services/period-lock.js"
 import {
@@ -21,6 +22,7 @@ import {
 } from "../services/overtime-cap.js"
 import { loadRuleConfigFor } from "../services/payroll-inputs.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
+import { formatLeaveDuration } from "../lib/leave-duration.js"
 import { localDateKey } from "../lib/tz.js"
 import { approvalStepsHaveCandidates, columnsExist, isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { logger } from "../lib/logger.js"
@@ -280,9 +282,20 @@ function fmtTaipei(iso: string | null | undefined): string {
   return TAIPEI_FMT.format(d)
 }
 
-function periodText(startAt: string | null | undefined, endAt: string | null | undefined, hours: unknown): string {
+/**
+ * 通知內文的「期間（時數）」。請假的時數寫成天＋時（2026-10-11 業主決定，例「（1 天 7 時）」，1 天 ＝
+ * `opts.hoursPerDay` 小時，省略＝8）；其他類型（加班、在家工作…）維持「（N 小時）」。
+ * 只是文字——`leave_requests.hours` 與通知 payload 的 hours 仍是小時。
+ */
+export function periodText(
+  startAt: string | null | undefined,
+  endAt: string | null | undefined,
+  hours: unknown,
+  opts: { leave?: boolean; hoursPerDay?: number } = {},
+): string {
   const h = hours == null || hours === "" ? null : Number(hours)
-  const hoursText = h != null && Number.isFinite(h) ? `（${h} 小時）` : ""
+  const amount = h == null || !Number.isFinite(h) ? null : opts.leave ? formatLeaveDuration(h, opts.hoursPerDay) : `${h} 小時`
+  const hoursText = amount == null ? "" : `（${amount}）`
   return `${fmtTaipei(startAt)} ～ ${fmtTaipei(endAt)}${hoursText}`
 }
 
@@ -292,6 +305,8 @@ interface RequestContext {
   leaveTypeName: string | null
   /** leave_types.requires_attachment；欄位尚未套用時視為 false。 */
   requiresAttachment: boolean
+  /** 請假單才載入：1 天 ＝ 幾小時（規則 payroll.dailyRegularHours），只給通知內文把時數寫成天＋時用。 */
+  dailyRegularHours?: number
 }
 
 /** 申請人姓名／工號＋假別名稱（通知內文與附件必要檢查都要用）。 */
@@ -338,6 +353,8 @@ async function loadRequestContext(
     applicantEmpNo: (emp?.emp_no as string | null) ?? null,
     leaveTypeName,
     requiresAttachment,
+    // 只有請假單（有 leaveTypeId）要換算天＋時；讀不到時 loadDailyRegularHours 退回 8、不丟錯。
+    dailyRegularHours: leaveTypeId ? await loadDailyRegularHours(tenantId) : undefined,
   }
 }
 
@@ -402,7 +419,7 @@ async function notifyStepApprover(params: {
     employeeIds: approverEmpIds,
     type: "approval",
     title: `待簽核：${ctx.applicantName} 的${kindLabel(lr.kind)}申請`,
-    body: `${applicantLabel(ctx)} 申請${subjectLabel(lr, ctx)}，期間 ${periodText(lr.start_at, lr.end_at, lr.hours)}${reason}。請至「待我簽核」處理${stepText}。${hrText}${extra}`,
+    body: `${applicantLabel(ctx)} 申請${subjectLabel(lr, ctx)}，期間 ${periodText(lr.start_at, lr.end_at, lr.hours, { leave: lr.kind === "leave", hoursPerDay: ctx.dailyRegularHours })}${reason}。請至「待我簽核」處理${stepText}。${hrText}${extra}`,
     payload: basePayload(lr, {
       event,
       currentStep: step,
@@ -450,7 +467,7 @@ async function notifyApplicant(params: {
     employeeIds: [lr.employee_id],
     type: "approval",
     title: `你的${kindLabel(lr.kind)}申請${verdict}`,
-    body: `${subjectLabel(lr, ctx)} 期間 ${periodText(lr.start_at, lr.end_at, lr.hours)} ${verdict}。${commentText}${extra}`.trim(),
+    body: `${subjectLabel(lr, ctx)} 期間 ${periodText(lr.start_at, lr.end_at, lr.hours, { leave: lr.kind === "leave", hoursPerDay: ctx.dailyRegularHours })} ${verdict}。${commentText}${extra}`.trim(),
     payload: basePayload(lr, {
       event,
       currentStep: step,
