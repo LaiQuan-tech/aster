@@ -7,7 +7,6 @@ import { employeesRouter } from "./routes/employees.js"
 import { authAccountsRouter } from "./routes/auth-accounts.js"
 import { departmentsRouter } from "./routes/departments.js"
 import { shiftsRouter } from "./routes/shifts.js"
-import { schedulesRouter } from "./routes/schedules.js"
 import { punchRouter } from "./routes/punch.js"
 import { leaveTypesRouter } from "./routes/leave-types.js"
 import { approvalFlowsRouter } from "./routes/approval-flows.js"
@@ -22,6 +21,7 @@ import { exportsRouter } from "./routes/exports.js"
 import { calendarRouter } from "./routes/calendar.js"
 import { payrollRouter } from "./routes/payroll.js"
 import { payrollPeriodsRouter } from "./routes/payroll-periods.js"
+import { payrollAdjustmentsRouter } from "./routes/payroll-adjustments.js"
 import { leaveBalancesRouter } from "./routes/leave-balances.js"
 import { leaveRegisterRouter } from "./routes/leave-register.js"
 import { compTimeRouter } from "./routes/comp-time.js"
@@ -130,7 +130,7 @@ app.use(authAccountsRouter) // /employees/bulk-invite、/employees/:id/invite|se
 app.use(employeesRouter)
 app.use(departmentsRouter)
 app.use(shiftsRouter)
-app.use(schedulesRouter)
+// 班表（/schedules）2026-10-11 隨班表功能移除（業主：不需要）：端點取消註冊 → 落到下面的 404。
 app.use(punchRouter)
 app.use(leaveTypesRouter)
 app.use(approvalFlowsRouter)
@@ -145,6 +145,7 @@ app.use(exportsRouter)
 app.use(calendarRouter)
 app.use(payrollRouter)
 app.use(payrollPeriodsRouter) // /payroll-periods*（發薪鎖定：完成本月發薪／重新開放；2026-10-11）
+app.use(payrollAdjustmentsRouter) // /payroll-adjustments*（薪資一次性加減項＝前期更正：下月補發或扣回；2026-10-11）
 app.use(leaveBalancesRouter)
 app.use(leaveRegisterRouter)
 app.use(compTimeRouter)

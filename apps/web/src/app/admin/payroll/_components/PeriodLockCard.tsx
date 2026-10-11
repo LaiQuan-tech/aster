@@ -411,6 +411,8 @@ export function PeriodLockCard() {
             {PRIOR_PERIOD_CORRECTION_HREF && (
               <Link
                 href={PRIOR_PERIOD_CORRECTION_HREF}
+                // 連結在同一頁：先關掉對話框，才看得到後面那張「薪資加減項（前期更正）」卡。
+                onClick={dismissReopen}
                 className="mt-1 inline-block text-xs font-medium underline"
                 data-testid="prior-period-correction-link"
               >

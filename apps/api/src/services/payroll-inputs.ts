@@ -3,6 +3,7 @@ import {
   parseRuleConfig,
   type AttendanceDay,
   type DayType,
+  type PayrollAdjustment,
   type RuleConfig,
   type SalaryStructure,
 } from "@hr/rules"
@@ -11,6 +12,7 @@ import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
 import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { DEFAULT_TIMEZONE, todayKey } from "../lib/tz.js"
 import { sumClaimsForPayroll, type PayrollClaimRow } from "./payroll-claims.js"
+import { loadAdjustmentsByEmployee } from "./payroll-adjustments.js"
 import { leaveDeductRate, loadLeaveTypes } from "./settlement.js"
 
 /**
@@ -321,6 +323,11 @@ export interface PayrollInputs {
   allowancesByEmployee: Map<string, number>
   /** 本期從薪資扣回的預支（預支差額為負 → 員工應退，正值）。 */
   advanceRecoveryByEmployee: Map<string, number>
+  /**
+   * 本期一次性加減項（前期更正：下月補發或扣回；payroll_adjustments，沒被軟刪除的）。
+   * 課稅的補發進 gross、扣回進應扣、不課稅的補發只加在實發，規則見引擎檔頭（packages/rules payroll-engine）。
+   */
+  adjustmentsByEmployee: Map<string, PayrollAdjustment[]>
 }
 
 /**
@@ -350,6 +357,7 @@ export async function loadPayrollInputs(
         expensesByEmployee: new Map(),
         allowancesByEmployee: new Map(),
         advanceRecoveryByEmployee: new Map(),
+        adjustmentsByEmployee: new Map(),
       }
     }
     salQuery = salQuery.in("employee_id", employeeIds)
@@ -369,6 +377,7 @@ export async function loadPayrollInputs(
     expensesByEmployee: new Map(),
     allowancesByEmployee: new Map(),
     advanceRecoveryByEmployee: new Map(),
+    adjustmentsByEmployee: new Map(),
   }
   if (scopeIds.length === 0) return empty
 
@@ -452,6 +461,10 @@ export async function loadPayrollInputs(
     }
   }
 
+  // --- 本期一次性加減項（前期更正）----------------------------------------
+  // 放進哪一期由那一列的 period 決定（HR 在薪資作業頁逐人維護）；軟刪除的不算。見 services/payroll-adjustments.ts。
+  const adjustmentsByEmployee = await loadAdjustmentsByEmployee(tenantId, period, scopeIds)
+
   return {
     rules,
     ruleConfigVersion: version,
@@ -461,6 +474,7 @@ export async function loadPayrollInputs(
     expensesByEmployee,
     allowancesByEmployee,
     advanceRecoveryByEmployee,
+    adjustmentsByEmployee,
   }
 }
 
@@ -475,6 +489,8 @@ export interface EmployeePayrollInputs {
   deductRateByCode: Map<string, number>
   expenses: number
   allowances: number
+  /** 本期一次性加減項（前期更正）；試算與薪資執行用同一份，月表上的數字才會等於薪資單。 */
+  adjustments: PayrollAdjustment[]
 }
 
 export async function buildPayrollInputs(
@@ -498,6 +514,7 @@ export async function buildPayrollInputs(
     deductRateByCode: batch.deductRateByCode,
     expenses: batch.expensesByEmployee.get(employeeId) ?? 0,
     allowances: batch.allowancesByEmployee.get(employeeId) ?? 0,
+    adjustments: batch.adjustmentsByEmployee.get(employeeId) ?? [],
   }
 }
 
@@ -507,5 +524,5 @@ export function computeFromInputs(
   inputs: EmployeePayrollInputs,
 ): ReturnType<typeof computePayslip> | null {
   if (!inputs.salary) return null
-  return computePayslip(days, inputs.salary, inputs.rules, inputs.expenses, inputs.allowances)
+  return computePayslip(days, inputs.salary, inputs.rules, inputs.expenses, inputs.allowances, inputs.adjustments)
 }

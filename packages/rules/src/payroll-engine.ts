@@ -20,6 +20,14 @@
  *     沒付過,再扣一次就是雙扣。(月薪制/出勤天數制照舊。)
  *
  * 代墊支出刻意不進 gross:那是代收代付、非薪資所得,課稅基礎不同。
+ *
+ * 一次性加減項(前期更正,第 6 個參數 adjustments):已匯款的月份不改原薪資單,在下月薪資補發或扣回。
+ *   • 課稅的補發(金額 > 0、taxable) → 進 gross,併入扣繳基礎(屬薪資所得)
+ *   • 不課稅的補發(金額 > 0、非 taxable) → 不進 gross,只加在實發(稅務性質同代墊支出)
+ *   • 扣回(金額 < 0,不論 taxable) → 進 totalDeductions,只減實發;**不減 gross**——已扣繳的稅不因這筆扣回而退,
+ *     保守(不少扣),年度結算再調整
+ *   • 保險以投保薪資為基數,不受影響
+ * 每一筆都在 lines 與 adjustments 逐項列出,標題帶「(更正 YYYY-MM)」,薪資單任何一版(後台、員工、Email)都看得到。
  */
 
 import { nhiEmployeePremium } from "./tw-tax.js";
@@ -33,7 +41,9 @@ import {
   DAY_TYPE_TO_OVERTIME_WHEN,
   type AttendanceDay,
   type OvertimeSegment,
+  type PayrollAdjustment,
   type PayrollMethod,
+  type PayslipAdjustmentLine,
   type PayslipBreakdown,
   type PayslipLine,
   type SalaryStructure,
@@ -46,6 +56,17 @@ import {
  */
 function round(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/**
+ * 加減項在薪資單上的顯示名稱:有更正月份就標「(更正 YYYY-MM)」,讓員工知道這筆補發/扣回對應哪個月。
+ * 名稱本身已經寫了同樣的「更正 YYYY-MM」就不重複標。純函式,後台/員工/Email 三處顯示共用同一個規則。
+ */
+export function adjustmentDisplayLabel(label: string, relatedPeriod?: string | null): string {
+  const name = label.trim();
+  if (!relatedPeriod) return name;
+  const tag = `更正 ${relatedPeriod}`;
+  return name.includes(tag) ? name : `${name}(${tag})`;
 }
 
 /** 時薪專用:四捨五入到小數 4 位 (客戶薪資表「平日每小時工資額」的精度)。 */
@@ -111,6 +132,11 @@ export function computePayslip(
    * 由呼叫端依投保級距表判斷 (該表尚未匯入,見帳本待辦)。
    */
   allowances = 0,
+  /**
+   * 本期一次性加減項 (前期更正:下月補發或扣回)。預設無。處理規則見檔頭;金額為 0 或不是有限數字的略過。
+   * 每筆在 lines 與 breakdown.adjustments 逐項列出,標題帶「(更正 YYYY-MM)」。
+   */
+  adjustments: readonly PayrollAdjustment[] = [],
 ): PayslipBreakdown {
   const method: PayrollMethod = salary.method ?? rules.payroll.method;
   // 時薪制(工讀生/Part-time,C5)不可退而求其次用 baseSalary÷divisor 猜時薪——
@@ -240,7 +266,41 @@ export function computePayslip(
   const allowancesTotal = round(allowances);
   if (allowancesTotal !== 0) lines.push({ label: "定額補貼", amount: allowancesTotal });
 
-  const gross = round(base + overtimePay + nightPay + attendanceBonus + allowancesTotal);
+  // 一次性加減項 (前期更正):依正負與課稅分三種歸屬,見檔頭。金額先取到分;0/非有限數字略過。
+  const adjustmentLines: PayslipAdjustmentLine[] = [];
+  let adjustmentEarnings = 0;
+  let adjustmentDeductions = 0;
+  let adjustmentNonTaxable = 0;
+  for (const adj of adjustments) {
+    const amount = round(Number(adj.amount));
+    if (!Number.isFinite(amount) || amount === 0) continue;
+    const taxable = adj.taxable !== false;
+    const treatment = amount < 0 ? "deduction" : taxable ? "earning" : "non_taxable";
+    adjustmentLines.push({
+      ...(adj.id ? { id: adj.id } : {}),
+      label: String(adj.label ?? "").trim() || "加減項",
+      amount,
+      taxable,
+      relatedPeriod: adj.relatedPeriod ?? null,
+      treatment,
+    });
+    if (treatment === "earning") adjustmentEarnings += amount;
+    else if (treatment === "deduction") adjustmentDeductions += -amount;
+    else adjustmentNonTaxable += amount;
+  }
+  adjustmentEarnings = round(adjustmentEarnings);
+  adjustmentDeductions = round(adjustmentDeductions);
+  adjustmentNonTaxable = round(adjustmentNonTaxable);
+  const adjustmentLine = (a: PayslipAdjustmentLine): PayslipLine => ({
+    label: adjustmentDisplayLabel(a.label, a.relatedPeriod),
+    amount: a.amount,
+  });
+  // 課稅的補發跟定額補貼一樣在 gross 之前進 lines,「lines 加總 = gross」的對帳維持成立。
+  for (const a of adjustmentLines) if (a.treatment === "earning") lines.push(adjustmentLine(a));
+
+  const gross = round(
+    base + overtimePay + nightPay + attendanceBonus + allowancesTotal + adjustmentEarnings,
+  );
 
   // --- 請假扣款 / 遲到早退扣款 (扣項,不動 gross) ---------------------------
   // 請假扣款 = Σ 請假分鐘 ÷ 60 × 時薪 × deductRate;比例由呼叫端隨每筆帶入
@@ -315,12 +375,14 @@ export function computePayslip(
       pensionVoluntary +
       advance +
       leaveDeduction +
-      lateEarlyDeduction,
+      lateEarlyDeduction +
+      adjustmentDeductions,
   );
 
   // 代墊支出是「代收代付」,不是薪資所得 → 不進 gross,直接加在實發。
+  // 不課稅的補發 (加減項) 稅務性質相同,同樣只加在實發。
   const expensesTotal = round(expenses);
-  const net = round(gross - totalDeductions + expensesTotal);
+  const net = round(gross - totalDeductions + expensesTotal + adjustmentNonTaxable);
 
   if (laborInsurance !== 0) lines.push({ label: "勞保費", amount: -laborInsurance });
   if (healthInsurance !== 0) lines.push({ label: "健保費", amount: -healthInsurance });
@@ -330,7 +392,9 @@ export function computePayslip(
   if (leaveDeduction !== 0) lines.push(...leaveLines);
   if (lateEarlyDeduction !== 0)
     lines.push({ label: "遲到早退扣款", amount: -lateEarlyDeduction });
+  for (const a of adjustmentLines) if (a.treatment === "deduction") lines.push(adjustmentLine(a));
   if (expensesTotal !== 0) lines.push({ label: "支出(代墊)", amount: expensesTotal });
+  for (const a of adjustmentLines) if (a.treatment === "non_taxable") lines.push(adjustmentLine(a));
 
   return {
     base,
@@ -354,5 +418,9 @@ export function computePayslip(
     expenses: expensesTotal,
     net,
     lines,
+    // 只有本期真的有加減項才帶這四個欄位(沒有加減項的薪資單輸出與以前完全相同)。
+    ...(adjustmentLines.length > 0
+      ? { adjustmentEarnings, adjustmentDeductions, adjustmentNonTaxable, adjustments: adjustmentLines }
+      : {}),
   };
 }

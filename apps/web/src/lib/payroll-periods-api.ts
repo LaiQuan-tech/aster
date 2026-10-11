@@ -385,10 +385,12 @@ export const PRIOR_PERIOD_CORRECTION_HINT =
   "如果這個月薪資已經匯款，建議不要重新開放，改在下個月薪資用「前期更正」補發或扣回";
 
 /**
- * 「前期更正」的入口連結。**目前是 null**：現有系統沒有「可在某月加一行有說明的加減項」的入口，薪資引擎也沒有
- * 一次性加減項。之後有入口只改這一個值——有值時重新開放對話框會在提示後面附連結，null 就不顯示。
+ * 「前期更正」的入口連結：薪資作業頁的「薪資加減項（前期更正）」卡（`id="payroll-adjustments"`，
+ * app/admin/payroll/_components/PayrollAdjustmentsCard.tsx）——可對每位員工在某月加一行有說明的補發或扣回，
+ * 薪資執行時併進該月薪資單並標「更正 YYYY-MM」（lib/payroll-adjustments-api.ts）。
+ * 有值時重新開放對話框會在提示後面附連結（點了先關掉對話框再捲到那張卡）；null 就不顯示。
  */
-export const PRIOR_PERIOD_CORRECTION_HREF: string | null = null;
+export const PRIOR_PERIOD_CORRECTION_HREF: string | null = "/admin/payroll#payroll-adjustments";
 
 /** 重新開放對話框的後果說明。 */
 export const REOPEN_EFFECT_NOTE =

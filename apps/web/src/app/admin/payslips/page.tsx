@@ -16,6 +16,7 @@ import {
   sendPayslipsBatch,
   type PayslipSendFields,
 } from "@/lib/cash-payouts-api";
+import { adjustmentDisplayOf, adjustmentPrintRows, signedMoney, TREATMENT_LABEL } from "@/lib/payroll-adjustments-api";
 
 /** M3：`sent_at`／`sent_to` 在 migration 0050 之後才有（lib/admin-api.ts 是 WP0 的檔，不改）。 */
 type PayslipRow = Payslip & PayslipSendFields;
@@ -227,6 +228,7 @@ table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6p
 <tr><td>夜間加給</td><td style="text-align:right">${money(n(p.night_pay))}</td></tr>
 <tr><td>全勤獎金</td><td style="text-align:right">${money(n(p.attendance_bonus))}</td></tr>
 <tr><td>定額補貼</td><td style="text-align:right">${money(n(b.allowances))}</td></tr>
+${adjustmentPrintRows(b, "earning", { money, esc })}
 <tr class="sum"><td>應發合計</td><td style="text-align:right">${money(n(p.gross))}</td></tr></table>
 <h2>應扣</h2><table>
 <tr><td>勞保自付</td><td style="text-align:right">${money(n(b.laborInsurance))}</td></tr>
@@ -235,9 +237,11 @@ table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6p
 <tr><td>預支扣回</td><td style="text-align:right">${money(n(b.advance))}</td></tr>
 <tr><td>請假扣款</td><td style="text-align:right">${money(n(b.leaveDeduction))}</td></tr>
 <tr><td>遲到早退扣款</td><td style="text-align:right">${money(n(b.lateEarlyDeduction))}</td></tr>
+${adjustmentPrintRows(b, "deduction", { money, esc })}
 <tr class="sum"><td>應扣合計</td><td style="text-align:right">${money(n(b.totalDeductions))}</td></tr></table>
 <h2>實發</h2><table>
 <tr><td>代墊支出（不計薪資所得）</td><td style="text-align:right">${money(n(b.expenses))}</td></tr>
+${adjustmentPrintRows(b, "non_taxable", { money, esc })}
 <tr class="sum"><td>實發金額</td><td style="text-align:right">${money(netOf(p))}</td></tr></table>
 ${ot.length ? `<h2>加班費分段</h2><table>${ot.join("")}</table>` : ""}
 ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
@@ -407,7 +411,9 @@ function PayslipRow({
 }) {
   const lines = b.lines ?? [];
   const ot = b.overtimeSegments ?? [];
-  const hasDetail = lines.length > 0 || ot.length > 0;
+  // 一次性加減項（前期更正）：薪資單逐項列出，標「(更正 YYYY-MM)」；舊薪資單沒有。
+  const adjustments = adjustmentDisplayOf(b);
+  const hasDetail = lines.length > 0 || ot.length > 0 || adjustments.all.length > 0;
   return (
     <>
       <tr className="border-b border-gray-50">
@@ -418,6 +424,15 @@ function PayslipRow({
             </button>
           ) : (
             name
+          )}
+          {adjustments.all.length > 0 && (
+            <span
+              className="ml-2 rounded-full bg-sky-50 px-2 py-0.5 text-xs font-normal text-sky-700"
+              title="含一次性加減項（前期更正）：展開看逐項明細；應發／應扣／實發都已包含"
+              data-testid="payslip-has-adjustments"
+            >
+              含更正 {adjustments.all.length} 筆
+            </span>
           )}
         </td>
         <td className="py-2 pr-3 text-right text-gray-500">{money(n(b.hourlyWage))}</td>
@@ -485,6 +500,22 @@ function PayslipRow({
                           <td className="py-0.5 pr-3 text-gray-700">{OT_LABEL[s.when] ?? s.when} × {s.multiplier}</td>
                           <td className="py-0.5 pr-3 text-right text-gray-500">{s.hours} 小時</td>
                           <td className="py-0.5 text-right">{money(s.amount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {adjustments.all.length > 0 && (
+                <div data-testid="payslip-adjustments-block">
+                  <p className="mb-1 text-xs font-semibold text-gray-500">加減項（前期更正）</p>
+                  <table className="w-full text-xs">
+                    <tbody>
+                      {adjustments.all.map((a, i) => (
+                        <tr key={a.id ?? i}>
+                          <td className="py-0.5 pr-3 text-gray-700">{a.label}</td>
+                          <td className="py-0.5 pr-3 text-gray-400">{TREATMENT_LABEL[a.treatment]}</td>
+                          <td className={`py-0.5 text-right ${a.signed < 0 ? "text-rose-700" : ""}`}>{signedMoney(a.signed)}</td>
                         </tr>
                       ))}
                     </tbody>

@@ -128,7 +128,7 @@ HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼�
      （`tenants.features.approval.fallbackApproverEmpId`）**與老闆指定的人**（`features.payroll.periodUnlockEmpIds`，
      後台「設定 › 進階功能」只有老闆或 platform_admin 能改）；HR 不是就 403。成功後 locked 月表轉回 approved、
      finalized 薪資單轉回 draft、`period_closes` 標 `reopened`（誰／何時／理由，欄位 `reopened_*`）、寫 audit、通知老闆與 HR；
-     之後要再鎖必須重新過一次檢查清單。已匯款的更正不要重新開放，改在下月薪資處理（目前系統沒有「前期更正」加減項入口）。
+     之後要再鎖必須重新過一次檢查清單。已匯款的更正不要重新開放，改在下月薪資用「前期更正」補發或扣回（見下一條）。
    - **權限邊界：HR 不能靠三條路變成老闆**（2026-10-11 業主拍板，`apps/api/src/services/privileged-accounts.ts`；
      誰是老闆＝誰能重新開放已結算月份，所以這三件事只有老闆或 platform_admin 能做，其他人含 HR 一律 403）：
      ① **換老闆設定**（`PUT /api/tenant/settings` 的 `features.approval.fallbackApproverEmpId`，後台「假別與簽核流程」頁）——
@@ -145,6 +145,22 @@ HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼�
      前端對應：假別與簽核流程頁的老闆欄位、員工管理頁的角色下拉（「平台管理員」選項）與重設密碼／寄信動作，
      非老闆／非 platform_admin 看到的是停用並附說明（`apps/web/src/lib/privileged-accounts.ts`）。
      ⚠️ 仍然沒有堵的：有資料庫權限的人（直接改庫）與 platform_admin 本人；每一步都留 audit，重新開放時老闆與 HR 都會收到通知。
+   - **前期更正＝薪資一次性加減項**（2026-10-11 業主拍板）：已匯款的月份不重新開放、不改原薪資單，改在**下個月**薪資補發或扣回。
+     資料表 `payroll_adjustments`（`packages/db/sql/0055_payroll_adjustments.sql`，軟刪除 `deleted_at`）；HR 專用 API
+     `GET|POST /payroll-adjustments`、`PATCH|DELETE /payroll-adjustments/:id`（`apps/api/src/routes/payroll-adjustments.ts`）：
+     每筆＝員工＋`period`（放進哪一期的薪資單）＋名稱＋帶正負號的金額＋是否課稅＋更正的月份（`related_period`）＋HR 備註
+     （備註不會印在薪資單上）。新增／修改／刪除遇到該月已發薪鎖定 → 409 `period_closed`、該員工該期薪資單已定稿 → 409
+     `payslip_finalized`；非 HR 403；寫 audit。後台入口：「薪資與費用 › 薪資作業」的「薪資加減項（前期更正）」卡
+     （每位員工可展開編輯；重新開放月結的對話框裡「前往前期更正」連結也指到這裡）。
+     **併進薪資單的方式**（`POST /payroll/run` → 引擎 `computePayslip` 第 6 個參數；`packages/rules/src/payroll-engine.ts` 檔頭有完整說明）：
+     課稅的補發 → 計入**應發 gross**（併入扣繳基礎＝薪資所得）；不課稅的補發 → 不進 gross、只加在實發；扣回（負）→ 計入**應扣**、
+     只減實發，**不減 gross**——保守處理：已扣繳的稅不因這筆扣回而退（不少扣），年度結算再調整；勞健保以投保薪資為基數，不受影響。
+     對帳：`gross = … + adjustmentEarnings`、`totalDeductions = … + adjustmentDeductions`、
+     `net = gross − totalDeductions + expenses + adjustmentNonTaxable`、`Σ lines = net`；`breakdown.adjustments` 逐筆內嵌（含 id）。
+     **薪資單每一筆都列出**（標題帶「(更正 YYYY-MM)」）：後台列印版與逐項明細、員工端「我的薪資單 › 看明細」、Email（html 與純文字，
+     `apps/api/src/services/payslip-html.ts`）；沒有加減項的薪資單版面不變。出勤月表的薪資試算同樣帶入（試算＝薪資單）。
+     **草稿不會自己跟上**：新增／修改／刪除後要**重新執行薪資作業**才會反映；回應的 `payslip.stale: true` 與畫面「草稿未更新」就是提醒，
+     而且草稿過期時定稿會被擋（409 `adjustments_stale`），不會有「補發漏進薪資單卻已定稿」。
    - 舊的 `POST /attendance-sheets/close-period`／`reopen-period`（含 `force`）已移除，`GET /attendance-sheets/period-closes` 仍在。
 3. **月表快照歷史** — 每次 `approveSheet` 都往 `attendance_sheet_snapshots` 追加一列（seq 遞增、不可刪），
    return／reopen 只清 `attendance_sheets.snapshot`、歷史不動；`GET /attendance-sheets/:id/snapshots`（HR）列出。

@@ -1699,7 +1699,10 @@ async function composeLiveView(
   let money: SheetMoney | null = null
   if (inputs?.salary) {
     try {
-      money = toMoney(computePayslip(payrollDays, inputs.salary, inputs.rules, inputs.expenses, inputs.allowances), inputs.rules)
+      money = toMoney(
+        computePayslip(payrollDays, inputs.salary, inputs.rules, inputs.expenses, inputs.allowances, inputs.adjustments),
+        inputs.rules,
+      )
     } catch (err) {
       // 引擎拒絕猜時薪（無時薪且無本薪）→ money 留 null，月表其餘照常。
       logger.warn({ err, tenantId, sheetId: sheet.id }, "attendance-sheets: money preview unavailable")

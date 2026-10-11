@@ -20,6 +20,7 @@ import {
 import { buildNhiDependentBody, buildTaxDependentBody, dependentErrorMessage } from "@/lib/payroll-dependents";
 import { loadPayrollEmployees } from "@/lib/payroll-employees";
 import { errorMessageOf } from "@/lib/period-closed";
+import { PayrollAdjustmentsCard } from "./_components/PayrollAdjustmentsCard";
 import { PeriodLockCard } from "./_components/PeriodLockCard";
 
 const inputCls =
@@ -77,6 +78,8 @@ export default function PayrollAdminPage() {
   const [runEmployeeId, setRunEmployeeId] = useState("");
   // ok=false 是錯誤（紅字）：例如該月已發薪鎖定（409 period_closed）。
   const [runMsg, setRunMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // 每執行一次薪資作業加 1：「薪資加減項（前期更正）」卡重新讀一次，草稿薪資單跟上了就拿掉「草稿未更新」的提醒。
+  const [adjustmentsRefresh, setAdjustmentsRefresh] = useState(0);
 
   const visibleEmployees = useMemo(() => {
     const term = employeeKeyword.trim().toLowerCase();
@@ -262,12 +265,16 @@ export default function PayrollAdminPage() {
       const result = await runPayroll(runPeriod, runEmployeeId || undefined);
       // 遲到說明老闆還沒決定的人（視為影響全勤）一併提醒（2026-10-11）。
       const lateWarnings = (result.warnings ?? []).map((w) => `${empName(w.employeeId)} ${w.message}`);
+      // 併進薪資單的一次性加減項（前期更正）筆數，讓 HR 核對（API 回 adjustmentCount；舊版 API 沒有就不顯示）。
+      const adjustmentCount = (result as { adjustmentCount?: number }).adjustmentCount ?? 0;
       setRunMsg({
         ok: true,
         text:
           `已執行 ${runPeriod} 薪資作業：產生 ${result.generated} 筆，略過已定案 ${result.skipped.length} 筆` +
+          (adjustmentCount > 0 ? `；含加減項（前期更正）${adjustmentCount} 筆` : "") +
           (lateWarnings.length > 0 ? `；提醒：${lateWarnings.join("；")}` : ""),
       });
+      setAdjustmentsRefresh((n) => n + 1);
     } catch (err) {
       // 該月已發薪鎖定 → 409 period_closed →「YYYY-MM 已結算，請洽管理者」（要重算，先請老闆或老闆指定的人重新開放）。
       setRunMsg({ ok: false, text: errorMessageOf(err, "執行失敗") });
@@ -500,6 +507,10 @@ export default function PayrollAdminPage() {
 
       {/* 月結與發薪鎖定（2026-10-11）：每個月一個月結開關；先於「執行薪資」，因為鎖住的月份不能再執行。 */}
       <PeriodLockCard />
+
+      {/* 前期更正（2026-10-11）：已匯款的月份不改原薪資單，在下月薪資補發或扣回；薪資單逐項列出並標「更正 YYYY-MM」。
+          先於「執行薪資」，因為加減項要在執行之前加好（或加完再重新執行）。#payroll-adjustments 是重新開放對話框裡「前往前期更正」的錨點。 */}
+      <PayrollAdjustmentsCard employees={employees} refreshKey={adjustmentsRefresh} />
 
       <Card>
         <h2 className="mb-4 text-sm font-medium text-gray-500">執行薪資/獎金作業</h2>

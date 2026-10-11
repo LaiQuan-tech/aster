@@ -7,6 +7,10 @@
  * 之後才是加班費分段與逐項明細。三段的順序與標題是驗收條件，改動前先看
  * `__tests__/payslip-html.test.ts`。
  *
+ * 一次性加減項（前期更正；breakdown.adjustments）一筆一列、標題帶「(更正 YYYY-MM)」：課稅補發列在應發
+ * （應發合計之前）、扣回列在應扣（應扣合計之前，金額顯示正值）、不課稅補發列在實發（實發金額之前，標「不計薪資所得」）。
+ * 純文字版共用同一份資料列，所以兩版都列得出每一筆。
+ *
  * 與列印版的兩個差別：
  *   ① **不含任何 `<script>`**（列印版結尾有 `window.print()`；信件裡的腳本不會執行，
  *      而且會被郵件服務判定成可疑內容）——測試直接斷言 html 不含 "<script"。
@@ -15,6 +19,20 @@
  * 金額一律 `toLocaleString("zh-TW")`（千分位、無小數），與畫面同一份格式；
  * 姓名／備註等自由文字一律 `esc()` 後才進 HTML。
  */
+
+import { adjustmentDisplayLabel } from "@hr/rules"
+
+/** 薪資單上的一筆一次性加減項（前期更正；引擎 PayslipAdjustmentLine 的子集，舊薪資單沒有）。 */
+export interface PayslipAdjustmentLike {
+  label: string
+  /** 帶正負號的原金額（正＝補發、負＝扣回）。 */
+  amount: number
+  taxable?: boolean
+  /** 更正的月份 'YYYY-MM'；顯示為「(更正 YYYY-MM)」。 */
+  relatedPeriod?: string | null
+  /** earning＝課稅補發（列在應發）、deduction＝扣回（列在應扣）、non_taxable＝不課稅補發（列在實發）。 */
+  treatment?: "earning" | "deduction" | "non_taxable"
+}
 
 /** 只取用得到的欄位，舊資料 breakdown 可能是 `{}`，全部 optional。 */
 export interface PayslipBreakdownLike {
@@ -31,6 +49,8 @@ export interface PayslipBreakdownLike {
   net?: number
   overtimeSegments?: Array<{ when: string; multiplier: number; hours: number; amount: number }>
   lines?: Array<{ label: string; amount: number }>
+  /** 一次性加減項（前期更正）；只有本期有加減項的薪資單才有。 */
+  adjustments?: PayslipAdjustmentLike[]
 }
 
 /** PostgREST 的 numeric 欄位回字串；這裡一律接受 string | number | null。 */
@@ -95,6 +115,26 @@ export function payslipMailSubject(period: string): string {
 
 type Row = [label: string, value: string]
 
+type AdjustmentTreatment = NonNullable<PayslipAdjustmentLike["treatment"]>
+
+function treatmentOf(a: PayslipAdjustmentLike): AdjustmentTreatment {
+  if (a.treatment) return a.treatment
+  return n(a.amount) < 0 ? "deduction" : a.taxable === false ? "non_taxable" : "earning"
+}
+
+/**
+ * 某一種歸屬的加減項資料列（一筆一列，標題帶「(更正 YYYY-MM)」）：課稅補發列在應發、扣回列在應扣、不課稅補發列在實發。
+ * 金額一律顯示正值（應扣段的其他列也是正值）。三處顯示（後台列印、員工、Email）規則一致。
+ */
+function adjustmentRows(b: PayslipBreakdownLike, treatment: AdjustmentTreatment): Row[] {
+  return (b.adjustments ?? [])
+    .filter((a) => treatmentOf(a) === treatment)
+    .map((a) => {
+      const label = adjustmentDisplayLabel(String(a.label ?? ""), a.relatedPeriod ?? null)
+      return [treatment === "non_taxable" ? `${label}（不計薪資所得）` : label, money(Math.abs(n(a.amount)))] as Row
+    })
+}
+
 function tableHtml(rows: Row[], sumIndex: number): string {
   const tds = rows.map(([label, value], i) => {
     const bold = i === sumIndex ? "font-weight:600;background:#f7f7f7;" : ""
@@ -114,6 +154,7 @@ function sections(p: PayslipLike, b: PayslipBreakdownLike): Array<{ title: strin
         ["夜間加給", money(n(p.night_pay))],
         ["全勤獎金", money(n(p.attendance_bonus))],
         ["定額補貼", money(n(b.allowances))],
+        ...adjustmentRows(b, "earning"),
         ["應發合計", money(n(p.gross))],
       ],
     },
@@ -126,6 +167,7 @@ function sections(p: PayslipLike, b: PayslipBreakdownLike): Array<{ title: strin
         ["預支扣回", money(n(b.advance))],
         ["請假扣款", money(n(b.leaveDeduction))],
         ["遲到早退扣款", money(n(b.lateEarlyDeduction))],
+        ...adjustmentRows(b, "deduction"),
         ["應扣合計", money(n(b.totalDeductions))],
       ],
     },
@@ -133,6 +175,7 @@ function sections(p: PayslipLike, b: PayslipBreakdownLike): Array<{ title: strin
       title: "實發",
       rows: [
         ["代墊支出（不計薪資所得）", money(n(b.expenses))],
+        ...adjustmentRows(b, "non_taxable"),
         ["實發金額", money(netOf(p, b))],
       ],
     },

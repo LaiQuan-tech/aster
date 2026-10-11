@@ -167,6 +167,44 @@ export interface PayslipLine {
 }
 
 /**
+ * 薪資一次性加減項的輸入(前期更正:已匯款的月份不改原薪資單,於下月補發或扣回)。
+ * 資料來源是 payroll_adjustments 表(HR 在薪資作業頁逐人維護),不是薪資結構——逐期事件,放進哪一期的薪資單
+ * 由那一列的 period 決定。
+ */
+export interface PayrollAdjustment {
+  /** 資料庫列 id;帶了就會記進薪資單明細,定稿前用它比對加減項有沒有異動。 */
+  id?: string;
+  /** 給員工看的名稱,例「補發 9 月加班費」。 */
+  label: string;
+  /** 帶正負號的金額,非 0:正=補發(加項)、負=扣回(減項)。 */
+  amount: number;
+  /** 是否屬薪資所得(補發的加項併入應發與扣繳基礎)。預設 true;false=不課稅的補發,只加在實發。 */
+  taxable?: boolean;
+  /** 更正的是哪個月('YYYY-MM'),薪資單顯示為「更正 YYYY-MM」。 */
+  relatedPeriod?: string | null;
+}
+
+/**
+ * 加減項在這張薪資單裡的歸屬:
+ *   • earning     課稅的補發(正、taxable)→ 併入應發 gross、扣繳基礎
+ *   • deduction   扣回(負,不論 taxable)→ 併入應扣 totalDeductions,只減實發
+ *   • non_taxable 不課稅的補發(正、非 taxable)→ 不進 gross,直接加在實發(同代墊支出的稅務性質)
+ */
+export type PayslipAdjustmentTreatment = "earning" | "deduction" | "non_taxable";
+
+/** 薪資單上的一筆加減項(引擎輸出,存進 payslips.breakdown.adjustments)。 */
+export interface PayslipAdjustmentLine {
+  id?: string;
+  label: string;
+  /** 帶正負號的金額(正=補發、負=扣回)。 */
+  amount: number;
+  taxable: boolean;
+  /** 更正的月份 'YYYY-MM';沒有則 null。 */
+  relatedPeriod: string | null;
+  treatment: PayslipAdjustmentTreatment;
+}
+
+/**
  * 薪資單明細 (payroll-engine 的輸出)。所有欄位為金額。
  * gross = base + overtimePay + nightPay + attendanceBonus + allowances
  *         − attendanceDeduction
@@ -221,10 +259,27 @@ export interface PayslipBreakdown {
   totalDeductions: number;
   /** 員工代墊支出 (加項;不計入 gross,直接加在實發)。 */
   expenses: number;
-  /** 實發金額 = gross − totalDeductions + expenses。 */
+  /** 實發金額 = gross − totalDeductions + expenses (+ adjustmentNonTaxable)。 */
   net: number;
   /** 逐項稽核明細。 */
   lines: PayslipLine[];
+  /**
+   * 一次性加減項(前期更正)。**只有本期有加減項時才有這四個欄位**(舊薪資單沒有,讀的人都要容忍缺席)。
+   * 對帳:
+   *   gross           = … + adjustmentEarnings
+   *   totalDeductions = … + adjustmentDeductions
+   *   net             = gross − totalDeductions + expenses + adjustmentNonTaxable
+   * 稅務處理:課稅的補發進 gross(併入扣繳基礎);扣回**只減實發、不減 gross**——已扣繳的稅不因這筆扣回而退,
+   * 保守(不少扣),年度結算再調整。保險以投保薪資為基數,不受影響。
+   */
+  /** 課稅的補發合計(正值),已計入 gross。 */
+  adjustmentEarnings?: number;
+  /** 扣回合計(正值),已計入 totalDeductions。 */
+  adjustmentDeductions?: number;
+  /** 不課稅的補發合計(正值),不進 gross、直接加在 net。 */
+  adjustmentNonTaxable?: number;
+  /** 每一筆加減項(依輸入順序)。 */
+  adjustments?: PayslipAdjustmentLine[];
 }
 
 /** 加班費的一個分段 (例:平日前 2 小時 1.334 倍)。 */

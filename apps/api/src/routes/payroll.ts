@@ -30,6 +30,7 @@ import {
 import { SheetError, lockApprovedSheetFor, type SheetSnapshot } from "../services/attendance-sheets.js"
 import { exemptDatesOf, loadLateReportsForPeriod, undecidedCountOf } from "../services/late-reports.js"
 import { PERIOD_RE, assertPeriodOpen } from "../services/period-lock.js"
+import { adjustmentsStale, embeddedAdjustmentsOf, loadAdjustmentsByEmployee } from "../services/payroll-adjustments.js"
 
 export const payrollRouter = Router()
 
@@ -138,7 +139,15 @@ payrollRouter.post(
       // --- rule config / salary structures / 眷屬 / 報銷 / 預支 ----------------
       // 全部由 services/payroll-inputs.ts 組裝（與出勤月表的試算共用同一套輸入）。
       const inputs = await loadPayrollInputs(tenantId, period, employeeId ? [employeeId] : undefined)
-      const { rules, deductRateByCode, dependentsByEmployee, expensesByEmployee, allowancesByEmployee, advanceRecoveryByEmployee } = inputs
+      const {
+        rules,
+        deductRateByCode,
+        dependentsByEmployee,
+        expensesByEmployee,
+        allowancesByEmployee,
+        advanceRecoveryByEmployee,
+        adjustmentsByEmployee,
+      } = inputs
       const salaries = Array.from(inputs.salaryByEmployee.values())
       const employeeIds = salaries.map((s) => s.employee_id)
 
@@ -234,6 +243,7 @@ payrollRouter.post(
       // 否則錯誤會一路靜默到員工的存摺。
       const missingInsuredSalary: string[] = []
       const rows: Array<Record<string, unknown>> = []
+      let adjustmentCount = 0 // 這次併進薪資單的一次性加減項（前期更正）筆數，回給畫面核對
       const now = new Date().toISOString()
       for (const sal of salaries) {
         if (finalized.has(sal.employee_id)) {
@@ -265,6 +275,8 @@ payrollRouter.post(
             rules,
             expensesByEmployee.get(sal.employee_id) ?? 0,
             allowancesByEmployee.get(sal.employee_id) ?? 0,
+            // 一次性加減項（前期更正）：課稅補發進 gross、扣回進應扣、不課稅補發只加實發（引擎檔頭）。
+            adjustmentsByEmployee.get(sal.employee_id) ?? [],
           )
         } catch (err) {
           // The engine refuses to guess a wage (no hourly_wage AND no base
@@ -274,6 +286,7 @@ payrollRouter.post(
           skippedDetails.push({ employeeId: sal.employee_id, reason: "hourly_wage_missing" })
           continue
         }
+        adjustmentCount += breakdown.adjustments?.length ?? 0
         rows.push({
           tenant_id: tenantId,
           employee_id: sal.employee_id,
@@ -313,6 +326,7 @@ payrollRouter.post(
         skippedDetails,
         missingInsuredSalary,
         allowanceReview,
+        adjustmentCount,
         unapprovedSheets,
         // 只提醒這次有產生薪資單的人（已定案／略過的不列）。
         warnings: employeeIds.filter((id) => !skipped.includes(id)).flatMap(lateWarningFor),
@@ -437,6 +451,7 @@ payrollRouter.get(
  * (status draft → finalized). A finalized payslip is excluded from future
  * payroll runs (they skip it). Already-finalized → 409; missing/cross-tenant →
  * 404. Tenant-scoped via res.locals.tenantId. 該月已發薪鎖定 → 409 period_closed。
+ * 一次性加減項（前期更正）有異動而草稿沒重新執行薪資作業 → 409 adjustments_stale（見 routes/payroll-adjustments.ts）。
  */
 payrollRouter.post(
   "/payslips/:id/finalize",
@@ -450,7 +465,7 @@ payrollRouter.post(
     try {
       const { data: existing, error: selErr } = await supabaseAdmin
         .from("payslips")
-        .select("id, status, period")
+        .select("id, status, period, employee_id, breakdown")
         .eq("tenant_id", tenantId)
         .eq("id", id)
         .maybeSingle()
@@ -468,6 +483,19 @@ payrollRouter.post(
       if (existing.status === "finalized") {
         res.status(409).json({ error: "already_finalized" })
         return
+      }
+      // 一次性加減項（前期更正）有異動、草稿還沒跟上 → 擋下來請先重新執行薪資作業。不擋的話，定稿之後這個月就不能再改，
+      // 那筆補發／扣回會永遠沒進薪資單（services/payroll-adjustments.ts 的 adjustmentsStale）。
+      if (typeof existing.employee_id === "string") {
+        const current = await loadAdjustmentsByEmployee(tenantId, existing.period as string, [existing.employee_id])
+        if (adjustmentsStale(embeddedAdjustmentsOf(existing.breakdown), current.get(existing.employee_id))) {
+          res.status(409).json({
+            error: "adjustments_stale",
+            period: existing.period,
+            message: `${existing.period as string} 的加減項（前期更正）有異動，薪資單還沒跟上，請先回薪資作業重新執行 ${existing.period as string} 的薪資再定稿`,
+          })
+          return
+        }
       }
 
       const { data: updated, error: updErr } = await supabaseAdmin

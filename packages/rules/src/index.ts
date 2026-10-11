@@ -68,7 +68,7 @@ export {
   type LunchWindow,
   type LunchShiftLike,
 } from "./lunch-window.js";
-export { computePayslip, resolveAttendanceDeduction } from "./payroll-engine.js";
+export { adjustmentDisplayLabel, computePayslip, resolveAttendanceDeduction } from "./payroll-engine.js";
 export {
   lateAttendanceStatus,
   normalizeLateDecision,

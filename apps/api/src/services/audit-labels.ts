@@ -24,6 +24,7 @@ export const AUDIT_TABLE_LABELS: Record<string, string> = {
   salary_structures: "薪資結構",
   salary_adjustments: "薪資調整",
   payslips: "薪資單",
+  payroll_adjustments: "薪資加減項（前期更正）",
   period_closes: "月結",
   rule_configs: "差勤／薪資規則",
   leave_requests: "申請單（假單／加班／補打卡／出差／預支）",
@@ -225,6 +226,10 @@ export const AUDIT_FIELD_LABELS: Record<string, string> = {
   payroll: "薪資設定（可重新開放月結的人）",
   // 特權帳號邊界（2026-10-11）：換老闆的稽核 payload 是 { approval: { fallbackApproverEmpId } }
   approval: "簽核設定（老闆）",
+  // 薪資加減項（payroll_adjustments；2026-10-11）
+  taxable: "課稅（併入薪資所得）",
+  related_period: "更正月份",
+  created_by_emp_id: "建立者",
   created_at: "建立時間",
   updated_at: "更新時間",
 }

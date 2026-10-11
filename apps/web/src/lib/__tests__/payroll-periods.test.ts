@@ -267,11 +267,11 @@ describe("重新開放的理由（trim 後至少 5 個字）", () => {
 });
 
 describe("前期更正提示與重新開放的說明（對話框一定要顯示）", () => {
-  it("提示文字一字不差；連結目前是 null（現有系統沒有前期更正入口，之後有入口只改這一個值）", () => {
+  it("提示文字一字不差；連結指向薪資作業頁的『薪資加減項（前期更正）』卡（#payroll-adjustments）", () => {
     expect(PRIOR_PERIOD_CORRECTION_HINT).toBe(
       "如果這個月薪資已經匯款，建議不要重新開放，改在下個月薪資用「前期更正」補發或扣回",
     );
-    expect(PRIOR_PERIOD_CORRECTION_HREF).toBeNull();
+    expect(PRIOR_PERIOD_CORRECTION_HREF).toBe("/admin/payroll#payroll-adjustments");
   });
 
   it("重新開放的後果說明", () => {
