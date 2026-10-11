@@ -17,6 +17,7 @@ import type { ApprovalFlow, Department, Employee, LeaveRequest, RequestKind, Req
 import type { LeaveSegment } from "./ess-api";
 import { localDateKey, fmtHm } from "./ess-format";
 import { summarizeSegment } from "./ess-notifications";
+import { formatLeaveDuration, formatRequestHours } from "./leave-duration";
 
 /** ISO → 當地 `YYYY-MM-DD HH:mm`（CSV 用；原本直接切 ISO 字串會變成 UTC，與畫面差 8 小時）。 */
 function csvLocalDateTime(iso: string): string {
@@ -354,9 +355,12 @@ export const CSV_HEADER: readonly string[] = [
   "目前簽核人",
   "關卡",
   "狀態",
+  // 2026-10-11 請假時數顯示成天＋時：「時數」維持數字（小時，可加總），這欄放在最後（不改既有欄位順序），
+  // 只有請假列填「N 天 N 時」，其他類型留空。
+  "時數(天時)",
 ];
 
-/** 表頭＋每列 12 欄（全部字串）；狀態欄 pending 依桶顯示待簽核／簽核中。 */
+/** 表頭＋每列 13 欄（全部字串）；狀態欄 pending 依桶顯示待簽核／簽核中；最後一欄「時數(天時)」只有請假列有值。 */
 export function csvMatrix(
   rows: readonly LeaveRequest[],
   lookup: Pick<ApprovalLookup, "employeeName" | "employeeDept" | "approverLabel">,
@@ -375,6 +379,7 @@ export function csvMatrix(
     lookup.approverLabel(row),
     `第 ${row.current_step} 關`,
     BUCKET_LABEL[bucketOf(row, ctx)],
+    row.kind === "leave" && row.hours != null ? formatLeaveDuration(row.hours) : "",
   ]);
   return [[...CSV_HEADER], ...body];
 }
@@ -440,14 +445,15 @@ function leaveSegmentsOf(value: unknown): LeaveSegment[] {
 /**
  * 「內容」欄（原 approvals `contentLines`）：第一行期間＋時數，之後原因／地點／代理人／類型／給付。
  * 結束時間缺席／無效，或與起始同一分鐘（補卡單 startAt = endAt）→ 只顯示起始。
+ * 時數：請假寫成天＋時（2026-10-11 業主決定，1 天 ＝ 8 小時，例「（1 天 7 時）」），其他類型（加班、出差…）維持「（N 小時）」。
  * 請假若跨多天、而且各天的時段不一樣（首日從中途開始、末日只請到中途），第二行逐日列出
- * 「逐日：10/13 14:00–18:00 · 4 小時、10/14 09:00–18:00 · 8 小時、…」，審核者才看得出實際請哪幾小時。
+ * 「逐日：10/13 14:00–18:00 · 4 時、10/14 09:00–18:00 · 1 天、…」，審核者才看得出實際請哪幾小時。
  */
 export function contentLines(row: LeaveRequest): string[] {
   const start = fmtDateTime(row.start_at) ?? "—";
   const end = fmtDateTime(row.end_at);
   const period = end && end !== start ? `${start} → ${end}` : start;
-  const lines = [row.hours != null ? `${period}（${row.hours} 小時）` : period];
+  const lines = [row.hours != null ? `${period}（${formatRequestHours(row.kind, row.hours)}）` : period];
   if (row.kind === "leave") {
     const segs = leaveSegmentsOf(row.segments);
     const uniform = segs.every((seg) => seg.startTime === segs[0].startTime && seg.endTime === segs[0].endTime);

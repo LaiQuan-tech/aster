@@ -33,8 +33,9 @@ import {
   DISBURSEMENT_STEP_KIND_LABELS,
   type PendingDisbursementApproval,
 } from "@/lib/disbursements-api";
-import { fmtDateTime, fmtHours, fmtMoney, relativeTime } from "@/lib/ess-format";
+import { fmtDateTime, fmtMoney, relativeTime } from "@/lib/ess-format";
 import { summarizeSegments } from "@/lib/ess-notifications";
+import { formatRequestHours } from "@/lib/leave-duration";
 import { describePeriodClosed } from "@/lib/period-closed";
 import { LateReportsSection } from "./_components/LateReportsSection";
 import {
@@ -121,12 +122,13 @@ function rowLabel(row: PendingApproval): string {
 
 /**
  * 期間文字：有分段用 summarizeSegments（≤3 段逐行、>3 段壓縮），否則起訖＋時數。
+ * 時數：請假寫成天＋時（2026-10-11 業主決定，1 天 ＝ 8 小時，與 summarizeSegments 同一套），加班等維持小時。
  * 結束時間缺席／無效，或與起始同一分鐘（補卡單 startAt = endAt）→ 只顯示起始，不印「～ —」。
  */
 function periodText(row: PendingApproval): string {
   const segs = summarizeSegments(row.segments);
   if (segs) return segs;
-  const hours = row.hours != null ? ` · ${fmtHours(row.hours)}` : "";
+  const hours = row.hours != null ? ` · ${formatRequestHours(row.kind, row.hours)}` : "";
   const start = fmtDateTime(row.start_at);
   const end = row.end_at ? fmtDateTime(row.end_at) : "—";
   return end === "—" || end === start ? `${start}${hours}` : `${start} ～ ${end}${hours}`;

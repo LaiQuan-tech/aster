@@ -41,10 +41,12 @@ export interface MyRequestsProps {
   highlightId: string | null;
   /** 判斷「全天／上午／下午」文案用的班別。 */
   defaultShift: ShiftLike;
+  /** 1 天 ＝ 幾小時（規則 payroll.dailyRegularHours）：只用在把請假時數顯示成天＋時；缺席＝8。 */
+  hoursPerDay?: number;
   onReload: () => Promise<void>;
 }
 
-export function MyRequests({ requests, loading, error, highlightId, defaultShift, onReload }: MyRequestsProps) {
+export function MyRequests({ requests, loading, error, highlightId, defaultShift, hoursPerDay, onReload }: MyRequestsProps) {
   const toast = useToast();
   const [filter, setFilter] = useState<Filter>("all");
   const [limit, setLimit] = useState(PAGE_SIZE);
@@ -160,6 +162,7 @@ export function MyRequests({ requests, loading, error, highlightId, defaultShift
               request={r}
               highlighted={r.id === highlightId}
               defaultShift={defaultShift}
+              hoursPerDay={hoursPerDay}
               uploading={uploadingId === r.id}
               onUpload={() => pickFile(r.id)}
               onCancel={() => setCancelTarget(r)}
@@ -179,7 +182,7 @@ export function MyRequests({ requests, loading, error, highlightId, defaultShift
       <ConfirmDialog
         open={cancelTarget !== null}
         title="撤回這張申請？"
-        message={cancelTarget ? `${requestTitle(cancelTarget)}\n${describeRequest(cancelTarget, { shift: defaultShift })}\n\n撤回後簽核者不會再看到這張單；需要的話可以再填一張新的。` : undefined}
+        message={cancelTarget ? `${requestTitle(cancelTarget)}\n${describeRequest(cancelTarget, { shift: defaultShift, hoursPerDay })}\n\n撤回後簽核者不會再看到這張單；需要的話可以再填一張新的。` : undefined}
         confirmLabel="撤回"
         danger
         busy={cancelling}
@@ -194,6 +197,7 @@ function RequestRow({
   request: r,
   highlighted,
   defaultShift,
+  hoursPerDay,
   uploading,
   onUpload,
   onCancel,
@@ -201,6 +205,7 @@ function RequestRow({
   request: LeaveRequest;
   highlighted: boolean;
   defaultShift: ShiftLike;
+  hoursPerDay?: number;
   uploading: boolean;
   onUpload: () => void;
   onCancel: () => void;
@@ -219,7 +224,7 @@ function RequestRow({
         <p className="min-w-0 font-medium text-gray-800">{requestTitle(r)}</p>
         <Pill tone={STATUS_TONE[r.status] ?? "gray"}>{STATUS_LABEL[r.status] ?? r.status}</Pill>
       </div>
-      <p className="mt-0.5 text-sm text-gray-600">{describeRequest(r, { shift: defaultShift })}</p>
+      <p className="mt-0.5 text-sm text-gray-600">{describeRequest(r, { shift: defaultShift, hoursPerDay })}</p>
       {/* M1：送單時就標記的月加班上限旗標（只標不擋；超額部分由公司另行給付） */}
       {r.beyond_cap === true && (
         <p className="mt-1">

@@ -227,7 +227,7 @@ export function SubmitBar({
   );
 }
 
-/** 表單的即時摘要列（「共 3 天 · 24 小時」那種）。 */
+/** 表單的即時摘要列（「共 1 天 7 時」那種）。 */
 export function SummaryLine({ children, tone = "gray" }: { children: ReactNode; tone?: "gray" | "red" | "amber" | "brand" }) {
   const cls =
     tone === "red"

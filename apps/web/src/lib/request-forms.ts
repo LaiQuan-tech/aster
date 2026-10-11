@@ -16,6 +16,7 @@
  */
 import type { CreateRequestBody, LeaveRequest, LeaveSegment, RequestKind, RequestStatus } from "./ess-api";
 import { fmtDateShort, fmtDateTime, fmtDateWithWeekday, fmtHm, fmtHours, fmtMoney, localDateKey, todayKey } from "./ess-format";
+import { formatLeaveDuration } from "./leave-duration";
 import { DEFAULT_SHIFT, addDaysIfCrossesMidnight, halfDayWindow, normalizeHm, parseHm, type ShiftLike } from "./leave-hours";
 import { describePeriodClosed, periodClosedMessage } from "./period-closed";
 
@@ -498,12 +499,15 @@ function isFullDaySegment(seg: LeaveSegment, shift: ShiftLike | undefined): bool
 }
 
 /**
- * 逐日明細一行：「10/13（二）14:00–18:00 4 小時」「10/14（三）全天 8 小時」。
+ * 逐日明細一行：「10/13（二）14:00–18:00 4 時」「10/14（三）全天」。
  * 請假表單的多日摘要用；`shift`＝該日的班別（整天＝起訖剛好是上班到下班，顯示「全天」）。
+ * 請假時數寫成天＋時（2026-10-11 業主決定，1 天 ＝ `hoursPerDay` 小時，省略＝8）；
+ * **整天只寫「全天」**——時數就是一整天，再附「1 天」只是重複；部分天才附時段與時數。
  */
-export function describeLeaveDay(seg: LeaveSegment, shift: ShiftLike | undefined): string {
-  const slot = isFullDaySegment(seg, shift) ? "全天" : `${normalizeHm(seg.startTime)}–${normalizeHm(seg.endTime)}`;
-  return `${fmtDateWithWeekday(seg.date)}${slot} ${fmtHours(seg.hours)}`;
+export function describeLeaveDay(seg: LeaveSegment, shift: ShiftLike | undefined, hoursPerDay?: number): string {
+  if (isFullDaySegment(seg, shift)) return `${fmtDateWithWeekday(seg.date)}全天`;
+  const slot = `${normalizeHm(seg.startTime)}–${normalizeHm(seg.endTime)}`;
+  return `${fmtDateWithWeekday(seg.date)}${slot} ${formatLeaveDuration(seg.hours, hoursPerDay)}`;
 }
 
 /** 一段請假在單日時的時段標籤：對得上班別的全天／上午／下午就用字，否則顯示時間。 */
@@ -537,7 +541,13 @@ function rangeFromIso(startIso: string, endIso: string, tz?: string): string {
   return `${fmtDateShort(sd)}–${fmtDateShort(ed)}`;
 }
 
-/** 清單每列第 2 行的期間摘要（五種申請各自的格式，API 新欄位缺席時退化到 start_at／end_at）。 */
+/**
+ * 清單每列第 2 行的期間摘要（五種申請各自的格式，API 新欄位缺席時退化到 start_at／end_at）。
+ *
+ * 請假的時數寫成天＋時（2026-10-11 業主決定；`opts.hoursPerDay`＝1 天幾小時，省略＝8），加班、在家工作維持小時。
+ * 請假**只留請假時數、不再附日曆天數**：日期範圍本身已經看得出橫跨幾天，再寫「3 天 · 1 天 7 時」
+ * 會有兩個「天」並排（日曆天 vs 請假天）；整天只寫「全天」，不重複寫「1 天」。
+ */
 export function describeRequest(
   r: Pick<
     LeaveRequest,
@@ -553,32 +563,34 @@ export function describeRequest(
     | "advance_requested"
     | "estimated_cost"
   >,
-  opts: { shift?: ShiftLike; tz?: string } = {},
+  opts: { shift?: ShiftLike; tz?: string; hoursPerDay?: number } = {},
 ): string {
   const tz = opts.tz;
   const segments = Array.isArray(r.segments) ? r.segments.filter((s) => s && DATE_RE.test(s.date)) : [];
   switch (r.kind) {
     case "leave": {
       const hours = hoursOf(r);
-      const hoursText = hours == null ? "" : ` · ${fmtHours(hours)}`;
+      const hoursText = hours == null ? "" : ` · ${formatLeaveDuration(hours, opts.hoursPerDay)}`;
       if (segments.length === 1) {
         const seg = segments[0];
-        return `${fmtDateWithWeekday(seg.date)}${periodLabel(seg, opts.shift ?? DEFAULT_SHIFT)}${hoursText}`;
+        const label = periodLabel(seg, opts.shift ?? DEFAULT_SHIFT);
+        // 整天只寫「全天」；上午／下午／指定時段才附時數。
+        return `${fmtDateWithWeekday(seg.date)}${label}${label === "全天" ? "" : hoursText}`;
       }
       if (segments.length > 1) {
         const first = segments[0];
         const last = segments[segments.length - 1];
         // 首日從中途開始、或末日只請到中途（多日請假可選開始／結束時間）→ 把起訖的日期＋時間都寫出來，
-        // 例「10/13 14:00 – 10/15 12:00 · 3 天 · 15 小時」；兩端都是整天維持「10/13–10/15 · 3 天 · 24 小時」。
+        // 例「10/13 14:00 – 10/15 12:00 · 1 天 7 時」；兩端都是整天維持「10/13–10/15 · 3 天」。
         const shift = opts.shift ?? DEFAULT_SHIFT;
         const startsMidDay = normalizeHm(first.startTime) !== normalizeHm(shift.start_time);
         const endsMidDay = normalizeHm(last.endTime) !== normalizeHm(shift.end_time);
         if (startsMidDay || endsMidDay) {
           const from = `${fmtDateShort(first.date)} ${normalizeHm(first.startTime)}`;
           const to = `${fmtDateShort(last.date)} ${normalizeHm(last.endTime)}`;
-          return `${from} – ${to} · ${segments.length} 天${hoursText}`;
+          return `${from} – ${to}${hoursText}`;
         }
-        return `${fmtDateShort(first.date)}–${fmtDateShort(last.date)} · ${segments.length} 天${hoursText}`;
+        return `${fmtDateShort(first.date)}–${fmtDateShort(last.date)}${hoursText}`;
       }
       return `${rangeFromIso(r.start_at, r.end_at, tz)}${hoursText}`;
     }
@@ -625,7 +637,7 @@ export function describeRequest(
 }
 
 /** 成功畫面的摘要：從剛送出的 body 反推成清單同款文案（不用等列表重載）。 */
-export function describeBody(body: CreateRequestBody, opts: { shift?: ShiftLike; tz?: string } = {}): string {
+export function describeBody(body: CreateRequestBody, opts: { shift?: ShiftLike; tz?: string; hoursPerDay?: number } = {}): string {
   return describeRequest(
     {
       kind: body.kind,

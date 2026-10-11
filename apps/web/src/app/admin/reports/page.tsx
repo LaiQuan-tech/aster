@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiDownload } from "@/lib/api-client";
-import { fmtHm, fmtHours, localDateKey } from "@/lib/ess-format";
-import { formatLeaveDuration } from "@/lib/leave-duration";
+import { fmtHm, localDateKey } from "@/lib/ess-format";
+import { formatRequestHours } from "@/lib/leave-duration";
 import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getAttendanceReport,
@@ -29,14 +29,6 @@ function minutesToHours(minutes: number) {
 
 function money(value: number) {
   return `$${numberFmt.format(value)}`;
-}
-
-/**
- * 表單的「時數」格：請假寫成天＋時（2026-10-11 業主決定，1 天 ＝ 8 小時；報表 API 沒回規則的每日工時，用預設 8），
- * 其他類型（加班、公出…）維持小時。資料與 CSV 仍是小時。
- */
-function formHours(kind: string, hours: number) {
-  return kind === "leave" ? formatLeaveDuration(hours) : fmtHours(hours);
 }
 
 /** ISO → 當地「YYYY-MM-DD HH:mm」；原本直接切 ISO 字串會變成 UTC，比台北少 8 小時。 */
@@ -299,7 +291,7 @@ export default function ReportsPage() {
                     <td className="px-3 py-2 text-gray-900">{kindLabel(row.kind)}</td>
                     <td className="px-3 py-2 text-gray-600">{statusLabel(row.status)}</td>
                     <td className="px-3 py-2 text-right text-gray-600">{row.count}</td>
-                    <td className="px-3 py-2 text-right text-gray-600 whitespace-nowrap">{formHours(row.kind, row.hours)}</td>
+                    <td className="px-3 py-2 text-right text-gray-600 whitespace-nowrap">{formatRequestHours(row.kind, row.hours)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -397,7 +389,7 @@ export default function ReportsPage() {
                   <td className="px-3 py-2 text-gray-600">{kindLabel(row.kind)}</td>
                   <td className="px-3 py-2 text-gray-600">{statusLabel(row.status)}</td>
                   <td className="px-3 py-2 text-gray-600">{fmtDateTime(row.startAt)} → {fmtDateTime(row.endAt)}</td>
-                  <td className="px-3 py-2 text-right text-gray-600 whitespace-nowrap">{formHours(row.kind, row.hours)}</td>
+                  <td className="px-3 py-2 text-right text-gray-600 whitespace-nowrap">{formatRequestHours(row.kind, row.hours)}</td>
                 </tr>
               ))}
             </tbody>

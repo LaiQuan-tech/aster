@@ -19,6 +19,7 @@ import {
 } from "@hr/rules"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { logger } from "../lib/logger.js"
+import { formatLeaveDurationMinutes } from "../lib/leave-duration.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import {
   addDaysKey,
@@ -529,7 +530,8 @@ export function computeAnomalies(
           code: "leave_overlap_work",
           severity: "error",
           detail: { leaveMinutes: leave, workedMinutes: worked, shiftNetMinutes: net },
-          message: `請假 ${fmtHm(leave)} 加上工時 ${fmtHm(worked)} 超過班表淨工時 ${fmtHm(net)}`,
+          // 請假時數寫成天＋時（2026-10-11 業主決定；1 天 ＝ 規則每日正常工時）；工時、淨工時不是請假，維持小時。
+          message: `請假 ${formatLeaveDurationMinutes(leave, regularMinutes / 60)} 加上工時 ${fmtHm(worked)} 超過班表淨工時 ${fmtHm(net)}`,
         })
       }
     }

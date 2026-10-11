@@ -4,6 +4,7 @@ import {
   formatLeaveDuration,
   formatLeaveDurationMinutes,
   formatLeaveRemaining,
+  formatRequestHours,
   leaveHoursInputHint,
   normalizeHoursPerDay,
   reformatLeaveSummary,
@@ -106,6 +107,32 @@ describe("格式規則", () => {
         expect(h * 60 + m, `${text} 的時分部分必須小於一天`).toBeLessThan(dayMinutes);
       }
     }
+  });
+});
+
+describe("formatRequestHours — 各種申請混在一起的地方：請假天＋時，其他類型維持小時", () => {
+  it("請假 → 天＋時（每日工時可帶）", () => {
+    expect(formatRequestHours("leave", 15)).toBe("1 天 7 時");
+    expect(formatRequestHours("leave", "8.00")).toBe("1 天");
+    expect(formatRequestHours("leave", 2.5)).toBe("2 時 30 分");
+    expect(formatRequestHours("leave", 15, 7.5)).toBe("2 天");
+  });
+
+  it("加班、在家工作、出差、補卡… → 「N 小時」（不會被換成天）", () => {
+    for (const kind of ["ot", "wfh", "business_trip", "fix_punch", "petty_cash"]) {
+      expect(formatRequestHours(kind, 3), kind).toBe("3 小時");
+      expect(formatRequestHours(kind, 8), kind).toBe("8 小時"); // 8 小時不是「1 天」
+      expect(formatRequestHours(kind, 15), kind).toBe("15 小時");
+    }
+    expect(formatRequestHours("ot", "2.50")).toBe("2.5 小時");
+  });
+
+  it("沒有時數／不是數字 →「—」；kind 缺席當作非請假", () => {
+    expect(formatRequestHours("leave", null)).toBe("—");
+    expect(formatRequestHours("ot", undefined)).toBe("—");
+    expect(formatRequestHours("leave", "abc")).toBe("—");
+    expect(formatRequestHours(undefined, 8)).toBe("8 小時");
+    expect(formatRequestHours(null, 8)).toBe("8 小時");
   });
 });
 

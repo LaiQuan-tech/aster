@@ -79,6 +79,8 @@ function RequestsView() {
   // 參考資料（best-effort：任何一支失敗都退化，不擋表單）
   const [leaveTypes, setLeaveTypes] = useState<LeaveType[] | null>(null);
   const [balances, setBalances] = useState<LeaveBalance[]>([]);
+  // 1 天 ＝ 幾小時（規則 payroll.dailyRegularHours，隨 GET /leave-balances 回；缺席＝8）：只用在把請假時數顯示成天＋時。
+  const [hoursPerDay, setHoursPerDay] = useState<number | undefined>(undefined);
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [advanceThreshold, setAdvanceThreshold] = useState<number | null>(null);
   const defaultShift = useMemo(() => pickDefaultShift(shifts), [shifts]);
@@ -118,7 +120,10 @@ function RequestsView() {
       ]);
       if (!active) return;
       setLeaveTypes(lt.status === "fulfilled" ? (lt.value.leaveTypes ?? []) : []);
-      if (bal.status === "fulfilled") setBalances(bal.value.balances ?? []);
+      if (bal.status === "fulfilled") {
+        setBalances(bal.value.balances ?? []);
+        setHoursPerDay(bal.value.dailyRegularHours);
+      }
       if (sh.status === "fulfilled") setShifts(sh.value.shifts ?? []);
       if (cfg.status === "fulfilled") setAdvanceThreshold(cfg.value.settings?.advanceThreshold ?? null);
     })();
@@ -190,6 +195,7 @@ function RequestsView() {
             leaveTypes={leaveTypes}
             balances={balances}
             defaultShift={defaultShift}
+            hoursPerDay={hoursPerDay}
           />
         );
       case "fix_punch":
@@ -234,6 +240,7 @@ function RequestsView() {
           error={listError}
           highlightId={urlId}
           defaultShift={defaultShift}
+          hoursPerDay={hoursPerDay}
           onReload={loadRequests}
         />
       </div>

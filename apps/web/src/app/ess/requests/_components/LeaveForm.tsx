@@ -8,16 +8,19 @@
  *         選了上午／下午會多一行說明（`describeHalfDays`），不涵蓋午休的班別維持各半。
  *   多日：開始日期＋開始時間、結束日期＋結束時間（時間 1 小時一格，預設＝上班／下班＝整天）。
  *         第一天從開始時間請到下班、中間整天、最後一天從上班請到結束時間；休息日／國定假日自動不計。
- * 時數由 `computeLeaveSegments` 即時算：單日摘要「09:00–12:00，共 3 小時」；多日逐日列出
- * 「10/13（二）14:00–18:00 4 小時」…再加「共 N 天 · X 小時」「已略過 N 天」「剩餘 X 小時」
+ * 時數由 `computeLeaveSegments` 即時算：單日摘要「09:00–12:00，共 3 時」；多日逐日列出
+ * 「10/13（二）14:00–18:00 4 時」「10/14（三）全天」…再加「共 1 天 7 時」「已略過 N 天」「剩餘 6 天」
  * 「申請時數超過剩餘額度」。畫面只用 1 小時步進，後端不強制最小單位。
+ * 請假時數的顯示一律天＋時（2026-10-11 業主決定，1 天 ＝ `hoursPerDay` 小時，API 隨餘額回，缺席用 8）；
+ * 「指定時數」的下拉與「最多 N 小時」是輸入選項，維持小時。時數的計算與送出的 body 仍全是小時。
  * 班表功能已移除（2026-10-11）：每天都用預設班別（`defaultShift`，日班）算時數與時間選項。
  */
 import { useEffect, useId, useMemo, useState, type FormEvent } from "react";
 import { Field, Input, Segmented, Select } from "@/components/ess-ui";
 import type { LeaveBalance, LeaveType } from "@/lib/ess-api";
-import { fmtDateShort, fmtHours, todayKey } from "@/lib/ess-format";
+import { fmtDateShort, todayKey } from "@/lib/ess-format";
 import { describeHalfDays, resolveLeavePick, skipReasonLabel, type LeavePeriod, type ShiftLike } from "@/lib/leave-hours";
+import { formatLeaveDuration } from "@/lib/leave-duration";
 import { buildCreateBody, describeBody, describeLeaveDay, isBuildError, remainingHours } from "@/lib/request-forms";
 import { AttachmentField, ReasonField, SubmitBar, SummaryLine, validateFiles, type FormCommonProps } from "./form-shared";
 import { useLeaveCalendar } from "./use-leave-calendar";
@@ -42,6 +45,8 @@ export interface LeaveFormProps extends FormCommonProps {
   balances: LeaveBalance[];
   /** 每天都用這個班別（請假頁傳租戶最早建立的班別＝日班；班表功能已移除）。 */
   defaultShift: ShiftLike;
+  /** 1 天 ＝ 幾小時（規則 payroll.dailyRegularHours，隨 GET /leave-balances 回）：只用在把時數顯示成天＋時；缺席＝8。 */
+  hoursPerDay?: number;
 }
 
 /** 班表功能已移除：沒有逐日班別，`resolveLeavePick` 一律退回 defaultShift。 */
@@ -51,6 +56,7 @@ export function LeaveForm({
   leaveTypes,
   balances,
   defaultShift,
+  hoursPerDay,
   initialDate,
   submitting,
   submitError,
@@ -130,7 +136,7 @@ export function LeaveForm({
       reason,
     });
     if (isBuildError(body)) return setLocalError(body.error);
-    const summary = `${selectedType?.name ?? "請假"} · ${describeBody(body, { shift: defaultShift })}`;
+    const summary = `${selectedType?.name ?? "請假"} · ${describeBody(body, { shift: defaultShift, hoursPerDay })}`;
     await onSubmit(body, files, summary);
   }
 
@@ -292,15 +298,14 @@ export function LeaveForm({
         {result.error ? (
           <SummaryLine tone="red">{result.error}</SummaryLine>
         ) : mode === "single" ? (
-          <SummaryLine tone="brand">{`${single.startTime}–${single.endTime}，共 ${fmtHours(result.totalHours)}`}</SummaryLine>
+          <SummaryLine tone="brand">{`${single.startTime}–${single.endTime}，共 ${formatLeaveDuration(result.totalHours, hoursPerDay)}`}</SummaryLine>
         ) : (
           <>
             {result.segments.map((seg) => (
-              <SummaryLine key={seg.date}>{describeLeaveDay(seg, shiftOn(seg.date))}</SummaryLine>
+              <SummaryLine key={seg.date}>{describeLeaveDay(seg, shiftOn(seg.date), hoursPerDay)}</SummaryLine>
             ))}
-            <SummaryLine tone="brand">
-              共 {result.segments.length} 天 · {fmtHours(result.totalHours)}
-            </SummaryLine>
+            {/* 只寫請假總時數：上面逐日已列出每一天，再寫「共 3 天」會跟「1 天 7 時」兩個「天」並排。 */}
+            <SummaryLine tone="brand">共 {formatLeaveDuration(result.totalHours, hoursPerDay)}</SummaryLine>
           </>
         )}
         {result.skipped.length > 0 && (
@@ -310,7 +315,9 @@ export function LeaveForm({
         )}
         {result.warning && <SummaryLine tone="amber">{result.warning}</SummaryLine>}
         {leaveTypeId && (
-          <SummaryLine>{remaining == null ? "此假別尚未設定額度" : `剩餘 ${fmtHours(Math.max(0, remaining))}`}</SummaryLine>
+          <SummaryLine>
+            {remaining == null ? "此假別尚未設定額度" : `剩餘 ${formatLeaveDuration(Math.max(0, remaining), hoursPerDay)}`}
+          </SummaryLine>
         )}
         {overBalance && <SummaryLine tone="red">申請時數超過剩餘額度</SummaryLine>}
       </div>

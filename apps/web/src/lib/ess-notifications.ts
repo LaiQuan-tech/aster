@@ -14,7 +14,8 @@
  * 未讀 ＝ `payload.read !== true`（標記已讀是把 `read: true` 併進 payload）。
  */
 import type { LeaveSegment, NotificationItem } from "./ess-api";
-import { fmtDateShort, fmtHours } from "./ess-format";
+import { fmtDateShort } from "./ess-format";
+import { formatLeaveDuration } from "./leave-duration";
 
 /* ------------------------------------------------------------ 類型 --- */
 
@@ -122,14 +123,17 @@ export function punchTypeLabel(type: string): string {
   return (PUNCH_TYPE_LABEL as Record<string, string | undefined>)[type] ?? `補卡（${type}）`;
 }
 
-/** 單段：`09/18 09:00–18:00 · 8 小時`；補卡段：`09/18 09:00 · 補上班卡`。 */
+/**
+ * 單段：`09/18 09:00–18:00 · 1 天`、`09/18 14:00–18:00 · 4 時`（請假時數寫成天＋時，2026-10-11 業主決定，
+ * 1 天 ＝ 8 小時）；補卡段：`09/18 09:00 · 補上班卡`。
+ */
 export function summarizeSegment(seg: LeaveSegment): string {
   const date = fmtDateShort(seg.date);
   if (seg.type) {
     return `${date} ${seg.startTime} · ${punchTypeLabel(seg.type)}`;
   }
   const hours = Number(seg.hours);
-  const hoursText = Number.isFinite(hours) && hours > 0 ? ` · ${fmtHours(hours)}` : "";
+  const hoursText = Number.isFinite(hours) && hours > 0 ? ` · ${formatLeaveDuration(hours)}` : "";
   return `${date} ${seg.startTime}–${seg.endTime}${hoursText}`;
 }
 
@@ -137,10 +141,11 @@ export function summarizeSegment(seg: LeaveSegment): string {
  * 多段請假壓成卡片文字：
  *   - 0 段 → ""
  *   - ≤3 段 → 逐段一行（換行分隔；渲染時用 `whitespace-pre-line`）
- *   - >3 段 → 「09/18–09/25 全天 ×6 · 48 小時」
+ *   - >3 段 → 「09/18–09/25 全天 ×6 · 6 天」
  *     時段全部相同且 ≥8 小時叫「全天」；相同但不足 8 小時顯示 `HH:mm–HH:mm`；
  *     時段不一致（多日請假的首日從中途開始、末日只請到中途）→ 寫出起訖的日期＋時間，
- *     例「10/13 14:00 – 10/17 12:00 ×5 · 31 小時」，簽核者才看得出首尾不是整天。
+ *     例「10/13 14:00 – 10/17 12:00 ×5 · 3 天 7 時」，簽核者才看得出首尾不是整天。
+ *   末尾的時數是請假總時數（天＋時，1 天 ＝ 8 小時）；「×N」是段數（日曆上的天），兩者不是同一個「天」。
  */
 export function summarizeSegments(segs: LeaveSegment[] | null | undefined): string {
   if (!segs || segs.length === 0) return "";
@@ -155,9 +160,9 @@ export function summarizeSegments(segs: LeaveSegment[] | null | undefined): stri
   }, 0);
   const sameSlot = sorted.every((seg) => seg.startTime === first.startTime && seg.endTime === first.endTime);
   if (!sameSlot) {
-    return `${fmtDateShort(first.date)} ${first.startTime} – ${fmtDateShort(last.date)} ${last.endTime} ×${sorted.length} · ${fmtHours(total)}`;
+    return `${fmtDateShort(first.date)} ${first.startTime} – ${fmtDateShort(last.date)} ${last.endTime} ×${sorted.length} · ${formatLeaveDuration(total)}`;
   }
   const slotHours = Number(first.hours);
   const slot = Number.isFinite(slotHours) && slotHours >= 8 ? "全天" : `${first.startTime}–${first.endTime}`;
-  return `${fmtDateShort(first.date)}–${fmtDateShort(last.date)} ${slot} ×${sorted.length} · ${fmtHours(total)}`;
+  return `${fmtDateShort(first.date)}–${fmtDateShort(last.date)} ${slot} ×${sorted.length} · ${formatLeaveDuration(total)}`;
 }

@@ -29,7 +29,8 @@
  * 日期字串一律 `YYYY-MM-DD`（dateKey，不做時區換算）。
  */
 import type { LeaveSegment } from "./ess-api";
-import { addDays, fmtHours, weekdayOf } from "./ess-format";
+import { addDays, weekdayOf } from "./ess-format";
+import { formatLeaveDuration } from "./leave-duration";
 
 /** 班別最小集合（API 的 `Shift` 是它的超集）。 */
 export interface ShiftLike {
@@ -317,15 +318,15 @@ export function halfDayWindow(
 }
 
 /**
- * 請假表單選「上午／下午」時的說明（以起始日的班別）：
- *   日班 →「以午休為界：上午 09:00–12:00（3 小時）、下午 13:00–18:00（5 小時）」
- *   午班 →「這個班別沒有涵蓋午休，上午、下午各半：上午 14:00–17:30（3.5 小時）、下午 18:30–22:00（3.5 小時）」
+ * 請假表單選「上午／下午」時的說明（以起始日的班別）。時數寫成天＋時（2026-10-11 業主決定）：
+ *   日班 →「以午休為界：上午 09:00–12:00（3 時）、下午 13:00–18:00（5 時）」
+ *   午班 →「這個班別沒有涵蓋午休，上午、下午各半：上午 14:00–17:30（3 時 30 分）、下午 18:30–22:00（3 時 30 分）」
  *   沒有休息的班別 →「這個班別沒有午休，上午、下午各半：…」
  */
 export function describeHalfDays(shift: ShiftLike): string {
   const am = halfDayWindow(shift, "am");
   const pm = halfDayWindow(shift, "pm");
-  const both = `上午 ${am.startTime}–${am.endTime}（${fmtHours(am.hours)}）、下午 ${pm.startTime}–${pm.endTime}（${fmtHours(pm.hours)}）`;
+  const both = `上午 ${am.startTime}–${am.endTime}（${formatLeaveDuration(am.hours)}）、下午 ${pm.startTime}–${pm.endTime}（${formatLeaveDuration(pm.hours)}）`;
   const w = shiftWindow(shift);
   if (lunchSplitOf(w)) return `以午休為界：${both}`;
   return `這個班別沒有${w.breakMin > 0 ? "涵蓋" : ""}午休，上午、下午各半：${both}`;

@@ -399,7 +399,7 @@ describe("statsOf", () => {
 /* ----------------------------------------------------------------- CSV --- */
 
 describe("csvMatrix／csvText", () => {
-  it("表頭 12 欄與 form-records 相同，每列 12 格全是字串", () => {
+  it("表頭 13 欄（原本 12 欄不動，最後多一欄「時數(天時)」），每列 13 格全是字串", () => {
     expect(CSV_HEADER).toEqual([
       "申請日期",
       "單位",
@@ -413,14 +413,32 @@ describe("csvMatrix／csvText", () => {
       "目前簽核人",
       "關卡",
       "狀態",
+      "時數(天時)",
     ]);
     const matrix = csvMatrix(ALL_ROWS, LOOKUP, CTX);
     expect(matrix).toHaveLength(ALL_ROWS.length + 1);
     expect(matrix[0]).toEqual(CSV_HEADER);
     for (const row of matrix) {
-      expect(row).toHaveLength(12);
+      expect(row).toHaveLength(13);
       expect(row.every((cell) => typeof cell === "string")).toBe(true);
     }
+  });
+
+  it("「時數」仍是數字（小時，可加總）；「時數(天時)」只有請假列有值，其他類型留空", () => {
+    const leave = request({ kind: "leave", hours: 15 });
+    const ot = request({ kind: "ot", hours: 3 });
+    const trip = request({ kind: "business_trip", hours: 8 });
+    const noHoursLeave = request({ kind: "leave", hours: null });
+    const [, leaveCells, otCells, tripCells, noHoursCells] = csvMatrix([leave, ot, trip, noHoursLeave].map((r) => ({ ...r, current_approver_emp_id: ME })), LOOKUP, CTX);
+    const col = CSV_HEADER.indexOf("時數");
+    const dayCol = CSV_HEADER.indexOf("時數(天時)");
+    expect(dayCol).toBe(CSV_HEADER.length - 1);
+    expect([leaveCells[col], leaveCells[dayCol]]).toEqual(["15", "1 天 7 時"]);
+    expect([otCells[col], otCells[dayCol]]).toEqual(["3", ""]);
+    expect([tripCells[col], tripCells[dayCol]]).toEqual(["8", ""]); // 出差 8 小時不是「1 天」
+    expect([noHoursCells[col], noHoursCells[dayCol]]).toEqual(["", ""]);
+    // 數字欄加起來還是小時：15 + 3 + 8
+    expect([leaveCells, otCells, tripCells].reduce((sum, cells) => sum + Number(cells[col]), 0)).toBe(26);
   });
 
   it("各欄取值：日期與起迄時間都轉成「當地」時間（不是 UTC 切字串）、時數空值→空字串、地點/代理/給付用「 / 」串、原因退回備註、狀態依桶", () => {
@@ -443,6 +461,7 @@ describe("csvMatrix／csvText", () => {
       "第 1 關 · A001 · Kimi",
       "第 1 關",
       "待簽核",
+      "", // 補卡不是請假，「時數(天時)」留空
     ]);
     expect(fallback.slice(1, 4)).toEqual(["管理部", "B001 · 老闆", "加班"]);
     expect(fallback[7]).toBe("台中廠 / pay");
@@ -515,7 +534,8 @@ describe("contentLines（內容欄）", () => {
       payout: "comp_time",
     });
     const lines = contentLines(row);
-    expect(lines[0]).toMatch(/→ .*（2\.5 小時）$/);
+    // 請假時數寫成天＋時（2026-10-11 業主決定）
+    expect(lines[0]).toMatch(/→ .*（2 時 30 分）$/);
     expect(lines.slice(1)).toEqual(["客戶拜訪", "地點：新竹", "代理人：王小美", "類型：出差", "加班給付：補休"]);
     const remarkOnly = contentLines(request({ hours: null, reason: "", remark: "備註而已", trip_type: "outing", payout: "pay" }));
     expect(remarkOnly[0]).not.toContain("小時");
@@ -537,12 +557,20 @@ describe("contentLines（內容欄）", () => {
     expect(contentLines(missing)[0]).not.toContain("undefined");
 
     const invalid = request({ hours: 2, end_at: "not-a-date" });
-    expect(contentLines(invalid)[0]).toBe(`${startOf(invalid)}（2 小時）`);
+    expect(contentLines(invalid)[0]).toBe(`${startOf(invalid)}（2 時）`);
 
     // 正常起訖仍是「起 → 迄」
     const normal = request({ hours: 8 });
     expect(contentLines(normal)[0]).toContain(" → ");
-    expect(contentLines(normal)[0]).toMatch(/（8 小時）$/);
+    expect(contentLines(normal)[0]).toMatch(/（1 天）$/);
+  });
+
+  it("只有請假改天＋時：加班、出差、在家工作的時數維持「N 小時」", () => {
+    expect(contentLines(request({ kind: "leave", hours: 15 }))[0]).toMatch(/（1 天 7 時）$/);
+    for (const kind of ["ot", "business_trip", "wfh", "fix_punch"] as const) {
+      expect(contentLines(request({ kind, hours: 8 }))[0], kind).toMatch(/（8 小時）$/);
+      expect(contentLines(request({ kind, hours: 3 }))[0], kind).toMatch(/（3 小時）$/);
+    }
   });
 
   it("請假多日、各天時段不一樣（首日從中途開始／末日請到中途）→ 第二行逐日列出時段與時數", () => {
@@ -558,8 +586,8 @@ describe("contentLines（內容欄）", () => {
       ],
     });
     const lines = contentLines(row);
-    expect(lines[0]).toMatch(/→ .*（15 小時）$/);
-    expect(lines[1]).toBe("逐日：10/13 14:00–18:00 · 4 小時、10/14 09:00–18:00 · 8 小時、10/15 09:00–12:00 · 3 小時");
+    expect(lines[0]).toMatch(/→ .*（1 天 7 時）$/);
+    expect(lines[1]).toBe("逐日：10/13 14:00–18:00 · 4 時、10/14 09:00–18:00 · 1 天、10/15 09:00–12:00 · 3 時");
     // 原因照舊接在逐日之後
     expect(lines.slice(2)).toEqual(["回南部辦事"]);
   });

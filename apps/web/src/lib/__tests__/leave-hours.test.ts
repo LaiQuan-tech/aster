@@ -93,12 +93,12 @@ describe("shiftWorkHours / halfDayWindow / customHours", () => {
   });
 
   it("表單說明 describeHalfDays：日班「以午休為界…」；午班／沒有休息的班別「…各半」", () => {
-    expect(describeHalfDays(DAY_SHIFT)).toBe("以午休為界：上午 09:00–12:00（3 小時）、下午 13:00–18:00（5 小時）");
+    expect(describeHalfDays(DAY_SHIFT)).toBe("以午休為界：上午 09:00–12:00（3 時）、下午 13:00–18:00（5 時）");
     expect(describeHalfDays({ start_time: "14:00", end_time: "22:00", break_minutes: 60 })).toBe(
-      "這個班別沒有涵蓋午休，上午、下午各半：上午 14:00–17:30（3.5 小時）、下午 18:30–22:00（3.5 小時）",
+      "這個班別沒有涵蓋午休，上午、下午各半：上午 14:00–17:30（3 時 30 分）、下午 18:30–22:00（3 時 30 分）",
     );
     expect(describeHalfDays({ start_time: "09:00", end_time: "17:00", break_minutes: 0 })).toBe(
-      "這個班別沒有午休，上午、下午各半：上午 09:00–13:00（4 小時）、下午 13:00–17:00（4 小時）",
+      "這個班別沒有午休，上午、下午各半：上午 09:00–13:00（4 時）、下午 13:00–17:00（4 時）",
     );
   });
 

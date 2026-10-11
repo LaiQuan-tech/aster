@@ -12,6 +12,8 @@
  * `__tests__/leave-duration.test.ts` 還會直接 import API 那份逐案例比對——改任何一邊，那裡就會紅。
  */
 
+import { fmtHours } from "./ess-format";
+
 /** 規則參數 `payroll.dailyRegularHours` 的預設值；前端拿不到規則時用它。 */
 export const DEFAULT_LEAVE_HOURS_PER_DAY = 8;
 
@@ -90,6 +92,14 @@ export function formatLeaveRemaining(hours: HoursInput, hoursPerDay?: HoursInput
   const minutes = Math.round(Math.abs(n) * 60);
   if (n < 0 && minutes > 0) return `${LEAVE_OVERUSE_LABEL} ${formatLeaveDurationMinutes(minutes, hoursPerDay)}`;
   return formatLeaveDurationMinutes(minutes, hoursPerDay);
+}
+
+/**
+ * 申請單的時數文字：**請假**（kind='leave'）→「N 天 N 時」；其他類型（加班、在家工作、出差…）→「N 小時」。
+ * 簽核頁的「內容」欄、簽核卡這種「各種申請混在一起」的地方用——只有請假改天＋時，加班等維持小時。
+ */
+export function formatRequestHours(kind: string | null | undefined, hours: HoursInput, hoursPerDay?: HoursInput): string {
+  return kind === "leave" ? formatLeaveDuration(hours, hoursPerDay) : fmtHours(hours);
 }
 
 /**

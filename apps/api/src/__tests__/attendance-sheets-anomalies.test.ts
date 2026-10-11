@@ -271,6 +271,36 @@ describe("computeAnomalies — 日級規則逐條", () => {
     expect(list.find((x) => x.code === "leave_overlap_work")).toMatchObject({ severity: "error" })
   })
 
+  it("leave_overlap_work 訊息：請假時數寫成天＋時（2026-10-11），工時與班表淨工時不是請假、維持小時", () => {
+    const messageOf = (leaveMinutes: number, workedMinutes: number, netMinutes: number, rules: typeof RULES = RULES) => {
+      const row = dayRow(D, { worked_minutes: workedMinutes, leave_minutes_computed: leaveMinutes, first_in: iso(D, "09:00"), last_out: iso(D, "18:00") })
+      const list = computeAnomalies({ period: "2026-06" }, [row], ctx({ [D]: facts({ scheduled: true, shiftNetMinutes: netMinutes }) }, { rules })).days.get(D) ?? []
+      return list.find((x) => x.code === "leave_overlap_work")?.message
+    }
+    expect(messageOf(240, 480, 480)).toBe("請假 4 時 加上工時 8 小時 超過班表淨工時 8 小時")
+    expect(messageOf(480, 480, 480)).toBe("請假 1 天 加上工時 8 小時 超過班表淨工時 8 小時")
+    expect(messageOf(510, 300, 480)).toBe("請假 1 天 30 分 加上工時 5 小時 超過班表淨工時 8 小時")
+    // 規則每日正常工時 7.5：請假 7.5 小時 ＝ 1 天
+    const rules75: typeof RULES = { ...RULES, payroll: { ...RULES.payroll, dailyRegularHours: 7.5 } }
+    expect(messageOf(450, 480, 450, rules75)).toBe("請假 1 天 加上工時 8 小時 超過班表淨工時 7 小時 30 分")
+    // detail 給程式用的欄位仍是分鐘
+    const row = dayRow(D, { worked_minutes: 480, leave_minutes_computed: 480 })
+    const detail = computeAnomalies({ period: "2026-06" }, [row], ctx({ [D]: facts(SHIFT_9_18) })).days.get(D)?.find((x) => x.code === "leave_overlap_work")?.detail
+    expect(detail).toMatchObject({ leaveMinutes: 480, workedMinutes: 480, shiftNetMinutes: 480 })
+  })
+
+  it("leave_overlap_work 訊息：1 天 ＝ 規則每日正常工時，不是該日班表淨工時", () => {
+    const messageOf = (leaveMinutes: number, workedMinutes: number, netMinutes: number, rules: typeof RULES = RULES) => {
+      const row = dayRow(D, { worked_minutes: workedMinutes, leave_minutes_computed: leaveMinutes, first_in: iso(D, "09:00"), last_out: iso(D, "18:00") })
+      return computeAnomalies({ period: "2026-06" }, [row], ctx({ [D]: facts({ scheduled: true, shiftNetMinutes: netMinutes }) }, { rules })).days.get(D)?.find((x) => x.code === "leave_overlap_work")?.message
+    }
+    // 規則每日 8 小時、班表淨工時 10 小時：請假 480 分仍是 1 天（不是 8 時）
+    expect(messageOf(480, 480, 600)).toBe("請假 1 天 加上工時 8 小時 超過班表淨工時 10 小時")
+    // 加班起算基準是班表淨工時（basis='shift'）時，請假的「1 天」依然看規則每日工時
+    const shiftBasis = { ...RULES, overtime: { ...RULES.overtime, basis: "shift" as const } } as typeof RULES
+    expect(messageOf(480, 480, 600, shiftBasis)).toBe("請假 1 天 加上工時 8 小時 超過班表淨工時 10 小時")
+  })
+
   it("late / early_leave / overtime_override / overtime_over_daily_cap / manual_punch / cross_midnight / outing_unpaired 皆為 warn", () => {
     const row = dayRow(D, {
       first_in: iso(D, "10:00"),
