@@ -33,6 +33,7 @@ const T = {
   noRequests: "user-no-requests", // parttime，essTabs 有 approvals、沒有 requests
   unrestricted: "user-unrestricted", // contract：沒設定 → 不限縮
   intern: "user-intern", // intern：沒設定 → 預設清單（沒有 approvals）
+  neither: "user-neither", // temp：essTabs 只有 home／notifications（簽核與請假申請都沒開）
   hr: "user-hr",
   accountant: "user-accountant",
 }
@@ -47,6 +48,7 @@ beforeEach(() => {
         essTabs: {
           regular: ["home", "requests", "notifications"],
           parttime: ["home", "approvals", "notifications"],
+          temp: ["home", "notifications"],
         },
       },
     },
@@ -56,6 +58,7 @@ beforeEach(() => {
     { id: "e2", tenant_id: TENANT_ID, user_id: T.noRequests, role: "employee", employment_type: "parttime" },
     { id: "e3", tenant_id: TENANT_ID, user_id: T.unrestricted, role: "employee", employment_type: "contract" },
     { id: "e4", tenant_id: TENANT_ID, user_id: T.intern, role: "employee", employment_type: "intern" },
+    { id: "e7", tenant_id: TENANT_ID, user_id: T.neither, role: "employee", employment_type: "temp" },
     { id: "e5", tenant_id: TENANT_ID, user_id: T.hr, role: "hr_admin", employment_type: "regular" },
     { id: "e6", tenant_id: TENANT_ID, user_id: T.accountant, role: "accountant", employment_type: "regular" },
   ]
@@ -101,6 +104,48 @@ describe("essTabs 開了「簽核」、沒開「請假申請」", () => {
     const res = await call(T.noRequests, [method, path])
     expect(res.status).toBe(403)
     expect(res.body).toEqual({ error: "ess_tab_disabled", tab: "requests" })
+  })
+})
+
+describe("路徑大小寫不能繞過（Express 路由不分大小寫）", () => {
+  it.each([
+    ["POST", "/requests/abc-123/APPROVE"],
+    ["POST", "/Requests/abc-123/Reject"],
+    ["POST", "/REQUESTS/BATCH-DECISION"],
+    ["GET", "/Requests/Pending-Approvals"],
+  ] as Array<[string, string]>)("沒開「簽核」的人打 %s %s → 403 tab=approvals", async (method, path) => {
+    const res = await call(T.noApprovals, [method, path])
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: "ess_tab_disabled", tab: "approvals" })
+  })
+
+  it("沒開「請假申請」的人改大小寫送單也一樣 403（tab=requests）", async () => {
+    const res = await call(T.noRequests, ["POST", "/REQUESTS"])
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: "ess_tab_disabled", tab: "requests" })
+  })
+})
+
+describe("申請單附件：簽核者要在簽核頁看得到（GET），上傳／刪除只屬「請假申請」", () => {
+  it("只開「簽核」沒開「請假申請」的主管：GET 附件通（看病假憑證才簽得下去）；POST 上傳 403 tab=requests", async () => {
+    const view = await call(T.noRequests, ["GET", "/requests/abc-123/attachments"])
+    expect(view.status).toBe(200)
+    expect(view.body.reached).toBe(true)
+
+    const upload = await call(T.noRequests, ["POST", "/requests/abc-123/attachments"])
+    expect(upload.status).toBe(403)
+    expect(upload.body).toEqual({ error: "ess_tab_disabled", tab: "requests" })
+  })
+
+  it("只開「請假申請」沒開「簽核」的人：GET 附件照通（申請人看自己的附件）", async () => {
+    const view = await call(T.noApprovals, ["GET", "/requests/abc-123/attachments"])
+    expect(view.status).toBe(200)
+  })
+
+  it("兩個都沒開 → GET 附件 403（回報的是主要分頁 requests）", async () => {
+    const view = await call(T.neither, ["GET", "/requests/abc-123/attachments"])
+    expect(view.status).toBe(403)
+    expect(view.body).toEqual({ error: "ess_tab_disabled", tab: "requests" })
   })
 })
 

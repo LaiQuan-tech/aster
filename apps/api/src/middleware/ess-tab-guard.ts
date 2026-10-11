@@ -49,6 +49,11 @@ const INTERN_DEFAULT_ESS_TABS = ["home", "punches", "requests", "notifications",
 interface RouteTabRule {
   path: string
   tab: string
+  /**
+   * 這條路由「也算」授權的其他分頁（任一個有開就放行；403 回報的仍是 `tab`）。
+   * 例：簽核頁要看申請單附件（GET /requests/:id/attachments），只開「簽核」沒開「請假申請」的主管也要看得到。
+   */
+  alsoTabs?: readonly string[]
   exact?: boolean
   methods?: readonly string[]
   /** 路徑帶參數的路由（例如 /requests/:id/approve）：有 pattern 就改用它比對整條路徑，`exact` 與前綴規則都不看。 */
@@ -63,6 +68,9 @@ const ROUTE_TABS: readonly RouteTabRule[] = [
   { path: "/requests/pending-approvals", tab: "approvals" },
   { path: "/requests/batch-decision", tab: "approvals", exact: true },
   { path: "/requests/:id/approve|reject", tab: "approvals", pattern: /^\/requests\/[^/]+\/(?:approve|reject)$/ },
+  // 申請單附件：申請人（請假申請）與簽核者（簽核頁看病假憑證等，attachments.ts 寫明主管簽核時要看得到）共用 GET；
+  // 上傳／刪除仍只屬「請假申請」。
+  { path: "/requests/:id/attachments", tab: "requests", alsoTabs: ["approvals"], pattern: /^\/requests\/[^/]+\/attachments$/, methods: ["GET"] },
   { path: "/requests", tab: "requests" },
   { path: "/leave-balances", tab: "balances" },
   { path: "/my/attendance-sheet", tab: "sheet" },
@@ -96,27 +104,35 @@ function matches(path: string, rule: RouteTabRule): boolean {
 }
 
 /**
- * 純函式：某個請求屬於哪個 ESS 分頁；不在對照表內回 null（＝不擋）。
- * `path` 是 `req.path`（不含 query string）。
+ * 純函式：某個請求算哪些 ESS 分頁的授權（任一個有開就放行）；第一個是主要分頁。
+ * 不在對照表內回 []（＝不擋）。`path` 是 `req.path`（不含 query string）。
+ *
+ * 路徑一律先轉小寫再比對：Express 的路由不分大小寫（`POST /requests/x/APPROVE` 照樣進得了核准處理器），
+ * 對照表若分大小寫，改個大小寫就能繞過分頁限縮。id 那段（`[^/]+`）不受影響。
  */
-export function tabForRoute(method: string, path: string): string | null {
-  const clean = path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path
+export function tabsForRoute(method: string, path: string): string[] {
+  const clean = (path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path).toLowerCase()
 
   // 永遠放行：打卡、/me、公告（web 的 ALWAYS_VISIBLE_TAB_KEYS 與打卡本身）。
-  if (clean === "/me" || clean.startsWith("/me/")) return null
-  if (clean === "/punch" || clean.startsWith("/punch/")) return null
-  if (clean === "/announcements" || clean.startsWith("/announcements/")) return null
+  if (clean === "/me" || clean.startsWith("/me/")) return []
+  if (clean === "/punch" || clean.startsWith("/punch/")) return []
+  if (clean === "/announcements" || clean.startsWith("/announcements/")) return []
 
   // /employees/:id/profile… → mydata（/employees 本身是 HR／會計端點，不在此擋）。
   const emp = /^\/employees\/[^/]+\/([^/?]+)/.exec(clean)
-  if (emp && MYDATA_EMPLOYEE_SUBPATHS.includes(emp[1])) return "mydata"
-  if (MYDATA_TOP_PREFIXES.some((p) => clean === p || clean.startsWith(`${p}/`))) return "mydata"
+  if (emp && MYDATA_EMPLOYEE_SUBPATHS.includes(emp[1])) return ["mydata"]
+  if (MYDATA_TOP_PREFIXES.some((p) => clean === p || clean.startsWith(`${p}/`))) return ["mydata"]
 
   for (const rule of ROUTE_TABS) {
     if (rule.methods && !rule.methods.includes(method.toUpperCase())) continue
-    if (matches(clean, rule)) return rule.tab
+    if (matches(clean, rule)) return [rule.tab, ...(rule.alsoTabs ?? [])]
   }
-  return null
+  return []
+}
+
+/** 純函式：某個請求的**主要**分頁；不在對照表內回 null（＝不擋）。多分頁共用的路由看 `tabsForRoute`。 */
+export function tabForRoute(method: string, path: string): string | null {
+  return tabsForRoute(method, path)[0] ?? null
 }
 
 /* ── 快取（每項 60 秒）────────────────────────────────────────────────── */
@@ -214,8 +230,8 @@ async function identityOf(token: string): Promise<{ tenantId: string; role: stri
  */
 export async function essTabGuard(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const tab = tabForRoute(req.method, req.path)
-    if (!tab) {
+    const tabs = tabsForRoute(req.method, req.path)
+    if (tabs.length === 0) {
       next()
       return
     }
@@ -240,11 +256,11 @@ export async function essTabGuard(req: Request, res: Response, next: NextFunctio
       return
     }
     const allowed = essTabsFor(await essTabsCfgOf(identity.tenantId), identity.employmentType)
-    if (allowed == null || allowed.includes(tab)) {
+    if (allowed == null || tabs.some((tab) => allowed.includes(tab))) {
       next()
       return
     }
-    res.status(403).json({ error: "ess_tab_disabled", tab })
+    res.status(403).json({ error: "ess_tab_disabled", tab: tabs[0] })
   } catch {
     // 守門失敗不該讓整個 API 掛掉：退回「只有前端擋」的現況。
     next()

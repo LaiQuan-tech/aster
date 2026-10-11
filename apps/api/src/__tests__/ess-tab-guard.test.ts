@@ -5,7 +5,7 @@ import { supabaseAdmin } from "../lib/supabase"
 import { provisionTenant } from "../services/tenants"
 import { purgeTestTenant } from "./helpers/purge"
 import { app } from "../app"
-import { essTabsFor, resetEssTabGuardCache, tabForRoute } from "../middleware/ess-tab-guard"
+import { essTabsFor, resetEssTabGuardCache, tabForRoute, tabsForRoute } from "../middleware/ess-tab-guard"
 
 /**
  * ESS 分頁限縮的 API 層守門（M20）。
@@ -42,6 +42,36 @@ describe("tabForRoute（路由 → ESS 分頁對照表，純函式）", () => {
     expect(tabForRoute("POST", "/requests/approve")).toBe("requests")
     expect(tabForRoute("POST", "/requests-archive/abc/approve")).toBeNull()
     expect(tabForRoute("POST", "/disbursements/abc/approve")).toBeNull() // 放款單的簽核不在 ESS 分頁對照表
+  })
+
+  it("申請單附件：GET 申請人（請假申請）與簽核者（簽核）共用，其他方法仍只屬請假申請", () => {
+    // 簽核頁看病假憑證等附件就是打 GET /requests/:id/attachments——只開「簽核」的主管也要拿得到
+    expect(tabsForRoute("GET", "/requests/abc-123/attachments")).toEqual(["requests", "approvals"])
+    expect(tabForRoute("GET", "/requests/abc-123/attachments")).toBe("requests") // 主要分頁（403 回報的）
+    expect(tabsForRoute("POST", "/requests/abc-123/attachments")).toEqual(["requests"])
+    expect(tabsForRoute("DELETE", "/requests/abc-123/attachments/att-1")).toEqual(["requests"])
+    // 其他路由都只有一個分頁
+    expect(tabsForRoute("POST", "/requests/abc-123/approve")).toEqual(["approvals"])
+    expect(tabsForRoute("GET", "/requests")).toEqual(["requests"])
+    expect(tabsForRoute("GET", "/me")).toEqual([])
+    expect(tabsForRoute("GET", "/leave-types")).toEqual([])
+  })
+
+  it("路徑大小寫不影響歸類（Express 的路由不分大小寫，改個大小寫不能繞過分頁限縮）", () => {
+    expect(tabForRoute("POST", "/requests/abc-123/APPROVE")).toBe("approvals")
+    expect(tabForRoute("POST", "/requests/abc-123/Reject")).toBe("approvals")
+    expect(tabForRoute("POST", "/Requests/Batch-Decision")).toBe("approvals")
+    expect(tabForRoute("POST", "/REQUESTS/BATCH-DECISION/")).toBe("approvals")
+    expect(tabForRoute("GET", "/Requests/Pending-Approvals")).toBe("approvals")
+    expect(tabForRoute("POST", "/REQUESTS")).toBe("requests")
+    expect(tabForRoute("GET", "/PAYSLIPS")).toBe("payslips")
+    expect(tabForRoute("GET", "/Leave-Balances")).toBe("balances")
+    expect(tabForRoute("PUT", "/Employees/E1/Profile")).toBe("mydata")
+    expect(tabsForRoute("GET", "/REQUESTS/abc/ATTACHMENTS")).toEqual(["requests", "approvals"])
+    // 永遠放行的路由大小寫變化也照放行
+    expect(tabForRoute("GET", "/ME")).toBeNull()
+    expect(tabForRoute("POST", "/Punch")).toBeNull()
+    expect(tabForRoute("GET", "/ANNOUNCEMENTS")).toBeNull()
   })
 
   it("其餘分頁：假別餘額／月表／薪資單／報銷／分潤／專案／考核／職缺／AI／公司／通知／班表", () => {
