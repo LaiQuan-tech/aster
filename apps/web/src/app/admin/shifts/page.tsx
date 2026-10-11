@@ -10,6 +10,7 @@ import {
   deleteShift,
   type Shift,
 } from "@/lib/admin-api";
+import { describeLunch, lunchFitsShift, parseHm } from "@/lib/leave-hours";
 
 // shifts store start_time/end_time as "HH:MM:SS"; trim to HH:MM for the inputs.
 function hhmm(t: string): string {
@@ -21,6 +22,8 @@ interface Draft {
   startTime: string;
   endTime: string;
   breakMinutes: string;
+  /** 午休開始 HH:MM；空字串＝不設（依規則推：涵蓋 12:00 的班別用 12:00）。 */
+  breakStart: string;
   isNightShift: boolean;
 }
 
@@ -29,8 +32,26 @@ const EMPTY: Draft = {
   startTime: "09:00",
   endTime: "18:00",
   breakMinutes: "60",
+  breakStart: "",
   isNightShift: false,
 };
+
+/** 表單草稿 → 午休計算用的班別形狀（與請假時數、API 結算同一條規則）。 */
+function draftShift(d: Draft) {
+  return {
+    start_time: d.startTime,
+    end_time: d.endTime,
+    break_minutes: d.breakMinutes ? Number(d.breakMinutes) : 0,
+    break_start: d.breakStart || null,
+  };
+}
+
+/** 存檔前檢查：上下班時間要填；明設的午休要整段落在上班時間內（API 也會擋，這裡先講清楚）。 */
+function draftError(d: Draft): string | null {
+  if (parseHm(d.startTime) == null || parseHm(d.endTime) == null) return "請輸入上班與下班時間";
+  if (d.breakStart && !lunchFitsShift(draftShift(d))) return "午休要整段落在上班時間內";
+  return null;
+}
 
 export default function ShiftsPage() {
   const [rows, setRows] = useState<Shift[]>([]);
@@ -68,6 +89,11 @@ export default function ShiftsPage() {
       setFormError("請輸入班別名稱");
       return;
     }
+    const invalid = draftError(draft);
+    if (invalid) {
+      setFormError(invalid);
+      return;
+    }
     setSubmitting(true);
     try {
       await createShift({
@@ -75,6 +101,7 @@ export default function ShiftsPage() {
         startTime: draft.startTime,
         endTime: draft.endTime,
         breakMinutes: draft.breakMinutes ? Number(draft.breakMinutes) : 0,
+        breakStart: draft.breakStart || null,
         isNightShift: draft.isNightShift,
       });
       setDraft(EMPTY);
@@ -87,12 +114,18 @@ export default function ShiftsPage() {
   }
 
   async function saveEdit(id: string) {
+    const invalid = draftError(editDraft);
+    if (invalid) {
+      setError(invalid);
+      return;
+    }
     try {
       await updateShift(id, {
         name: editDraft.name.trim(),
         startTime: editDraft.startTime,
         endTime: editDraft.endTime,
         breakMinutes: editDraft.breakMinutes ? Number(editDraft.breakMinutes) : 0,
+        breakStart: editDraft.breakStart || null,
         isNightShift: editDraft.isNightShift,
       });
       setEditingId(null);
@@ -156,6 +189,30 @@ export default function ShiftsPage() {
           onChange={(e) => set({ ...d, breakMinutes: e.target.value })}
         />
       </div>
+      <div>
+        <label className={labelCls}>午休開始時間</label>
+        <div className="flex items-center gap-2">
+          <input
+            type="time"
+            className={inputCls}
+            value={d.breakStart}
+            onChange={(e) => set({ ...d, breakStart: e.target.value })}
+          />
+          {d.breakStart && (
+            <button
+              type="button"
+              onClick={() => set({ ...d, breakStart: "" })}
+              className="shrink-0 text-sm text-gray-500 hover:underline"
+            >
+              清除
+            </button>
+          )}
+        </div>
+        <p className="mt-1 text-xs text-gray-500">空白＝涵蓋 12:00 的班別用 12:00；其他班別照工作時數中點推算。</p>
+        {describeLunch(draftShift(d)) && (
+          <p className="mt-0.5 text-xs text-gray-500 tabular-nums">目前：{describeLunch(draftShift(d))}</p>
+        )}
+      </div>
     </div>
   );
 
@@ -214,6 +271,7 @@ export default function ShiftsPage() {
                       </div>
                       <p className="mt-0.5 text-sm text-gray-500 tabular-nums">
                         {hhmm(s.start_time)} – {hhmm(s.end_time)} · 休 {s.break_minutes} 分
+                        {describeLunch(s) ? ` · ${describeLunch(s)}` : ""}
                       </p>
                     </div>
                     <div className="flex shrink-0 gap-3">
@@ -225,6 +283,7 @@ export default function ShiftsPage() {
                             startTime: hhmm(s.start_time),
                             endTime: hhmm(s.end_time),
                             breakMinutes: String(s.break_minutes),
+                            breakStart: s.break_start ? hhmm(s.break_start) : "",
                             isNightShift: s.is_night_shift,
                           });
                         }}

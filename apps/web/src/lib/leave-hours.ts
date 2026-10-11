@@ -5,12 +5,17 @@
  *   - 當日班別＝ `shiftByDate[date]`（schedules 的 shift_id 對 shifts）；沒排班 → `defaultShift`
  *     （租戶第一個 shift，created_at 最早）；連 shift 都沒有 → `DEFAULT_SHIFT`（09:00–18:00 休 60）。
  *   - `shiftWorkHours = (end − start − break) / 60`；end ≤ start 視為跨日（+24h）。
+ *   - 午休（2026-10-11 業主決定：午休 12:00–13:00）＝ `lunchWindowMinutes` 的單一規則，與 API 結算
+ *     （@hr/rules lunch-window）逐行相同：班別有 break_start → 用它；沒設且班別涵蓋 12:00 → 12:00 起；
+ *     其他（午班、夜班…）沿用舊推算（工作時數中點起算，14:00–22:00 → 17:30–18:30）。
+ *     日班 09:00–18:00 休 60 → 午休 12:00–13:00（以前推成 13:00–14:00）。
  *   - 全天＝ `[start, end]`，時數＝ shiftWorkHours。
- *   - 上午＝ `[start, start+half]`、下午＝ `[end−half, end]`，`half = shiftWorkHours / 2`
- *     （日班 → 上午 09:00–13:00／下午 14:00–18:00 各 4h）。
- *   - 自訂＝牆鐘差，扣除與「假定休息窗」`[start+half, start+half+break]` 的重疊。
+ *   - 上午＝從上班起算工作時數的一半、下午＝倒數到下班的一半（都跳過午休），`half = shiftWorkHours / 2`
+ *     （日班 → 上午 09:00–14:00／下午 14:00–18:00 各 4h，09–12＋13–14 ＝ 4h）。舊推算的班別午休剛好在
+ *     中點，結果與以前的 `[start, start+half]`／`[end−half, end]` 相同。
+ *   - 自訂＝牆鐘差，扣除與午休的重疊。
  *   - 指定時數（2026-10-11）＝從某個開始時間起請 N 小時（1 小時一格），結束時間由系統往後算、
- *     跳過假定休息窗（例：09:00 起 5 小時 → 09:00–15:00，午休不算請假）。
+ *     跳過午休（例：日班 09:00 起 5 小時 → 09:00–15:00，午休 12:00–13:00 不算請假）。
  *   - 多日：逐日產一段；跳過 `rest_day`／`fixed_holiday`、以及行事曆沒裁定的週六日；
  *     行事曆裁定 `workday` 的週末（補班）保留；範圍內沒有工作日 → error。
  *     首日可從 `startTime` 請到下班、末日可從上班請到 `endTime`、中間整天（省略＝整天）；
@@ -31,6 +36,8 @@ export interface ShiftLike {
   end_time: string;
   /** 休息分鐘；舊 API 沒有時視為 0。 */
   break_minutes?: number | null;
+  /** 午休開始 `HH:mm`（shifts.break_start）；空＝依規則推（見 `lunchWindowMinutes`）。 */
+  break_start?: string | null;
 }
 
 /** 連一個 shift 都沒有時的退化班別：日班 09:00–18:00 休 60（8 小時）。 */
@@ -100,7 +107,7 @@ export function parseHm(value: string | null | undefined): number | null {
   if (!m) return null;
   const h = Number(m[1]);
   const min = Number(m[2]);
-  if (h > 24 || min > 59) return null;
+  if (h > 24 || min > 59 || (h === 24 && min > 0)) return null;
   return h * 60 + min;
 }
 
@@ -128,6 +135,8 @@ interface ShiftWindow {
   end: number;
   breakMin: number;
   crossesMidnight: boolean;
+  /** 午休開始（0–1439）；null＝沒設（依規則推）。 */
+  breakStart: number | null;
 }
 
 /** 班別的起訖分鐘（end ≤ start 視為跨日 +24h）；時間格式不對 → 退化成 DEFAULT_SHIFT。 */
@@ -137,21 +146,97 @@ function shiftWindow(shift: ShiftLike): ShiftWindow {
   if (start == null || end == null) {
     start = parseHm(DEFAULT_SHIFT.start_time) as number;
     end = parseHm(DEFAULT_SHIFT.end_time) as number;
-    return { start, end, breakMin: breakMinutesOf(DEFAULT_SHIFT), crossesMidnight: false };
+    return { start, end, breakMin: breakMinutesOf(DEFAULT_SHIFT), crossesMidnight: false, breakStart: null };
   }
   const crossesMidnight = end <= start;
   if (crossesMidnight) end += MINUTES_PER_DAY;
-  return { start, end, breakMin: breakMinutesOf(shift), crossesMidnight };
+  return { start, end, breakMin: breakMinutesOf(shift), crossesMidnight, breakStart: parseHm(shift.break_start ?? null) };
+}
+
+/* ------------------------------------------------------------ 午休 --- */
+
+/** 午休區間怎麼來的：班別明設／涵蓋 12:00／舊推算（工作時數中點）。 */
+export type LunchSource = "break_start" | "noon" | "legacy";
+
+export interface LunchWindow {
+  /** 班別座標（分鐘）：自上班那天 00:00 起算，跨日班的隔日時刻 +1440。 */
+  start: number;
+  end: number;
+  source: LunchSource;
+}
+
+const NOON_MINUTES = 12 * 60;
+
+/**
+ * 某天某班的午休區間（2026-10-11 業主決定：午休 12:00–13:00）。
+ *   1. 有午休開始（break_start）→ [breakStart, breakStart + breakMinutes)
+ *   2. 沒設，且班別涵蓋 12:00（上班早於 12:00、12:00 + 休息不晚於下班）→ [12:00, 12:00 + breakMinutes)
+ *   3. 其他 → 舊推算：工作時數中點起算 [start + 工時/2, + breakMinutes)
+ *   休息 0 分 → null。
+ * ⚠️ 與 packages/rules/src/lunch-window.ts 的 `lunchWindowMinutes` 逐行相同（API 結算用那份）：
+ * web 不依賴 @hr/rules，兩份由 __tests__/lunch-window-parity.test.ts 在同一組輸入上比對，改一邊就要改另一邊。
+ * @param startMin      上班（0–1439）
+ * @param endMin        下班，已換到班別座標（跨日 +1440，所以 > startMin）
+ * @param breakMinutes  休息分鐘
+ * @param breakStartMin 午休開始（0–1439）；null＝沒設
+ */
+export function lunchWindowMinutes(
+  startMin: number,
+  endMin: number,
+  breakMinutes: number,
+  breakStartMin: number | null,
+): LunchWindow | null {
+  const bm = Number.isFinite(breakMinutes) && breakMinutes > 0 ? breakMinutes : 0;
+  if (bm <= 0 || !(endMin > startMin)) return null;
+  if (breakStartMin != null) {
+    // 跨日班的凌晨午休（例 22:00–06:00、02:00 起）落在隔日。
+    const s = endMin > MINUTES_PER_DAY && breakStartMin < startMin ? breakStartMin + MINUTES_PER_DAY : breakStartMin;
+    return { start: s, end: s + bm, source: "break_start" };
+  }
+  for (const noon of [NOON_MINUTES, NOON_MINUTES + MINUTES_PER_DAY]) {
+    if (startMin < noon && noon + bm <= endMin) return { start: noon, end: noon + bm, source: "noon" };
+  }
+  const work = Math.max(0, endMin - startMin - bm);
+  const s = startMin + work / 2;
+  return { start: s, end: s + bm, source: "legacy" };
+}
+
+/** 班別（API 的 shift 形狀）→ 午休區間；時間格式不對或沒有休息 → null（同 @hr/rules 的 lunchWindowOf）。 */
+export function lunchWindowOfShift(shift: ShiftLike): LunchWindow | null {
+  const start = parseHm(shift.start_time);
+  let end = parseHm(shift.end_time);
+  if (start == null || end == null) return null;
+  if (end <= start) end += MINUTES_PER_DAY;
+  return lunchWindowMinutes(start, end, breakMinutesOf(shift), parseHm(shift.break_start ?? null));
 }
 
 /**
- * 假定休息窗 `[start + 工作時數/2, + 休息分鐘]`（班別沒有存午休的實際時段，全站都用這條公式：
- * 日班 09:00–18:00 休 60 → 13:00–14:00）。沒有休息（0 分）時起訖相同。
+ * 整段午休落在上班時間內（班別頁存檔前檢查；與 @hr/rules 的 lunchFitsShift、API 的檢查同一條）：
+ * 晚於上班時間開始、不晚於下班結束。沒有午休 → true；上下班時間格式不對 → false。
  */
+export function lunchFitsShift(shift: ShiftLike): boolean {
+  const start = parseHm(shift.start_time);
+  let end = parseHm(shift.end_time);
+  if (start == null || end == null) return false;
+  if (end <= start) end += MINUTES_PER_DAY;
+  const w = lunchWindowOfShift(shift);
+  return w == null || (w.start > start && w.end <= end);
+}
+
+/** 班別頁的午休說明：「午休 12:00–13:00」＋怎麼來的；沒有休息 → ""。 */
+export function describeLunch(shift: ShiftLike): string {
+  const w = lunchWindowOfShift(shift);
+  if (!w) return "";
+  const range = `午休 ${fmtMinutes(w.start)}–${fmtMinutes(w.end)}`;
+  if (w.source === "noon") return `${range}（涵蓋 12:00，預設）`;
+  if (w.source === "legacy") return `${range}（推算）`;
+  return range;
+}
+
+/** 這個班別在請假計算裡用的午休窗；沒有休息 → 長度 0 的窗（呼叫端另以 breakMin > 0 判斷）。 */
 function breakWindowOf(w: ShiftWindow): { start: number; end: number } {
-  const work = Math.max(0, w.end - w.start - w.breakMin);
-  const start = w.start + work / 2;
-  return { start, end: start + w.breakMin };
+  const lunch = lunchWindowMinutes(w.start, w.end, w.breakMin, w.breakStart);
+  return lunch ? { start: lunch.start, end: lunch.end } : { start: w.start, end: w.start };
 }
 
 /** [a, b]（班別座標軸上的分鐘）扣掉與休息窗重疊後的工作分鐘；b ≤ a → 0。 */
@@ -178,7 +263,16 @@ export function shiftWorkHours(shift: ShiftLike): number {
   return round2(Math.max(0, (w.end - w.start - w.breakMin) / 60));
 }
 
-/** 上午＝ [start, start+half]、下午＝ [end−half, end]，half＝工作時數的一半。 */
+/**
+ * 半天的容忍（分鐘）：half 是「時數四捨五入到 2 位 × 60」，與真正的一半最多差 0.3 分。
+ * 舊推算的午休剛好在中點，差這一點點不能被當成「跨過午休」。
+ */
+const HALF_TOLERANCE = 0.5;
+
+/**
+ * 上午＝從上班起算工作時數的一半、下午＝倒數到下班的一半，都跳過午休；half＝工作時數的一半。
+ * 日班 09:00–18:00 休 60（午休 12:00–13:00）→ 上午 09:00–14:00、下午 14:00–18:00，各 4 小時。
+ */
 export function halfDayWindow(
   shift: ShiftLike,
   half: "am" | "pm",
@@ -186,14 +280,20 @@ export function halfDayWindow(
   const w = shiftWindow(shift);
   const hours = round2(shiftWorkHours(shift) / 2);
   const halfMin = hours * 60;
+  const bw = breakWindowOf(w);
+  const hasBreak = w.breakMin > 0;
   if (half === "am") {
-    return { startTime: fmtMinutes(w.start), endTime: fmtMinutes(w.start + halfMin), hours };
+    let end = w.start + halfMin;
+    if (hasBreak && w.start < bw.start && end > bw.start + HALF_TOLERANCE) end += bw.end - bw.start;
+    return { startTime: fmtMinutes(w.start), endTime: fmtMinutes(Math.min(end, w.end)), hours };
   }
-  return { startTime: fmtMinutes(w.end - halfMin), endTime: fmtMinutes(w.end), hours };
+  let start = w.end - halfMin;
+  if (hasBreak && w.end > bw.end && start < bw.end - HALF_TOLERANCE) start -= bw.end - bw.start;
+  return { startTime: fmtMinutes(Math.max(start, w.start)), endTime: fmtMinutes(w.end), hours };
 }
 
 /**
- * 自訂時段時數：牆鐘差扣除與假定休息窗 `[start+half, start+half+break]` 的重疊。
+ * 自訂時段時數：牆鐘差扣除與午休（`lunchWindowMinutes`）的重疊。
  * 起訖格式不對、或結束不晚於開始（日班）→ 0。夜班（跨日）時凌晨的時間視為隔日。
  */
 export function customHours(shift: ShiftLike, start: string, end: string): number {
@@ -213,8 +313,8 @@ export function customHours(shift: ShiftLike, start: string, end: string): numbe
 
 /**
  * 「開始時間」選項：從班別上班時間起每 60 分一格（到下班前至少還剩 1 小時可請），
- * 落在午休（假定休息窗，含起點、不含終點）內的格子不給——例：日班 09:00–18:00 休 60 →
- * 09:00、10:00、11:00、12:00、14:00、15:00、16:00、17:00（13:00 在午休裡）。
+ * 落在午休（含起點、不含終點）內的格子不給——例：日班 09:00–18:00 休 60（午休 12:00–13:00）→
+ * 09:00、10:00、11:00、13:00、14:00、15:00、16:00、17:00（12:00 在午休裡）。
  * 單日「指定時數」的開始時間與多日的首日開始時間都用這份。
  */
 export function startTimeOptions(shift: ShiftLike): string[] {
@@ -231,8 +331,8 @@ export function startTimeOptions(shift: ShiftLike): string[] {
 
 /**
  * 「結束時間」選項（多日的末日用）：上班時間 +1 小時起每 60 分一格，最後一格固定是下班時間
- * （＝整天）。午休內的格子不給：起點 13:00（請到午休開始）可選，13:00 之後到 14:00 的略過
- * （14:00 與 13:00 請的時數一樣）。日班 → 10:00、11:00、12:00、13:00、15:00、16:00、17:00、18:00。
+ * （＝整天）。午休內的格子不給：起點 12:00（請到午休開始）可選，12:00 之後到 13:00 的略過
+ * （13:00 與 12:00 請的時數一樣）。日班 → 10:00、11:00、12:00、14:00、15:00、16:00、17:00、18:00。
  */
 export function endTimeOptions(shift: ShiftLike): string[] {
   const w = shiftWindow(shift);
@@ -263,7 +363,7 @@ export function maxHoursFrom(shift: ShiftLike, start: string): number {
 
 /**
  * 從 `start` 起請 `hours` 小時的結束時間（`HH:mm`）：往後數工作分鐘、跳過午休，
- * 例：日班 09:00 起 4 小時 → 13:00（剛好到午休開始）、5 小時 → 15:00（午休不算）。
+ * 例：日班 09:00 起 3 小時 → 12:00（剛好到午休開始）、4 小時 → 14:00（午休 12:00–13:00 不算）。
  * `start` 不合法（見 maxHoursFrom）、`hours` 不是正數、或超過下班時間 → null。
  */
 export function endTimeForHours(shift: ShiftLike, start: string, hours: number): string | null {

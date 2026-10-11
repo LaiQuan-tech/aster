@@ -320,6 +320,8 @@ export interface Shift {
   end_time: string;
   /** 休息分鐘數（請假時數計算用）；舊 API 沒有時視為 0。 */
   break_minutes?: number | null;
+  /** 午休開始 `HH:MM`（請假時數避開午休用）；null／沒有＝依規則推（涵蓋 12:00 用 12:00）。 */
+  break_start?: string | null;
   is_night_shift?: boolean | null;
   created_at?: string;
 }

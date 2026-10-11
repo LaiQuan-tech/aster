@@ -494,6 +494,8 @@ export interface Shift {
   start_time: string;
   end_time: string;
   break_minutes: number;
+  /** 午休開始 `HH:MM`（shifts.break_start）；null／沒有＝依規則推（涵蓋 12:00 用 12:00，其他沿用舊推算）。 */
+  break_start?: string | null;
   is_night_shift: boolean;
   created_at: string;
 }
@@ -507,6 +509,8 @@ export function createShift(body: {
   startTime: string;
   endTime: string;
   breakMinutes?: number;
+  /** 午休開始 `HH:MM`；null＝不設（依規則推）。 */
+  breakStart?: string | null;
   isNightShift?: boolean;
 }) {
   return apiFetch<{ id: string }>("/shifts", {
@@ -522,6 +526,8 @@ export function updateShift(
     startTime?: string;
     endTime?: string;
     breakMinutes?: number;
+    /** 午休開始 `HH:MM`；null＝清掉（改依規則推）。 */
+    breakStart?: string | null;
     isNightShift?: boolean;
   },
 ) {

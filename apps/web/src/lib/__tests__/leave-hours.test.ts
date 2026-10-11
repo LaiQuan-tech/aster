@@ -19,11 +19,14 @@ import {
   type ShiftLike,
 } from "../leave-hours";
 
-/** 日班（正式租戶的第一個 shift）；DB time 欄位會回 HH:mm:ss，這裡故意用這種格式。 */
+/**
+ * 日班（正式租戶的第一個 shift）；DB time 欄位會回 HH:mm:ss，這裡故意用這種格式。
+ * 沒設 break_start、涵蓋 12:00 → 午休 12:00–13:00（2026-10-11 業主決定；以前推成 13:00–14:00）。
+ */
 const DAY_SHIFT: ShiftLike = { start_time: "09:00:00", end_time: "18:00:00", break_minutes: 60 };
 /** 夜班 22:00–06:00 休 60 → 7 小時。 */
 const NIGHT_SHIFT: ShiftLike = { start_time: "22:00", end_time: "06:00", break_minutes: 60 };
-/** 09:00–17:50 休 45 → 485 分 = 8.0833… → 8.08。 */
+/** 09:00–17:50 休 45 → 485 分 = 8.0833… → 8.08；涵蓋 12:00 → 午休 12:00–12:45。 */
 const ODD_SHIFT: ShiftLike = { start_time: "09:00", end_time: "17:50", break_minutes: 45 };
 
 function base(over: Partial<LeaveHoursInput>): LeaveHoursInput {
@@ -44,17 +47,39 @@ describe("shiftWorkHours / halfDayWindow / customHours", () => {
     expect(normalizeHm("09:00:00")).toBe("09:00");
   });
 
-  it("上午 09:00–13:00／下午 14:00–18:00 各 4 小時", () => {
-    expect(halfDayWindow(DAY_SHIFT, "am")).toEqual({ startTime: "09:00", endTime: "13:00", hours: 4 });
+  it("上午 09:00–14:00（跳過午休 12:00–13:00：09–12＋13–14）／下午 14:00–18:00 各 4 小時", () => {
+    expect(halfDayWindow(DAY_SHIFT, "am")).toEqual({ startTime: "09:00", endTime: "14:00", hours: 4 });
     expect(halfDayWindow(DAY_SHIFT, "pm")).toEqual({ startTime: "14:00", endTime: "18:00", hours: 4 });
+    expect(customHours(DAY_SHIFT, "09:00", "14:00")).toBe(4);
   });
 
-  it("自訂 09:00–18:00 扣除休息窗 13:00–14:00 ＝ 8 小時", () => {
+  it("班別明設午休 13:00（break_start）→ 照設定：上午 09:00–13:00、下午 14:00–18:00", () => {
+    const set: ShiftLike = { ...DAY_SHIFT, break_start: "13:00" };
+    expect(halfDayWindow(set, "am")).toEqual({ startTime: "09:00", endTime: "13:00", hours: 4 });
+    expect(halfDayWindow(set, "pm")).toEqual({ startTime: "14:00", endTime: "18:00", hours: 4 });
+    expect(customHours(set, "13:30", "17:00")).toBe(3);
+  });
+
+  it("晚到班 10:00–19:00 休 60（涵蓋 12:00）→ 午休 12:00–13:00；上午 10:00–15:00、下午 15:00–19:00", () => {
+    const late: ShiftLike = { start_time: "10:00", end_time: "19:00", break_minutes: 60 };
+    expect(halfDayWindow(late, "am")).toEqual({ startTime: "10:00", endTime: "15:00", hours: 4 });
+    expect(halfDayWindow(late, "pm")).toEqual({ startTime: "15:00", endTime: "19:00", hours: 4 });
+  });
+
+  it("午班 14:00–22:00 休 60（不涵蓋 12:00）沿用舊推算 17:30–18:30：上午 14:00–17:30、下午 18:30–22:00", () => {
+    const pm: ShiftLike = { start_time: "14:00", end_time: "22:00", break_minutes: 60 };
+    expect(halfDayWindow(pm, "am")).toEqual({ startTime: "14:00", endTime: "17:30", hours: 3.5 });
+    expect(halfDayWindow(pm, "pm")).toEqual({ startTime: "18:30", endTime: "22:00", hours: 3.5 });
+    expect(customHours(pm, "17:00", "19:00")).toBe(1);
+  });
+
+  it("自訂 09:00–18:00 扣除午休 12:00–13:00 ＝ 8 小時", () => {
     expect(customHours(DAY_SHIFT, "09:00", "18:00")).toBe(8);
   });
 
-  it("自訂 13:30–17:00：牆鐘 3.5 小時，與休息窗重疊 30 分 → 3 小時", () => {
-    expect(customHours(DAY_SHIFT, "13:30", "17:00")).toBe(3);
+  it("自訂 12:30–17:00：牆鐘 4.5 小時，與午休 12:00–13:00 重疊 30 分 → 4 小時；13:30–17:00 不重疊 → 3.5", () => {
+    expect(customHours(DAY_SHIFT, "12:30", "17:00")).toBe(4);
+    expect(customHours(DAY_SHIFT, "13:30", "17:00")).toBe(3.5);
   });
 
   it("自訂結束不晚於開始（日班）→ 0；格式不對 → 0", () => {
@@ -102,19 +127,24 @@ describe("computeLeaveSegments", () => {
     expect(r.skipped).toEqual([]);
   });
 
-  it("單日上午／下午各 4 小時", () => {
+  it("單日上午／下午各 4 小時（上午跳過午休 → 09:00–14:00）", () => {
     expect(computeLeaveSegments(base({ period: "am" })).segments[0]).toEqual({
       date: "2026-09-18",
       startTime: "09:00",
-      endTime: "13:00",
+      endTime: "14:00",
       hours: 4,
     });
-    expect(computeLeaveSegments(base({ period: "pm" })).totalHours).toBe(4);
+    expect(computeLeaveSegments(base({ period: "pm" })).segments[0]).toEqual({
+      date: "2026-09-18",
+      startTime: "14:00",
+      endTime: "18:00",
+      hours: 4,
+    });
   });
 
-  it("單日自訂 13:30–17:00 → 3 小時；缺時間或結束不晚於開始 → error", () => {
-    const ok = computeLeaveSegments(base({ period: "custom", customStart: "13:30", customEnd: "17:00" }));
-    expect(ok.segments[0]).toEqual({ date: "2026-09-18", startTime: "13:30", endTime: "17:00", hours: 3 });
+  it("單日自訂 12:30–17:00 → 4 小時（午休重疊 30 分不算）；缺時間或結束不晚於開始 → error", () => {
+    const ok = computeLeaveSegments(base({ period: "custom", customStart: "12:30", customEnd: "17:00" }));
+    expect(ok.segments[0]).toEqual({ date: "2026-09-18", startTime: "12:30", endTime: "17:00", hours: 4 });
     expect(computeLeaveSegments(base({ period: "custom" })).error).toBe("請輸入起訖時間");
     expect(computeLeaveSegments(base({ period: "custom", customStart: "15:00", customEnd: "14:00" })).error).toBe(
       "結束時間需晚於開始時間",
@@ -198,21 +228,27 @@ describe("computeLeaveSegments", () => {
 
 /* ------------------------------------------------------------------------
  * 請假單位精細到小時（2026-10-11）：1 小時一格的時間選項、單日指定時數、多日首尾部分天。
- * 日班 09:00–18:00 休 60 → 假定休息窗 13:00–14:00；2026-10-13 是週二（10/17、10/18 週末）。
+ * 日班 09:00–18:00 休 60 → 午休 12:00–13:00；2026-10-13 是週二（10/17、10/18 週末）。
  * ---------------------------------------------------------------------- */
 
 describe("startTimeOptions／endTimeOptions（1 小時一格，午休不給選）", () => {
-  it("日班：開始 09:00 起每小時一格、13:00（午休內）不給，14:00 給；17:00 還剩 1 小時是最後一格", () => {
-    expect(startTimeOptions(DAY_SHIFT)).toEqual(["09:00", "10:00", "11:00", "12:00", "14:00", "15:00", "16:00", "17:00"]);
+  it("日班：開始 09:00 起每小時一格、12:00（午休內）不給，13:00 給；17:00 還剩 1 小時是最後一格", () => {
+    expect(startTimeOptions(DAY_SHIFT)).toEqual(["09:00", "10:00", "11:00", "13:00", "14:00", "15:00", "16:00", "17:00"]);
   });
 
-  it("日班：結束 10:00 起，13:00（請到午休開始）可選、14:00 與午休內不給，最後一格固定是下班 18:00", () => {
-    expect(endTimeOptions(DAY_SHIFT)).toEqual(["10:00", "11:00", "12:00", "13:00", "15:00", "16:00", "17:00", "18:00"]);
+  it("日班：結束 10:00 起，12:00（請到午休開始）可選、13:00 與午休內不給，最後一格固定是下班 18:00", () => {
+    expect(endTimeOptions(DAY_SHIFT)).toEqual(["10:00", "11:00", "12:00", "14:00", "15:00", "16:00", "17:00", "18:00"]);
   });
 
-  it("下班時間不在整點格上（09:00–17:50 休 45）：開始少最後一格（剩不到 1 小時）、結束最後一格是 17:50", () => {
-    expect(startTimeOptions(ODD_SHIFT)).toEqual(["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00"]);
+  it("下班時間不在整點格上（09:00–17:50 休 45，午休 12:00–12:45）：開始不給 12:00、少最後一格；結束最後一格是 17:50", () => {
+    expect(startTimeOptions(ODD_SHIFT)).toEqual(["09:00", "10:00", "11:00", "13:00", "14:00", "15:00", "16:00"]);
     expect(endTimeOptions(ODD_SHIFT).slice(-3)).toEqual(["16:00", "17:00", "17:50"]);
+  });
+
+  it("午班 14:00–22:00（舊推算午休 17:30–18:30）時間選項與以前相同", () => {
+    const pm: ShiftLike = { start_time: "14:00", end_time: "22:00", break_minutes: 60 };
+    expect(startTimeOptions(pm)).toEqual(["14:00", "15:00", "16:00", "17:00", "19:00", "20:00", "21:00"]);
+    expect(endTimeOptions(pm)).toEqual(["15:00", "16:00", "17:00", "19:00", "20:00", "21:00", "22:00"]);
   });
 
   it("夜班 22:00–06:00：開始 22:00、23:00、00:00、01:00，02:00 在午休（01:30–02:30）裡不給；結束最後一格 06:00", () => {
@@ -238,30 +274,33 @@ describe("startTimeOptions／endTimeOptions（1 小時一格，午休不給選�
 });
 
 describe("maxHoursFrom／endTimeForHours（指定時數：自動算結束時間、跳過午休）", () => {
-  it("maxHoursFrom：09:00 起 8、10:00 起 7、12:00 起 5（午休不算）、14:00 起 4、17:00 起 1", () => {
+  it("maxHoursFrom：09:00 起 8、10:00 起 7、11:00 起 6（午休不算）、13:00 起 5、14:00 起 4、17:00 起 1", () => {
     expect(maxHoursFrom(DAY_SHIFT, "09:00")).toBe(8);
     expect(maxHoursFrom(DAY_SHIFT, "10:00")).toBe(7);
-    expect(maxHoursFrom(DAY_SHIFT, "12:00")).toBe(5);
+    expect(maxHoursFrom(DAY_SHIFT, "11:00")).toBe(6);
+    expect(maxHoursFrom(DAY_SHIFT, "13:00")).toBe(5);
     expect(maxHoursFrom(DAY_SHIFT, "14:00")).toBe(4);
     expect(maxHoursFrom(DAY_SHIFT, "17:00")).toBe(1);
   });
 
   it("maxHoursFrom：午休內、上班前、下班時間、格式不對 → 0；工時有小數（8.08）無條件捨去成 8", () => {
-    expect(maxHoursFrom(DAY_SHIFT, "13:00")).toBe(0);
-    expect(maxHoursFrom(DAY_SHIFT, "13:30")).toBe(0);
+    expect(maxHoursFrom(DAY_SHIFT, "12:00")).toBe(0);
+    expect(maxHoursFrom(DAY_SHIFT, "12:30")).toBe(0);
     expect(maxHoursFrom(DAY_SHIFT, "08:00")).toBe(0);
     expect(maxHoursFrom(DAY_SHIFT, "18:00")).toBe(0);
     expect(maxHoursFrom(DAY_SHIFT, "abc")).toBe(0);
     expect(maxHoursFrom(ODD_SHIFT, "09:00")).toBe(8);
   });
 
-  it("endTimeForHours：09:00 起 4 小時 → 13:00（剛好到午休開始）、5 小時 → 15:00（午休不算）、8 小時 → 18:00", () => {
-    expect(endTimeForHours(DAY_SHIFT, "09:00", 4)).toBe("13:00");
+  it("endTimeForHours：09:00 起 3 小時 → 12:00（剛好到午休開始）、4 小時 → 14:00、5 小時 → 15:00（午休不算）、8 小時 → 18:00", () => {
+    expect(endTimeForHours(DAY_SHIFT, "09:00", 3)).toBe("12:00");
+    expect(endTimeForHours(DAY_SHIFT, "09:00", 4)).toBe("14:00");
     expect(endTimeForHours(DAY_SHIFT, "09:00", 5)).toBe("15:00");
     expect(endTimeForHours(DAY_SHIFT, "09:00", 8)).toBe("18:00");
-    expect(endTimeForHours(DAY_SHIFT, "10:00", 3)).toBe("13:00");
+    expect(endTimeForHours(DAY_SHIFT, "10:00", 2)).toBe("12:00");
+    expect(endTimeForHours(DAY_SHIFT, "10:00", 3)).toBe("14:00");
     expect(endTimeForHours(DAY_SHIFT, "11:00", 3)).toBe("15:00");
-    expect(endTimeForHours(DAY_SHIFT, "12:00", 2)).toBe("15:00");
+    expect(endTimeForHours(DAY_SHIFT, "13:00", 2)).toBe("15:00");
     expect(endTimeForHours(DAY_SHIFT, "14:00", 4)).toBe("18:00");
     expect(endTimeForHours(DAY_SHIFT, "17:00", 1)).toBe("18:00");
     expect(endTimeForHours(DAY_SHIFT, "09:00", 0.5)).toBe("09:30");
@@ -271,7 +310,7 @@ describe("maxHoursFrom／endTimeForHours（指定時數：自動算結束時間�
     expect(endTimeForHours(DAY_SHIFT, "09:00", 9)).toBeNull();
     expect(endTimeForHours(DAY_SHIFT, "14:00", 5)).toBeNull();
     expect(endTimeForHours(DAY_SHIFT, "17:00", 2)).toBeNull();
-    expect(endTimeForHours(DAY_SHIFT, "13:00", 1)).toBeNull();
+    expect(endTimeForHours(DAY_SHIFT, "12:00", 1)).toBeNull();
     expect(endTimeForHours(DAY_SHIFT, "09:00", 0)).toBeNull();
     expect(endTimeForHours(DAY_SHIFT, "09:00", -1)).toBeNull();
     expect(endTimeForHours(DAY_SHIFT, "09:00", Number.NaN)).toBeNull();
@@ -306,14 +345,16 @@ describe("maxHoursFrom／endTimeForHours（指定時數：自動算結束時間�
 describe("computeLeaveSegments — 單日指定時數", () => {
   const TUE = "2026-10-13";
 
-  it("10:00 起 3 小時 → 10:00–13:00 · 3 小時", () => {
+  it("10:00 起 3 小時 → 10:00–14:00（午休 12:00–13:00 不算）· 3 小時；10:00 起 2 小時 → 10:00–12:00", () => {
     const r = computeLeaveSegments(base({ startDate: TUE, period: "hours", hoursStart: "10:00", hoursCount: 3 }));
     expect(r.error).toBeUndefined();
-    expect(r.segments).toEqual([{ date: TUE, startTime: "10:00", endTime: "13:00", hours: 3 }]);
+    expect(r.segments).toEqual([{ date: TUE, startTime: "10:00", endTime: "14:00", hours: 3 }]);
     expect(r.totalHours).toBe(3);
+    const two = computeLeaveSegments(base({ startDate: TUE, period: "hours", hoursStart: "10:00", hoursCount: 2 }));
+    expect(two.segments).toEqual([{ date: TUE, startTime: "10:00", endTime: "12:00", hours: 2 }]);
   });
 
-  it("跨午休：11:00 起 3 小時 → 11:00–15:00（午休 13:00–14:00 不算）· 3 小時；09:00 起 4 小時 ＝ 上午", () => {
+  it("跨午休：11:00 起 3 小時 → 11:00–15:00（午休 12:00–13:00 不算）· 3 小時；09:00 起 4 小時 ＝ 上午", () => {
     const across = computeLeaveSegments(base({ startDate: TUE, period: "hours", hoursStart: "11:00", hoursCount: 3 }));
     expect(across.segments).toEqual([{ date: TUE, startTime: "11:00", endTime: "15:00", hours: 3 }]);
     const am = computeLeaveSegments(base({ startDate: TUE, period: "hours", hoursStart: "09:00", hoursCount: 4 }));
@@ -335,7 +376,7 @@ describe("computeLeaveSegments — 單日指定時數", () => {
     expect(computeLeaveSegments(base({ startDate: TUE, period: "hours", hoursStart: "10:00", hoursCount: 0 })).error).toBe(
       "請選擇請假時數",
     );
-    expect(computeLeaveSegments(base({ startDate: TUE, period: "hours", hoursStart: "13:00", hoursCount: 1 })).error).toBe(
+    expect(computeLeaveSegments(base({ startDate: TUE, period: "hours", hoursStart: "12:00", hoursCount: 1 })).error).toBe(
       "開始時間要在上班時間內，且不能落在午休",
     );
     expect(computeLeaveSegments(base({ startDate: TUE, period: "hours", hoursStart: "14:00", hoursCount: 5 })).error).toBe(
@@ -363,7 +404,7 @@ describe("computeLeaveSegments — 多日首尾部分天", () => {
     expect(r.skipped).toEqual([]);
   });
 
-  it("首尾跨午休：首日 11:00 起（11–13＋14–18 ＝ 6 小時）、末日請到 15:00（09–13＋14–15 ＝ 5 小時）", () => {
+  it("首尾跨午休：首日 11:00 起（11–12＋13–18 ＝ 6 小時）、末日請到 15:00（09–12＋13–15 ＝ 5 小時）", () => {
     const r = computeLeaveSegments(base({ startDate: "2026-10-13", endDate: "2026-10-15", startTime: "11:00", endTime: "15:00" }));
     expect(r.segments).toEqual([
       { date: "2026-10-13", startTime: "11:00", endTime: "18:00", hours: 6 },
@@ -373,13 +414,15 @@ describe("computeLeaveSegments — 多日首尾部分天", () => {
     expect(r.totalHours).toBe(19);
   });
 
-  it("首日 12:00 起：12–13 ＋ 14–18 ＝ 5 小時；末日請到 13:00（午休開始）＝ 4 小時", () => {
-    const r = computeLeaveSegments(base({ startDate: "2026-10-13", endDate: "2026-10-14", startTime: "12:00", endTime: "13:00" }));
+  it("首日 13:00 起（午休後）＝ 5 小時；末日請到 12:00（午休開始）＝ 3 小時，請到 13:00（午休結束）一樣 3 小時", () => {
+    const r = computeLeaveSegments(base({ startDate: "2026-10-13", endDate: "2026-10-14", startTime: "13:00", endTime: "12:00" }));
     expect(r.segments).toEqual([
-      { date: "2026-10-13", startTime: "12:00", endTime: "18:00", hours: 5 },
-      { date: "2026-10-14", startTime: "09:00", endTime: "13:00", hours: 4 },
+      { date: "2026-10-13", startTime: "13:00", endTime: "18:00", hours: 5 },
+      { date: "2026-10-14", startTime: "09:00", endTime: "12:00", hours: 3 },
     ]);
-    expect(r.totalHours).toBe(9);
+    expect(r.totalHours).toBe(8);
+    const toLunchEnd = computeLeaveSegments(base({ startDate: "2026-10-13", endDate: "2026-10-14", startTime: "13:00", endTime: "13:00" }));
+    expect(toLunchEnd.segments[1]).toEqual({ date: "2026-10-14", startTime: "09:00", endTime: "13:00", hours: 3 });
   });
 
   it("遇週末：週五 14:00 → 下週一 12:00，週六日自動不計 → 週五 4 小時＋週一 3 小時 ＝ 7 小時", () => {
@@ -536,7 +579,7 @@ describe("resolveLeavePick（表單的選項＋預設值＋時數一次算完）
   it("單日預設：全天 09:00–18:00 8 小時；指定時數的預設是上班時間起 1 小時（最多 8 小時）", () => {
     const pick = resolveLeavePick(state({}), CTX);
     expect(pick.result.segments).toEqual([{ date: "2026-10-13", startTime: "09:00", endTime: "18:00", hours: 8 }]);
-    expect(pick.startOptions).toEqual(["09:00", "10:00", "11:00", "12:00", "14:00", "15:00", "16:00", "17:00"]);
+    expect(pick.startOptions).toEqual(["09:00", "10:00", "11:00", "13:00", "14:00", "15:00", "16:00", "17:00"]);
     expect(pick.hoursStartValue).toBe("09:00");
     expect(pick.maxHours).toBe(8);
     expect(pick.hoursCountValue).toBe(1);
@@ -544,11 +587,11 @@ describe("resolveLeavePick（表單的選項＋預設值＋時數一次算完）
     expect(hours.result.segments).toEqual([{ date: "2026-10-13", startTime: "09:00", endTime: "10:00", hours: 1 }]);
   });
 
-  it("單日指定時數：10:00 起 3 小時 → 10:00–13:00；時數超過上限會夾到上限（17:00 起最多 1 小時）", () => {
+  it("單日指定時數：10:00 起 3 小時 → 10:00–14:00（跳過午休）；時數超過上限會夾到上限（17:00 起最多 1 小時）", () => {
     const three = resolveLeavePick(state({ period: "hours", hoursStart: "10:00", hoursCount: 3 }), CTX);
     expect(three.maxHours).toBe(7);
     expect(three.hoursCountValue).toBe(3);
-    expect(three.result.segments[0]).toMatchObject({ startTime: "10:00", endTime: "13:00", hours: 3 });
+    expect(three.result.segments[0]).toMatchObject({ startTime: "10:00", endTime: "14:00", hours: 3 });
     const clamped = resolveLeavePick(state({ period: "hours", hoursStart: "17:00", hoursCount: 5 }), CTX);
     expect(clamped.maxHours).toBe(1);
     expect(clamped.hoursCountValue).toBe(1);
@@ -556,7 +599,7 @@ describe("resolveLeavePick（表單的選項＋預設值＋時數一次算完）
   });
 
   it("選的開始時間不在選項裡（午休內、或換了日期班別不同）→ 退回上班時間，不會送出不合法的組合", () => {
-    const inBreak = resolveLeavePick(state({ period: "hours", hoursStart: "13:00", hoursCount: 2 }), CTX);
+    const inBreak = resolveLeavePick(state({ period: "hours", hoursStart: "12:00", hoursCount: 2 }), CTX);
     expect(inBreak.hoursStartValue).toBe("09:00");
     expect(inBreak.result.error).toBeUndefined();
     const night = resolveLeavePick(state({ period: "hours", hoursStart: "10:00", hoursCount: 2 }), {
@@ -571,7 +614,7 @@ describe("resolveLeavePick（表單的選項＋預設值＋時數一次算完）
     const whole = resolveLeavePick(state({ mode: "range", endDate: "2026-10-15" }), CTX);
     expect(whole.rangeStartValue).toBe("09:00");
     expect(whole.rangeEndValue).toBe("18:00");
-    expect(whole.endOptions).toEqual(["10:00", "11:00", "12:00", "13:00", "15:00", "16:00", "17:00", "18:00"]);
+    expect(whole.endOptions).toEqual(["10:00", "11:00", "12:00", "14:00", "15:00", "16:00", "17:00", "18:00"]);
     expect(whole.result.totalHours).toBe(24);
 
     const partial = resolveLeavePick(state({ mode: "range", endDate: "2026-10-15", rangeStart: "14:00", rangeEnd: "12:00" }), CTX);
