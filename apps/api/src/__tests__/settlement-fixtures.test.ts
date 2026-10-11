@@ -6,6 +6,7 @@ import {
   applyOvertimePipeline,
   computeAttendanceDay,
   parseRuleConfig,
+  unscheduledShiftDef,
   type DayType,
   type RuleConfig,
   type ShiftDef,
@@ -23,8 +24,9 @@ import { pairPunchesTz, type PunchLike } from "../services/punch-pairing.js"
  * fixture 的班表），逐日比對系統加班分鐘與 Excel 三個級距欄位的合計。
  *
  * 日型：週六日 = rest_day；行政機關放假日（lib/tw-holidays.ts，6/19 端午）=
- * fixed_holiday；其餘 workday。班表只掛在 workday（例假/固定假不排班，與
- * settlement 相同 → 那天不扣班表固定休息，劉皇佑 6/6 13:54–18:38 才會是 270）。
+ * fixed_holiday；其餘 workday。班表只掛在 workday（例假/固定假不排班）；不排班的日子
+ * 與 settlement 相同走 unscheduledShiftDef（整天＋預設午休 12:00–13:00，扣在班區間的
+ * 重疊，2026-10-11 業主決定）→ 劉皇佑 6/6 13:54–18:38 不碰午休，仍是 270。
  *
  * punchMode:
  *   full_day      in/out 是整天上下班 → 整天走引擎（工時、遲到、早退、加班）。
@@ -70,12 +72,16 @@ interface Fixture {
 /** 已知的 Excel 手填偏差：key = `${姓名}|${日期}`，值 = 說明（含分類）。 */
 const KNOWN_EXCEL_DEVIATIONS: Record<string, string> = {
   // 劉皇佑 — README：隱藏列（原表放在「異常打卡」資料夾，Excel 級距欄未填）
-  "劉皇佑|2026-06-07": "hidden 週日 10:10–23:13 rest_day 750 vs Excel 0（README 標示異常隱藏列）",
-  "劉皇佑|2026-06-14": "hidden 週日 10:27–21:57 rest_day 660 vs Excel 0（README 標示異常隱藏列）",
+  "劉皇佑|2026-06-07": "hidden 週日 10:10–23:13 rest_day 扣午休 723 → 扣晚餐 693 → 690 vs Excel 0（README 標示異常隱藏列）",
+  "劉皇佑|2026-06-14": "hidden 週日 10:27–21:57 rest_day 扣午休 630 vs Excel 0（README 標示異常隱藏列）",
   "劉皇佑|2026-06-19": "hidden 端午節 14:00–20:05 fixed_holiday 做1給8=480 vs Excel 0（隱藏列）",
   "劉皇佑|2026-06-23": "hidden 10:06–19:37 工時 511 → 加班 30 vs Excel 0（隱藏列）",
   "劉皇佑|2026-06-26": "hidden 10:03–19:43 工時 520 → 加班 30 vs Excel 0（隱藏列）",
   "劉皇佑|2026-06-30": "hidden 09:52–19:33 工時 521 → 加班 30 vs Excel 0（隱藏列）",
+  // 劉皇佑 — 2026-10-11 業主決定「午休 12:00–13:00 不計工時」，未排班日也扣午休重疊；6 月 Excel
+  // 的例假日沒扣午休（同月余裕哲 6/27 12:14–17:53 也沒扣，那份是 overtime_only 模式、不經引擎）。
+  // 例假日要不要扣午休待業主確認；確認不扣就把 settlement 的預設午休限縮到 workday，這筆會變回相符。
+  "劉皇佑|2026-06-13": "週六 10:23–18:07 rest_day 未排班扣午休 60 → 404 → 390 vs Excel 450（6 月 Excel 例假日未扣午休）",
   // 劉皇佑 — 手填取整噪音（無任何一致規則能同時吻合 6/2 與這兩天）
   "劉皇佑|2026-06-05": "10:15–22:22 raw 187 → 扣晚餐 157 → 150 vs Excel 180（手填進位）",
   "劉皇佑|2026-06-24": "09:33–19:58 raw 85 → 60 vs Excel 90（手填進位）",
@@ -105,8 +111,6 @@ function dayTypeOf(date: string): DayType {
   return wd === 0 || wd === 6 ? "rest_day" : "workday"
 }
 
-const UNSCHEDULED: ShiftDef = { start: "00:00", end: "23:59", breakMinutes: 0 }
-
 function isoAt(date: string, hhmm: string): string {
   const [h, m] = hhmm.split(":").map(Number)
   return zonedTimeToUtc(date, h, m, TPE).toISOString()
@@ -127,6 +131,8 @@ const rulesNoMeal: RuleConfig = parseRuleConfig({
   ...DEFAULT_RULE_CONFIG,
   overtime: { ...DEFAULT_RULE_CONFIG.overtime, mealBreak: null },
 })
+/** 與 settlement 相同的未排班班別：整天＋租戶預設午休（12:00 起 60 分，扣在班區間的重疊）。 */
+const UNSCHEDULED: ShiftDef = unscheduledShiftDef(rules)
 
 interface DayResult {
   date: string
@@ -235,7 +241,7 @@ describe("亞斯特 115-06 指定錨點", () => {
     expect(r.system).toBe(180)
   })
 
-  it("劉皇佑 6/6 六 13:54–18:38 → rest_day 270 分（不排班 → 不扣午休）", () => {
+  it("劉皇佑 6/6 六 13:54–18:38 → rest_day 270 分（不排班 → 預設午休 12:00–13:00 不重疊 → 不扣）", () => {
     const r = resultsOf("劉皇佑").get("2026-06-06")!
     expect(r.dayType).toBe("rest_day")
     expect(r.worked).toBe(284)

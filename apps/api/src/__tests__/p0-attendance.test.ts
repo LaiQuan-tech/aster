@@ -210,7 +210,7 @@ describe("P0 fix_punch approval → punch_records → settlement", () => {
     expect(new Date(rows[1].punch_at).toISOString()).toBe(OUT_AT)
   })
 
-  it("settlement pairs them on the Taipei work_date (worked 540, no anomaly)", async () => {
+  it("settlement pairs them on the Taipei work_date (worked 480, no anomaly)", async () => {
     const settle = await request(app)
       .post("/attendance/settle")
       .set("Authorization", `Bearer ${adminToken}`)
@@ -226,12 +226,12 @@ describe("P0 fix_punch approval → punch_records → settlement", () => {
     expect(data?.length).toBe(1)
     const day = data![0] as { work_date: string; worked_minutes: number; late_minutes: number; overtime_minutes: number; day_type: string; anomaly: unknown }
     expect(day.work_date).toBe(WORK_DATE)
-    // No schedule → default shift, no break: 09:00–18:00 = 540 worked, late 0,
-    // OT raw 60 → 60 (floor 30, ≥ 30). 2026-08-10 is a Monday → workday.
+    // No schedule → 整天＋租戶預設午休 12:00–13:00（2026-10-11 業主決定「做滿 8 小時不含
+    // 午休」）：09:00–18:00 扣重疊 60 = 480 worked、late 0、OT 0。2026-08-10 is a Monday → workday.
     expect(day.day_type).toBe("workday")
-    expect(day.worked_minutes).toBe(540)
+    expect(day.worked_minutes).toBe(480)
     expect(day.late_minutes).toBe(0)
-    expect(day.overtime_minutes).toBe(60)
+    expect(day.overtime_minutes).toBe(0)
     expect(day.anomaly).toBeNull()
   })
 

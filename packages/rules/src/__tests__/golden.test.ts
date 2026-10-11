@@ -8,7 +8,7 @@ import type {
   SalaryStructure,
   ShiftDef,
 } from "../index";
-import { applyOvertimePipeline } from "../worktime-engine";
+import { applyOvertimePipeline, unscheduledShiftDef } from "../worktime-engine";
 import {
   resolveHourlyWageDivisor,
   resolveLateEarlyDeductionEnabled,
@@ -1224,5 +1224,72 @@ describe("規則六 時薪制(工讀生/Part-time)", () => {
       const monthly = computePayslip([day], { method: "monthly", baseSalary: 36000, hourlyWage: 200 }, otRules);
       expect(monthly.lateEarlyDeduction).toBe(100); // 0.5h × 200
     });
+  });
+});
+
+// =========================================================================
+// 規則七：午休 (2026-10-11 業主決定)
+//   「做滿 8 小時」不含午休 1 小時:09:00–18:00 剛好 8 小時、加班 0。午休 = 12:00–13:00。
+//   未排班的日子以租戶預設午休 (12:00 起 60 分) 扣「在班區間與午休的重疊」;有排班看班別
+//   (break_start → 涵蓋 12:00 → 舊推算,見 lunch-window.ts)。已核准請假的時段不算遲到早退。
+//   (之前未排班日完全不扣午休 → 09:00–18:00 記成 9 小時、加班 60 分,這條就是在擋那個回歸。)
+// =========================================================================
+describe("規則七 午休 12:00–13:00 (做滿 8 小時不含午休)", () => {
+  const rules: RuleConfig = parseRuleConfig({
+    attendance_bonus: { base: 0, tiers: [{ lateMinutesUpTo: null, deduct: 0 }] },
+    overtime: { rules: [{ when: "weekday_ot", multiplier: 1.34 }] },
+    night: { window: { from: "22:00", to: "06:00" }, multiplier: 1.34 },
+    payroll: { method: "monthly", dailyRegularHours: 8 },
+  });
+  const workday = { date: "2026-09-01", dayType: "workday" as const };
+  const unscheduled = unscheduledShiftDef(rules);
+
+  it("未排班 09:00–18:00 → 工時 480、加班 0;10:00–19:00 同樣 480;13:30–18:00 不扣 → 270", () => {
+    const nineToSix = computeAttendanceDay(
+      { inAt: "2026-09-01T09:00:00", outAt: "2026-09-01T18:00:00" },
+      unscheduled,
+      rules,
+      workday,
+    );
+    expect(nineToSix.workedMinutes).toBe(480);
+    expect(nineToSix.overtimeMinutes).toBe(0);
+    const tenToSeven = computeAttendanceDay(
+      { inAt: "2026-09-01T10:00:00", outAt: "2026-09-01T19:00:00" },
+      unscheduled,
+      rules,
+      workday,
+    );
+    expect(tenToSeven.workedMinutes).toBe(480);
+    expect(tenToSeven.overtimeMinutes).toBe(0);
+    const afternoon = computeAttendanceDay(
+      { inAt: "2026-09-01T13:30:00", outAt: "2026-09-01T18:00:00" },
+      unscheduled,
+      rules,
+      workday,
+    );
+    expect(afternoon.workedMinutes).toBe(270);
+  });
+
+  it("未排班 09:00–21:00 → 扣午休後 660、加班 180 (未超過 180 分不扣晚餐)", () => {
+    const day = computeAttendanceDay(
+      { inAt: "2026-09-01T09:00:00", outAt: "2026-09-01T21:00:00" },
+      unscheduled,
+      rules,
+      workday,
+    );
+    expect(day.workedMinutes).toBe(660);
+    expect(day.overtimeMinutes).toBe(180);
+  });
+
+  it("日班 09:00–18:00 休 60:上午請 09:00–12:00、13:00 到班 → 遲到 0、工時 300", () => {
+    const shift: ShiftDef = { start: "09:00", end: "18:00", breakMinutes: 60, breakStart: "12:00" };
+    const day = computeAttendanceDay(
+      { inAt: "2026-09-01T13:00:00", outAt: "2026-09-01T18:00:00" },
+      shift,
+      rules,
+      { ...workday, leaveIntervals: [{ from: "2026-09-01T09:00:00", to: "2026-09-01T12:00:00" }] },
+    );
+    expect(day.lateMinutes).toBe(0);
+    expect(day.workedMinutes).toBe(300);
   });
 });

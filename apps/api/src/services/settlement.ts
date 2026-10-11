@@ -1,9 +1,14 @@
 import {
   computeAttendanceDay,
+  hhmmToMinutesOrNull,
+  lunchWindowOf,
+  resolveDefaultLunch,
   resolveOvertimeBasis,
   resolveOvertimeDailyCapMinutes,
+  unscheduledShiftDef,
   type DayType,
   type ShiftDef,
+  type TimeInterval,
 } from "@hr/rules"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
@@ -11,6 +16,7 @@ import {
   addDaysKey,
   dayWindowUtc,
   localDateKey,
+  toNaiveLocal,
   weekdayOfKey,
   zonedTimeToUtc,
   type DateKey,
@@ -29,6 +35,8 @@ import { pairPunchesTz, type PairedDay } from "./punch-pairing.js"
  *   • the employee's schedule → shift (start/end/break) for the day,
  *   • the day's type from tenant_calendar_days (fallback: Sat/Sun rest_day),
  *   • approved leave minutes sliced onto that local day (by leave-type code),
+ *     plus the leave's time windows on that day (2026-10-11：已核准請假覆蓋的時段
+ *     不算遲到／早退——引擎的 ctx.leaveIntervals；pending 不抵),
  *   • approved 在家工作（kind='wfh'）單覆蓋到的日子（M2：沒打卡的那天仍以班表
  *     淨工時認列出勤，遲到/早退歸零，anomaly.wfh 留痕），
  *   • the rule_config version in effect for the settled month (falling back to
@@ -51,9 +59,12 @@ import { pairPunchesTz, type PairedDay } from "./punch-pairing.js"
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
 const MS_PER_MIN = 60_000
 
-// Default shift for punched days with no schedule: a plain full day, no break.
-// Late / early-leave are meaningless against it and are zeroed by the caller.
-const UNSCHEDULED_SHIFT: ShiftDef = { start: "00:00", end: "23:59", breakMinutes: 0 }
+// 午休（2026-10-11 業主決定「做滿 8 小時不含午休 1 小時」）：
+//   • 有排班 → 班別自己的午休（@hr/rules lunch-window：break_start → 涵蓋 12:00 → 舊推算）。
+//   • 沒排班 → @hr/rules unscheduledShiftDef(rules)：整天 00:00–23:59、午休＝租戶預設
+//     （attendance.defaultLunch，預設 12:00 起 60 分），工時扣「在班區間與午休的重疊」——
+//     09:00–18:00 ＝ 8 小時、加班 0（以前這裡休息 0 分，會記成 9 小時、加班 60 分）。
+//     遲到／早退對它沒有意義，下面一律歸零。
 
 interface PunchRow {
   employee_id: string
@@ -72,6 +83,8 @@ interface ShiftRow {
   start_time: string
   end_time: string
   break_minutes: number
+  /** 午休開始 'HH:MM'（migration 0060；舊庫沒有這欄 → undefined）。 */
+  break_start?: string | null
 }
 
 interface CalendarRow {
@@ -137,6 +150,27 @@ function shiftWindowUtc(
 }
 
 /**
+ * 班別的**明確**午休（@hr/rules lunch-window 規則 1、2：break_start／涵蓋 12:00）投影到本地日
+ * `date` 的 UTC [start, end)。舊推算（規則 3：午班、夜班…）或沒有午休 → null——那類班別的
+ * 請假切片維持舊行為（不扣午休，封頂在班表淨工時）。
+ */
+function explicitLunchUtc(date: DateKey, shift: ShiftDef, tz: string): { start: number; end: number } | null {
+  const lunch = lunchWindowOf(shift)
+  if (!lunch || lunch.source === "legacy") return null
+  // lunch.start／end 是「自 date 00:00 起的分鐘」（跨日 +1440）；Date.UTC 會把超過的分鐘進位到隔日。
+  return {
+    start: zonedTimeToUtc(date, 0, lunch.start, tz).getTime(),
+    end: zonedTimeToUtc(date, 0, lunch.end, tz).getTime(),
+  }
+}
+
+/** [startMs, endMs) 與午休 `lunch` 重疊的分鐘（lunch 為 null → 0）。 */
+function lunchOverlapMinutes(startMs: number, endMs: number, lunch: { start: number; end: number } | null): number {
+  if (!lunch) return 0
+  return Math.max(0, Math.min(endMs, lunch.end) - Math.max(startMs, lunch.start)) / MS_PER_MIN
+}
+
+/**
  * Slice one approved leave request into minutes per local day. Precedence:
  *   1. `segments` (多段) — each row is already a local day.
  *   2. single-day request — its declared `hours` (what the filer asked for);
@@ -146,6 +180,11 @@ function shiftWindowUtc(
  *      leave covers it, and 0 on rest days / fixed holidays.
  * `hours` on a multi-day request is treated as a summary and not used to
  * distribute minutes (the per-day slicing is what the payslip must show).
+ *
+ * 午休（2026-10-11）：2、3 用「重疊」推分鐘時，扣掉與午休的重疊——有排班看班別的明確
+ * 午休（explicitLunchUtc），沒排班看 `ctx.defaultLunch`（租戶預設，12:00 起 60 分）。
+ * 例：日班單日 09:00–14:00、沒填 hours → 300 − 60 ＝ 240。segments（前端 leave-hours
+ * 已算好 hours）不受影響。`defaultLunch` 省略＝沒排班的日子不扣（舊行為）。
  */
 function sliceLeave(
   req: LeaveRequestRow,
@@ -156,10 +195,21 @@ function sliceLeave(
     regularMinutes: number
     shiftFor: (employeeId: string, date: DateKey) => ShiftDef | null
     dayTypeFor: (date: DateKey) => DayType
+    defaultLunch?: { start: string; minutes: number }
   },
 ): Array<{ date: DateKey; minutes: number }> {
   const out: Array<{ date: DateKey; minutes: number }> = []
   const inRange = (d: DateKey) => d >= ctx.from && d <= ctx.to
+  // 沒排班那天的午休（UTC）：租戶預設午休投影到該日。
+  const defaultLunchUtc = (d: DateKey): { start: number; end: number } | null => {
+    const lunch = ctx.defaultLunch
+    const startMin = lunch ? hhmmToMinutesOrNull(lunch.start) : null
+    if (!lunch || startMin == null || !(lunch.minutes > 0)) return null
+    return {
+      start: zonedTimeToUtc(d, 0, startMin, ctx.tz).getTime(),
+      end: zonedTimeToUtc(d, 0, startMin + lunch.minutes, ctx.tz).getTime(),
+    }
+  }
 
   if (Array.isArray(req.segments) && req.segments.length > 0) {
     for (const seg of req.segments) {
@@ -191,10 +241,14 @@ function sliceLeave(
       const shift = ctx.shiftFor(req.employee_id, firstDay)
       if (shift) {
         const w = shiftWindowUtc(firstDay, shift, ctx.tz)
-        const overlap = Math.max(0, Math.min(endMs, w.end) - Math.max(startMs, w.start))
-        minutes = Math.min(w.workMinutes, Math.round(overlap / MS_PER_MIN))
+        const lo = Math.max(startMs, w.start)
+        const hi = Math.min(endMs, w.end)
+        const overlap = Math.max(0, hi - lo) / MS_PER_MIN
+        const lunch = hi > lo ? lunchOverlapMinutes(lo, hi, explicitLunchUtc(firstDay, shift, ctx.tz)) : 0
+        minutes = Math.min(w.workMinutes, Math.round(overlap - lunch))
       } else {
-        minutes = Math.min(ctx.regularMinutes, Math.round((endMs - startMs) / MS_PER_MIN))
+        const lunch = lunchOverlapMinutes(startMs, endMs, defaultLunchUtc(firstDay))
+        minutes = Math.min(ctx.regularMinutes, Math.round((endMs - startMs) / MS_PER_MIN - lunch))
       }
     }
     if (minutes > 0) out.push({ date: firstDay, minutes })
@@ -207,19 +261,85 @@ function sliceLeave(
     let minutes = 0
     if (shift) {
       const w = shiftWindowUtc(d, shift, ctx.tz)
-      const overlap = Math.max(0, Math.min(endMs, w.end) - Math.max(startMs, w.start))
-      minutes = overlap >= w.end - w.start ? w.workMinutes : Math.min(w.workMinutes, Math.round(overlap / MS_PER_MIN))
+      const lo = Math.max(startMs, w.start)
+      const hi = Math.min(endMs, w.end)
+      const overlap = Math.max(0, hi - lo)
+      if (overlap >= w.end - w.start) {
+        minutes = w.workMinutes
+      } else {
+        const lunch = hi > lo ? lunchOverlapMinutes(lo, hi, explicitLunchUtc(d, shift, ctx.tz)) : 0
+        minutes = Math.min(w.workMinutes, Math.round(overlap / MS_PER_MIN - lunch))
+      }
     } else if (ctx.dayTypeFor(d) === "workday") {
       const day = dayWindowUtc(d, ctx.tz)
       const dayStart = new Date(day.startIso).getTime()
       const dayEnd = new Date(day.endIso).getTime()
-      const overlap = Math.max(0, Math.min(endMs, dayEnd) - Math.max(startMs, dayStart))
-      minutes =
-        overlap >= dayEnd - dayStart
-          ? ctx.regularMinutes
-          : Math.min(ctx.regularMinutes, Math.round(overlap / MS_PER_MIN))
+      const lo = Math.max(startMs, dayStart)
+      const hi = Math.min(endMs, dayEnd)
+      const overlap = Math.max(0, hi - lo)
+      if (overlap >= dayEnd - dayStart) {
+        minutes = ctx.regularMinutes
+      } else {
+        const lunch = hi > lo ? lunchOverlapMinutes(lo, hi, defaultLunchUtc(d)) : 0
+        minutes = Math.min(ctx.regularMinutes, Math.round(overlap / MS_PER_MIN - lunch))
+      }
     }
     if (minutes > 0) out.push({ date: d, minutes })
+  }
+  return out
+}
+
+/** 'HH:MM'（容許 24:00）→ 分鐘；格式不對 → null。 */
+function segmentMinutes(value: unknown): number | null {
+  return typeof value === "string" ? hhmmToMinutesOrNull(value) : null
+}
+
+/**
+ * 2026-10-11 請假時段不算遲到／早退：把一張**已核准**的假單攤成「每個本地日被請假覆蓋的時段」
+ * （naive local，與 pairPunchesTz 給引擎的 pairs 同一個時鐘），給引擎的 ctx.leaveIntervals。
+ *   1. `segments`：每段 date＋startTime／endTime。時間換到「那天班別的座標」——與前端
+ *      leave-hours 產生 segments 的算法相同：跨日班（例夜班 22:00–06:00）早於上班時間的時刻
+ *      算隔日，所以夜班下半段 {date D, 02:30–06:00} 是 D+1 的 02:30–06:00；結束不晚於開始再 +1 天。
+ *      只有時數、沒有起訖的段無從得知覆蓋哪一段 → 不抵（保守，照樣記遲到早退）。
+ *   2. 沒有 segments：start_at–end_at 整段，掛到它涵蓋的每個本地日（引擎只取與遲到／早退
+ *      區段的交集，整段掛上去不會多抵）。
+ * 窗外的日子不收。純函式。
+ */
+function leaveIntervalsOf(
+  req: Pick<LeaveRequestRow, "employee_id" | "start_at" | "end_at" | "segments">,
+  ctx: { tz: string; from: DateKey; to: DateKey; shiftFor?: (employeeId: string, date: DateKey) => ShiftDef | null },
+): Array<{ date: DateKey; interval: TimeInterval }> {
+  const out: Array<{ date: DateKey; interval: TimeInterval }> = []
+  const inRange = (d: DateKey) => d >= ctx.from && d <= ctx.to
+  const naiveAt = (d: DateKey, minutes: number) => toNaiveLocal(zonedTimeToUtc(d, 0, minutes, ctx.tz), ctx.tz)
+
+  if (Array.isArray(req.segments) && req.segments.length > 0) {
+    for (const seg of req.segments) {
+      if (!seg || typeof seg.date !== "string" || !dateRe.test(seg.date) || !inRange(seg.date)) continue
+      const a = segmentMinutes(seg.startTime)
+      const b = segmentMinutes(seg.endTime)
+      if (a == null || b == null) continue
+      // 那天的班別若跨日，早於上班時間的時刻屬於隔日（同 web leave-hours 的 onShiftAxis）。
+      const shift = ctx.shiftFor?.(req.employee_id, seg.date) ?? null
+      const shiftStart = shift ? hhmmToMinutesOrNull(shift.start) : null
+      const shiftEnd = shift ? hhmmToMinutesOrNull(shift.end) : null
+      const crosses = shiftStart != null && shiftEnd != null && shiftEnd <= shiftStart
+      const onAxis = (m: number) => (crosses && shiftStart != null && m < shiftStart ? m + 24 * 60 : m)
+      const fromMin = onAxis(a)
+      let toMin = onAxis(b)
+      if (toMin <= fromMin) toMin += 24 * 60
+      out.push({ date: seg.date, interval: { from: naiveAt(seg.date, fromMin), to: naiveAt(seg.date, toMin) } })
+    }
+    return out
+  }
+
+  const startMs = new Date(req.start_at).getTime()
+  const endMs = new Date(req.end_at).getTime()
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return out
+  const interval: TimeInterval = { from: toNaiveLocal(req.start_at, ctx.tz), to: toNaiveLocal(req.end_at, ctx.tz) }
+  const lastDay = localDateKey(new Date(endMs - 1), ctx.tz)
+  for (let d = localDateKey(req.start_at, ctx.tz); d <= lastDay; d = addDaysKey(d, 1)) {
+    if (inRange(d)) out.push({ date: d, interval })
   }
   return out
 }
@@ -250,8 +370,7 @@ function sliceWfhDates(
  *   basis='regularHours'（預設）→ 法定 payroll.dailyRegularHours（8 小時）
  *   basis='shift'              → 該日班表淨工時（span − 班別原始 breakMinutes）；
  *                                 沒有排班就退回法定值。
- * 注意這裡一定要用**班別原始的** breakMinutes：settleAttendance 為了避免把「打卡
- * 外出／休息」扣兩次，會把傳給引擎的 shift.breakMinutes 歸零，那份不能拿來當基準。
+ * 基準一律用班別原始的 breakMinutes（與當天有沒有打卡休息段、實際扣了多少午休無關）。
  */
 function regularMinutesForDay(
   basis: "regularHours" | "shift",
@@ -388,23 +507,36 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   const shiftIds = Array.from(new Set(schedules.map((s) => s.shift_id).filter((id): id is string => !!id)))
   const shiftById = new Map<string, ShiftRow>()
   if (shiftIds.length > 0) {
-    const { data: shiftData, error: shiftErr } = await supabaseAdmin
-      .from("shifts")
-      .select("id, start_time, end_time, break_minutes")
-      .eq("tenant_id", tenantId)
-      .in("id", shiftIds)
-    if (shiftErr) throw new Error(`settleAttendance (shifts): ${shiftErr.message}`)
-    for (const s of (shiftData ?? []) as ShiftRow[]) shiftById.set(s.id, s)
+    const loadShifts = (cols: string) =>
+      supabaseAdmin.from("shifts").select(cols).eq("tenant_id", tenantId).in("id", shiftIds)
+    let shiftRes = await loadShifts("id, start_time, end_time, break_minutes, break_start")
+    if (shiftRes.error && isMissingColumnError(shiftRes.error)) {
+      // 舊庫還沒有 shifts.break_start（migration 0060）→ 午休全走「涵蓋 12:00／舊推算」。
+      warnSchemaGapOnce("shifts.break_start", shiftRes.error)
+      shiftRes = await loadShifts("id, start_time, end_time, break_minutes")
+    }
+    if (shiftRes.error) throw new Error(`settleAttendance (shifts): ${shiftRes.error.message}`)
+    for (const s of (shiftRes.data ?? []) as unknown as ShiftRow[]) shiftById.set(s.id, s)
   }
   const shiftByKey = new Map<string, ShiftDef | null>()
   for (const s of schedules) {
     const row = s.shift_id ? shiftById.get(s.shift_id) : undefined
     shiftByKey.set(
       `${s.employee_id}|${s.work_date}`,
-      row ? { start: row.start_time, end: row.end_time, breakMinutes: row.break_minutes ?? 0 } : null,
+      row
+        ? {
+            start: row.start_time,
+            end: row.end_time,
+            breakMinutes: row.break_minutes ?? 0,
+            breakStart: row.break_start ?? null,
+          }
+        : null,
     )
   }
   const shiftFor = (empId: string, date: DateKey): ShiftDef | null => shiftByKey.get(`${empId}|${date}`) ?? null
+  // 沒排班的日子：整天＋租戶預設午休（見檔頭「午休」）。
+  const unscheduledShift = unscheduledShiftDef(rules)
+  const defaultLunch = resolveDefaultLunch(rules)
 
   // --- calendar → dayType ------------------------------------------------------
   const calendar = await loadCalendar(tenantId, from, to)
@@ -432,9 +564,11 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   const { data: leaveData, error: leaveErr } = await leaveQuery
   if (leaveErr) throw new Error(`settleAttendance (leave_requests): ${leaveErr.message}`)
   const leaveByKey = new Map<string, DayLeave>()
+  // 已核准請假覆蓋的時段（遲到／早退免計；這個查詢只撈 status='approved'，pending 不會進來）。
+  const leaveIntervalsByKey = new Map<string, TimeInterval[]>()
   for (const req of (leaveData ?? []) as LeaveRequestRow[]) {
     const code = req.leave_type_id ? (leaveTypes.get(req.leave_type_id)?.code ?? "unknown") : "unspecified"
-    for (const slice of sliceLeave(req, { tz, from, to, regularMinutes, shiftFor, dayTypeFor })) {
+    for (const slice of sliceLeave(req, { tz, from, to, regularMinutes, shiftFor, dayTypeFor, defaultLunch })) {
       const key = `${req.employee_id}|${slice.date}`
       let dl = leaveByKey.get(key)
       if (!dl) {
@@ -443,6 +577,12 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
       }
       dl.total += slice.minutes
       dl.breakdown[code] = (dl.breakdown[code] ?? 0) + slice.minutes
+    }
+    for (const { date, interval } of leaveIntervalsOf(req, { tz, from, to, shiftFor })) {
+      const key = `${req.employee_id}|${date}`
+      const list = leaveIntervalsByKey.get(key)
+      if (list) list.push(interval)
+      else leaveIntervalsByKey.set(key, [interval])
     }
   }
 
@@ -495,21 +635,17 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     const scheduledShift = shiftFor(empId, workDate)
     const dayType = dayTypeFor(workDate)
 
-    // Punched breaks already cut out of the pairs → don't deduct the shift's
-    // fixed break a second time.
-    const shift: ShiftDef = scheduledShift
-      ? {
-          start: scheduledShift.start,
-          end: scheduledShift.end,
-          breakMinutes: day && day.breaks.length > 0 ? 0 : scheduledShift.breakMinutes,
-        }
-      : UNSCHEDULED_SHIFT
+    // 班別：有排班用該班（含午休設定），沒排班用「整天＋預設午休」。打卡的休息段已從
+    // pairs 切掉 → punchedBreaks 讓引擎不再扣午休（午休時窗仍用於遲到／早退）。
+    const shift: ShiftDef = scheduledShift ?? unscheduledShift
 
     const dayRegularMinutes = regularMinutesForDay(basis, scheduledShift, workDate, tz, regularMinutes)
     const result = computeAttendanceDay(day?.pairs ?? [], shift, rules, {
       date: workDate,
       dayType,
       regularMinutes: dayRegularMinutes,
+      leaveIntervals: leaveIntervalsByKey.get(key),
+      punchedBreaks: !!day && day.breaks.length > 0,
     })
     let workedMinutes = result.workedMinutes
     let lateMinutes = scheduledShift ? result.lateMinutes : 0
@@ -587,4 +723,6 @@ export const __internal = {
   sliceWfhDates,
   regularMinutesForDay,
   wfhWorkedMinutes,
+  leaveIntervalsOf,
+  explicitLunchUtc,
 }

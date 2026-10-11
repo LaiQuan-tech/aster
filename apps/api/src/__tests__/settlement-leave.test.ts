@@ -167,3 +167,55 @@ describe("settlement — leaveDeductRate", () => {
     expect(leaveDeductRate(undefined)).toBe(0)
   })
 })
+
+describe("settlement — 午休 12:00–13:00（2026-10-11）在請假切片的影響", () => {
+  const { explicitLunchUtc } = __internal
+  const lunchCtx = { ...ctx, defaultLunch: { start: "12:00", minutes: 60 } }
+
+  it("explicitLunchUtc：日班（涵蓋 12:00）→ 台北 12:00–13:00；午班 14:00–22:00（舊推算）→ null", () => {
+    const w = explicitLunchUtc("2026-06-08", DAY, TPE)
+    expect(w && new Date(w.start).toISOString()).toBe("2026-06-08T04:00:00.000Z")
+    expect(w && new Date(w.end).toISOString()).toBe("2026-06-08T05:00:00.000Z")
+    expect(explicitLunchUtc("2026-06-08", { start: "14:00", end: "22:00", breakMinutes: 60 }, TPE)).toBeNull()
+    // 明設 break_start 也算明確午休（夜班 02:00 → 隔天 02:00 台北 = 當天 18:00Z）
+    const night = explicitLunchUtc("2026-06-08", { start: "22:00", end: "06:00", breakMinutes: 60, breakStart: "02:00" }, TPE)
+    expect(night && new Date(night.start).toISOString()).toBe("2026-06-08T18:00:00.000Z")
+  })
+
+  it("單日沒填 hours、跨午休 09:00–14:00 → 扣掉午休重疊 → 240（以前 300）", () => {
+    const req = { ...base, start_at: at("2026-06-08", "09:00"), end_at: at("2026-06-08", "14:00"), hours: null }
+    expect(sliceLeave(req, ctx)).toEqual([{ date: "2026-06-08", minutes: 240 }])
+  })
+
+  it("單日沒填 hours、沒排班：有 defaultLunch → 240；沒傳 defaultLunch（舊呼叫端）→ 300", () => {
+    const noShift = { ...lunchCtx, shiftFor: () => null }
+    const req = { ...base, start_at: at("2026-06-08", "09:00"), end_at: at("2026-06-08", "14:00"), hours: null }
+    expect(sliceLeave(req, noShift)).toEqual([{ date: "2026-06-08", minutes: 240 }])
+    expect(sliceLeave(req, { ...ctx, shiftFor: () => null })).toEqual([{ date: "2026-06-08", minutes: 300 }])
+  })
+
+  it("午班 14:00–22:00（不涵蓋 12:00）行為不變：14:00–19:00 → 300（不扣推算午休）", () => {
+    const pmShift: ShiftDef = { start: "14:00", end: "22:00", breakMinutes: 60 }
+    const req = { ...base, start_at: at("2026-06-08", "14:00"), end_at: at("2026-06-08", "19:00"), hours: null }
+    expect(sliceLeave(req, { ...ctx, shiftFor: () => pmShift })).toEqual([{ date: "2026-06-08", minutes: 300 }])
+  })
+
+  it("多日邊界日跨午休：首日 11:00 起 → 420 − 60 = 360；末日請到 14:00 → 300 − 60 = 240", () => {
+    const req = { ...base, start_at: at("2026-06-02", "11:00"), end_at: at("2026-06-03", "14:00"), hours: null }
+    expect(sliceLeave(req, lunchCtx)).toEqual([
+      { date: "2026-06-02", minutes: 360 },
+      { date: "2026-06-03", minutes: 240 },
+    ])
+  })
+
+  it("segments 一律以前端算好的 hours 為準，不再扣午休", () => {
+    const req = {
+      ...base,
+      start_at: at("2026-06-08", "09:00"),
+      end_at: at("2026-06-08", "14:00"),
+      hours: "4",
+      segments: [{ date: "2026-06-08", startTime: "09:00", endTime: "14:00", hours: 4 }],
+    }
+    expect(sliceLeave(req, lunchCtx)).toEqual([{ date: "2026-06-08", minutes: 240 }])
+  })
+})

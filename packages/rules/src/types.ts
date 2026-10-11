@@ -15,14 +15,23 @@ export interface PunchPair {
 
 /**
  * 班別定義。start/end 為 'HH:MM'。end < start 視為跨日班 (e.g. 22:00→06:00)。
- * breakMinutes 為不計薪的休息時間。isNightShift 純標記用 (引擎以 night.window
+ * breakMinutes 為不計薪的休息時間;breakStart 為午休開始 'HH:MM'(shifts.break_start,
+ * 可省略)——午休落在哪一段由 lunch-window.ts 的三條規則決定 (有 breakStart 用它;
+ * 涵蓋 12:00 用 12:00;其他沿用舊推算)。isNightShift 純標記用 (引擎以 night.window
  * 重疊計算夜間時數，不依賴此旗標)。
  */
 export interface ShiftDef {
   start: string;
   end: string;
   breakMinutes: number;
+  breakStart?: string | null;
   isNightShift?: boolean;
+}
+
+/** 一段時間 (與 PunchPair 同一個時鐘:naive local Date 或 ISO 字串)。 */
+export interface TimeInterval {
+  from: Date | string;
+  to: Date | string;
 }
 
 /** 該日屬性 (例假/固定假由呼叫端判定，引擎不需國定假日表)。 */
@@ -47,6 +56,18 @@ export interface DayContext {
    * 而不是照 8 小時算成 0。無排班的日子呼叫端仍應留空（退回法定 8 小時）。
    */
   regularMinutes?: number;
+  /**
+   * 當天**已核准**請假覆蓋的時段（與 punches 同一個時鐘）。遲到／早退不計這些時段，
+   * 連同與它們相連的午休：日班上午請 09:00–12:00、13:00 到班 → 遲到 0（12:00–13:00
+   * 是午休）；下午請 14:00–18:00、14:00 下班 → 早退 0。pending 的假單不要放進來。
+   */
+  leaveIntervals?: TimeInterval[];
+  /**
+   * 當天有打卡的休息段（break_in/break_out，呼叫端已從 punches 切掉）。只影響舊推算
+   * （lunch-window 規則 3）的班別：不再固定扣 breakMinutes（否則扣兩次）。明確的午休
+   * （規則 1、2）一律扣「在班區間與午休的重疊」，切掉的休息段本來就不在區間裡，不會重複扣。
+   */
+  punchedBreaks?: boolean;
 }
 
 /**
@@ -67,11 +88,16 @@ export interface LeaveEntry {
  */
 export interface AttendanceDay {
   date: string;
-  /** 實際工時 = 在班時間 − 休息;不含休息分鐘。 */
+  /** 實際工時 = 在班時間 − 午休 (見 worktime-engine);不含休息分鐘。 */
   workedMinutes: number;
-  /** 遲到分鐘 (相對班表 start;早到為 0)。 */
+  /**
+   * 遲到分鐘 = 班表 start 到第一次上班卡之間，扣掉午休與已核准請假覆蓋的時段 (早到為 0)。
+   */
   lateMinutes: number;
-  /** 早退分鐘 (相對班表 end;晚走為 0;rest_day / fixed_holiday 一律 0)。 */
+  /**
+   * 早退分鐘 = 最後一次下班卡到班表 end 之間，扣掉午休與已核准請假覆蓋的時段
+   * (晚走為 0;rest_day / fixed_holiday 一律 0)。
+   */
   earlyLeaveMinutes?: number;
   /**
    * 當日加班分鐘 (計薪用)。worktime-engine 的輸出已經過

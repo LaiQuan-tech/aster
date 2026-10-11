@@ -14,6 +14,7 @@ import { z } from "zod";
  *   - night 夜間: 時段視窗 + 倍率
  *   - payroll 薪資: 計薪方式 (月薪 / 按出勤天數) + 加班參數 + 時薪除數
  *   - leave_deduction 請假/遲到早退扣款開關
+ *   - attendance 出勤: 未排班日的預設午休 (2026-10-11)
  *
  * 新增的 knob 一律「型別上 optional、引擎端補預設」(見檔尾 resolve* helpers),
  * 而不是用 zod `.default()` 讓 parse 後變成必填:apps/api 的 DEFAULT_RULE_CONFIG
@@ -228,6 +229,24 @@ const LeaveDeductionSchema = z
   })
   .optional();
 
+// 出勤設定 (2026-10-11 業主決定「做滿 8 小時不含午休 1 小時」):
+//   defaultLunch  未排班日的預設午休 { start 'HH:MM', minutes }。省略 = 12:00、60 分
+//                 (resolveDefaultLunch)。未排班的日子扣「在班區間與這段的重疊」:
+//                 09:00–18:00 扣 60 → 8h、加班 0;13:30–18:00 不扣。
+//                 有排班的日子看班別自己的午休 (lunch-window.ts 的三條規則)。
+// 整段可省略。
+const DefaultLunchSchema = z.object({
+  start: HHMM,
+  minutes: z.number().int().min(0).max(240),
+});
+export type DefaultLunch = z.infer<typeof DefaultLunchSchema>;
+
+const AttendanceSchema = z
+  .object({
+    defaultLunch: DefaultLunchSchema.optional(),
+  })
+  .optional();
+
 export const RuleConfigSchema = z.object({
   attendance_bonus: AttendanceBonusSchema,
   overtime: OvertimeSchema,
@@ -236,6 +255,7 @@ export const RuleConfigSchema = z.object({
   insurance: InsuranceSchema,
   leave_deduction: LeaveDeductionSchema,
   leave: LeaveSchema,
+  attendance: AttendanceSchema,
 });
 
 export type RuleConfig = z.infer<typeof RuleConfigSchema>;
@@ -306,6 +326,14 @@ export function resolvePayrollGates(rules: RuleConfig): {
 /** 遲到早退是否扣款 (省略 → false)。 */
 export function resolveLateEarlyDeductionEnabled(rules: RuleConfig): boolean {
   return rules.leave_deduction?.lateEarly?.enabled ?? false;
+}
+
+/** 未排班日的預設午休 (業主 2026-10-11 確認:12:00 起 60 分)。 */
+export const DEFAULT_LUNCH: DefaultLunch = { start: "12:00", minutes: 60 };
+
+/** 未排班日的預設午休 (省略 → 12:00、60 分)。 */
+export function resolveDefaultLunch(rules: RuleConfig): DefaultLunch {
+  return rules.attendance?.defaultLunch ?? DEFAULT_LUNCH;
 }
 
 /* ------------------------------------ 2026-09-23 需求補齊:加班上限/特休/級距 ----- */
