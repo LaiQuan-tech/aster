@@ -5,7 +5,8 @@
  * ⚠️ 2026-10-11 兩項功能移除後的改動（本腳本沒有重跑，只改寫呼叫）：
  *   • 班表（排班）已移除：POST/GET /schedules 現在是 404，所以這支**不再排班**、也不再檢查殘留班表
  *     （原 ensureSchedules／reportStraySchedules 已刪）。沒有班表後，結算對每天都走「未排班」規則
- *     （整天、不扣午休；見 apps/api/src/services/settlement.ts），本腳本原先「日班／晚到班／午班」各排給不同人
+ *     （工作日＝整天、扣租戶預設午休，2026-10-12 起改用彈性上班 08:00–10:00 判遲到；例假日／國定假日＝整天、
+ *     不扣午休；見 apps/api/src/services/settlement.ts 的午休說明），本腳本原先「日班／晚到班／午班」各排給不同人
  *     的前提不在了——[COMPARE]／[SPOTCHECK] 的數字（尤其晚到班的劉皇佑、午班的劉明哲）可能對不上 Excel，
  *     僅供參考，FAIL 不代表系統有 bug。班別（shifts）本身還在，所以仍會建立三個班別定義。
  *   • 代申請已移除：POST /requests 帶 onBehalfOfEmployeeId 不是本人 → 400 filing_on_behalf_removed。

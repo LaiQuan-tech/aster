@@ -28,7 +28,7 @@
 > ⚠️ 以上數字是 2026-10-11 班表功能移除**之前**最後一次執行的結果。移除後腳本已改（拿掉 5-4～5-6、13-1 改成直接寫
 > `schedules` 列），**尚未重跑**——重跑後 PASS 總數會變（少 6 個斷言、13-1 前置多 1 個），其餘表格的「實際」欄也應以重跑結果為準。
 
-> 下表「實際」欄為最新一次執行的結果。`POST /attendance/settle` 一案在第一版腳本誤期望 201，經對照 `apps/api/src/routes/attendance.ts:51` 實際回傳 200 後修正腳本（屬腳本問題，非 API bug），現已 PASS。
+> 下表「實際」欄為最新一次執行的結果（班表功能移除前；13-1 的前置已改、標「待重跑」）。`POST /attendance/settle` 一案在第一版腳本誤期望 201，經對照 `apps/api/src/routes/attendance.ts:51` 實際回傳 200 後修正腳本（屬腳本問題，非 API bug），現已 PASS。
 
 ---
 
@@ -187,7 +187,7 @@
 
 | # | 測試案例 | 前置 | 步驟 | 預期 | 實際 |
 | --- | --- | --- | --- | --- | --- |
-| 13-1 | 缺卡掃描（只 in 未 out） | 另建員工，用 service_role 直接寫一列當日 `schedules`（`POST /schedules` 已移除；缺卡掃描讀班表的分支保留給歷史資料），今日只打 in | `POST /attendance/scan-missing-punch {date:今日}` | 200；`missing` 含該員工 `issue:"no_out"` | PASS |
+| 13-1 | 缺卡掃描（只 in 未 out） | 另建員工，用 service_role 直接寫一列當日 `schedules`（`POST /schedules` 已移除；缺卡掃描讀班表的分支保留給歷史資料），今日只打 in | `POST /attendance/scan-missing-punch {date:今日}` | 200；`missing` 含該員工 `issue:"no_out"` | 待重跑（班表移除前 PASS） |
 | 13-2 | 產生通知 | 13-1 | 同上回應 | `queued>=1` | PASS |
 | 13-3 | 重掃冪等 | 13-1 已掃 | 再掃同日 | `queued==0` | PASS |
 | 13-4 | HR 看全部通知 | hr token | `GET /notifications` | 200；含該 `missing_punch` 通知 | PASS |
