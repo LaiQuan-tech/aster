@@ -4,12 +4,14 @@ import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import {
   listKnowledgeDocuments, createKnowledgeText, uploadKnowledgeFile, linkProjectDocument, reindexKnowledgeDocument,
-  deleteKnowledgeDocument, knowledgeDownloadUrl, searchKnowledge, type KnowledgeDocument, type SearchHit,
+  deleteKnowledgeDocument, knowledgeDownloadUrl, searchKnowledge, KNOWLEDGE_FILE_ACCEPT, KNOWLEDGE_MAX_BYTES,
+  KNOWLEDGE_SUPPORTED_LABEL, type KnowledgeDocument, type SearchHit,
 } from "@/lib/knowledge-api";
 import { listProjects, getProjectDocuments, type Project, type ProjectDocument } from "@/lib/projects-api";
 
 /**
- * 文件庫 · 語意搜尋。三種進件：貼文字、上傳檔案（txt/md/csv/json/pdf/docx）、掛專案文件庫既有檔。
+ * 文件庫 · 語意搜尋。三種進件：貼文字、上傳檔案（txt/md/csv/json/pdf/docx，單檔 10 MB 以內；小檔經 API、
+ * 大檔用簽名網址直傳 Storage，見 lib/knowledge-api.ts）、掛專案文件庫既有檔。
  * 建檔即索引（抽字 → 切塊 → 向量）。搜尋有金鑰走語意、沒金鑰退回關鍵字，結果標示用了哪種。
  */
 const STATUS_CLS: Record<KnowledgeDocument["status"], string> = {
@@ -178,11 +180,14 @@ export default function KnowledgePage() {
           <h2 className="text-sm font-semibold text-gray-700">文件（{docs.length}）</h2>
           <div className="ml-auto flex gap-2">
             <button type="button" onClick={() => setAdd(add === "text" ? null : "text")} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700">貼文字</button>
-            <input ref={fileRef} type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" className="hidden" onChange={(e) => void addFile(e.target.files?.[0])} />
-            <button type="button" onClick={() => fileRef.current?.click()} disabled={busy === "add"} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 disabled:opacity-50">{busy === "add" ? "處理中…" : "上傳檔案"}</button>
+            <input ref={fileRef} type="file" accept={KNOWLEDGE_FILE_ACCEPT} className="hidden" onChange={(e) => void addFile(e.target.files?.[0])} />
+            <button type="button" onClick={() => fileRef.current?.click()} disabled={busy === "add"} title={`收 ${KNOWLEDGE_SUPPORTED_LABEL}，單檔 ${KNOWLEDGE_MAX_BYTES / 1024 / 1024} MB 以內`} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 disabled:opacity-50">{busy === "add" ? "處理中…" : "上傳檔案"}</button>
             <button type="button" onClick={() => setAdd(add === "project" ? null : "project")} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700">掛入專案文件</button>
           </div>
         </div>
+        <p className="-mt-1 mb-3 text-xs text-gray-400">
+          上傳檔案收 {KNOWLEDGE_SUPPORTED_LABEL}，單檔 {KNOWLEDGE_MAX_BYTES / 1024 / 1024} MB 以內（大檔會直接傳到儲存空間，要多等一下）。
+        </p>
 
         {add === "text" && (
           <div className="mb-4 rounded-lg border border-gray-200 p-3">
