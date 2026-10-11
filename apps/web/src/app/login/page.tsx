@@ -108,7 +108,6 @@ export default function LoginPage() {
           onChange={(e) => setEmail(e.target.value)}
           className="w-full rounded-md border border-gray-300 px-3 py-2 mb-4 focus:outline-none focus:ring-2 focus:ring-[var(--brand)]"
         />
-        <p className="-mt-2 mb-4 text-xs text-gray-400">Demo 可直接輸入 demo。</p>
 
         <div className="mb-1 flex items-center justify-between">
           <label className="block text-sm font-medium text-gray-700" htmlFor="password">
