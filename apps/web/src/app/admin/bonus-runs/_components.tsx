@@ -37,7 +37,7 @@ export function ItemsTable({ items, label = "" }: { items: BonusRunPreview["item
         <thead>
           <tr className="bg-gray-100 text-center font-semibold text-gray-700">
             <th className="border border-black px-2 py-2" rowSpan={2}>序號</th><th className="border border-black px-2 py-2" rowSpan={2}>{label || "期別"}</th>
-            <th className="border border-black px-2 py-2" rowSpan={2}>專案單號</th><th className="border border-black px-2 py-2" rowSpan={2}>工程名稱</th><th className="border border-black px-2 py-2" rowSpan={2}>含稅</th>
+            <th className="border border-black px-2 py-2" rowSpan={2}>專案單號</th><th className="border border-black px-2 py-2" rowSpan={2}>工程名稱</th><th className="border border-black px-2 py-2" rowSpan={2}>未稅金額</th>
             <th className="border border-black px-2 py-2" rowSpan={2}>之前請領</th><th className="border border-black px-2 py-2" rowSpan={2}>之前請領%</th>
             <th className="border border-black px-2 py-2" rowSpan={2}>本次請款</th><th className="border border-black px-2 py-2" rowSpan={2}>本次款%</th><th className="border border-black px-2 py-2" rowSpan={2}>累積 %</th>
             <th className="border border-black px-2 py-1" colSpan={3}>獎金比例</th>
