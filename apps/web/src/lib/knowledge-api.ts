@@ -56,6 +56,10 @@ const KNOWLEDGE_ERRORS: Record<string, string> = {
   upload_not_found: "檔案沒有傳完整，請重新上傳。",
   invalid_storage_path: "上傳憑證不合法，請重新上傳。",
   already_registered: "這個檔案已經上傳過了。",
+  // 後端的欄位驗證（空檔 base64 是空字串、檔名太長…）；前端先擋空檔，剩下的多半是檔名超過 200 字。
+  invalid_body: "上傳內容不完整或格式不對（檔名過長？檔案是空的？），請重新選擇檔案。",
+  // 只在前端用的（不送請求）：
+  empty_file: "檔案是空的（0 bytes），請確認選到正確的檔案。",
 }
 
 /**
@@ -86,6 +90,7 @@ type KnowledgeCreateResult = { document: KnowledgeDocument; index: { status: str
  * 失敗一律丟 `Error`，message 已翻成中文。
  */
 export async function uploadKnowledgeFile(file: File, title?: string): Promise<KnowledgeCreateResult> {
+  if (file.size === 0) throw new Error(KNOWLEDGE_ERRORS.empty_file)
   if (file.size > KNOWLEDGE_MAX_BYTES) throw new Error(KNOWLEDGE_ERRORS.file_too_large)
   const contentType = file.type || "application/octet-stream"
   try {

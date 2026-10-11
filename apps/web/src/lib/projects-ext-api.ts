@@ -950,7 +950,8 @@ export const RECEIVED_AMOUNT_HINT = "請填未稅金額，不要填含稅的銀�
 
 /** 入帳金額輸入框的 placeholder：「未稅 12,000」（帶該期應收未稅金額）；金額未知只寫「未稅金額」。 */
 export function receivedAmountPlaceholder(effectiveAmount: number | null | undefined): string {
-  return effectiveAmount == null ? "未稅金額" : `未稅 ${effectiveAmount.toLocaleString()}`
+  // 固定 en-US 千分位（同 ess-format 的 fmtMoney）：不吃執行環境的語系，畫面與測試都穩定。
+  return effectiveAmount == null ? "未稅金額" : `未稅 ${effectiveAmount.toLocaleString("en-US")}`
 }
 
 /**

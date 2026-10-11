@@ -34,6 +34,7 @@ import {
   ADMIN_SECTIONS,
   adminModulesOf,
   configurableTabsForRole,
+  nextRoleTabs,
   roleNavOf,
   type AdminModuleKey,
   type AdminModulesConfig,
@@ -159,12 +160,8 @@ export default function AdvancedFeaturesPage() {
   /** 勾／取消單一分頁。該區原本沒有 tabs 鍵（＝全部）時，先展開成完整清單再減。 */
   function toggleRoleTab(section: AdminSectionKey, tabKey: string, enabled: boolean) {
     if (!roleNav) return;
-    // 只算可勾選的分頁（HR 限定的分頁，例如集團總覽，勾了也無效，不放進清單）。
-    const all = configurableTabsForRole(section).map((t) => t.key);
-    const current = roleNav.tabs[section] ?? all;
-    const next = enabled
-      ? all.filter((k) => current.includes(k) || k === tabKey)
-      : all.filter((k) => current.includes(k) && k !== tabKey);
+    // 只算可勾選的分頁（HR 限定的分頁，例如集團總覽，勾了也無效，不放進清單）；見 admin-nav.ts 的 nextRoleTabs。
+    const next = nextRoleTabs(section, roleNav.tabs[section], tabKey, enabled);
     void saveRoleNav({ sections: roleNav.sections, tabs: { ...roleNav.tabs, [section]: next } });
   }
 

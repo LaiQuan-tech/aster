@@ -170,6 +170,14 @@ describe("uploadKnowledgeFile — 大檔（3～10 MiB）簽名網址直傳 Stora
   });
 });
 
+describe("uploadKnowledgeFile — 空檔", () => {
+  it("0 bytes 的檔案：不送任何請求（以前會被後端 invalid_body 擋掉，畫面顯示英文原碼），訊息說檔案是空的", async () => {
+    await expect(uploadKnowledgeFile(fileOf("空.txt", 0, "text/plain"))).rejects.toThrow("檔案是空的");
+    expect(h.apiFetch).not.toHaveBeenCalled();
+    expect(h.uploadToSignedUrl).not.toHaveBeenCalled();
+  });
+});
+
 describe("humanizeKnowledgeError", () => {
   it("API 錯誤碼翻中文（認 .code，也認 [status] code 格式的訊息）；其他錯誤原樣；不是 Error 用備用訊息", () => {
     expect(humanizeKnowledgeError(apiError(413, "file_too_large"))).toContain("單檔上限 10 MB");
@@ -177,6 +185,9 @@ describe("humanizeKnowledgeError", () => {
     expect(humanizeKnowledgeError(apiError(400, "upload_not_found"))).toContain("沒有傳完整");
     expect(humanizeKnowledgeError(apiError(400, "invalid_storage_path"))).toContain("重新上傳");
     expect(humanizeKnowledgeError(apiError(409, "already_registered"))).toContain("已經上傳過");
+    // 後端欄位驗證失敗（例如檔名超過 200 字）不再顯示英文原碼
+    expect(humanizeKnowledgeError(apiError(400, "invalid_body"))).toContain("上傳內容不完整");
+    expect(humanizeKnowledgeError(apiError(400, "invalid_body"))).not.toContain("invalid_body");
     expect(humanizeKnowledgeError(new Error("網路中斷"))).toBe("網路中斷");
     expect(humanizeKnowledgeError("字串", "備用")).toBe("備用");
     expect(humanizeKnowledgeError("字串")).toBe("上傳失敗");

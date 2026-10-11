@@ -16,6 +16,7 @@ import {
   isAdminPathAllowed,
   isHrOnlyAdminPath,
   isModuleEnabled,
+  nextRoleTabs,
   normalizeAdminPath,
   offLimitsCopy,
   parentPathFor,
@@ -818,6 +819,30 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
     for (const { section, tab } of HR_ONLY_TABS) {
       expect(configurableTabsForRole(section).map((t) => t.key)).not.toContain(tab.key);
     }
+  });
+
+  it("nextRoleTabs：勾／取消單一分頁——沒有 tabs 鍵（＝全部）先展開再加減，只算可勾選的分頁，照表順序", () => {
+    const configurable = configurableTabsForRole("finance").map((t) => t.key);
+    // 原本沒有 tabs 鍵＝該區全部：取消 reports → 其餘全留，且不含 hrOnly 的 groupOverview
+    expect(nextRoleTabs("finance", undefined, "reports", false)).toEqual(configurable.filter((k) => k !== "reports"));
+    expect(nextRoleTabs("finance", undefined, "reports", false)).not.toContain("groupOverview");
+    // 已有清單：再勾回來 → 照表順序插回去（不是接在最後）
+    expect(nextRoleTabs("finance", ["projects", "bonus"], "overview", true)).toEqual(["projects", "overview", "bonus"]);
+    // 取消清單裡的一個
+    expect(nextRoleTabs("finance", ["projects", "overview", "bonus"], "overview", false)).toEqual(["projects", "bonus"]);
+    // 重複勾／重複取消是冪等的
+    expect(nextRoleTabs("finance", ["projects"], "projects", true)).toEqual(["projects"]);
+    expect(nextRoleTabs("finance", ["projects"], "overview", false)).toEqual(["projects"]);
+    // 取消到沒有 → 空陣列（該區沒有任何可見分頁）
+    expect(nextRoleTabs("finance", ["projects"], "projects", false)).toEqual([]);
+  });
+
+  it("nextRoleTabs：殘留的 hrOnly／不認得的 key 順手丟掉；勾 hrOnly 的 key 不會加進去", () => {
+    // 舊版設定頁可能把 groupOverview 展開進清單
+    expect(nextRoleTabs("finance", ["projects", "groupOverview", "nope"], "overview", true)).toEqual(["projects", "overview"]);
+    expect(nextRoleTabs("finance", ["projects", "groupOverview"], "projects", false)).toEqual([]);
+    expect(nextRoleTabs("finance", ["projects"], "groupOverview", true)).toEqual(["projects"]);
+    expect(nextRoleTabs("finance", undefined, "groupOverview", true)).toEqual(configurableTabsForRole("finance").map((t) => t.key));
   });
 
   it("目前 hrOnly 的就是財務分區的集團總覽（新增 hrOnly 分頁時，下面的路徑與提示測試會自動涵蓋）", () => {

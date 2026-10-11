@@ -894,6 +894,23 @@ export function configurableTabsForRole(section: AdminSectionKey): AdminTab[] {
   return ADMIN_TABS[section].filter((tab) => !tab.hrOnly);
 }
 
+/**
+ * 「會計可用範圍」勾／取消單一分頁後，該分區存起來的分頁清單（照表順序）：
+ *   • 只算可勾選的分頁（configurableTabsForRole，排除 hrOnly）；
+ *   • `current` 是這個分區目前存的清單，undefined＝沒有 tabs 鍵＝該區全部分頁，先展開成完整清單再加減；
+ *   • 清單裡殘留的 hrOnly 或不認得的 key 順手丟掉；勾一個不可勾選的 key（例如 groupOverview）不會加進去。
+ */
+export function nextRoleTabs(
+  section: AdminSectionKey,
+  current: readonly string[] | undefined,
+  tabKey: string,
+  enabled: boolean,
+): string[] {
+  const all = configurableTabsForRole(section).map((tab) => tab.key);
+  const base = current ?? all;
+  return enabled ? all.filter((key) => base.includes(key) || key === tabKey) : all.filter((key) => base.includes(key) && key !== tabKey);
+}
+
 /** 某分頁的子分頁（沒有 children／找不到 → []）。 */
 export function subTabsFor(section: AdminSectionKey, tab: string | null | undefined): AdminSubTab[] {
   if (!tab) return [];

@@ -226,7 +226,12 @@ export function invalidateBranding() {
   void getBrandingCached()
     .then((res) => {
       if (gen !== generation) return; // 已登出：丟棄
-      setSnapshot({ branding: res.branding ?? null, features: res.features ?? null });
+      // isBoss 是由 features 與 me 算出來的衍生值：老闆設定剛被改（交棒）時要一併重算，不然簽核分頁要等下一輪 load 才跟上。
+      setSnapshot({
+        branding: res.branding ?? null,
+        features: res.features ?? null,
+        isBoss: isApprovalBoss(res.features ?? null, snapshot.me?.id),
+      });
     })
     .catch(() => {
       /* best-effort：失敗保留舊值 */
