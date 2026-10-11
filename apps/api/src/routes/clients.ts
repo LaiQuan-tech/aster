@@ -5,7 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin, requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { sanitizeSearchTerm } from "../lib/search-term.js"
-import { resolveSelf } from "../middleware/scope.js"
+import { isHrRole, resolveSelf } from "../middleware/scope.js"
 import { isValidTaiwanTaxId, TAX_ID_RE } from "../services/tax-id.js"
 import { INVOICE_TYPES, PAYMENT_METHODS } from "../services/project-money.js"
 import { CLIENT_COLS, serializeClient, type ClientRow } from "../services/project-application-store.js"
@@ -18,11 +18,14 @@ export const clientsRouter = Router()
  * 的 `CLIENT_COLS`／`serializeClient`／`ClientRow`（該檔另一批任務同時在改，
  * 這裡改了容易互相打架）。做法：select 時在共用欄位清單後面多接幾欄，
  * 序列化時在共用序列化結果外面再疊一層。
+ *
+ * 2026-10-11：`is_affiliate`（關係企業，packages/db 0062，已套正式庫）同樣疊在這裡——
+ * 集團總覽（services/group-overview.ts）的集團合計會剔除「客戶是關係企業的專案收入」。
  */
-const CLIENT_COLS_EXT = `${CLIENT_COLS}, category, short_name`
-type ClientRowExt = ClientRow & { category: string | null; short_name: string | null }
+const CLIENT_COLS_EXT = `${CLIENT_COLS}, category, short_name, is_affiliate`
+type ClientRowExt = ClientRow & { category: string | null; short_name: string | null; is_affiliate: boolean | null }
 function serializeClientExt(r: ClientRowExt) {
-  return { ...serializeClient(r), category: r.category ?? null, shortName: r.short_name ?? null }
+  return { ...serializeClient(r), category: r.category ?? null, shortName: r.short_name ?? null, isAffiliate: r.is_affiliate === true }
 }
 
 /**
@@ -38,6 +41,12 @@ function serializeClientExt(r: ClientRowExt) {
  */
 
 const dayField = z.string().trim().max(40).nullable().optional()
+
+/**
+ * 「關係企業」標記會改變集團總覽的集團合計（剔除這家客戶的專案收入），所以只有 HR／平台管理員能設定或變更；
+ * 會計（requireFinance 放行）仍可照常維護其他欄位。重送跟現值一樣的值不算變更。
+ */
+const AFFILIATE_HR_ONLY = { error: "affiliate_hr_only", message: "只有 HR 管理員可以設定「關係企業」標記。" } as const
 
 /**
  * 客戶分類（B4）：合法值是租戶「選項清單 → 客戶分類」（`option_items`，list_key＝client_category）裡**啟用**的
@@ -68,6 +77,8 @@ const clientBody = z.object({
   shortName: z.string().trim().max(40).nullable().optional(),
   /** 分類 code（選項清單 client_category 的 code；預設有建築師／技師／業主／政府機關／其他）。可空——既有名冊未必補得回。 */
   category: z.string().trim().min(1).max(100).nullable().optional(),
+  /** 關係企業（集團內姊妹公司）：集團總覽合計時剔除與它的往來。DB 欄位 NOT NULL，所以只收 boolean，不收 null。 */
+  isAffiliate: z.boolean().optional(),
   taxId: z
     .string()
     .trim()
@@ -92,7 +103,7 @@ const clientBody = z.object({
 function toRow(b: Partial<z.infer<typeof clientBody>>): Record<string, unknown> {
   const row: Record<string, unknown> = {}
   const map: Array<[keyof z.infer<typeof clientBody>, string]> = [
-    ["name", "name"], ["shortName", "short_name"], ["category", "category"], ["taxId", "tax_id"], ["phone", "phone"], ["fax", "fax"],
+    ["name", "name"], ["shortName", "short_name"], ["category", "category"], ["isAffiliate", "is_affiliate"], ["taxId", "tax_id"], ["phone", "phone"], ["fax", "fax"],
     ["invoiceAddress", "invoice_address"], ["contactName", "contact_name"], ["contactPhone", "contact_phone"],
     ["email", "email"], ["invoiceType", "invoice_type"], ["paymentMethod", "payment_method"],
     ["closingDay", "closing_day"], ["paymentDay", "payment_day"], ["note", "note"],
@@ -137,12 +148,16 @@ clientsRouter.post("/clients", requireAuth, requireTenant, requireFinance, async
     return
   }
   try {
+    const self = userId ? await resolveSelf(tenantId, userId) : null
+    if (parsed.data.isAffiliate === true && !isHrRole(self?.role)) {
+      res.status(403).json(AFFILIATE_HR_ONLY)
+      return
+    }
     const problem = await categoryProblem(tenantId, parsed.data.category, null)
     if (problem) {
       res.status(400).json({ error: problem, category: parsed.data.category })
       return
     }
-    const self = userId ? await resolveSelf(tenantId, userId) : null
     const { data, error } = await supabaseAdmin
       .from("clients")
       .insert({ tenant_id: tenantId, created_by_emp_id: self?.id ?? null, ...toRow(parsed.data) })
@@ -165,6 +180,7 @@ clientsRouter.post("/clients", requireAuth, requireTenant, requireFinance, async
 // ── PATCH /clients/:id — HR ────────────────────────────────────────────
 clientsRouter.patch("/clients/:id", requireAuth, requireTenant, requireFinance, async (req: Request, res: Response, next: NextFunction) => {
   const tenantId = res.locals.tenantId as string
+  const userId = req.auth?.userId
   const id = req.params.id as string
   const parsed = clientBody.partial().safeParse(req.body)
   if (!parsed.success) {
@@ -177,6 +193,30 @@ clientsRouter.patch("/clients/:id", requireAuth, requireTenant, requireFinance, 
     return
   }
   try {
+    // 關係企業標記只有 HR 能「變更」：非 HR 帶了這個欄位就比對現值，不同 → 403；一樣＝沒變更，放行，
+    // 但這個欄位從 update 剔除（不把一個可能已被 HR 並發改掉的舊值寫回去）。
+    if (parsed.data.isAffiliate !== undefined) {
+      const self = userId ? await resolveSelf(tenantId, userId) : null
+      if (!isHrRole(self?.role)) {
+        const { data: stored, error: storedError } = await supabaseAdmin
+          .from("clients")
+          .select("is_affiliate")
+          .eq("tenant_id", tenantId)
+          .eq("id", id)
+          .is("deleted_at", null)
+          .maybeSingle()
+        if (storedError) {
+          next(new Error(`PATCH /clients/${id} (load is_affiliate): ${storedError.message}`))
+          return
+        }
+        // 查無這個客戶就往下走，由下面的 update 回 404。
+        if (stored && ((stored as { is_affiliate?: boolean | null }).is_affiliate === true) !== parsed.data.isAffiliate) {
+          res.status(403).json(AFFILIATE_HR_ONLY)
+          return
+        }
+        delete row.is_affiliate
+      }
+    }
     // 改選分類才要比對清單；先讀這個客戶現在存的值，沿用原值（即使已停用）不擋。
     if (parsed.data.category) {
       const { data: current, error: currentError } = await supabaseAdmin

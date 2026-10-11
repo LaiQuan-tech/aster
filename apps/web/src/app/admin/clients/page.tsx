@@ -1,18 +1,26 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, Pill, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import {
   listClients, createClient, updateClient, deleteClient, humanizeClientError,
   INVOICE_TYPE_LABELS, PAYMENT_METHOD_LABELS,
   type Client, type ClientInput, type InvoiceType, type PaymentMethod, type ClientCategory,
 } from "@/lib/projects-ext-api";
 import { OPTION_INACTIVE_MARK, optionChoices, optionLabel, useOptionList } from "@/lib/option-lists-api";
+import { getMeCached, peekMeCached } from "@/lib/ess-state";
+import { isHrRole } from "@/lib/roles";
+import { affiliateInputField, humanizeAffiliateError } from "@/lib/affiliate";
 
 /**
  * 客戶名冊（模組五）。建案表單的客戶下拉、專案申請單列印都吃這裡的資料。
  * 統編非必填（自然人業主或尚未取得統編的案子可以先建檔），比照廠商名冊
  * 的軟刪除慣例——刪除只是從列表收起來，往來紀錄不會消失。
+ *
+ * 關係企業（2026-10-11）：表單可勾「關係企業（集團內姊妹公司）」，列表名稱旁顯示徽章。集團總覽的集團合計
+ * 會剔除這類客戶的專案收入（各公司自己的數字照常包含）。這個標記會改變老闆看的集團數字，所以只有
+ * HR／平台管理員能設定（API 對會計回 403 affiliate_hr_only）；會計看得到但勾選框是停用的，
+ * 存檔時也只在旗標有變動才送出，免得會計改別的欄位被擋。
  *
  * 分類（2026-10-10）：選項不再寫死，吃「設定 → 選項清單 → 客戶分類」（`useOptionList("client_category")`），
  * 管理員可自行新增。篩選下拉列出全部項目（含已停用的——舊客戶可能還用著）；表單下拉只列啟用的項目，
@@ -23,20 +31,25 @@ type Form = {
   contactName: string; contactPhone: string; email: string;
   invoiceType: InvoiceType | ""; paymentMethod: PaymentMethod | ""; closingDay: string; paymentDay: string;
   note: string;
+  isAffiliate: boolean;
 };
+/** 純文字欄位的 key（F() 產生輸入框用；勾選欄 isAffiliate 另外畫）。 */
+type TextKey = Exclude<keyof Form, "isAffiliate">;
 const emptyForm = (): Form => ({
   name: "", shortName: "", category: "", taxId: "", phone: "", fax: "", invoiceAddress: "", contactName: "", contactPhone: "", email: "",
-  invoiceType: "", paymentMethod: "", closingDay: "", paymentDay: "", note: "",
+  invoiceType: "", paymentMethod: "", closingDay: "", paymentDay: "", note: "", isAffiliate: false,
 });
 const fromClient = (c: Client): Form => ({
   name: c.name, shortName: c.shortName ?? "", category: c.category ?? "", taxId: c.taxId ?? "", phone: c.phone ?? "", fax: c.fax ?? "", invoiceAddress: c.invoiceAddress ?? "",
   contactName: c.contactName ?? "", contactPhone: c.contactPhone ?? "", email: c.email ?? "",
   invoiceType: c.invoiceType ?? "", paymentMethod: c.paymentMethod ?? "", closingDay: c.closingDay ?? "", paymentDay: c.paymentDay ?? "",
-  note: c.note ?? "",
+  note: c.note ?? "", isAffiliate: c.isAffiliate === true,
 });
-const toInput = (f: Form): ClientInput => ({
+/** `original`＝正在編輯的客戶（新增時 null）：關係企業旗標只在有變動時才送（新增＝勾了才送）。 */
+const toInput = (f: Form, original: Client | null): ClientInput => ({
   name: f.name.trim(),
   shortName: f.shortName.trim() || null,
+  ...affiliateInputField(f.isAffiliate, original),
   category: f.category || null,
   taxId: f.taxId.trim() || null,
   phone: f.phone.trim() || null,
@@ -63,6 +76,21 @@ export default function ClientsPage() {
   const [editing, setEditing] = useState<Client | "new" | null>(null);
   const [form, setForm] = useState<Form>(emptyForm());
   const [busy, setBusy] = useState(false);
+  // 只有 HR／平台管理員能設定關係企業（會計 API 會 403）；取不到角色就當不能。
+  const [canSetAffiliate, setCanSetAffiliate] = useState(() => isHrRole(peekMeCached()?.role));
+  useEffect(() => {
+    let active = true;
+    getMeCached()
+      .then((me) => {
+        if (active) setCanSetAffiliate(isHrRole(me.role));
+      })
+      .catch(() => {
+        if (active) setCanSetAffiliate(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -95,13 +123,13 @@ export default function ClientsPage() {
     setBusy(true);
     setError(null);
     try {
-      const body = toInput(form);
+      const body = toInput(form, editing === "new" ? null : editing);
       if (editing === "new") await createClient(body);
       else await updateClient(editing.id, body);
       setEditing(null);
       await load();
     } catch (err) {
-      setError(humanizeClientError(err, "儲存失敗"));
+      setError(humanizeAffiliateError(humanizeClientError(err, "儲存失敗")));
     } finally {
       setBusy(false);
     }
@@ -117,7 +145,7 @@ export default function ClientsPage() {
     }
   }
 
-  const F = (k: keyof Form, label: string, ph?: string, maxLength?: number) => (
+  const F = (k: TextKey, label: string, ph?: string, maxLength?: number) => (
     <div>
       <label className={labelCls}>{label}</label>
       <input className={inputCls} value={form[k]} onChange={(e) => setForm((f) => ({ ...f, [k]: e.target.value }))} placeholder={ph} maxLength={maxLength} />
@@ -171,7 +199,10 @@ export default function ClientsPage() {
               <tbody>
                 {shown.map((c) => (
                   <tr key={c.id} className="border-b last:border-0">
-                    <td className="py-2 pr-3 font-medium text-gray-900">{c.name}</td>
+                    <td className="py-2 pr-3 font-medium text-gray-900">
+                      {c.name}
+                      {c.isAffiliate === true && <Pill tone="blue" className="ml-1.5 align-middle">關係企業</Pill>}
+                    </td>
                     <td className="py-2 pr-3 text-gray-600">{c.shortName || "—"}</td>
                     <td className="py-2 pr-3 text-gray-600">
                       {c.category ? (
@@ -241,6 +272,24 @@ export default function ClientsPage() {
             {F("closingDay", "結帳日", "例：每月 5 日")}
             {F("paymentDay", "付款日", "例：次月 10 日")}
             <div className="sm:col-span-2">{F("invoiceAddress", "發票地址")}</div>
+            <div className="sm:col-span-2">
+              <label className={`flex items-start gap-2 text-sm ${canSetAffiliate ? "cursor-pointer text-gray-700" : "text-gray-400"}`}>
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4"
+                  checked={form.isAffiliate}
+                  disabled={!canSetAffiliate}
+                  onChange={(e) => setForm((f) => ({ ...f, isAffiliate: e.target.checked }))}
+                />
+                <span>
+                  關係企業（集團內姊妹公司）
+                  <span className="block text-xs text-gray-400">
+                    勾選後，這家客戶的專案收入在「集團總覽」的集團合計中會被剔除（各公司自己的數字照常包含）。
+                    {canSetAffiliate ? "" : "只有 HR 管理員可以設定。"}
+                  </span>
+                </span>
+              </label>
+            </div>
             <div className="sm:col-span-2">
               <label className={labelCls}>備註</label>
               <textarea className={`${inputCls} min-h-[72px]`} value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} />

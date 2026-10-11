@@ -47,6 +47,8 @@ export interface Client {
   name: string
   /** 簡稱：列表與搜尋用，可空（最長 40 字）。 */
   shortName?: string | null
+  /** 關係企業（集團內姊妹公司）：集團總覽的集團合計會剔除這家客戶的專案收入。選填：web 先於 API 部署時舊回應沒有這個鍵。 */
+  isAffiliate?: boolean
   /** 分類 code（選項清單 client_category）：可空，既有名冊未必補得回。 */
   category: ClientCategory | null
   taxId: string | null

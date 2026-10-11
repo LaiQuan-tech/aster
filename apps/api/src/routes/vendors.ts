@@ -5,7 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { sanitizeSearchTerm } from "../lib/search-term.js"
-import { resolveSelf } from "../middleware/scope.js"
+import { isHrRole, resolveSelf } from "../middleware/scope.js"
 import { generateJson, GeminiNotConfiguredError, isGeminiConfigured } from "../lib/gemini.js"
 import { isValidTaiwanTaxId, TAX_ID_RE } from "../services/tax-id.js"
 import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
@@ -24,8 +24,9 @@ const BUCKET = "vendor-cards"
 const MAX_BYTES = 8 * 1024 * 1024
 // 收款帳戶四欄（bank_*／account_holder）由 packages/db 0041 加入，放款專區建立匯款時預填。
 // short_name（簡稱）由 0060 加入，已套正式庫，直接 select（比照 clients.short_name，不另做退路）。
+// is_affiliate（關係企業）由 0062 加入，同樣已套正式庫：集團總覽的集團合計會剔除「付給關係企業廠商的放款」。
 const COLS =
-  "id, tenant_id, name, short_name, category, contact_name, title, phone, mobile, email, address, tax_id, website, bank_name, bank_code, bank_account, account_holder, note, card_storage_path, source, created_by_emp_id, created_at, updated_at, deleted_at"
+  "id, tenant_id, name, short_name, is_affiliate, category, contact_name, title, phone, mobile, email, address, tax_id, website, bank_name, bank_code, bank_account, account_holder, note, card_storage_path, source, created_by_emp_id, created_at, updated_at, deleted_at"
 /** 正式庫尚未套 0041 時的退路（見 lib/schema-compat.ts 的部署順序說明）。 */
 const COLS_LEGACY =
   "id, tenant_id, name, category, contact_name, title, phone, mobile, email, address, tax_id, website, note, card_storage_path, source, created_by_emp_id, created_at, updated_at, deleted_at"
@@ -52,6 +53,8 @@ const vendorBody = z.object({
   name: z.string().trim().min(1).max(120),
   /** 簡稱：列表／下拉顯示與搜尋用，最長 40 字，可空（空字串視為清除）。 */
   shortName: z.string().trim().max(40).nullable().optional(),
+  /** 關係企業（集團內姊妹公司）：集團總覽合計時剔除與它的往來。DB 欄位 NOT NULL，所以只收 boolean，不收 null。 */
+  isAffiliate: z.boolean().optional(),
   category: z.string().trim().max(60).nullable().optional(),
   contactName: z.string().trim().max(60).nullable().optional(),
   title: z.string().trim().max(60).nullable().optional(),
@@ -76,6 +79,12 @@ const vendorBody = z.object({
   source: z.enum(["manual", "card_ocr"]).optional(),
 })
 
+/**
+ * 「關係企業」標記會改變集團總覽的集團合計（剔除付給這家廠商的放款），所以只有 HR／平台管理員能設定或變更；
+ * 廠商名冊其他欄位仍是全租戶可寫。重送跟現值一樣的值不算變更。
+ */
+const AFFILIATE_HR_ONLY = { error: "affiliate_hr_only", message: "只有 HR 管理員可以設定「關係企業」標記。" } as const
+
 const scanBody = z.object({
   fileName: z.string().trim().min(1).max(200),
   contentType: z.string().regex(/^image\/(jpeg|png|webp|heic|heif)$/i, "只接受 JPEG / PNG / WebP / HEIC 影像"),
@@ -87,6 +96,7 @@ function serialize(r: Record<string, unknown>) {
     id: r.id,
     name: r.name,
     shortName: r.short_name ?? null,
+    isAffiliate: r.is_affiliate === true,
     category: r.category ?? null,
     contactName: r.contact_name ?? null,
     title: r.title ?? null,
@@ -112,7 +122,7 @@ function serialize(r: Record<string, unknown>) {
 function toRow(b: z.infer<typeof vendorBody>): Record<string, unknown> {
   const row: Record<string, unknown> = {}
   const map: Array<[keyof typeof b, string]> = [
-    ["name", "name"], ["shortName", "short_name"], ["category", "category"], ["contactName", "contact_name"], ["title", "title"],
+    ["name", "name"], ["shortName", "short_name"], ["isAffiliate", "is_affiliate"], ["category", "category"], ["contactName", "contact_name"], ["title", "title"],
     ["phone", "phone"], ["mobile", "mobile"], ["email", "email"], ["address", "address"],
     ["taxId", "tax_id"], ["website", "website"],
     ["bankName", "bank_name"], ["bankCode", "bank_code"], ["bankAccount", "bank_account"], ["accountHolder", "account_holder"],
@@ -160,6 +170,10 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, async (req: Request, 
   }
   try {
     const self = userId ? await resolveSelf(tenantId, userId) : null
+    if (parsed.data.isAffiliate === true && !isHrRole(self?.role)) {
+      res.status(403).json(AFFILIATE_HR_ONLY)
+      return
+    }
     const { data, error } = await withVendorCols((cols) =>
       supabaseAdmin
         .from("vendors")
@@ -180,6 +194,7 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, async (req: Request, 
 // ── PATCH /vendors/:id ─────────────────────────────────────────────────
 vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, async (req: Request, res: Response, next: NextFunction) => {
   const tenantId = res.locals.tenantId as string
+  const userId = req.auth?.userId
   const id = req.params.id as string
   const parsed = vendorBody.partial().safeParse(req.body)
   if (!parsed.success) {
@@ -191,16 +206,43 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, async (req: Requ
     return
   }
   try {
-    const { data, error } = await withVendorCols((cols) =>
-      supabaseAdmin
+    // 關係企業標記只有 HR 能「變更」：非 HR 帶了這個欄位就比對現值，不同 → 403；一樣＝沒變更，放行，
+    // 但這個欄位從 update 剔除（不把一個可能已被 HR 並發改掉的舊值寫回去）。
+    let dropAffiliate = false
+    if (parsed.data.isAffiliate !== undefined) {
+      const self = userId ? await resolveSelf(tenantId, userId) : null
+      if (!isHrRole(self?.role)) {
+        const { data: stored, error: storedError } = await supabaseAdmin
+          .from("vendors")
+          .select("is_affiliate")
+          .eq("tenant_id", tenantId)
+          .eq("id", id)
+          .is("deleted_at", null)
+          .maybeSingle()
+        if (storedError) {
+          next(new Error(`PATCH /vendors/${id} (load is_affiliate): ${storedError.message}`))
+          return
+        }
+        // 查無這個廠商就往下走，由下面的 update 回 404。
+        if (stored && ((stored as { is_affiliate?: boolean | null }).is_affiliate === true) !== parsed.data.isAffiliate) {
+          res.status(403).json(AFFILIATE_HR_ONLY)
+          return
+        }
+        dropAffiliate = true
+      }
+    }
+    const { data, error } = await withVendorCols((cols) => {
+      const row = toRow(parsed.data as z.infer<typeof vendorBody>)
+      if (dropAffiliate) delete row.is_affiliate
+      return supabaseAdmin
         .from("vendors")
-        .update({ ...toRow(parsed.data as z.infer<typeof vendorBody>), updated_at: new Date().toISOString() })
+        .update({ ...row, updated_at: new Date().toISOString() })
         .eq("tenant_id", tenantId)
         .eq("id", id)
         .is("deleted_at", null)
         .select(cols)
-        .maybeSingle(),
-    )
+        .maybeSingle()
+    })
     if (error) {
       next(new Error(`PATCH /vendors/${id}: ${error.message}`))
       return

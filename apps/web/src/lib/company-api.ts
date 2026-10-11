@@ -58,6 +58,8 @@ export interface Vendor {
   name: string
   /** 簡稱：列表、下拉與搜尋用，可空（最長 40 字）。選填欄位：web 先於 API 部署時舊回應沒有這個鍵。 */
   shortName?: string | null
+  /** 關係企業（集團內姊妹公司）：集團總覽的集團合計會剔除付給這家廠商的放款。選填：舊回應沒有這個鍵。 */
+  isAffiliate?: boolean
   category: string | null
   contactName: string | null
   title: string | null
