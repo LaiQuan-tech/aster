@@ -435,6 +435,13 @@
       "when": 1791703690516,
       "tag": "0061_late_reports",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1791705412840,
+      "tag": "0062_affiliate_flags",
+      "breakpoints": true
     }
   ]
 }

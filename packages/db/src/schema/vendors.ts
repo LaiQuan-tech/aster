@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, index } from "drizzle-orm/pg-core"
+import { pgTable, uuid, text, boolean, timestamp, index } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 
 /**
@@ -19,6 +19,8 @@ export const vendors = pgTable(
     name: text("name").notNull(),
     /** 簡稱：列表、下拉與搜尋用，可空。 */
     shortName: text("short_name"),
+    /** 關係企業（姊妹公司）：集團總覽合計時剔除與它的往來。 */
+    isAffiliate: boolean("is_affiliate").notNull().default(false),
     category: text("category"),
     contactName: text("contact_name"),
     title: text("title"),

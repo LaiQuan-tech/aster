@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, timestamp, index, uniqueIndex,
+  pgTable, uuid, text, boolean, timestamp, index, uniqueIndex,
 } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 import { tenants } from "./tenants"
@@ -25,6 +25,8 @@ export const clients = pgTable(
     name: text("name").notNull(),
     /** 簡稱：列表與下拉顯示用，可空。 */
     shortName: text("short_name"),
+    /** 關係企業（姊妹公司）：集團總覽合計時剔除與它的往來。 */
+    isAffiliate: boolean("is_affiliate").notNull().default(false),
     taxId: text("tax_id"),
     phone: text("phone"),
     fax: text("fax"),
