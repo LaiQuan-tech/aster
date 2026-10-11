@@ -133,6 +133,10 @@ export const tenantSettingsSchema = z.object({
        * 老闆（features.approval.fallbackApproverEmpId）本人永遠能解鎖，不必列在名單裡。
        * **只有老闆（或 platform_admin）能改這份名單**——其他人（含 HR）帶了不同的名單 → 403 `not_boss`
        * （見 PUT /api/tenant/settings）。名單裡的人必須是本租戶的員工。
+       * ⚠️ 這支端點本身是 requireHrAdmin：老闆要是 hr_admin／platform_admin 才進得了（本系統的老闆就是 hr_admin，
+       * 見 routes/group-overview.ts）。另外「誰是老闆」（approval.fallbackApproverEmpId）目前任何 HR 都能改，
+       * 所以 HR 並沒有被技術性地擋在解鎖之外。要不要把「換老闆」也收成老闆／platform_admin 專屬（以及限制誰能把角色
+       * 設成 platform_admin），是權限模型的決定，目前沒做（已回報業主）。
        */
       payroll: z
         .object({

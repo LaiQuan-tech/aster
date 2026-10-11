@@ -436,7 +436,7 @@ payrollRouter.get(
  * POST /payslips/:id/finalize — HR admin locks a draft payslip
  * (status draft → finalized). A finalized payslip is excluded from future
  * payroll runs (they skip it). Already-finalized → 409; missing/cross-tenant →
- * 404. Tenant-scoped via res.locals.tenantId.
+ * 404. Tenant-scoped via res.locals.tenantId. 該月已發薪鎖定 → 409 period_closed。
  */
 payrollRouter.post(
   "/payslips/:id/finalize",
@@ -450,7 +450,7 @@ payrollRouter.post(
     try {
       const { data: existing, error: selErr } = await supabaseAdmin
         .from("payslips")
-        .select("id, status")
+        .select("id, status, period")
         .eq("tenant_id", tenantId)
         .eq("id", id)
         .maybeSingle()
@@ -462,6 +462,9 @@ payrollRouter.post(
         res.status(404).json({ error: "not_found" })
         return
       }
+      // 發薪鎖定：該月已結算 → 409 period_closed（結算時在職且有薪資結構的人薪資單都已定稿；
+      // 這裡擋的是不在職者的草稿之類的殘列，不讓已結算月份的薪資單狀態再被改動）。
+      await assertPeriodOpen(tenantId, existing.period as string)
       if (existing.status === "finalized") {
         res.status(409).json({ error: "already_finalized" })
         return

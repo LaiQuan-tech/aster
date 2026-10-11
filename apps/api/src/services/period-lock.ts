@@ -47,6 +47,41 @@ export function periodOfDate(dateOrPeriod: string): string {
   throw new Error(`period-lock: expected 'YYYY-MM' or 'YYYY-MM-DD', got '${String(dateOrPeriod)}'`)
 }
 
+/**
+ * 'YYYY-MM-DD' 是不是真的存在的日曆日（2026-02-30、2026-08-32、2026-09-00 都不是）。
+ * 申請單 segments 的日期要先過這關（routes/requests.ts 的 zod）：下游（services/ledger.ts 補卡）用
+ * `Date.UTC` 組時間，不存在的日期會被悄悄進位到別的月份，月份歸屬就對不上。
+ */
+export function isRealDateKey(dateKey: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateKey)
+  if (!m) return false
+  const y = Number(m[1])
+  const mo = Number(m[2])
+  const d = Number(m[3])
+  if (mo < 1 || mo > 12 || d < 1) return false
+  return d <= new Date(Date.UTC(y, mo, 0)).getUTCDate()
+}
+
+/**
+ * 一個日期字串碰到哪些月份：真的存在的日期就是它自己的月份；**不存在的日期（會被進位的）保守地把進位前後兩個月都算**，
+ * 寧可多擋，也不要讓「2026-08-32」被當成 8 月而溜過 9 月的鎖。格式不對回 []。
+ */
+function monthsOfDateKey(dateKey: string): string[] {
+  const m = /^(\d{4})-(0[1-9]|1[0-2])-(\d{2})$/.exec(dateKey)
+  if (!m) return []
+  const own = `${m[1]}-${m[2]}`
+  if (isRealDateKey(dateKey)) return [own]
+  const rolled = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])))
+  const rolledPeriod = `${String(rolled.getUTCFullYear()).padStart(4, "0")}-${String(rolled.getUTCMonth() + 1).padStart(2, "0")}`
+  return own === rolledPeriod ? [own] : [own, rolledPeriod]
+}
+
+/** 'YYYY-MM' 就是它自己；'YYYY-MM-DD' 見 monthsOfDateKey。格式不對丟錯（不讓誤傳的 ISO 時間點被悄悄切成錯的月份）。 */
+function monthsOfDateOrPeriod(value: string): string[] {
+  periodOfDate(value)
+  return PERIOD_RE.test(value) ? [value] : monthsOfDateKey(value)
+}
+
 /** 時間點（ISO instant）→ 租戶時區的 'YYYY-MM'。 */
 export function periodOfInstant(iso: string, tz: string): string {
   return localDateKey(iso, tz).slice(0, 7)
@@ -122,7 +157,7 @@ export function requestSelector(span: RequestSpan, tz: string): PeriodSelector {
   if (Array.isArray(span.segments)) {
     for (const seg of span.segments) {
       const date = (seg as { date?: unknown } | null)?.date
-      if (typeof date === "string" && DATE_KEY_RE.test(date)) months.add(date.slice(0, 7))
+      if (typeof date === "string") for (const p of monthsOfDateKey(date)) months.add(p)
     }
   }
   const ranges: PeriodRange[] = []
@@ -255,15 +290,16 @@ function asList(value: string | readonly string[]): readonly string[] {
  * 丟 PeriodClosedError（409 period_closed）。
  */
 export async function assertPeriodOpen(tenantId: string, dateOrPeriod: string | readonly string[]): Promise<void> {
-  const closed = await findClosedPeriods(tenantId, { months: asList(dateOrPeriod).map(periodOfDate) })
+  const months = asList(dateOrPeriod).flatMap(monthsOfDateOrPeriod)
+  const closed = await findClosedPeriods(tenantId, { months })
   if (closed.length > 0) throw new PeriodClosedError(closed)
 }
 
 /** 日期區間（'YYYY-MM-DD'，含頭尾）碰到任何已結算月就丟 PeriodClosedError；出勤結算用。 */
 export async function assertDateRangeOpen(tenantId: string, fromDate: string, toDate: string): Promise<void> {
-  const a = periodOfDate(fromDate)
-  const b = periodOfDate(toDate)
-  const closed = await findClosedPeriods(tenantId, { ranges: [a <= b ? { from: a, to: b } : { from: b, to: a }] })
+  // 不存在的日期（會被進位的）把進位前後兩個月都算進區間，保守擋。
+  const bounds = [...monthsOfDateOrPeriod(fromDate), ...monthsOfDateOrPeriod(toDate)].sort()
+  const closed = await findClosedPeriods(tenantId, { ranges: [{ from: bounds[0] as string, to: bounds[bounds.length - 1] as string }] })
   if (closed.length > 0) throw new PeriodClosedError(closed)
 }
 

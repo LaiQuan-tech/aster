@@ -203,6 +203,43 @@ describe("POST /payroll-periods/:period/close — 完成本月發薪並鎖定", 
     expect(res.body).toEqual({ error: "already_closed", period: PERIOD })
   })
 
+  it("鎖月表的途中有新的寫入（主管核准了一張 9 月假單、還沒核銷）→ 事後複查不通過：409 checklist_incomplete、不寫已結算；處理完再按一次就鎖得起來", async () => {
+    // 在鎖第一張月表的瞬間（attendance_sheets 的第一個 UPDATE）塞進一張已核准、未核銷的 9 月假單，模擬空窗內的寫入。
+    const original = fake.from.bind(fake)
+    let injected = false
+    const spy = vi.spyOn(fake, "from").mockImplementation((table: string) => {
+      const builder = original(table)
+      if (table === "attendance_sheets" && !injected) {
+        const realUpdate = builder.update.bind(builder)
+        builder.update = (value: Row) => {
+          if (!injected) {
+            injected = true
+            fake.db.leave_requests = [
+              ...(fake.db.leave_requests ?? []),
+              { id: "late-approved", tenant_id: TENANT_ID, employee_id: EMP1, kind: "leave", status: "approved", deleted_at: null, leave_type_id: null, hours: 8, start_at: new Date("2026-09-12T09:00:00+08:00").toISOString(), end_at: new Date("2026-09-12T18:00:00+08:00").toISOString(), settled_at: null },
+            ]
+          }
+          return realUpdate(value)
+        }
+      }
+      return builder
+    })
+    const res = await as(TOKENS.hr).post(`/payroll-periods/${PERIOD}/close`)
+    spy.mockRestore()
+    expect(res.status, JSON.stringify(res.body)).toBe(409)
+    expect(res.body.error).toBe("checklist_incomplete")
+    const leave = res.body.checklist.items.find((i: { key: string }) => i.key === "leave_settlement")
+    expect(leave).toMatchObject({ passed: false, done: 0, total: 1 })
+    expect(leave.pending[0].refId).toBe("late-approved")
+    expect(closes()).toHaveLength(0) // 沒有寫下已結算
+    // HR 把假單核銷後再按一次：已鎖的月表冪等、其餘補鎖，成功。
+    fake.db.leave_requests = fake.db.leave_requests.map((l) => ({ ...l, settled_at: "2026-10-11T00:00:00Z" }))
+    const again = await as(TOKENS.hr).post(`/payroll-periods/${PERIOD}/close`)
+    expect(again.status, JSON.stringify(again.body)).toBe(200)
+    expect(sheetStatuses()).toEqual(Array(6).fill("locked"))
+    expect(closeRowOf().status).toBe("closed")
+  })
+
   it("只有 HR 能鎖：員工、老闆（不是 HR 角色）、查無員工列的帳號都 403；期別格式不對 400", async () => {
     for (const token of [TOKENS.emp1, TOKENS.boss, TOKENS.designee, TOKENS.ghost]) {
       expect((await as(token).post(`/payroll-periods/${PERIOD}/close`)).status, token).toBe(403)
@@ -310,6 +347,30 @@ describe("POST /payroll-periods/:period/reopen — 重新開放", () => {
     expect(sheetStatuses()).toEqual(Array(6).fill("locked"))
     const ok = await as(TOKENS.boss).post(`/payroll-periods/${PERIOD}/reopen`).send({ reason: "剛好五個字" })
     expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+  })
+
+  it("理由長度以『字』計：3 個 emoji 是 3 個字（不是 6 個）→ 400；5 個 emoji 才夠", async () => {
+    await closeIt()
+    const short = await as(TOKENS.boss).post(`/payroll-periods/${PERIOD}/reopen`).send({ reason: "😀😀😀" })
+    expect(short.status).toBe(400)
+    expect(short.body.error).toBe("reason_too_short")
+    expect(closeRowOf().status).toBe("closed")
+    const ok = await as(TOKENS.boss).post(`/payroll-periods/${PERIOD}/reopen`).send({ reason: "😀😀😀😀😀" })
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+  })
+
+  it("解鎖途中失敗（月表與薪資單都回復了，翻 reopened 那一步出錯）→ 仍是 closed、重打補完（這次沒東西可回復，只翻狀態）", async () => {
+    await closeIt()
+    fake.injectError({ table: "period_closes", action: "update", error: { message: "boom", code: "XX000" } })
+    const failed = await as(TOKENS.boss).post(`/payroll-periods/${PERIOD}/reopen`).send({ reason: "翻狀態那一步出錯" })
+    expect(failed.status).toBe(500)
+    expect(closeRowOf().status).toBe("closed")
+    expect(sheetStatuses()).toEqual(Array(6).fill("approved"))
+    expect(slipStatuses()).toEqual(["draft", "draft"])
+    const retry = await as(TOKENS.boss).post(`/payroll-periods/${PERIOD}/reopen`).send({ reason: "重打補完它" })
+    expect(retry.status, JSON.stringify(retry.body)).toBe(200)
+    expect(retry.body).toMatchObject({ status: "reopened", unlockedSheets: 0, revertedPayslips: 0 })
+    expect(closeRowOf().status).toBe("reopened")
   })
 
   it("沒鎖過的月份 → 404 period_not_closed；已經重新開放過 → 409 already_reopened（不重複解鎖、不重複通知）；期別格式不對 400", async () => {

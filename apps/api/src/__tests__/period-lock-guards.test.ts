@@ -1,6 +1,7 @@
 import type { Server } from "node:http"
 import express, { type NextFunction, type Request, type Response } from "express"
 import request from "supertest"
+import ExcelJS from "exceljs"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 // 純測試：supabase 換成記憶體版（helpers/fake-supabase.ts），不連任何 DB。
@@ -12,6 +13,7 @@ import { advancesRouter } from "../routes/advances.js"
 import { attendanceRouter } from "../routes/attendance.js"
 import { attendanceSheetsRouter } from "../routes/attendance-sheets.js"
 import { expensesRouter } from "../routes/expenses.js"
+import { importsRouter } from "../routes/imports.js"
 import { leaveSettlementRouter } from "../routes/leave-settlement.js"
 import { payrollPeriodsRouter } from "../routes/payroll-periods.js"
 import { payrollRouter } from "../routes/payroll.js"
@@ -50,6 +52,7 @@ app.use(advancesRouter)
 app.use(payrollRouter)
 app.use(payrollPeriodsRouter)
 app.use(tenantRouter)
+app.use(importsRouter)
 app.use(periodClosedErrorHandler)
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
@@ -529,8 +532,8 @@ describe("出勤", () => {
     const res = await as(T.emp2).get(`/my/attendance-sheet?period=${SEP}`)
     expect(res.status, JSON.stringify(res.body)).toBe(200) // EMP2 有 S_LOCKED
     const none = await as(T.mgr).get("/my/attendance-sheet?period=2026-08")
-    // 8 月沒鎖、沒有月表 → 會即時產生（維持原行為）；本測試只確認 9 月沒有月表的人不被產生。
-    expect(none.status).not.toBe(409)
+    // 8 月沒鎖、沒有月表 → 會即時產生（維持原行為）。
+    expect(none.status, JSON.stringify(none.body)).toBe(200)
     fake.db.attendance_sheets = fake.db.attendance_sheets.filter((r) => r.id !== S_LOCKED)
     const missing = await as(T.emp2).get(`/my/attendance-sheet?period=${SEP}`)
     expect(missing.status).toBe(404)
@@ -834,6 +837,113 @@ describe("遲到說明：老闆決定", () => {
     const res = await as(T.hr1).post(`/late-reports/${LR_SEP}/decision`).send({ decision: "exempt" })
     expect(res.status).toBe(403)
     expect(res.body.error).toBe("not_boss")
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 其他：segment 日期要真的存在、月表核准的錯誤優先序、薪資單定稿、xlsx 匯入
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("申請單 segment 日期必須是真的存在的日期（不然補卡的 Date.UTC 會悄悄進位到別的月份）", () => {
+  it("2026-08-32、2026-02-30、2026-09-00 → 400 invalid_body，不建單；真的存在的日期照常", async () => {
+    for (const date of ["2026-08-32", "2026-02-30", "2026-09-00"]) {
+      const res = await as(T.emp).post("/requests").send(
+        leaveBody(tpe("2026-08-10", "09:00:00"), tpe("2026-08-10", "18:00:00"), { segments: [{ date, startTime: "09:00", endTime: "18:00", hours: 8 }] }),
+      )
+      expect(res.status, date).toBe(400)
+      expect(res.body.error, date).toBe("invalid_body")
+    }
+    expect(fake.db.leave_requests ?? []).toHaveLength(0)
+    const ok = await as(T.emp).post("/requests").send(
+      leaveBody(tpe("2026-10-14", "09:00:00"), tpe("2026-10-14", "18:00:00"), { segments: [{ date: "2026-10-14", startTime: "09:00", endTime: "18:00", hours: 8 }] }),
+    )
+    expect(ok.status, JSON.stringify(ok.body)).toBe(201)
+  })
+})
+
+describe("月表核准：已結算月先答 period_closed，不讓 unsettled_leave 搶先回答", () => {
+  const S_SEP = "50000000-0000-4000-8000-0000000000a1"
+  beforeEach(() => {
+    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: BOSS }, attendance: { blockApproveOnUnsettledLeave: true } } }]
+    fake.db.attendance_sheets = [
+      { id: S_SEP, tenant_id: TENANT_ID, employee_id: EMP, period: SEP, status: "manager_reviewed", manager_emp_id: MGR, version: 1, locked_at: null, month_anomalies: [], snapshot: null },
+    ]
+    fake.db.leave_requests = [
+      { id: "lv-unsettled", tenant_id: TENANT_ID, employee_id: EMP, kind: "leave", status: "approved", deleted_at: null, leave_type_id: LT, hours: 8, start_at: tpe("2026-09-10", "09:00:00"), end_at: tpe("2026-09-10", "18:00:00"), settled_at: null },
+    ]
+  })
+
+  it("該月沒鎖：照原本回 409 unsettled_leave；鎖了：409 period_closed", async () => {
+    const before = await as(T.hr1).post(`/attendance-sheets/${S_SEP}/approve`).send({})
+    expect(before.status).toBe(409)
+    expect(before.body.error).toBe("unsettled_leave")
+    lock(SEP)
+    const after = await as(T.hr1).post(`/attendance-sheets/${S_SEP}/approve`).send({})
+    expect(after.status).toBe(409)
+    expect(after.body).toEqual(CLOSED)
+  })
+})
+
+describe("薪資單定稿：POST /payslips/:id/finalize", () => {
+  const P_SEP = "9a000000-0000-4000-8000-000000000001"
+  const P_OCT = "9a000000-0000-4000-8000-000000000002"
+  beforeEach(() => {
+    fake.db.payslips = [
+      { id: P_SEP, tenant_id: TENANT_ID, employee_id: EMP, period: SEP, status: "draft" },
+      { id: P_OCT, tenant_id: TENANT_ID, employee_id: EMP, period: OCT, status: "draft" },
+    ]
+  })
+
+  it("該月已結算 → 409 period_closed，薪資單狀態不動；沒鎖的月份照常定稿", async () => {
+    lock(SEP)
+    const blocked = await as(T.hr1).post(`/payslips/${P_SEP}/finalize`).send({})
+    expect(blocked.status).toBe(409)
+    expect(blocked.body).toEqual(CLOSED)
+    expect(fake.db.payslips[0]?.status).toBe("draft")
+    const ok = await as(T.hr1).post(`/payslips/${P_OCT}/finalize`).send({})
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    expect(fake.db.payslips[1]?.status).toBe("finalized")
+  })
+
+  it("已重新開放的月份可以定稿", async () => {
+    lock(SEP, "reopened")
+    const res = await as(T.hr1).post(`/payslips/${P_SEP}/finalize`).send({})
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(fake.db.payslips[0]?.status).toBe("finalized")
+  })
+})
+
+describe("xlsx 匯入打卡（POST /imports/punches）：試跑與正式匯入都擋已結算月", () => {
+  async function punchesXlsx(rows: string[][]): Promise<string> {
+    const wb = new ExcelJS.Workbook()
+    const ws = wb.addWorksheet("資料")
+    ws.addRow(["工號", "姓名", "日期", "時間", "類型"])
+    for (const row of rows) ws.addRow(row)
+    return Buffer.from((await wb.xlsx.writeBuffer()) as ArrayBuffer).toString("base64")
+  }
+  const upload = async (rows: string[][], dryRun: boolean) =>
+    as(T.hr1).post("/imports/punches").send({ fileName: "punches.xlsx", dataBase64: await punchesXlsx(rows), dryRun })
+
+  it("有一列在已結算的 9 月 → 試跑與正式匯入都 409，一筆都沒寫；全在 10 月 → 試跑回 valid、正式匯入寫入", async () => {
+    lock(SEP)
+    const mixed = [["", "員工甲", "2026-10-05", "09:00", "上班"], ["", "員工甲", "2026-09-05", "09:00", "上班"]]
+    const dry = await upload(mixed, true)
+    expect(dry.status, JSON.stringify(dry.body)).toBe(409)
+    expect(dry.body).toEqual(CLOSED)
+    const real = await upload(mixed, false)
+    expect(real.status, JSON.stringify(real.body)).toBe(409)
+    expect(real.body).toEqual(CLOSED)
+    expect(punchRecords()).toHaveLength(0)
+
+    const octOnly = [["", "員工甲", "2026-10-05", "09:00", "上班"], ["", "員工甲", "2026-10-05", "18:00", "下班"]]
+    const dryOk = await upload(octOnly, true)
+    expect(dryOk.status, JSON.stringify(dryOk.body)).toBe(200)
+    expect(dryOk.body.valid).toBe(2)
+    expect(punchRecords()).toHaveLength(0)
+    const ok = await upload(octOnly, false)
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    expect(ok.body.imported).toBe(2)
+    expect(punchRecords()).toHaveLength(2)
   })
 })
 

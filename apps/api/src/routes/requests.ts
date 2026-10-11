@@ -10,7 +10,7 @@ import { enrichRequestRows } from "../services/request-enrich.js"
 import { isStepCandidate, stepCandidates, stepSelectCols } from "../services/approval-steps.js"
 import { enqueue } from "../services/notify.js"
 import { writeAuditLog } from "../services/audit.js"
-import { assertRequestOpen, closedPeriodsOfRequest } from "../services/period-lock.js"
+import { assertRequestOpen, closedPeriodsOfRequest, isRealDateKey } from "../services/period-lock.js"
 import {
   approvedOtMinutesInPeriod,
   beyondCapCheck,
@@ -58,7 +58,8 @@ const createSchema = z.object({
   segments: z
     .array(
       z.object({
-        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        // 要是真的存在的日期（2026-08-32 會被補卡的 Date.UTC 進位到 9/1，發薪鎖定的月份歸屬就錯了）。
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isRealDateKey, "date must be a real calendar day"),
         startTime: z.string().regex(/^\d{2}:\d{2}$/),
         endTime: z.string().regex(/^\d{2}:\d{2}$/),
         hours: z.number().nonnegative(),

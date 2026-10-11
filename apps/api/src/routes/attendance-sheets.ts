@@ -489,6 +489,8 @@ attendanceSheetsRouter.post(
       const caller = await requireCaller(req, res)
       if (!caller) return
       const sheet = await loadSheet(tenantId, id)
+      // 發薪鎖定：已結算月先答 period_closed（approveSheet 在服務層也擋；這裡先擋，不讓下面的 unsettled_leave 搶先回答）。
+      await assertPeriodOpen(tenantId, sheet.period)
       const unsettledIds = await unsettledLeaveBlockingApprove(tenantId, sheet)
       if (unsettledIds.length > 0) {
         res.status(409).json({ error: "unsettled_leave", unsettledIds, count: unsettledIds.length })

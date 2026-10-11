@@ -201,11 +201,13 @@ payrollPeriodsRouter.post(
         return
       }
       const reason = parsed.data.reason.trim()
-      if (reason.length < REOPEN_REASON_MIN) {
+      // 以字（code point）計，不是 UTF-16 單位：3 個 emoji 是 3 個字，不是 6 個。
+      const reasonLength = Array.from(reason).length
+      if (reasonLength < REOPEN_REASON_MIN) {
         res.status(400).json({ error: "reason_too_short", message: `重新開放的理由至少 ${REOPEN_REASON_MIN} 個字` })
         return
       }
-      if (reason.length > REOPEN_REASON_MAX) {
+      if (reasonLength > REOPEN_REASON_MAX) {
         res.status(400).json({ error: "reason_too_long", message: `重新開放的理由最多 ${REOPEN_REASON_MAX} 字` })
         return
       }

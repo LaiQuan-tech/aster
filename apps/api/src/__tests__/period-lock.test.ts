@@ -18,6 +18,7 @@ import {
   getPeriodLockState,
   isPeriodClosed,
   isPeriodClosedError,
+  isRealDateKey,
   loadPeriodUnlockPolicy,
   periodOfDate,
   periodOfInstant,
@@ -364,5 +365,41 @@ describe("解鎖權限：老闆＋老闆指定的人；只有老闆（或 platfo
     ]
     expect(await loadPeriodUnlockPolicy(TENANT_ID)).toEqual({ bossEmpId: BOSS, designatedEmpIds: [DESIGNEE] })
     expect(await loadPeriodUnlockPolicy(OTHER_TENANT_ID)).toEqual({ bossEmpId: null, designatedEmpIds: [] })
+  })
+})
+
+describe("不存在的日期（會被進位）——月份歸屬保守處理，不讓 2026-08-32 被當成 8 月而溜過 9 月的鎖", () => {
+  const tpe = (date: string, hms: string) => new Date(`${date}T${hms}+08:00`).toISOString()
+
+  it("isRealDateKey：真的日曆日（含閏日）才算", () => {
+    for (const ok of ["2026-09-30", "2026-02-28", "2028-02-29", "2026-12-31", "2026-01-01"]) expect(isRealDateKey(ok), ok).toBe(true)
+    for (const bad of ["2026-02-29", "2026-02-30", "2026-04-31", "2026-08-32", "2026-09-00", "2026-13-01", "2026-00-10", "2026-9-3", "2026-09-30T00:00:00Z", ""]) {
+      expect(isRealDateKey(bad), bad).toBe(false)
+    }
+  })
+
+  it("申請單 segment 日期不存在 → 進位前後兩個月都算（8/32 → 8、9 月；9/0 → 9、8 月；2/30 → 2、3 月）", () => {
+    const at = tpe("2026-08-10", "09:00:00")
+    const span = (date: string) => ({ start_at: at, end_at: at, segments: [{ date, startTime: "09:00", endTime: "09:00", hours: 0 }] })
+    expect(periodsOfRequest(span("2026-08-32"), "Asia/Taipei")).toEqual(["2026-08", "2026-09"])
+    expect(periodsOfRequest(span("2026-09-00"), "Asia/Taipei")).toEqual(["2026-08", "2026-09"])
+    expect(periodsOfRequest(span("2026-02-30"), "Asia/Taipei")).toEqual(["2026-02", "2026-03", "2026-08"])
+    expect(requestSelector(span("2026-12-40"), "Asia/Taipei").months).toEqual(["2026-12", "2027-01"])
+  })
+
+  it("守門員：9 月已結算，segment 填 2026-08-32 的單照樣被擋（進位後就是 9/1）", async () => {
+    fake.db.period_closes = [closeRow("2026-09")]
+    const at = tpe("2026-08-10", "09:00:00")
+    await expect(
+      assertRequestOpen(TENANT_ID, { start_at: at, end_at: at, segments: [{ date: "2026-08-32", startTime: "09:00", endTime: "09:00", hours: 0 }] }),
+    ).rejects.toMatchObject({ period: "2026-09" })
+  })
+
+  it("assertPeriodOpen／assertDateRangeOpen 收到不存在的日期也保守：2026-08-32 算 8、9 月；格式錯誤（ISO 時間點）照樣丟錯", async () => {
+    fake.db.period_closes = [closeRow("2026-09")]
+    await expect(assertPeriodOpen(TENANT_ID, "2026-08-32")).rejects.toMatchObject({ period: "2026-09" })
+    await expect(assertDateRangeOpen(TENANT_ID, "2026-08-32", "2026-08-32")).rejects.toMatchObject({ period: "2026-09" })
+    await expect(assertDateRangeOpen(TENANT_ID, "2026-10", "2026-10")).resolves.toBeUndefined()
+    await expect(assertPeriodOpen(TENANT_ID, "2026-09-30T16:00:00.000Z")).rejects.toThrow()
   })
 })

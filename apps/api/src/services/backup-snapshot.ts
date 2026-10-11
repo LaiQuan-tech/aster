@@ -1114,7 +1114,8 @@ async function loadPeriodCloseRow(tenantId: string, period: string): Promise<Per
  *   2. 檢查清單四項（services/payroll-period.ts）必須全過，否則 409 checklist_incomplete 附整份清單；
  *      **沒有 force、沒有強制略過**。
  *   3. approved 的月表全部轉 locked（lockSheet：會通知員工；已 locked 的不動）。
- *   4. 寫 period_closes（status closed、sheet_count／locked_count、snapshot_manifest_path＝該月已有的
+ *   4. 事後複查：再算一次檢查清單（鎖月表的幾秒內可能有新的寫入），不通過就中止、不寫「已結算」。
+ *   5. 寫 period_closes（status closed、sheet_count／locked_count、snapshot_manifest_path＝該月已有的
  *      最新快照 manifest 路徑，否則 null）。第一次鎖定是 insert；重新開放過的月份是「條件式」update
  *      （只有還是 reopened 才寫），兩個人同時按時後到的拿到 409 already_closed，不會蓋掉先到的。
  * 鎖定成功後該月所有薪資相關寫入一律 409 period_closed（services/period-lock.ts）。
@@ -1141,6 +1142,13 @@ export async function closePeriod(tenantId: string, period: string, actorEmpId: 
     lockedNow += 1
   }
   const lockedCount = sheets.filter((s) => s.status === "locked").length + lockedNow
+
+  // 事後複查：鎖月表要花幾秒，這段時間主管可能又核准了一張假單、HR 又退回了一張月表、有人又改了報銷……
+  // 寫下「已結算」之前再算一次，不通過就中止（回最新的清單）。已鎖的月表維持鎖定——它們本來就是已核准的，
+  // 與薪資單定稿時鎖單張月表的狀態相同；HR 處理完再按一次即可（鎖定冪等）。這一步把「檢查通過」到「寫下鎖」
+  // 之間的空窗從整個鎖月表迴圈縮到只剩一次查詢。
+  const recheck = await evaluatePeriodChecklist(tenantId, period)
+  if (!recheck.ready) throw new PeriodCloseError("checklist_incomplete", 409, { period, checklist: recheck })
 
   // 月結紀錄指向「該月最新一次快照」的 manifest（W7 之後同月可能有多次執行）。
   const manifestRun = await latestRun(tenantId, period).catch(() => null)
