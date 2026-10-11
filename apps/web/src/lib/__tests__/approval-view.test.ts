@@ -544,4 +544,50 @@ describe("contentLines（內容欄）", () => {
     expect(contentLines(normal)[0]).toContain(" → ");
     expect(contentLines(normal)[0]).toMatch(/（8 小時）$/);
   });
+
+  it("請假多日、各天時段不一樣（首日從中途開始／末日請到中途）→ 第二行逐日列出時段與時數", () => {
+    const row = request({
+      hours: 15,
+      start_at: "2026-10-13T06:00:00+00:00", // 台北 14:00
+      end_at: "2026-10-15T04:00:00+00:00", // 台北 12:00
+      reason: "回南部辦事",
+      segments: [
+        { date: "2026-10-13", startTime: "14:00", endTime: "18:00", hours: 4 },
+        { date: "2026-10-14", startTime: "09:00", endTime: "18:00", hours: 8 },
+        { date: "2026-10-15", startTime: "09:00", endTime: "12:00", hours: 3 },
+      ],
+    });
+    const lines = contentLines(row);
+    expect(lines[0]).toMatch(/→ .*（15 小時）$/);
+    expect(lines[1]).toBe("逐日：10/13 14:00–18:00 · 4 小時、10/14 09:00–18:00 · 8 小時、10/15 09:00–12:00 · 3 小時");
+    // 原因照舊接在逐日之後
+    expect(lines.slice(2)).toEqual(["回南部辦事"]);
+  });
+
+  it("不加逐日行：單段（單日指定時數）、多日每天時段相同（整天）、非請假、segments 缺席／格式不對", () => {
+    const one = request({ hours: 3, segments: [{ date: "2026-10-13", startTime: "10:00", endTime: "13:00", hours: 3 }] });
+    expect(contentLines(one)).toHaveLength(1);
+    const whole = request({
+      hours: 16,
+      segments: [
+        { date: "2026-10-13", startTime: "09:00", endTime: "18:00", hours: 8 },
+        { date: "2026-10-14", startTime: "09:00", endTime: "18:00", hours: 8 },
+      ],
+    });
+    expect(contentLines(whole)).toHaveLength(1);
+    const ot = request({
+      kind: "ot",
+      segments: [
+        { date: "2026-10-13", startTime: "14:00", endTime: "18:00", hours: 4 },
+        { date: "2026-10-14", startTime: "09:00", endTime: "12:00", hours: 3 },
+      ],
+    });
+    expect(contentLines(ot)).toHaveLength(1);
+    expect(contentLines(request({ segments: null }))).toHaveLength(1);
+    expect(contentLines(request({ segments: "garbage" }))).toHaveLength(1);
+    // 格式不對的段落略過，不會印出 undefined
+    const messy = request({ segments: [{ nope: 1 }, null, { date: "2026-10-13", startTime: "14:00", endTime: "18:00", hours: 4 }] });
+    expect(contentLines(messy)).toHaveLength(1);
+    expect(contentLines(messy).join("\n")).not.toContain("undefined");
+  });
 });

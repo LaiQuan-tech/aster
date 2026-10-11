@@ -1,23 +1,21 @@
 "use client";
 
 /**
- * 請假：假別 → 單日｜多日 → 全天｜上午｜下午｜自訂（多日鎖全天）→ 事由 →
- * （需憑證假別才出現附件且必填）→ 送出。時數由 `computeLeaveSegments` 即時算，
- * 顯示「共 N 天 · X 小時」「已略過 N 天」「剩餘 X 小時」「申請時數超過剩餘額度」。
+ * 請假（單位精細到小時，2026-10-11）：假別 → 單日｜多日 → 事由 → （需憑證假別才出現附件且必填）→ 送出。
+ *   單日：全天｜上午｜下午｜指定時數（開始時間＋請幾小時；開始時間從上班時間起每 1 小時一格、
+ *         不能落在午休，時數 1 小時為單位、最多到下班前可請的時數；結束時間由系統算、跳過午休）。
+ *   多日：開始日期＋開始時間、結束日期＋結束時間（時間 1 小時一格，預設＝上班／下班＝整天）。
+ *         第一天從開始時間請到下班、中間整天、最後一天從上班請到結束時間；休息日／國定假日自動不計。
+ * 時數由 `computeLeaveSegments` 即時算：單日摘要「09:00–13:00，共 4 小時」；多日逐日列出
+ * 「10/13（二）14:00–18:00 4 小時」…再加「共 N 天 · X 小時」「已略過 N 天」「剩餘 X 小時」
+ * 「申請時數超過剩餘額度」。畫面只用 1 小時步進，後端不強制最小單位。
  */
 import { useEffect, useId, useMemo, useState, type FormEvent } from "react";
 import { Field, Input, Segmented, Select } from "@/components/ess-ui";
 import type { LeaveBalance, LeaveType, Shift } from "@/lib/ess-api";
 import { fmtDateShort, fmtHours, todayKey } from "@/lib/ess-format";
-import {
-  computeLeaveSegments,
-  normalizeHm,
-  shiftWorkHours,
-  skipReasonLabel,
-  type LeavePeriod,
-  type ShiftLike,
-} from "@/lib/leave-hours";
-import { buildCreateBody, describeBody, isBuildError, remainingHours } from "@/lib/request-forms";
+import { resolveLeavePick, skipReasonLabel, type LeavePeriod, type ShiftLike } from "@/lib/leave-hours";
+import { buildCreateBody, describeBody, describeLeaveDay, isBuildError, remainingHours } from "@/lib/request-forms";
 import { AttachmentField, ReasonField, SubmitBar, SummaryLine, validateFiles, type FormCommonProps } from "./form-shared";
 import { useLeaveCalendar } from "./use-leave-calendar";
 
@@ -32,7 +30,7 @@ const PERIOD_OPTIONS: { value: LeavePeriod; label: string }[] = [
   { value: "full", label: "全天" },
   { value: "am", label: "上午" },
   { value: "pm", label: "下午" },
-  { value: "custom", label: "自訂" },
+  { value: "hours", label: "指定時數" },
 ];
 
 export interface LeaveFormProps extends FormCommonProps {
@@ -56,14 +54,18 @@ export function LeaveForm({
   submitError,
   onSubmit,
 }: LeaveFormProps) {
-  const ids = { type: useId(), start: useId(), end: useId(), cStart: useId(), cEnd: useId() };
+  const ids = { type: useId(), start: useId(), end: useId(), hStart: useId(), hCount: useId(), rStart: useId(), rEnd: useId() };
   const [leaveTypeId, setLeaveTypeId] = useState("");
   const [mode, setMode] = useState<DateMode>("single");
   const [startDate, setStartDate] = useState(initialDate || todayKey());
   const [endDate, setEndDate] = useState(initialDate || todayKey());
   const [period, setPeriod] = useState<LeavePeriod>("full");
-  const [customStart, setCustomStart] = useState("");
-  const [customEnd, setCustomEnd] = useState("");
+  // 單日「指定時數」：開始時間（空字串＝上班時間）＋請幾小時（0＝預設 1 小時）。
+  const [hoursStart, setHoursStart] = useState("");
+  const [hoursCount, setHoursCount] = useState(0);
+  // 多日：首日開始時間（空字串＝上班時間）／末日結束時間（空字串＝下班時間）。
+  const [rangeStart, setRangeStart] = useState("");
+  const [rangeEnd, setRangeEnd] = useState("");
   const [reason, setReason] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -76,26 +78,21 @@ export function LeaveForm({
   const effectiveEnd = mode === "range" ? endDate : startDate;
   // 班表只抓本人的（scope=mine，見 use-leave-calendar）。
   const calendar = useLeaveCalendar(startDate, effectiveEnd, shifts, employeeId);
+  const shiftOn = (date: string): ShiftLike => calendar.shiftByDate[date] ?? defaultShift;
 
-  // 自訂時段的預設值＝當天班別的起訖（使用者沒改過才跟著班別走）。
-  const startShift = calendar.shiftByDate[startDate] ?? defaultShift;
-  const customStartValue = customStart || normalizeHm(startShift.start_time);
-  const customEndValue = customEnd || normalizeHm(startShift.end_time);
-
-  const result = useMemo(
+  // 時間選項（1 小時一格、以各自那天的班別為準）、預設值與時數都由純函式算（見 resolveLeavePick）：
+  // 選的值不在選項裡就退回預設——開始＝上班時間、結束＝下班時間（＝整天）、時數 1 小時。
+  const pick = useMemo(
     () =>
-      computeLeaveSegments({
-        startDate,
-        endDate: effectiveEnd,
-        period: mode === "range" ? "full" : period,
-        customStart: customStartValue,
-        customEnd: customEndValue,
-        shiftByDate: calendar.shiftByDate,
-        defaultShift,
-        dayTypeByDate: calendar.dayTypeByDate,
-      }),
-    [startDate, effectiveEnd, mode, period, customStartValue, customEndValue, calendar, defaultShift],
+      resolveLeavePick(
+        { mode, startDate, endDate, period, hoursStart, hoursCount, rangeStart, rangeEnd },
+        { shiftByDate: calendar.shiftByDate, defaultShift, dayTypeByDate: calendar.dayTypeByDate },
+      ),
+    [mode, startDate, endDate, period, hoursStart, hoursCount, rangeStart, rangeEnd, calendar, defaultShift],
   );
+  const { startOptions, endOptions, hoursStartValue, maxHours, hoursCountValue, rangeStartValue, rangeEndValue, result } = pick;
+  // 班別有休息才提「午休」（沒有休息的班別，時間選項就是連續的）。
+  const hasBreak = Number(shiftOn(startDate).break_minutes ?? 0) > 0;
 
   const selectedType = leaveTypes?.find((lt) => lt.id === leaveTypeId) ?? null;
   const requiresAttachment = selectedType?.requiresAttachment === true;
@@ -134,6 +131,12 @@ export function LeaveForm({
     const summary = `${selectedType?.name ?? "請假"} · ${describeBody(body, { shift: defaultShift })}`;
     await onSubmit(body, files, summary);
   }
+
+  /** 時間選項的顯示字：上班時間／下班時間（＝整天的預設）加註。 */
+  const startLabel = (t: string, i: number) => (i === 0 ? `${t}（上班）` : t);
+  const endLabel = (t: string, i: number) => (i === endOptions.length - 1 ? `${t}（下班）` : t);
+
+  const single = result.segments[0];
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4" noValidate>
@@ -178,6 +181,22 @@ export function LeaveForm({
             <Field label="開始日期" required htmlFor={ids.start}>
               <Input id={ids.start} type="date" value={startDate} onChange={(e) => changeStart(e.target.value)} required />
             </Field>
+            <Field label="開始時間" required htmlFor={ids.rStart}>
+              <Select
+                id={ids.rStart}
+                value={rangeStartValue}
+                onChange={(e) => {
+                  setRangeStart(e.target.value);
+                  setLocalError(null);
+                }}
+              >
+                {startOptions.map((t, i) => (
+                  <option key={t} value={t}>
+                    {startLabel(t, i)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
             <Field label="結束日期" required htmlFor={ids.end}>
               <Input
                 id={ids.end}
@@ -190,6 +209,22 @@ export function LeaveForm({
                 }}
                 required
               />
+            </Field>
+            <Field label="結束時間" required htmlFor={ids.rEnd}>
+              <Select
+                id={ids.rEnd}
+                value={rangeEndValue}
+                onChange={(e) => {
+                  setRangeEnd(e.target.value);
+                  setLocalError(null);
+                }}
+              >
+                {endOptions.map((t, i) => (
+                  <option key={t} value={t}>
+                    {endLabel(t, i)}
+                  </option>
+                ))}
+              </Select>
             </Field>
           </div>
         )}
@@ -206,45 +241,64 @@ export function LeaveForm({
               setLocalError(null);
             }}
           />
-          {period === "custom" && (
+          {period === "hours" && (
             <div className="grid grid-cols-2 gap-3">
-              <Field label="開始時間" required htmlFor={ids.cStart}>
-                <Input
-                  id={ids.cStart}
-                  type="time"
-                  value={customStartValue}
+              <Field label="開始時間" required htmlFor={ids.hStart} hint={hasBreak ? "午休時段不能選" : undefined}>
+                <Select
+                  id={ids.hStart}
+                  value={hoursStartValue}
                   onChange={(e) => {
-                    setCustomStart(e.target.value);
+                    setHoursStart(e.target.value);
                     setLocalError(null);
                   }}
-                />
+                >
+                  {startOptions.map((t, i) => (
+                    <option key={t} value={t}>
+                      {startLabel(t, i)}
+                    </option>
+                  ))}
+                </Select>
               </Field>
-              <Field label="結束時間" required htmlFor={ids.cEnd}>
-                <Input
-                  id={ids.cEnd}
-                  type="time"
-                  value={customEndValue}
+              <Field label="時數" required htmlFor={ids.hCount} hint={`最多 ${Math.max(maxHours, 1)} 小時${hasBreak ? "，午休不算" : ""}`}>
+                <Select
+                  id={ids.hCount}
+                  value={String(hoursCountValue)}
                   onChange={(e) => {
-                    setCustomEnd(e.target.value);
+                    setHoursCount(Number(e.target.value));
                     setLocalError(null);
                   }}
-                />
+                >
+                  {Array.from({ length: Math.max(maxHours, 1) }, (_, i) => i + 1).map((n) => (
+                    <option key={n} value={n}>
+                      {n} 小時
+                    </option>
+                  ))}
+                </Select>
               </Field>
             </div>
           )}
         </div>
       ) : (
-        <p className="text-xs text-gray-400">多日請假以每天全天計（每天 {fmtHours(shiftWorkHours(defaultShift))}），週末與假日自動略過。</p>
+        <p className="text-xs text-gray-400">
+          預設整天（上班到下班）。第一天從開始時間請到下班、中間整天、最後一天從上班請到結束時間；休息日與國定假日自動不計。
+        </p>
       )}
 
       {/* 即時摘要 */}
       <div className="space-y-1 rounded-xl bg-gray-50 px-3 py-2.5">
         {result.error ? (
           <SummaryLine tone="red">{result.error}</SummaryLine>
+        ) : mode === "single" ? (
+          <SummaryLine tone="brand">{`${single.startTime}–${single.endTime}，共 ${fmtHours(result.totalHours)}`}</SummaryLine>
         ) : (
-          <SummaryLine tone="brand">
-            共 {result.segments.length} 天 · {fmtHours(result.totalHours)}
-          </SummaryLine>
+          <>
+            {result.segments.map((seg) => (
+              <SummaryLine key={seg.date}>{describeLeaveDay(seg, shiftOn(seg.date))}</SummaryLine>
+            ))}
+            <SummaryLine tone="brand">
+              共 {result.segments.length} 天 · {fmtHours(result.totalHours)}
+            </SummaryLine>
+          </>
         )}
         {result.skipped.length > 0 && (
           <SummaryLine>

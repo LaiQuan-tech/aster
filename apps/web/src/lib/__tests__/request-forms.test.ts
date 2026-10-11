@@ -9,6 +9,7 @@ import {
   balanceBucketFor,
   buildCreateBody,
   describeBody,
+  describeLeaveDay,
   describeRequest,
   isBuildError,
   isRequestKind,
@@ -24,6 +25,7 @@ import {
   type TripFormValues,
   type WfhFormValues,
 } from "../request-forms";
+import { computeLeaveSegments } from "../leave-hours";
 
 /** 本地時間字串 → epoch，讓斷言不依賴跑測試機器的時區。 */
 const local = (s: string) => new Date(s).getTime();
@@ -520,5 +522,96 @@ describe("代申請已移除（申請人一律是登入者本人）", () => {
     expect(REQUEST_ERROR_MESSAGES.filing_on_behalf_removed).toContain("代為申請功能已移除");
     expect(REQUEST_ERROR_MESSAGES).not.toHaveProperty("proxy_filing_requires_hr");
     expect(REQUEST_ERROR_MESSAGES).not.toHaveProperty("target_employee_not_found");
+  });
+});
+
+/* ------------------------------------------------------------------------
+ * 請假單位精細到小時（2026-10-11）：多日首尾部分天的 body 與顯示文案。
+ * 同一組資料（10/13 14:00–18:00 4h、10/14 全天 8h、10/15 09:00–12:00 3h ＝ 15 小時）
+ * 也用在 apps/api 的 leave-partial-days.test.ts，前後端數字對得上。
+ * ---------------------------------------------------------------------- */
+
+const PARTIAL_SEGMENTS = [
+  { date: "2026-10-13", startTime: "14:00", endTime: "18:00", hours: 4 },
+  { date: "2026-10-14", startTime: "09:00", endTime: "18:00", hours: 8 },
+  { date: "2026-10-15", startTime: "09:00", endTime: "12:00", hours: 3 },
+];
+
+describe("請假精細到小時：body 與顯示", () => {
+  it("buildCreateBody：多日首尾部分天 → startAt＝首日開始時間、endAt＝末日結束時間、hours 15、segments 原樣", () => {
+    const body = ok(
+      buildCreateBody("leave", { leaveTypeId: LEAVE.leaveTypeId, segments: PARTIAL_SEGMENTS, hours: 15, reason: "" }),
+    );
+    expect(body.kind).toBe("leave");
+    expect(at(body.startAt)).toBe(local("2026-10-13T14:00:00"));
+    expect(at(body.endAt)).toBe(local("2026-10-15T12:00:00"));
+    expect(body.hours).toBe(15);
+    expect(body.segments).toEqual(PARTIAL_SEGMENTS);
+  });
+
+  it("describeLeaveDay：逐日一行「10/13（二）14:00–18:00 4 小時」；整天（對得上班別）寫「全天」", () => {
+    expect(describeLeaveDay(PARTIAL_SEGMENTS[0], DAY_SHIFT)).toBe("10/13（二）14:00–18:00 4 小時");
+    expect(describeLeaveDay(PARTIAL_SEGMENTS[1], DAY_SHIFT)).toBe("10/14（三）全天 8 小時");
+    expect(describeLeaveDay(PARTIAL_SEGMENTS[2], DAY_SHIFT)).toBe("10/15（四）09:00–12:00 3 小時");
+    // 沒有班別可比 → 不敢說全天，照實寫時間
+    expect(describeLeaveDay(PARTIAL_SEGMENTS[1], undefined)).toBe("10/14（三）09:00–18:00 8 小時");
+    // 班別不同（夜班）→ 同樣的時段不算全天
+    expect(describeLeaveDay(PARTIAL_SEGMENTS[1], { start_time: "22:00", end_time: "06:00" })).toBe("10/14（三）09:00–18:00 8 小時");
+  });
+
+  it("describeRequest：多日首日從中途開始／末日請到中途 → 「10/13 14:00 – 10/15 12:00 · 3 天 · 15 小時」", () => {
+    const partial = row({ hours: 15, segments: PARTIAL_SEGMENTS });
+    expect(describeRequest(partial, { shift: DAY_SHIFT })).toBe("10/13 14:00 – 10/15 12:00 · 3 天 · 15 小時");
+    // 沒傳班別 → 退回預設班別 09:00–18:00，結果相同
+    expect(describeRequest(partial)).toBe("10/13 14:00 – 10/15 12:00 · 3 天 · 15 小時");
+  });
+
+  it("describeRequest：只有首日從中途開始、或只有末日請到中途，也把起訖時間寫出來；兩端整天維持原本的「10/13–10/15 · 3 天」", () => {
+    const startOnly = row({
+      hours: 20,
+      segments: [PARTIAL_SEGMENTS[0], PARTIAL_SEGMENTS[1], { date: "2026-10-15", startTime: "09:00", endTime: "18:00", hours: 8 }],
+    });
+    expect(describeRequest(startOnly, { shift: DAY_SHIFT })).toBe("10/13 14:00 – 10/15 18:00 · 3 天 · 20 小時");
+    const endOnly = row({
+      hours: 19,
+      segments: [{ date: "2026-10-13", startTime: "09:00", endTime: "18:00", hours: 8 }, PARTIAL_SEGMENTS[1], PARTIAL_SEGMENTS[2]],
+    });
+    expect(describeRequest(endOnly, { shift: DAY_SHIFT })).toBe("10/13 09:00 – 10/15 12:00 · 3 天 · 19 小時");
+    const whole = row({
+      hours: 24,
+      segments: PARTIAL_SEGMENTS.map((seg) => ({ ...seg, startTime: "09:00", endTime: "18:00", hours: 8 })),
+    });
+    expect(describeRequest(whole, { shift: DAY_SHIFT })).toBe("10/13–10/15 · 3 天 · 24 小時");
+  });
+
+  it("describeRequest：單日指定時數 → 時段顯示起訖；剛好是上午／下午就用字", () => {
+    const three = row({ hours: 3, segments: [{ date: "2026-10-13", startTime: "10:00", endTime: "13:00", hours: 3 }] });
+    expect(describeRequest(three, { shift: DAY_SHIFT })).toBe("10/13（二）10:00–13:00 · 3 小時");
+    const across = row({ hours: 3, segments: [{ date: "2026-10-13", startTime: "11:00", endTime: "15:00", hours: 3 }] });
+    expect(describeRequest(across, { shift: DAY_SHIFT })).toBe("10/13（二）11:00–15:00 · 3 小時");
+    const am = row({ hours: 4, segments: [{ date: "2026-10-13", startTime: "09:00", endTime: "13:00", hours: 4 }] });
+    expect(describeRequest(am, { shift: DAY_SHIFT })).toBe("10/13（二）上午 · 4 小時");
+  });
+
+  it("表單到成功畫面一條龍：computeLeaveSegments → buildCreateBody → describeBody（含午休與週末）", () => {
+    const calc = computeLeaveSegments({
+      startDate: "2026-10-16", // 週五
+      endDate: "2026-10-19", // 下週一
+      period: "full",
+      startTime: "14:00",
+      endTime: "12:00",
+      shiftByDate: {},
+      defaultShift: DAY_SHIFT,
+      dayTypeByDate: {},
+    });
+    expect(calc.error).toBeUndefined();
+    expect(calc.totalHours).toBe(7); // 週五 14–18 ＝ 4、週末不計、週一 09–12 ＝ 3
+    const body = ok(
+      buildCreateBody("leave", { leaveTypeId: LEAVE.leaveTypeId, segments: calc.segments, hours: calc.totalHours, reason: "" }),
+    );
+    expect(body.hours).toBe(7);
+    expect(at(body.startAt)).toBe(local("2026-10-16T14:00:00"));
+    expect(at(body.endAt)).toBe(local("2026-10-19T12:00:00"));
+    expect(describeBody(body, { shift: DAY_SHIFT })).toBe("10/16 14:00 – 10/19 12:00 · 2 天 · 7 小時");
   });
 });

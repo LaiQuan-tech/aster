@@ -14,7 +14,9 @@
  *   名單對它們沒有意義，拿來當退路會把別人的單誤判成「待我簽」。
  */
 import type { ApprovalFlow, Department, Employee, LeaveRequest, RequestKind, RequestStatus } from "./admin-api";
+import type { LeaveSegment } from "./ess-api";
 import { localDateKey, fmtHm } from "./ess-format";
+import { summarizeSegment } from "./ess-notifications";
 
 /** ISO → 當地 `YYYY-MM-DD HH:mm`（CSV 用；原本直接切 ISO 字串會變成 UTC，與畫面差 8 小時）。 */
 function csvLocalDateTime(iso: string): string {
@@ -422,15 +424,35 @@ function fmtDateTime(iso: string | null | undefined): string | null {
   return d.toLocaleString("zh-TW", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
+/** `segments`（API 回的 jsonb，型別是 unknown）→ 逐日請假段；格式不對的略過。 */
+function leaveSegmentsOf(value: unknown): LeaveSegment[] {
+  if (!Array.isArray(value)) return [];
+  const out: LeaveSegment[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") continue;
+    const seg = raw as Record<string, unknown>;
+    if (typeof seg.date !== "string" || typeof seg.startTime !== "string" || typeof seg.endTime !== "string") continue;
+    out.push({ date: seg.date, startTime: seg.startTime, endTime: seg.endTime, hours: Number(seg.hours) || 0 });
+  }
+  return out;
+}
+
 /**
  * 「內容」欄（原 approvals `contentLines`）：第一行期間＋時數，之後原因／地點／代理人／類型／給付。
  * 結束時間缺席／無效，或與起始同一分鐘（補卡單 startAt = endAt）→ 只顯示起始。
+ * 請假若跨多天、而且各天的時段不一樣（首日從中途開始、末日只請到中途），第二行逐日列出
+ * 「逐日：10/13 14:00–18:00 · 4 小時、10/14 09:00–18:00 · 8 小時、…」，審核者才看得出實際請哪幾小時。
  */
 export function contentLines(row: LeaveRequest): string[] {
   const start = fmtDateTime(row.start_at) ?? "—";
   const end = fmtDateTime(row.end_at);
   const period = end && end !== start ? `${start} → ${end}` : start;
   const lines = [row.hours != null ? `${period}（${row.hours} 小時）` : period];
+  if (row.kind === "leave") {
+    const segs = leaveSegmentsOf(row.segments);
+    const uniform = segs.every((seg) => seg.startTime === segs[0].startTime && seg.endTime === segs[0].endTime);
+    if (segs.length > 1 && !uniform) lines.push(`逐日：${segs.map(summarizeSegment).join("、")}`);
+  }
   const main = row.reason || row.remark;
   if (main) lines.push(main);
   if (row.location) lines.push(`地點：${row.location}`);

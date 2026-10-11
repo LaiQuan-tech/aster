@@ -422,6 +422,21 @@ export function buildCreateBody<K extends keyof FormValuesByKind>(
 
 /* -------------------------------------------------------- 清單文案 --- */
 
+/** 這一段是不是該日班別的整天（起訖剛好是上班到下班）；沒有班別可比 → false。 */
+function isFullDaySegment(seg: LeaveSegment, shift: ShiftLike | undefined): boolean {
+  if (!shift) return false;
+  return normalizeHm(seg.startTime) === normalizeHm(shift.start_time) && normalizeHm(seg.endTime) === normalizeHm(shift.end_time);
+}
+
+/**
+ * 逐日明細一行：「10/13（二）14:00–18:00 4 小時」「10/14（三）全天 8 小時」。
+ * 請假表單的多日摘要用；`shift`＝該日的班別（整天＝起訖剛好是上班到下班，顯示「全天」）。
+ */
+export function describeLeaveDay(seg: LeaveSegment, shift: ShiftLike | undefined): string {
+  const slot = isFullDaySegment(seg, shift) ? "全天" : `${normalizeHm(seg.startTime)}–${normalizeHm(seg.endTime)}`;
+  return `${fmtDateWithWeekday(seg.date)}${slot} ${fmtHours(seg.hours)}`;
+}
+
 /** 一段請假在單日時的時段標籤：對得上班別的全天／上午／下午就用字，否則顯示時間。 */
 function periodLabel(seg: LeaveSegment, shift: ShiftLike | undefined): string {
   const start = normalizeHm(seg.startTime);
@@ -481,9 +496,19 @@ export function describeRequest(
         return `${fmtDateWithWeekday(seg.date)}${periodLabel(seg, opts.shift ?? DEFAULT_SHIFT)}${hoursText}`;
       }
       if (segments.length > 1) {
-        const first = segments[0].date;
-        const last = segments[segments.length - 1].date;
-        return `${fmtDateShort(first)}–${fmtDateShort(last)} · ${segments.length} 天${hoursText}`;
+        const first = segments[0];
+        const last = segments[segments.length - 1];
+        // 首日從中途開始、或末日只請到中途（多日請假可選開始／結束時間）→ 把起訖的日期＋時間都寫出來，
+        // 例「10/13 14:00 – 10/15 12:00 · 3 天 · 15 小時」；兩端都是整天維持「10/13–10/15 · 3 天 · 24 小時」。
+        const shift = opts.shift ?? DEFAULT_SHIFT;
+        const startsMidDay = normalizeHm(first.startTime) !== normalizeHm(shift.start_time);
+        const endsMidDay = normalizeHm(last.endTime) !== normalizeHm(shift.end_time);
+        if (startsMidDay || endsMidDay) {
+          const from = `${fmtDateShort(first.date)} ${normalizeHm(first.startTime)}`;
+          const to = `${fmtDateShort(last.date)} ${normalizeHm(last.endTime)}`;
+          return `${from} – ${to} · ${segments.length} 天${hoursText}`;
+        }
+        return `${fmtDateShort(first.date)}–${fmtDateShort(last.date)} · ${segments.length} 天${hoursText}`;
       }
       return `${rangeFromIso(r.start_at, r.end_at, tz)}${hoursText}`;
     }

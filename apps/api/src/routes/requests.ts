@@ -50,6 +50,10 @@ const createSchema = z.object({
   // 對象不是本人 → 400 filing_on_behalf_removed（見 POST /requests）；是本人或沒帶 → 照常。
   onBehalfOfEmployeeId: z.string().uuid().optional(),
   // 多段日期 (新增列): individual day segments; hours should be their sum.
+  // 請假單位精細到小時（2026-10-11）：每一段可以只是當天的一部分（例：14:00–18:00 4 小時、09:00–12:00 3 小時），
+  // 多日請假的首日可從中途開始、末日可請到中途。後端只信任 segments 與 hours、沒有「必須整天」的假設：
+  // 核准扣假（services/ledger）以 hours 計、月結切片（settlement.sliceLeave）與年度請假表（leave-register）
+  // 逐段以 segments[].hours 計。見 __tests__/leave-partial-days.test.ts。
   segments: z
     .array(
       z.object({

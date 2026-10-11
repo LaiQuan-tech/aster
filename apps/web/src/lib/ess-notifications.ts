@@ -134,7 +134,8 @@ export function summarizeSegment(seg: LeaveSegment): string {
  *   - ≤3 段 → 逐段一行（換行分隔；渲染時用 `whitespace-pre-line`）
  *   - >3 段 → 「09/18–09/25 全天 ×6 · 48 小時」
  *     時段全部相同且 ≥8 小時叫「全天」；相同但不足 8 小時顯示 `HH:mm–HH:mm`；
- *     時段不一致就不標時段。
+ *     時段不一致（多日請假的首日從中途開始、末日只請到中途）→ 寫出起訖的日期＋時間，
+ *     例「10/13 14:00 – 10/17 12:00 ×5 · 31 小時」，簽核者才看得出首尾不是整天。
  */
 export function summarizeSegments(segs: LeaveSegment[] | null | undefined): string {
   if (!segs || segs.length === 0) return "";
@@ -148,10 +149,10 @@ export function summarizeSegments(segs: LeaveSegment[] | null | undefined): stri
     return sum + (Number.isFinite(hours) ? hours : 0);
   }, 0);
   const sameSlot = sorted.every((seg) => seg.startTime === first.startTime && seg.endTime === first.endTime);
+  if (!sameSlot) {
+    return `${fmtDateShort(first.date)} ${first.startTime} – ${fmtDateShort(last.date)} ${last.endTime} ×${sorted.length} · ${fmtHours(total)}`;
+  }
   const slotHours = Number(first.hours);
-  let slot = "";
-  if (sameSlot) slot = Number.isFinite(slotHours) && slotHours >= 8 ? "全天" : `${first.startTime}–${first.endTime}`;
-
-  const range = `${fmtDateShort(first.date)}–${fmtDateShort(last.date)}`;
-  return `${range}${slot ? ` ${slot}` : ""} ×${sorted.length} · ${fmtHours(total)}`;
+  const slot = Number.isFinite(slotHours) && slotHours >= 8 ? "全天" : `${first.startTime}–${first.endTime}`;
+  return `${fmtDateShort(first.date)}–${fmtDateShort(last.date)} ${slot} ×${sorted.length} · ${fmtHours(total)}`;
 }

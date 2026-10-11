@@ -13,6 +13,7 @@ import {
   type LeaveRequest,
   type LeaveType,
 } from "@/lib/admin-api";
+import { fmtHm, localDateKey } from "@/lib/ess-format";
 import {
   balancePeriodLabel,
   balanceSourceClass,
@@ -270,8 +271,9 @@ export default function LeaveBalancesPage() {
                         {names.employeeMap.get(request.employee_id) ?? request.employee_id.slice(0, 8)}
                       </td>
                       <td className="py-2 pr-4">{request.leave_type_id ? names.leaveTypeMap.get(request.leave_type_id) : "未指定"}</td>
+                      {/* 請假可以只請幾個小時、多日也可從中途開始／請到中途 → 期間要帶時間（當地時區） */}
                       <td className="py-2 pr-4">
-                        {request.start_at.slice(0, 10)} → {request.end_at.slice(0, 10)}
+                        {localDateKey(request.start_at)} {fmtHm(request.start_at)} → {localDateKey(request.end_at)} {fmtHm(request.end_at)}
                       </td>
                       <td className="py-2 pr-4">{request.hours ?? "—"}</td>
                       <td className="py-2 pr-4">{request.reason ?? "—"}</td>
