@@ -40,6 +40,8 @@ export const BOSS_SETTING_HANDOVER_NOTE = "你是目前的老闆，可以交棒�
 export const CREDENTIALS_LOCKED_NOTE = "只有老闆或平台管理員可以重設老闆、HR 管理員、平台管理員（以及老闆指定的人）的密碼";
 /** 角色下拉：沒有權限指派平台管理員時的說明。 */
 export const PLATFORM_ADMIN_ASSIGN_NOTE = "「平台管理員」角色只有平台管理員可以指派";
+/** 角色下拉：目標是受保護帳號、登入者不能變更它的角色時的說明。 */
+export const ROLE_CHANGE_LOCKED_NOTE = "只有老闆或平台管理員可以變更老闆、HR 管理員、平台管理員（以及老闆指定的人）的角色";
 
 const PLATFORM_ADMIN = "platform_admin";
 const HR_ADMIN = "hr_admin";
@@ -146,6 +148,19 @@ export function credentialsLockedFor(
   return true;
 }
 
+/**
+ * 這位登入者對 `target` 的**角色**變更是不是被鎖住：與重設密碼同一個判準（受保護帳號、登入者不是老闆也不是 platform_admin、
+ * 而且不是對自己）。後端同樣擋——降級也算：否則 HR 可以先把另一位 HR 降成一般員工、重設密碼、再升回去。
+ * 只有「角色真的有變」才會被後端擋；員工管理頁儲存時帶著原值不受影響，所以這裡鎖的是下拉本身。
+ */
+export function roleChangeLockedFor(
+  viewer: PrivilegeViewer | null | undefined,
+  target: PrivilegeTarget,
+  policy: PrivilegePolicy,
+): boolean {
+  return credentialsLockedFor(viewer, target, policy);
+}
+
 function codeOf(err: unknown): string | null {
   if (!(err instanceof Error)) return null;
   const code = (err as { code?: unknown }).code;
@@ -158,9 +173,11 @@ function codeOf(err: unknown): string | null {
  * 後端的特權邊界錯誤 → 給人看的中文；不是這類錯誤回 null（呼叫端走自己原本的翻譯）。
  * `not_boss` 在不同端點意思不同，所以由呼叫端用 `context` 說清楚是哪件事。
  */
-export function privilegeErrorMessage(err: unknown, context: "boss" | "credentials" = "boss"): string | null {
+export function privilegeErrorMessage(err: unknown, context: "boss" | "credentials" | "role" = "boss"): string | null {
   const code = codeOf(err) ?? (err instanceof Error ? err.message : "");
   if (code.includes("platform_admin_required")) return PLATFORM_ADMIN_ASSIGN_NOTE;
-  if (code.includes("not_boss")) return context === "credentials" ? CREDENTIALS_LOCKED_NOTE : BOSS_SETTING_LOCKED_NOTE;
+  if (code.includes("not_boss")) {
+    return context === "credentials" ? CREDENTIALS_LOCKED_NOTE : context === "role" ? ROLE_CHANGE_LOCKED_NOTE : BOSS_SETTING_LOCKED_NOTE;
+  }
   return null;
 }

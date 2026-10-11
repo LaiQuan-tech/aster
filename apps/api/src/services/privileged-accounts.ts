@@ -35,6 +35,19 @@ export function normalizeRole(role: string | null | undefined): string {
   return (role ?? "").trim().toLowerCase()
 }
 
+/** 系統認得的角色（employees.role 是自由文字，這五個以外的字串不帶任何權限）。 */
+const KNOWN_ROLES: ReadonlySet<string> = new Set(["employee", "manager", "accountant", HR_ADMIN_ROLE, PLATFORM_ADMIN_ROLE])
+
+/**
+ * 寫進資料庫的角色字串：已知角色一律存小寫標準寫法，其他字串只去頭尾空白。
+ * 為什麼要統一：權限判斷（requireRole、RLS 的 is_hr_admin）是**精確比對**，`Platform_Admin` 這種大小寫變體既不帶權限、
+ * 又會讓原本的 platform_admin 默默失去權限；而本檔的檢查是正規化後比對，兩邊寫法必須一致。
+ */
+export function canonicalRole(role: string): string {
+  const normalized = normalizeRole(role)
+  return KNOWN_ROLES.has(normalized) ? normalized : role.trim()
+}
+
 export interface PrivilegeCaller {
   id: string
   role: string
@@ -49,6 +62,7 @@ export type PrivilegeCode = "not_boss" | "platform_admin_required"
 
 export const BOSS_SETTING_MESSAGE = "只有老闆或平台管理員可以更換老闆設定"
 export const CREDENTIALS_MESSAGE = "只有老闆或平台管理員可以重設老闆、HR 管理員或平台管理員的密碼"
+export const ROLE_CHANGE_MESSAGE = "只有老闆或平台管理員可以變更老闆、HR 管理員或平台管理員的角色"
 export const PLATFORM_ADMIN_ASSIGN_MESSAGE = "只有平台管理員可以指派「平台管理員」角色"
 
 /** 權限不足：一律 403 `{ error: code, message }`（middleware/privilege-error.ts 轉成回應）。 */
@@ -123,6 +137,16 @@ export function canManageCredentialsOf(caller: PrivilegeCaller, target: AccountT
   return isBossOrPlatformAdmin(policy, caller)
 }
 
+/**
+ * 能不能變更 `target` 的角色：受保護帳號（老闆、老闆指定的解鎖人、hr_admin、platform_admin）的角色異動——**含降級**——
+ * 只有老闆或 platform_admin 能做（本人除外）。純函式。
+ * 為什麼降級也要擋：不擋的話，HR 先把另一位 HR 降成一般員工（不再受保護）、重設他的密碼、再升回 hr_admin，
+ * 受保護帳號的密碼保護就形同虛設；對老闆／platform_admin 則是直接剝奪他們的權限。判準與 canManageCredentialsOf 相同。
+ */
+export function canChangeRoleOf(caller: PrivilegeCaller, target: AccountTarget, policy: PeriodUnlockPolicy): boolean {
+  return canManageCredentialsOf(caller, target, policy)
+}
+
 /** 載入某位員工的 {id, role}（actorEmpId → 角色）；查無或沒帶 id 回 null。 */
 export async function loadActor(tenantId: string, actorEmpId: string | null | undefined): Promise<PrivilegeCaller | null> {
   if (!actorEmpId) return null
@@ -151,6 +175,25 @@ export async function assertCanManageCredentials(
   if (!isProtectedAccount(target, policy)) return
   if (!caller || !canManageCredentialsOf(caller, target, policy)) {
     throw new PrivilegeError("not_boss", CREDENTIALS_MESSAGE)
+  }
+}
+
+/**
+ * 呼叫者不能把 `target` 的角色改成 `newRole` 就丟 PrivilegeError（403 `not_boss`）。角色沒變（正規化後相同）一律放行——
+ * 員工管理頁每次儲存都會帶 role，只改姓名不能被擋。會讀一次租戶的解鎖政策。
+ */
+export async function assertCanChangeRole(
+  tenantId: string,
+  caller: PrivilegeCaller | null,
+  target: AccountTarget,
+  newRole: string,
+  policyOverride?: PeriodUnlockPolicy,
+): Promise<void> {
+  if (normalizeRole(newRole) === normalizeRole(target.role)) return
+  const policy = policyOverride ?? (await loadPeriodUnlockPolicy(tenantId))
+  if (!isProtectedAccount(target, policy)) return
+  if (!caller || !canChangeRoleOf(caller, target, policy)) {
+    throw new PrivilegeError("not_boss", ROLE_CHANGE_MESSAGE)
   }
 }
 

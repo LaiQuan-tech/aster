@@ -144,7 +144,15 @@ HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼�
      剩下 HR 仍能做、但**不會**變成老闆的事：停用／改名等員工維護、建立新的 hr_admin 帳號、重設一般員工密碼。
      前端對應：假別與簽核流程頁的老闆欄位、員工管理頁的角色下拉（「平台管理員」選項）與重設密碼／寄信動作，
      非老闆／非 platform_admin 看到的是停用並附說明（`apps/web/src/lib/privileged-accounts.ts`）。
-     ⚠️ 仍然沒有堵的：有資料庫權限的人（直接改庫）與 platform_admin 本人；每一步都留 audit，重新開放時老闆與 HR 都會收到通知。
+     另外：**變更受保護帳號的角色（含降級）**同樣只有老闆或 platform_admin（本人除外）——否則 HR 可以先把另一位 HR 降成一般員工、
+     重設密碼、再升回去，上面的保護就白做了；角色字串寫入前統一成標準寫法（`Platform_Admin` 存成 `platform_admin`）；
+     批次建立帳號的表頭不能有重複欄位（`role` 與 `角色` 同時出現 → 400）；平台操作員白名單 email 不能拿來建員工帳號。
+     ⚠️ **DB 層要另外套 SQL**：`sql/0001` 的 `employees_hr_write` 讓任何 HR 用自己的 JWT 經 PostgREST 直接改 employees
+     （例如把自己的 role 改成 platform_admin），會繞過上面全部的 API 檢查——`packages/db/sql/0056_employees_api_only_writes.sql`
+     收掉它（網頁從不直連資料表、API 走 service role，不影響功能）。**這份 SQL 需由維護人員套到正式庫，撰寫時尚未套用。**
+     發薪鎖定相關的其他表（payslips、attendance_sheets…）HR 的寫入 policy 仍在（sql/0049 當時保留的取捨），所以整套仍然是
+     API 層的防線，不是對「會直接打資料庫」的惡意內部人員的技術性防線；platform_admin 本人與有資料庫權限的人不受限。
+     每一步都留 audit，重新開放時老闆與 HR 都會收到通知。
    - **前期更正＝薪資一次性加減項**（2026-10-11 業主拍板）：已匯款的月份不重新開放、不改原薪資單，改在**下個月**薪資補發或扣回。
      資料表 `payroll_adjustments`（`packages/db/sql/0055_payroll_adjustments.sql`，軟刪除 `deleted_at`）；HR 專用 API
      `GET|POST /payroll-adjustments`、`PATCH|DELETE /payroll-adjustments/:id`（`apps/api/src/routes/payroll-adjustments.ts`）：

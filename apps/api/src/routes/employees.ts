@@ -12,10 +12,13 @@ import { allowWeakInitialPassword, createUserPasswordAttributes, setPasswordDire
 import { seedHireAcknowledgements } from "../services/onboarding-signatures.js"
 import {
   assertCanAssignRole,
+  assertCanChangeRole,
   assertCanManageCredentials,
+  canonicalRole,
   isPlatformAdminPromotion,
   type PrivilegeCaller,
 } from "../services/privileged-accounts.js"
+import { isPlatformAdminEmail } from "../middleware/platform.js"
 
 export const employeesRouter = Router()
 
@@ -255,7 +258,10 @@ employeesRouter.get(
  * fails we delete the just-created auth user so we don't leak orphaned accounts.
  *
  * 權限邊界（2026-10-11）：`role: "platform_admin"` 只有 platform_admin 能指派，其他人（含 HR）403
- * `platform_admin_required`——在建 auth 帳號**之前**檢查，被擋時不留下孤兒帳號。
+ * `platform_admin_required`——在建 auth 帳號**之前**檢查，被擋時不留下孤兒帳號。角色字串寫進去前統一成標準寫法
+ * （canonicalRole：`Platform_Admin` 這類大小寫變體存成 platform_admin，不會變成一個沒有權限的怪角色）。
+ * 平台操作員白名單（PLATFORM_ADMIN_EMAILS）的 email 不能拿來建租戶員工帳號（409 email_in_other_tenant，
+ * 與邀請信流程同一個規則）——否則 HR 可以替還沒註冊的操作員 email 先建帳號、設好密碼。
  */
 employeesRouter.post(
   "/employees",
@@ -273,6 +279,10 @@ employeesRouter.post(
 
     try {
       assertCanAssignRole(await callerOf(req, tenantId), role ?? "employee")
+      if (isPlatformAdminEmail(email)) {
+        res.status(409).json({ error: "email_in_other_tenant" })
+        return
+      }
       // 租戶允許簡單初始密碼時改帶 bcrypt 的 password_hash（GoTrue createUser 不對雜湊做 HIBP 檢查），
       // 否則維持明文 password（受 GoTrue 弱密碼防護）。見 services/password-policy.ts。
       const { data: created, error: userErr } = await supabaseAdmin.auth.admin.createUser({
@@ -304,7 +314,7 @@ employeesRouter.post(
           tenant_id: tenantId,
           user_id: userId,
           name,
-          role: role ?? "employee",
+          role: canonicalRole(role ?? "employee"),
           dept_id: deptId ?? null,
           emp_no: empNo ?? null,
           employment_type: employmentType ?? "regular",
@@ -328,7 +338,7 @@ employeesRouter.post(
         tableName: "employees",
         recordId: emp.id as string,
         action: "INSERT",
-        newRow: { name, email, role: role ?? "employee", dept_id: deptId ?? null, emp_no: empNo ?? null },
+        newRow: { name, email, role: canonicalRole(role ?? "employee"), dept_id: deptId ?? null, emp_no: empNo ?? null },
         context: "POST /employees — 建立員工帳號",
       })
 
@@ -349,9 +359,13 @@ employeesRouter.post(
  * one of this tenant's employees. Tenant-scoped; 404 when the id is not in this
  * tenant.
  *
- * 權限邊界（2026-10-11）：把角色**變成** platform_admin 只有 platform_admin 能做（HR 不能指派，也不能升自己），
- * 其他人 403 `platform_admin_required`。目標本來就是 platform_admin、帶著原值存檔（員工管理頁每次儲存都會帶 role）
- * 照常通過。
+ * 權限邊界（2026-10-11）：
+ *   • 把角色**變成** platform_admin 只有 platform_admin 能做（HR 不能指派，也不能升自己），其他人 403
+ *     `platform_admin_required`。目標本來就是 platform_admin、帶著原值存檔（員工管理頁每次儲存都會帶 role）照常通過。
+ *   • **變更受保護帳號（老闆、老闆指定的解鎖人、hr_admin、platform_admin）的角色——含降級**——只有老闆或 platform_admin
+ *     （本人除外），其他人 403 `not_boss`。不擋的話 HR 可以把另一位 HR 降成一般員工、重設他的密碼、再升回去，
+ *     重設密碼那條保護就白做了。角色沒變（只改姓名等）不受影響。
+ *   • 角色字串寫進去前統一成標準寫法（canonicalRole）。
  */
 employeesRouter.patch(
   "/employees/:id",
@@ -369,7 +383,7 @@ employeesRouter.patch(
 
     const patch: Record<string, unknown> = {}
     if (parsed.data.deptId !== undefined) patch.dept_id = parsed.data.deptId
-    if (parsed.data.role !== undefined) patch.role = parsed.data.role
+    if (parsed.data.role !== undefined) patch.role = canonicalRole(parsed.data.role)
     if (parsed.data.status !== undefined) patch.status = parsed.data.status
     if (parsed.data.name !== undefined) patch.name = parsed.data.name
     if (parsed.data.empNo !== undefined) patch.emp_no = parsed.data.empNo
@@ -393,9 +407,11 @@ employeesRouter.patch(
           res.status(404).json({ error: "not_found" })
           return
         }
+        const caller = await callerOf(req, tenantId)
         if (isPlatformAdminPromotion(parsed.data.role, target.role as string)) {
-          assertCanAssignRole(await callerOf(req, tenantId), parsed.data.role)
+          assertCanAssignRole(caller, parsed.data.role)
         }
+        await assertCanChangeRole(tenantId, caller, { id: String(id), role: target.role as string }, parsed.data.role)
       }
       const { data, error } = await supabaseAdmin
         .from("employees")

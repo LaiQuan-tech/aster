@@ -120,6 +120,40 @@ describe("CSV 角色欄是 platform_admin", () => {
   })
 })
 
+describe("表頭重複欄位——曾經的繞過：第一欄 employee、第二欄 platform_admin", () => {
+  it("`角色` 與 `role` 同時出現（中英文別名算同一欄）→ 400 invalid_header，一列都不處理", async () => {
+    const csv = ["name,email,角色,role", "evil,evil@example.com,employee,platform_admin"].join("\n")
+    const err = await bulk(csv, HR).catch((e) => e)
+    expect(err).toMatchObject({ name: "AccountError", code: "invalid_header", status: 400 })
+    expect(String(err.message)).toContain("role")
+    expect(adminAuth.generateLink).not.toHaveBeenCalled()
+    expect(fake.writes).toHaveLength(0)
+  })
+
+  it("`role,role`、`email,e-mail` 之類任何重複的已知欄位都一樣被拒（platform_admin 本人也一樣，歧義的資料不收）", async () => {
+    for (const header of ["name,email,role,role", "name,email,e-mail", "name,email,empNo,工號"]) {
+      const err = await bulk([header, "x,x@example.com,a,b"].join("\n"), PA).catch((e) => e)
+      expect(err, header).toMatchObject({ code: "invalid_header" })
+    }
+  })
+
+  it("只用別名 `角色`（單一欄位）仍然生效：HR 填 platform_admin → 403，一般角色照舊", async () => {
+    const blocked = await bulk(["name,email,角色", "evil,evil@example.com,platform_admin"].join("\n"), HR).catch((e) => e)
+    expect(blocked).toMatchObject({ code: "platform_admin_required" })
+    const ok = await bulk(["name,email,角色", "好人,good@example.com,accountant"].join("\n"), HR)
+    expect(ok).toMatchObject({ created: 1, skipped: 0 })
+    expect((fake.db.employees.find((r) => r.name === "好人") as Row).role).toBe("accountant")
+  })
+
+  it("角色寫入前統一成標準寫法（Hr_Admin → hr_admin）；Platform_Admin 變體被擋", async () => {
+    const created = await bulk(csvOf("新人資,hr-new@example.com,,Hr_Admin"), HR)
+    expect(created).toMatchObject({ created: 1 })
+    expect((fake.db.employees.find((r) => r.name === "新人資") as Row).role).toBe("hr_admin")
+    const blocked = await bulk(csvOf("冒牌,fake@example.com,,Platform_Admin"), HR).catch((e) => e)
+    expect(blocked).toMatchObject({ code: "platform_admin_required" })
+  })
+})
+
 describe("綁到既有的未綁帳號列", () => {
   it("HR 綁一般員工 → 照舊 bound，user_id 被填上", async () => {
     const summary = await bulk(csvOf("待開通員工,free@example.com,E100,"), HR)

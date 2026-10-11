@@ -63,9 +63,11 @@ import { getBrandingCached, getMeCached, peekMeCached } from "@/lib/ess-state";
 import {
   CREDENTIALS_LOCKED_NOTE,
   PLATFORM_ADMIN_ASSIGN_NOTE,
+  ROLE_CHANGE_LOCKED_NOTE,
   canAssignPlatformAdmin,
   credentialsLockedFor,
   privilegePolicyOf,
+  roleChangeLockedFor,
   roleOptionsFor,
   type PrivilegePolicy,
   type PrivilegeViewer,
@@ -1155,7 +1157,14 @@ export default function EmployeesPage() {
                               className={inputCls}
                               value={editRole}
                               onChange={(event) => setEditRole(event.target.value)}
-                              title={canAssignPlatform ? undefined : PLATFORM_ADMIN_ASSIGN_NOTE}
+                              disabled={roleChangeLockedFor(viewer, { id: employee.id, role: employee.role }, privilegePolicy)}
+                              title={
+                                roleChangeLockedFor(viewer, { id: employee.id, role: employee.role }, privilegePolicy)
+                                  ? ROLE_CHANGE_LOCKED_NOTE
+                                  : canAssignPlatform
+                                    ? undefined
+                                    : PLATFORM_ADMIN_ASSIGN_NOTE
+                              }
                             >
                               {roleOptionsFor(ROLES, viewer, employee.role).map((item) => (
                                 <option key={item.value} value={item.value} disabled={item.disabled}>{item.label}</option>
@@ -1166,7 +1175,11 @@ export default function EmployeesPage() {
                               <option value="inactive">停用</option>
                             </select>
                           </div>
-                          {!canAssignPlatform && <p className="mt-2 text-xs text-gray-400">{PLATFORM_ADMIN_ASSIGN_NOTE}</p>}
+                          {roleChangeLockedFor(viewer, { id: employee.id, role: employee.role }, privilegePolicy) ? (
+                            <p className="mt-2 text-xs text-amber-700" data-testid="role-change-locked-note">{ROLE_CHANGE_LOCKED_NOTE}</p>
+                          ) : (
+                            !canAssignPlatform && <p className="mt-2 text-xs text-gray-400">{PLATFORM_ADMIN_ASSIGN_NOTE}</p>
+                          )}
                           {/* 第二排：個資——生日／身分證／戶籍地址（寬欄）一列、匯款帳號四欄（銀行代碼／銀行名稱／帳號／戶名）一列。
                               欄數跟著外框寬度走（@3xl＝外框 ≥ 48rem 才分 8 欄，與上一排的 8 欄上下對齊；較窄時 2 欄，
                               免得身分證、日期在窄格裡被截掉）。身分證轉大寫、不驗格式（外籍居留證格式不同）。 */}

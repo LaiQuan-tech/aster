@@ -13,6 +13,8 @@ import {
   needsBossHandoverConfirm,
   privilegeErrorMessage,
   privilegePolicyOf,
+  ROLE_CHANGE_LOCKED_NOTE,
+  roleChangeLockedFor,
   roleOptionsFor,
   type PrivilegePolicy,
 } from "../privileged-accounts";
@@ -168,6 +170,30 @@ describe("③ 重設／寄連結給受保護帳號", () => {
     const open = employeeActionsFor({ status: "active", user_id: "u1" }, { isSelf: false });
     expect(open.find((a) => a.key === "send-reset")?.disabled).toBeFalsy();
     expect(open.find((a) => a.key === "set-password")?.title).toBe("由 HR 直接指定一組密碼（同仁下次登入須改密碼）");
+  });
+});
+
+describe("變更受保護帳號的角色（含降級）——員工管理頁編輯列的角色下拉", () => {
+  it("與重設密碼同一個判準：HR 對老闆、解鎖人、其他 hr_admin、platform_admin 鎖住；對一般員工與自己不鎖；老闆與 platform_admin 都不鎖", () => {
+    for (const target of [
+      { id: BOSS, role: "hr_admin" },
+      { id: DESIGNEE, role: "employee" },
+      { id: HR2, role: "hr_admin" },
+      { id: PA, role: "platform_admin" },
+    ]) {
+      expect(roleChangeLockedFor(hr, target, policy), target.id).toBe(true);
+      expect(roleChangeLockedFor(boss, target, policy), target.id).toBe(false);
+      expect(roleChangeLockedFor(pa, target, policy), target.id).toBe(false);
+    }
+    expect(roleChangeLockedFor(hr, { id: EMP, role: "employee" }, policy)).toBe(false);
+    expect(roleChangeLockedFor(hr, { id: HR, role: "hr_admin" }, policy)).toBe(false);
+    expect(roleChangeLockedFor(null, { id: HR2, role: "hr_admin" }, policy)).toBe(false);
+  });
+
+  it("後端回 not_boss 時，角色情境給『變更角色』的說法", () => {
+    const err = Object.assign(new Error("[403] not_boss"), { code: "not_boss", status: 403 });
+    expect(privilegeErrorMessage(err, "role")).toBe(ROLE_CHANGE_LOCKED_NOTE);
+    expect(ROLE_CHANGE_LOCKED_NOTE).toContain("角色");
   });
 });
 

@@ -30,8 +30,9 @@ import { assertCanManageCredentials, type PrivilegeCaller } from "../services/pr
  * 權限邊界（2026-10-11，services/privileged-accounts.ts）：invite／send-reset／bulk-invite 在 dryRun 或沒設信件
  * 服務時會把設密碼連結直接回給 HR，拿到連結＝能替對方設新密碼。所以目標若是受保護帳號（老闆、老闆指定的解鎖人、
  * hr_admin、platform_admin），只有老闆或 platform_admin 能發（對自己例外），其他人 403 `not_boss`；
- * 一般員工照舊。bulk-invite 逐列檢查（見 bulkInviteFromCsv），另外 CSV 的角色欄是 platform_admin 時只有
- * platform_admin 能指派（403 `platform_admin_required`，該列 skipped）。
+ * 一般員工照舊。bulk-invite 綁到受保護列時逐列檢查（見 bulkInviteFromCsv，該列 skipped `not_boss`）；CSV 任何一列要寫入的
+ * 角色是 platform_admin 時只有 platform_admin 能做，否則**整份 CSV** 回 403 `platform_admin_required`（一列都不處理）；
+ * 表頭有重複欄位（`role` 與 `角色` 同時出現）回 400 `invalid_header`。
  */
 export const authAccountsRouter = Router()
 

@@ -6,13 +6,17 @@ vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase
 import {
   CREDENTIALS_MESSAGE,
   PLATFORM_ADMIN_ASSIGN_MESSAGE,
+  ROLE_CHANGE_MESSAGE,
   PrivilegeError,
   assertCanAssignRole,
+  assertCanChangeRole,
   assertCanManageCredentials,
   bossChanged,
   canAssignRole,
   canChangeBoss,
+  canChangeRoleOf,
   canManageCredentialsOf,
+  canonicalRole,
   isBossOrPlatformAdmin,
   isPlatformAdminPromotion,
   isPrivilegeError,
@@ -44,6 +48,15 @@ describe("角色字串", () => {
     expect(normalizeRole(" Platform_Admin ")).toBe("platform_admin")
     expect(normalizeRole(null)).toBe("")
     expect(normalizeRole(undefined)).toBe("")
+  })
+
+  it("canonicalRole：已知角色存成小寫標準寫法（大小寫變體不會變成沒有權限的怪角色），未知字串只去頭尾空白、保留原樣", () => {
+    expect(canonicalRole(" Platform_Admin ")).toBe("platform_admin")
+    expect(canonicalRole("HR_ADMIN")).toBe("hr_admin")
+    expect(canonicalRole("Accountant")).toBe("accountant")
+    expect(canonicalRole("Manager")).toBe("manager")
+    expect(canonicalRole("employee")).toBe("employee")
+    expect(canonicalRole("  Intern ")).toBe("Intern")
   })
 })
 
@@ -187,5 +200,48 @@ describe("assertCanManageCredentials／loadActor — 會讀租戶的解鎖政策
     expect(await loadActor(TENANT_ID, undefined)).toBeNull()
     expect(await loadActor(TENANT_ID, "ffffffff-ffff-4fff-8fff-ffffffffffff")).toBeNull()
     expect(await loadActor("99999999-9999-4999-8999-999999999999", HR)).toBeNull()
+  })
+})
+
+describe("canChangeRoleOf／assertCanChangeRole — 變更受保護帳號的角色（含降級）", () => {
+  const hr = { id: HR, role: "hr_admin" }
+
+  it("與重設密碼同一個判準：HR 動不了老闆、解鎖人、其他 hr_admin、platform_admin；老闆與 platform_admin 可以；對自己可以；一般員工誰都可以", () => {
+    for (const target of [
+      { id: BOSS, role: "employee" },
+      { id: DESIGNEE, role: "employee" },
+      { id: HR2, role: "hr_admin" },
+      { id: PA, role: "platform_admin" },
+    ]) {
+      expect(canChangeRoleOf(hr, target, withBoss), target.id).toBe(false)
+      expect(canChangeRoleOf({ id: BOSS, role: "hr_admin" }, target, withBoss), target.id).toBe(true)
+      expect(canChangeRoleOf({ id: PA, role: "platform_admin" }, target, withBoss), target.id).toBe(true)
+    }
+    expect(canChangeRoleOf(hr, { id: HR, role: "hr_admin" }, withBoss)).toBe(true) // 本人
+    expect(canChangeRoleOf(hr, { id: EMP, role: "employee" }, withBoss)).toBe(true)
+  })
+
+  beforeEach(() => {
+    fake.reset()
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: BOSS }, payroll: { periodUnlockEmpIds: [DESIGNEE] } } }]
+  })
+
+  it("HR 把另一位 HR 降成一般員工 → PrivilegeError(not_boss)——這是『降級→重設密碼→升回去』繞過的第一步", async () => {
+    const err = await assertCanChangeRole(TENANT_ID, hr, { id: HR2, role: "hr_admin" }, "employee").catch((e) => e)
+    expect(isPrivilegeError(err)).toBe(true)
+    expect(err.toBody()).toEqual({ error: "not_boss", message: ROLE_CHANGE_MESSAGE })
+  })
+
+  it("角色沒變（正規化後相同）一律放行：員工管理頁每次儲存都帶 role，只改姓名不能被擋", async () => {
+    await expect(assertCanChangeRole(TENANT_ID, hr, { id: HR2, role: "hr_admin" }, "hr_admin")).resolves.toBeUndefined()
+    await expect(assertCanChangeRole(TENANT_ID, hr, { id: PA, role: "platform_admin" }, " Platform_Admin ")).resolves.toBeUndefined()
+  })
+
+  it("一般員工升 hr_admin、老闆降 HR、本人自己降級、查不到呼叫者改一般員工 → 放行；查不到呼叫者改受保護帳號 → 擋", async () => {
+    await expect(assertCanChangeRole(TENANT_ID, hr, { id: EMP, role: "employee" }, "hr_admin")).resolves.toBeUndefined()
+    await expect(assertCanChangeRole(TENANT_ID, { id: BOSS, role: "hr_admin" }, { id: HR2, role: "hr_admin" }, "employee")).resolves.toBeUndefined()
+    await expect(assertCanChangeRole(TENANT_ID, hr, { id: HR, role: "hr_admin" }, "employee")).resolves.toBeUndefined()
+    await expect(assertCanChangeRole(TENANT_ID, null, { id: EMP, role: "employee" }, "manager")).resolves.toBeUndefined()
+    await expect(assertCanChangeRole(TENANT_ID, null, { id: HR2, role: "hr_admin" }, "employee")).rejects.toBeInstanceOf(PrivilegeError)
   })
 })

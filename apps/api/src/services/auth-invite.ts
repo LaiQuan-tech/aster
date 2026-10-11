@@ -12,6 +12,7 @@ import {
   PLATFORM_ADMIN_ROLE,
   assertCanAssignRole,
   canManageCredentialsOf,
+  canonicalRole,
   isProtectedAccount,
   loadActor,
   normalizeRole,
@@ -496,6 +497,22 @@ export async function bulkInviteFromCsv(opts: {
   if (!headers.includes("name") || !headers.includes("email")) {
     throw new AccountError("invalid_header", 400, "表頭至少要有 name 與 email 兩欄")
   }
+  // 同一個欄位不能出現兩次（`role` 與別名 `角色` 算同一欄）：兩欄都有值時會以後面的覆蓋前面的，權限檢查與實際寫入看到的
+  // 就可能是不同欄——曾經因此能用「第一欄 employee、第二欄 platform_admin」繞過 platform_admin 的檢查。
+  const knownKeys = new Set(Object.values(HEADER_ALIASES))
+  const repeated = headers.find((h, i) => knownKeys.has(h) && headers.indexOf(h) !== i)
+  if (repeated) {
+    throw new AccountError("invalid_header", 400, `表頭有重複的欄位：${repeated}（中文與英文別名算同一欄）`)
+  }
+  // 一列的欄位 → 物件（空白欄略過）。權限檢查與逐列處理用同一份，檢查看到的就是要寫入的。
+  const rawOf = (cells: string[]): Record<string, string> => {
+    const raw: Record<string, string> = {}
+    headers.forEach((h, col) => {
+      const v = (cells[col] ?? "").trim()
+      if (v) raw[h] = v
+    })
+    return raw
+  }
 
   const [{ data: empRows, error: empErr }, { data: deptRows, error: deptErr }, policy, actor] = await Promise.all([
     supabaseAdmin
@@ -512,12 +529,10 @@ export async function bulkInviteFromCsv(opts: {
   const deptByName = new Map<string, string>()
   for (const d of deptRows ?? []) deptByName.set((d.name as string).trim(), d.id as string)
 
-  // 角色欄含 platform_admin 而操作者不是 platform_admin → 整份拒絕（先於任何副作用）。
-  const roleCol = headers.indexOf("role")
-  if (roleCol >= 0) {
-    for (let i = headerIdx + 1; i < table.length; i++) {
-      if (normalizeRole(table[i][roleCol]) === PLATFORM_ADMIN_ROLE) assertCanAssignRole(actor, PLATFORM_ADMIN_ROLE)
-    }
+  // 任何一列要寫入的角色是 platform_admin 而操作者不是 platform_admin → 整份拒絕（先於任何副作用）。
+  for (let i = headerIdx + 1; i < table.length; i++) {
+    if (table[i].length === 0) continue
+    if (normalizeRole(rawOf(table[i]).role) === PLATFORM_ADMIN_ROLE) assertCanAssignRole(actor, PLATFORM_ADMIN_ROLE)
   }
 
   const appName = await tenantAppName(tenantId)
@@ -543,11 +558,7 @@ export async function bulkInviteFromCsv(opts: {
     const cells = table[i]
     if (cells.length === 0) continue
     const line = i + 1
-    const raw: Record<string, string> = {}
-    headers.forEach((h, col) => {
-      const v = (cells[col] ?? "").trim()
-      if (v) raw[h] = v
-    })
+    const raw = rawOf(cells)
     const name = raw.name ?? null
     const email = raw.email?.toLowerCase() ?? null
     try {
@@ -628,7 +639,7 @@ export async function bulkInviteFromCsv(opts: {
             tenant_id: tenantId,
             user_id: resolved.user.id,
             name,
-            role: raw.role ?? "employee",
+            role: canonicalRole(raw.role ?? "employee"),
             dept_id: deptId,
             emp_no: empNo,
             employment_type: raw.employmentType ?? "regular",

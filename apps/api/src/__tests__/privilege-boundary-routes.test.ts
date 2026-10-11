@@ -311,7 +311,8 @@ describe("② PATCH /employees/:id — 把角色變成 platform_admin", () => {
   })
 
   it("HR 改角色成 hr_admin／會計／主管、或根本沒帶 role → 照舊 200；不存在的 id → 404", async () => {
-    for (const role of ["hr_admin", "accountant", "manager", "employee"]) {
+    // hr_admin 放最後：升成 hr_admin 之後那個人就是受保護帳號，HR 不能再改他的角色（見下面『變更受保護帳號的角色』）。
+    for (const role of ["accountant", "manager", "employee", "hr_admin"]) {
       const res = await as(T.hr).patch(`/employees/${EMP}`).send({ role })
       expect(res.status, role).toBe(200)
       expect(rowOf(EMP).role).toBe(role)
@@ -429,5 +430,78 @@ describe("③ POST /employees/:id/send-reset 與 /invite — 發重設／邀請�
   it("不存在的員工 → 404（先於權限檢查，不洩漏哪些 id 是受保護帳號）", async () => {
     const res = await as(T.hr).post("/employees/ffffffff-ffff-4fff-8fff-ffffffffffff/send-reset").send({ dryRun: true })
     expect(res.status).toBe(404)
+  })
+})
+
+describe("② PATCH /employees/:id — 變更受保護帳號的角色（含降級）只有老闆或 platform_admin", () => {
+  it("HR 把另一位 HR 降成一般員工 → 403 not_boss，角色沒變；接著重設他的密碼也被擋（降級→重設→升回的繞過走不通）", async () => {
+    const res = await as(T.hr).patch(`/employees/${HR2}`).send({ role: "employee" })
+    expect(res.status, JSON.stringify(res.body)).toBe(403)
+    expect(res.body.error).toBe("not_boss")
+    expect(res.body.message).toContain("角色")
+    expect(rowOf(HR2).role).toBe("hr_admin")
+    expect(employeeWrites()).toHaveLength(0)
+    expect((await as(T.hr).post(`/employees/${HR2}/reset-password`).send({})).status).toBe(403)
+  })
+
+  it("HR 降 platform_admin、降老闆（角色是 hr_admin 的那位）、降解鎖人 → 全部 403", async () => {
+    seed({ approval: { fallbackApproverEmpId: BOSS }, payroll: { periodUnlockEmpIds: [DESIGNEE] } })
+    fake.db.employees = fake.db.employees.map((r) => (r.id === DESIGNEE ? { ...r, role: "manager" } : r))
+    for (const [target, role] of [[PA, "hr_admin"], [BOSS, "employee"], [DESIGNEE, "employee"]] as const) {
+      const res = await as(T.hr).patch(`/employees/${target}`).send({ role })
+      expect(res.status, `${target}→${role}`).toBe(403)
+      expect(res.body.error).toBe("not_boss")
+    }
+    expect(rowOf(PA).role).toBe("platform_admin")
+    expect(rowOf(BOSS).role).toBe("hr_admin")
+  })
+
+  it("角色沒變就不受影響：HR 編輯另一位 HR 的姓名並帶原 role → 200（員工管理頁每次儲存都帶 role）", async () => {
+    const res = await as(T.hr).patch(`/employees/${HR2}`).send({ role: "hr_admin", name: "改名" })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(rowOf(HR2)).toMatchObject({ role: "hr_admin", name: "改名" })
+  })
+
+  it("老闆與 platform_admin 可以降級；HR 可以降自己；HR 把一般員工升成 hr_admin 照舊", async () => {
+    expect((await as(T.boss).patch(`/employees/${HR2}`).send({ role: "employee" })).status).toBe(200)
+    expect((await as(T.pa).patch(`/employees/${HR}`).send({ role: "manager" })).status).toBe(200)
+    expect((await as(T.pa).patch(`/employees/${HR}`).send({ role: "hr_admin" })).status).toBe(200)
+    expect((await as(T.hr).patch(`/employees/${HR}`).send({ role: "employee" })).status).toBe(200) // 本人
+    expect((await as(T.boss).patch(`/employees/${EMP}`).send({ role: "hr_admin" })).status).toBe(200)
+  })
+
+  it("角色字串寫入前統一成標準寫法：帶 Platform_Admin 存給原本就是 platform_admin 的人，不會讓他默默失去權限", async () => {
+    const res = await as(T.hr).patch(`/employees/${PA}`).send({ role: " Platform_Admin ", name: "仍是平台管理員" })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(rowOf(PA).role).toBe("platform_admin")
+    const asHr = await as(T.hr).patch(`/employees/${EMP}`).send({ role: "HR_ADMIN" })
+    expect(asHr.status).toBe(200)
+    expect(rowOf(EMP).role).toBe("hr_admin")
+    const promote = await as(T.hr).patch(`/employees/${EMP}`).send({ role: "PLATFORM_ADMIN" })
+    expect(promote.status).toBe(403)
+    expect(promote.body.error).toBe("platform_admin_required")
+  })
+})
+
+describe("② POST /employees — 角色標準寫法與平台操作員白名單 email", () => {
+  it("建立時角色統一成標準寫法（HR 建 Hr_Admin → 存成 hr_admin）", async () => {
+    const res = await as(T.hr).post("/employees").send({ email: "canon@example.com", name: "新同仁", password: "Passw0rd-xyz", role: "Hr_Admin" })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(employeeWrites().some((w) => (w.payload as Row).role === "hr_admin")).toBe(true)
+  })
+
+  it("PLATFORM_ADMIN_EMAILS 白名單的 email 不能拿來建員工帳號（409 email_in_other_tenant），沒建 auth 帳號、沒寫 employees", async () => {
+    const saved = process.env.PLATFORM_ADMIN_EMAILS
+    process.env.PLATFORM_ADMIN_EMAILS = "operator@example.com"
+    try {
+      const res = await as(T.hr).post("/employees").send({ email: "Operator@Example.com", name: "冒牌", password: "Passw0rd-xyz" })
+      expect(res.status).toBe(409)
+      expect(res.body.error).toBe("email_in_other_tenant")
+      expect(adminAuth.createUser).not.toHaveBeenCalled()
+      expect(employeeWrites()).toHaveLength(0)
+    } finally {
+      if (saved === undefined) delete process.env.PLATFORM_ADMIN_EMAILS
+      else process.env.PLATFORM_ADMIN_EMAILS = saved
+    }
   })
 })
