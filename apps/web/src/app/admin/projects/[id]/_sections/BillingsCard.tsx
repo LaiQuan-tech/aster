@@ -14,6 +14,9 @@ import {
   BILLING_KIND_LABELS,
   computeReceivableState,
   localTodayKey,
+  RECEIVED_AMOUNT_HINT,
+  RECEIVED_AMOUNT_LABEL,
+  receivedAmountPlaceholder,
   RECEIVABLE_STATE_LABELS,
   RECEIVABLE_STATE_BADGE_CLASS,
   type BillingScheduleExt,
@@ -404,14 +407,27 @@ export function BillingsCard({
                           {/* 入帳 */}
                           {saved.receivedOn ? (
                             <button type="button" className="text-green-700 hover:underline" onClick={() => cancelReceive(saved.id)}>
-                              已入帳 {fmtMoney(saved.receivedAmount)}／{saved.receivedOn}（點取消）
+                              已入帳 {fmtMoney(saved.receivedAmount)}（未稅）／{saved.receivedOn}（點取消）
                             </button>
                           ) : receiveFormId === saved.id ? (
                             <span className="flex flex-wrap items-center gap-1.5">
                               <input className="rounded border border-gray-300 px-1.5 py-0.5" type="date" value={receivedOn} onChange={(e) => setReceivedOn(e.target.value)} />
-                              <input className="w-24 rounded border border-gray-300 px-1.5 py-0.5 text-right" type="number" placeholder={fmtMoney(saved.effectiveAmount)} value={receivedAmount} onChange={(e) => setReceivedAmount(e.target.value)} />
+                              <label className="flex items-center gap-1 text-gray-600">
+                                <span>{RECEIVED_AMOUNT_LABEL}</span>
+                                <input
+                                  className="w-28 rounded border border-gray-300 px-1.5 py-0.5 text-right"
+                                  type="number"
+                                  min="0"
+                                  aria-label={RECEIVED_AMOUNT_LABEL}
+                                  title={RECEIVED_AMOUNT_HINT}
+                                  placeholder={receivedAmountPlaceholder(saved.effectiveAmount)}
+                                  value={receivedAmount}
+                                  onChange={(e) => setReceivedAmount(e.target.value)}
+                                />
+                              </label>
                               <button type="button" className="rounded bg-gray-700 px-2 py-0.5 text-white" onClick={() => submitReceive(saved.id)}>確認</button>
                               <button type="button" className="text-gray-400" onClick={() => setReceiveFormId(null)}>取消</button>
+                              <span className="basis-full text-[11px] text-amber-700">{RECEIVED_AMOUNT_HINT}</span>
                             </span>
                           ) : (
                             <button

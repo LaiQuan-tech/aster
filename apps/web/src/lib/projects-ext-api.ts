@@ -937,6 +937,19 @@ export function localTodayKey(): string {
 }
 
 /**
+ * 入帳金額一律填**未稅**（2026-10-11）：專案收入、年度總表、集團總覽都以未稅計；有人把銀行入帳的含稅金額填進來，
+ * 收入就會多算 5%（集團總覽的資料品質提醒會抓「實收大於應收（未稅）」）。所以輸入框的標籤、placeholder 與說明
+ * 都明寫「未稅」。留空＝後端依該期應收（未稅）金額入帳（POST /billings/:id/receive）。
+ */
+export const RECEIVED_AMOUNT_LABEL = "入帳金額（未稅）"
+export const RECEIVED_AMOUNT_HINT = "請填未稅金額，不要填含稅的銀行入帳金額；留空＝依應收未稅金額入帳。"
+
+/** 入帳金額輸入框的 placeholder：「未稅 12,000」（帶該期應收未稅金額）；金額未知只寫「未稅金額」。 */
+export function receivedAmountPlaceholder(effectiveAmount: number | null | undefined): string {
+  return effectiveAmount == null ? "未稅金額" : `未稅 ${effectiveAmount.toLocaleString()}`
+}
+
+/**
  * 「已收足」——前端版，規則同後端 `services/project-money.isFullyReceived`：
  * `/billings/:id/receive` 支援部分入帳，有入帳日不等於收完。實收 ≥ 有效金額才算收足；
  * 有效金額未知（沒合約也沒報價單、算不出該期金額）時有入帳日就當收足——本來就無從標欠多少。
