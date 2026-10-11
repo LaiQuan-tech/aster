@@ -166,9 +166,18 @@ HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼�
      對帳：`gross = … + adjustmentEarnings`、`totalDeductions = … + adjustmentDeductions`、
      `net = gross − totalDeductions + expenses + adjustmentNonTaxable`、`Σ lines = net`；`breakdown.adjustments` 逐筆內嵌（含 id）。
      **薪資單每一筆都列出**（標題帶「(更正 YYYY-MM)」）：後台列印版與逐項明細、員工端「我的薪資單 › 看明細」、Email（html 與純文字，
-     `apps/api/src/services/payslip-html.ts`）；沒有加減項的薪資單版面不變。出勤月表的薪資試算同樣帶入（試算＝薪資單）。
-     **草稿不會自己跟上**：新增／修改／刪除後要**重新執行薪資作業**才會反映；回應的 `payslip.stale: true` 與畫面「草稿未更新」就是提醒，
-     而且草稿過期時定稿會被擋（409 `adjustments_stale`），不會有「補發漏進薪資單卻已定稿」。
+     `apps/api/src/services/payslip-html.ts`）；沒有加減項的薪資單版面不變。工資清冊（`/reports/payroll`，JSON 與 CSV）多四欄：
+     補發（計入應發）、扣回（拆成「追回課稅所得」與「追回非課稅」兩欄——年度申報才知道全年應發合計裡有多少是已經收回的）、
+     不課稅補發（只加實發）。出勤月表**未核准**時的薪資試算同樣帶入加減項（試算＝薪資單）；已核准的月表讀核准當下凍結的快照，
+     核准之後才加的加減項不會回頭改它（和報銷、定額補貼一樣），月表也沒有單獨一欄列加減項，合計已含在應發／應扣／實發。
+     **草稿不會自己跟上**：新增／修改／刪除後要**重新執行薪資作業**才會反映；回應的 `payslip.stale: true`、列表的
+     `staleEmployees`（含加減項已全刪光、草稿卻還內嵌舊的那種）與畫面「草稿未更新」就是提醒，而且草稿過期時定稿會被擋
+     （409 `adjustments_stale`）。與定稿同時發生也有保護：加減項端點寫入後再查一次是否已定稿（是就還原並回 409），定稿更新後
+     再比對一次加減項（不一致就退回草稿），兩邊至少一邊會發現。
+     **範圍外員工會被提醒**：薪資執行以薪資結構為準、月結檢查只看在職員工，所以加在「沒有薪資結構」或「已離職／停用」的人身上的
+     加減項會靜默不發或月結檢查看不到——新增時回 `warnings`、列表帶 `employeeNotes`、畫面標紅。實發為負數時
+     `POST /payroll/run` 的 `warnings` 帶 `negative_net`。重新開放某月前，對話框會列出「已經在後續月份更正過這個月」的加減項
+     （`GET /payroll-adjustments?relatedPeriod=`），重算可能和它們重複入帳。
    - 舊的 `POST /attendance-sheets/close-period`／`reopen-period`（含 `force`）已移除，`GET /attendance-sheets/period-closes` 仍在。
 3. **月表快照歷史** — 每次 `approveSheet` 都往 `attendance_sheet_snapshots` 追加一列（seq 遞增、不可刪），
    return／reopen 只清 `attendance_sheets.snapshot`、歷史不動；`GET /attendance-sheets/:id/snapshots`（HR）列出。

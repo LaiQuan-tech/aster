@@ -25,7 +25,8 @@
  *   • 課稅的補發(金額 > 0、taxable) → 進 gross,併入扣繳基礎(屬薪資所得)
  *   • 不課稅的補發(金額 > 0、非 taxable) → 不進 gross,只加在實發(稅務性質同代墊支出)
  *   • 扣回(金額 < 0,不論 taxable) → 進 totalDeductions,只減實發;**不減 gross**——已扣繳的稅不因這筆扣回而退,
- *     保守(不少扣),年度結算再調整
+ *     保守(不少扣),年度結算再調整。taxable 旗標對扣回的意義是「追回的是已課稅所得」,不改變本期計算,只用來讓
+ *     工資清冊分欄列出(adjustmentDeductionsTaxable),年度申報時才知道全年應發合計裡有多少是已收回的
  *   • 保險以投保薪資為基數,不受影響
  * 每一筆都在 lines 與 adjustments 逐項列出,標題帶「(更正 YYYY-MM)」,薪資單任何一版(後台、員工、Email)都看得到。
  */
@@ -270,6 +271,7 @@ export function computePayslip(
   const adjustmentLines: PayslipAdjustmentLine[] = [];
   let adjustmentEarnings = 0;
   let adjustmentDeductions = 0;
+  let adjustmentDeductionsTaxable = 0;
   let adjustmentNonTaxable = 0;
   for (const adj of adjustments) {
     const amount = round(Number(adj.amount));
@@ -285,11 +287,16 @@ export function computePayslip(
       treatment,
     });
     if (treatment === "earning") adjustmentEarnings += amount;
-    else if (treatment === "deduction") adjustmentDeductions += -amount;
-    else adjustmentNonTaxable += amount;
+    else if (treatment === "deduction") {
+      adjustmentDeductions += -amount;
+      // 追回的是已課稅所得（taxable）還是不課稅的給付：不影響本期怎麼算（一律只減實發、不減 gross），
+      // 但工資清冊要分欄列出，年度申報才有資料可以調整。
+      if (taxable) adjustmentDeductionsTaxable += -amount;
+    } else adjustmentNonTaxable += amount;
   }
   adjustmentEarnings = round(adjustmentEarnings);
   adjustmentDeductions = round(adjustmentDeductions);
+  adjustmentDeductionsTaxable = round(adjustmentDeductionsTaxable);
   adjustmentNonTaxable = round(adjustmentNonTaxable);
   const adjustmentLine = (a: PayslipAdjustmentLine): PayslipLine => ({
     label: adjustmentDisplayLabel(a.label, a.relatedPeriod),
@@ -420,7 +427,7 @@ export function computePayslip(
     lines,
     // 只有本期真的有加減項才帶這四個欄位(沒有加減項的薪資單輸出與以前完全相同)。
     ...(adjustmentLines.length > 0
-      ? { adjustmentEarnings, adjustmentDeductions, adjustmentNonTaxable, adjustments: adjustmentLines }
+      ? { adjustmentEarnings, adjustmentDeductions, adjustmentDeductionsTaxable, adjustmentNonTaxable, adjustments: adjustmentLines }
       : {}),
   };
 }

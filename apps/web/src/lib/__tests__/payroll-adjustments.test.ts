@@ -15,6 +15,7 @@ import {
   parseAmountInput,
   payslipStateNote,
   previousPeriod,
+  relatedAdjustmentsNote,
   signedMoney,
   summarizeAdjustments,
   type AdjustmentDraft,
@@ -213,5 +214,23 @@ describe("錯誤訊息與提醒", () => {
     expect(payslipStateNote({ status: "draft", stale: false }, "2026-10")).toBeNull();
     expect(payslipStateNote({ status: null, stale: false }, "2026-10")).toBeNull();
     expect(payslipStateNote(null, "2026-10")).toBeNull();
+  });
+});
+
+describe("重新開放某月之前：後續月份已經更正過它", () => {
+  it("沒有就是 null；有就說明可能重複入帳，逐筆列出（最多 5 筆，其餘寫還有 N 筆）", () => {
+    expect(relatedAdjustmentsNote("2026-09", [])).toBeNull();
+    expect(relatedAdjustmentsNote("2026-09", null)).toBeNull();
+    const note = relatedAdjustmentsNote("2026-09", [
+      { period: "2026-10", label: "補發加班費", amount: 3000 },
+      { period: "2026-10", label: "扣回誤發", amount: -500 },
+    ]);
+    expect(note?.title).toContain("2026-09 已經有 2 筆前期更正");
+    expect(note?.title).toContain("重複入帳");
+    expect(note?.lines).toEqual(["2026-10 薪資：補發加班費（+3,000）", "2026-10 薪資：扣回誤發（-500）"]);
+    const many = Array.from({ length: 7 }, (_, i) => ({ period: "2026-10", label: `第 ${i + 1} 筆`, amount: 1 }));
+    const long = relatedAdjustmentsNote("2026-09", many);
+    expect(long?.lines).toHaveLength(6);
+    expect(long?.lines[5]).toBe("還有 2 筆");
   });
 });

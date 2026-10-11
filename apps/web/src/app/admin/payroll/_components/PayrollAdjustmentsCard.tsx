@@ -13,7 +13,7 @@
  * 「前期更正」入口連結（lib/payroll-periods-api.ts 的 PRIOR_PERIOD_CORRECTION_HREF）指到這張卡的 #payroll-adjustments。
  * 純函式（表單驗證、歸屬、合計、錯誤訊息）與 API 呼叫在 lib/payroll-adjustments-api.ts（有單元測試）。
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Card, InlineError, Input, Pill, Select, Skeleton, useToast } from "@/components/admin-ui";
 import type { Employee } from "@/lib/admin-api";
 import {
@@ -60,6 +60,10 @@ export function PayrollAdjustmentsCard({ employees, refreshKey = 0 }: Props) {
   const [period, setPeriod] = useState(currentMonth);
   const [rows, setRows] = useState<PayrollAdjustmentWithState[]>([]);
   const [periodState, setPeriodState] = useState<PeriodLockState | undefined>(undefined);
+  /** API 回的：草稿薪資單沒跟上加減項的員工 id（含加減項已全刪光、草稿卻還內嵌舊的）。 */
+  const [staleIds, setStaleIds] = useState<string[]>([]);
+  /** API 回的：範圍外員工的提醒（沒有薪資結構、已離職或停用）。 */
+  const [notes, setNotes] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [keyword, setKeyword] = useState("");
@@ -72,17 +76,29 @@ export function PayrollAdjustmentsCard({ employees, refreshKey = 0 }: Props) {
   /** 剛做完新增／修改／刪除，後端回的該員工薪資單狀態（草稿是否過期、是否已定稿）。 */
   const [lastState, setLastState] = useState<{ empId: string; state: PayslipAdjustState } | null>(null);
 
+  // 請求序號：快速換月份或連續操作時，只採用「最後一次發出」的回應，慢回來的舊月份資料不會蓋掉新月份。
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
       const res = await listPayrollAdjustments({ period });
+      if (seq !== loadSeq.current) return;
       setRows(res.adjustments);
       setPeriodState(res.periodState);
+      setStaleIds(res.staleEmployees ?? []);
+      setNotes(res.employeeNotes ?? {});
       setLoadError(null);
     } catch (err) {
+      if (seq !== loadSeq.current) return;
+      // 載入失敗不能留著舊資料（可能是別的月份的）：清空，錯誤訊息另外顯示。
+      setRows([]);
+      setPeriodState(undefined);
+      setStaleIds([]);
+      setNotes({});
       setLoadError(adjustmentErrorMessage(err, "載入失敗"));
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [period]);
 
@@ -90,13 +106,22 @@ export function PayrollAdjustmentsCard({ employees, refreshKey = 0 }: Props) {
     void load();
   }, [load, refreshKey]);
 
-  // 換月份：收起編輯區、清掉表單與提醒。
+  // 頁面重新執行了薪資作業（refreshKey 變了）：剛才操作後記下的狀態作廢，改以重新讀回來的為準。
+  useEffect(() => {
+    setLastState(null);
+  }, [refreshKey]);
+
+  // 換月份：收起編輯區、清掉表單、提醒，以及上一個月份的資料。
   useEffect(() => {
     setOpenEmpId(null);
     setEditingId(null);
     setDraft(emptyAdjustmentDraft(period));
     setFormError(null);
     setLastState(null);
+    setRows([]);
+    setPeriodState(undefined);
+    setStaleIds([]);
+    setNotes({});
   }, [period]);
 
   const byEmployee = useMemo(() => {
@@ -120,18 +145,19 @@ export function PayrollAdjustmentsCard({ employees, refreshKey = 0 }: Props) {
       ? employees.filter((e) => `${e.name} ${e.emp_no ?? ""}`.toLowerCase().includes(kw))
       : showAll
         ? employees
-        : employees.filter((e) => byEmployee.has(e.id));
+        : employees.filter((e) => byEmployee.has(e.id) || staleIds.includes(e.id));
     return [...list].sort((a, b) => {
-      const diff = Number(byEmployee.has(b.id)) - Number(byEmployee.has(a.id));
+      const diff = Number(byEmployee.has(b.id) || staleIds.includes(b.id)) - Number(byEmployee.has(a.id) || staleIds.includes(a.id));
       return diff !== 0 ? diff : a.name.localeCompare(b.name, "zh-TW");
     });
-  }, [employees, byEmployee, keyword, showAll]);
+  }, [employees, byEmployee, keyword, showAll, staleIds]);
 
+  // 草稿沒跟上加減項的員工：以 API 回的為準（包含加減項已全刪光、不在列表裡的那種），再補上列表各列自己帶的。
   const staleEmployees = useMemo(() => {
-    const ids = new Set<string>();
+    const ids = new Set<string>(staleIds);
     for (const row of rows) if (row.payslip.stale) ids.add(row.employeeId);
     return ids;
-  }, [rows]);
+  }, [rows, staleIds]);
 
   const periodClosed = periodState === "closed";
 
@@ -178,6 +204,9 @@ export function PayrollAdjustmentsCard({ employees, refreshKey = 0 }: Props) {
       if (!res) return;
       setLastState({ empId, state: res.payslip });
       toast.show(editing ? "已更新加減項" : "已新增加減項", "success");
+      // 範圍外員工（沒有薪資結構、已離職或停用）：新增成功但要講清楚這筆不會自動發放／月結檢查看不到。
+      const warnings = (res as { warnings?: string[] }).warnings;
+      if (warnings && warnings.length > 0) toast.show(warnings.join("；"), "info");
       setEditingId(null);
       setDraft(emptyAdjustmentDraft(period));
       await load();
@@ -215,9 +244,9 @@ export function PayrollAdjustmentsCard({ employees, refreshKey = 0 }: Props) {
         </p>
 
         <div className="mb-3 flex flex-wrap items-end gap-3">
-          <label className="block text-xs font-medium text-gray-500">
+          <label className="block w-44 text-xs font-medium text-gray-500">
             放進哪一期的薪資單
-            <Input type="month" value={period} onChange={(e) => e.target.value && setPeriod(e.target.value)} className="mt-1 !w-44" />
+            <Input type="month" value={period} onChange={(e) => e.target.value && setPeriod(e.target.value)} className="mt-1" />
           </label>
           <label className="block min-w-[12rem] flex-1 text-xs font-medium text-gray-500">
             搜尋員工（姓名或工號）
@@ -257,8 +286,11 @@ export function PayrollAdjustmentsCard({ employees, refreshKey = 0 }: Props) {
               const totals = summarizeAdjustments(list);
               const open = openEmpId === emp.id;
               const rowState = list[0]?.payslip ?? null;
-              const state = lastState?.empId === emp.id ? lastState.state : rowState;
-              const note = payslipStateNote(state, period);
+              // 列表重新讀回來的狀態優先；沒有任何加減項（例如剛刪光）才用剛操作後記下的。
+              const state = rowState ?? (lastState?.empId === emp.id ? lastState.state : null);
+              const staleNow = staleEmployees.has(emp.id);
+              const note = payslipStateNote(state ? { ...state, stale: state.stale || staleNow } : staleNow ? { status: "draft", stale: true } : null, period);
+              const empNotes = notes[emp.id] ?? [];
               const locked = periodClosed || state?.status === "finalized";
               return (
                 <li key={emp.id} data-testid={`adjustments-emp-${emp.id}`}>
@@ -280,11 +312,17 @@ export function PayrollAdjustmentsCard({ employees, refreshKey = 0 }: Props) {
                       </span>
                     )}
                     {state?.status === "finalized" && <Pill tone="green">薪資單已定稿</Pill>}
-                    {state?.stale && <Pill tone="amber">草稿未更新</Pill>}
+                    {(state?.stale || staleNow) && state?.status !== "finalized" && <Pill tone="amber">草稿未更新</Pill>}
+                    {empNotes.length > 0 && <Pill tone="red">需注意</Pill>}
                   </button>
 
                   {open && (
                     <div id={`adjustments-panel-${emp.id}`} className="space-y-3 border-t border-gray-100 bg-gray-50/50 px-3 py-3">
+                      {empNotes.map((text) => (
+                        <p key={text} role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700" data-testid="adjustment-employee-note">
+                          {text}
+                        </p>
+                      ))}
                       {note && (
                         <p
                           role={note.tone === "warn" ? "status" : "note"}
@@ -414,14 +452,14 @@ export function PayrollAdjustmentsCard({ employees, refreshKey = 0 }: Props) {
                               <input
                                 type="checkbox"
                                 checked={draft.taxable}
-                                disabled={draft.kind === "deduct"}
                                 onChange={(e) => setDraft({ ...draft, taxable: e.target.checked })}
                               />
-                              屬薪資所得（併入應發與扣繳）
+                              {draft.kind === "deduct" ? "追回的是已課稅的所得" : "屬薪資所得（併入應發與扣繳）"}
                             </label>
                           </div>
                           <p className="text-xs text-gray-400">
-                            補發勾「屬薪資所得」→ 計入應發並併入扣繳基礎；不勾 → 只加在實發。扣回一律只減實發，不減應發（已扣繳的稅不退，年度結算再調整）。
+                            補發勾「屬薪資所得」→ 計入應發並併入扣繳基礎；不勾 → 只加在實發。扣回一律只減實發、不減應發（已扣繳的稅不退，年度結算再調整）；
+                            勾「追回的是已課稅的所得」只影響工資清冊的分欄——年度申報時才知道全年應發合計裡有多少是已經收回的。
                           </p>
                           {formError && <InlineError>{formError}</InlineError>}
                           <div className="flex flex-wrap justify-end gap-2">

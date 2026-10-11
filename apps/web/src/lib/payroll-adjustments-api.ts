@@ -68,15 +68,29 @@ export interface BreakdownAdjustmentLine {
 
 /* ── API ───────────────────────────────────────────────────────────── */
 
-export function listPayrollAdjustments(query: { period?: string; employeeId?: string }) {
+export interface PayrollAdjustmentList {
+  adjustments: PayrollAdjustmentWithState[];
+  /** 帶 period 時才有：該月的發薪鎖定狀態。 */
+  periodState?: PeriodLockState;
+  /** 只帶 period 時才有：草稿薪資單沒跟上加減項的員工 id（含加減項已全刪光、草稿卻還內嵌舊的那種）。 */
+  staleEmployees?: string[];
+  /** 範圍外員工的提醒（員工 id → 話）：沒有薪資結構、已離職或停用。 */
+  employeeNotes?: Record<string, string[]>;
+}
+
+/**
+ * 依月份、依人或依「更正的是哪個月」（`relatedPeriod`，重新開放某月前看後續月份已經補發／扣回過什麼）查；至少帶一個。
+ */
+export function listPayrollAdjustments(query: { period?: string; employeeId?: string; relatedPeriod?: string }) {
   const qs = new URLSearchParams();
   if (query.period) qs.set("period", query.period);
   if (query.employeeId) qs.set("employeeId", query.employeeId);
-  return apiFetch<{ adjustments: PayrollAdjustmentWithState[]; periodState?: PeriodLockState }>(`/payroll-adjustments?${qs.toString()}`);
+  if (query.relatedPeriod) qs.set("relatedPeriod", query.relatedPeriod);
+  return apiFetch<PayrollAdjustmentList>(`/payroll-adjustments?${qs.toString()}`);
 }
 
 export function createPayrollAdjustment(body: PayrollAdjustmentBody) {
-  return apiFetch<{ adjustment: PayrollAdjustment; payslip: PayslipAdjustState }>("/payroll-adjustments", {
+  return apiFetch<{ adjustment: PayrollAdjustment; payslip: PayslipAdjustState; warnings?: string[] }>("/payroll-adjustments", {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -322,6 +336,24 @@ export function buildPatch(draft: AdjustmentDraft, period: string): DraftResult<
       relatedPeriod: draft.relatedPeriod.trim() || null,
       note: draft.note.trim() || null,
     },
+  };
+}
+
+/**
+ * 重新開放某月之前的提醒：這個月已經有「更正這個月」的加減項放在後續月份的薪資裡（補發或扣回）。
+ * 重新開放並重算這個月、又把差額補進去的話，會和後續月份那些重複入帳。沒有就回 null。
+ */
+export function relatedAdjustmentsNote(
+  period: string,
+  list: ReadonlyArray<Pick<PayrollAdjustment, "period" | "label" | "amount">> | null | undefined,
+  show = 5,
+): { title: string; lines: string[] } | null {
+  if (!list || list.length === 0) return null;
+  const lines = list.slice(0, show).map((a) => `${a.period} 薪資：${a.label}（${signedMoney(a.amount)}）`);
+  if (list.length > show) lines.push(`還有 ${list.length - show} 筆`);
+  return {
+    title: `${period} 已經有 ${list.length} 筆前期更正放在後續月份的薪資裡：重新開放並重算 ${period}，可能和這些補發或扣回重複入帳，請先確認`,
+    lines,
   };
 }
 

@@ -56,7 +56,7 @@ beforeEach(() => {
       attendance_bonus: 0,
       gross: 43000,
       status: "draft",
-      breakdown: { allowances: 0, totalDeductions: 2000, expenses: 0, net: 41450, adjustmentEarnings: 3000, adjustmentDeductions: 2000, adjustmentNonTaxable: 450 },
+      breakdown: { allowances: 0, totalDeductions: 2000, expenses: 0, net: 41450, adjustmentEarnings: 3000, adjustmentDeductions: 2000, adjustmentDeductionsTaxable: 1500, adjustmentNonTaxable: 450 },
     },
     {
       id: "p2",
@@ -83,8 +83,16 @@ describe("GET /reports/payroll — 加減項欄位", () => {
     const rows = res.body.rows as Array<Record<string, unknown>>
     const e1 = rows.find((r) => r.employeeId === E1)
     const e2 = rows.find((r) => r.employeeId === E2)
-    expect(e1).toMatchObject({ adjustmentEarnings: 3000, adjustmentDeductions: 2000, adjustmentNonTaxable: 450, gross: 43000, net: 41450 })
-    expect(e2).toMatchObject({ adjustmentEarnings: 0, adjustmentDeductions: 0, adjustmentNonTaxable: 0, gross: 50000, net: 50000 })
+    expect(e1).toMatchObject({
+      adjustmentEarnings: 3000,
+      adjustmentDeductions: 2000,
+      adjustmentDeductionsTaxable: 1500, // 追回的是已課稅所得
+      adjustmentDeductionsNonTaxable: 500, // 追回的是不課稅的給付
+      adjustmentNonTaxable: 450,
+      gross: 43000,
+      net: 41450,
+    })
+    expect(e2).toMatchObject({ adjustmentEarnings: 0, adjustmentDeductions: 0, adjustmentDeductionsTaxable: 0, adjustmentDeductionsNonTaxable: 0, adjustmentNonTaxable: 0, gross: 50000, net: 50000 })
     expect(res.body.total).toMatchObject({ gross: 93000, totalDeductions: 2000, net: 91450 })
   })
 
@@ -96,12 +104,16 @@ describe("GET /reports/payroll — 加減項欄位", () => {
     const idx = (label: string) => header.indexOf(label)
     expect(idx("加減項補發(前期更正)")).toBeGreaterThan(-1)
     expect(idx("加減項補發(前期更正)")).toBeLessThan(idx("應發合計"))
-    expect(idx("加減項扣回(前期更正)")).toBeLessThan(idx("應扣合計"))
+    // 扣回拆成兩欄（追回課稅所得／追回非課稅），年度申報才知道全年應發合計裡有多少是已收回的。
+    expect(idx("加減項扣回-追回課稅所得(前期更正)")).toBeGreaterThan(-1)
+    expect(idx("加減項扣回-追回課稅所得(前期更正)")).toBeLessThan(idx("應扣合計"))
+    expect(idx("加減項扣回-追回非課稅(前期更正)")).toBeLessThan(idx("應扣合計"))
     expect(idx("加減項不課稅補發(前期更正)")).toBeLessThan(idx("實發金額"))
     const total = lines[lines.length - 1].split(",")
     expect(total[1]).toBe("合計")
     expect(total[idx("加減項補發(前期更正)")]).toBe("3000")
-    expect(total[idx("加減項扣回(前期更正)")]).toBe("2000")
+    expect(total[idx("加減項扣回-追回課稅所得(前期更正)")]).toBe("1500")
+    expect(total[idx("加減項扣回-追回非課稅(前期更正)")]).toBe("500")
     expect(total[idx("加減項不課稅補發(前期更正)")]).toBe("450")
   })
 })

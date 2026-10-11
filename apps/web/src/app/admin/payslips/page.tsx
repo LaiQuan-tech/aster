@@ -133,7 +133,8 @@ export default function PayslipsPage() {
       await finalizePayslip(id);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "定案失敗");
+      // 例：409 adjustments_stale（加減項有異動、草稿沒重新執行）——API 帶中文說明，顯示說明而不是 `[409] adjustments_stale`。
+      setError(apiErrorMessage(err, "定案失敗"));
     } finally {
       setBusy(false);
     }

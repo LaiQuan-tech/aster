@@ -325,3 +325,44 @@ describe("試算（出勤月表）與薪資執行用同一組加減項", () => {
     expect(preview?.adjustments?.map((a) => a.id)).toEqual(b.adjustments.map((a: { id: string }) => a.id))
   })
 })
+
+describe("定稿與新增加減項同時發生：定稿更新之後再比對一次，不一致就退回草稿", () => {
+  it("定稿更新的當下剛好有人新增加減項 → 409 adjustments_stale，薪資單退回草稿（不會把沒算進去的補發定稿）", async () => {
+    await baseline()
+    let fired = false
+    fake.checks.payslips = (row) => {
+      // 定稿的 update 套用當下（status 變 finalized）模擬另一個請求插入一筆新的加減項。
+      if (!fired && row.status === "finalized") {
+        fired = true
+        fake.db.payroll_adjustments = [
+          ...(fake.db.payroll_adjustments ?? []),
+          { id: "d0000000-0000-4000-8000-0000000000ab", tenant_id: TENANT_ID, employee_id: EMP, period: OCT, label: "插隊的", amount: "700.00", taxable: true, related_period: null, created_at: "2026-10-11T00:00:00Z", deleted_at: null },
+        ]
+      }
+      return null
+    }
+    const res = await as(T.hr).post(`/payslips/${slipOf(EMP).id as string}/finalize`)
+    expect(res.status, JSON.stringify(res.body)).toBe(409)
+    expect(res.body.error).toBe("adjustments_stale")
+    expect(slipOf(EMP).status).toBe("draft")
+    // 重新執行就會帶進去，之後可以定稿。
+    fake.checks.payslips = undefined as never
+    await runPayroll(OCT, EMP)
+    expect(bd(EMP).adjustments).toHaveLength(1)
+    expect((await as(T.hr).post(`/payslips/${slipOf(EMP).id as string}/finalize`)).status).toBe(200)
+  })
+})
+
+describe("POST /payroll/run — 實發為負數時提醒", () => {
+  it("扣回比當月薪資還大 → 薪資單照算，但 warnings 帶 negative_net（員工、金額）；正常的人沒有這個提醒", async () => {
+    await addAdj({ label: "追回溢領", amount: -500_000, relatedPeriod: SEP })
+    const res = await runPayroll()
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    const negative = (res.body.warnings as Array<{ employeeId: string; code: string; message: string }>).filter((w) => w.code === "negative_net")
+    expect(negative).toHaveLength(1)
+    expect(negative[0].employeeId).toBe(EMP)
+    expect(negative[0].message).toContain("實發為負數")
+    expect(bd(EMP).net).toBeLessThan(0)
+    expect(bd(EMP2).net).toBeGreaterThan(0)
+  })
+})

@@ -45,6 +45,7 @@ import {
   type PeriodChecklist,
   type PeriodStatus,
 } from "@/lib/payroll-periods-api";
+import { listPayrollAdjustments, relatedAdjustmentsNote, type PayrollAdjustmentWithState } from "@/lib/payroll-adjustments-api";
 
 /** 狀態文字的顏色：開放中灰、已結算綠、已重新開放琥珀（文字本身已寫明狀態，顏色只是輔助）。 */
 const STATUS_TEXT_CLASS: Record<PeriodStatus, string> = {
@@ -187,6 +188,27 @@ export function PeriodLockCard() {
     setReason("");
     setReopenError(null);
   }
+
+  // 重新開放對話框打開時，查一下這個月是不是已經在後續月份被「前期更正」過（補發／扣回）：重算它可能重複入帳，要提醒。
+  // 查不到（沒權限、網路）就當沒有——提醒是輔助，不擋重新開放。
+  const [relatedAdjustments, setRelatedAdjustments] = useState<PayrollAdjustmentWithState[] | null>(null);
+  useEffect(() => {
+    if (!reopenTarget) {
+      setRelatedAdjustments(null);
+      return;
+    }
+    let active = true;
+    listPayrollAdjustments({ relatedPeriod: reopenTarget })
+      .then((res) => {
+        if (active) setRelatedAdjustments(res.adjustments);
+      })
+      .catch(() => {
+        if (active) setRelatedAdjustments(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [reopenTarget]);
 
   function dismissReopen() {
     if (reopening) return;
@@ -420,6 +442,21 @@ export function PeriodLockCard() {
               </Link>
             )}
           </div>
+
+          {reopenTarget && relatedAdjustmentsNote(reopenTarget, relatedAdjustments) && (
+            <div
+              role="note"
+              className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-900"
+              data-testid="reopen-related-adjustments"
+            >
+              <p className="font-medium">{relatedAdjustmentsNote(reopenTarget, relatedAdjustments)?.title}</p>
+              <ul className="mt-1 list-disc pl-4">
+                {relatedAdjustmentsNote(reopenTarget, relatedAdjustments)?.lines.map((line, i) => (
+                  <li key={i}>{line}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           <p className="text-xs leading-relaxed text-gray-500">{REOPEN_EFFECT_NOTE}</p>
 

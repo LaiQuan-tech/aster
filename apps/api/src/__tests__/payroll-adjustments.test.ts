@@ -105,6 +105,8 @@ beforeEach(() => {
     employee(EMP2, T.emp2, "employee", "員工乙"),
     employee(GHOST_OTHER_TENANT, "u-other", "employee", "別家公司的人", OTHER_TENANT_ID),
   ]
+  // 員工甲、乙有薪資結構（沒有的話新增時會附『不會發放』的提醒，見下面「範圍外員工」）。
+  fake.db.salary_structures = [EMP, EMP2].map((employee_id, i) => ({ id: `sal-${i}`, tenant_id: TENANT_ID, employee_id }))
 })
 
 describe("權限：只有 HR（hr_admin／platform_admin）", () => {
@@ -405,5 +407,116 @@ describe("DELETE /payroll-adjustments/:id — 軟刪除", () => {
     fake.db.payslips = [{ id: "p1", tenant_id: TENANT_ID, employee_id: EMP, period: OCT, status: "draft", breakdown: { adjustments: [{ id: row.id, label: "補發", amount: 1000, taxable: true, relatedPeriod: null }] } }]
     const res = await as(T.hr).delete(`/payroll-adjustments/${row.id}`)
     expect(res.body.payslip).toEqual({ status: "draft", stale: true })
+  })
+})
+
+describe("GET /payroll-adjustments — 依更正月份、過期草稿提醒", () => {
+  it("只帶 relatedPeriod 也可以（重新開放某月前，看後續月份已經補發／扣回過什麼）；這種查詢不附薪資單狀態", async () => {
+    seedAdjustment({ id: "d0000000-0000-4000-8000-000000000b01", period: "2026-10", related_period: SEP, label: "10 月補發 9 月的" })
+    seedAdjustment({ id: "d0000000-0000-4000-8000-000000000b02", period: "2026-11", related_period: SEP, label: "11 月再補 9 月的" })
+    seedAdjustment({ id: "d0000000-0000-4000-8000-000000000b03", period: "2026-11", related_period: "2026-08", label: "更正 8 月的" })
+    seedAdjustment({ id: "d0000000-0000-4000-8000-000000000b04", period: "2026-10", related_period: SEP, label: "已刪", deleted_at: "2026-10-11T00:00:00.000Z" })
+    const res = await as(T.hr).get(`/payroll-adjustments?relatedPeriod=${SEP}`)
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.adjustments.map((a: { label: string }) => a.label)).toEqual(["10 月補發 9 月的", "11 月再補 9 月的"])
+    expect(res.body.adjustments.every((a: { payslip: unknown }) => JSON.stringify(a.payslip) === JSON.stringify({ status: null, stale: false }))).toBe(true)
+    expect(res.body.staleEmployees).toBeUndefined()
+    expect((await as(T.hr).get("/payroll-adjustments?relatedPeriod=2026-9")).status).toBe(400)
+  })
+
+  it("staleEmployees：加減項已全部刪光、草稿薪資單卻還內嵌著舊的那一位，不會因為不在列表裡就讓提醒消失", async () => {
+    fake.db.payslips = [
+      { id: "p1", tenant_id: TENANT_ID, employee_id: EMP, period: OCT, status: "draft", breakdown: { adjustments: [{ id: "gone", label: "已被刪光的", amount: 100, taxable: true, relatedPeriod: null }] } },
+      { id: "p2", tenant_id: TENANT_ID, employee_id: EMP2, period: OCT, status: "draft", breakdown: {} },
+    ]
+    const res = await as(T.hr).get(`/payroll-adjustments?period=${OCT}`)
+    expect(res.status).toBe(200)
+    expect(res.body.adjustments).toEqual([])
+    expect(res.body.staleEmployees).toEqual([EMP])
+  })
+
+  it("staleEmployees：現有加減項已進草稿 → 不算過期；沒跟上 → 算；已定稿的不算", async () => {
+    const synced = seedAdjustment({ id: "d0000000-0000-4000-8000-000000000c01", employee_id: EMP, label: "已跟上", amount: "500.00" })
+    seedAdjustment({ id: "d0000000-0000-4000-8000-000000000c02", employee_id: EMP2, label: "還沒跟上" })
+    fake.db.payslips = [
+      { id: "p1", tenant_id: TENANT_ID, employee_id: EMP, period: OCT, status: "draft", breakdown: { adjustments: [{ id: synced.id, label: "已跟上", amount: 500, taxable: true, relatedPeriod: null }] } },
+      { id: "p2", tenant_id: TENANT_ID, employee_id: EMP2, period: OCT, status: "draft", breakdown: {} },
+    ]
+    const res = await as(T.hr).get(`/payroll-adjustments?period=${OCT}`)
+    expect(res.body.staleEmployees).toEqual([EMP2])
+    const byLabel = Object.fromEntries(res.body.adjustments.map((a: { label: string; payslip: unknown }) => [a.label, a.payslip]))
+    expect(byLabel["已跟上"]).toEqual({ status: "draft", stale: false })
+    expect(byLabel["還沒跟上"]).toEqual({ status: "draft", stale: true })
+  })
+})
+
+describe("範圍外員工：沒有薪資結構、已離職或停用——提醒，不靜默", () => {
+  it("沒有薪資結構的員工：新增成功（201）但回 warnings；列表的 employeeNotes 也帶同一句", async () => {
+    fake.db.salary_structures = [] // 員工甲沒有薪資結構
+    const res = await as(T.hr).post("/payroll-adjustments").send(body())
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(res.body.warnings).toHaveLength(1)
+    expect(res.body.warnings[0]).toContain("沒有薪資結構")
+    const list = await as(T.hr).get(`/payroll-adjustments?period=${OCT}`)
+    expect(list.body.employeeNotes[EMP]).toEqual(res.body.warnings)
+  })
+
+  it("已離職（terminated_at）或停用（status）的員工：回『月結檢查不含他』的提醒；在職且有薪資結構的人沒有任何提醒", async () => {
+    fake.db.employees = fake.db.employees.map((r) =>
+      r.id === EMP ? { ...r, terminated_at: "2026-09-20" } : r.id === EMP2 ? { ...r, status: "inactive" } : r,
+    )
+    for (const employeeId of [EMP, EMP2]) {
+      const res = await as(T.hr).post("/payroll-adjustments").send(body({ employeeId }))
+      expect(res.status).toBe(201)
+      expect(res.body.warnings.join("")).toContain("離職或停用")
+    }
+    fake.db.employees = fake.db.employees.map((r) => (r.id === EMP || r.id === EMP2 ? { ...r, terminated_at: null, status: "active" } : r))
+    const clean = await as(T.hr).post("/payroll-adjustments").send(body())
+    expect(clean.status).toBe(201)
+    expect(clean.body.warnings).toBeUndefined()
+  })
+})
+
+describe("與定稿同時發生：寫入之後再查一次，已定稿就還原並回 409", () => {
+  /** 在「寫入當下」把該員工該期的薪資單變成已定稿（模擬檢查之後、寫入之前有人按了定稿）。只觸發一次。 */
+  function finalizeDuringNextWrite(table: "payroll_adjustments") {
+    let fired = false
+    fake.checks[table] = () => {
+      if (!fired) {
+        fired = true
+        fake.db.payslips = [...(fake.db.payslips ?? []), { id: "p-race", tenant_id: TENANT_ID, employee_id: EMP, period: OCT, status: "finalized" }]
+      }
+      return null
+    }
+  }
+
+  it("新增：寫入時薪資單剛好被定稿 → 409 payslip_finalized，剛寫的那筆被軟刪除（列表看不到、薪資執行不會算）", async () => {
+    finalizeDuringNextWrite("payroll_adjustments")
+    const res = await as(T.hr).post("/payroll-adjustments").send(body())
+    expect(res.status, JSON.stringify(res.body)).toBe(409)
+    expect(res.body.error).toBe("payslip_finalized")
+    expect(adjRows()).toHaveLength(1)
+    expect(typeof adjRows()[0].deleted_at).toBe("string")
+    expect(liveRows()).toHaveLength(0)
+    expect((fake.db.audit_logs ?? []).filter((a) => a.table_name === "payroll_adjustments")).toHaveLength(0)
+  })
+
+  it("修改：寫入時剛好被定稿 → 409，改回原值", async () => {
+    const row = seedAdjustment({ amount: "1000.00", label: "原本的" })
+    finalizeDuringNextWrite("payroll_adjustments")
+    const res = await as(T.hr).patch(`/payroll-adjustments/${row.id}`).send({ amount: 9999, label: "改壞的" })
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("payslip_finalized")
+    expect(adjRows()[0]).toMatchObject({ label: "原本的" })
+    expect(Number(adjRows()[0].amount)).toBe(1000)
+  })
+
+  it("刪除：寫入時剛好被定稿 → 409，恢復這筆", async () => {
+    const row = seedAdjustment()
+    finalizeDuringNextWrite("payroll_adjustments")
+    const res = await as(T.hr).delete(`/payroll-adjustments/${row.id}`)
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("payslip_finalized")
+    expect(adjRows()[0].deleted_at).toBeNull()
   })
 })

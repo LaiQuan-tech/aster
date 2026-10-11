@@ -244,6 +244,7 @@ payrollRouter.post(
       const missingInsuredSalary: string[] = []
       const rows: Array<Record<string, unknown>> = []
       let adjustmentCount = 0 // 這次併進薪資單的一次性加減項（前期更正）筆數，回給畫面核對
+      const negativeNetWarnings: Array<{ employeeId: string; code: "negative_net"; message: string }> = []
       const now = new Date().toISOString()
       for (const sal of salaries) {
         if (finalized.has(sal.employee_id)) {
@@ -287,6 +288,14 @@ payrollRouter.post(
           continue
         }
         adjustmentCount += breakdown.adjustments?.length ?? 0
+        // 實發為負（例如扣回比當月薪資還大）：薪資單照算，但提醒 HR 確認金額。
+        if (breakdown.net < 0) {
+          negativeNetWarnings.push({
+            employeeId: sal.employee_id,
+            code: "negative_net",
+            message: `實發為負數（${breakdown.net.toLocaleString("zh-TW")}）：請確認扣回等加減項的金額是否合理`,
+          })
+        }
         rows.push({
           tenant_id: tenantId,
           employee_id: sal.employee_id,
@@ -329,7 +338,7 @@ payrollRouter.post(
         adjustmentCount,
         unapprovedSheets,
         // 只提醒這次有產生薪資單的人（已定案／略過的不列）。
-        warnings: employeeIds.filter((id) => !skipped.includes(id)).flatMap(lateWarningFor),
+        warnings: [...employeeIds.filter((id) => !skipped.includes(id)).flatMap(lateWarningFor), ...negativeNetWarnings],
       })
     } catch (err) {
       next(err)
@@ -508,6 +517,26 @@ payrollRouter.post(
       if (updErr || !updated) {
         next(new Error(`POST /payslips/${id}/finalize (update): ${updErr?.message}`))
         return
+      }
+      // 更新之後再比對一次加減項：上面「檢查」與這裡「更新」之間剛好有人新增／修改／刪除的話，退回草稿並回 409
+      // （另一邊的加減項端點也會在寫入後查一次是否已定稿並還原——兩邊至少有一邊會發現，不會有補發漏進已定稿的薪資單）。
+      if (typeof updated.employee_id === "string") {
+        const after = await loadAdjustmentsByEmployee(tenantId, updated.period as string, [updated.employee_id as string])
+        if (adjustmentsStale(embeddedAdjustmentsOf(existing.breakdown), after.get(updated.employee_id as string))) {
+          await supabaseAdmin
+            .from("payslips")
+            .update({ status: "draft", updated_at: new Date().toISOString() })
+            .eq("tenant_id", tenantId)
+            .eq("id", id)
+            .eq("status", "finalized")
+          logger.warn({ tenantId, payslipId: id }, "finalize: adjustments changed during finalize, reverted to draft")
+          res.status(409).json({
+            error: "adjustments_stale",
+            period: updated.period,
+            message: `${updated.period as string} 的加減項（前期更正）剛好有異動，薪資單已退回草稿，請重新執行薪資再定稿`,
+          })
+          return
+        }
       }
       // 薪資定稿 → 同員同月 approved 的出勤月表轉 locked（P1）。表未遷移或
       // 沒有核准月表就略過；鎖定失敗不影響已定稿的薪資單，只記 log。

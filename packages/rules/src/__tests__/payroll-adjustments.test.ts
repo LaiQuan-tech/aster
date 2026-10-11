@@ -127,6 +127,20 @@ describe("扣回（負）→ 進應扣，只減實發，不減 gross", () => {
     expect(nonTaxable.totalDeductions).toBe(bare.totalDeductions + 500);
     expect(nonTaxable.adjustments?.[0]).toMatchObject({ treatment: "deduction", taxable: false });
   });
+
+  it("taxable 旗標對扣回的意義是『追回的是已課稅所得』：只拆出 adjustmentDeductionsTaxable 供工資清冊分欄，不改變計算", () => {
+    const mixed = computePayslip(oneNormalDay, salary, rules, 0, 0, [
+      { label: "追回多領薪資", amount: -2000, taxable: true },
+      { label: "追回不課稅津貼", amount: -300.5, taxable: false },
+      { label: "追回預設（課稅）", amount: -100 },
+    ]);
+    expect(mixed.adjustmentDeductions).toBe(2400.5);
+    expect(mixed.adjustmentDeductionsTaxable).toBe(2100);
+    expect(mixed.gross).toBe(bare.gross); // 兩種都不減 gross
+    expect(mixed.net).toBe(bare.net - 2400.5);
+    const nonTaxableOnly = computePayslip(oneNormalDay, salary, rules, 0, 0, [{ label: "追回", amount: -500, taxable: false }]);
+    expect(nonTaxableOnly.adjustmentDeductionsTaxable).toBe(0);
+  });
 });
 
 describe("不課稅的補發（正、非 taxable）→ 只加在實發", () => {

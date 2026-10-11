@@ -276,6 +276,8 @@ export interface PayslipBreakdown {
   adjustmentEarnings?: number;
   /** 扣回合計(正值),已計入 totalDeductions。 */
   adjustmentDeductions?: number;
+  /** 扣回合計中,追回的是已課稅所得(taxable)的部分(正值);其餘是追回不課稅的給付。只供工資清冊分欄,不影響計算。 */
+  adjustmentDeductionsTaxable?: number;
   /** 不課稅的補發合計(正值),不進 gross、直接加在 net。 */
   adjustmentNonTaxable?: number;
   /** 每一筆加減項(依輸入順序)。 */

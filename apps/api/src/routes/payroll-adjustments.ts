@@ -9,8 +9,10 @@ import { writeAuditLog } from "../services/audit.js"
 import { PERIOD_RE, assertPeriodOpen, getPeriodLockState } from "../services/period-lock.js"
 import {
   ADJUSTMENT_COLS,
+  employeeAdjustmentNotes,
   loadAdjustmentsByEmployee,
   payslipAdjustStates,
+  periodPayslipStates,
   toAdjustmentView,
   type AdjustmentRow,
   type AdjustmentView,
@@ -25,8 +27,11 @@ import {
  *   • 課稅的補發 → 進應發（併入扣繳基礎）  • 不課稅的補發 → 只加在實發  • 扣回 → 進應扣、只減實發（不減 gross，保守）
  * 引擎規則與稅務處理見 packages/rules/src/payroll-engine.ts 檔頭；資料表 packages/db/sql/0055_payroll_adjustments.sql。
  *
- *   GET    /payroll-adjustments?period=YYYY-MM&employeeId=   依月份或依人（至少帶一個）；每筆附該期薪資單狀態
- *                                                            `payslip: { status: draft|finalized|null, stale }`
+ *   GET    /payroll-adjustments?period=YYYY-MM&employeeId=&relatedPeriod=   依月份、依人或依「更正的是哪個月」（至少帶一個）；
+ *                                                            每筆附該期薪資單狀態 `payslip: { status: draft|finalized|null, stale }`；
+ *                                                            帶 period 時另回 `periodState`、`staleEmployees`（草稿沒跟上加減項的員工，
+ *                                                            含加減項已全刪光但草稿還內嵌舊的那種）；`employeeNotes` 是範圍外員工的提醒
+ *                                                            （沒有薪資結構＝薪資執行不會產生他的薪資單；已離職／停用＝月結檢查不含他）
  *   POST   /payroll-adjustments                              新增 { employeeId, period, label, amount, taxable?, relatedPeriod?, note? }
  *   PATCH  /payroll-adjustments/:id                          修改 label／amount／taxable／relatedPeriod／note（員工與期別不能改，要換就刪掉重建）
  *   DELETE /payroll-adjustments/:id                          軟刪除（deleted_at；薪資執行與列表都排除）
@@ -39,7 +44,12 @@ import {
  * ## 草稿薪資單不會自己跟上
  * 薪資單是 POST /payroll/run 算出來存著的草稿，新增／修改／刪除加減項之後要**重新執行薪資作業**才會反映。
  * 回應的 `payslip.stale: true` 就是在提醒這件事；而且草稿過期（stale）時定稿會被擋（409 `adjustments_stale`，routes/payroll.ts），
- * 不會有「補發漏進薪資單、卻已經定稿」的情況。
+ * 不會有「補發漏進薪資單、卻已經定稿」的情況（針對有薪資單、在薪資執行範圍內的員工；見 `employeeNotes`）。
+ *
+ * ## 與定稿同時發生
+ * 「檢查有沒有定稿」和「寫入」之間可能剛好有人按了定稿。所以寫入**之後**再查一次：若這時已定稿，把剛才的寫入還原
+ * （新增→軟刪除、修改→改回原值、刪除→恢復）並回 409 `payslip_finalized`；定稿那邊（routes/payroll.ts）也在更新之後
+ * 再比對一次加減項，不一致就退回草稿——兩邊至少有一邊會發現。
  */
 export const payrollAdjustmentsRouter = Router()
 
@@ -64,8 +74,12 @@ const listQuerySchema = z
   .object({
     period: periodSchema.optional(),
     employeeId: z.string().uuid().optional(),
+    /** 更正的是哪個月：重新開放某月時用來看「這個月已經在後續月份補發／扣回過哪些」（避免重算後重複入帳）。 */
+    relatedPeriod: periodSchema.optional(),
   })
-  .refine((q) => q.period !== undefined || q.employeeId !== undefined, { message: "period or employeeId is required" })
+  .refine((q) => q.period !== undefined || q.employeeId !== undefined || q.relatedPeriod !== undefined, {
+    message: "period, employeeId or relatedPeriod is required",
+  })
 
 const createSchema = z.object({
   employeeId: z.string().uuid(),
@@ -146,11 +160,12 @@ payrollAdjustmentsRouter.get(
       res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
       return
     }
-    const { period, employeeId } = parsed.data
+    const { period, employeeId, relatedPeriod } = parsed.data
     try {
       let query = supabaseAdmin.from("payroll_adjustments").select(ADJUSTMENT_COLS).eq("tenant_id", tenantId).is("deleted_at", null)
       if (period) query = query.eq("period", period)
       if (employeeId) query = query.eq("employee_id", employeeId)
+      if (relatedPeriod) query = query.eq("related_period", relatedPeriod)
       const { data, error } = await query
         .order("period", { ascending: true })
         .order("created_at", { ascending: true })
@@ -166,18 +181,37 @@ payrollAdjustmentsRouter.get(
       const byPeriod = new Map<string, AdjustmentView[]>()
       for (const view of views) byPeriod.set(view.period, [...(byPeriod.get(view.period) ?? []), view])
       const stateOf = new Map<string, PayslipAdjustState>()
-      for (const [p, list] of byPeriod) {
-        const ids = [...new Set(list.map((v) => v.employeeId))]
+      let staleEmployees: string[] | undefined
+      // 依「更正月份」查的是資訊用途（重新開放某月前看後續月份補發過什麼），結果只是現有加減項的一個子集，
+      // 拿來算薪資單有沒有跟上會誤判——這種查詢不附薪資單狀態。
+      for (const [p, list] of relatedPeriod ? [] : byPeriod) {
         const current = new Map<string, AdjustmentView[]>()
         for (const v of list) current.set(v.employeeId, [...(current.get(v.employeeId) ?? []), v])
-        const states = await payslipAdjustStates(tenantId, p, ids, current)
-        for (const [id, state] of states) stateOf.set(`${p}|${id}`, state)
+        if (period && !employeeId && p === period) {
+          // 只帶月份：這個月的加減項就是全部，連同「加減項已全刪光、草稿卻還內嵌舊的」過期草稿一次查出來。
+          const all = await periodPayslipStates(tenantId, p, current)
+          staleEmployees = all.staleEmployeeIds
+          for (const [id, state] of all.states) stateOf.set(`${p}|${id}`, state)
+        } else {
+          const states = await payslipAdjustStates(tenantId, p, [...current.keys()], current)
+          for (const [id, state] of states) stateOf.set(`${p}|${id}`, state)
+        }
+      }
+      if (period && !employeeId && !relatedPeriod && staleEmployees === undefined) {
+        // 這個月完全沒有加減項：仍要看有沒有過期草稿（內嵌著已被刪光的舊加減項）。
+        staleEmployees = (await periodPayslipStates(tenantId, period, new Map())).staleEmployeeIds
       }
       const adjustments = views.map((v) => ({ ...v, payslip: stateOf.get(`${v.period}|${v.employeeId}`) ?? { status: null, stale: false } }))
 
+      // 範圍外員工的提醒（沒有薪資結構、已離職／停用），含過期草稿的員工（畫面要列名字）。
+      const noteIds = [...new Set([...views.map((v) => v.employeeId), ...(staleEmployees ?? [])])]
+      const notes = await employeeAdjustmentNotes(tenantId, noteIds)
+
       res.status(200).json({
         adjustments,
+        employeeNotes: Object.fromEntries(notes),
         ...(period ? { periodState: await getPeriodLockState(tenantId, period) } : {}),
+        ...(staleEmployees ? { staleEmployees } : {}),
       })
     } catch (err) {
       next(err)
@@ -247,6 +281,14 @@ payrollAdjustmentsRouter.post(
         return
       }
       const view = toAdjustmentView(created as unknown as AdjustmentRow)
+      // 寫入之後再查一次：剛好在檢查與寫入之間被定稿 → 把這筆還原（軟刪除）並回 409（見檔頭「與定稿同時發生」）。
+      const lateBlock = await finalizedBlock(tenantId, view.employeeId, view.period)
+      if (lateBlock) {
+        const now = new Date().toISOString()
+        await supabaseAdmin.from("payroll_adjustments").update({ deleted_at: now, updated_at: now }).eq("tenant_id", tenantId).eq("id", view.id)
+        res.status(409).json(lateBlock)
+        return
+      }
       await writeAuditLog({
         tenantId,
         tableName: "payroll_adjustments",
@@ -256,7 +298,12 @@ payrollAdjustmentsRouter.post(
         actorEmpId,
         context: "POST /payroll-adjustments — 新增薪資加減項（前期更正）",
       })
-      res.status(201).json({ adjustment: view, payslip: await payslipStateAfter(tenantId, view.employeeId, view.period) })
+      const warnings = (await employeeAdjustmentNotes(tenantId, [view.employeeId])).get(view.employeeId) ?? []
+      res.status(201).json({
+        adjustment: view,
+        payslip: await payslipStateAfter(tenantId, view.employeeId, view.period),
+        ...(warnings.length > 0 ? { warnings } : {}),
+      })
     } catch (err) {
       next(err)
     }
@@ -334,6 +381,24 @@ payrollAdjustmentsRouter.patch(
         return
       }
       const view = toAdjustmentView(updated as unknown as AdjustmentRow)
+      const lateBlock = await finalizedBlock(tenantId, view.employeeId, view.period)
+      if (lateBlock) {
+        // 剛好被定稿：改回原值，薪資單才不會和加減項對不起來。
+        await supabaseAdmin
+          .from("payroll_adjustments")
+          .update({
+            label: before.label,
+            amount: before.amount,
+            taxable: before.taxable,
+            related_period: before.relatedPeriod,
+            note: before.note,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("tenant_id", tenantId)
+          .eq("id", view.id)
+        res.status(409).json(lateBlock)
+        return
+      }
       await writeAuditLog({
         tenantId,
         tableName: "payroll_adjustments",
@@ -403,6 +468,13 @@ payrollAdjustmentsRouter.delete(
       }
       if (!removed) {
         res.status(404).json({ error: "not_found" })
+        return
+      }
+      const lateBlock = await finalizedBlock(tenantId, before.employeeId, before.period)
+      if (lateBlock) {
+        // 剛好被定稿：恢復這筆。
+        await supabaseAdmin.from("payroll_adjustments").update({ deleted_at: null, updated_at: new Date().toISOString() }).eq("tenant_id", tenantId).eq("id", before.id)
+        res.status(409).json(lateBlock)
         return
       }
       await writeAuditLog({
