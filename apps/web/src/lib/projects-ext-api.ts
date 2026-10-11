@@ -1054,7 +1054,8 @@ export interface DuplicateProjectResponse {
     code: string
     name: string
     kind: DuplicateKind
-    parentProjectId: string
+    /** 新案的母案（根 main 案）；來源是沒有母案的非主案時為 null（子案不可掛子案，要補母案走 PATCH）。 */
+    parentProjectId: string | null
     rootCode: string
   }
   archived: { id: string; code: string | null } | null

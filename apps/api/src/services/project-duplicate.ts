@@ -35,10 +35,15 @@ import {
  * 期程的 billed／invoiced／received 事件、副委託的付款事件。
  * 這些不是「忘了」，是**新案的錢從零開始**——複製過去會把舊案的請款算成新案的。
  *
- * ── 母案永遠是根 main 案 ────────────────────────────────────────────
+ * ── 母案永遠是根 main 案（沒有就不掛） ──────────────────────────────
  * routes/projects.ts 的 validateParent 規定母案必須是 main（不能疊羅漢），
  * 所以從 `-1` 再複製出 `-2` 時，`-2` 的 parent 仍是根案，不是 `-1`。
  * 變更歷史（loadLineage）就是「根案＋所有掛在根案底下的案」。
+ *
+ * 母案是選填（2026-09-30 起）：追加減／加做常常先開案、之後才補母案，所以來源可能是
+ * 「沒有母案的非主案」。這時沒有 main 根案可掛——不能退而掛在這個非主案上（子案不可掛子案），
+ * 新案的母案設為 null（＝`source.parent_project_id ?? null`），之後要補再走 PATCH parentProjectId。
+ * 編號仍沿用來源的 code（`{來源 code}-{n}`）。
  *
  * ── 沒有交易 ──────────────────────────────────────────────────────
  * supabase-js 沒有多語句交易；本檔與 routes/subcontracts.ts、billings.ts 一樣
@@ -93,7 +98,8 @@ export type DuplicateProjectResult =
         code: string
         name: string
         kind: DuplicateKind
-        parentProjectId: string
+        /** 新案的母案（根 main 案）；來源是沒有母案的非主案時為 null（子案不可掛子案，見檔頭）。 */
+        parentProjectId: string | null
         rootCode: string
       }
       archived: { id: string; code: string | null } | null
@@ -215,6 +221,10 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
   const root = await resolveRoot(tenantId, source)
   const rootCode = root.code
   if (!rootCode) return { ok: false, status: 409, error: "root_code_missing" }
+  // 新案的母案：只能是 main（validateParent）。root 是 main → 掛它（來源是主案＝掛原案；來源是有母案的子案＝掛
+  // 它的母案）；root 不是 main（來源是沒有母案的非主案，或鏈上斷在非主案）→ 沒有 main 可掛，母案留空，
+  // 絕不掛在非主案底下。
+  const parentProjectId = (root.kind ?? "main") === "main" ? root.id : null
 
   // ── 1. 新案本體（撞號重試） ──────────────────────────────────────
   const baseRow = {
@@ -230,7 +240,7 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
     opened_on: input.openedOn,
     status: "active",
     client_id: source.client_id,
-    parent_project_id: root.id,
+    parent_project_id: parentProjectId,
     kind,
     site_address: source.site_address,
     site_area_m2: source.site_area_m2,
@@ -388,7 +398,7 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
     newRow: {
       code: inserted.code,
       kind,
-      parent_project_id: root.id,
+      parent_project_id: parentProjectId,
       duplicated_from: source.id,
       duplicated_from_code: source.code,
       amount,
@@ -432,7 +442,7 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
       code: inserted.code,
       name: inserted.name,
       kind,
-      parentProjectId: root.id,
+      parentProjectId,
       rootCode,
     },
     archived,
