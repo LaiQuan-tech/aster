@@ -5,6 +5,7 @@ import Link from "next/link";
 import { MonthPicker } from "@/components/MonthPicker";
 import { AttendanceSheetTable } from "@/components/AttendanceSheetTable";
 import { Button, Card, InlineError, Pill, type PillTone } from "@/components/ess-ui";
+import { useEssState } from "@/lib/ess-state";
 import {
   getMyAttendanceSheet,
   listAttendanceSheets,
@@ -36,6 +37,7 @@ const STATUS_TONE: Record<SheetView["status"], PillTone> = {
 };
 
 export default function AttendanceSheetPage() {
+  const { me } = useEssState();
   const [period, setPeriod] = useState(currentPeriod);
   const [sheet, setSheet] = useState<SheetView | null>(null);
   const [loading, setLoading] = useState(true);
@@ -113,7 +115,8 @@ export default function AttendanceSheetPage() {
   }
 
   // scope=mine 的名單一律含本人：自己送出的月表不能自己審（API 會 403），從「待我審核」排除。
-  const reviewable = (pending ?? []).filter((row) => row.employeeId !== sheet?.employeeId);
+  // 同時比對登入身分與本人月表：月表載入失敗或清單先回來時也不會列出自己。
+  const reviewable = (pending ?? []).filter((row) => row.employeeId !== me?.id && row.employeeId !== sheet?.employeeId);
 
   return (
     <div className="space-y-4">
