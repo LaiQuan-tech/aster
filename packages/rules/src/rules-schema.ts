@@ -14,7 +14,7 @@ import { z } from "zod";
  *   - night 夜間: 時段視窗 + 倍率
  *   - payroll 薪資: 計薪方式 (月薪 / 按出勤天數) + 加班參數 + 時薪除數
  *   - leave_deduction 請假/遲到早退扣款開關
- *   - attendance 出勤: 未排班日的預設午休 (2026-10-11)
+ *   - attendance 出勤: 未排班日的預設午休、彈性上班時窗 (2026-10-11)
  *
  * 新增的 knob 一律「型別上 optional、引擎端補預設」(見檔尾 resolve* helpers),
  * 而不是用 zod `.default()` 讓 parse 後變成必填:apps/api 的 DEFAULT_RULE_CONFIG
@@ -241,9 +241,26 @@ const DefaultLunchSchema = z.object({
 });
 export type DefaultLunch = z.infer<typeof DefaultLunchSchema>;
 
+// 彈性上班時窗 (2026-10-11 業主拍板),套在**未排班的工作日**:
+//   startFrom   最早上班:之前打的上班卡不算工時 (工時從 max(上班卡, startFrom) 起算)
+//   startUntil  最晚上班:之後才打上班卡算遲到 (以整分鐘比較,10:00:59 不算)
+//   workMinutes 應工作分鐘 (不含午休):應下班 = clamp(上班卡, startFrom, startUntil)
+//               + workMinutes + 與午休的重疊;下班卡早於應下班 = 早退
+// 省略 = 預設啟用 08:00–10:00、480 分 (resolveFlexWindow);明示 null = 關閉
+// (未排班日退回「整天、不計遲到早退」)。加班照舊:扣午休後超過正常工時的部分。
+const FlexWindowSchema = z
+  .object({
+    startFrom: HHMM,
+    startUntil: HHMM,
+    workMinutes: z.number().int().positive().max(1440),
+  })
+  .refine((v) => v.startFrom <= v.startUntil, { message: "startFrom must not be later than startUntil" });
+export type FlexWindow = z.infer<typeof FlexWindowSchema>;
+
 const AttendanceSchema = z
   .object({
     defaultLunch: DefaultLunchSchema.optional(),
+    flex: FlexWindowSchema.nullable().optional(),
   })
   .optional();
 
@@ -334,6 +351,15 @@ export const DEFAULT_LUNCH: DefaultLunch = { start: "12:00", minutes: 60 };
 /** 未排班日的預設午休 (省略 → 12:00、60 分)。 */
 export function resolveDefaultLunch(rules: RuleConfig): DefaultLunch {
   return rules.attendance?.defaultLunch ?? DEFAULT_LUNCH;
+}
+
+/** 彈性上班時窗預設 (業主 2026-10-11:08:00–10:00 之間上班、做滿 8 小時)。 */
+export const DEFAULT_FLEX_WINDOW: FlexWindow = { startFrom: "08:00", startUntil: "10:00", workMinutes: 480 };
+
+/** 彈性上班時窗 (省略 → 預設啟用;明示 null → 關閉,回 null)。 */
+export function resolveFlexWindow(rules: RuleConfig): FlexWindow | null {
+  const v = rules.attendance?.flex;
+  return v === undefined ? DEFAULT_FLEX_WINDOW : v;
 }
 
 /* ------------------------------------ 2026-09-23 需求補齊:加班上限/特休/級距 ----- */

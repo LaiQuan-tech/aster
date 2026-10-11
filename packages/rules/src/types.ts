@@ -5,7 +5,7 @@
  * `Date` objects or ISO-8601 strings; the engines normalise on the way in.
  */
 
-import type { OvertimeWhen } from "./rules-schema.js";
+import type { FlexWindow, OvertimeWhen } from "./rules-schema.js";
 
 /** A single in/out punch pair for one working day. */
 export interface PunchPair {
@@ -26,6 +26,12 @@ export interface ShiftDef {
   breakMinutes: number;
   breakStart?: string | null;
   isNightShift?: boolean;
+  /**
+   * 彈性上班時窗 (attendance.flex;只有未排班的工作日由 flexShiftDef 帶):有值時遲到／早退
+   * 改看時窗——上班卡晚於 startUntil 算遲到、應下班 = clamp(上班卡, startFrom, startUntil)
+   * + workMinutes + 午休重疊;startFrom 前的打卡不算工時。start/end 不再用來判斷遲到早退。
+   */
+  flex?: FlexWindow | null;
 }
 
 /** 一段時間 (與 PunchPair 同一個時鐘:naive local Date 或 ISO 字串)。 */
@@ -113,6 +119,12 @@ export interface AttendanceDay {
   nightMinutes: number;
   /** 當日請假 (呼叫端帶入;payroll-engine 據此算請假扣款)。 */
   leaves?: LeaveEntry[];
+  /**
+   * 老闆已決定這天的遲到「不影響全勤」(late_reports.attendance_decision = 'exempt')。
+   * payroll-engine 算全勤獎金的累計遲到分鐘時略過這天;遲到早退扣款 (leave_deduction) 照算。
+   * 沒決定或決定「影響」→ 省略 (照算)。
+   */
+  lateExempt?: boolean;
   dayType: DayType;
 }
 

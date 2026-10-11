@@ -8,11 +8,23 @@ import { setActor } from "../lib/request-context.js"
 import { clientIpOf } from "../lib/client-ip.js"
 import { writeAuditLog } from "../services/audit.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
-import { dayWindowUtc, todayKey } from "../lib/tz.js"
+import { dayWindowUtc, localParts, todayKey } from "../lib/tz.js"
+import { logger } from "../lib/logger.js"
 import { checkPunchCooldown, cooldownSeconds, statusFromRecords } from "../services/punch-guard.js"
 import { importManualPunches } from "../services/imports/writers.js"
+import { lateMinutesForArrival, type ArrivalLateness } from "../services/settlement.js"
+import {
+  LATE_REASON_MAX,
+  attachPunchToLateReport,
+  normalizeLateReason,
+  notifyLateReport,
+  recordLateReport,
+} from "../services/late-reports.js"
+import { lateReportsRouter } from "./late-reports.js"
 
 export const punchRouter = Router()
+// 遲到說明 API（GET /late-reports、POST /late-reports/:id/decision）由打卡產生，掛在打卡路由底下。
+punchRouter.use(lateReportsRouter)
 
 // "YYYY-MM-DD".
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
@@ -30,6 +42,9 @@ const punchSchema = z.object({
   // 2026-09-30：沒拿到座標時，前端帶來的定位失敗原因（見 punch_records.geo_status
   // 的 CHECK，migrations/0051）。有 lat/lng 時就算帶了也會被忽略（見下方 insert）。
   geoStatus: z.enum(["denied", "unavailable", "timeout", "unsupported"]).optional(),
+  // 2026-10-11 遲到理由：當天第一張上班卡遲到時必填（trim 後 1–500 字，見下方 POST /punch）。
+  // 沒遲到時帶了也不理會。
+  lateReason: z.string().max(5000).optional(),
   // NOTE: we deliberately do NOT read employeeId from the body. The punch is
   // always recorded for the token owner (anti-proxy-punch). Any employeeId a
   // client sends is ignored — kept lax here so a stray field doesn't 400.
@@ -90,6 +105,39 @@ function isHrRole(role: string | undefined): boolean {
   return !!role && ["hr_admin", "platform_admin"].includes(role)
 }
 
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n)
+}
+
+/**
+ * 遲到理由（2026-10-11 業主拍板）：這張上班卡是不是**當天（租戶時區）第一張上班卡**、而且遲到。
+ * 不是第一張、沒遲到、或沒有應上班時間（例假日沒排班）→ null。遲到分鐘與月結同一個引擎算
+ * （settlement.lateMinutesForArrival：整分鐘比較、扣午休與已核准請假）。
+ * 判斷本身出錯時記 warn 並放行（null）——不能讓打卡因為遲到檢查掛掉；月表照樣會記遲到。
+ */
+async function firstInLateness(tenantId: string, employeeId: string, now: Date): Promise<ArrivalLateness | null> {
+  const { start, end } = await todayWindow(tenantId)
+  const { data: prior, error: priorErr } = await supabaseAdmin
+    .from("punch_records")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("employee_id", employeeId)
+    .eq("type", "in")
+    .gte("punch_at", start)
+    .lt("punch_at", end)
+    .limit(1)
+    .maybeSingle()
+  if (priorErr) throw new Error(`POST /punch (first in): ${priorErr.message}`)
+  if (prior) return null
+  try {
+    const lateness = await lateMinutesForArrival({ tenantId, employeeId, arrivalAt: now })
+    return lateness.lateMinutes > 0 ? lateness : null
+  } catch (err) {
+    logger.warn({ err, tenantId, employeeId }, "POST /punch: late check failed — punch allowed without late reason")
+    return null
+  }
+}
+
 /**
  * POST /punch — the authenticated employee clocks in/out for THEMSELVES.
  *
@@ -117,6 +165,14 @@ function isHrRole(role: string | undefined): boolean {
  * 打卡 IP（0060）：寫入時記下 `ip_address`（lib/client-ip.ts：x-forwarded-for 第一段 →
  * x-real-ip → req.ip，不合法存 null）。IP 只給 HR 在後台看，員工自己的 201 回應
  * 不帶——`record` 也剝掉 ip_address。HR 補登（/punch/manual、匯入）不記 IP。
+ *
+ * 遲到理由（2026-10-11，沒有人可以免）：當天第一張上班卡若遲到（沒排班的工作日＝晚於彈性時窗
+ * 10:00；有排班＝晚於班別上班時間；整分鐘比較，10:00:59 不算），body 必須帶 `lateReason`
+ * （trim 後 1–500 字），否則
+ *   400 { error: "late_reason_required", lateMinutes, threshold, punchTime, workDate }
+ * 而且**不寫打卡**。帶了就先寫 late_reports（一人一天一筆，老闆的決定欄位不動）、再寫打卡、
+ * 把打卡 id 掛回去，第一次寫入時通知直屬主管與老闆；201 多帶 `lateReport: { id, lateMinutes }`。
+ * 手動補登（/punch/manual）與匯入不要求理由。
  */
 punchRouter.post(
   "/punch",
@@ -136,6 +192,7 @@ punchRouter.post(
       return
     }
     const { type, source, lat, lng, deviceId, geoStatus } = parsed.data
+    const now = new Date()
 
     try {
       const self = await resolveSelf(tenantId, userId)
@@ -166,7 +223,7 @@ punchRouter.post(
         }
         const guard = checkPunchCooldown(
           recent ? { punch_at: recent.punch_at as string } : null,
-          new Date(),
+          now,
           seconds,
         )
         if (!guard.ok && recent) {
@@ -202,6 +259,48 @@ punchRouter.post(
         resolvedType = last?.type === "in" ? "out" : "in"
       }
 
+      // 遲到理由：當天第一張上班卡遲到 → 沒帶理由就擋下（不寫打卡）。
+      const lateness = resolvedType === "in" ? await firstInLateness(tenantId, self.id, now) : null
+      let lateReason: string | null = null
+      let punchTime = ""
+      if (lateness) {
+        const tz = await getTenantTimezone(tenantId)
+        const parts = localParts(now, tz)
+        punchTime = `${pad2(parts.hh)}:${pad2(parts.mm)}`
+        lateReason = normalizeLateReason(parsed.data.lateReason)
+        if (!lateReason) {
+          if (typeof parsed.data.lateReason === "string" && parsed.data.lateReason.trim().length > LATE_REASON_MAX) {
+            res.status(400).json({
+              error: "invalid_body",
+              details: { formErrors: [], fieldErrors: { lateReason: [`遲到原因最多 ${LATE_REASON_MAX} 字`] } },
+            })
+            return
+          }
+          res.status(400).json({
+            error: "late_reason_required",
+            lateMinutes: lateness.lateMinutes,
+            threshold: lateness.threshold,
+            punchTime,
+            workDate: lateness.workDate,
+          })
+          return
+        }
+      }
+
+      // 先存遲到說明再寫打卡：打卡寫進去就刪不掉（forbid_hard_delete），反過來才不會有
+      // 「遲到卻沒有理由」的打卡。表不存在（舊庫）→ null，照常打卡。
+      const lateReport =
+        lateness && lateReason
+          ? await recordLateReport({
+              tenantId,
+              employeeId: self.id,
+              workDate: lateness.workDate,
+              punchAt: now.toISOString(),
+              lateMinutes: lateness.lateMinutes,
+              reason: lateReason,
+            })
+          : null
+
       const { data, error } = await supabaseAdmin
         .from("punch_records")
         .insert({
@@ -216,6 +315,8 @@ punchRouter.post(
           geo_status: lat != null && lng != null ? null : (geoStatus ?? null),
           // 來源 IP（只有員工自己打卡才記，見 lib/client-ip.ts；取不到或不合法 → null）。
           ip_address: clientIpOf(req),
+          // 檢查過遲到的上班卡，時間用檢查當下那一刻（與遲到說明的 punch_at 一致）；其餘照 DB 預設。
+          ...(lateness ? { punch_at: now.toISOString() } : {}),
         })
         .select("*")
         .single()
@@ -224,6 +325,29 @@ punchRouter.post(
         next(new Error(`POST /punch: ${error?.message}`))
         return
       }
+
+      if (lateReport && lateness && lateReason) {
+        await attachPunchToLateReport(tenantId, lateReport.id, data.id as string)
+        if (lateReport.needsNotify) {
+          const { data: emp } = await supabaseAdmin
+            .from("employees")
+            .select("name")
+            .eq("tenant_id", tenantId)
+            .eq("id", self.id)
+            .maybeSingle()
+          await notifyLateReport({
+            tenantId,
+            employeeId: self.id,
+            employeeName: ((emp as { name?: string | null } | null)?.name ?? "").trim() || "同仁",
+            reportId: lateReport.id,
+            workDate: lateness.workDate,
+            punchHm: punchTime,
+            lateMinutes: lateness.lateMinutes,
+            reason: lateReason,
+          })
+        }
+      }
+
       // IP 只給 HR（GET /punch 後台列表）看：員工自己的回應不帶，record 也剝掉。
       const { ip_address: _ipAddress, ...record } = data
       res.status(201).json({
@@ -235,6 +359,7 @@ punchRouter.post(
         lng: data.lng,
         deviceId: data.device_id,
         record,
+        ...(lateReport && lateness ? { lateReport: { id: lateReport.id, lateMinutes: lateness.lateMinutes } } : {}),
       })
     } catch (err) {
       next(err)

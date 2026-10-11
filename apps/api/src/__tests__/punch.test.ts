@@ -166,10 +166,12 @@ afterAll(async () => {
 
 describe("F3 punch in/out — auto-inferred type", () => {
   it("first POST /punch (no type) → 201 type='in'", async () => {
+    // 2026-10-11 起當天第一張上班卡遲到（沒排班的工作日 10:00 後）要帶理由；整合測試在任何時刻跑都要過，
+    // 一律帶上（沒遲到時伺服器不理會）。
     const res = await request(app)
       .post("/punch")
       .set("Authorization", `Bearer ${emp1Token}`)
-      .send({})
+      .send({ lateReason: "整合測試" })
 
     expect(res.status).toBe(201)
     expect(res.body.type).toBe("in")
@@ -385,7 +387,7 @@ describe("WP1 punch cooldown — PUNCH_COOLDOWN_SECONDS blocks a double tap", ()
       const first = await request(app)
         .post("/punch")
         .set("Authorization", `Bearer ${emp3Token}`)
-        .send({ type: "in" })
+        .send({ type: "in", lateReason: "整合測試" })
       expect(first.status).toBe(201)
       expect(first.body.type).toBe("in")
       expect(typeof first.body.record?.punch_at).toBe("string")

@@ -8,10 +8,14 @@
  *   • 規則 3 (午班、夜班等舊推算):維持舊行為——工時固定扣 breakMinutes、遲到/早退
  *     照字面;只有已核准請假跟推算窗相接時,才用它銜接「請假 → 午休 → 到班」。
  * 請假 (ctx.leaveIntervals):已核准請假覆蓋的時段不算遲到/早退。
+ * 彈性上班 (shift.flex,未排班的工作日):startFrom 前不算工時、晚於 startUntil 算遲到、
+ *   應下班 = clamp(上班卡, startFrom, startUntil) + workMinutes + 午休重疊。
+ * 遲到一律以整分鐘比較 (上班卡秒數捨去,10:00:59 不算遲到)。
  */
 
 import {
   resolveDefaultLunch,
+  resolveFlexWindow,
   resolveOvertimeMealBreak,
   resolveOvertimeRounding,
   type OvertimeRoundingMode,
@@ -206,10 +210,23 @@ export function applyOvertimePipeline(
  * 未排班日的「班別」:整天 00:00–23:59 (沒有應到/應退時間,遲到/早退由呼叫端歸零),
  * 午休 = 租戶預設午休 (attendance.defaultLunch,預設 12:00 起 60 分)→ 工時扣「在班區間
  * 與午休的重疊」:09:00–18:00 = 8h、加班 0;10:00–19:00 同樣 8h;13:30–18:00 不扣。
+ * 未排班的**工作日**在彈性上班啟用時改用 flexShiftDef。
  */
 export function unscheduledShiftDef(rules: RuleConfig): ShiftDef {
   const lunch = resolveDefaultLunch(rules);
   return { start: "00:00", end: "23:59", breakMinutes: lunch.minutes, breakStart: lunch.start };
+}
+
+/**
+ * 未排班工作日的彈性上班「班別」(attendance.flex 關閉 → null):午休同 unscheduledShiftDef,
+ * flex 帶時窗。工時從 max(上班卡, startFrom) 起算;上班卡晚於 startUntil 算遲到;
+ * 應下班 = clamp(上班卡, startFrom, startUntil) + workMinutes + 午休重疊,早於它下班算早退。
+ */
+export function flexShiftDef(rules: RuleConfig): ShiftDef | null {
+  const flex = resolveFlexWindow(rules);
+  if (!flex) return null;
+  const lunch = resolveDefaultLunch(rules);
+  return { start: flex.startFrom, end: "23:59", breakMinutes: lunch.minutes, breakStart: lunch.start, flex };
 }
 
 /**
@@ -244,6 +261,16 @@ export function computeAttendanceDay(
   // 班表投影的基準日 = 最早一段 inAt 的當天。
   const earliestIn = Math.min(...intervals.map((iv) => iv.start));
   const dayBase = startOfLocalDay(earliestIn);
+  // 遲到以「整分鐘」比較 (業主 2026-10-11:10:00:59 不算遲到):上班卡的秒數捨去。
+  const arrivalMinuteMs = Math.floor(earliestIn / MS_PER_MIN) * MS_PER_MIN;
+
+  // 彈性上班 (未排班的工作日):startFrom 之前的打卡不算工時 → 把各段裁到 startFrom 之後。
+  const flex = shift.flex ?? null;
+  const flexFromMs = flex ? dayBase + hhmmToMinutes(flex.startFrom) * MS_PER_MIN : null;
+  const workIntervals: Interval[] =
+    flexFromMs === null
+      ? intervals
+      : intervals.map((iv) => ({ start: Math.max(iv.start, flexFromMs), end: Math.max(iv.end, flexFromMs) }));
 
   // 午休區間 (lunch-window.ts 的單一規則) 投影到基準日。
   const lunch = lunchWindowOf(shift);
@@ -258,11 +285,11 @@ export function computeAttendanceDay(
   //     15:00–15:10 打了休息卡 → 午休照扣 60)。
   //   • 舊推算 (規則 3):維持固定扣 breakMinutes;當天有打卡的休息段 → 已切掉,不再扣。
   const grossMinutes =
-    intervals.reduce((acc, iv) => acc + (iv.end - iv.start) / MS_PER_MIN, 0);
+    workIntervals.reduce((acc, iv) => acc + (iv.end - iv.start) / MS_PER_MIN, 0);
   let breakDeduct: number;
   if (explicitLunch && lunchIv) {
     breakDeduct =
-      intervals.reduce(
+      workIntervals.reduce(
         (acc, iv) => acc + Math.max(0, Math.min(iv.end, lunchIv.end) - Math.max(iv.start, lunchIv.start)),
         0,
       ) / MS_PER_MIN;
@@ -283,22 +310,38 @@ export function computeAttendanceDay(
     leaveIvs.some((l) => l.start <= lunchIv.end + MS_PER_MIN && l.end >= lunchIv.start - MS_PER_MIN);
   if (lunchIv && (explicitLunch || legacyBridged)) excused.push(lunchIv);
 
-  // 遲到:班表 start (投影到基準日) 到最早一段 inAt 之間,扣掉免計時段。
-  const shiftStartMin = hhmmToMinutes(shift.start);
-  const shiftStartMs = dayBase + shiftStartMin * MS_PER_MIN;
-  const lateMinutes = Math.round(uncoveredMs(shiftStartMs, earliestIn, excused) / MS_PER_MIN);
-
-  // 早退:最晚一段 outAt 到班表 end (投影到同一基準日;跨日班 end < start 投影到隔天)
-  // 之間,扣掉免計時段。例假/固定假沒有「應到班到幾點」→ 0。
+  // 遲到/早退的基準:
+  //   • 班別:應上班 = 班表 start、應下班 = 班表 end (投影到基準日;跨日班 end < start 投影到隔天)。
+  //   • 彈性:應上班 = startUntil (晚於它才算遲到);應下班 = clamp(上班卡, startFrom, startUntil)
+  //     + workMinutes,中間碰到午休就往後延 (09:00 到 → 18:00、10:00 到 → 19:00、07:30 到 → 17:00)。
   const latestOut = Math.max(...intervals.map((iv) => iv.end));
-  const shiftEndMin = hhmmToMinutes(shift.end);
-  const shiftEndMs =
-    dayBase +
-    (shiftEndMin < shiftStartMin ? shiftEndMin + MIN_PER_DAY : shiftEndMin) *
-      MS_PER_MIN;
+  let expectedStartMs: number;
+  let expectedEndMs: number;
+  if (flex) {
+    const fromMs = dayBase + hhmmToMinutes(flex.startFrom) * MS_PER_MIN;
+    const untilMs = dayBase + hhmmToMinutes(flex.startUntil) * MS_PER_MIN;
+    const startMs = Math.min(Math.max(arrivalMinuteMs, fromMs), untilMs);
+    let endMs = startMs + flex.workMinutes * MS_PER_MIN;
+    if (explicitLunch && lunchIv && startMs < lunchIv.end && endMs > lunchIv.start) {
+      endMs += lunchIv.end - Math.max(startMs, lunchIv.start);
+    }
+    expectedStartMs = untilMs;
+    expectedEndMs = endMs;
+  } else {
+    const shiftStartMin = hhmmToMinutes(shift.start);
+    const shiftEndMin = hhmmToMinutes(shift.end);
+    expectedStartMs = dayBase + shiftStartMin * MS_PER_MIN;
+    expectedEndMs =
+      dayBase + (shiftEndMin < shiftStartMin ? shiftEndMin + MIN_PER_DAY : shiftEndMin) * MS_PER_MIN;
+  }
+
+  // 遲到:應上班到第一次上班卡 (捨去秒數) 之間,扣掉免計時段。
+  const lateMinutes = Math.round(uncoveredMs(expectedStartMs, arrivalMinuteMs, excused) / MS_PER_MIN);
+
+  // 早退:最晚一段 outAt 到應下班之間,扣掉免計時段。例假/固定假沒有「應到班到幾點」→ 0。
   const earlyLeaveMinutes =
     ctx.dayType === "workday"
-      ? Math.round(uncoveredMs(latestOut, shiftEndMs, excused) / MS_PER_MIN)
+      ? Math.round(uncoveredMs(latestOut, expectedEndMs, excused) / MS_PER_MIN)
       : 0;
 
   // 加班:平日 = 超過「正常工時」的部分;例假/固定假 = 全部工時。正常工時預設是
@@ -323,7 +366,7 @@ export function computeAttendanceDay(
   // 夜間:工作區間與 night.window 的重疊,再上限到實際工時(避免把休息算進
   // 夜間;當整班都在夜間視窗時,休息分鐘自然從夜間時數扣除)。
   const rawNight = nightOverlapMinutes(
-    intervals,
+    workIntervals,
     rules.night.window.from,
     rules.night.window.to,
   );

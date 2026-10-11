@@ -77,9 +77,9 @@ function roundYuan(n: number): number {
 /**
  * 全勤獎金:以「全月累計遲到分鐘」套階梯。tiers 由小到大,取第一個
  * lateMinutesUpTo === null(封頂) 或 totalLate <= lateMinutesUpTo 的階。
- * 回傳該階扣款 (找不到任何階則扣 0)。
+ * 回傳該階扣款 (找不到任何階則扣 0)。匯出給 late-attendance 判斷「是否因遲到失去全勤」。
  */
-function resolveAttendanceDeduction(
+export function resolveAttendanceDeduction(
   totalLateMinutes: number,
   tiers: RuleConfig["attendance_bonus"]["tiers"],
 ): number {
@@ -215,7 +215,8 @@ export function computePayslip(
   );
 
   // --- 全勤獎金 (全月累計遲到 → 階梯扣款,從 base 扣) ----------------------
-  const totalLateMinutes = days.reduce((acc, d) => acc + d.lateMinutes, 0);
+  // 老闆決定「不影響全勤」的遲到 (lateExempt) 不累計;沒決定 = 影響 (照算)。
+  const totalLateMinutes = days.reduce((acc, d) => acc + (d.lateExempt ? 0 : d.lateMinutes), 0);
   const bonusBase = rules.attendance_bonus.base;
   const attendanceDeduction = resolveAttendanceDeduction(
     totalLateMinutes,

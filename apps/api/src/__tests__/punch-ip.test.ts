@@ -1,6 +1,6 @@
 import express, { type NextFunction, type Request, type Response } from "express"
 import request from "supertest"
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 // 純測試：supabase 換成記憶體版（helpers/fake-supabase.ts），不連任何 DB。
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
@@ -68,6 +68,16 @@ const ipWritten = (row: Record<string, unknown> | undefined) => (row && "ip_addr
 const hasIpKey = (record: Record<string, unknown>) => "ip_address" in record || "ipAddress" in record
 
 describe("POST /punch — 記錄打卡 IP", () => {
+  // 2026-10-11 起當天第一張上班卡遲到要填理由（10:00 後）；這裡測的是 IP，時間固定在週一 09:00（台北），
+  // 不讓測試結果跟著跑測試的時刻變。
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date("2026-10-12T01:00:00.000Z"))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   const punchFrom = (headers: Record<string, string>) => {
     let req = asEmp(request(app).post("/punch")).send({ type: "in" })
     for (const [name, value] of Object.entries(headers)) req = req.set(name, value)

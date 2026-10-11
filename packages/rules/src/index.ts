@@ -17,10 +17,13 @@ export {
   resolveHourlyWageDivisor,
   resolvePayrollGates,
   resolveLateEarlyDeductionEnabled,
-  // 2026-10-11 午休：未排班日的預設午休
+  // 2026-10-11 午休：未排班日的預設午休；彈性上班時窗
   DEFAULT_LUNCH,
   resolveDefaultLunch,
   type DefaultLunch,
+  DEFAULT_FLEX_WINDOW,
+  resolveFlexWindow,
+  type FlexWindow,
   // 2026-09-23 需求補齊:加班上限/起算基準/特休週年制/勞健保級距
   OvertimeBasisSchema,
   OvertimeBeyondCapSchema,
@@ -53,7 +56,7 @@ export {
 } from "./rules-schema.js";
 
 export * from "./types.js";
-export { computeAttendanceDay, applyOvertimePipeline, unscheduledShiftDef } from "./worktime-engine.js";
+export { computeAttendanceDay, applyOvertimePipeline, unscheduledShiftDef, flexShiftDef } from "./worktime-engine.js";
 export {
   NOON_MINUTES,
   hhmmToMinutesOrNull,
@@ -65,7 +68,15 @@ export {
   type LunchWindow,
   type LunchShiftLike,
 } from "./lunch-window.js";
-export { computePayslip } from "./payroll-engine.js";
+export { computePayslip, resolveAttendanceDeduction } from "./payroll-engine.js";
+export {
+  lateAttendanceStatus,
+  normalizeLateDecision,
+  undecidedLateWarning,
+  type LateAttendanceStatus,
+  type LateDecision,
+  type LateReportLike,
+} from "./late-attendance.js";
 export {
   bonusSupplementaryPremium,
   otherIncomeSupplementaryPremium,

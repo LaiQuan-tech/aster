@@ -8,7 +8,10 @@ import {
   resolvePayrollGates,
   resolveOvertimeMealBreak,
   DAY_TYPE_TO_OVERTIME_WHEN,
+  normalizeLateDecision,
+  undecidedLateWarning,
   type DayType,
+  type LateDecision,
   type OvertimeBeyondCap,
   type OvertimeSegment,
   type RuleConfig,
@@ -33,6 +36,7 @@ import { tenantBlocksApproveOnUnsettledLeave } from "./leave-settlement.js"
 import { pairPunchesTz } from "./punch-pairing.js"
 import { capMinutesFor } from "./overtime-cap.js"
 import { writeAuditLog } from "./audit.js"
+import { exemptDatesOf, loadLateReportsForPeriod, undecidedCountOf, type LateReportRow } from "./late-reports.js"
 import {
   buildPayrollInputs,
   loadRuleConfigFor,
@@ -383,6 +387,10 @@ export interface AnomalyDayFacts {
   unpairedOutings: number
   /** Any punch that day with source='manual' (補打卡落地). */
   manualPunch: boolean
+  /** 2026-10-11 遲到說明：員工打卡時填的遲到原因（沒有 → 省略）。 */
+  lateReason?: string | null
+  /** 老闆的決定（affects／exempt；沒決定 → null，視為影響全勤）。 */
+  lateDecision?: LateDecision
 }
 
 export interface AnomalyContext {
@@ -413,6 +421,8 @@ export interface AnomalyContext {
   beyondCap?: OvertimeBeyondCap
   /** M1：該月「有已核准加班單」的日期集合——超額日不在集合裡就升級成 error。 */
   approvedOtDates?: Set<DateKey>
+  /** 2026-10-11：本月遲到說明還沒經老闆決定的筆數（視為影響全勤）；> 0 發月級提醒。 */
+  undecidedLateCount?: number
 }
 
 export interface AnomalyResult {
@@ -524,7 +534,18 @@ export function computeAnomalies(
     }
 
     // ── warn ──
-    if (late > 0) push({ code: "late", severity: "warn", detail: { minutes: late }, message: `遲到 ${late} 分` })
+    if (late > 0) {
+      // 遲到說明（2026-10-11）：帶出員工填的原因與老闆的決定。
+      const decision = facts.lateDecision ?? null
+      const decisionText =
+        facts.lateReason == null ? "" : decision === "exempt" ? "；老闆：不影響全勤" : decision === "affects" ? "；老闆：影響全勤" : "；老闆尚未決定"
+      push({
+        code: "late",
+        severity: "warn",
+        detail: facts.lateReason == null ? { minutes: late } : { minutes: late, reason: facts.lateReason, decision },
+        message: facts.lateReason == null ? `遲到 ${late} 分` : `遲到 ${late} 分（原因：${facts.lateReason}${decisionText}）`,
+      })
+    }
     if (early > 0) push({ code: "early_leave", severity: "warn", detail: { minutes: early }, message: `早退 ${early} 分` })
     if (override != null && override !== computed) {
       push({
@@ -644,6 +665,16 @@ export function computeAnomalies(
       message: `本月有 ${unsettledLeaveCount} 張假單已核准但人資尚未核銷`,
     })
   }
+  // 2026-10-11 遲到說明：老闆還沒決定的筆數（沒決定＝影響全勤）。
+  const undecidedLate = undecidedLateWarning(ctx.undecidedLateCount ?? 0)
+  if (undecidedLate) {
+    result.month.push({
+      code: "late_reports_undecided",
+      severity: "warn",
+      detail: { count: ctx.undecidedLateCount },
+      message: undecidedLate,
+    })
+  }
   if (!ctx.hasSalaryStructure) {
     result.month.push({ code: "no_salary_structure", severity: "warn", message: "尚未設定薪資結構，無法試算金額" })
   }
@@ -761,6 +792,8 @@ interface MonthFacts {
   /** B8：tenants.features.attendance.blockApproveOnUnsettledLeave。整批（同一次 loadMonthFacts）共用同一個值。 */
   blockApproveOnUnsettledLeave: boolean
   salaryEmpIds: Set<string>
+  /** 2026-10-11：本月遲到說明（依員工）。 */
+  lateReportsByEmp: Map<string, LateReportRow[]>
 }
 
 function hhmmToMinutes(hhmm: string): number {
@@ -811,6 +844,7 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     unsettledLeaveByEmp: new Map(),
     blockApproveOnUnsettledLeave: false,
     salaryEmpIds: new Set(),
+    lateReportsByEmp: new Map(),
   }
   if (employeeIds.length === 0) return facts
 
@@ -989,6 +1023,9 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
   if (salErr) throw new Error(`attendance-sheets (salary_structures): ${salErr.message}`)
   for (const r of (salData ?? []) as Array<{ employee_id: string }>) facts.salaryEmpIds.add(r.employee_id)
 
+  // 遲到說明（2026-10-11；表不存在 → 空）
+  facts.lateReportsByEmp = await loadLateReportsForPeriod(tenantId, period, employeeIds)
+
   return facts
 }
 
@@ -1049,11 +1086,14 @@ function buildDayRows(
 function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContext {
   const dayFacts = new Map<DateKey, AnomalyDayFacts>()
   const punchFacts = facts.punchFactsByEmp.get(employeeId)
+  const lateReports = facts.lateReportsByEmp.get(employeeId) ?? []
+  const lateByDate = new Map(lateReports.map((r) => [r.work_date, r] as const))
   for (let d = facts.from; d <= facts.to; d = addDaysKey(d, 1)) {
     const key = `${employeeId}|${d}`
     const sched = facts.scheduleByKey.get(key)
     const pf = punchFacts?.get(d)
     const ad = facts.attendanceByKey.get(key)
+    const late = lateByDate.get(d)
     dayFacts.set(d, {
       scheduled: !!sched,
       shiftNetMinutes: sched?.shiftNetMinutes ?? null,
@@ -1062,6 +1102,7 @@ function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContex
       unpairedPunches: ad?.anomaly?.unpairedPunches ?? 0,
       unpairedOutings: Math.max(ad?.anomaly?.unpairedOutings ?? 0, pf?.unpairedOutings ?? 0),
       manualPunch: pf?.manualPunch ?? false,
+      ...(late ? { lateReason: late.reason, lateDecision: normalizeLateDecision(late.attendance_decision) } : {}),
     })
   }
   const approvedOtDates = new Set<DateKey>()
@@ -1079,6 +1120,7 @@ function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContex
     capMinutes: capMinutesFor(facts.rules),
     beyondCap: resolveOvertimeBeyondCap(facts.rules),
     approvedOtDates,
+    undecidedLateCount: undecidedCountOf(lateReports),
   }
 }
 
@@ -1467,6 +1509,8 @@ export function buildPayrollDays(
   attendanceRows: AttendanceDayRow[],
   deductRateByCode: Map<string, number>,
   beyondCapByDate?: Map<string, number>,
+  /** 2026-10-11：老闆決定「不影響全勤」的遲到日期 → AttendanceDay.lateExempt（全勤不累計）。 */
+  lateExemptDates?: Set<string>,
 ): AttendanceDayInput[] {
   const byDate = new Map<string, SheetDayRow>()
   for (const d of days) byDate.set(d.work_date, d)
@@ -1480,6 +1524,7 @@ export function buildPayrollDays(
       ...base,
       overtimeMinutes: Math.max(0, effective - beyond),
       overtimeMinutesComputed: base.overtimeMinutes,
+      ...(lateExemptDates?.has(row.work_date) ? { lateExempt: true } : {}),
     })
   }
   return out
@@ -1601,7 +1646,7 @@ async function composeLiveView(
   sheet: SheetRow,
   opts: { includeMoney: boolean },
 ): Promise<{ view: SheetView; payrollDays: AttendanceDayInput[]; inputs: EmployeePayrollInputs | null }> {
-  const [dayRows, empInfo, attendanceRows, leaveNames, ruleConfig] = await Promise.all([
+  const [dayRows, empInfo, attendanceRows, leaveNames, ruleConfig, lateReports] = await Promise.all([
     loadDays(tenantId, sheet.id),
     loadEmployeeInfo(tenantId, [sheet.employee_id, ...(sheet.manager_emp_id ? [sheet.manager_emp_id] : [])]),
     loadAttendanceRowsForSheet(tenantId, sheet),
@@ -1609,6 +1654,8 @@ async function composeLiveView(
     // M1／M24 都要規則：月加班上限（超額歸屬）與加班級距欄名。依「這張表的
     // period」選版，與 generate/recompute 當時用的版本一致。
     loadRuleConfigFor(tenantId, sheet.period),
+    // 2026-10-11 遲到說明：老闆決定不影響全勤的日子，薪資試算／核准快照的全勤不累計。
+    loadLateReportsForPeriod(tenantId, sheet.period, [sheet.employee_id]),
   ])
   const projectIds = Array.from(new Set(dayRows.map((d) => d.project_id).filter((id): id is string => !!id)))
   const projectNames = await loadProjectNames(tenantId, projectIds)
@@ -1636,6 +1683,7 @@ async function composeLiveView(
     attendanceRows,
     inputs?.deductRateByCode ?? new Map(),
     settleSeparately ? beyondCapByDate : undefined,
+    exemptDatesOf(lateReports.get(sheet.employee_id)),
   )
   let money: SheetMoney | null = null
   if (inputs?.salary) {

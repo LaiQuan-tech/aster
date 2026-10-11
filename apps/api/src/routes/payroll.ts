@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
-import { computePayslip, resolvePayrollGates, type AttendanceDay } from "@hr/rules"
+import { computePayslip, resolvePayrollGates, undecidedLateWarning, type AttendanceDay } from "@hr/rules"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
@@ -28,6 +28,7 @@ import {
   toSalaryStructure,
 } from "../services/payroll-inputs.js"
 import { SheetError, lockApprovedSheetFor, type SheetSnapshot } from "../services/attendance-sheets.js"
+import { exemptDatesOf, loadLateReportsForPeriod, undecidedCountOf } from "../services/late-reports.js"
 
 export const payrollRouter = Router()
 
@@ -105,11 +106,11 @@ function isHrRole(role: string | undefined): boolean {
  * structure. An already-FINALIZED payslip for the (employee, period) is left
  * untouched and reported in `skipped` (a finalized slip is locked).
  *
- * Returns { generated: N, skipped: string[], skippedDetails, missingInsuredSalary }
+ * Returns { generated: N, skipped: string[], skippedDetails, missingInsuredSalary, warnings }
  * (skipped = employee ids skipped — payslip already finalized, or the engine
  * could not derive a wage (no hourly_wage and no base salary); skippedDetails
  * carries the reason per id; missingInsuredSalary = 有保費規則但未設投保薪資者，
- * 其保費會被算成 0)。
+ * 其保費會被算成 0；warnings = 遲到說明老闆尚未決定（視為影響全勤）的人與筆數）。
  */
 payrollRouter.post(
   "/payroll/run",
@@ -182,6 +183,21 @@ payrollRouter.post(
         else daysByEmployee.set(row.employee_id, [day])
       }
       for (const [id, days] of snapshotDaysByEmployee) daysByEmployee.set(id, days)
+
+      // --- 遲到說明（2026-10-11）：老闆決定「不影響全勤」的日子全勤不累計（lateExempt）；
+      //     沒決定視為影響，並在回應 warnings 提醒 HR。快照的 payrollDays 在核准當下已凍結
+      //     lateExempt（services/attendance-sheets.ts buildPayrollDays），這裡不再改。
+      const lateReportsByEmployee = await loadLateReportsForPeriod(tenantId, period, employeeIds)
+      for (const [id, days] of daysByEmployee) {
+        if (snapshotDaysByEmployee.has(id)) continue
+        const exempt = exemptDatesOf(lateReportsByEmployee.get(id))
+        if (exempt.size > 0) daysByEmployee.set(id, days.map((d) => (exempt.has(d.date) ? { ...d, lateExempt: true } : d)))
+      }
+      const warnings = employeeIds.flatMap((id) => {
+        const count = undecidedCountOf(lateReportsByEmployee.get(id))
+        const message = undecidedLateWarning(count)
+        return message ? [{ employeeId: id, code: "late_reports_undecided" as const, count, message }] : []
+      })
 
       // --- already-finalized payslips for this period (locked, skip) ----------
       const { data: finData, error: finErr } = await supabaseAdmin
@@ -290,6 +306,7 @@ payrollRouter.post(
         missingInsuredSalary,
         allowanceReview,
         unapprovedSheets,
+        warnings,
       })
     } catch (err) {
       next(err)

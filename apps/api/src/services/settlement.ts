@@ -1,5 +1,6 @@
 import {
   computeAttendanceDay,
+  flexShiftDef,
   hhmmToMinutesOrNull,
   lunchWindowOf,
   resolveDefaultLunch,
@@ -65,6 +66,10 @@ const MS_PER_MIN = 60_000
 //     （attendance.defaultLunch，預設 12:00 起 60 分），工時扣「在班區間與午休的重疊」——
 //     09:00–18:00 ＝ 8 小時、加班 0（以前這裡休息 0 分，會記成 9 小時、加班 60 分）。
 //     遲到／早退對它沒有意義，下面一律歸零。
+//   • 沒排班的**工作日** → 彈性上班（@hr/rules flexShiftDef，attendance.flex，預設 08:00–10:00、
+//     480 分，2026-10-11 業主拍板）：08:00 前不算工時、10:00 後到算遲到、應下班＝clamp(上班卡,
+//     08:00, 10:00)＋8 小時＋午休重疊。這種日子的遲到／早退照算（不歸零）。例假日／國定假日沒有應
+//     上下班時間，不套彈性。
 
 interface PunchRow {
   employee_id: string
@@ -398,6 +403,131 @@ function wfhWorkedMinutes(
   return shiftNet > 0 ? shiftNet : fallbackMinutes
 }
 
+/**
+ * 某天要用哪個「班別」結算：有排班 → 該班；沒排班的工作日 → 彈性上班（attendance.flex 關閉時
+ * 退回整天）；例假日／國定假日沒排班 → 整天＋預設午休（沒有應上下班時間）。純函式。
+ */
+function pickDayShift(
+  scheduledShift: ShiftDef | null,
+  dayType: DayType,
+  flexShift: ShiftDef | null,
+  unscheduledShift: ShiftDef,
+): ShiftDef {
+  if (scheduledShift) return scheduledShift
+  if (dayType === "workday" && flexShift) return flexShift
+  return unscheduledShift
+}
+
+export interface ArrivalLateness {
+  /** 上班日（租戶時區）。 */
+  workDate: DateKey
+  /** 遲到分鐘（與結算同一個引擎算：整分鐘比較、扣掉午休與已核准請假）；不適用 → 0。 */
+  lateMinutes: number
+  /** 應上班的時間 'HH:MM'：彈性＝startUntil（10:00）、有排班＝班別上班時間；不適用 → null。 */
+  threshold: string | null
+  /** shift＝有排班；flex＝沒排班的工作日（彈性上班）；none＝沒有應上班時間（例假日、彈性關閉）。 */
+  mode: "shift" | "flex" | "none"
+}
+
+/**
+ * 打卡當下判斷「這張上班卡遲到幾分」（員工 POST /punch 的遲到理由檢查用）。
+ * 與 settleAttendance 用同一條路徑：當天班別（排班＋shifts.break_start）→ 沒排班的工作日走彈性上班 →
+ * 已核准請假的時段 → computeAttendanceDay 的 lateMinutes（把這張卡當成當天第一段的上班時間）。
+ * 例假日／國定假日沒排班 → mode 'none'、0 分。
+ */
+export async function lateMinutesForArrival(input: {
+  tenantId: string
+  employeeId: string
+  arrivalAt: string | Date
+}): Promise<ArrivalLateness> {
+  const { tenantId, employeeId } = input
+  const arrivalIso = new Date(input.arrivalAt).toISOString()
+  const tz = await getTenantTimezone(tenantId)
+  const workDate = localDateKey(arrivalIso, tz)
+  const { rules } = await loadRuleConfigFor(tenantId, workDate.slice(0, 7))
+
+  // 當天班別
+  const { data: schedRow, error: schedErr } = await supabaseAdmin
+    .from("schedules")
+    .select("shift_id")
+    .eq("tenant_id", tenantId)
+    .eq("employee_id", employeeId)
+    .eq("work_date", workDate)
+    .maybeSingle()
+  if (schedErr) throw new Error(`lateMinutesForArrival (schedules): ${schedErr.message}`)
+  let scheduledShift: ShiftDef | null = null
+  const shiftId = (schedRow as { shift_id?: string | null } | null)?.shift_id ?? null
+  if (shiftId) {
+    const loadShift = (cols: string) =>
+      supabaseAdmin.from("shifts").select(cols).eq("tenant_id", tenantId).eq("id", shiftId).maybeSingle()
+    let shiftRes = await loadShift("id, start_time, end_time, break_minutes, break_start")
+    if (shiftRes.error && isMissingColumnError(shiftRes.error)) {
+      warnSchemaGapOnce("shifts.break_start", shiftRes.error)
+      shiftRes = await loadShift("id, start_time, end_time, break_minutes")
+    }
+    if (shiftRes.error) throw new Error(`lateMinutesForArrival (shifts): ${shiftRes.error.message}`)
+    const row = shiftRes.data as unknown as ShiftRow | null
+    if (row) {
+      scheduledShift = {
+        start: row.start_time,
+        end: row.end_time,
+        breakMinutes: row.break_minutes ?? 0,
+        breakStart: row.break_start ?? null,
+      }
+    }
+  }
+
+  // 日屬性
+  const calendar = await loadCalendar(tenantId, workDate, workDate)
+  const wd = weekdayOfKey(workDate)
+  const dayType: DayType = calendar.get(workDate) ?? (wd === 0 || wd === 6 ? "rest_day" : "workday")
+
+  const shift = pickDayShift(scheduledShift, dayType, flexShiftDef(rules), unscheduledShiftDef(rules))
+  const mode: ArrivalLateness["mode"] = scheduledShift ? "shift" : shift.flex ? "flex" : "none"
+  if (mode === "none") return { workDate, lateMinutes: 0, threshold: null, mode }
+
+  // 已核准請假覆蓋當天的時段
+  const day = dayWindowUtc(workDate, tz)
+  const { data: leaveData, error: leaveErr } = await supabaseAdmin
+    .from("leave_requests")
+    .select("id, employee_id, leave_type_id, start_at, end_at, hours, segments")
+    .eq("tenant_id", tenantId)
+    .eq("employee_id", employeeId)
+    .eq("kind", "leave")
+    .eq("status", "approved")
+    .is("deleted_at", null)
+    .lt("start_at", day.endIso)
+    .gt("end_at", day.startIso)
+  if (leaveErr) throw new Error(`lateMinutesForArrival (leave_requests): ${leaveErr.message}`)
+  const leaveIntervals: TimeInterval[] = []
+  for (const req of (leaveData ?? []) as LeaveRequestRow[]) {
+    for (const slice of leaveIntervalsOf(req, {
+      tz,
+      from: workDate,
+      to: workDate,
+      shiftFor: () => scheduledShift,
+    })) {
+      leaveIntervals.push(slice.interval)
+    }
+  }
+
+  const arrival = toNaiveLocal(arrivalIso, tz)
+  const result = computeAttendanceDay([{ inAt: arrival, outAt: arrival }], shift, rules, {
+    date: workDate,
+    dayType,
+    leaveIntervals,
+  })
+  const threshold = shift.flex ? shift.flex.startUntil : scheduledShift ? normalizeHhmm(scheduledShift.start) : null
+  return { workDate, lateMinutes: result.lateMinutes, threshold, mode }
+}
+
+/** 'HH:MM:SS' → 'HH:MM'（DB time 欄位會回秒數）。 */
+function normalizeHhmm(value: string): string {
+  const m = hhmmToMinutesOrNull(value)
+  if (m == null) return value
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`
+}
+
 /** tenant_calendar_days in [from, to] → date → DayType (empty until 0038). */
 async function loadCalendar(tenantId: string, from: DateKey, to: DateKey): Promise<Map<DateKey, DayType>> {
   const map = new Map<DateKey, DayType>()
@@ -534,8 +664,9 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     )
   }
   const shiftFor = (empId: string, date: DateKey): ShiftDef | null => shiftByKey.get(`${empId}|${date}`) ?? null
-  // 沒排班的日子：整天＋租戶預設午休（見檔頭「午休」）。
+  // 沒排班的日子：整天＋租戶預設午休；工作日改彈性上班（見檔頭「午休」）。
   const unscheduledShift = unscheduledShiftDef(rules)
+  const flexShift = flexShiftDef(rules)
   const defaultLunch = resolveDefaultLunch(rules)
 
   // --- calendar → dayType ------------------------------------------------------
@@ -635,9 +766,11 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     const scheduledShift = shiftFor(empId, workDate)
     const dayType = dayTypeFor(workDate)
 
-    // 班別：有排班用該班（含午休設定），沒排班用「整天＋預設午休」。打卡的休息段已從
-    // pairs 切掉 → punchedBreaks 讓引擎不再扣午休（午休時窗仍用於遲到／早退）。
-    const shift: ShiftDef = scheduledShift ?? unscheduledShift
+    // 班別：有排班用該班（含午休設定）；沒排班的工作日用彈性上班；其他沒排班的日子用
+    // 「整天＋預設午休」。打卡的休息段已從 pairs 切掉 → punchedBreaks（只影響舊推算班別）。
+    const shift: ShiftDef = pickDayShift(scheduledShift, dayType, flexShift, unscheduledShift)
+    // 遲到／早退有意義＝有排班，或用彈性上班（有應上下班時間）；其餘歸零。
+    const hasExpectedTimes = !!scheduledShift || !!shift.flex
 
     const dayRegularMinutes = regularMinutesForDay(basis, scheduledShift, workDate, tz, regularMinutes)
     const result = computeAttendanceDay(day?.pairs ?? [], shift, rules, {
@@ -648,8 +781,8 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
       punchedBreaks: !!day && day.breaks.length > 0,
     })
     let workedMinutes = result.workedMinutes
-    let lateMinutes = scheduledShift ? result.lateMinutes : 0
-    let earlyLeaveMinutes = scheduledShift ? (result.earlyLeaveMinutes ?? 0) : 0
+    let lateMinutes = hasExpectedTimes ? result.lateMinutes : 0
+    let earlyLeaveMinutes = hasExpectedTimes ? (result.earlyLeaveMinutes ?? 0) : 0
 
     const leave = leaveByKey.get(key)
     const anomaly: Record<string, unknown> = {}
@@ -718,6 +851,7 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
 
 /** Exposed for the settlement unit tests (pure, no IO). */
 export const __internal = {
+  pickDayShift,
   sliceLeave,
   shiftWindowUtc,
   sliceWfhDates,

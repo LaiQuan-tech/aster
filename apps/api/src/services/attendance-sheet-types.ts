@@ -47,6 +47,8 @@ export type AnomalyCode =
   | "consecutive_late"
   | "pending_leave_in_period"
   | "no_salary_structure"
+  /** 2026-10-11：本月有遲到說明老闆還沒決定（視為影響全勤；warn）。 */
+  | "late_reports_undecided"
 
 export interface SheetAnomaly {
   code: AnomalyCode
