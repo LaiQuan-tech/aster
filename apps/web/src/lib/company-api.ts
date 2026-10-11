@@ -56,6 +56,8 @@ export function putMailbox(
 export interface Vendor {
   id: string
   name: string
+  /** 簡稱：列表、下拉與搜尋用，可空（最長 40 字）。選填欄位：web 先於 API 部署時舊回應沒有這個鍵。 */
+  shortName?: string | null
   category: string | null
   contactName: string | null
   title: string | null
@@ -80,6 +82,13 @@ export interface Vendor {
 export type VendorInput = Partial<Omit<Vendor, "id" | "taxIdValid" | "hasCard" | "createdAt" | "updatedAt">> & {
   name: string
   cardStoragePath?: string | null
+}
+/**
+ * 廠商下拉選項的顯示字：有簡稱顯示「簡稱（全名）」，沒有（或簡稱與全名相同）只顯示全名。
+ * 只影響顯示——選下去存的、帶進表單的仍是全名（payeeName／vendorName 等）。
+ */
+export function vendorOptionLabel(v: Pick<Vendor, "name" | "shortName">): string {
+  return v.shortName && v.shortName !== v.name ? `${v.shortName}（${v.name}）` : v.name
 }
 export function listVendors(q?: string) {
   return apiFetch<{ vendors: Vendor[] }>(`/vendors${q ? `?q=${encodeURIComponent(q)}` : ""}`)

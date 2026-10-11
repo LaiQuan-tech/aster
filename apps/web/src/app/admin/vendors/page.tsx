@@ -17,21 +17,22 @@ import {
  * 文字組裝與剪貼簿三段式退路共用 lib/remittance.ts（與放款單明細頁同一份）。
  */
 type Form = {
-  name: string; category: string; contactName: string; title: string; phone: string; mobile: string;
+  name: string; shortName: string; category: string; contactName: string; title: string; phone: string; mobile: string;
   email: string; address: string; taxId: string; website: string; note: string;
   bankName: string; bankCode: string; bankAccount: string; accountHolder: string;
 };
 const emptyForm = (): Form => ({
-  name: "", category: "", contactName: "", title: "", phone: "", mobile: "", email: "", address: "", taxId: "", website: "", note: "",
+  name: "", shortName: "", category: "", contactName: "", title: "", phone: "", mobile: "", email: "", address: "", taxId: "", website: "", note: "",
   bankName: "", bankCode: "", bankAccount: "", accountHolder: "",
 });
 const fromVendor = (v: Vendor): Form => ({
-  name: v.name, category: v.category ?? "", contactName: v.contactName ?? "", title: v.title ?? "", phone: v.phone ?? "", mobile: v.mobile ?? "",
+  name: v.name, shortName: v.shortName ?? "", category: v.category ?? "", contactName: v.contactName ?? "", title: v.title ?? "", phone: v.phone ?? "", mobile: v.mobile ?? "",
   email: v.email ?? "", address: v.address ?? "", taxId: v.taxId ?? "", website: v.website ?? "", note: v.note ?? "",
   bankName: v.bankName ?? "", bankCode: v.bankCode ?? "", bankAccount: v.bankAccount ?? "", accountHolder: v.accountHolder ?? "",
 });
 const toInput = (f: Form): VendorInput => ({
   name: f.name.trim(),
+  shortName: f.shortName.trim() || null,
   category: f.category.trim() || null, contactName: f.contactName.trim() || null, title: f.title.trim() || null,
   phone: f.phone.trim() || null, mobile: f.mobile.trim() || null, email: f.email.trim() || null, address: f.address.trim() || null,
   taxId: f.taxId.trim() || null, website: f.website.trim() || null, note: f.note.trim() || null,
@@ -144,10 +145,10 @@ export default function VendorsPage() {
     try { await deleteVendor(v.id); await load(); } catch (err) { setError(err instanceof Error ? err.message : "刪除失敗"); }
   }
 
-  const F = (k: keyof Form, label: string, ph?: string) => (
+  const F = (k: keyof Form, label: string, ph?: string, maxLength?: number) => (
     <div>
       <label className={labelCls}>{label}</label>
-      <input className={inputCls} value={form[k]} onChange={(e) => setForm((f) => ({ ...f, [k]: e.target.value }))} placeholder={ph} />
+      <input className={inputCls} value={form[k]} onChange={(e) => setForm((f) => ({ ...f, [k]: e.target.value }))} placeholder={ph} maxLength={maxLength} />
     </div>
   );
 
@@ -157,7 +158,7 @@ export default function VendorsPage() {
 
       <Card>
         <div className="mb-3 flex flex-wrap items-center gap-3">
-          <input className={`${inputCls} max-w-xs`} value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜尋名稱 / 窗口 / 統編 / 電話 / 類別" />
+          <input className={`${inputCls} max-w-xs`} value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜尋名稱 / 簡稱 / 窗口 / 統編 / 電話 / 類別" />
           <input ref={fileRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => void onPickCard(e.target.files?.[0])} />
           <button type="button" onClick={() => fileRef.current?.click()} disabled={busy} className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 disabled:opacity-50">
             📷 拍名片建檔
@@ -173,6 +174,7 @@ export default function VendorsPage() {
               <thead>
                 <tr className="border-b text-left text-xs text-gray-500">
                   <th className="py-2 pr-3">廠商</th>
+                  <th className="py-2 pr-3">簡稱</th>
                   <th className="py-2 pr-3">類別</th>
                   <th className="py-2 pr-3">窗口</th>
                   <th className="py-2 pr-3">電話 / 手機</th>
@@ -192,6 +194,7 @@ export default function VendorsPage() {
                       {v.name}
                       {v.hasCard && <span className="ml-1 text-xs text-gray-400" title="有名片影像">🪪</span>}
                     </td>
+                    <td className="py-2 pr-3 text-gray-600">{v.shortName || "—"}</td>
                     <td className="py-2 pr-3 text-gray-600">{v.category ?? "—"}</td>
                     <td className="py-2 pr-3 text-gray-600">{v.contactName ?? "—"}{v.title ? <span className="text-xs text-gray-400">・{v.title}</span> : null}</td>
                     <td className="py-2 pr-3 text-gray-600">{[v.phone, v.mobile].filter(Boolean).join(" / ") || "—"}</td>
@@ -232,6 +235,7 @@ export default function VendorsPage() {
           <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_260px]">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {F("name", "廠商 / 公司名稱 *")}
+              {F("shortName", "簡稱", "選填，最長 40 字", 40)}
               {F("category", "類別", "例：印刷、建材、顧問")}
               {F("contactName", "窗口姓名")}
               {F("title", "職稱")}

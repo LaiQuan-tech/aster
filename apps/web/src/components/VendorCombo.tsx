@@ -1,10 +1,12 @@
 "use client";
 
 import { inputCls } from "@/components/admin-ui";
-import type { Vendor } from "@/lib/company-api";
+import { vendorOptionLabel, type Vendor } from "@/lib/company-api";
 
 /** 廠商挑選：可選名冊裡的 vendor，也可以直接輸入自由文字名稱。兩者並存
- * （選了 vendor 就把名稱一併帶入，之後改名冊不影響這裡已存的字串）。 */
+ * （選了 vendor 就把名稱一併帶入，之後改名冊不影響這裡已存的字串）。
+ * 選項有簡稱時顯示「簡稱（全名）」（vendorOptionLabel）；`<select>` 沒有前端篩選，
+ * 簡稱放前面是讓鍵盤直接打簡稱就能跳到那一項。帶入的名稱仍是全名。 */
 export function VendorCombo({
   vendors,
   vendorId,
@@ -29,7 +31,7 @@ export function VendorCombo({
       >
         <option value="">自由輸入／未建檔</option>
         {vendors.map((v) => (
-          <option key={v.id} value={v.id}>{v.name}</option>
+          <option key={v.id} value={v.id}>{vendorOptionLabel(v)}</option>
         ))}
       </select>
       <input

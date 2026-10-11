@@ -58,8 +58,8 @@ const VENDOR_ROW = {
   updated_at: "2026-10-01T00:00:00+00:00",
 }
 
-/** routes/vendors.ts 的 or() 依序比對的六個欄位。 */
-const SEARCH_COLS = ["name", "contact_name", "category", "tax_id", "phone", "mobile"]
+/** routes/vendors.ts 的 or() 依序比對的七個欄位（short_name 簡稱由 0060 加入）。 */
+const SEARCH_COLS = ["name", "short_name", "contact_name", "category", "tax_id", "phone", "mobile"]
 const expectedOr = (needle: string) => SEARCH_COLS.map((col) => `${col}.ilike.%${needle}%`).join(",")
 
 const vendorChains = () => sb.chains.filter((chain) => chain.table === "vendors")
@@ -77,7 +77,7 @@ function soleOrFilter(): string {
   return ors[0][0] as string
 }
 
-/** or 條件拆回六段：欄位順序不變、每段都是 `<col>.ilike.%<needle>%`，needle 不含 % _ , ( )。 */
+/** or 條件拆回七段：欄位順序不變、每段都是 `<col>.ilike.%<needle>%`，needle 不含 % _ , ( )。 */
 function needlesOf(filter: string): string[] {
   const terms = filter.split(",")
   expect(terms).toHaveLength(SEARCH_COLS.length)
@@ -103,7 +103,7 @@ describe("GET /vendors?q= — 剝除 % _ , ( )", () => {
     ["開括號", "(測試廠商甲", "測試廠商甲"],
     ["LIKE 萬用字元", "50%_折扣", "50折扣"],
     ["全部混在一起", "%_,()測試(廠商),甲_%", "測試廠商甲"],
-  ])("%s：剝完才進 or()，仍是六段 ilike、不多出條件", async (_label, q, needle) => {
+  ])("%s：剝完才進 or()，仍是七段 ilike、不多出條件", async (_label, q, needle) => {
     const res = await search(q)
 
     expect(res.status).toBe(200)
@@ -117,7 +117,7 @@ describe("GET /vendors?q= — 搜尋字串長度上限", () => {
   it.each([
     ["8000 個英文字", "a".repeat(8000), "a"],
     ["1000 個中文字", "字".repeat(1000), "字"],
-  ])("%s的 q：六段 ilike 的 needle 各恰好 100 字", async (_label, q, ch) => {
+  ])("%s的 q：七段 ilike 的 needle 各恰好 100 字", async (_label, q, ch) => {
     const res = await search(q)
 
     expect(res.status).toBe(200)

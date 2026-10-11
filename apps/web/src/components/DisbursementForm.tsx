@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { inputCls, labelCls, PrimaryButton, ErrorText } from "@/components/admin-ui";
-import type { Vendor } from "@/lib/company-api";
+import { vendorOptionLabel, type Vendor } from "@/lib/company-api";
 import { companyOptions } from "@/lib/company-options";
 import type { Company } from "@/lib/projects-ext-api";
 import {
@@ -375,7 +375,7 @@ export default function DisbursementForm({
             <select className={inputCls} value={state.vendorId} onChange={(e) => handleVendorSelect(e.target.value)}>
               <option value="">選擇廠商…</option>
               {vendors.map((v) => (
-                <option key={v.id} value={v.id}>{v.name}</option>
+                <option key={v.id} value={v.id}>{vendorOptionLabel(v)}</option>
               ))}
             </select>
           </div>

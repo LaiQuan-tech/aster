@@ -23,8 +23,9 @@ export const vendorsRouter = Router()
 const BUCKET = "vendor-cards"
 const MAX_BYTES = 8 * 1024 * 1024
 // 收款帳戶四欄（bank_*／account_holder）由 packages/db 0041 加入，放款專區建立匯款時預填。
+// short_name（簡稱）由 0060 加入，已套正式庫，直接 select（比照 clients.short_name，不另做退路）。
 const COLS =
-  "id, tenant_id, name, category, contact_name, title, phone, mobile, email, address, tax_id, website, bank_name, bank_code, bank_account, account_holder, note, card_storage_path, source, created_by_emp_id, created_at, updated_at, deleted_at"
+  "id, tenant_id, name, short_name, category, contact_name, title, phone, mobile, email, address, tax_id, website, bank_name, bank_code, bank_account, account_holder, note, card_storage_path, source, created_by_emp_id, created_at, updated_at, deleted_at"
 /** 正式庫尚未套 0041 時的退路（見 lib/schema-compat.ts 的部署順序說明）。 */
 const COLS_LEGACY =
   "id, tenant_id, name, category, contact_name, title, phone, mobile, email, address, tax_id, website, note, card_storage_path, source, created_by_emp_id, created_at, updated_at, deleted_at"
@@ -49,6 +50,8 @@ async function withVendorCols<T>(
 
 const vendorBody = z.object({
   name: z.string().trim().min(1).max(120),
+  /** 簡稱：列表／下拉顯示與搜尋用，最長 40 字，可空（空字串視為清除）。 */
+  shortName: z.string().trim().max(40).nullable().optional(),
   category: z.string().trim().max(60).nullable().optional(),
   contactName: z.string().trim().max(60).nullable().optional(),
   title: z.string().trim().max(60).nullable().optional(),
@@ -83,6 +86,7 @@ function serialize(r: Record<string, unknown>) {
   return {
     id: r.id,
     name: r.name,
+    shortName: r.short_name ?? null,
     category: r.category ?? null,
     contactName: r.contact_name ?? null,
     title: r.title ?? null,
@@ -108,7 +112,7 @@ function serialize(r: Record<string, unknown>) {
 function toRow(b: z.infer<typeof vendorBody>): Record<string, unknown> {
   const row: Record<string, unknown> = {}
   const map: Array<[keyof typeof b, string]> = [
-    ["name", "name"], ["category", "category"], ["contactName", "contact_name"], ["title", "title"],
+    ["name", "name"], ["shortName", "short_name"], ["category", "category"], ["contactName", "contact_name"], ["title", "title"],
     ["phone", "phone"], ["mobile", "mobile"], ["email", "email"], ["address", "address"],
     ["taxId", "tax_id"], ["website", "website"],
     ["bankName", "bank_name"], ["bankCode", "bank_code"], ["bankAccount", "bank_account"], ["accountHolder", "account_holder"],
@@ -131,7 +135,7 @@ vendorsRouter.get("/vendors", requireAuth, requireTenant, async (req: Request, r
       let query = supabaseAdmin.from("vendors").select(cols).eq("tenant_id", tenantId).is("deleted_at", null)
       if (q) {
         const like = `%${sanitizeSearchTerm(q)}%`
-        query = query.or(`name.ilike.${like},contact_name.ilike.${like},category.ilike.${like},tax_id.ilike.${like},phone.ilike.${like},mobile.ilike.${like}`)
+        query = query.or(`name.ilike.${like},short_name.ilike.${like},contact_name.ilike.${like},category.ilike.${like},tax_id.ilike.${like},phone.ilike.${like},mobile.ilike.${like}`)
       }
       return query.order("name", { ascending: true })
     })
