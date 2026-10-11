@@ -71,7 +71,7 @@ export default function AttendanceSheetPage() {
         if (active) setPending(res.sheets);
       })
       .catch(() => {
-        // 非主管會 403，或該角色端點本來就回空——一律視為隱藏區塊，不當成錯誤顯示。
+        // 讀取失敗一律視為隱藏區塊，不當成錯誤顯示。
         if (active) setPending([]);
       });
     return () => {
@@ -111,6 +111,9 @@ export default function AttendanceSheetPage() {
       setSubmitting(false);
     }
   }
+
+  // scope=mine 的名單一律含本人：自己送出的月表不能自己審（API 會 403），從「待我審核」排除。
+  const reviewable = (pending ?? []).filter((row) => row.employeeId !== sheet?.employeeId);
 
   return (
     <div className="space-y-4">
@@ -174,10 +177,10 @@ export default function AttendanceSheetPage() {
         )}
       </Card>
 
-      {pending && pending.length > 0 && (
+      {reviewable.length > 0 && (
         <Card title="待我審核" className="no-print">
           <div className="space-y-2">
-            {pending.map((row) => (
+            {reviewable.map((row) => (
               <Link
                 key={row.id}
                 href={`/ess/attendance-sheet/${row.id}`}
