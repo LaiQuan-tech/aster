@@ -573,6 +573,10 @@ export interface LeaveRequest {
   location: string | null;
   remark: string | null;
   segments: unknown;
+  /** 出差／公出、零用金的預估花費（元）；其他種類與沒填＝null。numeric 可能以字串回（"1200.00"）。 */
+  estimated_cost?: number | string | null;
+  /** 出差／公出、零用金的預支金額（元）；沒預支（自行墊付）＝null 或 0。 */
+  advance_requested?: number | string | null;
   status: RequestStatus;
   current_step: number;
   /** 目前關卡的第一位候選簽核人（相容欄位）；多人候選請看 `current_candidate_emp_ids`。 */

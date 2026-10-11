@@ -539,7 +539,6 @@ export interface PendingApproval extends LeaveRequest {
   payout?: "pay" | "comp_time" | null;
   location?: string | null;
   remark?: string | null;
-  advance_requested?: string | number | null;
 }
 
 /** 「輪到我簽」的單；任何角色都可呼叫，沒有就是空陣列。 */

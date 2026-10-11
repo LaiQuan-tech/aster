@@ -15,7 +15,7 @@
  */
 import type { ApprovalFlow, Department, Employee, LeaveRequest, RequestKind, RequestStatus } from "./admin-api";
 import type { LeaveSegment } from "./ess-api";
-import { localDateKey, fmtHm } from "./ess-format";
+import { localDateKey, fmtHm, fmtMoney } from "./ess-format";
 import { summarizeSegment } from "./ess-notifications";
 import { formatLeaveDuration, formatRequestHours } from "./leave-duration";
 
@@ -442,8 +442,51 @@ function leaveSegmentsOf(value: unknown): LeaveSegment[] {
   return out;
 }
 
+/* ------------------------------------------------ 金額（出差／公出、零用金）----- */
+
+export interface RequestAmounts {
+  /** 預估花費（元）；沒填＝null。 */
+  estimatedCost: number | null;
+  /** 申請預支金額（元）；沒預支（沒帶或 0）＝null。 */
+  advance: number | null;
+}
+
+/** 金額欄位可能是數字或數字字串（PostgREST 的 numeric 常以字串回，例 "1200.00"）；空、非數字、負數＝null。 */
+function moneyOf(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const n = typeof value === "number" ? value : Number(String(value).replace(/,/g, ""));
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 /**
- * 「內容」欄（原 approvals `contentLines`）：第一行期間＋時數，之後原因／地點／代理人／類型／給付。
+ * 簽核者要看的金額（2026-10-11：主管與老闆核准時要看得到錢）：**只有出差／公出（business_trip）與零用金（petty_cash）**
+ * 才有；其他種類一律 null。API 的 GET /requests 與 /requests/pending-approvals 每列都回 `estimated_cost`、
+ * `advance_requested`（REQUEST_COLS）。
+ *   • 預估花費：出差的「預估此趟總花費」，或零用金「自行墊付」時要核的金額；沒填＝null（先預支的零用金只有預支金額）。
+ *   • 預支：有預支（> 0）才有；沒預支＝自行墊付、回來報銷。
+ */
+export function requestAmountsOf(row: {
+  kind: string;
+  estimated_cost?: number | string | null;
+  advance_requested?: number | string | null;
+}): RequestAmounts {
+  if (row.kind !== "business_trip" && row.kind !== "petty_cash") return { estimatedCost: null, advance: null };
+  const advance = moneyOf(row.advance_requested);
+  return { estimatedCost: moneyOf(row.estimated_cost), advance: advance !== null && advance > 0 ? advance : null };
+}
+
+/** 金額文字行：「預估花費 NT$ 1,200」「預支 NT$ 500」（有才有，順序固定先預估後預支）；沒有金額 → []。 */
+export function requestAmountLines(row: Parameters<typeof requestAmountsOf>[0]): string[] {
+  const { estimatedCost, advance } = requestAmountsOf(row);
+  const lines: string[] = [];
+  if (estimatedCost !== null) lines.push(`預估花費 ${fmtMoney(estimatedCost)}`);
+  if (advance !== null) lines.push(`預支 ${fmtMoney(advance)}`);
+  return lines;
+}
+
+/**
+ * 「內容」欄（原 approvals `contentLines`）：第一行期間＋時數，之後原因／地點／代理人／類型／金額／給付。
+ * 出差／公出與零用金的單在類型之後多兩行金額：「預估花費 NT$ …」、有預支時再加「預支 NT$ …」（見 requestAmountLines）。
  * 結束時間缺席／無效，或與起始同一分鐘（補卡單 startAt = endAt）→ 只顯示起始。
  * 時數：請假寫成天＋時（2026-10-11 業主決定，1 天 ＝ 8 小時，例「（1 天 7 時）」），其他類型（加班、出差…）維持「（N 小時）」。
  * 請假若跨多天、而且各天的時段不一樣（首日從中途開始、末日只請到中途），第二行逐日列出
@@ -464,6 +507,7 @@ export function contentLines(row: LeaveRequest): string[] {
   if (row.location) lines.push(`地點：${row.location}`);
   if (row.agent_name) lines.push(`代理人：${row.agent_name}`);
   if (row.trip_type) lines.push(`類型：${row.trip_type === "outing" ? "公出" : "出差"}`);
+  lines.push(...requestAmountLines(row));
   if (row.payout) lines.push(`加班給付：${row.payout === "pay" ? "加班費" : "補休"}`);
   return lines;
 }

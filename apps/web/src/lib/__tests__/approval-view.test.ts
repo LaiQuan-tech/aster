@@ -22,6 +22,8 @@ import {
   parseApprovalView,
   pendingCounts,
   resolveApproverId,
+  requestAmountLines,
+  requestAmountsOf,
   rowsForView,
   statsOf,
   statusParamFor,
@@ -617,5 +619,68 @@ describe("contentLines（內容欄）", () => {
     const messy = request({ segments: [{ nope: 1 }, null, { date: "2026-10-13", startTime: "14:00", endTime: "18:00", hours: 4 }] });
     expect(contentLines(messy)).toHaveLength(1);
     expect(contentLines(messy).join("\n")).not.toContain("undefined");
+  });
+});
+
+/* ------------------------------------------------ 金額（出差／公出、零用金）--- */
+
+describe("requestAmountsOf — 簽核者要看的金額（2026-10-11）", () => {
+  it("出差／公出：預估花費＋預支都有；金額可以是數字或 PostgREST 的數字字串", () => {
+    expect(requestAmountsOf({ kind: "business_trip", estimated_cost: 12000, advance_requested: 5000 })).toEqual({ estimatedCost: 12000, advance: 5000 });
+    expect(requestAmountsOf({ kind: "business_trip", estimated_cost: "12000.00", advance_requested: "5,000.50" })).toEqual({ estimatedCost: 12000, advance: 5000.5 });
+  });
+
+  it("零用金：自行墊付只有預估花費（要核的金額）；先預支只有預支金額", () => {
+    expect(requestAmountsOf({ kind: "petty_cash", estimated_cost: 800, advance_requested: null })).toEqual({ estimatedCost: 800, advance: null });
+    expect(requestAmountsOf({ kind: "petty_cash", estimated_cost: null, advance_requested: 3000 })).toEqual({ estimatedCost: null, advance: 3000 });
+  });
+
+  it("沒預支（沒帶、null、0）→ advance null；預估花費 0 照實回 0（員工自己填的）", () => {
+    for (const advance_requested of [undefined, null, 0, "0", "0.00", ""]) {
+      expect(requestAmountsOf({ kind: "business_trip", estimated_cost: 500, advance_requested }).advance, String(advance_requested)).toBeNull();
+    }
+    expect(requestAmountsOf({ kind: "business_trip", estimated_cost: 0 }).estimatedCost).toBe(0);
+  });
+
+  it("沒填、非數字、負數 → null，不印 NaN／undefined", () => {
+    for (const value of [undefined, null, "", "abc", Number.NaN, -5, "-5"]) {
+      expect(requestAmountsOf({ kind: "business_trip", estimated_cost: value as never, advance_requested: value as never }), String(value)).toEqual({
+        estimatedCost: null,
+        advance: null,
+      });
+    }
+  });
+
+  it("其他種類（請假、加班、補卡、在家工作）一律沒有金額——就算資料列殘留了值", () => {
+    for (const kind of ["leave", "ot", "fix_punch", "wfh"]) {
+      expect(requestAmountsOf({ kind, estimated_cost: 999, advance_requested: 999 }), kind).toEqual({ estimatedCost: null, advance: null });
+    }
+  });
+});
+
+describe("requestAmountLines／contentLines — 後台簽核頁的金額行", () => {
+  it("出差：「預估花費 NT$ 12,000」＋有預支再加「預支 NT$ 5,000」，接在類型之後、給付之前", () => {
+    const lines = contentLines(
+      request({ kind: "business_trip", hours: null, reason: "台中客戶會議", location: "台中", trip_type: "business_trip", estimated_cost: 12000, advance_requested: 5000 }),
+    );
+    expect(lines.slice(1)).toEqual(["台中客戶會議", "地點：台中", "類型：出差", "預估花費 NT$ 12,000", "預支 NT$ 5,000"]);
+  });
+
+  it("沒預支只有預估花費；數字字串與小數也格式化（NT$ 1,200.5）", () => {
+    expect(requestAmountLines({ kind: "business_trip", estimated_cost: "1200.50", advance_requested: null })).toEqual(["預估花費 NT$ 1,200.5"]);
+    expect(requestAmountLines({ kind: "petty_cash", estimated_cost: 800 })).toEqual(["預估花費 NT$ 800"]);
+  });
+
+  it("零用金先預支只有「預支 NT$ …」", () => {
+    const lines = contentLines(request({ kind: "petty_cash", hours: null, reason: "採買活動物資", advance_requested: 3000 }));
+    expect(lines.slice(1)).toEqual(["採買活動物資", "預支 NT$ 3,000"]);
+  });
+
+  it("沒有金額的單、其他種類：行數與以前完全一樣（沒有多出任何金額行）", () => {
+    expect(contentLines(request({ kind: "business_trip", hours: null }))).toHaveLength(1);
+    expect(contentLines(request({ kind: "petty_cash", hours: null, reason: "文具" }))).toHaveLength(2);
+    expect(contentLines(request({ kind: "leave", hours: 8, estimated_cost: 999, advance_requested: 999 }))).toHaveLength(1);
+    expect(contentLines(request({ kind: "ot", hours: 2, estimated_cost: 999, advance_requested: 999 }))).toHaveLength(1);
+    expect(requestAmountLines({ kind: "wfh", estimated_cost: 5 })).toEqual([]);
   });
 });

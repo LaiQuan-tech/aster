@@ -33,6 +33,7 @@ import {
   DISBURSEMENT_STEP_KIND_LABELS,
   type PendingDisbursementApproval,
 } from "@/lib/disbursements-api";
+import { requestAmountsOf } from "@/lib/approval-view";
 import { fmtDateTime, fmtMoney, relativeTime } from "@/lib/ess-format";
 import { summarizeSegments } from "@/lib/ess-notifications";
 import { formatRequestHours } from "@/lib/leave-duration";
@@ -75,6 +76,9 @@ type RequestAttachment = { id: string; fileName: string; sizeBytes: number; cont
  * /requests/batch-decision（逐張檢查是不是輪到我簽；不是的那張回錯誤、其他照常），送出後在頂部
  * 顯示結果（成功 N、失敗 M 與各張原因）並重抓清單。放款單是另一套 API、沒有批次端點，維持逐張。
  * 純函式與 API 呼叫在 lib/ess-approval-batch.ts。
+ *
+ * 2026-10-11：出差／公出、零用金的卡片多顯示「預估花費」，有預支再加「預支」，主管與老闆核准時看得到金額
+ * （lib/approval-view.ts 的 requestAmountsOf；API 每列都回 estimated_cost／advance_requested）。
  */
 
 const KIND_LABEL: Record<RequestKind, string> = {
@@ -532,7 +536,8 @@ export default function ApprovalsPage() {
             const attachmentCount = row.attachment_count;
             const attachmentsOpen = expandedAttachmentsId === row.id;
             const reason = row.reason?.trim();
-            const advance = row.advance_requested != null ? Number(row.advance_requested) : 0;
+            // 出差／公出、零用金的金額（主管與老闆核准時要看得到錢）：預估花費、預支（有才有）。
+            const amounts = requestAmountsOf(row);
             const checked = selecting && selectedSet.has(row.id);
             return (
               <li key={row.id}>
@@ -587,8 +592,8 @@ export default function ApprovalsPage() {
                     </div>
                   </div>
 
-                  {/* 身：期間、事由、地點／預支（有才顯示）、附件 */}
-                  <dl className="mt-3 grid grid-cols-[3.25rem_1fr] gap-x-2 gap-y-1.5 text-sm text-gray-700">
+                  {/* 身：期間、事由、地點／預估花費／預支（有才顯示）、附件。標籤欄 4.5rem：放得下「預估花費」四個字 */}
+                  <dl className="mt-3 grid grid-cols-[4.5rem_1fr] gap-x-2 gap-y-1.5 text-sm text-gray-700">
                     <dt className="text-gray-400">期間</dt>
                     <dd className="whitespace-pre-line">{periodText(row)}</dd>
                     <dt className="text-gray-400">事由</dt>
@@ -601,10 +606,16 @@ export default function ApprovalsPage() {
                         <dd className="break-words">{row.location}</dd>
                       </>
                     )}
-                    {advance > 0 && (
+                    {amounts.estimatedCost !== null && (
+                      <>
+                        <dt className="text-gray-400">預估花費</dt>
+                        <dd>{fmtMoney(amounts.estimatedCost)}</dd>
+                      </>
+                    )}
+                    {amounts.advance !== null && (
                       <>
                         <dt className="text-gray-400">預支</dt>
-                        <dd>{fmtMoney(advance)}</dd>
+                        <dd>{fmtMoney(amounts.advance)}</dd>
                       </>
                     )}
                     {row.remark && (
