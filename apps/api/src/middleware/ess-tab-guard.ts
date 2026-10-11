@@ -51,11 +51,18 @@ interface RouteTabRule {
   tab: string
   exact?: boolean
   methods?: readonly string[]
+  /** 路徑帶參數的路由（例如 /requests/:id/approve）：有 pattern 就改用它比對整條路徑，`exact` 與前綴規則都不看。 */
+  pattern?: RegExp
 }
 
 const ROUTE_TABS: readonly RouteTabRule[] = [
-  // 「待我簽核」必須排在 /requests 之前，否則會被前綴規則吃掉。
+  // 簽核動作屬「簽核」分頁（approvals），不是「請假申請」（requests）：待我簽核的清單、批次簽核、單筆核准／駁回
+  // 都歸 approvals。這幾條必須排在 /requests 之前，否則會被前綴規則吃掉。
+  // （以前批次簽核與單筆核准／駁回被歸在 requests：essTabs 開了「簽核」沒開「請假申請」的人前端看得到簽核頁卻
+  // 按不下去，反過來沒開「簽核」、有開「請假申請」的人還能直接打 API 簽核。）
   { path: "/requests/pending-approvals", tab: "approvals" },
+  { path: "/requests/batch-decision", tab: "approvals", exact: true },
+  { path: "/requests/:id/approve|reject", tab: "approvals", pattern: /^\/requests\/[^/]+\/(?:approve|reject)$/ },
   { path: "/requests", tab: "requests" },
   { path: "/leave-balances", tab: "balances" },
   { path: "/my/attendance-sheet", tab: "sheet" },
@@ -83,6 +90,7 @@ const MYDATA_EMPLOYEE_SUBPATHS = ["profile", "certifications", "educations", "wo
 const MYDATA_TOP_PREFIXES = ["/certifications", "/educations", "/work-history"]
 
 function matches(path: string, rule: RouteTabRule): boolean {
+  if (rule.pattern) return rule.pattern.test(path)
   if (rule.exact) return path === rule.path
   return path === rule.path || path.startsWith(`${rule.path}/`) || path.startsWith(`${rule.path}?`)
 }

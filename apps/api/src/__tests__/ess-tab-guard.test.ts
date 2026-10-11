@@ -20,12 +20,28 @@ const SUPABASE_URL = process.env.SUPABASE_URL ?? ""
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ?? ""
 
 describe("tabForRoute（路由 → ESS 分頁對照表，純函式）", () => {
-  it("申請與簽核：/requests/pending-approvals 先比對到 approvals，其餘 /requests* 是 requests", () => {
+  it("申請與簽核：待我簽核、批次簽核、單筆核准／駁回都是 approvals，其餘 /requests* 是 requests", () => {
     expect(tabForRoute("GET", "/requests/pending-approvals")).toBe("approvals")
+    // 簽核動作屬「簽核」分頁（以前被歸在 requests）
+    expect(tabForRoute("POST", "/requests/batch-decision")).toBe("approvals")
+    expect(tabForRoute("POST", "/requests/abc-123/approve")).toBe("approvals")
+    expect(tabForRoute("POST", "/requests/abc-123/reject")).toBe("approvals")
+    expect(tabForRoute("POST", "/requests/batch-decision/")).toBe("approvals") // 結尾斜線正規化
+    // 送單、撤回、補附件、提醒、出差報告、註銷、換簽核人仍是「請假申請」
     expect(tabForRoute("GET", "/requests")).toBe("requests")
     expect(tabForRoute("POST", "/requests")).toBe("requests")
     expect(tabForRoute("POST", "/requests/abc-123/cancel")).toBe("requests")
     expect(tabForRoute("POST", "/requests/abc-123/attachments")).toBe("requests")
+    expect(tabForRoute("POST", "/requests/abc-123/remind")).toBe("requests")
+    expect(tabForRoute("POST", "/requests/abc-123/change-approver")).toBe("requests")
+    expect(tabForRoute("PATCH", "/requests/abc-123/trip-report")).toBe("requests")
+    expect(tabForRoute("DELETE", "/requests/abc-123")).toBe("requests")
+    // 只認 /requests/:id/approve|reject 的完整形狀，不會誤傷長得像的路徑
+    expect(tabForRoute("POST", "/requests/abc-123/approve/extra")).toBe("requests")
+    expect(tabForRoute("POST", "/requests/abc-123/approved")).toBe("requests")
+    expect(tabForRoute("POST", "/requests/approve")).toBe("requests")
+    expect(tabForRoute("POST", "/requests-archive/abc/approve")).toBeNull()
+    expect(tabForRoute("POST", "/disbursements/abc/approve")).toBeNull() // 放款單的簽核不在 ESS 分頁對照表
   })
 
   it("其餘分頁：假別餘額／月表／薪資單／報銷／分潤／專案／考核／職缺／AI／公司／通知／班表", () => {
