@@ -16,6 +16,8 @@ export const shifts = pgTable("shifts", {
   startTime: text("start_time").notNull(),
   endTime: text("end_time").notNull(),
   breakMinutes: integer("break_minutes").notNull().default(0),
+  /** 午休開始時間（HH:MM）；空＝班別涵蓋 12:00 時用 12:00，否則沿用舊推算。 */
+  breakStart: text("break_start"),
   isNightShift: boolean("is_night_shift").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 })

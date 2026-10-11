@@ -17,6 +17,8 @@ export const vendors = pgTable(
       .notNull()
       .references(() => tenants.id),
     name: text("name").notNull(),
+    /** 簡稱：列表、下拉與搜尋用，可空。 */
+    shortName: text("short_name"),
     category: text("category"),
     contactName: text("contact_name"),
     title: text("title"),

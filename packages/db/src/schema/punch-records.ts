@@ -44,6 +44,8 @@ export const punchRecords = pgTable(
      * packages/db/migrations（本欄新增的同一支 migration）。
      */
     geoStatus: text("geo_status"),
+    /** 打卡時的來源 IP（x-forwarded-for 第一段），供管理者查驗。 */
+    ipAddress: text("ip_address"),
     requestId: uuid("request_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

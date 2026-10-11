@@ -55,6 +55,8 @@ export const contracts = pgTable(
     ourRole: text("our_role").notNull().default("contractor"),
     title: text("title").notNull(),
     counterparty: text("counterparty"),
+    /** 合約內容／說明（受合約權限保護，只有該案經理、承辦與 HR 看得到）。 */
+    contentNote: text("content_note"),
     amount: numeric("amount"),
     /** 專案正式金額的唯一來源。作廢列不占用主合約名額。 */
     isPrimary: boolean("is_primary").notNull().default(false),
