@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest"
 import ExcelJS from "exceljs"
 import { workbookToBuffer } from "../lib/xlsx/index.js"
-import { IMPORT_KINDS, IMPORT_KIND_DEFS, templateFileName } from "../services/imports/kinds.js"
+import { IMPORT_KINDS, IMPORT_KIND_DEFS, isImportKind, templateFileName } from "../services/imports/kinds.js"
 import { cellText, parseImportWorkbook } from "../services/imports/parse.js"
 import { buildImportWorkbook, type TemplateRefs } from "../services/imports/template.js"
 
 /**
- * services/imports/kinds.ts ＋ template.ts——6 種 kind 的定義一致性，以及範本
+ * services/imports/kinds.ts ＋ template.ts——5 種 kind 的定義一致性（批次排班已隨班表功能移除），以及範本
  * write → reload 後：「資料」表頭＝columns.header、範例列灰字、每個 kind 都有
  * 「說明」、附表照 extraSheets、範本自己丟回 parse 會把範例列當範例跳過。
  * 附表資料用 fixture（不連 DB）。
@@ -54,10 +54,15 @@ describe("IMPORT_KIND_DEFS 一致性", () => {
     expect(templateFileName(kind)).toBe(`匯入範本-${def.label}.xlsx`)
   })
 
+  it("批次排班（schedules）2026-10-11 隨班表功能移除：不在 kind 清單、POST /imports/schedules 會 404 unknown_kind", () => {
+    expect(IMPORT_KINDS as readonly string[]).not.toContain("schedules")
+    expect(isImportKind("schedules")).toBe(false)
+    expect(isImportKind("punches")).toBe(true)
+  })
+
   it("表頭與契約一致", () => {
     const headers = (k: (typeof IMPORT_KINDS)[number]) => IMPORT_KIND_DEFS[k].columns.map((c) => c.header)
     expect(headers("punches")).toEqual(["工號", "姓名", "日期", "時間", "類型"])
-    expect(headers("schedules")).toEqual(["工號", "姓名", "日期", "班別", "狀態"])
     expect(headers("salary-adjustments")).toEqual(["工號", "姓名", "生效日", "新薪資", "原因"])
     expect(headers("onboardings")).toEqual(["姓名", "報到日", "身分別", "地區", "僱用類型", "部門", "主管工號"])
     expect(headers("employees")).toEqual(["姓名", "Email", "工號", "部門", "僱用類型", "到職日", "角色"])
@@ -108,15 +113,14 @@ describe("buildImportWorkbook（write → reload）", () => {
     }
   })
 
-  it("員工清單只列在職、含部門名；班別清單有時間；部門清單有名稱", async () => {
-    const sched = await reload("schedules")
-    const emps = sched.getWorksheet("員工清單")!
+  it("員工清單只列在職、含部門名；部門清單有名稱（班別清單目前沒有 kind 使用）", async () => {
+    const punches = await reload("punches")
+    const emps = punches.getWorksheet("員工清單")!
     expect(rowTexts(emps, 1)).toEqual(["工號", "姓名", "部門"])
     expect(rowTexts(emps, 2)).toEqual(["A001", "王小明", "業務部"])
     expect(rowTexts(emps, 3)).toEqual(["B002", "李小華", ""])
     expect(emps.rowCount).toBe(3) // 已離職的不列
-    const shifts = sched.getWorksheet("班別清單")!
-    expect(rowTexts(shifts, 2)).toEqual(["早班", "09:00", "18:00"])
+    expect(punches.getWorksheet("班別清單")).toBeUndefined()
 
     const ob = await reload("onboardings")
     expect(rowTexts(ob.getWorksheet("部門清單")!, 2)).toEqual(["業務部"])

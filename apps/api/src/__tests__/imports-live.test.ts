@@ -130,17 +130,17 @@ describe.skipIf(!ready)("批次匯入（Excel）— live", () => {
   }, 90_000)
 
   describe("範本下載", () => {
-    it("GET /imports/schedules/template → xlsx：資料／說明／員工清單／班別清單，表頭＝columns.header，員工清單列出兩位員工", async () => {
-      const res = await asAdmin(request(app).get("/imports/schedules/template")).buffer(true).parse(binaryParser)
+    it("GET /imports/punches/template → xlsx：資料／說明／員工清單，表頭＝columns.header，員工清單列出兩位員工", async () => {
+      const res = await asAdmin(request(app).get("/imports/punches/template")).buffer(true).parse(binaryParser)
       expect(res.status).toBe(200)
       expect(res.headers["content-type"]).toContain("spreadsheetml")
-      expect(res.headers["content-disposition"]).toBe(`attachment; filename*=UTF-8''${encodeURIComponent("匯入範本-批次排班.xlsx")}`)
+      expect(res.headers["content-disposition"]).toBe(`attachment; filename*=UTF-8''${encodeURIComponent("匯入範本-批次打卡補登.xlsx")}`)
       const wb = new ExcelJS.Workbook()
       await wb.xlsx.load(res.body as unknown as ArrayBuffer)
-      expect(wb.worksheets.map((w) => w.name)).toEqual(["資料", "說明", "員工清單", "班別清單"])
+      expect(wb.worksheets.map((w) => w.name)).toEqual(["資料", "說明", "員工清單"])
       const headers: string[] = []
       wb.getWorksheet("資料")!.getRow(1).eachCell((c) => headers.push(String(c.value)))
-      expect(headers).toEqual(IMPORT_KIND_DEFS.schedules.columns.map((c) => c.header))
+      expect(headers).toEqual(IMPORT_KIND_DEFS.punches.columns.map((c) => c.header))
       const emps: string[][] = []
       wb.getWorksheet("員工清單")!.eachRow((row, n) => {
         if (n === 1) return
@@ -154,9 +154,12 @@ describe.skipIf(!ready)("批次匯入（Excel）— live", () => {
           ["B002", "李小華", ""],
         ]),
       )
-      const shifts: string[] = []
-      wb.getWorksheet("班別清單")!.getRow(2).eachCell((c) => shifts.push(String(c.value)))
-      expect(shifts).toEqual(["早班", "09:00", "18:00"])
+    })
+
+    it("批次排班已隨班表功能移除（2026-10-11）：GET /imports/schedules/template → 404 unknown_kind", async () => {
+      const res = await asAdmin(request(app).get("/imports/schedules/template"))
+      expect(res.status).toBe(404)
+      expect(res.body.error).toBe("unknown_kind")
     })
 
     it("未知 kind → 404；非 HR → 403", async () => {
@@ -243,42 +246,6 @@ describe.skipIf(!ready)("批次匯入（Excel）— live", () => {
       expect(new Date(data![0].punch_at as string).toISOString()).toBe(zonedTimeToUtc("2026-09-17", 9, 0, "Asia/Taipei").toISOString())
       expect(data![1]).toMatchObject({ employee_id: empBId, type: "out", source: "manual" })
       expect(new Date(data![1].punch_at as string).toISOString()).toBe(zonedTimeToUtc("2026-09-17", 18, 5, "Asia/Taipei").toISOString())
-    })
-  })
-
-  describe("schedules", () => {
-    let b64: string
-    beforeAll(async () => {
-      b64 = await xlsxBase64("schedules", [
-        ["A001", "王小明", "2026-10-06", "早班", "待確認"],
-        ["B002", "", "2026-10-07", "", "休假"],
-        ["A001", "王小明", "2026-10-06", "早班", ""], // 同人同天重複
-        ["A001", "王小明", "2026-10-08", "夜班", ""], // 找不到班別
-        ["Z999", "", "2026-10-08", "早班", ""],
-      ])
-    })
-
-    it("dryRun：valid 2、errors 3（重複／找不到班別／找不到工號）", async () => {
-      const res = await upload("schedules", b64, true)
-      expect(res.status).toBe(200)
-      expect(res.body).toMatchObject({ kind: "schedules", total: 5, valid: 2 })
-      expect((res.body.errors as Array<{ line: number }>).map((e) => e.line)).toEqual([4, 5, 6])
-      expect(await countRows("schedules")).toBe(0)
-    })
-
-    it("實匯：imported 2；班別 id 與狀態正確、休假列 shift_id 為空", async () => {
-      const res = await upload("schedules", b64, false)
-      expect(res.status).toBe(200)
-      expect(res.body).toMatchObject({ valid: 2, imported: 2 })
-      const { data } = await supabaseAdmin
-        .from("schedules")
-        .select("employee_id, work_date, shift_id, status")
-        .eq("tenant_id", tenantId)
-        .order("work_date", { ascending: true })
-      expect(data).toEqual([
-        { employee_id: empAId, work_date: "2026-10-06", shift_id: shiftId, status: "scheduled" },
-        { employee_id: empBId, work_date: "2026-10-07", shift_id: null, status: "day_off" },
-      ])
     })
   })
 

@@ -891,6 +891,7 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
   for (const [empId, list] of punchesByEmp) facts.punchFactsByEmp.set(empId, derivePunchFacts(list, tz))
 
   // schedules + shifts → net minutes
+  // 班表功能已移除（2026-10-11，業主：不需要），此分支只對歷史資料生效：沒有新的班表列 → absent_scheduled 不會再出現、淨工時退回規則的正常工時。
   const { data: schedData, error: schedErr } = await supabaseAdmin
     .from("schedules")
     .select("employee_id, work_date, shift_id")

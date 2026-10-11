@@ -25,8 +25,8 @@ interface Tenant {
 let A: Tenant
 let B: Tenant
 
-// A plain employee under tenant A (role='employee'); proves a normal user can
-// read only their own schedules and cannot write shifts.
+// A plain employee under tenant A (role='employee'); proves a normal user cannot
+// write shifts. (班表 /schedules 2026-10-11 隨班表功能移除，端點改測 404。)
 let aEmployeeEmail: string
 let aEmployeePassword: string
 let aEmployeeToken: string
@@ -227,126 +227,6 @@ describe("F2 shifts CRUD — tenant A, HR admin", () => {
   })
 })
 
-describe("F2 schedules assign & query", () => {
-  let shiftId: string
-  const workDate = "2026-07-01"
-
-  it("POST /shifts (setup) + POST /schedules assigns A's employee a day → 201", async () => {
-    const shiftRes = await request(app)
-      .post("/shifts")
-      .set("Authorization", `Bearer ${A.adminToken}`)
-      .send({ name: `Sched Shift ${stamp}`, startTime: "10:00", endTime: "19:00" })
-    expect(shiftRes.status).toBe(201)
-    shiftId = shiftRes.body.id
-
-    const res = await request(app)
-      .post("/schedules")
-      .set("Authorization", `Bearer ${A.adminToken}`)
-      .send({ employeeId: aEmployeeId, workDate, shiftId })
-
-    expect(res.status).toBe(201)
-
-    const { data } = await supabaseAdmin
-      .from("schedules")
-      .select("tenant_id, employee_id, work_date, shift_id, status")
-      .eq("tenant_id", A.tenantId)
-      .eq("employee_id", aEmployeeId)
-      .eq("work_date", workDate)
-      .single()
-    expect(data?.tenant_id).toBe(A.tenantId)
-    expect(data?.shift_id).toBe(shiftId)
-    expect(data?.status).toBe("scheduled")
-  })
-
-  it("POST /schedules again for same employee+date upserts (no duplicate)", async () => {
-    const res = await request(app)
-      .post("/schedules")
-      .set("Authorization", `Bearer ${A.adminToken}`)
-      .send({ employeeId: aEmployeeId, workDate, shiftId: null, status: "day_off" })
-
-    expect(res.status).toBe(201)
-
-    const { data, error } = await supabaseAdmin
-      .from("schedules")
-      .select("id, shift_id, status")
-      .eq("tenant_id", A.tenantId)
-      .eq("employee_id", aEmployeeId)
-      .eq("work_date", workDate)
-    expect(error).toBeNull()
-    expect(data?.length).toBe(1)
-    expect(data?.[0].shift_id).toBeNull()
-    expect(data?.[0].status).toBe("day_off")
-  })
-
-  it("POST /schedules supports batch assignments array", async () => {
-    const res = await request(app)
-      .post("/schedules")
-      .set("Authorization", `Bearer ${A.adminToken}`)
-      .send({
-        assignments: [
-          { employeeId: aEmployeeId, workDate: "2026-07-02", shiftId },
-          { employeeId: aOtherEmployeeId, workDate: "2026-07-02", shiftId },
-        ],
-      })
-
-    expect(res.status).toBe(201)
-
-    const { count } = await supabaseAdmin
-      .from("schedules")
-      .select("id", { count: "exact", head: true })
-      .eq("tenant_id", A.tenantId)
-      .eq("work_date", "2026-07-02")
-    expect(count).toBe(2)
-  })
-
-  it("GET /schedules (HR) returns the whole tenant's schedules", async () => {
-    const res = await request(app)
-      .get("/schedules")
-      .set("Authorization", `Bearer ${A.adminToken}`)
-
-    expect(res.status).toBe(200)
-    const rows = res.body.schedules as Array<{ employee_id: string; tenant_id: string }>
-    expect(rows.every((r) => r.tenant_id === A.tenantId)).toBe(true)
-    // Sees both A's employee and the other employee.
-    expect(rows.some((r) => r.employee_id === aEmployeeId)).toBe(true)
-    expect(rows.some((r) => r.employee_id === aOtherEmployeeId)).toBe(true)
-  })
-
-  it("GET /schedules (employee) returns ONLY the caller's own rows", async () => {
-    const res = await request(app)
-      .get("/schedules")
-      .set("Authorization", `Bearer ${aEmployeeToken}`)
-
-    expect(res.status).toBe(200)
-    const rows = res.body.schedules as Array<{ employee_id: string }>
-    expect(rows.length).toBeGreaterThan(0)
-    expect(rows.every((r) => r.employee_id === aEmployeeId)).toBe(true)
-    // The other employee's rows must not leak.
-    expect(rows.some((r) => r.employee_id === aOtherEmployeeId)).toBe(false)
-  })
-
-  it("GET /schedules?employeeId=<other> as employee is forced back to self (never sees other)", async () => {
-    const res = await request(app)
-      .get(`/schedules?employeeId=${aOtherEmployeeId}`)
-      .set("Authorization", `Bearer ${aEmployeeToken}`)
-
-    expect(res.status).toBe(200)
-    const rows = res.body.schedules as Array<{ employee_id: string }>
-    expect(rows.some((r) => r.employee_id === aOtherEmployeeId)).toBe(false)
-  })
-
-  it("GET /schedules?from=&to= filters by date window (HR)", async () => {
-    const res = await request(app)
-      .get(`/schedules?from=2026-07-02&to=2026-07-02`)
-      .set("Authorization", `Bearer ${A.adminToken}`)
-
-    expect(res.status).toBe(200)
-    const rows = res.body.schedules as Array<{ work_date: string }>
-    expect(rows.length).toBeGreaterThan(0)
-    expect(rows.every((r) => r.work_date === "2026-07-02")).toBe(true)
-  })
-})
-
 describe("F2 authorization — non-HR employee cannot write shifts", () => {
   it("a role='employee' user POST /shifts → 403", async () => {
     const res = await request(app)
@@ -357,14 +237,6 @@ describe("F2 authorization — non-HR employee cannot write shifts", () => {
     expect(res.status).toBe(403)
   })
 
-  it("a role='employee' user POST /schedules → 403", async () => {
-    const res = await request(app)
-      .post("/schedules")
-      .set("Authorization", `Bearer ${aEmployeeToken}`)
-      .send({ employeeId: aEmployeeId, workDate: "2026-07-03" })
-
-    expect(res.status).toBe(403)
-  })
 })
 
 describe("F2 cross-tenant — A cannot mutate B's shift", () => {
@@ -407,145 +279,19 @@ describe("F2 cross-tenant — A cannot mutate B's shift", () => {
   })
 })
 
-describe("F2 班表匯入 — HR bulk-imports a roster from CSV", () => {
-  it("POST /schedules/import upserts every valid row → 201 { count, errors:[] }", async () => {
-    const csv = [
-      "employeeId,workDate,status",
-      `${aEmployeeId},2026-07-10,scheduled`,
-      `${aEmployeeId},2026-07-11,day_off`,
-    ].join("\n")
-
-    const res = await request(app)
-      .post("/schedules/import")
-      .set("Authorization", `Bearer ${A.adminToken}`)
-      .send({ csv })
-
-    expect(res.status).toBe(201)
-    expect(res.body.count).toBe(2)
-    expect(res.body.errors).toEqual([])
-
-    const { count } = await supabaseAdmin
-      .from("schedules")
-      .select("id", { count: "exact", head: true })
-      .eq("tenant_id", A.tenantId)
-      .eq("employee_id", aEmployeeId)
-      .in("work_date", ["2026-07-10", "2026-07-11"])
-    expect(count).toBe(2)
-  })
-
-  it("a bad row is reported per-line and skipped; valid rows still import", async () => {
-    const csv = [
-      "employeeId,workDate",
-      `${aEmployeeId},2026-07-12`,
-      `${aEmployeeId},NOT-A-DATE`,
-    ].join("\n")
-
-    const res = await request(app)
-      .post("/schedules/import")
-      .set("Authorization", `Bearer ${A.adminToken}`)
-      .send({ csv })
-
-    expect(res.status).toBe(201)
-    expect(res.body.count).toBe(1)
-    expect(res.body.errors.length).toBe(1)
-    expect(res.body.errors[0].line).toBe(3)
-  })
-
-  it("a CSV with no valid rows → 400 no_valid_rows", async () => {
-    const csv = ["employeeId,workDate", `${aEmployeeId},NOPE`].join("\n")
-    const res = await request(app)
-      .post("/schedules/import")
-      .set("Authorization", `Bearer ${A.adminToken}`)
-      .send({ csv })
-    expect(res.status).toBe(400)
-    expect(res.body.error).toBe("no_valid_rows")
-  })
-
-  it("a non-HR employee cannot import → 403", async () => {
-    const csv = ["employeeId,workDate", `${aEmployeeId},2026-07-13`].join("\n")
-    const res = await request(app)
-      .post("/schedules/import")
-      .set("Authorization", `Bearer ${aEmployeeToken}`)
-      .send({ csv })
-    expect(res.status).toBe(403)
-  })
-})
-
-describe("F2 班表審核 — employee acknowledges / disputes their roster", () => {
-  let myScheduleId: string
-  let otherScheduleId: string
-
-  it("setup: HR assigns a row to the employee and to the other employee", async () => {
-    const mine = await request(app)
-      .post("/schedules")
-      .set("Authorization", `Bearer ${A.adminToken}`)
-      .send({ employeeId: aEmployeeId, workDate: "2026-07-20" })
-    expect(mine.status).toBe(201)
-    myScheduleId = mine.body.ids[0]
-
-    const other = await request(app)
-      .post("/schedules")
-      .set("Authorization", `Bearer ${A.adminToken}`)
-      .send({ employeeId: aOtherEmployeeId, workDate: "2026-07-20" })
-    expect(other.status).toBe(201)
-    otherScheduleId = other.body.ids[0]
-  })
-
-  it("the assigned employee acknowledges → status 'confirmed'", async () => {
-    const res = await request(app)
-      .post(`/schedules/${myScheduleId}/acknowledge`)
-      .set("Authorization", `Bearer ${aEmployeeToken}`)
-      .send({})
-    expect(res.status).toBe(200)
-    expect(res.body.status).toBe("confirmed")
-
-    const { data } = await supabaseAdmin
-      .from("schedules")
-      .select("status")
-      .eq("id", myScheduleId)
-      .single()
-    expect(data?.status).toBe("confirmed")
-  })
-
-  it("the assigned employee disputes → status 'disputed'", async () => {
-    const res = await request(app)
-      .post(`/schedules/${myScheduleId}/dispute`)
-      .set("Authorization", `Bearer ${aEmployeeToken}`)
-      .send({})
-    expect(res.status).toBe(200)
-    expect(res.body.status).toBe("disputed")
-  })
-
-  it("an employee cannot review someone else's schedule → 403", async () => {
-    const res = await request(app)
-      .post(`/schedules/${otherScheduleId}/acknowledge`)
-      .set("Authorization", `Bearer ${aEmployeeToken}`)
-      .send({})
-    expect(res.status).toBe(403)
-
-    // The other employee's row is untouched.
-    const { data } = await supabaseAdmin
-      .from("schedules")
-      .select("status")
-      .eq("id", otherScheduleId)
-      .single()
-    expect(data?.status).toBe("scheduled")
-  })
-
-  it("HR may acknowledge any row in the tenant", async () => {
-    const res = await request(app)
-      .post(`/schedules/${otherScheduleId}/acknowledge`)
-      .set("Authorization", `Bearer ${A.adminToken}`)
-      .send({})
-    expect(res.status).toBe(200)
-    expect(res.body.status).toBe("confirmed")
-  })
-
-  it("reviewing a non-existent schedule → 404", async () => {
-    const res = await request(app)
-      .post(`/schedules/00000000-0000-0000-0000-000000000000/acknowledge`)
-      .set("Authorization", `Bearer ${aEmployeeToken}`)
-      .send({})
-    expect(res.status).toBe(404)
+describe("班表端點已移除（2026-10-11，業主：不需要）→ 404", () => {
+  it.each([
+    ["GET", "/schedules"],
+    ["POST", "/schedules"],
+    ["POST", "/schedules/import"],
+    ["POST", "/schedules/00000000-0000-0000-0000-000000000000/acknowledge"],
+    ["POST", "/schedules/00000000-0000-0000-0000-000000000000/dispute"],
+  ] as const)("%s %s（HR 與員工都一樣）→ 404 not_found", async (method, path) => {
+    for (const token of [A.adminToken, aEmployeeToken]) {
+      const req = method === "GET" ? request(app).get(path) : request(app).post(path).send({})
+      const res = await req.set("Authorization", `Bearer ${token}`)
+      expect(res.status).toBe(404)
+      expect(res.body.error).toBe("not_found")
+    }
   })
 })

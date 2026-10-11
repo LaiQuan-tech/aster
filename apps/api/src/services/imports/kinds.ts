@@ -1,5 +1,5 @@
 /**
- * 批次匯入（Excel 範本下載 → 填寫 → 上傳）的 6 種 kind 定義。
+ * 批次匯入（Excel 範本下載 → 填寫 → 上傳）的 5 種 kind 定義（「批次排班」2026-10-11 隨班表功能移除）。
  *
  * 這份是 API 端的欄位表；web 端 `apps/web/src/lib/import-kinds.ts` 放一份同樣
  * 的常數（前後端各自維護，跟 PayslipBreakdown 一樣的慣例——@hr/web 沒有依賴
@@ -14,7 +14,6 @@
 
 export const IMPORT_KINDS = [
   "punches",
-  "schedules",
   "salary-adjustments",
   "onboardings",
   "employees",
@@ -85,13 +84,6 @@ export const ROLE_LABELS: Record<string, string> = {
   hr_admin: "HR 管理員",
 }
 
-export const SCHEDULE_STATUS_LABELS: Record<string, string> = {
-  scheduled: "待確認",
-  confirmed: "已確認",
-  day_off: "休假",
-  disputed: "有爭議",
-}
-
 const EMP_NO_HINT = "員工的工號（見「員工清單」工作表）。工號與姓名至少填一個；工號空白時用姓名比對，同名者必須填工號。"
 const NAME_HINT = "員工姓名（見「員工清單」）。填了工號時姓名只做核對，不符會回報錯誤。"
 const DATE_HINT = "格式 YYYY-MM-DD（例 2026-09-15）；Excel 的日期格式儲存格也可以。"
@@ -133,39 +125,6 @@ export const IMPORT_KIND_DEFS: Record<ImportKind, ImportKindDef> = {
       "時間以公司設定的時區解讀（預設台北時間），寫入時自動轉成系統時間。",
       "已停用的員工也能補登（例如補離職前的紀錄）。",
     ],
-  },
-  schedules: {
-    kind: "schedules",
-    label: "批次排班",
-    description: "替員工指定某一天的班別。同一位員工同一天已有排班時會被這次的內容覆蓋。",
-    columns: [
-      { key: "empNo", header: "工號", required: false, hint: EMP_NO_HINT, example: "A001", width: 12 },
-      { key: "name", header: "姓名", required: false, hint: NAME_HINT, example: "王小明", width: 14 },
-      { key: "date", header: "日期", required: true, hint: DATE_HINT, example: "2026-10-01", width: 14 },
-      {
-        key: "shift",
-        header: "班別",
-        required: false,
-        hint: "班別名稱（見「班別清單」）。留空＝不排班別（通常搭配狀態「休假」）。",
-        example: "早班",
-        width: 14,
-      },
-      {
-        key: "status",
-        header: "狀態",
-        required: false,
-        hint: "待確認／已確認／休假（也接受 scheduled/confirmed/day_off）。留空＝待確認。",
-        example: "待確認",
-        options: ["待確認", "已確認", "休假"],
-        width: 10,
-      },
-    ],
-    examples: [
-      ["A001", "王小明", "2026-10-01", "早班", "待確認"],
-      ["A001", "王小明", "2026-10-02", "", "休假"],
-    ],
-    extraSheets: ["employees", "shifts"],
-    notes: ["同一個檔案裡同一位員工同一天只能出現一次。", "排班後員工可在 ESS 端確認或提出異議。"],
   },
   "salary-adjustments": {
     kind: "salary-adjustments",

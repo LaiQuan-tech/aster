@@ -9,7 +9,6 @@ import { assertInstantsOpen } from "../period-lock.js"
  *
  * 這裡的每個函式都是從原本 routes 的 handler 抽出來的寫入段，行為不變：
  *   • importManualPunches      ← POST /punch/manual/import（先驗同租戶員工、逐筆 employee_not_found、source=manual）
- *   • upsertScheduleAssignments ← POST /schedules、POST /schedules/import（upsert (tenant, employee, work_date)）
  *   • insertSalaryAdjustments   ← POST /salary-adjustments/import
  *   • insertOnboardings         ← POST /onboardings/import（status=pending）
  *   • generateTenantCalendar    ← POST /calendar/generate（週末→rest_day、假日→fixed_holiday）
@@ -78,42 +77,6 @@ export async function importManualPunches(
   const { data, error } = await supabaseAdmin.from("punch_records").insert(rows).select("id")
   if (error) throw new Error(`${context}: ${error.message}`)
   return { ids: (data ?? []).map((record) => record.id as string), errors }
-}
-
-/* ── 排班 ─────────────────────────────────────────────────────────── */
-
-export interface ScheduleAssignment {
-  employeeId: string
-  /** YYYY-MM-DD */
-  workDate: string
-  shiftId?: string | null
-  status?: string
-}
-
-export function scheduleRow(tenantId: string, a: ScheduleAssignment) {
-  return {
-    tenant_id: tenantId,
-    employee_id: a.employeeId,
-    work_date: a.workDate,
-    shift_id: a.shiftId ?? null,
-    status: a.status ?? "scheduled",
-  }
-}
-
-/** upsert on (tenant_id, employee_id, work_date)：同一人同一天重排會覆蓋而不是報錯。 */
-export async function upsertScheduleAssignments(
-  tenantId: string,
-  assignments: ScheduleAssignment[],
-  context = "upsertScheduleAssignments",
-): Promise<{ ids: string[] }> {
-  if (assignments.length === 0) return { ids: [] }
-  const rows = assignments.map((a) => scheduleRow(tenantId, a))
-  const { data, error } = await supabaseAdmin
-    .from("schedules")
-    .upsert(rows, { onConflict: "tenant_id,employee_id,work_date" })
-    .select("id")
-  if (error) throw new Error(`${context}: ${error.message}`)
-  return { ids: (data ?? []).map((r) => r.id as string) }
 }
 
 /* ── 調薪 ─────────────────────────────────────────────────────────── */

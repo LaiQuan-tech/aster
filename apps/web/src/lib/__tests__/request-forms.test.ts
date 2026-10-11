@@ -222,8 +222,8 @@ describe("buildCreateBody（六種 kind）", () => {
   it("在家工作：日期不合法／迄早於起／時數 0 或負數 → error", () => {
     expect(buildCreateBody("wfh", { ...WFH, startDate: "" })).toEqual({ error: "請選擇起迄日期" });
     expect(buildCreateBody("wfh", { ...WFH, endDate: "2026-09-17" })).toEqual({ error: "結束日期不可早於開始日期" });
-    expect(buildCreateBody("wfh", { ...WFH, hours: "0" })).toEqual({ error: "時數請填正數，或留空由班表計算" });
-    expect(buildCreateBody("wfh", { ...WFH, hours: "-3" })).toEqual({ error: "時數請填正數，或留空由班表計算" });
+    expect(buildCreateBody("wfh", { ...WFH, hours: "0" })).toEqual({ error: "時數請填正數，或留空依正常工時計算" });
+    expect(buildCreateBody("wfh", { ...WFH, hours: "-3" })).toEqual({ error: "時數請填正數，或留空依正常工時計算" });
     expect(buildCreateBody("wfh", { ...WFH, reason: "很".repeat(251) })).toEqual({ error: "事由請在 250 字以內" });
   });
 

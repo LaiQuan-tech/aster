@@ -3,7 +3,7 @@
 /**
  * 在家工作／加做申報（M2）：起迄日期（全天）＋ 時數（選填）＋ 事由（選填）。
  *
- * 時數留空＝由出勤引擎以當日班表淨工時計（核准後該日無打卡也不算曠職）；
+ * 時數留空＝由出勤引擎以當日正常工時計（班表功能 2026-10-11 移除後不再看班表；核准後該日無打卡也不算曠職）；
  * 填了則代表實際加做的時數。body 只帶 `startAt / endAt / hours? / reason?`
  * （後端 `apps/api/src/routes/requests.ts` kind='wfh'）。
  */
@@ -66,7 +66,7 @@ export function WfhForm({ initialDate, submitting, submitError, onSubmit }: Form
         </Field>
       </div>
 
-      <Field label="時數" htmlFor={ids.hours} hint="留空＝依當日班表的淨工時計；有實際加做時數再填">
+      <Field label="時數" htmlFor={ids.hours} hint="留空＝依當日正常工時計；有實際加做時數再填">
         <Input
           id={ids.hours}
           type="number"

@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 
 /**
  * 員工端（/ess）「我的…」頁一律帶 `scope=mine`（2026-09-30）：
- * 下列 8 支 GET 清單端點，呼叫者是 hr_admin／platform_admin／accountant 時——
+ * 下列 7 支 GET 清單端點（GET /schedules 已隨班表功能移除），呼叫者是 hr_admin／platform_admin／accountant 時——
  *   • 帶 scope=mine → 跟一般員工走同一條路徑：只回本人、忽略 employeeId／deptId；
  *     KPI 套考核者／受評者過濾；月表當成非財務角色套主管範圍。
  *   • 不帶 → 維持舊行為（後台靠這個：HR／財務角色看全租戶、可帶 employeeId）。
@@ -71,7 +71,6 @@ vi.mock("../services/attendance-sheets.js", async (importOriginal) => {
 })
 
 import { leaveBalancesRouter } from "../routes/leave-balances.js"
-import { schedulesRouter } from "../routes/schedules.js"
 import { payrollRouter } from "../routes/payroll.js"
 import { expensesRouter } from "../routes/expenses.js"
 import { advancesRouter } from "../routes/advances.js"
@@ -85,7 +84,6 @@ const app = express()
 app.use(express.json())
 app.use(
   leaveBalancesRouter,
-  schedulesRouter,
   payrollRouter,
   expensesRouter,
   advancesRouter,
@@ -148,10 +146,6 @@ function seed(): void {
     row("lb-platform", ids.platform, { leave_type_id: "lt", year: 2026, period_start: "2026-01-01", period_end: "2026-12-31" }),
     row("lb-other", ids.other, { leave_type_id: "lt", year: 2026, period_start: "2026-01-01", period_end: "2026-12-31" }),
   ]
-  h.db.schedules = [
-    row("s-hr", ids.hr, { work_date: "2026-09-01", shift_id: "sh", status: "published" }),
-    row("s-other", ids.other, { work_date: "2026-09-01", shift_id: "sh", status: "published" }),
-  ]
   h.db.payslips = [
     row("p-hr", ids.hr, { period: "2026-08", status: "finalized" }),
     row("p-platform", ids.platform, { period: "2026-09", status: "draft" }),
@@ -184,10 +178,9 @@ beforeEach(seed)
 
 const idsIn = (list: unknown): string[] => ((list ?? []) as Array<{ id: string }>).map((r) => r.id).sort()
 
-/** 單純「釘本人」的 6 支：`all`＝管理角色不帶 scope 的舊結果，`mine`＝scope=mine 的結果。 */
+/** 單純「釘本人」的 5 支：`all`＝管理角色不帶 scope 的舊結果，`mine`＝scope=mine 的結果。 */
 const PINNED = [
   { name: "GET /leave-balances", path: "/leave-balances", key: "balances", caller: "user-hr", all: ["lb-hr", "lb-other", "lb-platform"], mine: ["lb-hr"], byOther: ["lb-other"] },
-  { name: "GET /schedules", path: "/schedules", key: "schedules", caller: "user-hr", all: ["s-hr", "s-other"], mine: ["s-hr"], byOther: ["s-other"] },
   { name: "GET /payslips", path: "/payslips", key: "payslips", caller: "user-hr", all: ["p-hr", "p-other", "p-platform"], mine: ["p-hr"], byOther: ["p-other"] },
   { name: "GET /payslips（platform_admin）", path: "/payslips", key: "payslips", caller: "user-platform", all: ["p-hr", "p-other", "p-platform"], mine: ["p-platform"], byOther: ["p-other"] },
   { name: "GET /expenses?period=", path: "/expenses?period=2026-09", key: "claims", caller: "user-accountant", all: ["x-acc", "x-other"], mine: ["x-acc"], byOther: ["x-other"] },

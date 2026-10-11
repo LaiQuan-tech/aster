@@ -207,7 +207,7 @@ export interface PettyCashFormValues extends CommonFormValues {
 export interface WfhFormValues extends CommonFormValues {
   startDate: string;
   endDate: string;
-  /** 選填總時數；空＝不帶，由出勤引擎以當日班表淨工時計。 */
+  /** 選填總時數；空＝不帶，由出勤引擎以當日正常工時計（班表功能已移除）。 */
   hours: string | number;
 }
 
@@ -437,7 +437,7 @@ function buildPettyCash(form: PettyCashFormValues, now: Date): BuildResult {
 
 /**
  * 在家工作（M2）：`startAt`＝起日 00:00、`endAt`＝迄日 23:59（全天，與出差同慣例）。
- * 時數選填——沒填時後端與出勤引擎以當日班表淨工時計；填了代表「加做」的實際時數。
+ * 時數選填——沒填時後端與出勤引擎以當日正常工時計（班表功能已移除）；填了代表「加做」的實際時數。
  */
 export function buildWfhBody(form: WfhFormValues): BuildResult {
   if (!DATE_RE.test(form.startDate ?? "") || !DATE_RE.test(form.endDate ?? "")) return { error: "請選擇起迄日期" };
@@ -448,7 +448,7 @@ export function buildWfhBody(form: WfhFormValues): BuildResult {
   let hours: number | undefined;
   if (rawHours !== "") {
     const n = toNumber(rawHours);
-    if (n == null || n <= 0) return { error: "時數請填正數，或留空由班表計算" };
+    if (n == null || n <= 0) return { error: "時數請填正數，或留空依正常工時計算" };
     if (n > 24 * 31) return { error: "時數超過合理範圍，請確認" };
     hours = round2(n);
   }

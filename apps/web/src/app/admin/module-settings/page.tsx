@@ -989,7 +989,7 @@ export default function ModuleSettingsPage() {
               </div>
               <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
                 <input type="checkbox" checked={allowEmployeeDispute} onChange={(event) => setAllowEmployeeDispute(event.target.checked)} />
-                允許員工班表/出勤異議
+                允許員工出勤異議
               </label>
               <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700">
                 <input type="checkbox" checked={enableAutoSettlement} onChange={(event) => setEnableAutoSettlement(event.target.checked)} />

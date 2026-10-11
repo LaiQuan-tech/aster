@@ -7,7 +7,6 @@ import {
   EMPLOYMENT_TYPE_LABELS,
   PUNCH_TYPE_LABELS,
   ROLE_LABELS,
-  SCHEDULE_STATUS_LABELS,
   type ImportKind,
 } from "./kinds.js"
 import { normalizeToken, type ParsedImportRow } from "./parse.js"
@@ -18,19 +17,17 @@ import {
   isProtectedAccount,
   loadActor,
 } from "../privileged-accounts.js"
-import { loadDepartments, loadShifts, NameResolver, resolveEmployees, type EmployeeRef } from "./resolve.js"
+import { loadDepartments, NameResolver, resolveEmployees, type EmployeeRef } from "./resolve.js"
 import {
   generateTenantCalendar,
   importManualPunches,
   insertOnboardings,
   insertSalaryAdjustments,
-  upsertScheduleAssignments,
   type HolidayInput,
   type ManualPunchRecord,
   type OnboardingInput,
   type PunchType,
   type SalaryAdjustmentInput,
-  type ScheduleAssignment,
 } from "./writers.js"
 
 /**
@@ -143,7 +140,6 @@ function enumMap(labels: Record<string, string>): Map<string, string> {
 const PUNCH_TYPES = enumMap(PUNCH_TYPE_LABELS)
 const EMPLOYMENT_TYPES = enumMap(EMPLOYMENT_TYPE_LABELS)
 const ROLES = enumMap(ROLE_LABELS)
-const SCHEDULE_STATUSES = enumMap(SCHEDULE_STATUS_LABELS)
 
 function allowed(labels: Record<string, string>): string {
   return Object.values(labels).join("／")
@@ -242,46 +238,6 @@ async function runPunches(tenantId: string, rows: ParsedImportRow[], dryRun: boo
     )
     for (const e of writeErrors) errors.push({ line: e.line, message: "找不到員工（可能剛被刪除）" })
     out.valid = valid.length - writeErrors.length
-    out.imported = ids.length
-  }
-  return out
-}
-
-/* ── schedules ────────────────────────────────────────────────────── */
-
-async function runSchedules(tenantId: string, rows: ParsedImportRow[], dryRun: boolean) {
-  const [resolver, shifts] = await Promise.all([resolveEmployees(tenantId), loadShifts(tenantId)])
-  const shiftByName = new NameResolver(shifts)
-  const { valid, errors } = validateRows<ScheduleAssignment>(
-    rows,
-    (v) => {
-      const emp = resolver.resolve(v.empNo, v.name)
-      if (!emp.ok) return fail(emp.message)
-      const date = requireDate(v.date, "日期")
-      if (!date.ok) return date
-      let shiftId: string | null = null
-      if (v.shift.trim()) {
-        shiftId = shiftByName.get(v.shift)
-        if (!shiftId) return fail(`找不到班別「${v.shift.trim()}」（見範本的「班別清單」）`)
-      }
-      let status = "scheduled"
-      if (v.status.trim()) {
-        const mapped = SCHEDULE_STATUSES.get(normalizeToken(v.status))
-        if (!mapped) return fail(`「狀態」須為 ${allowed(SCHEDULE_STATUS_LABELS)}（填的是「${v.status}」）`)
-        status = mapped
-      }
-      return { ok: true, value: { employeeId: emp.employee.id, workDate: date.value, shiftId, status } }
-    },
-    (a) => `${a.employeeId}|${a.workDate}`,
-    "同一位員工同一天在第 {line} 列已經出現過",
-  )
-  const out: Partial<ImportRunResult> = { valid: valid.length, errors }
-  if (!dryRun) {
-    const { ids } = await upsertScheduleAssignments(
-      tenantId,
-      valid.map((r) => r.value),
-      "POST /imports/schedules",
-    )
     out.imported = ids.length
   }
   return out
@@ -598,9 +554,6 @@ export async function runImport(
   switch (kind) {
     case "punches":
       partial = await runPunches(tenantId, rows, dryRun)
-      break
-    case "schedules":
-      partial = await runSchedules(tenantId, rows, dryRun)
       break
     case "salary-adjustments":
       partial = await runSalaryAdjustments(tenantId, rows, dryRun)
