@@ -24,6 +24,7 @@ import {
   tabsForSection,
   type AdminSectionKey,
 } from "../admin-nav";
+import { OVERVIEW_BASIS_NOTE } from "../group-overview";
 
 const SECTION_KEYS: AdminSectionKey[] = [
   "home",
@@ -153,6 +154,20 @@ describe("resolveAdminPath：最長前綴", () => {
     expect(resolveAdminPath("/admin/companies")).toMatchObject({ tab: "directory", sub: "companies" });
   });
 
+  it("/admin/group-overview → finance 的 groupOverview 分頁（沒有子分頁、不是 detail），頁首說明就是口徑", () => {
+    expect(resolveAdminPath("/admin/group-overview")).toMatchObject({
+      section: "finance",
+      tab: "groupOverview",
+      sub: null,
+      title: "集團總覽",
+      desc: OVERVIEW_BASIS_NOTE,
+      isDetail: false,
+      narrow: false,
+    });
+    expect(resolveAdminPath("/admin/group-overview").module).toBeUndefined();
+    expect(subTabsFor("finance", "groupOverview")).toEqual([]);
+  });
+
   it("/admin/knowledge/ask → knowledge 的 ask 子分頁，且帶 module knowledge", () => {
     expect(resolveAdminPath("/admin/knowledge/ask")).toMatchObject({
       section: "announce",
@@ -205,6 +220,7 @@ describe("resolveAdminPath：最長前綴", () => {
       module: "attendanceSettlement",
     });
     expect(resolveAdminPath("/admin/attendance-sheets")).toMatchObject({ section: "attendance", tab: "sheets" });
+    expect(resolveAdminPath("/admin/late-reports")).toMatchObject({ section: "attendance", tab: "lateReports", title: "遲到說明" });
   });
 
   it("query／尾斜線不影響：/admin/approvals?status=all 是簽核分頁", () => {
@@ -344,7 +360,7 @@ describe("ADMIN_SECTIONS／homeEntries", () => {
 });
 
 describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
-  it("finance 7 個分頁 key 順序固定", () => {
+  it("finance 8 個分頁 key 順序固定（集團總覽排在報表之後、名冊之前）", () => {
     expect(ADMIN_TABS.finance.map((t) => t.key)).toEqual([
       "projects",
       "overview",
@@ -352,6 +368,7 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
       "disbursements",
       "bonus",
       "reports",
+      "groupOverview",
       "directory",
     ]);
     expect(tabsForSection("finance", null).map((t) => t.key)).toEqual(ADMIN_TABS.finance.map((t) => t.key));
@@ -425,7 +442,7 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
       "ai",
     ]);
     expect(tabsForSection("announce", { knowledge: true }).map((t) => t.key)).toEqual(["announcements", "companyInfo", "knowledge"]);
-    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "sheets", "schedules", "duty"]);
+    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "sheets", "lateReports", "schedules", "duty"]);
   });
 
   it("subTabsFor：有 children 回子分頁（含 href）、沒有回 []、null 回 []", () => {
@@ -495,6 +512,27 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
     // homeEntries 帶 roleNav → 排除 home 的可見分區
     expect(homeEntries(NAV).map((s) => s.key)).toEqual(["finance", "attendance", "payroll", "people", "settings"]);
     expect(homeEntries()).toHaveLength(8);
+  });
+
+  it("集團總覽 hrOnly：HR（roleNav null）看得到；會計預設範圍不列；租戶自訂成「整個財務分區」也不列", () => {
+    expect(ADMIN_TABS.finance.find((t) => t.key === "groupOverview")).toMatchObject({ hrOnly: true, href: "/admin/group-overview" });
+    // 只有這一個分頁是 hrOnly
+    const hrOnlyKeys = (Object.values(ADMIN_TABS).flat() as Array<{ key: string; hrOnly?: boolean }>).filter((t) => t.hrOnly).map((t) => t.key);
+    expect(hrOnlyKeys).toEqual(["groupOverview"]);
+
+    expect(tabsForSection("finance", null).map((t) => t.key)).toContain("groupOverview");
+    expect(tabsForSection("finance", null, { roleNav: null }).map((t) => t.key)).toContain("groupOverview");
+    expect(tabsForSection("finance", null, { roleNav: NAV }).map((t) => t.key)).not.toContain("groupOverview");
+
+    // 自訂範圍只列分區、沒列 tabs → 「該區全部分頁」，但 hrOnly 的仍然剔除
+    const custom = roleNavOf("accountant", { roles: { accountant: { sections: ["finance"] } } });
+    const customFinance = tabsForSection("finance", null, { roleNav: custom }).map((t) => t.key);
+    expect(customFinance).toEqual(["projects", "overview", "receivables", "disbursements", "bonus", "reports", "directory"]);
+    // 就算把它明列進 tabs 白名單也不行（hrOnly 優先）
+    const listed = roleNavOf("accountant", { roles: { accountant: { sections: ["finance"], tabs: { finance: ["projects", "groupOverview"] } } } });
+    expect(tabsForSection("finance", null, { roleNav: listed }).map((t) => t.key)).toEqual(["projects"]);
+    // includeTab（直開網址）仍會把它塞回分頁列，讓 AdminShell 標「未開放」
+    expect(tabsForSection("finance", null, { roleNav: NAV, includeTab: "groupOverview" }).map((t) => t.key)).toContain("groupOverview");
   });
 
   it("roleNavOf：非會計 → null；會計沒設定 → 預設；features.roles.accountant 有效時整鍵覆蓋（只收認得的 key、補 home）", () => {
@@ -582,6 +620,17 @@ describe("isAdminPathAllowed：直開網址的角色守門（2026-09-23 驗收�
     ]) {
       expect(allowed(path), path).toBe(true);
     }
+  });
+
+  it("集團總覽：會計（預設範圍或自訂成整個財務分區）直開網址 → false；HR → true", () => {
+    expect(allowed("/admin/group-overview")).toBe(false);
+    const wholeFinance = roleNavOf("accountant", { roles: { accountant: { sections: ["finance"] } } });
+    expect(allowed("/admin/group-overview", wholeFinance ?? NAV)).toBe(false);
+    // 同一個自訂範圍下，財務分區其他分頁照常放行
+    expect(allowed("/admin/projects/receivables", wholeFinance ?? NAV)).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/group-overview", roleNav: null })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/group-overview", roleNav: roleNavOf("hr_admin", null) })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/group-overview", roleNav: roleNavOf("platform_admin", {}) })).toBe(true);
   });
 
   it("hr_admin／platform_admin（roleNav null）→ 一律 true，含隱藏模組與未知路徑", () => {

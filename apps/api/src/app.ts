@@ -70,6 +70,8 @@ import { birthdayGiftsRouter } from "./routes/birthday-gifts.js"
 import { dutyRostersRouter } from "./routes/duty-rosters.js"
 import { profileChangeRequestsRouter } from "./routes/profile-change-requests.js"
 import { internalCronRouter } from "./routes/internal-cron.js"
+// 2026-10-11 集團總覽
+import { groupOverviewRouter } from "./routes/group-overview.js"
 import { essTabGuard } from "./middleware/ess-tab-guard.js"
 import { runWithRequestContext } from "./lib/request-context.js"
 
@@ -188,6 +190,8 @@ app.use(birthdayGiftsRouter) // /birthday-gifts*（M7 生日紅包；WP8）
 app.use(dutyRostersRouter) // /duty-rosters*（M8 值日／總機；WP8）
 app.use(profileChangeRequestsRouter) // /profile-change-requests*（W6 員工改資料審核；WP8）
 app.use(internalCronRouter) // /internal/leave/annual-grant、/internal/people/birthday-reminder（WP9）
+// 2026-10-11 集團總覽
+app.use(groupOverviewRouter) // /group-overview、/group-overview/detail（跨公司入帳收入／放款支出／專案毛利；HR）
 
 // 404 fallback.
 app.use((_req: Request, res: Response) => {

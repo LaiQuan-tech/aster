@@ -22,6 +22,8 @@
  *     真正的守門在 API（requireFinance／canSeeBonus）。
  *   - `isAdminPathAllowed({ pathname, roleNav, modules })`（2026-09-23 驗收修正）：直開網址時
  *     這個角色能不能看這一頁；AdminShell 不渲染未開放的頁、首頁卡片依它隱藏。HR 一律 true。
+ *   - `AdminTab.hrOnly`（2026-10-11 集團總覽）：只給 HR／平台管理員的分頁。帶了 roleNav（會計）就一律不列，
+ *     即使租戶自訂的會計範圍沒限縮該分區的分頁；直開網址同樣走 isAdminPathAllowed 擋掉。API 另有 requireHrAdmin。
  */
 
 export type AdminSectionKey =
@@ -86,6 +88,8 @@ export interface AdminTab {
   narrow?: boolean;
   /** 隱藏模組：features.adminModules[module] === true 才列在分頁列。 */
   module?: AdminModuleKey;
+  /** 只給 HR／平台管理員（roleNav 為 null）：帶了 roleNav 的角色（會計）不列、直開網址也不放行。 */
+  hrOnly?: boolean;
   detail?: AdminDetailDef;
   /** 有子分頁時，路由由子分頁產生（tab 本身的 href 應等於第一個子分頁的 href）。 */
   children?: AdminSubTab[];
@@ -240,6 +244,14 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       ],
     },
     {
+      key: "groupOverview",
+      label: "集團總覽",
+      href: "/admin/group-overview",
+      title: "集團總覽",
+      desc: "收入＝實際入帳（未稅）；支出＝已匯款放款（代扣前）；專案毛利不含人事成本",
+      hrOnly: true,
+    },
+    {
       key: "directory",
       label: "名冊",
       href: "/admin/clients",
@@ -306,6 +318,13 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       title: "出勤月表 · 月結簽核",
       desc: "依月份彙整全員出勤月表，追蹤送出／審核進度、產生本月與匯出",
       detail: { title: "出勤月表" },
+    },
+    {
+      key: "lateReports",
+      label: "遲到說明",
+      href: "/admin/late-reports",
+      title: "遲到說明",
+      desc: "超過上班時間（未排班 10:00）才打上班卡的遲到原因；老闆決定是否影響全勤，沒決定視為影響",
     },
     {
       key: "schedules",
@@ -853,6 +872,7 @@ export function roleNavOf(role: string | null | undefined, features: Record<stri
 
 /**
  * 分區的可見分頁：module 未啟用的剔除；`roleNav` 有列這個分區時只留清單內的分頁；
+ * `hrOnly` 的分頁只要帶了 `roleNav`（＝受限角色，目前是會計）就剔除；
  * `includeTab`（目前所在分頁 key）強制保留，讓直開隱藏模組／未開放給該角色的網址時
  * 分頁列仍看得到自己（AdminShell 會標「未啟用」／「未開放」）。順序照表。
  */
@@ -864,8 +884,11 @@ export function tabsForSection(
   const keep = opts?.includeTab ?? null;
   const allowed = opts?.roleNav?.tabs[section];
   const allowedSet = allowed ? new Set(allowed) : null;
+  const restricted = !!opts?.roleNav;
   return ADMIN_TABS[section].filter(
-    (tab) => tab.key === keep || (isModuleEnabled(modules, tab.module) && (!allowedSet || allowedSet.has(tab.key))),
+    (tab) =>
+      tab.key === keep ||
+      (isModuleEnabled(modules, tab.module) && (!allowedSet || allowedSet.has(tab.key)) && !(restricted && tab.hrOnly)),
   );
 }
 
