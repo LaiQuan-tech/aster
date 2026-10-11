@@ -14,9 +14,11 @@
  * 鎖定／解鎖流程在 services/backup-snapshot.ts（closePeriod／reopenPeriod）。
  */
 import { supabaseAdmin } from "../lib/supabase.js"
+import { formatLeaveDuration } from "../lib/leave-duration.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { dayWindowUtc, localDateKey, monthRangeKeys } from "../lib/tz.js"
 import { isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { loadDailyRegularHours } from "./daily-regular-hours.js"
 import { shiftPeriod } from "./period-lock.js"
 
 export type ChecklistKey = "sheets" | "leave_settlement" | "expense_settlement" | "payslips"
@@ -189,12 +191,19 @@ export interface LeaveLite {
   settled_at: string | null
 }
 
-/** ② 假單核銷：期間與該月重疊的已核准假單，settled_at 不為空才算核銷。 */
+/**
+ * ② 假單核銷：期間與該月重疊的已核准假單，settled_at 不為空才算核銷。
+ *
+ * 未核銷清單裡的時數寫成「天＋時」（2026-10-11 業主決定請假時數一律顯示天＋時，與假單核銷頁同一套；
+ * `hoursPerDay`＝規則 payroll.dailyRegularHours，1 天幾小時，沒給／不合理＝8）。只改文字：
+ * 資料、判定都不變。時數缺席或不是數字的假單不印括號。
+ */
 export function summariseLeaveSettlement(
   rows: readonly LeaveLite[],
   names: ReadonlyMap<string, string>,
   leaveTypeNames: ReadonlyMap<string, string>,
   tz: string,
+  hoursPerDay?: number,
 ): ChecklistItem {
   const pending: ChecklistPendingEntry[] = []
   let done = 0
@@ -206,7 +215,8 @@ export function summariseLeaveSettlement(
     const typeName = r.leave_type_id ? leaveTypeNames.get(r.leave_type_id) || "請假" : "請假"
     const start = localDateKey(r.start_at, tz)
     const end = localDateKey(r.end_at, tz)
-    const hours = r.hours != null && r.hours !== "" ? `（${Number(r.hours)} 小時）` : ""
+    const duration = r.hours != null && r.hours !== "" ? formatLeaveDuration(r.hours, hoursPerDay) : ""
+    const hours = duration && duration !== "—" ? `（${duration}）` : ""
     pending.push({
       employeeId: r.employee_id,
       employeeName: nameOf(names, r.employee_id),
@@ -420,7 +430,9 @@ export async function evaluatePeriodChecklist(tenantId: string, period: string):
   const names = employeeNameMap(employees)
   const employed = employedInPeriodOf(employees, period)
 
-  const [sheetRes, leaveRes, leaveTypeRes, claimRes, salaryRes, slipRes, pendingRes] = await Promise.all([
+  const [hoursPerDay, sheetRes, leaveRes, leaveTypeRes, claimRes, salaryRes, slipRes, pendingRes] = await Promise.all([
+    // 1 天 ＝ 幾小時（未核銷假單的時數顯示用）；讀不到退回 8、不丟錯。
+    loadDailyRegularHours(tenantId),
     supabaseAdmin.from("attendance_sheets").select("id, employee_id, status").eq("tenant_id", tenantId).eq("period", period),
     supabaseAdmin
       .from("leave_requests")
@@ -455,7 +467,7 @@ export async function evaluatePeriodChecklist(tenantId: string, period: string):
 
   const items = [
     summariseSheets(employed, sheets, names),
-    summariseLeaveSettlement(leaves, names, leaveTypeNames, tz),
+    summariseLeaveSettlement(leaves, names, leaveTypeNames, tz, hoursPerDay),
     summariseExpenseSettlement(claims, names),
     summarisePayslips(employed, withSalary, payslips, names),
   ]

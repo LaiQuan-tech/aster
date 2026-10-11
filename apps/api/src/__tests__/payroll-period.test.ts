@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 // 純測試：supabase 換成記憶體版（helpers/fake-supabase.ts），不連任何 DB。
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
 
+import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
+import { logger } from "../lib/logger.js"
 import { clearTenantTimezoneCache } from "../lib/tenant-tz.js"
 import {
   CHECKLIST_LIST_LIMIT,
@@ -164,8 +166,36 @@ describe("② summariseLeaveSettlement — 已核准假單核銷", () => {
       ["乙", "l2", "unsettled"],
       ["甲", "l1", "unsettled"],
     ])
-    expect(item.pending[0]?.detail).toBe("事假 2026-09-29～2026-10-02（24 小時）尚未核銷")
-    expect(item.pending[1]?.detail).toBe("事假 2026-09-03（8 小時）尚未核銷")
+    // 時數寫成天＋時（2026-10-11）：24 小時＝3 天、8 小時＝1 天（每日 8 小時）。
+    expect(item.pending[0]?.detail).toBe("事假 2026-09-29～2026-10-02（3 天）尚未核銷")
+    expect(item.pending[1]?.detail).toBe("事假 2026-09-03（1 天）尚未核銷")
+  })
+
+  it("時數顯示天＋時：不整天的拆成天／時／分；1 天用傳進來的每日工時換算（沒給＝8）", () => {
+    const detailOf = (hours: number | string | null, hoursPerDay?: number) => {
+      const rows = [leave("l1", E1, tpe("2026-09-03", "09:00:00"), tpe("2026-09-04", "18:00:00"), null, hours)]
+      return summariseLeaveSettlement(rows, names(list), types, "Asia/Taipei", hoursPerDay).pending[0]?.detail
+    }
+    expect(detailOf(15)).toBe("事假 2026-09-03～2026-09-04（1 天 7 時）尚未核銷")
+    expect(detailOf(15, 7.5)).toBe("事假 2026-09-03～2026-09-04（2 天）尚未核銷")
+    expect(detailOf("22.00", 7.5)).toBe("事假 2026-09-03～2026-09-04（2 天 7 時）尚未核銷")
+    expect(detailOf(4)).toBe("事假 2026-09-03～2026-09-04（4 時）尚未核銷")
+    expect(detailOf(2.5)).toBe("事假 2026-09-03～2026-09-04（2 時 30 分）尚未核銷")
+    // 每日工時不合理（0、負數）→ 退回 8
+    expect(detailOf(16, 0)).toBe("事假 2026-09-03～2026-09-04（2 天）尚未核銷")
+    expect(detailOf(16, -3)).toBe("事假 2026-09-03～2026-09-04（2 天）尚未核銷")
+  })
+
+  it("時數缺席（null／空字串）或不是數字 → 不印括號；0 小時寫成「0 天」；不再出現「小時」字樣", () => {
+    const detailOf = (hours: number | string | null) => {
+      const rows = [leave("l1", E1, tpe("2026-09-03", "09:00:00"), tpe("2026-09-03", "18:00:00"), null, hours)]
+      return summariseLeaveSettlement(rows, names(list), types, "Asia/Taipei").pending[0]?.detail
+    }
+    expect(detailOf(null)).toBe("事假 2026-09-03尚未核銷")
+    expect(detailOf("")).toBe("事假 2026-09-03尚未核銷")
+    expect(detailOf("abc")).toBe("事假 2026-09-03尚未核銷")
+    expect(detailOf(0)).toBe("事假 2026-09-03（0 天）尚未核銷")
+    for (const hours of [1, 8, 24, "12.50"]) expect(detailOf(hours)).not.toContain("小時")
   })
 })
 
@@ -369,6 +399,47 @@ describe("evaluatePeriodChecklist — 整條（記憶體版 DB）", () => {
     const leave = (await evaluatePeriodChecklist(TENANT_ID, PERIOD)).items.find((i) => i.key === "leave_settlement") as ChecklistItem
     expect(leave).toMatchObject({ done: 0, total: 1, passed: false })
     expect(leave.pending[0]?.refId).toBe("cross")
+  })
+
+  describe("未核銷假單的時數用規則的每日工時換算天＋時", () => {
+    const unsettled = (hours: number): Row => ({
+      id: "u1", tenant_id: TENANT_ID, employee_id: E2, kind: "leave", status: "approved", deleted_at: null, leave_type_id: LT, hours,
+      start_at: tpe("2026-09-14", "09:00:00"), end_at: tpe("2026-09-16", "12:00:00"), settled_at: null,
+    })
+    const leaveDetail = async () => {
+      const item = (await evaluatePeriodChecklist(TENANT_ID, PERIOD)).items.find((i) => i.key === "leave_settlement") as ChecklistItem
+      return item.pending[0]?.detail
+    }
+    const rule = (dailyRegularHours: number): Row => ({
+      tenant_id: TENANT_ID,
+      config: { ...DEFAULT_RULE_CONFIG, payroll: { ...DEFAULT_RULE_CONFIG.payroll, dailyRegularHours } },
+      version: 1,
+      effective_from: "1900-01-01",
+    })
+
+    it("租戶沒設規則 → 每日 8 小時：15 小時＝1 天 7 時", async () => {
+      fake.db.leave_requests = [unsettled(15)]
+      expect(await leaveDetail()).toBe("事假 2026-09-14～2026-09-16（1 天 7 時）尚未核銷")
+    })
+
+    it("規則每日工時設 7.5 → 同樣 15 小時＝2 天（資料仍是 15 小時，只是顯示換算）", async () => {
+      fake.db.rule_configs = [rule(7.5)]
+      fake.db.leave_requests = [unsettled(15)]
+      expect(await leaveDetail()).toBe("事假 2026-09-14～2026-09-16（2 天）尚未核銷")
+      expect(fake.db.leave_requests[0]?.hours).toBe(15)
+    })
+
+    it("讀規則失敗 → 退回 8、清單照出（不因為顯示用的欄位讓檢查清單整個失敗），並留 warn log", async () => {
+      const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined)
+      try {
+        fake.injectError({ table: "rule_configs", action: "select", error: { message: "boom", code: "XX000" } })
+        fake.db.leave_requests = [unsettled(15)]
+        expect(await leaveDetail()).toBe("事假 2026-09-14～2026-09-16（1 天 7 時）尚未核銷")
+        expect(warn).toHaveBeenCalledTimes(1)
+      } finally {
+        warn.mockRestore()
+      }
+    })
   })
 
   it("只有報銷沒過：歸屬期是 9 月、還是 submitted 的單；別的月份、別的租戶的單不算", async () => {
