@@ -414,6 +414,13 @@
       "when": 1791624492300,
       "tag": "0058_option_items",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1791700218957,
+      "tag": "0059_rls_api_only_writes",
+      "breakpoints": true
     }
   ]
 }
