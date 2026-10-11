@@ -223,6 +223,31 @@ describe("POST /punch — 遲到理由（沒有人可以免）", () => {
     expect(lateReports()).toHaveLength(0)
   })
 
+  it("打卡寫進去之後通知出錯（查直屬主管失敗）→ 照樣 201，不讓員工重試多出一張上班卡", async () => {
+    setNow("2026-10-12", "10:30")
+    // 先讓部門欄位探測跑過（之後的 departments 查詢才會吃到注入的錯誤）。
+    await as(TOKENS.mgr).get("/late-reports")
+    fake.injectError({ table: "departments", action: "select", error: { message: "boom", code: "XX000" } })
+    const res = await as(TOKENS.emp).post("/punch").send({ type: "in", lateReason: "塞車" })
+    expect(res.status).toBe(201)
+    expect(punchInserts()).toHaveLength(1)
+    expect(lateReports()[0]).toMatchObject({ reason: "塞車", punch_record_id: res.body.id })
+  })
+
+  it("打卡時間＝檢查用的同一刻（沒遲到的上班卡也明確寫入，秒數邊界不會多出遲到）", async () => {
+    setNow("2026-10-12", "10:00:59")
+    const res = await as(TOKENS.emp).post("/punch").send({ type: "in" })
+    expect(res.status).toBe(201)
+    expect(fake.db.punch_records?.[0]?.punch_at).toBe(tpe("2026-10-12", "10:00:59"))
+  })
+
+  it("生效日（2026-10-12）之前的日子沒有彈性上班：10/09（週五）10:30 打卡不用理由", async () => {
+    setNow("2026-10-09", "10:30")
+    const res = await as(TOKENS.emp).post("/punch").send({ type: "in" })
+    expect(res.status).toBe(201)
+    expect(lateReports()).toHaveLength(0)
+  })
+
   it("HR 手動補登不要求理由", async () => {
     setNow("2026-10-12", "11:00")
     const res = await as(TOKENS.hr).post("/punch/manual").send({ employeeId: EMP, punchAt: tpe("2026-10-12", "10:45"), type: "in" })
@@ -295,13 +320,32 @@ describe("POST /late-reports/:id/decision — 只有老闆", () => {
 
     const second = await as(TOKENS.boss).post(`/late-reports/${ID}/decision`).send({ decision: "affects" })
     expect(second.status).toBe(200)
-    expect(second.body.lateReport).toMatchObject({ decision: "affects", decisionNote: null })
+    // 改判沒帶備註 → 原本的備註保留
+    expect(second.body.lateReport).toMatchObject({ decision: "affects", decisionNote: "交通事故有證明" })
 
     const audits = (fake.db.audit_logs ?? []).filter((a) => a.table_name === "late_reports")
     expect(audits).toHaveLength(2)
     expect(audits[0]).toMatchObject({ record_id: ID, action: "UPDATE", actor_emp_id: BOSS, context: "遲到說明決定：不影響全勤" })
-    expect(audits[1]).toMatchObject({ context: "遲到說明改判：exempt → affects" })
+    expect(audits[1]).toMatchObject({ context: "遲到說明改判：不影響全勤 → 影響全勤" })
     expect(audits[1].old_row).toMatchObject({ attendance_decision: "exempt" })
+  })
+
+  it("沒帶 note（員工端簽核頁按的）→ 保留原本的備註；帶空字串 → 清掉", async () => {
+    await as(TOKENS.boss).post(`/late-reports/${ID}/decision`).send({ decision: "exempt", note: "有證明" })
+    const keep = await as(TOKENS.boss).post(`/late-reports/${ID}/decision`).send({ decision: "affects" })
+    expect(keep.body.lateReport).toMatchObject({ decision: "affects", decisionNote: "有證明" })
+    const clear = await as(TOKENS.boss).post(`/late-reports/${ID}/decision`).send({ decision: "affects", note: "" })
+    expect(clear.body.lateReport.decisionNote).toBeNull()
+  })
+
+  it("那個月的出勤月表已核准／鎖定 → 409 sheet_frozen（薪資讀核准快照）；草稿照常可決定", async () => {
+    fake.db.attendance_sheets = [{ id: "s1", tenant_id: TENANT_ID, employee_id: EMP, period: "2026-10", status: "approved" }]
+    const frozen = await as(TOKENS.boss).post(`/late-reports/${ID}/decision`).send({ decision: "exempt" })
+    expect(frozen.status).toBe(409)
+    expect(frozen.body).toMatchObject({ error: "sheet_frozen", status: "approved" })
+    expect(fake.db.late_reports?.[0]?.attendance_decision ?? null).toBeNull()
+    fake.db.attendance_sheets = [{ id: "s1", tenant_id: TENANT_ID, employee_id: EMP, period: "2026-10", status: "draft" }]
+    expect((await as(TOKENS.boss).post(`/late-reports/${ID}/decision`).send({ decision: "exempt" })).status).toBe(200)
   })
 
   it("decision 不在 affects／exempt → 400；不存在或不是 uuid → 404", async () => {
@@ -327,6 +371,10 @@ describe("全勤與月表", () => {
     }
     const status = (await lateAttendanceForPeriod(TENANT_ID, "2026-10", [EMP, OTHER], rules)).get(EMP)!
     expect(status).toMatchObject({ undecidedCount: 1, exemptCount: 1, countingLateMinutes: 10, attendanceDeduction: 2000, losesFullAttendance: true })
+    // 事後補核准請假、那天不再遲到 → 未決定那筆不再算（也不計入全勤）
+    fake.db.attendance_days![1].late_minutes = 0
+    const after = (await lateAttendanceForPeriod(TENANT_ID, "2026-10", [EMP], rules)).get(EMP)!
+    expect(after).toMatchObject({ undecidedCount: 0, countingLateMinutes: 0, losesFullAttendance: false })
     const other = (await lateAttendanceForPeriod(TENANT_ID, "2026-10", [OTHER], rules)).get(OTHER)!
     expect(other).toMatchObject({ reportCount: 0, losesFullAttendance: false })
   })
@@ -338,6 +386,8 @@ describe("全勤與月表", () => {
       { tenant_id: TENANT_ID, employee_id: EMP, type: "out", punch_at: tpe("2026-10-12", "19:30"), source: "web" },
       { tenant_id: TENANT_ID, employee_id: EMP, type: "in", punch_at: tpe("2026-10-13", "09:30"), source: "web" },
       { tenant_id: TENANT_ID, employee_id: EMP, type: "out", punch_at: tpe("2026-10-13", "17:30"), source: "web" },
+      { tenant_id: TENANT_ID, employee_id: EMP, type: "in", punch_at: tpe("2026-10-09", "10:15"), source: "web" },
+      { tenant_id: TENANT_ID, employee_id: EMP, type: "out", punch_at: tpe("2026-10-09", "19:00"), source: "web" },
     ]
     fake.db.late_reports = [
       { id: "c1", tenant_id: TENANT_ID, employee_id: EMP, work_date: "2026-10-12", punch_record_id: null, punch_at: tpe("2026-10-12", "10:30"), late_minutes: 30, reason: "捷運故障", attendance_decision: null, decided_by_emp_id: null, decided_at: null, decision_note: null },
@@ -349,6 +399,8 @@ describe("全勤與月表", () => {
     expect(ad("2026-10-12")).toMatchObject({ worked_minutes: 480, late_minutes: 30, early_leave_minutes: 0, overtime_minutes: 0 })
     // 10/13：09:30–17:30 → 應下班 18:30 → 早退 60
     expect(ad("2026-10-13")).toMatchObject({ worked_minutes: 420, late_minutes: 0, early_leave_minutes: 60 })
+    // 10/09（生效日前）：10:15–19:00 不套彈性 → 不記遲到早退
+    expect(ad("2026-10-09")).toMatchObject({ late_minutes: 0, early_leave_minutes: 0 })
 
     const sheet = (fake.db.attendance_sheets ?? []).find((s) => s.employee_id === EMP && s.period === "2026-10")!
     const day = (fake.db.attendance_sheet_days ?? []).find((d) => d.sheet_id === sheet.id && d.work_date === "2026-10-12")!

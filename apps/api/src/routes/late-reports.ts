@@ -6,6 +6,7 @@ import { resolveSelf } from "../middleware/scope.js"
 import {
   LATE_REASON_MAX,
   LateReportNotFoundError,
+  LateReportSheetFrozenError,
   decideLateReport,
   lateReportScope,
   listLateReports,
@@ -18,7 +19,8 @@ import {
  *        老闆（features.approval.fallbackApproverEmpId）與 HR（hr_admin／platform_admin）看全公司；
  *        主管看自己管的部門（含子部門）的人；每個人都看得到自己的。回 { lateReports, canDecide }。
  *   POST /late-reports/:id/decision { decision: "affects"|"exempt", note? }
- *        **只有老闆**能決定（其他人 403 not_boss）；可改決定，寫 audit。
+ *        **只有老闆**能決定（其他人 403 not_boss）；可改決定，寫 audit。沒帶 note＝不動原本的備註。
+ *        那個月的出勤月表已核准／鎖定 → 409 sheet_frozen（薪資讀核准快照，要先退回或重開月表）。
  *
  * 全勤：沒決定視為「影響全勤」，exempt 不影響（services/late-reports.ts lateAttendanceForPeriod）。
  */
@@ -112,18 +114,25 @@ lateReportsRouter.post(
         res.status(403).json({ error: "not_boss", message: "只有老闆可以決定遲到是否影響全勤" })
         return
       }
-      const note = parsed.data.note ? parsed.data.note : null
       const lateReport = await decideLateReport({
         tenantId,
         id,
         decision: parsed.data.decision,
-        note,
+        note: parsed.data.note === undefined ? undefined : parsed.data.note,
         actorEmpId: self.id,
       })
       res.status(200).json({ lateReport })
     } catch (err) {
       if (err instanceof LateReportNotFoundError) {
         res.status(404).json({ error: "not_found" })
+        return
+      }
+      if (err instanceof LateReportSheetFrozenError) {
+        res.status(409).json({
+          error: "sheet_frozen",
+          status: err.status,
+          message: "這個月的出勤月表已核准，薪資照核准當下計算；要改請先退回或重開月表",
+        })
         return
       }
       next(err)

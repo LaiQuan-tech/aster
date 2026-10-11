@@ -1120,7 +1120,14 @@ function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContex
     capMinutes: capMinutesFor(facts.rules),
     beyondCap: resolveOvertimeBeyondCap(facts.rules),
     approvedOtDates,
-    undecidedLateCount: undecidedCountOf(lateReports),
+    undecidedLateCount: undecidedCountOf(
+      lateReports,
+      new Set(
+        lateReports
+          .map((r) => r.work_date)
+          .filter((d) => (facts.attendanceByKey.get(`${employeeId}|${d}`)?.late_minutes ?? 0) > 0),
+      ),
+    ),
   }
 }
 

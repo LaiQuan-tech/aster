@@ -193,11 +193,12 @@ payrollRouter.post(
         const exempt = exemptDatesOf(lateReportsByEmployee.get(id))
         if (exempt.size > 0) daysByEmployee.set(id, days.map((d) => (exempt.has(d.date) ? { ...d, lateExempt: true } : d)))
       }
-      const warnings = employeeIds.flatMap((id) => {
-        const count = undecidedCountOf(lateReportsByEmployee.get(id))
+      const lateWarningFor = (id: string) => {
+        const stillLate = new Set((daysByEmployee.get(id) ?? []).filter((d) => d.lateMinutes > 0).map((d) => d.date))
+        const count = undecidedCountOf(lateReportsByEmployee.get(id), stillLate)
         const message = undecidedLateWarning(count)
         return message ? [{ employeeId: id, code: "late_reports_undecided" as const, count, message }] : []
-      })
+      }
 
       // --- already-finalized payslips for this period (locked, skip) ----------
       const { data: finData, error: finErr } = await supabaseAdmin
@@ -306,7 +307,8 @@ payrollRouter.post(
         missingInsuredSalary,
         allowanceReview,
         unapprovedSheets,
-        warnings,
+        // 只提醒這次有產生薪資單的人（已定案／略過的不列）。
+        warnings: employeeIds.filter((id) => !skipped.includes(id)).flatMap(lateWarningFor),
       })
     } catch (err) {
       next(err)

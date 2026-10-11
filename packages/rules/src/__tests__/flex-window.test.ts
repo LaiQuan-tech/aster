@@ -33,17 +33,12 @@ const workday = { date: D, dayType: "workday" as const };
 const flex = flexShiftDef(rules) as ShiftDef;
 
 describe("彈性上班時窗（attendance.flex）", () => {
-  it("預設啟用 08:00–10:00、480 分；明示 null 關閉；startFrom 晚於 startUntil 會被擋", () => {
+  it("預設啟用 08:00–10:00、480 分、2026-10-12 起；明示 null 關閉；startFrom 晚於 startUntil 會被擋", () => {
     expect(rules.attendance).toBeUndefined();
-    expect(resolveFlexWindow(rules)).toEqual({ startFrom: "08:00", startUntil: "10:00", workMinutes: 480 });
-    expect(DEFAULT_FLEX_WINDOW).toEqual({ startFrom: "08:00", startUntil: "10:00", workMinutes: 480 });
-    expect(flex).toEqual({
-      start: "08:00",
-      end: "23:59",
-      breakMinutes: 60,
-      breakStart: "12:00",
-      flex: { startFrom: "08:00", startUntil: "10:00", workMinutes: 480 },
-    });
+    const expected = { startFrom: "08:00", startUntil: "10:00", workMinutes: 480, effectiveFrom: "2026-10-12" };
+    expect(resolveFlexWindow(rules)).toEqual(expected);
+    expect(DEFAULT_FLEX_WINDOW).toEqual(expected);
+    expect(flex).toEqual({ start: "08:00", end: "23:59", breakMinutes: 60, breakStart: "12:00", flex: expected });
     const off = parseRuleConfig({ ...rules, attendance: { flex: null } });
     expect(resolveFlexWindow(off)).toBeNull();
     expect(flexShiftDef(off)).toBeNull();
@@ -51,6 +46,18 @@ describe("彈性上班時窗（attendance.flex）", () => {
     expect(resolveFlexWindow(custom)).toEqual({ startFrom: "07:30", startUntil: "09:30", workMinutes: 450 });
     expect(() => parseRuleConfig({ ...rules, attendance: { flex: { startFrom: "11:00", startUntil: "10:00", workMinutes: 480 } } })).toThrow();
     expect(() => parseRuleConfig({ ...rules, attendance: { flex: { startFrom: "08:00", startUntil: "10:00", workMinutes: 0 } } })).toThrow();
+    expect(() =>
+      parseRuleConfig({ ...rules, attendance: { flex: { startFrom: "08:00", startUntil: "10:00", workMinutes: 480, effectiveFrom: "10/12" } } }),
+    ).toThrow();
+  });
+
+  it("生效日之前的日子沒有彈性上班（重算舊月份不會冒出當時沒有的遲到）；自訂時窗沒寫生效日＝一律套用", () => {
+    expect(resolveFlexWindow(rules, "2026-10-09")).toBeNull();
+    expect(flexShiftDef(rules, "2026-10-09")).toBeNull();
+    expect(resolveFlexWindow(rules, "2026-10-12")?.startUntil).toBe("10:00");
+    expect(flexShiftDef(rules, "2026-10-12")?.flex?.startUntil).toBe("10:00");
+    const always = parseRuleConfig({ ...rules, attendance: { flex: { startFrom: "08:00", startUntil: "10:00", workMinutes: 480 } } });
+    expect(flexShiftDef(always, "2026-01-05")).not.toBeNull();
   });
 
   it.each([
@@ -92,6 +99,21 @@ describe("彈性上班時窗（attendance.flex）", () => {
     ).toBe(0);
     // 沒請假同樣情境 → 早退 240（14:00–18:00）
     expect(computeAttendanceDay(pair("09:00", "14:00"), flex, rules, workday).earlyLeaveMinutes).toBe(240);
+  });
+
+  it("上午請假後才到班：應上班從請假開始算，不會被誤算早退", () => {
+    const leave = (a: string, b: string) => ({ from: at(a), to: at(b) });
+    // 上午請 09:00–14:00（預設班別的上午半天）、14:00–18:00 上班 → 視為 09:00 起 → 應下班 18:00 → 早退 0
+    const am = computeAttendanceDay(pair("14:00", "18:00"), flex, rules, { ...workday, leaveIntervals: [leave("09:00", "14:00")] });
+    expect(am.lateMinutes).toBe(0);
+    expect(am.earlyLeaveMinutes).toBe(0);
+    // 請 08:00–12:00、13:00–17:00 上班（午休接上請假）→ 視為 08:00 起 → 應下班 17:00 → 早退 0
+    const early = computeAttendanceDay(pair("13:00", "17:00"), flex, rules, { ...workday, leaveIntervals: [leave("08:00", "12:00")] });
+    expect(early.earlyLeaveMinutes).toBe(0);
+    // 請假沒接到上班卡（08:00–09:00，11:00 才到）→ 照上班卡算：遲到 60、應下班 19:00
+    const gap = computeAttendanceDay(pair("11:00", "19:00"), flex, rules, { ...workday, leaveIntervals: [leave("08:00", "09:00")] });
+    expect(gap.lateMinutes).toBe(60);
+    expect(gap.earlyLeaveMinutes).toBe(0);
   });
 
   it("夜間分鐘也只算 08:00 之後（08:00 前不算工時）", () => {

@@ -116,20 +116,20 @@ function pad2(n: number): string {
  * 判斷本身出錯時記 warn 並放行（null）——不能讓打卡因為遲到檢查掛掉；月表照樣會記遲到。
  */
 async function firstInLateness(tenantId: string, employeeId: string, now: Date): Promise<ArrivalLateness | null> {
-  const { start, end } = await todayWindow(tenantId)
-  const { data: prior, error: priorErr } = await supabaseAdmin
-    .from("punch_records")
-    .select("id")
-    .eq("tenant_id", tenantId)
-    .eq("employee_id", employeeId)
-    .eq("type", "in")
-    .gte("punch_at", start)
-    .lt("punch_at", end)
-    .limit(1)
-    .maybeSingle()
-  if (priorErr) throw new Error(`POST /punch (first in): ${priorErr.message}`)
-  if (prior) return null
   try {
+    const { start, end } = await todayWindow(tenantId)
+    const { data: prior, error: priorErr } = await supabaseAdmin
+      .from("punch_records")
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .eq("employee_id", employeeId)
+      .eq("type", "in")
+      .gte("punch_at", start)
+      .lt("punch_at", end)
+      .limit(1)
+      .maybeSingle()
+    if (priorErr) throw new Error(`first in: ${priorErr.message}`)
+    if (prior) return null
     const lateness = await lateMinutesForArrival({ tenantId, employeeId, arrivalAt: now })
     return lateness.lateMinutes > 0 ? lateness : null
   } catch (err) {
@@ -315,8 +315,9 @@ punchRouter.post(
           geo_status: lat != null && lng != null ? null : (geoStatus ?? null),
           // 來源 IP（只有員工自己打卡才記，見 lib/client-ip.ts；取不到或不合法 → null）。
           ip_address: clientIpOf(req),
-          // 檢查過遲到的上班卡，時間用檢查當下那一刻（與遲到說明的 punch_at 一致）；其餘照 DB 預設。
-          ...(lateness ? { punch_at: now.toISOString() } : {}),
+          // 打卡時間＝這個請求檢查（冷卻、遲到）用的同一刻：秒數邊界（10:00:59.8 檢查不算遲到、
+          // DB 晚一點寫成 10:01:00.1）才不會讓月結多出一筆沒有遲到說明的遲到。
+          punch_at: now.toISOString(),
         })
         .select("*")
         .single()
@@ -326,25 +327,31 @@ punchRouter.post(
         return
       }
 
+      // 打卡已經寫進去了：之後的掛 id／通知出錯只記 warn、照樣回 201（回 500 會讓員工重試、
+      // 多出一張上班卡）。
       if (lateReport && lateness && lateReason) {
-        await attachPunchToLateReport(tenantId, lateReport.id, data.id as string)
-        if (lateReport.needsNotify) {
-          const { data: emp } = await supabaseAdmin
-            .from("employees")
-            .select("name")
-            .eq("tenant_id", tenantId)
-            .eq("id", self.id)
-            .maybeSingle()
-          await notifyLateReport({
-            tenantId,
-            employeeId: self.id,
-            employeeName: ((emp as { name?: string | null } | null)?.name ?? "").trim() || "同仁",
-            reportId: lateReport.id,
-            workDate: lateness.workDate,
-            punchHm: punchTime,
-            lateMinutes: lateness.lateMinutes,
-            reason: lateReason,
-          })
+        try {
+          await attachPunchToLateReport(tenantId, lateReport.id, data.id as string)
+          if (lateReport.needsNotify) {
+            const { data: emp } = await supabaseAdmin
+              .from("employees")
+              .select("name")
+              .eq("tenant_id", tenantId)
+              .eq("id", self.id)
+              .maybeSingle()
+            await notifyLateReport({
+              tenantId,
+              employeeId: self.id,
+              employeeName: ((emp as { name?: string | null } | null)?.name ?? "").trim() || "同仁",
+              reportId: lateReport.id,
+              workDate: lateness.workDate,
+              punchHm: punchTime,
+              lateMinutes: lateness.lateMinutes,
+              reason: lateReason,
+            })
+          }
+        } catch (err) {
+          logger.warn({ err, tenantId, lateReportId: lateReport.id }, "POST /punch: late report follow-up failed (punch already saved)")
         }
       }
 

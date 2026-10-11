@@ -67,9 +67,9 @@ const MS_PER_MIN = 60_000
 //     09:00–18:00 ＝ 8 小時、加班 0（以前這裡休息 0 分，會記成 9 小時、加班 60 分）。
 //     遲到／早退對它沒有意義，下面一律歸零。
 //   • 沒排班的**工作日** → 彈性上班（@hr/rules flexShiftDef，attendance.flex，預設 08:00–10:00、
-//     480 分，2026-10-11 業主拍板）：08:00 前不算工時、10:00 後到算遲到、應下班＝clamp(上班卡,
-//     08:00, 10:00)＋8 小時＋午休重疊。這種日子的遲到／早退照算（不歸零）。例假日／國定假日沒有應
-//     上下班時間，不套彈性。
+//     480 分、2026-10-12 起生效，2026-10-11 業主拍板）：08:00 前不算工時、10:00 後到算遲到、應下班＝
+//     clamp(上班卡, 08:00, 10:00)＋8 小時＋午休重疊。這種日子的遲到／早退照算（不歸零）。例假日／國定
+//     假日沒有應上下班時間、生效日之前的日子也沒有這條規則，都不套彈性（重算舊月份不會冒出遲到）。
 
 interface PunchRow {
   employee_id: string
@@ -482,7 +482,7 @@ export async function lateMinutesForArrival(input: {
   const wd = weekdayOfKey(workDate)
   const dayType: DayType = calendar.get(workDate) ?? (wd === 0 || wd === 6 ? "rest_day" : "workday")
 
-  const shift = pickDayShift(scheduledShift, dayType, flexShiftDef(rules), unscheduledShiftDef(rules))
+  const shift = pickDayShift(scheduledShift, dayType, flexShiftDef(rules, workDate), unscheduledShiftDef(rules))
   const mode: ArrivalLateness["mode"] = scheduledShift ? "shift" : shift.flex ? "flex" : "none"
   if (mode === "none") return { workDate, lateMinutes: 0, threshold: null, mode }
 
@@ -666,7 +666,6 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   const shiftFor = (empId: string, date: DateKey): ShiftDef | null => shiftByKey.get(`${empId}|${date}`) ?? null
   // 沒排班的日子：整天＋租戶預設午休；工作日改彈性上班（見檔頭「午休」）。
   const unscheduledShift = unscheduledShiftDef(rules)
-  const flexShift = flexShiftDef(rules)
   const defaultLunch = resolveDefaultLunch(rules)
 
   // --- calendar → dayType ------------------------------------------------------
@@ -768,7 +767,8 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
 
     // 班別：有排班用該班（含午休設定）；沒排班的工作日用彈性上班；其他沒排班的日子用
     // 「整天＋預設午休」。打卡的休息段已從 pairs 切掉 → punchedBreaks（只影響舊推算班別）。
-    const shift: ShiftDef = pickDayShift(scheduledShift, dayType, flexShift, unscheduledShift)
+    // 彈性上班有生效日（attendance.flex.effectiveFrom，預設 2026-10-12）：之前的日子 flexShiftDef 回 null。
+    const shift: ShiftDef = pickDayShift(scheduledShift, dayType, flexShiftDef(rules, workDate), unscheduledShift)
     // 遲到／早退有意義＝有排班，或用彈性上班（有應上下班時間）；其餘歸零。
     const hasExpectedTimes = !!scheduledShift || !!shift.flex
 

@@ -282,12 +282,28 @@ export class LateReportNotFoundError extends Error {
   }
 }
 
-/** 老闆決定（呼叫端已確認是老闆）。可改決定；寫 audit（old／new）。 */
+/** 那個月的出勤月表已核准／鎖定：薪資讀核准快照，這時改決定不會生效 → 擋下。 */
+export class LateReportSheetFrozenError extends Error {
+  readonly status: string
+  constructor(status: string) {
+    super("sheet_frozen")
+    this.name = "LateReportSheetFrozenError"
+    this.status = status
+  }
+}
+
+const DECISION_LABEL: Record<"affects" | "exempt", string> = { affects: "影響全勤", exempt: "不影響全勤" }
+
+/**
+ * 老闆決定（呼叫端已確認是老闆）。可改決定；寫 audit（old／new）。
+ * note：undefined＝不動原本的備註（從員工端簽核頁按的不帶備註）；字串＝改成這段（空字串清掉）。
+ * 那個月的出勤月表已核准／鎖定 → LateReportSheetFrozenError（要先退回或重開月表）。
+ */
 export async function decideLateReport(input: {
   tenantId: string
   id: string
   decision: "affects" | "exempt"
-  note: string | null
+  note?: string | null
   actorEmpId: string
 }): Promise<LateReportView> {
   const { data: current, error: selErr } = await supabaseAdmin
@@ -299,14 +315,24 @@ export async function decideLateReport(input: {
   if (selErr) throw new Error(`late-reports (load): ${selErr.message}`)
   if (!current) throw new LateReportNotFoundError()
   const before = current as unknown as LateReportRow
+  const { data: sheet, error: sheetErr } = await supabaseAdmin
+    .from("attendance_sheets")
+    .select("status")
+    .eq("tenant_id", input.tenantId)
+    .eq("employee_id", before.employee_id)
+    .eq("period", before.work_date.slice(0, 7))
+    .maybeSingle()
+  if (sheetErr && !isMissingTableError(sheetErr)) throw new Error(`late-reports (sheet): ${sheetErr.message}`)
+  const sheetStatus = (sheet as { status?: string } | null)?.status
+  if (sheetStatus === "approved" || sheetStatus === "locked") throw new LateReportSheetFrozenError(sheetStatus)
   const now = new Date().toISOString()
-  const patch = {
+  const patch: Record<string, unknown> = {
     attendance_decision: input.decision,
     decided_by_emp_id: input.actorEmpId,
     decided_at: now,
-    decision_note: input.note,
     updated_at: now,
   }
+  if (input.note !== undefined) patch.decision_note = input.note && input.note.trim() ? input.note.trim() : null
   const { data: updated, error: updErr } = await supabaseAdmin
     .from("late_reports")
     .update(patch)
@@ -329,9 +355,10 @@ export async function decideLateReport(input: {
     },
     newRow: patch,
     actorEmpId: input.actorEmpId,
-    context: before.attendance_decision
-      ? `遲到說明改判：${before.attendance_decision} → ${input.decision}`
-      : `遲到說明決定：${input.decision === "exempt" ? "不影響全勤" : "影響全勤"}`,
+    context:
+      before.attendance_decision === "affects" || before.attendance_decision === "exempt"
+        ? `遲到說明改判：${DECISION_LABEL[before.attendance_decision]} → ${DECISION_LABEL[input.decision]}`
+        : `遲到說明決定：${DECISION_LABEL[input.decision]}`,
   })
   const names = await employeeNames(input.tenantId, [after.employee_id, input.actorEmpId])
   return toLateReportView(after, names)
@@ -415,7 +442,12 @@ export function exemptDatesOf(rows: readonly LateReportRow[] | undefined): Set<s
   return new Set((rows ?? []).filter((r) => normalizeLateDecision(r.attendance_decision) === "exempt").map((r) => r.work_date))
 }
 
-/** 未決定的筆數（沒決定＝影響全勤）。 */
-export function undecidedCountOf(rows: readonly LateReportRow[] | undefined): number {
-  return (rows ?? []).filter((r) => normalizeLateDecision(r.attendance_decision) === null).length
+/**
+ * 未決定的筆數（沒決定＝影響全勤）。給了 stillLateDates 時只算「那天現在仍有遲到」的——事後補核准
+ * 請假、或打卡沒寫成的那筆不再列進提醒。
+ */
+export function undecidedCountOf(rows: readonly LateReportRow[] | undefined, stillLateDates?: Set<string>): number {
+  return (rows ?? []).filter(
+    (r) => normalizeLateDecision(r.attendance_decision) === null && (!stillLateDates || stillLateDates.has(r.work_date)),
+  ).length
 }

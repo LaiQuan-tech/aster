@@ -218,12 +218,12 @@ export function unscheduledShiftDef(rules: RuleConfig): ShiftDef {
 }
 
 /**
- * 未排班工作日的彈性上班「班別」(attendance.flex 關閉 → null):午休同 unscheduledShiftDef,
- * flex 帶時窗。工時從 max(上班卡, startFrom) 起算;上班卡晚於 startUntil 算遲到;
- * 應下班 = clamp(上班卡, startFrom, startUntil) + workMinutes + 午休重疊,早於它下班算早退。
+ * 未排班工作日的彈性上班「班別」(attendance.flex 關閉、或 date 早於生效日 → null):午休同
+ * unscheduledShiftDef,flex 帶時窗。工時從 max(上班卡, startFrom) 起算;上班卡晚於 startUntil
+ * 算遲到;應下班 = clamp(上班卡, startFrom, startUntil) + workMinutes + 午休重疊,早於它下班算早退。
  */
-export function flexShiftDef(rules: RuleConfig): ShiftDef | null {
-  const flex = resolveFlexWindow(rules);
+export function flexShiftDef(rules: RuleConfig, date?: string): ShiftDef | null {
+  const flex = resolveFlexWindow(rules, date);
   if (!flex) return null;
   const lunch = resolveDefaultLunch(rules);
   return { start: flex.startFrom, end: "23:59", breakMinutes: lunch.minutes, breakStart: lunch.start, flex };
@@ -320,7 +320,19 @@ export function computeAttendanceDay(
   if (flex) {
     const fromMs = dayBase + hhmmToMinutes(flex.startFrom) * MS_PER_MIN;
     const untilMs = dayBase + hhmmToMinutes(flex.startUntil) * MS_PER_MIN;
-    const startMs = Math.min(Math.max(arrivalMinuteMs, fromMs), untilMs);
+    // 上班卡前若有已核准請假 (連同相接的午休) 一路接到上班卡,這天從請假開始就算「上班了」:
+    // 上午請 09:00–14:00、14:00 到 → 視為 09:00 起 → 應下班 18:00 (不會被算早退)。
+    let anchorMs = arrivalMinuteMs;
+    for (let moved = true; moved; ) {
+      moved = false;
+      for (const iv of excused) {
+        if (iv.start < anchorMs && iv.end >= anchorMs) {
+          anchorMs = iv.start;
+          moved = true;
+        }
+      }
+    }
+    const startMs = Math.min(Math.max(anchorMs, fromMs), untilMs);
     let endMs = startMs + flex.workMinutes * MS_PER_MIN;
     if (explicitLunch && lunchIv && startMs < lunchIv.end && endMs > lunchIv.start) {
       endMs += lunchIv.end - Math.max(startMs, lunchIv.start);

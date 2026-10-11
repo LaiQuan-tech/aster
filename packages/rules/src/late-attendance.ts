@@ -27,7 +27,10 @@ export interface LateAttendanceStatus {
   reportCount: number;
   affectsCount: number;
   exemptCount: number;
-  /** 老闆尚未決定的筆數 (視為影響全勤)。 */
+  /**
+   * 老闆尚未決定的筆數 (視為影響全勤)。有給 days 時只算「那天現在仍有遲到」的
+   * (事後補核准請假、或打卡沒寫成的那筆不再算)。
+   */
   undecidedCount: number;
   /** 老闆決定不影響全勤的日期 (給 AttendanceDay.lateExempt)。 */
   exemptDates: string[];
@@ -51,6 +54,9 @@ export function lateAttendanceStatus(input: {
   tiers?: RuleConfig["attendance_bonus"]["tiers"];
 }): LateAttendanceStatus {
   const exempt = new Set<string>();
+  const stillLate = input.days
+    ? new Set(input.days.filter((d) => (Number(d.lateMinutes) || 0) > 0).map((d) => d.date))
+    : null;
   let affectsCount = 0;
   let exemptCount = 0;
   let undecidedCount = 0;
@@ -61,7 +67,7 @@ export function lateAttendanceStatus(input: {
       exempt.add(r.workDate);
     } else if (decision === "affects") {
       affectsCount += 1;
-    } else {
+    } else if (!stillLate || stillLate.has(r.workDate)) {
       undecidedCount += 1;
     }
   }

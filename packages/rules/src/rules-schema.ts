@@ -246,13 +246,16 @@ export type DefaultLunch = z.infer<typeof DefaultLunchSchema>;
 //   startUntil  最晚上班:之後才打上班卡算遲到 (以整分鐘比較,10:00:59 不算)
 //   workMinutes 應工作分鐘 (不含午休):應下班 = clamp(上班卡, startFrom, startUntil)
 //               + workMinutes + 與午休的重疊;下班卡早於應下班 = 早退
-// 省略 = 預設啟用 08:00–10:00、480 分 (resolveFlexWindow);明示 null = 關閉
+//   effectiveFrom 生效日 'YYYY-MM-DD' (含);之前的日子不套 (重算舊月份時不會冒出當時根本不存在
+//               的遲到/早退)。省略 = 一律套用。
+// 省略整段 = 預設啟用 08:00–10:00、480 分、2026-10-12 起 (resolveFlexWindow);明示 null = 關閉
 // (未排班日退回「整天、不計遲到早退」)。加班照舊:扣午休後超過正常工時的部分。
 const FlexWindowSchema = z
   .object({
     startFrom: HHMM,
     startUntil: HHMM,
     workMinutes: z.number().int().positive().max(1440),
+    effectiveFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected 'YYYY-MM-DD'").optional(),
   })
   .refine((v) => v.startFrom <= v.startUntil, { message: "startFrom must not be later than startUntil" });
 export type FlexWindow = z.infer<typeof FlexWindowSchema>;
@@ -353,13 +356,27 @@ export function resolveDefaultLunch(rules: RuleConfig): DefaultLunch {
   return rules.attendance?.defaultLunch ?? DEFAULT_LUNCH;
 }
 
-/** 彈性上班時窗預設 (業主 2026-10-11:08:00–10:00 之間上班、做滿 8 小時)。 */
-export const DEFAULT_FLEX_WINDOW: FlexWindow = { startFrom: "08:00", startUntil: "10:00", workMinutes: 480 };
+/**
+ * 彈性上班時窗預設 (業主 2026-10-11 拍板:08:00–10:00 之間上班、做滿 8 小時)。
+ * 生效日 2026-10-12 (拍板後第一個工作日):之前的日子沒有這條規則,重算也不套。
+ */
+export const DEFAULT_FLEX_WINDOW: FlexWindow = {
+  startFrom: "08:00",
+  startUntil: "10:00",
+  workMinutes: 480,
+  effectiveFrom: "2026-10-12",
+};
 
-/** 彈性上班時窗 (省略 → 預設啟用;明示 null → 關閉,回 null)。 */
-export function resolveFlexWindow(rules: RuleConfig): FlexWindow | null {
+/**
+ * 彈性上班時窗 (省略 → 預設啟用;明示 null → 關閉,回 null)。給了 date ('YYYY-MM-DD') 時,
+ * 早於 effectiveFrom 的日子也回 null (那天沒有彈性上班)。
+ */
+export function resolveFlexWindow(rules: RuleConfig, date?: string): FlexWindow | null {
   const v = rules.attendance?.flex;
-  return v === undefined ? DEFAULT_FLEX_WINDOW : v;
+  const flex = v === undefined ? DEFAULT_FLEX_WINDOW : v;
+  if (!flex) return null;
+  if (date && flex.effectiveFrom && date < flex.effectiveFrom) return null;
+  return flex;
 }
 
 /* ------------------------------------ 2026-09-23 需求補齊:加班上限/特休/級距 ----- */
