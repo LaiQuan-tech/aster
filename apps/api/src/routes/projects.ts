@@ -429,19 +429,20 @@ function serializeProject(
 }
 
 /**
- * 案型與母案的規則：
- *   • kind≠main 必須掛母案（追加減／加做／估驗都是「某個主案的」）→ parent_required
- *   • 母案必須同租戶、且本身是 main（不能掛在追加減底下疊羅漢）→ invalid_parent
- *   • main 不掛母案、也不能掛自己
+ * 案型與母案的規則（業主 2026-09-30 會議：拿掉「必須先有母案」的限制）：
+ *   • 母案是**選填**——沒帶母案（POST 省略／null、PATCH 帶 null）可以建任何案型。追加減／
+ *     加做／代墊常常是先開案、之後才補母案（補母案走 PATCH parentProjectId）。
+ *   • **有帶母案才驗**：必須同租戶、且本身是 main（不能掛在追加減底下疊羅漢）→ invalid_parent
+ *   • main 不掛母案、任何案也不能掛自己 → invalid_parent
  */
 async function validateParent(
   tenantId: string,
   kind: string,
   parentProjectId: string | null,
   selfId: string | null,
-): Promise<"parent_required" | "invalid_parent" | null> {
-  if (kind === "main") return parentProjectId ? "invalid_parent" : null
-  if (!parentProjectId) return "parent_required"
+): Promise<"invalid_parent" | null> {
+  if (!parentProjectId) return null
+  if (kind === "main") return "invalid_parent"
   if (selfId && parentProjectId === selfId) return "invalid_parent"
   const { data, error } = await supabaseAdmin
     .from("projects")
@@ -1161,6 +1162,21 @@ projectsRouter.patch(
         if (parentError) {
           res.status(400).json({ error: parentError })
           return
+        }
+        // 底下已經有追加／變更／代墊案的主案，不能改成別的案型：它們的母案必須是 main（validateParent
+        // 的規則），改了就留下掛在非主案底下的子案。母案改成選填後，改案型不必先選母案，更容易誤觸。
+        if (kind !== "main" && (scope.project.kind ?? "main") === "main") {
+          const { data: children, error: childErr } = await supabaseAdmin
+            .from("projects")
+            .select("id")
+            .eq("tenant_id", tenantId)
+            .eq("parent_project_id", scope.project.id)
+            .limit(1)
+          if (childErr) throw new Error(`PATCH /projects/${scope.project.id} (children): ${childErr.message}`)
+          if ((children ?? []).length > 0) {
+            res.status(409).json({ error: "has_child_projects" })
+            return
+          }
         }
         patch.kind = kind
         patch.parent_project_id = kind === "main" ? null : parentId

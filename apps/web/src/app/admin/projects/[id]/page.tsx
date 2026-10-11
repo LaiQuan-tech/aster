@@ -26,6 +26,7 @@ import {
   getBillingSchedule,
   getProjectSubcontracts,
   listCompanies,
+  listProjectsExt,
   getP3SettingsLite,
   loadContractsForProjectAccess,
   engineerDisciplinesOf,
@@ -37,7 +38,9 @@ import {
   type InstallmentInputExt,
   type SubcontractPayment,
   type Company,
+  type ProjectListItem,
 } from "@/lib/projects-ext-api";
+import { parentProjectChoices } from "../_components/project-application-form";
 import {
   humanError,
   todayKey,
@@ -96,7 +99,14 @@ export default function AdminProjectDetailPage() {
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [adjustments, setAdjustments] = useState<ShareAdjustment[]>([]);
   const [documents, setDocuments] = useState<ProjectDocument[]>([]);
+  /**
+   * 合約掃描檔與合約內容欄位只有 HR／該案 lead／經理與主辦成員看得到（會計與部門主管看不到）。
+   * 後端在 documents 回應裡告知；false 時合約卡不顯示掃描檔、上傳／刪除按鈕與內容欄位。
+   */
+  const [canSeeContractDocs, setCanSeeContractDocs] = useState(false);
   const [contracts, setContracts] = useState<Contract[]>([]);
+  /** 「母案」下拉的來源：同租戶的主案（含已封存的）。載入失敗就是空清單，不影響整頁。 */
+  const [mainProjects, setMainProjects] = useState<ProjectListItem[]>([]);
   const [schedule, setSchedule] = useState<BillingScheduleExt | null>(null);
   /** 期程是整批存的，所以編輯中的狀態獨立於已存檔的 schedule。 */
   const [draft, setDraft] = useState<InstallmentInputExt[]>([]);
@@ -125,6 +135,9 @@ export default function AdminProjectDetailPage() {
   const [cAmount, setCAmount] = useState("");
   const [cSignedOn, setCSignedOn] = useState("");
   const [cCopies, setCCopies] = useState("1");
+  const [cContentNote, setCContentNote] = useState("");
+  /** 正在編輯的合約內容欄位：合約 id → 草稿文字。放這裡的原因同下面 showContractForm（load() 會整頁重掛）。 */
+  const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
   const [savingContract, setSavingContract] = useState(false);
   // 「＋ 新增文件」表單的展開狀態：放這裡是因為 load() 會整頁卸載重掛（見下方 `if (loading)`），
   // 放在 ContractsCard 裡送出後會被重置成收起。預設收起。
@@ -166,7 +179,7 @@ export default function AdminProjectDetailPage() {
       // access 由 detail 回應決定；先取得它，避免非 finance 使用者先打合約 API 收到 403，
       // 進而讓整頁 Promise.all 失敗。
       const detail = await getProjectDetail(projectId);
-      const [m, adj, docs, contractsForAccess, bs, subs, d, e, ven, comp, p3] = await Promise.all([
+      const [m, adj, docs, contractsForAccess, bs, subs, d, e, ven, comp, p3, mains] = await Promise.all([
         getProjectMembers(projectId),
         getProjectAdjustments(projectId),
         getProjectDocuments(projectId),
@@ -180,6 +193,11 @@ export default function AdminProjectDetailPage() {
         listVendors(),
         listCompanies(),
         getP3SettingsLite().catch(() => null),
+        // 補母案的下拉：只要主案（後端 ?kind=main）；主案本身不顯示這個下拉，就不必抓。
+        // 失敗不該讓整頁掛掉，下拉空著就好。
+        detail.project.kind === "main"
+          ? Promise.resolve({ projects: [] as ProjectListItem[] })
+          : listProjectsExt({ includeArchived: true, kinds: ["main"] }).catch(() => ({ projects: [] as ProjectListItem[] })),
       ]);
       const disciplineList = engineerDisciplinesOf(p3?.settings.disciplines ?? null);
       setDisciplines(disciplineList);
@@ -213,6 +231,8 @@ export default function AdminProjectDetailPage() {
       setMembers(m.members);
       setAdjustments(adj.adjustments);
       setDocuments(docs.documents);
+      setCanSeeContractDocs(docs.canSeeContractDocs);
+      setMainProjects(mains.projects);
       setDepts(d.departments);
       setEmps(e.employees.filter((x) => x.status === "active"));
       setVendors(ven.vendors);
@@ -340,6 +360,7 @@ export default function AdminProjectDetailPage() {
           savingApp={savingApp} setSavingApp={setSavingApp}
           appSavedAt={appSavedAt} setAppSavedAt={setAppSavedAt}
           contracts={contracts} vendors={vendors} companies={companies} canFinance={canFinance}
+          parentChoices={parentProjectChoices(mainProjects, project.id, project.parentProjectId)}
           disciplines={disciplines}
           error={error} setError={setError} load={load}
         />
@@ -359,6 +380,9 @@ export default function AdminProjectDetailPage() {
           cAmount={cAmount} setCAmount={setCAmount}
           cSignedOn={cSignedOn} setCSignedOn={setCSignedOn}
           cCopies={cCopies} setCCopies={setCCopies}
+          cContentNote={cContentNote} setCContentNote={setCContentNote}
+          noteDrafts={noteDrafts} setNoteDrafts={setNoteDrafts}
+          canSeeContractDocs={canSeeContractDocs}
           savingContract={savingContract} setSavingContract={setSavingContract}
           showAddForm={showContractForm} setShowAddForm={setShowContractForm}
           contractFileRef={contractFileRef} pendingContractId={pendingContractId}
@@ -411,7 +435,7 @@ export default function AdminProjectDetailPage() {
       />
 
       {/* 文件（知識庫） */}
-      <DocumentsCard projectId={projectId} fileRef={fileRef} projectLevelDocs={projectLevelDocs} removeDoc={removeDoc} setError={setError} load={load} />
+      <DocumentsCard projectId={projectId} fileRef={fileRef} projectLevelDocs={projectLevelDocs} canSeeContractDocs={canSeeContractDocs} removeDoc={removeDoc} setError={setError} load={load} />
 
       {/* 分潤異動史 */}
       <AdjustmentsCard adjustments={adjustments} />

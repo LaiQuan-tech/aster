@@ -7,10 +7,13 @@ import {
   projectApplicationSchedule,
   projectApplicationVisibility,
   createAndOpenProject,
+  parentProjectChoices,
+  parentProjectPatch,
   selectedCompanyId,
   toAuthorizedCreateProjectBody,
   toCreateProjectBody,
 } from "./project-application-form";
+import { humanizeProjectExtError } from "../../../../lib/projects-ext-api";
 
 describe("project application form model", () => {
   it("starts with the eight rows printed on the project application", () => {
@@ -260,5 +263,81 @@ describe("承接公司（申請單左上角下拉）", () => {
 
     expect(toAuthorizedCreateProjectBody(resolved, { canFinance: true, canBonus: false }).companyId).toBe("company-default");
     expect(toAuthorizedCreateProjectBody(resolved, { canFinance: false, canBonus: false }).companyId).toBe("company-default");
+  });
+});
+
+describe("母案是選填（業主 2026-09-30 會議：拿掉「必須先有母案」）", () => {
+  it("變更設計／追加／代墊沒選母案也能送出：表單驗證不再要求母案", () => {
+    for (const kind of ["change", "addition", "advance"] as const) {
+      const draft = emptyProjectApplicationDraft("2026-10-01", []);
+      draft.name = "先開案的案子";
+      draft.kind = kind;
+      draft.parentProjectId = "";
+      expect(projectApplicationErrors(draft), kind).toEqual([]);
+      const body = toCreateProjectBody(draft);
+      expect(body.kind).toBe(kind);
+      expect(body.parentProjectId).toBeNull();
+    }
+  });
+
+  it("有選母案就帶母案；主案一律不帶（就算草稿裡殘留著先前選的母案）", () => {
+    const draft = emptyProjectApplicationDraft("2026-10-01", []);
+    draft.name = "追加案";
+    draft.kind = "addition";
+    draft.parentProjectId = "main-1";
+    expect(toCreateProjectBody(draft).parentProjectId).toBe("main-1");
+
+    draft.kind = "main";
+    expect(toCreateProjectBody(draft).parentProjectId).toBeNull();
+  });
+
+  it("parentProjectChoices：只列主案、排除自己；kind 缺值當主案；已封存的標註", () => {
+    const projects = [
+      { id: "main-1", code: "AT-115-001", name: "甲案", kind: "main" },
+      { id: "main-2", code: "AT-115-002", name: "乙案", kind: null, archivedAt: "2026-09-01T00:00:00Z" },
+      { id: "main-3", code: null, name: "沒編號的主案" },
+      { id: "add-1", code: "AT-115-001-1", name: "加做", kind: "addition" },
+      { id: "chg-1", code: "AT-115-001-2", name: "變更", kind: "change" },
+      { id: "adv-1", code: "AT-115-003", name: "代墊", kind: "advance" },
+    ];
+
+    expect(parentProjectChoices(projects, "main-1", null)).toEqual([
+      { id: "main-2", label: "AT-115-002　乙案（已封存）" },
+      { id: "main-3", label: "沒編號的主案" },
+    ]);
+    // 子案掛母案：自己是追加案，不在選項裡；主案甲可選
+    expect(parentProjectChoices(projects, "add-1", "main-1").map((c) => c.id)).toEqual(["main-1", "main-2", "main-3"]);
+    expect(parentProjectChoices([], "add-1", null)).toEqual([]);
+  });
+
+  it("parentProjectChoices：目前的母案不在清單裡（例如查不到）也保留一個選項，不悄悄顯示成未指定", () => {
+    const projects = [{ id: "main-1", code: "AT-115-001", name: "甲案", kind: "main" }];
+    const choices = parentProjectChoices(projects, "add-1", "gone-main");
+    expect(choices[0]).toEqual({ id: "gone-main", label: "（目前的母案，不在清單內）" });
+    expect(choices.map((c) => c.id)).toEqual(["gone-main", "main-1"]);
+  });
+
+  it("parentProjectPatch：存申請單時母案只在「改了」才送——沒改不送、補上送 id、清空送 null、主案永不送", () => {
+    // 沒改（有母案、表單還是它；沒母案、表單還是空）→ 不送，免得悄悄蓋掉別人剛改的母案
+    expect(parentProjectPatch({ kind: "addition", parentProjectId: "main-1" }, "main-1")).toEqual({});
+    expect(parentProjectPatch({ kind: "advance", parentProjectId: null }, "")).toEqual({});
+    // 事後補母案
+    expect(parentProjectPatch({ kind: "advance", parentProjectId: null }, "main-1")).toEqual({ parentProjectId: "main-1" });
+    // 換母案
+    expect(parentProjectPatch({ kind: "change", parentProjectId: "main-1" }, "main-2")).toEqual({ parentProjectId: "main-2" });
+    // 母案可清空：表單選回「未指定」→ 送 null
+    expect(parentProjectPatch({ kind: "addition", parentProjectId: "main-1" }, "")).toEqual({ parentProjectId: null });
+    // 主案不能掛母案：就算表單值怪怪的也不送
+    expect(parentProjectPatch({ kind: "main", parentProjectId: null }, "main-1")).toEqual({});
+    expect(parentProjectPatch({ kind: "main", parentProjectId: null }, "")).toEqual({});
+  });
+
+  it("錯誤訊息：has_child_projects（底下還有子案的主案不能改案型）有專屬說明", () => {
+    expect(humanizeProjectExtError(new Error("[409] has_child_projects"), "x")).toContain("底下還有追加／變更／代墊案");
+  });
+
+  it("錯誤訊息：invalid_parent 說明三種不合法（非主案／自己／主案掛母案）；不再有 parent_required 的專屬訊息", () => {
+    expect(humanizeProjectExtError(new Error("[400] invalid_parent"), "x")).toContain("必須是同租戶的主案");
+    expect(humanizeProjectExtError(new Error("[400] parent_required"), "x")).toBe("[400] parent_required");
   });
 });

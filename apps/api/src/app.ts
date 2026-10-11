@@ -88,7 +88,9 @@ app.use(
   }),
 )
 
-// 12mb 容得下專案文件的 base64 上傳（單檔上限 8MB，見 project-documents.ts）。
+// 12mb 是本機／非 Vercel 環境的保險。線上跑在 Vercel serverless，request body 上限約 4.5MB（超過平台直接回
+// 413，到不了這裡），所以專案文件經 API 的 base64 上傳只收 ≤3MiB，更大的檔走簽名網址直傳 Storage
+// （見 project-documents.ts 的 BASE64_MAX_BYTES／MAX_BYTES）。
 app.use(express.json({ limit: "12mb" }))
 
 // 稽核操作者情境：每個請求開一份 AsyncLocalStorage store（lib/request-context.ts），

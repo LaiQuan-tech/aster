@@ -1,9 +1,10 @@
 "use client";
 
-import { useId, type RefObject } from "react";
+import { Fragment, useId, type RefObject } from "react";
 import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   uploadProjectDocument,
+  CONTRACT_SCAN_ACCEPT,
   type ProjectDocument,
   createContract,
   updateContract,
@@ -38,6 +39,17 @@ interface ContractsCardProps {
   setCSignedOn: Setter<string>;
   cCopies: string;
   setCCopies: Setter<string>;
+  /** 「新增文件」表單的合約內容／說明草稿（只有 canSeeContractDocs 的人看得到這個欄位）。 */
+  cContentNote: string;
+  setCContentNote: Setter<string>;
+  /** 正在編輯的合約內容欄位：合約 id → 草稿文字（放 page.tsx，load() 重掛時不會丟）。 */
+  noteDrafts: Record<string, string>;
+  setNoteDrafts: Setter<Record<string, string>>;
+  /**
+   * 合約掃描檔與合約內容欄位只有 HR／該案 lead／經理與主辦成員看得到（會計與部門主管看不到，
+   * 後端也不會回）。false 時整個隱藏：掃描檔、上傳／刪除、內容欄位。
+   */
+  canSeeContractDocs: boolean;
   savingContract: boolean;
   setSavingContract: Setter<boolean>;
   /**
@@ -74,6 +86,11 @@ export function ContractsCard({
   setCSignedOn,
   cCopies,
   setCCopies,
+  cContentNote,
+  setCContentNote,
+  noteDrafts,
+  setNoteDrafts,
+  canSeeContractDocs,
   savingContract,
   setSavingContract,
   showAddForm,
@@ -103,12 +120,15 @@ export function ContractsCard({
         amount: cAmount === "" ? null : Number(cAmount),
         signedOn: cSignedOn || null,
         copies: Number(cCopies) || 1,
+        // 內容欄位只有有權者能寫（沒權限的人表單上根本沒有這欄；帶了後端也回 403）。
+        ...(canSeeContractDocs && cContentNote.trim() ? { contentNote: cContentNote.trim() } : {}),
       });
       setCTitle("");
       setCCounterparty("");
       setCAmount("");
       setCSignedOn("");
       setCCopies("1");
+      setCContentNote("");
       await load();
     } catch (err) {
       setError(humanError(err, "新增文件失敗"));
@@ -177,6 +197,30 @@ export function ContractsCard({
     }
   }
 
+  function startNote(c: Contract) {
+    setNoteDrafts((drafts) => ({ ...drafts, [c.id]: c.contentNote ?? "" }));
+  }
+
+  function cancelNote(c: Contract) {
+    setNoteDrafts((drafts) => {
+      const { [c.id]: _discarded, ...rest } = drafts;
+      return rest;
+    });
+  }
+
+  async function saveNote(c: Contract) {
+    const draft = noteDrafts[c.id];
+    if (draft === undefined) return;
+    setError(null);
+    try {
+      await updateContract(c.id, { contentNote: draft.trim() || null });
+      cancelNote(c);
+      await load();
+    } catch (err) {
+      setError(humanError(err, "儲存合約內容失敗"));
+    }
+  }
+
   function pickContractScan(contractId: string) {
     pendingContractId.current = contractId;
     contractFileRef.current?.click();
@@ -227,113 +271,163 @@ export function ContractsCard({
             </thead>
             <tbody>
               {contracts.map((c) => (
-                <tr key={c.id} className="border-b last:border-0">
-                  <td className="py-2 pr-3">
-                    <span className={`rounded-full px-2 py-0.5 text-xs ${c.docType === "contract" ? "bg-blue-50 text-blue-700" : c.docType === "change_order" ? "bg-amber-50 text-amber-700" : "bg-gray-100 text-gray-600"}`}>
-                      {DOC_TYPE_LABELS[c.docType]}
-                    </span>
-                    {c.version > 1 && <span className="ml-1 text-xs text-gray-400">v{c.version}</span>}
-                  </td>
-                  <td className="py-2 pr-3 font-medium text-gray-900">{c.title}</td>
-                  <td className="py-2 pr-3 text-gray-600">{c.counterparty ?? "—"}</td>
-                  <td className="py-2 pr-3 text-right text-gray-600">{fmtMoney(c.amount)}</td>
-                  <td className="py-2 pr-3 text-gray-600">{c.signedOn ?? "—"}</td>
-                  <td className="py-2 pr-3 text-right text-gray-600">
-                    {!c.dutiable ? (
-                      <span className="text-xs text-gray-400">不課</span>
-                    ) : c.stampDutyAmount == null ? (
-                      <span className="text-xs text-red-600" title="應貼花但沒有金額，算不出稅額">
-                        缺金額
+                <Fragment key={c.id}>
+                  {/* 有內容欄位那一列時，合約列不畫底線（內容列才畫），讓兩列看起來是同一筆。 */}
+                  <tr className={canSeeContractDocs ? "" : "border-b last:border-0"}>
+                    <td className="py-2 pr-3">
+                      <span className={`rounded-full px-2 py-0.5 text-xs ${c.docType === "contract" ? "bg-blue-50 text-blue-700" : c.docType === "change_order" ? "bg-amber-50 text-amber-700" : "bg-gray-100 text-gray-600"}`}>
+                        {DOC_TYPE_LABELS[c.docType]}
                       </span>
-                    ) : (
-                      fmtMoney(c.stampDutyAmount)
-                    )}
-                  </td>
-                  <td className="py-2 pr-3">
-                    <div className="flex flex-col items-start gap-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <select
-                          className="rounded border border-gray-200 px-1 py-0.5 text-xs text-gray-600"
-                          value={c.ourRole}
-                          onChange={(e) => changeOurRole(c, e.target.value as OurRole)}
-                          title="貼花方式：我方貼／對方貼／各自貼"
-                        >
-                          {(Object.keys(OUR_ROLE_SHORT_LABELS) as OurRole[]).map((v) => (
-                            <option key={v} value={v}>
-                              {OUR_ROLE_SHORT_LABELS[v]}
-                            </option>
-                          ))}
-                        </select>
-                        <label className="flex items-center gap-1 text-xs text-gray-500">
-                          <input
-                            type="checkbox"
-                            checked={c.stampDutyRequired === "no"}
-                            onChange={(e) => toggleStampDutyNotRequired(c, e.target.checked)}
-                          />
-                          不用貼
-                        </label>
-                      </div>
+                      {c.version > 1 && <span className="ml-1 text-xs text-gray-400">v{c.version}</span>}
+                    </td>
+                    <td className="py-2 pr-3 font-medium text-gray-900">{c.title}</td>
+                    <td className="py-2 pr-3 text-gray-600">{c.counterparty ?? "—"}</td>
+                    <td className="py-2 pr-3 text-right text-gray-600">{fmtMoney(c.amount)}</td>
+                    <td className="py-2 pr-3 text-gray-600">{c.signedOn ?? "—"}</td>
+                    <td className="py-2 pr-3 text-right text-gray-600">
                       {!c.dutiable ? (
-                        <span className="text-xs text-gray-400">—</span>
-                      ) : c.stampDutyPaidOn ? (
-                        <button
-                          type="button"
-                          className="text-xs text-green-700 hover:underline"
-                          onClick={() => markStamped(c, null)}
-                          title="點一下取消標記"
-                        >
-                          已貼 {c.stampDutyPaidOn}
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="rounded border border-gray-200 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-50"
-                          onClick={() => markStamped(c, new Date().toISOString().slice(0, 10))}
-                        >
-                          標記已貼花
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="max-w-[9rem] truncate text-left text-xs text-gray-400 hover:text-gray-600"
-                        onClick={() => editStampDutyNote(c)}
-                        title={c.stampDutyNote ?? "新增印花稅備註"}
-                      >
-                        {c.stampDutyNote ? `備註：${c.stampDutyNote}` : "＋ 備註"}
-                      </button>
-                    </div>
-                  </td>
-                  <td className="py-2 pr-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      {(scansByContract.get(c.id) ?? []).map((doc) => (
-                        <span key={doc.id} className="inline-flex items-center gap-1">
-                          <a href={doc.url ?? "#"} target="_blank" rel="noreferrer" className="text-xs" style={{ color: "var(--brand)" }} title={`${Math.round(doc.sizeBytes / 1024)} KB`}>
-                            {doc.fileName}
-                          </a>
-                          <button type="button" className="text-xs text-gray-300 hover:text-red-600" onClick={() => removeDoc(doc)} title="刪除掃描檔">
-                            ×
-                          </button>
+                        <span className="text-xs text-gray-400">不課</span>
+                      ) : c.stampDutyAmount == null ? (
+                        <span className="text-xs text-red-600" title="應貼花但沒有金額，算不出稅額">
+                          缺金額
                         </span>
-                      ))}
+                      ) : (
+                        fmtMoney(c.stampDutyAmount)
+                      )}
+                    </td>
+                    <td className="py-2 pr-3">
+                      <div className="flex flex-col items-start gap-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <select
+                            className="rounded border border-gray-200 px-1 py-0.5 text-xs text-gray-600"
+                            value={c.ourRole}
+                            onChange={(e) => changeOurRole(c, e.target.value as OurRole)}
+                            title="貼花方式：我方貼／對方貼／各自貼"
+                          >
+                            {(Object.keys(OUR_ROLE_SHORT_LABELS) as OurRole[]).map((v) => (
+                              <option key={v} value={v}>
+                                {OUR_ROLE_SHORT_LABELS[v]}
+                              </option>
+                            ))}
+                          </select>
+                          <label className="flex items-center gap-1 text-xs text-gray-500">
+                            <input
+                              type="checkbox"
+                              checked={c.stampDutyRequired === "no"}
+                              onChange={(e) => toggleStampDutyNotRequired(c, e.target.checked)}
+                            />
+                            不用貼
+                          </label>
+                        </div>
+                        {!c.dutiable ? (
+                          <span className="text-xs text-gray-400">—</span>
+                        ) : c.stampDutyPaidOn ? (
+                          <button
+                            type="button"
+                            className="text-xs text-green-700 hover:underline"
+                            onClick={() => markStamped(c, null)}
+                            title="點一下取消標記"
+                          >
+                            已貼 {c.stampDutyPaidOn}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="rounded border border-gray-200 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-50"
+                            onClick={() => markStamped(c, new Date().toISOString().slice(0, 10))}
+                          >
+                            標記已貼花
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="max-w-[9rem] truncate text-left text-xs text-gray-400 hover:text-gray-600"
+                          onClick={() => editStampDutyNote(c)}
+                          title={c.stampDutyNote ?? "新增印花稅備註"}
+                        >
+                          {c.stampDutyNote ? `備註：${c.stampDutyNote}` : "＋ 備註"}
+                        </button>
+                      </div>
+                    </td>
+                    <td className="py-2 pr-3">
+                      {canSeeContractDocs ? (
+                        <div className="flex flex-wrap items-center gap-2">
+                          {(scansByContract.get(c.id) ?? []).map((doc) => (
+                            <span key={doc.id} className="inline-flex items-center gap-1">
+                              <a href={doc.url ?? "#"} target="_blank" rel="noreferrer" className="text-xs" style={{ color: "var(--brand)" }} title={`${Math.round(doc.sizeBytes / 1024)} KB`}>
+                                {doc.fileName}
+                              </a>
+                              <button type="button" className="text-xs text-gray-300 hover:text-red-600" onClick={() => removeDoc(doc)} title="刪除掃描檔">
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                          <button
+                            type="button"
+                            className="rounded border border-gray-200 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-50"
+                            onClick={() => pickContractScan(c.id)}
+                            title="只收 PDF 與圖片（JPG、PNG、HEIC、WebP），單檔 10 MB 以內"
+                          >
+                            上傳掃描檔
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-gray-300" title="合約掃描檔只有該案經理、承辦與 HR 看得到">
+                          —
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-2 pr-3 text-right">
                       <button
                         type="button"
-                        className="rounded border border-gray-200 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-50"
-                        onClick={() => pickContractScan(c.id)}
+                        className="text-xs text-gray-400 hover:text-red-600"
+                        onClick={() => removeContract(c)}
                       >
-                        上傳掃描檔
+                        作廢
                       </button>
-                    </div>
-                  </td>
-                  <td className="py-2 pr-3 text-right">
-                    <button
-                      type="button"
-                      className="text-xs text-gray-400 hover:text-red-600"
-                      onClick={() => removeContract(c)}
-                    >
-                      作廢
-                    </button>
-                  </td>
-                </tr>
+                    </td>
+                  </tr>
+                  {canSeeContractDocs && (
+                    <tr className="border-b last:border-0">
+                      <td colSpan={9} className="pb-3 pr-3">
+                        {noteDrafts[c.id] !== undefined ? (
+                          <div className="rounded-lg bg-slate-50 p-2">
+                            <label className="mb-1 block text-xs text-gray-500" htmlFor={`contract-note-${c.id}`}>
+                              合約內容／說明（只有該案經理、承辦與 HR 看得到）
+                            </label>
+                            <textarea
+                              id={`contract-note-${c.id}`}
+                              className={inputCls}
+                              rows={4}
+                              maxLength={2000}
+                              value={noteDrafts[c.id]}
+                              onChange={(e) => setNoteDrafts((drafts) => ({ ...drafts, [c.id]: e.target.value }))}
+                            />
+                            <div className="mt-2 flex items-center gap-3">
+                              <PrimaryButton onClick={() => saveNote(c)}>儲存內容</PrimaryButton>
+                              <button type="button" className="text-sm text-gray-500 hover:underline" onClick={() => cancelNote(c)}>
+                                取消
+                              </button>
+                              <span className="ml-auto text-xs text-gray-400">{noteDrafts[c.id].length}/2000</span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex items-start gap-2 text-xs">
+                            <span className="shrink-0 pt-0.5 text-gray-400">合約內容／說明</span>
+                            {c.contentNote ? (
+                              <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-gray-700">{c.contentNote}</p>
+                            ) : (
+                              <span className="flex-1 text-gray-300">（尚未填寫）</span>
+                            )}
+                            <button type="button" className="shrink-0 text-gray-500 hover:underline" onClick={() => startNote(c)}>
+                              {c.contentNote ? "編輯" : "＋ 填寫"}
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -343,6 +437,7 @@ export function ContractsCard({
       <input
         ref={contractFileRef}
         type="file"
+        accept={CONTRACT_SCAN_ACCEPT}
         className="hidden"
         onChange={(e) => onUploadContractScan(e.target.files?.[0])}
       />
@@ -401,6 +496,20 @@ export function ContractsCard({
               <input className={inputCls} type="number" min="1" value={cCopies} onChange={(e) => setCCopies(e.target.value)} />
               <p className="mt-1 text-xs text-gray-400">同一憑證繕寫兩份以上，各份均應貼用。</p>
             </div>
+            {canSeeContractDocs && (
+              <div className="sm:col-span-3">
+                <label className={labelCls}>合約內容／說明</label>
+                <textarea
+                  className={inputCls}
+                  rows={3}
+                  maxLength={2000}
+                  value={cContentNote}
+                  onChange={(e) => setCContentNote(e.target.value)}
+                  placeholder="選填：合約重點、付款條件、特殊約定…"
+                />
+                <p className="mt-1 text-xs text-gray-400">只有該案經理、承辦與 HR 看得到；建立後也可以在合約列上編輯。</p>
+              </div>
+            )}
           </div>
           <div className="mt-3 flex items-center gap-3">
             <PrimaryButton onClick={addContract} disabled={savingContract}>

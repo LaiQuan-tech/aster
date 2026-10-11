@@ -149,6 +149,29 @@ export async function canSeeBonus(
 }
 
 /**
+ * 合約掃描檔（project_documents.contract_id 不為 null 的檔）與合約內容欄位
+ * （contracts.content_note）的可見性（業主 2026-09-30 會議）。**比 finance 窄**，
+ * 只有這四種人：
+ *   • hr_admin、platform_admin（isHrRole）
+ *   • 該案 `projects.lead_emp_id`
+ *   • 該案成員且 `role_in_project` 為 manager（經理）或 lead（主辦／承辦）
+ * 其餘一律看不到——一般成員、非成員、**部門主管、會計**都不行（會計與部門主管仍有 finance，
+ * 看得到合約列的金額／印花稅，只是看不到掃描檔與內容欄位）。
+ * 讀、上傳、刪除合約掃描與讀寫內容欄位都用這同一條判斷式，不要各處自己拼。
+ * `membershipRole` 帶進來可省一次查詢（呼叫端已查過時；undefined＝自己查）。
+ */
+export async function canSeeContractDocs(
+  tenantId: string,
+  self: Pick<SelfEmployee, "id" | "role">,
+  project: { id: string; lead_emp_id: string | null },
+  membershipRole?: string | null,
+): Promise<boolean> {
+  if (isHrRole(self.role) || project.lead_emp_id === self.id) return true
+  const role = membershipRole !== undefined ? membershipRole : await membershipRoleOf(tenantId, project.id, self.id)
+  return isLeadRole(role)
+}
+
+/**
  * 呼叫者在整個租戶裡「有 finance 權限」的專案 id 集合；HR 回 null 代表全部。
  * 給未收款清單這種跨專案的查詢用——逐案呼叫 canManageProject 會 N+1。
  */

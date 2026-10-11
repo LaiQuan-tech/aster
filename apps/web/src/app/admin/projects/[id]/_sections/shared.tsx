@@ -30,6 +30,7 @@ export const STATUS_ERRORS: Record<string, string> = {
   amount_unknown: "算不出金額（還沒有合約，或這期沒有百分比也沒有人工金額）。",
   already_billed: "這期已經標記請款過了。",
   not_billed: "這期還沒標記請款。",
+  forbidden_contract_content: "合約內容／說明只有該案經理、承辦與 HR 能填寫。",
 };
 
 export function fmtMoney(n: number | null | undefined): string {
@@ -57,6 +58,8 @@ export function emptyEngineersForm(): EngineersForm {
 export interface AppForm {
   /** 承接公司。"" ＝ 沿用租戶預設公司（專案上 company_id 為 null）；有值＝這案指定的公司。 */
   companyId: string;
+  /** 母案（變更設計／追加／代墊才有）。"" ＝ 還沒指定，可事後補；主案恆為 ""。 */
+  parentProjectId: string;
   siteAddress: string;
   siteAreaM2: string;
   designScope: DesignScopeItem[];
@@ -76,6 +79,7 @@ export function appFormFrom(p: ProjectDetail): AppForm {
   }
   return {
     companyId: p.companyId ?? "",
+    parentProjectId: p.parentProjectId ?? "",
     siteAddress: p.siteAddress ?? "",
     siteAreaM2: p.siteAreaM2 != null ? String(p.siteAreaM2) : "",
     designScope: p.designScope ?? [],

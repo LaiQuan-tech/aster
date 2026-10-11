@@ -139,6 +139,53 @@ export function selectedCompanyId(chosen: string, companies: readonly CompanyOpt
   return chosen && companies.some((company) => company.id === chosen) ? chosen : defaultCompanyIdOf(companies);
 }
 
+/** 母案下拉的來源列只需要這幾個欄位（`GET /projects` 的列）。`kind` 缺值當主案。 */
+export interface ParentProjectSource {
+  id: string;
+  code: string | null;
+  name: string;
+  kind?: string | null;
+  archivedAt?: string | null;
+}
+
+/**
+ * 專案明細頁「母案」下拉的選項：只列主案（母案必須是 main）、排除自己；
+ * 這案目前掛的母案就算不在清單裡（例如查不到）也保留一個選項，免得畫面把既有資料悄悄顯示成「未指定」。
+ * 已封存的主案照列、標「（已封存）」——追加減的流程會把原案封存，它仍是合法的母案。
+ * 清單本身來自 `GET /projects`（同租戶）；最後以 API 的 invalid_parent 為準。
+ */
+export function parentProjectChoices(
+  projects: readonly ParentProjectSource[],
+  selfId: string | null,
+  currentParentId: string | null,
+): Array<{ id: string; label: string }> {
+  const label = (project: ParentProjectSource) =>
+    `${project.code ? `${project.code}　` : ""}${project.name}${project.archivedAt ? "（已封存）" : ""}`;
+  const choices = projects
+    .filter((project) => (project.kind ?? "main") === "main" && project.id !== selfId)
+    .map((project) => ({ id: project.id, label: label(project) }));
+  if (currentParentId && !choices.some((choice) => choice.id === currentParentId)) {
+    choices.unshift({ id: currentParentId, label: "（目前的母案，不在清單內）" });
+  }
+  return choices;
+}
+
+/**
+ * 專案明細頁存「申請單資料」時，母案要不要一起送（`PATCH parentProjectId`）：
+ *   • 主案不能掛母案、下拉也不顯示 → 不送
+ *   • 沒改（表單值＝專案上目前的母案）→ 不送：每次存申請單都把母案整份送回去，萬一別人剛好改過
+ *     就等於悄悄蓋回舊值
+ *   • 改了 → 送新的 id；清空（表單 ""）→ 送 null（母案可清空）
+ */
+export function parentProjectPatch(
+  project: { kind: string; parentProjectId: string | null },
+  formParentId: string,
+): { parentProjectId?: string | null } {
+  if (project.kind === "main") return {};
+  const next = formParentId || null;
+  return next === (project.parentProjectId ?? null) ? {} : { parentProjectId: next };
+}
+
 function optionalNumber(value: string): number | null {
   const normalized = value.trim();
   return normalized === "" ? null : Number(normalized);
@@ -170,7 +217,7 @@ function invalidNonnegative(value: string): boolean {
 export function projectApplicationErrors(draft: ProjectApplicationDraft): string[] {
   const errors: string[] = [];
   if (!draft.name.trim()) errors.push("請輸入專案名稱");
-  if (draft.kind !== "main" && !draft.parentProjectId) errors.push("變更設計／追加／代墊必須選擇母案");
+  // 母案是選填（業主 2026-09-30 會議）：變更設計／追加／代墊可以先開案、之後在專案明細補母案。
   if (invalidNonnegative(draft.siteAreaM2)) errors.push("設計面積須為 0 以上的數字");
   if (invalidNonnegative(draft.contractAmount)) errors.push("合約金額須為 0 以上的數字");
   if (invalidNonnegative(draft.otherExpenses)) errors.push("其他支出須為 0 以上的數字");

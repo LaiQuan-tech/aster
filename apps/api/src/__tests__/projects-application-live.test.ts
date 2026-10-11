@@ -218,11 +218,8 @@ describe("P3-1 舊的預先取號空列（功能已移除，讀取端防護仍�
 })
 
 describe("P3-3 案型與母案", () => {
-  it("kind=addition 沒帶母案 → 400 parent_required", async () => {
-    const res = await createProject({ name: "加做", kind: "addition" })
-    expect(res.status).toBe(400)
-    expect(res.body.error).toBe("parent_required")
-  })
+  // 母案是選填（業主 2026-09-30 會議）：kind≠main 沒帶母案也能建，案例在檔案最後的 describe
+  // 「母案選填」——建案會多佔一個流水號，放在這裡會位移後面依賴精確編號的斷言（改回舊格式的 012）。
 
   it("母案是 main → 201；母案不是 main → 400 invalid_parent", async () => {
     const ok = await createProject({ name: "加做：增設車道", kind: "addition", parentProjectId: mainProjectId })
@@ -245,10 +242,10 @@ describe("P3-3 案型與母案", () => {
     expect(b.body.error).toBe("invalid_parent")
   })
 
-  it("PATCH 改案型也走同一套規則", async () => {
-    const res = await asAdmin(request(app).patch(`/projects/${mainProjectId}`)).send({ kind: "change" })
+  it("PATCH 帶母案也走同一套規則：main 不能掛母案（不動任何資料）", async () => {
+    const res = await asAdmin(request(app).patch(`/projects/${mainProjectId}`)).send({ parentProjectId: mainProjectId })
     expect(res.status).toBe(400)
-    expect(res.body.error).toBe("parent_required")
+    expect(res.body.error).toBe("invalid_parent")
   })
 })
 
@@ -1129,5 +1126,54 @@ describe("B 批次驗收修正：改角色重算期程／部分入帳可逾期�
     const flipBack = await asAdmin(request(app).patch(`/contracts/${auto.body.contract.id}`)).send({ stampDutyRequired: "auto" })
     expect(flipBack.status).toBe(200)
     expect((await asAdmin(request(app).get("/reports/stamp-duty"))).body.summary.missingSignedOn).toBe(base + 1)
+  })
+})
+
+// ─── 母案選填（業主 2026-09-30 會議：拿掉「必須先有母案」）──────────────────────
+// 放在檔案最後：會另外 createProject，插在中段會位移前面依賴精確流水號的斷言（012）。
+describe("母案選填：沒母案也能建追加減／加做／代墊，事後 PATCH 補母案", () => {
+  let orphanId: string
+
+  it("kind=addition 沒帶母案 → 201，parentProjectId 是 null（過去回 400 parent_required）", async () => {
+    const res = await createProject({ name: "先開案的加做", kind: "addition" })
+    expect(res.status).toBe(201)
+    orphanId = res.body.id as string
+    const got = await asAdmin(request(app).get(`/projects/${orphanId}`))
+    expect(got.body.project.kind).toBe("addition")
+    expect(got.body.project.parentProjectId).toBeNull()
+  })
+
+  it("事後補母案：同租戶 main → 200；GET 回新母案", async () => {
+    const res = await asAdmin(request(app).patch(`/projects/${orphanId}`)).send({ parentProjectId: mainProjectId })
+    expect(res.status).toBe(200)
+    const got = await asAdmin(request(app).get(`/projects/${orphanId}`))
+    expect(got.body.project.parentProjectId).toBe(mainProjectId)
+    expect(got.body.project.kind).toBe("addition")
+  })
+
+  it("補的母案若是子案（追加案）→ 400 invalid_parent；母案是自己 → 400；不動原本的母案", async () => {
+    const other = await createProject({ name: "另一個先開案的代墊", kind: "advance" })
+    expect(other.status).toBe(201)
+    const child = await asAdmin(request(app).patch(`/projects/${other.body.id}`)).send({ parentProjectId: orphanId })
+    expect(child.status).toBe(400)
+    expect(child.body.error).toBe("invalid_parent")
+    const self = await asAdmin(request(app).patch(`/projects/${orphanId}`)).send({ parentProjectId: orphanId })
+    expect(self.status).toBe(400)
+    expect(self.body.error).toBe("invalid_parent")
+    const got = await asAdmin(request(app).get(`/projects/${orphanId}`))
+    expect(got.body.project.parentProjectId).toBe(mainProjectId)
+  })
+
+  it("母案可清空：PATCH parentProjectId=null → 200，母案變回 null；PATCH 改案型不帶母案也不再被擋", async () => {
+    const cleared = await asAdmin(request(app).patch(`/projects/${orphanId}`)).send({ parentProjectId: null })
+    expect(cleared.status).toBe(200)
+    const got = await asAdmin(request(app).get(`/projects/${orphanId}`))
+    expect(got.body.project.parentProjectId).toBeNull()
+
+    const changed = await asAdmin(request(app).patch(`/projects/${orphanId}`)).send({ kind: "change" })
+    expect(changed.status).toBe(200)
+    const after = await asAdmin(request(app).get(`/projects/${orphanId}`))
+    expect(after.body.project.kind).toBe("change")
+    expect(after.body.project.parentProjectId).toBeNull()
   })
 })

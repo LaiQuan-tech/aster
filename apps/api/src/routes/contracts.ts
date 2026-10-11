@@ -5,7 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
-import { loadProjectScope } from "../services/project-scope.js"
+import { canSeeContractDocs, loadProjectScope } from "../services/project-scope.js"
 import {
   DOC_TYPES,
   OUR_ROLES,
@@ -30,7 +30,7 @@ export const contractsRouter = Router()
 
 // ⚠️ 單一字串常值，不可用 + 相接——supabase-js 從字串常值推列型別。
 const CONTRACT_COLS =
-  "id, tenant_id, project_id, doc_type, our_role, title, counterparty, amount, is_primary, signed_on, version, supersedes_id, copies, stamp_duty_required, stamp_duty_rate, stamp_duty_amount, stamp_duty_paid_on, stamp_duty_note, created_by_emp_id, created_at, deleted_at"
+  "id, tenant_id, project_id, doc_type, our_role, title, counterparty, amount, is_primary, signed_on, version, supersedes_id, copies, stamp_duty_required, stamp_duty_rate, stamp_duty_amount, stamp_duty_paid_on, stamp_duty_note, content_note, created_by_emp_id, created_at, deleted_at"
 
 type ContractRow = {
   id: string
@@ -50,6 +50,8 @@ type ContractRow = {
   stamp_duty_amount: string | null
   stamp_duty_paid_on: string | null
   stamp_duty_note: string | null
+  /** 合約內容／說明（0930 會議）。只有 canSeeContractDocs 的人讀得到，見 serialize()。 */
+  content_note: string | null
   created_at: string
 }
 
@@ -70,6 +72,8 @@ const createSchema = z.object({
   stampDutyRate: z.number().min(0).max(1).nullish(),
   stampDutyPaidOn: z.string().regex(dateRe).nullish(),
   stampDutyNote: z.string().trim().max(2000).nullish(),
+  /** 合約內容／說明。只有 HR／該案 lead／經理與主辦成員能寫（無權帶了回 403 forbidden_contract_content）。 */
+  contentNote: z.string().trim().max(2000).nullish(),
 })
 
 const updateSchema = z
@@ -86,6 +90,8 @@ const updateSchema = z
     stampDutyRate: z.number().min(0).max(1).nullable().optional(),
     stampDutyPaidOn: z.string().regex(dateRe).nullable().optional(),
     stampDutyNote: z.string().trim().max(2000).nullable().optional(),
+    /** 合約內容／說明；帶 null 或空字串＝清空。權限同 createSchema。 */
+    contentNote: z.string().trim().max(2000).nullable().optional(),
     // docType 刻意不可改：決定課不課稅的文件分類（契據／報價單），改了等於
     // 把契據冒充報價單（或反過來）。要改請作廢後重立一件。
   })
@@ -101,7 +107,19 @@ function num(v: string | number | null | undefined): number | null {
   return Number.isFinite(n) ? n : null
 }
 
-function serialize(row: ContractRow) {
+/** 合約內容欄位：空字串（trim 後）視同清空，一律存 null。 */
+function noteOf(v: string | null | undefined): string | null {
+  const t = v?.trim()
+  return t ? t : null
+}
+
+/**
+ * `canSeeContent`＝呼叫者是否能看合約內容欄位（canSeeContractDocs：HR／該案 lead／經理與主辦成員）。
+ * 合約列本身是 finance 範圍（含會計與部門主管，他們要對金額與印花稅）；內容欄位比 finance 窄，
+ * 看不到的人收到 null——不是省略欄位，前端分不出「沒填」與「看不到」時靠 documents 回應的
+ * canSeeContractDocs 旗標。
+ */
+function serialize(row: ContractRow, canSeeContent: boolean) {
   return {
     id: row.id,
     projectId: row.project_id,
@@ -120,6 +138,7 @@ function serialize(row: ContractRow) {
     stampDutyAmount: num(row.stamp_duty_amount),
     stampDutyPaidOn: row.stamp_duty_paid_on,
     stampDutyNote: row.stamp_duty_note,
+    contentNote: canSeeContent ? (row.content_note ?? null) : null,
     createdAt: row.created_at,
     /** 衍生：依 docType + ourRole + 人工覆寫判定的最終結論。 */
     dutiable: resolveStampDutyRequired({
@@ -178,7 +197,8 @@ contractsRouter.get(
         next(new Error(`GET /projects/${req.params.id}/contracts: ${error.message}`))
         return
       }
-      res.status(200).json({ contracts: (data ?? []).map((r) => serialize(r as ContractRow)) })
+      const canSeeContent = await canSeeContractDocs(tenantId, scope.self, scope.project)
+      res.status(200).json({ contracts: (data ?? []).map((r) => serialize(r as ContractRow, canSeeContent)) })
     } catch (err) {
       next(err)
     }
@@ -264,6 +284,14 @@ contractsRouter.post(
         return
       }
       const b = parsed.data
+      // 合約內容欄位只有 canSeeContractDocs 的人能寫（會計與部門主管有 finance、能建合約列，
+      // 但帶內容欄位進來 → 403；看不到的欄位也不讓他們寫）。
+      const canSeeContent = await canSeeContractDocs(tenantId, scope.self, scope.project)
+      const contentNote = noteOf(b.contentNote)
+      if (contentNote !== null && !canSeeContent) {
+        res.status(403).json({ error: "forbidden_contract_content" })
+        return
+      }
       const superseded = b.supersedesId ? await loadSupersededContract(tenantId, b.supersedesId) : null
       if (superseded?.isPrimary) {
         res.status(409).json({ error: "primary_contract_requires_main_endpoint" })
@@ -300,6 +328,7 @@ contractsRouter.post(
           stamp_duty_amount: duty,
           stamp_duty_paid_on: b.stampDutyPaidOn ?? null,
           stamp_duty_note: b.stampDutyNote ?? null,
+          content_note: contentNote,
           created_by_emp_id: scope.self.id,
         })
         .select(CONTRACT_COLS)
@@ -311,7 +340,7 @@ contractsRouter.post(
       // 合約金額是分期請款的分母（模組四第 4 條）。新增／追加後期程就過時了，
       // 這裡重算，否則使用者要自己回去按一次存檔才會更新。
       await recomputeBillings(tenantId, req.params.id as string)
-      res.status(201).json({ contract: serialize(data as ContractRow) })
+      res.status(201).json({ contract: serialize(data as ContractRow, canSeeContent) })
     } catch (err) {
       next(err)
     }
@@ -375,14 +404,23 @@ contractsRouter.patch(
         return
       }
       if (row.is_primary) {
-        const primaryStampFields = new Set(["stampDutyRequired", "stampDutyPaidOn", "stampDutyNote"])
-        if (Object.keys(parsed.data).some((field) => !primaryStampFields.has(field))) {
+        // 主合約的金額／名稱等一律走 main-contract 端點（單一來源）；貼花欄位與「合約內容／說明」
+        // 不影響金額，可在這裡改——內容欄位最該寫在主合約上，擋掉就沒地方寫了。
+        const primaryEditableFields = new Set(["stampDutyRequired", "stampDutyPaidOn", "stampDutyNote", "contentNote"])
+        if (Object.keys(parsed.data).some((field) => !primaryEditableFields.has(field))) {
           res.status(409).json({ error: "primary_contract_requires_main_endpoint" })
           return
         }
       }
 
       const b = parsed.data
+      // 合約內容欄位的讀寫權限＝canSeeContractDocs（見 serialize 的說明）。帶 contentNote 進來
+      // （含帶 null 清空）卻沒有權限 → 403；沒帶這個欄位的 PATCH 不受影響（會計照常改貼花欄位）。
+      const canSeeContent = await canSeeContractDocs(tenantId, scope.self, scope.project)
+      if (b.contentNote !== undefined && !canSeeContent) {
+        res.status(403).json({ error: "forbidden_contract_content" })
+        return
+      }
       const patch: Record<string, unknown> = {}
       if (b.title !== undefined) patch.title = b.title
       if (b.counterparty !== undefined) patch.counterparty = b.counterparty
@@ -394,6 +432,7 @@ contractsRouter.patch(
       if (b.stampDutyRate !== undefined) patch.stamp_duty_rate = b.stampDutyRate
       if (b.stampDutyPaidOn !== undefined) patch.stamp_duty_paid_on = b.stampDutyPaidOn
       if (b.stampDutyNote !== undefined) patch.stamp_duty_note = b.stampDutyNote
+      if (b.contentNote !== undefined) patch.content_note = noteOf(b.contentNote)
 
       // 金額／份數／費率／應貼花旗標／我方角色任一改動，稅額就要重算——
       // 否則清單會拿舊的凍結值，跟合約上的金額或貼花方式對不起來。
@@ -449,7 +488,7 @@ contractsRouter.patch(
         newRow: patch,
         context: "PATCH /contracts/:id — 修改合約",
       })
-      res.status(200).json({ contract: serialize(data as ContractRow) })
+      res.status(200).json({ contract: serialize(data as ContractRow, canSeeContent) })
     } catch (err) {
       next(err)
     }

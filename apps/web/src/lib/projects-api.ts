@@ -4,7 +4,8 @@
  * 分潤可見性由後端依角色分流（GET /projects/:id/members 的 canManage）；前端
  * 只是照後端回傳渲染，不自行 gate。
  */
-import { apiFetch } from "./api-client"
+import { apiFetch, type ApiError } from "./api-client"
+import { getSupabaseBrowser } from "./supabase-browser"
 
 export type ShareMode = "pool_pct" | "fixed_amount"
 
@@ -178,6 +179,17 @@ export interface ProjectDocument {
   url: string | null
 }
 
+/**
+ * `GET /projects/:id/documents` 的回應。合約掃描檔只給 HR／該案 lead／該案經理與主辦成員：
+ * 其他人的 `documents` 裡根本沒有合約掃描檔（連檔名都不給），`canSeeContractDocs` 是 false——
+ * 前端靠這個旗標決定要不要顯示合約掃描的徽章與上傳／刪除按鈕與合約內容欄位。
+ * 舊版後端沒有這個欄位時一律當 false（寧可少顯示，授權本來就在後端）。
+ */
+export interface ProjectDocumentsResponse {
+  documents: ProjectDocument[]
+  canSeeContractDocs: boolean
+}
+
 export interface MyProjectShare {
   memberId: string
   projectId: string
@@ -259,6 +271,11 @@ export interface Contract {
   stampDutyAmount: number | null
   stampDutyPaidOn: string | null
   stampDutyNote: string | null
+  /**
+   * 合約內容／說明（多行文字）。只有 HR／該案 lead／經理與主辦成員讀得到；其他人（含有 finance 的
+   * 會計與部門主管）永遠收到 null——分不出「沒填」與「看不到」時看 `ProjectDocumentsResponse.canSeeContractDocs`。
+   */
+  contentNote?: string | null
   createdAt: string
   /** 衍生：最終是否應由我方貼花。 */
   dutiable: boolean
@@ -316,6 +333,8 @@ export function createContract(
     stampDutyRate?: number | null
     stampDutyPaidOn?: string | null
     stampDutyNote?: string | null
+    /** 合約內容／說明（最長 2000 字）。只有 canSeeContractDocs 的人能帶，否則 403 forbidden_contract_content。 */
+    contentNote?: string | null
   },
 ) {
   return apiFetch<{ contract: Contract }>(`/projects/${projectId}/contracts`, {
@@ -342,6 +361,8 @@ export function updateContract(
     stampDutyRate?: number | null
     stampDutyPaidOn?: string | null
     stampDutyNote?: string | null
+    /** 合約內容／說明；null 或空字串＝清空。權限同 createContract。 */
+    contentNote?: string | null
   },
 ) {
   return apiFetch<{ contract: Contract }>(`/contracts/${id}`, {
@@ -602,30 +623,156 @@ export function getMyProjectShares() {
 
 /* -------------------------------------------------------------- documents -- */
 
-export function getProjectDocuments(projectId: string) {
-  return apiFetch<{ documents: ProjectDocument[] }>(`/projects/${projectId}/documents`)
+export async function getProjectDocuments(projectId: string): Promise<ProjectDocumentsResponse> {
+  const res = await apiFetch<{ documents: ProjectDocument[]; canSeeContractDocs?: boolean }>(`/projects/${projectId}/documents`)
+  return { documents: res.documents, canSeeContractDocs: res.canSeeContractDocs === true }
+}
+
+/**
+ * 上傳的兩條路（見 apps/api/src/routes/project-documents.ts）：
+ *   • ≤ 3 MiB：檔案轉 base64 隨 JSON 送給 API。API 跑在 Vercel serverless，request body 上限約 4.5 MB，
+ *     base64 又膨脹 4/3，所以經 API 實際只傳得動 3 MB 多；超過平台直接回 413（沒有 CORS 標頭，
+ *     瀏覽器只看到「Failed to fetch」），所以大檔不能走這條。
+ *   • 3 MiB～10 MiB：先向 API 要簽名上傳網址，瀏覽器把檔案直接傳進 Supabase Storage（不經 API），
+ *     再呼叫 API 登記（API 用 Storage 回報的實際大小與類型再驗一次）。
+ * 兩個常數與後端的 BASE64_MAX_BYTES／MAX_BYTES 同步。
+ */
+export const BASE64_UPLOAD_MAX_BYTES = 3 * 1024 * 1024
+export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
+
+/**
+ * 合約掃描檔只收 PDF 與圖片（後端 CONTRACT_SCAN_* 同一份名單）。一般專案文件不受這條限制。
+ * `CONTRACT_SCAN_ACCEPT` 給 `<input type="file" accept>` 用——只是選檔時的提示，真正的把關在後端。
+ */
+export const CONTRACT_SCAN_EXTENSIONS: readonly string[] = [".pdf", ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp"]
+export const CONTRACT_SCAN_ACCEPT =
+  ".pdf,.jpg,.jpeg,.png,.heic,.heif,.webp,application/pdf,image/jpeg,image/png,image/heic,image/heif,image/webp"
+export const CONTRACT_SCAN_TYPE_MESSAGE = "合約掃描檔只收 PDF 與圖片（JPG、PNG、HEIC、WebP）。"
+
+const CONTENT_TYPE_BY_EXT: Record<string, string> = {
+  ".pdf": "application/pdf",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".heic": "image/heic",
+  ".heif": "image/heif",
+  ".webp": "image/webp",
+}
+
+function extOf(fileName: string): string {
+  return (fileName.match(/\.[A-Za-z0-9]{1,8}$/) ?? [""])[0].toLowerCase()
+}
+
+/** 合約掃描檔的副檔名是否在名單內（上傳前的友善檢查；後端還會驗 MIME）。 */
+export function isContractScanFile(file: { name: string }): boolean {
+  return CONTRACT_SCAN_EXTENSIONS.includes(extOf(file.name))
+}
+
+/**
+ * 上傳時帶的 MIME。瀏覽器對沒註冊的副檔名會給空字串（例如 Windows 上的 .heic）、
+ * 或給 application/octet-stream；這時依副檔名補上正確的類型，免得合格的檔被後端的 MIME 檢查擋掉。
+ * 瀏覽器自己有給明確類型就照用（`image/jpg` 這種非標準寫法改成 `image/jpeg`）。
+ */
+export function uploadContentType(file: { name: string; type: string }): string {
+  const type = (file.type ?? "").split(";")[0]?.trim().toLowerCase() ?? ""
+  if (type && type !== "application/octet-stream") return type === "image/jpg" || type === "image/pjpeg" ? "image/jpeg" : type
+  return CONTENT_TYPE_BY_EXT[extOf(file.name)] ?? "application/octet-stream"
+}
+
+const DOCUMENT_ERRORS: Record<string, string> = {
+  forbidden: "沒有上傳權限（專案文件只有該案成員、負責人、所屬部門主管與 HR／會計能上傳）。",
+  unsupported_file_type: CONTRACT_SCAN_TYPE_MESSAGE,
+  file_too_large: `檔案太大：單檔上限 ${MAX_DOCUMENT_BYTES / 1024 / 1024} MB，請壓縮或拆檔後再上傳。`,
+  contract_not_in_project: "這份合約不屬於這個專案、或已經作廢。",
+  upload_not_found: "檔案沒有傳完整，請重新上傳。",
+  invalid_storage_path: "上傳憑證不合法，請重新上傳。",
+  already_registered: "這個檔案已經上傳過了。",
+}
+
+/** 合約掃描檔的 403：授權比一般專案文件窄（只有該案經理、承辦與 HR），訊息要講對。 */
+const CONTRACT_SCAN_FORBIDDEN_MESSAGE = "沒有上傳權限（合約掃描檔只有該案經理、承辦與 HR 能上傳）。"
+
+/**
+ * 上傳／登記失敗的訊息翻成中文；不是 API 的錯誤（例如直傳 Storage 本身失敗）原樣顯示。
+ * `contract`＝這次是合約掃描檔（403 的原因不同：授權比一般專案文件窄）。
+ */
+export function humanizeDocumentError(err: unknown, opts: { fallback?: string; contract?: boolean } = {}): string {
+  if (!(err instanceof Error)) return opts.fallback ?? "上傳失敗"
+  // apiFetch 丟出的錯誤帶 `.code`；沒有時（例如測試／別處手組的 Error）從「[403] forbidden」格式的訊息裡取。
+  const code = (err as ApiError).code ?? err.message.match(/^\[\d{3}\]\s+(\w+)$/)?.[1]
+  if (code === "forbidden" && opts.contract) return CONTRACT_SCAN_FORBIDDEN_MESSAGE
+  if (code && DOCUMENT_ERRORS[code]) return DOCUMENT_ERRORS[code]
+  return err.message || (opts.fallback ?? "上傳失敗")
+}
+
+/**
+ * 頁面實際要顯示的文件：沒有權限的人一律不顯示合約掃描檔。後端本來就不會回給無權者
+ * （GET /projects/:id/documents），這裡再濾一次讓前端與後端對應——萬一混進來也不會顯示徽章與連結。
+ */
+export function visibleProjectDocuments(documents: readonly ProjectDocument[], canSeeContractDocs: boolean): ProjectDocument[] {
+  return documents.filter((doc) => !doc.contractId || canSeeContractDocs)
 }
 
 async function fileToBase64(file: File): Promise<string> {
   const buf = await file.arrayBuffer()
   const bytes = new Uint8Array(buf)
+  // 分段轉字串：一次 String.fromCharCode(...大陣列) 會爆呼叫堆疊，逐字元相加又太慢。
   let binary = ""
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+  const CHUNK = 0x8000
+  for (let i = 0; i < bytes.length; i += CHUNK) binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
   return btoa(binary)
 }
 
-/** 帶 contractId 就是合約掃描檔；後端會驗合約屬於此專案且未作廢，授權比照合約（HR / lead / 部門主管）。 */
+/**
+ * 帶 contractId 就是合約掃描檔；後端會驗合約屬於此專案且未作廢，授權＝該案 lead／經理與主辦成員／HR
+ * （部門主管與會計不行），檔案類型只收 PDF 與圖片。失敗一律丟 `Error`，message 已翻成中文。
+ */
 export async function uploadProjectDocument(projectId: string, file: File, contractId?: string) {
-  const dataBase64 = await fileToBase64(file)
-  return apiFetch<{ id: string; sizeBytes: number }>(`/projects/${projectId}/documents`, {
-    method: "POST",
-    body: JSON.stringify({
-      fileName: file.name,
-      contentType: file.type || "application/octet-stream",
-      dataBase64,
-      ...(contractId ? { contractId } : {}),
-    }),
-  })
+  if (contractId && !isContractScanFile(file)) throw new Error(CONTRACT_SCAN_TYPE_MESSAGE)
+  if (file.size > MAX_DOCUMENT_BYTES) throw new Error(DOCUMENT_ERRORS.file_too_large)
+  const contentType = uploadContentType(file)
+  try {
+    if (file.size <= BASE64_UPLOAD_MAX_BYTES) {
+      return await apiFetch<{ id: string; sizeBytes: number }>(`/projects/${projectId}/documents`, {
+        method: "POST",
+        body: JSON.stringify({
+          fileName: file.name,
+          contentType,
+          dataBase64: await fileToBase64(file),
+          ...(contractId ? { contractId } : {}),
+        }),
+      })
+    }
+    // 大檔：要簽名上傳網址 → 直傳 Storage → 登記。
+    const slot = await apiFetch<{ bucket: string; path: string; token: string; maxBytes: number }>(
+      `/projects/${projectId}/documents/upload-url`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          fileName: file.name,
+          contentType,
+          sizeBytes: file.size,
+          ...(contractId ? { contractId } : {}),
+        }),
+      },
+    )
+    // supabase-js 對 Blob／File 一律以 FormData 送、MIME 取 blob.type（fileOptions.contentType 不管用），
+    // 所以重包一個帶正確 type 的 File（內容不複製、只是參照）。
+    const body = new File([file], file.name, { type: contentType })
+    const { error } = await getSupabaseBrowser().storage.from(slot.bucket).uploadToSignedUrl(slot.path, slot.token, body, { contentType })
+    if (error) throw new Error(`檔案傳到儲存空間失敗：${error.message}`)
+    return await apiFetch<{ id: string; sizeBytes: number }>(`/projects/${projectId}/documents`, {
+      method: "POST",
+      body: JSON.stringify({
+        fileName: file.name,
+        contentType,
+        storagePath: slot.path,
+        ...(contractId ? { contractId } : {}),
+      }),
+    })
+  } catch (err) {
+    throw new Error(humanizeDocumentError(err, { contract: !!contractId }))
+  }
 }
 
 export function deleteProjectDocument(projectId: string, docId: string) {

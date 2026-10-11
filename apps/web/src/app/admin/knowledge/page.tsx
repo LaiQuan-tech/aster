@@ -54,7 +54,8 @@ export default function KnowledgePage() {
     if (add === "project" && projects.length === 0) listProjects().then((r) => setProjects(r.projects)).catch(() => null);
   }, [add, projects.length]);
   useEffect(() => {
-    if (projectId) getProjectDocuments(projectId).then((r) => setProjectDocs(r.documents)).catch(() => setProjectDocs([]));
+    // 合約掃描檔不能掛進知識庫（後端回 400 contract_document_not_allowed）：選單裡直接不列。
+    if (projectId) getProjectDocuments(projectId).then((r) => setProjectDocs(r.documents.filter((d) => !d.contractId))).catch(() => setProjectDocs([]));
     else setProjectDocs([]);
   }, [projectId]);
 

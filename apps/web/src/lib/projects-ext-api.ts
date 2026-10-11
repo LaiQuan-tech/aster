@@ -327,12 +327,15 @@ export function listProjectsExt(opts?: {
   dir?: SortDir
   /** M14：歸屬年度（fiscal_year）；省略＝全部年度。 */
   year?: number | null
+  /** 只回這些案型（後端 `?kind=main,change`，在 DB 端篩）；省略＝全部案型。補母案的下拉只要 `["main"]`。 */
+  kinds?: ProjectKind[]
 }) {
   const q = new URLSearchParams()
   if (opts?.includeArchived) q.set("includeArchived", "1")
   if (opts?.sort) q.set("sort", opts.sort)
   if (opts?.dir) q.set("dir", opts.dir)
   if (opts?.year != null) q.set("year", String(opts.year))
+  if (opts?.kinds && opts.kinds.length > 0) q.set("kind", opts.kinds.join(","))
   const qs = q.toString()
   return apiFetch<{ projects: ProjectListItem[] }>(`/projects${qs ? `?${qs}` : ""}`)
 }
@@ -726,8 +729,9 @@ export function updateProjectFields(id: string, body: UpdateProjectExtBody) {
 /** 建立／編輯專案共用的錯誤碼人性化（P3 案型與客戶）。 */
 export function humanizeProjectExtError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : fallback
-  if (msg.includes("parent_required")) return "變更設計／追加／代墊必須選擇母案。"
-  if (msg.includes("invalid_parent")) return "母案不合法（必須是同租戶的主案，且不能是自己）。"
+  // 母案是選填（業主 2026-09-30 會議），後端不再回 parent_required；有帶母案才驗 invalid_parent。
+  if (msg.includes("invalid_parent")) return "母案不合法：必須是同租戶的主案、不能是自己；主案本身也不能再掛母案。"
+  if (msg.includes("has_child_projects")) return "這個主案底下還有追加／變更／代墊案，不能改成其他案型。請先把那些案的母案移走或清空。"
   if (msg.includes("invalid_client")) return "選到的客戶不存在或已刪除。"
   if (msg.includes("invalid_company")) return "選到的承接公司不存在或不屬於本租戶，請重新選擇。"
   if (msg.includes("company_inactive")) return "選到的承接公司已停用，請改選其他公司。"

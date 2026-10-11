@@ -61,12 +61,14 @@ async function loadDocumentText(doc: KnowledgeDocRow & { body: string }): Promis
   if (doc.kind === "project_document") {
     const { data: pd, error } = await supabaseAdmin
       .from("project_documents")
-      .select("storage_path, content_type, file_name")
+      .select("storage_path, content_type, file_name, contract_id")
       .eq("tenant_id", doc.tenant_id)
       .eq("id", doc.project_document_id)
       .maybeSingle()
     if (error) throw new Error(`loadDocumentText (project_document): ${error.message}`)
     if (!pd) throw new Error("project_document_missing")
+    // 合約掃描檔不進知識庫（掛入端已擋；這裡擋歷史殘留的重建索引）。
+    if (pd.contract_id) throw new Error("contract_document_not_allowed")
     bucket = PROJECT_DOC_BUCKET
     path = pd.storage_path as string
     contentType = (pd.content_type as string | null) ?? contentType
@@ -158,10 +160,57 @@ export interface SearchHit {
   similarity: number | null
 }
 
-/** 語意搜尋（有金鑰）或關鍵字搜尋（無金鑰）。 */
+const LINK_PAGE_SIZE = 1000
+const LINK_IN_CHUNK = 100
+
+/**
+ * 來源是**合約掃描檔**（project_documents.contract_id 不為 null）的知識庫文件 id。
+ * 合約掃描只給該案經理、承辦與 HR 看（services/project-scope.ts 的 canSeeContractDocs），而知識庫的
+ * 搜尋／問答是全公司可用——這種文件不該被搜到、問到、列出或下載。掛入端（POST /knowledge/documents）
+ * 已經禁止，這裡是讀取端的防線，擋歷史殘留（正式庫目前 0 筆）。
+ */
+export async function contractLinkedDocumentIds(tenantId: string): Promise<Set<string>> {
+  // ① 所有「掛專案文件」的知識庫文件。分頁撈：PostgREST max-rows=1000 會靜默截斷，
+  //    截斷＝漏擋，這道防線不能因為資料多了就悄悄失效（樣板同 services/bonus-run-store.ts fetchAll）。
+  const linked: Array<{ id: string; project_document_id: string }> = []
+  for (let from = 0; ; from += LINK_PAGE_SIZE) {
+    const { data, error } = await supabaseAdmin
+      .from("knowledge_documents")
+      .select("id, project_document_id")
+      .eq("tenant_id", tenantId)
+      .eq("kind", "project_document")
+      .order("id", { ascending: true })
+      .range(from, from + LINK_PAGE_SIZE - 1)
+    if (error) throw new Error(`contractLinkedDocumentIds (docs): ${error.message}`)
+    const batch = data ?? []
+    for (const d of batch) {
+      if (d.project_document_id) linked.push({ id: d.id as string, project_document_id: d.project_document_id as string })
+    }
+    if (batch.length < LINK_PAGE_SIZE) break
+  }
+  if (linked.length === 0) return new Set()
+
+  // ② 其中哪些指向合約掃描檔。`.in()` 分批：id 是 uuid，一批 100 個約 4 KB，查詢網址不會長到被閘道擋掉。
+  const scanIds = new Set<string>()
+  for (let i = 0; i < linked.length; i += LINK_IN_CHUNK) {
+    const ids = [...new Set(linked.slice(i, i + LINK_IN_CHUNK).map((d) => d.project_document_id))]
+    const { data, error } = await supabaseAdmin
+      .from("project_documents")
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .in("id", ids)
+      .not("contract_id", "is", null)
+    if (error) throw new Error(`contractLinkedDocumentIds (scans): ${error.message}`)
+    for (const r of data ?? []) scanIds.add(r.id as string)
+  }
+  return new Set(linked.filter((d) => scanIds.has(d.project_document_id)).map((d) => d.id))
+}
+
+/** 語意搜尋（有金鑰）或關鍵字搜尋（無金鑰）。來源是合約掃描檔的文件一律排除。 */
 export async function searchKnowledge(tenantId: string, query: string, limit = 8): Promise<{ mode: "vector" | "keyword"; hits: SearchHit[] }> {
   const q = query.trim()
   if (!q) return { mode: isGeminiConfigured() ? "vector" : "keyword", hits: [] }
+  const blocked = await contractLinkedDocumentIds(tenantId)
   if (isGeminiConfigured()) {
     const [vec] = await embedTexts([q], "RETRIEVAL_QUERY")
     const { data, error } = await supabaseAdmin.rpc("match_knowledge_chunks", {
@@ -179,7 +228,8 @@ export async function searchKnowledge(tenantId: string, query: string, limit = 8
       content: r.content as string,
       similarity: Number(r.similarity),
     }))
-    if (hits.length > 0) return { mode: "vector", hits }
+    const allowed = hits.filter((h) => !blocked.has(h.documentId))
+    if (allowed.length > 0) return { mode: "vector", hits: allowed }
     // 向量沒中（例如文件是無金鑰時期建的、沒有 embedding）→ 退回關鍵字
   }
   const like = `%${q.replace(/[%_]/g, "")}%`
@@ -196,7 +246,7 @@ export async function searchKnowledge(tenantId: string, query: string, limit = 8
     const title = Array.isArray(d) ? (d[0]?.title ?? "") : (d?.title ?? "")
     return { chunkId: r.id as string, documentId: r.document_id as string, title, chunkIndex: Number(r.chunk_index), content: r.content as string, similarity: null }
   })
-  return { mode: "keyword", hits }
+  return { mode: "keyword", hits: hits.filter((h) => !blocked.has(h.documentId)) }
 }
 
 const ASK_SYSTEM = `你是公司內部文件助理。只能依「參考資料」回答，資料裡沒有的就明說「文件裡沒有提到」，不要用常識補。

@@ -8,7 +8,7 @@ import { resolveSelf } from "../middleware/scope.js"
 import { GeminiNotConfiguredError, isGeminiConfigured } from "../lib/gemini.js"
 import { kindOf } from "../services/knowledge-text.js"
 import {
-  DOC_COLS, KNOWLEDGE_BUCKET, PROJECT_DOC_BUCKET, indexDocument, searchKnowledge, askKnowledge, serializeDoc,
+  DOC_COLS, KNOWLEDGE_BUCKET, PROJECT_DOC_BUCKET, contractLinkedDocumentIds, indexDocument, searchKnowledge, askKnowledge, serializeDoc,
   type KnowledgeDocRow,
 } from "../services/knowledge-store.js"
 
@@ -43,7 +43,10 @@ knowledgeRouter.get("/knowledge/documents", requireAuth, requireTenant, async (_
       next(new Error(`GET /knowledge/documents: ${error.message}`))
       return
     }
-    res.status(200).json({ documents: ((data ?? []) as unknown as KnowledgeDocRow[]).map(serializeDoc), aiAvailable: isGeminiConfigured() })
+    // 來源是合約掃描檔的文件不列（連標題與檔名都不給）：合約掃描只有經理／承辦／HR 看得到。
+    const blocked = await contractLinkedDocumentIds(tenantId)
+    const documents = ((data ?? []) as unknown as KnowledgeDocRow[]).filter((d) => !blocked.has(d.id)).map(serializeDoc)
+    res.status(200).json({ documents, aiAvailable: isGeminiConfigured() })
   } catch (err) {
     next(err)
   }
@@ -96,7 +99,7 @@ knowledgeRouter.post("/knowledge/documents", requireAuth, requireTenant, require
     } else {
       const { data: pd, error: pdErr } = await supabaseAdmin
         .from("project_documents")
-        .select("id, file_name, content_type")
+        .select("id, file_name, content_type, contract_id")
         .eq("tenant_id", tenantId)
         .eq("id", b.projectDocumentId)
         .maybeSingle()
@@ -106,6 +109,11 @@ knowledgeRouter.post("/knowledge/documents", requireAuth, requireTenant, require
       }
       if (!pd) {
         res.status(404).json({ error: "project_document_not_found" })
+        return
+      }
+      // 合約掃描檔只給該案經理、承辦與 HR 看；知識庫的搜尋與問答是全公司可用，掛進去等於繞過這條線。
+      if (pd.contract_id) {
+        res.status(400).json({ error: "contract_document_not_allowed" })
         return
       }
       const { data: dup } = await supabaseAdmin.from("knowledge_documents").select("id").eq("tenant_id", tenantId).eq("project_document_id", b.projectDocumentId).maybeSingle()
@@ -184,7 +192,12 @@ knowledgeRouter.get("/knowledge/documents/:id/download", requireAuth, requireTen
     let bucket = KNOWLEDGE_BUCKET
     let path = doc.storage_path as string | null
     if (doc.kind === "project_document") {
-      const { data: pd } = await supabaseAdmin.from("project_documents").select("storage_path").eq("tenant_id", tenantId).eq("id", doc.project_document_id).maybeSingle()
+      const { data: pd } = await supabaseAdmin.from("project_documents").select("storage_path, contract_id").eq("tenant_id", tenantId).eq("id", doc.project_document_id).maybeSingle()
+      // 來源是合約掃描檔（歷史殘留）：當作不存在，不發簽名網址。
+      if (pd?.contract_id) {
+        res.status(404).json({ error: "not_found" })
+        return
+      }
       bucket = PROJECT_DOC_BUCKET
       path = (pd?.storage_path as string | null) ?? null
     }

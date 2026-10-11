@@ -19,7 +19,7 @@ import {
   type Company,
   COMMON_DISCIPLINES,
 } from "@/lib/projects-ext-api";
-import { selectedCompanyId } from "../../_components/project-application-form";
+import { parentProjectPatch, selectedCompanyId } from "../../_components/project-application-form";
 import { type AppForm, type Setter } from "./shared";
 
 /** 「訂單類型（沿用合約）」：跟後端 summarizeContracts() 同一套邏輯——
@@ -58,6 +58,11 @@ interface ApplicationFieldsCardProps {
   vendors: Vendor[];
   /** 名冊 → 公司主體：「承接公司」下拉的選項（申請單左上角那間公司）；已停用的只在這案原本就選它時才列。 */
   companies: Company[];
+  /**
+   * 「母案」下拉的選項（page.tsx 以 `parentProjectChoices` 算好）：同租戶的主案、已排除本案；
+   * 只有變更設計／追加／代墊會用到（主案不能掛母案，下拉不顯示）。
+   */
+  parentChoices: Array<{ id: string; label: string }>;
   canFinance: boolean;
   /** W8：協力技師的科別欄位（租戶設定 `project_settings.disciplines`），由 page.tsx 傳入。 */
   disciplines: string[];
@@ -78,6 +83,7 @@ export function ApplicationFieldsCard({
   contracts,
   vendors,
   companies,
+  parentChoices,
   canFinance,
   disciplines,
   error,
@@ -117,6 +123,8 @@ export function ApplicationFieldsCard({
       await updateProjectFields(project.id, {
         // "" ＝ 沒指定、沿用租戶預設公司 → 送 null（不會把專案悄悄釘死在目前的預設公司）。
         companyId: appForm.companyId || null,
+        // 母案只在「改了」才送（可清空、主案不送）；規則見 parentProjectPatch。
+        ...parentProjectPatch(project, appForm.parentProjectId),
         siteAddress: appForm.siteAddress.trim() || null,
         siteAreaM2: appForm.siteAreaM2 === "" ? null : Number(appForm.siteAreaM2),
         designScope: appForm.designScope
@@ -164,6 +172,22 @@ export function ApplicationFieldsCard({
           </select>
           <p className="mt-1 text-xs text-gray-400">申請單左上角印的公司。{appForm.companyId ? "" : "尚未指定，目前沿用預設公司。"}</p>
         </div>
+        {project.kind !== "main" && (
+          <div>
+            <label className={labelCls}>母案</label>
+            <select
+              className={inputCls}
+              value={appForm.parentProjectId}
+              onChange={(e) => setAppForm((f) => f && { ...f, parentProjectId: e.target.value })}
+            >
+              <option value="">未指定（可事後補上）</option>
+              {parentChoices.map((choice) => (
+                <option key={choice.id} value={choice.id}>{choice.label}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-gray-400">母案是選填，可隨時補上或清空；只能選主案，不能選自己。</p>
+          </div>
+        )}
         <div>
           <label className={labelCls}>設計地點</label>
           <input className={inputCls} value={appForm.siteAddress} onChange={(e) => setAppForm((f) => f && { ...f, siteAddress: e.target.value })} />

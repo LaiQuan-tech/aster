@@ -8,6 +8,7 @@ import {
   getProjectMembers,
   getProjectDocuments,
   uploadProjectDocument,
+  visibleProjectDocuments,
   type MembersResponse,
   type ProjectDocument,
 } from "@/lib/projects-api";
@@ -28,6 +29,9 @@ export default function EssProjectDetailPage() {
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [membersRes, setMembersRes] = useState<MembersResponse | null>(null);
   const [documents, setDocuments] = useState<ProjectDocument[]>([]);
+  // 合約掃描檔只給 HR／該案 lead／經理與主辦成員；後端對其他人的回應根本不含合約掃描檔（連檔名都不給），
+  // 這個旗標讓前端對應：沒權限就不顯示「合約掃描檔」徽章，連萬一混進來的也濾掉。
+  const [canSeeContractDocs, setCanSeeContractDocs] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -44,6 +48,7 @@ export default function EssProjectDetailPage() {
       setProject(detail.project);
       setMembersRes(m);
       setDocuments(docs.documents);
+      setCanSeeContractDocs(docs.canSeeContractDocs);
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入失敗");
     } finally {
@@ -68,6 +73,8 @@ export default function EssProjectDetailPage() {
     }
   }
 
+  // 沒有權限的人：合約掃描檔一律不顯示（後端本來就不回，這裡再濾一次，兩邊對應）。
+  const visibleDocuments = visibleProjectDocuments(documents, canSeeContractDocs);
   const isPool = membersRes?.shareMode === "pool_pct";
   const canManage = membersRes?.canManage ?? false;
 
@@ -113,20 +120,22 @@ export default function EssProjectDetailPage() {
             )}
           </Card>
 
-          {/* 文件 */}
+          {/* 文件：一般專案文件全公司可見；合約掃描檔只給有權者（見上面 canSeeContractDocs） */}
           <Card title="專案文件">
             <input ref={fileRef} type="file" className="mb-3 block text-sm" onChange={(e) => onUpload(e.target.files?.[0])} />
-            {documents.length === 0 ? (
+            {/* 上傳失敗（檔案太大、沒權限…）原本只在「找不到專案」那個分支才顯示，載入成功後完全看不到。 */}
+            {error && <div className="mb-3"><InlineError>{error}</InlineError></div>}
+            {visibleDocuments.length === 0 ? (
               <p className="text-sm text-gray-400">尚無文件</p>
             ) : (
               <ul className="divide-y">
-                {documents.map((doc) => (
+                {visibleDocuments.map((doc) => (
                   <li key={doc.id} className="flex items-center justify-between py-2 text-sm">
                     <span className="min-w-0">
                       <a href={doc.url ?? "#"} target="_blank" rel="noreferrer" className="font-medium" style={{ color: "var(--brand)" }}>
                         {doc.fileName}
                       </a>
-                      {doc.contractId && <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500">合約掃描檔</span>}
+                      {canSeeContractDocs && doc.contractId && <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500">合約掃描檔</span>}
                     </span>
                     <span className="text-xs text-gray-400">{Math.round(doc.sizeBytes / 1024)} KB</span>
                   </li>
