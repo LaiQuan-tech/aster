@@ -32,8 +32,8 @@ import {
   ACCOUNTANT_DEFAULT_NAV,
   ADMIN_MODULES,
   ADMIN_SECTIONS,
-  ADMIN_TABS,
   adminModulesOf,
+  configurableTabsForRole,
   roleNavOf,
   type AdminModuleKey,
   type AdminModulesConfig,
@@ -159,11 +159,12 @@ export default function AdvancedFeaturesPage() {
   /** 勾／取消單一分頁。該區原本沒有 tabs 鍵（＝全部）時，先展開成完整清單再減。 */
   function toggleRoleTab(section: AdminSectionKey, tabKey: string, enabled: boolean) {
     if (!roleNav) return;
-    const all = ADMIN_TABS[section].map((t) => t.key);
+    // 只算可勾選的分頁（HR 限定的分頁，例如集團總覽，勾了也無效，不放進清單）。
+    const all = configurableTabsForRole(section).map((t) => t.key);
     const current = roleNav.tabs[section] ?? all;
     const next = enabled
       ? all.filter((k) => current.includes(k) || k === tabKey)
-      : current.filter((k) => k !== tabKey);
+      : all.filter((k) => current.includes(k) && k !== tabKey);
     void saveRoleNav({ sections: roleNav.sections, tabs: { ...roleNav.tabs, [section]: next } });
   }
 
@@ -252,6 +253,7 @@ export default function AdvancedFeaturesPage() {
           專案與財務（不含獎金季發放）、出勤月表、報銷與預支、員工基本資料。
           <span className="block text-xs text-gray-400">
             這裡只管看不看得見；薪資、獎金與租戶設定的資料在 API 端就擋住了，勾回來也只會看到「無權限」。
+            集團總覽等 HR 限定的頁面不在清單內（只有 HR／管理者能開）。
           </span>
         </p>
         {loading || !roleNav ? (
@@ -260,7 +262,8 @@ export default function AdvancedFeaturesPage() {
           <ul className="divide-y divide-gray-100">
             {ROLE_NAV_SECTIONS.map((section) => {
               const on = roleNav.sections.includes(section.key);
-              const tabs = ADMIN_TABS[section.key];
+              // 排除 HR 限定的分頁（hrOnly，例如集團總覽）：會計怎麼勾都開不了，不列出來。
+              const tabs = configurableTabsForRole(section.key);
               const allowed = roleNav.tabs[section.key] ?? tabs.map((t) => t.key);
               const id = `role-nav-section-${section.key}`;
               return (

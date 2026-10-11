@@ -15,7 +15,8 @@
  * - 角色範圍（W4，2026-09-23）：會計（employees.role='accountant'）的側欄只列開放的分區、
  *   分頁列只列開放的分頁（lib/admin-nav.ts 的 roleNavOf／sectionsForRole／tabsForSection；
  *   範圍可在「設定 → 進階功能 → 會計可用範圍」調整）。直開未開放的網址（2026-09-23 驗收修正）：
- *   isAdminPathAllowed 回 false 就不渲染 children，改畫整頁「此頁未開放給會計」＋回首頁——以前照常
+ *   isAdminPathAllowed 回 false 就不渲染 children，改畫整頁「此頁未開放給會計」（HR 限定頁，例如集團總覽，
+ *   改說「此頁僅限 HR／管理者」，見 offLimitsCopy）＋回首頁——以前照常
  *   渲染該頁，結果是 403 toast＋空殼頁（bonus-runs）或整頁正常（payroll）。HR／平台管理員不受影響
  *   （隱藏模組直開網址仍可用）。真正的防線仍在 API（requireFinance／requireHrAdmin），這裡只是
  *   導覽層守門，別把它當安全邊界。
@@ -33,6 +34,7 @@ import {
   adminModulesOf,
   isAdminPathAllowed,
   isModuleEnabled,
+  offLimitsCopy,
   resolveAdminPath,
   roleNavOf,
   sectionsForRole,
@@ -176,17 +178,21 @@ const BRAND_OUTLINE: CSSProperties = { borderColor: "var(--brand)", color: "var(
 /**
  * `allowedTabKeys` null＝不限縮（HR／平台管理員）；有值時不在集合裡的分頁只會因為
  * 「直開網址」才被 tabsForSection 的 includeTab 塞回列上，標「未開放給會計」。
+ * `restricted`＝登入者是受限角色（會計，roleNav 不為 null）：HR 限定（hrOnly）的分頁同樣只會因為直開網址
+ * 才出現在列上，標「僅限 HR／管理者」（不是「未開放給會計」——那暗示請 HR 勾選就能開）。
  */
 function TabBar({
   tabs,
   activeKey,
   modules,
   allowedTabKeys,
+  restricted,
 }: {
   tabs: AdminTab[];
   activeKey: string | null;
   modules: AdminModulesConfig;
   allowedTabKeys: ReadonlySet<string> | null;
+  restricted: boolean;
 }) {
   return (
     <nav
@@ -196,7 +202,8 @@ function TabBar({
       {tabs.map((tab) => {
         const active = tab.key === activeKey;
         const disabled = !isModuleEnabled(modules, tab.module);
-        const offLimits = !disabled && !!allowedTabKeys && !allowedTabKeys.has(tab.key);
+        const hrOnly = !disabled && restricted && tab.hrOnly === true;
+        const offLimits = !disabled && !hrOnly && !!allowedTabKeys && !allowedTabKeys.has(tab.key);
         return (
           <Link
             key={tab.key}
@@ -211,6 +218,11 @@ function TabBar({
             {disabled && (
               <Pill tone="gray" className="ml-1.5">
                 未啟用
+              </Pill>
+            )}
+            {hrOnly && (
+              <Pill tone="gray" className="ml-1.5">
+                僅限 HR／管理者
               </Pill>
             )}
             {offLimits && (
@@ -289,6 +301,8 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
   // 直開未開放給這個角色的網址：不渲染頁面本體（見檔頭說明）。HR／平台管理員永遠 true。
   const pathAllowed = isAdminPathAllowed({ pathname, roleNav, modules });
   const roleLabel = me.role === "accountant" ? "會計" : "此角色";
+  // 直開被擋的整頁說明：HR 限定頁（集團總覽）說「此頁僅限 HR／管理者」，其餘說「此頁未開放給{角色}」。
+  const offLimits = offLimitsCopy({ pathname, roleLabel });
   const isHome = resolved.title === "";
   const appName = state.branding?.appName ?? DEFAULT_APP_NAME;
   const brandStyle = state.branding?.primaryColor
@@ -383,7 +397,7 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
             </div>
             {tabs.length >= 2 && (
               <div className="px-3 pb-2">
-                <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} allowedTabKeys={allowedTabKeys} />
+                <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} allowedTabKeys={allowedTabKeys} restricted={roleNav !== null} />
               </div>
             )}
             {subTabs.length > 0 && (
@@ -397,11 +411,9 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
             {!pathAllowed ? (
               <main className="py-12 text-center" aria-labelledby="admin-off-limits-title">
                 <h1 id="admin-off-limits-title" className="text-xl font-bold text-gray-900">
-                  此頁未開放給{roleLabel}
+                  {offLimits.title}
                 </h1>
-                <p className="mt-2 text-sm text-gray-500">
-                  這個功能不在{roleLabel}的後台範圍內；需要的話請 HR 到「設定 → 進階功能」調整可用範圍。
-                </p>
+                <p className="mt-2 text-sm text-gray-500">{offLimits.body}</p>
                 <Link
                   href="/admin"
                   className="mt-6 inline-flex min-h-10 items-center justify-center rounded-xl px-5 text-sm font-medium text-white"
@@ -424,7 +436,7 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
                     {resolved.desc && <p className="mt-1 text-sm text-gray-500">{resolved.desc}</p>}
                     {tabs.length >= 2 && (
                       <div className="mt-4">
-                        <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} allowedTabKeys={allowedTabKeys} />
+                        <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} allowedTabKeys={allowedTabKeys} restricted={roleNav !== null} />
                       </div>
                     )}
                     {subTabs.length > 0 && <SubTabBar subTabs={subTabs} activeKey={resolved.sub} />}

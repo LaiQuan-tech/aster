@@ -11,10 +11,13 @@ import {
   ADMIN_SECTIONS,
   ADMIN_TABS,
   adminModulesOf,
+  configurableTabsForRole,
   homeEntries,
   isAdminPathAllowed,
+  isHrOnlyAdminPath,
   isModuleEnabled,
   normalizeAdminPath,
+  offLimitsCopy,
   parentPathFor,
   resolveAdminPath,
   roleNavOf,
@@ -793,5 +796,69 @@ describe("檔案系統覆蓋（app/admin/**/page.tsx）", () => {
     ]);
     const orphan = ADMIN_ROUTES.filter((r) => !r.pattern && !pages.has(r.prefix) && !pending.has(r.prefix)).map((r) => r.prefix);
     expect(orphan).toEqual([]);
+  });
+});
+
+describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋的提示（2026-10-11）", () => {
+  const HR_ONLY_TABS = (Object.entries(ADMIN_TABS) as Array<[AdminSectionKey, readonly (typeof ADMIN_TABS)[AdminSectionKey][number][]]>).flatMap(
+    ([section, tabs]) => tabs.filter((tab) => tab.hrOnly).map((tab) => ({ section, tab })),
+  );
+
+  it("configurableTabsForRole：「會計可用範圍」可勾選的分頁排除 hrOnly（集團總覽），其餘照表、順序不變", () => {
+    const finance = configurableTabsForRole("finance").map((t) => t.key);
+    expect(finance).not.toContain("groupOverview");
+    expect(finance).toEqual(ADMIN_TABS.finance.filter((t) => t.key !== "groupOverview").map((t) => t.key));
+    expect(finance).toEqual(expect.arrayContaining(["projects", "overview", "receivables", "disbursements", "bonus", "reports", "directory"]));
+    // 沒有 hrOnly 分頁的分區：跟 ADMIN_TABS 完全一樣
+    for (const section of SECTION_KEYS) {
+      const expected = ADMIN_TABS[section].filter((t) => !t.hrOnly).map((t) => t.key);
+      expect(configurableTabsForRole(section).map((t) => t.key), section).toEqual(expected);
+    }
+    // 任何 hrOnly 分頁都不會出現在可勾選清單
+    for (const { section, tab } of HR_ONLY_TABS) {
+      expect(configurableTabsForRole(section).map((t) => t.key)).not.toContain(tab.key);
+    }
+  });
+
+  it("目前 hrOnly 的就是財務分區的集團總覽（新增 hrOnly 分頁時，下面的路徑與提示測試會自動涵蓋）", () => {
+    expect(HR_ONLY_TABS.map(({ section, tab }) => `${section}/${tab.key}`)).toEqual(["finance/groupOverview"]);
+  });
+
+  it("isHrOnlyAdminPath：HR 限定頁（含 query／尾斜線／子路徑）→ true；其他頁、首頁、未知路徑 → false", () => {
+    for (const { tab } of HR_ONLY_TABS) {
+      expect(isHrOnlyAdminPath(tab.href), tab.href).toBe(true);
+      expect(isHrOnlyAdminPath(`${tab.href}/`), tab.href).toBe(true);
+      expect(isHrOnlyAdminPath(`${tab.href}?year=2026`), tab.href).toBe(true);
+      expect(isHrOnlyAdminPath(`${tab.href}/detail`), tab.href).toBe(true);
+    }
+    for (const path of ["/admin", "/admin/projects", "/admin/projects/receivables", "/admin/payroll", "/admin/bonus-runs", "/admin/settings/advanced", "/admin/whatever"]) {
+      expect(isHrOnlyAdminPath(path), path).toBe(false);
+    }
+  });
+
+  it("offLimitsCopy：HR 限定頁說「此頁僅限 HR／管理者」，不說「未開放給會計」也不叫人去進階功能開放", () => {
+    const copy = offLimitsCopy({ pathname: "/admin/group-overview", roleLabel: "會計" });
+    expect(copy.title).toBe("此頁僅限 HR／管理者");
+    expect(copy.title).not.toContain("會計");
+    expect(copy.body).toContain("HR");
+    expect(copy.body).toContain("無法");
+    // 角色名稱不影響 HR 限定頁的說法
+    expect(offLimitsCopy({ pathname: "/admin/group-overview", roleLabel: "此角色" })).toEqual(copy);
+  });
+
+  it("offLimitsCopy：其他被擋的頁維持原本的說法（未開放給{角色}，請 HR 到進階功能調整）", () => {
+    for (const path of ["/admin/payroll", "/admin/bonus-runs", "/admin/whatever"]) {
+      const copy = offLimitsCopy({ pathname: path, roleLabel: "會計" });
+      expect(copy.title, path).toBe("此頁未開放給會計");
+      expect(copy.body, path).toBe("這個功能不在會計的後台範圍內；需要的話請 HR 到「設定 → 進階功能」調整可用範圍。");
+    }
+    expect(offLimitsCopy({ pathname: "/admin/payroll", roleLabel: "此角色" }).title).toBe("此頁未開放給此角色");
+  });
+
+  it("會計預設範圍與自訂範圍的分頁清單都不含 hrOnly 的 key（設定頁不會再把它寫進去）", () => {
+    const keys = HR_ONLY_TABS.map(({ tab }) => tab.key);
+    for (const list of Object.values(ACCOUNTANT_DEFAULT_NAV.tabs)) {
+      for (const key of keys) expect(list ?? []).not.toContain(key);
+    }
   });
 });

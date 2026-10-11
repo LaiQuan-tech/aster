@@ -885,6 +885,15 @@ export function tabsForSection(
   );
 }
 
+/**
+ * 「會計可用範圍」設定（設定 → 進階功能）列出來給人勾的分頁：**排除 `hrOnly`**（目前是財務分區的集團總覽）。
+ * hrOnly 的分頁只要帶了 roleNav 就一律不列、直開網址也不放行（見 tabsForSection／isAdminPathAllowed），
+ * 勾了也無效，列出來只會誤導人以為能開放給會計。順序照表。
+ */
+export function configurableTabsForRole(section: AdminSectionKey): AdminTab[] {
+  return ADMIN_TABS[section].filter((tab) => !tab.hrOnly);
+}
+
 /** 某分頁的子分頁（沒有 children／找不到 → []）。 */
 export function subTabsFor(section: AdminSectionKey, tab: string | null | undefined): AdminSubTab[] {
   if (!tab) return [];
@@ -919,6 +928,31 @@ export function homeEntries(roleNav?: RoleNavConfig | null, modules?: AdminModul
 }
 
 /* ---------------------------------------------------------- 路徑守門 --- */
+
+/**
+ * 這個網址是不是「HR 限定頁」：解析到的分頁帶 `hrOnly`（detail／子路徑跟著父分頁走）。
+ * 未知路徑、首頁 → false。用來決定直開被擋時要說「此頁僅限 HR／管理者」，而不是「此頁未開放給會計」
+ * （後者暗示可以請 HR 在「進階功能」開放，但 HR 限定頁開不了）。
+ */
+export function isHrOnlyAdminPath(pathname: string): boolean {
+  const resolved = resolveAdminPath(normalizeAdminPath(pathname));
+  if (resolved.route.exact || resolved.tab === null) return false;
+  return ADMIN_TABS[resolved.section].find((tab) => tab.key === resolved.tab)?.hrOnly === true;
+}
+
+/** 直開被擋時整頁顯示的標題與說明。HR 限定頁一律是「此頁僅限 HR／管理者」；其餘是「此頁未開放給{角色}」。 */
+export function offLimitsCopy(opts: { pathname: string; roleLabel: string }): { title: string; body: string } {
+  if (isHrOnlyAdminPath(opts.pathname)) {
+    return {
+      title: "此頁僅限 HR／管理者",
+      body: "這個功能只開放給 HR 與管理者，無法在「設定 → 進階功能」開放給其他角色。",
+    };
+  }
+  return {
+    title: `此頁未開放給${opts.roleLabel}`,
+    body: `這個功能不在${opts.roleLabel}的後台範圍內；需要的話請 HR 到「設定 → 進階功能」調整可用範圍。`,
+  };
+}
 
 /**
  * 這個角色能不能開這個後台網址（2026-09-23 正式站驗收：會計直開 /admin/bonus-runs 只得到
