@@ -319,7 +319,9 @@ export interface LeaveBalance {
  * HR／會計帳號在員工端也只拿自己的桶——請假表單的「剩餘時數」才不會拿到別人的額度。
  */
 export function getLeaveBalances() {
-  return apiFetch<{ balances: LeaveBalance[] }>("/leave-balances?scope=mine");
+  // dailyRegularHours：1 天 ＝ 幾小時（規則參數，預設 8），只給畫面把小時顯示成「天＋時」用
+  // （lib/leave-duration.ts）；balances 的數字仍是小時。舊版 API 沒有這欄 → 缺席時用 8。
+  return apiFetch<{ balances: LeaveBalance[]; dailyRegularHours?: number }>("/leave-balances?scope=mine");
 }
 
 export interface ScheduleRow {

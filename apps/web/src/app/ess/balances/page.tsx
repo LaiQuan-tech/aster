@@ -4,22 +4,20 @@ import { useEffect, useState } from "react";
 import { Card, InlineError } from "@/components/ess-ui";
 import { getLeaveBalances, getLeaveTypes, type LeaveBalance, type LeaveType } from "@/lib/ess-api";
 import { balancePeriodLabel } from "@/lib/leave-balances-api";
+import { formatLeaveDuration } from "@/lib/leave-duration";
 
 /**
  * 我的假別額度：`leave_balances` 一列一個「期間桶」。特休週年制（W1，2026-09-23）後
  * 期間是到職日週年（例：2026-05-10 ～ 2027-05-09），不再是曆年，所以顯示期間而不是年度；
  * API 還沒回期間欄的舊資料由 balancePeriodLabel 退回顯示年度。
+ *
+ * 時數顯示成「天＋時」（2026-10-11 業主決定，例：剩 6 天、可用 7 天、已用 1 天；13 天 4 時），
+ * 1 天 ＝ `dailyRegularHours` 小時（API 隨 /leave-balances 回，缺席用 8）。**只改顯示**：餘額桶與 API 欄位仍是小時。
  */
-
-// "X 時 Y 分" from decimal hours (display as hours+minutes).
-function fmt(hours: number): string {
-  const h = Math.floor(hours);
-  const m = Math.round((hours - h) * 60);
-  return `${h} 時 ${m} 分`;
-}
 
 export default function BalancesPage() {
   const [balances, setBalances] = useState<LeaveBalance[]>([]);
+  const [hoursPerDay, setHoursPerDay] = useState<number | undefined>(undefined);
   const [types, setTypes] = useState<LeaveType[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,12 +25,14 @@ export default function BalancesPage() {
     Promise.all([getLeaveBalances(), getLeaveTypes()])
       .then(([b, t]) => {
         setBalances(b.balances);
+        setHoursPerDay(b.dailyRegularHours);
         setTypes(t.leaveTypes);
       })
       .catch((err) => setError(err instanceof Error ? err.message : "載入失敗"));
   }, []);
 
   const typeName = (id: string) => types.find((t) => t.id === id)?.name ?? id.slice(0, 8);
+  const fmt = (hours: number) => formatLeaveDuration(hours, hoursPerDay);
 
   return (
     <div className="space-y-4">

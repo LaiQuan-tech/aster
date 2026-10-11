@@ -1706,7 +1706,9 @@ export function getLeaveBalancesAdmin(params: { employeeId?: string; year?: numb
   const qs = new URLSearchParams();
   if (params.employeeId) qs.set("employeeId", params.employeeId);
   if (params.year) qs.set("year", String(params.year));
-  return apiFetch<{ balances: LeaveBalance[] }>(
+  // dailyRegularHours：1 天 ＝ 幾小時（規則參數，預設 8），只給畫面把小時顯示成「天＋時」用
+  // （lib/leave-duration.ts）；balances 的數字仍是小時。舊版 API 沒有這欄 → 缺席時用 8。
+  return apiFetch<{ balances: LeaveBalance[]; dailyRegularHours?: number }>(
     `/leave-balances${qs.toString() ? `?${qs.toString()}` : ""}`,
   );
 }

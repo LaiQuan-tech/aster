@@ -21,6 +21,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { Card, PrimaryButton, ErrorText, Empty } from "@/components/admin-ui";
 import { MonthPicker } from "@/components/MonthPicker";
 import { getDepartments, type Department } from "@/lib/admin-api";
+import { formatLeaveDuration } from "@/lib/leave-duration";
 import {
   listLeaveSettlements,
   settleLeaveRequests,
@@ -71,6 +72,8 @@ export default function LeaveSettlementPage() {
   const [departments, setDepartments] = useState<Department[]>([]);
 
   const [summary, setSummary] = useState<SettlementSummary>(emptySummary);
+  // 1 天 ＝ 幾小時（規則參數 payroll.dailyRegularHours，API 隨清單回；缺席用 8）：只用在顯示，hours 仍是小時。
+  const [hoursPerDay, setHoursPerDay] = useState<number | undefined>(undefined);
   const [items, setItems] = useState<SettlementItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -89,6 +92,7 @@ export default function LeaveSettlementPage() {
     try {
       const res = await listLeaveSettlements({ period, deptId: deptId || undefined, status: statusFilter });
       setSummary(res.summary);
+      setHoursPerDay(res.dailyRegularHours);
       setItems(res.items);
       setSelected({});
       setError(null);
@@ -299,7 +303,7 @@ export default function LeaveSettlementPage() {
               <p className="mt-1 text-sm text-gray-400">—</p>
             ) : (
               <p className="mt-1 text-sm leading-relaxed text-gray-800">
-                {summary.hoursByLeaveType.map((h) => `${h.leaveTypeName} ${h.totalHours}h`).join("、")}
+                {summary.hoursByLeaveType.map((h) => `${h.leaveTypeName} ${formatLeaveDuration(h.totalHours, hoursPerDay)}`).join("、")}
               </p>
             )}
           </div>
@@ -358,7 +362,7 @@ export default function LeaveSettlementPage() {
                           </span>
                         )}
                       </td>
-                      <td className="py-2 pr-3 text-right tabular-nums">{item.hours}</td>
+                      <td className="py-2 pr-3 text-right tabular-nums whitespace-nowrap">{formatLeaveDuration(item.hours, hoursPerDay)}</td>
                       <td className="py-2 pr-3 text-right tabular-nums">{fmtDeductRate(item.leaveType.deductRate)}</td>
                       <td className="py-2 pr-3">
                         <button

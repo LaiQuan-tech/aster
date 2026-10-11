@@ -23,6 +23,7 @@ import {
   type AnnualGrantEntry,
   type AnnualGrantResult,
 } from "@/lib/leave-balances-api";
+import { formatLeaveDuration, formatLeaveRemaining, leaveHoursInputHint } from "@/lib/leave-duration";
 import {
   downloadEmployeeLeaveRegister,
   getEmployeeLeaveRegister,
@@ -58,6 +59,9 @@ export default function LeaveBalancesPage() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [leaveTypes, setLeaveTypes] = useState<LeaveType[]>([]);
   const [balances, setBalances] = useState<LeaveBalance[]>([]);
+  // 1 天 ＝ 幾小時（規則參數 payroll.dailyRegularHours，API 隨 /leave-balances 回；缺席用 8）。只用在顯示，
+  // 資料與輸入仍是小時。年度請假表與年度給假結果各自帶自己的 dailyRegularHours，見下面。
+  const [hoursPerDay, setHoursPerDay] = useState<number | undefined>(undefined);
   const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
   const [leaveRegister, setLeaveRegister] = useState<EmployeeLeaveRegister | null>(null);
   const [employeeId, setEmployeeId] = useState("");
@@ -133,6 +137,7 @@ export default function LeaveBalancesPage() {
           : Promise.resolve(null),
       ]);
       setBalances(balanceRes.balances);
+      setHoursPerDay(balanceRes.dailyRegularHours);
       setEmployees(employeeRes.employees);
       setLeaveTypes(leaveTypeRes.leaveTypes);
       setLeaveRequests(requestRes.requests);
@@ -211,6 +216,9 @@ export default function LeaveBalancesPage() {
   const grantRows: AnnualGrantEntry[] = grantShown
     ? [...grantShown.granted, ...grantShown.migrated, ...grantShown.skipped]
     : [];
+  // 年度請假表自己帶 dailyRegularHours（也是這一欄「1日 = N小時」的來源），年度給假結果也是；時數以外的都用上面 /leave-balances 回的。
+  const registerPerDay = leaveRegister?.register.dailyRegularHours;
+  const grantPerDay = grantShown?.dailyRegularHours;
 
   return (
     <>
@@ -275,7 +283,7 @@ export default function LeaveBalancesPage() {
                       <td className="py-2 pr-4">
                         {localDateKey(request.start_at)} {fmtHm(request.start_at)} → {localDateKey(request.end_at)} {fmtHm(request.end_at)}
                       </td>
-                      <td className="py-2 pr-4">{request.hours ?? "—"}</td>
+                      <td className="py-2 pr-4 whitespace-nowrap">{formatLeaveDuration(request.hours, hoursPerDay)}</td>
                       <td className="py-2 pr-4">{request.reason ?? "—"}</td>
                       <td className="py-2">{request.status}</td>
                     </tr>
@@ -292,15 +300,15 @@ export default function LeaveBalancesPage() {
           <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div className="rounded-xl bg-slate-50 p-4">
               <p className="text-xs text-slate-500">總給假</p>
-              <p className="mt-1 text-2xl font-semibold text-slate-900">{totals.entitled + totals.deferred}</p>
+              <p className="mt-1 text-2xl font-semibold text-slate-900">{formatLeaveDuration(totals.entitled + totals.deferred, hoursPerDay)}</p>
             </div>
             <div className="rounded-xl bg-red-50 p-4">
               <p className="text-xs text-red-600">已使用</p>
-              <p className="mt-1 text-2xl font-semibold text-red-700">{totals.used}</p>
+              <p className="mt-1 text-2xl font-semibold text-red-700">{formatLeaveDuration(totals.used, hoursPerDay)}</p>
             </div>
             <div className="rounded-xl bg-green-50 p-4">
               <p className="text-xs text-green-600">剩餘</p>
-              <p className="mt-1 text-2xl font-semibold text-green-700">{totals.entitled + totals.deferred - totals.used}</p>
+              <p className="mt-1 text-2xl font-semibold text-green-700">{formatLeaveRemaining(totals.entitled + totals.deferred - totals.used, hoursPerDay)}</p>
             </div>
           </div>
           <h2 className="mb-4 text-sm font-medium text-gray-500">剩餘假別時數</h2>
@@ -341,10 +349,10 @@ export default function LeaveBalancesPage() {
                           </span>
                         </td>
                         <td className="py-2 pr-4">{names.leaveTypeMap.get(balance.leave_type_id) ?? balance.leave_type_id.slice(0, 8)}</td>
-                        <td className="py-2 pr-4">{Number(balance.entitled)}</td>
-                        <td className="py-2 pr-4">{Number(balance.deferred)}</td>
-                        <td className="py-2 pr-4">{Number(balance.used)}</td>
-                        <td className="py-2">{available}</td>
+                        <td className="py-2 pr-4 whitespace-nowrap">{formatLeaveDuration(Number(balance.entitled), hoursPerDay)}</td>
+                        <td className="py-2 pr-4 whitespace-nowrap">{formatLeaveDuration(Number(balance.deferred), hoursPerDay)}</td>
+                        <td className="py-2 pr-4 whitespace-nowrap">{formatLeaveDuration(Number(balance.used), hoursPerDay)}</td>
+                        <td className="py-2 whitespace-nowrap">{formatLeaveRemaining(available, hoursPerDay)}</td>
                       </tr>
                     );
                   })}
@@ -397,8 +405,7 @@ export default function LeaveBalancesPage() {
                     {leaveRegister.register.leaveTypes.map((type) => (
                       <th key={type.id} className="border border-black px-3 py-2 text-center font-medium">{type.name}</th>
                     ))}
-                    <th className="border border-black px-3 py-2 text-center font-medium">合計(hr)</th>
-                    <th className="border border-black px-3 py-2 text-center font-medium">合計(日)</th>
+                    <th className="border border-black px-3 py-2 text-center font-medium">合計</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -406,23 +413,25 @@ export default function LeaveBalancesPage() {
                     <tr key={month.month}>
                       <td className="border border-black px-3 py-2 text-center">{month.month}月</td>
                       {leaveRegister.register.leaveTypes.map((type) => (
-                        <td key={type.id} className="border border-black px-3 py-2 text-center">
-                          {month.hoursByType[type.id] ?? 0}
+                        <td key={type.id} className="border border-black px-3 py-2 text-center whitespace-nowrap">
+                          {formatLeaveDuration(month.hoursByType[type.id] ?? 0, registerPerDay)}
                         </td>
                       ))}
-                      <td className="border border-black px-3 py-2 text-center font-medium">{month.totalHours}</td>
-                      <td className="border border-black px-3 py-2 text-center">{month.totalDays}</td>
+                      <td className="border border-black px-3 py-2 text-center font-medium whitespace-nowrap">
+                        {formatLeaveDuration(month.totalHours, registerPerDay)}
+                      </td>
                     </tr>
                   ))}
                   <tr className="bg-gray-50 font-semibold">
                     <td className="border border-black px-3 py-2 text-center">總計</td>
                     {leaveRegister.register.leaveTypes.map((type) => (
-                      <td key={type.id} className="border border-black px-3 py-2 text-center">
-                        {leaveRegister.register.totals.hoursByType[type.id] ?? 0}
+                      <td key={type.id} className="border border-black px-3 py-2 text-center whitespace-nowrap">
+                        {formatLeaveDuration(leaveRegister.register.totals.hoursByType[type.id] ?? 0, registerPerDay)}
                       </td>
                     ))}
-                    <td className="border border-black px-3 py-2 text-center">{leaveRegister.register.totals.totalHours}</td>
-                    <td className="border border-black px-3 py-2 text-center">{leaveRegister.register.totals.totalDays}</td>
+                    <td className="border border-black px-3 py-2 text-center whitespace-nowrap">
+                      {formatLeaveDuration(leaveRegister.register.totals.totalHours, registerPerDay)}
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -479,8 +488,7 @@ export default function LeaveBalancesPage() {
                         <th className="py-2 pr-4">到職日</th>
                         <th className="py-2 pr-4">週年期間</th>
                         <th className="py-2 pr-4">年資（月）</th>
-                        <th className="py-2 pr-4">天數</th>
-                        <th className="py-2 pr-4">時數</th>
+                        <th className="py-2 pr-4">給假</th>
                         <th className="py-2">結果</th>
                       </tr>
                     </thead>
@@ -495,13 +503,12 @@ export default function LeaveBalancesPage() {
                             {row.periodStart && row.periodEnd ? `${row.periodStart} ～ ${row.periodEnd}` : "—"}
                           </td>
                           <td className="py-2 pr-4">{row.seniorityMonths}</td>
-                          <td className="py-2 pr-4">{row.days}</td>
-                          <td className="py-2 pr-4">{row.entitledHours}</td>
+                          <td className="py-2 pr-4 whitespace-nowrap">{formatLeaveDuration(row.entitledHours, grantPerDay)}</td>
                           <td className="py-2">
                             {row.action === "granted" && <span className="text-green-700">新增</span>}
                             {row.action === "migrated" && (
                               <span className="text-amber-700">
-                                由曆年 {row.fromYear} 搬遷（已用 {row.usedHours} 小時）
+                                由曆年 {row.fromYear} 搬遷（已用 {formatLeaveDuration(row.usedHours, grantPerDay)}）
                               </span>
                             )}
                             {row.action === "skipped" && (
@@ -512,7 +519,7 @@ export default function LeaveBalancesPage() {
                       ))}
                       {grantRows.length === 0 && (
                         <tr>
-                          <td colSpan={7} className="py-3 text-gray-400">沒有符合條件的員工（需在職且有到職日）</td>
+                          <td colSpan={6} className="py-3 text-gray-400">沒有符合條件的員工（需在職且有到職日）</td>
                         </tr>
                       )}
                     </tbody>
@@ -550,10 +557,12 @@ export default function LeaveBalancesPage() {
               <div>
                 <label className={labelCls}>本期給假時數</label>
                 <input type="number" step="0.5" className={inputCls} value={entitled} onChange={(event) => setEntitled(event.target.value)} />
+                <p className="mt-1 text-xs text-gray-400">{leaveHoursInputHint(entitled, hoursPerDay)}</p>
               </div>
               <div>
                 <label className={labelCls}>遞延時數</label>
                 <input type="number" step="0.5" className={inputCls} value={deferred} onChange={(event) => setDeferred(event.target.value)} />
+                <p className="mt-1 text-xs text-gray-400">{leaveHoursInputHint(deferred, hoursPerDay)}</p>
               </div>
               <div className="flex items-end">
                 <PrimaryButton type="submit">儲存</PrimaryButton>

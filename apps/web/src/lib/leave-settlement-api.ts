@@ -73,6 +73,11 @@ export interface LeaveSettlementListResponse {
   period: string;
   summary: SettlementSummary;
   items: SettlementItem[];
+  /**
+   * 1 天 ＝ 幾小時（規則參數 payroll.dailyRegularHours，預設 8）：只給畫面把 hours（仍是小時）顯示成
+   * 「天＋時」用（lib/leave-duration.ts）。舊版 API 沒有這欄 → 缺席時用 8。
+   */
+  dailyRegularHours?: number;
 }
 
 export interface LeaveSettlementListParams {

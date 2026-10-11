@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { fmtHm } from "@/lib/ess-format";
+import { formatLeaveDurationMinutes, reformatLeaveSummary } from "@/lib/leave-duration";
 import {
   SHEET_FILTER_TEXT,
   SHEET_SHOW_ALL_STORAGE_KEY,
@@ -271,8 +272,9 @@ function DayRow({
       <td className="py-2 pr-2">
         {day.leaveMinutes > 0 ? (
           <span>
-            {hours(day.leaveMinutes)}h
-            {day.leaveSummary && <span className="ml-1 text-gray-500">{day.leaveSummary}</span>}
+            {/* 請假時數顯示成天＋時（2026-10-11）；leaveSummary 是 API 存好的「特休 8h」字串，顯示時逐段換算。 */}
+            <span className="whitespace-nowrap">{formatLeaveDurationMinutes(day.leaveMinutes)}</span>
+            {day.leaveSummary && <span className="ml-1 text-gray-500">{reformatLeaveSummary(day.leaveSummary)}</span>}
           </span>
         ) : (
           <span className="text-gray-300">—</span>
@@ -559,12 +561,12 @@ function SummaryRow({ totals, tierLabels, outingMinutes }: { totals: SheetTotals
       </div>
       <div className="rounded-xl bg-purple-50 p-4">
         <p className="text-xs text-purple-600">請假合計</p>
-        <p className="mt-1 text-xl font-semibold text-purple-700">{hours(totals.leaveMinutes)} 小時</p>
+        <p className="mt-1 text-xl font-semibold text-purple-700">{formatLeaveDurationMinutes(totals.leaveMinutes)}</p>
         {leaveTypeEntries.length > 0 && (
           <p className="mt-1 flex flex-wrap gap-1 text-[11px] text-purple-500">
             {leaveTypeEntries.map(([type, minutes]) => (
               <span key={type} className="rounded-full bg-purple-100 px-1.5 py-0.5">
-                {type} {hours(minutes)}h
+                {type} {formatLeaveDurationMinutes(minutes)}
               </span>
             ))}
           </p>
