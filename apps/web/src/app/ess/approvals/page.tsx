@@ -35,6 +35,7 @@ import {
 } from "@/lib/disbursements-api";
 import { fmtDateTime, fmtHours, fmtMoney, relativeTime } from "@/lib/ess-format";
 import { summarizeSegments } from "@/lib/ess-notifications";
+import { LateReportsSection } from "./_components/LateReportsSection";
 import {
   BottomSheet,
   Button,
@@ -755,6 +756,9 @@ export default function ApprovalsPage() {
           </ul>
         </>
       )}
+
+      {/* 遲到說明（2026-10-11）：主管看部屬的（唯讀）、老闆直接按「影響／不影響全勤」；沒有就不顯示 */}
+      {!loading && <LateReportsSection />}
 
       {/* 多選批次簽核：底部固定列（手機浮在底部分頁列之上，桌機貼底）＋預留空間，最後一張卡不會被蓋住 */}
       {!loading && selecting && (

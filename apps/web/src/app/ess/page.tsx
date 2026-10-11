@@ -6,16 +6,20 @@ import {
   getAnnouncements,
   getPunchToday,
   isPunchTooSoon,
+  lateReasonRequiredOf,
   postPunch,
+  type LateReasonRequired,
+  type PunchResult,
 } from "@/lib/ess-api";
 import { fmtHm, todayKey, weekdayLabel } from "@/lib/ess-format";
+import { LATE_REASON_MAX, lateReasonError, lateReasonPrompt } from "@/lib/late-reason";
 import {
   needsAnnouncementHint,
   summarizePunches,
   type PunchLike,
   type PunchSummary,
 } from "@/lib/punch-state";
-import { Button, Card, Icon, InlineError, useToast } from "@/components/ess-ui";
+import { BottomSheet, Button, Card, Icon, InlineError, Textarea, useToast } from "@/components/ess-ui";
 import { OvertimeCapCard } from "./_components/OvertimeCapCard";
 import { DutyTodayCard } from "./_components/DutyTodayCard";
 
@@ -27,6 +31,11 @@ import { DutyTodayCard } from "./_components/DutyTodayCard";
  * 載入順序：`GET /punch/today` 最先且獨立（失敗 → InlineError＋重試，鈕 disabled）；
  * 公告是加分項，在打卡狀態之後才抓、失敗不影響。GPS 在 mount 時預抓存 ref，
  * 按下時 ≤2 分鐘的定位直接用，否則最多再等 3 秒，沒有就 `source:"web"`——來源不顯示。
+ *
+ * 遲到理由（2026-10-11）：當天第一張上班卡遲到（沒排班的工作日晚於 10:00、有排班晚於班別上班時間）
+ * 伺服器回 400 late_reason_required、不寫打卡 → 底部彈出對話框「你今天 HH:MM 上班，超過 10:00
+ * （遲到 N 分鐘），請填寫原因（主管與老闆會看到）」＋多行輸入；送出時沿用剛才取得的定位、帶
+ * `lateReason` 重送；取消就不打卡。
  */
 
 /* ------------------------------------------------------------ 定位 --- */
@@ -277,6 +286,71 @@ function AnnouncementHint({ count }: { count: number }) {
   );
 }
 
+/* --------------------------------------------------- LateReasonSheet --- */
+
+/** 遲到理由對話框（手機從底部滑出）：說明＋多行輸入＋「送出並打卡」／「取消」。 */
+function LateReasonSheet({
+  info,
+  value,
+  error,
+  submitting,
+  onChange,
+  onSubmit,
+  onCancel,
+}: {
+  info: LateReasonRequired | null;
+  value: string;
+  error: string | null;
+  submitting: boolean;
+  onChange: (next: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  const length = value.trim().length;
+  return (
+    <BottomSheet open={info !== null} onClose={submitting ? () => undefined : onCancel} title="請填寫遲到原因">
+      {info && (
+        <form
+          className="space-y-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSubmit();
+          }}
+        >
+          <p className="text-base leading-relaxed text-gray-800">{lateReasonPrompt(info)}</p>
+          <div>
+            <label htmlFor="late-reason" className="sr-only">
+              遲到原因
+            </label>
+            <Textarea
+              id="late-reason"
+              rows={4}
+              value={value}
+              maxLength={LATE_REASON_MAX + 50}
+              placeholder="例如：捷運延誤、送小孩看醫生"
+              onChange={(event) => onChange(event.target.value)}
+              aria-invalid={error ? true : undefined}
+              className="text-base"
+            />
+            <p className="mt-1 text-right text-xs tabular-nums text-gray-400">
+              {length}／{LATE_REASON_MAX}
+            </p>
+          </div>
+          {error && <InlineError>{error}</InlineError>}
+          <div className="flex flex-col gap-2 pt-1">
+            <Button type="submit" size="lg" block loading={submitting} disabled={submitting}>
+              送出並打卡
+            </Button>
+            <Button type="button" variant="secondary" size="lg" block disabled={submitting} onClick={onCancel}>
+              取消（不打卡）
+            </Button>
+          </div>
+        </form>
+      )}
+    </BottomSheet>
+  );
+}
+
 /* ---------------------------------------------------------- EssHome --- */
 
 export default function EssHome() {
@@ -288,6 +362,13 @@ export default function EssHome() {
   const [locked, setLocked] = useState(false);
   const [punchError, setPunchError] = useState<string | null>(null);
   const [hintCount, setHintCount] = useState(0);
+  // 遲到理由對話框：伺服器回 late_reason_required 時打開；pendingBody＝剛才那次打卡的內容（含定位），
+  // 送出理由時原樣重送。
+  const [lateInfo, setLateInfo] = useState<LateReasonRequired | null>(null);
+  const [lateReason, setLateReason] = useState("");
+  const [lateError, setLateError] = useState<string | null>(null);
+  const [lateSubmitting, setLateSubmitting] = useState(false);
+  const pendingBodyRef = useRef<Parameters<typeof postPunch>[0] | null>(null);
 
   const fixRef = useRef<GeoFix | null>(null);
   /** 最近一次定位失敗的原因；預抓或按下打卡任一次失敗都會覆蓋，送出打卡時撈最新值。 */
@@ -358,6 +439,30 @@ export default function EssHome() {
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [loadPunch]);
 
+  /** 打卡成功（含帶理由重送成功）：樂觀更新、Toast、震動、短暫鎖鈕、背景對齊。 */
+  const afterPunchSuccess = useCallback(
+    async (res: PunchResult) => {
+      // 先用回傳的 record 樂觀更新，再背景抓 /punch/today 對齊。
+      const rec: PunchLike = res.record ?? { type: res.type, punch_at: res.punchAt };
+      setRecords((prev) => [...prev, rec]);
+      const lateNote = res.lateReport ? "（已送出遲到說明）" : "";
+      toast.show(`${rec.type === "in" ? "上班" : "下班"}打卡成功 ${fmtHm(rec.punch_at)}${lateNote}`, "success");
+      try {
+        navigator.vibrate?.(30);
+      } catch {
+        /* 不支援就算了 */
+      }
+      setLocked(true);
+      if (lockTimer.current) clearTimeout(lockTimer.current);
+      lockTimer.current = setTimeout(() => {
+        lockTimer.current = null;
+        if (activeRef.current) setLocked(false);
+      }, AFTER_SUCCESS_LOCK_MS);
+      await loadPunch({ quiet: true });
+    },
+    [toast, loadPunch],
+  );
+
   const onPunch = useCallback(async () => {
     if (punching || locked || loading || loadError) return;
     const type = summary.nextType; // 一律送明確 type，伺服器不猜
@@ -380,31 +485,24 @@ export default function EssHome() {
             );
 
       // 沒拿到座標才帶 geoStatus；沒有新結果（這次也失敗）就用最近一次記下的原因。
-      const res = await postPunch(
-        fix
-          ? { type, source: "gps", lat: fix.lat, lng: fix.lng }
-          : { type, source: "web", geoStatus: geoStatusRef.current ?? undefined },
-      );
+      const body: Parameters<typeof postPunch>[0] = fix
+        ? { type, source: "gps", lat: fix.lat, lng: fix.lng }
+        : { type, source: "web", geoStatus: geoStatusRef.current ?? undefined };
+      pendingBodyRef.current = body;
+      const res = await postPunch(body);
       if (!activeRef.current) return;
-
-      // 先用回傳的 record 樂觀更新，再背景抓 /punch/today 對齊。
-      const rec: PunchLike = res.record ?? { type: res.type, punch_at: res.punchAt };
-      setRecords((prev) => [...prev, rec]);
-      toast.show(`${rec.type === "in" ? "上班" : "下班"}打卡成功 ${fmtHm(rec.punch_at)}`, "success");
-      try {
-        navigator.vibrate?.(30);
-      } catch {
-        /* 不支援就算了 */
-      }
-      setLocked(true);
-      if (lockTimer.current) clearTimeout(lockTimer.current);
-      lockTimer.current = setTimeout(() => {
-        lockTimer.current = null;
-        if (activeRef.current) setLocked(false);
-      }, AFTER_SUCCESS_LOCK_MS);
-      await loadPunch({ quiet: true });
+      pendingBodyRef.current = null;
+      await afterPunchSuccess(res);
     } catch (err) {
       if (!activeRef.current) return;
+      const late = lateReasonRequiredOf(err);
+      if (late) {
+        // 遲到：伺服器沒寫打卡，打開理由對話框（定位沿用 pendingBodyRef）。
+        setLateInfo(late);
+        setLateError(null);
+        return;
+      }
+      pendingBodyRef.current = null;
       if (isPunchTooSoon(err)) {
         // 409 不帶 body 給前端，時間從 /punch/today 重抓（最後一筆 in/out 的時間）。
         let when = "";
@@ -425,7 +523,48 @@ export default function EssHome() {
     } finally {
       if (activeRef.current) setPunching(false);
     }
-  }, [punching, locked, loading, loadError, summary.nextType, toast, loadPunch]);
+  }, [punching, locked, loading, loadError, summary.nextType, toast, afterPunchSuccess]);
+
+  /** 遲到理由送出：驗證 1–500 字 → 帶 lateReason 原樣重送剛才那次打卡。 */
+  const submitLateReason = useCallback(async () => {
+    const body = pendingBodyRef.current;
+    if (!body || lateSubmitting) return;
+    const invalid = lateReasonError(lateReason);
+    if (invalid) {
+      setLateError(invalid);
+      return;
+    }
+    setLateSubmitting(true);
+    setLateError(null);
+    try {
+      const res = await postPunch({ ...body, lateReason: lateReason.trim() });
+      if (!activeRef.current) return;
+      pendingBodyRef.current = null;
+      setLateInfo(null);
+      setLateReason("");
+      await afterPunchSuccess(res);
+    } catch (err) {
+      if (!activeRef.current) return;
+      const late = lateReasonRequiredOf(err);
+      if (late) {
+        // 伺服器仍認為缺理由（例如只有空白）：更新遲到分鐘、留在對話框。
+        setLateInfo(late);
+        setLateError("請填寫遲到原因");
+      } else {
+        setLateError(punchErrorMessage(err, "送出失敗，請再試一次"));
+      }
+    } finally {
+      if (activeRef.current) setLateSubmitting(false);
+    }
+  }, [lateReason, lateSubmitting, afterPunchSuccess]);
+
+  /** 取消：不打卡，關掉對話框（理由草稿保留，再按一次打卡可以接著寫）。 */
+  const cancelLateReason = useCallback(() => {
+    if (lateSubmitting) return;
+    pendingBodyRef.current = null;
+    setLateInfo(null);
+    setLateError(null);
+  }, [lateSubmitting]);
 
   return (
     <div className="mx-auto flex w-full max-w-md flex-col gap-4">
@@ -444,6 +583,18 @@ export default function EssHome() {
       <OvertimeCapCard />
       <DutyTodayCard />
       <AnnouncementHint count={hintCount} />
+      <LateReasonSheet
+        info={lateInfo}
+        value={lateReason}
+        error={lateError}
+        submitting={lateSubmitting}
+        onChange={(next) => {
+          setLateReason(next);
+          if (lateError) setLateError(null);
+        }}
+        onSubmit={() => void submitLateReason()}
+        onCancel={cancelLateReason}
+      />
     </div>
   );
 }

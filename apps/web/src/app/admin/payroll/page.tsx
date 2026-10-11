@@ -257,7 +257,12 @@ export default function PayrollAdminPage() {
     setRunMsg(null);
     try {
       const result = await runPayroll(runPeriod, runEmployeeId || undefined);
-      setRunMsg(`已執行 ${runPeriod} 薪資作業：產生 ${result.generated} 筆，略過已定案 ${result.skipped.length} 筆`);
+      // 遲到說明老闆還沒決定的人（視為影響全勤）一併提醒（2026-10-11）。
+      const lateWarnings = (result.warnings ?? []).map((w) => `${empName(w.employeeId)} ${w.message}`);
+      setRunMsg(
+        `已執行 ${runPeriod} 薪資作業：產生 ${result.generated} 筆，略過已定案 ${result.skipped.length} 筆` +
+          (lateWarnings.length > 0 ? `；提醒：${lateWarnings.join("；")}` : ""),
+      );
     } catch (err) {
       setRunMsg(err instanceof Error ? err.message : "執行失敗");
     }

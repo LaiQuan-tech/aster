@@ -1387,8 +1387,16 @@ export interface Payslip {
   sent_to?: string | null;
 }
 
+export interface PayrollRunWarning {
+  employeeId: string;
+  /** late_reports_undecided：這人本期有遲到說明老闆還沒決定（視為影響全勤）。 */
+  code: "late_reports_undecided";
+  count: number;
+  message: string;
+}
+
 export function runPayroll(period: string, employeeId?: string) {
-  return apiFetch<{ generated: number; skipped: string[] }>(`/payroll/run`, {
+  return apiFetch<{ generated: number; skipped: string[]; warnings?: PayrollRunWarning[] }>(`/payroll/run`, {
     method: "POST",
     body: JSON.stringify({ period, employeeId }),
   });

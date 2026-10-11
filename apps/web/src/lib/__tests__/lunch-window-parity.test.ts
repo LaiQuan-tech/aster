@@ -22,19 +22,24 @@ describe("午休規則：web（leave-hours）與 API（@hr/rules lunch-window）
   });
 
   it("數字版逐格比對：上班每 30 分 × 班長 30 分–24 小時 × 休息 0／30／45／60／90 × 午休開始（沒設或每 60 分）", () => {
+    // 28.8 萬組：逐組 expect 太慢（並行跑會超過 5 秒），改成收集不一致的組合、最後一次斷言。
     let compared = 0;
+    const mismatches: string[] = [];
     for (let start = 0; start < 1440; start += 30) {
       for (let len = 30; len <= 1440; len += 30) {
         const end = start + len;
         for (const bm of [0, 30, 45, 60, 90]) {
           for (let bs = -60; bs < 1440; bs += 60) {
             const breakStart = bs < 0 ? null : bs;
-            expect(lunchWindowMinutes(start, end, bm, breakStart)).toEqual(rulesLunchWindowMinutes(start, end, bm, breakStart));
+            const web = JSON.stringify(lunchWindowMinutes(start, end, bm, breakStart));
+            const api = JSON.stringify(rulesLunchWindowMinutes(start, end, bm, breakStart));
+            if (web !== api && mismatches.length < 5) mismatches.push(`${start}-${end} 休${bm} 起${breakStart}: web ${web} / api ${api}`);
             compared += 1;
           }
         }
       }
     }
+    expect(mismatches).toEqual([]);
     expect(compared).toBe(48 * 48 * 5 * 25);
   });
 

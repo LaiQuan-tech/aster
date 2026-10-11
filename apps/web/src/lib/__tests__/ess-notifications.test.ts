@@ -26,6 +26,13 @@ describe("isUnread（三態）", () => {
   });
 });
 
+describe("notificationLink — 遲到說明（2026-10-11）", () => {
+  it("late_report → /ess/approvals；Pill 文字「遲到說明」", () => {
+    expect(notificationLink(notif("late_report", { lateReportId: "x", workDate: "2026-10-12", lateMinutes: 30 }))).toBe("/ess/approvals");
+    expect(typeLabel("late_report")).toBe("遲到說明");
+  });
+});
+
 describe("notificationLink", () => {
   it("approval submitted／advanced → /ess/approvals", () => {
     expect(notificationLink(notif("approval", { requestId: "r1", event: "submitted", currentStep: 1 }))).toBe(

@@ -10,6 +10,7 @@
  *   missing_punch     `{ date, issue }`
  *   attendance_sheet  `{ sheetId, period, … }`
  *   anomaly           `{ anomalyType, from, to, detail }`
+ *   late_report       `{ lateReportId, employeeId, workDate, lateMinutes }`（2026-10-11 遲到說明，給主管與老闆）
  * 未讀 ＝ `payload.read !== true`（標記已讀是把 `read: true` 併進 payload）。
  */
 import type { LeaveSegment, NotificationItem } from "./ess-api";
@@ -24,6 +25,7 @@ export const TYPE_LABEL: Record<string, string> = {
   attendance_sheet: "出勤月表",
   anomaly: "出勤異常",
   announcement: "公告",
+  late_report: "遲到說明",
 };
 
 export function typeLabel(type: string | null | undefined): string {
@@ -57,6 +59,7 @@ function str(value: unknown): string | null {
  *   missing_punch               → `/ess/requests?kind=fix_punch&date=<date>`
  *   attendance_sheet            → `/ess/attendance-sheet/<sheetId>`（缺 sheetId → null）
  *   anomaly                     → `/ess/punches?from=<from>&to=<to>`
+ *   late_report                 → `/ess/approvals`（簽核頁的「遲到說明」段；老闆在那裡決定）
  *   其他類型／缺 payload         → null
  */
 export function notificationLink(n: NotificationLike): string | null {
@@ -92,6 +95,8 @@ export function notificationLink(n: NotificationLike): string | null {
       const qs = params.toString();
       return qs ? `/ess/punches?${qs}` : "/ess/punches";
     }
+    case "late_report":
+      return "/ess/approvals";
     default:
       return null;
   }

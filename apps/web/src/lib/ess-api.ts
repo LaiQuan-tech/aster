@@ -71,6 +71,34 @@ export interface PunchResult {
   deviceId?: string | null;
   /** 完整的 punch_records 列，讓首頁可以樂觀更新今日紀錄再對齊 GET /punch/today。 */
   record?: PunchRecord;
+  /** 2026-10-11：遲到上班卡附了理由時，伺服器寫下的遲到說明。 */
+  lateReport?: { id: string; lateMinutes: number };
+}
+
+/**
+ * POST /punch 的 `400 late_reason_required`（2026-10-11）：當天第一張上班卡遲到卻沒帶理由。
+ * 伺服器不寫打卡，回遲到分鐘、門檻（彈性 10:00／班別上班時間）、打卡時間（HH:MM）與上班日。
+ */
+export interface LateReasonRequired {
+  lateMinutes: number;
+  threshold: string | null;
+  punchTime: string;
+  workDate: string;
+}
+
+/** 從 apiFetch 丟出的錯誤認出 late_reason_required；不是就回 null。 */
+export function lateReasonRequiredOf(err: unknown): LateReasonRequired | null {
+  if (!(err instanceof Error)) return null;
+  const e = err as Error & { status?: number; code?: string; body?: unknown };
+  if (e.status !== 400 || e.code !== "late_reason_required") return null;
+  const body = (e.body ?? {}) as Record<string, unknown>;
+  const lateMinutes = Number(body.lateMinutes);
+  return {
+    lateMinutes: Number.isFinite(lateMinutes) ? lateMinutes : 0,
+    threshold: typeof body.threshold === "string" ? body.threshold : null,
+    punchTime: typeof body.punchTime === "string" ? body.punchTime : "",
+    workDate: typeof body.workDate === "string" ? body.workDate : "",
+  };
 }
 
 /**
@@ -371,6 +399,8 @@ export function postPunch(body: {
   lng?: number;
   /** 沒有 lat/lng 時，定位失敗的原因（見 apps/api/src/routes/punch.ts querySchema）。 */
   geoStatus?: "denied" | "unavailable" | "timeout" | "unsupported";
+  /** 遲到理由（當天第一張上班卡遲到時必填，1–500 字；沒遲到時伺服器不理會）。 */
+  lateReason?: string;
 }) {
   return apiFetch<PunchResult>("/punch", {
     method: "POST",
