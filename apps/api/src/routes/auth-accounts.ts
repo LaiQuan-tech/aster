@@ -14,7 +14,8 @@ import {
   sendEmployeeAccountLink,
 } from "../services/auth-invite.js"
 import { seedHireAcknowledgements } from "../services/onboarding-signatures.js"
-import { assertCanManageCredentials, type PrivilegeCaller } from "../services/privileged-accounts.js"
+import { assertCanManageCredentials, isProtectedAccount, type PrivilegeCaller } from "../services/privileged-accounts.js"
+import { loadPeriodUnlockPolicy } from "../services/period-lock.js"
 
 /**
  * A1 帳號與邀請信：
@@ -30,7 +31,8 @@ import { assertCanManageCredentials, type PrivilegeCaller } from "../services/pr
  * 權限邊界（2026-10-11，services/privileged-accounts.ts）：invite／send-reset／bulk-invite 在 dryRun 或沒設信件
  * 服務時會把設密碼連結直接回給 HR，拿到連結＝能替對方設新密碼。所以目標若是受保護帳號（老闆、老闆指定的解鎖人、
  * hr_admin、platform_admin），只有老闆或 platform_admin 能發（對自己例外），其他人 403 `not_boss`；
- * 一般員工照舊。bulk-invite 綁到受保護列時逐列檢查（見 bulkInviteFromCsv，該列 skipped `not_boss`）；CSV 任何一列要寫入的
+ * 一般員工照舊。受保護列、還沒綁登入帳號時，invite 一定要明確帶收件信箱（400 `email_required`）——My Data 的信箱 HR 改得動，
+ * 照那個信箱寄的話，連結會落到 HR 手上。bulk-invite 綁到受保護列時逐列檢查（見 bulkInviteFromCsv，該列 skipped `not_boss`）；CSV 任何一列要寫入的
  * 角色是 platform_admin 時只有 platform_admin 能做，否則**整份 CSV** 回 403 `platform_admin_required`（一列都不處理）；
  * 表頭有重複欄位（`role` 與 `角色` 同時出現）回 400 `invalid_header`。
  */
@@ -155,11 +157,14 @@ authAccountsRouter.post(
         return
       }
       // 受保護帳號只有老闆或 platform_admin 能發連結／綁帳號——先於 sendEmployeeAccountLink（它會建帳號、輪替 token）。
-      await assertCanManageCredentials(tenantId, await callerOf(tenantId, req.auth?.userId), employee)
+      const policy = await loadPeriodUnlockPolicy(tenantId)
+      await assertCanManageCredentials(tenantId, await callerOf(tenantId, req.auth?.userId), employee, policy)
       const outcome = await sendEmployeeAccountLink({
         tenantId,
         employee,
         email: parsed.data.email,
+        // 受保護帳號、還沒綁登入帳號：收件信箱要明確輸入，不用 My Data 的（HR 改得動 My Data 的信箱）。
+        requireExplicitEmail: isProtectedAccount(employee, policy),
         dryRun: parsed.data.dryRun,
         actorEmpId: await actorEmpId(tenantId, req.auth?.userId),
         context: "POST /employees/:id/invite",

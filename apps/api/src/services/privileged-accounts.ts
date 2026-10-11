@@ -108,11 +108,13 @@ export function canAssignRole(caller: PrivilegeCaller, role: string): boolean {
 }
 
 /**
- * 角色變更是否為「變成 platform_admin」：新角色是 platform_admin 且目前不是。純函式。
- * （`currentRole` 為 null＝新建的列，視為不是。）
+ * 角色變更是否為「變成 platform_admin」：寫進去的角色（標準寫法）是 platform_admin，而資料庫現在存的**不是剛好**
+ * `platform_admin`。純函式。（`currentRole` 為 null＝新建的列，視為不是。）
+ * 為什麼目前的角色要精確比對：權限判斷（requireRole）是精確比對，既有的非標準列（例如 `Platform_Admin`）其實沒有權限；
+ * 它帶著原值存檔時，canonicalRole 會把它寫成真的 platform_admin——那就是升級，必須算進來。
  */
 export function isPlatformAdminPromotion(newRole: string | null | undefined, currentRole: string | null | undefined): boolean {
-  return normalizeRole(newRole) === PLATFORM_ADMIN_ROLE && normalizeRole(currentRole) !== PLATFORM_ADMIN_ROLE
+  return canonicalRole(newRole ?? "") === PLATFORM_ADMIN_ROLE && (currentRole ?? "") !== PLATFORM_ADMIN_ROLE
 }
 
 /**

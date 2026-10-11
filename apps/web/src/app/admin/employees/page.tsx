@@ -762,8 +762,17 @@ export default function EmployeesPage() {
         res = await sendEmployeeInvite(id);
       } catch (err) {
         // 員工沒 Email（My Data 未填）→ 讓 HR 直接輸入要寄的信箱再試一次。
-        if (!(err instanceof Error && err.message.includes("no_email"))) throw err;
-        const typed = window.prompt(`「${empName}」尚未有 Email，請輸入要寄送邀請信的信箱：`, "");
+        // email_required：老闆／HR 管理員／平台管理員／老闆指定的人，邀請信的收件信箱一律要明確輸入（My Data 的信箱 HR 改得動，
+        // 照那個信箱寄，連結會落到改信箱的人手上）。
+        const message = err instanceof Error ? err.message : "";
+        const missing = message.includes("no_email") ? "no_email" : message.includes("email_required") ? "email_required" : null;
+        if (!missing) throw err;
+        const typed = window.prompt(
+          missing === "email_required"
+            ? `「${empName}」是老闆、HR 管理員、平台管理員或老闆指定的人，寄邀請信前請明確輸入收件信箱（不使用 My Data 裡的信箱）：`
+            : `「${empName}」尚未有 Email，請輸入要寄送邀請信的信箱：`,
+          "",
+        );
         if (!typed || !typed.trim()) return;
         res = await sendEmployeeInvite(id, { email: typed.trim() });
       }

@@ -197,6 +197,20 @@ const bdNum = (bd: Record<string, unknown> | null, key: string) =>
   bd && typeof bd[key] === "number" && Number.isFinite(bd[key] as number) ? (bd[key] as number) : 0
 
 /**
+ * 一次性加減項的扣回裡，追回的是「已課稅所得」的部分（工資清冊分欄用，年度申報要知道全年應發合計裡有多少是已收回的）。
+ * 引擎新版直接存 adjustmentDeductionsTaxable；沒有這個欄位的薪資單（例如更早算出來的）從內嵌的每一筆回推：
+ * 負的金額且 taxable 不是 false 的加總。
+ */
+const taxableDeductionsOf = (bd: Record<string, unknown> | null): number => {
+  if (bd && typeof bd.adjustmentDeductionsTaxable === "number" && Number.isFinite(bd.adjustmentDeductionsTaxable)) {
+    return bd.adjustmentDeductionsTaxable
+  }
+  const list = bd && Array.isArray(bd.adjustments) ? (bd.adjustments as Array<{ amount?: unknown; taxable?: unknown }>) : []
+  const sum = list.reduce((acc, a) => (typeof a?.amount === "number" && a.amount < 0 && a.taxable !== false ? acc - a.amount : acc), 0)
+  return Math.round(sum * 100) / 100
+}
+
+/**
  * GET /reports/payroll?period= — per-employee payslip lines for the period plus
  * totals. Numeric columns come back from PostgREST as strings, so they are
  * coerced to numbers for the sums (and the JSON rows expose numbers).
@@ -259,9 +273,9 @@ reportsRouter.get(
         advance: bdNum(s.breakdown, "advance"),
         adjustmentDeductions: bdNum(s.breakdown, "adjustmentDeductions"),
         // 扣回拆兩欄：追回的是已課稅所得（全年應發合計裡有多少是已收回的，年度申報用）／追回的是不課稅的給付。
-        adjustmentDeductionsTaxable: bdNum(s.breakdown, "adjustmentDeductionsTaxable"),
+        adjustmentDeductionsTaxable: taxableDeductionsOf(s.breakdown),
         adjustmentDeductionsNonTaxable:
-          Math.round((bdNum(s.breakdown, "adjustmentDeductions") - bdNum(s.breakdown, "adjustmentDeductionsTaxable")) * 100) / 100,
+          Math.round((bdNum(s.breakdown, "adjustmentDeductions") - taxableDeductionsOf(s.breakdown)) * 100) / 100,
         totalDeductions: bdNum(s.breakdown, "totalDeductions"),
         expenses: bdNum(s.breakdown, "expenses"),
         adjustmentNonTaxable: bdNum(s.breakdown, "adjustmentNonTaxable"),

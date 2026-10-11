@@ -345,6 +345,12 @@ export async function sendEmployeeAccountLink(opts: {
   email?: string | null
   dryRun?: boolean
   forceRecovery?: boolean
+  /**
+   * 未綁帳號的列一定要由呼叫者明確給收件信箱（`email`），不退回 My Data 的公司／私人信箱。
+   * 用在受保護帳號（老闆、解鎖人、hr_admin、platform_admin）：HR 能改 My Data 的信箱，若邀請信照那個信箱寄，
+   * HR 先把信箱改成自己的，老闆再按「寄邀請信」，連結就寄到 HR 手上、帳號被 HR 接管。
+   */
+  requireExplicitEmail?: boolean
   actorEmpId?: string | null
   context: string
 }): Promise<LinkOutcome> {
@@ -381,6 +387,13 @@ export async function sendEmployeeAccountLink(opts: {
   }
 
   if (opts.forceRecovery) throw new AccountError("no_account", 409, "此員工尚未綁定登入帳號")
+  if (opts.requireExplicitEmail && !opts.email?.trim()) {
+    throw new AccountError(
+      "email_required",
+      400,
+      "這是老闆、HR 管理員、平台管理員或老闆指定的人：寄邀請信前請明確輸入收件信箱（不使用 My Data 裡的信箱）",
+    )
+  }
 
   const email = opts.email?.trim().toLowerCase() || (await profileEmail(tenantId, employee.id))
   if (!email) throw new AccountError("no_email", 409, "此員工沒有 Email（請在 My Data 填公司或私人信箱，或在邀請時指定）")

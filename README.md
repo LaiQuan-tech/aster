@@ -147,12 +147,17 @@ HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼�
      另外：**變更受保護帳號的角色（含降級）**同樣只有老闆或 platform_admin（本人除外）——否則 HR 可以先把另一位 HR 降成一般員工、
      重設密碼、再升回去，上面的保護就白做了；角色字串寫入前統一成標準寫法（`Platform_Admin` 存成 `platform_admin`）；
      批次建立帳號的表頭不能有重複欄位（`role` 與 `角色` 同時出現 → 400）；平台操作員白名單 email 不能拿來建員工帳號。
+     受保護帳號（老闆、解鎖人、hr_admin、platform_admin）**還沒綁登入帳號**時，寄邀請信（`POST /employees/:id/invite`）一定要明確帶
+     收件信箱（400 `email_required`，員工管理頁會跳出輸入框）——My Data 的信箱 HR 改得動，照那個信箱寄的話連結會落到 HR 手上。
      ⚠️ **DB 層要另外套 SQL**：`sql/0001` 的 `employees_hr_write` 讓任何 HR 用自己的 JWT 經 PostgREST 直接改 employees
      （例如把自己的 role 改成 platform_admin），會繞過上面全部的 API 檢查——`packages/db/sql/0056_employees_api_only_writes.sql`
-     收掉它（網頁從不直連資料表、API 走 service role，不影響功能）。**這份 SQL 需由維護人員套到正式庫，撰寫時尚未套用。**
-     發薪鎖定相關的其他表（payslips、attendance_sheets…）HR 的寫入 policy 仍在（sql/0049 當時保留的取捨），所以整套仍然是
-     API 層的防線，不是對「會直接打資料庫」的惡意內部人員的技術性防線；platform_admin 本人與有資料庫權限的人不受限。
-     每一步都留 audit，重新開放時老闆與 HR 都會收到通知。
+     （`migrations/0066`、維護人員用的 `docs/套用-2026-10-11-employees收掉HR直連寫入.sql`）收掉它（網頁從不直連資料表、API 走
+     service role，不影響功能）。**這份 SQL 需由維護人員套到正式庫，撰寫時尚未套用。** 套用前順便查一次非標準寫法的角色列
+     （`SELECT id, role FROM employees WHERE role <> lower(btrim(role))`——權限判斷是精確比對，這類列其實沒有權限；
+     API 已把寫入統一成小寫標準寫法，且這類列「帶原值存檔」算升級，HR 不能靠它變成 platform_admin）。
+     發薪鎖定相關的其他表仍有 HR 寫入 policy（payslips、attendance_days、punch_records、leave_requests；sql/0049 當時保留的取捨。
+     attendance_sheets、period_closes、payroll_adjustments、tenants 沒有），所以整套仍然是 API 層的防線，不是對「會直接打資料庫」的
+     惡意內部人員的完整防線；platform_admin 本人與有資料庫權限的人不受限。每一步都留 audit，重新開放時老闆與 HR 都會收到通知。
    - **前期更正＝薪資一次性加減項**（2026-10-11 業主拍板）：已匯款的月份不重新開放、不改原薪資單，改在**下個月**薪資補發或扣回。
      資料表 `payroll_adjustments`（`packages/db/sql/0055_payroll_adjustments.sql`，軟刪除 `deleted_at`）；HR 專用 API
      `GET|POST /payroll-adjustments`、`PATCH|DELETE /payroll-adjustments/:id`（`apps/api/src/routes/payroll-adjustments.ts`）：
@@ -172,10 +177,12 @@ HR 配發暫時密碼（`POST /employees` 帶密碼、或「配發暫時密碼�
      核准之後才加的加減項不會回頭改它（和報銷、定額補貼一樣），月表也沒有單獨一欄列加減項，合計已含在應發／應扣／實發。
      **草稿不會自己跟上**：新增／修改／刪除後要**重新執行薪資作業**才會反映；回應的 `payslip.stale: true`、列表的
      `staleEmployees`（含加減項已全刪光、草稿卻還內嵌舊的那種）與畫面「草稿未更新」就是提醒，而且草稿過期時定稿會被擋
-     （409 `adjustments_stale`）。與定稿同時發生也有保護：加減項端點寫入後再查一次是否已定稿（是就還原並回 409），定稿更新後
-     再比對一次加減項（不一致就退回草稿），兩邊至少一邊會發現。
+     （409 `adjustments_stale`）。與定稿同時發生也有保護：加減項端點寫入後再查一次是否已定稿（是就還原並回 409；還原本身失敗回
+     500 並記 log，不假裝還原了），定稿更新後再比對一次加減項（不一致就退回草稿，退不回也是 500 並記 log），兩邊至少一邊會發現。
+     修改是樂觀鎖（`updated_at` 沒變才改，同時改同一筆後到的回 409 `conflict`）。
      **範圍外員工會被提醒**：薪資執行以薪資結構為準、月結檢查只看在職員工，所以加在「沒有薪資結構」或「已離職／停用」的人身上的
-     加減項會靜默不發或月結檢查看不到——新增時回 `warnings`、列表帶 `employeeNotes`、畫面標紅。實發為負數時
+     加減項會靜默不發或月結檢查看不到（「該月在職」用月結檢查清單同一個判準，預定月底才離職的人不會被誤報）——新增時回 `warnings`、
+     列表帶 `employeeNotes`、畫面標紅。實發為負數時
      `POST /payroll/run` 的 `warnings` 帶 `negative_net`。重新開放某月前，對話框會列出「已經在後續月份更正過這個月」的加減項
      （`GET /payroll-adjustments?relatedPeriod=`），重算可能和它們重複入帳。
    - 舊的 `POST /attendance-sheets/close-period`／`reopen-period`（含 `force`）已移除，`GET /attendance-sheets/period-closes` 仍在。

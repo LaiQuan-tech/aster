@@ -348,11 +348,13 @@ export function relatedAdjustmentsNote(
   list: ReadonlyArray<Pick<PayrollAdjustment, "period" | "label" | "amount">> | null | undefined,
   show = 5,
 ): { title: string; lines: string[] } | null {
-  if (!list || list.length === 0) return null;
-  const lines = list.slice(0, show).map((a) => `${a.period} 薪資：${a.label}（${signedMoney(a.amount)}）`);
-  if (list.length > show) lines.push(`還有 ${list.length - show} 筆`);
+  // 只算放在「後續月份」薪資裡的（同一個月自己更正自己，重算時本來就一起算，不會重複）。
+  const later = (list ?? []).filter((a) => a.period > period);
+  if (later.length === 0) return null;
+  const lines = later.slice(0, show).map((a) => `${a.period} 薪資：${a.label}（${signedMoney(a.amount)}）`);
+  if (later.length > show) lines.push(`還有 ${later.length - show} 筆`);
   return {
-    title: `${period} 已經有 ${list.length} 筆前期更正放在後續月份的薪資裡：重新開放並重算 ${period}，可能和這些補發或扣回重複入帳，請先確認`,
+    title: `${period} 已經有 ${later.length} 筆前期更正放在後續月份的薪資裡：重新開放並重算 ${period}，可能和這些補發或扣回重複入帳，請先確認`,
     lines,
   };
 }
@@ -366,6 +368,7 @@ export function adjustmentErrorMessage(err: unknown, fallback = "儲存失敗"):
   if (code === "invalid_body") return "欄位格式不正確：名稱 1–100 字、金額大於 0 且最多兩位小數、更正月份不能晚於薪資月份";
   if (code === "forbidden") return "目前的帳號沒有權限（需要 HR 管理員）";
   if (code === "not_found") return "這筆加減項已不存在（可能剛被刪除），請重新整理";
+  if (code === "conflict") return "這筆加減項剛被別人修改或刪除了，請重新整理再試";
   return apiErrorMessage(err, fallback);
 }
 

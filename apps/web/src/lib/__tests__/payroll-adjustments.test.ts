@@ -204,6 +204,7 @@ describe("錯誤訊息與提醒", () => {
     expect(adjustmentErrorMessage(apiError(400, "invalid_body"))).toContain("欄位格式不正確");
     expect(adjustmentErrorMessage(apiError(403, "forbidden"))).toContain("HR");
     expect(adjustmentErrorMessage(apiError(404, "not_found"))).toContain("已不存在");
+    expect(adjustmentErrorMessage(apiError(409, "conflict"))).toContain("剛被別人修改");
     expect(adjustmentErrorMessage(new Error("boom"))).toBe("boom");
     expect(adjustmentErrorMessage("x", "儲存失敗")).toBe("儲存失敗");
   });
@@ -228,6 +229,14 @@ describe("重新開放某月之前：後續月份已經更正過它", () => {
     expect(note?.title).toContain("2026-09 已經有 2 筆前期更正");
     expect(note?.title).toContain("重複入帳");
     expect(note?.lines).toEqual(["2026-10 薪資：補發加班費（+3,000）", "2026-10 薪資：扣回誤發（-500）"]);
+    // 同一個月自己更正自己（period 不晚於被更正的月份）重算時本來就一起算，不會重複入帳，不列。
+    expect(relatedAdjustmentsNote("2026-09", [{ period: "2026-09", label: "同月", amount: 5 }])).toBeNull();
+    const mixed = relatedAdjustmentsNote("2026-09", [
+      { period: "2026-09", label: "同月", amount: 5 },
+      { period: "2026-10", label: "後續月份", amount: 7 },
+    ]);
+    expect(mixed?.lines).toEqual(["2026-10 薪資：後續月份（+7）"]);
+    expect(mixed?.title).toContain("1 筆");
     const many = Array.from({ length: 7 }, (_, i) => ({ period: "2026-10", label: `第 ${i + 1} 筆`, amount: 1 }));
     const long = relatedAdjustmentsNote("2026-09", many);
     expect(long?.lines).toHaveLength(6);

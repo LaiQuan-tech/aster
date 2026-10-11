@@ -1,6 +1,7 @@
 import type { PayrollAdjustment } from "@hr/rules"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { employedInPeriodOf } from "./payroll-period.js"
 
 /**
  * 薪資一次性加減項（前期更正；2026-10-11）——資料層與「薪資單有沒有跟上最新加減項」的判斷。
@@ -216,27 +217,45 @@ export async function periodPayslipStates(
 /* ── 範圍外員工的提醒 ──────────────────────────────────────────────── */
 
 export const NO_SALARY_NOTE = "這位員工還沒有薪資結構：薪資執行不會產生他的薪資單，這筆加減項不會發放（請先到上方設定薪資結構）"
-export const INACTIVE_NOTE = "這位員工已離職或停用：月結檢查不含他的薪資單，請自行確認他的薪資單已定稿並匯款"
+export const INACTIVE_NOTE = "這位員工在這個月已經不在職：月結檢查不含他的薪資單，請自行確認他的薪資單已定稿並匯款"
 
 /**
- * 薪資執行是以薪資結構為準的（沒有薪資結構的人不會產生薪資單），月結檢查只看在職員工——所以加在這兩種人身上的加減項
- * 會「靜默不發」或「月結檢查看不到」。回傳每位員工該提醒的話（沒事的不在 Map 裡），新增時與列表都帶給畫面。
+ * 薪資執行是以薪資結構為準的（沒有薪資結構的人不會產生薪資單），月結檢查只看「該月在職」的員工——所以加在這兩種人身上的
+ * 加減項會「靜默不發」或「月結檢查看不到」。回傳每位員工該提醒的話（沒事的不在 Map 裡），新增時與列表都帶給畫面。
+ * 「該月在職」用月結檢查清單同一個判準（payroll-period.ts employedInPeriodOf：在職中，或離職日在月初之後；到職日不晚於月底）——
+ * 預定月底才離職、或月中離職的人，這個月的月結檢查仍然包含他們，不能提醒成「不含」。
+ * 同一位員工有多個月份的加減項時，把各月份的提醒合併（去重）。
  */
-export async function employeeAdjustmentNotes(tenantId: string, employeeIds: readonly string[]): Promise<Map<string, string[]>> {
+export async function employeeAdjustmentNotes(
+  tenantId: string,
+  entries: ReadonlyArray<{ employeeId: string; period: string }>,
+): Promise<Map<string, string[]>> {
   const notes = new Map<string, string[]>()
-  if (employeeIds.length === 0) return notes
-  const ids = [...employeeIds]
+  if (entries.length === 0) return notes
+  const ids = [...new Set(entries.map((e) => e.employeeId))]
   const [emps, salaries] = await Promise.all([
-    supabaseAdmin.from("employees").select("id, status, terminated_at").eq("tenant_id", tenantId).in("id", ids),
+    supabaseAdmin.from("employees").select("id, name, status, hire_date, terminated_at").eq("tenant_id", tenantId).in("id", ids),
     supabaseAdmin.from("salary_structures").select("employee_id").eq("tenant_id", tenantId).in("employee_id", ids),
   ])
   if (emps.error) throw new Error(`employeeAdjustmentNotes (employees): ${emps.error.message}`)
   if (salaries.error) throw new Error(`employeeAdjustmentNotes (salary_structures): ${salaries.error.message}`)
   const hasSalary = new Set(((salaries.data ?? []) as Array<{ employee_id: string }>).map((r) => r.employee_id))
-  const add = (id: string, text: string) => notes.set(id, [...(notes.get(id) ?? []), text])
-  for (const row of (emps.data ?? []) as Array<{ id: string; status: string | null; terminated_at: string | null }>) {
-    if (!hasSalary.has(row.id)) add(row.id, NO_SALARY_NOTE)
-    if ((row.status ?? "active") !== "active" || row.terminated_at) add(row.id, INACTIVE_NOTE)
+  const rowOf = new Map(
+    ((emps.data ?? []) as Array<{ id: string; name: string | null; status: string | null; hire_date: string | null; terminated_at: string | null }>).map((r) => [r.id, r]),
+  )
+  const add = (id: string, text: string) => {
+    const list = notes.get(id) ?? []
+    if (!list.includes(text)) notes.set(id, [...list, text])
+  }
+  for (const { employeeId, period } of entries) {
+    const row = rowOf.get(employeeId)
+    if (!row) continue
+    if (!hasSalary.has(employeeId)) add(employeeId, NO_SALARY_NOTE)
+    const employed = employedInPeriodOf(
+      [{ id: row.id, name: row.name, status: row.status ?? "active", hire_date: row.hire_date, terminated_at: row.terminated_at }],
+      period,
+    )
+    if (employed.length === 0) add(employeeId, INACTIVE_NOTE)
   }
   return notes
 }

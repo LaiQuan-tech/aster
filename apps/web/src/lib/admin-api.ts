@@ -1354,8 +1354,11 @@ export interface Payslip {
 
 export interface PayrollRunWarning {
   employeeId: string;
-  /** late_reports_undecided：這人本期有遲到說明老闆還沒決定（視為影響全勤）。 */
-  code: "late_reports_undecided";
+  /**
+   * late_reports_undecided：這人本期有遲到說明老闆還沒決定（視為影響全勤）。
+   * negative_net：實發為負數（例如前期更正的扣回比當月薪資還大），薪資單照算，請 HR 確認金額。
+   */
+  code: "late_reports_undecided" | "negative_net";
   count: number;
   message: string;
 }

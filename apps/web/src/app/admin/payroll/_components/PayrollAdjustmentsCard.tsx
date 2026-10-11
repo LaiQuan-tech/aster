@@ -77,8 +77,13 @@ export function PayrollAdjustmentsCard({ employees, refreshKey = 0 }: Props) {
   const [lastState, setLastState] = useState<{ empId: string; state: PayslipAdjustState } | null>(null);
 
   // 請求序號：快速換月份或連續操作時，只採用「最後一次發出」的回應，慢回來的舊月份資料不會蓋掉新月份。
+  // periodRef 是「現在選的月份」：送出新增／修改／刪除之後 await load() 用的是送出當下的舊 closure，途中若換了月份，
+  // 那個舊 closure 的 load 直接不做事（不能搶走序號，否則新月份自己的載入會被當成過期而丟掉）。
   const loadSeq = useRef(0);
+  const periodRef = useRef(period);
+  periodRef.current = period;
   const load = useCallback(async () => {
+    if (period !== periodRef.current) return;
     const seq = ++loadSeq.current;
     setLoading(true);
     try {

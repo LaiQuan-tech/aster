@@ -892,8 +892,9 @@ export default function ModuleSettingsPage() {
     setError(null);
     setMessage(null);
     try {
-      const nextFeatures = {
-        ...features,
+      // 只送自己的鍵：API 對 features 是淺層合併（沒帶的鍵維持原值）。不要把整包 features 送回去——頁面資料可能是舊的，
+      // 帶上去的老闆（approval）、解鎖名單（payroll）會被當成「有人在改」（HR 會被 403，老闆／平台管理員則會被默默改回舊值）。
+      const ownFeatures = {
         formParameters: {
           myDataRequiresApproval,
           editableFields: editableFields
@@ -903,8 +904,8 @@ export default function ModuleSettingsPage() {
           attachmentLimitKb: Number(attachmentLimitKb) || DEFAULT_ATTACHMENT_LIMIT_KB,
         },
       };
-      const saved = await saveTenantSettings({ features: nextFeatures });
-      setFeatures(saved.features ?? nextFeatures);
+      const saved = await saveTenantSettings({ features: ownFeatures });
+      setFeatures(saved.features ?? { ...features, ...ownFeatures });
       setMessage("表單參數已儲存");
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存表單參數失敗");
@@ -915,8 +916,8 @@ export default function ModuleSettingsPage() {
     setError(null);
     setMessage(null);
     try {
-      const nextFeatures = {
-        ...features,
+      // 同上：只送自己的鍵。
+      const ownFeatures = {
         attendanceModule: {
           activeYear,
           yearStatus,
@@ -926,8 +927,8 @@ export default function ModuleSettingsPage() {
           enableAutoSettlement,
         },
       };
-      const saved = await saveTenantSettings({ features: nextFeatures });
-      setFeatures(saved.features ?? nextFeatures);
+      const saved = await saveTenantSettings({ features: ownFeatures });
+      setFeatures(saved.features ?? { ...features, ...ownFeatures });
       setMessage("差勤模組設定已儲存");
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存差勤模組設定失敗");

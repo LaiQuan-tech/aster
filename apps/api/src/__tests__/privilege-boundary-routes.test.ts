@@ -505,3 +505,41 @@ describe("② POST /employees — 角色標準寫法與平台操作員白名單 
     }
   })
 })
+
+describe("② 非標準寫法的既有列（Platform_Admin）——帶原值存檔不能變成真的 platform_admin", () => {
+  it("目前存的是 Platform_Admin（沒有權限）：HR 帶原值或標準寫法存檔 → 403 platform_admin_required，角色不變；platform_admin 可以", async () => {
+    fake.db.employees = fake.db.employees.map((r) => (r.id === EMP ? { ...r, role: "Platform_Admin" } : r))
+    for (const role of ["Platform_Admin", "platform_admin"]) {
+      const res = await as(T.hr).patch(`/employees/${EMP}`).send({ role, name: "只想改名" })
+      expect(res.status, role).toBe(403)
+      expect(res.body.error).toBe("platform_admin_required")
+    }
+    expect(rowOf(EMP).role).toBe("Platform_Admin")
+    expect(rowOf(EMP).name).not.toBe("只想改名")
+    const byPa = await as(T.pa).patch(`/employees/${EMP}`).send({ role: "Platform_Admin" })
+    expect(byPa.status).toBe(200)
+    expect(rowOf(EMP).role).toBe("platform_admin")
+  })
+})
+
+describe("③ 邀請信——受保護帳號、還沒綁登入帳號：收件信箱要明確輸入（HR 改得動 My Data 的信箱）", () => {
+  const lastCall = () => accountLink.send.mock.calls.at(-1)?.[0] as { requireExplicitEmail?: boolean; email?: string } | undefined
+
+  it("受保護的未開通列（hr_admin）：老闆邀請時路由要求明確信箱（requireExplicitEmail=true）；一般員工不要求", async () => {
+    const protectedInvite = await as(T.boss).post(`/employees/${NOACCT_HR}/invite`).send({ dryRun: true, email: "chosen@example.com" })
+    expect(protectedInvite.status, JSON.stringify(protectedInvite.body)).toBe(200)
+    expect(lastCall()).toMatchObject({ requireExplicitEmail: true, email: "chosen@example.com" })
+
+    accountLink.send.mockClear()
+    const ordinary = await as(T.hr).post(`/employees/${EMP}/invite`).send({ dryRun: true })
+    expect(ordinary.status).toBe(200)
+    expect(lastCall()?.requireExplicitEmail).toBe(false)
+  })
+
+  it("老闆指定的解鎖人也算受保護（沒帶信箱時同樣要求明確輸入）", async () => {
+    fake.db.employees = fake.db.employees.map((r) => (r.id === DESIGNEE ? { ...r, user_id: null } : r))
+    const res = await as(T.boss).post(`/employees/${DESIGNEE}/invite`).send({ dryRun: true })
+    expect(res.status).toBe(200)
+    expect(lastCall()?.requireExplicitEmail).toBe(true)
+  })
+})

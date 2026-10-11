@@ -11,7 +11,7 @@ vi.mock("../lib/supabase.js", async () => {
   return { ...base, supabaseAdmin: { ...base.supabaseAdmin, auth: { admin: adminAuth } } }
 })
 
-import { bulkInviteFromCsv } from "../services/auth-invite.js"
+import { bulkInviteFromCsv, sendEmployeeAccountLink } from "../services/auth-invite.js"
 import { runImport } from "../services/imports/run.js"
 import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
@@ -229,5 +229,43 @@ describe("POST /imports/employees 的 dryRun 預判（只驗證，不建帳號�
     )
     expect(res.valid).toBe(2)
     expect(res.errors).toHaveLength(0)
+  })
+})
+
+describe("sendEmployeeAccountLink — 受保護帳號、未綁登入帳號時一定要明確給收件信箱", () => {
+  const link = (over: Record<string, unknown>) =>
+    sendEmployeeAccountLink({
+      tenantId: TENANT_ID,
+      employee: { id: FREE_HR, user_id: null, name: "待開通人資" },
+      dryRun: true,
+      actorEmpId: BOSS,
+      context: "test",
+      ...over,
+    })
+
+  it("requireExplicitEmail 且沒帶 email → AccountError email_required（400），不查 My Data 信箱、不建帳號、不產 token", async () => {
+    fake.db.employee_profiles = [{ tenant_id: TENANT_ID, employee_id: FREE_HR, company_email: "hr-controlled@example.com", personal_email: null }]
+    const err = await link({ requireExplicitEmail: true }).catch((e) => e)
+    expect(err).toMatchObject({ name: "AccountError", code: "email_required", status: 400 })
+    expect(adminAuth.generateLink).not.toHaveBeenCalled()
+    expect(fake.reads).not.toContain("employee_profiles")
+    expect(rowOf(FREE_HR).user_id).toBeNull()
+  })
+
+  it("明確給了 email → 照常綁定（用的是這個信箱，不是 My Data 的）；沒有要求明確信箱時照舊退回 My Data 的信箱", async () => {
+    fake.db.employee_profiles = [{ tenant_id: TENANT_ID, employee_id: FREE_HR, company_email: "hr-controlled@example.com", personal_email: null }]
+    const out = await link({ requireExplicitEmail: true, email: "Chosen@Example.com" })
+    expect(out).toMatchObject({ email: "chosen@example.com", action: "bound" })
+    expect(rowOf(FREE_HR).user_id).not.toBeNull()
+
+    const fallback = await sendEmployeeAccountLink({
+      tenantId: TENANT_ID,
+      employee: { id: FREE_EMP, user_id: null, name: "待開通員工" },
+      dryRun: true,
+      actorEmpId: HR,
+      context: "test",
+    }).catch((e) => e)
+    // 一般員工沒有 profile、沒帶 email → 照舊 no_email（既有行為不變）
+    expect(fallback).toMatchObject({ code: "no_email" })
   })
 })

@@ -213,6 +213,8 @@ describe("被擋時的友善訊息", () => {
   it("accountErrorMessage（員工管理頁的錯誤翻譯表）也認得這兩個代碼；批次建立的列錯誤『not_boss: …』同樣翻得出來", () => {
     expect(accountErrorMessage(new Error("[403] not_boss"))).toContain("只有老闆或平台管理員");
     expect(accountErrorMessage(new Error("[403] platform_admin_required"))).toContain("平台管理員");
+    // 受保護帳號、未開通：邀請信的收件信箱要明確輸入（400 email_required）
+    expect(accountErrorMessage(new Error("[400] email_required"))).toContain("明確輸入收件信箱");
     expect(accountErrorMessage(new Error("not_boss: 只有老闆或平台管理員可以重設老闆、HR 管理員或平台管理員的密碼"))).toContain("只有老闆或平台管理員");
   });
 });

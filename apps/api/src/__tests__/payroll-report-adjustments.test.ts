@@ -76,6 +76,39 @@ beforeEach(() => {
 
 const get = (path: string) => request(server).get(path).set("Authorization", "Bearer u-hr")
 
+describe("GET /reports/payroll — 沒有 adjustmentDeductionsTaxable 欄位的薪資單（更早算出來的）從內嵌的每一筆回推", () => {
+  it("扣回且 taxable 不是 false 的加總＝追回課稅所得；taxable=false 的是追回非課稅；正數的補發不算", async () => {
+    fake.db.payslips = [
+      {
+        id: "p-legacy",
+        tenant_id: TENANT_ID,
+        employee_id: E1,
+        period: "2026-10",
+        base: 40000,
+        overtime_pay: 0,
+        night_pay: 0,
+        attendance_bonus: 0,
+        gross: 40000,
+        status: "draft",
+        breakdown: {
+          totalDeductions: 2300.5,
+          net: 37699.5,
+          adjustmentDeductions: 2300.5,
+          adjustments: [
+            { id: "a", label: "追回溢領", amount: -2000, taxable: true, treatment: "deduction" },
+            { id: "b", label: "追回津貼", amount: -300.5, taxable: false, treatment: "deduction" },
+            { id: "c", label: "補發", amount: 500, taxable: true, treatment: "earning" },
+          ],
+        },
+      },
+    ]
+    const res = await get("/reports/payroll?period=2026-10")
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    const row = (res.body.rows as Array<Record<string, unknown>>).find((r) => r.employeeId === E1)
+    expect(row).toMatchObject({ adjustmentDeductions: 2300.5, adjustmentDeductionsTaxable: 2000, adjustmentDeductionsNonTaxable: 300.5 })
+  })
+})
+
 describe("GET /reports/payroll — 加減項欄位", () => {
   it("JSON：每位員工附三個加減項欄位（沒有的是 0）；合計列不受影響", async () => {
     const res = await get("/reports/payroll?period=2026-10")

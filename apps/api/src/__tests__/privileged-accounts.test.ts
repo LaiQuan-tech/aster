@@ -103,8 +103,16 @@ describe("canAssignRole／isPlatformAdminPromotion — 指派 platform_admin", (
     expect(isPlatformAdminPromotion("platform_admin", "employee")).toBe(true)
     expect(isPlatformAdminPromotion("platform_admin", null)).toBe(true) // 新建的列
     expect(isPlatformAdminPromotion("platform_admin", "platform_admin")).toBe(false)
+    expect(isPlatformAdminPromotion(" Platform_Admin ", "platform_admin")).toBe(false) // 寫進去的標準寫法跟目前存的一樣
     expect(isPlatformAdminPromotion("hr_admin", "platform_admin")).toBe(false) // 降級不在這條範圍
     expect(isPlatformAdminPromotion("employee", "employee")).toBe(false)
+  })
+
+  it("isPlatformAdminPromotion：目前存的是非標準寫法（Platform_Admin，requireRole 精確比對所以其實沒有權限）時，帶原值存檔會被 canonicalRole 寫成真的 platform_admin——那是升級", () => {
+    expect(isPlatformAdminPromotion("platform_admin", "Platform_Admin")).toBe(true)
+    expect(isPlatformAdminPromotion("Platform_Admin", "Platform_Admin")).toBe(true)
+    expect(isPlatformAdminPromotion("PLATFORM_ADMIN", " platform_admin")).toBe(true) // 連前後空白都算不一樣
+    expect(isPlatformAdminPromotion(undefined, "Platform_Admin")).toBe(false)
   })
 
   it("assertCanAssignRole：HR 指派 platform_admin → PrivilegeError(platform_admin_required)；其他角色與 platform_admin 本人放行", () => {

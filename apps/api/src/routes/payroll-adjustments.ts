@@ -5,6 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { logger } from "../lib/logger.js"
 import { writeAuditLog } from "../services/audit.js"
 import { PERIOD_RE, assertPeriodOpen, getPeriodLockState } from "../services/period-lock.js"
 import {
@@ -39,6 +40,7 @@ import {
  * 新增／修改／刪除的限制（一律 409）：
  *   • 該月已發薪鎖定 → `{ error: "period_closed", period }`（services/period-lock.ts；要改先由老闆或老闆指定的人重新開放）
  *   • 該員工該期的薪資單已定稿 → `{ error: "payslip_finalized", period }`（定稿的薪資單不再改；要更正請加在下個月）
+ * 修改是樂觀鎖（updated_at 沒變才改）：同時改同一筆，後到的回 409 `conflict`。
  * 非 HR → 403。每次異動寫 audit（DB trigger 之外，應用層補「為什麼」）。
  *
  * ## 草稿薪資單不會自己跟上
@@ -124,6 +126,15 @@ async function finalizedBlock(tenantId: string, employeeId: string, period: stri
     : null
 }
 
+/**
+ * 「寫入之後發現剛好被定稿，要還原」這一步自己失敗了：不能回 409 假裝還原好了（資料其實還是改了、薪資單卻已定稿）。
+ * 記 log（要人工確認這筆加減項與薪資單），回 500。
+ */
+function restoreFailed(what: string, reason: string, ctx: Record<string, unknown>): Error {
+  logger.error({ ...ctx, reason }, `payroll-adjustments: ${what} failed to revert after payslip got finalized — needs manual check`)
+  return new Error(`${what}: 剛好被定稿，且無法自動還原（${reason}），請人工確認這筆加減項與薪資單`)
+}
+
 /** 異動後該員工該期的薪資單狀態（草稿是否已過期）。 */
 async function payslipStateAfter(tenantId: string, employeeId: string, period: string): Promise<PayslipAdjustState> {
   const current = await loadAdjustmentsByEmployee(tenantId, period, [employeeId])
@@ -203,9 +214,12 @@ payrollAdjustmentsRouter.get(
       }
       const adjustments = views.map((v) => ({ ...v, payslip: stateOf.get(`${v.period}|${v.employeeId}`) ?? { status: null, stale: false } }))
 
-      // 範圍外員工的提醒（沒有薪資結構、已離職／停用），含過期草稿的員工（畫面要列名字）。
-      const noteIds = [...new Set([...views.map((v) => v.employeeId), ...(staleEmployees ?? [])])]
-      const notes = await employeeAdjustmentNotes(tenantId, noteIds)
+      // 範圍外員工的提醒（沒有薪資結構、這個月不在職），含過期草稿的員工（畫面要列名字）。判準隨月份：每個月份各自判斷。
+      const noteEntries = [
+        ...views.map((v) => ({ employeeId: v.employeeId, period: v.period })),
+        ...(period ? (staleEmployees ?? []).map((employeeId) => ({ employeeId, period })) : []),
+      ]
+      const notes = await employeeAdjustmentNotes(tenantId, noteEntries)
 
       res.status(200).json({
         adjustments,
@@ -285,7 +299,15 @@ payrollAdjustmentsRouter.post(
       const lateBlock = await finalizedBlock(tenantId, view.employeeId, view.period)
       if (lateBlock) {
         const now = new Date().toISOString()
-        await supabaseAdmin.from("payroll_adjustments").update({ deleted_at: now, updated_at: now }).eq("tenant_id", tenantId).eq("id", view.id)
+        const { error: undoErr } = await supabaseAdmin
+          .from("payroll_adjustments")
+          .update({ deleted_at: now, updated_at: now })
+          .eq("tenant_id", tenantId)
+          .eq("id", view.id)
+        if (undoErr) {
+          next(restoreFailed(`POST /payroll-adjustments (undo insert ${view.id})`, undoErr.message, { tenantId, adjustmentId: view.id }))
+          return
+        }
         res.status(409).json(lateBlock)
         return
       }
@@ -298,7 +320,7 @@ payrollAdjustmentsRouter.post(
         actorEmpId,
         context: "POST /payroll-adjustments — 新增薪資加減項（前期更正）",
       })
-      const warnings = (await employeeAdjustmentNotes(tenantId, [view.employeeId])).get(view.employeeId) ?? []
+      const warnings = (await employeeAdjustmentNotes(tenantId, [{ employeeId: view.employeeId, period: view.period }])).get(view.employeeId) ?? []
       res.status(201).json({
         adjustment: view,
         payslip: await payslipStateAfter(tenantId, view.employeeId, view.period),
@@ -364,11 +386,14 @@ payrollAdjustmentsRouter.patch(
       if (body.taxable !== undefined) patch.taxable = body.taxable
       if (body.relatedPeriod !== undefined) patch.related_period = body.relatedPeriod
       if (body.note !== undefined) patch.note = body.note ? body.note : null
+      // 樂觀鎖：只有「還是我剛讀到的那個版本」（updated_at 沒變）才改。兩個人同時改同一筆時，後到的拿到 409 conflict，
+      // 不會悄悄蓋掉前一個人的修改，定稿競態的還原也不會蓋到第三者的改動。
       const { data: updated, error } = await supabaseAdmin
         .from("payroll_adjustments")
         .update(patch)
         .eq("tenant_id", tenantId)
         .eq("id", before.id)
+        .eq("updated_at", before.updatedAt)
         .is("deleted_at", null)
         .select(ADJUSTMENT_COLS)
         .maybeSingle()
@@ -377,14 +402,15 @@ payrollAdjustmentsRouter.patch(
         return
       }
       if (!updated) {
-        res.status(404).json({ error: "not_found" })
+        res.status(409).json({ error: "conflict", message: "這筆加減項剛被別人修改或刪除了，請重新整理再試" })
         return
       }
       const view = toAdjustmentView(updated as unknown as AdjustmentRow)
       const lateBlock = await finalizedBlock(tenantId, view.employeeId, view.period)
       if (lateBlock) {
-        // 剛好被定稿：改回原值，薪資單才不會和加減項對不起來。
-        await supabaseAdmin
+        // 剛好被定稿：改回原值，薪資單才不會和加減項對不起來。只有「還是我剛寫的那個版本」才還原（沒命中＝中間又有人改過，
+        // 不能蓋掉，回 500 請人工確認）。
+        const { data: restored, error: undoErr } = await supabaseAdmin
           .from("payroll_adjustments")
           .update({
             label: before.label,
@@ -396,6 +422,13 @@ payrollAdjustmentsRouter.patch(
           })
           .eq("tenant_id", tenantId)
           .eq("id", view.id)
+          .eq("updated_at", view.updatedAt)
+          .select("id")
+          .maybeSingle()
+        if (undoErr || !restored) {
+          next(restoreFailed(`PATCH /payroll-adjustments/${view.id} (revert)`, undoErr?.message ?? "row changed again", { tenantId, adjustmentId: view.id }))
+          return
+        }
         res.status(409).json(lateBlock)
         return
       }
@@ -473,7 +506,15 @@ payrollAdjustmentsRouter.delete(
       const lateBlock = await finalizedBlock(tenantId, before.employeeId, before.period)
       if (lateBlock) {
         // 剛好被定稿：恢復這筆。
-        await supabaseAdmin.from("payroll_adjustments").update({ deleted_at: null, updated_at: new Date().toISOString() }).eq("tenant_id", tenantId).eq("id", before.id)
+        const { error: undoErr } = await supabaseAdmin
+          .from("payroll_adjustments")
+          .update({ deleted_at: null, updated_at: new Date().toISOString() })
+          .eq("tenant_id", tenantId)
+          .eq("id", before.id)
+        if (undoErr) {
+          next(restoreFailed(`DELETE /payroll-adjustments/${before.id} (restore)`, undoErr.message, { tenantId, adjustmentId: before.id }))
+          return
+        }
         res.status(409).json(lateBlock)
         return
       }

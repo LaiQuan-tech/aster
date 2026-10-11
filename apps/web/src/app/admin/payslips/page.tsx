@@ -145,11 +145,18 @@ export default function PayslipsPage() {
     if (drafts.length === 0) return;
     if (!confirm(`確定將 ${period} 的 ${drafts.length} 張草稿全部定案？定案後不可再重算。`)) return;
     setBusy(true);
+    let current: PayslipRow | null = null;
     try {
-      for (const p of drafts) await finalizePayslip(p.id);
+      for (const p of drafts) {
+        current = p;
+        await finalizePayslip(p.id);
+      }
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "定案失敗");
+      // 前面已經定案成功的那幾張要看得到：先重新載入，再顯示失敗訊息（帶上是哪一位；例如 409 adjustments_stale＝加減項有異動，
+      // 要先回薪資作業重新執行薪資）。顯示 API 的中文說明，不是 `[409] adjustments_stale` 代碼。
+      await load();
+      setError(`${current ? `${empName(current.employee_id)}：` : ""}${apiErrorMessage(err, "定案失敗")}`);
     } finally {
       setBusy(false);
     }

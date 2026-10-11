@@ -461,19 +461,45 @@ describe("範圍外員工：沒有薪資結構、已離職或停用——提醒�
     expect(list.body.employeeNotes[EMP]).toEqual(res.body.warnings)
   })
 
-  it("已離職（terminated_at）或停用（status）的員工：回『月結檢查不含他』的提醒；在職且有薪資結構的人沒有任何提醒", async () => {
+  it("這個月已經不在職（9 月底前離職、或停用沒有離職日）的員工：回『月結檢查不含他』的提醒；在職且有薪資結構的人沒有任何提醒", async () => {
     fake.db.employees = fake.db.employees.map((r) =>
-      r.id === EMP ? { ...r, terminated_at: "2026-09-20" } : r.id === EMP2 ? { ...r, status: "inactive" } : r,
+      r.id === EMP ? { ...r, status: "inactive", terminated_at: "2026-09-20" } : r.id === EMP2 ? { ...r, status: "inactive" } : r,
     )
     for (const employeeId of [EMP, EMP2]) {
       const res = await as(T.hr).post("/payroll-adjustments").send(body({ employeeId }))
       expect(res.status).toBe(201)
-      expect(res.body.warnings.join("")).toContain("離職或停用")
+      expect(res.body.warnings.join("")).toContain("已經不在職")
     }
     fake.db.employees = fake.db.employees.map((r) => (r.id === EMP || r.id === EMP2 ? { ...r, terminated_at: null, status: "active" } : r))
     const clean = await as(T.hr).post("/payroll-adjustments").send(body())
     expect(clean.status).toBe(201)
     expect(clean.body.warnings).toBeUndefined()
+  })
+
+  it("判準跟月結檢查清單同一個（employedInPeriodOf）：預定 10/31 離職、或 10/15 離職的人，10 月的月結檢查仍然包含他們——不能提醒成『不含』；但他們的 11 月就不在職了", async () => {
+    fake.db.employees = fake.db.employees.map((r) =>
+      r.id === EMP ? { ...r, status: "active", terminated_at: "2026-10-31" } : r.id === EMP2 ? { ...r, status: "inactive", terminated_at: "2026-10-15" } : r,
+    )
+    for (const employeeId of [EMP, EMP2]) {
+      const inPeriod = await as(T.hr).post("/payroll-adjustments").send(body({ employeeId }))
+      expect(inPeriod.status).toBe(201)
+      expect(inPeriod.body.warnings, `10 月 ${employeeId}`).toBeUndefined()
+    }
+    const november = await as(T.hr).post("/payroll-adjustments").send(body({ employeeId: EMP2, period: "2026-11" }))
+    expect(november.status).toBe(201)
+    expect(november.body.warnings.join("")).toContain("已經不在職")
+    // 列表：各月份各自判斷
+    const list = await as(T.hr).get(`/payroll-adjustments?employeeId=${EMP2}`)
+    expect(list.body.employeeNotes[EMP2].join("")).toContain("已經不在職")
+    const octOnly = await as(T.hr).get(`/payroll-adjustments?period=${OCT}`)
+    expect(octOnly.body.employeeNotes[EMP2]).toBeUndefined()
+  })
+
+  it("到職日在這個月之後也算不在職範圍", async () => {
+    fake.db.employees = fake.db.employees.map((r) => (r.id === EMP ? { ...r, hire_date: "2026-12-01" } : r))
+    const res = await as(T.hr).post("/payroll-adjustments").send(body())
+    expect(res.status).toBe(201)
+    expect(res.body.warnings.join("")).toContain("已經不在職")
   })
 })
 
@@ -518,5 +544,90 @@ describe("與定稿同時發生：寫入之後再查一次，已定稿就還原�
     expect(res.status).toBe(409)
     expect(res.body.error).toBe("payslip_finalized")
     expect(adjRows()[0].deleted_at).toBeNull()
+  })
+})
+
+describe("修改是樂觀鎖：同時改同一筆，後到的 409 conflict；還原時中間又被改過就不蓋掉", () => {
+  /** 在下一次對 payroll_adjustments 的 update 之前，先模擬另一個請求改了這一列（updated_at 變了）。只觸發一次。 */
+  function concurrentEditBeforeNextUpdate(mutate: (row: Row) => void) {
+    const original = fake.from.bind(fake)
+    let fired = false
+    const spy = vi.spyOn(fake, "from").mockImplementation(((table: string) => {
+      const builder = original(table) as unknown as { update: (...args: unknown[]) => unknown }
+      if (table !== "payroll_adjustments" || fired) return builder as never
+      const originalUpdate = builder.update.bind(builder)
+      builder.update = (...args: unknown[]) => {
+        if (!fired) {
+          fired = true
+          mutate(adjRows()[0])
+        }
+        return originalUpdate(...args)
+      }
+      return builder as never
+    }) as never)
+    return spy
+  }
+
+  it("讀到之後、寫入之前，這一列被別人改了 → 409 conflict，不覆蓋對方的修改，也沒寫 audit", async () => {
+    const row = seedAdjustment({ amount: "1000.00", label: "原本" })
+    const spy = concurrentEditBeforeNextUpdate((r) => {
+      r.amount = "5000.00"
+      r.updated_at = "2026-10-11T09:00:00.000Z"
+    })
+    try {
+      const res = await as(T.hr).patch(`/payroll-adjustments/${row.id}`).send({ amount: 2000 })
+      expect(res.status, JSON.stringify(res.body)).toBe(409)
+      expect(res.body.error).toBe("conflict")
+      expect(Number(adjRows()[0].amount)).toBe(5000)
+      expect((fake.db.audit_logs ?? []).filter((a) => a.table_name === "payroll_adjustments")).toHaveLength(0)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("沒有人同時改：照常 200（版本號就是 updated_at，每次修改都會換新）", async () => {
+    const row = seedAdjustment()
+    expect((await as(T.hr).patch(`/payroll-adjustments/${row.id}`).send({ amount: 1500 })).status).toBe(200)
+    expect((await as(T.hr).patch(`/payroll-adjustments/${row.id}`).send({ amount: 1600 })).status).toBe(200)
+    expect(Number(adjRows()[0].amount)).toBe(1600)
+  })
+})
+
+describe("定稿競態的還原本身失敗：不能回 409 假裝還原好了", () => {
+  /** 寫入當下：薪資單變成已定稿，並讓「下一次」對 payroll_adjustments 的寫入失敗（模擬還原那一步出錯）。 */
+  function finalizeThenBreakNextWrite() {
+    let fired = false
+    fake.checks.payroll_adjustments = () => {
+      if (!fired) {
+        fired = true
+        fake.db.payslips = [...(fake.db.payslips ?? []), { id: "p-race", tenant_id: TENANT_ID, employee_id: EMP, period: OCT, status: "finalized" }]
+        fake.injectError({ table: "payroll_adjustments", action: "update", error: { message: "boom", code: "XX000" } })
+      }
+      return null
+    }
+  }
+
+  it("新增：還原（軟刪除）失敗 → 500，不是 409", async () => {
+    // 新增走 insert：下一次寫入是 update（還原），injectError 讓它失敗。
+    finalizeThenBreakNextWrite()
+    const res = await as(T.hr).post("/payroll-adjustments").send(body())
+    expect(res.status).toBe(500)
+    expect(String(res.body.error)).toContain("無法自動還原")
+  })
+
+  it("修改：還原失敗 → 500，不是 409", async () => {
+    const row = seedAdjustment()
+    finalizeThenBreakNextWrite()
+    const res = await as(T.hr).patch(`/payroll-adjustments/${row.id}`).send({ amount: 9999 })
+    expect(res.status).toBe(500)
+    expect(String(res.body.error)).toContain("無法自動還原")
+  })
+
+  it("刪除：恢復失敗 → 500，不是 409", async () => {
+    const row = seedAdjustment()
+    finalizeThenBreakNextWrite()
+    const res = await as(T.hr).delete(`/payroll-adjustments/${row.id}`)
+    expect(res.status).toBe(500)
+    expect(String(res.body.error)).toContain("無法自動還原")
   })
 })

@@ -523,12 +523,18 @@ payrollRouter.post(
       if (typeof updated.employee_id === "string") {
         const after = await loadAdjustmentsByEmployee(tenantId, updated.period as string, [updated.employee_id as string])
         if (adjustmentsStale(embeddedAdjustmentsOf(existing.breakdown), after.get(updated.employee_id as string))) {
-          await supabaseAdmin
+          const { error: revertErr } = await supabaseAdmin
             .from("payslips")
             .update({ status: "draft", updated_at: new Date().toISOString() })
             .eq("tenant_id", tenantId)
             .eq("id", id)
             .eq("status", "finalized")
+          if (revertErr) {
+            // 退不回草稿：不能回 409 假裝沒定稿（薪資單其實是 finalized、加減項卻沒跟上）。記 log、回 500，請人工處理。
+            logger.error({ tenantId, payslipId: id, reason: revertErr.message }, "finalize: adjustments changed during finalize and revert to draft FAILED — needs manual check")
+            next(new Error(`POST /payslips/${id}/finalize (revert): 加減項在定稿時有異動，但薪資單無法自動退回草稿，請人工確認`))
+            return
+          }
           logger.warn({ tenantId, payslipId: id }, "finalize: adjustments changed during finalize, reverted to draft")
           res.status(409).json({
             error: "adjustments_stale",

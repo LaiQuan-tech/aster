@@ -353,6 +353,28 @@ describe("定稿與新增加減項同時發生：定稿更新之後再比對一�
   })
 })
 
+describe("定稿競態的退回草稿本身失敗：不能回 409 假裝沒定稿", () => {
+  it("定稿當下有人新增加減項、而且退回草稿的更新出錯 → 500（記 log 請人工確認），不是 409", async () => {
+    await baseline()
+    let fired = false
+    fake.checks.payslips = (row) => {
+      if (!fired && row.status === "finalized") {
+        fired = true
+        fake.db.payroll_adjustments = [
+          ...(fake.db.payroll_adjustments ?? []),
+          { id: "d0000000-0000-4000-8000-0000000000ac", tenant_id: TENANT_ID, employee_id: EMP, period: OCT, label: "插隊的", amount: "700.00", taxable: true, related_period: null, created_at: "2026-10-11T00:00:00Z", deleted_at: null },
+        ]
+        // 下一次對 payslips 的 update（退回草稿）失敗
+        fake.injectError({ table: "payslips", action: "update", error: { message: "boom", code: "XX000" } })
+      }
+      return null
+    }
+    const res = await as(T.hr).post(`/payslips/${slipOf(EMP).id as string}/finalize`)
+    expect(res.status).toBe(500)
+    expect(String(res.body.error)).toContain("無法自動退回草稿")
+  })
+})
+
 describe("POST /payroll/run — 實發為負數時提醒", () => {
   it("扣回比當月薪資還大 → 薪資單照算，但 warnings 帶 negative_net（員工、金額）；正常的人沒有這個提醒", async () => {
     await addAdj({ label: "追回溢領", amount: -500_000, relatedPeriod: SEP })

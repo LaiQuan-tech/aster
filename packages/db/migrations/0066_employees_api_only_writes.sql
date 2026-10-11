@@ -1,0 +1,18 @@
+-- 2026-10-11 employees 寫入一律經 API（service role，不受 RLS 影響），網頁從不直連資料表。
+-- 修補（審查發現，待維護人員套到正式庫後再用模擬 JWT 實測確認、交易回滾不留資料）：
+--   sql/0001 的 employees_hr_write（FOR ALL）讓任何 HR 管理員用自己的 JWT 經 PostgREST 直接改 employees——
+--   可以把自己的 role 改成 platform_admin，或把老闆那一列的 user_id 換成自己另一個帳號——完全繞過 API 的權限邊界
+--   （apps/api/src/services/privileged-accounts.ts：換老闆、指派 platform_admin、重設受保護帳號密碼、變更受保護帳號的角色
+--   只有老闆或 platform_admin）。
+-- 讀取 policy（employees_self_or_hr_read）不動。apps/web 沒有任何 .from() 直連資料表（只有 storage 簽名網址上傳），
+-- API 用 service role，所以收掉寫入不影響功能。前提：已套到 0065（sql/0055）。可重跑。
+--
+-- ⚠️ 套用前請先確認沒有其他程式用「使用者 JWT」直接寫 employees（本倉庫 grep 過：沒有）。
+-- ⚠️ 這只收 employees。發薪鎖定相關的其他表仍有 HR 寫入 policy（payslips、attendance_days、punch_records、
+--    leave_requests——sql/0049 當時保留「HR 管理員寫入」的取捨；attendance_sheets、period_closes、tenants 本來就沒有）；
+--    要不要一併收是另一個決定。所以整套仍然是 API 層的防線，不是對「會直接打資料庫」的惡意內部人員的完整防線。
+-- 驗證（套用後，以 HR 的 JWT 經 PostgREST）：INSERT 會被 RLS 擋（42501）；UPDATE／DELETE 不報錯、但 0 列受影響——
+--    要看「0 列」而不是看有沒有報錯。想讓三種寫入都直接報錯，可再打開下面的 REVOKE。
+DROP POLICY IF EXISTS employees_hr_write ON public.employees;
+-- 要更保守（日後有人又加了寫入 policy 也寫不進去）可再收掉資料表權限；RLS 啟用且沒有寫入 policy 時，這行不是必要的：
+-- REVOKE INSERT, UPDATE, DELETE ON public.employees FROM anon, authenticated;
