@@ -316,12 +316,27 @@ describe("打卡紀錄頁 — punchRowReasons／partitionPunchRows", () => {
     expect(punchRowReasons(row("2026-09-16", "complete", null), TODAY)).toEqual(["bad_order"]);
   });
 
-  it("休息日有打卡 → 有事（buildDayRows 只會在週六日有紀錄時才列）", () => {
-    expect(punchRowReasons(row("2026-09-12", "complete", 300), TODAY)).toEqual(["weekend"]); // 週六
-    expect(punchRowReasons(row("2026-09-13", "missing_out"), TODAY)).toEqual(["missing_out", "weekend"]); // 週日
+  it("沒有行事曆：週六日有打卡 → 有事（buildDayRows 只會在非上班日有紀錄時才列）", () => {
+    expect(punchRowReasons(row("2026-09-12", "complete", 300), TODAY)).toEqual(["non_workday"]); // 週六
+    expect(punchRowReasons(row("2026-09-13", "missing_out"), TODAY)).toEqual(["missing_out", "non_workday"]); // 週日
   });
 
-  it("partitionPunchRows：只收起上下班完整的平日；開全部後都顯示；保持原順序", () => {
+  it("有行事曆（2026-10-12）：平日的國定假日有完整打卡（去加班）→ 有事；補班的週六完整打卡 → 沒事", () => {
+    // 2026-10-09 是週五：行事曆標國定假日
+    expect(punchRowReasons(row("2026-10-09", "complete", 300), TODAY, "fixed_holiday")).toEqual(["non_workday"]);
+    expect(isNotablePunchRow(row("2026-10-09", "complete", 300), TODAY, "fixed_holiday")).toBe(true);
+    // 沒傳行事曆時同一天是平日 → 照舊收起（行事曆抓不到的退回規則）
+    expect(isNotablePunchRow(row("2026-10-09", "complete", 300), TODAY)).toBe(false);
+    // 2026-09-12 是週六：行事曆標補班（workday）→ 是上班日，完整打卡不列
+    expect(punchRowReasons(row("2026-09-12", "complete", 480), TODAY, "workday")).toEqual([]);
+    // 補班日缺卡／沒打卡照樣列（理由是缺卡，不是非上班日）
+    expect(punchRowReasons(row("2026-09-12", "missing_out"), TODAY, "workday")).toEqual(["missing_out"]);
+    expect(punchRowReasons(row("2026-09-12", "none"), TODAY, "workday")).toEqual(["no_punch"]);
+    // 平日被標休息日（rest_day）也算非上班日
+    expect(punchRowReasons(row("2026-09-16", "complete", 480), TODAY, "rest_day")).toEqual(["non_workday"]);
+  });
+
+  it("partitionPunchRows：只收起上下班完整的上班日；開全部後都顯示；保持原順序", () => {
     const rows = [
       row("2026-09-17", "missing_out"), // 今天
       row("2026-09-16", "complete", 540),
@@ -335,6 +350,24 @@ describe("打卡紀錄頁 — punchRowReasons／partitionPunchRows", () => {
     const all = partitionPunchRows(rows, true, TODAY);
     expect(all.hiddenCount).toBe(0);
     expect(all.entries.map((e) => e.item.date)).toEqual(rows.map((r) => r.date));
+  });
+
+  it("partitionPunchRows 帶行事曆：國定假日加班預設列出、補班日完整收起；行事曆沒有的日子退回週一～五", () => {
+    const rows = [
+      row("2026-09-16", "complete", 540), // 週三，行事曆：國定假日（去加班）
+      row("2026-09-15", "complete", 530), // 週二，行事曆沒有 → 平日
+      row("2026-09-13", "complete", 200), // 週日，行事曆沒有 → 休息日
+      row("2026-09-12", "complete", 480), // 週六，行事曆：補班
+    ];
+    const dayTypeByDate = { "2026-09-16": "fixed_holiday", "2026-09-12": "workday" };
+    const p = partitionPunchRows(rows, false, TODAY, dayTypeByDate);
+    expect(p.entries.filter((e) => !e.hidden).map((e) => e.item.date)).toEqual(["2026-09-16", "2026-09-13"]);
+    expect([p.notableCount, p.hiddenCount, p.visibleCount]).toEqual([2, 2, 2]);
+    // 不帶行事曆＝舊規則：週三收起、週六列出
+    const legacy = partitionPunchRows(rows, false, TODAY);
+    expect(legacy.entries.filter((e) => !e.hidden).map((e) => e.item.date)).toEqual(["2026-09-13", "2026-09-12"]);
+    // 空的行事曆（抓到了但這段期間沒有裁定）＝同舊規則
+    expect(partitionPunchRows(rows, false, TODAY, {}).hiddenCount).toBe(legacy.hiddenCount);
   });
 });
 

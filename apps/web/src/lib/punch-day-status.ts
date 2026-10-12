@@ -35,6 +35,10 @@
  *   有打卡的日子照打卡狀態顯示（不論是否上班日、有沒有核准單），核准單只當小字註記。
  *   今天：缺下班＝「上班中」、沒打卡＝「尚未打卡」，都不催補卡（同舊行為）；只有今天沒打卡且整天被涵蓋時，
  *   改顯示單的種類（「尚未打卡」會讓請假中的人以為要打卡；兩者都不給補卡）。
+ *
+ * ── 參考資料的等待上限（`settleWithin`，2026-10-12）───────────────────────────────
+ *   行事曆、已核准的單、班別跟打卡紀錄一起到齊才顯示；三支參考資料各自包一層等待上限，任一支卡住（不是失敗，
+ *   是一直沒回應）就退回舊規則（週一～五／沒有核准單／預設班別），打卡紀錄照常顯示，不會整頁停在骨架。
  */
 import { addDays, fmtHm, localDateKey } from "./ess-format";
 import { DEFAULT_SHIFT, lunchWindowOfShift, normalizeHm, parseHm, type DayType, type ShiftLike } from "./leave-hours";
@@ -83,6 +87,34 @@ export function dayTypesForYears(
   const merged: Record<string, DayType> = {};
   for (const year of years) Object.assign(merged, byYear.get(year) ?? {});
   return merged;
+}
+
+/* -------------------------------------------------- 等待上限 --- */
+
+/**
+ * 最多等 `ms` 毫秒：期限內成功 → 結果；失敗（reject）或逾時 → `fallback()`。不會因為 `task` 失敗或卡住而 reject
+ * （只有 `fallback` 自己丟例外才會）。逾時後 `task` 照樣跑完、只是不再等它——各 loader 成功時自己寫快取，
+ * 晚到的結果下次查詢就用得到。`fallback` 在用到時才算（例如逾時當下已快取好的年份行事曆照用）。
+ */
+export function settleWithin<T>(task: Promise<T>, ms: number, fallback: () => T): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (value: () => T) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        resolve(value());
+      } catch (err) {
+        reject(err);
+      }
+    };
+    const timer = setTimeout(() => finish(fallback), ms);
+    task.then(
+      (value) => finish(() => value),
+      () => finish(fallback),
+    );
+  });
 }
 
 /* ---------------------------------------------------------- 班別 --- */

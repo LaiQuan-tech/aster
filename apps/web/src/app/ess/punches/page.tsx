@@ -13,6 +13,7 @@ import {
   dayTypesForYears,
   pickDefaultShift,
   punchRowView,
+  settleWithin,
   type ApprovedRequestLike,
   type PunchRowView,
 } from "@/lib/punch-day-status";
@@ -29,6 +30,11 @@ import { Button, Card, EmptyState, Field, InlineError, Input, Pill, Skeleton } f
 /** 查詢區間上限（天）；也擋掉 <input type=date> 打字打到一半吐出的 0202 年之類的值。 */
 const MAX_RANGE_DAYS = 366;
 const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+/**
+ * 參考資料（行事曆、已核准的單、班別）各自最多等這麼久（settleWithin）；逾時就退回舊規則（週一～五／沒有核准單／
+ * 預設班別），打卡紀錄本身照常顯示——任一支卡住不能讓整頁停在骨架。
+ */
+const CONTEXT_WAIT_MS = 5_000;
 
 const timeOf = (record?: PunchHistoryRecord) => (record ? fmtHm(record.punch_at) : "—");
 const durationOf = (row: DayRow) => (row.durationMin == null ? "—" : fmtHoursMinutes(row.durationMin / 60));
@@ -36,7 +42,8 @@ const durationOf = (row: DayRow) => (row.durationMin == null ? "—" : fmtHoursM
 /**
  * 判斷「這天要不要打卡」用的參考資料（2026-10-12）：行事曆按年快取、已核准的單與預設班別整頁抓一次。
  * 都只快取成功的結果；抓不到（403「請假申請」分頁沒開／503 calendar_not_migrated／網路錯）這次就退回
- * 舊規則（週一～五、沒有核准單、日班），下次查詢再試。這幾支永遠不丟例外，不擋打卡紀錄本身。
+ * 舊規則（週一～五、沒有核准單、日班），下次查詢再試。這幾支永遠不丟例外，不擋打卡紀錄本身；
+ * 呼叫端另外各包 CONTEXT_WAIT_MS 的等待上限（卡住也不擋），晚到的成功結果照樣寫進快取。
  */
 interface DayContextCache {
   calendarByYear: Map<number, Record<string, DayType>>;
@@ -147,12 +154,16 @@ export default function PunchesPage() {
     setLoading(true);
     try {
       // 行事曆、已核准的單、班別跟打卡紀錄一起到齊才顯示：不會先閃「未打卡＋申請補卡」再改標籤。
+      // 三支參考資料各自最多等 CONTEXT_WAIT_MS：卡住就退回舊規則（行事曆用逾時當下已快取的年份、其餘週一～五；
+      // 沒有核准單；預設班別），打卡紀錄照常顯示。
       const cache = contextCacheRef.current;
       const [res, dayTypeByDate, approved, shift] = await Promise.all([
         getPunchRecords(f, t),
-        loadDayTypes(cache, f, t),
-        loadApproved(cache),
-        loadShift(cache),
+        settleWithin(loadDayTypes(cache, f, t), CONTEXT_WAIT_MS, () =>
+          dayTypesForYears(calendarYearsOf(f, t), cache.calendarByYear),
+        ),
+        settleWithin(loadApproved(cache), CONTEXT_WAIT_MS, (): ApprovedRequestLike[] => []),
+        settleWithin(loadShift(cache), CONTEXT_WAIT_MS, () => pickDefaultShift(null)),
       ]);
       if (seq !== seqRef.current) return; // 已有更新的查詢，丟掉這筆舊回應
       setLoaded({ from: f, to: t, records: res.records, dayTypeByDate, approved, shift });
@@ -190,9 +201,13 @@ export default function PunchesPage() {
   }, [rows, loaded, today]);
   const viewOf = (row: DayRow): PunchRowView => views.get(row.date) ?? punchRowView(row, today);
 
-  // 預設只列需要留意的日子（缺卡、上班日沒打卡、休息日有打卡、今天）；上下班都完整的平日收起來。
+  // 預設只列需要留意的日子（缺卡、上班日沒打卡、休息日或國定假日有打卡、今天）；上下班都完整的上班日收起來。
+  // 哪天是上班日照行事曆（補班日算上班日、平日的國定假日不算；抓不到＝週一～五），與上面補空列同一份裁定。
   // 匯出 CSV 一律吃完整的 rows，不受這個開關影響。
-  const partition = useMemo(() => partitionPunchRows(rows, showAll, today), [rows, showAll, today]);
+  const partition = useMemo(
+    () => partitionPunchRows(rows, showAll, today, loaded?.dayTypeByDate),
+    [rows, showAll, today, loaded],
+  );
   const visibleRows = useMemo(() => partition.entries.filter((entry) => !entry.hidden).map((entry) => entry.item), [partition]);
 
   const showSkeleton = loading && !loaded;
@@ -224,7 +239,7 @@ export default function PunchesPage() {
         </div>
         <InlineError className="mt-2">{rangeError}</InlineError>
         <p className="mt-2 text-xs text-gray-400">
-          預設只列需要留意的日子（缺卡、上班日沒打卡、休息日有打卡、今天），打開「顯示全部日期」可看每一天。上班日依公司行事曆（補班日照列），沒有打卡也會列出；國定假日、休息日只列有紀錄的日子。已核准整天請假、公出、在家工作或出差的日子會直接標示，不必補卡。時間為本地時間。
+          預設只列需要留意的日子（缺卡、上班日沒打卡、休息日或國定假日有打卡、今天），打開「顯示全部日期」可看每一天。上班日依公司行事曆（補班日照列），沒有打卡也會列出；國定假日、休息日只列有紀錄的日子。已核准整天請假、公出、在家工作或出差的日子會直接標示，不必補卡。時間為本地時間。
         </p>
       </Card>
 

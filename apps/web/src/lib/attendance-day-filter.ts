@@ -28,15 +28,17 @@
  *   missing_in／missing_out／no_punch  缺上班卡、缺下班卡、平日完全沒打卡（可能是請假或假日，
  *               這頁看不出來，寧可列出讓員工自己判斷要不要補卡）
  *   bad_order   上下班都有但時長算不出來（下班早於上班）
- *   weekend     休息日有打卡（buildDayRows 只在週六日有紀錄時才列）
- *   上下班都完整的平日 → 不算。
+ *   non_workday 休息日、國定假日有打卡（buildDayRows 只在非上班日有紀錄時才列）。哪天是上班日（2026-10-12）：
+ *               頁面傳了行事曆裁定（dayType）就照裁定——平日的國定假日去加班要列、補班的週六完整打卡不列；
+ *               沒有裁定（含行事曆抓不到）＝週六日（leave-hours 的 isWorkday，與 buildDayRows 補空列同一條規則）。
+ *   上下班都完整的上班日 → 不算。
  *
  * ── 開關記憶 ───────────────────────────────────────────────────────────────────
  * 用 localStorage 當 per-viewer 的便利記憶（ESS 與後台各自一份）；讀寫都包 try/catch，
  * 私密視窗／封鎖網站資料／儲存空間滿了都只會退回「預設關」，不影響畫面。
  */
 import type { SheetDayView } from "./attendance-sheets-api";
-import { weekdayOf } from "./ess-format";
+import { isWorkday, type DayType } from "./leave-hours";
 import type { DayRow } from "./punch-history";
 
 /* ------------------------------------------------------------ 月表 --- */
@@ -106,23 +108,32 @@ export function isNotableSheetDay(day: SheetDayView, extra?: SheetDayExtra): boo
 
 /* ------------------------------------------------------ 打卡紀錄頁 --- */
 
-export type PunchRowReason = "today" | "missing_in" | "missing_out" | "no_punch" | "bad_order" | "weekend";
+export type PunchRowReason = "today" | "missing_in" | "missing_out" | "no_punch" | "bad_order" | "non_workday";
 
-/** 打卡紀錄頁這一列為什麼要預設顯示（空陣列＝上下班都完整的平日）。`today` 是 `YYYY-MM-DD`（當地今天）。 */
-export function punchRowReasons(row: Pick<DayRow, "date" | "status" | "durationMin">, today: string): PunchRowReason[] {
+/** 行事曆裁定（`GET /calendar` 的 date → day_type，同 buildDayRows 的 `dayTypeByDate`）；沒有那天＝週一～五上班。 */
+export type DayTypeByDate = Readonly<Record<string, DayType | undefined>>;
+
+/**
+ * 打卡紀錄頁這一列為什麼要預設顯示（空陣列＝上下班都完整的上班日）。`today` 是 `YYYY-MM-DD`（當地今天）。
+ * `dayType`（選填）＝這天的行事曆裁定：workday（補班）算上班日、rest_day／fixed_holiday 不算；省略＝週一～五。
+ */
+export function punchRowReasons(
+  row: Pick<DayRow, "date" | "status" | "durationMin">,
+  today: string,
+  dayType?: DayType,
+): PunchRowReason[] {
   const reasons: PunchRowReason[] = [];
   if (row.date === today) reasons.push("today");
   if (row.status === "missing_in") reasons.push("missing_in");
   else if (row.status === "missing_out") reasons.push("missing_out");
   else if (row.status === "none") reasons.push("no_punch");
   else if (row.durationMin == null) reasons.push("bad_order");
-  const weekday = weekdayOf(row.date);
-  if (weekday === 0 || weekday === 6) reasons.push("weekend");
+  if (!isWorkday(row.date, dayType)) reasons.push("non_workday");
   return reasons;
 }
 
-export function isNotablePunchRow(row: Pick<DayRow, "date" | "status" | "durationMin">, today: string): boolean {
-  return punchRowReasons(row, today).length > 0;
+export function isNotablePunchRow(row: Pick<DayRow, "date" | "status" | "durationMin">, today: string, dayType?: DayType): boolean {
+  return punchRowReasons(row, today, dayType).length > 0;
 }
 
 /* ------------------------------------------------------------ 分組 --- */
@@ -173,12 +184,17 @@ export function partitionSheetDays(
   return partitionNotable(days, (day) => isNotableSheetDay(day, extraOf?.(day)), showAll);
 }
 
+/**
+ * 打卡紀錄頁分組。`dayTypeByDate`（選填）＝行事曆裁定，判斷哪天是上班日（見 punchRowReasons）；
+ * 不帶或沒有那天＝週一～五（行事曆抓不到時的舊規則）。
+ */
 export function partitionPunchRows<T extends Pick<DayRow, "date" | "status" | "durationMin">>(
   rows: readonly T[],
   showAll: boolean,
   today: string,
+  dayTypeByDate?: DayTypeByDate,
 ): Partition<T> {
-  return partitionNotable(rows, (row) => isNotablePunchRow(row, today), showAll);
+  return partitionNotable(rows, (row) => isNotablePunchRow(row, today, dayTypeByDate?.[row.date]), showAll);
 }
 
 /* ------------------------------------------------------------ 文案 --- */

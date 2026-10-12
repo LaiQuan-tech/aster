@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { DEFAULT_SHIFT } from "../leave-hours";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { DEFAULT_SHIFT, type ShiftLike } from "../leave-hours";
 import { buildDayRows, type PunchHistoryRecord } from "../punch-history";
 import {
   approvedCoverageByDate,
@@ -8,6 +8,7 @@ import {
   dayTypesForYears,
   pickDefaultShift,
   punchRowView,
+  settleWithin,
   type ApprovedRequestLike,
   type DayCoverage,
 } from "../punch-day-status";
@@ -119,6 +120,85 @@ describe("跨年區間＋行事曆抓不到退回週一～五（dayTypesForYears
 
   it("兩年都抓不到 → 完全是舊規則週一～五", () => {
     expect(datesWith(new Map())).toEqual(["2026-01-02", "2026-01-01", "2025-12-31", "2025-12-30", "2025-12-29"]);
+  });
+});
+
+/* -------------------------------------------------- 等待上限 --- */
+
+describe("settleWithin（參考資料各自最多等幾秒，卡住就退回舊規則）", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("期限內成功 → 結果；fallback 不會被呼叫", async () => {
+    const fallback = vi.fn(() => "退回");
+    await expect(settleWithin(Promise.resolve("行事曆"), 5_000, fallback)).resolves.toBe("行事曆");
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it("失敗（reject）→ fallback，不丟例外", async () => {
+    await expect(settleWithin(Promise.reject(new Error("503")), 5_000, () => "退回")).resolves.toBe("退回");
+  });
+
+  it("卡住（一直沒回應）→ 剛好在期限到時給 fallback；之前不會先給", async () => {
+    vi.useFakeTimers();
+    const hang = new Promise<string>(() => undefined);
+    let result: string | undefined;
+    void settleWithin(hang, 5_000, () => "退回").then((value) => {
+      result = value;
+    });
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(result).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(result).toBe("退回");
+  });
+
+  it("逾時後才回來的結果不會改掉已給的 fallback；fallback 在逾時當下才算（用得到那時已快取的資料）", async () => {
+    vi.useFakeTimers();
+    let release!: (value: string) => void;
+    const slow = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    const cache: string[] = [];
+    const settled = settleWithin(slow, 5_000, () => `退回（已快取 ${cache.length} 年）`);
+    cache.push("2026"); // 期限內先到的另一年
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(settled).resolves.toBe("退回（已快取 1 年）");
+    release("晚到的行事曆");
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(settled).resolves.toBe("退回（已快取 1 年）");
+  });
+
+  it("打卡紀錄頁情境：三支參考資料一支卡住，Promise.all 仍在 5 秒後帶著退回值完成（打卡紀錄照常顯示）", async () => {
+    vi.useFakeTimers();
+    const records = Promise.resolve([{ id: "p1", type: "in", punch_at: "2026-09-14T01:00:00Z" }]);
+    const stuckCalendar = new Promise<Record<string, string>>(() => undefined);
+    let done: unknown[] | undefined;
+    void Promise.all([
+      records,
+      settleWithin(stuckCalendar, 5_000, () => ({})),
+      settleWithin(Promise.resolve([leave(null)]), 5_000, (): ApprovedRequestLike[] => []),
+      settleWithin<ShiftLike>(Promise.resolve(DAY_SHIFT), 5_000, () => pickDefaultShift(null)),
+    ]).then((value) => {
+      done = value;
+    });
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(done).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(done).toBeDefined();
+    const [punches, dayTypes, approved, shift] = done as [unknown[], Record<string, string>, ApprovedRequestLike[], unknown];
+    expect(punches).toHaveLength(1);
+    expect(dayTypes).toEqual({}); // 行事曆退回週一～五
+    expect(approved).toHaveLength(1); // 沒卡住的照用
+    expect(shift).toBe(DAY_SHIFT);
+  });
+
+  it("fallback 自己丟例外 → reject（不會永遠停在等待）", async () => {
+    await expect(
+      settleWithin(Promise.reject(new Error("x")), 5_000, () => {
+        throw new Error("fallback 壞了");
+      }),
+    ).rejects.toThrow("fallback 壞了");
   });
 });
 

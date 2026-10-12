@@ -17,10 +17,10 @@ import { describePeriodClosed } from "@/lib/period-closed";
 import {
   needsAnnouncementHint,
   precheckPunch,
-  punchStateChangedNotice,
   shouldApplyPolledPunches,
   summarizePunches,
   type PunchLike,
+  type PunchPrecheck,
   type PunchSummary,
 } from "@/lib/punch-state";
 import { runWhileVisible } from "@/lib/visible-interval";
@@ -46,12 +46,14 @@ import { DutyTodayCard } from "./_components/DutyTodayCard";
  * 按鈕還是「上班打卡」）就會寫出第二張 in，而打卡紀錄不能硬刪。所以
  *   ① 畫面可見時每 60 秒安靜重抓 `/punch/today`，隱藏就停，回到前景先立刻對齊再恢復計時；
  *      打卡送出中與成功後鎖定期不發，晚到的舊回應用序號丟掉，不會蓋掉樂觀更新。
- *   ② 按下打卡時跟定位並行再抓一次（最多等 3 秒），用 `precheckPunch`（lib/punch-state.ts）比對：
- *      種類變了就不送、畫面換成最新狀態並提示、短暫鎖鈕；抓不到就照畫面送，不擋打卡。
- *      遲到理由對話框的「送出並打卡」重送前也照樣確認一次（對話框可能開了一陣子）。
+ *   ② 按下打卡時跟定位並行再抓一次（最多等 3 秒），用 `precheckPunch`（lib/punch-state.ts）跟按下當時的畫面比對：
+ *      種類變了、或多了畫面上沒有的 in／out（例如主管同時核准補上班＋補下班）就不送、畫面換成最新狀態並提示、
+ *      短暫鎖鈕；抓不到就照畫面送，不擋打卡。遲到理由對話框的「送出並打卡」重送前也照樣確認一次（對話框可能
+ *      開了一陣子），比對的是當初按下時的畫面（pendingScreenRef）。
  *   ①② 都只認「正面證據」：今天還沒有任何 in／out（例如加班過午夜，`/punch/today` 已換到新的一天）不算
  *      新證據——輪詢不把「上班中」蓋成空的、預檢照畫面送 out（伺服器照收，結算把過午夜的下班卡歸到上班那天）。
- *      進頁與回到前景的重抓照舊整個套用。
+ *      但畫面上的上班卡已超過 16 小時（STALE_WORKING_MS）就當成已換日：輪詢的空紀錄照常套用、預檢不送下班卡
+ *      （按鈕改回「上班打卡」並提示另送補卡；查不到最新狀態就整個重新載入）。進頁與回到前景的重抓照舊整個套用。
  */
 
 /* ------------------------------------------------------------ 定位 --- */
@@ -151,7 +153,8 @@ function requestFix(
 
 /**
  * 按下打卡時確認最新狀態：抓 `GET /punch/today` 的紀錄；失敗或超過 `waitMs` → null，絕不 reject
- * （呼叫端交給 precheckPunch：null＝照畫面上的種類送出，不因為查不到就擋打卡）。
+ * （呼叫端交給 precheckPunch：null＝照畫面上的種類送出，不因為查不到就擋打卡；只有畫面「上班中」而上班卡
+ * 已超過 16 小時例外，改成重新載入）。
  */
 function fetchTodayRecords(waitMs: number): Promise<PunchLike[] | null> {
   return new Promise((resolve) => {
@@ -449,6 +452,8 @@ export default function EssHome() {
   const [lateError, setLateError] = useState<string | null>(null);
   const [lateSubmitting, setLateSubmitting, lateSubmittingRef] = useStateRef(false);
   const pendingBodyRef = useRef<Parameters<typeof postPunch>[0] | null>(null);
+  /** 送出 pendingBodyRef 那次按下當時畫面上的紀錄：遲到理由重送前的預檢跟它比（對話框開著時輪詢可能已改了畫面）。 */
+  const pendingScreenRef = useRef<readonly PunchLike[]>([]);
 
   const fixRef = useRef<GeoFix | null>(null);
   /** 最近一次定位失敗的原因；預抓或按下打卡任一次失敗都會覆蓋，送出打卡時撈最新值。 */
@@ -466,8 +471,8 @@ export default function EssHome() {
 
   /**
    * 抓 `/punch/today`。`quiet`＝背景對齊（不動 loading、失敗不顯示）。只有最後發出的那次能改畫面（loadSeqRef）。
-   * `poll`＝每 60 秒的背景輪詢（隱含 quiet）：只認正面證據——拿到空紀錄而畫面正在上班中（加班過午夜）就維持畫面
-   * （shouldApplyPolledPunches）；進頁、回到前景、打卡後的對齊照舊整個套用。
+   * `poll`＝每 60 秒的背景輪詢（隱含 quiet）：只認正面證據——拿到空紀錄而畫面正在上班中（加班過午夜）就維持畫面，
+   * 上班卡已超過 16 小時才照常套用（shouldApplyPolledPunches）；進頁、回到前景、打卡後的對齊照舊整個套用。
    */
   const loadPunch = useCallback(
     async (opts?: { quiet?: boolean; poll?: boolean }) => {
@@ -481,7 +486,7 @@ export default function EssHome() {
       try {
         const today = await getPunchToday();
         if (!activeRef.current || seq !== loadSeqRef.current) return;
-        if (poll) setRecords((prev) => (shouldApplyPolledPunches(prev, today.records) ? today.records : prev));
+        if (poll) setRecords((prev) => (shouldApplyPolledPunches(prev, today.records, Date.now()) ? today.records : prev));
         else setRecords(today.records);
         setLoadError(null);
       } catch (err) {
@@ -521,17 +526,19 @@ export default function EssHome() {
   );
 
   /**
-   * 預檢發現狀態變了（precheckPunch 回 send:false）：不送，畫面換成最新紀錄、顯示提示、短暫鎖鈕。
+   * 預檢沒送出（precheckPunch 回 send:false）：顯示提示、短暫鎖鈕，畫面換成最新紀錄；查不到最新紀錄而畫面又
+   * 過期（unverified：上班卡已超過 16 小時）就整個重新載入（載入中鈕會鎖住，失敗給重試）。
    * 序號 +1：在這之前發出的背景抓取作廢，不會把最新紀錄蓋回去。
    */
   const abortStalePunch = useCallback(
-    (latest: readonly PunchLike[], latestSummary: PunchSummary) => {
+    (check: Extract<PunchPrecheck, { send: false }>) => {
       loadSeqRef.current += 1;
-      setRecords([...latest]);
-      setPunchNotice(punchStateChangedNotice(latestSummary));
+      setPunchNotice(check.notice);
       lockFor(AFTER_PRECHECK_LOCK_MS);
+      if (check.latest) setRecords([...check.latest]);
+      else void loadPunch();
     },
-    [lockFor],
+    [lockFor, loadPunch],
   );
 
   useEffect(() => {
@@ -603,7 +610,8 @@ export default function EssHome() {
 
   const onPunch = useCallback(async () => {
     if (punching || locked || loading || loadError) return;
-    const type = summary.nextType; // 一律送明確 type，伺服器不猜；送出前先跟最新紀錄比對（precheckPunch）
+    // 一律送明確 type，伺服器不猜：由按下當時畫面上的紀錄推出，送出前先跟最新紀錄比對（precheckPunch）
+    const screen = records;
     loadSeqRef.current += 1; // 按下前發出、還沒回來的背景抓取作廢：打卡流程期間畫面只由這裡更新
     setPunching(true);
     setPunchError(null);
@@ -623,21 +631,24 @@ export default function EssHome() {
                 geoStatusRef.current = status;
               },
             );
-      // 打卡前確認最新狀態：跟定位並行抓 /punch/today（最多等 3 秒）。畫面過期（例如主管剛核准補卡）
-      // 就不送，畫面換成最新狀態＋提示＋短暫鎖鈕；抓不到（null）照畫面上的種類送，不擋打卡。
+      // 打卡前確認最新狀態：跟定位並行抓 /punch/today（最多等 3 秒）。畫面過期（例如主管剛核准補卡、
+      // 隔夜的「上班中」）就不送，畫面換成最新狀態＋提示＋短暫鎖鈕；抓不到（null）照畫面上的種類送，不擋打卡
+      // （畫面「上班中」而上班卡已超過 16 小時例外：重新載入）。
       const [fix, latest] = await Promise.all([fixPromise, fetchTodayRecords(PUNCH_PRECHECK_WAIT_MS)]);
       if (!activeRef.current) return;
-      const check = precheckPunch(type, latest);
+      const check = precheckPunch(screen, latest, Date.now());
       if (!check.send) {
-        abortStalePunch(check.latest, check.summary);
+        abortStalePunch(check);
         return;
       }
+      const type = check.type;
 
       // 沒拿到座標才帶 geoStatus；沒有新結果（這次也失敗）就用最近一次記下的原因。
       const body: Parameters<typeof postPunch>[0] = fix
         ? { type, source: "gps", lat: fix.lat, lng: fix.lng }
         : { type, source: "web", geoStatus: geoStatusRef.current ?? undefined };
       pendingBodyRef.current = body;
+      pendingScreenRef.current = screen;
       const res = await postPunch(body);
       if (!activeRef.current) return;
       pendingBodyRef.current = null;
@@ -672,7 +683,7 @@ export default function EssHome() {
     } finally {
       if (activeRef.current) setPunching(false);
     }
-  }, [punching, locked, loading, loadError, summary.nextType, toast, afterPunchSuccess, setPunching, abortStalePunch]);
+  }, [punching, locked, loading, loadError, records, toast, afterPunchSuccess, setPunching, abortStalePunch]);
 
   /** 遲到理由送出：驗證 1–500 字 → 確認最新狀態（precheckPunch）→ 帶 lateReason 原樣重送剛才那次打卡。 */
   const submitLateReason = useCallback(async () => {
@@ -688,13 +699,16 @@ export default function EssHome() {
     setLateError(null);
     try {
       // 對話框可能開了一陣子（這期間主管可能核准了今天的補上班卡、或本人在別的裝置打過卡）：重送前同樣
-      // 確認最新狀態；種類變了就不送、關掉對話框、畫面換成最新狀態並提示，抓不到照送。
-      const check = body.type ? precheckPunch(body.type, await fetchTodayRecords(PUNCH_PRECHECK_WAIT_MS)) : null;
+      // 確認最新狀態，比對的是當初按下時的畫面（body.type 由它推出；對話框開著時輪詢可能已改了畫面）。
+      // 狀態變了就不送、關掉對話框、畫面換成最新狀態並提示，抓不到照送。
+      const check = body.type
+        ? precheckPunch(pendingScreenRef.current, await fetchTodayRecords(PUNCH_PRECHECK_WAIT_MS), Date.now())
+        : null;
       if (!activeRef.current) return;
       if (check && !check.send) {
         pendingBodyRef.current = null;
         setLateInfo(null);
-        abortStalePunch(check.latest, check.summary);
+        abortStalePunch(check);
         return;
       }
       const res = await postPunch({ ...body, lateReason: lateReason.trim() });

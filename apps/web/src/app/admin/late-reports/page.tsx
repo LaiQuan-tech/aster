@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Card, Empty, ErrorText, Pill, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import { fmtDateWithWeekday, fmtDateTime, fmtHm } from "@/lib/ess-format";
+import { invalidateEssState } from "@/lib/ess-state";
 import {
   decideLateReport,
   getLateReports,
@@ -76,6 +77,7 @@ export default function LateReportsPage() {
       const res = await decideLateReport(report.id, next, notes[report.id]);
       setReports((prev) => prev.map((r) => (r.id === report.id ? res.lateReport : r)));
       setNotes((prev) => ({ ...prev, [report.id]: "" }));
+      invalidateEssState(); // 員工端「簽核」紅點含老闆待決定的遲到說明（lib/ess-badges.ts），立刻重抓、不等 30 秒 TTL
       toast.show(`${report.employeeName}：${next === "exempt" ? "不影響全勤" : "影響全勤"}`, "success");
     } catch (err) {
       toast.show(lateDecisionErrorMessage(err), "error");
