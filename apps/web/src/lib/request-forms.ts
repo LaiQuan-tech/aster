@@ -106,8 +106,8 @@ export const PETTY_EXPENSE_METHOD_LABEL: Record<ExpenseMethod, string> = {
   self_paid: "自行墊付，之後憑單據報銷",
 };
 
-/** 出差、公出、零用金一律送主管與老闆簽核（2026-10-11 業主拍板）；表單提示文字。 */
-export const BOSS_APPROVAL_HINT = "出差、公出與零用金都會送主管與老闆簽核";
+/** 出差、公出一律送主管與老闆簽核（2026-10-11 業主拍板；10-12 起零用金改在公出單選「先預支」）；表單提示文字。 */
+export const BOSS_APPROVAL_HINT = "出差、公出都會送主管與老闆簽核";
 
 /**
  * 預支金額欄的顯示值：員工還沒動過它（`touched` 為 false）→ 預設帶「預估花費」（可改）；
