@@ -2,9 +2,20 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { getPunchRecords } from "@/lib/ess-api";
+import { getCalendar, getPunchRecords, getRequests, getShifts } from "@/lib/ess-api";
 import { addDays, fmtDateWithWeekday, fmtHm, fmtHoursMinutes, todayKey } from "@/lib/ess-format";
-import { buildDayRows, type DayRow, type DayRowStatus, type PunchHistoryRecord } from "@/lib/punch-history";
+import type { DayType, ShiftLike } from "@/lib/leave-hours";
+import { buildDayRows, fixPunchHref, type DayRow, type PunchHistoryRecord } from "@/lib/punch-history";
+import {
+  approvedCoverageByDate,
+  calendarYearsOf,
+  dayTypeMapOf,
+  dayTypesForYears,
+  pickDefaultShift,
+  punchRowView,
+  type ApprovedRequestLike,
+  type PunchRowView,
+} from "@/lib/punch-day-status";
 import {
   PUNCHES_SHOW_ALL_STORAGE_KEY,
   PUNCH_FILTER_TEXT,
@@ -13,34 +24,65 @@ import {
   readStoredFlag,
   writeStoredFlag,
 } from "@/lib/attendance-day-filter";
-import { Button, Card, EmptyState, Field, InlineError, Input, Pill, Skeleton, type PillTone } from "@/components/ess-ui";
+import { Button, Card, EmptyState, Field, InlineError, Input, Pill, Skeleton } from "@/components/ess-ui";
 
 /** 查詢區間上限（天）；也擋掉 <input type=date> 打字打到一半吐出的 0202 年之類的值。 */
 const MAX_RANGE_DAYS = 366;
 const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-const STATUS_PILL: Record<DayRowStatus, { label: string; tone: PillTone }> = {
-  complete: { label: "完整", tone: "green" },
-  missing_in: { label: "缺上班", tone: "amber" },
-  missing_out: { label: "缺下班", tone: "amber" },
-  none: { label: "未打卡", tone: "gray" },
-};
-
-/**
- * 狀態標籤：今天還在進行中，「缺下班」其實是「上班中」、「未打卡」是「尚未打卡」，
- * 不該催人補卡；其餘日子照 buildDayRows 的狀態顯示。
- */
-function pillOf(row: DayRow, today: string): { label: string; tone: PillTone; fixable: boolean } {
-  if (row.date === today) {
-    if (row.status === "missing_out") return { label: "上班中", tone: "blue", fixable: false };
-    if (row.status === "none") return { label: "尚未打卡", tone: "gray", fixable: false };
-  }
-  return { ...STATUS_PILL[row.status], fixable: row.status !== "complete" };
-}
-
 const timeOf = (record?: PunchHistoryRecord) => (record ? fmtHm(record.punch_at) : "—");
 const durationOf = (row: DayRow) => (row.durationMin == null ? "—" : fmtHoursMinutes(row.durationMin / 60));
-const fixPunchHref = (date: string) => `/ess/requests?kind=fix_punch&date=${date}`;
+
+/**
+ * 判斷「這天要不要打卡」用的參考資料（2026-10-12）：行事曆按年快取、已核准的單與預設班別整頁抓一次。
+ * 都只快取成功的結果；抓不到（403「請假申請」分頁沒開／503 calendar_not_migrated／網路錯）這次就退回
+ * 舊規則（週一～五、沒有核准單、日班），下次查詢再試。這幾支永遠不丟例外，不擋打卡紀錄本身。
+ */
+interface DayContextCache {
+  calendarByYear: Map<number, Record<string, DayType>>;
+  approved: ApprovedRequestLike[] | null;
+  shift: ShiftLike | null;
+}
+
+async function loadDayTypes(cache: DayContextCache, from: string, to: string): Promise<Record<string, DayType>> {
+  const years = calendarYearsOf(from, to);
+  await Promise.all(
+    years
+      .filter((year) => !cache.calendarByYear.has(year))
+      .map(async (year) => {
+        try {
+          const res = await getCalendar(year);
+          cache.calendarByYear.set(year, dayTypeMapOf(res?.days));
+        } catch {
+          // 這一年退回週一～五（不快取，下次查詢再試）
+        }
+      }),
+  );
+  return dayTypesForYears(years, cache.calendarByYear);
+}
+
+async function loadApproved(cache: DayContextCache): Promise<ApprovedRequestLike[]> {
+  if (cache.approved) return cache.approved;
+  try {
+    // 不帶 from／to：API 只篩 start_at 而且用 UTC 日界，跨區間的多日假會漏；全抓再依日期過濾。
+    const res = await getRequests({ scope: "mine", status: "approved" });
+    cache.approved = Array.isArray(res?.requests) ? res.requests : [];
+    return cache.approved;
+  } catch {
+    return [];
+  }
+}
+
+async function loadShift(cache: DayContextCache): Promise<ShiftLike> {
+  if (cache.shift) return cache.shift;
+  try {
+    const res = await getShifts();
+    cache.shift = pickDefaultShift(res?.shifts);
+    return cache.shift;
+  } catch {
+    return pickDefaultShift(null);
+  }
+}
 
 function rangeErrorOf(from: string, to: string): string | null {
   if (!DATE_KEY_RE.test(from) || !DATE_KEY_RE.test(to)) return "請選擇完整的起迄日期";
@@ -52,9 +94,9 @@ function rangeErrorOf(from: string, to: string): string | null {
 
 const csvCell = (value: string | number) => `"${String(value).replaceAll('"', '""')}"`;
 
-function downloadCsv(rows: DayRow[], from: string, to: string, today: string) {
+function downloadCsv(rows: DayRow[], from: string, to: string, viewOf: (row: DayRow) => PunchRowView) {
   const header = ["日期", "上班", "下班", "時長", "狀態"];
-  const body = rows.map((row) => [row.date, timeOf(row.in), timeOf(row.out), durationOf(row), pillOf(row, today).label]);
+  const body = rows.map((row) => [row.date, timeOf(row.in), timeOf(row.out), durationOf(row), viewOf(row).label]);
   const csv = [header, ...body].map((line) => line.map(csvCell).join(",")).join("\n");
   const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -69,6 +111,12 @@ interface Loaded {
   from: string;
   to: string;
   records: PunchHistoryRecord[];
+  /** 行事曆裁定；抓不到的年份不在裡面 → 那幾天退回週一～五。 */
+  dayTypeByDate: Record<string, DayType>;
+  /** 已核准的單（抓不到＝空，退回舊行為）。 */
+  approved: ApprovedRequestLike[];
+  /** 預設班別：判斷請假有沒有涵蓋整個上班時段。 */
+  shift: ShiftLike;
 }
 
 export default function PunchesPage() {
@@ -79,6 +127,7 @@ export default function PunchesPage() {
   const [error, setError] = useState<string | null>(null);
   const seqRef = useRef(0);
   const firstLoadRef = useRef(true);
+  const contextCacheRef = useRef<DayContextCache>({ calendarByYear: new Map(), approved: null, shift: null });
 
   const rangeError = useMemo(() => rangeErrorOf(from, to), [from, to]);
 
@@ -97,9 +146,16 @@ export default function PunchesPage() {
     const seq = ++seqRef.current;
     setLoading(true);
     try {
-      const res = await getPunchRecords(f, t);
+      // 行事曆、已核准的單、班別跟打卡紀錄一起到齊才顯示：不會先閃「未打卡＋申請補卡」再改標籤。
+      const cache = contextCacheRef.current;
+      const [res, dayTypeByDate, approved, shift] = await Promise.all([
+        getPunchRecords(f, t),
+        loadDayTypes(cache, f, t),
+        loadApproved(cache),
+        loadShift(cache),
+      ]);
       if (seq !== seqRef.current) return; // 已有更新的查詢，丟掉這筆舊回應
-      setLoaded({ from: f, to: t, records: res.records });
+      setLoaded({ from: f, to: t, records: res.records, dayTypeByDate, approved, shift });
       setError(null);
     } catch (err) {
       if (seq !== seqRef.current) return;
@@ -119,12 +175,22 @@ export default function PunchesPage() {
   }, [from, to, rangeError, load]);
 
   const today = todayKey();
+  // 空列只補上班日（行事曆：補班日要、國定假日／休息日不要；抓不到＝週一～五）。
   const rows = useMemo(
-    () => (loaded ? buildDayRows(loaded.records, loaded.from, loaded.to) : []),
+    () => (loaded ? buildDayRows(loaded.records, loaded.from, loaded.to, undefined, { dayTypeByDate: loaded.dayTypeByDate }) : []),
     [loaded],
   );
+  // 每列的標籤／補卡連結／註記：整天請假（含請假＋公出湊滿）、公出、在家工作、出差且沒打卡的日子不給「申請補卡」。
+  // 日期換算與上面分組打卡同一個時區（瀏覽器時區）。
+  const views = useMemo(() => {
+    const coverage = loaded
+      ? approvedCoverageByDate(loaded.approved, { from: loaded.from, to: loaded.to, shift: loaded.shift })
+      : null;
+    return new Map(rows.map((row) => [row.date, punchRowView(row, today, coverage?.get(row.date))]));
+  }, [rows, loaded, today]);
+  const viewOf = (row: DayRow): PunchRowView => views.get(row.date) ?? punchRowView(row, today);
 
-  // 預設只列需要留意的日子（缺卡、平日沒打卡、休息日有打卡、今天）；上下班都完整的平日收起來。
+  // 預設只列需要留意的日子（缺卡、上班日沒打卡、休息日有打卡、今天）；上下班都完整的平日收起來。
   // 匯出 CSV 一律吃完整的 rows，不受這個開關影響。
   const partition = useMemo(() => partitionPunchRows(rows, showAll, today), [rows, showAll, today]);
   const visibleRows = useMemo(() => partition.entries.filter((entry) => !entry.hidden).map((entry) => entry.item), [partition]);
@@ -149,7 +215,7 @@ export default function PunchesPage() {
             <Button
               variant="secondary"
               className="w-full sm:w-auto"
-              onClick={() => downloadCsv(rows, loaded?.from ?? from, loaded?.to ?? to, today)}
+              onClick={() => downloadCsv(rows, loaded?.from ?? from, loaded?.to ?? to, viewOf)}
               disabled={rows.length === 0}
             >
               匯出 CSV
@@ -158,7 +224,7 @@ export default function PunchesPage() {
         </div>
         <InlineError className="mt-2">{rangeError}</InlineError>
         <p className="mt-2 text-xs text-gray-400">
-          預設只列需要留意的日子（缺卡、平日沒打卡、休息日有打卡、今天），打開「顯示全部日期」可看每一天。平日沒有打卡也會列出；週六日只列有紀錄的日子。時間為本地時間。
+          預設只列需要留意的日子（缺卡、上班日沒打卡、休息日有打卡、今天），打開「顯示全部日期」可看每一天。上班日依公司行事曆（補班日照列），沒有打卡也會列出；國定假日、休息日只列有紀錄的日子。已核准整天請假、公出、在家工作或出差的日子會直接標示，不必補卡。時間為本地時間。
         </p>
       </Card>
 
@@ -206,13 +272,14 @@ export default function PunchesPage() {
                 {/* 手機：卡片式 */}
                 <ul className="space-y-3 md:hidden" aria-busy={loading || undefined}>
                   {visibleRows.map((row) => {
-                    const pill = pillOf(row, today);
+                    const view = viewOf(row);
                     return (
                       <li key={row.date} className="rounded-xl border border-gray-100 bg-gray-50 p-3">
                         <div className="flex items-center justify-between gap-3">
                           <p className="text-sm font-semibold text-gray-900">{fmtDateWithWeekday(row.date)}</p>
-                          <Pill tone={pill.tone}>{pill.label}</Pill>
+                          <Pill tone={view.tone}>{view.label}</Pill>
                         </div>
+                        {view.note && <p className="mt-1 text-xs text-gray-500">{view.note}</p>}
                         <dl className="mt-2 grid grid-cols-3 gap-2 text-sm">
                           <div className="rounded-lg bg-white px-3 py-2">
                             <dt className="text-xs text-gray-400">上班</dt>
@@ -227,9 +294,9 @@ export default function PunchesPage() {
                             <dd className="mt-0.5 font-semibold tabular-nums text-gray-800">{durationOf(row)}</dd>
                           </div>
                         </dl>
-                        {pill.fixable && (
+                        {view.fixType && (
                           <Link
-                            href={fixPunchHref(row.date)}
+                            href={fixPunchHref(row.date, view.fixType)}
                             className="mt-1 inline-flex min-h-10 items-center text-sm font-medium hover:underline"
                             style={{ color: "var(--brand)" }}
                           >
@@ -255,7 +322,7 @@ export default function PunchesPage() {
                     </thead>
                     <tbody>
                       {visibleRows.map((row) => {
-                        const pill = pillOf(row, today);
+                        const view = viewOf(row);
                         return (
                           <tr key={row.date} className="border-b border-gray-50">
                             <td className="py-2.5 pr-4 font-medium text-gray-800">{fmtDateWithWeekday(row.date)}</td>
@@ -264,10 +331,10 @@ export default function PunchesPage() {
                             <td className="py-2.5 pr-4 tabular-nums">{durationOf(row)}</td>
                             <td className="py-2.5">
                               <div className="flex items-center gap-3">
-                                <Pill tone={pill.tone}>{pill.label}</Pill>
-                                {pill.fixable && (
+                                <Pill tone={view.tone}>{view.label}</Pill>
+                                {view.fixType && (
                                   <Link
-                                    href={fixPunchHref(row.date)}
+                                    href={fixPunchHref(row.date, view.fixType)}
                                     className="text-xs font-medium hover:underline"
                                     style={{ color: "var(--brand)" }}
                                   >
@@ -275,6 +342,7 @@ export default function PunchesPage() {
                                   </Link>
                                 )}
                               </div>
+                              {view.note && <p className="mt-1 text-xs text-gray-500">{view.note}</p>}
                             </td>
                           </tr>
                         );

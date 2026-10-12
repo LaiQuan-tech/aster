@@ -3,6 +3,8 @@
 /**
  * 補卡：日期 ＋「上班｜下班」＋ 時間 ＋ 補卡原因（必填）。
  * body：`segments:[{date,startTime:t,endTime:t,hours:0,type:"in"|"out"}]`、`startAt = endAt`。
+ * 卡別預設上班；從打卡紀錄頁「申請補卡」進來時，缺下班的那天帶 `type=out`（請假頁讀網址傳 `initialPunchType`）。
+ * 時間沒動過就跟著卡別與班別走（上班＝班別開始、下班＝班別結束；班別晚到也會更新），使用者改過就不覆蓋。
  */
 import { useId, useState, type FormEvent } from "react";
 import { Field, Input, Segmented } from "@/components/ess-ui";
@@ -20,12 +22,14 @@ const TYPE_OPTIONS: { value: PunchType; label: string }[] = [
 export interface FixPunchFormProps extends FormCommonProps {
   /** 預設時間：上班＝班別開始、下班＝班別結束。 */
   defaultShift: ShiftLike;
+  /** 預設補哪一種卡（網址 `type=in|out`）；省略＝上班。 */
+  initialPunchType?: PunchType;
 }
 
-export function FixPunchForm({ defaultShift, initialDate, submitting, submitError, onSubmit }: FixPunchFormProps) {
+export function FixPunchForm({ defaultShift, initialPunchType, initialDate, submitting, submitError, onSubmit }: FixPunchFormProps) {
   const ids = { date: useId(), time: useId() };
   const [date, setDate] = useState(initialDate);
-  const [type, setType] = useState<PunchType>("in");
+  const [type, setType] = useState<PunchType>(initialPunchType === "out" ? "out" : "in");
   const [time, setTime] = useState("");
   const [reason, setReason] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);

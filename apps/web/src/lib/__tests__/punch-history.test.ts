@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { buildDayRows, isWeekday, MAX_FILL_DAYS, type PunchHistoryRecord } from "../punch-history";
+import {
+  buildDayRows,
+  fixPunchHref,
+  fixPunchTypeOf,
+  isFillDay,
+  isWeekday,
+  MAX_FILL_DAYS,
+  type PunchHistoryRecord,
+} from "../punch-history";
 
 /**
  * 全部用 UTC ISO 輸入＋ tz:"Asia/Taipei"（UTC+8）：只要分組退回 `punch_at.slice(0, 10)`
@@ -141,5 +149,64 @@ describe("buildDayRows", () => {
     // "0202-09-17" 是 <input type=date> 打字打到一半會吐出的值
     const rows = buildDayRows([], "0202-09-17", "2026-09-17", TZ);
     expect(rows.length).toBeLessThanOrEqual(MAX_FILL_DAYS);
+  });
+});
+
+/**
+ * 行事曆（2026-10-12 教育訓練驗收：國定假日被列成「未打卡」）。日期是測試用的假設裁定：
+ * 2026-10-09（五）國定假日、2026-09-19（六）補班、2026-09-16（三）公司自訂休息日。
+ */
+describe("isFillDay（要不要補「沒打卡」空列）", () => {
+  it("沒有裁定＝週一～五；有裁定照裁定；無效日期一律不要", () => {
+    expect(isFillDay("2026-10-09")).toBe(true); // 週五、沒裁定
+    expect(isFillDay("2026-09-19")).toBe(false); // 週六、沒裁定
+    expect(isFillDay("2026-10-09", "fixed_holiday")).toBe(false);
+    expect(isFillDay("2026-09-16", "rest_day")).toBe(false);
+    expect(isFillDay("2026-09-19", "workday")).toBe(true); // 補班
+    expect(isFillDay("2026-09-20", "special")).toBe(false); // 看不懂的裁定 → 退回週一～五（週日）
+    expect(isFillDay("not-a-date", "workday")).toBe(false);
+    expect(isFillDay("2026-13-01")).toBe(false);
+  });
+});
+
+describe("buildDayRows：依行事曆補空列", () => {
+  it("國定假日、休息日沒打卡不補列；補班的週六沒打卡要補列", () => {
+    const dayTypeByDate = { "2026-09-16": "rest_day", "2026-09-19": "workday" };
+    const rows = buildDayRows([], "2026-09-14", "2026-09-20", TZ, { dayTypeByDate });
+    expect(rows.map((row) => row.date)).toEqual(["2026-09-19", "2026-09-18", "2026-09-17", "2026-09-15", "2026-09-14"]);
+    expect(rows.every((row) => row.status === "none")).toBe(true);
+
+    const holiday = buildDayRows([], "2026-10-05", "2026-10-11", TZ, { dayTypeByDate: { "2026-10-09": "fixed_holiday" } });
+    expect(holiday.map((row) => row.date)).toEqual(["2026-10-08", "2026-10-07", "2026-10-06", "2026-10-05"]);
+  });
+
+  it("國定假日有打卡照列（不論是否上班日都照打卡狀態）", () => {
+    // 2026-10-09T01:00Z = 台北 10/09（五）09:00
+    const rows = buildDayRows([rec("in", "2026-10-09T01:00:00Z")], "2026-10-09", "2026-10-09", TZ, {
+      dayTypeByDate: { "2026-10-09": "fixed_holiday" },
+    });
+    expect(rows.map((row) => [row.date, row.status])).toEqual([["2026-10-09", "missing_out"]]);
+  });
+
+  it("沒帶行事曆（或行事曆抓不到＝空表）→ 舊規則週一～五", () => {
+    const withEmpty = buildDayRows([], "2026-10-05", "2026-10-11", TZ, { dayTypeByDate: {} });
+    const without = buildDayRows([], "2026-10-05", "2026-10-11", TZ);
+    expect(withEmpty).toEqual(without);
+    expect(without.map((row) => row.date)).toEqual(["2026-10-09", "2026-10-08", "2026-10-07", "2026-10-06", "2026-10-05"]);
+  });
+});
+
+describe("補卡連結帶卡別", () => {
+  it("缺下班 → out；缺上班、整天沒打卡 → in", () => {
+    expect(fixPunchTypeOf("missing_out")).toBe("out");
+    expect(fixPunchTypeOf("missing_in")).toBe("in");
+    expect(fixPunchTypeOf("none")).toBe("in");
+  });
+
+  it("連結帶 kind、date、type", () => {
+    expect(fixPunchHref("2026-09-16", "out")).toBe("/ess/requests?kind=fix_punch&date=2026-09-16&type=out");
+    expect(fixPunchHref("2026-09-16", "in")).toBe("/ess/requests?kind=fix_punch&date=2026-09-16&type=in");
+    const params = new URL(fixPunchHref("2026-09-16", "out"), "https://example.test").searchParams;
+    expect([params.get("kind"), params.get("date"), params.get("type")]).toEqual(["fix_punch", "2026-09-16", "out"]);
   });
 });

@@ -66,6 +66,9 @@ function RequestsView() {
   const urlDate = searchParams.get("date");
   const urlId = searchParams.get("id");
   const initialDate = urlDate && DATE_RE.test(urlDate) ? urlDate : todayKey();
+  // 補卡預設卡別：打卡紀錄頁「申請補卡」帶 `type=in|out`（lib/punch-history 的 fixPunchHref）；其他值忽略。
+  const urlPunchType = searchParams.get("type");
+  const initialPunchType = urlPunchType === "in" || urlPunchType === "out" ? urlPunchType : undefined;
 
   // 進頁時確保 ESS 狀態新鮮（ensureFresh）；本頁不再需要 me（請假表單原本用它篩班表，班表功能已移除）。
   useEssState();
@@ -199,7 +202,7 @@ function RequestsView() {
           />
         );
       case "fix_punch":
-        return <FixPunchForm key={`fix-${formKey}`} {...common} defaultShift={defaultShift} />;
+        return <FixPunchForm key={`fix-${formKey}`} {...common} defaultShift={defaultShift} initialPunchType={initialPunchType} />;
       case "ot":
         return <OvertimeForm key={`ot-${formKey}`} {...common} />;
       case "business_trip":
