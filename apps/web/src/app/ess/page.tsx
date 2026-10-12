@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   getAnnouncements,
   getPunchToday,
+  getRequests,
   isPunchTooSoon,
   lateReasonRequiredOf,
   postPunch,
@@ -13,6 +15,14 @@ import {
 } from "@/lib/ess-api";
 import { fmtHm, todayKey, weekdayLabel } from "@/lib/ess-format";
 import { LATE_REASON_MAX, lateReasonError, lateReasonPrompt } from "@/lib/late-reason";
+import {
+  PENDING_FIX_PUNCH_CELL_SUFFIX,
+  forgotPunchInHref,
+  summarizeWithPendingFixPunch,
+  withPendingFixPunch,
+  type PendingAwareSummary,
+  type PendingFixPunchRequestLike,
+} from "@/lib/pending-fix-punch";
 import { describePeriodClosed } from "@/lib/period-closed";
 import {
   needsAnnouncementHint,
@@ -21,7 +31,6 @@ import {
   summarizePunches,
   type PunchLike,
   type PunchPrecheck,
-  type PunchSummary,
 } from "@/lib/punch-state";
 import { runWhileVisible } from "@/lib/visible-interval";
 import { BottomSheet, Button, Card, Icon, InlineError, Textarea, useToast } from "@/components/ess-ui";
@@ -54,6 +63,16 @@ import { DutyTodayCard } from "./_components/DutyTodayCard";
  *      新證據——輪詢不把「上班中」蓋成空的、預檢照畫面送 out（伺服器照收，結算把過午夜的下班卡歸到上班那天）。
  *      但畫面上的上班卡已超過 16 小時（STALE_WORKING_MS）就當成已換日：輪詢的空紀錄照常套用、預檢不送下班卡
  *      （按鈕改回「上班打卡」並提示另送補卡；查不到最新狀態就整個重新載入）。進頁與回到前景的重抓照舊整個套用。
+ *
+ * 待核准的上班補卡（2026-10-12 業主拍板）：忘了打上班卡的人送出補卡後，不用等主管核准就能照常打下班卡。
+ * 每次抓 `/punch/today` 時並行抓 `GET /requests?scope=mine&status=pending&kind=fix_punch`（最多等 3 秒）；今天有
+ * 本人待簽核的補上班卡、今天又沒有真的上班卡，就把它當成一張「暫定上班卡」併進畫面紀錄（lib/pending-fix-punch.ts，
+ * 再交給上面同一套 punch-state 函式）→ 狀態「上班中・補卡待核准（08:52）」、按鈕「下班打卡」送 type=out、
+ * 「上班」欄「08:52（待核准）」。抓不到待簽核單：403（沒開「請假」分頁）→ 這次進頁不再抓、照舊行為；
+ * 斷線／逾時 → 沿用上次抓到的結果（一開始＝沒有）。主管核准後照舊補一筆人工上班卡（打卡前預檢以種類＋時刻
+ * 認得是同一張）；駁回的話那天有下班卡、沒上班卡，月表顯示「缺上班卡」（預期行為）。
+ * 遲到理由對話框多一顆「早上有到，只是忘了打卡」：不打卡、關掉對話框，帶去補卡單（預選上班、日期今天）；
+ * 待簽核單回過 403（沒開「請假」分頁、送不了補卡單）就不顯示這顆。
  */
 
 /* ------------------------------------------------------------ 定位 --- */
@@ -94,6 +113,8 @@ const PUNCH_POLL_MS = 60_000;
 const PUNCH_PRECHECK_WAIT_MS = 3_000;
 /** 預檢發現狀態變了（沒送出、按鈕換了種類）後鎖鈕的時間：擋連點把另一種卡直接送出去，也讓人看一下提示。 */
 const AFTER_PRECHECK_LOCK_MS = 2_000;
+/** 抓待簽核補卡單最多等這麼久（跟 `/punch/today` 並行）；逾時就沿用上次的結果，不讓它拖住打卡鈕。 */
+const PENDING_FIX_WAIT_MS = 3_000;
 
 const PREFETCH_OPTS: PositionOptions = { maximumAge: 60_000, timeout: 8_000, enableHighAccuracy: false };
 const ON_PUNCH_OPTS: PositionOptions = { maximumAge: FIX_FRESH_MS, timeout: PUNCH_FIX_WAIT_MS, enableHighAccuracy: false };
@@ -170,6 +191,29 @@ function fetchTodayRecords(waitMs: number): Promise<PunchLike[] | null> {
     getPunchToday().then(
       (today) => finish(Array.isArray(today?.records) ? today.records : null),
       () => finish(null),
+    );
+  });
+}
+
+/**
+ * 抓本人待簽核的補卡單（`GET /requests?scope=mine&status=pending&kind=fix_punch`），首頁拿來判斷「今天有沒有
+ * 待核准的上班補卡」（lib/pending-fix-punch.ts）。成功 → 清單；403（沒開「請假」分頁，API essTabGuard 擋）→
+ * "forbidden"；其他失敗或超過 `waitMs` → null。絕不 reject。
+ */
+function fetchPendingFixPunches(waitMs: number): Promise<PendingFixPunchRequestLike[] | "forbidden" | null> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (result: PendingFixPunchRequestLike[] | "forbidden" | null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+    timer = setTimeout(() => finish(null), waitMs);
+    getRequests({ scope: "mine", status: "pending", kind: "fix_punch" }).then(
+      (res) => finish(Array.isArray(res?.requests) ? res.requests : null),
+      (err: unknown) => finish((err as { status?: unknown } | null)?.status === 403 ? "forbidden" : null),
     );
   });
 }
@@ -258,7 +302,7 @@ function PunchCard({
   onPunch,
   onRetryLoad,
 }: {
-  summary: PunchSummary;
+  summary: PendingAwareSummary;
   loading: boolean;
   loadError: string | null;
   punching: boolean;
@@ -271,9 +315,10 @@ function PunchCard({
 }) {
   const disabled = loading || !!loadError || punching || locked;
   const label = loading ? "載入中…" : punching ? "打卡中…" : summary.nextLabel;
+  // 待核准的上班補卡撐起的「上班中」：statusLabel 已是「上班中・補卡待核准（08:52）」，不再接「· 自 HH:MM」。
   const status = loading
     ? " "
-    : summary.phase === "working" && summary.workingSince
+    : summary.phase === "working" && summary.workingSince && !summary.workingOnPending
       ? `${summary.statusLabel} · 自 ${fmtHm(summary.workingSince)}`
       : summary.statusLabel;
 
@@ -322,14 +367,25 @@ function PunchCard({
 
 /* ------------------------------------------------------- TodayTimes --- */
 
-function TodayTimes({ summary, loading }: { summary: PunchSummary; loading: boolean }) {
+function TodayTimes({ summary, loading }: { summary: PendingAwareSummary; loading: boolean }) {
   const cell = (iso: string | null) => (loading ? "…" : iso ? fmtHm(iso) : "—");
+  // 「上班」是待核准的上班補卡：顯示補卡單上的時間＋「（待核准）」。
+  const pendingIn = !loading && summary.firstInPending ? summary.pendingIn : null;
   return (
     <Card title="今日">
       <dl className="grid grid-cols-2 divide-x divide-gray-100 text-center">
         <div className="px-2">
           <dt className="text-xs font-medium text-gray-400">上班</dt>
-          <dd className="mt-1 text-2xl font-semibold tabular-nums text-gray-900">{cell(summary.firstInAt)}</dd>
+          <dd className="mt-1 text-2xl font-semibold tabular-nums text-gray-900">
+            {pendingIn ? (
+              <>
+                {pendingIn.hm}
+                <span className="ml-0.5 align-middle text-sm font-medium text-amber-700">{PENDING_FIX_PUNCH_CELL_SUFFIX}</span>
+              </>
+            ) : (
+              cell(summary.firstInAt)
+            )}
+          </dd>
         </div>
         <div className="px-2">
           <dt className="text-xs font-medium text-gray-400">下班</dt>
@@ -368,7 +424,11 @@ function AnnouncementHint({ count }: { count: number }) {
 
 /* --------------------------------------------------- LateReasonSheet --- */
 
-/** 遲到理由對話框（手機從底部滑出）：說明＋多行輸入＋「送出並打卡」／「取消」。 */
+/**
+ * 遲到理由對話框（手機從底部滑出）：說明＋多行輸入＋「送出並打卡」／「早上有到，只是忘了打卡」／「取消」。
+ * 「早上有到，只是忘了打卡」（2026-10-12）：不打卡、關掉對話框，帶去補卡單（預選上班、日期今天）；送出補卡回到
+ * 首頁就是「下班打卡」（待核准的上班補卡當作已上班，見檔頭）。
+ */
 function LateReasonSheet({
   info,
   value,
@@ -376,6 +436,7 @@ function LateReasonSheet({
   submitting,
   onChange,
   onSubmit,
+  onForgotPunch,
   onCancel,
 }: {
   info: LateReasonRequired | null;
@@ -384,6 +445,8 @@ function LateReasonSheet({
   submitting: boolean;
   onChange: (next: string) => void;
   onSubmit: () => void;
+  /** 沒給（沒開「請假」分頁、送不了補卡單）就不顯示「早上有到，只是忘了打卡」。 */
+  onForgotPunch?: () => void;
   onCancel: () => void;
 }) {
   const length = value.trim().length;
@@ -421,6 +484,11 @@ function LateReasonSheet({
             <Button type="submit" size="lg" block loading={submitting} disabled={submitting}>
               送出並打卡
             </Button>
+            {onForgotPunch && (
+              <Button type="button" variant="secondary" size="lg" block disabled={submitting} onClick={onForgotPunch}>
+                早上有到，只是忘了打卡
+              </Button>
+            )}
             <Button type="button" variant="secondary" size="lg" block disabled={submitting} onClick={onCancel}>
               取消（不打卡）
             </Button>
@@ -435,6 +503,8 @@ function LateReasonSheet({
 
 export default function EssHome() {
   const toast = useToast();
+  const router = useRouter();
+  /** 今天的打卡紀錄；有待核准的上班補卡時多一張暫定上班卡（withPendingFixPunch，沒有 id）。 */
   const [records, setRecords] = useState<PunchLike[]>([]);
   // loading／punching／locked／lateSubmitting 另有同步的 ref：背景輪詢在計時器裡讀，判斷現在能不能動畫面。
   const [loading, setLoading, loadingRef] = useStateRef(true);
@@ -466,8 +536,23 @@ export default function EssHome() {
    * 背景輪詢回應不能把樂觀更新蓋回「上班打卡」。
    */
   const loadSeqRef = useRef(0);
+  /**
+   * 最近一次抓到的本人待簽核補卡單（抓不到就沿用上次的；一開始 null＝沒有）。每次把紀錄放進畫面前都用它併上
+   * 暫定上班卡（mergePending）。
+   */
+  const pendingFixRef = useRef<readonly PendingFixPunchRequestLike[] | null>(null);
+  /** GET /requests 回過 403（沒開「請假」分頁）：這次進頁不再抓，照舊行為。 */
+  const pendingForbiddenRef = useRef(false);
+  /** 同上（給畫面用）：沒開「請假」分頁就送不了補卡單，遲到對話框不顯示「早上有到，只是忘了打卡」。 */
+  const [fixPunchForbidden, setFixPunchForbidden] = useState(false);
 
-  const summary = useMemo(() => summarizePunches(records), [records]);
+  const summary = useMemo(() => summarizeWithPendingFixPunch(records), [records]);
+
+  /** 今天的真紀錄＋（有的話）待核准的上班補卡 → 畫面紀錄（lib/pending-fix-punch.ts）。 */
+  const mergePending = useCallback(
+    (list: ReadonlyArray<PunchLike>) => withPendingFixPunch(list, pendingFixRef.current, todayKey()),
+    [],
+  );
 
   /**
    * 抓 `/punch/today`。`quiet`＝背景對齊（不動 loading、失敗不顯示）。只有最後發出的那次能改畫面（loadSeqRef）。
@@ -484,10 +569,23 @@ export default function EssHome() {
         setLoadError(null);
       }
       try {
-        const today = await getPunchToday();
+        // 待簽核補卡單跟今日打卡並行抓（不會 reject、最多等 3 秒）：今天的上班補卡還沒核准也當作已上班。
+        const [today, pending] = await Promise.all([
+          getPunchToday(),
+          pendingForbiddenRef.current ? Promise.resolve(null) : fetchPendingFixPunches(PENDING_FIX_WAIT_MS),
+        ]);
         if (!activeRef.current || seq !== loadSeqRef.current) return;
-        if (poll) setRecords((prev) => (shouldApplyPolledPunches(prev, today.records, Date.now()) ? today.records : prev));
-        else setRecords(today.records);
+        if (pending === "forbidden") {
+          pendingForbiddenRef.current = true;
+          pendingFixRef.current = null;
+          setFixPunchForbidden(true);
+        } else if (pending) {
+          pendingFixRef.current = pending;
+        }
+        const next = mergePending(today.records);
+        // 輪詢比的是併過暫定上班卡的紀錄：補卡撐起的「上班中」跟真的上班卡一樣，空紀錄（過午夜）不蓋掉。
+        if (poll) setRecords((prev) => (shouldApplyPolledPunches(prev, next, Date.now()) ? next : prev));
+        else setRecords(next);
         setLoadError(null);
       } catch (err) {
         if (!activeRef.current || quiet || seq !== loadSeqRef.current) return;
@@ -497,7 +595,7 @@ export default function EssHome() {
         if (activeRef.current && !quiet && seq === loadSeqRef.current) setLoading(false);
       }
     },
-    [setLoading],
+    [setLoading, mergePending],
   );
 
   /**
@@ -535,10 +633,10 @@ export default function EssHome() {
       loadSeqRef.current += 1;
       setPunchNotice(check.notice);
       lockFor(AFTER_PRECHECK_LOCK_MS);
-      if (check.latest) setRecords([...check.latest]);
+      if (check.latest) setRecords(mergePending(check.latest));
       else void loadPunch();
     },
-    [lockFor, loadPunch],
+    [lockFor, loadPunch, mergePending],
   );
 
   useEffect(() => {
@@ -594,7 +692,8 @@ export default function EssHome() {
       // 抓取回應一律丟掉，不會把這筆樂觀更新蓋回去。
       const rec: PunchLike = res.record ?? { type: res.type, punch_at: res.punchAt };
       loadSeqRef.current += 1;
-      setRecords((prev) => [...prev, rec]);
+      // 重新併一次暫定上班卡：補卡撐起的上班中按了下班 → 今日已下班（上班欄仍顯示待核准的時間）。
+      setRecords((prev) => mergePending([...prev, rec]));
       const lateNote = res.lateReport ? "（已送出遲到說明）" : "";
       toast.show(`${rec.type === "in" ? "上班" : "下班"}打卡成功 ${fmtHm(rec.punch_at)}${lateNote}`, "success");
       try {
@@ -605,7 +704,7 @@ export default function EssHome() {
       lockFor(AFTER_SUCCESS_LOCK_MS);
       await loadPunch({ quiet: true });
     },
-    [toast, loadPunch, lockFor],
+    [toast, loadPunch, lockFor, mergePending],
   );
 
   const onPunch = useCallback(async () => {
@@ -669,8 +768,8 @@ export default function EssHome() {
         try {
           const today = await getPunchToday();
           if (!activeRef.current) return;
-          setRecords(today.records);
-          const s = summarizePunches(today.records);
+          setRecords(mergePending(today.records));
+          const s = summarizePunches(today.records); // 時間看真的卡，不拿待核准的補卡時間
           const last = s.phase === "working" ? s.workingSince : s.lastOutAt;
           if (last) when = `（${fmtHm(last)}）`;
         } catch {
@@ -683,7 +782,7 @@ export default function EssHome() {
     } finally {
       if (activeRef.current) setPunching(false);
     }
-  }, [punching, locked, loading, loadError, records, toast, afterPunchSuccess, setPunching, abortStalePunch]);
+  }, [punching, locked, loading, loadError, records, toast, afterPunchSuccess, setPunching, abortStalePunch, mergePending]);
 
   /** 遲到理由送出：驗證 1–500 字 → 確認最新狀態（precheckPunch）→ 帶 lateReason 原樣重送剛才那次打卡。 */
   const submitLateReason = useCallback(async () => {
@@ -740,6 +839,18 @@ export default function EssHome() {
     setLateError(null);
   }, [lateSubmitting]);
 
+  /**
+   * 「早上有到，只是忘了打卡」：不打卡、關掉對話框，帶去補卡單（預選上班、日期今天）。送出補卡回到首頁，
+   * 待核准的上班補卡就當作已上班 →「下班打卡」。
+   */
+  const forgotPunchIn = useCallback(() => {
+    if (lateSubmitting) return;
+    pendingBodyRef.current = null;
+    setLateInfo(null);
+    setLateError(null);
+    router.push(forgotPunchInHref(todayKey()));
+  }, [lateSubmitting, router]);
+
   return (
     <div className="mx-auto flex w-full max-w-md flex-col gap-4">
       <Clock />
@@ -768,6 +879,7 @@ export default function EssHome() {
           if (lateError) setLateError(null);
         }}
         onSubmit={() => void submitLateReason()}
+        onForgotPunch={fixPunchForbidden ? undefined : forgotPunchIn}
         onCancel={cancelLateReason}
       />
     </div>
