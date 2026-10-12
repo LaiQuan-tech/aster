@@ -64,7 +64,7 @@ describe("費用方式的畫面文字", () => {
   });
 
   it("簽核提示：出差、公出與零用金都送主管與老闆", () => {
-    expect(BOSS_APPROVAL_HINT).toBe("出差、公出與零用金都會送主管與老闆簽核");
+    expect(BOSS_APPROVAL_HINT).toBe("出差、公出都會送主管與老闆簽核");
   });
 });
 
