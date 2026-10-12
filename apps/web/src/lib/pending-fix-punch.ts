@@ -69,37 +69,53 @@ function normalizeHm(raw: string): string | null {
   return `${pad2(h)}:${pad2(min)}`;
 }
 
+/** 待簽核補卡單裡「日期是 today、卡別是 type」的每一段 → 補卡單 id、時間 HH:MM、時刻（ms，瀏覽器時區）。 */
+function pendingSegments(
+  requests: ReadonlyArray<PendingFixPunchRequestLike> | null | undefined,
+  today: string,
+  type: "in" | "out",
+): Array<{ requestId: string; hm: string; at: number }> {
+  const out: Array<{ requestId: string; hm: string; at: number }> = [];
+  if (!requests || !DATE_RE.test(today)) return out;
+  for (const r of requests) {
+    if (!r || r.kind !== "fix_punch" || r.status !== "pending" || !Array.isArray(r.segments)) continue;
+    for (const s of r.segments) {
+      if (!s || s.type !== type || s.date !== today || typeof s.startTime !== "string") continue;
+      const hm = normalizeHm(s.startTime);
+      if (!hm) continue;
+      const at = Date.parse(`${today}T${hm}:00`); // 沒有時區後綴＝瀏覽器時區
+      if (!Number.isFinite(at)) continue;
+      out.push({ requestId: r.id, hm, at });
+    }
+  }
+  return out;
+}
+
 /**
  * 從待簽核單挑出「本人、待簽核、補上班卡、日期是今天」的補卡（kind=fix_punch、status=pending、
  * 某一段 type=in 且 date=today）。好幾張就取時間最早的一張；沒有、或拿不到清單（null）→ null。
  * 補下班卡、補別天的卡、已核准／駁回／撤回的單都不算。`today`＝`YYYY-MM-DD`（呼叫端用 todayKey()）。
+ * 今天另外有待核准的補下班卡、時間又晚於這張補上班卡（一次補整天：主管核准後上下班都會補齊）→ null，
+ * 不當成「上班中」，維持現有行為。
  */
 export function pendingFixPunchInFor(
   requests: ReadonlyArray<PendingFixPunchRequestLike> | null | undefined,
   today: string,
 ): PendingFixPunchIn | null {
-  if (!requests || !DATE_RE.test(today)) return null;
-  let best: { item: PendingFixPunchIn; at: number } | null = null;
-  for (const r of requests) {
-    if (!r || r.kind !== "fix_punch" || r.status !== "pending" || !Array.isArray(r.segments)) continue;
-    for (const s of r.segments) {
-      if (!s || s.type !== "in" || s.date !== today || typeof s.startTime !== "string") continue;
-      const hm = normalizeHm(s.startTime);
-      if (!hm) continue;
-      const at = Date.parse(`${today}T${hm}:00`); // 沒有時區後綴＝瀏覽器時區
-      if (!Number.isFinite(at)) continue;
-      if (!best || at < best.at) {
-        best = { item: { requestId: r.id, date: today, hm, punchAt: new Date(at).toISOString() }, at };
-      }
-    }
+  let best: { requestId: string; hm: string; at: number } | null = null;
+  for (const seg of pendingSegments(requests, today, "in")) {
+    if (!best || seg.at < best.at) best = seg;
   }
-  return best ? best.item : null;
+  if (!best) return null;
+  const earliestIn = best.at;
+  if (pendingSegments(requests, today, "out").some((o) => o.at > earliestIn)) return null;
+  return { requestId: best.requestId, date: today, hm: best.hm, punchAt: new Date(best.at).toISOString() };
 }
 
 /**
  * 把待核准的上班補卡併進今天的打卡紀錄：先拿掉紀錄裡舊的暫定上班卡，再看要不要放一張新的。全部成立才放：
- *   ① 有今天、待簽核的補上班卡（pendingFixPunchInFor）。拿不到待簽核單（null：例如沒開「請假」分頁的員工
- *      GET /requests 回 403）→ 不放，照舊行為。
+ *   ① 有今天、待簽核的補上班卡（pendingFixPunchInFor；同一天有更晚的待核准補下班卡就不算）。拿不到待簽核單
+ *      （null：例如沒開「請假」分頁的員工 GET /requests 回 403）→ 不放，照舊行為。
  *   ② 今天沒有真的上班卡——有了就以真的為準（照舊）。
  *   ③ 補卡時間早於今天每一張真的 in／out：暫定上班卡只當「今天的第一張卡」。補卡時間填得比已打的下班卡還晚
  *      （填錯）時放進去，最後一張又會是 in、按鈕又變回「下班打卡」，所以不放。
@@ -120,6 +136,46 @@ export function withPendingFixPunch(
   if (notFirst) return real;
   const provisional: ProvisionalPunch = { type: "in", punch_at: pending.punchAt, pendingFixPunch: pending };
   return [...real, provisional];
+}
+
+/**
+ * 背景輪詢：補卡被撤回或駁回（2026-10-12 審查回饋）。這次**有成功抓到**待簽核單、畫面上的暫定上班卡是今天的，
+ * 而新紀錄裡已經沒有暫定上班卡（那張補卡不在待簽核單裡了）→ true：直接套用新紀錄，回到「上班打卡」，
+ * 不要卡在「下班打卡」。暫定卡不是今天的（加班過午夜）→ false，照 shouldApplyPolledPunches 保留上班中。
+ * `next`＝已經用最新待簽核單併過的紀錄。
+ */
+export function pendingFixPunchWithdrawn(
+  screen: ReadonlyArray<PunchLike>,
+  next: ReadonlyArray<PunchLike>,
+  today: string,
+): boolean {
+  const shown = screen.find(isProvisionalPunch);
+  if (!shown || shown.pendingFixPunch.date !== today) return false;
+  return !next.some(isProvisionalPunch);
+}
+
+/** 預檢擋下上班卡時的提示（今天已送出上班補卡）。 */
+export const PENDING_FIX_PUNCH_IN_NOTICE = "你已送出今天的上班補卡，請按下班打卡";
+
+/**
+ * 送上班卡前的補卡預檢（2026-10-12 審查回饋）：畫面還是「上班打卡」（例如在別的分頁剛送出上班補卡、
+ * 首頁還沒重抓），送出去就會在補卡之外多一張上班卡（打卡紀錄不能硬刪）。所以送 in 前一併重抓待簽核單：
+ * 用最新的真紀錄（抓不到就用畫面上的真卡）＋最新待簽核單併一次，出現暫定上班卡 → 中止，回傳要換上的紀錄
+ * （畫面變「上班中・補卡待核准」）與提示；否則 null，照常送出。
+ * `pending` 為 null（這次沒抓到待簽核單）→ null：不因為查不到就擋打卡。
+ */
+export function precheckPendingFixPunch(
+  type: "in" | "out",
+  screen: ReadonlyArray<PunchLike>,
+  latest: ReadonlyArray<PunchLike> | null | undefined,
+  pending: ReadonlyArray<PendingFixPunchRequestLike> | null | undefined,
+  today: string,
+): { records: PunchLike[]; notice: string } | null {
+  if (type !== "in" || !pending) return null;
+  const base = latest ?? screen.filter((r) => !isProvisionalPunch(r));
+  const merged = withPendingFixPunch(base, pending, today);
+  if (!merged.some(isProvisionalPunch)) return null;
+  return { records: merged, notice: PENDING_FIX_PUNCH_IN_NOTICE };
 }
 
 export interface PendingAwareSummary extends PunchSummary {

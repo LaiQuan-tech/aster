@@ -1,10 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
   PENDING_FIX_PUNCH_CELL_SUFFIX,
+  PENDING_FIX_PUNCH_IN_NOTICE,
   forgotPunchInHref,
   isProvisionalPunch,
   pendingFixPunchInFor,
   pendingFixPunchStatusLabel,
+  pendingFixPunchWithdrawn,
+  precheckPendingFixPunch,
   summarizeWithPendingFixPunch,
   withPendingFixPunch,
   type PendingFixPunchRequestLike,
@@ -239,5 +242,76 @@ describe("文案與網址", () => {
     expect(params.get("kind")).toBe("fix_punch");
     expect(params.get("date")).toBe(TODAY);
     expect(params.get("type")).toBe("in");
+  });
+});
+
+describe("審查回饋（2026-10-12）", () => {
+  const screen = withPendingFixPunch([], [fixPunch()], TODAY);
+
+  it("補卡被撤回或駁回：這次抓到的待簽核單沒有那張補卡、暫定卡是今天的 → 直接套用新紀錄（回到「上班打卡」）", () => {
+    const next = withPendingFixPunch([], [], TODAY);
+    expect(pendingFixPunchWithdrawn(screen, next, TODAY)).toBe(true);
+    // 原本的輪詢規則不會套用（空紀錄不蓋掉上班中），所以要靠這條
+    expect(shouldApplyPolledPunches(screen, next, Date.parse(local("12:00")))).toBe(false);
+    expect(summarizeWithPendingFixPunch(next).nextLabel).toBe("上班打卡");
+  });
+
+  it("補卡還在待簽核 → 不算撤回", () => {
+    const next = withPendingFixPunch([], [fixPunch()], TODAY);
+    expect(pendingFixPunchWithdrawn(screen, next, TODAY)).toBe(false);
+  });
+
+  it("過午夜（暫定卡是昨天的）→ 不算撤回，照舊保留上班中", () => {
+    const next = withPendingFixPunch([], [fixPunch()], TOMORROW);
+    expect(pendingFixPunchWithdrawn(screen, next, TOMORROW)).toBe(false);
+  });
+
+  it("畫面上沒有暫定卡 → false", () => {
+    expect(pendingFixPunchWithdrawn([], [], TODAY)).toBe(false);
+  });
+
+  it("送上班卡前：查到今天有待核准的上班補卡 → 中止，畫面換成「上班中・補卡待核准」並提示按下班打卡", () => {
+    const hit = precheckPendingFixPunch("in", [], [], [fixPunch()], TODAY);
+    expect(hit?.notice).toBe(PENDING_FIX_PUNCH_IN_NOTICE);
+    expect(hit?.notice).toBe("你已送出今天的上班補卡，請按下班打卡");
+    const s = summarizeWithPendingFixPunch(hit!.records);
+    expect(s.statusLabel).toBe("上班中・補卡待核准（08:52）");
+    expect(s.nextLabel).toBe("下班打卡");
+  });
+
+  it("送上班卡前：最新紀錄抓不到（null）就用畫面上的真卡判斷", () => {
+    expect(precheckPendingFixPunch("in", [], null, [fixPunch()], TODAY)).not.toBeNull();
+  });
+
+  it("送上班卡前：沒有待核准的上班補卡、待簽核單沒抓到、已有真的上班卡、或送的是下班卡 → 照常送（null）", () => {
+    expect(precheckPendingFixPunch("in", [], [], [], TODAY)).toBeNull();
+    expect(precheckPendingFixPunch("in", [], [], null, TODAY)).toBeNull();
+    expect(precheckPendingFixPunch("in", [], [{ id: "p1", type: "in", punch_at: local("10:31") }], [fixPunch()], TODAY)).toBeNull();
+    expect(precheckPendingFixPunch("out", [], [], [fixPunch()], TODAY)).toBeNull();
+    expect(precheckPendingFixPunch("in", [], [], [fixPunch({ date: YESTERDAY })], TODAY)).toBeNull();
+  });
+
+  it("今天另有待核准的補下班卡、時間晚於補上班卡 → 不變成「上班中」，維持現有行為", () => {
+    const both = [fixPunch({ id: "in-1" }), fixPunch({ id: "out-1", type: "out", time: "18:00" })];
+    expect(pendingFixPunchInFor(both, TODAY)).toBeNull();
+    const s = summarizeWithPendingFixPunch(withPendingFixPunch([], both, TODAY));
+    expect(s.nextLabel).toBe("上班打卡");
+    // 同一張單補整天（上班＋下班兩段）也一樣
+    const oneRequest: PendingFixPunchRequestLike = {
+      id: "day-1",
+      kind: "fix_punch",
+      status: "pending",
+      segments: [
+        { date: TODAY, startTime: "08:52", type: "in" },
+        { date: TODAY, startTime: "18:00", type: "out" },
+      ],
+    };
+    expect(pendingFixPunchInFor([oneRequest], TODAY)).toBeNull();
+    expect(precheckPendingFixPunch("in", [], [], both, TODAY)).toBeNull();
+  });
+
+  it("補下班卡是別天的、或時間早於補上班卡 → 不影響，照樣當作已上班", () => {
+    expect(pendingFixPunchInFor([fixPunch(), fixPunch({ id: "o", type: "out", time: "18:00", date: YESTERDAY })], TODAY)?.hm).toBe("08:52");
+    expect(pendingFixPunchInFor([fixPunch(), fixPunch({ id: "o", type: "out", time: "08:00" })], TODAY)?.hm).toBe("08:52");
   });
 });
