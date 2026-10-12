@@ -4,9 +4,10 @@
  * - 分組鍵一律用 `localDateKey(punch_at, tz)`（Intl 換算），**不要用 `punch_at.slice(0, 10)`**
  *   ——那是 UTC 日期，台北 00:30 的下班會被算到前一天（曾是線上 bug）。
  * - 每日 `in`＝當天最早的一筆 in、`out`＝當天最晚的一筆 out；其他 type（休息／外出）忽略。
- * - 區間內每個上班日都補一列（沒紀錄→`none`）；非上班日只列有紀錄的日子。區間外但有紀錄的日子照列（不丟資料）。
+ * - 區間內每個上班日都補一列（沒紀錄→`none`）；國定假日也一律補一列（2026-10-12 業主要求：畫面標「國定假日」，
+ *   見 punch-day-status 的 `punchRowView`）；休息日只列有紀錄的日子。區間外但有紀錄的日子照列（不丟資料）。
  *   上班日（2026-10-12 教育訓練驗收：國定假日被列成「未打卡」）：傳了行事曆裁定 `dayTypeByDate` 就照裁定——
- *   補班日（workday）要補、國定假日／休息日（fixed_holiday／rest_day）不補；沒裁定的日子（含行事曆抓不到）
+ *   補班日（workday）要補、休息日（rest_day）不補；沒裁定的日子（含行事曆抓不到）
  *   ＝週一～五（leave-hours 的 `isWorkday`，與 API 結算的預設相同）。
  * - `durationMin`＝out − in 的分鐘數（兩者都有才算；跨 UTC 午夜照算，因為只看時間戳）。
  *   out 早於 in（順序異常）→ `null`。
@@ -50,12 +51,12 @@ export function isWeekday(dateKey: string): boolean {
 }
 
 /**
- * 這天要不要補「沒打卡」空列＝是不是上班日：行事曆有裁定照裁定（workday 補班日要；
- * rest_day／fixed_holiday 不要），沒有裁定＝週一～五。無效日期一律不要。
+ * 這天要不要補「沒打卡」空列：上班日（行事曆有裁定照裁定：workday 補班日要、rest_day 不要；沒有裁定＝週一～五），
+ * 加上國定假日（fixed_holiday：一律列出、畫面標「國定假日」不給補卡，2026-10-12 業主要求）。無效日期一律不要。
  */
 export function isFillDay(dateKey: string, dayType?: DayType): boolean {
   if (weekdayOf(dateKey) < 0) return false;
-  return isWorkday(dateKey, dayType);
+  return dayType === "fixed_holiday" || isWorkday(dateKey, dayType);
 }
 
 export interface BuildDayRowsOptions {
@@ -96,7 +97,7 @@ function durationOf(inRec: PunchHistoryRecord | undefined, outRec: PunchHistoryR
 /**
  * 把打卡紀錄整理成每日一列，依日期降冪。
  * `from`／`to` 為當地日期鍵（含頭尾）；格式不對或 from > to 時不補空列，只列有紀錄的日子。
- * 空列只補上班日（見 `isFillDay`；`opts.dayTypeByDate` 是行事曆裁定）。
+ * 空列補上班日與國定假日（見 `isFillDay`；`opts.dayTypeByDate` 是行事曆裁定）。
  */
 export function buildDayRows(
   records: PunchHistoryRecord[],

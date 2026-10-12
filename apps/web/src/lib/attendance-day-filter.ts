@@ -25,8 +25,10 @@
  *
  * ── 打卡紀錄頁（DayRow）：沒有請假／加班資料（那在月表），只看打卡本身 ──────────────
  *   today       今天（還在進行中，不該憑空消失）
- *   missing_in／missing_out／no_punch  缺上班卡、缺下班卡、平日完全沒打卡（可能是請假或假日，
- *               這頁看不出來，寧可列出讓員工自己判斷要不要補卡）
+ *   missing_in／missing_out／no_punch  缺上班卡、缺下班卡、上班日完全沒打卡（寧可列出讓員工自己判斷要不要補卡）
+ *   holiday     國定假日沒打卡（2026-10-12 業主要求：一律列出、標「國定假日」）——預設顯示，但不算 no_punch（不是缺卡）
+ *   covered     上班日沒打卡、但整天有已核准的請假／公出／在家工作／出差（頁面傳 `coveredDates`）——
+ *               預設顯示（員工一眼看到「請假・特休（事由）」），但不算 no_punch（不是缺卡）
  *   bad_order   上下班都有但時長算不出來（下班早於上班）
  *   non_workday 休息日、國定假日有打卡（buildDayRows 只在非上班日有紀錄時才列）。哪天是上班日（2026-10-12）：
  *               頁面傳了行事曆裁定（dayType）就照裁定——平日的國定假日去加班要列、補班的週六完整打卡不列；
@@ -108,7 +110,21 @@ export function isNotableSheetDay(day: SheetDayView, extra?: SheetDayExtra): boo
 
 /* ------------------------------------------------------ 打卡紀錄頁 --- */
 
-export type PunchRowReason = "today" | "missing_in" | "missing_out" | "no_punch" | "bad_order" | "non_workday";
+export type PunchRowReason =
+  | "today"
+  | "missing_in"
+  | "missing_out"
+  | "no_punch"
+  | "holiday"
+  | "covered"
+  | "bad_order"
+  | "non_workday";
+
+/** 單看打卡判斷不出來、由頁面另外算好傳進來的資訊。 */
+export interface PunchRowExtra {
+  /** 這天整天有已核准的請假／公出／在家工作／出差（punch-day-status 的 `approvedCoverageByDate` 的 `full`）。 */
+  covered?: boolean;
+}
 
 /** 行事曆裁定（`GET /calendar` 的 date → day_type，同 buildDayRows 的 `dayTypeByDate`）；沒有那天＝週一～五上班。 */
 export type DayTypeByDate = Readonly<Record<string, DayType | undefined>>;
@@ -116,24 +132,33 @@ export type DayTypeByDate = Readonly<Record<string, DayType | undefined>>;
 /**
  * 打卡紀錄頁這一列為什麼要預設顯示（空陣列＝上下班都完整的上班日）。`today` 是 `YYYY-MM-DD`（當地今天）。
  * `dayType`（選填）＝這天的行事曆裁定：workday（補班）算上班日、rest_day／fixed_holiday 不算；省略＝週一～五。
+ * 沒打卡的日子：國定假日 → holiday、整天有已核准的單（`extra.covered`）→ covered，其餘 → no_punch（缺卡）。
  */
 export function punchRowReasons(
   row: Pick<DayRow, "date" | "status" | "durationMin">,
   today: string,
   dayType?: DayType,
+  extra: PunchRowExtra = {},
 ): PunchRowReason[] {
   const reasons: PunchRowReason[] = [];
+  const holidayNoPunch = row.status === "none" && dayType === "fixed_holiday";
   if (row.date === today) reasons.push("today");
   if (row.status === "missing_in") reasons.push("missing_in");
   else if (row.status === "missing_out") reasons.push("missing_out");
-  else if (row.status === "none") reasons.push("no_punch");
+  else if (row.status === "none") reasons.push(holidayNoPunch ? "holiday" : extra.covered ? "covered" : "no_punch");
   else if (row.durationMin == null) reasons.push("bad_order");
-  if (!isWorkday(row.date, dayType)) reasons.push("non_workday");
+  // non_workday＝休息日、國定假日「有打卡」；國定假日沒打卡已經是 holiday，不重複。
+  if (!holidayNoPunch && !isWorkday(row.date, dayType)) reasons.push("non_workday");
   return reasons;
 }
 
-export function isNotablePunchRow(row: Pick<DayRow, "date" | "status" | "durationMin">, today: string, dayType?: DayType): boolean {
-  return punchRowReasons(row, today, dayType).length > 0;
+export function isNotablePunchRow(
+  row: Pick<DayRow, "date" | "status" | "durationMin">,
+  today: string,
+  dayType?: DayType,
+  extra?: PunchRowExtra,
+): boolean {
+  return punchRowReasons(row, today, dayType, extra).length > 0;
 }
 
 /* ------------------------------------------------------------ 分組 --- */
@@ -186,15 +211,21 @@ export function partitionSheetDays(
 
 /**
  * 打卡紀錄頁分組。`dayTypeByDate`（選填）＝行事曆裁定，判斷哪天是上班日（見 punchRowReasons）；
- * 不帶或沒有那天＝週一～五（行事曆抓不到時的舊規則）。
+ * 不帶或沒有那天＝週一～五（行事曆抓不到時的舊規則）。`coveredDates`（選填）＝整天有已核准單的日期。
+ * 國定假日、整天有已核准單的日子一律預設顯示（理由是 holiday／covered，不是缺卡）。
  */
 export function partitionPunchRows<T extends Pick<DayRow, "date" | "status" | "durationMin">>(
   rows: readonly T[],
   showAll: boolean,
   today: string,
   dayTypeByDate?: DayTypeByDate,
+  coveredDates?: ReadonlySet<string>,
 ): Partition<T> {
-  return partitionNotable(rows, (row) => isNotablePunchRow(row, today, dayTypeByDate?.[row.date]), showAll);
+  return partitionNotable(
+    rows,
+    (row) => isNotablePunchRow(row, today, dayTypeByDate?.[row.date], { covered: coveredDates?.has(row.date) ?? false }),
+    showAll,
+  );
 }
 
 /* ------------------------------------------------------------ 文案 --- */
@@ -210,7 +241,8 @@ export const PUNCH_FILTER_TEXT = {
   showAll: (total: number) => `顯示全部日期（${total} 天）`,
   hidden: (hidden: number) => `已隱藏 ${hidden} 天打卡正常的日子`,
   emptyTitle: "這段期間的打卡都正常",
-  emptyHint: (total: number) => `沒有缺卡、未打卡或休息日出勤的日子；打開上方「顯示全部日期」可以看全部 ${total} 天。`,
+  emptyHint: (total: number) =>
+    `沒有缺卡、未打卡、國定假日、整天請假或休息日出勤的日子；打開上方「顯示全部日期」可以看全部 ${total} 天。`,
 } as const;
 
 /* ------------------------------------------------------ 開關記憶 --- */

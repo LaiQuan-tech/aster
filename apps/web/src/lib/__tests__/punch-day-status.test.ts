@@ -1,13 +1,17 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { DEFAULT_SHIFT, type ShiftLike } from "../leave-hours";
+import { partitionPunchRows, punchRowReasons } from "../attendance-day-filter";
 import { buildDayRows, type PunchHistoryRecord } from "../punch-history";
 import {
   approvedCoverageByDate,
   calendarYearsOf,
+  dayLabelMapOf,
   dayTypeMapOf,
   dayTypesForYears,
+  holidayLabelOf,
   pickDefaultShift,
   punchRowView,
+  reasonTextOf,
   settleWithin,
   type ApprovedRequestLike,
   type DayCoverage,
@@ -45,8 +49,22 @@ function wholeDays(kind: string, startUtc: string, endUtc: string, extra: Partia
 }
 
 /** 公出：單日起訖時刻；hours＝牆鐘差（表單算法，含午休）。 */
-function outing(startUtc: string, endUtc: string, hours: number | null = null): ApprovedRequestLike {
-  return { kind: "business_trip", trip_type: "outing", status: "approved", start_at: startUtc, end_at: endUtc, hours, segments: null };
+function outing(
+  startUtc: string,
+  endUtc: string,
+  hours: number | null = null,
+  extra: Partial<ApprovedRequestLike> = {},
+): ApprovedRequestLike {
+  return {
+    kind: "business_trip",
+    trip_type: "outing",
+    status: "approved",
+    start_at: startUtc,
+    end_at: endUtc,
+    hours,
+    segments: null,
+    ...extra,
+  };
 }
 
 let seq = 0;
@@ -97,9 +115,10 @@ describe("跨年區間＋行事曆抓不到退回週一～五（dayTypesForYears
       dayTypeByDate: dayTypesForYears(calendarYearsOf(range[0], range[1]), byYear),
     }).map((row) => row.date);
 
-  it("兩年都抓到：補班週六補列、國定假日不補", () => {
+  it("兩年都抓到：補班週六補列、國定假日也補列（畫面標「國定假日」）", () => {
     expect(datesWith(new Map([[2025, y2025], [2026, y2026]]))).toEqual([
       "2026-01-02",
+      "2026-01-01",
       "2025-12-31",
       "2025-12-30",
       "2025-12-29",
@@ -561,10 +580,11 @@ describe("punchRowView", () => {
 /* -------------------------------------------------------- 整頁情境 --- */
 
 describe("打卡紀錄兩週情境（行事曆＋已核准的單＋打卡 → 每列標籤與補卡卡別）", () => {
-  it("國定假日不列、補班週六列出；整天假／整天公出／在家／出差不給補卡；半天假、半天公出照樣可補；缺下班補 out", () => {
+  it("國定假日標「國定假日・…」、補班週六列出；整天假／整天公出／在家／出差不給補卡；半天假、半天公出照樣可補；缺下班補 out", () => {
     const from = "2026-09-28";
     const to = "2026-10-11";
     const dayTypeByDate = { "2026-10-03": "workday", "2026-10-09": "fixed_holiday", "2026-10-10": "fixed_holiday" };
+    const labelByDate: Record<string, string> = { "2026-10-09": "國慶日補假（10/10適逢週六）", "2026-10-10": "國慶日" };
     const records = [
       punch("in", "2026-09-28T01:00:00Z"), // 09-28 09:00
       punch("out", "2026-09-28T10:00:00Z"), // 09-28 18:00
@@ -587,11 +607,13 @@ describe("打卡紀錄兩週情境（行事曆＋已核准的單＋打卡 → �
     const rows = buildDayRows(records, from, to, TZ, { dayTypeByDate });
     const coverage = approvedCoverageByDate(approved, { from, to, shift: DAY_SHIFT, tz: TZ });
     const table = rows.map((r) => {
-      const view = punchRowView(r, "2026-10-12", coverage.get(r.date));
+      const view = punchRowView(r, "2026-10-12", coverage.get(r.date), holidayLabelOf(dayTypeByDate[r.date as keyof typeof dayTypeByDate], labelByDate[r.date]));
       return [r.date, view.label, view.fixType, view.note];
     });
 
     expect(table).toEqual([
+      ["2026-10-10", "國定假日・國慶日", null, ""], // 週六的國定假日；10-11 週日照舊不列
+      ["2026-10-09", "國定假日・國慶日補假", null, ""],
       ["2026-10-08", "缺上班", "in", ""],
       ["2026-10-07", "在家工作", null, ""],
       ["2026-10-06", "缺下班", "out", "已核准：請假・病假 09:00–12:00"],
@@ -603,5 +625,289 @@ describe("打卡紀錄兩週情境（行事曆＋已核准的單＋打卡 → �
       ["2026-09-29", "出差", null, ""],
       ["2026-09-28", "完整", null, ""],
     ]);
+  });
+});
+
+/* ------------------------------------------- 國定假日與事由（2026-10-12 業主要求） --- */
+
+describe("dayLabelMapOf", () => {
+  it("只收有日期、有 label 的列（去頭尾空白），壞列略過", () => {
+    expect(
+      dayLabelMapOf([
+        { date: "2026-10-09", day_type: "fixed_holiday", label: " 國慶日補假（10/10適逢週六） " },
+        { date: "2026-10-10", day_type: "fixed_holiday", label: "國慶日" },
+        { date: "2026-10-11", day_type: "rest_day", label: null },
+        { date: "2026-10-12", day_type: "workday", label: "   " },
+        { date: "bad", label: "x" },
+        null,
+      ]),
+    ).toEqual({ "2026-10-09": "國慶日補假（10/10適逢週六）", "2026-10-10": "國慶日" });
+    expect(dayLabelMapOf(undefined)).toEqual({});
+  });
+
+  it("dayTypesForYears 也能併 label（抓不到的年份不放）", () => {
+    const labels = new Map([[2026, { "2026-10-10": "國慶日" }]]);
+    expect(dayTypesForYears([2025, 2026], labels)).toEqual({ "2026-10-10": "國慶日" });
+  });
+});
+
+describe("holidayLabelOf（國定假日的標籤）", () => {
+  it("有 label →「國定假日・名稱」；沒有 label →「國定假日」", () => {
+    expect(holidayLabelOf("fixed_holiday", "國慶日")).toBe("國定假日・國慶日");
+    expect(holidayLabelOf("fixed_holiday", "國慶日補假")).toBe("國定假日・國慶日補假");
+    expect(holidayLabelOf("fixed_holiday", null)).toBe("國定假日");
+    expect(holidayLabelOf("fixed_holiday", "  ")).toBe("國定假日");
+    expect(holidayLabelOf("fixed_holiday")).toBe("國定假日");
+    expect(holidayLabelOf("fixed_holiday", "國定假日")).toBe("國定假日"); // label 本身就叫國定假日 → 不重複
+  });
+
+  it("結尾說明日期的括號去掉；名稱本身的括號保留", () => {
+    expect(holidayLabelOf("fixed_holiday", "國慶日補假（10/10適逢週六）")).toBe("國定假日・國慶日補假");
+    expect(holidayLabelOf("fixed_holiday", "小年夜調整放假（小年夜2/15適逢週日，調整至本日放假）")).toBe("國定假日・小年夜調整放假");
+    expect(holidayLabelOf("fixed_holiday", "春節（初一）")).toBe("國定假日・春節（初一）");
+    expect(holidayLabelOf("fixed_holiday", "（10/10）")).toBe("國定假日・（10/10）"); // 整段都是括號 → 照原樣
+  });
+
+  it("不是國定假日（休息日、補班、沒裁定）→ null", () => {
+    expect(holidayLabelOf("rest_day", "週末")).toBeNull();
+    expect(holidayLabelOf("workday", "補班")).toBeNull();
+    expect(holidayLabelOf(undefined, "國慶日")).toBeNull();
+  });
+});
+
+describe("punchRowView：國定假日", () => {
+  const TODAY = "2026-10-12";
+  const HOLIDAY = "國定假日・國慶日補假";
+  const row = (status: "complete" | "missing_in" | "missing_out" | "none", date = "2026-10-09") => ({ date, status });
+
+  it("沒打卡 → 標「國定假日・…」（沒 label＝「國定假日」）、不給補卡", () => {
+    expect(punchRowView(row("none"), TODAY, null, HOLIDAY)).toEqual({ label: HOLIDAY, tone: "blue", fixType: null, note: "" });
+    expect(punchRowView(row("none"), TODAY, null, holidayLabelOf("fixed_holiday", null))).toEqual({
+      label: "國定假日",
+      tone: "blue",
+      fixType: null,
+      note: "",
+    });
+  });
+
+  it("有打卡 → 照打卡狀態顯示，附小字註記「國定假日・…」（缺卡照樣可補：假日加班要算數）", () => {
+    expect(punchRowView(row("complete"), TODAY, null, HOLIDAY)).toEqual({ label: "完整", tone: "green", fixType: null, note: HOLIDAY });
+    expect(punchRowView(row("missing_out"), TODAY, null, HOLIDAY)).toEqual({
+      label: "缺下班",
+      tone: "amber",
+      fixType: "out",
+      note: HOLIDAY,
+    });
+    expect(punchRowView(row("complete"), TODAY, null, "國定假日")).toMatchObject({ label: "完整", note: "國定假日" });
+  });
+
+  it("今天剛好是國定假日、還沒打卡 → 標國定假日（不是「尚未打卡」）", () => {
+    expect(punchRowView(row("none", TODAY), TODAY, null, "國定假日・國慶日")).toEqual({
+      label: "國定假日・國慶日",
+      tone: "blue",
+      fixType: null,
+      note: "",
+    });
+  });
+
+  it("國定假日那天另有已核准的單（例如跨假日的出差）→ 標籤仍是國定假日，單放註記", () => {
+    const trip: DayCoverage = { full: { kind: "business_trip", label: "出差", reason: "台中客戶驗收" }, partial: [] };
+    expect(punchRowView(row("none"), TODAY, trip, HOLIDAY)).toEqual({
+      label: HOLIDAY,
+      tone: "blue",
+      fixType: null,
+      note: "已核准：出差（台中客戶驗收）",
+    });
+    expect(punchRowView(row("complete"), TODAY, trip, HOLIDAY).note).toBe(`${HOLIDAY}；已核准：出差（台中客戶驗收）`);
+  });
+});
+
+describe("reasonTextOf（事由的顯示）", () => {
+  it("沒填、空白、不是字串 → 空字串", () => {
+    expect(reasonTextOf(null)).toBe("");
+    expect(reasonTextOf(undefined)).toBe("");
+    expect(reasonTextOf("   ")).toBe("");
+    expect(reasonTextOf(123)).toBe("");
+  });
+
+  it("空白與換行壓成一格；16 字以內照原樣；超過截到 16 字加「…」", () => {
+    expect(reasonTextOf("  家中\n有事 ")).toBe("家中 有事");
+    expect(reasonTextOf("一二三四五六七八九十一二三四五六")).toBe("一二三四五六七八九十一二三四五六"); // 剛好 16 字
+    expect(reasonTextOf("一二三四五六七八九十一二三四五六七")).toBe("一二三四五六七八九十一二三四五六…");
+    expect(reasonTextOf("小孩發燒需要帶去醫院看診並在家照顧兩天")).toBe("小孩發燒需要帶去醫院看診並在家照…");
+  });
+
+  it("組合 emoji 算一個字、不會被切半", () => {
+    const family = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}"; // 一家人（三個人用 ZWJ 連起來）
+    expect(reasonTextOf(`一二三四五六七八九十一二三四五${family}六`)).toBe(`一二三四五六七八九十一二三四五${family}…`);
+    expect(reasonTextOf(`${family}出遊`)).toBe(`${family}出遊`);
+  });
+});
+
+describe("approvedCoverageByDate＋punchRowView：事由", () => {
+  const TODAY = "2026-10-12";
+  const view = (coverage: DayCoverage | undefined, status: "none" | "complete" | "missing_out" = "none") =>
+    punchRowView({ date: "2026-09-15", status }, TODAY, coverage);
+
+  it("整天請假有事由 → 「請假・特休（家中有事）」、不給補卡；沒有事由 → 「請假・特休」", () => {
+    const withReason = approvedCoverageByDate([leave([seg("2026-09-15", "09:00", "18:00", 8)], { reason: "家中有事" })], ctx("2026-09-15", "2026-09-15"));
+    expect(withReason.get("2026-09-15")).toEqual({ full: { kind: "leave", label: "請假・特休", reason: "家中有事" }, partial: [] });
+    expect(view(withReason.get("2026-09-15"))).toEqual({ label: "請假・特休（家中有事）", tone: "blue", fixType: null, note: "" });
+
+    const noReason = approvedCoverageByDate([leave([seg("2026-09-15", "09:00", "18:00", 8)], { reason: "  " })], ctx("2026-09-15", "2026-09-15"));
+    expect(noReason.get("2026-09-15")).toEqual({ full: { kind: "leave", label: "請假・特休" }, partial: [] });
+    expect(view(noReason.get("2026-09-15"))).toMatchObject({ label: "請假・特休", fixType: null });
+  });
+
+  it("事由太長 → 截到 16 字加「…」", () => {
+    const map = approvedCoverageByDate(
+      [leave([seg("2026-09-15", "09:00", "18:00", 8)], { reason: "小孩發燒需要帶去醫院看診並在家照顧兩天" })],
+      ctx("2026-09-15", "2026-09-15"),
+    );
+    expect(view(map.get("2026-09-15")).label).toBe("請假・特休（小孩發燒需要帶去醫院看診並在家照…）");
+  });
+
+  it("舊單（segments 為 null）整天也帶事由", () => {
+    const map = approvedCoverageByDate(
+      [leave(null, { start_at: "2026-09-15T01:00:00Z", end_at: "2026-09-15T10:00:00Z", leave_type_name: "事假", reason: "辦理證件" })],
+      ctx("2026-09-15", "2026-09-15"),
+    );
+    expect(view(map.get("2026-09-15")).label).toBe("請假・事假（辦理證件）");
+  });
+
+  it("半天假：註記加事由「請假・特休 13:00–18:00（看牙醫）」，照樣可補卡", () => {
+    const map = approvedCoverageByDate([leave([seg("2026-09-15", "13:00", "18:00", 4)], { reason: "看牙醫" })], ctx("2026-09-15", "2026-09-15"));
+    expect(map.get("2026-09-15")).toEqual({ full: null, partial: ["請假・特休 13:00–18:00（看牙醫）"] });
+    expect(view(map.get("2026-09-15"))).toEqual({
+      label: "未打卡",
+      tone: "gray",
+      fixType: "in",
+      note: "已核准：請假・特休 13:00–18:00（看牙醫）",
+    });
+  });
+
+  it("兩張單合起來涵蓋整天 → 照現行規則合併標籤，事由取時間最早、有填的那張", () => {
+    const am = leave([seg("2026-09-15", "09:00", "12:00", 3)], { reason: "上午看診" });
+    const pm = leave([seg("2026-09-15", "13:00", "18:00", 5)], { leave_type_name: "病假", reason: "下午休養" });
+    // 陣列順序故意把下午那張放前面：事由照時間取上午那張
+    const map = approvedCoverageByDate([pm, am], ctx("2026-09-15", "2026-09-15"));
+    expect(view(map.get("2026-09-15")).label).toBe("請假・特休、病假（上午看診）");
+
+    const amNoReason = leave([seg("2026-09-15", "09:00", "12:00", 3)]);
+    const fallback = approvedCoverageByDate([amNoReason, pm], ctx("2026-09-15", "2026-09-15"));
+    expect(view(fallback.get("2026-09-15")).label).toBe("請假・特休、病假（下午休養）");
+
+    const none = approvedCoverageByDate([amNoReason, leave([seg("2026-09-15", "13:00", "18:00", 5)], { leave_type_name: "病假" })], ctx("2026-09-15", "2026-09-15"));
+    expect(view(none.get("2026-09-15")).label).toBe("請假・特休、病假");
+  });
+
+  it("整天請假那天有打卡 → 照打卡狀態，註記「請假・特休（整天，家中有事）」", () => {
+    const map = approvedCoverageByDate([leave([seg("2026-09-15", "09:00", "18:00", 8)], { reason: "家中有事" })], ctx("2026-09-15", "2026-09-15"));
+    expect(view(map.get("2026-09-15"), "missing_out")).toEqual({
+      label: "缺下班",
+      tone: "amber",
+      fixType: "out",
+      note: "已核准：請假・特休（整天，家中有事）",
+    });
+  });
+
+  it("在家工作、出差、公出有事由也加在標籤後面；沒有事由照舊", () => {
+    const wfh = approvedCoverageByDate(
+      [wholeDays("wfh", "2026-09-14T16:00:00Z", "2026-09-15T15:59:00Z", { reason: "等裝潢驗收" })],
+      ctx("2026-09-15", "2026-09-15"),
+    );
+    expect(wfh.get("2026-09-15")).toEqual({ full: { kind: "wfh", label: "在家工作", reason: "等裝潢驗收" }, partial: [] });
+    expect(view(wfh.get("2026-09-15"))).toEqual({ label: "在家工作（等裝潢驗收）", tone: "blue", fixType: null, note: "" });
+    expect(view(wfh.get("2026-09-15"), "complete")).toMatchObject({ label: "完整", note: "已核准：在家工作（等裝潢驗收）" });
+
+    const trip = approvedCoverageByDate(
+      [wholeDays("business_trip", "2026-09-14T16:00:00Z", "2026-09-15T15:59:00Z", { trip_type: "business_trip", reason: "台中客戶驗收" })],
+      ctx("2026-09-15", "2026-09-15"),
+    );
+    expect(view(trip.get("2026-09-15")).label).toBe("出差（台中客戶驗收）");
+
+    const fullOuting = approvedCoverageByDate(
+      [outing("2026-09-15T01:00:00Z", "2026-09-15T10:00:00Z", 9, { reason: "拜訪客戶" })],
+      ctx("2026-09-15", "2026-09-15"),
+    );
+    expect(view(fullOuting.get("2026-09-15"))).toMatchObject({ label: "公出（拜訪客戶）", fixType: null });
+
+    const halfOuting = approvedCoverageByDate(
+      [outing("2026-09-15T06:00:00Z", "2026-09-15T09:00:00Z", 3, { reason: "拜訪客戶" })],
+      ctx("2026-09-15", "2026-09-15"),
+    );
+    expect(view(halfOuting.get("2026-09-15"))).toEqual({
+      label: "未打卡",
+      tone: "gray",
+      fixType: "in",
+      note: "已核准：公出 14:00–17:00（拜訪客戶）",
+    });
+
+    const plainWfh = approvedCoverageByDate([wholeDays("wfh", "2026-09-14T16:00:00Z", "2026-09-15T15:59:00Z")], ctx("2026-09-15", "2026-09-15"));
+    expect(view(plainWfh.get("2026-09-15")).label).toBe("在家工作");
+  });
+
+  it("請假＋公出湊滿整天 → 「請假・特休＋公出（事由）」，事由取時間最早、有填的那張", () => {
+    const map = approvedCoverageByDate(
+      [
+        leave([seg("2026-09-15", "09:00", "12:00", 3)]),
+        outing("2026-09-15T05:00:00Z", "2026-09-15T10:00:00Z", 5, { reason: "拜訪客戶" }),
+      ],
+      ctx("2026-09-15", "2026-09-15"),
+    );
+    expect(view(map.get("2026-09-15"))).toMatchObject({ label: "請假・特休＋公出（拜訪客戶）", fixType: null });
+  });
+});
+
+describe("預設檢視：國定假日、整天請假要看得到，而且不算缺卡（partitionPunchRows）", () => {
+  it("國定假日沒打卡 → holiday、整天核准單沒打卡 → covered，都預設顯示；真的沒打卡才是 no_punch；週末休息日不列", () => {
+    const from = "2026-10-05";
+    const to = "2026-10-11";
+    const today = "2026-10-12";
+    const dayTypeByDate = { "2026-10-09": "fixed_holiday", "2026-10-10": "fixed_holiday", "2026-10-11": "rest_day" };
+    const records = [
+      punch("in", "2026-10-05T01:00:00Z"), // 10-05 09:00
+      punch("out", "2026-10-05T10:00:00Z"), // 10-05 18:00（完整 → 收起）
+      punch("in", "2026-10-06T01:00:00Z"),
+      punch("out", "2026-10-06T10:00:00Z"), // 10-06 完整 → 收起
+      punch("in", "2026-10-10T02:00:00Z"), // 10-10（六、國定假日）10:00 加班
+      punch("out", "2026-10-10T06:00:00Z"), // 10-10 14:00
+    ];
+    const approved = [leave([seg("2026-10-07", "09:00", "18:00", 8)], { reason: "家中有事" })];
+
+    const rows = buildDayRows(records, from, to, TZ, { dayTypeByDate });
+    const coverage = approvedCoverageByDate(approved, { from, to, shift: DAY_SHIFT, tz: TZ });
+    const coveredDates = new Set([...coverage].flatMap(([date, day]) => (day.full ? [date] : [])));
+    const p = partitionPunchRows(rows, false, today, dayTypeByDate, coveredDates);
+    const visible = p.entries.filter((e) => !e.hidden).map((e) => e.item);
+    const labelOf = (date: string) =>
+      punchRowView(
+        rows.find((r) => r.date === date)!,
+        today,
+        coverage.get(date),
+        holidayLabelOf(dayTypeByDate[date as keyof typeof dayTypeByDate], date === "2026-10-09" ? "國慶日補假（10/10適逢週六）" : "國慶日"),
+      ).label;
+
+    // 10-11（日、休息日）不列；10-05、10-06 完整收起
+    expect(rows.map((r) => r.date)).toEqual(["2026-10-10", "2026-10-09", "2026-10-08", "2026-10-07", "2026-10-06", "2026-10-05"]);
+    expect(visible.map((r) => r.date)).toEqual(["2026-10-10", "2026-10-09", "2026-10-08", "2026-10-07"]);
+    expect(visible.map((r) => [r.date, labelOf(r.date)])).toEqual([
+      ["2026-10-10", "完整"], // 國定假日去加班：照打卡狀態（註記「國定假日・國慶日」）
+      ["2026-10-09", "國定假日・國慶日補假"],
+      ["2026-10-08", "未打卡"],
+      ["2026-10-07", "請假・特休（家中有事）"],
+    ]);
+    // 只有 10-08 是缺卡（no_punch）；國定假日、整天請假不算
+    const reasons = visible.map((r) => punchRowReasons(r, today, dayTypeByDate[r.date as keyof typeof dayTypeByDate], { covered: coveredDates.has(r.date) }));
+    expect(reasons).toEqual([["non_workday"], ["holiday"], ["no_punch"], ["covered"]]);
+    expect(reasons.flat().filter((reason) => reason === "no_punch")).toHaveLength(1);
+    // 「顯示全部日期」也看得到國定假日
+    expect(partitionPunchRows(rows, true, today, dayTypeByDate, coveredDates).entries.map((e) => e.item.date)).toContain("2026-10-09");
+  });
+
+  it("不帶 coveredDates（舊呼叫）→ 整天請假那天照舊算 no_punch，仍預設顯示", () => {
+    const rows = [{ date: "2026-10-07", status: "none" as const, durationMin: null }];
+    expect(punchRowReasons(rows[0], "2026-10-12")).toEqual(["no_punch"]);
+    expect(partitionPunchRows(rows, false, "2026-10-12").hiddenCount).toBe(0);
   });
 });

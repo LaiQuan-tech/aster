@@ -9,8 +9,10 @@ import { buildDayRows, fixPunchHref, type DayRow, type PunchHistoryRecord } from
 import {
   approvedCoverageByDate,
   calendarYearsOf,
+  dayLabelMapOf,
   dayTypeMapOf,
   dayTypesForYears,
+  holidayLabelOf,
   pickDefaultShift,
   punchRowView,
   settleWithin,
@@ -47,11 +49,27 @@ const durationOf = (row: DayRow) => (row.durationMin == null ? "—" : fmtHoursM
  */
 interface DayContextCache {
   calendarByYear: Map<number, Record<string, DayType>>;
+  /** 行事曆的 label（國定假日的節日名稱），跟 calendarByYear 同時寫入。 */
+  calendarLabelsByYear: Map<number, Record<string, string>>;
   approved: ApprovedRequestLike[] | null;
   shift: ShiftLike | null;
 }
 
-async function loadDayTypes(cache: DayContextCache, from: string, to: string): Promise<Record<string, DayType>> {
+interface CalendarInfo {
+  dayTypeByDate: Record<string, DayType>;
+  labelByDate: Record<string, string>;
+}
+
+/** 目前快取裡的行事曆（逾時的退回值也用這個：已快取好的年份照用，其餘週一～五）。 */
+function cachedCalendar(cache: DayContextCache, from: string, to: string): CalendarInfo {
+  const years = calendarYearsOf(from, to);
+  return {
+    dayTypeByDate: dayTypesForYears(years, cache.calendarByYear),
+    labelByDate: dayTypesForYears(years, cache.calendarLabelsByYear),
+  };
+}
+
+async function loadCalendar(cache: DayContextCache, from: string, to: string): Promise<CalendarInfo> {
   const years = calendarYearsOf(from, to);
   await Promise.all(
     years
@@ -59,13 +77,14 @@ async function loadDayTypes(cache: DayContextCache, from: string, to: string): P
       .map(async (year) => {
         try {
           const res = await getCalendar(year);
+          cache.calendarLabelsByYear.set(year, dayLabelMapOf(res?.days));
           cache.calendarByYear.set(year, dayTypeMapOf(res?.days));
         } catch {
           // 這一年退回週一～五（不快取，下次查詢再試）
         }
       }),
   );
-  return dayTypesForYears(years, cache.calendarByYear);
+  return cachedCalendar(cache, from, to);
 }
 
 async function loadApproved(cache: DayContextCache): Promise<ApprovedRequestLike[]> {
@@ -120,6 +139,8 @@ interface Loaded {
   records: PunchHistoryRecord[];
   /** 行事曆裁定；抓不到的年份不在裡面 → 那幾天退回週一～五。 */
   dayTypeByDate: Record<string, DayType>;
+  /** 行事曆的 label（國定假日標「國定假日・國慶日補假」用）。 */
+  labelByDate: Record<string, string>;
   /** 已核准的單（抓不到＝空，退回舊行為）。 */
   approved: ApprovedRequestLike[];
   /** 預設班別：判斷請假有沒有涵蓋整個上班時段。 */
@@ -134,7 +155,12 @@ export default function PunchesPage() {
   const [error, setError] = useState<string | null>(null);
   const seqRef = useRef(0);
   const firstLoadRef = useRef(true);
-  const contextCacheRef = useRef<DayContextCache>({ calendarByYear: new Map(), approved: null, shift: null });
+  const contextCacheRef = useRef<DayContextCache>({
+    calendarByYear: new Map(),
+    calendarLabelsByYear: new Map(),
+    approved: null,
+    shift: null,
+  });
 
   const rangeError = useMemo(() => rangeErrorOf(from, to), [from, to]);
 
@@ -157,16 +183,14 @@ export default function PunchesPage() {
       // 三支參考資料各自最多等 CONTEXT_WAIT_MS：卡住就退回舊規則（行事曆用逾時當下已快取的年份、其餘週一～五；
       // 沒有核准單；預設班別），打卡紀錄照常顯示。
       const cache = contextCacheRef.current;
-      const [res, dayTypeByDate, approved, shift] = await Promise.all([
+      const [res, calendar, approved, shift] = await Promise.all([
         getPunchRecords(f, t),
-        settleWithin(loadDayTypes(cache, f, t), CONTEXT_WAIT_MS, () =>
-          dayTypesForYears(calendarYearsOf(f, t), cache.calendarByYear),
-        ),
+        settleWithin(loadCalendar(cache, f, t), CONTEXT_WAIT_MS, () => cachedCalendar(cache, f, t)),
         settleWithin(loadApproved(cache), CONTEXT_WAIT_MS, (): ApprovedRequestLike[] => []),
         settleWithin(loadShift(cache), CONTEXT_WAIT_MS, () => pickDefaultShift(null)),
       ]);
       if (seq !== seqRef.current) return; // 已有更新的查詢，丟掉這筆舊回應
-      setLoaded({ from: f, to: t, records: res.records, dayTypeByDate, approved, shift });
+      setLoaded({ from: f, to: t, records: res.records, ...calendar, approved, shift });
       setError(null);
     } catch (err) {
       if (seq !== seqRef.current) return;
@@ -186,27 +210,46 @@ export default function PunchesPage() {
   }, [from, to, rangeError, load]);
 
   const today = todayKey();
-  // 空列只補上班日（行事曆：補班日要、國定假日／休息日不要；抓不到＝週一～五）。
+  // 空列補上班日與國定假日（行事曆：補班日要、國定假日一律列、休息日不要；抓不到＝週一～五）。
   const rows = useMemo(
     () => (loaded ? buildDayRows(loaded.records, loaded.from, loaded.to, undefined, { dayTypeByDate: loaded.dayTypeByDate }) : []),
     [loaded],
   );
-  // 每列的標籤／補卡連結／註記：整天請假（含請假＋公出湊滿）、公出、在家工作、出差且沒打卡的日子不給「申請補卡」。
-  // 日期換算與上面分組打卡同一個時區（瀏覽器時區）。
-  const views = useMemo(() => {
-    const coverage = loaded
-      ? approvedCoverageByDate(loaded.approved, { from: loaded.from, to: loaded.to, shift: loaded.shift })
-      : null;
-    return new Map(rows.map((row) => [row.date, punchRowView(row, today, coverage?.get(row.date))]));
-  }, [rows, loaded, today]);
+  // 已核准的單逐日涵蓋情形；日期換算與上面分組打卡同一個時區（瀏覽器時區）。
+  const coverage = useMemo(
+    () => (loaded ? approvedCoverageByDate(loaded.approved, { from: loaded.from, to: loaded.to, shift: loaded.shift }) : null),
+    [loaded],
+  );
+  // 每列的標籤／補卡連結／註記：國定假日（「國定假日・國慶日補假」）、整天請假（含請假＋公出湊滿）、公出、在家工作、
+  // 出差且沒打卡的日子不給「申請補卡」；已核准單有事由就加在後面（「請假・特休（家中有事）」）。
+  const views = useMemo(
+    () =>
+      new Map(
+        rows.map((row) => [
+          row.date,
+          punchRowView(
+            row,
+            today,
+            coverage?.get(row.date),
+            holidayLabelOf(loaded?.dayTypeByDate[row.date], loaded?.labelByDate[row.date]),
+          ),
+        ]),
+      ),
+    [rows, coverage, loaded, today],
+  );
   const viewOf = (row: DayRow): PunchRowView => views.get(row.date) ?? punchRowView(row, today);
 
-  // 預設只列需要留意的日子（缺卡、上班日沒打卡、休息日或國定假日有打卡、今天）；上下班都完整的上班日收起來。
+  // 預設只列需要留意的日子（缺卡、上班日沒打卡、國定假日、整天有已核准的請假／公出／在家工作／出差、休息日有打卡、
+  // 今天）；上下班都完整的上班日收起來。國定假日、整天有核准單的日子理由是 holiday／covered，不算缺卡。
   // 哪天是上班日照行事曆（補班日算上班日、平日的國定假日不算；抓不到＝週一～五），與上面補空列同一份裁定。
   // 匯出 CSV 一律吃完整的 rows，不受這個開關影響。
+  const coveredDates = useMemo(
+    () => new Set(Array.from(coverage ?? []).flatMap(([date, day]) => (day.full ? [date] : []))),
+    [coverage],
+  );
   const partition = useMemo(
-    () => partitionPunchRows(rows, showAll, today, loaded?.dayTypeByDate),
-    [rows, showAll, today, loaded],
+    () => partitionPunchRows(rows, showAll, today, loaded?.dayTypeByDate, coveredDates),
+    [rows, showAll, today, loaded, coveredDates],
   );
   const visibleRows = useMemo(() => partition.entries.filter((entry) => !entry.hidden).map((entry) => entry.item), [partition]);
 
@@ -239,7 +282,7 @@ export default function PunchesPage() {
         </div>
         <InlineError className="mt-2">{rangeError}</InlineError>
         <p className="mt-2 text-xs text-gray-400">
-          預設只列需要留意的日子（缺卡、上班日沒打卡、休息日或國定假日有打卡、今天），打開「顯示全部日期」可看每一天。上班日依公司行事曆（補班日照列），沒有打卡也會列出；國定假日、休息日只列有紀錄的日子。已核准整天請假、公出、在家工作或出差的日子會直接標示，不必補卡。時間為本地時間。
+          預設只列需要留意的日子（缺卡、上班日沒打卡、國定假日、已核准的整天請假／公出／在家工作／出差、休息日有打卡、今天），打開「顯示全部日期」可看每一天。上班日依公司行事曆（補班日照列），沒有打卡也會列出；國定假日一律列出並標示「國定假日」，休息日只列有紀錄的日子。國定假日、已核准整天請假、公出、在家工作或出差的日子會直接標示（有填事由會一併顯示），不必補卡。時間為本地時間。
         </p>
       </Card>
 
@@ -290,9 +333,12 @@ export default function PunchesPage() {
                     const view = viewOf(row);
                     return (
                       <li key={row.date} className="rounded-xl border border-gray-100 bg-gray-50 p-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="text-sm font-semibold text-gray-900">{fmtDateWithWeekday(row.date)}</p>
-                          <Pill tone={view.tone}>{view.label}</Pill>
+                        {/* 標籤可能帶事由（「請假・特休（家中有事）」）：放不下就換到日期下一行、標籤內文字可折行，不撐破卡片。 */}
+                        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                          <p className="shrink-0 text-sm font-semibold text-gray-900">{fmtDateWithWeekday(row.date)}</p>
+                          <Pill tone={view.tone}>
+                            <span className="whitespace-normal">{view.label}</span>
+                          </Pill>
                         </div>
                         {view.note && <p className="mt-1 text-xs text-gray-500">{view.note}</p>}
                         <dl className="mt-2 grid grid-cols-3 gap-2 text-sm">
@@ -346,7 +392,9 @@ export default function PunchesPage() {
                             <td className="py-2.5 pr-4 tabular-nums">{durationOf(row)}</td>
                             <td className="py-2.5">
                               <div className="flex items-center gap-3">
-                                <Pill tone={view.tone}>{view.label}</Pill>
+                                <Pill tone={view.tone}>
+                                  <span className="whitespace-normal">{view.label}</span>
+                                </Pill>
                                 {view.fixType && (
                                   <Link
                                     href={fixPunchHref(row.date, view.fixType)}

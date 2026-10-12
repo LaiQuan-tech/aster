@@ -157,11 +157,14 @@ describe("buildDayRows", () => {
  * 2026-10-09（五）國定假日、2026-09-19（六）補班、2026-09-16（三）公司自訂休息日。
  */
 describe("isFillDay（要不要補「沒打卡」空列）", () => {
-  it("沒有裁定＝週一～五；有裁定照裁定；無效日期一律不要", () => {
+  it("沒有裁定＝週一～五；有裁定照裁定；國定假日一律要；無效日期一律不要", () => {
     expect(isFillDay("2026-10-09")).toBe(true); // 週五、沒裁定
     expect(isFillDay("2026-09-19")).toBe(false); // 週六、沒裁定
-    expect(isFillDay("2026-10-09", "fixed_holiday")).toBe(false);
+    // 國定假日一律補列（2026-10-12 業主要求：畫面標「國定假日」、不給補卡），落在週六也一樣
+    expect(isFillDay("2026-10-09", "fixed_holiday")).toBe(true);
+    expect(isFillDay("2026-10-10", "fixed_holiday")).toBe(true);
     expect(isFillDay("2026-09-16", "rest_day")).toBe(false);
+    expect(isFillDay("2026-10-11", "rest_day")).toBe(false); // 週日的休息日照舊不列
     expect(isFillDay("2026-09-19", "workday")).toBe(true); // 補班
     expect(isFillDay("2026-09-20", "special")).toBe(false); // 看不懂的裁定 → 退回週一～五（週日）
     expect(isFillDay("not-a-date", "workday")).toBe(false);
@@ -170,14 +173,25 @@ describe("isFillDay（要不要補「沒打卡」空列）", () => {
 });
 
 describe("buildDayRows：依行事曆補空列", () => {
-  it("國定假日、休息日沒打卡不補列；補班的週六沒打卡要補列", () => {
+  it("休息日沒打卡不補列；補班的週六沒打卡要補列", () => {
     const dayTypeByDate = { "2026-09-16": "rest_day", "2026-09-19": "workday" };
     const rows = buildDayRows([], "2026-09-14", "2026-09-20", TZ, { dayTypeByDate });
     expect(rows.map((row) => row.date)).toEqual(["2026-09-19", "2026-09-18", "2026-09-17", "2026-09-15", "2026-09-14"]);
     expect(rows.every((row) => row.status === "none")).toBe(true);
+  });
 
-    const holiday = buildDayRows([], "2026-10-05", "2026-10-11", TZ, { dayTypeByDate: { "2026-10-09": "fixed_holiday" } });
-    expect(holiday.map((row) => row.date)).toEqual(["2026-10-08", "2026-10-07", "2026-10-06", "2026-10-05"]);
+  it("國定假日沒打卡也補一列（含落在週六的）；一般週末休息日照舊不列", () => {
+    const holiday = buildDayRows([], "2026-10-05", "2026-10-11", TZ, {
+      dayTypeByDate: { "2026-10-09": "fixed_holiday", "2026-10-10": "fixed_holiday", "2026-10-11": "rest_day" },
+    });
+    expect(holiday.map((row) => [row.date, row.status])).toEqual([
+      ["2026-10-10", "none"], // 週六的國定假日
+      ["2026-10-09", "none"], // 週五的國定假日
+      ["2026-10-08", "none"],
+      ["2026-10-07", "none"],
+      ["2026-10-06", "none"],
+      ["2026-10-05", "none"],
+    ]);
   });
 
   it("國定假日有打卡照列（不論是否上班日都照打卡狀態）", () => {

@@ -31,8 +31,14 @@
  *   與出勤月表的規則對齊：有已核准請假／在家工作／出差的日子，沒打卡不算缺卡。
  *
  * ── 一列怎麼顯示（`punchRowView`）────────────────────────────────────────────
+ *   國定假日（行事曆 fixed_holiday，2026-10-12 業主要求）：沒打卡 → 標籤「國定假日・國慶日補假」（節日名稱取
+ *   行事曆 label，去掉說明日期的括號，見 `holidayLabelOf`；沒有 label＝「國定假日」），不給「申請補卡」（今天也一樣）。
+ *   有打卡 → 照打卡狀態顯示（缺卡照樣可以補卡：假日加班要算數），另附小字註記「國定假日・…」。
  *   沒打卡（none）的日子被整天涵蓋 → 標籤改成「請假・特休」「公出」「在家工作」「出差」，不給「申請補卡」。
  *   有打卡的日子照打卡狀態顯示（不論是否上班日、有沒有核准單），核准單只當小字註記。
+ *   事由（2026-10-12 業主要求）：已核准單的 `reason` 有填就加在標籤／註記後面——「請假・特休（家中有事）」
+ *   「請假・特休 13:00–18:00（看牙醫）」「在家工作（等裝潢驗收）」；空白壓成一格、超過 16 字截斷加「…」
+ *   （`reasonTextOf`）。兩張單合起來才算整天時，取時間最早、有填事由的那張。
  *   今天：缺下班＝「上班中」、沒打卡＝「尚未打卡」，都不催補卡（同舊行為）；只有今天沒打卡且整天被涵蓋時，
  *   改顯示單的種類（「尚未打卡」會讓請假中的人以為要打卡；兩者都不給補卡）。
  *
@@ -76,17 +82,41 @@ export function dayTypeMapOf(days: unknown): Record<string, DayType> {
   return map;
 }
 
+/** `GET /calendar` 的 `days` → `{ date: label }`（只收有填 label 的列，前後空白去掉）；國定假日的節日名稱用。 */
+export function dayLabelMapOf(days: unknown): Record<string, string> {
+  const map: Record<string, string> = {};
+  if (!Array.isArray(days)) return map;
+  for (const day of days) {
+    if (!day || typeof day !== "object") continue;
+    const { date, label } = day as { date?: unknown; label?: unknown };
+    if (typeof date === "string" && DATE_RE.test(date) && typeof label === "string" && label.trim()) map[date] = label.trim();
+  }
+  return map;
+}
+
 /**
- * 把各年份的行事曆裁定併成一張表。`byYear` 沒有的年份（抓不到）就不放，
+ * 把各年份的行事曆裁定（或 label）併成一張表。`byYear` 沒有的年份（抓不到）就不放，
  * 那幾天由 punch-history 的 `isFillDay` 退回週一～五。
  */
-export function dayTypesForYears(
+export function dayTypesForYears<T = DayType>(
   years: readonly number[],
-  byYear: ReadonlyMap<number, Readonly<Record<string, DayType>>>,
-): Record<string, DayType> {
-  const merged: Record<string, DayType> = {};
+  byYear: ReadonlyMap<number, Readonly<Record<string, T>>>,
+): Record<string, T> {
+  const merged: Record<string, T> = {};
   for (const year of years) Object.assign(merged, byYear.get(year) ?? {});
   return merged;
+}
+
+/**
+ * 國定假日這一列的標籤：「國定假日・國慶日補假」；沒有 label＝「國定假日」；不是國定假日（fixed_holiday）→ null。
+ * label 結尾說明日期的括號（含數字，例如「國慶日補假（10/10適逢週六）」的「（10/10適逢週六）」）去掉，
+ * 「春節（初一）」這種名稱本身的括號保留。
+ */
+export function holidayLabelOf(dayType: DayType | undefined, label?: string | null): string | null {
+  if (dayType !== "fixed_holiday") return null;
+  const raw = typeof label === "string" ? label.replace(/\s+/g, " ").trim() : "";
+  const name = raw.replace(/\s*[（(][^（()）]*\d[^（()）]*[）)]$/, "").trim() || raw;
+  return name && name !== "國定假日" ? `國定假日・${name}` : "國定假日";
 }
 
 /* -------------------------------------------------- 等待上限 --- */
@@ -186,15 +216,20 @@ export interface ApprovedRequestLike {
   segments?: ReadonlyArray<SegmentLike | null | undefined> | null;
   trip_type?: string | null;
   leave_type_name?: string | null;
+  /** 申請事由（選填）；有填就加在標籤／註記後面（`reasonTextOf`）。 */
+  reason?: string | null;
 }
 
 /** 整天涵蓋的種類；請假＋公出合起來蓋滿算 "leave"（標籤「請假・特休＋公出」）。 */
 export type CoverageKind = "leave" | "outing" | "wfh" | "business_trip";
 
 export interface DayCoverage {
-  /** 整天涵蓋（沒打卡也不必補卡）：`label` 如「請假・特休」「請假・特休＋公出」「公出」「在家工作」「出差」。 */
-  full: { kind: CoverageKind; label: string } | null;
-  /** 只涵蓋部分時段的請假／公出給小字註記，例如「請假・特休 13:00–18:00」「公出 14:00–17:00」。 */
+  /**
+   * 整天涵蓋（沒打卡也不必補卡）：`label` 如「請假・特休」「請假・特休＋公出」「公出」「在家工作」「出差」（不含事由）；
+   * `reason`＝整理過的事由（`reasonTextOf`，沒填就沒有這個欄位），畫面顯示成「請假・特休（事由）」。
+   */
+  full: { kind: CoverageKind; label: string; reason?: string } | null;
+  /** 只涵蓋部分時段的請假／公出給小字註記，例如「請假・特休 13:00–18:00」「公出 14:00–17:00（拜訪客戶）」。 */
   partial: string[];
 }
 
@@ -224,11 +259,35 @@ interface TimePiece {
   wholeByHours: boolean;
   /** 假別名（可空；公出為空）。 */
   name: string;
-  /** 小字註記。 */
+  /** 整理過的事由（可空）。 */
+  reason: string;
+  /** 小字註記（含事由）。 */
   text: string;
 }
 
 const OUTING_LABEL = "公出";
+/** 事由最多顯示幾個字（超過截斷加「…」）。 */
+export const REASON_MAX_CHARS = 16;
+
+/** 字串切成「看得到的一個字」（grapheme：組合 emoji 不會被切半）；瀏覽器沒有 Intl.Segmenter → 退回逐碼點。 */
+function graphemesOf(text: string): string[] {
+  const Segmenter = (Intl as { Segmenter?: new (locale?: string, opts?: { granularity: "grapheme" }) => { segment(input: string): Iterable<{ segment: string }> } }).Segmenter;
+  if (typeof Segmenter !== "function") return Array.from(text);
+  return Array.from(new Segmenter("zh-Hant", { granularity: "grapheme" }).segment(text), (part) => part.segment);
+}
+
+/** 申請事由 → 顯示用：空白（含換行）壓成一格、去頭尾；超過 REASON_MAX_CHARS 個字截斷加「…」；沒填／不是字串 → ""。 */
+export function reasonTextOf(reason: unknown): string {
+  if (typeof reason !== "string") return "";
+  const chars = graphemesOf(reason.replace(/\s+/g, " ").trim());
+  return chars.length > REASON_MAX_CHARS ? `${chars.slice(0, REASON_MAX_CHARS).join("").trimEnd()}…` : chars.join("");
+}
+
+/** 「請假・特休」＋事由 →「請假・特休（家中有事）」；沒有事由照原樣。 */
+export const withReason = (text: string, reason?: string | null) => (reason ? `${text}（${reason}）` : text);
+
+/** 時間最早、有填事由的那塊的事由（兩張單合起來才算整天時用）；都沒填 → ""。 */
+const firstReasonOf = (pieces: readonly { reason: string }[]) => pieces.find((p) => p.reason)?.reason ?? "";
 
 const dayIndex = (dateKey: string) => Math.round(Date.parse(`${dateKey}T00:00:00Z`) / MS_PER_DAY);
 
@@ -268,7 +327,7 @@ function walkDays(from: string, to: string, visit: (date: string) => void): void
 function intervalPiecesOf(
   req: ApprovedRequestLike,
   ctx: CoverageContext,
-  base: { source: TimePiece["source"]; name: string; label: string; wholeHours?: (hours: number) => boolean },
+  base: { source: TimePiece["source"]; name: string; label: string; reason: string; wholeHours?: (hours: number) => boolean },
   push: (date: string, piece: TimePiece) => void,
 ): void {
   const start = localPoint(req.start_at, ctx.tz);
@@ -290,7 +349,8 @@ function intervalPiecesOf(
       hours: sameDay ? hours : 0,
       wholeByHours: sameDay && !!base.wholeHours?.(hours),
       name: base.name,
-      text: `${base.label} ${when}`,
+      reason: base.reason,
+      text: withReason(`${base.label} ${when}`, base.reason),
     });
   });
 }
@@ -299,6 +359,7 @@ function intervalPiecesOf(
 function leavePiecesOf(req: ApprovedRequestLike, ctx: CoverageContext, win: WorkWindow, push: (date: string, piece: TimePiece) => void): void {
   const name = typeof req.leave_type_name === "string" ? req.leave_type_name.trim() : "";
   const label = leaveLabelOf([name]);
+  const reason = reasonTextOf(req.reason);
   const wholeHours = (hours: number) => hours > 0 && hours * 60 >= win.workMinutes - TOLERANCE_MIN;
 
   const segments = (Array.isArray(req.segments) ? req.segments : []).filter(
@@ -328,14 +389,15 @@ function leavePiecesOf(req: ApprovedRequestLike, ctx: CoverageContext, win: Work
         hours,
         wholeByHours: wholeHours(hours),
         name,
-        text: span ? `${label} ${normalizeHm(startTime)}–${normalizeHm(endTime)}` : label,
+        reason,
+        text: withReason(span ? `${label} ${normalizeHm(startTime)}–${normalizeHm(endTime)}` : label, reason),
       });
     }
     return;
   }
 
   // 舊單／匯入單：沒有 segments → start_at／end_at 換成當地時間，逐日切。
-  intervalPiecesOf(req, ctx, { source: "leave", name, label, wholeHours }, push);
+  intervalPiecesOf(req, ctx, { source: "leave", name, label, reason, wholeHours }, push);
 }
 
 /** 在家工作／出差涵蓋到的當地日（同 API sliceWfhDates：end_at 剛好落在午夜算前一天），只收 `[from, to]` 內。 */
@@ -395,19 +457,24 @@ export function approvedCoverageByDate(
     if (list) list.push(piece);
     else piecesByDate.set(date, [piece]);
   };
-  const wfhDates = new Set<string>();
-  const tripDates = new Set<string>();
+  // 在家工作／出差：日期 → 事由（同一天有好幾張時取第一張有填事由的）。
+  const wfhDates = new Map<string, string>();
+  const tripDates = new Map<string, string>();
+  const markDates = (dates: Map<string, string>, req: ApprovedRequestLike) => {
+    const reason = reasonTextOf(req.reason);
+    for (const date of coveredDatesOf(req, ctx)) if (!dates.get(date)) dates.set(date, reason);
+  };
   for (const req of Array.isArray(requests) ? requests : []) {
     if (!req || typeof req !== "object") continue;
     if (req.status != null && req.status !== "approved") continue;
     if (req.kind === "leave") {
       leavePiecesOf(req, ctx, win, pushPiece);
     } else if (req.kind === "wfh") {
-      for (const date of coveredDatesOf(req, ctx)) wfhDates.add(date);
+      markDates(wfhDates, req);
     } else if (req.kind === "business_trip" && req.trip_type === "business_trip") {
-      for (const date of coveredDatesOf(req, ctx)) tripDates.add(date);
+      markDates(tripDates, req);
     } else if (req.kind === "business_trip" && req.trip_type === "outing") {
-      intervalPiecesOf(req, ctx, { source: "outing", name: "", label: OUTING_LABEL }, pushPiece);
+      intervalPiecesOf(req, ctx, { source: "outing", name: "", label: OUTING_LABEL, reason: reasonTextOf(req.reason) }, pushPiece);
     }
   }
 
@@ -419,7 +486,7 @@ export function approvedCoverageByDate(
       win,
     ) >= win.workMinutes - TOLERANCE_MIN;
 
-  const dates = new Set<string>([...piecesByDate.keys(), ...wfhDates, ...tripDates]);
+  const dates = new Set<string>([...piecesByDate.keys(), ...wfhDates.keys(), ...tripDates.keys()]);
   for (const date of dates) {
     // 只留碰得到上班時段的時段塊（例：結束剛好在午夜的單不會在隔天留註記）。
     const pieces = (piecesByDate.get(date) ?? [])
@@ -430,15 +497,21 @@ export function approvedCoverageByDate(
     const leaveLabel = leaveLabelOf(leaves.map((p) => p.name));
 
     // 請假自己蓋滿 → 請假標籤；要加上公出才蓋滿 → 「請假・特休＋公出」，只有公出 → 「公出」。
+    // 事由：湊滿整天的那幾塊裡，時間最早、有填事由的那張（firstReasonOf）；出差／在家工作取那天的單。
+    const fullOf = (kind: CoverageKind, label: string, reason: string): DayCoverage["full"] =>
+      reason ? { kind, label, reason } : { kind, label };
     let full: DayCoverage["full"] = null;
     if (leaves.length > 0 && isWhole(leaves)) {
-      full = { kind: "leave", label: leaveLabel };
+      full = fullOf("leave", leaveLabel, firstReasonOf(leaves));
     } else if (hasOuting && isWhole(pieces)) {
-      full = leaves.length > 0 ? { kind: "leave", label: `${leaveLabel}＋${OUTING_LABEL}` } : { kind: "outing", label: OUTING_LABEL };
+      full =
+        leaves.length > 0
+          ? fullOf("leave", `${leaveLabel}＋${OUTING_LABEL}`, firstReasonOf(pieces))
+          : fullOf("outing", OUTING_LABEL, firstReasonOf(pieces));
     } else if (tripDates.has(date)) {
-      full = { kind: "business_trip", label: "出差" };
+      full = fullOf("business_trip", "出差", tripDates.get(date) ?? "");
     } else if (wfhDates.has(date)) {
-      full = { kind: "wfh", label: "在家工作" };
+      full = fullOf("wfh", "在家工作", wfhDates.get(date) ?? "");
     }
     // 整天是請假／公出湊出來的 → 不再逐塊註記；其他（蓋不滿、或整天是出差／在家）→ 每塊各一則註記。
     const piecesMadeFull = full?.kind === "leave" || full?.kind === "outing";
@@ -472,17 +545,32 @@ const noteOf = (items: readonly string[]) => (items.length > 0 ? `已核准：${
 
 /**
  * 打卡紀錄一列的狀態標籤、要不要給「申請補卡」（給的話補哪一種卡）、小字註記。
- * `today` 是當地今天的日期鍵；`coverage` 是這天的已核准單（`approvedCoverageByDate`）。
+ * `today` 是當地今天的日期鍵；`coverage` 是這天的已核准單（`approvedCoverageByDate`）；
+ * `holiday` 是國定假日的標籤（`holidayLabelOf`，不是國定假日＝省略／null）。
  */
-export function punchRowView(row: Pick<DayRow, "date" | "status">, today: string, coverage?: DayCoverage | null): PunchRowView {
+export function punchRowView(
+  row: Pick<DayRow, "date" | "status">,
+  today: string,
+  coverage?: DayCoverage | null,
+  holiday?: string | null,
+): PunchRowView {
   const full = coverage?.full ?? null;
   const partial = coverage?.partial ?? [];
-  // 沒打卡、但整天都有已核准的單 → 標籤改成單的種類，不催補卡（今天也一樣）。
-  if (row.status === "none" && full) return { label: full.label, tone: "blue", fixType: null, note: noteOf(partial) };
+  const fullLabel = full ? withReason(full.label, full.reason) : "";
+  // 國定假日沒打卡 → 「國定假日・國慶日補假」，不催補卡（今天也一樣）；那天的已核准單（少見，例如跨假日的出差）當小字註記。
+  if (row.status === "none" && holiday) {
+    return { label: holiday, tone: "blue", fixType: null, note: noteOf(full ? [fullLabel, ...partial] : partial) };
+  }
+  // 沒打卡、但整天都有已核准的單 → 標籤改成單的種類（含事由），不催補卡（今天也一樣）。
+  if (row.status === "none" && full) return { label: fullLabel, tone: "blue", fixType: null, note: noteOf(partial) };
 
-  // 請假、公出本來就有部分時段的，整天要註明「（整天）」；在家工作、出差只有整天，不必加。
-  const fullNote = full && (full.kind === "leave" || full.kind === "outing") ? `${full.label}（整天）` : full?.label;
-  const note = noteOf(fullNote ? [fullNote, ...partial] : partial);
+  // 請假、公出本來就有部分時段的，整天要註明「（整天）」（有事由：「（整天，家中有事）」）；在家工作、出差只有整天，不必加。
+  const fullNote =
+    full && (full.kind === "leave" || full.kind === "outing")
+      ? `${full.label}（整天${full.reason ? `，${full.reason}` : ""}）`
+      : fullLabel;
+  // 國定假日有打卡：照打卡狀態顯示，小字註記「國定假日・…」放最前面。
+  const note = [holiday ?? "", noteOf(fullNote ? [fullNote, ...partial] : partial)].filter(Boolean).join("；");
   // 今天還在進行中：「缺下班」其實是「上班中」、「未打卡」是「尚未打卡」，不該催人補卡。
   if (row.date === today) {
     if (row.status === "missing_out") return { label: "上班中", tone: "blue", fixType: null, note };
