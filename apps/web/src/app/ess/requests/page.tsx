@@ -3,7 +3,7 @@
 /**
  * 請假／申請 `/ess/requests?kind=…&date=…&id=…`
  *
- * 由上而下：①種類切換（請假｜補卡｜加班｜在家｜公出｜預支）②該種類的表單卡（只顯示該種類欄位）
+ * 由上而下：①種類切換（請假｜補卡｜加班｜公出）②該種類的表單卡（只顯示該種類欄位）
  * ③送出後成功畫面取代表單（等待誰簽核＋摘要＋再填一張／查看我的申請）
  * ④「我的申請」清單（`GET /requests?scope=mine`）。
  * 申請人一律是登入者本人（沒有代為申請；API 對代申請欄位且對象非本人回 400 filing_on_behalf_removed）。
@@ -44,7 +44,6 @@ import { MyRequests } from "./_components/MyRequests";
 import { OvertimeForm } from "./_components/OvertimeForm";
 import { SubmitSuccess } from "./_components/SubmitSuccess";
 import { TripForm } from "./_components/TripForm";
-import { WfhForm } from "./_components/WfhForm";
 import { describeError } from "./_components/form-shared";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -227,8 +226,6 @@ function RequestsView() {
         return <OvertimeForm key={`ot-${formKey}`} {...common} />;
       case "business_trip":
         return <TripForm key={`trip-${formKey}`} {...common} advanceThreshold={advanceThreshold} />;
-      case "wfh":
-        return <WfhForm key={`wfh-${formKey}`} {...common} />;
       default:
         return null;
     }
