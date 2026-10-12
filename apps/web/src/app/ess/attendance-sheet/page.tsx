@@ -1,11 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { MonthPicker } from "@/components/MonthPicker";
-import { AttendanceSheetTable } from "@/components/AttendanceSheetTable";
+import { AttendanceSheetTable, SheetMonthAnomalies } from "@/components/AttendanceSheetTable";
 import { Button, Card, InlineError, Pill, type PillTone } from "@/components/ess-ui";
 import { useEssState } from "@/lib/ess-state";
+import { getMyApprovedTrips, type MyTrip } from "@/lib/ess-api";
+import { todayKey } from "@/lib/ess-format";
+import { findNoPunchDates, isTripsForbidden, noPunchSummary } from "@/lib/sheet-no-punch";
 import {
   getMyAttendanceSheet,
   listAttendanceSheets,
@@ -14,13 +17,18 @@ import {
   friendlyError,
   mergeDayPatch,
   unacknowledgedErrors,
+  currentSheetPeriod,
   SHEET_STATUS_LABEL,
+  SHEET_TIME_ZONE,
   type SheetView,
   type SheetListItem,
   type SheetDayPatch,
 } from "@/lib/attendance-sheets-api";
 
-const currentPeriod = new Date().toISOString().slice(0, 7);
+/**
+ * 本人已核准的出差／公出單（「無打卡紀錄」判斷用）：讀取中＝先不標；讀不到（403 以外的錯誤）＝這次整張不標。
+ */
+type TripsState = { status: "loading" } | { status: "failed" } | { status: "ready"; trips: MyTrip[] };
 
 function fmtDateTime(iso: string | null): string {
   if (!iso) return "—";
@@ -38,7 +46,8 @@ const STATUS_TONE: Record<SheetView["status"], PillTone> = {
 
 export default function AttendanceSheetPage() {
   const { me } = useEssState();
-  const [period, setPeriod] = useState(currentPeriod);
+  // 預設月份用台北時間、在元件裡算（模組層只算一次又是 UTC：每月 1 日台北 00:00–07:59 會跑到上個月）。
+  const [period, setPeriod] = useState(() => currentSheetPeriod());
   const [sheet, setSheet] = useState<SheetView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -46,6 +55,7 @@ export default function AttendanceSheetPage() {
   const [submitting, setSubmitting] = useState(false);
   // null = 尚未載入；[] = 載入完成但沒有（或非主管、403 → 隱藏區塊）
   const [pending, setPending] = useState<SheetListItem[] | null>(null);
+  const [trips, setTrips] = useState<TripsState>({ status: "loading" });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -81,6 +91,34 @@ export default function AttendanceSheetPage() {
     };
   }, [period]);
 
+  // 「無打卡紀錄」要排除已核准的出差／公出：讀一次本人的單子（不分月份，全部帶回來由前端比對日期）。
+  useEffect(() => {
+    let active = true;
+    getMyApprovedTrips()
+      .then((res) => {
+        if (!active) return;
+        setTrips(Array.isArray(res?.requests) ? { status: "ready", trips: res.requests } : { status: "failed" });
+      })
+      .catch((err) => {
+        if (!active) return;
+        // 403＝員工端「申請」分頁沒開，這個人送不了出差單 → 當作沒有出差；其他錯誤 → 這次整張不標（避免誤標）。
+        setTrips(isTripsForbidden(err) ? { status: "ready", trips: [] } : { status: "failed" });
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // 整天沒打卡又沒請假／在家／出差公出的上班日（只在本人月表標；後台、主管審核頁、匯出都不標）。
+  const noPunchDates = useMemo(
+    () =>
+      sheet && trips.status === "ready"
+        ? findNoPunchDates(sheet, { today: todayKey(SHEET_TIME_ZONE), trips: trips.trips })
+        : [],
+    [sheet, trips],
+  );
+  const noPunchDateSet = useMemo(() => new Set(noPunchDates), [noPunchDates]);
+
   async function handlePatchDay(date: string, patch: SheetDayPatch) {
     if (!sheet) return;
     try {
@@ -97,6 +135,7 @@ export default function AttendanceSheetPage() {
 
   const editable = sheet ? sheet.status === "draft" || sheet.status === "returned" : false;
   const blockers = sheet ? unacknowledgedErrors(sheet) : [];
+  const noPunchText = noPunchSummary(noPunchDates, editable);
 
   async function onSubmit() {
     if (!sheet) return;
@@ -154,10 +193,18 @@ export default function AttendanceSheetPage() {
               showMoney={false}
               onPatchDay={handlePatchDay}
               preferenceScope="ess"
+              noPunchDates={noPunchDateSet}
             />
-            <div className="no-print mt-4 space-y-2">
+            {/* 異常區：月份級異常列印時照印；無打卡摘要、送出前檢查與送出鈕不印。 */}
+            <div className="mt-4 space-y-2">
+              <SheetMonthAnomalies anomalies={sheet.monthAnomalies} audience="ess" />
+              {noPunchText && (
+                <p className="no-print rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                  {noPunchText}
+                </p>
+              )}
               {editable && blockers.length > 0 && (
-                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+                <div className="no-print rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
                   <p className="mb-1 font-medium">送出前請先在表格中說明以下錯誤等級異常：</p>
                   <ul className="list-disc space-y-0.5 pl-4">
                     {blockers.map((b, i) => (
@@ -169,7 +216,12 @@ export default function AttendanceSheetPage() {
                 </div>
               )}
               {editable && (
-                <Button onClick={() => void onSubmit()} disabled={blockers.length > 0} loading={submitting}>
+                <Button
+                  className="no-print"
+                  onClick={() => void onSubmit()}
+                  disabled={blockers.length > 0}
+                  loading={submitting}
+                >
                   {submitting ? "送出中…" : "送出"}
                 </Button>
               )}

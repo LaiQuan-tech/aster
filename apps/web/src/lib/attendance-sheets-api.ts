@@ -8,6 +8,7 @@
  * 不一致，以後端實際回應為準回來改這裡（欄位命名、是否包一層 `sheet` 等）。
  */
 import { apiFetch, apiDownload } from "./api-client";
+import { todayKey } from "./ess-format";
 import { describePeriodClosed } from "./period-closed";
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,11 @@ export type AnomalyCode =
   | "overtime_beyond_cap_unapproved"
   | "consecutive_late"
   | "pending_leave_in_period"
+  /**
+   * B8：本月有已核准但人資尚未核銷的假單（月份級；預設 warn，租戶開了
+   * blockApproveOnUnsettledLeave 時是 error）。後端以 `as` 轉型送出，共用合約檔沒列，這裡補上。
+   */
+  | "unsettled_leave_in_period"
   | "no_salary_structure"
   /** 2026-10-11：本月有遲到說明老闆還沒決定（視為影響全勤）。 */
   | "late_reports_undecided";
@@ -161,6 +167,8 @@ export interface SheetView {
   employeeId: string;
   employeeName: string;
   employeeNo: string | null;
+  /** 到職日 'YYYY-MM-DD'（員工主檔）；舊的核准快照沒有這欄 → 讀取端當作不知道。 */
+  hireDate?: string | null;
   department: string | null;
   title: string | null;
   period: string;
@@ -445,4 +453,88 @@ export function unacknowledgedErrors(sheet: SheetView): { date: string; anomaly:
     }
   }
   return out;
+}
+
+/**
+ * 出勤月表的「日」一律以台北時間為準（API 用租戶時區、預設 Asia/Taipei；前端拿不到租戶設定，固定台北）。
+ */
+export const SHEET_TIME_ZONE = "Asia/Taipei";
+
+/**
+ * 「這個月」的月表期別 'YYYY-MM'（台北時間；`now` 可注入以利測試）。
+ * 不要用 `new Date().toISOString().slice(0, 7)`：那是 UTC，每月 1 日台北 00:00–07:59 會算成上個月。
+ * 頁面要在元件裡算（useState 初始化函式），不要放模組層——模組層只在載入時算一次，SSR 時用的還是伺服器時間。
+ */
+export function currentSheetPeriod(now: Date | number | string = new Date()): string {
+  return todayKey(SHEET_TIME_ZONE, now).slice(0, 7);
+}
+
+// ---------------------------------------------------------------------------
+// 月份級異常（2026-10-12）：月加班門檻、連續遲到、假單待簽核／未核銷、遲到說明未決定、未設定薪資結構。
+// 不屬於任何一天，表格的「異常」欄放不下；畫面元件是 components/AttendanceSheetTable 的 SheetMonthAnomalies。
+// ---------------------------------------------------------------------------
+
+/** 誰在看：員工端（本人月表、主管審核頁）或後台。 */
+export type MonthAnomalyAudience = "ess" | "admin";
+
+/** 只有 HR 能處理、員工端不顯示的月份級異常。 */
+const HR_ONLY_MONTH_ANOMALIES: ReadonlySet<string> = new Set<AnomalyCode>(["no_salary_structure"]);
+
+/**
+ * message 空白時的中文說明（API 一律會帶中文 message，這是舊快照或欄位缺漏時的保險）。
+ * 對照 apps/api/src/services/attendance-sheets.ts 產生月份級異常的那一段。
+ */
+export const MONTH_ANOMALY_FALLBACK_TEXT: Partial<Record<AnomalyCode, string>> = {
+  monthly_ot_threshold: "本月加班累計已達門檻",
+  consecutive_late: "本月有連續遲到",
+  pending_leave_in_period: "本月仍有假單待簽核，核准後請假時數才會計入",
+  unsettled_leave_in_period: "本月有假單已核准但人資尚未核銷",
+  late_reports_undecided: "本月有遲到說明老闆尚未決定（視為影響全勤）",
+  no_salary_structure: "尚未設定薪資結構，無法試算金額",
+};
+
+/** 代碼也不認得時的通用說法。 */
+export const MONTH_ANOMALY_GENERIC_TEXT = "本月出勤有一項需要留意的狀況";
+
+const SEVERITY_ORDER: Record<AnomalySeverity, number> = { error: 0, warn: 1, info: 2 };
+
+export interface MonthAnomalyItem {
+  code: string;
+  severity: AnomalySeverity;
+  text: string;
+}
+
+/** 一筆月份級異常要顯示的文字：API 的 message；空白時用代碼對照的中文；代碼也不認得就用通用說法。 */
+export function monthAnomalyText(anomaly: { code?: unknown; message?: unknown }): string {
+  if (typeof anomaly.message === "string" && anomaly.message.trim()) return anomaly.message.trim();
+  // hasOwnProperty：避免 constructor／toString 這類代碼撈到 Object.prototype 上的東西。
+  const code = typeof anomaly.code === "string" ? anomaly.code : "";
+  const byCode = Object.prototype.hasOwnProperty.call(MONTH_ANOMALY_FALLBACK_TEXT, code)
+    ? MONTH_ANOMALY_FALLBACK_TEXT[code as AnomalyCode]
+    : undefined;
+  return byCode ?? MONTH_ANOMALY_GENERIC_TEXT;
+}
+
+/**
+ * 要顯示的月份級異常：員工端（`"ess"`）拿掉只有 HR 能處理的項目（未設定薪資結構）；嚴重度不認得的當 info；
+ * 依嚴重度排序（error → warn → info；同級維持 API 原順序，Array#sort 是穩定排序）。
+ * 不是陣列、缺代碼又缺訊息的資料一律略過，不丟例外。
+ */
+export function visibleMonthAnomalies(
+  list: readonly SheetAnomaly[] | null | undefined,
+  audience: MonthAnomalyAudience,
+): MonthAnomalyItem[] {
+  if (!Array.isArray(list)) return [];
+  const items: MonthAnomalyItem[] = [];
+  for (const raw of list as readonly unknown[]) {
+    if (!raw || typeof raw !== "object") continue;
+    const anomaly = raw as { code?: unknown; severity?: unknown; message?: unknown };
+    const code = typeof anomaly.code === "string" ? anomaly.code : "";
+    const hasMessage = typeof anomaly.message === "string" && anomaly.message.trim() !== "";
+    if (!code && !hasMessage) continue;
+    if (audience === "ess" && HR_ONLY_MONTH_ANOMALIES.has(code)) continue;
+    const severity: AnomalySeverity = anomaly.severity === "error" || anomaly.severity === "warn" ? anomaly.severity : "info";
+    items.push({ code, severity, text: monthAnomalyText(anomaly) });
+  }
+  return items.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
 }

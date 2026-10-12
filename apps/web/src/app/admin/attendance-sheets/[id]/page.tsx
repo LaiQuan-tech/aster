@@ -323,12 +323,14 @@ export default function AttendanceSheetDetailPage() {
           </button>
         </div>
 
+        {/* 月份級異常（月加班門檻、連續遲到、假單待簽核／未核銷、遲到說明未決定、未設定薪資結構）放在表格上方。 */}
         <AttendanceSheetTable
           sheet={sheet}
           editable={sheet.status !== "locked"}
           showMoney
           onPatchDay={handlePatchDay}
           preferenceScope="admin"
+          showMonthAnomalies="admin"
         />
       </Card>
 

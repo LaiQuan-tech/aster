@@ -170,9 +170,15 @@ describe("共用錯誤翻譯接上 describePeriodClosed", () => {
     expect(friendlySettlementError(new Error("[403] forbidden"), "核銷失敗")).toBe("沒有權限執行此操作");
   });
 
-  it("遲到說明決定（lateDecisionErrorMessage）", () => {
+  it("遲到說明決定（lateDecisionErrorMessage）：已結算照舊；其他碼一律中文、不露原碼（細節見 late-decision-error.test.ts）", () => {
     expect(lateDecisionErrorMessage(closed)).toBe(CLOSED_2026_09);
-    expect(lateDecisionErrorMessage(new Error("[403] not_boss"))).toBe("[403] not_boss");
+    expect(lateDecisionErrorMessage(closedMessageOnly)).toBe(CLOSED_GENERIC);
+    // 2026-10-12 起：not_boss 不再原樣回 `[403] not_boss`，sheet_frozen 不再原樣回 `[409] sheet_frozen`
+    expect(lateDecisionErrorMessage(new Error("[403] not_boss"))).toBe("只有老闆可以決定遲到是否影響全勤");
+    expect(lateDecisionErrorMessage(apiError(409, { error: "sheet_frozen", status: "approved" }))).toBe(
+      "本月出勤表已核准或鎖定，不能再改，請洽 HR",
+    );
+    expect(lateDecisionErrorMessage(new Error("[418] brand_new_rule"))).toBe("決定失敗");
     expect(lateDecisionErrorMessage("boom")).toBe("決定失敗");
   });
 

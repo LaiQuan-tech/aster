@@ -30,6 +30,7 @@ import type { DayRow } from "../punch-history";
  * 「這天有沒有事」：出勤月表預設只顯示有事的日子（請假、加班、異常、手動註記／審核覆寫），
  * 平淡的正常出勤收起來；打卡紀錄頁預設只列需要處理的日子。規則寫在 attendance-day-filter.ts 檔頭。
  * 最重要的一條：error 級異常的日子**永遠不能被藏起來**（員工送出前要看得到要補的卡）。
+ * 2026-10-12：員工本人月表另外傳「無打卡紀錄」（no_punch，lib/sheet-no-punch.ts）進來，那些日子也要預設顯示。
  */
 
 function anomaly(code: AnomalyCode, severity: AnomalySeverity, message = code): SheetAnomaly {
@@ -180,6 +181,59 @@ describe("sheetDayReasons — 有事的日子", () => {
       overtime: { effective: 60, computed: 60, override: 60 },
     });
     expect(sheetDayReasons(d)).toEqual(["error", "warn", "leave", "overtime", "override", "late", "outing", "note"]);
+    // 頁面另外傳進來的 no_punch 排在 warn 之後
+    expect(sheetDayReasons(d, { noPunch: true })).toEqual([
+      "error",
+      "warn",
+      "no_punch",
+      "leave",
+      "overtime",
+      "override",
+      "late",
+      "outing",
+      "note",
+    ]);
+  });
+});
+
+describe("no_punch（員工本人月表的「無打卡紀錄」，由頁面算好傳進來）", () => {
+  const blank = day({ date: "2026-09-08", firstIn: null, lastOut: null, workedMinutes: 0 });
+
+  it("單看當天資料不算有事；頁面傳 noPunch:true 才算；false／不傳一樣不算", () => {
+    expect(sheetDayReasons(blank)).toEqual([]);
+    expect(sheetDayReasons(blank, { noPunch: true })).toEqual(["no_punch"]);
+    expect(isNotableSheetDay(blank, { noPunch: true })).toBe(true);
+    expect(isNotableSheetDay(blank, { noPunch: false })).toBe(false);
+    expect(isNotableSheetDay(blank, {})).toBe(false);
+    expect(isNotableSheetDay(blank)).toBe(false);
+  });
+
+  it("partitionSheetDays 帶 extraOf：無打卡的日子預設顯示（不被「顯示全月」收起）；不帶＝行為與以前相同", () => {
+    const plain = day({ date: "2026-09-07" });
+    const leave = day({ date: "2026-09-09", firstIn: null, lastOut: null, workedMinutes: 0, leaveMinutes: 480, leaveSummary: "特休" });
+    const days = [plain, blank, leave];
+    const noPunchDates = new Set(["2026-09-08"]);
+    const extraOf = (d: SheetDayView) => ({ noPunch: noPunchDates.has(d.date) });
+
+    const withExtra = partitionSheetDays(days, false, extraOf);
+    expect(withExtra.entries.filter((e) => !e.hidden).map((e) => e.item.date)).toEqual(["2026-09-08", "2026-09-09"]);
+    expect([withExtra.notableCount, withExtra.hiddenCount, withExtra.visibleCount]).toEqual([2, 1, 2]);
+
+    // 不帶（後台、主管審核頁）：整天沒打卡的日子跟以前一樣被收起來
+    const without = partitionSheetDays(days, false);
+    expect(without.entries.filter((e) => !e.hidden).map((e) => e.item.date)).toEqual(["2026-09-09"]);
+    expect(partitionSheetDays(days, false, () => undefined).hiddenCount).toBe(2);
+
+    // 開「顯示全月」：全部顯示，no_punch 的標記仍在
+    const all = partitionSheetDays(days, true, extraOf);
+    expect(all.hiddenCount).toBe(0);
+    expect(all.entries.find((e) => e.item.date === "2026-09-08")?.notable).toBe(true);
+  });
+
+  it("不擋送出：no_punch 不是 anomalies，unacknowledgedErrors 不受影響", () => {
+    const sheet = { days: [blank] } as unknown as SheetView;
+    expect(partitionSheetDays(sheet.days, false, () => ({ noPunch: true })).visibleCount).toBe(1);
+    expect(unacknowledgedErrors(sheet)).toEqual([]);
   });
 });
 

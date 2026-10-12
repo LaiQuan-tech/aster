@@ -11,6 +11,9 @@
  *             跨午夜）。判斷：顯示。它們全是「這天不尋常、可能需要說明或核對」的訊號，數量遠少於整月；
  *             藏起來，遲到、補打卡這種要核對的日子就得打開全月才找得到。
  *   info      只有資訊級（延長工時扣晚餐、超額另計的說明）→ 不算。它們只會出現在本來就有加班的日子。
+ *   no_punch  員工本人月表的「無打卡紀錄」（2026-10-12）：上班日整天沒打卡、也沒請假／在家／出差公出。
+ *             單看當天資料判斷不出來（要今天、計算時間、到職日、出差單），由頁面用 lib/sheet-no-punch.ts
+ *             算好、經 partitionSheetDays 的 `extraOf` 傳進來；不傳就沒有這一條（後台、主管審核頁）。
  *   leave     有請假
  *   overtime  有加班（含月上限之外改為另行給付的分鐘）
  *   override  加班時數被人工覆寫（審核覆寫）——即使覆寫成 0 也算，那是一筆需要留意的紀錄
@@ -38,20 +41,37 @@ import type { DayRow } from "./punch-history";
 
 /* ------------------------------------------------------------ 月表 --- */
 
-export type SheetDayReason = "error" | "warn" | "leave" | "overtime" | "override" | "late" | "outing" | "note";
+export type SheetDayReason =
+  | "error"
+  | "warn"
+  | "no_punch"
+  | "leave"
+  | "overtime"
+  | "override"
+  | "late"
+  | "outing"
+  | "note";
+
+/** 單看當天資料判斷不出來、由頁面另外算好傳進來的「有事」。 */
+export interface SheetDayExtra {
+  /** 員工本人月表的「無打卡紀錄」（lib/sheet-no-punch.ts）。 */
+  noPunch?: boolean;
+}
 
 const num = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
 const hasText = (value: unknown): boolean => typeof value === "string" && value.trim() !== "";
 
 /**
- * 這一天為什麼「有事」（空陣列＝平淡的正常出勤）。順序固定：error、warn、leave、overtime、
+ * 這一天為什麼「有事」（空陣列＝平淡的正常出勤）。順序固定：error、warn、no_punch、leave、overtime、
  * override、late、outing、note。欄位缺漏（舊版快照）一律當沒有，不會丟例外。
+ * `extra` 是頁面另外算好的判斷（目前只有 no_punch）；不帶＝只看當天資料。
  */
-export function sheetDayReasons(day: SheetDayView): SheetDayReason[] {
+export function sheetDayReasons(day: SheetDayView, extra: SheetDayExtra = {}): SheetDayReason[] {
   const reasons: SheetDayReason[] = [];
   const anomalies = Array.isArray(day.anomalies) ? day.anomalies : [];
   if (anomalies.some((a) => a?.severity === "error")) reasons.push("error");
   if (anomalies.some((a) => a?.severity === "warn")) reasons.push("warn");
+  if (extra.noPunch === true) reasons.push("no_punch");
   if (num(day.leaveMinutes) > 0 || hasText(day.leaveSummary)) reasons.push("leave");
 
   const ot = day.overtime;
@@ -80,8 +100,8 @@ export function sheetDayReasons(day: SheetDayView): SheetDayReason[] {
 }
 
 /** 月表這天有事嗎（預設要顯示）。 */
-export function isNotableSheetDay(day: SheetDayView): boolean {
-  return sheetDayReasons(day).length > 0;
+export function isNotableSheetDay(day: SheetDayView, extra?: SheetDayExtra): boolean {
+  return sheetDayReasons(day, extra).length > 0;
 }
 
 /* ------------------------------------------------------ 打卡紀錄頁 --- */
@@ -141,8 +161,16 @@ export function partitionNotable<T>(items: readonly T[], isNotable: (item: T) =>
   };
 }
 
-export function partitionSheetDays(days: readonly SheetDayView[], showAll: boolean): Partition<SheetDayView> {
-  return partitionNotable(days, isNotableSheetDay, showAll);
+/**
+ * 月表分組。`extraOf`（選填）逐日回傳頁面另外算好的判斷（員工本人月表傳「無打卡紀錄」），
+ * 成立的日子跟其他有事的日子一樣預設顯示、不會被「顯示全月」收起；不帶＝只看當天資料（後台、主管審核頁）。
+ */
+export function partitionSheetDays(
+  days: readonly SheetDayView[],
+  showAll: boolean,
+  extraOf?: (day: SheetDayView) => SheetDayExtra | undefined,
+): Partition<SheetDayView> {
+  return partitionNotable(days, (day) => isNotableSheetDay(day, extraOf?.(day)), showAll);
 }
 
 export function partitionPunchRows<T extends Pick<DayRow, "date" | "status" | "durationMin">>(

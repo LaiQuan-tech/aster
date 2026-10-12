@@ -15,6 +15,8 @@ import {
 import {
   friendlyError,
   otTierLabelsOf,
+  visibleMonthAnomalies,
+  type MonthAnomalyAudience,
   type SheetAnomaly,
   type SheetDayPatch,
   type SheetDayView,
@@ -22,6 +24,7 @@ import {
   type SheetTotals,
   type SheetView,
 } from "@/lib/attendance-sheets-api";
+import { NO_PUNCH_HINT, NO_PUNCH_LABEL } from "@/lib/sheet-no-punch";
 
 /**
  * 出勤月表共用表格：ESS 自助填報頁與 Admin 審核頁共用同一份版面，靠 `editable`／
@@ -38,6 +41,12 @@ import {
  * 月表合計、總計列與薪資試算一律是全月數字，不受過濾影響；列印時收起來的日子仍會印出
  * （`hidden print:table-row`），印出來的出勤統計表維持完整一個月。開關狀態用 localStorage
  * 記在各自的瀏覽器裡（`preferenceScope`：ESS 與後台各記各的），沒記憶一律預設關。
+ *
+ * 2026-10-12（教育訓練驗收）：
+ *   • 月份級異常（月加班門檻、連續遲到、假單待簽核…）不屬於任何一天，用 `SheetMonthAnomalies` 顯示；
+ *     `showMonthAnomalies` 有帶就放在表格上方（後台詳細頁、主管審核頁），員工本人頁放在頁面下方的異常區。
+ *   • `noPunchDates`（只有員工本人月表傳）：整天沒打卡又沒請假／在家／出差公出的上班日，異常欄顯示琥珀色
+ *     「無打卡紀錄」、預設顯示；不寫進 anomalies，不需要填說明、不擋送出（判斷規則見 lib/sheet-no-punch.ts）。
  */
 
 const WEEKDAY_LABEL = ["日", "一", "二", "三", "四", "五", "六"];
@@ -84,6 +93,13 @@ const SEVERITY_STYLE: Record<SheetAnomaly["severity"], string> = {
   info: "border border-gray-200 bg-gray-100 text-gray-600",
 };
 
+/** 嚴重度的文字（給螢幕報讀；畫面上靠顏色區分，與日級異常一致）。 */
+const SEVERITY_TEXT: Record<SheetAnomaly["severity"], string> = {
+  error: "錯誤",
+  warn: "警示",
+  info: "資訊",
+};
+
 const ALERT_STYLE: Record<SheetTotals["overtimeMonthlyAlert"], string> = {
   none: "bg-gray-100 text-gray-500",
   "36": "bg-amber-100 text-amber-700",
@@ -98,11 +114,40 @@ const ALERT_LABEL: Record<SheetTotals["overtimeMonthlyAlert"], string> = {
   "46": "已達 46 小時上限",
 };
 
-function rowTone(day: SheetDayView): string {
+function rowTone(day: SheetDayView, noPunch = false): string {
   if (day.anomalies.some((a) => a.severity === "error")) return "bg-red-50/70";
-  if (day.anomalies.some((a) => a.severity === "warn")) return "bg-amber-50/70";
+  if (noPunch || day.anomalies.some((a) => a.severity === "warn")) return "bg-amber-50/70";
   if (day.dayType !== "workday") return "bg-gray-50";
   return "";
+}
+
+/**
+ * 月份級異常區塊（2026-10-12）：配色與日級異常一致（error 紅、warn 琥珀、info 灰），顯示 API 的中文 message
+ * （空白時用代碼對照的中文）。不需要說明、不擋送出。`audience="ess"`（員工端）不顯示只有 HR 能處理的項目
+ * （未設定薪資結構）。列印時照印（外層本來就不印的除外）。沒有要顯示的就整塊不出現。
+ */
+export function SheetMonthAnomalies({
+  anomalies,
+  audience,
+}: {
+  anomalies: SheetView["monthAnomalies"] | null | undefined;
+  audience: MonthAnomalyAudience;
+}) {
+  const items = visibleMonthAnomalies(anomalies, audience);
+  if (items.length === 0) return null;
+  return (
+    <section aria-label="本月異常" className="rounded-xl border border-gray-100 p-3">
+      <p className="mb-2 text-xs font-medium text-gray-500">本月異常</p>
+      <ul className="space-y-1.5">
+        {items.map((item, i) => (
+          <li key={`${item.code}-${i}`} className={`rounded-lg px-3 py-2 text-xs font-medium ${SEVERITY_STYLE[item.severity]}`}>
+            <span className="sr-only">{SEVERITY_TEXT[item.severity]}：</span>
+            {item.text}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
 }
 
 export function AttendanceSheetTable({
@@ -111,6 +156,8 @@ export function AttendanceSheetTable({
   showMoney,
   onPatchDay,
   preferenceScope,
+  showMonthAnomalies,
+  noPunchDates,
 }: {
   sheet: SheetView;
   editable: boolean;
@@ -121,6 +168,16 @@ export function AttendanceSheetTable({
    * 不帶就不記憶（每次載入都預設關）。
    */
   preferenceScope?: SheetFilterScope;
+  /**
+   * 在表格上方（列印抬頭之後）顯示月份級異常：後台詳細頁 `"admin"`、主管審核頁 `"ess"`。
+   * 不帶＝不顯示（員工本人頁自己放在頁面下方的異常區）。
+   */
+  showMonthAnomalies?: MonthAnomalyAudience;
+  /**
+   * 「無打卡紀錄」的日期（lib/sheet-no-punch.ts 算好；只有員工本人月表傳）。不帶＝不標
+   * （後台、主管審核頁、核准快照）。標了的日子異常欄顯示琥珀色標籤、預設顯示，不需要說明、不擋送出。
+   */
+  noPunchDates?: ReadonlySet<string> | null;
 }) {
   const { year, month } = minguoPeriod(sheet.period);
   const [overrideOpenFor, setOverrideOpenFor] = useState<string | null>(null);
@@ -139,7 +196,16 @@ export function AttendanceSheetTable({
     if (storageKey) writeStoredFlag(browserStorage(), storageKey, next);
   }
 
-  const partition = useMemo(() => partitionSheetDays(sheet.days, showAll), [sheet.days, showAll]);
+  // 「無打卡紀錄」的日子跟其他有事的日子一樣預設顯示（不被「顯示全月」收起）。
+  const partition = useMemo(
+    () =>
+      partitionSheetDays(
+        sheet.days,
+        showAll,
+        noPunchDates && noPunchDates.size > 0 ? (day) => ({ noPunch: noPunchDates.has(day.date) }) : undefined,
+      ),
+    [sheet.days, showAll, noPunchDates],
+  );
 
   async function patch(date: string, value: SheetDayPatch) {
     if (!onPatchDay) return;
@@ -151,6 +217,8 @@ export function AttendanceSheetTable({
       <div className="print-sheet-header">
         亞斯特設計顧問有限公司／{year}年{month}月 出勤統計表－{sheet.employeeName}
       </div>
+
+      {showMonthAnomalies && <SheetMonthAnomalies anomalies={sheet.monthAnomalies} audience={showMonthAnomalies} />}
 
       {partition.total > 0 && (
         <div className="no-print flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
@@ -199,6 +267,7 @@ export function AttendanceSheetTable({
                 key={day.date}
                 day={day}
                 hidden={hidden}
+                noPunch={noPunchDates?.has(day.date) ?? false}
                 editable={editable}
                 overridePopoverOpen={overrideOpenFor === day.date}
                 onOpenOverride={() => setOverrideOpenFor(day.date)}
@@ -246,6 +315,7 @@ export function AttendanceSheetTable({
 function DayRow({
   day,
   hidden,
+  noPunch,
   editable,
   overridePopoverOpen,
   onOpenOverride,
@@ -255,6 +325,8 @@ function DayRow({
   day: SheetDayView;
   /** 沒事的日子且沒開「顯示全月」：畫面上收起來，列印時仍印出（維持完整一個月）。 */
   hidden: boolean;
+  /** 員工本人月表的「無打卡紀錄」（琥珀色標籤；不需要說明）。 */
+  noPunch: boolean;
   editable: boolean;
   overridePopoverOpen: boolean;
   onOpenOverride: () => void;
@@ -264,7 +336,7 @@ function DayRow({
   const hasOverride = day.overtime.override != null;
   const beyondCap = day.overtime.beyondCap ?? 0;
   return (
-    <tr className={`border-b border-gray-50 align-top ${rowTone(day)}${hidden ? " hidden print:table-row" : ""}`}>
+    <tr className={`border-b border-gray-50 align-top ${rowTone(day, noPunch)}${hidden ? " hidden print:table-row" : ""}`}>
       <td className="py-2 pl-3 pr-2 tabular-nums">{day.date}</td>
       <td className="py-2 pr-2">{weekdayLabel(day.date)}</td>
       <td className="py-2 pr-2 tabular-nums">{hhmm(day.firstIn)}</td>
@@ -328,7 +400,7 @@ function DayRow({
         <InlineTextCell value={day.note} editable={editable} placeholder="備註" onSave={(v) => onPatch({ note: v })} />
       </td>
       <td className="py-2 pr-3">
-        <AnomalyCell day={day} editable={editable} onPatch={onPatch} />
+        <AnomalyCell day={day} noPunch={noPunch} editable={editable} onPatch={onPatch} />
       </td>
     </tr>
   );
@@ -480,10 +552,12 @@ function OverridePopover({
 
 function AnomalyCell({
   day,
+  noPunch,
   editable,
   onPatch,
 }: {
   day: SheetDayView;
+  noPunch: boolean;
   editable: boolean;
   onPatch: (patch: SheetDayPatch) => Promise<void>;
 }) {
@@ -493,7 +567,7 @@ function AnomalyCell({
 
   useEffect(() => setAck(day.anomalyAck ?? ""), [day.anomalyAck]);
 
-  if (day.anomalies.length === 0) return <span className="text-gray-300">—</span>;
+  if (day.anomalies.length === 0 && !noPunch) return <span className="text-gray-300">—</span>;
 
   async function commit() {
     if (ack === (day.anomalyAck ?? "")) return;
@@ -511,6 +585,11 @@ function AnomalyCell({
   return (
     <div className="space-y-1">
       <div className="flex flex-wrap gap-1">
+        {noPunch && (
+          <span title={NO_PUNCH_HINT} className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${SEVERITY_STYLE.warn}`}>
+            {NO_PUNCH_LABEL}
+          </span>
+        )}
         {day.anomalies.map((anomaly, i) => (
           <span
             key={`${anomaly.code}-${i}`}
@@ -521,7 +600,8 @@ function AnomalyCell({
           </span>
         ))}
       </div>
-      {editable && (
+      {/* 說明欄只給真正的異常；「無打卡紀錄」是提示，不需要說明。 */}
+      {editable && day.anomalies.length > 0 && (
         <div>
           <input
             value={ack}
