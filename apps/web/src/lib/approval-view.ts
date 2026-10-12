@@ -18,6 +18,7 @@ import type { LeaveSegment } from "./ess-api";
 import { localDateKey, fmtHm, fmtMoney } from "./ess-format";
 import { summarizeSegment } from "./ess-notifications";
 import { formatLeaveDuration, formatRequestHours } from "./leave-duration";
+import { hasWorkdayGap } from "./leave-gaps";
 
 /** ISO → 當地 `YYYY-MM-DD HH:mm`（CSV 用；原本直接切 ISO 字串會變成 UTC，與畫面差 8 小時）。 */
 function csvLocalDateTime(iso: string): string {
@@ -491,6 +492,7 @@ export function requestAmountLines(row: Parameters<typeof requestAmountsOf>[0]):
  * 時數：請假寫成天＋時（2026-10-11 業主決定，1 天 ＝ 8 小時，例「（1 天 7 時）」），其他類型（加班、出差…）維持「（N 小時）」。
  * 請假若跨多天、而且各天的時段不一樣（首日從中途開始、末日只請到中途），第二行逐日列出
  * 「逐日：10/13 14:00–18:00 · 4 時、10/14 09:00–18:00 · 1 天、…」，審核者才看得出實際請哪幾小時。
+ * 日期不連續（自選日期，例 10/12、10/14、10/20 都整天）也加這一行，第一行的「起 → 迄」看不出空檔。
  */
 export function contentLines(row: LeaveRequest): string[] {
   const start = fmtDateTime(row.start_at) ?? "—";
@@ -500,7 +502,8 @@ export function contentLines(row: LeaveRequest): string[] {
   if (row.kind === "leave") {
     const segs = leaveSegmentsOf(row.segments);
     const uniform = segs.every((seg) => seg.startTime === segs[0].startTime && seg.endTime === segs[0].endTime);
-    if (segs.length > 1 && !uniform) lines.push(`逐日：${segs.map(summarizeSegment).join("、")}`);
+    // 日期不連續（自選日期，2026-10-12）也逐日列：第一行的「起 → 迄」看不出中間哪幾天沒請。
+    if (segs.length > 1 && (!uniform || hasWorkdayGap(segs))) lines.push(`逐日：${segs.map(summarizeSegment).join("、")}`);
   }
   const main = row.reason || row.remark;
   if (main) lines.push(main);

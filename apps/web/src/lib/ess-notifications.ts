@@ -17,6 +17,7 @@
 import type { LeaveSegment, NotificationItem } from "./ess-api";
 import { fmtDateShort } from "./ess-format";
 import { formatLeaveDuration } from "./leave-duration";
+import { needsDayList } from "./leave-gaps";
 
 /* ------------------------------------------------------------ 類型 --- */
 
@@ -150,6 +151,8 @@ export function summarizeSegment(seg: LeaveSegment): string {
  *     時段不一致（多日請假的首日從中途開始、末日只請到中途）→ 寫出起訖的日期＋時間，
  *     例「10/13 14:00 – 10/17 12:00 ×5 · 3 天 7 時」，簽核者才看得出首尾不是整天。
  *   末尾的時數是請假總時數（天＋時，1 天 ＝ 8 小時）；「×N」是段數（日曆上的天），兩者不是同一個「天」。
+ *   - >3 段但日期不連續（中間有沒請的上班日）或中間某天只請部分時段（見 leave-gaps 的 needsDayList）
+ *     → 不壓縮：逐段一行，最後一行「共 N 天 M 時」。
  */
 export function summarizeSegments(segs: LeaveSegment[] | null | undefined): string {
   if (!segs || segs.length === 0) return "";
@@ -162,6 +165,8 @@ export function summarizeSegments(segs: LeaveSegment[] | null | undefined): stri
     const hours = Number(seg.hours);
     return sum + (Number.isFinite(hours) ? hours : 0);
   }, 0);
+  // 自選日期（2026-10-12）：不連續，或中間某天只請半天 → 壓成「首日–末日」會看起來整段都整天請 → 逐段一行＋合計。
+  if (needsDayList(sorted)) return [...sorted.map(summarizeSegment), `共 ${formatLeaveDuration(total)}`].join("\n");
   const sameSlot = sorted.every((seg) => seg.startTime === first.startTime && seg.endTime === first.endTime);
   if (!sameSlot) {
     return `${fmtDateShort(first.date)} ${first.startTime} – ${fmtDateShort(last.date)} ${last.endTime} ×${sorted.length} · ${formatLeaveDuration(total)}`;

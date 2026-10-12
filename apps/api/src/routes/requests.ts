@@ -282,21 +282,72 @@ function fmtTaipei(iso: string | null | undefined): string {
   return TAIPEI_FMT.format(d)
 }
 
+/** 'YYYY-MM-DD' 加一天（純日曆運算）。 */
+function nextDateKey(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`)
+  d.setUTCDate(d.getUTCDate() + 1)
+  return d.toISOString().slice(0, 10)
+}
+
+/**
+ * 多日請假自選日期（2026-10-12）：不連續（例 10/12、10/14 下午、10/20）或中間某天只請部分時段時，「起 ～ 迄」
+ * 會看起來整段都整天請，改逐段列出「10/12 09:00–18:00、10/14 13:00–18:00、10/20 09:00–18:00」
+ * （超過 4 段列前 3 段＋「等 N 個日期」）。不連續＝依日期排序後，相鄰兩段之間有週一到週五的日子
+ * （只隔週末的週五＋週一不算）。
+ * 連續、少於兩段、格式不對 → null（呼叫端維持「起 ～ 迄」）。
+ */
+function gapSegmentsText(segments: unknown): string | null {
+  if (!Array.isArray(segments)) return null
+  const segs = segments
+    .filter(
+      (s): s is { date: string; startTime: string; endTime: string } =>
+        !!s &&
+        typeof s === "object" &&
+        typeof (s as Record<string, unknown>).date === "string" &&
+        /^\d{4}-\d{2}-\d{2}$/.test((s as Record<string, unknown>).date as string) &&
+        typeof (s as Record<string, unknown>).startTime === "string" &&
+        typeof (s as Record<string, unknown>).endTime === "string",
+    )
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+  if (segs.length < 2) return null
+  // 連續但中間某天只請部分時段（或首日只請上午、末日只請下午）也逐段列：舊多日表單的形狀是「首日可晚到、
+  // 末日可早退、其餘整天」——除了首日都從最早的開始時間起、除了末日都請到最晚的結束時間（同 web leave-gaps.needsDayList）。
+  const minStart = segs.reduce((m, s) => (s.startTime < m ? s.startTime : m), segs[0].startTime)
+  const maxEnd = segs.reduce((m, s) => (s.endTime > m ? s.endTime : m), segs[0].endTime)
+  let gap = segs.some((s, i) => (i > 0 && s.startTime !== minStart) || (i < segs.length - 1 && s.endTime !== maxEnd))
+  for (let i = 1; i < segs.length && !gap; i++) {
+    let cursor = nextDateKey(segs[i - 1].date)
+    for (let n = 0; cursor < segs[i].date && n < 400; n++) {
+      const wd = new Date(`${cursor}T00:00:00Z`).getUTCDay()
+      if (wd >= 1 && wd <= 5) {
+        gap = true
+        break
+      }
+      cursor = nextDateKey(cursor)
+    }
+  }
+  if (!gap) return null
+  const parts = segs.map((s) => `${s.date.slice(5, 7)}/${s.date.slice(8, 10)} ${s.startTime}–${s.endTime}`)
+  return parts.length > 4 ? `${parts.slice(0, 3).join("、")}…等 ${parts.length} 個日期` : parts.join("、")
+}
+
 /**
  * 通知內文的「期間（時數）」。請假的時數寫成天＋時（2026-10-11 業主決定，例「（1 天 7 時）」，1 天 ＝
  * `opts.hoursPerDay` 小時，省略＝8）；其他類型（加班、在家工作…）維持「（N 小時）」。
  * 只是文字——`leave_requests.hours` 與通知 payload 的 hours 仍是小時。
+ * 請假帶 `opts.segments` 且日期不連續（自選日期）→ 期間改逐段列出（見 gapSegmentsText），不寫「起 ～ 迄」。
  */
 export function periodText(
   startAt: string | null | undefined,
   endAt: string | null | undefined,
   hours: unknown,
-  opts: { leave?: boolean; hoursPerDay?: number } = {},
+  opts: { leave?: boolean; hoursPerDay?: number; segments?: unknown } = {},
 ): string {
   const h = hours == null || hours === "" ? null : Number(hours)
   const amount = h == null || !Number.isFinite(h) ? null : opts.leave ? formatLeaveDuration(h, opts.hoursPerDay) : `${h} 小時`
   const hoursText = amount == null ? "" : `（${amount}）`
-  return `${fmtTaipei(startAt)} ～ ${fmtTaipei(endAt)}${hoursText}`
+  const listed = opts.leave ? gapSegmentsText(opts.segments) : null
+  return `${listed ?? `${fmtTaipei(startAt)} ～ ${fmtTaipei(endAt)}`}${hoursText}`
 }
 
 interface RequestContext {
@@ -372,6 +423,8 @@ interface ApprovalNoticeRequest {
   end_at: string
   hours: unknown
   reason: string | null
+  /** 多段日期（jsonb）；請假日期不連續時通知內文逐段列出（periodText）。 */
+  segments?: unknown
 }
 
 function applicantLabel(ctx: RequestContext): string {
@@ -424,7 +477,7 @@ async function notifyStepApprover(params: {
     employeeIds: approverEmpIds,
     type: "approval",
     title: `待簽核：${ctx.applicantName} 的${kindLabel(lr.kind)}申請`,
-    body: `${applicantLabel(ctx)} 申請${subjectLabel(lr, ctx)}，期間 ${periodText(lr.start_at, lr.end_at, lr.hours, { leave: lr.kind === "leave", hoursPerDay: ctx.dailyRegularHours })}${reason}。請至「待我簽核」處理${stepText}。${hrText}${extra}`,
+    body: `${applicantLabel(ctx)} 申請${subjectLabel(lr, ctx)}，期間 ${periodText(lr.start_at, lr.end_at, lr.hours, { leave: lr.kind === "leave", hoursPerDay: ctx.dailyRegularHours, segments: lr.segments })}${reason}。請至「待我簽核」處理${stepText}。${hrText}${extra}`,
     payload: basePayload(lr, {
       event,
       currentStep: step,
@@ -472,7 +525,7 @@ async function notifyApplicant(params: {
     employeeIds: [lr.employee_id],
     type: "approval",
     title: `你的${kindLabel(lr.kind)}申請${verdict}`,
-    body: `${subjectLabel(lr, ctx)} 期間 ${periodText(lr.start_at, lr.end_at, lr.hours, { leave: lr.kind === "leave", hoursPerDay: ctx.dailyRegularHours })} ${verdict}。${commentText}${extra}`.trim(),
+    body: `${subjectLabel(lr, ctx)} 期間 ${periodText(lr.start_at, lr.end_at, lr.hours, { leave: lr.kind === "leave", hoursPerDay: ctx.dailyRegularHours, segments: lr.segments })} ${verdict}。${commentText}${extra}`.trim(),
     payload: basePayload(lr, {
       event,
       currentStep: step,
@@ -685,6 +738,7 @@ requestsRouter.post(
             end_at: endAt,
             hours: hours ?? null,
             reason: reason ?? null,
+            segments: segments ?? null,
           },
           ctx,
           approverEmpIds: chainSteps[0].candidateEmpIds,
@@ -1250,6 +1304,7 @@ async function decideOneRequest(params: {
     end_at: lr.end_at as string,
     hours: lr.hours ?? null,
     reason: (lr.reason as string | null) ?? null,
+    segments: lr.segments ?? null,
   }
   const currentStep = lr.current_step as number
   const actedAt = new Date().toISOString()

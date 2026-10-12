@@ -6,22 +6,25 @@
  *         不能落在午休，時數 1 小時為單位、最多到下班前可請的時數；結束時間由系統算、跳過午休）。
  *         上午／下午以午休為界（2026-10-11 業主決定）：日班上午 09:00–12:00、下午 13:00–18:00；
  *         選了上午／下午會多一行說明（`describeHalfDays`），不涵蓋午休的班別維持各半。
- *   多日：開始日期＋開始時間、結束日期＋結束時間（時間 1 小時一格，預設＝上班／下班＝整天）。
- *         第一天從開始時間請到下班、中間整天、最後一天從上班請到結束時間；休息日／國定假日自動不計。
- * 時數由 `computeLeaveSegments` 即時算：單日摘要「09:00–12:00，共 3 時」；多日逐日列出
- * 「10/13（二）14:00–18:00 4 時」「10/14（三）全天」…再加「共 1 天 7 時」「已略過 N 天」「剩餘 6 天」
- * 「申請時數超過剩餘額度」。畫面只用 1 小時步進，後端不強制最小單位。
+ *   多日（2026-10-12 業主：自己挑日期、一天一天新增，日期可以不連續，例 10/12、10/14 下午、10/20）：
+ *         日期清單，每一列＝日期＋時段（全天｜上午｜下午｜指定時數，和單日同一套）；每列可刪除，
+ *         「＋新增日期」預設帶上一列的下一個上班日。同一天不能選兩次；休息日／國定假日提醒、仍可送出。
+ *         整份清單是一張假單（segments 依日期排序），主管簽一張；算法與檢查見 lib/leave-day-list。
+ * 時數即時算：單日摘要「09:00–12:00，共 3 時」；多日逐日列出「10/12（一）全天」
+ * 「10/14（三）下午 13:00–18:00 5 時」…再加「合計 2 天 5 時」「剩餘 6 天」「申請時數超過剩餘額度」。
+ * 畫面只用 1 小時步進，後端不強制最小單位。
  * 請假時數的顯示一律天＋時（2026-10-11 業主決定，1 天 ＝ `hoursPerDay` 小時，API 隨餘額回，缺席用 8）；
  * 「指定時數」的下拉與「最多 N 小時」是輸入選項，維持小時。時數的計算與送出的 body 仍全是小時。
  * 班表功能已移除（2026-10-11）：每天都用預設班別（`defaultShift`，日班）算時數與時間選項。
  */
-import { useEffect, useId, useMemo, useState, type FormEvent } from "react";
-import { Field, Input, Segmented, Select } from "@/components/ess-ui";
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react";
+import { Button, Field, Input, Segmented, Select } from "@/components/ess-ui";
 import type { LeaveBalance, LeaveType } from "@/lib/ess-api";
-import { fmtDateShort, todayKey } from "@/lib/ess-format";
-import { describeHalfDays, resolveLeavePick, skipReasonLabel, type LeavePeriod, type ShiftLike } from "@/lib/leave-hours";
+import { addDays, fmtDateWithWeekday, todayKey } from "@/lib/ess-format";
+import { describeLeaveDayRow, nextLeaveDate, resolveLeaveDayList, type LeaveDayRow } from "@/lib/leave-day-list";
+import { MAX_LEAVE_SEGMENTS, describeHalfDays, resolveLeavePick, type LeavePeriod, type ShiftLike } from "@/lib/leave-hours";
 import { formatLeaveDuration } from "@/lib/leave-duration";
-import { buildCreateBody, describeBody, describeLeaveDay, isBuildError, remainingHours } from "@/lib/request-forms";
+import { buildCreateBody, describeBody, isBuildError, remainingHours } from "@/lib/request-forms";
 import { AttachmentField, ReasonField, SubmitBar, SummaryLine, validateFiles, type FormCommonProps } from "./form-shared";
 import { useLeaveCalendar } from "./use-leave-calendar";
 
@@ -62,18 +65,17 @@ export function LeaveForm({
   submitError,
   onSubmit,
 }: LeaveFormProps) {
-  const ids = { type: useId(), start: useId(), end: useId(), hStart: useId(), hCount: useId(), rStart: useId(), rEnd: useId() };
+  const ids = { type: useId(), start: useId(), hStart: useId(), hCount: useId(), day: useId() };
   const [leaveTypeId, setLeaveTypeId] = useState("");
   const [mode, setMode] = useState<DateMode>("single");
   const [startDate, setStartDate] = useState(initialDate || todayKey());
-  const [endDate, setEndDate] = useState(initialDate || todayKey());
   const [period, setPeriod] = useState<LeavePeriod>("full");
   // 單日「指定時數」：開始時間（空字串＝上班時間）＋請幾小時（0＝預設 1 小時）。
   const [hoursStart, setHoursStart] = useState("");
   const [hoursCount, setHoursCount] = useState(0);
-  // 多日：首日開始時間（空字串＝上班時間）／末日結束時間（空字串＝下班時間）。
-  const [rangeStart, setRangeStart] = useState("");
-  const [rangeEnd, setRangeEnd] = useState("");
+  // 多日：自選日期清單（每列＝日期＋時段），第一次切到「多日」才建立；與單日的選擇各自保留。
+  const [days, setDays] = useState<LeaveDayRow[]>([]);
+  const rowSeq = useRef(0);
   const [reason, setReason] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -83,56 +85,91 @@ export function LeaveForm({
     if (!leaveTypeId && leaveTypes && leaveTypes.length === 1) setLeaveTypeId(leaveTypes[0].id);
   }, [leaveTypes, leaveTypeId]);
 
-  const effectiveEnd = mode === "range" ? endDate : startDate;
-  // 行事曆（假日）按需載入；班別每天都是 defaultShift（班表功能已移除）。
-  const dayTypeByDate = useLeaveCalendar(startDate, effectiveEnd);
+  // 行事曆（假日）按需載入：涵蓋單日的日期、多日清單上的所有日期，再往後 31 天（「＋新增日期」找下一個上班日用）。
+  // 班別每天都是 defaultShift（班表功能已移除）。
+  const dayDates = mode === "range" ? days.map((d) => d.date).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort() : [];
+  const calStart = dayDates.length > 0 && dayDates[0] < startDate ? dayDates[0] : startDate;
+  const calLast = dayDates.length > 0 && dayDates[dayDates.length - 1] > startDate ? dayDates[dayDates.length - 1] : startDate;
+  const dayTypeByDate = useLeaveCalendar(calStart, addDays(calLast, 31));
   const shiftOn = (_date: string): ShiftLike => defaultShift;
 
-  // 時間選項（1 小時一格、以各自那天的班別為準）、預設值與時數都由純函式算（見 resolveLeavePick）：
-  // 選的值不在選項裡就退回預設——開始＝上班時間、結束＝下班時間（＝整天）、時數 1 小時。
+  // 單日：時間選項（1 小時一格、以那天的班別為準）、預設值與時數都由純函式算（見 resolveLeavePick）：
+  // 選的值不在選項裡就退回預設——開始＝上班時間、時數 1 小時。
   const pick = useMemo(
     () =>
       resolveLeavePick(
-        { mode, startDate, endDate, period, hoursStart, hoursCount, rangeStart, rangeEnd },
+        { mode: "single", startDate, endDate: startDate, period, hoursStart, hoursCount, rangeStart: "", rangeEnd: "" },
         { shiftByDate: NO_SCHEDULED_SHIFTS, defaultShift, dayTypeByDate },
       ),
-    [mode, startDate, endDate, period, hoursStart, hoursCount, rangeStart, rangeEnd, dayTypeByDate, defaultShift],
+    [startDate, period, hoursStart, hoursCount, dayTypeByDate, defaultShift],
   );
-  const { startOptions, endOptions, hoursStartValue, maxHours, hoursCountValue, rangeStartValue, rangeEndValue, result } = pick;
+  const { startOptions, hoursStartValue, maxHours, hoursCountValue, result } = pick;
+  // 多日：每列同一套單日算法，加上同日重複、休息日提醒、依日期排序與合計（見 resolveLeaveDayList）。
+  const list = useMemo(
+    () => resolveLeaveDayList(days, { shiftByDate: NO_SCHEDULED_SHIFTS, defaultShift, dayTypeByDate }),
+    [days, dayTypeByDate, defaultShift],
+  );
+  const isRange = mode === "range";
+  const formError = isRange ? list.error : result.error;
+  const totalHours = isRange ? list.totalHours : result.totalHours;
   // 班別有休息才提「午休」（沒有休息的班別，時間選項就是連續的）。
   const hasBreak = Number(shiftOn(startDate).break_minutes ?? 0) > 0;
 
   const selectedType = leaveTypes?.find((lt) => lt.id === leaveTypeId) ?? null;
   const requiresAttachment = selectedType?.requiresAttachment === true;
-  // 餘額桶依到職週年切期間，所以要用「申請起日」去找桶，跨週年期的單才算得對。
-  const remaining = leaveTypeId ? remainingHours(balances, leaveTypeId, startDate) : null;
-  const overBalance = remaining != null && !result.error && result.totalHours > remaining;
-  const skippedReasons = Array.from(new Set(result.skipped.map((s) => skipReasonLabel(s.reason)))).join("／");
+  // 餘額桶依到職週年切期間，所以要用「申請起日」去找桶（後端扣假也看起日＝最早的那天），跨週年期的單才算得對。
+  const bucketDate = isRange ? (list.segments[0]?.date ?? dayDates[0] ?? startDate) : startDate;
+  const remaining = leaveTypeId ? remainingHours(balances, leaveTypeId, bucketDate) : null;
+  const overBalance = remaining != null && !formError && totalHours > remaining;
+
+  function newRow(date: string): LeaveDayRow {
+    rowSeq.current += 1;
+    return { id: `day-${rowSeq.current}`, date, period: "full", hoursStart: "", hoursCount: 0 };
+  }
 
   function changeMode(next: DateMode) {
     setMode(next);
     setLocalError(null);
-    if (next === "range" && endDate < startDate) setEndDate(startDate);
+    // 第一次切到多日：先放兩天——單日選的那天＋它的下一個上班日（不要可以刪、可以改）。
+    if (next === "range" && days.length === 0) {
+      const first = newRow(startDate);
+      setDays([first, newRow(nextLeaveDate([first], dayTypeByDate, startDate))]);
+    }
   }
 
   function changeStart(value: string) {
     setStartDate(value);
     setLocalError(null);
-    if (mode === "range" && endDate < value) setEndDate(value);
+  }
+
+  function updateDay(id: string, patch: Partial<Omit<LeaveDayRow, "id">>) {
+    setDays((prev) => prev.map((d) => (d.id === id ? { ...d, ...patch } : d)));
+    setLocalError(null);
+  }
+
+  function removeDay(id: string) {
+    setDays((prev) => (prev.length <= 1 ? prev : prev.filter((d) => d.id !== id)));
+    setLocalError(null);
+  }
+
+  function addDay() {
+    if (days.length >= MAX_LEAVE_SEGMENTS) return;
+    setDays([...days, newRow(nextLeaveDate(days, dayTypeByDate, startDate))]);
+    setLocalError(null);
   }
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setLocalError(null);
     if (leaveTypes && leaveTypes.length > 0 && !leaveTypeId) return setLocalError("請選擇假別");
-    if (result.error) return setLocalError(result.error);
+    if (formError) return setLocalError(formError);
     if (requiresAttachment && files.length === 0) return setLocalError("此假別需要附上憑證");
     const fileError = validateFiles(files);
     if (fileError) return setLocalError(fileError);
     const body = buildCreateBody("leave", {
       leaveTypeId,
-      segments: result.segments,
-      hours: result.totalHours,
+      segments: isRange ? list.segments : result.segments,
+      hours: totalHours,
       reason,
     });
     if (isBuildError(body)) return setLocalError(body.error);
@@ -140,9 +177,8 @@ export function LeaveForm({
     await onSubmit(body, files, summary);
   }
 
-  /** 時間選項的顯示字：上班時間／下班時間（＝整天的預設）加註。 */
+  /** 開始時間選項的顯示字：上班時間加註。 */
   const startLabel = (t: string, i: number) => (i === 0 ? `${t}（上班）` : t);
-  const endLabel = (t: string, i: number) => (i === endOptions.length - 1 ? `${t}（下班）` : t);
 
   const single = result.segments[0];
 
@@ -185,55 +221,101 @@ export function LeaveForm({
             <Input id={ids.start} type="date" value={startDate} onChange={(e) => changeStart(e.target.value)} required />
           </Field>
         ) : (
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="開始日期" required htmlFor={ids.start}>
-              <Input id={ids.start} type="date" value={startDate} onChange={(e) => changeStart(e.target.value)} required />
-            </Field>
-            <Field label="開始時間" required htmlFor={ids.rStart}>
-              <Select
-                id={ids.rStart}
-                value={rangeStartValue}
-                onChange={(e) => {
-                  setRangeStart(e.target.value);
-                  setLocalError(null);
-                }}
-              >
-                {startOptions.map((t, i) => (
-                  <option key={t} value={t}>
-                    {startLabel(t, i)}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Field label="結束日期" required htmlFor={ids.end}>
-              <Input
-                id={ids.end}
-                type="date"
-                min={startDate}
-                value={endDate}
-                onChange={(e) => {
-                  setEndDate(e.target.value);
-                  setLocalError(null);
-                }}
-                required
-              />
-            </Field>
-            <Field label="結束時間" required htmlFor={ids.rEnd}>
-              <Select
-                id={ids.rEnd}
-                value={rangeEndValue}
-                onChange={(e) => {
-                  setRangeEnd(e.target.value);
-                  setLocalError(null);
-                }}
-              >
-                {endOptions.map((t, i) => (
-                  <option key={t} value={t}>
-                    {endLabel(t, i)}
-                  </option>
-                ))}
-              </Select>
-            </Field>
+          <div className="space-y-3">
+            <ul className="space-y-3" aria-label="請假日期">
+              {list.rows.map((view, index) => {
+                const row = days[index];
+                if (!row) return null;
+                const dateId = `${ids.day}-${view.id}-date`;
+                const label = `日期 ${index + 1}`;
+                return (
+                  <li key={view.id} className="space-y-3 rounded-xl border border-gray-200 p-3">
+                    <div className="flex items-end gap-2">
+                      <div className="min-w-0 flex-1">
+                        <Field label={label} required htmlFor={dateId}>
+                          <Input
+                            id={dateId}
+                            type="date"
+                            value={row.date}
+                            onChange={(e) => updateDay(view.id, { date: e.target.value })}
+                            aria-invalid={view.error ? true : undefined}
+                            required
+                          />
+                        </Field>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        onClick={() => removeDay(view.id)}
+                        disabled={days.length <= 1}
+                        aria-label={`刪除${view.date ? fmtDateWithWeekday(view.date) : label}`}
+                      >
+                        刪除
+                      </Button>
+                    </div>
+                    <Segmented<LeavePeriod>
+                      aria-label={`${label}的時段`}
+                      compact
+                      options={PERIOD_OPTIONS}
+                      value={row.period}
+                      onChange={(p) => updateDay(view.id, { period: p })}
+                    />
+                    {(row.period === "am" || row.period === "pm") && (
+                      <p className="text-xs text-gray-400">{describeHalfDays(shiftOn(view.date))}</p>
+                    )}
+                    {row.period === "hours" && (
+                      <div className="grid grid-cols-2 gap-3">
+                        <Field label="開始時間" required htmlFor={`${dateId}-start`} hint={hasBreak ? "午休時段不能選" : undefined}>
+                          <Select
+                            id={`${dateId}-start`}
+                            value={view.hoursStartValue}
+                            onChange={(e) => updateDay(view.id, { hoursStart: e.target.value })}
+                          >
+                            {view.startOptions.map((t, i) => (
+                              <option key={t} value={t}>
+                                {startLabel(t, i)}
+                              </option>
+                            ))}
+                          </Select>
+                        </Field>
+                        <Field
+                          label="時數"
+                          required
+                          htmlFor={`${dateId}-hours`}
+                          hint={`最多 ${Math.max(view.maxHours, 1)} 小時${hasBreak ? "，午休不算" : ""}`}
+                        >
+                          <Select
+                            id={`${dateId}-hours`}
+                            value={String(view.hoursCountValue)}
+                            onChange={(e) => updateDay(view.id, { hoursCount: Number(e.target.value) })}
+                          >
+                            {Array.from({ length: Math.max(view.maxHours, 1) }, (_, i) => i + 1).map((n) => (
+                              <option key={n} value={n}>
+                                {n} 小時
+                              </option>
+                            ))}
+                          </Select>
+                        </Field>
+                      </div>
+                    )}
+                    {view.error ? (
+                      <p role="alert" className="text-sm text-red-600">
+                        {view.error}
+                      </p>
+                    ) : view.warning ? (
+                      <p className="text-sm text-amber-700">{view.warning}</p>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+            <Button variant="secondary" block onClick={addDay} disabled={days.length >= MAX_LEAVE_SEGMENTS}>
+              ＋新增日期
+            </Button>
+            <p className="text-xs text-gray-400">
+              {days.length >= MAX_LEAVE_SEGMENTS
+                ? `一次最多 ${MAX_LEAVE_SEGMENTS} 天，其餘請另外申請`
+                : "一天一列，日期可以不連續；每天可選全天、上午、下午或指定時數。"}
+            </p>
           </div>
         )}
       </div>
@@ -289,33 +371,30 @@ export function LeaveForm({
             </div>
           )}
         </div>
-      ) : (
-        <p className="text-xs text-gray-400">
-          預設整天（上班到下班）。第一天從開始時間請到下班、中間整天、最後一天從上班請到結束時間；休息日與國定假日自動不計。
-        </p>
-      )}
+      ) : null}
 
       {/* 即時摘要 */}
       <div className="space-y-1 rounded-xl bg-gray-50 px-3 py-2.5">
-        {result.error ? (
-          <SummaryLine tone="red">{result.error}</SummaryLine>
-        ) : mode === "single" ? (
+        {formError ? (
+          <SummaryLine tone="red">{formError}</SummaryLine>
+        ) : !isRange ? (
           <SummaryLine tone="brand">{`${single.startTime}–${single.endTime}，共 ${formatLeaveDuration(result.totalHours, hoursPerDay)}`}</SummaryLine>
         ) : (
           <>
-            {result.segments.map((seg) => (
-              <SummaryLine key={seg.date}>{describeLeaveDay(seg, shiftOn(seg.date), hoursPerDay)}</SummaryLine>
+            {/* 依日期排序逐日列出各天的時段與時數（整天只寫「全天」），最後是合計（天＋時）。 */}
+            {list.segments.map((seg) => (
+              <SummaryLine key={seg.date}>{describeLeaveDayRow(seg, shiftOn(seg.date), hoursPerDay)}</SummaryLine>
             ))}
-            {/* 只寫請假總時數：上面逐日已列出每一天，再寫「共 3 天」會跟「1 天 7 時」兩個「天」並排。 */}
-            <SummaryLine tone="brand">共 {formatLeaveDuration(result.totalHours, hoursPerDay)}</SummaryLine>
+            <SummaryLine tone="brand">合計 {formatLeaveDuration(list.totalHours, hoursPerDay)}</SummaryLine>
           </>
         )}
-        {result.skipped.length > 0 && (
-          <SummaryLine>
-            已略過 {result.skipped.length} 天（{skippedReasons}）：{result.skipped.map((s) => fmtDateShort(s.date)).join("、")}
-          </SummaryLine>
-        )}
-        {result.warning && <SummaryLine tone="amber">{result.warning}</SummaryLine>}
+        {isRange
+          ? list.warnings.map((w) => (
+              <SummaryLine key={w} tone="amber">
+                {w}
+              </SummaryLine>
+            ))
+          : result.warning && <SummaryLine tone="amber">{result.warning}</SummaryLine>}
         {leaveTypeId && (
           <SummaryLine>
             {remaining == null ? "此假別尚未設定額度" : `剩餘 ${formatLeaveDuration(Math.max(0, remaining), hoursPerDay)}`}

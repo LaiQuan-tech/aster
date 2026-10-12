@@ -28,6 +28,7 @@ import {
 } from "./ess-format";
 import { summarizeSegments } from "./ess-notifications";
 import { formatLeaveDuration, formatRequestHours } from "./leave-duration";
+import { hasWorkdayGap } from "./leave-gaps";
 import { DEFAULT_SHIFT, addDaysIfCrossesMidnight, halfDayWindow, normalizeHm, parseHm, type ShiftLike } from "./leave-hours";
 import { describePeriodClosed, periodClosedMessage } from "./period-closed";
 
@@ -333,12 +334,15 @@ function round2(n: number): number {
 /* ------------------------------------------------------- buildCreateBody --- */
 
 function buildLeave(form: LeaveFormValues): BuildResult {
-  const segments = (form.segments ?? []).map((s) => ({
-    date: s.date,
-    startTime: normalizeHm(s.startTime),
-    endTime: normalizeHm(s.endTime),
-    hours: round2(Number(s.hours) || 0),
-  }));
+  // 依日期（同日再依開始時間）排序：startAt／endAt 取首尾段，多日自選日期（2026-10-12）的列可以是任意順序。
+  const segments = (form.segments ?? [])
+    .map((s) => ({
+      date: s.date,
+      startTime: normalizeHm(s.startTime),
+      endTime: normalizeHm(s.endTime),
+      hours: round2(Number(s.hours) || 0),
+    }))
+    .sort((a, b) => (a.date !== b.date ? (a.date < b.date ? -1 : 1) : a.startTime < b.startTime ? -1 : a.startTime > b.startTime ? 1 : 0));
   if (segments.length === 0) return { error: "請選擇日期" };
   if (segments.some((s) => !DATE_RE.test(s.date) || parseHm(s.startTime) == null || parseHm(s.endTime) == null)) {
     return { error: "日期或時間格式不正確" };
@@ -722,6 +726,26 @@ export function describeRequest(
         const label = periodLabel(seg, opts.shift ?? DEFAULT_SHIFT);
         // 整天只寫「全天」；上午／下午／指定時段才附時數。
         return `${fmtDateWithWeekday(seg.date)}${label}${label === "全天" ? "" : hoursText}`;
+      }
+      const sortedSegs = [...segments].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      const dayShift = opts.shift ?? DEFAULT_SHIFT;
+      // 舊多日表單的形狀＝「首日可晚到、末日可早退、其餘整天」（對照班別的上下班時間）：只有這種才能寫成「首日–末日」。
+      const rangeShape = sortedSegs.every(
+        (seg, i) =>
+          (i === 0 || normalizeHm(seg.startTime) === normalizeHm(dayShift.start_time)) &&
+          (i === sortedSegs.length - 1 || normalizeHm(seg.endTime) === normalizeHm(dayShift.end_time)),
+      );
+      if (segments.length > 1 && (hasWorkdayGap(sortedSegs) || !rangeShape)) {
+        // 自選日期（2026-10-12）：不連續（例 10/12、10/14 下午、10/20）或中間某天只請半天，寫「首日–末日」會看起來
+        // 整段都整天請，改逐日列出（整天只寫日期，其他附時段），超過 4 天只列前 3 天＋「等 N 個日期」。
+        const sorted = sortedSegs;
+        const shift = dayShift;
+        const parts = sorted.map((seg) => {
+          const label = periodLabel(seg, shift);
+          return label === "全天" ? fmtDateShort(seg.date) : `${fmtDateShort(seg.date)} ${label}`;
+        });
+        const shown = parts.length > 4 ? `${parts.slice(0, 3).join("、")}…等 ${parts.length} 個日期` : parts.join("、");
+        return `${shown}${hoursText}`;
       }
       if (segments.length > 1) {
         const first = segments[0];
