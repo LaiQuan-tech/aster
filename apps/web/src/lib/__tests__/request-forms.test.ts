@@ -10,11 +10,15 @@ import {
   approvalLine,
   approvalPeriodText,
   approvalWhenText,
+  attachmentLimitOf,
+  attachmentTooLargeText,
+  attachmentUploadWarning,
   balanceBucketFor,
   buildCreateBody,
   describeBody,
   describeLeaveDay,
   describeRequest,
+  fmtAttachmentLimit,
   isAllDayRequest,
   isBuildError,
   isRequestKind,
@@ -988,23 +992,95 @@ describe("approvalWhenText（簽核頁批次結果、勾選框 aria-label 認「
   });
 });
 
-describe("附件太大的錯誤碼：API 的 file_too_large 與舊碼 payload_too_large 走同一句中文", () => {
-  /** 與 apiFetch 丟出的錯誤同形：message 是「[status] code」，另掛 status／code。 */
-  const apiError = (status: number, code: string) => Object.assign(new Error(`[${status}] ${code}`), { status, code });
+describe("附件太大的錯誤碼：API 的 file_too_large 與舊碼 payload_too_large", () => {
+  /** 與 apiFetch 丟出的錯誤同形：message 是「[status] code」，另掛 status／code／body（整包回應）。 */
+  const apiError = (status: number, code: string, body?: Record<string, unknown>) =>
+    Object.assign(new Error(`[${status}] ${code}`), { status, code, body: body ?? { error: code } });
+  const MiB = 1024 * 1024;
 
-  it("API（POST /requests/:id/attachments）的 413 file_too_large → 中文，不再露出「[413] file_too_large」", () => {
-    const text = requestErrorText(apiError(413, "file_too_large"));
-    expect(text).toBe("附件太大，單檔限 3 MB");
-    expect(text).not.toMatch(/file_too_large|\[413\]/);
+  it("回應帶了上限（maxBytes，依租戶設定）→ 照它寫數字，不寫死 3 MB", () => {
+    expect(attachmentTooLargeText(apiError(413, "file_too_large", { error: "file_too_large", maxBytes: 1 * MiB }))).toBe(
+      "附件太大，單檔限 1 MB",
+    );
+    expect(attachmentTooLargeText(apiError(413, "file_too_large", { error: "file_too_large", maxBytes: 500 * 1024 }))).toBe(
+      "附件太大，單檔限 500 KB",
+    );
+    expect(attachmentTooLargeText(apiError(413, "file_too_large", { error: "file_too_large", maxBytes: 3 * MiB }))).toBe(
+      "附件太大，單檔限 3 MB",
+    );
   });
 
-  it("舊碼 payload_too_large 照舊；兩個碼是同一句", () => {
-    expect(requestErrorText(apiError(413, "payload_too_large"))).toBe("附件太大，單檔限 3 MB");
+  it("沒帶上限（舊 API、舊碼 payload_too_large）→ 不寫數字的通用說法；兩個碼同一句；不露出「[413] file_too_large」", () => {
+    const generic = attachmentTooLargeText(apiError(413, "file_too_large"));
+    expect(generic).toBe("附件超過公司設定的大小上限，請縮小後再傳");
+    expect(generic).not.toMatch(/\d|file_too_large|\[413\]/);
+    expect(attachmentTooLargeText(apiError(413, "payload_too_large"))).toBe(generic);
+    expect(attachmentTooLargeText(new Error("[413] file_too_large"))).toBe(generic);
+    // 查表（requestErrorText）是同一句保底，不再寫死 3 MB
+    expect(requestErrorText(apiError(413, "file_too_large"))).toBe(generic);
     expect(REQUEST_ERROR_MESSAGES.file_too_large).toBe(REQUEST_ERROR_MESSAGES.payload_too_large);
   });
 
-  it("只有訊息格式「[413] file_too_large」（沒有 .code 屬性）也認得；別的 413 碼不被誤翻", () => {
-    expect(requestErrorText(new Error("[413] file_too_large"))).toBe("附件太大，單檔限 3 MB");
+  it("別的錯誤不歸它管（回 null，交給 requestErrorText／friendlyError）", () => {
+    expect(attachmentTooLargeText(new Error("[413] something_else"))).toBeNull();
+    expect(attachmentTooLargeText(apiError(409, "max_files_reached", { error: "max_files_reached", max: 3 }))).toBeNull();
+    expect(attachmentTooLargeText("file_too_large")).toBeNull();
     expect(requestErrorText(new Error("[413] something_else"))).toBeNull();
+  });
+
+  it("maxBytes 不合理（0、負數、字串）→ 當作沒帶", () => {
+    for (const maxBytes of [0, -1, "1048576", Number.NaN]) {
+      expect(attachmentLimitOf(apiError(413, "file_too_large", { error: "file_too_large", maxBytes }))).toBeNull();
+    }
+    expect(attachmentLimitOf(apiError(413, "file_too_large", { error: "file_too_large", maxBytes: 2048 }))).toBe(2048);
+    expect(attachmentLimitOf(null)).toBeNull();
+  });
+
+  it("上限的寫法：整數 MB、捨去到 0.1 MB、不滿 1 MB 寫 KB；寫出來的數字不會比實際上限大", () => {
+    expect(fmtAttachmentLimit(3 * MiB)).toBe("3 MB");
+    expect(fmtAttachmentLimit(1.5 * MiB)).toBe("1.5 MB");
+    expect(fmtAttachmentLimit(2000 * 1024)).toBe("1.9 MB"); // 1.95 MB 不寫成 2 MB
+    expect(fmtAttachmentLimit(500 * 1024)).toBe("500 KB");
+    expect(fmtAttachmentLimit(100)).toBe("1 KB");
+  });
+});
+
+describe("請假附件上傳失敗的提醒（單已建立）", () => {
+  const NET = "連線失敗，請確認網路連線後再試";
+
+  it("全部沒傳上 → 列出檔名、原因寫一次，請到「我的申請」按「上傳憑證」補傳", () => {
+    expect(attachmentUploadWarning([{ name: "診斷證明.jpg", reason: NET }], 1)).toBe(
+      `申請已送出，但附件「診斷證明.jpg」上傳失敗（${NET}）。請在下方「我的申請」按「上傳憑證」補傳。`,
+    );
+    expect(
+      attachmentUploadWarning(
+        [
+          { name: "a.jpg", reason: NET },
+          { name: "b.pdf", reason: NET },
+        ],
+        2,
+      ),
+    ).toBe(`申請已送出，但附件「a.jpg」「b.pdf」上傳失敗（${NET}）。請在下方「我的申請」按「上傳憑證」補傳。`);
+  });
+
+  it("只有部分沒傳上 → 說其餘已上傳（列表不會再給「上傳憑證」）；原因不同就各寫各的", () => {
+    expect(attachmentUploadWarning([{ name: "b.jpg", reason: NET }], 3)).toBe(
+      `申請已送出，但附件「b.jpg」上傳失敗（${NET}）；其餘 2 個已上傳。缺的附件若必要，請撤回這張申請後重新申請。`,
+    );
+    expect(
+      attachmentUploadWarning(
+        [
+          { name: "a.jpg", reason: NET },
+          { name: "b.pdf", reason: "附件太大，單檔限 1 MB" },
+        ],
+        3,
+      ),
+    ).toBe(
+      `申請已送出，但附件「a.jpg」（${NET}）、「b.pdf」（附件太大，單檔限 1 MB）上傳失敗；其餘 1 個已上傳。缺的附件若必要，請撤回這張申請後重新申請。`,
+    );
+  });
+
+  it("都傳上了 → null（成功畫面不多一行）", () => {
+    expect(attachmentUploadWarning([], 2)).toBeNull();
   });
 });

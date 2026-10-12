@@ -8,7 +8,8 @@
  * ④「我的申請」清單（`GET /requests?scope=mine`）。
  * 申請人一律是登入者本人（沒有代為申請；API 對代申請欄位且對象非本人回 400 filing_on_behalf_removed）。
  *
- * 送出流程：`createRequest(body)` → 逐檔 `uploadAttachment` → `invalidateEssState()` → 成功畫面 → 列表重載。
+ * 送出流程：先準備附件（壓縮＋大小檢查，不過就不建單）→ `createRequest(body)` → 逐檔 `uploadAttachment`
+ * （某檔失敗其餘照傳）→ `invalidateEssState()` → 成功畫面 → 列表重載（lib/upload-prep.ts createThenUploadAll）。
  * 純函式（時數規則、body 組裝、清單文案）在 `@/lib/leave-hours` 與 `@/lib/request-forms`，有單元測試。
  * 頁框（頂部列／底列／gate／Toast）由 `ess/layout.tsx` 提供，本頁只回內容。
  */
@@ -34,7 +35,8 @@ import {
 import { todayKey } from "@/lib/ess-format";
 import { invalidateEssState, useEssState } from "@/lib/ess-state";
 import { DEFAULT_SHIFT, type ShiftLike } from "@/lib/leave-hours";
-import { KIND_LABEL, KIND_ORDER, approvalChainSummary, isRequestKind } from "@/lib/request-forms";
+import { KIND_LABEL, KIND_ORDER, approvalChainSummary, attachmentUploadWarning, isRequestKind } from "@/lib/request-forms";
+import { createThenUploadAll, withFileName } from "@/lib/upload-prep";
 import { FixPunchForm } from "./_components/FixPunchForm";
 import { KindSwitcher } from "./_components/KindSwitcher";
 import { LeaveForm } from "./_components/LeaveForm";
@@ -161,16 +163,27 @@ function RequestsView() {
       setSubmitting(true);
       setSubmitError(null);
       try {
-        const created = await createRequest(body);
-        let uploadWarning: string | null = null;
-        for (const file of files) {
-          try {
-            await uploadAttachment(created.requestId, file);
-          } catch (err) {
-            uploadWarning = `申請已送出，但附件「${file.name}」上傳失敗（${describeError(err, "上傳失敗")}）。請在下方「我的申請」補傳憑證。`;
-            break;
-          }
+        // 順序（2026-10-12）：先準備每個附件（照片壓縮＋3 MB 檢查）→ 建單 → 逐檔上傳（lib/upload-prep.ts）。
+        // 以前先建單才壓縮：桌機 Chrome 選 HEIC 壓不了，假單已建好卻缺憑證，同批其他檔也沒傳。
+        // 現在任一附件準備不過就不建單、訊息指出是哪個檔；建單後某個檔上傳失敗，其餘照傳，成功畫面列出沒傳上的檔。
+        const result = await createThenUploadAll({
+          files,
+          create: () => createRequest(body),
+          upload: (created, file) => uploadAttachment(created.requestId, file),
+        });
+        if (!result.ok) {
+          setSubmitError(
+            result.stage === "prepare"
+              ? withFileName(result.file.name, describeError(result.error, "附件無法使用，請換一個檔案"), files.length > 1)
+              : describeError(result.error, "送出失敗，請稍後再試"),
+          );
+          return;
         }
+        const created = result.created;
+        const uploadWarning = attachmentUploadWarning(
+          result.failed.map(({ file, error }) => ({ name: file.name, reason: describeError(error, "上傳失敗") })),
+          files.length,
+        );
         invalidateEssState();
         const steps = [...(created.steps ?? [])].sort((a, b) => a.stepOrder - b.stepOrder);
         // 第一關可能有多位候選（任一人簽即過）：有 candidateNames 就用「／」串，舊 API 退回 approverName

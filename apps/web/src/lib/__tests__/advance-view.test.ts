@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   EXPENSE_ERROR_MESSAGES,
-  NETWORK_FAILURE_MESSAGE,
   RECEIPT_AUTO_CANCEL_REASON,
   advanceDate,
   advanceOptionLabel,
@@ -12,14 +11,18 @@ import {
   claimStatusLabel,
   describeBalance,
   expenseErrorMessage,
-  isNetworkFailure,
+  expenseErrorReason,
+  expenseLoadErrorMessage,
   isUnsettledAdvance,
   isValidPeriod,
+  leftoverCancelFailedMessage,
+  leftoverClaimNotice,
   receiptUploadFailedMessage,
   settlementWarnings,
   type AdvanceLike,
   type PreviewClaim,
 } from "../advance-view";
+import { NETWORK_FAILURE_MESSAGE, UPLOAD_NETWORK_FAILURE_MESSAGE, UploadPrepError } from "../upload-prep";
 
 /**
  * 預支綁定與核銷預覽的顯示用純函式（2026-10-11）。
@@ -128,60 +131,99 @@ describe("預支的選項文字", () => {
 
 describe("報銷頁的錯誤訊息", () => {
   const apiError = (status: number, code: string) => Object.assign(new Error(`[${status}] ${code}`), { status, code });
+  /** 畫面文字不該有英文（錯誤碼、Failed to fetch…）；「MB」「YYYY-MM」之外。 */
+  const noEnglish = (text: string) => expect(text.replace(/MB/g, "")).not.toMatch(/[A-Za-z]/);
 
   it("invalid_advance／invalid_trip_request 等已知錯誤碼 → 中文說明（從 .code 或 `[status] code` 取）", () => {
-    expect(expenseErrorMessage(apiError(400, "invalid_advance"), "x")).toBe(EXPENSE_ERROR_MESSAGES.invalid_advance);
-    expect(expenseErrorMessage(new Error("[400] invalid_trip_request"), "x")).toBe(EXPENSE_ERROR_MESSAGES.invalid_trip_request);
+    expect(expenseErrorMessage(apiError(400, "invalid_advance"), "x", "create")).toBe(EXPENSE_ERROR_MESSAGES.invalid_advance);
+    expect(expenseErrorMessage(new Error("[400] invalid_trip_request"), "x", "create")).toBe(EXPENSE_ERROR_MESSAGES.invalid_trip_request);
     expect(EXPENSE_ERROR_MESSAGES.invalid_advance).toContain("預支");
     expect(apiErrorCode(new Error("[409] period_settled"))).toBe("period_settled");
     expect(apiErrorCode("boom")).toBeNull();
   });
 
   it("預支核銷後綁定憑證鎖定（409 advance_settled）、月份已鎖定（period_settled）也有中文說明", () => {
-    expect(expenseErrorMessage(apiError(409, "advance_settled"), "x")).toBe(EXPENSE_ERROR_MESSAGES.advance_settled);
+    expect(expenseErrorMessage(apiError(409, "advance_settled"), "x", "cancel")).toBe(EXPENSE_ERROR_MESSAGES.advance_settled);
     expect(EXPENSE_ERROR_MESSAGES.advance_settled).toContain("預支核銷");
-    expect(expenseErrorMessage(apiError(409, "period_settled"), "x")).toBe(EXPENSE_ERROR_MESSAGES.period_settled);
+    expect(expenseErrorMessage(apiError(409, "period_settled"), "x", "create")).toBe(EXPENSE_ERROR_MESSAGES.period_settled);
   });
 
-  it("不認得的錯誤碼 → 原訊息；不是 Error → fallback", () => {
-    expect(expenseErrorMessage(new Error("[500] kaboom"), "送出失敗")).toBe("[500] kaboom");
-    expect(expenseErrorMessage("boom", "送出失敗")).toBe("送出失敗");
+  it("不認得的錯誤碼（[500] upload_failed…）→ 不露出英文代碼，用該步驟的中文 fallback；原因查不到 → null", () => {
+    expect(expenseErrorMessage(new Error("[500] kaboom"), "送出失敗，請稍後再試", "create")).toBe("送出失敗，請稍後再試");
+    expect(expenseErrorMessage(apiError(500, "upload_failed"), "撤回失敗", "cancel")).toBe("撤回失敗");
+    expect(expenseErrorMessage("boom", "送出失敗", "create")).toBe("送出失敗");
+    expect(expenseErrorReason(apiError(500, "upload_failed"), "upload")).toBeNull();
+    expect(expenseErrorReason(new Error("something English"), "create")).toBeNull();
   });
 
   it("憑證太大（413 file_too_large）→ 中文，講 3 MB（API 收 5 MB，但經 Vercel 實際只傳得動約 3 MB）", () => {
-    expect(expenseErrorMessage(apiError(413, "file_too_large"), "x")).toBe(EXPENSE_ERROR_MESSAGES.file_too_large);
+    expect(expenseErrorMessage(apiError(413, "file_too_large"), "x", "upload")).toBe(EXPENSE_ERROR_MESSAGES.file_too_large);
     expect(EXPENSE_ERROR_MESSAGES.file_too_large).toContain("3 MB");
   });
 
-  it("連線本身失敗（Chrome／Safari／Firefox 三種說法）→「可能是檔案太大或網路不穩」；一般錯誤不算", () => {
+  it("斷線依步驟：只有上傳憑證提「可能是檔案太大」；建單、撤回、載入只說連線失敗", () => {
     for (const message of ["Failed to fetch", "Load failed", "NetworkError when attempting to fetch resource."]) {
-      expect(isNetworkFailure(new TypeError(message))).toBe(true);
-      expect(expenseErrorMessage(new TypeError(message), "送出失敗")).toBe(NETWORK_FAILURE_MESSAGE);
+      const err = new TypeError(message);
+      expect(expenseErrorMessage(err, "x", "upload")).toBe(UPLOAD_NETWORK_FAILURE_MESSAGE);
+      expect(expenseErrorMessage(err, "x", "create")).toBe(NETWORK_FAILURE_MESSAGE);
+      expect(expenseErrorMessage(err, "x", "cancel")).toBe(NETWORK_FAILURE_MESSAGE);
+      expect(expenseErrorReason(err, "load")).toBe(NETWORK_FAILURE_MESSAGE);
     }
-    expect(NETWORK_FAILURE_MESSAGE).toContain("檔案太大");
-    expect(NETWORK_FAILURE_MESSAGE).toContain("網路不穩");
-    expect(isNetworkFailure(new Error("[500] kaboom"))).toBe(false);
-    expect(isNetworkFailure("Failed to fetch")).toBe(false);
+    expect(NETWORK_FAILURE_MESSAGE).not.toContain("檔案太大");
   });
 
-  it("前端準備階段的中文錯誤（沒有錯誤碼）原樣顯示", () => {
-    expect(expenseErrorMessage(new Error("檔案超過 3 MB，請縮小或改傳照片／截圖"), "送出失敗")).toBe(
-      "檔案超過 3 MB，請縮小或改傳照片／截圖",
-    );
+  it("前端準備階段的中文錯誤（UploadPrepError，沒有錯誤碼）原樣顯示", () => {
+    const err = new UploadPrepError("檔案超過 3 MB，請縮小或改傳照片／截圖");
+    expect(expenseErrorMessage(err, "送出失敗", "upload")).toBe("檔案超過 3 MB，請縮小或改傳照片／截圖");
   });
 
-  it("憑證上傳失敗（單已建好）：自動撤回成功 → 請重新送出；撤回也失敗 → 請在列表撤回後重送；括號附原因", () => {
+  it("已結算月份（409 period_closed）任何步驟都是「YYYY-MM 已結算，請洽管理者」", () => {
+    const closed = Object.assign(new Error("[409] period_closed"), { status: 409, code: "period_closed", body: { error: "period_closed", period: "2026-09" } });
+    expect(expenseErrorMessage(closed, "x", "cancel")).toBe("2026-09 已結算，請洽管理者");
+    expect(expenseErrorMessage(closed, "x", "create")).toBe("2026-09 已結算，請洽管理者");
+  });
+
+  it("載入失敗：一律中文（不再顯示「Load failed」或 [500] …）", () => {
+    expect(expenseLoadErrorMessage(new TypeError("Load failed"))).toBe(`無法載入報銷資料：${NETWORK_FAILURE_MESSAGE}`);
+    expect(expenseLoadErrorMessage(apiError(403, "not_an_employee"))).toBe(`無法載入報銷資料：${EXPENSE_ERROR_MESSAGES.not_an_employee}`);
+    expect(expenseLoadErrorMessage(apiError(500, "internal_error"))).toBe("無法載入報銷資料，請重新整理頁面再試");
+    for (const err of [new TypeError("Load failed"), new TypeError("Failed to fetch"), apiError(500, "internal_error"), "boom"]) {
+      noEnglish(expenseLoadErrorMessage(err));
+    }
+  });
+
+  it("憑證上傳失敗（單已建好）：自動撤回成功 → 請重新送出；撤回也失敗 → 說單還在、沒有憑證；括號只附中文原因", () => {
     const err = new TypeError("Failed to fetch");
     expect(receiptUploadFailedMessage(err, true)).toBe(
-      `憑證上傳失敗，這筆報銷已自動撤回，請重新送出。（${NETWORK_FAILURE_MESSAGE}）`,
+      `憑證上傳失敗，這筆報銷已自動撤回，請重新送出。（${UPLOAD_NETWORK_FAILURE_MESSAGE}）`,
     );
     expect(receiptUploadFailedMessage(apiError(413, "file_too_large"), false)).toBe(
-      `憑證上傳失敗，請在下方列表撤回這筆後再重新送出。（${EXPENSE_ERROR_MESSAGES.file_too_large}）`,
+      `憑證上傳失敗，自動撤回也沒有成功，這筆報銷目前沒有憑證。（${EXPENSE_ERROR_MESSAGES.file_too_large}）`,
     );
-    expect(receiptUploadFailedMessage("boom", true)).toContain("（上傳失敗）");
+    // 認不得的原因不附（以前會露出「（[500] upload_failed）」）
+    expect(receiptUploadFailedMessage(apiError(500, "upload_failed"), true)).toBe("憑證上傳失敗，這筆報銷已自動撤回，請重新送出。");
+    expect(receiptUploadFailedMessage("boom", false)).toBe("憑證上傳失敗，自動撤回也沒有成功，這筆報銷目前沒有憑證。");
+    for (const e of [err, apiError(500, "upload_failed"), apiError(413, "file_too_large")]) {
+      noEnglish(receiptUploadFailedMessage(e, true));
+      noEnglish(receiptUploadFailedMessage(e, false));
+    }
     // 寫進 status_reason：API 要求 1–250 字。
     expect(RECEIPT_AUTO_CANCEL_REASON.length).toBeGreaterThan(0);
     expect(RECEIPT_AUTO_CANCEL_REASON.length).toBeLessThanOrEqual(250);
+  });
+
+  it("留下的單（撤回也失敗）：按鈕上方的常駐說明寫月份、說再按送出會先撤回；撤不掉 → 這次不送出、附中文原因", () => {
+    const notice = leftoverClaimNotice("2026-10");
+    expect(notice).toContain("2026-10");
+    expect(notice).toContain("先撤回");
+    expect(notice).toContain("不會重複");
+    expect(leftoverCancelFailedMessage(new TypeError("Load failed"))).toBe(
+      `上一筆沒附到憑證的報銷還沒撤回成功，這次先不送出，免得重複。（${NETWORK_FAILURE_MESSAGE}）`,
+    );
+    expect(leftoverCancelFailedMessage(apiError(500, "kaboom"))).toBe(
+      "上一筆沒附到憑證的報銷還沒撤回成功，這次先不送出，免得重複。請稍後再試。",
+    );
+    noEnglish(leftoverCancelFailedMessage(apiError(500, "kaboom")));
   });
 });
 

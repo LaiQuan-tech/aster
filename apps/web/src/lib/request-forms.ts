@@ -132,10 +132,59 @@ export function advanceFieldValue(touched: boolean, advanceRequested: string, es
 export const REASON_MAX = 250;
 
 /**
- * 附件太大的說法。API（routes/attachments.ts）回 413 `file_too_large`，早期前端認的碼是 `payload_too_large`——
- * 兩個碼共用同一句，免得畫面露出「[413] file_too_large」。照片會先壓縮（lib/upload-prep.ts），會走到這裡的是 PDF 等不壓縮的檔。
+ * 附件太大的說法。API（routes/attachments.ts）回 413 `{ error: "file_too_large", maxBytes }`，早期前端認的碼是
+ * `payload_too_large`——兩個碼共用，免得畫面露出「[413] file_too_large」。單檔上限依租戶設定（模組設定 → 表單參數
+ * → 附件上限 KB，沒設是 3 MB）：回應帶了 `maxBytes` 就照它寫數字（{@link attachmentTooLargeText}），沒帶就用
+ * 這句不寫死數字的說法。照片會先壓縮（lib/upload-prep.ts），會走到這裡的多半是 PDF 等不壓縮的檔。
  */
-const ATTACHMENT_TOO_LARGE_MESSAGE = "附件太大，單檔限 3 MB";
+const ATTACHMENT_TOO_LARGE_MESSAGE = "附件超過公司設定的大小上限，請縮小後再傳";
+
+/** 413 回應帶的單檔上限（apiFetch 錯誤的 `.body.maxBytes`）；沒有或不是正數 → null。 */
+export function attachmentLimitOf(err: unknown): number | null {
+  const body = err !== null && typeof err === "object" ? (err as { body?: unknown }).body : undefined;
+  const max = body !== null && typeof body === "object" ? (body as { maxBytes?: unknown }).maxBytes : undefined;
+  return typeof max === "number" && Number.isFinite(max) && max > 0 ? max : null;
+}
+
+/** 上限寫成「3 MB」「1.5 MB」「500 KB」：無條件捨去到 0.1 MB／1 KB，寫出來的數字不會比實際上限大。 */
+export function fmtAttachmentLimit(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1) return `${Math.floor(mb * 10) / 10} MB`;
+  return `${Math.max(1, Math.floor(bytes / 1024))} KB`;
+}
+
+/**
+ * 附件太大（413 file_too_large／payload_too_large）的中文：回應帶了上限 →「附件太大，單檔限 1 MB」；
+ * 沒帶 → {@link ATTACHMENT_TOO_LARGE_MESSAGE}；不是這兩個碼 → null（ESS 的 describeError 先問它，再查下面的表）。
+ */
+export function attachmentTooLargeText(err: unknown): string | null {
+  const code = requestErrorCode(err);
+  if (code !== "file_too_large" && code !== "payload_too_large") return null;
+  const limit = attachmentLimitOf(err);
+  return limit ? `附件太大，單檔限 ${fmtAttachmentLimit(limit)}` : ATTACHMENT_TOO_LARGE_MESSAGE;
+}
+
+/**
+ * 假單已建立、但有附件沒傳上去時（成功畫面的提醒）：列出沒傳上的檔名與原因（原因都一樣只寫一次）。
+ *   • 全部沒傳上 → 請員工到「我的申請」按「上傳憑證」補傳（列表在一個附件都沒有時才給這個按鈕）；
+ *   • 只有部分沒傳上 → 說其餘已上傳；這時列表不會再給「上傳憑證」，缺的檔若必要請撤回後重新申請。
+ * `failed` 是空的 → null。
+ */
+export function attachmentUploadWarning(
+  failed: readonly { name: string; reason: string }[],
+  total: number,
+): string | null {
+  if (failed.length === 0) return null;
+  const reasons = Array.from(new Set(failed.map((f) => f.reason)));
+  const which =
+    reasons.length === 1
+      ? `${failed.map((f) => `「${f.name}」`).join("")}上傳失敗（${reasons[0]}）`
+      : `${failed.map((f) => `「${f.name}」（${f.reason}）`).join("、")}上傳失敗`;
+  const uploaded = total - failed.length;
+  return uploaded > 0
+    ? `申請已送出，但附件${which}；其餘 ${uploaded} 個已上傳。缺的附件若必要，請撤回這張申請後重新申請。`
+    : `申請已送出，但附件${which}。請在下方「我的申請」按「上傳憑證」補傳。`;
+}
 
 /** API 錯誤碼 → 中文（找不到的碼由呼叫端退回 attendance-sheets-api 的 friendlyError）。 */
 export const REQUEST_ERROR_MESSAGES: Record<string, string> = {

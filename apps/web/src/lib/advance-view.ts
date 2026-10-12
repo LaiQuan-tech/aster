@@ -12,6 +12,12 @@
  */
 import { fmtDateShort, fmtMoney } from "./ess-format";
 import { describePeriodClosed, periodClosedMessage } from "./period-closed";
+import {
+  NETWORK_FAILURE_MESSAGE,
+  UPLOAD_NETWORK_FAILURE_MESSAGE,
+  UploadPrepError,
+  isNetworkFailure,
+} from "./upload-prep";
 
 /* ------------------------------------------------------------ 預支 --- */
 
@@ -118,18 +124,6 @@ export const EXPENSE_ERROR_MESSAGES: Record<string, string> = {
   file_too_large: "檔案太大，單檔請在 3 MB 以內；請縮小或改傳照片／截圖",
 };
 
-/**
- * fetch 本身失敗、沒拿到任何回應：Chrome「Failed to fetch」、Safari「Load failed」、Firefox「NetworkError when
- * attempting to fetch resource.」。上傳時常見的原因是請求超過 Vercel 約 4.5 MB 的上限——平台回 413 但沒有
- * CORS 標頭，瀏覽器只給這句；其次是網路不穩。
- */
-const NETWORK_FAILURE_RE = /^(failed to fetch|load failed|networkerror when attempting to fetch resource)/i;
-export const NETWORK_FAILURE_MESSAGE = "連線失敗，可能是檔案太大或網路不穩；請換小一點的檔案或稍後再試";
-
-export function isNetworkFailure(err: unknown): boolean {
-  return err instanceof Error && NETWORK_FAILURE_RE.test(err.message.trim());
-}
-
 /** apiFetch 的錯誤碼（`.code`，沒有就從 `[status] code` 的 message 取）；不是 Error → null。 */
 export function apiErrorCode(err: unknown): string | null {
   if (!(err instanceof Error)) return null;
@@ -139,33 +133,61 @@ export function apiErrorCode(err: unknown): string | null {
   return fromMessage || null;
 }
 
+/** 報銷頁的各個步驟：建單、上傳憑證、撤回、載入。斷線時只有上傳憑證會提「可能是檔案太大」。 */
+export type ExpenseStep = "create" | "upload" | "cancel" | "load";
+
 /**
- * 報銷送出／修改／撤回失敗的中文說明。歸屬期已發薪鎖定（409 period_closed）→「YYYY-MM 已結算，請洽管理者」；
- * 連線本身失敗（Failed to fetch）→ {@link NETWORK_FAILURE_MESSAGE}；
- * 其餘查 {@link EXPENSE_ERROR_MESSAGES}，再不然 Error.message，不是 Error 就用 fallback。
+ * 錯誤的中文原因（認得的才回）：歸屬期已發薪鎖定（409 period_closed）→「YYYY-MM 已結算，請洽管理者」；
+ * 連線本身失敗（Failed to fetch／Load failed…）→ {@link NETWORK_FAILURE_MESSAGE}，上傳憑證時改用
+ * {@link UPLOAD_NETWORK_FAILURE_MESSAGE}；前端準備憑證時擋下的（{@link UploadPrepError}，本來就是中文）→ 原樣；
+ * 其餘查 {@link EXPENSE_ERROR_MESSAGES}。認不得（例如 `[500] upload_failed`）→ null：畫面不露出英文代碼，
+ * 呼叫端改用該步驟的中文說法，原始錯誤記在 console。
  */
-export function expenseErrorMessage(err: unknown, fallback: string): string {
+export function expenseErrorReason(err: unknown, step: ExpenseStep): string | null {
   const closed = describePeriodClosed(err);
   if (closed) return closed;
-  if (isNetworkFailure(err)) return NETWORK_FAILURE_MESSAGE;
+  if (isNetworkFailure(err)) return step === "upload" ? UPLOAD_NETWORK_FAILURE_MESSAGE : NETWORK_FAILURE_MESSAGE;
+  if (err instanceof UploadPrepError) return err.message;
   const code = apiErrorCode(err);
-  if (code && EXPENSE_ERROR_MESSAGES[code]) return EXPENSE_ERROR_MESSAGES[code];
-  return err instanceof Error && err.message ? err.message : fallback;
+  return code && EXPENSE_ERROR_MESSAGES[code] ? EXPENSE_ERROR_MESSAGES[code] : null;
+}
+
+/** 報銷送出／撤回失敗的中文說明：{@link expenseErrorReason}，認不得就用 fallback（該步驟的中文說法）。 */
+export function expenseErrorMessage(err: unknown, fallback: string, step: ExpenseStep = "create"): string {
+  return expenseErrorReason(err, step) ?? fallback;
+}
+
+/** 載入報銷資料（類別、我的報銷、出差單、預支）失敗的說明：一律中文，不露出「Load failed」「[500] …」。 */
+export function expenseLoadErrorMessage(err: unknown): string {
+  const reason = expenseErrorReason(err, "load");
+  return reason ? `無法載入報銷資料：${reason}` : "無法載入報銷資料，請重新整理頁面再試";
 }
 
 /** 憑證上傳失敗時自動撤回剛建的單，寫進 status_reason 的理由（HR 在後台看得到）。 */
 export const RECEIPT_AUTO_CANCEL_REASON = "憑證上傳失敗，系統自動撤回";
 
 /**
- * 報銷送出時單已建好、憑證卻上傳失敗的說明（括號附上傳失敗的原因）：
+ * 報銷送出時單已建好、憑證卻上傳失敗的說明（只有中文：括號附認得的原因，認不得就不附）：
  *   • 已自動撤回 → 請重新送出（表單保留，直接再按送出即可）；
- *   • 撤回也失敗 → 單還在，請員工在列表撤回那筆再重送，免得留下一筆沒有憑證的單、重送又多一筆。
+ *   • 撤回也失敗 → 單還在、沒有憑證。頁面會記住這筆，下次送出先撤回它再建新單（說明見 {@link leftoverClaimNotice}）。
  */
 export function receiptUploadFailedMessage(err: unknown, rolledBack: boolean): string {
-  const reason = expenseErrorMessage(err, "上傳失敗");
+  const reason = expenseErrorReason(err, "upload");
+  const why = reason ? `（${reason}）` : "";
   return rolledBack
-    ? `憑證上傳失敗，這筆報銷已自動撤回，請重新送出。（${reason}）`
-    : `憑證上傳失敗，請在下方列表撤回這筆後再重新送出。（${reason}）`;
+    ? `憑證上傳失敗，這筆報銷已自動撤回，請重新送出。${why}`
+    : `憑證上傳失敗，自動撤回也沒有成功，這筆報銷目前沒有憑證。${why}`;
+}
+
+/** 有一筆留下的單（沒有憑證、還沒撤回）時，送出按鈕上方常駐的說明：再按送出會先撤回它，不會重複。 */
+export function leftoverClaimNotice(period: string): string {
+  return `${period} 有一筆報銷沒附到憑證、還沒撤回。直接再按「送出」會先撤回那一筆再重新送出，不會重複；也可以在下方列表自己撤回。`;
+}
+
+/** 送出前要先撤回留下的單、卻撤不掉：這次沒有建新單（免得重複）。 */
+export function leftoverCancelFailedMessage(err: unknown): string {
+  const reason = expenseErrorReason(err, "cancel");
+  return `上一筆沒附到憑證的報銷還沒撤回成功，這次先不送出，免得重複。${reason ? `（${reason}）` : "請稍後再試。"}`;
 }
 
 /* ------------------------------------------------------ 核銷前預覽 --- */

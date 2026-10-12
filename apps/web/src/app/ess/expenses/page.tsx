@@ -22,17 +22,22 @@ import {
   advanceSubject,
   bindableAdvances,
   expenseErrorMessage,
+  expenseLoadErrorMessage,
+  leftoverCancelFailedMessage,
+  leftoverClaimNotice,
   receiptUploadFailedMessage,
   RECEIPT_AUTO_CANCEL_REASON,
   type AdvanceRequestInfo,
 } from "@/lib/advance-view";
 import { localDateKey, todayKey } from "@/lib/ess-format";
-import { createThenUpload, pickedFileError } from "@/lib/upload-prep";
+import { createThenUpload, leftoverAfter, pickedFileError } from "@/lib/upload-prep";
 
 /** GET /advances 每列附對應申請單的摘要（2026-10-11）；MyAdvance 沒宣告，這裡補。 */
 type AdvanceRow = MyAdvance & { request?: AdvanceRequestInfo | null; created_at?: string };
 /** GET /expenses 的列另外有 advance_id／trip_request_id；MyExpenseClaim 沒宣告，這裡補。 */
 type ClaimRow = MyExpenseClaim & { advance_id?: string | null; trip_request_id?: string | null };
+/** POST /expenses 建好的單（id＋歸屬月份）。 */
+type CreatedClaim = Awaited<ReturnType<typeof fileExpense>>;
 
 // 本地日期（不用 UTC 切片：台北每月 1 日 00:00–08:00 UTC 還在上個月，預設日期／月份會差一個月）。
 function thisPeriod(): string {
@@ -58,8 +63,15 @@ export default function EssExpensesPage() {
   const [categories, setCategories] = useState<MyExpenseCategory[]>([]);
   const [claims, setClaims] = useState<ClaimRow[]>([]);
   const [period, setPeriod] = useState(thisPeriod);
+  // 三種錯誤各放一格，互不覆蓋：載入失敗（卡片上方）、列表撤回失敗（卡片上方）、送出失敗（送出按鈕上方）。
+  // 以前共用一格：送出時憑證上傳＋撤回都失敗、切月份重新載入又失敗，「請先撤回」的提示就被「Load failed」蓋掉。
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  // 憑證沒傳上、自動撤回也失敗而留下的單（還在、沒有憑證）：下次按送出先撤回它、撤不掉就不建新單，
+  // 員工不知道單已建好、再按一次也不會多一筆（見 lib/upload-prep.ts createThenUpload 的 leftover）。
+  const [leftover, setLeftover] = useState<CreatedClaim | null>(null);
 
   // 填報表單
   const [categoryId, setCategoryId] = useState("");
@@ -90,8 +102,10 @@ export default function EssExpensesPage() {
       setClaims(e.claims);
       setTrips(t.requests);
       setAdvances(a.advances);
+      setLoadError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "載入失敗");
+      console.warn("[報銷] 載入失敗", err);
+      setLoadError(expenseLoadErrorMessage(err));
     }
   }, [period]);
 
@@ -121,13 +135,18 @@ export default function EssExpensesPage() {
     e.preventDefault();
     setBusy(true);
     setError(null);
+    setSubmitError(null);
     setMessage(null);
+    const hadLeftover = leftover !== null;
     try {
       // 憑證跟著單子一起送：事前審核可以省，憑證不能省。
       // 順序（2026-10-12）：先準備憑證（照片壓縮＋3 MB 檢查），過不了就不建單；建單後才上傳，上傳失敗就撤回剛建的單。
       // 以前先建單再傳，傳失敗時單已存在、表單又沒清，員工再按送出就多一筆沒有憑證的重複單。
+      // 上一次留下的單（撤回也失敗）在建新單前先撤回；選「撤回再重建」而不是「把憑證補傳到舊單」：
+      // 新單一定是員工現在表單上的內容（失敗後可能改過金額、日期），也不會把憑證掛到員工已自己撤回的舊單上。
       const result = await createThenUpload({
         file: receipt,
+        leftover,
         create: () =>
           fileExpense({
             categoryId,
@@ -141,15 +160,24 @@ export default function EssExpensesPage() {
         upload: (claim, file) => uploadExpenseReceipt(claim.id, file),
         rollback: (claim) => cancelExpense(claim.id, RECEIPT_AUTO_CANCEL_REASON),
       });
+      setLeftover((current) => leftoverAfter(current, result));
       if (!result.ok) {
-        if (result.stage !== "upload") {
-          setError(expenseErrorMessage(result.error, "送出失敗"));
-          return;
+        // 畫面只放依步驟的中文說明；原始錯誤（[500] upload_failed 之類）記在 console 給除錯用。
+        console.warn(`[報銷] 送出失敗（${result.stage}）`, result.error);
+        if (result.stage === "prepare") {
+          setSubmitError(expenseErrorMessage(result.error, "這個憑證檔案無法使用，請換一個檔案", "upload"));
+        } else if (result.stage === "leftover") {
+          setSubmitError(leftoverCancelFailedMessage(result.error));
+        } else if (result.stage === "create") {
+          setSubmitError(expenseErrorMessage(result.error, "送出失敗，請稍後再試", "create"));
+          // 上一筆已在建單前撤回：重新載入，列表才看得到它變成已撤回。
+          if (hadLeftover) await load();
+        } else {
+          setSubmitError(receiptUploadFailedMessage(result.error, result.rolledBack));
+          // 表單保留，換個檔或稍後直接再按送出。撤回也失敗＝單還在：列表切到那筆的月份，員工才看得到、撤得掉。
+          if (!result.rolledBack && result.created.period !== period) setPeriod(result.created.period);
+          else await load();
         }
-        // 表單保留，換個檔或稍後直接再按送出。撤回也失敗＝單還在：列表切到那筆的月份，員工才看得到、撤得掉。
-        if (!result.rolledBack && result.created.period !== period) setPeriod(result.created.period);
-        else await load();
-        setError(receiptUploadFailedMessage(result.error, result.rolledBack));
         return;
       }
       const created = result.created;
@@ -168,7 +196,8 @@ export default function EssExpensesPage() {
       setAdvanceId("");
       await load();
     } catch (err) {
-      setError(expenseErrorMessage(err, "送出失敗"));
+      console.warn("[報銷] 送出失敗", err);
+      setSubmitError(expenseErrorMessage(err, "送出失敗，請稍後再試", "create"));
     } finally {
       setBusy(false);
     }
@@ -183,9 +212,12 @@ export default function EssExpensesPage() {
     }
     try {
       await cancelExpense(id, reason.trim());
+      // 員工自己撤回了留下的那一筆 → 下次送出不必再撤
+      setLeftover((current) => (current?.id === id ? null : current));
       await load();
     } catch (err) {
-      setError(expenseErrorMessage(err, "撤回失敗"));
+      console.warn("[報銷] 撤回失敗", err);
+      setError(expenseErrorMessage(err, "撤回失敗，請稍後再試", "cancel"));
     }
   }
 
@@ -200,6 +232,7 @@ export default function EssExpensesPage() {
           送出後不需逐筆審核，由管理者於月結時一次核銷。請附上憑證。
         </p>
 
+        {loadError && <InlineError className="mb-3">{loadError}</InlineError>}
         {error && <InlineError className="mb-3">{error}</InlineError>}
         {message && <p className="mb-3 text-sm text-green-700">{message}</p>}
 
@@ -346,6 +379,14 @@ export default function EssExpensesPage() {
               className="w-full text-sm"
             />
           </Field>
+
+          {/* 送出失敗的說明放在按鈕正上方：手機上按完送出畫面停在這裡，放卡片頂端要往上捲才看得到。 */}
+          <InlineError>{submitError}</InlineError>
+          {leftover && (
+            <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              {leftoverClaimNotice(leftover.period)}
+            </p>
+          )}
 
           <Button
             type="submit"

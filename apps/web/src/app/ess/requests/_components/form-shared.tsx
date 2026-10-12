@@ -8,18 +8,35 @@
 import { useId, useRef, type ChangeEvent, type ReactNode } from "react";
 import { friendlyError } from "@/lib/attendance-sheets-api";
 import type { CreateRequestBody } from "@/lib/ess-api";
-import { EXPENSE_METHOD_FIELD_LABEL, REASON_MAX, requestErrorText, type ExpenseMethod } from "@/lib/request-forms";
-import { UPLOAD_MAX_BYTES, pickedFileError, pickedFilesError, uploadKindOf } from "@/lib/upload-prep";
+import {
+  EXPENSE_METHOD_FIELD_LABEL,
+  REASON_MAX,
+  attachmentTooLargeText,
+  requestErrorText,
+  type ExpenseMethod,
+} from "@/lib/request-forms";
+import {
+  NETWORK_FAILURE_MESSAGE,
+  UPLOAD_MAX_BYTES,
+  isNetworkFailure,
+  pickedFileError,
+  pickedFilesError,
+  uploadKindOf,
+} from "@/lib/upload-prep";
 import { Button, Field, Icon, InlineError, Textarea } from "@/components/ess-ui";
 
 /* ------------------------------------------------------------ 錯誤 --- */
 
 /**
- * 申請頁專屬錯誤碼優先（含 409 period_closed →「YYYY-MM 已結算，請洽管理者」，送出與撤回都走這裡），
- * 其餘沿用出勤月表那套 friendlyError（unauthorized／forbidden…）。
+ * 申請頁的錯誤 → 中文（送出、撤回、上傳附件、「我的申請」補傳與載入都走這裡）：
+ *   1. 連線本身失敗（Chrome「Failed to fetch」、Safari「Load failed」、Firefox「NetworkError…」）→ 中文，不露出英文；
+ *   2. 附件太大（413）→ 照回應帶的上限寫「單檔限 N MB」（上限依租戶設定，不一定是 3 MB）；
+ *   3. 申請頁專屬錯誤碼（含 409 period_closed →「YYYY-MM 已結算，請洽管理者」）；
+ *   4. 其餘沿用出勤月表那套 friendlyError（unauthorized／forbidden…）。
  */
 export function describeError(err: unknown, fallback: string): string {
-  return requestErrorText(err) ?? friendlyError(err, fallback);
+  if (isNetworkFailure(err)) return NETWORK_FAILURE_MESSAGE;
+  return attachmentTooLargeText(err) ?? requestErrorText(err) ?? friendlyError(err, fallback);
 }
 
 /* ------------------------------------------------------------ 附件 --- */

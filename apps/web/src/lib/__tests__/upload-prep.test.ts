@@ -3,9 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * 上傳前準備（2026-10-12 教育訓練驗收第 13 條）：
  *   • 報銷憑證、請假附件以 base64 隨 JSON 送，API 跑在 Vercel（請求上限約 4.5 MB）→ 準備後單檔 ≤ 3 MiB
- *   • 照片長邊縮到 2000px、轉 JPEG 0.8（EXIF 方向轉正、透明鋪白底）；GIF／SVG 不壓；
- *     解不開或壓完沒有比較小 → 用原檔；非圖片超過 3 MB → 前端擋下、不送任何請求
- *   • 報銷：先準備憑證 → 建單 → 上傳；準備失敗不建單、上傳失敗自動撤回剛建的單
+ *   • 照片縮小後轉 JPEG 0.8（一般照片長邊 2000、長截圖短邊至少 1000、總像素 ≤ 16MP；EXIF 方向轉正、透明鋪白底）；
+ *     GIF／SVG 不壓；解不開或壓完沒有比較小 → 用原檔；非圖片超過 3 MB → 前端擋下、不送任何請求
+ *   • 報銷：先準備憑證 → （撤回上次留下的單）→ 建單 → 上傳；準備失敗不建單、上傳失敗自動撤回剛建的單
+ *   • 請假：先準備每個附件 → 建單 → 逐檔上傳；任一個準備失敗不建單、某檔上傳失敗其餘照傳
  * ⚠️ 識別碼、檔名都是明顯的假值（repo 是公開的）。
  */
 
@@ -17,25 +18,34 @@ import {
   EMPTY_FILE_MESSAGE,
   FILE_TOO_LARGE_MESSAGE,
   IMAGE_MAX_EDGE,
+  IMAGE_MAX_PIXELS,
+  IMAGE_MIN_SHORT_EDGE,
   IMAGE_SOURCE_MAX_BYTES,
   IMAGE_SOURCE_TOO_LARGE_MESSAGE,
   JPEG_QUALITY,
+  NETWORK_FAILURE_MESSAGE,
   UNCOMPRESSIBLE_TOO_LARGE_MESSAGE,
   UPLOAD_MAX_BYTES,
+  UPLOAD_NETWORK_FAILURE_MESSAGE,
   UploadPrepError,
   createThenUpload,
+  createThenUploadAll,
+  isNetworkFailure,
   jpegFileName,
+  leftoverAfter,
   pickedFileError,
   pickedFilesError,
   preferCompressed,
   prepareUploadFile,
   targetSize,
   uploadKindOf,
+  withFileName,
+  type CreateThenUploadResult,
   type DecodedImage,
   type ImageCodec,
 } from "../upload-prep";
-import { cancelExpense, fileExpense, uploadAttachment, uploadExpenseReceipt } from "../ess-api";
-import { NETWORK_FAILURE_MESSAGE, RECEIPT_AUTO_CANCEL_REASON, receiptUploadFailedMessage } from "../advance-view";
+import { cancelExpense, createRequest, fileExpense, uploadAttachment, uploadExpenseReceipt } from "../ess-api";
+import { RECEIPT_AUTO_CANCEL_REASON, receiptUploadFailedMessage } from "../advance-view";
 
 const MiB = 1024 * 1024;
 
@@ -94,6 +104,12 @@ describe("上限與常數", () => {
     expect(IMAGE_MAX_EDGE).toBe(2000);
     expect(JPEG_QUALITY).toBe(0.8);
   });
+
+  it("短邊至少 1000px（長截圖的小字）；總像素上限在 iOS canvas 的 4096×4096 之內", () => {
+    expect(IMAGE_MIN_SHORT_EDGE).toBe(1000);
+    expect(IMAGE_MAX_PIXELS).toBeLessThanOrEqual(4096 * 4096);
+    expect(IMAGE_MAX_PIXELS).toBeGreaterThanOrEqual(15_000_000);
+  });
 });
 
 describe("uploadKindOf（要不要壓）", () => {
@@ -116,19 +132,42 @@ describe("uploadKindOf（要不要壓）", () => {
   });
 });
 
-describe("targetSize（長邊縮到 2000px）", () => {
-  it("橫式、直式、手機截圖：長邊剛好 2000、等比、四捨五入", () => {
+describe("targetSize（比例＝min(1, max(2000／長邊, 1000／短邊))，總像素 ≤ 16MP）", () => {
+  it("一般照片：長邊剛好 2000、等比、四捨五入（橫式、直式、一億畫素都一樣）", () => {
     expect(targetSize(4032, 3024)).toEqual({ width: 2000, height: 1500 });
     expect(targetSize(3024, 4032)).toEqual({ width: 1500, height: 2000 });
-    expect(targetSize(1170, 2532)).toEqual({ width: 924, height: 2000 });
     expect(targetSize(8064, 6048)).toEqual({ width: 2000, height: 1500 });
+    expect(targetSize(12000, 9000)).toEqual({ width: 2000, height: 1500 });
   });
 
-  it("本來就不超過 2000 → 原尺寸；極細長的圖短邊至少 1px；可指定別的長邊", () => {
+  it("長截圖收據 1080×8000 → 1000×7407（短邊留 1000，不是只看長邊縮成 270×2000）；手機截圖 1170×2532 → 1000×2164", () => {
+    expect(targetSize(1080, 8000)).toEqual({ width: 1000, height: 7407 });
+    expect(targetSize(8000, 1080)).toEqual({ width: 7407, height: 1000 });
+    expect(targetSize(1170, 2532)).toEqual({ width: 1000, height: 2164 });
+  });
+
+  it("不放大：本來就不超過 2000、或短邊已比 1000 窄（3000×600、10000×3）→ 原尺寸", () => {
     expect(targetSize(2000, 1000)).toEqual({ width: 2000, height: 1000 });
     expect(targetSize(800, 600)).toEqual({ width: 800, height: 600 });
-    expect(targetSize(10000, 3)).toEqual({ width: 2000, height: 1 });
-    expect(targetSize(3000, 1500, 1000)).toEqual({ width: 1000, height: 500 });
+    expect(targetSize(3000, 600)).toEqual({ width: 3000, height: 600 });
+    expect(targetSize(10000, 3)).toEqual({ width: 10000, height: 3 });
+  });
+
+  it("超大面積被夾到 16MP 以內（等比；四捨五入會超過時改捨去）", () => {
+    // 900×20000（18MP）本來不必縮（短邊已窄），但超過面積上限 → 等比縮
+    const tall = targetSize(900, 20000);
+    expect(tall).toEqual({ width: 848, height: 18856 });
+    expect(tall.width * tall.height).toBeLessThanOrEqual(IMAGE_MAX_PIXELS);
+    // 1290×30000：照短邊算是 1000×23256（23MP）仍太大 → 夾到 16MP 內，長寬比不變
+    const scroll = targetSize(1290, 30000);
+    expect(scroll.width * scroll.height).toBeLessThanOrEqual(IMAGE_MAX_PIXELS);
+    expect(scroll.width * scroll.height).toBeGreaterThan(IMAGE_MAX_PIXELS * 0.99);
+    expect(scroll.height / scroll.width).toBeCloseTo(30000 / 1290, 1);
+  });
+
+  it("上下限可換（例如只看長邊）", () => {
+    expect(targetSize(3000, 1500, { maxEdge: 1000, minShortEdge: 0 })).toEqual({ width: 1000, height: 500 });
+    expect(targetSize(4000, 4000, { maxPixels: 1_000_000 })).toEqual({ width: 1000, height: 1000 });
   });
 });
 
@@ -166,6 +205,11 @@ describe("pickedFileError／pickedFilesError（選檔當下的大小判斷）", 
     expect(pickedFilesError([photo])).toBeNull();
     expect(pickedFilesError([])).toBeNull();
   });
+
+  it("withFileName：兩個以上才加「檔名」", () => {
+    expect(withFileName("IMG_0001.HEIC", "壓不了", true)).toBe("「IMG_0001.HEIC」壓不了");
+    expect(withFileName("IMG_0001.HEIC", "壓不了", false)).toBe("壓不了");
+  });
 });
 
 describe("preferCompressed（壓完沒有比較小就用原檔）", () => {
@@ -197,6 +241,13 @@ describe("prepareUploadFile（假解碼器）", () => {
     expect(out.type).toBe("image/jpeg");
     expect(out.size).toBe(600_000);
     expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("長截圖收據 1080×8000 → 畫成 1000×7407（不是 270×2000）", async () => {
+    const { codec, toJpeg } = fakeCodec({ width: 1080, height: 8000, jpegBytes: 900_000 });
+    const out = await prepareUploadFile(fileOf("收據截圖.png", 4 * MiB, "image/png"), codec);
+    expect(toJpeg.mock.calls[0]!.slice(1)).toEqual([1000, 7407, 0.8]);
+    expect(out.size).toBe(900_000);
   });
 
   it("小圖也轉 JPEG（不放大）：PNG 截圖 800×600 → 800×600", async () => {
@@ -524,7 +575,240 @@ describe("createThenUpload（報銷頁：先準備憑證 → 建單 → 上傳�
     if (!result.ok && result.stage === "upload") {
       const message = receiptUploadFailedMessage(result.error, result.rolledBack);
       expect(message).toContain("這筆報銷已自動撤回，請重新送出");
-      expect(message).toContain(NETWORK_FAILURE_MESSAGE);
+      expect(message).toContain(UPLOAD_NETWORK_FAILURE_MESSAGE);
     }
+  });
+});
+
+/* ------------------------------- 報銷：上傳＋撤回都失敗後再按送出（leftover） --- */
+
+describe("createThenUpload 的 leftover（上次憑證沒傳上、撤回也失敗而留下的單）", () => {
+  type Claim = { id: string; period: string };
+  const LEFT: Claim = { id: "claim-left", period: "2026-09" };
+  const steps = () => {
+    const order: string[] = [];
+    return {
+      order,
+      create: vi.fn(async (): Promise<Claim> => {
+        order.push("create");
+        return { id: "claim-new", period: "2026-10" };
+      }),
+      upload: vi.fn(async (created: Claim, _file: File) => {
+        order.push(`upload ${created.id}`);
+      }),
+      rollback: vi.fn(async (created: Claim) => {
+        order.push(`rollback ${created.id}`);
+      }),
+    };
+  };
+  const pdf = () => fileOf("發票.pdf", 10, "application/pdf");
+
+  it("先撤回留下的單才建新單：順序 rollback(留下的) → create → upload", async () => {
+    const s = steps();
+    const result = await createThenUpload({ file: pdf(), leftover: LEFT, ...s });
+    expect(result).toEqual({ ok: true, created: { id: "claim-new", period: "2026-10" } });
+    expect(s.order).toEqual(["rollback claim-left", "create", "upload claim-new"]);
+  });
+
+  it("撤不掉留下的單 → 停在 leftover，不建新單（再按一次送出也不會多一筆）", async () => {
+    const s = steps();
+    s.rollback.mockRejectedValueOnce(new TypeError("Load failed"));
+    const result = await createThenUpload({ file: pdf(), leftover: LEFT, ...s });
+    expect(result).toMatchObject({ ok: false, stage: "leftover", leftover: LEFT });
+    expect(s.create).not.toHaveBeenCalled();
+    expect(s.upload).not.toHaveBeenCalled();
+  });
+
+  it("憑證準備不過 → 什麼都不動（留下的單也不撤）", async () => {
+    const s = steps();
+    const result = await createThenUpload({ file: fileOf("a.pdf", 3 * MiB + 1, "application/pdf"), leftover: LEFT, ...s });
+    expect(result).toMatchObject({ ok: false, stage: "prepare" });
+    expect(s.order).toEqual([]);
+  });
+
+  it("沒有留下的單（null／省略）→ 照原本流程", async () => {
+    const s = steps();
+    await createThenUpload({ file: pdf(), leftover: null, ...s });
+    expect(s.order).toEqual(["create", "upload claim-new"]);
+  });
+
+  it("leftoverAfter：準備失敗／撤回留下的失敗 → 照記；走到建單以後 → 清掉；上傳失敗又撤不回 → 改記這次的單", () => {
+    const NEW: Claim = { id: "claim-new", period: "2026-10" };
+    const r = (x: CreateThenUploadResult<Claim>) => x;
+    expect(leftoverAfter(LEFT, r({ ok: false, stage: "prepare", error: 1 }))).toBe(LEFT);
+    expect(leftoverAfter(LEFT, r({ ok: false, stage: "leftover", error: 1, leftover: LEFT }))).toBe(LEFT);
+    expect(leftoverAfter(LEFT, r({ ok: false, stage: "create", error: 1 }))).toBeNull();
+    expect(leftoverAfter(LEFT, r({ ok: true, created: NEW }))).toBeNull();
+    expect(leftoverAfter(LEFT, r({ ok: false, stage: "upload", error: 1, created: NEW, rolledBack: true }))).toBeNull();
+    expect(leftoverAfter(LEFT, r({ ok: false, stage: "upload", error: 1, created: NEW, rolledBack: false }))).toBe(NEW);
+    expect(leftoverAfter(null, r({ ok: false, stage: "upload", error: 1, created: NEW, rolledBack: false }))).toBe(NEW);
+    expect(leftoverAfter(null, r({ ok: false, stage: "prepare", error: 1 }))).toBeNull();
+  });
+
+  it("接上真正的 ess-api（同報銷頁）：上傳＋撤回都斷線 → 再按送出、撤回仍斷線 → 沒有第二個 POST /expenses；網路恢復 → 先撤回舊單再建一筆", async () => {
+    const submit = (leftover: { id: string; period: string; nature: string } | null) =>
+      createThenUpload({
+        file: new File(["%PDF-1.4"], "發票.pdf", { type: "application/pdf" }),
+        leftover,
+        create: () => fileExpense({ categoryId: "cat-1", amount: 100, incurredOn: "2026-10-12" }),
+        upload: (claim, file) => uploadExpenseReceipt(claim.id, file),
+        rollback: (claim) => cancelExpense(claim.id, RECEIPT_AUTO_CANCEL_REASON),
+      });
+    const calls = () => h.apiFetch.mock.calls.map(([path, opts]) => `${opts.method} ${path}`);
+
+    // 第 1 次：建單成功、上傳斷線、自動撤回也斷線 → 單留著
+    h.apiFetch
+      .mockResolvedValueOnce({ id: "claim-1", period: "2026-10", nature: "reimbursement" })
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    const first = await submit(null);
+    expect(first).toMatchObject({ ok: false, stage: "upload", rolledBack: false });
+    let leftover = leftoverAfter(null, first);
+    expect(leftover).toMatchObject({ id: "claim-1" });
+
+    // 第 2 次：撤回舊單仍斷線 → 停下，沒有再 POST /expenses
+    h.apiFetch.mockReset();
+    h.apiFetch.mockRejectedValueOnce(new TypeError("Load failed"));
+    const second = await submit(leftover);
+    expect(second).toMatchObject({ ok: false, stage: "leftover" });
+    expect(calls()).toEqual(["PATCH /expenses/claim-1"]);
+    leftover = leftoverAfter(leftover, second);
+    expect(leftover).toMatchObject({ id: "claim-1" });
+
+    // 第 3 次：網路恢復 → 撤回舊單 → 建新單 → 上傳憑證，全部成功
+    h.apiFetch.mockReset();
+    h.apiFetch
+      .mockResolvedValueOnce({ id: "claim-1" })
+      .mockResolvedValueOnce({ id: "claim-2", period: "2026-10", nature: "reimbursement" })
+      .mockResolvedValueOnce({ id: "att-1" });
+    const third = await submit(leftover);
+    expect(third).toMatchObject({ ok: true, created: { id: "claim-2" } });
+    expect(calls()).toEqual(["PATCH /expenses/claim-1", "POST /expenses", "POST /expenses/claim-2/attachments"]);
+    expect(JSON.parse(h.apiFetch.mock.calls[0]![1].body)).toEqual({ status: "cancelled", statusReason: RECEIPT_AUTO_CANCEL_REASON });
+    expect(leftoverAfter(leftover, third)).toBeNull();
+  });
+});
+
+/* ------------------------------------------------ 請假：建單＋多個附件 --- */
+
+describe("createThenUploadAll（請假頁：先準備每個附件 → 建單 → 逐檔上傳）", () => {
+  const steps = () => {
+    const order: string[] = [];
+    return {
+      order,
+      create: vi.fn(async () => {
+        order.push("create");
+        return { requestId: "req-1" };
+      }),
+      upload: vi.fn(async (_created: { requestId: string }, file: File) => {
+        order.push(`upload ${file.name}`);
+      }),
+    };
+  };
+
+  it("任一附件準備失敗（第 2 個 PDF 超過 3 MB）→ 不建單、一個都不傳，回報是哪個檔", async () => {
+    const s = steps();
+    const ok = fileOf("收據.pdf", 10, "application/pdf");
+    const bad = fileOf("診斷證明.pdf", 3 * MiB + 1, "application/pdf");
+    const result = await createThenUploadAll({ files: [ok, bad], ...s });
+    expect(result).toMatchObject({ ok: false, stage: "prepare", file: bad });
+    expect(!result.ok && result.error).toBeInstanceOf(UploadPrepError);
+    expect(s.order).toEqual([]);
+  });
+
+  it("全部準備好才建單；上傳的是準備好的檔（照片是壓縮後的 JPEG）", async () => {
+    const s = steps();
+    const prepare = vi.fn(async (file: File) => {
+      s.order.push(`prepare ${file.name}`);
+      return file.name.endsWith(".HEIC") ? fileOf("IMG_0001.jpg", 100, "image/jpeg") : file;
+    });
+    const result = await createThenUploadAll({
+      files: [fileOf("IMG_0001.HEIC", 5 * MiB, "image/heic"), fileOf("收據.pdf", 10, "application/pdf")],
+      prepare,
+      ...s,
+    });
+    expect(result).toEqual({ ok: true, created: { requestId: "req-1" }, failed: [] });
+    expect(s.order).toEqual(["prepare IMG_0001.HEIC", "prepare 收據.pdf", "create", "upload IMG_0001.jpg", "upload 收據.pdf"]);
+  });
+
+  it("建單失敗 → 不上傳", async () => {
+    const s = steps();
+    s.create.mockRejectedValueOnce(new Error("[409] period_closed"));
+    const result = await createThenUploadAll({ files: [fileOf("a.pdf", 10, "application/pdf")], ...s });
+    expect(result).toMatchObject({ ok: false, stage: "create" });
+    expect(s.upload).not.toHaveBeenCalled();
+  });
+
+  it("建單後第 1 個附件上傳失敗 → 其餘照傳，失敗的列在 failed（原檔、原本的檔名）", async () => {
+    const s = steps();
+    const a = fileOf("a.pdf", 10, "application/pdf");
+    const b = fileOf("b.pdf", 10, "application/pdf");
+    const c = fileOf("c.pdf", 10, "application/pdf");
+    const boom = new TypeError("Failed to fetch");
+    s.upload.mockImplementationOnce(async () => {
+      s.order.push("upload a.pdf");
+      throw boom;
+    });
+    const result = await createThenUploadAll({ files: [a, b, c], ...s });
+    expect(s.order).toEqual(["create", "upload a.pdf", "upload b.pdf", "upload c.pdf"]);
+    expect(result).toEqual({ ok: true, created: { requestId: "req-1" }, failed: [{ file: a, error: boom }] });
+  });
+
+  it("沒有附件 → 只建單", async () => {
+    const s = steps();
+    expect(await createThenUploadAll({ files: [], ...s })).toEqual({ ok: true, created: { requestId: "req-1" }, failed: [] });
+    expect(s.order).toEqual(["create"]);
+  });
+
+  it("接上真正的 ess-api（同請假頁）：桌機 Chrome 解不開的 3.5 MB HEIC → 一個請求都沒送（沒建單）", async () => {
+    // Node 沒有 createImageBitmap／Image，等同解不開 HEIC 的瀏覽器
+    const heic = fileOf("IMG_0012.HEIC", 3.5 * MiB, "image/heic");
+    const result = await createThenUploadAll({
+      files: [fileOf("收據.pdf", 10, "application/pdf"), heic],
+      create: () => createRequest({ kind: "leave" } as Parameters<typeof createRequest>[0]),
+      upload: (created, file) => uploadAttachment(created.requestId, file),
+    });
+    expect(result).toMatchObject({ ok: false, stage: "prepare", file: heic });
+    expect(!result.ok && (result.error as Error).message).toBe(UNCOMPRESSIBLE_TOO_LARGE_MESSAGE);
+    expect(h.apiFetch).not.toHaveBeenCalled();
+  });
+
+  it("接上真正的 ess-api：建單後第 1 個附件斷線、第 2 個照傳", async () => {
+    h.apiFetch
+      .mockResolvedValueOnce({ requestId: "req-9" }) // POST /requests
+      .mockRejectedValueOnce(new TypeError("Failed to fetch")) // 第 1 個附件
+      .mockResolvedValueOnce({ id: "att-2" }); // 第 2 個附件
+    const result = await createThenUploadAll({
+      files: [new File(["%PDF-1.4"], "a.pdf", { type: "application/pdf" }), new File(["%PDF-1.4"], "b.pdf", { type: "application/pdf" })],
+      create: () => createRequest({ kind: "leave" } as Parameters<typeof createRequest>[0]),
+      upload: (created, file) => uploadAttachment(created.requestId, file),
+    });
+    expect(h.apiFetch.mock.calls.map(([path]) => path)).toEqual([
+      "/requests",
+      "/requests/req-9/attachments",
+      "/requests/req-9/attachments",
+    ]);
+    expect(result.ok && result.failed.map((f) => f.file.name)).toEqual(["a.pdf"]);
+  });
+});
+
+/* ------------------------------------------------------------ 連線失敗 --- */
+
+describe("isNetworkFailure／斷線的中文說法", () => {
+  it("Chrome／Safari／Firefox 三種說法都認得；一般 API 錯誤、字串不算", () => {
+    for (const message of ["Failed to fetch", "Load failed", "NetworkError when attempting to fetch resource."]) {
+      expect(isNetworkFailure(new TypeError(message))).toBe(true);
+    }
+    expect(isNetworkFailure(new Error("[500] kaboom"))).toBe(false);
+    expect(isNetworkFailure(new UploadPrepError(FILE_TOO_LARGE_MESSAGE))).toBe(false);
+    expect(isNetworkFailure("Failed to fetch")).toBe(false);
+  });
+
+  it("一般說法不提檔案；上傳的說法才提「可能是檔案太大」；都沒有英文", () => {
+    expect(NETWORK_FAILURE_MESSAGE).toContain("連線失敗");
+    expect(NETWORK_FAILURE_MESSAGE).not.toContain("檔案");
+    expect(UPLOAD_NETWORK_FAILURE_MESSAGE).toContain("檔案太大");
+    expect(UPLOAD_NETWORK_FAILURE_MESSAGE).toContain("網路不穩");
+    for (const text of [NETWORK_FAILURE_MESSAGE, UPLOAD_NETWORK_FAILURE_MESSAGE]) expect(text).not.toMatch(/[A-Za-z]/);
   });
 });

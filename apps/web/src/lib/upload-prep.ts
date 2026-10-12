@@ -3,9 +3,11 @@
  * 報銷憑證（POST /expenses/:id/attachments）與請假附件（POST /requests/:id/attachments）共用：
  * ess-api.ts 的 uploadExpenseReceipt／uploadAttachment 送出前一律經過 {@link prepareUploadFile}。
  *
- *   1. 照片（JPEG／PNG／WebP／HEIC…瀏覽器解得開的點陣圖）→ 長邊縮到 2000px、轉 JPEG 品質 0.8。
+ *   1. 照片（JPEG／PNG／WebP／HEIC…瀏覽器解得開的點陣圖）→ 縮小後轉 JPEG 品質 0.8（尺寸見 {@link targetSize}：
+ *      一般照片長邊約 2000px；長截圖收據短邊至少約 1000px，小字才看得清；總像素不超過約 16MP）。
  *      GIF（可能是動圖）與 SVG（向量圖）不壓；解不開（例如 Chrome 上的 HEIC）或壓完沒有比較小 → 用原檔。
  *   2. 大小判斷：準備好的檔案超過 3 MB → 前端擋下（丟 {@link UploadPrepError}），不送任何請求。
+ *   3. 建單＋附檔的順序：先準備、過了才建單（報銷 {@link createThenUpload}、請假 {@link createThenUploadAll}）。
  *
  * 為什麼是 3 MB：API 跑在 Vercel serverless，請求 body 上限約 4.5 MB；檔案轉 base64 隨 JSON 送會膨脹 4/3，
  * 3 MB × 4/3 ≈ 4 MB，加上其他 JSON 欄位仍在上限內。超過時平台直接回 413、而且沒有 CORS 標頭，瀏覽器只看到
@@ -27,8 +29,18 @@ export const UPLOAD_MAX_BYTES = 3 * 1024 * 1024;
  */
 export const IMAGE_SOURCE_MAX_BYTES = 25 * 1024 * 1024;
 
-/** 壓縮後的長邊上限：A4 拍滿畫面約 170 dpi，發票、收據上的字看得清楚。 */
+/** 一般照片壓縮後的長邊：A4 拍滿畫面約 170 dpi，發票、收據上的字看得清楚。 */
 export const IMAGE_MAX_EDGE = 2000;
+/**
+ * 縮小時短邊至少留這麼寬（原圖本來就比較窄就不放大）：長截圖收據（例如 1080×8000）若只看長邊縮到 2000，
+ * 寬度只剩 270px、小字糊掉；照短邊算是 1000×7407，字跟在手機上看到的差不多大。
+ */
+export const IMAGE_MIN_SHORT_EDGE = 1000;
+/**
+ * 輸出的總像素上限：iOS Safari 的 canvas 面積上限約 16.7MP（4096×4096），超過就畫不出來（只能退回原檔）。
+ * 極長的截圖照短邊算仍超過時，再等比縮到這個面積內。
+ */
+export const IMAGE_MAX_PIXELS = 16_000_000;
 /** 輸出 JPEG 的品質（0–1）。 */
 export const JPEG_QUALITY = 0.8;
 
@@ -82,12 +94,32 @@ function isHeif(file: Pick<FileLike, "name" | "type">): boolean {
   return HEIF_TYPES.includes(normalizedType(file.type)) || HEIF_EXTS.includes(extOf(file.name));
 }
 
-/** 長邊縮到 maxEdge 以內的尺寸（等比、四捨五入、至少 1px）；本來就不超過 → 原尺寸。 */
-export function targetSize(width: number, height: number, maxEdge: number = IMAGE_MAX_EDGE): { width: number; height: number } {
-  const longEdge = Math.max(width, height);
-  if (longEdge <= maxEdge) return { width, height };
-  const scale = maxEdge / longEdge;
-  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+/** 壓縮尺寸的三個上下限（預設 {@link IMAGE_MAX_EDGE}／{@link IMAGE_MIN_SHORT_EDGE}／{@link IMAGE_MAX_PIXELS}）。 */
+export interface SizeLimits {
+  maxEdge: number;
+  minShortEdge: number;
+  maxPixels: number;
+}
+
+/**
+ * 壓縮後的尺寸（等比、四捨五入、至少 1px；不放大）：
+ *   縮放比例＝min(1, max(長邊上限／長邊, 短邊下限／短邊))——
+ *   一般照片 4032×3024 → 2000×1500（長邊 2000）；長截圖 1080×8000 → 1000×7407（短邊留 1000）；
+ *   本來就窄的 3000×600 不縮。縮完總像素仍超過上限 → 再等比縮到上限內（iOS canvas 畫不出太大的圖）。
+ */
+export function targetSize(width: number, height: number, limits: Partial<SizeLimits> = {}): { width: number; height: number } {
+  const { maxEdge = IMAGE_MAX_EDGE, minShortEdge = IMAGE_MIN_SHORT_EDGE, maxPixels = IMAGE_MAX_PIXELS } = limits;
+  const area = width * height;
+  let scale = Math.min(1, Math.max(maxEdge / Math.max(width, height), minShortEdge / Math.min(width, height)));
+  if (area * scale * scale > maxPixels) scale = Math.sqrt(maxPixels / area);
+  if (scale >= 1) return { width, height };
+  const scaled = (round: (n: number) => number) => ({
+    width: Math.max(1, round(width * scale)),
+    height: Math.max(1, round(height * scale)),
+  });
+  const rounded = scaled(Math.round);
+  // 四捨五入可能多出幾個像素而超過面積上限 → 改無條件捨去
+  return rounded.width * rounded.height > maxPixels ? scaled(Math.floor) : rounded;
 }
 
 /** 壓成 JPEG 後的檔名：副檔名改 .jpg（「IMG_0001.HEIC」→「IMG_0001.jpg」）；沒有副檔名就補上。 */
@@ -117,11 +149,16 @@ export function pickedFileError(file: FileLike): string | null {
   return file.size > UPLOAD_MAX_BYTES ? FILE_TOO_LARGE_MESSAGE : null;
 }
 
-/** 多個附件：回第一個有問題的（兩個以上時前面加檔名，才知道是哪一個）；都沒問題 → null。 */
+/** 多個附件時訊息前面加檔名（「IMG_0001.HEIC」…），才知道是哪一個；只有一個就不加。 */
+export function withFileName(name: string, message: string, multiple: boolean): string {
+  return multiple ? `「${name}」${message}` : message;
+}
+
+/** 多個附件：回第一個有問題的（兩個以上時前面加檔名）；都沒問題 → null。 */
 export function pickedFilesError(files: readonly FileLike[]): string | null {
   for (const file of files) {
     const problem = pickedFileError(file);
-    if (problem) return files.length > 1 ? `「${file.name}」${problem}` : problem;
+    if (problem) return withFileName(file.name, problem, files.length > 1);
   }
   return null;
 }
@@ -201,7 +238,7 @@ export const browserImageCodec: ImageCodec = {
   },
 };
 
-/** 壓成長邊 ≤ 2000px 的 JPEG（品質 0.8）；解不開、畫不出來 → null（呼叫端用原檔）。 */
+/** 壓成 {@link targetSize} 尺寸的 JPEG（品質 0.8）；解不開、畫不出來 → null（呼叫端用原檔）。 */
 async function compressImage(file: File, codec: ImageCodec): Promise<File | null> {
   let image: DecodedImage | null = null;
   try {
@@ -265,18 +302,24 @@ export async function prepareUploadFile(file: File, codec: ImageCodec = browserI
 
 export type CreateThenUploadResult<T> =
   | { ok: true; created: T }
-  | { ok: false; stage: "prepare" | "create"; error: unknown }
+  | { ok: false; stage: "prepare"; error: unknown }
+  | { ok: false; stage: "leftover"; error: unknown; leftover: T }
+  | { ok: false; stage: "create"; error: unknown }
   | { ok: false; stage: "upload"; error: unknown; created: T; rolledBack: boolean };
 
 /**
  * 建單＋附檔的順序（報銷頁用）：
  *   1. 先準備檔案（壓縮＋大小判斷）——過不了就停，不建單；
- *   2. 建單；
- *   3. 上傳；失敗就呼叫 rollback（報銷＝撤回剛建的單），免得留下一筆沒有附檔的單、員工重送又多一筆。
- * 不丟錯，用 `stage` 說停在哪一步；`rolledBack` 為 false＝撤回也失敗、單還在，要請使用者自己處理。
+ *   2. 有 `leftover`（上一次憑證沒傳上、自動撤回也失敗而留下的單）→ 先用 rollback 撤掉它；撤不掉就停，不建新單
+ *      （以前員工不知道單已建好、再按送出就多一筆沒有憑證的單）；
+ *   3. 建單；
+ *   4. 上傳；失敗就呼叫 rollback（報銷＝撤回剛建的單），免得留下一筆沒有附檔的單、員工重送又多一筆。
+ * 不丟錯，用 `stage` 說停在哪一步；`rolledBack` 為 false＝撤回也失敗、單還在——呼叫端把它記成下一次的
+ * `leftover`（見 {@link leftoverAfter}）。
  */
 export async function createThenUpload<T>(steps: {
   file: File | null;
+  leftover?: T | null;
   create: () => Promise<T>;
   upload: (created: T, file: File) => Promise<unknown>;
   rollback: (created: T) => Promise<unknown>;
@@ -289,6 +332,13 @@ export async function createThenUpload<T>(steps: {
       upload = await prepare(steps.file);
     } catch (error) {
       return { ok: false, stage: "prepare", error };
+    }
+  }
+  if (steps.leftover) {
+    try {
+      await steps.rollback(steps.leftover);
+    } catch (error) {
+      return { ok: false, stage: "leftover", error, leftover: steps.leftover };
     }
   }
   let created: T;
@@ -311,4 +361,80 @@ export async function createThenUpload<T>(steps: {
     }
   }
   return { ok: true, created };
+}
+
+/**
+ * {@link createThenUpload} 之後要記住的「留下的單」（下一次送出的 `leftover`）：
+ *   • 停在準備、或撤回上一筆失敗 → 上一筆沒動到，照記；
+ *   • 走到建單以後（建單失敗、成功、上傳失敗但撤回成功）→ 上一筆已撤回，清掉；
+ *   • 上傳失敗而且撤回也失敗 → 改記這次建的單。
+ */
+export function leftoverAfter<T>(previous: T | null, result: CreateThenUploadResult<T>): T | null {
+  if (result.ok) return null;
+  if (result.stage === "prepare" || result.stage === "leftover") return previous;
+  if (result.stage === "upload" && !result.rolledBack) return result.created;
+  return null;
+}
+
+export type CreateThenUploadAllResult<T> =
+  | { ok: true; created: T; failed: { file: File; error: unknown }[] }
+  | { ok: false; stage: "prepare"; file: File; error: unknown }
+  | { ok: false; stage: "create"; error: unknown };
+
+/**
+ * 建單＋多個附件的順序（請假頁用）：
+ *   1. 逐一準備每個附件（壓縮＋大小判斷）——任一個過不了就停，不建單（`file`＝哪一個）。
+ *      以前先建單才壓縮：桌機 Chrome 壓不了 HEIC，假單已建好卻缺憑證，同批其他檔也沒傳；
+ *   2. 建單；
+ *   3. 逐一上傳準備好的檔；某一個失敗不中斷，其餘照傳，沒傳上的列在 `failed`（原檔，畫面用原本的檔名）。
+ * 不撤回：請假單缺附件仍是有效的單（列表標「缺憑證」、可補傳）。一個接一個做，不同時解多張大圖（手機記憶體）。
+ */
+export async function createThenUploadAll<T>(steps: {
+  files: readonly File[];
+  create: () => Promise<T>;
+  upload: (created: T, file: File) => Promise<unknown>;
+  prepare?: (file: File) => Promise<File>;
+}): Promise<CreateThenUploadAllResult<T>> {
+  const prepare = steps.prepare ?? ((file: File) => prepareUploadFile(file));
+  const prepared: { original: File; upload: File }[] = [];
+  for (const file of steps.files) {
+    try {
+      prepared.push({ original: file, upload: await prepare(file) });
+    } catch (error) {
+      return { ok: false, stage: "prepare", file, error };
+    }
+  }
+  let created: T;
+  try {
+    created = await steps.create();
+  } catch (error) {
+    return { ok: false, stage: "create", error };
+  }
+  const failed: { file: File; error: unknown }[] = [];
+  for (const { original, upload } of prepared) {
+    try {
+      await steps.upload(created, upload);
+    } catch (error) {
+      failed.push({ file: original, error });
+    }
+  }
+  return { ok: true, created, failed };
+}
+
+/* -------------------------------------------------------- 連線失敗 --- */
+
+/**
+ * fetch 本身失敗、沒拿到任何回應：Chrome「Failed to fetch」、Safari「Load failed」、Firefox「NetworkError when
+ * attempting to fetch resource.」。多半是網路不穩或中斷；上傳時也可能是請求超過 Vercel 約 4.5 MB 的上限
+ * （平台回 413 但沒有 CORS 標頭，見檔頭）。這幾句英文不該直接出現在畫面上。
+ */
+const NETWORK_FAILURE_RE = /^(failed to fetch|load failed|networkerror when attempting to fetch resource)/i;
+
+/** 斷線的一般說法（建單、撤回、載入…）。 */
+export const NETWORK_FAILURE_MESSAGE = "連線失敗，請確認網路連線後再試";
+/** 上傳檔案時斷線的說法：多提「可能是檔案太大」。 */
+export const UPLOAD_NETWORK_FAILURE_MESSAGE = "連線失敗，可能是檔案太大或網路不穩；請換小一點的檔案或稍後再試";
+
+export function isNetworkFailure(err: unknown): boolean {
+  return err instanceof Error && NETWORK_FAILURE_RE.test(err.message.trim());
 }
