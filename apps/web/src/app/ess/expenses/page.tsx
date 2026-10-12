@@ -25,9 +25,14 @@ import {
   expenseLoadErrorMessage,
   leftoverCancelFailedMessage,
   leftoverClaimNotice,
+  leftoverGoneMessage,
+  readLeftoverClaim,
   receiptUploadFailedMessage,
   RECEIPT_AUTO_CANCEL_REASON,
+  saveLeftoverClaim,
   type AdvanceRequestInfo,
+  type LeftoverClaim,
+  type StorageLike,
 } from "@/lib/advance-view";
 import { localDateKey, todayKey } from "@/lib/ess-format";
 import { createThenUpload, leftoverAfter, pickedFileError } from "@/lib/upload-prep";
@@ -36,8 +41,6 @@ import { createThenUpload, leftoverAfter, pickedFileError } from "@/lib/upload-p
 type AdvanceRow = MyAdvance & { request?: AdvanceRequestInfo | null; created_at?: string };
 /** GET /expenses 的列另外有 advance_id／trip_request_id；MyExpenseClaim 沒宣告，這裡補。 */
 type ClaimRow = MyExpenseClaim & { advance_id?: string | null; trip_request_id?: string | null };
-/** POST /expenses 建好的單（id＋歸屬月份）。 */
-type CreatedClaim = Awaited<ReturnType<typeof fileExpense>>;
 
 // 本地日期（不用 UTC 切片：台北每月 1 日 00:00–08:00 UTC 還在上個月，預設日期／月份會差一個月）。
 function thisPeriod(): string {
@@ -59,19 +62,50 @@ const STATUS_LABEL: Record<string, string> = {
   rejected: "已退件",
 };
 
+/** 這個分頁的 sessionStorage；瀏覽器擋住存取（有的設定一碰就丟 SecurityError）→ null。只在 effect 裡呼叫（伺服器端沒有 window）。 */
+function sessionStore(): StorageLike | null {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 憑證沒傳上、自動撤回也失敗而留下的單（還在、沒有憑證）：用法同 useState，另外記在 sessionStorage——
+ * 重新整理同一分頁仍記得，下次按送出照樣先重試撤回（關掉分頁才忘；讀寫失敗、壞值都當沒有，見 lib/advance-view.ts）。
+ * 掛載後才讀回來（伺服器端渲染沒有 sessionStorage，一開始就讀會讓 hydration 對不上）；讀回之前不寫，免得把還沒讀的紀錄蓋掉。
+ */
+function useLeftoverClaim() {
+  const [leftover, setLeftover] = useState<LeftoverClaim | null>(null);
+  const [restored, setRestored] = useState(false);
+
+  useEffect(() => {
+    setLeftover(readLeftoverClaim(sessionStore()));
+    setRestored(true);
+  }, []);
+
+  useEffect(() => {
+    if (restored) saveLeftoverClaim(sessionStore(), leftover);
+  }, [leftover, restored]);
+
+  return [leftover, setLeftover] as const;
+}
+
 export default function EssExpensesPage() {
   const [categories, setCategories] = useState<MyExpenseCategory[]>([]);
   const [claims, setClaims] = useState<ClaimRow[]>([]);
   const [period, setPeriod] = useState(thisPeriod);
-  // 三種錯誤各放一格，互不覆蓋：載入失敗（卡片上方）、列表撤回失敗（卡片上方）、送出失敗（送出按鈕上方）。
+  // 三種錯誤各放一格，互不覆蓋：載入失敗（卡片上方）、列表撤回失敗（那一列下方）、送出失敗（送出按鈕上方）。
   // 以前共用一格：送出時憑證上傳＋撤回都失敗、切月份重新載入又失敗，「請先撤回」的提示就被「Load failed」蓋掉。
+  // 列表撤回失敗的訊息跟著按下的那一列（以前放在第一張卡片頂端，手機上要往上捲才看得到）。
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [cancelError, setCancelError] = useState<{ id: string; message: string } | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   // 憑證沒傳上、自動撤回也失敗而留下的單（還在、沒有憑證）：下次按送出先撤回它、撤不掉就不建新單，
   // 員工不知道單已建好、再按一次也不會多一筆（見 lib/upload-prep.ts createThenUpload 的 leftover）。
-  const [leftover, setLeftover] = useState<CreatedClaim | null>(null);
+  const [leftover, setLeftover] = useLeftoverClaim();
 
   // 填報表單
   const [categoryId, setCategoryId] = useState("");
@@ -134,7 +168,7 @@ export default function EssExpensesPage() {
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
-    setError(null);
+    setCancelError(null);
     setSubmitError(null);
     setMessage(null);
     const hadLeftover = leftover !== null;
@@ -168,6 +202,11 @@ export default function EssExpensesPage() {
           setSubmitError(expenseErrorMessage(result.error, "這個憑證檔案無法使用，請換一個檔案", "upload"));
         } else if (result.stage === "leftover") {
           setSubmitError(leftoverCancelFailedMessage(result.error));
+        } else if (result.stage === "leftover-gone") {
+          // 上一筆再撤也撤不掉（已不存在、已核銷或月份已結算）：記錄已清掉、這次不送出，請員工確認後再按一次送出。
+          // 重新載入，列表才看得到那一筆現在的狀態。
+          setSubmitError(leftoverGoneMessage(result.error, result.leftover.period));
+          await load();
         } else if (result.stage === "create") {
           setSubmitError(expenseErrorMessage(result.error, "送出失敗，請稍後再試", "create"));
           // 上一筆已在建單前撤回：重新載入，列表才看得到它變成已撤回。
@@ -206,8 +245,9 @@ export default function EssExpensesPage() {
   async function onCancel(id: string) {
     const reason = window.prompt("撤回理由（必填）：");
     if (reason === null) return;
+    setCancelError(null);
     if (!reason.trim()) {
-      setError("撤回理由為必填");
+      setCancelError({ id, message: "撤回理由為必填" });
       return;
     }
     try {
@@ -217,7 +257,7 @@ export default function EssExpensesPage() {
       await load();
     } catch (err) {
       console.warn("[報銷] 撤回失敗", err);
-      setError(expenseErrorMessage(err, "撤回失敗，請稍後再試", "cancel"));
+      setCancelError({ id, message: expenseErrorMessage(err, "撤回失敗，請稍後再試", "cancel") });
     }
   }
 
@@ -233,7 +273,6 @@ export default function EssExpensesPage() {
         </p>
 
         {loadError && <InlineError className="mb-3">{loadError}</InlineError>}
-        {error && <InlineError className="mb-3">{error}</InlineError>}
         {message && <p className="mb-3 text-sm text-green-700">{message}</p>}
 
         <form onSubmit={onSubmit} className="space-y-4">
@@ -453,7 +492,10 @@ export default function EssExpensesPage() {
           <input
             type="month"
             value={period}
-            onChange={(e) => setPeriod(e.target.value)}
+            onChange={(e) => {
+              setPeriod(e.target.value);
+              setCancelError(null);
+            }}
             className="rounded-xl border border-gray-200 px-3 py-1.5 text-sm"
           />
         }
@@ -507,6 +549,8 @@ export default function EssExpensesPage() {
                       )}
                     </div>
                   </div>
+                  {/* 撤回失敗的說明放在按下的那一列：手機上列表一長，放卡片頂端要往上捲才看得到。 */}
+                  {cancelError?.id === c.id && <InlineError className="mt-2">{cancelError.message}</InlineError>}
                 </li>
               ))}
             </ul>

@@ -300,10 +300,30 @@ export async function prepareUploadFile(file: File, codec: ImageCodec = browserI
 
 /* ------------------------------------------------- 建單＋附檔順序 --- */
 
+/** apiFetch 錯誤的 HTTP 狀態碼：`.status`；沒有就從 `[409] code` 的訊息前綴取；不是 API 錯誤（斷線、字串…）→ null。 */
+export function apiErrorStatus(err: unknown): number | null {
+  if (!(err instanceof Error)) return null;
+  const status = (err as { status?: unknown }).status;
+  if (typeof status === "number" && Number.isInteger(status)) return status;
+  const prefix = /^\[(\d{3})\]/.exec(err.message.trim());
+  return prefix ? Number(prefix[1]) : null;
+}
+
+/**
+ * 撤回留下的單時，伺服器回這兩種＝「再撤也撤不掉」，不是等一等就會好的失敗：
+ *   404 那筆已經不存在；409 已核銷（already_settled）、綁的預支已核銷（advance_settled）、月份已結算（period_closed）。
+ * 斷線、500、403… 可能是暫時的，或不是這邊判斷得了的 → 維持「先不送出、稍後再試」。
+ */
+export function isLeftoverGone(err: unknown): boolean {
+  const status = apiErrorStatus(err);
+  return status === 404 || status === 409;
+}
+
 export type CreateThenUploadResult<T> =
   | { ok: true; created: T }
   | { ok: false; stage: "prepare"; error: unknown }
   | { ok: false; stage: "leftover"; error: unknown; leftover: T }
+  | { ok: false; stage: "leftover-gone"; error: unknown; leftover: T }
   | { ok: false; stage: "create"; error: unknown }
   | { ok: false; stage: "upload"; error: unknown; created: T; rolledBack: boolean };
 
@@ -311,7 +331,10 @@ export type CreateThenUploadResult<T> =
  * 建單＋附檔的順序（報銷頁用）：
  *   1. 先準備檔案（壓縮＋大小判斷）——過不了就停，不建單；
  *   2. 有 `leftover`（上一次憑證沒傳上、自動撤回也失敗而留下的單）→ 先用 rollback 撤掉它；撤不掉就停，不建新單
- *      （以前員工不知道單已建好、再按送出就多一筆沒有憑證的單）；
+ *      （以前員工不知道單已建好、再按送出就多一筆沒有憑證的單）。停下來分兩種：
+ *        • 暫時性的失敗（斷線、500…）→ stage "leftover"，呼叫端繼續記著它，下次再試；
+ *        • 404（那筆已不存在）、409（已核銷、月份已結算…，見 {@link isLeftoverGone}）→ stage "leftover-gone"：再撤也撤不掉，
+ *          繼續記著只會讓員工永遠送不出去——同樣不建新單（這次不送出，請員工確認後再按一次），但呼叫端把記錄清掉；
  *   3. 建單；
  *   4. 上傳；失敗就呼叫 rollback（報銷＝撤回剛建的單），免得留下一筆沒有附檔的單、員工重送又多一筆。
  * 不丟錯，用 `stage` 說停在哪一步；`rolledBack` 為 false＝撤回也失敗、單還在——呼叫端把它記成下一次的
@@ -338,6 +361,7 @@ export async function createThenUpload<T>(steps: {
     try {
       await steps.rollback(steps.leftover);
     } catch (error) {
+      if (isLeftoverGone(error)) return { ok: false, stage: "leftover-gone", error, leftover: steps.leftover };
       return { ok: false, stage: "leftover", error, leftover: steps.leftover };
     }
   }
@@ -365,7 +389,8 @@ export async function createThenUpload<T>(steps: {
 
 /**
  * {@link createThenUpload} 之後要記住的「留下的單」（下一次送出的 `leftover`）：
- *   • 停在準備、或撤回上一筆失敗 → 上一筆沒動到，照記；
+ *   • 停在準備、或暫時撤不掉上一筆（stage "leftover"）→ 上一筆沒動到，照記；
+ *   • 上一筆再撤也撤不掉（stage "leftover-gone"：已不存在、已核銷、月份已結算）→ 不必再記，清掉；
  *   • 走到建單以後（建單失敗、成功、上傳失敗但撤回成功）→ 上一筆已撤回，清掉；
  *   • 上傳失敗而且撤回也失敗 → 改記這次建的單。
  */

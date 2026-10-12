@@ -7,11 +7,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  *     GIF／SVG 不壓；解不開或壓完沒有比較小 → 用原檔；非圖片超過 3 MB → 前端擋下、不送任何請求
  *   • 報銷：先準備憑證 → （撤回上次留下的單）→ 建單 → 上傳；準備失敗不建單、上傳失敗自動撤回剛建的單
  *   • 請假：先準備每個附件 → 建單 → 逐檔上傳；任一個準備失敗不建單、某檔上傳失敗其餘照傳
+ *   • 報銷留下的單（上傳＋撤回都失敗）：記在 sessionStorage，重新整理後下次送出照樣先重試撤回；
+ *     重試撤回回 404／409（不存在、已核銷、月份已結算）→ 不卡住：清掉記錄、這次不送出
+ *   • 申請頁的錯誤翻譯 describeError：認得的照舊；認不得的（[500] internal_server_error）只給中文通用說法
  * ⚠️ 識別碼、檔名都是明顯的假值（repo 是公開的）。
  */
 
 const h = vi.hoisted(() => ({ apiFetch: vi.fn() }));
 vi.mock("../api-client", () => ({ apiFetch: h.apiFetch }));
+// describeError 在 form-shared.tsx，那支用 `@/` 別名 import（vitest 沒設別名）：別名接回真的模組；畫面元件（ess-ui）換成空殼——翻譯用不到它們。
+vi.mock("@/components/ess-ui", () => ({ Button: null, Field: null, Icon: null, InlineError: null, Textarea: null }));
+vi.mock("@/lib/attendance-sheets-api", () => import("../attendance-sheets-api"));
+vi.mock("@/lib/request-forms", () => import("../request-forms"));
+vi.mock("@/lib/upload-prep", () => import("../upload-prep"));
 
 import {
   COMPRESSED_TOO_LARGE_MESSAGE,
@@ -28,8 +36,10 @@ import {
   UPLOAD_MAX_BYTES,
   UPLOAD_NETWORK_FAILURE_MESSAGE,
   UploadPrepError,
+  apiErrorStatus,
   createThenUpload,
   createThenUploadAll,
+  isLeftoverGone,
   isNetworkFailure,
   jpegFileName,
   leftoverAfter,
@@ -45,12 +55,28 @@ import {
   type ImageCodec,
 } from "../upload-prep";
 import { cancelExpense, createRequest, fileExpense, uploadAttachment, uploadExpenseReceipt } from "../ess-api";
-import { RECEIPT_AUTO_CANCEL_REASON, receiptUploadFailedMessage } from "../advance-view";
+import {
+  LEFTOVER_STORAGE_KEY,
+  RECEIPT_AUTO_CANCEL_REASON,
+  leftoverGoneMessage,
+  readLeftoverClaim,
+  receiptUploadFailedMessage,
+  saveLeftoverClaim,
+  type LeftoverClaim,
+  type StorageLike,
+} from "../advance-view";
+import { attachmentUploadWarning } from "../request-forms";
+import { UNKNOWN_ERROR_MESSAGE, describeError } from "../../app/ess/requests/_components/form-shared";
 
 const MiB = 1024 * 1024;
 
 function fileOf(name: string, bytes: number, type: string): File {
   return new File([new Uint8Array(bytes)], name, { type });
+}
+
+/** apiFetch 丟的錯誤長相：message 是 `[status] code`，另有 .status／.code／.body。 */
+function apiError(status: number, code: string, body: Record<string, unknown> = { error: code }): Error {
+  return Object.assign(new Error(`[${status}] ${code}`), { status, code, body });
 }
 
 /** 假的解碼器：記下呼叫，解出指定尺寸、輸出指定大小的 JPEG。 */
@@ -580,6 +606,48 @@ describe("createThenUpload（報銷頁：先準備憑證 → 建單 → 上傳�
   });
 });
 
+/* -------------------------------- 撤回留下的單：哪些失敗是「再撤也撤不掉」 --- */
+
+describe("apiErrorStatus／isLeftoverGone", () => {
+  it("狀態碼：.status 優先，沒有就取 `[409] code` 的前綴；斷線、字串、一般 Error、不是三位數 → null", () => {
+    expect(apiErrorStatus(apiError(409, "already_settled"))).toBe(409);
+    expect(apiErrorStatus(new Error("[404] not_found"))).toBe(404);
+    expect(apiErrorStatus(Object.assign(new Error("[500] boom"), { status: 409 }))).toBe(409);
+    expect(apiErrorStatus(Object.assign(new Error("[404] not_found"), { status: "404" }))).toBe(404); // .status 不是數字 → 看前綴
+    expect(apiErrorStatus(new TypeError("Failed to fetch"))).toBeNull();
+    expect(apiErrorStatus(new Error("boom"))).toBeNull();
+    expect(apiErrorStatus(new Error("[40] x"))).toBeNull();
+    expect(apiErrorStatus("[409] already_settled")).toBeNull();
+    expect(apiErrorStatus(null)).toBeNull();
+    expect(apiErrorStatus(undefined)).toBeNull();
+  });
+
+  it("404（不存在）、409（已核銷 already_settled／預支已核銷 advance_settled／月份已結算 period_closed）才算撤不掉", () => {
+    expect(isLeftoverGone(apiError(404, "not_found"))).toBe(true);
+    expect(isLeftoverGone(apiError(409, "already_settled"))).toBe(true);
+    expect(isLeftoverGone(apiError(409, "advance_settled"))).toBe(true);
+    expect(isLeftoverGone(apiError(409, "period_closed", { error: "period_closed", period: "2026-09" }))).toBe(true);
+    expect(isLeftoverGone(new Error("[409] period_closed"))).toBe(true);
+  });
+
+  it("403、500、斷線、一般錯誤、非 Error 都可能是暫時的（或不是這邊判斷得了的）→ 不算", () => {
+    for (const err of [
+      apiError(403, "forbidden"),
+      apiError(400, "invalid_body"),
+      apiError(401, "unauthorized"),
+      apiError(500, "internal_server_error"),
+      apiError(502, "bad_gateway"),
+      new TypeError("Failed to fetch"),
+      new TypeError("Load failed"),
+      new Error("boom"),
+      "[409] already_settled",
+      null,
+    ]) {
+      expect(isLeftoverGone(err), String(err)).toBe(false);
+    }
+  });
+});
+
 /* ------------------------------- 報銷：上傳＋撤回都失敗後再按送出（leftover） --- */
 
 describe("createThenUpload 的 leftover（上次憑證沒傳上、撤回也失敗而留下的單）", () => {
@@ -643,6 +711,152 @@ describe("createThenUpload 的 leftover（上次憑證沒傳上、撤回也失�
     expect(leftoverAfter(LEFT, r({ ok: false, stage: "upload", error: 1, created: NEW, rolledBack: false }))).toBe(NEW);
     expect(leftoverAfter(null, r({ ok: false, stage: "upload", error: 1, created: NEW, rolledBack: false }))).toBe(NEW);
     expect(leftoverAfter(null, r({ ok: false, stage: "prepare", error: 1 }))).toBeNull();
+  });
+
+  it("撤回留下的單回 404（那筆已不存在）或 409（已核銷、月份已結算）→ stage leftover-gone：這次也不建新單、不上傳，回傳那一筆", async () => {
+    for (const err of [
+      apiError(404, "not_found"),
+      apiError(409, "already_settled"),
+      apiError(409, "advance_settled"),
+      apiError(409, "period_closed", { error: "period_closed", period: "2026-09" }),
+      new Error("[409] already_settled"), // 只剩訊息
+    ]) {
+      const s = steps();
+      s.rollback.mockRejectedValueOnce(err);
+      const result = await createThenUpload({ file: pdf(), leftover: LEFT, ...s });
+      expect(result).toEqual({ ok: false, stage: "leftover-gone", error: err, leftover: LEFT });
+      expect(s.rollback).toHaveBeenCalledTimes(1);
+      expect(s.create).not.toHaveBeenCalled();
+      expect(s.upload).not.toHaveBeenCalled();
+    }
+  });
+
+  it("其他撤不掉的原因（500、403、斷線、一般錯誤）維持原樣：stage leftover（繼續記著，下次再試）", async () => {
+    for (const err of [
+      apiError(500, "internal_server_error"),
+      apiError(403, "forbidden"),
+      apiError(400, "invalid_body"),
+      new TypeError("Failed to fetch"),
+      new TypeError("Load failed"),
+      new Error("boom"),
+      "boom",
+    ]) {
+      const s = steps();
+      s.rollback.mockRejectedValueOnce(err);
+      const result = await createThenUpload({ file: pdf(), leftover: LEFT, ...s });
+      expect(result).toEqual({ ok: false, stage: "leftover", error: err, leftover: LEFT });
+      expect(s.create).not.toHaveBeenCalled();
+    }
+  });
+
+  it("leftoverAfter：leftover-gone（撤不掉的單）→ 清掉記錄，不管之前記的是什麼", () => {
+    const gone: CreateThenUploadResult<Claim> = { ok: false, stage: "leftover-gone", error: apiError(409, "period_closed"), leftover: LEFT };
+    expect(leftoverAfter(LEFT, gone)).toBeNull();
+    expect(leftoverAfter(null, gone)).toBeNull();
+  });
+
+  it("接上真正的 ess-api：留下的單回 409（月份已結算）→ 這次沒有 POST /expenses、記錄清掉；再按一次送出 → 直接建單＋上傳", async () => {
+    const submit = (leftover: LeftoverClaim | null) =>
+      createThenUpload({
+        file: new File(["%PDF-1.4"], "發票.pdf", { type: "application/pdf" }),
+        leftover,
+        create: () => fileExpense({ categoryId: "cat-1", amount: 100, incurredOn: "2026-10-12" }),
+        upload: (claim, file) => uploadExpenseReceipt(claim.id, file),
+        rollback: (claim) => cancelExpense(claim.id, RECEIPT_AUTO_CANCEL_REASON),
+      });
+    const calls = () => h.apiFetch.mock.calls.map(([path, opts]) => `${opts.method} ${path}`);
+
+    // 重試撤回上個月留下的單：那個月已發薪鎖定 → 409 period_closed
+    let leftover: LeftoverClaim | null = { id: "claim-1", period: "2026-09" };
+    h.apiFetch.mockRejectedValueOnce(apiError(409, "period_closed", { error: "period_closed", period: "2026-09" }));
+    const first = await submit(leftover);
+    expect(first).toMatchObject({ ok: false, stage: "leftover-gone", leftover: { id: "claim-1", period: "2026-09" } });
+    expect(calls()).toEqual(["PATCH /expenses/claim-1"]); // 沒有再建新單
+    if (!first.ok && first.stage === "leftover-gone") {
+      expect(leftoverGoneMessage(first.error, first.leftover.period)).toContain("請洽 HR 確認，確認後再按一次送出");
+    }
+    leftover = leftoverAfter(leftover, first);
+    expect(leftover).toBeNull();
+
+    // 員工確認後再按一次送出：已經沒有留下的單 → 建單＋上傳
+    h.apiFetch.mockReset();
+    h.apiFetch
+      .mockResolvedValueOnce({ id: "claim-2", period: "2026-10", nature: "reimbursement" })
+      .mockResolvedValueOnce({ id: "att-1" });
+    const second = await submit(leftover);
+    expect(second).toMatchObject({ ok: true, created: { id: "claim-2" } });
+    expect(calls()).toEqual(["POST /expenses", "POST /expenses/claim-2/attachments"]);
+  });
+
+  it("接上真正的 ess-api：留下的單回 404（已不存在）→ 同樣不卡住：只有一個 PATCH、記錄清掉", async () => {
+    const leftover: LeftoverClaim = { id: "claim-gone", period: "2026-10" };
+    h.apiFetch.mockRejectedValueOnce(apiError(404, "not_found"));
+    const result = await createThenUpload({
+      file: new File(["%PDF-1.4"], "發票.pdf", { type: "application/pdf" }),
+      leftover,
+      create: () => fileExpense({ categoryId: "cat-1", amount: 100, incurredOn: "2026-10-12" }),
+      upload: (claim, file) => uploadExpenseReceipt(claim.id, file),
+      rollback: (claim) => cancelExpense(claim.id, RECEIPT_AUTO_CANCEL_REASON),
+    });
+    expect(result).toMatchObject({ ok: false, stage: "leftover-gone" });
+    expect(h.apiFetch.mock.calls.map(([path, opts]) => `${opts.method} ${path}`)).toEqual(["PATCH /expenses/claim-gone"]);
+    expect(leftoverAfter(leftover, result)).toBeNull();
+  });
+
+  it("重新整理同一分頁：留下的單記在 sessionStorage，讀回來後下次送出照樣先重試撤回、不建第二筆；撤回成功後清掉", async () => {
+    // 假的 sessionStorage；頁面的 useLeftoverClaim 在 state 變動後用 saveLeftoverClaim 寫入、掛載時用 readLeftoverClaim 讀回
+    const data = new Map<string, string>();
+    const storage: StorageLike = {
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => void data.set(key, value),
+      removeItem: (key) => void data.delete(key),
+    };
+    const submit = (leftover: LeftoverClaim | null) =>
+      createThenUpload({
+        file: new File(["%PDF-1.4"], "發票.pdf", { type: "application/pdf" }),
+        leftover,
+        create: () => fileExpense({ categoryId: "cat-1", amount: 100, incurredOn: "2026-10-12" }),
+        upload: (claim, file) => uploadExpenseReceipt(claim.id, file),
+        rollback: (claim) => cancelExpense(claim.id, RECEIPT_AUTO_CANCEL_REASON),
+      });
+    const calls = () => h.apiFetch.mock.calls.map(([path, opts]) => `${opts.method} ${path}`);
+
+    // 第 1 次：建單成功、上傳斷線、自動撤回也斷線 → 單留著，記進 sessionStorage
+    h.apiFetch
+      .mockResolvedValueOnce({ id: "claim-1", period: "2026-10", nature: "reimbursement" })
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    const first = await submit(null);
+    expect(first).toMatchObject({ ok: false, stage: "upload", rolledBack: false });
+    saveLeftoverClaim(storage, leftoverAfter(null, first));
+    expect([...data.keys()]).toEqual([LEFTOVER_STORAGE_KEY]);
+
+    // 重新整理：頁面記憶體清空，掛載後從 sessionStorage 讀回
+    let leftover = readLeftoverClaim(storage);
+    expect(leftover).toEqual({ id: "claim-1", period: "2026-10" });
+
+    // 第 2 次：撤回舊單仍斷線 → 只有 PATCH 舊單，沒有第二個 POST /expenses；記錄還在
+    h.apiFetch.mockReset();
+    h.apiFetch.mockRejectedValueOnce(new TypeError("Load failed"));
+    const second = await submit(leftover);
+    expect(second).toMatchObject({ ok: false, stage: "leftover" });
+    expect(calls()).toEqual(["PATCH /expenses/claim-1"]);
+    leftover = leftoverAfter(leftover, second);
+    saveLeftoverClaim(storage, leftover);
+    expect(readLeftoverClaim(storage)).toEqual({ id: "claim-1", period: "2026-10" });
+
+    // 第 3 次：網路恢復 → 先撤回舊單 → 建新單 → 上傳；成功後記錄清掉
+    h.apiFetch.mockReset();
+    h.apiFetch
+      .mockResolvedValueOnce({ id: "claim-1" })
+      .mockResolvedValueOnce({ id: "claim-2", period: "2026-10", nature: "reimbursement" })
+      .mockResolvedValueOnce({ id: "att-1" });
+    const third = await submit(leftover);
+    expect(third).toMatchObject({ ok: true, created: { id: "claim-2" } });
+    expect(calls()).toEqual(["PATCH /expenses/claim-1", "POST /expenses", "POST /expenses/claim-2/attachments"]);
+    saveLeftoverClaim(storage, leftoverAfter(leftover, third));
+    expect(data.size).toBe(0);
+    expect(readLeftoverClaim(storage)).toBeNull();
   });
 
   it("接上真正的 ess-api（同報銷頁）：上傳＋撤回都斷線 → 再按送出、撤回仍斷線 → 沒有第二個 POST /expenses；網路恢復 → 先撤回舊單再建一筆", async () => {
@@ -810,5 +1024,116 @@ describe("isNetworkFailure／斷線的中文說法", () => {
     expect(UPLOAD_NETWORK_FAILURE_MESSAGE).toContain("檔案太大");
     expect(UPLOAD_NETWORK_FAILURE_MESSAGE).toContain("網路不穩");
     for (const text of [NETWORK_FAILURE_MESSAGE, UPLOAD_NETWORK_FAILURE_MESSAGE]) expect(text).not.toMatch(/[A-Za-z]/);
+  });
+});
+
+/* -------------------------------------------- 申請頁的錯誤翻譯（describeError） --- */
+
+describe("describeError（請假送出、我的申請補傳／撤回、載入共用）", () => {
+  /** 畫面文字不該有英文（MB、KB 單位除外）。 */
+  const noEnglish = (text: string) => expect(text.replace(/MB|KB/g, "")).not.toMatch(/[A-Za-z]/);
+  /** 畫面不出現 `[數字] 英文代碼`。 */
+  const noStatusCode = (text: string) => expect(text).not.toMatch(/\[\d+\]/);
+  const silenceWarn = () => vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+  it("認得的照舊：文案不變，也不吵 console", () => {
+    const warn = silenceWarn();
+    const closed = apiError(409, "period_closed", { error: "period_closed", period: "2026-09" });
+    expect(describeError(apiError(401, "unauthorized"), "x")).toBe("請重新登入");
+    expect(describeError(apiError(403, "forbidden"), "x")).toBe("沒有權限執行此操作");
+    expect(describeError(apiError(404, "not_found"), "x")).toBe("找不到這張申請");
+    expect(describeError(apiError(409, "not_pending"), "x")).toBe("這張申請已不是待簽核狀態");
+    expect(describeError(apiError(400, "attachment_required"), "x")).toBe("此假別需要附上憑證");
+    expect(describeError(apiError(409, "locked"), "x")).toBe("此月表已鎖定，不可再變更"); // 出勤月表那套 friendlyError 的表
+    expect(describeError(closed, "x")).toBe("2026-09 已結算，請洽管理者");
+    expect(describeError(apiError(413, "file_too_large", { error: "file_too_large", maxBytes: 1 * MiB }), "x")).toBe(
+      "附件太大，單檔限 1 MB",
+    );
+    expect(describeError(apiError(413, "file_too_large"), "x")).toBe("附件超過公司設定的大小上限，請縮小後再傳");
+    for (const message of ["Failed to fetch", "Load failed", "NetworkError when attempting to fetch resource."]) {
+      expect(describeError(new TypeError(message), "x")).toBe(NETWORK_FAILURE_MESSAGE);
+    }
+    // 前端自己擋下的、本來就是中文的訊息：原樣
+    expect(describeError(new UploadPrepError(FILE_TOO_LARGE_MESSAGE), "x")).toBe(FILE_TOO_LARGE_MESSAGE);
+    expect(describeError(new UploadPrepError(EMPTY_FILE_MESSAGE), "x")).toBe(EMPTY_FILE_MESSAGE);
+    expect(describeError(new Error("讀取檔案失敗"), "x")).toBe("讀取檔案失敗");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("認不得的錯誤碼／英文訊息 → 只給中文通用說法，畫面沒有 [數字] 英文代碼；原始錯誤記在 console.warn", () => {
+    for (const err of [
+      apiError(500, "internal_server_error"),
+      new Error("[500] internal_server_error"), // 只剩訊息
+      apiError(409, "max_files_reached", { error: "max_files_reached", max: 3 }),
+      apiError(400, "invalid_base64"),
+      new Error("[502] Bad Gateway"),
+      new TypeError("Cannot read properties of undefined (reading 'id')"), // 程式錯誤的英文訊息
+    ]) {
+      const warn = silenceWarn();
+      const text = describeError(err, "上傳失敗");
+      expect(text, String(err)).toBe(UNKNOWN_ERROR_MESSAGE);
+      noStatusCode(text);
+      noEnglish(text);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(expect.any(String), err); // 原始錯誤原封不動記下來
+      warn.mockRestore();
+    }
+  });
+
+  it("fallback 只給不是 Error 的東西（字串、null、undefined）與沒有訊息的 Error；認不得的 Error 不用它", () => {
+    const warn = silenceWarn();
+    expect(describeError("boom", "送出失敗，請稍後再試")).toBe("送出失敗，請稍後再試");
+    expect(describeError(undefined, "撤回失敗")).toBe("撤回失敗");
+    expect(describeError(null, "載入申請失敗")).toBe("載入申請失敗");
+    expect(describeError(new Error(""), "上傳憑證失敗")).toBe("上傳憑證失敗");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("每個呼叫點的 fallback 都適用：請假送出（建單、附件準備、附件上傳）、我的申請（補傳、撤回）、載入", () => {
+    silenceWarn();
+    for (const fallback of ["送出失敗，請稍後再試", "附件無法使用，請換一個檔案", "上傳失敗", "上傳憑證失敗", "撤回失敗", "載入申請失敗"]) {
+      expect(describeError(apiError(500, "internal_server_error"), fallback)).toBe(UNKNOWN_ERROR_MESSAGE);
+      expect(describeError(new UploadPrepError(FILE_TOO_LARGE_MESSAGE), fallback)).toBe(FILE_TOO_LARGE_MESSAGE);
+      expect(describeError("boom", fallback)).toBe(fallback);
+    }
+  });
+
+  it("通用說法本身：全中文，單獨顯示或放進「（…）」括號都通順", () => {
+    noEnglish(UNKNOWN_ERROR_MESSAGE);
+    expect(UNKNOWN_ERROR_MESSAGE).toContain("請稍後再試");
+  });
+
+  it("請假送出的成功畫面：附件上傳回 [500] internal_server_error → 括號裡只有中文通用說法（以前寫成「（[500] internal_server_error）」）", async () => {
+    silenceWarn();
+    h.apiFetch.mockResolvedValueOnce({ requestId: "req-9" }).mockRejectedValueOnce(apiError(500, "internal_server_error"));
+    const result = await createThenUploadAll({
+      files: [new File(["%PDF-1.4"], "診斷證明.pdf", { type: "application/pdf" })],
+      create: () => createRequest({ kind: "leave" } as Parameters<typeof createRequest>[0]),
+      upload: (created, file) => uploadAttachment(created.requestId, file),
+    });
+    expect(result.ok).toBe(true);
+    const failed = result.ok ? result.failed : [];
+    expect(failed).toHaveLength(1);
+    // 同請假頁 submit：沒傳上的檔 → { name, reason: describeError(error, "上傳失敗") } → attachmentUploadWarning
+    const warning = attachmentUploadWarning(
+      failed.map(({ file, error }) => ({ name: file.name, reason: describeError(error, "上傳失敗") })),
+      1,
+    );
+    expect(warning).toBe(
+      `申請已送出，但附件「診斷證明.pdf」上傳失敗（${UNKNOWN_ERROR_MESSAGE}）。請在下方「我的申請」按「上傳憑證」補傳。`,
+    );
+    noStatusCode(warning!);
+    expect(warning).not.toContain("internal_server_error");
+  });
+
+  it("我的申請補傳（uploadAttachment）：回 [500] → 中文通用說法；回 413 → 照回應的上限；斷線 → 連線失敗", async () => {
+    silenceWarn();
+    const file = new File(["%PDF-1.4"], "診斷證明.pdf", { type: "application/pdf" });
+    h.apiFetch.mockRejectedValueOnce(apiError(500, "internal_server_error"));
+    await expect(uploadAttachment("req-9", file).catch((err) => describeError(err, "上傳憑證失敗"))).resolves.toBe(UNKNOWN_ERROR_MESSAGE);
+    h.apiFetch.mockRejectedValueOnce(apiError(413, "file_too_large", { error: "file_too_large", maxBytes: 2 * MiB }));
+    await expect(uploadAttachment("req-9", file).catch((err) => describeError(err, "上傳憑證失敗"))).resolves.toBe("附件太大，單檔限 2 MB");
+    h.apiFetch.mockRejectedValueOnce(new TypeError("Load failed"));
+    await expect(uploadAttachment("req-9", file).catch((err) => describeError(err, "上傳憑證失敗"))).resolves.toBe(NETWORK_FAILURE_MESSAGE);
   });
 });

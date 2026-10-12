@@ -27,16 +27,31 @@ import { Button, Field, Icon, InlineError, Textarea } from "@/components/ess-ui"
 
 /* ------------------------------------------------------------ 錯誤 --- */
 
+/** 認不得的錯誤給人看的說法：單獨顯示、或放在「附件「a.jpg」上傳失敗（…）」的括號裡都通順。 */
+export const UNKNOWN_ERROR_MESSAGE = "系統暫時無法處理，請稍後再試";
+
+/** 中文字、CJK 符號（、。「」）與全形標點（，：）：有任何一個，就當這句本來就是中文說明。 */
+const HAS_CJK_RE = /[\u3000-\u9fff\uff00-\uffef]/;
+
 /**
  * 申請頁的錯誤 → 中文（送出、撤回、上傳附件、「我的申請」補傳與載入都走這裡）：
  *   1. 連線本身失敗（Chrome「Failed to fetch」、Safari「Load failed」、Firefox「NetworkError…」）→ 中文，不露出英文；
  *   2. 附件太大（413）→ 照回應帶的上限寫「單檔限 N MB」（上限依租戶設定，不一定是 3 MB）；
  *   3. 申請頁專屬錯誤碼（含 409 period_closed →「YYYY-MM 已結算，請洽管理者」）；
- *   4. 其餘沿用出勤月表那套 friendlyError（unauthorized／forbidden…）。
+ *   4. 其餘沿用出勤月表那套 friendlyError（unauthorized／forbidden…）；
+ *   5. 以上都對不上（例如 `[500] internal_server_error`、英文的例外訊息）→ {@link UNKNOWN_ERROR_MESSAGE}，畫面不露出英文代碼，
+ *      原始錯誤改記在 console。前端自己擋下的（UploadPrepError）等本來就是中文的訊息照舊原樣顯示。
+ * `fallback` 只在丟出來的不是 Error（字串之類）或沒有訊息時用，各呼叫點（請假送出、附件補傳與撤回、載入申請）傳自己的中文說法。
  */
 export function describeError(err: unknown, fallback: string): string {
   if (isNetworkFailure(err)) return NETWORK_FAILURE_MESSAGE;
-  return attachmentTooLargeText(err) ?? requestErrorText(err) ?? friendlyError(err, fallback);
+  const text = attachmentTooLargeText(err) ?? requestErrorText(err) ?? friendlyError(err, fallback);
+  // friendlyError 查不到對照時會把 Error.message 原樣丟回來；原樣又沒有半個中文字＝英文代碼，不上畫面。
+  if (err instanceof Error && text === err.message && !HAS_CJK_RE.test(text)) {
+    console.warn("[申請] 無法辨識的錯誤，畫面只顯示通用說法", err);
+    return UNKNOWN_ERROR_MESSAGE;
+  }
+  return text;
 }
 
 /* ------------------------------------------------------------ 附件 --- */

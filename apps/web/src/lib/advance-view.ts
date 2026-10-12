@@ -16,6 +16,7 @@ import {
   NETWORK_FAILURE_MESSAGE,
   UPLOAD_NETWORK_FAILURE_MESSAGE,
   UploadPrepError,
+  apiErrorStatus,
   isNetworkFailure,
 } from "./upload-prep";
 
@@ -188,6 +189,77 @@ export function leftoverClaimNotice(period: string): string {
 export function leftoverCancelFailedMessage(err: unknown): string {
   const reason = expenseErrorReason(err, "cancel");
   return `上一筆沒附到憑證的報銷還沒撤回成功，這次先不送出，免得重複。${reason ? `（${reason}）` : "請稍後再試。"}`;
+}
+
+/**
+ * 送出前重試撤回留下的單，伺服器說再撤也撤不掉（404 那筆已不存在；409 已核銷、月份已結算…，見 upload-prep.ts 的
+ * isLeftoverGone）：記錄已清掉、這次沒有建新單。請員工確認後再按一次送出——不然會永遠卡在「先撤回上一筆」。
+ * `period` 是那一筆的歸屬月份（YYYY-MM）。
+ */
+export function leftoverGoneMessage(err: unknown, period: string): string {
+  return apiErrorStatus(err) === 404
+    ? `上一筆（${period}）沒附到憑證的報銷已經不存在（可能已被刪除），不用再撤回。這次先不送出，請看一下下方列表，沒問題的話再按一次送出。`
+    : `上一筆（${period}）沒附到憑證的報銷已無法撤回（可能已月結或已核銷），這次先不送出。請洽 HR 確認，確認後再按一次送出。`;
+}
+
+/* ------------------------------- 留下的單：記在 sessionStorage（重新整理仍記得） --- */
+
+/** 留下的單要記住的欄位：撤回用 id，說明文字用 period。 */
+export interface LeftoverClaim {
+  id: string;
+  period: string;
+}
+
+/**
+ * sessionStorage 的 key：固定前綴，不帶租戶或員工。sessionStorage 只在這個分頁、這個網站內，重新整理還在、關掉分頁就沒了。
+ * 讀回來的單若撤不掉（不存在、已月結…）會被清掉，不會一直卡著（見 {@link leftoverGoneMessage}）。
+ */
+export const LEFTOVER_STORAGE_KEY = "aster.ess.expenses.leftover";
+
+/** 只用到 getItem／setItem／removeItem（window.sessionStorage 符合；測試換成假的）。 */
+export interface StorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+/** 單的 id 會放進撤回的網址（PATCH /expenses/:id），只收英數、底線與連字號。 */
+const LEFTOVER_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** 把存起來的字串還原成留下的單；不是 JSON、欄位缺或格式不對（壞值）→ null。 */
+export function parseLeftoverClaim(raw: string | null | undefined): LeftoverClaim | null {
+  if (!raw) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+    const { id, period } = value as { id?: unknown; period?: unknown };
+    if (typeof id !== "string" || !LEFTOVER_ID_RE.test(id)) return null;
+    if (typeof period !== "string" || !isValidPeriod(period)) return null;
+    return { id, period: period.trim() };
+  } catch {
+    return null;
+  }
+}
+
+/** 讀回留下的單：沒有儲存空間、讀不到（被擋、丟錯）、壞值 → null（當作沒有）。 */
+export function readLeftoverClaim(storage: StorageLike | null): LeftoverClaim | null {
+  if (!storage) return null;
+  try {
+    return parseLeftoverClaim(storage.getItem(LEFTOVER_STORAGE_KEY));
+  } catch {
+    return null;
+  }
+}
+
+/** 記下（或清掉：null）留下的單，只存 id 與 period。寫不進去（被擋、額度滿）不丟錯，只是重新整理後就不記得了。 */
+export function saveLeftoverClaim(storage: StorageLike | null, claim: LeftoverClaim | null): void {
+  if (!storage) return;
+  try {
+    if (claim) storage.setItem(LEFTOVER_STORAGE_KEY, JSON.stringify({ id: claim.id, period: claim.period }));
+    else storage.removeItem(LEFTOVER_STORAGE_KEY);
+  } catch {
+    // 寫不進去就只剩頁面記憶體這一份
+  }
 }
 
 /* ------------------------------------------------------ 核銷前預覽 --- */

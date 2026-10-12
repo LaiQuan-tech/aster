@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EXPENSE_ERROR_MESSAGES,
+  LEFTOVER_STORAGE_KEY,
   RECEIPT_AUTO_CANCEL_REASON,
   advanceDate,
   advanceOptionLabel,
@@ -17,10 +18,16 @@ import {
   isValidPeriod,
   leftoverCancelFailedMessage,
   leftoverClaimNotice,
+  leftoverGoneMessage,
+  parseLeftoverClaim,
+  readLeftoverClaim,
   receiptUploadFailedMessage,
+  saveLeftoverClaim,
   settlementWarnings,
   type AdvanceLike,
+  type LeftoverClaim,
   type PreviewClaim,
+  type StorageLike,
 } from "../advance-view";
 import { NETWORK_FAILURE_MESSAGE, UPLOAD_NETWORK_FAILURE_MESSAGE, UploadPrepError } from "../upload-prep";
 
@@ -224,6 +231,129 @@ describe("報銷頁的錯誤訊息", () => {
       "上一筆沒附到憑證的報銷還沒撤回成功，這次先不送出，免得重複。請稍後再試。",
     );
     noEnglish(leftoverCancelFailedMessage(apiError(500, "kaboom")));
+  });
+});
+
+describe("留下的單：記在 sessionStorage（重新整理同一分頁仍記得）", () => {
+  const apiError = (status: number, code: string) => Object.assign(new Error(`[${status}] ${code}`), { status, code });
+  /** 畫面文字不該有英文（HR 除外）。 */
+  const noEnglish = (text: string) => expect(text.replace(/HR/g, "")).not.toMatch(/[A-Za-z]/);
+
+  /** 假的 sessionStorage：Map 存；`broken` 指定哪個方法要丟錯（被擋、額度滿）。 */
+  function fakeStorage(initial: Record<string, string> = {}, broken: Partial<Record<keyof StorageLike, boolean>> = {}) {
+    const data = new Map(Object.entries(initial));
+    const storage: StorageLike = {
+      getItem: (key) => {
+        if (broken.getItem) throw new Error("SecurityError");
+        return data.get(key) ?? null;
+      },
+      setItem: (key, value) => {
+        if (broken.setItem) throw new Error("QuotaExceededError");
+        data.set(key, value);
+      },
+      removeItem: (key) => {
+        if (broken.removeItem) throw new Error("SecurityError");
+        data.delete(key);
+      },
+    };
+    return { storage, data };
+  }
+  const CLAIM: LeftoverClaim = { id: "claim-left", period: "2026-09" };
+
+  it("記下再讀回；只存 id 與 period（POST /expenses 回的其他欄位不留）", () => {
+    const { storage, data } = fakeStorage();
+    expect(readLeftoverClaim(storage)).toBeNull(); // 沒記過＝沒有
+    const created = { ...CLAIM, nature: "reimbursement", advanceId: null }; // 建單回的是整包
+    saveLeftoverClaim(storage, created);
+    expect([...data.keys()]).toEqual([LEFTOVER_STORAGE_KEY]);
+    expect(JSON.parse(data.get(LEFTOVER_STORAGE_KEY)!)).toEqual(CLAIM);
+    expect(readLeftoverClaim(storage)).toEqual(CLAIM);
+  });
+
+  it("清掉（null）→ 把紀錄刪掉；之後讀回是沒有", () => {
+    const { storage, data } = fakeStorage();
+    saveLeftoverClaim(storage, CLAIM);
+    saveLeftoverClaim(storage, null);
+    expect(data.size).toBe(0);
+    expect(readLeftoverClaim(storage)).toBeNull();
+  });
+
+  it("壞值（不是 JSON、不是物件、欄位缺、格式不對）一律當沒有", () => {
+    const bad = [
+      "",
+      "not json",
+      "{",
+      "null",
+      "[]",
+      "42",
+      '"claim-left"',
+      "{}",
+      '{"id":"claim-left"}',
+      '{"period":"2026-09"}',
+      '{"id":1,"period":"2026-09"}',
+      '{"id":"claim-left","period":202609}',
+      '{"id":"claim-left","period":"2026-13"}',
+      '{"id":"claim-left","period":"九月"}',
+      '{"id":"","period":"2026-09"}',
+      '{"id":"../expenses/other","period":"2026-09"}', // id 會進網址，不收斜線
+      '{"id":"a b","period":"2026-09"}',
+      `{"id":"${"x".repeat(65)}","period":"2026-09"}`,
+    ];
+    for (const raw of bad) {
+      expect(parseLeftoverClaim(raw), raw).toBeNull();
+      expect(readLeftoverClaim(fakeStorage({ [LEFTOVER_STORAGE_KEY]: raw }).storage), raw).toBeNull();
+    }
+    expect(parseLeftoverClaim(null)).toBeNull();
+    expect(parseLeftoverClaim(undefined)).toBeNull();
+    // 好值：uuid 長相、多餘欄位忽略、月份前後空白去掉
+    expect(parseLeftoverClaim('{"id":"00000000-0000-4000-8000-000000000001","period":" 2026-10 ","nature":"x"}')).toEqual({
+      id: "00000000-0000-4000-8000-000000000001",
+      period: "2026-10",
+    });
+  });
+
+  it("讀不到（沒有儲存空間、getItem 被擋丟錯）→ 當沒有，不丟錯", () => {
+    expect(readLeftoverClaim(null)).toBeNull();
+    const blocked = fakeStorage({ [LEFTOVER_STORAGE_KEY]: JSON.stringify(CLAIM) }, { getItem: true });
+    expect(readLeftoverClaim(blocked.storage)).toBeNull();
+  });
+
+  it("寫不進去（沒有儲存空間、setItem 額度滿、removeItem 被擋）→ 不丟錯，只是重新整理後不記得", () => {
+    expect(() => saveLeftoverClaim(null, CLAIM)).not.toThrow();
+    expect(() => saveLeftoverClaim(null, null)).not.toThrow();
+    expect(() => saveLeftoverClaim(fakeStorage({}, { setItem: true }).storage, CLAIM)).not.toThrow();
+    expect(() => saveLeftoverClaim(fakeStorage({}, { removeItem: true }).storage, null)).not.toThrow();
+  });
+
+  it("key 是固定前綴（不帶租戶或員工）", () => {
+    expect(LEFTOVER_STORAGE_KEY).toMatch(/^aster\./);
+    expect(LEFTOVER_STORAGE_KEY).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}/);
+  });
+
+  it("撤不掉的說明（404／409）：寫月份、說這次先不送出、請確認後再按一次送出；409 請洽 HR；全是中文", () => {
+    const notFound = leftoverGoneMessage(apiError(404, "not_found"), "2026-09");
+    expect(notFound).toContain("2026-09");
+    expect(notFound).toContain("已經不存在");
+    expect(notFound).toContain("不用再撤回");
+    expect(notFound).toContain("這次先不送出");
+    expect(notFound).toContain("再按一次送出");
+    noEnglish(notFound);
+
+    for (const err of [
+      apiError(409, "already_settled"),
+      apiError(409, "advance_settled"),
+      Object.assign(apiError(409, "period_closed"), { body: { error: "period_closed", period: "2026-09" } }),
+      new Error("[409] already_settled"), // 只剩訊息
+    ]) {
+      const closed = leftoverGoneMessage(err, "2026-09");
+      expect(closed).toContain("2026-09");
+      expect(closed).toContain("已無法撤回（可能已月結或已核銷）");
+      expect(closed).toContain("這次先不送出");
+      expect(closed).toContain("請洽 HR 確認，確認後再按一次送出");
+      noEnglish(closed);
+    }
+    // 兩種說法不同（404 是「不存在」，不叫員工找 HR）
+    expect(notFound).not.toContain("HR");
   });
 });
 
