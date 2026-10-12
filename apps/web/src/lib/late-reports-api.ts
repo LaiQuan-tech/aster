@@ -11,6 +11,8 @@ import { describePeriodClosed } from "./period-closed";
 
 export type LateDecision = "affects" | "exempt" | null;
 export type LateDecisionFilter = "undecided" | "affects" | "exempt" | "all";
+/** 不能再決定的原因（2026-10-12）：period_closed＝那個月已結算；sheet_frozen＝該員那個月的出勤月表已核准／鎖定。 */
+export type LateLockedReason = "period_closed" | "sheet_frozen";
 
 export interface LateReport {
   id: string;
@@ -28,6 +30,11 @@ export interface LateReport {
   decidedByName: string | null;
   decidedAt: string | null;
   decisionNote: string | null;
+  /**
+   * 不能再決定的原因；null／缺席＝還能決定。只有 GET /late-reports 的列表會帶
+   * （決定的回應、舊版 API 沒有這個欄位）。
+   */
+  lockedReason?: LateLockedReason | null;
 }
 
 export interface LateReportList {

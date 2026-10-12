@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { needsAnnouncementHint, summarizePunches } from "../punch-state";
+import {
+  needsAnnouncementHint,
+  precheckPunch,
+  punchStateChangedNotice,
+  shouldApplyPolledPunches,
+  summarizePunches,
+} from "../punch-state";
 
 /** 2026-09-18 台北時間 hh:mm（UTC+8）的 ISO 字串。 */
 function at(hhmm: string): string {
@@ -119,6 +125,99 @@ describe("summarizePunches", () => {
     expect(s.firstInAt).toBeNull();
     expect(s.lastOutAt).toBe(at("18:05"));
     expect(s.nextType).toBe("in");
+  });
+});
+
+describe("precheckPunch（打卡前確認最新狀態，2026-10-12）", () => {
+  it("主管剛核准補上班卡：畫面還是「上班打卡」（in）、最新紀錄已有 in → 中止不送，回最新紀錄與摘要", () => {
+    const latest = [{ ...IN_0902, id: "fix-in" }];
+    const r = precheckPunch("in", latest);
+    expect(r.send).toBe(false);
+    if (r.send) return;
+    expect(r.latest).toBe(latest); // 呼叫端拿來換掉畫面，不另外複製
+    expect(r.summary.phase).toBe("working");
+    expect(r.summary.nextType).toBe("out");
+    expect(r.summary.nextLabel).toBe("下班打卡");
+    expect(r.summary.workingSince).toBe(at("09:02"));
+  });
+
+  it("畫面是「下班打卡」（out）但最新紀錄已有下班卡（例如補下班卡剛核准）→ 中止，下一步改回 in", () => {
+    const r = precheckPunch("out", [IN_0902, OUT_1805]);
+    expect(r.send).toBe(false);
+    if (r.send) return;
+    expect(r.summary.nextType).toBe("in");
+    expect(r.summary.nextLabel).toBe("再次上班打卡");
+  });
+
+  it("最新紀錄推出的下一步與畫面相同 → 照畫面送", () => {
+    expect(precheckPunch("in", [])).toEqual({ send: true, type: "in" });
+    expect(precheckPunch("out", [IN_0902])).toEqual({ send: true, type: "out" });
+    // 中間多了補卡（in＋out），最後仍是 in：下一步一樣是 out
+    expect(precheckPunch("out", [IN_0902, OUT_1205, IN_1301])).toEqual({ send: true, type: "out" });
+    // break_*／outing_* 不影響判斷
+    expect(precheckPunch("out", [IN_0902, { type: "break_start", punch_at: at("12:00") }])).toEqual({
+      send: true,
+      type: "out",
+    });
+  });
+
+  it("none 與 done 下一步都是 in：畫面「上班打卡」、最新已是 in＋out → 照送 in（只比種類，不比階段）", () => {
+    expect(precheckPunch("in", [IN_0902, OUT_1805])).toEqual({ send: true, type: "in" });
+  });
+
+  it("抓失敗或逾時（null／undefined）→ 照畫面上的種類送出，不擋打卡", () => {
+    expect(precheckPunch("in", null)).toEqual({ send: true, type: "in" });
+    expect(precheckPunch("out", undefined)).toEqual({ send: true, type: "out" });
+  });
+
+  it("亂序的最新紀錄也照時間判斷（同 summarizePunches）", () => {
+    const r = precheckPunch("in", [OUT_1205, IN_1301, IN_0902]);
+    expect(r.send).toBe(false);
+    if (r.send) return;
+    expect(r.summary.nextType).toBe("out");
+  });
+
+  it("空紀錄＋畫面上班中（加班過午夜，新的一天還沒打卡）→ 沒有新證據，照送 out，不中止", () => {
+    expect(precheckPunch("out", [])).toEqual({ send: true, type: "out" });
+  });
+
+  it("空紀錄＋畫面下班／尚未打卡 → 照送 in", () => {
+    expect(precheckPunch("in", [])).toEqual({ send: true, type: "in" });
+  });
+
+  it("只有休息／外出卡（沒有任何 in／out）也算空紀錄 → 照畫面送", () => {
+    expect(precheckPunch("out", [{ type: "break_start", punch_at: at("00:10") }])).toEqual({ send: true, type: "out" });
+  });
+});
+
+describe("punchStateChangedNotice", () => {
+  it("中文提示：說明可能是主管核准補卡、按鈕改成什麼、請再按一次", () => {
+    expect(punchStateChangedNotice(summarizePunches([IN_0902]))).toBe(
+      "打卡狀態剛更新（可能主管已核准補卡），按鈕已改為「下班打卡」，請確認後再按一次",
+    );
+    expect(punchStateChangedNotice(summarizePunches([IN_0902, OUT_1805]))).toContain("「再次上班打卡」");
+  });
+});
+
+describe("shouldApplyPolledPunches（每 60 秒背景輪詢，只認正面證據）", () => {
+  it("輪詢拿到空紀錄、畫面上班中（加班過午夜）→ 不套用，按鈕維持「下班打卡」", () => {
+    expect(shouldApplyPolledPunches([IN_0902], [])).toBe(false);
+    // 只有休息卡也算空
+    expect(shouldApplyPolledPunches([IN_0902], [{ type: "break_start", punch_at: at("00:10") }])).toBe(false);
+  });
+
+  it("輪詢拿到非空且不同的狀態（主管剛核准補上班卡）→ 套用", () => {
+    expect(shouldApplyPolledPunches([], [IN_0902])).toBe(true);
+    expect(shouldApplyPolledPunches([IN_0902], [IN_0902, OUT_1805])).toBe(true);
+  });
+
+  it("輪詢拿到非空且相同 → 套用（沒有差別，照常對齊）", () => {
+    expect(shouldApplyPolledPunches([IN_0902], [IN_0902])).toBe(true);
+  });
+
+  it("空紀錄＋畫面沒在上班（尚未打卡／已下班）→ 照常套用", () => {
+    expect(shouldApplyPolledPunches([], [])).toBe(true);
+    expect(shouldApplyPolledPunches([IN_0902, OUT_1805], [])).toBe(true);
   });
 });
 

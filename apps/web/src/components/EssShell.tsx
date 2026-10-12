@@ -5,12 +5,15 @@
  *
  * - 手機（<lg）：頂部列（返回鍵／頁標題／登入者姓名／後台 pill）＋固定底部分頁列
  *   「打卡・請假・（簽核）・通知・更多」，內容區 `.pb-tabbar` 預留底列高度。
+ *   頁標題預設照路由表；頁面可用 `useEssPageTitle`（components/ess-page-title.tsx）依頁內狀態覆寫，
+ *   例如 /ess/requests 依申請種類顯示「補卡申請」（2026-10-12）。
  * - 桌機（lg+）：頂部列左 appName、中同一組項目水平導覽、右「姓名」＋「後台」＋「登出」；無底列。
  * - 右上角：姓名（/me 回來才顯示，點了進「更多」的帳號卡）一律顯示；「後台」只給
  *   isAdmin（hr_admin／platform_admin／accountant，lib/roles.ts）的帳號，一般員工看不到。
  * - 頁面 gate：依 routeForPath(pathname).key 對 /me 的 essTabs 判斷，一律 optimistic
  *   （/me 未回先渲染），確定不允許才換成「此帳號未開放此功能」。home／更多／公告不 gate。
- * - 徽章：簽核＝待簽筆數（紅色，99+）、通知＝未讀數（API 沒回就不顯示）。
+ * - 徽章：簽核＝待簽申請單＋（老闆）待決定的遲到說明（lib/ess-badges.ts；紅色，99+；後台 AdminShell 仍只算
+ *   申請單）、通知＝未讀數（API 沒回就不顯示）。
  * - ToastProvider 放在這裡，頁面用 useToast()。
  * - 所有共用資料走 useEssState()（模組層快取），換頁不重打 /me／branding。
  */
@@ -18,6 +21,8 @@ import { useCallback, useState, type CSSProperties, type ReactNode } from "react
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
+import { approvalsBadgeCount } from "@/lib/ess-badges";
+import { resolveEssHeaderTitle, type EssTitleOverride } from "@/lib/ess-page-title";
 import { resetEssState, useEssState } from "@/lib/ess-state";
 import {
   ALWAYS_VISIBLE_TAB_KEYS,
@@ -29,6 +34,7 @@ import {
   type BottomTabKey,
 } from "@/lib/ess-tabs";
 import { Button, Icon, ToastProvider, type IconName } from "@/components/ess-ui";
+import { EssPageTitleContext } from "@/components/ess-page-title";
 
 const DEFAULT_APP_NAME = "亞斯特設計顧問 數位化系統";
 
@@ -91,6 +97,8 @@ export function EssShell({ children }: { children: ReactNode }) {
   const router = useRouter();
   const state = useEssState();
   const [loggingOut, setLoggingOut] = useState(false);
+  // 頁面覆寫的頂部列標題（useEssPageTitle 設定；綁 pathname，見 lib/ess-page-title.ts）。
+  const [titleOverride, setTitleOverride] = useState<EssTitleOverride | null>(null);
 
   const route = routeForPath(pathname);
   const tabs = bottomTabs({
@@ -113,8 +121,12 @@ export function EssShell({ children }: { children: ReactNode }) {
 
   const appName = state.branding?.appName ?? DEFAULT_APP_NAME;
   const userName = state.me?.name?.trim() ?? "";
-  const title = route.title || appName;
-  const isHomeTitle = !route.title;
+  const { title, isAppName: isHomeTitle } = resolveEssHeaderTitle({
+    pathname,
+    override: titleOverride,
+    routeTitle: route.title,
+    appName,
+  });
   const showBack = !isBottomRootPath(pathname);
   const brandStyle = state.branding?.primaryColor
     ? ({ ["--brand" as string]: state.branding.primaryColor } as CSSProperties)
@@ -126,7 +138,7 @@ export function EssShell({ children }: { children: ReactNode }) {
   }, [router]);
 
   const badgeFor = (key: BottomTabKey, inline = false) => {
-    if (key === "approvals") return <Badge count={state.pendingApprovals} label="張待簽核" inline={inline} />;
+    if (key === "approvals") return <Badge count={approvalsBadgeCount(state)} label="件待簽核" inline={inline} />;
     if (key === "notifications") return <Badge count={state.unreadNotifications} label="則未讀通知" inline={inline} />;
     return null;
   };
@@ -231,11 +243,13 @@ export function EssShell({ children }: { children: ReactNode }) {
           </div>
         </header>
 
-        <main
-          className={`pb-tabbar mx-auto w-full px-3 pt-4 sm:px-4 ${route.wide ? "max-w-6xl" : "max-w-3xl"}`}
-        >
-          {gated ? <GatePanel /> : children}
-        </main>
+        <EssPageTitleContext.Provider value={setTitleOverride}>
+          <main
+            className={`pb-tabbar mx-auto w-full px-3 pt-4 sm:px-4 ${route.wide ? "max-w-6xl" : "max-w-3xl"}`}
+          >
+            {gated ? <GatePanel /> : children}
+          </main>
+        </EssPageTitleContext.Provider>
 
         {/* 手機底部分頁列 */}
         <nav

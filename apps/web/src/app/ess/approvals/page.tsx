@@ -66,7 +66,7 @@ type RequestAttachment = { id: string; fileName: string; sizeBytes: number; cont
  *   放款單   GET /disbursements/pending-approvals（獨立表 disbursement_approval_steps，
  *            見計畫 §3.0 B；沒有簽核表或沒輪到我就是空陣列，該段不顯示）
  * 一屏一張卡：核准一步（意見選填、預設收起）、駁回開底部面板填理由（必填）。做完決定
- * Toast 回饋 ＋ `invalidateEssState()` 讓底列徽章立刻減 1（徽章目前只算申請單）。
+ * Toast 回饋 ＋ `invalidateEssState()` 讓底列徽章立刻減 1（員工端徽章＝待簽申請單＋老闆還能決定的遲到說明，見 lib/ess-badges.ts；放款單不算）。
  * 頁框（頂部列／底列／gate）由 ess/layout.tsx 提供，這裡只負責內容。
  *
  * M1：加班單超過月上限時卡片上多一顆「超過月上限」pill（超額時數另行給付）。

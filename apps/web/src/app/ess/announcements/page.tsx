@@ -11,9 +11,10 @@ import { getAnnouncementYears, listAnnouncementsBy } from "@/lib/people-extras-a
  * 列表：標題、日期、需簽收 Pill、內文預設收合 3 行、點一下展開。
  *
  * M10 年度分區：公告放久了是一長串平鋪清單，這裡用年份切換（租戶時區歸年）；
- * 預設「全部」維持原本的行為，切到某一年只打該年的資料。
+ * 預設「全部」維持原本的行為，切到某一年只打該年的資料（切換即重抓；快速連切時以最後一次為準，
+ * 晚到的舊回應丟掉）。
  *
- * 被動查閱紀錄（從舊首頁搬來）：mount 時只對**需簽收且尚未查閱**的現行版呼叫
+ * 被動查閱紀錄（從舊首頁搬來）：每次載入（進頁、切年份）只對**需簽收且尚未查閱**的現行版呼叫
  * `recordAnnouncementView`——伺服器只保留第一次，所以已查閱（viewed_at 有值）的不重打；
  * 舊 API 沒有 viewed_at（undefined）時視為未查閱照打。這是 log 不是「勾選同意」，失敗不影響畫面。
  */
@@ -62,13 +63,18 @@ export default function AnnouncementsPage() {
   const [years, setYears] = useState<number[]>([]);
   const [year, setYear] = useState<string>(ALL);
   const [error, setError] = useState<string | null>(null);
-  const activeRef = useRef(true);
+  // 載入序號：每次載入 +1，回應回來時不是最新那次就丟掉——快速切年份時，晚到的舊年份回應不會蓋掉新結果；
+  // 卸載時也 +1，在途回應一律作廢。
+  const seqRef = useRef(0);
 
+  // 依年份重抓（2026-10-12 修：以前 useCallback 依賴是 []，永遠用第一次的「全部」，切年份沒作用）。
   const load = useCallback(async () => {
+    const seq = ++seqRef.current;
     setError(null);
+    setList(null); // 換年份先回骨架，不讓上一個年份的清單掛在新年份底下
     try {
       const res = await listAnnouncementsBy(year === ALL ? {} : { year: Number(year) });
-      if (!activeRef.current) return;
+      if (seq !== seqRef.current) return;
       setList(res.announcements);
       for (const a of res.announcements) {
         if (a.requires_signature && a.current_version_id && isUnviewed(a)) {
@@ -76,19 +82,22 @@ export default function AnnouncementsPage() {
         }
       }
     } catch (err) {
-      if (!activeRef.current) return;
-      setList((prev) => prev ?? []);
+      if (seq !== seqRef.current) return;
+      setList([]);
       setError(err instanceof Error && err.message ? err.message : "載入公告失敗");
     }
-  }, []);
+  }, [year]);
 
   useEffect(() => {
-    activeRef.current = true;
     void load();
-    return () => {
-      activeRef.current = false;
-    };
   }, [load]);
+
+  useEffect(
+    () => () => {
+      seqRef.current += 1;
+    },
+    [],
+  );
 
   useEffect(() => {
     getAnnouncementYears()

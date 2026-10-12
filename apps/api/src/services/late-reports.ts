@@ -12,7 +12,7 @@ import { addDaysKey, monthRangeKeys, type DateKey } from "../lib/tz.js"
 import { isHrRole, managedDeptIds, managerOfEmployee, type SelfEmployee } from "../middleware/scope.js"
 import { enqueue } from "./notify.js"
 import { writeAuditLog } from "./audit.js"
-import { assertPeriodOpen } from "./period-lock.js"
+import { PERIOD_RE, assertPeriodOpen, findClosedPeriods } from "./period-lock.js"
 
 /**
  * 遲到說明（late_reports，2026-10-11 業主拍板）。
@@ -45,6 +45,12 @@ export interface LateReportRow {
   updated_at: string
 }
 
+/**
+ * 這筆遲到說明為什麼不能再決定（2026-10-12）：period_closed＝那天所在的月份已結算；
+ * sheet_frozen＝該員那個月的出勤月表已核准／鎖定。判斷與 decideLateReport 擋下的兩種情況一致。
+ */
+export type LateReportLockedReason = "period_closed" | "sheet_frozen"
+
 /** 回給前端的形狀（camelCase＋姓名）。 */
 export interface LateReportView {
   id: string
@@ -59,6 +65,11 @@ export interface LateReportView {
   decidedByName: string | null
   decidedAt: string | null
   decisionNote: string | null
+  /**
+   * 不能再決定的原因；null＝還能決定（或查不到鎖定狀態）。只有列表（listLateReports）帶這個欄位；
+   * 決定的回應（decideLateReport）不帶——決定得成功就代表沒鎖。
+   */
+  lockedReason?: LateReportLockedReason | null
 }
 
 const COLS =
@@ -245,7 +256,90 @@ export function toLateReportView(row: LateReportRow, names: Map<string, string>)
 
 export type LateDecisionFilter = "undecided" | "affects" | "exempt" | "all"
 
-/** 列表：period（YYYY-MM）／員工／決定狀態篩選；employeeIds 有給就限縮在這些人。日期新到舊。 */
+/** attendance_sheets 的查表鍵（員工＋月份 'YYYY-MM'）；lateReportLockedReason 的 sheetStatuses 用它當鍵。 */
+export function sheetLockKey(employeeId: string, period: string): string {
+  return `${employeeId}|${period}`
+}
+
+/**
+ * 這筆遲到說明現在還能不能由老闆決定（純函式）——判斷順序與 decideLateReport 一致：
+ *   1. 那天所在的月份已結算（period_closes status='closed'）→ "period_closed"
+ *   2. 否則該員該月的出勤月表已核准／鎖定（attendance_sheets status approved／locked）→ "sheet_frozen"
+ *   3. 其他 → null（可以決定）
+ * `closedPeriods`（'YYYY-MM'）與 `sheetStatuses`（鍵＝sheetLockKey）是呼叫端批次查好的集合。
+ */
+export function lateReportLockedReason(
+  row: Pick<LateReportRow, "employee_id" | "work_date">,
+  closedPeriods: ReadonlySet<string>,
+  sheetStatuses: ReadonlyMap<string, string>,
+): LateReportLockedReason | null {
+  const period = row.work_date.slice(0, 7)
+  if (closedPeriods.has(period)) return "period_closed"
+  const status = sheetStatuses.get(sheetLockKey(row.employee_id, period))
+  return status === "approved" || status === "locked" ? "sheet_frozen" : null
+}
+
+export interface LateReportLocks {
+  closedPeriods: Set<string>
+  sheetStatuses: Map<string, string>
+}
+
+/**
+ * 列表用：批次查這些遲到說明所在月份的鎖定狀態——period_closes 一句（findClosedPeriods）、
+ * attendance_sheets 一句（只查還沒結算的月份；已結算的 period_closed 優先，不必再看月表），不逐列查。
+ * 查失敗或表不存在 → 當作沒鎖並記 warn，列表照常回（真正擋寫入的是 decideLateReport 本身）。
+ */
+export async function loadLateReportLocks(tenantId: string, rows: readonly LateReportRow[]): Promise<LateReportLocks> {
+  const locks: LateReportLocks = { closedPeriods: new Set(), sheetStatuses: new Map() }
+  const periods = [...new Set(rows.map((r) => r.work_date.slice(0, 7)))].filter((p) => PERIOD_RE.test(p)).sort()
+  if (periods.length === 0) return locks
+  try {
+    for (const p of await findClosedPeriods(tenantId, { months: periods })) locks.closedPeriods.add(p)
+  } catch (err) {
+    logger.warn(
+      { tenantId, error: err instanceof Error ? err.message : String(err) },
+      "late-reports: period_closes lookup failed — list lockedReason treated as not locked",
+    )
+  }
+  const openPeriods = periods.filter((p) => !locks.closedPeriods.has(p))
+  const employeeIds = [
+    ...new Set(rows.filter((r) => openPeriods.includes(r.work_date.slice(0, 7))).map((r) => r.employee_id)),
+  ]
+  if (openPeriods.length === 0 || employeeIds.length === 0) return locks
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("attendance_sheets")
+      .select("employee_id, period, status")
+      .eq("tenant_id", tenantId)
+      .in("period", openPeriods)
+      .in("employee_id", employeeIds)
+      .in("status", ["approved", "locked"])
+    if (error) {
+      if (isMissingTableError(error)) warnSchemaGapOnce("attendance_sheets", error)
+      else
+        logger.warn(
+          { tenantId, error: error.message },
+          "late-reports: attendance_sheets lookup failed — list lockedReason treated as not locked",
+        )
+      return locks
+    }
+    for (const sheet of (data ?? []) as Array<{ employee_id: string; period: string; status: string }>) {
+      locks.sheetStatuses.set(sheetLockKey(sheet.employee_id, sheet.period), sheet.status)
+    }
+  } catch (err) {
+    logger.warn(
+      { tenantId, error: err instanceof Error ? err.message : String(err) },
+      "late-reports: attendance_sheets lookup failed — list lockedReason treated as not locked",
+    )
+  }
+  return locks
+}
+
+/**
+ * 列表：period（YYYY-MM）／員工／決定狀態篩選；employeeIds 有給就限縮在這些人。日期新到舊。
+ * 每列多帶 lockedReason（2026-10-12）：已結算或月表已核准／鎖定的月份不能再決定，員工端簽核頁不給按鈕、
+ * 老闆的簽核紅點也不算它們（不然這些永遠未決定的會讓紅點卡住）。
+ */
 export async function listLateReports(
   tenantId: string,
   filter: { period?: string; employeeId?: string; decision?: LateDecisionFilter; employeeIds?: string[] },
@@ -269,11 +363,17 @@ export async function listLateReports(
     throw new Error(`late-reports (list): ${error.message}`)
   }
   const rows = (data ?? []) as unknown as LateReportRow[]
-  const names = await employeeNames(
-    tenantId,
-    rows.flatMap((r) => [r.employee_id, r.decided_by_emp_id ?? ""]),
-  )
-  return rows.map((r) => toLateReportView(r, names))
+  const [names, locks] = await Promise.all([
+    employeeNames(
+      tenantId,
+      rows.flatMap((r) => [r.employee_id, r.decided_by_emp_id ?? ""]),
+    ),
+    loadLateReportLocks(tenantId, rows),
+  ])
+  return rows.map((r) => ({
+    ...toLateReportView(r, names),
+    lockedReason: lateReportLockedReason(r, locks.closedPeriods, locks.sheetStatuses),
+  }))
 }
 
 export class LateReportNotFoundError extends Error {

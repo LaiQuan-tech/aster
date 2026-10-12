@@ -11,6 +11,7 @@
  *   attendance_sheet  `{ sheetId, period, … }`
  *   anomaly           `{ anomalyType, from, to, detail }`
  *   late_report       `{ lateReportId, employeeId, workDate, lateMinutes }`（2026-10-11 遲到說明，給主管與老闆）
+ *   announcement      不看 payload 內容（正式 API 目前沒有產生點，只有 demo 種子；payload 也沒有公告 id）
  * 未讀 ＝ `payload.read !== true`（標記已讀是把 `read: true` 併進 payload）。
  */
 import type { LeaveSegment, NotificationItem } from "./ess-api";
@@ -61,6 +62,7 @@ function str(value: unknown): string | null {
  *   attendance_sheet            → `/ess/attendance-sheet/<sheetId>`（缺 sheetId → null）
  *   anomaly                     → `/ess/punches?from=<from>&to=<to>`
  *   late_report                 → `/ess/approvals`（簽核頁的「遲到說明」段；老闆在那裡決定）
+ *   announcement                → `/ess/announcements`（公告頁；payload 沒有公告 id，只導到列表）
  *   其他類型／缺 payload         → null
  */
 export function notificationLink(n: NotificationLike): string | null {
@@ -98,6 +100,8 @@ export function notificationLink(n: NotificationLike): string | null {
     }
     case "late_report":
       return "/ess/approvals";
+    case "announcement":
+      return "/ess/announcements";
     default:
       return null;
   }

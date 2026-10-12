@@ -6,9 +6,12 @@
  * 動機：舊版每個 ESS 頁面各自打 /me＋branding＋pending-approvals（換一頁約 3 次 /me）。
  * 現在只有 EssShell（layout）與少數頁面呼叫 `useEssState()`，資料放在模組層：
  *   - `me`／`branding`：直到 `resetEssState()`（登出）前只抓一次。
- *   - 計數（pendingApprovals／unreadNotifications）：TTL 30 秒；分頁回到前景
- *     （visibilitychange）時過期就重抓；簽核／標記已讀後呼叫 `invalidateEssState()`
+ *   - 計數（pendingApprovals／unreadNotifications／pendingLateReports）：TTL 30 秒；分頁回到前景
+ *     （visibilitychange）時過期就重抓；簽核／決定遲到說明／標記已讀後呼叫 `invalidateEssState()`
  *     立刻重抓，徽章在同一頁就會更新。
+ *   - `pendingLateReports`（2026-10-12）：老闆待決定的遲到說明筆數，員工端「簽核」紅點＝它＋pendingApprovals
+ *     （lib/ess-badges.ts）。要先知道是不是老闆（/me＋branding 回來）才抓，所以是同一輪 load 的第二段；
+ *     不是老闆不抓、恆為 0；抓失敗當 0，不影響其他欄位。pendingApprovals 的語意不變（後台也在用）。
  *   - `getMeCached()`／`getBrandingCached()` 給頁面直接拿資料用，in-flight 去重
  *     （同時多個呼叫只打一次）。整頁載入時 AuthGate（/me）與根 layout 的 TenantBranding
  *     （branding）也走這兩個——它們最先發出請求，後面的 AdminGate／AdminShell／EssShell 都直接
@@ -34,6 +37,8 @@ import {
   type BrandingResponse,
   type Me,
 } from "@/lib/ess-api";
+import { countPendingLateReports } from "@/lib/ess-badges";
+import { getLateReports } from "@/lib/late-reports-api";
 import { isApprovalBoss } from "@/lib/payroll-periods-api";
 
 export interface EssState {
@@ -53,6 +58,11 @@ export interface EssState {
   features: Record<string, unknown> | null;
   pendingApprovals: number;
   unreadNotifications: number;
+  /**
+   * 待我決定的遲到說明（老闆才有；GET /late-reports?decision=undecided，全公司、不分月份，canDecide 才算、
+   * 排除自己，規則同簽核頁）。不是老闆或抓失敗＝0。只給員工端「簽核」紅點用，後台徽章不看它。
+   */
+  pendingLateReports: number;
 }
 
 const INITIAL_STATE: EssState = {
@@ -66,6 +76,7 @@ const INITIAL_STATE: EssState = {
   features: null,
   pendingApprovals: 0,
   unreadNotifications: 0,
+  pendingLateReports: 0,
 };
 
 const COUNTS_TTL_MS = 30_000;
@@ -153,8 +164,19 @@ function countsStale(): boolean {
 }
 
 /**
- * 載入一輪：me＋branding（有快取就直接命中）＋兩個計數。任何一支失敗都退化，
- * 不 reject。同時多次呼叫只跑一次；`force`（invalidate）在進行中會排一輪補抓。
+ * 待我決定的遲到說明筆數（老闆才呼叫）。失敗一律 0，不 reject。
+ */
+async function fetchPendingLateReports(meId: string | null | undefined): Promise<number> {
+  try {
+    return countPendingLateReports(await getLateReports({ decision: "undecided" }), meId);
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 載入一輪：me＋branding（有快取就直接命中）＋兩個計數；是老闆再抓第二段（待決定的遲到說明）。
+ * 任何一支失敗都退化，不 reject。同時多次呼叫只跑一次；`force`（invalidate）在進行中會排一輪補抓。
  */
 function load(force = false): Promise<void> {
   if (loadInflight) {
@@ -172,20 +194,28 @@ function load(force = false): Promise<void> {
     if (gen !== generation) return; // 已登出：丟棄
     const me = meRes.status === "fulfilled" ? meRes.value : null;
     const brand = brandRes.status === "fulfilled" ? brandRes.value : null;
+    const isBoss = isApprovalBoss(brand?.features ?? null, me?.id);
     countsAt = Date.now();
     setSnapshot({
       loaded: true,
       me,
       isAdmin: isAdminRole(me?.role),
       isManager: me?.isManager === true,
-      isBoss: isApprovalBoss(brand?.features ?? null, me?.id),
+      isBoss,
       essTabs: me && Array.isArray(me.essTabs) ? me.essTabs : null,
       branding: brand?.branding ?? null,
       features: brand?.features ?? null,
       pendingApprovals: pendingRes.status === "fulfilled" ? pendingRes.value.requests.length : 0,
       unreadNotifications:
         unreadRes.status === "fulfilled" && typeof unreadRes.value?.count === "number" ? unreadRes.value.count : 0,
+      // 不是老闆 → 0；是老闆先留著上一輪的數字（第二段回來再換），紅點不會每輪閃一下歸零。
+      ...(isBoss ? {} : { pendingLateReports: 0 }),
     });
+    if (!isBoss) return;
+    // 第二段：是老闆才抓待決定的遲到說明（要等 /me＋branding 才知道是不是老闆）。
+    const pendingLateReports = await fetchPendingLateReports(me?.id);
+    if (gen !== generation) return; // 已登出：丟棄
+    setSnapshot({ pendingLateReports });
   })().finally(() => {
     if (gen !== generation) return;
     loadInflight = null;
@@ -203,7 +233,7 @@ function ensureFresh() {
 }
 
 /**
- * 簽核做完決定、標記通知已讀、送出申請後呼叫：清掉計數與 me 快取並立刻重抓，
+ * 簽核做完決定、老闆決定遲到說明、標記通知已讀、送出申請後呼叫：清掉計數與 me 快取並立刻重抓，
  * 徽章在同一頁就會更新。branding 不動。沒有任何訂閱者時只清快取，不重抓。
  */
 export function invalidateEssState() {
@@ -227,10 +257,13 @@ export function invalidateBranding() {
     .then((res) => {
       if (gen !== generation) return; // 已登出：丟棄
       // isBoss 是由 features 與 me 算出來的衍生值：老闆設定剛被改（交棒）時要一併重算，不然簽核分頁要等下一輪 load 才跟上。
+      const isBoss = isApprovalBoss(res.features ?? null, snapshot.me?.id);
       setSnapshot({
         branding: res.branding ?? null,
         features: res.features ?? null,
-        isBoss: isApprovalBoss(res.features ?? null, snapshot.me?.id),
+        isBoss,
+        // 不再是老闆：待決定的遲到說明不算進紅點（新接任的老闆等下一輪 load 的第二段再抓）。
+        ...(isBoss ? {} : { pendingLateReports: 0 }),
       });
     })
     .catch(() => {

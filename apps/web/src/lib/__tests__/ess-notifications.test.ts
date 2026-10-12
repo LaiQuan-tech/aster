@@ -79,10 +79,18 @@ describe("notificationLink", () => {
     expect(notificationLink(notif("anomaly", { anomalyType: "late" }))).toBe("/ess/punches");
   });
 
+  it("announcement → /ess/announcements（不看 payload 內容；2026-10-12 前回 null，點了只展開內文）", () => {
+    expect(notificationLink(notif("announcement", { id: "a1" }))).toBe("/ess/announcements");
+    // demo 種子的 payload 形狀（沒有公告 id）
+    expect(notificationLink(notif("announcement", { demo: true, channels: ["email"] }))).toBe("/ess/announcements");
+    expect(notificationLink(notif("announcement", { read: true }))).toBe("/ess/announcements");
+    expect(typeLabel("announcement")).toBe("公告");
+  });
+
   it("缺 payload／未知 type → null", () => {
     expect(notificationLink(notif("approval", null))).toBeNull();
     expect(notificationLink(notif("missing_punch", null))).toBeNull();
-    expect(notificationLink(notif("announcement", { id: "a1" }))).toBeNull();
+    expect(notificationLink(notif("announcement", null))).toBeNull();
     expect(notificationLink(notif("report", { period: "2026-08" }))).toBeNull();
   });
 

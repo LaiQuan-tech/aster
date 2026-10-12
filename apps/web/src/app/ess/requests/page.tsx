@@ -15,6 +15,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Card, Skeleton } from "@/components/ess-ui";
+import { useEssPageTitle } from "@/components/ess-page-title";
 import {
   createRequest,
   getExpenseSettingsForMe,
@@ -78,6 +79,8 @@ function RequestsView() {
   useEffect(() => {
     if (isRequestKind(urlKind)) setKind(urlKind);
   }, [urlKind]);
+  // 手機頂部標題跟著種類走（補卡申請、加班申請…；同下方卡片標題），離開本頁自動還原路由表的標題。
+  useEssPageTitle(`${KIND_LABEL[kind]}申請`);
 
   // 參考資料（best-effort：任何一支失敗都退化，不擋表單）
   const [leaveTypes, setLeaveTypes] = useState<LeaveType[] | null>(null);

@@ -3,8 +3,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Card, InlineError, Pill, SectionTitle, useToast } from "@/components/ess-ui";
 import { fmtDateWithWeekday, fmtHm } from "@/lib/ess-format";
-import { useEssState } from "@/lib/ess-state";
-import { decideLateReport, getLateReports, lateDecisionErrorMessage, type LateReport } from "@/lib/late-reports-api";
+import { invalidateEssState, useEssState } from "@/lib/ess-state";
+import {
+  decideLateReport,
+  getLateReports,
+  lateDecisionErrorMessage,
+  type LateLockedReason,
+  type LateReport,
+} from "@/lib/late-reports-api";
 import { lateDecisionLabel, lateDecisionTone, lateReportHeadline, periodOf, sortLateReports } from "@/lib/late-reason";
 
 /**
@@ -12,8 +18,17 @@ import { lateDecisionLabel, lateDecisionTone, lateReportHeadline, periodOf, sort
  *   • 主管：看自己部門的人本月的遲到說明（唯讀）。
  *   • 老闆（features.approval.fallbackApproverEmpId）：看全公司，本月的＋以前還沒決定的，
  *     每張卡直接按「影響全勤」／「不影響全勤」（可改決定）。
+ *   • 已經不能決定的（API 列表的 lockedReason：那個月已結算，或該員月表已核准／鎖定；2026-10-12）
+ *     不給按鈕，改一行灰字說明——跟老闆的簽核紅點（lib/ess-badges.ts，不算這些）一致。
  * 自己的遲到說明不列在這裡；一筆都沒有就整段不顯示。沒決定視為影響全勤。
  */
+
+/** 不能再決定的原因 → 卡片上取代按鈕的灰字（對應 API decideLateReport 擋下的兩種情況）。 */
+const LOCKED_NOTE: Record<LateLockedReason, string> = {
+  sheet_frozen: "月表已核准或鎖定，不能再改，請洽 HR",
+  period_closed: "這個月已結算，不能再改",
+};
+
 export function LateReportsSection() {
   const toast = useToast();
   const { me } = useEssState();
@@ -59,8 +74,11 @@ export function LateReportsSection() {
     setBusyId(report.id);
     try {
       const res = await decideLateReport(report.id, decision);
-      setReports((prev) => prev.map((r) => (r.id === report.id ? res.lateReport : r)));
+      // 決定的回應不帶 lockedReason（只有列表有）：合併進原本那列，列表帶來的欄位不會被洗掉。
+      setReports((prev) => prev.map((r) => (r.id === report.id ? { ...r, ...res.lateReport } : r)));
       toast.show(`${report.employeeName}：${decision === "exempt" ? "不影響全勤" : "影響全勤"}`, "success");
+      // 老闆的簽核紅點含待決定的遲到說明（lib/ess-badges.ts）：決定完立刻重抓，紅點同頁就減少。
+      invalidateEssState();
     } catch (err) {
       toast.show(lateDecisionErrorMessage(err), "error");
     } finally {
@@ -107,7 +125,10 @@ export function LateReportsSection() {
                   {report.reason}
                 </p>
                 {report.decisionNote && <p className="mt-1 text-xs text-gray-500">老闆備註：{report.decisionNote}</p>}
-                {canDecide && (
+                {canDecide && report.lockedReason && (
+                  <p className="mt-3 text-sm text-gray-500">{LOCKED_NOTE[report.lockedReason] ?? "不能再改"}</p>
+                )}
+                {canDecide && !report.lockedReason && (
                   <div className="mt-3 grid grid-cols-2 gap-2">
                     <Button
                       variant={report.decision === "affects" ? "primary" : "secondary"}
