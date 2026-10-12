@@ -1,22 +1,28 @@
 import { describe, it, expect } from "vitest";
-import type { CreateRequestBody, LeaveRequest } from "../ess-api";
+import type { CreateRequestBody, LeaveRequest, RequestStepRow } from "../ess-api";
 import {
   KIND_LABEL,
   KIND_ORDER,
   KIND_SHORT,
   REQUEST_ERROR_MESSAGES,
+  allDayPeriodText,
+  approvalComments,
   approvalLine,
+  approvalPeriodText,
+  approvalWhenText,
   balanceBucketFor,
   buildCreateBody,
   describeBody,
   describeLeaveDay,
   describeRequest,
+  isAllDayRequest,
   isBuildError,
   isRequestKind,
   needsAttachment,
   overtimeHours,
   remainingHours,
   requestErrorCode,
+  requestErrorText,
   requestTitle,
   type FixPunchFormValues,
   type LeaveFormValues,
@@ -650,5 +656,353 @@ describe("請假精細到小時：body 與顯示", () => {
     expect(at(body.startAt)).toBe(local("2026-10-16T14:00:00"));
     expect(at(body.endAt)).toBe(local("2026-10-19T12:00:00"));
     expect(describeBody(body, { shift: DAY_SHIFT })).toBe("10/16 14:00 – 10/19 12:00 · 7 時");
+  });
+});
+
+/* ----------------------------------------------------------------------
+ * 2026-10-12 教育訓練驗收：
+ *   • 整天型申請（出差、在家工作）web 表單存成「起日 00:00～迄日 23:59」→ 簽核卡與我的申請只顯示日期，不印時刻；公出保留時刻。
+ *   • 兩關以上的單，第一關主管加註的意見申請人看不到 → 我的申請要列出各關簽核意見。
+ * ---------------------------------------------------------------------- */
+
+// 台北 09/18 00:00 ～ 23:59（瀏覽器時區的整天）
+const DAY_START = "2026-09-17T16:00:00Z";
+const DAY_END = "2026-09-18T15:59:00Z";
+
+/** 一張出差單（預設：整天、單日、跨縣市）。 */
+function tripRow(over: Partial<LeaveRequest> = {}): LeaveRequest {
+  return row({
+    kind: "business_trip",
+    hours: null,
+    start_at: DAY_START,
+    end_at: DAY_END,
+    trip_type: "business_trip",
+    trip_scope: "domestic_intercity",
+    location: "台中",
+    ...over,
+  });
+}
+
+/** 一張公出單（有起訖時刻）。 */
+function outingRow(over: Partial<LeaveRequest> = {}): LeaveRequest {
+  return tripRow({
+    trip_type: "outing",
+    trip_scope: "local",
+    location: "台北",
+    hours: 3,
+    start_at: "2026-09-18T01:00:00Z", // 台北 09:00
+    end_at: "2026-09-18T04:00:00Z", // 台北 12:00
+    ...over,
+  });
+}
+
+describe("isAllDayRequest / allDayPeriodText（整天型＝出差與在家工作，看 kind／trip_type）", () => {
+  it("isAllDayRequest：出差、在家工作 → true；公出、舊列 trip_type 缺席、其他種類 → false", () => {
+    expect(isAllDayRequest(tripRow())).toBe(true);
+    expect(isAllDayRequest(row({ kind: "wfh" }))).toBe(true);
+    expect(isAllDayRequest(outingRow())).toBe(false);
+    expect(isAllDayRequest(tripRow({ trip_type: null }))).toBe(false);
+    expect(isAllDayRequest(tripRow({ trip_type: undefined }))).toBe(false);
+    for (const kind of ["leave", "ot", "fix_punch", "petty_cash"] as const) {
+      // 就算資料裡誤帶 trip_type，非出差／在家工作的種類也不算整天型
+      expect(isAllDayRequest(row({ kind, trip_type: "business_trip" }))).toBe(false);
+    }
+  });
+
+  it("allDayPeriodText：出差單日「09/18（五）」、多日「09/18（五）～ 09/19（六）」、跨年「12/31（四）～ 01/02（六）」", () => {
+    expect(allDayPeriodText(tripRow(), TZ)).toBe("09/18（五）");
+    expect(allDayPeriodText(tripRow({ end_at: "2026-09-19T15:59:00Z" }), TZ)).toBe("09/18（五）～ 09/19（六）");
+    expect(allDayPeriodText(tripRow({ start_at: "2026-12-30T16:00:00Z", end_at: "2027-01-02T15:59:00Z" }), TZ)).toBe(
+      "12/31（四）～ 01/02（六）",
+    );
+  });
+
+  it("allDayPeriodText：在家工作與我的申請同一份文案（單日「09/18（五）全天」、跨日「09/18–09/19」）", () => {
+    const one = row({ kind: "wfh", hours: null, start_at: DAY_START, end_at: DAY_END });
+    expect(allDayPeriodText(one, TZ)).toBe("09/18（五）全天");
+    const span = row({ kind: "wfh", hours: null, start_at: DAY_START, end_at: "2026-09-19T15:59:00Z" });
+    expect(allDayPeriodText(span, TZ)).toBe("09/18–09/19");
+    // 沒有時數時，兩邊的期間文字逐字相同（describeRequest 的 wfh 分支沒有別的東西）
+    expect(allDayPeriodText(one, TZ)).toBe(describeRequest(one, { tz: TZ }));
+    expect(allDayPeriodText(span, TZ)).toBe(describeRequest(span, { tz: TZ }));
+  });
+
+  it("allDayPeriodText：公出、舊列 trip_type 缺席、其他種類 → null（呼叫端走原本的起訖時刻）；日期無效也是 null", () => {
+    expect(allDayPeriodText(outingRow(), TZ)).toBeNull();
+    expect(allDayPeriodText(tripRow({ trip_type: null }), TZ)).toBeNull();
+    expect(allDayPeriodText(row({ kind: "ot" }), TZ)).toBeNull();
+    expect(allDayPeriodText(row({ kind: "leave" }), TZ)).toBeNull();
+    expect(allDayPeriodText(tripRow({ start_at: "not-a-date" }), TZ)).toBeNull();
+    expect(allDayPeriodText(row({ kind: "wfh", start_at: "not-a-date" }), TZ)).toBeNull();
+  });
+});
+
+describe("整天出差只顯示日期：我的申請 describeRequest", () => {
+  it("單日出差「09/18（五） · 台中 · 出差（跨縣市）」，不再印 00:00–23:59", () => {
+    const text = describeRequest(tripRow(), { tz: TZ });
+    expect(text).toBe("09/18（五） · 台中 · 出差（跨縣市）");
+    expect(text).not.toMatch(/00:00|23:59/);
+  });
+
+  it("多日、跨年的出差維持「起–迄」日期（本來就沒有時刻）", () => {
+    expect(describeRequest(tripRow({ end_at: "2026-09-19T15:59:00Z" }), { tz: TZ })).toBe("09/18–09/19 · 台中 · 出差（跨縣市）");
+    expect(describeRequest(tripRow({ start_at: "2026-12-30T16:00:00Z", end_at: "2027-01-02T15:59:00Z" }), { tz: TZ })).toBe(
+      "12/31–01/02 · 台中 · 出差（跨縣市）",
+    );
+  });
+
+  it("公出保留起訖時刻；就算剛好填 00:00–23:59 也不被誤當整天（判斷看 trip_type，不看時刻）", () => {
+    expect(describeRequest(outingRow(), { tz: TZ })).toBe("09/18（五）09:00–12:00 · 台北 · 公出");
+    expect(describeRequest(outingRow({ start_at: DAY_START, end_at: DAY_END }), { tz: TZ })).toBe(
+      "09/18（五）00:00–23:59 · 台北 · 公出",
+    );
+  });
+
+  it("舊列 trip_type 缺席的出差分辨不出整天 → 維持顯示時刻（不靠 00:00／23:59 猜）", () => {
+    expect(describeRequest(tripRow({ trip_type: null, trip_scope: null }), { tz: TZ })).toBe(
+      "09/18（五）00:00–23:59 · 台中 · 公出／出差",
+    );
+  });
+
+  it("在家工作維持原樣（單日「全天」、跨日只有日期）；表單送出後的成功畫面（describeBody）出差單日也只有日期", () => {
+    const wfh = row({ kind: "wfh", hours: null, start_at: DAY_START, end_at: DAY_END });
+    expect(describeRequest(wfh, { tz: TZ })).toBe("09/18（五）全天");
+    const body = ok(buildCreateBody("business_trip", { ...TRIP, startDate: "2026-09-18", endDate: "2026-09-18" }));
+    expect(describeBody(body)).toBe("09/18（五） · 台中 · 出差（跨縣市）");
+    const multi = ok(buildCreateBody("business_trip", TRIP)); // 09/18–09/19
+    expect(describeBody(multi)).toBe("09/18–09/19 · 台中 · 出差（跨縣市）");
+  });
+});
+
+describe("整天出差只顯示日期：主管簽核卡 approvalPeriodText", () => {
+  it("出差單日「09/18（五）」、多日「09/18（五）～ 09/19（六）」、跨年「12/31（四）～ 01/02（六）」，不印 00:00／23:59", () => {
+    expect(approvalPeriodText(tripRow(), { tz: TZ })).toBe("09/18（五）");
+    expect(approvalPeriodText(tripRow({ end_at: "2026-09-19T15:59:00Z" }), { tz: TZ })).toBe("09/18（五）～ 09/19（六）");
+    expect(
+      approvalPeriodText(tripRow({ start_at: "2026-12-30T16:00:00Z", end_at: "2027-01-02T15:59:00Z" }), { tz: TZ }),
+    ).toBe("12/31（四）～ 01/02（六）");
+    expect(approvalPeriodText(tripRow({ end_at: "2026-09-19T15:59:00Z" }), { tz: TZ })).not.toMatch(/00:00|23:59/);
+  });
+
+  it("出差若帶了時數（舊資料）仍接在日期後面", () => {
+    expect(approvalPeriodText(tripRow({ hours: 16 }), { tz: TZ })).toBe("09/18（五） · 16 小時");
+  });
+
+  it("在家工作只顯示日期，與我的申請同一份文案（含時數）", () => {
+    const one = row({ kind: "wfh", hours: 8, start_at: DAY_START, end_at: DAY_END });
+    expect(approvalPeriodText(one, { tz: TZ })).toBe("09/18（五）全天 · 8 小時");
+    expect(approvalPeriodText(one, { tz: TZ })).toBe(describeRequest(one, { tz: TZ }));
+    const span = row({ kind: "wfh", hours: 16, start_at: DAY_START, end_at: "2026-09-19T15:59:00Z" });
+    expect(approvalPeriodText(span, { tz: TZ })).toBe("09/18–09/19 · 16 小時");
+    expect(approvalPeriodText(span, { tz: TZ })).toBe(describeRequest(span, { tz: TZ }));
+    const noHours = row({ kind: "wfh", hours: null, start_at: DAY_START, end_at: "2026-09-19T15:59:00Z" });
+    expect(approvalPeriodText(noHours, { tz: TZ })).toBe("09/18–09/19");
+  });
+
+  it("公出保留起訖時刻；舊列 trip_type 缺席也照舊顯示時刻（就算剛好是 00:00–23:59）", () => {
+    expect(approvalPeriodText(outingRow(), { tz: TZ })).toBe("09/18 09:00 ～ 09/18 12:00 · 3 小時");
+    expect(approvalPeriodText(outingRow({ hours: null, start_at: DAY_START, end_at: DAY_END }), { tz: TZ })).toBe(
+      "09/18 00:00 ～ 09/18 23:59",
+    );
+    expect(approvalPeriodText(tripRow({ trip_type: null }), { tz: TZ })).toBe("09/18 00:00 ～ 09/18 23:59");
+  });
+
+  it("其他種類格式不變：加班「起 ～ 迄 · 小時」、補卡（起訖同一分鐘）只有起始、請假走分段摘要", () => {
+    const ot = row({ kind: "ot", start_at: "2026-09-18T10:00:00Z", end_at: "2026-09-18T12:00:00Z", hours: 2, payout: "comp_time" });
+    expect(approvalPeriodText(ot, { tz: TZ })).toBe("09/18 18:00 ～ 09/18 20:00 · 2 小時");
+    const fix = row({ kind: "fix_punch", hours: null, start_at: "2026-09-18T10:05:00Z", end_at: "2026-09-18T10:05:00Z" });
+    expect(approvalPeriodText(fix, { tz: TZ })).toBe("09/18 18:05");
+    const leave = row({ segments: [{ date: "2026-09-18", startTime: "09:00", endTime: "18:00", hours: 8 }] });
+    expect(approvalPeriodText(leave, { tz: TZ })).toBe("09/18 09:00–18:00 · 1 天");
+    // 結束時間缺席 → 只顯示起始，不印「～ —」
+    expect(approvalPeriodText(row({ kind: "ot", hours: null, end_at: "" }), { tz: TZ })).toBe("09/18 09:00");
+  });
+});
+
+/** 一關（GET /requests 列上的 steps[]，snake_case）；預設＝王小明（主管）核准、台北 10/12 14:05、沒填意見。 */
+function step(over: Partial<RequestStepRow> = {}): RequestStepRow {
+  return {
+    step_order: 1,
+    approver_emp_id: "emp-mgr",
+    approver_name: "王小明",
+    candidate_emp_ids: ["emp-mgr"],
+    candidate_names: ["王小明"],
+    kind: "manager",
+    decision: "approved",
+    comment: null,
+    acted_at: "2026-10-12T06:05:00Z",
+    ...over,
+  };
+}
+
+/** 第 2 關＝老闆（fallback），預設 10/12 15:30 核准。 */
+function bossStep(over: Partial<RequestStepRow> = {}): RequestStepRow {
+  return step({
+    step_order: 2,
+    approver_emp_id: "emp-boss",
+    approver_name: "陳老闆",
+    candidate_emp_ids: ["emp-boss"],
+    candidate_names: ["陳老闆"],
+    kind: "fallback",
+    acted_at: "2026-10-12T07:30:00Z",
+    ...over,
+  });
+}
+
+describe("approvalComments（我的申請的各關簽核意見）", () => {
+  it("兩關都有意見 → 依關卡順序各一行：「第 1 關・王小明 已核准 10/12 14:05：…」", () => {
+    const r = row({
+      status: "approved",
+      current_step: 2,
+      total_steps: 2,
+      steps: [step({ comment: "先放行，注意交接" }), bossStep({ comment: "同意" })],
+    });
+    expect(approvalComments(r, { tz: TZ })).toEqual([
+      "第 1 關・王小明 已核准 10/12 14:05：先放行，注意交接",
+      "第 2 關・陳老闆 已核准 10/12 15:30：同意",
+    ]);
+  });
+
+  it("只有第一關有意見、第二關還在待簽 → 第一關主管的意見看得到（驗收抓到的洞），簽核狀態行不變", () => {
+    const r = row({
+      status: "pending",
+      current_step: 2,
+      total_steps: 2,
+      current_approver_name: "陳老闆",
+      steps: [step({ comment: "預算已確認" }), bossStep({ decision: "pending", comment: null, acted_at: null })],
+    });
+    expect(approvalComments(r, { tz: TZ })).toEqual(["第 1 關・王小明 已核准 10/12 14:05：預算已確認"]);
+    expect(approvalLine(r, { tz: TZ })).toBe("等待 陳老闆 簽核（第 2／2 關）");
+  });
+
+  it("第二關駁回 → 駁回理由已在 approvalLine，不重複；第一關的意見照列", () => {
+    const r = row({
+      status: "rejected",
+      current_step: 2,
+      total_steps: 2,
+      decision_comment: "日期與專案衝突",
+      decided_at: "2026-10-12T07:30:00Z",
+      steps: [step({ comment: "我這關沒問題" }), bossStep({ decision: "rejected", comment: "日期與專案衝突" })],
+    });
+    expect(approvalLine(r, { tz: TZ })).toBe("駁回理由：日期與專案衝突");
+    expect(approvalComments(r, { tz: TZ })).toEqual(["第 1 關・王小明 已核准 10/12 14:05：我這關沒問題"]);
+  });
+
+  it("第一關就駁回（第二關從沒輪到）→ 沒有額外的行；單據不是已駁回卻有已駁回的關（資料異常）→ 照列「已駁回」", () => {
+    const first = row({
+      status: "rejected",
+      current_step: 1,
+      total_steps: 2,
+      decision_comment: "資料不齊",
+      steps: [step({ decision: "rejected", comment: "資料不齊" }), bossStep({ decision: "pending", acted_at: null })],
+    });
+    expect(approvalComments(first, { tz: TZ })).toEqual([]);
+    const odd = row({ status: "pending", steps: [step({ decision: "rejected", comment: "再補一份附件" })] });
+    expect(approvalComments(odd, { tz: TZ })).toEqual(["王小明 已駁回 10/12 14:05：再補一份附件"]);
+  });
+
+  it("待簽（還沒人簽）→ 沒有意見行；待簽的關就算帶了字串也不列", () => {
+    const r = row({
+      status: "pending",
+      steps: [
+        step({ decision: "pending", comment: null, acted_at: null }),
+        bossStep({ decision: "pending", comment: "不該出現", acted_at: null }),
+      ],
+    });
+    expect(approvalComments(r, { tz: TZ })).toEqual([]);
+  });
+
+  it("單關核准有意見 → 不寫「第 N 關」：「王小明 已核准 10/12 14:05：沒問題」", () => {
+    const r = row({ status: "approved", total_steps: 1, steps: [step({ comment: "沒問題" })] });
+    expect(approvalComments(r, { tz: TZ })).toEqual(["王小明 已核准 10/12 14:05：沒問題"]);
+  });
+
+  it("沒填意見（含只有空白）的核准關不列、不佔行；意見前後空白會修掉", () => {
+    const r = row({
+      status: "approved",
+      steps: [step({ comment: null }), bossStep({ comment: "  OK  " }), step({ step_order: 3, comment: "   " })],
+    });
+    expect(approvalComments(r, { tz: TZ })).toEqual(["第 2 關・陳老闆 已核准 10/12 15:30：OK"]);
+    // 每一關都沒意見 → 空陣列（畫面上不出現這一塊）
+    expect(approvalComments(row({ status: "approved", steps: [step(), bossStep()] }), { tz: TZ })).toEqual([]);
+  });
+
+  it("steps 缺漏或 null（舊 API）→ 空陣列，不炸", () => {
+    expect(approvalComments(row({}))).toEqual([]);
+    expect(approvalComments(row({ steps: null }))).toEqual([]);
+    expect(approvalComments(row({ steps: undefined }))).toEqual([]);
+    expect(approvalComments(row({ steps: [] }))).toEqual([]);
+  });
+
+  it("亂序的 steps 依 step_order 排列且不改動傳入的陣列；HR 覆核關加註、姓名退回候選、沒有時間就不印時間", () => {
+    const steps = [
+      step({ step_order: 2, kind: "hr", approver_name: null, candidate_names: ["李小華", "周小美"], comment: "資料齊全", acted_at: null }),
+      step({ step_order: 1, comment: "同意" }),
+    ];
+    const r = row({ status: "approved", steps });
+    expect(approvalComments(r, { tz: TZ })).toEqual([
+      "第 1 關・王小明 已核准 10/12 14:05：同意",
+      "第 2 關・李小華／周小美（HR 覆核）已核准：資料齊全",
+    ]);
+    expect(steps.map((s) => s.step_order)).toEqual([2, 1]);
+  });
+
+  it("所有申請種類一致：只看 status 與 steps，與 kind 無關", () => {
+    const steps = [step({ comment: "先放行" }), bossStep({ decision: "pending", acted_at: null })];
+    for (const kind of KIND_ORDER) {
+      expect(approvalComments(row({ kind, status: "pending", current_step: 2, total_steps: 2, steps }), { tz: TZ })).toEqual([
+        "第 1 關・王小明 已核准 10/12 14:05：先放行",
+      ]);
+    }
+  });
+});
+
+describe("approvalWhenText（簽核頁批次結果、勾選框 aria-label 認「哪一張」用的時間）", () => {
+  it("整天出差只有日期（單日、多日、跨年），不再是「09/18 00:00」", () => {
+    expect(approvalWhenText(tripRow(), { tz: TZ })).toBe("09/18（五）");
+    expect(approvalWhenText(tripRow({ end_at: "2026-09-19T15:59:00Z" }), { tz: TZ })).toBe("09/18（五）～ 09/19（六）");
+    expect(
+      approvalWhenText(tripRow({ start_at: "2026-12-30T16:00:00Z", end_at: "2027-01-02T15:59:00Z" }), { tz: TZ }),
+    ).toBe("12/31（四）～ 01/02（六）");
+    expect(approvalWhenText(tripRow(), { tz: TZ })).not.toMatch(/00:00/);
+  });
+
+  it("在家工作與簽核卡的期間同一份日期文案", () => {
+    const wfh = row({ kind: "wfh", hours: 8, start_at: DAY_START, end_at: DAY_END });
+    expect(approvalWhenText(wfh, { tz: TZ })).toBe("09/18（五）全天");
+    expect(approvalWhenText(wfh, { tz: TZ })).toBe(allDayPeriodText(wfh, TZ));
+  });
+
+  it("公出、舊列 trip_type 缺席的出差、其他種類維持起始時刻 MM/DD HH:mm", () => {
+    expect(approvalWhenText(outingRow(), { tz: TZ })).toBe("09/18 09:00");
+    expect(approvalWhenText(tripRow({ trip_type: null }), { tz: TZ })).toBe("09/18 00:00");
+    expect(approvalWhenText(row({ kind: "leave" }), { tz: TZ })).toBe("09/18 09:00");
+    expect(approvalWhenText(row({ kind: "ot", start_at: "2026-09-18T10:00:00Z" }), { tz: TZ })).toBe("09/18 18:00");
+  });
+
+  it("起始時間無效 → '—'，不炸", () => {
+    expect(approvalWhenText(tripRow({ start_at: "not-a-date" }), { tz: TZ })).toBe("—");
+    expect(approvalWhenText(row({ start_at: "not-a-date" }), { tz: TZ })).toBe("—");
+  });
+});
+
+describe("附件太大的錯誤碼：API 的 file_too_large 與舊碼 payload_too_large 走同一句中文", () => {
+  /** 與 apiFetch 丟出的錯誤同形：message 是「[status] code」，另掛 status／code。 */
+  const apiError = (status: number, code: string) => Object.assign(new Error(`[${status}] ${code}`), { status, code });
+
+  it("API（POST /requests/:id/attachments）的 413 file_too_large → 中文，不再露出「[413] file_too_large」", () => {
+    const text = requestErrorText(apiError(413, "file_too_large"));
+    expect(text).toBe("附件太大，單檔限 3 MB");
+    expect(text).not.toMatch(/file_too_large|\[413\]/);
+  });
+
+  it("舊碼 payload_too_large 照舊；兩個碼是同一句", () => {
+    expect(requestErrorText(apiError(413, "payload_too_large"))).toBe("附件太大，單檔限 3 MB");
+    expect(REQUEST_ERROR_MESSAGES.file_too_large).toBe(REQUEST_ERROR_MESSAGES.payload_too_large);
+  });
+
+  it("只有訊息格式「[413] file_too_large」（沒有 .code 屬性）也認得；別的 413 碼不被誤翻", () => {
+    expect(requestErrorText(new Error("[413] file_too_large"))).toBe("附件太大，單檔限 3 MB");
+    expect(requestErrorText(new Error("[413] something_else"))).toBeNull();
   });
 });

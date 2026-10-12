@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   EXPENSE_ERROR_MESSAGES,
+  NETWORK_FAILURE_MESSAGE,
+  RECEIPT_AUTO_CANCEL_REASON,
   advanceDate,
   advanceOptionLabel,
   advanceStatusLabel,
@@ -10,8 +12,10 @@ import {
   claimStatusLabel,
   describeBalance,
   expenseErrorMessage,
+  isNetworkFailure,
   isUnsettledAdvance,
   isValidPeriod,
+  receiptUploadFailedMessage,
   settlementWarnings,
   type AdvanceLike,
   type PreviewClaim,
@@ -142,6 +146,42 @@ describe("報銷頁的錯誤訊息", () => {
   it("不認得的錯誤碼 → 原訊息；不是 Error → fallback", () => {
     expect(expenseErrorMessage(new Error("[500] kaboom"), "送出失敗")).toBe("[500] kaboom");
     expect(expenseErrorMessage("boom", "送出失敗")).toBe("送出失敗");
+  });
+
+  it("憑證太大（413 file_too_large）→ 中文，講 3 MB（API 收 5 MB，但經 Vercel 實際只傳得動約 3 MB）", () => {
+    expect(expenseErrorMessage(apiError(413, "file_too_large"), "x")).toBe(EXPENSE_ERROR_MESSAGES.file_too_large);
+    expect(EXPENSE_ERROR_MESSAGES.file_too_large).toContain("3 MB");
+  });
+
+  it("連線本身失敗（Chrome／Safari／Firefox 三種說法）→「可能是檔案太大或網路不穩」；一般錯誤不算", () => {
+    for (const message of ["Failed to fetch", "Load failed", "NetworkError when attempting to fetch resource."]) {
+      expect(isNetworkFailure(new TypeError(message))).toBe(true);
+      expect(expenseErrorMessage(new TypeError(message), "送出失敗")).toBe(NETWORK_FAILURE_MESSAGE);
+    }
+    expect(NETWORK_FAILURE_MESSAGE).toContain("檔案太大");
+    expect(NETWORK_FAILURE_MESSAGE).toContain("網路不穩");
+    expect(isNetworkFailure(new Error("[500] kaboom"))).toBe(false);
+    expect(isNetworkFailure("Failed to fetch")).toBe(false);
+  });
+
+  it("前端準備階段的中文錯誤（沒有錯誤碼）原樣顯示", () => {
+    expect(expenseErrorMessage(new Error("檔案超過 3 MB，請縮小或改傳照片／截圖"), "送出失敗")).toBe(
+      "檔案超過 3 MB，請縮小或改傳照片／截圖",
+    );
+  });
+
+  it("憑證上傳失敗（單已建好）：自動撤回成功 → 請重新送出；撤回也失敗 → 請在列表撤回後重送；括號附原因", () => {
+    const err = new TypeError("Failed to fetch");
+    expect(receiptUploadFailedMessage(err, true)).toBe(
+      `憑證上傳失敗，這筆報銷已自動撤回，請重新送出。（${NETWORK_FAILURE_MESSAGE}）`,
+    );
+    expect(receiptUploadFailedMessage(apiError(413, "file_too_large"), false)).toBe(
+      `憑證上傳失敗，請在下方列表撤回這筆後再重新送出。（${EXPENSE_ERROR_MESSAGES.file_too_large}）`,
+    );
+    expect(receiptUploadFailedMessage("boom", true)).toContain("（上傳失敗）");
+    // 寫進 status_reason：API 要求 1–250 字。
+    expect(RECEIPT_AUTO_CANCEL_REASON.length).toBeGreaterThan(0);
+    expect(RECEIPT_AUTO_CANCEL_REASON.length).toBeLessThanOrEqual(250);
   });
 });
 

@@ -3,6 +3,7 @@
  * (see apps/api/src/routes/{tenant,punch,announcements,requests,leave-types}.ts).
  */
 import { apiFetch } from "./api-client";
+import { prepareUploadFile } from "./upload-prep";
 
 export interface Branding {
   primaryColor?: string;
@@ -225,9 +226,32 @@ export interface LeaveRequest {
   /** 最後一次簽核決定的意見（駁回理由）與時間。 */
   decision_comment?: string | null;
   decided_at?: string | null;
+  /** 整條簽核鏈（依 step_order；GET /requests 與 /requests/pending-approvals 每列都帶，舊 API 沒回 → 缺席）。 */
+  steps?: RequestStepRow[] | null;
   /* ── 月加班上限（M1，2026-09-23）：kind=ot 送單時累計超過上限即標記「超過月上限，另行給付」 ── */
   beyond_cap?: boolean;
   beyond_cap_detail?: BeyondCapDetail | null;
+}
+
+/**
+ * 列表列上的一關（API request-enrich.ts 的 EnrichedStep，欄位 snake_case）。
+ * 注意：POST /requests 201 回應的 steps（見 CreateRequestResult）是 camelCase 的另一個形狀，別混用。
+ */
+export interface RequestStepRow {
+  step_order: number;
+  /** 已簽的關＝實際簽的人；pending 關＝第一位候選。 */
+  approver_emp_id: string;
+  /** `approver_emp_id` 的姓名；查不到（已刪除員工等）為 null。 */
+  approver_name: string | null;
+  candidate_emp_ids: string[];
+  candidate_names: string[];
+  /** 關卡來源：manager｜hr｜list｜fallback｜hr_admin；舊列 null。 */
+  kind: string | null;
+  /** pending｜approved｜rejected。 */
+  decision: string;
+  /** 簽核者在這一關加註的意見（核准選填、駁回必填）；沒填 null。 */
+  comment: string | null;
+  acted_at: string | null;
 }
 
 export interface LeaveType {
@@ -868,17 +892,20 @@ export function getInternalJobs() {
   return apiFetch<{ internalJobs: InternalJob[] }>("/internal-jobs");
 }
 
-/** Upload one attachment (≤3MB) to a request as base64 JSON. */
+/**
+ * 上傳一個附件到申請單（base64 JSON）。請假送出與「我的申請」補傳都走這裡，所以準備放在這一層：
+ * 照片先壓縮（長邊 2000px、JPEG 0.8），準備後超過 3 MB（Vercel 請求上限，見 lib/upload-prep.ts）
+ * 就丟 UploadPrepError（中文訊息）、不送請求。
+ */
 export async function uploadAttachment(requestId: string, file: File): Promise<void> {
-  const dataBase64 = await new Promise<string>((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
-    r.onerror = () => reject(new Error("讀取檔案失敗"));
-    r.readAsDataURL(file);
-  });
+  const upload = await prepareUploadFile(file);
   await apiFetch<{ id: string }>(`/requests/${requestId}/attachments`, {
     method: "POST",
-    body: JSON.stringify({ fileName: file.name, contentType: file.type || "application/octet-stream", dataBase64 }),
+    body: JSON.stringify({
+      fileName: upload.name,
+      contentType: upload.type || "application/octet-stream",
+      dataBase64: await fileToBase64(upload),
+    }),
   });
 }
 
@@ -951,19 +978,18 @@ export function cancelExpense(id: string, reason: string) {
   });
 }
 
+/**
+ * 上傳一張報銷憑證（base64 JSON）。照片先壓縮、準備後超過 3 MB 就丟 UploadPrepError、不送請求（同 uploadAttachment）。
+ * 報銷頁在建單前就先準備過（lib/upload-prep.ts createThenUpload），這裡再經過一次不會重壓。
+ */
 export async function uploadExpenseReceipt(claimId: string, file: File): Promise<void> {
-  const dataBase64 = await new Promise<string>((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
-    r.onerror = () => reject(new Error("讀取檔案失敗"));
-    r.readAsDataURL(file);
-  });
+  const upload = await prepareUploadFile(file);
   await apiFetch<{ id: string }>(`/expenses/${claimId}/attachments`, {
     method: "POST",
     body: JSON.stringify({
-      fileName: file.name,
-      contentType: file.type || "application/octet-stream",
-      dataBase64,
+      fileName: upload.name,
+      contentType: upload.type || "application/octet-stream",
+      dataBase64: await fileToBase64(upload),
     }),
   });
 }

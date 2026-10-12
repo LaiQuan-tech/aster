@@ -2,7 +2,8 @@
 
 /**
  * 「我的申請」清單（`GET /requests?scope=mine`）：每列三行（種類＋假別名｜狀態 Pill、期間摘要、
- * 等誰簽／駁回理由／核准時間）＋附件數＋「缺憑證」＋「上傳憑證」＋ pending「撤回」（ConfirmDialog）。
+ * 等誰簽／駁回理由／核准時間）＋各關簽核意見（有意見才多一塊，見 `approvalComments`）＋附件數＋「缺憑證」＋「上傳憑證」＋
+ * pending「撤回」（ConfirmDialog）。
  * 頂部 chips 全部｜待簽核｜已核准｜已駁回（前端過濾）；預設 30 筆＋「顯示更多」；`?id=` 高亮並捲到。
  * API 新欄位（leave_type_name／current_approver_name／attachment_count…）缺席時各行優雅退化。
  */
@@ -15,12 +16,14 @@ import {
   BEYOND_CAP_LABEL,
   STATUS_LABEL,
   STATUS_TONE,
+  approvalComments,
   approvalLine,
   describeRequest,
   needsAttachment,
   requestTitle,
 } from "@/lib/request-forms";
-import { MAX_FILE_BYTES, describeError } from "./form-shared";
+import { pickedFileError } from "@/lib/upload-prep";
+import { describeError } from "./form-shared";
 
 type Filter = "all" | "pending" | "approved" | "rejected";
 
@@ -94,8 +97,11 @@ export function MyRequests({ requests, loading, error, highlightId, defaultShift
     const requestId = uploadTargetRef.current;
     uploadTargetRef.current = null;
     if (!file || !requestId) return;
-    if (file.size > MAX_FILE_BYTES) {
-      toast.show("附件單檔限 3 MB", "error");
+    // 選檔當下的檢查看 pickedFileError：空檔、PDF 等非圖片超過 3 MB、照片原檔超過 25 MB 才擋；
+    // 照片超過 3 MB 放行——uploadAttachment 上傳前會先壓縮（lib/upload-prep.ts）。
+    const problem = pickedFileError(file);
+    if (problem) {
+      toast.show(problem, "error");
       return;
     }
     setActionError(null);
@@ -211,6 +217,7 @@ function RequestRow({
   onCancel: () => void;
 }) {
   const line = approvalLine(r);
+  const comments = approvalComments(r);
   const missing = needsAttachment(r);
   const attachments = typeof r.attachment_count === "number" ? r.attachment_count : null;
   const showFooter = (attachments != null && attachments > 0) || missing || r.status === "pending";
@@ -232,6 +239,16 @@ function RequestRow({
         </p>
       )}
       {line && <p className={`mt-0.5 text-sm ${r.status === "rejected" ? "text-red-600" : "text-gray-500"}`}>{line}</p>}
+      {/* 各關簽核意見（含兩關以上的單第一關主管加註的）：有意見才出現，沒意見的單不多一行 */}
+      {comments.length > 0 && (
+        <ul aria-label="簽核意見" className="mt-1 space-y-0.5 border-l-2 border-gray-200 pl-2 text-xs text-gray-500">
+          {comments.map((text, i) => (
+            <li key={i} className="break-words">
+              {text}
+            </li>
+          ))}
+        </ul>
+      )}
       {showFooter && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           {attachments != null && attachments > 0 && (

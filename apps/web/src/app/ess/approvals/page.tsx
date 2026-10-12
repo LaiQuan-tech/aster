@@ -34,10 +34,9 @@ import {
   type PendingDisbursementApproval,
 } from "@/lib/disbursements-api";
 import { requestAmountsOf } from "@/lib/approval-view";
-import { fmtDateTime, fmtMoney, relativeTime } from "@/lib/ess-format";
-import { summarizeSegments } from "@/lib/ess-notifications";
-import { formatRequestHours } from "@/lib/leave-duration";
+import { fmtMoney, relativeTime } from "@/lib/ess-format";
 import { describePeriodClosed } from "@/lib/period-closed";
+import { approvalPeriodText, approvalWhenText } from "@/lib/request-forms";
 import { LateReportsSection } from "./_components/LateReportsSection";
 import {
   BottomSheet,
@@ -118,24 +117,13 @@ function applicantName(row: PendingApproval): string {
   return row.employee_name ?? row.employee_id.slice(0, 8);
 }
 
-/** 批次結果裡認得出是哪一張：「王小明 · 請假（特休）· 10/13 09:00」（同一個人送了好幾張時靠起始時間分辨）。 */
+/**
+ * 批次結果裡認得出是哪一張：「王小明 · 請假（特休）· 10/13 09:00」（同一個人送了好幾張時靠起始時間分辨）。
+ * 整天的出差／在家工作只顯示日期（同簽核卡，不印存檔用的 00:00）：「王小明 · 公出/出差 · 09/18（五）」；公出等維持起始時刻。
+ */
 function rowLabel(row: PendingApproval): string {
   const leaveType = row.leave_type_name ? `（${row.leave_type_name}）` : "";
-  return `${applicantName(row)} · ${kindLabel(row.kind)}${leaveType} · ${fmtDateTime(row.start_at)}`;
-}
-
-/**
- * 期間文字：有分段用 summarizeSegments（≤3 段逐行、>3 段壓縮），否則起訖＋時數。
- * 時數：請假寫成天＋時（2026-10-11 業主決定，1 天 ＝ 8 小時，與 summarizeSegments 同一套），加班等維持小時。
- * 結束時間缺席／無效，或與起始同一分鐘（補卡單 startAt = endAt）→ 只顯示起始，不印「～ —」。
- */
-function periodText(row: PendingApproval): string {
-  const segs = summarizeSegments(row.segments);
-  if (segs) return segs;
-  const hours = row.hours != null ? ` · ${formatRequestHours(row.kind, row.hours)}` : "";
-  const start = fmtDateTime(row.start_at);
-  const end = row.end_at ? fmtDateTime(row.end_at) : "—";
-  return end === "—" || end === start ? `${start}${hours}` : `${start} ～ ${end}${hours}`;
+  return `${applicantName(row)} · ${kindLabel(row.kind)}${leaveType} · ${approvalWhenText(row)}`;
 }
 
 export default function ApprovalsPage() {
@@ -595,7 +583,8 @@ export default function ApprovalsPage() {
                   {/* 身：期間、事由、地點／預估花費／預支（有才顯示）、附件。標籤欄 4.5rem：放得下「預估花費」四個字 */}
                   <dl className="mt-3 grid grid-cols-[4.5rem_1fr] gap-x-2 gap-y-1.5 text-sm text-gray-700">
                     <dt className="text-gray-400">期間</dt>
-                    <dd className="whitespace-pre-line">{periodText(row)}</dd>
+                    {/* 期間文字由 lib/request-forms.ts 的 approvalPeriodText 組（可單測）：整天型（出差、在家工作）只有日期，公出保留時刻 */}
+                    <dd className="whitespace-pre-line">{approvalPeriodText(row)}</dd>
                     <dt className="text-gray-400">事由</dt>
                     <dd className="whitespace-pre-wrap break-words">
                       {reason ? reason : <span className="text-gray-400">（未填）</span>}

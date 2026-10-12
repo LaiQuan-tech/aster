@@ -244,11 +244,18 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<H
 
 /* -------------------------------------------------------- Segmented --- */
 
+/**
+ * 分段切換（radiogroup）。
+ * `compact`（選用，不傳＝原樣）：窄螢幕上選項字數偏多、按鈕被均分後內寬不夠（例如請假時段列的
+ * 「指定時數」在 390px 內寬只剩 57px，剛好斷成兩行）時用——按鈕文字不換行、水平 padding 縮成 px-1.5；
+ * 高度不變（md 仍 min-h-10，觸控目標不縮小）。
+ */
 export function Segmented<T extends string>({
   options,
   value,
   onChange,
   size = "md",
+  compact = false,
   className,
   "aria-label": ariaLabel,
 }: {
@@ -256,6 +263,7 @@ export function Segmented<T extends string>({
   value: T;
   onChange: (value: T) => void;
   size?: "sm" | "md";
+  compact?: boolean;
   className?: string;
   "aria-label"?: string;
 }) {
@@ -294,7 +302,14 @@ export function Segmented<T extends string>({
             onClick={() => onChange(opt.value)}
             className={cx(
               "flex-1 rounded-lg font-medium transition",
-              size === "sm" ? "min-h-8 px-2 text-xs" : "min-h-10 px-3 text-sm",
+              // compact 才改 padding 並禁止換行；沒傳時 class 字串與原本逐字相同。
+              compact
+                ? size === "sm"
+                  ? "min-h-8 px-1.5 text-xs whitespace-nowrap"
+                  : "min-h-10 px-1.5 text-sm whitespace-nowrap"
+                : size === "sm"
+                  ? "min-h-8 px-2 text-xs"
+                  : "min-h-10 px-3 text-sm",
               active ? "bg-white shadow-sm" : "text-gray-500 hover:text-gray-700",
             )}
             style={active ? { color: "var(--brand)" } : undefined}

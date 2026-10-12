@@ -113,7 +113,22 @@ export const EXPENSE_ERROR_MESSAGES: Record<string, string> = {
   invalid_category: "這個費用類別已停用，請重新選擇",
   filing_on_behalf_removed: "代為填報功能已移除，只能以本人身分送出",
   not_an_employee: "找不到你的員工資料，請聯絡 HR",
+  // 憑證上傳（POST /expenses/:id/attachments）：API 收 5 MB，但經 Vercel 實際只傳得動約 3 MB（見 lib/upload-prep.ts），
+  // 前端已先壓縮照片、擋下超過 3 MB 的檔，這條是保底。
+  file_too_large: "檔案太大，單檔請在 3 MB 以內；請縮小或改傳照片／截圖",
 };
+
+/**
+ * fetch 本身失敗、沒拿到任何回應：Chrome「Failed to fetch」、Safari「Load failed」、Firefox「NetworkError when
+ * attempting to fetch resource.」。上傳時常見的原因是請求超過 Vercel 約 4.5 MB 的上限——平台回 413 但沒有
+ * CORS 標頭，瀏覽器只給這句；其次是網路不穩。
+ */
+const NETWORK_FAILURE_RE = /^(failed to fetch|load failed|networkerror when attempting to fetch resource)/i;
+export const NETWORK_FAILURE_MESSAGE = "連線失敗，可能是檔案太大或網路不穩；請換小一點的檔案或稍後再試";
+
+export function isNetworkFailure(err: unknown): boolean {
+  return err instanceof Error && NETWORK_FAILURE_RE.test(err.message.trim());
+}
 
 /** apiFetch 的錯誤碼（`.code`，沒有就從 `[status] code` 的 message 取）；不是 Error → null。 */
 export function apiErrorCode(err: unknown): string | null {
@@ -126,14 +141,31 @@ export function apiErrorCode(err: unknown): string | null {
 
 /**
  * 報銷送出／修改／撤回失敗的中文說明。歸屬期已發薪鎖定（409 period_closed）→「YYYY-MM 已結算，請洽管理者」；
+ * 連線本身失敗（Failed to fetch）→ {@link NETWORK_FAILURE_MESSAGE}；
  * 其餘查 {@link EXPENSE_ERROR_MESSAGES}，再不然 Error.message，不是 Error 就用 fallback。
  */
 export function expenseErrorMessage(err: unknown, fallback: string): string {
   const closed = describePeriodClosed(err);
   if (closed) return closed;
+  if (isNetworkFailure(err)) return NETWORK_FAILURE_MESSAGE;
   const code = apiErrorCode(err);
   if (code && EXPENSE_ERROR_MESSAGES[code]) return EXPENSE_ERROR_MESSAGES[code];
   return err instanceof Error && err.message ? err.message : fallback;
+}
+
+/** 憑證上傳失敗時自動撤回剛建的單，寫進 status_reason 的理由（HR 在後台看得到）。 */
+export const RECEIPT_AUTO_CANCEL_REASON = "憑證上傳失敗，系統自動撤回";
+
+/**
+ * 報銷送出時單已建好、憑證卻上傳失敗的說明（括號附上傳失敗的原因）：
+ *   • 已自動撤回 → 請重新送出（表單保留，直接再按送出即可）；
+ *   • 撤回也失敗 → 單還在，請員工在列表撤回那筆再重送，免得留下一筆沒有憑證的單、重送又多一筆。
+ */
+export function receiptUploadFailedMessage(err: unknown, rolledBack: boolean): string {
+  const reason = expenseErrorMessage(err, "上傳失敗");
+  return rolledBack
+    ? `憑證上傳失敗，這筆報銷已自動撤回，請重新送出。（${reason}）`
+    : `憑證上傳失敗，請在下方列表撤回這筆後再重新送出。（${reason}）`;
 }
 
 /* ------------------------------------------------------ 核銷前預覽 --- */

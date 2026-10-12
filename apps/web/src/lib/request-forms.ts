@@ -15,8 +15,19 @@
  *     自行墊付就不帶（後端不開預支，憑證之後走月報銷）。
  */
 import type { CreateRequestBody, LeaveRequest, LeaveSegment, RequestKind, RequestStatus } from "./ess-api";
-import { fmtDateShort, fmtDateTime, fmtDateWithWeekday, fmtHm, fmtHours, fmtMoney, localDateKey, todayKey } from "./ess-format";
-import { formatLeaveDuration } from "./leave-duration";
+import {
+  fmtDateShort,
+  fmtDateSpan,
+  fmtDateTime,
+  fmtDateWithWeekday,
+  fmtHm,
+  fmtHours,
+  fmtMoney,
+  localDateKey,
+  todayKey,
+} from "./ess-format";
+import { summarizeSegments } from "./ess-notifications";
+import { formatLeaveDuration, formatRequestHours } from "./leave-duration";
 import { DEFAULT_SHIFT, addDaysIfCrossesMidnight, halfDayWindow, normalizeHm, parseHm, type ShiftLike } from "./leave-hours";
 import { describePeriodClosed, periodClosedMessage } from "./period-closed";
 
@@ -118,6 +129,12 @@ export function advanceFieldValue(touched: boolean, advanceRequested: string, es
 /** 事由上限（createSchema `reason.max(250)`）。 */
 export const REASON_MAX = 250;
 
+/**
+ * 附件太大的說法。API（routes/attachments.ts）回 413 `file_too_large`，早期前端認的碼是 `payload_too_large`——
+ * 兩個碼共用同一句，免得畫面露出「[413] file_too_large」。照片會先壓縮（lib/upload-prep.ts），會走到這裡的是 PDF 等不壓縮的檔。
+ */
+const ATTACHMENT_TOO_LARGE_MESSAGE = "附件太大，單檔限 3 MB";
+
 /** API 錯誤碼 → 中文（找不到的碼由呼叫端退回 attendance-sheets-api 的 friendlyError）。 */
 export const REQUEST_ERROR_MESSAGES: Record<string, string> = {
   no_approver_available: "找不到可簽核的主管，請聯絡 HR 設定簽核流程",
@@ -128,7 +145,8 @@ export const REQUEST_ERROR_MESSAGES: Record<string, string> = {
   not_pending: "這張申請已不是待簽核狀態",
   not_found: "找不到這張申請",
   invalid_body: "送出的內容格式不正確，請檢查日期與時間",
-  payload_too_large: "附件太大，單檔限 3 MB",
+  file_too_large: ATTACHMENT_TOO_LARGE_MESSAGE,
+  payload_too_large: ATTACHMENT_TOO_LARGE_MESSAGE,
   // 發薪鎖定（2026-10-11）：申請單碰到已結算月（送出、撤回都會）。拿得到月份時走 describePeriodClosed 的
   // 「YYYY-MM 已結算，請洽管理者」；這條是只有錯誤碼、沒有月份時的通用說法。
   period_closed: periodClosedMessage(),
@@ -533,12 +551,87 @@ function hoursOf(r: Pick<LeaveRequest, "hours" | "segments">): number | null {
   return null;
 }
 
-function rangeFromIso(startIso: string, endIso: string, tz?: string): string {
+/**
+ * 起迄的期間文字：同一天「09/18（五）09:00–12:00」、跨天「09/18–09/19」（跨天本來就只有日期）。
+ * `dateOnly`＝整天型申請（出差）：同一天只留「09/18（五）」，不印存檔用的 00:00–23:59。
+ */
+function rangeFromIso(startIso: string, endIso: string, tz?: string, dateOnly = false): string {
   const sd = localDateKey(startIso, tz);
   const ed = localDateKey(endIso, tz);
   if (!sd || !ed) return "—";
-  if (sd === ed) return `${fmtDateWithWeekday(sd)}${fmtHm(startIso, tz)}–${fmtHm(endIso, tz)}`;
+  if (sd === ed) {
+    return dateOnly ? fmtDateWithWeekday(sd) : `${fmtDateWithWeekday(sd)}${fmtHm(startIso, tz)}–${fmtHm(endIso, tz)}`;
+  }
   return `${fmtDateShort(sd)}–${fmtDateShort(ed)}`;
+}
+
+/**
+ * 整天型申請？是 → 期間只該顯示日期、不印時刻。
+ *   • 出差（kind=business_trip 且 trip_type=business_trip）：web 表單存成「起日 00:00～迄日 23:59」
+ *     （buildTrip，瀏覽器時區），DB 沒有 all_day 欄位——所以看 trip_type，不看「剛好是 00:00／23:59」。
+ *   • 在家工作（kind=wfh）：同樣是整天（buildWfhBody）。
+ * 公出（trip_type=outing）有起訖時刻，不算；舊列 trip_type 為 null 的出差分辨不出來，維持顯示時刻（不猜）。
+ */
+export function isAllDayRequest(r: Pick<LeaveRequest, "kind" | "trip_type">): boolean {
+  return r.kind === "wfh" || (r.kind === "business_trip" && r.trip_type === "business_trip");
+}
+
+/** 在家工作的期間（只有日期）：單日「09/18（五）全天」、跨日「09/18–09/19」；起迄日期無效 → null。 */
+function wfhDates(r: Pick<LeaveRequest, "start_at" | "end_at">, tz?: string): string | null {
+  const sd = localDateKey(r.start_at, tz);
+  const ed = localDateKey(r.end_at, tz);
+  if (!sd || !ed) return null;
+  if (sd === ed) return `${fmtDateWithWeekday(sd)}全天`;
+  return `${fmtDateShort(sd)}–${fmtDateShort(ed)}`;
+}
+
+/**
+ * 簽核卡「期間」欄的整天型文字（2026-10-12）：出差、在家工作只有日期，不再是「09/18 00:00 ～ 09/19 23:59」；
+ * 其他種類（含公出）或日期無效 → null，呼叫端走原本的起訖時刻。
+ *   出差：單日「09/18（五）」、跨天「09/18（五）～ 09/19（六）」（簽核卡本來就用「～」連起訖）。
+ *   在家工作：與「我的申請」同一份文案（單日「09/18（五）全天」、跨日「09/18–09/19」），兩邊對得上。
+ */
+export function allDayPeriodText(
+  r: Pick<LeaveRequest, "kind" | "trip_type" | "start_at" | "end_at">,
+  tz?: string,
+): string | null {
+  if (!isAllDayRequest(r)) return null;
+  if (r.kind === "wfh") return wfhDates(r, tz);
+  const text = fmtDateSpan(r.start_at, r.end_at, tz);
+  return text === "—" ? null : text;
+}
+
+/**
+ * 主管簽核卡（/ess/approvals）「期間」欄：
+ *   有分段（請假、補卡）用 summarizeSegments（≤3 段逐行、>3 段壓縮）；整天型（出差、在家工作）只顯示日期
+ *   （`allDayPeriodText`，列上本來就帶 trip_type，看 kind／trip_type 判斷，不猜 00:00／23:59）；其餘「起 ～ 迄」＋時數。
+ * 時數：請假寫成天＋時（2026-10-11 業主決定，1 天 ＝ 8 小時，與 summarizeSegments 同一套），加班等維持小時。
+ * 結束時間缺席／無效，或與起始同一分鐘（補卡單 startAt = endAt）→ 只顯示起始，不印「～ —」。
+ */
+export function approvalPeriodText(
+  row: Pick<LeaveRequest, "kind" | "trip_type" | "start_at" | "end_at" | "hours" | "segments">,
+  opts: { tz?: string } = {},
+): string {
+  const segs = summarizeSegments(row.segments);
+  if (segs) return segs;
+  const hours = row.hours != null ? ` · ${formatRequestHours(row.kind, row.hours)}` : "";
+  const allDay = allDayPeriodText(row, opts.tz);
+  if (allDay) return `${allDay}${hours}`;
+  const start = fmtDateTime(row.start_at, opts.tz);
+  const end = row.end_at ? fmtDateTime(row.end_at, opts.tz) : "—";
+  return end === "—" || end === start ? `${start}${hours}` : `${start} ～ ${end}${hours}`;
+}
+
+/**
+ * 簽核頁批次結果、勾選框 aria-label 認「哪一張」用的時間（同一個人送了好幾張時靠它分辨）：
+ * 整天型（出差、在家工作）只有日期，與簽核卡的期間同一套（`allDayPeriodText`），不印存檔用的 00:00；
+ * 其餘（含公出、舊列 trip_type 缺席的出差）維持起始時刻 `MM/DD HH:mm`。
+ */
+export function approvalWhenText(
+  row: Pick<LeaveRequest, "kind" | "trip_type" | "start_at" | "end_at">,
+  opts: { tz?: string } = {},
+): string {
+  return allDayPeriodText(row, opts.tz) ?? fmtDateTime(row.start_at, opts.tz);
 }
 
 /**
@@ -547,6 +640,7 @@ function rangeFromIso(startIso: string, endIso: string, tz?: string): string {
  * 請假的時數寫成天＋時（2026-10-11 業主決定；`opts.hoursPerDay`＝1 天幾小時，省略＝8），加班、在家工作維持小時。
  * 請假**只留請假時數、不再附日曆天數**：日期範圍本身已經看得出橫跨幾天，再寫「3 天 · 1 天 7 時」
  * 會有兩個「天」並排（日曆天 vs 請假天）；整天只寫「全天」，不重複寫「1 天」。
+ * 出差（整天，存成 00:00–23:59）只顯示日期，不印時刻；公出有起訖時刻照舊（見 `isAllDayRequest`）。
  */
 export function describeRequest(
   r: Pick<
@@ -611,7 +705,9 @@ export function describeRequest(
       const type = r.trip_type === "business_trip" || r.trip_type === "outing" ? TRIP_TYPE_LABEL[r.trip_type] : "公出／出差";
       const scope = r.trip_type === "business_trip" && r.trip_scope && TRIP_SCOPE_LABEL[r.trip_scope] ? `（${TRIP_SCOPE_LABEL[r.trip_scope]}）` : "";
       const location = (r.location ?? "").trim();
-      const parts = [rangeFromIso(r.start_at, r.end_at, tz), location || null, `${type}${scope}`].filter(Boolean);
+      // 出差是整天（存成 00:00–23:59）→ 單日只顯示日期；公出有起訖時刻，照舊。
+      const period = rangeFromIso(r.start_at, r.end_at, tz, isAllDayRequest(r));
+      const parts = [period, location || null, `${type}${scope}`].filter(Boolean);
       return parts.join(" · ");
     }
     case "petty_cash": {
@@ -625,11 +721,7 @@ export function describeRequest(
     case "wfh": {
       const hours = hoursOf(r);
       const hoursText = hours == null ? "" : ` · ${fmtHours(hours)}`;
-      const sd = localDateKey(r.start_at, tz);
-      const ed = localDateKey(r.end_at, tz);
-      if (!sd || !ed) return `${rangeFromIso(r.start_at, r.end_at, tz)}${hoursText}`;
-      if (sd === ed) return `${fmtDateWithWeekday(sd)}全天${hoursText}`;
-      return `${fmtDateShort(sd)}–${fmtDateShort(ed)}${hoursText}`;
+      return `${wfhDates(r, tz) ?? rangeFromIso(r.start_at, r.end_at, tz)}${hoursText}`;
     }
     default:
       return rangeFromIso(r.start_at, r.end_at, tz);
@@ -740,6 +832,41 @@ export function approvalLine(
     default:
       return null;
   }
+}
+
+/**
+ * 「我的申請」各關的簽核意見（2026-10-12）。GET /requests 每列都帶整條 steps[]、每關含簽核者加註的意見，
+ * 但清單只看得到 `decision_comment`（駁回理由＝決定那一關）——兩關以上的單，第一關主管的意見申請人看不到，
+ * 簽核卡上卻寫著「簽核意見（申請人看得到）」。回顯示用的行（依關卡順序），例：
+ *   「第 1 關・王小明 已核准 10/12 14:05：請注意交接」
+ *   單關的單不寫「第 N 關」：「王小明 已核准 10/12 14:05：請注意交接」；HR 覆核關比照 `approvalLine` 加註「（HR 覆核）」。
+ * 規則（所有申請種類一致）：
+ *   • 只列有意見的關——沒填意見的核准關、待簽的關都不列，沒意見的單不會多出任何一行。
+ *   • 單據已駁回時，駁回那一關的理由已由 `approvalLine` 的「駁回理由：…」顯示，這裡不重複；其他關照列。
+ *   • 姓名用該關實際簽的人（`approver_name`），沒有再退回候選姓名。
+ *   • steps 缺漏或 null（舊 API）→ 空陣列。
+ */
+export function approvalComments(r: Pick<LeaveRequest, "status" | "steps">, opts: { tz?: string } = {}): string[] {
+  const steps = Array.isArray(r.steps) ? [...r.steps].sort((a, b) => a.step_order - b.step_order) : [];
+  const multi = steps.length > 1;
+  const lines: string[] = [];
+  for (const s of steps) {
+    const comment = (s.comment ?? "").trim();
+    if (!comment) continue;
+    if (s.decision !== "approved" && s.decision !== "rejected") continue;
+    if (s.decision === "rejected" && r.status === "rejected") continue;
+    const actor =
+      (s.approver_name ?? "").trim() || approvalStepName({ candidateNames: s.candidate_names, approverName: s.approver_name });
+    const who = [multi ? `第 ${s.step_order} 關` : "", actor].filter(Boolean).join("・");
+    const hrNote = s.kind === "hr" ? "（HR 覆核）" : "";
+    const head = `${who}${hrNote}`;
+    const acted = s.acted_at ? fmtDateTime(s.acted_at, opts.tz) : "—";
+    const when = acted === "—" ? "" : ` ${acted}`;
+    // 全形括號後直接接動詞（與 approvalLine 同），其餘用半形空白隔開
+    const lead = head ? (hrNote ? head : `${head} `) : "";
+    lines.push(`${lead}${s.decision === "rejected" ? "已駁回" : "已核准"}${when}：${comment}`);
+  }
+  return lines;
 }
 
 /** pending 請假、假別需憑證、且一個附件都沒有 → 顯示「缺憑證」＋「上傳憑證」。 */

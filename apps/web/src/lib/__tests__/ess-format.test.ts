@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   addDays,
   fmtDateShort,
+  fmtDateSpan,
   fmtDateTime,
   fmtDateWithWeekday,
   fmtHm,
@@ -62,6 +63,33 @@ describe("fmtDateShort / fmtDateTime / fmtDateWithWeekday", () => {
     expect(fmtDateWithWeekday("2026-09-17")).toBe("09/17（四）");
     expect(fmtDateWithWeekday("2026-09-20")).toBe("09/20（日）");
     expect(fmtDateWithWeekday("2026/09/18")).toBe("—");
+  });
+});
+
+describe("fmtDateSpan（整天型申請的期間：只有日期，沒有 00:00／23:59）", () => {
+  // 出差在 web 表單存成「起日 00:00～迄日 23:59」（瀏覽器時區）；台北 09/18 00:00 ＝ 09/17 16:00Z。
+  const START = "2026-09-17T16:00:00Z";
+
+  it("同一天 → 「09/18（五）」；跨天 → 「09/18（五）～ 09/19（六）」", () => {
+    expect(fmtDateSpan(START, "2026-09-18T15:59:00Z", TZ)).toBe("09/18（五）");
+    expect(fmtDateSpan(START, "2026-09-19T15:59:00Z", TZ)).toBe("09/18（五）～ 09/19（六）");
+  });
+
+  it("跨年：12/31 到隔年 01/02，星期照各自的日期算", () => {
+    expect(fmtDateSpan("2026-12-30T16:00:00Z", "2027-01-02T15:59:00Z", TZ)).toBe("12/31（四）～ 01/02（六）");
+  });
+
+  it("依 tz 換成當地日期，不是 UTC 切片：同一組時間在 UTC 會變成跨兩天", () => {
+    expect(fmtDateSpan(START, "2026-09-18T15:59:00Z", "UTC")).toBe("09/17（四）～ 09/18（五）");
+    expect(fmtDateSpan(START, "2026-09-18T15:59:00Z", TZ)).toBe("09/18（五）");
+  });
+
+  it("迄缺席／空字串／無效 → 當作同一天；起無效 → '—'", () => {
+    expect(fmtDateSpan(START, undefined, TZ)).toBe("09/18（五）");
+    expect(fmtDateSpan(START, null, TZ)).toBe("09/18（五）");
+    expect(fmtDateSpan(START, "", TZ)).toBe("09/18（五）");
+    expect(fmtDateSpan(START, "not-a-date", TZ)).toBe("09/18（五）");
+    expect(fmtDateSpan("not-a-date", "2026-09-18T15:59:00Z", TZ)).toBe("—");
   });
 });
 

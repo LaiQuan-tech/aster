@@ -240,8 +240,10 @@ export function LeaveForm({
 
       {mode === "single" ? (
         <div className="space-y-3">
+          {/* compact：4 顆均分，390px 內寬每顆只剩 57px，「指定時數」會斷成兩行；改不換行＋縮 padding（高度不變） */}
           <Segmented<LeavePeriod>
             aria-label="時段"
+            compact
             options={PERIOD_OPTIONS}
             value={period}
             onChange={(p) => {
@@ -333,7 +335,9 @@ export function LeaveForm({
           }}
           required
           label="憑證"
-          hint="此假別需附憑證（例如診所收據）；最多 3 個，單檔 3 MB"
+          // 附件限制的說法與 AttachmentField 預設說明（form-shared.tsx）一致：照片上傳前自動壓縮，PDF 等不壓縮的單檔 3 MB。
+          // 這個 hint 會取代預設說明（不是疊加），畫面上只出現這一句。
+          hint="此假別需附憑證（例如診所收據）；最多 3 個，照片會自動壓縮，PDF 單檔 3 MB"
           error={localError === "此假別需要附上憑證" ? localError : undefined}
         />
       )}

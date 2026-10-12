@@ -124,6 +124,19 @@ export function localDateKey(iso: string, tz?: string): string {
   return `${p.year}-${p.month}-${p.day}`;
 }
 
+/**
+ * 起迄的**日期**區間（不帶時刻；整天型的出差用）：同一天 `MM/DD（五）`，跨天 `MM/DD（五）～ MM/DD（六）`。
+ * 起迄吃 ISO，依 tz 換成當地日期（不是 UTC 切片）；迄缺席／無效 → 當作同一天；起無效 → "—"。
+ * 全形括號右側本來就有留白，「～」前面不再多加空白。
+ */
+export function fmtDateSpan(startIso: string, endIso?: string | null, tz?: string): string {
+  const sd = localDateKey(startIso, tz);
+  if (!sd) return "—";
+  const ed = endIso ? localDateKey(endIso, tz) : "";
+  if (!ed || ed === sd) return fmtDateWithWeekday(sd);
+  return `${fmtDateWithWeekday(sd)}～ ${fmtDateWithWeekday(ed)}`;
+}
+
 /** 今天（指定時區）的 dateKey；`now` 可注入以利測試。 */
 export function todayKey(tz?: string, now: Date | number | string = new Date()): string {
   const d = toDate(now) ?? new Date();

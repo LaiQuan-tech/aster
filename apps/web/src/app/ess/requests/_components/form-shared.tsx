@@ -9,6 +9,7 @@ import { useId, useRef, type ChangeEvent, type ReactNode } from "react";
 import { friendlyError } from "@/lib/attendance-sheets-api";
 import type { CreateRequestBody } from "@/lib/ess-api";
 import { EXPENSE_METHOD_FIELD_LABEL, REASON_MAX, requestErrorText, type ExpenseMethod } from "@/lib/request-forms";
+import { UPLOAD_MAX_BYTES, pickedFileError, pickedFilesError, uploadKindOf } from "@/lib/upload-prep";
 import { Button, Field, Icon, InlineError, Textarea } from "@/components/ess-ui";
 
 /* ------------------------------------------------------------ 錯誤 --- */
@@ -24,12 +25,15 @@ export function describeError(err: unknown, fallback: string): string {
 /* ------------------------------------------------------------ 附件 --- */
 
 export const MAX_FILES = 3;
-export const MAX_FILE_BYTES = 3 * 1024 * 1024;
+/**
+ * 不壓縮的附件（PDF、GIF…）單檔上限＝經 API 上傳的上限 3 MB（Vercel 請求上限，見 lib/upload-prep.ts）。
+ * 照片不看原始大小：上傳前會先壓縮（ess-api uploadAttachment），選檔時只擋原檔超過 25 MB 的。
+ */
+export const MAX_FILE_BYTES = UPLOAD_MAX_BYTES;
 
 export function validateFiles(files: File[]): string | null {
   if (files.length > MAX_FILES) return `附件最多 ${MAX_FILES} 個`;
-  if (files.some((f) => f.size > MAX_FILE_BYTES)) return "附件單檔限 3 MB";
-  return null;
+  return pickedFilesError(files);
 }
 
 function fmtBytes(bytes: number): string {
@@ -70,7 +74,7 @@ export function AttachmentField({
       required={required}
       htmlFor={id}
       error={error}
-      hint={hint ?? `最多 ${MAX_FILES} 個，單檔 3 MB（照片或 PDF）`}
+      hint={hint ?? `最多 ${MAX_FILES} 個；照片會自動壓縮，PDF 單檔 3 MB`}
     >
       <input
         id={id}
@@ -83,25 +87,37 @@ export function AttachmentField({
       />
       {files.length > 0 && (
         <ul className="space-y-1.5">
-          {files.map((f, i) => (
-            <li
-              key={`${f.name}-${i}`}
-              className="flex items-center justify-between gap-3 rounded-xl bg-gray-50 px-3 py-2 text-sm text-gray-700"
-            >
-              <span className="flex min-w-0 items-center gap-2">
-                <Icon name="paperclip" className="h-4 w-4 shrink-0 text-gray-400" />
-                <span className="truncate">{f.name}</span>
-                <span className="shrink-0 text-xs text-gray-400">{fmtBytes(f.size)}</span>
-              </span>
-              <button
-                type="button"
-                className="shrink-0 text-xs text-red-600 hover:underline"
-                onClick={() => onChange(files.filter((_, idx) => idx !== i))}
+          {files.map((f, i) => {
+            // 選檔當下就標出過不了的檔（PDF 超過 3 MB、照片超過 25 MB、空檔）；送出時 validateFiles 會擋。
+            const problem = pickedFileError(f);
+            // 超過 3 MB 的照片會在上傳前壓縮，標註一下免得員工以為會被擋。
+            const willShrink = !problem && uploadKindOf(f) === "compress" && f.size > MAX_FILE_BYTES;
+            return (
+              <li
+                key={`${f.name}-${i}`}
+                className={`rounded-xl px-3 py-2 text-sm text-gray-700 ${problem ? "bg-red-50" : "bg-gray-50"}`}
               >
-                移除
-              </button>
-            </li>
-          ))}
+                <div className="flex items-center justify-between gap-3">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Icon name="paperclip" className="h-4 w-4 shrink-0 text-gray-400" />
+                    <span className="truncate">{f.name}</span>
+                    <span className="shrink-0 text-xs text-gray-400">
+                      {fmtBytes(f.size)}
+                      {willShrink ? "・上傳時自動壓縮" : ""}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className="shrink-0 text-xs text-red-600 hover:underline"
+                    onClick={() => onChange(files.filter((_, idx) => idx !== i))}
+                  >
+                    移除
+                  </button>
+                </div>
+                {problem && <p className="mt-1 text-xs text-red-600">{problem}</p>}
+              </li>
+            );
+          })}
         </ul>
       )}
       {files.length < MAX_FILES && (

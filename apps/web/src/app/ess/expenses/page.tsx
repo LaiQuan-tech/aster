@@ -22,9 +22,12 @@ import {
   advanceSubject,
   bindableAdvances,
   expenseErrorMessage,
+  receiptUploadFailedMessage,
+  RECEIPT_AUTO_CANCEL_REASON,
   type AdvanceRequestInfo,
 } from "@/lib/advance-view";
 import { localDateKey, todayKey } from "@/lib/ess-format";
+import { createThenUpload, pickedFileError } from "@/lib/upload-prep";
 
 /** GET /advances 每列附對應申請單的摘要（2026-10-11）；MyAdvance 沒宣告，這裡補。 */
 type AdvanceRow = MyAdvance & { request?: AdvanceRequestInfo | null; created_at?: string };
@@ -64,6 +67,8 @@ export default function EssExpensesPage() {
   const [incurredOn, setIncurredOn] = useState(today);
   const [note, setNote] = useState("");
   const [receipt, setReceipt] = useState<File | null>(null);
+  // 憑證欄是非受控的 <input type="file">：送出成功後換 key 讓它重建，才不會還顯示上一張的檔名。
+  const [receiptInputKey, setReceiptInputKey] = useState(0);
   const [busy, setBusy] = useState(false);
   // 出差軌（模組三第 2 條）：這類報銷必須綁一張已核准的出差單。
   const [trips, setTrips] = useState<MyTrip[]>([]);
@@ -118,17 +123,36 @@ export default function EssExpensesPage() {
     setError(null);
     setMessage(null);
     try {
-      const created = await fileExpense({
-        categoryId,
-        amount: Number(amount),
-        incurredOn,
-        note: note.trim() || undefined,
-        // 類別要求出差單時必帶；沒要求時選了就帶（自行墊付的出差憑證靠它對回哪一趟）。
-        tripRequestId: effectiveTripId || undefined,
-        advanceId: effectiveAdvanceId || undefined,
-      });
       // 憑證跟著單子一起送：事前審核可以省，憑證不能省。
-      if (receipt) await uploadExpenseReceipt(created.id, receipt);
+      // 順序（2026-10-12）：先準備憑證（照片壓縮＋3 MB 檢查），過不了就不建單；建單後才上傳，上傳失敗就撤回剛建的單。
+      // 以前先建單再傳，傳失敗時單已存在、表單又沒清，員工再按送出就多一筆沒有憑證的重複單。
+      const result = await createThenUpload({
+        file: receipt,
+        create: () =>
+          fileExpense({
+            categoryId,
+            amount: Number(amount),
+            incurredOn,
+            note: note.trim() || undefined,
+            // 類別要求出差單時必帶；沒要求時選了就帶（自行墊付的出差憑證靠它對回哪一趟）。
+            tripRequestId: effectiveTripId || undefined,
+            advanceId: effectiveAdvanceId || undefined,
+          }),
+        upload: (claim, file) => uploadExpenseReceipt(claim.id, file),
+        rollback: (claim) => cancelExpense(claim.id, RECEIPT_AUTO_CANCEL_REASON),
+      });
+      if (!result.ok) {
+        if (result.stage !== "upload") {
+          setError(expenseErrorMessage(result.error, "送出失敗"));
+          return;
+        }
+        // 表單保留，換個檔或稍後直接再按送出。撤回也失敗＝單還在：列表切到那筆的月份，員工才看得到、撤得掉。
+        if (!result.rolledBack && result.created.period !== period) setPeriod(result.created.period);
+        else await load();
+        setError(receiptUploadFailedMessage(result.error, result.rolledBack));
+        return;
+      }
+      const created = result.created;
       // 綁了預支（自己選的，或該趟出差的預支被自動綁上）→ 隨預支核銷；否則歸屬月結。
       const boundAdvance = effectiveAdvanceId || (created as { advanceId?: string | null }).advanceId;
       setMessage(
@@ -139,6 +163,7 @@ export default function EssExpensesPage() {
       setAmount("");
       setNote("");
       setReceipt(null);
+      setReceiptInputKey((k) => k + 1);
       setTripRequestId("");
       setAdvanceId("");
       await load();
@@ -306,8 +331,14 @@ export default function EssExpensesPage() {
             />
           </Field>
 
-          <Field label="憑證（發票／收據／乘車明細）" htmlFor="receipt">
+          <Field
+            label="憑證（發票／收據／乘車明細）"
+            htmlFor="receipt"
+            hint="照片會自動壓縮後上傳；PDF 單檔 3 MB 以內"
+            error={receipt ? (pickedFileError(receipt) ?? undefined) : undefined}
+          >
             <input
+              key={receiptInputKey}
               id="receipt"
               type="file"
               accept="image/*,application/pdf"
