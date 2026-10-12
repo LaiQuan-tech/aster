@@ -33,19 +33,23 @@ import {
 import { todayKey } from "@/lib/ess-format";
 import { invalidateEssState, useEssState } from "@/lib/ess-state";
 import { DEFAULT_SHIFT, type ShiftLike } from "@/lib/leave-hours";
-import { KIND_LABEL, approvalChainSummary, isRequestKind } from "@/lib/request-forms";
+import { KIND_LABEL, KIND_ORDER, approvalChainSummary, isRequestKind } from "@/lib/request-forms";
 import { FixPunchForm } from "./_components/FixPunchForm";
 import { KindSwitcher } from "./_components/KindSwitcher";
 import { LeaveForm } from "./_components/LeaveForm";
 import { MyRequests } from "./_components/MyRequests";
 import { OvertimeForm } from "./_components/OvertimeForm";
-import { PettyCashForm } from "./_components/PettyCashForm";
 import { SubmitSuccess } from "./_components/SubmitSuccess";
 import { TripForm } from "./_components/TripForm";
 import { WfhForm } from "./_components/WfhForm";
 import { describeError } from "./_components/form-shared";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** 只切到切換列上有的表單；舊的「預支」（petty_cash）深連結落回請假，下方「我的申請」照常顯示舊單。 */
+function isFormKind(k: string | null): k is RequestKind {
+  return isRequestKind(k) && KIND_ORDER.includes(k);
+}
 
 interface SuccessInfo {
   approverName: string | null;
@@ -70,10 +74,10 @@ function RequestsView() {
   // 進頁時確保 ESS 狀態新鮮（ensureFresh）；本頁不再需要 me（請假表單原本用它篩班表，班表功能已移除）。
   useEssState();
 
-  const [kind, setKind] = useState<RequestKind>(isRequestKind(urlKind) ? urlKind : "leave");
+  const [kind, setKind] = useState<RequestKind>(isFormKind(urlKind) ? urlKind : "leave");
   // 外部改了網址（例如通知深連結）就跟著切；本頁自己切換時已先 setKind，這裡不會再觸發。
   useEffect(() => {
-    if (isRequestKind(urlKind)) setKind(urlKind);
+    if (isFormKind(urlKind)) setKind(urlKind);
   }, [urlKind]);
 
   // 參考資料（best-effort：任何一支失敗都退化，不擋表單）
@@ -204,8 +208,6 @@ function RequestsView() {
         return <OvertimeForm key={`ot-${formKey}`} {...common} />;
       case "business_trip":
         return <TripForm key={`trip-${formKey}`} {...common} advanceThreshold={advanceThreshold} />;
-      case "petty_cash":
-        return <PettyCashForm key={`pc-${formKey}`} {...common} advanceThreshold={advanceThreshold} />;
       case "wfh":
         return <WfhForm key={`wfh-${formKey}`} {...common} />;
       default:

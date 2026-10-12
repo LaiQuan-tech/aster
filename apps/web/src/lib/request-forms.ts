@@ -44,8 +44,10 @@ export const KIND_SHORT: Record<RequestKind, string> = {
 /**
  * 種類切換列的順序＝可送出的種類。`wfh`（在家工作／加做申報，M2）排在加班之後：
  * 兩者都是「在正常班表之外的工作」，心智模型接近。
+ * 2026-10-12 業主決定：零用金只有公出時才需要，改在公出單選「先預支」；員工端拿掉獨立的「預支」表單。
+ * `petty_cash` 仍是合法 kind（舊單的顯示、簽核、核銷照常），只是不再出現在切換列。
  */
-export const KIND_ORDER: RequestKind[] = ["leave", "fix_punch", "ot", "wfh", "business_trip", "petty_cash"];
+export const KIND_ORDER: RequestKind[] = ["leave", "fix_punch", "ot", "wfh", "business_trip"];
 
 /** 加班單超過月上限時列上的標記（M1；送出即標記，不擋單）。 */
 export const BEYOND_CAP_LABEL = "超過月上限，另行給付";

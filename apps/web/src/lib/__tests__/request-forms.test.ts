@@ -84,7 +84,9 @@ describe("KIND_LABEL／KIND_SHORT／KIND_ORDER（2026-09-23 起含 wfh）", () =
     }
     expect(KIND_LABEL.wfh).toBe("在家工作");
     expect(KIND_SHORT.wfh).toBe("在家");
-    expect(KIND_ORDER).toEqual(["leave", "fix_punch", "ot", "wfh", "business_trip", "petty_cash"]);
+    // 2026-10-12 起員工端不再提供獨立的「預支」表單（零用金改在公出單選「先預支」）。
+    expect(KIND_ORDER).toEqual(["leave", "fix_punch", "ot", "wfh", "business_trip"]);
+    expect(KIND_ORDER).not.toContain("petty_cash");
     expect(isRequestKind("wfh")).toBe(true);
     expect(requestTitle(row({ kind: "wfh" }))).toBe("在家工作");
   });
