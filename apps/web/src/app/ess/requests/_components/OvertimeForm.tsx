@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * 加班：日期 ＋ 起訖時間 ＋ 休息扣除（分，預設 0）＋ 給付（加班費｜補休）＋ 事由（選填）。
- * body：`hours = 差 − 休息`、`payout`、reason 後綴「休息扣除：N 分鐘｜給付方式：X」。
+ * 加班：日期 ＋ 起訖時間 ＋ 給付（加班費｜補休）＋ 事由（選填）。2026-10-12 業主決定拿掉「休息扣除」欄位，
+ * 時數＝起訖差（結束不晚於開始視為跨日）。body：`hours`、`payout`、reason 後綴「給付方式：X」。
  */
 import { useId, useState, type FormEvent } from "react";
 import { Field, Input, Segmented } from "@/components/ess-ui";
@@ -18,16 +18,15 @@ const PAYOUT_OPTIONS: { value: Payout; label: string }[] = [
 ];
 
 export function OvertimeForm({ initialDate, submitting, submitError, onSubmit }: FormCommonProps) {
-  const ids = { date: useId(), start: useId(), end: useId(), brk: useId() };
+  const ids = { date: useId(), start: useId(), end: useId() };
   const [date, setDate] = useState(initialDate);
   const [startTime, setStartTime] = useState("18:00");
   const [endTime, setEndTime] = useState("20:00");
-  const [breakMinutes, setBreakMinutes] = useState("0");
   const [payout, setPayout] = useState<Payout>("pay");
   const [reason, setReason] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
 
-  const hours = overtimeHours(startTime, endTime, breakMinutes);
+  const hours = overtimeHours(startTime, endTime, 0);
   const clear = () => setLocalError(null);
 
   async function handleSubmit(event: FormEvent) {
@@ -37,7 +36,7 @@ export function OvertimeForm({ initialDate, submitting, submitError, onSubmit }:
       date,
       startTime,
       endTime,
-      breakMinutes,
+      breakMinutes: 0,
       payout,
       reason,
     });
@@ -87,21 +86,6 @@ export function OvertimeForm({ initialDate, submitting, submitError, onSubmit }:
         </Field>
       </div>
 
-      <Field label="休息扣除（分鐘）" htmlFor={ids.brk} hint="中途休息、用餐不算加班的分鐘數；沒有就填 0">
-        <Input
-          id={ids.brk}
-          type="number"
-          inputMode="numeric"
-          min={0}
-          step={5}
-          value={breakMinutes}
-          onChange={(e) => {
-            setBreakMinutes(e.target.value);
-            clear();
-          }}
-        />
-      </Field>
-
       <Field label="給付方式" required>
         <Segmented<Payout>
           aria-label="給付方式"
@@ -118,7 +102,7 @@ export function OvertimeForm({ initialDate, submitting, submitError, onSubmit }:
         {hours == null ? (
           <SummaryLine tone="red">請輸入起訖時間</SummaryLine>
         ) : hours <= 0 ? (
-          <SummaryLine tone="red">加班時數需大於 0，請確認起訖時間與休息扣除</SummaryLine>
+          <SummaryLine tone="red">加班時數需大於 0，請確認起訖時間</SummaryLine>
         ) : (
           <SummaryLine tone="brand">
             加班 {fmtHours(hours)} · {PAYOUT_LABEL[payout]}

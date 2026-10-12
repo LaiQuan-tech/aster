@@ -5,7 +5,7 @@
  * 送出 body 慣例（沿用舊頁面，後端契約 `apps/api/src/routes/requests.ts` createSchema）：
  *   - `startAt`／`endAt` 為 ISO（`toIso`：把本地 `YYYY-MM-DDTHH:mm` 轉 UTC ISO）。
  *   - `reason` 空字串一律省略（zod `min(1)`），最長 250。
- *   - 加班 reason 後綴「休息扣除：N 分鐘｜給付方式：X」、`hours = 差 − 休息`、`payout`。
+ *   - 加班 reason 後綴「給付方式：X」（有休息分鐘才加「休息扣除：N 分鐘」；員工端表單 10/12 起不再提供）、`hours = 差 − 休息`、`payout`。
  *   - 補卡 `segments:[{date,startTime:t,endTime:t,hours:0,type}]`、`startAt = endAt`。
  *   - 公出／出差沿用 `tripType / location / tripScope / estimatedCost / advanceRequested` 欄位名。
  *   - 零用金 `reason`（用途）必填、`startAt = endAt = now`；費用方式（2026-10-11）二選一：
@@ -399,10 +399,11 @@ function buildOvertime(form: OvertimeFormValues): BuildResult {
   const hours = overtimeHours(form.startTime, form.endTime, brk);
   if (hours == null) return { error: "請輸入起訖時間" };
   if (hours > 16) return { error: "加班時數超過 16 小時，請確認起訖時間" };
-  if (hours <= 0) return { error: "加班時數需大於 0，請確認起訖時間與休息扣除" };
+  if (hours <= 0) return { error: "加班時數需大於 0，請確認起訖時間" };
   const payout = form.payout === "comp_time" ? "comp_time" : "pay";
   const free = cleanReason(form.reason);
-  const reason = [free, `休息扣除：${brk} 分鐘`, `給付方式：${PAYOUT_LABEL[payout]}`].filter(Boolean).join("｜");
+  // 員工端表單已拿掉「休息扣除」（2026-10-12）；仍帶休息分鐘的呼叫端（舊資料、測試）才加後綴。
+  const reason = [free, brk > 0 ? `休息扣除：${brk} 分鐘` : null, `給付方式：${PAYOUT_LABEL[payout]}`].filter(Boolean).join("｜");
   if (reason.length > REASON_MAX) return { error: `事由請在 ${REASON_MAX - (reason.length - (free?.length ?? 0))} 字以內` };
   const endDate = addDaysIfCrossesMidnight(form.date, form.startTime, form.endTime);
   const body: CreateRequestBody = {

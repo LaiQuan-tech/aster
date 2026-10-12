@@ -151,11 +151,11 @@ describe("buildCreateBody（六種 kind）", () => {
     expect(at(body.endAt)).toBe(local("2026-09-18T20:30:00"));
     // 沒填事由：後綴仍在；休息空字串視為 0
     const bare = ok(buildCreateBody("ot", { ...OT, reason: "", breakMinutes: "", payout: "pay" }));
-    expect(bare.reason).toBe("休息扣除：0 分鐘｜給付方式：加班費");
+    expect(bare.reason).toBe("給付方式：加班費");
     expect(bare.hours).toBe(2.5);
     expect(overtimeHours("22:00", "01:00", 0)).toBe(3); // 跨日
     expect(buildCreateBody("ot", { ...OT, endTime: "18:20", breakMinutes: "30" })).toEqual({
-      error: "加班時數需大於 0，請確認起訖時間與休息扣除",
+      error: "加班時數需大於 0，請確認起訖時間",
     });
   });
 
