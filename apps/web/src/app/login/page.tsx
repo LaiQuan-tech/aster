@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
+import { authErrorMessage, validateLoginInput } from "@/lib/auth-error-messages";
 import { useSession } from "@/lib/use-session";
 
 const REMEMBER_KEY = "aster_login";
@@ -16,10 +17,6 @@ export default function LoginPage() {
   const [remember, setRemember] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const resolveLoginEmail = (value: string) => {
-    const normalized = value.trim();
-    return normalized.toLowerCase() === "demo" ? "demo@daoteng.demo" : normalized;
-  };
 
   // Already signed in → skip the form.
   useEffect(() => {
@@ -53,21 +50,28 @@ export default function LoginPage() {
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    // 登入只認 Email：員工編號、舊的 demo 帳號這類不像 Email 的輸入，在這裡就用中文擋下，不打到 Supabase
+    // （以前打過去會回英文的 "Invalid login credentials"）。表單是 noValidate，必填檢查也在這裡。
+    const check = validateLoginInput(email, password);
+    if (!check.ok) {
+      setError(check.error);
+      return;
+    }
     setSubmitting(true);
     try {
       const supabase = getSupabaseBrowser();
       const { error: signInError } = await supabase.auth.signInWithPassword({
-        email: resolveLoginEmail(email),
+        email: check.email,
         password,
       });
       if (signInError) {
-        setError(signInError.message);
+        setError(authErrorMessage(signInError, "sign-in"));
         return;
       }
       // 記住帳號：勾選則只存 email 到 localStorage（絕不存密碼），取消則清除。
       try {
         if (remember) {
-          localStorage.setItem(REMEMBER_KEY, JSON.stringify({ email: email.trim() }));
+          localStorage.setItem(REMEMBER_KEY, JSON.stringify({ email: check.email }));
         } else {
           localStorage.removeItem(REMEMBER_KEY);
         }
@@ -76,7 +80,7 @@ export default function LoginPage() {
       }
       router.replace("/ess");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "登入失敗");
+      setError(authErrorMessage(err, "sign-in"));
     } finally {
       setSubmitting(false);
     }
@@ -86,6 +90,7 @@ export default function LoginPage() {
     <main className="min-h-dvh flex items-center justify-center bg-gray-50 p-4">
       <form
         onSubmit={onSubmit}
+        noValidate
         className="w-full max-w-sm rounded-xl bg-white p-8 shadow-sm border border-gray-100"
       >
         <h1
@@ -97,12 +102,15 @@ export default function LoginPage() {
         <p className="text-sm text-gray-500 mb-6">亞斯特設計顧問 數位化系統</p>
 
         <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="email">
-          Email / 帳號
+          Email
         </label>
         <input
           id="email"
-          type="text"
+          type="email"
+          inputMode="email"
           autoComplete="username"
+          autoCapitalize="none"
+          spellCheck={false}
           required
           value={email}
           onChange={(e) => setEmail(e.target.value)}

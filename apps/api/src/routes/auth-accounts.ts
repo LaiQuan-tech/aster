@@ -58,7 +58,9 @@ const changePasswordSchema = z.object({
 
 function sendAccountError(res: Response, err: unknown): boolean {
   if (err instanceof AccountError) {
-    res.status(err.status).json({ error: err.code, message: err.message })
+    // extra（例如 password_rejected 的 reasons）放前面：萬一帶了 error／message 也蓋不掉錯誤碼與說明；
+    // 沒有 extra 的錯誤，回應形狀跟以前完全一樣 { error, message }。
+    res.status(err.status).json({ ...err.extra, error: err.code, message: err.message })
     return true
   }
   return false
@@ -229,7 +231,8 @@ authAccountsRouter.post("/auth/forgot-password", async (req: Request, res: Respo
   }
 })
 
-// POST /me/password — 舊密碼錯 401 invalid_current_password。
+// POST /me/password — 舊密碼錯 401 invalid_current_password；新密碼被 GoTrue 擋（太短／字元不足／外洩名單）
+// 422 password_rejected＋reasons（services/password-update-error.ts）；新舊相同 400 same_password。
 authAccountsRouter.post(
   "/me/password",
   requireAuth,

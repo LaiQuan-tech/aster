@@ -7,6 +7,7 @@ import { logger } from "../lib/logger.js"
 import { writeAuditLog } from "./audit.js"
 import { isPlatformAdminEmail } from "../middleware/platform.js"
 import { loadPeriodUnlockPolicy } from "./period-lock.js"
+import { passwordUpdateRejectionFrom } from "./password-update-error.js"
 import {
   CREDENTIALS_MESSAGE,
   PLATFORM_ADMIN_ROLE,
@@ -56,6 +57,8 @@ export class AccountError extends Error {
     public readonly code: string,
     public readonly status: number,
     message?: string,
+    /** 附加進 HTTP 回應 JSON 的欄位（例如 password_rejected 的 reasons）；回應時不會蓋掉 error／message。 */
+    public readonly extra?: Record<string, unknown>,
   ) {
     super(message ?? code)
     this.name = "AccountError"
@@ -822,7 +825,13 @@ export async function changeOwnPassword(opts: {
   await supabaseAdmin.auth.admin.signOut(data.session.access_token, "local").catch(() => undefined)
 
   const { error: updErr } = await supabaseAdmin.auth.admin.updateUserById(opts.userId, { password: opts.newPassword })
-  if (updErr) throw new Error(`changeOwnPassword: ${updErr.message}`)
+  if (updErr) {
+    // GoTrue 擋下新密碼（太短／字元不足／在外洩名單）或與舊密碼相同 → 4xx，畫面才顯示得出中文原因，
+    // 不是 500 internal_server_error（services/password-update-error.ts）。其他錯誤維持原樣往上丟（500）。
+    const rejected = passwordUpdateRejectionFrom(updErr)
+    if (rejected) throw new AccountError(rejected.code, rejected.status, rejected.message, rejected.extra)
+    throw new Error(`changeOwnPassword: ${updErr.message}`)
+  }
   await clearMustChangePassword({ tenantId: opts.tenantId, userId: opts.userId, context: "POST /me/password" })
 }
 

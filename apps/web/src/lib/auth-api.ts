@@ -6,8 +6,9 @@
  * employmentType、essTabs）在這裡用自己的型別擴充，讀取時一律 optional，舊 API
  * 部署前後都不會炸。
  */
-import { apiFetch } from "./api-client";
+import { apiFetch, type ApiError } from "./api-client";
 import type { AccountsFeatureSettings } from "./admin-api";
+import { weakPasswordMessage } from "./auth-error-messages";
 
 /* ------------------------------------------------------------------ me ----- */
 
@@ -27,7 +28,10 @@ export function getMeAuth() {
   return apiFetch<MeAuth>("/me");
 }
 
-/** 舊密碼換新密碼。舊密碼錯 → 401 invalid_current_password。 */
+/**
+ * 舊密碼換新密碼。舊密碼錯 → 401 invalid_current_password；新密碼被擋（太短／字元不足／外洩名單）→
+ * 422 password_rejected（回應 body 帶 reasons，文案見 accountErrorMessage）。
+ */
 export function changeMyPassword(currentPassword: string, newPassword: string) {
   return apiFetch<{ ok: true }>("/me/password", {
     method: "POST",
@@ -160,6 +164,13 @@ export function accountsFeatureOf(features: Record<string, unknown> | null | und
 /** API 回的 4xx 錯誤碼（409／422／404）→ 給 HR 看的中文；apiFetch 的訊息格式是 `[status] code`。 */
 export function accountErrorMessage(err: unknown, fallback = "操作失敗"): string {
   const message = err instanceof Error ? err.message : "";
+  // 員工自己改密碼被 GoTrue 擋下（POST /me/password → 422 password_rejected）：依 API 回應 body 的 reasons 挑
+  // 文案。必須先於下面的子字串比對；錯誤碼刻意不含 "weak_password"，才不會被 HR 配發初始密碼那句（要去設定
+  // 開關）吃掉——員工自己改密碼沒有那個開關。
+  if (err instanceof Error && ((err as ApiError).code === "password_rejected" || message.includes("password_rejected"))) {
+    const body = (err as ApiError).body as { reasons?: unknown } | null | undefined;
+    return weakPasswordMessage(body?.reasons);
+  }
   const table: Record<string, string> = {
     no_email: "此員工沒有 Email：請先在 My Data 填公司或私人信箱，或在邀請時指定",
     no_account: "此員工尚未綁定登入帳號，請改用「寄邀請信」",

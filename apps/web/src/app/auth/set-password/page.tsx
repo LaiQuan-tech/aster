@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
 import { markPasswordDone } from "@/lib/auth-api";
+import { authErrorMessage } from "@/lib/auth-error-messages";
 import type { ApiError } from "@/lib/api-client";
 import { resetMustChangeCache } from "@/components/AuthGate";
 
@@ -89,9 +90,8 @@ function SetPasswordInner() {
         const supabase = getSupabaseBrowser();
         const { error: updErr } = await supabase.auth.updateUser({ password });
         if (updErr) {
-          setError(
-            /different from the old password/i.test(updErr.message) ? "新密碼不可與舊密碼相同" : updErr.message,
-          );
+          // GoTrue 的錯誤是英文原文（弱密碼／外洩、新舊相同、連結失效、連線失敗…），一律轉中文，不直接秀給使用者。
+          setError(authErrorMessage(updErr, "set-password"));
           setPhase("form");
           return;
         }
@@ -113,7 +113,7 @@ function SetPasswordInner() {
       setPhase("done");
       router.replace("/ess");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "設定失敗");
+      setError(authErrorMessage(err, "set-password"));
       setPhase("form");
     }
   }
