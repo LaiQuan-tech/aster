@@ -6,9 +6,9 @@ import { MonthPicker } from "@/components/MonthPicker";
 import { AttendanceSheetTable, SheetMonthAnomalies } from "@/components/AttendanceSheetTable";
 import { Button, Card, InlineError, Pill, type PillTone } from "@/components/ess-ui";
 import { useEssState } from "@/lib/ess-state";
-import { getMyApprovedTrips, type MyTrip } from "@/lib/ess-api";
+import { getRequests, type LeaveRequest } from "@/lib/ess-api";
 import { todayKey } from "@/lib/ess-format";
-import { findNoPunchDates, isTripsForbidden, noPunchSummary } from "@/lib/sheet-no-punch";
+import { findNoPunchDates, isRequestsForbidden, noPunchSummary } from "@/lib/sheet-no-punch";
 import {
   getMyAttendanceSheet,
   listAttendanceSheets,
@@ -26,9 +26,10 @@ import {
 } from "@/lib/attendance-sheets-api";
 
 /**
- * 本人已核准的出差／公出單（「無打卡紀錄」判斷用）：讀取中＝先不標；讀不到（403 以外的錯誤）＝這次整張不標。
+ * 本人已核准的申請單（「無打卡紀錄」判斷用：請假、在家工作、補卡、出差／公出）：讀取中＝先不標；
+ * 讀不到（403 以外的錯誤）＝這次整張不標。
  */
-type TripsState = { status: "loading" } | { status: "failed" } | { status: "ready"; trips: MyTrip[] };
+type ApprovedState = { status: "loading" } | { status: "failed" } | { status: "ready"; requests: LeaveRequest[] };
 
 function fmtDateTime(iso: string | null): string {
   if (!iso) return "—";
@@ -55,7 +56,7 @@ export default function AttendanceSheetPage() {
   const [submitting, setSubmitting] = useState(false);
   // null = 尚未載入；[] = 載入完成但沒有（或非主管、403 → 隱藏區塊）
   const [pending, setPending] = useState<SheetListItem[] | null>(null);
-  const [trips, setTrips] = useState<TripsState>({ status: "loading" });
+  const [approved, setApproved] = useState<ApprovedState>({ status: "loading" });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -91,31 +92,36 @@ export default function AttendanceSheetPage() {
     };
   }, [period]);
 
-  // 「無打卡紀錄」要排除已核准的出差／公出：讀一次本人的單子（不分月份，全部帶回來由前端比對日期）。
+  // 「無打卡紀錄」要排除已核准的請假／在家工作／補卡／出差公出：月表日資料是快照，快照之後才核准的單子
+  // 在月表上看不到，所以讀一次本人所有已核准的單（不分月份、不分種類，由 lib/sheet-no-punch.ts 挑種類比對日期）。
   useEffect(() => {
     let active = true;
-    getMyApprovedTrips()
+    getRequests({ scope: "mine", status: "approved" })
       .then((res) => {
         if (!active) return;
-        setTrips(Array.isArray(res?.requests) ? { status: "ready", trips: res.requests } : { status: "failed" });
+        setApproved(Array.isArray(res?.requests) ? { status: "ready", requests: res.requests } : { status: "failed" });
       })
       .catch((err) => {
         if (!active) return;
-        // 403＝員工端「申請」分頁沒開，這個人送不了出差單 → 當作沒有出差；其他錯誤 → 這次整張不標（避免誤標）。
-        setTrips(isTripsForbidden(err) ? { status: "ready", trips: [] } : { status: "failed" });
+        // 403＝員工端「申請」分頁沒開，這個人送不了申請單 → 當作沒有核准單；其他錯誤 → 這次整張不標（避免誤標）。
+        setApproved(isRequestsForbidden(err) ? { status: "ready", requests: [] } : { status: "failed" });
       });
     return () => {
       active = false;
     };
   }, []);
 
-  // 整天沒打卡又沒請假／在家／出差公出的上班日（只在本人月表標；後台、主管審核頁、匯出都不標）。
+  // 身分類別（GET /me）：只有固定上班日的人（正職、約聘）才標。/me 還沒回來、失敗，或登入身分不是這張月表的本人
+  // → undefined → 整張不標（工讀／兼職一週只來幾天，平日沒打卡很正常；不知道就寧可不標）。
+  const employmentType = me && sheet && me.id === sheet.employeeId ? me.employmentType : undefined;
+
+  // 整天沒打卡又沒請假／在家／補卡／出差公出的上班日（只在本人月表標；後台、主管審核頁、匯出、列印都不標）。
   const noPunchDates = useMemo(
     () =>
-      sheet && trips.status === "ready"
-        ? findNoPunchDates(sheet, { today: todayKey(SHEET_TIME_ZONE), trips: trips.trips })
+      sheet && approved.status === "ready"
+        ? findNoPunchDates(sheet, { today: todayKey(SHEET_TIME_ZONE), requests: approved.requests, employmentType })
         : [],
-    [sheet, trips],
+    [sheet, approved, employmentType],
   );
   const noPunchDateSet = useMemo(() => new Set(noPunchDates), [noPunchDates]);
 
@@ -195,8 +201,8 @@ export default function AttendanceSheetPage() {
               preferenceScope="ess"
               noPunchDates={noPunchDateSet}
             />
-            {/* 異常區：月份級異常列印時照印；無打卡摘要、送出前檢查與送出鈕不印。 */}
-            <div className="mt-4 space-y-2">
+            {/* 異常區（月份級異常、無打卡摘要、送出前檢查、送出鈕）整塊不印：印出來的出勤統計表跟 10/12 改版前一樣。 */}
+            <div className="no-print mt-4 space-y-2">
               <SheetMonthAnomalies anomalies={sheet.monthAnomalies} audience="ess" />
               {noPunchText && (
                 <p className="no-print rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">

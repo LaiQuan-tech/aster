@@ -47,6 +47,8 @@ import { NO_PUNCH_HINT, NO_PUNCH_LABEL } from "@/lib/sheet-no-punch";
  *     `showMonthAnomalies` 有帶就放在表格上方（後台詳細頁、主管審核頁），員工本人頁放在頁面下方的異常區。
  *   • `noPunchDates`（只有員工本人月表傳）：整天沒打卡又沒請假／在家／出差公出的上班日，異常欄顯示琥珀色
  *     「無打卡紀錄」、預設顯示；不寫進 anomalies，不需要填說明、不擋送出（判斷規則見 lib/sheet-no-punch.ts）。
+ *   • 兩者都只上畫面、不印（.no-print）：印出來的出勤統計表跟改版前一樣——無打卡的日子異常欄印「—」、
+ *     列底色不變；後台也不會把「尚未設定薪資結構」這類內部訊息印在統計表上。
  */
 
 const WEEKDAY_LABEL = ["日", "一", "二", "三", "四", "五", "六"];
@@ -116,7 +118,9 @@ const ALERT_LABEL: Record<SheetTotals["overtimeMonthlyAlert"], string> = {
 
 function rowTone(day: SheetDayView, noPunch = false): string {
   if (day.anomalies.some((a) => a.severity === "error")) return "bg-red-50/70";
-  if (noPunch || day.anomalies.some((a) => a.severity === "warn")) return "bg-amber-50/70";
+  if (day.anomalies.some((a) => a.severity === "warn")) return "bg-amber-50/70";
+  // 「無打卡紀錄」只是畫面上的提示：琥珀底只上螢幕，列印維持原本（只標上班日，原本沒有底色）。
+  if (noPunch) return "bg-amber-50/70 print:bg-transparent";
   if (day.dayType !== "workday") return "bg-gray-50";
   return "";
 }
@@ -124,7 +128,8 @@ function rowTone(day: SheetDayView, noPunch = false): string {
 /**
  * 月份級異常區塊（2026-10-12）：配色與日級異常一致（error 紅、warn 琥珀、info 灰），顯示 API 的中文 message
  * （空白時用代碼對照的中文）。不需要說明、不擋送出。`audience="ess"`（員工端）不顯示只有 HR 能處理的項目
- * （未設定薪資結構）。列印時照印（外層本來就不印的除外）。沒有要顯示的就整塊不出現。
+ * （未設定薪資結構）。只上畫面、列印不印（.no-print）：出勤統計表的列印版面維持改版前的樣子，後台「尚未設定
+ * 薪資結構」這類內部訊息也不會印出去。沒有要顯示的就整塊不出現。
  */
 export function SheetMonthAnomalies({
   anomalies,
@@ -136,7 +141,7 @@ export function SheetMonthAnomalies({
   const items = visibleMonthAnomalies(anomalies, audience);
   if (items.length === 0) return null;
   return (
-    <section aria-label="本月異常" className="rounded-xl border border-gray-100 p-3">
+    <section aria-label="本月異常" className="no-print rounded-xl border border-gray-100 p-3">
       <p className="mb-2 text-xs font-medium text-gray-500">本月異常</p>
       <ul className="space-y-1.5">
         {items.map((item, i) => (
@@ -585,11 +590,13 @@ function AnomalyCell({
   return (
     <div className="space-y-1">
       <div className="flex flex-wrap gap-1">
+        {/* 「無打卡紀錄」只上畫面：列印不印標籤，那天沒有其他異常時照原本印「—」。 */}
         {noPunch && (
-          <span title={NO_PUNCH_HINT} className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${SEVERITY_STYLE.warn}`}>
+          <span title={NO_PUNCH_HINT} className={`no-print rounded-full px-2 py-0.5 text-[11px] font-medium ${SEVERITY_STYLE.warn}`}>
             {NO_PUNCH_LABEL}
           </span>
         )}
+        {noPunch && day.anomalies.length === 0 && <span className="hidden text-gray-300 print:inline">—</span>}
         {day.anomalies.map((anomaly, i) => (
           <span
             key={`${anomaly.code}-${i}`}

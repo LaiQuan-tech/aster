@@ -121,6 +121,13 @@ describe("accountErrorMessage — 員工改密碼被擋（password_rejected＋re
     );
   });
 
+  it("reasons 含 too_long（新密碼超過 72 bytes）→ 密碼太長，請改短一點；不露出 too_long 或錯誤碼", () => {
+    const text = accountErrorMessage(apiError(422, "password_rejected", { reasons: ["too_long"] }), "修改密碼失敗");
+    expect(text).toBe("密碼太長，請改短一點（最多 72 個位元組，中文約 24 字）");
+    expect(text).not.toContain("too_long");
+    expect(text).not.toContain("password_rejected");
+  });
+
   it("同一支修改密碼 API 的其他錯誤文案不變", () => {
     expect(accountErrorMessage(apiError(401, "invalid_current_password"))).toBe("目前密碼不正確");
     expect(accountErrorMessage(apiError(400, "same_password"))).toBe("新密碼不可與目前密碼相同");
@@ -172,6 +179,13 @@ describe("changeMyPassword → accountErrorMessage（走真的 apiFetch，fetch 
   it("422 password_rejected 沒帶 reasons → 通用句", async () => {
     stubFetch(422, { error: "password_rejected", message: "x" });
     expect(accountErrorMessage(await caught(), "修改密碼失敗")).toBe("這組密碼太弱或曾外洩，請換一組");
+  });
+
+  it("422 password_rejected＋reasons=['too_long']（API 擋下超過 72 bytes 的新密碼）→ 密碼太長", async () => {
+    stubFetch(422, { error: "password_rejected", message: "密碼太長，請改短一點（最多 72 個位元組，中文約 24 字）", reasons: ["too_long"] });
+    const err = await caught();
+    expect((err as Error).message).toBe("[422] password_rejected");
+    expect(accountErrorMessage(err, "修改密碼失敗")).toBe("密碼太長，請改短一點（最多 72 個位元組，中文約 24 字）");
   });
 
   it("401 invalid_current_password 仍是原本的文案", async () => {

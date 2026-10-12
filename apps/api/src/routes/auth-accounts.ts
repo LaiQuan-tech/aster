@@ -16,6 +16,7 @@ import {
 import { seedHireAcknowledgements } from "../services/onboarding-signatures.js"
 import { assertCanManageCredentials, isProtectedAccount, type PrivilegeCaller } from "../services/privileged-accounts.js"
 import { loadPeriodUnlockPolicy } from "../services/period-lock.js"
+import { PASSWORD_TOO_LONG_REASON, passwordTooLong, passwordTooLongRejection } from "../services/password-update-error.js"
 
 /**
  * A1 帳號與邀請信：
@@ -53,8 +54,24 @@ const forgotSchema = z.object({ email: z.string().trim().email() })
 
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(1, "currentPassword is required"),
-  newPassword: z.string().min(8, "newPassword must be at least 8 characters"),
+  newPassword: z
+    .string()
+    .min(8, "newPassword must be at least 8 characters")
+    // bcrypt 上限：UTF-8 超過 72 bytes GoTrue 一定拒絕（以前落成 500）。只有這一項不過時回 422 password_rejected
+    // ＋reasons ["too_long"]（見 onlyPasswordTooLong），形狀與 GoTrue 擋下弱密碼相同。
+    .refine((value) => !passwordTooLong(value), {
+      message: "newPassword must be at most 72 bytes (UTF-8)",
+      params: { reason: PASSWORD_TOO_LONG_REASON },
+    }),
 })
+
+/** zod 只有「新密碼太長」這一項不過（其他欄位都對）→ 回 422 password_rejected，不是一般的 400 invalid_body。 */
+function onlyPasswordTooLong(error: z.ZodError): boolean {
+  return (
+    error.issues.length > 0 &&
+    error.issues.every((issue) => issue.code === z.ZodIssueCode.custom && issue.params?.reason === PASSWORD_TOO_LONG_REASON)
+  )
+}
 
 function sendAccountError(res: Response, err: unknown): boolean {
   if (err instanceof AccountError) {
@@ -232,7 +249,8 @@ authAccountsRouter.post("/auth/forgot-password", async (req: Request, res: Respo
 })
 
 // POST /me/password — 舊密碼錯 401 invalid_current_password；新密碼被 GoTrue 擋（太短／字元不足／外洩名單）
-// 422 password_rejected＋reasons（services/password-update-error.ts）；新舊相同 400 same_password。
+// 422 password_rejected＋reasons（services/password-update-error.ts）；新密碼超過 72 bytes 422 password_rejected
+// ＋reasons ["too_long"]（zod 先擋，不打 GoTrue）；新舊相同 400 same_password。
 authAccountsRouter.post(
   "/me/password",
   requireAuth,
@@ -247,6 +265,11 @@ authAccountsRouter.post(
     }
     const parsed = changePasswordSchema.safeParse(req.body ?? {})
     if (!parsed.success) {
+      if (onlyPasswordTooLong(parsed.error)) {
+        const tooLong = passwordTooLongRejection()
+        sendAccountError(res, new AccountError(tooLong.code, tooLong.status, tooLong.message, tooLong.extra))
+        return
+      }
       res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
       return
     }

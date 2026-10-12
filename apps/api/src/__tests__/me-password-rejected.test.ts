@@ -35,6 +35,7 @@ import { fake, TENANT_ID } from "./helpers/fake-supabase.js"
 /**
  * POST /me/password 的錯誤回應（2026-10-12：改密碼遇弱密碼／外洩以前一律 500 internal_server_error）：
  *   • GoTrue 擋新密碼（太短／字元不足／外洩）→ 422 { error: "password_rejected", message, reasons }
+ *   • 新密碼超過 72 bytes（zod 先擋，或 GoTrue 回密碼過長）→ 422 同形狀，reasons ["too_long"]
  *   • GoTrue 說新舊相同 → 400 same_password（跟路由預先檢查的既有回應同形狀）
  *   • 其他 GoTrue 錯誤 → 照舊 500
  *   • 舊密碼錯 → 401 invalid_current_password（形狀不變）；成功 → 200 { ok: true }
@@ -130,6 +131,56 @@ describe("POST /me/password — GoTrue 擋下新密碼", () => {
     const network = await post(GOOD_BODY)
     expect(network.status).toBe(500)
     expect(network.body).toEqual({ error: "internal_server_error" })
+  })
+})
+
+/**
+ * 新密碼超過 72 個位元組（UTF-8，bcrypt 上限）：以前 zod 只檢查至少 8 碼，GoTrue 回錯落成 500。
+ * 現在 zod 先擋 → 422 password_rejected＋reasons ["too_long"]（不驗舊密碼、不打 GoTrue）；GoTrue 回的同類錯誤也一樣。
+ */
+describe("POST /me/password — 新密碼太長（> 72 bytes）", () => {
+  const TOO_LONG_BODY = {
+    error: "password_rejected",
+    message: "密碼太長，請改短一點（最多 72 個位元組，中文約 24 字）",
+    reasons: ["too_long"],
+  }
+
+  it.each([
+    ["英數 73 字", "a".repeat(73)],
+    ["中文 25 字（75 bytes，字數沒超過也擋）", "密".repeat(25)],
+    ["很長", "x".repeat(500)],
+  ])("%s → 422 password_rejected＋reasons too_long，不驗舊密碼、不打 GoTrue", async (_label, newPassword) => {
+    const res = await post({ currentPassword: "old-pass-1234", newPassword })
+    expect(res.status, JSON.stringify(res.body)).toBe(422)
+    expect(res.body).toEqual(TOO_LONG_BODY)
+    expect(anonSignIn).not.toHaveBeenCalled()
+    expect(adminAuth.updateUserById).not.toHaveBeenCalled()
+    expect(fake.db.employees[0]!.must_change_password).toBe(true)
+  })
+
+  it("剛好 72 bytes（中文 24 字、英數 72 字）照常送 GoTrue → 200", async () => {
+    adminAuth.updateUserById.mockResolvedValue({ data: { user: { id: USER_ID } }, error: null })
+    for (const newPassword of ["密".repeat(24), "a".repeat(72)]) {
+      const res = await post({ currentPassword: "old-pass-1234", newPassword })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      expect(adminAuth.updateUserById).toHaveBeenLastCalledWith(USER_ID, { password: newPassword })
+    }
+  })
+
+  it("GoTrue 回密碼過長（400 validation_failed）→ 一樣 422 password_rejected＋reasons too_long，不是 500", async () => {
+    adminAuth.updateUserById.mockResolvedValue({
+      data: { user: null },
+      error: new AuthApiError("Password cannot be longer than 72 characters", 400, "validation_failed"),
+    })
+    const res = await post(GOOD_BODY)
+    expect(res.status).toBe(422)
+    expect(res.body).toEqual(TOO_LONG_BODY)
+  })
+
+  it("太長之外還有別的欄位錯（沒帶目前密碼）→ 照舊 400 invalid_body", async () => {
+    const res = await post({ currentPassword: "", newPassword: "a".repeat(73) })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("invalid_body")
   })
 })
 

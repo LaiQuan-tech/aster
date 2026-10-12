@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi, type MockInstance } from "vitest";
 import {
   AuthApiError,
   AuthInvalidCredentialsError,
@@ -7,11 +7,17 @@ import {
   AuthWeakPasswordError,
 } from "@supabase/supabase-js";
 import {
+  AUTH_UNKNOWN_ERROR_MESSAGE,
   LOGIN_EMAIL_REQUIRED_MESSAGE,
   LOGIN_PASSWORD_REQUIRED_MESSAGE,
+  PASSWORD_MAX_BYTES,
+  PASSWORD_TOO_LONG_MESSAGE,
   authErrorMessage,
   classifyAuthError,
   looksLikeEmail,
+  passwordByteLength,
+  passwordRejectedMessage,
+  passwordTooLong,
   validateLoginInput,
   weakPasswordMessage,
 } from "../auth-error-messages";
@@ -19,16 +25,34 @@ import {
 /**
  * lib/auth-error-messages.ts（純函式）：
  *   - weakPasswordMessage：GoTrue 的 reasons（length｜characters｜pwned）→ 中文，含 pwned 最優先
+ *   - passwordRejectedMessage／passwordTooLong：超過 72 bytes 的密碼（API 的 password_rejected reasons too_long）
  *   - classifyAuthError／authErrorMessage：登入頁（sign-in）與首次設定密碼頁（set-password）的 Supabase Auth 錯誤 → 中文，
- *     依 code → name → status 判斷，message 只當後備；任何情況都不能把英文原文整句丟給使用者
+ *     依 code → name → status 判斷，message 只當後備；任何情況都不能把英文原文整句或錯誤代碼丟給使用者
+ *     （認不得的錯誤代碼改用 console.warn 記錄）
  *   - looksLikeEmail／validateLoginInput：登入頁送出前的輸入檢查（不像 Email 就不呼叫 Supabase）
  */
 
 const GOTRUE_PWNED = "Password is known to be weak and easy to guess, please choose a different one.";
 const GOTRUE_SHORT = "Password should be at least 8 characters.";
+/** GoTrue 對超過 72 bytes 的密碼（bcrypt 上限）：400 validation_failed。 */
+const GOTRUE_TOO_LONG = "Password cannot be longer than 72 characters";
 
 /** 有一整句英文（兩個以上的英文單字連在一起）＝把原文丟給使用者了。 */
 const ENGLISH_SENTENCE = /[A-Za-z]{2,}\s+[A-Za-z]{2,}/;
+/** GoTrue 的錯誤代碼（snake_case）出現在畫面上＝把代碼丟給使用者了。 */
+const SNAKE_CASE_CODE = /[a-z0-9]+_[a-z0-9_]+/i;
+
+const SIGN_IN_GENERIC = "登入失敗，請確認 Email 與密碼；若持續發生請洽 HR";
+const SET_PASSWORD_GENERIC = "設定密碼失敗，請重新開啟設定連結或洽 HR";
+
+// 認不得的錯誤會 console.warn 記代碼：整個檔案都接起來（不污染測試輸出），需要的測試再檢查內容。
+let warnSpy: MockInstance<typeof console.warn>;
+beforeEach(() => {
+  warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+});
+afterEach(() => {
+  warnSpy.mockRestore();
+});
 
 describe("weakPasswordMessage（reasons → 中文）", () => {
   it("含 pwned → 太常見或曾外洩", () => {
@@ -130,16 +154,76 @@ describe("authErrorMessage — 首次設定密碼頁（set-password）", () => {
     expect(authErrorMessage("Failed to fetch", "set-password")).toBe(offline);
   });
 
-  it("不認得的錯誤 → 通用中文＋錯誤代碼，不露英文原文", () => {
+  it("不認得的錯誤 → 只顯示中文（重新開啟連結或洽 HR），代碼不上畫面、改記在 console.warn", () => {
     const text = authErrorMessage(new AuthApiError("Database error updating user", 500, "unexpected_failure"), "set-password");
-    expect(text).toBe("設定密碼失敗，請稍後再試（錯誤代碼：unexpected_failure）");
+    expect(text).toBe(SET_PASSWORD_GENERIC);
+    expect(text).toBe(AUTH_UNKNOWN_ERROR_MESSAGE["set-password"]);
     expect(text).not.toContain("Database");
-    // 沒有 code → 不附代碼
-    expect(authErrorMessage(new Error("something odd happened"), "set-password")).toBe("設定密碼失敗，請稍後再試");
+    expect(text).not.toContain("unexpected_failure");
+    expect(text).not.toContain("錯誤代碼");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[1]).toEqual({ code: "unexpected_failure", name: "AuthApiError", status: 500 });
+    // 沒有 code → 一樣是通用中文
+    expect(authErrorMessage(new Error("something odd happened"), "set-password")).toBe(SET_PASSWORD_GENERIC);
   });
 
-  it("Supabase 暫時故障（AuthRetryableFetchError 5xx）不說成網路問題", () => {
+  it("validation_failed（輸入驗證錯誤，再試也一樣）→ 不叫人「稍後再試」", () => {
+    const text = authErrorMessage(new AuthApiError("Unable to validate email address: invalid format", 400, "validation_failed"), "set-password");
+    expect(text).toBe(SET_PASSWORD_GENERIC);
+    expect(text).not.toContain("稍後再試");
+    expect(warnSpy.mock.calls[0]?.[1]).toMatchObject({ code: "validation_failed", status: 400 });
+  });
+
+  it("密碼超過 72 bytes（GoTrue 400 validation_failed）→ 密碼太長，請改短一點", () => {
+    expect(PASSWORD_TOO_LONG_MESSAGE).toBe("密碼太長，請改短一點（最多 72 個位元組，中文約 24 字）");
+    expect(authErrorMessage(new AuthApiError(GOTRUE_TOO_LONG, 400, "validation_failed"), "set-password")).toBe(PASSWORD_TOO_LONG_MESSAGE);
+    expect(classifyAuthError(new AuthApiError(GOTRUE_TOO_LONG, 400, "validation_failed")).kind).toBe("password_too_long");
+    // 沒有 code 的舊版、bcrypt 原文也認得
+    expect(authErrorMessage(new Error(GOTRUE_TOO_LONG), "set-password")).toBe(PASSWORD_TOO_LONG_MESSAGE);
+    expect(authErrorMessage({ status: 500, message: "bcrypt: password length exceeds 72 bytes" }, "set-password")).toBe(
+      PASSWORD_TOO_LONG_MESSAGE,
+    );
+    // 認得的錯誤不記 console.warn
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("Supabase 暫時故障（AuthRetryableFetchError 5xx）不說成網路問題，維持「請稍後再試」", () => {
     expect(authErrorMessage(new AuthRetryableFetchError("Service Unavailable", 503), "set-password")).toBe("設定密碼失敗，請稍後再試");
+    expect(authErrorMessage(new AuthRetryableFetchError("Bad Gateway", 502), "sign-in")).toBe("登入失敗，請稍後再試");
+  });
+});
+
+describe("passwordTooLong／passwordByteLength — 72 個位元組（UTF-8）上限", () => {
+  it("英數一字 1 byte：72 個剛好可以、73 個太長", () => {
+    expect(PASSWORD_MAX_BYTES).toBe(72);
+    expect(passwordByteLength("a".repeat(72))).toBe(72);
+    expect(passwordTooLong("a".repeat(72))).toBe(false);
+    expect(passwordTooLong("a".repeat(73))).toBe(true);
+  });
+
+  it("中文一字 3 bytes：24 字剛好 72 bytes、25 字太長（字數沒超過也一樣擋）", () => {
+    expect(passwordByteLength("密".repeat(24))).toBe(72);
+    expect(passwordTooLong("密".repeat(24))).toBe(false);
+    expect(passwordTooLong("密".repeat(25))).toBe(true);
+    expect(passwordTooLong(`${"密".repeat(24)}a`)).toBe(true);
+  });
+
+  it("emoji 一個 4 bytes；空字串 0", () => {
+    expect(passwordByteLength("😀")).toBe(4);
+    expect(passwordTooLong("😀".repeat(18))).toBe(false);
+    expect(passwordTooLong("😀".repeat(19))).toBe(true);
+    expect(passwordByteLength("")).toBe(0);
+  });
+});
+
+describe("passwordRejectedMessage — ESS 修改密碼被 API 擋下（password_rejected 的 reasons）", () => {
+  it("too_long → 密碼太長；其他照 weakPasswordMessage", () => {
+    expect(passwordRejectedMessage(["too_long"])).toBe(PASSWORD_TOO_LONG_MESSAGE);
+    expect(passwordRejectedMessage(["pwned"])).toBe(weakPasswordMessage(["pwned"]));
+    expect(passwordRejectedMessage(["length"])).toBe("密碼太短，請換一組更長的密碼");
+    expect(passwordRejectedMessage([])).toBe("這組密碼太弱或曾外洩，請換一組");
+    expect(passwordRejectedMessage(undefined)).toBe("這組密碼太弱或曾外洩，請換一組");
+    expect(passwordRejectedMessage("too_long")).toBe("這組密碼太弱或曾外洩，請換一組");
   });
 });
 
@@ -167,13 +251,21 @@ describe("authErrorMessage — 登入頁（sign-in）", () => {
     expect(authErrorMessage(new TypeError("Failed to fetch"), "sign-in")).toBe("連線失敗，請檢查網路後再試");
   });
 
-  it("其他錯誤 → 通用中文（附錯誤代碼）；session 類錯誤在登入頁不說「設定連結」", () => {
-    expect(authErrorMessage(new AuthApiError("User is banned", 403, "user_banned"), "sign-in")).toBe(
-      "登入失敗，請稍後再試（錯誤代碼：user_banned）",
-    );
-    expect(authErrorMessage(new Error("boom"), "sign-in")).toBe("登入失敗，請稍後再試");
+  it("其他錯誤 → 只顯示中文（確認 Email 與密碼、洽 HR），不附英文代碼；代碼記在 console.warn", () => {
+    const banned = authErrorMessage(new AuthApiError("User is banned", 403, "user_banned"), "sign-in");
+    expect(banned).toBe(SIGN_IN_GENERIC);
+    expect(banned).toBe(AUTH_UNKNOWN_ERROR_MESSAGE["sign-in"]);
+    expect(banned).not.toContain("user_banned");
+    expect(banned).not.toContain("錯誤代碼");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[0]).toContain("sign-in");
+    expect(warnSpy.mock.calls[0]?.[1]).toEqual({ code: "user_banned", name: "AuthApiError", status: 403 });
+    expect(authErrorMessage(new Error("boom"), "sign-in")).toBe(SIGN_IN_GENERIC);
+  });
+
+  it("session 類錯誤在登入頁不說「設定連結」", () => {
     const sessionish = authErrorMessage(new AuthSessionMissingError(), "sign-in");
-    expect(sessionish).toBe("登入失敗，請稍後再試");
+    expect(sessionish).toBe(SIGN_IN_GENERIC);
     expect(sessionish).not.toContain("設定連結");
   });
 });
@@ -187,10 +279,10 @@ describe("classifyAuthError — 判斷順序與邊界", () => {
     expect(classifyAuthError({ code: "invalid_credentials", name: "AuthRetryableFetchError", status: 429 }).kind).toBe("invalid_credentials");
   });
 
-  it("AuthRetryableFetchError：status 0 或沒有 → network；5xx → unknown（不是使用者的網路問題）", () => {
+  it("AuthRetryableFetchError：status 0 或沒有 → network；5xx → unavailable（不是使用者的網路問題）", () => {
     expect(classifyAuthError(new AuthRetryableFetchError("x", 0)).kind).toBe("network");
     expect(classifyAuthError({ name: "AuthRetryableFetchError" }).kind).toBe("network");
-    expect(classifyAuthError(new AuthRetryableFetchError("Bad Gateway", 502)).kind).toBe("unknown");
+    expect(classifyAuthError(new AuthRetryableFetchError("Bad Gateway", 502)).kind).toBe("unavailable");
   });
 
   it("reasons 只收字串", () => {
@@ -201,8 +293,8 @@ describe("classifyAuthError — 判斷順序與邊界", () => {
   it("null／undefined／數字／空物件／空字串 → unknown，不丟例外", () => {
     for (const v of [null, undefined, 42, {}, "", [], true]) {
       expect(classifyAuthError(v).kind).toBe("unknown");
-      expect(authErrorMessage(v, "sign-in")).toBe("登入失敗，請稍後再試");
-      expect(authErrorMessage(v, "set-password")).toBe("設定密碼失敗，請稍後再試");
+      expect(authErrorMessage(v, "sign-in")).toBe(SIGN_IN_GENERIC);
+      expect(authErrorMessage(v, "set-password")).toBe(SET_PASSWORD_GENERIC);
     }
   });
 
@@ -211,21 +303,25 @@ describe("classifyAuthError — 判斷順序與邊界", () => {
     expect(classifyAuthError({ code: "toString", name: "hasOwnProperty" }).kind).toBe("unknown");
   });
 
-  it("奇怪的 code 不附在文案後面（只收 snake_case 代碼）", () => {
-    expect(authErrorMessage({ code: "<script>alert(1)</script>" }, "sign-in")).toBe("登入失敗，請稍後再試");
-    expect(authErrorMessage({ code: "x".repeat(65) }, "sign-in")).toBe("登入失敗，請稍後再試");
+  it("奇怪的 code 不上畫面，也不寫進 console（只收 snake_case 代碼）", () => {
+    expect(authErrorMessage({ code: "<script>alert(1)</script>" }, "sign-in")).toBe(SIGN_IN_GENERIC);
+    expect(authErrorMessage({ code: "x".repeat(65) }, "sign-in")).toBe(SIGN_IN_GENERIC);
+    expect(warnSpy.mock.calls.map((call) => (call[1] as { code: unknown }).code)).toEqual([null, null]);
   });
 
-  it("任何 Supabase 錯誤都不會把英文原文整句丟出去", () => {
+  it("任何 Supabase 錯誤都不會把英文原文整句或錯誤代碼丟出去", () => {
     const samples: unknown[] = [
       new AuthApiError("Invalid login credentials", 400, "invalid_credentials"),
       new AuthApiError("Email not confirmed", 400, "email_not_confirmed"),
       new AuthApiError("User is banned", 403, "user_banned"),
       new AuthApiError("Database error updating user", 500, "unexpected_failure"),
+      new AuthApiError("Unable to validate email address: invalid format", 400, "validation_failed"),
+      new AuthApiError(GOTRUE_TOO_LONG, 400, "validation_failed"),
       new AuthWeakPasswordError(GOTRUE_PWNED, 422, ["pwned"]),
       new AuthWeakPasswordError(GOTRUE_SHORT, 422, ["length"]),
       new AuthSessionMissingError(),
       new AuthRetryableFetchError("Failed to fetch", 0),
+      new AuthRetryableFetchError("Service Unavailable", 503),
       new TypeError("Failed to fetch"),
       new Error("some unexpected thing"),
       { message: "Something went wrong on our side", status: 418 },
@@ -234,8 +330,10 @@ describe("classifyAuthError — 判斷順序與邊界", () => {
       for (const context of ["sign-in", "set-password"] as const) {
         const text = authErrorMessage(sample, context);
         expect(text, `${context}: ${JSON.stringify(sample)}`).toMatch(/[\u4e00-\u9fff]/);
-        // 錯誤代碼（snake_case）可以出現，但不能有一整句英文
-        expect(text.replace(/（錯誤代碼：[a-z0-9_]+）/i, ""), `${context}: ${text}`).not.toMatch(ENGLISH_SENTENCE);
+        // 不能有一整句英文，也不能有錯誤代碼（代碼只記在 console.warn）
+        expect(text, `${context}: ${text}`).not.toMatch(ENGLISH_SENTENCE);
+        expect(text, `${context}: ${text}`).not.toMatch(SNAKE_CASE_CODE);
+        expect(text, `${context}: ${text}`).not.toContain("錯誤代碼");
       }
     }
   });

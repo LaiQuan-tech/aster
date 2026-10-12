@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
 import { markPasswordDone } from "@/lib/auth-api";
-import { authErrorMessage } from "@/lib/auth-error-messages";
+import { PASSWORD_TOO_LONG_MESSAGE, authErrorMessage, passwordTooLong } from "@/lib/auth-error-messages";
 import type { ApiError } from "@/lib/api-client";
 import { resetMustChangeCache } from "@/components/AuthGate";
 
@@ -77,6 +77,11 @@ function SetPasswordInner() {
     if (!passwordSaved) {
       if (password.length < 8) {
         setError("密碼至少 8 碼");
+        return;
+      }
+      // 超過 72 bytes GoTrue 一定拒絕（bcrypt 上限）：先在這裡擋，不靠比對 GoTrue 的英文訊息。
+      if (passwordTooLong(password)) {
+        setError(PASSWORD_TOO_LONG_MESSAGE);
         return;
       }
       if (password !== confirm) {
