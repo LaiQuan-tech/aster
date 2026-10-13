@@ -19,6 +19,8 @@ import {
   deleteEmployeeProfilePhoto,
   deleteEmployeeWorkHistory,
   getDepartments,
+  getShifts,
+  type Shift,
   getEmployeeProfile,
   getEmployeesWithProfile,
   inviteEmployee,
@@ -295,6 +297,9 @@ function describeError(err: unknown, fallback: string): string {
   const raw = err instanceof Error ? err.message : "";
   const code = parseApiErrorCode(raw);
   const probe = code ?? raw;
+  // 個人出勤設定（2026-10-13）的兩個錯誤碼。
+  if (probe === "shift_not_found") return "選的班別不存在（可能剛被刪除），請重新選擇";
+  if (probe === "schema_not_ready") return "資料庫尚未套用「員工個人班別與在家打卡」更新，請洽系統維護人員";
   const translated = accountErrorMessage(new Error(probe), "");
   if (translated && translated !== probe) return translated;
   return raw || fallback;
@@ -430,6 +435,10 @@ export default function EmployeesPage() {
   const [editHireDate, setEditHireDate] = useState("");
   const [editTerminatedAt, setEditTerminatedAt] = useState("");
   const [editStatus, setEditStatus] = useState("active");
+  // 員工個人出勤設定（2026-10-13）：預設班別（""＝依公司規則）與「允許在家上班打卡」。
+  const [editDefaultShiftId, setEditDefaultShiftId] = useState("");
+  const [editWfhPunch, setEditWfhPunch] = useState(false);
+  const [shifts, setShifts] = useState<Shift[]>([]);
   // 列內編輯第二排：生日／身分證／戶籍地／匯款帳號（存在 employee_profiles，走 PUT profile，與上面的 PATCH employees 分開送）。
   const [editPersonal, setEditPersonal] = useState<PersonalForm>(() => personalFormFrom({}));
   const [editSaving, setEditSaving] = useState(false);
@@ -499,6 +508,14 @@ export default function EmployeesPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 預設班別下拉的選項（/admin/shifts 的班別）；抓不到就只剩「依公司規則」。
+  useEffect(() => {
+    getShifts()
+      .then((res) => setShifts(res.shifts))
+      .catch(() => setShifts([]));
+  }, []);
+  const shiftNameMap = useMemo(() => new Map(shifts.map((shift) => [shift.id, shift])), [shifts]);
 
   async function openProfile(employeeId: string) {
     setProfileEmpId(employeeId);
@@ -605,8 +622,14 @@ export default function EmployeesPage() {
     const personal = current ? personalChanges(current, editPersonal) : {};
     setEditSaving(true);
     setEditError(null);
+    // 個人出勤設定只在有變更時才送（DB 還沒套 0068 時，沒動到就不會被 409 擋下其他欄位的儲存）。
+    const nextShiftId = editDefaultShiftId || null;
+    const shiftChanged = (current?.default_shift_id ?? null) !== nextShiftId;
+    const wfhChanged = (current?.features?.wfhPunch === true) !== editWfhPunch;
     try {
       await updateEmployee(id, {
+        ...(shiftChanged ? { defaultShiftId: nextShiftId } : {}),
+        ...(wfhChanged ? { features: { wfhPunch: editWfhPunch } } : {}),
         name: editName.trim() || undefined,
         role: editRole,
         deptId: editDeptId || null,
@@ -902,6 +925,8 @@ export default function EmployeesPage() {
     setEditHireDate(employee.hire_date ?? "");
     setEditTerminatedAt(employee.terminated_at ?? "");
     setEditStatus(employee.status);
+    setEditDefaultShiftId(employee.default_shift_id ?? "");
+    setEditWfhPunch(employee.features?.wfhPunch === true);
   }
 
   /** 「⋯」選單的項目 → 各自既有的 handler（顯示規則在 lib/employee-actions.ts）。 */
@@ -1224,6 +1249,31 @@ export default function EmployeesPage() {
                               <input className={inputCls} value={editPersonal.accountHolder} onChange={(event) => setPersonal("accountHolder", event.target.value)} autoComplete="off" />
                             </PersonalField>
                           </div>
+                          {/* 第三排：個人出勤設定（2026-10-13）。預設班別＝這位員工平日的上下班時間（遲到、應下班、缺卡都照它）；
+                              「依公司規則」＝沒有個人班別，照公司的彈性上班規則。在家上班打卡＝員工端打卡卡片出現「在家上班」勾選框。 */}
+                          <div className="mt-3 grid grid-cols-2 gap-3 @3xl:grid-cols-8">
+                            <PersonalField label="預設班別" className="@3xl:col-span-3">
+                              <select className={inputCls} value={editDefaultShiftId} onChange={(event) => setEditDefaultShiftId(event.target.value)}>
+                                <option value="">依公司規則</option>
+                                {shifts.map((shift) => (
+                                  <option key={shift.id} value={shift.id}>
+                                    {shift.name}（{shift.start_time.slice(0, 5)}–{shift.end_time.slice(0, 5)}）
+                                  </option>
+                                ))}
+                              </select>
+                            </PersonalField>
+                            <PersonalField label="在家上班" className="@3xl:col-span-3">
+                              <label className="flex h-[38px] items-center gap-2 text-sm text-gray-700">
+                                <input
+                                  type="checkbox"
+                                  checked={editWfhPunch}
+                                  onChange={(event) => setEditWfhPunch(event.target.checked)}
+                                  className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
+                                />
+                                允許在家上班打卡
+                              </label>
+                            </PersonalField>
+                          </div>
                           {editError && (
                             <div className="mt-3">
                               <ErrorText>{editError}</ErrorText>
@@ -1243,6 +1293,15 @@ export default function EmployeesPage() {
                         <td className="py-3 pr-4">
                           <p className="font-medium text-gray-800">{employee.name}</p>
                           <p className="text-xs text-gray-500">工號 {employee.emp_no ?? "—"}</p>
+                          {(employee.default_shift_id || employee.features?.wfhPunch) && (
+                            <p className="text-xs text-gray-500">
+                              {employee.default_shift_id
+                                ? `班別 ${shiftNameMap.get(employee.default_shift_id)?.name ?? "（已刪除）"}`
+                                : ""}
+                              {employee.default_shift_id && employee.features?.wfhPunch ? "・" : ""}
+                              {employee.features?.wfhPunch ? "可在家打卡" : ""}
+                            </p>
+                          )}
                           {credentialsLockedOf(employee) && (
                             <p className="text-xs text-amber-700" title={CREDENTIALS_LOCKED_NOTE} data-testid="credentials-locked-hint">
                               密碼僅老闆／平台管理員可重設

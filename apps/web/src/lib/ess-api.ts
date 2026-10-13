@@ -29,6 +29,10 @@ export interface Me {
   /** 是否為任一部門主管（後端可選欄位；沒有時前端改用「待我簽核」筆數判斷）。 */
   isManager?: boolean;
   mustChangePassword?: boolean;
+  /** 員工個人功能開關（2026-10-13；舊 API 沒有，讀取要 optional）。wfhPunch＝可勾「在家上班」打卡。 */
+  features?: { wfhPunch?: boolean } | null;
+  /** 個人預設班別（null＝依公司規則／彈性上班）。 */
+  defaultShift?: { id: string; name: string; start: string; end: string } | null;
 }
 
 /** The caller's own employee profile; used to detect HR admins in the ESS. */
@@ -54,6 +58,8 @@ export interface PunchRecord {
   lat: number | null;
   lng: number | null;
   device_id: string | null;
+  /** 在家上班打卡（2026-10-13；DB 未套 0068 時不會有這欄）。 */
+  wfh?: boolean;
 }
 
 export interface PunchTodayResponse {
@@ -74,6 +80,8 @@ export interface PunchResult {
   record?: PunchRecord;
   /** 2026-10-11：遲到上班卡附了理由時，伺服器寫下的遲到說明。 */
   lateReport?: { id: string; lateMinutes: number };
+  /** 這筆是否記為在家上班（2026-10-13）。 */
+  wfh?: boolean;
 }
 
 /**
@@ -401,6 +409,8 @@ export function postPunch(body: {
   geoStatus?: "denied" | "unavailable" | "timeout" | "unsupported";
   /** 遲到理由（當天第一張上班卡遲到時必填，1–500 字；沒遲到時伺服器不理會）。 */
   lateReason?: string;
+  /** 在家上班（只有 me.features.wfhPunch 開通的員工能帶 true；否則 400 wfh_punch_not_enabled）。 */
+  wfh?: boolean;
 }) {
   return apiFetch<PunchResult>("/punch", {
     method: "POST",

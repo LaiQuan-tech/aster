@@ -35,6 +35,8 @@ import {
   type PunchPrecheck,
 } from "@/lib/punch-state";
 import { runWhileVisible } from "@/lib/visible-interval";
+import { getMeCached, peekMeCached } from "@/lib/ess-state";
+import { WFH_SUFFIX, browserStorage, hasWfhPunch, readWfhChoice, wfhPunchEnabled, writeWfhChoice } from "@/lib/wfh-punch";
 import { BottomSheet, Button, Card, Icon, InlineError, Textarea, useToast } from "@/components/ess-ui";
 import { OvertimeCapCard } from "./_components/OvertimeCapCard";
 import { DutyTodayCard } from "./_components/DutyTodayCard";
@@ -243,6 +245,7 @@ const PUNCH_ERROR_MESSAGES: Record<string, string> = {
   not_an_employee: "此帳號尚未對應到員工資料，無法打卡",
   unauthorized: "登入已逾期，請重新登入",
   invalid_body: "送出的內容格式不正確",
+  wfh_punch_not_enabled: "你尚未開通「在家上班」打卡，請取消勾選或洽管理員",
 };
 
 /**
@@ -306,6 +309,10 @@ function PunchCard({
   notice,
   onPunch,
   onRetryLoad,
+  wfhEnabled,
+  wfh,
+  todayWfh,
+  onWfhChange,
 }: {
   summary: PendingAwareSummary;
   loading: boolean;
@@ -317,15 +324,22 @@ function PunchCard({
   notice: string | null;
   onPunch: () => void;
   onRetryLoad: () => void;
+  /** 2026-10-13：本人有開通在家上班打卡（/me features.wfhPunch）才顯示勾選框。 */
+  wfhEnabled: boolean;
+  wfh: boolean;
+  /** 今天已有在家上班的打卡 → 狀態列加「（在家）」。 */
+  todayWfh: boolean;
+  onWfhChange: (checked: boolean) => void;
 }) {
   const disabled = loading || !!loadError || punching || locked;
   const label = loading ? "載入中…" : punching ? "打卡中…" : summary.nextLabel;
   // 待核准的上班補卡撐起的「上班中」：statusLabel 已是「上班中・補卡待核准（08:52）」，不再接「· 自 HH:MM」。
-  const status = loading
+  const baseStatus = loading
     ? " "
     : summary.phase === "working" && summary.workingSince && !summary.workingOnPending
       ? `${summary.statusLabel} · 自 ${fmtHm(summary.workingSince)}`
       : summary.statusLabel;
+  const status = !loading && todayWfh ? `${baseStatus}${WFH_SUFFIX}` : baseStatus;
 
   return (
     <Card>
@@ -340,6 +354,18 @@ function PunchCard({
       >
         <span className="text-2xl font-bold">{label}</span>
       </Button>
+      {wfhEnabled && (
+        <label className="mt-3 flex items-center justify-center gap-2 text-base text-gray-700">
+          <input
+            type="checkbox"
+            className="h-5 w-5"
+            checked={wfh}
+            disabled={punching}
+            onChange={(e) => onWfhChange(e.target.checked)}
+          />
+          在家上班
+        </label>
+      )}
       <p className="mt-3 min-h-5 text-center text-sm text-gray-500" aria-live="polite">
         {status}
       </p>
@@ -553,6 +579,25 @@ export default function EssHome() {
 
   const summary = useMemo(() => summarizeWithPendingFixPunch(records), [records]);
 
+  // 在家上班打卡（2026-10-13）：只有 /me features.wfhPunch 開通的員工看得到勾選框；勾選狀態記住「今天」。
+  const [wfhEnabled, setWfhEnabled] = useState(() => wfhPunchEnabled(peekMeCached()));
+  const [wfh, setWfh] = useState(false);
+  useEffect(() => {
+    setWfh(readWfhChoice(browserStorage(), todayKey()));
+    getMeCached()
+      .then((me) => {
+        if (activeRef.current) setWfhEnabled(wfhPunchEnabled(me));
+      })
+      .catch(() => {
+        /* 抓不到 /me 就不顯示勾選框（照一般打卡） */
+      });
+  }, []);
+  const onWfhChange = useCallback((checked: boolean) => {
+    setWfh(checked);
+    writeWfhChoice(browserStorage(), todayKey(), checked);
+  }, []);
+  const todayWfh = useMemo(() => hasWfhPunch(records), [records]);
+
   /** 今天的真紀錄＋（有的話）待核准的上班補卡 → 畫面紀錄（lib/pending-fix-punch.ts）。 */
   const mergePending = useCallback(
     (list: ReadonlyArray<PunchLike>) => withPendingFixPunch(list, pendingFixRef.current, todayKey()),
@@ -748,7 +793,8 @@ export default function EssHome() {
       // 重新併一次暫定上班卡：補卡撐起的上班中按了下班 → 今日已下班（上班欄仍顯示待核准的時間）。
       setRecords((prev) => mergePending([...prev, rec]));
       const lateNote = res.lateReport ? "（已送出遲到說明）" : "";
-      toast.show(`${rec.type === "in" ? "上班" : "下班"}打卡成功 ${fmtHm(rec.punch_at)}${lateNote}`, "success");
+      const wfhNote = res.wfh ? WFH_SUFFIX : "";
+      toast.show(`${rec.type === "in" ? "上班" : "下班"}打卡成功 ${fmtHm(rec.punch_at)}${wfhNote}${lateNote}`, "success");
       try {
         navigator.vibrate?.(30);
       } catch {
@@ -803,9 +849,13 @@ export default function EssHome() {
       if (abortForPendingFixPunch(type, screen, latest, freshPending)) return;
 
       // 沒拿到座標才帶 geoStatus；沒有新結果（這次也失敗）就用最近一次記下的原因。
-      const body: Parameters<typeof postPunch>[0] = fix
-        ? { type, source: "gps", lat: fix.lat, lng: fix.lng }
-        : { type, source: "web", geoStatus: geoStatusRef.current ?? undefined };
+      const body: Parameters<typeof postPunch>[0] = {
+        ...(fix
+          ? { type, source: "gps" as const, lat: fix.lat, lng: fix.lng }
+          : { type, source: "web" as const, geoStatus: geoStatusRef.current ?? undefined }),
+        // 在家上班：只有開通且勾了才帶（遲到理由重送沿用同一個 body）。
+        ...(wfhEnabled && wfh ? { wfh: true } : {}),
+      };
       pendingBodyRef.current = body;
       pendingScreenRef.current = screen;
       const res = await postPunch(body);
@@ -842,7 +892,7 @@ export default function EssHome() {
     } finally {
       if (activeRef.current) setPunching(false);
     }
-  }, [punching, locked, loading, loadError, records, toast, afterPunchSuccess, setPunching, abortStalePunch, mergePending, refetchPendingForPunch, abortForPendingFixPunch]);
+  }, [punching, locked, loading, loadError, records, toast, afterPunchSuccess, setPunching, abortStalePunch, mergePending, refetchPendingForPunch, abortForPendingFixPunch, wfhEnabled, wfh]);
 
   /** 遲到理由送出：驗證 1–500 字 → 確認最新狀態（precheckPunch）→ 帶 lateReason 原樣重送剛才那次打卡。 */
   const submitLateReason = useCallback(async () => {
@@ -931,6 +981,10 @@ export default function EssHome() {
         notice={punchNotice}
         onPunch={onPunch}
         onRetryLoad={() => void loadPunch()}
+        wfhEnabled={wfhEnabled}
+        wfh={wfh}
+        todayWfh={todayWfh}
+        onWfhChange={onWfhChange}
       />
       <TodayTimes summary={summary} loading={loading} />
       <OvertimeCapCard />

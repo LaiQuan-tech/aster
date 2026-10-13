@@ -22,6 +22,8 @@ export interface PunchHistoryRecord {
   type: string;
   punch_at: string;
   source?: string | null;
+  /** 在家上班打卡（2026-10-13；舊 API／DB 未套 0068 沒有這欄）。 */
+  wfh?: boolean;
 }
 
 export type DayRowStatus = "complete" | "missing_in" | "missing_out" | "none";

@@ -163,10 +163,11 @@ export interface OvertimeSettlement {
   emp_no?: string | null;
 }
 
-export function getOvertimeSettlements(params: { period?: string; status?: string } = {}) {
+export function getOvertimeSettlements(params: { period?: string; status?: string; employeeId?: string } = {}) {
   const qs = new URLSearchParams();
   if (params.period) qs.set("period", params.period);
   if (params.status) qs.set("status", params.status);
+  if (params.employeeId) qs.set("employeeId", params.employeeId);
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return apiFetch<{ settlements: OvertimeSettlement[] }>(`/overtime-settlements${suffix}`);
 }

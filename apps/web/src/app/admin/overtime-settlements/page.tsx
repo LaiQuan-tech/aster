@@ -43,6 +43,10 @@ type StatusFilter = "draft" | "paid" | "all";
 export default function OvertimeSettlementsPage() {
   const [period, setPeriod] = useState(currentPeriod);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("draft");
+  // 依員工篩選（2026-10-13）：選了員工可勾「所有月份」看他歷月的另計明細。
+  const [filterEmpId, setFilterEmpId] = useState("");
+  const [allMonths, setAllMonths] = useState(false);
+  const showAllMonths = !!filterEmpId && allMonths;
   const [rows, setRows] = useState<OvertimeSettlement[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -67,8 +71,9 @@ export default function OvertimeSettlementsPage() {
     setLoading(true);
     try {
       const res = await getOvertimeSettlements({
-        period,
+        ...(showAllMonths ? {} : { period }),
         ...(statusFilter === "all" ? {} : { status: statusFilter }),
+        ...(filterEmpId ? { employeeId: filterEmpId } : {}),
       });
       setRows(res.settlements);
       setError(null);
@@ -78,7 +83,7 @@ export default function OvertimeSettlementsPage() {
     } finally {
       setLoading(false);
     }
-  }, [period, statusFilter]);
+  }, [period, statusFilter, filterEmpId, showAllMonths]);
 
   useEffect(() => {
     void load();
@@ -182,8 +187,32 @@ export default function OvertimeSettlementsPage() {
         <div className="mb-3 flex flex-wrap items-end gap-3">
           <div>
             <label className={labelCls}>月份</label>
-            <MonthPicker value={period} onChange={setPeriod} disabled={busy} />
+            <MonthPicker value={period} onChange={setPeriod} disabled={busy || showAllMonths} />
           </div>
+          <div>
+            <label className={labelCls}>員工</label>
+            <select
+              className={inputCls}
+              value={filterEmpId}
+              onChange={(e) => {
+                setFilterEmpId(e.target.value);
+                if (!e.target.value) setAllMonths(false);
+              }}
+            >
+              <option value="">全部員工</option>
+              {employees.map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.emp_no ? `${e.emp_no} · ${e.name}` : e.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          {filterEmpId && (
+            <label className="flex items-center gap-1.5 pb-2 text-sm text-gray-600">
+              <input type="checkbox" checked={allMonths} onChange={(e) => setAllMonths(e.target.checked)} />
+              所有月份
+            </label>
+          )}
           <div>
             <label className={labelCls}>狀態</label>
             <select
@@ -231,7 +260,9 @@ export default function OvertimeSettlementsPage() {
         {loading ? (
           <Empty>載入中…</Empty>
         ) : rows.length === 0 ? (
-          <Empty>{period} 沒有需要另行給付的加班超額（月表核准後才會產生）</Empty>
+          <Empty>
+            {showAllMonths ? "這位員工" : period} 沒有需要另行給付的加班超額（月表核准後才會產生）
+          </Empty>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
@@ -252,7 +283,7 @@ export default function OvertimeSettlementsPage() {
                   <SettlementRow
                     key={r.id}
                     row={r}
-                    label={empLabel(r)}
+                    label={showAllMonths ? `${r.period}　${empLabel(r)}` : empLabel(r)}
                     busy={busy}
                     onSave={onSaveRow}
                     onPay={onPay}

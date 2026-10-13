@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { getCalendar, getPunchRecords, getRequests, getShifts } from "@/lib/ess-api";
 import { addDays, fmtDateWithWeekday, fmtHm, fmtHoursMinutes, todayKey } from "@/lib/ess-format";
+import { WFH_SUFFIX } from "@/lib/wfh-punch";
+import { getMeCached } from "@/lib/ess-state";
 import type { DayType, ShiftLike } from "@/lib/leave-hours";
 import { buildDayRows, fixPunchHref, type DayRow, type PunchHistoryRecord } from "@/lib/punch-history";
 import {
@@ -38,7 +40,9 @@ const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
  */
 const CONTEXT_WAIT_MS = 5_000;
 
-const timeOf = (record?: PunchHistoryRecord) => (record ? fmtHm(record.punch_at) : "—");
+// 在家上班的打卡（2026-10-13）標「（在家）」，畫面與匯出共用。
+const timeOf = (record?: PunchHistoryRecord) =>
+  record ? `${fmtHm(record.punch_at)}${record.wfh === true ? WFH_SUFFIX : ""}` : "—";
 const durationOf = (row: DayRow) => (row.durationMin == null ? "—" : fmtHoursMinutes(row.durationMin / 60));
 
 /**
@@ -102,8 +106,11 @@ async function loadApproved(cache: DayContextCache): Promise<ApprovedRequestLike
 async function loadShift(cache: DayContextCache): Promise<ShiftLike> {
   if (cache.shift) return cache.shift;
   try {
-    const res = await getShifts();
-    cache.shift = pickDefaultShift(res?.shifts);
+    // 員工有個人預設班別（2026-10-13，後台員工設定）就用那個班；否則照舊取第一個建立的班別。
+    const [res, me] = await Promise.all([getShifts(), getMeCached().catch(() => null)]);
+    const personalId = me?.defaultShift?.id ?? null;
+    const personal = personalId ? res?.shifts?.filter((s) => s?.id === personalId) : null;
+    cache.shift = pickDefaultShift(personal && personal.length > 0 ? personal : res?.shifts);
     return cache.shift;
   } catch {
     return pickDefaultShift(null);
