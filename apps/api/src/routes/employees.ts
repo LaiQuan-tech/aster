@@ -19,6 +19,8 @@ import {
   type PrivilegeCaller,
 } from "../services/privileged-accounts.js"
 import { isPlatformAdminEmail } from "../middleware/platform.js"
+import { employeesHavePersonalSettings } from "../services/employee-shifts.js"
+import { normalizeEmployeeFeatures } from "../services/employee-features.js"
 
 export const employeesRouter = Router()
 
@@ -43,6 +45,9 @@ const updateSchema = z
     employmentType: z.string().trim().min(1).optional(),
     hireDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
     terminatedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+    // 2026-10-13 員工個人設定（migration 0068）：個人預設班別（null＝依公司規則／彈性上班）與功能開關。
+    defaultShiftId: z.string().uuid().nullable().optional(),
+    features: z.object({ wfhPunch: z.boolean().optional() }).strict().optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 
@@ -215,9 +220,13 @@ employeesRouter.get(
         }
       }
 
+      // 員工個人設定（0068）：套了才多撈 default_shift_id、features（features 只吐已知鍵）。
+      const personal = await employeesHavePersonalSettings()
       const { data, error } = await supabaseAdmin
         .from("employees")
-        .select("id, tenant_id, user_id, name, role, dept_id, emp_no, employment_type, hire_date, terminated_at, status, created_at")
+        .select(
+          `id, tenant_id, user_id, name, role, dept_id, emp_no, employment_type, hire_date, terminated_at, status, created_at${personal ? ", default_shift_id, features" : ""}`,
+        )
         .eq("tenant_id", tenantId)
         .order("created_at", { ascending: true })
 
@@ -227,7 +236,11 @@ employeesRouter.get(
       }
       // email 在 auth.users 不在 employees 表：一次撈回本租戶員工綁定的帳號 email 補到每列，
       // user_id 為 null 或帳號已不存在 → null。
-      const rows = data ?? []
+      const rows: Array<Record<string, unknown>> = ((data ?? []) as unknown as Array<Record<string, unknown>>).map((row) => ({
+        ...row,
+        default_shift_id: (row.default_shift_id as string | null | undefined) ?? null,
+        features: normalizeEmployeeFeatures(row.features),
+      }))
       const [emails, extras] = await Promise.all([
         emailsByUserId(rows.map((row) => row.user_id as string | null).filter((id): id is string => !!id)),
         profileFields
@@ -390,8 +403,55 @@ employeesRouter.patch(
     if (parsed.data.employmentType !== undefined) patch.employment_type = parsed.data.employmentType
     if (parsed.data.hireDate !== undefined) patch.hire_date = parsed.data.hireDate
     if (parsed.data.terminatedAt !== undefined) patch.terminated_at = parsed.data.terminatedAt
+    if (parsed.data.defaultShiftId !== undefined) patch.default_shift_id = parsed.data.defaultShiftId
 
     try {
+      // 員工個人設定（2026-10-13）：欄位未套（0068）→ 409 schema_not_ready，不要讓 PostgREST 回 500。
+      const wantsPersonal = parsed.data.defaultShiftId !== undefined || parsed.data.features !== undefined
+      if (wantsPersonal && !(await employeesHavePersonalSettings())) {
+        res.status(409).json({ error: "schema_not_ready", detail: "employees.default_shift_id / features (migration 0068)" })
+        return
+      }
+      // 預設班別必須是本租戶的班別（supabaseAdmin 繞過 RLS，FK 擋不住跨租戶 id）。
+      if (parsed.data.defaultShiftId) {
+        const { data: shift, error: shiftErr } = await supabaseAdmin
+          .from("shifts")
+          .select("id")
+          .eq("tenant_id", tenantId)
+          .eq("id", parsed.data.defaultShiftId)
+          .maybeSingle()
+        if (shiftErr) {
+          next(new Error(`PATCH /employees/${id} (shift): ${shiftErr.message}`))
+          return
+        }
+        if (!shift) {
+          res.status(400).json({ error: "shift_not_found" })
+          return
+        }
+      }
+      // features 是合併寫入：只改帶來的鍵，其他鍵（含日後新增的）原樣保留。
+      if (parsed.data.features !== undefined) {
+        const { data: current, error: curErr } = await supabaseAdmin
+          .from("employees")
+          .select("features")
+          .eq("tenant_id", tenantId)
+          .eq("id", id)
+          .maybeSingle()
+        if (curErr) {
+          next(new Error(`PATCH /employees/${id} (features): ${curErr.message}`))
+          return
+        }
+        if (!current) {
+          res.status(404).json({ error: "not_found" })
+          return
+        }
+        const raw = (current as { features?: unknown }).features
+        const base = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
+        const merged: Record<string, unknown> = { ...base }
+        for (const [k, v] of Object.entries(parsed.data.features)) if (v !== undefined) merged[k] = v
+        patch.features = merged
+      }
+
       if (parsed.data.role !== undefined) {
         const { data: target, error: targetErr } = await supabaseAdmin
           .from("employees")

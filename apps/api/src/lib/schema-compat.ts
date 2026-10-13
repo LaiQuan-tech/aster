@@ -100,3 +100,8 @@ export function departmentsHaveManagerList(): Promise<boolean> {
 export function approvalStepsHaveCandidates(): Promise<boolean> {
   return columnsExist("approval_steps", "candidate_emp_ids, step_kind")
 }
+
+/** punch_records.wfh（migration 0068，在家上班打卡）是否已在。 */
+export function punchRecordsHaveWfh(): Promise<boolean> {
+  return columnsExist("punch_records", "wfh")
+}

@@ -27,14 +27,16 @@ import {
   diffDaysKey,
   localDateKey,
   monthRangeKeys,
+  todayKey,
   weekdayOfKey,
   type DateKey,
 } from "../lib/tz.js"
-import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { isMissingColumnError, isMissingTableError, punchRecordsHaveWfh, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { managerOfEmployee } from "../middleware/scope.js"
 import { settleAttendance } from "./settlement.js"
+import { loadShiftResolver } from "./employee-shifts.js"
 import { tenantBlocksApproveOnUnsettledLeave } from "./leave-settlement.js"
-import { pairPunchesTz } from "./punch-pairing.js"
+import { pairPunchesTz, wfhPunchDates } from "./punch-pairing.js"
 import { capMinutesFor } from "./overtime-cap.js"
 import { writeAuditLog } from "./audit.js"
 import { assertPeriodOpen } from "./period-lock.js"
@@ -694,6 +696,8 @@ interface PunchRow {
   type: string
   punch_at: string
   source: string | null
+  /** 在家上班打卡（migration 0068；未套 → undefined）。 */
+  wfh?: boolean | null
 }
 
 interface PunchFacts {
@@ -878,55 +882,57 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
   const winEnd = dayWindowUtc(addDaysKey(to, 1), tz).endIso
   const { data: punchData, error: punchErr } = await supabaseAdmin
     .from("punch_records")
-    .select("employee_id, type, punch_at, source")
+    // wfh：在家上班打卡（migration 0068；未套 → 不撈，當天就只看 wfh 申請單）。
+    .select((await punchRecordsHaveWfh()) ? "employee_id, type, punch_at, source, wfh" : "employee_id, type, punch_at, source")
     .eq("tenant_id", tenantId)
     .in("employee_id", employeeIds)
     .gte("punch_at", winStart)
     .lt("punch_at", winEnd)
   if (punchErr) throw new Error(`attendance-sheets (punches): ${punchErr.message}`)
   const punchesByEmp = new Map<string, PunchRow[]>()
-  for (const p of (punchData ?? []) as PunchRow[]) {
+  for (const p of (punchData ?? []) as unknown as PunchRow[]) {
     const arr = punchesByEmp.get(p.employee_id)
     if (arr) arr.push(p)
     else punchesByEmp.set(p.employee_id, [p])
   }
-  for (const [empId, list] of punchesByEmp) facts.punchFactsByEmp.set(empId, derivePunchFacts(list, tz))
-
-  // schedules + shifts → net minutes
-  // 班表功能已移除（2026-10-11，業主：不需要），此分支只對歷史資料生效：沒有新的班表列 → absent_scheduled 不會再出現、淨工時退回規則的正常工時。
-  const { data: schedData, error: schedErr } = await supabaseAdmin
-    .from("schedules")
-    .select("employee_id, work_date, shift_id")
-    .eq("tenant_id", tenantId)
-    .in("employee_id", employeeIds)
-    .gte("work_date", from)
-    .lte("work_date", to)
-  if (schedErr) throw new Error(`attendance-sheets (schedules): ${schedErr.message}`)
-  const schedules = (schedData ?? []) as Array<{ employee_id: string; work_date: string; shift_id: string | null }>
-  const shiftIds = Array.from(new Set(schedules.map((s) => s.shift_id).filter((id): id is string => !!id)))
-  const shiftNet = new Map<string, number>()
-  if (shiftIds.length > 0) {
-    const { data: shiftData, error: shiftErr } = await supabaseAdmin
-      .from("shifts")
-      .select("id, start_time, end_time, break_minutes")
-      .eq("tenant_id", tenantId)
-      .in("id", shiftIds)
-    if (shiftErr) throw new Error(`attendance-sheets (shifts): ${shiftErr.message}`)
-    for (const s of (shiftData ?? []) as Array<{ id: string; start_time: string; end_time: string; break_minutes: number | null }>) {
-      const start = hhmmToMinutes(s.start_time)
-      let end = hhmmToMinutes(s.end_time)
-      if (end < start) end += 24 * 60
-      shiftNet.set(s.id, Math.max(0, end - start - (s.break_minutes ?? 0)))
+  for (const [empId, list] of punchesByEmp) {
+    facts.punchFactsByEmp.set(empId, derivePunchFacts(list, tz))
+    // 2026-10-13 在家上班打卡：當天有勾「在家上班」的打卡 → day.wfh（併入下面 wfh 申請單的同一個集合）。
+    // 工時／遲到照打卡算（attendance_days 由 settleAttendance 照打卡結算，不像 wfh 申請單補工時）。
+    for (const d of wfhPunchDates(list, tz)) {
+      if (d >= from && d <= to) facts.wfhByKey.add(`${empId}|${d}`)
     }
-  }
-  for (const s of schedules) {
-    facts.scheduleByKey.set(`${s.employee_id}|${s.work_date}`, {
-      shiftNetMinutes: s.shift_id ? (shiftNet.get(s.shift_id) ?? null) : null,
-    })
   }
 
   // calendar
   facts.calendar = await loadCalendarDayTypes(tenantId, from, to)
+
+  // 當天班別 → 淨工時（services/employee-shifts.ts，與結算／打卡遲到判斷／缺卡掃描同一支）：
+  // 排班列（班表功能 2026-10-11 已移除，只剩歷史資料）→ 員工個人預設班別（2026-10-13，只限工作日）。
+  // 有班別的日子＝「有應到」：沒打卡、沒假、沒在家 → absent_scheduled。都沒有 → 淨工時退回規則的正常工時。
+  // 個人預設班別只標到今天（租戶時區）為止：月中產生月表時，還沒到的日子不該冒出曠職。
+  const resolver = await loadShiftResolver({ tenantId, from, to, employeeIds })
+  const shiftNetOf = (shift: { start: string; end: string; breakMinutes: number } | null): number | null => {
+    if (!shift) return null
+    const start = hhmmToMinutes(shift.start)
+    let end = hhmmToMinutes(shift.end)
+    if (end < start) end += 24 * 60
+    return Math.max(0, end - start - (shift.breakMinutes ?? 0))
+  }
+  for (const key of resolver.scheduledKeys()) {
+    const [empId, d] = key.split("|")
+    facts.scheduleByKey.set(key, { shiftNetMinutes: shiftNetOf(resolver.forDay(empId, d, "workday").shift) })
+  }
+  const today = todayKey(tz)
+  for (const empId of resolver.employeesWithDefault()) {
+    for (let d = from; d <= to && d <= today; d = addDaysKey(d, 1)) {
+      const key = `${empId}|${d}`
+      if (facts.scheduleByKey.has(key)) continue
+      const dayType: DayType = facts.calendar.get(d) ?? (weekdayOfKey(d) === 0 || weekdayOfKey(d) === 6 ? "rest_day" : "workday")
+      const resolved = resolver.forDay(empId, d, dayType)
+      if (resolved.source) facts.scheduleByKey.set(key, { shiftNetMinutes: shiftNetOf(resolved.shift) })
+    }
+  }
 
   // leave type names (for the leave summary text)
   const { data: ltData, error: ltErr } = await supabaseAdmin

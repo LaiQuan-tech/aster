@@ -229,3 +229,23 @@ export function pairPunchesTz(punches: PunchLike[], tz: string): Map<DateKey, Pa
 
   return days
 }
+
+/**
+ * 2026-10-13 在家上班打卡：哪些本地日（租戶時區）有勾「在家上班」的打卡（punch_records.wfh=true）。
+ * 一張 wfh 打卡算在它所屬的工作日：下班卡跟著配對到的上班卡那天（跨午夜的 14:30→00:10 不會把隔天標成在家），
+ * 其餘（上班卡、外出／休息、配不到的下班卡）算在打卡當下的本地日。純函式。
+ */
+export function wfhPunchDates(punches: Array<PunchLike & { wfh?: boolean | null }>, tz: string): Set<DateKey> {
+  const out = new Set<DateKey>()
+  if (!punches.some((p) => p.wfh === true)) return out
+  const outDayByInstant = new Map<string, DateKey>()
+  for (const [date, day] of pairPunchesTz(punches, tz)) {
+    for (const seg of day.segments) outDayByInstant.set(new Date(seg.outAt).toISOString(), date)
+  }
+  for (const p of punches) {
+    if (p.wfh !== true) continue
+    const paired = p.type === "out" ? outDayByInstant.get(new Date(p.punch_at).toISOString()) : undefined
+    out.add(paired ?? localDateKey(p.punch_at, tz))
+  }
+  return out
+}

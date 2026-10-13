@@ -25,6 +25,7 @@ import {
 import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { loadRuleConfigFor } from "./payroll-inputs.js"
 import { assertDateRangeOpen } from "./period-lock.js"
+import { loadShiftResolver } from "./employee-shifts.js"
 import { pairPunchesTz, type PairedDay } from "./punch-pairing.js"
 
 /**
@@ -78,21 +79,6 @@ interface PunchRow {
   employee_id: string
   type: string
   punch_at: string
-}
-
-interface ScheduleRow {
-  employee_id: string
-  work_date: string
-  shift_id: string | null
-}
-
-interface ShiftRow {
-  id: string
-  start_time: string
-  end_time: string
-  break_minutes: number
-  /** 午休開始 'HH:MM'（migration 0060；舊庫沒有這欄 → undefined）。 */
-  break_start?: string | null
 }
 
 interface CalendarRow {
@@ -429,9 +415,9 @@ export interface ArrivalLateness {
   workDate: DateKey
   /** 遲到分鐘（與結算同一個引擎算：整分鐘比較、扣掉午休與已核准請假）；不適用 → 0。 */
   lateMinutes: number
-  /** 應上班的時間 'HH:MM'：彈性＝startUntil（10:00）、有排班＝班別上班時間；不適用 → null。 */
+  /** 應上班的時間 'HH:MM'：彈性＝startUntil（10:00）、有排班／個人預設班別＝班別上班時間；不適用 → null。 */
   threshold: string | null
-  /** shift＝有排班；flex＝沒排班的工作日（彈性上班）；none＝沒有應上班時間（例假日、彈性關閉）。 */
+  /** shift＝有排班或個人預設班別（employee-shifts.ts）；flex＝沒班別的工作日（彈性上班）；none＝沒有應上班時間（例假日、彈性關閉）。 */
   mode: "shift" | "flex" | "none"
 }
 
@@ -452,41 +438,15 @@ export async function lateMinutesForArrival(input: {
   const workDate = localDateKey(arrivalIso, tz)
   const { rules } = await loadRuleConfigFor(tenantId, workDate.slice(0, 7))
 
-  // 當天班別（班表功能已移除（2026-10-11，業主：不需要），此分支只對歷史資料生效；沒有班表列 → 工作日走彈性上班）
-  const { data: schedRow, error: schedErr } = await supabaseAdmin
-    .from("schedules")
-    .select("shift_id")
-    .eq("tenant_id", tenantId)
-    .eq("employee_id", employeeId)
-    .eq("work_date", workDate)
-    .maybeSingle()
-  if (schedErr) throw new Error(`lateMinutesForArrival (schedules): ${schedErr.message}`)
-  let scheduledShift: ShiftDef | null = null
-  const shiftId = (schedRow as { shift_id?: string | null } | null)?.shift_id ?? null
-  if (shiftId) {
-    const loadShift = (cols: string) =>
-      supabaseAdmin.from("shifts").select(cols).eq("tenant_id", tenantId).eq("id", shiftId).maybeSingle()
-    let shiftRes = await loadShift("id, start_time, end_time, break_minutes, break_start")
-    if (shiftRes.error && isMissingColumnError(shiftRes.error)) {
-      warnSchemaGapOnce("shifts.break_start", shiftRes.error)
-      shiftRes = await loadShift("id, start_time, end_time, break_minutes")
-    }
-    if (shiftRes.error) throw new Error(`lateMinutesForArrival (shifts): ${shiftRes.error.message}`)
-    const row = shiftRes.data as unknown as ShiftRow | null
-    if (row) {
-      scheduledShift = {
-        start: row.start_time,
-        end: row.end_time,
-        breakMinutes: row.break_minutes ?? 0,
-        breakStart: row.break_start ?? null,
-      }
-    }
-  }
-
   // 日屬性
   const calendar = await loadCalendar(tenantId, workDate, workDate)
   const wd = weekdayOfKey(workDate)
   const dayType: DayType = calendar.get(workDate) ?? (wd === 0 || wd === 6 ? "rest_day" : "workday")
+
+  // 當天班別（services/employee-shifts.ts，與結算／月表／缺卡掃描同一支）：排班（歷史資料）→ 個人預設班別
+  // （只限工作日）→ 沒有＝工作日走彈性上班。
+  const resolver = await loadShiftResolver({ tenantId, from: workDate, to: workDate, employeeIds: [employeeId] })
+  const scheduledShift = resolver.forDay(employeeId, workDate, dayType).shift
 
   const shift = pickDayShift(scheduledShift, dayType, flexShiftDef(rules, workDate), unscheduledShiftDef(rules, dayType))
   const mode: ArrivalLateness["mode"] = scheduledShift ? "shift" : shift.flex ? "flex" : "none"
@@ -631,56 +591,6 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   if (punchErr) throw new Error(`settleAttendance (punches): ${punchErr.message}`)
   const punches = (punchData ?? []) as PunchRow[]
 
-  // --- schedules in window + shift lookup --------------------------------------
-  // 班表功能已移除（2026-10-11，業主：不需要），此分支只對歷史資料生效：
-  // 已沒有新增班表的入口（後台／員工端頁面、POST /schedules、批次排班匯入都拿掉了），schedules 表只剩
-  // 舊資料（2026-08 測試資料）。沒有班表列 → 每天走「沒排班」：工作日＝彈性上班、例假日＝整天不扣午休。
-  let schedQuery = supabaseAdmin
-    .from("schedules")
-    .select("employee_id, work_date, shift_id")
-    .eq("tenant_id", tenantId)
-    .gte("work_date", from)
-    .lte("work_date", to)
-  if (employeeId) schedQuery = schedQuery.eq("employee_id", employeeId)
-  const { data: schedData, error: schedErr } = await schedQuery
-  if (schedErr) throw new Error(`settleAttendance (schedules): ${schedErr.message}`)
-  const schedules = (schedData ?? []) as ScheduleRow[]
-
-  const shiftIds = Array.from(new Set(schedules.map((s) => s.shift_id).filter((id): id is string => !!id)))
-  const shiftById = new Map<string, ShiftRow>()
-  if (shiftIds.length > 0) {
-    const loadShifts = (cols: string) =>
-      supabaseAdmin.from("shifts").select(cols).eq("tenant_id", tenantId).in("id", shiftIds)
-    let shiftRes = await loadShifts("id, start_time, end_time, break_minutes, break_start")
-    if (shiftRes.error && isMissingColumnError(shiftRes.error)) {
-      // 舊庫還沒有 shifts.break_start（migration 0060）→ 午休全走「涵蓋 12:00／舊推算」。
-      warnSchemaGapOnce("shifts.break_start", shiftRes.error)
-      shiftRes = await loadShifts("id, start_time, end_time, break_minutes")
-    }
-    if (shiftRes.error) throw new Error(`settleAttendance (shifts): ${shiftRes.error.message}`)
-    for (const s of (shiftRes.data ?? []) as unknown as ShiftRow[]) shiftById.set(s.id, s)
-  }
-  const shiftByKey = new Map<string, ShiftDef | null>()
-  for (const s of schedules) {
-    const row = s.shift_id ? shiftById.get(s.shift_id) : undefined
-    shiftByKey.set(
-      `${s.employee_id}|${s.work_date}`,
-      row
-        ? {
-            start: row.start_time,
-            end: row.end_time,
-            breakMinutes: row.break_minutes ?? 0,
-            breakStart: row.break_start ?? null,
-          }
-        : null,
-    )
-  }
-  const shiftFor = (empId: string, date: DateKey): ShiftDef | null => shiftByKey.get(`${empId}|${date}`) ?? null
-  // 沒排班的日子：工作日＝整天＋租戶預設午休（彈性上班生效後改彈性）；例假日／國定假日＝整天、不扣午休。
-  const unscheduledWorkday = unscheduledShiftDef(rules, "workday")
-  const unscheduledRestDay = unscheduledShiftDef(rules, "rest_day")
-  const defaultLunch = resolveDefaultLunch(rules)
-
   // --- calendar → dayType ------------------------------------------------------
   const calendar = await loadCalendar(tenantId, from, to)
   const dayTypeFor = (date: DateKey): DayType => {
@@ -689,6 +599,16 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     const wd = weekdayOfKey(date)
     return wd === 0 || wd === 6 ? "rest_day" : "workday"
   }
+
+  // --- 當天班別（services/employee-shifts.ts，與打卡遲到判斷／月表／缺卡掃描同一支）---------------
+  // 排班列（班表功能 2026-10-11 已移除，只剩 2026-08 測試資料）→ 員工個人預設班別（2026-10-13，只限工作日）→
+  // 都沒有＝「沒排班」：工作日＝彈性上班、例假日＝整天不扣午休。
+  const resolver = await loadShiftResolver({ tenantId, from, to, employeeIds: employeeId ? [employeeId] : undefined })
+  const shiftFor = (empId: string, date: DateKey): ShiftDef | null => resolver.forDay(empId, date, dayTypeFor(date)).shift
+  // 沒排班的日子：工作日＝整天＋租戶預設午休（彈性上班生效後改彈性）；例假日／國定假日＝整天、不扣午休。
+  const unscheduledWorkday = unscheduledShiftDef(rules, "workday")
+  const unscheduledRestDay = unscheduledShiftDef(rules, "rest_day")
+  const defaultLunch = resolveDefaultLunch(rules)
 
   // --- approved leave overlapping the window, sliced per local day ---------------
   const leaveTypes = await loadLeaveTypes(tenantId)
@@ -766,7 +686,7 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   // --- the set of (employee, day) to settle -------------------------------------
   const keys = new Set<string>([
     ...pairedByKey.keys(),
-    ...shiftByKey.keys(),
+    ...resolver.scheduledKeys(),
     ...leaveByKey.keys(),
     ...wfhByKey,
   ])

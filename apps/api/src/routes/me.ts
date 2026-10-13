@@ -3,6 +3,8 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { departmentsHaveManagerList } from "../lib/schema-compat.js"
+import { employeesHavePersonalSettings } from "../services/employee-shifts.js"
+import { normalizeEmployeeFeatures } from "../services/employee-features.js"
 
 export const meRouter = Router()
 
@@ -53,6 +55,10 @@ async function isDeptManager(tenantId: string, empId: string): Promise<boolean> 
  * /auth/set-password?mode=change。`essTabs`：由 `tenants.features.essTabs[employment_type]`
  * 取；沒設定時 intern 用預設清單，其他身分回 null（＝全部分頁）。
  *
+ * 員工個人設定（2026-10-13，migration 0068；未套 → features 全關、defaultShift null）：
+ *   `features: { wfhPunch }`——員工端據此決定要不要顯示「在家上班」勾選框；
+ *   `defaultShift: { id, name, start, end } | null`——個人預設班別（沒有＝依公司規則／彈性上班）。
+ *
  * Open to any authenticated tenant member: the ESS uses it to detect HR admins
  * (to surface the back-office link) and the admin console uses it as its gate.
  */
@@ -85,6 +91,38 @@ meRouter.get(
         return
       }
 
+      // 個人設定：另查一次（欄位可能還沒套，不能塞進上面的 select 讓整支 /me 500）。
+      let features = normalizeEmployeeFeatures(null)
+      let defaultShift: { id: string; name: string; start: string; end: string } | null = null
+      if (await employeesHavePersonalSettings()) {
+        const { data: personal, error: personalErr } = await supabaseAdmin
+          .from("employees")
+          .select("features, default_shift_id")
+          .eq("tenant_id", tenantId)
+          .eq("id", data.id as string)
+          .maybeSingle()
+        if (personalErr) throw new Error(`GET /me (personal settings): ${personalErr.message}`)
+        const row = personal as { features?: unknown; default_shift_id?: string | null } | null
+        features = normalizeEmployeeFeatures(row?.features)
+        if (row?.default_shift_id) {
+          const { data: shift, error: shiftErr } = await supabaseAdmin
+            .from("shifts")
+            .select("id, name, start_time, end_time")
+            .eq("tenant_id", tenantId)
+            .eq("id", row.default_shift_id)
+            .maybeSingle()
+          if (shiftErr) throw new Error(`GET /me (default shift): ${shiftErr.message}`)
+          if (shift) {
+            defaultShift = {
+              id: shift.id as string,
+              name: shift.name as string,
+              start: shift.start_time as string,
+              end: shift.end_time as string,
+            }
+          }
+        }
+      }
+
       const employmentType = (data.employment_type as string | null) ?? null
       res.status(200).json({
         id: data.id,
@@ -98,6 +136,8 @@ meRouter.get(
         employmentType,
         essTabs: await resolveEssTabs(tenantId, employmentType),
         isManager: await isDeptManager(tenantId, data.id as string),
+        features,
+        defaultShift,
       })
     } catch (err) {
       next(err)

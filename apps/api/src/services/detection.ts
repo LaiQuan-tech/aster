@@ -1,7 +1,10 @@
 import { supabaseAdmin } from "../lib/supabase.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
-import { addDaysKey, dayWindowUtc, localDateKey } from "../lib/tz.js"
+import { addDaysKey, dayWindowUtc, localDateKey, weekdayOfKey } from "../lib/tz.js"
 import { pairPunchesTz } from "./punch-pairing.js"
+import { loadShiftResolver } from "./employee-shifts.js"
+import { isMissingTableError } from "../lib/schema-compat.js"
+import type { DayType } from "@hr/rules"
 
 /**
  * Rule-based attendance detection — pure query logic shared by the HR API routes
@@ -45,20 +48,25 @@ export interface ScanMissingResult {
   queued: number
 }
 
-interface ScheduleRow {
-  employee_id: string
-  shift_id: string | null
-}
-
-interface ShiftRow {
-  id: string
-  end_time: string
-}
-
 interface PunchRow {
   employee_id: string
   type: string
   punch_at: string
+}
+
+/** `date` 的日屬性：tenant_calendar_days 優先，沒有就六日＝例假日（與 settlement.loadCalendar 同規則）。 */
+async function dayTypeOn(tenantId: string, date: string): Promise<DayType> {
+  const { data, error } = await supabaseAdmin
+    .from("tenant_calendar_days")
+    .select("day_type")
+    .eq("tenant_id", tenantId)
+    .eq("date", date)
+    .maybeSingle()
+  if (error && !isMissingTableError(error)) throw new Error(`scanMissingPunches (calendar): ${error.message}`)
+  const t = (data as { day_type?: string } | null)?.day_type
+  if (t === "workday" || t === "rest_day" || t === "fixed_holiday") return t
+  const wd = weekdayOfKey(date)
+  return wd === 0 || wd === 6 ? "rest_day" : "workday"
 }
 
 /**
@@ -87,34 +95,19 @@ export async function scanMissingPunches(
   const start = dayWindowUtc(date, tz).startIso
   const end = dayWindowUtc(addDaysKey(date, 1), tz).endIso
 
-  // Employees scheduled on `date`.
-  // 班表功能已移除（2026-10-11，業主：不需要），此分支只對歷史資料生效：沒有新的班表列 → 這裡回空，缺卡掃描不會再找到人。
-  const { data: schedData, error: schedErr } = await supabaseAdmin
-    .from("schedules")
-    .select("employee_id, shift_id")
-    .eq("tenant_id", tenantId)
-    .eq("work_date", date)
-  if (schedErr) throw new Error(`scanMissingPunches (schedules): ${schedErr.message}`)
-  const schedules = (schedData ?? []) as ScheduleRow[]
-  if (schedules.length === 0) return { missing: [], queued: 0 }
-
-  // Shift end-times (for the "after shift end" qualifier on no_out).
-  const shiftIds = Array.from(
-    new Set(schedules.map((s) => s.shift_id).filter((id): id is string => !!id)),
-  )
-  const shiftEndById = new Map<string, string>()
-  if (shiftIds.length > 0) {
-    const { data: shiftData, error: shiftErr } = await supabaseAdmin
-      .from("shifts")
-      .select("id, end_time")
-      .eq("tenant_id", tenantId)
-      .in("id", shiftIds)
-    if (shiftErr) throw new Error(`scanMissingPunches (shifts): ${shiftErr.message}`)
-    for (const s of (shiftData ?? []) as ShiftRow[]) shiftEndById.set(s.id, s.end_time)
+  // Employees with a shift on `date`（services/employee-shifts.ts，與結算／月表／打卡遲到判斷同一支）：
+  // 排班列（班表功能 2026-10-11 已移除，只剩歷史資料）＋工作日有個人預設班別（2026-10-13）的在職員工。
+  // 兩者都沒有 → 回空（走彈性上班的人沒有「應到」，不掃）。
+  const dayType = await dayTypeOn(tenantId, date)
+  const resolver = await loadShiftResolver({ tenantId, from: date, to: date, activeOnly: true })
+  const scheduledIdSet = new Set<string>(resolver.scheduledKeys().map((k) => k.split("|")[0]))
+  for (const empId of resolver.employeesWithDefault()) {
+    if (resolver.forDay(empId, date, dayType).source) scheduledIdSet.add(empId)
   }
+  const scheduledIds = Array.from(scheduledIdSet)
+  if (scheduledIds.length === 0) return { missing: [], queued: 0 }
 
   // That day's punches for the scheduled employees.
-  const scheduledIds = Array.from(new Set(schedules.map((s) => s.employee_id)))
   const { data: punchData, error: punchErr } = await supabaseAdmin
     .from("punch_records")
     .select("employee_id, type, punch_at")
@@ -139,17 +132,13 @@ export async function scanMissingPunches(
     if (day && day.segments.length > 0) hasPair.add(empId)
   }
 
-  // One finding per scheduled employee (dedupe shift-per-day already a DB
-  // invariant, but guard anyway).
-  const seen = new Set<string>()
+  // One finding per scheduled employee.
   const missing: MissingPunch[] = []
-  for (const s of schedules) {
-    if (seen.has(s.employee_id)) continue
-    seen.add(s.employee_id)
-    if (!hasIn.has(s.employee_id)) {
-      missing.push({ employeeId: s.employee_id, issue: "no_in" })
-    } else if (!hasPair.has(s.employee_id)) {
-      missing.push({ employeeId: s.employee_id, issue: "no_out" })
+  for (const empId of scheduledIds) {
+    if (!hasIn.has(empId)) {
+      missing.push({ employeeId: empId, issue: "no_in" })
+    } else if (!hasPair.has(empId)) {
+      missing.push({ employeeId: empId, issue: "no_out" })
     }
   }
 
@@ -332,11 +321,7 @@ interface AnomalyDayRow {
   worked_minutes: number
   late_minutes: number
   overtime_minutes: number
-}
-
-interface ScheduledDayRow {
-  employee_id: string
-  work_date: string
+  day_type?: string | null
 }
 
 interface ExistingAnomalyNotificationRow {
@@ -371,7 +356,7 @@ export async function detectAnomalies(
 
   const { data: dayData, error: adErr } = await supabaseAdmin
     .from("attendance_days")
-    .select("employee_id, work_date, worked_minutes, late_minutes, overtime_minutes")
+    .select("employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, day_type")
     .eq("tenant_id", tenantId)
     .gte("work_date", from)
     .lte("work_date", to)
@@ -379,19 +364,14 @@ export async function detectAnomalies(
   if (adErr) throw new Error(`detectAnomalies (attendance_days): ${adErr.message}`)
   const days = (dayData ?? []) as AnomalyDayRow[]
 
-  // Scheduled (employee, work_date) pairs in the window — used by
-  // frequent_missing to tell "settled to 0 because absent" from "no schedule".
-  // 班表功能已移除（2026-10-11，業主：不需要），此分支只對歷史資料生效：沒有新的班表列 → frequent_missing 只會出現在舊資料的日子。
-  const { data: schedData, error: schedErr } = await supabaseAdmin
-    .from("schedules")
-    .select("employee_id, work_date")
-    .eq("tenant_id", tenantId)
-    .gte("work_date", from)
-    .lte("work_date", to)
-  if (schedErr) throw new Error(`detectAnomalies (schedules): ${schedErr.message}`)
-  const scheduledKeys = new Set(
-    ((schedData ?? []) as ScheduledDayRow[]).map((s) => `${s.employee_id}|${s.work_date}`),
-  )
+  // 有班別的 (employee, work_date)——frequent_missing 用它分辨「有應到卻結算成 0」與「本來就沒有班別」。
+  // 班別解析走 services/employee-shifts.ts（與結算／月表／打卡遲到判斷同一支）：排班列（班表功能 2026-10-11
+  // 已移除，只剩歷史資料）→ 工作日的個人預設班別（2026-10-13）。日屬性用 attendance_days 自己的 day_type。
+  const resolver = await loadShiftResolver({ tenantId, from, to })
+  const isScheduled = (d: AnomalyDayRow): boolean => {
+    const dayType: DayType = d.day_type === "rest_day" || d.day_type === "fixed_holiday" ? d.day_type : "workday"
+    return resolver.forDay(d.employee_id, d.work_date, dayType).source !== null
+  }
 
   // Group settled days per employee (already date-ascending from the query).
   const perEmp = new Map<string, AnomalyDayRow[]>()
@@ -446,7 +426,7 @@ export async function detectAnomalies(
 
     // frequent_missing: scheduled days that settled to worked_minutes=0.
     const missingDays = empDays.filter(
-      (d) => (d.worked_minutes ?? 0) === 0 && scheduledKeys.has(`${employeeId}|${d.work_date}`),
+      (d) => (d.worked_minutes ?? 0) === 0 && isScheduled(d),
     )
     if (missingDays.length >= FREQUENT_MISSING_THRESHOLD) {
       anomalies.push({

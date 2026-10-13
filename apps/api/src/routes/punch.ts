@@ -14,6 +14,8 @@ import { checkPunchCooldown, cooldownSeconds, statusFromRecords } from "../servi
 import { assertInstantsOpen } from "../services/period-lock.js"
 import { importManualPunches } from "../services/imports/writers.js"
 import { lateMinutesForArrival, type ArrivalLateness } from "../services/settlement.js"
+import { checkWfhPunch, loadEmployeeFeatures } from "../services/employee-features.js"
+import { punchRecordsHaveWfh } from "../lib/schema-compat.js"
 import {
   LATE_REASON_MAX,
   attachPunchToLateReport,
@@ -46,6 +48,9 @@ const punchSchema = z.object({
   // 2026-10-11 遲到理由：當天第一張上班卡遲到時必填（trim 後 1–500 字，見下方 POST /punch）。
   // 沒遲到時帶了也不理會。
   lateReason: z.string().max(5000).optional(),
+  // 2026-10-13 在家上班打卡：只有 employees.features.wfhPunch 開通的員工能帶 true（否則 400
+  // wfh_punch_not_enabled）；寫進 punch_records.wfh，月表該日標「在家工作」，工時照打卡算。
+  wfh: z.boolean().optional(),
   // NOTE: we deliberately do NOT read employeeId from the body. The punch is
   // always recorded for the token owner (anti-proxy-punch). Any employeeId a
   // client sends is ignored — kept lax here so a stray field doesn't 400.
@@ -65,11 +70,15 @@ const querySchema = z.object({
   mine: z.enum(["1", "true"]).optional(),
 })
 
-const SELECT_COLS = "id, tenant_id, employee_id, punch_at, type, source, lat, lng, device_id, geo_status"
-// 打卡來源 IP（0060 punch_records.ip_address）只給 HR 的後台列表：GET /punch 在 HR 且非 mine 時才多撈，
-// 序列化成 ipAddress（見 withIpAddress）。員工端查詢（/punch/today、mine=1、一般員工）一律用 SELECT_COLS，
-// 連欄位都不撈。
-const SELECT_COLS_WITH_IP = `${SELECT_COLS}, ip_address`
+const SELECT_COLS_BASE = "id, tenant_id, employee_id, punch_at, type, source, lat, lng, device_id, geo_status"
+/** 打卡列表欄位：0068 套了就多撈 wfh（在家上班打卡），員工端打卡紀錄／今日狀態據此標「在家」。 */
+async function selectCols(withIp = false): Promise<string> {
+  const base = (await punchRecordsHaveWfh()) ? `${SELECT_COLS_BASE}, wfh` : SELECT_COLS_BASE
+  return withIp ? `${base}, ip_address` : base
+}
+// 打卡來源 IP（0060 punch_records.ip_address）只給 HR 的後台列表：GET /punch 在 HR 且非 mine 時才多撈
+// （selectCols(true)），序列化成 ipAddress（見 withIpAddress）。員工端查詢（/punch/today、mine=1、一般員工）
+// 一律 selectCols()，連欄位都不撈。
 
 /** 把 DB 的 ip_address 換成回應用的 ipAddress（沒有就 null），其餘欄位原樣。 */
 function withIpAddress(row: Record<string, unknown>): Record<string, unknown> {
@@ -195,7 +204,7 @@ punchRouter.post(
       res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
       return
     }
-    const { type, source, lat, lng, deviceId, geoStatus } = parsed.data
+    const { type, source, lat, lng, deviceId, geoStatus, wfh } = parsed.data
     const now = new Date()
 
     try {
@@ -205,6 +214,16 @@ punchRouter.post(
         // cannot punch for anyone else).
         res.status(403).json({ error: "not_an_employee" })
         return
+      }
+
+      // 在家上班打卡：沒開通卻帶 wfh=true → 400，不寫打卡（services/employee-features.ts）。
+      const wfhRequested = wfh === true
+      if (wfhRequested) {
+        const guard = checkWfhPunch(wfh, await loadEmployeeFeatures(tenantId, self.id))
+        if (!guard.ok) {
+          res.status(400).json({ error: guard.error })
+          return
+        }
       }
 
       // 發薪鎖定：當下所在的月份（租戶時區）已結算 → 409 period_closed（提早結算的特例；services/period-lock.ts）。
@@ -325,6 +344,8 @@ punchRouter.post(
           // 打卡時間＝這個請求檢查（冷卻、遲到）用的同一刻：秒數邊界（10:00:59.8 檢查不算遲到、
           // DB 晚一點寫成 10:01:00.1）才不會讓月結多出一筆沒有遲到說明的遲到。
           punch_at: now.toISOString(),
+          // 只在勾了才帶欄位：沒勾＝DB 預設 false，舊庫（0068 未套）一般打卡照常寫得進去。
+          ...(wfhRequested ? { wfh: true } : {}),
         })
         .select("*")
         .single()
@@ -372,6 +393,7 @@ punchRouter.post(
         lat: data.lat,
         lng: data.lng,
         deviceId: data.device_id,
+        wfh: data.wfh === true,
         record,
         ...(lateReport && lateness ? { lateReport: { id: lateReport.id, lateMinutes: lateness.lateMinutes } } : {}),
       })
@@ -410,7 +432,7 @@ punchRouter.get(
       const { start, end } = await todayWindow(tenantId)
       const { data, error } = await supabaseAdmin
         .from("punch_records")
-        .select(SELECT_COLS)
+        .select(await selectCols())
         .eq("tenant_id", tenantId)
         .eq("employee_id", self.id)
         .gte("punch_at", start)
@@ -422,7 +444,7 @@ punchRouter.get(
         return
       }
       const records = data ?? []
-      const status = statusFromRecords(records as Array<{ type: string }>)
+      const status = statusFromRecords(records as unknown as Array<{ type: string }>)
       res.status(200).json({ records, status })
     } catch (err) {
       next(err)
@@ -484,7 +506,7 @@ punchRouter.get(
       const includeIp = isHr && !mine
       let query = supabaseAdmin
         .from("punch_records")
-        .select(includeIp ? SELECT_COLS_WITH_IP : SELECT_COLS)
+        .select(await selectCols(includeIp))
         .eq("tenant_id", tenantId)
 
       if (mine) {
