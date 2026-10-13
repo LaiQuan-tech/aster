@@ -3,8 +3,9 @@ import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { addDaysKey, dayWindowUtc, localDateKey, weekdayOfKey } from "../lib/tz.js"
 import { pairPunchesTz } from "./punch-pairing.js"
 import { loadShiftResolver } from "./employee-shifts.js"
-import { isMissingTableError } from "../lib/schema-compat.js"
-import type { DayType } from "@hr/rules"
+import { coveredByRequests, loadApprovedAbsences, shiftBoundsOn } from "./absence-cover.js"
+import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import type { DayType, ShiftDef } from "@hr/rules"
 
 /**
  * Rule-based attendance detection — pure query logic shared by the HR API routes
@@ -86,6 +87,7 @@ async function dayTypeOn(tenantId: string, date: string): Promise<DayType> {
 export async function scanMissingPunches(
   tenantId: string,
   date: string,
+  opts: { now?: Date } = {},
 ): Promise<ScanMissingResult> {
   if (!dateRe.test(date)) throw new Error("scanMissingPunches: date must be YYYY-MM-DD")
 
@@ -98,11 +100,31 @@ export async function scanMissingPunches(
   // Employees with a shift on `date`（services/employee-shifts.ts，與結算／月表／打卡遲到判斷同一支）：
   // 排班列（班表功能 2026-10-11 已移除，只剩歷史資料）＋工作日有個人預設班別（2026-10-13）的在職員工。
   // 兩者都沒有 → 回空（走彈性上班的人沒有「應到」，不掃）。
+  // 舊排班列（含 shift_id 空／班別已刪的列）照舊：有列就掃，判斷完全不變。
+  // 個人預設班別（只有沒有排班列的人）另外三道過濾，只用在他們身上：
+  //   • 在職期間外、非工作日 → resolver 已排除（forDay 回 null）；
+  //   • 班別整段被已核准的請假／在家／出差單覆蓋 → 不判（services/absence-cover.ts）；
+  //   • 班別還沒開始 → 不判；班別（跨日班的隔天）還沒結束 → 不判缺下班卡。
+  const now = (opts.now ?? new Date()).getTime()
   const dayType = await dayTypeOn(tenantId, date)
   const resolver = await loadShiftResolver({ tenantId, from: date, to: date, activeOnly: true })
   const scheduledIdSet = new Set<string>(resolver.scheduledKeys().map((k) => k.split("|")[0]))
+  const defaultShiftByEmp = new Map<string, ShiftDef>()
   for (const empId of resolver.employeesWithDefault()) {
-    if (resolver.forDay(empId, date, dayType).source) scheduledIdSet.add(empId)
+    if (scheduledIdSet.has(empId)) continue
+    const resolved = resolver.forDay(empId, date, dayType)
+    if (resolved.source === "default" && resolved.shift) defaultShiftByEmp.set(empId, resolved.shift)
+  }
+  if (defaultShiftByEmp.size > 0) {
+    const absences = await loadApprovedAbsences(tenantId, [...defaultShiftByEmp.keys()], date, date, tz)
+    for (const [empId, shift] of defaultShiftByEmp) {
+      const bounds = shiftBoundsOn(date, shift, tz)
+      if (!bounds || now < bounds.start || coveredByRequests(absences, empId, date, shift, tz)) {
+        defaultShiftByEmp.delete(empId)
+        continue
+      }
+      scheduledIdSet.add(empId)
+    }
   }
   const scheduledIds = Array.from(scheduledIdSet)
   if (scheduledIds.length === 0) return { missing: [], queued: 0 }
@@ -138,6 +160,10 @@ export async function scanMissingPunches(
     if (!hasIn.has(empId)) {
       missing.push({ employeeId: empId, issue: "no_in" })
     } else if (!hasPair.has(empId)) {
+      // 個人預設班別（例：夜班 22:00–06:00）下班時間還沒到 → 還不算缺下班卡。
+      const shift = defaultShiftByEmp.get(empId)
+      const bounds = shift ? shiftBoundsOn(date, shift, tz) : null
+      if (bounds && now < bounds.end) continue
       missing.push({ employeeId: empId, issue: "no_out" })
     }
   }
@@ -322,6 +348,8 @@ interface AnomalyDayRow {
   late_minutes: number
   overtime_minutes: number
   day_type?: string | null
+  anomaly?: unknown
+  leave_minutes?: number | null
 }
 
 interface ExistingAnomalyNotificationRow {
@@ -354,23 +382,43 @@ export async function detectAnomalies(
     throw new Error("detectAnomalies: from/to must be YYYY-MM-DD")
   }
 
-  const { data: dayData, error: adErr } = await supabaseAdmin
-    .from("attendance_days")
-    .select("employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, day_type")
-    .eq("tenant_id", tenantId)
-    .gte("work_date", from)
-    .lte("work_date", to)
-    .order("work_date", { ascending: true })
-  if (adErr) throw new Error(`detectAnomalies (attendance_days): ${adErr.message}`)
-  const days = (dayData ?? []) as AnomalyDayRow[]
+  const loadDays = (cols: string) =>
+    supabaseAdmin
+      .from("attendance_days")
+      .select(cols)
+      .eq("tenant_id", tenantId)
+      .gte("work_date", from)
+      .lte("work_date", to)
+      .order("work_date", { ascending: true })
+  const BASE_COLS = "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes"
+  // day_type／anomaly／leave_minutes 只給個人預設班別的缺卡判斷用；舊庫沒有 leave_minutes（0038）→ 退回基本欄位。
+  let adRes = await loadDays(`${BASE_COLS}, day_type, anomaly, leave_minutes`)
+  if (adRes.error && isMissingColumnError(adRes.error)) {
+    warnSchemaGapOnce("attendance_days.p0_columns", adRes.error)
+    adRes = await loadDays(`${BASE_COLS}, day_type, anomaly`)
+  }
+  if (adRes.error) throw new Error(`detectAnomalies (attendance_days): ${adRes.error.message}`)
+  const days = (adRes.data ?? []) as unknown as AnomalyDayRow[]
 
   // 有班別的 (employee, work_date)——frequent_missing 用它分辨「有應到卻結算成 0」與「本來就沒有班別」。
   // 班別解析走 services/employee-shifts.ts（與結算／月表／打卡遲到判斷同一支）：排班列（班表功能 2026-10-11
   // 已移除，只剩歷史資料）→ 工作日的個人預設班別（2026-10-13）。日屬性用 attendance_days 自己的 day_type。
+  // 舊排班列（含 shift_id 空／班別已刪）照舊：有列＋工時 0 就算。個人預設班別（沒有排班列的人）另外排除：
+  // 請假日（leave_minutes > 0）、在家工作申請單認列的日子（anomaly.wfh）、班別整段被已核准在家／出差單覆蓋的日子。
+  // 沒打卡的預設班別工作日由 settleAttendance 寫出 worked=0 的列（見 settlement.ts），所以真正沒來的日子抓得到。
   const resolver = await loadShiftResolver({ tenantId, from, to })
-  const isScheduled = (d: AnomalyDayRow): boolean => {
+  const defaultEmpIds = resolver.employeesWithDefault()
+  const tz = defaultEmpIds.length > 0 ? await getTenantTimezone(tenantId) : null
+  const absences = tz ? await loadApprovedAbsences(tenantId, defaultEmpIds, from, to, tz) : []
+  const isMissingDay = (d: AnomalyDayRow): boolean => {
+    if ((d.worked_minutes ?? 0) !== 0) return false
+    if (resolver.scheduleOf(d.employee_id, d.work_date) !== undefined) return true
     const dayType: DayType = d.day_type === "rest_day" || d.day_type === "fixed_holiday" ? d.day_type : "workday"
-    return resolver.forDay(d.employee_id, d.work_date, dayType).source !== null
+    const resolved = resolver.forDay(d.employee_id, d.work_date, dayType)
+    if (resolved.source !== "default" || !resolved.shift || !tz) return false
+    if ((d.leave_minutes ?? 0) > 0) return false
+    if (d.anomaly && typeof d.anomaly === "object" && (d.anomaly as { wfh?: unknown }).wfh === true) return false
+    return !coveredByRequests(absences, d.employee_id, d.work_date, resolved.shift, tz)
   }
 
   // Group settled days per employee (already date-ascending from the query).
@@ -426,7 +474,7 @@ export async function detectAnomalies(
 
     // frequent_missing: scheduled days that settled to worked_minutes=0.
     const missingDays = empDays.filter(
-      (d) => (d.worked_minutes ?? 0) === 0 && isScheduled(d),
+      (d) => isMissingDay(d),
     )
     if (missingDays.length >= FREQUENT_MISSING_THRESHOLD) {
       anomalies.push({

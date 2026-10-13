@@ -17,6 +17,7 @@ import {
   addDaysKey,
   dayWindowUtc,
   localDateKey,
+  todayKey,
   toNaiveLocal,
   weekdayOfKey,
   zonedTimeToUtc,
@@ -690,6 +691,14 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     ...leaveByKey.keys(),
     ...wfhByKey,
   ])
+  // 個人預設班別（2026-10-13）：在職期間內、今天（租戶時區）以前的工作日，沒打卡也寫一列（worked=0），
+  // 跟舊排班員工一樣——月表、attendance_days、frequent_missing 才看得到「有班別卻沒來」。今天還在進行中，不先寫。
+  const today = todayKey(tz)
+  for (const empId of resolver.employeesWithDefault()) {
+    for (let d = from; d <= to && d < today; d = addDaysKey(d, 1)) {
+      if (resolver.forDay(empId, d, dayTypeFor(d)).source === "default") keys.add(`${empId}|${d}`)
+    }
+  }
 
   const rows: Array<Record<string, unknown>> = []
   for (const key of keys) {

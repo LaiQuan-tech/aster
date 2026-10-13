@@ -35,6 +35,7 @@ import { isMissingColumnError, isMissingTableError, punchRecordsHaveWfh, warnSch
 import { managerOfEmployee } from "../middleware/scope.js"
 import { settleAttendance } from "./settlement.js"
 import { loadShiftResolver } from "./employee-shifts.js"
+import { coveredByRequests, loadApprovedAbsences } from "./absence-cover.js"
 import { tenantBlocksApproveOnUnsettledLeave } from "./leave-settlement.js"
 import { pairPunchesTz, wfhPunchDates } from "./punch-pairing.js"
 import { capMinutesFor } from "./overtime-cap.js"
@@ -910,7 +911,8 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
   // 當天班別 → 淨工時（services/employee-shifts.ts，與結算／打卡遲到判斷／缺卡掃描同一支）：
   // 排班列（班表功能 2026-10-11 已移除，只剩歷史資料）→ 員工個人預設班別（2026-10-13，只限工作日）。
   // 有班別的日子＝「有應到」：沒打卡、沒假、沒在家 → absent_scheduled。都沒有 → 淨工時退回規則的正常工時。
-  // 個人預設班別只標到今天（租戶時區）為止：月中產生月表時，還沒到的日子不該冒出曠職。
+  // 個人預設班別只標到昨天（租戶時區）為止：今天還在進行中、之後的日子還沒到，都不該冒出曠職；
+  // 在職期間（到職日～離職日）外的日子 resolver 不給班別（employee-shifts.ts withinEmployment）。
   const resolver = await loadShiftResolver({ tenantId, from, to, employeeIds })
   const shiftNetOf = (shift: { start: string; end: string; breakMinutes: number } | null): number | null => {
     if (!shift) return null
@@ -919,18 +921,24 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     if (end < start) end += 24 * 60
     return Math.max(0, end - start - (shift.breakMinutes ?? 0))
   }
+  // 舊排班列照舊：有列就算有應到；shift_id 空／班別已刪 → 淨工時 null（與改動前相同）。
   for (const key of resolver.scheduledKeys()) {
     const [empId, d] = key.split("|")
-    facts.scheduleByKey.set(key, { shiftNetMinutes: shiftNetOf(resolver.forDay(empId, d, "workday").shift) })
+    facts.scheduleByKey.set(key, { shiftNetMinutes: shiftNetOf(resolver.scheduleOf(empId, d) ?? null) })
   }
+  // 出差／公出、在家工作單蓋滿班別的日子也不算有應到（月表本身只看得到請假分鐘與 wfh 申請單，看不到出差）。
   const today = todayKey(tz)
-  for (const empId of resolver.employeesWithDefault()) {
-    for (let d = from; d <= to && d <= today; d = addDaysKey(d, 1)) {
+  const defaultEmpIds = resolver.employeesWithDefault()
+  const offsiteRequests = (await loadApprovedAbsences(tenantId, defaultEmpIds, from, to, tz)).filter((r) => r.kind !== "leave")
+  for (const empId of defaultEmpIds) {
+    for (let d = from; d <= to && d < today; d = addDaysKey(d, 1)) {
       const key = `${empId}|${d}`
       if (facts.scheduleByKey.has(key)) continue
       const dayType: DayType = facts.calendar.get(d) ?? (weekdayOfKey(d) === 0 || weekdayOfKey(d) === 6 ? "rest_day" : "workday")
       const resolved = resolver.forDay(empId, d, dayType)
-      if (resolved.source) facts.scheduleByKey.set(key, { shiftNetMinutes: shiftNetOf(resolved.shift) })
+      if (!resolved.source || !resolved.shift) continue
+      if (coveredByRequests(offsiteRequests, empId, d, resolved.shift, tz)) continue
+      facts.scheduleByKey.set(key, { shiftNetMinutes: shiftNetOf(resolved.shift) })
     }
   }
 
@@ -2419,4 +2427,4 @@ export function previousPeriod(today: DateKey): string {
 }
 
 /** Exposed for unit tests. */
-export const __internal = { buildDayRows, anomalyContextFor, upsertBeyondCapSettlement }
+export const __internal = { buildDayRows, anomalyContextFor, upsertBeyondCapSettlement, loadMonthFacts }

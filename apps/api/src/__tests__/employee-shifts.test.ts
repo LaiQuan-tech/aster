@@ -88,3 +88,43 @@ describe("wfhPunchDates — 在家打卡算在哪一天（Asia/Taipei）", () =>
     expect(wfhPunchDates([{ type: "in", punch_at: "2026-10-13T06:30:00Z" }], TZ).size).toBe(0)
   })
 })
+
+import { withinEmployment } from "../services/employee-shifts.js"
+import { coveredByRequests, windowCovered } from "../services/absence-cover.js"
+
+describe("withinEmployment／在職期間外不套個人預設班別", () => {
+  it("到職日當天起、離職日當天止；空值不限", () => {
+    const e = { hireDate: "2026-09-15", terminatedAt: "2026-12-31" }
+    expect(withinEmployment("2026-09-14", e)).toBe(false)
+    expect(withinEmployment("2026-09-15", e)).toBe(true)
+    expect(withinEmployment("2026-12-31", e)).toBe(true)
+    expect(withinEmployment("2027-01-01", e)).toBe(false)
+    expect(withinEmployment("2000-01-01", { hireDate: null, terminatedAt: null })).toBe(true)
+    expect(resolveDayShift({ scheduledShift: null, defaultShift: PERSONAL, dayType: "workday", date: "2026-09-14", employment: e }).source).toBeNull()
+  })
+})
+
+describe("windowCovered／coveredByRequests — 班別整段被核准單蓋滿", () => {
+  it("聯集蓋滿才算；扣掉明確午休", () => {
+    const w = { start: 0, end: 100 }
+    expect(windowCovered(w, null, [{ start: 0, end: 60 }, { start: 50, end: 100 }])).toBe(true)
+    expect(windowCovered(w, null, [{ start: 0, end: 40 }, { start: 50, end: 100 }])).toBe(false)
+    expect(windowCovered(w, { start: 40, end: 50 }, [{ start: 0, end: 40 }, { start: 50, end: 100 }])).toBe(true)
+  })
+
+  it("日班 09–18 午休 12–13：上午、下午兩段 segments 合起來算整天", () => {
+    const req = {
+      employee_id: "e1",
+      kind: "leave",
+      start_at: "2026-09-01T01:00:00Z",
+      end_at: "2026-09-01T10:00:00Z",
+      segments: [
+        { date: "2026-09-01", startTime: "09:00", endTime: "12:00" },
+        { date: "2026-09-01", startTime: "13:00", endTime: "18:00" },
+      ],
+    }
+    expect(coveredByRequests([req], "e1", "2026-09-01", SCHEDULED, "Asia/Taipei")).toBe(true)
+    expect(coveredByRequests([{ ...req, segments: [req.segments[0]!] }], "e1", "2026-09-01", SCHEDULED, "Asia/Taipei")).toBe(false)
+    expect(coveredByRequests([req], "e2", "2026-09-01", SCHEDULED, "Asia/Taipei")).toBe(false)
+  })
+})
