@@ -27,7 +27,6 @@ import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "..
 import { loadRuleConfigFor } from "./payroll-inputs.js"
 import { assertDateRangeOpen } from "./period-lock.js"
 import { loadShiftResolver } from "./employee-shifts.js"
-import { loadEmployeeFeaturesMap } from "./employee-features.js"
 import { pairPunchesTz, type PairedDay } from "./punch-pairing.js"
 
 /**
@@ -701,8 +700,8 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     }
   }
 
-  // 個人開關「不計夜間加給」（employees.features.noNightPremium）：這些員工 night_minutes 一律寫 0。
-  const featuresByEmp = await loadEmployeeFeaturesMap(tenantId, employeeId ? [employeeId] : undefined)
+  // 個人開關「不計夜間加給」（employees.features.noNightPremium）不在這裡處理：night_minutes 照實寫，
+  // 只在薪資引擎入口 applyNightPolicy 歸 0——開關日後關掉時，不必重新結算夜間加給就會回來。
 
   const rows: Array<Record<string, unknown>> = []
   for (const key of keys) {
@@ -766,7 +765,7 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
       worked_minutes: workedMinutes,
       late_minutes: lateMinutes,
       overtime_minutes: result.overtimeMinutes,
-      night_minutes: featuresByEmp.get(empId)?.noNightPremium ? 0 : result.nightMinutes,
+      night_minutes: result.nightMinutes,
       day_type: result.dayType,
       anomaly: Object.keys(anomaly).length > 0 ? anomaly : null,
       leave_minutes: leave?.total ?? 0,

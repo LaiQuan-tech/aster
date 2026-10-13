@@ -239,19 +239,12 @@ describe("不計夜間加給（features.noNightPremium）", () => {
   const nightOf = (employeeId: string) =>
     fake.db.attendance_days!.find((r) => r.employee_id === employeeId && r.work_date === "2026-09-01")?.night_minutes
 
-  it("開關開 → 14:30–22:30 的 22:00–22:30 夜間分鐘寫 0", async () => {
-    seed({ defaultEmp: { features: { noNightPremium: true } } })
-    punchDay(DEFAULT_EMP)
-    await settleAttendance({ tenantId: TENANT_ID, from: "2026-09-01", to: "2026-09-01", employeeId: DEFAULT_EMP })
-    expect(nightOf(DEFAULT_EMP)).toBe(0)
-  })
-
-  it("開關關 → 照舊 30 分；同一批結算裡其他員工不受影響", async () => {
+  it("結算照實記夜間分鐘（開關只在薪資引擎歸 0，日後關掉開關不必重結算）", async () => {
     seed({ defaultEmp: { features: { noNightPremium: true } } })
     punchDay(DEFAULT_EMP)
     punchDay(FLEX_EMP)
     await settleAttendance({ tenantId: TENANT_ID, from: "2026-09-01", to: "2026-09-01" })
-    expect(nightOf(DEFAULT_EMP)).toBe(0)
+    expect(nightOf(DEFAULT_EMP)).toBe(30)
     expect(nightOf(FLEX_EMP)).toBe(30)
   })
 })
