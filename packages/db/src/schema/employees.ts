@@ -1,9 +1,10 @@
 import {
-  pgTable, uuid, text, date, timestamp, boolean, uniqueIndex,
+  pgTable, uuid, text, date, timestamp, boolean, jsonb, uniqueIndex, index,
 } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 import { tenants } from "./tenants"
 import { departments } from "./departments"
+import { shifts } from "./shifts"
 
 /**
  * Employees — people belonging to a tenant. `userId` links to the auth user
@@ -34,11 +35,21 @@ export const employees = pgTable(
     // 離職日 — set when the employee is deactivated; drives Dashboard 離職 counts.
     terminatedAt: date("terminated_at"),
     mustChangePassword: boolean("must_change_password").notNull().default(false),
+    /**
+     * 2026-10-13 員工個人設定（migration 0068）：個人預設班別——工作日沒有 schedules 列時用它判遲到／應下班／缺卡
+     * （apps/api services/employee-shifts.ts）；NULL＝依公司規則（彈性上班）。班別被刪 → SET NULL。
+     */
+    defaultShiftId: uuid("default_shift_id").references(() => shifts.id, { onDelete: "set null" }),
+    /** 個人功能開關（CHECK：必須是 object）；目前只用 `{ wfhPunch: true }`＝可勾「在家上班」打卡。 */
+    features: jsonb("features").$type<{ wfhPunch?: boolean }>().notNull().default(sql`'{}'::jsonb`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     userIdUnique: uniqueIndex("employees_user_id_uq")
       .on(table.userId)
       .where(sql`${table.userId} is not null`),
+    defaultShiftIdx: index("employees_default_shift_idx")
+      .on(table.defaultShiftId)
+      .where(sql`${table.defaultShiftId} is not null`),
   }),
 )

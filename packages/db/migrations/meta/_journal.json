@@ -477,6 +477,13 @@
       "when": 1791731184229,
       "tag": "0067_drop_hr_direct_writes",
       "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1791900000000,
+      "tag": "0068_employee_personal_shift_wfh_punch",
+      "breakpoints": true
     }
   ]
 }

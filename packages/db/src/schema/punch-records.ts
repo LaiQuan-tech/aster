@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, doublePrecision, timestamp, index, uniqueIndex,
+  pgTable, uuid, text, doublePrecision, timestamp, boolean, index, uniqueIndex,
 } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 import { tenants } from "./tenants"
@@ -47,6 +47,8 @@ export const punchRecords = pgTable(
     /** 打卡時的來源 IP（x-forwarded-for 第一段），供管理者查驗。 */
     ipAddress: text("ip_address"),
     requestId: uuid("request_id"),
+    /** 2026-10-13 在家上班打卡（migration 0068）：員工勾了「在家上班」打的卡；月表該日標在家工作，工時照打卡算。 */
+    wfh: boolean("wfh").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
