@@ -44,17 +44,17 @@ describe("resolveDayShift — 四個讀取點共用的優先序", () => {
 
 describe("employee features", () => {
   it("normalizeEmployeeFeatures：只認 wfhPunch === true", () => {
-    expect(normalizeEmployeeFeatures({ wfhPunch: true })).toEqual({ wfhPunch: true })
-    expect(normalizeEmployeeFeatures({ wfhPunch: "true" })).toEqual({ wfhPunch: false })
-    expect(normalizeEmployeeFeatures(null)).toEqual({ wfhPunch: false })
-    expect(normalizeEmployeeFeatures([true])).toEqual({ wfhPunch: false })
+    expect(normalizeEmployeeFeatures({ wfhPunch: true })).toEqual({ wfhPunch: true, noNightPremium: false })
+    expect(normalizeEmployeeFeatures({ wfhPunch: "true", noNightPremium: true })).toEqual({ wfhPunch: false, noNightPremium: true })
+    expect(normalizeEmployeeFeatures(null)).toEqual({ wfhPunch: false, noNightPremium: false })
+    expect(normalizeEmployeeFeatures([true])).toEqual({ wfhPunch: false, noNightPremium: false })
   })
 
   it("checkWfhPunch：沒帶／false 放行；true 要開通", () => {
-    expect(checkWfhPunch(undefined, { wfhPunch: false })).toEqual({ ok: true })
-    expect(checkWfhPunch(false, { wfhPunch: false })).toEqual({ ok: true })
-    expect(checkWfhPunch(true, { wfhPunch: true })).toEqual({ ok: true })
-    expect(checkWfhPunch(true, { wfhPunch: false })).toEqual({ ok: false, error: "wfh_punch_not_enabled" })
+    expect(checkWfhPunch(undefined, { wfhPunch: false, noNightPremium: false })).toEqual({ ok: true })
+    expect(checkWfhPunch(false, { wfhPunch: false, noNightPremium: false })).toEqual({ ok: true })
+    expect(checkWfhPunch(true, { wfhPunch: true, noNightPremium: false })).toEqual({ ok: true })
+    expect(checkWfhPunch(true, { wfhPunch: false, noNightPremium: false })).toEqual({ ok: false, error: "wfh_punch_not_enabled" })
   })
 })
 
@@ -126,5 +126,41 @@ describe("windowCovered／coveredByRequests — 班別整段被核准單蓋滿",
     expect(coveredByRequests([req], "e1", "2026-09-01", SCHEDULED, "Asia/Taipei")).toBe(true)
     expect(coveredByRequests([{ ...req, segments: [req.segments[0]!] }], "e1", "2026-09-01", SCHEDULED, "Asia/Taipei")).toBe(false)
     expect(coveredByRequests([req], "e2", "2026-09-01", SCHEDULED, "Asia/Taipei")).toBe(false)
+  })
+})
+
+import { computePayslip, type AttendanceDay } from "@hr/rules"
+import { applyNightPolicy } from "../services/employee-features.js"
+import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
+
+describe("applyNightPolicy — 薪資引擎入口的不計夜間加給", () => {
+  const day: AttendanceDay = {
+    date: "2026-09-01",
+    workedMinutes: 480,
+    lateMinutes: 0,
+    overtimeMinutes: 0,
+    nightMinutes: 30,
+    dayType: "workday",
+  }
+  const salary = { method: "monthly" as const, baseSalary: 36000 }
+  const off = { wfhPunch: false, noNightPremium: false }
+  const on = { wfhPunch: false, noNightPremium: true }
+
+  it("開 → 夜間分鐘 0、倍率 0、夜間加給 0；不動原陣列與原規則", () => {
+    const p = applyNightPolicy(on, [day], DEFAULT_RULE_CONFIG)
+    expect(p.days[0]!.nightMinutes).toBe(0)
+    expect(p.rules.night.multiplier).toBe(0)
+    expect(day.nightMinutes).toBe(30)
+    expect(DEFAULT_RULE_CONFIG.night.multiplier).toBe(1.34)
+    expect(computePayslip(p.days, salary, p.rules).nightPay).toBe(0)
+  })
+
+  it("關（或沒有開關）→ 原樣，22:00–22:30 照算夜間加給", () => {
+    for (const f of [off, null, undefined]) {
+      const p = applyNightPolicy(f, [day], DEFAULT_RULE_CONFIG)
+      expect(p.days[0]).toBe(day)
+      expect(p.rules).toBe(DEFAULT_RULE_CONFIG)
+      expect(computePayslip(p.days, salary, p.rules).nightPay).toBeGreaterThan(0)
+    }
   })
 })

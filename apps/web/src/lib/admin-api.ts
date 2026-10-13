@@ -117,8 +117,8 @@ export interface Employee {
   email: string | null;
   /** 個人預設班別（2026-10-13，migration 0068；null＝依公司規則／彈性上班；舊 API 沒有這欄）。 */
   default_shift_id?: string | null;
-  /** 個人功能開關（wfhPunch＝允許在家上班打卡）；舊 API 沒有這欄。 */
-  features?: { wfhPunch?: boolean } | null;
+  /** 個人功能開關（wfhPunch＝允許在家上班打卡、noNightPremium＝不計夜間加給）；舊 API 沒有這欄。 */
+  features?: { wfhPunch?: boolean; noNightPremium?: boolean } | null;
 }
 
 export function getEmployees() {
@@ -190,7 +190,7 @@ export function updateEmployee(
     /** 個人預設班別（null＝依公司規則）；DB 未套 0068 → 409 schema_not_ready。 */
     defaultShiftId?: string | null;
     /** 個人功能開關（合併寫入，只改帶來的鍵）。 */
-    features?: { wfhPunch?: boolean };
+    features?: { wfhPunch?: boolean; noNightPremium?: boolean };
   },
 ) {
   return apiFetch<{ id: string }>(`/employees/${id}`, {

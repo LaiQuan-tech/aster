@@ -35,6 +35,7 @@ import { isMissingColumnError, isMissingTableError, punchRecordsHaveWfh, warnSch
 import { managerOfEmployee } from "../middleware/scope.js"
 import { settleAttendance } from "./settlement.js"
 import { loadShiftResolver } from "./employee-shifts.js"
+import { applyNightPolicy } from "./employee-features.js"
 import { coveredByRequests, loadApprovedAbsences } from "./absence-cover.js"
 import { tenantBlocksApproveOnUnsettledLeave } from "./leave-settlement.js"
 import { pairPunchesTz, wfhPunchDates } from "./punch-pairing.js"
@@ -1716,8 +1717,10 @@ async function composeLiveView(
   let money: SheetMoney | null = null
   if (inputs?.salary) {
     try {
+      // 個人開關「不計夜間加給」：與薪資執行同一個入口（employee-features.applyNightPolicy）。
+      const policy = applyNightPolicy(inputs.features, payrollDays, inputs.rules)
       money = toMoney(
-        computePayslip(payrollDays, inputs.salary, inputs.rules, inputs.expenses, inputs.allowances, inputs.adjustments),
+        computePayslip(policy.days, inputs.salary, policy.rules, inputs.expenses, inputs.allowances, inputs.adjustments),
         inputs.rules,
       )
     } catch (err) {

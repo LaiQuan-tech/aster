@@ -438,6 +438,8 @@ export default function EmployeesPage() {
   // 員工個人出勤設定（2026-10-13）：預設班別（""＝依公司規則）與「允許在家上班打卡」。
   const [editDefaultShiftId, setEditDefaultShiftId] = useState("");
   const [editWfhPunch, setEditWfhPunch] = useState(false);
+  // 不計夜間加給（2026-10-13）：結算夜間分鐘寫 0、薪資與月表試算不發夜間加給（只影響這位員工）。
+  const [editNoNightPremium, setEditNoNightPremium] = useState(false);
   const [shifts, setShifts] = useState<Shift[]>([]);
   // 列內編輯第二排：生日／身分證／戶籍地／匯款帳號（存在 employee_profiles，走 PUT profile，與上面的 PATCH employees 分開送）。
   const [editPersonal, setEditPersonal] = useState<PersonalForm>(() => personalFormFrom({}));
@@ -626,10 +628,15 @@ export default function EmployeesPage() {
     const nextShiftId = editDefaultShiftId || null;
     const shiftChanged = (current?.default_shift_id ?? null) !== nextShiftId;
     const wfhChanged = (current?.features?.wfhPunch === true) !== editWfhPunch;
+    const nightChanged = (current?.features?.noNightPremium === true) !== editNoNightPremium;
+    const featurePatch = {
+      ...(wfhChanged ? { wfhPunch: editWfhPunch } : {}),
+      ...(nightChanged ? { noNightPremium: editNoNightPremium } : {}),
+    };
     try {
       await updateEmployee(id, {
         ...(shiftChanged ? { defaultShiftId: nextShiftId } : {}),
-        ...(wfhChanged ? { features: { wfhPunch: editWfhPunch } } : {}),
+        ...(wfhChanged || nightChanged ? { features: featurePatch } : {}),
         name: editName.trim() || undefined,
         role: editRole,
         deptId: editDeptId || null,
@@ -927,6 +934,7 @@ export default function EmployeesPage() {
     setEditStatus(employee.status);
     setEditDefaultShiftId(employee.default_shift_id ?? "");
     setEditWfhPunch(employee.features?.wfhPunch === true);
+    setEditNoNightPremium(employee.features?.noNightPremium === true);
   }
 
   /** 「⋯」選單的項目 → 各自既有的 handler（顯示規則在 lib/employee-actions.ts）。 */
@@ -1273,6 +1281,17 @@ export default function EmployeesPage() {
                                 允許在家上班打卡
                               </label>
                             </PersonalField>
+                            <PersonalField label="夜間加給" className="@3xl:col-span-2">
+                              <label className="flex h-[38px] items-center gap-2 text-sm text-gray-700">
+                                <input
+                                  type="checkbox"
+                                  checked={editNoNightPremium}
+                                  onChange={(event) => setEditNoNightPremium(event.target.checked)}
+                                  className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
+                                />
+                                不計夜間加給
+                              </label>
+                            </PersonalField>
                           </div>
                           {editError && (
                             <div className="mt-3">
@@ -1293,13 +1312,15 @@ export default function EmployeesPage() {
                         <td className="py-3 pr-4">
                           <p className="font-medium text-gray-800">{employee.name}</p>
                           <p className="text-xs text-gray-500">工號 {employee.emp_no ?? "—"}</p>
-                          {(employee.default_shift_id || employee.features?.wfhPunch) && (
+                          {(employee.default_shift_id || employee.features?.wfhPunch || employee.features?.noNightPremium) && (
                             <p className="text-xs text-gray-500">
                               {employee.default_shift_id
                                 ? `班別 ${shiftNameMap.get(employee.default_shift_id)?.name ?? "（已刪除）"}`
                                 : ""}
                               {employee.default_shift_id && employee.features?.wfhPunch ? "・" : ""}
                               {employee.features?.wfhPunch ? "可在家打卡" : ""}
+                              {(employee.default_shift_id || employee.features?.wfhPunch) && employee.features?.noNightPremium ? "・" : ""}
+                              {employee.features?.noNightPremium ? "不計夜間加給" : ""}
                             </p>
                           )}
                           {credentialsLockedOf(employee) && (

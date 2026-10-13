@@ -1,20 +1,59 @@
+import type { AttendanceDay, RuleConfig } from "@hr/rules"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { employeesHavePersonalSettings } from "./employee-shifts.js"
 
 /**
  * 員工個人功能開關（employees.features jsonb，migration 0068；2026-10-13）。
- * 目前只有：
- *   wfhPunch  允許「在家上班」打卡——員工端打卡卡片出現勾選框，勾了該筆打卡記 punch_records.wfh=true。
+ * 目前有：
+ *   wfhPunch        允許「在家上班」打卡——員工端打卡卡片出現勾選框，勾了該筆打卡記 punch_records.wfh=true。
+ *   noNightPremium  不計夜間加給（2026-10-13 業主決定，個人開關、不改租戶規則）：結算時 night_minutes 寫 0、
+ *                   薪資引擎（薪資執行／月表試算）對這位員工夜間分鐘歸 0、夜間倍率 0（見 applyNightPolicy）。
  * 未知鍵原樣保留（PATCH 是合併寫入），讀取時只吐出已知鍵。
  */
 export interface EmployeeFeatures {
   wfhPunch: boolean
+  noNightPremium: boolean
 }
 
 /** jsonb（可能是 null、陣列、亂型別）→ 已知鍵、布林化。純函式。 */
 export function normalizeEmployeeFeatures(raw: unknown): EmployeeFeatures {
   const obj = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
-  return { wfhPunch: obj.wfhPunch === true }
+  return { wfhPunch: obj.wfhPunch === true, noNightPremium: obj.noNightPremium === true }
+}
+
+/**
+ * 薪資引擎的單一入口（純函式）：員工開了 noNightPremium → 每天的夜間分鐘歸 0、規則夜間倍率 0
+ * （兩道一起：舊的 attendance_days 或已核准月表快照裡殘留的夜間分鐘也算不出錢）。其他員工原樣回傳。
+ */
+export function applyNightPolicy<D extends Pick<AttendanceDay, "nightMinutes">>(
+  features: EmployeeFeatures | null | undefined,
+  days: D[],
+  rules: RuleConfig,
+): { days: D[]; rules: RuleConfig } {
+  if (!features?.noNightPremium) return { days, rules }
+  return {
+    days: days.map((d) => (d.nightMinutes ? { ...d, nightMinutes: 0 } : d)),
+    rules: { ...rules, night: { ...rules.night, multiplier: 0 } },
+  }
+}
+
+/**
+ * 一批員工的功能開關（employee_id → features）；`employeeIds` 省略＝全租戶。0068 未套 → 空 Map（全關）。
+ * 只收至少有一個開關打開的員工（其他人查不到＝全關）。
+ */
+export async function loadEmployeeFeaturesMap(tenantId: string, employeeIds?: string[]): Promise<Map<string, EmployeeFeatures>> {
+  const out = new Map<string, EmployeeFeatures>()
+  if (employeeIds && employeeIds.length === 0) return out
+  if (!(await employeesHavePersonalSettings())) return out
+  let q = supabaseAdmin.from("employees").select("id, features").eq("tenant_id", tenantId)
+  if (employeeIds) q = q.in("id", employeeIds)
+  const { data, error } = await q
+  if (error) throw new Error(`loadEmployeeFeaturesMap: ${error.message}`)
+  for (const row of (data ?? []) as Array<{ id: string; features?: unknown }>) {
+    const f = normalizeEmployeeFeatures(row.features)
+    if (f.wfhPunch || f.noNightPremium) out.set(row.id, f)
+  }
+  return out
 }
 
 /**

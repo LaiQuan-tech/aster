@@ -30,7 +30,7 @@ export interface Me {
   isManager?: boolean;
   mustChangePassword?: boolean;
   /** 員工個人功能開關（2026-10-13；舊 API 沒有，讀取要 optional）。wfhPunch＝可勾「在家上班」打卡。 */
-  features?: { wfhPunch?: boolean } | null;
+  features?: { wfhPunch?: boolean; noNightPremium?: boolean } | null;
   /** 個人預設班別（null＝依公司規則／彈性上班）。 */
   defaultShift?: { id: string; name: string; start: string; end: string } | null;
 }

@@ -229,3 +229,29 @@ describe("月表 loadMonthFacts — 預設班別的應到日", () => {
     expect([...facts.scheduleByKey.keys()]).toEqual([`${SCHED_EMP}|2026-09-01`])
   })
 })
+
+describe("不計夜間加給（features.noNightPremium）", () => {
+  const punchDay = (employeeId: string) =>
+    fake.db.punch_records!.push(
+      { id: `${employeeId}-in`, tenant_id: TENANT_ID, employee_id: employeeId, type: "in", punch_at: "2026-09-01T14:30:00+08:00" },
+      { id: `${employeeId}-out`, tenant_id: TENANT_ID, employee_id: employeeId, type: "out", punch_at: "2026-09-01T22:30:00+08:00" },
+    )
+  const nightOf = (employeeId: string) =>
+    fake.db.attendance_days!.find((r) => r.employee_id === employeeId && r.work_date === "2026-09-01")?.night_minutes
+
+  it("開關開 → 14:30–22:30 的 22:00–22:30 夜間分鐘寫 0", async () => {
+    seed({ defaultEmp: { features: { noNightPremium: true } } })
+    punchDay(DEFAULT_EMP)
+    await settleAttendance({ tenantId: TENANT_ID, from: "2026-09-01", to: "2026-09-01", employeeId: DEFAULT_EMP })
+    expect(nightOf(DEFAULT_EMP)).toBe(0)
+  })
+
+  it("開關關 → 照舊 30 分；同一批結算裡其他員工不受影響", async () => {
+    seed({ defaultEmp: { features: { noNightPremium: true } } })
+    punchDay(DEFAULT_EMP)
+    punchDay(FLEX_EMP)
+    await settleAttendance({ tenantId: TENANT_ID, from: "2026-09-01", to: "2026-09-01" })
+    expect(nightOf(DEFAULT_EMP)).toBe(0)
+    expect(nightOf(FLEX_EMP)).toBe(30)
+  })
+})

@@ -47,7 +47,7 @@ const updateSchema = z
     terminatedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
     // 2026-10-13 員工個人設定（migration 0068）：個人預設班別（null＝依公司規則／彈性上班）與功能開關。
     defaultShiftId: z.string().uuid().nullable().optional(),
-    features: z.object({ wfhPunch: z.boolean().optional() }).strict().optional(),
+    features: z.object({ wfhPunch: z.boolean().optional(), noNightPremium: z.boolean().optional() }).strict().optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 

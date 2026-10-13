@@ -1,4 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
+import { applyNightPolicy } from "../services/employee-features.js"
 import { z } from "zod"
 import { computePayslip, resolvePayrollGates, undecidedLateWarning, type AttendanceDay } from "@hr/rules"
 import { requireAuth } from "../middleware/auth.js"
@@ -263,17 +264,23 @@ payrollRouter.post(
         ) {
           missingInsuredSalary.push(sal.employee_id)
         }
-        const days = daysByEmployee.get(sal.employee_id) ?? []
+        // 個人開關「不計夜間加給」（employees.features.noNightPremium）：夜間分鐘歸 0、倍率 0——連已核准月表快照
+        // 裡殘留的夜間分鐘也不計（services/employee-features.ts applyNightPolicy，月表試算用同一支）。
+        const policy = applyNightPolicy(
+          inputs.featuresByEmployee?.get(sal.employee_id),
+          daysByEmployee.get(sal.employee_id) ?? [],
+          rules,
+        )
         let breakdown: ReturnType<typeof computePayslip>
         try {
           breakdown = computePayslip(
-            days,
+            policy.days,
             toSalaryStructure(
               sal,
               dependentsByEmployee.get(sal.employee_id) ?? 0,
               advanceRecoveryByEmployee.get(sal.employee_id) ?? 0,
             ),
-            rules,
+            policy.rules,
             expensesByEmployee.get(sal.employee_id) ?? 0,
             allowancesByEmployee.get(sal.employee_id) ?? 0,
             // 一次性加減項（前期更正）：課稅補發進 gross、扣回進應扣、不課稅補發只加實發（引擎檔頭）。

@@ -14,6 +14,7 @@ import { DEFAULT_TIMEZONE, todayKey } from "../lib/tz.js"
 import { sumClaimsForPayroll, type PayrollClaimRow } from "./payroll-claims.js"
 import { loadAdjustmentsByEmployee } from "./payroll-adjustments.js"
 import { leaveDeductRate, loadLeaveTypes } from "./settlement.js"
+import { applyNightPolicy, loadEmployeeFeaturesMap, type EmployeeFeatures } from "./employee-features.js"
 
 /**
  * Payroll inputs — everything `computePayslip` needs besides the AttendanceDay[]
@@ -328,6 +329,8 @@ export interface PayrollInputs {
    * 課稅的補發進 gross、扣回進應扣、不課稅的補發只加在實發，規則見引擎檔頭（packages/rules payroll-engine）。
    */
   adjustmentsByEmployee: Map<string, PayrollAdjustment[]>
+  /** 員工個人功能開關（只收有開關打開的人；noNightPremium 在引擎入口由 applyNightPolicy 套用）。 */
+  featuresByEmployee?: Map<string, EmployeeFeatures>
 }
 
 /**
@@ -464,8 +467,10 @@ export async function loadPayrollInputs(
   // --- 本期一次性加減項（前期更正）----------------------------------------
   // 放進哪一期由那一列的 period 決定（HR 在薪資作業頁逐人維護）；軟刪除的不算。見 services/payroll-adjustments.ts。
   const adjustmentsByEmployee = await loadAdjustmentsByEmployee(tenantId, period, scopeIds)
+  const featuresByEmployee = await loadEmployeeFeaturesMap(tenantId, scopeIds)
 
   return {
+    featuresByEmployee,
     rules,
     ruleConfigVersion: version,
     salaryByEmployee,
@@ -491,6 +496,8 @@ export interface EmployeePayrollInputs {
   allowances: number
   /** 本期一次性加減項（前期更正）；試算與薪資執行用同一份，月表上的數字才會等於薪資單。 */
   adjustments: PayrollAdjustment[]
+  /** 員工個人功能開關（noNightPremium → 引擎入口 applyNightPolicy）。 */
+  features: EmployeeFeatures | null
 }
 
 export async function buildPayrollInputs(
@@ -515,6 +522,7 @@ export async function buildPayrollInputs(
     expenses: batch.expensesByEmployee.get(employeeId) ?? 0,
     allowances: batch.allowancesByEmployee.get(employeeId) ?? 0,
     adjustments: batch.adjustmentsByEmployee.get(employeeId) ?? [],
+    features: batch.featuresByEmployee?.get(employeeId) ?? null,
   }
 }
 
@@ -524,5 +532,6 @@ export function computeFromInputs(
   inputs: EmployeePayrollInputs,
 ): ReturnType<typeof computePayslip> | null {
   if (!inputs.salary) return null
-  return computePayslip(days, inputs.salary, inputs.rules, inputs.expenses, inputs.allowances, inputs.adjustments)
+  const policy = applyNightPolicy(inputs.features, days, inputs.rules)
+  return computePayslip(policy.days, inputs.salary, policy.rules, inputs.expenses, inputs.allowances, inputs.adjustments)
 }
