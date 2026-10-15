@@ -27,7 +27,8 @@ export interface PunchLike {
   punch_at: string;
   id?: string | null;
   /**
-   * 2026-10-15：`GET /punch/today` 把「前一天 16 小時內、還開著的上班卡」（跨午夜加班）放在最前面並標 true。
+   * 2026-10-15：`GET /punch/today` 把「前一天還開著的上班卡」（跨午夜加班；由 API 判定：16 小時內且早於那天
+   * 班別下班＋6 小時，沒班別＝今天 06:00 前，見 API services/punch-carry-over.ts）放在最前面並標 true。
    * 它決定階段（上班中 → 「下班打卡」），但不算今天的上班時間、下班時間與筆數。
    */
   carry_over?: boolean | null;
@@ -269,6 +270,25 @@ export function needsReInConfirm(summary: Pick<PunchSummary, "phase" | "lastOutA
   if (summary.phase !== "done" || !summary.lastOutAt) return false;
   const out = Date.parse(summary.lastOutAt);
   return Number.isFinite(out) && Number.isFinite(now) && now - out >= 0 && now - out < RECENT_OUT_CONFIRM_MS;
+}
+
+/** 跨日下班距上班超過多久要先確認（2026-10-15 驗收回饋）。 */
+export const LONG_CARRY_OVER_CONFIRM_MS = 12 * 60 * 60_000;
+
+/**
+ * 畫面是跨日的「上班中」（workingCarriedOver）、按的是下班，而距上班卡已超過 LONG_CARRY_OVER_CONFIRM_MS
+ * → 回傳已上班幾小時（無條件捨去），首頁先跳「自昨天 HH:MM 起已 N 小時，確定是下班？」；否則 null。
+ * 跨日卡由 API 判定（carry_over），這裡只加一道確認，不另算規則。
+ */
+export function longCarryOverOutHours(
+  summary: Pick<PunchSummary, "workingCarriedOver" | "workingSince" | "nextType">,
+  now: number,
+): number | null {
+  if (!summary.workingCarriedOver || summary.nextType !== "out" || !summary.workingSince) return null;
+  const since = Date.parse(summary.workingSince);
+  if (!Number.isFinite(since) || !Number.isFinite(now)) return null;
+  const elapsed = now - since;
+  return elapsed > LONG_CARRY_OVER_CONFIRM_MS ? Math.floor(elapsed / 3_600_000) : null;
 }
 
 export interface AnnouncementLike {

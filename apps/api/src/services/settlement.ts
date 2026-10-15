@@ -496,7 +496,7 @@ function normalizeHhmm(value: string): string {
 }
 
 /** tenant_calendar_days in [from, to] → date → DayType (empty until 0038). */
-async function loadCalendar(tenantId: string, from: DateKey, to: DateKey): Promise<Map<DateKey, DayType>> {
+export async function loadCalendar(tenantId: string, from: DateKey, to: DateKey): Promise<Map<DateKey, DayType>> {
   const map = new Map<DateKey, DayType>()
   const { data, error } = await supabaseAdmin
     .from("tenant_calendar_days")

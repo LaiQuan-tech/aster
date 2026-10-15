@@ -28,6 +28,7 @@ import {
 import { describePeriodClosed } from "@/lib/period-closed";
 import {
   needsAnnouncementHint,
+  longCarryOverOutHours,
   needsReInConfirm,
   precheckPunch,
   shouldApplyPolledPunches,
@@ -69,9 +70,10 @@ import { DutyTodayCard } from "./_components/DutyTodayCard";
  *      但畫面上的上班卡已超過 16 小時（STALE_WORKING_MS）就當成已換日：輪詢的空紀錄照常套用、預檢不送下班卡
  *      （按鈕改回「上班打卡」並提示另送補卡；查不到最新狀態就整個重新載入）。進頁與回到前景的重抓照舊整個套用。
  *   跨午夜（2026-10-15 修）：以前「進頁／回到前景」過了 00:00 就拿到空紀錄 → 只剩「上班打卡」，下午上班、半夜才下班
- *      的人只能先按上班再按下班，前一天的上班卡配不到下班卡。現在 `/punch/today` 會把前一天 16 小時內還開著的上班卡
- *      併進來（`carry_over`），首頁顯示「上班中（跨日）· 自 HH:MM」＋「下班打卡」，另給「改打上班卡」的出口
- *      （昨天其實忘了打下班卡的人）。剛下班 10 分鐘內按「再次上班打卡」會先確認（needsReInConfirm）。
+ *      的人只能先按上班再按下班，前一天的上班卡配不到下班卡。現在 `/punch/today` 會把前一天還開著的上班卡併進來
+ *      （`carry_over`；判定全在 API services/punch-carry-over.ts：16 小時內、早於那天班別下班＋6 小時，沒班別＝06:00 前），
+ *      首頁顯示「上班中（跨日）· 自昨天 HH:MM」＋「下班打卡」，另給「改打上班卡」次要按鈕（昨天其實忘了打下班卡的人）；
+ *      距上班超過 12 小時按下班先確認（longCarryOverOutHours）。剛下班 10 分鐘內按「再次上班打卡」會先確認（needsReInConfirm）。
  *
  * 待核准的上班補卡（2026-10-12 業主拍板）：忘了打上班卡的人送出補卡後，不用等主管核准就能照常打下班卡。
  * 每次抓 `/punch/today` 時並行抓 `GET /requests?scope=mine&status=pending&kind=fix_punch`（最多等 3 秒）；今天有
@@ -345,7 +347,7 @@ function PunchCard({
   const baseStatus = loading
     ? " "
     : summary.phase === "working" && summary.workingSince && !summary.workingOnPending
-      ? `${summary.statusLabel} · 自 ${fmtHm(summary.workingSince)}`
+      ? `${summary.statusLabel} · 自${summary.workingCarriedOver ? "昨天" : ""} ${fmtHm(summary.workingSince)}`
       : summary.phase === "done" && summary.lastOutAt
         ? `${summary.statusLabel} · 下班 ${fmtHm(summary.lastOutAt)}`
         : summary.statusLabel;
@@ -366,15 +368,10 @@ function PunchCard({
       </Button>
       {/* 跨午夜仍在上班中（前一天 16 小時內的上班卡還開著）：主按鈕是「下班打卡」；昨天其實忘了打下班卡的人走這裡。 */}
       {!loading && summary.workingCarriedOver && (
-        <div className="mt-2 text-center">
-          <button
-            type="button"
-            className="text-sm text-gray-500 underline underline-offset-2 disabled:opacity-50"
-            disabled={disabled}
-            onClick={() => onPunchInInstead()}
-          >
-            不是接續前一天的班？改打上班卡
-          </button>
+        <div className="mt-2">
+          <Button variant="secondary" size="lg" block disabled={disabled} onClick={() => onPunchInInstead()}>
+            昨天已下班（忘了打卡）？改打上班卡
+          </Button>
         </div>
       )}
       {wfhEnabled && (
@@ -841,6 +838,12 @@ export default function EssHome() {
     const shown = summarizePunches(screen);
     if (!forceIn && needsReInConfirm(shown, Date.now()) && shown.lastOutAt) {
       const ok = window.confirm(`你在 ${fmtHm(shown.lastOutAt)} 已打下班卡（已成功）。\n確定要再次上班打卡嗎？`);
+      if (!ok) return;
+    }
+    // 跨日下班、距上班已超過 12 小時：先確認是下班（昨天可能其實忘了打下班卡）。
+    const longHours = forceIn ? null : longCarryOverOutHours(shown, Date.now());
+    if (longHours !== null && shown.workingSince) {
+      const ok = window.confirm(`自昨天 ${fmtHm(shown.workingSince)} 起已 ${longHours} 小時，確定是下班？\n（若昨天忘了打下班卡，請取消後按「改打上班卡」）`);
       if (!ok) return;
     }
     loadSeqRef.current += 1; // 按下前發出、還沒回來的背景抓取作廢：打卡流程期間畫面只由這裡更新

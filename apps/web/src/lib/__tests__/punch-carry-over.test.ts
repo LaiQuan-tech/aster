@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   CARRY_OVER_STATUS_LABEL,
   RECENT_OUT_CONFIRM_MS,
+  longCarryOverOutHours,
   needsReInConfirm,
   precheckPunch,
   shouldApplyPolledPunches,
@@ -112,5 +113,18 @@ describe("needsReInConfirm — 剛下班又按再次上班（10/14 23:20:42 out 
     expect(needsReInConfirm({ phase: "working", lastOutAt: out }, t(out) + 1000)).toBe(false);
     expect(needsReInConfirm({ phase: "done", lastOutAt: null }, t(out))).toBe(false);
     expect(needsReInConfirm({ phase: "done", lastOutAt: "bad" }, t(out))).toBe(false);
+  });
+});
+
+describe("longCarryOverOutHours — 跨日下班距上班超過 12 小時要確認", () => {
+  it("14:10 上班、01:28 下班（11 小時多）→ 不用確認", () => {
+    expect(longCarryOverOutHours(summarizePunches([carried]), NOW_0128)).toBeNull();
+  });
+  it("超過 12 小時 → 回傳小時數（無條件捨去）", () => {
+    expect(longCarryOverOutHours(summarizePunches([carried]), t(carried.punch_at) + 13.5 * 3_600_000)).toBe(13);
+  });
+  it("不是跨日的上班中 → 不用確認", () => {
+    const s = summarizePunches([{ type: "in", punch_at: carried.punch_at }]);
+    expect(longCarryOverOutHours(s, t(carried.punch_at) + 13 * 3_600_000)).toBeNull();
   });
 });
