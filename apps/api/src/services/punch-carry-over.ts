@@ -15,10 +15,12 @@ import { CARRY_OVER_MAX_MS, carryOverOpenIn } from "./punch-guard.js"
  *
  * 判斷「前一天最後一張是 in 的那張卡還算不算開著」：
  *   • 最外層：距今 ≤ CARRY_OVER_MAX_MS（16 小時）。
- *   • 上班卡那天有班別（排班歷史資料或個人預設班別，services/employee-shifts.ts，與結算同一支）
- *     → 現在要早於「那天班別下班時間＋CARRY_OVER_GRACE_MS（6 小時）」（跨日班下班在隔天）。
- *   • 沒有班別（公司彈性規則）→ 現在要早於今天（租戶時區）06:00。
- * 例：14:30–22:30 班 → 隔天 04:30 前；沒班別 → 06:00 前。前一天 18:00 上班、隔天 09:00 來 → 不算。
+ *   • 截止＝「今天（租戶時區）06:00」；上班卡那天有班別（排班歷史資料或個人預設班別，
+ *     services/employee-shifts.ts，與結算同一支）時取它與「那天班別下班＋CARRY_OVER_GRACE_MS（6 小時）」
+ *     較晚者（跨日班下班在隔天）——日班（09:00–18:00，＋6h＝00:00）加班過午夜也能在 06:00 前下班
+ *     （2026-10-15 複驗建議）。
+ * 例：14:30–22:30 班 → 隔天 06:00 前（04:30 與 06:00 取晚）；22:00–06:00 夜班 → 隔天 12:00 前；沒班別 → 06:00 前。
+ * 前一天 18:00 上班、隔天 09:00 來 → 不算。
  * 前端只看 API 回的 `carry_over`，不另算一套。
  */
 
@@ -28,14 +30,14 @@ export const CARRY_OVER_GRACE_MS = 6 * 60 * 60_000
 export const CARRY_OVER_NO_SHIFT_CUTOFF_HOUR = 6
 
 /**
- * 純函式：截止時刻（UTC ms）。`shift`＝上班卡那天（`inDate`）的班別；null＝沒班別 → `today` 06:00。
- * 班別時間解析不了 → 退回沒班別的規則。
+ * 純函式：截止時刻（UTC ms）＝ `today` 06:00，與（有班別時）`inDate` 班別下班＋6 小時取較晚者。
+ * `shift`＝上班卡那天（`inDate`）的班別；null 或時間解析不了 → 只看 06:00。16 小時上限另由 carryOverOpenIn 管。
  */
 export function carryOverCutoffMs(input: { inDate: DateKey; today: DateKey; shift: ShiftDef | null; tz: string }): number {
   const { inDate, today, shift, tz } = input
+  const sixAm = zonedTimeToUtc(today, CARRY_OVER_NO_SHIFT_CUTOFF_HOUR, 0, tz).getTime()
   const bounds = shift ? shiftBoundsOn(inDate, shift, tz) : null
-  if (bounds) return bounds.end + CARRY_OVER_GRACE_MS
-  return zonedTimeToUtc(today, CARRY_OVER_NO_SHIFT_CUTOFF_HOUR, 0, tz).getTime()
+  return bounds ? Math.max(sixAm, bounds.end + CARRY_OVER_GRACE_MS) : sixAm
 }
 
 /**

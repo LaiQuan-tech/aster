@@ -304,6 +304,11 @@ function Clock() {
   );
 }
 
+/** 今天（瀏覽器時區，與 todayKey() 同一個日界）00:00 的 ms；預檢／輪詢判斷「畫面的上班卡是不是今天以前」用。 */
+function todayStartMs(): number {
+  return Date.parse(`${todayKey()}T00:00:00`);
+}
+
 /* -------------------------------------------------------- PunchCard --- */
 
 function PunchCard({
@@ -677,7 +682,7 @@ export default function EssHome() {
         const day = todayKey();
         if (poll) {
           setRecords((prev) =>
-            shouldApplyPolledPunches(prev, next, Date.now()) || (pendingFresh && pendingFixPunchWithdrawn(prev, next, day))
+            shouldApplyPolledPunches(prev, next, Date.now(), todayStartMs()) || (pendingFresh && pendingFixPunchWithdrawn(prev, next, day))
               ? next
               : prev,
           );
@@ -876,7 +881,7 @@ export default function EssHome() {
         wantsIn ? refetchPendingForPunch() : Promise.resolve(null),
       ]);
       if (!activeRef.current) return;
-      const check = precheckPunch(screen, latest, Date.now());
+      const check = precheckPunch(screen, latest, Date.now(), todayStartMs());
       if (!check.send) {
         abortStalePunch(check);
         return;
@@ -950,7 +955,7 @@ export default function EssHome() {
       const [latest, freshPending] = body.type
         ? await Promise.all([fetchTodayRecords(PUNCH_PRECHECK_WAIT_MS), refetchPendingForPunch()])
         : [null, null];
-      const check = body.type ? precheckPunch(pendingScreenRef.current, latest, Date.now()) : null;
+      const check = body.type ? precheckPunch(pendingScreenRef.current, latest, Date.now(), todayStartMs()) : null;
       if (!activeRef.current) return;
       if (check && !check.send) {
         pendingBodyRef.current = null;

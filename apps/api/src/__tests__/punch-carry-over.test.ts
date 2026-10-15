@@ -92,7 +92,7 @@ describe("GET /punch/today — 併入前一天還開著的上班卡", () => {
     expect(res.body.records[0]).toMatchObject({ carry_over: true })
   })
 
-  it("有班別：10/14 23:20 誤按上班、10/15 09:00 或 14:00 進頁 → 不判跨日（班別 22:30＋6h＝04:30 已過）", async () => {
+  it("有班別：10/14 23:20 誤按上班、10/15 09:00 或 14:00 進頁 → 不判跨日（截止 06:00 已過）", async () => {
     fake.db.punch_records = [punch(SHIFT_EMP, "out", "2026-10-14T15:20:42.000Z"), punch(SHIFT_EMP, "in", "2026-10-14T15:20:55.000Z")]
     for (const now of ["2026-10-15T01:00:00.000Z", "2026-10-15T06:00:00.000Z"]) {
       at(now)
@@ -132,6 +132,20 @@ describe("GET /punch/today — 併入前一天還開著的上班卡", () => {
   })
 })
 
+describe("日班加班過午夜（複驗建議 B）", () => {
+  // 最後一張上班卡 17:00（下午外出回來再打），16 小時上限不會先擋：01:30 判跨日、06:30 因 06:00 截止不判。
+  it("09:00–18:00 班 10/13 17:00 上班、10/14 01:30 → 判跨日；10/14 06:30 → 不判", async () => {
+    fake.db.shifts = [{ id: SHIFT_ID, tenant_id: TENANT_ID, start_time: "09:00", end_time: "18:00", break_minutes: 60, break_start: null }]
+    fake.db.punch_records = [punch(SHIFT_EMP, "in", "2026-10-13T09:00:00.000Z")]
+    at("2026-10-13T17:30:00.000Z")
+    let res = await as(SHIFT_TOKEN)(request(app).get("/punch/today"))
+    expect(res.body.records[0]).toMatchObject({ carry_over: true })
+    at("2026-10-13T22:30:00.000Z")
+    res = await as(SHIFT_TOKEN)(request(app).get("/punch/today"))
+    expect(res.body.records).toEqual([])
+  })
+})
+
 describe("POST /punch 沒帶 type — 推斷跟 /punch/today 一致", () => {
   const inserted = () =>
     fake.writes
@@ -164,11 +178,19 @@ describe("POST /punch 沒帶 type — 推斷跟 /punch/today 一致", () => {
   })
 })
 
-describe("carryOverCutoffMs", () => {
+describe("carryOverCutoffMs — 06:00 與班別下班＋6h 取較晚者", () => {
   const tz = "Asia/Taipei"
-  it("有班別：班別下班＋6 小時（跨日班下班在隔天）", () => {
-    expect(new Date(carryOverCutoffMs({ inDate: "2026-10-13", today: "2026-10-14", shift: { start: "14:30", end: "22:30", breakMinutes: 0 }, tz })).toISOString()).toBe("2026-10-13T20:30:00.000Z")
-    expect(new Date(carryOverCutoffMs({ inDate: "2026-10-13", today: "2026-10-14", shift: { start: "22:00", end: "06:00", breakMinutes: 0 }, tz })).toISOString()).toBe("2026-10-14T04:00:00.000Z")
+  const cutoff = (start: string, end: string) =>
+    new Date(carryOverCutoffMs({ inDate: "2026-10-13", today: "2026-10-14", shift: { start, end, breakMinutes: 0 }, tz })).toISOString()
+  it("14:30–22:30 班：04:30 早於 06:00 → 06:00", () => {
+    expect(cutoff("14:30", "22:30")).toBe("2026-10-13T22:00:00.000Z")
+  })
+  it("09:00–18:00 日班：00:00 早於 06:00 → 06:00（加班過午夜仍可下班）", () => {
+    expect(cutoff("09:00", "18:00")).toBe("2026-10-13T22:00:00.000Z")
+  })
+  it("22:00–06:00 夜班：隔天 12:00 晚於 06:00 → 12:00；16:00–02:00 → 08:00", () => {
+    expect(cutoff("22:00", "06:00")).toBe("2026-10-14T04:00:00.000Z")
+    expect(cutoff("16:00", "02:00")).toBe("2026-10-14T00:00:00.000Z")
   })
   it("沒班別：今天 06:00（台北）", () => {
     expect(new Date(carryOverCutoffMs({ inDate: "2026-10-13", today: "2026-10-14", shift: null, tz })).toISOString()).toBe("2026-10-13T22:00:00.000Z")

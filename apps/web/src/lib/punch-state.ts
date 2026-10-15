@@ -130,6 +130,22 @@ function isStaleWorking(summary: PunchSummary, now: number): boolean {
   return Number.isFinite(since) && Number.isFinite(now) && now - since > STALE_WORKING_MS;
 }
 
+/**
+ * 畫面「上班中」靠的是一張今天開始（`todayStartMs`，瀏覽器時區今天 00:00）之前的**真的**上班卡（有 id）
+ * （2026-10-15 複驗建議）。這時 API 若還認它是開著的，最新回應會帶著它（carry_over，判定見 API
+ * services/punch-carry-over.ts）；最新回應是空的＝API 已判定換日 → 空紀錄算正面證據。
+ * 沒有 id 的上班卡（待核准上班補卡撐起的暫定卡、或沒拿到 record 的樂觀更新）API 判斷不到，維持舊規則。
+ * `todayStartMs` 沒給 → false（舊行為）。
+ */
+function workingFromBeforeToday(screen: ReadonlyArray<PunchLike>, todayStartMs: number | undefined): boolean {
+  if (todayStartMs === undefined || !Number.isFinite(todayStartMs)) return false;
+  const work = screen.filter(isWorkPunch).sort(comparePunchAt);
+  const last = work[work.length - 1];
+  if (!last || last.type !== "in" || typeof last.id !== "string" || !last.id) return false;
+  const at = Date.parse(last.punch_at);
+  return Number.isFinite(at) && at < todayStartMs;
+}
+
 /** 打卡時刻（ms）；解析不了就退回原字串比較。 */
 function instantOf(punchAt: string): number | string {
   const t = Date.parse(punchAt);
@@ -190,11 +206,14 @@ export type PunchPrecheck<T extends PunchLike = PunchLike> =
  *     不算狀態變了；休息／外出卡（break_*／outing_*）一律不看。
  *   - 其他 → 照畫面送。
  * `now`＝現在（ms since epoch），判斷上班卡過期用。
+ * `todayStartMs`（選填）＝今天 00:00（ms）：畫面上班中靠的是今天以前的真上班卡、而最新回應是空的（沒有
+ * carry_over）→ API 已判定換日，同樣不送（day_changed）——避免分頁前晚開著、隔天早上按下班配出十幾小時。
  */
 export function precheckPunch<T extends PunchLike>(
   screen: ReadonlyArray<PunchLike>,
   latest: readonly T[] | null | undefined,
   now: number,
+  todayStartMs?: number,
 ): PunchPrecheck<T> {
   const shown = summarizePunches(screen);
   const type = shown.nextType;
@@ -206,7 +225,7 @@ export function precheckPunch<T extends PunchLike>(
   const summary = summarizePunches(latest);
   // 前一天還開著的上班卡（carry_over）是正面證據：不走「空紀錄」分支，照下面跟畫面比對。
   if (summary.inOutCount === 0 && !summary.workingCarriedOver) {
-    if (!stale) return { send: true, type };
+    if (!stale && !workingFromBeforeToday(screen, todayStartMs)) return { send: true, type };
     return { send: false, reason: "day_changed", latest, summary, notice: punchDayChangedNotice(summary) };
   }
   if (summary.nextType !== type || hasUnseenWorkPunch(screen, latest)) {
@@ -246,17 +265,20 @@ export function punchUnverifiedNotice(): string {
  *     「下班打卡」：多半是加班過午夜、新的一天還沒打卡，套用就會把按鈕翻成「上班打卡」，人反而打不了下班卡。
  *   - 同上但上班卡已超過 16 小時 → 套用：多半是昨天忘了打下班卡、分頁開了一整夜，按鈕回到「上班打卡」。
  *   - 其他（空紀錄＋畫面沒在上班）→ 套用。
+ *   - 2026-10-15：畫面上班中靠的是今天（`todayStartMs`）以前的真上班卡、輪詢回來是空的（API 沒帶 carry_over，
+ *     已判定換日）→ 套用。
  * 只用在背景輪詢；進頁與回到前景的重抓照舊整個套用。`now`＝現在（ms since epoch）。
  */
 export function shouldApplyPolledPunches(
   screen: ReadonlyArray<PunchLike>,
   polled: ReadonlyArray<PunchLike>,
   now: number,
+  todayStartMs?: number,
 ): boolean {
   const p = summarizePunches(polled);
   if (p.inOutCount > 0 || p.workingCarriedOver) return true;
   const shown = summarizePunches(screen);
-  return shown.phase !== "working" || isStaleWorking(shown, now);
+  return shown.phase !== "working" || isStaleWorking(shown, now) || workingFromBeforeToday(screen, todayStartMs);
 }
 
 /** 剛下班多久內再按「再次上班打卡」要先確認（2026-10-15：下班後十幾秒又多一張上班卡）。 */

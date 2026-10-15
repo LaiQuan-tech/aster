@@ -128,3 +128,44 @@ describe("longCarryOverOutHours — 跨日下班距上班超過 12 小時要確�
     expect(longCarryOverOutHours(s, t(carried.punch_at) + 13 * 3_600_000)).toBeNull();
   });
 });
+
+describe("複驗建議 A：畫面的上班卡在今天以前、API 最新回應沒有 carry_over → 已換日", () => {
+  // 瀏覽器在台北：10/14 00:00 台北＝10/13T16:00Z。前晚 18:00 上班（10:00Z）、分頁開著，隔天 09:00（01:00Z）按下班。
+  const TODAY_START = t("2026-10-13T16:00:00.000Z");
+  const lastNight: PunchLike = { id: "p-1800", type: "in", punch_at: "2026-10-13T10:00:00.000Z" };
+  const NOW_0900 = t("2026-10-14T01:00:00.000Z");
+
+  it("預檢：最新是空的 → 不送（day_changed），按鈕改回上班打卡", () => {
+    const check = precheckPunch([lastNight], [], NOW_0900, TODAY_START);
+    expect(check.send).toBe(false);
+    if (!check.send) {
+      expect(check.reason).toBe("day_changed");
+      expect(check.summary?.nextLabel).toBe("上班打卡");
+    }
+  });
+
+  it("預檢：最新帶著 carry_over（API 還認它開著）→ 照送 out", () => {
+    expect(precheckPunch([lastNight], [{ ...lastNight, carry_over: true }], NOW_0900, TODAY_START)).toEqual({ send: true, type: "out" });
+  });
+
+  it("預檢：上班卡是今天的、最新空的（抓到別的日界）→ 照舊照畫面送", () => {
+    const todayIn: PunchLike = { id: "p-0100", type: "in", punch_at: "2026-10-13T17:00:00.000Z" };
+    expect(precheckPunch([todayIn], [], t("2026-10-13T18:00:00Z"), TODAY_START)).toEqual({ send: true, type: "out" });
+  });
+
+  it("沒給 todayStartMs → 舊行為（照送）", () => {
+    expect(precheckPunch([lastNight], [], NOW_0900)).toEqual({ send: true, type: "out" });
+  });
+
+  it("沒有 id 的上班卡（待核准補卡的暫定卡）→ 維持舊規則", () => {
+    expect(precheckPunch([{ type: "in", punch_at: lastNight.punch_at }], [], NOW_0900, TODAY_START)).toEqual({ send: true, type: "out" });
+  });
+
+  it("輪詢：空紀錄 → 套用；帶 carry_over → 套用；今天的上班卡＋空紀錄 → 不套用", () => {
+    expect(shouldApplyPolledPunches([lastNight], [], NOW_0900, TODAY_START)).toBe(true);
+    expect(shouldApplyPolledPunches([lastNight], [{ ...lastNight, carry_over: true }], NOW_0900, TODAY_START)).toBe(true);
+    const todayIn: PunchLike = { id: "p-0100", type: "in", punch_at: "2026-10-13T17:00:00.000Z" };
+    expect(shouldApplyPolledPunches([todayIn], [], t("2026-10-13T18:00:00Z"), TODAY_START)).toBe(false);
+    expect(shouldApplyPolledPunches([lastNight], [], NOW_0900)).toBe(false);
+  });
+});
