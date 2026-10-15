@@ -10,7 +10,13 @@ import { writeAuditLog } from "../services/audit.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { dayWindowUtc, localParts, todayKey } from "../lib/tz.js"
 import { logger } from "../lib/logger.js"
-import { checkPunchCooldown, cooldownSeconds, statusFromRecords } from "../services/punch-guard.js"
+import {
+  CARRY_OVER_MAX_MS,
+  carryOverOpenIn,
+  checkPunchCooldown,
+  cooldownSeconds,
+  statusFromRecords,
+} from "../services/punch-guard.js"
 import { assertInstantsOpen } from "../services/period-lock.js"
 import { importManualPunches } from "../services/imports/writers.js"
 import { lateMinutesForArrival, type ArrivalLateness } from "../services/settlement.js"
@@ -93,6 +99,35 @@ async function todayWindow(tenantId: string): Promise<{ start: string; end: stri
   const tz = await getTenantTimezone(tenantId)
   const { startIso, endIso } = dayWindowUtc(todayKey(tz), tz)
   return { start: startIso, end: endIso }
+}
+
+/**
+ * 跨午夜仍在上班中（2026-10-15）：今天（租戶日曆日）開始前最後一張 in／out 若是 16 小時內的 in，回傳那一列
+ * （欄位照 `cols`）；否則 null。只往回撈 CARRY_OVER_MAX_MS，判斷本身是 services/punch-guard.ts carryOverOpenIn。
+ * GET /punch/today 把它併進紀錄（標 `carry_over: true`），POST /punch 沒帶 type 時據此推成 out——前後端一致。
+ */
+async function findCarryOverIn(
+  tenantId: string,
+  employeeId: string,
+  todayStartIso: string,
+  now: Date,
+  cols: string,
+): Promise<Record<string, unknown> | null> {
+  const since = new Date(now.getTime() - CARRY_OVER_MAX_MS).toISOString()
+  const { data, error } = await supabaseAdmin
+    .from("punch_records")
+    .select(cols)
+    .eq("tenant_id", tenantId)
+    .eq("employee_id", employeeId)
+    .in("type", ["in", "out"])
+    .gte("punch_at", since)
+    .lt("punch_at", todayStartIso)
+    .order("punch_at", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) throw new Error(`carry-over in: ${error.message}`)
+  const row = (data ?? null) as unknown as (Record<string, unknown> & { type: string; punch_at: string }) | null
+  return carryOverOpenIn(row, todayStartIso, now)
 }
 
 // Resolve the caller's own employee row (id + role) in this tenant, or null.
@@ -282,7 +317,12 @@ punchRouter.post(
           next(new Error(`POST /punch (infer): ${lastErr.message}`))
           return
         }
-        resolvedType = last?.type === "in" ? "out" : "in"
+        if (last) resolvedType = last.type === "in" ? "out" : "in"
+        else {
+          // 今天還沒有 in／out：前一天 16 小時內的上班卡還開著（跨午夜加班）→ 這張是下班卡。
+          const carried = await findCarryOverIn(tenantId, self.id, start, now, "id, type, punch_at")
+          resolvedType = carried ? "out" : "in"
+        }
       }
 
       // 遲到理由：當天第一張上班卡遲到 → 沒帶理由就擋下（不寫打卡）。
@@ -409,6 +449,10 @@ punchRouter.post(
  * 'in', else 'off'. break_* / outing_* punches are ignored for the status
  * (see statusFromRecords) so a break never reads as "已下班" on the front
  * page. A caller with no employee row returns an empty list and status 'off'.
+ *
+ * 跨午夜（2026-10-15）：今天開始前最後一張 in／out 若是 16 小時內的 in（還在上班中），那一列會放在
+ * `records` 最前面並多帶 `carry_over: true`（status 因此是 working）。前端拿它判斷「下班打卡」，但不算進
+ * 今天的上班時間／筆數。
  */
 punchRouter.get(
   "/punch/today",
@@ -443,7 +487,11 @@ punchRouter.get(
         next(new Error(`GET /punch/today: ${error.message}`))
         return
       }
-      const records = data ?? []
+      const cols = await selectCols()
+      const todayRows = (data ?? []) as unknown as Array<Record<string, unknown>>
+      // 跨午夜仍在上班中：把前一天 16 小時內、還開著的上班卡放在最前面（標 carry_over），首頁才會顯示「下班打卡」。
+      const carried = await findCarryOverIn(tenantId, self.id, start, new Date(), cols)
+      const records = carried ? [{ ...carried, carry_over: true }, ...todayRows] : todayRows
       const status = statusFromRecords(records as unknown as Array<{ type: string }>)
       res.status(200).json({ records, status })
     } catch (err) {

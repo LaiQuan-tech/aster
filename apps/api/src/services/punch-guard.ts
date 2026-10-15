@@ -75,3 +75,33 @@ export function statusFromRecords(records: Array<{ type: string }>): WorkStatus 
   }
   return "off"
 }
+
+/**
+ * 跨午夜仍在上班中的「前一天上班卡」最多往回認多久（2026-10-15）。
+ * `GET /punch/today` 與 POST /punch 沒帶 type 時的推斷都只看租戶的日曆日：下午上班、過了 00:00 才下班的人，
+ * 新的一天還沒有任何 in／out，以前就被當成「尚未打卡」→ 首頁只剩「上班打卡」，員工只好先按上班再按下班，
+ * 前一天的上班卡因此配不到下班卡（結算 services/punch-pairing.ts 遇到中間夾著另一張 in 就不配）。
+ * 跟前端 lib/punch-state.ts 的 STALE_WORKING_MS 同一個數字：正常工時連同延長工時一天最多 12 小時
+ * （勞基法第 32 條）加休息與收尾餘裕取 16 小時；超過就當成昨天忘了打下班卡，不再當成還在上班。
+ */
+export const CARRY_OVER_MAX_MS = 16 * 60 * 60_000
+
+/**
+ * 純函式：今天（租戶日曆日）開始前最後一張 in／out（`lastBeforeToday`，呼叫端只撈 in／out）若是 in、
+ * 而且距 `now` 不超過 CARRY_OVER_MAX_MS → 回傳它（員工跨午夜仍在上班中）；否則 null。
+ * 時間解析不了、在今天開始之後、或在 `now` 之後（時鐘誤差）→ null（寧可照舊當成新的一天）。
+ */
+export function carryOverOpenIn<T extends { type: string; punch_at: string }>(
+  lastBeforeToday: T | null | undefined,
+  todayStartIso: string,
+  now: Date,
+): T | null {
+  if (!lastBeforeToday || lastBeforeToday.type !== "in") return null
+  const inMs = Date.parse(lastBeforeToday.punch_at)
+  const startMs = Date.parse(todayStartIso)
+  if (!Number.isFinite(inMs) || !Number.isFinite(startMs)) return null
+  if (inMs >= startMs) return null
+  const elapsed = now.getTime() - inMs
+  if (elapsed < 0 || elapsed > CARRY_OVER_MAX_MS) return null
+  return lastBeforeToday
+}

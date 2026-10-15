@@ -60,6 +60,8 @@ export interface PunchRecord {
   device_id: string | null;
   /** 在家上班打卡（2026-10-13；DB 未套 0068 時不會有這欄）。 */
   wfh?: boolean;
+  /** 2026-10-15：GET /punch/today 併進來的前一天上班卡（跨午夜仍在上班中）；只有那一列有。 */
+  carry_over?: boolean;
 }
 
 export interface PunchTodayResponse {

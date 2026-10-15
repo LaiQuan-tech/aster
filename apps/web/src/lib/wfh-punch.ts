@@ -53,7 +53,8 @@ export function writeWfhChoice(storage: StorageLike | null, day: string, checked
 
 /** 打卡紀錄裡有沒有在家上班的卡（GET /punch/today、/punch 每列的 wfh；舊 API 沒有這欄 → false）。 */
 export function hasWfhPunch(records: ReadonlyArray<object>): boolean {
-  return records.some((r) => (r as { wfh?: unknown }).wfh === true);
+  // 前一天還開著的上班卡（carry_over，跨午夜）不算今天的。
+  return records.some((r) => (r as { wfh?: unknown }).wfh === true && (r as { carry_over?: unknown }).carry_over !== true);
 }
 
 /** 顯示用後綴：在家上班的打卡標「（在家）」。 */

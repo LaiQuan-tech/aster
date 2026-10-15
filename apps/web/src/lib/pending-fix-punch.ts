@@ -16,7 +16,7 @@
  *   - 背景輪詢比的是「併過暫定上班卡」的紀錄：加班過午夜（補卡日期已不是今天）照舊維持「上班中」，
  *     上班卡超過 16 小時才翻回「上班打卡」，跟真的上班卡同一套規則。
  */
-import { summarizePunches, type PunchLike, type PunchSummary } from "./punch-state";
+import { isCarryOverPunch, summarizePunches, type PunchLike, type PunchSummary } from "./punch-state";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** 補卡段的時間：`HH:MM`（表單一律送這種；容許尾巴帶秒）。 */
@@ -129,7 +129,8 @@ export function withPendingFixPunch(
   const real = records.filter((r) => !isProvisionalPunch(r));
   const pending = pendingFixPunchInFor(requests, today);
   if (!pending) return real;
-  if (real.some((r) => r.type === "in")) return real;
+  // 前一天還開著的上班卡（carry_over，跨午夜）不是今天的上班卡，不擋今天的暫定上班卡。
+  if (real.some((r) => r.type === "in" && !isCarryOverPunch(r))) return real;
   const at = Date.parse(pending.punchAt);
   // 時間解析不了的真卡也當成「不晚於補卡時間」：寧可照舊，不冒按鈕翻來翻去的險。
   const notFirst = real.some((r) => r.type === "out" && !(Date.parse(r.punch_at) > at));

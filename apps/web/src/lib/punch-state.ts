@@ -26,6 +26,11 @@ export interface PunchLike {
   type: string;
   punch_at: string;
   id?: string | null;
+  /**
+   * 2026-10-15：`GET /punch/today` 把「前一天 16 小時內、還開著的上班卡」（跨午夜加班）放在最前面並標 true。
+   * 它決定階段（上班中 → 「下班打卡」），但不算今天的上班時間、下班時間與筆數。
+   */
+  carry_over?: boolean | null;
 }
 
 /**
@@ -57,6 +62,16 @@ export interface PunchSummary {
   nextLabel: string;
   /** 按鈕旁的狀態文案。 */
   statusLabel: string;
+  /** 上班中是因為前一天還開著的上班卡（跨午夜，`carry_over`）；首頁另給「改打上班卡」的出口。 */
+  workingCarriedOver: boolean;
+}
+
+/** 跨午夜仍在上班中的狀態文案（接「· 自 HH:MM」）。 */
+export const CARRY_OVER_STATUS_LABEL = "上班中（跨日）";
+
+/** 是不是 `/punch/today` 併進來的前一天上班卡。 */
+export function isCarryOverPunch(r: PunchLike): boolean {
+  return r.carry_over === true;
 }
 
 const PHASE_COPY: Record<PunchPhase, Pick<PunchSummary, "nextType" | "nextLabel" | "statusLabel">> = {
@@ -78,9 +93,12 @@ function comparePunchAt(a: PunchLike, b: PunchLike): number {
 }
 
 export function summarizePunches(records: ReadonlyArray<PunchLike>): PunchSummary {
-  const work = records.filter(isWorkPunch).sort(comparePunchAt);
-  const last = work[work.length - 1];
+  const all = records.filter(isWorkPunch).sort(comparePunchAt);
+  const last = all[all.length - 1];
   const phase: PunchPhase = !last ? "none" : last.type === "in" ? "working" : "done";
+  // 上班／下班時間與筆數只算今天的卡；前一天的上班卡（carry_over）只拿來決定階段。
+  const work = all.filter((r) => !isCarryOverPunch(r));
+  const workingCarriedOver = phase === "working" && !!last && isCarryOverPunch(last);
 
   const firstIn = work.find((r) => r.type === "in");
   let lastOut: PunchLike | undefined;
@@ -91,13 +109,16 @@ export function summarizePunches(records: ReadonlyArray<PunchLike>): PunchSummar
     }
   }
 
+  const copy = PHASE_COPY[phase];
   return {
     phase,
     firstInAt: firstIn?.punch_at ?? null,
     lastOutAt: lastOut?.punch_at ?? null,
     workingSince: phase === "working" && last ? last.punch_at : null,
     inOutCount: work.length,
-    ...PHASE_COPY[phase],
+    ...copy,
+    statusLabel: workingCarriedOver ? CARRY_OVER_STATUS_LABEL : copy.statusLabel,
+    workingCarriedOver,
   };
 }
 
@@ -182,7 +203,8 @@ export function precheckPunch<T extends PunchLike>(
     return { send: false, reason: "unverified", latest: null, summary: null, notice: punchUnverifiedNotice() };
   }
   const summary = summarizePunches(latest);
-  if (summary.inOutCount === 0) {
+  // 前一天還開著的上班卡（carry_over）是正面證據：不走「空紀錄」分支，照下面跟畫面比對。
+  if (summary.inOutCount === 0 && !summary.workingCarriedOver) {
     if (!stale) return { send: true, type };
     return { send: false, reason: "day_changed", latest, summary, notice: punchDayChangedNotice(summary) };
   }
@@ -230,9 +252,23 @@ export function shouldApplyPolledPunches(
   polled: ReadonlyArray<PunchLike>,
   now: number,
 ): boolean {
-  if (summarizePunches(polled).inOutCount > 0) return true;
+  const p = summarizePunches(polled);
+  if (p.inOutCount > 0 || p.workingCarriedOver) return true;
   const shown = summarizePunches(screen);
   return shown.phase !== "working" || isStaleWorking(shown, now);
+}
+
+/** 剛下班多久內再按「再次上班打卡」要先確認（2026-10-15：下班後十幾秒又多一張上班卡）。 */
+export const RECENT_OUT_CONFIRM_MS = 10 * 60_000;
+
+/**
+ * 按鈕是「再次上班打卡」、而今天最後一張下班卡在 RECENT_OUT_CONFIRM_MS 內 → true：首頁先跳確認再送。
+ * 防的是剛按完下班、以為沒打到又按一次（多出一張上班卡，打卡紀錄不能硬刪）。
+ */
+export function needsReInConfirm(summary: Pick<PunchSummary, "phase" | "lastOutAt">, now: number): boolean {
+  if (summary.phase !== "done" || !summary.lastOutAt) return false;
+  const out = Date.parse(summary.lastOutAt);
+  return Number.isFinite(out) && Number.isFinite(now) && now - out >= 0 && now - out < RECENT_OUT_CONFIRM_MS;
 }
 
 export interface AnnouncementLike {

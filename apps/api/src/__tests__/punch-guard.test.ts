@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest"
 import {
+  CARRY_OVER_MAX_MS,
+  carryOverOpenIn,
   DEFAULT_PUNCH_COOLDOWN_SECONDS,
   checkPunchCooldown,
   cooldownSeconds,
@@ -120,5 +122,35 @@ describe("statusFromRecords — only in/out flip the state", () => {
     expect(statusFromRecords(rec("in", "out", "outing_in", "outing_out"))).toBe("off")
     expect(statusFromRecords(rec("break_in"))).toBe("off")
     expect(statusFromRecords(rec("outing_in", "outing_out"))).toBe("off")
+  })
+})
+
+describe("carryOverOpenIn — 跨午夜仍在上班中（2026-10-15）", () => {
+  // 台北 10/14 00:00 = 10/13T16:00Z。
+  const todayStart = "2026-10-13T16:00:00.000Z"
+  const in1410 = { type: "in", punch_at: "2026-10-13T06:10:00.000Z" } // 10/13 14:10 台北
+
+  it("前一天 14:10 上班、10/14 01:28 還沒下班 → 認得這張上班卡（應推為下班）", () => {
+    expect(carryOverOpenIn(in1410, todayStart, new Date("2026-10-13T17:28:41.000Z"))).toBe(in1410)
+  })
+
+  it("最後一張是 out（前一天已下班）→ null", () => {
+    expect(carryOverOpenIn({ type: "out", punch_at: in1410.punch_at }, todayStart, new Date("2026-10-13T17:28:00Z"))).toBeNull()
+  })
+
+  it("沒有前一天的卡 → null", () => {
+    expect(carryOverOpenIn(null, todayStart, new Date("2026-10-13T17:28:00Z"))).toBeNull()
+  })
+
+  it("超過 16 小時（昨天忘了打下班卡，隔天早上來）→ null；剛好 16 小時仍算", () => {
+    const inMs = Date.parse(in1410.punch_at)
+    expect(carryOverOpenIn(in1410, todayStart, new Date(inMs + CARRY_OVER_MAX_MS))).toBe(in1410)
+    expect(carryOverOpenIn(in1410, todayStart, new Date(inMs + CARRY_OVER_MAX_MS + 1))).toBeNull()
+  })
+
+  it("上班卡在今天開始之後、在未來、或時間解析不了 → null", () => {
+    expect(carryOverOpenIn({ type: "in", punch_at: "2026-10-13T16:30:00Z" }, todayStart, new Date("2026-10-13T17:00:00Z"))).toBeNull()
+    expect(carryOverOpenIn(in1410, todayStart, new Date("2026-10-13T05:00:00Z"))).toBeNull()
+    expect(carryOverOpenIn({ type: "in", punch_at: "garbage" }, todayStart, new Date("2026-10-13T17:00:00Z"))).toBeNull()
   })
 })

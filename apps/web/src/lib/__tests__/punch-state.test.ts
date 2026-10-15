@@ -45,6 +45,7 @@ describe("summarizePunches", () => {
       nextType: "in",
       nextLabel: "上班打卡",
       statusLabel: "尚未打卡",
+      workingCarriedOver: false,
     });
   });
 
