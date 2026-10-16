@@ -59,6 +59,8 @@ export interface ExpenseDraft {
 
 /** 驗證過、可以送出的一筆（POST /expenses 的 body 去掉 tripRequestId，建公出單後才知道）。 */
 export interface ReadyExpense {
+  /** 畫面上的位置（0 起算，含空白列）：送出後的錯誤「第 N 筆」用它，與表單卡片「第 N 筆」一致。 */
+  position: number;
   categoryId: string;
   amount: number;
   incurredOn: string;
@@ -83,6 +85,14 @@ export function isSelfPaidTrip(r: Pick<TripLike, "kind" | "advance_requested">):
 /** 這張出差單現在能不能拿來填報銷（簽核中或已核准；駁回、撤回的不行）。 */
 export function isTripOpenForExpenses(r: Pick<TripLike, "status">): boolean {
   return r.status === "pending" || r.status === "approved";
+}
+
+/**
+ * 報銷頁「綁定出差單」可列的出差單：已核准的都列；簽核中的只列「自行墊付」的
+ * （先預支的單核准後才開預支、報銷要隨預支核銷，維持核准後才列）。
+ */
+export function isTripListedForExpenses(r: Pick<TripLike, "kind" | "status" | "advance_requested">): boolean {
+  return r.status === "approved" || (r.status === "pending" && isSelfPaidTrip(r));
 }
 
 /** 「我的申請」該不該顯示「填報銷單」：自行墊付、簽核中或已核准的公出／出差單。 */
@@ -220,7 +230,7 @@ export function validateExpenseDrafts(
       if (problem) return fail(problem);
     }
     const note = (d.note.trim() || defaultNote).slice(0, EXPENSE_NOTE_MAX);
-    ready.push({ categoryId: cat.id, amount, incurredOn: d.incurredOn, ...(note ? { note } : {}), receipt: d.receipt });
+    ready.push({ position: i, categoryId: cat.id, amount, incurredOn: d.incurredOn, ...(note ? { note } : {}), receipt: d.receipt });
   }
   return { ok: true, ready };
 }
@@ -228,6 +238,7 @@ export function validateExpenseDrafts(
 /* ------------------------------------------------------ 送出編排 --- */
 
 export interface FiledExpense<C> {
+  /** 畫面上的位置（{@link ReadyExpense.position}）。 */
   index: number;
   amount: number;
   claim: C;
@@ -251,7 +262,7 @@ export type TripWithExpensesResult<T, C> =
 
 /**
  * 公出單＋報銷明細一起送出：
- *   1. 先準備每張憑證（壓縮＋3 MB 檢查）——任一張不過就停，什麼單都不建（stage "prepare"，index＝第幾筆）；
+ *   1. 先準備每張憑證（壓縮＋3 MB 檢查）——任一張不過就停，什麼單都不建（stage "prepare"，index＝畫面上的位置）；
  *   2. 建公出單；失敗就停（stage "trip"，也沒有報銷單）；
  *   3. 逐筆建報銷單（綁這張公出單）＋傳憑證（lib/upload-prep.ts createThenUpload：傳失敗就撤回剛建的報銷單）。
  *      某筆失敗其餘照送，結果分成 filed／failed。公出單已建好，所以第 3 步的失敗**不會**讓呼叫端重送公出單——
@@ -262,7 +273,7 @@ export async function fileTripWithExpenses<T, C>(steps: {
   expenses: readonly ReadyExpense[];
   createTrip: () => Promise<T>;
   tripId: (trip: T) => string;
-  fileExpense: (body: Omit<ReadyExpense, "receipt"> & { tripRequestId: string }) => Promise<C>;
+  fileExpense: (body: Omit<ReadyExpense, "receipt" | "position"> & { tripRequestId: string }) => Promise<C>;
   upload: (claim: C, file: File) => Promise<unknown>;
   rollback: (claim: C) => Promise<unknown>;
   prepare?: (file: File) => Promise<File>;
@@ -278,7 +289,7 @@ export async function fileTripWithExpenses<T, C>(steps: {
     try {
       prepared.push(await prepare(file));
     } catch (error) {
-      return { ok: false, stage: "prepare", index: i, error };
+      return { ok: false, stage: "prepare", index: steps.expenses[i].position, error };
     }
   }
 
@@ -293,7 +304,7 @@ export async function fileTripWithExpenses<T, C>(steps: {
   const filed: FiledExpense<C>[] = [];
   const failed: FailedExpense<C>[] = [];
   for (let i = 0; i < steps.expenses.length; i++) {
-    const { receipt: _receipt, ...body } = steps.expenses[i];
+    const { receipt: _receipt, position, ...body } = steps.expenses[i];
     const result = await createThenUpload<C>({
       file: prepared[i],
       create: () => steps.fileExpense({ ...body, tripRequestId }),
@@ -302,17 +313,17 @@ export async function fileTripWithExpenses<T, C>(steps: {
       // 第 1 步已準備過，這裡原樣用
       prepare: async (file) => file,
     });
-    if (result.ok) filed.push({ index: i, amount: body.amount, claim: result.created });
+    if (result.ok) filed.push({ index: position, amount: body.amount, claim: result.created });
     else if (result.stage === "upload")
       failed.push({
-        index: i,
+        index: position,
         amount: body.amount,
         stage: "upload",
         error: result.error,
         rolledBack: result.rolledBack,
         ...(result.rolledBack ? {} : { leftover: result.created }),
       });
-    else failed.push({ index: i, amount: body.amount, stage: "create", error: result.error });
+    else failed.push({ index: position, amount: body.amount, stage: "create", error: result.error });
   }
   return { ok: true, trip, filed, failed };
 }

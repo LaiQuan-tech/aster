@@ -279,11 +279,15 @@ function RequestRow({
               上傳憑證
             </Button>
           )}
-          {claims && (
-            <Link href={tripExpenseHref(r.id)} className="text-xs text-green-700 underline-offset-2 hover:underline">
-              {tripClaimSummaryText(claims)}
-            </Link>
-          )}
+          {/* 已駁回／撤回的單：報銷頁不再列它（預填不到），只顯示文字不可點 */}
+          {claims &&
+            (r.status === "rejected" || r.status === "cancelled" ? (
+              <span className="text-xs text-gray-500">{tripClaimSummaryText(claims)}</span>
+            ) : (
+              <Link href={tripExpenseHref(r.id)} className="text-xs text-green-700 underline-offset-2 hover:underline">
+                {tripClaimSummaryText(claims)}
+              </Link>
+            ))}
           {fillExpense && (
             <Link
               href={tripExpenseHref(r.id)}

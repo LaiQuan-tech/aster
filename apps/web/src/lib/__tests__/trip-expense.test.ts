@@ -4,6 +4,7 @@ import {
   isBlankDraft,
   isCategoryUsableForTrip,
   isSelfPaidTrip,
+  isTripListedForExpenses,
   parseTripParam,
   showFillExpense,
   summarizeTripClaims,
@@ -57,6 +58,16 @@ describe("判斷：自行墊付、可填報銷、類別可用", () => {
     expect(showFillExpense({ ...base, advance_requested: 5000 })).toBe(false); // 先預支：走預支核銷，不變
     expect(showFillExpense({ ...base, kind: "leave" })).toBe(false);
     expect(showFillExpense({ ...base, kind: "petty_cash" })).toBe(false);
+  });
+
+  it("報銷頁可列的出差單：已核准全列；簽核中只列自行墊付的；駁回、撤回不列", () => {
+    const base = { kind: "business_trip", advance_requested: null };
+    expect(isTripListedForExpenses({ ...base, status: "approved" })).toBe(true);
+    expect(isTripListedForExpenses({ ...base, status: "approved", advance_requested: "3000" })).toBe(true);
+    expect(isTripListedForExpenses({ ...base, status: "pending" })).toBe(true);
+    expect(isTripListedForExpenses({ ...base, status: "pending", advance_requested: "3000" })).toBe(false);
+    expect(isTripListedForExpenses({ ...base, status: "rejected" })).toBe(false);
+    expect(isTripListedForExpenses({ ...base, status: "cancelled" })).toBe(false);
   });
 
   it("要求出差核准的類別：簽核中不能用、核准後可以；停用的一律不行", () => {
@@ -140,8 +151,8 @@ describe("明細驗證 validateExpenseDrafts", () => {
     expect(res).toEqual({
       ok: true,
       ready: [
-        { categoryId: CAT_PLAIN.id, amount: 1200, incurredOn: "2026-10-16", note: NOTE, receipt },
-        { categoryId: CAT_PLAIN.id, amount: 80, incurredOn: "2026-10-16", note: "停車", receipt: null },
+        { position: 0, categoryId: CAT_PLAIN.id, amount: 1200, incurredOn: "2026-10-16", note: NOTE, receipt },
+        { position: 1, categoryId: CAT_PLAIN.id, amount: 80, incurredOn: "2026-10-16", note: "停車", receipt: null },
       ],
     });
   });
@@ -167,10 +178,20 @@ describe("明細驗證 validateExpenseDrafts", () => {
     );
     expect(res).toEqual({ ok: false, index: 2, error: "報銷第 3 筆：請填寫金額" });
   });
+
+  it("position 記畫面上的位置（中間有空白列也不重新編號）", () => {
+    const res = validateExpenseDrafts(
+      [draft(), draft({ categoryId: CAT_PLAIN.id, amount: "10" }), draft(), draft({ categoryId: CAT_PLAIN.id, amount: "20" })],
+      CATS,
+      NOTE,
+    );
+    expect(res.ok && res.ready.map((r) => r.position)).toEqual([1, 3]);
+  });
 });
 
 describe("送出編排 fileTripWithExpenses", () => {
-  const ready = (amount: number, receipt: File | null = null): ReadyExpense => ({
+  const ready = (amount: number, receipt: File | null = null, position = 0): ReadyExpense => ({
+    position,
     categoryId: CAT_PLAIN.id,
     amount,
     incurredOn: "2026-10-16",
@@ -219,14 +240,14 @@ describe("送出編排 fileTripWithExpenses", () => {
     const bad = file("bad.pdf", 10, "application/pdf");
     const err = new Error("檔案超過 3 MB");
     const d = deps({
-      expenses: [ready(100), ready(50, bad)],
+      expenses: [ready(100, null, 0), ready(50, bad, 2)], // 畫面第 2 列是空白、已略過
       prepare: vi.fn(async (f: File) => {
         if (f === bad) throw err;
         return f;
       }),
     });
     const res = await fileTripWithExpenses(d);
-    expect(res).toEqual({ ok: false, stage: "prepare", index: 1, error: err });
+    expect(res).toEqual({ ok: false, stage: "prepare", index: 2, error: err });
     expect(d.createTrip).not.toHaveBeenCalled();
     expect(d.fileExpense).not.toHaveBeenCalled();
   });
@@ -246,7 +267,7 @@ describe("送出編排 fileTripWithExpenses", () => {
     const uploadErr = new Error("Failed to fetch");
     let n = 0;
     const d = deps({
-      expenses: [ready(100), ready(200, r2), ready(300, r3), ready(400)],
+      expenses: [ready(100, null, 0), ready(200, r2, 1), ready(300, r3, 3), ready(400, null, 4)], // 畫面第 3 列空白
       fileExpense: vi.fn(async () => {
         n += 1;
         if (n === 1) throw createErr;
@@ -264,11 +285,11 @@ describe("送出編排 fileTripWithExpenses", () => {
     expect(d.createTrip).toHaveBeenCalledTimes(1);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(res.filed).toEqual([{ index: 3, amount: 400, claim: { id: "claim-4" } }]);
+    expect(res.filed).toEqual([{ index: 4, amount: 400, claim: { id: "claim-4" } }]);
     expect(res.failed).toEqual([
       { index: 0, amount: 100, stage: "create", error: createErr },
       { index: 1, amount: 200, stage: "upload", error: uploadErr, rolledBack: true },
-      { index: 2, amount: 300, stage: "upload", error: uploadErr, rolledBack: false, leftover: { id: "claim-3" } },
+      { index: 3, amount: 300, stage: "upload", error: uploadErr, rolledBack: false, leftover: { id: "claim-3" } },
     ]);
     expect(d.rollback).toHaveBeenCalledTimes(2);
   });

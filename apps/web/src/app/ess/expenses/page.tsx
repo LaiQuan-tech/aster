@@ -43,7 +43,7 @@ import {
 import { todayKey } from "@/lib/ess-format";
 import { createThenUpload, leftoverAfter, pickedFileError } from "@/lib/upload-prep";
 import {
-  isTripOpenForExpenses,
+  isTripListedForExpenses,
   parseTripParam,
   tripExpenseNote,
   tripOptionLabel,
@@ -131,7 +131,7 @@ export default function EssExpensesPage() {
   const [receiptInputKey, setReceiptInputKey] = useState(0);
   const [busy, setBusy] = useState(false);
   // 出差軌（模組三第 2 條）：這類報銷必須綁一張已核准的出差單。
-  // trips＝我的出差單（簽核中＋已核准；駁回、撤回的濾掉）；要求出差核准的類別只列已核准的。
+  // trips＝我的出差單（已核准＋簽核中的自行墊付單；駁回、撤回、簽核中的先預支單濾掉）；要求出差核准的類別只列已核准的。
   const [trips, setTrips] = useState<MyTrip[]>([]);
   // `?trip=` 預填（公出申請的「填報銷單」）：id、是否已套用、找不到時的說明。
   const [prefillTripId, setPrefillTripId] = useState<string | null>(null);
@@ -154,7 +154,8 @@ export default function EssExpensesPage() {
       ]);
       setCategories(c.categories.filter((x) => x.active));
       setClaims(e.claims);
-      setTrips((t.requests ?? []).filter(isTripOpenForExpenses));
+      // 已核准的全列；簽核中的只列自行墊付的（先預支的維持核准後才列）。
+      setTrips((t.requests ?? []).filter(isTripListedForExpenses));
       setTripsLoaded(true);
       setAdvances(a.advances);
       setLoadError(null);
@@ -340,7 +341,7 @@ export default function EssExpensesPage() {
         )}
         {prefillMissing && (
           <p className="mb-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            找不到那張公出／出差申請（可能已駁回、撤回），這筆會當一般報銷送出；需要的話可在下方選擇要綁的出差單。
+            找不到那張公出／出差申請（可能已駁回、撤回，或是先預支、還在簽核的單），這筆會當一般報銷送出；需要的話可在下方選擇要綁的出差單。
           </p>
         )}
         {loadError && <InlineError className="mb-3">{loadError}</InlineError>}
