@@ -1,5 +1,11 @@
 "use client";
 
+/**
+ * 員工報銷 `/ess/expenses`。
+ * `?trip=<出差單 id>`（2026-10-16，公出／出差申請的「填報銷單」）：從自己的出差單找到那張，預填發生日期（起日）、
+ * 備註（類型＋地點＋事由）、綁定出差單，並在表單頂端顯示「來自 MM/DD 公出申請」。簽核中的出差單也能綁，
+ * 但只限類別沒要求出差核准的費用（lib/trip-expense.ts isCategoryUsableForTrip；API 對要求核准的回 trip_not_approved）。
+ */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Card, Field, InlineError, Input, Select } from "@/components/ess-ui";
 import {
@@ -8,7 +14,7 @@ import {
   fileExpense,
   cancelExpense,
   uploadExpenseReceipt,
-  getMyApprovedTrips,
+  getMyTrips,
   getMyAdvances,
   type MyExpenseCategory,
   type MyExpenseClaim,
@@ -34,8 +40,16 @@ import {
   type LeftoverClaim,
   type StorageLike,
 } from "@/lib/advance-view";
-import { localDateKey, todayKey } from "@/lib/ess-format";
+import { todayKey } from "@/lib/ess-format";
 import { createThenUpload, leftoverAfter, pickedFileError } from "@/lib/upload-prep";
+import {
+  isTripOpenForExpenses,
+  parseTripParam,
+  tripExpenseNote,
+  tripOptionLabel,
+  tripOriginLabel,
+  tripStartDate,
+} from "@/lib/trip-expense";
 
 /** GET /advances 每列附對應申請單的摘要（2026-10-11）；MyAdvance 沒宣告，這裡補。 */
 type AdvanceRow = MyAdvance & { request?: AdvanceRequestInfo | null; created_at?: string };
@@ -117,7 +131,13 @@ export default function EssExpensesPage() {
   const [receiptInputKey, setReceiptInputKey] = useState(0);
   const [busy, setBusy] = useState(false);
   // 出差軌（模組三第 2 條）：這類報銷必須綁一張已核准的出差單。
+  // trips＝我的出差單（簽核中＋已核准；駁回、撤回的濾掉）；要求出差核准的類別只列已核准的。
   const [trips, setTrips] = useState<MyTrip[]>([]);
+  // `?trip=` 預填（公出申請的「填報銷單」）：id、是否已套用、找不到時的說明。
+  const [prefillTripId, setPrefillTripId] = useState<string | null>(null);
+  const [prefillApplied, setPrefillApplied] = useState(false);
+  const [prefillMissing, setPrefillMissing] = useState(false);
+  const [tripsLoaded, setTripsLoaded] = useState(false);
   const [tripRequestId, setTripRequestId] = useState("");
   const [advances, setAdvances] = useState<AdvanceRow[]>([]);
   // 這筆是哪次預支的花費（選填）：員工選了「先預支」的出差／零用金，回來報銷時在這裡選對應那一次，
@@ -129,12 +149,13 @@ export default function EssExpensesPage() {
       const [c, e, t, a] = await Promise.all([
         getMyExpenseCategories(),
         getMyExpenses(period),
-        getMyApprovedTrips(),
+        getMyTrips(),
         getMyAdvances(),
       ]);
       setCategories(c.categories.filter((x) => x.active));
       setClaims(e.claims);
-      setTrips(t.requests);
+      setTrips((t.requests ?? []).filter(isTripOpenForExpenses));
+      setTripsLoaded(true);
       setAdvances(a.advances);
       setLoadError(null);
     } catch (err) {
@@ -146,6 +167,26 @@ export default function EssExpensesPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 讀 `?trip=`（只在掛載時讀一次；用 window 而不是 useSearchParams，免得整頁要包 Suspense）。
+  useEffect(() => {
+    setPrefillTripId(parseTripParam(window.location.search));
+  }, []);
+
+  // 出差單載入後套用預填：日期＝起日、備註＝類型＋地點＋事由、綁定這張。找不到（已駁回、撤回或不是你的）→ 提示。
+  useEffect(() => {
+    if (!prefillTripId || prefillApplied || !tripsLoaded) return;
+    const trip = trips.find((t) => t.id === prefillTripId);
+    setPrefillApplied(true);
+    if (!trip) {
+      setPrefillMissing(true);
+      return;
+    }
+    setTripRequestId(trip.id);
+    const start = tripStartDate(trip);
+    if (start) setIncurredOn(start);
+    setNote(tripExpenseNote(trip));
+  }, [prefillTripId, prefillApplied, tripsLoaded, trips]);
 
   const selected = categories.find((c) => c.id === categoryId);
   // 尚未核銷（已核准待撥款、已撥款待核銷）的預支，新的在前。
@@ -160,7 +201,15 @@ export default function EssExpensesPage() {
   // 選的項目若已不在清單裡（例如頁面開著時那筆預支剛被核銷、重新載入後不見了），視為沒選——
   // 否則 <select> 顯示「不是預支的花費」，送出卻還帶著舊 id 被 API 擋（invalid_advance）而且重送也一樣。
   const effectiveAdvanceId = !allowanceSelected && bindable.some((a) => a.id === advanceId) ? advanceId : "";
-  const effectiveTripId = trips.some((t) => t.id === tripRequestId) ? tripRequestId : "";
+  // 可綁的出差單：要求出差核准的類別只列已核准的；其他類別連簽核中的也列（標「簽核中」）。
+  const approvedTrips = useMemo(() => trips.filter((t) => t.status === "approved"), [trips]);
+  const selectableTrips = selected?.requires_trip_approval ? approvedTrips : trips;
+  const effectiveTripId = selectableTrips.some((t) => t.id === tripRequestId) ? tripRequestId : "";
+  // 預填的那張出差單（還綁著才算）：表單頂端顯示「來自 MM/DD 公出申請」。
+  const prefillTrip = prefillTripId ? trips.find((t) => t.id === prefillTripId) : undefined;
+  const prefillActive = !!prefillTrip && tripRequestId === prefillTrip.id;
+  // 預填的出差單還在簽核、類別卻要求出差核准 → 說明為什麼沒綁上。
+  const prefillBlocked = prefillActive && prefillTrip?.status !== "approved" && selected?.requires_trip_approval === true;
   // 選的出差單若已開了預支，送出時後端會自動綁上（沒選預支也一樣；定額補貼不綁）。
   const tripAdvance =
     effectiveTripId && !allowanceSelected ? bindable.find((a) => a.request_id === effectiveTripId) : undefined;
@@ -231,7 +280,9 @@ export default function EssExpensesPage() {
       setNote("");
       setReceipt(null);
       setReceiptInputKey((k) => k + 1);
-      setTripRequestId("");
+      // 從公出申請來的：繼續綁同一趟（多半還有下一張單據），日期、備註保留；其他情況照舊清掉。
+      if (!prefillActive) setTripRequestId("");
+      else if (prefillTrip) setNote(tripExpenseNote(prefillTrip));
       setAdvanceId("");
       await load();
     } catch (err) {
@@ -272,6 +323,26 @@ export default function EssExpensesPage() {
           送出後不需逐筆審核，由管理者於月結時一次核銷。請附上憑證。
         </p>
 
+        {prefillActive && prefillTrip && (
+          <div className="mb-3 flex items-start justify-between gap-3 rounded-xl bg-blue-50 px-3 py-2 text-sm text-blue-800">
+            <span>
+              {tripOriginLabel(prefillTrip)}
+              <span className="block text-xs text-blue-700">已帶入日期與事由，並綁定這張申請；可直接修改。</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setTripRequestId("")}
+              className="shrink-0 text-xs text-blue-700 underline"
+            >
+              不綁定
+            </button>
+          </div>
+        )}
+        {prefillMissing && (
+          <p className="mb-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            找不到那張公出／出差申請（可能已駁回、撤回），這筆會當一般報銷送出；需要的話可在下方選擇要綁的出差單。
+          </p>
+        )}
         {loadError && <InlineError className="mb-3">{loadError}</InlineError>}
         {message && <p className="mb-3 text-sm text-green-700">{message}</p>}
 
@@ -306,7 +377,12 @@ export default function EssExpensesPage() {
               （自行墊付的出差憑證靠它對回哪一趟；日常費用留空）。 */}
           {selected?.requires_trip_approval && (
             <div>
-              {trips.length === 0 ? (
+              {prefillBlocked && (
+                <p className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  這張公出／出差申請還在簽核，「{selected.name}」要等核准後才能報銷；可先改選其他類別。
+                </p>
+              )}
+              {approvedTrips.length === 0 ? (
                 <Field label="綁定出差單">
                   <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
                     你目前沒有已核准的出差單。此類別的費用必須先提出「公出/出差」
@@ -322,10 +398,9 @@ export default function EssExpensesPage() {
                     required
                   >
                     <option value="">請選擇</option>
-                    {trips.map((t) => (
+                    {approvedTrips.map((t) => (
                       <option key={t.id} value={t.id}>
-                        {localDateKey(t.start_at)}
-                        {t.location ? ` · ${t.location}` : ""}
+                        {tripOptionLabel(t)}
                       </option>
                     ))}
                   </Select>
@@ -339,8 +414,7 @@ export default function EssExpensesPage() {
                 <option value="">不綁定</option>
                 {trips.map((t) => (
                   <option key={t.id} value={t.id}>
-                    {localDateKey(t.start_at)}
-                    {t.location ? ` · ${t.location}` : ""}
+                    {tripOptionLabel(t)}
                   </option>
                 ))}
               </Select>

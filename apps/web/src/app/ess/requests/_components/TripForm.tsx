@@ -8,8 +8,13 @@
  * ○ 自行墊付，回來報銷 → 不送 advanceRequested，後端核准時不開預支，憑證之後走月報銷。預設＝自行墊付
  * （與舊版「沒勾需要預支」一樣）。
  * body 欄位名沿用舊頁面：tripType / location / tripScope / estimatedCost / advanceRequested。
+ *
+ * 自行墊付＋當場填報銷（2026-10-16）：選自行墊付時多一個預設收合的「現在就填報銷明細（選填）」
+ * （TripExpenseDrafts）。有填明細 → 交給 `onSubmitWithExpenses`（先建公出單、再逐筆建報銷，見 lib/trip-expense.ts）；
+ * 沒填或選先預支 → 照舊走 `onSubmit`，行為與以前相同。
  */
-import { useId, useState, type FormEvent } from "react";
+import { useCallback, useId, useState, type FormEvent } from "react";
+import type { CreateRequestBody, MyExpenseCategory } from "@/lib/ess-api";
 import { Field, Input, Segmented, Select } from "@/components/ess-ui";
 import { fmtMoney } from "@/lib/ess-format";
 import {
@@ -23,7 +28,9 @@ import {
   isBuildError,
   type ExpenseMethod,
 } from "@/lib/request-forms";
+import { tripExpenseNote, validateExpenseDrafts, type ExpenseDraft, type ReadyExpense } from "@/lib/trip-expense";
 import { ExpenseMethodField, ReasonField, SubmitBar, type FormCommonProps } from "./form-shared";
+import { TripExpenseDrafts } from "./TripExpenseDrafts";
 
 type TripType = "outing" | "business_trip";
 type TripScope = "local" | "domestic_intercity" | "overseas";
@@ -38,9 +45,21 @@ const SCOPES: TripScope[] = ["local", "domestic_intercity", "overseas"];
 export interface TripFormProps extends FormCommonProps {
   /** 建議提出預支的門檻（伺服器設定）；null＝沒設定就不提示。 */
   advanceThreshold: number | null;
+  /** 報銷類別（自行墊付當場填明細用）；null＝載入中或失敗，不顯示明細區。 */
+  expenseCategories: MyExpenseCategory[] | null;
+  /** 自行墊付且有填報銷明細時的送出（公出單＋報銷單）；沒填明細仍走 onSubmit。 */
+  onSubmitWithExpenses: (body: CreateRequestBody, summary: string, expenses: ReadyExpense[]) => Promise<void>;
 }
 
-export function TripForm({ advanceThreshold, initialDate, submitting, submitError, onSubmit }: TripFormProps) {
+export function TripForm({
+  advanceThreshold,
+  expenseCategories,
+  initialDate,
+  submitting,
+  submitError,
+  onSubmit,
+  onSubmitWithExpenses,
+}: TripFormProps) {
   const ids = { date: useId(), start: useId(), end: useId(), sDate: useId(), eDate: useId(), scope: useId(), loc: useId(), cost: useId(), adv: useId() };
   const [tripType, setTripType] = useState<TripType>("outing");
   const [date, setDate] = useState(initialDate);
@@ -57,8 +76,20 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
   const [advanceTouched, setAdvanceTouched] = useState(false);
   const [reason, setReason] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<ExpenseDraft[]>([]);
+  const [draftErrorIndex, setDraftErrorIndex] = useState<number | null>(null);
 
-  const clear = () => setLocalError(null);
+  const clear = () => {
+    setLocalError(null);
+    setDraftErrorIndex(null);
+  };
+  const changeDrafts = useCallback((next: ExpenseDraft[]) => {
+    setDrafts(next);
+    setLocalError(null);
+    setDraftErrorIndex(null);
+  }, []);
+  const tripDate = tripType === "outing" ? date : startDate;
+  const defaultNote = tripExpenseNote({ trip_type: tripType, location, reason });
   const advanceWanted = method === "advance";
   const advanceValue = advanceFieldValue(advanceTouched, advanceRequested, estimatedCost);
   const advanceAmount = Number(advanceValue.replace(/,/g, ""));
@@ -83,7 +114,17 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
       reason,
     });
     if (isBuildError(body)) return setLocalError(body.error);
-    await onSubmit(body, [], `${TRIP_TYPE_LABEL[tripType]} · ${describeBody(body)}`);
+    const summary = `${TRIP_TYPE_LABEL[tripType]} · ${describeBody(body)}`;
+    // 先預支：明細區不顯示，也不送（就算之前填過又切回先預支）。
+    if (!advanceWanted && expenseCategories) {
+      const checked = validateExpenseDrafts(drafts, expenseCategories, defaultNote);
+      if (!checked.ok) {
+        setDraftErrorIndex(checked.index);
+        return setLocalError(checked.error);
+      }
+      if (checked.ready.length > 0) return onSubmitWithExpenses(body, summary, checked.ready);
+    }
+    await onSubmit(body, [], summary);
   }
 
   return (
@@ -260,7 +301,15 @@ export function TripForm({ advanceThreshold, initialDate, submitting, submitErro
             </Field>
           </div>
         ) : (
-          <p className="mt-1 text-xs text-gray-400">不預支。回來後到「報銷」頁填報單據，隨月結一併給付。</p>
+          <TripExpenseDrafts
+            categories={expenseCategories}
+            drafts={drafts}
+            onChange={changeDrafts}
+            tripDate={tripDate}
+            defaultNote={defaultNote}
+            errorIndex={draftErrorIndex}
+            disabled={submitting}
+          />
         )}
       </ExpenseMethodField>
 

@@ -951,6 +951,10 @@ export interface MyExpenseClaim {
   period: string;
   note: string | null;
   status: string;
+  /** 綁的出差單（自行墊付的出差憑證靠它對回哪一趟）；舊 API 沒回時缺席。 */
+  trip_request_id?: string | null;
+  /** 綁的預支。 */
+  advance_id?: string | null;
 }
 
 export function getMyExpenseCategories() {
@@ -1017,6 +1021,10 @@ export interface MyTrip {
   advance_requested: string | null;
   trip_report: string | null;
   status: string;
+  /* 以下 GET /requests 都有回，舊宣告沒寫；optional 讓舊呼叫端不受影響 */
+  kind?: string;
+  trip_type?: "outing" | "business_trip" | null;
+  reason?: string | null;
 }
 
 export interface MyAdvance {
@@ -1039,6 +1047,14 @@ export function getMyApprovedTrips() {
   return apiFetch<{ requests: MyTrip[] }>(
     "/requests?kind=business_trip&status=approved&scope=mine",
   );
+}
+
+/**
+ * 我的公出／出差單（不限狀態，新的在前）——報銷頁「綁定出差單」用：已核准的都能綁；簽核中的只有
+ * 「類別沒要求出差核准」的費用能綁（公出表單選自行墊付、當天回來就補報銷，2026-10-16）。畫面自己依狀態過濾。
+ */
+export function getMyTrips() {
+  return apiFetch<{ requests: MyTrip[] }>("/requests?kind=business_trip&scope=mine");
 }
 
 /**

@@ -43,9 +43,42 @@ export interface TripBindingRow {
   employee_id: string
 }
 
-/** 這張出差單能不能被這位員工的報銷單綁定：本人、同租戶、已核准的 business_trip。 */
-export function isBindableTrip(trip: TripBindingRow | null | undefined, actor: BindingActor): boolean {
+/**
+ * 這張出差單能不能被這位員工的報銷單綁定：本人、同租戶的 business_trip，且
+ *   • 已核准（approved）——一律可綁；
+ *   • 簽核中（pending）——只有 `allowPending` 時可綁（2026-10-16）：員工在公出／出差表單選「自行墊付」時
+ *     可以當場一起填報銷明細，那時出差單剛建、還在簽核。只限**類別沒要求出差核准**的費用
+ *     （這類費用本來就不必綁出差單、照常隨月結給付，綁上只是「對回哪一趟」）；類別要求出差核准的
+ *     （模組三第 2 條的閘門）仍須已核准，路由對它回 400 `trip_not_approved`。
+ *     之後出差單若被駁回／撤回，月結審視清單的 `tripNotApproved` 會把這些憑證標出來給 HR 決定。
+ */
+export function isBindableTrip(
+  trip: TripBindingRow | null | undefined,
+  actor: BindingActor,
+  opts: { allowPending?: boolean } = {},
+): boolean {
   if (!trip) return false
   if (trip.tenant_id != null && trip.tenant_id !== actor.tenantId) return false
-  return trip.kind === "business_trip" && trip.status === "approved" && trip.employee_id === actor.employeeId
+  if (trip.kind !== "business_trip" || trip.employee_id !== actor.employeeId) return false
+  return trip.status === "approved" || (opts.allowPending === true && trip.status === "pending")
+}
+
+/**
+ * 月結審視（GET /expense-settlements/:period/review 的 `tripNotApproved`）：憑證綁的出差單現在不是「已核准」→
+ * 回給 HR 看的中文說明；已核准（或沒綁）→ null。讀不到列（已註銷、不存在）也要標。
+ */
+export function tripNotApprovedHint(trip: { status: string; deleted_at?: string | null } | null | undefined): string | null {
+  if (!trip || trip.deleted_at) return "綁定的出差單已不存在"
+  switch (trip.status) {
+    case "approved":
+      return null
+    case "pending":
+      return "綁定的出差單還在簽核"
+    case "rejected":
+      return "綁定的出差單已被駁回"
+    case "cancelled":
+      return "綁定的出差單已撤回"
+    default:
+      return "綁定的出差單未核准"
+  }
 }

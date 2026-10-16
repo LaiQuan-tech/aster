@@ -110,7 +110,8 @@ export function bindableAdvances<T extends AdvanceLike>(advances: readonly T[]):
 /** POST /expenses 的錯誤碼 → 中文（找不到的碼由呼叫端退回 fallback）。 */
 export const EXPENSE_ERROR_MESSAGES: Record<string, string> = {
   invalid_advance: "選的預支已不能綁定（已核銷、已取消，或不是你的預支），請重新整理頁面後再選",
-  invalid_trip_request: "選的出差單不能綁定（不是你的，或還沒核准），請重新整理頁面後再選",
+  invalid_trip_request: "選的出差單不能綁定（不是你的，或已駁回、撤回），請重新整理頁面後再選",
+  trip_not_approved: "這個類別的費用要等出差單核准後才能報銷；可先選其他類別，或核准後再填",
   trip_request_required: "這個類別的費用必須綁定一張已核准的出差單",
   period_settled: "該月份已月結鎖定，不能再送出；請聯絡 HR",
   // 發薪鎖定（2026-10-11）：歸屬期已結算（送出、修改、撤回都會）。有月份時走 describePeriodClosed 的

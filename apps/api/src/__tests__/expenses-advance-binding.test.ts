@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
 
 import { expensesRouter } from "../routes/expenses.js"
-import { BINDABLE_ADVANCE_STATUSES, isBindableAdvance, isBindableTrip } from "../services/expense-binding.js"
+import { BINDABLE_ADVANCE_STATUSES, isBindableAdvance, isBindableTrip, tripNotApprovedHint } from "../services/expense-binding.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 /**
@@ -68,6 +68,8 @@ const TRIP_PENDING = "aaaaaaaa-0000-4000-8000-000000000003" // 本人、還在�
 const TRIP_OTHERS = "aaaaaaaa-0000-4000-8000-000000000004" // 別人的、已核准
 const PETTY_REQ = "aaaaaaaa-0000-4000-8000-000000000005" // 本人、已核准，但是零用金單（不是出差單）
 const TRIP_SETTLED = "aaaaaaaa-0000-4000-8000-000000000006" // 本人、已核准，預支已核銷
+const TRIP_REJECTED = "aaaaaaaa-0000-4000-8000-000000000007" // 本人、已駁回
+const TRIP_OTHERS_PENDING = "aaaaaaaa-0000-4000-8000-000000000008" // 別人的、還在簽核
 const NO_SUCH = "aaaaaaaa-0000-4000-8000-0000000000ff"
 
 // 預支
@@ -131,6 +133,8 @@ beforeEach(() => {
     trip(TRIP_OTHERS, OTHER_ID),
     trip(PETTY_REQ, STAFF_ID, { kind: "petty_cash" }),
     trip(TRIP_SETTLED, STAFF_ID),
+    trip(TRIP_REJECTED, STAFF_ID, { status: "rejected" }),
+    trip(TRIP_OTHERS_PENDING, OTHER_ID, { status: "pending" }),
   ]
   fake.db.advances = [
     advance(ADV_PAID, STAFF_ID, "paid", { request_id: TRIP_OWN }),
@@ -236,7 +240,8 @@ describe("POST /expenses — tripRequestId：有帶就驗（本人、已核准�
 
   it.each([
     ["別人的", TRIP_OTHERS],
-    ["還沒核准的", TRIP_PENDING],
+    ["別人還在簽核的", TRIP_OTHERS_PENDING],
+    ["已駁回的", TRIP_REJECTED],
     ["零用金單（不是出差單）", PETTY_REQ],
     ["不存在的", NO_SUCH],
   ])("綁%s出差單 → 400 invalid_trip_request（即使類別沒有要求出差單）", async (_label, tripRequestId) => {
@@ -245,6 +250,30 @@ describe("POST /expenses — tripRequestId：有帶就驗（本人、已核准�
     expect(res.status, JSON.stringify(res.body)).toBe(400)
     expect(res.body.error).toBe("invalid_trip_request")
     expect(claims()).toEqual([])
+  })
+
+  it("本人還在簽核的出差單（公出表單當場填報銷）＋類別沒要求出差核准 → 201，綁上出差單、不綁預支", async () => {
+    const res = await post("/expenses", STAFF_TOKEN).send({ ...CLAIM, tripRequestId: TRIP_PENDING })
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(res.body.advanceId).toBeNull()
+    expect(claims()[0]).toMatchObject({ trip_request_id: TRIP_PENDING })
+    expect(claims()[0]?.advance_id ?? null).toBeNull()
+  })
+
+  it("本人還在簽核的出差單＋類別要求出差核准 → 400 trip_not_approved（閘門不放寬），不建單", async () => {
+    const res = await post("/expenses", STAFF_TOKEN).send({ ...CLAIM, categoryId: CAT_TRIP, tripRequestId: TRIP_PENDING })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("trip_not_approved")
+    expect(claims()).toEqual([])
+  })
+
+  it("類別要求出差核准＋別人還在簽核的出差單 → 仍是 400 invalid_trip_request（不透露別人的單）", async () => {
+    const res = await post("/expenses", STAFF_TOKEN).send({ ...CLAIM, categoryId: CAT_TRIP, tripRequestId: TRIP_OTHERS_PENDING })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("invalid_trip_request")
   })
 
   it("已註銷（deleted_at）的出差單也不能綁", async () => {
@@ -437,10 +466,42 @@ describe("綁定判斷純函式（services/expense-binding.ts）", () => {
     const row = { tenant_id: TENANT_ID, kind: "business_trip", status: "approved", employee_id: STAFF_ID }
     expect(isBindableTrip(row, actor)).toBe(true)
     expect(isBindableTrip({ ...row, status: "pending" }, actor)).toBe(false)
+    // 簽核中：只有 allowPending（類別沒要求出差核准）才可綁；駁回、撤回、別人的一樣不行
+    expect(isBindableTrip({ ...row, status: "pending" }, actor, { allowPending: true })).toBe(true)
+    expect(isBindableTrip({ ...row, status: "rejected" }, actor, { allowPending: true })).toBe(false)
+    expect(isBindableTrip({ ...row, status: "cancelled" }, actor, { allowPending: true })).toBe(false)
+    expect(isBindableTrip({ ...row, status: "pending", employee_id: OTHER_ID }, actor, { allowPending: true })).toBe(false)
+    expect(isBindableTrip({ ...row, status: "pending", kind: "petty_cash" }, actor, { allowPending: true })).toBe(false)
     expect(isBindableTrip({ ...row, status: "rejected" }, actor)).toBe(false)
     expect(isBindableTrip({ ...row, kind: "petty_cash" }, actor)).toBe(false)
     expect(isBindableTrip({ ...row, employee_id: OTHER_ID }, actor)).toBe(false)
     expect(isBindableTrip({ ...row, tenant_id: OTHER_TENANT_ID }, actor)).toBe(false)
     expect(isBindableTrip(null, actor)).toBe(false)
+  })
+})
+
+describe("月結審視 tripNotApproved：綁的出差單沒核准的憑證標給 HR", () => {
+  it("純函式：已核准 → null；簽核中／駁回／撤回／不存在 → 中文說明", () => {
+    expect(tripNotApprovedHint({ status: "approved" })).toBeNull()
+    expect(tripNotApprovedHint({ status: "pending" })).toBe("綁定的出差單還在簽核")
+    expect(tripNotApprovedHint({ status: "rejected" })).toBe("綁定的出差單已被駁回")
+    expect(tripNotApprovedHint({ status: "cancelled" })).toBe("綁定的出差單已撤回")
+    expect(tripNotApprovedHint({ status: "approved", deleted_at: "2026-10-01T00:00:00.000Z" })).toBe("綁定的出差單已不存在")
+    expect(tripNotApprovedHint(undefined)).toBe("綁定的出差單已不存在")
+  })
+
+  it("GET review：綁簽核中出差單的憑證出現在 tripNotApproved；綁已核准的、沒綁的不出現", async () => {
+    const pending = await post("/expenses", STAFF_TOKEN).send({ ...CLAIM, tripRequestId: TRIP_PENDING })
+    expect(pending.status, JSON.stringify(pending.body)).toBe(201)
+    const approved = await post("/expenses", STAFF_TOKEN).send({ ...CLAIM, amount: 300, tripRequestId: TRIP_SELF_PAID })
+    expect(approved.status, JSON.stringify(approved.body)).toBe(201)
+    const plain = await post("/expenses", STAFF_TOKEN).send({ ...CLAIM, amount: 50 })
+    expect(plain.status, JSON.stringify(plain.body)).toBe(201)
+
+    const res = await request(server).get("/expense-settlements/2026-10/review").set("Authorization", `Bearer ${HR_TOKEN}`)
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.issues.tripNotApproved).toEqual([
+      expect.objectContaining({ claimId: pending.body.id, tripRequestId: TRIP_PENDING, amount: 1200, hint: "綁定的出差單還在簽核" }),
+    ])
   })
 })

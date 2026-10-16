@@ -6,7 +6,10 @@
  * pending「撤回」（ConfirmDialog）。
  * 頂部 chips 全部｜待簽核｜已核准｜已駁回（前端過濾）；預設 30 筆＋「顯示更多」；`?id=` 高亮並捲到。
  * API 新欄位（leave_type_name／current_approver_name／attachment_count…）缺席時各行優雅退化。
+ * 自行墊付的公出／出差單（簽核中或已核准，2026-10-16）：多「填報銷單」連到報銷頁（預填這張單），
+ * 已報銷過的另顯示「已報銷 N 筆・NT$ X」；撤回這種單時提醒已填的報銷不會跟著撤回。
  */
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Button, Card, ConfirmDialog, EmptyState, Icon, InlineError, Pill, Segmented, Skeleton, useToast } from "@/components/ess-ui";
 import { cancelRequest, uploadAttachment, type LeaveRequest } from "@/lib/ess-api";
@@ -23,6 +26,7 @@ import {
   requestTitle,
 } from "@/lib/request-forms";
 import { pickedFileError } from "@/lib/upload-prep";
+import { showFillExpense, tripClaimSummaryText, tripExpenseHref, type TripClaimSummary } from "@/lib/trip-expense";
 import { describeError } from "./form-shared";
 
 type Filter = "all" | "pending" | "approved" | "rejected";
@@ -46,10 +50,12 @@ export interface MyRequestsProps {
   defaultShift: ShiftLike;
   /** 1 天 ＝ 幾小時（規則 payroll.dailyRegularHours）：只用在把請假時數顯示成天＋時；缺席＝8。 */
   hoursPerDay?: number;
+  /** 每張出差單已報銷幾筆（key＝申請單 id）；沒有＝沒報銷過或沒載到。 */
+  tripClaims?: ReadonlyMap<string, TripClaimSummary>;
   onReload: () => Promise<void>;
 }
 
-export function MyRequests({ requests, loading, error, highlightId, defaultShift, hoursPerDay, onReload }: MyRequestsProps) {
+export function MyRequests({ requests, loading, error, highlightId, defaultShift, hoursPerDay, tripClaims, onReload }: MyRequestsProps) {
   const toast = useToast();
   const [filter, setFilter] = useState<Filter>("all");
   const [limit, setLimit] = useState(PAGE_SIZE);
@@ -82,6 +88,12 @@ export function MyRequests({ requests, loading, error, highlightId, defaultShift
     });
     return () => cancelAnimationFrame(frame);
   }, [highlightId, filtered, limit, loading]);
+
+  function cancelMessage(r: LeaveRequest): string {
+    const base = `${requestTitle(r)}\n${describeRequest(r, { shift: defaultShift, hoursPerDay })}\n\n撤回後簽核者不會再看到這張單；需要的話可以再填一張新的。`;
+    const claims = tripClaims?.get(r.id);
+    return claims ? `${base}\n\n這張單${tripClaimSummaryText(claims)}，撤回不會一起撤回報銷；不需要的話請到「報銷」頁撤回。` : base;
+  }
 
   const visible = filtered.slice(0, limit);
   const hidden = Math.max(0, filtered.length - visible.length);
@@ -169,6 +181,7 @@ export function MyRequests({ requests, loading, error, highlightId, defaultShift
               highlighted={r.id === highlightId}
               defaultShift={defaultShift}
               hoursPerDay={hoursPerDay}
+              claims={tripClaims?.get(r.id)}
               uploading={uploadingId === r.id}
               onUpload={() => pickFile(r.id)}
               onCancel={() => setCancelTarget(r)}
@@ -188,7 +201,7 @@ export function MyRequests({ requests, loading, error, highlightId, defaultShift
       <ConfirmDialog
         open={cancelTarget !== null}
         title="撤回這張申請？"
-        message={cancelTarget ? `${requestTitle(cancelTarget)}\n${describeRequest(cancelTarget, { shift: defaultShift, hoursPerDay })}\n\n撤回後簽核者不會再看到這張單；需要的話可以再填一張新的。` : undefined}
+        message={cancelTarget ? cancelMessage(cancelTarget) : undefined}
         confirmLabel="撤回"
         danger
         busy={cancelling}
@@ -204,6 +217,7 @@ function RequestRow({
   highlighted,
   defaultShift,
   hoursPerDay,
+  claims,
   uploading,
   onUpload,
   onCancel,
@@ -212,6 +226,7 @@ function RequestRow({
   highlighted: boolean;
   defaultShift: ShiftLike;
   hoursPerDay?: number;
+  claims?: TripClaimSummary;
   uploading: boolean;
   onUpload: () => void;
   onCancel: () => void;
@@ -220,7 +235,8 @@ function RequestRow({
   const comments = approvalComments(r);
   const missing = needsAttachment(r);
   const attachments = typeof r.attachment_count === "number" ? r.attachment_count : null;
-  const showFooter = (attachments != null && attachments > 0) || missing || r.status === "pending";
+  const fillExpense = showFillExpense(r);
+  const showFooter = (attachments != null && attachments > 0) || missing || r.status === "pending" || fillExpense || !!claims;
 
   return (
     <li
@@ -262,6 +278,19 @@ function RequestRow({
             <Button size="sm" variant="secondary" onClick={onUpload} loading={uploading}>
               上傳憑證
             </Button>
+          )}
+          {claims && (
+            <Link href={tripExpenseHref(r.id)} className="text-xs text-green-700 underline-offset-2 hover:underline">
+              {tripClaimSummaryText(claims)}
+            </Link>
+          )}
+          {fillExpense && (
+            <Link
+              href={tripExpenseHref(r.id)}
+              className="inline-flex min-h-9 items-center rounded-xl border border-gray-200 bg-white px-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              {claims ? "再填一筆" : "填報銷單"}
+            </Link>
           )}
           {r.status === "pending" && (
             <Button

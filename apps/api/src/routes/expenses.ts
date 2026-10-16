@@ -9,7 +9,7 @@ import { setActor } from "../lib/request-context.js"
 import { isFinanceRole } from "../middleware/scope.js"
 import { writeAuditLog } from "../services/audit.js"
 import { catalogCode } from "../services/catalog-code.js"
-import { BINDABLE_ADVANCE_STATUSES, isBindableAdvance, isBindableTrip } from "../services/expense-binding.js"
+import { BINDABLE_ADVANCE_STATUSES, isBindableAdvance, isBindableTrip, tripNotApprovedHint } from "../services/expense-binding.js"
 import { summariseClaimsForSettlement } from "../services/payroll-claims.js"
 import { PERIOD_RE, PeriodClosedError, assertPeriodOpen, isPeriodClosed } from "../services/period-lock.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
@@ -52,8 +52,10 @@ const claimSchema = z.object({
   onBehalfOfEmployeeId: z.string().uuid().optional(),
   /**
    * 綁定的出差單（模組三第 2 條）。類別的 `requires_trip_approval` 為 true 時必填；
-   * 沒要求也可以選填（自行墊付的出差憑證靠它對回哪一趟）。**有帶就驗**：須為本人、
-   * 已核准的 business_trip，否則 400 `invalid_trip_request`。
+   * 沒要求也可以選填（自行墊付的出差憑證靠它對回哪一趟）。**有帶就驗**：須為本人的
+   * business_trip，否則 400 `invalid_trip_request`；須已核准——例外：類別沒要求出差核准時，
+   * 簽核中（pending）的也可以綁（公出表單當場填報銷，2026-10-16）；類別要求核准而出差單還在簽核
+   * → 400 `trip_not_approved`。
    */
   tripRequestId: z.string().uuid().optional(),
   /**
@@ -325,7 +327,7 @@ expensesRouter.post(
         return
       }
       // 出差單綁定：類別沒要求時也是選填，但**有帶就驗**（不再只在類別要求時才驗——
-      // 否則員工可以把憑證掛到別人的出差單上）。須為本人、已核准的 business_trip。
+      // 否則員工可以把憑證掛到別人的出差單上）。須為本人的 business_trip、已核准（或見下方簽核中的例外）。
       if (parsed.data.tripRequestId) {
         const { data: trip, error: tripErr } = await supabaseAdmin
           .from("leave_requests")
@@ -338,10 +340,13 @@ expensesRouter.post(
           next(new Error(`POST /expenses (trip): ${tripErr.message}`))
           return
         }
-        // 不區分「不存在」「非出差單」「非本人」「未核准」——一律同一個錯誤，
-        // 免得成為探測他人單號的管道。
-        if (!isBindableTrip(trip, { tenantId, employeeId })) {
-          res.status(400).json({ error: "invalid_trip_request" })
+        // 不區分「不存在」「非出差單」「非本人」——一律同一個錯誤，免得成為探測他人單號的管道。
+        // 簽核中的出差單（2026-10-16，公出表單「自行墊付」當場填報銷）：類別沒要求出差核准時可綁；
+        // 類別要求出差核准（第 2 條閘門）→ 400 trip_not_approved（本人的單，告訴他原因不會洩漏什麼）。
+        const gated = cat.requires_trip_approval === true
+        if (!isBindableTrip(trip, { tenantId, employeeId }, { allowPending: !gated })) {
+          const ownPending = gated && isBindableTrip(trip, { tenantId, employeeId }, { allowPending: true })
+          res.status(400).json({ error: ownPending ? "trip_not_approved" : "invalid_trip_request" })
           return
         }
       }
@@ -785,7 +790,7 @@ expensesRouter.get(
     try {
       const { data: claims, error } = await supabaseAdmin
         .from("expense_claims")
-        .select("id, employee_id, category_id, nature, amount, incurred_on, status, advance_id")
+        .select("id, employee_id, category_id, nature, amount, incurred_on, status, advance_id, trip_request_id")
         .eq("tenant_id", tenantId)
         .eq("period", period)
         .eq("status", "submitted")
@@ -802,7 +807,7 @@ expensesRouter.get(
           allowanceTotal: 0,
           advanceBoundCount: 0,
           advanceBoundTotal: 0,
-          issues: { missingReceipt: [], overCap: [], attendanceMismatch: [] },
+          issues: { missingReceipt: [], overCap: [], attendanceMismatch: [], tripNotApproved: [] },
         })
         return
       }
@@ -880,6 +885,39 @@ expensesRouter.get(
         }
       }
 
+      // 4) 綁的出差單沒有核准（2026-10-16）：公出表單「自行墊付」當場填的報銷會綁上還在簽核的出差單，
+      //    之後那張單若被駁回、撤回或仍在簽核，這裡標出來讓 HR 決定照付（費用本身不需事前審核）還是退件。
+      const tripIds = Array.from(
+        new Set(rows.map((r) => r.trip_request_id as string | null).filter((v): v is string => !!v)),
+      )
+      const tripNotApproved: Array<Record<string, unknown>> = []
+      if (tripIds.length > 0) {
+        const { data: trips, error: tripErr } = await supabaseAdmin
+          .from("leave_requests")
+          .select("id, status, deleted_at")
+          .eq("tenant_id", tenantId)
+          .in("id", tripIds)
+        if (tripErr) {
+          next(new Error(`GET review (trips): ${tripErr.message}`))
+          return
+        }
+        const tripById = new Map((trips ?? []).map((t) => [t.id as string, t]))
+        for (const r of rows) {
+          const tripId = r.trip_request_id as string | null
+          if (!tripId) continue
+          const hint = tripNotApprovedHint(tripById.get(tripId) as { status: string; deleted_at?: string | null } | undefined)
+          if (!hint) continue
+          tripNotApproved.push({
+            claimId: r.id,
+            employeeId: r.employee_id,
+            incurredOn: r.incurred_on,
+            amount: Number(r.amount),
+            tripRequestId: tripId,
+            hint,
+          })
+        }
+      }
+
       // 合計只算「真的會隨月薪給付」的憑證；綁了預支的走預支核銷，另列 advanceBound*
       // （claimCount 仍是這批全部憑證——它們同樣要在這次月結審視）。見 services/payroll-claims.ts。
       const { reimbursementTotal, allowanceTotal, advanceBoundCount, advanceBoundTotal } = summariseClaimsForSettlement(
@@ -893,7 +931,7 @@ expensesRouter.get(
         allowanceTotal,
         advanceBoundCount,
         advanceBoundTotal,
-        issues: { missingReceipt, overCap, attendanceMismatch },
+        issues: { missingReceipt, overCap, attendanceMismatch, tripNotApproved },
       })
     } catch (err) {
       next(err)

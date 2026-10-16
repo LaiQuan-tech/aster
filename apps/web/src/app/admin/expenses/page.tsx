@@ -94,7 +94,7 @@ export default function AdminExpensesPage() {
   const issueCount = useMemo(() => {
     if (!review) return 0;
     const i = review.issues;
-    return i.missingReceipt.length + i.overCap.length + i.attendanceMismatch.length;
+    return i.missingReceipt.length + i.overCap.length + i.attendanceMismatch.length + (i.tripNotApproved?.length ?? 0);
   }, [review]);
 
   async function onSettle() {
@@ -255,6 +255,26 @@ export default function AdminExpensesPage() {
                     >
                       {r.incurredOn} · {empName(r.employeeId)} · {money(r.amount)} 元
                       <span className="ml-2 text-xs text-red-700">{r.hint}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
+            {(review.issues.tripNotApproved?.length ?? 0) > 0 && (
+              <section>
+                <h3 className="text-sm font-medium text-gray-800">
+                  綁定的出差單未核准（{review.issues.tripNotApproved?.length}）
+                </h3>
+                <p className="mb-2 text-xs text-gray-500">
+                  員工在公出／出差申請時選自行墊付、當場填的報銷，之後那張申請被駁回、撤回或仍在簽核。
+                  這類費用本身不需事前審核，請決定照付還是退件。
+                </p>
+                <ul className="space-y-1 text-sm">
+                  {review.issues.tripNotApproved?.map((r) => (
+                    <li key={r.claimId} className="rounded border border-amber-200 bg-amber-50 px-3 py-2">
+                      {r.incurredOn} · {empName(r.employeeId)} · {money(r.amount)} 元
+                      <span className="ml-2 text-xs text-amber-800">{r.hint}</span>
                     </li>
                   ))}
                 </ul>

@@ -2086,6 +2086,15 @@ export interface ExpenseReview {
       overtimeMinutes: number | null;
       hint: string;
     }>;
+    /** 綁的出差單沒核准（簽核中／駁回／撤回）的憑證（2026-10-16；舊 API 沒有）。 */
+    tripNotApproved?: Array<{
+      claimId: string;
+      employeeId: string;
+      incurredOn: string;
+      amount: number;
+      tripRequestId: string;
+      hint: string;
+    }>;
   };
 }
 
