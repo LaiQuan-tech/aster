@@ -1,3 +1,4 @@
+import { dayFlagsOf } from "./day-flags.js"
 import {
   computePayslip,
   parseRuleConfig,
@@ -63,7 +64,7 @@ export interface AttendanceDayRow {
   leave_breakdown?: Record<string, number> | null
   outing_minutes?: number | null
   early_leave_minutes?: number | null
-  /** jsonb；一例一休旗標 ptoWork／compDayOwed／compTimeMinutes 由 settleAttendance 寫在這裡（2026-10-17）。 */
+  /** jsonb；一例一休旗標 ptoWork／compDayOwed／compTimeMinutes／dinnerTaken 由 settleAttendance 寫在 anomaly.flags（2026-10-17）。 */
   anomaly?: unknown
 }
 
@@ -147,14 +148,20 @@ export function toAttendanceDay(
   }
 }
 
-/** attendance_days.anomaly → AttendanceDay 的一例一休旗標（只帶有值的鍵）。純函式。 */
-export function oneRestOneOffFlags(anomaly: unknown): Pick<AttendanceDay, "ptoWork" | "compDayOwed" | "compTimeMinutes"> {
-  if (!anomaly || typeof anomaly !== "object" || Array.isArray(anomaly)) return {}
-  const a = anomaly as Record<string, unknown>
-  const out: Pick<AttendanceDay, "ptoWork" | "compDayOwed" | "compTimeMinutes"> = {}
-  if (a.ptoWork === true) out.ptoWork = true
-  if (typeof a.compDayOwed === "number" && a.compDayOwed > 0) out.compDayOwed = a.compDayOwed
-  if (typeof a.compTimeMinutes === "number" && a.compTimeMinutes > 0) out.compTimeMinutes = a.compTimeMinutes
+/**
+ * attendance_days.anomaly → AttendanceDay 的一例一休旗標（只帶有值的鍵）。純函式。
+ * 旗標在 anomaly.flags（舊列在頂層），讀法統一走 services/day-flags.ts dayFlagsOf。
+ * dinnerTaken 是結算當時的最終值（手動優先），payroll-engine 只拿來反推例假／國定假日的實際加班分鐘。
+ */
+export function oneRestOneOffFlags(
+  anomaly: unknown,
+): Pick<AttendanceDay, "ptoWork" | "compDayOwed" | "compTimeMinutes" | "dinnerTaken"> {
+  const f = dayFlagsOf(anomaly)
+  const out: Pick<AttendanceDay, "ptoWork" | "compDayOwed" | "compTimeMinutes" | "dinnerTaken"> = {}
+  if (f.ptoWork) out.ptoWork = true
+  if (f.compDayOwed) out.compDayOwed = f.compDayOwed
+  if (f.compTimeMinutes) out.compTimeMinutes = f.compTimeMinutes
+  if (f.dinnerTaken !== undefined) out.dinnerTaken = f.dinnerTaken
   return out
 }
 

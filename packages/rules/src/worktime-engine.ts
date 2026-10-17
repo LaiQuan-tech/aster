@@ -223,23 +223,35 @@ export function applyOvertimePipeline(
   regularMinutes?: number,
   flags?: OvertimeDayFlags,
 ): number {
-  if (rawMinutes <= 0) return 0;
-  let minutes = rawMinutes;
-
-  minutes = Math.max(
-    0,
-    minutes - overtimeMealDeductionMinutes(rawMinutes, rules, dayType, regularMinutes, flags),
-  );
-
-  const rounding = resolveOvertimeRounding(rules);
-  minutes = roundToUnit(minutes, rounding.unitMinutes, rounding.mode);
-  if (minutes < rounding.minimumMinutes) minutes = 0;
-
+  let minutes = overtimeMinutesBeforeMinCharge(rawMinutes, rules, dayType, regularMinutes, flags);
   if (minutes > 0) {
     const rule = resolveOvertimeRule(rules, overtimeWhenFor(dayType, flags?.ptoWork));
     const minCharge = rule?.minChargeHours ?? 0;
     if (minCharge > 0) minutes = Math.max(minutes, Math.round(minCharge * 60));
   }
+  return minutes;
+}
+
+/**
+ * 管線的前三步 (用餐扣除 → 取整 → 最低分鐘),**不套保底時數**——也就是「實際做了幾分鐘」的加班。
+ * payroll-engine 比較例假 max_rest_day／國定假日 max_weekday 時,要拿實際分鐘 (不是做 1 給 8 的 480)
+ * 去套休息日／平日倍率,用的就是這支。
+ */
+export function overtimeMinutesBeforeMinCharge(
+  rawMinutes: number,
+  rules: RuleConfig,
+  dayType: DayType,
+  regularMinutes?: number,
+  flags?: OvertimeDayFlags,
+): number {
+  if (rawMinutes <= 0) return 0;
+  let minutes = Math.max(
+    0,
+    rawMinutes - overtimeMealDeductionMinutes(rawMinutes, rules, dayType, regularMinutes, flags),
+  );
+  const rounding = resolveOvertimeRounding(rules);
+  minutes = roundToUnit(minutes, rounding.unitMinutes, rounding.mode);
+  if (minutes < rounding.minimumMinutes) minutes = 0;
   return minutes;
 }
 

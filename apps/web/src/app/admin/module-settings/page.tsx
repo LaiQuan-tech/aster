@@ -26,6 +26,8 @@ import {
   type InsuranceBracketSet,
   type OvertimeBasis,
   type OvertimeBeyondCap,
+  type FixedHolidayPay,
+  type RegularLeavePay,
   type RuleConfigExt,
   type RuleConfigVersionFull,
 } from "@/lib/rule-config-api";
@@ -124,6 +126,9 @@ interface OvertimeParamsForm {
   basis: OvertimeBasis;
   monthlyCapHours: string;
   beyondCap: OvertimeBeyondCap;
+  /* 2026-10-17 驗收修正：例假／國定假日加發計法 */
+  regularLeavePay: RegularLeavePay;
+  fixedHolidayPay: FixedHolidayPay;
 }
 
 const DEFAULT_OT_FORM: OvertimeParamsForm = {
@@ -146,6 +151,8 @@ const DEFAULT_OT_FORM: OvertimeParamsForm = {
   basis: "regularHours",
   monthlyCapHours: "40",
   beyondCap: "settle_separately",
+  regularLeavePay: "max_rest_day",
+  fixedHolidayPay: "statutory",
 };
 
 function tiersToForm(tiers: OvertimeTier[] | undefined): [TierFormRow, TierFormRow, TierFormRow] {
@@ -194,6 +201,9 @@ function hydrateOvertimeForm(config: RuleConfig): OvertimeParamsForm {
     basis: ot.basis ?? "regularHours",
     monthlyCapHours: String(ot.monthlyCapHours ?? 40),
     beyondCap: ot.beyondCap ?? "settle_separately",
+    // 與 @hr/rules resolveRegularLeavePay／resolveFixedHolidayPay 同一組預設。
+    regularLeavePay: ot.regularLeavePay ?? "max_rest_day",
+    fixedHolidayPay: ot.fixedHolidayPay ?? "statutory",
   };
 }
 
@@ -750,6 +760,8 @@ export default function ModuleSettingsPage() {
           monthlyCapHours:
             otForm.monthlyCapHours.trim() === "" ? undefined : Number(otForm.monthlyCapHours) || undefined,
           beyondCap: otForm.beyondCap,
+          regularLeavePay: otForm.regularLeavePay,
+          fixedHolidayPay: otForm.fixedHolidayPay,
         },
         payroll: {
           ...base.payroll,
@@ -1194,6 +1206,36 @@ export default function ModuleSettingsPage() {
                     <p className="mt-1 text-xs text-gray-400">
                       「另行給付」＝超額時數歸入加班另行給付帳（現金／補休），出勤月表與薪資單維持合規版
                     </p>
+                  </div>
+                </div>
+
+                {/* 2026-10-17 驗收修正：例假／國定假日加發計法 */}
+                <div className="grid grid-cols-1 gap-4 rounded-md border border-gray-200 p-3 sm:grid-cols-2">
+                  <div>
+                    <label className={labelCls}>例假出勤加發</label>
+                    <select
+                      className={inputCls}
+                      value={otForm.regularLeavePay}
+                      onChange={(e) => patchOt({ regularLeavePay: e.target.value as RegularLeavePay })}
+                    >
+                      <option value="max_rest_day">法定與休息日算法取高者（預設）</option>
+                      <option value="statutory">只算法定（加發一日）</option>
+                    </select>
+                    <p className="mt-1 text-xs text-gray-400">
+                      法定＝加發 8 小時 ×1（超過 8 小時依例假分段）；取高者＝再拿休息日倍率算同樣時數，哪個多給哪個。兩者都要補假一日
+                    </p>
+                  </div>
+                  <div>
+                    <label className={labelCls}>國定假日出勤加發</label>
+                    <select
+                      className={inputCls}
+                      value={otForm.fixedHolidayPay}
+                      onChange={(e) => patchOt({ fixedHolidayPay: e.target.value as FixedHolidayPay })}
+                    >
+                      <option value="statutory">做 1 給 8（預設）</option>
+                      <option value="max_weekday">做 1 給 8 與平日加班倍率取高者</option>
+                    </select>
+                    <p className="mt-1 text-xs text-gray-400">取高者＝整段工時以平日加班倍率計算，比做 1 給 8 多就給多的（特休出勤同國定假日）</p>
                   </div>
                 </div>
 

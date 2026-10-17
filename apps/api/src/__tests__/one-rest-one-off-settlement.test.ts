@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 // 純測試：supabase 換成記憶體版（helpers/fake-supabase.ts），不連任何 DB。
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
 
+import { hasRealAnomaly } from "../services/day-flags.js"
 import { settleAttendance } from "../services/settlement.js"
 import { zonedTimeToUtc } from "../lib/tz.js"
 import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
@@ -11,8 +12,8 @@ import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
  * 一例一休（2026-10-17）走真的 settleAttendance（記憶體版 supabase）：
  *   • 沒有行事曆列：週日 → regular_leave、週六 → rest_day；員工個人例假週一 → 週一 regular_leave、週六 workday。
  *   • 行事曆有列就用（週日被 HR 改成 workday）。
- *   • 特休（annual）整天假＋有打卡 → anomaly.ptoWork；例假出勤 → anomaly.compDayOwed。
- *   • 加班單選補休 → anomaly.compTimeMinutes。
+ *   • 特休（annual）整天假＋有打卡 → anomaly.flags.ptoWork；例假出勤 → anomaly.flags.compDayOwed。
+ *   • 加班單選補休 → anomaly.flags.compTimeMinutes（旗標不是異常，放 flags 子鍵）。
  * 2026-09-05 週六、09-06 週日、09-07 週一、09-08 週二、09-13 週日。⚠️ 識別碼都是假值。
  */
 const TPE = "Asia/Taipei"
@@ -83,12 +84,20 @@ beforeEach(() => {
   ]
 })
 
+/** anomaly.flags（settleAttendance 2026-10-17 驗收修正後的位置；頂層只剩真正的異常）。 */
+const flagsOf = (r: { anomaly?: unknown }): Record<string, unknown> => {
+  const a = (r.anomaly ?? {}) as Record<string, unknown>
+  expect(hasRealAnomaly(a)).toBe(false) // 只有旗標 → 結算頁不算異常
+  expect(Object.keys(a).filter((k) => k !== "flags")).toEqual([])
+  return (a.flags ?? {}) as Record<string, unknown>
+}
+
 describe("settleAttendance — 一例一休日別", () => {
   it("沒有行事曆列：週六休息日、週日例假；例假出勤記 compDayOwed", async () => {
     await settleAttendance({ tenantId: TENANT_ID, from: "2026-09-05", to: "2026-09-13" })
     expect(row(EMP, "2026-09-05").day_type).toBe("rest_day")
     expect(row(EMP, "2026-09-06").day_type).toBe("regular_leave")
-    expect((row(EMP, "2026-09-06").anomaly as Record<string, unknown>).compDayOwed).toBe(1)
+    expect(flagsOf(row(EMP, "2026-09-06")).compDayOwed).toBe(1)
     expect(row(EMP, "2026-09-07").day_type).toBe("workday")
   })
 
@@ -104,9 +113,24 @@ describe("settleAttendance — 一例一休日別", () => {
     expect(row(EMP, "2026-09-13").day_type).toBe("workday")
   })
 
-  it("特休整天假又有打卡 → anomaly.ptoWork；加班單選補休 → anomaly.compTimeMinutes", async () => {
+  it("特休整天假又有打卡 → anomaly.flags.ptoWork；加班單選補休 → anomaly.flags.compTimeMinutes", async () => {
     await settleAttendance({ tenantId: TENANT_ID, from: "2026-09-07", to: "2026-09-08" })
-    expect((row(EMP, "2026-09-08").anomaly as Record<string, unknown>).ptoWork).toBe(true)
-    expect((row(EMP, "2026-09-07").anomaly as Record<string, unknown>).compTimeMinutes).toBe(120)
+    expect(flagsOf(row(EMP, "2026-09-08")).ptoWork).toBe(true)
+    expect(flagsOf(row(EMP, "2026-09-07")).compTimeMinutes).toBe(120)
+  })
+
+  it("S5 單日加班上限只看平日：休息日／例假 9h 不標 overtimeCapExceeded，平日超過 240 分照標", async () => {
+    fake.db.punch_records.push(...work(EMP, "2026-09-09", "09:00", "23:00"))
+    await settleAttendance({ tenantId: TENANT_ID, from: "2026-09-05", to: "2026-09-09" })
+    expect(row(EMP, "2026-09-05").overtime_minutes).toBeGreaterThan(240)
+    expect(row(EMP, "2026-09-05").anomaly).toBeNull()
+    expect(row(EMP, "2026-09-06").overtime_minutes).toBeGreaterThan(240)
+    expect((row(EMP, "2026-09-06").anomaly as Record<string, unknown>).overtimeCapExceeded).toBeUndefined()
+    expect(hasRealAnomaly(row(EMP, "2026-09-06").anomaly)).toBe(false)
+    // 特休出勤（9/8）也不標
+    expect((row(EMP, "2026-09-08").anomaly as Record<string, unknown>).overtimeCapExceeded).toBeUndefined()
+    // 平日 09:00–23:00 → 工時 13h、加班 300 > 240
+    expect((row(EMP, "2026-09-09").anomaly as Record<string, unknown>).overtimeCapExceeded).toEqual({ minutes: 300, capMinutes: 240 })
+    expect(hasRealAnomaly(row(EMP, "2026-09-09").anomaly)).toBe(true)
   })
 })

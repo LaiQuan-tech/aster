@@ -454,6 +454,32 @@ export async function detectAnomalies(
     if (!rulesByPeriod.has(period)) rulesByPeriod.set(period, (await loadRuleConfigFor(tenantId, period)).rules)
   }
 
+  // 七休一「有出勤」＝有工時或有打卡（compliance.attendedDay，與月表同口徑）：撈 [lookbackFrom, to] 的打卡，
+  // 依 pairPunchesTz 歸到工作日（跨午夜的下班卡算上班那天）。
+  const punchedByEmp = new Map<string, Set<string>>()
+  if (perEmpAll.size > 0) {
+    const punchTz = tz ?? (await getTenantTimezone(tenantId))
+    const { data: punchData, error: punchErr } = await supabaseAdmin
+      .from("punch_records")
+      .select("employee_id, type, punch_at")
+      .eq("tenant_id", tenantId)
+      .in("employee_id", [...perEmpAll.keys()])
+      .gte("punch_at", dayWindowUtc(addDaysKey(lookbackFrom, -1), punchTz).startIso)
+      .lt("punch_at", dayWindowUtc(addDaysKey(to, 1), punchTz).endIso)
+    if (punchErr) throw new Error(`detectAnomalies (punch_records): ${punchErr.message}`)
+    const punchesByEmp = new Map<string, PunchRow[]>()
+    for (const p of (punchData ?? []) as PunchRow[]) {
+      const arr = punchesByEmp.get(p.employee_id)
+      if (arr) arr.push(p)
+      else punchesByEmp.set(p.employee_id, [p])
+    }
+    for (const [empId, list] of punchesByEmp) {
+      const dates = new Set<string>()
+      for (const date of pairPunchesTz(list, punchTz).keys()) if (date >= lookbackFrom && date <= to) dates.add(date)
+      punchedByEmp.set(empId, dates)
+    }
+  }
+
   const anomalies: Anomaly[] = []
   for (const [employeeId, empAllDays] of perEmpAll) {
     for (const f of complianceFindings(empAllDays, {
@@ -461,6 +487,7 @@ export async function detectAnomalies(
       to,
       rulesFor: (period) => rulesByPeriod.get(period) as RuleConfig,
       capCountable: capCountableMinutes,
+      punchedDates: punchedByEmp.get(employeeId),
     })) {
       anomalies.push({ employeeId, type: f.type, detail: { ...f.detail, key: f.key } })
     }

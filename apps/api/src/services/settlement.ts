@@ -755,7 +755,7 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   // 當日值＝月表手動值（attendance_days.dinner_taken，HR／員工在月表切換）優先，沒設才看下班卡的勾選
   // （punch_records.dinner_taken，依配對歸屬工作日；任一張 true → true）。見 punch-pairing.effectiveDinnerTaken。
   // 這裡只讀手動值，upsert 不寫 dinner_taken 欄位（PostgREST upsert 只更新帶來的欄位），月表手動值不會被結算洗掉；
-  // 最終值另記在 anomaly.dinnerTaken／dinnerSource 供月表顯示。
+  // 最終值另記在 anomaly.flags.dinnerTaken／dinnerSource 供月表顯示。
   const dinnerByKey = new Map<string, boolean>()
   if (await columnsExist("attendance_days", "dinner_taken")) {
     let dinnerQuery = supabaseAdmin
@@ -834,7 +834,7 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     const dayRegularMinutes = regularMinutesForDay(basis, scheduledShift, workDate, tz, regularMinutes)
     const leave = leaveByKey.get(key)
     // 特休日出勤（2026-10-17）：當天有已核准的特休（code 'annual'）整天假、又有打卡出勤 → 引擎依國定假日計薪
-    // （DayContext.ptoWork）。特休假單本身不在這裡撤銷：anomaly.ptoWork 留痕，由月表／HR 處理。
+    // （DayContext.ptoWork）。特休假單本身不在這裡撤銷：anomaly.flags.ptoWork 留痕，由月表／HR 處理。
     const punchedPairs = !!day && day.pairs.length > 0
     const ptoWork = punchedPairs && (leave?.breakdown[PTO_LEAVE_CODE] ?? 0) >= dayRegularMinutes
     const dinner = effectiveDinnerTaken(dinnerByKey.get(key), punchDinnerByKey.get(key))
@@ -870,20 +870,24 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
       anomaly.wfh = true
     }
 
-    if (result.overtimeMinutes > dailyCap) {
+    // 單日加班上限只適用平日（與月表 overtime_over_daily_cap 同口徑）：休息日／例假／國定假日／特休出勤
+    // 整天工時都是加班分鐘（含做 1 給 8 的保底），拿 240 分比沒有意義，改由 daily_over_12h 把關。
+    if (dayType === "workday" && !result.ptoWork && result.overtimeMinutes > dailyCap) {
       anomaly.overtimeCapExceeded = { minutes: result.overtimeMinutes, capMinutes: dailyCap }
     }
-    // 一例一休（2026-10-17）：attendance_days 沒有專屬欄位，記在 anomaly jsonb；payroll-inputs.toAttendanceDay 讀回
-    // AttendanceDay.ptoWork／compDayOwed／compTimeMinutes。
-    if (result.ptoWork) anomaly.ptoWork = true
-    if (result.compDayOwed) anomaly.compDayOwed = result.compDayOwed
+    // 一例一休（2026-10-17）：計薪用的當日旗標不是異常，記在 anomaly.flags 子鍵（attendance_days 沒有專屬欄位）；
+    // 讀取一律走 services/day-flags.ts dayFlagsOf（payroll-inputs、月表、合規）。結算頁「異常」判斷排除 flags。
+    const flags: Record<string, unknown> = {}
+    if (result.ptoWork) flags.ptoWork = true
+    if (result.compDayOwed) flags.compDayOwed = result.compDayOwed
     // 晚餐最終值（月表顯示「晚餐」用；手動值本身在 dinner_taken 欄位，不在這裡寫）。
     if (dinner.taken !== undefined) {
-      anomaly.dinnerTaken = dinner.taken
-      anomaly.dinnerSource = dinner.source
+      flags.dinnerTaken = dinner.taken
+      flags.dinnerSource = dinner.source
     }
     const compTimeMinutes = compTimeByKey.get(key) ?? 0
-    if (compTimeMinutes > 0) anomaly.compTimeMinutes = compTimeMinutes
+    if (compTimeMinutes > 0) flags.compTimeMinutes = compTimeMinutes
+    if (Object.keys(flags).length > 0) anomaly.flags = flags
 
     rows.push({
       tenant_id: tenantId,

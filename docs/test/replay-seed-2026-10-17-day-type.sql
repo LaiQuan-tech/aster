@@ -19,3 +19,11 @@ insert into public.tenant_calendar_days (tenant_id, date, day_type, label, sourc
   ('d0000000-0000-4000-8000-000000000002', '2026-03-07', 'rest_day', null, 'generated'),
   ('d0000000-0000-4000-8000-000000000002', '2026-03-08', 'rest_day', null, 'generated'),
   ('d0000000-0000-4000-8000-000000000002', '2026-04-04', 'fixed_holiday', '兒童節', 'import');
+-- 已結算月份不動（2026-10-17 驗收修正 B2）：租戶一 2026-02 已結算 → 2/28 週末國定假日本日維持 fixed_holiday；
+-- 2026-09 已結算 → 9/6 週日維持 rest_day；租戶二 2026-03 曾結算後重新開放（reopened）→ 照常改。
+insert into public.tenant_calendar_days (tenant_id, date, day_type, label, source) values
+  ('d0000000-0000-4000-8000-000000000001', '2026-09-06', 'rest_day', null, 'generated');
+insert into public.period_closes (tenant_id, period, status, reopened_at, reopen_reason) values
+  ('d0000000-0000-4000-8000-000000000001', '2026-02', 'closed', null, null),
+  ('d0000000-0000-4000-8000-000000000001', '2026-09', 'closed', null, null),
+  ('d0000000-0000-4000-8000-000000000002', '2026-03', 'reopened', now(), '測試：重新開放');

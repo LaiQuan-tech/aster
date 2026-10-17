@@ -162,6 +162,11 @@ export interface AttendanceDay {
    * 扣除:先扣當日倍率最低的段 (同倍率先扣較早的段),最多扣到當日加班分鐘為止。
    */
   compTimeMinutes?: number;
+  /**
+   * 當天有用公司晚餐 (結算時的最終值;呼叫端帶入,省略 = 未勾)。payroll-engine 只在例假 max_rest_day／
+   * 國定假日 max_weekday 反推「實際加班分鐘」時用到 (與 worktime-engine 同一條晚餐扣除判斷)。
+   */
+  dinnerTaken?: boolean;
 }
 
 /** 計薪方式 (與 RuleConfig.payroll.method 對齊)。 */

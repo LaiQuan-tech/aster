@@ -384,7 +384,8 @@ export function reviewAttendanceSheet(id: string, decision: "approve" | "return"
 
 /** HR 後台：manager_reviewed → approved。 */
 export function approveAttendanceSheet(id: string) {
-  return apiFetch<{ id: string; status: SheetStatus; approvedAt: string | null }>(
+  // warnings：超過月加班上限另計的提示（例：缺薪資資料，金額未計）；舊 API 不回 → undefined。
+  return apiFetch<{ id: string; status: SheetStatus; approvedAt: string | null; warnings?: string[] }>(
     `/attendance-sheets/${id}/approve`,
     { method: "POST" },
   );

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { anomalyForExport, hasRealAnomaly } from "@/lib/attendance-anomaly";
 import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getEmployees,
@@ -84,7 +85,7 @@ function downloadCsv(
     row.overtime_minutes,
     row.night_minutes,
     row.day_type ?? "",
-    row.anomaly ? JSON.stringify(row.anomaly) : "",
+    anomalyForExport(row.anomaly),
   ]);
   const csv = [header, ...csvRows]
     .map((row) => row.map((cell) => `"${String(cell).replaceAll("\"", "\"\"")}"`).join(","))
@@ -131,7 +132,7 @@ export default function AttendanceSettlementPage() {
       if (dataType === "late") return row.late_minutes > 0;
       if (dataType === "overtime") return row.overtime_minutes > 0;
       if (dataType === "night") return row.night_minutes > 0;
-      if (dataType === "anomaly") return !!row.anomaly;
+      if (dataType === "anomaly") return hasRealAnomaly(row.anomaly);
       return true;
     });
   }, [dataType, dayType, rows, settlementStatus, settlementStatusFilter]);
@@ -143,7 +144,7 @@ export default function AttendanceSettlementPage() {
         total.late += row.late_minutes;
         total.overtime += row.overtime_minutes;
         total.night += row.night_minutes;
-        if (row.anomaly) total.anomaly += 1;
+        if (hasRealAnomaly(row.anomaly)) total.anomaly += 1;
         return total;
       },
       { worked: 0, late: 0, overtime: 0, night: 0, anomaly: 0 },
@@ -388,7 +389,7 @@ export default function AttendanceSettlementPage() {
                     <td className="py-2 pr-4">{minutes(row.overtime_minutes)}</td>
                     <td className="py-2 pr-4">{minutes(row.night_minutes)}</td>
                     <td className="py-2 pr-4">{row.day_type ?? "—"}</td>
-                    <td className="py-2">{row.anomaly ? "有" : "—"}</td>
+                    <td className="py-2">{hasRealAnomaly(row.anomaly) ? "有" : "—"}</td>
                   </tr>
                 ))}
               </tbody>

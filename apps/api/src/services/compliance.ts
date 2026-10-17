@@ -1,5 +1,6 @@
 import { overtimeMealDeductionMinutes, type DayType, type RuleConfig } from "@hr/rules"
 import { addDaysKey, diffDaysKey, type DateKey } from "../lib/tz.js"
+import { dayFlagsOf } from "./day-flags.js"
 
 /**
  * 一例一休合規判斷（2026-10-17，純函式）——出勤月表異常（services/attendance-sheets.ts computeAnomalies）與
@@ -41,6 +42,18 @@ export function consecutiveWorkRuns(workedDates: Iterable<DateKey>): Map<DateKey
     prev = d
   }
   return out
+}
+
+/**
+ * 七休一的「有出勤」（月表 computeAnomalies 與 detection 同一口徑，2026-10-17 驗收修正）：
+ * 有工時，或當天有打卡（`punched`：依 pairPunchesTz 歸到這個工作日的任何一張卡；或 attendance_days.anomaly
+ * 記了未配對打卡）。只有打卡、工時 0 的日子（漏打下班卡、整段落在彈性起點前）也算出勤——人確實來了。
+ */
+export function attendedDay(input: { workedMinutes?: number | null; punched?: boolean; anomaly?: unknown }): boolean {
+  if ((input.workedMinutes ?? 0) > 0) return true
+  if (input.punched) return true
+  const a = anomalyRecord(input.anomaly)
+  return typeof a.unpairedPunches === "number" && a.unpairedPunches > 0
 }
 
 /** 月初往前要看幾天才判得出跨月的七休一（＝上限天數）。 */
@@ -118,7 +131,7 @@ function asDayTypeLoose(v: string | null | undefined): DayType {
 /**
  * 一位員工的合規發現（主管／HR 通知用，純函式）。`days` 可以比 [from, to] 早（七休一要看前 6 天、
  * 月上限要看當月 1 號起），只回報落在 [from, to] 的發現：
- *   • seven_day_rule：連續出勤（worked_minutes > 0）超過 6 天、且這段連續延伸進 [from, to]。
+ *   • seven_day_rule：連續出勤（attendedDay：有工時或有打卡）超過 6 天、且這段連續延伸進 [from, to]。
  *   • regular_leave_work／pto_work／daily_over_12h：[from, to] 內每一天一筆。
  *   • monthly_ot_over_46h：與 [from, to] 相交的月份，capCountableMinutes 口徑累計 > 46h。
  * 月上限的「延長工時」用 attendance_days.overtime_minutes（結算值，月表人工覆寫不在這裡）。
@@ -131,6 +144,8 @@ export function complianceFindings(
     /** 期間 'YYYY-MM' → 當月規則（日正常工時、晚餐扣除）。 */
     rulesFor: (period: string) => RuleConfig
     capCountable: (day: { dayType: DayType; overtimeMinutes: number; ptoWork?: boolean }, regularMinutes: number) => number
+    /** 有打卡的工作日（pairPunchesTz 歸日；七休一「有出勤」用，見 attendedDay）。省略＝只看工時與未配對打卡。 */
+    punchedDates?: ReadonlySet<DateKey>
   },
 ): ComplianceFinding[] {
   const { from, to } = opts
@@ -139,7 +154,13 @@ export function complianceFindings(
   const out: ComplianceFinding[] = []
 
   // 七休一
-  const runs = consecutiveWorkRuns(sorted.filter((d) => (d.worked_minutes ?? 0) > 0).map((d) => d.work_date))
+  const punched = opts.punchedDates ?? new Set<DateKey>()
+  const runs = consecutiveWorkRuns([
+    ...sorted
+      .filter((d) => attendedDay({ workedMinutes: d.worked_minutes, punched: punched.has(d.work_date), anomaly: d.anomaly }))
+      .map((d) => d.work_date),
+    ...punched,
+  ])
   const longest = new Map<DateKey, { length: number; to: DateKey }>()
   for (const [date, run] of runs) {
     if (run.length <= SEVEN_DAY_MAX_CONSECUTIVE || !inWindow(date)) continue
@@ -156,7 +177,7 @@ export function complianceFindings(
     const rules = opts.rulesFor(period)
     const regular = Math.round(rules.payroll.dailyRegularHours * 60)
     const dayType = asDayTypeLoose(d.day_type)
-    const a = anomalyRecord(d.anomaly)
+    const a = dayFlagsOf(d.anomaly)
     const ptoWork = a.ptoWork === true
     const worked = d.worked_minutes ?? 0
     monthTotals.set(
@@ -165,7 +186,7 @@ export function complianceFindings(
     )
     if (!inWindow(d.work_date) || worked <= 0) continue
     if (dayType === "regular_leave") {
-      const compDayOwed = typeof a.compDayOwed === "number" ? a.compDayOwed : 0
+      const compDayOwed = a.compDayOwed ?? 0
       out.push({ type: "regular_leave_work", key: d.work_date, detail: { date: d.work_date, workedMinutes: worked, compDayOwed } })
     }
     if (ptoWork) out.push({ type: "pto_work", key: d.work_date, detail: { date: d.work_date, workedMinutes: worked } })

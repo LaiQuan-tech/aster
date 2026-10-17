@@ -136,9 +136,10 @@ export default function AttendanceSheetDetailPage() {
     setError(null);
     setMessage(null);
     try {
-      await approveAttendanceSheet(sheet.id);
-      await load(); // approve 只回 {id,status,approvedAt}，重新 GET 換回完整 SheetView
-      setMessage("已核准");
+      const res = await approveAttendanceSheet(sheet.id);
+      await load(); // approve 只回 {id,status,approvedAt,warnings}，重新 GET 換回完整 SheetView
+      const warnings = res?.warnings ?? [];
+      setMessage(warnings.length > 0 ? `已核准。${warnings.join("；")}` : "已核准");
     } catch (err) {
       setError(friendlyError(err, "核准失敗"));
     } finally {

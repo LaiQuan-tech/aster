@@ -128,6 +128,21 @@ export type OvertimeBasis = z.infer<typeof OvertimeBasisSchema>;
 export const OvertimeBeyondCapSchema = z.enum(["settle_separately", "warn"]);
 export type OvertimeBeyondCap = z.infer<typeof OvertimeBeyondCapSchema>;
 
+// 例假出勤加發的計法 (2026-10-17 驗收修正:不讓員工因改制悄悄少領):
+//   max_rest_day  max(法定「加發一日」(例假規則:8h ×1,超過 8h 依例假 tiers),
+//                     該租戶休息日規則對「同樣分鐘」的加發)。預設——舊規則租戶
+//                     (以前週日當休息日算) 改制後週日出勤金額只會 ≥ 舊算法。
+//   statutory     只算法定 (例假規則)。
+// 兩者 compDayOwed (需補假一日) 都照給。
+export const RegularLeavePaySchema = z.enum(["statutory", "max_rest_day"]);
+export type RegularLeavePay = z.infer<typeof RegularLeavePaySchema>;
+
+// 國定假日 (含特休出勤) 加發的計法:
+//   statutory    法定「做 1 給 8」(國定假日規則)。預設。
+//   max_weekday  max(做 1 給 8, 以平日加班倍率對整段工時計算)。業主尚未決定,先做成可設定。
+export const FixedHolidayPaySchema = z.enum(["statutory", "max_weekday"]);
+export type FixedHolidayPay = z.infer<typeof FixedHolidayPaySchema>;
+
 // 加班設定：
 //   rules             逐情境倍率規則 (見上)
 //   rounding          加班分鐘取整 (省略 = DEFAULT_OVERTIME_ROUNDING)
@@ -138,6 +153,8 @@ export type OvertimeBeyondCap = z.infer<typeof OvertimeBeyondCapSchema>;
 //   monthlyCapHours   月加班上限 (小時;省略 = 40。法定 46)。送加班單時超過即標 beyond_cap;
 //                     月表核准時超額依 beyondCap 處理。
 //   beyondCap         超過上限的處理 (省略 = settle_separately)
+//   regularLeavePay   例假出勤加發計法 (省略 = max_rest_day)
+//   fixedHolidayPay   國定假日出勤加發計法 (省略 = statutory)
 const OvertimeSchema = z.object({
   rules: z.array(OvertimeRuleSchema),
   rounding: OvertimeRoundingSchema.optional(),
@@ -147,6 +164,8 @@ const OvertimeSchema = z.object({
   basis: OvertimeBasisSchema.optional(),
   monthlyCapHours: z.number().positive().optional(),
   beyondCap: OvertimeBeyondCapSchema.optional(),
+  regularLeavePay: RegularLeavePaySchema.optional(),
+  fixedHolidayPay: FixedHolidayPaySchema.optional(),
 });
 
 // 夜間加給：window 時段視窗 ("HH:MM"，允許跨午夜如 00:00–08:30)，multiplier 倍率。
@@ -527,6 +546,19 @@ export function resolveOvertimeBasis(rules: RuleConfig): OvertimeBasis {
 /** 月加班上限 (小時;省略 → 40)。 */
 export function resolveOvertimeMonthlyCapHours(rules: RuleConfig): number {
   return rules.overtime.monthlyCapHours ?? DEFAULT_OVERTIME_MONTHLY_CAP_HOURS;
+}
+
+export const DEFAULT_REGULAR_LEAVE_PAY: RegularLeavePay = "max_rest_day";
+export const DEFAULT_FIXED_HOLIDAY_PAY: FixedHolidayPay = "statutory";
+
+/** 例假出勤加發計法 (省略 → max_rest_day:舊規則租戶週日金額不會比改制前少)。 */
+export function resolveRegularLeavePay(rules: RuleConfig): RegularLeavePay {
+  return rules.overtime.regularLeavePay ?? DEFAULT_REGULAR_LEAVE_PAY;
+}
+
+/** 國定假日出勤加發計法 (省略 → statutory「做 1 給 8」)。 */
+export function resolveFixedHolidayPay(rules: RuleConfig): FixedHolidayPay {
+  return rules.overtime.fixedHolidayPay ?? DEFAULT_FIXED_HOLIDAY_PAY;
 }
 
 /** 超過月上限的處理 (省略 → settle_separately)。 */

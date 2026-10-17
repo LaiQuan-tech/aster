@@ -45,6 +45,7 @@ import { tenantBlocksApproveOnUnsettledLeave } from "./leave-settlement.js"
 import { pairPunchesTz, wfhPunchDates } from "./punch-pairing.js"
 import { capMinutesFor } from "./overtime-cap.js"
 import {
+  attendedDay,
   consecutiveWorkRuns,
   dailyTotalWorkMinutes,
   DAILY_TOTAL_CAP_MINUTES,
@@ -54,6 +55,7 @@ import {
   sevenDayLookbackFrom,
 } from "./compliance.js"
 import { writeAuditLog } from "./audit.js"
+import { dayFlagsOf } from "./day-flags.js"
 import { assertPeriodOpen } from "./period-lock.js"
 import { exemptDatesOf, loadLateReportsForPeriod, undecidedCountOf, type LateReportRow } from "./late-reports.js"
 import {
@@ -425,14 +427,14 @@ export interface AnomalyDayFacts {
   lateReason?: string | null
   /** 老闆的決定（affects／exempt；沒決定 → null，視為影響全勤）。 */
   lateDecision?: LateDecision
-  /** 特休日出勤（attendance_days.anomaly.ptoWork，settleAttendance 寫入；2026-10-17）。 */
+  /** 特休日出勤（attendance_days.anomaly.flags.ptoWork，settleAttendance 寫入；2026-10-17）。 */
   ptoWork?: boolean
   /**
    * 當天晚餐的最終值（2026-10-17）：月表手動值（attendance_days.dinner_taken）優先，否則下班卡勾選
-   * （settleAttendance 寫在 attendance_days.anomaly.dinnerTaken）；都沒有／migration 0070 未套 → undefined（不扣）。
+   * （settleAttendance 寫在 attendance_days.anomaly.flags.dinnerTaken）；都沒有／migration 0070 未套 → undefined（不扣）。
    */
   dinnerTaken?: boolean
-  /** 例假出勤應補假日數（attendance_days.anomaly.compDayOwed，settleAttendance 寫入；2026-10-17）。 */
+  /** 例假出勤應補假日數（attendance_days.anomaly.flags.compDayOwed，settleAttendance 寫入；2026-10-17）。 */
   compDayOwed?: number
 }
 
@@ -542,9 +544,14 @@ export function computeAnomalies(
   const approvedOtDates = ctx.approvedOtDates ?? new Set<DateKey>()
   const sorted = [...days].sort((a, b) => a.work_date.localeCompare(b.work_date))
   // 七休一：「有出勤」＝有工時或有打卡（含上月尾，跨月連續也算）。
+  // 判斷式與 detection 共用 compliance.attendedDay。
   const attended = (day: SheetDayRow): boolean => {
     const f = ctx.dayFacts.get(day.work_date) ?? EMPTY_FACTS
-    return (day.worked_minutes ?? 0) > 0 || !!day.first_in || !!day.last_out || f.unpairedIn > 0 || f.unpairedOut > 0
+    return attendedDay({
+      workedMinutes: day.worked_minutes,
+      punched: !!day.first_in || !!day.last_out || f.unpairedIn > 0 || f.unpairedOut > 0,
+      anomaly: { unpairedPunches: f.unpairedPunches },
+    })
   }
   const runs = consecutiveWorkRuns([...(ctx.priorWorkedDates ?? []), ...sorted.filter(attended).map((d) => d.work_date)])
 
@@ -679,7 +686,7 @@ export function computeAnomalies(
     }
     // 例假出勤已由 regular_leave_work（error）表示，不再重複發 holiday_work。
     if (dayType !== "workday" && dayType !== REGULAR_LEAVE && worked > 0) {
-      const offLabel = dayType === REGULAR_LEAVE ? "例假" : dayType === "rest_day" ? "休息日" : "國定假日"
+      const offLabel = dayType === "rest_day" ? "休息日" : "國定假日"
       push({ code: "holiday_work", severity: "warn", detail: { dayType, workedMinutes: worked }, message: `${offLabel}出勤 ${fmtHm(worked)}` })
     }
     if (facts.unpairedOutings > 0) {
@@ -896,13 +903,8 @@ interface AttendanceRowWithAnomaly extends AttendanceDayRow {
     unpairedPunches?: number
     unpairedOutings?: number
     unpairedBreaks?: number
-    /** 一例一休（2026-10-17，settlement.ts）。 */
-    ptoWork?: boolean
-    compDayOwed?: number
-    compTimeMinutes?: number
-    /** 晚餐最終值與來源（2026-10-17，settlement.ts）。 */
-    dinnerTaken?: boolean
-    dinnerSource?: "manual" | "punch" | null
+    /** 當日旗標（ptoWork／compDayOwed／compTimeMinutes／dinnerTaken／dinnerSource；舊列在頂層）——一律用 dayFlagsOf 讀。 */
+    flags?: Record<string, unknown>
   } | null
   /** 月表手動設定的晚餐（migration 0070；未套 → undefined）。 */
   dinner_taken?: boolean | null
@@ -991,21 +993,50 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     facts.attendanceByKey.set(`${row.employee_id}|${row.work_date}`, row)
   }
 
-  // 七休一跨月（2026-10-17）：月初前 6 天有出勤的日子（上月尾）。
+  // 七休一跨月（2026-10-17）：月初前 6 天有出勤的日子（上月尾）。「有出勤」＝有工時或有打卡
+  // （compliance.attendedDay，與 detection 同口徑）：attendance_days 的工時／未配對打卡，加上那幾天的打卡。
+  const lookback = sevenDayLookbackFrom(from)
   const { data: priorData, error: priorErr } = await supabaseAdmin
     .from("attendance_days")
-    .select("employee_id, work_date")
+    .select("employee_id, work_date, worked_minutes, anomaly")
     .eq("tenant_id", tenantId)
     .in("employee_id", employeeIds)
-    .gte("work_date", sevenDayLookbackFrom(from))
+    .gte("work_date", lookback)
     .lt("work_date", from)
-    .gt("worked_minutes", 0)
   if (priorErr) throw new Error(`attendance-sheets (prior attendance_days): ${priorErr.message}`)
-  for (const r of (priorData ?? []) as Array<{ employee_id: string; work_date: string }>) {
-    const list = facts.priorWorkedByEmp.get(r.employee_id)
-    if (list) list.push(r.work_date)
-    else facts.priorWorkedByEmp.set(r.employee_id, [r.work_date])
+  const priorPunched = new Map<string, Set<DateKey>>()
+  {
+    const { data: priorPunchData, error: priorPunchErr } = await supabaseAdmin
+      .from("punch_records")
+      .select("employee_id, type, punch_at")
+      .eq("tenant_id", tenantId)
+      .in("employee_id", employeeIds)
+      .gte("punch_at", dayWindowUtc(addDaysKey(lookback, -1), tz).startIso)
+      .lt("punch_at", dayWindowUtc(from, tz).endIso)
+    if (priorPunchErr) throw new Error(`attendance-sheets (prior punch_records): ${priorPunchErr.message}`)
+    const byEmp = new Map<string, Array<{ type: string; punch_at: string }>>()
+    for (const p of (priorPunchData ?? []) as Array<{ employee_id: string; type: string; punch_at: string }>) {
+      const arr = byEmp.get(p.employee_id)
+      if (arr) arr.push(p)
+      else byEmp.set(p.employee_id, [p])
+    }
+    for (const [empId, list] of byEmp) {
+      const dates = new Set<DateKey>()
+      for (const d of pairPunchesTz(list, tz).keys()) if (d >= lookback && d < from) dates.add(d)
+      priorPunched.set(empId, dates)
+    }
   }
+  const priorByEmp = new Map<string, Set<DateKey>>()
+  const addPrior = (empId: string, date: DateKey) => {
+    const set = priorByEmp.get(empId)
+    if (set) set.add(date)
+    else priorByEmp.set(empId, new Set([date]))
+  }
+  for (const r of (priorData ?? []) as Array<{ employee_id: string; work_date: string; worked_minutes: number | null; anomaly: unknown }>) {
+    if (attendedDay({ workedMinutes: r.worked_minutes, anomaly: r.anomaly })) addPrior(r.employee_id, r.work_date)
+  }
+  for (const [empId, dates] of priorPunched) for (const d of dates) addPrior(empId, d)
+  for (const [empId, dates] of priorByEmp) facts.priorWorkedByEmp.set(empId, [...dates].sort())
 
   // punches: local-day window widened by one day each side (cross-midnight pairs)
   const winStart = dayWindowUtc(addDaysKey(from, -1), tz).startIso
@@ -1198,7 +1229,7 @@ function buildDayRows(
     const dayType: DayType = ad ? asDayType(ad.day_type) : fallbackType
     const computed = ad?.overtime_minutes ?? 0
     const override = prev?.overtime_minutes_override ?? null
-    const tiers = splitOvertimeTiers(override ?? computed, dayType, facts.rules, ad?.anomaly?.ptoWork === true)
+    const tiers = splitOvertimeTiers(override ?? computed, dayType, facts.rules, dayFlagsOf(ad?.anomaly).ptoWork === true)
     rows.push({
       sheet_id: sheetId,
       work_date: d,
@@ -1232,20 +1263,15 @@ function buildDayRows(
 
 /**
  * 一天的晚餐最終值與來源（2026-10-17）：月表手動值（attendance_days.dinner_taken）優先，否則
- * settleAttendance 記在 anomaly.dinnerTaken 的值（下班卡勾選）。都沒有 → taken undefined。
+ * settleAttendance 記在 anomaly.flags.dinnerTaken 的值（下班卡勾選；舊列在頂層）。都沒有 → taken undefined。
  */
 export function dinnerOf(
   row: { dinner_taken?: boolean | null; anomaly?: unknown } | undefined,
 ): { taken: boolean | undefined; source: "manual" | "punch" | null } {
   if (!row) return { taken: undefined, source: null }
   if (typeof row.dinner_taken === "boolean") return { taken: row.dinner_taken, source: "manual" }
-  const a = row.anomaly
-  if (a && typeof a === "object" && !Array.isArray(a)) {
-    const rec = a as Record<string, unknown>
-    if (typeof rec.dinnerTaken === "boolean") {
-      return { taken: rec.dinnerTaken, source: rec.dinnerSource === "manual" ? "manual" : "punch" }
-    }
-  }
+  const f = dayFlagsOf(row.anomaly)
+  if (f.dinnerTaken !== undefined) return { taken: f.dinnerTaken, source: f.dinnerSource ?? "punch" }
   return { taken: undefined, source: null }
 }
 
@@ -1260,6 +1286,8 @@ function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContex
     const pf = punchFacts?.get(d)
     const ad = facts.attendanceByKey.get(key)
     const late = lateByDate.get(d)
+    const adFlags = dayFlagsOf(ad?.anomaly)
+    const dinner = dinnerOf(ad)
     dayFacts.set(d, {
       scheduled: !!sched,
       shiftNetMinutes: sched?.shiftNetMinutes ?? null,
@@ -1269,9 +1297,9 @@ function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContex
       unpairedOutings: Math.max(ad?.anomaly?.unpairedOutings ?? 0, pf?.unpairedOutings ?? 0),
       manualPunch: pf?.manualPunch ?? false,
       ...(late ? { lateReason: late.reason, lateDecision: normalizeLateDecision(late.attendance_decision) } : {}),
-      ...(ad?.anomaly?.ptoWork === true ? { ptoWork: true } : {}),
-      ...(dinnerOf(ad).taken !== undefined ? { dinnerTaken: dinnerOf(ad).taken } : {}),
-      ...(typeof ad?.anomaly?.compDayOwed === "number" && ad.anomaly.compDayOwed > 0 ? { compDayOwed: ad.anomaly.compDayOwed } : {}),
+      ...(adFlags.ptoWork ? { ptoWork: true } : {}),
+      ...(dinner.taken !== undefined ? { dinnerTaken: dinner.taken } : {}),
+      ...(adFlags.compDayOwed ? { compDayOwed: adFlags.compDayOwed } : {}),
     })
   }
   const approvedOtDates = new Set<DateKey>()
@@ -1724,6 +1752,39 @@ export function buildPayrollDays(
   return out
 }
 
+/** 另計表金額的計算結果：amount null ＝沒算（缺薪資資料或引擎拒算），reason 說明原因。 */
+export interface BeyondCapAmount {
+  amount: number | null
+  reason?: "missing_salary" | "engine_error"
+}
+
+/** 缺薪資資料時回應／通知／另計表備註用的提示。 */
+export const BEYOND_CAP_MISSING_SALARY_HINT = "缺薪資資料，金額未計"
+
+/**
+ * M1 另計表自動算金額（2026-10-17 驗收修正，純函式）：被移出薪資單的超額分鐘「若不移出」時薪資單應付的加班費
+ * ＝ 加班費(不扣超額) − 加班費(扣超額)。兩次都走薪資執行同一條入口（applyNightPolicy → computePayslip），
+ * 所以每一分鐘都照它在當日原本落入的倍率段計價（超額扣的是當日最後、倍率最高的那段），補休、例假／
+ * 國定假日取高者等規則也一致。員工沒有薪資資料 → amount null、reason 'missing_salary'。
+ */
+export function beyondCapSettlementAmount(
+  inputs: Pick<EmployeePayrollInputs, "salary" | "rules" | "features"> | null,
+  cappedDays: AttendanceDayInput[],
+  uncappedDays: AttendanceDayInput[],
+): BeyondCapAmount {
+  if (!inputs?.salary) return { amount: null, reason: "missing_salary" }
+  try {
+    const otPay = (days: AttendanceDayInput[]) => {
+      const policy = applyNightPolicy(inputs.features, days, inputs.rules)
+      return computePayslip(policy.days, inputs.salary as SalaryStructure, policy.rules).overtimePay
+    }
+    return { amount: round2(Math.max(0, otPay(uncappedDays) - otPay(cappedDays))) }
+  } catch {
+    // 引擎拒絕猜時薪（無時薪且無本薪）→ 同缺薪資資料處理。
+    return { amount: null, reason: "engine_error" }
+  }
+}
+
 function toMoney(breakdown: ReturnType<typeof computePayslip>, rules: RuleConfig): SheetMoney {
   return {
     base: breakdown.base,
@@ -1841,7 +1902,13 @@ async function composeLiveView(
   tenantId: string,
   sheet: SheetRow,
   opts: { includeMoney: boolean },
-): Promise<{ view: SheetView; payrollDays: AttendanceDayInput[]; inputs: EmployeePayrollInputs | null }> {
+): Promise<{
+  view: SheetView
+  payrollDays: AttendanceDayInput[]
+  /** 不扣月加班超額的版本（另計表算金額用；warn 模式與 payrollDays 相同）。 */
+  payrollDaysUncapped: AttendanceDayInput[]
+  inputs: EmployeePayrollInputs | null
+}> {
   const [dayRows, empInfo, attendanceRows, leaveNames, ruleConfig, lateReports] = await Promise.all([
     loadDays(tenantId, sheet.id),
     loadEmployeeInfo(tenantId, [sheet.employee_id, ...(sheet.manager_emp_id ? [sheet.manager_emp_id] : [])]),
@@ -1897,6 +1964,15 @@ async function composeLiveView(
     settleSeparately ? beyondCapByDate : undefined,
     exemptDatesOf(lateReports.get(sheet.employee_id)),
   )
+  const payrollDaysUncapped = settleSeparately
+    ? buildPayrollDays(
+        dayRows,
+        attendanceRows,
+        inputs?.deductRateByCode ?? new Map(),
+        undefined,
+        exemptDatesOf(lateReports.get(sheet.employee_id)),
+      )
+    : payrollDays
   let money: SheetMoney | null = null
   if (inputs?.salary) {
     try {
@@ -1931,7 +2007,7 @@ async function composeLiveView(
     money,
     anomalyCount: countAnomalies(days, monthAnomalies),
   }
-  return { view, payrollDays, inputs }
+  return { view, payrollDays, payrollDaysUncapped, inputs }
 }
 
 /**
@@ -2488,23 +2564,35 @@ async function appendSheetSnapshot(
  * M1：月表核准時把「超過月加班上限」的分鐘寫進 overtime_settlements（另行給付帳）。
  *
  *   規則 `overtime.beyondCap='warn'`  → 只警示，不建帳（既有列也不動）。
- *   無列          → insert 一列 draft（source='beyond_cap'，每人每月至多一列）。
- *   已有 draft    → 更新分鐘（reopen 重算後再核准會走到這裡）。
+ *   無列          → insert 一列 draft（source='beyond_cap'，每人每月至多一列），amount 自動算（見
+ *                   beyondCapSettlementAmount；缺薪資資料 → amount 留空、備註與回傳 warnings 提示）。
+ *   已有 draft    → 分鐘變了才更新分鐘＋重算 amount（reopen 重算後再核准會走到這裡）；分鐘沒變就不動，
+ *                   HR 手動改過的金額保留。
  *   已有 paid     → **不動**（DB trigger 也擋），只記 warn log ＋ audit，讓 HR 知道
  *                   重算後的分鐘與已付的不同，要自己開一列 manual 補差額。
  *
  * 永不讓核准失敗：表還沒遷移（overtime_settlements 不存在）或寫入出錯都只記錄。
+ * 回傳要給呼叫端（核准回應）的提示。
  */
 async function upsertBeyondCapSettlement(
   tenantId: string,
   sheet: SheetRow,
   totals: SheetTotals,
   actorEmpId: string,
-): Promise<void> {
+  computed: BeyondCapAmount = { amount: null, reason: "missing_salary" },
+): Promise<string[]> {
   const minutes = Math.max(0, Math.round(totals.overtimeBeyondCapMinutes ?? 0))
+  const warnings: string[] = []
+  const missingHint = () => {
+    if (computed.amount === null) {
+      warnings.push(`超過月加班上限另計 ${fmtHm(minutes)}：${BEYOND_CAP_MISSING_SALARY_HINT}，請到加班另行給付帳手動填金額`)
+    }
+  }
+  const note =
+    "月表核准自動產生（超過月加班上限，另行給付）" + (computed.amount === null ? `；${BEYOND_CAP_MISSING_SALARY_HINT}` : "")
   try {
     const { rules } = await loadRuleConfigFor(tenantId, sheet.period)
-    if (resolveOvertimeBeyondCap(rules) !== "settle_separately") return
+    if (resolveOvertimeBeyondCap(rules) !== "settle_separately") return warnings
 
     const { data: existing, error: selErr } = await supabaseAdmin
       .from("overtime_settlements")
@@ -2517,26 +2605,28 @@ async function upsertBeyondCapSettlement(
     if (selErr) {
       if (isMissingTableError(selErr)) {
         warnSchemaGapOnce("overtime_settlements", selErr)
-        return
+        return warnings
       }
       throw new Error(selErr.message)
     }
 
     if (!existing) {
-      if (minutes <= 0) return
+      if (minutes <= 0) return warnings
       const { error } = await supabaseAdmin.from("overtime_settlements").insert({
         tenant_id: tenantId,
         employee_id: sheet.employee_id,
         period: sheet.period,
         source: "beyond_cap",
         minutes,
+        amount: computed.amount,
         status: "draft",
         sheet_id: sheet.id,
         created_by_emp_id: actorEmpId,
-        note: "月表核准自動產生（超過月加班上限，另行給付）",
+        note,
       })
       if (error) throw new Error(error.message)
-      return
+      missingHint()
+      return warnings
     }
 
     if ((existing.status as string) === "paid") {
@@ -2551,27 +2641,30 @@ async function upsertBeyondCapSettlement(
           recordId: existing.id as string,
           action: "UPDATE",
           oldRow: { minutes: existing.minutes, status: "paid" },
-          newRow: { recomputedMinutes: minutes, applied: false },
+          newRow: { recomputedMinutes: minutes, recomputedAmount: computed.amount, applied: false },
           actorEmpId,
           context: "月表重新核准：超額另計已付款，分鐘未覆蓋（請另開 manual 列補差額）",
         })
+        warnings.push(`超過月加班上限另計已付款，重算後為 ${fmtHm(minutes)}（與已付不同），請另開一列補差額`)
       }
-      return
+      return warnings
     }
 
-    if ((existing.minutes as number) === minutes) return
+    if ((existing.minutes as number) === minutes) return warnings
     const { error } = await supabaseAdmin
       .from("overtime_settlements")
-      .update({ minutes, sheet_id: sheet.id })
+      .update({ minutes, amount: minutes > 0 ? computed.amount : 0, sheet_id: sheet.id })
       .eq("tenant_id", tenantId)
       .eq("id", existing.id as string)
     if (error) throw new Error(error.message)
+    if (minutes > 0) missingHint()
   } catch (err) {
     logger.error(
       { err: err instanceof Error ? err.message : err, sheetId: sheet.id, period: sheet.period },
       "attendance-sheets: 超額另計寫入失敗（核准不回滾）",
     )
   }
+  return warnings
 }
 
 /**
@@ -2579,11 +2672,15 @@ async function upsertBeyondCapSettlement(
  * 規則版本＋薪資結構＋引擎用逐日資料寫進 snapshot。之後薪資結算讀快照。
  * 同時 append 一列 attendance_sheet_snapshots（reason 'approve'）留歷史。
  */
-export async function approveSheet(tenantId: string, sheetId: string, actorEmpId: string): Promise<SheetRow> {
+export async function approveSheet(
+  tenantId: string,
+  sheetId: string,
+  actorEmpId: string,
+): Promise<SheetRow & { warnings: string[] }> {
   const sheet = await loadSheet(tenantId, sheetId)
   await assertPeriodOpen(tenantId, sheet.period)
   assertTransition(sheet, "approved")
-  const { view, payrollDays, inputs } = await composeLiveView(tenantId, sheet, { includeMoney: true })
+  const { view, payrollDays, payrollDaysUncapped, inputs } = await composeLiveView(tenantId, sheet, { includeMoney: true })
   const now = new Date().toISOString()
   const snapshot: SheetSnapshot = {
     ...view,
@@ -2604,9 +2701,19 @@ export async function approveSheet(tenantId: string, sheetId: string, actorEmpId
   })
   await appendSheetSnapshot(tenantId, next, snapshot, actorEmpId, "approve")
   // M1：核准 = 數字定稿，超額分鐘這時才落成另行給付的帳。
-  await upsertBeyondCapSettlement(tenantId, next, view.totals, actorEmpId)
+  // 金額＝這些分鐘若留在薪資單上應付的加班費（beyondCapSettlementAmount）；缺薪資資料 → 留空並回傳提示。
+  const amount: BeyondCapAmount =
+    (view.totals.overtimeBeyondCapMinutes ?? 0) > 0
+      ? beyondCapSettlementAmount(inputs, payrollDays, payrollDaysUncapped)
+      : { amount: 0 }
+  const warnings = await upsertBeyondCapSettlement(tenantId, next, view.totals, actorEmpId, amount)
   await notify(tenantId, [sheet.employee_id], next, "approved", `出勤月表已核准（${sheet.period}）`, `你的 ${sheet.period} 出勤月表已由 HR 核准。`)
-  return next
+  // 另計表的提示（缺薪資資料金額未計、已付款分鐘不同）通知核准的 HR 本人；核准回應也帶 warnings。
+  if (warnings.length > 0) {
+    const name = await employeeName(tenantId, sheet.employee_id)
+    await notify(tenantId, [actorEmpId], next, "beyond_cap_settlement", `加班另行給付待處理（${name} ${sheet.period}）`, warnings.join("\n"))
+  }
+  return { ...next, warnings }
 }
 
 /**

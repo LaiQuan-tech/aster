@@ -500,7 +500,8 @@ attendanceSheetsRouter.post(
         return
       }
       const next_ = await approveSheet(tenantId, id, caller.self.id)
-      res.status(200).json({ id: next_.id, status: next_.status, approvedAt: next_.approved_at })
+      // warnings：超過月加班上限另計的提示（例：缺薪資資料，金額未計）；沒有就是空陣列。
+      res.status(200).json({ id: next_.id, status: next_.status, approvedAt: next_.approved_at, warnings: next_.warnings })
     } catch (err) {
       sendSheetError(res, err, next)
     }

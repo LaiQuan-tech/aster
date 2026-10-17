@@ -20,6 +20,10 @@ import type { RuleConfig, RuleConfigOvertime, RuleConfigVersion } from "./admin-
 export type OvertimeBasis = "regularHours" | "shift";
 /** 月加班超過上限後：超額另行給付（不進薪資單）／只警示。 */
 export type OvertimeBeyondCap = "settle_separately" | "warn";
+/** 例假出勤加發：只算法定／max(法定, 休息日規則同分鐘)。省略 = max_rest_day。 */
+export type RegularLeavePay = "statutory" | "max_rest_day";
+/** 國定假日出勤加發：做 1 給 8／max(做 1 給 8, 平日倍率 × 整段工時)。省略 = statutory。 */
+export type FixedHolidayPay = "statutory" | "max_weekday";
 /** 特休制度：到職日週年制／曆年制。 */
 export type AnnualLeaveBasis = "anniversary" | "calendar";
 
@@ -64,6 +68,10 @@ export interface RuleConfigOvertimeExt extends RuleConfigOvertime {
   monthlyCapHours?: number;
   /** 省略 = settle_separately。 */
   beyondCap?: OvertimeBeyondCap;
+  /** 省略 = max_rest_day（2026-10-17 驗收修正）。 */
+  regularLeavePay?: RegularLeavePay;
+  /** 省略 = statutory。 */
+  fixedHolidayPay?: FixedHolidayPay;
 }
 
 /**

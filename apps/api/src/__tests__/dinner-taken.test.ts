@@ -78,11 +78,11 @@ describe("dinnerPunchByDate／effectiveDinnerTaken（純函式）", () => {
 })
 
 describe("settleAttendance — 晚餐勾選（opt_in，扣 60 分）", () => {
-  it("下班卡勾晚餐 → 加班 180 − 60 ＝ 120；anomaly 記最終值與來源", async () => {
+  it("下班卡勾晚餐 → 加班 180 − 60 ＝ 120；anomaly.flags 記最終值與來源", async () => {
     fake.db.punch_records = [punch("in", at(DAY, "09:00")), punch("out", at(DAY, "21:00"), { dinner_taken: true })]
     await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY })
     expect(adRow().overtime_minutes).toBe(120)
-    expect(adRow().anomaly).toMatchObject({ dinnerTaken: true, dinnerSource: "punch" })
+    expect(adRow().anomaly).toEqual({ flags: { dinnerTaken: true, dinnerSource: "punch" } })
   })
 
   it("沒勾（或勾 false）→ 不扣，加班 180", async () => {
@@ -101,7 +101,7 @@ describe("settleAttendance — 晚餐勾選（opt_in，扣 60 分）", () => {
     await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY })
     expect(adRow().overtime_minutes).toBe(180)
     expect(adRow().dinner_taken).toBe(false)
-    expect(adRow().anomaly).toMatchObject({ dinnerTaken: false, dinnerSource: "manual" })
+    expect(adRow().anomaly).toEqual({ flags: { dinnerTaken: false, dinnerSource: "manual" } })
     // 結算的 upsert 從不帶 dinner_taken 欄位
     for (const w of fake.writes.filter((x) => x.table === "attendance_days" && x.action === "upsert")) {
       for (const r of w.payload as Row[]) expect("dinner_taken" in r).toBe(false)

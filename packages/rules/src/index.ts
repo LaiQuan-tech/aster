@@ -51,6 +51,15 @@ export {
   resolveOvertimeBasis,
   resolveOvertimeMonthlyCapHours,
   resolveOvertimeBeyondCap,
+  // 2026-10-17 驗收修正:例假／國定假日加發計法
+  RegularLeavePaySchema,
+  FixedHolidayPaySchema,
+  DEFAULT_REGULAR_LEAVE_PAY,
+  DEFAULT_FIXED_HOLIDAY_PAY,
+  resolveRegularLeavePay,
+  resolveFixedHolidayPay,
+  type RegularLeavePay,
+  type FixedHolidayPay,
   resolveAnnualLeavePolicy,
   resolveInsuranceBrackets,
   bracketFor,
@@ -72,6 +81,7 @@ export * from "./types.js";
 export {
   computeAttendanceDay,
   applyOvertimePipeline,
+  overtimeMinutesBeforeMinCharge,
   overtimeMealDeductionMinutes,
   capCountableMinutes,
   unscheduledShiftDef,

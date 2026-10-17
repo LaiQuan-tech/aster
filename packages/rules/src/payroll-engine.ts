@@ -32,10 +32,13 @@
  */
 
 import { nhiEmployeePremium } from "./tw-tax.js";
+import { overtimeMinutesBeforeMinCharge } from "./worktime-engine.js";
 import {
+  resolveFixedHolidayPay,
   resolveHourlyWageDivisor,
   resolveLateEarlyDeductionEnabled,
   resolveOvertimeRule,
+  resolveRegularLeavePay,
   type OvertimeWhen,
   type RuleConfig,
 } from "./rules-schema.js";
@@ -112,6 +115,111 @@ export function resolveAttendanceDeduction(
     }
   }
   return 0;
+}
+
+/**
+ * 一天的加班依某條規則計價:先把分鐘切成 (倍率, 時數) 的段,再扣已轉補休的分鐘,最後算錢。
+ *   固定時薪制 (若設定) 覆蓋一切倍率:一段、倍率記 1、單價 flatHourly。
+ *   無 tiers:一段單一倍率。
+ *   有 tiers:累進分段,uptoHours 是「累計」上限,最後一段可省略代表無上限。
+ * 已轉補休的分鐘 (加班單選補休且核准) 不發現金:從倍率最低的段先扣 (同倍率先扣較早的段),最多扣到
+ * 當日加班時數。對員工最有利——高倍率的段留著發現金。
+ */
+function priceOvertimeDay(
+  rule: { multiplier: number; tiers?: { uptoHours?: number; multiplier: number }[] },
+  minutes: number,
+  compTimeMinutesWanted: number | undefined,
+  hourlyWage: number,
+  flatHourly: number | undefined,
+): { segs: { multiplier: number; hours: number; amount: number }[]; compMinutes: number; amount: number } {
+  const hours = Math.max(0, minutes) / 60;
+  const segs: { multiplier: number; hours: number }[] = [];
+  if (flatHourly !== undefined || !rule.tiers) {
+    segs.push({ multiplier: flatHourly !== undefined ? 1 : rule.multiplier, hours });
+  } else {
+    let remaining = hours;
+    let consumed = 0;
+    for (const tier of rule.tiers) {
+      if (remaining <= 0) break;
+      const cap = tier.uptoHours ?? Infinity;
+      const segHours = Math.min(remaining, cap - consumed);
+      if (segHours <= 0) continue; // 這段的額度已被前面用完
+      segs.push({ multiplier: tier.multiplier, hours: segHours });
+      remaining -= segHours;
+      consumed += segHours;
+    }
+  }
+
+  let compMinutes = 0;
+  const compMinutesWanted = Math.max(0, compTimeMinutesWanted ?? 0);
+  if (compMinutesWanted > 0) {
+    let compLeft = Math.min(compMinutesWanted / 60, hours);
+    compMinutes = Math.round(compLeft * 60);
+    const order = segs
+      .map((seg, i) => ({ seg, i }))
+      .sort((a, b) => a.seg.multiplier - b.seg.multiplier || a.i - b.i);
+    for (const { seg } of order) {
+      if (compLeft <= 0) break;
+      const take = Math.min(seg.hours, compLeft);
+      seg.hours -= take;
+      compLeft -= take;
+    }
+  }
+
+  const priced: { multiplier: number; hours: number; amount: number }[] = [];
+  let amount = 0;
+  for (const seg of segs) {
+    if (seg.hours <= 1e-9) continue;
+    const segAmount =
+      flatHourly !== undefined ? seg.hours * flatHourly : seg.hours * hourlyWage * seg.multiplier;
+    amount += segAmount;
+    priced.push({ multiplier: seg.multiplier, hours: seg.hours, amount: segAmount });
+  }
+  return { segs: priced, compMinutes, amount };
+}
+
+/**
+ * 這天「實際做了幾分鐘」的加班 (不含做 1 給 8 的保底):overtimeMinutes 超過保底就是實際值
+ * (含人工覆寫);等於／低於保底時以 workedMinutes 重跑管線前三步 (用餐扣除 → 取整 → 最低分鐘),
+ * 不超過 overtimeMinutes (月加班超額另計扣掉的分鐘不會被加回來)。
+ */
+function actualOvertimeMinutes(
+  day: AttendanceDay,
+  minChargeHours: number | undefined,
+  rules: RuleConfig,
+): number {
+  const minChargeMinutes = Math.round((minChargeHours ?? 0) * 60);
+  if (day.overtimeMinutes > minChargeMinutes) return day.overtimeMinutes;
+  const derived = overtimeMinutesBeforeMinCharge(day.workedMinutes, rules, day.dayType, undefined, {
+    dinnerTaken: day.dinnerTaken,
+    ptoWork: day.ptoWork,
+  });
+  return Math.min(day.overtimeMinutes, derived);
+}
+
+/**
+ * 例假／國定假日「取高者」的比較基準 (2026-10-17 驗收修正:不讓員工因改制悄悄少領):
+ *   • 例假 + overtime.regularLeavePay='max_rest_day' (預設) → 休息日規則 × 實際分鐘
+ *   • 國定假日 (含特休出勤) + overtime.fixedHolidayPay='max_weekday' → 平日加班規則 × 實際分鐘 (整段工時)
+ * 比較用的規則不存在、或是整條轉補休 (compTime) → null (只算法定)。比較用規則自己的保底照套。
+ */
+function alternativeOvertimeBasis(
+  day: AttendanceDay,
+  when: OvertimeWhen,
+  rule: { minChargeHours?: number },
+  rules: RuleConfig,
+): { rule: NonNullable<ReturnType<typeof resolveOvertimeRule>>; minutes: number } | null {
+  let altWhen: OvertimeWhen | null = null;
+  if (when === "regular_leave" && resolveRegularLeavePay(rules) === "max_rest_day") altWhen = "rest_day";
+  else if (when === "fixed_holiday" && resolveFixedHolidayPay(rules) === "max_weekday") altWhen = "weekday_ot";
+  if (!altWhen) return null;
+  const altRule = resolveOvertimeRule(rules, altWhen);
+  if (!altRule || altRule.compTime) return null;
+  let minutes = actualOvertimeMinutes(day, rule.minChargeHours, rules);
+  if (minutes <= 0) return null;
+  const altMin = altRule.minChargeHours ?? 0;
+  if (altMin > 0) minutes = Math.max(minutes, Math.round(altMin * 60));
+  return { rule: altRule, minutes };
 }
 
 export function computePayslip(
@@ -201,54 +309,18 @@ export function computePayslip(
       compTimeMinutes += day.overtimeMinutes; // 轉補休,不發現金
       continue;
     }
-    const hours = day.overtimeMinutes / 60;
 
-    // 先把當日加班切成 (倍率, 時數) 的段,再扣補休,最後才算錢。
-    //   固定時薪制 (若設定) 覆蓋一切倍率:一段、倍率記 1、單價 flatHourly。
-    //   無 tiers:一段單一倍率。
-    //   有 tiers:累進分段,uptoHours 是「累計」上限,最後一段可省略代表無上限。
-    const segs: { multiplier: number; hours: number }[] = [];
-    if (flatHourly !== undefined || !rule.tiers) {
-      segs.push({ multiplier: flatHourly !== undefined ? 1 : rule.multiplier, hours });
-    } else {
-      let remaining = hours;
-      let consumed = 0;
-      for (const tier of rule.tiers) {
-        if (remaining <= 0) break;
-        const cap = tier.uptoHours ?? Infinity;
-        const segHours = Math.min(remaining, cap - consumed);
-        if (segHours <= 0) continue; // 這段的額度已被前面用完
-        segs.push({ multiplier: tier.multiplier, hours: segHours });
-        remaining -= segHours;
-        consumed += segHours;
-      }
+    // 法定 (該日規則) 的算法;例假 max_rest_day／國定假日 max_weekday 另算一個「比較用」的算法,取金額高者。
+    let chosen = priceOvertimeDay(rule, day.overtimeMinutes, day.compTimeMinutes, hourlyWage, flatHourly);
+    const alt = alternativeOvertimeBasis(day, when, rule, rules);
+    if (alt) {
+      const altPriced = priceOvertimeDay(alt.rule, alt.minutes, day.compTimeMinutes, hourlyWage, flatHourly);
+      if (altPriced.amount > chosen.amount + 1e-9) chosen = altPriced;
     }
-
-    // 已轉補休的分鐘 (加班單選補休且核准) 不發現金:從當日倍率最低的段先扣
-    // (同倍率先扣較早的段),最多扣到當日加班時數。對員工最有利——高倍率的段留著發現金。
-    const compMinutesWanted = Math.max(0, day.compTimeMinutes ?? 0);
-    if (compMinutesWanted > 0) {
-      let compLeft = Math.min(compMinutesWanted / 60, hours);
-      compTimeMinutes += Math.round(compLeft * 60);
-      const order = segs
-        .map((seg, i) => ({ seg, i }))
-        .sort((a, b) => a.seg.multiplier - b.seg.multiplier || a.i - b.i);
-      for (const { seg } of order) {
-        if (compLeft <= 0) break;
-        const take = Math.min(seg.hours, compLeft);
-        seg.hours -= take;
-        compLeft -= take;
-      }
-    }
-
-    for (const seg of segs) {
-      if (seg.hours <= 1e-9) continue;
-      const amount =
-        flatHourly !== undefined
-          ? seg.hours * flatHourly
-          : seg.hours * hourlyWage * seg.multiplier;
-      overtimePay += amount;
-      addSegment(when, seg.multiplier, seg.hours, amount);
+    compTimeMinutes += chosen.compMinutes;
+    for (const seg of chosen.segs) {
+      overtimePay += seg.amount;
+      addSegment(when, seg.multiplier, seg.hours, seg.amount);
     }
   }
   overtimePay = round(overtimePay);
