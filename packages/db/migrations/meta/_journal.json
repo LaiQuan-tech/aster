@@ -491,6 +491,13 @@
       "when": 1792000000000,
       "tag": "0069_one_rest_one_off_day_type",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1792200000000,
+      "tag": "0071_calendar_import_drafts",
+      "breakpoints": true
     }
   ]
 }

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, PrimaryButton, ErrorText } from "@/components/admin-ui";
 import { BatchImportButton } from "@/components/BatchImport";
+import { CalendarImportPanel, CalendarReadinessBanner } from "@/components/CalendarImportPanel";
 import {
   getBranding,
   getCalendar,
@@ -111,6 +112,8 @@ export default function CalendarPage() {
   const [error, setError] = useState<string | null>(null);
   const [policy, setPolicy] = useState<WeekendPolicy>(DEFAULT_POLICY);
   const [savingPolicy, setSavingPolicy] = useState(false);
+  // 核准匯入草稿後，頂端「尚未核准」提醒要重抓。
+  const [readinessKey, setReadinessKey] = useState(0);
 
   useEffect(() => {
     getBranding()
@@ -244,6 +247,7 @@ export default function CalendarPage() {
   return (
     <>
       <Card>
+        <CalendarReadinessBanner refreshKey={readinessKey} />
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <button type="button" onClick={() => setYear((y) => y - 1)} className="rounded-md border px-3 py-1.5 text-sm">
@@ -309,6 +313,14 @@ export default function CalendarPage() {
             }}
           />
         </div>
+
+        <CalendarImportPanel
+          year={year}
+          onApplied={() => {
+            setReadinessKey((k) => k + 1);
+            void load();
+          }}
+        />
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {MONTH_LABELS.map((label, index) => {

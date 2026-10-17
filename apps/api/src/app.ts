@@ -19,6 +19,7 @@ import { attendanceRouter } from "./routes/attendance.js"
 import { attendanceSheetsRouter } from "./routes/attendance-sheets.js"
 import { exportsRouter } from "./routes/exports.js"
 import { calendarRouter } from "./routes/calendar.js"
+import { calendarImportRouter } from "./routes/calendar-import.js"
 import { payrollRouter } from "./routes/payroll.js"
 import { payrollPeriodsRouter } from "./routes/payroll-periods.js"
 import { payrollAdjustmentsRouter } from "./routes/payroll-adjustments.js"
@@ -143,6 +144,7 @@ app.use(attendanceRouter)
 app.use(attendanceSheetsRouter)
 app.use(exportsRouter)
 app.use(calendarRouter)
+app.use(calendarImportRouter) // /calendar/import/*、/calendar/readiness（國定假日年度匯入，services/holiday-import.ts）
 app.use(payrollRouter)
 app.use(payrollPeriodsRouter) // /payroll-periods*（發薪鎖定：完成本月發薪／重新開放；2026-10-11）
 app.use(payrollAdjustmentsRouter) // /payroll-adjustments*（薪資一次性加減項＝前期更正：下月補發或扣回；2026-10-11）

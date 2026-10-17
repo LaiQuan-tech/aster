@@ -162,6 +162,8 @@ export interface CalendarGenerateResult {
   skipped: number
   /** 落在例假／休息日的國定假日數：本日維持例假／休息日（label 註記），不標 fixed_holiday。 */
   weekendHolidays: number
+  /** pruneStaleImports 時：刪掉的過期匯入列數（舊清單有、新清單沒有的 source 'import' 列）。 */
+  pruned?: number
 }
 
 /** tenant_calendar_days 尚未建表（packages/db migration 0038）——route 對應 503 calendar_not_migrated。 */
@@ -242,12 +244,15 @@ export function planTenantCalendar(input: {
  * 產生／更正某年的租戶行事曆（POST /calendar/generate 與 xlsx 匯入 POST /imports/holidays 共用），見 planTenantCalendar。
  * 週休設定讀 tenants.features.attendance（services/day-type.ts；預設週日例假、週六休息日）。
  * `holidays` 未給時用內建的行政機關辦公日曆表（TW_HOLIDAYS：2026、2027）；沒有的年份只產生例假／休息日。
+ * `options.pruneStaleImports`（國定假日匯入草稿核准用，services/holiday-import.ts）：該年既有的 source 'import' 列
+ * 不在這次的計畫裡（例如官方修正版把補假日改了一天）→ 刪掉，回到依星期判定；HR 手動列一樣不動。
  */
 export async function generateTenantCalendar(
   tenantId: string,
   year: number,
   holidays?: HolidayInput[],
   context = "generateTenantCalendar",
+  options: { pruneStaleImports?: boolean } = {},
 ): Promise<CalendarGenerateResult> {
   const holidaySource = holidays ?? TW_HOLIDAYS[year] ?? []
 
@@ -281,11 +286,30 @@ export async function generateTenantCalendar(
     if (error) throw new Error(`${context} (holidays): ${error.message}`)
   }
 
+  let pruned: number | undefined
+  if (options.pruneStaleImports) {
+    const planned = new Set([...plan.weekendRows, ...plan.holidayRows].map((r) => r.date))
+    const stale = [...existingSources].filter(([date, source]) => source === "import" && !planned.has(date)).map(([date]) => date)
+    pruned = 0
+    if (stale.length > 0) {
+      const { data, error } = await supabaseAdmin
+        .from("tenant_calendar_days")
+        .delete()
+        .eq("tenant_id", tenantId)
+        .eq("source", "import")
+        .in("date", stale)
+        .select("id")
+      if (error) throw new Error(`${context} (prune): ${error.message}`)
+      pruned = (data ?? []).length
+    }
+  }
+
   return {
     year,
     generated: plan.weekendRows.length,
     imported: plan.holidayRows.length,
     skipped: plan.skipped,
     weekendHolidays: plan.weekendHolidays,
+    ...(pruned !== undefined ? { pruned } : {}),
   }
 }

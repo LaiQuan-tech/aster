@@ -1,0 +1,546 @@
+[
+{
+"date": "20250101",
+"year": "2025",
+"name": "中華民國開國紀念日",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20250127",
+"year": "2025",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "調整放假日",
+"description": "全國各機關學校放假一日，小年夜(一月二十七日)適逢星期一，調整為放假日，並於二月八日補行上班一日。"
+},
+{
+"date": "20250128",
+"year": "2025",
+"name": "農曆除夕",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20250129",
+"year": "2025",
+"name": "春節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20250130",
+"year": "2025",
+"name": "春節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20250131",
+"year": "2025",
+"name": "春節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20250208",
+"year": "2025",
+"name": null,
+"isholiday": "否",
+"holidaycategory": "補行上班日",
+"description": null
+},
+{
+"date": "20250228",
+"year": "2025",
+"name": "和平紀念日",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20250403",
+"year": "2025",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+},
+{
+"date": "20250404",
+"year": "2025",
+"name": "兒童節及民族掃墓節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日，兒童節與民族掃墓節同一日，於四月三日補假一日。"
+},
+{
+"date": "20250501",
+"year": "2025",
+"name": "勞動節",
+"isholiday": "是",
+"holidaycategory": "特定節日",
+"description": "勞工放假一日。"
+},
+{
+"date": "20250530",
+"year": "2025",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+},
+{
+"date": "20250531",
+"year": "2025",
+"name": "端午節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20250903",
+"year": "2025",
+"name": "軍人節",
+"isholiday": "是",
+"holidaycategory": "特定節日",
+"description": "軍人依國防部規定辦理。"
+},
+{
+"date": "20250928",
+"year": "2025",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20250929",
+"year": "2025",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": "9/28（日）假日，於9/29（一）補假一日"
+},
+{
+"date": "20251006",
+"year": "2025",
+"name": "中秋節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20251010",
+"year": "2025",
+"name": "國慶日",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20251024",
+"year": "2025",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": "光復暨金門古寧頭大捷紀念日適逢星期六，則於前一日10/24(五)補假一日"
+},
+{
+"date": "20251025",
+"year": "2025",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20251225",
+"year": "2025",
+"name": "行憲紀念日",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20260101",
+"year": "2026",
+"name": "中華民國開國紀念日",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20260216",
+"year": "2026",
+"name": "除夕",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20260217",
+"year": "2026",
+"name": "春節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20260218",
+"year": "2026",
+"name": "春節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20260219",
+"year": "2026",
+"name": "春節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20260220",
+"year": "2026",
+"name": "春節",
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": "補假一日"
+},
+{
+"date": "20260227",
+"year": "2026",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": "和平紀念日逢例假日，於2/27（五）補假一日"
+},
+{
+"date": "20260228",
+"year": "2026",
+"name": "和平紀念日",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20260403",
+"year": "2026",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+},
+{
+"date": "20260404",
+"year": "2026",
+"name": "兒童節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日，4/4（六）兒童節逢例假日，於4/3（五）補假一日。"
+},
+{
+"date": "20260405",
+"year": "2026",
+"name": "民族掃墓節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "4/5（日）清明節逢例假日，於4/6（一）補假一日"
+},
+{
+"date": "20260406",
+"year": "2026",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+},
+{
+"date": "20260501",
+"year": "2026",
+"name": "勞動節",
+"isholiday": "是",
+"holidaycategory": "特定節日",
+"description": "全國各機關學校及勞工放假一日。"
+},
+{
+"date": "20260619",
+"year": "2026",
+"name": "端午節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20260903",
+"year": "2026",
+"name": "軍人節",
+"isholiday": "是",
+"holidaycategory": "特定節日",
+"description": "軍人依國防部規定辦理。"
+},
+{
+"date": "20260925",
+"year": "2026",
+"name": "中秋節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20260928",
+"year": "2026",
+"name": "教師節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20261009",
+"year": "2026",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+},
+{
+"date": "20261010",
+"year": "2026",
+"name": "國慶日",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "10/10（六）國慶日逢例假日，於10/9（五）補假一日"
+},
+{
+"date": "20261025",
+"year": "2026",
+"name": "光復節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "10/25（日）台灣光復節逢例假日，於10/26（一）補假一日"
+},
+{
+"date": "20261026",
+"year": "2026",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+},
+{
+"date": "20261225",
+"year": "2026",
+"name": "行憲紀念日",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20270101",
+"year": "2027",
+"name": "中華民國開國紀念日",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20270204",
+"year": "2027",
+"name": "小年夜",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20270205",
+"year": "2027",
+"name": "除夕",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20270206",
+"year": "2027",
+"name": "春節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日，適逢星期六，於2月9日補假一日。"
+},
+{
+"date": "20270207",
+"year": "2027",
+"name": "春節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日，適逢星期日，於2月10日補假一日。"
+},
+{
+"date": "20270208",
+"year": "2027",
+"name": "春節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": null
+},
+{
+"date": "20270209",
+"year": "2027",
+"name": "春節",
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+},
+{
+"date": "20270210",
+"year": "2027",
+"name": "春節",
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+},
+{
+"date": "20270228",
+"year": "2027",
+"name": "和平紀念日",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日，適逢星期日，於3月1日補假一日。"
+},
+{
+"date": "20270301",
+"year": "2027",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+},
+{
+"date": "20270404",
+"year": "2027",
+"name": "兒童節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日，適逢星期日，於4月6日補假一日。"
+},
+{
+"date": "20270405",
+"year": "2027",
+"name": "民族掃墓節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20270406",
+"year": "2027",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+},
+{
+"date": "20270430",
+"year": "2027",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+},
+{
+"date": "20270501",
+"year": "2027",
+"name": "勞動節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校及勞工放假一日，適逢星期六，於4月30日補假一日。"
+},
+{
+"date": "20270609",
+"year": "2027",
+"name": "端午節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20270903",
+"year": "2027",
+"name": "軍人節",
+"isholiday": "是",
+"holidaycategory": "特定節日",
+"description": "軍人依國防部規定辦理。"
+},
+{
+"date": "20270915",
+"year": "2027",
+"name": "中秋節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20270928",
+"year": "2027",
+"name": "教師節",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20271010",
+"year": "2027",
+"name": "國慶日",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日，適逢星期日，於10月11日補假一日。"
+},
+{
+"date": "20271011",
+"year": "2027",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+},
+{
+"date": "20271025",
+"year": "2027",
+"name": "臺灣光復暨金門古寧頭大捷紀念日",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日。"
+},
+{
+"date": "20271224",
+"year": "2027",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+},
+{
+"date": "20271225",
+"year": "2027",
+"name": "行憲紀念日",
+"isholiday": "是",
+"holidaycategory": "放假之紀念日及節日",
+"description": "全國各機關學校放假一日，適逢星期六，於116年12月24日補假一日。"
+},
+{
+"date": "20271231",
+"year": "2027",
+"name": null,
+"isholiday": "是",
+"holidaycategory": "補假",
+"description": null
+}
+]

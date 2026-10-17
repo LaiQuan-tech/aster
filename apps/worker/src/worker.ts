@@ -28,6 +28,7 @@ const SCHEDULER_IDS = [
   "monthly-snapshot",
   "annual-leave-grant",
   "birthday-reminder",
+  "holiday-calendar-import",
 ];
 
 /** 月度快照是「一次呼叫做一段、帶游標續打」的分頁 API；這是續打次數上限（防迴圈跑不完）。 */
@@ -135,6 +136,14 @@ async function registerSchedulers() {
     { pattern: "0 8 * * *", tz: "Asia/Taipei" },
     { name: "birthday-reminder", data: {} },
   );
+  // 國定假日年度匯入（2026-10-17）：每日 07:30 台北。7/1 起下一年沒有已核准行事曆 → API 抓人事行政總處
+  // 辦公日曆建草稿並通知 HR；每月 1 日重抓當年與下一年，官方修正版與已核准不同 → 建新草稿並通知。
+  // 只建草稿、從不自動核准；官方還沒公布那一年就什麼都不做，隔天再試。
+  await attendanceQueue.upsertJobScheduler(
+    "holiday-calendar-import",
+    { pattern: "30 7 * * *", tz: "Asia/Taipei" },
+    { name: "holiday-calendar-import", data: {} },
+  );
 
   attendanceWorker = new Worker(
     "attendance",
@@ -160,6 +169,7 @@ async function registerSchedulers() {
         "monthly-snapshot": "/internal/backups/monthly-snapshot",
         "annual-leave-grant": "/internal/leave/annual-grant",
         "birthday-reminder": "/internal/people/birthday-reminder",
+        "holiday-calendar-import": "/internal/calendar/holiday-import",
       };
       const endpoint = endpointByJob[job.name] ?? "/internal/attendance/daily-settle";
 
@@ -237,6 +247,11 @@ async function registerSchedulers() {
                 ...(typeof job.data?.date === "string" ? { date: job.data.date } : {}),
                 anomalyDays: typeof job.data?.anomalyDays === "number" ? job.data.anomalyDays : 7,
               }
+          : job.name === "holiday-calendar-import"
+            ? {
+                ...(typeof job.data?.date === "string" ? { date: job.data.date } : {}),
+                ...(job.data?.force === true ? { force: true } : {}),
+              }
           : job.name === "annual-leave-grant"
             ? // 基準日這支叫 asOf 不叫 date；排程不帶，API 端對每個租戶用該租戶時區的今天。
               (typeof job.data?.asOf === "string" ? { asOf: job.data.asOf } : {})
@@ -287,7 +302,7 @@ if (process.env.REDIS_URL) {
     process.exit(1);
   });
   logger.info(
-    "Worker process started (attendance + detection + notifications + monthly snapshot + annual leave + birthdays)",
+    "Worker process started (attendance + detection + notifications + monthly snapshot + annual leave + birthdays + holiday calendar)",
   );
 } else {
   // Skeleton mode: no broker, so we only run the health server. This keeps the

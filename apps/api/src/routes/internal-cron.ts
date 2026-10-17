@@ -5,12 +5,14 @@ import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { todayKey } from "../lib/tz.js"
 import { AnnualLeaveError, grantAnnualLeave } from "../services/annual-leave.js"
 import { remindBirthdays } from "../services/birthday.js"
+import { CalendarImportNotMigratedError, runHolidayImportJob } from "../services/holiday-import.js"
 
 /**
  * 排程端點（worker 呼叫；W1 年度給假、M7 生日提醒）——2026-09-23 WP9。
  *
  *   POST /internal/leave/annual-grant        body {asOf?, dryRun?}   worker 每日 01:30 台北
  *   POST /internal/people/birthday-reminder  body {date?}            worker 每日 08:00 台北
+ *   POST /internal/calendar/holiday-import   body {date?, force?}    worker 每日 07:30 台北（國定假日年度匯入草稿，2026-10-17）
  *
  * 兩支都是「迴圈所有 `tenants.status='active'` 租戶、逐租戶 try/catch、一個租戶失敗
  * 不影響其他租戶」。日期一律**用租戶自己的時區**算今天（不是伺服器時區也不是寫死台北）：
@@ -193,6 +195,53 @@ internalCronRouter.post(
         results,
       })
     } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// ── 國定假日年度匯入（2026-10-17）──────────────────────────────────────
+
+const holidayImportSchema = z.object({
+  /** 基準日；省略＝台北今天（假日資料只有台灣，跟租戶時區無關）。 */
+  date: z.string().regex(dateRe).optional(),
+  /** 當成每月重抓日（當年＋下一年都抓、比對官方修正）；人工補跑用。 */
+  force: z.boolean().optional(),
+})
+
+/**
+ * POST /internal/calendar/holiday-import — 每日排程（services/holiday-import.ts runHolidayImportJob）：
+ *   7/1 起下一年沒有已核准行事曆 → 抓政府資料建草稿並通知 HR；每月 1 日重抓當年與下一年，
+ *   官方修正版與已核准不同 → 建新草稿並通知。只建草稿、從不自動核准或改行事曆。
+ * 官方還沒公布那一年 → 該年 fetch='not_published'（正常，隔天再試）。表未建（sql/0061）→ 200 skipped。
+ */
+internalCronRouter.post(
+  "/internal/calendar/holiday-import",
+  async (req: Request, res: Response, next: NextFunction) => {
+    if (!requireInternalToken(req, res)) return
+    if (!requireInternalJobsEnabled(res)) return
+    const parsed = holidayImportSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const result = await runHolidayImportJob({
+        ...(parsed.data.date ? { today: parsed.data.date } : {}),
+        ...(parsed.data.force === true ? { force: true } : {}),
+      })
+      res.status(200).json({
+        today: result.today,
+        created: result.years.reduce((sum, y) => sum + y.created, 0),
+        notified: result.years.reduce((sum, y) => sum + y.notified, 0),
+        failed: result.years.reduce((sum, y) => sum + y.tenants.filter((t) => t.action === "error").length, 0),
+        years: result.years,
+      })
+    } catch (err) {
+      if (err instanceof CalendarImportNotMigratedError) {
+        res.status(200).json({ skipped: "calendar_import_not_migrated", detail: err.message })
+        return
+      }
       next(err)
     }
   },
