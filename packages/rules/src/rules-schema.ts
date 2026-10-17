@@ -40,13 +40,16 @@ const AttendanceBonusSchema = z.object({
 });
 
 // 加班觸發情境的閉集合，對應 DayContext.dayType：
-//   weekday_ot   ← workday      平日延長工時
-//   rest_day     ← rest_day     例假日出勤
-//   fixed_holiday ← fixed_holiday 國定/固定假日出勤
+//   weekday_ot    ← workday        平日延長工時
+//   rest_day      ← rest_day       休息日出勤 (一例一休的「休」;舊註解寫「例假日」是誤稱)
+//   fixed_holiday ← fixed_holiday  國定/固定假日出勤 (特休日被叫回 ptoWork 也走這條)
+//   regular_leave ← regular_leave  例假出勤 (一例一休的「例」;2026-10-17 新增)。設定裡沒有
+//                   這條規則時引擎採法定預設 (DEFAULT_REGULAR_LEAVE_RULE),**不會**退回休息日。
 export const OvertimeWhenSchema = z.enum([
   "weekday_ot",
   "rest_day",
   "fixed_holiday",
+  "regular_leave",
 ]);
 export type OvertimeWhen = z.infer<typeof OvertimeWhenSchema>;
 
@@ -85,13 +88,31 @@ const OvertimeRoundingSchema = z.object({
 });
 export type OvertimeRounding = z.infer<typeof OvertimeRoundingSchema>;
 
-// 加班用餐扣除：當日原始加班分鐘 > afterMinutes 時扣 deductMinutes (不低於 0)。
-// 整個物件給 null = 不扣;省略 = 用預設 {180, 30}。
+// 加班用餐扣除：當日「延長工時」> afterMinutes 時扣 deductMinutes (不低於 0)。
+//   mode  auto   只看時數 (舊行為:延長工時 > afterMinutes 就扣)。**物件沒帶 mode = auto**,
+//                舊 config 行為不變。
+//         opt_in 只有當天 DayContext.dinnerTaken === true (員工勾了「有用公司晚餐」)
+//                才扣;沒勾一律不扣 (2026-10-17)。
+//   afterMinutes / deductMinutes 省略時依 mode 補 (resolveOvertimeMealBreak):
+//         auto → 180 / 30 (舊預設);opt_in → 0 / 60。
+// 整個物件給 null = 不扣;整個省略 = 用舊預設 {auto, 180, 30} (舊 config 照舊)。
+// 新租戶建議值見 NEW_TENANT_OVERTIME_MEAL_BREAK ({opt_in, 0, 60})。
+export const OvertimeMealBreakModeSchema = z.enum(["auto", "opt_in"]);
+export type OvertimeMealBreakMode = z.infer<typeof OvertimeMealBreakModeSchema>;
+
 const OvertimeMealBreakSchema = z.object({
-  afterMinutes: z.number().int().nonnegative().default(180),
-  deductMinutes: z.number().int().nonnegative().default(30),
+  mode: OvertimeMealBreakModeSchema.optional(),
+  afterMinutes: z.number().int().nonnegative().optional(),
+  deductMinutes: z.number().int().nonnegative().optional(),
 });
 export type OvertimeMealBreak = z.infer<typeof OvertimeMealBreakSchema>;
+
+/** resolveOvertimeMealBreak 的輸出:三個欄位都補齊。 */
+export interface ResolvedOvertimeMealBreak {
+  mode: OvertimeMealBreakMode;
+  afterMinutes: number;
+  deductMinutes: number;
+}
 
 // 加班起算基準 (W9,2026-09-23):
 //   regularHours  超過 payroll.dailyRegularHours (法定 8 小時) 才算加班 (舊行為,預設)
@@ -295,10 +316,94 @@ export const DEFAULT_OVERTIME_ROUNDING: OvertimeRounding = {
   mode: "floor",
   minimumMinutes: 30,
 };
-export const DEFAULT_OVERTIME_MEAL_BREAK: OvertimeMealBreak = {
+export const DEFAULT_OVERTIME_MEAL_BREAK: ResolvedOvertimeMealBreak = {
+  mode: "auto",
   afterMinutes: 180,
   deductMinutes: 30,
 };
+/** mode=opt_in 而 afterMinutes/deductMinutes 省略時的補值 (勾了晚餐就扣 60 分)。 */
+export const DEFAULT_OPT_IN_MEAL_BREAK: ResolvedOvertimeMealBreak = {
+  mode: "opt_in",
+  afterMinutes: 0,
+  deductMinutes: 60,
+};
+
+/**
+ * 新租戶建議值 (2026-10-17 一例一休改版):加班照分鐘算、晚餐由員工勾選才扣 60 分。
+ * resolver 對「省略」仍回舊預設 (舊 config 行為不變);新租戶要吃到新值,得把這兩個常數
+ * 寫進 API 的 DEFAULT_RULE_CONFIG (apps/api/src/lib/default-rule-config.ts)。
+ */
+export const NEW_TENANT_OVERTIME_ROUNDING: OvertimeRounding = {
+  unitMinutes: 1,
+  mode: "floor",
+  minimumMinutes: 0,
+};
+export const NEW_TENANT_OVERTIME_MEAL_BREAK: ResolvedOvertimeMealBreak = { ...DEFAULT_OPT_IN_MEAL_BREAK };
+
+/** 客戶 Excel 的加班倍率 (勞基法 §24 / §39 / §40)。 */
+export const OT_RATE_FIRST_2H = 1.334;
+export const OT_RATE_NEXT = 1.666667;
+export const OT_RATE_REST_DAY_OVER_8H = 2.666667;
+
+type OvertimeRule = RuleConfig["overtime"]["rules"][number];
+
+/**
+ * 國定假日 / 特休出勤 / 例假共用的分段:前 8 小時 ×1 (加發一日,配 minChargeHours 8 =「做 1 給 8」),
+ * 第 9–10 小時 ×1.334,之後 ×1.666667。
+ */
+const HOLIDAY_TIERS: NonNullable<OvertimeRule["tiers"]> = [
+  { uptoHours: 8, multiplier: 1 },
+  { uptoHours: 10, multiplier: OT_RATE_FIRST_2H },
+  { multiplier: OT_RATE_NEXT },
+];
+
+/**
+ * 例假出勤的法定預設 (設定裡沒有 when='regular_leave' 時採用):不論時數加發 8 小時 ×1,
+ * 超過 8 小時同國定假日分段;另外引擎在 AttendanceDay.compDayOwed 標 1 (需補假一日)。
+ */
+export const DEFAULT_REGULAR_LEAVE_RULE: OvertimeRule = {
+  when: "regular_leave",
+  multiplier: 1,
+  minChargeHours: 8,
+  tiers: HOLIDAY_TIERS,
+};
+
+/**
+ * 法定倍率整套規則 (照客戶 Excel;新租戶 / 改版後正式租戶建議值):
+ *   平日   ≤2h ×1.334、之後 ×1.666667
+ *   休息日 ≤2h ×1.334、3–8h ×1.666667、9h 起 ×2.666667
+ *   國定假日 做 1 給 8 (8h ×1),8h 後前 2h ×1.334、之後 ×1.666667
+ *   例假   同國定假日 + 需補假 (compDayOwed)
+ */
+export const STATUTORY_OVERTIME_RULES: OvertimeRule[] = [
+  {
+    when: "weekday_ot",
+    multiplier: OT_RATE_FIRST_2H,
+    tiers: [{ uptoHours: 2, multiplier: OT_RATE_FIRST_2H }, { multiplier: OT_RATE_NEXT }],
+  },
+  {
+    when: "rest_day",
+    multiplier: OT_RATE_FIRST_2H,
+    tiers: [
+      { uptoHours: 2, multiplier: OT_RATE_FIRST_2H },
+      { uptoHours: 8, multiplier: OT_RATE_NEXT },
+      { multiplier: OT_RATE_REST_DAY_OVER_8H },
+    ],
+  },
+  { when: "fixed_holiday", multiplier: 1, minChargeHours: 8, tiers: HOLIDAY_TIERS },
+  DEFAULT_REGULAR_LEAVE_RULE,
+];
+
+/**
+ * 某情境適用的加班規則:設定裡有就用設定;regular_leave 沒設定 → DEFAULT_REGULAR_LEAVE_RULE
+ * (不退回休息日);其他情境沒設定 → undefined (維持舊行為:不計加班)。
+ * worktime-engine 的保底時數與 payroll-engine 的倍率都經這裡,兩邊不會分岔。
+ */
+export function resolveOvertimeRule(rules: RuleConfig, when: OvertimeWhen): OvertimeRule | undefined {
+  const found = rules.overtime.rules.find((r) => r.when === when);
+  if (found) return found;
+  return when === "regular_leave" ? DEFAULT_REGULAR_LEAVE_RULE : undefined;
+}
 export const DEFAULT_OVERTIME_DAILY_CAP_MINUTES = 240;
 export const DEFAULT_OVERTIME_MONTHLY_ALERT_HOURS: readonly number[] = [36, 40, 46];
 export const DEFAULT_HOURLY_WAGE_DIVISOR = 240;
@@ -310,10 +415,21 @@ export function resolveOvertimeRounding(rules: RuleConfig): OvertimeRounding {
   return rules.overtime.rounding ?? DEFAULT_OVERTIME_ROUNDING;
 }
 
-/** 加班用餐扣除 (省略 → 預設 {180, 30};明示 null → 不扣,回 null)。 */
-export function resolveOvertimeMealBreak(rules: RuleConfig): OvertimeMealBreak | null {
+/**
+ * 加班用餐扣除 (省略 → 舊預設 {auto, 180, 30};明示 null → 不扣,回 null)。
+ * 物件沒帶 mode → auto;afterMinutes/deductMinutes 沒帶 → 依 mode 補 (auto 180/30、opt_in 0/60)。
+ */
+export function resolveOvertimeMealBreak(rules: RuleConfig): ResolvedOvertimeMealBreak | null {
   const v = rules.overtime.mealBreak;
-  return v === undefined ? DEFAULT_OVERTIME_MEAL_BREAK : v;
+  if (v === null) return null;
+  if (v === undefined) return DEFAULT_OVERTIME_MEAL_BREAK;
+  const mode = v.mode ?? "auto";
+  const fallback = mode === "opt_in" ? DEFAULT_OPT_IN_MEAL_BREAK : DEFAULT_OVERTIME_MEAL_BREAK;
+  return {
+    mode,
+    afterMinutes: v.afterMinutes ?? fallback.afterMinutes,
+    deductMinutes: v.deductMinutes ?? fallback.deductMinutes,
+  };
 }
 
 /** 單日加班上限 (分);引擎不裁切,供 API 判異常。 */

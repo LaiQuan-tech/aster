@@ -982,7 +982,7 @@ describe("規則五 亞斯特 115-06 五份出勤表", () => {
         mode: "floor",
         minimumMinutes: 30,
       });
-      expect(resolveOvertimeMealBreak(legacy)).toEqual({ afterMinutes: 180, deductMinutes: 30 });
+      expect(resolveOvertimeMealBreak(legacy)).toEqual({ mode: "auto", afterMinutes: 180, deductMinutes: 30 });
       expect(resolveOvertimeDailyCapMinutes(legacy)).toBe(240);
       expect(resolveOvertimeMonthlyAlertHours(legacy)).toEqual([36, 40, 46]);
       expect(resolveHourlyWageDivisor(legacy)).toBe(240);

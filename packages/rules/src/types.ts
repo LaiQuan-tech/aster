@@ -40,15 +40,29 @@ export interface TimeInterval {
   to: Date | string;
 }
 
-/** 該日屬性 (例假/固定假由呼叫端判定，引擎不需國定假日表)。 */
-export type DayType = "workday" | "rest_day" | "fixed_holiday";
+/**
+ * 該日屬性 (由呼叫端依行事曆判定，引擎不需國定假日表):
+ *   workday        工作日
+ *   rest_day       休息日 (一例一休的「休」)
+ *   regular_leave  例假 (一例一休的「例」;出勤需補假,見 AttendanceDay.compDayOwed)
+ *   fixed_holiday  國定/固定假日
+ */
+export type DayType = "workday" | "rest_day" | "regular_leave" | "fixed_holiday";
 
 /** DayType → 加班規則 when 的對應 (閉集合;worktime 與 payroll 兩個引擎共用)。 */
 export const DAY_TYPE_TO_OVERTIME_WHEN: Record<DayType, OvertimeWhen> = {
   workday: "weekday_ot",
   rest_day: "rest_day",
+  regular_leave: "regular_leave",
   fixed_holiday: "fixed_holiday",
 };
+
+/**
+ * 這天的加班走哪條規則:特休日被叫回上班 (ptoWork) 計法同國定假日;其餘照 dayType。
+ */
+export function overtimeWhenFor(dayType: DayType, ptoWork?: boolean): OvertimeWhen {
+  return ptoWork ? "fixed_holiday" : DAY_TYPE_TO_OVERTIME_WHEN[dayType];
+}
 
 export interface DayContext {
   /** ISO date 'YYYY-MM-DD' — 用來定位這天 (純標籤，不參與工時運算)。 */
@@ -74,6 +88,16 @@ export interface DayContext {
    * （規則 1、2）一律扣「在班區間與午休的重疊」，切掉的休息段本來就不在區間裡，不會重複扣。
    */
   punchedBreaks?: boolean;
+  /**
+   * 當天有用公司晚餐 (員工勾選)。overtime.mealBreak.mode='opt_in' 時只有 true 才扣晚餐;
+   * mode='auto' (舊 config) 忽略此欄,照時數判斷。
+   */
+  dinnerTaken?: boolean;
+  /**
+   * 特休日被叫回上班。計法同國定假日 (整天工時都算加班、做 1 給 8、8h 後分段),
+   * 不論 dayType 是什麼。呼叫端負責把那天的特休假單撤掉/不扣假。
+   */
+  ptoWork?: boolean;
 }
 
 /**
@@ -126,6 +150,18 @@ export interface AttendanceDay {
    */
   lateExempt?: boolean;
   dayType: DayType;
+  /** 特休日被叫回上班 (DayContext.ptoWork 原樣帶出);payroll 據此改用國定假日規則。 */
+  ptoWork?: boolean;
+  /**
+   * 例假出勤需補假的天數 (regular_leave 且當日加班分鐘 > 0 → 1;其餘省略)。
+   * 只是標記,引擎不自動產生補假;payroll 會加總到 PayslipBreakdown.compDaysOwed。
+   */
+  compDayOwed?: number;
+  /**
+   * 這天已轉補休 (加班單選補休且核准) 的加班分鐘,由呼叫端帶入。payroll 從這天的加班費
+   * 扣除:先扣當日倍率最低的段 (同倍率先扣較早的段),最多扣到當日加班分鐘為止。
+   */
+  compTimeMinutes?: number;
 }
 
 /** 計薪方式 (與 RuleConfig.payroll.method 對齊)。 */
@@ -234,8 +270,13 @@ export interface PayslipBreakdown {
   attendanceDeduction: number;
   /** 定額補貼合計 (屬薪資所得,已計入 gross;見本介面開頭說明)。 */
   allowances: number;
-  /** 轉補休的加班時數 (compTime=true 的規則;不發現金,僅供 ledger)。 */
+  /**
+   * 轉補休的加班分鐘 (不發現金,僅供 ledger):compTime=true 規則的整日分鐘
+   * + 各日 AttendanceDay.compTimeMinutes 實際扣掉的分鐘。
+   */
   compTimeMinutes: number;
+  /** 例假出勤需補假的天數合計 (Σ AttendanceDay.compDayOwed);只有 > 0 時才有這個欄位。 */
+  compDaysOwed?: number;
   /** 應發合計。 */
   gross: number;
   /** 加班費按加班別×倍率分段的逐段明細 (供薪資明細表逐列呈現)。 */

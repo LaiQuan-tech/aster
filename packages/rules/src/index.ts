@@ -12,6 +12,19 @@ export {
   DEFAULT_REQUIRE_ANOMALY_ACK,
   resolveOvertimeRounding,
   resolveOvertimeMealBreak,
+  // 2026-10-17 一例一休:例假、晚餐勾選、法定倍率整套
+  OvertimeMealBreakModeSchema,
+  DEFAULT_OPT_IN_MEAL_BREAK,
+  NEW_TENANT_OVERTIME_ROUNDING,
+  NEW_TENANT_OVERTIME_MEAL_BREAK,
+  OT_RATE_FIRST_2H,
+  OT_RATE_NEXT,
+  OT_RATE_REST_DAY_OVER_8H,
+  DEFAULT_REGULAR_LEAVE_RULE,
+  STATUTORY_OVERTIME_RULES,
+  resolveOvertimeRule,
+  type OvertimeMealBreakMode,
+  type ResolvedOvertimeMealBreak,
   resolveOvertimeDailyCapMinutes,
   resolveOvertimeMonthlyAlertHours,
   resolveHourlyWageDivisor,
@@ -56,7 +69,15 @@ export {
 } from "./rules-schema.js";
 
 export * from "./types.js";
-export { computeAttendanceDay, applyOvertimePipeline, unscheduledShiftDef, flexShiftDef } from "./worktime-engine.js";
+export {
+  computeAttendanceDay,
+  applyOvertimePipeline,
+  overtimeMealDeductionMinutes,
+  capCountableMinutes,
+  unscheduledShiftDef,
+  flexShiftDef,
+  type OvertimeDayFlags,
+} from "./worktime-engine.js";
 export {
   NOON_MINUTES,
   hhmmToMinutesOrNull,

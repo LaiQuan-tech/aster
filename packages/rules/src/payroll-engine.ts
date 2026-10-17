@@ -35,11 +35,12 @@ import { nhiEmployeePremium } from "./tw-tax.js";
 import {
   resolveHourlyWageDivisor,
   resolveLateEarlyDeductionEnabled,
+  resolveOvertimeRule,
   type OvertimeWhen,
   type RuleConfig,
 } from "./rules-schema.js";
 import {
-  DAY_TYPE_TO_OVERTIME_WHEN,
+  overtimeWhenFor,
   type AttendanceDay,
   type OvertimeSegment,
   type PayrollAdjustment,
@@ -188,10 +189,13 @@ export function computePayslip(
     }
   };
 
+  let compDaysOwed = 0;
   for (const day of days) {
+    if ((day.compDayOwed ?? 0) > 0) compDaysOwed += day.compDayOwed!;
     if (day.overtimeMinutes <= 0) continue;
-    const when = DAY_TYPE_TO_OVERTIME_WHEN[day.dayType];
-    const rule = rules.overtime.rules.find((r) => r.when === when);
+    // 特休出勤 (ptoWork) 走國定假日規則;例假沒設定規則時 resolveOvertimeRule 給法定預設。
+    const when = overtimeWhenFor(day.dayType, day.ptoWork);
+    const rule = resolveOvertimeRule(rules, when);
     if (!rule) continue; // 無對應規則 → 不計加班(亦不補休)
     if (rule.compTime) {
       compTimeMinutes += day.overtimeMinutes; // 轉補休,不發現金
@@ -199,34 +203,52 @@ export function computePayslip(
     }
     const hours = day.overtimeMinutes / 60;
 
-    // 固定時薪制(若設定)覆蓋一切倍率設定。
-    if (flatHourly !== undefined) {
-      const amount = hours * flatHourly;
-      overtimePay += amount;
-      addSegment(when, 1, hours, amount);
-      continue;
+    // 先把當日加班切成 (倍率, 時數) 的段,再扣補休,最後才算錢。
+    //   固定時薪制 (若設定) 覆蓋一切倍率:一段、倍率記 1、單價 flatHourly。
+    //   無 tiers:一段單一倍率。
+    //   有 tiers:累進分段,uptoHours 是「累計」上限,最後一段可省略代表無上限。
+    const segs: { multiplier: number; hours: number }[] = [];
+    if (flatHourly !== undefined || !rule.tiers) {
+      segs.push({ multiplier: flatHourly !== undefined ? 1 : rule.multiplier, hours });
+    } else {
+      let remaining = hours;
+      let consumed = 0;
+      for (const tier of rule.tiers) {
+        if (remaining <= 0) break;
+        const cap = tier.uptoHours ?? Infinity;
+        const segHours = Math.min(remaining, cap - consumed);
+        if (segHours <= 0) continue; // 這段的額度已被前面用完
+        segs.push({ multiplier: tier.multiplier, hours: segHours });
+        remaining -= segHours;
+        consumed += segHours;
+      }
     }
 
-    if (!rule.tiers) {
-      const amount = hours * hourlyWage * rule.multiplier;
-      overtimePay += amount;
-      addSegment(when, rule.multiplier, hours, amount);
-      continue;
+    // 已轉補休的分鐘 (加班單選補休且核准) 不發現金:從當日倍率最低的段先扣
+    // (同倍率先扣較早的段),最多扣到當日加班時數。對員工最有利——高倍率的段留著發現金。
+    const compMinutesWanted = Math.max(0, day.compTimeMinutes ?? 0);
+    if (compMinutesWanted > 0) {
+      let compLeft = Math.min(compMinutesWanted / 60, hours);
+      compTimeMinutes += Math.round(compLeft * 60);
+      const order = segs
+        .map((seg, i) => ({ seg, i }))
+        .sort((a, b) => a.seg.multiplier - b.seg.multiplier || a.i - b.i);
+      for (const { seg } of order) {
+        if (compLeft <= 0) break;
+        const take = Math.min(seg.hours, compLeft);
+        seg.hours -= take;
+        compLeft -= take;
+      }
     }
 
-    // 累進分段:uptoHours 是「累計」上限,最後一段可省略代表無上限。
-    let remaining = hours;
-    let consumed = 0;
-    for (const tier of rule.tiers) {
-      if (remaining <= 0) break;
-      const cap = tier.uptoHours ?? Infinity;
-      const segHours = Math.min(remaining, cap - consumed);
-      if (segHours <= 0) continue; // 這段的額度已被前面用完
-      const amount = segHours * hourlyWage * tier.multiplier;
+    for (const seg of segs) {
+      if (seg.hours <= 1e-9) continue;
+      const amount =
+        flatHourly !== undefined
+          ? seg.hours * flatHourly
+          : seg.hours * hourlyWage * seg.multiplier;
       overtimePay += amount;
-      addSegment(when, tier.multiplier, segHours, amount);
-      remaining -= segHours;
-      consumed += segHours;
+      addSegment(when, seg.multiplier, seg.hours, amount);
     }
   }
   overtimePay = round(overtimePay);
@@ -413,6 +435,7 @@ export function computePayslip(
     attendanceDeduction,
     allowances: allowancesTotal,
     compTimeMinutes,
+    ...(compDaysOwed > 0 ? { compDaysOwed } : {}),
     gross,
     overtimeSegments,
     laborInsurance,
