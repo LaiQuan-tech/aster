@@ -21,3 +21,17 @@ describe("payrollGateText（薪資執行前閘門 409）", () => {
     expect(payrollGateText("x", String)).toBeNull();
   });
 });
+
+describe("payrollGateText — beyond_cap_sheet_not_approved", () => {
+  it("列出人名、說明要先重新核准月表", () => {
+    const err = Object.assign(new Error("[409] beyond_cap_sheet_not_approved"), {
+      status: 409,
+      code: "beyond_cap_sheet_not_approved",
+      body: { settlements: [{ employeeId: "e1", status: "draft", minutes: 0 }, { employeeId: "e1", status: "paid", minutes: 60 }] },
+    });
+    const text = payrollGateText(err, (id) => (id === "e1" ? "王小明" : id)) ?? "";
+    expect(text).toContain("重新核准出勤月表");
+    expect(text).toContain("王小明");
+    expect(text.match(/王小明/g)).toHaveLength(1);
+  });
+});

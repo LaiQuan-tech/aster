@@ -120,6 +120,9 @@ function isHrRole(role: string | undefined): boolean {
  * 日級異常 → 409 `{ error: "anomalies_unacknowledged", period, count, anomalies: [{ employeeId, sheetId, date,
  * code, message }] }`，一張都不產生（services/attendance-sheets.ts unacknowledgedErrorsForPeriod）。
  *
+ * 超額另計防重複給付（2026-10-17）：月表未核准、卻有 source='beyond_cap' 的另計表草稿／已付款列 → 409
+ * `{ error: "beyond_cap_sheet_not_approved", period, message, count, settlements: [{ employeeId, status, minutes }] }`。
+ *
  * Returns { generated: N, skipped: string[], skippedDetails, missingInsuredSalary, warnings }
  * (skipped = employee ids skipped — payslip already finalized, or the engine
  * could not derive a wage (no hourly_wage and no base salary); skippedDetails
@@ -252,6 +255,46 @@ payrollRouter.post(
         if (pending.length > 0) {
           res.status(409).json({ error: "anomalies_unacknowledged", period, count: pending.length, anomalies: pending })
           return
+        }
+      }
+
+      // --- 超額另計防重複給付（2026-10-17 驗收修正 N1）------------------------------------------
+      // 月表沒核准（不是 approved/locked、沒有快照）的人，薪資改讀 attendance_days 的**全額**加班；
+      // 此時若該期還有 source='beyond_cap' 的另計表草稿或已付款列，超額那段就會兩邊都付 → 409，一張都不產生。
+      // 處理：重新核准月表（薪資改讀扣掉超額的快照，另計表依新分鐘重算）。已定稿的人不擋。
+      {
+        const pendingIds = unapprovedSheets.filter((id) => !finalized.has(id))
+        if (pendingIds.length > 0) {
+          const { data: bcData, error: bcErr } = await supabaseAdmin
+            .from("overtime_settlements")
+            .select("employee_id, status, minutes")
+            .eq("tenant_id", tenantId)
+            .eq("period", period)
+            .eq("source", "beyond_cap")
+            .in("employee_id", pendingIds)
+            .in("status", ["draft", "paid"])
+          if (bcErr) {
+            if (!isMissingTableError(bcErr)) {
+              next(new Error(`POST /payroll/run (overtime_settlements): ${bcErr.message}`))
+              return
+            }
+            warnSchemaGapOnce("overtime_settlements", bcErr)
+          } else if ((bcData ?? []).length > 0) {
+            const settlements = (bcData ?? []).map((r) => ({
+              employeeId: r.employee_id as string,
+              status: r.status as string,
+              minutes: Number(r.minutes) || 0,
+            }))
+            res.status(409).json({
+              error: "beyond_cap_sheet_not_approved",
+              period,
+              message:
+                "這些員工本期有「超過月加班上限另行給付」的紀錄，但出勤月表尚未核准——薪資會改用全額加班計算，與另計表重複給付。請先重新核准出勤月表再執行薪資。",
+              count: settlements.length,
+              settlements,
+            })
+            return
+          }
         }
       }
 

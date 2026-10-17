@@ -12,10 +12,14 @@ describe("hasRealAnomaly — 當日旗標不算異常", () => {
     expect(hasRealAnomaly({ ptoWork: true, compDayOwed: 1, compTimeMinutes: 60, dinnerTaken: false, dinnerSource: "manual" })).toBe(false);
   });
 
-  it("未配對打卡、單日加班上限、wfh 等仍是異常", () => {
+  it("在家工作認列（新列 flags.wfh、舊列頂層 wfh）不算異常", () => {
+    expect(hasRealAnomaly({ flags: { wfh: true } })).toBe(false);
+    expect(hasRealAnomaly({ wfh: true })).toBe(false);
+  });
+
+  it("未配對打卡、單日加班上限仍是異常", () => {
     expect(hasRealAnomaly({ unpairedPunches: 1, flags: { dinnerTaken: true } })).toBe(true);
     expect(hasRealAnomaly({ overtimeCapExceeded: { minutes: 300, capMinutes: 240 } })).toBe(true);
-    expect(hasRealAnomaly({ wfh: true })).toBe(true);
   });
 
   it("CSV 匯出只留真正的異常鍵", () => {

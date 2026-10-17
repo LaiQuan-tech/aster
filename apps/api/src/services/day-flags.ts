@@ -1,7 +1,7 @@
 /**
  * attendance_days.anomaly 裡的「當日旗標」（2026-10-17 驗收修正 S4）。
  *
- * anomaly jsonb 原本只放真正的異常（未配對打卡、單日加班超過上限、wfh 留痕…），結算頁
+ * anomaly jsonb 原本只放真正的異常（未配對打卡、單日加班超過上限…），結算頁
  * （admin/attendance-settlement）把「anomaly 非空」當成異常。一例一休改版把計薪用的旗標也寫進
  * anomaly 頂層，結果每個例假出勤／有勾晚餐／轉補休的日子都被算成異常。
  *
@@ -12,7 +12,7 @@
  */
 
 /** 只是旗標、不是異常的鍵（舊列寫在 anomaly 頂層；新列寫在 anomaly.flags）。 */
-export const DAY_FLAG_KEYS = ["ptoWork", "compDayOwed", "compTimeMinutes", "dinnerTaken", "dinnerSource"] as const
+export const DAY_FLAG_KEYS = ["ptoWork", "compDayOwed", "compTimeMinutes", "dinnerTaken", "dinnerSource", "wfh"] as const
 
 export interface DayFlags {
   /** 特休日出勤（計薪同國定假日）。 */
@@ -24,6 +24,8 @@ export interface DayFlags {
   /** 結算當時的晚餐最終值（手動值另在 attendance_days.dinner_taken 欄位）。 */
   dinnerTaken?: boolean
   dinnerSource?: "manual" | "punch"
+  /** 在家工作申請單認列出勤（M2；當天沒打卡、以班表淨工時認列）。 */
+  wfh?: true
 }
 
 function record(v: unknown): Record<string, unknown> | null {
@@ -39,6 +41,7 @@ export function dayFlagsOf(anomaly: unknown): DayFlags {
   if (src.ptoWork === true) out.ptoWork = true
   if (typeof src.compDayOwed === "number" && src.compDayOwed > 0) out.compDayOwed = src.compDayOwed
   if (typeof src.compTimeMinutes === "number" && src.compTimeMinutes > 0) out.compTimeMinutes = src.compTimeMinutes
+  if (src.wfh === true) out.wfh = true
   if (typeof src.dinnerTaken === "boolean") {
     out.dinnerTaken = src.dinnerTaken
     out.dinnerSource = src.dinnerSource === "manual" ? "manual" : "punch"

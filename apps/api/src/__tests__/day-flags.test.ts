@@ -23,13 +23,16 @@ describe("dayFlagsOf／hasRealAnomaly（S4）", () => {
     expect(dayFlagsOf({ flags: { dinnerTaken: false } })).toEqual({ dinnerTaken: false, dinnerSource: "punch" })
   })
 
-  it("只有旗標不算異常；未配對打卡／單日上限／wfh 才算", () => {
+  it("只有旗標（含在家工作 wfh，新舊兩種形狀）不算異常；未配對打卡／單日上限才算", () => {
+    expect(hasRealAnomaly({ flags: { wfh: true } })).toBe(false)
+    expect(hasRealAnomaly({ wfh: true })).toBe(false)
+    expect(dayFlagsOf({ wfh: true })).toEqual({ wfh: true })
+    expect(dayFlagsOf({ flags: { wfh: true } })).toEqual({ wfh: true })
     expect(hasRealAnomaly({ flags: { ptoWork: true } })).toBe(false)
     expect(hasRealAnomaly({ compDayOwed: 1, dinnerTaken: true, dinnerSource: "punch" })).toBe(false)
     expect(hasRealAnomaly(null)).toBe(false)
     expect(hasRealAnomaly({ unpairedPunches: 1, flags: { ptoWork: true } })).toBe(true)
     expect(hasRealAnomaly({ overtimeCapExceeded: { minutes: 300, capMinutes: 240 } })).toBe(true)
-    expect(hasRealAnomaly({ wfh: true })).toBe(true)
   })
 
   it("payroll-inputs 從 flags 讀回 AttendanceDay 旗標（含 dinnerTaken）", () => {

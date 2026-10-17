@@ -392,14 +392,16 @@ export function approveAttendanceSheet(id: string) {
 }
 
 export function returnAttendanceSheet(id: string, reason: string) {
-  return apiFetch<{ id: string; status: SheetStatus; returnReason: string | null }>(
+  // warnings：從已核准退回時，超額另計已付款的警示（舊 API 不回 → undefined）。
+  return apiFetch<{ id: string; status: SheetStatus; returnReason: string | null; warnings?: string[] }>(
     `/attendance-sheets/${id}/return`,
     { method: "POST", body: JSON.stringify({ reason }) },
   );
 }
 
 export function reopenAttendanceSheet(id: string, reason: string) {
-  return apiFetch<{ id: string; status: SheetStatus }>(`/attendance-sheets/${id}/reopen`, {
+  // warnings：超額另計已付款的警示（草稿會被作廢、待重新核准重算）；舊 API 不回 → undefined。
+  return apiFetch<{ id: string; status: SheetStatus; warnings?: string[] }>(`/attendance-sheets/${id}/reopen`, {
     method: "POST",
     body: JSON.stringify({ reason }),
   });

@@ -9,7 +9,7 @@ import { isImportKind, templateFileName, type ImportKind } from "../services/imp
 import { parseImportWorkbook } from "../services/imports/parse.js"
 import { runImport } from "../services/imports/run.js"
 import { buildImportTemplate } from "../services/imports/template.js"
-import { CalendarNotMigratedError } from "../services/imports/writers.js"
+import { CalendarNotMigratedError, CalendarSchemaNotReadyError } from "../services/imports/writers.js"
 
 /**
  * 批次匯入（Excel 範本下載 → 管理員填寫 → 上傳）——HR only。契約見
@@ -145,6 +145,10 @@ importsRouter.post(
     } catch (err) {
       if (err instanceof CalendarNotMigratedError) {
         res.status(503).json({ error: "calendar_not_migrated", detail: err.message })
+        return
+      }
+      if (err instanceof CalendarSchemaNotReadyError) {
+        res.status(409).json({ error: "schema_not_ready", detail: err.message })
         return
       }
       if (err instanceof AccountError) {

@@ -45,7 +45,7 @@ import { dinnerPunchByDate, effectiveDinnerTaken, pairPunchesTz, type PairedDay 
  *     plus the leave's time windows on that day (2026-10-11：已核准請假覆蓋的時段
  *     不算遲到／早退——引擎的 ctx.leaveIntervals；pending 不抵),
  *   • approved 在家工作（kind='wfh'）單覆蓋到的日子（M2：沒打卡的那天仍以班表
- *     淨工時認列出勤，遲到/早退歸零，anomaly.wfh 留痕），
+ *     淨工時認列出勤，遲到/早退歸零，anomaly.flags.wfh 留痕），
  *   • the rule_config version in effect for the settled month (falling back to
  *     the default template),
  * then calls computeAttendanceDay and upserts the result into attendance_days.
@@ -862,12 +862,13 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     // 則法定正常工時）認列出勤，遲到／早退歸零（在家沒有「應到班時間」），加班仍是
     // 0（要加班請另外送加班單）。有打卡就照打卡算，不動。例假／固定假不認列。
     const wfh = wfhByKey.has(key)
+    let wfhCredited = false
     const punchedAny = !!day && day.pairs.length > 0
     if (wfh && !punchedAny && dayType === "workday") {
       workedMinutes = wfhWorkedMinutes(scheduledShift, workDate, tz, dayRegularMinutes)
       lateMinutes = 0
       earlyLeaveMinutes = 0
-      anomaly.wfh = true
+      wfhCredited = true
     }
 
     // 單日加班上限只適用平日（與月表 overtime_over_daily_cap 同口徑）：休息日／例假／國定假日／特休出勤
@@ -878,6 +879,8 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     // 一例一休（2026-10-17）：計薪用的當日旗標不是異常，記在 anomaly.flags 子鍵（attendance_days 沒有專屬欄位）；
     // 讀取一律走 services/day-flags.ts dayFlagsOf（payroll-inputs、月表、合規）。結算頁「異常」判斷排除 flags。
     const flags: Record<string, unknown> = {}
+    // 在家工作認列（M2）也是留痕不是異常（2026-10-17 驗收修正：舊列在頂層 anomaly.wfh，dayFlagsOf 兩種都讀）。
+    if (wfhCredited) flags.wfh = true
     if (result.ptoWork) flags.ptoWork = true
     if (result.compDayOwed) flags.compDayOwed = result.compDayOwed
     // 晚餐最終值（月表顯示「晚餐」用；手動值本身在 dinner_taken 欄位，不在這裡寫）。

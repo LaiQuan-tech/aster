@@ -7,6 +7,7 @@ import { asDayTypeOrWorkday, loadDayTypeResolver } from "./day-type.js"
 import { coveredByRequests, loadApprovedAbsences, shiftBoundsOn } from "./absence-cover.js"
 import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { capCountableMinutes, type DayType, type RuleConfig, type ShiftDef } from "@hr/rules"
+import { dayFlagsOf } from "./day-flags.js"
 import { complianceFindings, sevenDayLookbackFrom, type ComplianceFindingType } from "./compliance.js"
 import { loadRuleConfigFor } from "./payroll-inputs.js"
 import { managerOfEmployee } from "../middleware/scope.js"
@@ -415,7 +416,7 @@ export async function detectAnomalies(
   // 班別解析走 services/employee-shifts.ts（與結算／月表／打卡遲到判斷同一支）：排班列（班表功能 2026-10-11
   // 已移除，只剩歷史資料）→ 工作日的個人預設班別（2026-10-13）。日屬性用 attendance_days 自己的 day_type。
   // 舊排班列（含 shift_id 空／班別已刪）照舊：有列＋工時 0 就算。個人預設班別（沒有排班列的人）另外排除：
-  // 請假日（leave_minutes > 0）、在家工作申請單認列的日子（anomaly.wfh）、班別整段被已核准在家／出差單覆蓋的日子。
+  // 請假日（leave_minutes > 0）、在家工作申請單認列的日子（anomaly.flags.wfh，舊列在頂層）、班別整段被已核准在家／出差單覆蓋的日子。
   // 沒打卡的預設班別工作日由 settleAttendance 寫出 worked=0 的列（見 settlement.ts），所以真正沒來的日子抓得到。
   const resolver = await loadShiftResolver({ tenantId, from, to })
   const defaultEmpIds = resolver.employeesWithDefault()
@@ -428,7 +429,7 @@ export async function detectAnomalies(
     const resolved = resolver.forDay(d.employee_id, d.work_date, dayType)
     if (resolved.source !== "default" || !resolved.shift || !tz) return false
     if ((d.leave_minutes ?? 0) > 0) return false
-    if (d.anomaly && typeof d.anomaly === "object" && (d.anomaly as { wfh?: unknown }).wfh === true) return false
+    if (dayFlagsOf(d.anomaly).wfh) return false
     return !coveredByRequests(absences, d.employee_id, d.work_date, resolved.shift, tz)
   }
 

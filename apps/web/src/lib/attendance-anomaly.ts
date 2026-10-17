@@ -3,9 +3,9 @@
  *
  * attendance_days.anomaly 除了真正的異常（未配對打卡、單日加班超過上限…），也帶計薪用的當日旗標：
  * 新列在子鍵 `flags`，改版前已結算、尚未重算的舊列在頂層（ptoWork／compDayOwed／compTimeMinutes／
- * dinnerTaken／dinnerSource）。這些都不算異常。鍵名與 apps/api/src/services/day-flags.ts 同步。
+ * dinnerTaken／dinnerSource／wfh 在家工作認列）。這些都不算異常。鍵名與 apps/api/src/services/day-flags.ts 同步。
  */
-export const DAY_FLAG_KEYS = ["ptoWork", "compDayOwed", "compTimeMinutes", "dinnerTaken", "dinnerSource"] as const;
+export const DAY_FLAG_KEYS = ["ptoWork", "compDayOwed", "compTimeMinutes", "dinnerTaken", "dinnerSource", "wfh"] as const;
 
 const NON_ANOMALY_KEYS = new Set<string>(["flags", ...DAY_FLAG_KEYS]);
 

@@ -133,4 +133,23 @@ describe("settleAttendance — 一例一休日別", () => {
     expect((row(EMP, "2026-09-09").anomaly as Record<string, unknown>).overtimeCapExceeded).toEqual({ minutes: 300, capMinutes: 240 })
     expect(hasRealAnomaly(row(EMP, "2026-09-09").anomaly)).toBe(true)
   })
+
+  it("在家工作單認列（沒打卡的平日）→ anomaly 只有 flags.wfh，不算異常", async () => {
+    fake.db.leave_requests.push({
+      id: "r-wfh",
+      tenant_id: TENANT_ID,
+      employee_id: EMP,
+      kind: "wfh",
+      status: "approved",
+      leave_type_id: null,
+      start_at: at("2026-09-10", "09:00"),
+      end_at: at("2026-09-10", "18:00"),
+      hours: "8",
+      deleted_at: null,
+    })
+    await settleAttendance({ tenantId: TENANT_ID, from: "2026-09-10", to: "2026-09-10" })
+    expect(row(EMP, "2026-09-10").worked_minutes).toBe(480)
+    expect(row(EMP, "2026-09-10").anomaly).toEqual({ flags: { wfh: true } })
+    expect(hasRealAnomaly(row(EMP, "2026-09-10").anomaly)).toBe(false)
+  })
 })

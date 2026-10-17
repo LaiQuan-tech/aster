@@ -106,5 +106,12 @@ WHERE c.id = t.id
 --     要先重新開放才能重算，或維持原數字（已發薪）並用下月加減項更正。
 -- SELECT DISTINCT tenant_id, to_char(work_date, 'YYYY-MM') AS period FROM public.attendance_days
 --   WHERE day_type = 'regular_leave' ORDER BY 1, 2;   -- ← 在 R1 之前跑
+--     **已核准月表的快照也要處理**：approved／locked 的月表，薪資執行讀的是快照 attendance_sheets.snapshot
+--     的 payrollDays（核准當下凍結），R1 改不到它——快照裡含 regular_leave 的月表要「退回 → 重算 → 再核准」，
+--     薪資才會照休息日算（locked 的要先重新開放該月）。下面列出這些月表（同樣在 R1 之前跑）：
+-- SELECT tenant_id, employee_id, period, status FROM public.attendance_sheets
+--   WHERE status IN ('approved', 'locked')
+--     AND jsonb_path_exists(snapshot, '$.payrollDays[*] ? (@.dayType == "regular_leave")')
+--   ORDER BY 1, 3, 2;
 --
 -- B 段的週末國定假日本日修正沒有自動還原（舊值是錯的，同一節日算兩天假）；必要時在後台行事曆頁手動改。

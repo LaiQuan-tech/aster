@@ -178,6 +178,24 @@ export class CalendarNotMigratedError extends Error {
   }
 }
 
+/**
+ * tenant_calendar_days 的日別 CHECK 還不認得 'regular_leave'（migration 0069／sql 0059 未套）——
+ * route 對應 409 schema_not_ready（2026-10-17 驗收修正 S3：不要 500）。
+ */
+export class CalendarSchemaNotReadyError extends Error {
+  readonly code = "schema_not_ready"
+  constructor() {
+    super("tenant_calendar_days.day_type 尚不接受 regular_leave（例假）：請先套用 docs/套用-2026-10-17-一例一休日別.sql（migration 0069）")
+    this.name = "CalendarSchemaNotReadyError"
+  }
+}
+
+/** PostgREST 錯誤是不是「日別 CHECK 違反」（23514 + tenant_calendar_days_day_type_chk）。 */
+export function isDayTypeCheckViolation(err: { code?: string | null; message?: string | null } | null | undefined): boolean {
+  if (!err) return false
+  return err.code === "23514" && /tenant_calendar_days_day_type_chk/.test(err.message ?? "")
+}
+
 export interface CalendarPlanRow {
   date: string
   day_type: "regular_leave" | "rest_day" | "fixed_holiday"
@@ -312,13 +330,19 @@ export async function generateTenantCalendar(
     const { error } = await supabaseAdmin
       .from("tenant_calendar_days")
       .upsert(plan.weekendRows.map(toDb), { onConflict: "tenant_id,date" })
-    if (error) throw new Error(`${context} (weekends): ${error.message}`)
+    if (error) {
+      if (isDayTypeCheckViolation(error)) throw new CalendarSchemaNotReadyError()
+      throw new Error(`${context} (weekends): ${error.message}`)
+    }
   }
   if (plan.holidayRows.length > 0) {
     const { error } = await supabaseAdmin
       .from("tenant_calendar_days")
       .upsert(plan.holidayRows.map(toDb), { onConflict: "tenant_id,date" })
-    if (error) throw new Error(`${context} (holidays): ${error.message}`)
+    if (error) {
+      if (isDayTypeCheckViolation(error)) throw new CalendarSchemaNotReadyError()
+      throw new Error(`${context} (holidays): ${error.message}`)
+    }
   }
 
   let pruned: number | undefined

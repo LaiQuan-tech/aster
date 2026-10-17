@@ -155,9 +155,10 @@ export default function AttendanceSheetDetailPage() {
     setError(null);
     setMessage(null);
     try {
-      await returnAttendanceSheet(sheet.id, reason.trim());
-      await load(); // return 只回 {id,status,returnReason}，重新 GET 換回完整 SheetView
-      setMessage("已退回");
+      const res = await returnAttendanceSheet(sheet.id, reason.trim());
+      await load(); // return 只回 {id,status,returnReason,warnings}，重新 GET 換回完整 SheetView
+      const warnings = res?.warnings ?? [];
+      setMessage(warnings.length > 0 ? `已退回。${warnings.join("；")}` : "已退回");
     } catch (err) {
       setError(friendlyError(err, "退回失敗"));
     } finally {
@@ -173,9 +174,10 @@ export default function AttendanceSheetDetailPage() {
     setError(null);
     setMessage(null);
     try {
-      await reopenAttendanceSheet(sheet.id, reason.trim());
-      await load(); // reopen 只回 {id,status}，重新 GET 換回完整 SheetView
-      setMessage("已重開為草稿");
+      const res = await reopenAttendanceSheet(sheet.id, reason.trim());
+      await load(); // reopen 只回 {id,status,warnings}，重新 GET 換回完整 SheetView
+      const warnings = res?.warnings ?? [];
+      setMessage(warnings.length > 0 ? `已重開為草稿。${warnings.join("；")}` : "已重開為草稿");
     } catch (err) {
       setError(friendlyError(err, "重開失敗"));
     } finally {

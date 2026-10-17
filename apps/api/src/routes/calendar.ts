@@ -5,7 +5,12 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { isMissingTableError } from "../lib/schema-compat.js"
-import { CalendarNotMigratedError, generateTenantCalendar } from "../services/imports/writers.js"
+import {
+  CalendarNotMigratedError,
+  CalendarSchemaNotReadyError,
+  generateTenantCalendar,
+  isDayTypeCheckViolation,
+} from "../services/imports/writers.js"
 
 export const calendarRouter = Router()
 
@@ -64,6 +69,11 @@ const generateSchema = z.object({
 })
 
 const SELECT_COLS = "id, tenant_id, date, day_type, label, source, created_at"
+
+/** 409 schema_not_ready：日別 CHECK 還不認得 regular_leave（需先套 migration 0069）。 */
+function schemaNotReady(res: Response, detail: string): void {
+  res.status(409).json({ error: "schema_not_ready", detail })
+}
 
 function notMigrated(res: Response, err: { code?: string | null; message?: string | null }): boolean {
   if (!isMissingTableError(err)) return false
@@ -133,6 +143,10 @@ calendarRouter.put(
         .select(SELECT_COLS)
       if (error) {
         if (notMigrated(res, error)) return
+        if (isDayTypeCheckViolation(error)) {
+          schemaNotReady(res, new CalendarSchemaNotReadyError().message)
+          return
+        }
         next(new Error(`PUT /calendar/days: ${error.message}`))
         return
       }
@@ -166,6 +180,10 @@ calendarRouter.post(
     } catch (err) {
       if (err instanceof CalendarNotMigratedError) {
         res.status(503).json({ error: "calendar_not_migrated", detail: err.message })
+        return
+      }
+      if (err instanceof CalendarSchemaNotReadyError) {
+        schemaNotReady(res, err.message)
         return
       }
       next(err)

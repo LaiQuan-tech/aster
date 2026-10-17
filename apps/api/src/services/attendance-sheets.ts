@@ -2653,7 +2653,7 @@ async function upsertBeyondCapSettlement(
     if ((existing.minutes as number) === minutes) return warnings
     const { error } = await supabaseAdmin
       .from("overtime_settlements")
-      .update({ minutes, amount: minutes > 0 ? computed.amount : 0, sheet_id: sheet.id })
+      .update({ minutes, amount: minutes > 0 ? computed.amount : 0, sheet_id: sheet.id, note })
       .eq("tenant_id", tenantId)
       .eq("id", existing.id as string)
     if (error) throw new Error(error.message)
@@ -2662,6 +2662,67 @@ async function upsertBeyondCapSettlement(
     logger.error(
       { err: err instanceof Error ? err.message : err, sheetId: sheet.id, period: sheet.period },
       "attendance-sheets: 超額另計寫入失敗（核准不回滾）",
+    )
+  }
+  return warnings
+}
+
+/** 另計表作廢註記（月表退回／重開後，待重新核准時 upsertBeyondCapSettlement 重算分鐘與金額）。 */
+export const BEYOND_CAP_VOID_NOTE = "月表已重開，待重新核准後重算"
+
+/**
+ * 月表從 approved 退回／重開時，該員該期 source='beyond_cap' 的另計表（2026-10-17 驗收修正 N1：避免重複給付）：
+ *   • draft → minutes、amount 清成 0，note 註記 BEYOND_CAP_VOID_NOTE（不刪列：DB 禁硬刪、也留稽核軌跡）。
+ *     月表重開後薪資會改讀 attendance_days 全額，另計表若還留著分鐘就是兩邊都付。重新核准時分鐘不同 → 重算。
+ *   • paid → 不動（DB trigger 也擋），回傳警示：已另行付款的超額，重新核准前薪資若照全額算就會重複給付。
+ * 永不讓退回／重開失敗：表不存在或寫入出錯只記 log。回傳要給 HR 的提示。
+ */
+async function voidBeyondCapSettlement(tenantId: string, sheet: SheetRow, actorEmpId: string): Promise<string[]> {
+  const warnings: string[] = []
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("overtime_settlements")
+      .select("id, status, minutes, amount")
+      .eq("tenant_id", tenantId)
+      .eq("employee_id", sheet.employee_id)
+      .eq("period", sheet.period)
+      .eq("source", "beyond_cap")
+    if (error) {
+      if (isMissingTableError(error)) {
+        warnSchemaGapOnce("overtime_settlements", error)
+        return warnings
+      }
+      throw new Error(error.message)
+    }
+    for (const row of (data ?? []) as Array<{ id: string; status: string; minutes: number; amount: number | string | null }>) {
+      if (row.status === "paid") {
+        warnings.push(
+          `本月超過加班上限的 ${fmtHm(row.minutes)} 已另行付款；重新核准前若照未核准月表跑薪資會重複給付（薪資執行會擋），請重新核准月表`,
+        )
+        continue
+      }
+      if (row.status !== "draft" || ((row.minutes ?? 0) === 0 && Number(row.amount ?? 0) === 0)) continue
+      const { error: upErr } = await supabaseAdmin
+        .from("overtime_settlements")
+        .update({ minutes: 0, amount: 0, note: BEYOND_CAP_VOID_NOTE })
+        .eq("tenant_id", tenantId)
+        .eq("id", row.id)
+      if (upErr) throw new Error(upErr.message)
+      await writeAuditLog({
+        tenantId,
+        tableName: "overtime_settlements",
+        recordId: row.id,
+        action: "UPDATE",
+        oldRow: { minutes: row.minutes, amount: row.amount, status: "draft" },
+        newRow: { minutes: 0, amount: 0, status: "draft" },
+        actorEmpId,
+        context: `月表退回／重開（${sheet.period}）：超額另計草稿作廢，待重新核准後重算`,
+      })
+    }
+  } catch (err) {
+    logger.error(
+      { err: err instanceof Error ? err.message : err, sheetId: sheet.id, period: sheet.period },
+      "attendance-sheets: 超額另計作廢失敗（退回／重開不回滾）",
     )
   }
   return warnings
@@ -2720,7 +2781,12 @@ export async function approveSheet(
  * returnSheet — submitted/manager_reviewed/approved → returned（清掉 sheets.snapshot；
  * attendance_sheet_snapshots 的歷史不動）；locked → 409 locked。
  */
-export async function returnSheet(tenantId: string, sheetId: string, actorEmpId: string, reason: string): Promise<SheetRow> {
+export async function returnSheet(
+  tenantId: string,
+  sheetId: string,
+  actorEmpId: string,
+  reason: string,
+): Promise<SheetRow & { warnings: string[] }> {
   const sheet = await loadSheet(tenantId, sheetId)
   await assertPeriodOpen(tenantId, sheet.period)
   assertTransition(sheet, "returned")
@@ -2734,14 +2800,22 @@ export async function returnSheet(tenantId: string, sheetId: string, actorEmpId:
     approved_by: null,
   })
   await notify(tenantId, [sheet.employee_id], next, "returned", `出勤月表被退回（${sheet.period}）`, `你的 ${sheet.period} 出勤月表被退回：${reason}。請修正後重新送出。`)
-  return next
+  // 從 approved 退回 = 快照作廢、薪資改讀全額 → 超額另計草稿一併作廢（N1）。
+  const warnings = sheet.status === "approved" ? await voidBeyondCapSettlement(tenantId, sheet, actorEmpId) : []
+  if (warnings.length > 0) await notifyBeyondCapVoidWarnings(tenantId, actorEmpId, next, warnings)
+  return { ...next, warnings }
 }
 
 /**
  * reopenSheet — approved → draft（HR 重新開放；清掉 sheets.snapshot，記 reopen_reason）。
  * attendance_sheet_snapshots 的歷史不動：再次核准會 append 下一個 seq。
  */
-export async function reopenSheet(tenantId: string, sheetId: string, actorEmpId: string, reason: string): Promise<SheetRow> {
+export async function reopenSheet(
+  tenantId: string,
+  sheetId: string,
+  actorEmpId: string,
+  reason: string,
+): Promise<SheetRow & { warnings: string[] }> {
   const sheet = await loadSheet(tenantId, sheetId)
   await assertPeriodOpen(tenantId, sheet.period)
   assertTransition(sheet, "draft")
@@ -2757,8 +2831,15 @@ export async function reopenSheet(tenantId: string, sheetId: string, actorEmpId:
     submitted_by: null,
   })
   await notify(tenantId, [sheet.employee_id], next, "reopened", `出勤月表重新開放（${sheet.period}）`, `HR 已重新開放你的 ${sheet.period} 出勤月表（${reason}），請確認後重新送出。`)
-  void actorEmpId
-  return next
+  // 快照作廢、薪資改讀全額 → 超額另計草稿作廢（N1：避免薪資單與另計表兩邊都付）；已付款列警示 HR。
+  const warnings = await voidBeyondCapSettlement(tenantId, sheet, actorEmpId)
+  if (warnings.length > 0) await notifyBeyondCapVoidWarnings(tenantId, actorEmpId, next, warnings)
+  return { ...next, warnings }
+}
+
+async function notifyBeyondCapVoidWarnings(tenantId: string, actorEmpId: string, sheet: SheetRow, warnings: string[]): Promise<void> {
+  const name = await employeeName(tenantId, sheet.employee_id)
+  await notify(tenantId, [actorEmpId], sheet, "beyond_cap_settlement", `加班另行給付需留意（${name} ${sheet.period}）`, warnings.join("\n"))
 }
 
 /** lockSheet — approved → locked（薪資定稿後呼叫）。 */

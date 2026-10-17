@@ -533,7 +533,7 @@ attendanceSheetsRouter.post(
         return
       }
       const next_ = await returnSheet(tenantId, id, caller.self.id, parsed.data.reason)
-      res.status(200).json({ id: next_.id, status: next_.status, returnReason: next_.return_reason })
+      res.status(200).json({ id: next_.id, status: next_.status, returnReason: next_.return_reason, warnings: next_.warnings })
     } catch (err) {
       sendSheetError(res, err, next)
     }
@@ -561,7 +561,8 @@ attendanceSheetsRouter.post(
       const caller = await requireCaller(req, res)
       if (!caller) return
       const next_ = await reopenSheet(tenantId, id, caller.self.id, parsed.data.reason)
-      res.status(200).json({ id: next_.id, status: next_.status })
+      // warnings：已另行付款的超額另計（重開前若照全額跑薪資會重複給付）。
+      res.status(200).json({ id: next_.id, status: next_.status, warnings: next_.warnings })
     } catch (err) {
       sendSheetError(res, err, next)
     }
