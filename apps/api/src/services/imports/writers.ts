@@ -2,8 +2,8 @@ import { supabaseAdmin } from "../../lib/supabase.js"
 import { isMissingTableError } from "../../lib/schema-compat.js"
 import { TW_HOLIDAYS } from "../../lib/tw-holidays.js"
 import { addDaysKey, weekdayOfKey } from "../../lib/tz.js"
-import { assertInstantsOpen } from "../period-lock.js"
-import { loadTenantWeekendPolicy, type WeekendPolicy } from "../day-type.js"
+import { assertInstantsOpen, findClosedPeriods } from "../period-lock.js"
+import { loadTenantWeekendPolicy, weekdayDayType, type WeekendPolicy } from "../day-type.js"
 
 /**
  * 批次寫入（既有的 CSV 匯入端點與新的 xlsx 匯入 POST /imports/:kind 共用）。
@@ -164,6 +164,10 @@ export interface CalendarGenerateResult {
   weekendHolidays: number
   /** pruneStaleImports 時：刪掉的過期匯入列數（舊清單有、新清單沒有的 source 'import' 列）。 */
   pruned?: number
+  /** skipClosedPeriods 時：落在已結算（發薪鎖）月份、本來會改但沒改的日子（升序）。 */
+  lockedUnchanged?: Array<{ date: string; current: string; planned: string | null }>
+  /** skipClosedPeriods 時：該年已結算的月份（YYYY-MM）。 */
+  lockedPeriods?: string[]
 }
 
 /** tenant_calendar_days 尚未建表（packages/db migration 0038）——route 對應 503 calendar_not_migrated。 */
@@ -246,19 +250,21 @@ export function planTenantCalendar(input: {
  * `holidays` 未給時用內建的行政機關辦公日曆表（TW_HOLIDAYS：2026、2027）；沒有的年份只產生例假／休息日。
  * `options.pruneStaleImports`（國定假日匯入草稿核准用，services/holiday-import.ts）：該年既有的 source 'import' 列
  * 不在這次的計畫裡（例如官方修正版把補假日改了一天）→ 刪掉，回到依星期判定；HR 手動列一樣不動。
+ * `options.skipClosedPeriods`（同上）：已結算（period_closes status='closed'，services/period-lock.ts 的
+ * findClosedPeriods）月份的日子一律不寫、不刪；會改到日別或名稱的列在 `lockedUnchanged`，讓 HR 知道。
  */
 export async function generateTenantCalendar(
   tenantId: string,
   year: number,
   holidays?: HolidayInput[],
   context = "generateTenantCalendar",
-  options: { pruneStaleImports?: boolean } = {},
+  options: { pruneStaleImports?: boolean; skipClosedPeriods?: boolean } = {},
 ): Promise<CalendarGenerateResult> {
   const holidaySource = holidays ?? TW_HOLIDAYS[year] ?? []
 
   const { data: existingData, error: existingErr } = await supabaseAdmin
     .from("tenant_calendar_days")
-    .select("date, source")
+    .select("date, source, day_type, label")
     .eq("tenant_id", tenantId)
     .gte("date", `${year}-01-01`)
     .lte("date", `${year}-12-31`)
@@ -267,10 +273,39 @@ export async function generateTenantCalendar(
     throw new Error(`${context} (existing): ${existingErr.message}`)
   }
   const existingSources = new Map<string, string>()
-  for (const row of (existingData ?? []) as Array<{ date: string; source: string }>) existingSources.set(row.date, row.source)
+  const existingRows = new Map<string, { day_type: string; label: string | null }>()
+  for (const row of (existingData ?? []) as Array<{ date: string; source: string; day_type?: string; label?: string | null }>) {
+    existingSources.set(row.date, row.source)
+    if (row.day_type) existingRows.set(row.date, { day_type: row.day_type, label: row.label ?? null })
+  }
 
   const policy = await loadTenantWeekendPolicy(tenantId)
   const plan = planTenantCalendar({ year, holidays: holidaySource, policy, existingSources })
+  const plannedDates = new Set([...plan.weekendRows, ...plan.holidayRows].map((r) => r.date))
+
+  // 已結算月份：不寫不刪，只回報會改到的日子。
+  let lockedPeriods: string[] | undefined
+  let lockedUnchanged: CalendarGenerateResult["lockedUnchanged"]
+  if (options.skipClosedPeriods) {
+    lockedPeriods = await findClosedPeriods(tenantId, { ranges: [{ from: `${year}-01`, to: `${year}-12` }] })
+    lockedUnchanged = []
+    if (lockedPeriods.length > 0) {
+      const closed = new Set(lockedPeriods)
+      const isLocked = (date: string) => closed.has(date.slice(0, 7))
+      const keep = (rows: CalendarPlanRow[]) =>
+        rows.filter((r) => {
+          if (!isLocked(r.date)) return true
+          const cur = existingRows.get(r.date)
+          const curType = cur?.day_type ?? weekdayDayType(r.date, policy)
+          if (curType !== r.day_type || (cur && (cur.label ?? null) !== (r.label ?? null)) || (!cur && r.label)) {
+            lockedUnchanged!.push({ date: r.date, current: curType, planned: r.day_type })
+          }
+          return false
+        })
+      plan.weekendRows = keep(plan.weekendRows)
+      plan.holidayRows = keep(plan.holidayRows)
+    }
+  }
 
   const toDb = (r: CalendarPlanRow) => ({ tenant_id: tenantId, ...r })
   if (plan.weekendRows.length > 0) {
@@ -288,8 +323,12 @@ export async function generateTenantCalendar(
 
   let pruned: number | undefined
   if (options.pruneStaleImports) {
-    const planned = new Set([...plan.weekendRows, ...plan.holidayRows].map((r) => r.date))
-    const stale = [...existingSources].filter(([date, source]) => source === "import" && !planned.has(date)).map(([date]) => date)
+    const closed = new Set(lockedPeriods ?? [])
+    const staleAll = [...existingSources].filter(([date, source]) => source === "import" && !plannedDates.has(date)).map(([date]) => date)
+    const stale = staleAll.filter((date) => !closed.has(date.slice(0, 7)))
+    for (const date of staleAll) {
+      if (closed.has(date.slice(0, 7))) lockedUnchanged?.push({ date, current: existingRows.get(date)?.day_type ?? "fixed_holiday", planned: null })
+    }
     pruned = 0
     if (stale.length > 0) {
       const { data, error } = await supabaseAdmin
@@ -311,5 +350,6 @@ export async function generateTenantCalendar(
     skipped: plan.skipped,
     weekendHolidays: plan.weekendHolidays,
     ...(pruned !== undefined ? { pruned } : {}),
+    ...(lockedUnchanged ? { lockedUnchanged: lockedUnchanged.sort((a, b) => a.date.localeCompare(b.date)), lockedPeriods } : {}),
   }
 }

@@ -122,6 +122,7 @@ export const SNAPSHOT_TABLES: readonly SnapshotTableSpec[] = [
   { name: "shifts" },
   { name: "schedules" },
   { name: "tenant_calendar_days" },
+  { name: "calendar_import_drafts" }, // 國定假日匯入草稿＋核准紀錄（sql/0061；未套用的環境記 skipped）
   { name: "punch_records" },
   { name: "attendance_days" },
   { name: "attendance_sheets" },

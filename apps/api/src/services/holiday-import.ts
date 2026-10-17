@@ -4,6 +4,7 @@ import { addDaysKey, diffDaysKey, weekdayOfKey, todayKey, DEFAULT_TIMEZONE, type
 import { generateTenantCalendar, planTenantCalendar, type CalendarGenerateResult } from "./imports/writers.js"
 import { loadTenantWeekendPolicy, type WeekendPolicy } from "./day-type.js"
 import { enqueue } from "./notify.js"
+import { findClosedPeriods } from "./period-lock.js"
 import { writeAuditLog } from "./audit.js"
 
 /**
@@ -603,8 +604,11 @@ export interface PreviewChange {
   weekday: number
   current: { dayType: string; label: string | null; source: string | null } | null
   next: { dayType: string; label: string | null } | null
-  /** add＝新增列；change＝改日別或名稱；remove＝舊匯入列（新版沒有）會刪掉；keep_manual＝HR 手動列不動（但與新版不同）。 */
-  action: "add" | "change" | "remove" | "keep_manual"
+  /**
+   * add＝新增列；change＝改日別或名稱；remove＝舊匯入列（新版沒有）會刪掉；keep_manual＝HR 手動列不動（但與新版不同）；
+   * locked＝落在已結算（發薪鎖）月份，核准時不改。
+   */
+  action: "add" | "change" | "remove" | "keep_manual" | "locked"
 }
 
 /**
@@ -616,36 +620,40 @@ export function previewDraftApply(input: {
   holidays: DraftHoliday[]
   policy: WeekendPolicy
   existing: CalendarRowLite[]
+  /** 已結算月份（YYYY-MM）：這些月份會改到的日子標 locked。 */
+  closedPeriods?: readonly string[]
 }): { changes: PreviewChange[]; counts: Record<PreviewChange["action"], number> } {
+  const closed = new Set(input.closedPeriods ?? [])
   const existingByDate = new Map(input.existing.filter((r) => r.date.startsWith(`${input.year}-`)).map((r) => [r.date, r]))
   const existingSources = new Map([...existingByDate.values()].map((r) => [r.date, r.source ?? "generated"]))
   const plan = planTenantCalendar({ year: input.year, holidays: input.holidays, policy: input.policy })
   const planned = new Map([...plan.weekendRows, ...plan.holidayRows].map((r) => [r.date, r]))
   const changes: PreviewChange[] = []
   const dates = new Set([...planned.keys(), ...existingByDate.keys()])
+  const push = (c: PreviewChange) => changes.push(closed.has(c.date.slice(0, 7)) && c.action !== "keep_manual" ? { ...c, action: "locked" } : c)
   for (const date of [...dates].sort()) {
     const cur = existingByDate.get(date) ?? null
     const nxt = planned.get(date) ?? null
     const current = cur ? { dayType: cur.day_type, label: cur.label, source: cur.source } : null
     const next = nxt ? { dayType: nxt.day_type, label: nxt.label } : null
     if (cur && existingSources.get(date) === "manual") {
-      if (!nxt || nxt.day_type !== cur.day_type) changes.push({ date, weekday: weekdayOfKey(date), current, next, action: "keep_manual" })
+      if (!nxt || nxt.day_type !== cur.day_type) push({ date, weekday: weekdayOfKey(date), current, next, action: "keep_manual" })
       continue
     }
     if (!cur && nxt) {
       // 週末列沒寫過也只是把預設寫進去，不算變動；節日（有 label）才列。
-      if (nxt.day_type === "fixed_holiday" || nxt.label) changes.push({ date, weekday: weekdayOfKey(date), current, next, action: "add" })
+      if (nxt.day_type === "fixed_holiday" || nxt.label) push({ date, weekday: weekdayOfKey(date), current, next, action: "add" })
       continue
     }
     if (cur && !nxt) {
-      if (cur.source === "import") changes.push({ date, weekday: weekdayOfKey(date), current, next, action: "remove" })
+      if (cur.source === "import") push({ date, weekday: weekdayOfKey(date), current, next, action: "remove" })
       continue
     }
     if (cur && nxt && (cur.day_type !== nxt.day_type || (cur.label ?? null) !== (nxt.label ?? null))) {
-      changes.push({ date, weekday: weekdayOfKey(date), current, next, action: "change" })
+      push({ date, weekday: weekdayOfKey(date), current, next, action: "change" })
     }
   }
-  const counts = { add: 0, change: 0, remove: 0, keep_manual: 0 }
+  const counts = { add: 0, change: 0, remove: 0, keep_manual: 0, locked: 0 }
   for (const c of changes) counts[c.action] += 1
   return { changes, counts }
 }
@@ -759,8 +767,12 @@ async function loadCalendarRows(tenantId: string, year: number): Promise<Calenda
 
 /** 草稿套用預覽（GET /calendar/import/drafts/:id）。 */
 export async function previewImportDraft(tenantId: string, draft: DraftRow) {
-  const [policy, existing] = await Promise.all([loadTenantWeekendPolicy(tenantId), loadCalendarRows(tenantId, draft.year)])
-  return previewDraftApply({ year: draft.year, holidays: draft.payload.holidays ?? [], policy, existing })
+  const [policy, existing, closedPeriods] = await Promise.all([
+    loadTenantWeekendPolicy(tenantId),
+    loadCalendarRows(tenantId, draft.year),
+    findClosedPeriods(tenantId, { ranges: [{ from: `${draft.year}-01`, to: `${draft.year}-12` }] }),
+  ])
+  return { ...previewDraftApply({ year: draft.year, holidays: draft.payload.holidays ?? [], policy, existing, closedPeriods }), closedPeriods }
 }
 
 /** HR 編輯草稿清單（只有 status='draft' 能改）。 */
@@ -790,7 +802,8 @@ export async function updateImportDraft(
 }
 
 /**
- * 核准：用草稿清單寫行事曆（writers.generateTenantCalendar，HR 手動列不動、舊核准版的過期 import 列刪掉），
+ * 核准：用草稿清單寫行事曆（writers.generateTenantCalendar，HR 手動列不動、舊核准版的過期 import 列刪掉；
+ * 已結算（發薪鎖）月份的日子不寫不刪，會改到的列在 calendar.lockedUnchanged、warnings 提醒 HR），
  * 再把草稿標 approved、同年舊的 approved 標 superseded。寫行事曆是冪等的，所以先寫行事曆、再改狀態
  * （改狀態失敗重按一次即可，不會留下「已核准卻沒寫進行事曆」）。
  */
@@ -798,7 +811,7 @@ export async function approveImportDraft(
   tenantId: string,
   id: string,
   actorEmpId: string | null,
-): Promise<{ draft: DraftRow; calendar: CalendarGenerateResult }> {
+): Promise<{ draft: DraftRow; calendar: CalendarGenerateResult; warnings: string[] }> {
   const draft = await getImportDraft(tenantId, id)
   if (!draft) throw new DraftStateError("not_found", "草稿不存在")
   if (draft.status !== "draft") throw new DraftStateError("not_editable", "只有待核准的草稿可以核准", draft.status)
@@ -808,8 +821,16 @@ export async function approveImportDraft(
     draft.year,
     (draft.payload.holidays ?? []).map((h) => ({ date: h.date, label: h.label })),
     "approveImportDraft",
-    { pruneStaleImports: true },
+    { pruneStaleImports: true, skipClosedPeriods: true },
   )
+  const locked = calendar.lockedUnchanged ?? []
+  const warnings =
+    locked.length > 0
+      ? [
+          `${locked.length} 天落在已結算月份（${(calendar.lockedPeriods ?? []).join("、")}）未變更：${locked.map((l) => l.date).join("、")}。` +
+            "如需更正，請先重新開放該月再重新匯入核准，或由 HR 手動處理並評估補發／扣回。",
+        ]
+      : []
 
   const nowIso = new Date().toISOString()
   const { error: supErr } = await supabaseAdmin
@@ -836,11 +857,11 @@ export async function approveImportDraft(
     recordId: id,
     action: "UPDATE",
     oldRow: { status: "draft" },
-    newRow: { status: "approved", year: draft.year, source: draft.source, edited: draft.payload.edited, calendar },
+    newRow: { status: "approved", year: draft.year, source: draft.source, edited: draft.payload.edited, calendar, warnings },
     actorEmpId,
     context: `核准 ${draft.year} 年國定假日行事曆`,
   })
-  return { draft: row, calendar }
+  return { draft: row, calendar, warnings }
 }
 
 /** 薪資前檢查資料（GET /calendar/readiness）。 */

@@ -30,6 +30,7 @@ const ACTION_META: Record<string, { label: string; cls: string }> = {
   change: { label: "更正", cls: "bg-blue-50 text-blue-700" },
   remove: { label: "移除", cls: "bg-gray-100 text-gray-600" },
   keep_manual: { label: "HR 手動，不動", cls: "bg-amber-50 text-amber-800" },
+  locked: { label: "已結算月，不改", cls: "bg-red-50 text-red-700" },
 };
 const DAY_TYPE_LABEL: Record<string, string> = { workday: "工作日", rest_day: "休息日", regular_leave: "例假", fixed_holiday: "國定假日" };
 
@@ -93,6 +94,7 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [lockWarnings, setLockWarnings] = useState<string[]>([]);
   const [open, setOpen] = useState(false);
 
   const show = useCallback((d: ImportDraft, p: DraftPreview) => {
@@ -110,6 +112,7 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
     setRows([]);
     setMessage(null);
     setError(null);
+    setLockWarnings([]);
     listHolidayDrafts(year)
       .then(async (res) => {
         const pending = res.drafts.find((d) => d.status === "draft");
@@ -172,6 +175,7 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
     try {
       const res = await approveHolidayDraft(draft.id);
       setDraft(res.draft);
+      setLockWarnings(res.warnings ?? []);
       setMessage(
         `已核准並寫入：國定假日 ${res.calendar.imported} 筆、例假／休息日 ${res.calendar.generated} 筆` +
           `（HR 手動略過 ${res.calendar.skipped}${res.calendar.pruned ? `、移除舊匯入 ${res.calendar.pruned}` : ""}）。`,
@@ -225,6 +229,13 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
         </div>
       )}
       {message && <p className="mt-2 text-sm text-green-600">{message}</p>}
+      {lockWarnings.length > 0 && (
+        <div className="mt-2 rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+          {lockWarnings.map((w) => (
+            <p key={w}>⚠ {w}</p>
+          ))}
+        </div>
+      )}
 
       {draft && open && (
         <div className="mt-4 space-y-4 text-sm">
@@ -382,9 +393,15 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
           {preview && (
             <div>
               <p className="mb-1 font-semibold text-gray-800">
-                核准後行事曆的變動（新增 {preview.counts.add}、更正 {preview.counts.change}、移除 {preview.counts.remove}、HR 手動不動 {preview.counts.keep_manual}）
+                核准後行事曆的變動（新增 {preview.counts.add}、更正 {preview.counts.change}、移除 {preview.counts.remove}、HR 手動不動 {preview.counts.keep_manual}
+                {preview.counts.locked ? `、已結算月不改 ${preview.counts.locked}` : ""}）
                 {dirty && <span className="ml-2 text-xs font-normal text-amber-700">（尚未儲存的修改不在預覽內）</span>}
               </p>
+              {(preview.closedPeriods?.length ?? 0) > 0 && preview.counts.locked > 0 && (
+                <p className="mb-1 text-xs text-red-700">
+                  {preview.closedPeriods!.join("、")} 已結算（發薪鎖），這些月份的日子核准時不會變更；如需更正請先重新開放該月。
+                </p>
+              )}
               {preview.changes.length === 0 ? (
                 <p className="text-xs text-gray-500">行事曆已與草稿一致。</p>
               ) : (

@@ -33,6 +33,7 @@ import {
 import { planTenantCalendar } from "../services/imports/writers.js"
 import { DEFAULT_WEEKEND_POLICY } from "../services/day-type.js"
 import { TW_HOLIDAYS } from "../lib/tw-holidays.js"
+import { SNAPSHOT_TABLES } from "../services/backup-snapshot.js"
 import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 /**
@@ -380,6 +381,43 @@ describe("approveImportDraft — 寫行事曆", () => {
     expect((fake.db.audit_logs ?? []).some((a) => a.table_name === "calendar_import_drafts" && a.record_id === DRAFT_ID)).toBe(true)
   })
 
+  it("已結算（發薪鎖）月份的日子不改：不寫、不刪，列在 lockedUnchanged 並警告；未鎖月份照改", async () => {
+    fake.db.period_closes = [
+      { tenant_id: TENANT_ID, period: "2027-03", status: "closed" },
+      { tenant_id: TENANT_ID, period: "2027-04", status: "reopened" },
+    ]
+    const before = fake.db.tenant_calendar_days!.length
+    const res = await request(server).post(`/calendar/import/drafts/${DRAFT_ID}/approve`).set("Authorization", "Bearer user-hr")
+    expect(res.status).toBe(200)
+    expect(res.body.calendar.lockedPeriods).toEqual(["2027-03"])
+    const locked = (res.body.calendar.lockedUnchanged as Array<{ date: string; current: string; planned: string | null }>)
+    // 3/1 補假本來要寫 fixed_holiday、3/15 舊匯入列本來要刪；3 月的週日（例假）只是把預設寫進去、不算變動
+    expect(locked).toEqual([
+      { date: "2027-03-01", current: "workday", planned: "fixed_holiday" },
+      { date: "2027-03-15", current: "fixed_holiday", planned: null },
+    ])
+    expect(res.body.warnings[0]).toContain("已結算月份（2027-03）未變更：2027-03-01、2027-03-15")
+    const days = new Map((fake.db.tenant_calendar_days ?? []).map((r) => [r.date as string, r]))
+    expect(days.has("2027-03-01")).toBe(false)
+    expect(days.get("2027-03-15")).toMatchObject({ day_type: "fixed_holiday", source: "import", label: "舊版錯的補假" })
+    expect([...days.keys()].filter((d) => d.startsWith("2027-03-"))).toEqual(["2027-03-15"])
+    // reopened 的 4 月照改
+    expect(days.get("2027-04-06")).toMatchObject({ day_type: "fixed_holiday", source: "import" })
+    expect(fake.db.tenant_calendar_days!.length).toBeGreaterThan(before)
+    expect(res.body.calendar.pruned).toBe(0)
+  })
+
+  it("預覽：已結算月份會改到的日子標 locked", async () => {
+    fake.db.period_closes = [{ tenant_id: TENANT_ID, period: "2027-03", status: "closed" }]
+    const res = await request(server).get(`/calendar/import/drafts/${DRAFT_ID}`).set("Authorization", "Bearer user-hr")
+    expect(res.status).toBe(200)
+    const byDate = new Map((res.body.preview.changes as Row[]).map((c) => [c.date, c.action]))
+    expect(byDate.get("2027-03-01")).toBe("locked")
+    expect(byDate.get("2027-03-15")).toBe("locked")
+    expect(byDate.get("2027-04-06")).toBe("add")
+    expect(res.body.preview.closedPeriods).toEqual(["2027-03"])
+  })
+
   it("已核准的草稿不能再核准／編輯（409）；非 HR 403", async () => {
     await approveImportDraft(TENANT_ID, DRAFT_ID, HR_ID)
     const again = await request(server).post(`/calendar/import/drafts/${DRAFT_ID}/approve`).set("Authorization", "Bearer user-hr")
@@ -444,5 +482,13 @@ describe("runHolidayImportJob — 排程", () => {
     const r = await runHolidayImportJob({ today: "2027-07-05", fetchOptions: { fetchImpl: mockFetch({ meta: "empty", ntpc: "empty" }).fn, timeoutMs: 200 } })
     expect(r.years[0]).toMatchObject({ year: 2028, fetch: "not_published", created: 0, notified: 0 })
     expect(fake.db.notifications).toEqual([])
+  })
+})
+
+describe("每月快照", () => {
+  it("calendar_import_drafts 在 SNAPSHOT_TABLES（緊接 tenant_calendar_days）", () => {
+    const names = SNAPSHOT_TABLES.map((t) => t.name)
+    expect(names).toContain("calendar_import_drafts")
+    expect(names.indexOf("calendar_import_drafts")).toBe(names.indexOf("tenant_calendar_days") + 1)
   })
 })

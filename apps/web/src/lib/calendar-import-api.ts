@@ -63,12 +63,14 @@ export interface PreviewChange {
   weekday: number;
   current: { dayType: string; label: string | null; source: string | null } | null;
   next: { dayType: string; label: string | null } | null;
-  action: "add" | "change" | "remove" | "keep_manual";
+  action: "add" | "change" | "remove" | "keep_manual" | "locked";
 }
 
 export interface DraftPreview {
   changes: PreviewChange[];
   counts: Record<PreviewChange["action"], number>;
+  /** 已結算（發薪鎖）月份，核准時不改。 */
+  closedPeriods?: string[];
 }
 
 export interface CalendarReadiness {
@@ -101,7 +103,18 @@ export function updateHolidayDraft(id: string, holidays: { date: string; label: 
 }
 
 export function approveHolidayDraft(id: string) {
-  return apiFetch<{ draft: ImportDraft; calendar: { generated: number; imported: number; skipped: number; pruned?: number } }>(
+  return apiFetch<{
+    draft: ImportDraft;
+    calendar: {
+      generated: number;
+      imported: number;
+      skipped: number;
+      pruned?: number;
+      lockedUnchanged?: { date: string; current: string; planned: string | null }[];
+      lockedPeriods?: string[];
+    };
+    warnings: string[];
+  }>(
     `/calendar/import/drafts/${encodeURIComponent(id)}/approve`,
     { method: "POST" },
   );
