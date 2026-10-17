@@ -550,7 +550,8 @@ export function createRequest(body: CreateRequestBody) {
 }
 
 export function cancelRequest(id: string) {
-  return apiFetch<{ status: RequestStatus }>(`/requests/${id}/cancel`, {
+  // expenseClaims：公出／出差單撤回時，API 一併撤回綁定報銷的筆數（2026-10-17；其他單缺席）。
+  return apiFetch<{ status: RequestStatus; expenseClaims?: { withdrawn: number; kept: number } }>(`/requests/${id}/cancel`, {
     method: "POST",
     body: JSON.stringify({}),
   });

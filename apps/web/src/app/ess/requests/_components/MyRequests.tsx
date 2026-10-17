@@ -7,7 +7,7 @@
  * 頂部 chips 全部｜待簽核｜已核准｜已駁回（前端過濾）；預設 30 筆＋「顯示更多」；`?id=` 高亮並捲到。
  * API 新欄位（leave_type_name／current_approver_name／attachment_count…）缺席時各行優雅退化。
  * 自行墊付的公出／出差單（簽核中或已核准，2026-10-16）：多「填報銷單」連到報銷頁（預填這張單），
- * 已報銷過的另顯示「已報銷 N 筆・NT$ X」；撤回這種單時提醒已填的報銷不會跟著撤回。
+ * 已報銷過的另顯示「已報銷 N 筆・NT$ X」；撤回這種單時提醒綁定的報銷會一併撤回（API 自動撤回，2026-10-17）。
  */
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
@@ -26,7 +26,14 @@ import {
   requestTitle,
 } from "@/lib/request-forms";
 import { pickedFileError } from "@/lib/upload-prep";
-import { showFillExpense, tripClaimSummaryText, tripExpenseHref, type TripClaimSummary } from "@/lib/trip-expense";
+import {
+  cancelledToastText,
+  showFillExpense,
+  tripCancelClaimsNotice,
+  tripClaimSummaryText,
+  tripExpenseHref,
+  type TripClaimSummary,
+} from "@/lib/trip-expense";
 import { describeError } from "./form-shared";
 
 type Filter = "all" | "pending" | "approved" | "rejected";
@@ -92,7 +99,7 @@ export function MyRequests({ requests, loading, error, highlightId, defaultShift
   function cancelMessage(r: LeaveRequest): string {
     const base = `${requestTitle(r)}\n${describeRequest(r, { shift: defaultShift, hoursPerDay })}\n\n撤回後簽核者不會再看到這張單；需要的話可以再填一張新的。`;
     const claims = tripClaims?.get(r.id);
-    return claims ? `${base}\n\n這張單${tripClaimSummaryText(claims)}，撤回不會一起撤回報銷；不需要的話請到「報銷」頁撤回。` : base;
+    return claims ? `${base}\n\n${tripCancelClaimsNotice(claims)}` : base;
   }
 
   const visible = filtered.slice(0, limit);
@@ -134,8 +141,8 @@ export function MyRequests({ requests, loading, error, highlightId, defaultShift
     setActionError(null);
     setCancelling(true);
     try {
-      await cancelRequest(cancelTarget.id);
-      toast.show("已撤回", "success");
+      const res = await cancelRequest(cancelTarget.id);
+      toast.show(cancelledToastText(res.expenseClaims), "success");
       setCancelTarget(null);
       invalidateEssState();
       await onReload();

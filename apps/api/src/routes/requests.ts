@@ -11,6 +11,7 @@ import { isStepCandidate, stepCandidates, stepSelectCols } from "../services/app
 import { enqueue } from "../services/notify.js"
 import { loadDailyRegularHours } from "../services/daily-regular-hours.js"
 import { writeAuditLog } from "../services/audit.js"
+import { tripClaimWithdrawalNote, withdrawClaimsOfTrip, type TripClaimWithdrawal } from "../services/trip-claim-withdrawal.js"
 import { assertRequestOpen, closedPeriodsOfRequest, isRealDateKey } from "../services/period-lock.js"
 import {
   approvedOtMinutesInPeriod,
@@ -1112,7 +1113,12 @@ async function decide(
       next(new Error(`POST /requests/${requestId}/${action}: ${outcome.error}`))
       return
     }
-    res.status(200).json({ status: outcome.status, currentStep: outcome.currentStep, notified: outcome.notified ?? 0 })
+    res.status(200).json({
+      status: outcome.status,
+      currentStep: outcome.currentStep,
+      notified: outcome.notified ?? 0,
+      ...(outcome.expenseClaims ? { expenseClaims: outcome.expenseClaims } : {}),
+    })
   } catch (err) {
     next(err)
   }
@@ -1120,8 +1126,21 @@ async function decide(
 
 type DecisionActor = { id: string; role: string }
 
+/** 回應帶出的報銷撤回數（沒跑＝空物件）。 */
+function expenseClaimsField(w: TripClaimWithdrawal | null): { expenseClaims?: { withdrawn: number; kept: number } } {
+  return w ? { expenseClaims: { withdrawn: w.withdrawn, kept: w.kept } } : {}
+}
+
 type DecisionOutcome =
-  | { ok: true; id: string; status: "pending" | "approved" | "rejected"; currentStep: number; notified?: number }
+  | {
+      ok: true
+      id: string
+      status: "pending" | "approved" | "rejected"
+      currentStep: number
+      notified?: number
+      /** 公出／出差單駁回時自動撤回綁定報銷的結果（2026-10-17）；其他情況缺席。 */
+      expenseClaims?: { withdrawn: number; kept: number }
+    }
   | { ok: false; id: string; error: string; period?: string }
 
 /** 寫簽核關卡結果；acted_by_emp_id 記「實際按下核准／駁回的人」（HR 代簽時是 HR）。
@@ -1340,8 +1359,22 @@ async function decideOneRequest(params: {
       },
     })
 
-    const notified = await notifyApplicant({ tenantId, lr: notice, ctx, event: "rejected", step: currentStep, actedByEmpId: actor.id, comment })
-    return { ok: true, id: requestId, status: "rejected", currentStep, notified }
+    // 公出／出差單駁回 → 綁在它上面、還能撤回的報銷一併撤回（best-effort，不擋駁回），通知裡說明幾筆。
+    const withdrawal =
+      lr.kind === "business_trip"
+        ? await withdrawClaimsOfTrip({ tenantId, tripRequestId: requestId, actorEmpId: actor.id, cause: "rejected" })
+        : null
+    const notified = await notifyApplicant({
+      tenantId,
+      lr: notice,
+      ctx,
+      event: "rejected",
+      step: currentStep,
+      actedByEmpId: actor.id,
+      comment,
+      extraNote: tripClaimWithdrawalNote(withdrawal),
+    })
+    return { ok: true, id: requestId, status: "rejected", currentStep, notified, ...expenseClaimsField(withdrawal) }
   }
 
   const stepFail = await markStep(step.id, { decision: "approved", comment: comment ?? null, acted_at: actedAt }, actor.id, { takeOver })
@@ -1925,7 +1958,12 @@ requestsRouter.post(
         },
       })
 
-      res.status(200).json({ status: "cancelled" })
+      // 公出／出差單撤回 → 綁定的報銷一併撤回（best-effort）。
+      const withdrawal =
+        lr.kind === "business_trip"
+          ? await withdrawClaimsOfTrip({ tenantId, tripRequestId: requestId, actorEmpId: self.id, cause: "cancelled" })
+          : null
+      res.status(200).json({ status: "cancelled", ...expenseClaimsField(withdrawal) })
     } catch (err) {
       next(err)
     }
@@ -2112,7 +2150,12 @@ requestsRouter.delete(
         },
       })
 
-      res.status(200).json({ id: requestId })
+      // 公出／出差單註銷 → 綁定的報銷一併撤回（best-effort；駁回／撤回時已撤過的不會重來）。
+      const withdrawal =
+        lr.kind === "business_trip"
+          ? await withdrawClaimsOfTrip({ tenantId, tripRequestId: requestId, actorEmpId: self?.id ?? null, cause: "deleted" })
+          : null
+      res.status(200).json({ id: requestId, ...expenseClaimsField(withdrawal) })
     } catch (err) {
       next(err)
     }

@@ -267,8 +267,8 @@ export default function AdminExpensesPage() {
                   綁定的出差單未核准（{review.issues.tripNotApproved?.length}）
                 </h3>
                 <p className="mb-2 text-xs text-gray-500">
-                  員工在公出／出差申請時選自行墊付、當場填的報銷，之後那張申請被駁回、撤回或仍在簽核。
-                  這類費用本身不需事前審核，請決定照付還是退件。
+                  綁定的公出／出差申請還在簽核，或已駁回、撤回卻沒能自動撤回的報銷（例如綁的預支已核銷、
+                  月份已鎖，或自動撤回時出錯）。這類費用本身不需事前審核，請決定照付還是退件。
                 </p>
                 <ul className="space-y-1 text-sm">
                   {review.issues.tripNotApproved?.map((r) => (
