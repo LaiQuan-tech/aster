@@ -129,9 +129,15 @@ export default function AttendanceSheetPage() {
     if (!sheet) return;
     try {
       const res = await patchAttendanceSheetDay(sheet.id, date, patch);
-      setSheet((prev) =>
-        prev ? { ...prev, days: prev.days.map((d) => (d.date === date ? mergeDayPatch(d, res.day) : d)) } : prev,
-      );
+      if (patch.dinnerTaken !== undefined) {
+        // 晚餐改的是結算輸入：伺服器已重算當天加班與整月異常，重新抓整張表（不閃整頁載入）。
+        const fresh = await getMyAttendanceSheet(period);
+        setSheet(fresh.sheet);
+      } else {
+        setSheet((prev) =>
+          prev ? { ...prev, days: prev.days.map((d) => (d.date === date ? mergeDayPatch(d, res.day) : d)) } : prev,
+        );
+      }
       setError(null);
     } catch (err) {
       setError(friendlyError(err, "更新失敗"));

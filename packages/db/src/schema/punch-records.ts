@@ -49,6 +49,8 @@ export const punchRecords = pgTable(
     requestId: uuid("request_id"),
     /** 2026-10-13 在家上班打卡（migration 0068）：員工勾了「在家上班」打的卡；月表該日標在家工作，工時照打卡算。 */
     wfh: boolean("wfh").notNull().default(false),
+    /** 2026-10-17 晚餐勾選（migration 0070）：下班卡勾「今天有用公司晚餐」；NULL＝沒問到。結算見 services/settlement.ts。 */
+    dinnerTaken: boolean("dinner_taken"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

@@ -107,6 +107,8 @@ interface OvertimeParamsForm {
   mode: OvertimeRoundingMode;
   minimumMinutes: string;
   mealBreakEnabled: boolean;
+  /** 2026-10-17：auto＝延長工時超過門檻就自動扣；opt_in＝員工下班打卡勾「有用公司晚餐」（或月表上勾）才扣。 */
+  mealMode: "auto" | "opt_in";
   mealAfterMinutes: string;
   mealDeductMinutes: string;
   dailyCapMinutes: string;
@@ -129,6 +131,7 @@ const DEFAULT_OT_FORM: OvertimeParamsForm = {
   mode: "floor",
   minimumMinutes: "30",
   mealBreakEnabled: true,
+  mealMode: "auto",
   mealAfterMinutes: "180",
   mealDeductMinutes: "30",
   dailyCapMinutes: "240",
@@ -174,8 +177,10 @@ function hydrateOvertimeForm(config: RuleConfig): OvertimeParamsForm {
     minimumMinutes: String(ot.rounding?.minimumMinutes ?? 30),
     // schema 語意：省略 mealBreak = 用預設（視為啟用）；明確 null 才是關閉。
     mealBreakEnabled: mealBreak !== null,
-    mealAfterMinutes: String(mealBreak?.afterMinutes ?? 180),
-    mealDeductMinutes: String(mealBreak?.deductMinutes ?? 30),
+    // 沒帶 mode＝auto（舊設定）。門檻／扣除分鐘的預設依模式（與引擎 resolveOvertimeMealBreak 相同）：auto 180／30、opt_in 0／60。
+    mealMode: mealBreak?.mode === "opt_in" ? "opt_in" : "auto",
+    mealAfterMinutes: String(mealBreak?.afterMinutes ?? (mealBreak?.mode === "opt_in" ? 0 : 180)),
+    mealDeductMinutes: String(mealBreak?.deductMinutes ?? (mealBreak?.mode === "opt_in" ? 60 : 30)),
     dailyCapMinutes: String(ot.dailyCapMinutes ?? 240),
     monthlyAlertHours: alertHoursToForm(ot.monthlyAlertHours),
     hourlyWageDivisor: String(config.payroll.hourlyWageDivisor ?? 240),
@@ -730,8 +735,8 @@ export default function ModuleSettingsPage() {
           },
           mealBreak: otForm.mealBreakEnabled
             ? {
-                // 晚餐扣除模式（auto／opt_in）這張表單不編，沿用既有值，免得 opt_in 存一次就變回自動扣。
-                ...(base.overtime.mealBreak?.mode ? { mode: base.overtime.mealBreak.mode } : {}),
+                // 晚餐扣除模式（2026-10-17 起可在這張卡設定）：auto 自動扣／opt_in 有勾晚餐才扣。
+                mode: otForm.mealMode,
                 afterMinutes: Number(otForm.mealAfterMinutes) || 0,
                 deductMinutes: Number(otForm.mealDeductMinutes) || 0,
               }
@@ -1066,6 +1071,29 @@ export default function ModuleSettingsPage() {
                     />
                     啟用晚餐扣除
                   </label>
+                  <div className="sm:col-span-3">
+                    <label className={labelCls}>晚餐扣除方式</label>
+                    <select
+                      disabled={!otForm.mealBreakEnabled}
+                      className={`${inputCls} disabled:bg-gray-50 disabled:text-gray-400`}
+                      value={otForm.mealMode}
+                      onChange={(e) => {
+                        const mode = e.target.value === "opt_in" ? "opt_in" : "auto";
+                        // 換模式時把門檻／扣除分鐘換成該模式的建議值（仍可再改）。
+                        patchOt(
+                          mode === "opt_in"
+                            ? { mealMode: mode, mealAfterMinutes: "0", mealDeductMinutes: "60" }
+                            : { mealMode: mode, mealAfterMinutes: "180", mealDeductMinutes: "30" },
+                        );
+                      }}
+                    >
+                      <option value="opt_in">有用公司晚餐才扣（員工下班打卡勾選，HR 可在月表改）</option>
+                      <option value="auto">自動扣（延長工時超過門檻就扣）</option>
+                    </select>
+                    <p className="mt-1 text-xs text-gray-400">
+                      「有勾才扣」：當天有延長工時時，員工下班打卡會看到「今天有用公司晚餐」（預設不勾）；月表的「晚餐」可再修正，修正後重算當天加班。
+                    </p>
+                  </div>
                   <div>
                     <label className={labelCls}>延長工時超過幾分鐘扣（門檻分）</label>
                     <input
@@ -1087,7 +1115,9 @@ export default function ModuleSettingsPage() {
                       value={otForm.mealDeductMinutes}
                       onChange={(e) => patchOt({ mealDeductMinutes: e.target.value })}
                     />
-                    <p className="mt-1 text-xs text-gray-400">Excel：延長工時超過 3 小時（180 分）扣 30 分晚餐</p>
+                    <p className="mt-1 text-xs text-gray-400">
+                      {otForm.mealMode === "opt_in" ? "有勾晚餐的日子扣這麼多分鐘（建議 60）" : "Excel：延長工時超過 3 小時（180 分）扣 30 分晚餐"}
+                    </p>
                   </div>
                 </div>
 

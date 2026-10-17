@@ -274,6 +274,8 @@ export function AttendanceSheetTable({
                 hidden={hidden}
                 noPunch={noPunchDates?.has(day.date) ?? false}
                 editable={editable}
+                // 晚餐改的是結算輸入（加班分鐘會變）：核准後數字已凍結，只剩唯讀標籤。
+                dinnerEditable={editable && sheet.status !== "approved" && sheet.status !== "locked"}
                 overridePopoverOpen={overrideOpenFor === day.date}
                 onOpenOverride={() => setOverrideOpenFor(day.date)}
                 onCloseOverride={() => setOverrideOpenFor((cur) => (cur === day.date ? null : cur))}
@@ -322,12 +324,15 @@ function DayRow({
   hidden,
   noPunch,
   editable,
+  dinnerEditable,
   overridePopoverOpen,
   onOpenOverride,
   onCloseOverride,
   onPatch,
 }: {
   day: SheetDayView;
+  /** 晚餐切換（approved／locked 不能改）。 */
+  dinnerEditable: boolean;
   /** 沒事的日子且沒開「顯示全月」：畫面上收起來，列印時仍印出（維持完整一個月）。 */
   hidden: boolean;
   /** 員工本人月表的「無打卡紀錄」（琥珀色標籤；不需要說明）。 */
@@ -390,6 +395,7 @@ function DayRow({
             在家
           </span>
         )}
+        <DinnerToggle day={day} editable={dinnerEditable} onPatch={onPatch} />
         <InlineTextCell value={day.content} editable={editable} placeholder="內容" onSave={(v) => onPatch({ content: v })} />
       </td>
       <td className="py-2 pr-2">
@@ -408,6 +414,60 @@ function DayRow({
         <AnomalyCell day={day} noPunch={noPunch} editable={editable} onPatch={onPatch} />
       </td>
     </tr>
+  );
+}
+
+/**
+ * 晚餐（2026-10-17）：公司規則「有用公司晚餐才扣」時，有出勤的日子可切換當天「晚餐」。改了伺服器會重算當天加班
+ * （頁面重新載入整張表）。唯讀時只在有勾的日子顯示「晚餐」標籤；`source='manual'` 代表月表上手動改過（優先於打卡勾選）。
+ */
+function DinnerToggle({
+  day,
+  editable,
+  onPatch,
+}: {
+  day: SheetDayView;
+  editable: boolean;
+  onPatch: (patch: SheetDayPatch) => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const dinner = day.dinner;
+  if (!dinner?.optIn || day.workedMinutes <= 0) return null;
+  const taken = dinner.taken === true;
+  const title =
+    dinner.source === "manual" ? "月表手動設定（優先於下班打卡的勾選）" : dinner.source === "punch" ? "下班打卡時勾選" : "未填（不扣晚餐）";
+  if (!editable) {
+    return taken ? (
+      <span title={title} className="mr-1 rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[11px] text-amber-700">
+        晚餐
+      </span>
+    ) : null;
+  }
+  async function toggle(next: boolean) {
+    setBusy(true);
+    setErr(null);
+    try {
+      await onPatch({ dinnerTaken: next });
+    } catch (error) {
+      setErr(friendlyError(error, "更新失敗"));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <span className="no-print mr-1 inline-flex items-center gap-1 align-middle text-[11px] text-gray-600" title={title}>
+      <input
+        type="checkbox"
+        className="h-3.5 w-3.5"
+        checked={taken}
+        disabled={busy}
+        onChange={(event) => void toggle(event.target.checked)}
+        aria-label={`${day.date} 有用公司晚餐`}
+      />
+      晚餐{dinner.source === "manual" ? "（手動）" : ""}
+      {err && <span className="text-red-600">{err}</span>}
+    </span>
   );
 }
 

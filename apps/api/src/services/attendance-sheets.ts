@@ -44,6 +44,15 @@ import { coveredByRequests, loadApprovedAbsences } from "./absence-cover.js"
 import { tenantBlocksApproveOnUnsettledLeave } from "./leave-settlement.js"
 import { pairPunchesTz, wfhPunchDates } from "./punch-pairing.js"
 import { capMinutesFor } from "./overtime-cap.js"
+import {
+  consecutiveWorkRuns,
+  dailyTotalWorkMinutes,
+  DAILY_TOTAL_CAP_MINUTES,
+  MONTHLY_OT_LEGAL_CAP_MINUTES,
+  regularLeaveWorkMessage,
+  SEVEN_DAY_MAX_CONSECUTIVE,
+  sevenDayLookbackFrom,
+} from "./compliance.js"
 import { writeAuditLog } from "./audit.js"
 import { assertPeriodOpen } from "./period-lock.js"
 import { exemptDatesOf, loadLateReportsForPeriod, undecidedCountOf, type LateReportRow } from "./late-reports.js"
@@ -106,6 +115,10 @@ export type SheetErrorCode =
   | "sheets_not_migrated"
   | "invalid_period"
   | "invalid_project"
+  /** 2026-10-17 晚餐勾選：migration 0070（attendance_days.dinner_taken）未套。 */
+  | "dinner_not_migrated"
+  /** 2026-10-17 晚餐勾選：那天沒有出勤結算列（沒打卡）——沒有工時就沒有晚餐可扣。 */
+  | "no_attendance_for_dinner"
 
 /** Typed failure the route layer maps to HTTP (`{error: code, ...details}`). */
 export class SheetError extends Error {
@@ -414,8 +427,13 @@ export interface AnomalyDayFacts {
   lateDecision?: LateDecision
   /** 特休日出勤（attendance_days.anomaly.ptoWork，settleAttendance 寫入；2026-10-17）。 */
   ptoWork?: boolean
-  /** 當天勾了晚餐（attendance_days.dinner_taken；晚餐功能未上 → undefined）。 */
+  /**
+   * 當天晚餐的最終值（2026-10-17）：月表手動值（attendance_days.dinner_taken）優先，否則下班卡勾選
+   * （settleAttendance 寫在 attendance_days.anomaly.dinnerTaken）；都沒有／migration 0070 未套 → undefined（不扣）。
+   */
   dinnerTaken?: boolean
+  /** 例假出勤應補假日數（attendance_days.anomaly.compDayOwed，settleAttendance 寫入；2026-10-17）。 */
+  compDayOwed?: number
 }
 
 export interface AnomalyContext {
@@ -448,6 +466,11 @@ export interface AnomalyContext {
   approvedOtDates?: Set<DateKey>
   /** 2026-10-11：本月遲到說明還沒經老闆決定的筆數（視為影響全勤）；> 0 發月級提醒。 */
   undecidedLateCount?: number
+  /**
+   * 2026-10-17 七休一跨月：月初前 6 天內有出勤的日期（attendance_days.worked_minutes > 0）。
+   * 省略＝不看上月尾（手工 fixture）；生產路徑（anomalyContextFor）一定會填。
+   */
+  priorWorkedDates?: DateKey[]
 }
 
 export interface AnomalyResult {
@@ -481,6 +504,12 @@ function fmtHm(minutes: number): string {
  *   overtime_over_daily_cap / holiday_work / outing_unpaired / manual_punch /
  *   cross_midnight；info：meal_deducted、overtime_beyond_cap；
  *   error（M1）：overtime_beyond_cap_unapproved。
+ * 一例一休合規（2026-10-17，services/compliance.ts，日級、可填說明，薪資執行前閘門會檢查 error）：
+ *   error：seven_day_rule（依日曆連續出勤第 7 天起，含上月尾）、regular_leave_work（例假出勤，
+ *   取代該日的 holiday_work）、daily_over_12h（正常＋延長 > 12h，休息日亦同）、monthly_ot_over_46h
+ *   （capCountableMinutes 口徑累計跨過 46h 的那一天）；warn：pto_work（特休日出勤，HR 處理特休假單）。
+ *   overtime_over_daily_cap（單日加班上限，預設 4h）只看平日：休息日／例假／國定假日／特休出勤整天都算
+ *   加班，不適用平日 4h，改由 daily_over_12h 把關。
  * 月級：monthly_ot_threshold（規則門檻由小到大，第一階 warn、其後 error）、
  *   consecutive_late（連續 ≥3 個日曆日遲到，同 detection.ts）、
  *   pending_leave_in_period、no_salary_structure。
@@ -512,6 +541,12 @@ export function computeAnomalies(
   const beyondCapMode = ctx.beyondCap ?? resolveOvertimeBeyondCap(ctx.rules)
   const approvedOtDates = ctx.approvedOtDates ?? new Set<DateKey>()
   const sorted = [...days].sort((a, b) => a.work_date.localeCompare(b.work_date))
+  // 七休一：「有出勤」＝有工時或有打卡（含上月尾，跨月連續也算）。
+  const attended = (day: SheetDayRow): boolean => {
+    const f = ctx.dayFacts.get(day.work_date) ?? EMPTY_FACTS
+    return (day.worked_minutes ?? 0) > 0 || !!day.first_in || !!day.last_out || f.unpairedIn > 0 || f.unpairedOut > 0
+  }
+  const runs = consecutiveWorkRuns([...(ctx.priorWorkedDates ?? []), ...sorted.filter(attended).map((d) => d.work_date)])
 
   let totalEffective = 0
   for (const day of sorted) {
@@ -529,6 +564,7 @@ export function computeAnomalies(
     const dayRegularMinutes = shiftBasis ? (facts.shiftNetMinutes ?? regularMinutes) : regularMinutes
     // 算進月上限／月門檻的分鐘（capCountableMinutes：例假 0、國定假日與特休出勤只計 8h 以外）。
     const countable = capCountableMinutes({ dayType, overtimeMinutes: effective, ptoWork: facts.ptoWork }, regularMinutes)
+    const prevTotalEffective = totalEffective
     totalEffective += countable
     // 日期序歸屬：累計跨過上限的那天起，超出的分鐘算在當天（同 allocateBeyondCap）。
     const beyondCapMinutes =
@@ -561,7 +597,61 @@ export function computeAnomalies(
       }
     }
 
+    // ── 一例一休合規（error）──
+    const run = runs.get(day.work_date)
+    if (run && run.length > SEVEN_DAY_MAX_CONSECUTIVE && attended(day)) {
+      push({
+        code: "seven_day_rule",
+        severity: "error",
+        detail: { consecutiveDays: run.length, from: run.from },
+        message: `連續出勤第 ${run.length} 天（自 ${run.from} 起）：依勞基法第 36 條每七日至少應有一日例假`,
+      })
+    }
+    if (dayType === REGULAR_LEAVE && (worked > 0 || punched)) {
+      const compDayOwed = facts.compDayOwed ?? 0
+      push({
+        code: "regular_leave_work",
+        severity: "error",
+        detail: { workedMinutes: worked, compDayOwed },
+        message: regularLeaveWorkMessage(fmtHm(worked), compDayOwed),
+      })
+    }
+    const dayTotal = dailyTotalWorkMinutes({
+      dayType,
+      workedMinutes: worked,
+      regularMinutes: dayRegularMinutes,
+      rules: ctx.rules,
+      overtimeOverride: override,
+      ptoWork: facts.ptoWork,
+      dinnerTaken: facts.dinnerTaken,
+    })
+    if (dayTotal > DAILY_TOTAL_CAP_MINUTES) {
+      push({
+        code: "daily_over_12h",
+        severity: "error",
+        detail: { totalMinutes: dayTotal, capMinutes: DAILY_TOTAL_CAP_MINUTES, dayType },
+        message: `當日總工時 ${fmtHm(dayTotal)} 超過 12 小時（勞基法第 32 條：正常工時加延長工時一日不得超過 12 小時）`,
+      })
+    }
+    if (prevTotalEffective <= MONTHLY_OT_LEGAL_CAP_MINUTES && totalEffective > MONTHLY_OT_LEGAL_CAP_MINUTES) {
+      const totalHours = Math.round((totalEffective / 60) * 100) / 100
+      push({
+        code: "monthly_ot_over_46h",
+        severity: "error",
+        detail: { totalMinutes: totalEffective, capMinutes: MONTHLY_OT_LEGAL_CAP_MINUTES },
+        message: `本月延長工時累計到這天為 ${totalHours} 小時，超過勞基法第 32 條單月 46 小時上限`,
+      })
+    }
+
     // ── warn ──
+    if (facts.ptoWork) {
+      push({
+        code: "pto_work",
+        severity: "warn",
+        detail: { workedMinutes: worked },
+        message: "特休日出勤：當天已核准整天特休又有出勤，工資依國定假日計；請 HR 處理該特休假單（撤銷或改期）",
+      })
+    }
     if (late > 0) {
       // 遲到說明（2026-10-11）：帶出員工填的原因與老闆的決定。
       const decision = facts.lateDecision ?? null
@@ -583,10 +673,12 @@ export function computeAnomalies(
         message: `加班以人工覆寫為 ${fmtHm(override)}（系統試算 ${fmtHm(computed)}）${day.override_reason ? `：${day.override_reason}` : ""}`,
       })
     }
-    if (effective > dailyCap) {
+    // 單日加班上限只適用平日：休息日／例假／國定假日／特休出勤整天都算加班，改由 daily_over_12h 把關。
+    if (dayType === "workday" && !facts.ptoWork && effective > dailyCap) {
       push({ code: "overtime_over_daily_cap", severity: "warn", detail: { minutes: effective, capMinutes: dailyCap }, message: `當日加班 ${fmtHm(effective)} 超過單日上限 ${fmtHm(dailyCap)}` })
     }
-    if (dayType !== "workday" && worked > 0) {
+    // 例假出勤已由 regular_leave_work（error）表示，不再重複發 holiday_work。
+    if (dayType !== "workday" && dayType !== REGULAR_LEAVE && worked > 0) {
       const offLabel = dayType === REGULAR_LEAVE ? "例假" : dayType === "rest_day" ? "休息日" : "國定假日"
       push({ code: "holiday_work", severity: "warn", detail: { dayType, workedMinutes: worked }, message: `${offLabel}出勤 ${fmtHm(worked)}` })
     }
@@ -808,8 +900,11 @@ interface AttendanceRowWithAnomaly extends AttendanceDayRow {
     ptoWork?: boolean
     compDayOwed?: number
     compTimeMinutes?: number
+    /** 晚餐最終值與來源（2026-10-17，settlement.ts）。 */
+    dinnerTaken?: boolean
+    dinnerSource?: "manual" | "punch" | null
   } | null
-  /** 晚餐勾選（欄位由晚餐功能另加；未加 → undefined）。 */
+  /** 月表手動設定的晚餐（migration 0070；未套 → undefined）。 */
   dinner_taken?: boolean | null
 }
 
@@ -836,6 +931,8 @@ interface MonthFacts {
   salaryEmpIds: Set<string>
   /** 2026-10-11：本月遲到說明（依員工）。 */
   lateReportsByEmp: Map<string, LateReportRow[]>
+  /** 2026-10-17 七休一跨月：月初前 6 天內有出勤（worked_minutes > 0）的日期，依員工。 */
+  priorWorkedByEmp: Map<string, DateKey[]>
 }
 
 function hhmmToMinutes(hhmm: string): number {
@@ -866,6 +963,7 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     blockApproveOnUnsettledLeave: false,
     salaryEmpIds: new Set(),
     lateReportsByEmp: new Map(),
+    priorWorkedByEmp: new Map(),
   }
   if (employeeIds.length === 0) return facts
 
@@ -891,6 +989,22 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
   if (ad.error) throw new Error(`attendance-sheets (attendance_days): ${ad.error.message}`)
   for (const row of (ad.data ?? []) as unknown as AttendanceRowWithAnomaly[]) {
     facts.attendanceByKey.set(`${row.employee_id}|${row.work_date}`, row)
+  }
+
+  // 七休一跨月（2026-10-17）：月初前 6 天有出勤的日子（上月尾）。
+  const { data: priorData, error: priorErr } = await supabaseAdmin
+    .from("attendance_days")
+    .select("employee_id, work_date")
+    .eq("tenant_id", tenantId)
+    .in("employee_id", employeeIds)
+    .gte("work_date", sevenDayLookbackFrom(from))
+    .lt("work_date", from)
+    .gt("worked_minutes", 0)
+  if (priorErr) throw new Error(`attendance-sheets (prior attendance_days): ${priorErr.message}`)
+  for (const r of (priorData ?? []) as Array<{ employee_id: string; work_date: string }>) {
+    const list = facts.priorWorkedByEmp.get(r.employee_id)
+    if (list) list.push(r.work_date)
+    else facts.priorWorkedByEmp.set(r.employee_id, [r.work_date])
   }
 
   // punches: local-day window widened by one day each side (cross-midnight pairs)
@@ -1116,6 +1230,25 @@ function buildDayRows(
   return rows
 }
 
+/**
+ * 一天的晚餐最終值與來源（2026-10-17）：月表手動值（attendance_days.dinner_taken）優先，否則
+ * settleAttendance 記在 anomaly.dinnerTaken 的值（下班卡勾選）。都沒有 → taken undefined。
+ */
+export function dinnerOf(
+  row: { dinner_taken?: boolean | null; anomaly?: unknown } | undefined,
+): { taken: boolean | undefined; source: "manual" | "punch" | null } {
+  if (!row) return { taken: undefined, source: null }
+  if (typeof row.dinner_taken === "boolean") return { taken: row.dinner_taken, source: "manual" }
+  const a = row.anomaly
+  if (a && typeof a === "object" && !Array.isArray(a)) {
+    const rec = a as Record<string, unknown>
+    if (typeof rec.dinnerTaken === "boolean") {
+      return { taken: rec.dinnerTaken, source: rec.dinnerSource === "manual" ? "manual" : "punch" }
+    }
+  }
+  return { taken: undefined, source: null }
+}
+
 function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContext {
   const dayFacts = new Map<DateKey, AnomalyDayFacts>()
   const punchFacts = facts.punchFactsByEmp.get(employeeId)
@@ -1137,7 +1270,8 @@ function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContex
       manualPunch: pf?.manualPunch ?? false,
       ...(late ? { lateReason: late.reason, lateDecision: normalizeLateDecision(late.attendance_decision) } : {}),
       ...(ad?.anomaly?.ptoWork === true ? { ptoWork: true } : {}),
-      ...(typeof ad?.dinner_taken === "boolean" ? { dinnerTaken: ad.dinner_taken } : {}),
+      ...(dinnerOf(ad).taken !== undefined ? { dinnerTaken: dinnerOf(ad).taken } : {}),
+      ...(typeof ad?.anomaly?.compDayOwed === "number" && ad.anomaly.compDayOwed > 0 ? { compDayOwed: ad.anomaly.compDayOwed } : {}),
     })
   }
   const approvedOtDates = new Set<DateKey>()
@@ -1155,6 +1289,7 @@ function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContex
     capMinutes: capMinutesFor(facts.rules),
     beyondCap: resolveOvertimeBeyondCap(facts.rules),
     approvedOtDates,
+    priorWorkedDates: facts.priorWorkedByEmp.get(employeeId) ?? [],
     undecidedLateCount: undecidedCountOf(
       lateReports,
       new Set(
@@ -1433,7 +1568,12 @@ function isoOrNull(value: string | null): string | null {
   return Number.isNaN(t) ? value : new Date(t).toISOString()
 }
 
-function toDayView(row: SheetDayRow, projectName: string | null, beyondCapMinutes = 0): SheetDayView {
+function toDayView(
+  row: SheetDayRow,
+  projectName: string | null,
+  beyondCapMinutes = 0,
+  dinner?: SheetDayView["dinner"],
+): SheetDayView {
   const computed = row.overtime_minutes_computed ?? 0
   const override = row.overtime_minutes_override ?? null
   return {
@@ -1466,6 +1606,7 @@ function toDayView(row: SheetDayRow, projectName: string | null, beyondCapMinute
     note: row.note,
     anomalyAck: row.anomaly_ack,
     anomalies: Array.isArray(row.anomalies) ? row.anomalies : [],
+    ...(dinner ? { dinner } : {}),
   }
 }
 
@@ -1495,7 +1636,15 @@ export function buildTotals(
     overtimeMonthlyAlert: "none",
     ...(rules ? { otTierLabels: otTierLabels(rules) } : {}),
   }
+  // 月累計警示（36/40/46）用 capCountableMinutes 口徑（2026-10-17，與月表異常 monthly_ot_threshold／
+  // monthly_ot_over_46h 同口徑）：例假 0、國定假日與特休出勤只計 8h 以外。特休出勤由日異常 pto_work 認。
+  const regular = Math.round((rules?.payroll.dailyRegularHours ?? 8) * 60)
+  let countableTotal = 0
   for (const d of days) {
+    countableTotal += capCountableMinutes(
+      { dayType: d.dayType, overtimeMinutes: Math.max(0, d.overtime.effective), ptoWork: d.anomalies.some((a) => a.code === "pto_work") },
+      regular,
+    )
     if (d.workedMinutes > 0 || d.wfh) totals.attendanceDays += 1
     totals.workedMinutes += d.workedMinutes
     totals.lateMinutes += d.lateMinutes
@@ -1516,7 +1665,7 @@ export function buildTotals(
       }
     }
   }
-  totals.overtimeMonthlyAlert = overtimeMonthlyAlert(totals.otTotal)
+  totals.overtimeMonthlyAlert = overtimeMonthlyAlert(countableTotal)
   return totals
 }
 
@@ -1624,7 +1773,9 @@ async function loadAttendanceRowsForSheet(tenantId: string, sheet: SheetRow): Pr
       .lt("work_date", nextFirst)
   const P0 = "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type, anomaly, leave_minutes, leave_breakdown, outing_minutes, early_leave_minutes"
   const BASE = "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type, anomaly"
-  let res = await load(P0)
+  // 月表手動晚餐（migration 0070）：套了才撈。
+  const dinnerCol = (await columnsExist("attendance_days", "dinner_taken")) ? ", dinner_taken" : ""
+  let res = await load(P0 + dinnerCol)
   if (res.error && isMissingColumnError(res.error)) {
     warnSchemaGapOnce("attendance_days.p0_columns", res.error)
     res = await load(BASE)
@@ -1718,9 +1869,18 @@ async function composeLiveView(
     capMinutesFor(rules),
     Math.round(rules.payroll.dailyRegularHours * 60),
   )
-  const days = dayRows.map((r) =>
-    toDayView(r, r.project_id ? (projectNames.get(r.project_id) ?? null) : null, beyondCapByDate.get(r.work_date) ?? 0),
-  )
+  // 晚餐（2026-10-17）：規則「有勾才扣」（opt_in）時，有工時的日子給月表切換；auto 模式只帶 optIn=false。
+  const dinnerOptIn = resolveOvertimeMealBreak(rules)?.mode === "opt_in"
+  const attendanceByDate = new Map(attendanceRows.map((r) => [r.work_date, r] as const))
+  const days = dayRows.map((r) => {
+    const d = dinnerOf(attendanceByDate.get(r.work_date) as AttendanceRowWithAnomaly | undefined)
+    return toDayView(
+      r,
+      r.project_id ? (projectNames.get(r.project_id) ?? null) : null,
+      beyondCapByDate.get(r.work_date) ?? 0,
+      { taken: d.taken ?? null, source: d.source, optIn: dinnerOptIn },
+    )
+  })
   const breakdownByDate = new Map<string, Record<string, number>>()
   for (const r of attendanceRows) {
     if (r.leave_breakdown && typeof r.leave_breakdown === "object") breakdownByDate.set(r.work_date, r.leave_breakdown)
@@ -1925,6 +2085,12 @@ export interface DayPatch {
   projectId?: string | null
   note?: string | null
   anomalyAck?: string | null
+  /**
+   * 2026-10-17 晚餐勾選：月表手動設定當天「有用公司晚餐」（true／false），null＝清掉手動值、回到下班卡勾選。
+   * 寫在 attendance_days.dinner_taken（不是月表列），寫完重新結算當天（加班分鐘會變）再重算月表。
+   * 核准後（approved／locked）數字已凍結，不能改。
+   */
+  dinnerTaken?: boolean | null
 }
 
 /**
@@ -1947,6 +2113,24 @@ export async function patchSheetDay(tenantId: string, sheet: SheetRow, date: str
   if (selErr) throw wrapDbError("patchSheetDay (select)", selErr)
   if (!existing) throw new SheetError("day_not_found", 404)
   const row = existing as unknown as SheetDayRow
+
+  // 晚餐勾選：改的是結算輸入（attendance_days.dinner_taken），不是月表人工欄。
+  const dinnerTouched = patch.dinnerTaken !== undefined
+  if (dinnerTouched) {
+    if (isFrozenStatus(sheet.status)) {
+      throw new SheetError("sheet_not_editable", 409, { status: sheet.status, field: "dinnerTaken" })
+    }
+    if (!(await columnsExist("attendance_days", "dinner_taken"))) throw new SheetError("dinner_not_migrated", 503)
+    const { data: adRows, error: adErr } = await supabaseAdmin
+      .from("attendance_days")
+      .update({ dinner_taken: patch.dinnerTaken })
+      .eq("tenant_id", tenantId)
+      .eq("employee_id", sheet.employee_id)
+      .eq("work_date", date)
+      .select("id")
+    if (adErr) throw wrapDbError("patchSheetDay (dinner)", adErr)
+    if (!adRows || adRows.length === 0) throw new SheetError("no_attendance_for_dinner", 409, { date })
+  }
 
   const update: Record<string, unknown> = {}
   const overrideTouched = patch.overtimeMinutesOverride !== undefined
@@ -1978,7 +2162,13 @@ export async function patchSheetDay(tenantId: string, sheet: SheetRow, date: str
   }
   if (patch.note !== undefined) update.note = patch.note
   if (patch.anomalyAck !== undefined) update.anomaly_ack = patch.anomalyAck
-  if (Object.keys(update).length === 0) return row
+  if (Object.keys(update).length === 0 && !dinnerTouched) return row
+  if (Object.keys(update).length === 0) {
+    // 只改晚餐：重新結算當天（同一支 settleAttendance，讀到新的手動值）→ 重算月表的計算欄與異常。
+    await settleAttendance({ tenantId, from: date, to: date, employeeId: sheet.employee_id })
+    await refreshDerived(tenantId, sheet)
+    return reloadDay(tenantId, row.id as string)
+  }
 
   const { data: updated, error: updErr } = await supabaseAdmin
     .from("attendance_sheet_days")
@@ -2014,19 +2204,24 @@ export async function patchSheetDay(tenantId: string, sheet: SheetRow, date: str
     return updated as unknown as SheetDayRow
   }
 
-  // 覆寫變動 → 分級與異常（含月加班門檻）要跟著變；註記變動不影響計算欄。
-  if (overrideTouched && (patch.overtimeMinutesOverride ?? null) !== (row.overtime_minutes_override ?? null)) {
+  // 晚餐變動 → 當天重新結算（加班分鐘會變）；覆寫變動 → 分級與異常（含月加班門檻）要跟著變；註記變動不影響計算欄。
+  if (dinnerTouched) await settleAttendance({ tenantId, from: date, to: date, employeeId: sheet.employee_id })
+  if (dinnerTouched || (overrideTouched && (patch.overtimeMinutesOverride ?? null) !== (row.overtime_minutes_override ?? null))) {
     await refreshDerived(tenantId, sheet)
-    const { data: fresh, error: freshErr } = await supabaseAdmin
-      .from("attendance_sheet_days")
-      .select(DAY_COLS)
-      .eq("tenant_id", tenantId)
-      .eq("id", row.id as string)
-      .single()
-    if (freshErr || !fresh) throw wrapDbError("patchSheetDay (reload)", freshErr ?? { message: "no row" })
-    return fresh as unknown as SheetDayRow
+    return reloadDay(tenantId, row.id as string)
   }
   return updated as unknown as SheetDayRow
+}
+
+async function reloadDay(tenantId: string, dayId: string): Promise<SheetDayRow> {
+  const { data: fresh, error: freshErr } = await supabaseAdmin
+    .from("attendance_sheet_days")
+    .select(DAY_COLS)
+    .eq("tenant_id", tenantId)
+    .eq("id", dayId)
+    .single()
+  if (freshErr || !fresh) throw wrapDbError("patchSheetDay (reload)", freshErr ?? { message: "no row" })
+  return fresh as unknown as SheetDayRow
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2158,6 +2353,57 @@ export async function submitSheet(tenantId: string, sheetId: string, actorEmpId:
   })
   await notify(tenantId, await hrAdminIds(tenantId), next, "manager_reviewed", `出勤月表待核准（${sheet.period}）`, `${name} 的 ${sheet.period} 出勤月表（無直屬主管）已送出，請 HR 核准。`)
   return next
+}
+
+export interface UnacknowledgedAnomaly {
+  employeeId: string
+  sheetId: string
+  date: string
+  code: string
+  message: string
+}
+
+/**
+ * 薪資執行前閘門（2026-10-17）：某期月表上「error 級、沒填說明（anomaly_ack）」的日級異常，與 submitSheet 的
+ * requireAnomalyAck 是同一條規則（呼叫端先看 resolvePayrollGates(rules).requireAnomalyAck）。涵蓋所有日級
+ * error，含一例一休合規碼（seven_day_rule、regular_leave_work、daily_over_12h、monthly_ot_over_46h）。
+ * 月級 error 沒有說明欄，與送出關卡一樣不擋。讀 attendance_sheet_days 的現況（核准後的人工註記會鏡射回這裡）；
+ * 沒有月表的員工查不到（requireApprovedSheet 才擋得住「沒月表」）。月表表未遷移 → 空陣列。
+ */
+export async function unacknowledgedErrorsForPeriod(
+  tenantId: string,
+  period: string,
+  employeeIds: string[],
+): Promise<UnacknowledgedAnomaly[]> {
+  if (employeeIds.length === 0) return []
+  const { data: sheets, error: sheetErr } = await supabaseAdmin
+    .from("attendance_sheets")
+    .select("id, employee_id")
+    .eq("tenant_id", tenantId)
+    .eq("period", period)
+    .in("employee_id", employeeIds)
+  if (sheetErr) {
+    if (isMissingTableError(sheetErr)) return []
+    throw wrapDbError("unacknowledgedErrorsForPeriod (sheets)", sheetErr)
+  }
+  const empBySheet = new Map(((sheets ?? []) as Array<{ id: string; employee_id: string }>).map((r) => [r.id, r.employee_id] as const))
+  if (empBySheet.size === 0) return []
+  const { data: days, error: dayErr } = await supabaseAdmin
+    .from("attendance_sheet_days")
+    .select("sheet_id, work_date, anomalies, anomaly_ack")
+    .eq("tenant_id", tenantId)
+    .in("sheet_id", Array.from(empBySheet.keys()))
+    .order("work_date", { ascending: true })
+  if (dayErr) throw wrapDbError("unacknowledgedErrorsForPeriod (days)", dayErr)
+  const out: UnacknowledgedAnomaly[] = []
+  for (const d of (days ?? []) as Array<{ sheet_id: string; work_date: string; anomalies: SheetAnomaly[] | null; anomaly_ack: string | null }>) {
+    if (d.anomaly_ack && d.anomaly_ack.trim().length > 0) continue
+    for (const a of Array.isArray(d.anomalies) ? d.anomalies : []) {
+      if (a.severity !== "error") continue
+      out.push({ employeeId: empBySheet.get(d.sheet_id) as string, sheetId: d.sheet_id, date: d.work_date, code: a.code, message: a.message })
+    }
+  }
+  return out
 }
 
 /** reviewSheet — submitted → manager_reviewed（approve）或 returned（return）。 */

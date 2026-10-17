@@ -3,7 +3,9 @@ import {
   flexShiftDef,
   hhmmToMinutesOrNull,
   lunchWindowOf,
+  overtimeMealDeductionMinutes,
   resolveDefaultLunch,
+  resolveOvertimeMealBreak,
   resolveOvertimeBasis,
   resolveOvertimeDailyCapMinutes,
   unscheduledShiftDef,
@@ -27,7 +29,7 @@ import { loadDayTypeResolver } from "./day-type.js"
 import { loadRuleConfigFor } from "./payroll-inputs.js"
 import { assertDateRangeOpen } from "./period-lock.js"
 import { loadShiftResolver } from "./employee-shifts.js"
-import { pairPunchesTz, type PairedDay } from "./punch-pairing.js"
+import { dinnerPunchByDate, effectiveDinnerTaken, pairPunchesTz, type PairedDay } from "./punch-pairing.js"
 
 /**
  * Worktime settlement — the glue that wires the @hr/rules engine to real data.
@@ -81,6 +83,8 @@ interface PunchRow {
   employee_id: string
   type: string
   punch_at: string
+  /** 下班卡的晚餐勾選（migration 0070；未套 → 不撈、undefined）。 */
+  dinner_taken?: boolean | null
 }
 
 /** 特休的假別代碼（leave_types.code；annual-leave.ts 年度給假用同一個）。 */
@@ -486,6 +490,84 @@ export async function lateMinutesForArrival(input: {
   return { workDate, lateMinutes: result.lateMinutes, threshold, mode }
 }
 
+/** GET /punch/today 的晚餐勾選提示（2026-10-17）。 */
+export interface DinnerPrompt {
+  /** 規則 overtime.mealBreak.mode='opt_in'（有勾才扣）。false → 前端不顯示「今天有用公司晚餐」勾選框。 */
+  optIn: boolean
+  /** 從這個時刻起打下班卡＝當天有延長工時（勾了晚餐會扣）；null＝不適用（沒有開著的上班卡、規則不是 opt_in、16 小時內都不會有延長工時）。 */
+  fromAt: string | null
+  /** 那張開著的上班卡所屬的工作日（租戶時區）。 */
+  workDate: DateKey | null
+}
+
+/** 晚餐提示往後找的上限：上班卡起 16 小時（與跨午夜下班卡的判斷同一個上限，services/punch-carry-over.ts）。 */
+const DINNER_PROMPT_HORIZON_MIN = 16 * 60
+
+/**
+ * 員工端打卡首頁的晚餐勾選提示：還開著的上班卡（今天的，或跨午夜帶過來的）若在 `fromAt` 之後打下班卡，
+ * 當天就有延長工時——這時才顯示「今天有用公司晚餐」勾選框（預設不勾）。
+ * 判斷與結算同一條路徑：當天日別、班別（排班／個人預設班別／彈性上班）、加班起算基準，把「現在下班」
+ * 丟進 computeAttendanceDay，再用 @hr/rules overtimeMealDeductionMinutes 問「勾了晚餐會不會扣」；
+ * 結果對下班時間單調，二分搜尋到分鐘。平日＝超過正常下班即顯示；休息日／國定假日＝超過正常工時才顯示
+ * （8 小時內勾了也不扣，見引擎）。已核准請假的時段不在這裡扣（提示用，結算時照實算）。純計算＋三個查詢。
+ */
+export async function dinnerPromptForOpenShift(input: {
+  tenantId: string
+  employeeId: string
+  /** 今天的打卡（含跨午夜帶過來的上班卡），type／punch_at 即可。 */
+  punches: Array<{ type: string; punch_at: string }>
+}): Promise<DinnerPrompt> {
+  const { tenantId, employeeId } = input
+  const work = input.punches
+    .filter((p) => p.type === "in" || p.type === "out")
+    .sort((a, b) => new Date(a.punch_at).getTime() - new Date(b.punch_at).getTime())
+  const last = work[work.length - 1]
+  if (!last || last.type !== "in") return { optIn: false, fromAt: null, workDate: null }
+
+  const tz = await getTenantTimezone(tenantId)
+  const workDate = localDateKey(last.punch_at, tz)
+  const { rules } = await loadRuleConfigFor(tenantId, workDate.slice(0, 7))
+  const meal = resolveOvertimeMealBreak(rules)
+  if (!meal || meal.mode !== "opt_in") return { optIn: false, fromAt: null, workDate }
+
+  const dayTypes = await loadDayTypeResolver({ tenantId, from: workDate, to: workDate, employeeIds: [employeeId] })
+  const dayType: DayType = dayTypes.forDay(employeeId, workDate)
+  const resolver = await loadShiftResolver({ tenantId, from: workDate, to: workDate, employeeIds: [employeeId] })
+  const scheduledShift = resolver.forDay(employeeId, workDate, dayType).shift
+  const shift = pickDayShift(scheduledShift, dayType, flexShiftDef(rules, workDate), unscheduledShiftDef(rules, dayType))
+  const regular = regularMinutesForDay(
+    resolveOvertimeBasis(rules),
+    scheduledShift,
+    workDate,
+    tz,
+    Math.round(rules.payroll.dailyRegularHours * 60),
+  )
+
+  const inMs = new Date(last.punch_at).getTime()
+  const deductsAt = (minutesAfterIn: number): boolean => {
+    const outIso = new Date(inMs + minutesAfterIn * 60_000).toISOString()
+    const day = pairPunchesTz([...input.punches, { type: "out", punch_at: outIso }], tz).get(workDate)
+    if (!day || day.pairs.length === 0) return false
+    const result = computeAttendanceDay(day.pairs, shift, rules, {
+      date: workDate,
+      dayType,
+      regularMinutes: regular,
+      punchedBreaks: day.breaks.length > 0,
+    })
+    const raw = dayType === "workday" ? Math.max(0, result.workedMinutes - regular) : result.workedMinutes
+    return overtimeMealDeductionMinutes(raw, rules, dayType, regular, { dinnerTaken: true }) > 0
+  }
+  if (!deductsAt(DINNER_PROMPT_HORIZON_MIN)) return { optIn: true, fromAt: null, workDate }
+  let lo = 0
+  let hi = DINNER_PROMPT_HORIZON_MIN
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2)
+    if (deductsAt(mid)) hi = mid
+    else lo = mid + 1
+  }
+  return { optIn: true, fromAt: new Date(inMs + lo * 60_000).toISOString(), workDate }
+}
+
 /** 'HH:MM:SS' → 'HH:MM'（DB time 欄位會回秒數）。 */
 function normalizeHhmm(value: string): string {
   const m = hhmmToMinutesOrNull(value)
@@ -556,16 +638,18 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   //     crosses midnight at either edge can still be closed -------------------
   const winStart = dayWindowUtc(addDaysKey(from, -1), tz).startIso
   const winEnd = dayWindowUtc(addDaysKey(to, 1), tz).endIso
+  // 晚餐勾選（punch_records.dinner_taken，migration 0070）：套了才撈。
+  const punchHasDinner = await columnsExist("punch_records", "dinner_taken")
   let punchQuery = supabaseAdmin
     .from("punch_records")
-    .select("employee_id, type, punch_at")
+    .select(punchHasDinner ? "employee_id, type, punch_at, dinner_taken" : "employee_id, type, punch_at")
     .eq("tenant_id", tenantId)
     .gte("punch_at", winStart)
     .lt("punch_at", winEnd)
   if (employeeId) punchQuery = punchQuery.eq("employee_id", employeeId)
   const { data: punchData, error: punchErr } = await punchQuery
   if (punchErr) throw new Error(`settleAttendance (punches): ${punchErr.message}`)
-  const punches = (punchData ?? []) as PunchRow[]
+  const punches = (punchData ?? []) as unknown as PunchRow[]
 
   // --- 日別（services/day-type.ts，與打卡遲到判斷／月表／缺卡掃描同一支）--------------------
   // 行事曆有列就用；沒有＝依例假／休息日星期（員工個人設定優先，預設週日例假、週六休息日）。
@@ -666,9 +750,12 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     compTimeByKey.set(key, (compTimeByKey.get(key) ?? 0) + minutes)
   }
 
-  // --- 晚餐勾選（attendance_days.dinner_taken；欄位由晚餐功能另加，未加 → 全部 undefined）---------
+  // --- 晚餐勾選（migration 0070；未套 → 全部 undefined）-------------------------------------------
   // 規則 overtime.mealBreak.mode='opt_in' 時只有勾了才扣晚餐；'auto'（舊 config）引擎忽略這個旗標。
-  // 這裡只讀既有值，upsert 不寫這欄（PostgREST upsert 只更新帶來的欄位），員工勾選不會被結算洗掉。
+  // 當日值＝月表手動值（attendance_days.dinner_taken，HR／員工在月表切換）優先，沒設才看下班卡的勾選
+  // （punch_records.dinner_taken，依配對歸屬工作日；任一張 true → true）。見 punch-pairing.effectiveDinnerTaken。
+  // 這裡只讀手動值，upsert 不寫 dinner_taken 欄位（PostgREST upsert 只更新帶來的欄位），月表手動值不會被結算洗掉；
+  // 最終值另記在 anomaly.dinnerTaken／dinnerSource 供月表顯示。
   const dinnerByKey = new Map<string, boolean>()
   if (await columnsExist("attendance_days", "dinner_taken")) {
     let dinnerQuery = supabaseAdmin
@@ -693,10 +780,16 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     else punchesByEmp.set(p.employee_id, [p])
   }
   const pairedByKey = new Map<string, PairedDay>()
+  const punchDinnerByKey = new Map<string, boolean>()
   for (const [empId, list] of punchesByEmp) {
     for (const [date, day] of pairPunchesTz(list, tz)) {
       if (date < from || date > to) continue // belongs to a neighbouring window
       pairedByKey.set(`${empId}|${date}`, day)
+    }
+    if (punchHasDinner) {
+      for (const [date, taken] of dinnerPunchByDate(list, tz)) {
+        if (date >= from && date <= to) punchDinnerByKey.set(`${empId}|${date}`, taken)
+      }
     }
   }
 
@@ -744,13 +837,14 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     // （DayContext.ptoWork）。特休假單本身不在這裡撤銷：anomaly.ptoWork 留痕，由月表／HR 處理。
     const punchedPairs = !!day && day.pairs.length > 0
     const ptoWork = punchedPairs && (leave?.breakdown[PTO_LEAVE_CODE] ?? 0) >= dayRegularMinutes
+    const dinner = effectiveDinnerTaken(dinnerByKey.get(key), punchDinnerByKey.get(key))
     const result = computeAttendanceDay(day?.pairs ?? [], shift, rules, {
       date: workDate,
       dayType,
       regularMinutes: dayRegularMinutes,
       leaveIntervals: leaveIntervalsByKey.get(key),
       punchedBreaks: !!day && day.breaks.length > 0,
-      dinnerTaken: dinnerByKey.get(key),
+      dinnerTaken: dinner.taken,
       ptoWork: ptoWork || undefined,
     })
     let workedMinutes = result.workedMinutes
@@ -783,6 +877,11 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     // AttendanceDay.ptoWork／compDayOwed／compTimeMinutes。
     if (result.ptoWork) anomaly.ptoWork = true
     if (result.compDayOwed) anomaly.compDayOwed = result.compDayOwed
+    // 晚餐最終值（月表顯示「晚餐」用；手動值本身在 dinner_taken 欄位，不在這裡寫）。
+    if (dinner.taken !== undefined) {
+      anomaly.dinnerTaken = dinner.taken
+      anomaly.dinnerSource = dinner.source
+    }
     const compTimeMinutes = compTimeByKey.get(key) ?? 0
     if (compTimeMinutes > 0) anomaly.compTimeMinutes = compTimeMinutes
 

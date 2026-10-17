@@ -343,7 +343,9 @@ function writeDayRows(ws: ExcelJS.Worksheet, view: SheetView, tz: string): numbe
     beyondCell.numFmt = "0.0"
 
     // M2：在家工作的日子在「內容」欄前面標出來（工時是認列的，不是打卡來的）。
-    const content = day.content ?? ""
+    // 2026-10-17 晚餐勾選（規則「有勾才扣」）：當天有用公司晚餐也標在「內容」欄（扣了幾分看異常欄的 meal_deducted）。
+    const dinnerNote = day.dinner?.optIn && day.dinner.taken === true ? "有晚餐" : ""
+    const content = [dinnerNote, day.content ?? ""].filter((v) => v).join("／")
     row.getCell(10).value = day.wfh ? (content ? `在家工作／${content}` : "在家工作") : content
     row.getCell(11).value = day.outingNote ?? day.projectName ?? ""
     row.getCell(12).value = crossedMidnight ? `${day.note ?? ""}(隔日)`.trim() : (day.note ?? "")

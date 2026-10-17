@@ -14,9 +14,14 @@ import { checkPunchCooldown, cooldownSeconds, statusFromRecords } from "../servi
 import { findCarryOverIn } from "../services/punch-carry-over.js"
 import { assertInstantsOpen } from "../services/period-lock.js"
 import { importManualPunches } from "../services/imports/writers.js"
-import { lateMinutesForArrival, type ArrivalLateness } from "../services/settlement.js"
+import {
+  dinnerPromptForOpenShift,
+  lateMinutesForArrival,
+  type ArrivalLateness,
+  type DinnerPrompt,
+} from "../services/settlement.js"
 import { checkWfhPunch, loadEmployeeFeatures } from "../services/employee-features.js"
-import { punchRecordsHaveWfh } from "../lib/schema-compat.js"
+import { columnsExist, punchRecordsHaveWfh } from "../lib/schema-compat.js"
 import {
   LATE_REASON_MAX,
   attachPunchToLateReport,
@@ -52,6 +57,10 @@ const punchSchema = z.object({
   // 2026-10-13 在家上班打卡：只有 employees.features.wfhPunch 開通的員工能帶 true（否則 400
   // wfh_punch_not_enabled）；寫進 punch_records.wfh，月表該日標「在家工作」，工時照打卡算。
   wfh: z.boolean().optional(),
+  // 2026-10-17 晚餐勾選：打「下班卡」時勾的「今天有用公司晚餐」（ESS 只在當天有延長工時才顯示勾選框，預設不勾）。
+  // 只有這張卡最後是 type='out' 才寫進 punch_records.dinner_taken（migration 0070；未套 → 忽略）；上班卡帶了也不理會。
+  // 結算：月表手動值優先，其次當天任一張下班卡 true（services/settlement.ts）。
+  dinnerTaken: z.boolean().optional(),
   // NOTE: we deliberately do NOT read employeeId from the body. The punch is
   // always recorded for the token owner (anti-proxy-punch). Any employeeId a
   // client sends is ignored — kept lax here so a stray field doesn't 400.
@@ -188,6 +197,9 @@ async function firstInLateness(tenantId: string, employeeId: string, now: Date):
  *
  * 發薪鎖定（2026-10-11）：當下所在的月份（租戶時區）已結算 → 409 `{ error: "period_closed", period }`，
  * 不寫打卡也不寫遲到說明（正常情況當月不會是已結算月，這是提早結算的特例）。
+ *
+ * 晚餐勾選（2026-10-17）：`dinnerTaken`（boolean）只在這張卡是下班卡時寫進 punch_records.dinner_taken；
+ * 201 多帶 `dinnerTaken`（沒寫＝null）。
  */
 punchRouter.post(
   "/punch",
@@ -206,7 +218,7 @@ punchRouter.post(
       res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
       return
     }
-    const { type, source, lat, lng, deviceId, geoStatus, wfh } = parsed.data
+    const { type, source, lat, lng, deviceId, geoStatus, wfh, dinnerTaken } = parsed.data
     const now = new Date()
 
     try {
@@ -342,6 +354,9 @@ punchRouter.post(
             })
           : null
 
+      // 晚餐勾選只記在下班卡上，且欄位已套（0070）才帶，舊庫照常寫得進去。
+      const writeDinner =
+        resolvedType === "out" && typeof dinnerTaken === "boolean" && (await columnsExist("punch_records", "dinner_taken"))
       const { data, error } = await supabaseAdmin
         .from("punch_records")
         .insert({
@@ -361,6 +376,7 @@ punchRouter.post(
           punch_at: now.toISOString(),
           // 只在勾了才帶欄位：沒勾＝DB 預設 false，舊庫（0068 未套）一般打卡照常寫得進去。
           ...(wfhRequested ? { wfh: true } : {}),
+          ...(writeDinner ? { dinner_taken: dinnerTaken } : {}),
         })
         .select("*")
         .single()
@@ -409,6 +425,7 @@ punchRouter.post(
         lng: data.lng,
         deviceId: data.device_id,
         wfh: data.wfh === true,
+        dinnerTaken: typeof data.dinner_taken === "boolean" ? data.dinner_taken : null,
         record,
         ...(lateReport && lateness ? { lateReport: { id: lateReport.id, lateMinutes: lateness.lateMinutes } } : {}),
       })
@@ -429,6 +446,10 @@ punchRouter.post(
  * 沒班別＝今天 06:00 前，見 services/punch-carry-over.ts），那一列會放在
  * `records` 最前面並多帶 `carry_over: true`（status 因此是 working）。前端拿它判斷「下班打卡」，但不算進
  * 今天的上班時間／筆數。
+ *
+ * 晚餐勾選（2026-10-17）：多回 `dinnerPrompt: { optIn, fromAt, workDate } | null`（上班中才算，見
+ * services/settlement.ts dinnerPromptForOpenShift）。`optIn && fromAt && 現在 ≥ fromAt` 時首頁顯示
+ * 「今天有用公司晚餐」勾選框，下班打卡帶 `dinnerTaken`。
  */
 punchRouter.get(
   "/punch/today",
@@ -477,7 +498,21 @@ punchRouter.get(
       const todayRows = (data ?? []) as unknown as Array<Record<string, unknown>>
       const records = carried ? [{ ...carried, carry_over: true }, ...todayRows] : todayRows
       const status = statusFromRecords(records as unknown as Array<{ type: string }>)
-      res.status(200).json({ records, status })
+      // 晚餐勾選提示（2026-10-17）：上班中且規則是「有勾才扣」時，回「從幾點起下班＝有延長工時」，
+      // 首頁到了那個時間才在下班打卡鈕旁顯示「今天有用公司晚餐」。判斷出錯只記 warn、回 null（不影響打卡）。
+      let dinnerPrompt: DinnerPrompt | null = null
+      if (status === "working") {
+        try {
+          dinnerPrompt = await dinnerPromptForOpenShift({
+            tenantId,
+            employeeId: self.id,
+            punches: records as unknown as Array<{ type: string; punch_at: string }>,
+          })
+        } catch (err) {
+          logger.warn({ err, tenantId, employeeId: self.id }, "GET /punch/today: dinner prompt failed")
+        }
+      }
+      res.status(200).json({ records, status, dinnerPrompt })
     } catch (err) {
       next(err)
     }

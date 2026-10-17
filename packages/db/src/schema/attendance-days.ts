@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, date, integer, jsonb, timestamp, uniqueIndex } from "drizzle-orm/pg-core"
+import { pgTable, uuid, text, date, integer, jsonb, timestamp, uniqueIndex, boolean } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 import { employees } from "./employees"
 
@@ -40,6 +40,11 @@ export const attendanceDays = pgTable(
     leaveBreakdown: jsonb("leave_breakdown").notNull().default({}),
     outingMinutes: integer("outing_minutes").notNull().default(0),
     earlyLeaveMinutes: integer("early_leave_minutes").notNull().default(0),
+    /**
+     * 2026-10-17 晚餐勾選（migration 0070）：出勤月表手動設定的晚餐（HR／員工），優先於下班卡的勾選；
+     * NULL＝沒手動設定。結算 upsert 不帶這欄（不會被重算洗掉），當日最終值記在 anomaly.dinnerTaken。
+     */
+    dinnerTaken: boolean("dinner_taken"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

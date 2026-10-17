@@ -49,6 +49,16 @@ export type AnomalyCode =
   | "no_salary_structure"
   /** 2026-10-11：本月有遲到說明老闆還沒決定（視為影響全勤；warn）。 */
   | "late_reports_undecided"
+  /** 2026-10-17 一例一休合規（services/compliance.ts）：依日曆連續出勤超過 6 天（跨月也算；error）。 */
+  | "seven_day_rule"
+  /** 例假出勤（勞基法第 40 條，加發一日工資＋補假，detail.compDayOwed；error）。 */
+  | "regular_leave_work"
+  /** 特休日出勤（已核准整天特休又有出勤，HR 處理該特休假單；warn）。 */
+  | "pto_work"
+  /** 單日正常＋延長工時超過 12 小時（休息日亦同；error）。 */
+  | "daily_over_12h"
+  /** 月延長工時（capCountableMinutes 口徑）累計跨過 46 小時的那一天（error）。 */
+  | "monthly_ot_over_46h"
 
 export interface SheetAnomaly {
   code: AnomalyCode
@@ -95,6 +105,12 @@ export interface SheetDayView {
   note: string | null
   anomalyAck: string | null
   anomalies: SheetAnomaly[]
+  /**
+   * 2026-10-17 晚餐勾選：`taken`＝當日最終值（月表手動值優先，否則下班卡勾選；null＝未填＝不扣）、
+   * `source`＝manual（月表手動）｜punch（下班卡）｜null、`optIn`＝規則是「有勾才扣」（false 時畫面不顯示切換）。
+   * 舊快照／舊版 API 沒有這欄。
+   */
+  dinner?: { taken: boolean | null; source: "manual" | "punch" | null; optIn: boolean }
 }
 
 /** Month-level rollups shown in the sheet header/summary row. */

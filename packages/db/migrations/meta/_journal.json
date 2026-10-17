@@ -493,6 +493,13 @@
       "breakpoints": true
     },
     {
+      "idx": 70,
+      "version": "7",
+      "when": 1792100000000,
+      "tag": "0070_dinner_taken",
+      "breakpoints": true
+    },
+    {
       "idx": 71,
       "version": "7",
       "when": 1792200000000,

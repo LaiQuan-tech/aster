@@ -249,3 +249,37 @@ export function wfhPunchDates(punches: Array<PunchLike & { wfh?: boolean | null 
   }
   return out
 }
+
+/**
+ * 2026-10-17 晚餐勾選：下班卡上的「今天有用公司晚餐」（punch_records.dinner_taken）歸到哪個工作日。
+ * 歸屬與 wfhPunchDates 相同：配對到的下班卡跟著上班卡那天（跨午夜 14:30→00:10 的晚餐算前一天），
+ * 配不到的下班卡算打卡當下的本地日。只看 type='out' 且 dinner_taken 非 null 的卡；
+ * 同一天任一張 true → true，否則（有 false）→ false。沒有勾選資料的日子不在 Map 裡。純函式。
+ */
+export function dinnerPunchByDate(
+  punches: Array<PunchLike & { dinner_taken?: boolean | null }>,
+  tz: string,
+): Map<DateKey, boolean> {
+  const out = new Map<DateKey, boolean>()
+  const flagged = punches.filter((p) => p.type === "out" && typeof p.dinner_taken === "boolean")
+  if (flagged.length === 0) return out
+  const outDayByInstant = new Map<string, DateKey>()
+  for (const [date, day] of pairPunchesTz(punches, tz)) {
+    for (const seg of day.segments) outDayByInstant.set(new Date(seg.outAt).toISOString(), date)
+  }
+  for (const p of flagged) {
+    const date = outDayByInstant.get(new Date(p.punch_at).toISOString()) ?? localDateKey(p.punch_at, tz)
+    out.set(date, out.get(date) === true || p.dinner_taken === true)
+  }
+  return out
+}
+
+/** 當日晚餐的最終值與來源：月表手動值（attendance_days.dinner_taken）優先，其次下班卡勾選；都沒有＝undefined（不扣）。 */
+export function effectiveDinnerTaken(
+  manual: boolean | null | undefined,
+  punch: boolean | undefined,
+): { taken: boolean | undefined; source: "manual" | "punch" | null } {
+  if (typeof manual === "boolean") return { taken: manual, source: "manual" }
+  if (typeof punch === "boolean") return { taken: punch, source: "punch" }
+  return { taken: undefined, source: null }
+}

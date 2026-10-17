@@ -28,7 +28,12 @@ import {
   toAttendanceDay,
   toSalaryStructure,
 } from "../services/payroll-inputs.js"
-import { SheetError, lockApprovedSheetFor, type SheetSnapshot } from "../services/attendance-sheets.js"
+import {
+  SheetError,
+  lockApprovedSheetFor,
+  unacknowledgedErrorsForPeriod,
+  type SheetSnapshot,
+} from "../services/attendance-sheets.js"
 import { exemptDatesOf, loadLateReportsForPeriod, undecidedCountOf } from "../services/late-reports.js"
 import { PERIOD_RE, assertPeriodOpen } from "../services/period-lock.js"
 import { adjustmentsStale, embeddedAdjustmentsOf, loadAdjustmentsByEmployee } from "../services/payroll-adjustments.js"
@@ -110,6 +115,10 @@ function isHrRole(role: string | undefined): boolean {
  * untouched and reported in `skipped` (a finalized slip is locked).
  *
  * 發薪鎖定：該月已結算（period_closes closed）→ 409 period_closed，一張都不產生。
+ *
+ * 異常閘門（2026-10-17）：規則 payroll.requireAnomalyAck（預設 true）時，這期月表還有 error 級、沒填說明的
+ * 日級異常 → 409 `{ error: "anomalies_unacknowledged", period, count, anomalies: [{ employeeId, sheetId, date,
+ * code, message }] }`，一張都不產生（services/attendance-sheets.ts unacknowledgedErrorsForPeriod）。
  *
  * Returns { generated: N, skipped: string[], skippedDetails, missingInsuredSalary, warnings }
  * (skipped = employee ids skipped — payslip already finalized, or the engine
@@ -230,6 +239,21 @@ payrollRouter.post(
         return
       }
       const finalized = new Set((finData ?? []).map((r) => r.employee_id as string))
+
+      // --- 薪資執行前閘門（2026-10-17）：與月表送出同一條 requireAnomalyAck 規則 ----------------
+      // 這期月表上還有 error 級、沒填說明的日級異常（缺卡、七休一、例假出勤、單日超過 12 小時、月延長工時
+      // 超過 46 小時…）→ 409，一張都不產生，列出待處理清單（已定案的人不擋）。HR 在月表該日填說明後再執行。
+      if (resolvePayrollGates(rules).requireAnomalyAck) {
+        const pending = await unacknowledgedErrorsForPeriod(
+          tenantId,
+          period,
+          employeeIds.filter((id) => !finalized.has(id)),
+        )
+        if (pending.length > 0) {
+          res.status(409).json({ error: "anomalies_unacknowledged", period, count: pending.length, anomalies: pending })
+          return
+        }
+      }
 
       // --- compute + upsert each employee's payslip ---------------------------
       // `skipped` keeps its historical shape (employee ids) for existing

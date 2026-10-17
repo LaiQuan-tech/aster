@@ -4,6 +4,7 @@
  */
 import { apiFetch } from "./api-client";
 import { prepareUploadFile } from "./upload-prep";
+import type { DinnerPrompt } from "./dinner-prompt";
 
 export interface Branding {
   primaryColor?: string;
@@ -67,6 +68,8 @@ export interface PunchRecord {
 export interface PunchTodayResponse {
   records: PunchRecord[];
   status: "working" | "off";
+  /** 2026-10-17 晚餐勾選提示（上班中才有；舊 API 沒有這欄）。見 lib/dinner-prompt.ts。 */
+  dinnerPrompt?: DinnerPrompt | null;
 }
 
 export interface PunchResult {
@@ -84,6 +87,8 @@ export interface PunchResult {
   lateReport?: { id: string; lateMinutes: number };
   /** 這筆是否記為在家上班（2026-10-13）。 */
   wfh?: boolean;
+  /** 下班卡勾的晚餐（2026-10-17；沒問到＝null）。 */
+  dinnerTaken?: boolean | null;
 }
 
 /**
@@ -413,6 +418,8 @@ export function postPunch(body: {
   lateReason?: string;
   /** 在家上班（只有 me.features.wfhPunch 開通的員工能帶 true；否則 400 wfh_punch_not_enabled）。 */
   wfh?: boolean;
+  /** 2026-10-17：下班卡勾的「今天有用公司晚餐」（只有顯示勾選框時才帶，見 lib/dinner-prompt.ts）。 */
+  dinnerTaken?: boolean;
 }) {
   return apiFetch<PunchResult>("/punch", {
     method: "POST",

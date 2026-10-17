@@ -41,6 +41,7 @@ export const attendanceSheetsRouter = Router()
  *   GET   /attendance-sheets/:id                 同上範圍；`money` 只給 HR
  *   GET   /my/attendance-sheet?period=           本人；不存在且 period ≤ 當月 → 即時產生
  *   PATCH /attendance-sheets/:id/days/:date      本人（draft/returned）；HR（locked 前；approved 只能改註記）
+ *                                                dinnerTaken（晚餐）改的是結算輸入：重算當天加班；approved 起不能改
  *   POST  /attendance-sheets/:id/submit          本人或 HR
  *   POST  /attendance-sheets/:id/review          manager_emp_id 本人或 HR
  *   POST  /attendance-sheets/:id/approve         HR
@@ -95,6 +96,8 @@ export const dayPatchSchema = z
     projectId: z.string().uuid().nullable().optional(),
     note: z.string().trim().max(500).nullable().optional(),
     anomalyAck: z.string().trim().max(250).nullable().optional(),
+    // 2026-10-17 晚餐勾選：true／false＝月表手動設定、null＝清掉回到下班卡勾選（寫完重算當天加班）。
+    dinnerTaken: z.boolean().nullable().optional(),
   })
   .refine(
     (b) =>

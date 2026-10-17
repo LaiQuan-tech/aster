@@ -6,7 +6,10 @@ import { loadShiftResolver } from "./employee-shifts.js"
 import { asDayTypeOrWorkday, loadDayTypeResolver } from "./day-type.js"
 import { coveredByRequests, loadApprovedAbsences, shiftBoundsOn } from "./absence-cover.js"
 import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
-import type { DayType, ShiftDef } from "@hr/rules"
+import { capCountableMinutes, type DayType, type RuleConfig, type ShiftDef } from "@hr/rules"
+import { complianceFindings, sevenDayLookbackFrom, type ComplianceFindingType } from "./compliance.js"
+import { loadRuleConfigFor } from "./payroll-inputs.js"
+import { managerOfEmployee } from "../middleware/scope.js"
 
 /**
  * Rule-based attendance detection — pure query logic shared by the HR API routes
@@ -19,8 +22,9 @@ import type { DayType, ShiftDef } from "@hr/rules"
  *     queued in-app notification per finding (idempotent re-runs).
  *   • computeLateStats   — per-employee / per-department late roll-up over a
  *     window, with an optional recent-period trend series.
- *   • detectAnomalies    — connected-late streaks, frequent missing punches and
- *     monthly overtime that breaches the 勞基法 46h ceiling.
+ *   • detectAnomalies    — connected-late streaks, frequent missing punches, and the
+ *     一例一休合規 checks（services/compliance.ts，2026-10-17）: 七休一、例假出勤、特休出勤、
+ *     單日 12 小時、單月延長工時 46 小時（capCountableMinutes 口徑）。
  *
  * Time model: punches are stored as UTC instants; the business clock is the
  * tenant's timezone (tenants.timezone, default Asia/Taipei — see lib/tz.ts),
@@ -308,7 +312,20 @@ export async function computeLateStats(
 
 // --- 異常出勤偵測 --------------------------------------------------------------
 
-export type AnomalyType = "consecutive_late" | "frequent_missing" | "excess_overtime"
+/**
+ * 2026-10-17：原本的 excess_overtime（單月加班 > 46h，直接加總 overtime_minutes）改名 monthly_ot_over_46h、
+ * 改用 capCountableMinutes 口徑（與出勤月表同碼同口徑）；另加四個一例一休合規碼。
+ */
+export type AnomalyType = "consecutive_late" | "frequent_missing" | ComplianceFindingType
+
+/** 合規類發現通知主管與 HR（不是員工本人），去重看 payload.key（同一件事每天重掃不重複通知）。 */
+const COMPLIANCE_TYPES: ReadonlySet<AnomalyType> = new Set<AnomalyType>([
+  "seven_day_rule",
+  "regular_leave_work",
+  "pto_work",
+  "daily_over_12h",
+  "monthly_ot_over_46h",
+])
 
 export interface Anomaly {
   employeeId: string
@@ -354,12 +371,15 @@ interface ExistingAnomalyNotificationRow {
  *   • consecutive_late  — a run of ≥3 calendar-adjacent workdays with late>0.
  *   • frequent_missing  — ≥2 days in the window that were scheduled yet settled
  *                         to worked_minutes=0 (a likely missed day / no punch).
- *   • excess_overtime   — any calendar month whose summed overtime_minutes
- *                         exceeds the 勞基法 46h ceiling (2760 minutes).
+ *   • 一例一休合規（services/compliance.ts complianceFindings）：seven_day_rule（連續出勤超過 6 天，
+ *     往前多讀 6 天判跨月／跨窗）、regular_leave_work、pto_work、daily_over_12h（每天一筆）、
+ *     monthly_ot_over_46h（與窗相交的月份，從當月 1 號累計，capCountableMinutes 口徑）。
  *
- * Optionally (`queue:true`) it enqueues one 'anomaly' notification per finding
- * addressed to the affected employee (HR routing is a later concern). Returns
- * the findings plus the number of notifications inserted.
+ * Optionally (`queue:true`) it enqueues 'anomaly' notifications: consecutive_late／frequent_missing go to
+ * the affected employee (deduped per from/to as before); the compliance findings go to the employee's
+ * manager and every active HR admin (payload carries subjectEmployeeId + a stable key; deduped on
+ * recipient + type + subject + key over the last 62 days, so a daily re-scan does not re-notify).
+ * Returns the findings plus the number of notifications inserted.
  */
 export async function detectAnomalies(
   tenantId: string,
@@ -369,12 +389,15 @@ export async function detectAnomalies(
     throw new Error("detectAnomalies: from/to must be YYYY-MM-DD")
   }
 
+  // 合規檢查要往前看：七休一多讀 6 天、月上限從 from 那個月的 1 號累計。連續遲到／缺卡仍只看 [from, to]。
+  const monthStart = `${from.slice(0, 7)}-01`
+  const lookbackFrom = sevenDayLookbackFrom(from) < monthStart ? sevenDayLookbackFrom(from) : monthStart
   const loadDays = (cols: string) =>
     supabaseAdmin
       .from("attendance_days")
       .select(cols)
       .eq("tenant_id", tenantId)
-      .gte("work_date", from)
+      .gte("work_date", lookbackFrom)
       .lte("work_date", to)
       .order("work_date", { ascending: true })
   const BASE_COLS = "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes"
@@ -385,7 +408,8 @@ export async function detectAnomalies(
     adRes = await loadDays(`${BASE_COLS}, day_type, anomaly`)
   }
   if (adRes.error) throw new Error(`detectAnomalies (attendance_days): ${adRes.error.message}`)
-  const days = (adRes.data ?? []) as unknown as AnomalyDayRow[]
+  const allDays = (adRes.data ?? []) as unknown as AnomalyDayRow[]
+  const days = allDays.filter((d) => d.work_date >= from)
 
   // 有班別的 (employee, work_date)——frequent_missing 用它分辨「有應到卻結算成 0」與「本來就沒有班別」。
   // 班別解析走 services/employee-shifts.ts（與結算／月表／打卡遲到判斷同一支）：排班列（班表功能 2026-10-11
@@ -416,7 +440,31 @@ export async function detectAnomalies(
     else perEmp.set(d.employee_id, [d])
   }
 
+  const perEmpAll = new Map<string, AnomalyDayRow[]>()
+  for (const d of allDays) {
+    const arr = perEmpAll.get(d.employee_id)
+    if (arr) arr.push(d)
+    else perEmpAll.set(d.employee_id, [d])
+  }
+
+  // 合規檢查的規則依月份選版（與月表同一支 loadRuleConfigFor）。
+  const rulesByPeriod = new Map<string, RuleConfig>()
+  for (const d of allDays) {
+    const period = d.work_date.slice(0, 7)
+    if (!rulesByPeriod.has(period)) rulesByPeriod.set(period, (await loadRuleConfigFor(tenantId, period)).rules)
+  }
+
   const anomalies: Anomaly[] = []
+  for (const [employeeId, empAllDays] of perEmpAll) {
+    for (const f of complianceFindings(empAllDays, {
+      from,
+      to,
+      rulesFor: (period) => rulesByPeriod.get(period) as RuleConfig,
+      capCountable: capCountableMinutes,
+    })) {
+      anomalies.push({ employeeId, type: f.type, detail: { ...f.detail, key: f.key } })
+    }
+  }
   for (const [employeeId, empDays] of perEmp) {
     // consecutive_late: longest run of calendar-adjacent late days.
     let runStart: string | null = null
@@ -470,32 +518,18 @@ export async function detectAnomalies(
         detail: { count: missingDays.length, dates: missingDays.map((d) => d.work_date) },
       })
     }
-
-    // excess_overtime: any month over the 46h cap.
-    const otByMonth = new Map<string, number>()
-    for (const d of empDays) {
-      const period = d.work_date.slice(0, 7)
-      otByMonth.set(period, (otByMonth.get(period) ?? 0) + (d.overtime_minutes ?? 0))
-    }
-    for (const [period, ot] of otByMonth) {
-      if (ot > MONTHLY_OT_CAP_MINUTES) {
-        anomalies.push({
-          employeeId,
-          type: "excess_overtime",
-          detail: { period, overtimeMinutes: ot, capMinutes: MONTHLY_OT_CAP_MINUTES },
-        })
-      }
-    }
   }
 
   let queued = 0
-  if (queue && anomalies.length > 0) {
-    const labels: Record<AnomalyType, string> = {
+  const personal = anomalies.filter((a) => !COMPLIANCE_TYPES.has(a.type))
+  const compliance = anomalies.filter((a) => COMPLIANCE_TYPES.has(a.type))
+  if (queue && compliance.length > 0) queued += await queueComplianceNotifications(tenantId, compliance, { from, to })
+  if (queue && personal.length > 0) {
+    const labels: Record<string, string> = {
       consecutive_late: "連續遲到預警",
       frequent_missing: "頻繁缺卡預警",
-      excess_overtime: "加班超時預警",
     }
-    const employeeIds = Array.from(new Set(anomalies.map((a) => a.employeeId)))
+    const employeeIds = Array.from(new Set(personal.map((a) => a.employeeId)))
     const { data: existingData, error: existingErr } = await supabaseAdmin
       .from("notifications")
       .select("employee_id, payload")
@@ -510,7 +544,7 @@ export async function detectAnomalies(
         .filter((row) => row.payload?.from === from && row.payload?.to === to)
         .map((row) => `${row.employee_id}|${row.payload?.anomalyType}`),
     )
-    const rows = anomalies
+    const rows = personal
       .filter((a) => !existingKeys.has(`${a.employeeId}|${a.type}`))
       .map((a) => ({
         tenant_id: tenantId,
@@ -525,11 +559,104 @@ export async function detectAnomalies(
     if (rows.length > 0) {
       const { error: insErr } = await supabaseAdmin.from("notifications").insert(rows)
       if (insErr) throw new Error(`detectAnomalies (queue): ${insErr.message}`)
-      queued = rows.length
+      queued += rows.length
     }
   }
 
   return { anomalies, queued }
+}
+
+const COMPLIANCE_LABELS: Record<ComplianceFindingType, string> = {
+  seven_day_rule: "七休一違規預警",
+  regular_leave_work: "例假出勤預警",
+  pto_work: "特休日出勤提醒",
+  daily_over_12h: "單日工時超過 12 小時預警",
+  monthly_ot_over_46h: "單月延長工時超過 46 小時預警",
+}
+
+/** 合規通知的內文（不含姓名——通知列表另有對象；姓名在畫面端由 subjectEmployeeId 查）。 */
+function complianceBody(a: Anomaly): string {
+  const d = a.detail as Record<string, unknown>
+  switch (a.type) {
+    case "seven_day_rule":
+      return `員工自 ${String(d.from)} 起連續出勤 ${String(d.consecutiveDays)} 天（至 ${String(d.to)}），依勞基法第 36 條每七日至少應有一日例假。`
+    case "regular_leave_work":
+      return `員工於例假日 ${String(d.date)} 出勤：依勞基法第 40 條僅限天災、事變或突發事件，須加發一日工資並於事後給補假。`
+    case "pto_work":
+      return `員工於特休日 ${String(d.date)} 出勤，工資依國定假日計；請處理該特休假單（撤銷或改期）。`
+    case "daily_over_12h":
+      return `員工 ${String(d.date)} 當日總工時超過 12 小時（勞基法第 32 條）。`
+    case "monthly_ot_over_46h":
+      return `員工 ${String(d.period)} 延長工時累計已超過 46 小時（勞基法第 32 條）。`
+    default:
+      return "偵測到出勤合規異常。"
+  }
+}
+
+/**
+ * 合規發現 → 通知主管（managerOfEmployee）與所有在職 HR 管理員；同一位收件人、同一類型、同一位員工、
+ * 同一個 key 在近 62 天內已通知過就不再發（每日排程重掃同一個違規不會天天通知）。
+ */
+async function queueComplianceNotifications(
+  tenantId: string,
+  findings: Anomaly[],
+  window: { from: string; to: string },
+): Promise<number> {
+  const { data: hrData, error: hrErr } = await supabaseAdmin
+    .from("employees")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("role", "hr_admin")
+    .eq("status", "active")
+  if (hrErr) throw new Error(`detectAnomalies (hr admins): ${hrErr.message}`)
+  const hrIds = (hrData ?? []).map((r) => r.id as string)
+
+  const subjects = Array.from(new Set(findings.map((f) => f.employeeId)))
+  const recipientsBySubject = new Map<string, string[]>()
+  for (const subject of subjects) {
+    const manager = await managerOfEmployee(tenantId, subject)
+    recipientsBySubject.set(subject, Array.from(new Set([...(manager ? [manager] : []), ...hrIds])))
+  }
+  const allRecipients = Array.from(new Set(Array.from(recipientsBySubject.values()).flat()))
+  if (allRecipients.length === 0) return 0
+
+  const since = new Date(Date.now() - 62 * 24 * 60 * 60 * 1000).toISOString()
+  const { data: existingData, error: existingErr } = await supabaseAdmin
+    .from("notifications")
+    .select("employee_id, payload")
+    .eq("tenant_id", tenantId)
+    .eq("type", "anomaly")
+    .in("employee_id", allRecipients)
+    .gte("created_at", since)
+  if (existingErr) throw new Error(`detectAnomalies (existing compliance): ${existingErr.message}`)
+  const seen = new Set(
+    ((existingData ?? []) as Array<{ employee_id: string; payload: Record<string, unknown> | null }>)
+      .filter((r) => r.payload && typeof r.payload.key === "string")
+      .map((r) => `${r.employee_id}|${String(r.payload?.anomalyType)}|${String(r.payload?.subjectEmployeeId)}|${String(r.payload?.key)}`),
+  )
+  const rows: Array<Record<string, unknown>> = []
+  for (const f of findings) {
+    const key = String((f.detail as Record<string, unknown>).key ?? "")
+    for (const recipient of recipientsBySubject.get(f.employeeId) ?? []) {
+      const dedupe = `${recipient}|${f.type}|${f.employeeId}|${key}`
+      if (seen.has(dedupe)) continue
+      seen.add(dedupe)
+      rows.push({
+        tenant_id: tenantId,
+        employee_id: recipient,
+        type: "anomaly",
+        title: COMPLIANCE_LABELS[f.type as ComplianceFindingType] ?? "出勤合規預警",
+        body: complianceBody(f),
+        channel: "inapp",
+        status: "pending",
+        payload: { anomalyType: f.type, from: window.from, to: window.to, subjectEmployeeId: f.employeeId, key, detail: f.detail },
+      })
+    }
+  }
+  if (rows.length === 0) return 0
+  const { error: insErr } = await supabaseAdmin.from("notifications").insert(rows)
+  if (insErr) throw new Error(`detectAnomalies (queue compliance): ${insErr.message}`)
+  return rows.length
 }
 
 /** True when `b` is exactly one calendar day after `a` (both "YYYY-MM-DD"). */

@@ -22,6 +22,7 @@ import { loadPayrollEmployees } from "@/lib/payroll-employees";
 import { errorMessageOf } from "@/lib/period-closed";
 import { PayrollAdjustmentsCard } from "./_components/PayrollAdjustmentsCard";
 import { PeriodLockCard } from "./_components/PeriodLockCard";
+import { payrollGateText } from "@/lib/payroll-gate";
 
 const inputCls =
   "w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
@@ -277,7 +278,8 @@ export default function PayrollAdminPage() {
       setAdjustmentsRefresh((n) => n + 1);
     } catch (err) {
       // 該月已發薪鎖定 → 409 period_closed →「YYYY-MM 已結算，請洽管理者」（要重算，先請老闆或老闆指定的人重新開放）。
-      setRunMsg({ ok: false, text: errorMessageOf(err, "執行失敗") });
+      // 這期月表還有 error 級、沒填說明的日異常 → 409 anomalies_unacknowledged（2026-10-17 薪資執行前閘門），列出待處理項目。
+      setRunMsg({ ok: false, text: payrollGateText(err, empName) ?? errorMessageOf(err, "執行失敗") });
     }
   }
 

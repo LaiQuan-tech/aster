@@ -190,12 +190,15 @@ describe("computeAnomalies — 115-06 fixture 情境", () => {
     expect(r.month.map((m) => m.code)).not.toContain("monthly_ot_threshold")
   })
 
-  it("劉皇佑 6/7（fixture 裡是週日 10:10–23:13）→ 例假出勤 warn，沒有 error 級異常", () => {
+  it("劉皇佑 6/7（fixture 裡是週日 10:10–23:13）→ 休息日出勤 warn；唯一的 error 是單日超過 12 小時（2026-10-17）", () => {
     const row = rowFromFixture(liu, pick(liu, "2026-06-07"))
     expect(row.day_type).toBe("rest_day")
     const r = computeAnomalies({ period: "2026-06" }, [row], ctx())
     const list = r.days.get("2026-06-07") ?? []
-    expect(list.some((a) => a.severity === "error")).toBe(false)
+    // 10:10–23:13 整天 783 分、扣晚餐 30 分 → 753 分 > 720：休息日亦適用一日 12 小時上限。
+    expect(list.filter((a) => a.severity === "error").map((a) => a.code)).toEqual(["daily_over_12h"])
+    // 休息日整天都算加班，不適用平日單日加班 4 小時上限（不再誤報）。
+    expect(codes(list)).not.toContain("overtime_over_daily_cap")
     expect(codes(list)).toContain("holiday_work")
     expect(codes(list)).not.toContain("absent_scheduled")
     expect(codes(list)).not.toContain("late")
@@ -322,7 +325,8 @@ describe("computeAnomalies — 日級規則逐條", () => {
     expect(byCode.get("overtime_over_daily_cap")?.detail).toMatchObject({ minutes: 300, capMinutes: 240 })
     // 晚餐扣除 info：worked 840 − 480 = 360 > 180
     expect(byCode.get("meal_deducted")?.severity).toBe("info")
-    expect(list.some((a) => a.severity === "error")).toBe(false)
+    // 10:00–01:00：正常 480 ＋ 覆寫加班 300 ＝ 780 > 720 → 唯一的 error 是單日超過 12 小時（2026-10-17）。
+    expect(list.filter((a) => a.severity === "error").map((a) => a.code)).toEqual(["daily_over_12h"])
   })
 
   it("override 等於系統值時不發 overtime_override", () => {
@@ -375,7 +379,8 @@ describe("computeAnomalies — M1 月加班上限超額（overtime_beyond_cap）
     const last = r.days.get("2026-06-05") ?? []
     expect(codes(last)).toContain("overtime_beyond_cap")
     expect(codes(last)).not.toContain("overtime_beyond_cap_unapproved")
-    expect(last.some((a) => a.severity === "error")).toBe(false)
+    // 這組 fixture 每天 14–18 小時，單日 12 小時（daily_over_12h）另計；這裡只看月上限相關的 error。
+    expect(last.some((a) => a.severity === "error" && a.code !== "daily_over_12h")).toBe(false)
   })
 
   it("剛好等於上限不算超；beyondCap='warn' 時訊息不提另行給付", () => {

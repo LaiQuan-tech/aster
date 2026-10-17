@@ -297,7 +297,7 @@ describe("F1 anomaly detection", () => {
     detail?: unknown
   }
 
-  it("flags consecutive_late and excess_overtime for emp1; nothing for emp2", async () => {
+  it("flags consecutive_late and monthly_ot_over_46h for emp1; nothing for emp2", async () => {
     const res = await request(app)
       .get(`/attendance/anomalies?from=${ANOM_FROM}&to=${ANOM_TO}`)
       .set("Authorization", `Bearer ${A.adminToken}`)
@@ -307,7 +307,7 @@ describe("F1 anomaly detection", () => {
 
     const e1 = anomalies.filter((a) => a.employeeId === emp1Id).map((a) => a.type)
     expect(e1).toContain("consecutive_late")
-    expect(e1).toContain("excess_overtime")
+    expect(e1).toContain("monthly_ot_over_46h")
 
     // emp2 has only scattered short late days + small OT → no anomaly.
     const e2 = anomalies.filter((a) => a.employeeId === emp2Id)

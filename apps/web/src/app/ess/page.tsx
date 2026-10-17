@@ -39,6 +39,7 @@ import {
 import { runWhileVisible } from "@/lib/visible-interval";
 import { getMeCached, peekMeCached } from "@/lib/ess-state";
 import { WFH_SUFFIX, browserStorage, hasWfhPunch, readWfhChoice, wfhPunchEnabled, writeWfhChoice } from "@/lib/wfh-punch";
+import { dinnerBodyFor, showDinnerCheckbox, type DinnerPrompt } from "@/lib/dinner-prompt";
 import { BottomSheet, Button, Card, Icon, InlineError, Textarea, useToast } from "@/components/ess-ui";
 import { OvertimeCapCard } from "./_components/OvertimeCapCard";
 import { DutyTodayCard } from "./_components/DutyTodayCard";
@@ -56,6 +57,9 @@ import { DutyTodayCard } from "./_components/DutyTodayCard";
  * 伺服器回 400 late_reason_required、不寫打卡 → 底部彈出對話框「你今天 HH:MM 上班，超過 10:00
  * （遲到 N 分鐘），請填寫原因（主管與老闆會看到）」＋多行輸入；送出時沿用剛才取得的定位、帶
  * `lateReason` 重送；取消就不打卡。
+ *
+ * 晚餐勾選（2026-10-17）：公司規則「有用公司晚餐才扣」時，`/punch/today` 回 `dinnerPrompt`；上班中且已過正常下班
+ * （有延長工時）才在打卡鈕下顯示「今天有用公司晚餐」（預設不勾），下班打卡帶 `dinnerTaken`（lib/dinner-prompt.ts）。
  *
  * 畫面過期防呆（2026-10-12）：伺服器照前端送的 type 寫入，畫面停在舊狀態（例如主管剛核准補上班卡，
  * 按鈕還是「上班打卡」）就會寫出第二張 in，而打卡紀錄不能硬刪。所以
@@ -326,6 +330,9 @@ function PunchCard({
   wfh,
   todayWfh,
   onWfhChange,
+  dinnerVisible,
+  dinner,
+  onDinnerChange,
 }: {
   summary: PendingAwareSummary;
   loading: boolean;
@@ -345,6 +352,10 @@ function PunchCard({
   /** 今天已有在家上班的打卡 → 狀態列加「（在家）」。 */
   todayWfh: boolean;
   onWfhChange: (checked: boolean) => void;
+  /** 2026-10-17：已過正常下班（有延長工時）且公司規則是「有用晚餐才扣」→ 顯示「今天有用公司晚餐」。 */
+  dinnerVisible: boolean;
+  dinner: boolean;
+  onDinnerChange: (checked: boolean) => void;
 }) {
   const disabled = loading || !!loadError || punching || locked;
   const label = loading ? "載入中…" : punching ? "打卡中…" : summary.nextLabel;
@@ -389,6 +400,18 @@ function PunchCard({
             onChange={(e) => onWfhChange(e.target.checked)}
           />
           在家上班
+        </label>
+      )}
+      {!loading && dinnerVisible && (
+        <label className="mt-3 flex items-center justify-center gap-2 text-base text-gray-700">
+          <input
+            type="checkbox"
+            className="h-5 w-5"
+            checked={dinner}
+            disabled={punching}
+            onChange={(e) => onDinnerChange(e.target.checked)}
+          />
+          今天有用公司晚餐
         </label>
       )}
       <p className="mt-3 min-h-5 text-center text-sm text-gray-500" aria-live="polite">
@@ -623,6 +646,17 @@ export default function EssHome() {
   }, []);
   const todayWfh = useMemo(() => hasWfhPunch(records), [records]);
 
+  // 晚餐勾選（2026-10-17）：/punch/today 回的提示（從幾點起下班＝有延長工時）；每 30 秒看一次時間決定顯示與否。
+  // 勾選預設不勾，打完卡（或換了一張上班卡）就清掉。
+  const [dinnerPrompt, setDinnerPrompt] = useState<DinnerPrompt | null>(null);
+  const [dinner, setDinner] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+  const dinnerVisible = showDinnerCheckbox(dinnerPrompt, summary.phase, nowMs);
+
   /** 今天的真紀錄＋（有的話）待核准的上班補卡 → 畫面紀錄（lib/pending-fix-punch.ts）。 */
   const mergePending = useCallback(
     (list: ReadonlyArray<PunchLike>) => withPendingFixPunch(list, pendingFixRef.current, todayKey()),
@@ -676,6 +710,7 @@ export default function EssHome() {
           pendingFixRef.current = pending;
         }
         const next = mergePending(today.records);
+        setDinnerPrompt(today.dinnerPrompt ?? null);
         // 輪詢比的是併過暫定上班卡的紀錄：補卡撐起的「上班中」跟真的上班卡一樣，空紀錄（過午夜）不蓋掉。
         // 例外：這次有抓到待簽核單、今天的那張補卡已不在（撤回／駁回）→ 直接套用，回到「上班打卡」。
         const pendingFresh = pending !== null;
@@ -826,6 +861,7 @@ export default function EssHome() {
         /* 不支援就算了 */
       }
       lockFor(AFTER_SUCCESS_LOCK_MS);
+      setDinner(false);
       await loadPunch({ quiet: true });
     },
     [toast, loadPunch, lockFor, mergePending],
@@ -896,6 +932,8 @@ export default function EssHome() {
           : { type, source: "web" as const, geoStatus: geoStatusRef.current ?? undefined }),
         // 在家上班：只有開通且勾了才帶（遲到理由重送沿用同一個 body）。
         ...(wfhEnabled && wfh ? { wfh: true } : {}),
+        // 晚餐：下班卡且畫面有顯示勾選框才帶（勾＝true、沒勾＝false）；按下當時重新比一次時間。
+        ...dinnerBodyFor(type, showDinnerCheckbox(dinnerPrompt, shown.phase, Date.now()), dinner),
       };
       pendingBodyRef.current = body;
       pendingScreenRef.current = screen;
@@ -933,7 +971,7 @@ export default function EssHome() {
     } finally {
       if (activeRef.current) setPunching(false);
     }
-  }, [punching, locked, loading, loadError, records, toast, afterPunchSuccess, setPunching, abortStalePunch, mergePending, refetchPendingForPunch, abortForPendingFixPunch, wfhEnabled, wfh]);
+  }, [punching, locked, loading, loadError, records, toast, afterPunchSuccess, setPunching, abortStalePunch, mergePending, refetchPendingForPunch, abortForPendingFixPunch, wfhEnabled, wfh, dinnerPrompt, dinner]);
 
   /** 遲到理由送出：驗證 1–500 字 → 確認最新狀態（precheckPunch）→ 帶 lateReason 原樣重送剛才那次打卡。 */
   const submitLateReason = useCallback(async () => {
@@ -1027,6 +1065,9 @@ export default function EssHome() {
         wfh={wfh}
         todayWfh={todayWfh}
         onWfhChange={onWfhChange}
+        dinnerVisible={dinnerVisible}
+        dinner={dinner}
+        onDinnerChange={setDinner}
       />
       <TodayTimes summary={summary} loading={loading} />
       <OvertimeCapCard />
