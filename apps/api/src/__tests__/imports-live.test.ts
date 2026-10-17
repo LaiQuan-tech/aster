@@ -406,7 +406,7 @@ describe.skipIf(!ready)("批次匯入（Excel）— live", () => {
       expect((res.body.errors as Array<{ line: number }>).map((e) => e.line)).toEqual([4, 5, 6])
     })
 
-    it("實匯：走 calendar/generate 的邏輯 → result {year, generated, imported, skipped}，DB 有 2 筆 fixed_holiday（未建表則 503）", async () => {
+    it("實匯：走 calendar/generate 的邏輯 → result {year, generated, imported, skipped}，DB 有 1 筆 fixed_holiday（週六的兒童節不標；未建表則 503）", async () => {
       const res = await upload("holidays", b64, false)
       if (!migrated) {
         expect(res.status).toBe(503)
@@ -414,8 +414,9 @@ describe.skipIf(!ready)("批次匯入（Excel）— live", () => {
         return
       }
       expect(res.status).toBe(200)
-      expect(res.body).toMatchObject({ valid: 2, imported: 2 })
-      expect(res.body.result).toMatchObject({ year: 2026, imported: 2, skipped: 0 })
+      // 2026-04-04 是週六：國定假日落在休息日 → 本日維持休息日（label 註記），只有 6/19 寫成 fixed_holiday。
+      expect(res.body).toMatchObject({ valid: 2, imported: 1 })
+      expect(res.body.result).toMatchObject({ year: 2026, imported: 1, skipped: 0, weekendHolidays: 1 })
       expect(res.body.result.generated).toBeGreaterThan(100) // 2026 的週六日
       const { data } = await supabaseAdmin
         .from("tenant_calendar_days")
@@ -423,10 +424,7 @@ describe.skipIf(!ready)("批次匯入（Excel）— live", () => {
         .eq("tenant_id", tenantId)
         .eq("day_type", "fixed_holiday")
         .order("date", { ascending: true })
-      expect(data).toEqual([
-        { date: "2026-04-04", day_type: "fixed_holiday", label: "兒童節", source: "import" },
-        { date: "2026-06-19", day_type: "fixed_holiday", label: "端午節", source: "import" },
-      ])
+      expect(data).toEqual([{ date: "2026-06-19", day_type: "fixed_holiday", label: "端午節", source: "import" }])
     })
   })
 })

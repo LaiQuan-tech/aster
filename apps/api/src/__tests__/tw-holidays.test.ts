@@ -22,6 +22,22 @@ describe("TW_HOLIDAYS drift guard", () => {
     expect(TW_HOLIDAYS[2026]).toEqual(json.holidays)
   })
 
+  it("API copy === packages/db/seed/tw-holidays-2027.json", () => {
+    const json = JSON.parse(readFileSync(resolve(ROOT, "packages/db/seed/tw-holidays-2027.json"), "utf8")) as {
+      holidays: Array<{ date: string; label: string; type?: string }>
+    }
+    expect(TW_HOLIDAYS[2027]).toEqual(json.holidays)
+  })
+
+  it("2027 has 24 entries, all valid YYYY-MM-DD of 2027, unique, sorted", () => {
+    const list = TW_HOLIDAYS[2027]
+    expect(list).toHaveLength(24)
+    const dates = list.map((h) => h.date)
+    expect(new Set(dates).size).toBe(dates.length)
+    expect([...dates].sort()).toEqual(dates)
+    for (const d of dates) expect(d).toMatch(/^2027-\d{2}-\d{2}$/)
+  })
+
   it("API copy === @hr/db TW_HOLIDAYS (packages/db/src/seed/tw-holidays.ts)", async () => {
     // Dynamic import with a runtime path so apps/api's tsc (rootDir=src) does
     // not try to compile the db package's source.

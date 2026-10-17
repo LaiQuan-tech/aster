@@ -5,8 +5,8 @@ import { tenants } from "./tenants"
  * Tenant calendar days — per-tenant overrides layered on top of the worktime
  * engine's default workweek: statutory holidays, a company-declared 補假/調整
  *放假 workday, an extra 公司內定 rest day, etc. `dayType` mirrors the engine's
- * DayType ('workday' | 'rest_day' | 'fixed_holiday'); enforced by a CHECK
- * constraint added in sql/0026 (drizzle has no first-class enum/CHECK here,
+ * DayType ('workday' | 'rest_day' | 'regular_leave' | 'fixed_holiday'); enforced by a CHECK
+ * constraint added in sql/0026, widened by sql/0059 (drizzle has no first-class enum/CHECK here,
  * same reasoning as sql/0021's projects_status_chk). `label` is the human
  * name shown in the calendar UI (e.g. "端午節"). `source` distinguishes a
  * manually entered row from one imported (e.g. from the 行政院人事行政總處

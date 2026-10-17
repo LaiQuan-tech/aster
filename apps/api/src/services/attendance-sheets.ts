@@ -7,7 +7,10 @@ import {
   resolveOvertimeMonthlyCapHours,
   resolvePayrollGates,
   resolveOvertimeMealBreak,
-  DAY_TYPE_TO_OVERTIME_WHEN,
+  resolveOvertimeRule,
+  overtimeWhenFor,
+  overtimeMealDeductionMinutes,
+  capCountableMinutes,
   normalizeLateDecision,
   undecidedLateWarning,
   type DayType,
@@ -31,10 +34,11 @@ import {
   weekdayOfKey,
   type DateKey,
 } from "../lib/tz.js"
-import { isMissingColumnError, isMissingTableError, punchRecordsHaveWfh, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { columnsExist, isMissingColumnError, isMissingTableError, punchRecordsHaveWfh, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { managerOfEmployee } from "../middleware/scope.js"
 import { settleAttendance } from "./settlement.js"
 import { loadShiftResolver } from "./employee-shifts.js"
+import { asDayTypeOrWorkday, buildDayTypeResolver, DEFAULT_WEEKEND_POLICY, loadDayTypeResolver, REGULAR_LEAVE, type DayTypeResolver } from "./day-type.js"
 import { applyNightPolicy } from "./employee-features.js"
 import { coveredByRequests, loadApprovedAbsences } from "./absence-cover.js"
 import { tenantBlocksApproveOnUnsettledLeave } from "./leave-settlement.js"
@@ -47,6 +51,7 @@ import {
   buildPayrollInputs,
   loadRuleConfigFor,
   toAttendanceDay,
+  oneRestOneOffFlags,
   type AttendanceDayInput,
   type AttendanceDayRow,
   type EmployeePayrollInputs,
@@ -238,11 +243,14 @@ export function splitOvertimeTiers(
   effectiveMinutes: number,
   dayType: DayType,
   rules: RuleConfig,
+  /** 特休日出勤：級距照國定假日規則（@hr/rules overtimeWhenFor）。 */
+  ptoWork?: boolean,
 ): { tier1: number; tier2: number; tier3: number } {
   const out = { tier1: 0, tier2: 0, tier3: 0 }
   const minutes = Math.max(0, Math.round(effectiveMinutes))
   if (minutes === 0) return out
-  const rule = rules.overtime.rules.find((r) => r.when === DAY_TYPE_TO_OVERTIME_WHEN[dayType])
+  // resolveOvertimeRule：例假沒設定規則時採法定預設，不退回休息日（與引擎同一支）。
+  const rule = resolveOvertimeRule(rules, overtimeWhenFor(dayType, ptoWork))
   if (!rule?.tiers || rule.tiers.length === 0) {
     out.tier1 = minutes
     return out
@@ -311,16 +319,22 @@ export function otTierLabels(rules: RuleConfig): [string, string, string] {
  * （剛好等於上限不算超）；後面每一天則整天都是超額。
  * 例：上限 40h、日序 10/10/10/8/6 小時 → 只有第 5 天有 4 小時超額。
  * `capMinutes <= 0` 視為沒有上限（回空 Map）。
+ * 累計的是「算進月上限的分鐘」（@hr/rules capCountableMinutes，2026-10-17 一例一休）：平日／休息日全計、
+ * 國定假日與特休出勤只計 8h 以外、例假 0。沒帶 dayType 的舊呼叫端視同平日（全計）。
  */
 export function allocateBeyondCap(
-  days: Array<{ date: string; effective: number }>,
+  days: Array<{ date: string; effective: number; dayType?: DayType; ptoWork?: boolean }>,
   capMinutes: number,
+  regularMinutes = 480,
 ): Map<string, number> {
   const out = new Map<string, number>()
   if (!Number.isFinite(capMinutes) || capMinutes <= 0) return out
   let cumulative = 0
   for (const day of [...days].sort((a, b) => a.date.localeCompare(b.date))) {
-    const effective = Math.max(0, Math.round(day.effective))
+    const effective = capCountableMinutes(
+      { dayType: day.dayType ?? "workday", overtimeMinutes: Math.max(0, Math.round(day.effective)), ptoWork: day.ptoWork },
+      regularMinutes,
+    )
     cumulative += effective
     const beyond = Math.min(Math.max(0, cumulative - capMinutes), effective)
     if (beyond > 0) out.set(day.date, beyond)
@@ -357,20 +371,21 @@ export function mealDeducted(
   dayType: DayType,
   rules: RuleConfig,
   regularMinutes?: number,
+  /** 當天的晚餐勾選／特休出勤（與 settlement 帶給引擎的 DayContext 同值）。 */
+  flags?: { dinnerTaken?: boolean; ptoWork?: boolean },
 ): boolean {
-  const meal = resolveOvertimeMealBreak(rules)
-  if (!meal) return false
   const regular = regularMinutes != null && regularMinutes > 0
     ? Math.round(regularMinutes)
     : Math.round(rules.payroll.dailyRegularHours * 60)
-  const raw = dayType === "workday" ? Math.max(0, workedMinutes - regular) : workedMinutes
-  if (raw <= 0) return false
-  const extended = dayType === "workday" ? raw : Math.max(0, raw - regular)
-  return extended > meal.afterMinutes
+  // raw 的定義與引擎一致：平日（非特休出勤）＝超過正常工時的部分；其餘＝整天工時。
+  const weekdayLike = dayType === "workday" && !flags?.ptoWork
+  const raw = weekdayLike ? Math.max(0, workedMinutes - regular) : workedMinutes
+  return overtimeMealDeductionMinutes(raw, rules, dayType, regular, flags) > 0
 }
 
+/** attendance_days／月表列的 day_type → DayType（含例假 regular_leave；不認得＝workday）。services/day-type.ts。 */
 function asDayType(v: string | null | undefined): DayType {
-  return v === "rest_day" || v === "fixed_holiday" ? v : "workday"
+  return asDayTypeOrWorkday(v)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -397,6 +412,10 @@ export interface AnomalyDayFacts {
   lateReason?: string | null
   /** 老闆的決定（affects／exempt；沒決定 → null，視為影響全勤）。 */
   lateDecision?: LateDecision
+  /** 特休日出勤（attendance_days.anomaly.ptoWork，settleAttendance 寫入；2026-10-17）。 */
+  ptoWork?: boolean
+  /** 當天勾了晚餐（attendance_days.dinner_taken；晚餐功能未上 → undefined）。 */
+  dinnerTaken?: boolean
 }
 
 export interface AnomalyContext {
@@ -508,10 +527,12 @@ export function computeAnomalies(
     const override = day.overtime_minutes_override
     const effective = effectiveOvertime(day)
     const dayRegularMinutes = shiftBasis ? (facts.shiftNetMinutes ?? regularMinutes) : regularMinutes
-    totalEffective += effective
+    // 算進月上限／月門檻的分鐘（capCountableMinutes：例假 0、國定假日與特休出勤只計 8h 以外）。
+    const countable = capCountableMinutes({ dayType, overtimeMinutes: effective, ptoWork: facts.ptoWork }, regularMinutes)
+    totalEffective += countable
     // 日期序歸屬：累計跨過上限的那天起，超出的分鐘算在當天（同 allocateBeyondCap）。
     const beyondCapMinutes =
-      capMinutes > 0 ? Math.min(Math.max(0, totalEffective - capMinutes), effective) : 0
+      capMinutes > 0 ? Math.min(Math.max(0, totalEffective - capMinutes), countable) : 0
 
     // ── error ──
     if (facts.unpairedOut > 0) {
@@ -565,8 +586,9 @@ export function computeAnomalies(
     if (effective > dailyCap) {
       push({ code: "overtime_over_daily_cap", severity: "warn", detail: { minutes: effective, capMinutes: dailyCap }, message: `當日加班 ${fmtHm(effective)} 超過單日上限 ${fmtHm(dailyCap)}` })
     }
-    if ((dayType === "rest_day" || dayType === "fixed_holiday") && worked > 0) {
-      push({ code: "holiday_work", severity: "warn", detail: { dayType, workedMinutes: worked }, message: `${dayType === "rest_day" ? "例假日" : "固定假日"}出勤 ${fmtHm(worked)}` })
+    if (dayType !== "workday" && worked > 0) {
+      const offLabel = dayType === REGULAR_LEAVE ? "例假" : dayType === "rest_day" ? "休息日" : "國定假日"
+      push({ code: "holiday_work", severity: "warn", detail: { dayType, workedMinutes: worked }, message: `${offLabel}出勤 ${fmtHm(worked)}` })
     }
     if (facts.unpairedOutings > 0) {
       push({ code: "outing_unpaired", severity: "warn", detail: { unpairedOutings: facts.unpairedOutings }, message: "外出打卡未配對（有外出無返回或反之）" })
@@ -577,7 +599,7 @@ export function computeAnomalies(
     }
 
     // ── info ──
-    if (mealDeducted(worked, dayType, ctx.rules, dayRegularMinutes)) {
+    if (mealDeducted(worked, dayType, ctx.rules, dayRegularMinutes, { dinnerTaken: facts.dinnerTaken, ptoWork: facts.ptoWork })) {
       const meal = resolveOvertimeMealBreak(ctx.rules)
       push({ code: "meal_deducted", severity: "info", detail: { deductMinutes: meal?.deductMinutes ?? 0 }, message: `延長工時已扣除晚餐 ${meal?.deductMinutes ?? 0} 分` })
     }
@@ -778,7 +800,17 @@ export function derivePunchFacts(punches: PunchRow[], tz: string): Map<DateKey, 
 }
 
 interface AttendanceRowWithAnomaly extends AttendanceDayRow {
-  anomaly?: { unpairedPunches?: number; unpairedOutings?: number; unpairedBreaks?: number } | null
+  anomaly?: {
+    unpairedPunches?: number
+    unpairedOutings?: number
+    unpairedBreaks?: number
+    /** 一例一休（2026-10-17，settlement.ts）。 */
+    ptoWork?: boolean
+    compDayOwed?: number
+    compTimeMinutes?: number
+  } | null
+  /** 晚餐勾選（欄位由晚餐功能另加；未加 → undefined）。 */
+  dinner_taken?: boolean | null
 }
 
 interface MonthFacts {
@@ -793,7 +825,8 @@ interface MonthFacts {
   wfhByKey: Set<string>
   /** M1：已核准加班單覆蓋到的 `empId|date`（判「超額日有沒有加班單」用）。 */
   approvedOtByKey: Set<string>
-  calendar: Map<DateKey, DayType>
+  /** 日別查詢器（services/day-type.ts：行事曆 → 例假／休息日星期，員工個人設定優先；與結算同一支）。 */
+  dayTypes: DayTypeResolver
   leaveNameByCode: Map<string, string>
   pendingLeaveByEmp: Map<string, number>
   /** B8：已核准但尚未核銷（settled_at IS NULL，期間內重疊）假單數量。 */
@@ -808,27 +841,6 @@ interface MonthFacts {
 function hhmmToMinutes(hhmm: string): number {
   const [h, m] = hhmm.split(":").map(Number)
   return h * 60 + m
-}
-
-async function loadCalendarDayTypes(tenantId: string, from: DateKey, to: DateKey): Promise<Map<DateKey, DayType>> {
-  const map = new Map<DateKey, DayType>()
-  const { data, error } = await supabaseAdmin
-    .from("tenant_calendar_days")
-    .select("date, day_type")
-    .eq("tenant_id", tenantId)
-    .gte("date", from)
-    .lte("date", to)
-  if (error) {
-    if (isMissingTableError(error)) {
-      warnSchemaGapOnce("tenant_calendar_days", error)
-      return map
-    }
-    throw new Error(`attendance-sheets (calendar): ${error.message}`)
-  }
-  for (const row of (data ?? []) as Array<{ date: string; day_type: string }>) {
-    if (row.day_type === "workday" || row.day_type === "rest_day" || row.day_type === "fixed_holiday") map.set(row.date, row.day_type)
-  }
-  return map
 }
 
 /** Everything a rebuild of `employeeIds`' sheets for `period` needs, in one pass. */
@@ -847,7 +859,7 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     scheduleByKey: new Map(),
     wfhByKey: new Set(),
     approvedOtByKey: new Set(),
-    calendar: new Map(),
+    dayTypes: buildDayTypeResolver({ calendar: new Map(), tenantPolicy: DEFAULT_WEEKEND_POLICY }),
     leaveNameByCode: new Map(),
     pendingLeaveByEmp: new Map(),
     unsettledLeaveByEmp: new Map(),
@@ -869,7 +881,9 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
       .lt("work_date", nextFirst)
   const P0 = "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type, anomaly, leave_minutes, leave_breakdown, outing_minutes, early_leave_minutes"
   const BASE = "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type, anomaly"
-  let ad = await loadAd(P0)
+  // 晚餐勾選（attendance_days.dinner_taken，晚餐功能另加；未加 → 不撈）。
+  const dinnerCol = (await columnsExist("attendance_days", "dinner_taken")) ? ", dinner_taken" : ""
+  let ad = await loadAd(P0 + dinnerCol)
   if (ad.error && isMissingColumnError(ad.error)) {
     warnSchemaGapOnce("attendance_days.p0_columns", ad.error)
     ad = await loadAd(BASE)
@@ -906,8 +920,8 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     }
   }
 
-  // calendar
-  facts.calendar = await loadCalendarDayTypes(tenantId, from, to)
+  // 日別（行事曆＋例假／休息日星期＋員工個人設定）
+  facts.dayTypes = await loadDayTypeResolver({ tenantId, from, to, employeeIds })
 
   // 當天班別 → 淨工時（services/employee-shifts.ts，與結算／打卡遲到判斷／缺卡掃描同一支）：
   // 排班列（班表功能 2026-10-11 已移除，只剩歷史資料）→ 員工個人預設班別（2026-10-13，只限工作日）。
@@ -935,7 +949,7 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     for (let d = from; d <= to && d < today; d = addDaysKey(d, 1)) {
       const key = `${empId}|${d}`
       if (facts.scheduleByKey.has(key)) continue
-      const dayType: DayType = facts.calendar.get(d) ?? (weekdayOfKey(d) === 0 || weekdayOfKey(d) === 6 ? "rest_day" : "workday")
+      const dayType: DayType = facts.dayTypes.forDay(empId, d)
       const resolved = resolver.forDay(empId, d, dayType)
       if (!resolved.source || !resolved.shift) continue
       if (coveredByRequests(offsiteRequests, empId, d, resolved.shift, tz)) continue
@@ -1066,11 +1080,11 @@ function buildDayRows(
     const ad = facts.attendanceByKey.get(key)
     const pf = punchFacts?.get(d)
     const prev = existing.get(d)
-    const fallbackType: DayType = facts.calendar.get(d) ?? ((weekdayOfKey(d) === 0 || weekdayOfKey(d) === 6) ? "rest_day" : "workday")
+    const fallbackType: DayType = facts.dayTypes.forDay(employeeId, d)
     const dayType: DayType = ad ? asDayType(ad.day_type) : fallbackType
     const computed = ad?.overtime_minutes ?? 0
     const override = prev?.overtime_minutes_override ?? null
-    const tiers = splitOvertimeTiers(override ?? computed, dayType, facts.rules)
+    const tiers = splitOvertimeTiers(override ?? computed, dayType, facts.rules, ad?.anomaly?.ptoWork === true)
     rows.push({
       sheet_id: sheetId,
       work_date: d,
@@ -1122,6 +1136,8 @@ function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContex
       unpairedOutings: Math.max(ad?.anomaly?.unpairedOutings ?? 0, pf?.unpairedOutings ?? 0),
       manualPunch: pf?.manualPunch ?? false,
       ...(late ? { lateReason: late.reason, lateDecision: normalizeLateDecision(late.attendance_decision) } : {}),
+      ...(ad?.anomaly?.ptoWork === true ? { ptoWork: true } : {}),
+      ...(typeof ad?.dinner_taken === "boolean" ? { dinnerTaken: ad.dinner_taken } : {}),
     })
   }
   const approvedOtDates = new Set<DateKey>()
@@ -1606,8 +1622,8 @@ async function loadAttendanceRowsForSheet(tenantId: string, sheet: SheetRow): Pr
       .eq("employee_id", sheet.employee_id)
       .gte("work_date", from)
       .lt("work_date", nextFirst)
-  const P0 = "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type, leave_minutes, leave_breakdown, outing_minutes, early_leave_minutes"
-  const BASE = "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type"
+  const P0 = "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type, anomaly, leave_minutes, leave_breakdown, outing_minutes, early_leave_minutes"
+  const BASE = "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type, anomaly"
   let res = await load(P0)
   if (res.error && isMissingColumnError(res.error)) {
     warnSchemaGapOnce("attendance_days.p0_columns", res.error)
@@ -1691,9 +1707,16 @@ async function composeLiveView(
   const rules = ruleConfig.rules
   // M1：超額分鐘依日期序歸屬（畫面／匯出兩種模式都顯示；只有 settle_separately
   // 才從薪資的加班分鐘扣掉）。
+  const ptoWorkDates = new Set(attendanceRows.filter((r) => oneRestOneOffFlags(r.anomaly).ptoWork).map((r) => r.work_date))
   const beyondCapByDate = allocateBeyondCap(
-    dayRows.map((r) => ({ date: r.work_date, effective: effectiveOvertime(r) })),
+    dayRows.map((r) => ({
+      date: r.work_date,
+      effective: effectiveOvertime(r),
+      dayType: asDayType(r.day_type),
+      ptoWork: ptoWorkDates.has(r.work_date),
+    })),
     capMinutesFor(rules),
+    Math.round(rules.payroll.dailyRegularHours * 60),
   )
   const days = dayRows.map((r) =>
     toDayView(r, r.project_id ? (projectNames.get(r.project_id) ?? null) : null, beyondCapByDate.get(r.work_date) ?? 0),

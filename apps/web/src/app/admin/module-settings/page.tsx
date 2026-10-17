@@ -716,7 +716,13 @@ export default function ModuleSettingsPage() {
       const merged: RuleConfigExt = {
         ...asExtConfig(base),
         overtime: {
-          rules: [weekdayRule, restRule, fixedRule],
+          // 這張表單只編平日／休息日／國定假日三條；其他規則（例：例假 regular_leave）原樣保留，不能存一次就被洗掉。
+          rules: [
+            weekdayRule,
+            restRule,
+            fixedRule,
+            ...base.overtime.rules.filter((r) => r.when !== "weekday_ot" && r.when !== "rest_day" && r.when !== "fixed_holiday"),
+          ],
           rounding: {
             unitMinutes: Number(otForm.unitMinutes) || 30,
             mode: otForm.mode,
@@ -724,6 +730,8 @@ export default function ModuleSettingsPage() {
           },
           mealBreak: otForm.mealBreakEnabled
             ? {
+                // 晚餐扣除模式（auto／opt_in）這張表單不編，沿用既有值，免得 opt_in 存一次就變回自動扣。
+                ...(base.overtime.mealBreak?.mode ? { mode: base.overtime.mealBreak.mode } : {}),
                 afterMinutes: Number(otForm.mealAfterMinutes) || 0,
                 deductMinutes: Number(otForm.mealDeductMinutes) || 0,
               }
@@ -1167,8 +1175,8 @@ export default function ModuleSettingsPage() {
                     onChange={(i, f, v) => setTierField("weekdayTiers", i, f, v)}
                   />
                   <TierEditor
-                    title="加班分段倍率 · 例假日出勤（rest_day）"
-                    hint="Excel：與平日延長工時共用同一組分段倍率"
+                    title="加班分段倍率 · 休息日出勤（rest_day）"
+                    hint="一例一休的「休」（預設週六）。例假（預設週日）出勤另依法定：做 1 給 8＋需補假一日（regular_leave 規則）"
                     tiers={otForm.restDayTiers}
                     onChange={(i, f, v) => setTierField("restDayTiers", i, f, v)}
                   />

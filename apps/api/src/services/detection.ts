@@ -1,10 +1,11 @@
 import { supabaseAdmin } from "../lib/supabase.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
-import { addDaysKey, dayWindowUtc, localDateKey, weekdayOfKey } from "../lib/tz.js"
+import { addDaysKey, dayWindowUtc, localDateKey } from "../lib/tz.js"
 import { pairPunchesTz } from "./punch-pairing.js"
 import { loadShiftResolver } from "./employee-shifts.js"
+import { asDayTypeOrWorkday, loadDayTypeResolver } from "./day-type.js"
 import { coveredByRequests, loadApprovedAbsences, shiftBoundsOn } from "./absence-cover.js"
-import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import type { DayType, ShiftDef } from "@hr/rules"
 
 /**
@@ -55,21 +56,6 @@ interface PunchRow {
   punch_at: string
 }
 
-/** `date` 的日屬性：tenant_calendar_days 優先，沒有就六日＝例假日（與 settlement.loadCalendar 同規則）。 */
-async function dayTypeOn(tenantId: string, date: string): Promise<DayType> {
-  const { data, error } = await supabaseAdmin
-    .from("tenant_calendar_days")
-    .select("day_type")
-    .eq("tenant_id", tenantId)
-    .eq("date", date)
-    .maybeSingle()
-  if (error && !isMissingTableError(error)) throw new Error(`scanMissingPunches (calendar): ${error.message}`)
-  const t = (data as { day_type?: string } | null)?.day_type
-  if (t === "workday" || t === "rest_day" || t === "fixed_holiday") return t
-  const wd = weekdayOfKey(date)
-  return wd === 0 || wd === 6 ? "rest_day" : "workday"
-}
-
 /**
  * scanMissingPunches — for a tenant + calendar `date` (tenant-local), find
  * every employee who has a schedule that day, pair their punches (same
@@ -106,13 +92,14 @@ export async function scanMissingPunches(
   //   • 班別整段被已核准的請假／在家／出差單覆蓋 → 不判（services/absence-cover.ts）；
   //   • 班別還沒開始 → 不判；班別（跨日班的隔天）還沒結束 → 不判缺下班卡。
   const now = (opts.now ?? new Date()).getTime()
-  const dayType = await dayTypeOn(tenantId, date)
+  // 日屬性：services/day-type.ts（行事曆 → 例假／休息日星期，員工個人設定優先；與結算／月表同一支）。
+  const dayTypes = await loadDayTypeResolver({ tenantId, from: date, to: date })
   const resolver = await loadShiftResolver({ tenantId, from: date, to: date, activeOnly: true })
   const scheduledIdSet = new Set<string>(resolver.scheduledKeys().map((k) => k.split("|")[0]))
   const defaultShiftByEmp = new Map<string, ShiftDef>()
   for (const empId of resolver.employeesWithDefault()) {
     if (scheduledIdSet.has(empId)) continue
-    const resolved = resolver.forDay(empId, date, dayType)
+    const resolved = resolver.forDay(empId, date, dayTypes.forDay(empId, date))
     if (resolved.source === "default" && resolved.shift) defaultShiftByEmp.set(empId, resolved.shift)
   }
   if (defaultShiftByEmp.size > 0) {
@@ -413,7 +400,7 @@ export async function detectAnomalies(
   const isMissingDay = (d: AnomalyDayRow): boolean => {
     if ((d.worked_minutes ?? 0) !== 0) return false
     if (resolver.scheduleOf(d.employee_id, d.work_date) !== undefined) return true
-    const dayType: DayType = d.day_type === "rest_day" || d.day_type === "fixed_holiday" ? d.day_type : "workday"
+    const dayType: DayType = asDayTypeOrWorkday(d.day_type)
     const resolved = resolver.forDay(d.employee_id, d.work_date, dayType)
     if (resolved.source !== "default" || !resolved.shift || !tz) return false
     if ((d.leave_minutes ?? 0) > 0) return false

@@ -8,17 +8,39 @@ import { employeesHavePersonalSettings } from "./employee-shifts.js"
  *   wfhPunch        允許「在家上班」打卡——員工端打卡卡片出現勾選框，勾了該筆打卡記 punch_records.wfh=true。
  *   noNightPremium  不計夜間加給（2026-10-13 業主決定，個人開關、不改租戶規則）：結算時 night_minutes 寫 0、
  *                   薪資引擎（薪資執行／月表試算）對這位員工夜間分鐘歸 0、夜間倍率 0（見 applyNightPolicy）。
+ *   regularLeaveWeekday  個人例假日（一例一休的「例」，0＝週日…6＝週六；null＝依公司 tenants.features.attendance）。
+ *   restDayWeekday       個人休息日（同上；null＝未設時：與公司例假日相同→公司休息日，否則→公司例假日那天）。
+ *                        兩者的解讀見 services/day-type.ts（2026-10-17 一例一休）。
  * 未知鍵原樣保留（PATCH 是合併寫入），讀取時只吐出已知鍵。
  */
 export interface EmployeeFeatures {
   wfhPunch: boolean
   noNightPremium: boolean
+  /** 個人例假日 0–6（0＝週日）；null＝依公司設定。 */
+  regularLeaveWeekday?: number | null
+  /** 個人休息日 0–6；null＝依預設推導（services/day-type.ts employeeWeekendPolicy）。 */
+  restDayWeekday?: number | null
 }
 
-/** jsonb（可能是 null、陣列、亂型別）→ 已知鍵、布林化。純函式。 */
+/** 0–6 的整數 → 星期；其他（含字串、小數、null）→ null。純函式。 */
+export function asWeekday(v: unknown): number | null {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 6 ? v : null
+}
+
+/** jsonb（可能是 null、陣列、亂型別）→ 已知鍵、布林化／星期化。純函式。 */
 export function normalizeEmployeeFeatures(raw: unknown): EmployeeFeatures {
   const obj = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
-  return { wfhPunch: obj.wfhPunch === true, noNightPremium: obj.noNightPremium === true }
+  return {
+    wfhPunch: obj.wfhPunch === true,
+    noNightPremium: obj.noNightPremium === true,
+    regularLeaveWeekday: asWeekday(obj.regularLeaveWeekday),
+    restDayWeekday: asWeekday(obj.restDayWeekday),
+  }
+}
+
+/** 員工有沒有任何一個非預設的個人設定（loadEmployeeFeaturesMap 只收這些人）。純函式。 */
+export function hasAnyEmployeeFeature(f: EmployeeFeatures): boolean {
+  return f.wfhPunch || f.noNightPremium || f.regularLeaveWeekday != null || f.restDayWeekday != null
 }
 
 /**
@@ -39,7 +61,7 @@ export function applyNightPolicy<D extends Pick<AttendanceDay, "nightMinutes">>(
 
 /**
  * 一批員工的功能開關（employee_id → features）；`employeeIds` 省略＝全租戶。0068 未套 → 空 Map（全關）。
- * 只收至少有一個開關打開的員工（其他人查不到＝全關）。
+ * 只收至少有一個開關打開（或設了個人例假／休息日）的員工（其他人查不到＝全關、依公司設定）。
  */
 export async function loadEmployeeFeaturesMap(tenantId: string, employeeIds?: string[]): Promise<Map<string, EmployeeFeatures>> {
   const out = new Map<string, EmployeeFeatures>()
@@ -51,7 +73,7 @@ export async function loadEmployeeFeaturesMap(tenantId: string, employeeIds?: st
   if (error) throw new Error(`loadEmployeeFeaturesMap: ${error.message}`)
   for (const row of (data ?? []) as Array<{ id: string; features?: unknown }>) {
     const f = normalizeEmployeeFeatures(row.features)
-    if (f.wfhPunch || f.noNightPremium) out.set(row.id, f)
+    if (hasAnyEmployeeFeature(f)) out.set(row.id, f)
   }
   return out
 }

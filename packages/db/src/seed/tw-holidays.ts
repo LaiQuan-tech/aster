@@ -1,8 +1,9 @@
 /**
- * 台灣（中華民國）政府行政機關辦公日曆表的放假日——不含例假日（週六、週日），
- * 供 POST /calendar/generate 在租戶未自帶清單時匯入為 fixed_holiday。
+ * 台灣（中華民國）政府行政機關辦公日曆表的放假日（2026、2027），含落在週末的節日本日（供 label 註記；
+ * generateTenantCalendar 不把週末本日標成 fixed_holiday，只標補假日，見 services/imports/writers.ts）。
+ * POST /calendar/generate 在呼叫端未自帶 holidays 時使用（週間的日子 → fixed_holiday）。
  *
- * 內容與 packages/db/seed/tw-holidays-2026.json 的 `holidays` 陣列逐筆相同
+ * 內容與 packages/db/seed/tw-holidays-{2026,2027}.json 的 `holidays` 陣列逐筆相同
  * （JSON 是人工核對用的原始檔，這裡是程式可 import 的型別化版本；apps/api 另
  * 有一份同內容的常數，並以測試釘住三者一致，見
  * apps/api/src/__tests__/tw-holidays.test.ts）。新年度的清單請同時加進 JSON 與
@@ -39,5 +40,31 @@ export const TW_HOLIDAYS: Record<number, TwHoliday[]> = {
     { date: "2026-10-25", label: "台灣光復暨金門古寧頭大捷紀念日" },
     { date: "2026-10-26", label: "台灣光復暨金門古寧頭大捷紀念日補假（10/25適逢週日）", type: "make_up" },
     { date: "2026-12-25", label: "行憲紀念日" },
+  ],
+  2027: [
+    { date: "2027-01-01", label: "元旦（開國紀念日）" },
+    { date: "2027-02-04", label: "春節（小年夜）" },
+    { date: "2027-02-05", label: "春節（除夕）" },
+    { date: "2027-02-06", label: "春節（初一）" },
+    { date: "2027-02-07", label: "春節（初二）" },
+    { date: "2027-02-08", label: "春節（初三）" },
+    { date: "2027-02-09", label: "春節補假（初一2/6適逢週六）", type: "make_up" },
+    { date: "2027-02-10", label: "春節補假（初二2/7適逢週日）", type: "make_up" },
+    { date: "2027-02-28", label: "和平紀念日" },
+    { date: "2027-03-01", label: "和平紀念日補假（2/28適逢週日）", type: "make_up" },
+    { date: "2027-04-04", label: "兒童節" },
+    { date: "2027-04-05", label: "清明節" },
+    { date: "2027-04-06", label: "兒童節補假（4/4適逢週日）", type: "make_up" },
+    { date: "2027-04-30", label: "勞動節補假（5/1適逢週六）", type: "make_up" },
+    { date: "2027-05-01", label: "勞動節" },
+    { date: "2027-06-09", label: "端午節" },
+    { date: "2027-09-15", label: "中秋節" },
+    { date: "2027-09-28", label: "教師節（孔子誕辰紀念日）" },
+    { date: "2027-10-10", label: "國慶日" },
+    { date: "2027-10-11", label: "國慶日補假（10/10適逢週日）", type: "make_up" },
+    { date: "2027-10-25", label: "台灣光復暨金門古寧頭大捷紀念日" },
+    { date: "2027-12-24", label: "行憲紀念日補假（12/25適逢週六）", type: "make_up" },
+    { date: "2027-12-25", label: "行憲紀念日" },
+    { date: "2027-12-31", label: "2028年元旦補假（2028/1/1適逢週六）", type: "make_up" },
   ],
 }

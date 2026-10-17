@@ -8,7 +8,7 @@ import { employees } from "./employees"
  * with the employee's shift + the tenant's active rule config, calls
  * `computeAttendanceDay`, and upserts the resulting worked/late/overtime/night
  * minutes here (all integer minutes). `day_type` mirrors the engine's DayType
- * ('workday' | 'rest_day' | 'fixed_holiday'); `anomaly` carries optional
+ * ('workday' | 'rest_day' | 'regular_leave' | 'fixed_holiday'); `anomaly` carries optional
  * settlement notes (e.g. an unpaired punch). The unique (tenant_id,
  * employee_id, work_date) index makes the settlement idempotent (re-running
  * updates rather than duplicates) and powers payroll/report reads downstream.

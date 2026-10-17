@@ -1697,7 +1697,8 @@ export function setLeaveBalance(body: {
  * 或後端的 DEFAULT_RULE_CONFIG），故頂層四個必填欄位一定存在；insurance／
  * leave_deduction 在 schema 上整段 optional，可能不存在。
  */
-export type OvertimeWhen = "weekday_ot" | "rest_day" | "fixed_holiday";
+/** regular_leave＝例假出勤（2026-10-17；設定沒有這條時後端採法定預設：做 1 給 8＋需補假一日）。 */
+export type OvertimeWhen = "weekday_ot" | "rest_day" | "regular_leave" | "fixed_holiday";
 
 export interface OvertimeTier {
   /** 這一段的累計上限（小時，含）；省略 = 最後一段、無上限。 */
@@ -1724,6 +1725,8 @@ export interface OvertimeRounding {
 }
 
 export interface OvertimeMealBreak {
+  /** auto＝照時數自動扣（舊設定，省略即 auto）；opt_in＝員工勾選晚餐才扣（2026-10-17 新租戶預設）。 */
+  mode?: "auto" | "opt_in";
   afterMinutes: number;
   deductMinutes: number;
 }
@@ -1843,7 +1846,8 @@ export function pickRuleConfigVersion<T extends { version: number; effectiveFrom
 
 /* ---------------------------------------------------------- 行事曆 / 假日表 --- */
 
-export type CalendarDayType = "workday" | "rest_day" | "fixed_holiday";
+/** regular_leave＝例假、rest_day＝休息日（一例一休，2026-10-17）。 */
+export type CalendarDayType = "workday" | "rest_day" | "regular_leave" | "fixed_holiday";
 
 export interface CalendarDay {
   id: string;
@@ -1875,7 +1879,7 @@ export function putCalendarDays(
 
 /** HR 專用：批次產生週末＋國定假日；不帶 holidays 時套用該年度內建清單。 */
 export function generateCalendar(body: { year: number; holidays?: { date: string; label: string }[] }) {
-  return apiFetch<{ generated: number; imported: number; skipped: number }>("/calendar/generate", {
+  return apiFetch<{ generated: number; imported: number; skipped: number; weekendHolidays?: number }>("/calendar/generate", {
     method: "POST",
     body: JSON.stringify(body),
   });

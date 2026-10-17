@@ -377,10 +377,10 @@ export function getShifts() {
 
 /* ------------------------------------------------- 行事曆（假日表）--- */
 
-/** GET /calendar?year= 的一列：rest_day（例假／休息日）、fixed_holiday（國定假日）、workday（補班）。 */
+/** GET /calendar?year= 的一列：regular_leave（例假）、rest_day（休息日）、fixed_holiday（國定假日）、workday（補班）。 */
 export interface CalendarDay {
   date: string;
-  day_type: "rest_day" | "fixed_holiday" | "workday" | string;
+  day_type: "regular_leave" | "rest_day" | "fixed_holiday" | "workday" | string;
   label: string | null;
 }
 

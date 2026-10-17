@@ -139,11 +139,9 @@ describe("P0 /calendar", () => {
     expect(put.status).toBe(200)
     expect(put.body.upserted).toBe(2)
     expect(gen.status).toBe(200)
-    // 期望值從假日表算出來，不寫死：generate 對「本身就是國定假日的週末」不產 rest_day
-    // （留給 import 步驟寫成 fixed_holiday——國定假日出勤的計薪倍率不同，不能被
-    // rest_day 蓋掉）。2026：104 個週末 − 1 個人工（6/20）− 落在週末的假日數；
-    // 假日 21 筆 − 1 個人工（6/19）＝ import 20；skipped ＝ 1 + 1。
-    // 舊斷言寫死 103 是在「週末不排除假日」的舊行為下算的，實作改了測試沒跟上。
+    // 期望值從假日表算出來，不寫死（2026-10-17 一例一休）：週末一律產生例假（週日）／休息日（週六），
+    // 落在週末的國定假日本日維持例假／休息日，只有週間的假日（含補假日）寫成 fixed_holiday；
+    // HR 手動的 6/19、6/20 不動（skipped 2）。
     const holidays2026 = (TW_HOLIDAYS[2026] ?? []).map((h) => h.date)
     const weekends2026: string[] = []
     for (let d = new Date(Date.UTC(2026, 0, 1)); d.getUTCFullYear() === 2026; d.setUTCDate(d.getUTCDate() + 1)) {
@@ -151,20 +149,22 @@ describe("P0 /calendar", () => {
       if (dow === 0 || dow === 6) weekends2026.push(d.toISOString().slice(0, 10))
     }
     const manual = new Set(["2026-06-19", "2026-06-20"])
-    const holidaySet = new Set(holidays2026)
-    const expectedGenerated = weekends2026.filter((d) => !manual.has(d) && !holidaySet.has(d)).length
-    const expectedImported = holidays2026.filter((d) => !manual.has(d)).length
-    const expectedSkipped = weekends2026.filter((d) => manual.has(d)).length + (holidays2026.length - expectedImported)
+    const weekendSet = new Set(weekends2026)
+    const expectedGenerated = weekends2026.filter((d) => !manual.has(d)).length
+    const expectedImported = holidays2026.filter((d) => !manual.has(d) && !weekendSet.has(d)).length
     expect(weekends2026.length).toBe(104)
     expect(gen.body.generated).toBe(expectedGenerated)
     expect(gen.body.imported).toBe(expectedImported)
-    expect(gen.body.skipped).toBe(expectedSkipped)
+    expect(gen.body.skipped).toBe(2)
     expect(get.status).toBe(200)
     const days = get.body.days as Array<{ date: string; day_type: string; source: string; label: string | null }>
     expect(days.find((d) => d.date === "2026-06-19")).toMatchObject({ day_type: "fixed_holiday", source: "manual", label: "端午節" })
     expect(days.find((d) => d.date === "2026-06-20")).toMatchObject({ day_type: "workday", source: "manual" })
     expect(days.find((d) => d.date === "2026-01-01")).toMatchObject({ day_type: "fixed_holiday", source: "import" })
     expect(days.find((d) => d.date === "2026-06-06")).toMatchObject({ day_type: "rest_day", source: "generated" })
+    expect(days.find((d) => d.date === "2026-06-07")).toMatchObject({ day_type: "regular_leave", source: "generated" })
+    expect(days.find((d) => d.date === "2026-10-10")).toMatchObject({ day_type: "rest_day", source: "generated" })
+    expect(days.find((d) => d.date === "2026-10-09")).toMatchObject({ day_type: "fixed_holiday", source: "import" })
     expect(del.status).toBe(200)
     const again = await request(app).delete("/calendar/days/2026-06-20").set("Authorization", `Bearer ${adminToken}`)
     expect(again.status).toBe(404)

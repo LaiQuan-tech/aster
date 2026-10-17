@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import { computePayslip, type RuleConfig } from "@hr/rules"
-import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
+import { LEGACY_RULE_CONFIG_2026_09 as DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js" // 2026-10-17 前的預設（115-06 fixture 依此）
 import { weekdayOfKey } from "../lib/tz.js"
 import {
   allocateBeyondCap,

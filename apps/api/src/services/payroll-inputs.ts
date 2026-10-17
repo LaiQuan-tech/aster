@@ -15,6 +15,7 @@ import { sumClaimsForPayroll, type PayrollClaimRow } from "./payroll-claims.js"
 import { loadAdjustmentsByEmployee } from "./payroll-adjustments.js"
 import { leaveDeductRate, loadLeaveTypes } from "./settlement.js"
 import { applyNightPolicy, loadEmployeeFeaturesMap, type EmployeeFeatures } from "./employee-features.js"
+import { asDayTypeOrWorkday } from "./day-type.js"
 
 /**
  * Payroll inputs — everything `computePayslip` needs besides the AttendanceDay[]
@@ -62,10 +63,12 @@ export interface AttendanceDayRow {
   leave_breakdown?: Record<string, number> | null
   outing_minutes?: number | null
   early_leave_minutes?: number | null
+  /** jsonb；一例一休旗標 ptoWork／compDayOwed／compTimeMinutes 由 settleAttendance 寫在這裡（2026-10-17）。 */
+  anomaly?: unknown
 }
 
 export const ATTENDANCE_BASE_COLS =
-  "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type"
+  "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type, anomaly"
 export const ATTENDANCE_P0_COLS = `${ATTENDANCE_BASE_COLS}, leave_minutes, leave_breakdown, outing_minutes, early_leave_minutes`
 
 /** The engine ignores fields it does not know; outingMinutes rides along for audit. */
@@ -118,8 +121,9 @@ export function toAttendanceDay(
   row: AttendanceDayRow,
   deductRateByCode: Map<string, number>,
 ): AttendanceDayInput {
-  const dt = row.day_type
-  const dayType: DayType = dt === "rest_day" || dt === "fixed_holiday" ? dt : "workday"
+  // 含例假 regular_leave（services/day-type.ts）；不認得的值＝workday。
+  const dayType: DayType = asDayTypeOrWorkday(row.day_type)
+  const flags = oneRestOneOffFlags(row.anomaly)
   const breakdown =
     row.leave_breakdown && typeof row.leave_breakdown === "object" ? row.leave_breakdown : {}
   const leaves = Object.entries(breakdown)
@@ -139,7 +143,19 @@ export function toAttendanceDay(
     dayType,
     leaves: leaves.length > 0 ? leaves : undefined,
     outingMinutes: row.outing_minutes ?? 0,
+    ...flags,
   }
+}
+
+/** attendance_days.anomaly → AttendanceDay 的一例一休旗標（只帶有值的鍵）。純函式。 */
+export function oneRestOneOffFlags(anomaly: unknown): Pick<AttendanceDay, "ptoWork" | "compDayOwed" | "compTimeMinutes"> {
+  if (!anomaly || typeof anomaly !== "object" || Array.isArray(anomaly)) return {}
+  const a = anomaly as Record<string, unknown>
+  const out: Pick<AttendanceDay, "ptoWork" | "compDayOwed" | "compTimeMinutes"> = {}
+  if (a.ptoWork === true) out.ptoWork = true
+  if (typeof a.compDayOwed === "number" && a.compDayOwed > 0) out.compDayOwed = a.compDayOwed
+  if (typeof a.compTimeMinutes === "number" && a.compTimeMinutes > 0) out.compTimeMinutes = a.compTimeMinutes
+  return out
 }
 
 /* ---------------------------------------------------------------------------

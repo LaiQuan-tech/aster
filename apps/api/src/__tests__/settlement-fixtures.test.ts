@@ -11,7 +11,7 @@ import {
   type RuleConfig,
   type ShiftDef,
 } from "@hr/rules"
-import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
+import { LEGACY_RULE_CONFIG_2026_09 as DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js" // 2026-10-17 前的預設（115-06 fixture 依此）
 import { TW_HOLIDAYS } from "../lib/tw-holidays.js"
 import { weekdayOfKey, zonedTimeToUtc, addDaysKey } from "../lib/tz.js"
 import { pairPunchesTz, type PunchLike } from "../services/punch-pairing.js"

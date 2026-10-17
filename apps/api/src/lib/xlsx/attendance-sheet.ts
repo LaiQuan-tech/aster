@@ -176,7 +176,8 @@ function fallbackDay(date: string): SheetDayView {
   return {
     date,
     weekday,
-    dayType: weekday === 0 || weekday === 6 ? "rest_day" : "workday",
+    // 防呆列沒有租戶設定可看：依預設週休（週日例假、週六休息日）。
+    dayType: weekday === 0 ? "regular_leave" : weekday === 6 ? "rest_day" : "workday",
     firstIn: null,
     lastOut: null,
     workedMinutes: 0,

@@ -49,9 +49,9 @@ export const DEFAULT_SHIFT: ShiftLike = { start_time: "09:00", end_time: "18:00"
 export type LeavePeriod = "full" | "am" | "pm" | "custom" | "hours";
 
 /** `GET /calendar` 的 day_type；undefined＝行事曆沒有這天（用週六日判斷）。 */
-export type DayType = "workday" | "rest_day" | "fixed_holiday" | string;
+export type DayType = "workday" | "rest_day" | "regular_leave" | "fixed_holiday" | string;
 
-export type SkipReason = "weekend" | "rest_day" | "fixed_holiday";
+export type SkipReason = "weekend" | "rest_day" | "regular_leave" | "fixed_holiday";
 
 export interface LeaveHoursInput {
   startDate: string;
@@ -464,18 +464,19 @@ export function listDates(startDate: string, endDate: string): string[] {
 }
 
 /**
- * 是否工作日：行事曆說 `workday`（補班）→ true；`rest_day`／`fixed_holiday` → false；
+ * 是否工作日：行事曆說 `workday`（補班）→ true；`rest_day`／`regular_leave`（例假）／`fixed_holiday` → false；
  * 行事曆沒有這天（undefined／其他）→ 非週六日才算工作日。
  */
 export function isWorkday(date: string, dayType: DayType | undefined): boolean {
   if (dayType === "workday") return true;
-  if (dayType === "rest_day" || dayType === "fixed_holiday") return false;
+  if (dayType === "rest_day" || dayType === "regular_leave" || dayType === "fixed_holiday") return false;
   const w = weekdayOf(date);
   return w !== 0 && w !== 6;
 }
 
 function skipReasonOf(date: string, dayType: DayType | undefined): SkipReason {
   if (dayType === "rest_day") return "rest_day";
+  if (dayType === "regular_leave") return "regular_leave";
   if (dayType === "fixed_holiday") return "fixed_holiday";
   return "weekend";
 }
@@ -483,6 +484,7 @@ function skipReasonOf(date: string, dayType: DayType | undefined): SkipReason {
 const SKIP_LABEL: Record<SkipReason, string> = {
   weekend: "週末",
   rest_day: "休息日",
+  regular_leave: "例假",
   fixed_holiday: "國定假日",
 };
 

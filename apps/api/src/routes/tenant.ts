@@ -139,6 +139,13 @@ export const tenantSettingsSchema = z.object({
       attendance: z
         .object({
           blockApproveOnUnsettledLeave: z.boolean().optional(),
+          /**
+           * 一例一休（2026-10-17，services/day-type.ts）：例假是星期幾（0＝週日…6＝週六，預設 0）、
+           * 休息日是星期幾（預設：例假週日→週六、例假週六→週日）。行事曆沒有列的日子依此判；
+           * POST /calendar/generate 也依此產生例假／休息日。員工可在 employees.features 個人覆寫。
+           */
+          regularLeaveWeekday: z.number().int().min(0).max(6).optional(),
+          restDayWeekday: z.number().int().min(0).max(6).optional(),
         })
         .optional(),
       /**
@@ -251,7 +258,8 @@ tenantRouter.put(
       const features: Record<string, unknown> = { ...currentFeatures, ...incomingFeatures }
       // payroll、approval 是巢狀設定：合併而不是整鍵覆蓋。payroll：之後在裡面加別的設定不會被只帶 periodUnlockEmpIds 的
       // 請求洗掉；approval：帶 `approval: {}` 不會把老闆洗成空（要清除老闆得明確帶 fallbackApproverEmpId: null）。
-      for (const key of ["payroll", "approval"] as const) {
+      // attendance 同理：只帶 regularLeaveWeekday 不會洗掉 blockApproveOnUnsettledLeave。
+      for (const key of ["payroll", "approval", "attendance"] as const) {
         if (incomingFeatures[key] !== undefined) {
           features[key] = { ...asRecord(currentFeatures[key]), ...asRecord(incomingFeatures[key]) }
         }

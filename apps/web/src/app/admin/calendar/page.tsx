@@ -4,23 +4,27 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, PrimaryButton, ErrorText } from "@/components/admin-ui";
 import { BatchImportButton } from "@/components/BatchImport";
 import {
+  getBranding,
   getCalendar,
   putCalendarDays,
   generateCalendar,
+  saveTenantSettings,
   type CalendarDay,
   type CalendarDayType,
 } from "@/lib/admin-api";
 
 /**
  * 行事曆 / 假日表：維護 tenant_calendar_days——在 worktime 引擎預設工作週之上的逐日
- * 覆寫（例假日、國定假日、補班日）。點格子在 workday → rest_day → fixed_holiday
- * 三態間循環，每次切換立即 PUT /calendar/days；fixed_holiday 另外可填 label
+ * 覆寫（例假、休息日、國定假日、補班日）。點格子在 workday → rest_day → regular_leave →
+ * fixed_holiday 四態間循環，每次切換立即 PUT /calendar/days；fixed_holiday 另外可填 label
  * （國定假日名稱）。
  *
- * 沒有覆寫列的日期預設值取自 apps/api/src/routes/calendar.ts 的權威定義：「週六、
- * 日預設 rest_day，其餘預設 workday」（settlement.ts 結算時就是照這個規則判
- * DayType）；下面的 effectiveDayType 鏡射同一規則，讓格子顏色即使在 HR 尚未按過
- * 「產生」按鈕前也能準確預覽結算會怎麼判。
+ * 一例一休（2026-10-17）：勞基法第 36 條每七日一日「例假」、一日「休息日」，兩者出勤的計薪與
+ * 法律效果不同。沒有覆寫列的日期預設值取自 apps/api/src/services/day-type.ts 的權威定義：
+ * 租戶 features.attendance.regularLeaveWeekday 那天＝例假（預設週日）、另一個週末日＝休息日
+ * （預設週六），其餘＝工作日；下面的 effectiveDayType 鏡射同一規則，讓格子顏色即使在 HR 尚未
+ * 按過「產生」按鈕前也能準確預覽結算會怎麼判。國定假日落在例假／休息日時，本日維持例假／休息日，
+ * 只有補假日標國定假日（產生按鈕會這樣寫）。員工個人的例假／休息日在員工資料設定，不顯示在這裡。
  */
 
 const WEEKDAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"];
@@ -31,30 +35,52 @@ const MONTH_LABELS = [
 
 const DAY_TYPE_META: Record<CalendarDayType, { cls: string; label: string }> = {
   workday: { cls: "bg-white text-gray-700 border border-gray-100", label: "工作日" },
-  rest_day: { cls: "bg-gray-200 text-gray-700", label: "例假日" },
+  rest_day: { cls: "bg-gray-200 text-gray-700", label: "休息日" },
+  regular_leave: { cls: "bg-amber-100 text-amber-800", label: "例假" },
   fixed_holiday: { cls: "bg-red-50 text-red-700 border border-red-100", label: "國定假日" },
 };
 
 function cycle(dt: CalendarDayType): CalendarDayType {
   if (dt === "workday") return "rest_day";
-  if (dt === "rest_day") return "fixed_holiday";
+  if (dt === "rest_day") return "regular_leave";
+  if (dt === "regular_leave") return "fixed_holiday";
   return "workday";
 }
+
+/** 週休設定（與 apps/api services/day-type.ts tenantWeekendPolicy 同一套推導）。 */
+interface WeekendPolicy {
+  regularLeaveWeekday: number;
+  restDayWeekday: number;
+}
+
+function asWeekday(v: unknown): number | null {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 6 ? v : null;
+}
+
+function weekendPolicyOf(features: unknown): WeekendPolicy {
+  const f = features && typeof features === "object" ? (features as Record<string, unknown>) : {};
+  const att = f.attendance && typeof f.attendance === "object" ? (f.attendance as Record<string, unknown>) : {};
+  const regular = asWeekday(att.regularLeaveWeekday) ?? 0;
+  let rest = asWeekday(att.restDayWeekday);
+  if (rest == null || rest === regular) rest = regular === 0 ? 6 : regular === 6 ? 0 : (regular + 6) % 7;
+  return { regularLeaveWeekday: regular, restDayWeekday: rest };
+}
+
+const DEFAULT_POLICY: WeekendPolicy = { regularLeaveWeekday: 0, restDayWeekday: 6 };
 
 function weekdayOf(date: string): number {
   const [y, m, d] = date.split("-").map(Number);
   return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
 }
 
-function isWeekend(weekday: number): boolean {
-  return weekday === 0 || weekday === 6;
-}
-
-/** 沒有覆寫列時：週六、日 → rest_day，其餘 → workday（與 apps/api calendar.ts 對齊）。 */
-function effectiveDayType(dayMap: Map<string, CalendarDay>, date: string): CalendarDayType {
+/** 沒有覆寫列時：例假日 → regular_leave、休息日 → rest_day，其餘 → workday（與 apps/api services/day-type.ts 對齊）。 */
+function effectiveDayType(dayMap: Map<string, CalendarDay>, date: string, policy: WeekendPolicy): CalendarDayType {
   const explicit = dayMap.get(date)?.day_type;
   if (explicit) return explicit;
-  return isWeekend(weekdayOf(date)) ? "rest_day" : "workday";
+  const wd = weekdayOf(date);
+  if (wd === policy.regularLeaveWeekday) return "regular_leave";
+  if (wd === policy.restDayWeekday) return "rest_day";
+  return "workday";
 }
 
 /**
@@ -83,6 +109,30 @@ export default function CalendarPage() {
   const [labelDraft, setLabelDraft] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [policy, setPolicy] = useState<WeekendPolicy>(DEFAULT_POLICY);
+  const [savingPolicy, setSavingPolicy] = useState(false);
+
+  useEffect(() => {
+    getBranding()
+      .then((res) => setPolicy(weekendPolicyOf(res.features)))
+      .catch(() => setPolicy(DEFAULT_POLICY));
+  }, []);
+
+  async function onRegularLeaveChange(weekday: number) {
+    setSavingPolicy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      // 只改例假日；休息日跟著預設推導（例假週日→休息日週六、例假週六→休息日週日）。
+      const res = await saveTenantSettings({ features: { attendance: { regularLeaveWeekday: weekday } } });
+      setPolicy(weekendPolicyOf(res.features));
+      setMessage("已更新例假日。已產生過的行事曆請再按一次「產生」更正週末（HR 手動改過的日子不會被動）。");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "更新例假日失敗");
+    } finally {
+      setSavingPolicy(false);
+    }
+  }
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -103,19 +153,21 @@ export default function CalendarPage() {
     void load();
   }, [load]);
 
-  // 含隱含的週六日 rest_day，不只是有覆寫列的天數，才能反映結算實際會採用的天數。
+  // 含隱含的例假／休息日，不只是有覆寫列的天數，才能反映結算實際會採用的天數。
   const stats = useMemo(() => {
     let restDays = 0;
+    let regularLeaves = 0;
     let holidays = 0;
     const daysInYear = (Date.UTC(year + 1, 0, 1) - Date.UTC(year, 0, 1)) / 86_400_000;
     for (let i = 0; i < daysInYear; i += 1) {
       const date = new Date(Date.UTC(year, 0, 1) + i * 86_400_000).toISOString().slice(0, 10);
-      const dt = effectiveDayType(dayMap, date);
+      const dt = effectiveDayType(dayMap, date, policy);
       if (dt === "rest_day") restDays += 1;
+      else if (dt === "regular_leave") regularLeaves += 1;
       else if (dt === "fixed_holiday") holidays += 1;
     }
-    return { restDays, holidays };
-  }, [dayMap, year]);
+    return { restDays, regularLeaves, holidays };
+  }, [dayMap, year, policy]);
 
   async function saveDay(date: string, dayType: CalendarDayType, label: string | null) {
     setError(null);
@@ -148,7 +200,7 @@ export default function CalendarPage() {
 
   function onCellClick(date: string) {
     if (savingDates.has(date)) return;
-    const current = effectiveDayType(dayMap, date);
+    const current = effectiveDayType(dayMap, date, policy);
     const next = cycle(current);
     if (next === "fixed_holiday") {
       const currentLabel = dayMap.get(date)?.label ?? "";
@@ -179,7 +231,8 @@ export default function CalendarPage() {
     setMessage(null);
     try {
       const res = await generateCalendar({ year });
-      setMessage(`已產生 ${res.generated} 筆（匯入 ${res.imported}、略過 ${res.skipped}）`);
+      const weekendNote = res.weekendHolidays ? `；${res.weekendHolidays} 個節日適逢例假／休息日，本日不另標國定假日（補假日已標）` : "";
+      setMessage(`已寫入例假／休息日 ${res.generated} 筆、國定假日 ${res.imported} 筆（HR 手動設定略過 ${res.skipped}）${weekendNote}`);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "產生行事曆失敗");
@@ -206,8 +259,11 @@ export default function CalendarPage() {
             <span className="flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2 py-1 text-gray-600">
               <span className="h-2.5 w-2.5 rounded-full border border-gray-300 bg-white" /> 工作日
             </span>
+            <span className="flex items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-amber-800">
+              <span className="h-2.5 w-2.5 rounded-full bg-amber-300" /> 例假 {stats.regularLeaves} 天
+            </span>
             <span className="flex items-center gap-1 rounded-full bg-gray-100 px-2 py-1 text-gray-600">
-              <span className="h-2.5 w-2.5 rounded-full bg-gray-300" /> 例假日 {stats.restDays} 天
+              <span className="h-2.5 w-2.5 rounded-full bg-gray-300" /> 休息日 {stats.restDays} 天
             </span>
             <span className="flex items-center gap-1 rounded-full bg-red-50 px-2 py-1 text-red-700">
               <span className="h-2.5 w-2.5 rounded-full bg-red-300" /> 國定假日 {stats.holidays} 天
@@ -223,8 +279,24 @@ export default function CalendarPage() {
 
         <div className="mb-5 flex flex-wrap items-center gap-3 rounded-lg border border-gray-100 bg-gray-50/60 p-3">
           <PrimaryButton type="button" onClick={() => void onGenerate()} disabled={busy}>
-            {busy ? "產生中…" : `產生週末＋國定假日（${year} 內建）`}
+            {busy ? "產生中…" : `產生例假／休息日＋國定假日（${year} 內建）`}
           </PrimaryButton>
+          <label className="flex items-center gap-1 text-sm text-gray-600">
+            例假日
+            <select
+              value={policy.regularLeaveWeekday}
+              disabled={savingPolicy}
+              onChange={(e) => void onRegularLeaveChange(Number(e.target.value))}
+              className="rounded-md border border-gray-200 bg-white px-2 py-1 text-sm"
+            >
+              {WEEKDAY_LABELS.map((w, i) => (
+                <option key={w} value={i}>
+                  週{w}
+                </option>
+              ))}
+            </select>
+            <span className="text-xs text-gray-400">休息日：週{WEEKDAY_LABELS[policy.restDayWeekday]}</span>
+          </label>
           {/* 自訂假日清單改成「下載 Excel 範本 → 填完上傳」的面板（原本是貼 JSON 的框）；年份由檔案內的日期決定。 */}
           <BatchImportButton
             kind="holidays"
@@ -254,7 +326,7 @@ export default function CalendarPage() {
                   {cells.map((date, cellIndex) => {
                     if (!date) return <div key={cellIndex} />;
                     const info = dayMap.get(date);
-                    const dayType = effectiveDayType(dayMap, date);
+                    const dayType = effectiveDayType(dayMap, date, policy);
                     const meta = DAY_TYPE_META[dayType];
                     const day = Number(date.slice(-2));
                     const isSaving = savingDates.has(date);
@@ -263,7 +335,7 @@ export default function CalendarPage() {
                         <button
                           type="button"
                           onClick={() => onCellClick(date)}
-                          title={`${date}　${meta.label}${info?.label ? `　${info.label}` : ""}${!info && dayType === "rest_day" ? "（週末預設，尚未寫入）" : ""}`}
+                          title={`${date}　${meta.label}${info?.label ? `　${info.label}` : ""}${!info && (dayType === "rest_day" || dayType === "regular_leave") ? "（週休預設，尚未寫入）" : ""}`}
                           className="w-full rounded-md py-1 text-xs leading-tight"
                         >
                           {day}

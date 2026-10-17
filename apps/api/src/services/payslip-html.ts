@@ -76,6 +76,7 @@ export interface RenderPayslipInput {
 const OT_LABEL: Record<string, string> = {
   weekday_ot: "平日加班",
   rest_day: "休息日",
+  regular_leave: "例假",
   fixed_holiday: "國定假日",
 }
 

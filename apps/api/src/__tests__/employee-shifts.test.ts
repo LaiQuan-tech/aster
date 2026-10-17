@@ -44,10 +44,10 @@ describe("resolveDayShift — 四個讀取點共用的優先序", () => {
 
 describe("employee features", () => {
   it("normalizeEmployeeFeatures：只認 wfhPunch === true", () => {
-    expect(normalizeEmployeeFeatures({ wfhPunch: true })).toEqual({ wfhPunch: true, noNightPremium: false })
-    expect(normalizeEmployeeFeatures({ wfhPunch: "true", noNightPremium: true })).toEqual({ wfhPunch: false, noNightPremium: true })
-    expect(normalizeEmployeeFeatures(null)).toEqual({ wfhPunch: false, noNightPremium: false })
-    expect(normalizeEmployeeFeatures([true])).toEqual({ wfhPunch: false, noNightPremium: false })
+    expect(normalizeEmployeeFeatures({ wfhPunch: true })).toEqual({ wfhPunch: true, noNightPremium: false, regularLeaveWeekday: null, restDayWeekday: null })
+    expect(normalizeEmployeeFeatures({ wfhPunch: "true", noNightPremium: true })).toEqual({ wfhPunch: false, noNightPremium: true, regularLeaveWeekday: null, restDayWeekday: null })
+    expect(normalizeEmployeeFeatures(null)).toEqual({ wfhPunch: false, noNightPremium: false, regularLeaveWeekday: null, restDayWeekday: null })
+    expect(normalizeEmployeeFeatures([true])).toEqual({ wfhPunch: false, noNightPremium: false, regularLeaveWeekday: null, restDayWeekday: null })
   })
 
   it("checkWfhPunch：沒帶／false 放行；true 要開通", () => {

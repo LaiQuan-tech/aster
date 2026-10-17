@@ -19,11 +19,11 @@ import {
   localDateKey,
   todayKey,
   toNaiveLocal,
-  weekdayOfKey,
   zonedTimeToUtc,
   type DateKey,
 } from "../lib/tz.js"
-import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { columnsExist, isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { loadDayTypeResolver } from "./day-type.js"
 import { loadRuleConfigFor } from "./payroll-inputs.js"
 import { assertDateRangeOpen } from "./period-lock.js"
 import { loadShiftResolver } from "./employee-shifts.js"
@@ -37,7 +37,8 @@ import { pairPunchesTz, type PairedDay } from "./punch-pairing.js"
  *   • that day's punches paired into in/out segments (cross-midnight pairs
  *     belong to the 'in' day; outing/break pairs are cut out of worked time),
  *   • the employee's schedule → shift (start/end/break) for the day,
- *   • the day's type from tenant_calendar_days (fallback: Sat/Sun rest_day),
+ *   • the day's type (services/day-type.ts：tenant_calendar_days 優先，沒有列＝依例假／休息日星期設定，
+ *     員工個人設定優先；預設週日例假、週六休息日),
  *   • approved leave minutes sliced onto that local day (by leave-type code),
  *     plus the leave's time windows on that day (2026-10-11：已核准請假覆蓋的時段
  *     不算遲到／早退——引擎的 ctx.leaveIntervals；pending 不抵),
@@ -82,10 +83,8 @@ interface PunchRow {
   punch_at: string
 }
 
-interface CalendarRow {
-  date: string
-  day_type: string
-}
+/** 特休的假別代碼（leave_types.code；annual-leave.ts 年度給假用同一個）。 */
+const PTO_LEAVE_CODE = "annual"
 
 interface LeaveRequestRow {
   id: string
@@ -439,10 +438,9 @@ export async function lateMinutesForArrival(input: {
   const workDate = localDateKey(arrivalIso, tz)
   const { rules } = await loadRuleConfigFor(tenantId, workDate.slice(0, 7))
 
-  // 日屬性
-  const calendar = await loadCalendar(tenantId, workDate, workDate)
-  const wd = weekdayOfKey(workDate)
-  const dayType: DayType = calendar.get(workDate) ?? (wd === 0 || wd === 6 ? "rest_day" : "workday")
+  // 日屬性（services/day-type.ts，與結算／月表／缺卡掃描同一支）
+  const dayTypes = await loadDayTypeResolver({ tenantId, from: workDate, to: workDate, employeeIds: [employeeId] })
+  const dayType: DayType = dayTypes.forDay(employeeId, workDate)
 
   // 當天班別（services/employee-shifts.ts，與結算／月表／缺卡掃描同一支）：排班（歷史資料）→ 個人預設班別
   // （只限工作日）→ 沒有＝工作日走彈性上班。
@@ -493,29 +491,6 @@ function normalizeHhmm(value: string): string {
   const m = hhmmToMinutesOrNull(value)
   if (m == null) return value
   return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`
-}
-
-/** tenant_calendar_days in [from, to] → date → DayType (empty until 0038). */
-export async function loadCalendar(tenantId: string, from: DateKey, to: DateKey): Promise<Map<DateKey, DayType>> {
-  const map = new Map<DateKey, DayType>()
-  const { data, error } = await supabaseAdmin
-    .from("tenant_calendar_days")
-    .select("date, day_type")
-    .eq("tenant_id", tenantId)
-    .gte("date", from)
-    .lte("date", to)
-  if (error) {
-    if (isMissingTableError(error)) {
-      warnSchemaGapOnce("tenant_calendar_days", error)
-      return map
-    }
-    throw new Error(`settleAttendance (calendar): ${error.message}`)
-  }
-  for (const row of (data ?? []) as CalendarRow[]) {
-    const t = row.day_type
-    if (t === "workday" || t === "rest_day" || t === "fixed_holiday") map.set(row.date, t)
-  }
-  return map
 }
 
 /** leave_types of the tenant, id → row (deduct_rate optional until 0038). */
@@ -592,20 +567,16 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   if (punchErr) throw new Error(`settleAttendance (punches): ${punchErr.message}`)
   const punches = (punchData ?? []) as PunchRow[]
 
-  // --- calendar → dayType ------------------------------------------------------
-  const calendar = await loadCalendar(tenantId, from, to)
-  const dayTypeFor = (date: DateKey): DayType => {
-    const fromCalendar = calendar.get(date)
-    if (fromCalendar) return fromCalendar
-    const wd = weekdayOfKey(date)
-    return wd === 0 || wd === 6 ? "rest_day" : "workday"
-  }
+  // --- 日別（services/day-type.ts，與打卡遲到判斷／月表／缺卡掃描同一支）--------------------
+  // 行事曆有列就用；沒有＝依例假／休息日星期（員工個人設定優先，預設週日例假、週六休息日）。
+  const dayTypes = await loadDayTypeResolver({ tenantId, from, to, employeeIds: employeeId ? [employeeId] : undefined })
+  const dayTypeFor = (empId: string, date: DateKey): DayType => dayTypes.forDay(empId, date)
 
   // --- 當天班別（services/employee-shifts.ts，與打卡遲到判斷／月表／缺卡掃描同一支）---------------
   // 排班列（班表功能 2026-10-11 已移除，只剩 2026-08 測試資料）→ 員工個人預設班別（2026-10-13，只限工作日）→
   // 都沒有＝「沒排班」：工作日＝彈性上班、例假日＝整天不扣午休。
   const resolver = await loadShiftResolver({ tenantId, from, to, employeeIds: employeeId ? [employeeId] : undefined })
-  const shiftFor = (empId: string, date: DateKey): ShiftDef | null => resolver.forDay(empId, date, dayTypeFor(date)).shift
+  const shiftFor = (empId: string, date: DateKey): ShiftDef | null => resolver.forDay(empId, date, dayTypeFor(empId, date)).shift
   // 沒排班的日子：工作日＝整天＋租戶預設午休（彈性上班生效後改彈性）；例假日／國定假日＝整天、不扣午休。
   const unscheduledWorkday = unscheduledShiftDef(rules, "workday")
   const unscheduledRestDay = unscheduledShiftDef(rules, "rest_day")
@@ -632,7 +603,8 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   const leaveIntervalsByKey = new Map<string, TimeInterval[]>()
   for (const req of (leaveData ?? []) as LeaveRequestRow[]) {
     const code = req.leave_type_id ? (leaveTypes.get(req.leave_type_id)?.code ?? "unknown") : "unspecified"
-    for (const slice of sliceLeave(req, { tz, from, to, regularMinutes, shiftFor, dayTypeFor, defaultLunch })) {
+    const reqDayTypeFor = (date: DateKey): DayType => dayTypeFor(req.employee_id, date)
+    for (const slice of sliceLeave(req, { tz, from, to, regularMinutes, shiftFor, dayTypeFor: reqDayTypeFor, defaultLunch })) {
       const key = `${req.employee_id}|${slice.date}`
       let dl = leaveByKey.get(key)
       if (!dl) {
@@ -669,6 +641,50 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     for (const d of sliceWfhDates(req, { tz, from, to })) wfhByKey.add(`${req.employee_id}|${d}`)
   }
 
+  // --- 加班單選補休（payout='comp_time'）→ 當天的 compTimeMinutes（2026-10-17）-----------------
+  // 已由 ledger.applyApprovalEffects 記進 comp_time_ledger，薪資引擎要從當天加班費扣掉這些分鐘才不會重複給付
+  // （AttendanceDay.compTimeMinutes）。歸屬：加班單開始時間的租戶本地日。只認員工明示選補休的單；
+  // 規則層 compTime=true 的整日轉補休由引擎自己處理，不在這裡重複計。
+  let compQuery = supabaseAdmin
+    .from("leave_requests")
+    .select("employee_id, start_at, hours")
+    .eq("tenant_id", tenantId)
+    .eq("kind", "ot")
+    .eq("status", "approved")
+    .eq("payout", "comp_time")
+    .is("deleted_at", null)
+    .gte("start_at", rangeStart)
+    .lt("start_at", rangeEnd)
+  if (employeeId) compQuery = compQuery.eq("employee_id", employeeId)
+  const { data: compData, error: compErr } = await compQuery
+  if (compErr) throw new Error(`settleAttendance (comp-time ot): ${compErr.message}`)
+  const compTimeByKey = new Map<string, number>()
+  for (const r of (compData ?? []) as Array<{ employee_id: string; start_at: string; hours: string | number | null }>) {
+    const minutes = Math.round((Number(r.hours) || 0) * 60)
+    if (minutes <= 0) continue
+    const key = `${r.employee_id}|${localDateKey(r.start_at, tz)}`
+    compTimeByKey.set(key, (compTimeByKey.get(key) ?? 0) + minutes)
+  }
+
+  // --- 晚餐勾選（attendance_days.dinner_taken；欄位由晚餐功能另加，未加 → 全部 undefined）---------
+  // 規則 overtime.mealBreak.mode='opt_in' 時只有勾了才扣晚餐；'auto'（舊 config）引擎忽略這個旗標。
+  // 這裡只讀既有值，upsert 不寫這欄（PostgREST upsert 只更新帶來的欄位），員工勾選不會被結算洗掉。
+  const dinnerByKey = new Map<string, boolean>()
+  if (await columnsExist("attendance_days", "dinner_taken")) {
+    let dinnerQuery = supabaseAdmin
+      .from("attendance_days")
+      .select("employee_id, work_date, dinner_taken")
+      .eq("tenant_id", tenantId)
+      .gte("work_date", from)
+      .lte("work_date", to)
+    if (employeeId) dinnerQuery = dinnerQuery.eq("employee_id", employeeId)
+    const { data: dinnerData, error: dinnerErr } = await dinnerQuery
+    if (dinnerErr) throw new Error(`settleAttendance (dinner_taken): ${dinnerErr.message}`)
+    for (const r of (dinnerData ?? []) as Array<{ employee_id: string; work_date: string; dinner_taken: boolean | null }>) {
+      if (r.dinner_taken != null) dinnerByKey.set(`${r.employee_id}|${r.work_date}`, r.dinner_taken === true)
+    }
+  }
+
   // --- pair punches per employee (tz-aware, cross-midnight) ---------------------
   const punchesByEmp = new Map<string, PunchRow[]>()
   for (const p of punches) {
@@ -696,7 +712,7 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   const today = todayKey(tz)
   for (const empId of resolver.employeesWithDefault()) {
     for (let d = from; d <= to && d < today; d = addDaysKey(d, 1)) {
-      if (resolver.forDay(empId, d, dayTypeFor(d)).source === "default") keys.add(`${empId}|${d}`)
+      if (resolver.forDay(empId, d, dayTypeFor(empId, d)).source === "default") keys.add(`${empId}|${d}`)
     }
   }
 
@@ -708,7 +724,7 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     const [empId, workDate] = key.split("|")
     const day = pairedByKey.get(key)
     const scheduledShift = shiftFor(empId, workDate)
-    const dayType = dayTypeFor(workDate)
+    const dayType = dayTypeFor(empId, workDate)
 
     // 班別：有排班用該班（含午休設定）；沒排班的工作日用彈性上班（未生效前＝「整天＋預設午休」）；
     // 沒排班的例假日／國定假日＝整天、不扣午休。打卡的休息段已從 pairs 切掉 → punchedBreaks（只影響舊推算班別）。
@@ -723,18 +739,24 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     const hasExpectedTimes = !!scheduledShift || !!shift.flex
 
     const dayRegularMinutes = regularMinutesForDay(basis, scheduledShift, workDate, tz, regularMinutes)
+    const leave = leaveByKey.get(key)
+    // 特休日出勤（2026-10-17）：當天有已核准的特休（code 'annual'）整天假、又有打卡出勤 → 引擎依國定假日計薪
+    // （DayContext.ptoWork）。特休假單本身不在這裡撤銷：anomaly.ptoWork 留痕，由月表／HR 處理。
+    const punchedPairs = !!day && day.pairs.length > 0
+    const ptoWork = punchedPairs && (leave?.breakdown[PTO_LEAVE_CODE] ?? 0) >= dayRegularMinutes
     const result = computeAttendanceDay(day?.pairs ?? [], shift, rules, {
       date: workDate,
       dayType,
       regularMinutes: dayRegularMinutes,
       leaveIntervals: leaveIntervalsByKey.get(key),
       punchedBreaks: !!day && day.breaks.length > 0,
+      dinnerTaken: dinnerByKey.get(key),
+      ptoWork: ptoWork || undefined,
     })
     let workedMinutes = result.workedMinutes
     let lateMinutes = hasExpectedTimes ? result.lateMinutes : 0
     let earlyLeaveMinutes = hasExpectedTimes ? (result.earlyLeaveMinutes ?? 0) : 0
 
-    const leave = leaveByKey.get(key)
     const anomaly: Record<string, unknown> = {}
     if (day) {
       if (day.unpairedPunches > 0) anomaly.unpairedPunches = day.unpairedPunches
@@ -757,6 +779,12 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     if (result.overtimeMinutes > dailyCap) {
       anomaly.overtimeCapExceeded = { minutes: result.overtimeMinutes, capMinutes: dailyCap }
     }
+    // 一例一休（2026-10-17）：attendance_days 沒有專屬欄位，記在 anomaly jsonb；payroll-inputs.toAttendanceDay 讀回
+    // AttendanceDay.ptoWork／compDayOwed／compTimeMinutes。
+    if (result.ptoWork) anomaly.ptoWork = true
+    if (result.compDayOwed) anomaly.compDayOwed = result.compDayOwed
+    const compTimeMinutes = compTimeByKey.get(key) ?? 0
+    if (compTimeMinutes > 0) anomaly.compTimeMinutes = compTimeMinutes
 
     rows.push({
       tenant_id: tenantId,

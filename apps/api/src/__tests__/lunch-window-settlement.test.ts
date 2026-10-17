@@ -7,6 +7,7 @@ import { settleAttendance, __internal } from "../services/settlement.js"
 import { generateSheets } from "../services/attendance-sheets.js"
 import { zonedTimeToUtc } from "../lib/tz.js"
 import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
+import { LEGACY_RULE_CONFIG_2026_09 } from "../lib/default-rule-config.js"
 
 /**
  * 2026-10-11 午休規則＋請假時段不算遲到／早退——走真的 settleAttendance／generateSheets
@@ -96,6 +97,8 @@ function seed(): void {
     ...punches("2026-09-15", [["in", "09:00"], ["out", "12:00"]]), // 日班＋下午半天 13:00–18:00
   ]
   fake.db.employees = [{ id: EMP, tenant_id: TENANT_ID, status: "active", hire_date: "2026-01-05", terminated_at: null }]
+  // 本檔的期望值（30 分取整、自動扣晚餐）是照 2026-10-17 前的系統預設算的；預設改成法定新值後，明示存一版舊規則。
+  fake.db.rule_configs = [{ tenant_id: TENANT_ID, config: LEGACY_RULE_CONFIG_2026_09, version: 1, effective_from: "1900-01-01", active: true }]
 }
 
 function dayRow(date: string): Row {

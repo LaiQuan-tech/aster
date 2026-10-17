@@ -1,11 +1,11 @@
 import type { DayType, ShiftDef } from "@hr/rules"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
-import { localDateKey, weekdayOfKey, zonedTimeToUtc, type DateKey } from "../lib/tz.js"
+import { localDateKey, zonedTimeToUtc, type DateKey } from "../lib/tz.js"
 import { logger } from "../lib/logger.js"
 import { shiftBoundsOn } from "./absence-cover.js"
 import { loadShiftResolver } from "./employee-shifts.js"
-import { loadCalendar } from "./settlement.js"
+import { loadDayTypeResolver } from "./day-type.js"
 import { CARRY_OVER_MAX_MS, carryOverOpenIn } from "./punch-guard.js"
 
 /**
@@ -73,9 +73,8 @@ export async function findCarryOverIn(input: {
 
     const tz = await getTenantTimezone(tenantId)
     const inDate = localDateKey(row.punch_at, tz)
-    const calendar = await loadCalendar(tenantId, inDate, inDate)
-    const wd = weekdayOfKey(inDate)
-    const dayType: DayType = calendar.get(inDate) ?? (wd === 0 || wd === 6 ? "rest_day" : "workday")
+    const dayTypes = await loadDayTypeResolver({ tenantId, from: inDate, to: inDate, employeeIds: [employeeId] })
+    const dayType: DayType = dayTypes.forDay(employeeId, inDate)
     const resolver = await loadShiftResolver({ tenantId, from: inDate, to: inDate, employeeIds: [employeeId] })
     const shift = resolver.forDay(employeeId, inDate, dayType).shift
     return carryOverOpenIn(row, todayStartIso, now, carryOverCutoffMs({ inDate, today, shift, tz }))

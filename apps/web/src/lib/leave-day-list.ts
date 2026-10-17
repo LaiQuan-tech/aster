@@ -87,6 +87,7 @@ function round2(n: number): number {
 function restDayLabel(date: string, dayType: DayType | undefined): string | null {
   if (isWorkday(date, dayType)) return null;
   if (dayType === "rest_day") return "休息日";
+  if (dayType === "regular_leave") return "例假";
   if (dayType === "fixed_holiday") return "國定假日";
   return "週末";
 }

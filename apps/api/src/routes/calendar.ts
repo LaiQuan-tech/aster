@@ -11,16 +11,20 @@ export const calendarRouter = Router()
 
 /**
  * Tenant calendar (tenant_calendar_days) — the per-day ruling the settlement
- * reads to decide a work_date's DayType. Days with no row default to Sat/Sun =
- * rest_day, everything else = workday (see services/settlement.ts).
+ * reads to decide a work_date's DayType. Days with no row fall back to the
+ * weekly 一例一休 pattern (services/day-type.ts：tenants.features.attendance
+ * .regularLeaveWeekday／restDayWeekday, default Sun = regular_leave 例假,
+ * Sat = rest_day 休息日; an employee's personal setting wins).
  *
  *   GET    /calendar?year=YYYY      any member — the year's rows
  *   PUT    /calendar/days           HR — upsert explicit rulings (source 'manual')
- *   POST   /calendar/generate       HR — weekends → rest_day (source 'generated',
- *                                   never overwriting an existing row) + the
- *                                   given (or, for 2026, the built-in 行政機關
- *                                   辦公日曆表) holidays → fixed_holiday
- *                                   (source 'import')
+ *   POST   /calendar/generate       HR — weekends → regular_leave／rest_day
+ *                                   (source 'generated') + the given (or, for
+ *                                   2026／2027, the built-in 行政機關辦公日曆表)
+ *                                   holidays → fixed_holiday (source 'import');
+ *                                   a holiday on a weekend keeps the weekend type
+ *                                   (only its 補假 day is fixed_holiday). Manual
+ *                                   rows are never touched. See writers.ts.
  *   DELETE /calendar/days/:date     HR — remove one ruling
  *
  * The calendar is configuration, not evidence, so hard delete is fine. Every
@@ -30,7 +34,7 @@ export const calendarRouter = Router()
  */
 
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
-const DAY_TYPES = ["workday", "rest_day", "fixed_holiday"] as const
+const DAY_TYPES = ["workday", "rest_day", "regular_leave", "fixed_holiday"] as const
 
 const yearQuerySchema = z.object({
   year: z.coerce.number().int().min(1970).max(2100),
@@ -153,7 +157,7 @@ calendarRouter.post(
     }
     const { year } = parsed.data
     // Caller's list wins; otherwise the built-in 行政機關 calendar for years we
-    // ship (2026). A year we have no list for imports nothing (not an error —
+    // ship (2026, 2027). A year we have no list for imports nothing (not an error —
     // HR can PUT the days later). 週末→rest_day、假日→fixed_holiday 的邏輯在
     // services/imports/writers.ts 的 generateTenantCalendar（xlsx 匯入 POST /imports/holidays 共用）。
     try {

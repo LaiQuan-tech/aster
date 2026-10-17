@@ -67,7 +67,7 @@ export interface SheetAnomaly {
 export interface SheetDayView {
   date: string;
   weekday: number;
-  dayType: "workday" | "rest_day" | "fixed_holiday";
+  dayType: "workday" | "rest_day" | "regular_leave" | "fixed_holiday";
   firstIn: string | null;
   lastOut: string | null;
   workedMinutes: number;

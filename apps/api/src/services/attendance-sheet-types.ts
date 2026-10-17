@@ -61,7 +61,8 @@ export interface SheetAnomaly {
 export interface SheetDayView {
   date: string
   weekday: number
-  dayType: "workday" | "rest_day" | "fixed_holiday"
+  /** regular_leave＝例假（一例一休，2026-10-17）、rest_day＝休息日、fixed_holiday＝國定假日。 */
+  dayType: "workday" | "rest_day" | "regular_leave" | "fixed_holiday"
   firstIn: string | null
   lastOut: string | null
   workedMinutes: number
