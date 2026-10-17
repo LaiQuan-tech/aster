@@ -984,3 +984,28 @@ describe("S10d 下載安全：網域白名單、轉址、大小上限", () => {
     await expect(fetchHolidayYear(2027, { fetchImpl: streamed.fn, timeoutMs: 500, maxBytes: 16 * 1024 }).then((r) => r.errors[0])).resolves.toContain("上限")
   })
 })
+
+describe("日別 CHECK 未套 0069 → 409 schema_not_ready", () => {
+  const checkErr = { code: "23514", message: 'new row for relation "tenant_calendar_days" violates check constraint "tenant_calendar_days_day_type_chk"' }
+
+  it("核准草稿：寫例假列撞舊 CHECK → 409 schema_not_ready（說明 0069），草稿維持 draft", async () => {
+    setupApproveDb()
+    registerApproveRpc()
+    fake.injectError({ table: "tenant_calendar_days", action: "upsert", error: checkErr })
+    const res = await request(server).post(`/calendar/import/drafts/${DRAFT_ID}/approve`).set("Authorization", "Bearer user-hr")
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("schema_not_ready")
+    expect(res.body.detail).toContain("0069")
+    expect(fake.db.calendar_import_drafts!.find((r) => r.id === DRAFT_ID)?.status).toBe("draft")
+    expect(approvedRows().map((r) => r.id)).toEqual([OLD_APPROVED_ID])
+  })
+
+  it("重新產生未結算月份：撞舊 CHECK → 409 schema_not_ready", async () => {
+    setupApproveDb()
+    fake.injectError({ table: "tenant_calendar_days", action: "upsert", error: checkErr })
+    const res = await request(server).post("/calendar/import/regenerate").set("Authorization", "Bearer user-hr").send({ years: [2027] })
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: "schema_not_ready" })
+    expect(res.body.detail).toContain("0069")
+  })
+})

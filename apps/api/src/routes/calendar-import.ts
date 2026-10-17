@@ -6,7 +6,7 @@ import { requireHrAdmin } from "../middleware/role.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { todayKey } from "../lib/tz.js"
-import { CalendarNotMigratedError } from "../services/imports/writers.js"
+import { CalendarNotMigratedError, CalendarSchemaNotReadyError } from "../services/imports/writers.js"
 import {
   CalendarImportNotMigratedError,
   DraftStateError,
@@ -70,6 +70,11 @@ async function callerEmpId(req: Request, tenantId: string): Promise<string | nul
 
 /** 可預期的錯誤 → HTTP；其他交給 next。 */
 function handleError(res: Response, next: NextFunction, err: unknown): void {
+  // 日別 CHECK 還不認得 regular_leave（核准草稿、重新產生都會寫例假列）→ 409，說明需先套 migration 0069。
+  if (err instanceof CalendarSchemaNotReadyError) {
+    res.status(409).json({ error: "schema_not_ready", detail: err.message })
+    return
+  }
   if (err instanceof CalendarImportNotMigratedError || err instanceof CalendarNotMigratedError) {
     res.status(503).json({ error: "calendar_import_not_migrated", detail: err.message })
     return
