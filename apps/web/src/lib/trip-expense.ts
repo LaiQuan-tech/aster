@@ -188,14 +188,15 @@ export function tripClaimSummaryText(s: TripClaimSummary): string {
  * 已核銷或月份已鎖的不動，HR 在月結審視處理）。
  */
 export function tripCancelClaimsNotice(s: TripClaimSummary): string {
-  return `綁定的 ${s.count} 筆報銷會一併撤回（已結算的不受影響）。`;
+  return `綁定的 ${s.count} 筆報銷會一併撤回（已核銷或已鎖月的不受影響）。`;
 }
 
-/** 撤回成功的提示：有一併撤回報銷就說幾筆。 */
-export function cancelledToastText(claims?: { withdrawn: number; kept: number } | null): string {
-  if (!claims || (claims.withdrawn <= 0 && claims.kept <= 0)) return "已撤回";
-  const parts = [`已撤回，並一併撤回 ${claims.withdrawn} 筆報銷`];
-  if (claims.kept > 0) parts.push(`${claims.kept} 筆已結算未撤回`);
+/** 撤回成功的提示：一併撤回幾筆、幾筆因已核銷或已鎖月保留；自動撤回失敗時請員工到報銷頁確認。撤回 0 筆不寫「0 筆」。 */
+export function cancelledToastText(claims?: { withdrawn: number; kept: number; failed?: boolean } | null): string {
+  if (!claims) return "已撤回";
+  if (claims.failed) return "已撤回公出單；綁定的報銷未能自動撤回，請到報銷頁確認";
+  const parts: string[] = [claims.withdrawn > 0 ? `已撤回，並一併撤回 ${claims.withdrawn} 筆報銷` : "已撤回"];
+  if (claims.kept > 0) parts.push(`${claims.kept} 筆報銷已核銷或已鎖月，未撤回`);
   return parts.join("；");
 }
 

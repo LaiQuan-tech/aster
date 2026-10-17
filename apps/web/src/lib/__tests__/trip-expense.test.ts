@@ -335,13 +335,15 @@ describe("成功畫面的報銷結果 tripExpenseOutcome", () => {
 
 describe("撤回公出單：提醒與結果提示", () => {
   it("撤回前提醒綁定的報銷會一併撤回", () => {
-    expect(tripCancelClaimsNotice({ count: 2, total: 1350 })).toBe("綁定的 2 筆報銷會一併撤回（已結算的不受影響）。");
+    expect(tripCancelClaimsNotice({ count: 2, total: 1350 })).toBe("綁定的 2 筆報銷會一併撤回（已核銷或已鎖月的不受影響）。");
   });
 
-  it("撤回後提示：沒有綁報銷＝「已撤回」；有撤回、有保留各自說明", () => {
+  it("撤回後提示：沒綁＝「已撤回」；撤回 0 筆不寫 0；保留寫「已核銷或已鎖月」；失敗請到報銷頁確認", () => {
     expect(cancelledToastText(undefined)).toBe("已撤回");
     expect(cancelledToastText({ withdrawn: 0, kept: 0 })).toBe("已撤回");
-    expect(cancelledToastText({ withdrawn: 2, kept: 0 })).toBe("已撤回，並一併撤回 2 筆報銷");
-    expect(cancelledToastText({ withdrawn: 1, kept: 1 })).toBe("已撤回，並一併撤回 1 筆報銷；1 筆已結算未撤回");
+    expect(cancelledToastText({ withdrawn: 2, kept: 0, failed: false })).toBe("已撤回，並一併撤回 2 筆報銷");
+    expect(cancelledToastText({ withdrawn: 1, kept: 1 })).toBe("已撤回，並一併撤回 1 筆報銷；1 筆報銷已核銷或已鎖月，未撤回");
+    expect(cancelledToastText({ withdrawn: 0, kept: 2 })).toBe("已撤回；2 筆報銷已核銷或已鎖月，未撤回");
+    expect(cancelledToastText({ withdrawn: 0, kept: 0, failed: true })).toBe("已撤回公出單；綁定的報銷未能自動撤回，請到報銷頁確認");
   });
 });

@@ -1127,8 +1127,10 @@ async function decide(
 type DecisionActor = { id: string; role: string }
 
 /** 回應帶出的報銷撤回數（沒跑＝空物件）。 */
-function expenseClaimsField(w: TripClaimWithdrawal | null): { expenseClaims?: { withdrawn: number; kept: number } } {
-  return w ? { expenseClaims: { withdrawn: w.withdrawn, kept: w.kept } } : {}
+function expenseClaimsField(w: TripClaimWithdrawal | null): {
+  expenseClaims?: { withdrawn: number; kept: number; failed: boolean }
+} {
+  return w ? { expenseClaims: { withdrawn: w.withdrawn, kept: w.kept, failed: w.failed } } : {}
 }
 
 type DecisionOutcome =
@@ -1139,7 +1141,7 @@ type DecisionOutcome =
       currentStep: number
       notified?: number
       /** 公出／出差單駁回時自動撤回綁定報銷的結果（2026-10-17）；其他情況缺席。 */
-      expenseClaims?: { withdrawn: number; kept: number }
+      expenseClaims?: { withdrawn: number; kept: number; failed: boolean }
     }
   | { ok: false; id: string; error: string; period?: string }
 
@@ -1362,7 +1364,13 @@ async function decideOneRequest(params: {
     // 公出／出差單駁回 → 綁在它上面、還能撤回的報銷一併撤回（best-effort，不擋駁回），通知裡說明幾筆。
     const withdrawal =
       lr.kind === "business_trip"
-        ? await withdrawClaimsOfTrip({ tenantId, tripRequestId: requestId, actorEmpId: actor.id, cause: "rejected" })
+        ? await withdrawClaimsOfTrip({
+            tenantId,
+            tripRequestId: requestId,
+            employeeId: lr.employee_id as string,
+            actorEmpId: actor.id,
+            cause: "rejected",
+          })
         : null
     const notified = await notifyApplicant({
       tenantId,
@@ -1961,7 +1969,13 @@ requestsRouter.post(
       // 公出／出差單撤回 → 綁定的報銷一併撤回（best-effort）。
       const withdrawal =
         lr.kind === "business_trip"
-          ? await withdrawClaimsOfTrip({ tenantId, tripRequestId: requestId, actorEmpId: self.id, cause: "cancelled" })
+          ? await withdrawClaimsOfTrip({
+              tenantId,
+              tripRequestId: requestId,
+              employeeId: lr.employee_id as string,
+              actorEmpId: self.id,
+              cause: "cancelled",
+            })
           : null
       res.status(200).json({ status: "cancelled", ...expenseClaimsField(withdrawal) })
     } catch (err) {
@@ -2096,7 +2110,7 @@ requestsRouter.delete(
 
       const { data: lr, error: lrErr } = await supabaseAdmin
         .from("leave_requests")
-        .select("id, status, deleted_at, current_step, kind, start_at, end_at, segments")
+        .select("id, employee_id, status, deleted_at, current_step, kind, start_at, end_at, segments")
         .eq("tenant_id", tenantId)
         .eq("id", requestId)
         .maybeSingle()
@@ -2153,7 +2167,13 @@ requestsRouter.delete(
       // 公出／出差單註銷 → 綁定的報銷一併撤回（best-effort；駁回／撤回時已撤過的不會重來）。
       const withdrawal =
         lr.kind === "business_trip"
-          ? await withdrawClaimsOfTrip({ tenantId, tripRequestId: requestId, actorEmpId: self?.id ?? null, cause: "deleted" })
+          ? await withdrawClaimsOfTrip({
+              tenantId,
+              tripRequestId: requestId,
+              employeeId: lr.employee_id as string,
+              actorEmpId: self?.id ?? null,
+              cause: "deleted",
+            })
           : null
       res.status(200).json({ id: requestId, ...expenseClaimsField(withdrawal) })
     } catch (err) {

@@ -79,7 +79,8 @@ export function tripClaimWithdrawalNote(w: TripClaimWithdrawal | null | undefine
   if (!w) return null
   const parts: string[] = []
   if (w.withdrawn > 0) parts.push(`已自動撤回 ${w.withdrawn} 筆綁定這張單的報銷`)
-  if (w.kept > 0) parts.push(`另有 ${w.kept} 筆已結算，未撤回，請洽 HR`)
+  if (w.kept > 0) parts.push(`${w.withdrawn > 0 ? "另有 " : "綁定這張單的報銷有 "}${w.kept} 筆已核銷或已鎖月，未撤回，請洽 HR`)
+  if (w.failed) parts.push("綁定的報銷未能自動撤回，請到報銷頁確認")
   return parts.length > 0 ? `${parts.join("；")}。` : null
 }
 
@@ -101,10 +102,12 @@ async function lockedPeriodsOf(tenantId: string, periods: string[]): Promise<Set
 export async function withdrawClaimsOfTrip(params: {
   tenantId: string
   tripRequestId: string
+  /** 出差單的申請人：只撤他本人的報銷（舊資料若有別人的報銷掛在這張單上，不誤撤）。 */
+  employeeId: string
   actorEmpId: string | null
   cause: TripWithdrawCause
 }): Promise<TripClaimWithdrawal> {
-  const { tenantId, tripRequestId, actorEmpId, cause } = params
+  const { tenantId, tripRequestId, employeeId, actorEmpId, cause } = params
   const result: TripClaimWithdrawal = { withdrawn: 0, kept: 0, failed: false }
   try {
     const { data: rows, error } = await supabaseAdmin
@@ -112,6 +115,7 @@ export async function withdrawClaimsOfTrip(params: {
       .select("id, status, period, advance_id")
       .eq("tenant_id", tenantId)
       .eq("trip_request_id", tripRequestId)
+      .eq("employee_id", employeeId)
       .in("status", ["submitted", "settled"])
     if (error) throw new Error(`load claims: ${error.message}`)
     const claims = (rows ?? []) as unknown as TripClaimRow[]
@@ -141,6 +145,7 @@ export async function withdrawClaimsOfTrip(params: {
       .update({ status: "cancelled", status_reason: reason, updated_at: new Date().toISOString() })
       .eq("tenant_id", tenantId)
       .in("id", plan.withdraw)
+      .eq("employee_id", employeeId)
       .eq("status", "submitted")
       .select("id")
     if (upErr) throw new Error(`withdraw claims: ${upErr.message}`)

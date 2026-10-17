@@ -14,7 +14,7 @@ import {
   tripClaimWithdrawalNote,
   withdrawClaimsOfTrip,
 } from "../services/trip-claim-withdrawal.js"
-import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
+import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 /**
  * 公出／出差單被駁回、撤回、註銷 → 自動撤回綁在上面的報銷（services/trip-claim-withdrawal.ts，2026-10-17 業主決定）。
@@ -53,6 +53,7 @@ const STAFF_TOKEN = "user-staff"
 const HR_ID = "bbbbbbbb-0000-4000-8000-000000000001"
 const MGR_ID = "bbbbbbbb-0000-4000-8000-000000000003"
 const STAFF_ID = "bbbbbbbb-0000-4000-8000-000000000004"
+const OTHER_STAFF_ID = "bbbbbbbb-0000-4000-8000-000000000005"
 
 const TRIP = "aaaaaaaa-0000-4000-8000-000000000001"
 const OTHER_TRIP = "aaaaaaaa-0000-4000-8000-000000000002"
@@ -173,8 +174,11 @@ describe("純函式", () => {
     expect(tripClaimWithdrawalNote({ withdrawn: 0, kept: 0, failed: false })).toBeNull()
     expect(tripClaimWithdrawalNote({ withdrawn: 2, kept: 0, failed: false })).toBe("已自動撤回 2 筆綁定這張單的報銷。")
     expect(tripClaimWithdrawalNote({ withdrawn: 1, kept: 1, failed: false })).toBe(
-      "已自動撤回 1 筆綁定這張單的報銷；另有 1 筆已結算，未撤回，請洽 HR。",
+      "已自動撤回 1 筆綁定這張單的報銷；另有 1 筆已核銷或已鎖月，未撤回，請洽 HR。",
     )
+    // 撤回 0 筆不寫「撤回 0 筆」
+    expect(tripClaimWithdrawalNote({ withdrawn: 0, kept: 2, failed: false })).toBe("綁定這張單的報銷有 2 筆已核銷或已鎖月，未撤回，請洽 HR。")
+    expect(tripClaimWithdrawalNote({ withdrawn: 0, kept: 0, failed: true })).toBe("綁定的報銷未能自動撤回，請到報銷頁確認。")
   })
 })
 
@@ -184,7 +188,7 @@ describe("駁回公出單 → 自動撤回綁定的報銷", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     expect(res.body.status).toBe("rejected")
-    expect(res.body.expenseClaims).toEqual({ withdrawn: 2, kept: 2 })
+    expect(res.body.expenseClaims).toEqual({ withdrawn: 2, kept: 2, failed: false })
     for (const id of ["c-open-1", "c-open-2"]) {
       expect(claimRow(id)).toMatchObject({ status: "cancelled", status_reason: TRIP_WITHDRAW_REASON.rejected })
     }
@@ -198,7 +202,7 @@ describe("駁回公出單 → 自動撤回綁定的報銷", () => {
 
     const notice = noticesTo(STAFF_ID).at(-1)
     expect(notice?.body).toContain("已自動撤回 2 筆綁定這張單的報銷")
-    expect(notice?.body).toContain("另有 2 筆已結算")
+    expect(notice?.body).toContain("另有 2 筆已核銷或已鎖月，未撤回")
   })
 
   it("歸屬期已報銷月結 → 那期的不撤回（kept）", async () => {
@@ -206,8 +210,32 @@ describe("駁回公出單 → 自動撤回綁定的報銷", () => {
     const res = await post(`/requests/${TRIP}/reject`, MGR_TOKEN).send({})
 
     expect(res.status, JSON.stringify(res.body)).toBe(200)
-    expect(res.body.expenseClaims).toEqual({ withdrawn: 0, kept: 4 })
+    expect(res.body.expenseClaims).toEqual({ withdrawn: 0, kept: 4, failed: false })
     expect(claimRow("c-open-1").status).toBe("submitted")
+  })
+
+  it("同單號但報銷人不是申請人（舊資料）→ 不撤；別租戶同單號的報銷也不動", async () => {
+    fake.db.expense_claims?.push(
+      claim("c-not-filer", { employee_id: OTHER_STAFF_ID }),
+      claim("c-foreign-tenant", { tenant_id: OTHER_TENANT_ID }),
+    )
+    const res = await post(`/requests/${TRIP}/reject`, MGR_TOKEN).send({})
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.expenseClaims).toEqual({ withdrawn: 2, kept: 2, failed: false })
+    expect(claimRow("c-not-filer").status).toBe("submitted")
+    expect(claimRow("c-foreign-tenant").status).toBe("submitted")
+  })
+
+  it("歸屬期已發薪鎖定（period_closes）→ 那期的報銷保留（kept），其他照撤", async () => {
+    fake.db.expense_claims?.push(claim("c-closed-month", { period: "2026-09", incurred_on: "2026-09-30" }))
+    fake.db.period_closes = [{ tenant_id: TENANT_ID, period: "2026-09", status: "closed" }]
+    const res = await post(`/requests/${TRIP}/reject`, MGR_TOKEN).send({})
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.expenseClaims).toEqual({ withdrawn: 2, kept: 3, failed: false })
+    expect(claimRow("c-closed-month").status).toBe("submitted")
+    expect(claimRow("c-open-1").status).toBe("cancelled")
   })
 
   it("批次駁回也會撤回，每張結果帶 expenseClaims", async () => {
@@ -215,8 +243,8 @@ describe("駁回公出單 → 自動撤回綁定的報銷", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     expect(res.body.results).toEqual([
-      expect.objectContaining({ id: TRIP, ok: true, status: "rejected", expenseClaims: { withdrawn: 2, kept: 2 } }),
-      expect.objectContaining({ id: OTHER_TRIP, ok: true, status: "rejected", expenseClaims: { withdrawn: 1, kept: 0 } }),
+      expect.objectContaining({ id: TRIP, ok: true, status: "rejected", expenseClaims: { withdrawn: 2, kept: 2, failed: false } }),
+      expect.objectContaining({ id: OTHER_TRIP, ok: true, status: "rejected", expenseClaims: { withdrawn: 1, kept: 0, failed: false } }),
     ])
     expect(claimRow("c-other-trip").status).toBe("cancelled")
   })
@@ -229,9 +257,11 @@ describe("駁回公出單 → 自動撤回綁定的報銷", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     expect(res.body.status).toBe("rejected")
     expect((fake.db.leave_requests ?? []).find((r) => r.id === TRIP)?.status).toBe("rejected")
-    expect(res.body.expenseClaims).toEqual({ withdrawn: 0, kept: 2 })
+    expect(res.body.expenseClaims).toEqual({ withdrawn: 0, kept: 2, failed: true })
     expect(claimRow("c-open-1").status).toBe("submitted")
     expect(warn).toHaveBeenCalled()
+    // 駁回通知說明沒撤成、請員工到報銷頁確認
+    expect(noticesTo(STAFF_ID).at(-1)?.body).toContain("綁定的報銷未能自動撤回，請到報銷頁確認")
   })
 
   it("請假單駁回：不碰報銷、回應沒有 expenseClaims（行為不變）", async () => {
@@ -248,7 +278,7 @@ describe("申請人撤回／HR 註銷公出單", () => {
     const res = await post(`/requests/${TRIP}/cancel`, STAFF_TOKEN).send({})
 
     expect(res.status, JSON.stringify(res.body)).toBe(200)
-    expect(res.body).toEqual({ status: "cancelled", expenseClaims: { withdrawn: 2, kept: 2 } })
+    expect(res.body).toEqual({ status: "cancelled", expenseClaims: { withdrawn: 2, kept: 2, failed: false } })
     expect(claimRow("c-open-1")).toMatchObject({ status: "cancelled", status_reason: TRIP_WITHDRAW_REASON.cancelled })
   })
 
@@ -262,7 +292,7 @@ describe("申請人撤回／HR 註銷公出單", () => {
       .send({ reason: "重複建單" })
 
     expect(res.status, JSON.stringify(res.body)).toBe(200)
-    expect(res.body.expenseClaims).toEqual({ withdrawn: 0, kept: 2 })
+    expect(res.body.expenseClaims).toEqual({ withdrawn: 0, kept: 2, failed: false })
     expect(claimRow("c-open-1").status_reason).toBe(TRIP_WITHDRAW_REASON.rejected)
     expect(claimAudits()).toHaveLength(2)
   })
@@ -274,22 +304,22 @@ describe("申請人撤回／HR 註銷公出單", () => {
       .send({ reason: "建錯" })
 
     expect(res.status, JSON.stringify(res.body)).toBe(200)
-    expect(res.body.expenseClaims).toEqual({ withdrawn: 2, kept: 2 })
+    expect(res.body.expenseClaims).toEqual({ withdrawn: 2, kept: 2, failed: false })
     expect(claimRow("c-open-2").status_reason).toBe(TRIP_WITHDRAW_REASON.deleted)
   })
 })
 
 describe("withdrawClaimsOfTrip 直接呼叫", () => {
   it("同一張連跑兩次：第二次 0 筆（冪等）；讀取失敗回 failed 不丟例外", async () => {
-    const first = await withdrawClaimsOfTrip({ tenantId: TENANT_ID, tripRequestId: TRIP, actorEmpId: HR_ID, cause: "rejected" })
-    const second = await withdrawClaimsOfTrip({ tenantId: TENANT_ID, tripRequestId: TRIP, actorEmpId: HR_ID, cause: "rejected" })
+    const first = await withdrawClaimsOfTrip({ tenantId: TENANT_ID, tripRequestId: TRIP, actorEmpId: HR_ID, employeeId: STAFF_ID, cause: "rejected" })
+    const second = await withdrawClaimsOfTrip({ tenantId: TENANT_ID, tripRequestId: TRIP, actorEmpId: HR_ID, employeeId: STAFF_ID, cause: "rejected" })
     expect(first).toEqual({ withdrawn: 2, kept: 2, failed: false })
     expect(second).toEqual({ withdrawn: 0, kept: 2, failed: false })
 
     vi.spyOn(logger, "warn").mockImplementation(() => undefined as never)
     fake.injectError({ table: "expense_claims", action: "select", error: { message: "boom" } })
     await expect(
-      withdrawClaimsOfTrip({ tenantId: TENANT_ID, tripRequestId: OTHER_TRIP, actorEmpId: HR_ID, cause: "cancelled" }),
+      withdrawClaimsOfTrip({ tenantId: TENANT_ID, tripRequestId: OTHER_TRIP, actorEmpId: HR_ID, employeeId: STAFF_ID, cause: "cancelled" }),
     ).resolves.toEqual({ withdrawn: 0, kept: 0, failed: true })
     expect(claimRow("c-other-trip").status).toBe("submitted")
   })
