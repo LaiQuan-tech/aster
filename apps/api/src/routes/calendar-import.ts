@@ -19,6 +19,7 @@ import {
   getImportDraft,
   listImportDrafts,
   previewImportDraft,
+  regenerateOpenCalendar,
   updateImportDraft,
 } from "../services/holiday-import.js"
 
@@ -28,8 +29,11 @@ import {
  *   POST  /calendar/import/fetch               HR  {year} 抓政府資料 → 建草稿（同年舊草稿標 superseded）
  *   GET   /calendar/import/drafts?year=        HR  草稿清單（新到舊）
  *   GET   /calendar/import/drafts/:id          HR  單筆＋套用預覽（逐日：新增／更正／刪除／HR 手動列不動）
- *   PATCH /calendar/import/drafts/:id          HR  {holidays:[{date,label,kind?,makeUpFor?}]} 核准前編輯（改補假日、加選舉日）
- *   POST  /calendar/import/drafts/:id/approve  HR  核准 → 寫 tenant_calendar_days（只覆寫 generated／import 列）
+ *   PATCH /calendar/import/drafts/:id          HR  {holidays:[{date,label,kind?,makeUpFor?,adopt?,note?}]} 核准前編輯
+ *                                                  （改補假日、加選舉日、勾選是否採用調整放假）
+ *   POST  /calendar/import/drafts/:id/approve  HR  核准 → 寫 tenant_calendar_days（只寫「採用」的日子；只覆寫 generated／import 列）
+ *   POST  /calendar/import/regenerate          HR  {years?} 改例假／休息日設定後，依新週休重新產生未結算月份的行事曆
+ *                                                  （PUT /api/tenant/settings 改週休時回應會提示這個動作；不自動執行）
  *   GET   /calendar/readiness?date=            HR  當年（12 月起含下一年）行事曆是否已核准——給薪資前檢查用
  *
  * 所有查詢都釘在 res.locals.tenantId（supabaseAdmin 繞過 RLS）。
@@ -49,11 +53,14 @@ const patchSchema = z.object({
         label: z.string().trim().min(1).max(120),
         kind: z.enum(["holiday", "make_up", "adjusted", "extra"]).optional(),
         makeUpFor: z.string().regex(dateRe).nullable().optional(),
+        adopt: z.boolean().optional(),
+        note: z.string().max(200).nullable().optional(),
       }),
     )
     .max(120),
 })
 const readinessSchema = z.object({ date: z.string().regex(dateRe).optional() })
+const regenerateSchema = z.object({ years: z.array(z.number().int().min(2000).max(2100)).min(1).max(3).optional() })
 
 async function callerEmpId(req: Request, tenantId: string): Promise<string | null> {
   const userId = req.auth?.userId
@@ -220,6 +227,36 @@ calendarImportRouter.get(
     try {
       const date = parsed.data.date ?? todayKey(await getTenantTimezone(tenantId))
       res.status(200).json(await calendarReadiness(tenantId, date))
+    } catch (err) {
+      handleError(res, next, err)
+    }
+  },
+)
+
+calendarImportRouter.post(
+  "/calendar/import/regenerate",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const parsed = regenerateSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const thisYear = Number(todayKey(await getTenantTimezone(tenantId)).slice(0, 4))
+      const years = [...new Set(parsed.data.years ?? [thisYear, thisYear + 1])].sort()
+      const results = await regenerateOpenCalendar(tenantId, years)
+      const warnings = results
+        .filter((r) => (r.calendar.lockedUnchanged ?? []).length > 0)
+        .map(
+          (r) =>
+            `${r.year} 年已結算月份（${r.lockedPeriods.join("、")}）未變更 ${r.calendar.lockedUnchanged!.length} 天；` +
+            "如需更正請先重新開放該月。",
+        )
+      res.status(200).json({ years: results, warnings })
     } catch (err) {
       handleError(res, next, err)
     }

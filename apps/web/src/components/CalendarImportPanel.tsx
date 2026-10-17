@@ -7,7 +7,9 @@ import {
   fetchHolidayDraft,
   getCalendarReadiness,
   getHolidayDraft,
+  isAdopted,
   listHolidayDrafts,
+  regenerateCalendar,
   updateHolidayDraft,
   type CalendarReadiness,
   type DraftHoliday,
@@ -19,8 +21,9 @@ import {
 /**
  * 行事曆頁的「從政府資料匯入」（apps/api services/holiday-import.ts）：
  *   抓人事行政總處辦公日曆 → 草稿 → 預覽（逐日差異、與新北不一致標紅、週末節日、跨年補假、補行上班已忽略）
- *   → 可編輯（改補假日、加選舉投票日）→ 核准才寫入行事曆（HR 手動改過的日子不動）。
- * 排程每天也會自動建草稿並通知 HR（7/1 起下一年；每月 1 日檢查官方修正版）。
+ *   → 可編輯（改補假日、加選舉投票日、勾選是否採用調整放假）→ 核准才寫入行事曆（HR 手動改過的日子不動、只寫「採用」的日子）。
+ * 排程每天也會自動建草稿並通知 HR（7/1 起下一年；每月 1 日檢查官方修正版——草稿已編輯過就不取代，顯示「新版可用」）。
+ * 週休非週六日的公司：政府補假日期僅供參考（草稿附註＋警示）；改了例假／休息日後可按「重新產生未結算月份行事曆」。
  */
 
 const WEEKDAY = ["日", "一", "二", "三", "四", "五", "六"];
@@ -37,6 +40,11 @@ const DAY_TYPE_LABEL: Record<string, string> = { workday: "工作日", rest_day:
 function weekdayOf(date: string): number {
   const [y, m, d] = date.split("-").map(Number);
   return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+
+function isOffDayFor(date: string, policy?: { regularLeaveWeekday: number; restDayWeekday: number }): boolean {
+  const wd = weekdayOf(date);
+  return policy ? wd === policy.regularLeaveWeekday || wd === policy.restDayWeekday : wd === 0 || wd === 6;
 }
 
 function md(date: string): string {
@@ -130,6 +138,7 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
   }, [year, show]);
 
   async function onFetch() {
+    if (draft?.status === "draft" && draft.payload.edited && !window.confirm(`目前 ${draft.year} 草稿已有 HR 編輯，重新取得會建立新草稿、放棄這些編輯。確定？`)) return;
     setBusy("fetch");
     setError(null);
     setMessage(null);
@@ -152,7 +161,14 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
     try {
       const res = await updateHolidayDraft(
         draft.id,
-        rows.map((r) => ({ date: r.date, label: r.label, kind: r.kind, makeUpFor: r.makeUpFor ?? null })),
+        rows.map((r) => ({
+          date: r.date,
+          label: r.label,
+          kind: r.kind,
+          makeUpFor: r.makeUpFor ?? null,
+          ...(r.adopt !== undefined ? { adopt: r.adopt } : {}),
+          ...(r.note ? { note: r.note } : {}),
+        })),
       );
       show(res.draft, res.preview);
       setMessage("草稿已儲存。");
@@ -188,6 +204,34 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
     }
   }
 
+  async function onRegenerate() {
+    if (
+      !window.confirm(
+        `依目前的例假／休息日設定，重新產生 ${year} 年未結算月份的行事曆？已結算月份與 HR 手動設定的日子不會變更。`,
+      )
+    )
+      return;
+    setBusy("regenerate");
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await regenerateCalendar([year]);
+      const y = res.years[0];
+      setLockWarnings(res.warnings ?? []);
+      setMessage(
+        y
+          ? `已依目前週休重新產生 ${y.year} 年：例假／休息日 ${y.calendar.generated} 筆、國定假日 ${y.calendar.imported} 筆` +
+              `${y.removedStaleWeekend ? `、移除舊週休 ${y.removedStaleWeekend} 筆` : ""}。`
+          : "已重新產生。",
+      );
+      onApplied();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "重新產生失敗");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const diffDates = useMemo(() => {
     const m = new Map<string, string>();
     for (const item of draft?.diff?.available ? draft.diff.items : []) {
@@ -204,7 +248,8 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
   }, [draft]);
 
   function updateRow(i: number, patch: Partial<DraftHoliday>) {
-    setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch, weekend: patch.date ? [0, 6].includes(weekdayOf(patch.date)) : r.weekend } : r)));
+    const policy = draft?.payload.policy;
+    setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch, weekend: patch.date ? isOffDayFor(patch.date, policy) : r.weekend } : r)));
     setDirty(true);
   }
 
@@ -217,6 +262,15 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
           {busy === "fetch" ? "取得中…" : `從政府資料匯入（${year}）`}
         </PrimaryButton>
         <span className="text-xs text-gray-500">人事行政總處辦公日曆（新北資料交叉比對）→ 草稿 → 核准後才寫入</span>
+        <button
+          type="button"
+          onClick={() => void onRegenerate()}
+          disabled={busy !== null}
+          className="rounded-md border px-2 py-1 text-xs text-gray-700 disabled:opacity-40"
+          title="改了例假／休息日設定後使用：依新設定重寫未結算月份的行事曆"
+        >
+          {busy === "regenerate" ? "重新產生中…" : "重新產生未結算月份行事曆"}
+        </button>
         {draft && (
           <button type="button" onClick={() => setOpen((v) => !v)} className="text-xs text-blue-600 underline">
             {open ? "收合草稿" : `查看 ${draft.year} 草稿（${draft.status === "draft" ? "待核准" : draft.status === "approved" ? "已核准" : "已取代"}）`}
@@ -245,9 +299,34 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
             {draft.payload.edited ? "・HR 已編輯" : ""}
           </div>
 
-          {(draft.payload.official.warnings.length > 0 || draft.payload.fetchErrors.length > 0) && (
+          {draft.status === "draft" && draft.payload.pendingRevision && (
+            <div className="rounded-md border border-blue-200 bg-blue-50 p-2 text-xs text-blue-900">
+              <p className="font-semibold">
+                政府辦公日曆有新版（{new Date(draft.payload.pendingRevision.fetchedAt).toLocaleDateString("zh-TW")} 取得），您編輯中的草稿未被取代：
+              </p>
+              <ul className="mt-1 list-disc pl-5">
+                {draft.payload.pendingRevision.added.map((h) => (
+                  <li key={`a-${h.date}`}>新增 {h.date} {h.label}（{KIND_LABEL[h.kind]}）</li>
+                ))}
+                {draft.payload.pendingRevision.removed.map((h) => (
+                  <li key={`r-${h.date}`}>取消 {h.date} {h.label}</li>
+                ))}
+                {draft.payload.pendingRevision.kindChanged.map((h) => (
+                  <li key={`k-${h.date}`}>
+                    {h.date} 類型 {KIND_LABEL[h.from]} → {KIND_LABEL[h.to]}
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1">可在下表手動調整後核准，或改用新版重建草稿（會放棄目前的編輯）。</p>
+              <button type="button" onClick={() => void onFetch()} disabled={busy !== null} className="mt-1 rounded border border-blue-300 bg-white px-2 py-1 disabled:opacity-40">
+                改用新版重建草稿
+              </button>
+            </div>
+          )}
+
+          {(draft.payload.official.warnings.length > 0 || draft.payload.fetchErrors.length > 0 || (draft.payload.tenantWarnings?.length ?? 0) > 0) && (
             <ul className="list-disc space-y-1 rounded-md bg-amber-50 py-2 pl-6 pr-3 text-xs text-amber-900">
-              {[...draft.payload.fetchErrors, ...draft.payload.official.warnings].map((w) => (
+              {[...(draft.payload.tenantWarnings ?? []), ...draft.payload.fetchErrors, ...draft.payload.official.warnings].map((w) => (
                 <li key={w}>{w}</li>
               ))}
             </ul>
@@ -278,6 +357,7 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
             <table className="min-w-full text-xs">
               <thead>
                 <tr className="border-b text-left text-gray-500">
+                  <th className="py-1 pr-2" title="勾選的日子核准時才寫入行事曆">採用</th>
                   <th className="py-1 pr-2">日期</th>
                   <th className="py-1 pr-2">名稱</th>
                   <th className="py-1 pr-2">類型</th>
@@ -288,8 +368,21 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
               <tbody>
                 {rows.map((r, i) => {
                   const crossYear = r.makeUpFor && r.makeUpFor.slice(0, 4) !== String(draft.year);
+                  const adopted = isAdopted(r);
                   return (
-                    <tr key={`${i}-${r.date}`} className={`border-b ${diffDates.has(r.date) ? "bg-red-50 text-red-800" : ""}`}>
+                    <tr
+                      key={`${i}-${r.date}`}
+                      className={`border-b ${diffDates.has(r.date) ? "bg-red-50 text-red-800" : ""} ${adopted ? "" : "text-gray-400"}`}
+                    >
+                      <td className="py-1 pr-2">
+                        <input
+                          type="checkbox"
+                          checked={adopted}
+                          disabled={!editable}
+                          onChange={(e) => updateRow(i, { adopt: e.target.checked })}
+                          aria-label={`${r.date} 核准時寫入行事曆`}
+                        />
+                      </td>
                       <td className="py-1 pr-2 whitespace-nowrap">
                         {editable ? (
                           <input
@@ -330,7 +423,9 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
                         )}
                       </td>
                       <td className="py-1 pr-2 text-gray-500">
-                        {r.weekend && <span className="mr-1 rounded bg-gray-100 px-1">週末節日：維持例假／休息日</span>}
+                        {r.weekend && adopted && <span className="mr-1 rounded bg-gray-100 px-1">落在公司例假／休息日：維持例假／休息日</span>}
+                        {r.kind === "adjusted" && <span className="mr-1 rounded bg-amber-50 px-1 text-amber-800">調整放假（民間不適用）</span>}
+                        {r.note && <span className="mr-1">{r.note}</span>}
                         {r.makeUpFor && <span className="mr-1">補 {md(r.makeUpFor)}</span>}
                         {crossYear && <span className="mr-1 rounded bg-purple-50 px-1 text-purple-700">跨年補假</span>}
                         {diffDates.get(r.date) && <span className="text-red-700">{diffDates.get(r.date)}</span>}
@@ -362,7 +457,10 @@ export function CalendarImportPanel({ year, onApplied }: { year: number; onAppli
               <button
                 type="button"
                 onClick={() => {
-                  setRows((prev) => [...prev, { date: `${draft.year}-11-01`, label: "選舉投票日", kind: "extra", weekend: [0, 6].includes(weekdayOf(`${draft.year}-11-01`)) }]);
+                  setRows((prev) => [
+                    ...prev,
+                    { date: `${draft.year}-11-01`, label: "選舉投票日", kind: "extra", weekend: isOffDayFor(`${draft.year}-11-01`, draft.payload.policy) },
+                  ]);
                   setDirty(true);
                 }}
                 className="rounded-md border px-3 py-1.5 text-xs"

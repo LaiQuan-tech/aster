@@ -8,6 +8,25 @@ import { resolveSelf } from "../middleware/scope.js"
 import { writeAuditLog } from "../services/audit.js"
 import { canEditUnlockList, sameEmployeeSet, unlockPolicyOf } from "../services/period-lock.js"
 import { BOSS_SETTING_MESSAGE, bossChanged, canChangeBoss } from "../services/privileged-accounts.js"
+import { tenantWeekendPolicy, type WeekendPolicy } from "../services/day-type.js"
+
+/**
+ * 改了例假／休息日（features.attendance.regularLeaveWeekday／restDayWeekday）→ 既有行事曆是依舊週休產生的，
+ * 回應附上「重新產生未結算月份行事曆」的提示與動作（POST /calendar/import/regenerate）。不自動執行：
+ * 由 HR 確認後按鈕觸發（已結算月份不動）。純函式。
+ */
+export function weekendChangeHint(before: WeekendPolicy, after: WeekendPolicy) {
+  if (before.regularLeaveWeekday === after.regularLeaveWeekday && before.restDayWeekday === after.restDayWeekday) return null
+  return {
+    reason: "weekend_policy_changed" as const,
+    before,
+    after,
+    message:
+      "例假／休息日設定已變更。行事曆仍是依舊設定產生的，請按「重新產生未結算月份行事曆」套用新設定" +
+      "（已結算月份不會變更；HR 手動設定的日子不動）。",
+    action: { method: "POST" as const, path: "/calendar/import/regenerate", label: "重新產生未結算月份行事曆" },
+  }
+}
 
 export const tenantRouter = Router()
 
@@ -386,7 +405,8 @@ tenantRouter.put(
           context: "PUT /api/tenant/settings — 老闆指定可重新開放已結算月份的人",
         })
       }
-      res.status(200).json({ branding: data.branding, features: data.features })
+      const calendarRegeneration = weekendChangeHint(tenantWeekendPolicy(currentFeatures), tenantWeekendPolicy(data.features))
+      res.status(200).json({ branding: data.branding, features: data.features, ...(calendarRegeneration ? { calendarRegeneration } : {}) })
     } catch (err) {
       next(err)
     }

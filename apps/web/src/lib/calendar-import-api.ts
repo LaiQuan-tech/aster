@@ -10,8 +10,32 @@ export interface DraftHoliday {
   date: string;
   label: string;
   kind: HolidayKind;
+  /** official：落在政府週六日；草稿 holidays：落在公司例假／休息日。 */
   weekend: boolean;
   makeUpFor?: string | null;
+  /** 核准時是否寫入；未設＝依 kind（調整放假預設不採用）。 */
+  adopt?: boolean;
+  /** 系統附註（為何預設不採用等）。 */
+  note?: string | null;
+}
+
+/** 這一天核准時會不會寫進行事曆（與 API isAdopted 相同）。 */
+export function isAdopted(h: Pick<DraftHoliday, "kind" | "adopt">): boolean {
+  return h.adopt ?? h.kind !== "adjusted";
+}
+
+export interface WeekendPolicy {
+  regularLeaveWeekday: number;
+  restDayWeekday: number;
+}
+
+export interface PendingRevision {
+  officialKey: string;
+  fetchedAt: string;
+  source: "dgpa" | "ntpc";
+  added: { date: string; label: string; kind: HolidayKind }[];
+  removed: { date: string; label: string; kind: HolidayKind }[];
+  kindChanged: { date: string; from: HolidayKind; to: HolidayKind }[];
 }
 
 export interface CalendarDiffItem {
@@ -43,6 +67,10 @@ export interface DraftPayload {
   edited: boolean;
   editedAt?: string | null;
   fetchErrors: string[];
+  policy?: WeekendPolicy;
+  tenantWarnings?: string[];
+  /** 官方有新版、但草稿已被 HR 編輯 → 沒取代，提示用。 */
+  pendingRevision?: PendingRevision | null;
 }
 
 export interface ImportDraft {
@@ -95,7 +123,10 @@ export function getHolidayDraft(id: string) {
   return apiFetch<{ draft: ImportDraft; preview: DraftPreview }>(`/calendar/import/drafts/${encodeURIComponent(id)}`);
 }
 
-export function updateHolidayDraft(id: string, holidays: { date: string; label: string; kind?: HolidayKind; makeUpFor?: string | null }[]) {
+export function updateHolidayDraft(
+  id: string,
+  holidays: { date: string; label: string; kind?: HolidayKind; makeUpFor?: string | null; adopt?: boolean; note?: string | null }[],
+) {
   return apiFetch<{ draft: ImportDraft; preview: DraftPreview }>(`/calendar/import/drafts/${encodeURIComponent(id)}`, {
     method: "PATCH",
     body: JSON.stringify({ holidays }),
@@ -122,4 +153,12 @@ export function approveHolidayDraft(id: string) {
 
 export function getCalendarReadiness(date?: string) {
   return apiFetch<CalendarReadiness>(`/calendar/readiness${date ? `?date=${date}` : ""}`);
+}
+
+/** 改例假／休息日設定後，依新週休重新產生未結算月份的行事曆（已結算月份、HR 手動列不動）。 */
+export function regenerateCalendar(years?: number[]) {
+  return apiFetch<{
+    years: { year: number; holidaySource: "approved_draft" | "builtin" | "none"; removedStaleWeekend: number; lockedPeriods: string[]; calendar: { generated: number; imported: number; skipped: number } }[];
+    warnings: string[];
+  }>("/calendar/import/regenerate", { method: "POST", body: JSON.stringify(years ? { years } : {}) });
 }
