@@ -22,7 +22,8 @@ import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supab
  * ⚠️ 全部是明顯的假資料。
  *
  * 情境（2026 年）：甲（預設）、乙兩家公司；
- *   員工：甲 2 人在職＋1 人離職、乙 1 人在職、未指派 1 人在職（HR 本人）、別租戶 1 人。
+ *   員工：甲 2 人在職＋1 人離職（2026-06-30 離職）、乙 1 人在職、未指派 1 人在職（HR 本人）、別租戶 1 人。
+ *   在職口徑＝到職日 ≤ 今天且（無離職日或離職日 ≥ 今天），與首頁人事區相同（今天＝真實的租戶當地日期，情境日期都在過去）。
  *   薪資單：甲在職 3 月 40,000（定稿）＋4 月 40,000（草稿）、甲離職者 3 月 30,000、乙 3 月 50,000、
  *           未指派 3 月 20,000、別租戶 3 月 99,999、2025-12 的甲 12,345（不在 2026）。
  *   收入：甲 3 月入帳 500,000；放款：乙 3 月 10,000。
@@ -56,7 +57,7 @@ function seed() {
     { id: E_HR, tenant_id: TENANT_ID, user_id: HR_TOKEN, role: "hr_admin", status: "active", company_id: null },
     { id: E_A1, tenant_id: TENANT_ID, user_id: null, role: "employee", status: "active", company_id: CO_A },
     { id: E_A2, tenant_id: TENANT_ID, user_id: null, role: "employee", status: "active", company_id: CO_A },
-    { id: E_A_LEFT, tenant_id: TENANT_ID, user_id: null, role: "employee", status: "inactive", company_id: CO_A },
+    { id: E_A_LEFT, tenant_id: TENANT_ID, user_id: null, role: "employee", status: "inactive", hire_date: "2025-01-01", terminated_at: "2026-06-30", company_id: CO_A },
     { id: E_B1, tenant_id: TENANT_ID, user_id: null, role: "employee", status: "active", company_id: CO_B },
     { id: E_OTHER, tenant_id: OTHER_TENANT_ID, user_id: null, role: "employee", status: "active", company_id: CO_OTHER_TENANT },
   ]
@@ -74,6 +75,7 @@ function seed() {
   fake.db.disbursements = [
     { id: "D1", tenant_id: TENANT_ID, status: "paid", paid_on: "2026-03-10", paying_company_id: CO_B, vendor_id: null, payee_kind: "other", payee_name: "測試收款人", amount: 10000, withheld_amount: 0 },
   ]
+  fake.db.overtime_settlements = []
   fake.db.payslips = [
     slip(E_A1, "2026-03", 40000),
     slip(E_A1, "2026-04", "40000.50", "draft"),
@@ -115,7 +117,67 @@ describe("GET /group-overview — 人事（在職人數、薪資成本）", () =
     expect(company(body, CO_B).payrollCost).toBe(50000)
     expect(body.group.unassignedPayrollCost).toBe(20000)
     expect(body.group.payrollCost).toBe(180000.5)
-    expect(body.payroll).toEqual({ hasData: true, slipCount: 5, draftSlipCount: 1, companyAssignmentReady: true, employerCostIncluded: false })
+    expect(body.payroll).toMatchObject({
+      hasData: true,
+      slipCount: 5,
+      draftSlipCount: 1,
+      companyAssignmentReady: true,
+      employerCostIncluded: false,
+      basis: "gross",
+      basisNote: "應發（gross）口徑：未扣請假／遲到扣款、不含雇主負擔、加班另計與獎金",
+    })
+  })
+
+  it("在職人數與首頁同口徑：未到職（到職日在未來）不算、離職日在未來仍算、沒填到職日視為在職", async () => {
+    fake.db.employees!.push(
+      { id: "bbbbbbbb-0000-4000-8000-0000000000f1", tenant_id: TENANT_ID, status: "active", hire_date: "2099-01-01", terminated_at: null, company_id: CO_B },
+      { id: "bbbbbbbb-0000-4000-8000-0000000000f2", tenant_id: TENANT_ID, status: "inactive", hire_date: "2020-01-01", terminated_at: "2099-12-31", company_id: CO_B },
+    )
+    const body = await getOverview()
+    expect(company(body, CO_B).headcount).toBe(2)
+  })
+
+  it("補充：payrollCostNet＝gross−請假−遲到早退扣款；overtimeSettlementCost＝同期另計（草稿＋已付、沒金額不計），按員工公司", async () => {
+    fake.db.payslips!.find((p) => p.employee_id === E_B1)!.breakdown = { leaveDeduction: 1000, lateEarlyDeduction: "250.5" }
+    fake.db.overtime_settlements = [
+      { id: "OT1", tenant_id: TENANT_ID, employee_id: E_B1, period: "2026-03", amount: "3000", status: "paid" },
+      { id: "OT2", tenant_id: TENANT_ID, employee_id: E_A1, period: "2026-04", amount: 1200, status: "draft" },
+      { id: "OT3", tenant_id: TENANT_ID, employee_id: E_A1, period: "2026-05", amount: null, status: "draft" },
+      { id: "OT4", tenant_id: TENANT_ID, employee_id: E_HR, period: "2026-03", amount: 500, status: "void" },
+      { id: "OT5", tenant_id: OTHER_TENANT_ID, employee_id: E_OTHER, period: "2026-03", amount: 9999, status: "paid" },
+    ]
+    const body = await getOverview()
+    expect(company(body, CO_B).payrollCost).toBe(50000)
+    expect(company(body, CO_B).payrollCostNet).toBe(48749.5)
+    expect(company(body, CO_A).payrollCostNet).toBe(110000.5)
+    expect(company(body, CO_B).overtimeSettlementCost).toBe(3000)
+    expect(company(body, CO_A).overtimeSettlementCost).toBe(1200)
+    expect(body.group.payrollCostNet).toBe(180000.5 - 1250.5)
+    expect(body.group.overtimeSettlementCost).toBe(4200)
+    // 扣人事成本後仍以 gross 為準
+    expect(company(body, CO_B).grossProfitAfterPayroll).toBe(-60000)
+    expect(body.payroll).toMatchObject({ overtimeSettlementAvailable: true, overtimeSettlementCount: 3, overtimeSettlementDraftCount: 2, overtimeSettlementNoAmountCount: 1 })
+  })
+
+  it("overtime_settlements 表不存在 → overtimeSettlementCost 全 null，其他照常", async () => {
+    fake.injectError({ table: "overtime_settlements", action: "select", error: { code: "42P01", message: "relation does not exist" } })
+    const body = await getOverview()
+    expect(company(body, CO_A).overtimeSettlementCost).toBeNull()
+    expect(body.group.overtimeSettlementCost).toBeNull()
+    expect(body.payroll.overtimeSettlementAvailable).toBe(false)
+    expect(company(body, CO_A).payrollCost).toBe(110000.5)
+  })
+
+  it("monthly[] 每月 payrollCost（依 payslip period）；那個月沒有任何薪資單 → null", async () => {
+    const body = await getOverview()
+    const a = company(body, CO_A).monthly
+    expect(a[2].payrollCost).toBe(70000)
+    expect(a[3].payrollCost).toBe(40000.5)
+    expect(a[4].payrollCost).toBeNull()
+    expect(company(body, CO_B).monthly[3].payrollCost).toBe(0)
+    expect(body.group.monthly[2].payrollCost).toBe(140000)
+    expect(body.group.monthly[3].payrollCost).toBe(40000.5)
+    expect(body.group.monthly[0].payrollCost).toBeNull()
   })
 
   it("扣人事成本後：公司＝毛利－自己的薪資（未指派不分攤）；集團＝集團毛利－（納入公司＋未指派）", async () => {
@@ -179,6 +241,7 @@ describe("GET /group-overview — 人事（在職人數、薪資成本）", () =
     expect(company(body, CO_A).headcount).toBe(0)
     expect(company(body, CO_A).payrollCost).toBe(0)
     expect(body.group.unassignedHeadcount).toBe(4)
+    expect(body.group.monthly[2].payrollCost).toBe(140000)
     expect(body.group.unassignedPayrollCost).toBe(180000.5)
     expect(body.group.payrollCost).toBe(180000.5)
     expect(body.payroll.companyAssignmentReady).toBe(false)

@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { companyInsertPatch, defaultCompanyIdForNewEmployee } from "../services/employee-company.js"
 import { seedHireAcknowledgements } from "../services/onboarding-signatures.js"
 import { insertOnboardings, type OnboardingInput } from "../services/imports/writers.js"
 
@@ -289,6 +290,8 @@ onboardingsRouter.post(
           hire_date: ob.report_date ?? null,
           role: "employee",
           status: "active",
+          // 所屬公司（0072）：租戶恰好一家啟用中公司 → 自動帶入，否則未指派；未套 0072 不帶欄位。
+          ...companyInsertPatch(await defaultCompanyIdForNewEmployee(tenantId)),
         })
         .select("id")
         .single()

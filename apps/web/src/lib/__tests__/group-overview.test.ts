@@ -17,6 +17,7 @@ import {
   fmtPct,
   NO_PAYROLL_TEXT,
   PAYROLL_BASIS_NOTE,
+  PAYROLL_GROSS_NOTE,
   nameWithShort,
   niceStep,
   payrollNotes,
@@ -206,17 +207,32 @@ describe("payrollNotes（人事說明）", () => {
     expect(payrollNotes(undefined, {})).toEqual([]);
   });
 
-  it("一律標示口徑（未指派不分攤、不含雇主負擔）", () => {
+  it("一律標示應發口徑（未扣請假／遲到、不含雇主負擔、加班另計與獎金）與未指派不分攤", () => {
     const notes = payrollNotes(ready, { unassignedHeadcount: 0, unassignedPayrollCost: 0 });
     expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain(PAYROLL_GROSS_NOTE);
     expect(notes[0]).toContain(PAYROLL_BASIS_NOTE);
-    expect(notes[0]).toContain("不含雇主負擔");
+    expect(PAYROLL_GROSS_NOTE).toBe("應發（gross）口徑：未扣請假／遲到扣款、不含雇主負擔、加班另計與獎金");
+  });
+
+  it("後端帶了 basisNote 就照抄", () => {
+    expect(payrollNotes({ ...ready, basisNote: "後端口徑" }, {})[0]).toContain("後端口徑");
   });
 
   it("沒有薪資資料 → 標示「尚無薪資資料」；未指派只列人數不列金額", () => {
-    const notes = payrollNotes({ ...ready, hasData: false, slipCount: 0 }, { unassignedHeadcount: 3, unassignedPayrollCost: null });
+    const notes = payrollNotes({ ...ready, hasData: false, slipCount: 0 }, { unassignedHeadcount: 3, unassignedPayrollCost: null, payrollCostNet: null });
     expect(notes.some((n) => n.startsWith(NO_PAYROLL_TEXT))).toBe(true);
+    expect(notes.some((n) => n.includes("扣除請假"))).toBe(false);
     expect(notes.at(-1)).toBe("未指派公司的員工 3 人：不分攤到任何公司，但計入集團合計；可到「員工管理」指派所屬公司");
+  });
+
+  it("補充：扣款後金額、加班另計（含草稿與無金額筆數）", () => {
+    const notes = payrollNotes(
+      { ...ready, overtimeSettlementAvailable: true, overtimeSettlementCount: 3, overtimeSettlementDraftCount: 2, overtimeSettlementNoAmountCount: 1 },
+      { payrollCostNet: 98000, overtimeSettlementCost: 4200 },
+    );
+    expect(notes).toContain("補充：扣除請假／遲到扣款後 98,000 元");
+    expect(notes).toContain("補充：加班超額另計 4,200 元（3 筆，其中 2 筆草稿、1 筆尚無金額未計；不在人事成本內）");
   });
 
   it("有草稿薪資單、有未指派金額、欄位未套", () => {

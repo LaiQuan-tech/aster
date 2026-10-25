@@ -13,6 +13,8 @@ export interface GroupMonthPoint {
   invoiced: number;
   expense: number;
   grossProfit: number;
+  /** 該月薪資單應發合計（依 payslip period）；那個月沒有任何薪資單 → null；舊版 API 沒有。 */
+  payrollCost?: number | null;
 }
 
 export interface GroupAffiliateAmounts {
@@ -43,9 +45,13 @@ export interface GroupCompanyRow {
   monthly: GroupMonthPoint[];
   /** 目前在職人數（依員工所屬公司）。 */
   headcount: number;
-  /** 期間內薪資單應發合計（依員工所屬公司）；期間內沒有任何薪資單 → null（尚無薪資資料）。 */
+  /** 期間內薪資單應發（gross）合計（依員工所屬公司）；期間內沒有任何薪資單 → null（尚無薪資資料）。 */
   payrollCost: number | null;
-  /** 毛利 − 薪資成本；payrollCost 為 null 時也是 null。 */
+  /** 補充：gross −（請假＋遲到早退扣款）；沒有薪資資料 → null。 */
+  payrollCostNet?: number | null;
+  /** 補充：同期加班超額另計（草稿＋已付）金額；表不存在 → null。 */
+  overtimeSettlementCost?: number | null;
+  /** 毛利 − 人事成本（gross）；payrollCost 為 null 時也是 null。 */
   grossProfitAfterPayroll: number | null;
 }
 
@@ -61,8 +67,12 @@ export interface GroupTotals {
   monthly: GroupMonthPoint[];
   /** 在職人數：納入合計的公司＋未指派。 */
   headcount: number;
-  /** 薪資成本：納入合計的公司＋未指派；沒有薪資資料 → null。 */
+  /** 人事成本（gross）：納入合計的公司＋未指派；沒有薪資資料 → null。 */
   payrollCost: number | null;
+  /** 補充：gross −（請假＋遲到早退扣款）；沒有薪資資料 → null。 */
+  payrollCostNet?: number | null;
+  /** 補充：加班超額另計；表不存在 → null。 */
+  overtimeSettlementCost?: number | null;
   /** 未指派公司的在職人數（不分攤到任何公司）。 */
   unassignedHeadcount: number;
   /** 未指派公司員工的薪資成本；沒有薪資資料 → null。 */
@@ -82,6 +92,14 @@ export interface GroupPayrollSummary {
   companyAssignmentReady: boolean;
   /** 薪資成本是否含雇主負擔（勞健保、勞退雇主提繳）；目前固定 false（只有應發）。 */
   employerCostIncluded: boolean;
+  /** 人事成本口徑（"gross"）與說明文字。 */
+  basis?: string;
+  basisNote?: string;
+  /** 加班超額另計：表是否存在、期間內筆數／草稿／沒有金額的筆數。 */
+  overtimeSettlementAvailable?: boolean;
+  overtimeSettlementCount?: number;
+  overtimeSettlementDraftCount?: number;
+  overtimeSettlementNoAmountCount?: number;
 }
 
 export interface GroupPeriod {

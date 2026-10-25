@@ -15,6 +15,9 @@ import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "..
  *   projects.company_id
  *   disbursements.paying_company_id／receipt_issuer_company_id
  *   project_subcontract_payments.paying_company_id／receipt_issuer_company_id
+ *   ＋ employees.company_id（2026-10-25，migration 0072）：外鍵是 ON DELETE SET NULL、DB 不會擋，
+ *     但刪掉公司會讓員工無聲變回「未指派」、集團總覽的人事歸屬跟著跑掉，所以業主要求同樣視為「使用中」不准刪（含離職員工）。
+ *     檢查與刪除之間剛好有人被指派到這家（競態）時，DB 照 SET NULL 處理，不會 500。
  * 外鍵對所有列生效，所以這裡**不排除**已軟刪（deleted_at）、已封存、已作廢（void）的列——
  * 一筆作廢的放款單照樣讓 DB 拒絕刪除那間公司。
  *
@@ -31,22 +34,25 @@ export type CompanyUsage = {
   disbursements: number
   /** 付款公司或收據抬頭是這間公司的下包期款數（同一期兩個欄位都指到它只算一筆）。 */
   subcontractPayments: number
+  /** 所屬公司是這間公司的員工數（employees.company_id；含離職）。 */
+  employees: number
   total: number
 }
 
-type UsageBucket = "projects" | "disbursements" | "subcontractPayments"
+type UsageBucket = "projects" | "disbursements" | "subcontractPayments" | "employees"
 
-export const emptyCompanyUsage = (): CompanyUsage => ({ projects: 0, disbursements: 0, subcontractPayments: 0, total: 0 })
+export const emptyCompanyUsage = (): CompanyUsage => ({ projects: 0, disbursements: 0, subcontractPayments: 0, employees: 0, total: 0 })
 
 type UsageSource = { bucket: UsageBucket; table: string; column: string }
 
-/** 五個外鍵欄位（見檔頭）。新增引用 companies.id 的欄位時，這裡一定要跟著加。 */
+/** 五個外鍵欄位＋員工所屬公司（見檔頭）。新增引用 companies.id 的欄位時，這裡一定要跟著加。 */
 export const COMPANY_USAGE_SOURCES: readonly UsageSource[] = [
   { bucket: "projects", table: "projects", column: "company_id" },
   { bucket: "disbursements", table: "disbursements", column: "paying_company_id" },
   { bucket: "disbursements", table: "disbursements", column: "receipt_issuer_company_id" },
   { bucket: "subcontractPayments", table: "project_subcontract_payments", column: "paying_company_id" },
   { bucket: "subcontractPayments", table: "project_subcontract_payments", column: "receipt_issuer_company_id" },
+  { bucket: "employees", table: "employees", column: "company_id" },
 ]
 
 /**
@@ -106,6 +112,7 @@ export async function loadCompanyUsage(tenantId: string, companyIds: readonly st
     projects: new Map(),
     disbursements: new Map(),
     subcontractPayments: new Map(),
+    employees: new Map(),
   }
   COMPANY_USAGE_SOURCES.forEach((source, index) => {
     for (const { rowId, companyId } of fetched[index] ?? []) {
@@ -119,7 +126,8 @@ export async function loadCompanyUsage(tenantId: string, companyIds: readonly st
     entry.projects = seen.projects.get(companyId)?.size ?? 0
     entry.disbursements = seen.disbursements.get(companyId)?.size ?? 0
     entry.subcontractPayments = seen.subcontractPayments.get(companyId)?.size ?? 0
-    entry.total = entry.projects + entry.disbursements + entry.subcontractPayments
+    entry.employees = seen.employees.get(companyId)?.size ?? 0
+    entry.total = entry.projects + entry.disbursements + entry.subcontractPayments + entry.employees
   }
   return usage
 }

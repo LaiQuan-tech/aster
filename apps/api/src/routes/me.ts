@@ -2,6 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { logger } from "../lib/logger.js"
 import { departmentsHaveManagerList, employeesHaveCompany } from "../lib/schema-compat.js"
 import { employeesHavePersonalSettings } from "../services/employee-shifts.js"
 import { normalizeEmployeeFeatures } from "../services/employee-features.js"
@@ -38,6 +39,32 @@ async function isDeptManager(tenantId: string, empId: string): Promise<boolean> 
   const { count, error } = await q
   if (error) throw new Error(`isDeptManager: ${error.message}`)
   return (count ?? 0) > 0
+}
+
+/**
+ * 本人的所屬公司（migration 0072）。員工列的 company_id 與公司名冊並行查（名冊是小表，整張讀回再對）；
+ * 欄位未套 → null；任何查詢錯誤 → null＋warn（只是顯示用，不能讓 /me 整支 500、把人擋在登入後）。
+ */
+async function loadOwnCompany(tenantId: string, empId: string): Promise<{ companyId: string | null; companyName: string | null }> {
+  const none = { companyId: null, companyName: null }
+  try {
+    if (!(await employeesHaveCompany())) return none
+    const [own, roster] = await Promise.all([
+      supabaseAdmin.from("employees").select("company_id").eq("tenant_id", tenantId).eq("id", empId).maybeSingle(),
+      supabaseAdmin.from("companies").select("id, name").eq("tenant_id", tenantId),
+    ])
+    if (own.error || roster.error) {
+      logger.warn({ tenantId, empId, employeeError: own.error?.message ?? null, companiesError: roster.error?.message ?? null }, "GET /me: 讀所屬公司失敗，回 null")
+      return none
+    }
+    const companyId = (own.data as { company_id?: string | null } | null)?.company_id ?? null
+    if (!companyId) return none
+    const company = ((roster.data ?? []) as Array<{ id: string; name: string }>).find((c) => c.id === companyId)
+    return { companyId, companyName: company?.name ?? null }
+  } catch (err) {
+    logger.warn({ tenantId, empId, err: err instanceof Error ? err.message : String(err) }, "GET /me: 讀所屬公司失敗，回 null")
+    return none
+  }
 }
 
 /**
@@ -125,29 +152,8 @@ meRouter.get(
         }
       }
 
-      // 所屬公司：同樣另查（0072 未套時不能塞進主 select）。
-      let companyId: string | null = null
-      let companyName: string | null = null
-      if (await employeesHaveCompany()) {
-        const { data: own, error: ownErr } = await supabaseAdmin
-          .from("employees")
-          .select("company_id")
-          .eq("tenant_id", tenantId)
-          .eq("id", data.id as string)
-          .maybeSingle()
-        if (ownErr) throw new Error(`GET /me (company): ${ownErr.message}`)
-        companyId = (own as { company_id?: string | null } | null)?.company_id ?? null
-        if (companyId) {
-          const { data: company, error: companyErr } = await supabaseAdmin
-            .from("companies")
-            .select("id, name")
-            .eq("tenant_id", tenantId)
-            .eq("id", companyId)
-            .maybeSingle()
-          if (companyErr) throw new Error(`GET /me (company name): ${companyErr.message}`)
-          companyName = (company?.name as string | undefined) ?? null
-        }
-      }
+      // 所屬公司：同樣另查（0072 未套時不能塞進主 select）。讀不到（任何錯誤）→ 兩個都 null＋warn，不讓 /me 500。
+      const { companyId, companyName } = await loadOwnCompany(tenantId, data.id as string)
 
       const employmentType = (data.employment_type as string | null) ?? null
       res.status(200).json({

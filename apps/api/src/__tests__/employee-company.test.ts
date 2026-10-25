@@ -3,7 +3,23 @@ import request from "supertest"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 // 純測試：supabase 換成記憶體版（helpers/fake-supabase.ts），不連任何 DB。
-vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
+// auth.admin.createUser／deleteUser：POST /employees 建帳號用，換成記憶體假帳號。
+vi.mock("../lib/supabase.js", async () => {
+  const mod = (await import("./helpers/fake-supabase.js")).fakeSupabaseModule()
+  let seq = 0
+  return {
+    ...mod,
+    supabaseAdmin: {
+      ...mod.supabaseAdmin,
+      auth: {
+        admin: {
+          createUser: async () => ({ data: { user: { id: `new-user-${++seq}` } }, error: null }),
+          deleteUser: async () => ({ data: null, error: null }),
+        },
+      },
+    },
+  }
+})
 
 // employees.company_id（migration 0072）套了沒：用旗標切換「未套」情境（降級）。
 const schema = vi.hoisted(() => ({ companyReady: true }))
@@ -20,6 +36,7 @@ vi.mock("../services/employee-emails.js", () => ({
 import { employeesRouter } from "../routes/employees.js"
 import { meRouter } from "../routes/me.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID } from "./helpers/fake-supabase.js"
+import { soleActiveCompany } from "../services/employee-company.js"
 
 // 2026-10-25 員工所屬公司：PATCH /employees 的 companyId、POST /employees/assign-company、
 // GET /employees 與 GET /me 的公司欄位，以及 0072 未套時的降級。識別碼、名稱都是假值。
@@ -172,6 +189,13 @@ describe("POST /employees/assign-company — 批次指派", () => {
     expect(companyOf(OTHER_TENANT_EMP_ID)).toBeNull()
   })
 
+  it("一次超過 200 人 → 400 invalid_body（id 清單在網址裡，太長會撞上限）", async () => {
+    const ids = Array.from({ length: 201 }, (_, i) => `bbbbbbbb-0000-4000-8000-${String(1000 + i).padStart(12, "0")}`)
+    const res = await as(HR_TOKEN)(request(app).post("/employees/assign-company")).send({ employeeIds: ids, companyId: CO_B })
+    expect(res.status).toBe(400)
+    expect(empUpdates()).toHaveLength(0)
+  })
+
   it("空清單／不是 uuid → 400 invalid_body", async () => {
     const empty = await as(HR_TOKEN)(request(app).post("/employees/assign-company")).send({ employeeIds: [], companyId: CO_B })
     expect(empty.status).toBe(400)
@@ -222,5 +246,61 @@ describe("GET /employees、GET /me — 公司欄位", () => {
     const degraded = await as(EMP_TOKEN)(request(app).get("/me"))
     expect(degraded.status).toBe(200)
     expect(degraded.body).toMatchObject({ companyId: null, companyName: null })
+  })
+})
+
+describe("GET /me — 讀公司失敗降級", () => {
+  it("companies 查詢出錯 → companyId／companyName 皆 null，/me 照常 200", async () => {
+    fake.injectError({ table: "companies", action: "select", error: { code: "XX000", message: "boom" } })
+    const res = await as(EMP_TOKEN)(request(app).get("/me"))
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ id: EMP_ID, companyId: null, companyName: null })
+  })
+})
+
+describe("POST /employees — 新員工預設公司", () => {
+  const body = { email: "new.staff@example.test", name: "測試新人", password: "Test-Passw0rd!x" }
+  const created = () => fake.writes.filter((w) => w.table === "employees" && w.action === "insert").map((w) => w.payload as Record<string, unknown>)
+
+  it("恰好一家啟用中公司 → 自動帶入", async () => {
+    fake.db.companies = fake.db.companies!.filter((c) => c.id !== CO_B)
+    const res = await as(HR_TOKEN)(request(app).post("/employees")).send(body)
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(created()[0]).toMatchObject({ company_id: CO_A })
+  })
+
+  it("兩家以上啟用中 → 未指派（null）；body.companyId 可覆寫", async () => {
+    const auto = await as(HR_TOKEN)(request(app).post("/employees")).send(body)
+    expect(auto.status).toBe(201)
+    expect(created()[0]).toMatchObject({ company_id: null })
+    const explicit = await as(HR_TOKEN)(request(app).post("/employees")).send({ ...body, email: "second@example.test", companyId: CO_B })
+    expect(explicit.status).toBe(201)
+    expect(created()[1]).toMatchObject({ company_id: CO_B })
+  })
+
+  it("body.companyId 是別租戶的公司 → 400 invalid_company，不建帳號", async () => {
+    const res = await as(HR_TOKEN)(request(app).post("/employees")).send({ ...body, companyId: CO_OTHER_TENANT })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("invalid_company")
+    expect(created()).toHaveLength(0)
+  })
+
+  it("0072 未套：不帶 company_id 欄位；帶了 companyId → 409 schema_not_ready", async () => {
+    schema.companyReady = false
+    const plain = await as(HR_TOKEN)(request(app).post("/employees")).send(body)
+    expect(plain.status).toBe(201)
+    expect(created()[0]).not.toHaveProperty("company_id")
+    const withCompany = await as(HR_TOKEN)(request(app).post("/employees")).send({ ...body, email: "x@example.test", companyId: CO_A })
+    expect(withCompany.status).toBe(409)
+  })
+
+  it("soleActiveCompany：停用的不算", () => {
+    const list = [
+      { id: "a", name: "A", isDefault: true, isActive: true },
+      { id: "x", name: "X", isDefault: false, isActive: false },
+    ]
+    expect(soleActiveCompany(list)?.id).toBe("a")
+    expect(soleActiveCompany([...list, { id: "b", name: "B", isDefault: false, isActive: true }])).toBeNull()
+    expect(soleActiveCompany([])).toBeNull()
   })
 })

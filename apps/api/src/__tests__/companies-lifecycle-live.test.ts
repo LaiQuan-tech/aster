@@ -50,7 +50,7 @@ type CompanyBody = {
   name: string
   isDefault: boolean
   isActive: boolean
-  usage: { projects: number; disbursements: number; subcontractPayments: number; total: number }
+  usage: { projects: number; disbursements: number; subcontractPayments: number; employees: number; total: number }
 }
 
 const NAME_A = `測試公司甲 ${stamp}`
@@ -115,7 +115,7 @@ describe.skipIf(!ready)("公司主體生命週期 — live", () => {
     expect(companyA).toMatchObject({ isDefault: true, isActive: true })
     for (const c of [companyB, companyC, companyD]) expect(c).toMatchObject({ isDefault: false, isActive: true })
     for (const c of [companyA, companyB, companyC, companyD]) {
-      expect(c.usage).toEqual({ projects: 0, disbursements: 0, subcontractPayments: 0, total: 0 })
+      expect(c.usage).toEqual({ projects: 0, disbursements: 0, subcontractPayments: 0, employees: 0, total: 0 })
     }
   })
 

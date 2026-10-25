@@ -898,22 +898,25 @@ describe("回應形狀（web 的 lib/group-overview-api.ts 型別逐欄依賴這
   it("GET /group-overview：period／companies／group（含 eliminated、monthly）的欄位固定", async () => {
     const body = await getOverview()
     expect(keys(body)).toEqual(["companies", "dataQuality", "group", "payroll", "period"])
-    expect(keys(body.payroll)).toEqual(["companyAssignmentReady", "draftSlipCount", "employerCostIncluded", "hasData", "slipCount"])
+    expect(keys(body.payroll)).toEqual([
+      "basis", "basisNote", "companyAssignmentReady", "draftSlipCount", "employerCostIncluded", "hasData",
+      "overtimeSettlementAvailable", "overtimeSettlementCount", "overtimeSettlementDraftCount", "overtimeSettlementNoAmountCount", "slipCount",
+    ])
     expect(keys(body.dataQuality)).toEqual(["receivedOverEffective", "undatedReceived"])
     expect(keys(body.dataQuality.undatedReceived)).toEqual(["amount", "count", "sample"])
     expect(keys(body.dataQuality.receivedOverEffective)).toEqual(["count", "excess", "sample"])
     expect(keys(body.period)).toEqual(["from", "month", "to", "year"])
     expect(keys(body.companies[0]!)).toEqual([
-      "affiliate", "excluded", "expense", "grossMarginPct", "grossProfit", "grossProfitAfterPayroll", "headcount", "id", "invoiced", "isActive", "isDefault", "monthly", "name", "payrollCost", "revenue",
+      "affiliate", "excluded", "expense", "grossMarginPct", "grossProfit", "grossProfitAfterPayroll", "headcount", "id", "invoiced", "isActive", "isDefault", "monthly", "name", "overtimeSettlementCost", "payrollCost", "payrollCostNet", "revenue",
     ])
     expect(keys(body.companies[0]!.affiliate)).toEqual(["expense", "invoiced", "revenue"])
-    expect(keys(body.companies[0]!.monthly[0]!)).toEqual(["expense", "grossProfit", "invoiced", "month", "revenue"])
+    expect(keys(body.companies[0]!.monthly[0]!)).toEqual(["expense", "grossProfit", "invoiced", "month", "payrollCost", "revenue"])
     expect(keys(body.group)).toEqual([
-      "eliminated", "expense", "grossMarginPct", "grossProfit", "grossProfitAfterPayroll", "headcount", "includedCompanyIds", "invoiced", "monthly", "payrollCost", "revenue",
+      "eliminated", "expense", "grossMarginPct", "grossProfit", "grossProfitAfterPayroll", "headcount", "includedCompanyIds", "invoiced", "monthly", "overtimeSettlementCost", "payrollCost", "payrollCostNet", "revenue",
       "unassignedHeadcount", "unassignedPayrollCost",
     ])
     expect(keys(body.group.eliminated)).toEqual(["expense", "invoiced", "revenue", "total"])
-    expect(keys(body.group.monthly[0]!)).toEqual(["expense", "grossProfit", "invoiced", "month", "revenue"])
+    expect(keys(body.group.monthly[0]!)).toEqual(["expense", "grossProfit", "invoiced", "month", "payrollCost", "revenue"])
     // 金額一律是 number（不是字串），毛利率是 number 或 null
     for (const c of body.companies) {
       for (const v of [c.revenue, c.invoiced, c.expense, c.grossProfit]) expect(typeof v).toBe("number")

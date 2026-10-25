@@ -23,6 +23,7 @@ import { employeesHavePersonalSettings } from "../services/employee-shifts.js"
 import { normalizeEmployeeFeatures } from "../services/employee-features.js"
 import { employeesHaveCompany } from "../lib/schema-compat.js"
 import { checkProjectCompany, loadTenantCompanies } from "../services/project-company.js"
+import { companyInsertPatch, defaultCompanyIdForNewEmployee } from "../services/employee-company.js"
 
 export const employeesRouter = Router()
 
@@ -35,6 +36,8 @@ const createSchema = z.object({
   empNo: z.string().trim().min(1).optional(),
   employmentType: z.string().trim().min(1).optional(),
   hireDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(), // null＝未填到職日（與 PATCH 一致）
+  // 所屬公司（migration 0072）：省略＝租戶恰好一家啟用中公司時自動帶入，否則未指派；null＝明確未指派。
+  companyId: z.string().uuid().nullable().optional(),
 })
 
 const updateSchema = z
@@ -66,7 +69,8 @@ const updateSchema = z
 
 /** POST /employees/assign-company：一次把多位員工指派到同一家公司（companyId null＝改回未指派）。 */
 const assignCompanySchema = z.object({
-  employeeIds: z.array(z.string().uuid()).min(1, "employeeIds is required").max(500),
+  // 上限 200：id 清單放在 PostgREST 的 URL（每個 uuid 約 39 字元），200 個約 8 KB，再多會撞反向代理的網址長度上限。
+  employeeIds: z.array(z.string().uuid()).min(1, "employeeIds is required").max(200),
   companyId: z.string().uuid().nullable(),
 })
 
@@ -323,6 +327,25 @@ employeesRouter.post(
 
     try {
       assertCanAssignRole(await callerOf(req, tenantId), role ?? "employee")
+      // 所屬公司：在建 auth 帳號**之前**決定與驗證（被擋時不留孤兒帳號）。
+      let companyId: string | null | undefined
+      if (parsed.data.companyId !== undefined) {
+        if (!(await employeesHaveCompany())) {
+          res.status(409).json(SCHEMA_NOT_READY_COMPANY)
+          return
+        }
+        companyId = parsed.data.companyId
+        if (companyId) {
+          const check = checkProjectCompany(await loadTenantCompanies(tenantId), companyId)
+          if (!check.ok) {
+            const { ok: _ok, ...body } = check
+            res.status(400).json(body)
+            return
+          }
+        }
+      } else {
+        companyId = await defaultCompanyIdForNewEmployee(tenantId)
+      }
       if (isPlatformAdminEmail(email)) {
         res.status(409).json({ error: "email_in_other_tenant" })
         return
@@ -365,6 +388,7 @@ employeesRouter.post(
           hire_date: hireDate ?? null,
           status: "active",
           must_change_password: true, // HR 配發的初始密碼：首次登入強制改密碼
+          ...companyInsertPatch(companyId),
         })
         .select("id")
         .single()
@@ -568,7 +592,7 @@ employeesRouter.patch(
 
 /**
  * POST /employees/assign-company — 批次指派員工所屬公司（2026-10-25，HR）。
- *   body: { employeeIds: uuid[1..500], companyId: uuid | null }；null＝改回未指派。
+ *   body: { employeeIds: uuid[1..200], companyId: uuid | null }；null＝改回未指派。
  *   • 欄位未套（migration 0072）→ 409 schema_not_ready。
  *   • 公司必須屬於本租戶（400 invalid_company）、不能是停用的公司（400 company_inactive）。
  *   • 每位員工都必須屬於本租戶：有任何一位查不到 → 400 employee_not_found（附 missing 清單），整批不寫。

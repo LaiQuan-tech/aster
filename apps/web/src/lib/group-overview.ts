@@ -153,28 +153,58 @@ export const PAYROLL_BASIS_NOTE = "人事成本以員工所屬公司歸屬，未
 /** 人事成本為 null（期間內沒有任何薪資單）時畫面上的字。 */
 export const NO_PAYROLL_TEXT = "尚無薪資資料";
 
+/** 後端 payroll.basisNote 的預設值（舊版 API 沒帶時用）。 */
+export const PAYROLL_GROSS_NOTE = "應發（gross）口徑：未扣請假／遲到扣款、不含雇主負擔、加班另計與獎金";
+
+export type PayrollSummaryLike = {
+  hasData: boolean;
+  slipCount: number;
+  draftSlipCount: number;
+  companyAssignmentReady: boolean;
+  employerCostIncluded: boolean;
+  basisNote?: string;
+  overtimeSettlementAvailable?: boolean;
+  overtimeSettlementCount?: number;
+  overtimeSettlementDraftCount?: number;
+  overtimeSettlementNoAmountCount?: number;
+};
+
 /**
- * 集團合計卡下方的人事說明（純文字陣列，一句一行）。
+ * 集團合計卡下方的人事說明（純文字陣列，一句一行）。人事成本以應發（gross）為主，扣款後與加班另計只是補充。
  * `payroll` 省略＝舊版 API（沒有人事欄位），回空陣列不顯示。
  */
 export function payrollNotes(
-  payroll:
-    | { hasData: boolean; slipCount: number; draftSlipCount: number; companyAssignmentReady: boolean; employerCostIncluded: boolean }
-    | undefined,
-  group: { unassignedHeadcount?: number; unassignedPayrollCost?: number | null },
+  payroll: PayrollSummaryLike | undefined,
+  group: {
+    unassignedHeadcount?: number;
+    unassignedPayrollCost?: number | null;
+    payrollCostNet?: number | null;
+    overtimeSettlementCost?: number | null;
+  },
 ): string[] {
   if (!payroll) return [];
   const notes: string[] = [];
   if (!payroll.companyAssignmentReady) {
     notes.push("員工所屬公司尚未啟用（資料庫待更新），所有員工暫列「未指派」");
   }
-  notes.push(
-    `${PAYROLL_BASIS_NOTE}；人事成本＝期間內薪資單應發合計${payroll.employerCostIncluded ? "（含雇主負擔）" : "，不含雇主負擔的勞健保、勞退"}`,
-  );
+  notes.push(`人事成本＝期間內薪資單${payroll.basisNote ?? PAYROLL_GROSS_NOTE}；${PAYROLL_BASIS_NOTE}`);
   if (!payroll.hasData) {
     notes.push(`${NO_PAYROLL_TEXT}：這段期間還沒有產生任何薪資單，人事成本與「扣人事成本後」顯示「—」`);
-  } else if (payroll.draftSlipCount > 0) {
-    notes.push(`${payroll.slipCount} 張薪資單中有 ${payroll.draftSlipCount} 張尚未定稿，數字可能再變動`);
+  } else {
+    if (payroll.draftSlipCount > 0) {
+      notes.push(`${payroll.slipCount} 張薪資單中有 ${payroll.draftSlipCount} 張尚未定稿，數字可能再變動`);
+    }
+    if (group.payrollCostNet != null) {
+      notes.push(`補充：扣除請假／遲到扣款後 ${fmtMoney(group.payrollCostNet)} 元`);
+    }
+  }
+  if (payroll.overtimeSettlementAvailable && group.overtimeSettlementCost != null && (payroll.overtimeSettlementCount ?? 0) > 0) {
+    const extra: string[] = [];
+    if ((payroll.overtimeSettlementDraftCount ?? 0) > 0) extra.push(`其中 ${payroll.overtimeSettlementDraftCount} 筆草稿`);
+    if ((payroll.overtimeSettlementNoAmountCount ?? 0) > 0) extra.push(`${payroll.overtimeSettlementNoAmountCount} 筆尚無金額未計`);
+    notes.push(
+      `補充：加班超額另計 ${fmtMoney(group.overtimeSettlementCost)} 元（${payroll.overtimeSettlementCount} 筆${extra.length ? `，${extra.join("、")}` : ""}；不在人事成本內）`,
+    );
   }
   const unassigned = group.unassignedHeadcount ?? 0;
   const unassignedCost = group.unassignedPayrollCost ?? null;

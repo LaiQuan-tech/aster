@@ -38,14 +38,14 @@ const guards = [requireAuth, requireTenant, requireHrAdmin] as const
 async function resolvePeriod(
   tenantId: string,
   query: Request["query"],
-): Promise<{ ok: true; year: number; month: number | null } | { ok: false; error: "invalid_year" | "invalid_month" }> {
-  // 只有沒帶 year 才需要查租戶時區算「今年」；帶了就不多打一次 tenants。
-  const fallbackYear = query.year === undefined ? Number(todayKey(await getTenantTimezone(tenantId)).slice(0, 4)) : 0
-  const year = parseOverviewYear(query.year, fallbackYear)
+): Promise<{ ok: true; year: number; month: number | null; today: string } | { ok: false; error: "invalid_year" | "invalid_month" }> {
+  // 租戶當地今天：沒帶 year 時取今年，在職人數也用它（與首頁人事區同一個「今天」）。
+  const today = todayKey(await getTenantTimezone(tenantId))
+  const year = parseOverviewYear(query.year, Number(today.slice(0, 4)))
   if (year === null) return { ok: false, error: "invalid_year" }
   const month = parseOverviewMonth(query.month)
   if (month === undefined) return { ok: false, error: "invalid_month" }
-  return { ok: true, year, month }
+  return { ok: true, year, month, today }
 }
 
 // ── GET /group-overview ────────────────────────────────────────────────
@@ -57,7 +57,7 @@ groupOverviewRouter.get("/group-overview", ...guards, async (req: Request, res: 
       res.status(400).json({ error: period.error })
       return
     }
-    const model = buildGroupModel(await loadGroupOverviewData(tenantId, period.year))
+    const model = buildGroupModel(await loadGroupOverviewData(tenantId, period.year, period.today))
     res.status(200).json(summarizeGroupOverview(model, { month: period.month, excluded: parseExcludeIds(req.query.exclude) }))
   } catch (err) {
     next(err)
@@ -83,7 +83,7 @@ groupOverviewRouter.get("/group-overview/detail", ...guards, async (req: Request
       res.status(400).json({ error: period.error })
       return
     }
-    const model = buildGroupModel(await loadGroupOverviewData(tenantId, period.year))
+    const model = buildGroupModel(await loadGroupOverviewData(tenantId, period.year, period.today))
     const detail = detailGroupOverview(model, { companyId, month: period.month, kind: kind as DetailKind })
     if (!detail) {
       res.status(404).json({ error: "company_not_found" })

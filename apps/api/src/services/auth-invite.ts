@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js"
 import { createHash } from "node:crypto"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { companyInsertPatch, defaultCompanyIdForNewEmployee } from "./employee-company.js"
 import { isMailConfigured, sendMail } from "../lib/resend.js"
 import { parseCsv } from "../lib/csv.js"
 import { logger } from "../lib/logger.js"
@@ -552,6 +553,9 @@ export async function bulkInviteFromCsv(opts: {
   }
 
   const appName = await tenantAppName(tenantId)
+  // 新建員工的所屬公司（0072）：整份共用一次查詢——恰好一家啟用中公司 → 帶入；否則未指派；未套 0072 不帶欄位。
+  // 綁定既有員工（action=bound）不動他原本的公司。
+  const newEmployeeCompany = companyInsertPatch(await defaultCompanyIdForNewEmployee(tenantId))
   const dryRun = !!opts.dryRun || !isMailConfigured()
   const summary: BulkInviteSummary = {
     created: 0,
@@ -662,6 +666,7 @@ export async function bulkInviteFromCsv(opts: {
             hire_date: raw.hireDate ?? null,
             status: "active",
             must_change_password: false,
+            ...newEmployeeCompany,
           }
           const { data: created, error: insErr } = await supabaseAdmin
             .from("employees")

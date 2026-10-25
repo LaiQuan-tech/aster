@@ -118,9 +118,9 @@ describe("GET /companies — isActive 與使用量", () => {
     expect(res.status).toBe(200)
     const byId = Object.fromEntries((res.body.companies as Row[]).map((c) => [c.id, c]))
     expect(Object.keys(byId).sort()).toEqual([C_DEFAULT, C_SECOND, C_USED, C_INACTIVE].sort()) // 別租戶的不出現
-    expect(byId[C_USED].usage).toEqual({ projects: 2, disbursements: 3, subcontractPayments: 3, total: 8 })
-    expect(byId[C_DEFAULT].usage).toEqual({ projects: 0, disbursements: 1, subcontractPayments: 0, total: 1 })
-    expect(byId[C_SECOND].usage).toEqual({ projects: 0, disbursements: 0, subcontractPayments: 0, total: 0 })
+    expect(byId[C_USED].usage).toEqual({ projects: 2, disbursements: 3, subcontractPayments: 3, employees: 0, total: 8 })
+    expect(byId[C_DEFAULT].usage).toEqual({ projects: 0, disbursements: 1, subcontractPayments: 0, employees: 0, total: 1 })
+    expect(byId[C_SECOND].usage).toEqual({ projects: 0, disbursements: 0, subcontractPayments: 0, employees: 0, total: 0 })
     expect(byId[C_DEFAULT]).toMatchObject({ isDefault: true, isActive: true })
     expect(byId[C_INACTIVE]).toMatchObject({ isDefault: false, isActive: false })
   })
@@ -165,7 +165,7 @@ describe("GET /companies — isActive 與使用量", () => {
 
     expect(res.status).toBe(200)
     const used = (res.body.companies as Row[]).find((c) => c.id === C_USED)
-    expect(used?.usage).toEqual({ projects: 2, disbursements: 0, subcontractPayments: 3, total: 5 })
+    expect(used?.usage).toEqual({ projects: 2, disbursements: 0, subcontractPayments: 3, employees: 0, total: 5 })
 
     fake.injectError({ table: "projects", action: "select", error: { code: "XX000", message: "boom" } })
     const broken = await as(STAFF_TOKEN, request(app).get("/companies"))
@@ -227,7 +227,7 @@ describe("PUT /companies — 停用", () => {
     expect(stored(C_DEFAULT)).toMatchObject({ is_active: true, is_default: true })
     const byId = Object.fromEntries((res.body.companies as Row[]).map((c) => [c.id, c]))
     expect(byId[C_SECOND]).toMatchObject({ isActive: false, isDefault: false })
-    expect(byId[C_SECOND].usage).toEqual({ projects: 0, disbursements: 0, subcontractPayments: 0, total: 0 })
+    expect(byId[C_SECOND].usage).toEqual({ projects: 0, disbursements: 0, subcontractPayments: 0, employees: 0, total: 0 })
     expect(byId[C_DEFAULT]).toMatchObject({ isActive: true, isDefault: true })
   })
 
@@ -377,7 +377,7 @@ describe("DELETE /companies/:id", () => {
     expect(res.status).toBe(409)
     expect(res.body).toEqual({
       error: "company_in_use",
-      usage: { projects: 2, disbursements: 3, subcontractPayments: 3, total: 8 },
+      usage: { projects: 2, disbursements: 3, subcontractPayments: 3, employees: 0, total: 8 },
     })
     expect(companyDeletes()).toHaveLength(0)
     expect(stored(C_USED)).toBeTruthy()
@@ -403,7 +403,16 @@ describe("DELETE /companies/:id", () => {
     const res = await as(HR_TOKEN, request(app).delete(`/companies/${C_SECOND}`))
 
     expect(res.status).toBe(409)
-    expect(res.body).toMatchObject({ error: "company_in_use", usage: { subcontractPayments: 1, total: 1 } })
+    expect(res.body).toMatchObject({ error: "company_in_use", usage: { subcontractPayments: 1, employees: 0, total: 1 } })
+  })
+
+  it("還有員工指派在這家（所屬公司，含離職員工）也算使用中，不准刪", async () => {
+    fake.db.employees!.push({ id: "bbbbbbbb-0000-4000-8000-0000000000e1", tenant_id: TENANT_ID, user_id: null, role: "employee", status: "inactive", company_id: C_SECOND })
+
+    const res = await as(HR_TOKEN, request(app).delete(`/companies/${C_SECOND}`))
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: "company_in_use", usage: { employees: 1, total: 1 } })
   })
 
   it("預設公司：409 company_is_default（就算沒被用過）", async () => {

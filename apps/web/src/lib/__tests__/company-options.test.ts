@@ -102,7 +102,7 @@ describe("錯誤訊息人性化（新增的錯誤碼）", () => {
   it("公司主體名冊：預設不能停用／不能刪、使用中不能刪、找不到", () => {
     expect(humanizeCompanyError(apiError(400, "default_company_inactive"), "x")).toBe("預設公司不能停用，請先把預設改到其他公司。");
     expect(humanizeCompanyError(apiError(409, "company_is_default"), "x")).toBe("預設公司不能刪除，請先把預設改到其他公司。");
-    expect(humanizeCompanyError(apiError(409, "company_in_use"), "x")).toBe("這間公司已被紀錄使用，無法刪除，可改為停用。");
+    expect(humanizeCompanyError(apiError(409, "company_in_use"), "x")).toBe("這間公司已被紀錄使用（含有員工指派在這家），無法刪除，可改為停用或先把員工改指派。");
     expect(humanizeCompanyError(apiError(404, "not_found"), "x")).toBe("找不到這間公司，可能已被刪除，請重新整理。");
     // 既有的訊息不受影響
     expect(humanizeCompanyError(apiError(400, "multiple_defaults"), "x")).toBe("預設主體只能勾一筆。");

@@ -44,7 +44,7 @@ const STALE_CODES = new Set(["company_in_use", "company_is_default", "not_found"
 function usageHint(r: Row): string {
   const u = r.usage;
   if (!u) return "";
-  return `專案 ${u.projects}、放款單 ${u.disbursements}、下包期款 ${u.subcontractPayments}`;
+  return `專案 ${u.projects}、放款單 ${u.disbursements}、下包期款 ${u.subcontractPayments}、員工 ${u.employees ?? 0}`;
 }
 
 export default function CompaniesPage() {

@@ -53,6 +53,14 @@ const negative = (n: number) => (n < 0 ? "text-red-600" : "text-gray-900");
 
 /* ------------------------------------------------------------ 數字卡 --- */
 
+/** 人事成本格的補充說明（滑鼠移上去）：扣請假／遲到後、加班另計；兩個都沒有回 undefined。 */
+function supplementTitle(row: { payrollCostNet?: number | null; overtimeSettlementCost?: number | null }): string | undefined {
+  const parts: string[] = [];
+  if (row.payrollCostNet != null) parts.push(`扣請假／遲到後 ${fmtMoney(row.payrollCostNet)}`);
+  if (row.overtimeSettlementCost != null && row.overtimeSettlementCost !== 0) parts.push(`加班另計 ${fmtMoney(row.overtimeSettlementCost)}（不在人事成本內）`);
+  return parts.length ? parts.join("；") : undefined;
+}
+
 /** 人數：舊版 API 沒有欄位 → 「—」。 */
 const fmtCount = (n: number | null | undefined) => (n == null ? "—" : `${n.toLocaleString("zh-TW")} 人`);
 
@@ -79,7 +87,7 @@ export function StatCards({
   if (payroll) {
     cards.push(
       { label: "在職人數", value: fmtCount(group.headcount), hint: "目前在職，含未指派公司" },
-      { label: "人事成本", value: fmtMoney(group.payrollCost), hint: noPayroll ? NO_PAYROLL_TEXT : "薪資單應發合計" },
+      { label: "人事成本", value: fmtMoney(group.payrollCost), hint: noPayroll ? NO_PAYROLL_TEXT : "薪資單應發（gross）合計" },
       {
         label: "扣人事成本後",
         value: fmtMoney(group.grossProfitAfterPayroll),
@@ -313,7 +321,7 @@ export function CompanyTable({
               <th className="py-2 pr-3 text-right" title={`專案毛利 − 人事成本；${PAYROLL_BASIS_NOTE}`}>扣人事成本後</th>
               <th className="py-2 pr-3 text-right">毛利率</th>
               <th className="py-2 pr-3 text-right" title="目前在職、依員工所屬公司">在職人數</th>
-              <th className="py-2 pr-3 text-right" title={`期間內薪資單應發合計；${PAYROLL_BASIS_NOTE}`}>人事成本</th>
+              <th className="py-2 pr-3 text-right" title={`期間內薪資單${payroll?.basisNote ?? "應發（gross）合計"}；${PAYROLL_BASIS_NOTE}`}>人事成本</th>
               <th className="py-2 text-right" title="客戶是關係企業的專案收入、付給關係企業廠商的放款；已包含在左邊的數字裡，只有集團合計會剔除">
                 其中關係企業往來
               </th>
@@ -354,7 +362,7 @@ export function CompanyTable({
                     </td>
                     <td className="py-2 pr-3 text-right">{fmtPct(c.grossMarginPct)}</td>
                     <td className="py-2 pr-3 text-right">{c.headcount ?? "—"}</td>
-                    <td className="py-2 pr-3 text-right" title={payrollTitle}>{fmtMoney(c.payrollCost)}</td>
+                    <td className="py-2 pr-3 text-right" title={payrollTitle ?? supplementTitle(c)}>{fmtMoney(c.payrollCost)}</td>
                     <td className="py-2 text-right text-xs">{affiliateCellText(c.affiliate)}</td>
                   </tr>
                   {open && (
@@ -405,7 +413,7 @@ export function CompanyTable({
               </td>
               <td className="py-2 pr-3 text-right">{fmtPct(group.grossMarginPct)}</td>
               <td className="py-2 pr-3 text-right">{group.headcount ?? "—"}</td>
-              <td className="py-2 pr-3 text-right" title={payrollTitle}>{fmtMoney(group.payrollCost)}</td>
+              <td className="py-2 pr-3 text-right" title={payrollTitle ?? supplementTitle(group)}>{fmtMoney(group.payrollCost)}</td>
               <td className="py-2 text-right text-xs font-normal text-gray-500">已剔除 {fmtMoney(group.eliminated.total)}</td>
             </tr>
           </tfoot>

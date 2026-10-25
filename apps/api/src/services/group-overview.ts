@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "../lib/supabase.js"
-import { employeesHaveCompany } from "../lib/schema-compat.js"
+import { employeesHaveCompany, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { isEmployedOn } from "./employment-status.js"
 import { defaultCompanyOf, loadTenantCompanies, type CompanyLite } from "./project-company.js"
 import { effectiveBillingAmount, pct1 } from "./project-money.js"
 
@@ -46,16 +47,24 @@ import { effectiveBillingAmount, pct1 } from "./project-money.js"
  *     含稅金額（未稅×1.05）當成未稅填進去，收入會因此灌水 5%。部分入帳（實收較少）、剛好收足都不算。
  *
  * ── 人事（2026-10-25，員工所屬公司 employees.company_id，migration 0072）────────────
- *   • 在職人數（headcount）＝目前 status='active' 的員工，依員工**目前**的所屬公司歸屬（不是歷史快照，換年度不變）。
- *   • 薪資成本（payrollCost）＝期間內（payslips.period 'YYYY-MM' 落在年度／月份）已產生的薪資單應發合計 `gross`，
- *     草稿與已定稿都算（定稿前數字可能再變，畫面附註草稿張數）；同樣依員工**目前**的所屬公司歸屬，離職員工的薪資單照算。
- *     payslips 沒有雇主負擔（勞健保、勞退雇主提繳）欄位，所以只有應發，不含雇主負擔（payroll.employerCostIncluded=false）。
+ *   • 在職人數（headcount）＝今天（租戶當地）在職：到職日 ≤ 今天且（沒有離職日或離職日 ≥ 今天），與後台首頁人事區
+ *     （services/boss-summary.ts）同一個 helper（services/employment-status.ts isEmployedOn）；依員工**目前**的所屬公司歸屬，
+ *     換年度／月份不變。
+ *   • 人事成本（payrollCost）＝**應發（gross）口徑**：期間內（payslips.period 'YYYY-MM' 落在年度／月份）已產生的薪資單
+ *     應發合計，草稿與已定稿都算（畫面附註草稿張數）。gross **未扣**請假／遲到早退扣款、**不含**雇主負擔（勞健保、勞退
+ *     雇主提繳——payslips 沒有這些欄位）、**不含**加班超額另計（overtime_settlements）與各種獎金（獎金試算、三節獎金）。
+ *     同樣依員工**目前**的所屬公司歸屬，離職員工的薪資單照算。口徑文字在 PAYROLL_BASIS_NOTE（API 回應 payroll.basisNote）。
+ *   • 補充（頁面以 gross 為主、這兩個只做補充顯示）：
+ *       payrollCostNet          ＝ gross −（breakdown.leaveDeduction ＋ breakdown.lateEarlyDeduction）；舊薪資單沒有這兩鍵當 0。
+ *       overtimeSettlementCost  ＝ 同期間 overtime_settlements（status draft／paid）的 amount 合計，依員工所屬公司歸屬；
+ *                                 amount 為空（補休或未定案）不計、張數另報。表不存在 → null。
+ *   • monthly[] 每個月另有 payrollCost（依 payslip period；那個月整個租戶沒有任何薪資單 → null），首頁「本月」可直接取。
  *   • company_id 為 NULL（未指派）、指到不在本租戶名冊的公司、或 0072 還沒套 → 列在「未指派」
  *     （group.unassignedHeadcount／unassignedPayrollCost），**不分攤**到任何公司。
- *   • 各公司「扣人事成本後」＝毛利－該公司薪資成本。集團合計的人事成本＝納入合計的公司＋未指派（集團整體真的付出去的錢），
+ *   • 各公司「扣人事成本後」＝毛利－該公司人事成本（gross）。集團合計的人事成本＝納入合計的公司＋未指派（集團整體真的付出去的錢），
  *     集團「扣人事成本後」＝集團毛利－集團人事成本。
- *   • 期間內一張薪資單都沒有（例如正式庫還沒跑過薪資）→ payrollCost／扣人事成本後一律 null（畫面顯示「尚無薪資資料」），
- *     不用 0 假裝「人事成本是零」。
+ *   • 期間內一張薪資單都沒有（例如正式庫還沒跑過薪資）→ payrollCost／payrollCostNet／扣人事成本後一律 null
+ *     （畫面顯示「尚無薪資資料」），不用 0 假裝「人事成本是零」。
  *
  * ── 計算方式 ──────────────────────────────────────────────────────
  *   一次撈整年的事件（入帳／開票／匯款）→ 在記憶體裡依「公司×月」加總，月份、公司排除、關係企業剔除都只是
@@ -141,7 +150,9 @@ export type VendorInputRow = {
 /** 員工（人事歸屬用）；company_id 在 0072 未套時不存在。 */
 export type EmployeeInputRow = {
   id: string
-  status: string | null
+  status?: string | null
+  hire_date?: string | null
+  terminated_at?: string | null
   company_id?: string | null
 }
 
@@ -152,7 +163,21 @@ export type PayslipInputRow = {
   period: string
   gross: Numeric
   status: string | null
+  /** 引擎完整輸出（只讀 leaveDeduction／lateEarlyDeduction）。 */
+  breakdown?: unknown
 }
+
+/** 期間內的加班超額另計（overtime_settlements，status draft／paid）。 */
+export type OvertimeSettlementInputRow = {
+  employee_id: string
+  /** 'YYYY-MM'。 */
+  period: string
+  amount: Numeric
+  status: string | null
+}
+
+/** 人事成本的口徑說明（API 回應 payroll.basisNote、頁面照抄）。 */
+export const PAYROLL_BASIS_NOTE = "應發（gross）口徑：未扣請假／遲到扣款、不含雇主負擔、加班另計與獎金"
 
 export type GroupOverviewData = {
   year: number
@@ -173,6 +198,10 @@ export type GroupOverviewData = {
   payslips?: PayslipInputRow[]
   /** employees.company_id（0072）已套；false＝全部人列在未指派。省略視為 true。 */
   companyAssignmentReady?: boolean
+  /** 該年的加班超額另計；null＝表不存在（未套 sql/0040）；省略＝沒有資料。 */
+  overtimeSettlements?: OvertimeSettlementInputRow[] | null
+  /** 租戶當地今天（'YYYY-MM-DD'），在職人數用；省略取 UTC 今天。 */
+  today?: string
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -295,11 +324,11 @@ async function fetchByIds<T>(table: string, cols: string, tenantId: string, ids:
  *   公司名冊 ＋ 該年入帳的期別 ＋ 該年開票的期別（兩條查詢、以 id 去重）＋ 有入帳金額卻沒入帳日的期別
  *   （資料品質提醒用，正常是空的）＋ 該年已匯款的放款單，再依這些列補專案、客戶（關係企業標記）、廠商（關係企業標記）。
  */
-export async function loadGroupOverviewData(tenantId: string, year: number): Promise<GroupOverviewData> {
+export async function loadGroupOverviewData(tenantId: string, year: number, today?: string): Promise<GroupOverviewData> {
   const from = `${year}-01-01`
   const to = `${year}-12-31`
   const companyAssignmentReady = await employeesHaveCompany()
-  const [companies, receivedRows, invoicedRows, undatedReceived, disbursementRows, employees, payslips] = await Promise.all([
+  const [companies, receivedRows, invoicedRows, undatedReceived, disbursementRows, employees, payslips, overtimeSettlements] = await Promise.all([
     loadTenantCompanies(tenantId),
     fetchAllRows<BillingInputRow>("group-overview billings(received)", (a, b) =>
       supabaseAdmin
@@ -348,7 +377,7 @@ export async function loadGroupOverviewData(tenantId: string, year: number): Pro
     fetchAllRows<EmployeeInputRow>("group-overview employees", (a, b) =>
       supabaseAdmin
         .from("employees")
-        .select(companyAssignmentReady ? "id, status, company_id" : "id, status")
+        .select(companyAssignmentReady ? "id, status, hire_date, terminated_at, company_id" : "id, status, hire_date, terminated_at")
         .eq("tenant_id", tenantId)
         .order("id", { ascending: true })
         .range(a, b) as unknown as PromiseLike<{ data: EmployeeInputRow[] | null; error: { message: string } | null }>,
@@ -356,13 +385,14 @@ export async function loadGroupOverviewData(tenantId: string, year: number): Pro
     fetchAllRows<PayslipInputRow>("group-overview payslips", (a, b) =>
       supabaseAdmin
         .from("payslips")
-        .select("id, employee_id, period, gross, status")
+        .select("id, employee_id, period, gross, status, breakdown")
         .eq("tenant_id", tenantId)
         .gte("period", `${year}-01`)
         .lte("period", `${year}-12`)
         .order("id", { ascending: true })
         .range(a, b),
     ),
+    loadOvertimeSettlements(tenantId, year),
   ])
 
   // 同一期可能兩條查詢都撈到、offset 分頁遇到並發寫入也可能在頁界重複一列 → 一律以 id 去重。
@@ -400,7 +430,45 @@ export async function loadGroupOverviewData(tenantId: string, year: number): Pro
     employees: [...new Map(employees.map((row) => [row.id, row])).values()],
     payslips: [...new Map(payslips.map((row) => [`${row.employee_id}|${row.period}`, row])).values()],
     companyAssignmentReady,
+    overtimeSettlements,
+    today,
   }
+}
+
+/** 該年的加班超額另計（draft＋paid）；表不存在（未套 sql/0040）→ null。 */
+async function loadOvertimeSettlements(tenantId: string, year: number): Promise<OvertimeSettlementInputRow[] | null> {
+  const rows: OvertimeSettlementInputRow[] = []
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const { data, error } = await supabaseAdmin
+      .from("overtime_settlements")
+      .select("id, employee_id, period, amount, status")
+      .eq("tenant_id", tenantId)
+      .in("status", ["draft", "paid"])
+      .gte("period", `${year}-01`)
+      .lte("period", `${year}-12`)
+      .order("id", { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1)
+    if (error) {
+      if (isMissingTableError(error)) {
+        warnSchemaGapOnce("group-overview.overtime_settlements", error)
+        return null
+      }
+      throw new Error(`group-overview overtime_settlements: ${error.message}`)
+    }
+    const batch = (data ?? []) as unknown as Array<OvertimeSettlementInputRow & { id: string }>
+    rows.push(...batch)
+    if (batch.length < PAGE_SIZE) break
+  }
+  // offset 分頁遇到並發寫入可能在頁界重複一列 → 以 id 去重。
+  return [...new Map((rows as Array<OvertimeSettlementInputRow & { id: string }>).map((row) => [row.id, row])).values()]
+}
+
+/** 薪資單 breakdown 裡的請假＋遲到早退扣款（分）；舊薪資單沒有這兩鍵 → 0。 */
+function slipDeductionCents(breakdown: unknown): number {
+  if (!breakdown || typeof breakdown !== "object" || Array.isArray(breakdown)) return 0
+  const b = breakdown as Record<string, unknown>
+  const num = (v: unknown): number => (typeof v === "number" || typeof v === "string" ? toCents(v) : 0)
+  return num(b.leaveDeduction) + num(b.lateEarlyDeduction)
 }
 
 /** 'YYYY-MM' → 這一年的月份（1–12）；不是這一年或格式不對回 null。 */
@@ -473,15 +541,25 @@ export type GroupModel = {
   people: PeopleModel
 }
 
-/** 人事（見檔頭「人事」）：key 是公司 id 或 UNASSIGNED_EMPLOYEES_KEY。 */
+/** 人事（見檔頭「人事」）：key 是公司 id 或 UNASSIGNED_EMPLOYEES_KEY；每格是 12 個月（分）。 */
 export type PeopleModel = {
   companyAssignmentReady: boolean
   headcount: Map<string, number>
-  /** 每家公司 12 個月的薪資應發（分）。 */
+  /** 薪資單應發（gross）。 */
   payroll: Map<string, number[]>
-  /** 每月薪資單張數／其中草稿張數。 */
+  /** 薪資單的請假＋遲到早退扣款。 */
+  deductions: Map<string, number[]>
+  /** 加班超額另計金額（draft＋paid）。 */
+  overtime: Map<string, number[]>
+  /** 每月薪資單張數／其中草稿張數（整個租戶）。 */
   slips: number[]
   draftSlips: number[]
+  /** 每月加班另計筆數／其中草稿／其中沒有金額。 */
+  overtimeRows: number[]
+  overtimeDraftRows: number[]
+  overtimeNoAmountRows: number[]
+  /** overtime_settlements 表存在。 */
+  overtimeAvailable: boolean
 }
 
 /** 人事歸屬的「未指派」鍵（不是一列公司，只在 group.unassigned* 出現）。 */
@@ -593,15 +671,35 @@ export function buildGroupModel(data: GroupOverviewData): GroupModel {
     const stored = companyAssignmentReady ? (e.company_id ?? null) : null
     employeeCompany.set(e.id, stored && known.has(stored) ? stored : UNASSIGNED_EMPLOYEES_KEY)
   }
+  const zeros = () => ALL_MONTHS.map(() => 0)
   const people: PeopleModel = {
     companyAssignmentReady,
     headcount: new Map(),
     payroll: new Map(),
-    slips: ALL_MONTHS.map(() => 0),
-    draftSlips: ALL_MONTHS.map(() => 0),
+    deductions: new Map(),
+    overtime: new Map(),
+    slips: zeros(),
+    draftSlips: zeros(),
+    overtimeRows: zeros(),
+    overtimeDraftRows: zeros(),
+    overtimeNoAmountRows: zeros(),
+    overtimeAvailable: data.overtimeSettlements !== null,
   }
+  const addTo = (map: Map<string, number[]>, key: string, month: number, cents: number) => {
+    let cells = map.get(key)
+    if (!cells) {
+      cells = zeros()
+      map.set(key, cells)
+    }
+    cells[month - 1] = (cells[month - 1] as number) + cents
+  }
+  const bump = (arr: number[], month: number) => {
+    arr[month - 1] = (arr[month - 1] as number) + 1
+  }
+  // 在職：與首頁人事區同一個口徑（services/employment-status.ts）。
+  const today = data.today ?? new Date().toISOString().slice(0, 10)
   for (const e of data.employees ?? []) {
-    if (e.status !== "active") continue
+    if (!isEmployedOn(e, today)) continue
     const key = employeeCompany.get(e.id) as string
     people.headcount.set(key, (people.headcount.get(key) ?? 0) + 1)
   }
@@ -609,18 +707,27 @@ export function buildGroupModel(data: GroupOverviewData): GroupModel {
     const month = monthOfPeriod(slip.period, year)
     if (month === null) continue
     const key = employeeCompany.get(slip.employee_id) ?? UNASSIGNED_EMPLOYEES_KEY
-    let cells = people.payroll.get(key)
-    if (!cells) {
-      cells = ALL_MONTHS.map(() => 0)
-      people.payroll.set(key, cells)
+    addTo(people.payroll, key, month, toCents(slip.gross))
+    addTo(people.deductions, key, month, slipDeductionCents(slip.breakdown))
+    bump(people.slips, month)
+    if (slip.status !== "finalized") bump(people.draftSlips, month)
+  }
+  for (const ot of data.overtimeSettlements ?? []) {
+    if (ot.status !== "draft" && ot.status !== "paid") continue
+    const month = monthOfPeriod(ot.period, year)
+    if (month === null) continue
+    const key = employeeCompany.get(ot.employee_id) ?? UNASSIGNED_EMPLOYEES_KEY
+    bump(people.overtimeRows, month)
+    if (ot.status === "draft") bump(people.overtimeDraftRows, month)
+    if (ot.amount === null || ot.amount === undefined || ot.amount === "") {
+      bump(people.overtimeNoAmountRows, month)
+      continue
     }
-    cells[month - 1] = (cells[month - 1] as number) + toCents(slip.gross)
-    people.slips[month - 1] = (people.slips[month - 1] as number) + 1
-    if (slip.status !== "finalized") people.draftSlips[month - 1] = (people.draftSlips[month - 1] as number) + 1
+    addTo(people.overtime, key, month, toCents(ot.amount))
   }
 
   const active = new Set(facts.map((f) => f.companyId))
-  for (const key of [...people.headcount.keys(), ...people.payroll.keys()]) active.add(key)
+  for (const key of [...people.headcount.keys(), ...people.payroll.keys(), ...people.overtime.keys()]) active.add(key)
   const companies: CompanyLite[] = roster.filter((c) => c.isActive || active.has(c.id))
   if (active.has(UNASSIGNED_COMPANY_ID)) {
     companies.push({ id: UNASSIGNED_COMPANY_ID, name: UNASSIGNED_COMPANY_NAME, isDefault: false, isActive: true })
@@ -651,7 +758,15 @@ export function buildGroupModel(data: GroupOverviewData): GroupModel {
  * 總覽
  * ────────────────────────────────────────────────────────────────── */
 
-export type MonthPoint = { month: number; revenue: number; invoiced: number; expense: number; grossProfit: number }
+export type MonthPoint = {
+  month: number
+  revenue: number
+  invoiced: number
+  expense: number
+  grossProfit: number
+  /** 該月薪資單應發合計（依 payslip period、員工所屬公司）；那個月整個租戶沒有任何薪資單 → null。 */
+  payrollCost: number | null
+}
 export type AffiliateAmounts = { revenue: number; invoiced: number; expense: number }
 
 export type CompanyOverview = {
@@ -676,9 +791,13 @@ export type CompanyOverview = {
   monthly: MonthPoint[]
   /** 目前在職人數（依員工所屬公司）。 */
   headcount: number
-  /** 期間內薪資單應發合計（依員工所屬公司）；期間內沒有任何薪資單 → null（尚無薪資資料）。 */
+  /** 期間內薪資單應發（gross）合計（依員工所屬公司）；期間內沒有任何薪資單 → null（尚無薪資資料）。口徑見 PAYROLL_BASIS_NOTE。 */
   payrollCost: number | null
-  /** 毛利－薪資成本；payrollCost 為 null 時也是 null。 */
+  /** 補充：gross −（請假＋遲到早退扣款）；沒有薪資資料 → null。 */
+  payrollCostNet: number | null
+  /** 補充：同期加班超額另計（草稿＋已付）金額合計；表不存在 → null。 */
+  overtimeSettlementCost: number | null
+  /** 毛利－人事成本（gross）；payrollCost 為 null 時也是 null。 */
   grossProfitAfterPayroll: number | null
 }
 
@@ -696,8 +815,12 @@ export type GroupTotals = {
   monthly: MonthPoint[]
   /** 在職人數：納入合計的公司＋未指派。 */
   headcount: number
-  /** 薪資成本：納入合計的公司＋未指派；沒有薪資資料 → null。 */
+  /** 人事成本（gross）：納入合計的公司＋未指派；沒有薪資資料 → null。 */
   payrollCost: number | null
+  /** 補充：gross −（請假＋遲到早退扣款），納入公司＋未指派；沒有薪資資料 → null。 */
+  payrollCostNet: number | null
+  /** 補充：加班超額另計，納入公司＋未指派；表不存在 → null。 */
+  overtimeSettlementCost: number | null
   /** 未指派公司的在職人數（不分攤到任何公司）。 */
   unassignedHeadcount: number
   /** 未指派公司員工的薪資成本；沒有薪資資料 → null。 */
@@ -716,6 +839,16 @@ export type PayrollSummary = {
   companyAssignmentReady: boolean
   /** 薪資成本是否含雇主負擔（勞健保、勞退雇主提繳）；目前 payslips 沒有這些欄位，固定 false。 */
   employerCostIncluded: false
+  /** 人事成本的口徑：固定 "gross"（應發）。 */
+  basis: "gross"
+  /** 口徑說明文字（PAYROLL_BASIS_NOTE），頁面照抄。 */
+  basisNote: string
+  /** overtime_settlements 表存在（false → overtimeSettlementCost 全是 null）。 */
+  overtimeSettlementAvailable: boolean
+  /** 期間內加班另計筆數／其中草稿／其中沒有金額（不計入金額）。 */
+  overtimeSettlementCount: number
+  overtimeSettlementDraftCount: number
+  overtimeSettlementNoAmountCount: number
 }
 
 export type GroupOverviewResult = {
@@ -756,13 +889,14 @@ function cellsByCompany(facts: readonly Fact[]): Map<string, Cell[]> {
   return out
 }
 
-function point(month: number, revenue: number, invoiced: number, expense: number): MonthPoint {
+function point(month: number, revenue: number, invoiced: number, expense: number, payrollCents: number | null): MonthPoint {
   return {
     month,
     revenue: fromCents(revenue),
     invoiced: fromCents(invoiced),
     expense: fromCents(expense),
     grossProfit: fromCents(revenue - expense),
+    payrollCost: payrollCents === null ? null : fromCents(payrollCents),
   }
 }
 
@@ -781,14 +915,22 @@ export function summarizeGroupOverview(
   const slipCount = periodMonths.reduce((s, m) => s + (people.slips[m - 1] as number), 0)
   const draftSlipCount = periodMonths.reduce((s, m) => s + (people.draftSlips[m - 1] as number), 0)
   const hasPayroll = slipCount > 0
-  const payrollCentsOf = (key: string): number => {
-    const cells = people.payroll.get(key)
+  const sumPeriod = (map: Map<string, number[]>, key: string): number => {
+    const cells = map.get(key)
     return cells ? periodMonths.reduce((s, m) => s + (cells[m - 1] as number), 0) : 0
   }
+  const monthHasSlips = (i: number) => (people.slips[i] as number) > 0
+  const payrollMonthly = (key: string): Array<number | null> => {
+    const cells = people.payroll.get(key)
+    return ALL_MONTHS.map((_, i) => (monthHasSlips(i) ? ((cells?.[i] as number | undefined) ?? 0) : null))
+  }
   const unassignedHeadcount = people.headcount.get(UNASSIGNED_EMPLOYEES_KEY) ?? 0
-  const unassignedPayroll = payrollCentsOf(UNASSIGNED_EMPLOYEES_KEY)
+  const unassignedPayroll = sumPeriod(people.payroll, UNASSIGNED_EMPLOYEES_KEY)
   let groupHeadcount = unassignedHeadcount
   let groupPayroll = unassignedPayroll
+  let groupDeductions = sumPeriod(people.deductions, UNASSIGNED_EMPLOYEES_KEY)
+  let groupOvertime = sumPeriod(people.overtime, UNASSIGNED_EMPLOYEES_KEY)
+  const groupPayrollMonths = ALL_MONTHS.map((_, i) => (people.payroll.get(UNASSIGNED_EMPLOYEES_KEY)?.[i] as number | undefined) ?? 0)
 
   for (const company of model.companies) {
     const cells = cellsOf.get(company.id) ?? ALL_MONTHS.map(emptyCell)
@@ -804,11 +946,19 @@ export function summarizeGroupOverview(
     }
     const excluded = opts.excluded.has(company.id)
     const headcount = people.headcount.get(company.id) ?? 0
-    const payrollCents = payrollCentsOf(company.id)
+    const payrollCents = sumPeriod(people.payroll, company.id)
+    const deductionCents = sumPeriod(people.deductions, company.id)
+    const overtimeCents = sumPeriod(people.overtime, company.id)
+    const monthlyPayroll = payrollMonthly(company.id)
     if (!excluded) {
       includedIds.push(company.id)
       groupHeadcount += headcount
       groupPayroll += payrollCents
+      groupDeductions += deductionCents
+      groupOvertime += overtimeCents
+      monthlyPayroll.forEach((v, i) => {
+        groupPayrollMonths[i] = (groupPayrollMonths[i] as number) + (v ?? 0)
+      })
       cells.forEach((cell, i) => {
         const g = groupMonths[i] as Cell
         g.revenue += cell.revenue
@@ -835,9 +985,11 @@ export function summarizeGroupOverview(
         invoiced: fromCents(period.affInvoiced),
         expense: fromCents(period.affExpense),
       },
-      monthly: cells.map((cell, i) => point(i + 1, cell.revenue, cell.invoiced, cell.expense)),
+      monthly: cells.map((cell, i) => point(i + 1, cell.revenue, cell.invoiced, cell.expense, monthlyPayroll[i] ?? null)),
       headcount,
       payrollCost: hasPayroll ? fromCents(payrollCents) : null,
+      payrollCostNet: hasPayroll ? fromCents(payrollCents - deductionCents) : null,
+      overtimeSettlementCost: people.overtimeAvailable ? fromCents(overtimeCents) : null,
       grossProfitAfterPayroll: hasPayroll ? fromCents(period.revenue - period.expense - payrollCents) : null,
     })
   }
@@ -874,9 +1026,13 @@ export function summarizeGroupOverview(
         expense: fromCents(elimExpense),
         total: fromCents(elimRevenue + elimExpense),
       },
-      monthly: groupMonths.map((g, i) => point(i + 1, g.revenue - g.affRevenue, g.invoiced - g.affInvoiced, g.expense - g.affExpense)),
+      monthly: groupMonths.map((g, i) =>
+        point(i + 1, g.revenue - g.affRevenue, g.invoiced - g.affInvoiced, g.expense - g.affExpense, monthHasSlips(i) ? (groupPayrollMonths[i] as number) : null),
+      ),
       headcount: groupHeadcount,
       payrollCost: hasPayroll ? fromCents(groupPayroll) : null,
+      payrollCostNet: hasPayroll ? fromCents(groupPayroll - groupDeductions) : null,
+      overtimeSettlementCost: people.overtimeAvailable ? fromCents(groupOvertime) : null,
       unassignedHeadcount,
       unassignedPayrollCost: hasPayroll ? fromCents(unassignedPayroll) : null,
       grossProfitAfterPayroll: hasPayroll ? fromCents(revenue - expense - groupPayroll) : null,
@@ -888,6 +1044,12 @@ export function summarizeGroupOverview(
       draftSlipCount,
       companyAssignmentReady: people.companyAssignmentReady,
       employerCostIncluded: false,
+      basis: "gross",
+      basisNote: PAYROLL_BASIS_NOTE,
+      overtimeSettlementAvailable: people.overtimeAvailable,
+      overtimeSettlementCount: periodMonths.reduce((s, m) => s + (people.overtimeRows[m - 1] as number), 0),
+      overtimeSettlementDraftCount: periodMonths.reduce((s, m) => s + (people.overtimeDraftRows[m - 1] as number), 0),
+      overtimeSettlementNoAmountCount: periodMonths.reduce((s, m) => s + (people.overtimeNoAmountRows[m - 1] as number), 0),
     },
   }
 }

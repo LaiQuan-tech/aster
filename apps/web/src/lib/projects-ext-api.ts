@@ -100,6 +100,8 @@ export interface CompanyUsage {
   projects: number
   disbursements: number
   subcontractPayments: number
+  /** 所屬公司是這間的員工數（2026-10-25；舊 API 沒有）。 */
+  employees?: number
   total: number
 }
 
@@ -149,7 +151,7 @@ export function humanizeCompanyError(err: unknown, fallback: string): string {
   if (msg.includes("name_taken")) return "名稱已被其他主體使用。"
   if (msg.includes("default_company_inactive")) return "預設公司不能停用，請先把預設改到其他公司。"
   if (msg.includes("company_is_default")) return "預設公司不能刪除，請先把預設改到其他公司。"
-  if (msg.includes("company_in_use")) return "這間公司已被紀錄使用，無法刪除，可改為停用。"
+  if (msg.includes("company_in_use")) return "這間公司已被紀錄使用（含有員工指派在這家），無法刪除，可改為停用或先把員工改指派。"
   if (msg.includes("not_found")) return "找不到這間公司，可能已被刪除，請重新整理。"
   return msg
 }

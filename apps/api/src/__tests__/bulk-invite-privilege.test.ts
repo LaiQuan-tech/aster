@@ -120,6 +120,29 @@ describe("CSV 角色欄是 platform_admin", () => {
   })
 })
 
+describe("所屬公司（2026-10-25）：新建的列自動帶入唯一啟用中公司，綁定既有列不動", () => {
+  const CO = "d0000000-0000-4000-8000-00000000000a"
+  it("恰好一家啟用中公司 → 新建列 company_id＝該公司；綁定的既有列不寫 company_id", async () => {
+    fake.db.companies = [
+      { id: CO, tenant_id: TENANT_ID, name: "測試公司A", is_default: true, is_active: true },
+      { id: "d0000000-0000-4000-8000-00000000000x", tenant_id: TENANT_ID, name: "測試停用公司", is_default: false, is_active: false },
+    ]
+    const summary = await bulk(csvOf("新同仁,emp-new@example.com,,", "待開通員工,free-emp@example.com,E100,"), HR)
+    expect(summary).toMatchObject({ created: 1, bound: 1, skipped: 0 })
+    expect(fake.db.employees.find((r) => r.name === "新同仁")).toMatchObject({ company_id: CO })
+    expect(rowOf(FREE_EMP).company_id).toBeUndefined()
+  })
+
+  it("兩家以上啟用中 → 新建列未指派（null）", async () => {
+    fake.db.companies = [
+      { id: CO, tenant_id: TENANT_ID, name: "測試公司A", is_default: true, is_active: true },
+      { id: "d0000000-0000-4000-8000-00000000000b", tenant_id: TENANT_ID, name: "測試公司B", is_default: false, is_active: true },
+    ]
+    await bulk(csvOf("新同仁,emp-new@example.com,,"), HR)
+    expect(fake.db.employees.find((r) => r.name === "新同仁")).toMatchObject({ company_id: null })
+  })
+})
+
 describe("表頭重複欄位——曾經的繞過：第一欄 employee、第二欄 platform_admin", () => {
   it("`角色` 與 `role` 同時出現（中英文別名算同一欄）→ 400 invalid_header，一列都不處理", async () => {
     const csv = ["name,email,角色,role", "evil,evil@example.com,employee,platform_admin"].join("\n")
