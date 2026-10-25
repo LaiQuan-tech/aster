@@ -16,17 +16,16 @@ import {
   buildBossSummary,
   defaultBossSummaryLoaders,
   headcountSnapshot,
-  overdueByCompany,
   sumMoney,
   summarizeDraftSettlements,
-  UNASSIGNED_COMPANY_ID,
+  summarizeReceivables,
   type BossSummaryLoaders,
 } from "../services/boss-summary.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 /**
  * 後台首頁彙總端點 GET /dashboard/boss-summary（services/boss-summary.ts）：
- *   • 角色裁切：HR 全部、會計只拿放款待簽與出勤（依 features.roles.accountant）、一般員工 403。
+ *   • 角色裁切：HR 全部（本月放款支出除外）、會計拿放款待簽／出勤／未收款／本月放款支出（依 features.roles.accountant）、一般員工 403。
  *   • 子查詢失敗只讓該欄 null，不讓整支 500。
  *   • 金額合計以「分」累加（0.1＋0.2 不會變 0.30000000000000004）。
  * ⚠️ 識別碼、名稱都是明顯的假值（repo 是公開的）。
@@ -62,9 +61,6 @@ const EMP_B = "bbbbbbbb-0000-4000-8000-00000000000b"
 const SHEET_A = "cccccccc-0000-4000-8000-00000000000a"
 const SHEET_B = "cccccccc-0000-4000-8000-00000000000b"
 
-const COMPANY_MAIN = "dddddddd-0000-4000-8000-000000000001"
-const COMPANY_SUB = "dddddddd-0000-4000-8000-000000000002"
-
 const get = (path: string, token: string) => request(server).get(path).set("Authorization", `Bearer ${token}`)
 
 function employee(id: string, userId: string | null, role: string, extra: Row = {}): Row {
@@ -90,32 +86,51 @@ function seed(features: Row = {}) {
   fake.db.disbursements = [
     { id: "d1", tenant_id: TENANT_ID, status: "pending_approval", amount: "0.1" },
     { id: "d2", tenant_id: TENANT_ID, status: "pending_approval", amount: 0.2 },
-    { id: "d3", tenant_id: TENANT_ID, status: "paid", amount: 999 },
+    { id: "d3", tenant_id: TENANT_ID, status: "paid", amount: 999, paid_on: "2026-10-03" },
+    { id: "d5", tenant_id: TENANT_ID, status: "paid", amount: "0.5", paid_on: "2026-10-31" },
+    { id: "d6", tenant_id: TENANT_ID, status: "paid", amount: 777, paid_on: "2026-09-30" },
     { id: "d4", tenant_id: OTHER_TENANT_ID, status: "pending_approval", amount: 999 },
   ]
   fake.db.overtime_settlements = [
     { id: "o1", tenant_id: TENANT_ID, status: "draft", period: "2026-08", amount: "1200.5" },
     { id: "o2", tenant_id: TENANT_ID, status: "draft", period: "2026-09", amount: null },
     { id: "o3", tenant_id: TENANT_ID, status: "paid", period: "2026-09", amount: 5000 },
+    // 月表重開時作廢的草稿（minutes／amount 清成 0）：不算待發
+    { id: "o4", tenant_id: TENANT_ID, status: "draft", period: "2026-10", amount: 0, minutes: 0 },
   ]
 }
 
 describe("bossSummaryScope／accountantTabAllowed（鏡像 web roleNavOf）", () => {
-  it("HR／平台管理員全部可見；一般員工全部不可見", () => {
-    expect(Object.values(bossSummaryScope("hr_admin", null)).every(Boolean)).toBe(true)
-    expect(Object.values(bossSummaryScope("platform_admin", null)).every(Boolean)).toBe(true)
+  it("HR／平台管理員除了本月放款支出（首頁那格顯示本年收入）全部可見；一般員工全部不可見", () => {
+    for (const role of ["hr_admin", "platform_admin"]) {
+      const { monthDisbursements, ...rest } = bossSummaryScope(role, null)
+      expect(monthDisbursements).toBe(false)
+      expect(Object.values(rest).every(Boolean)).toBe(true)
+    }
     expect(Object.values(bossSummaryScope("employee", null)).some(Boolean)).toBe(false)
   })
 
-  it("會計預設：放款待簽＋出勤可見；假單、加班另計、人事、各公司逾期應收不可見", () => {
+  it("會計預設：放款待簽＋出勤＋未收款＋專案示警＋本月放款支出可見；假單、加班另計、人事不可見", () => {
     expect(bossSummaryScope("accountant", null)).toEqual({
       leaveApprovals: false,
       disbursementApprovals: true,
       attendance: true,
       overtime: false,
       people: false,
-      receivablesByCompany: false,
+      receivables: true,
+      projectAlerts: true,
+      monthDisbursements: true,
     })
+    // finance 只開 projects → 未收款／示警／放款相關都不給
+    const onlyProjects = { roles: { accountant: { tabs: { finance: ["projects"] } } } }
+    expect(bossSummaryScope("accountant", onlyProjects)).toMatchObject({
+      receivables: false,
+      projectAlerts: false,
+      disbursementApprovals: false,
+      monthDisbursements: false,
+    })
+    // 專案示警跟「報表」分頁走（示警頁是它的子分頁）
+    expect(bossSummaryScope("accountant", { roles: { accountant: { tabs: { finance: ["reports"] } } } }).projectAlerts).toBe(true)
   })
 
   it("features.roles.accountant 覆蓋：拿掉出勤分區、或 finance 只開 projects", () => {
@@ -162,11 +177,13 @@ describe("純函式：金額與彙總", () => {
     })
   })
 
-  it("summarizeDraftSettlements：金額合計、未填金額筆數、最近期別", () => {
+  it("summarizeDraftSettlements：金額合計、未填金額筆數、最近期別；minutes＝0 的作廢草稿不計", () => {
     expect(summarizeDraftSettlements([
       { period: "2026-08", amount: "100.1" },
       { period: "2026-09", amount: null },
-      { period: "2026-07", amount: 0.2 },
+      { period: "2026-07", amount: 0.2, minutes: 30 },
+      { period: "2026-10", amount: 0, minutes: 0 },
+      { period: "2026-11", amount: null, minutes: "0" },
     ])).toEqual({ count: 3, amount: 100.3, missingAmount: 1, latestPeriod: "2026-09" })
     expect(summarizeDraftSettlements([])).toEqual({ count: 0, amount: 0, missingAmount: 0, latestPeriod: null })
   })
@@ -183,31 +200,16 @@ describe("純函式：金額與彙總", () => {
     expect(headcountSnapshot(rows, "2026-10", "2026-10-25")).toEqual({ active: 3, hires: 2, exits: 2 })
   })
 
-  it("overdueByCompany：null 歸預設公司、名冊外歸未歸屬、沒逾期的公司也列 0", () => {
-    const companies = [
-      { id: COMPANY_MAIN, name: "甲測試公司", isDefault: true, isActive: true },
-      { id: COMPANY_SUB, name: "乙測試公司", isDefault: false, isActive: true },
-    ]
-    const projectCompany = new Map<string, string | null>([
-      ["p1", null],
-      ["p2", COMPANY_MAIN],
-      ["p3", "not-in-roster"],
-    ])
-    const out = overdueByCompany(
-      [
-        { projectId: "p1", unreceived: 0.1 },
-        { projectId: "p2", unreceived: 0.2 },
-        { projectId: "p3", unreceived: 50 },
-        { projectId: "p-unknown", unreceived: null },
-      ],
-      projectCompany,
-      companies,
-    )
-    expect(out).toEqual([
-      { companyId: COMPANY_MAIN, companyName: "甲測試公司", overdueAmount: 0.3, overdueCount: 3 },
-      { companyId: COMPANY_SUB, companyName: "乙測試公司", overdueAmount: 0, overdueCount: 0 },
-      { companyId: UNASSIGNED_COMPANY_ID, companyName: "（未歸屬公司）", overdueAmount: 50, overdueCount: 1 },
-    ])
+  it("summarizeReceivables：未收金額以分加總、逾期＝overdueDays > 0 的列數", () => {
+    expect(
+      summarizeReceivables([
+        { unreceived: 0.1, overdueDays: 3 },
+        { unreceived: 0.2, overdueDays: 0 },
+        { unreceived: null, overdueDays: 10 },
+        { unreceived: 50, overdueDays: null },
+      ]),
+    ).toEqual({ unreceivedTotal: 50.3, overdueCount: 2 })
+    expect(summarizeReceivables([])).toEqual({ unreceivedTotal: 0, overdueCount: 0 })
   })
 })
 
@@ -218,7 +220,9 @@ describe("buildBossSummary：失敗降級", () => {
     sheetFacts: async () => aggregateSheetAnomalies([], []),
     draftSettlements: async () => ({ count: 1, amount: 10, missingAmount: 0, latestPeriod: "2026-09" }),
     headcount: async () => ({ active: 5, hires: 1, exits: 0 }),
-    overdueByCompany: async () => [],
+    receivables: async () => ({ unreceivedTotal: 1000, overdueCount: 2 }),
+    projectAlerts: async () => ({ total: 5, high: 2 }),
+    monthDisbursements: async () => ({ count: 4, amount: 300 }),
   }
   const base = { tenantId: TENANT_ID, role: "hr_admin", features: null, period: "2026-10", today: "2026-10-25" }
 
@@ -226,13 +230,16 @@ describe("buildBossSummary：失敗降級", () => {
     const boom = async () => {
       throw new Error("db down")
     }
-    const r = await buildBossSummary(base, { ...ok, pendingLeave: boom, headcount: boom, sheetFacts: boom })
+    const r = await buildBossSummary(base, { ...ok, pendingLeave: boom, headcount: boom, sheetFacts: boom, projectAlerts: boom })
     expect(r.approvals).toEqual({ leave: null, disbursements: 3, disbursementAmount: 100, total: 3 })
     expect(r.people).toBeNull()
     expect(r.attendance).toBeNull()
     expect(r.overtime).toEqual({ overCapPeople: null, draftCount: 1, draftAmount: 10, draftMissingAmount: 0, latestDraftPeriod: "2026-09" })
-    expect(r.overdueReceivablesByCompany).toEqual([])
+    expect(r.receivables).toEqual({ unreceivedTotal: 1000, overdueCount: 2 })
+    expect(r.projectAlerts).toBeNull()
+    expect(r.monthDisbursements).toBeNull() // HR 不查
     expect(r.scope.people).toBe(true) // 有權限、只是查詢失敗
+    expect(r.scope.projectAlerts).toBe(true)
   })
 
   it("全部失敗 → 合計也是 null（不假裝 0）", async () => {
@@ -249,9 +256,16 @@ describe("buildBossSummary：失敗降級", () => {
       Object.entries(ok).map(([k, fn]) => [k, async (ctx: unknown) => (called.push(k), (fn as (c: unknown) => unknown)(ctx))]),
     ) as BossSummaryLoaders
     await buildBossSummary({ ...base, role: "accountant" }, spy)
-    expect(called.sort()).toEqual(["pendingDisbursements", "sheetFacts"])
+    expect(called.sort()).toEqual(["monthDisbursements", "pendingDisbursements", "projectAlerts", "receivables", "sheetFacts"])
   })
 })
+
+// 未收款／專案示警走既有的 buildReceivables／currentAlerts（各自有測試）；這裡換成固定值，只驗組裝。
+const STUB_HEAVY: BossSummaryLoaders = {
+  ...defaultBossSummaryLoaders,
+  receivables: async () => ({ unreceivedTotal: 0, overdueCount: 0 }),
+  projectAlerts: async () => ({ total: 0, high: 0 }),
+}
 
 describe("GET /dashboard/boss-summary（fake supabase）", () => {
   beforeEach(() => {
@@ -268,10 +282,10 @@ describe("GET /dashboard/boss-summary（fake supabase）", () => {
   })
 
   // 「今天」由租戶時區決定；測試用 buildBossSummary 直接帶固定日期驗數字，路由只驗權限與形狀。
-  it("HR：四區都有，數字依租戶過濾", async () => {
+  it("HR：各欄都有（本月放款支出除外），數字依租戶過濾", async () => {
     const r = await buildBossSummary(
       { tenantId: TENANT_ID, role: "hr_admin", features: null, period: "2026-10", today: "2026-10-25" },
-      { ...defaultBossSummaryLoaders, overdueByCompany: async () => [] },
+      STUB_HEAVY,
     )
     expect(r.approvals).toEqual({ leave: 2, disbursements: 2, disbursementAmount: 0.3, total: 4 })
     expect(r.attendance).toEqual({
@@ -282,7 +296,20 @@ describe("GET /dashboard/boss-summary（fake supabase）", () => {
     })
     expect(r.overtime).toEqual({ overCapPeople: 0, draftCount: 2, draftAmount: 1200.5, draftMissingAmount: 1, latestDraftPeriod: "2026-09" })
     expect(r.people).toEqual({ active: 3, hires: 0, exits: 0 })
-    expect(r.overdueReceivablesByCompany).toEqual([])
+    expect(r.receivables).toEqual({ unreceivedTotal: 0, overdueCount: 0 })
+    expect(r.projectAlerts).toEqual({ total: 0, high: 0 })
+    expect(r.monthDisbursements).toBeNull()
+  })
+
+  it("會計：本月放款支出＝本月匯款日的已付放款（不含上月、送簽中）", async () => {
+    const r = await buildBossSummary(
+      { tenantId: TENANT_ID, role: "accountant", features: null, period: "2026-10", today: "2026-10-25" },
+      STUB_HEAVY,
+    )
+    expect(r.monthDisbursements).toEqual({ count: 2, amount: 999.5 })
+    expect(r.receivables).toEqual({ unreceivedTotal: 0, overdueCount: 0 })
+    expect(r.projectAlerts).toEqual({ total: 0, high: 0 })
+    expect(r.people).toBeNull()
   })
 
   it("子查詢的 DB 錯誤 → 該欄 null、端點 200", async () => {
@@ -295,7 +322,7 @@ describe("GET /dashboard/boss-summary（fake supabase）", () => {
     expect(res.body.period).toMatch(/^\d{4}-\d{2}$/)
   })
 
-  it("會計：沒有人事／加班另計／假單／各公司逾期應收", async () => {
+  it("會計：沒有人事／加班另計／假單", async () => {
     const res = await get("/dashboard/boss-summary", ACC_TOKEN)
     expect(res.status).toBe(200)
     expect(res.body.approvals.leave).toBeNull()
@@ -303,7 +330,8 @@ describe("GET /dashboard/boss-summary（fake supabase）", () => {
     expect(res.body.approvals.total).toBe(2)
     expect(res.body.people).toBeNull()
     expect(res.body.overtime).toBeNull()
-    expect(res.body.overdueReceivablesByCompany).toBeNull()
+    expect(res.body.scope.receivables).toBe(true)
+    expect(res.body.scope.projectAlerts).toBe(true)
     expect(res.body.attendance).not.toBeNull()
     expect(fake.reads).not.toContain("overtime_settlements")
     expect(fake.reads).not.toContain("leave_requests")
@@ -328,14 +356,14 @@ describe("GET /dashboard/boss-summary（fake supabase）", () => {
     }))
     const r = await buildBossSummary(
       { tenantId: TENANT_ID, role: "hr_admin", features: null, period: "2026-10", today: "2026-10-25" },
-      { ...defaultBossSummaryLoaders, overdueByCompany: async () => [] },
+      STUB_HEAVY,
     )
     expect(r.overtime).toMatchObject({ draftCount: 1001, draftAmount: 1001, latestDraftPeriod: "2026-09" })
 
     fake.injectError({ table: "overtime_settlements", action: "select", error: { message: "missing", code: "42P01" } })
     const missing = await buildBossSummary(
       { tenantId: TENANT_ID, role: "hr_admin", features: null, period: "2026-10", today: "2026-10-25" },
-      { ...defaultBossSummaryLoaders, overdueByCompany: async () => [] },
+      STUB_HEAVY,
     )
     expect(missing.overtime).toMatchObject({ draftCount: null, draftAmount: null })
   })

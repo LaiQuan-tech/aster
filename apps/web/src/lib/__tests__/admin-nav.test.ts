@@ -12,7 +12,6 @@ import {
   ADMIN_TABS,
   adminModulesOf,
   configurableTabsForRole,
-  homeEntries,
   isAdminPathAllowed,
   isHrOnlyAdminPath,
   isModuleEnabled,
@@ -334,7 +333,7 @@ describe("resolveAdminPath：detail 頁（isDetail／parentPath／title）", () 
   });
 });
 
-describe("ADMIN_SECTIONS／homeEntries", () => {
+describe("ADMIN_SECTIONS", () => {
   it("9 個分區、順序固定、href 不重複且都解析回自己的分區", () => {
     expect(ADMIN_SECTIONS).toHaveLength(9);
     expect(ADMIN_SECTIONS.map((s) => s.key)).toEqual(SECTION_KEYS);
@@ -353,13 +352,6 @@ describe("ADMIN_SECTIONS／homeEntries", () => {
     for (const section of ADMIN_SECTIONS.slice(1)) {
       expect(tabsForSection(section.key, null)[0]?.href).toBe(section.href);
     }
-  });
-
-  it("homeEntries() 8 格、排除 home、順序照側欄", () => {
-    const entries = homeEntries();
-    expect(entries).toHaveLength(8);
-    expect(entries.map((s) => s.key)).toEqual(SECTION_KEYS.slice(1));
-    expect(entries.some((s) => s.key === "home")).toBe(false);
   });
 });
 
@@ -514,9 +506,6 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
     ]);
     // 分區被列了但一個分頁都不剩 → 不列
     expect(sectionsForRole({ sections: ["home", "system"], tabs: { system: ["nope"] } }).map((s) => s.key)).toEqual(["home"]);
-    // homeEntries 帶 roleNav → 排除 home 的可見分區
-    expect(homeEntries(NAV).map((s) => s.key)).toEqual(["finance", "attendance", "payroll", "people", "settings"]);
-    expect(homeEntries()).toHaveLength(8);
   });
 
   it("集團總覽 hrOnly：HR（roleNav null）看得到；會計預設範圍不列；租戶自訂成「整個財務分區」也不列", () => {

@@ -123,7 +123,7 @@ dashboardRouter.get(
 )
 
 /**
- * GET /dashboard/boss-summary — 後台首頁「待處理」「人事」兩區（＋集團區的各公司逾期應收）一次回傳。
+ * GET /dashboard/boss-summary — 後台首頁（頂部 4 個大數字＋「需要你處理」清單）要的數字一次回傳（本年收入另走 /group-overview）。
  * 口徑、角色裁切與失敗降級寫在 services/boss-summary.ts 檔頭。finance 層（HR／平台管理員／會計）可打，
  * 會計只拿到導覽開放給他的那幾欄，其餘為 null（`scope` 標示）。子查詢失敗只讓該欄 null，不回 500。
  */

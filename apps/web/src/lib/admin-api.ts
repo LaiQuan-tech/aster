@@ -709,21 +709,6 @@ export function getRequestAttachments(requestId: string) {
 
 /* ------------------------------------------------------- announcements ----- */
 
-export interface Announcement {
-  id: string;
-  tenant_id: string;
-  title: string;
-  body: string;
-  audience: string | null;
-  created_by: string | null;
-  created_at: string;
-  updated_at: string | null;
-}
-
-export function getAnnouncements() {
-  return apiFetch<{ announcements: Announcement[] }>("/announcements");
-}
-
 export function createAnnouncement(body: { title: string; body: string; audience?: string }) {
   return apiFetch<{ id: string }>("/announcements", {
     method: "POST",

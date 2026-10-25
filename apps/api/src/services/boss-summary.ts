@@ -3,21 +3,23 @@ import { isEmployedOn } from "./employment-status.js"
 import { logger } from "../lib/logger.js"
 import { isMissingTableError } from "../lib/schema-compat.js"
 import { addDaysKey, monthRangeKeys } from "../lib/tz.js"
-import { defaultCompanyOf, loadTenantCompanies, type CompanyLite } from "./project-company.js"
 import { buildReceivables, loadP3Settings } from "./project-application-store.js"
 import { overdueDays, type OverdueBasis } from "./project-money.js"
+import { currentAlerts } from "./project-alert-store.js"
 
 /**
  * 後台首頁（老闆看板）的彙總端點 GET /dashboard/boss-summary（2026-10-25 業主核准）。
- * 首頁「待處理」「人事」兩區要的數字一次回傳，免得首頁打十幾支 API；「集團總覽」區沿用 GET /group-overview，
- * 這裡只補它沒有的「各公司逾期應收」。
+ * 2026-10-25 簡化版首頁（頂部 4 個大數字＋「需要你處理」清單）要的數字一次回傳；「本年收入」沿用 GET /group-overview
+ * （僅 HR），其餘都在這裡——首頁只打這 1–2 支。
  *
  * ── 角色裁切（bossSummaryScope）────────────────────────────────────────
- *   • hr_admin／platform_admin：全部。
+ *   • hr_admin／platform_admin：全部（本月放款支出除外，見下）。
  *   • accountant：比照後台導覽（web lib/admin-nav.ts roleNavOf：tenants.features.roles.accountant 覆蓋，
  *     沒設＝ACCOUNTANT_DEFAULT_NAV）——放款待簽核看「財務 → 放款」分頁、出勤異常／合規警示看「出勤 → 出勤月表」分頁。
+ *     未收款看「財務 → 請款與未收款」分頁、專案示警看「財務 → 報表」分頁（示警是它的子分頁）、本月放款支出跟放款分頁走。
  *     假單待簽（HR 全租戶口徑）、加班超額另計（薪資級，API 本身 requireHrAdmin）、人事（/dashboard/headcount
- *     requireHrAdmin）、各公司逾期應收（集團總覽是 hrOnly）一律不給。
+ *     requireHrAdmin）一律不給。
+ *   • HR 不需要「本月放款支出」（首頁那格給 HR 顯示本年收入）→ 不查。
  *   看不到的區塊回 null，`scope` 告訴前端哪些是「沒權限」、哪些是「查詢失敗」。
  *
  * ── 失敗降級 ──────────────────────────────────────────────────────────
@@ -33,15 +35,15 @@ import { overdueDays, type OverdueBasis } from "./project-money.js"
  *   • 合規警示（10/17 月表異常碼）：seven_day_rule／regular_leave_work／daily_over_12h／monthly_ot_over_46h 逐件計數。
  *   • 加班超上限人數：本月月表有 overtime_beyond_cap(_unapproved) 異常的人數（M1 月加班上限，預設 40h）。
  *   • 待發加班另計：overtime_settlements status=draft 全部期別（分頁讀完）的筆數與金額合計（金額未填的另計 missingAmount 筆）；
+ *     minutes＝0 的草稿不算——月表退回／重開時作廢的草稿會被清成 0 分 0 元（attendance-sheets.ts 超額另計作廢），不是待發的錢。
  *     首頁連到另計頁「未付款＋所有月份」（?status=draft&all=1）。
  *   • 人事：在職＝到職日 ≤ 今天且（未離職或離職日 ≥ 今天）；本月新進／離職＝到職日／離職日落在本月
  *     （與 /dashboard/headcount 同一套欄位：沒填到職日視為一直在職）。
- *   • 各公司逾期應收：與 /projects/receivables 同一份 buildReceivables＋租戶逾期起算基準，取 overdueDays > 0 的期別，
- *     依專案承接公司（projects.company_id，null＝預設公司）加總未收金額；查不到的公司歸「（未歸屬公司）」。
+ *   • 未收款：與 GET /projects/receivables（status=open、不篩 state）同一份 buildReceivables＋租戶逾期起算基準——
+ *     unreceivedTotal＝未收金額合計、overdueCount＝overdueDays > 0 的期別數（＝應收頁的 summary）。
+ *   • 專案示警：與 GET /projects/alerts 同一份 currentAlerts；total＝全部件數、high＝高風險件數。
+ *   • 本月放款支出：disbursements status=paid、匯款日落在本月的 amount 合計與張數（＝GET /disbursements/summary 的 monthTotal）。
  */
-
-export const UNASSIGNED_COMPANY_ID = "unassigned"
-export const UNASSIGNED_COMPANY_NAME = "（未歸屬公司）"
 
 /** PostgREST max-rows＝1000：可能超過的查詢一律分頁。 */
 const PAGE_SIZE = 1000
@@ -56,10 +58,12 @@ export type BossScope = {
   attendance: boolean
   overtime: boolean
   people: boolean
-  receivablesByCompany: boolean
+  receivables: boolean
+  projectAlerts: boolean
+  monthDisbursements: boolean
 }
 
-/** 會計預設可見範圍——與 web lib/admin-nav.ts ACCOUNTANT_DEFAULT_NAV 同步（這裡只需要用到的兩個分頁）。 */
+/** 會計預設可見範圍——與 web lib/admin-nav.ts ACCOUNTANT_DEFAULT_NAV 同步。 */
 const ACCOUNTANT_DEFAULT_SECTIONS: readonly string[] = ["home", "finance", "attendance", "payroll", "people", "settings"]
 const ACCOUNTANT_DEFAULT_TABS: Readonly<Record<string, readonly string[]>> = {
   finance: ["projects", "overview", "receivables", "disbursements", "reports", "directory"],
@@ -95,19 +99,41 @@ export function accountantTabAllowed(features: unknown, section: string, tab: st
 
 export function bossSummaryScope(role: string | null | undefined, features: unknown): BossScope {
   if (role === "hr_admin" || role === "platform_admin") {
-    return { leaveApprovals: true, disbursementApprovals: true, attendance: true, overtime: true, people: true, receivablesByCompany: true }
+    return {
+      leaveApprovals: true,
+      disbursementApprovals: true,
+      attendance: true,
+      overtime: true,
+      people: true,
+      receivables: true,
+      projectAlerts: true,
+      monthDisbursements: false,
+    }
   }
   if (role === "accountant") {
+    const disbursementsTab = accountantTabAllowed(features, "finance", "disbursements")
     return {
       leaveApprovals: false,
-      disbursementApprovals: accountantTabAllowed(features, "finance", "disbursements"),
+      disbursementApprovals: disbursementsTab,
       attendance: accountantTabAllowed(features, "attendance", "sheets"),
       overtime: false,
       people: false,
-      receivablesByCompany: false,
+      receivables: accountantTabAllowed(features, "finance", "receivables"),
+      // 專案示警頁是「報表」分頁底下的子分頁（web admin-nav ADMIN_TABS.finance reports.children）。
+      projectAlerts: accountantTabAllowed(features, "finance", "reports"),
+      monthDisbursements: disbursementsTab,
     }
   }
-  return { leaveApprovals: false, disbursementApprovals: false, attendance: false, overtime: false, people: false, receivablesByCompany: false }
+  return {
+    leaveApprovals: false,
+    disbursementApprovals: false,
+    attendance: false,
+    overtime: false,
+    people: false,
+    receivables: false,
+    projectAlerts: false,
+    monthDisbursements: false,
+  }
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -200,17 +226,23 @@ export function aggregateSheetAnomalies(sheets: readonly SheetLite[], days: read
   return { sheetCount: sheets.length, anomalies, anomalySheets, compliance, overCapPeople: overCap.size }
 }
 
-export type SettlementLite = { period: string | null; amount: unknown }
+export type SettlementLite = { period: string | null; amount: unknown; minutes?: unknown }
 export type DraftSettlementFacts = { count: number; amount: number; missingAmount: number; latestPeriod: string | null }
 
+/** 月表退回／重開時作廢的草稿（minutes 清成 0）：不是待發的錢，不計。minutes 沒選（undefined）／null 照算。 */
+export function isVoidedDraft(r: { minutes?: unknown }): boolean {
+  return toNum(r.minutes) === 0
+}
+
 export function summarizeDraftSettlements(rows: readonly SettlementLite[]): DraftSettlementFacts {
+  const live = rows.filter((r) => !isVoidedDraft(r))
   let missingAmount = 0
   let latestPeriod: string | null = null
-  for (const r of rows) {
+  for (const r of live) {
     if (toNum(r.amount) === null) missingAmount += 1
     if (r.period && (latestPeriod === null || r.period > latestPeriod)) latestPeriod = r.period
   }
-  return { count: rows.length, amount: sumMoney(rows.map((r) => r.amount)), missingAmount, latestPeriod }
+  return { count: live.length, amount: sumMoney(live.map((r) => r.amount)), missingAmount, latestPeriod }
 }
 
 export type EmployeeLite = { hire_date: string | null; terminated_at: string | null }
@@ -232,37 +264,19 @@ export function headcountSnapshot(rows: readonly EmployeeLite[], period: string,
   return { active, hires, exits }
 }
 
-export type OverdueRowLite = { projectId: string; unreceived: number | null }
-export type CompanyOverdue = { companyId: string; companyName: string; overdueAmount: number; overdueCount: number }
+export type ReceivableLite = { unreceived: number | null; overdueDays: number | null }
+export type ReceivableFacts = { unreceivedTotal: number; overdueCount: number }
 
-/**
- * 逾期期別依專案承接公司加總。`projectCompany`：專案 id → 存的 company_id（null＝預設公司）。
- * 名冊裡每家公司都回一列（沒有逾期＝0），查不到的公司另成「（未歸屬公司）」列（有金額才出現）。
- */
-export function overdueByCompany(
-  overdueRows: readonly OverdueRowLite[],
-  projectCompany: ReadonlyMap<string, string | null>,
-  companies: readonly CompanyLite[],
-): CompanyOverdue[] {
-  const fallback = defaultCompanyOf(companies)
-  const known = new Set(companies.map((c) => c.id))
-  const acc = new Map<string, { cents: number; count: number }>()
-  for (const r of overdueRows) {
-    const stored = projectCompany.get(r.projectId) ?? null
-    const companyId = stored ? (known.has(stored) ? stored : UNASSIGNED_COMPANY_ID) : (fallback?.id ?? UNASSIGNED_COMPANY_ID)
-    const cur = acc.get(companyId) ?? { cents: 0, count: 0 }
-    cur.cents += Math.round((toNum(r.unreceived) ?? 0) * 100)
-    cur.count += 1
-    acc.set(companyId, cur)
+/** 未收款總額＋逾期筆數（＝GET /projects/receivables 的 summary：unreceived 加總、overdueDays > 0 的列數）。 */
+export function summarizeReceivables(rows: readonly ReceivableLite[]): ReceivableFacts {
+  return {
+    unreceivedTotal: sumMoney(rows.map((r) => r.unreceived)),
+    overdueCount: rows.filter((r) => (r.overdueDays ?? 0) > 0).length,
   }
-  const out: CompanyOverdue[] = companies.map((c) => {
-    const a = acc.get(c.id)
-    return { companyId: c.id, companyName: c.name, overdueAmount: (a?.cents ?? 0) / 100, overdueCount: a?.count ?? 0 }
-  })
-  const un = acc.get(UNASSIGNED_COMPANY_ID)
-  if (un) out.push({ companyId: UNASSIGNED_COMPANY_ID, companyName: UNASSIGNED_COMPANY_NAME, overdueAmount: un.cents / 100, overdueCount: un.count })
-  return out
 }
+
+export type ProjectAlertFacts = { total: number; high: number }
+export type MonthDisbursementFacts = { count: number; amount: number }
 
 /* ──────────────────────────────────────────────────────────────────
  * 讀取（每支獨立，失敗由 settle 降級）
@@ -347,7 +361,7 @@ async function loadDraftSettlements(ctx: BossSummaryCtx): Promise<DraftSettlemen
   for (let from = 0; ; from += PAGE_SIZE) {
     const { data, error } = await supabaseAdmin
       .from("overtime_settlements")
-      .select("id, period, amount")
+      .select("id, period, amount, minutes")
       .eq("tenant_id", ctx.tenantId)
       .eq("status", "draft")
       .order("id", { ascending: true })
@@ -382,24 +396,39 @@ function overdueBasisOf(features: unknown): OverdueBasis {
   return isRecord(receivable) && receivable.overdueBasis === "invoiced" ? "invoiced" : "billed"
 }
 
-async function loadOverdueByCompany(ctx: BossSummaryCtx): Promise<CompanyOverdue[]> {
+async function loadReceivables(ctx: BossSummaryCtx): Promise<ReceivableFacts> {
   const basis = overdueBasisOf(ctx.features)
-  const [settings, companies] = await Promise.all([loadP3Settings(ctx.tenantId), loadTenantCompanies(ctx.tenantId)])
+  const settings = await loadP3Settings(ctx.tenantId)
   const rows = await buildReceivables(ctx.tenantId, { projectIds: null, status: "open", today: ctx.today, settings })
-  const overdue = rows.filter((r) => (overdueDays(r.invoicedOn, r.receivedOn, ctx.today, basis, r.billedOn, r.unreceived) ?? 0) > 0)
-  const projectCompany = new Map<string, string | null>()
-  const projects = await selectAllPages<{ id: string; company_id: string | null }>(
+  return summarizeReceivables(
+    rows.map((r) => ({
+      unreceived: r.unreceived,
+      overdueDays: overdueDays(r.invoicedOn, r.receivedOn, ctx.today, basis, r.billedOn, r.unreceived),
+    })),
+  )
+}
+
+async function loadProjectAlerts(ctx: BossSummaryCtx): Promise<ProjectAlertFacts> {
+  const alerts = await currentAlerts(ctx.tenantId, ctx.today)
+  return { total: alerts.length, high: alerts.filter((a) => a.severity === "high").length }
+}
+
+async function loadMonthDisbursements(ctx: BossSummaryCtx): Promise<MonthDisbursementFacts> {
+  const { from: monthFrom, to: monthTo } = monthRangeKeys(ctx.period)
+  const rows = await selectAllPages<{ id: string; amount: unknown }>(
     (from, to) =>
       supabaseAdmin
-        .from("projects")
-        .select("id, company_id")
+        .from("disbursements")
+        .select("id, amount")
         .eq("tenant_id", ctx.tenantId)
+        .eq("status", "paid")
+        .gte("paid_on", monthFrom)
+        .lte("paid_on", monthTo)
         .order("id", { ascending: true })
         .range(from, to),
-    "boss-summary (projects)",
+    "boss-summary (disbursements paid)",
   )
-  for (const p of projects) projectCompany.set(p.id, p.company_id ?? null)
-  return overdueByCompany(overdue, projectCompany, companies)
+  return { count: rows.length, amount: sumMoney(rows.map((r) => r.amount)) }
 }
 
 export type BossSummaryLoaders = {
@@ -408,7 +437,9 @@ export type BossSummaryLoaders = {
   sheetFacts: (ctx: BossSummaryCtx) => Promise<SheetAnomalyFacts>
   draftSettlements: (ctx: BossSummaryCtx) => Promise<DraftSettlementFacts | null>
   headcount: (ctx: BossSummaryCtx) => Promise<HeadcountFacts>
-  overdueByCompany: (ctx: BossSummaryCtx) => Promise<CompanyOverdue[]>
+  receivables: (ctx: BossSummaryCtx) => Promise<ReceivableFacts>
+  projectAlerts: (ctx: BossSummaryCtx) => Promise<ProjectAlertFacts>
+  monthDisbursements: (ctx: BossSummaryCtx) => Promise<MonthDisbursementFacts>
 }
 
 export const defaultBossSummaryLoaders: BossSummaryLoaders = {
@@ -417,7 +448,9 @@ export const defaultBossSummaryLoaders: BossSummaryLoaders = {
   sheetFacts: loadSheetFacts,
   draftSettlements: loadDraftSettlements,
   headcount: loadHeadcount,
-  overdueByCompany: loadOverdueByCompany,
+  receivables: loadReceivables,
+  projectAlerts: loadProjectAlerts,
+  monthDisbursements: loadMonthDisbursements,
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -451,7 +484,12 @@ export type BossSummary = {
     latestDraftPeriod: string | null
   } | null
   people: HeadcountFacts | null
-  overdueReceivablesByCompany: CompanyOverdue[] | null
+  /** 未收款總額＋逾期筆數。 */
+  receivables: ReceivableFacts | null
+  /** 專案示警件數（含高風險件數）。 */
+  projectAlerts: ProjectAlertFacts | null
+  /** 本月已匯款的放款（會計首頁那格；HR 不查＝null）。 */
+  monthDisbursements: MonthDisbursementFacts | null
 }
 
 async function settle<T>(label: string, run: () => Promise<T>): Promise<T | null> {
@@ -472,13 +510,15 @@ export async function buildBossSummary(
   const scope = bossSummaryScope(input.role, input.features)
   const ctx: BossSummaryCtx = { tenantId: input.tenantId, period: input.period, today: input.today, features: input.features }
 
-  const [leave, disb, sheets, drafts, people, overdue] = await Promise.all([
+  const [leave, disb, sheets, drafts, people, receivables, alerts, monthDisb] = await Promise.all([
     scope.leaveApprovals ? settle("pendingLeave", () => loaders.pendingLeave(ctx)) : skip,
     scope.disbursementApprovals ? settle("pendingDisbursements", () => loaders.pendingDisbursements(ctx)) : skip,
     scope.attendance || scope.overtime ? settle("sheetFacts", () => loaders.sheetFacts(ctx)) : skip,
     scope.overtime ? settle("draftSettlements", () => loaders.draftSettlements(ctx)) : skip,
     scope.people ? settle("headcount", () => loaders.headcount(ctx)) : skip,
-    scope.receivablesByCompany ? settle("overdueByCompany", () => loaders.overdueByCompany(ctx)) : skip,
+    scope.receivables ? settle("receivables", () => loaders.receivables(ctx)) : skip,
+    scope.projectAlerts ? settle("projectAlerts", () => loaders.projectAlerts(ctx)) : skip,
+    scope.monthDisbursements ? settle("monthDisbursements", () => loaders.monthDisbursements(ctx)) : skip,
   ])
 
   const visibleCounts = [leave, disb?.count ?? null].filter((n): n is number => n !== null)
@@ -506,6 +546,8 @@ export async function buildBossSummary(
         }
       : null,
     people: scope.people ? people : null,
-    overdueReceivablesByCompany: scope.receivablesByCompany ? overdue : null,
+    receivables: scope.receivables ? receivables : null,
+    projectAlerts: scope.projectAlerts ? alerts : null,
+    monthDisbursements: scope.monthDisbursements ? monthDisb : null,
   }
 }

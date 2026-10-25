@@ -1,83 +1,8 @@
 /**
- * 後台首頁（老闆看板，app/admin/page.tsx）專用的輕量讀取（2026-09-30 效能）：每張卡只抓它要
- * 顯示的欄位。端點與既有頁面共用，只是多帶選填參數（API 不帶時行為不變）：
- *
- *   - GET /backups?limit=1                                → 只讀最新一個月份（以前 4 個月份約 250 KB）
- *   - GET /projects/annual?…&view=totals                  → 只回年度合計，不回每案明細
- *   - GET /projects?…&kind=change,addition&limit=5        → DB 端篩類型、只取前 5 筆
- *   - GET /company-pages?slug=benefits&fields=summary      → 只回那一頁、不回內文
- *
- * 部署先後相容：web 比 API 先上線時，舊 API 會忽略這些參數回完整資料——所以這裡照樣在
- * 前端做 periods[0]／find(slug)／filter＋slice，卡片數字不受部署順序影響。
+ * 後台首頁（app/admin/page.tsx）的讀取：GET /dashboard/boss-summary 一次拿齊「4 個大數字＋需要你處理」要的數字
+ * （本年收入另由 GET /group-overview 提供，僅 HR）；boss-summary 404（API 還是舊版）時退回 getPendingRequestsCount 只算假單。
  */
 import { apiFetch } from "./api-client";
-import type { SnapshotPeriodSummary } from "./backup-api";
-import type { AnnualTotals, ProjectListItem } from "./projects-ext-api";
-
-/** 最新一個月份的快照摘要（＝GET /backups 的 periods[0]）；完全沒有快照 → null。 */
-export async function getLatestBackupPeriod(): Promise<SnapshotPeriodSummary | null> {
-  const r = await apiFetch<{ periods: SnapshotPeriodSummary[] }>("/backups?limit=1");
-  return r.periods[0] ?? null;
-}
-
-export interface AnnualTotalsResponse {
-  today: string;
-  year: number;
-  rocYear: number;
-  totals: AnnualTotals;
-}
-
-/** 年度總表的合計列（與 GET /projects/annual 完整版的 `totals` 同一套算法）。year：西元或民國年。 */
-export function getAnnualTotals(year: number) {
-  const q = new URLSearchParams({ year: String(year), format: "json", view: "totals" });
-  return apiFetch<AnnualTotalsResponse>(`/projects/annual?${q.toString()}`);
-}
-
-const CHANGE_KINDS = ["change", "addition"] as const;
-
-/**
- * 最近的變更／追加案（含已封存），依開案日新到舊取前 `limit` 筆——與舊寫法
- * `listProjectsExt({ includeArchived: true, sort: "opened", dir: "desc" })` 再
- * filter(change｜addition).slice(0, limit) 的結果相同。
- */
-export async function listRecentChangeProjects(limit = 5): Promise<ProjectListItem[]> {
-  const q = new URLSearchParams({
-    includeArchived: "1",
-    sort: "opened",
-    dir: "desc",
-    kind: CHANGE_KINDS.join(","),
-    limit: String(limit),
-  });
-  const r = await apiFetch<{ projects: ProjectListItem[] }>(`/projects?${q.toString()}`);
-  return r.projects.filter((p) => p.kind === "change" || p.kind === "addition").slice(0, limit);
-}
-
-/**
- * 「最近變更案」卡上的「原案」編號：用母案（`parent_project_id`）那一列的編號（API 列表的 `parentCode`）。
- * 母案是選填（2026-09-30 起）——沒有母案就沒有原案，**不再**從編號格式（`{原案 code}-{n}`）反推：
- * 追加案可以先開案、之後才補母案，編號也不一定長那樣，反推會憑空掛上一個不存在的「原案」。
- * 有母案 id 但編號查不到（母案列不見、或舊版 API 沒回 parentCode）→ null，卡片就不印「原案」。
- */
-export function changeParentCodeOf(p: Pick<ProjectListItem, "parentProjectId" | "parentCode">): string | null {
-  return p.parentProjectId ? (p.parentCode ?? null) : null;
-}
-
-/** GET /company-pages?fields=summary 的一頁（沒有 body）。 */
-export interface CompanyPageSummary {
-  slug: string;
-  defaultTitle: string;
-  title: string;
-  updatedAt: string | null;
-  updatedByEmpId: string | null;
-  exists: boolean;
-}
-
-/** 單一公司資訊頁的標題／更新時間（不含內文）；slug 不在清單裡 → null。 */
-export async function getCompanyPageSummary(slug: string): Promise<CompanyPageSummary | null> {
-  const q = new URLSearchParams({ slug, fields: "summary" });
-  const r = await apiFetch<{ pages: CompanyPageSummary[] }>(`/company-pages?${q.toString()}`);
-  return r.pages.find((p) => p.slug === slug) ?? null;
-}
 
 /**
  * 「待簽核假單」卡只要筆數：GET /requests?status=pending&countOnly=1 與
@@ -100,7 +25,10 @@ export interface BossScope {
   attendance: boolean;
   overtime: boolean;
   people: boolean;
-  receivablesByCompany: boolean;
+  /** 以下三欄 2026-10-25 簡化版首頁才有；舊 API 沒回（undefined）→ 前端當「有權限、值讀不到」顯示「—」。 */
+  receivables?: boolean;
+  projectAlerts?: boolean;
+  monthDisbursements?: boolean;
 }
 
 export interface BossSummary {
@@ -129,10 +57,15 @@ export interface BossSummary {
     latestDraftPeriod: string | null;
   } | null;
   people: { active: number; hires: number; exits: number } | null;
-  overdueReceivablesByCompany: Array<{ companyId: string; companyName: string; overdueAmount: number; overdueCount: number }> | null;
+  /** 未收款總額＋逾期筆數（＝應收頁 summary）。舊 API 沒有此欄。 */
+  receivables?: { unreceivedTotal: number; overdueCount: number } | null;
+  /** 專案示警件數（high＝高風險）。舊 API 沒有此欄。 */
+  projectAlerts?: { total: number; high: number } | null;
+  /** 本月已匯款放款（會計首頁那格；HR 為 null）。舊 API 沒有此欄。 */
+  monthDisbursements?: { count: number; amount: number } | null;
 }
 
-/** 首頁「待處理」「人事」兩區＋各公司逾期應收，一次回傳（finance 層可打，依角色裁切）。 */
+/** 首頁要的數字一次回傳（finance 層可打，依角色裁切）。 */
 export function getBossSummary(): Promise<BossSummary> {
   return apiFetch<BossSummary>("/dashboard/boss-summary");
 }

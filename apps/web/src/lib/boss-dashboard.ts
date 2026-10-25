@@ -1,14 +1,15 @@
 /**
- * 後台首頁（老闆看板，app/admin/page.tsx）新版三區的純函式：數字格式、集團 KPI、各公司列、下鑽連結、
- * 下游頁面讀網址篩選。全部無 React、無 IO，有 vitest（lib/__tests__/boss-dashboard.test.ts）。
+ * 後台首頁（app/admin/page.tsx）的純函式：數字格式、頂部 4 個大數字、「需要你處理」清單、下鑽連結、下游頁面讀網址篩選。
+ * 全部無 React、無 IO，有 vitest（lib/__tests__/boss-dashboard.test.ts）。
  *
- * 資料來源：
- *   • 集團總覽區 → GET /group-overview（整年一次；本月數字取 monthly[本月]，不另打一支）；
- *     各公司逾期應收 → GET /dashboard/boss-summary 的 overdueReceivablesByCompany。
- *   • 待處理／人事區 → GET /dashboard/boss-summary（後端 services/boss-summary.ts）。
- * `/group-overview` 回應若有 `companies[].headcount`／`payrollCost`（員工所屬公司上線後才有）就顯示，沒有就不顯示。
+ * 2026-10-25 業主說舊版「太複雜」→ 首頁只剩兩塊（老闆 10 秒看懂）：
+ *   1. 頂部 4 個大數字（headlineTiles）：本年收入（會計改本月放款支出）／待簽核／未收款／在職人數（會計改本月出勤異常）。
+ *   2. 「需要你處理」清單（todoItems）：只列數量 > 0 的項目，一行一項。
+ * 資料：GET /dashboard/boss-summary（全部角色）＋ GET /group-overview（僅 HR／平台管理員，只取本年收入與毛利率）。
+ * 每格各自降級：讀不到就顯示「—」不擋其他格；boss-summary 404（API 舊版）時待簽核退回只算假單。
  */
 import { ADMIN_TABS, isModuleEnabled, resolveAdminPath, type AdminModulesConfig } from "./admin-nav";
+import type { BossSummary } from "./dashboard-api";
 
 /* ------------------------------------------------------------- 格式 --- */
 
@@ -36,206 +37,26 @@ export function fmtPct1(p: number | null | undefined): string {
   return p == null || !Number.isFinite(p) ? "—" : `${p.toFixed(1)}%`;
 }
 
-/** 毛利率（%，一位小數）：收入 0 → null（與後端 project-money pct1 同口徑）。 */
-export function marginPct(grossProfit: number, revenue: number): number | null {
-  if (!revenue) return null;
-  return Math.round((grossProfit / revenue) * 1000) / 10;
-}
-
 /** 數字要不要標成「需要處理」的顏色：> 0 才標。 */
 export function needsAttention(n: number | null | undefined): boolean {
   return n != null && n > 0;
 }
 
-/* -------------------------------------------------- 型別（最小子集） --- */
+/* ---------------------------------------------------------- 載入狀態 --- */
 
-export interface MonthPointLite {
-  month: number;
-  revenue: number;
-  expense: number;
-  grossProfit: number;
-  /** 每月薪資成本（後端目前沒有；有了就接上，本月檢視才顯示薪資欄）。 */
-  payrollCost?: number | null;
-}
+export type Load<T> = { loading: boolean; error: string | null; data: T | null };
 
-export interface GroupCompanyLite {
-  id: string;
-  name: string;
-  isActive: boolean;
-  excluded?: boolean;
-  revenue: number;
-  expense: number;
-  grossProfit: number;
-  grossMarginPct: number | null;
-  monthly: MonthPointLite[];
-  /** 員工所屬公司上線後才有（另一批工作）：沒有就不顯示。 */
-  headcount?: number | null;
-  /** 查詢期間（首頁查整年＝年度）的薪資成本；null＝期間內沒有薪資單。 */
-  payrollCost?: number | null;
-  /** 毛利－薪資成本（同上期間）。 */
-  grossProfitAfterPayroll?: number | null;
-}
+/** boss-summary 的載入狀態；outdated＝API 還是舊版（404）。 */
+export type SummaryLoad = Load<BossSummary> & { outdated?: boolean };
 
+/** 連到的後台頁能不能開（角色 isAdminPathAllowed ＋ 租戶模組開關 homeLinkModuleEnabled）；page.tsx 組好傳進來。 */
+export type LinkOn = (href: string) => boolean;
+
+/** GET /group-overview 首頁用得到的最小子集（本年收入、毛利率、公司家數）。 */
 export interface GroupOverviewLite {
   period: { year: number };
-  companies: GroupCompanyLite[];
-  group: { revenue: number; expense: number; grossProfit: number; grossMarginPct: number | null; monthly: MonthPointLite[] };
-}
-
-export interface CompanyOverdueLite {
-  companyId: string;
-  companyName: string;
-  overdueAmount: number;
-  overdueCount: number;
-}
-
-/* ---------------------------------------------------------- 集團 KPI --- */
-
-export interface Kpi {
-  revenue: number;
-  expense: number;
-  grossProfit: number;
-  grossMarginPct: number | null;
-}
-
-/** 本月與本年集團收入／毛利／毛利率。本月取 group.monthly[month-1]（已剔除關係企業往來）。 */
-export function groupKpis(overview: GroupOverviewLite, month: number): { month: Kpi; year: Kpi } {
-  const p = overview.group.monthly.find((m) => m.month === month);
-  const monthKpi: Kpi = p
-    ? { revenue: p.revenue, expense: p.expense, grossProfit: p.grossProfit, grossMarginPct: marginPct(p.grossProfit, p.revenue) }
-    : { revenue: 0, expense: 0, grossProfit: 0, grossMarginPct: null };
-  const g = overview.group;
-  return {
-    month: monthKpi,
-    year: { revenue: g.revenue, expense: g.expense, grossProfit: g.grossProfit, grossMarginPct: g.grossMarginPct },
-  };
-}
-
-/* ---------------------------------------------------------- 各公司列 --- */
-
-export type CompanyView = "month" | "year";
-
-export interface CompanyRow {
-  id: string;
-  name: string;
-  revenue: number;
-  expense: number;
-  grossProfit: number;
-  grossMarginPct: number | null;
-  /** 逾期應收（不分月／年，是「現在」的狀態）；boss-summary 沒回（查詢失敗）→ null。 */
-  overdue: number | null;
-  overdueCount: number | null;
-  headcount: number | null | undefined;
-  payrollCost: number | null | undefined;
-  grossProfitAfterPayroll: number | null | undefined;
-  /**
-   * 薪資成本只有年度數字（本月檢視、且回應沒有 monthly[].payrollCost）：薪資欄與扣人事後毛利顯示「—」，
-   * 畫面註「薪資成本僅年度」。
-   */
-  payrollYearOnly: boolean;
-}
-
-/**
- * 各公司一列：收入／放款支出／毛利依 view 取本月（monthly[month-1]）或整年；逾期應收以公司 id 對上
- * boss-summary 的 overdueReceivablesByCompany。停用且整年沒數字、也沒有逾期的公司不列；
- * 只出現在逾期清單（例如「（未歸屬公司）」）且有金額的列補在最後。
- */
-export function companyRows(
-  overview: GroupOverviewLite,
-  overdue: readonly CompanyOverdueLite[] | null,
-  view: CompanyView,
-  month: number,
-): CompanyRow[] {
-  const overdueBy = new Map((overdue ?? []).map((o) => [o.companyId, o]));
-  const rows: CompanyRow[] = [];
-  for (const c of overview.companies) {
-    const o = overdueBy.get(c.id);
-    const idle = c.revenue === 0 && c.expense === 0 && !(o && o.overdueAmount !== 0);
-    if (!c.isActive && idle) continue;
-    let revenue = c.revenue;
-    let expense = c.expense;
-    let grossProfit = c.grossProfit;
-    let pct = c.grossMarginPct;
-    let payrollCost = c.payrollCost;
-    let afterPayroll = c.grossProfitAfterPayroll;
-    let payrollYearOnly = false;
-    if (view === "month") {
-      const p = c.monthly.find((m) => m.month === month);
-      revenue = p?.revenue ?? 0;
-      expense = p?.expense ?? 0;
-      grossProfit = p?.grossProfit ?? 0;
-      pct = marginPct(grossProfit, revenue);
-      if (p && p.payrollCost !== undefined) {
-        // 後端有提供每月薪資：照用（null＝那個月沒有薪資單）。
-        payrollCost = p.payrollCost;
-        afterPayroll = p.payrollCost === null ? null : grossProfit - p.payrollCost;
-      } else {
-        // 只有年度薪資：本月不能拿整年的數字充數。
-        payrollYearOnly = c.payrollCost !== undefined || c.grossProfitAfterPayroll !== undefined;
-        payrollCost = c.payrollCost === undefined ? undefined : null;
-        afterPayroll = c.grossProfitAfterPayroll === undefined ? undefined : null;
-      }
-    }
-    rows.push({
-      id: c.id,
-      name: c.name,
-      revenue,
-      expense,
-      grossProfit,
-      grossMarginPct: pct,
-      overdue: overdue ? (o?.overdueAmount ?? 0) : null,
-      overdueCount: overdue ? (o?.overdueCount ?? 0) : null,
-      headcount: c.headcount,
-      payrollCost,
-      grossProfitAfterPayroll: afterPayroll,
-      payrollYearOnly,
-    });
-  }
-  const known = new Set(overview.companies.map((c) => c.id));
-  for (const o of overdue ?? []) {
-    if (known.has(o.companyId) || o.overdueAmount === 0) continue;
-    rows.push({
-      id: o.companyId,
-      name: o.companyName,
-      revenue: 0,
-      expense: 0,
-      grossProfit: 0,
-      grossMarginPct: null,
-      overdue: o.overdueAmount,
-      overdueCount: o.overdueCount,
-      headcount: undefined,
-      payrollCost: undefined,
-      grossProfitAfterPayroll: undefined,
-      payrollYearOnly: false,
-    });
-  }
-  return rows;
-}
-
-/** 回應裡有沒有人數／薪資成本欄位（任何一列帶了該鍵就顯示那一欄）。 */
-export interface OptionalColumns {
-  headcount: boolean;
-  payrollCost: boolean;
-  grossProfitAfterPayroll: boolean;
-}
-
-export function optionalColumns(overview: GroupOverviewLite): OptionalColumns {
-  return {
-    headcount: overview.companies.some((c) => c.headcount !== undefined),
-    payrollCost: overview.companies.some((c) => c.payrollCost !== undefined),
-    grossProfitAfterPayroll: overview.companies.some((c) => c.grossProfitAfterPayroll !== undefined),
-  };
-}
-
-/** 本月檢視時薪資只有年度數字的提示（任何一列 payrollYearOnly 就顯示）。 */
-export const PAYROLL_YEAR_ONLY_NOTE = "薪資成本僅年度";
-
-/** 人事區「在職」的口徑說明（集團總覽的人數會改成同一口徑）。 */
-export const HEADCOUNT_BASIS_NOTE = "在職＝到職日已到、尚未離職（離職日當天仍算在職）；新進／離職依到職日／離職日落在本月";
-
-/** 只有一家公司（列數 ≤ 1）→ 首頁改顯示單一公司摘要、不畫列表。 */
-export function isSingleCompany(rows: readonly CompanyRow[]): boolean {
-  return rows.length <= 1;
+  companies: Array<{ id: string; isActive: boolean; excluded?: boolean; revenue: number; expense: number }>;
+  group: { revenue: number; grossMarginPct: number | null };
 }
 
 /* ---------------------------------------------------------- 下鑽連結 --- */
@@ -246,11 +67,252 @@ export const bossLinks = {
   groupOverview: "/admin/group-overview",
   leaveApprovals: "/admin/approvals?status=pending",
   disbursementApprovals: "/admin/disbursements/approvals?scope=all",
+  disbursements: "/admin/disbursements",
+  receivables: "/admin/projects/receivables",
+  projectAlerts: "/admin/projects/alerts",
+  attendanceSheets: "/admin/attendance-sheets",
   attendanceAnomalies: (period: string) => `/admin/attendance-sheets?period=${encodeURIComponent(period)}&anomaly=1`,
   /** 待發加班另計是「所有月份」的草稿合計 → 另計頁開「未付款＋所有月份」。 */
   overtimeDrafts: "/admin/overtime-settlements?status=draft&all=1",
   employees: "/admin/employees",
 } as const;
+
+/* ------------------------------------------------------- 頂部大數字 --- */
+
+export type Tone = "normal" | "attention" | "danger";
+
+export interface HeadlineTile {
+  key: "revenue" | "monthDisbursements" | "approvals" | "receivables" | "people" | "attendance";
+  label: string;
+  loading: boolean;
+  /** 讀不到（錯誤、舊 API、子查詢失敗）→「—」。 */
+  value: string;
+  sub: string | null;
+  /** 多家公司時「本年收入」下的小字。 */
+  note: string | null;
+  /** 角色／模組開不了那一頁 → null（格子照畫、不能點）。 */
+  href: string | null;
+  tone: Tone;
+}
+
+export type HomeViewer = "group" | "finance";
+
+/** 有實際營運的公司家數（停用且整年沒數字的不算、被排除的不算）。 */
+export function activeCompanyCount(overview: GroupOverviewLite): number {
+  return overview.companies.filter((c) => !c.excluded && (c.isActive || c.revenue !== 0 || c.expense !== 0)).length;
+}
+
+type ScopeKey = keyof BossSummary["scope"];
+
+/**
+ * 頂部大數字（最多 4 格，順序固定）。viewer：group＝HR／平台管理員（本年收入、在職人數）；finance＝會計
+ * （本月放款支出、本月出勤異常——會計看不到集團與人事）。
+ * 格子要不要畫：boss-summary 回來後看 scope（false＝這個角色沒權限 → 不畫）；還沒回來／失敗／舊 API → 看角色開不開得了那一頁。
+ */
+export function headlineTiles(input: {
+  viewer: HomeViewer;
+  summary: SummaryLoad;
+  overview: Load<GroupOverviewLite>;
+  /** boss-summary 404 時退回的待簽假單數。 */
+  pendingLeave: Load<number>;
+  linkOn: LinkOn;
+}): HeadlineTile[] {
+  const { viewer, summary, overview, pendingLeave, linkOn } = input;
+  const s = summary.outdated || summary.error ? null : summary.data;
+  const href = (path: string, gate = path) => (linkOn(gate) ? path : null);
+  const visible = (key: ScopeKey, gate: string) => (s ? s.scope[key] !== false : linkOn(gate));
+  const tile = (t: Omit<HeadlineTile, "note"> & { note?: string | null }): HeadlineTile => ({ note: null, ...t });
+  const tiles: HeadlineTile[] = [];
+
+  // 1. 本年收入（HR）／本月放款支出（會計）
+  if (viewer === "group") {
+    const o = overview.error ? null : overview.data;
+    const n = o ? activeCompanyCount(o) : 0;
+    tiles.push(
+      tile({
+        key: "revenue",
+        label: "本年收入",
+        loading: overview.loading,
+        value: fmtWan(o?.group.revenue),
+        sub: o ? `毛利率 ${fmtPct1(o.group.grossMarginPct)}` : null,
+        note: n > 1 ? `${n} 家公司・點看各公司` : null,
+        href: href(bossLinks.groupOverview),
+        tone: "normal",
+      }),
+    );
+  } else if (visible("monthDisbursements", bossLinks.disbursements)) {
+    const d = s?.monthDisbursements ?? null;
+    tiles.push(
+      tile({
+        key: "monthDisbursements",
+        label: "本月放款支出",
+        loading: summary.loading,
+        value: fmtWan(d?.amount),
+        sub: d ? `${fmtCount(d.count)} 筆已匯款` : null,
+        href: href(bossLinks.disbursements),
+        tone: "normal",
+      }),
+    );
+  }
+
+  // 2. 待簽核（假單＋放款）
+  if (summary.outdated) {
+    if (linkOn(bossLinks.leaveApprovals)) {
+      const n = pendingLeave.error ? null : pendingLeave.data;
+      tiles.push(
+        tile({
+          key: "approvals",
+          label: "待簽核",
+          loading: pendingLeave.loading,
+          value: fmtCount(n),
+          sub: n == null ? null : `假單 ${fmtCount(n)}`,
+          href: bossLinks.leaveApprovals,
+          tone: needsAttention(n) ? "attention" : "normal",
+        }),
+      );
+    }
+  } else {
+    const showLeave = visible("leaveApprovals", bossLinks.leaveApprovals);
+    const showDisb = visible("disbursementApprovals", bossLinks.disbursementApprovals);
+    if (showLeave || showDisb) {
+      const a = s?.approvals ?? null;
+      const parts: string[] = [];
+      if (a && showLeave) parts.push(`假單 ${fmtCount(a.leave)}`);
+      if (a && showDisb) parts.push(`放款 ${fmtCount(a.disbursements)}`);
+      tiles.push(
+        tile({
+          key: "approvals",
+          label: "待簽核",
+          loading: summary.loading,
+          value: fmtCount(a?.total),
+          sub: parts.length > 0 ? parts.join("・") : null,
+          href: showLeave ? href(bossLinks.leaveApprovals) : href(bossLinks.disbursementApprovals),
+          tone: needsAttention(a?.total) ? "attention" : "normal",
+        }),
+      );
+    }
+  }
+
+  // 3. 未收款
+  if (visible("receivables", bossLinks.receivables)) {
+    const r = s?.receivables ?? null;
+    tiles.push(
+      tile({
+        key: "receivables",
+        label: "未收款",
+        loading: summary.loading,
+        value: fmtWan(r?.unreceivedTotal),
+        sub: r ? `逾期 ${fmtCount(r.overdueCount)} 筆` : null,
+        href: href(bossLinks.receivables),
+        tone: needsAttention(r?.overdueCount) ? "attention" : "normal",
+      }),
+    );
+  }
+
+  // 4. 在職人數（HR）／本月出勤異常（會計）
+  if (viewer === "group") {
+    if (visible("people", bossLinks.employees)) {
+      const p = s?.people ?? null;
+      tiles.push(
+        tile({
+          key: "people",
+          label: "在職人數",
+          loading: summary.loading,
+          value: fmtCount(p?.active),
+          sub: p ? `本月 +${fmtCount(p.hires)} / −${fmtCount(p.exits)}` : null,
+          href: href(bossLinks.employees),
+          tone: "normal",
+        }),
+      );
+    }
+  } else if (visible("attendance", bossLinks.attendanceSheets)) {
+    const att = s?.attendance ?? null;
+    tiles.push(
+      tile({
+        key: "attendance",
+        label: "本月出勤異常",
+        loading: summary.loading,
+        value: fmtCount(att?.anomalies),
+        sub: att ? (att.sheetCount === 0 ? "本月月表尚未產生" : `${fmtCount(att.anomalySheets)} 張月表有異常`) : null,
+        href: s ? href(bossLinks.attendanceAnomalies(s.period), bossLinks.attendanceSheets) : null,
+        tone: needsAttention(att?.anomalies) ? "attention" : "normal",
+      }),
+    );
+  }
+  return tiles;
+}
+
+/* ------------------------------------------------------ 需要你處理 --- */
+
+export type TodoIcon = "alert" | "approval" | "money" | "clock" | "project";
+
+export interface TodoItem {
+  key: "compliance" | "leave" | "disbursements" | "projectAlerts" | "overCap" | "overtimeDrafts" | "anomalies";
+  icon: TodoIcon;
+  text: string;
+  /** 數字＋單位，例如「44 張」。 */
+  count: string;
+  href: string;
+  tone: "danger" | "attention";
+}
+
+/** 清單預設顯示幾行，其餘收在「查看全部」。 */
+export const TODO_LIMIT = 6;
+
+/**
+ * 「需要你處理」：只列數量 > 0、且這個角色／模組開得了目標頁的項目，先急後緩（合規 → 簽核 → 示警 → 加班 → 出勤異常）。
+ * boss-summary 404（舊 API）時只剩假單（pendingLeave）。
+ */
+export function todoItems(input: { summary: SummaryLoad; pendingLeave: Load<number>; linkOn: LinkOn }): TodoItem[] {
+  const { summary, pendingLeave, linkOn } = input;
+  const items: TodoItem[] = [];
+  const push = (gate: string, n: number | null | undefined, item: Omit<TodoItem, "count"> & { unit: string }) => {
+    if (!needsAttention(n) || !linkOn(gate)) return;
+    const { unit, ...rest } = item;
+    items.push({ ...rest, count: `${fmtCount(n)} ${unit}` });
+  };
+
+  if (summary.outdated) {
+    push(bossLinks.leaveApprovals, pendingLeave.data, { key: "leave", icon: "approval", text: "假單待簽核", unit: "張", href: bossLinks.leaveApprovals, tone: "attention" });
+    return items;
+  }
+  const s = summary.data;
+  if (!s) return items;
+  const sheets = bossLinks.attendanceAnomalies(s.period);
+  const att = s.attendance;
+  const ot = s.overtime;
+  const alerts = s.projectAlerts ?? null;
+
+  push(bossLinks.attendanceSheets, att?.compliance.total, { key: "compliance", icon: "alert", text: "合規警示（七休一、工時等）", unit: "筆", href: sheets, tone: "danger" });
+  push(bossLinks.leaveApprovals, s.approvals.leave, { key: "leave", icon: "approval", text: "假單待簽核", unit: "張", href: bossLinks.leaveApprovals, tone: "attention" });
+  push(bossLinks.disbursementApprovals, s.approvals.disbursements, {
+    key: "disbursements",
+    icon: "approval",
+    text: s.approvals.disbursementAmount ? `放款單待簽核・NT$ ${fmtWan(s.approvals.disbursementAmount)}` : "放款單待簽核",
+    unit: "張",
+    href: bossLinks.disbursementApprovals,
+    tone: "attention",
+  });
+  push(bossLinks.projectAlerts, alerts?.total, {
+    key: "projectAlerts",
+    icon: "project",
+    text: alerts && alerts.high > 0 ? `專案示警（${fmtCount(alerts.high)} 件高風險）` : "專案示警",
+    unit: "件",
+    href: bossLinks.projectAlerts,
+    tone: alerts && alerts.high > 0 ? "danger" : "attention",
+  });
+  push(bossLinks.attendanceSheets, ot?.overCapPeople, { key: "overCap", icon: "clock", text: "加班超過月上限", unit: "人", href: sheets, tone: "attention" });
+  push(bossLinks.overtimeDrafts, ot?.draftCount, {
+    key: "overtimeDrafts",
+    icon: "money",
+    text: `加班另計待發放${ot?.draftAmount ? `・NT$ ${fmtWan(ot.draftAmount)}` : ""}${ot?.draftMissingAmount ? `（${fmtCount(ot.draftMissingAmount)} 筆未填金額）` : ""}`,
+    unit: "筆",
+    href: bossLinks.overtimeDrafts,
+    tone: "attention",
+  });
+  push(bossLinks.attendanceSheets, att?.anomalies, { key: "anomalies", icon: "clock", text: "出勤異常", unit: "件", href: sheets, tone: "attention" });
+  return items;
+}
 
 /* ---------------------------------------------------------- 模組開關 --- */
 
@@ -283,24 +345,4 @@ export function readFlagParam(search: string, name: string): boolean {
 export function readEnumParam<T extends string>(search: string, name: string, allowed: readonly T[]): T | null {
   const v = new URLSearchParams(search).get(name);
   return v && (allowed as readonly string[]).includes(v) ? (v as T) : null;
-}
-
-/* ------------------------------------------------------- 合規警示文案 --- */
-
-export interface ComplianceCounts {
-  total: number;
-  sevenDayRule: number;
-  regularLeaveWork: number;
-  dailyOver12h: number;
-  monthlyOtOver46h: number;
-}
-
-/** 合規警示的細項（固定順序；0 件也列，讓老闆知道有在檢查哪四項）。 */
-export function complianceItems(c: ComplianceCounts): Array<{ key: keyof Omit<ComplianceCounts, "total">; label: string; count: number }> {
-  return [
-    { key: "sevenDayRule", label: "七休一", count: c.sevenDayRule },
-    { key: "regularLeaveWork", label: "例假出勤", count: c.regularLeaveWork },
-    { key: "dailyOver12h", label: "單日>12h", count: c.dailyOver12h },
-    { key: "monthlyOtOver46h", label: "月>46h", count: c.monthlyOtOver46h },
-  ];
 }

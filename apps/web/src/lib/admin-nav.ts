@@ -11,7 +11,7 @@
  *     （key 與 href 是其他工作包的依賴，**不要改名**）。
  *   - `ADMIN_ROUTES`：由分頁攤平的路由表；`resolveAdminPath()` 依 pathname 決定分區、分頁、
  *     頁首標題／說明、內容寬度、是否 detail 頁（動態子路徑）與返回鍵目標。
- *   - `tabsForSection()`／`subTabsFor()`／`homeEntries()`：AdminShell 分頁列與首頁分區入口。
+ *   - `tabsForSection()`／`subTabsFor()`：AdminShell 分頁列。
  *   - `adminModulesOf()`／`isModuleEnabled()`：隱藏模組開關的讀法。
  *   - `ADMIN_REDIRECTS`：舊網址轉址；apps/web/next.config.ts 維持同一份（單元測試對照）。
  *   - 角色導覽（2026-09-23 W4 會計角色）：`RoleNavConfig`／`ACCOUNTANT_DEFAULT_NAV`／
@@ -135,7 +135,7 @@ export interface ResolvedAdminRoute {
 
 /** 9 個分區，順序＝側欄順序。 */
 export const ADMIN_SECTIONS: readonly AdminSection[] = [
-  { key: "home", label: "首頁", icon: "home", href: "/admin", desc: "老闆數字卡與功能分區入口" },
+  { key: "home", label: "首頁", icon: "home", href: "/admin", desc: "老闆數字與需要處理的事項" },
   { key: "finance", label: "專案與財務", icon: "finance", href: "/admin/projects", desc: "專案、請款放款、獎金與名冊" },
   { key: "approvals", label: "假單與簽核", icon: "approvals", href: "/admin/approvals", desc: "簽核表單、假別餘額與月底核銷" },
   { key: "attendance", label: "出勤", icon: "attendance", href: "/admin/punch-records", desc: "打卡紀錄、出勤月表、遲到說明與值日" },
@@ -937,11 +937,6 @@ export function sectionsForRole(roleNav: RoleNavConfig | null | undefined, modul
     out.push(first.href === section.href ? section : { ...section, href: first.href });
   }
   return out;
-}
-
-/** 首頁的分區入口（排除 home）：不帶 roleNav＝8 格；帶 roleNav＝該角色可見的分區。 */
-export function homeEntries(roleNav?: RoleNavConfig | null, modules?: AdminModulesConfig | null): AdminSection[] {
-  return sectionsForRole(roleNav ?? null, modules).filter((section) => section.key !== "home");
 }
 
 /* ---------------------------------------------------------- 路徑守門 --- */

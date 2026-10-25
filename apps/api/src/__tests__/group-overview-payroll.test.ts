@@ -143,6 +143,8 @@ describe("GET /group-overview — 人事（在職人數、薪資成本）", () =
       { id: "OT1", tenant_id: TENANT_ID, employee_id: E_B1, period: "2026-03", amount: "3000", status: "paid" },
       { id: "OT2", tenant_id: TENANT_ID, employee_id: E_A1, period: "2026-04", amount: 1200, status: "draft" },
       { id: "OT3", tenant_id: TENANT_ID, employee_id: E_A1, period: "2026-05", amount: null, status: "draft" },
+      // 月表重開時作廢的草稿（minutes／amount 清成 0）：不計筆數
+      { id: "OT6", tenant_id: TENANT_ID, employee_id: E_A1, period: "2026-06", amount: 0, minutes: 0, status: "draft" },
       { id: "OT4", tenant_id: TENANT_ID, employee_id: E_HR, period: "2026-03", amount: 500, status: "void" },
       { id: "OT5", tenant_id: OTHER_TENANT_ID, employee_id: E_OTHER, period: "2026-03", amount: 9999, status: "paid" },
     ]
