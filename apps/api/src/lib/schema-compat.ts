@@ -105,3 +105,8 @@ export function approvalStepsHaveCandidates(): Promise<boolean> {
 export function punchRecordsHaveWfh(): Promise<boolean> {
   return columnsExist("punch_records", "wfh")
 }
+
+/** employees.company_id（migration 0072，員工所屬公司）是否已在。 */
+export function employeesHaveCompany(): Promise<boolean> {
+  return columnsExist("employees", "company_id")
+}

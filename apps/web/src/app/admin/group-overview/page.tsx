@@ -17,7 +17,8 @@ import { CompanyTable, DataQualityNotice, StatCards, TrendCard, type DetailState
 
 /**
  * 集團總覽（2026-10-11 業主拍板第一版）：跨公司彙總入帳收入、放款支出與專案毛利。只有 HR（老闆）看得到。
- * 淨利（含薪資等人事成本）是第二版，這頁不含人事成本。口徑與資料來源見後端
+ * 2026-10-25 加上人事：各公司在職人數、人事成本（薪資單應發）與「扣人事成本後」；人事依員工所屬公司歸屬，
+ * 未指派公司的員工另列一列、不分攤（但計入集團合計）。口徑與資料來源見後端
  * apps/api/src/services/group-overview.ts 檔頭：
  *   收入＝實際入帳（未稅、依入帳日歸月）；已開票只是參考（依開票日）；支出＝已匯款放款（代扣前毛額、依匯款日）；
  *   集團合計剔除「客戶是關係企業的專案收入」與「付給關係企業廠商的放款」，各公司自己的數字照常包含。
@@ -194,13 +195,14 @@ export default function GroupOverviewPage() {
       {data ? (
         // 重新載入時保留上一份畫面（降低透明度），不閃骨架、不跳版
         <div className={`space-y-4 transition-opacity md:space-y-6 ${loading ? "opacity-60" : ""}`} aria-busy={loading}>
-          <StatCards group={data.group} year={data.period.year} month={data.period.month} />
+          <StatCards group={data.group} year={data.period.year} month={data.period.month} payroll={data.payroll} />
           <CompanyTable
             companies={data.companies}
             group={data.group}
             expandedId={expandedId}
             detail={activeDetail}
             onToggle={(id) => setExpandedId((cur) => (cur === id ? null : id))}
+            payroll={data.payroll}
           />
           {trend && <TrendCard points={trend.points} label={trend.label} highlightMonth={data.period.month} />}
         </div>

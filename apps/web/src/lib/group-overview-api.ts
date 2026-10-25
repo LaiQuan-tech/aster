@@ -1,6 +1,6 @@
 /**
  * 集團總覽的 typed API 呼叫與回應型別。後端見 apps/api/src/routes/group-overview.ts；
- * 口徑（入帳收入未稅依入帳日、放款已匯款毛額依匯款日、關係企業剔除）見 apps/api/src/services/group-overview.ts。
+ * 口徑（入帳收入未稅依入帳日、放款已匯款毛額依匯款日、關係企業剔除、人事依員工所屬公司）見 apps/api/src/services/group-overview.ts。
  * 只有 hr_admin／platform_admin 打得通（其他角色 403）。
  */
 import { apiFetch } from "./api-client";
@@ -41,6 +41,12 @@ export interface GroupCompanyRow {
   affiliate: GroupAffiliateAmounts;
   /** 該年 12 個月（不受月份篩選影響）。 */
   monthly: GroupMonthPoint[];
+  /** 目前在職人數（依員工所屬公司）。 */
+  headcount: number;
+  /** 期間內薪資單應發合計（依員工所屬公司）；期間內沒有任何薪資單 → null（尚無薪資資料）。 */
+  payrollCost: number | null;
+  /** 毛利 − 薪資成本；payrollCost 為 null 時也是 null。 */
+  grossProfitAfterPayroll: number | null;
 }
 
 export interface GroupTotals {
@@ -53,6 +59,29 @@ export interface GroupTotals {
   /** 集團合計已剔除的關係企業往來（只計納入合計的公司）。 */
   eliminated: GroupAffiliateAmounts & { total: number };
   monthly: GroupMonthPoint[];
+  /** 在職人數：納入合計的公司＋未指派。 */
+  headcount: number;
+  /** 薪資成本：納入合計的公司＋未指派；沒有薪資資料 → null。 */
+  payrollCost: number | null;
+  /** 未指派公司的在職人數（不分攤到任何公司）。 */
+  unassignedHeadcount: number;
+  /** 未指派公司員工的薪資成本；沒有薪資資料 → null。 */
+  unassignedPayrollCost: number | null;
+  /** 集團毛利 − 集團薪資成本；沒有薪資資料 → null。 */
+  grossProfitAfterPayroll: number | null;
+}
+
+/** 人事資料的狀態。 */
+export interface GroupPayrollSummary {
+  /** 期間內有任何薪資單；false＝畫面標示「尚無薪資資料」。 */
+  hasData: boolean;
+  slipCount: number;
+  /** 其中還是草稿（未定稿）的張數。 */
+  draftSlipCount: number;
+  /** 員工所屬公司欄位（migration 0072）已套；false＝全部人列在未指派。 */
+  companyAssignmentReady: boolean;
+  /** 薪資成本是否含雇主負擔（勞健保、勞退雇主提繳）；目前固定 false（只有應發）。 */
+  employerCostIncluded: boolean;
 }
 
 export interface GroupPeriod {
@@ -88,6 +117,8 @@ export interface GroupOverviewResult {
   companies: GroupCompanyRow[];
   group: GroupTotals;
   dataQuality: GroupDataQuality;
+  /** 舊版 API 沒有這個欄位（部署順序差）時是 undefined。 */
+  payroll?: GroupPayrollSummary;
 }
 
 export type GroupDetailKind = "revenue" | "expense";

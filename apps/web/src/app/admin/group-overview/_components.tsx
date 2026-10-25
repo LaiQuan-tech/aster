@@ -2,6 +2,7 @@
 
 /**
  * 集團總覽頁的零件：數字卡、各公司表（點列展開下鑽）、月趨勢圖。
+ * 2026-10-25 加上人事：在職人數、人事成本、扣人事成本後（人事依員工所屬公司，未指派另列不分攤）。
  * 狀態與資料抓取在 page.tsx；金額格式、圖表座標等純邏輯在 lib/group-overview.ts（有單元測試）。
  */
 import { Fragment, useMemo, useState } from "react";
@@ -12,6 +13,7 @@ import type {
   GroupDataQuality,
   GroupExpenseDetail,
   GroupMonthPoint,
+  GroupPayrollSummary,
   GroupQualityRow,
   GroupRevenueDetail,
   GroupTotals,
@@ -24,6 +26,9 @@ import {
   fmtMoneyOrDash,
   fmtPct,
   nameWithShort,
+  NO_PAYROLL_TEXT,
+  PAYROLL_BASIS_NOTE,
+  payrollNotes,
   periodLabel,
   qualityMessages,
   roundedTopBarPath,
@@ -48,7 +53,21 @@ const negative = (n: number) => (n < 0 ? "text-red-600" : "text-gray-900");
 
 /* ------------------------------------------------------------ 數字卡 --- */
 
-export function StatCards({ group, year, month }: { group: GroupTotals; year: number; month: number | null }) {
+/** 人數：舊版 API 沒有欄位 → 「—」。 */
+const fmtCount = (n: number | null | undefined) => (n == null ? "—" : `${n.toLocaleString("zh-TW")} 人`);
+
+export function StatCards({
+  group,
+  year,
+  month,
+  payroll,
+}: {
+  group: GroupTotals;
+  year: number;
+  month: number | null;
+  payroll?: GroupPayrollSummary;
+}) {
+  const noPayroll = group.payrollCost == null;
   const cards: Array<{ label: string; value: string; hint: string; tone?: string }> = [
     { label: "集團入帳收入", value: fmtMoney(group.revenue), hint: "實際入帳、未稅" },
     { label: "已開票（參考）", value: fmtMoney(group.invoiced), hint: "依開票日、未稅，不併入收入" },
@@ -56,9 +75,23 @@ export function StatCards({ group, year, month }: { group: GroupTotals; year: nu
     { label: "專案毛利", value: fmtMoney(group.grossProfit), hint: "入帳收入 − 放款支出", tone: negative(group.grossProfit) },
     { label: "毛利率", value: fmtPct(group.grossMarginPct), hint: "毛利 ÷ 入帳收入", tone: group.grossMarginPct != null && group.grossMarginPct < 0 ? "text-red-600" : "text-gray-900" },
   ];
+  // 人事三張卡：舊版 API（沒有 payroll）不顯示，免得出現一排「—」。
+  if (payroll) {
+    cards.push(
+      { label: "在職人數", value: fmtCount(group.headcount), hint: "目前在職，含未指派公司" },
+      { label: "人事成本", value: fmtMoney(group.payrollCost), hint: noPayroll ? NO_PAYROLL_TEXT : "薪資單應發合計" },
+      {
+        label: "扣人事成本後",
+        value: fmtMoney(group.grossProfitAfterPayroll),
+        hint: noPayroll ? NO_PAYROLL_TEXT : "專案毛利 − 人事成本",
+        tone: group.grossProfitAfterPayroll != null ? negative(group.grossProfitAfterPayroll) : undefined,
+      },
+    );
+  }
+  const notes = payrollNotes(payroll, group);
   return (
     <Card title={`集團合計 · ${periodLabel(year, month)}`}>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      <div className={`grid grid-cols-2 gap-3 sm:grid-cols-3 ${payroll ? "lg:grid-cols-4" : "lg:grid-cols-5"}`}>
         {cards.map((c) => (
           <div key={c.label} className="rounded-xl bg-slate-50 p-3">
             <p className="text-xs font-medium text-gray-500">{c.label}</p>
@@ -68,6 +101,13 @@ export function StatCards({ group, year, month }: { group: GroupTotals; year: nu
         ))}
       </div>
       <p className="mt-3 text-xs text-gray-500">{eliminatedNote(group.eliminated)}。</p>
+      {notes.length > 0 && (
+        <ul className="mt-1 space-y-0.5 text-xs text-gray-500">
+          {notes.map((n) => (
+            <li key={n}>{n}。</li>
+          ))}
+        </ul>
+      )}
     </Card>
   );
 }
@@ -237,7 +277,7 @@ function DrillPanel({ detail }: { detail: DetailState | null }) {
 
 /* --------------------------------------------------------- 各公司表 --- */
 
-const COLUMN_COUNT = 7;
+const COLUMN_COUNT = 10;
 
 export function CompanyTable({
   companies,
@@ -245,18 +285,24 @@ export function CompanyTable({
   expandedId,
   detail,
   onToggle,
+  payroll,
 }: {
   companies: GroupCompanyRow[];
   group: GroupTotals;
   expandedId: string | null;
   detail: DetailState | null;
   onToggle: (companyId: string) => void;
+  payroll?: GroupPayrollSummary;
 }) {
+  const showUnassigned = (group.unassignedHeadcount ?? 0) > 0 || (group.unassignedPayrollCost ?? 0) !== 0;
+  const payrollTitle = payroll?.hasData === false ? NO_PAYROLL_TEXT : undefined;
   return (
     <Card title="各公司" action={<span className="text-xs text-gray-400">點一列看收入（專案）與支出（廠商）</span>}>
       <div className="overflow-x-auto">
         <table className="w-full whitespace-nowrap text-sm">
-          <caption className="sr-only">各公司入帳收入、已開票（參考）、放款支出、專案毛利與毛利率；每家公司的數字含關係企業往來</caption>
+          <caption className="sr-only">
+            各公司入帳收入、已開票（參考）、放款支出、專案毛利、扣人事成本後、毛利率、在職人數與人事成本；每家公司的數字含關係企業往來；{PAYROLL_BASIS_NOTE}
+          </caption>
           <thead>
             <tr className="border-b text-left text-xs text-gray-500">
               <th className="py-2 pr-3">公司</th>
@@ -264,7 +310,10 @@ export function CompanyTable({
               <th className="py-2 pr-3 text-right" title="依開票日、未稅；參考數字，不併入收入">已開票（參考）</th>
               <th className="py-2 pr-3 text-right">放款支出</th>
               <th className="py-2 pr-3 text-right">專案毛利</th>
+              <th className="py-2 pr-3 text-right" title={`專案毛利 − 人事成本；${PAYROLL_BASIS_NOTE}`}>扣人事成本後</th>
               <th className="py-2 pr-3 text-right">毛利率</th>
+              <th className="py-2 pr-3 text-right" title="目前在職、依員工所屬公司">在職人數</th>
+              <th className="py-2 pr-3 text-right" title={`期間內薪資單應發合計；${PAYROLL_BASIS_NOTE}`}>人事成本</th>
               <th className="py-2 text-right" title="客戶是關係企業的專案收入、付給關係企業廠商的放款；已包含在左邊的數字裡，只有集團合計會剔除">
                 其中關係企業往來
               </th>
@@ -297,7 +346,15 @@ export function CompanyTable({
                     <td className="py-2 pr-3 text-right">{fmtMoney(c.invoiced)}</td>
                     <td className="py-2 pr-3 text-right">{fmtMoney(c.expense)}</td>
                     <td className={`py-2 pr-3 text-right font-medium ${c.excluded ? "" : negative(c.grossProfit)}`}>{fmtMoney(c.grossProfit)}</td>
+                    <td
+                      className={`py-2 pr-3 text-right ${c.excluded || c.grossProfitAfterPayroll == null ? "" : negative(c.grossProfitAfterPayroll)}`}
+                      title={payrollTitle}
+                    >
+                      {fmtMoney(c.grossProfitAfterPayroll)}
+                    </td>
                     <td className="py-2 pr-3 text-right">{fmtPct(c.grossMarginPct)}</td>
+                    <td className="py-2 pr-3 text-right">{c.headcount ?? "—"}</td>
+                    <td className="py-2 pr-3 text-right" title={payrollTitle}>{fmtMoney(c.payrollCost)}</td>
                     <td className="py-2 text-right text-xs">{affiliateCellText(c.affiliate)}</td>
                   </tr>
                   {open && (
@@ -313,18 +370,42 @@ export function CompanyTable({
                 </Fragment>
               );
             })}
+            {showUnassigned && (
+              <tr className="border-b text-gray-600">
+                <td className="py-2 pr-3">
+                  未指派公司的員工
+                  <span className="ml-2 text-xs text-gray-400">（人事成本不分攤）</span>
+                </td>
+                <td className="py-2 pr-3 text-right text-gray-400" colSpan={6}>
+                  <Link href="/admin/employees" className="text-xs underline hover:text-gray-700">
+                    到員工管理指派所屬公司
+                  </Link>
+                </td>
+                <td className="py-2 pr-3 text-right">{group.unassignedHeadcount}</td>
+                <td className="py-2 pr-3 text-right" title={payrollTitle}>{fmtMoney(group.unassignedPayrollCost)}</td>
+                <td className="py-2 text-right text-xs">—</td>
+              </tr>
+            )}
           </tbody>
           <tfoot>
             <tr className="border-t-2 border-gray-800 font-semibold">
               <td className="py-2 pr-3">
                 集團合計
-                <span className="ml-2 text-xs font-normal text-gray-500">（已剔除關係企業往來，不含未納入的公司）</span>
+                <span className="ml-2 text-xs font-normal text-gray-500">（已剔除關係企業往來，不含未納入的公司；人事含未指派）</span>
               </td>
               <td className="py-2 pr-3 text-right">{fmtMoney(group.revenue)}</td>
               <td className="py-2 pr-3 text-right">{fmtMoney(group.invoiced)}</td>
               <td className="py-2 pr-3 text-right">{fmtMoney(group.expense)}</td>
               <td className={`py-2 pr-3 text-right ${negative(group.grossProfit)}`}>{fmtMoney(group.grossProfit)}</td>
+              <td
+                className={`py-2 pr-3 text-right ${group.grossProfitAfterPayroll == null ? "" : negative(group.grossProfitAfterPayroll)}`}
+                title={payrollTitle}
+              >
+                {fmtMoney(group.grossProfitAfterPayroll)}
+              </td>
               <td className="py-2 pr-3 text-right">{fmtPct(group.grossMarginPct)}</td>
+              <td className="py-2 pr-3 text-right">{group.headcount ?? "—"}</td>
+              <td className="py-2 pr-3 text-right" title={payrollTitle}>{fmtMoney(group.payrollCost)}</td>
               <td className="py-2 text-right text-xs font-normal text-gray-500">已剔除 {fmtMoney(group.eliminated.total)}</td>
             </tr>
           </tfoot>

@@ -1,10 +1,11 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { employeesHaveCompany } from "../lib/schema-compat.js"
 import { defaultCompanyOf, loadTenantCompanies, type CompanyLite } from "./project-company.js"
 import { effectiveBillingAmount, pct1 } from "./project-money.js"
 
 /**
  * 集團總覽（2026-10-11 業主拍板第一版）：跨公司彙總入帳收入、放款支出與專案毛利。
- * 淨利（含薪資等人事成本）是第二版，這裡不算。
+ * 2026-10-25 加上人事：各公司在職人數、薪資成本，以及「毛利扣人事成本後」（見下方「人事」）。
  *
  * ── 口徑（業主定案）────────────────────────────────────────────────
  *   • 收入（主）＝實際入帳金額，依**入帳日**（project_billings.received_on）歸月，一律**未稅**。
@@ -43,6 +44,18 @@ import { effectiveBillingAmount, pct1 } from "./project-money.js"
  *     bonus-run-store.ts 把這種列算成已收）——沒有入帳日就無法歸月，所以不在任何一個月的收入裡（租戶全部期別）。
  *   • `receivedOverEffective`：該年入帳的期別中，實收大於該期有效金額（未稅）超過 1 元者——典型症狀是把銀行入帳的
  *     含稅金額（未稅×1.05）當成未稅填進去，收入會因此灌水 5%。部分入帳（實收較少）、剛好收足都不算。
+ *
+ * ── 人事（2026-10-25，員工所屬公司 employees.company_id，migration 0072）────────────
+ *   • 在職人數（headcount）＝目前 status='active' 的員工，依員工**目前**的所屬公司歸屬（不是歷史快照，換年度不變）。
+ *   • 薪資成本（payrollCost）＝期間內（payslips.period 'YYYY-MM' 落在年度／月份）已產生的薪資單應發合計 `gross`，
+ *     草稿與已定稿都算（定稿前數字可能再變，畫面附註草稿張數）；同樣依員工**目前**的所屬公司歸屬，離職員工的薪資單照算。
+ *     payslips 沒有雇主負擔（勞健保、勞退雇主提繳）欄位，所以只有應發，不含雇主負擔（payroll.employerCostIncluded=false）。
+ *   • company_id 為 NULL（未指派）、指到不在本租戶名冊的公司、或 0072 還沒套 → 列在「未指派」
+ *     （group.unassignedHeadcount／unassignedPayrollCost），**不分攤**到任何公司。
+ *   • 各公司「扣人事成本後」＝毛利－該公司薪資成本。集團合計的人事成本＝納入合計的公司＋未指派（集團整體真的付出去的錢），
+ *     集團「扣人事成本後」＝集團毛利－集團人事成本。
+ *   • 期間內一張薪資單都沒有（例如正式庫還沒跑過薪資）→ payrollCost／扣人事成本後一律 null（畫面顯示「尚無薪資資料」），
+ *     不用 0 假裝「人事成本是零」。
  *
  * ── 計算方式 ──────────────────────────────────────────────────────
  *   一次撈整年的事件（入帳／開票／匯款）→ 在記憶體裡依「公司×月」加總，月份、公司排除、關係企業剔除都只是
@@ -125,6 +138,22 @@ export type VendorInputRow = {
   is_affiliate: boolean | null
 }
 
+/** 員工（人事歸屬用）；company_id 在 0072 未套時不存在。 */
+export type EmployeeInputRow = {
+  id: string
+  status: string | null
+  company_id?: string | null
+}
+
+/** 期間內的薪資單（payslips）。 */
+export type PayslipInputRow = {
+  employee_id: string
+  /** 'YYYY-MM'。 */
+  period: string
+  gross: Numeric
+  status: string | null
+}
+
 export type GroupOverviewData = {
   year: number
   /** 本租戶全部公司主體（含停用）。 */
@@ -138,6 +167,12 @@ export type GroupOverviewData = {
   /** 該年匯款日、status='paid' 的放款單。 */
   disbursements: DisbursementInputRow[]
   vendors: VendorInputRow[]
+  /** 本租戶全部員工（含離職：離職員工的薪資單仍要歸到公司）。省略＝沒有人事資料。 */
+  employees?: EmployeeInputRow[]
+  /** 該年的薪資單。 */
+  payslips?: PayslipInputRow[]
+  /** employees.company_id（0072）已套；false＝全部人列在未指派。省略視為 true。 */
+  companyAssignmentReady?: boolean
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -263,7 +298,8 @@ async function fetchByIds<T>(table: string, cols: string, tenantId: string, ids:
 export async function loadGroupOverviewData(tenantId: string, year: number): Promise<GroupOverviewData> {
   const from = `${year}-01-01`
   const to = `${year}-12-31`
-  const [companies, receivedRows, invoicedRows, undatedReceived, disbursementRows] = await Promise.all([
+  const companyAssignmentReady = await employeesHaveCompany()
+  const [companies, receivedRows, invoicedRows, undatedReceived, disbursementRows, employees, payslips] = await Promise.all([
     loadTenantCompanies(tenantId),
     fetchAllRows<BillingInputRow>("group-overview billings(received)", (a, b) =>
       supabaseAdmin
@@ -309,6 +345,24 @@ export async function loadGroupOverviewData(tenantId: string, year: number): Pro
         .order("id", { ascending: true })
         .range(a, b),
     ),
+    fetchAllRows<EmployeeInputRow>("group-overview employees", (a, b) =>
+      supabaseAdmin
+        .from("employees")
+        .select(companyAssignmentReady ? "id, status, company_id" : "id, status")
+        .eq("tenant_id", tenantId)
+        .order("id", { ascending: true })
+        .range(a, b) as unknown as PromiseLike<{ data: EmployeeInputRow[] | null; error: { message: string } | null }>,
+    ),
+    fetchAllRows<PayslipInputRow>("group-overview payslips", (a, b) =>
+      supabaseAdmin
+        .from("payslips")
+        .select("id, employee_id, period, gross, status")
+        .eq("tenant_id", tenantId)
+        .gte("period", `${year}-01`)
+        .lte("period", `${year}-12`)
+        .order("id", { ascending: true })
+        .range(a, b),
+    ),
   ])
 
   // 同一期可能兩條查詢都撈到、offset 分頁遇到並發寫入也可能在頁界重複一列 → 一律以 id 去重。
@@ -334,7 +388,28 @@ export async function loadGroupOverviewData(tenantId: string, year: number): Pro
       uniq(disbursements.map((d) => d.vendor_id)),
     ),
   ])
-  return { year, companies, billings, undatedReceived, projects, clients, disbursements, vendors }
+  return {
+    year,
+    companies,
+    billings,
+    undatedReceived,
+    projects,
+    clients,
+    disbursements,
+    vendors,
+    employees: [...new Map(employees.map((row) => [row.id, row])).values()],
+    payslips: [...new Map(payslips.map((row) => [`${row.employee_id}|${row.period}`, row])).values()],
+    companyAssignmentReady,
+  }
+}
+
+/** 'YYYY-MM' → 這一年的月份（1–12）；不是這一年或格式不對回 null。 */
+export function monthOfPeriod(period: string | null | undefined, year: number): number | null {
+  if (!period) return null
+  const m = /^(\d{4})-(\d{2})$/.exec(period)
+  if (!m || Number(m[1]) !== year) return null
+  const month = Number(m[2])
+  return month >= 1 && month <= 12 ? month : null
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -395,7 +470,22 @@ export type GroupModel = {
   clientById: Map<string, ClientInputRow>
   vendorById: Map<string, VendorInputRow>
   quality: DataQuality
+  people: PeopleModel
 }
+
+/** 人事（見檔頭「人事」）：key 是公司 id 或 UNASSIGNED_EMPLOYEES_KEY。 */
+export type PeopleModel = {
+  companyAssignmentReady: boolean
+  headcount: Map<string, number>
+  /** 每家公司 12 個月的薪資應發（分）。 */
+  payroll: Map<string, number[]>
+  /** 每月薪資單張數／其中草稿張數。 */
+  slips: number[]
+  draftSlips: number[]
+}
+
+/** 人事歸屬的「未指派」鍵（不是一列公司，只在 group.unassigned* 出現）。 */
+const UNASSIGNED_EMPLOYEES_KEY = "__unassigned_employees__"
 
 const UNKNOWN_PAYEE_LABEL = "（未填收款方）"
 
@@ -496,7 +586,41 @@ export function buildGroupModel(data: GroupOverviewData): GroupModel {
     })
   }
 
+  // 人事：依員工目前的所屬公司；未指派／不在名冊／0072 未套 → 未指派（不分攤）。
+  const companyAssignmentReady = data.companyAssignmentReady !== false
+  const employeeCompany = new Map<string, string>()
+  for (const e of data.employees ?? []) {
+    const stored = companyAssignmentReady ? (e.company_id ?? null) : null
+    employeeCompany.set(e.id, stored && known.has(stored) ? stored : UNASSIGNED_EMPLOYEES_KEY)
+  }
+  const people: PeopleModel = {
+    companyAssignmentReady,
+    headcount: new Map(),
+    payroll: new Map(),
+    slips: ALL_MONTHS.map(() => 0),
+    draftSlips: ALL_MONTHS.map(() => 0),
+  }
+  for (const e of data.employees ?? []) {
+    if (e.status !== "active") continue
+    const key = employeeCompany.get(e.id) as string
+    people.headcount.set(key, (people.headcount.get(key) ?? 0) + 1)
+  }
+  for (const slip of data.payslips ?? []) {
+    const month = monthOfPeriod(slip.period, year)
+    if (month === null) continue
+    const key = employeeCompany.get(slip.employee_id) ?? UNASSIGNED_EMPLOYEES_KEY
+    let cells = people.payroll.get(key)
+    if (!cells) {
+      cells = ALL_MONTHS.map(() => 0)
+      people.payroll.set(key, cells)
+    }
+    cells[month - 1] = (cells[month - 1] as number) + toCents(slip.gross)
+    people.slips[month - 1] = (people.slips[month - 1] as number) + 1
+    if (slip.status !== "finalized") people.draftSlips[month - 1] = (people.draftSlips[month - 1] as number) + 1
+  }
+
   const active = new Set(facts.map((f) => f.companyId))
+  for (const key of [...people.headcount.keys(), ...people.payroll.keys()]) active.add(key)
   const companies: CompanyLite[] = roster.filter((c) => c.isActive || active.has(c.id))
   if (active.has(UNASSIGNED_COMPANY_ID)) {
     companies.push({ id: UNASSIGNED_COMPANY_ID, name: UNASSIGNED_COMPANY_NAME, isDefault: false, isActive: true })
@@ -520,7 +644,7 @@ export function buildGroupModel(data: GroupOverviewData): GroupModel {
       sample: [...over].sort(byAmountDesc((x) => x.excessCents)).slice(0, QUALITY_SAMPLE_LIMIT).map((o) => o.row),
     },
   }
-  return { year, roster, companies, facts, projectById, clientById, vendorById, quality }
+  return { year, roster, companies, facts, projectById, clientById, vendorById, quality, people }
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -550,6 +674,12 @@ export type CompanyOverview = {
   affiliate: AffiliateAmounts
   /** 該年 12 個月（不受 month 篩選影響）；數字照該公司自己的口徑（含關係企業）。 */
   monthly: MonthPoint[]
+  /** 目前在職人數（依員工所屬公司）。 */
+  headcount: number
+  /** 期間內薪資單應發合計（依員工所屬公司）；期間內沒有任何薪資單 → null（尚無薪資資料）。 */
+  payrollCost: number | null
+  /** 毛利－薪資成本；payrollCost 為 null 時也是 null。 */
+  grossProfitAfterPayroll: number | null
 }
 
 export type GroupTotals = {
@@ -564,6 +694,28 @@ export type GroupTotals = {
   eliminated: AffiliateAmounts & { total: number }
   /** 該年 12 個月：納入公司各自扣掉關係企業往來後的加總。 */
   monthly: MonthPoint[]
+  /** 在職人數：納入合計的公司＋未指派。 */
+  headcount: number
+  /** 薪資成本：納入合計的公司＋未指派；沒有薪資資料 → null。 */
+  payrollCost: number | null
+  /** 未指派公司的在職人數（不分攤到任何公司）。 */
+  unassignedHeadcount: number
+  /** 未指派公司員工的薪資成本；沒有薪資資料 → null。 */
+  unassignedPayrollCost: number | null
+  /** 集團毛利－集團薪資成本；沒有薪資資料 → null。 */
+  grossProfitAfterPayroll: number | null
+}
+
+export type PayrollSummary = {
+  /** 期間內有任何薪資單。false＝畫面標示「尚無薪資資料」。 */
+  hasData: boolean
+  /** 期間內薪資單張數／其中還是草稿（未定稿）的張數。 */
+  slipCount: number
+  draftSlipCount: number
+  /** employees.company_id（0072）已套；false＝全部人列在未指派。 */
+  companyAssignmentReady: boolean
+  /** 薪資成本是否含雇主負擔（勞健保、勞退雇主提繳）；目前 payslips 沒有這些欄位，固定 false。 */
+  employerCostIncluded: false
 }
 
 export type GroupOverviewResult = {
@@ -572,6 +724,8 @@ export type GroupOverviewResult = {
   group: GroupTotals
   /** 資料品質提醒（見檔頭）；不影響上面任何數字。 */
   dataQuality: DataQuality
+  /** 人事資料的狀態（見檔頭「人事」）。 */
+  payroll: PayrollSummary
 }
 
 /** 一格＝一家公司的一個月（分）；aff* 是其中屬於關係企業的部分。 */
@@ -623,6 +777,19 @@ export function summarizeGroupOverview(
   const groupMonths = ALL_MONTHS.map(emptyCell)
   const includedIds: string[] = []
 
+  const { people } = model
+  const slipCount = periodMonths.reduce((s, m) => s + (people.slips[m - 1] as number), 0)
+  const draftSlipCount = periodMonths.reduce((s, m) => s + (people.draftSlips[m - 1] as number), 0)
+  const hasPayroll = slipCount > 0
+  const payrollCentsOf = (key: string): number => {
+    const cells = people.payroll.get(key)
+    return cells ? periodMonths.reduce((s, m) => s + (cells[m - 1] as number), 0) : 0
+  }
+  const unassignedHeadcount = people.headcount.get(UNASSIGNED_EMPLOYEES_KEY) ?? 0
+  const unassignedPayroll = payrollCentsOf(UNASSIGNED_EMPLOYEES_KEY)
+  let groupHeadcount = unassignedHeadcount
+  let groupPayroll = unassignedPayroll
+
   for (const company of model.companies) {
     const cells = cellsOf.get(company.id) ?? ALL_MONTHS.map(emptyCell)
     const period = emptyCell()
@@ -636,8 +803,12 @@ export function summarizeGroupOverview(
       period.affExpense += cell.affExpense
     }
     const excluded = opts.excluded.has(company.id)
+    const headcount = people.headcount.get(company.id) ?? 0
+    const payrollCents = payrollCentsOf(company.id)
     if (!excluded) {
       includedIds.push(company.id)
+      groupHeadcount += headcount
+      groupPayroll += payrollCents
       cells.forEach((cell, i) => {
         const g = groupMonths[i] as Cell
         g.revenue += cell.revenue
@@ -665,6 +836,9 @@ export function summarizeGroupOverview(
         expense: fromCents(period.affExpense),
       },
       monthly: cells.map((cell, i) => point(i + 1, cell.revenue, cell.invoiced, cell.expense)),
+      headcount,
+      payrollCost: hasPayroll ? fromCents(payrollCents) : null,
+      grossProfitAfterPayroll: hasPayroll ? fromCents(period.revenue - period.expense - payrollCents) : null,
     })
   }
 
@@ -701,8 +875,20 @@ export function summarizeGroupOverview(
         total: fromCents(elimRevenue + elimExpense),
       },
       monthly: groupMonths.map((g, i) => point(i + 1, g.revenue - g.affRevenue, g.invoiced - g.affInvoiced, g.expense - g.affExpense)),
+      headcount: groupHeadcount,
+      payrollCost: hasPayroll ? fromCents(groupPayroll) : null,
+      unassignedHeadcount,
+      unassignedPayrollCost: hasPayroll ? fromCents(unassignedPayroll) : null,
+      grossProfitAfterPayroll: hasPayroll ? fromCents(revenue - expense - groupPayroll) : null,
     },
     dataQuality: model.quality,
+    payroll: {
+      hasData: hasPayroll,
+      slipCount,
+      draftSlipCount,
+      companyAssignmentReady: people.companyAssignmentReady,
+      employerCostIncluded: false,
+    },
   }
 }
 

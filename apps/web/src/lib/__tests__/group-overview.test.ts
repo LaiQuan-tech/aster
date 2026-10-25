@@ -15,8 +15,11 @@ import {
   fmtMoney,
   fmtMoneyOrDash,
   fmtPct,
+  NO_PAYROLL_TEXT,
+  PAYROLL_BASIS_NOTE,
   nameWithShort,
   niceStep,
+  payrollNotes,
   periodLabel,
   qualityMessages,
   realCompanyCount,
@@ -193,6 +196,37 @@ describe("qualityMessages（資料品質提醒的文字）", () => {
     expect(msgs).toHaveLength(2);
     expect(msgs[0]).toContain("沒有填入帳日");
     expect(msgs[1]).toContain("2025 年");
+  });
+});
+
+describe("payrollNotes（人事說明）", () => {
+  const ready = { hasData: true, slipCount: 10, draftSlipCount: 0, companyAssignmentReady: true, employerCostIncluded: false };
+
+  it("舊版 API 沒有 payroll → 不顯示", () => {
+    expect(payrollNotes(undefined, {})).toEqual([]);
+  });
+
+  it("一律標示口徑（未指派不分攤、不含雇主負擔）", () => {
+    const notes = payrollNotes(ready, { unassignedHeadcount: 0, unassignedPayrollCost: 0 });
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain(PAYROLL_BASIS_NOTE);
+    expect(notes[0]).toContain("不含雇主負擔");
+  });
+
+  it("沒有薪資資料 → 標示「尚無薪資資料」；未指派只列人數不列金額", () => {
+    const notes = payrollNotes({ ...ready, hasData: false, slipCount: 0 }, { unassignedHeadcount: 3, unassignedPayrollCost: null });
+    expect(notes.some((n) => n.startsWith(NO_PAYROLL_TEXT))).toBe(true);
+    expect(notes.at(-1)).toBe("未指派公司的員工 3 人：不分攤到任何公司，但計入集團合計；可到「員工管理」指派所屬公司");
+  });
+
+  it("有草稿薪資單、有未指派金額、欄位未套", () => {
+    const notes = payrollNotes(
+      { ...ready, draftSlipCount: 2, companyAssignmentReady: false },
+      { unassignedHeadcount: 1, unassignedPayrollCost: 45000 },
+    );
+    expect(notes[0]).toContain("尚未啟用");
+    expect(notes).toContain("10 張薪資單中有 2 張尚未定稿，數字可能再變動");
+    expect(notes.at(-1)).toContain("人事成本 45,000 元");
   });
 });
 

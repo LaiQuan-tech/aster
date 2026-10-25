@@ -145,6 +145,46 @@ export function affiliateCellText(a: { revenue: number; invoiced: number; expens
   return parts.length === 0 ? "—" : parts.join("／");
 }
 
+/* ------------------------------------------------------------ 人事 --- */
+
+/** 「扣人事成本後」的口徑標示（頁面、表頭 title 共用）。 */
+export const PAYROLL_BASIS_NOTE = "人事成本以員工所屬公司歸屬，未指派者不分攤";
+
+/** 人事成本為 null（期間內沒有任何薪資單）時畫面上的字。 */
+export const NO_PAYROLL_TEXT = "尚無薪資資料";
+
+/**
+ * 集團合計卡下方的人事說明（純文字陣列，一句一行）。
+ * `payroll` 省略＝舊版 API（沒有人事欄位），回空陣列不顯示。
+ */
+export function payrollNotes(
+  payroll:
+    | { hasData: boolean; slipCount: number; draftSlipCount: number; companyAssignmentReady: boolean; employerCostIncluded: boolean }
+    | undefined,
+  group: { unassignedHeadcount?: number; unassignedPayrollCost?: number | null },
+): string[] {
+  if (!payroll) return [];
+  const notes: string[] = [];
+  if (!payroll.companyAssignmentReady) {
+    notes.push("員工所屬公司尚未啟用（資料庫待更新），所有員工暫列「未指派」");
+  }
+  notes.push(
+    `${PAYROLL_BASIS_NOTE}；人事成本＝期間內薪資單應發合計${payroll.employerCostIncluded ? "（含雇主負擔）" : "，不含雇主負擔的勞健保、勞退"}`,
+  );
+  if (!payroll.hasData) {
+    notes.push(`${NO_PAYROLL_TEXT}：這段期間還沒有產生任何薪資單，人事成本與「扣人事成本後」顯示「—」`);
+  } else if (payroll.draftSlipCount > 0) {
+    notes.push(`${payroll.slipCount} 張薪資單中有 ${payroll.draftSlipCount} 張尚未定稿，數字可能再變動`);
+  }
+  const unassigned = group.unassignedHeadcount ?? 0;
+  const unassignedCost = group.unassignedPayrollCost ?? null;
+  if (unassigned > 0 || (unassignedCost ?? 0) !== 0) {
+    const cost = payroll.hasData ? `、人事成本 ${fmtMoney(unassignedCost)} 元` : "";
+    notes.push(`未指派公司的員工 ${unassigned} 人${cost}：不分攤到任何公司，但計入集團合計；可到「員工管理」指派所屬公司`);
+  }
+  return notes;
+}
+
 /** 客戶／廠商顯示名：有簡稱且不同於全名 → 「簡稱（全名）」，否則全名。 */
 export function nameWithShort(name: string, shortName: string | null | undefined): string {
   return shortName && shortName !== name ? `${shortName}（${name}）` : name;

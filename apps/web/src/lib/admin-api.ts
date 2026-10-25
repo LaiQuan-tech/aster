@@ -119,6 +119,10 @@ export interface Employee {
   default_shift_id?: string | null;
   /** 個人功能開關（wfhPunch＝允許在家上班打卡、noNightPremium＝不計夜間加給）；舊 API 沒有這欄。 */
   features?: { wfhPunch?: boolean; noNightPremium?: boolean } | null;
+  /** 所屬公司（2026-10-25，migration 0072；null＝未指派；舊 API／DB 未套時沒有或是 null）。 */
+  company_id?: string | null;
+  /** 所屬公司名稱（後端依名冊帶出；未指派 null）。 */
+  company_name?: string | null;
 }
 
 export function getEmployees() {
@@ -191,11 +195,24 @@ export function updateEmployee(
     defaultShiftId?: string | null;
     /** 個人功能開關（合併寫入，只改帶來的鍵）。 */
     features?: { wfhPunch?: boolean; noNightPremium?: boolean };
+    /** 所屬公司（null＝未指派）；DB 未套 0072 → 409 schema_not_ready；別租戶 400 invalid_company；新選停用公司 400 company_inactive。 */
+    companyId?: string | null;
   },
 ) {
   return apiFetch<{ id: string }>(`/employees/${id}`, {
     method: "PATCH",
     body: JSON.stringify(body),
+  });
+}
+
+/**
+ * POST /employees/assign-company — 批次指派所屬公司（HR；companyId null＝改回未指派）。
+ * 錯誤：409 schema_not_ready（DB 未套 0072）、400 invalid_company／company_inactive／employee_not_found。
+ */
+export function assignEmployeesCompany(employeeIds: string[], companyId: string | null) {
+  return apiFetch<{ companyId: string | null; updated: number }>("/employees/assign-company", {
+    method: "POST",
+    body: JSON.stringify({ employeeIds, companyId }),
   });
 }
 

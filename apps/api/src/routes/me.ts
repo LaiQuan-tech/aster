@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { departmentsHaveManagerList } from "../lib/schema-compat.js"
+import { departmentsHaveManagerList, employeesHaveCompany } from "../lib/schema-compat.js"
 import { employeesHavePersonalSettings } from "../services/employee-shifts.js"
 import { normalizeEmployeeFeatures } from "../services/employee-features.js"
 
@@ -58,6 +58,8 @@ async function isDeptManager(tenantId: string, empId: string): Promise<boolean> 
  * 員工個人設定（2026-10-13，migration 0068；未套 → features 全關、defaultShift null）：
  *   `features: { wfhPunch }`——員工端據此決定要不要顯示「在家上班」勾選框；
  *   `defaultShift: { id, name, start, end } | null`——個人預設班別（沒有＝依公司規則／彈性上班）。
+ *
+ * 員工所屬公司（2026-10-25，migration 0072；未套 → 兩個都 null）：`companyId`、`companyName`。
  *
  * Open to any authenticated tenant member: the ESS uses it to detect HR admins
  * (to surface the back-office link) and the admin console uses it as its gate.
@@ -123,6 +125,30 @@ meRouter.get(
         }
       }
 
+      // 所屬公司：同樣另查（0072 未套時不能塞進主 select）。
+      let companyId: string | null = null
+      let companyName: string | null = null
+      if (await employeesHaveCompany()) {
+        const { data: own, error: ownErr } = await supabaseAdmin
+          .from("employees")
+          .select("company_id")
+          .eq("tenant_id", tenantId)
+          .eq("id", data.id as string)
+          .maybeSingle()
+        if (ownErr) throw new Error(`GET /me (company): ${ownErr.message}`)
+        companyId = (own as { company_id?: string | null } | null)?.company_id ?? null
+        if (companyId) {
+          const { data: company, error: companyErr } = await supabaseAdmin
+            .from("companies")
+            .select("id, name")
+            .eq("tenant_id", tenantId)
+            .eq("id", companyId)
+            .maybeSingle()
+          if (companyErr) throw new Error(`GET /me (company name): ${companyErr.message}`)
+          companyName = (company?.name as string | undefined) ?? null
+        }
+      }
+
       const employmentType = (data.employment_type as string | null) ?? null
       res.status(200).json({
         id: data.id,
@@ -138,6 +164,8 @@ meRouter.get(
         isManager: await isDeptManager(tenantId, data.id as string),
         features,
         defaultShift,
+        companyId,
+        companyName,
       })
     } catch (err) {
       next(err)

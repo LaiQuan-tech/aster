@@ -7,6 +7,7 @@ import { BatchImportButton } from "@/components/BatchImport";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
 import AuditDrawer from "@/components/AuditDrawer";
 import {
+  assignEmployeesCompany,
   addEmployeeCertification,
   addEmployeeEducation,
   addEmployeeJobHistory,
@@ -60,6 +61,16 @@ import {
   type ProfileChangeRequest,
 } from "@/lib/people-extras-api";
 import { isBulkInviteResult } from "@/lib/import-view";
+import { listCompanies, type Company } from "@/lib/projects-ext-api";
+import { companyOptions } from "@/lib/company-options";
+import {
+  UNASSIGNED_FILTER,
+  companyErrorMessage,
+  companyLabel,
+  filterByCompany,
+  toggleAllVisible,
+  toggleSelected,
+} from "@/lib/employee-company";
 import { EMPLOYMENT_TYPES as EMPLOYMENT_TYPE_VALUES, EMPLOYMENT_TYPE_LABELS } from "@/lib/ess-tabs";
 import { getBrandingCached, getMeCached, peekMeCached } from "@/lib/ess-state";
 import {
@@ -299,7 +310,10 @@ function describeError(err: unknown, fallback: string): string {
   const probe = code ?? raw;
   // 個人出勤設定（2026-10-13）的兩個錯誤碼。
   if (probe === "shift_not_found") return "選的班別不存在（可能剛被刪除），請重新選擇";
-  if (probe === "schema_not_ready") return "資料庫尚未套用「員工個人班別與在家打卡」更新，請洽系統維護人員";
+  // schema_not_ready：個人班別與在家打卡（0068）或所屬公司（0072）的資料庫更新還沒套。
+  if (probe === "schema_not_ready") return "資料庫尚未套用最新更新（員工個人設定或所屬公司），請洽系統維護人員";
+  const companyMsg = companyErrorMessage(code);
+  if (companyMsg) return companyMsg;
   const translated = accountErrorMessage(new Error(probe), "");
   if (translated && translated !== probe) return translated;
   return raw || fallback;
@@ -334,7 +348,8 @@ const PIN_RIGHT_TH =
 const PIN_RIGHT_TD = "sticky right-0 z-[5] bg-white shadow-[inset_1px_0_0_var(--color-gray-100)]";
 
 /** 員工列表欄數（列內編輯時 td 要跨滿；Email 欄在手機隱藏，跨欄數多算無妨）。 */
-const COLUMN_COUNT = 10;
+/** 編輯列 colSpan：勾選、員工、Email、單位/身分、所屬公司、到離職、生日、身分證、戶籍地、匯款帳號、角色/狀態、操作。 */
+const COLUMN_COUNT = 12;
 
 export default function EmployeesPage() {
   const toast = useToast();
@@ -441,6 +456,14 @@ export default function EmployeesPage() {
   // 不計夜間加給（2026-10-13）：結算夜間分鐘寫 0、薪資與月表試算不發夜間加給（只影響這位員工）。
   const [editNoNightPremium, setEditNoNightPremium] = useState(false);
   const [shifts, setShifts] = useState<Shift[]>([]);
+  // 員工所屬公司（2026-10-25）：編輯下拉、列表篩選、多選批次指派。
+  const [companies, setCompanies] = useState<Company[]>([]);
+  const [editCompanyId, setEditCompanyId] = useState("");
+  const [companyFilter, setCompanyFilter] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [batchCompanyId, setBatchCompanyId] = useState("");
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchError, setBatchError] = useState<string | null>(null);
   // 列內編輯第二排：生日／身分證／戶籍地／匯款帳號（存在 employee_profiles，走 PUT profile，與上面的 PATCH employees 分開送）。
   const [editPersonal, setEditPersonal] = useState<PersonalForm>(() => personalFormFrom({}));
   const [editSaving, setEditSaving] = useState(false);
@@ -518,6 +541,34 @@ export default function EmployeesPage() {
       .catch(() => setShifts([]));
   }, []);
   const shiftNameMap = useMemo(() => new Map(shifts.map((shift) => [shift.id, shift])), [shifts]);
+
+  // 所屬公司下拉／篩選的選項（名冊 → 公司主體）；抓不到就只剩「未指派」。
+  useEffect(() => {
+    listCompanies()
+      .then((res) => setCompanies(res.companies))
+      .catch(() => setCompanies([]));
+  }, []);
+  const visibleRows = useMemo(() => filterByCompany(rows, companyFilter), [rows, companyFilter]);
+  const visibleIds = useMemo(() => visibleRows.map((row) => row.id), [visibleRows]);
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
+
+  /** 多選批次指派所屬公司（「」＝改回未指派）。成功後清掉勾選、靜默重載。 */
+  async function applyBatchCompany() {
+    if (batchBusy || selectedIds.size === 0) return;
+    setBatchBusy(true);
+    setBatchError(null);
+    try {
+      const res = await assignEmployeesCompany([...selectedIds], batchCompanyId || null);
+      const target = batchCompanyId ? (companies.find((c) => c.id === batchCompanyId)?.name ?? "所選公司") : "未指派";
+      setMessage(`已把 ${res.updated} 位員工指派到「${target}」`);
+      setSelectedIds(new Set());
+      await fetchRows();
+    } catch (err) {
+      setBatchError(describeError(err, "批次指派失敗"));
+    } finally {
+      setBatchBusy(false);
+    }
+  }
 
   async function openProfile(employeeId: string) {
     setProfileEmpId(employeeId);
@@ -629,6 +680,9 @@ export default function EmployeesPage() {
     const shiftChanged = (current?.default_shift_id ?? null) !== nextShiftId;
     const wfhChanged = (current?.features?.wfhPunch === true) !== editWfhPunch;
     const nightChanged = (current?.features?.noNightPremium === true) !== editNoNightPremium;
+    // 所屬公司也只在有變更時才送（DB 還沒套 0072 時，沒動到就不會被 409 擋下其他欄位）。
+    const nextCompanyId = editCompanyId || null;
+    const companyChanged = (current?.company_id ?? null) !== nextCompanyId;
     const featurePatch = {
       ...(wfhChanged ? { wfhPunch: editWfhPunch } : {}),
       ...(nightChanged ? { noNightPremium: editNoNightPremium } : {}),
@@ -637,6 +691,7 @@ export default function EmployeesPage() {
       await updateEmployee(id, {
         ...(shiftChanged ? { defaultShiftId: nextShiftId } : {}),
         ...(wfhChanged || nightChanged ? { features: featurePatch } : {}),
+        ...(companyChanged ? { companyId: nextCompanyId } : {}),
         name: editName.trim() || undefined,
         role: editRole,
         deptId: editDeptId || null,
@@ -933,6 +988,7 @@ export default function EmployeesPage() {
     setEditTerminatedAt(employee.terminated_at ?? "");
     setEditStatus(employee.status);
     setEditDefaultShiftId(employee.default_shift_id ?? "");
+    setEditCompanyId(employee.company_id ?? "");
     setEditWfhPunch(employee.features?.wfhPunch === true);
     setEditNoNightPremium(employee.features?.noNightPremium === true);
   }
@@ -1150,21 +1206,86 @@ export default function EmployeesPage() {
             />
           )}
         </div>
+        {/* 所屬公司：篩選＋多選批次指派（2026-10-25）。集團總覽依它把在職人數、人事成本歸到公司；未指派不分攤。 */}
+        {rows.length > 0 && (
+          <div className="mb-3 flex flex-wrap items-end gap-3">
+            <div>
+              <label className={labelCls} htmlFor="emp-company-filter">所屬公司</label>
+              <select
+                id="emp-company-filter"
+                className={inputCls}
+                value={companyFilter}
+                onChange={(event) => setCompanyFilter(event.target.value)}
+              >
+                <option value="">全部公司</option>
+                <option value={UNASSIGNED_FILTER}>未指派</option>
+                {companies.map((company) => (
+                  <option key={company.id} value={company.id}>
+                    {company.name}
+                    {company.isActive === false ? "（已停用）" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {canManage && selectedIds.size > 0 && (
+              <div className="flex flex-wrap items-end gap-2 rounded-lg bg-slate-50 px-3 py-2" data-testid="batch-company-bar">
+                <span className="self-center text-sm text-gray-700">已選 {selectedIds.size} 人，指派到</span>
+                <select
+                  aria-label="批次指派的公司"
+                  className={inputCls}
+                  value={batchCompanyId}
+                  onChange={(event) => setBatchCompanyId(event.target.value)}
+                >
+                  <option value="">未指派</option>
+                  {companyOptions(companies).map((option) => (
+                    <option key={option.id} value={option.id}>{option.label}</option>
+                  ))}
+                </select>
+                <Button onClick={() => void applyBatchCompany()} disabled={batchBusy}>
+                  {batchBusy ? "指派中…" : "套用"}
+                </Button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedIds(new Set())}
+                  disabled={batchBusy}
+                  className="self-center text-xs text-gray-500 underline hover:text-gray-800 disabled:opacity-50"
+                >
+                  取消勾選
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+        {batchError && <div className="mb-3"><ErrorText>{batchError}</ErrorText></div>}
         {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
         {loading ? (
           <Empty>載入中…</Empty>
         ) : rows.length === 0 ? (
           <Empty>尚無員工</Empty>
+        ) : visibleRows.length === 0 ? (
+          <Empty>這家公司目前沒有員工</Empty>
         ) : (
           // 外框：直向超過視窗高度、橫向超過寬度都在框內捲（表頭釘上方、操作欄釘右側）。
           // @container 讓下面的列內編輯區能用 100cqw 取得「外框可視寬度」。
           <div className="@container max-h-[calc(100dvh-12rem)] overflow-auto">
-            <table className="w-full min-w-[84rem] text-left text-sm">
+            <table className="w-full min-w-[92rem] text-left text-sm">
               <thead>
                 <tr className="text-xs text-gray-500">
+                  {canManage && (
+                    <th className={`${STICKY_TH} w-8 py-2 pr-2`}>
+                      <input
+                        type="checkbox"
+                        aria-label="全選畫面上的員工"
+                        checked={allVisibleSelected}
+                        onChange={() => setSelectedIds((cur) => toggleAllVisible(cur, visibleIds))}
+                        className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
+                      />
+                    </th>
+                  )}
                   <th className={`${STICKY_TH} min-w-[7rem] py-2 pr-4`}>員工</th>
                   <th className={`${STICKY_TH} hidden min-w-[12rem] py-2 pr-4 sm:table-cell`}>Email</th>
                   <th className={`${STICKY_TH} min-w-[8rem] py-2 pr-4`}>單位/身分</th>
+                  <th className={`${STICKY_TH} min-w-[7rem] py-2 pr-4`}>所屬公司</th>
                   <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-4`}>到離職</th>
                   <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-4`}>生日</th>
                   <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-4`}>身分證</th>
@@ -1175,7 +1296,7 @@ export default function EmployeesPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((employee) => (
+                {visibleRows.map((employee) => (
                   <tr key={employee.id} className="border-b border-gray-50 align-top">
                     {editingId === employee.id ? (
                       <td colSpan={COLUMN_COUNT} className="py-3">
@@ -1257,10 +1378,18 @@ export default function EmployeesPage() {
                               <input className={inputCls} value={editPersonal.accountHolder} onChange={(event) => setPersonal("accountHolder", event.target.value)} autoComplete="off" />
                             </PersonalField>
                           </div>
-                          {/* 第三排：個人出勤設定（2026-10-13）。預設班別＝這位員工平日的上下班時間（遲到、應下班、缺卡都照它）；
+                          {/* 第三排：所屬公司（2026-10-25，集團總覽依它歸屬人數與人事成本；未指派不分攤）＋個人出勤設定（2026-10-13）。預設班別＝這位員工平日的上下班時間（遲到、應下班、缺卡都照它）；
                               「依公司規則」＝沒有個人班別，照公司的彈性上班規則。在家上班打卡＝員工端打卡卡片出現「在家上班」勾選框。 */}
                           <div className="mt-3 grid grid-cols-2 gap-3 @3xl:grid-cols-8">
-                            <PersonalField label="預設班別" className="@3xl:col-span-3">
+                            <PersonalField label="所屬公司" className="@3xl:col-span-2">
+                              <select className={inputCls} value={editCompanyId} onChange={(event) => setEditCompanyId(event.target.value)}>
+                                <option value="">未指派</option>
+                                {companyOptions(companies, editCompanyId).map((option) => (
+                                  <option key={option.id} value={option.id}>{option.label}</option>
+                                ))}
+                              </select>
+                            </PersonalField>
+                            <PersonalField label="預設班別" className="@3xl:col-span-2">
                               <select className={inputCls} value={editDefaultShiftId} onChange={(event) => setEditDefaultShiftId(event.target.value)}>
                                 <option value="">依公司規則</option>
                                 {shifts.map((shift) => (
@@ -1270,7 +1399,7 @@ export default function EmployeesPage() {
                                 ))}
                               </select>
                             </PersonalField>
-                            <PersonalField label="在家上班" className="@3xl:col-span-3">
+                            <PersonalField label="在家上班" className="@3xl:col-span-2">
                               <label className="flex h-[38px] items-center gap-2 text-sm text-gray-700">
                                 <input
                                   type="checkbox"
@@ -1309,6 +1438,17 @@ export default function EmployeesPage() {
                       </td>
                     ) : (
                       <>
+                        {canManage && (
+                          <td className="py-3 pr-2">
+                            <input
+                              type="checkbox"
+                              aria-label={`勾選 ${employee.name}`}
+                              checked={selectedIds.has(employee.id)}
+                              onChange={() => setSelectedIds((cur) => toggleSelected(cur, employee.id))}
+                              className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
+                            />
+                          </td>
+                        )}
                         <td className="py-3 pr-4">
                           <p className="font-medium text-gray-800">{employee.name}</p>
                           <p className="text-xs text-gray-500">工號 {employee.emp_no ?? "—"}</p>
@@ -1347,6 +1487,7 @@ export default function EmployeesPage() {
                           </div>
                         </td>
                         <td className="py-3 pr-4 text-gray-600">{deptNameMap.get(employee.dept_id ?? "") ?? "—"} / {employmentTypeLabel(employee.employment_type)}</td>
+                        <td className={`py-3 pr-4 ${employee.company_id ? "text-gray-600" : "text-amber-700"}`}>{companyLabel(employee, companies)}</td>
                         <td className="whitespace-nowrap py-3 pr-4 text-gray-600">{employee.hire_date ?? "—"} → {employee.terminated_at ?? "在職"}</td>
                         <td className="whitespace-nowrap py-3 pr-4 text-gray-600">{employee.birthday || "—"}</td>
                         <td className="whitespace-nowrap py-3 pr-4 text-gray-600">{employee.idNumber || "—"}</td>

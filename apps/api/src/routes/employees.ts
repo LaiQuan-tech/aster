@@ -21,6 +21,8 @@ import {
 import { isPlatformAdminEmail } from "../middleware/platform.js"
 import { employeesHavePersonalSettings } from "../services/employee-shifts.js"
 import { normalizeEmployeeFeatures } from "../services/employee-features.js"
+import { employeesHaveCompany } from "../lib/schema-compat.js"
+import { checkProjectCompany, loadTenantCompanies } from "../services/project-company.js"
 
 export const employeesRouter = Router()
 
@@ -57,8 +59,18 @@ const updateSchema = z
       })
       .strict()
       .optional(),
+    // 2026-10-25 員工所屬公司（migration 0072）：null＝未指派（集團總覽另列、人事成本不分攤）。
+    companyId: z.string().uuid().nullable().optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
+
+/** POST /employees/assign-company：一次把多位員工指派到同一家公司（companyId null＝改回未指派）。 */
+const assignCompanySchema = z.object({
+  employeeIds: z.array(z.string().uuid()).min(1, "employeeIds is required").max(500),
+  companyId: z.string().uuid().nullable(),
+})
+
+const SCHEMA_NOT_READY_COMPANY = { error: "schema_not_ready", detail: "employees.company_id (migration 0072)" } as const
 
 const resetPasswordSchema = z.object({
   // 帶了＝管理員指定這組密碼（後台「設定密碼」）；未帶則後端產生隨機暫時密碼。長度下限與建帳號一致。
@@ -230,11 +242,12 @@ employeesRouter.get(
       }
 
       // 員工個人設定（0068）：套了才多撈 default_shift_id、features（features 只吐已知鍵）。
-      const personal = await employeesHavePersonalSettings()
+      // 員工所屬公司（0072）：套了才多撈 company_id；公司名稱另查名冊（小表，一次查完）。
+      const [personal, hasCompany] = await Promise.all([employeesHavePersonalSettings(), employeesHaveCompany()])
       const { data, error } = await supabaseAdmin
         .from("employees")
         .select(
-          `id, tenant_id, user_id, name, role, dept_id, emp_no, employment_type, hire_date, terminated_at, status, created_at${personal ? ", default_shift_id, features" : ""}`,
+          `id, tenant_id, user_id, name, role, dept_id, emp_no, employment_type, hire_date, terminated_at, status, created_at${personal ? ", default_shift_id, features" : ""}${hasCompany ? ", company_id" : ""}`,
         )
         .eq("tenant_id", tenantId)
         .order("created_at", { ascending: true })
@@ -245,11 +258,20 @@ employeesRouter.get(
       }
       // email 在 auth.users 不在 employees 表：一次撈回本租戶員工綁定的帳號 email 補到每列，
       // user_id 為 null 或帳號已不存在 → null。
-      const rows: Array<Record<string, unknown>> = ((data ?? []) as unknown as Array<Record<string, unknown>>).map((row) => ({
-        ...row,
-        default_shift_id: (row.default_shift_id as string | null | undefined) ?? null,
-        features: normalizeEmployeeFeatures(row.features),
-      }))
+      const companyName = new Map(
+        hasCompany ? (await loadTenantCompanies(tenantId)).map((c) => [c.id, c.name] as const) : [],
+      )
+      const rows: Array<Record<string, unknown>> = ((data ?? []) as unknown as Array<Record<string, unknown>>).map((row) => {
+        const companyId = (row.company_id as string | null | undefined) ?? null
+        return {
+          ...row,
+          default_shift_id: (row.default_shift_id as string | null | undefined) ?? null,
+          features: normalizeEmployeeFeatures(row.features),
+          // 未套 0072 → 一律 null；存的 id 不在本租戶名冊（理論上不會發生）→ 名稱 null。
+          company_id: companyId,
+          company_name: companyId ? (companyName.get(companyId) ?? null) : null,
+        }
+      })
       const [emails, extras] = await Promise.all([
         emailsByUserId(rows.map((row) => row.user_id as string | null).filter((id): id is string => !!id)),
         profileFields
@@ -413,8 +435,43 @@ employeesRouter.patch(
     if (parsed.data.hireDate !== undefined) patch.hire_date = parsed.data.hireDate
     if (parsed.data.terminatedAt !== undefined) patch.terminated_at = parsed.data.terminatedAt
     if (parsed.data.defaultShiftId !== undefined) patch.default_shift_id = parsed.data.defaultShiftId
+    if (parsed.data.companyId !== undefined) patch.company_id = parsed.data.companyId
 
     try {
+      // 員工所屬公司（2026-10-25）：欄位未套（0072）→ 409 schema_not_ready。
+      if (parsed.data.companyId !== undefined) {
+        if (!(await employeesHaveCompany())) {
+          res.status(409).json(SCHEMA_NOT_READY_COMPANY)
+          return
+        }
+        // 必須是本租戶的公司（supabaseAdmin 繞過 RLS，FK 擋不住跨租戶 id）；停用的公司不能新選或改選，沿用原值放行。
+        if (parsed.data.companyId) {
+          const { data: current, error: curErr } = await supabaseAdmin
+            .from("employees")
+            .select("id, company_id")
+            .eq("tenant_id", tenantId)
+            .eq("id", id)
+            .maybeSingle()
+          if (curErr) {
+            next(new Error(`PATCH /employees/${id} (company): ${curErr.message}`))
+            return
+          }
+          if (!current) {
+            res.status(404).json({ error: "not_found" })
+            return
+          }
+          const check = checkProjectCompany(
+            await loadTenantCompanies(tenantId),
+            parsed.data.companyId,
+            (current as { company_id?: string | null }).company_id ?? null,
+          )
+          if (!check.ok) {
+            const { ok: _ok, ...body } = check
+            res.status(400).json(body)
+            return
+          }
+        }
+      }
       // 員工個人設定（2026-10-13）：欄位未套（0068）→ 409 schema_not_ready，不要讓 PostgREST 回 500。
       const wantsPersonal = parsed.data.defaultShiftId !== undefined || parsed.data.features !== undefined
       if (wantsPersonal && !(await employeesHavePersonalSettings())) {
@@ -503,6 +560,73 @@ employeesRouter.patch(
         return
       }
       res.status(200).json({ id: data.id })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * POST /employees/assign-company — 批次指派員工所屬公司（2026-10-25，HR）。
+ *   body: { employeeIds: uuid[1..500], companyId: uuid | null }；null＝改回未指派。
+ *   • 欄位未套（migration 0072）→ 409 schema_not_ready。
+ *   • 公司必須屬於本租戶（400 invalid_company）、不能是停用的公司（400 company_inactive）。
+ *   • 每位員工都必須屬於本租戶：有任何一位查不到 → 400 employee_not_found（附 missing 清單），整批不寫。
+ *   回 { companyId, updated }。稽核由 employees 的 audit trigger 逐列記錄。
+ */
+employeesRouter.post(
+  "/employees/assign-company",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const parsed = assignCompanySchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    const employeeIds = [...new Set(parsed.data.employeeIds)]
+    const { companyId } = parsed.data
+    try {
+      if (!(await employeesHaveCompany())) {
+        res.status(409).json(SCHEMA_NOT_READY_COMPANY)
+        return
+      }
+      if (companyId) {
+        const check = checkProjectCompany(await loadTenantCompanies(tenantId), companyId)
+        if (!check.ok) {
+          const { ok: _ok, ...body } = check
+          res.status(400).json(body)
+          return
+        }
+      }
+      const { data: found, error: foundErr } = await supabaseAdmin
+        .from("employees")
+        .select("id")
+        .eq("tenant_id", tenantId)
+        .in("id", employeeIds)
+      if (foundErr) {
+        next(new Error(`POST /employees/assign-company (load): ${foundErr.message}`))
+        return
+      }
+      const foundIds = new Set(((found ?? []) as Array<{ id: string }>).map((row) => row.id))
+      const missing = employeeIds.filter((empId) => !foundIds.has(empId))
+      if (missing.length > 0) {
+        res.status(400).json({ error: "employee_not_found", missing })
+        return
+      }
+      const { data: updated, error: updErr } = await supabaseAdmin
+        .from("employees")
+        .update({ company_id: companyId })
+        .eq("tenant_id", tenantId)
+        .in("id", employeeIds)
+        .select("id")
+      if (updErr) {
+        next(new Error(`POST /employees/assign-company: ${updErr.message}`))
+        return
+      }
+      res.status(200).json({ companyId, updated: (updated ?? []).length })
     } catch (err) {
       next(err)
     }

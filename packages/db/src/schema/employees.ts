@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm"
 import { tenants } from "./tenants"
 import { departments } from "./departments"
 import { shifts } from "./shifts"
+import { companies } from "./companies"
 
 /**
  * Employees — people belonging to a tenant. `userId` links to the auth user
@@ -42,6 +43,11 @@ export const employees = pgTable(
     defaultShiftId: uuid("default_shift_id").references(() => shifts.id, { onDelete: "set null" }),
     /** 個人功能開關（CHECK：必須是 object）；目前只用 `{ wfhPunch: true }`＝可勾「在家上班」打卡。 */
     features: jsonb("features").$type<{ wfhPunch?: boolean }>().notNull().default(sql`'{}'::jsonb`),
+    /**
+     * 2026-10-25 員工所屬公司（migration 0072）：集團總覽依它把在職人數、薪資成本歸到公司；
+     * NULL＝未指派（另列、不分攤）。公司被刪 → SET NULL。API 寫入前驗證同租戶。
+     */
+    companyId: uuid("company_id").references(() => companies.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -51,5 +57,6 @@ export const employees = pgTable(
     defaultShiftIdx: index("employees_default_shift_idx")
       .on(table.defaultShiftId)
       .where(sql`${table.defaultShiftId} is not null`),
+    tenantCompanyIdx: index("employees_tenant_company_idx").on(table.tenantId, table.companyId),
   }),
 )
