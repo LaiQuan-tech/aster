@@ -8,6 +8,7 @@
  *   • 待處理／人事區 → GET /dashboard/boss-summary（後端 services/boss-summary.ts）。
  * `/group-overview` 回應若有 `companies[].headcount`／`payrollCost`（員工所屬公司上線後才有）就顯示，沒有就不顯示。
  */
+import { ADMIN_TABS, isModuleEnabled, resolveAdminPath, type AdminModulesConfig } from "./admin-nav";
 
 /* ------------------------------------------------------------- 格式 --- */
 
@@ -53,6 +54,8 @@ export interface MonthPointLite {
   revenue: number;
   expense: number;
   grossProfit: number;
+  /** 每月薪資成本（後端目前沒有；有了就接上，本月檢視才顯示薪資欄）。 */
+  payrollCost?: number | null;
 }
 
 export interface GroupCompanyLite {
@@ -67,7 +70,10 @@ export interface GroupCompanyLite {
   monthly: MonthPointLite[];
   /** 員工所屬公司上線後才有（另一批工作）：沒有就不顯示。 */
   headcount?: number | null;
+  /** 查詢期間（首頁查整年＝年度）的薪資成本；null＝期間內沒有薪資單。 */
   payrollCost?: number | null;
+  /** 毛利－薪資成本（同上期間）。 */
+  grossProfitAfterPayroll?: number | null;
 }
 
 export interface GroupOverviewLite {
@@ -121,6 +127,12 @@ export interface CompanyRow {
   overdueCount: number | null;
   headcount: number | null | undefined;
   payrollCost: number | null | undefined;
+  grossProfitAfterPayroll: number | null | undefined;
+  /**
+   * 薪資成本只有年度數字（本月檢視、且回應沒有 monthly[].payrollCost）：薪資欄與扣人事後毛利顯示「—」，
+   * 畫面註「薪資成本僅年度」。
+   */
+  payrollYearOnly: boolean;
 }
 
 /**
@@ -144,12 +156,25 @@ export function companyRows(
     let expense = c.expense;
     let grossProfit = c.grossProfit;
     let pct = c.grossMarginPct;
+    let payrollCost = c.payrollCost;
+    let afterPayroll = c.grossProfitAfterPayroll;
+    let payrollYearOnly = false;
     if (view === "month") {
       const p = c.monthly.find((m) => m.month === month);
       revenue = p?.revenue ?? 0;
       expense = p?.expense ?? 0;
       grossProfit = p?.grossProfit ?? 0;
       pct = marginPct(grossProfit, revenue);
+      if (p && p.payrollCost !== undefined) {
+        // 後端有提供每月薪資：照用（null＝那個月沒有薪資單）。
+        payrollCost = p.payrollCost;
+        afterPayroll = p.payrollCost === null ? null : grossProfit - p.payrollCost;
+      } else {
+        // 只有年度薪資：本月不能拿整年的數字充數。
+        payrollYearOnly = c.payrollCost !== undefined || c.grossProfitAfterPayroll !== undefined;
+        payrollCost = c.payrollCost === undefined ? undefined : null;
+        afterPayroll = c.grossProfitAfterPayroll === undefined ? undefined : null;
+      }
     }
     rows.push({
       id: c.id,
@@ -161,7 +186,9 @@ export function companyRows(
       overdue: overdue ? (o?.overdueAmount ?? 0) : null,
       overdueCount: overdue ? (o?.overdueCount ?? 0) : null,
       headcount: c.headcount,
-      payrollCost: c.payrollCost,
+      payrollCost,
+      grossProfitAfterPayroll: afterPayroll,
+      payrollYearOnly,
     });
   }
   const known = new Set(overview.companies.map((c) => c.id));
@@ -178,18 +205,33 @@ export function companyRows(
       overdueCount: o.overdueCount,
       headcount: undefined,
       payrollCost: undefined,
+      grossProfitAfterPayroll: undefined,
+      payrollYearOnly: false,
     });
   }
   return rows;
 }
 
 /** 回應裡有沒有人數／薪資成本欄位（任何一列帶了該鍵就顯示那一欄）。 */
-export function optionalColumns(overview: GroupOverviewLite): { headcount: boolean; payrollCost: boolean } {
+export interface OptionalColumns {
+  headcount: boolean;
+  payrollCost: boolean;
+  grossProfitAfterPayroll: boolean;
+}
+
+export function optionalColumns(overview: GroupOverviewLite): OptionalColumns {
   return {
-    headcount: overview.companies.some((c) => "headcount" in c && c.headcount !== undefined),
-    payrollCost: overview.companies.some((c) => "payrollCost" in c && c.payrollCost !== undefined),
+    headcount: overview.companies.some((c) => c.headcount !== undefined),
+    payrollCost: overview.companies.some((c) => c.payrollCost !== undefined),
+    grossProfitAfterPayroll: overview.companies.some((c) => c.grossProfitAfterPayroll !== undefined),
   };
 }
+
+/** 本月檢視時薪資只有年度數字的提示（任何一列 payrollYearOnly 就顯示）。 */
+export const PAYROLL_YEAR_ONLY_NOTE = "薪資成本僅年度";
+
+/** 人事區「在職」的口徑說明（集團總覽的人數會改成同一口徑）。 */
+export const HEADCOUNT_BASIS_NOTE = "在職＝到職日已到、尚未離職（離職日當天仍算在職）；新進／離職依到職日／離職日落在本月";
 
 /** 只有一家公司（列數 ≤ 1）→ 首頁改顯示單一公司摘要、不畫列表。 */
 export function isSingleCompany(rows: readonly CompanyRow[]): boolean {
@@ -205,10 +247,23 @@ export const bossLinks = {
   leaveApprovals: "/admin/approvals?status=pending",
   disbursementApprovals: "/admin/disbursements/approvals?scope=all",
   attendanceAnomalies: (period: string) => `/admin/attendance-sheets?period=${encodeURIComponent(period)}&anomaly=1`,
-  overtimeDrafts: (period: string | null) =>
-    period ? `/admin/overtime-settlements?status=draft&period=${encodeURIComponent(period)}` : "/admin/overtime-settlements?status=draft",
+  /** 待發加班另計是「所有月份」的草稿合計 → 另計頁開「未付款＋所有月份」。 */
+  overtimeDrafts: "/admin/overtime-settlements?status=draft&all=1",
   employees: "/admin/employees",
 } as const;
+
+/* ---------------------------------------------------------- 模組開關 --- */
+
+/**
+ * 首頁卡片連到的後台頁所屬分頁是否啟用（tenants.features.adminModules；分頁沒掛 module＝永遠啟用）。
+ * 不看角色（角色另由 isAdminPathAllowed 判斷）；未知路徑、首頁 → true。
+ */
+export function homeLinkModuleEnabled(href: string, modules: AdminModulesConfig | null | undefined): boolean {
+  const resolved = resolveAdminPath(href);
+  if (resolved.route.exact || resolved.tab === null) return true;
+  const tab = ADMIN_TABS[resolved.section].find((t) => t.key === resolved.tab);
+  return isModuleEnabled(modules, tab?.module);
+}
 
 /* -------------------------------------------- 下游頁面讀網址篩選（首頁帶過去的） --- */
 

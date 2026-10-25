@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { isEmployedOn } from "./employment-status.js"
 import { logger } from "../lib/logger.js"
 import { isMissingTableError } from "../lib/schema-compat.js"
 import { addDaysKey, monthRangeKeys } from "../lib/tz.js"
@@ -31,7 +32,8 @@ import { overdueDays, type OverdueBasis } from "./project-money.js"
  *     本月月表還沒產生時 sheetCount＝0，數字都是 0，前端顯示「本月月表尚未產生」。
  *   • 合規警示（10/17 月表異常碼）：seven_day_rule／regular_leave_work／daily_over_12h／monthly_ot_over_46h 逐件計數。
  *   • 加班超上限人數：本月月表有 overtime_beyond_cap(_unapproved) 異常的人數（M1 月加班上限，預設 40h）。
- *   • 待發加班另計：overtime_settlements status=draft 全部期別的筆數與金額合計（金額未填的另計 missingAmount 筆）。
+ *   • 待發加班另計：overtime_settlements status=draft 全部期別（分頁讀完）的筆數與金額合計（金額未填的另計 missingAmount 筆）；
+ *     首頁連到另計頁「未付款＋所有月份」（?status=draft&all=1）。
  *   • 人事：在職＝到職日 ≤ 今天且（未離職或離職日 ≥ 今天）；本月新進／離職＝到職日／離職日落在本月
  *     （與 /dashboard/headcount 同一套欄位：沒填到職日視為一直在職）。
  *   • 各公司逾期應收：與 /projects/receivables 同一份 buildReceivables＋租戶逾期起算基準，取 overdueDays > 0 的期別，
@@ -223,7 +225,7 @@ export function headcountSnapshot(rows: readonly EmployeeLite[], period: string,
   for (const e of rows) {
     const hired = e.hire_date ?? "0000-01-01"
     const term = e.terminated_at ? e.terminated_at.slice(0, 10) : null
-    if (hired <= today && (!term || term >= today)) active += 1
+    if (isEmployedOn(e, today)) active += 1
     if (e.hire_date && hired >= from && hired <= to) hires += 1
     if (term && term >= from && term <= to) exits += 1
   }
@@ -340,17 +342,25 @@ async function loadSheetFacts(ctx: BossSummaryCtx): Promise<SheetAnomalyFacts> {
 }
 
 async function loadDraftSettlements(ctx: BossSummaryCtx): Promise<DraftSettlementFacts | null> {
-  const { data, error } = await supabaseAdmin
-    .from("overtime_settlements")
-    .select("id, period, amount")
-    .eq("tenant_id", ctx.tenantId)
-    .eq("status", "draft")
-    .limit(PAGE_SIZE)
-  if (error) {
-    if (isMissingTableError(error)) return null
-    throw new Error(`boss-summary (overtime_settlements): ${error.message}`)
+  // 草稿不限期別、可能超過 PostgREST max-rows → 分頁讀完；表尚未遷移（0050 未套）→ null。
+  const rows: SettlementLite[] = []
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabaseAdmin
+      .from("overtime_settlements")
+      .select("id, period, amount")
+      .eq("tenant_id", ctx.tenantId)
+      .eq("status", "draft")
+      .order("id", { ascending: true })
+      .range(from, from + PAGE_SIZE - 1)
+    if (error) {
+      if (isMissingTableError(error)) return null
+      throw new Error(`boss-summary (overtime_settlements): ${error.message}`)
+    }
+    const page = (data ?? []) as SettlementLite[]
+    rows.push(...page)
+    if (page.length < PAGE_SIZE) break
   }
-  return summarizeDraftSettlements((data ?? []) as SettlementLite[])
+  return summarizeDraftSettlements(rows)
 }
 
 async function loadHeadcount(ctx: BossSummaryCtx): Promise<HeadcountFacts> {

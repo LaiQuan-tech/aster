@@ -23,20 +23,24 @@ import {
   getLatestBackupPeriod,
   changeParentCodeOf,
   getBossSummary,
+  getPendingRequestsCount,
   listRecentChangeProjects,
   type BossSummary,
   type CompanyPageSummary,
 } from "@/lib/dashboard-api";
 import { getGroupOverview } from "@/lib/group-overview-api";
-import type { GroupOverviewLite } from "@/lib/boss-dashboard";
+import { homeLinkModuleEnabled, type GroupOverviewLite } from "@/lib/boss-dashboard";
+import type { ApiError } from "@/lib/api-client";
 import { useEssState } from "@/lib/ess-state";
-import { GroupSection, PeopleSection, TodoSection } from "./_home-sections";
+import { GroupSection, PeopleSection, TodoSection, type SummaryLoad } from "./_home-sections";
 
 /* -------------------------------------------------------------- 老闆看板 -- */
 // 2026-10-25 首頁改版（業主核准），由上而下：
 //   1. 集團總覽（僅 HR／平台管理員）：GET /group-overview 整年一次＋boss-summary 的各公司逾期應收；
 //   2. 待處理、3. 人事：GET /dashboard/boss-summary 一次回傳（依角色裁切，會計沒有人事／集團）；
 //   4. 下面原有的卡片（營運看板）照舊，只拿掉已併入「待處理」的「待簽核假單」。
+//      （boss-summary 404＝API 還是舊版時，「待簽核假單」卡暫時回來當後備，待處理區顯示「需更新」。）
+//   新三區的卡片另依租戶模組開關（homeLinkModuleEnabled）隱藏停用模組的卡。
 // B9：每張卡各自獨立讀取、獨立失敗——用 Promise.allSettled 平行打既有端點
 // (不新增 API),任一支掛掉只讓那張卡顯示「載入失敗」,其餘照常顯示數字。
 // 2026-09-30 效能：每張卡只抓自己要顯示的欄位（lib/dashboard-api.ts：快照只讀最新月份、
@@ -144,13 +148,24 @@ export default function AdminOverview() {
   // （會計打 /group-overview 會 403，而且集團區本來就不畫）。
   const role = essState.me?.role ?? null;
   const isGroupViewer = role === "hr_admin" || role === "platform_admin";
-  const [summary, setSummary] = useState<Loadable<BossSummary>>(initLoadable<BossSummary>());
+  const [summary, setSummary] = useState<SummaryLoad>(initLoadable<BossSummary>());
+  // 前端比 API 先上線（boss-summary 404）：待處理區顯示「需更新」，舊的「待簽核假單」卡暫時回到營運看板當後備。
+  const [pendingReq, setPendingReq] = useState<Loadable<number>>(initLoadable<number>());
   const [overview, setOverview] = useState<Loadable<GroupOverviewLite>>(initLoadable<GroupOverviewLite>());
   useEffect(() => {
     let active = true;
     getBossSummary()
       .then((data) => active && setSummary({ loading: false, error: null, data }))
-      .catch((err) => active && setSummary({ loading: false, error: errMsg(err), data: null }));
+      .catch((err) => {
+        if (!active) return;
+        const outdated = (err as ApiError | null)?.status === 404;
+        setSummary({ loading: false, error: outdated ? null : errMsg(err), data: null, outdated });
+        if (outdated && canOpenRef.current("/admin/approvals")) {
+          getPendingRequestsCount()
+            .then((count) => active && setPendingReq({ loading: false, error: null, data: count }))
+            .catch((e) => active && setPendingReq({ loading: false, error: errMsg(e), data: null }));
+        }
+      });
     return () => {
       active = false;
     };
@@ -168,7 +183,12 @@ export default function AdminOverview() {
   // 本月：以 boss-summary 回的租戶當地月份為準，還沒回來先用瀏覽器當地月份。
   const month = summary.data ? Number(summary.data.period.slice(5, 7)) : new Date().getMonth() + 1;
   // 人事區：載入中依角色先決定要不要畫骨架（會計不畫）；回來後以 scope.people 為準。
-  const showPeople = summary.data ? summary.data.scope.people : essState.loaded ? isGroupViewer : false;
+  const showPeople = summary.data ? summary.data.scope.people : essState.loaded ? isGroupViewer && !summary.outdated && !summary.error : false;
+  // 新三區的卡片：角色開得了那一頁、且那一頁所屬模組有啟用（tenants.features.adminModules）才畫。
+  const linkOn = useMemo(
+    () => (href: string) => canOpen(href) && homeLinkModuleEnabled(href, modules),
+    [canOpen, modules],
+  );
 
   const [disb, setDisb] = useState<Loadable<DisbursementSummary>>(initLoadable<DisbursementSummary>());
   const [recv, setRecv] = useState<Loadable<ReceivablesCardData>>(initLoadable<ReceivablesCardData>());
@@ -330,8 +350,8 @@ export default function AdminOverview() {
   return (
     <>
       {isGroupViewer ? <GroupSection overview={overview} summary={summary} month={month} /> : null}
-      <TodoSection summary={summary} />
-      {showPeople ? <PeopleSection summary={summary} /> : null}
+      <TodoSection summary={summary} linkOn={linkOn} />
+      {showPeople ? <PeopleSection summary={summary} linkOn={linkOn} /> : null}
 
       <Card>
         <h2 className="mb-4 text-sm font-medium text-gray-500">營運看板</h2>
@@ -357,6 +377,12 @@ export default function AdminOverview() {
             <p className="text-xl font-semibold text-gray-900">{fmtMoney(bonus.data?.yearTotal)}</p>
             <p className="mt-0.5 text-xs text-gray-500">最近批次 {bonus.data?.latestLabel ?? "—"}</p>
           </BossCard>
+
+          {summary.outdated ? (
+            <BossCard href="/admin/approvals" label="待簽核假單" canOpen={canOpen} state={pendingReq}>
+              <p className="text-xl font-semibold text-gray-900">{pendingReq.data ?? 0}</p>
+            </BossCard>
+          ) : null}
 
           <BossCard href="/admin/projects/alerts" label="專案示警數" canOpen={canOpen} state={alerts}>
             <p className="text-xl font-semibold text-gray-900">{alerts.data?.total ?? 0}</p>

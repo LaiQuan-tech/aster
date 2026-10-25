@@ -15,8 +15,11 @@ import {
   isSingleCompany,
   needsAttention,
   optionalColumns,
+  HEADCOUNT_BASIS_NOTE,
+  PAYROLL_YEAR_ONLY_NOTE,
   type CompanyRow,
   type CompanyView,
+  type OptionalColumns,
   type GroupOverviewLite,
   type Kpi,
 } from "@/lib/boss-dashboard";
@@ -24,6 +27,18 @@ import {
 /* 後台首頁新版三區（集團總覽／待處理／人事）。資料由 page.tsx 讀好傳進來，這裡只負責畫；格式與計算在 lib/boss-dashboard.ts。 */
 
 export type Load<T> = { loading: boolean; error: string | null; data: T | null };
+
+/** boss-summary 的載入狀態；outdated＝API 還是舊版（404），前端先上線時的後備。 */
+export type SummaryLoad = Load<BossSummary> & { outdated?: boolean };
+
+/**
+ * 卡片連到的後台頁能不能開（角色 isAdminPathAllowed ＋ 租戶模組開關 homeLinkModuleEnabled）；
+ * 回 false 就不畫那張卡／那一行。page.tsx 組好傳進來。
+ */
+export type LinkOn = (href: string) => boolean;
+
+const ATTENDANCE_SHEETS = "/admin/attendance-sheets";
+const OVERTIME_SETTLEMENTS = "/admin/overtime-settlements";
 
 /* ----------------------------------------------------------- 共用元件 --- */
 
@@ -124,7 +139,7 @@ function KpiBlock({ title, kpi }: { title: string; kpi: Kpi | null }) {
   );
 }
 
-function CompanyTable({ rows, cols }: { rows: CompanyRow[]; cols: { headcount: boolean; payrollCost: boolean } }) {
+function CompanyTable({ rows, cols }: { rows: CompanyRow[]; cols: OptionalColumns }) {
   return (
     <>
       {/* 桌機：表格 */}
@@ -139,7 +154,8 @@ function CompanyTable({ rows, cols }: { rows: CompanyRow[]; cols: { headcount: b
               <th className="py-2 pr-3 text-right font-medium">毛利率</th>
               <th className="py-2 pr-3 text-right font-medium">逾期應收</th>
               {cols.headcount ? <th className="py-2 pr-3 text-right font-medium">人數</th> : null}
-              {cols.payrollCost ? <th className="py-2 text-right font-medium">薪資成本</th> : null}
+              {cols.payrollCost ? <th className="py-2 pr-3 text-right font-medium">薪資成本</th> : null}
+              {cols.grossProfitAfterPayroll ? <th className="py-2 text-right font-medium">扣人事後</th> : null}
             </tr>
           </thead>
           <tbody>
@@ -155,7 +171,10 @@ function CompanyTable({ rows, cols }: { rows: CompanyRow[]; cols: { headcount: b
                   {needsAttention(r.overdueCount) ? <span className="ml-1 text-xs text-gray-400">{r.overdueCount} 筆</span> : null}
                 </td>
                 {cols.headcount ? <td className="py-2 pr-3 text-right tabular-nums">{fmtCount(r.headcount)}</td> : null}
-                {cols.payrollCost ? <td className="py-2 text-right tabular-nums">{fmtWan(r.payrollCost)}</td> : null}
+                {cols.payrollCost ? <td className="py-2 pr-3 text-right tabular-nums">{fmtWan(r.payrollCost)}</td> : null}
+                {cols.grossProfitAfterPayroll ? (
+                  <td className={`py-2 text-right tabular-nums ${(r.grossProfitAfterPayroll ?? 0) < 0 ? "text-red-600" : ""}`}>{fmtWan(r.grossProfitAfterPayroll)}</td>
+                ) : null}
               </tr>
             ))}
           </tbody>
@@ -187,6 +206,12 @@ function CompanyTable({ rows, cols }: { rows: CompanyRow[]; cols: { headcount: b
                   <dd className="text-right tabular-nums text-gray-900">{fmtWan(r.payrollCost)}</dd>
                 </>
               ) : null}
+              {cols.grossProfitAfterPayroll ? (
+                <>
+                  <dt className="text-gray-500">扣人事後</dt>
+                  <dd className={`text-right tabular-nums ${(r.grossProfitAfterPayroll ?? 0) < 0 ? "text-red-600" : "text-gray-900"}`}>{fmtWan(r.grossProfitAfterPayroll)}</dd>
+                </>
+              ) : null}
             </dl>
           </li>
         ))}
@@ -195,7 +220,7 @@ function CompanyTable({ rows, cols }: { rows: CompanyRow[]; cols: { headcount: b
   );
 }
 
-function SingleCompanySummary({ row, cols }: { row: CompanyRow; cols: { headcount: boolean; payrollCost: boolean } }) {
+function SingleCompanySummary({ row, cols }: { row: CompanyRow; cols: OptionalColumns }) {
   return (
     <div>
       <p className="mb-2 truncate text-sm font-medium text-gray-800">{row.name}</p>
@@ -211,7 +236,17 @@ function SingleCompanySummary({ row, cols }: { row: CompanyRow; cols: { headcoun
           attention={needsAttention(row.overdue)}
         />
         {cols.headcount ? <Tile label="人數" value={fmtCount(row.headcount)} /> : null}
-        {cols.payrollCost ? <Tile label="薪資成本" value={fmtWan(row.payrollCost)} /> : null}
+        {cols.payrollCost ? (
+          <Tile label="薪資成本" value={fmtWan(row.payrollCost)} sub={row.payrollYearOnly ? PAYROLL_YEAR_ONLY_NOTE : undefined} />
+        ) : null}
+        {cols.grossProfitAfterPayroll ? (
+          <Tile
+            label="扣人事後"
+            value={fmtWan(row.grossProfitAfterPayroll)}
+            sub={row.payrollYearOnly ? PAYROLL_YEAR_ONLY_NOTE : undefined}
+            danger={(row.grossProfitAfterPayroll ?? 0) < 0}
+          />
+        ) : null}
       </div>
     </div>
   );
@@ -230,7 +265,8 @@ export function GroupSection({
   const kpis = overview.data ? groupKpis(overview.data, month) : null;
   const overdue = summary.data?.overdueReceivablesByCompany ?? null;
   const rows = overview.data ? companyRows(overview.data, overdue, view, month) : [];
-  const cols = overview.data ? optionalColumns(overview.data) : { headcount: false, payrollCost: false };
+  const cols: OptionalColumns = overview.data ? optionalColumns(overview.data) : { headcount: false, payrollCost: false, grossProfitAfterPayroll: false };
+  const payrollYearOnly = rows.some((r) => r.payrollYearOnly);
   const year = overview.data?.period.year;
 
   return (
@@ -278,6 +314,9 @@ export function GroupSection({
             ) : (
               <CompanyTable rows={rows} cols={cols} />
             )}
+            {payrollYearOnly && !isSingleCompany(rows) ? (
+              <p className="mt-2 text-xs text-gray-400">本月檢視：{PAYROLL_YEAR_ONLY_NOTE}，薪資成本與扣人事後顯示「—」，請切到「本年」。</p>
+            ) : null}
             {summary.data && summary.data.scope.receivablesByCompany && overdue === null ? (
               <p className="mt-2 text-xs text-gray-400">逾期應收暫時讀不到，顯示「—」。</p>
             ) : null}
@@ -329,7 +368,7 @@ function SplitTile({
   );
 }
 
-export function TodoSection({ summary }: { summary: Load<BossSummary> }) {
+export function TodoSection({ summary, linkOn }: { summary: SummaryLoad; linkOn: LinkOn }) {
   const s = summary.data;
   const loading = summary.loading;
   const scope = s?.scope;
@@ -339,8 +378,8 @@ export function TodoSection({ summary }: { summary: Load<BossSummary> }) {
   const noSheets = att !== null && att.sheetCount === 0;
 
   const approvalLines: Array<{ key: string; text: ReactNode; href: string }> = [];
-  if (loading || scope?.leaveApprovals) approvalLines.push({ key: "leave", text: `假單 ${fmtCount(s?.approvals.leave)}`, href: bossLinks.leaveApprovals });
-  if (loading || scope?.disbursementApprovals)
+  if ((loading || scope?.leaveApprovals) && linkOn(bossLinks.leaveApprovals)) approvalLines.push({ key: "leave", text: `假單 ${fmtCount(s?.approvals.leave)}`, href: bossLinks.leaveApprovals });
+  if ((loading || scope?.disbursementApprovals) && linkOn(bossLinks.disbursementApprovals))
     approvalLines.push({
       key: "disb",
       text: (
@@ -352,9 +391,19 @@ export function TodoSection({ summary }: { summary: Load<BossSummary> }) {
       href: bossLinks.disbursementApprovals,
     });
 
-  const showApprovals = loading || !!scope?.leaveApprovals || !!scope?.disbursementApprovals;
-  const showAttendance = loading || !!scope?.attendance;
-  const showOvertime = !loading && !!scope?.overtime;
+  const showApprovals = approvalLines.length > 0;
+  const showAttendance = (loading || !!scope?.attendance) && linkOn(ATTENDANCE_SHEETS);
+  const showOvertime = !loading && !!scope?.overtime && linkOn(OVERTIME_SETTLEMENTS);
+
+  if (summary.outdated) {
+    return (
+      <Card>
+        <SectionTitle title="待處理" />
+        <p className="text-sm text-amber-700">需更新：伺服器尚未提供首頁彙總資料（API 版本較舊），更新後就會顯示。待簽核假單暫列在下方「營運看板」。</p>
+      </Card>
+    );
+  }
+  if (!summary.error && !showApprovals && !showAttendance && !showOvertime) return null;
 
   return (
     <Card>
@@ -425,9 +474,9 @@ export function TodoSection({ summary }: { summary: Load<BossSummary> }) {
                       {ot?.draftCount ? <span className="text-gray-400">（{ot.draftCount} 筆{ot.draftMissingAmount ? `，${ot.draftMissingAmount} 筆未填金額` : ""}）</span> : null}
                     </>
                   ),
-                  href: bossLinks.overtimeDrafts(ot?.latestDraftPeriod ?? null),
+                  href: bossLinks.overtimeDrafts,
                 },
-                ...(period ? [{ key: "sheets", text: "看本月月表", href: bossLinks.attendanceAnomalies(period) }] : []),
+                ...(period && linkOn(ATTENDANCE_SHEETS) ? [{ key: "sheets", text: "看本月月表", href: bossLinks.attendanceAnomalies(period) }] : []),
               ]}
             />
           ) : null}
@@ -439,30 +488,38 @@ export function TodoSection({ summary }: { summary: Load<BossSummary> }) {
 
 /* -------------------------------------------------------------- 人事區 --- */
 
-export function PeopleSection({ summary }: { summary: Load<BossSummary> }) {
+export function PeopleSection({ summary, linkOn }: { summary: SummaryLoad; linkOn: LinkOn }) {
   const s = summary.data;
   const loading = summary.loading;
   const p = s?.people ?? null;
   const att = s?.attendance ?? null;
+  const showEmployees = linkOn(bossLinks.employees);
+  const showAttendance = linkOn(ATTENDANCE_SHEETS);
+  if (summary.outdated || (!showEmployees && !showAttendance)) return null;
   return (
     <Card>
       <SectionTitle title="人事" hint={s?.period ? `${s.period} 本月` : undefined} />
       {summary.error ? (
         <LoadError message={summary.error} />
       ) : (
+        <>
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <Tile label="在職" loading={loading} value={fmtCount(p?.active)} href={bossLinks.employees} />
-          <Tile label="本月新進" loading={loading} value={fmtCount(p?.hires)} href={bossLinks.employees} />
-          <Tile label="本月離職" loading={loading} value={fmtCount(p?.exits)} href={bossLinks.employees} attention={needsAttention(p?.exits)} />
-          <Tile
+          {showEmployees ? <Tile label="在職" loading={loading} value={fmtCount(p?.active)} href={bossLinks.employees} /> : null}
+          {showEmployees ? <Tile label="本月新進" loading={loading} value={fmtCount(p?.hires)} href={bossLinks.employees} /> : null}
+          {showEmployees ? (
+            <Tile label="本月離職" loading={loading} value={fmtCount(p?.exits)} href={bossLinks.employees} attention={needsAttention(p?.exits)} />
+          ) : null}
+          {showAttendance ? <Tile
             label="本月出勤異常"
             loading={loading}
             value={fmtCount(att?.anomalies)}
             sub={att && att.sheetCount === 0 ? "本月月表尚未產生" : undefined}
             href={s?.period ? bossLinks.attendanceAnomalies(s.period) : undefined}
             attention={needsAttention(att?.anomalies)}
-          />
+          /> : null}
         </div>
+        {showEmployees ? <p className="mt-2 text-xs text-gray-400">{HEADCOUNT_BASIS_NOTE}</p> : null}
+        </>
       )}
     </Card>
   );

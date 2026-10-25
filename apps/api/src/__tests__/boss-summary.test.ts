@@ -318,6 +318,28 @@ describe("GET /dashboard/boss-summary（fake supabase）", () => {
     expect(res.body.approvals.disbursements).toBe(2)
   })
 
+  it("待發加班另計：超過 1000 筆照樣分頁加總；表未遷移 → overtime 的另計欄 null", async () => {
+    fake.db.overtime_settlements = Array.from({ length: 1001 }, (_, i) => ({
+      id: `ot-${String(i).padStart(5, "0")}`,
+      tenant_id: TENANT_ID,
+      status: "draft",
+      period: i === 1000 ? "2026-09" : "2026-08",
+      amount: 1,
+    }))
+    const r = await buildBossSummary(
+      { tenantId: TENANT_ID, role: "hr_admin", features: null, period: "2026-10", today: "2026-10-25" },
+      { ...defaultBossSummaryLoaders, overdueByCompany: async () => [] },
+    )
+    expect(r.overtime).toMatchObject({ draftCount: 1001, draftAmount: 1001, latestDraftPeriod: "2026-09" })
+
+    fake.injectError({ table: "overtime_settlements", action: "select", error: { message: "missing", code: "42P01" } })
+    const missing = await buildBossSummary(
+      { tenantId: TENANT_ID, role: "hr_admin", features: null, period: "2026-10", today: "2026-10-25" },
+      { ...defaultBossSummaryLoaders, overdueByCompany: async () => [] },
+    )
+    expect(missing.overtime).toMatchObject({ draftCount: null, draftAmount: null })
+  })
+
   it("一般員工 → 403", async () => {
     const res = await get("/dashboard/boss-summary", STAFF_TOKEN)
     expect(res.status).toBe(403)

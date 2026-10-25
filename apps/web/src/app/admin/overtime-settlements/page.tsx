@@ -6,7 +6,7 @@ import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { MonthPicker } from "@/components/MonthPicker";
 import { apiDownload } from "@/lib/api-client";
-import { readEnumParam, readPeriodParam } from "@/lib/boss-dashboard";
+import { readEnumParam, readFlagParam, readPeriodParam } from "@/lib/boss-dashboard";
 import { getEmployees, type Employee } from "@/lib/admin-api";
 import {
   OT_CHANNELS,
@@ -52,12 +52,15 @@ export default function OvertimeSettlementsPage() {
     if (p) setPeriod(p);
     const st = readEnumParam<StatusFilter>(search, "status", ["draft", "paid", "all"]);
     if (st) setStatusFilter(st);
+    if (readFlagParam(search, "all")) setAllMonths(true);
     setQueryReady(true);
   }, []);
   // 依員工篩選（2026-10-13）：選了員工可勾「所有月份」看他歷月的另計明細。
   const [filterEmpId, setFilterEmpId] = useState("");
   const [allMonths, setAllMonths] = useState(false);
-  const showAllMonths = !!filterEmpId && allMonths;
+  // 「所有月份」：選了員工時看他歷月明細；或狀態是「未付款」時不選員工也能看全部月份的草稿（首頁「待發加班另計」帶 ?all=1）。
+  const allMonthsAvailable = !!filterEmpId || statusFilter === "draft";
+  const showAllMonths = allMonthsAvailable && allMonths;
   const [rows, setRows] = useState<OvertimeSettlement[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -208,7 +211,7 @@ export default function OvertimeSettlementsPage() {
               value={filterEmpId}
               onChange={(e) => {
                 setFilterEmpId(e.target.value);
-                if (!e.target.value) setAllMonths(false);
+                if (!e.target.value && statusFilter !== "draft") setAllMonths(false);
               }}
             >
               <option value="">全部員工</option>
@@ -219,7 +222,7 @@ export default function OvertimeSettlementsPage() {
               ))}
             </select>
           </div>
-          {filterEmpId && (
+          {allMonthsAvailable && (
             <label className="flex items-center gap-1.5 pb-2 text-sm text-gray-600">
               <input type="checkbox" checked={allMonths} onChange={(e) => setAllMonths(e.target.checked)} />
               所有月份
@@ -273,7 +276,7 @@ export default function OvertimeSettlementsPage() {
           <Empty>載入中…</Empty>
         ) : rows.length === 0 ? (
           <Empty>
-            {showAllMonths ? "這位員工" : period} 沒有需要另行給付的加班超額（月表核准後才會產生）
+            {showAllMonths ? (filterEmpId ? "這位員工" : "所有月份") : period} 沒有需要另行給付的加班超額（月表核准後才會產生）
           </Empty>
         ) : (
           <div className="overflow-x-auto">

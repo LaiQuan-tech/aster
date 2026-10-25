@@ -11,6 +11,8 @@ import {
   marginPct,
   needsAttention,
   optionalColumns,
+  homeLinkModuleEnabled,
+  PAYROLL_YEAR_ONLY_NOTE,
   readEnumParam,
   readFlagParam,
   readPeriodParam,
@@ -118,18 +120,53 @@ describe("集團 KPI 與各公司列", () => {
     const one = overview([company("A")]);
     expect(isSingleCompany(companyRows(one, [], "year", 10))).toBe(true);
     expect(isSingleCompany(companyRows(overview([company("A"), company("B")]), [], "year", 10))).toBe(false);
-    expect(optionalColumns(one)).toEqual({ headcount: false, payrollCost: false });
+    expect(optionalColumns(one)).toEqual({ headcount: false, payrollCost: false, grossProfitAfterPayroll: false });
     const withHc = overview([company("A", { headcount: 12 }), company("B")]);
-    expect(optionalColumns(withHc)).toEqual({ headcount: true, payrollCost: false });
+    expect(optionalColumns(withHc)).toEqual({ headcount: true, payrollCost: false, grossProfitAfterPayroll: false });
     expect(companyRows(withHc, [], "year", 10)[0]?.headcount).toBe(12);
+  });
+});
+
+describe("薪資成本：本月不拿整年數字充數", () => {
+  const withPayroll = (extra: Partial<GroupCompanyLite> = {}) =>
+    overview([company("A", { payrollCost: 240_000, grossProfitAfterPayroll: 460_000, ...extra }), company("B")]);
+
+  it("本年：照回應的年度薪資與扣人事後", () => {
+    const [a] = companyRows(withPayroll(), [], "year", 10);
+    expect(a).toMatchObject({ payrollCost: 240_000, grossProfitAfterPayroll: 460_000, payrollYearOnly: false });
+  });
+
+  it("本月且沒有 monthly[].payrollCost：薪資與扣人事後為 null（顯示「—」）並標 payrollYearOnly", () => {
+    const [a, b] = companyRows(withPayroll(), [], "month", 10);
+    expect(a).toMatchObject({ payrollCost: null, grossProfitAfterPayroll: null, payrollYearOnly: true });
+    // 回應根本沒有薪資欄的公司：維持 undefined、不標
+    expect(b).toMatchObject({ payrollCost: undefined, grossProfitAfterPayroll: undefined, payrollYearOnly: false });
+    expect(PAYROLL_YEAR_ONLY_NOTE).toBe("薪資成本僅年度");
+  });
+
+  it("本月且 monthly[].payrollCost 存在：用當月薪資算扣人事後", () => {
+    const monthly = months({ 10: { revenue: 300_000, expense: 100_000 } }).map((m) => ({ ...m, payrollCost: m.month === 10 ? 50_000 : null }));
+    const [a] = companyRows(withPayroll({ monthly }), [], "month", 10);
+    expect(a).toMatchObject({ payrollCost: 50_000, grossProfitAfterPayroll: 150_000, payrollYearOnly: false });
+    const [sep] = companyRows(withPayroll({ monthly }), [], "month", 9);
+    expect(sep).toMatchObject({ payrollCost: null, grossProfitAfterPayroll: null, payrollYearOnly: false });
+  });
+});
+
+describe("模組開關", () => {
+  it("homeLinkModuleEnabled：分頁掛了 module 的要啟用才 true；沒掛 module 的永遠 true", () => {
+    expect(homeLinkModuleEnabled("/admin/attendance-sheets?period=2026-10&anomaly=1", {})).toBe(true);
+    expect(homeLinkModuleEnabled("/admin/approvals?status=pending", null)).toBe(true);
+    expect(homeLinkModuleEnabled("/admin/attendance-settlement", {})).toBe(false);
+    expect(homeLinkModuleEnabled("/admin/attendance-settlement", { attendanceSettlement: true })).toBe(true);
+    expect(homeLinkModuleEnabled("/admin", {})).toBe(true);
   });
 });
 
 describe("下鑽連結與下游頁讀網址", () => {
   it("bossLinks 帶篩選", () => {
     expect(bossLinks.attendanceAnomalies("2026-10")).toBe("/admin/attendance-sheets?period=2026-10&anomaly=1");
-    expect(bossLinks.overtimeDrafts("2026-09")).toBe("/admin/overtime-settlements?status=draft&period=2026-09");
-    expect(bossLinks.overtimeDrafts(null)).toBe("/admin/overtime-settlements?status=draft");
+    expect(bossLinks.overtimeDrafts).toBe("/admin/overtime-settlements?status=draft&all=1");
     expect(bossLinks.leaveApprovals).toBe("/admin/approvals?status=pending");
     expect(bossLinks.disbursementApprovals).toBe("/admin/disbursements/approvals?scope=all");
   });
