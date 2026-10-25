@@ -8,6 +8,7 @@ import { MonthPicker } from "@/components/MonthPicker";
 import { apiDownload } from "@/lib/api-client";
 import { readEnumParam, readFlagParam, readPeriodParam } from "@/lib/boss-dashboard";
 import { getEmployees, type Employee } from "@/lib/admin-api";
+import { isVoidedBeyondCapDraft } from "@/lib/overtime-void";
 import {
   OT_CHANNELS,
   OT_CHANNEL_LABEL,
@@ -120,11 +121,13 @@ export default function OvertimeSettlementsPage() {
   );
 
   const totals = useMemo(() => {
-    const t = { minutes: 0, amount: 0, draft: 0, paid: 0 };
+    // 月表重開時作廢的草稿（0 分 0 元＋作廢註記）不是待發的錢：不計入未付款（分鐘、金額本來就是 0）。
+    const t = { minutes: 0, amount: 0, draft: 0, paid: 0, voided: 0 };
     for (const r of rows) {
       t.minutes += r.minutes ?? 0;
       t.amount += r.amount ?? 0;
       if (r.status === "paid") t.paid += 1;
+      else if (isVoidedBeyondCapDraft(r)) t.voided += 1;
       else t.draft += 1;
     }
     return t;
@@ -271,6 +274,11 @@ export default function OvertimeSettlementsPage() {
           <Stat label="未付款" value={`${totals.draft} 筆`} tone="amber" />
           <Stat label="已付款" value={`${totals.paid} 筆`} tone="slate" />
         </div>
+        {totals.voided > 0 ? (
+          <p className="-mt-2 mb-4 text-xs text-gray-400">
+            另有 {totals.voided} 筆已作廢（月表重開，待重新核准後重算），不計入未付款。
+          </p>
+        ) : null}
 
         {loading ? (
           <Empty>載入中…</Empty>
@@ -408,6 +416,7 @@ function SettlementRow({
   onPay: (row: OvertimeSettlement, paidOn: string) => Promise<void>;
 }) {
   const paid = row.status === "paid";
+  const voided = isVoidedBeyondCapDraft(row);
   const [amount, setAmount] = useState(row.amount === null ? "" : String(row.amount));
   const [note, setNote] = useState(row.note ?? "");
   const [paidOn, setPaidOn] = useState(todayKey());
@@ -471,13 +480,16 @@ function SettlementRow({
       </td>
       <td className="py-2 pr-3">
         <span
-          className={`rounded-full px-2 py-0.5 text-xs ${paid ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}
+          className={`rounded-full px-2 py-0.5 text-xs ${
+            paid ? "bg-green-100 text-green-700" : voided ? "bg-gray-100 text-gray-500" : "bg-amber-100 text-amber-700"
+          }`}
         >
-          {paid ? `已付款 ${row.paid_on ?? ""}` : "未付款"}
+          {paid ? `已付款 ${row.paid_on ?? ""}` : voided ? "已作廢（月表重開）" : "未付款"}
         </span>
       </td>
       <td className="py-2 whitespace-nowrap">
-        {!paid && (
+        {/* 作廢草稿等月表重新核准後重算，不給標記付款（避免付掉一筆 0 元列）。 */}
+        {!paid && !voided && (
           <div className="flex items-center gap-2">
             <input
               type="date"

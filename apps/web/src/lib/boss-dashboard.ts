@@ -176,18 +176,21 @@ export function headlineTiles(input: {
     const showDisb = visible("disbursementApprovals", bossLinks.disbursementApprovals);
     if (showLeave || showDisb) {
       const a = s?.approvals ?? null;
+      // 任一有權限的子項查詢失敗（null）→ 合計不可信，整格「—」；副標只列查得到的部分。
+      const partial = !!a && ((showLeave && a.leave === null) || (showDisb && a.disbursements === null));
       const parts: string[] = [];
-      if (a && showLeave) parts.push(`假單 ${fmtCount(a.leave)}`);
-      if (a && showDisb) parts.push(`放款 ${fmtCount(a.disbursements)}`);
+      if (a && showLeave && a.leave !== null) parts.push(`假單 ${fmtCount(a.leave)}`);
+      if (a && showDisb && a.disbursements !== null) parts.push(`放款 ${fmtCount(a.disbursements)}`);
+      const total = partial ? null : a?.total;
       tiles.push(
         tile({
           key: "approvals",
           label: "待簽核",
           loading: summary.loading,
-          value: fmtCount(a?.total),
+          value: fmtCount(total),
           sub: parts.length > 0 ? parts.join("・") : null,
           href: showLeave ? href(bossLinks.leaveApprovals) : href(bossLinks.disbursementApprovals),
-          tone: needsAttention(a?.total) ? "attention" : "normal",
+          tone: needsAttention(total) ? "attention" : "normal",
         }),
       );
     }
@@ -312,6 +315,26 @@ export function todoItems(input: { summary: SummaryLoad; pendingLeave: Load<numb
   });
   push(bossLinks.attendanceSheets, att?.anomalies, { key: "anomalies", icon: "clock", text: "出勤異常", unit: "件", href: sheets, tone: "attention" });
   return items;
+}
+
+/**
+ * 「需要你處理」的資料是否不完整：清單用到的欄位裡，有權限（scope true）卻是 null（子查詢失敗）的任何一個；
+ * 舊 API（404）時看假單後備有沒有讀到。清單為空時據此顯示「部分資料讀不到」而不是綠色 ✓
+ * （讀不到不代表沒事）。boss-summary 整支失敗另由畫面顯示「暫時讀不到」。
+ */
+export function todoDataIncomplete(input: { summary: SummaryLoad; pendingLeave: Load<number> }): boolean {
+  const { summary, pendingLeave } = input;
+  if (summary.outdated) return !!pendingLeave.error;
+  const s = summary.data;
+  if (!s) return false;
+  const sc = s.scope;
+  return (
+    (sc.leaveApprovals && s.approvals.leave === null) ||
+    (sc.disbursementApprovals && s.approvals.disbursements === null) ||
+    (sc.attendance && s.attendance === null) ||
+    (sc.overtime && (s.overtime === null || s.overtime.overCapPeople === null || s.overtime.draftCount === null)) ||
+    (sc.projectAlerts === true && (s.projectAlerts ?? null) === null)
+  );
 }
 
 /* ---------------------------------------------------------- 模組開關 --- */

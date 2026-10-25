@@ -21,6 +21,7 @@ import {
   summarizeReceivables,
   type BossSummaryLoaders,
 } from "../services/boss-summary.js"
+import { BEYOND_CAP_VOID_NOTE } from "../services/overtime-void.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 /**
@@ -95,8 +96,8 @@ function seed(features: Row = {}) {
     { id: "o1", tenant_id: TENANT_ID, status: "draft", period: "2026-08", amount: "1200.5" },
     { id: "o2", tenant_id: TENANT_ID, status: "draft", period: "2026-09", amount: null },
     { id: "o3", tenant_id: TENANT_ID, status: "paid", period: "2026-09", amount: 5000 },
-    // 月表重開時作廢的草稿（minutes／amount 清成 0）：不算待發
-    { id: "o4", tenant_id: TENANT_ID, status: "draft", period: "2026-10", amount: 0, minutes: 0 },
+    // 月表重開時作廢的草稿（minutes／amount 清成 0＋作廢註記）：不算待發
+    { id: "o4", tenant_id: TENANT_ID, status: "draft", source: "beyond_cap", period: "2026-10", amount: 0, minutes: 0, note: BEYOND_CAP_VOID_NOTE },
   ]
 }
 
@@ -177,14 +178,20 @@ describe("純函式：金額與彙總", () => {
     })
   })
 
-  it("summarizeDraftSettlements：金額合計、未填金額筆數、最近期別；minutes＝0 的作廢草稿不計", () => {
+  it("summarizeDraftSettlements：金額合計、未填金額筆數、最近期別；只排除月表重開作廢的草稿", () => {
+    const voided = { source: "beyond_cap", minutes: 0, note: BEYOND_CAP_VOID_NOTE }
     expect(summarizeDraftSettlements([
       { period: "2026-08", amount: "100.1" },
       { period: "2026-09", amount: null },
       { period: "2026-07", amount: 0.2, minutes: 30 },
-      { period: "2026-10", amount: 0, minutes: 0 },
-      { period: "2026-11", amount: null, minutes: "0" },
+      { period: "2026-10", amount: 0, ...voided },
+      { period: "2026-11", amount: null, ...voided, minutes: "0" },
     ])).toEqual({ count: 3, amount: 100.3, missingAmount: 1, latestPeriod: "2026-09" })
+    // 手動補登的「0 分鐘固定金額」、或沒有作廢註記的 0 分鐘草稿 → 照算
+    expect(summarizeDraftSettlements([
+      { period: "2026-10", amount: 500, source: "manual", minutes: 0, note: null },
+      { period: "2026-10", amount: 0, source: "beyond_cap", minutes: 0, note: "其他備註" },
+    ])).toMatchObject({ count: 2, amount: 500 })
     expect(summarizeDraftSettlements([])).toEqual({ count: 0, amount: 0, missingAmount: 0, latestPeriod: null })
   })
 

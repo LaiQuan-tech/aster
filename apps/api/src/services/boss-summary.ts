@@ -6,6 +6,7 @@ import { addDaysKey, monthRangeKeys } from "../lib/tz.js"
 import { buildReceivables, loadP3Settings } from "./project-application-store.js"
 import { overdueDays, type OverdueBasis } from "./project-money.js"
 import { currentAlerts } from "./project-alert-store.js"
+import { isVoidedBeyondCapDraft } from "./overtime-void.js"
 
 /**
  * 後台首頁（老闆看板）的彙總端點 GET /dashboard/boss-summary（2026-10-25 業主核准）。
@@ -35,7 +36,8 @@ import { currentAlerts } from "./project-alert-store.js"
  *   • 合規警示（10/17 月表異常碼）：seven_day_rule／regular_leave_work／daily_over_12h／monthly_ot_over_46h 逐件計數。
  *   • 加班超上限人數：本月月表有 overtime_beyond_cap(_unapproved) 異常的人數（M1 月加班上限，預設 40h）。
  *   • 待發加班另計：overtime_settlements status=draft 全部期別（分頁讀完）的筆數與金額合計（金額未填的另計 missingAmount 筆）；
- *     minutes＝0 的草稿不算——月表退回／重開時作廢的草稿會被清成 0 分 0 元（attendance-sheets.ts 超額另計作廢），不是待發的錢。
+ *     作廢草稿不算——月表退回／重開時會被清成 0 分 0 元並註記（判斷見 overtime-void.ts isVoidedBeyondCapDraft；
+ *     手動補登的「0 分鐘固定金額」另計照算）。
  *     首頁連到另計頁「未付款＋所有月份」（?status=draft&all=1）。
  *   • 人事：在職＝到職日 ≤ 今天且（未離職或離職日 ≥ 今天）；本月新進／離職＝到職日／離職日落在本月
  *     （與 /dashboard/headcount 同一套欄位：沒填到職日視為一直在職）。
@@ -226,16 +228,19 @@ export function aggregateSheetAnomalies(sheets: readonly SheetLite[], days: read
   return { sheetCount: sheets.length, anomalies, anomalySheets, compliance, overCapPeople: overCap.size }
 }
 
-export type SettlementLite = { period: string | null; amount: unknown; minutes?: unknown }
+export type SettlementLite = {
+  period: string | null
+  amount: unknown
+  status?: string | null
+  source?: string | null
+  minutes?: unknown
+  note?: string | null
+}
 export type DraftSettlementFacts = { count: number; amount: number; missingAmount: number; latestPeriod: string | null }
 
-/** 月表退回／重開時作廢的草稿（minutes 清成 0）：不是待發的錢，不計。minutes 沒選（undefined）／null 照算。 */
-export function isVoidedDraft(r: { minutes?: unknown }): boolean {
-  return toNum(r.minutes) === 0
-}
-
+/** rows 都是 status=draft 的列；月表重開作廢的草稿（isVoidedBeyondCapDraft）不是待發的錢，不計。 */
 export function summarizeDraftSettlements(rows: readonly SettlementLite[]): DraftSettlementFacts {
-  const live = rows.filter((r) => !isVoidedDraft(r))
+  const live = rows.filter((r) => !isVoidedBeyondCapDraft({ ...r, status: r.status ?? "draft" }))
   let missingAmount = 0
   let latestPeriod: string | null = null
   for (const r of live) {
@@ -361,7 +366,7 @@ async function loadDraftSettlements(ctx: BossSummaryCtx): Promise<DraftSettlemen
   for (let from = 0; ; from += PAGE_SIZE) {
     const { data, error } = await supabaseAdmin
       .from("overtime_settlements")
-      .select("id, period, amount, minutes")
+      .select("id, period, amount, status, source, minutes, note")
       .eq("tenant_id", ctx.tenantId)
       .eq("status", "draft")
       .order("id", { ascending: true })

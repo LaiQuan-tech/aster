@@ -129,7 +129,16 @@ function TodoRow({ item }: { item: TodoItem }) {
   );
 }
 
-export function TodoList({ items, state }: { items: TodoItem[]; state: Pick<Load<unknown>, "loading" | "error"> }) {
+export function TodoList({
+  items,
+  state,
+  incomplete,
+}: {
+  items: TodoItem[];
+  state: Pick<Load<unknown>, "loading" | "error">;
+  /** 有權限的欄位讀不到（lib todoDataIncomplete）：清單空時不能說「沒有待處理」。 */
+  incomplete: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
   const shown = expanded ? items : items.slice(0, TODO_LIMIT);
   const hidden = items.length - shown.length;
@@ -143,9 +152,15 @@ export function TodoList({ items, state }: { items: TodoItem[]; state: Pick<Load
           <Skeleton className="h-6 w-2/3" />
         </div>
       ) : items.length === 0 ? (
-        <p className={`mt-3 text-sm ${state.error ? "text-gray-400" : "text-emerald-700"}`} title={state.error ?? undefined}>
-          {state.error ? "待處理事項暫時讀不到 —" : "目前沒有待處理事項 ✓"}
-        </p>
+        state.error ? (
+          <p className="mt-3 text-sm text-gray-400" title={state.error}>
+            待處理事項暫時讀不到 —
+          </p>
+        ) : incomplete ? (
+          <p className="mt-3 text-sm text-amber-700">部分資料讀不到，請稍後重新整理</p>
+        ) : (
+          <p className="mt-3 text-sm text-emerald-700">目前沒有待處理事項 ✓</p>
+        )
       ) : (
         <>
           <ul className="mt-1 divide-y divide-gray-100">

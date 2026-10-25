@@ -16,6 +16,7 @@ import { groupOverviewRouter } from "../routes/group-overview.js"
 import { clearTenantTimezoneCache } from "../lib/tenant-tz.js"
 import { buildGroupModel, monthOfPeriod, summarizeGroupOverview, type GroupOverviewData } from "../services/group-overview.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
+import { BEYOND_CAP_VOID_NOTE } from "../services/overtime-void.js"
 
 /**
  * 集團總覽的人事（2026-10-25）：各公司在職人數、薪資成本、毛利扣人事成本後，未指派另列不分攤。
@@ -143,8 +144,10 @@ describe("GET /group-overview — 人事（在職人數、薪資成本）", () =
       { id: "OT1", tenant_id: TENANT_ID, employee_id: E_B1, period: "2026-03", amount: "3000", status: "paid" },
       { id: "OT2", tenant_id: TENANT_ID, employee_id: E_A1, period: "2026-04", amount: 1200, status: "draft" },
       { id: "OT3", tenant_id: TENANT_ID, employee_id: E_A1, period: "2026-05", amount: null, status: "draft" },
-      // 月表重開時作廢的草稿（minutes／amount 清成 0）：不計筆數
-      { id: "OT6", tenant_id: TENANT_ID, employee_id: E_A1, period: "2026-06", amount: 0, minutes: 0, status: "draft" },
+      // 月表重開時作廢的草稿（minutes／amount 清成 0＋作廢註記）：不計筆數
+      { id: "OT6", tenant_id: TENANT_ID, employee_id: E_A1, period: "2026-06", amount: 0, minutes: 0, status: "draft", source: "beyond_cap", note: BEYOND_CAP_VOID_NOTE },
+      // 手動補登的「0 分鐘固定金額」：照算（不是作廢）
+      { id: "OT7", tenant_id: TENANT_ID, employee_id: E_A1, period: "2026-06", amount: 300, minutes: 0, status: "draft", source: "manual", note: null },
       { id: "OT4", tenant_id: TENANT_ID, employee_id: E_HR, period: "2026-03", amount: 500, status: "void" },
       { id: "OT5", tenant_id: OTHER_TENANT_ID, employee_id: E_OTHER, period: "2026-03", amount: 9999, status: "paid" },
     ]
@@ -153,12 +156,12 @@ describe("GET /group-overview — 人事（在職人數、薪資成本）", () =
     expect(company(body, CO_B).payrollCostNet).toBe(48749.5)
     expect(company(body, CO_A).payrollCostNet).toBe(110000.5)
     expect(company(body, CO_B).overtimeSettlementCost).toBe(3000)
-    expect(company(body, CO_A).overtimeSettlementCost).toBe(1200)
+    expect(company(body, CO_A).overtimeSettlementCost).toBe(1500)
     expect(body.group.payrollCostNet).toBe(180000.5 - 1250.5)
-    expect(body.group.overtimeSettlementCost).toBe(4200)
+    expect(body.group.overtimeSettlementCost).toBe(4500)
     // 扣人事成本後仍以 gross 為準
     expect(company(body, CO_B).grossProfitAfterPayroll).toBe(-60000)
-    expect(body.payroll).toMatchObject({ overtimeSettlementAvailable: true, overtimeSettlementCount: 3, overtimeSettlementDraftCount: 2, overtimeSettlementNoAmountCount: 1 })
+    expect(body.payroll).toMatchObject({ overtimeSettlementAvailable: true, overtimeSettlementCount: 4, overtimeSettlementDraftCount: 3, overtimeSettlementNoAmountCount: 1 })
   })
 
   it("overtime_settlements 表不存在 → overtimeSettlementCost 全 null，其他照常", async () => {

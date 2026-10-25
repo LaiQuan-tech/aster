@@ -3,6 +3,7 @@ import { employeesHaveCompany, isMissingTableError, warnSchemaGapOnce } from "..
 import { isEmployedOn } from "./employment-status.js"
 import { defaultCompanyOf, loadTenantCompanies, type CompanyLite } from "./project-company.js"
 import { effectiveBillingAmount, pct1 } from "./project-money.js"
+import { isVoidedBeyondCapDraft } from "./overtime-void.js"
 
 /**
  * 集團總覽（2026-10-11 業主拍板第一版）：跨公司彙總入帳收入、放款支出與專案毛利。
@@ -174,8 +175,10 @@ export type OvertimeSettlementInputRow = {
   period: string
   amount: Numeric
   status: string | null
-  /** 超額分鐘；草稿為 0＝月表退回／重開時作廢（attendance-sheets.ts 超額另計作廢），不計筆數。省略＝視為有效。 */
+  /** 作廢判斷用（overtime-void.ts isVoidedBeyondCapDraft）：月表重開時作廢的草稿不計筆數。省略＝視為有效。 */
+  source?: string | null
   minutes?: Numeric
+  note?: string | null
 }
 
 /** 人事成本的口徑說明（API 回應 payroll.basisNote、頁面照抄）。 */
@@ -443,7 +446,7 @@ async function loadOvertimeSettlements(tenantId: string, year: number): Promise<
   for (let offset = 0; ; offset += PAGE_SIZE) {
     const { data, error } = await supabaseAdmin
       .from("overtime_settlements")
-      .select("id, employee_id, period, amount, status, minutes")
+      .select("id, employee_id, period, amount, status, source, minutes, note")
       .eq("tenant_id", tenantId)
       .in("status", ["draft", "paid"])
       .gte("period", `${year}-01`)
@@ -716,8 +719,8 @@ export function buildGroupModel(data: GroupOverviewData): GroupModel {
   }
   for (const ot of data.overtimeSettlements ?? []) {
     if (ot.status !== "draft" && ot.status !== "paid") continue
-    // 作廢的草稿（minutes 清成 0、金額 0）：不是待發的另計，筆數／未填金額都不算。
-    if (ot.status === "draft" && ot.minutes !== null && ot.minutes !== undefined && ot.minutes !== "" && Number(ot.minutes) === 0) continue
+    // 月表重開時作廢的草稿：不是待發的另計，筆數／未填金額都不算（手動補登的 0 分鐘固定金額照算）。
+    if (isVoidedBeyondCapDraft(ot)) continue
     const month = monthOfPeriod(ot.period, year)
     if (month === null) continue
     const key = employeeCompany.get(ot.employee_id) ?? UNASSIGNED_EMPLOYEES_KEY

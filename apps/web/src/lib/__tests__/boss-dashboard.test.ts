@@ -11,6 +11,7 @@ import {
   readEnumParam,
   readFlagParam,
   readPeriodParam,
+  todoDataIncomplete,
   todoItems,
   type GroupOverviewLite,
   type Load,
@@ -181,6 +182,24 @@ describe("頂部大數字 headlineTiles", () => {
     expect(sub.find((t) => t.key === "receivables")).toMatchObject({ value: "—", sub: null });
   });
 
+  it("待簽核：任一有權限的子項查詢失敗 → 整格「—」，副標只列查得到的部分", () => {
+    const partial = hrSummary({ approvals: { leave: null, disbursements: 3, disbursementAmount: 1, total: 3 } });
+    const tile = headlineTiles({ viewer: "group", summary: s(partial), overview: done(overview(1)), pendingLeave: NONE, linkOn: HR_LINK }).find(
+      (t) => t.key === "approvals",
+    );
+    expect(tile).toMatchObject({ value: "—", sub: "放款 3", tone: "normal" });
+    // 會計沒有假單權限 → 假單 null 不算失敗
+    const acc = headlineTiles({ viewer: "finance", summary: s(accSummary()), overview: loading(), pendingLeave: NONE, linkOn: ACC_LINK }).find(
+      (t) => t.key === "approvals",
+    );
+    expect(acc?.value).toBe("3");
+    // 兩個都失敗 → 「—」、沒有副標
+    const both = hrSummary({ approvals: { leave: null, disbursements: null, disbursementAmount: null, total: null } });
+    expect(
+      headlineTiles({ viewer: "group", summary: s(both), overview: done(overview(1)), pendingLeave: NONE, linkOn: HR_LINK }).find((t) => t.key === "approvals"),
+    ).toMatchObject({ value: "—", sub: null });
+  });
+
   it("舊 API（boss-summary 404）：待簽核退回只算假單；未收款／在職「—」", () => {
     const outdated: SummaryLoad = { loading: false, error: null, data: null, outdated: true };
     const tiles = headlineTiles({ viewer: "group", summary: outdated, overview: done(overview(1)), pendingLeave: done(12), linkOn: HR_LINK });
@@ -239,6 +258,25 @@ describe("需要你處理 todoItems", () => {
     expect(todoItems({ summary: s(sum), pendingLeave: NONE, linkOn: HR_LINK }).find((i) => i.key === "overtimeDrafts")?.text).toBe("加班另計待發放（2 筆未填金額）");
     expect(todoItems({ summary: loading(), pendingLeave: NONE, linkOn: HR_LINK })).toEqual([]);
     expect(todoItems({ summary: failed(), pendingLeave: NONE, linkOn: HR_LINK })).toEqual([]);
+  });
+
+  it("todoDataIncomplete：有權限的清單欄位為 null 才算不完整（清單空時改顯示「部分資料讀不到」）", () => {
+    expect(todoDataIncomplete({ summary: s(hrSummary()), pendingLeave: NONE })).toBe(false);
+    expect(todoDataIncomplete({ summary: s(hrSummary({ attendance: null })), pendingLeave: NONE })).toBe(true);
+    expect(todoDataIncomplete({ summary: s(hrSummary({ projectAlerts: null })), pendingLeave: NONE })).toBe(true);
+    expect(
+      todoDataIncomplete({ summary: s(hrSummary({ overtime: { overCapPeople: 0, draftCount: null, draftAmount: null, draftMissingAmount: null, latestDraftPeriod: null } })), pendingLeave: NONE }),
+    ).toBe(true);
+    expect(todoDataIncomplete({ summary: s(hrSummary({ approvals: { leave: 0, disbursements: null, disbursementAmount: null, total: 0 } })), pendingLeave: NONE })).toBe(true);
+    // 會計沒權限的欄位本來就是 null → 不算
+    expect(todoDataIncomplete({ summary: s(accSummary()), pendingLeave: NONE })).toBe(false);
+    // 與清單無關的欄位（未收款）失敗不影響清單
+    expect(todoDataIncomplete({ summary: s(hrSummary({ receivables: null })), pendingLeave: NONE })).toBe(false);
+    // 載入中、舊 API
+    expect(todoDataIncomplete({ summary: loading(), pendingLeave: NONE })).toBe(false);
+    const outdated: SummaryLoad = { loading: false, error: null, data: null, outdated: true };
+    expect(todoDataIncomplete({ summary: outdated, pendingLeave: failed() })).toBe(true);
+    expect(todoDataIncomplete({ summary: outdated, pendingLeave: done(0) })).toBe(false);
   });
 
   it("舊 API（404）→ 只剩假單", () => {

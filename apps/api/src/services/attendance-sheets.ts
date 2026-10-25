@@ -56,6 +56,7 @@ import {
 } from "./compliance.js"
 import { writeAuditLog } from "./audit.js"
 import { dayFlagsOf } from "./day-flags.js"
+import { BEYOND_CAP_VOID_NOTE } from "./overtime-void.js"
 import { assertPeriodOpen } from "./period-lock.js"
 import { exemptDatesOf, loadLateReportsForPeriod, undecidedCountOf, type LateReportRow } from "./late-reports.js"
 import {
@@ -2667,8 +2668,8 @@ async function upsertBeyondCapSettlement(
   return warnings
 }
 
-/** 另計表作廢註記（月表退回／重開後，待重新核准時 upsertBeyondCapSettlement 重算分鐘與金額）。 */
-export const BEYOND_CAP_VOID_NOTE = "月表已重開，待重新核准後重算"
+// 作廢註記常數與「作廢草稿」判斷搬到 overtime-void.ts 共用（boss-summary／group-overview 也要用）；這裡 re-export 維持舊匯入點。
+export { BEYOND_CAP_VOID_NOTE }
 
 /**
  * 月表從 approved 退回／重開時，該員該期 source='beyond_cap' 的另計表（2026-10-17 驗收修正 N1：避免重複給付）：

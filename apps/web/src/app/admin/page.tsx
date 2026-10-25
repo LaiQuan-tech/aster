@@ -7,6 +7,7 @@ import { getGroupOverview } from "@/lib/group-overview-api";
 import {
   headlineTiles,
   homeLinkModuleEnabled,
+  todoDataIncomplete,
   todoItems,
   type GroupOverviewLite,
   type Load,
@@ -93,11 +94,12 @@ export default function AdminOverview() {
   );
   const items = useMemo(() => todoItems({ summary, pendingLeave, linkOn }), [summary, pendingLeave, linkOn]);
   const listState = summary.outdated ? pendingLeave : summary;
+  const incomplete = useMemo(() => todoDataIncomplete({ summary, pendingLeave }), [summary, pendingLeave]);
 
   return (
     <>
       {essState.loaded ? <HeadlineGrid tiles={tiles} /> : <HeadlineSkeleton />}
-      <TodoList items={items} state={listState} />
+      <TodoList items={items} state={listState} incomplete={incomplete} />
     </>
   );
 }
