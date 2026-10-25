@@ -22,13 +22,21 @@ import {
   getCompanyPageSummary,
   getLatestBackupPeriod,
   changeParentCodeOf,
-  getPendingRequestsCount,
+  getBossSummary,
   listRecentChangeProjects,
+  type BossSummary,
   type CompanyPageSummary,
 } from "@/lib/dashboard-api";
+import { getGroupOverview } from "@/lib/group-overview-api";
+import type { GroupOverviewLite } from "@/lib/boss-dashboard";
 import { useEssState } from "@/lib/ess-state";
+import { GroupSection, PeopleSection, TodoSection } from "./_home-sections";
 
 /* -------------------------------------------------------------- 老闆看板 -- */
+// 2026-10-25 首頁改版（業主核准），由上而下：
+//   1. 集團總覽（僅 HR／平台管理員）：GET /group-overview 整年一次＋boss-summary 的各公司逾期應收；
+//   2. 待處理、3. 人事：GET /dashboard/boss-summary 一次回傳（依角色裁切，會計沒有人事／集團）；
+//   4. 下面原有的卡片（營運看板）照舊，只拿掉已併入「待處理」的「待簽核假單」。
 // B9：每張卡各自獨立讀取、獨立失敗——用 Promise.allSettled 平行打既有端點
 // (不新增 API),任一支掛掉只讓那張卡顯示「載入失敗」,其餘照常顯示數字。
 // 2026-09-30 效能：每張卡只抓自己要顯示的欄位（lib/dashboard-api.ts：快照只讀最新月份、
@@ -132,11 +140,40 @@ export default function AdminOverview() {
   useEffect(() => {
     canOpenRef.current = canOpen;
   }, [canOpen]);
+  // 新版三區：boss-summary 掛載就打（finance 層都能打，後端依角色裁切）；集團總覽等 /me 確定是 HR／平台管理員才打
+  // （會計打 /group-overview 會 403，而且集團區本來就不畫）。
+  const role = essState.me?.role ?? null;
+  const isGroupViewer = role === "hr_admin" || role === "platform_admin";
+  const [summary, setSummary] = useState<Loadable<BossSummary>>(initLoadable<BossSummary>());
+  const [overview, setOverview] = useState<Loadable<GroupOverviewLite>>(initLoadable<GroupOverviewLite>());
+  useEffect(() => {
+    let active = true;
+    getBossSummary()
+      .then((data) => active && setSummary({ loading: false, error: null, data }))
+      .catch((err) => active && setSummary({ loading: false, error: errMsg(err), data: null }));
+    return () => {
+      active = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (!isGroupViewer) return;
+    let active = true;
+    getGroupOverview()
+      .then((data) => active && setOverview({ loading: false, error: null, data }))
+      .catch((err) => active && setOverview({ loading: false, error: errMsg(err), data: null }));
+    return () => {
+      active = false;
+    };
+  }, [isGroupViewer]);
+  // 本月：以 boss-summary 回的租戶當地月份為準，還沒回來先用瀏覽器當地月份。
+  const month = summary.data ? Number(summary.data.period.slice(5, 7)) : new Date().getMonth() + 1;
+  // 人事區：載入中依角色先決定要不要畫骨架（會計不畫）；回來後以 scope.people 為準。
+  const showPeople = summary.data ? summary.data.scope.people : essState.loaded ? isGroupViewer : false;
+
   const [disb, setDisb] = useState<Loadable<DisbursementSummary>>(initLoadable<DisbursementSummary>());
   const [recv, setRecv] = useState<Loadable<ReceivablesCardData>>(initLoadable<ReceivablesCardData>());
   const [annual, setAnnual] = useState<Loadable<AnnualCardData>>(initLoadable<AnnualCardData>());
   const [bonus, setBonus] = useState<Loadable<BonusCardData>>(initLoadable<BonusCardData>());
-  const [pendingReq, setPendingReq] = useState<Loadable<number>>(initLoadable<number>());
   const [alerts, setAlerts] = useState<Loadable<AlertsCardData>>(initLoadable<AlertsCardData>());
   const [announcements, setAnnouncements] = useState<Loadable<Announcement[]>>(initLoadable<Announcement[]>());
   const [changes, setChanges] = useState<Loadable<ProjectListItem[]>>(initLoadable<ProjectListItem[]>());
@@ -202,15 +239,6 @@ export default function AdminOverview() {
         }
       } catch (err) {
         if (active) setBonus({ loading: false, error: errMsg(err), data: null });
-      }
-    }
-
-    async function loadPending() {
-      try {
-        const count = await getPendingRequestsCount();
-        if (active) setPendingReq({ loading: false, error: null, data: count });
-      } catch (err) {
-        if (active) setPendingReq({ loading: false, error: errMsg(err), data: null });
       }
     }
 
@@ -285,7 +313,6 @@ export default function AdminOverview() {
       ["/admin/projects/receivables", loadReceivables],
       ["/admin/projects/annual", loadAnnual],
       ["/admin/bonus-runs", loadBonus],
-      ["/admin/approvals", loadPending],
       ["/admin/projects/alerts", loadAlerts],
       ["/admin/announcements", loadAnnouncements],
       ["/admin/projects", loadChanges],
@@ -302,8 +329,12 @@ export default function AdminOverview() {
 
   return (
     <>
+      {isGroupViewer ? <GroupSection overview={overview} summary={summary} month={month} /> : null}
+      <TodoSection summary={summary} />
+      {showPeople ? <PeopleSection summary={summary} /> : null}
+
       <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">老闆看板</h2>
+        <h2 className="mb-4 text-sm font-medium text-gray-500">營運看板</h2>
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
           <BossCard href="/admin/disbursements" label="放款" canOpen={canOpen} state={disb}>
             <p className="text-xl font-semibold text-gray-900">{fmtMoney(disb.data?.monthTotal)}</p>
@@ -325,10 +356,6 @@ export default function AdminOverview() {
           <BossCard href="/admin/bonus-runs" label="獎金本年已發放" canOpen={canOpen} state={bonus}>
             <p className="text-xl font-semibold text-gray-900">{fmtMoney(bonus.data?.yearTotal)}</p>
             <p className="mt-0.5 text-xs text-gray-500">最近批次 {bonus.data?.latestLabel ?? "—"}</p>
-          </BossCard>
-
-          <BossCard href="/admin/approvals" label="待簽核假單" canOpen={canOpen} state={pendingReq}>
-            <p className="text-xl font-semibold text-gray-900">{pendingReq.data ?? 0}</p>
           </BossCard>
 
           <BossCard href="/admin/projects/alerts" label="專案示警數" canOpen={canOpen} state={alerts}>

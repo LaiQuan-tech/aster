@@ -90,3 +90,49 @@ export async function getPendingRequestsCount(): Promise<number> {
   const r = await apiFetch<{ count?: number; requests?: unknown[] }>("/requests?status=pending&countOnly=1");
   return r.count ?? r.requests?.length ?? 0;
 }
+
+/* ---------------------------------------------- GET /dashboard/boss-summary --- */
+
+/** 這個角色看得到哪些區塊（後端 services/boss-summary.ts bossSummaryScope）；false＝沒權限，true 但值 null＝查詢失敗。 */
+export interface BossScope {
+  leaveApprovals: boolean;
+  disbursementApprovals: boolean;
+  attendance: boolean;
+  overtime: boolean;
+  people: boolean;
+  receivablesByCompany: boolean;
+}
+
+export interface BossSummary {
+  /** 租戶當地本月 YYYY-MM。 */
+  period: string;
+  today: string;
+  scope: BossScope;
+  approvals: {
+    leave: number | null;
+    disbursements: number | null;
+    disbursementAmount: number | null;
+    total: number | null;
+  };
+  attendance: {
+    sheetCount: number;
+    /** error／warn、不含合規碼。 */
+    anomalies: number;
+    anomalySheets: number;
+    compliance: { total: number; sevenDayRule: number; regularLeaveWork: number; dailyOver12h: number; monthlyOtOver46h: number };
+  } | null;
+  overtime: {
+    overCapPeople: number | null;
+    draftCount: number | null;
+    draftAmount: number | null;
+    draftMissingAmount: number | null;
+    latestDraftPeriod: string | null;
+  } | null;
+  people: { active: number; hires: number; exits: number } | null;
+  overdueReceivablesByCompany: Array<{ companyId: string; companyName: string; overdueAmount: number; overdueCount: number }> | null;
+}
+
+/** 首頁「待處理」「人事」兩區＋各公司逾期應收，一次回傳（finance 層可打，依角色裁切）。 */
+export function getBossSummary(): Promise<BossSummary> {
+  return apiFetch<BossSummary>("/dashboard/boss-summary");
+}

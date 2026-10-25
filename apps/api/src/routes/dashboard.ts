@@ -2,8 +2,12 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireFinance, requireHrAdmin } from "../middleware/role.js"
+import { resolveSelf } from "../middleware/scope.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { todayKey } from "../lib/tz.js"
+import { getTenantTimezone } from "../lib/tenant-tz.js"
+import { buildBossSummary } from "../services/boss-summary.js"
 
 export const dashboardRouter = Router()
 
@@ -112,6 +116,44 @@ dashboardRouter.get(
       }
 
       res.status(200).json({ series, totals })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * GET /dashboard/boss-summary — 後台首頁「待處理」「人事」兩區（＋集團區的各公司逾期應收）一次回傳。
+ * 口徑、角色裁切與失敗降級寫在 services/boss-summary.ts 檔頭。finance 層（HR／平台管理員／會計）可打，
+ * 會計只拿到導覽開放給他的那幾欄，其餘為 null（`scope` 標示）。子查詢失敗只讓該欄 null，不回 500。
+ */
+dashboardRouter.get(
+  "/dashboard/boss-summary",
+  requireAuth,
+  requireTenant,
+  requireFinance,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
+    try {
+      const [self, tz, tenant] = await Promise.all([
+        resolveSelf(tenantId, userId),
+        getTenantTimezone(tenantId),
+        supabaseAdmin.from("tenants").select("features").eq("id", tenantId).maybeSingle(),
+      ])
+      if (!self) {
+        res.status(403).json({ error: "forbidden" })
+        return
+      }
+      const today = todayKey(tz)
+      // features 讀不到（欄位異常）→ 當作沒設定：會計退回預設範圍，HR 不受影響。
+      const features = tenant.error ? null : ((tenant.data as { features?: unknown } | null)?.features ?? null)
+      const summary = await buildBossSummary({ tenantId, role: self.role, features, period: today.slice(0, 7), today })
+      res.status(200).json(summary)
     } catch (err) {
       next(err)
     }

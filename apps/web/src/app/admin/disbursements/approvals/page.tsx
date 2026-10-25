@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton, Segmented } from "@/components/admin-ui";
 import { getMeCached } from "@/lib/ess-state";
+import { readEnumParam } from "@/lib/boss-dashboard";
 import {
   approveDisbursement,
   getPendingDisbursementApprovals,
@@ -31,6 +32,12 @@ type Scope = "mine" | "all";
  */
 export default function DisbursementApprovalsPage() {
   const [scope, setScope] = useState<Scope>("mine");
+  // 首頁「待簽核 → 放款單」帶 ?scope=all 過來（非 finance 角色後端仍只回輪到自己的）：掛載時先套再載入。
+  const [queryReady, setQueryReady] = useState(false);
+  useEffect(() => {
+    if (readEnumParam<Scope>(window.location.search, "scope", ["all"])) setScope("all");
+    setQueryReady(true);
+  }, []);
   const [rows, setRows] = useState<PendingDisbursementApproval[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -53,8 +60,9 @@ export default function DisbursementApprovalsPage() {
   }, [scope]);
 
   useEffect(() => {
+    if (!queryReady) return;
     void load();
-  }, [load]);
+  }, [load, queryReady]);
 
   useEffect(() => {
     void (async () => {

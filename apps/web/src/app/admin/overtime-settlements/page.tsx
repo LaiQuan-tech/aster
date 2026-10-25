@@ -6,6 +6,7 @@ import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { MonthPicker } from "@/components/MonthPicker";
 import { apiDownload } from "@/lib/api-client";
+import { readEnumParam, readPeriodParam } from "@/lib/boss-dashboard";
 import { getEmployees, type Employee } from "@/lib/admin-api";
 import {
   OT_CHANNELS,
@@ -43,6 +44,16 @@ type StatusFilter = "draft" | "paid" | "all";
 export default function OvertimeSettlementsPage() {
   const [period, setPeriod] = useState(currentPeriod);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("draft");
+  // 首頁「待發加班另計」帶 ?status=draft&period=YYYY-MM 過來：掛載時先套網址篩選再載入。
+  const [queryReady, setQueryReady] = useState(false);
+  useEffect(() => {
+    const search = window.location.search;
+    const p = readPeriodParam(search);
+    if (p) setPeriod(p);
+    const st = readEnumParam<StatusFilter>(search, "status", ["draft", "paid", "all"]);
+    if (st) setStatusFilter(st);
+    setQueryReady(true);
+  }, []);
   // 依員工篩選（2026-10-13）：選了員工可勾「所有月份」看他歷月的另計明細。
   const [filterEmpId, setFilterEmpId] = useState("");
   const [allMonths, setAllMonths] = useState(false);
@@ -86,8 +97,9 @@ export default function OvertimeSettlementsPage() {
   }, [period, statusFilter, filterEmpId, showAllMonths]);
 
   useEffect(() => {
+    if (!queryReady) return;
     void load();
-  }, [load]);
+  }, [load, queryReady]);
 
   const empLabel = useCallback(
     (row: OvertimeSettlement) => {

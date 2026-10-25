@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { readFlagParam, readPeriodParam } from "@/lib/boss-dashboard";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { MonthPicker } from "@/components/MonthPicker";
 import { getDepartments, type Department } from "@/lib/admin-api";
@@ -57,6 +58,16 @@ export default function AttendanceSheetsPage() {
   const [status, setStatus] = useState<SheetStatus | "">("");
   const [deptId, setDeptId] = useState("");
   const [onlyAnomaly, setOnlyAnomaly] = useState(false);
+  // 首頁「出勤異常／合規警示」帶 ?period=YYYY-MM&anomaly=1 過來（lib/boss-dashboard.ts bossLinks）：
+  // 掛載時先套網址篩選再開始載入（queryReady），免得先用預設值載一次、又觸發「自動往前找有月表的月份」蓋掉帶來的月份。
+  const [queryReady, setQueryReady] = useState(false);
+  useEffect(() => {
+    const search = window.location.search;
+    const p = readPeriodParam(search);
+    if (p) setPeriod(p);
+    if (readFlagParam(search, "anomaly")) setOnlyAnomaly(true);
+    setQueryReady(true);
+  }, []);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [sheets, setSheets] = useState<SheetListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -130,8 +141,9 @@ export default function AttendanceSheetsPage() {
   }, []);
 
   useEffect(() => {
+    if (!queryReady) return;
     void load();
-  }, [load]);
+  }, [load, queryReady]);
 
   const stats = useMemo(() => {
     const byStatus: Partial<Record<SheetStatus, number>> = {};
