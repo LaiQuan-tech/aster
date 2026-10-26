@@ -76,7 +76,15 @@ async function registerSchedulers() {
   if (!attendanceQueue || !maybeRedis) return;
 
   const queue = attendanceQueue;
-  await Promise.allSettled(RETIRED_SCHEDULER_IDS.map((id) => queue.removeJobScheduler(id)));
+  const retired = await Promise.allSettled(RETIRED_SCHEDULER_IDS.map((id) => queue.removeJobScheduler(id)));
+  retired.forEach((result, index) => {
+    const id = RETIRED_SCHEDULER_IDS[index];
+    if (result.status === "fulfilled") {
+      logger.info({ schedulerId: id, removed: result.value }, "retired job scheduler cleanup");
+    } else {
+      logger.warn({ schedulerId: id, err: result.reason }, "retired job scheduler cleanup failed");
+    }
+  });
 
   if (process.env.ENABLE_WORKER_SCHEDULERS !== "true") {
     await Promise.allSettled(SCHEDULER_IDS.map((id) => queue.removeJobScheduler(id)));
@@ -170,7 +178,16 @@ async function registerSchedulers() {
         "annual-leave-grant": "/internal/leave/annual-grant",
         "holiday-calendar-import": "/internal/calendar/holiday-import",
       };
-      const endpoint = endpointByJob[job.name] ?? "/internal/attendance/daily-settle";
+      const endpoint = endpointByJob[job.name];
+      if (!endpoint) {
+        // 絕不預設打 daily-settle：未知名稱可能是已移除功能殘留在 Redis 的舊排程。
+        if (RETIRED_SCHEDULER_IDS.includes(job.name)) {
+          logger.info({ jobId: job.id, name: job.name }, "retired job skipped (feature removed)");
+        } else {
+          logger.warn({ jobId: job.id, name: job.name }, "unknown job name skipped (no endpoint mapping)");
+        }
+        return;
+      }
 
       if (job.name === "monthly-snapshot") {
         // 分頁續打：API 回 nextTenantId/nextTable/nextOffset/nextRun 就原樣帶回去，直到 done。

@@ -192,7 +192,7 @@ app.use(overtimeSettlementsRouter) // /my/overtime-cap、/overtime-settlements*�
 app.use(festivalBonusesRouter) // /festival-bonuses*（M6 三節獎金；WP7）
 app.use(dutyRostersRouter) // /duty-rosters*（M8 值日／總機；WP8）
 app.use(profileChangeRequestsRouter) // /profile-change-requests*（W6 員工改資料審核；WP8）
-app.use(internalCronRouter) // /internal/leave/annual-grant、（WP9）
+app.use(internalCronRouter) // /internal/leave/annual-grant、/internal/calendar/holiday-import（WP9；排程端點）
 // 2026-10-11 集團總覽
 app.use(groupOverviewRouter) // /group-overview、/group-overview/detail（跨公司入帳收入／放款支出／專案毛利；HR）
 

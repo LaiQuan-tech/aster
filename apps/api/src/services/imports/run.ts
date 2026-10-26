@@ -2,6 +2,7 @@ import { getTenantTimezone } from "../../lib/tenant-tz.js"
 import { zonedTimeToUtc } from "../../lib/tz.js"
 import { supabaseAdmin } from "../../lib/supabase.js"
 import { isPlatformAdminEmail } from "../../middleware/platform.js"
+import { seedHireAcknowledgements } from "../hire-acknowledgements.js"
 import { belongsToTenant, bulkInviteFromCsv, findAuthUserByEmail, type BulkInviteSummary } from "../auth-invite.js"
 import {
   EMPLOYMENT_TYPE_LABELS,
@@ -275,6 +276,12 @@ async function runSalaryAdjustments(tenantId: string, rows: ParsedImportRow[], d
   return out
 }
 
+async function employeeIdSet(tenantId: string): Promise<Set<string>> {
+  const { data, error } = await supabaseAdmin.from("employees").select("id").eq("tenant_id", tenantId)
+  if (error) throw new Error(`imports (employees snapshot): ${error.message}`)
+  return new Set((data ?? []).map((r) => r.id as string))
+}
+
 /* ── employees（批次建立帳號 → bulkInviteFromCsv） ─────────────────── */
 
 interface EmployeeInviteRow {
@@ -427,6 +434,9 @@ async function runEmployees(
     const r = row.value
     lines.push([r.name, r.email, r.empNo, r.deptName, r.employmentType, r.hireDate, r.role].map(csvCell).join(","))
   }
+  // 新人補簽：bulkInviteFromCsv 的 summary 沒有逐列 employeeId，前後取 id 集合差集（與 POST /employees/bulk-invite 一致）。
+  const seedsAcks = options.dryRunInvite !== true
+  const before = seedsAcks ? await employeeIdSet(tenantId) : new Set<string>()
   const summary = await bulkInviteFromCsv({
     tenantId,
     csv: lines.join("\n"),
@@ -434,6 +444,17 @@ async function runEmployees(
     actorEmpId: actorEmpId ?? null,
     context: "POST /imports/employees",
   })
+  if (seedsAcks && summary.created > 0) {
+    try {
+      for (const id of await employeeIdSet(tenantId)) {
+        if (before.has(id)) continue
+        await seedHireAcknowledgements(tenantId, id)
+      }
+    } catch (err) {
+      // best-effort：帳號都建好了，補簽清單失敗不該讓匯入回報失敗。
+      console.error("[imports] seed hire acknowledgements failed:", err)
+    }
+  }
   const excelLine = (csvLine: number): number => valid[csvLine - 2]?.line ?? csvLine
   const remapped: BulkInviteSummary = {
     ...summary,
