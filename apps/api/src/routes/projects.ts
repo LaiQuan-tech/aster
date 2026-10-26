@@ -1876,7 +1876,8 @@ projectsRouter.put(
         revisionInput,
       )
       await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "PUT /projects/:id/share-revision")
-      res.status(200).json(result)
+      // 獎金比例只給看得到毛利的人（老闆／HR）：經理只維護名單時，後端補上的目前比例不可原樣回傳（可反推毛利）。
+      res.status(200).json(scope.canSeeProfit ? result : { ...result, bonusRatePct: null })
     } catch (err) {
       if (err instanceof ProjectShareRevisionError) {
         res.status(err.httpStatus).json({ error: err.code })

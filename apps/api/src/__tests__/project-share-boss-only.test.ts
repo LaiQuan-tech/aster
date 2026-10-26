@@ -231,6 +231,8 @@ describe("PUT /projects/:id/share-revision — 只有老闆可以改比例", () 
     expect(res.status).toBe(200)
     const call = fake.rpcCalls.find((c) => c.name === "apply_project_share_revision")
     expect(call?.args.p_bonus_rate_pct).toBe(10)
+    // 回應不可帶回目前比例（經理看不到毛利，比例＋自己的應得可反推毛利）
+    expect(res.body.bonusRatePct).toBeNull()
   })
 
   it("HR 改獎金比例 → 403", async () => {
