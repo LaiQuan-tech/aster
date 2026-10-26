@@ -158,7 +158,7 @@ export function computeProjectAlerts(input: AlertInput, today: string): ProjectA
         }
       }
       if (!p.startsOn || !p.endsOn) {
-        push({ rule: "missing_dates", severity: "low", message: `沒填${!p.startsOn ? "起始日" : ""}${!p.startsOn && !p.endsOn ? "與" : ""}${!p.endsOn ? "預定完工日" : ""}，甘特圖與到期示警無法追蹤` })
+        push({ rule: "missing_dates", severity: "low", message: `沒填${!p.startsOn ? "起始日" : ""}${!p.startsOn && !p.endsOn ? "與" : ""}${!p.endsOn ? "預定完工日" : ""}，到期示警無法追蹤` })
       }
     }
     // 已到期（過完工日或已結案／解約）但還有未請款金額：錢還沒收完

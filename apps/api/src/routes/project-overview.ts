@@ -9,7 +9,7 @@ import { generateText, GeminiNotConfiguredError, isGeminiConfigured } from "../l
 export const projectOverviewRouter = Router()
 
 /**
- * 專案總覽（甘特圖／看板）與進度示警。
+ * 專案總覽（看板）與進度示警。
  * 路徑是 /projects/overview、/projects/alerts —— 必須掛在 projectsRouter 之前，
  * 否則會被 /projects/:id 吃掉。全租戶可讀（專案列表本來就是）。
  */
@@ -55,7 +55,6 @@ projectOverviewRouter.get("/projects/overview", requireAuth, requireTenant, asyn
           contractTotal: contractTotal || null,
           billedTotal: billed,
           scheduledTotal: scheduled,
-          milestones: billings.map((b) => ({ installmentNo: b.installmentNo, plannedOn: b.plannedOn, billedOn: b.billedOn, amount: b.amount })),
           lastActivity: input.lastActivity[p.id] ?? null,
           alerts: { high: pa.filter((a) => a.severity === "high").length, medium: pa.filter((a) => a.severity === "medium").length, low: pa.filter((a) => a.severity === "low").length },
         }

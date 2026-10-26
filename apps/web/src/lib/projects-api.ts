@@ -70,7 +70,7 @@ export interface Project {
   statusChangedAt: string | null
   /** 可見性：非 null 即已封存。 */
   archivedAt: string | null
-  /** 預定起訖日（甘特圖／示警）；可空。 */
+  /** 預定起訖日（示警）；可空。 */
   startsOn?: string | null
   endsOn?: string | null
   /** 開案日期（A5）。事後補 K 單的案子不用建立日／K 單日，用這欄真正開案那天。 */
@@ -867,12 +867,6 @@ export function deleteProjectDocument(projectId: string, docId: string) {
 
 /* ------------------------------------------------- 專案總覽與進度示警 -- */
 
-export interface OverviewMilestone {
-  installmentNo: number
-  plannedOn: string | null
-  billedOn: string | null
-  amount: number | null
-}
 export interface OverviewProject {
   id: string
   name: string
@@ -887,7 +881,6 @@ export interface OverviewProject {
   contractTotal: number | null
   billedTotal: number
   scheduledTotal: number
-  milestones: OverviewMilestone[]
   lastActivity: string | null
   alerts: { high: number; medium: number; low: number }
 }

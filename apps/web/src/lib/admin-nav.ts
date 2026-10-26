@@ -171,10 +171,10 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
     },
     {
       key: "overview",
-      label: "看板／甘特",
+      label: "看板",
       href: "/admin/projects/overview",
       title: "專案總覽",
-      desc: "看板依案情狀態分欄；甘特圖看預定期程與請款里程碑。點卡片進專案。",
+      desc: "看板依案情狀態分欄，可拖拉改狀態。點卡片進專案。",
     },
     {
       key: "receivables",

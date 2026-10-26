@@ -3,7 +3,7 @@
  * 全部無 React、無 IO，有 vitest（lib/__tests__/group-overview.test.ts）。
  * 後端口徑見 apps/api/src/services/group-overview.ts 檔頭；型別在 lib/group-overview-api.ts。
  *
- * 圖表沒有引入套件：repo 沒有圖表套件，專案總覽的甘特圖也是手刻 inline SVG，這裡沿用——頁面只負責畫，
+ * 圖表沒有引入套件：repo 沒有圖表套件，圖表一律手刻 inline SVG，這裡沿用——頁面只負責畫，
  * 座標、刻度、長條與折線路徑都在這裡算好，才測得到。
  */
 
