@@ -326,3 +326,93 @@ export function needsAnnouncementHint(list: ReadonlyArray<AnnouncementLike>): nu
   }
   return n;
 }
+
+/* ------------------------------------------------- 打卡卡片的按鈕 --- */
+
+/** 首頁打卡卡片當下的介面狀態（PunchCard 的 props 摘要）。 */
+export interface PunchCardUi {
+  /** 正在載入今日打卡（有逾時上限，見 app/ess/page.tsx PUNCH_LOAD_TIMEOUT_MS）。 */
+  loading: boolean;
+  /** 今日打卡載入失敗或逾時（狀態不明）。 */
+  loadFailed: boolean;
+  /** 打卡送出中（唯一允許「沒有可按的打卡鈕」的狀態）。 */
+  punching: boolean;
+  /** 成功或預檢中止後的短暫鎖定（2～3 秒，擋連點）。 */
+  locked: boolean;
+}
+
+/**
+ * 卡片上的一顆打卡鈕。`force`：按下時要送的種類由按鈕決定（狀態不明時的二選一、跨日的「改打上班卡」）；
+ * null＝照畫面推出的下一步（summary.nextType）。
+ */
+export interface PunchCardAction {
+  key: "next" | "in" | "out" | "carry_in";
+  label: string;
+  force: PunchType | null;
+  disabled: boolean;
+  variant: "primary" | "secondary";
+}
+
+/** 跨日上班中時給「昨天其實忘了打下班卡」的出口。 */
+export const CARRY_OVER_PUNCH_IN_LABEL = "昨天已下班（忘了打卡）？改打上班卡";
+/** 狀態不明（載入失敗／逾時）時的說明。 */
+export const PUNCH_STATE_UNKNOWN_HINT = "目前讀不到今天的打卡狀態，請依實際情況選擇上班或下班";
+
+/**
+ * 打卡卡片要畫哪些按鈕（2026-10-26）。契約：**除了送出中（punching），永遠有一顆可按（或幾秒內會解鎖）的打卡鈕**；
+ * 上班中（phase working）時第一顆一定是「下班打卡」。
+ *   - punching → 一顆「打卡中…」disabled。
+ *   - loadFailed（載入失敗／逾時，狀態不明）→ 「上班打卡」「下班打卡」兩顆都可按（員工自己選；送出前仍會再抓一次
+ *     最新狀態比對，抓得到而跟選的不同就不送、改顯示正確的按鈕）。以前這時候唯一的按鈕是 disabled，只剩小小的「重試」。
+ *   - loading（首次載入，有逾時上限）→ 一顆「載入中…」disabled。
+ *   - 其他 → 照 summary 的下一步（上班中＝「下班打卡」）；跨日上班中多一顆「改打上班卡」。locked 只讓按鈕暫時 disabled。
+ * 晚餐、在家上班勾選框都不影響按鈕（不 disabled、不必先勾）。
+ */
+export function punchCardActions(
+  summary: Pick<PunchSummary, "phase" | "nextLabel" | "workingCarriedOver">,
+  ui: PunchCardUi,
+): PunchCardAction[] {
+  if (ui.punching) return [{ key: "next", label: "打卡中…", force: null, disabled: true, variant: "primary" }];
+  if (ui.loadFailed) {
+    return [
+      { key: "in", label: PHASE_COPY.none.nextLabel, force: "in", disabled: ui.locked, variant: "primary" },
+      { key: "out", label: PHASE_COPY.working.nextLabel, force: "out", disabled: ui.locked, variant: "primary" },
+    ];
+  }
+  if (ui.loading) return [{ key: "next", label: "載入中…", force: null, disabled: true, variant: "primary" }];
+  const actions: PunchCardAction[] = [
+    {
+      key: "next",
+      label: summary.nextLabel,
+      force: null,
+      disabled: ui.locked,
+      variant: summary.phase === "done" ? "secondary" : "primary",
+    },
+  ];
+  if (summary.phase === "working" && summary.workingCarriedOver) {
+    actions.push({ key: "carry_in", label: CARRY_OVER_PUNCH_IN_LABEL, force: "in", disabled: ui.locked, variant: "secondary" });
+  }
+  return actions;
+}
+
+/**
+ * 狀態不明時員工自己選了上班／下班（force），按下時另抓到最新紀錄（2026-10-26）：
+ *   - 抓不到（null）→ 照選的送（不能因為查不到就擋打卡）。
+ *   - 抓到了、下一步跟選的一樣 → 送。
+ *   - 抓到了、下一步跟選的不同 → 不送：呼叫端把畫面換成最新紀錄（按鈕回到正確的那一顆）並顯示提示。
+ */
+export function precheckForcedPunch<T extends PunchLike>(
+  force: PunchType,
+  latest: readonly T[] | null | undefined,
+): PunchPrecheck<T> {
+  if (!latest) return { send: true, type: force };
+  const summary = summarizePunches(latest);
+  if (summary.nextType === force) return { send: true, type: force };
+  return {
+    send: false,
+    reason: "changed",
+    latest,
+    summary,
+    notice: `已讀到今天的打卡狀態，按鈕已改為「${summary.nextLabel}」，請確認後再按一次`,
+  };
+}
