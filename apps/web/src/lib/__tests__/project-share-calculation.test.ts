@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest"
 import {
   calculateProjectShares,
   defaultPctForRole,
+  effectiveRoleSharePct,
   hydrateShareDraft,
+  parseRoleSharePctDraft,
+  roleSharePctDraftOf,
   pctAfterRoleChange,
   orderShareMembers,
   type ShareDraftMember,
@@ -125,5 +128,33 @@ describe("角色預設趴數帶入", () => {
 
   it("pctAfterRoleChange：已手動改過 → 保留", () => {
     expect(pctAfterRoleChange(25, "member", "manager", defaults)).toBe(25)
+  })
+})
+
+describe("各角色分潤趴數（2026-10-27 改為每個專案各自設定）", () => {
+  const tenant = { manager: 12, lead: 8, support: 3, member: 1 }
+  it("effectiveRoleSharePct：本案有設定用本案；未設定（null）退回租戶起始值", () => {
+    expect(effectiveRoleSharePct({ manager: 25 }, tenant)).toEqual({ manager: 25 })
+    expect(effectiveRoleSharePct(null, tenant)).toEqual(tenant)
+    expect(effectiveRoleSharePct(undefined, undefined)).toEqual({})
+    expect(defaultPctForRole(effectiveRoleSharePct({ manager: 25 }, tenant), "lead")).toBe(0)
+  })
+
+  it("新成員與改角色的帶入來源是本案設定", () => {
+    const share = effectiveRoleSharePct({ manager: 25, lead: 15, support: 5, member: 2 }, tenant)
+    expect(defaultPctForRole(share, "member")).toBe(2)
+    expect(pctAfterRoleChange(2, "member", "lead", share)).toBe(15)
+    expect(pctAfterRoleChange(7, "member", "lead", share)).toBe(7)
+  })
+
+  it("roleSharePctDraftOf／parseRoleSharePctDraft：空白＝0；allowUnset 時全空白＝null；超出範圍回錯誤", () => {
+    expect(roleSharePctDraftOf({ manager: 12.5 })).toEqual({ manager: "12.5", lead: "", support: "", member: "" })
+    expect(parseRoleSharePctDraft({ manager: "12.5", lead: "", support: "3", member: "" })).toEqual({
+      ok: true, value: { manager: 12.5, lead: 0, support: 3, member: 0 },
+    })
+    expect(parseRoleSharePctDraft(roleSharePctDraftOf(null), { allowUnset: true })).toEqual({ ok: true, value: null })
+    expect(parseRoleSharePctDraft(roleSharePctDraftOf(null))).toEqual({ ok: true, value: { manager: 0, lead: 0, support: 0, member: 0 } })
+    const bad = parseRoleSharePctDraft({ manager: "101", lead: "", support: "", member: "" })
+    expect(bad.ok).toBe(false)
   })
 })

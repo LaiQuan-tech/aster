@@ -16,11 +16,14 @@ import {
 } from "@/lib/projects-api";
 import {
   getProjectDetail,
+  updateProjectFields,
   disciplineLabel,
   type ProjectDetail,
   type ProjectMoney,
 } from "@/lib/projects-ext-api";
 import { MembersCard } from "@/app/admin/projects/[id]/_sections/MembersCard";
+import { RoleSharePctCard } from "@/app/admin/projects/_components/RoleSharePctCard";
+import { effectiveRoleSharePct } from "@/lib/project-share-calculation";
 
 function money(n: number | null): string {
   return n == null ? "—" : n.toLocaleString("zh-TW");
@@ -57,8 +60,9 @@ export default function EssProjectDetailPage() {
       setProjectMoney(detail.money);
       setMembersRes(m);
       if (m.canEditBonus) {
+        // 本案各角色分潤趴數（2026-10-27）；本案未設定時退回租戶的新專案起始值。
         const st = await getProjectSettings().catch(() => null);
-        setShareDefaults(st?.settings.defaultSharePctByRole ?? {});
+        setShareDefaults(effectiveRoleSharePct(detail.project.sharePctByRole, st?.settings.defaultSharePctByRole));
       }
       setDocuments(docs.documents);
       setCanSeeContractDocs(docs.canSeeContractDocs);
@@ -160,6 +164,22 @@ export default function EssProjectDetailPage() {
           {/* 老闆：分潤編輯器（比例與角色；加人／移除仍由 HR／負責人在後台）。 */}
           {membersRes?.canEditBonus && (
             <>
+              {/* 老闆：本案各角色分潤趴數（專案申請單的同一組設定；新增成員時依角色帶入）。 */}
+              <RoleSharePctCard
+                idPrefix="ess-project-role-share"
+                title="各角色分潤趴數"
+                description={project.sharePctByRole != null
+                  ? "本案新增成員時依角色自動帶入（每位成員的趴數）。"
+                  : "本案尚未設定，目前沿用新專案起始值；儲存後即為本案自己的設定。"}
+                values={shareDefaults}
+                canEdit
+                bossConfigured={membersRes.bossConfigured !== false}
+                allowUnset
+                onSave={async (value) => {
+                  await updateProjectFields(projectId, { sharePctByRole: value });
+                  await load();
+                }}
+              />
               <MembersCard
                 projectId={projectId}
                 members={membersRes.members}

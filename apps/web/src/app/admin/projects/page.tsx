@@ -37,7 +37,6 @@ import {
 } from "@/lib/projects-ext-api";
 import { ProjectApplicationForm } from "./_components/ProjectApplicationForm";
 import { createAndOpenProject } from "./_components/project-application-form";
-import { RoleShareDefaultsCard } from "./_components/RoleShareDefaultsCard";
 
 const STATUS_BADGE: Record<ProjectStatus, string> = {
   active: "bg-green-50 text-green-700",
@@ -226,6 +225,11 @@ export default function AdminProjectsPage() {
           canFinance={canFinance}
           // 建案的分潤模式／獎金池欄位只給老闆；HR 建案時不送，由後端帶預設（pool_pct、無獎金池）。
           canBonus={canEditBonus}
+          // 2026-10-27：各角色分潤趴數改在每個專案的申請單各自設定（原本列表頁的全公司共用卡已移除）；
+          // 預填「設定 → 進階功能」的新專案起始值，HR 看得到但唯讀、不送出（後端複製起始值）。
+          canSeeBonus={canBonus || canEditBonus}
+          bossConfigured={bossConfigured}
+          roleShareDefaults={settings?.defaultSharePctByRole ?? null}
           saving={saving}
           apiError={error}
           onSubmit={submit}
@@ -233,15 +237,6 @@ export default function AdminProjectsPage() {
         />
         </div>
       </Card> : null}
-
-      {settings && (canBonus || canEditBonus) ? (
-        <RoleShareDefaultsCard
-          defaults={settings.defaultSharePctByRole ?? {}}
-          canEdit={canEditBonus}
-          bossConfigured={bossConfigured}
-          onSaved={(next) => setSettings(next)}
-        />
-      ) : null}
 
       <Card>
         <div className="mb-3 flex flex-wrap items-center gap-3">

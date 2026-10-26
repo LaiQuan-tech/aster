@@ -178,6 +178,27 @@ describe("project application form model", () => {
     });
   });
 
+  it("各角色分潤趴數：預填新專案起始值；老闆送出四鍵，非老闆不送（後端複製起始值）", () => {
+    const draft = emptyProjectApplicationDraft("2026-10-01", [], { manager: 12, lead: 8, support: 3, member: 1 });
+    draft.name = "分潤趴數測試案";
+    expect(draft.sharePctByRole).toEqual({ manager: "12", lead: "8", support: "3", member: "1" });
+    draft.sharePctByRole.manager = "20";
+
+    const boss = toAuthorizedCreateProjectBody(draft, { canFinance: true, canBonus: true });
+    expect(boss.sharePctByRole).toEqual({ manager: 20, lead: 8, support: 3, member: 1 });
+
+    const hr = toAuthorizedCreateProjectBody(draft, { canFinance: true, canBonus: false });
+    expect(hr).not.toHaveProperty("sharePctByRole");
+  });
+
+  it("各角色分潤趴數：四格全空白＝null；超出 0–100 擋在表單驗證", () => {
+    const draft = emptyProjectApplicationDraft("2026-10-01", []);
+    draft.name = "未設定趴數的案子";
+    expect(toCreateProjectBody(draft).sharePctByRole).toBeNull();
+    draft.sharePctByRole.lead = "150";
+    expect(projectApplicationErrors(draft)).toContain("主辦的分潤趴數必須介於 0 與 100 之間");
+  });
+
   it("does not expose contract, billing, or subcontract amounts without finance access", () => {
     const draft = emptyProjectApplicationDraft("2026-10-01", ["電機"]);
     draft.name = "一般主管建立的案子";

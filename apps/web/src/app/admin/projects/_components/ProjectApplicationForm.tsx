@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { ClientCombo } from "@/components/ClientCombo";
 import { VendorCombo } from "@/components/VendorCombo";
 import { Button, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
@@ -33,6 +33,8 @@ import {
   toAuthorizedCreateProjectBody,
   type ProjectApplicationDraft,
 } from "./project-application-form";
+import { RoleSharePctInputs, RoleShareReadOnlyBadge } from "./RoleSharePctCard";
+import { roleSharePctDraftOf, type RoleSharePct } from "@/lib/project-share-calculation";
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -60,7 +62,14 @@ interface ProjectApplicationFormProps {
   mainProjects: ProjectListItem[];
   vatRate: number;
   canFinance: boolean;
+  /** 分潤寫入權（只有老闆／platform_admin）：分潤模式、獎金池、各角色分潤趴數可填且會送出。 */
   canBonus: boolean;
+  /** 看得到分潤（HR／老闆）：各角色分潤趴數區塊要不要畫；看得到但不能改＝唯讀。省略＝跟著 canBonus。 */
+  canSeeBonus?: boolean;
+  /** 租戶是否已指定老闆（唯讀提示文字用）。 */
+  bossConfigured?: boolean;
+  /** 租戶的新專案起始值（ProjectSettings.defaultSharePctByRole），預填進「各角色分潤趴數」。 */
+  roleShareDefaults?: RoleSharePct | null;
   saving: boolean;
   apiError: string | null;
   onSubmit: (body: CreateProjectExtBody) => Promise<void>;
@@ -78,14 +87,24 @@ export function ProjectApplicationForm({
   vatRate,
   canFinance,
   canBonus,
+  canSeeBonus,
+  bossConfigured = true,
+  roleShareDefaults,
   saving,
   apiError,
   onSubmit,
   onCreateClient,
 }: ProjectApplicationFormProps) {
   const [draft, setDraft] = useState<ProjectApplicationDraft>(() =>
-    emptyProjectApplicationDraft(new Date().toLocaleDateString("sv-SE"), disciplines),
+    emptyProjectApplicationDraft(new Date().toLocaleDateString("sv-SE"), disciplines, roleShareDefaults),
   );
+  // 新專案起始值通常比表單晚到：使用者還沒動過「各角色分潤趴數」就跟著換成起始值。
+  const roleShareTouched = useRef(false);
+  useEffect(() => {
+    if (roleShareTouched.current) return;
+    setDraft((current) => ({ ...current, sharePctByRole: roleSharePctDraftOf(roleShareDefaults) }));
+  }, [roleShareDefaults]);
+  const showRoleShare = canSeeBonus ?? canBonus;
   const [formErrors, setFormErrors] = useState<string[]>([]);
   const [showNewClient, setShowNewClient] = useState(false);
   const [newClientName, setNewClientName] = useState("");
@@ -312,6 +331,27 @@ export function ProjectApplicationForm({
           <div className="sm:col-span-2"><label className={labelCls}>說明</label><textarea className={inputCls} rows={3} value={draft.description} onChange={(event) => patch("description", event.target.value)} /></div>
         </div>
       </Section>
+
+      {showRoleShare ? (
+        <Section title="各角色分潤趴數">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-slate-500">
+              本案新增成員時依角色自動帶入（每位成員的趴數）。預填的是「設定 → 進階功能」的新專案起始值
+              {canBonus ? "，可依本案調整；四格全空白＝本案不設定。" : "，建立後由老闆在專案明細的申請單調整。"}
+            </p>
+            {!canBonus ? <RoleShareReadOnlyBadge bossConfigured={bossConfigured} /> : null}
+          </div>
+          <RoleSharePctInputs
+            draft={draft.sharePctByRole}
+            idPrefix="new-project-role-share"
+            disabled={!canBonus || saving}
+            onChange={(role, value) => {
+              roleShareTouched.current = true;
+              setDraft((current) => ({ ...current, sharePctByRole: { ...current.sharePctByRole, [role]: value } }));
+            }}
+          />
+        </Section>
+      ) : null}
 
       {formErrors.length > 0 ? <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700"><ul className="list-disc pl-5">{formErrors.map((message) => <li key={message}>{message}</li>)}</ul></div> : null}
       <ErrorText>{apiError}</ErrorText>

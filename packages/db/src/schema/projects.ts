@@ -92,6 +92,12 @@ export const projects = pgTable(
     bonusPool: numeric("bonus_pool"),
     /** 新制專案獎金率（%）；有值時獎金池由合約總額 × 比例衍生，null 相容舊 bonusPool。 */
     bonusRatePct: numeric("bonus_rate_pct", { precision: 7, scale: 4 }),
+    /**
+     * 本案各角色的分潤趴數（2026-10-27，migration 0075）：{manager, lead, support, member} → 0–100。
+     * null＝本案未設定，新增成員時退回租戶的「新專案起始值」（project_settings.default_share_pct_by_role）。
+     * 只有老闆／platform_admin 可設定（API 守門）；寫入一律經 API。
+     */
+    sharePctByRole: jsonb("share_pct_by_role"),
     // ── P3 專案申請單（模組五）新增 ──────────────────────────────────
     /** 業主／客戶。可空：知識庫舊案未必補得回業主資料。 */
     clientId: uuid("client_id").references(() => clients.id),

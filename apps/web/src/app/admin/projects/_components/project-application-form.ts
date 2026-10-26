@@ -1,6 +1,7 @@
-import type { ShareMode } from "@/lib/projects-api";
+import type { ProjectMemberRole, ShareMode } from "@/lib/projects-api";
 // 相對路徑：vitest 沒設 `@/` 別名，純函式測試要能直接載入這支檔案。
 import { defaultActiveCompanyId } from "../../../../lib/company-options";
+import { parseRoleSharePctDraft, roleSharePctDraftOf, type RoleSharePct } from "../../../../lib/project-share-calculation";
 import type {
   BillingKind,
   CreateProjectExtBody,
@@ -60,6 +61,11 @@ export interface ProjectApplicationDraft {
   endsOn: string;
   shareMode: ShareMode;
   bonusPool: string;
+  /**
+   * 本案各角色分潤趴數（2026-10-27，四格字串）。預填租戶的新專案起始值；只有老闆能改、也只有老闆送出
+   * （見 toAuthorizedCreateProjectBody）。四格全空白＝本案不設定（送 null）。
+   */
+  sharePctByRole: Record<ProjectMemberRole, string>;
 }
 
 const DEFAULT_STAGES: ReadonlyArray<Pick<ProjectApplicationBillingDraft, "kind" | "milestone" | "percentage">> = [
@@ -76,6 +82,8 @@ const DEFAULT_STAGES: ReadonlyArray<Pick<ProjectApplicationBillingDraft, "kind" 
 export function emptyProjectApplicationDraft(
   openedOn: string,
   disciplines: readonly string[],
+  /** 租戶的新專案起始值（ProjectSettings.defaultSharePctByRole），預填進「各角色分潤趴數」。 */
+  roleShareDefaults?: RoleSharePct | null,
 ): ProjectApplicationDraft {
   return {
     name: "",
@@ -111,6 +119,7 @@ export function emptyProjectApplicationDraft(
     endsOn: "",
     shareMode: "pool_pct",
     bonusPool: "",
+    sharePctByRole: roleSharePctDraftOf(roleShareDefaults),
   };
 }
 
@@ -222,6 +231,8 @@ export function projectApplicationErrors(draft: ProjectApplicationDraft): string
   if (invalidNonnegative(draft.contractAmount)) errors.push("合約金額須為 0 以上的數字");
   if (invalidNonnegative(draft.otherExpenses)) errors.push("其他支出須為 0 以上的數字");
   if (invalidNonnegative(draft.bonusPool)) errors.push("獎金池須為 0 以上的數字");
+  const roleShare = parseRoleSharePctDraft(draft.sharePctByRole, { allowUnset: true });
+  if (!roleShare.ok) errors.push(roleShare.error);
   for (const [index, row] of draft.designScope.entries()) {
     if (!row.discipline.trim() && (row.item.trim() || row.amount.trim())) {
       errors.push(`科別與服務項目第 ${index + 1} 列已填內容或金額，請選擇科別`);
@@ -319,7 +330,14 @@ export function toCreateProjectBody(draft: ProjectApplicationDraft): CreateProje
     endsOn: optionalText(draft.endsOn),
     shareMode: draft.shareMode,
     bonusPool: draft.shareMode === "pool_pct" ? optionalNumber(draft.bonusPool) : null,
+    ...roleShareBodyOf(draft),
   };
+}
+
+/** 各角色分潤趴數 → 建案 body 的 sharePctByRole（四格全空白＝null；不合法的不送，由 projectApplicationErrors 擋下）。 */
+function roleShareBodyOf(draft: ProjectApplicationDraft): Pick<CreateProjectExtBody, "sharePctByRole"> {
+  const parsed = parseRoleSharePctDraft(draft.sharePctByRole, { allowUnset: true });
+  return parsed.ok ? { sharePctByRole: parsed.value } : {};
 }
 
 export interface ProjectApplicationScheduleRow {
@@ -422,7 +440,8 @@ export function toAuthorizedCreateProjectBody(
         designScope: body.designScope?.map((row) => ({ ...row, amount: null })),
       };
   if (access.canBonus) return withoutFinance;
-  const { shareMode: _shareMode, bonusPool: _bonusPool, ...withoutBonus } = withoutFinance;
+  // 非老闆不送分潤欄位：分潤模式／獎金池由後端帶預設，各角色分潤趴數由後端複製新專案起始值。
+  const { shareMode: _shareMode, bonusPool: _bonusPool, sharePctByRole: _sharePctByRole, ...withoutBonus } = withoutFinance;
   return withoutBonus;
 }
 

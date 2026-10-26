@@ -119,6 +119,20 @@ const fiscalYearSchema = z.preprocess(
   z.number().int().min(2000).max(2100),
 )
 
+/**
+ * W3（2026-09-23）：專案成員四角色——manager 經理／lead 主辦／support 支援／
+ * member 組員，各自可有不同的分潤趴數（2026-10-27 起每個專案各自設定，見 `sharePctByRoleSchema`）。
+ * manager 與 lead 屬「負責人層」（services/project-scope.ts 的 PROJECT_LEAD_ROLES）：
+ * 看得到全案分潤、也取得該案 finance 權限。值域與 RLS `is_project_lead()` 同步。
+ */
+export const PROJECT_MEMBER_ROLES = ["manager", "lead", "support", "member"] as const
+
+/**
+ * 本案各角色分潤趴數（2026-10-27，`projects.share_pct_by_role`）：四角色 → 0–100。整鍵覆蓋，
+ * UI 一律送完整四鍵；null＝本案未設定（新增成員時退回租戶的新專案起始值）。只有老闆／platform_admin 可設定。
+ */
+const sharePctByRoleSchema = z.record(z.enum(PROJECT_MEMBER_ROLES), z.number().min(0).max(100))
+
 const applicationFields = {
   /**
    * 開案日期（A5）。事後補 K 單的案子不該用建立日／K 單當天當日期，
@@ -203,6 +217,11 @@ const createSchema = z.object({
   initialSubcontracts: z.array(initialSubcontractSchema).max(100).optional(),
   /** 承接公司（申請單左上角）。省略／null＝租戶預設公司；不屬於本租戶回 400 invalid_company。 */
   companyId: z.string().uuid().nullish(),
+  /**
+   * 本案各角色分潤趴數（專案申請單）。只有老闆／platform_admin 可帶非 null（其他人 403，比照獎金池）；
+   * 省略＝複製租戶的新專案起始值（有非 0 值才複製，否則 null）；帶 null＝本案不設定。
+   */
+  sharePctByRole: sharePctByRoleSchema.nullish(),
   ...applicationFields,
 }).superRefine((body, ctx) => {
   if (body.contractAmount !== undefined && body.primaryContract != null) {
@@ -234,18 +253,12 @@ const updateSchema = z
     endsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
     /** 承接公司。帶 null＝改回沿用租戶預設公司；不屬於本租戶回 400 invalid_company。 */
     companyId: z.string().uuid().nullable().optional(),
+    /** 本案各角色分潤趴數。**真的有變**才算改分潤，只有老闆／platform_admin 可以（同獎金池）。 */
+    sharePctByRole: sharePctByRoleSchema.nullable().optional(),
     ...applicationFields,
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
   .refine((b) => !(b.startsOn && b.endsOn) || b.startsOn <= b.endsOn, { message: "endsOn must not be before startsOn" })
-
-/**
- * W3（2026-09-23）：專案成員四角色——manager 經理／lead 主辦／support 支援／
- * member 組員，各自可有不同的預設分潤趴數（`project_settings.default_share_pct_by_role`）。
- * manager 與 lead 屬「負責人層」（services/project-scope.ts 的 PROJECT_LEAD_ROLES）：
- * 看得到全案分潤、也取得該案 finance 權限。值域與 RLS `is_project_lead()` 同步。
- */
-export const PROJECT_MEMBER_ROLES = ["manager", "lead", "support", "member"] as const
 
 const memberCreateSchema = z.object({
   employeeId: z.string().uuid(),
@@ -382,6 +395,48 @@ async function defaultSharePctByRole(tenantId: string): Promise<Record<string, n
     if (Number.isFinite(n) && n >= 0 && n <= 100) out[key] = n
   }
   return out
+}
+
+/**
+ * 2026-10-27：本案各角色分潤趴數（`projects.share_pct_by_role`，migration 0075）。
+ * 欄位尚未套用或本案未設定 → null。刻意不放進 PROJECT_COLS：遷移前上碼時整個專案查詢會因缺欄位而失敗。
+ */
+async function loadProjectSharePct(tenantId: string, projectId: string): Promise<Record<string, number> | null> {
+  if (!(await columnsExist("projects", "share_pct_by_role"))) return null
+  const { data, error } = await supabaseAdmin
+    .from("projects")
+    .select("share_pct_by_role")
+    .eq("tenant_id", tenantId)
+    .eq("id", projectId)
+    .maybeSingle()
+  if (error) throw new Error(`loadProjectSharePct: ${error.message}`)
+  const raw = (data as { share_pct_by_role?: unknown } | null)?.share_pct_by_role
+  if (raw === null || raw === undefined) return null
+  return sharePctMapOf(raw)
+}
+
+/**
+ * 新增成員時用的角色趴數：本案有設定用本案的；本案未設定（或欄位未套）退回租戶的新專案起始值
+ * （`project_settings.default_share_pct_by_role`，相容舊行為）。兩者都沒有的角色由呼叫端當 0。
+ */
+export async function effectiveSharePctByRole(tenantId: string, projectId: string): Promise<Record<string, number>> {
+  return (await loadProjectSharePct(tenantId, projectId)) ?? (await defaultSharePctByRole(tenantId))
+}
+
+/** 租戶的新專案起始值裡有沒有任何非 0 的角色趴數（建案省略 sharePctByRole 時決定要不要複製）。 */
+function hasNonZeroShare(map: Record<string, number>): boolean {
+  return PROJECT_MEMBER_ROLES.some((role) => !isZeroish(map[role]))
+}
+
+/** 兩組角色趴數是否相同：null（未設定）只等於 null；有設定時四角色逐一比（缺鍵＝null）。純函式。 */
+export function sameSharePctMap(a: Record<string, number> | null, b: Record<string, number> | null): boolean {
+  if (a === null || b === null) return a === b
+  return PROJECT_MEMBER_ROLES.every((role) => {
+    const x = a[role] ?? null
+    const y = b[role] ?? null
+    if (x === null || y === null) return x === y
+    return Math.abs(x - y) < 1e-9
+  })
 }
 
 /**
@@ -874,6 +929,19 @@ projectsRouter.post(
         return
       }
     }
+    // 2026-10-27：本案各角色分潤趴數只有老闆／platform_admin 可帶（帶 null＝不設定，誰都可以）。
+    // 規則比照獎金池：看不到分潤的人（會計）403 forbidden_bonus；HR 403 bonus_edit_boss_only／409 boss_not_configured。
+    if (b.sharePctByRole !== undefined && b.sharePctByRole !== null) {
+      const bonusEdit = await resolveBonusEditAccess(tenantId, self)
+      if (bonusEdit.denial) {
+        if (!isHrRole(self.role)) {
+          res.status(403).json({ error: "forbidden_bonus" })
+          return
+        }
+        res.status(bonusEdit.denial.status).json({ error: bonusEdit.denial.error })
+        return
+      }
+    }
     const primaryContract: MainContractInput | null =
       b.primaryContract ?? (b.contractAmount !== undefined ? { amount: b.contractAmount } : null)
     const billings: NewBillingInput[] = b.billings ?? []
@@ -1004,6 +1072,15 @@ projectsRouter.post(
         }
       }
 
+      // 本案各角色分潤趴數：省略＝複製租戶的新專案起始值（有非 0 值才複製），之後改起始值不會回頭動到這個案子。
+      let sharePctByRole: Record<string, number> | null
+      if (b.sharePctByRole !== undefined) {
+        sharePctByRole = b.sharePctByRole === null ? null : sharePctMapOf(b.sharePctByRole)
+      } else {
+        const tenantDefaults = sharePctMapOf(await defaultSharePctByRole(tenantId))
+        sharePctByRole = hasNonZeroShare(tenantDefaults) ? tenantDefaults : null
+      }
+
       const baseRow = {
         tenant_id: tenantId,
         name: b.name,
@@ -1031,6 +1108,8 @@ projectsRouter.post(
         other_expenses: b.otherExpenses ?? 0,
         engineers: b.engineers ?? {},
         company_id: companyId,
+        // migration 0075 之前的建案函式不認得這個鍵，會直接忽略（不會失敗）。
+        share_pct_by_role: sharePctByRole,
       }
 
       const createWithCode = (code: string) => createProjectApplicationAtomic(
@@ -1111,14 +1190,18 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
   const row = scope.project
   const finance = scope.canManage
   const bonus = scope.canSeeBonus
-  const [signed, client, settings, companies] = await Promise.all([
+  const [signed, client, settings, companies, sharePctByRole] = await Promise.all([
     signedProjectIds(tenantId, [row.id]),
     loadClient(tenantId, row.client_id),
     loadP3Settings(tenantId),
     loadTenantCompanies(tenantId),
+    bonus ? loadProjectSharePct(tenantId, row.id) : Promise.resolve(null),
   ])
   const project = {
     ...serializeProject(row, { finance, bonus, profit: scope.canSeeProfit, hasSignedContract: signed.has(row.id) }),
+    // 本案各角色分潤趴數（2026-10-27）：只給看得到分潤的人（canSeeBonus：老闆／HR／經理／主辦／部門主管）。
+    // 趴數本身推不出毛利，所以不限 canSeeProfit。null＝本案未設定（或看不到）。
+    sharePctByRole,
     client: client ? serializeClient(client) : null,
     // 承接公司的有效名稱（申請單／列印頁左上角用）：company_id 為 null 時是租戶預設公司。
     companyName: effectiveCompanyOf(row.company_id, companies)?.name ?? null,
@@ -1302,8 +1385,29 @@ projectsRouter.patch(
         res.status(scope.bonusEdit.denial.status).json({ error: scope.bonusEdit.denial.error })
         return
       }
+      // 2026-10-27：本案各角色分潤趴數——同獎金池，真的有變才算改分潤；會計 forbidden_bonus，其他非老闆 403／409。
+      let sharePctChange: { next: Record<string, number> | null } | null = null
+      if (b.sharePctByRole !== undefined) {
+        if (!(await columnsExist("projects", "share_pct_by_role"))) {
+          res.status(409).json({ error: "migration_required", column: "share_pct_by_role" })
+          return
+        }
+        const next = b.sharePctByRole === null ? null : sharePctMapOf(b.sharePctByRole)
+        if (!sameSharePctMap(await loadProjectSharePct(tenantId, scope.project.id), next)) {
+          if (!scope.canSeeBonus) {
+            res.status(403).json({ error: "forbidden_bonus" })
+            return
+          }
+          if (scope.bonusEdit.denial) {
+            res.status(scope.bonusEdit.denial.status).json({ error: scope.bonusEdit.denial.error })
+            return
+          }
+          sharePctChange = { next }
+        }
+      }
 
       const patch: Record<string, unknown> = {}
+      if (sharePctChange) patch.share_pct_by_role = sharePctChange.next
       if (b.name !== undefined) {
         patch.name = b.name
         // 舊的預先取號空列（功能已移除，僅剩既有資料）一填上真名就是正式的案子了。
@@ -1556,8 +1660,9 @@ projectsRouter.get(
 // ── POST /projects/:id/members — HR/lead(含 manager)/部門主管 新增成員 ────
 /**
  * W3：`roleInProject` 四值（manager 經理／lead 主辦／support 支援／member 組員）。
- * pool_pct 模式下沒帶 `sharePct` 時，依角色套 `project_settings.default_share_pct_by_role`
- * ——業主的做法是「經理幾趴、主辦幾趴」先講好，每次加人不必重打。
+ * pool_pct 模式下沒帶 `sharePct` 時，依角色套本案的 `projects.share_pct_by_role`（2026-10-27 起每案各自設定；
+ * 本案未設定退回租戶的 `project_settings.default_share_pct_by_role`，都沒有＝0）——業主的做法是
+ * 「經理幾趴、主辦幾趴」先講好，每次加人不必重打。
  * 守門用 canSeeBonus（**不含會計**）：成員分潤是獎金區。
  */
 projectsRouter.post(
@@ -1593,10 +1698,10 @@ projectsRouter.post(
       let sharePct = b.sharePct ?? null
       let shareAmount = b.shareAmount ?? null
       if (scope.bonusEdit.canEdit) {
-        // 老闆：pool_pct 且未指定趴數 → 帶該角色的預設值（沒設定就維持 null）。
+        // 老闆：pool_pct 且未指定趴數 → 帶本案該角色的趴數（本案未設定退回租戶的新專案起始值，都沒有＝0）。
         if (sharePct === null && isPool) {
-          const defaults = await defaultSharePctByRole(tenantId)
-          sharePct = defaults[roleInProject] ?? null
+          const defaults = await effectiveSharePctByRole(tenantId, scope.project.id)
+          sharePct = defaults[roleInProject] ?? 0
         }
       } else {
         // 分潤改版 #6：HR／負責人仍可加人，但趴數一律 0，由老闆另行設定；帶了非 0 的分潤就擋。
@@ -2087,8 +2192,9 @@ const projectSettingsSchema = z
     vatRate: z.number().min(0).max(1).optional(),
     disciplines: z.array(z.string().trim().min(1).max(40)).max(30).optional(),
     /**
-     * W3：四角色的預設分潤趴數（0–100）。整鍵覆蓋，不是深合併——少帶一個角色
-     * 就是把那個角色的預設清掉，UI 一律送完整四鍵。
+     * W3：四角色的預設分潤趴數（0–100）。2026-10-27 起改稱「新專案起始值」：建案時複製進專案的
+     * share_pct_by_role、或專案未設定時的退路；每個專案的實際趴數在專案申請單各自設定。
+     * 整鍵覆蓋，不是深合併——少帶一個角色就是把那個角色的預設清掉，UI 一律送完整四鍵。
      */
     defaultSharePctByRole: z
       .record(z.enum(PROJECT_MEMBER_ROLES), z.number().min(0).max(100))

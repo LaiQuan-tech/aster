@@ -105,6 +105,12 @@ describe("projects table", () => {
     expect(cols.bonusRatePct.notNull).toBe(false)
   })
 
+  it("各角色分潤趴數（share_pct_by_role，migration 0075）可空：null＝本案未設定、退回新專案起始值", () => {
+    expect(cols.sharePctByRole.name).toBe("share_pct_by_role")
+    expect(cols.sharePctByRole.notNull).toBe(false)
+    expect(cols.sharePctByRole.default).toBeUndefined()
+  })
+
   // 編號唯一性是 DB 的事，不是應用層的事：兩人同時建案時各自查都說沒重複。
   it("(tenant_id, code) 有 unique index，撞號由 DB 擋下", () => {
     const idx = getTableConfig(projects).indexes.find(

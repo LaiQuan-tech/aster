@@ -54,6 +54,8 @@ import {
 } from "./_sections/shared";
 import { ProjectSettingsCard } from "./_sections/ProjectSettingsCard";
 import { ApplicationFieldsCard } from "./_sections/ApplicationFieldsCard";
+import { RoleSharePctCard } from "../_components/RoleSharePctCard";
+import { effectiveRoleSharePct } from "@/lib/project-share-calculation";
 import { MoneyCard } from "./_sections/MoneyCard";
 import { ContractsCard } from "./_sections/ContractsCard";
 import { BillingsCard } from "./_sections/BillingsCard";
@@ -98,14 +100,17 @@ export default function AdminProjectDetailPage() {
   const [access, setAccess] = useState<ProjectAccess>({ finance: true, bonus: true });
   const [money, setMoney] = useState<ProjectMoney | null>(null);
   const [members, setMembers] = useState<ProjectMember[]>([]);
-  // 分潤改版：寫入權（只有老闆）、老闆是否已指定、估算的目前毛利、租戶角色預設趴數。
+  // 分潤改版：寫入權（只有老闆）、老闆是否已指定、估算的目前毛利、各角色趴數。
+  // defaults＝本案各角色分潤趴數（申請單，2026-10-27）；本案未設定時退回租戶的新專案起始值。
   const [shareMeta, setShareMeta] = useState<{
     canEditBonus: boolean;
     bossConfigured: boolean;
     grossProfit: number | null;
     profitHidden: boolean;
     defaults: Partial<Record<ProjectMemberRole, number>>;
-  }>({ canEditBonus: false, bossConfigured: true, grossProfit: null, profitHidden: false, defaults: {} });
+    /** 本案是否已有自己的設定（false＝沿用新專案起始值）。 */
+    projectShareSet: boolean;
+  }>({ canEditBonus: false, bossConfigured: true, grossProfit: null, profitHidden: false, defaults: {}, projectShareSet: false });
   const [adjustments, setAdjustments] = useState<ShareAdjustment[]>([]);
   const [documents, setDocuments] = useState<ProjectDocument[]>([]);
   /**
@@ -245,7 +250,11 @@ export default function AdminProjectDetailPage() {
         grossProfit: m.bonusEstimate && m.bonusEstimate.basis !== "fixed_amount" ? m.bonusEstimate.grossProfit : null,
         // 專案毛利只有老闆／platform_admin／授權 HR 看得到（canSeeProfit）；其他人不在本機推算獎金總額。
         profitHidden: m.canSeeProfit === false,
-        defaults: (p3?.settings.defaultSharePctByRole ?? {}) as Partial<Record<ProjectMemberRole, number>>,
+        defaults: effectiveRoleSharePct(
+          detail.project.sharePctByRole,
+          (p3?.settings.defaultSharePctByRole ?? null) as Partial<Record<ProjectMemberRole, number>> | null,
+        ),
+        projectShareSet: detail.project.sharePctByRole != null,
       });
       setAdjustments(adj.adjustments);
       setDocuments(docs.documents);
@@ -359,7 +368,7 @@ export default function AdminProjectDetailPage() {
       {/* 專案設定 */}
       <ProjectSettingsCard project={project} depts={depts} emps={emps} isPool={isPool} canBonus={canBonus} canEditBonus={shareMeta.canEditBonus} canSeeProfit={access.profit !== false} saveProjectField={saveProjectField} error={error} />
 
-      {/* 本案公司人員與個人分潤：放在專案設定正下方，避免和全租戶角色預設混淆。 */}
+      {/* 本案公司人員與個人分潤：新增成員依本案「各角色分潤趴數」（申請單）帶入。 */}
       <MembersCard
         projectId={projectId} members={members} emps={emps} canBonus={canBonus}
         canEditBonus={shareMeta.canEditBonus} bossConfigured={shareMeta.bossConfigured}
@@ -383,6 +392,24 @@ export default function AdminProjectDetailPage() {
           parentChoices={parentProjectChoices(mainProjects, project.id, project.parentProjectId)}
           disciplines={disciplines}
           error={error} setError={setError} load={load}
+          roleShareSection={canBonus ? (
+            <RoleSharePctCard
+              embedded
+              idPrefix="project-role-share"
+              title="各角色分潤趴數"
+              description={shareMeta.projectShareSet
+                ? "本案新增成員時依角色自動帶入（每位成員的趴數）。"
+                : "本案尚未設定，目前沿用新專案起始值；老闆儲存後即為本案自己的設定。"}
+              values={shareMeta.defaults}
+              canEdit={shareMeta.canEditBonus}
+              bossConfigured={shareMeta.bossConfigured}
+              allowUnset
+              onSave={async (value) => {
+                await updateProjectFields(project.id, { sharePctByRole: value });
+                await load();
+              }}
+            />
+          ) : null}
         />
       )}
 

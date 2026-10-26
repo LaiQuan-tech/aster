@@ -19,7 +19,7 @@ interface MembersCardProps {
   /** 分潤改版 #6：只有老闆（或 platform_admin）能改獎金比例與趴數；其他看得到的人只能維護名單。 */
   canEditBonus?: boolean;
   bossConfigured?: boolean;
-  /** 分潤改版 #2：租戶的角色預設趴數；新增成員／改角色時帶入（仍需老闆存檔）。 */
+  /** 本案各角色分潤趴數（申請單；本案未設定時呼叫端退回租戶的新專案起始值，見 effectiveRoleSharePct）；新增成員／改角色時帶入（仍需老闆存檔）。 */
   defaultSharePctByRole?: Partial<Record<ProjectMemberRole, number>>;
   contractAmount: number | null;
   receivedAmount: number;

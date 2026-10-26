@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import { VendorCombo } from "@/components/VendorCombo";
 import type { Vendor } from "@/lib/company-api";
@@ -69,6 +70,11 @@ interface ApplicationFieldsCardProps {
   error: string | null;
   setError: Setter<string | null>;
   load: () => Promise<void>;
+  /**
+   * 各角色分潤趴數（2026-10-27）：本案的經理／主辦／支援／組員 %，自己的儲存鈕、只有老闆能改。
+   * 由 page.tsx 組好傳入（看不到分潤的人傳 null，整塊不畫）；不併入下方「儲存申請單資料」，免得 HR 存申請單時碰到分潤。
+   */
+  roleShareSection?: ReactNode;
 }
 
 /** 申請單資料（模組五）：地點／面積／發票／付款、科別與服務項目、協力技師。整批儲存。 */
@@ -89,6 +95,7 @@ export function ApplicationFieldsCard({
   error,
   setError,
   load,
+  roleShareSection,
 }: ApplicationFieldsCardProps) {
   /**
    * 畫面上要出現的科別欄位＝租戶設定的科別；表單裡已經有值但設定裡沒有的
@@ -153,6 +160,7 @@ export function ApplicationFieldsCard({
   return (
     <Card>
       <h2 className="mb-3 text-sm font-semibold text-gray-700">申請單資料</h2>
+      {roleShareSection ? <div className="mb-4">{roleShareSection}</div> : null}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div>
           <label className={labelCls}>承接公司</label>

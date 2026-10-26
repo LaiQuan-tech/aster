@@ -13,7 +13,7 @@
 import { apiFetch, apiDownload } from "./api-client"
 import type {
   Project, ProjectStatus, ShareMode, Installment, InstallmentInput, DocType, OurRole, Contract,
-  ProjectSort, SortDir,
+  ProjectSort, SortDir, ProjectMemberRole,
 } from "./projects-api"
 
 /* ============================================================== 通用列舉 == */
@@ -258,6 +258,11 @@ export interface CreateProjectExtBody {
   initialSubcontracts?: InitialSubcontractInput[]
   /** 承接公司（名冊 → 公司主體，申請單左上角）。省略／null＝後端補租戶預設公司。 */
   companyId?: string | null
+  /**
+   * 本案各角色分潤趴數（2026-10-27）。只有老闆／platform_admin 可帶非 null；省略＝後端複製租戶的
+   * 新專案起始值（有非 0 值才複製），null＝本案不設定。
+   */
+  sharePctByRole?: Partial<Record<ProjectMemberRole, number>> | null
 }
 
 export type InitialSubcontractInput = {
@@ -643,6 +648,11 @@ export interface ProjectDetail extends Project {
   companyId?: string | null
   /** 承接公司的有效名稱（company_id 為 null 時是租戶預設公司）；申請單／列印頁左上角顯示這個。 */
   companyName?: string | null
+  /**
+   * 本案各角色分潤趴數（2026-10-27，專案申請單）。只給看得到分潤的人；null＝本案未設定
+   * （或看不到），新增成員時退回租戶的新專案起始值（ProjectSettings.defaultSharePctByRole）。
+   */
+  sharePctByRole?: Partial<Record<ProjectMemberRole, number>> | null
 }
 
 /** 合約精簡版（年度總表／專案明細內嵌用），比完整 Contract 少幾欄。 */
@@ -733,6 +743,8 @@ export interface UpdateProjectExtBody {
   engineers?: ProjectEngineers
   /** 承接公司。帶 null＝改回沿用租戶預設公司；省略＝不動。 */
   companyId?: string | null
+  /** 本案各角色分潤趴數。只有老闆／platform_admin 可改（真的有變才算）；null＝本案不設定。 */
+  sharePctByRole?: Partial<Record<ProjectMemberRole, number>> | null
 }
 
 /** 編輯專案（含 P3 新欄位）。code 一樣不在參數裡——不可變更（後端回 409 code_immutable）。 */
@@ -766,7 +778,7 @@ export function humanizeProjectExtError(err: unknown, fallback: string): string 
   if (msg.includes("billing_percentage_total_exceeded")) return "一般期款百分比合計不可超過 100%。"
   if (msg.includes("negative_installment_amount")) return "期款設定會使末期金額小於 0，請降低前期百分比或指定金額。"
   if (msg.includes("invalid_billing_total")) return "期款有效金額合計與合約金額不一致。"
-  if (msg.includes("migration_required")) return "這個欄位需要先套用資料庫遷移（0050）才能儲存。"
+  if (msg.includes("migration_required")) return "這個欄位需要先套用資料庫遷移才能儲存（各角色預設趴數 0050、本案各角色分潤趴數 0075）。"
   return msg
 }
 

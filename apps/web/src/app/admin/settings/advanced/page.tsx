@@ -17,6 +17,8 @@
  *   4. 重新開放已結算月份的人（發薪鎖定，2026-10-11）：存 tenants.features.payroll.periodUnlockEmpIds，
  *      本租戶在職員工的勾選清單，勾選即存；**只有老闆（或 platform_admin）能改**，其他人唯讀。這張卡自己
  *      載入員工與目前登入者，見 _components/PeriodUnlockCard.tsx。
+ *   5. 新專案起始值：各角色分潤趴數（2026-10-27，原專案列表頁的共用卡搬來這裡）：project_settings.default_share_pct_by_role，
+ *      建案時預填進專案申請單；每個專案的實際趴數在該案申請單各自設定。只有老闆能改，見 _components/RoleShareStartCard.tsx。
  * 四張卡共用同一次 getBrandingCached() 載入（模組層快取＋in-flight 去重）。頁首標題／說明由 AdminShell 依路由表提供，
  * 這裡不包 header／main。
  */
@@ -28,6 +30,7 @@ import { saveTenantSettings, type AccountsFeatureSettings } from "@/lib/admin-ap
 import { accountsFeatureOf } from "@/lib/auth-api";
 import { getBrandingCached, invalidateBranding } from "@/lib/ess-state";
 import { PeriodUnlockCard } from "./_components/PeriodUnlockCard";
+import { RoleShareStartCard } from "./_components/RoleShareStartCard";
 import {
   ACCOUNTANT_DEFAULT_NAV,
   ADMIN_MODULES,
@@ -308,6 +311,8 @@ export default function AdvancedFeaturesPage() {
       </Card>
 
       <PeriodUnlockCard />
+
+      <RoleShareStartCard />
     </>
   );
 }
