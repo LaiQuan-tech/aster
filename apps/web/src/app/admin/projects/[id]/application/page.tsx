@@ -88,8 +88,14 @@ export function ApplicationDocument({
   printChecked,
   contracts,
   vendors,
+  showProfit = true,
 }: {
   data: ApplicationData;
+  /**
+   * 利潤／毛利率兩欄（2026-10-26 業主決定：屬集團財務）。false＝呼叫者看不到（後端也回 null），整欄不畫。
+   * 省略＝畫（純排版預覽用）。
+   */
+  showProfit?: boolean;
   printChecked?: Partial<Record<PrintBlockKey, boolean>>;
   /** M17：合約與印花稅區塊的資料；省略＝不畫那一區（純排版預覽用）。 */
   contracts?: Contract[];
@@ -287,16 +293,24 @@ export function ApplicationDocument({
             <tr className="bg-gray-50 print:bg-gray-100">
               <th className="border border-gray-400 px-2 py-1">發包小計</th>
               <th className="border border-gray-400 px-2 py-1">其他支出</th>
-              <th className="border border-gray-400 px-2 py-1">利潤</th>
-              <th className="border border-gray-400 px-2 py-1">毛利率</th>
+              {showProfit && (
+                <>
+                  <th className="border border-gray-400 px-2 py-1">利潤</th>
+                  <th className="border border-gray-400 px-2 py-1">毛利率</th>
+                </>
+              )}
             </tr>
           </thead>
           <tbody>
             <tr>
               <td className="border border-gray-400 px-2 py-1">{fmtMoney(money?.subcontractTotal)}</td>
               <td className="border border-gray-400 px-2 py-1">{fmtMoney(money?.otherExpenses)}</td>
-              <td className="border border-gray-400 px-2 py-1">{fmtMoney(money?.profit)}</td>
-              <td className="border border-gray-400 px-2 py-1">{money?.grossMarginPct ?? "—"}{money?.grossMarginPct != null && "%"}</td>
+              {showProfit && (
+                <>
+                  <td className="border border-gray-400 px-2 py-1">{fmtMoney(money?.profit)}</td>
+                  <td className="border border-gray-400 px-2 py-1">{money?.grossMarginPct ?? "—"}{money?.grossMarginPct != null && "%"}</td>
+                </>
+              )}
             </tr>
           </tbody>
         </table>
@@ -353,6 +367,8 @@ export default function ProjectApplicationPrintPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
   const [data, setData] = useState<ApplicationData | null>(null);
+  // 利潤／毛利率只給看得到集團財務的人（access.profit；舊後端沒有＝照舊顯示）。
+  const [showProfit, setShowProfit] = useState(true);
   /** M17：合約區塊的資料。合約讀不到（沒有 finance 權限）時留空陣列，區塊仍在但顯示「尚無合約」。 */
   const [contracts, setContracts] = useState<Contract[]>([]);
   /** 廠商名冊：協力技師的 vendorId → 名稱（GET /vendors 只要登入即可讀）；讀不到就留空，欄位退回只看 name。 */
@@ -383,7 +399,10 @@ export default function ProjectApplicationPrintPage() {
       });
     getProjectApplication(projectId)
       .then((res) => {
-        if (active) setData(res.application);
+        if (active) {
+          setData(res.application);
+          setShowProfit(res.access.profit !== false);
+        }
       })
       .catch((err) => {
         if (active) setError(err instanceof Error ? err.message : "載入失敗");
@@ -471,7 +490,7 @@ export default function ProjectApplicationPrintPage() {
       ) : error || !data ? (
         <p className="text-sm text-red-600">{error ?? "找不到專案"}</p>
       ) : (
-        <ApplicationDocument data={data} printChecked={printChecked} contracts={contracts} vendors={vendors} />
+        <ApplicationDocument data={data} printChecked={printChecked} contracts={contracts} vendors={vendors} showProfit={showProfit} />
       )}
     </div>
   );

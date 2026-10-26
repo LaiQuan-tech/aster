@@ -364,6 +364,11 @@ export interface ProjectAccess {
   editBonus?: boolean
   /** 租戶是否已指定老闆。 */
   bossConfigured?: boolean
+  /**
+   * 看得到專案毛利／毛利率（老闆／platform_admin／授權 HR；2026-10-26）。false 時 money.profit／grossMarginPct
+   * 是 null，畫面整欄不畫。舊版後端沒有這個鍵＝照舊顯示。
+   */
+  profit?: boolean
 }
 
 /** project-money.ts computeMoney() 的原始輸出——欄位與後端逐一對照過。 */

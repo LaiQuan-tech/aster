@@ -42,6 +42,8 @@ interface SubcontractsCardProps {
   /** 全部公司（含已停用）；期款的公司下拉只列啟用的，加上該期目前已選的。唯讀顯示（已連動放款單）照原名。 */
   companies: Company[];
   money: ProjectMoney | null;
+  /** 利潤／毛利率（集團財務，2026-10-26）；false＝不畫。省略＝畫。 */
+  showProfit?: boolean;
   error: string | null;
   setError: Setter<string | null>;
   load: () => Promise<void>;
@@ -76,6 +78,7 @@ export function SubcontractsCard({
   vendors,
   companies,
   money,
+  showProfit = true,
   error,
   setError,
   load,
@@ -482,8 +485,12 @@ export function SubcontractsCard({
         <div className="mt-4 grid grid-cols-2 gap-4 border-t pt-4 text-sm sm:grid-cols-4">
           <div><p className="text-xs text-gray-500">發包小計</p><p className="font-medium text-gray-800">{fmtMoney(money.subcontractTotal)}</p></div>
           <div><p className="text-xs text-gray-500">其他支出</p><p className="font-medium text-gray-800">{fmtMoney(money.otherExpenses)}</p></div>
-          <div><p className="text-xs text-gray-500">利潤</p><p className="font-medium text-gray-800">{fmtMoney(money.profit)}</p></div>
-          <div><p className="text-xs text-gray-500">毛利率</p><p className="font-medium text-gray-800">{money.grossMarginPct ?? "—"}{money.grossMarginPct != null && "%"}</p></div>
+          {showProfit && (
+            <>
+              <div><p className="text-xs text-gray-500">利潤</p><p className="font-medium text-gray-800">{fmtMoney(money.profit)}</p></div>
+              <div><p className="text-xs text-gray-500">毛利率</p><p className="font-medium text-gray-800">{money.grossMarginPct ?? "—"}{money.grossMarginPct != null && "%"}</p></div>
+            </>
+          )}
         </div>
       )}
       <ErrorText>{error}</ErrorText>

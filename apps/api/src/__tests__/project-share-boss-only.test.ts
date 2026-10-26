@@ -616,3 +616,38 @@ describe("#1 金額走估算服務", () => {
     warn.mockRestore()
   })
 })
+
+describe("專案金額摘要：毛利／毛利率屬集團財務（2026-10-26 業主決定 2）", () => {
+  beforeEach(() => {
+    fake.db.contracts = [
+      { id: "c-1", tenant_id: TENANT_ID, project_id: PROJECT, our_role: "contractor", doc_type: "contract", amount: "1000000", signed_on: "2026-01-01", deleted_at: null, created_at: "2026-01-01T00:00:00.000Z" },
+    ]
+    fake.db.project_billings = []
+    fake.db.project_subcontracts = []
+    fake.db.project_subcontract_payments = []
+  })
+
+  for (const path of [`/projects/${PROJECT}`, `/projects/${PROJECT}/application`]) {
+    const moneyOf = (body: Row) => (path.endsWith("/application") ? body.application.money : body.money) as Row | null
+
+    it(`${path}：老闆／授權 HR／platform 拿得到 profit 與 grossMarginPct、access.profit=true`, async () => {
+      for (const token of [T.boss, T.grantedHr, T.platform]) {
+        const res = await as(token, request(app).get(path))
+        expect(res.status, token).toBe(200)
+        expect(res.body.access.profit, token).toBe(true)
+        expect(moneyOf(res.body), token).toMatchObject({ amountUntaxed: 1_000_000, profit: 1_000_000, grossMarginPct: 100 })
+      }
+    })
+
+    it(`${path}：未授權 HR、會計、經理、專案負責人、部門主管看得到其他金額，但 profit／grossMarginPct 為 null`, async () => {
+      for (const token of [T.hr, T.accountant, T.manager, T.lead, T.deptManager]) {
+        const res = await as(token, request(app).get(path))
+        expect(res.status, token).toBe(200)
+        expect(res.body.access.profit, token).toBe(false)
+        const money = moneyOf(res.body)
+        expect(money, token).not.toBeNull()
+        expect(money, token).toMatchObject({ amountUntaxed: 1_000_000, profit: null, grossMarginPct: null })
+      }
+    })
+  }
+})

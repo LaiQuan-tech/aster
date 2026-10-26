@@ -438,7 +438,7 @@ export default function AdminProjectDetailPage() {
           paymentsDraft={paymentsDraft} setPaymentsDraft={setPaymentsDraft}
           originalPayments={originalPayments} setOriginalPayments={setOriginalPayments}
           savingPayments={savingPayments} setSavingPayments={setSavingPayments}
-          vendors={vendors} companies={companies} money={money}
+          vendors={vendors} companies={companies} money={money} showProfit={access.profit !== false}
           error={error} setError={setError} load={load}
         />
       )}

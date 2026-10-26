@@ -1123,7 +1123,14 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
     companyName: effectiveCompanyOf(row.company_id, companies)?.name ?? null,
   }
   // editBonus：分潤寫入權（只有老闆／platform_admin）；bossConfigured：租戶是否已指定老闆。
-  const access = { finance, bonus, editBonus: scope.bonusEdit.canEdit, bossConfigured: scope.bonusEdit.bossConfigured }
+  // profit：專案毛利／毛利率可見性（老闆／platform_admin／授權 HR；2026-10-26 業主決定 2：申請單金額摘要也算集團財務）。
+  const access = {
+    finance,
+    bonus,
+    profit: scope.canSeeProfit,
+    editBonus: scope.bonusEdit.canEdit,
+    bossConfigured: scope.bonusEdit.bossConfigured,
+  }
   if (!finance) {
     return {
       ok: true as const,
@@ -1148,7 +1155,8 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
     ok: true as const,
     project,
     access,
-    money: bundle.money,
+    // 毛利（profit）與毛利率屬於集團財務：看不到的人（未授權 HR、會計、專案負責人、部門主管）API 不回。
+    money: scope.canSeeProfit ? bundle.money : { ...bundle.money, profit: null, grossMarginPct: null },
     billings: bundle.billings.map(serializeBilling),
     subcontracts: bundle.subcontracts.map((sc) => serializeSubcontract(sc, paymentsBySub.get(sc.id) ?? [])),
     contracts: bundle.contracts.map(serializeContractLite),
