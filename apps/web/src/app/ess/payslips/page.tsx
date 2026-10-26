@@ -5,6 +5,7 @@ import { Card, InlineError, Pill } from "@/components/ess-ui";
 import { getMyPayslips, type MyPayslip } from "@/lib/ess-api";
 import type { PayslipSendFields } from "@/lib/cash-payouts-api";
 import { adjustmentDisplayOf, signedMoney, TREATMENT_LABEL } from "@/lib/payroll-adjustments-api";
+import { MyPayslipStatementCard } from "./MyPayslipStatementCard";
 
 /** 薪資單 breakdown 上員工端用得到的欄位（API 的 GET /payslips?scope=mine 本來就帶 breakdown；舊資料可能是 {}）。 */
 interface MyBreakdown {
@@ -110,6 +111,7 @@ export default function PayslipsPage() {
 
   return (
     <div className="space-y-4">
+      <MyPayslipStatementCard />
       <Card>
         {error && <InlineError className="mb-3">{error}</InlineError>}
         <div className="space-y-3 md:hidden">
