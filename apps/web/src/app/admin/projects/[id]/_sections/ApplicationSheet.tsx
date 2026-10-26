@@ -42,6 +42,7 @@ import {
   rocDateParts,
   rocDots,
   SHEET_FIELD_PRINT_BLOCK,
+  GUILD_REPAYMENT_NOTE_MAX,
   type ApplicationSheetDraft,
   type PrintBlockKey,
   type SheetField,
@@ -491,7 +492,18 @@ export function ApplicationSheet({
         {guild ? "審迄還款:" : "發票號碼:"}
       </Cell>,
       <Cell className={blankCls("payment")} key={`stage-${s.no}-5`} col={stageCols[5]} span={APPLICATION_STAGE_SPANS[5]} row={r} kind="value">
-        {guild ? "" : [s.invoiceNo, rocDots(s.invoicedOn)].filter(Boolean).join(" ")}
+        {guild
+          ? editable ? (
+              <input
+                aria-label="審迄還款"
+                className={cellInput}
+                maxLength={GUILD_REPAYMENT_NOTE_MAX}
+                placeholder="例：115.9.30 還款"
+                value={draft.guildRepaymentNote}
+                onChange={(e) => set("guildRepaymentNote", e.target.value)}
+              />
+            ) : draft.guildRepaymentNote
+          : [s.invoiceNo, rocDots(s.invoicedOn)].filter(Boolean).join(" ")}
       </Cell>,
     );
   }

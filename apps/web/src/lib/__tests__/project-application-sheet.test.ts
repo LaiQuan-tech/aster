@@ -155,6 +155,19 @@ describe("草稿與只送變更欄位", () => {
     })
   })
 
+  it("審迄還款：改了才送、空白送 null、超過 200 字報錯", () => {
+    const p = fakeProject({ guildRepaymentNote: "115.9.30 已還" })
+    const d = applicationSheetDraftOf(p, disciplines)
+    expect(d.guildRepaymentNote).toBe("115.9.30 已還")
+    expect(applicationSheetPatch(p, d, opts)).toEqual({})
+    expect(applicationSheetPatch(p, { ...d, guildRepaymentNote: " 115.10.1 還 " }, opts)).toEqual({ guildRepaymentNote: "115.10.1 還" })
+    expect(applicationSheetPatch(p, { ...d, guildRepaymentNote: "  " }, opts)).toEqual({ guildRepaymentNote: null })
+    // 舊後端沒有這個鍵（undefined）＝沒填，空草稿不送
+    const old = fakeProject()
+    expect(applicationSheetPatch(old, applicationSheetDraftOf(old, disciplines), opts)).toEqual({})
+    expect(applicationSheetErrors({ ...d, guildRepaymentNote: "字".repeat(201) }, { canFinance: true })).toEqual(["審迄還款最多 200 字。"])
+  })
+
   it("看不到錢的人（非 finance）一律不送任何欄位", () => {
     const p = fakeProject()
     const d = { ...applicationSheetDraftOf(p, disciplines), siteAddress: "改了" }

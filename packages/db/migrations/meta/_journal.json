@@ -542,6 +542,13 @@
       "breakpoints": true
     },
     {
+      "idx": 77,
+      "version": "7",
+      "when": 1792800000000,
+      "tag": "0077_project_guild_repayment",
+      "breakpoints": true
+    },
+    {
       "idx": 78,
       "version": "7",
       "when": 1792800000000,

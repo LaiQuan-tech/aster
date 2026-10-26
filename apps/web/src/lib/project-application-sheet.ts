@@ -200,7 +200,12 @@ export interface ApplicationSheetDraft {
   otherExpenses: string;
   /** 備註欄的協力技師（依租戶設定的科別）。 */
   engineers: Record<string, EngineerDraft>;
+  /** 付款階段「技師公會代墊」列的「審迄還款」（自由文字，≤200 字；2026-10-28）。 */
+  guildRepaymentNote: string;
 }
+
+/** 審迄還款的長度上限（與 API zod、DB CHECK projects_guild_repayment_note_len_chk 相同）。 */
+export const GUILD_REPAYMENT_NOTE_MAX = 200;
 
 /**
  * 技師欄位＝租戶設定的科別；專案上已經有值、但設定裡沒有的科別（改過設定、或 backfill 前的舊 key）
@@ -235,6 +240,7 @@ export function applicationSheetDraftOf(project: ProjectDetail, disciplines: rea
     paymentDay: project.paymentDay ?? "",
     otherExpenses: project.otherExpenses != null ? String(project.otherExpenses) : "",
     engineers: engineerDraftOf(project.engineers, disciplines),
+    guildRepaymentNote: project.guildRepaymentNote ?? "",
   };
 }
 
@@ -255,6 +261,9 @@ export function applicationSheetErrors(draft: ApplicationSheetDraft, opts: { can
   if (opts.canFinance && parseOptionalNumber(draft.otherExpenses) === "invalid") errors.push("其他支出必須是 0 以上的數字。");
   if (draft.designScope.some((row) => !row.discipline.trim() && ((row.item ?? "").trim() || row.amount != null))) {
     errors.push("設計內容每一列都要填科別（只填項目或金額的列存不進去）。");
+  }
+  if (draft.guildRepaymentNote.trim().length > GUILD_REPAYMENT_NOTE_MAX) {
+    errors.push(`審迄還款最多 ${GUILD_REPAYMENT_NOTE_MAX} 字。`);
   }
   if (draft.designScope.some((row) => row.amount != null && (!Number.isFinite(row.amount) || row.amount < 0))) {
     errors.push("設計內容的金額必須是 0 以上的數字。");
@@ -335,6 +344,9 @@ export function applicationSheetPatch(
   const other = parseOptionalNumber(draft.otherExpenses);
   // 後端把 null 存成 0（serializeProject 也回 0），所以 null 與 0 視為同值。
   if (other !== "invalid" && (other ?? 0) !== (project.otherExpenses ?? 0)) patch.otherExpenses = other;
+
+  const guildRepaymentNote = textOrNull(draft.guildRepaymentNote);
+  if (guildRepaymentNote !== textOrNull(project.guildRepaymentNote)) patch.guildRepaymentNote = guildRepaymentNote;
 
   const engineersChanged =
     opts.disciplines.some(

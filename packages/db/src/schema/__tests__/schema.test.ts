@@ -111,6 +111,12 @@ describe("projects table", () => {
     expect(cols.sharePctByRole.default).toBeUndefined()
   })
 
+  it("審迄還款（guild_repayment_note，migration 0077）可空文字", () => {
+    expect(cols.guildRepaymentNote.name).toBe("guild_repayment_note")
+    expect(cols.guildRepaymentNote.notNull).toBe(false)
+    expect(cols.guildRepaymentNote.default).toBeUndefined()
+  })
+
   // 編號唯一性是 DB 的事，不是應用層的事：兩人同時建案時各自查都說沒重複。
   it("(tenant_id, code) 有 unique index，撞號由 DB 擋下", () => {
     const idx = getTableConfig(projects).indexes.find(

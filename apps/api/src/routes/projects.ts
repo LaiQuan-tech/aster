@@ -267,6 +267,11 @@ const updateSchema = z
     companyId: z.string().uuid().nullable().optional(),
     /** 本案各角色分潤趴數。**真的有變**才算改分潤，只有老闆／platform_admin 可以（同獎金池）。 */
     sharePctByRole: sharePctByRoleSchema.nullable().optional(),
+    /**
+     * 申請單付款階段「技師公會代墊」列的「審迄還款」（2026-10-28，migration 0077）。自由文字 ≤200 字；
+     * 空字串／null＝清空。權限同付款方式等申請單欄位（canManage）；欄位未套回 409 migration_required。
+     */
+    guildRepaymentNote: z.string().trim().max(200).nullable().optional(),
     ...applicationFields,
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
@@ -425,6 +430,23 @@ async function loadProjectSharePct(tenantId: string, projectId: string): Promise
   const raw = (data as { share_pct_by_role?: unknown } | null)?.share_pct_by_role
   if (raw === null || raw === undefined) return null
   return sharePctMapOf(raw)
+}
+
+/**
+ * 2026-10-28：申請單「審迄還款」（`projects.guild_repayment_note`，migration 0077）。
+ * 同 share_pct_by_role 不放進 PROJECT_COLS：遷移前上碼時整個專案查詢會因缺欄位而失敗。欄位未套或空值 → null。
+ */
+async function loadProjectGuildRepaymentNote(tenantId: string, projectId: string): Promise<string | null> {
+  if (!(await columnsExist("projects", "guild_repayment_note"))) return null
+  const { data, error } = await supabaseAdmin
+    .from("projects")
+    .select("guild_repayment_note")
+    .eq("tenant_id", tenantId)
+    .eq("id", projectId)
+    .maybeSingle()
+  if (error) throw new Error(`loadProjectGuildRepaymentNote: ${error.message}`)
+  const raw = (data as { guild_repayment_note?: unknown } | null)?.guild_repayment_note
+  return typeof raw === "string" && raw.trim() ? raw : null
 }
 
 /**
@@ -1227,18 +1249,21 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
   const row = scope.project
   const finance = scope.canManage
   const bonus = scope.canSeeBonus
-  const [signed, client, settings, companies, sharePctByRole] = await Promise.all([
+  const [signed, client, settings, companies, sharePctByRole, guildRepaymentNote] = await Promise.all([
     signedProjectIds(tenantId, [row.id]),
     loadClient(tenantId, row.client_id),
     loadP3Settings(tenantId),
     loadTenantCompanies(tenantId),
     bonus ? loadProjectSharePct(tenantId, row.id) : Promise.resolve(null),
+    loadProjectGuildRepaymentNote(tenantId, row.id),
   ])
   const project = {
     ...serializeProject(row, { finance, bonus, profit: scope.canSeeProfit, hasSignedContract: signed.has(row.id) }),
     // 本案各角色分潤趴數（2026-10-27）：只給看得到分潤的人（canSeeBonus：老闆／HR／經理／主辦／部門主管）。
     // 趴數本身推不出毛利，所以不限 canSeeProfit。null＝本案未設定（或看不到）。
     sharePctByRole,
+    // 申請單「審迄還款」（2026-10-28）：同付款方式，能看專案的人都看得到。欄位未套＝null。
+    guildRepaymentNote,
     client: client ? serializeClient(client) : null,
     // 承接公司的有效名稱（申請單／列印頁左上角用）：company_id 為 null 時是租戶預設公司。
     companyName: effectiveCompanyOf(row.company_id, companies)?.name ?? null,
@@ -1443,8 +1468,15 @@ projectsRouter.patch(
         }
       }
 
+      // 2026-10-28 審迄還款：欄位未套（migration 0077）時回 409，整筆不寫（不默默丟掉使用者填的字）。
+      if (b.guildRepaymentNote !== undefined && !(await columnsExist("projects", "guild_repayment_note"))) {
+        res.status(409).json({ error: "migration_required", column: "guild_repayment_note" })
+        return
+      }
+
       const patch: Record<string, unknown> = {}
       if (sharePctChange) patch.share_pct_by_role = sharePctChange.next
+      if (b.guildRepaymentNote !== undefined) patch.guild_repayment_note = b.guildRepaymentNote ? b.guildRepaymentNote : null
       if (b.name !== undefined) {
         patch.name = b.name
         // 舊的預先取號空列（功能已移除，僅剩既有資料）一填上真名就是正式的案子了。

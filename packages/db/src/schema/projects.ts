@@ -122,6 +122,11 @@ export const projects = pgTable(
     paymentMethod: text("payment_method"),
     closingDay: text("closing_day"),
     paymentDay: text("payment_day"),
+    /**
+     * 申請單付款階段「技師公會代墊」列的「審迄還款」（2026-10-28，migration 0077）。自由文字、可空、≤200 字
+     * （DB CHECK projects_guild_repayment_note_len_chk）；Word 原檔該格是單一空白格，沒有固定格式。
+     */
+    guildRepaymentNote: text("guild_repayment_note"),
     /** 雜項支出（差旅、規費等），計入專案損益但不屬於下包/技師費。 */
     otherExpenses: numeric("other_expenses", { precision: 14, scale: 2 }).notNull().default("0"),
     /** 工程師指派，開放形狀如 {discipline: employeeId[]}。 */
