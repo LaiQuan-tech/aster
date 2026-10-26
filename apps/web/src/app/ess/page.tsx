@@ -30,13 +30,18 @@ import {
   needsAnnouncementHint,
   longCarryOverOutHours,
   needsReInConfirm,
+  precheckForcedPunch,
   precheckPunch,
+  punchCardActions,
+  PUNCH_STATE_UNKNOWN_HINT,
   shouldApplyPolledPunches,
   summarizePunches,
   type PunchLike,
   type PunchPrecheck,
+  type PunchType,
 } from "@/lib/punch-state";
 import { runWhileVisible } from "@/lib/visible-interval";
+import { isPromiseTimeout, withTimeout } from "@/lib/with-timeout";
 import { getMeCached, peekMeCached } from "@/lib/ess-state";
 import { WFH_SUFFIX, browserStorage, hasWfhPunch, readWfhChoice, wfhPunchEnabled, writeWfhChoice } from "@/lib/wfh-punch";
 import { dinnerBodyFor, showDinnerCheckbox, type DinnerPrompt } from "@/lib/dinner-prompt";
@@ -49,7 +54,8 @@ import { DutyTodayCard } from "./_components/DutyTodayCard";
  * 今日值日／總機（M8，WP8 填）、需簽收公告提示。
  * 頁框（頂部列、底部分頁、登入守門、ToastProvider）由 `ess/layout.tsx` 提供，這裡不再包。
  *
- * 載入順序：`GET /punch/today` 最先且獨立（失敗 → InlineError＋重試，鈕 disabled）；
+ * 載入順序：`GET /punch/today` 最先且獨立（最多等 10 秒；失敗或逾時 → InlineError＋重試，並顯示「上班打卡」
+ * 「下班打卡」兩顆可按的鈕讓員工自己選——2026-10-26 起除了送出中，卡片永遠有可按的打卡鈕，見 punchCardActions）；
  * 公告是加分項，在打卡狀態之後才抓、失敗不影響。GPS 在 mount 時預抓存 ref，
  * 按下時 ≤2 分鐘的定位直接用，否則最多再等 3 秒，沒有就 `source:"web"`——來源不顯示。
  *
@@ -131,6 +137,16 @@ const PUNCH_POLL_MS = 60_000;
 const PUNCH_PRECHECK_WAIT_MS = 3_000;
 /** 預檢發現狀態變了（沒送出、按鈕換了種類）後鎖鈕的時間：擋連點把另一種卡直接送出去，也讓人看一下提示。 */
 const AFTER_PRECHECK_LOCK_MS = 2_000;
+/**
+ * 載入今日打卡最多等這麼久（2026-10-26）：逾時當成載入失敗——卡片改顯示「上班打卡」「下班打卡」兩顆可按的鈕
+ * （punchCardActions），不再無限期停在「載入中…」。
+ */
+const PUNCH_LOAD_TIMEOUT_MS = 10_000;
+/**
+ * 送出打卡最多等這麼久（2026-10-26）：逾時就結束「打卡中…」、顯示錯誤並背景重抓狀態；不知道有沒有寫進去，
+ * 所以再按時照常先預檢（最新紀錄多了那張卡就不會重送）。
+ */
+const PUNCH_POST_TIMEOUT_MS = 20_000;
 /** 抓待簽核補卡單最多等這麼久（跟 `/punch/today` 並行）；逾時就沿用上次的結果，不讓它拖住打卡鈕。 */
 const PENDING_FIX_WAIT_MS = 3_000;
 
@@ -267,6 +283,7 @@ const PUNCH_ERROR_MESSAGES: Record<string, string> = {
 function punchErrorMessage(err: unknown, fallback: string): string {
   const closed = describePeriodClosed(err);
   if (closed) return closed;
+  if (isPromiseTimeout(err)) return "連線逾時，請確認網路後再試一次（畫面已重新讀取打卡狀態）";
   if (err instanceof TypeError) return "連線失敗，請確認網路後再試一次";
   if (err instanceof Error && err.message) {
     const code = err.message.replace(/^\[\d+\]\s*/, "").trim();
@@ -324,7 +341,6 @@ function PunchCard({
   punchError,
   notice,
   onPunch,
-  onPunchInInstead,
   onRetryLoad,
   wfhEnabled,
   wfh,
@@ -342,9 +358,11 @@ function PunchCard({
   punchError: string | null;
   /** 預檢發現狀態變了、沒送出時的提示（不是錯誤，不給重試鈕：要員工看清楚新按鈕再按）。 */
   notice: string | null;
-  onPunch: () => void;
-  /** 跨午夜的「上班中（跨日）」時的出口：前一天其實忘了打下班卡，這次要打上班卡。 */
-  onPunchInInstead: () => void;
+  /**
+   * 按下打卡鈕。`force`＝按鈕指定的種類（狀態不明時的「上班打卡」／「下班打卡」二選一、跨日上班中的
+   * 「改打上班卡」）；null＝照畫面推出的下一步。
+   */
+  onPunch: (force: PunchType | null) => void;
   onRetryLoad: () => void;
   /** 2026-10-13：本人有開通在家上班打卡（/me features.wfhPunch）才顯示勾選框。 */
   wfhEnabled: boolean;
@@ -357,39 +375,40 @@ function PunchCard({
   dinner: boolean;
   onDinnerChange: (checked: boolean) => void;
 }) {
-  const disabled = loading || !!loadError || punching || locked;
-  const label = loading ? "載入中…" : punching ? "打卡中…" : summary.nextLabel;
+  // 按鈕由 punchCardActions 決定（lib/punch-state.ts）：除了送出中，永遠有可按的打卡鈕；上班中第一顆一定是
+  // 「下班打卡」；載入失敗／逾時（狀態不明）→「上班打卡」「下班打卡」兩顆都可按。勾選框不影響按鈕。
+  const actions = punchCardActions(summary, { loading, loadFailed: !!loadError, punching, locked });
   // 待核准的上班補卡撐起的「上班中」：statusLabel 已是「上班中・補卡待核准（08:52）」，不再接「· 自 HH:MM」。
-  const baseStatus = loading
-    ? " "
+  const baseStatus = loading || loadError
+    ? " "
     : summary.phase === "working" && summary.workingSince && !summary.workingOnPending
       ? `${summary.statusLabel} · 自${summary.workingCarriedOver ? "昨天" : ""} ${fmtHm(summary.workingSince)}`
       : summary.phase === "done" && summary.lastOutAt
         ? `${summary.statusLabel} · 下班 ${fmtHm(summary.lastOutAt)}`
         : summary.statusLabel;
-  const status = !loading && todayWfh ? `${baseStatus}${WFH_SUFFIX}` : baseStatus;
+  const status = !loading && !loadError && todayWfh ? `${baseStatus}${WFH_SUFFIX}` : baseStatus;
 
   return (
     <Card>
-      <Button
-        size="lg"
-        block
-        variant={summary.phase === "done" ? "secondary" : "primary"}
-        className="py-4"
-        disabled={disabled}
-        loading={punching}
-        onClick={() => onPunch()}
-      >
-        <span className="text-2xl font-bold">{label}</span>
-      </Button>
-      {/* 跨午夜仍在上班中（前一天 16 小時內的上班卡還開著）：主按鈕是「下班打卡」；昨天其實忘了打下班卡的人走這裡。 */}
-      {!loading && summary.workingCarriedOver && (
-        <div className="mt-2">
-          <Button variant="secondary" size="lg" block disabled={disabled} onClick={() => onPunchInInstead()}>
-            昨天已下班（忘了打卡）？改打上班卡
-          </Button>
-        </div>
+      {loadError && !punching && (
+        <p className="mb-2 text-center text-sm font-medium text-amber-700">{PUNCH_STATE_UNKNOWN_HINT}</p>
       )}
+      <div className={actions.length > 1 && actions[0].key !== "next" ? "grid grid-cols-2 gap-2" : "flex flex-col gap-2"}>
+        {actions.map((a) => (
+          <Button
+            key={a.key}
+            size="lg"
+            block
+            variant={a.variant}
+            className={a.key === "carry_in" ? undefined : "py-4"}
+            disabled={a.disabled}
+            loading={a.key === "next" && punching}
+            onClick={() => onPunch(a.force)}
+          >
+            {a.key === "carry_in" ? a.label : <span className="text-2xl font-bold">{a.label}</span>}
+          </Button>
+        ))}
+      </div>
       {wfhEnabled && (
         <label className="mt-3 flex items-center justify-center gap-2 text-base text-gray-700">
           <input
@@ -430,12 +449,15 @@ function PunchCard({
           </Button>
         </div>
       )}
-      {!loadError && punchError && (
+      {punchError && (
         <div className="mt-3 flex flex-col items-center gap-2">
           <InlineError>{punchError}</InlineError>
-          <Button variant="secondary" size="sm" onClick={() => onPunch()} disabled={punching || locked}>
-            重試
-          </Button>
+          {/* 狀態不明時不給「重試」（不知道該送哪一種）：上面兩顆按鈕自己選。 */}
+          {!loadError && (
+            <Button variant="secondary" size="sm" onClick={() => onPunch(null)} disabled={punching || locked}>
+              重試
+            </Button>
+          )}
         </div>
       )}
       {/* 告知：打卡會存座標（GPS）與來源 IP（後端 POST /punch 記 punch_records.ip_address），IP 只有 HR 看得到。 */}
@@ -697,8 +719,9 @@ export default function EssHome() {
       }
       try {
         // 待簽核補卡單跟今日打卡並行抓（不會 reject、最多等 3 秒）：今天的上班補卡還沒核准也當作已上班。
+        // 逾時（PUNCH_LOAD_TIMEOUT_MS）當成失敗：首次載入改顯示「上班／下班」兩顆可按的鈕，不再永遠「載入中…」。
         const [today, pending] = await Promise.all([
-          getPunchToday(),
+          withTimeout(getPunchToday(), PUNCH_LOAD_TIMEOUT_MS, "GET /punch/today"),
           pendingForbiddenRef.current ? Promise.resolve(null) : fetchPendingFixPunches(PENDING_FIX_WAIT_MS),
         ]);
         if (!activeRef.current || seq !== loadSeqRef.current) return;
@@ -769,8 +792,10 @@ export default function EssHome() {
       loadSeqRef.current += 1;
       setPunchNotice(check.notice);
       lockFor(AFTER_PRECHECK_LOCK_MS);
-      if (check.latest) setRecords(mergePending(check.latest));
-      else void loadPunch();
+      if (check.latest) {
+        setRecords(mergePending(check.latest));
+        setLoadError(null); // 拿到最新紀錄＝狀態已知（載入失敗時的二選一也回到單一正確按鈕）
+      } else void loadPunch();
     },
     [lockFor, loadPunch, mergePending],
   );
@@ -862,27 +887,36 @@ export default function EssHome() {
       }
       lockFor(AFTER_SUCCESS_LOCK_MS);
       setDinner(false);
-      await loadPunch({ quiet: true });
+      // 背景對齊不等它（2026-10-26）：以前在這裡 await，送出中（「打卡中…」disabled）要一直撐到這次重抓回來；
+      // 打完卡馬上鎖螢幕、請求卡住，回到前景按鈕還是「打卡中…」，而回前景的對齊又因為送出中被跳過——
+      // 下班時就看不到「下班打卡」。樂觀更新已經把畫面改好、鎖鈕 3 秒擋連點，對齊回來再覆蓋即可。
+      void loadPunch({ quiet: true });
     },
     [toast, loadPunch, lockFor, mergePending],
   );
 
   /**
-   * `forceIn`＝畫面是跨午夜的「上班中（跨日）」，員工按了「改打上班卡」出口（前一天其實忘了打下班卡）：
-   * 預檢照常（最新紀錄跟畫面不同就中止），通過後送 in 而不是 out。
+   * `force`＝按鈕指定的種類（punchCardActions）：
+   *   - 畫面是跨午夜的「上班中（跨日）」，員工按了「改打上班卡」出口（前一天其實忘了打下班卡）→ "in"：
+   *     預檢照常（最新紀錄跟畫面不同就中止），通過後送 in 而不是 out。
+   *   - 今日打卡載入失敗／逾時（狀態不明），員工從「上班打卡」「下班打卡」二選一 → 那一種：按下時抓得到最新
+   *     紀錄就以它為準（不同就不送、換成正確按鈕，precheckForcedPunch），抓不到照選的送。
    */
-  const onPunch = useCallback(async (forceIn = false) => {
-    if (punching || locked || loading || loadError) return;
+  const onPunch = useCallback(async (force: PunchType | null = null) => {
+    const unknownState = !!loadError;
+    if (punching || locked || loading) return;
+    if (unknownState && !force) return; // 狀態不明只能從兩顆按鈕自己選
+    const forceIn = force === "in" && !unknownState;
     // 一律送明確 type，伺服器不猜：由按下當時畫面上的紀錄推出，送出前先跟最新紀錄比對（precheckPunch）
     const screen = records;
     // 剛下班（10 分鐘內）又按「再次上班打卡」：先確認，避免以為沒打到又多一張上班卡（2026-10-15）。
     const shown = summarizePunches(screen);
-    if (!forceIn && needsReInConfirm(shown, Date.now()) && shown.lastOutAt) {
+    if (!force && needsReInConfirm(shown, Date.now()) && shown.lastOutAt) {
       const ok = window.confirm(`你在 ${fmtHm(shown.lastOutAt)} 已打下班卡（已成功）。\n確定要再次上班打卡嗎？`);
       if (!ok) return;
     }
     // 跨日下班、距上班已超過 12 小時：先確認是下班（昨天可能其實忘了打下班卡）。
-    const longHours = forceIn ? null : longCarryOverOutHours(shown, Date.now());
+    const longHours = force ? null : longCarryOverOutHours(shown, Date.now());
     if (longHours !== null && shown.workingSince) {
       const ok = window.confirm(`自昨天 ${fmtHm(shown.workingSince)} 起已 ${longHours} 小時，確定是下班？\n（若昨天忘了打下班卡，請取消後按「改打上班卡」）`);
       if (!ok) return;
@@ -910,14 +944,15 @@ export default function EssHome() {
       // 隔夜的「上班中」）就不送，畫面換成最新狀態＋提示＋短暫鎖鈕；抓不到（null）照畫面上的種類送，不擋打卡
       // （畫面「上班中」而上班卡已超過 16 小時例外：重新載入）。
       // 畫面要送上班卡時一併重抓待簽核單：今天已送出上班補卡（例如剛在別的分頁送）就不送，避免多一張上班卡。
-      const wantsIn = forceIn || shown.nextType === "in";
+      const wantsIn = force ? force === "in" : shown.nextType === "in";
       const [fix, latest, freshPending] = await Promise.all([
         fixPromise,
         fetchTodayRecords(PUNCH_PRECHECK_WAIT_MS),
         wantsIn ? refetchPendingForPunch() : Promise.resolve(null),
       ]);
       if (!activeRef.current) return;
-      const check = precheckPunch(screen, latest, Date.now(), todayStartMs());
+      const check =
+        unknownState && force ? precheckForcedPunch(force, latest) : precheckPunch(screen, latest, Date.now(), todayStartMs());
       if (!check.send) {
         abortStalePunch(check);
         return;
@@ -936,8 +971,9 @@ export default function EssHome() {
         ...dinnerBodyFor(type, showDinnerCheckbox(dinnerPrompt, shown.phase, Date.now()), dinner),
       };
       pendingBodyRef.current = body;
-      pendingScreenRef.current = screen;
-      const res = await postPunch(body);
+      // 狀態不明時二選一送出：遲到理由重送前的預檢改跟這次抓到的最新紀錄比（畫面上的紀錄不可信）。
+      pendingScreenRef.current = unknownState && latest ? latest : screen;
+      const res = await withTimeout(postPunch(body), PUNCH_POST_TIMEOUT_MS, "POST /punch");
       if (!activeRef.current) return;
       pendingBodyRef.current = null;
       await afterPunchSuccess(res);
@@ -951,11 +987,15 @@ export default function EssHome() {
         return;
       }
       pendingBodyRef.current = null;
+      if (isPromiseTimeout(err)) {
+        // 不知道有沒有寫進去：背景重抓（寫進去了畫面就會跟上；再按時預檢也會擋重複的卡）。
+        void loadPunch({ quiet: true });
+      }
       if (isPunchTooSoon(err)) {
         // 409 不帶 body 給前端，時間從 /punch/today 重抓（最後一筆 in/out 的時間）。
         let when = "";
         try {
-          const today = await getPunchToday();
+          const today = await withTimeout(getPunchToday(), PUNCH_PRECHECK_WAIT_MS, "GET /punch/today");
           if (!activeRef.current) return;
           setRecords(mergePending(today.records));
           const s = summarizePunches(today.records); // 時間看真的卡，不拿待核准的補卡時間
@@ -971,7 +1011,7 @@ export default function EssHome() {
     } finally {
       if (activeRef.current) setPunching(false);
     }
-  }, [punching, locked, loading, loadError, records, toast, afterPunchSuccess, setPunching, abortStalePunch, mergePending, refetchPendingForPunch, abortForPendingFixPunch, wfhEnabled, wfh, dinnerPrompt, dinner]);
+  }, [punching, locked, loading, loadError, records, toast, afterPunchSuccess, setPunching, abortStalePunch, mergePending, refetchPendingForPunch, abortForPendingFixPunch, wfhEnabled, wfh, dinnerPrompt, dinner, loadPunch]);
 
   /** 遲到理由送出：驗證 1–500 字 → 確認最新狀態（precheckPunch）→ 帶 lateReason 原樣重送剛才那次打卡。 */
   const submitLateReason = useCallback(async () => {
@@ -1006,7 +1046,7 @@ export default function EssHome() {
         setLateInfo(null);
         return;
       }
-      const res = await postPunch({ ...body, lateReason: lateReason.trim() });
+      const res = await withTimeout(postPunch({ ...body, lateReason: lateReason.trim() }), PUNCH_POST_TIMEOUT_MS, "POST /punch");
       if (!activeRef.current) return;
       pendingBodyRef.current = null;
       setLateInfo(null);
@@ -1020,12 +1060,13 @@ export default function EssHome() {
         setLateInfo(late);
         setLateError("請填寫遲到原因");
       } else {
+        if (isPromiseTimeout(err)) void loadPunch({ quiet: true });
         setLateError(punchErrorMessage(err, "送出失敗，請再試一次"));
       }
     } finally {
       if (activeRef.current) setLateSubmitting(false);
     }
-  }, [lateReason, lateSubmitting, afterPunchSuccess, setLateSubmitting, abortStalePunch, refetchPendingForPunch, abortForPendingFixPunch]);
+  }, [lateReason, lateSubmitting, afterPunchSuccess, setLateSubmitting, abortStalePunch, refetchPendingForPunch, abortForPendingFixPunch, loadPunch]);
 
   /** 取消：不打卡，關掉對話框（理由草稿保留，再按一次打卡可以接著寫）。 */
   const cancelLateReason = useCallback(() => {
@@ -1058,8 +1099,7 @@ export default function EssHome() {
         locked={locked}
         punchError={punchError}
         notice={punchNotice}
-        onPunch={() => void onPunch()}
-        onPunchInInstead={() => void onPunch(true)}
+        onPunch={(force) => void onPunch(force)}
         onRetryLoad={() => void loadPunch()}
         wfhEnabled={wfhEnabled}
         wfh={wfh}
