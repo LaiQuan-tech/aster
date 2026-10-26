@@ -51,6 +51,9 @@ import {
 import { BottomSheet, Button, Icon, Pill, ToastProvider } from "@/components/ess-ui";
 import { essLogout } from "@/components/EssShell";
 
+/** 後台使用說明書（靜態站，aster-admin-guide 專案）。 */
+const ADMIN_GUIDE_URL = "https://aster-admin-guide.vercel.app"
+
 const DEFAULT_APP_NAME = "亞斯特設計顧問 數位化系統";
 
 /* ------------------------------------------------------------- icons --- */
@@ -368,6 +371,14 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
             >
               員工端
             </Link>
+            <a
+              href={ADMIN_GUIDE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 flex min-h-10 items-center justify-center rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-50"
+            >
+              使用說明
+            </a>
             <Button variant="ghost" size="sm" block className="mt-2 text-gray-600" onClick={onLogout} loading={loggingOut}>
               <Icon name="logout" className="h-4 w-4" />
               登出
@@ -498,6 +509,15 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
             >
               員工端
             </Link>
+            <a
+              href={ADMIN_GUIDE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={closeDrawer}
+              className="mt-3 flex min-h-11 items-center justify-center rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-50"
+            >
+              使用說明
+            </a>
             <Button variant="ghost" size="md" block className="mt-3 text-gray-600" onClick={onLogout} loading={loggingOut}>
               <Icon name="logout" className="h-5 w-5" />
               登出
