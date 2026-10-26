@@ -206,7 +206,11 @@ export function buildAttendanceStatementGrid(data: StatementData): StatementGrid
     fill: YELLOW,
   })
   g.set(s, 7, { value: "薪資+支出", ...center })
-  g.set(s, 8, moneyCell(money ? netPay(money) + expenseTotal : null, { format: "intSp", bold: true, ...center, fill: YELLOW }))
+  // 薪資+支出：有薪資單 → 薪資單的實發（含代墊支出，與薪資明細表一致）；試算 → 實領＋上面列出的支出，
+  // 報銷讀取失敗（支出不可得）時顯示「—」，不拿不完整的數字相加。
+  const salaryPlus =
+    money?.source === "payslip" ? money.netWithExpenses : money && data.expenses ? netPay(money) + expenseTotal : null
+  g.set(s, 8, { ...moneyCell(salaryPlus, { format: "intSp", bold: true, ...center, fill: YELLOW }), ...(salaryPlus == null ? { value: null, text: MISSING_TEXT } : {}) })
 
   // 第 9 列：備註
   g.set(s + 1, 0, { value: "備註：", ...center })

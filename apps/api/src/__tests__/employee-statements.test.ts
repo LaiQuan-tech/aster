@@ -19,12 +19,12 @@ import {
   type GridCell,
   type StatementGrid,
 } from "../lib/statements/grid.js"
-import { buildAttendanceStatementGrid, dayContent, isListedDay, leaveNamesOf } from "../lib/statements/attendance-statement.js"
-import { absenceRows, buildPayslipStatementGrid, overtimeBlocks } from "../lib/statements/payslip-statement.js"
+import { buildAttendanceStatementGrid, dayContent, isListedDay, leaveNamesOf, netPay } from "../lib/statements/attendance-statement.js"
+import { absenceRows, buildPayslipStatementGrid, overtimeBlocks, ptoShare } from "../lib/statements/payslip-statement.js"
 import { buildStatementWorkbook } from "../lib/xlsx/statement-grid.js"
-import { mealNoteFor, moneyFromBreakdown } from "../services/employee-statements.js"
+import { mealNoteFor, moneyFromBreakdown, moneyFromPreview } from "../services/employee-statements.js"
 import { LEGACY_RULE_CONFIG_2026_09 } from "../lib/default-rule-config.js"
-import { fake, TENANT_ID } from "./helpers/fake-supabase.js"
+import { fake, OTHER_TENANT_ID, TENANT_ID } from "./helpers/fake-supabase.js"
 import { FAKE_EMPLOYEE_ID, fakeBreakdown, fakeSheetView, fakeStatementData } from "./fixtures/statement-fixture.js"
 
 /**
@@ -201,6 +201,85 @@ describe("薪資明細表：加班分段對應 Excel 列", () => {
   })
 })
 
+describe("驗收修正（2026-10-27）", () => {
+  const salaryPlusCell = (grid: StatementGrid, days: number) => cellAt(grid, 6 + days + 7, 8)
+
+  it("出勤統計表「薪資+支出」：有薪資單 → 薪資單 net（與薪資明細表一致）", () => {
+    const data = fakeStatementData()
+    const grid = buildAttendanceStatementGrid(data)
+    expect(salaryPlusCell(grid, data.attendance!.days.length)?.value).toBe(fakeBreakdown().net)
+  })
+
+  it("出勤統計表「薪資+支出」：試算且報銷讀取失敗 → 「—」", () => {
+    const data = fakeStatementData()
+    data.money = moneyFromPreview({
+      base: 30000, hourlyWage: 125, otPay: 0, otPayByTier: { tier1: 0, tier2: 0, tier3: 0 }, leaveDeduction: 300,
+      lateEarlyDeduction: 0, laborInsurance: 700, healthInsurance: 450, pensionVoluntary: 0, advance: 0,
+      gross: 30000, totalDeductions: 1450, expenses: 0, net: 28550, netPlusExpenses: 28550,
+    })
+    data.expenses = null
+    const grid = buildAttendanceStatementGrid(data)
+    expect(salaryPlusCell(grid, data.attendance!.days.length)).toMatchObject({ text: "—", value: null })
+  })
+
+  it("試算缺逐假別明細：缺勤補「請假扣款」列，應發−應扣＝實發", () => {
+    const data = fakeStatementData()
+    data.money = moneyFromPreview({
+      base: 30000, hourlyWage: 125, otPay: 500, otPayByTier: { tier1: 500, tier2: 0, tier3: 0 }, leaveDeduction: 300,
+      lateEarlyDeduction: 25, laborInsurance: 700, healthInsurance: 450, pensionVoluntary: 0, advance: 0,
+      gross: 30500, totalDeductions: 1475, expenses: 0, net: 29025, netPlusExpenses: 29025,
+    })
+    const rows = absenceRows(data)
+    expect(rows.find((r) => r.label === "請假扣款")).toMatchObject({ amount: 300 })
+    expect(rows.find((r) => r.label === "病假")?.amount).toBeNull()
+    const grid = buildPayslipStatementGrid(data)
+    const T = 4 + 15
+    const gross = cellAt(grid, T + 1, 6)!.value as number
+    const ins = cellAt(grid, T, 8)!.value as number
+    const abs = cellAt(grid, T, 11)!.value as number
+    const net = cellAt(grid, T + 1, 9)!.value as number
+    expect(gross - ins - abs).toBeCloseTo(net, 2)
+    expect(net).toBeCloseTo(netPay(data.money), 2)
+  })
+
+  it("max_weekday 下特休拆分：比例夾在 0–1、無負值、兩列加總＝引擎分段", () => {
+    // 特休日 8h 被平日規則取高計價：分段是 1.334×2h、1.666667×6h，月表級距（國定假日規則）卻全在 ≤8h 那級。
+    const data = fakeStatementData({ pto: true })
+    data.money = {
+      ...data.money!,
+      segments: [
+        { when: "fixed_holiday", multiplier: 1.334, hours: 2, amount: 333.5 },
+        { when: "fixed_holiday", multiplier: 1.666667, hours: 6, amount: 1250 },
+      ],
+    }
+    const blocks = overtimeBlocks(data.money, data.attendance)
+    const holiday = blocks.find((b) => b.key === "holiday")!.rows
+    const pto = blocks.find((b) => b.key === "pto")!.rows
+    for (const r of [...holiday, ...pto]) {
+      expect(r.hours!).toBeGreaterThanOrEqual(0)
+      expect(r.amount!).toBeGreaterThanOrEqual(0)
+    }
+    expect(holiday[1].amount! + pto[1].amount!).toBeCloseTo(333.5, 2)
+    expect(holiday[2].hours! + pto[2].hours!).toBeCloseTo(6, 2)
+    // 該級距月表沒時數 → 退回總時數比例（這個月只有特休出勤 → 全歸特休）
+    expect(pto[2]).toMatchObject({ hours: 6, amount: 1250 })
+    expect(ptoShare({ weekday: [0, 0, 0], rest: [0, 0, 0], holiday: [8, 0, 0], regular: [0, 0, 0], pto: [8, 0, 0] }, 1)).toBe(0.5)
+    expect(ptoShare({ weekday: [0, 0, 0], rest: [0, 0, 0], holiday: [0, 0, 0], regular: [0, 0, 0], pto: [0, 0, 0] }, 0)).toBe(0)
+  })
+
+  it("不課稅補發另列「補發」，不算進「支出」", () => {
+    const data = fakeStatementData()
+    data.money = { ...data.money!, adjustmentNonTaxable: 500, netWithExpenses: data.money!.netWithExpenses + 500 }
+    const grid = buildPayslipStatementGrid(data)
+    const H = 4 + 15 + 1
+    expect(cellAt(grid, H + 1, 8)?.text).toBe("支出")
+    expect(cellAt(grid, H + 1, 9)?.value).toBe(350)
+    expect(cellAt(grid, H + 2, 8)?.text).toBe("補發")
+    expect(cellAt(grid, H + 2, 9)?.value).toBe(500)
+    expect(cellAt(grid, H + 3, 8)?.text).toBe("薪資+支出")
+  })
+})
+
 describe("xlsx 匯出版面", () => {
   it("欄數、合併範圍、標題字串與 A4 直式", async () => {
     const data = fakeStatementData()
@@ -319,6 +398,15 @@ describe("GET /employees/:id/statements", () => {
     expect((await request(app).get(`/employees/${FAKE_EMPLOYEE_ID}/statements?period=2026-13`).use(as("hr-user"))).status).toBe(400)
   })
 
+  it("跨租戶：別租戶的員工 id → 404（三支端點都是）", async () => {
+    const foreign = "eeeeeeee-0000-4000-8000-000000000001"
+    fake.db.employees.push({ ...employeeRow(foreign, "foreign-user", "employee"), tenant_id: OTHER_TENANT_ID })
+    fake.db.payslips.push({ id: "px", tenant_id: OTHER_TENANT_ID, employee_id: foreign, period: "2026-06", status: "finalized", breakdown: fakeBreakdown(), gross: 1 })
+    expect((await request(app).get(`/employees/${foreign}/statements?period=2026-06`).use(as("hr-user"))).status).toBe(404)
+    expect((await request(app).get(`/employees/${foreign}/attendance-statement.xlsx?period=2026-06`).use(as("hr-user"))).status).toBe(404)
+    expect((await request(app).get(`/employees/${foreign}/payslip-statement.xlsx?period=2026-06`).use(as("hr-user"))).status).toBe(404)
+  })
+
   it("降級：沒有月表、沒有薪資單、報銷讀取失敗 → 200，格線照回", async () => {
     fake.db.attendance_sheets = []
     fake.db.payslips = []
@@ -367,6 +455,15 @@ describe("員工端 /my/payslip-statement(s)", () => {
     expect(staff.status).toBe(200)
     expect(staff.body.employee.id).toBe(E.staff)
     expect((await request(app).get("/my/payslip-statement?period=2026-06").use(as("hr-user"))).status).toBe(404)
+  })
+
+  it("員工端不跑 buildPayrollInputs（不讀薪資結構）", async () => {
+    fake.reads.length = 0
+    expect((await request(app).get("/my/payslip-statement?period=2026-06").use(as("target-user"))).status).toBe(200)
+    expect(fake.reads).not.toContain("salary_structures")
+    // 對照：後台 HR 路徑會讀（證明上面的斷言不是空的）
+    await request(app).get(`/employees/${FAKE_EMPLOYEE_ID}/statements?period=2026-06`).use(as("hr-user"))
+    expect(fake.reads).toContain("salary_structures")
   })
 
   it("ESS 分頁開關：兩條路徑都歸「薪資單」分頁", () => {

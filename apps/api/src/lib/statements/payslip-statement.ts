@@ -106,6 +106,29 @@ export function attendanceOtHours(view: SheetView | null): Record<OtBlockKey, [n
 }
 
 /**
+ * 國定假日分段裡屬於「特休出勤」的比例（0–1）。
+ *
+ * 標準規則（國定假日分段 ≤8h ×1、9–10h ×1.334、之後 ×1.666667）下，月表逐日的級距（splitOvertimeTiers 用同一條
+ * 規則切）與引擎分段一一對應，同倍率的金額與時數成正比，依該級距的特休時數比例拆分是精確的。
+ *
+ * ⚠️ 限制：`overtime.fixedHolidayPay='max_weekday'` 時，引擎可能改用「平日加班規則 × 整段工時」計價（取高者），
+ * 分段倍率變成 1.334／1.666667、時數也不再照國定假日級距切，月表級距與引擎分段對不上。此時：
+ *   • 該級距在月表有時數 → 仍用該級距的比例（近似值）；
+ *   • 該級距在月表沒有時數（分母 0）→ 退回用國定假日＋特休的「總時數」比例（近似值）。
+ * 不論哪種，比例一律夾在 0–1：拆出來的特休與國定假日兩列都不會是負值，加總恆等於引擎的分段時數與金額
+ * （國定假日／特休兩列之間的分配是近似，合計與實發不受影響）。
+ */
+export function ptoShare(att: Record<OtBlockKey, [number, number, number]>, idx: number): number {
+  const clamp = (n: number) => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0)
+  const pto = att.pto[idx] ?? 0
+  const total = pto + (att.holiday[idx] ?? 0)
+  if (total > 0) return clamp(pto / total)
+  const ptoAll = att.pto.reduce((a, b) => a + b, 0)
+  const all = ptoAll + att.holiday.reduce((a, b) => a + b, 0)
+  return all > 0 ? clamp(ptoAll / all) : 0
+}
+
+/**
  * 加班別區塊（Excel 中間那一欄）。有逐段加班費（薪資單）→ 時數與金額都用薪資單的分段；
  * 沒有（試算／尚無薪資）→ 時數用月表、金額 null（顯示「—」）。
  * 特休出勤在引擎裡併在國定假日規則（同一個 when），依月表裡「特休出勤」日子的時數比例拆出來
@@ -136,12 +159,7 @@ export function overtimeBlocks(money: StatementMoney | null, view: SheetView | n
         block.rows.push({ label: `×${seg.multiplier.toFixed(2)}`, multiplier: seg.multiplier, hours: seg.hours, amount: seg.amount })
         continue
       }
-      let share = 0
-      if (key === "holiday" && idx <= 2) {
-        const pto = att.pto[idx]
-        const total = pto + att.holiday[idx]
-        share = total > 0 ? pto / total : 0
-      }
+      const share = key === "holiday" && idx <= 2 ? ptoShare(att, idx) : 0
       const target = block.rows[idx]
       target.hours = (target.hours ?? 0) + seg.hours * (1 - share)
       target.amount = (target.amount ?? 0) + seg.amount * (1 - share)
@@ -205,6 +223,8 @@ export function absenceRows(data: Pick<StatementData, "money" | "attendance" | "
     },
     { label: "全勤", hours: null, amount: money ? money.attendanceDeduction : null },
   ]
+  // 月表試算沒有逐假別扣款：事假／病假金額「—」，另補一列「請假扣款」放總額，缺勤合計才含請假扣款（應發−應扣＝實發）。
+  if (money && !byCode && money.leaveDeduction) rows.push({ label: "請假扣款", hours: null, amount: money.leaveDeduction })
   if (byCode) {
     for (const [code, amount] of Object.entries(byCode)) {
       const name = leaveNames[code] ?? code
@@ -420,13 +440,24 @@ export function buildPayslipStatementGrid(data: StatementData): StatementGrid {
   g.outline(H, 9, H, 11, "medium")
 
   // 支出、薪資+支出（原檔 X27、X31；X31 沒有標籤，這裡補上「薪資+支出」）
-  const expenseShown = money ? Math.round((money.netWithExpenses - netPay(money)) * 100) / 100 : null
-  g.set(H + 1, 8, { value: "支出", bold: true, align: "right" })
-  g.set(H + 1, 9, amt(expenseShown, "acct"))
-  g.set(H + 2, 8, { value: "薪資+支出", bold: true, align: "right" })
-  g.set(H + 2, 9, amt(money ? money.netWithExpenses : null, "acct"))
+  // 實發（含支出）＝實發＋代墊支出＋不課稅補發；不課稅補發另列「補發」，不混在「支出」裡。
+  const nonTaxable = money?.adjustmentNonTaxable ?? 0
+  const expenseShown = money
+    ? Math.round((money.netWithExpenses - netPay(money) - nonTaxable) * 100) / 100
+    : null
+  let rr = H + 1
+  g.set(rr, 8, { value: "支出", bold: true, align: "right" })
+  g.set(rr, 9, amt(expenseShown, "acct"))
+  rr += 1
+  if (nonTaxable) {
+    g.set(rr, 8, { value: "補發", bold: true, align: "right" })
+    g.set(rr, 9, amt(nonTaxable, "acct"))
+    rr += 1
+  }
+  g.set(rr, 8, { value: "薪資+支出", bold: true, align: "right" })
+  g.set(rr, 9, amt(money ? money.netWithExpenses : null, "acct"))
 
-  const rowCount = H + 3
+  const rowCount = rr + 1
   return {
     kind: "payslip",
     title: `${rocPeriodTitle(data.period)}薪資明細表-${data.employee.name}`,

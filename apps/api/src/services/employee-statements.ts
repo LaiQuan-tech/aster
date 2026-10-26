@@ -301,7 +301,8 @@ export async function loadStatementData(
     safe("expenses", () => loadExpenses(tenantId, employeeId, period), null, ctx),
     safe("title", () => loadTitle(tenantId, employeeId), null, ctx),
     includeMoney ? safe("payslip", () => loadPayslipMoney(tenantId, employeeId, period, finalizedOnly), null, ctx) : null,
-    includeMoney ? safe("salary", () => loadSalaryInfo(tenantId, employeeId, period), null, ctx) : null,
+    // 員工端（finalizedOnly）只畫薪資明細表，用不到眷口／投保薪資 → 不跑 buildPayrollInputs（整包薪資輸入，較重）。
+    includeMoney && !finalizedOnly ? safe("salary", () => loadSalaryInfo(tenantId, employeeId, period), null, ctx) : null,
   ])
 
   let money: StatementMoney | null = null
