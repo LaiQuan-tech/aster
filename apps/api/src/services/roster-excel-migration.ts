@@ -325,6 +325,8 @@ export interface RosterPlan {
   /** Excel 值不合格（統編檢查碼錯、超長、重複統編…）沒寫的欄位。 */
   rejected: Array<{ table: "vendors" | "clients"; id: string; column: string; reason: string }>
   notes: { linesRemoved: number; linesKept: number; remarksAdded: number }
+  /** 併名記錄（10/12 把兩家公司名用「/」併成一筆）拆開：改名為剩下那家的筆數（另一家走補建）。 */
+  mergedRenames: Array<{ table: "vendors" | "clients"; id: string }>
 }
 
 /* ── 比對 ─────────────────────────────────────────────────────────── */
@@ -565,6 +567,7 @@ export function planRosterMigration(
     unmatchedExcel: [], ambiguousExcel: [], unmatchedDb: [], namelessRows: 0,
     skippedCredentialCells: 0, skippedLoginUrls: 0, editedAfterImport: [], conflicts: [], rejected: [],
     notes: { linesRemoved: 0, linesKept: 0, remarksAdded: 0 },
+    mergedRenames: [],
   }
   const inTenant = (r: { tenant_id: string }) => !opts.tenantId || r.tenant_id === opts.tenantId
   const liveVendors = input.vendors.filter((v) => !v.deleted_at && inTenant(v))
@@ -628,6 +631,7 @@ export function planRosterMigration(
     const marker = opts.insertMarker ?? DEFAULT_INSERT_MARKER
     for (const ref of plan.unmatchedExcel.filter((r) => r.file === "new")) {
       const row = newRows.find((r) => r.sheet === ref.sheet && r.rowNumber === ref.rowNumber)!
+      splitMergedName(plan, row, row.kind === "client" ? liveClients : liveVendors, row.kind === "client" ? "clients" : "vendors", opts.tenantId)
       const stub = { id: `new:${row.sheet}:${row.rowNumber}`, tenant_id: opts.tenantId, name: "", note: null, created_at: "", updated_at: "" }
       const isClient = row.kind === "client"
       const values = isClient
@@ -640,6 +644,40 @@ export function planRosterMigration(
     }
   }
   return plan
+}
+
+const MERGE_SEP_RE = /\s*[／/]\s*/
+
+/**
+ * 併名拆分：要補建的這一列（公司名稱 X）若正好是某筆「已對應、名稱用 / 併了兩家」記錄的其中一段，
+ * 那筆記錄改名為剩下的那一段（或幾段），X 另外新增——名冊才不會同時有「X/Y」與「X」。
+ * 匯入後有人改過名稱的記錄不動（列衝突），補建照常。
+ */
+function splitMergedName(plan: RosterPlan, row: ExcelRosterRow, records: Array<{ id: string; tenant_id: string; name: string; note?: string | null; created_at: string; updated_at: string }>, table: "vendors" | "clients", tenantId: string) {
+  const x = norm(row.cells["公司名稱"] || row.cells["簡稱"])
+  if (!x) return
+  for (const rec of records) {
+    if (rec.tenant_id !== tenantId) continue
+    const upd = plan.updates.find((u) => u.table === table && u.id === rec.id)
+    const current = typeof upd?.set.name === "string" ? upd.set.name : rec.name
+    const parts = current.split(MERGE_SEP_RE).map((p) => p.trim()).filter(Boolean)
+    if (parts.length < 2 || !parts.some((p) => norm(p) === x)) continue
+    const rest = parts.filter((p) => norm(p) !== x).join("／")
+    if (!rest) continue
+    // 只拆有對應到 Excel 列的匯入記錄（plan 裡有它，或對到了但沒有別的欄位要改）
+    const matched = !!upd || (hasImportMarker(rec.note) && !plan.unmatchedDb.some((d) => d.id === rec.id))
+    if (!matched) continue
+    if (editedAfterImport(rec)) {
+      plan.conflicts.push({ table, id: rec.id, column: "name" })
+      continue
+    }
+    if (upd) upd.set.name = rest
+    else {
+      plan.updates.push({ table, id: rec.id, tenantId: rec.tenant_id, seenUpdatedAt: rec.updated_at, set: { name: rest }, source: { file: row.file, sheet: row.sheet, rowNumber: row.rowNumber } })
+      plan.unchanged = Math.max(0, plan.unchanged - 1)
+    }
+    plan.mergedRenames.push({ table, id: rec.id })
+  }
 }
 
 /** 只含筆數與欄位名的摘要（可以貼進回報，不含任何儲存格內容）。 */
@@ -667,6 +705,7 @@ export function summarizePlan(plan: RosterPlan) {
     conflicts: countBy(plan.conflicts, (c) => `${c.table}.${c.column}`),
     rejected: countBy(plan.rejected, (r) => `${r.table}.${r.column}:${r.reason}`),
     notes: plan.notes,
+    mergedRenames: countBy(plan.mergedRenames, (r) => r.table),
   }
 }
 

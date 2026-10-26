@@ -279,6 +279,34 @@ describe("租戶範圍與補建新版列", () => {
     expect(summarizePlan(plan).toInsert).toEqual({ vendors: 1, clients: 1 })
   })
 
+  it("併名記錄：Excel 有「乙/甲」與單獨「乙」兩列 → 併名記錄改名為剩下的「甲」，「乙」另外新增", () => {
+    const merged = client({ id: "m1", name: "測試乙股份有限公司/測試甲事務所", short_name: "測乙", tax_id: "12345675" })
+    const rows = [
+      row({ sheet: "客戶資料", kind: "client", headers: CLIENT_HEADERS, cells: { 簡稱: "測乙", 公司名稱: "測試乙股份有限公司/測試甲事務所", 統編: "12345675", 區域: "測試市" } }),
+      row({ sheet: "客戶資料", kind: "client", headers: CLIENT_HEADERS, rowNumber: 6, cells: { 簡稱: "測乙", 公司名稱: "測試乙股份有限公司", 統編: "12345675" } }),
+    ]
+    const plan = planRosterMigration({ rows, vendors: [], clients: [merged] }, { tenantId: T, insertUnmatchedNew: true })
+    expect(plan.updates.find((u) => u.id === "m1")?.set).toMatchObject({ name: "測試甲事務所", region: "測試市" })
+    expect(plan.mergedRenames).toEqual([{ table: "clients", id: "m1" }])
+    expect(plan.inserts.map((i) => i.values.name)).toEqual(["測試乙股份有限公司"])
+    expect(plan.inserts[0].values).not.toHaveProperty("tax_id")
+    const sql = planToSql(plan)
+    expect(sql.indexOf("UPDATE public.clients")).toBeLessThan(sql.indexOf("INSERT INTO public.clients"))
+    expect(summarizePlan(plan).mergedRenames).toEqual({ clients: 1 })
+  })
+
+  it("併名記錄匯入後有人改過 → 不改名（列衝突），補建照常；沒開補建就不拆", () => {
+    const merged = client({ id: "m2", name: "測試乙股份有限公司／測試甲事務所", updated_at: LATER })
+    const rows = [row({ sheet: "客戶資料", kind: "client", headers: CLIENT_HEADERS, cells: { 公司名稱: "測試乙股份有限公司／測試甲事務所" } }), row({ sheet: "客戶資料", kind: "client", headers: CLIENT_HEADERS, rowNumber: 6, cells: { 公司名稱: "測試乙股份有限公司" } })]
+    const plan = planRosterMigration({ rows, vendors: [], clients: [merged] }, { tenantId: T, insertUnmatchedNew: true })
+    expect(plan.conflicts).toContainEqual({ table: "clients", id: "m2", column: "name" })
+    expect(plan.mergedRenames).toEqual([])
+    expect(plan.inserts).toHaveLength(1)
+    const noInsert = planRosterMigration({ rows, vendors: [], clients: [{ ...merged, updated_at: AT }] }, { tenantId: T })
+    expect(noInsert.mergedRenames).toEqual([])
+    expect(noInsert.updates.find((u) => u.id === "m2")?.set ?? {}).not.toHaveProperty("name")
+  })
+
   it("要補建卻沒給租戶 → 直接報錯", () => {
     expect(() => planRosterMigration({ rows: [], vendors: [], clients: [] }, { insertUnmatchedNew: true })).toThrow()
   })
