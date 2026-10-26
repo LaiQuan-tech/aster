@@ -230,6 +230,11 @@ export function returnBonusRun(id: string, reason: string) {
   return apiFetch<BonusRunDetail>(`/bonus-runs/${id}/return`, { method: "POST", body: JSON.stringify({ reason }) })
 }
 
+/** HR 撤回送審（限送審中、需原因；通知老闆）。已核准後只能老闆退回。 */
+export function withdrawBonusRun(id: string, reason: string) {
+  return apiFetch<BonusRunDetail>(`/bonus-runs/${id}/withdraw`, { method: "POST", body: JSON.stringify({ reason }) })
+}
+
 /** ESS 簽核頁：老闆的待核准獎金批次（非老闆回 canApprove=false、空清單）。 */
 export function getMyBonusApprovals() {
   return apiFetch<{ canApprove: boolean; runs: BonusRunDetail[] }>("/my/bonus-approvals")
@@ -302,6 +307,7 @@ const BONUS_ERRORS: Record<string, string> = {
   not_approved: "要先送審並經老闆核准才能發放",
   not_pending: "只有送審中的批次能核准",
   not_returnable: "只有送審中或已核准的批次能退回",
+  not_withdrawable: "只有送審中（尚未核准）的批次能撤回；已核准請老闆退回",
   not_approver: "只有老闆（租戶設定的最終核准人）能核准或退回",
   boss_not_configured: "還沒設定老闆（最終核准人）——請先到「公司設定 → 簽核」設定老闆再送審",
   amount_changed: "送審後金額有變動：老闆請按「退回」；HR 請按「重算」（會自動退回草稿）後重新送審",

@@ -8,7 +8,7 @@
  */
 
 /** 頁首／手機版頁面頂端的口徑說明（與 lib/admin-nav.ts 集團總覽分頁的 desc 同一句，測試會對照）。 */
-export const OVERVIEW_BASIS_NOTE = "收入＝實際入帳（未稅）；支出＝已匯款放款（代扣前）；專案毛利不含人事成本";
+export const OVERVIEW_BASIS_NOTE = "收入＝實際入帳（未稅）；支出＝已匯款放款＋未經放款單的已付複委託（代扣前）；專案毛利不含人事成本";
 
 /** 只有一家公司時的提示（正式庫現況）。 */
 export const SINGLE_COMPANY_HINT =

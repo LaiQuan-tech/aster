@@ -14,6 +14,7 @@ import {
   listPendingApprovals,
   returnRun,
   submitRun,
+  withdrawRun,
   createReversalRun,
   createRun,
   deleteRun,
@@ -48,7 +49,8 @@ export const bonusRunsRouter = Router()
  * 沖一次、沖銷批不能再被沖銷（services/bonus-run-store.ts createReversalRun）。
  *
  * **核准（#7，2026-10-26）**：草稿 →（HR）`POST /:id/submit` 送審 →（老闆）`POST /:id/approve` 核准
- * →（HR）`POST /:id/pay` 發放；老闆 `POST /:id/return {reason}` 退回草稿。老闆＝租戶
+ * →（HR）`POST /:id/pay` 發放；老闆 `POST /:id/return {reason}` 退回草稿；HR `POST /:id/withdraw {reason}`
+ * 撤回送審（限送審中，已核准後只能老闆退回；通知老闆）。老闆＝租戶
  * features.approval.fallbackApproverEmpId（沒設 → 409 boss_not_configured；非老闆 → 403 not_approver）。
  * approve／return 不掛 requireHrAdmin（老闆不一定是 HR），身分在 service 裡比對。老闆在 ESS 簽核頁用
  * `GET /my/bonus-approvals` 看待核准批次（含明細），不必進後台。沖銷批次走同一套。
@@ -341,6 +343,32 @@ bonusRunsRouter.post("/bonus-runs/:id/return", requireAuth, requireTenant, async
   try {
     const actor = await actorOf(tenantId, req)
     const detail = await returnRun(tenantId, actor, id, parsed.data.reason)
+    if (!detail) {
+      res.status(404).json({ error: "not_found" })
+      return
+    }
+    res.status(200).json(detail)
+  } catch (err) {
+    handleError(err, res, next)
+  }
+})
+
+// ── POST /bonus-runs/:id/withdraw {reason} — HR 撤回送審：pending_approval → draft（通知老闆；已核准 409） ──
+bonusRunsRouter.post("/bonus-runs/:id/withdraw", ...guards, async (req: Request, res: Response, next: NextFunction) => {
+  const tenantId = res.locals.tenantId as string
+  const id = req.params.id as string
+  if (!UUID_RE.test(id)) {
+    next()
+    return
+  }
+  const parsed = returnBody.safeParse(req.body ?? {})
+  if (!parsed.success) {
+    res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+    return
+  }
+  try {
+    const actor = await actorOf(tenantId, req)
+    const detail = await withdrawRun(tenantId, actor, id, parsed.data.reason)
     if (!detail) {
       res.status(404).json({ error: "not_found" })
       return

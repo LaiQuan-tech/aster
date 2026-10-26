@@ -17,6 +17,7 @@ import {
   reverseBonusRun,
   submitBonusRun,
   todayKey,
+  withdrawBonusRun,
   type BonusRunDetail,
 } from "@/lib/bonus-api";
 import Link from "next/link";
@@ -26,7 +27,7 @@ import { ExcludedArchivedList, GrossProfitTable, ItemsTable, SkippedList, Stat, 
  * 批次明細：毛利表（入帳／成本／毛利／比例）＋items 表（專案／員工／入帳比例／累計應發／已發／本季應發／超發紅字）。
  * 狀態（2026-10-26 加核准）：
  *   draft：可改期別／基準日並重算、改備註、送審（HR）、刪除（填理由）。
- *   pending_approval：老闆（canApprove）可核准／退回（需原因）；HR 可重算，金額變了自動退回草稿。
+ *   pending_approval：老闆（canApprove）可核准／退回（需原因）；HR 可撤回（需原因）、可重算，金額變了自動退回草稿。
  *   approved：HR 標記已發放（填發放日）；老闆仍可退回。
  *   paid：唯讀＋匯出 Excel（草稿也能匯出，方便先拿去對）。
  */
@@ -99,6 +100,16 @@ export default function BonusRunDetailPage() {
     if (!run) return;
     if (!confirm(`核准 ${run.label}？核准後 HR 才能發放（本批合計 ${fmtMoney(run.totals.amount)} 元）。`)) return;
     await act("approve", async () => keepDetail(await approveBonusRun(id)));
+  }
+  async function withdraw() {
+    if (!run) return;
+    const reason = prompt(`撤回 ${run.label} 的送審？（老闆會收到通知）請填撤回原因：`);
+    if (reason === null) return;
+    if (!reason.trim()) {
+      setError("撤回原因必填");
+      return;
+    }
+    await act("withdraw", async () => keepDetail(await withdrawBonusRun(id, reason.trim())));
   }
   async function sendBack() {
     if (!run) return;
@@ -229,7 +240,7 @@ export default function BonusRunDetailPage() {
       {isDraft && run.returnReason && (
         <Card>
           <p className="text-sm text-amber-800">
-            這批曾被退回{run.returnedAt ? `（${new Date(run.returnedAt).toLocaleString("zh-TW")}）` : ""}：{run.returnReason}
+            這批曾被退回／撤回{run.returnedAt ? `（${new Date(run.returnedAt).toLocaleString("zh-TW")}）` : ""}：{run.returnReason}
           </p>
         </Card>
       )}
@@ -338,7 +349,18 @@ export default function BonusRunDetailPage() {
                 {busy === "recompute" ? "重算中…" : "重算（金額變動會退回草稿）"}
               </button>
             )}
-            {!canApprove && isPending && <span className="text-xs text-gray-500">只有老闆能核准或退回。</span>}
+            {isPending && (
+              <button
+                type="button"
+                className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60 md:rounded-md"
+                onClick={withdraw}
+                disabled={busy !== null}
+              >
+                {busy === "withdraw" ? "撤回中…" : "撤回送審…"}
+              </button>
+            )}
+            {!canApprove && isPending && <span className="text-xs text-gray-500">只有老闆能核准或退回；送審中 HR 可撤回。</span>}
+            {!canApprove && isApproved && <span className="text-xs text-gray-500">已核准後 HR 不能撤回，要改請老闆退回。</span>}
           </div>
           {showPay && (
             <div className="mt-3 flex flex-wrap items-end gap-2 rounded-xl bg-gray-50 p-3">

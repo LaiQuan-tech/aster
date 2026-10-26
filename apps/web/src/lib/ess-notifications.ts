@@ -11,7 +11,7 @@
  *   attendance_sheet  `{ sheetId, period, … }`
  *   anomaly           `{ anomalyType, from, to, detail }`
  *   late_report       `{ lateReportId, employeeId, workDate, lateMinutes }`（2026-10-11 遲到說明，給主管與老闆）
- *   bonus_run         `{ bonusRunId, event: submitted|approved|returned, auto?, audience? }`（2026-10-26 獎金批次核准：送審給老闆、核准／退回給送審人）
+ *   bonus_run         `{ bonusRunId, event: submitted|approved|returned|withdrawn, auto?, audience? }`（2026-10-26 獎金批次核准：送審給老闆、核准／退回給送審人）
  *   announcement      不看 payload 內容（正式 API 目前沒有產生點，只有 demo 種子；payload 也沒有公告 id）
  * 未讀 ＝ `payload.read !== true`（標記已讀是把 `read: true` 併進 payload）。
  */

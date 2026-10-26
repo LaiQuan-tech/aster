@@ -217,6 +217,24 @@ describe("核准狀態機（#7）", () => {
     expect((await req("post", `/bonus-runs/${id}/approve`, BOSS_TOKEN).send({})).status).toBe(200)
   })
 
+  it("HR 撤回：送審中可撤回（需原因、通知老闆）；已核准後 409 not_withdrawable；非 HR 403", async () => {
+    const id = await createDraft()
+    await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
+    expect((await req("post", `/bonus-runs/${id}/withdraw`, HR_TOKEN).send({})).status).toBe(400)
+    expect((await req("post", `/bonus-runs/${id}/withdraw`, STAFF_TOKEN).send({ reason: "x" })).status).toBe(403)
+    const w = await req("post", `/bonus-runs/${id}/withdraw`, HR_TOKEN).send({ reason: "漏了一案" })
+    expect(w.status).toBe(200)
+    expect(w.body.run).toMatchObject({ status: "draft", returnedByEmpId: HR_ID, submittedAt: null })
+    expect(w.body.run.returnReason).toMatch(/漏了一案/)
+    expect(fake.db.notifications.some((n) => n.employee_id === BOSS_ID && n.payload?.event === "withdrawn" && /撤回/.test(n.title))).toBe(true)
+
+    await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
+    await req("post", `/bonus-runs/${id}/approve`, BOSS_TOKEN).send({})
+    const late = await req("post", `/bonus-runs/${id}/withdraw`, HR_TOKEN).send({ reason: "想改" })
+    expect([late.status, late.body.error]).toEqual([409, "not_withdrawable"])
+    expect(fake.db.bonus_runs.find((r) => r.id === id)?.status).toBe("approved")
+  })
+
   it("老闆沒設定 → 送審 409 boss_not_configured", async () => {
     fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: {} }]
     const id = await createDraft()
@@ -286,6 +304,8 @@ describe("狀態機純函式", () => {
     expect(transitionOf("draft", "approve")).toEqual({ ok: false, code: "not_pending" })
     expect(transitionOf("approved", "return")).toEqual({ ok: true, next: "draft" })
     expect(transitionOf("draft", "return")).toEqual({ ok: false, code: "not_returnable" })
+    expect(transitionOf("pending_approval", "withdraw")).toEqual({ ok: true, next: "draft" })
+    expect(transitionOf("approved", "withdraw")).toEqual({ ok: false, code: "not_withdrawable" })
     expect(transitionOf("approved", "pay")).toEqual({ ok: true, next: "paid" })
     expect(transitionOf("pending_approval", "pay")).toEqual({ ok: false, code: "not_approved" })
     expect(transitionOf("paid", "pay")).toEqual({ ok: false, code: "not_draft" })

@@ -57,7 +57,7 @@ export const BONUS_RUN_STATUS_LABEL: Record<BonusRunStatus, string> = {
  * 核准狀態機（#7，2026-10-26）——純函式；IO 在 bonus-run-store.ts
  *
  *   draft ──submit(HR)──▶ pending_approval ──approve(老闆)──▶ approved ──pay(HR)──▶ paid
- *     ▲                     │ return(老闆，需原因)               │
+ *     ▲                     │ return(老闆，需原因)／withdraw(HR，需原因，限送審中) │
  *     └─────────────────────┴───────────────────────────────────┘
  *   重算（手動 PATCH、入帳／成本／分潤設定變動的自動重算）在 pending_approval／approved 也會跑；
  *   每列金額的指紋（amountFingerprint）跟送審時存的不同 → 退回 draft，需重新送審。
@@ -65,11 +65,11 @@ export const BONUS_RUN_STATUS_LABEL: Record<BonusRunStatus, string> = {
  *   刪除只收 draft；發放只收 approved。沖銷批次走同一套。
  * ────────────────────────────────────────────────────────────────── */
 
-export type BonusRunAction = "submit" | "approve" | "return" | "pay" | "delete"
+export type BonusRunAction = "submit" | "approve" | "return" | "withdraw" | "pay" | "delete"
 
 export type TransitionResult =
   | { ok: true; next: BonusRunStatus }
-  | { ok: false; code: "not_draft" | "not_pending" | "not_returnable" | "not_approved" }
+  | { ok: false; code: "not_draft" | "not_pending" | "not_returnable" | "not_withdrawable" | "not_approved" }
 
 export function transitionOf(status: string, action: BonusRunAction): TransitionResult {
   switch (action) {
@@ -81,6 +81,9 @@ export function transitionOf(status: string, action: BonusRunAction): Transition
       return status === "pending_approval" || status === "approved"
         ? { ok: true, next: "draft" }
         : { ok: false, code: "not_returnable" }
+    case "withdraw":
+      // HR 撤回只限送審中；已核准後只能由老闆退回。
+      return status === "pending_approval" ? { ok: true, next: "draft" } : { ok: false, code: "not_withdrawable" }
     case "pay":
       if (status === "approved") return { ok: true, next: "paid" }
       // 已發放再按一次沿用舊錯誤碼 not_draft（「已經不是可處理的狀態」）。

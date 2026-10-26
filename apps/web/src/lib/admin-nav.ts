@@ -248,7 +248,7 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       label: "集團總覽",
       href: "/admin/group-overview",
       title: "集團總覽",
-      desc: "收入＝實際入帳（未稅）；支出＝已匯款放款（代扣前）；專案毛利不含人事成本",
+      desc: "收入＝實際入帳（未稅）；支出＝已匯款放款＋未經放款單的已付複委託（代扣前）；專案毛利不含人事成本",
       hrOnly: true,
     },
     {

@@ -34,7 +34,7 @@ export interface GroupCompanyRow {
   revenue: number;
   /** 已開票（未稅、依開票日；參考）。 */
   invoiced: number;
-  /** 放款支出（已匯款、代扣前毛額、依匯款日）。 */
+  /** 支出（已匯款放款＋未經放款單的已付複委託，代扣前毛額、依付款日）。 */
   expense: number;
   grossProfit: number;
   /** 毛利÷入帳收入（%，一位小數）；收入 0 → null。 */

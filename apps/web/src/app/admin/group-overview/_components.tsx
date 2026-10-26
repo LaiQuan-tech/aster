@@ -79,7 +79,7 @@ export function StatCards({
   const cards: Array<{ label: string; value: string; hint: string; tone?: string }> = [
     { label: "集團入帳收入", value: fmtMoney(group.revenue), hint: "實際入帳、未稅" },
     { label: "已開票（參考）", value: fmtMoney(group.invoiced), hint: "依開票日、未稅，不併入收入" },
-    { label: "放款支出", value: fmtMoney(group.expense), hint: "已匯款、代扣前" },
+    { label: "放款支出", value: fmtMoney(group.expense), hint: "已匯款放款＋已付複委託、代扣前" },
     { label: "專案毛利", value: fmtMoney(group.grossProfit), hint: "入帳收入 − 放款支出", tone: negative(group.grossProfit) },
     { label: "毛利率", value: fmtPct(group.grossMarginPct), hint: "毛利 ÷ 入帳收入", tone: group.grossMarginPct != null && group.grossMarginPct < 0 ? "text-red-600" : "text-gray-900" },
   ];

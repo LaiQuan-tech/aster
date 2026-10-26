@@ -433,6 +433,37 @@ describe("GET /group-overview — 放款：只算已匯款，作廢／草稿／�
   })
 })
 
+describe("舊路徑複委託已付款（2026-10-26 與獎金池毛利同口徑）", () => {
+  it("沒經放款單的已付期款計入支出（實付＋代扣，依付款日）；公司沒填歸專案承接公司；關係企業廠商剔除於集團合計", () => {
+    const CO_X = "cccccccc-0000-4000-8000-0000000000aa"
+    const data: GroupOverviewData = {
+      year: 2026,
+      companies: [
+        { id: CO_A, name: "測試設計公司A", isDefault: true, isActive: true },
+        { id: CO_X, name: "測試設計公司X", isDefault: false, isActive: true },
+      ],
+      billings: [],
+      undatedReceived: [],
+      projects: [{ id: "pj1", code: "T-1", name: "測試案", company_id: CO_X, client_id: null }],
+      clients: [],
+      vendors: [{ id: "v-aff", name: "關係廠商", is_affiliate: true }],
+      disbursements: [],
+      legacySubcontractPayments: [
+        { id: "sp1", paid_on: "2026-04-10", paid_amount: 90_000, withheld_amount: 10_000, paying_company_id: null, project_id: "pj1", vendor_id: null, vendor_name: "下包甲" },
+        { id: "sp2", paid_on: "2026-05-10", paid_amount: 20_000, withheld_amount: 0, paying_company_id: CO_A, project_id: "pj1", vendor_id: "v-aff", vendor_name: "關係廠商" },
+        { id: "sp3", paid_on: "2025-12-31", paid_amount: 99_999, withheld_amount: 0, paying_company_id: CO_A, project_id: "pj1", vendor_id: null, vendor_name: "去年" },
+      ],
+    }
+    const model = buildGroupModel(data)
+    const result = summarizeGroupOverview(model, { month: null, excluded: new Set() })
+    const byId = new Map(result.companies.map((c) => [c.id, c]))
+    expect(byId.get(CO_X)?.expense).toBe(100_000)
+    expect(byId.get(CO_A)?.expense).toBe(20_000)
+    expect(byId.get(CO_A)?.affiliate.expense).toBe(20_000)
+    expect(result.group.expense).toBe(100_000)
+  })
+})
+
 describe("GET /group-overview — 關係企業剔除（只影響集團合計）", () => {
   it("各公司自己的數字含關係企業往來，另列「其中關係企業」；集團合計剔除", async () => {
     const body = await getOverview()

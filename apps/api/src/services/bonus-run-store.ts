@@ -1218,6 +1218,41 @@ export async function returnRun(tenantId: string, actor: Actor, id: string, reas
   return getRun(tenantId, id)
 }
 
+/**
+ * HR 撤回送審（需原因）：pending_approval → draft，通知老闆。已核准後 HR 不能撤回（409 not_withdrawable），
+ * 只能請老闆退回。退回欄位（returned_*）一併記下，畫面顯示「曾被撤回」。
+ */
+export async function withdrawRun(tenantId: string, actor: Actor, id: string, reason: string): Promise<RunDetail | null> {
+  await requireApprovalSchema()
+  const current = await loadRun(tenantId, id)
+  if (!current) return null
+  assertTransition(current.status, "withdraw")
+  const fullReason = `HR 撤回：${reason}`
+  await transitionRow(tenantId, id, "pending_approval", returnPatch(actor.empId, fullReason), "withdrawRun")
+  await writeAuditLog({
+    tenantId,
+    tableName: "bonus_runs",
+    recordId: id,
+    action: "UPDATE",
+    oldRow: { status: "pending_approval" },
+    newRow: { status: "draft", returned_by_emp_id: actor.empId, return_reason: fullReason, withdrawn: true },
+    actorEmpId: actor.empId,
+    context: "POST /bonus-runs/:id/withdraw",
+  })
+  const boss = await loadBossEmpId(tenantId).catch(() => null)
+  if (boss) {
+    await enqueue({
+      tenantId,
+      employeeIds: [boss],
+      type: "bonus_run",
+      title: `獎金批次 ${current.label} 已由 HR 撤回`,
+      body: `撤回原因：${reason}。不需再核准，HR 修正後會重新送審。`,
+      payload: { bonusRunId: id, event: "withdrawn", audience: "boss", withdrawnByEmpId: actor.empId },
+    })
+  }
+  return getRun(tenantId, id)
+}
+
 /** approved → paid（凍結）。只收已核准；pay 前重抓 paid_before 逐列比對，不一致 → 409 stale_paid_before。 */
 export async function payRun(tenantId: string, actor: Actor, id: string, paidOn: string): Promise<RunDetail | null> {
   await requireApprovalSchema()

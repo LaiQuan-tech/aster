@@ -4,7 +4,7 @@ import { isEmployedOn } from "./employment-status.js"
 import { defaultCompanyOf, loadTenantCompanies, type CompanyLite } from "./project-company.js"
 import { effectiveBillingAmount, pct1 } from "./project-money.js"
 import { isVoidedBeyondCapDraft } from "./overtime-void.js"
-import { disbursementGrossCents } from "./project-gross-profit.js"
+import { disbursementGrossCents, subcontractPaymentGrossCents } from "./project-gross-profit.js"
 
 /**
  * 集團總覽（2026-10-11 業主拍板第一版）：跨公司彙總入帳收入、放款支出與專案毛利。
@@ -15,8 +15,11 @@ import { disbursementGrossCents } from "./project-gross-profit.js"
  *   • 已開票（應收，參考）＝依**開票日**（invoiced_on）歸月的開票金額，也是未稅；不併入收入。
  *   • 支出＝已匯款的放款：`disbursements.status='paid'`，依**匯款日**（paid_on）歸月，取**代扣前的毛額**
  *     （`amount`＋`withheld_amount`）。放款單是支出的唯一來源——下包期款經放款單付出的不另計，
- *     草稿／送簽中／已核准未付／作廢一律不計。⚠️ 反過來說，舊路徑手動標記已付、沒有經放款單的下包期款
- *     （project_subcontract_payments.disbursement_id 為空）不在 disbursements 裡，第一版不計入支出。
+ *     草稿／送簽中／已核准未付／作廢一律不計。
+ *     2026-10-26 起另計**舊路徑複委託已付款**：手動標記已付、沒有經放款單的下包期款
+ *     （project_subcontract_payments.disbursement_id 為空、paid_on 在期間內），毛額＝實付＋代扣
+ *     （services/project-gross-profit.ts subcontractPaymentGrossCents，與獎金池毛利同口徑），依付款日歸月；
+ *     公司歸期款的 paying_company_id，沒填 → 專案承接公司；關係企業看下包廠商。
  *   • 專案毛利＝入帳收入－放款支出；毛利率＝毛利÷入帳收入（收入 0 → null，畫面顯示「—」）。不含人事成本。
  *     單一專案的累計已實現毛利（獎金池用，2026-10-26）在 services/project-gross-profit.ts：同一個放款毛額口徑，
  *     依 disbursement_allocations 落到專案，另計舊路徑（沒經放款單）已付的複委託期款。
@@ -144,6 +147,18 @@ export type DisbursementInputRow = {
   withheld_amount: Numeric
 }
 
+/** 舊路徑（沒經放款單）已付的複委託期款，已併上所屬副委託的專案與廠商。 */
+export type LegacySubcontractPaymentInputRow = {
+  id: string
+  paid_on: string | null
+  paid_amount: Numeric
+  withheld_amount: Numeric
+  paying_company_id: string | null
+  project_id: string | null
+  vendor_id: string | null
+  vendor_name: string | null
+}
+
 export type VendorInputRow = {
   id: string
   name: string
@@ -199,6 +214,8 @@ export type GroupOverviewData = {
   clients: ClientInputRow[]
   /** 該年匯款日、status='paid' 的放款單。 */
   disbursements: DisbursementInputRow[]
+  /** 該年付款日、沒經放款單的已付複委託期款（2026-10-26 起計入支出）；省略＝沒有。 */
+  legacySubcontractPayments?: LegacySubcontractPaymentInputRow[]
   vendors: VendorInputRow[]
   /** 本租戶全部員工（含離職：離職員工的薪資單仍要歸到公司）。省略＝沒有人事資料。 */
   employees?: EmployeeInputRow[]
@@ -402,6 +419,7 @@ export async function loadGroupOverviewData(tenantId: string, year: number, toda
     ),
     loadOvertimeSettlements(tenantId, year),
   ])
+  const legacySubcontractPayments = await loadLegacySubcontractPayments(tenantId, from, to)
 
   // 同一期可能兩條查詢都撈到、offset 分頁遇到並發寫入也可能在頁界重複一列 → 一律以 id 去重。
   const billings = [...new Map([...receivedRows, ...invoicedRows].map((row) => [row.id, row])).values()]
@@ -410,7 +428,7 @@ export async function loadGroupOverviewData(tenantId: string, year: number, toda
     "projects",
     "id, code, name, company_id, client_id",
     tenantId,
-    uniq([...billings.map((b) => b.project_id), ...undatedReceived.map((u) => u.project_id)]),
+    uniq([...billings.map((b) => b.project_id), ...undatedReceived.map((u) => u.project_id), ...legacySubcontractPayments.map((p) => p.project_id)]),
   )
   const [clients, vendors] = await Promise.all([
     fetchByIds<ClientInputRow>(
@@ -423,7 +441,7 @@ export async function loadGroupOverviewData(tenantId: string, year: number, toda
       "vendors",
       "id, name, short_name, is_affiliate",
       tenantId,
-      uniq(disbursements.map((d) => d.vendor_id)),
+      uniq([...disbursements.map((d) => d.vendor_id), ...legacySubcontractPayments.map((p) => p.vendor_id)]),
     ),
   ])
   return {
@@ -434,6 +452,7 @@ export async function loadGroupOverviewData(tenantId: string, year: number, toda
     projects,
     clients,
     disbursements,
+    legacySubcontractPayments,
     vendors,
     employees: [...new Map(employees.map((row) => [row.id, row])).values()],
     payslips: [...new Map(payslips.map((row) => [`${row.employee_id}|${row.period}`, row])).values()],
@@ -441,6 +460,47 @@ export async function loadGroupOverviewData(tenantId: string, year: number, toda
     overtimeSettlements,
     today,
   }
+}
+
+/** 期間內付款、沒經放款單的已付複委託期款，併上副委託的專案與廠商。 */
+async function loadLegacySubcontractPayments(tenantId: string, from: string, to: string): Promise<LegacySubcontractPaymentInputRow[]> {
+  type PayRow = { id: string; subcontract_id: string; paid_on: string | null; paid_amount: Numeric; withheld_amount: Numeric; paying_company_id: string | null }
+  const pays = await fetchAllRows<PayRow>("group-overview legacy subcontract payments", (a, b) =>
+    supabaseAdmin
+      .from("project_subcontract_payments")
+      .select("id, subcontract_id, paid_on, paid_amount, withheld_amount, paying_company_id")
+      .eq("tenant_id", tenantId)
+      .is("disbursement_id", null)
+      .gte("paid_on", from)
+      .lte("paid_on", to)
+      .order("id", { ascending: true })
+      .range(a, b),
+  )
+  if (pays.length === 0) return []
+  const subs = await fetchByIds<{ id: string; project_id: string | null; vendor_id: string | null; vendor_name: string | null; deleted_at?: string | null }>(
+    "project_subcontracts",
+    "id, project_id, vendor_id, vendor_name, deleted_at",
+    tenantId,
+    uniq(pays.map((p) => p.subcontract_id)),
+  )
+  const subById = new Map(subs.map((s) => [s.id, s]))
+  const out: LegacySubcontractPaymentInputRow[] = []
+  for (const p of [...new Map(pays.map((row) => [row.id, row])).values()]) {
+    const sub = subById.get(p.subcontract_id)
+    // 副委託已刪除（軟刪）的期款不計——與獎金池毛利同口徑（project-gross-profit.ts 只看未刪的副委託）。
+    if (!sub || sub.deleted_at) continue
+    out.push({
+      id: p.id,
+      paid_on: p.paid_on,
+      paid_amount: p.paid_amount,
+      withheld_amount: p.withheld_amount,
+      paying_company_id: p.paying_company_id,
+      project_id: sub.project_id,
+      vendor_id: sub.vendor_id,
+      vendor_name: sub.vendor_name,
+    })
+  }
+  return out
 }
 
 /** 該年的加班超額另計（draft＋paid）；表不存在（未套 sql/0040）→ null。 */
@@ -669,6 +729,25 @@ export function buildGroupModel(data: GroupOverviewData): GroupModel {
       vendorKey: vendorKeyOf(d),
       vendorId: d.vendor_id ?? null,
       payeeName: d.payee_name ?? null,
+    })
+  }
+
+  // 舊路徑（沒經放款單）已付的複委託期款：毛額＝實付＋代扣，依付款日歸月（與獎金池毛利同口徑）。
+  for (const p of data.legacySubcontractPayments ?? []) {
+    const month = monthOfDate(p.paid_on, year)
+    if (month === null) continue
+    const project = p.project_id ? projectById.get(p.project_id) : undefined
+    const vendor = p.vendor_id ? vendorById.get(p.vendor_id) : undefined
+    facts.push({
+      kind: "expense",
+      companyId: p.paying_company_id ? resolveCompany(p.paying_company_id) : resolveCompany(project?.company_id),
+      month,
+      cents: subcontractPaymentGrossCents(p),
+      affiliate: vendor?.is_affiliate === true,
+      projectId: null,
+      vendorKey: p.vendor_id ? `v:${p.vendor_id}` : `o:${(p.vendor_name ?? "").trim() || UNKNOWN_PAYEE_LABEL}`,
+      vendorId: p.vendor_id ?? null,
+      payeeName: p.vendor_name ?? null,
     })
   }
 
