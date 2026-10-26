@@ -145,6 +145,11 @@ export interface BonusRunDetail {
   canApprove?: boolean
   /** PATCH 重算後從送審中／已核准退回草稿。 */
   returnedToDraft?: boolean
+  /**
+   * 看得到毛利類欄位（老闆／platform_admin／授權 HR；2026-10-26）。false 時 grossProfit／cost／bonusRatePct／
+   * bonusPool 等欄位是 null，畫面要整欄隱藏而不是顯示「—」。舊 API 沒有＝看得到。
+   */
+  canSeeProfit?: boolean
 }
 
 export interface BonusRunPreview {
@@ -153,6 +158,8 @@ export interface BonusRunPreview {
   items: BonusRunItem[]
   totals: BonusTotals
   snapshot: BonusRunSnapshot
+  /** 同 BonusRunDetail.canSeeProfit。 */
+  canSeeProfit?: boolean
 }
 
 export interface BonusSummaryQuarter {

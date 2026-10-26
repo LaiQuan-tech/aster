@@ -17,6 +17,7 @@ import {
   taipeiToday,
 } from "../services/project-status.js"
 import { isHrRole, resolveSelf } from "../middleware/scope.js"
+import { loadGroupFinancialsAccess } from "../services/financial-visibility.js"
 import {
   bonusEditAccessOf,
   loadProjectBossEmpId,
@@ -390,7 +391,7 @@ async function defaultSharePctByRole(tenantId: string): Promise<Record<string, n
  */
 function serializeProject(
   row: ProjectRow,
-  /** profit：獎金比例可見性（只有老闆與 HR，驗收 2026-10-26）；省略＝跟著 bonus。 */
+  /** profit：獎金比例可見性（老闆／platform_admin／授權 HR，2026-10-26）；省略＝跟著 bonus。 */
   opts: { finance: boolean; bonus?: boolean; profit?: boolean; hasSignedContract: boolean },
 ) {
   const bonus = opts.bonus ?? opts.finance
@@ -417,7 +418,7 @@ function serializeProject(
     shareMode: row.share_mode,
     // 分潤池屬 bonus 段：會計與一般員工一律 null（W4）；列表端點一律不回。
     bonusPool: bonus ? num(row.bonus_pool) : null,
-    // 獎金比例只給老闆與 HR：應得 ÷（比例 × 趴數）可反推毛利。
+    // 獎金比例只給看得到毛利的人（canSeeProfit）：應得 ÷（比例 × 趴數）可反推毛利。
     bonusRatePct: profit ? num(row.bonus_rate_pct) : null,
     createdAt: row.created_at,
     // P3
@@ -535,11 +536,12 @@ function computeAmount(project: ProjectRow, pct: number | null, amount: number |
 }
 
 /**
- * 專案毛利（毛利／入帳／成本／累計獎金池）只有老闆與 HR（hr_admin／platform_admin）看得到
- * （業主 2026-10-26）。經理／主辦／部門主管看得到分潤趴數與每人金額，但看不到毛利。
+ * 專案毛利（毛利／入帳／成本／累計獎金池、獎金比例）＝集團財務的一部分（業主 2026-10-26 二修：老闆與一般 HR 分開）：
+ * 只有老闆、platform_admin、被授權的 hr_admin（features.seeGroupFinancials）看得到。未授權 HR、經理／主辦／
+ * 部門主管看得到分潤趴數與每人金額，但看不到毛利。見 services/financial-visibility.ts。
  */
-function canSeeProjectProfit(self: { id: string; role: string }, bossEmpId: string | null): boolean {
-  return isHrRole(self.role) || (!!bossEmpId && bossEmpId === self.id.toLowerCase())
+async function canSeeProjectProfit(tenantId: string, self: { id: string; role: string }, bossEmpId: string | null): Promise<boolean> {
+  return (await loadGroupFinancialsAccess(tenantId, self, bossEmpId)).canSee
 }
 
 /** 分潤值的「沒有」：null／undefined／0 都算（新成員趴數 0 與未填視為同一件事）。 */
@@ -667,7 +669,7 @@ async function loadScope(
       canSeeBonus: boolean
       /** 分潤寫入權（只有老闆／platform_admin，見 services/project-scope.ts bonusEditAccessOf）。 */
       bonusEdit: BonusEditAccess
-      /** 專案毛利（毛利／入帳／成本／累計獎金池）可見性：只有老闆與 HR（業主 2026-10-26）。 */
+      /** 專案毛利（毛利／入帳／成本／累計獎金池）可見性：老闆／platform_admin／授權 HR（canSeeProjectProfit）。 */
       canSeeProfit: boolean
     }
   | { ok: false; status: number; error: string }
@@ -699,7 +701,7 @@ async function loadScope(
     canManage: access.finance,
     canSeeBonus: access.bonus,
     bonusEdit: bonusEditAccessOf(self, bossEmpId),
-    canSeeProfit: canSeeProjectProfit(self, bossEmpId),
+    canSeeProfit: await canSeeProjectProfit(tenantId, self, bossEmpId),
   }
 }
 
@@ -1494,7 +1496,9 @@ projectsRouter.get(
         if (!scope.canSeeBonus && m.employee_id !== scope.self.id) return base
         // 驗收 #4（2026-10-26）：看得到分潤但看不到毛利的人（經理／主辦／部門主管）只拿得到
         // 別人的角色與趴數——金額（應得／已發／待發／固定金額）會讓人反推出毛利，只留給自己那列。
-        if (!scope.canSeeProfit && m.employee_id !== scope.self.id) return { ...base, sharePct: pct }
+        // 未授權看集團財務的 HR（2026-10-26 二修）仍看得到每人金額：獎金批次本來就由 HR 試算、送審、發放，
+        // 每人金額是發放流程要的數字；他只是看不到毛利／獎金池／獎金比例。
+        if (!scope.canSeeProfit && !isHrRole(scope.self.role) && m.employee_id !== scope.self.id) return { ...base, sharePct: pct }
         const me = memberEstimateOf(est, m.employee_id as string)
         return {
           ...base,
@@ -1516,9 +1520,9 @@ projectsRouter.get(
         shareMode: scope.project.share_mode,
         canSeeProfit: scope.canSeeProfit,
         // 獎金池＝估算服務的累計池（毛利制＝max(0,毛利)×比例；舊制＝手填獎金池；固定金額＝null）。
-        // 累計池等於洩漏毛利，只給老闆與 HR（canSeeProfit）。
+        // 累計池等於洩漏毛利，只給看得到毛利的人（canSeeProfit）。
         bonusPool: scope.canSeeBonus && scope.canSeeProfit ? (est ? est.pool : num(scope.project.bonus_pool)) : null,
-        // 獎金比例也只給老闆與 HR：應得 ÷（比例 × 趴數）就是毛利。
+        // 獎金比例也只給 canSeeProfit：應得 ÷（比例 × 趴數）就是毛利。
         bonusRatePct: scope.canSeeBonus && scope.canSeeProfit ? num(scope.project.bonus_rate_pct) : null,
         bonusEstimate: scope.canSeeBonus && scope.canSeeProfit && est
           ? {
@@ -1876,7 +1880,7 @@ projectsRouter.put(
         revisionInput,
       )
       await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "PUT /projects/:id/share-revision")
-      // 獎金比例只給看得到毛利的人（老闆／HR）：經理只維護名單時，後端補上的目前比例不可原樣回傳（可反推毛利）。
+      // 獎金比例只給看得到毛利的人（老闆／platform_admin／授權 HR）：經理只維護名單時，後端補上的目前比例不可原樣回傳（可反推毛利）。
       res.status(200).json(scope.canSeeProfit ? result : { ...result, bonusRatePct: null })
     } catch (err) {
       if (err instanceof ProjectShareRevisionError) {
@@ -1935,12 +1939,12 @@ projectsRouter.get(
         for (const actor of actors ?? []) changedByNames.set(actor.id as string, actor.name as string)
       }
       // 驗收（2026-10-26）：看得到分潤但看不到毛利的人（經理／主辦／部門主管）濾掉獎金比例與獎金池
-      // 的異動、以及別人的固定金額異動——這些都能反推毛利或別人的金額。自己的異動保留。
+      // 的異動、以及別人的固定金額異動（未授權 HR 例外，金額異動保留）——這些都能反推毛利或別人的金額。自己的異動保留。
       const HIDDEN_FOR_NON_PROFIT = new Set(["bonus_rate", "pool"])
       const visible = (data ?? []).filter((a) => {
         if (scope.canSeeProfit) return true
         if (HIDDEN_FOR_NON_PROFIT.has(a.field as string)) return false
-        if (a.field === "amount" && a.employee_id !== scope.self.id) return false
+        if (a.field === "amount" && a.employee_id !== scope.self.id && !isHrRole(scope.self.role)) return false
         return true
       })
       const adjustments = visible.map((a) => {
@@ -2001,8 +2005,8 @@ projectsRouter.get(
         [...new Set((data ?? []).map((m) => m.project_id as string))],
         "GET /my/project-shares",
       )
-      // 專案毛利只有老闆與 HR 看得到（業主 2026-10-26）；一般成員（含經理／主辦／部門主管）不回。
-      const canSeeProfit = canSeeProjectProfit(self, await loadProjectBossEmpId(tenantId))
+      // 專案毛利只有老闆／platform_admin／授權 HR 看得到（業主 2026-10-26）；一般成員（含經理／主辦／部門主管）不回。
+      const canSeeProfit = await canSeeProjectProfit(tenantId, self, await loadProjectBossEmpId(tenantId))
       const shares = (data ?? []).map((m) => {
         const est = estimates?.get(m.project_id as string)
         const mine = memberEstimateOf(est, self.id)
@@ -2043,7 +2047,7 @@ projectsRouter.get(
           basis: est?.basis ?? null,
           /** 舊制（手填獎金池，未設獎金比例）——ESS 標「舊制」。 */
           legacy: est ? est.basis === "legacy_pool" : null,
-          /** 目前累計毛利（入帳未稅－已發生成本）；只有老闆與 HR 拿得到，其他人一律 null。 */
+          /** 目前累計毛利（入帳未稅－已發生成本）；只有 canSeeProfit（老闆／platform_admin／授權 HR）拿得到，其他人一律 null。 */
           grossProfit: canSeeProfit && est ? est.grossProfit : null,
         }
       })

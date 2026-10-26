@@ -27,7 +27,7 @@ interface MembersCardProps {
   grossProfit?: number | null;
   bonusRatePct: number | null;
   /**
-   * 專案毛利只有老闆與 HR 看得到（業主 2026-10-26）。true＝呼叫者看不到毛利（經理／主辦／部門主管）：
+   * 專案毛利只有老闆／platform_admin／授權 HR 看得到（業主 2026-10-26）。true＝呼叫者看不到毛利（未授權 HR、經理／主辦／部門主管）：
    * 不在本機推算獎金總額（會反推出毛利），每人金額改顯示後端估算值。
    */
   profitHidden?: boolean;
@@ -138,7 +138,7 @@ export function MembersCard({
       <div>
         <h2 className="text-sm font-semibold text-gray-700">專案獎金與分潤</h2>
         <p className="mt-0.5 text-xs text-gray-500">
-          {profitHidden ? "只顯示你自己的預估應得；其他成員的金額、專案毛利、獎金比例與總額僅老闆與 HR 可見。" : showProfit ? "獎金總額＝目前毛利 × 獎金比例（隨入帳與成本累計變動）。" : "修改比例後金額即時連動。"}已發放歷史不變，差額會在下一次撥款調整。
+          {profitHidden ? "專案毛利、獎金比例與總額僅老闆與經授權人員可見（一般成員只看得到自己的預估應得）。" : showProfit ? "獎金總額＝目前毛利 × 獎金比例（隨入帳與成本累計變動）。" : "修改比例後金額即時連動。"}已發放歷史不變，差額會在下一次撥款調整。
         </p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -158,7 +158,7 @@ export function MembersCard({
           <td className="border border-black px-3 py-3 text-right text-sm">{fmtMoney(contractAmount)}</td>
           <td className="border border-black px-3 py-3 text-right text-sm">{fmtMoney(receivedAmount)}</td>
           {showProfit && <td className="border border-black px-3 py-3 text-right text-sm">{fmtMoney(grossProfit)}</td>}
-          <td className="border border-black p-2">{profitHidden ? <div className="text-sm text-gray-400" title="獎金比例僅老闆與 HR 可見">—</div> : <div className="flex items-center justify-center gap-1"><input aria-label="專案獎金比例" className="w-20 rounded border border-gray-300 px-2 py-1 text-right disabled:bg-gray-50 disabled:text-gray-500" type="number" min="0" max="100" step="0.01" disabled={pctLocked} title={pctLocked ? lockedHint : undefined} value={draft.bonusRatePct ?? ""} onChange={(event) => setDraft((current) => ({ ...current, bonusRatePct: event.target.value === "" ? null : Number(event.target.value) }))} />%</div>}</td>
+          <td className="border border-black p-2">{profitHidden ? <div className="text-sm text-gray-400" title="獎金比例僅老闆與經授權人員可見">—</div> : <div className="flex items-center justify-center gap-1"><input aria-label="專案獎金比例" className="w-20 rounded border border-gray-300 px-2 py-1 text-right disabled:bg-gray-50 disabled:text-gray-500" type="number" min="0" max="100" step="0.01" disabled={pctLocked} title={pctLocked ? lockedHint : undefined} value={draft.bonusRatePct ?? ""} onChange={(event) => setDraft((current) => ({ ...current, bonusRatePct: event.target.value === "" ? null : Number(event.target.value) }))} />%</div>}</td>
           <td className="border border-black px-3 py-3 text-right text-sm font-semibold">{fmtMoney(calculation.bonusTotal)}</td>
           {calculation.members.map((member) => {
             const paid = paidByEmployee.get(member.employeeId);

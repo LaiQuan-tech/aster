@@ -33,6 +33,7 @@ import {
   ADMIN_TABS,
   adminModulesOf,
   isAdminPathAllowed,
+  canSeeGroupFinancialsOf,
   isModuleEnabled,
   offLimitsCopy,
   resolveAdminPath,
@@ -293,16 +294,18 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
   // W4：角色範圍。roleNav 為 null＝不限縮（HR／平台管理員與其他角色）。
   const roleNav = roleNavOf(me.role, state.features);
   const sections: AdminSection[] = sectionsForRole(roleNav, modules);
-  const tabs = tabsForSection(resolved.section, modules, { includeTab: resolved.tab, roleNav });
+  // 集團財務（集團總覽）只給老闆／platform_admin／授權 HR（/me.canSeeGroupFinancials，2026-10-26）。
+  const canSeeGroupFinancials = canSeeGroupFinancialsOf(me);
+  const tabs = tabsForSection(resolved.section, modules, { includeTab: resolved.tab, roleNav, canSeeGroupFinancials });
   const allowedTabKeys = roleNav?.tabs[resolved.section]
     ? new Set<string>(roleNav.tabs[resolved.section] as string[])
     : null;
   const subTabs = subTabsFor(resolved.section, resolved.tab);
   // 直開未開放給這個角色的網址：不渲染頁面本體（見檔頭說明）。HR／平台管理員永遠 true。
-  const pathAllowed = isAdminPathAllowed({ pathname, roleNav, modules });
+  const pathAllowed = isAdminPathAllowed({ pathname, roleNav, modules, canSeeGroupFinancials });
   const roleLabel = me.role === "accountant" ? "會計" : "此角色";
   // 直開被擋的整頁說明：HR 限定頁（集團總覽）說「此頁僅限 HR／管理者」，其餘說「此頁未開放給{角色}」。
-  const offLimits = offLimitsCopy({ pathname, roleLabel });
+  const offLimits = offLimitsCopy({ pathname, roleLabel, canSeeGroupFinancials });
   const isHome = resolved.title === "";
   const appName = state.branding?.appName ?? DEFAULT_APP_NAME;
   const brandStyle = state.branding?.primaryColor

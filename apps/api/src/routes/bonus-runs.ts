@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { resolveSelf } from "../middleware/scope.js"
+import { loadGroupFinancialsAccess } from "../services/financial-visibility.js"
 import { parseYearParam } from "../services/project-money.js"
 import { defaultRunLabel } from "../services/bonus-run.js"
 import {
@@ -26,6 +27,7 @@ import {
   tenantToday,
   updateRun,
   type Actor,
+  type SerializedItem,
 } from "../services/bonus-run-store.js"
 import { bonusRunFilename, bonusRunWorkbookBuffer } from "../lib/xlsx/bonus-runs.js"
 
@@ -54,6 +56,11 @@ export const bonusRunsRouter = Router()
  * features.approval.fallbackApproverEmpId（沒設 → 409 boss_not_configured；非老闆 → 403 not_approver）。
  * approve／return 不掛 requireHrAdmin（老闆不一定是 HR），身分在 service 裡比對。老闆在 ESS 簽核頁用
  * `GET /my/bonus-approvals` 看待核准批次（含明細），不必進後台。沖銷批次走同一套。
+ *
+ * **毛利欄位（2026-10-26 二修：老闆與一般 HR 分開）**：毛利／成本／獎金比例／累計獎金池屬於集團財務，只有老闆、
+ * platform_admin、被授權的 hr_admin（features.seeGroupFinancials）看得到；其他 HR 照樣能試算、建立、送審、發放與
+ * 匯出，但回應（含 xlsx）裡這些欄位是 null，並帶 `canSeeProfit: false` 讓前端隱藏欄位。發放所需的金額（入帳、
+ * 入帳比例、趴數、應得累計、已發、本次金額）不受影響。見 maskProfit。
  */
 
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
@@ -88,6 +95,53 @@ async function actorOf(tenantId: string, req: Request): Promise<Actor> {
   return { empId: self?.id ?? null }
 }
 
+/** 呼叫者＋看不看得到毛利（老闆／platform_admin／授權 HR）。 */
+async function viewerOf(tenantId: string, req: Request): Promise<{ actor: Actor; canSeeProfit: boolean }> {
+  const userId = req.auth?.userId
+  const self = userId ? await resolveSelf(tenantId, userId) : null
+  const canSeeProfit = self ? (await loadGroupFinancialsAccess(tenantId, self)).canSee : false
+  return { actor: { empId: self?.id ?? null }, canSeeProfit }
+}
+
+/** 明細的毛利類欄位（可直接或反推出專案毛利）。 */
+const ITEM_PROFIT_KEYS = ["bonusRatePct", "bonusPool", "cost", "disbursementCost", "subcontractCost", "grossProfit"] as const
+/** 批次 snapshot.projects[] 的毛利類欄位。 */
+const SNAPSHOT_PROFIT_KEYS = ["bonusRatePct", "bonusPool", "effectivePool", "cost", "disbursementCost", "subcontractCost", "grossProfit"] as const
+
+function maskItems(items: SerializedItem[]): SerializedItem[] {
+  return items.map((i) => {
+    const out = { ...i } as Record<string, unknown>
+    for (const k of ITEM_PROFIT_KEYS) out[k] = null
+    return out as SerializedItem
+  })
+}
+
+function maskSnapshot(snapshot: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+  if (!snapshot) return snapshot ?? null
+  const projects = Array.isArray(snapshot.projects)
+    ? (snapshot.projects as Array<Record<string, unknown>>).map((p) => {
+        const out = { ...p }
+        for (const k of SNAPSHOT_PROFIT_KEYS) if (k in out) out[k] = null
+        return out
+      })
+    : snapshot.projects
+  return { ...snapshot, projects }
+}
+
+/** 看不到毛利的人：把毛利類欄位換成 null（發放流程要的金額不動），並帶 canSeeProfit 旗標。 */
+export function maskProfit<T extends { items: SerializedItem[]; snapshot?: Record<string, unknown> | null }>(
+  detail: T,
+  canSeeProfit: boolean,
+): T & { canSeeProfit: boolean } {
+  if (canSeeProfit) return { ...detail, canSeeProfit }
+  return {
+    ...detail,
+    items: maskItems(detail.items),
+    ...("snapshot" in detail ? { snapshot: maskSnapshot(detail.snapshot) } : {}),
+    canSeeProfit,
+  }
+}
+
 function handleError(err: unknown, res: Response, next: NextFunction): void {
   if (err instanceof BonusRunError) {
     res.status(err.httpStatus).json({ error: err.code, ...(err.details ?? {}) })
@@ -116,16 +170,21 @@ bonusRunsRouter.post("/bonus-runs/preview", ...guards, async (req: Request, res:
     return
   }
   try {
-    await actorOf(tenantId, req)
+    const { canSeeProfit } = await viewerOf(tenantId, req)
     const asOf = parsed.data.asOf ?? (await tenantToday(tenantId))
     const preview = await previewRun(tenantId, asOf, null)
-    res.status(200).json({
-      label: parsed.data.label ?? defaultRunLabel(asOf),
-      asOf,
-      items: preview.items,
-      totals: preview.totals,
-      snapshot: preview.snapshot,
-    })
+    res.status(200).json(
+      maskProfit(
+        {
+          label: parsed.data.label ?? defaultRunLabel(asOf),
+          asOf,
+          items: preview.items,
+          totals: preview.totals,
+          snapshot: preview.snapshot as Record<string, unknown>,
+        },
+        canSeeProfit,
+      ),
+    )
   } catch (err) {
     handleError(err, res, next)
   }
@@ -175,14 +234,14 @@ bonusRunsRouter.post("/bonus-runs", ...guards, async (req: Request, res: Respons
     return
   }
   try {
-    const actor = await actorOf(tenantId, req)
+    const { actor, canSeeProfit } = await viewerOf(tenantId, req)
     const asOf = parsed.data.asOf ?? (await tenantToday(tenantId))
     const detail = await createRun(tenantId, actor, {
       label: parsed.data.label ?? defaultRunLabel(asOf),
       asOf,
       note: parsed.data.note ?? null,
     })
-    res.status(201).json(detail)
+    res.status(201).json(maskProfit(detail, canSeeProfit))
   } catch (err) {
     handleError(err, res, next)
   }
@@ -197,12 +256,13 @@ bonusRunsRouter.get("/bonus-runs/:id/export.xlsx", ...guards, async (req: Reques
     return
   }
   try {
-    await actorOf(tenantId, req)
-    const detail = await getRun(tenantId, id)
-    if (!detail) {
+    const { canSeeProfit } = await viewerOf(tenantId, req)
+    const raw = await getRun(tenantId, id)
+    if (!raw) {
       res.status(404).json({ error: "not_found" })
       return
     }
+    const detail = maskProfit(raw, canSeeProfit)
     const buffer = await bonusRunWorkbookBuffer(detail.run, detail.items)
     sendXlsx(res, buffer, bonusRunFilename(detail.run))
   } catch (err) {
@@ -219,13 +279,13 @@ bonusRunsRouter.get("/bonus-runs/:id", ...guards, async (req: Request, res: Resp
     return
   }
   try {
-    const actor = await actorOf(tenantId, req)
+    const { actor, canSeeProfit } = await viewerOf(tenantId, req)
     const detail = await getRun(tenantId, id)
     if (!detail) {
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(200).json({ ...detail, canApprove: await isBonusApprover(tenantId, actor.empId) })
+    res.status(200).json({ ...maskProfit(detail, canSeeProfit), canApprove: await isBonusApprover(tenantId, actor.empId) })
   } catch (err) {
     handleError(err, res, next)
   }
@@ -245,14 +305,14 @@ bonusRunsRouter.patch("/bonus-runs/:id", ...guards, async (req: Request, res: Re
     return
   }
   try {
-    const actor = await actorOf(tenantId, req)
+    const { actor, canSeeProfit } = await viewerOf(tenantId, req)
     const { recompute, ...input } = parsed.data
     const detail = await updateRun(tenantId, actor, id, input, { recompute })
     if (!detail) {
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(200).json(detail)
+    res.status(200).json(maskProfit(detail, canSeeProfit))
   } catch (err) {
     handleError(err, res, next)
   }
@@ -272,14 +332,14 @@ bonusRunsRouter.post("/bonus-runs/:id/pay", ...guards, async (req: Request, res:
     return
   }
   try {
-    const actor = await actorOf(tenantId, req)
+    const { actor, canSeeProfit } = await viewerOf(tenantId, req)
     const paidOn = parsed.data.paidOn ?? (await tenantToday(tenantId))
     const detail = await payRun(tenantId, actor, id, paidOn)
     if (!detail) {
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(200).json(detail)
+    res.status(200).json(maskProfit(detail, canSeeProfit))
   } catch (err) {
     handleError(err, res, next)
   }
@@ -294,13 +354,13 @@ bonusRunsRouter.post("/bonus-runs/:id/submit", ...guards, async (req: Request, r
     return
   }
   try {
-    const actor = await actorOf(tenantId, req)
+    const { actor, canSeeProfit } = await viewerOf(tenantId, req)
     const detail = await submitRun(tenantId, actor, id)
     if (!detail) {
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(200).json(detail)
+    res.status(200).json(maskProfit(detail, canSeeProfit))
   } catch (err) {
     handleError(err, res, next)
   }
@@ -315,13 +375,13 @@ bonusRunsRouter.post("/bonus-runs/:id/approve", requireAuth, requireTenant, asyn
     return
   }
   try {
-    const actor = await actorOf(tenantId, req)
+    const { actor, canSeeProfit } = await viewerOf(tenantId, req)
     const detail = await approveRun(tenantId, actor, id)
     if (!detail) {
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(200).json(detail)
+    res.status(200).json(maskProfit(detail, canSeeProfit))
   } catch (err) {
     handleError(err, res, next)
   }
@@ -341,13 +401,13 @@ bonusRunsRouter.post("/bonus-runs/:id/return", requireAuth, requireTenant, async
     return
   }
   try {
-    const actor = await actorOf(tenantId, req)
+    const { actor, canSeeProfit } = await viewerOf(tenantId, req)
     const detail = await returnRun(tenantId, actor, id, parsed.data.reason)
     if (!detail) {
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(200).json(detail)
+    res.status(200).json(maskProfit(detail, canSeeProfit))
   } catch (err) {
     handleError(err, res, next)
   }
@@ -367,13 +427,13 @@ bonusRunsRouter.post("/bonus-runs/:id/withdraw", ...guards, async (req: Request,
     return
   }
   try {
-    const actor = await actorOf(tenantId, req)
+    const { actor, canSeeProfit } = await viewerOf(tenantId, req)
     const detail = await withdrawRun(tenantId, actor, id, parsed.data.reason)
     if (!detail) {
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(200).json(detail)
+    res.status(200).json(maskProfit(detail, canSeeProfit))
   } catch (err) {
     handleError(err, res, next)
   }
@@ -394,13 +454,13 @@ bonusRunsRouter.post("/bonus-runs/:id/reverse", ...guards, async (req: Request, 
     return
   }
   try {
-    const actor = await actorOf(tenantId, req)
+    const { actor, canSeeProfit } = await viewerOf(tenantId, req)
     const detail = await createReversalRun(tenantId, actor, id, parsed.data.reason)
     if (!detail) {
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(201).json(detail)
+    res.status(201).json(maskProfit(detail, canSeeProfit))
   } catch (err) {
     handleError(err, res, next)
   }

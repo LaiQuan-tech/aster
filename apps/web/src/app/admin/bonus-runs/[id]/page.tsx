@@ -404,10 +404,13 @@ export default function BonusRunDetailPage() {
 
       <Card>
         <h2 className="mb-3 text-base font-semibold text-gray-800">明細（{detail.items.length} 列）</h2>
-        <div className="mb-4">
-          <GrossProfitTable items={detail.items} />
-        </div>
-        <ItemsTable items={detail.items} label={run.label} />
+        {/* 毛利表與獎金比例欄只給看得到集團財務的人（2026-10-26）。 */}
+        {detail.canSeeProfit !== false && (
+          <div className="mb-4">
+            <GrossProfitTable items={detail.items} />
+          </div>
+        )}
+        <ItemsTable items={detail.items} label={run.label} canSeeProfit={detail.canSeeProfit !== false} />
         <div className="mt-3 space-y-3">
           <SkippedList skipped={skipped} />
           <ExcludedArchivedList snapshot={detail.snapshot} />

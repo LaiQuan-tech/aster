@@ -323,8 +323,9 @@ export default function BonusRunsPage() {
                   <Stat label="超發列" value={preview.totals.overpaidCount > 0 ? `${preview.totals.overpaidCount} 列` : "無"} tone={preview.totals.overpaidCount > 0 ? "down" : undefined} />
                 </div>
                 <WarningsList warnings={preview.snapshot.warnings ?? preview.totals.warnings} />
-                <GrossProfitTable items={preview.items} />
-                <ItemsTable items={preview.items} label={fLabel} />
+                {/* 毛利表與獎金比例欄只給看得到集團財務的人（2026-10-26）；其他 HR 照常試算、建立、送審。 */}
+                {preview.canSeeProfit !== false && <GrossProfitTable items={preview.items} />}
+                <ItemsTable items={preview.items} label={fLabel} canSeeProfit={preview.canSeeProfit !== false} />
                 <SkippedList skipped={preview.totals.skipped.map((s) => ({ ...s, ...(preview.snapshot.skipped ?? []).find((x) => x.projectId === s.projectId) }))} />
                 <ExcludedArchivedList snapshot={preview.snapshot} />
               </div>

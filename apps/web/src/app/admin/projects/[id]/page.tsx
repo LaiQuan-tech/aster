@@ -243,7 +243,7 @@ export default function AdminProjectDetailPage() {
         bossConfigured: m.bossConfigured ?? detail.access.bossConfigured ?? true,
         // 毛利制（有設獎金比例）才用毛利算獎金總額；舊制／固定金額沿用原畫面。
         grossProfit: m.bonusEstimate && m.bonusEstimate.basis !== "fixed_amount" ? m.bonusEstimate.grossProfit : null,
-        // 專案毛利只有老闆與 HR 看得到；經理／主辦／部門主管不在本機推算獎金總額。
+        // 專案毛利只有老闆／platform_admin／授權 HR 看得到（canSeeProfit）；其他人不在本機推算獎金總額。
         profitHidden: m.canSeeProfit === false,
         defaults: (p3?.settings.defaultSharePctByRole ?? {}) as Partial<Record<ProjectMemberRole, number>>,
       });

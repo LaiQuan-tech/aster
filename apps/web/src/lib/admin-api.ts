@@ -25,6 +25,13 @@ export interface Me {
   empNo: string | null;
   status: string;
   email: string | null;
+  /**
+   * 看得到集團財務（集團總覽、專案毛利、首頁本年收入／毛利率；2026-10-26）：老闆／platform_admin／被授權的 HR。
+   * 舊版 API 沒有這個欄位——讀取請走 lib/admin-nav.ts 的 canSeeGroupFinancialsOf（缺席時退回「HR 角色」）。
+   */
+  canSeeGroupFinancials?: boolean;
+  /** 能授權別人「可看集團財務」（老闆／platform_admin）。 */
+  canGrantGroupFinancials?: boolean;
 }
 
 export function getMe() {

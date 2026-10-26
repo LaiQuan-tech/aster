@@ -34,6 +34,10 @@ export interface Me {
   features?: { wfhPunch?: boolean; noNightPremium?: boolean } | null;
   /** 個人預設班別（null＝依公司規則／彈性上班）。 */
   defaultShift?: { id: string; name: string; start: string; end: string } | null;
+  /** 看得到集團財務（2026-10-26；老闆／platform_admin／授權 HR）。舊 API 沒有。 */
+  canSeeGroupFinancials?: boolean;
+  /** 能授權別人「可看集團財務」（老闆／platform_admin）。舊 API 沒有。 */
+  canGrantGroupFinancials?: boolean;
 }
 
 /** The caller's own employee profile; used to detect HR admins in the ESS. */

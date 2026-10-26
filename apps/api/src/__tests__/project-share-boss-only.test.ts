@@ -60,6 +60,7 @@ const E = {
   deptManager: emp(7),
   newbie: emp(8), // 還不是成員
   lead: emp(9), // projects.lead_emp_id
+  grantedHr: emp(10), // hr_admin＋features.seeGroupFinancials（2026-10-26 二修：HR 預設看不到毛利）
 }
 const T = {
   boss: "boss-user",
@@ -70,6 +71,7 @@ const T = {
   member: "member-user",
   deptManager: "dept-manager-user",
   lead: "lead-user",
+  grantedHr: "granted-hr-user",
 }
 
 function setBoss(id: string | null) {
@@ -105,6 +107,7 @@ beforeEach(() => {
     { id: E.deptManager, tenant_id: TENANT_ID, user_id: T.deptManager, role: "employee", dept_id: DEPT },
     { id: E.newbie, tenant_id: TENANT_ID, user_id: "newbie-user", role: "employee", dept_id: null },
     { id: E.lead, tenant_id: TENANT_ID, user_id: T.lead, role: "employee", dept_id: null },
+    { id: E.grantedHr, tenant_id: TENANT_ID, user_id: T.grantedHr, role: "hr_admin", dept_id: null, features: { seeGroupFinancials: true } },
   ]
   fake.db.departments = [
     { id: DEPT, tenant_id: TENANT_ID, parent_id: null, name: "測試部門", manager_emp_id: E.deptManager, manager_emp_ids: [E.deptManager], created_at: "2026-01-01T00:00:00.000Z" },
@@ -396,7 +399,7 @@ describe("PATCH /projects/:id 封存／解除封存 → 重算草稿批次", () 
   })
 })
 
-describe("獎金比例與異動史：只有老闆與 HR 看得到比例（複驗 2026-10-26）", () => {
+describe("獎金比例與異動史：只有老闆／platform_admin／授權 HR 看得到比例（2026-10-26 二修）", () => {
   beforeEach(() => {
     const adj = (id: string, field: string, employeeId: string | null, oldValue: string | null, newValue: string | null) => ({
       id, tenant_id: TENANT_ID, project_id: PROJECT, employee_id: employeeId, change_set_id: null, field,
@@ -412,11 +415,13 @@ describe("獎金比例與異動史：只有老闆與 HR 看得到比例（複驗
     ]
   })
 
-  it("GET /projects/:id（經理）：bonusRatePct 為 null；老闆／HR 拿得到", async () => {
-    const mgr = await as(T.manager, request(app).get(`/projects/${PROJECT}`))
-    expect(mgr.status).toBe(200)
-    expect(mgr.body.project.bonusRatePct).toBeNull()
-    for (const token of [T.boss, T.hr]) {
+  it("GET /projects/:id（經理、未授權 HR）：bonusRatePct 為 null；老闆／授權 HR／platform 拿得到", async () => {
+    for (const token of [T.manager, T.hr]) {
+      const res = await as(token, request(app).get(`/projects/${PROJECT}`))
+      expect(res.status).toBe(200)
+      expect(res.body.project.bonusRatePct).toBeNull()
+    }
+    for (const token of [T.boss, T.grantedHr, T.platform]) {
       const res = await as(token, request(app).get(`/projects/${PROJECT}`))
       expect(res.body.project.bonusRatePct).toBe(10)
     }
@@ -429,8 +434,13 @@ describe("獎金比例與異動史：只有老闆與 HR 看得到比例（複驗
     expect(ids).toEqual(["a4", "a5", "a6"])
   })
 
-  it("GET /projects/:id/adjustments（老闆／HR）：全部看得到", async () => {
-    for (const token of [T.boss, T.hr]) {
+  it("GET /projects/:id/adjustments（未授權 HR）：濾掉比例／獎金池異動；每人金額異動保留（發放流程要用）", async () => {
+    const res = await as(T.hr, request(app).get(`/projects/${PROJECT}/adjustments`))
+    expect((res.body.adjustments as Row[]).map((a) => a.id).sort()).toEqual(["a3", "a4", "a5", "a6"])
+  })
+
+  it("GET /projects/:id/adjustments（老闆／授權 HR）：全部看得到", async () => {
+    for (const token of [T.boss, T.grantedHr]) {
       const res = await as(token, request(app).get(`/projects/${PROJECT}/adjustments`))
       expect((res.body.adjustments as Row[]).map((a) => a.id).sort()).toEqual(["a1", "a2", "a3", "a4", "a5", "a6"])
     }
@@ -504,10 +514,18 @@ describe("#1 金額走估算服務", () => {
     expect(estimate.calls).toEqual([{ tenantId: TENANT_ID, projectIds: [PROJECT] }])
   })
 
-  it("GET /projects/:id/members（HR）：看得到毛利，但 canEditBonus=false", async () => {
-    const res = await as(T.hr, request(app).get(`/projects/${PROJECT}/members`))
+  it("GET /projects/:id/members（授權 HR）：看得到毛利，但 canEditBonus=false", async () => {
+    const res = await as(T.grantedHr, request(app).get(`/projects/${PROJECT}/members`))
     expect(res.body).toMatchObject({ canSeeBonus: true, canSeeProfit: true, canEditBonus: false, bonusPool: 80000 })
     expect(res.body.bonusEstimate).toMatchObject({ grossProfit: 800000 })
+  })
+
+  it("GET /projects/:id/members（未授權 HR）：看得到分潤與每人金額，但沒有毛利／獎金池／獎金比例", async () => {
+    const res = await as(T.hr, request(app).get(`/projects/${PROJECT}/members`))
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ canSeeBonus: true, canSeeProfit: false, canEditBonus: false, bonusPool: null, bonusEstimate: null, bonusRatePct: null })
+    const other = (res.body.members as Row[]).find((m) => m.employeeId === E.member)
+    expect(other).toMatchObject({ estimatedAmount: 16000, paidAmount: 20000 })
   })
 
   it.each([
@@ -536,8 +554,8 @@ describe("#1 金額走估算服務", () => {
     expect(other).not.toHaveProperty("estimatedAmount")
   })
 
-  it("GET /projects/:id/members（老闆／HR）：看全部成員金額與獎金比例", async () => {
-    for (const token of [T.boss, T.hr]) {
+  it("GET /projects/:id/members（老闆／授權 HR）：看全部成員金額與獎金比例", async () => {
+    for (const token of [T.boss, T.grantedHr]) {
       const res = await as(token, request(app).get(`/projects/${PROJECT}/members`))
       expect(res.body.bonusRatePct).toBe(10)
       const other = (res.body.members as Row[]).find((m) => m.employeeId === E.member)
@@ -578,11 +596,15 @@ describe("#1 金額走估算服務", () => {
     expect(res.body.shares[0]).toMatchObject({ estimatedAmount: 24000, grossProfit: null })
   })
 
-  it("GET /my/project-shares：HR 本人是成員 → 看得到毛利", async () => {
-    fake.db.project_members.push({ id: "eeeeeeee-0000-4000-8000-000000000009", tenant_id: TENANT_ID, project_id: PROJECT, employee_id: E.hr, role_in_project: "support", share_pct: "0", share_amount: null, created_at: "2026-01-04T00:00:00.000Z" })
-    const res = await as(T.hr, request(app).get("/my/project-shares"))
-    expect(res.body.canSeeProfit).toBe(true)
-    expect(res.body.shares[0]).toMatchObject({ projectId: PROJECT, grossProfit: 800000 })
+  it("GET /my/project-shares：授權 HR 本人是成員 → 看得到毛利；未授權 HR → 看不到", async () => {
+    fake.db.project_members.push({ id: "eeeeeeee-0000-4000-8000-000000000009", tenant_id: TENANT_ID, project_id: PROJECT, employee_id: E.grantedHr, role_in_project: "support", share_pct: "0", share_amount: null, created_at: "2026-01-04T00:00:00.000Z" })
+    fake.db.project_members.push({ id: "eeeeeeee-0000-4000-8000-000000000010", tenant_id: TENANT_ID, project_id: PROJECT, employee_id: E.hr, role_in_project: "support", share_pct: "0", share_amount: null, created_at: "2026-01-04T00:00:00.000Z" })
+    const granted = await as(T.grantedHr, request(app).get("/my/project-shares"))
+    expect(granted.body.canSeeProfit).toBe(true)
+    expect(granted.body.shares[0]).toMatchObject({ projectId: PROJECT, grossProfit: 800000 })
+    const plain = await as(T.hr, request(app).get("/my/project-shares"))
+    expect(plain.body.canSeeProfit).toBe(false)
+    expect(plain.body.shares[0]).toMatchObject({ projectId: PROJECT, grossProfit: null })
   })
 
   it("估算服務失敗 → 退回舊算法，不 500", async () => {

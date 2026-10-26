@@ -405,3 +405,50 @@ describe("狀態機純函式", () => {
     expect(amountFingerprint([{ projectId: "p", employeeId: "a", amount: 1 }, { projectId: "p", employeeId: "b", amount: 2 }, { projectId: "q", employeeId: "z", amount: 0 }])).toBe(a)
   })
 })
+
+describe("毛利欄位：只有老闆／platform_admin／授權 HR 看得到（2026-10-26 二修）", () => {
+  const PROFIT_KEYS = ["grossProfit", "cost", "disbursementCost", "subcontractCost", "bonusRatePct", "bonusPool"]
+
+  it("未授權 HR：試算／建立／明細／送審照常，毛利類欄位為 null、canSeeProfit=false，發放金額不變", async () => {
+    const preview = await req("post", "/bonus-runs/preview", HR_TOKEN).send({ asOf: "2026-09-30" })
+    expect(preview.status).toBe(200)
+    expect(preview.body.canSeeProfit).toBe(false)
+    const p1 = (preview.body.items as Array<Record<string, unknown>>).find((i) => i.projectId === P1 && i.employeeId === STAFF_ID)!
+    for (const k of PROFIT_KEYS) expect(p1[k], k).toBeNull()
+    expect(p1).toMatchObject({ revenue: 4_000_000, entitledCumulative: 90_000, amount: 90_000 })
+    const snapP1 = (preview.body.snapshot.projects as Array<Record<string, unknown>>).find((p) => p.projectId === P1)!
+    for (const k of [...PROFIT_KEYS, "effectivePool"]) expect(snapP1[k], k).toBeNull()
+
+    const id = await createDraft()
+    const detail = await req("get", `/bonus-runs/${id}`, HR_TOKEN)
+    expect(detail.status).toBe(200)
+    expect(detail.body.canSeeProfit).toBe(false)
+    for (const item of detail.body.items as Array<Record<string, unknown>>) for (const k of PROFIT_KEYS) expect(item[k], k).toBeNull()
+    expect(detail.body.run.totals.amount).toBeGreaterThan(0)
+
+    const submitted = await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN)
+    expect(submitted.status).toBe(200)
+    expect(submitted.body.run.status).toBe("pending_approval")
+    expect(submitted.body.items[0].grossProfit).toBeNull()
+
+    // DB 裡的快照沒有被遮罩（遮罩只在回應）
+    const stored = fake.db.bonus_run_items!.find((r) => r.project_id === P1) as Row & { snapshot: Record<string, unknown> }
+    expect(stored.snapshot.grossProfit).toBe(3_000_000)
+  })
+
+  it("授權 HR（features.seeGroupFinancials）：看得到毛利", async () => {
+    fake.db.employees = fake.db.employees!.map((e) => (e.id === HR_ID ? { ...e, features: { seeGroupFinancials: true } } : e))
+    const id = await createDraft()
+    const detail = await req("get", `/bonus-runs/${id}`, HR_TOKEN)
+    expect(detail.body.canSeeProfit).toBe(true)
+    const p1 = (detail.body.items as Array<Record<string, unknown>>).find((i) => i.projectId === P1)!
+    expect(p1).toMatchObject({ grossProfit: 3_000_000, cost: 1_000_000, bonusPool: 300_000, bonusRatePct: 10 })
+  })
+
+  it("老闆（HR 兼老闆）：看得到毛利", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: HR_ID } } }]
+    const preview = await req("post", "/bonus-runs/preview", HR_TOKEN).send({ asOf: "2026-09-30" })
+    expect(preview.body.canSeeProfit).toBe(true)
+    expect((preview.body.items as Array<Record<string, unknown>>).find((i) => i.projectId === P1)!.grossProfit).toBe(3_000_000)
+  })
+})

@@ -23,7 +23,11 @@
  *   - `isAdminPathAllowed({ pathname, roleNav, modules })`（2026-09-23 驗收修正）：直開網址時
  *     這個角色能不能看這一頁；AdminShell 不渲染未開放的頁、首頁卡片依它隱藏。HR 一律 true。
  *   - `AdminTab.hrOnly`（2026-10-11 集團總覽）：只給 HR／平台管理員的分頁。帶了 roleNav（會計）就一律不列，
- *     即使租戶自訂的會計範圍沒限縮該分區的分頁；直開網址同樣走 isAdminPathAllowed 擋掉。API 另有 requireHrAdmin。
+ *     即使租戶自訂的會計範圍沒限縮該分區的分頁；直開網址同樣走 isAdminPathAllowed 擋掉。
+ *   - `AdminTab.groupFinancials`（2026-10-26 老闆與一般 HR 分開）：集團財務頁（集團總覽）。只有 /me.canSeeGroupFinancials
+ *     （老闆／platform_admin／被授權的 HR）才列、直開才放行——tabsForSection／isAdminPathAllowed 帶
+ *     `canSeeGroupFinancials: false` 時剔除。讀 /me 走 canSeeGroupFinancialsOf（舊 API 缺欄位時退回 HR 角色）。
+ *     API 守門在 routes/group-overview.ts（403 group_financials_forbidden）。
  */
 
 export type AdminSectionKey =
@@ -90,6 +94,8 @@ export interface AdminTab {
   module?: AdminModuleKey;
   /** 只給 HR／平台管理員（roleNav 為 null）：帶了 roleNav 的角色（會計）不列、直開網址也不放行。 */
   hrOnly?: boolean;
+  /** 集團財務頁（2026-10-26）：只給 /me.canSeeGroupFinancials（老闆／platform_admin／授權 HR）。 */
+  groupFinancials?: boolean;
   detail?: AdminDetailDef;
   /** 有子分頁時，路由由子分頁產生（tab 本身的 href 應等於第一個子分頁的 href）。 */
   children?: AdminSubTab[];
@@ -250,6 +256,7 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       title: "集團總覽",
       desc: "收入＝實際入帳（未稅）；支出＝已匯款放款＋未經放款單的已付複委託（代扣前）；專案毛利不含人事成本",
       hrOnly: true,
+      groupFinancials: true,
     },
     {
       key: "directory",
@@ -872,17 +879,43 @@ export function roleNavOf(role: string | null | undefined, features: Record<stri
 export function tabsForSection(
   section: AdminSectionKey,
   modules: AdminModulesConfig | null | undefined,
-  opts?: { includeTab?: string | null; roleNav?: RoleNavConfig | null },
+  opts?: {
+    includeTab?: string | null;
+    roleNav?: RoleNavConfig | null;
+    /** false＝看不到集團財務（剔除 groupFinancials 分頁）；省略＝不判斷（相容舊呼叫端）。 */
+    canSeeGroupFinancials?: boolean;
+  },
 ): AdminTab[] {
   const keep = opts?.includeTab ?? null;
   const allowed = opts?.roleNav?.tabs[section];
   const allowedSet = allowed ? new Set(allowed) : null;
   const restricted = !!opts?.roleNav;
+  const noGroupFinancials = opts?.canSeeGroupFinancials === false;
   return ADMIN_TABS[section].filter(
     (tab) =>
       tab.key === keep ||
-      (isModuleEnabled(modules, tab.module) && (!allowedSet || allowedSet.has(tab.key)) && !(restricted && tab.hrOnly)),
+      (isModuleEnabled(modules, tab.module) &&
+        (!allowedSet || allowedSet.has(tab.key)) &&
+        !(restricted && tab.hrOnly) &&
+        !(noGroupFinancials && tab.groupFinancials)),
   );
+}
+
+/**
+ * /me 的 canSeeGroupFinancials（2026-10-26）。舊版 API 沒有這個欄位 → 退回改版前的規則（HR／平台管理員），
+ * 免得前端先上線時 HR 的集團總覽入口消失；新 API 一定會回布林。
+ */
+export function canSeeGroupFinancialsOf(me: { role: string; canSeeGroupFinancials?: boolean } | null | undefined): boolean {
+  if (!me) return false;
+  if (typeof me.canSeeGroupFinancials === "boolean") return me.canSeeGroupFinancials;
+  return me.role === "hr_admin" || me.role === "platform_admin";
+}
+
+/** 這個網址是不是集團財務頁（分頁帶 groupFinancials；detail／子路徑跟著父分頁走）。 */
+export function isGroupFinancialsAdminPath(pathname: string): boolean {
+  const resolved = resolveAdminPath(normalizeAdminPath(pathname));
+  if (resolved.route.exact || resolved.tab === null) return false;
+  return ADMIN_TABS[resolved.section].find((tab) => tab.key === resolved.tab)?.groupFinancials === true;
 }
 
 /**
@@ -953,7 +986,18 @@ export function isHrOnlyAdminPath(pathname: string): boolean {
 }
 
 /** 直開被擋時整頁顯示的標題與說明。HR 限定頁一律是「此頁僅限 HR／管理者」；其餘是「此頁未開放給{角色}」。 */
-export function offLimitsCopy(opts: { pathname: string; roleLabel: string }): { title: string; body: string } {
+export function offLimitsCopy(opts: {
+  pathname: string;
+  roleLabel: string;
+  /** false＝看不到集團財務：集團財務頁改說「僅限老闆與授權人員」（2026-10-26）。省略＝舊文案。 */
+  canSeeGroupFinancials?: boolean;
+}): { title: string; body: string } {
+  if (opts.canSeeGroupFinancials === false && isGroupFinancialsAdminPath(opts.pathname)) {
+    return {
+      title: "此頁僅限老闆與授權人員",
+      body: "集團財務只開放給老闆與經老闆授權的人員；需要的話請老闆到員工資料開啟「可看集團財務」。",
+    };
+  }
   if (isHrOnlyAdminPath(opts.pathname)) {
     return {
       title: "此頁僅限 HR／管理者",
@@ -986,8 +1030,11 @@ export function isAdminPathAllowed(opts: {
   pathname: string;
   roleNav: RoleNavConfig | null | undefined;
   modules?: AdminModulesConfig | null;
+  /** false＝看不到集團財務：集團財務頁一律不放行（HR 也一樣）；省略＝不判斷（相容舊呼叫端）。 */
+  canSeeGroupFinancials?: boolean;
 }): boolean {
   const { roleNav } = opts;
+  if (opts.canSeeGroupFinancials === false && isGroupFinancialsAdminPath(opts.pathname)) return false;
   if (!roleNav) return true;
   const path = normalizeAdminPath(opts.pathname);
   if (path === "/admin") return true;

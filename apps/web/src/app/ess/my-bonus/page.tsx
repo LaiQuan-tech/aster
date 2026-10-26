@@ -12,7 +12,7 @@ function money(n: number | null): string {
 
 export default function MyBonusPage() {
   const [shares, setShares] = useState<MyProjectShare[]>([]);
-  // 專案毛利只有老闆與 HR 看得到（業主 2026-10-26）；其他人不顯示這一欄。
+  // 專案毛利只有老闆／platform_admin／授權 HR 看得到（業主 2026-10-26）；其他人不顯示這一欄。
   const [canSeeProfit, setCanSeeProfit] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<{ rows: MyBonusHistoryRow[]; total: number } | null>(null);

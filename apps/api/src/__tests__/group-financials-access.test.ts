@@ -110,7 +110,7 @@ describe("GET /me — canSeeGroupFinancials／canGrantGroupFinancials", () => {
 })
 
 describe("PATCH /employees/:id — features.seeGroupFinancials 只有老闆／platform_admin 能改", () => {
-  const patch = (token: string, id: string, body: unknown) => as(token)(request(app).patch(`/employees/${id}`)).send(body)
+  const patch = (token: string, id: string, body: object) => as(token)(request(app).patch(`/employees/${id}`)).send(body)
 
   it("老闆授權 HR → 200，合併寫入、保留其他鍵", async () => {
     const res = await patch(T.boss, E.hr, { features: { seeGroupFinancials: true } })

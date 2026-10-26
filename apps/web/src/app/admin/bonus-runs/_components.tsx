@@ -45,7 +45,11 @@ export function StatusBadge({ status }: { status: BonusRun["status"] }) {
   return <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>{BONUS_RUN_STATUS_LABELS[status] ?? status}</span>;
 }
 
-export function ItemsTable({ items, label = "" }: { items: BonusRunPreview["items"]; label?: string }) {
+/**
+ * `canSeeProfit=false`（未授權看集團財務的 HR，2026-10-26）：「獎金比例」只留「本次獎金」，% 與總獎金（＝累計獎金池，
+ * 可反推毛利）兩欄不畫。發放要用的金額、入帳、趴數照常。
+ */
+export function ItemsTable({ items, label = "", canSeeProfit = true }: { items: BonusRunPreview["items"]; label?: string; canSeeProfit?: boolean }) {
   if (items.length === 0) return <Empty>沒有可發放的明細（沒有「有成員、可計算」的專案）</Empty>;
   const rows = buildBonusRegisterRows(items);
   const slotHeaders = ["經理", "組員1", "組員2", "組員3", "組員4", "支援"];
@@ -58,12 +62,12 @@ export function ItemsTable({ items, label = "" }: { items: BonusRunPreview["item
             <th className="border border-black px-2 py-2" rowSpan={2}>專案單號</th><th className="border border-black px-2 py-2" rowSpan={2}>工程名稱</th><th className="border border-black px-2 py-2" rowSpan={2}>未稅金額</th>
             <th className="border border-black px-2 py-2" rowSpan={2}>之前請領</th><th className="border border-black px-2 py-2" rowSpan={2}>之前請領%</th>
             <th className="border border-black px-2 py-2" rowSpan={2}>本次請款</th><th className="border border-black px-2 py-2" rowSpan={2}>本次款%</th><th className="border border-black px-2 py-2" rowSpan={2}>累積 %</th>
-            <th className="border border-black px-2 py-1" colSpan={3}>獎金比例</th>
+            <th className="border border-black px-2 py-1" colSpan={canSeeProfit ? 3 : 1}>獎金比例</th>
             {slotHeaders.flatMap((header) => [<th key={`${header}-name`} className="border border-black px-2 py-2" rowSpan={2}>{header}</th>, <th key={`${header}-pct`} className="border border-black px-2 py-2" rowSpan={2} aria-label={`${header}比例`} />])}
             <th className="border border-black px-2 py-2" rowSpan={2}>尚未分配</th><th className="border border-black px-2 py-2" rowSpan={2}>備註</th>
           </tr>
           <tr className="bg-gray-100 text-center font-semibold text-gray-700">
-            <th className="border border-black px-2 py-1">%</th><th className="border border-black px-2 py-1">總獎金</th><th className="border border-black px-2 py-1">本次獎金</th>
+            {canSeeProfit && <><th className="border border-black px-2 py-1">%</th><th className="border border-black px-2 py-1">總獎金</th></>}<th className="border border-black px-2 py-1">本次獎金</th>
           </tr>
         </thead>
         <tbody>
@@ -86,7 +90,7 @@ export function ItemsTable({ items, label = "" }: { items: BonusRunPreview["item
               <td className="border border-black px-2 py-1.5 text-right">{fmtMoney(it.contractTotal)}</td><td className="border border-black px-2 py-1.5 text-right">{fmtMoney(previousReceived)}</td>
               <td className="border border-black px-2 py-1.5 text-right">{fmtPct(it.previousReceivedPct ?? (it.contractTotal ? previousReceived / it.contractTotal : 0))}</td><td className="border border-black px-2 py-1.5 text-right">{fmtMoney(currentReceived)}</td>
               <td className="border border-black px-2 py-1.5 text-right">{fmtPct(it.currentReceivedPct ?? (it.contractTotal ? currentReceived / it.contractTotal : 0))}</td><td className="border border-black px-2 py-1.5 text-right">{fmtPct(it.receivedPct)}</td>
-              <td className="border border-black px-2 py-1.5 text-right">{it.bonusRatePct == null ? "—" : `${it.bonusRatePct}%`}</td><td className="border border-black px-2 py-1.5 text-right">{fmtMoney(it.bonusPool)}</td>
+              {canSeeProfit && <><td className="border border-black px-2 py-1.5 text-right">{it.bonusRatePct == null ? "—" : `${it.bonusRatePct}%`}</td><td className="border border-black px-2 py-1.5 text-right">{fmtMoney(it.bonusPool)}</td></>}
               <td className={`border border-black px-2 py-1.5 text-right font-semibold ${overpaid > 0 ? "text-red-600" : ""}`}>{fmtMoney(register.currentBonus)}</td>
               {members.map((member, memberIndex) => <Fragment key={member?.employeeId ?? `empty-${memberIndex}`}><td className="border border-black px-2 py-1.5">{member?.employeeName ?? ""}</td><td className="border border-black px-2 py-1.5 text-right">{member ? (member.shareMode === "pool_pct" ? `${member.sharePct ?? 0}%` : fmtMoney(member.shareAmount)) : ""}</td></Fragment>)}
               <td className={`border border-black px-2 py-1.5 text-right ${unallocatedPct > 0 ? "font-semibold text-red-600" : ""}`}>{unallocatedPct}%</td>
@@ -97,7 +101,7 @@ export function ItemsTable({ items, label = "" }: { items: BonusRunPreview["item
             </tr>
           )})}
         </tbody>
-        <tfoot><tr className="bg-blue-50 font-semibold"><td className="border border-black px-2 py-2 text-right" colSpan={12}>合計（{rows.length} 案）</td><td className="border border-black px-2 py-2 text-right">{fmtMoney(rows.reduce((sum, row) => sum + row.currentBonus, 0))}</td><td className="border border-black" colSpan={14} /></tr></tfoot>
+        <tfoot><tr className="bg-blue-50 font-semibold"><td className="border border-black px-2 py-2 text-right" colSpan={canSeeProfit ? 12 : 10}>合計（{rows.length} 案）</td><td className="border border-black px-2 py-2 text-right">{fmtMoney(rows.reduce((sum, row) => sum + row.currentBonus, 0))}</td><td className="border border-black" colSpan={14} /></tr></tfoot>
       </table>
     </div>
   );
@@ -126,6 +130,7 @@ export function SkippedList({ skipped }: { skipped: Array<{ projectId: string; r
 /**
  * 獎金怎麼算出來的（2026-10-26 毛利制）：每案一列——入帳、成本（放款＋複委託）、毛利、比例、獎金池、
  * 用哪一制。讓 HR／老闆對得出「為什麼是這個數字」。舊批次（沒有毛利欄位）整張不顯示。
+ * 看不到集團財務的人（回應 canSeeProfit=false）呼叫端不畫這張表。
  */
 export function GrossProfitTable({ items }: { items: BonusRunPreview["items"] }) {
   const byProject = new Map<string, BonusRunPreview["items"][number]>();
