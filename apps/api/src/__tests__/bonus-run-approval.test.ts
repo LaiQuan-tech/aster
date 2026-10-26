@@ -255,6 +255,20 @@ describe("核准狀態機（#7）", () => {
     expect(fake.db.notifications.filter((n) => /退回草稿/.test(n.title)).map((n) => n.employee_id).sort()).toEqual([HR_ID, BOSS_ID].sort())
   })
 
+  it("核准前用最新資料重算：送審後新入帳 → 409 amount_changed、退回草稿、通知送審人，老闆不會核准過期金額", async () => {
+    const id = await createDraft()
+    await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
+    fake.db.project_billings.push(billing(P1, 1_000_000, "2026-09-15"))
+    const res = await req("post", `/bonus-runs/${id}/approve`, BOSS_TOKEN).send({})
+    expect([res.status, res.body.error, res.body.returnedToDraft]).toEqual([409, "amount_changed", true])
+    const row = fake.db.bonus_runs.find((r) => r.id === id)!
+    expect(row).toMatchObject({ status: "draft", approved_at: null })
+    expect(fake.db.notifications.some((n) => n.employee_id === HR_ID && /退回草稿/.test(n.title))).toBe(true)
+    // 資料沒變時核准照常
+    await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
+    expect((await req("post", `/bonus-runs/${id}/approve`, BOSS_TOKEN).send({})).body.run.status).toBe("approved")
+  })
+
   it("自動重算排程：同租戶多次觸發合併成一次", async () => {
     const id = await createDraft()
     const before = fake.writes.filter((w) => w.table === "bonus_runs" && w.action === "update").length

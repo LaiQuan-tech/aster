@@ -1092,6 +1092,17 @@ function moneyText(n: number): string {
   return `${Math.round(n).toLocaleString("en-US")} 元`
 }
 
+/**
+ * 核准與發放共用：用最新資料重算一次（沖銷批次內容是原批取負，不重算）。金額指紋與送審／核准時不同 →
+ * updateRun 已把批次退回草稿並通知送審人與老闆，這裡丟 409 amount_changed（returnedToDraft: true）；
+ * 金額相同 → 正常返回（明細已更新成最新），呼叫端繼續狀態轉移。
+ */
+async function recomputeOrReturn(tenantId: string, actor: Actor, run: RunRow): Promise<void> {
+  if (run.kind === "reversal") return
+  const fresh = await updateRun(tenantId, actor, run.id, {}, { recompute: true })
+  if (fresh?.returnedToDraft) throw new BonusRunError(409, "amount_changed", { returnedToDraft: true })
+}
+
 /** 老闆：租戶 features.approval.fallbackApproverEmpId；沒設 → 409 boss_not_configured。 */
 async function requireBoss(tenantId: string): Promise<string> {
   const boss = await loadBossEmpId(tenantId)
@@ -1167,8 +1178,12 @@ export async function approveRun(tenantId: string, actor: Actor, id: string): Pr
   const boss = await requireBoss(tenantId)
   if (!actor.empId || actor.empId.toLowerCase() !== boss) throw new BonusRunError(403, "not_approver")
   assertTransition(current.status, "approve")
+  // 核准前也用最新資料重算比對（與發放同一支）：送審後入帳／成本變了 → 退回草稿、409，老闆不會核准過期的金額。
+  await recomputeOrReturn(tenantId, actor, current)
   const items = await loadItemRows(tenantId, id)
-  if (current.approved_fingerprint && liveItemsFingerprint(items) !== current.approved_fingerprint) {
+  const latest = (await loadRun(tenantId, id)) ?? current
+  assertTransition(latest.status, "approve")
+  if (latest.approved_fingerprint && liveItemsFingerprint(items) !== latest.approved_fingerprint) {
     throw new BonusRunError(409, "amount_changed")
   }
   // 老闆本身是 HR 時可以自己送審自己核准（維持），但留下標註。
@@ -1272,12 +1287,8 @@ export async function payRun(tenantId: string, actor: Actor, id: string, paidOn:
   const before = await loadRun(tenantId, id)
   if (!before) return null
   assertTransition(before.status, "pay")
-  // 定案前用最新資料重算一次（沖銷批次不重算）：金額與核准時不同 → updateRun 已把批次退回草稿並通知
-  // 送審人與老闆，這裡回 409 amount_changed，絕不以舊金額發放。金額相同 → 繼續（明細已更新成最新）。
-  if (before.kind !== "reversal") {
-    const fresh = await updateRun(tenantId, actor, id, {}, { recompute: true })
-    if (fresh?.returnedToDraft) throw new BonusRunError(409, "amount_changed", { returnedToDraft: true })
-  }
+  // 定案前用最新資料重算比對（recomputeOrReturn）：金額與核准時不同 → 退回草稿、409，絕不以舊金額發放。
+  await recomputeOrReturn(tenantId, actor, before)
   const current = (await loadRun(tenantId, id)) ?? before
   assertTransition(current.status, "pay")
 
