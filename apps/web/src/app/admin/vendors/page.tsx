@@ -34,7 +34,8 @@ import { emptyVendorForm, vendorFormFrom, vendorFormToInput, type VendorForm, ty
  * Excel 沒有的欄位（職稱、銀行帳戶、關係企業、名片）只在編輯表單的「其他」區。
  *
  * 權限（2026-10-27 業主決定）：新增／修改／名片辨識限會計與 HR（API requireFinance），刪除限 HR；
- * 沒權限的人看不到「拍名片建檔／手動新增／編輯／刪除」，只能讀與複製帳號。
+ * 沒權限的人看不到「拍名片建檔／手動新增／編輯／刪除」，只能讀。收款帳戶（銀行四欄、複製帳號）也只給會計與 HR
+ * （API 對其他角色回 null）；銀行欄位只在編輯表單，表單本身就只開給會計與 HR。
  */
 export default function VendorsPage() {
   const toast = useToast();
@@ -54,6 +55,8 @@ export default function VendorsPage() {
   // 新增／修改：會計與 HR（API requireFinance）；刪除：HR。取不到角色就當不能。
   const [canEdit, setCanEdit] = useState(() => isAdminRole(peekMeCached()?.role));
   const canDelete = canSetAffiliate;
+  /** 收款帳戶（銀行四欄、複製帳號）只給會計與 HR——與新增／修改同一組角色（API 對其他人回 null）。 */
+  const canSeeBank = canEdit;
   useEffect(() => {
     let active = true;
     getMeCached()
@@ -282,15 +285,17 @@ export default function VendorsPage() {
                       );
                     })}
                     <td className="sticky right-0 z-10 whitespace-nowrap bg-white py-2 pl-3 text-right">
-                      <button
-                        type="button"
-                        onClick={() => void copyRemittance(v)}
-                        disabled={!v.bankAccount}
-                        title={v.bankAccount ? "複製戶名／銀行／帳號" : "這家廠商還沒填帳號"}
-                        className="mr-3 text-xs text-gray-600 hover:underline disabled:cursor-not-allowed disabled:text-gray-300 disabled:no-underline"
-                      >
-                        複製帳號
-                      </button>
+                      {canSeeBank && (
+                        <button
+                          type="button"
+                          onClick={() => void copyRemittance(v)}
+                          disabled={!v.bankAccount}
+                          title={v.bankAccount ? "複製戶名／銀行／帳號" : "這家廠商還沒填帳號"}
+                          className="mr-3 text-xs text-gray-600 hover:underline disabled:cursor-not-allowed disabled:text-gray-300 disabled:no-underline"
+                        >
+                          複製帳號
+                        </button>
+                      )}
                       {canEdit && (
                         <button type="button" onClick={() => void startEdit(v)} className="mr-3 text-xs text-gray-600 hover:underline">編輯</button>
                       )}

@@ -16,6 +16,13 @@ const sb = vi.hoisted(() => {
   /** 每次 await 依序吐出的結果；排完就回空清單。 */
   const queue: Result[] = []
   function from(table: string) {
+    // GET /vendors 回應前查呼叫者角色（銀行欄遮罩）：employees 一律查無此人＝非會計，不吃 queue
+    if (table === "employees") {
+      const emp: Record<string, unknown> = {}
+      for (const method of ["select", "eq", "maybeSingle"]) emp[method] = () => emp
+      emp.then = (resolve: (value: Result) => unknown) => Promise.resolve({ data: null, error: null }).then(resolve)
+      return emp
+    }
     const chain: Chain = { table, calls: [] }
     chains.push(chain)
     const builder: Record<string, unknown> = {}

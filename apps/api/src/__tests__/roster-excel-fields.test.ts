@@ -148,6 +148,36 @@ describe("廠商名冊：Excel 新欄位讀寫", () => {
   })
 })
 
+describe("廠商收款帳戶只給會計與 HR（2026-10-27 業主決定）", () => {
+  const bank = { bank_name: "測試銀行", bank_code: "000", bank_account: "0000-0000-0000", account_holder: "測試戶名" }
+  beforeEach(() => {
+    fake.db.vendors = fake.db.vendors.map((v) => (v.id === VENDOR_A ? { ...v, ...bank } : v))
+  })
+  const bankOf = (res: request.Response) => {
+    const v = (res.body.vendors as Array<Record<string, unknown>>).find((x) => x.id === VENDOR_A)!
+    return { bankName: v.bankName, bankCode: v.bankCode, bankAccount: v.bankAccount, accountHolder: v.accountHolder }
+  }
+
+  it("一般員工讀列表：銀行四欄為 null，其他欄位照常", async () => {
+    const res = await as(STAFF_TOKEN, request(app).get("/vendors"))
+    expect(res.status).toBe(200)
+    expect(bankOf(res)).toEqual({ bankName: null, bankCode: null, bankAccount: null, accountHolder: null })
+    expect((res.body.vendors as Array<{ id: string; name: string }>).find((x) => x.id === VENDOR_A)?.name).toBe("測試廠商甲")
+    expect(JSON.stringify(res.body)).not.toContain("0000-0000-0000")
+  })
+
+  it("沒有員工列（查無此人）也遮", async () => {
+    const res = await as("nobody-user", request(app).get("/vendors"))
+    expect(res.status).toBe(200)
+    expect(bankOf(res).bankAccount).toBeNull()
+  })
+
+  it.each([["會計", ACCOUNTANT_TOKEN], ["HR", HR_TOKEN]])("%s讀列表：銀行四欄有值", async (_label, token) => {
+    const res = await as(token, request(app).get("/vendors"))
+    expect(bankOf(res)).toEqual({ bankName: "測試銀行", bankCode: "000", bankAccount: "0000-0000-0000", accountHolder: "測試戶名" })
+  })
+})
+
 describe("廠商名冊：0076 沒套", () => {
   const missing = { code: "42703", message: "column vendors.roster_kind does not exist" }
 

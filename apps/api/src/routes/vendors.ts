@@ -5,7 +5,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireFinance, requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { sanitizeSearchTerm } from "../lib/search-term.js"
-import { isHrRole, resolveSelf } from "../middleware/scope.js"
+import { isFinanceRole, isHrRole, resolveSelf } from "../middleware/scope.js"
 import { generateJson, GeminiNotConfiguredError, isGeminiConfigured } from "../lib/gemini.js"
 import { isValidTaiwanTaxId, TAX_ID_RE } from "../services/tax-id.js"
 import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
@@ -14,7 +14,7 @@ export const vendorsRouter = Router()
 
 /**
  * 廠商名冊 + 名片建檔。
- * - 名冊全租戶可讀（往來窗口是大家都會用的資料）；新增／修改／名片辨識限會計與 HR（requireFinance：
+ * - 名冊全租戶可讀（往來窗口是大家都會用的資料），但收款帳戶四欄只給會計與 HR、其他人回 null；新增／修改／名片辨識限會計與 HR（requireFinance：
  *   hr_admin、platform_admin、accountant，2026-10-27 業主決定——一般員工、主管只能讀）；刪除（軟刪）限 HR。
  *   vendors 只有這支 router 會寫（報銷、放款、專案發包只存 vendor_id／名稱，不回寫名冊）。
  * - 名片：影像存私有 bucket vendor-cards，送 Gemini 抽欄位。抽出來的永遠是
@@ -208,6 +208,14 @@ function toRow(b: z.infer<typeof vendorBody>, roster = true): Record<string, unk
   return row
 }
 
+/**
+ * 收款帳戶四欄（銀行名稱／代碼／帳號／戶名）只給會計與 HR（2026-10-27 業主決定）；其他角色讀名冊時遮成 null。
+ * 寫入端點本來就限 requireFinance，回應不用遮。
+ */
+export function maskVendorBank<T extends Record<string, unknown>>(v: T): T {
+  return { ...v, bankName: null, bankCode: null, bankAccount: null, accountHolder: null }
+}
+
 // ── GET /vendors?q= ────────────────────────────────────────────────────
 vendorsRouter.get("/vendors", requireAuth, requireTenant, async (req: Request, res: Response, next: NextFunction) => {
   const tenantId = res.locals.tenantId as string
@@ -226,7 +234,11 @@ vendorsRouter.get("/vendors", requireAuth, requireTenant, async (req: Request, r
       next(new Error(`GET /vendors: ${error.message}`))
       return
     }
-    res.status(200).json({ vendors: (data ?? []).map((r) => serialize(r as unknown as Record<string, unknown>)) })
+    const userId = req.auth?.userId
+    const self = userId ? await resolveSelf(tenantId, userId) : null
+    const canSeeBank = isFinanceRole(self?.role)
+    const vendors = (data ?? []).map((r) => serialize(r as unknown as Record<string, unknown>))
+    res.status(200).json({ vendors: canSeeBank ? vendors : vendors.map(maskVendorBank) })
   } catch (err) {
     next(err)
   }

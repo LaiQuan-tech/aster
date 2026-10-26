@@ -166,6 +166,16 @@ async function actorOf(tenantId: string, req: Request): Promise<Actor> {
   return { empId: self?.id ?? null, role: self?.role ?? null }
 }
 
+/**
+ * 收款方（廠商）銀行資料只給會計與 HR（2026-10-27 業主決定）。放款其他端點本來就是 requireFinance；
+ * 只有簽核類端點（待我簽核、核准／退回）對任何候選簽核人開放，回傳前把收款方銀行三欄遮成 null。
+ * 付款公司自己的帳號（payingBankAccount）不是廠商資料，不遮。
+ */
+export function maskPayeeBank<T>(d: T): T {
+  if (!d || typeof d !== "object") return d
+  return { ...d, payeeBankName: null, payeeBankAccount: null, payeeBankCode: null }
+}
+
 function handleError(err: unknown, res: Response, next: NextFunction): void {
   if (err instanceof DisbursementError) {
     res.status(err.httpStatus).json({ error: err.code, ...(err.details ?? {}) })
@@ -271,7 +281,7 @@ disbursementsRouter.get("/disbursements/pending-approvals", ...authGuards, async
     }
     const wantAll = req.query.scope === "all" && isFinanceRole(actor.role)
     const items = await listPendingDisbursementApprovals(tenantId, actor, { scope: wantAll ? "all" : "mine" })
-    res.status(200).json({ scope: wantAll ? "all" : "mine", disbursements: items })
+    res.status(200).json({ scope: wantAll ? "all" : "mine", disbursements: isFinanceRole(actor.role) ? items : items.map(maskPayeeBank) })
   } catch (err) {
     handleError(err, res, next)
   }
@@ -471,7 +481,7 @@ function decisionRoute(action: "approve" | "reject") {
         res.status(404).json({ error: "not_found" })
         return
       }
-      res.status(200).json(out)
+      res.status(200).json(isFinanceRole(actor.role) ? out : { ...out, disbursement: maskPayeeBank(out.disbursement) })
     } catch (err) {
       handleError(err, res, next)
     }
