@@ -27,7 +27,7 @@ import {
   engineerDisciplinesOf,
   humanizeClientError,
   humanizeProjectExtError,
-  downloadAnnualProjectsXlsx,
+  downloadProjectRegisterXlsx,
   type ProjectListItem,
   type Client,
   type ClientInput,
@@ -39,6 +39,7 @@ import {
   REGISTER_FROZEN_COLUMNS,
   SHOW_HIDDEN_STORAGE_KEY,
   excelWidthToPx,
+  isTextSelected,
   registerRowCells,
   visibleRegisterColumns,
 } from "@/lib/project-register";
@@ -214,12 +215,12 @@ export default function AdminProjectsPage() {
     }
   }
 
-  /** 下載 Excel：沿用「年度總表」匯出（與原總表同版面），依歸屬年度；全部年度時取今年。 */
+  /** 下載 Excel：與原「專案申請單總表」一模一樣（layout=register），依歸屬年度；全部年度時由後端依租戶時區取今年。 */
   async function exportXlsx() {
     setExporting(true);
     setError(null);
     try {
-      await downloadAnnualProjectsXlsx({ year: yearFilter ? Number(yearFilter) : new Date().getFullYear(), includeArchived });
+      await downloadProjectRegisterXlsx({ year: yearFilter ? Number(yearFilter) : null, includeArchived });
     } catch (err) {
       setError(err instanceof Error ? err.message : "匯出失敗");
     } finally {
@@ -336,7 +337,11 @@ export default function AdminProjectsPage() {
               type="button"
               onClick={() => void exportXlsx()}
               disabled={exporting}
-              title={`匯出 ${yearFilter || new Date().getFullYear()} 歸屬年度的專案申請單總表（版面同原 Excel）`}
+              title={
+                yearFilter
+                  ? `匯出 ${yearFilter} 歸屬年度的專案申請單總表（版面同原 Excel）`
+                  : "匯出今年度的專案申請單總表（版面同原 Excel）；要其他年度請先選年度"
+              }
               className="rounded-lg border border-gray-300 px-3 py-1 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
             >
               {exporting ? "匯出中…" : "下載 Excel"}
@@ -428,8 +433,17 @@ export default function AdminProjectsPage() {
                       // 整列可點進明細；點到列內的連結／按鈕／表單元件時交給它自己處理。
                       onClick={(e) => {
                         if ((e.target as HTMLElement).closest("a,button,input,select,textarea,label")) return;
+                        // 在格子裡拖曳選字（要複製）放開時不導頁。
+                        if (isTextSelected(window.getSelection())) return;
                         if (e.metaKey || e.ctrlKey) window.open(href, "_blank");
                         else router.push(href);
+                      }}
+                      // 中鍵點整列＝開新分頁（同一般連結）。
+                      onAuxClick={(e) => {
+                        if (e.button !== 1) return;
+                        if ((e.target as HTMLElement).closest("a,button,input,select,textarea,label")) return;
+                        e.preventDefault();
+                        window.open(href, "_blank");
                       }}
                     >
                       {columns.map((c, i) => {

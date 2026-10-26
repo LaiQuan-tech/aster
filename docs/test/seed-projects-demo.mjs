@@ -6,7 +6,7 @@
  *
  * 灌的東西：我方公司主體（companies）、業主／客戶（clients）、廠商（vendors）、
  * 七個專案（六個範例＋一個變更案的母案）＋各自的合約／分期請款（含開票／入帳）／
- * 副委託（含放款）。跑完會呼叫年度總表、未收款清單、惠特的申請單金額、
+ * 副委託（含放款）。跑完會呼叫年度總表、未收款清單、範例科技的申請單金額、
  * 年度總表 xlsx 匯出，把結果印出來當驗收證據。
  *
  * ⚠️ 冪等：客戶／專案以「名稱」判斷已存在就沿用，不重複建立；合約／期程／
@@ -262,33 +262,33 @@ async function main() {
 
   // ── 我方公司主體 ──────────────────────────────────────────────────
   const companies = await ensureCompanies([
-    { name: "亞斯特設計顧問有限公司", taxId: "24721703", isDefault: true },
-    { name: "龍權" },
-    { name: "紅爐" },
+    { name: "亞斯特設計顧問有限公司", taxId: "00000005", isDefault: true },
+    { name: "範例關係企業甲" },
+    { name: "範例關係企業乙" },
   ])
   const asterCo = companies.get("亞斯特設計顧問有限公司")
-  const longQuanCo = companies.get("龍權")
+  const longQuanCo = companies.get("範例關係企業甲")
   log(`[COUNT] companies upserted=${COUNTS.companiesUpserted}`)
 
   // ── 客戶 ──────────────────────────────────────────────────────────
-  const clientPanji = await ensureClient("潘冀聯合建築師事務所", {
-    taxId: "04138317",
-    phone: "02-2701-2617",
-    invoiceAddress: "台北市仁愛路三段118巷12弄21號",
-    contactName: "葉勝鈿協理",
+  const clientPanji = await ensureClient("範例甲建築師事務所", {
+    taxId: "00000011",
+    phone: "02-0000-0000",
+    invoiceAddress: "台北市範例路一段1號",
+    contactName: "範例協理",
     invoiceType: "triplicate",
     paymentMethod: "transfer",
   })
-  const clientCai = await ensureClient("蔡宜勳建築師")
-  const clientZhao = await ensureClient("趙建銘建築師")
-  const clientTaichuang = await ensureClient("泰創工程")
-  const clientChengyi = await ensureClient("成宜企業")
-  const clientZhanghong = await ensureClient("張弘鼎建築師")
+  const clientCai = await ensureClient("範例乙建築師")
+  const clientZhao = await ensureClient("範例丙建築師")
+  const clientTaichuang = await ensureClient("範例工程有限公司")
+  const clientChengyi = await ensureClient("範例企業有限公司")
+  const clientZhanghong = await ensureClient("範例丁建築師")
   log(`[COUNT] clients created=${COUNTS.clientsCreated} reused=${COUNTS.clientsReused}`)
 
   // ── 廠商 ──────────────────────────────────────────────────────────
-  const vendorGuangxiu = await ensureVendor("廣修冷凍空調", { contactName: "MONICA" })
-  const vendorWeian = await ensureVendor("維安事務所", { contactName: "吳技師" })
+  const vendorGuangxiu = await ensureVendor("範例冷凍空調", { contactName: "範例聯絡人" })
+  const vendorWeian = await ensureVendor("範例技師事務所", { contactName: "範例技師" })
   log(`[COUNT] vendors created=${COUNTS.vendorsCreated} reused=${COUNTS.vendorsReused}`)
 
   // ── 專案負責人（lead）：只讀 GET /employees，不寫。優先用登入者本人。 ──
@@ -306,9 +306,9 @@ async function main() {
 
   const projectCache = await loadProjectCache()
 
-  // ── P1：惠特科技總部大樓 ──────────────────────────────────────────
-  const huiteHQ = await ensureProject(projectCache, "惠特科技總部大樓", {
-    name: "惠特科技總部大樓",
+  // ── P1：範例科技總部大樓 ──────────────────────────────────────────
+  const huiteHQ = await ensureProject(projectCache, "範例科技總部大樓", {
+    name: "範例科技總部大樓",
     kind: "main",
     clientId: clientPanji.id,
     leadEmpId,
@@ -316,7 +316,7 @@ async function main() {
       { discipline: "水電消防空調", item: "設計及簽證", amount: 3065831 },
       { discipline: "綠建築", item: "候選綠建築證書", amount: 130000 },
     ],
-    engineers: { electrical: { name: "維安" }, hvac: { name: "李廣修" } },
+    engineers: { electrical: { name: "範例電機技師" }, hvac: { name: "範例空調技師" } },
     invoiceType: "triplicate",
     paymentMethod: "transfer",
   })
@@ -358,7 +358,7 @@ async function main() {
     { installmentNo: 7, kind: "guild_advance", percentage: 0, milestone: "技師公會代墊" },
   ])
   issue(
-    "惠特科技總部大樓：候選綠建築證書 130,000（含稅、僅作說明）沒有另開分期期別——" +
+    "範例科技總部大樓：候選綠建築證書 130,000（含稅、僅作說明）沒有另開分期期別——" +
       "分期期程的分母是「合約總額」(3,043,645)，若把 130,000 當成獨立一期的 overrideAmount 加進同一份期程，" +
       "會被尾差演算法吃掉、拉歪最後一期的金額（尾差＝合約總額－各期合計，不是各期各自獨立）。" +
       "依題目指示的逃生條款略過，未建立這筆期別。",
@@ -395,9 +395,9 @@ async function main() {
     },
   ])
 
-  // ── P2：世紀台北港二期（母案，供一變掛靠）──────────────────────────
-  const centuryMain = await ensureProject(projectCache, "世紀台北港二期", {
-    name: "世紀台北港二期",
+  // ── P2：範例港區二期（母案，供一變掛靠）──────────────────────────
+  const centuryMain = await ensureProject(projectCache, "範例港區二期", {
+    name: "範例港區二期",
     kind: "main",
     clientId: clientCai.id,
     leadEmpId,
@@ -423,9 +423,9 @@ async function main() {
     },
   ])
 
-  // ── P3：世紀台北港二期 一變（kind=change，掛在 P2 底下）────────────
-  const centuryChange = await ensureProject(projectCache, "世紀台北港二期 一變", {
-    name: "世紀台北港二期 一變",
+  // ── P3：範例港區二期 一變（kind=change，掛在 P2 底下）────────────
+  const centuryChange = await ensureProject(projectCache, "範例港區二期 一變", {
+    name: "範例港區二期 一變",
     kind: "change",
     parentProjectId: centuryMain.id,
     clientId: clientCai.id,
@@ -449,9 +449,9 @@ async function main() {
     { installmentNo: 2, kind: "installment", percentage: 50, milestone: "完成驗收" },
   ])
 
-  // ── P4：橋新安居B 社會住宅（全新簽約、尚未請款——示範 100% 未收）──
-  const qiaoxin = await ensureProject(projectCache, "橋新安居B 社會住宅", {
-    name: "橋新安居B 社會住宅",
+  // ── P4：範例社會住宅B（全新簽約、尚未請款——示範 100% 未收）──
+  const qiaoxin = await ensureProject(projectCache, "範例社會住宅B", {
+    name: "範例社會住宅B",
     kind: "main",
     clientId: clientZhao.id,
     leadEmpId,
@@ -465,9 +465,9 @@ async function main() {
   })
   await ensureBillings(qiaoxin.id, [{ installmentNo: 1, kind: "installment", percentage: 100, milestone: "總價" }])
 
-  // ── P5：惠特電力竣工簽證（100% 已收）────────────────────────────
-  const huitePower = await ensureProject(projectCache, "惠特電力竣工簽證", {
-    name: "惠特電力竣工簽證",
+  // ── P5：範例電力竣工簽證（100% 已收）────────────────────────────
+  const huitePower = await ensureProject(projectCache, "範例電力竣工簽證", {
+    name: "範例電力竣工簽證",
     kind: "main",
     clientId: clientTaichuang.id,
     leadEmpId,
@@ -493,9 +493,9 @@ async function main() {
     },
   ])
 
-  // ── P6：205避雷針簽證（100% 已開票、未入帳——示範逾期未收）──────
-  const lightning205 = await ensureProject(projectCache, "205避雷針簽證", {
-    name: "205避雷針簽證",
+  // ── P6：範例避雷針簽證（100% 已開票、未入帳——示範逾期未收）──────
+  const lightning205 = await ensureProject(projectCache, "範例避雷針簽證", {
+    name: "範例避雷針簽證",
     kind: "main",
     clientId: clientChengyi.id,
     leadEmpId,
@@ -520,9 +520,9 @@ async function main() {
     },
   ])
 
-  // ── P7：大同雙連國小（5% 已收）───────────────────────────────────
-  const datong = await ensureProject(projectCache, "大同雙連國小", {
-    name: "大同雙連國小",
+  // ── P7：範例國小（5% 已收）───────────────────────────────────
+  const datong = await ensureProject(projectCache, "範例國小", {
+    name: "範例國小",
     kind: "main",
     clientId: clientZhanghong.id,
     leadEmpId,
@@ -556,7 +556,7 @@ async function main() {
       `subcontracts seeded=${COUNTS.subcontractsSeeded} skipped=${COUNTS.subcontractsSkipped}`,
   )
   for (const [name, p] of projectCache) {
-    if (["惠特科技總部大樓", "世紀台北港二期", "世紀台北港二期 一變", "橋新安居B 社會住宅", "惠特電力竣工簽證", "205避雷針簽證", "大同雙連國小"].includes(name)) {
+    if (["範例科技總部大樓", "範例港區二期", "範例港區二期 一變", "範例社會住宅B", "範例電力竣工簽證", "範例避雷針簽證", "範例國小"].includes(name)) {
       log(`[PROJECT] ${p.code ?? "(no code)"} — ${name} — id=${p.id}`)
     }
   }
@@ -585,7 +585,7 @@ async function main() {
     )
   }
 
-  // ── 驗證 3：惠特申請單 money ─────────────────────────────────────
+  // ── 驗證 3：範例科技申請單 money ─────────────────────────────────────
   const application = await api("GET", `/projects/${huiteHQ.id}/application`)
   const money = application.body.application.money
   log(
@@ -595,7 +595,7 @@ async function main() {
   )
   if (money.receivedTotal !== 608729) {
     issue(
-      `惠特已收金額實際為 ${fmt(money.receivedTotal)}，非題目原估的 608,729——原因是系統對每一期獨立四捨五入` +
+      `範例科技已收金額實際為 ${fmt(money.receivedTotal)}，非題目原估的 608,729——原因是系統對每一期獨立四捨五入` +
         `（10% × 3,043,645 = 304,364.5，各自四捨五入為 304,365，兩期合計 608,730），` +
         `而非用 20% 直接乘一次算出 608,729。這是 billing-schedule.ts 既有且刻意的尾差設計` +
         `（只有「最後一個未請款期別」吸收尾差，前面已請款的期別各自獨立四捨五入），不是本腳本的錯誤，` +

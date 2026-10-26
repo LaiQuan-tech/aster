@@ -137,3 +137,8 @@ export function registerRowCells(item: RegisterInput, disciplines: string[]): st
     ...disciplines.map((d) => (visible ? formatRegisterMoney(r?.subcontractByDiscipline[d]) : r ? MASKED : "")),
   ]
 }
+
+/** 有沒有選取中的文字：在格子裡拖曳選字放開時會觸發 click，這時不該當成「點整列」而導頁。 */
+export function isTextSelected(selection: Pick<Selection, "isCollapsed" | "toString"> | null | undefined): boolean {
+  return !!selection && !selection.isCollapsed && selection.toString().trim() !== ""
+}

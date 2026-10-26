@@ -893,6 +893,20 @@ export function downloadAnnualProjectsXlsx(params: { year: number; sort?: Annual
   return apiDownload(`/projects/annual?${q.toString()}`, `年度專案申請單總表_民國${params.year}.xlsx`)
 }
 
+/**
+ * 專案列表「下載 Excel」：與原「專案申請單總表」Excel 一模一樣（後端 layout=register：
+ * 無請款進度%／收款進度%／狀態／期數、I:N 隱藏）。`year` 省略＝後端依租戶時區取今年。
+ */
+export function downloadProjectRegisterXlsx(params: { year?: number | null; includeArchived?: boolean }) {
+  const q = new URLSearchParams()
+  if (params.year != null) q.set("year", String(params.year))
+  if (params.includeArchived) q.set("includeArchived", "1")
+  q.set("format", "xlsx")
+  q.set("layout", "register")
+  const label = params.year != null ? `民國${params.year >= 1911 ? params.year - 1911 : params.year}` : "今年度"
+  return apiDownload(`/projects/annual?${q.toString()}`, `專案申請單總表_${label}.xlsx`)
+}
+
 /* -------------------------------------------------------------- 未收款 -- */
 
 /** B5：請款三段狀態＋逾期。已入帳 > 逾期 > 已開票未入帳 > 已請款未開票 > 未請款。 */

@@ -19,7 +19,7 @@ export const projectsAnnualRouter = Router()
  * 之前，否則會被 /projects/:id 吃掉（同 project-overview.ts 的理由）。
  */
 
-// ── GET /projects/annual?year=115|2026&sort=code|unreceived_pct&format=json|xlsx&view=totals ──
+// ── GET /projects/annual?year=115|2026&sort=code|unreceived_pct&format=json|xlsx&view=totals&layout=register|annual ──
 /**
  * 老闆的 Excel「年度專案申請單總表」：一列一案（含舊的預先取號空列，若有），
  * 依建立月份分區塊小計，最後年度總計。HR 才能看——整年的金額都在上面。
@@ -55,6 +55,13 @@ projectsAnnualRouter.get(
         return
       }
       const includeArchived = req.query.includeArchived === "1"
+      // 版面（2026-10-27）：layout=register＝專案列表「下載 Excel」，與原 Excel 一模一樣（無系統欄、I:N 隱藏）；
+      // 省略＝年度總表頁的原本版面（科別後接請款進度%／收款進度%／狀態／期數）。只對 xlsx 有意義。
+      if (req.query.layout !== undefined && req.query.layout !== "register" && req.query.layout !== "annual") {
+        res.status(400).json({ error: "invalid_layout" })
+        return
+      }
+      const layout = req.query.layout === "register" ? "register" : "annual"
 
       // 時區與 P3 設定互不相依：一起查（以前是串行兩趟，冷啟動時各要等一趟 DB）。
       const [tz, settings] = await Promise.all([getTenantTimezone(tenantId), loadP3Settings(tenantId)])
@@ -73,7 +80,7 @@ projectsAnnualRouter.get(
 
       // A2 的公司名：companies 的預設主體 → 租戶名稱。
       const companyName = await defaultCompanyName(tenantId)
-      const buffer = await annualWorkbookBuffer(table, { companyName, today })
+      const buffer = await annualWorkbookBuffer(table, { companyName, today, layout })
       const filename = annualFilename(settings.codeFormat.prefix, table.rocYear)
       res
         .status(200)

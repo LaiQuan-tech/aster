@@ -82,8 +82,8 @@ const table: AnnualTable = {
 }
 
 describe("年度總表參考格式", () => {
-  it("欄位與原表完全一致：A:P 固定欄＋科別，不再附加系統欄；I:N 比照原檔隱藏", async () => {
-    const wb = await buildAnnualWorkbook(table, { companyName: "亞斯特設計顧問有限公司", today: "2026-03-04" })
+  it("專案列表（layout=register）：欄位與原表完全一致，A:P＋科別、無系統欄；I:N 比照原檔隱藏", async () => {
+    const wb = await buildAnnualWorkbook(table, { companyName: "亞斯特設計顧問有限公司", today: "2026-03-04", layout: "register" })
     const ws = wb.worksheets[0]
     const headers = ws.getRow(4).values as unknown[]
 
@@ -98,8 +98,8 @@ describe("年度總表參考格式", () => {
     expect(ws.getColumn("E").width).toBeCloseTo(25.45, 1)
   })
 
-  it("明細、小計與年度總計帶正確金額、千分位與全黑框", async () => {
-    const wb = await buildAnnualWorkbook(table, { companyName: "亞斯特設計顧問有限公司", today: "2026-03-04" })
+  it("專案列表（layout=register）明細、小計與年度總計帶正確金額、原檔會計格式與全黑框", async () => {
+    const wb = await buildAnnualWorkbook(table, { companyName: "亞斯特設計顧問有限公司", today: "2026-03-04", layout: "register" })
     const ws = wb.worksheets[0]
 
     expect(ws.getCell("A1").value).toBe("專案申請單")
@@ -122,6 +122,27 @@ describe("年度總表參考格式", () => {
     expect(ws.getCell("K6").value).toBe(500_000)
     expect(ws.getCell("I7").value).toBe(300_000)
     expect(ws.getCell("K7").value).toBe(500_000)
+  })
+
+  it("年度總表頁（預設 layout=annual）：維持原本行為，科別後接請款進度%／收款進度%／狀態／期數，不隱藏欄", async () => {
+    for (const layout of [undefined, "annual" as const]) {
+      const wb = await buildAnnualWorkbook(table, { companyName: "亞斯特設計顧問有限公司", today: "2026-03-04", layout })
+      const ws = wb.worksheets[0]
+      expect((ws.getRow(4).values as unknown[]).slice(1)).toEqual([
+        "項次", "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
+        "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
+        "空調", "消防", "汙水", "請款進度%", "收款進度%", "狀態", "期數",
+      ])
+      expect(["I", "J", "K", "L", "M", "N"].some((c) => ws.getColumn(c).hidden)).toBe(false)
+      expect(ws.getCell("T5").value).toBe(58.3)
+      expect(ws.getCell("U5").value).toBe(35)
+      expect(ws.getCell("V5").value).toBe("進行中")
+      expect(ws.getCell("W5").value).toBe("1/2")
+      expect(ws.getCell("F5").numFmt).toBe("#,##0")
+      expect(ws.getCell("W5").border.right?.style).toBe("thin")
+      // 小計／總計列的期數欄留空。
+      expect(ws.getCell("W6").value).toBeNull()
+    }
   })
 })
 

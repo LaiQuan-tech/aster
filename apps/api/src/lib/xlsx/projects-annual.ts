@@ -3,12 +3,24 @@ import { toRocYear, workbookToBuffer } from "./index.js"
 import type { AnnualTable, AnnualTotals } from "../../services/project-application-store.js"
 
 /**
- * 固定 A:P 依參考表排列；動態科別從 Q 欄開始。業主 2026-10-27「一模一樣」：
- * 不再附加系統欄（請款進度%、收款進度%、狀態、期數），I:N 比照原檔預設隱藏，金額用原檔的會計格式。
+ * 固定 A:P 依參考表排列；動態科別從 Q 欄開始。兩種版面（業主 2026-10-27）：
+ *   • "register"（專案列表「下載 Excel」）：與原 Excel 一模一樣——不附加系統欄、I:N 預設隱藏、金額用原檔會計格式。
+ *   • "annual"（年度總表頁「匯出 xlsx」，預設）：維持原本行為——科別之後接系統欄
+ *     （請款進度%、收款進度%、狀態、期數），不隱藏欄、金額 #,##0。
  */
+export type AnnualWorkbookLayout = "register" | "annual"
+
+const STATUS_LABEL: Record<string, string> = {
+  active: "進行中",
+  suspended: "暫停",
+  closed: "結案",
+  terminated: "已解約",
+}
 
 /** 原檔的會計格式：千分位、0 顯示「-」。 */
-const MONEY_FMT = '_-* #,##0_-;\\-* #,##0_-;_-* "-"??_-;_-@_-'
+const REGISTER_MONEY_FMT = '_-* #,##0_-;\\-* #,##0_-;_-* "-"??_-;_-@_-'
+const ANNUAL_MONEY_FMT = "#,##0"
+const PCT_FMT = "0.0"
 /** 原檔隱藏的欄：已收帳款、應收帳款、已開發票、合約、簽證、發包。 */
 const HIDDEN_COLUMNS = [9, 10, 11, 12, 13, 14]
 const FONT_NAME = "標楷體"
@@ -18,6 +30,8 @@ export type BuildAnnualWorkbookOptions = {
   companyName: string
   /** 'YYYY-MM-DD'（租戶當地今天），H3 用民國寫法。 */
   today: string
+  /** 省略＝"annual"（年度總表頁的原本行為）。 */
+  layout?: AnnualWorkbookLayout
 }
 
 function rocToday(today: string): string {
@@ -33,17 +47,25 @@ export async function buildAnnualWorkbook(table: AnnualTable, opts: BuildAnnualW
     views: [{ state: "frozen", xSplit: 5, ySplit: 4 }],
   })
 
+  const register = opts.layout === "register"
+  const moneyFmt = register ? REGISTER_MONEY_FMT : ANNUAL_MONEY_FMT
+  const money = (cell: ExcelJS.Cell, value: number | null) => writeMoney(cell, value, moneyFmt)
   const disciplines = table.disciplines
   const headers = [
     "項次", "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
     "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
     ...disciplines,
+    ...(register ? [] : ["請款進度%", "收款進度%", "狀態", "期數"]),
   ]
   const colCount = headers.length
   const C = {
     seq: 1, code: 2, date: 3, client: 4, name: 5, amount: 6, tax: 7, total: 8,
     received: 9, receivable: 10, invoiced: 11, contract: 12, signature: 13,
     subcontract: 14, lead: 15, note: 16, discFirst: 17,
+    billing: 17 + disciplines.length,
+    receipt: 18 + disciplines.length,
+    status: 19 + disciplines.length,
+    installments: 20 + disciplines.length,
   }
 
   ws.mergeCells(1, 1, 1, 16)
@@ -79,7 +101,14 @@ export async function buildAnnualWorkbook(table: AnnualTable, opts: BuildAnnualW
   disciplines.forEach((_discipline, index) => {
     ws.getColumn(C.discFirst + index).width = disciplineWidths[index] ?? 13
   })
-  for (const column of HIDDEN_COLUMNS) ws.getColumn(column).hidden = true
+  if (register) {
+    for (const column of HIDDEN_COLUMNS) ws.getColumn(column).hidden = true
+  } else {
+    ws.getColumn(C.billing).width = 11
+    ws.getColumn(C.receipt).width = 11
+    ws.getColumn(C.status).width = 10
+    ws.getColumn(C.installments).width = 8
+  }
 
   let rowNumber = 5
   const rowsBySeq = new Map(table.rows.map((row) => [row.seq, row]))
@@ -128,6 +157,12 @@ export async function buildAnnualWorkbook(table: AnnualTable, opts: BuildAnnualW
         const value = item.subcontractByDiscipline[discipline]
         money(row.getCell(C.discFirst + index), value === undefined ? null : value)
       })
+      if (!register) {
+        pct(row.getCell(C.billing), item.billingProgressPct)
+        pct(row.getCell(C.receipt), item.receiptProgressPct)
+        row.getCell(C.status).value = (STATUS_LABEL[item.status] ?? item.status) + (item.archived ? "（封存）" : "")
+        row.getCell(C.installments).value = item.installments
+      }
       row.font = { name: FONT_NAME, size: 12 }
       row.height = 26.25
       rowNumber += 1
@@ -156,10 +191,17 @@ export async function buildAnnualWorkbook(table: AnnualTable, opts: BuildAnnualW
   return wb
 }
 
-function money(cell: ExcelJS.Cell, value: number | null): void {
+function writeMoney(cell: ExcelJS.Cell, value: number | null, numFmt: string): void {
   cell.value = value ?? null
   if (value === null || value === undefined) return
-  cell.numFmt = MONEY_FMT
+  cell.numFmt = numFmt
+  cell.alignment = { horizontal: "right" }
+}
+
+function pct(cell: ExcelJS.Cell, value: number | null): void {
+  cell.value = value ?? null
+  if (value === null || value === undefined) return
+  cell.numFmt = PCT_FMT
   cell.alignment = { horizontal: "right" }
 }
 
