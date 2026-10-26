@@ -18,16 +18,16 @@ import { stickyOffsets } from "@/lib/bonus-sheet-api";
 /** 原檔字型新細明體；Mac／手機沒有就用其他明體。 */
 const SHEET_FONT_STACK = '"PMingLiU", "新細明體", "MingLiU", "Apple LiSung", "LiSong Pro", "Songti TC", "Noto Serif TC", serif';
 
-type EdgeIndex = { bottoms: Set<string>; rights: Set<string> };
+type EdgeIndex = { bottoms: Map<string, BorderStyle>; rights: Set<string> };
 
 /** 每格實際畫出的下框線（"列:欄"＝該位置的下緣）與右框線。 */
 function edgeIndex(grid: StatementGrid): EdgeIndex {
-  const bottoms = new Set<string>();
+  const bottoms = new Map<string, BorderStyle>();
   const rights = new Set<string>();
   for (const c of grid.cells) {
     const r2 = c.row + (c.rowSpan ?? 1) - 1;
     const c2 = c.col + (c.colSpan ?? 1) - 1;
-    if (c.border?.bottom) for (let k = c.col; k <= c2; k += 1) bottoms.add(`${r2}:${k}`);
+    if (c.border?.bottom) for (let k = c.col; k <= c2; k += 1) bottoms.set(`${r2}:${k}`, c.border.bottom);
     if (c.border?.right) for (let r = c.row; r <= r2; r += 1) rights.add(`${r}:${c2}`);
   }
   return { bottoms, rights };
@@ -39,8 +39,12 @@ function cellStyle(cell: GridCell, edges: EdgeIndex, sticky: { top: number | nul
   const c2 = cell.col + (cell.colSpan ?? 1) - 1;
   let top: BorderStyle | undefined;
   if (b.top) {
-    let missing = cell.row === 0 || b.top === "double";
-    for (let k = cell.col; k <= c2 && !missing; k += 1) if (!edges.bottoms.has(`${cell.row - 1}:${k}`)) missing = true;
+    // 上一列沒畫下框線才補；表頭雙線例外：上一列只有細線時仍畫雙線（上一列已是雙線就不重疊）。
+    let missing = cell.row === 0;
+    for (let k = cell.col; k <= c2 && !missing; k += 1) {
+      const above = edges.bottoms.get(`${cell.row - 1}:${k}`);
+      if (!above || (b.top === "double" && above !== "double")) missing = true;
+    }
     if (missing) top = b.top;
   }
   let left: BorderStyle | undefined;

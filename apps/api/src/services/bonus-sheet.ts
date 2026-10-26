@@ -5,6 +5,7 @@ import type { StatementGrid } from "../lib/statements/grid.js"
 import {
   buildClosedSheet,
   buildOpenSheet,
+  isInThisRound,
   mmddOf,
   periodLabelOf,
   type BonusSheetContext,
@@ -23,7 +24,8 @@ import { isTerminal } from "./project-status.js"
  * 「本次」的來源（使用者在頁面上選）：
  *   • runId：該獎金批次（任何狀態，未刪）的凍結明細＋快照（被跳過的案在 snapshot.projects 裡）。
  *   • asOf：依基準日即時試算（同獎金季發放的「試算」，不寫入）。
- *   • 都沒帶：最新一個一般批次（依基準日）；一個批次都沒有 → 今天的即時試算。
+ *   • 都沒帶：最新一個一般批次（依基準日；優先已發放且沒被沖銷的，見 defaultRunOf）；一個批次都沒有 → 今天的即時試算。
+ * 已結案（結案／解約／封存）的案放「已結案」表，但這一批還有本次入帳或本次獎金的留在「未結案」。
  *
  * 子資料失敗降級（回 200＋warnings，不整頁 500）：批次清單讀不到 → 選單空白；指定批次讀不到 → 改用試算；
  * 試算也失敗 → 空表；專案狀態讀不到 → 全部當未結案；營業稅率讀不到 → 5%；公司名稱讀不到 → 預設名稱。
@@ -65,6 +67,17 @@ type SnapshotProject = {
 const numOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null)
 const strOrNull = (v: unknown): string | null => (typeof v === "string" ? v : null)
 const basisOf = (v: unknown): BonusBasis | null => ((BONUS_BASES as readonly string[]).includes(v as string) ? (v as BonusBasis) : null)
+
+/** 預設批次：最新（依基準日）的一般批次，優先「已發放且沒被沖銷」，其次沒被沖銷的，再其次任何一般批次。 */
+export function defaultRunOf(runs: readonly SerializedRun[]): SerializedRun | null {
+  const regular = runs.filter((r) => r.kind === "regular")
+  return (
+    regular.find((r) => r.status === "paid" && !r.reversedByRunId) ??
+    regular.find((r) => !r.reversedByRunId) ??
+    regular[0] ??
+    null
+  )
+}
 
 function optionOf(run: SerializedRun): BonusSheetRunOption {
   return { id: run.id, label: run.label, asOf: run.asOf, status: run.status, kind: run.kind }
@@ -149,7 +162,8 @@ export function projectsFromItems(items: readonly SerializedItem[], snapshot: Re
       previousRatio: ratio,
       currentRatio: 0,
       bonusRatePct: numOrNull(snap?.bonusRatePct),
-      pool: numOrNull(snap?.effectivePool) ?? numOrNull(snap?.bonusPool),
+      // 固定金額制沒有獎金池；舊制的 effectivePool 就是手填池。
+      pool: basisOf(snap?.basis) === "fixed_amount" ? null : numOrNull(snap?.effectivePool),
       basis: basisOf(snap?.basis),
       currentBonus: 0,
       overpaidBy: 0,
@@ -213,7 +227,7 @@ export async function loadBonusSheet(tenantId: string, query: { runId?: string |
   let snapshot: Record<string, unknown> | null = null
   let asOf: string | null = query.asOf ?? null
 
-  const runId = query.runId ?? (query.asOf ? null : (runs.find((r) => r.kind === "regular")?.id ?? null))
+  const runId = query.runId ?? (query.asOf ? null : defaultRunOf(runs)?.id ?? null)
   if (runId) {
     try {
       const detail = await getRun(tenantId, runId)
@@ -250,7 +264,9 @@ export async function loadBonusSheet(tenantId: string, query: { runId?: string |
   if (projects.length > 0) {
     try {
       const closed = await loadClosedIds(tenantId, projects.map((p) => p.projectId))
-      for (const p of projects) p.closed = closed.has(p.projectId)
+      // 已結案但這一批還有本次入帳／本次獎金的案（例如收尾款那一季）留在「未結案」：已結案表沒有本次欄，
+      // 放過去本次獎金就看不到、合計對不上批次總額。
+      for (const p of projects) p.closed = closed.has(p.projectId) && !isInThisRound(p)
     } catch (err) {
       warn(warnings, "專案結案狀態讀取失敗，全部列在「未結案」", err)
     }

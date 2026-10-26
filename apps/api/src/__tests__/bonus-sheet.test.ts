@@ -14,7 +14,7 @@ vi.mock("../services/bonus-run-store.js", () => ({
 
 import { bonusSheetRouter, parseBonusSheetQuery } from "../routes/bonus-sheet.js"
 import { getRun, listRuns, previewRun, type SerializedItem, type SerializedRun } from "../services/bonus-run-store.js"
-import { projectsFromItems } from "../services/bonus-sheet.js"
+import { defaultRunOf, projectsFromItems } from "../services/bonus-sheet.js"
 import {
   CLOSED_COLUMNS,
   OPEN_COLUMNS,
@@ -334,7 +334,8 @@ beforeEach(() => {
   vi.mocked(listRuns).mockReset().mockResolvedValue([run])
   vi.mocked(getRun).mockReset().mockResolvedValue({
     run,
-    items: [item({ projectId: "p1", employeeId: "e1" }), item({ projectId: "p2", employeeId: "e1", projectCode: "T-0002", projectName: "測試案二" })],
+    // p2 已結案且這批沒有本次入帳／獎金 → 已結案表
+    items: [item({ projectId: "p1", employeeId: "e1" }), item({ projectId: "p2", employeeId: "e1", projectCode: "T-0002", projectName: "測試案二", amount: 0, currentReceived: 0, currentReceivedPct: 0, previousReceived: 500000, previousReceivedPct: 0.5 })],
     snapshot: { projects: [] },
   })
   vi.mocked(previewRun).mockReset().mockResolvedValue({ asOf: "2026-10-27", items: [item({ projectId: "p1", employeeId: "e1" })], totals: run.totals, snapshot: { projects: [] }, calc: [], projectMeta: new Map(), employeeMeta: new Map() })
@@ -362,6 +363,21 @@ describe("GET /bonus-sheet — 資料與降級", () => {
     expect(res.body.sheets.open.title).toBe("未結案")
     expect(res.body.sheets.closed.title).toBe("已結案")
     expect(getRun).toHaveBeenCalledWith(TENANT_ID, RUN_ID)
+  })
+
+  it("已結案但這批還有本次獎金 → 留在未結案（本次獎金不會從總表消失）", async () => {
+    vi.mocked(getRun).mockResolvedValue({ run, items: [item({ projectId: "p2", employeeId: "e1", amount: 7000 })], snapshot: null })
+    const res = await as(T.boss)(request(app).get("/bonus-sheet"))
+    expect(res.body.counts).toEqual({ open: 1, closed: 0 })
+  })
+
+  it("預設批次：優先已發放且沒被沖銷的一般批次", async () => {
+    const draft = { ...run, id: "cccccccc-0000-4000-8000-000000000002", asOf: "2026-12-01", status: "draft" as const }
+    const reversed = { ...run, id: "cccccccc-0000-4000-8000-000000000003", asOf: "2026-11-01", reversedByRunId: "x" }
+    const reversal = { ...run, id: "cccccccc-0000-4000-8000-000000000004", kind: "reversal" as const }
+    expect(defaultRunOf([draft, reversed, reversal, run])?.id).toBe(RUN_ID)
+    expect(defaultRunOf([draft, reversed])?.id).toBe(draft.id)
+    expect(defaultRunOf([reversal])).toBeNull()
   })
 
   it("asOf → 即時試算", async () => {

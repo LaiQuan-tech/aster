@@ -54,7 +54,11 @@ export default function BonusSheetPage() {
       const r = await getBonusSheet(sel);
       if (mine === seq.current) setData(r);
     } catch (err) {
-      if (mine === seq.current) setError(errorText(err));
+      if (mine === seq.current) {
+        // 換了批次／基準日卻載入失敗：不留上一份資料，免得表格與選單對不起來。
+        setData(null);
+        setError(errorText(err));
+      }
     } finally {
       if (mine === seq.current) setLoading(false);
     }
@@ -98,7 +102,8 @@ export default function BonusSheetPage() {
 
   return (
     <div className="space-y-4">
-      {grid && <style>{bonusSheetPrintCss(paper, tableWidth)}</style>}
+      {/* 只在按「列印」時掛列印樣式：平常用瀏覽器列印就印整頁，不會印出空白頁。 */}
+      {grid && printing && <style>{bonusSheetPrintCss(paper, tableWidth)}</style>}
       <Card className="no-print">
         <div className="flex flex-wrap items-end gap-3">
           <div className="min-w-72">
