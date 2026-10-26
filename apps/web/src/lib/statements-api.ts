@@ -9,7 +9,7 @@ import { apiDownload, apiFetch } from "./api-client";
  * 型別與 apps/api/src/lib/statements/grid.ts 同步。
  */
 
-export type BorderStyle = "thin" | "medium" | "thick";
+export type BorderStyle = "thin" | "medium" | "thick" | "double";
 
 export interface GridBorder {
   top?: BorderStyle;
@@ -34,15 +34,20 @@ export interface GridCell {
   wrap?: boolean;
   negative?: boolean;
   money?: boolean;
+  /** 字色 hex（專案獎金總表的紅字欄、灰字、藍字備註）；省略＝黑。 */
+  color?: string;
 }
 
 export interface StatementGrid {
-  kind: "attendance" | "payslip";
+  kind: "attendance" | "payslip" | "bonusSheet";
   title: string;
   columns: number[];
   rowHeights: number[];
   font: string;
   cells: GridCell[];
+  /** 凍結的表頭列數／前幾欄（專案獎金總表）。 */
+  freeze?: { rows: number; cols: number };
+  page?: { orientation: "portrait" | "landscape"; paperSize: number; printTitleRows?: [number, number] };
 }
 
 export interface StatementSummary {

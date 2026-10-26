@@ -356,12 +356,13 @@ describe("ADMIN_SECTIONS", () => {
 });
 
 describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
-  it("finance 7 個分頁 key 順序固定（集團總覽排在報表之後、名冊之前）", () => {
+  it("finance 8 個分頁 key 順序固定（獎金分潤緊接獎金季發放；集團總覽排在報表之後、名冊之前）", () => {
     expect(ADMIN_TABS.finance.map((t) => t.key)).toEqual([
       "projects",
       "receivables",
       "disbursements",
       "bonus",
+      "bonusSheet",
       "reports",
       "groupOverview",
       "directory",
@@ -503,9 +504,9 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
 
   it("集團總覽 hrOnly：HR（roleNav null）看得到；會計預設範圍不列；租戶自訂成「整個財務分區」也不列", () => {
     expect(ADMIN_TABS.finance.find((t) => t.key === "groupOverview")).toMatchObject({ hrOnly: true, href: "/admin/group-overview" });
-    // 只有這一個分頁是 hrOnly
+    // hrOnly 的只有獎金分潤（2026-10-27）與集團總覽
     const hrOnlyKeys = (Object.values(ADMIN_TABS).flat() as Array<{ key: string; hrOnly?: boolean }>).filter((t) => t.hrOnly).map((t) => t.key);
-    expect(hrOnlyKeys).toEqual(["groupOverview"]);
+    expect(hrOnlyKeys).toEqual(["bonusSheet", "groupOverview"]);
 
     expect(tabsForSection("finance", null).map((t) => t.key)).toContain("groupOverview");
     expect(tabsForSection("finance", null, { roleNav: null }).map((t) => t.key)).toContain("groupOverview");
@@ -786,10 +787,11 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
     ([section, tabs]) => tabs.filter((tab) => tab.hrOnly).map((tab) => ({ section, tab })),
   );
 
-  it("configurableTabsForRole：「會計可用範圍」可勾選的分頁排除 hrOnly（集團總覽），其餘照表、順序不變", () => {
+  it("configurableTabsForRole：「會計可用範圍」可勾選的分頁排除 hrOnly（獎金分潤、集團總覽），其餘照表、順序不變", () => {
     const finance = configurableTabsForRole("finance").map((t) => t.key);
     expect(finance).not.toContain("groupOverview");
-    expect(finance).toEqual(ADMIN_TABS.finance.filter((t) => t.key !== "groupOverview").map((t) => t.key));
+    expect(finance).not.toContain("bonusSheet");
+    expect(finance).toEqual(ADMIN_TABS.finance.filter((t) => t.key !== "groupOverview" && t.key !== "bonusSheet").map((t) => t.key));
     expect(finance).toEqual(expect.arrayContaining(["projects", "receivables", "disbursements", "bonus", "reports", "directory"]));
     // 沒有 hrOnly 分頁的分區：跟 ADMIN_TABS 完全一樣
     for (const section of SECTION_KEYS) {
@@ -826,8 +828,8 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
     expect(nextRoleTabs("finance", undefined, "groupOverview", true)).toEqual(configurableTabsForRole("finance").map((t) => t.key));
   });
 
-  it("目前 hrOnly 的就是財務分區的集團總覽（新增 hrOnly 分頁時，下面的路徑與提示測試會自動涵蓋）", () => {
-    expect(HR_ONLY_TABS.map(({ section, tab }) => `${section}/${tab.key}`)).toEqual(["finance/groupOverview"]);
+  it("目前 hrOnly 的是財務分區的獎金分潤與集團總覽（新增 hrOnly 分頁時，下面的路徑與提示測試會自動涵蓋）", () => {
+    expect(HR_ONLY_TABS.map(({ section, tab }) => `${section}/${tab.key}`)).toEqual(["finance/bonusSheet", "finance/groupOverview"]);
   });
 
   it("isHrOnlyAdminPath：HR 限定頁（含 query／尾斜線／子路徑）→ true；其他頁、首頁、未知路徑 → false", () => {

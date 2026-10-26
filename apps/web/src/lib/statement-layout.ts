@@ -15,7 +15,13 @@ export function rowPx(points: number): number {
   return Math.round((points * 4) / 3);
 }
 
-export const BORDER_PX: Record<BorderStyle, number> = { thin: 1, medium: 2, thick: 3 };
+export const BORDER_PX: Record<BorderStyle, number> = { thin: 1, medium: 2, thick: 3, double: 3 };
+
+/** CSS 框線：雙線用 `3px double`，其餘實線。 */
+export function borderCss(style: BorderStyle | undefined): string | undefined {
+  if (!style) return undefined;
+  return `${BORDER_PX[style]}px ${style === "double" ? "double" : "solid"} #000`;
+}
 
 /** 中文字型堆疊：原檔是微軟正黑體，Mac／手機沒有就用蘋方、思源黑體。 */
 export const STATEMENT_FONT_STACK =

@@ -5,6 +5,7 @@ import type { GridCell, StatementGrid } from "@/lib/statements-api";
 import {
   BORDER_PX,
   STATEMENT_FONT_STACK,
+  borderCss,
   columnPx,
   coveredPositions,
   gridGeometry,
@@ -35,7 +36,7 @@ const A4_PRINTABLE_PX = Math.floor((190 / 25.4) * 96);
 
 function cellStyle(cell: GridCell, fontStack: string): CSSProperties {
   const b = cell.border ?? {};
-  const side = (s?: keyof typeof BORDER_PX) => (s ? `${BORDER_PX[s]}px solid #000` : undefined);
+  const side = (s?: keyof typeof BORDER_PX) => borderCss(s);
   const numeric = typeof cell.value === "number";
   return {
     borderTop: side(b.top),
@@ -47,7 +48,7 @@ function cellStyle(cell: GridCell, fontStack: string): CSSProperties {
     fontFamily: fontStack,
     textAlign: cell.align ?? (numeric ? "right" : "left"),
     background: cell.fill,
-    color: cell.negative ? "#c00000" : "#000",
+    color: cell.negative ? "#c00000" : (cell.color ?? "#000"),
     whiteSpace: cell.wrap ? "normal" : "nowrap",
     overflow: "visible",
     padding: "0 3px",

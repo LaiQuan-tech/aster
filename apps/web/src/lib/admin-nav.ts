@@ -24,7 +24,7 @@
  *     這個角色能不能看這一頁；AdminShell 不渲染未開放的頁、首頁卡片依它隱藏。HR 一律 true。
  *   - `AdminTab.hrOnly`（2026-10-11 集團總覽）：只給 HR／平台管理員的分頁。帶了 roleNav（會計）就一律不列，
  *     即使租戶自訂的會計範圍沒限縮該分區的分頁；直開網址同樣走 isAdminPathAllowed 擋掉。
- *   - `AdminTab.groupFinancials`（2026-10-26 老闆與一般 HR 分開）：集團財務頁（集團總覽）。只有 /me.canSeeGroupFinancials
+ *   - `AdminTab.groupFinancials`（2026-10-26 老闆與一般 HR 分開）：集團財務頁（集團總覽；2026-10-27 起另有「獎金分潤」）。只有 /me.canSeeGroupFinancials
  *     （老闆／platform_admin／被授權的 HR）才列、直開才放行——tabsForSection／isAdminPathAllowed 帶
  *     `canSeeGroupFinancials: false` 時剔除。讀 /me 走 canSeeGroupFinancialsOf（舊 API 缺欄位時退回 HR 角色）。
  *     API 守門在 routes/group-overview.ts（403 group_financials_forbidden）。
@@ -213,6 +213,15 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       href: "/admin/bonus-runs",
       desc: "專案獎金隨請款入帳進度同比例拆發、按季發放；每季存成獨立快照，已發放不可覆蓋，歷年可累計對比",
       detail: { title: "獎金批次" },
+    },
+    {
+      key: "bonusSheet",
+      label: "獎金分潤",
+      href: "/admin/bonus-sheet",
+      title: "專案獎金總表",
+      desc: "版面同公司現行「專案獎金總表」（未結案／已結案）；本次欄依所選獎金批次或基準日。含稅＝系統未稅金額×(1＋營業稅率)，總獎金依系統獎金規則",
+      hrOnly: true,
+      groupFinancials: true,
     },
     {
       key: "reports",

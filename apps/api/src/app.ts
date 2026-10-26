@@ -73,6 +73,7 @@ import { profileChangeRequestsRouter } from "./routes/profile-change-requests.js
 import { internalCronRouter } from "./routes/internal-cron.js"
 // 2026-10-11 集團總覽
 import { groupOverviewRouter } from "./routes/group-overview.js"
+import { bonusSheetRouter } from "./routes/bonus-sheet.js"
 import { essTabGuard } from "./middleware/ess-tab-guard.js"
 import { periodClosedErrorHandler } from "./middleware/period-closed.js"
 import { privilegeErrorHandler } from "./middleware/privilege-error.js"
@@ -197,6 +198,8 @@ app.use(profileChangeRequestsRouter) // /profile-change-requests*（W6 員工改
 app.use(internalCronRouter) // /internal/leave/annual-grant、/internal/calendar/holiday-import（WP9；排程端點）
 // 2026-10-11 集團總覽
 app.use(groupOverviewRouter) // /group-overview、/group-overview/detail（跨公司入帳收入／放款支出／專案毛利；HR）
+// 2026-10-27 獎金分潤總表（版面同公司「專案獎金總表」；集團財務權限）
+app.use(bonusSheetRouter) // /bonus-sheet、/bonus-sheet/export.xlsx
 
 // 404 fallback.
 app.use((_req: Request, res: Response) => {

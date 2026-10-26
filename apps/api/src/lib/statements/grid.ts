@@ -10,7 +10,7 @@
  * 在 API 端遮，不把金額送到前端。
  */
 
-export type BorderStyle = "thin" | "medium" | "thick"
+export type BorderStyle = "thin" | "medium" | "thick" | "double"
 
 export interface GridBorder {
   top?: BorderStyle
@@ -23,6 +23,8 @@ export interface GridBorder {
  * 顯示格式。每一種都對應原 Excel 用到的 numFmt（見 NUM_FMT）：
  *   int＝#,##0、dec1＝#,##0.0、dec2＝#,##0.00（負數紅字括號）、acct＝會計格式（0 顯示「-」）、
  *   intSp＝#,##0_ 、num0＝0、general＝一般、md＝m/d、hm＝h:mm、mdZh＝m"月"d"日"、text＝文字。
+ *   專案獎金總表（lib/statements/bonus-sheet.ts）另用：intRed＝#,##0;[Red]-#,##0（負數紅字帶負號）、
+ *   pct0＝0%、pct1＝0.0 %（值為 0～1 的比例）。
  */
 export type CellFormat =
   | "text"
@@ -36,6 +38,9 @@ export type CellFormat =
   | "md"
   | "hm"
   | "mdZh"
+  | "intRed"
+  | "pct0"
+  | "pct1"
 
 export const NUM_FMT: Record<CellFormat, string> = {
   text: "@",
@@ -49,6 +54,9 @@ export const NUM_FMT: Record<CellFormat, string> = {
   md: "m/d;@",
   hm: "h:mm",
   mdZh: 'm"月"d"日"',
+  intRed: "#,##0;[Red]-#,##0",
+  pct0: "0%",
+  pct1: "0.0\\ %",
 }
 
 export interface GridCell {
@@ -77,10 +85,12 @@ export interface GridCell {
   negative?: boolean
   /** 金額格：會計（看不到金額的角色）遮成「—」。 */
   money?: boolean
+  /** 字色 hex（例 #FF0000）；省略＝黑。負數紅字由 negative 決定，優先於這裡。 */
+  color?: string
 }
 
 export interface StatementGrid {
-  kind: "attendance" | "payslip"
+  kind: "attendance" | "payslip" | "bonusSheet"
   /** xlsx 工作表名稱／檔名用的標題。 */
   title: string
   /** 欄寬（Excel 字元單位，照原檔）。 */
@@ -90,6 +100,16 @@ export interface StatementGrid {
   /** 預設字型（照原檔：微軟正黑體）。 */
   font: string
   cells: GridCell[]
+  /** 凍結窗格（xlsx）：上方幾列、左邊幾欄；省略＝不凍結。畫面端也可據此固定表頭／前幾欄。 */
+  freeze?: { rows: number; cols: number }
+  /** 版面設定（xlsx）；省略＝A4 直式、縮成一頁寬一頁高（出勤統計表／薪資明細表）。 */
+  page?: {
+    orientation: "portrait" | "landscape"
+    /** Excel paperSize：9＝A4、8＝A3。 */
+    paperSize: number
+    /** 每頁重複的表頭列（1 起算，含頭尾），例 [1, 4]。 */
+    printTitleRows?: [number, number]
+  }
 }
 
 export const STATEMENT_FONT = "微軟正黑體"
@@ -192,6 +212,12 @@ export function formatCellText(value: string | number | null | undefined, format
       return `${neg ? "-" : ""}${thousands(value, 0)}`
     case "num0":
       return String(roundHalfAway(value, 0))
+    case "intRed":
+      return `${neg ? "-" : ""}${thousands(value, 0)}`
+    case "pct0":
+      return `${roundHalfAway(value * 100, 0)}%`
+    case "pct1":
+      return `${roundHalfAway(value * 100, 1).toFixed(1)} %`
     default:
       return generalNumber(value)
   }
@@ -227,7 +253,7 @@ export class GridBuilder {
       border: cleanBorder({ ...(prev?.border ?? {}), ...(input.border ?? {}) }),
       text: input.text ?? formatCellText(value, format),
     }
-    if (typeof value === "number" && value < 0 && (format === "int" || format === "dec1" || format === "dec2")) merged.negative = true
+    if (typeof value === "number" && value < 0 && (format === "int" || format === "dec1" || format === "dec2" || format === "intRed")) merged.negative = true
     if (merged.border && Object.keys(merged.border).length === 0) delete merged.border
     this.cells.set(key, merged)
     return merged
@@ -300,7 +326,7 @@ function cleanBorder(b: GridBorder): GridBorder {
   return out
 }
 
-const BORDER_RANK: Record<BorderStyle, number> = { thin: 1, medium: 2, thick: 3 }
+const BORDER_RANK: Record<BorderStyle, number> = { thin: 1, double: 2, medium: 2, thick: 3 }
 
 function strongest(a: BorderStyle | undefined, b: BorderStyle): BorderStyle {
   if (!a) return b

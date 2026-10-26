@@ -52,14 +52,31 @@ export function writeStatementSheet(ws: ExcelJS.Worksheet, grid: StatementGrid):
     const h = grid.rowHeights[r]
     if (h) ws.getRow(r + 1).height = h
   }
-  ws.pageSetup = {
-    paperSize: 9, // A4
-    orientation: "portrait",
-    fitToPage: true,
-    fitToWidth: 1,
-    fitToHeight: 1,
-    horizontalCentered: true,
-    margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.3, footer: 0.3 },
+  if (grid.page) {
+    // 專案獎金總表：照原檔橫式（A3）、寬度縮成一頁、高度不限，每頁重複表頭列。
+    ws.pageSetup = {
+      paperSize: grid.page.paperSize,
+      orientation: grid.page.orientation,
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 0,
+      horizontalCentered: true,
+      margins: { left: 0.24, right: 0.24, top: 0.75, bottom: 0.5, header: 0.3, footer: 0.3 },
+      ...(grid.page.printTitleRows ? { printTitlesRow: `${grid.page.printTitleRows[0]}:${grid.page.printTitleRows[1]}` } : {}),
+    }
+  } else {
+    ws.pageSetup = {
+      paperSize: 9, // A4
+      orientation: "portrait",
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 1,
+      horizontalCentered: true,
+      margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.3, footer: 0.3 },
+    }
+  }
+  if (grid.freeze && (grid.freeze.rows > 0 || grid.freeze.cols > 0)) {
+    ws.views = [{ state: "frozen", xSplit: grid.freeze.cols, ySplit: grid.freeze.rows }]
   }
 
   // 先寫主格的值與樣式，再合併，最後畫框線（見下）。
@@ -73,7 +90,12 @@ export function writeStatementSheet(ws: ExcelJS.Worksheet, grid: StatementGrid):
     const target = ws.getCell(r1, c1)
     target.value = excelValueOf(cell)
     if (cell.value !== null && cell.format !== "text") target.numFmt = NUM_FMT[cell.format]
-    target.font = { name: grid.font, size: cell.size ?? 12, bold: cell.bold === true }
+    target.font = {
+      name: grid.font,
+      size: cell.size ?? 12,
+      bold: cell.bold === true,
+      ...(cell.color ? { color: { argb: argb(cell.color) } } : {}),
+    }
     target.alignment = {
       vertical: "middle",
       ...(cell.align ? { horizontal: cell.align } : {}),
