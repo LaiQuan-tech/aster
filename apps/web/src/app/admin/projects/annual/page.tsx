@@ -176,7 +176,7 @@ export default function AnnualProjectsPage() {
                 </tr>
                 <tr className="sticky top-0 z-20 bg-white text-center font-normal">
                   {[
-                    "項次", "專案單號", "日期", "客戶", "工程名稱", "金額(未稅)", "稅金", "含稅",
+                    "項次", "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅",
                     "已收帳款", "應收帳款", "已開發票", "合約", "簽證", "發包", "業務", "備註",
                     ...disciplines,
                     "請款進度%", "收款進度%", "狀態", "期數",

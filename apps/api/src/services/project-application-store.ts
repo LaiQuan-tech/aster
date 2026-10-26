@@ -643,15 +643,34 @@ export async function buildAnnualTable(
   const tz = await getTenantTimezone(tenantId).catch(() => DEFAULT_TIMEZONE)
   let q = supabaseAdmin
     .from("projects")
-    .select(
-      "id, name, code, fiscal_year, status, kind, reserved_at, archived_at, client_id, lead_emp_id, other_expenses, created_at, opened_on, engineers",
-    )
+    .select(ANNUAL_PROJECT_COLS)
     .eq("tenant_id", tenantId)
     .eq("fiscal_year", year)
   if (!opts.includeArchived) q = q.is("archived_at", null)
   const { data: projData, error: projErr } = await q
   if (projErr) throw new Error(`buildAnnualTable (projects): ${projErr.message}`)
   const projects = (projData ?? []) as AnnualProjectRow[]
+  const rows = await buildAnnualRows(tenantId, projects, opts.settings, tz)
+  return assembleAnnualTable(year, rows, opts.sort, opts.settings)
+}
+
+/** 年度總表／專案列表共用的投影欄位（projects 表）。 */
+export const ANNUAL_PROJECT_COLS =
+  "id, name, code, fiscal_year, status, kind, reserved_at, archived_at, client_id, lead_emp_id, other_expenses, created_at, opened_on, engineers"
+
+/**
+ * 一案一列的總表欄位（未排序、seq 一律 0）。年度總表與「所有專案」列表（GET /projects?view=register）
+ * 共用同一套算法，兩邊數字保證一致。不做權限遮罩——呼叫端自己決定誰看得到金額（見 maskRegisterRow）。
+ */
+export async function buildAnnualRows(
+  tenantId: string,
+  projects: AnnualProjectRow[],
+  settings: P3Settings,
+  tzIn?: string,
+): Promise<AnnualRow[]> {
+  if (projects.length === 0) return []
+  const tz = tzIn ?? (await getTenantTimezone(tenantId).catch(() => DEFAULT_TIMEZONE))
+  const opts = { settings }
   const ids = projects.map((p) => p.id)
 
   const [contracts, billings, subcontracts, clients, employees, children] = await Promise.all([
@@ -754,7 +773,17 @@ export async function buildAnnualTable(
       installmentsTotal: installmentRows.length,
     }
   })
+  return rows
+}
 
+/** 排序、編項次、依月份分區塊小計、算年度總計與科別欄順序。純函式。 */
+export function assembleAnnualTable(
+  year: number,
+  rows: AnnualRow[],
+  sort: "code" | "unreceived_pct",
+  settings: Pick<P3Settings, "disciplines">,
+): AnnualTable {
+  const opts = { sort, settings }
   rows.sort((a, b) => {
     if (opts.sort === "unreceived_pct") {
       const pa = a.unreceivedPct
@@ -787,8 +816,20 @@ export async function buildAnnualTable(
   }
   const blocks = [...blockMap.values()].sort((a, b) => a.month.localeCompare(b.month))
 
-  // 科別欄：租戶設定的順序在前，資料裡冒出來的其他科別接在後面。
-  const seen = new Set<string>(opts.settings.disciplines)
+  return {
+    year,
+    rocYear: year - 1911,
+    sort: opts.sort,
+    disciplines: annualDisciplines(opts.settings.disciplines, rows),
+    rows,
+    blocks,
+    totals,
+  }
+}
+
+/** 科別欄：租戶設定的順序在前，資料裡冒出來的其他科別接在後面。純函式。 */
+export function annualDisciplines(configured: string[], rows: Pick<AnnualRow, "subcontractByDiscipline">[]): string[] {
+  const seen = new Set<string>(configured)
   const extra: string[] = []
   for (const r of rows) {
     for (const k of Object.keys(r.subcontractByDiscipline)) {
@@ -798,16 +839,7 @@ export async function buildAnnualTable(
       }
     }
   }
-
-  return {
-    year,
-    rocYear: year - 1911,
-    sort: opts.sort,
-    disciplines: [...opts.settings.disciplines, ...extra],
-    rows,
-    blocks,
-    totals,
-  }
+  return [...configured, ...extra]
 }
 
 /** 編號比較：同前綴／年度時按流水號的數值比，不然 `AT-115-10` 會排在 `AT-115-2` 前面。 */

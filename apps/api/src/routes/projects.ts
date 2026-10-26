@@ -23,6 +23,7 @@ import {
   loadProjectBossEmpId,
   resolveBonusEditAccess,
   resolveProjectAccess,
+  financeProjectIds,
   type BonusEditAccess,
 } from "../services/project-scope.js"
 import { recomputeDraftRunsAfterWrite } from "../services/project-bonus-recompute.js"
@@ -56,7 +57,11 @@ import {
   serializeBilling,
   serializeSubcontract,
   serializeContractLite,
+  buildAnnualRows,
+  annualDisciplines,
+  type AnnualProjectRow,
 } from "../services/project-application-store.js"
+import { maskRegisterRows, type RegisterRow } from "../services/project-register.js"
 import {
   applyProjectShareRevision,
   ProjectShareRevisionError,
@@ -846,6 +851,14 @@ projectsRouter.get(
       limit = n
     }
 
+    // 2026-10-27：?view=register 每案多回一份「專案申請單總表」欄位（金額依權限遮罩，見 services/project-register.ts）。
+    // 不帶＝舊行為。值不合法一律 400（同 sort／kind）。
+    if (req.query.view !== undefined && req.query.view !== "register") {
+      res.status(400).json({ error: "invalid_view" })
+      return
+    }
+    const withRegister = req.query.view === "register"
+
     try {
       let query = supabaseAdmin
         .from("projects")
@@ -875,16 +888,33 @@ projectsRouter.get(
         parentCodesById(tenantId, rows.map((p) => p.parent_project_id)),
       ])
 
+      let register: Map<string, RegisterRow> | null = null
+      let registerDisciplines: string[] | null = null
+      if (withRegister) {
+        const self = req.auth?.userId ? await resolveSelf(tenantId, req.auth.userId) : null
+        if (!self) {
+          res.status(403).json({ error: "forbidden" })
+          return
+        }
+        const [settings, moneyIds] = await Promise.all([loadP3Settings(tenantId), financeProjectIds(tenantId, self)])
+        const annualRows = await buildAnnualRows(tenantId, rows as unknown as AnnualProjectRow[], settings)
+        const masked = maskRegisterRows(annualRows, moneyIds)
+        register = new Map(masked.map((r) => [r.projectId, r]))
+        // 科別欄只由遮罩後的列推（看不到金額的案不會多冒出科別名稱）。
+        registerDisciplines = annualDisciplines(settings.disciplines, masked)
+      }
+
       const projects = rows.map((row) => ({
         // 列表一律不回獎金池（W4）：列表沒有逐案算權限，回了等於全租戶都看得到。
         ...serializeProject(row, { finance: false, bonus: false, hasSignedContract: signed.has(row.id) }),
+        ...(register ? { register: register.get(row.id) ?? null } : {}),
         clientName: row.client_id ? (clientNames.get(row.client_id) ?? null) : null,
         // 母案的專案編號（母案選填：沒有母案或母案列不見＝null）。parentProjectId 在 serializeProject 裡。
         parentCode: row.parent_project_id ? (parentCodes.get(row.parent_project_id) ?? null) : null,
         // 承接公司的有效名稱：company_id 為 null 的案子顯示租戶預設公司。
         companyName: effectiveCompanyOf(row.company_id, companies)?.name ?? null,
       }))
-      res.status(200).json({ projects })
+      res.status(200).json(registerDisciplines ? { projects, registerDisciplines } : { projects })
     } catch (err) {
       next(err)
     }

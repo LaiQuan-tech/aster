@@ -11,6 +11,7 @@
  * 函式打同一組既有端點（如 `GET /projects/:id`）但回傳更完整的形狀。
  */
 import { apiFetch, apiDownload } from "./api-client"
+import type { ProjectRegisterCells } from "./project-register"
 import type {
   Project, ProjectStatus, ShareMode, Installment, InstallmentInput, DocType, OurRole, Contract,
   ProjectSort, SortDir, ProjectMemberRole,
@@ -331,6 +332,8 @@ export interface ProjectListItem extends Project {
   companyId?: string | null
   /** 承接公司的有效名稱（company_id 為 null 時是租戶預設公司）；租戶沒有任何公司主體時為 null。 */
   companyName?: string | null
+  /** 「專案申請單總表」欄位（只有帶 `view: "register"` 時才有；金額依權限遮罩）。 */
+  register?: ProjectRegisterCells | null
 }
 
 /** B4：`sort`／`dir` 省略＝後端預設（created desc），行為與改動前相容。 */
@@ -342,6 +345,8 @@ export function listProjectsExt(opts?: {
   year?: number | null
   /** 只回這些案型（後端 `?kind=main,change`，在 DB 端篩）；省略＝全部案型。補母案的下拉只要 `["main"]`。 */
   kinds?: ProjectKind[]
+  /** "register"＝每案多帶總表欄位（後端 `?view=register`），回應另有 registerDisciplines。 */
+  view?: "register"
 }) {
   const q = new URLSearchParams()
   if (opts?.includeArchived) q.set("includeArchived", "1")
@@ -349,8 +354,9 @@ export function listProjectsExt(opts?: {
   if (opts?.dir) q.set("dir", opts.dir)
   if (opts?.year != null) q.set("year", String(opts.year))
   if (opts?.kinds && opts.kinds.length > 0) q.set("kind", opts.kinds.join(","))
+  if (opts?.view) q.set("view", opts.view)
   const qs = q.toString()
-  return apiFetch<{ projects: ProjectListItem[] }>(`/projects${qs ? `?${qs}` : ""}`)
+  return apiFetch<{ projects: ProjectListItem[]; registerDisciplines?: string[] }>(`/projects${qs ? `?${qs}` : ""}`)
 }
 
 /** 統一取客戶顯示名稱：list 端點給平面 clientName，detail 端點給巢狀 client。 */

@@ -28,13 +28,20 @@ import {
   engineerDisciplinesOf,
   humanizeClientError,
   humanizeProjectExtError,
-  clientNameOf,
+  downloadAnnualProjectsXlsx,
   type ProjectListItem,
   type Client,
   type ClientInput,
   type Company,
   type CreateProjectExtBody,
 } from "@/lib/projects-ext-api";
+import {
+  MASKED,
+  REGISTER_FROZEN_COLUMNS,
+  excelWidthToPx,
+  registerColumns,
+  registerRowCells,
+} from "@/lib/project-register";
 import { ProjectApplicationForm } from "./_components/ProjectApplicationForm";
 import { createAndOpenProject } from "./_components/project-application-form";
 
@@ -48,6 +55,9 @@ const STATUS_BADGE: Record<ProjectStatus, string> = {
 export default function AdminProjectsPage() {
   const router = useRouter();
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
+  // 總表的科別發包欄（Q 欄起；租戶設定順序，後端已依權限推好）。
+  const [registerDisciplines, setRegisterDisciplines] = useState<string[]>([]);
+  const [exporting, setExporting] = useState(false);
   // 專案申請單整張可收放（業主 2026-10-07）：預設收起，點標題列展開、再點一下收起。
   // 收起只是 hidden，不卸載，填到一半的內容會保留。
   const [formOpen, setFormOpen] = useState(false);
@@ -87,7 +97,7 @@ export default function AdminProjectsPage() {
     setError(null);
     try {
       const [p, cl, comp, d, e, st, ven, p3, me] = await Promise.all([
-        listProjectsExt({ includeArchived, sort, dir, year: yearFilter ? Number(yearFilter) : null }),
+        listProjectsExt({ includeArchived, sort, dir, year: yearFilter ? Number(yearFilter) : null, view: "register" }),
         listClients(),
         // 公司名冊拿不到不該讓整個專案列表掛掉：退成空陣列，下拉會顯示「尚未設定公司主體」。
         listCompanies().catch(() => ({ companies: [] as Company[] })),
@@ -102,6 +112,7 @@ export default function AdminProjectsPage() {
       ]);
       setSettings(st.settings);
       setProjects(p.projects);
+      setRegisterDisciplines(p.registerDisciplines ?? []);
       setClients(cl.clients);
       setCompanies(comp.companies);
       setDepts(d.departments);
@@ -184,8 +195,26 @@ export default function AdminProjectsPage() {
     }
   }
 
-  const deptName = (id: string | null) => depts.find((d) => d.id === id)?.name ?? "—";
-  const empName = (id: string | null) => emps.find((e) => e.id === id)?.name ?? "—";
+  const columns = registerColumns(registerDisciplines);
+  // 凍結欄（A:E）的 left 位移：前面各欄寬的累加。
+  const frozenLeft = columns.slice(0, REGISTER_FROZEN_COLUMNS).reduce<number[]>((acc, c, i) => {
+    acc.push(i === 0 ? 0 : acc[i - 1] + excelWidthToPx(columns[i - 1].width));
+    return acc;
+  }, []);
+  const registerTableWidth = columns.reduce((sum, c) => sum + excelWidthToPx(c.width), 0) + 96;
+
+  /** 下載 Excel：沿用「年度總表」匯出（與原總表同版面），依歸屬年度；全部年度時取今年。 */
+  async function exportXlsx() {
+    setExporting(true);
+    setError(null);
+    try {
+      await downloadAnnualProjectsXlsx({ year: yearFilter ? Number(yearFilter) : new Date().getFullYear(), includeArchived });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "匯出失敗");
+    } finally {
+      setExporting(false);
+    }
+  }
 
   return (
     <>
@@ -291,6 +320,17 @@ export default function AdminProjectsPage() {
             />
             顯示已封存
           </label>
+          {canFinance ? (
+            <button
+              type="button"
+              onClick={() => void exportXlsx()}
+              disabled={exporting}
+              title={`匯出 ${yearFilter || new Date().getFullYear()} 歸屬年度的專案申請單總表（版面同原 Excel）`}
+              className="rounded-lg border border-gray-300 px-3 py-1 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {exporting ? "匯出中…" : "下載 Excel"}
+            </button>
+          ) : null}
 
           {settings && (
             <div className="ml-auto flex items-center gap-2 text-sm text-gray-500">
@@ -329,63 +369,97 @@ export default function AdminProjectsPage() {
         ) : shown.length === 0 ? (
           <Empty>{projects.length === 0 ? "尚無專案" : "沒有符合條件的專案"}</Empty>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+          /* 欄位＝「專案申請單總表」Excel（A:P＋科別）；凍結 A:E 與表頭，同原檔凍結窗格 F5。
+             縱向也在這個框裡捲，表頭才黏得住（overflow-x 會讓 sticky top 失效於整頁捲動）。 */
+          <div className="max-h-[75vh] overflow-auto rounded border border-gray-200">
+            <table
+              aria-label="所有專案"
+              // table-fixed＋總寬＝各欄寬加總：凍結欄的 left 位移才會跟實際欄寬對得上。
+              className="table-fixed border-separate border-spacing-0 text-sm text-gray-800"
+              style={{ width: registerTableWidth }}
+            >
+              <colgroup>
+                {columns.map((c) => <col key={c.header} style={{ width: excelWidthToPx(c.width) }} />)}
+                <col style={{ width: 96 }} />
+              </colgroup>
               <thead>
-                <tr className="border-b text-left text-gray-500">
-                  <th className="py-2 pr-3">編號</th>
-                  <th className="py-2 pr-3">專案</th>
-                  <th className="py-2 pr-3">客戶</th>
-                  <th className="py-2 pr-3">文件</th>
-                  <th className="py-2 pr-3">歸屬年度</th>
-                  <th className="py-2 pr-3">部門</th>
-                  <th className="py-2 pr-3">負責人</th>
-                  <th className="py-2 pr-3">分潤模式</th>
-                  <th className="py-2 pr-3">獎金池</th>
-                  <th className="py-2 pr-3">狀態</th>
-                  <th className="py-2 pr-3"></th>
+                <tr>
+                  {columns.map((c, i) => (
+                    <th
+                      key={c.header}
+                      scope="col"
+                      className={`sticky top-0 whitespace-nowrap border-b border-r border-gray-300 bg-gray-100 px-2 py-2 text-center font-medium text-gray-700 ${i < REGISTER_FROZEN_COLUMNS ? "z-30" : "z-20"}`}
+                      style={i < REGISTER_FROZEN_COLUMNS ? { left: frozenLeft[i] } : undefined}
+                    >
+                      {c.header}
+                    </th>
+                  ))}
+                  {/* 系統欄（原檔沒有）：案情篩選對得上、看得出封存。 */}
+                  <th scope="col" className="sticky top-0 z-20 border-b border-gray-300 bg-gray-100 px-2 py-2 text-center font-medium text-gray-500">
+                    狀態
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {shown.map((p) => (
-                  <tr key={p.id} className="border-b last:border-0">
-                    <td className="py-2 pr-3 font-mono text-xs text-gray-500">
-                      {p.code ?? "—"}
-                    </td>
-                    <td className="py-2 pr-3 font-medium text-gray-900">{p.name || "（未命名）"}</td>
-                    <td className="py-2 pr-3 text-gray-600">{clientNameOf(p)}</td>
-                    <td className="py-2 pr-3">
-                      {p.hasSignedContract ? (
-                        <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">合約</span>
-                      ) : (
-                        <span className="text-xs text-gray-400">報價單／未簽</span>
-                      )}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600">{p.fiscalYear ?? "—"}</td>
-                    <td className="py-2 pr-3 text-gray-600">{deptName(p.deptId)}</td>
-                    <td className="py-2 pr-3 text-gray-600">{empName(p.leadEmpId)}</td>
-                    <td className="py-2 pr-3 text-gray-600">{p.shareMode === "pool_pct" ? "池×%" : "固定金額"}</td>
-                    <td className="py-2 pr-3 text-gray-600">{p.bonusPool != null ? p.bonusPool.toLocaleString() : "—"}</td>
-                    <td className="py-2 pr-3">
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-xs ${
-                          STATUS_BADGE[p.status as ProjectStatus] ?? "bg-gray-100 text-gray-500"
-                        }`}
-                        title={p.statusReason ?? undefined}
-                      >
-                        {statusLabel(p.status)}
-                      </span>
-                      {p.archivedAt && (
-                        <span className="ml-1 text-xs text-gray-400">已封存</span>
-                      )}
-                    </td>
-                    <td className="py-2 pr-3">
-                      <Link href={`/admin/projects/${p.id}`} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
-                        管理 →
-                      </Link>
-                    </td>
-                  </tr>
-                ))}
+                {shown.map((p, index) => {
+                  const cells = registerRowCells(
+                    { seq: index + 1, code: p.code, clientName: p.clientName ?? null, name: p.name || "（未命名）", register: p.register },
+                    registerDisciplines,
+                  );
+                  const href = `/admin/projects/${p.id}`;
+                  return (
+                    <tr
+                      key={p.id}
+                      className="group cursor-pointer"
+                      // 整列可點進明細；點到列內的連結／按鈕／表單元件時交給它自己處理。
+                      onClick={(e) => {
+                        if ((e.target as HTMLElement).closest("a,button,input,select,textarea,label")) return;
+                        if (e.metaKey || e.ctrlKey) window.open(href, "_blank");
+                        else router.push(href);
+                      }}
+                    >
+                      {columns.map((c, i) => {
+                        const frozen = i < REGISTER_FROZEN_COLUMNS;
+                        const text = cells[i];
+                        return (
+                          <td
+                            key={c.header}
+                            className={`border-b border-r border-gray-200 bg-white px-2 py-1.5 group-hover:bg-cyan-50 ${
+                              frozen ? "sticky z-10" : ""
+                            } ${c.align === "right" ? "whitespace-nowrap text-right tabular-nums" : c.align === "left" ? "break-words text-left" : "break-words text-center"} ${
+                              text === MASKED ? "text-gray-300" : ""
+                            }`}
+                            style={frozen ? { left: frozenLeft[i] } : undefined}
+                            title={text === MASKED ? "無權限檢視此案金額" : undefined}
+                          >
+                            {i === 1 ? (
+                              <Link
+                                href={href}
+                                className="font-mono text-xs font-medium hover:underline"
+                                style={{ color: "var(--brand)" }}
+                              >
+                                {text || "—"}
+                              </Link>
+                            ) : (
+                              text
+                            )}
+                          </td>
+                        );
+                      })}
+                      <td className="border-b border-gray-200 bg-white px-2 py-1.5 text-center group-hover:bg-cyan-50">
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-xs ${
+                            STATUS_BADGE[p.status as ProjectStatus] ?? "bg-gray-100 text-gray-500"
+                          }`}
+                          title={p.statusReason ?? undefined}
+                        >
+                          {statusLabel(p.status)}
+                        </span>
+                        {p.archivedAt && <span className="ml-1 text-xs text-gray-400">已封存</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
