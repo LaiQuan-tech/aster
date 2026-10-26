@@ -81,6 +81,11 @@ export type DuplicateProjectInput = {
   copy: DuplicateCopyOptions
   /** 新案的開案日（租戶今天）。 */
   openedOn: string
+  /**
+   * 分潤改版 #6（2026-10-26）：只有老闆能設定分潤。複製成員時，呼叫者不是老闆 → 新案成員
+   * 趴數一律 0（名單與角色照抄，趴數由老闆另設）；省略＝照抄（舊行為）。
+   */
+  copyMemberSharePct?: boolean
   nowIso?: string
 }
 
@@ -382,7 +387,7 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
           project_id: newId,
           employee_id: m.employee_id,
           role_in_project: m.role_in_project ?? "member",
-          share_pct: m.share_pct,
+          share_pct: input.copyMemberSharePct === false ? (m.share_pct === null ? null : 0) : m.share_pct,
           share_amount: null,
         })),
       )

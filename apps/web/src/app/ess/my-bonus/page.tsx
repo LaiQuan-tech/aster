@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Card, InlineError } from "@/components/ess-ui";
-import { getMyProjectShares, type MyProjectShare } from "@/lib/projects-api";
+import { getMyProjectShares, memberRoleLabel, type MyProjectShare } from "@/lib/projects-api";
 import { getMyBonusHistory, type MyBonusHistoryRow } from "@/lib/bonus-api";
 
 function money(n: number | null): string {
@@ -26,7 +26,10 @@ export default function MyBonusPage() {
       .catch((err) => setHistoryError(err instanceof Error ? err.message : "載入失敗"));
   }, []);
 
-  const total = shares.reduce((s, x) => s + (x.computedAmount ?? 0), 0);
+  // 分潤改版 #1：預估應得（累計）＝估算服務；已發＝歷來已發放；待發＝兩者相減（下限 0）。
+  const total = shares.reduce((s, x) => s + (x.estimatedAmount ?? x.computedAmount ?? 0), 0);
+  const paidTotal = shares.reduce((s, x) => s + (x.paidAmount ?? 0), 0);
+  const pendingTotal = shares.reduce((s, x) => s + (x.pendingAmount ?? 0), 0);
 
   return (
     <div className="space-y-4">
@@ -38,17 +41,32 @@ export default function MyBonusPage() {
           <p className="rounded-xl bg-gray-50 p-4 text-sm text-gray-400">目前沒有任何專案分潤</p>
         ) : (
           <>
-            <div className="mb-4 rounded-xl bg-gray-50 p-4">
-              <p className="text-xs text-gray-400">目前分潤合計</p>
-              <p className="text-2xl font-bold text-gray-900">{money(total)} 元</p>
+            <div className="mb-4 grid grid-cols-3 gap-2">
+              <div className="rounded-xl bg-gray-50 p-3">
+                <p className="text-xs text-gray-400">預估應得合計</p>
+                <p className="text-xl font-bold text-gray-900">{money(total)}</p>
+              </div>
+              <div className="rounded-xl bg-gray-50 p-3">
+                <p className="text-xs text-gray-400">已發</p>
+                <p className="text-xl font-bold text-gray-900">{money(paidTotal)}</p>
+              </div>
+              <div className="rounded-xl bg-gray-50 p-3">
+                <p className="text-xs text-gray-400">待發</p>
+                <p className="text-xl font-bold text-gray-900">{money(pendingTotal)}</p>
+              </div>
             </div>
+            <p className="mb-3 text-xs text-gray-400">預估應得＝依目前毛利（已入帳扣除已發生成本）與你的趴數累計算到今天的金額，會隨入帳與成本變動；實際以每季發放為準。</p>
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
+              <table className="w-full min-w-[640px] text-left text-sm">
                 <thead>
                   <tr className="border-b text-xs text-gray-500">
                     <th className="py-2 pr-3">專案</th>
-                    <th className="py-2 pr-3">分潤</th>
-                    <th className="py-2 pr-3">實得金額</th>
+                    <th className="py-2 pr-3">角色</th>
+                    <th className="py-2 pr-3">趴數</th>
+                    <th className="py-2 pr-3 text-right">目前毛利</th>
+                    <th className="py-2 pr-3 text-right">預估應得</th>
+                    <th className="py-2 pr-3 text-right">已發</th>
+                    <th className="py-2 pr-3 text-right">待發</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -58,12 +76,16 @@ export default function MyBonusPage() {
                         <Link href={`/ess/projects/${s.projectId}`} style={{ color: "var(--brand)" }}>
                           {s.projectName ?? s.projectId}
                         </Link>
-                        {s.roleInProject === "lead" && <span className="ml-1 rounded-full bg-amber-50 px-1.5 py-0.5 text-xs text-amber-700">負責人</span>}
+                        {s.legacy && <span className="ml-1 rounded-full bg-gray-100 px-1.5 py-0.5 text-xs text-gray-600" title="手填獎金池、未設獎金比例的舊制專案">舊制</span>}
                       </td>
+                      <td className="py-2 pr-3 text-gray-700">{memberRoleLabel(s.roleInProject)}</td>
                       <td className="py-2 pr-3 text-gray-700">
                         {s.shareMode === "pool_pct" ? (s.sharePct != null ? `${s.sharePct}%` : "—") : money(s.shareAmount)}
                       </td>
-                      <td className="py-2 pr-3 font-medium text-gray-900">{money(s.computedAmount)}</td>
+                      <td className="py-2 pr-3 text-right text-gray-700">{s.legacy || s.basis === "fixed_amount" ? "—" : money(s.grossProfit ?? null)}</td>
+                      <td className="py-2 pr-3 text-right font-medium text-gray-900">{money(s.estimatedAmount ?? s.computedAmount)}</td>
+                      <td className="py-2 pr-3 text-right text-gray-700">{money(s.paidAmount ?? null)}</td>
+                      <td className="py-2 pr-3 text-right text-gray-700">{money(s.pendingAmount ?? null)}</td>
                     </tr>
                   ))}
                 </tbody>

@@ -37,6 +37,7 @@ import {
 } from "@/lib/projects-ext-api";
 import { ProjectApplicationForm } from "./_components/ProjectApplicationForm";
 import { createAndOpenProject } from "./_components/project-application-form";
+import { RoleShareDefaultsCard } from "./_components/RoleShareDefaultsCard";
 
 const STATUS_BADGE: Record<ProjectStatus, string> = {
   active: "bg-green-50 text-green-700",
@@ -61,6 +62,9 @@ export default function AdminProjectsPage() {
   const [vatRate, setVatRate] = useState(0.05);
   const [canFinance, setCanFinance] = useState(false);
   const [canBonus, setCanBonus] = useState(false);
+  // 分潤改版 #6：分潤寫入只有老闆（後端 /project-settings 回 canEditBonus）。看得到（HR）≠ 改得了。
+  const [canEditBonus, setCanEditBonus] = useState(false);
+  const [bossConfigured, setBossConfigured] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -108,6 +112,8 @@ export default function AdminProjectsPage() {
       setVatRate(p3?.settings.vatRate ?? 0.05);
       setCanFinance(["hr_admin", "platform_admin", "accountant"].includes(me.role));
       setCanBonus(["hr_admin", "platform_admin"].includes(me.role));
+      setCanEditBonus(st.canEditBonus === true);
+      setBossConfigured(st.bossConfigured === true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "載入失敗");
     } finally {
@@ -218,7 +224,8 @@ export default function AdminProjectsPage() {
           mainProjects={mainProjects}
           vatRate={vatRate}
           canFinance={canFinance}
-          canBonus={canBonus}
+          // 建案的分潤模式／獎金池欄位只給老闆；HR 建案時不送，由後端帶預設（pool_pct、無獎金池）。
+          canBonus={canEditBonus}
           saving={saving}
           apiError={error}
           onSubmit={submit}
@@ -226,6 +233,15 @@ export default function AdminProjectsPage() {
         />
         </div>
       </Card> : null}
+
+      {settings && (canBonus || canEditBonus) ? (
+        <RoleShareDefaultsCard
+          defaults={settings.defaultSharePctByRole ?? {}}
+          canEdit={canEditBonus}
+          bossConfigured={bossConfigured}
+          onSaved={(next) => setSettings(next)}
+        />
+      ) : null}
 
       <Card>
         <div className="mb-3 flex flex-wrap items-center gap-3">

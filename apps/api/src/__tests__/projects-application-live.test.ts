@@ -352,7 +352,7 @@ describe("P3-3 申請單欄位與三段權限", () => {
     expect(got.body.project.designScope[0].amount).toBe(800000)
     expect(got.body.project.engineers["電機"].name).toBe("王技師")
     expect(got.body.project.otherExpenses).toBe(18645)
-    expect(got.body.access).toEqual({ finance: true, bonus: true })
+    expect(got.body.access).toMatchObject({ finance: true, bonus: true })
     expect(got.body.money).not.toBeNull()
   })
 
@@ -369,7 +369,7 @@ describe("P3-3 申請單欄位與三段權限", () => {
     expect(got.status).toBe(200)
     expect(got.body.project.name).toBe("帶業主的案子")
     expect(got.body.project.client.name).toBe("某某建設股份有限公司")
-    expect(got.body.access).toEqual({ finance: false, bonus: false })
+    expect(got.body.access).toMatchObject({ finance: false, bonus: false })
     expect(got.body.money).toBeNull()
     expect(got.body.billings).toEqual([])
     expect(got.body.subcontracts).toEqual([])

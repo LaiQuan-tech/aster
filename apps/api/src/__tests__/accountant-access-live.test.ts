@@ -4,6 +4,7 @@ import request from "supertest"
 import { supabaseAdmin } from "../lib/supabase"
 import { provisionTenant } from "../services/tenants"
 import { purgeTestTenant } from "./helpers/purge"
+import { makeProvisionedAdminBoss } from "./helpers/live-boss"
 import { app } from "../app"
 
 /**
@@ -72,6 +73,8 @@ beforeAll(async () => {
     .eq("user_id", p.userId)
     .single()
   adminEmpId = hr!.id as string
+  // 分潤改版 #6：只有老闆能改分潤——讓管理員當老闆，下面才建得了有獎金池與趴數的案子。
+  await makeProvisionedAdminBoss(tenantId, p.userId)
 
   const acct = await createEmployee("acct", "accountant")
   acctEmpId = acct.id
@@ -117,7 +120,7 @@ describe("W4 會計可以用的：專案金流、名冊、人員基本資料", (
   it("GET /projects/:id → access {finance:true, bonus:false}，而且 project.bonusPool 是 null", async () => {
     const res = await as(acctToken, request(app).get(`/projects/${projectId}`))
     expect(res.status, JSON.stringify(res.body)).toBe(200)
-    expect(res.body.access).toEqual({ finance: true, bonus: false })
+    expect(res.body.access).toMatchObject({ finance: true, bonus: false })
     expect(res.body.project.bonusPool).toBeNull()
     // finance 段照樣拿得到
     expect(res.body.money).not.toBeNull()

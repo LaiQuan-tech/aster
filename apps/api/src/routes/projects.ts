@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin, requireFinance } from "../middleware/role.js"
+import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import {
   nextProjectCode,
@@ -17,7 +17,15 @@ import {
   taipeiToday,
 } from "../services/project-status.js"
 import { isHrRole, resolveSelf } from "../middleware/scope.js"
-import { resolveProjectAccess } from "../services/project-scope.js"
+import {
+  bonusEditAccessOf,
+  loadProjectBossEmpId,
+  resolveBonusEditAccess,
+  resolveProjectAccess,
+  type BonusEditAccess,
+} from "../services/project-scope.js"
+import { recomputeDraftRunsAfterWrite } from "../services/project-bonus-recompute.js"
+import { estimateProjectBonus, type ProjectBonusEstimate } from "../services/bonus-estimate.js"
 import { writeAuditLog } from "../services/audit.js"
 import { DEFAULT_AUTO_ARCHIVE_MONTHS } from "../services/project-archive.js"
 import {
@@ -482,7 +490,38 @@ function rel1<T>(v: unknown): T | null {
   return (v as T) ?? null
 }
 
-/** 依模式計算某成員的分潤金額（pool_pct: pool×pct/100；fixed_amount: shareAmount）。 */
+/**
+ * 分潤改版 #1：成員獎金池與員工預估一律走獎金引擎的估算服務（services/bonus-estimate.ts，
+ * 與獎金試算同一套：毛利制／舊制／固定金額、入帳比例、已發放）。估算失敗（例如遷移未套）
+ * 只記 log 回 null，呼叫端退回舊的 computeAmount——頁面不該因為估算掛掉而整頁 500。
+ */
+async function estimatesByProject(
+  tenantId: string,
+  projectIds: string[],
+  context: string,
+): Promise<Map<string, ProjectBonusEstimate> | null> {
+  if (projectIds.length === 0) return new Map()
+  try {
+    const list = await estimateProjectBonus(tenantId, projectIds)
+    return new Map(list.map((e) => [e.projectId, e]))
+  } catch (err) {
+    console.warn(`[bonus-estimate] ${context}: 估算失敗，退回舊算法`, err)
+    return null
+  }
+}
+
+/** 某成員在估算裡的數字；查無（不是成員／估算失敗）回 null。 */
+function memberEstimateOf(est: ProjectBonusEstimate | undefined, employeeId: string) {
+  const m = est?.members.find((x) => x.employeeId === employeeId)
+  if (!m) return null
+  return {
+    estimatedAmount: m.estimatedAmount,
+    paidAmount: m.paidAmount,
+    pendingAmount: Math.max(0, m.estimatedAmount - m.paidAmount),
+  }
+}
+
+/** 舊算法（估算服務不可用時的退路）：pool_pct: pool×pct/100；fixed_amount: shareAmount。 */
 function computeAmount(project: ProjectRow, pct: number | null, amount: number | null): number | null {
   if (project.share_mode === "pool_pct") {
     const pool = num(project.bonus_pool)
@@ -490,6 +529,40 @@ function computeAmount(project: ProjectRow, pct: number | null, amount: number |
     return Math.round(pool * (pct / 100) * 100) / 100
   }
   return amount
+}
+
+/** 分潤值的「沒有」：null／undefined／0 都算（新成員趴數 0 與未填視為同一件事）。 */
+function isZeroish(v: number | null | undefined): boolean {
+  return v === null || v === undefined || Math.abs(v) < 1e-9
+}
+
+/** 兩個分潤值是否相同（null 與 0 視為相同，避免編輯器把 null 正規化成 0 被誤判成改分潤）。 */
+function sameShare(a: number | null | undefined, b: number | null | undefined): boolean {
+  if (isZeroish(a) && isZeroish(b)) return true
+  if (a === null || a === undefined || b === null || b === undefined) return false
+  return Math.abs(a - b) < 1e-9
+}
+
+/**
+ * 分潤改版 #6：非老闆送來的整批分潤版本是否動到分潤（獎金比例、既有成員趴數、新成員非 0 趴數）。
+ * 成員移除與角色變更不算（那是名單維護，HR／負責人可做）。純函式，測試直接呼叫。
+ */
+export function shareRevisionChangesShares(
+  currentBonusRatePct: number | null,
+  currentMembers: Array<{ employeeId: string; sharePct: number | null }>,
+  revision: { bonusRatePct: number | null; members: Array<{ employeeId: string; sharePct: number | null }> },
+): boolean {
+  if (!sameShare(revision.bonusRatePct, currentBonusRatePct)) return true
+  const current = new Map(currentMembers.map((m) => [m.employeeId.toLowerCase(), m.sharePct]))
+  for (const m of revision.members) {
+    const key = m.employeeId.toLowerCase()
+    if (current.has(key)) {
+      if (!sameShare(m.sharePct, current.get(key) ?? null)) return true
+    } else if (!isZeroish(m.sharePct)) {
+      return true
+    }
+  }
+  return false
 }
 
 /**
@@ -565,6 +638,8 @@ async function loadScope(
       project: ProjectRow
       canManage: boolean
       canSeeBonus: boolean
+      /** 分潤寫入權（只有老闆／platform_admin，見 services/project-scope.ts bonusEditAccessOf）。 */
+      bonusEdit: BonusEditAccess
     }
   | { ok: false; status: number; error: string }
 > {
@@ -581,17 +656,20 @@ async function loadScope(
   if (!proj) return { ok: false, status: 404, error: "not_found" }
   const project = proj as ProjectRow
 
-  const access = await resolveProjectAccess(tenantId, self, {
-    id: project.id,
-    dept_id: project.dept_id,
-    lead_emp_id: project.lead_emp_id,
-  })
+  const bossEmpId = await loadProjectBossEmpId(tenantId)
+  const access = await resolveProjectAccess(
+    tenantId,
+    self,
+    { id: project.id, dept_id: project.dept_id, lead_emp_id: project.lead_emp_id },
+    bossEmpId,
+  )
   return {
     ok: true,
     self: { id: self.id, role: self.role },
     project,
     canManage: access.finance,
     canSeeBonus: access.bonus,
+    bonusEdit: bonusEditAccessOf(self, bossEmpId),
   }
 }
 
@@ -745,10 +823,23 @@ projectsRouter.post(
       return
     }
     // 會計屬 finance，可建立合約與期款；但獎金池／分潤模式仍是 bonus 權限，
-    // 與 PATCH /projects/:id 的 canSeeBonus 規則一致，不可藉由建案端點繞過。
-    if ((b.shareMode !== undefined || b.bonusPool !== undefined) && !isHrRole(self.role)) {
-      res.status(403).json({ error: "forbidden_bonus" })
-      return
+    // 與 PATCH /projects/:id 的規則一致，不可藉由建案端點繞過。
+    // 分潤改版 #6（2026-10-26）：寫入分潤只有老闆。HR 建案時帶預設值（pool_pct、無獎金池）
+    // 不算改分潤——申請單一律送 shareMode，不能因此讓 HR 建不了案。
+    if (b.shareMode !== undefined || b.bonusPool !== undefined) {
+      const bonusEdit = await resolveBonusEditAccess(tenantId, self)
+      // 看不到分潤的人（會計）帶任何分潤欄位都維持舊行為 403 forbidden_bonus。
+      if (!bonusEdit.canEdit && !isHrRole(self.role)) {
+        res.status(403).json({ error: "forbidden_bonus" })
+        return
+      }
+      const touchesBonus =
+        (b.bonusPool !== undefined && b.bonusPool !== null) ||
+        (b.shareMode !== undefined && b.shareMode !== "pool_pct")
+      if (touchesBonus && bonusEdit.denial) {
+        res.status(bonusEdit.denial.status).json({ error: bonusEdit.denial.error })
+        return
+      }
     }
     const primaryContract: MainContractInput | null =
       b.primaryContract ?? (b.contractAmount !== undefined ? { amount: b.contractAmount } : null)
@@ -999,7 +1090,8 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
     // 承接公司的有效名稱（申請單／列印頁左上角用）：company_id 為 null 時是租戶預設公司。
     companyName: effectiveCompanyOf(row.company_id, companies)?.name ?? null,
   }
-  const access = { finance, bonus }
+  // editBonus：分潤寫入權（只有老闆／platform_admin）；bossConfigured：租戶是否已指定老闆。
+  const access = { finance, bonus, editBonus: scope.bonusEdit.canEdit, bossConfigured: scope.bonusEdit.bossConfigured }
   if (!finance) {
     return {
       ok: true as const,
@@ -1160,6 +1252,15 @@ projectsRouter.patch(
         res.status(403).json({ error: "forbidden_bonus" })
         return
       }
+      // 分潤改版 #6：獎金池／分潤模式**真的有變**才算改分潤，只有老闆可以（編輯表單整份送回
+      // 原值時不擋，免得 HR 連案名都存不了）。
+      const bonusChanged =
+        (b.bonusPool !== undefined && (b.bonusPool ?? null) !== num(scope.project.bonus_pool)) ||
+        (b.shareMode !== undefined && b.shareMode !== scope.project.share_mode)
+      if (bonusChanged && scope.bonusEdit.denial) {
+        res.status(scope.bonusEdit.denial.status).json({ error: scope.bonusEdit.denial.error })
+        return
+      }
 
       const patch: Record<string, unknown> = {}
       if (b.name !== undefined) {
@@ -1291,6 +1392,7 @@ projectsRouter.patch(
           changed_by_emp_id: scope.self.id,
         })
       }
+      if (bonusChanged) await recomputeDraftRunsAfterWrite(tenantId, [data.id as string], "PATCH /projects/:id")
       res.status(200).json({ id: data.id })
     } catch (err) {
       next(err)
@@ -1330,6 +1432,13 @@ projectsRouter.get(
         next(new Error(`GET /projects/${req.params.id}/members: ${error.message}`))
         return
       }
+      // 估算只在「有數字要給」時才算：看得到分潤，或本人就在名單裡（自己的錢）。
+      const needEstimate =
+        scope.canSeeBonus || (data ?? []).some((m) => m.employee_id === scope.self.id)
+      const estimates = needEstimate
+        ? await estimatesByProject(tenantId, [scope.project.id], "GET /projects/:id/members")
+        : null
+      const est = estimates?.get(scope.project.id)
       // 分潤數字只給 bonus（W4：會計拿得到成員名單，拿不到趴數／金額／獎金池）。
       const members = (data ?? []).map((m) => {
         const emp = rel1<{ name: string; emp_no: string | null }>(
@@ -1347,19 +1456,40 @@ projectsRouter.get(
         // 本人那一列一律帶自己的數字——那是他自己的錢，ESS 專案頁靠這個顯示。
         // 只有「看得到全名單但沒有分潤權限」的人（會計）拿到的是純名單。
         if (!scope.canSeeBonus && m.employee_id !== scope.self.id) return base
+        const me = memberEstimateOf(est, m.employee_id as string)
         return {
           ...base,
           sharePct: pct,
           shareAmount: amount,
-          computedAmount: computeAmount(scope.project, pct, amount),
+          // computedAmount＝截至今天的累計應得（估算服務）；估算不可用時退回舊算法。
+          computedAmount: me ? me.estimatedAmount : computeAmount(scope.project, pct, amount),
+          estimatedAmount: me?.estimatedAmount ?? null,
+          paidAmount: me?.paidAmount ?? null,
+          pendingAmount: me?.pendingAmount ?? null,
         }
       })
       res.status(200).json({
         canManage: scope.canManage,
         canSeeBonus: scope.canSeeBonus,
+        // 分潤改版 #6：前端據此決定分潤編輯器唯讀與否、提示「僅老闆可修改」或「先指定老闆」。
+        canEditBonus: scope.bonusEdit.canEdit,
+        bossConfigured: scope.bonusEdit.bossConfigured,
         shareMode: scope.project.share_mode,
-        bonusPool: scope.canSeeBonus ? num(scope.project.bonus_pool) : null,
+        // 獎金池＝估算服務的累計池（毛利制＝max(0,毛利)×比例；舊制＝手填獎金池；固定金額＝null）。
+        bonusPool: scope.canSeeBonus ? (est ? est.pool : num(scope.project.bonus_pool)) : null,
         bonusRatePct: scope.canSeeBonus ? num(scope.project.bonus_rate_pct) : null,
+        bonusEstimate: scope.canSeeBonus && est
+          ? {
+              basis: est.basis,
+              pool: est.pool,
+              contractTotal: est.contractTotal,
+              revenue: est.revenue,
+              cost: est.cost,
+              grossProfit: est.grossProfit,
+              overContractPct: est.overContractPct,
+              skipped: est.skipped,
+            }
+          : null,
         members,
       })
     } catch (err) {
@@ -1404,11 +1534,23 @@ projectsRouter.post(
       }
       const b = parsed.data
       const roleInProject = b.roleInProject ?? "member"
-      // pool_pct 且未指定趴數 → 帶該角色的預設值（沒設定就維持 null）。
+      const isPool = scope.project.share_mode === "pool_pct"
       let sharePct = b.sharePct ?? null
-      if (sharePct === null && scope.project.share_mode === "pool_pct") {
-        const defaults = await defaultSharePctByRole(tenantId)
-        sharePct = defaults[roleInProject] ?? null
+      let shareAmount = b.shareAmount ?? null
+      if (scope.bonusEdit.canEdit) {
+        // 老闆：pool_pct 且未指定趴數 → 帶該角色的預設值（沒設定就維持 null）。
+        if (sharePct === null && isPool) {
+          const defaults = await defaultSharePctByRole(tenantId)
+          sharePct = defaults[roleInProject] ?? null
+        }
+      } else {
+        // 分潤改版 #6：HR／負責人仍可加人，但趴數一律 0，由老闆另行設定；帶了非 0 的分潤就擋。
+        if (!isZeroish(sharePct) || !isZeroish(shareAmount)) {
+          res.status(scope.bonusEdit.denial!.status).json({ error: scope.bonusEdit.denial!.error })
+          return
+        }
+        sharePct = isPool ? 0 : null
+        shareAmount = isPool ? null : 0
       }
       const { data, error } = await supabaseAdmin
         .from("project_members")
@@ -1418,7 +1560,7 @@ projectsRouter.post(
           employee_id: b.employeeId,
           role_in_project: roleInProject,
           share_pct: sharePct,
-          share_amount: b.shareAmount ?? null,
+          share_amount: shareAmount,
         })
         .select("id")
         .single()
@@ -1437,9 +1579,10 @@ projectsRouter.post(
         employee_id: b.employeeId,
         field: scope.project.share_mode === "pool_pct" ? "pct" : "amount",
         old_value: null,
-        new_value: scope.project.share_mode === "pool_pct" ? sharePct : b.shareAmount ?? null,
+        new_value: isPool ? sharePct : shareAmount,
         changed_by_emp_id: scope.self.id,
       })
+      await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "POST /projects/:id/members")
       res.status(201).json({ id: data.id })
     } catch (err) {
       next(err)
@@ -1492,6 +1635,14 @@ projectsRouter.patch(
       }
 
       const b = parsed.data
+      // 分潤改版 #6：角色可由 HR／負責人調整；趴數／金額**真的有變**才算改分潤，只有老闆可以。
+      const shareChanged =
+        (b.sharePct !== undefined && !sameShare(b.sharePct, num(current.share_pct as string | null))) ||
+        (b.shareAmount !== undefined && !sameShare(b.shareAmount, num(current.share_amount as string | null)))
+      if (shareChanged && scope.bonusEdit.denial) {
+        res.status(scope.bonusEdit.denial.status).json({ error: scope.bonusEdit.denial.error })
+        return
+      }
       const patch: Record<string, unknown> = {}
       if (b.roleInProject !== undefined) patch.role_in_project = b.roleInProject
       if (b.sharePct !== undefined) patch.share_pct = b.sharePct
@@ -1543,6 +1694,9 @@ projectsRouter.patch(
         })
       }
       if (adjustments.length) await supabaseAdmin.from("project_share_adjustments").insert(adjustments)
+      if (shareChanged) {
+        await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "PATCH /projects/:id/members/:memberId")
+      }
 
       res.status(200).json({ id: data.id })
     } catch (err) {
@@ -1590,6 +1744,8 @@ projectsRouter.delete(
         res.status(404).json({ error: "not_found" })
         return
       }
+      // 移除成員會改變分配（他的趴數變成未分配）→ 草稿批次跟著重算。
+      await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "DELETE /projects/:id/members/:memberId")
       res.status(200).json({ id: data.id })
     } catch (err) {
       next(err)
@@ -1624,12 +1780,35 @@ projectsRouter.put(
         res.status(403).json({ error: "forbidden" })
         return
       }
+      // 分潤改版 #6：只有老闆能改獎金比例與趴數。HR／負責人送來的整批版本只能是「成員名單維護」
+      // ——加人（趴數 0）、移除、換角色；任何既有成員趴數或獎金比例的變動都擋下。
+      if (scope.bonusEdit.denial) {
+        const { data: currentMembers, error: curErr } = await supabaseAdmin
+          .from("project_members")
+          .select("employee_id, share_pct")
+          .eq("tenant_id", tenantId)
+          .eq("project_id", req.params.id)
+        if (curErr) throw new Error(`PUT share-revision (load members): ${curErr.message}`)
+        const changesShare = shareRevisionChangesShares(
+          num(scope.project.bonus_rate_pct),
+          (currentMembers ?? []).map((m) => ({
+            employeeId: m.employee_id as string,
+            sharePct: num(m.share_pct as string | null),
+          })),
+          parsed.data,
+        )
+        if (changesShare) {
+          res.status(scope.bonusEdit.denial.status).json({ error: scope.bonusEdit.denial.error })
+          return
+        }
+      }
       const result = await applyProjectShareRevision(
         tenantId,
         req.params.id as string,
         scope.self.id,
         parsed.data,
       )
+      await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "PUT /projects/:id/share-revision")
       res.status(200).json(result)
     } catch (err) {
       if (err instanceof ProjectShareRevisionError) {
@@ -1740,7 +1919,14 @@ projectsRouter.get(
         next(new Error(`GET /my/project-shares: ${error.message}`))
         return
       }
+      const estimates = await estimatesByProject(
+        tenantId,
+        [...new Set((data ?? []).map((m) => m.project_id as string))],
+        "GET /my/project-shares",
+      )
       const shares = (data ?? []).map((m) => {
+        const est = estimates?.get(m.project_id as string)
+        const mine = memberEstimateOf(est, self.id)
         const proj = rel1<{ name: string; status: string; share_mode: string; bonus_pool: string | null }>(
           (m as { projects: unknown }).projects,
         )
@@ -1770,7 +1956,16 @@ projectsRouter.get(
           shareMode: proj?.share_mode ?? null,
           sharePct: pct,
           shareAmount: amount,
-          computedAmount: projRow ? computeAmount(projRow, pct, amount) : null,
+          // 分潤改版 #1：預估應得＝估算服務的累計應得；已發＝歷來已發放；待發＝兩者相減（下限 0）。
+          computedAmount: mine ? mine.estimatedAmount : projRow ? computeAmount(projRow, pct, amount) : null,
+          estimatedAmount: mine?.estimatedAmount ?? null,
+          paidAmount: mine?.paidAmount ?? null,
+          pendingAmount: mine?.pendingAmount ?? null,
+          basis: est?.basis ?? null,
+          /** 舊制（手填獎金池，未設獎金比例）——ESS 標「舊制」。 */
+          legacy: est ? est.basis === "legacy_pool" : null,
+          /** 目前累計毛利（入帳未稅－已發生成本）；成員看得到自己所在專案的毛利（業主 2026-10-26 #1）。 */
+          grossProfit: est ? est.grossProfit : null,
         }
       })
       res.status(200).json({ shares })
@@ -1878,24 +2073,38 @@ projectsRouter.get(
   "/project-settings",
   requireAuth,
   requireTenant,
-  async (_req: Request, res: Response, next: NextFunction) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {
-      const data = await loadSettingsRow(tenantId)
+      const [data, self] = await Promise.all([
+        loadSettingsRow(tenantId),
+        req.auth?.userId ? resolveSelf(tenantId, req.auth.userId) : Promise.resolve(null),
+      ])
+      const bonusEdit = self ? await resolveBonusEditAccess(tenantId, self) : null
       // 沒有設定列就回預設值，讓租戶不必先設定就能用。
-      res.status(200).json({ settings: serializeSettings(data) })
+      // canEditBonus／bossConfigured（分潤改版 #6）：角色預設趴數、建案的分潤欄位只有老闆能改。
+      res.status(200).json({
+        settings: serializeSettings(data),
+        canEditBonus: bonusEdit?.canEdit ?? false,
+        bossConfigured: bonusEdit?.bossConfigured ?? false,
+      })
     } catch (err) {
       next(err)
     }
   },
 )
 
-// ── PUT /project-settings — HR 調整 ───────────────────────────────────
+// ── PUT /project-settings — HR 調整；角色預設趴數只有老闆 ───────────────
+/**
+ * 分潤改版 #6（2026-10-26）：`defaultSharePctByRole` 是分潤設定，只有老闆（或 platform_admin）能改，
+ * 老闆不一定是 hr_admin，所以這支不再掛 requireHrAdmin，改在裡面逐欄位判：
+ *   • 帶 defaultSharePctByRole → 老闆限定（403 bonus_edit_boss_only／409 boss_not_configured）
+ *   • 帶其他欄位（封存、印花稅、編號格式…）→ 仍限 HR（403 forbidden，與 requireHrAdmin 相同）
+ */
 projectsRouter.put(
   "/project-settings",
   requireAuth,
   requireTenant,
-  requireHrAdmin,
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const parsed = projectSettingsSchema.safeParse(req.body)
@@ -1910,6 +2119,22 @@ projectsRouter.put(
     }
     try {
       const self = await resolveSelf(tenantId, userId)
+      if (!self) {
+        res.status(403).json({ error: "forbidden" })
+        return
+      }
+      const touchesOther = Object.keys(parsed.data).some((k) => k !== "defaultSharePctByRole")
+      if (touchesOther && !isHrRole(self.role)) {
+        res.status(403).json({ error: "forbidden" })
+        return
+      }
+      if (parsed.data.defaultSharePctByRole !== undefined) {
+        const bonusEdit = await resolveBonusEditAccess(tenantId, self)
+        if (bonusEdit.denial) {
+          res.status(bonusEdit.denial.status).json({ error: bonusEdit.denial.error })
+          return
+        }
+      }
       const row: Record<string, unknown> = {
         tenant_id: tenantId,
         updated_at: new Date().toISOString(),
@@ -1955,7 +2180,12 @@ projectsRouter.put(
         context: "PUT /project-settings",
       })
 
-      res.status(200).json({ settings: serializeSettings(data) })
+      const bonusEdit = await resolveBonusEditAccess(tenantId, self)
+      res.status(200).json({
+        settings: serializeSettings(data),
+        canEditBonus: bonusEdit.canEdit,
+        bossConfigured: bonusEdit.bossConfigured,
+      })
     } catch (err) {
       next(err)
     }

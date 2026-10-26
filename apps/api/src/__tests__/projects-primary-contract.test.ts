@@ -283,7 +283,7 @@ describe("primary contract authorization", () => {
 })
 
 describe("POST /projects primary contract", () => {
-  it("rejects bonus fields from accountants but allows HR to set them", async () => {
+  it("rejects bonus fields from accountants; HR needs to be the boss to set them (2026-10-26 #6)", async () => {
     h.db.projects = []
     const forbidden = await request(app)
       .post("/projects")
@@ -293,10 +293,33 @@ describe("POST /projects primary contract", () => {
     expect(forbidden.body.error).toBe("forbidden_bonus")
     expect(h.db.projects).toHaveLength(0)
 
+    // 分潤改版 #6：只有老闆可以設定獎金池。沒設老闆 → 409；HR 不是老闆 → 403。
+    const noBoss = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer hr-user")
+      .send({ name: "沒設老闆", code: "BONUS-409", shareMode: "pool_pct", bonusPool: 10_000 })
+    expect(noBoss.status).toBe(409)
+    expect(noBoss.body.error).toBe("boss_not_configured")
+    h.db.tenants = [{ id: h.tenantId, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: "aaaaaaaa-0000-4000-8000-000000000002" } } }]
+    const notBoss = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer hr-user")
+      .send({ name: "HR 不是老闆", code: "BONUS-403", shareMode: "pool_pct", bonusPool: 10_000 })
+    expect(notBoss.status).toBe(403)
+    expect(notBoss.body.error).toBe("bonus_edit_boss_only")
+    // HR 建案帶預設分潤模式、沒帶獎金池 → 不算改分潤，照常建立。
+    const plain = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer hr-user")
+      .send({ name: "HR 一般建案", code: "BONUS-DEFAULT", shareMode: "pool_pct" })
+    expect(plain.status).toBe(201)
+    h.db.projects = []
+
+    h.db.tenants = [{ id: h.tenantId, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: "aaaaaaaa-0000-4000-8000-000000000003" } } }]
     const allowed = await request(app)
       .post("/projects")
       .set("Authorization", "Bearer hr-user")
-      .send({ name: "HR 可設定獎金", code: "BONUS-YES", shareMode: "pool_pct", bonusPool: 10_000 })
+      .send({ name: "老闆可設定獎金", code: "BONUS-YES", shareMode: "pool_pct", bonusPool: 10_000 })
     expect(allowed.status).toBe(201)
     expect(h.db.projects[0]).toMatchObject({ share_mode: "pool_pct", bonus_pool: 10_000 })
   })

@@ -360,6 +360,10 @@ export interface ProjectAccess {
   finance: boolean
   /** 分潤：獎金池、成員趴數、實得金額、分潤異動史。**不含會計**（W4 業主決策 3）。 */
   bonus: boolean
+  /** 分潤寫入權（2026-10-26 起只有老闆／platform_admin）；舊版後端沒有這個鍵。 */
+  editBonus?: boolean
+  /** 租戶是否已指定老闆。 */
+  bossConfigured?: boolean
 }
 
 /** project-money.ts computeMoney() 的原始輸出——欄位與後端逐一對照過。 */
@@ -734,6 +738,13 @@ export function updateProjectFields(id: string, body: UpdateProjectExtBody) {
   })
 }
 
+/** 分潤改版 #6：只有老闆可以改分潤的兩個錯誤碼。 */
+export function humanizeBonusEditError(msg: string): string {
+  if (msg.includes("boss_not_configured")) return "尚未指定老闆。分潤比例僅老闆可修改，請先到「公司設定 → 簽核」指定老闆。"
+  if (msg.includes("bonus_edit_boss_only")) return "分潤比例僅老闆可修改。"
+  return msg
+}
+
 /** 建立／編輯專案共用的錯誤碼人性化（P3 案型與客戶）。 */
 export function humanizeProjectExtError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : fallback
@@ -746,6 +757,7 @@ export function humanizeProjectExtError(err: unknown, fallback: string): string 
   if (msg.includes("code_immutable")) return "專案編號不可變更。"
   if (msg.includes("unknown_discipline")) return "協力技師的科別不在專案設定的科別清單裡。請先到「專案設定 → 科別」新增。"
   if (msg.includes("forbidden_bonus")) return "分潤（獎金池／成員趴數）不在您的權限範圍內。"
+  if (msg.includes("bonus_edit_boss_only") || msg.includes("boss_not_configured")) return humanizeBonusEditError(msg)
   if (msg.includes("billing_percentage_total_exceeded")) return "一般期款百分比合計不可超過 100%。"
   if (msg.includes("negative_installment_amount")) return "期款設定會使末期金額小於 0，請降低前期百分比或指定金額。"
   if (msg.includes("invalid_billing_total")) return "期款有效金額合計與合約金額不一致。"

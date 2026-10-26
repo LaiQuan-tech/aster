@@ -6,17 +6,21 @@ import { useParams } from "next/navigation";
 import { Card, InlineError, Pill, SectionTitle } from "@/components/ess-ui";
 import {
   getProjectMembers,
+  getProjectSettings,
   getProjectDocuments,
   uploadProjectDocument,
   visibleProjectDocuments,
   type MembersResponse,
   type ProjectDocument,
+  type ProjectMemberRole,
 } from "@/lib/projects-api";
 import {
   getProjectDetail,
   disciplineLabel,
   type ProjectDetail,
+  type ProjectMoney,
 } from "@/lib/projects-ext-api";
+import { MembersCard } from "@/app/admin/projects/[id]/_sections/MembersCard";
 
 function money(n: number | null): string {
   return n == null ? "—" : n.toLocaleString("zh-TW");
@@ -28,6 +32,10 @@ export default function EssProjectDetailPage() {
 
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [membersRes, setMembersRes] = useState<MembersResponse | null>(null);
+  // 分潤改版 #6：老闆不一定是 HR、進不了後台專案頁——員工端專案頁直接給老闆分潤編輯器。
+  const [projectMoney, setProjectMoney] = useState<ProjectMoney | null>(null);
+  const [shareDefaults, setShareDefaults] = useState<Partial<Record<ProjectMemberRole, number>>>({});
+  const [shareError, setShareError] = useState<string | null>(null);
   const [documents, setDocuments] = useState<ProjectDocument[]>([]);
   // 合約掃描檔只給 HR／該案 lead／經理與主辦成員；後端對其他人的回應根本不含合約掃描檔（連檔名都不給），
   // 這個旗標讓前端對應：沒權限就不顯示「合約掃描檔」徽章，連萬一混進來的也濾掉。
@@ -46,7 +54,12 @@ export default function EssProjectDetailPage() {
       // 金額（money）與財務用的分潤細節不在這裡顯示——非 finance 者本來就拿
       // 不到（API 回 null），這裡只取基本資料／協力技師／客戶名稱／簽約狀態。
       setProject(detail.project);
+      setProjectMoney(detail.money);
       setMembersRes(m);
+      if (m.canEditBonus) {
+        const st = await getProjectSettings().catch(() => null);
+        setShareDefaults(st?.settings.defaultSharePctByRole ?? {});
+      }
       setDocuments(docs.documents);
       setCanSeeContractDocs(docs.canSeeContractDocs);
     } catch (err) {
@@ -143,6 +156,29 @@ export default function EssProjectDetailPage() {
               </ul>
             )}
           </Card>
+
+          {/* 老闆：分潤編輯器（比例與角色；加人／移除仍由 HR／負責人在後台）。 */}
+          {membersRes?.canEditBonus && (
+            <>
+              <MembersCard
+                projectId={projectId}
+                members={membersRes.members}
+                emps={membersRes.members.map((mm) => ({ id: mm.employeeId, name: mm.name ?? mm.employeeId, emp_no: mm.empNo }))}
+                canBonus
+                canEditBonus
+                bossConfigured={membersRes.bossConfigured !== false}
+                defaultSharePctByRole={shareDefaults}
+                contractAmount={projectMoney?.amountUntaxed ?? null}
+                receivedAmount={projectMoney?.receivedTotal ?? 0}
+                grossProfit={membersRes.bonusEstimate && membersRes.bonusEstimate.basis !== "fixed_amount" ? membersRes.bonusEstimate.grossProfit : null}
+                bonusRatePct={membersRes.bonusRatePct ?? null}
+                allowRosterEdit={false}
+                setError={setShareError}
+                load={load}
+              />
+              {shareError && <InlineError>{shareError}</InlineError>}
+            </>
+          )}
 
           {/* 分潤（可見性由後端決定：一般組員只看到自己那筆；負責人/部門主管看全部） */}
           <Card

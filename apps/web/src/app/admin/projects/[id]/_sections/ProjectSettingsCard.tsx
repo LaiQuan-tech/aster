@@ -14,6 +14,8 @@ interface ProjectSettingsCardProps {
   isPool: boolean;
   /** W4：分潤區（獎金池、角色預設趴數）的可見性。會計為 false。 */
   canBonus: boolean;
+  /** 分潤改版 #6：分潤模式與獎金池只有老闆能改（看得到 ≠ 改得了）。 */
+  canEditBonus?: boolean;
   saveProjectField: (patch: UpdateProjectExtBody) => Promise<void>;
   error: string | null;
 }
@@ -26,7 +28,7 @@ interface ProjectSettingsCardProps {
  * 實際公司人員與個人分潤由緊接在本卡下方的「專案獎金與分潤」整批編輯器維護；
  * 不把租戶級角色預設值混在單一專案頁，避免管理員誤以為正在設定本案人員。
  */
-export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, saveProjectField, error }: ProjectSettingsCardProps) {
+export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, canEditBonus = false, saveProjectField, error }: ProjectSettingsCardProps) {
   const [clients, setClients] = useState<Client[]>([]);
   useEffect(() => {
     listClients().then((r) => setClients(r.clients)).catch(() => {});
@@ -71,7 +73,8 @@ export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, sa
           <select
             className={inputCls}
             value={project.shareMode}
-            disabled={!canBonus}
+            disabled={!canBonus || !canEditBonus}
+            title={canBonus && !canEditBonus ? "分潤比例僅老闆可修改" : undefined}
             onChange={(e) => saveProjectField({ shareMode: e.target.value as ShareMode })}
           >
             <option value="pool_pct">獎金池 × 百分比</option>
@@ -85,6 +88,8 @@ export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, sa
               className={inputCls}
               type="number"
               min="0"
+              disabled={!canEditBonus}
+              title={!canEditBonus ? "分潤比例僅老闆可修改" : undefined}
               defaultValue={project.bonusPool ?? ""}
               onBlur={(e) => {
                 const v = e.target.value === "" ? null : Number(e.target.value);

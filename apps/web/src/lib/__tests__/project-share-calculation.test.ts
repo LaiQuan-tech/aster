@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest"
 import {
   calculateProjectShares,
+  defaultPctForRole,
   hydrateShareDraft,
+  pctAfterRoleChange,
   orderShareMembers,
   type ShareDraftMember,
 } from "../project-share-calculation"
@@ -86,5 +88,42 @@ describe("share editor model", () => {
       "member",
       "support",
     ])
+  })
+})
+
+describe("毛利制獎金總額（分潤改版 2026-10-26）", () => {
+  it("帶了毛利 → max(0, 毛利) × 比例，不用合約額", () => {
+    const result = calculateProjectShares({ contractAmount: 1_000_000, bonusRatePct: 10, grossProfit: 300_000, members })
+    expect(result.bonusTotal).toBe(30_000)
+    expect(result.members.map((m) => m.amount)).toEqual([3_000, 9_000, 6_000])
+  })
+
+  it("毛利為負 → 獎金總額 0", () => {
+    const result = calculateProjectShares({ contractAmount: 1_000_000, bonusRatePct: 10, grossProfit: -50_000, members })
+    expect(result.bonusTotal).toBe(0)
+  })
+
+  it("毛利 null → 沿用合約額 × 比例", () => {
+    const result = calculateProjectShares({ contractAmount: 1_000_000, bonusRatePct: 8, grossProfit: null, members })
+    expect(result.bonusTotal).toBe(80_000)
+  })
+})
+
+describe("角色預設趴數帶入", () => {
+  const defaults = { manager: 12, lead: 8, support: 3, member: 1 }
+
+  it("defaultPctForRole：有設定回設定值，沒設定回 0", () => {
+    expect(defaultPctForRole(defaults, "manager")).toBe(12)
+    expect(defaultPctForRole({}, "lead")).toBe(0)
+    expect(defaultPctForRole(undefined, "member")).toBe(0)
+  })
+
+  it("pctAfterRoleChange：趴數仍是原角色預設 → 換成新角色預設", () => {
+    expect(pctAfterRoleChange(1, "member", "manager", defaults)).toBe(12)
+    expect(pctAfterRoleChange(12, "manager", "support", defaults)).toBe(3)
+  })
+
+  it("pctAfterRoleChange：已手動改過 → 保留", () => {
+    expect(pctAfterRoleChange(25, "member", "manager", defaults)).toBe(25)
   })
 })

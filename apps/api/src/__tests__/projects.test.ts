@@ -9,6 +9,7 @@ import { provisionTenant } from "../services/tenants"
 import { taipeiToday } from "../services/project-status"
 import { autoArchiveProjects } from "../services/project-archive"
 import { app } from "../app"
+import { makeProvisionedAdminBoss } from "./helpers/live-boss"
 
 /**
  * 整份測試共用**一台**常駐 HTTP server。
@@ -69,6 +70,8 @@ beforeAll(async () => {
   createdTenantIds.push(provisioned.tenantId)
   createdUserIds.push(provisioned.userId)
   adminToken = await signIn(adminEmail, adminPassword)
+  // 分潤改版 #6：只有老闆能改分潤——讓管理員當老闆，既有的獎金池／趴數案例才成立。
+  await makeProvisionedAdminBoss(provisioned.tenantId, provisioned.userId)
 }, 60_000)
 
 afterAll(async () => {
@@ -1065,7 +1068,7 @@ describe("W4 列表不回獎金池 ＋ M14 年度篩選", () => {
     const res = await request(server).get(`/projects/${created.body.id}`).set("Authorization", `Bearer ${adminToken}`)
     expect(res.status).toBe(200)
     expect(res.body.project.bonusPool).toBe(123_000)
-    expect(res.body.access).toEqual({ finance: true, bonus: true })
+    expect(res.body.access).toMatchObject({ finance: true, bonus: true })
   })
 
   it("?year= 只回該歸屬年度的案子", async () => {

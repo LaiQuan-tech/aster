@@ -109,11 +109,18 @@ export async function resolveProjectAccess(
   tenantId: string,
   self: SelfEmployee,
   project: ProjectScopeRow,
+  /** 呼叫端已查過老闆時帶進來省一次查詢；undefined＝需要時自己查。 */
+  bossEmpId?: string | null,
 ): Promise<{ finance: boolean; bonus: boolean }> {
   const leadField = project.lead_emp_id === self.id
   let finance = isFinanceRole(self.role) || leadField
   let bonus = isHrRole(self.role) || leadField
   if (finance && bonus) return { finance, bonus }
+
+  // 分潤改版（2026-10-26）：老闆是唯一能改分潤的人，看不到就改不了——
+  // 老闆對每一案都有 finance＋bonus（看合約額才算得出獎金總額）。
+  const boss = bossEmpId !== undefined ? bossEmpId : await loadProjectBossEmpId(tenantId)
+  if (isSameEmp(boss, self.id)) return { finance: true, bonus: true }
 
   if (project.dept_id) {
     const managed = await managedDeptIds(tenantId, self.id)
@@ -140,12 +147,66 @@ export async function canSeeBonus(
   membershipRole?: string | null,
 ): Promise<boolean> {
   if (isHrRole(self.role) || project.lead_emp_id === self.id) return true
+  if (isSameEmp(await loadProjectBossEmpId(tenantId), self.id)) return true
   if (project.dept_id) {
     const managed = await managedDeptIds(tenantId, self.id)
     if (managed.includes(project.dept_id)) return true
   }
   const role = membershipRole !== undefined ? membershipRole : await membershipRoleOf(tenantId, project.id, self.id)
   return isLeadRole(role)
+}
+
+/* ── 分潤寫入權（業主 2026-10-26 拍板 #6：只有老闆可以改分潤） ─────────────
+ * 老闆＝`tenants.features.approval.fallbackApproverEmpId`（與期間鎖解鎖、遲到說明同一個人）。
+ * 「改分潤」＝任何會動到 projects.bonus_rate_pct／bonus_pool／share_mode、成員 share_pct／
+ * share_amount、或租戶角色預設趴數的寫入。HR、經理、主辦、部門主管都只能看不能改。
+ * platform_admin 例外（系統維護）。老闆沒設定 → 409 boss_not_configured（提示先到公司設定指定老闆）。
+ */
+
+/** 老闆的員工 id（小寫）；沒設定回 null。 */
+export async function loadProjectBossEmpId(tenantId: string): Promise<string | null> {
+  const { data, error } = await supabaseAdmin.from("tenants").select("features").eq("id", tenantId).maybeSingle()
+  if (error) throw new Error(`loadProjectBossEmpId: ${error.message}`)
+  const approval = ((data?.features as Record<string, unknown> | null | undefined)?.approval ?? null) as
+    | { fallbackApproverEmpId?: unknown }
+    | null
+  const id = approval?.fallbackApproverEmpId
+  return typeof id === "string" && id.length > 0 ? id.toLowerCase() : null
+}
+
+function isSameEmp(bossEmpId: string | null, empId: string): boolean {
+  return !!bossEmpId && bossEmpId === empId.toLowerCase()
+}
+
+export type BonusEditAccess = {
+  /** 可以改分潤（老闆本人或 platform_admin）。 */
+  canEdit: boolean
+  /** 租戶有沒有設定老闆（前端據此決定提示「先指定老闆」還是「僅老闆可修改」）。 */
+  bossConfigured: boolean
+  /** 不能改時的回應；canEdit=true 時為 null。 */
+  denial: { status: 403 | 409; error: "bonus_edit_boss_only" | "boss_not_configured" } | null
+}
+
+/** 純函式：給定老闆 id 判斷某人能不能改分潤。 */
+export function bonusEditAccessOf(self: Pick<SelfEmployee, "id" | "role">, bossEmpId: string | null): BonusEditAccess {
+  const bossConfigured = !!bossEmpId
+  if (self.role === "platform_admin" || isSameEmp(bossEmpId, self.id)) {
+    return { canEdit: true, bossConfigured, denial: null }
+  }
+  return {
+    canEdit: false,
+    bossConfigured,
+    denial: bossConfigured
+      ? { status: 403, error: "bonus_edit_boss_only" }
+      : { status: 409, error: "boss_not_configured" },
+  }
+}
+
+export async function resolveBonusEditAccess(
+  tenantId: string,
+  self: Pick<SelfEmployee, "id" | "role">,
+): Promise<BonusEditAccess> {
+  return bonusEditAccessOf(self, await loadProjectBossEmpId(tenantId))
 }
 
 /**

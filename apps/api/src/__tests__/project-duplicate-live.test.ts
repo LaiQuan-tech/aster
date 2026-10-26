@@ -9,6 +9,7 @@ import { taipeiToday } from "../services/project-status"
 import { ANNUAL_DUPLICATE_COUNT_WARNING } from "../services/project-application-store"
 import { RESERVED_NAME } from "../routes/projects"
 import { app } from "../app"
+import { makeProvisionedAdminBoss } from "./helpers/live-boss"
 
 /**
  * C2 複製專案（追加減／加做）＋原案自動封存＋變更歷史＋重複採計防呆——
@@ -66,6 +67,8 @@ beforeAll(async () => {
   createdTenantIds.push(provisioned.tenantId)
   createdUserIds.push(provisioned.userId)
   adminToken = await signIn(adminEmail, adminPassword)
+  // 分潤改版 #6：只有老闆能改分潤（建案帶獎金池、成員趴數）——讓管理員當老闆。
+  await makeProvisionedAdminBoss(provisioned.tenantId, provisioned.userId)
 
   // 一般員工：看得到專案基本資料與變更歷史，看不到錢、不能複製。
   const empEmail = `c2-${stamp}-emp@example.com`

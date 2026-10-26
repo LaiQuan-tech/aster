@@ -20,6 +20,7 @@ import {
 } from "../services/stamp-duty.js"
 import { taipeiToday } from "../services/project-status.js"
 import { recomputeBillings } from "../services/billing-store.js"
+import { recomputeDraftRunsAfterWrite } from "../services/project-bonus-recompute.js"
 import {
   loadMainContract,
   serializeMainContract,
@@ -249,6 +250,8 @@ contractsRouter.put(
       if (!scope.ok) return res.status(scope.status).json({ error: scope.error })
       if (!scope.finance) return res.status(403).json({ error: "forbidden" })
       const contract = await upsertMainContract(tenantId, req.params.id as string, scope.self.id, parsed.data)
+      // 分潤改版 #3：合約額變動 → 草稿獎金批次重算（best-effort）。
+      await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "PUT /projects/:id/main-contract")
       res.status(200).json({ contract: serializeMainContract(contract) })
     } catch (err) {
       next(err)
@@ -340,6 +343,8 @@ contractsRouter.post(
       // 合約金額是分期請款的分母（模組四第 4 條）。新增／追加後期程就過時了，
       // 這裡重算，否則使用者要自己回去按一次存檔才會更新。
       await recomputeBillings(tenantId, req.params.id as string)
+      // 分潤改版 #3：新增合約／追加減（change_order）→ 草稿獎金批次重算（best-effort）。
+      await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "POST /projects/:id/contracts")
       res.status(201).json({ contract: serialize(data as ContractRow, canSeeContent) })
     } catch (err) {
       next(err)
@@ -475,7 +480,11 @@ contractsRouter.patch(
       // client→both 會讓分母從 null 變成合約額，只在改金額時重算就會讓
       // project_billings.calculated_amount 停在舊值（驗收抓到的 B 批次問題 1）。
       // docType 也是分母條件，但 PATCH 刻意不開放改（見 updateSchema），不必列。
-      if (b.amount !== undefined || b.ourRole !== undefined) await recomputeBillings(tenantId, row.project_id)
+      if (b.amount !== undefined || b.ourRole !== undefined) {
+        await recomputeBillings(tenantId, row.project_id)
+        // 分潤改版 #3：合約額（或是否算我方營收）變動 → 草稿獎金批次重算（best-effort）。
+        await recomputeDraftRunsAfterWrite(tenantId, [row.project_id], "PATCH /contracts/:id")
+      }
       // 稽核（應用層）：只記這次改的欄位（前後值），整列由 trigger 記。
       const before: Record<string, unknown> = {}
       for (const k of Object.keys(patch)) before[k] = (row as unknown as Record<string, unknown>)[k] ?? null
@@ -556,6 +565,7 @@ contractsRouter.delete(
         return
       }
       await recomputeBillings(tenantId, current.project_id as string)
+      await recomputeDraftRunsAfterWrite(tenantId, [current.project_id as string], "DELETE /contracts/:id")
       res.status(200).json({ id: req.params.id })
     } catch (err) {
       next(err)

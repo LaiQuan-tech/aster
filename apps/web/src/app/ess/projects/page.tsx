@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Card, InlineError, Pill, type PillTone } from "@/components/ess-ui";
-import { listProjects, statusLabel, type Project } from "@/lib/projects-api";
+import { getProjectSettings, listProjects, statusLabel, type Project, type ProjectSettingsResponse } from "@/lib/projects-api";
+import { RoleShareDefaultsCard } from "@/app/admin/projects/_components/RoleShareDefaultsCard";
 
 const STATUS_TONE: Record<string, PillTone> = {
   active: "green",
@@ -15,15 +16,28 @@ const STATUS_TONE: Record<string, PillTone> = {
 export default function EssProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // 分潤改版 #6：老闆不一定是 HR、進不了後台——員工端專案列表給老闆維護「各角色預設分潤趴數」。
+  const [settings, setSettings] = useState<ProjectSettingsResponse | null>(null);
 
   useEffect(() => {
     listProjects()
       .then((r) => setProjects(r.projects))
       .catch((err) => setError(err instanceof Error ? err.message : "載入失敗"));
+    getProjectSettings()
+      .then((r) => setSettings(r))
+      .catch(() => setSettings(null));
   }, []);
 
   return (
     <div className="space-y-4">
+      {settings?.canEditBonus ? (
+        <RoleShareDefaultsCard
+          defaults={settings.settings.defaultSharePctByRole ?? {}}
+          canEdit
+          bossConfigured={settings.bossConfigured !== false}
+          onSaved={(next) => setSettings((cur) => (cur ? { ...cur, settings: next } : cur))}
+        />
+      ) : null}
       <Card>
         <p className="mb-4 text-sm text-gray-500">瀏覽公司所有專案的資料與文件。你的分潤只有你自己（與主管）看得到。</p>
         {error && <InlineError className="mb-3">{error}</InlineError>}

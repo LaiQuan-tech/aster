@@ -4,7 +4,8 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { todayKey } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
-import { loadProjectScope } from "../services/project-scope.js"
+import { loadProjectScope, resolveBonusEditAccess } from "../services/project-scope.js"
+import { recomputeDraftRunsAfterWrite } from "../services/project-bonus-recompute.js"
 import { writeAuditLog } from "../services/audit.js"
 import {
   duplicateProject,
@@ -89,6 +90,8 @@ projectDuplicateRouter.post(
         archiveOriginal,
         copy: { ...DEFAULT_COPY_OPTIONS, ...(b.copy ?? {}) },
         openedOn: todayKey(tz),
+        // 分潤改版 #6：只有老闆（或 platform_admin）複製時才照抄成員趴數，其他人複製 → 趴數 0。
+        copyMemberSharePct: (await resolveBonusEditAccess(tenantId, scope.self)).canEdit,
       })
       if (!result.ok) {
         res.status(result.status).json({ error: result.error })
@@ -113,6 +116,12 @@ projectDuplicateRouter.post(
           context: "POST /projects/:id/duplicate (archive original)",
         })
       }
+      // 分潤改版 #3：追加減／加做成立 → 新案與原案（及其母案）的草稿獎金批次重算。
+      await recomputeDraftRunsAfterWrite(
+        tenantId,
+        [result.project.id, scope.project.id, result.project.parentProjectId],
+        "POST /projects/:id/duplicate",
+      )
       res.status(201).json({ project: result.project, archived: result.archived, warnings })
     } catch (err) {
       next(err)

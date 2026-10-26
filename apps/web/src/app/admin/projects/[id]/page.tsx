@@ -13,6 +13,7 @@ import {
   deleteProjectDocument,
   getContracts,
   type ProjectMember,
+  type ProjectMemberRole,
   type ShareAdjustment,
   type ProjectDocument,
   type ProjectStatus,
@@ -97,6 +98,13 @@ export default function AdminProjectDetailPage() {
   const [access, setAccess] = useState<ProjectAccess>({ finance: true, bonus: true });
   const [money, setMoney] = useState<ProjectMoney | null>(null);
   const [members, setMembers] = useState<ProjectMember[]>([]);
+  // 分潤改版：寫入權（只有老闆）、老闆是否已指定、估算的目前毛利、租戶角色預設趴數。
+  const [shareMeta, setShareMeta] = useState<{
+    canEditBonus: boolean;
+    bossConfigured: boolean;
+    grossProfit: number | null;
+    defaults: Partial<Record<ProjectMemberRole, number>>;
+  }>({ canEditBonus: false, bossConfigured: true, grossProfit: null, defaults: {} });
   const [adjustments, setAdjustments] = useState<ShareAdjustment[]>([]);
   const [documents, setDocuments] = useState<ProjectDocument[]>([]);
   /**
@@ -229,6 +237,13 @@ export default function AdminProjectDetailPage() {
       // 會以設定裡的科別為準改寫）。
       setAppForm({ ...appFormFrom(detail.project), engineers: engineersFormOf(detail.project.engineers, disciplineList) });
       setMembers(m.members);
+      setShareMeta({
+        canEditBonus: m.canEditBonus ?? detail.access.editBonus ?? false,
+        bossConfigured: m.bossConfigured ?? detail.access.bossConfigured ?? true,
+        // 毛利制（有設獎金比例）才用毛利算獎金總額；舊制／固定金額沿用原畫面。
+        grossProfit: m.bonusEstimate && m.bonusEstimate.basis !== "fixed_amount" ? m.bonusEstimate.grossProfit : null,
+        defaults: (p3?.settings.defaultSharePctByRole ?? {}) as Partial<Record<ProjectMemberRole, number>>,
+      });
       setAdjustments(adj.adjustments);
       setDocuments(docs.documents);
       setCanSeeContractDocs(docs.canSeeContractDocs);
@@ -339,11 +354,13 @@ export default function AdminProjectDetailPage() {
       />
 
       {/* 專案設定 */}
-      <ProjectSettingsCard project={project} depts={depts} emps={emps} isPool={isPool} canBonus={canBonus} saveProjectField={saveProjectField} error={error} />
+      <ProjectSettingsCard project={project} depts={depts} emps={emps} isPool={isPool} canBonus={canBonus} canEditBonus={shareMeta.canEditBonus} saveProjectField={saveProjectField} error={error} />
 
       {/* 本案公司人員與個人分潤：放在專案設定正下方，避免和全租戶角色預設混淆。 */}
       <MembersCard
         projectId={projectId} members={members} emps={emps} canBonus={canBonus}
+        canEditBonus={shareMeta.canEditBonus} bossConfigured={shareMeta.bossConfigured}
+        defaultSharePctByRole={shareMeta.defaults} grossProfit={shareMeta.grossProfit}
         contractAmount={money?.amountUntaxed ?? null} receivedAmount={money?.receivedTotal ?? 0}
         bonusRatePct={project.bonusRatePct ?? null}
         setError={setError} load={load}

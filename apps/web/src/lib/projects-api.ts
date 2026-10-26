@@ -122,16 +122,41 @@ export interface ProjectMember {
    */
   sharePct: number | null
   shareAmount: number | null
+  /** 截至今天的累計應得（後端估算服務；估算不可用時為舊算法）。 */
   computedAmount: number | null
+  /** 分潤改版 #1：估算服務的累計應得／已發放／待發（下限 0）。估算不可用時 null。 */
+  estimatedAmount?: number | null
+  paidAmount?: number | null
+  pendingAmount?: number | null
+}
+
+export type BonusBasis = "gross_profit" | "legacy_pool" | "fixed_amount"
+
+/** 專案層的估算數字（GET /projects/:id/members 的 bonusEstimate，只給看得到分潤的人）。 */
+export interface ProjectBonusEstimateSummary {
+  basis: BonusBasis
+  pool: number | null
+  contractTotal: number | null
+  revenue: number
+  cost: number
+  grossProfit: number
+  overContractPct: number | null
+  skipped: "no_contract" | "no_pool" | null
 }
 
 export interface MembersResponse {
   canManage: boolean
   /** W4：分潤區（趴數／金額／獎金池）的可見性；舊版後端沒有這個鍵時視為與 canManage 相同。 */
   canSeeBonus?: boolean
+  /** 分潤改版 #6：能不能改分潤（只有老闆／platform_admin）。 */
+  canEditBonus?: boolean
+  /** 租戶是否已指定老闆（沒有 → 提示先到公司設定指定）。 */
+  bossConfigured?: boolean
   shareMode: ShareMode
+  /** 累計獎金池（毛利制＝max(0,毛利)×比例；舊制＝手填獎金池）。 */
   bonusPool: number | null
   bonusRatePct?: number | null
+  bonusEstimate?: ProjectBonusEstimateSummary | null
   members: ProjectMember[]
 }
 
@@ -200,6 +225,15 @@ export interface MyProjectShare {
   sharePct: number | null
   shareAmount: number | null
   computedAmount: number | null
+  /** 分潤改版 #1（估算服務）：預估應得（累計）／已發／待發；估算不可用時 null。 */
+  estimatedAmount?: number | null
+  paidAmount?: number | null
+  pendingAmount?: number | null
+  basis?: BonusBasis | null
+  /** 舊制（手填獎金池、未設獎金比例）。 */
+  legacy?: boolean | null
+  /** 目前累計毛利（入帳未稅－已發生成本）。 */
+  grossProfit?: number | null
 }
 
 export interface ProjectSettings {
@@ -474,12 +508,22 @@ export function getStampDutyReport(params?: {
 
 /* --------------------------------------------------------------- settings -- */
 
+/**
+ * `canEditBonus`／`bossConfigured`（分潤改版 #6）：角色預設趴數與建案分潤欄位只有老闆能改。
+ * 舊版後端沒有這兩個鍵。
+ */
+export interface ProjectSettingsResponse {
+  settings: ProjectSettings
+  canEditBonus?: boolean
+  bossConfigured?: boolean
+}
+
 export function getProjectSettings() {
-  return apiFetch<{ settings: ProjectSettings }>("/project-settings")
+  return apiFetch<ProjectSettingsResponse>("/project-settings")
 }
 
 export function updateProjectSettings(body: Partial<ProjectSettings>) {
-  return apiFetch<{ settings: ProjectSettings }>("/project-settings", {
+  return apiFetch<ProjectSettingsResponse>("/project-settings", {
     method: "PUT",
     body: JSON.stringify(body),
   })
