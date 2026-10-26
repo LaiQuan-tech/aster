@@ -9,11 +9,12 @@ vi.mock("../services/bonus-run-store.js", () => ({
   listRuns: vi.fn(),
   getRun: vi.fn(),
   previewRun: vi.fn(),
+  loadInputs: vi.fn(),
   tenantToday: vi.fn(async () => "2026-10-27"),
 }))
 
 import { bonusSheetRouter, parseBonusSheetQuery } from "../routes/bonus-sheet.js"
-import { getRun, listRuns, previewRun, type SerializedItem, type SerializedRun } from "../services/bonus-run-store.js"
+import { getRun, listRuns, loadInputs, previewRun, type SerializedItem, type SerializedRun } from "../services/bonus-run-store.js"
 import { defaultRunOf, projectsFromItems } from "../services/bonus-sheet.js"
 import {
   CLOSED_COLUMNS,
@@ -21,6 +22,7 @@ import {
   OPEN_HEADER_ROWS,
   buildClosedSheet,
   buildOpenSheet,
+  excelPoolOf,
   isInThisRound,
   memberSlots,
   mmddOf,
@@ -32,6 +34,7 @@ import {
 } from "../lib/statements/bonus-sheet.js"
 import { formatCellText, type GridCell, type StatementGrid } from "../lib/statements/grid.js"
 import { buildStatementWorkbook } from "../lib/xlsx/statement-grid.js"
+import { ASTER_LOGO_PNG_BASE64, ASTER_LOGO_PNG_HEIGHT, ASTER_LOGO_PNG_WIDTH } from "../lib/brand/aster-logo.js"
 import { fake, TENANT_ID } from "./helpers/fake-supabase.js"
 
 /**
@@ -118,8 +121,14 @@ describe("純函式", () => {
 
   it("noteOf：制度、跳過、多出成員、超發在前，專案說明在後", () => {
     const p = project({ basis: "legacy_pool", overpaidBy: 1234, note: "說明文字", skipped: "no_pool" })
-    expect(noteOf(p, [member({ employeeId: "戊", sharePct: 5 })])).toBe("舊制（手填獎金池）；未列入獎金試算：缺獎金池；其他分配：測試員戊 5%；超發 1,234；說明文字")
+    expect(noteOf(p, [member({ employeeId: "戊", sharePct: 5 })])).toBe("舊制（手填獎金池 50,000）；未列入獎金試算：缺獎金池；其他分配：測試員戊 5%；超發 1,234；說明文字")
     expect(noteOf(project(), [])).toBe("")
+  })
+
+  it("excelPoolOf：含稅×比例；沒比例或沒合約 null", () => {
+    expect(excelPoolOf({ contractTotal: 1000000, bonusRatePct: 8 }, 0.05)).toBe(84000)
+    expect(excelPoolOf({ contractTotal: 1000000, bonusRatePct: null }, 0.05)).toBeNull()
+    expect(excelPoolOf({ contractTotal: null, bonusRatePct: 8 }, 0.05)).toBeNull()
   })
 
   it("formatCellText：百分比與紅字千分位格式", () => {
@@ -154,7 +163,7 @@ describe("buildOpenSheet（未結案）", () => {
     expect(at(grid, 2, 0)).toMatchObject({ rowSpan: 2 })
     expect(at(grid, 2, 12)).toMatchObject({ colSpan: 2 })
     expect(at(grid, 0, 12)).toMatchObject({ value: "獎金分配(員工自行向行政申報)", rowSpan: 2, colSpan: 20 })
-    expect(at(grid, 0, 0)).toMatchObject({ value: "ASTER", rowSpan: 2, colSpan: 3 })
+    expect(at(grid, 0, 0)).toMatchObject({ value: "ASTER", logo: true, rowSpan: 2, colSpan: 3 })
     expect(at(grid, 0, 3)).toMatchObject({ value: "測試公司", colSpan: 4 })
     // 表頭雙線、本次欄淡綠
     expect(at(grid, 2, 0)?.border).toMatchObject({ top: "double", bottom: "double" })
@@ -171,7 +180,8 @@ describe("buildOpenSheet（未結案）", () => {
     expect(at(grid, r1, 9)).toMatchObject({ value: 210000, fill: "#E2EFDA" })
     expect(at(grid, r1, 11)).toMatchObject({ value: 12000, fill: "#E2EFDA" })
     expect(at(grid, r1, 12)).toMatchObject({ text: "10.0 %", color: "#FF0000" })
-    expect(at(grid, r1, 13)).toMatchObject({ value: 50000, color: "#FF0000" })
+    // 總獎金＝含稅×比例（原檔 N＝M×E）：1,050,000 × 10%
+    expect(at(grid, r1, 13)).toMatchObject({ value: 105000, color: "#FF0000" })
     // 經理、組員1（主辦優先）、組員2
     expect(at(grid, r1, 14)).toMatchObject({ value: "測試員甲", fill: "#E7E6E6" })
     expect(at(grid, r1, 15)).toMatchObject({ text: "40.0 %", color: "#FF0000" })
@@ -191,7 +201,7 @@ describe("buildOpenSheet（未結案）", () => {
     expect(at(grid, tr, 3)?.value).toBe("合計")
     expect(at(grid, tr, 9)?.value).toBe(210000)
     expect(at(grid, tr, 11)?.value).toBe(12000)
-    expect(at(grid, tr, 13)?.value).toBe(100000)
+    expect(at(grid, tr, 13)?.value).toBe(210000)
   })
 
   it("固定金額成員：% 欄顯示金額；沒合約的百分比空白", () => {
@@ -213,7 +223,7 @@ describe("buildClosedSheet（已結案）", () => {
     expect(at(g, 3, 6)?.value).toBe("%")
     expect(at(g, 3, 7)?.value).toBe("金額")
     expect(at(g, 4, 4)?.value).toBe(630000)
-    expect(at(g, 4, 7)).toMatchObject({ value: 50000, color: "#FF0000" })
+    expect(at(g, 4, 7)).toMatchObject({ value: 105000, color: "#FF0000" })
   })
 })
 
@@ -253,7 +263,9 @@ describe("xlsx 版面", () => {
   it("兩張工作表、欄數、合併、表頭字串、凍結、紅字、底色、雙線", async () => {
     const open = buildOpenSheet([project()], ctx)
     const closed = buildClosedSheet([project({ closed: true })], ctx)
-    const wb = await buildStatementWorkbook([open, closed], "test")
+    const wb = await buildStatementWorkbook([open, closed], "test", {
+      logoPng: { base64: ASTER_LOGO_PNG_BASE64, width: ASTER_LOGO_PNG_WIDTH, height: ASTER_LOGO_PNG_HEIGHT },
+    })
     const buf = await wb.xlsx.writeBuffer()
     const back = new ExcelJS.Workbook()
     await back.xlsx.load(buf as ArrayBuffer)
@@ -263,6 +275,11 @@ describe("xlsx 版面", () => {
     expect(ws.getColumn(33).width).toBeCloseTo(0.54)
     const merges = (ws.model as unknown as { merges: string[] }).merges
     for (const m of ["A1:C2", "D1:G2", "M1:AF2", "A3:A4", "B3:B4", "M3:N3", "O3:O4", "R3:R4", "AA3:AA4", "AC3:AC4", "AE3:AE4", "AF3:AF4"]) expect(merges).toContain(m)
+    // 標誌：兩張表左上各插一張圖，標誌格不寫字
+    expect(ws.getImages()).toHaveLength(1)
+    expect(ws.getImages()[0]!.range.tl.nativeRow).toBe(0)
+    expect(ws.getCell("A1").value).toBeNull()
+    expect(back.getWorksheet("已結案")!.getImages()).toHaveLength(1)
     expect(ws.getCell("A3").value).toBe("序號")
     expect(ws.getCell("H3").value).toBe("本次\n請款%")
     expect(ws.getCell("H4").value).toBe("0909")
@@ -332,6 +349,7 @@ beforeEach(() => {
     { id: "p2", tenant_id: TENANT_ID, status: "closed", archived_at: null },
   ]
   vi.mocked(listRuns).mockReset().mockResolvedValue([run])
+  vi.mocked(loadInputs).mockReset().mockResolvedValue({ projects: [], projectMeta: new Map(), employeeMeta: new Map(), archiveStage: new Map() })
   vi.mocked(getRun).mockReset().mockResolvedValue({
     run,
     // p2 已結案且這批沒有本次入帳／獎金 → 已結案表
@@ -380,6 +398,31 @@ describe("GET /bonus-sheet — 資料與降級", () => {
     expect(defaultRunOf([reversal])).toBeNull()
   })
 
+  it("沒有成員（不在批次內）的專案也列出：成員欄空白、沒有本次；複製取代的原案不列", async () => {
+    fake.db.projects.push(
+      { id: "p3", tenant_id: TENANT_ID, status: "active", archived_at: null, archive_reason: null },
+      { id: "p4", tenant_id: TENANT_ID, status: "active", archived_at: "2026-09-01T00:00:00Z", archive_reason: "已由 T-0099 取代：重開" },
+    )
+    vi.mocked(loadInputs).mockResolvedValue({
+      projects: [{ projectId: "p3", shareMode: "pool_pct", bonusPool: null, bonusRatePct: 10, projectNote: null, contractTotal: 200000, receivedTotal: 100000, members: [] }],
+      projectMeta: new Map([["p3", { id: "p3", code: "T-0003", name: "測試案三" }]]),
+      employeeMeta: new Map(),
+      archiveStage: new Map(),
+    })
+    const res = await as(T.boss)(request(app).get("/bonus-sheet"))
+    expect(loadInputs).toHaveBeenCalledWith(TENANT_ID, "2026-09-09", { projectIds: ["p3"], archiveRule: "all" })
+    expect(res.body.counts).toEqual({ open: 2, closed: 1 })
+    const cells = res.body.sheets.open.cells as GridCell[]
+    const row = cells.find((c) => c.value === "T-0003")!.row
+    const cell = (col: number) => cells.find((c) => c.row === row && c.col === col)
+    expect(cell(4)?.value).toBe(210000) // 含稅
+    expect(cell(5)?.value).toBe(105000) // 已收款（累計都算之前）
+    expect(cell(9)?.value).toBeNull() // 沒有本次請款
+    expect(cell(13)?.value).toBe(21000) // 總獎金＝含稅×比例
+    expect(cell(14)?.value).toBeNull() // 經理空白
+    expect(cell(30)?.value).toBeNull() // 沒成員 → 尚未分配空白
+  })
+
   it("asOf → 即時試算", async () => {
     const res = await as(T.boss)(request(app).get("/bonus-sheet?asOf=2026-10-01"))
     expect(res.body).toMatchObject({ source: "preview", asOf: "2026-10-01", mmdd: "1001", periodLabel: "2026. 10-12" })
@@ -409,13 +452,17 @@ describe("GET /bonus-sheet — 資料與降級", () => {
     expect(res.body).toMatchObject({ source: "empty", counts: { open: 0, closed: 0 } })
     expect(res.body.warnings).toContain("即時試算失敗，總表暫時沒有資料")
 
+    // 第一次讀 projects（批次以外的專案）、第二次（結案狀態）都失敗
+    fake.injectError({ table: "projects", action: "select", error: { message: "boom" } })
     fake.injectError({ table: "projects", action: "select", error: { message: "boom" } })
     fake.injectError({ table: "project_settings", action: "select", error: { message: "boom" } })
     res = await as(T.boss)(request(app).get("/bonus-sheet"))
     expect(res.status).toBe(200)
     expect(res.body.counts).toEqual({ open: 2, closed: 0 })
     expect(res.body.vatRate).toBe(0.05)
-    expect(res.body.warnings).toEqual(expect.arrayContaining(["專案結案狀態讀取失敗，全部列在「未結案」", "營業稅率讀取失敗，含稅金額暫以 5% 計"]))
+    expect(res.body.warnings).toEqual(
+      expect.arrayContaining(["批次以外的專案讀取失敗，只列批次內的專案", "專案結案狀態讀取失敗，全部列在「未結案」", "營業稅率讀取失敗，含稅金額暫以 5% 計"]),
+    )
   })
 
   it("指定的批次不存在 → 404；參數格式錯 → 400", async () => {

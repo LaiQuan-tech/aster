@@ -6,6 +6,7 @@ import { loadGroupFinancialsAccess } from "../services/financial-visibility.js"
 import { BonusSheetNotFound, loadBonusSheet } from "../services/bonus-sheet.js"
 import { buildStatementWorkbook } from "../lib/xlsx/statement-grid.js"
 import { workbookToBuffer } from "../lib/xlsx/index.js"
+import { ASTER_LOGO_PNG_BASE64, ASTER_LOGO_PNG_HEIGHT, ASTER_LOGO_PNG_WIDTH } from "../lib/brand/aster-logo.js"
 
 export const bonusSheetRouter = Router()
 
@@ -86,7 +87,9 @@ bonusSheetRouter.get("/bonus-sheet/export.xlsx", ...guards, async (req: Request,
   }
   try {
     const sheet = await loadBonusSheet(tenantId, { runId: q.runId, asOf: q.asOf })
-    const wb = await buildStatementWorkbook([sheet.sheets.open, sheet.sheets.closed], "aster-hr")
+    const wb = await buildStatementWorkbook([sheet.sheets.open, sheet.sheets.closed], "aster-hr", {
+      logoPng: { base64: ASTER_LOGO_PNG_BASE64, width: ASTER_LOGO_PNG_WIDTH, height: ASTER_LOGO_PNG_HEIGHT },
+    })
     const buffer = await workbookToBuffer(wb)
     const filename = `專案獎金總表-${sheet.asOf.replace(/-/g, "")}.xlsx`
     res

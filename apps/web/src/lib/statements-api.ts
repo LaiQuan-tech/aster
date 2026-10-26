@@ -36,6 +36,8 @@ export interface GridCell {
   money?: boolean;
   /** 字色 hex（專案獎金總表的紅字欄、灰字、藍字備註）；省略＝黑。 */
   color?: string;
+  /** 公司標誌格（專案獎金總表）：畫 /brand/aster-logo.svg，text 當替代文字。 */
+  logo?: boolean;
 }
 
 export interface StatementGrid {

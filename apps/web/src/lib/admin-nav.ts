@@ -219,7 +219,7 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       label: "獎金分潤",
       href: "/admin/bonus-sheet",
       title: "專案獎金總表",
-      desc: "版面同公司現行「專案獎金總表」（未結案／已結案）；本次欄依所選獎金批次或基準日。含稅＝系統未稅金額×(1＋營業稅率)，總獎金依系統獎金規則",
+      desc: "版面同公司現行「專案獎金總表」（未結案／已結案）；本次欄依所選獎金批次或基準日。含稅＝系統未稅金額×(1＋營業稅率)，總獎金＝含稅×獎金比例",
       hrOnly: true,
       groupFinancials: true,
     },

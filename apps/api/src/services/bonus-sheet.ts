@@ -11,8 +11,8 @@ import {
   type BonusSheetContext,
   type BonusSheetProject,
 } from "../lib/statements/bonus-sheet.js"
-import { BONUS_BASES, type BonusBasis } from "./bonus-run.js"
-import { getRun, listRuns, previewRun, tenantToday, type SerializedItem, type SerializedRun } from "./bonus-run-store.js"
+import { BONUS_BASES, isDuplicateReplacedArchive, projectBonusBasisOf, receivedRatioOf, type BonusBasis } from "./bonus-run.js"
+import { getRun, listRuns, loadInputs, previewRun, tenantToday, type SerializedItem, type SerializedRun } from "./bonus-run-store.js"
 import { loadP3Settings } from "./project-application-store.js"
 import { DEFAULT_VAT_RATE } from "./project-money.js"
 import { isTerminal } from "./project-status.js"
@@ -25,10 +25,12 @@ import { isTerminal } from "./project-status.js"
  *   • runId：該獎金批次（任何狀態，未刪）的凍結明細＋快照（被跳過的案在 snapshot.projects 裡）。
  *   • asOf：依基準日即時試算（同獎金季發放的「試算」，不寫入）。
  *   • 都沒帶：最新一個一般批次（依基準日；優先已發放且沒被沖銷的，見 defaultRunOf）；一個批次都沒有 → 今天的即時試算。
+ * 批次（或試算）明細以外的專案（沒有成員、試算不列的封存案）也列出：只有專案層數字，沒有「本次」，成員欄照
+ * 專案現有成員（沒有就空白）；「複製專案而封存的原案」不列（已由新案取代）。
  * 已結案（結案／解約／封存）的案放「已結案」表，但這一批還有本次入帳或本次獎金的留在「未結案」。
  *
  * 子資料失敗降級（回 200＋warnings，不整頁 500）：批次清單讀不到 → 選單空白；指定批次讀不到 → 改用試算；
- * 試算也失敗 → 空表；專案狀態讀不到 → 全部當未結案；營業稅率讀不到 → 5%；公司名稱讀不到 → 預設名稱。
+ * 試算也失敗 → 空表；其他專案讀不到 → 只列批次內的案；專案狀態讀不到 → 全部當未結案；營業稅率讀不到 → 5%；公司名稱讀不到 → 預設名稱。
  * 指定的批次不存在（或別租戶）→ BonusSheetNotFound（路由回 404）。
  */
 
@@ -176,6 +178,71 @@ export function projectsFromItems(items: readonly SerializedItem[], snapshot: Re
   return out
 }
 
+/**
+ * 批次明細以外的專案（租戶全部專案扣掉 exclude、扣掉複製取代的原案）：用獎金試算同一支 loadInputs 讀合約、
+ * 截至基準日的入帳與成員（archiveRule 'all'、指定 projectIds＝沒有成員也回）。
+ */
+async function loadOtherProjects(tenantId: string, asOf: string, exclude: ReadonlySet<string>): Promise<BonusSheetProject[]> {
+  const ids: string[] = []
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabaseAdmin
+      .from("projects")
+      .select("id, archive_reason")
+      .eq("tenant_id", tenantId)
+      .order("id", { ascending: true })
+      .range(from, from + 999)
+    if (error) throw new Error(`bonus-sheet (projects): ${error.message}`)
+    const rows = (data ?? []) as Array<{ id: string; archive_reason: string | null }>
+    for (const r of rows) if (!exclude.has(r.id) && !isDuplicateReplacedArchive(r.archive_reason)) ids.push(r.id)
+    if (rows.length < 1000) break
+  }
+  const out: BonusSheetProject[] = []
+  for (let i = 0; i < ids.length; i += 100) {
+    const inputs = await loadInputs(tenantId, asOf, { projectIds: ids.slice(i, i + 100), archiveRule: "all" })
+    for (const p of inputs.projects) {
+      const meta = inputs.projectMeta.get(p.projectId)
+      const b = projectBonusBasisOf(p)
+      const ratio = receivedRatioOf(p.contractTotal, p.receivedTotal)
+      const allocated = p.members.reduce((s, m) => s + (m.sharePct ?? 0), 0)
+      out.push({
+        projectId: p.projectId,
+        code: meta?.code ?? null,
+        name: meta?.name ?? null,
+        closed: false,
+        contractTotal: p.contractTotal,
+        receivedTotal: p.receivedTotal,
+        previousReceived: p.receivedTotal,
+        currentReceived: 0,
+        receivedRatio: ratio,
+        previousRatio: ratio,
+        currentRatio: 0,
+        bonusRatePct: p.bonusRatePct,
+        pool: b.pool,
+        basis: p.members.length > 0 ? b.basis : null,
+        currentBonus: 0,
+        overpaidBy: 0,
+        unallocatedPct: p.members.length > 0 && p.shareMode === "pool_pct" ? Math.max(0, Math.round((100 - allocated) * 10000) / 10000) : null,
+        note: p.projectNote,
+        skipped: null,
+        members: p.members.map((m) => {
+          const e = inputs.employeeMeta.get(m.employeeId)
+          return {
+            employeeId: m.employeeId,
+            name: e?.name ?? null,
+            empNo: e?.emp_no ?? null,
+            role: m.roleInProject ?? null,
+            shareMode: p.shareMode,
+            sharePct: m.sharePct,
+            shareAmount: m.shareAmount,
+            amount: 0,
+          }
+        }),
+      })
+    }
+  }
+  return out
+}
+
 /** 已結案：status 結案／解約，或已封存。 */
 async function loadClosedIds(tenantId: string, projectIds: readonly string[]): Promise<Set<string>> {
   const closed = new Set<string>()
@@ -261,6 +328,11 @@ export async function loadBonusSheet(tenantId: string, query: { runId?: string |
   const baseDate = asOf as string
 
   const projects = projectsFromItems(items, snapshot)
+  try {
+    projects.push(...(await loadOtherProjects(tenantId, baseDate, new Set(projects.map((p) => p.projectId)))))
+  } catch (err) {
+    warn(warnings, "批次以外的專案讀取失敗，只列批次內的專案", err)
+  }
   if (projects.length > 0) {
     try {
       const closed = await loadClosedIds(tenantId, projects.map((p) => p.projectId))

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 100" width="440" height="100" role="img" aria-label="ASTER">
+  <title>ASTER</title>
+  <!-- 亞斯特文字標誌（自製幾何字形，非字型）：粗體、右傾、A 為無橫槓尖頂。色 #1f3a8a。 -->
+  <g transform="translate(22 0) skewX(-12)" fill="none" stroke="#1f3a8a" stroke-width="20" stroke-linejoin="miter" stroke-linecap="butt">
+    <polygon points="0,90 44,6 88,90 65,90 44,47 23,90" fill="#1f3a8a" stroke="none"/>
+    <path d="M174 20 H124 Q106 20 106 35 Q106 50 124 50 H152 Q170 50 170 65 Q170 80 152 80 H102"/>
+    <path d="M184 20 H256 M220 20 V90"/>
+    <path d="M326 20 H276 V80 H326 M276 50 H318"/>
+    <path d="M346 90 V20 H384 Q402 20 402 37 Q402 54 384 54 H356 M376 54 L404 90"/>
+  </g>
+</svg>

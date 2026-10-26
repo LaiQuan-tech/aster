@@ -14,15 +14,18 @@ import { GridBuilder, type CellFormat, type CellInput, type GridBorder, type Sta
  *   「分配說明」（級距說明文字）與「115 7-9」（單季撥款表＝獎金季發放的匯出，lib/xlsx/bonus-runs.ts）不在這裡。
  *
  * 欄寬、列高、合併、框線（細線／表頭雙線）、字型字級、底色、紅字欄、數字格式都照原檔量出來的值。
- * 原檔左上的 ASTER 標誌是圖片，repo 沒有這張標誌資產 → 用文字標誌（粗體深藍「ASTER」）佔同一位置。
+ * 左上標誌：格子標 `logo: true`（值仍是「ASTER」當替代文字）；畫面畫 /brand/aster-logo.svg，Excel 插
+ * lib/brand/aster-logo.ts 的 PNG（自製幾何字形，不是第三方素材）。
  *
- * 數字口徑（照實顯示系統值，與原檔手算公式不同的地方在 docs 與回報裡列出）：
+ * 數字口徑（2026-10-27 業主：照原 Excel；獎金引擎同步改成含稅累計入帳×比例×個人%，所以本次金額直接用批次值）：
  *   • 系統的合約與入帳一律是**未稅**；表頭是「含稅」，金額欄（含稅／已收款／本次請款）＝未稅 ×（1＋營業稅率）
  *     四捨五入到元（同專案頁 MoneyCard 的含稅總額算法）；百分比是未稅入帳 ÷ 未稅合約，與含稅無關。
  *   • 已收款／已收款% ＝上一個已發放批次時的累計入帳（原檔 F＝E×G、I＝G＋H 的「之前」）；
  *     本次請款／本次請款% ＝之後到基準日的入帳；累積% ＝截至基準日的累計入帳比例。
- *   • 本次獎金＝該批次（或即時試算）該案各成員本次金額合計；總獎金＝系統獎金池（毛利制＝max(0,毛利)×比例；
- *     舊制＝手填獎金池）。原檔是「本次請款×比例」「含稅×比例」，系統 2026-10-26 起改毛利制，照實顯示系統值。
+ *   • 總獎金＝含稅 × 獎金比例（原檔 N＝M×E；已結案表 H＝G×D）；沒設比例的案空白。
+ *   • 本次獎金＝該批次（或即時試算）該案各成員本次金額合計，成員本次金額＝批次明細的 amount
+ *     （引擎算法＝含稅入帳×比例×個人%，與原檔 L＝J×M、Q＝L×P 一致）。
+ *   • 不在批次內的專案（沒有成員、或試算不列的案）沒有「本次」，累計入帳都算在已收款。
  *   • 成員：經理（manager）1 位、組員1–4（lead 主辦優先，再 member）、支援（support）1 位；
  *     多出來的成員寫進備註「其他分配：…」。組員4 與支援在原檔沒有本次金額欄，照原檔。
  */
@@ -107,6 +110,13 @@ export type BonusSheetContext = {
  * 小工具（有單元測試）
  * ────────────────────────────────────────────────────────────────── */
 
+/** 總獎金（原檔 N＝含稅×比例）：沒比例或沒合約 null。 */
+export function excelPoolOf(p: Pick<BonusSheetProject, "contractTotal" | "bonusRatePct">, vatRate: number): number | null {
+  const contract = taxed(p.contractTotal, vatRate)
+  if (contract === null || p.bonusRatePct === null) return null
+  return Math.round(contract * (p.bonusRatePct / 100))
+}
+
 /** 未稅 → 含稅（到元）；null 照傳。 */
 export function taxed(untaxed: number | null, vatRate: number): number | null {
   if (untaxed === null || !Number.isFinite(untaxed)) return null
@@ -177,7 +187,7 @@ const SKIP_TEXT = { no_contract: "未列入獎金試算：缺合約", no_pool: "
 /** 備註欄：系統註記（制度、跳過、多出的成員、超發）在前，專案說明在後。 */
 export function noteOf(p: BonusSheetProject, overflow: readonly BonusSheetMember[]): string {
   return [
-    p.basis === "legacy_pool" ? "舊制（手填獎金池）" : p.basis === "fixed_amount" ? "固定金額" : null,
+    p.basis === "legacy_pool" ? `舊制（手填獎金池${p.pool !== null ? ` ${Math.round(p.pool).toLocaleString("zh-TW")}` : ""}）` : p.basis === "fixed_amount" ? "固定金額" : null,
     p.skipped ? SKIP_TEXT[p.skipped] : null,
     overflow.length > 0 ? `其他分配：${overflow.map((m) => `${m.name ?? "—"} ${shareText(m)}`).join("、")}` : null,
     p.overpaidBy > 0 ? `超發 ${Math.round(p.overpaidBy).toLocaleString("zh-TW")}` : null,
@@ -231,7 +241,7 @@ export function buildOpenSheet(projectsIn: readonly BonusSheetProject[], ctx: Bo
   const projects = sortProjects(projectsIn)
 
   // ── 標題（1–2 列）：A–C 文字標誌、D–G 公司名稱、M–AF 表名 ──
-  g.set(0, 0, { value: BONUS_SHEET_WORDMARK, rowSpan: 2, colSpan: 3, bold: true, size: 18, color: NAVY, align: "center" })
+  g.set(0, 0, { value: BONUS_SHEET_WORDMARK, logo: true, rowSpan: 2, colSpan: 3, bold: true, size: 18, color: NAVY, align: "center" })
   g.set(0, 3, { value: ctx.companyName, rowSpan: 2, colSpan: 4, size: 12, align: "center", border: { bottom: "thin" } })
   g.set(0, 12, { value: "獎金分配(員工自行向行政申報)", rowSpan: 2, colSpan: OPEN_LAST - 12 + 1, size: 16, align: "center", border: { bottom: "thin" } })
   for (let c = 0; c <= 2; c += 1) g.border(1, c, { bottom: "thin" })
@@ -301,7 +311,7 @@ export function buildOpenSheet(projectsIn: readonly BonusSheetProject[], ctx: Bo
     set(O.cumPct2, { value: p.contractTotal ? p.receivedRatio : null, format: "pct0", size: 10, bold: true, ...grayText })
     set(O.bonus, { value: inRound ? Math.round(p.currentBonus) : null, format: "intRed", size: 10, bold: true, ...(inRound ? { fill: GREEN } : {}) })
     set(O.rate, { value: p.bonusRatePct === null ? null : p.bonusRatePct / 100, format: "pct1", color: RED, align: "center" })
-    set(O.pool, { value: p.pool === null ? null : Math.round(p.pool), format: "intRed", color: RED })
+    set(O.pool, { value: excelPoolOf(p, ctx.vatRate), format: "intRed", color: RED })
     const slots = memberSlots(p.members)
     slotsOf(slots).forEach((m, i) => {
       const slot = OPEN_SLOTS[i]!
@@ -313,7 +323,7 @@ export function buildOpenSheet(projectsIn: readonly BonusSheetProject[], ctx: Bo
     set(O.note, { value: noteOf(p, slots.overflow) || null, size: 10, wrap: true, color: BLUE_TEXT, align: "left" })
     if (inRound) sumCur += curTaxed
     sumBonus += inRound ? Math.round(p.currentBonus) : 0
-    sumPool += p.pool === null ? 0 : Math.round(p.pool)
+    sumPool += excelPoolOf(p, ctx.vatRate) ?? 0
     rowHeights.push(34)
     r += 1
   })
@@ -363,7 +373,7 @@ export function buildClosedSheet(projectsIn: readonly BonusSheetProject[], ctx: 
   const g = new GridBuilder()
   const projects = sortProjects(projectsIn)
 
-  g.set(0, 0, { value: BONUS_SHEET_WORDMARK, rowSpan: 2, colSpan: 3, bold: true, size: 18, color: NAVY, align: "center", border: { bottom: "double" } })
+  g.set(0, 0, { value: BONUS_SHEET_WORDMARK, logo: true, rowSpan: 2, colSpan: 3, bold: true, size: 18, color: NAVY, align: "center", border: { bottom: "double" } })
   g.set(0, 3, { value: `${ctx.companyName} (已結案) 獎金分配(員工自行向行政申報)`, rowSpan: 2, colSpan: 17 - 3 + 1, size: 12, align: "center", border: { bottom: "double" } })
 
   const head = (col: number, text: string | null, opts: Partial<CellInput> = {}) =>
@@ -396,7 +406,7 @@ export function buildClosedSheet(projectsIn: readonly BonusSheetProject[], ctx: 
     set(C.received, { value: taxed(p.receivedTotal, ctx.vatRate), format: "intRed" })
     set(C.receivedPct, { value: p.contractTotal ? p.receivedRatio : null, format: "pct0" })
     set(C.rate, { value: p.bonusRatePct === null ? null : p.bonusRatePct / 100, format: "pct1", color: RED, align: "center" })
-    set(C.pool, { value: p.pool === null ? null : Math.round(p.pool), format: "intRed", color: RED })
+    set(C.pool, { value: excelPoolOf(p, ctx.vatRate), format: "intRed", color: RED })
     const slots = memberSlots(p.members)
     slotsOf(slots).forEach((m, i) => {
       const slot = CLOSED_SLOTS[i]!
@@ -405,7 +415,7 @@ export function buildClosedSheet(projectsIn: readonly BonusSheetProject[], ctx: 
     })
     set(C.unalloc, { value: p.unallocatedPct === null ? null : p.unallocatedPct / 100, format: "pct1", color: RED, align: "center" })
     set(C.note, { value: noteOf(p, slots.overflow) || null, size: 10, wrap: true, align: "left" })
-    sumPool += p.pool === null ? 0 : Math.round(p.pool)
+    sumPool += excelPoolOf(p, ctx.vatRate) ?? 0
     rowHeights.push(51)
     r += 1
   })

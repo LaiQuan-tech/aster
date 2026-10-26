@@ -87,6 +87,8 @@ export interface GridCell {
   money?: boolean
   /** 字色 hex（例 #FF0000）；省略＝黑。負數紅字由 negative 決定，優先於這裡。 */
   color?: string
+  /** 公司標誌格：畫面畫標誌圖、Excel 插標誌 PNG（value 當替代文字）。 */
+  logo?: boolean
 }
 
 export interface StatementGrid {

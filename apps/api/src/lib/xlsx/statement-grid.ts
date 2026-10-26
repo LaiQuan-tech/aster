@@ -45,7 +45,45 @@ function edgeBorder(border: GridBorder | undefined, top: boolean, bottom: boolea
   return out
 }
 
-export function writeStatementSheet(ws: ExcelJS.Worksheet, grid: StatementGrid): void {
+/** 標誌圖（exceljs addImage 回傳的 id 與圖的像素尺寸）。 */
+export type SheetLogo = { imageId: number; width: number; height: number }
+
+function columnPixels(width: number): number {
+  return Math.round(width * 7 + 5)
+}
+
+/**
+ * 標誌格（cell.logo）：插圖到該格（合併範圍）內，高度約 28px（原檔標誌大小）、等比例、置中，不超出範圍。
+ */
+function placeLogo(ws: ExcelJS.Worksheet, grid: StatementGrid, cell: GridCell, logo: SheetLogo): void {
+  const cols = grid.columns.slice(cell.col, cell.col + (cell.colSpan ?? 1))
+  const areaW = cols.reduce((s, w) => s + columnPixels(w), 0)
+  const rows = grid.rowHeights.slice(cell.row, cell.row + (cell.rowSpan ?? 1))
+  const areaH = rows.reduce((s, h) => s + ((h || 15) * 4) / 3, 0)
+  let height = Math.min(28, areaH * 0.85)
+  let width = (height * logo.width) / logo.height
+  if (width > areaW * 0.95) {
+    width = areaW * 0.95
+    height = (width * logo.height) / logo.width
+  }
+  // tl 用小數欄／列表示格內偏移（exceljs 支援）：先算置中的像素偏移，再換成第幾欄＋比例。
+  const offX = (areaW - width) / 2
+  let col = cell.col
+  let rest = offX
+  for (const w of cols) {
+    const px = columnPixels(w)
+    if (rest < px) break
+    rest -= px
+    col += 1
+  }
+  const colFrac = col + rest / columnPixels(grid.columns[col] ?? 8.43)
+  const offY = (areaH - height) / 2
+  const firstRowPx = ((rows[0] || 15) * 4) / 3
+  const rowFrac = offY < firstRowPx ? cell.row + offY / firstRowPx : cell.row + 1 + (offY - firstRowPx) / (((rows[1] || 15) * 4) / 3)
+  ws.addImage(logo.imageId, { tl: { col: colFrac, row: rowFrac }, ext: { width: Math.round(width), height: Math.round(height) }, editAs: "oneCell" })
+}
+
+export function writeStatementSheet(ws: ExcelJS.Worksheet, grid: StatementGrid, opts: { logo?: SheetLogo } = {}): void {
   ws.columns = grid.columns.map((width) => ({ width }))
   const rows = Math.max(gridRowCount(grid), grid.rowHeights.length)
   for (let r = 0; r < rows; r += 1) {
@@ -88,7 +126,8 @@ export function writeStatementSheet(ws: ExcelJS.Worksheet, grid: StatementGrid):
     const c2 = c1 + (cell.colSpan ?? 1) - 1
     if (r2 > r1 || c2 > c1) merges.push([r1, c1, r2, c2])
     const target = ws.getCell(r1, c1)
-    target.value = excelValueOf(cell)
+    // 有標誌圖：標誌格不寫字（圖蓋在上面）；沒有就保留文字標誌。
+    target.value = cell.logo && opts.logo ? null : excelValueOf(cell)
     if (cell.value !== null && cell.format !== "text") target.numFmt = NUM_FMT[cell.format]
     target.font = {
       name: grid.font,
@@ -104,6 +143,7 @@ export function writeStatementSheet(ws: ExcelJS.Worksheet, grid: StatementGrid):
     if (cell.fill) target.fill = { type: "pattern", pattern: "solid", fgColor: { argb: argb(cell.fill) } }
   }
   for (const [r1, c1, r2, c2] of merges) ws.mergeCells(r1, c1, r2, c2)
+  if (opts.logo) for (const cell of grid.cells) if (cell.logo) placeLogo(ws, grid, cell, opts.logo)
 
   // 框線最後畫：合併格的框線畫在範圍邊緣的每一格（Excel 的行為）。exceljs 的從屬格與主格共用同一個 style
   // 物件，直接改 .border 會連主格一起改掉，所以每格換一個新的 style 物件。
@@ -129,18 +169,30 @@ function sanitizeSheetName(name: string): string {
   return (cleaned || "sheet").slice(0, 31)
 }
 
-/** 一份 workbook，每張格線一個工作表。 */
-export async function buildStatementWorkbook(grids: StatementGrid[], creator: string): Promise<ExcelJS.Workbook> {
+/**
+ * 一份 workbook，每張格線一個工作表。`opts.logoPng`：標誌 PNG（base64 與像素尺寸），有 `logo` 格的工作表插這張圖。
+ */
+export async function buildStatementWorkbook(
+  grids: StatementGrid[],
+  creator: string,
+  opts: { logoPng?: { base64: string; width: number; height: number } } = {},
+): Promise<ExcelJS.Workbook> {
   const { default: ExcelJSRuntime } = await import("exceljs")
   const wb = new ExcelJSRuntime.Workbook()
   wb.creator = creator
   wb.created = new Date()
   const used = new Set<string>()
+  let logo: SheetLogo | null = null
   for (const grid of grids) {
     let name = sanitizeSheetName(grid.title)
     for (let n = 2; used.has(name); n += 1) name = `${sanitizeSheetName(grid.title).slice(0, 28)} ${n}`
     used.add(name)
-    writeStatementSheet(wb.addWorksheet(name), grid)
+    const needsLogo = !!opts.logoPng && grid.cells.some((c) => c.logo)
+    if (needsLogo && !logo) {
+      const imageId = wb.addImage({ base64: opts.logoPng!.base64, extension: "png" })
+      logo = { imageId, width: opts.logoPng!.width, height: opts.logoPng!.height }
+    }
+    writeStatementSheet(wb.addWorksheet(name), grid, needsLogo && logo ? { logo } : {})
   }
   return wb
 }

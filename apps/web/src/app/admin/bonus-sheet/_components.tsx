@@ -105,7 +105,12 @@ export function BonusSheetTable({ grid, zoom = 1, printing = false }: { grid: St
         const Tag = r < headRows ? "th" : "td";
         return (
           <Tag key={c} rowSpan={cell.rowSpan} colSpan={cell.colSpan} style={cellStyle(cell, edges, { top: stickyTop, left: stickyLeft })}>
-            {cell.text}
+            {cell.logo ? (
+              // eslint-disable-next-line @next/next/no-img-element -- 靜態 SVG 標誌，列印也要原尺寸
+              <img src="/brand/aster-logo.svg" alt={cell.text} style={{ display: "block", height: 30, width: "auto", margin: "0 auto" }} />
+            ) : (
+              cell.text
+            )}
           </Tag>
         );
       })}
