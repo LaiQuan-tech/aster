@@ -905,8 +905,7 @@ export default function EmployeesPage() {
           <Empty>這家公司目前沒有員工</Empty>
         ) : (
           // 外框：直向超過視窗高度、橫向超過寬度都在框內捲（表頭釘上方、操作欄釘右側）。
-          // @container 讓下面的列內編輯區能用 100cqw 取得「外框可視寬度」。
-          <div className="@container max-h-[calc(100dvh-12rem)] overflow-auto">
+          <div className="max-h-[calc(100dvh-12rem)] overflow-auto">
             <table className="w-full min-w-[92rem] text-left text-sm">
               <thead>
                 <tr className="text-xs text-gray-500">

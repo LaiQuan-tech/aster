@@ -14,7 +14,7 @@
  * 權限：HR／平台管理員可編輯（PATCH／PUT 在 API 都是 requireHrAdmin）；會計看得到這頁但整頁唯讀、沒有儲存與帳號動作。
  * 「可看集團財務」只有老闆／平台管理員看得到、改得動（API 對其他人回 403 group_financials_grant_forbidden）。
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { Button, Card, Empty, ErrorText, Pill, inputCls, useToast } from "@/components/admin-ui";
@@ -207,7 +207,12 @@ export default function EmployeeDetailPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  /** 重抓這位員工；resetPersonal=false 時保留個資欄位的輸入（PUT 失敗後讓 HR 修正重送）。 */
+  /**
+   * 重抓這位員工；resetPersonal=false 時保留個資欄位的輸入（PUT 失敗後讓 HR 修正重送）。
+   * API 目前沒有單筆 GET /employees/:id（只有 PATCH），所以沿用列表那支 GET /employees?include=profile 再挑出這一位：
+   * 個資欄位（生日／身分證／戶籍地／匯款帳號）只有這支會帶，權限守門也同一套（requireFinance＋HR 才多欄位）。
+   * 員工數百人內回應量可接受；之後若加了單筆端點，換掉這裡即可（回傳形狀相同）。
+   */
   const fetchEmployee = useCallback(
     async (resetPersonal = true) => {
       const res = await getEmployeesWithProfile();
@@ -281,10 +286,42 @@ export default function EmployeeDetailPage() {
     };
   }, [dirty, canManage]);
 
+  // 瀏覽器上一頁（popstate）：有未存修改時先問。做法是在歷史紀錄多推一筆同網址的「哨兵」，
+  // 按上一頁會先退到哨兵下面那筆（仍是這頁），我們在 popstate 問：取消＝把哨兵推回去留在原地；確定＝再退一步真的離開。
+  // 存檔後（dirty 變回 false）哨兵若還在，按上一頁時直接再退一步，不讓使用者多按一次。
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty && canManage;
+  const guardPushedRef = useRef(false);
+  useEffect(() => {
+    if (!dirty || !canManage || guardPushedRef.current) return;
+    window.history.pushState({ ...(window.history.state ?? {}), __employeeUnsavedGuard: true }, "", window.location.href);
+    guardPushedRef.current = true;
+  }, [dirty, canManage]);
+  useEffect(() => {
+    const onPopState = (event: PopStateEvent) => {
+      if (!guardPushedRef.current) return;
+      if ((event.state as { __employeeUnsavedGuard?: boolean } | null)?.__employeeUnsavedGuard) return;
+      // 剛從哨兵退下來
+      if (dirtyRef.current && !window.confirm(UNSAVED_PROMPT)) {
+        window.history.pushState({ ...(window.history.state ?? {}), __employeeUnsavedGuard: true }, "", window.location.href);
+        return;
+      }
+      guardPushedRef.current = false;
+      dirtyRef.current = false;
+      window.history.back();
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
   const actions = useEmployeeAccountActions({
     onChanged: () => fetchEmployee(),
     // My Data（照片、學歷、證照、經歷）仍在列表頁維護：帶 ?profile= 回去會直接展開這位員工的 My Data。
-    onOpenProfile: (target) => router.push(`/admin/employees?profile=${encodeURIComponent(target.id)}`),
+    // 程式跳頁不經連結，click 攔截攔不到：有未存修改時這裡自己先問。
+    onOpenProfile: (target) => {
+      if (dirty && canManage && !window.confirm(UNSAVED_PROMPT)) return;
+      router.push(`/admin/employees?profile=${encodeURIComponent(target.id)}`);
+    },
   });
 
   const set = <K extends keyof EmployeeForm>(key: K, value: EmployeeForm[K]) =>
