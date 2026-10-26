@@ -334,7 +334,7 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
     <ToastProvider>
       <div className="admin-shell min-h-dvh bg-gray-50 md:flex" style={brandStyle}>
         {/* 桌機側欄：9 個分區 */}
-        <aside className="hidden md:sticky md:top-0 md:flex md:h-dvh md:w-60 md:shrink-0 md:flex-col md:border-r md:border-gray-100 md:bg-white">
+        <aside className="hidden md:sticky md:top-0 md:flex md:h-dvh md:w-56 md:shrink-0 md:flex-col md:border-r md:border-gray-100 md:bg-white">
           <div className="px-5 py-4">
             <Link href="/admin" className="block truncate text-base font-bold leading-snug" style={{ color: "var(--brand)" }}>
               {appName}
@@ -421,7 +421,7 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
             )}
           </header>
 
-          <div className={`mx-auto w-full px-3 py-4 sm:px-4 md:px-8 md:py-6 ${resolved.narrow ? "max-w-4xl" : "max-w-7xl"}`}>
+          <div className={`w-full px-4 py-4 md:py-5 lg:px-6 ${resolved.narrow ? "max-w-4xl" : ""}`}>
             {!pathAllowed ? (
               <main className="py-12 text-center" aria-labelledby="admin-off-limits-title">
                 <h1 id="admin-off-limits-title" className="text-xl font-bold text-gray-900">

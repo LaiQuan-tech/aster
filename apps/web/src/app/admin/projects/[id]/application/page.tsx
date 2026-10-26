@@ -158,7 +158,7 @@ export function ApplicationDocument({
       : "—";
 
   return (
-    <div className="print-sheet mx-auto max-w-3xl bg-white p-6 text-gray-900 print:max-w-none print:p-0">
+    <div className="print-sheet mx-auto max-w-3xl overflow-x-auto bg-white p-6 text-gray-900 print:max-w-none print:overflow-visible print:p-0">
       {/* 抬頭：左上角承接公司、中間標題；右欄留空讓標題維持置中。 */}
       <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
         <p className="text-left text-sm font-bold" data-testid="application-company-name">{companyName}</p>

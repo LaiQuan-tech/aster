@@ -906,7 +906,7 @@ export default function EmployeesPage() {
         ) : (
           // 外框：直向超過視窗高度、橫向超過寬度都在框內捲（表頭釘上方、操作欄釘右側）。
           <div className="max-h-[calc(100dvh-12rem)] overflow-auto">
-            <table className="w-full min-w-[92rem] text-left text-sm">
+            <table className="w-full text-left text-sm">
               <thead>
                 <tr className="text-xs text-gray-500">
                   {canManage && (
@@ -920,16 +920,14 @@ export default function EmployeesPage() {
                       />
                     </th>
                   )}
-                  <th className={`${STICKY_TH} min-w-[7rem] py-2 pr-4`}>員工</th>
-                  <th className={`${STICKY_TH} hidden min-w-[12rem] py-2 pr-4 sm:table-cell`}>Email</th>
-                  <th className={`${STICKY_TH} min-w-[8rem] py-2 pr-4`}>單位/身分</th>
-                  <th className={`${STICKY_TH} min-w-[7rem] py-2 pr-4`}>所屬公司</th>
-                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-4`}>到離職</th>
-                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-4`}>生日</th>
-                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-4`}>身分證</th>
-                  <th className={`${STICKY_TH} min-w-[13rem] py-2 pr-4`}>戶籍地</th>
-                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-4`}>匯款帳號</th>
-                  <th className={`${STICKY_TH} min-w-[8rem] py-2 pr-4`}>角色/狀態</th>
+                  {/* 2026-10-27 業主「一目瞭然」：Email 併入員工欄、所屬公司併入單位欄、生日與身分證同欄，1280px 桌機不用左右捲動。 */}
+                  <th className={`${STICKY_TH} min-w-[11rem] py-2 pr-3`}>員工／Email</th>
+                  <th className={`${STICKY_TH} min-w-[7rem] py-2 pr-3`}>單位/身分・所屬公司</th>
+                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-3`}>到離職</th>
+                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-3`}>生日／身分證</th>
+                  <th className={`${STICKY_TH} min-w-[9rem] py-2 pr-3`}>戶籍地</th>
+                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-3`}>匯款帳號</th>
+                  <th className={`${STICKY_TH} min-w-[6rem] py-2 pr-3`}>角色/狀態</th>
                   {canManage && <th className={`${PIN_RIGHT_TH} py-2 pl-3 text-right`}>操作</th>}
                 </tr>
               </thead>
@@ -948,7 +946,7 @@ export default function EmployeesPage() {
                             />
                           </td>
                         )}
-                        <td className="py-3 pr-4">
+                        <td className="py-3 pr-3">
                           {/* 2026-10-27：點姓名進員工內頁（出勤統計表／薪資明細表在內頁分頁）。會計也進得去（唯讀）。 */}
                           <Link href={employeeDetailHref(employee.id)} className="font-medium text-gray-800 hover:underline">
                             {employee.name}
@@ -970,12 +968,8 @@ export default function EmployeesPage() {
                               密碼僅老闆／平台管理員可重設
                             </p>
                           )}
-                          {/* 窄螢幕沒有 Email 欄，補在名字下方 */}
-                          <p className="text-xs text-gray-500 break-all sm:hidden">{employee.email ?? "—"}</p>
-                        </td>
-                        <td className="hidden py-3 pr-4 sm:table-cell">
-                          <div className="flex items-start gap-1.5">
-                            <span className="text-sm text-gray-600 break-all">{employee.email ?? "—"}</span>
+                          <div className="mt-0.5 flex items-start gap-1.5">
+                            <span className="text-xs text-gray-500 break-all">{employee.email ?? "—"}</span>
                             {employee.email && (
                               <button
                                 type="button"
@@ -988,21 +982,30 @@ export default function EmployeesPage() {
                             )}
                           </div>
                         </td>
-                        <td className="py-3 pr-4 text-gray-600">{deptNameMap.get(employee.dept_id ?? "") ?? "—"} / {employmentTypeLabel(employee.employment_type)}</td>
-                        <td className={`py-3 pr-4 ${employee.company_id ? "text-gray-600" : "text-amber-700"}`}>{companyLabel(employee, companies)}</td>
-                        <td className="whitespace-nowrap py-3 pr-4 text-gray-600">{employee.hire_date ?? "—"} → {employee.terminated_at ?? "在職"}</td>
-                        <td className="whitespace-nowrap py-3 pr-4 text-gray-600">{employee.birthday || "—"}</td>
-                        <td className="whitespace-nowrap py-3 pr-4 text-gray-600">{employee.idNumber || "—"}</td>
-                        <td className="py-3 pr-4 text-gray-600">
-                          <div className="min-w-[13rem] max-w-[20rem] whitespace-normal break-words">{employee.registeredAddress || "—"}</div>
+                        <td className="py-3 pr-3 text-gray-600">
+                          <p>{deptNameMap.get(employee.dept_id ?? "") ?? "—"} / {employmentTypeLabel(employee.employment_type)}</p>
+                          <p className={`text-xs ${employee.company_id ? "text-gray-500" : "text-amber-700"}`}>{companyLabel(employee, companies)}</p>
                         </td>
-                        <td className="whitespace-nowrap py-3 pr-4 text-gray-600">
+                        <td className="whitespace-nowrap py-3 pr-3 tabular-nums text-gray-600">
+                          <p>{employee.hire_date ?? "—"}</p>
+                          <p className="text-xs text-gray-500">→ {employee.terminated_at ?? "在職"}</p>
+                        </td>
+                        <td className="whitespace-nowrap py-3 pr-3 tabular-nums text-gray-600">
+                          <p>{employee.birthday || "—"}</p>
+                          <p className="text-xs text-gray-500">{employee.idNumber || "—"}</p>
+                        </td>
+                        <td className="py-3 pr-3 text-gray-600">
+                          <div className="min-w-[9rem] max-w-[16rem] whitespace-normal break-words">{employee.registeredAddress || "—"}</div>
+                        </td>
+                        <td className="whitespace-nowrap py-3 pr-3 text-gray-600">
                           <BankCell employee={employee} />
                         </td>
-                        <td className="py-3 pr-4">
-                          <span className="rounded-full bg-gray-100 px-2 py-1 text-xs text-gray-600">{roleLabel(employee.role)}</span>
-                          {employee.status !== "active" && <span className="ml-2 rounded-full bg-red-100 px-2 py-1 text-xs text-red-600">{employee.status}</span>}
-                          {!employee.user_id && <span className="ml-2 rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-700">未開通帳號</span>}
+                        <td className="py-3 pr-3">
+                          <div className="flex flex-wrap gap-1">
+                            <span className="rounded-full bg-gray-100 px-2 py-1 text-xs text-gray-600">{roleLabel(employee.role)}</span>
+                            {employee.status !== "active" && <span className="rounded-full bg-red-100 px-2 py-1 text-xs text-red-600">{employee.status}</span>}
+                            {!employee.user_id && <span className="whitespace-nowrap rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-700">未開通帳號</span>}
+                          </div>
                         </td>
                         {canManage && (
                           <td className={`${PIN_RIGHT_TD} whitespace-nowrap py-2 pl-3 text-right`}>

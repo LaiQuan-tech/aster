@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { GridCell, StatementGrid } from "@/lib/statements-api";
+import { FitModeBar, resolveFit, useFitMode } from "@/components/FitToWidth";
+import { dominantFontPt, ptToPx } from "@/lib/fit-zoom";
 import {
   BORDER_PX,
   STATEMENT_FONT_STACK,
@@ -17,7 +19,9 @@ import {
  * 出勤統計表／薪資明細表：照 API 給的格線（StatementGrid）畫 HTML table，重現公司 Excel 的版面——
  * 欄寬、列高、合併（colSpan/rowSpan）、細／中／粗框線、字級、粗體、底色、對齊、數字格式（API 已格式化）。
  *
- * 寬度：桌機照 Excel 等比例（欄寬 × 8px）；`fit` 時縮放到容器寬（手機員工端）；否則外層可水平捲動。
+ * 寬度：桌機照 Excel 等比例（欄寬 × 8px）；`fit` 時縮放到容器寬（手機員工端）；
+ * `fitControl`（後台）時預設「符合寬度」縮到容器寬、可切「實際大小」（記住選擇），縮到字太小才水平捲動；
+ * 都沒有時外層可水平捲動。
  * 列印：外層帶 `statement-print`，列印樣式只印這張表（A4 直式，表格縮放到一頁寬）。
  */
 
@@ -27,7 +31,7 @@ const PRINT_CSS = `
   body * { visibility: hidden !important; }
   .statement-print[data-printing="1"], .statement-print[data-printing="1"] * { visibility: visible !important; }
   .statement-print[data-printing="1"] { position: absolute; left: 0; top: 0; width: 190mm; overflow: visible !important; }
-  .statement-print[data-printing="1"] table { zoom: var(--statement-print-zoom, 1); }
+  .statement-print[data-printing="1"] table { zoom: var(--statement-print-zoom, 1) !important; }
 }
 `;
 
@@ -60,10 +64,13 @@ function cellStyle(cell: GridCell, fontStack: string): CSSProperties {
 export function StatementTable({
   grid,
   fit = false,
+  fitControl = false,
   printing = false,
   className,
 }: {
   grid: StatementGrid;
+  /** 後台：顯示「符合寬度／實際大小」切換，預設符合寬度（字太小時改水平捲動）。 */
+  fitControl?: boolean;
   /** 縮放到容器寬（不超過 100%）。 */
   fit?: boolean;
   /** 這張表是目前要列印的那一張（同頁有多張表時只印這張）。 */
@@ -76,70 +83,85 @@ export function StatementTable({
   const rows = gridRowCount(grid);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
+  const [containerPx, setContainerPx] = useState(0);
+  // 內容實際寬：Excel 式「文字溢出到右邊空格」會超出格線總寬，符合寬度要連溢出的字一起算進去。
+  const [contentPx, setContentPx] = useState(0);
+  const appliedZoomRef = useRef(1);
+  const [fitMode, setFitMode] = useFitMode();
+  const baseFontPx = useMemo(() => ptToPx(dominantFontPt(grid.cells.map((c) => c.size))), [grid]);
+  const controlled = fitControl && !fit ? resolveFit(fitMode, Math.max(0, containerPx - 4), Math.max(geometry.width, contentPx), baseFontPx) : null;
 
   useEffect(() => {
-    if (!fit || !wrapRef.current) return;
+    if (!(fit || fitControl) || !wrapRef.current) return;
     const el = wrapRef.current;
     const update = () => {
       const w = el.clientWidth;
+      setContainerPx(w);
+      if (fitControl) setContentPx(Math.ceil(el.scrollWidth / (appliedZoomRef.current || 1)));
       if (w > 0) setZoom(Math.min(1, w / geometry.width));
     };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [fit, geometry.width]);
+  }, [fit, fitControl, geometry.width, grid]);
 
   const printZoom = Math.min(1, A4_PRINTABLE_PX / geometry.width);
 
+  const appliedZoom = fit ? zoom : controlled && controlled.zoom !== 1 ? controlled.zoom : undefined;
+  appliedZoomRef.current = appliedZoom ?? 1;
+
   return (
-    <div
-      ref={wrapRef}
-      className={`statement-print ${fit ? "overflow-hidden" : "overflow-x-auto"} ${className ?? ""}`}
-      data-printing={printing ? "1" : "0"}
-      style={{ ["--statement-print-zoom" as string]: String(printZoom) }}
-    >
-      <style>{PRINT_CSS}</style>
-      <table
-        aria-label={grid.title}
-        style={{
-          tableLayout: "fixed",
-          borderCollapse: "collapse",
-          width: geometry.width,
-          zoom: fit ? zoom : undefined,
-          background: "#fff",
-          color: "#000",
-        }}
+    <>
+      {controlled && <FitModeBar mode={fitMode} onChange={setFitMode} result={controlled} className="mb-2" />}
+      <div
+        ref={wrapRef}
+        className={`statement-print ${fit ? "overflow-hidden" : "overflow-x-auto"} ${className ?? ""}`}
+        data-printing={printing ? "1" : "0"}
+        style={{ ["--statement-print-zoom" as string]: String(printZoom) }}
       >
-        <colgroup>
-          {grid.columns.map((w, i) => (
-            <col key={i} style={{ width: columnPx(w) }} />
-          ))}
-        </colgroup>
-        <tbody>
-          {Array.from({ length: rows }, (_, r) => (
-            <tr key={r} style={{ height: rowPx(grid.rowHeights[r] ?? 20.9) }}>
-              {grid.columns.map((_, c) => {
-                const key = `${r}:${c}`;
-                if (covered.has(key)) return null;
-                const cell = byPos.get(key);
-                if (!cell) return <td key={c} style={{ padding: 0 }} />;
-                return (
-                  <td
-                    key={c}
-                    rowSpan={cell.rowSpan}
-                    colSpan={cell.colSpan}
-                    style={cellStyle(cell, STATEMENT_FONT_STACK)}
-                    data-money={cell.money ? "1" : undefined}
-                  >
-                    {cell.text}
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+        <style>{PRINT_CSS}</style>
+        <table
+          aria-label={grid.title}
+          style={{
+            tableLayout: "fixed",
+            borderCollapse: "collapse",
+            width: geometry.width,
+            zoom: appliedZoom,
+            background: "#fff",
+            color: "#000",
+          }}
+        >
+          <colgroup>
+            {grid.columns.map((w, i) => (
+              <col key={i} style={{ width: columnPx(w) }} />
+            ))}
+          </colgroup>
+          <tbody>
+            {Array.from({ length: rows }, (_, r) => (
+              <tr key={r} style={{ height: rowPx(grid.rowHeights[r] ?? 20.9) }}>
+                {grid.columns.map((_, c) => {
+                  const key = `${r}:${c}`;
+                  if (covered.has(key)) return null;
+                  const cell = byPos.get(key);
+                  if (!cell) return <td key={c} style={{ padding: 0 }} />;
+                  return (
+                    <td
+                      key={c}
+                      rowSpan={cell.rowSpan}
+                      colSpan={cell.colSpan}
+                      style={cellStyle(cell, STATEMENT_FONT_STACK)}
+                      data-money={cell.money ? "1" : undefined}
+                    >
+                      {cell.text}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }

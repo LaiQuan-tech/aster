@@ -104,7 +104,7 @@ export function EmployeeStatementsPanel({ employeeId, kind }: { employeeId: stri
       {data && !summary && <Empty>只有 HR 可以查看薪資明細表。</Empty>}
       {summary && (
         <div className={loading ? "opacity-60" : undefined}>
-          <StatementTable grid={summary.grid} printing />
+          <StatementTable grid={summary.grid} fitControl printing />
         </div>
       )}
     </Card>

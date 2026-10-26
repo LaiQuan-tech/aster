@@ -46,7 +46,7 @@ export function Card({
   className?: string;
   children: ReactNode;
 }) {
-  return <EssCard {...props} className={["overflow-hidden md:rounded-xl md:p-6", className].filter(Boolean).join(" ")} />;
+  return <EssCard {...props} className={["overflow-hidden md:rounded-xl md:p-5", className].filter(Boolean).join(" ")} />;
 }
 
 /** 標題／說明改由 AdminShell 依路由表渲染；保留給尚未遷移的頁，永遠不畫。 */

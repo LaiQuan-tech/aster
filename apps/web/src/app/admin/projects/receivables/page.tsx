@@ -114,62 +114,62 @@ export default function ReceivablesPage() {
           <Empty>{status === "open" ? "目前沒有未收完的期別" : "沒有資料"}</Empty>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full whitespace-nowrap text-sm">
+            {/* 1280px 桌機不需左右捲動：編號／客戶併入專案欄、發票號碼併入開票日欄；長文字換行，日期與金額不換行。 */}
+            <table className="w-full text-[13px]">
               <thead>
                 <tr className="border-b text-left text-xs text-gray-500">
-                  <th className="py-2 pr-2">編號</th>
-                  <th className="py-2 pr-2">專案</th>
-                  <th className="py-2 pr-2">客戶</th>
-                  <th className="py-2 pr-2">狀態</th>
-                  <th className="py-2 pr-2">期別</th>
+                  <th className="py-2 pr-2">專案／客戶</th>
+                  <th className="whitespace-nowrap py-2 pr-2">狀態</th>
+                  <th className="whitespace-nowrap py-2 pr-2">期別</th>
                   <th className="py-2 pr-2">階段</th>
                   <th className="py-2 pr-2 text-right">%</th>
-                  <th className="py-2 pr-2 text-right">金額</th>
-                  <th className="py-2 pr-2">請款日</th>
-                  <th className="py-2 pr-2">開票日</th>
-                  <th className="py-2 pr-2">發票號碼</th>
-                  <th className="py-2 pr-2">入帳日</th>
-                  <th className="py-2 pr-2 text-right">已收</th>
-                  <th className="py-2 pr-2 text-right">未收</th>
-                  <th className="py-2 pr-2 text-right">逾期天數</th>
+                  <th className="whitespace-nowrap py-2 pr-2 text-right">金額</th>
+                  <th className="whitespace-nowrap py-2 pr-2">請款日</th>
+                  <th className="whitespace-nowrap py-2 pr-2">開票日／發票</th>
+                  <th className="whitespace-nowrap py-2 pr-2">入帳日</th>
+                  <th className="whitespace-nowrap py-2 pr-2 text-right">已收</th>
+                  <th className="whitespace-nowrap py-2 pr-2 text-right">未收</th>
+                  <th className="whitespace-nowrap py-2 text-right">逾期天數</th>
                 </tr>
               </thead>
               <tbody>
                 {data.receivables.map((r) => (
-                  <tr key={r.billingId} className="border-b last:border-0">
-                    <td className="py-1.5 pr-2 font-mono text-xs">
-                      <Link href={`/admin/projects/${r.projectId}`} className="hover:underline" style={{ color: "var(--brand)" }}>
-                        {r.code ?? "—"}
-                      </Link>
+                  <tr key={r.billingId} className="border-b align-top last:border-0">
+                    <td className="min-w-[12rem] py-1.5 pr-2">
+                      <div className="flex flex-wrap items-baseline gap-x-1.5">
+                        <Link href={`/admin/projects/${r.projectId}`} className="font-mono text-xs hover:underline" style={{ color: "var(--brand)" }}>
+                          {r.code ?? "—"}
+                        </Link>
+                        <span className="font-medium text-gray-900">{r.projectName}</span>
+                        {r.archived && (
+                          <span className="rounded bg-gray-100 px-1 text-[10px] font-normal text-gray-500" title="此案已封存（例如已被追加減案取代），但這期還沒收到款，仍要追">
+                            已封存
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-gray-500">{r.clientName ?? "—"}</div>
                     </td>
-                    <td className="py-1.5 pr-2 font-medium text-gray-900">
-                      {r.projectName}
-                      {r.archived && (
-                        <span className="ml-1 rounded bg-gray-100 px-1 text-[10px] font-normal text-gray-500" title="此案已封存（例如已被追加減案取代），但這期還沒收到款，仍要追">
-                          已封存
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-1.5 pr-2 text-gray-600">{r.clientName ?? "—"}</td>
-                    <td className="py-1.5 pr-2">
+                    <td className="whitespace-nowrap py-1.5 pr-2">
                       <span className={`rounded-full px-2 py-0.5 text-xs ${RECEIVABLE_STATE_BADGE_CLASS[r.state]}`}>
                         {RECEIVABLE_STATE_LABELS[r.state]}
                       </span>
                     </td>
                     <td className="py-1.5 pr-2 text-gray-600">
                       {r.installmentNo}
-                      {r.kind === "guild_advance" && <span className="ml-1 rounded bg-purple-50 px-1 text-[10px] text-purple-700">{BILLING_KIND_LABELS.guild_advance}</span>}
+                      {r.kind === "guild_advance" && <span className="ml-1 inline-block whitespace-nowrap rounded bg-purple-50 px-1 text-[10px] text-purple-700">{BILLING_KIND_LABELS.guild_advance}</span>}
                     </td>
-                    <td className="py-1.5 pr-2 text-gray-600">{r.milestone ?? "—"}</td>
-                    <td className="py-1.5 pr-2 text-right text-gray-600">{r.percentage ?? "—"}</td>
-                    <td className="py-1.5 pr-2 text-right text-gray-700">{fmtMoney(r.amount)}</td>
-                    <td className="py-1.5 pr-2 text-gray-500">{r.billedOn ?? "—"}</td>
-                    <td className="py-1.5 pr-2 text-gray-500">{r.invoicedOn ?? "—"}</td>
-                    <td className="py-1.5 pr-2 text-gray-500">{r.invoiceNo ?? "—"}</td>
-                    <td className="py-1.5 pr-2 text-gray-500">{r.receivedOn ?? "—"}</td>
-                    <td className="py-1.5 pr-2 text-right text-gray-600">{fmtMoney(r.receivedAmount)}</td>
-                    <td className="py-1.5 pr-2 text-right font-medium text-red-600">{fmtMoney(r.unreceived)}</td>
-                    <td className="py-1.5 pr-2 text-right">
+                    <td className="min-w-[4.5rem] py-1.5 pr-2 text-gray-600">{r.milestone ?? "—"}</td>
+                    <td className="whitespace-nowrap py-1.5 pr-2 text-right tabular-nums text-gray-600">{r.percentage ?? "—"}</td>
+                    <td className="whitespace-nowrap py-1.5 pr-2 text-right tabular-nums text-gray-700">{fmtMoney(r.amount)}</td>
+                    <td className="whitespace-nowrap py-1.5 pr-2 tabular-nums text-gray-500">{r.billedOn ?? "—"}</td>
+                    <td className="whitespace-nowrap py-1.5 pr-2 tabular-nums text-gray-500">
+                      <div>{r.invoicedOn ?? "—"}</div>
+                      {r.invoiceNo && <div className="text-xs text-gray-400">{r.invoiceNo}</div>}
+                    </td>
+                    <td className="whitespace-nowrap py-1.5 pr-2 tabular-nums text-gray-500">{r.receivedOn ?? "—"}</td>
+                    <td className="whitespace-nowrap py-1.5 pr-2 text-right tabular-nums text-gray-600">{fmtMoney(r.receivedAmount)}</td>
+                    <td className="whitespace-nowrap py-1.5 pr-2 text-right font-medium tabular-nums text-red-600">{fmtMoney(r.unreceived)}</td>
+                    <td className="whitespace-nowrap py-1.5 text-right tabular-nums">
                       {r.overdueDays != null && r.overdueDays > 0 ? (
                         <span className="font-medium text-red-600">{r.overdueDays}</span>
                       ) : (

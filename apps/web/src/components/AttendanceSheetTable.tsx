@@ -247,7 +247,8 @@ export function AttendanceSheetTable({
       )}
 
       <div className="overflow-x-auto rounded-xl border border-gray-100">
-        <table className="w-full min-w-[1180px] text-left text-sm">
+        {/* 最小寬 900px（原 1180px）：內容／外出／備註欄可換行，1280px 桌機後台不需左右捲動；手機仍可橫捲。 */}
+        <table className="w-full min-w-[900px] text-left text-sm">
           <thead>
             <tr className="border-b border-gray-200 bg-gray-50/60 text-xs text-gray-500">
               <th className="py-2 pl-3 pr-2">日期</th>
@@ -348,7 +349,7 @@ function DayRow({
   const beyondCap = day.overtime.beyondCap ?? 0;
   return (
     <tr className={`border-b border-gray-50 align-top ${rowTone(day, noPunch)}${hidden ? " hidden print:table-row" : ""}`}>
-      <td className="py-2 pl-3 pr-2 tabular-nums">{day.date}</td>
+      <td className="whitespace-nowrap py-2 pl-3 pr-2 tabular-nums">{day.date}</td>
       <td className="py-2 pr-2">{weekdayLabel(day.date)}</td>
       <td className="py-2 pr-2 tabular-nums">{hhmm(day.firstIn)}</td>
       <td className="py-2 pr-2 tabular-nums">{hhmm(day.lastOut)}</td>

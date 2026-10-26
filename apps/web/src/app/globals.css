@@ -41,6 +41,11 @@ body {
     display: none !important;
   }
 
+  /* 報表「符合寬度」縮放只用於螢幕；列印照原本大小（components/FitToWidth.tsx）。 */
+  .fit-zoom-inner {
+    zoom: 1 !important;
+  }
+
   .print-sheet-header {
     display: block;
     margin-bottom: 8px;

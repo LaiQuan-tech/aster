@@ -12,6 +12,8 @@ import {
   type BonusSheetSelection,
 } from "@/lib/bonus-sheet-api";
 import { gridGeometry } from "@/lib/statement-layout";
+import { resolveFit, useContainerWidth, useFitMode } from "@/components/FitToWidth";
+import { dominantFontPt, ptToPx } from "@/lib/fit-zoom";
 import { BonusSheetTable, bonusSheetPrintCss } from "./_components";
 
 /**
@@ -32,6 +34,7 @@ function todayLocal(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+/** 手動倍率；另有「符合寬度」（預設，記住選擇，見 components/FitToWidth.tsx）。 */
 const ZOOMS = [1, 0.85, 0.7, 0.55];
 
 export default function BonusSheetPage() {
@@ -40,7 +43,9 @@ export default function BonusSheetPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"open" | "closed">("open");
-  const [zoom, setZoom] = useState(1);
+  const [manualZoom, setManualZoom] = useState(1);
+  const [fitMode, setFitMode] = useFitMode();
+  const [sheetWrapRef, sheetWrapPx] = useContainerWidth<HTMLDivElement>();
   const [paper, setPaper] = useState<"A3" | "A4">("A3");
   const [printing, setPrinting] = useState(false);
   const [downloading, setDownloading] = useState(false);
@@ -70,6 +75,19 @@ export default function BonusSheetPage() {
 
   const grid = data ? (tab === "open" ? data.sheets.open : data.sheets.closed) : null;
   const tableWidth = useMemo(() => (grid ? gridGeometry(grid).width : 0), [grid]);
+  const baseFontPx = useMemo(() => (grid ? ptToPx(dominantFontPt(grid.cells.map((c) => c.size))) : 16), [grid]);
+  // 符合寬度：縮到表格外框內寬（扣左右 1px 框線）；字太小時停在最小可讀倍率、改左右捲動。
+  const fit = resolveFit("fit", Math.max(0, sheetWrapPx - 2), tableWidth, baseFontPx);
+  const zoom = fitMode === "fit" ? fit.zoom : manualZoom;
+  const zoomValue = fitMode === "fit" ? "fit" : String(manualZoom);
+  function onZoom(value: string) {
+    if (value === "fit") {
+      setFitMode("fit");
+      return;
+    }
+    setManualZoom(Number(value));
+    setFitMode("actual");
+  }
 
   useEffect(() => {
     if (!printing) return;
@@ -130,8 +148,9 @@ export default function BonusSheetPage() {
           )}
           <div>
             <label className={labelCls} htmlFor="bonus-sheet-zoom">縮放</label>
-            <select id="bonus-sheet-zoom" className={inputCls} value={zoom} onChange={(e) => setZoom(Number(e.target.value))}>
-              {ZOOMS.map((z) => <option key={z} value={z}>{Math.round(z * 100)}%</option>)}
+            <select id="bonus-sheet-zoom" className={inputCls} value={zoomValue} onChange={(e) => onZoom(e.target.value)}>
+              <option value="fit">符合寬度{fitMode === "fit" && fit.overflow ? `（${Math.round(fit.zoom * 100)}%）` : ""}</option>
+              {ZOOMS.map((z) => <option key={z} value={String(z)}>{z === 1 ? "實際大小（100%）" : `${Math.round(z * 100)}%`}</option>)}
             </select>
           </div>
           <div className="ml-auto flex flex-wrap items-end gap-2">
@@ -143,6 +162,11 @@ export default function BonusSheetPage() {
             <PrimaryButton onClick={download} disabled={!data || downloading}>{downloading ? "下載中…" : "下載 Excel"}</PrimaryButton>
           </div>
         </div>
+        {grid && fitMode === "fit" && fit.clamped && (
+          <p className="mt-3 text-xs text-amber-700" aria-live="polite">
+            表格欄位多，已縮到最小可讀字級（{Math.round(fit.zoom * 100)}%）仍比畫面寬，可左右捲動查看。
+          </p>
+        )}
         {data && (
           <p className="mt-3 text-xs text-gray-500">
             {data.source === "run" && data.run
@@ -180,7 +204,7 @@ export default function BonusSheetPage() {
 
       {loading && !data && <p className="text-sm text-gray-500">載入中…</p>}
       {grid && (
-        <div className={loading ? "opacity-60" : undefined}>
+        <div ref={sheetWrapRef} className={loading ? "opacity-60" : undefined}>
           <BonusSheetTable grid={grid} zoom={zoom} printing={printing} />
         </div>
       )}

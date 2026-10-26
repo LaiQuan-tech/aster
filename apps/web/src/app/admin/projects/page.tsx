@@ -398,7 +398,7 @@ export default function AdminProjectsPage() {
             <table
               aria-label="所有專案"
               // table-fixed＋總寬＝各欄寬加總：凍結欄的 left 位移才會跟實際欄寬對得上。
-              className="table-fixed border-separate border-spacing-0 text-sm text-gray-800"
+              className="table-fixed border-separate border-spacing-0 text-[13px] text-gray-800"
               style={{ width: registerTableWidth }}
             >
               <colgroup>
@@ -410,7 +410,7 @@ export default function AdminProjectsPage() {
                     <th
                       key={c.header}
                       scope="col"
-                      className={`sticky top-0 whitespace-nowrap border-b border-r border-gray-300 bg-gray-100 px-2 py-2 text-center font-medium text-gray-700 ${i < REGISTER_FROZEN_COLUMNS ? "z-30" : "z-20"}`}
+                      className={`sticky top-0 whitespace-nowrap border-b border-r border-gray-300 bg-gray-100 px-1.5 py-2 text-center font-medium text-gray-700 ${i < REGISTER_FROZEN_COLUMNS ? "z-30" : "z-20"}`}
                       style={i < REGISTER_FROZEN_COLUMNS ? { left: frozenLeft[i] } : undefined}
                     >
                       {c.header}
@@ -453,7 +453,7 @@ export default function AdminProjectsPage() {
                           <td
                             key={c.header}
                             // 已封存（勾「顯示已封存」才會出現）用淡灰底區分；凍結欄也要有底色才蓋得住捲過去的欄。
-                            className={`border-b border-r border-gray-200 px-2 py-1.5 group-hover:bg-cyan-50 ${
+                            className={`border-b border-r border-gray-200 px-1.5 py-1.5 group-hover:bg-cyan-50 ${
                               p.archivedAt ? "bg-gray-100 text-gray-500" : "bg-white"
                             } ${
                               frozen ? "sticky z-10" : ""

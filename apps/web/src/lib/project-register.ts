@@ -84,11 +84,12 @@ export function visibleRegisterColumns(disciplines: string[], showHidden: boolea
 export const SHOW_HIDDEN_STORAGE_KEY = "aster.projects.register.showHidden"
 
 /**
- * Excel 字元寬 → px。原檔字型是 12pt 標楷體（比預設 Calibri 11 寬），畫面是 14px 字＋左右各 8px 留白，
- * 取每單位 8px＋10px，讓「項次」「合約」「業務」這些原檔剛好塞得下的窄欄在畫面上也不折行。
+ * Excel 字元寬 → px。原檔字型是 12pt 標楷體（比預設 Calibri 11 寬），畫面是 13px 字＋左右各 6px 留白，
+ * 取每單位 7px＋8px，讓「項次」「合約」「業務」這些原檔剛好塞得下的窄欄在畫面上也不折行；
+ * 2026-10-27 業主要一目瞭然：由 8px＋10px 縮成這樣，1440px 桌機預設欄（隱藏 I:N）不用左右捲動。
  */
 export function excelWidthToPx(width: number): number {
-  return Math.round(width * 8 + 10)
+  return Math.round(width * 7 + 8)
 }
 
 /**

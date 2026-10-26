@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { FitToWidth } from "@/components/FitToWidth";
 import {
   getDisbursementPivot,
   exportDisbursementPivotXlsx,
@@ -125,39 +126,40 @@ export default function DisbursementPivotPage() {
         ) : !pivot || pivot.rows.length === 0 ? (
           <Empty>這個年度沒有資料</Empty>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full whitespace-nowrap text-sm">
+          // 12 個月＋合計等 18 欄：數字不換行、名稱換行；仍比畫面寬時「符合寬度」縮放（components/FitToWidth.tsx）。
+          <FitToWidth baseFontPx={13}>
+            <table className="w-full text-[13px]">
               <thead>
                 <tr className="border-b text-left text-xs text-gray-500">
                   <th className="py-2 pr-2">{groupLabel}</th>
                   {MONTH_LABELS.map((m) => (
-                    <th key={m} className="py-2 pr-2 text-right">
+                    <th key={m} className="whitespace-nowrap py-2 pr-1.5 text-right tabular-nums">
                       {m}
                     </th>
                   ))}
-                  <th className="py-2 pr-2 text-right">合計</th>
-                  <th className="py-2 pr-2 text-right">代扣</th>
-                  <th className="py-2 pr-2 text-right">筆數</th>
-                  <th className="py-2 pr-2 text-right" title="已取得發票／收據的匯款筆數">有發票</th>
-                  <th className="py-2 pr-2 text-right" title="沒發票也沒收據編號的金額合計">無憑證金額</th>
+                  <th className="whitespace-nowrap py-2 pr-1.5 text-right tabular-nums">合計</th>
+                  <th className="whitespace-nowrap py-2 pr-1.5 text-right tabular-nums">代扣</th>
+                  <th className="whitespace-nowrap py-2 pr-1.5 text-right tabular-nums">筆數</th>
+                  <th className="whitespace-nowrap py-2 pr-1.5 text-right tabular-nums" title="已取得發票／收據的匯款筆數">有發票</th>
+                  <th className="whitespace-nowrap py-2 pr-1.5 text-right tabular-nums" title="沒發票也沒收據編號的金額合計">無憑證金額</th>
                 </tr>
               </thead>
               <tbody>
                 {pivot.rows.map((row) => (
                   <tr key={row.key} className="border-b last:border-0">
-                    <td className="py-1.5 pr-2 font-medium text-gray-800">{row.label}</td>
+                    <td className="min-w-[7rem] max-w-[14rem] py-1.5 pr-2 font-medium text-gray-800">{row.label}</td>
                     {row.months.map((m, i) => (
-                      <td key={i} className="py-1.5 pr-2 text-right text-gray-700">
+                      <td key={i} className="whitespace-nowrap py-1.5 pr-1.5 text-right tabular-nums text-gray-700">
                         {fmtCell(m)}
                       </td>
                     ))}
-                    <td className="py-1.5 pr-2 text-right font-medium text-gray-900">{fmtCell(row.total)}</td>
-                    <td className="py-1.5 pr-2 text-right text-gray-500">{fmtCell(row.withheld)}</td>
-                    <td className="py-1.5 pr-2 text-right text-gray-500">{row.count}</td>
-                    <td className="py-1.5 pr-2 text-right text-gray-500">
+                    <td className="whitespace-nowrap py-1.5 pr-1.5 text-right tabular-nums font-medium text-gray-900">{fmtCell(row.total)}</td>
+                    <td className="whitespace-nowrap py-1.5 pr-1.5 text-right tabular-nums text-gray-500">{fmtCell(row.withheld)}</td>
+                    <td className="whitespace-nowrap py-1.5 pr-1.5 text-right tabular-nums text-gray-500">{row.count}</td>
+                    <td className="whitespace-nowrap py-1.5 pr-1.5 text-right tabular-nums text-gray-500">
                       {row.invoicedCount ?? 0}／{row.count}
                     </td>
-                    <td className={`py-1.5 pr-2 text-right ${(row.noReceiptAmount ?? 0) > 0 ? "font-medium text-red-600" : "text-gray-400"}`}>
+                    <td className={`whitespace-nowrap py-1.5 pr-1.5 text-right tabular-nums ${(row.noReceiptAmount ?? 0) > 0 ? "font-medium text-red-600" : "text-gray-400"}`}>
                       {fmtCell(row.noReceiptAmount ?? 0)}
                     </td>
                   </tr>
@@ -167,23 +169,23 @@ export default function DisbursementPivotPage() {
                 <tr className="border-t-2 border-gray-800 font-semibold">
                   <td className="py-2 pr-2">合計（{pivot.rows.length} {groupLabel}）</td>
                   {pivot.totals.months.map((m, i) => (
-                    <td key={i} className="py-2 pr-2 text-right">
+                    <td key={i} className="whitespace-nowrap py-2 pr-1.5 text-right tabular-nums">
                       {fmtCell(m)}
                     </td>
                   ))}
-                  <td className="py-2 pr-2 text-right">{fmtCell(pivot.totals.total)}</td>
-                  <td className="py-2 pr-2 text-right">{fmtCell(pivot.totals.withheld)}</td>
-                  <td className="py-2 pr-2 text-right">{pivot.totals.count}</td>
-                  <td className="py-2 pr-2 text-right">
+                  <td className="whitespace-nowrap py-2 pr-1.5 text-right tabular-nums">{fmtCell(pivot.totals.total)}</td>
+                  <td className="whitespace-nowrap py-2 pr-1.5 text-right tabular-nums">{fmtCell(pivot.totals.withheld)}</td>
+                  <td className="whitespace-nowrap py-2 pr-1.5 text-right tabular-nums">{pivot.totals.count}</td>
+                  <td className="whitespace-nowrap py-2 pr-1.5 text-right tabular-nums">
                     {pivot.totals.invoicedCount ?? 0}／{pivot.totals.count}
                   </td>
-                  <td className={`py-2 pr-2 text-right ${(pivot.totals.noReceiptAmount ?? 0) > 0 ? "text-red-600" : ""}`}>
+                  <td className={`whitespace-nowrap py-2 pr-1.5 text-right tabular-nums ${(pivot.totals.noReceiptAmount ?? 0) > 0 ? "text-red-600" : ""}`}>
                     {fmtCell(pivot.totals.noReceiptAmount ?? 0)}
                   </td>
                 </tr>
               </tfoot>
             </table>
-          </div>
+          </FitToWidth>
         )}
       </Card>
     </>

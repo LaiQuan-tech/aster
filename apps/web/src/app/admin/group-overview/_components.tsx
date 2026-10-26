@@ -307,7 +307,7 @@ export function CompanyTable({
   return (
     <Card title="各公司" action={<span className="text-xs text-gray-400">點一列看收入（專案）與支出（廠商）</span>}>
       <div className="overflow-x-auto">
-        <table className="w-full whitespace-nowrap text-sm">
+        <table className="w-full text-sm">
           <caption className="sr-only">
             各公司入帳收入、已開票（參考）、放款支出、專案毛利、扣人事成本後、毛利率、在職人數與人事成本；每家公司的數字含關係企業往來；{PAYROLL_BASIS_NOTE}
           </caption>
@@ -337,7 +337,7 @@ export function CompanyTable({
                     onClick={() => onToggle(c.id)}
                     className={`cursor-pointer border-b hover:bg-gray-50 ${open ? "bg-gray-50" : ""} ${muted}`}
                   >
-                    <td className="py-2 pr-3 font-medium">
+                    <td className="min-w-[11rem] py-2 pr-3 font-medium">
                       <button
                         type="button"
                         aria-expanded={open}
@@ -350,20 +350,20 @@ export function CompanyTable({
                       {!c.isActive && <Pill tone="gray" className="ml-2">已停用</Pill>}
                       {c.excluded && <Pill tone="gray" className="ml-2">未納入合計</Pill>}
                     </td>
-                    <td className="py-2 pr-3 text-right">{fmtMoney(c.revenue)}</td>
-                    <td className="py-2 pr-3 text-right">{fmtMoney(c.invoiced)}</td>
-                    <td className="py-2 pr-3 text-right">{fmtMoney(c.expense)}</td>
-                    <td className={`py-2 pr-3 text-right font-medium ${c.excluded ? "" : negative(c.grossProfit)}`}>{fmtMoney(c.grossProfit)}</td>
+                    <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums">{fmtMoney(c.revenue)}</td>
+                    <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums">{fmtMoney(c.invoiced)}</td>
+                    <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums">{fmtMoney(c.expense)}</td>
+                    <td className={`whitespace-nowrap py-2 pr-3 text-right tabular-nums font-medium ${c.excluded ? "" : negative(c.grossProfit)}`}>{fmtMoney(c.grossProfit)}</td>
                     <td
-                      className={`py-2 pr-3 text-right ${c.excluded || c.grossProfitAfterPayroll == null ? "" : negative(c.grossProfitAfterPayroll)}`}
+                      className={`whitespace-nowrap py-2 pr-3 text-right tabular-nums ${c.excluded || c.grossProfitAfterPayroll == null ? "" : negative(c.grossProfitAfterPayroll)}`}
                       title={payrollTitle}
                     >
                       {fmtMoney(c.grossProfitAfterPayroll)}
                     </td>
-                    <td className="py-2 pr-3 text-right">{fmtPct(c.grossMarginPct)}</td>
-                    <td className="py-2 pr-3 text-right">{c.headcount ?? "—"}</td>
-                    <td className="py-2 pr-3 text-right" title={payrollTitle ?? supplementTitle(c)}>{fmtMoney(c.payrollCost)}</td>
-                    <td className="py-2 text-right text-xs">{affiliateCellText(c.affiliate)}</td>
+                    <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums">{fmtPct(c.grossMarginPct)}</td>
+                    <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums">{c.headcount ?? "—"}</td>
+                    <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums" title={payrollTitle ?? supplementTitle(c)}>{fmtMoney(c.payrollCost)}</td>
+                    <td className="min-w-[6rem] py-2 text-right text-xs">{affiliateCellText(c.affiliate)}</td>
                   </tr>
                   {open && (
                     <tr className="border-b bg-gray-50">
@@ -384,14 +384,14 @@ export function CompanyTable({
                   未指派公司的員工
                   <span className="ml-2 text-xs text-gray-400">（人事成本不分攤）</span>
                 </td>
-                <td className="py-2 pr-3 text-right text-gray-400" colSpan={6}>
+                <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums text-gray-400" colSpan={6}>
                   <Link href="/admin/employees" className="text-xs underline hover:text-gray-700">
                     到員工管理指派所屬公司
                   </Link>
                 </td>
-                <td className="py-2 pr-3 text-right">{group.unassignedHeadcount}</td>
-                <td className="py-2 pr-3 text-right" title={payrollTitle}>{fmtMoney(group.unassignedPayrollCost)}</td>
-                <td className="py-2 text-right text-xs">—</td>
+                <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums">{group.unassignedHeadcount}</td>
+                <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums" title={payrollTitle}>{fmtMoney(group.unassignedPayrollCost)}</td>
+                <td className="min-w-[6rem] py-2 text-right text-xs">—</td>
               </tr>
             )}
           </tbody>
@@ -401,19 +401,19 @@ export function CompanyTable({
                 集團合計
                 <span className="ml-2 text-xs font-normal text-gray-500">（已剔除關係企業往來，不含未納入的公司；人事含未指派）</span>
               </td>
-              <td className="py-2 pr-3 text-right">{fmtMoney(group.revenue)}</td>
-              <td className="py-2 pr-3 text-right">{fmtMoney(group.invoiced)}</td>
-              <td className="py-2 pr-3 text-right">{fmtMoney(group.expense)}</td>
-              <td className={`py-2 pr-3 text-right ${negative(group.grossProfit)}`}>{fmtMoney(group.grossProfit)}</td>
+              <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums">{fmtMoney(group.revenue)}</td>
+              <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums">{fmtMoney(group.invoiced)}</td>
+              <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums">{fmtMoney(group.expense)}</td>
+              <td className={`whitespace-nowrap py-2 pr-3 text-right tabular-nums ${negative(group.grossProfit)}`}>{fmtMoney(group.grossProfit)}</td>
               <td
-                className={`py-2 pr-3 text-right ${group.grossProfitAfterPayroll == null ? "" : negative(group.grossProfitAfterPayroll)}`}
+                className={`whitespace-nowrap py-2 pr-3 text-right tabular-nums ${group.grossProfitAfterPayroll == null ? "" : negative(group.grossProfitAfterPayroll)}`}
                 title={payrollTitle}
               >
                 {fmtMoney(group.grossProfitAfterPayroll)}
               </td>
-              <td className="py-2 pr-3 text-right">{fmtPct(group.grossMarginPct)}</td>
-              <td className="py-2 pr-3 text-right">{group.headcount ?? "—"}</td>
-              <td className="py-2 pr-3 text-right" title={payrollTitle ?? supplementTitle(group)}>{fmtMoney(group.payrollCost)}</td>
+              <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums">{fmtPct(group.grossMarginPct)}</td>
+              <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums">{group.headcount ?? "—"}</td>
+              <td className="whitespace-nowrap py-2 pr-3 text-right tabular-nums" title={payrollTitle ?? supplementTitle(group)}>{fmtMoney(group.payrollCost)}</td>
               <td className="py-2 text-right text-xs font-normal text-gray-500">已剔除 {fmtMoney(group.eliminated.total)}</td>
             </tr>
           </tfoot>
