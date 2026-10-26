@@ -5,12 +5,14 @@ import { Button, Card, Empty, ErrorText, Pill, PrimaryButton, inputCls, labelCls
 import {
   listClients, createClient, updateClient, deleteClient, humanizeClientError,
   INVOICE_TYPE_LABELS, PAYMENT_METHOD_LABELS,
-  type Client, type ClientInput, type InvoiceType, type PaymentMethod, type ClientCategory,
+  type Client, type InvoiceType, type PaymentMethod, type ClientCategory,
 } from "@/lib/projects-ext-api";
 import { OPTION_INACTIVE_MARK, optionChoices, optionLabel, useOptionList } from "@/lib/option-lists-api";
 import { getMeCached, peekMeCached } from "@/lib/ess-state";
 import { isHrRole } from "@/lib/roles";
-import { affiliateInputField, humanizeAffiliateError } from "@/lib/affiliate";
+import { humanizeAffiliateError } from "@/lib/affiliate";
+import { CLIENT_EXCEL_COLUMNS, clientCellText } from "@/lib/roster-columns";
+import { clientFormFrom, clientFormToInput, emptyClientForm, type ClientForm, type ClientTextKey } from "@/lib/roster-forms";
 
 /**
  * 客戶名冊（模組五）。建案表單的客戶下拉、專案申請單列印都吃這裡的資料。
@@ -25,46 +27,11 @@ import { affiliateInputField, humanizeAffiliateError } from "@/lib/affiliate";
  * 分類（2026-10-10）：選項不再寫死，吃「設定 → 選項清單 → 客戶分類」（`useOptionList("client_category")`），
  * 管理員可自行新增。篩選下拉列出全部項目（含已停用的——舊客戶可能還用著）；表單下拉只列啟用的項目，
  * 外加這位客戶目前已選的停用項（標「（已停用）」，開舊客戶編輯時下拉不會悄悄換成「未分類」）。
+ *
+ * 欄位對齊 Excel（2026-10-27）：列表欄位與順序＝業主「客供商基本資料／客戶資料」（lib/roster-columns.ts），
+ * 可橫向捲動、第一欄（簡稱）凍結。Excel 沒有的欄位（分類、發票聯式、結帳日、付款日、關係企業）只在編輯表單的「其他」區；
+ * 分類仍可在上方篩選。
  */
-type Form = {
-  name: string; shortName: string; category: ClientCategory | ""; taxId: string; phone: string; fax: string; invoiceAddress: string;
-  contactName: string; contactPhone: string; email: string;
-  invoiceType: InvoiceType | ""; paymentMethod: PaymentMethod | ""; closingDay: string; paymentDay: string;
-  note: string;
-  isAffiliate: boolean;
-};
-/** 純文字欄位的 key（F() 產生輸入框用；勾選欄 isAffiliate 另外畫）。 */
-type TextKey = Exclude<keyof Form, "isAffiliate">;
-const emptyForm = (): Form => ({
-  name: "", shortName: "", category: "", taxId: "", phone: "", fax: "", invoiceAddress: "", contactName: "", contactPhone: "", email: "",
-  invoiceType: "", paymentMethod: "", closingDay: "", paymentDay: "", note: "", isAffiliate: false,
-});
-const fromClient = (c: Client): Form => ({
-  name: c.name, shortName: c.shortName ?? "", category: c.category ?? "", taxId: c.taxId ?? "", phone: c.phone ?? "", fax: c.fax ?? "", invoiceAddress: c.invoiceAddress ?? "",
-  contactName: c.contactName ?? "", contactPhone: c.contactPhone ?? "", email: c.email ?? "",
-  invoiceType: c.invoiceType ?? "", paymentMethod: c.paymentMethod ?? "", closingDay: c.closingDay ?? "", paymentDay: c.paymentDay ?? "",
-  note: c.note ?? "", isAffiliate: c.isAffiliate === true,
-});
-/** `original`＝正在編輯的客戶（新增時 null）：關係企業旗標只在有變動時才送（新增＝勾了才送）。 */
-const toInput = (f: Form, original: Client | null): ClientInput => ({
-  name: f.name.trim(),
-  shortName: f.shortName.trim() || null,
-  ...affiliateInputField(f.isAffiliate, original),
-  category: f.category || null,
-  taxId: f.taxId.trim() || null,
-  phone: f.phone.trim() || null,
-  fax: f.fax.trim() || null,
-  invoiceAddress: f.invoiceAddress.trim() || null,
-  contactName: f.contactName.trim() || null,
-  contactPhone: f.contactPhone.trim() || null,
-  email: f.email.trim() || null,
-  invoiceType: f.invoiceType || null,
-  paymentMethod: f.paymentMethod || null,
-  closingDay: f.closingDay.trim() || null,
-  paymentDay: f.paymentDay.trim() || null,
-  note: f.note.trim() || null,
-});
-
 export default function ClientsPage() {
   const categories = useOptionList("client_category");
   /** 分類 code → 名稱；清單載入中先顯示「…」，免得閃過原始代碼。 */
@@ -74,7 +41,7 @@ export default function ClientsPage() {
   const [categoryFilter, setCategoryFilter] = useState<ClientCategory | "">("");
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Client | "new" | null>(null);
-  const [form, setForm] = useState<Form>(emptyForm());
+  const [form, setForm] = useState<ClientForm>(emptyClientForm());
   const [busy, setBusy] = useState(false);
   // 只有 HR／平台管理員能設定關係企業（會計 API 會 403）；取不到角色就當不能。
   const [canSetAffiliate, setCanSetAffiliate] = useState(() => isHrRole(peekMeCached()?.role));
@@ -107,12 +74,12 @@ export default function ClientsPage() {
 
   function startNew() {
     setEditing("new");
-    setForm(emptyForm());
+    setForm(emptyClientForm());
     setError(null);
   }
   function startEdit(c: Client) {
     setEditing(c);
-    setForm(fromClient(c));
+    setForm(clientFormFrom(c));
     setError(null);
   }
 
@@ -120,16 +87,22 @@ export default function ClientsPage() {
 
   async function save() {
     if (!form.name.trim() || editing === null) return;
+    const parsed = clientFormToInput(form, editing === "new" ? null : editing);
+    if (!parsed.ok) {
+      setError(parsed.error);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      const body = toInput(form, editing === "new" ? null : editing);
+      const body = parsed.input;
       if (editing === "new") await createClient(body);
       else await updateClient(editing.id, body);
       setEditing(null);
       await load();
     } catch (err) {
-      setError(humanizeAffiliateError(humanizeClientError(err, "儲存失敗")));
+      const msg = humanizeAffiliateError(humanizeClientError(err, "儲存失敗"));
+      setError(msg.includes("migration_required") ? "資料庫尚未更新（名冊新欄位），請先套用 migration 0076 再存這些欄位。" : msg);
     } finally {
       setBusy(false);
     }
@@ -145,12 +118,25 @@ export default function ClientsPage() {
     }
   }
 
-  const F = (k: TextKey, label: string, ph?: string, maxLength?: number) => (
-    <div>
+  const F = (k: ClientTextKey, label: string, opts: { ph?: string; maxLength?: number; multiline?: boolean; wide?: boolean } = {}) => (
+    <div className={opts.wide ? "sm:col-span-2" : undefined}>
       <label className={labelCls}>{label}</label>
-      <input className={inputCls} value={form[k]} onChange={(e) => setForm((f) => ({ ...f, [k]: e.target.value }))} placeholder={ph} maxLength={maxLength} />
+      {opts.multiline ? (
+        <textarea
+          className={`${inputCls} min-h-[60px]`}
+          value={form[k]}
+          onChange={(e) => setForm((f) => ({ ...f, [k]: e.target.value }))}
+          placeholder={opts.ph}
+          maxLength={opts.maxLength}
+        />
+      ) : (
+        <input className={inputCls} value={form[k]} onChange={(e) => setForm((f) => ({ ...f, [k]: e.target.value }))} placeholder={opts.ph} maxLength={opts.maxLength} />
+      )}
     </div>
   );
+
+  /** 第一欄（簡稱）凍結：沒填簡稱時以灰字帶出公司名稱，捲到右邊仍認得是哪一家。 */
+  const stickyCell = "sticky left-0 z-10 bg-white";
 
   return (
     <>
@@ -158,11 +144,12 @@ export default function ClientsPage() {
 
       <Card>
         <div className="mb-3 flex flex-wrap items-center gap-3">
-          <input className={`${inputCls} max-w-xs`} value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜尋名稱 / 簡稱 / 統編 / 承辦" />
+          <input className={`${inputCls} max-w-xs`} value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜尋名稱 / 簡稱 / 統編 / 承辦 / 電話" />
           <select
             className="rounded-lg border border-gray-200 px-2 py-1.5 text-sm"
             value={categoryFilter}
             onChange={(e) => setCategoryFilter(e.target.value as ClientCategory | "")}
+            aria-label="客戶分類篩選"
           >
             <option value="">全部分類</option>
             {categories.items.map((item) => (
@@ -182,39 +169,48 @@ export default function ClientsPage() {
           <Empty>{q || categoryFilter ? "沒有符合的客戶" : "尚無客戶，請先新增。"}</Empty>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-max min-w-full text-sm">
               <thead>
                 <tr className="border-b text-left text-xs text-gray-500">
-                  <th className="py-2 pr-3">客戶</th>
-                  <th className="py-2 pr-3">簡稱</th>
-                  <th className="py-2 pr-3">分類</th>
-                  <th className="py-2 pr-3">統編</th>
-                  <th className="py-2 pr-3">採購承辦</th>
-                  <th className="py-2 pr-3">電話</th>
-                  <th className="py-2 pr-3">發票聯式</th>
-                  <th className="py-2 pr-3">付款方式</th>
-                  <th className="py-2"></th>
+                  {CLIENT_EXCEL_COLUMNS.map((col, i) => (
+                    <th key={col.key} scope="col" className={`whitespace-nowrap py-2 pr-3 ${i === 0 ? `${stickyCell} pl-1` : ""}`}>{col.header}</th>
+                  ))}
+                  <th scope="col" className="sticky right-0 z-10 bg-white py-2 pl-3"><span className="sr-only">操作</span></th>
                 </tr>
               </thead>
               <tbody>
                 {shown.map((c) => (
-                  <tr key={c.id} className="border-b last:border-0">
-                    <td className="py-2 pr-3 font-medium text-gray-900">
-                      {c.name}
-                      {c.isAffiliate === true && <Pill tone="blue" className="ml-1.5 align-middle">關係企業</Pill>}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600">{c.shortName || "—"}</td>
-                    <td className="py-2 pr-3 text-gray-600">
-                      {c.category ? (
-                        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{categoryText(c.category)}</span>
-                      ) : "—"}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600">{c.taxId ?? "—"}</td>
-                    <td className="py-2 pr-3 text-gray-600">{c.contactName ?? "—"}{c.contactPhone ? <span className="text-xs text-gray-400">・{c.contactPhone}</span> : null}</td>
-                    <td className="py-2 pr-3 text-gray-600">{c.phone ?? "—"}</td>
-                    <td className="py-2 pr-3 text-gray-600">{c.invoiceType ? INVOICE_TYPE_LABELS[c.invoiceType] : "—"}</td>
-                    <td className="py-2 pr-3 text-gray-600">{c.paymentMethod ? PAYMENT_METHOD_LABELS[c.paymentMethod] : "—"}</td>
-                    <td className="py-2 text-right whitespace-nowrap">
+                  <tr key={c.id} className="border-b align-top last:border-0">
+                    {CLIENT_EXCEL_COLUMNS.map((col, i) => {
+                      const value = clientCellText(c, col.key, PAYMENT_METHOD_LABELS);
+                      if (i === 0) {
+                        return (
+                          <th key={col.key} scope="row" className={`${stickyCell} whitespace-nowrap py-2 pl-1 pr-3 text-left font-medium text-gray-900`}>
+                            {value || <span className="font-normal text-gray-400" title="未填簡稱，顯示公司名稱">{c.name}</span>}
+                          </th>
+                        );
+                      }
+                      if (col.key === "name") {
+                        return (
+                          <td key={col.key} className="min-w-[10rem] py-2 pr-3 text-gray-900">
+                            {value}
+                            {c.isAffiliate === true && <Pill tone="blue" className="ml-1.5 align-middle">關係企業</Pill>}
+                            {c.category && (
+                              <span className="ml-1.5 rounded-full bg-gray-100 px-2 py-0.5 align-middle text-xs text-gray-600">{categoryText(c.category)}</span>
+                            )}
+                          </td>
+                        );
+                      }
+                      return (
+                        <td
+                          key={col.key}
+                          className={`py-2 pr-3 text-gray-600 ${col.multiline ? "min-w-[9rem] max-w-[18rem] whitespace-pre-line break-words" : "whitespace-nowrap"}`}
+                        >
+                          {value || "—"}
+                        </td>
+                      );
+                    })}
+                    <td className="sticky right-0 z-10 whitespace-nowrap bg-white py-2 pl-3 text-right">
                       <button type="button" onClick={() => startEdit(c)} className="mr-3 text-xs text-gray-600 hover:underline">編輯</button>
                       <button type="button" onClick={() => void remove(c)} className="text-xs text-gray-400 hover:text-red-600">刪除</button>
                     </td>
@@ -230,8 +226,31 @@ export default function ClientsPage() {
         <Card>
           <h2 className="mb-3 text-sm font-semibold text-gray-700">{editing === "new" ? "新增客戶" : `編輯：${editing.name}`}</h2>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {F("name", "名稱 *")}
-            {F("shortName", "簡稱", "選填，最長 40 字", 40)}
+            {F("shortName", "簡稱", { ph: "選填，最長 40 字", maxLength: 40 })}
+            {F("seq", "序", { ph: "整數" })}
+            {F("region", "區域", { ph: "例：台北市", maxLength: 40 })}
+            {F("code", "編號", { maxLength: 40 })}
+            {F("name", "公司名稱 *", { maxLength: 200, wide: true })}
+            {F("phone", "TEL", { multiline: true, maxLength: 200 })}
+            {F("fax", "FAX", { multiline: true, maxLength: 200 })}
+            {F("contactName", "承辦窗口", { multiline: true, maxLength: 300 })}
+            {F("contactPhone", "Mobil", { multiline: true, maxLength: 200 })}
+            {F("email", "e-mail", { multiline: true, maxLength: 500 })}
+            {F("invoiceAddress", "公司地址", { ph: "也是開立發票用的地址", maxLength: 300 })}
+            {F("taxId", "統編", { ph: "8 碼" })}
+            <div>
+              <label className={labelCls}>收款方式</label>
+              <select className={inputCls} value={form.paymentMethod} onChange={(e) => setForm((f) => ({ ...f, paymentMethod: e.target.value as PaymentMethod | "" }))}>
+                <option value="">未指定</option>
+                {(Object.keys(PAYMENT_METHOD_LABELS) as PaymentMethod[]).map((v) => (
+                  <option key={v} value={v}>{PAYMENT_METHOD_LABELS[v]}</option>
+                ))}
+              </select>
+            </div>
+            {F("note", "備註", { multiline: true, maxLength: 2000, wide: true })}
+          </div>
+          <h3 className="mb-2 mt-4 text-xs font-semibold text-gray-500">其他（Excel 沒有的欄位）</h3>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label className={labelCls}>分類</label>
               <select
@@ -245,12 +264,6 @@ export default function ClientsPage() {
                 ))}
               </select>
             </div>
-            {F("taxId", "統一編號", "8 碼")}
-            {F("phone", "電話")}
-            {F("fax", "傳真")}
-            {F("contactName", "採購承辦")}
-            {F("contactPhone", "承辦電話")}
-            {F("email", "Email")}
             <div>
               <label className={labelCls}>發票聯式</label>
               <select className={inputCls} value={form.invoiceType} onChange={(e) => setForm((f) => ({ ...f, invoiceType: e.target.value as InvoiceType | "" }))}>
@@ -260,18 +273,8 @@ export default function ClientsPage() {
                 ))}
               </select>
             </div>
-            <div>
-              <label className={labelCls}>付款方式</label>
-              <select className={inputCls} value={form.paymentMethod} onChange={(e) => setForm((f) => ({ ...f, paymentMethod: e.target.value as PaymentMethod | "" }))}>
-                <option value="">未指定</option>
-                {(Object.keys(PAYMENT_METHOD_LABELS) as PaymentMethod[]).map((v) => (
-                  <option key={v} value={v}>{PAYMENT_METHOD_LABELS[v]}</option>
-                ))}
-              </select>
-            </div>
-            {F("closingDay", "結帳日", "例：每月 5 日")}
-            {F("paymentDay", "付款日", "例：次月 10 日")}
-            <div className="sm:col-span-2">{F("invoiceAddress", "發票地址")}</div>
+            {F("closingDay", "結帳日", { ph: "例：每月 5 日" })}
+            {F("paymentDay", "付款日", { ph: "例：次月 10 日" })}
             <div className="sm:col-span-2">
               <label className={`flex items-start gap-2 text-sm ${canSetAffiliate ? "cursor-pointer text-gray-700" : "text-gray-400"}`}>
                 <input
@@ -289,10 +292,6 @@ export default function ClientsPage() {
                   </span>
                 </span>
               </label>
-            </div>
-            <div className="sm:col-span-2">
-              <label className={labelCls}>備註</label>
-              <textarea className={`${inputCls} min-h-[72px]`} value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} />
             </div>
           </div>
           <div className="mt-3 flex items-center gap-3">

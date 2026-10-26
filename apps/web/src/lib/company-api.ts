@@ -53,6 +53,8 @@ export function putMailbox(
 }
 
 /* ------------------------------------------------------------- 廠商名冊 -- */
+/** 名冊類別＝Excel「客供商基本資料」的工作表（0076）。 */
+export type VendorRosterKind = "supplier" | "engineer" | "review_unit"
 export interface Vendor {
   id: string
   name: string
@@ -60,16 +62,30 @@ export interface Vendor {
   shortName?: string | null
   /** 關係企業（集團內姊妹公司）：集團總覽的集團合計會剔除付給這家廠商的放款。選填：舊回應沒有這個鍵。 */
   isAffiliate?: boolean
+  /** 名冊類別＝Excel 工作表（0076）：supplier 供應商資料 | engineer 技師資料 | review_unit 送審相關單位。選填：舊回應沒有這個鍵（當 supplier）。 */
+  rosterKind?: VendorRosterKind
+  /** Excel「序」（0076）。 */
+  seq?: number | null
+  /** Excel「類別」。 */
   category: string | null
+  /** Excel「細目」（0076）。 */
+  subCategory?: string | null
+  /** Excel「編號」（0076）。 */
+  code?: string | null
+  /** Excel「承辦窗口」（原格整段文字，可能含多位窗口）。 */
   contactName: string | null
   title: string | null
   phone: string | null
+  /** Excel「FAX」（0076）。 */
+  fax?: string | null
   mobile: string | null
   email: string | null
   address: string | null
   taxId: string | null
   taxIdValid: boolean | null
   website: string | null
+  /** Excel「付款方式」（0076），自由文字。 */
+  paymentTerms?: string | null
   note: string | null
   /** 收款帳戶（放款專區用）。 */
   bankName: string | null

@@ -52,6 +52,10 @@ export interface Client {
   isAffiliate?: boolean
   /** 分類 code（選項清單 client_category）：可空，既有名冊未必補得回。 */
   category: ClientCategory | null
+  /** Excel「客戶資料」的「序」「區域」「編號」（0076）。選填：舊回應沒有這些鍵。 */
+  seq?: number | null
+  region?: string | null
+  code?: string | null
   taxId: string | null
   phone: string | null
   fax: string | null

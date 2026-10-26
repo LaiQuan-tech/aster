@@ -1,14 +1,19 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Card, Empty, ErrorText, Pill, PrimaryButton, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import { buildRemittanceText, copyText } from "@/lib/remittance";
 import { getMeCached, peekMeCached } from "@/lib/ess-state";
 import { isHrRole } from "@/lib/roles";
-import { affiliateInputField, humanizeAffiliateError } from "@/lib/affiliate";
+import { humanizeAffiliateError } from "@/lib/affiliate";
 import {
   listVendors, createVendor, updateVendor, deleteVendor, getVendorCardUrl, scanVendorCard,
-  type Vendor, type VendorInput,
+  type Vendor, type VendorInput, type VendorRosterKind,
 } from "@/lib/company-api";
+import {
+  VENDOR_EXCEL_COLUMNS, VENDOR_ROSTER_KINDS, VENDOR_ROSTER_KIND_LABELS,
+  countVendorsByKind, filterVendorsByKind, vendorCellText, vendorRosterKind,
+} from "@/lib/roster-columns";
+import { emptyVendorForm, vendorFormFrom, vendorFormToInput, type VendorForm, type VendorTextKey } from "@/lib/roster-forms";
 
 /**
  * 廠商名冊 · 名片建檔。
@@ -23,43 +28,19 @@ import {
  * 會剔除付給這類廠商的放款（各公司自己的數字照常包含）。這個標記會改變老闆看的集團數字，所以只有
  * HR／平台管理員能設定（API 對其他角色回 403 affiliate_hr_only）；其他人看得到但勾選框是停用的，
  * 存檔時也只在旗標有變動才送出，免得改別的欄位被擋。
+ *
+ * 欄位對齊 Excel（2026-10-27）：列表欄位與順序＝業主的「客供商基本資料」（lib/roster-columns.ts），
+ * 可橫向捲動、第一欄（簡稱）凍結；三個工作表（供應商／技師／送審相關單位）用上方頁籤篩選。
+ * Excel 沒有的欄位（職稱、銀行帳戶、關係企業、名片）只在編輯表單的「其他」區。
  */
-type Form = {
-  name: string; shortName: string; category: string; contactName: string; title: string; phone: string; mobile: string;
-  email: string; address: string; taxId: string; website: string; note: string;
-  bankName: string; bankCode: string; bankAccount: string; accountHolder: string;
-  isAffiliate: boolean;
-};
-/** 純文字欄位的 key（F() 產生輸入框用；勾選欄 isAffiliate 另外畫）。 */
-type TextKey = Exclude<keyof Form, "isAffiliate">;
-const emptyForm = (): Form => ({
-  name: "", shortName: "", category: "", contactName: "", title: "", phone: "", mobile: "", email: "", address: "", taxId: "", website: "", note: "",
-  bankName: "", bankCode: "", bankAccount: "", accountHolder: "", isAffiliate: false,
-});
-const fromVendor = (v: Vendor): Form => ({
-  name: v.name, shortName: v.shortName ?? "", category: v.category ?? "", contactName: v.contactName ?? "", title: v.title ?? "", phone: v.phone ?? "", mobile: v.mobile ?? "",
-  email: v.email ?? "", address: v.address ?? "", taxId: v.taxId ?? "", website: v.website ?? "", note: v.note ?? "",
-  bankName: v.bankName ?? "", bankCode: v.bankCode ?? "", bankAccount: v.bankAccount ?? "", accountHolder: v.accountHolder ?? "",
-  isAffiliate: v.isAffiliate === true,
-});
-/** `original`＝正在編輯的廠商（新增時 null）：關係企業旗標只在有變動時才送（新增＝勾了才送）。 */
-const toInput = (f: Form, original: Vendor | null): VendorInput => ({
-  name: f.name.trim(),
-  shortName: f.shortName.trim() || null,
-  ...affiliateInputField(f.isAffiliate, original),
-  category: f.category.trim() || null, contactName: f.contactName.trim() || null, title: f.title.trim() || null,
-  phone: f.phone.trim() || null, mobile: f.mobile.trim() || null, email: f.email.trim() || null, address: f.address.trim() || null,
-  taxId: f.taxId.trim() || null, website: f.website.trim() || null, note: f.note.trim() || null,
-  bankName: f.bankName.trim() || null, bankCode: f.bankCode.trim() || null, bankAccount: f.bankAccount.trim() || null, accountHolder: f.accountHolder.trim() || null,
-});
-
 export default function VendorsPage() {
   const toast = useToast();
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [q, setQ] = useState("");
+  const [kind, setKind] = useState<VendorRosterKind | "all">("all");
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Vendor | "new" | null>(null);
-  const [form, setForm] = useState<Form>(emptyForm());
+  const [form, setForm] = useState<VendorForm>(emptyVendorForm());
   const [cardPath, setCardPath] = useState<string | null>(null);
   const [cardPreview, setCardPreview] = useState<string | null>(null);
   const [scanMsg, setScanMsg] = useState<string | null>(null);
@@ -95,10 +76,10 @@ export default function VendorsPage() {
   }, [load]);
 
   function startNew() {
-    setEditing("new"); setForm(emptyForm()); setCardPath(null); setCardPreview(null); setScanMsg(null);
+    setEditing("new"); setForm(emptyVendorForm(kind === "all" ? "supplier" : kind)); setCardPath(null); setCardPreview(null); setScanMsg(null); setError(null);
   }
   async function startEdit(v: Vendor) {
-    setEditing(v); setForm(fromVendor(v)); setCardPath(null); setScanMsg(null); setCardPreview(null);
+    setEditing(v); setForm(vendorFormFrom(v)); setCardPath(null); setScanMsg(null); setCardPreview(null); setError(null);
     if (v.hasCard) {
       try { setCardPreview((await getVendorCardUrl(v.id)).url); } catch { /* 沒圖就沒圖 */ }
     }
@@ -142,16 +123,22 @@ export default function VendorsPage() {
 
   async function save() {
     if (!form.name.trim() || editing === null) return;
+    const parsed = vendorFormToInput(form, editing === "new" ? null : editing);
+    if (!parsed.ok) {
+      setError(parsed.error);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      const body: VendorInput = { ...toInput(form, editing === "new" ? null : editing), ...(cardPath ? { cardStoragePath: cardPath, source: "card_ocr" as const } : {}) };
+      const body: VendorInput = { ...parsed.input, ...(cardPath ? { cardStoragePath: cardPath, source: "card_ocr" as const } : {}) };
       if (editing === "new") await createVendor(body);
       else await updateVendor(editing.id, body);
       setEditing(null);
       await load();
     } catch (err) {
-      setError(humanizeAffiliateError(err instanceof Error ? err.message : "儲存失敗"));
+      const msg = err instanceof Error ? err.message : "儲存失敗";
+      setError(msg.includes("migration_required") ? "資料庫尚未更新（名冊新欄位），請先套用 migration 0076 再存這些欄位。" : humanizeAffiliateError(msg));
     } finally {
       setBusy(false);
     }
@@ -174,70 +161,113 @@ export default function VendorsPage() {
     try { await deleteVendor(v.id); await load(); } catch (err) { setError(err instanceof Error ? err.message : "刪除失敗"); }
   }
 
-  const F = (k: TextKey, label: string, ph?: string, maxLength?: number) => (
-    <div>
+  const counts = useMemo(() => countVendorsByKind(vendors), [vendors]);
+  const shown = useMemo(() => filterVendorsByKind(vendors, kind), [vendors, kind]);
+
+  const F = (k: VendorTextKey, label: string, opts: { ph?: string; maxLength?: number; multiline?: boolean; wide?: boolean } = {}) => (
+    <div className={opts.wide ? "sm:col-span-2" : undefined}>
       <label className={labelCls}>{label}</label>
-      <input className={inputCls} value={form[k]} onChange={(e) => setForm((f) => ({ ...f, [k]: e.target.value }))} placeholder={ph} maxLength={maxLength} />
+      {opts.multiline ? (
+        <textarea
+          className={`${inputCls} min-h-[60px]`}
+          value={form[k]}
+          onChange={(e) => setForm((f) => ({ ...f, [k]: e.target.value }))}
+          placeholder={opts.ph}
+          maxLength={opts.maxLength}
+        />
+      ) : (
+        <input className={inputCls} value={form[k]} onChange={(e) => setForm((f) => ({ ...f, [k]: e.target.value }))} placeholder={opts.ph} maxLength={opts.maxLength} />
+      )}
     </div>
   );
+
+  /** 第一欄（簡稱）凍結：沒填簡稱時以灰字帶出公司名稱，捲到右邊仍認得是哪一家。 */
+  const stickyCell = "sticky left-0 z-10 bg-white";
 
   return (
     <>
       {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
 
       <Card>
+        <div className="mb-3 flex flex-wrap items-center gap-2" role="tablist" aria-label="名冊類別">
+          {(["all", ...VENDOR_ROSTER_KINDS] as const).map((k) => (
+            <button
+              key={k}
+              type="button"
+              role="tab"
+              aria-selected={kind === k}
+              onClick={() => setKind(k)}
+              className={`rounded-full border px-3 py-1 text-sm ${kind === k ? "border-gray-900 bg-gray-900 text-white" : "border-gray-300 text-gray-700 hover:bg-gray-50"}`}
+            >
+              {k === "all" ? "全部" : VENDOR_ROSTER_KIND_LABELS[k]}
+              <span className={`ml-1 text-xs ${kind === k ? "text-gray-200" : "text-gray-400"}`}>{counts[k]}</span>
+            </button>
+          ))}
+        </div>
         <div className="mb-3 flex flex-wrap items-center gap-3">
-          <input className={`${inputCls} max-w-xs`} value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜尋名稱 / 簡稱 / 窗口 / 統編 / 電話 / 類別" />
+          <input className={`${inputCls} max-w-xs`} value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜尋名稱 / 簡稱 / 窗口 / 統編 / 電話 / 類別 / 細目" />
           <input ref={fileRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => void onPickCard(e.target.files?.[0])} />
           <button type="button" onClick={() => fileRef.current?.click()} disabled={busy} className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 disabled:opacity-50">
             📷 拍名片建檔
           </button>
           <PrimaryButton type="button" onClick={startNew}>手動新增</PrimaryButton>
-          <span className="text-sm text-gray-500">{vendors.length} 家</span>
+          <span className="text-sm text-gray-500">{shown.length} 家{kind !== "all" ? `（共 ${vendors.length} 家）` : ""}</span>
         </div>
-        {vendors.length === 0 ? (
-          <Empty>{q ? "沒有符合的廠商" : "尚無廠商。拍張名片或手動新增。"}</Empty>
+        {shown.length === 0 ? (
+          <Empty>{q || kind !== "all" ? "沒有符合的廠商" : "尚無廠商。拍張名片或手動新增。"}</Empty>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-max min-w-full text-sm">
               <thead>
                 <tr className="border-b text-left text-xs text-gray-500">
-                  <th className="py-2 pr-3">廠商</th>
-                  <th className="py-2 pr-3">簡稱</th>
-                  <th className="py-2 pr-3">類別</th>
-                  <th className="py-2 pr-3">窗口</th>
-                  <th className="py-2 pr-3">電話 / 手機</th>
-                  <th className="py-2 pr-3">Email</th>
-                  <th className="py-2 pr-3">統編</th>
-                  <th className="py-2 pr-3">銀行</th>
-                  <th className="py-2 pr-3">代碼</th>
-                  <th className="py-2 pr-3">帳號</th>
-                  <th className="py-2 pr-3">戶名</th>
-                  <th className="py-2"></th>
+                  {VENDOR_EXCEL_COLUMNS.map((col, i) => (
+                    <th key={col.key} scope="col" className={`whitespace-nowrap py-2 pr-3 ${i === 0 ? `${stickyCell} pl-1` : ""}`}>{col.header}</th>
+                  ))}
+                  <th scope="col" className="sticky right-0 z-10 bg-white py-2 pl-3"><span className="sr-only">操作</span></th>
                 </tr>
               </thead>
               <tbody>
-                {vendors.map((v) => (
-                  <tr key={v.id} className="border-b last:border-0">
-                    <td className="py-2 pr-3 font-medium text-gray-900">
-                      {v.name}
-                      {v.hasCard && <span className="ml-1 text-xs text-gray-400" title="有名片影像">🪪</span>}
-                      {v.isAffiliate === true && <Pill tone="blue" className="ml-1.5 align-middle">關係企業</Pill>}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600">{v.shortName || "—"}</td>
-                    <td className="py-2 pr-3 text-gray-600">{v.category ?? "—"}</td>
-                    <td className="py-2 pr-3 text-gray-600">{v.contactName ?? "—"}{v.title ? <span className="text-xs text-gray-400">・{v.title}</span> : null}</td>
-                    <td className="py-2 pr-3 text-gray-600">{[v.phone, v.mobile].filter(Boolean).join(" / ") || "—"}</td>
-                    <td className="py-2 pr-3 text-gray-600">{v.email ?? "—"}</td>
-                    <td className="py-2 pr-3 text-gray-600">
-                      {v.taxId ?? "—"}
-                      {v.taxIdValid === false && <span className="ml-1 text-xs text-amber-700" title="統一編號檢查碼不符">⚠</span>}
-                    </td>
-                    <td className="py-2 pr-3 text-gray-600">{v.bankName ?? "—"}</td>
-                    <td className="py-2 pr-3 text-gray-600">{v.bankCode ?? "—"}</td>
-                    <td className="py-2 pr-3 text-gray-600">{v.bankAccount ?? "—"}</td>
-                    <td className="py-2 pr-3 text-gray-600">{v.accountHolder ?? "—"}</td>
-                    <td className="py-2 text-right whitespace-nowrap">
+                {shown.map((v) => (
+                  <tr key={v.id} className="border-b align-top last:border-0">
+                    {VENDOR_EXCEL_COLUMNS.map((col, i) => {
+                      const value = vendorCellText(v, col.key);
+                      if (i === 0) {
+                        return (
+                          <th key={col.key} scope="row" className={`${stickyCell} whitespace-nowrap py-2 pl-1 pr-3 text-left font-medium text-gray-900`}>
+                            {value || <span className="font-normal text-gray-400" title="未填簡稱，顯示公司名稱">{v.name}</span>}
+                          </th>
+                        );
+                      }
+                      if (col.key === "name") {
+                        return (
+                          <td key={col.key} className="min-w-[10rem] py-2 pr-3 text-gray-900">
+                            {value}
+                            {v.hasCard && <span className="ml-1 text-xs text-gray-400" title="有名片影像">🪪</span>}
+                            {v.isAffiliate === true && <Pill tone="blue" className="ml-1.5 align-middle">關係企業</Pill>}
+                            {kind === "all" && vendorRosterKind(v) !== "supplier" && (
+                              <Pill tone="gray" className="ml-1.5 align-middle">{VENDOR_ROSTER_KIND_LABELS[vendorRosterKind(v)]}</Pill>
+                            )}
+                          </td>
+                        );
+                      }
+                      if (col.key === "taxId") {
+                        return (
+                          <td key={col.key} className="whitespace-nowrap py-2 pr-3 text-gray-600">
+                            {value || "—"}
+                            {v.taxIdValid === false && <span className="ml-1 text-xs text-amber-700" title="統一編號檢查碼不符">⚠</span>}
+                          </td>
+                        );
+                      }
+                      return (
+                        <td
+                          key={col.key}
+                          className={`py-2 pr-3 text-gray-600 ${col.multiline ? "min-w-[9rem] max-w-[18rem] whitespace-pre-line break-words" : "whitespace-nowrap"}`}
+                        >
+                          {value || "—"}
+                        </td>
+                      );
+                    })}
+                    <td className="sticky right-0 z-10 whitespace-nowrap bg-white py-2 pl-3 text-right">
                       <button
                         type="button"
                         onClick={() => void copyRemittance(v)}
@@ -263,43 +293,64 @@ export default function VendorsPage() {
           <h2 className="mb-3 text-sm font-semibold text-gray-700">{editing === "new" ? "新增廠商" : `編輯：${editing.name}`}</h2>
           {scanMsg && <p className="mb-3 rounded-md bg-blue-50 px-3 py-2 text-sm text-blue-800">{scanMsg}</p>}
           <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_260px]">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {F("name", "廠商 / 公司名稱 *")}
-              {F("shortName", "簡稱", "選填，最長 40 字", 40)}
-              {F("category", "類別", "例：印刷、建材、顧問")}
-              {F("contactName", "窗口姓名")}
-              {F("title", "職稱")}
-              {F("phone", "電話")}
-              {F("mobile", "手機")}
-              {F("email", "Email")}
-              {F("website", "網站")}
-              {F("taxId", "統一編號", "8 碼")}
-              {F("bankName", "銀行", "例：兆豐銀行")}
-              {F("bankCode", "銀行代碼", "例：017")}
-              {F("bankAccount", "帳號")}
-              {F("accountHolder", "戶名", "帳戶開戶姓名／公司名，供放款核對用")}
-              <div className="sm:col-span-2">{F("address", "地址")}</div>
-              <div className="sm:col-span-2">
-                <label className={`flex items-start gap-2 text-sm ${canSetAffiliate ? "cursor-pointer text-gray-700" : "text-gray-400"}`}>
-                  <input
-                    type="checkbox"
-                    className="mt-0.5 h-4 w-4"
-                    checked={form.isAffiliate}
-                    disabled={!canSetAffiliate}
-                    onChange={(e) => setForm((f) => ({ ...f, isAffiliate: e.target.checked }))}
-                  />
-                  <span>
-                    關係企業（集團內姊妹公司）
-                    <span className="block text-xs text-gray-400">
-                      勾選後，付給這家廠商的放款在「集團總覽」的集團合計中會被剔除（各公司自己的數字照常包含）。
-                      {canSetAffiliate ? "" : "只有 HR 管理員可以設定。"}
-                    </span>
-                  </span>
-                </label>
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className={labelCls}>名冊類別</label>
+                  <select
+                    className={inputCls}
+                    value={form.rosterKind}
+                    onChange={(e) => setForm((f) => ({ ...f, rosterKind: e.target.value as VendorRosterKind }))}
+                  >
+                    {VENDOR_ROSTER_KINDS.map((k) => (
+                      <option key={k} value={k}>{VENDOR_ROSTER_KIND_LABELS[k]}</option>
+                    ))}
+                  </select>
+                </div>
+                {F("shortName", "簡稱", { ph: "選填，最長 40 字", maxLength: 40 })}
+                {F("seq", "序", { ph: "整數" })}
+                {F("category", "類別", { ph: "例：廠商、空調、電力", maxLength: 60 })}
+                {F("subCategory", "細目", { ph: "例：電線電纜、消防", maxLength: 60 })}
+                {F("code", "編號", { maxLength: 40 })}
+                {F("name", "公司名稱 *", { maxLength: 120, wide: true })}
+                {F("phone", "TEL", { multiline: true, maxLength: 200 })}
+                {F("fax", "FAX", { multiline: true, maxLength: 200 })}
+                {F("contactName", "承辦窗口", { multiline: true, maxLength: 300 })}
+                {F("mobile", "Mobil", { multiline: true, maxLength: 200 })}
+                {F("email", "E-mail", { multiline: true, maxLength: 500 })}
+                {F("address", "公司地址", { maxLength: 300 })}
+                {F("taxId", "統編", { ph: "8 碼" })}
+                {F("paymentTerms", "付款方式", { ph: "例：現金、月結", maxLength: 100 })}
+                {F("website", "網址", { maxLength: 200 })}
+                {F("note", "備註", { multiline: true, maxLength: 2000, wide: true })}
               </div>
-              <div className="sm:col-span-2">
-                <label className={labelCls}>備註</label>
-                <textarea className={`${inputCls} min-h-[72px]`} value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} />
+              <div>
+                <h3 className="mb-2 text-xs font-semibold text-gray-500">其他（Excel 沒有的欄位）</h3>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  {F("title", "職稱", { maxLength: 60 })}
+                  {F("bankName", "銀行", { ph: "例：兆豐銀行" })}
+                  {F("bankCode", "銀行代碼", { ph: "例：017" })}
+                  {F("bankAccount", "帳號")}
+                  {F("accountHolder", "戶名", { ph: "帳戶開戶姓名／公司名，供放款核對用" })}
+                  <div className="sm:col-span-2">
+                    <label className={`flex items-start gap-2 text-sm ${canSetAffiliate ? "cursor-pointer text-gray-700" : "text-gray-400"}`}>
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 h-4 w-4"
+                        checked={form.isAffiliate}
+                        disabled={!canSetAffiliate}
+                        onChange={(e) => setForm((f) => ({ ...f, isAffiliate: e.target.checked }))}
+                      />
+                      <span>
+                        關係企業（集團內姊妹公司）
+                        <span className="block text-xs text-gray-400">
+                          勾選後，付給這家廠商的放款在「集團總覽」的集團合計中會被剔除（各公司自己的數字照常包含）。
+                          {canSetAffiliate ? "" : "只有 HR 管理員可以設定。"}
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+                </div>
               </div>
             </div>
             <div>

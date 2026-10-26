@@ -194,8 +194,8 @@ describe("GET /vendors?q= — 搜尋也比對簡稱", () => {
 
     expect(res.status).toBe(200)
     const filter = fake.orFilters.at(-1) ?? ""
-    // 剝完是「乙印deleted.is.null」：七段 ilike，沒有多出任何其他運算子的條件
-    expect(filter.split(",")).toHaveLength(7)
+    // 剝完是「乙印deleted.is.null」：八段 ilike（0076 加了細目 sub_category），沒有多出任何其他運算子的條件
+    expect(filter.split(",")).toHaveLength(8)
     expect(filter.split(",").every((term) => term.includes(".ilike.%乙印deleted.is.null%"))).toBe(true)
     expect(filter).toContain("short_name.ilike.%乙印deleted.is.null%")
     expect(idsOf(res)).toEqual([])

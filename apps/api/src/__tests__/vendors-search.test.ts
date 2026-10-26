@@ -58,9 +58,11 @@ const VENDOR_ROW = {
   updated_at: "2026-10-01T00:00:00+00:00",
 }
 
-/** routes/vendors.ts 的 or() 依序比對的七個欄位（short_name 簡稱由 0060 加入）。 */
-const SEARCH_COLS = ["name", "short_name", "contact_name", "category", "tax_id", "phone", "mobile"]
+/** routes/vendors.ts 的 or() 依序比對的八個欄位（short_name 簡稱由 0060 加入；sub_category 細目由 0076 加入，0076 沒套時不比對）。 */
+const SEARCH_COLS = ["name", "short_name", "contact_name", "category", "tax_id", "phone", "mobile", "sub_category"]
 const expectedOr = (needle: string) => SEARCH_COLS.map((col) => `${col}.ilike.%${needle}%`).join(",")
+/** 退回舊欄位集（0076 沒套）時的 or()：少了 sub_category。 */
+const expectedOrLegacy = (needle: string) => SEARCH_COLS.filter((col) => col !== "sub_category").map((col) => `${col}.ilike.%${needle}%`).join(",")
 
 const vendorChains = () => sb.chains.filter((chain) => chain.table === "vendors")
 const argsOf = (chain: { calls: Array<{ method: string; args: unknown[] }> }, method: string) =>
@@ -77,7 +79,7 @@ function soleOrFilter(): string {
   return ors[0][0] as string
 }
 
-/** or 條件拆回七段：欄位順序不變、每段都是 `<col>.ilike.%<needle>%`，needle 不含 % _ , ( )。 */
+/** or 條件拆回八段：欄位順序不變、每段都是 `<col>.ilike.%<needle>%`，needle 不含 % _ , ( )。 */
 function needlesOf(filter: string): string[] {
   const terms = filter.split(",")
   expect(terms).toHaveLength(SEARCH_COLS.length)
@@ -103,7 +105,7 @@ describe("GET /vendors?q= — 剝除 % _ , ( )", () => {
     ["開括號", "(測試廠商甲", "測試廠商甲"],
     ["LIKE 萬用字元", "50%_折扣", "50折扣"],
     ["全部混在一起", "%_,()測試(廠商),甲_%", "測試廠商甲"],
-  ])("%s：剝完才進 or()，仍是七段 ilike、不多出條件", async (_label, q, needle) => {
+  ])("%s：剝完才進 or()，仍是八段 ilike、不多出條件", async (_label, q, needle) => {
     const res = await search(q)
 
     expect(res.status).toBe(200)
@@ -117,7 +119,7 @@ describe("GET /vendors?q= — 搜尋字串長度上限", () => {
   it.each([
     ["8000 個英文字", "a".repeat(8000), "a"],
     ["1000 個中文字", "字".repeat(1000), "字"],
-  ])("%s的 q：七段 ilike 的 needle 各恰好 100 字", async (_label, q, ch) => {
+  ])("%s的 q：八段 ilike 的 needle 各恰好 100 字", async (_label, q, ch) => {
     const res = await search(q)
 
     expect(res.status).toBe(200)
@@ -172,9 +174,10 @@ describe("GET /vendors?q= — 缺匯款欄位重試（withVendorCols）", () => 
     expect(String(argsOf(chains[0], "select")[0][0])).toContain("bank_name")
     expect(String(argsOf(chains[1], "select")[0][0])).not.toContain("bank_name")
     const needle = `測試廠商甲${"乙".repeat(95)}`
-    for (const chain of chains) {
-      expect(argsOf(chain, "eq")).toContainEqual(["tenant_id", sb.TENANT])
-      expect(argsOf(chain, "or")).toEqual([[expectedOr(needle)]])
-    }
+    for (const chain of chains) expect(argsOf(chain, "eq")).toContainEqual(["tenant_id", sb.TENANT])
+    // 缺的是銀行欄＝連 0076 都沒套：第二次同時拿掉 0076 新欄位（含搜尋的 sub_category）
+    expect(argsOf(chains[0], "or")).toEqual([[expectedOr(needle)]])
+    expect(argsOf(chains[1], "or")).toEqual([[expectedOrLegacy(needle)]])
+    expect(String(argsOf(chains[1], "select")[0][0])).not.toContain("roster_kind")
   })
 })

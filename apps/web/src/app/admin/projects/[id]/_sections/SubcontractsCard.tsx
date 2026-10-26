@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls } from "@/components/admin-ui";
 import { VendorCombo } from "@/components/VendorCombo";
 import type { Vendor } from "@/lib/company-api";
+import { vendorCategoryLabel } from "@/lib/roster-columns";
 import { companyOptions } from "@/lib/company-options";
 import {
   putProjectSubcontracts,
@@ -84,19 +85,20 @@ export function SubcontractsCard({
   load,
 }: SubcontractsCardProps) {
   // B4：廠商依類別篩（vendors.category 是自由文字，不是固定列舉——類別選項
-  // 就從目前名冊裡實際出現過的值取，不強加一份清單）。
+  // 就從目前名冊裡實際出現過的值取，不強加一份清單）。2026-10-27 名冊對齊 Excel 後類別只放大類、
+  // 細目另存 subCategory，篩選改用「類別／細目」合併字（vendorCategoryLabel），維持原本的分得夠細。
   const [vendorCategoryFilter, setVendorCategoryFilter] = useState("");
   /** 正在送驗收確認的那一期（`subId:installmentNo`）。 */
   const [acceptingKey, setAcceptingKey] = useState<string | null>(null);
   const vendorCategories = useMemo(
-    () => Array.from(new Set(vendors.map((v) => v.category).filter((c): c is string => !!c))).sort(),
+    () => Array.from(new Set(vendors.map((v) => vendorCategoryLabel(v)).filter(Boolean))).sort(),
     [vendors],
   );
   /** 篩選後的廠商清單，但這列目前選的廠商一定留著——不然篩一下會讓已選的
    * 廠商從下拉裡消失，看起來像選到的東西不見了。 */
   function vendorsForRow(row: SubRow) {
     if (!vendorCategoryFilter) return vendors;
-    const filtered = vendors.filter((v) => v.category === vendorCategoryFilter);
+    const filtered = vendors.filter((v) => vendorCategoryLabel(v) === vendorCategoryFilter);
     if (row.vendorId && !filtered.some((v) => v.id === row.vendorId)) {
       const cur = vendors.find((v) => v.id === row.vendorId);
       if (cur) return [cur, ...filtered];

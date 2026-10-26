@@ -10,6 +10,7 @@ import { isValidTaiwanTaxId, TAX_ID_RE } from "../services/tax-id.js"
 import { INVOICE_TYPES, PAYMENT_METHODS } from "../services/project-money.js"
 import { CLIENT_COLS, serializeClient, type ClientRow } from "../services/project-application-store.js"
 import { CLIENT_CATEGORY_LIST_KEY, checkOptionPick, findOptionList } from "../services/option-lists.js"
+import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 
 export const clientsRouter = Router()
 
@@ -23,10 +24,56 @@ export const clientsRouter = Router()
  * 集團總覽（services/group-overview.ts）的集團合計會剔除「客戶是關係企業的專案收入」。
  */
 const CLIENT_COLS_EXT = `${CLIENT_COLS}, category, short_name, is_affiliate`
-type ClientRowExt = ClientRow & { category: string | null; short_name: string | null; is_affiliate: boolean | null }
-function serializeClientExt(r: ClientRowExt) {
-  return { ...serializeClient(r), category: r.category ?? null, shortName: r.short_name ?? null, isAffiliate: r.is_affiliate === true }
+type ClientRowExt = ClientRow & {
+  category: string | null
+  short_name: string | null
+  is_affiliate: boolean | null
+  seq?: number | null
+  region?: string | null
+  code?: string | null
 }
+function serializeClientExt(r: ClientRowExt) {
+  return {
+    ...serializeClient(r),
+    category: r.category ?? null,
+    shortName: r.short_name ?? null,
+    isAffiliate: r.is_affiliate === true,
+    seq: typeof r.seq === "number" ? r.seq : null,
+    region: r.region ?? null,
+    code: r.code ?? null,
+  }
+}
+
+/**
+ * 2026-10-27 名冊對齊 Excel「客供商基本資料／客戶資料」（packages/db 0076）：序、區域、編號。
+ * 部署順序不限：先帶新欄位查，撞到「欄位不存在」就記住（60 秒後再試）改用舊欄位集重跑——
+ * 列表不回新欄位；寫入帶了非空的新欄位回 409 migration_required（空值直接略過）。
+ */
+const ROSTER_COLS = "seq, region, code"
+const ROSTER_FIELDS = [["seq", "seq"], ["region", "region"], ["code", "code"]] as const
+const ROSTER_RETRY_MS = 60_000
+let rosterMissingAt = 0
+const rosterKnownMissing = () => rosterMissingAt > 0 && Date.now() - rosterMissingAt < ROSTER_RETRY_MS
+/** 測試用：清掉「0076 沒套」的記憶。 */
+export function resetClientSchemaCompatForTests(): void {
+  rosterMissingAt = 0
+}
+type DbResult<T> = { data: T; error: { code?: string | null; message?: string | null } | null }
+const MIGRATION_REQUIRED_CODE = "migration_required"
+async function withClientCols<T>(run: (cols: string, roster: boolean) => PromiseLike<DbResult<T>>): Promise<DbResult<T>> {
+  const roster = !rosterKnownMissing()
+  let r = await run(roster ? `${CLIENT_COLS_EXT}, ${ROSTER_COLS}` : CLIENT_COLS_EXT, roster)
+  if (r.error && roster && isMissingColumnError(r.error)) {
+    rosterMissingAt = Date.now()
+    warnSchemaGapOnce("clients.seq/region/code(0076)", r.error)
+    r = await run(CLIENT_COLS_EXT, false)
+  }
+  return r
+}
+function migrationBlocked<T>(): PromiseLike<DbResult<T>> {
+  return Promise.resolve({ data: null as T, error: { code: MIGRATION_REQUIRED_CODE, message: "migration_required" } })
+}
+const MIGRATION_REQUIRED = (columns: string[]) => ({ error: MIGRATION_REQUIRED_CODE, columns, message: "名冊新欄位（序、區域、編號）尚未套用資料庫更新（migration 0076）。" })
 
 /**
  * 客戶／業主名冊（P3 專案申請單），比照 vendors.ts 的廠商名冊。
@@ -86,12 +133,19 @@ const clientBody = z.object({
     .optional()
     .refine((v) => v == null || v === "" || TAX_ID_RE.test(v), "統一編號須為 8 碼數字")
     .refine((v) => v == null || v === "" || isValidTaiwanTaxId(v), "統一編號檢查碼錯誤"),
-  phone: z.string().trim().max(40).nullable().optional(),
-  fax: z.string().trim().max(40).nullable().optional(),
+  /** Excel「序」「區域」「編號」（0076）。 */
+  seq: z.number().int().min(0).max(99999).nullable().optional(),
+  region: z.string().trim().max(40).nullable().optional(),
+  code: z.string().trim().max(40).nullable().optional(),
+  /** TEL／FAX／Mobil（contactPhone）原格可能有多支號碼與說明，放寬到 200 字。 */
+  phone: z.string().trim().max(200).nullable().optional(),
+  fax: z.string().trim().max(200).nullable().optional(),
+  /** Excel「公司地址」。 */
   invoiceAddress: z.string().trim().max(300).nullable().optional(),
-  contactName: z.string().trim().max(60).nullable().optional(),
-  contactPhone: z.string().trim().max(40).nullable().optional(),
-  email: z.string().trim().max(200).nullable().optional(),
+  /** Excel「承辦窗口」：原格常是多位窗口＋分機的一段文字，放寬到 300 字。 */
+  contactName: z.string().trim().max(300).nullable().optional(),
+  contactPhone: z.string().trim().max(200).nullable().optional(),
+  email: z.string().trim().max(500).nullable().optional(),
   invoiceType: z.enum(INVOICE_TYPES).nullable().optional(),
   paymentMethod: z.enum(PAYMENT_METHODS).nullable().optional(),
   /** 結帳日／付款日：業主慣例多是「每月 25 日結、次月 10 日付」這類自由文字。 */
@@ -100,9 +154,10 @@ const clientBody = z.object({
   note: z.string().trim().max(2000).nullable().optional(),
 })
 
-function toRow(b: Partial<z.infer<typeof clientBody>>): Record<string, unknown> {
+function toRow(b: Partial<z.infer<typeof clientBody>>, roster = true): Record<string, unknown> {
   const row: Record<string, unknown> = {}
   const map: Array<[keyof z.infer<typeof clientBody>, string]> = [
+    ...ROSTER_FIELDS.filter(() => roster).map(([k, col]) => [k, col] as [keyof z.infer<typeof clientBody>, string]),
     ["name", "name"], ["shortName", "short_name"], ["category", "category"], ["isAffiliate", "is_affiliate"], ["taxId", "tax_id"], ["phone", "phone"], ["fax", "fax"],
     ["invoiceAddress", "invoice_address"], ["contactName", "contact_name"], ["contactPhone", "contact_phone"],
     ["email", "email"], ["invoiceType", "invoice_type"], ["paymentMethod", "payment_method"],
@@ -112,8 +167,16 @@ function toRow(b: Partial<z.infer<typeof clientBody>>): Record<string, unknown> 
   return row
 }
 
+/** 0076 沒套時：body 裡非空的新欄位（有就該回 409）。 */
+function rosterFieldsPresent(b: Partial<z.infer<typeof clientBody>>): string[] {
+  return ROSTER_FIELDS.filter(([k]) => {
+    const v = b[k]
+    return v !== undefined && v !== null && v !== ""
+  }).map(([, col]) => col)
+}
+
 /** clients 唯一的 unique index 就是統編那個（partial），23505 一律視為統編重複。 */
-function isTaxIdConflict(err: { code?: string } | null): boolean {
+function isTaxIdConflict(err: { code?: string | null } | null): boolean {
   return err?.code === "23505"
 }
 
@@ -122,17 +185,19 @@ clientsRouter.get("/clients", requireAuth, requireTenant, async (req: Request, r
   const tenantId = res.locals.tenantId as string
   const q = typeof req.query.q === "string" ? req.query.q.trim() : ""
   try {
-    let query = supabaseAdmin.from("clients").select(CLIENT_COLS_EXT).eq("tenant_id", tenantId).is("deleted_at", null)
-    if (q) {
-      const like = `%${sanitizeSearchTerm(q)}%`
-      query = query.or(`name.ilike.${like},short_name.ilike.${like},contact_name.ilike.${like},tax_id.ilike.${like},phone.ilike.${like}`)
-    }
-    const { data, error } = await query.order("name", { ascending: true })
+    const { data, error } = await withClientCols((cols) => {
+      let query = supabaseAdmin.from("clients").select(cols).eq("tenant_id", tenantId).is("deleted_at", null)
+      if (q) {
+        const like = `%${sanitizeSearchTerm(q)}%`
+        query = query.or(`name.ilike.${like},short_name.ilike.${like},contact_name.ilike.${like},tax_id.ilike.${like},phone.ilike.${like}`)
+      }
+      return query.order("name", { ascending: true })
+    })
     if (error) {
       next(new Error(`GET /clients: ${error.message}`))
       return
     }
-    res.status(200).json({ clients: (data ?? []).map((r) => serializeClientExt(r as ClientRowExt)) })
+    res.status(200).json({ clients: (data ?? []).map((r) => serializeClientExt(r as unknown as ClientRowExt)) })
   } catch (err) {
     next(err)
   }
@@ -158,11 +223,20 @@ clientsRouter.post("/clients", requireAuth, requireTenant, requireFinance, async
       res.status(400).json({ error: problem, category: parsed.data.category })
       return
     }
-    const { data, error } = await supabaseAdmin
-      .from("clients")
-      .insert({ tenant_id: tenantId, created_by_emp_id: self?.id ?? null, ...toRow(parsed.data) })
-      .select(CLIENT_COLS_EXT)
-      .single()
+    const present = rosterFieldsPresent(parsed.data)
+    const { data, error } = await withClientCols((cols, roster) =>
+      !roster && present.length > 0
+        ? migrationBlocked()
+        : supabaseAdmin
+            .from("clients")
+            .insert({ tenant_id: tenantId, created_by_emp_id: self?.id ?? null, ...toRow(parsed.data, roster) })
+            .select(cols)
+            .single(),
+    )
+    if (error?.code === MIGRATION_REQUIRED_CODE) {
+      res.status(409).json(MIGRATION_REQUIRED(present))
+      return
+    }
     if (error || !data) {
       if (isTaxIdConflict(error)) {
         res.status(409).json({ error: "tax_id_taken", taxId: parsed.data.taxId })
@@ -237,14 +311,24 @@ clientsRouter.patch("/clients/:id", requireAuth, requireTenant, requireFinance, 
         return
       }
     }
-    const { data, error } = await supabaseAdmin
-      .from("clients")
-      .update({ ...row, updated_at: new Date().toISOString() })
-      .eq("tenant_id", tenantId)
-      .eq("id", id)
-      .is("deleted_at", null)
-      .select(CLIENT_COLS_EXT)
-      .maybeSingle()
+    const present = rosterFieldsPresent(parsed.data)
+    const { data, error } = await withClientCols((cols, roster) => {
+      if (!roster && present.length > 0) return migrationBlocked()
+      const update = { ...row }
+      if (!roster) for (const [, col] of ROSTER_FIELDS) delete update[col]
+      return supabaseAdmin
+        .from("clients")
+        .update({ ...update, updated_at: new Date().toISOString() })
+        .eq("tenant_id", tenantId)
+        .eq("id", id)
+        .is("deleted_at", null)
+        .select(cols)
+        .maybeSingle()
+    })
+    if (error?.code === MIGRATION_REQUIRED_CODE) {
+      res.status(409).json(MIGRATION_REQUIRED(present))
+      return
+    }
     if (error) {
       if (isTaxIdConflict(error)) {
         res.status(409).json({ error: "tax_id_taken", taxId: parsed.data.taxId })

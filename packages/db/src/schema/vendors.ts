@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, boolean, timestamp, index } from "drizzle-orm/pg-core"
+import { pgTable, uuid, text, boolean, integer, timestamp, index } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 
 /**
@@ -21,15 +21,29 @@ export const vendors = pgTable(
     shortName: text("short_name"),
     /** 關係企業（姊妹公司）：集團總覽合計時剔除與它的往來。 */
     isAffiliate: boolean("is_affiliate").notNull().default(false),
+    /** 名冊類別＝Excel「客供商基本資料」的工作表：'supplier' 供應商資料 | 'engineer' 技師資料 |
+     * 'review_unit' 送審相關單位（0076；合法值見 sql/0066 的 vendors_roster_kind_chk）。 */
+    rosterKind: text("roster_kind").notNull().default("supplier"),
+    /** Excel「序」。 */
+    seq: integer("seq"),
+    /** Excel「類別」（自由文字）。 */
     category: text("category"),
+    /** Excel「細目」。 */
+    subCategory: text("sub_category"),
+    /** Excel「編號」。 */
+    code: text("code"),
     contactName: text("contact_name"),
     title: text("title"),
     phone: text("phone"),
+    /** Excel「FAX」（0076）。 */
+    fax: text("fax"),
     mobile: text("mobile"),
     email: text("email"),
     address: text("address"),
     taxId: text("tax_id"),
     website: text("website"),
+    /** Excel「付款方式」，自由文字（0076）。 */
+    paymentTerms: text("payment_terms"),
     /** 收款帳戶——放款專區建立匯款時預填收款方銀行資訊。 */
     bankName: text("bank_name"),
     bankCode: text("bank_code"),

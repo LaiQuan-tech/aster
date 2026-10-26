@@ -34,19 +34,64 @@ const BANK_COLS = ["bank_name", "bank_code", "bank_account", "account_holder"]
 let bankColsMissing = false
 
 /**
+ * 2026-10-27 名冊對齊 Excel「客供商基本資料」（packages/db 0076）：名冊類別（工作表）、序、細目、編號、FAX、付款方式。
+ * 部署順序不限：先帶新欄位查，撞到「欄位不存在」就記住（60 秒後再試一次帶新欄位），改用舊欄位集重跑——
+ * 列表不回新欄位（rosterKind 一律當 supplier），寫入帶了非空的新欄位回 409 migration_required（空值直接略過）。
+ */
+const ROSTER_COLS = "roster_kind, seq, sub_category, code, fax, payment_terms"
+export const VENDOR_ROSTER_KINDS = ["supplier", "engineer", "review_unit"] as const
+const ROSTER_FIELDS = [
+  ["rosterKind", "roster_kind"], ["seq", "seq"], ["subCategory", "sub_category"], ["code", "code"], ["fax", "fax"], ["paymentTerms", "payment_terms"],
+] as const
+
+const ROSTER_RETRY_MS = 60_000
+let rosterMissingAt = 0
+const rosterKnownMissing = () => rosterMissingAt > 0 && Date.now() - rosterMissingAt < ROSTER_RETRY_MS
+/** 測試用：清掉「0076／0041 沒套」的記憶。 */
+export function resetVendorSchemaCompatForTests(): void {
+  rosterMissingAt = 0
+  bankColsMissing = false
+}
+
+type DbResult<T> = { data: T; error: { code?: string | null; message?: string | null } | null }
+const MIGRATION_REQUIRED_CODE = "migration_required"
+
+/**
  * 用完整欄位集跑一次；撞到「欄位不存在」就記住並用舊欄位集重跑（寫入時 toRow 會
- * 同步略過銀行欄）。套完 0041 後永遠不會走到第二次。
+ * 同步略過銀行欄）。套完 0041 後永遠不會走到第二次。`roster`＝這一次是否帶 0076 新欄位。
  */
 async function withVendorCols<T>(
-  run: (cols: string) => PromiseLike<{ data: T; error: { code?: string | null; message?: string | null } | null }>,
-): Promise<{ data: T; error: { code?: string | null; message?: string | null } | null }> {
-  let r = await run(bankColsMissing ? COLS_LEGACY : COLS)
+  run: (cols: string, roster: boolean) => PromiseLike<DbResult<T>>,
+): Promise<DbResult<T>> {
+  const roster = !bankColsMissing && !rosterKnownMissing()
+  let r = await run(bankColsMissing ? COLS_LEGACY : roster ? `${COLS}, ${ROSTER_COLS}` : COLS, roster)
+  // 缺的是銀行欄（0041 都沒套）→ 0076 當然也沒有，直接退到最舊的欄位集；其他「欄位不存在」先當成 0076 沒套。
+  const bankMissing = (e: { message?: string | null } | null) => BANK_COLS.some((col) => (e?.message ?? "").includes(col))
+  if (r.error && roster && isMissingColumnError(r.error) && !bankMissing(r.error)) {
+    rosterMissingAt = Date.now()
+    warnSchemaGapOnce("vendors.roster_*(0076)", r.error)
+    r = await run(COLS, false)
+  }
   if (r.error && !bankColsMissing && isMissingColumnError(r.error)) {
+    if (roster) rosterMissingAt = Date.now()
     bankColsMissing = true
     warnSchemaGapOnce("vendors.bank_*", r.error)
-    r = await run(COLS_LEGACY)
+    r = await run(COLS_LEGACY, false)
   }
   return r
+}
+
+/** 0076 沒套時：body 裡非空的新欄位（有就該回 409）；空值（null／""）直接從寫入剔除，不擋舊畫面或清空的表單。 */
+function rosterFieldsPresent(b: Partial<z.infer<typeof vendorBody>>): string[] {
+  return ROSTER_FIELDS.filter(([k]) => {
+    const v = b[k]
+    return v !== undefined && v !== null && v !== ""
+  }).map(([, col]) => col)
+}
+const MIGRATION_REQUIRED = (columns: string[]) => ({ error: MIGRATION_REQUIRED_CODE, columns, message: "名冊新欄位（序、細目、編號、FAX、付款方式、名冊類別）尚未套用資料庫更新（migration 0076）。" })
+/** 寫入在「0076 沒套」那一輪：帶了非空新欄位就不寫，回一個假錯誤讓路由回 409。 */
+function migrationBlocked<T>(): PromiseLike<DbResult<T>> {
+  return Promise.resolve({ data: null as T, error: { code: MIGRATION_REQUIRED_CODE, message: "migration_required" } })
 }
 
 const vendorBody = z.object({
@@ -55,12 +100,24 @@ const vendorBody = z.object({
   shortName: z.string().trim().max(40).nullable().optional(),
   /** 關係企業（集團內姊妹公司）：集團總覽合計時剔除與它的往來。DB 欄位 NOT NULL，所以只收 boolean，不收 null。 */
   isAffiliate: z.boolean().optional(),
+  /** 名冊類別＝Excel 工作表（0076）：supplier 供應商資料 | engineer 技師資料 | review_unit 送審相關單位。DB NOT NULL，不收 null。 */
+  rosterKind: z.enum(VENDOR_ROSTER_KINDS).optional(),
+  /** Excel「序」（0076）。 */
+  seq: z.number().int().min(0).max(99999).nullable().optional(),
+  /** Excel「類別」。 */
   category: z.string().trim().max(60).nullable().optional(),
-  contactName: z.string().trim().max(60).nullable().optional(),
+  /** Excel「細目」（0076）。 */
+  subCategory: z.string().trim().max(60).nullable().optional(),
+  /** Excel「編號」（0076）。 */
+  code: z.string().trim().max(40).nullable().optional(),
+  /** Excel「承辦窗口」：原格常是多位窗口＋分機的一段文字，放寬到 300 字。 */
+  contactName: z.string().trim().max(300).nullable().optional(),
   title: z.string().trim().max(60).nullable().optional(),
-  phone: z.string().trim().max(40).nullable().optional(),
-  mobile: z.string().trim().max(40).nullable().optional(),
-  email: z.string().trim().max(200).nullable().optional(),
+  /** TEL／FAX／Mobil 原格可能有多支號碼與說明，放寬到 200 字。 */
+  phone: z.string().trim().max(200).nullable().optional(),
+  fax: z.string().trim().max(200).nullable().optional(),
+  mobile: z.string().trim().max(200).nullable().optional(),
+  email: z.string().trim().max(500).nullable().optional(),
   address: z.string().trim().max(300).nullable().optional(),
   taxId: z
     .string()
@@ -69,6 +126,8 @@ const vendorBody = z.object({
     .optional()
     .refine((v) => v == null || v === "" || TAX_ID_RE.test(v), "統一編號須為 8 碼數字"),
   website: z.string().trim().max(200).nullable().optional(),
+  /** Excel「付款方式」（0076），自由文字。 */
+  paymentTerms: z.string().trim().max(100).nullable().optional(),
   /** 收款帳戶（放款專區預填用）。 */
   bankName: z.string().trim().max(120).nullable().optional(),
   bankCode: z.string().trim().max(20).nullable().optional(),
@@ -97,16 +156,22 @@ function serialize(r: Record<string, unknown>) {
     name: r.name,
     shortName: r.short_name ?? null,
     isAffiliate: r.is_affiliate === true,
+    rosterKind: (VENDOR_ROSTER_KINDS as readonly string[]).includes(r.roster_kind as string) ? r.roster_kind : "supplier",
+    seq: typeof r.seq === "number" ? r.seq : null,
     category: r.category ?? null,
+    subCategory: r.sub_category ?? null,
+    code: r.code ?? null,
     contactName: r.contact_name ?? null,
     title: r.title ?? null,
     phone: r.phone ?? null,
+    fax: r.fax ?? null,
     mobile: r.mobile ?? null,
     email: r.email ?? null,
     address: r.address ?? null,
     taxId: r.tax_id ?? null,
     taxIdValid: typeof r.tax_id === "string" && r.tax_id ? isValidTaiwanTaxId(r.tax_id) : null,
     website: r.website ?? null,
+    paymentTerms: r.payment_terms ?? null,
     bankName: r.bank_name ?? null,
     bankCode: r.bank_code ?? null,
     bankAccount: r.bank_account ?? null,
@@ -119,9 +184,10 @@ function serialize(r: Record<string, unknown>) {
   }
 }
 
-function toRow(b: z.infer<typeof vendorBody>): Record<string, unknown> {
+function toRow(b: z.infer<typeof vendorBody>, roster = true): Record<string, unknown> {
   const row: Record<string, unknown> = {}
   const map: Array<[keyof typeof b, string]> = [
+    ...ROSTER_FIELDS.filter(() => roster).map(([k, col]) => [k, col] as [keyof typeof b, string]),
     ["name", "name"], ["shortName", "short_name"], ["isAffiliate", "is_affiliate"], ["category", "category"], ["contactName", "contact_name"], ["title", "title"],
     ["phone", "phone"], ["mobile", "mobile"], ["email", "email"], ["address", "address"],
     ["taxId", "tax_id"], ["website", "website"],
@@ -141,11 +207,12 @@ vendorsRouter.get("/vendors", requireAuth, requireTenant, async (req: Request, r
   const tenantId = res.locals.tenantId as string
   const q = typeof req.query.q === "string" ? req.query.q.trim() : ""
   try {
-    const { data, error } = await withVendorCols((cols) => {
+    const { data, error } = await withVendorCols((cols, roster) => {
       let query = supabaseAdmin.from("vendors").select(cols).eq("tenant_id", tenantId).is("deleted_at", null)
       if (q) {
         const like = `%${sanitizeSearchTerm(q)}%`
-        query = query.or(`name.ilike.${like},short_name.ilike.${like},contact_name.ilike.${like},category.ilike.${like},tax_id.ilike.${like},phone.ilike.${like},mobile.ilike.${like}`)
+        // 0076 已套時多比對「細目」（類別改放 Excel 的大類後，細目才是辨識廠商的關鍵字）。
+        query = query.or(`name.ilike.${like},short_name.ilike.${like},contact_name.ilike.${like},category.ilike.${like},tax_id.ilike.${like},phone.ilike.${like},mobile.ilike.${like}${roster ? `,sub_category.ilike.${like}` : ""}`)
       }
       return query.order("name", { ascending: true })
     })
@@ -174,13 +241,20 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, async (req: Request, 
       res.status(403).json(AFFILIATE_HR_ONLY)
       return
     }
-    const { data, error } = await withVendorCols((cols) =>
-      supabaseAdmin
-        .from("vendors")
-        .insert({ tenant_id: tenantId, created_by_emp_id: self?.id ?? null, ...toRow(parsed.data) })
-        .select(cols)
-        .single(),
+    const present = rosterFieldsPresent(parsed.data)
+    const { data, error } = await withVendorCols((cols, roster) =>
+      !roster && present.length > 0
+        ? migrationBlocked()
+        : supabaseAdmin
+            .from("vendors")
+            .insert({ tenant_id: tenantId, created_by_emp_id: self?.id ?? null, ...toRow(parsed.data, roster) })
+            .select(cols)
+            .single(),
     )
+    if (error?.code === MIGRATION_REQUIRED_CODE) {
+      res.status(409).json(MIGRATION_REQUIRED(present))
+      return
+    }
     if (error || !data) {
       next(new Error(`POST /vendors: ${error?.message}`))
       return
@@ -206,6 +280,7 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, async (req: Requ
     return
   }
   try {
+    const present = rosterFieldsPresent(parsed.data)
     // 關係企業標記只有 HR 能「變更」：非 HR 帶了這個欄位就比對現值，不同 → 403；一樣＝沒變更，放行，
     // 但這個欄位從 update 剔除（不把一個可能已被 HR 並發改掉的舊值寫回去）。
     let dropAffiliate = false
@@ -231,8 +306,9 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, async (req: Requ
         dropAffiliate = true
       }
     }
-    const { data, error } = await withVendorCols((cols) => {
-      const row = toRow(parsed.data as z.infer<typeof vendorBody>)
+    const { data, error } = await withVendorCols((cols, roster) => {
+      if (!roster && present.length > 0) return migrationBlocked()
+      const row = toRow(parsed.data as z.infer<typeof vendorBody>, roster)
       if (dropAffiliate) delete row.is_affiliate
       return supabaseAdmin
         .from("vendors")
@@ -243,6 +319,10 @@ vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, async (req: Requ
         .select(cols)
         .maybeSingle()
     })
+    if (error?.code === MIGRATION_REQUIRED_CODE) {
+      res.status(409).json(MIGRATION_REQUIRED(present))
+      return
+    }
     if (error) {
       next(new Error(`PATCH /vendors/${id}: ${error.message}`))
       return
