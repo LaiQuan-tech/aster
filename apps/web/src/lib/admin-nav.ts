@@ -414,6 +414,8 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       href: "/admin/employees",
       title: "員工主檔",
       desc: "帳號、組織、到離職、My Data、學歷證照、工作經歷與年資",
+      // 2026-10-26 員工內頁 /admin/employees/[id]：列表按「編輯」改進內頁編輯（原本是列下方的行內表單）。
+      detail: { title: "員工資料" },
     },
     {
       key: "departments",

@@ -1,18 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { BottomSheet, Button, Card, Empty, ErrorText, Field, Input, PrimaryButton, Segmented, inputCls, labelCls, useToast } from "@/components/admin-ui";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import Link from "next/link";
+import { Button, Card, Empty, ErrorText, PrimaryButton, Segmented, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import { ActionMenu } from "@/components/ActionMenu";
 import { BatchImportButton } from "@/components/BatchImport";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
-import AuditDrawer from "@/components/AuditDrawer";
 import {
   assignEmployeesCompany,
   addEmployeeCertification,
   addEmployeeEducation,
   addEmployeeJobHistory,
   addEmployeeWorkHistory,
-  deactivateEmployee,
   deleteEmployeeCertification,
   deleteEmployeeCertificationAttachment,
   deleteEmployeeEducation,
@@ -25,34 +24,25 @@ import {
   getEmployeeProfile,
   getEmployeesWithProfile,
   inviteEmployee,
-  resetEmployeePassword,
   saveEmployeeProfile,
   uploadEmployeeCertificationAttachment,
   uploadEmployeeEducationAttachment,
   uploadEmployeeProfilePhoto,
-  updateEmployee,
   type Department,
-  type Employee,
   type EmployeeWithProfile,
   type ProfileAggregate,
   type SaveProfileBody,
 } from "@/lib/admin-api";
 import {
-  accountErrorMessage,
   bulkInviteEmployees,
-  sendEmployeeInvite,
-  sendEmployeeReset,
   toInviteCsv,
-  type AccountLinkResult,
   type BulkInviteResult,
 } from "@/lib/auth-api";
-import { employeeActionsFor, generateRandomPassword, parseApiErrorCode, type EmployeeActionKey } from "@/lib/employee-actions";
+import { employeeActionsFor } from "@/lib/employee-actions";
+import { employeeDetailHref } from "@/lib/employee-edit";
+import { describeEmployeeError } from "@/lib/employee-errors";
 import {
   bankDisplay,
-  personalChanges,
-  personalFormFrom,
-  type PersonalForm,
-  type PersonalKey,
 } from "@/lib/employee-personal";
 import {
   approveProfileChange,
@@ -65,7 +55,6 @@ import { listCompanies, type Company } from "@/lib/projects-ext-api";
 import { companyOptions } from "@/lib/company-options";
 import {
   UNASSIGNED_FILTER,
-  companyErrorMessage,
   companyLabel,
   filterByCompany,
   toggleAllVisible,
@@ -76,17 +65,16 @@ import { getBrandingCached, getMeCached, peekMeCached } from "@/lib/ess-state";
 import {
   CREDENTIALS_LOCKED_NOTE,
   PLATFORM_ADMIN_ASSIGN_NOTE,
-  ROLE_CHANGE_LOCKED_NOTE,
   canAssignPlatformAdmin,
   credentialsLockedFor,
   privilegePolicyOf,
-  roleChangeLockedFor,
   roleOptionsFor,
   type PrivilegePolicy,
   type PrivilegeViewer,
 } from "@/lib/privileged-accounts";
 import { isHrRole } from "@/lib/roles";
 import { useSession } from "@/lib/use-session";
+import { useEmployeeAccountActions } from "./_components/useEmployeeAccountActions";
 
 const ROLES: { value: string; label: string }[] = [
   { value: "employee", label: "一般員工" },
@@ -289,35 +277,8 @@ function BankCell({ employee }: { employee: EmployeeWithProfile }) {
   );
 }
 
-/** 列內編輯第二排的欄位：小字標籤＋輸入框（第一排沿用原本的無標籤輸入框）。className 放欄寬（@3xl:col-span-*）。 */
-function PersonalField({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
-  return (
-    <label className={`block ${className ?? ""}`}>
-      <span className="mb-1 block text-xs text-gray-500">{label}</span>
-      {children}
-    </label>
-  );
-}
-
-/**
- * 新增帳號／重設密碼的 API 錯誤 → 中文。`apiFetch` 的訊息形如 `[422] weak_password`：
- * 先抽出代碼再查 `accountErrorMessage` 對照表；查不到就維持原字串（保留狀態碼方便回報），
- * 原字串也是空的才用 fallback。
- */
-function describeError(err: unknown, fallback: string): string {
-  const raw = err instanceof Error ? err.message : "";
-  const code = parseApiErrorCode(raw);
-  const probe = code ?? raw;
-  // 個人出勤設定（2026-10-13）的兩個錯誤碼。
-  if (probe === "shift_not_found") return "選的班別不存在（可能剛被刪除），請重新選擇";
-  // schema_not_ready：個人班別與在家打卡（0068）或所屬公司（0072）的資料庫更新還沒套。
-  if (probe === "schema_not_ready") return "資料庫尚未套用最新更新（員工個人設定或所屬公司），請洽系統維護人員";
-  const companyMsg = companyErrorMessage(code);
-  if (companyMsg) return companyMsg;
-  const translated = accountErrorMessage(new Error(probe), "");
-  if (translated && translated !== probe) return translated;
-  return raw || fallback;
-}
+/** 錯誤訊息對照搬到 lib/employee-errors.ts（員工內頁共用）。 */
+const describeError = describeEmployeeError;
 
 function profileInitial(profile: ProfileAggregate | null) {
   const values: Record<string, string> = {};
@@ -346,10 +307,6 @@ const STICKY_TH = "sticky top-0 z-10 bg-white shadow-[inset_0_-1px_0_var(--color
 const PIN_RIGHT_TH =
   "sticky top-0 right-0 z-20 bg-white shadow-[inset_0_-1px_0_var(--color-gray-200),inset_1px_0_0_var(--color-gray-100)]";
 const PIN_RIGHT_TD = "sticky right-0 z-[5] bg-white shadow-[inset_1px_0_0_var(--color-gray-100)]";
-
-/** 員工列表欄數（列內編輯時 td 要跨滿；Email 欄在手機隱藏，跨欄數多算無妨）。 */
-/** 編輯列 colSpan：勾選、員工、Email、單位/身分、所屬公司、到離職、生日、身分證、戶籍地、匯款帳號、角色/狀態、操作。 */
-const COLUMN_COUNT = 12;
 
 export default function EmployeesPage() {
   const toast = useToast();
@@ -417,59 +374,17 @@ export default function EmployeesPage() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  // 帳號信件結果（單筆）：寄出／dryRun 連結／備援暫時密碼，取代原本的 window.alert 明碼。
-  const [linkResult, setLinkResult] = useState<{ empName: string; result: AccountLinkResult } | null>(null);
-  const [tempPassword, setTempPassword] = useState<{ empName: string; password: string } | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  // 「設定密碼」面板：HR 直接指定一組密碼（API 帶 password 的 reset-password）。
-  // done 有值＝已成功，面板改顯示那組密碼讓 HR 抄給同仁（比照「暫時密碼」結果卡）。
-  const [setPwTarget, setSetPwTarget] = useState<{ id: string; name: string } | null>(null);
-  const [setPwValue, setSetPwValue] = useState("");
-  const [setPwShow, setSetPwShow] = useState(false);
-  const [setPwError, setSetPwError] = useState<string | null>(null);
-  const [setPwBusy, setSetPwBusy] = useState(false);
-  const [setPwDone, setSetPwDone] = useState<{ empName: string; password: string } | null>(null);
-  const setPwInputRef = useRef<HTMLInputElement>(null);
-  // 面板開啟時把焦點放進密碼框。不能用 autoFocus：BottomSheet 開啟時會在自己的 effect 裡 focus 面板
-  // （比 autoFocus 晚），這裡的 effect 屬於父層、跑在它之後，才搶得回來。
-  useEffect(() => {
-    if (setPwTarget && !setPwDone) setPwInputRef.current?.focus();
-  }, [setPwTarget, setPwDone]);
-  // C1 稽核：右側抽屜顯示該員工 employees 列的異動時間線
-  const [auditTarget, setAuditTarget] = useState<{ id: string; name: string } | null>(null);
-
   // 批次建立帳號改走 BatchImportButton（Excel 範本面板）；這裡只留「只建帳號、不寄信」的選項。
   const [bulkNoEmail, setBulkNoEmail] = useState(false);
 
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editName, setEditName] = useState("");
-  const [editRole, setEditRole] = useState("employee");
-  const [editDeptId, setEditDeptId] = useState("");
-  const [editEmpNo, setEditEmpNo] = useState("");
-  const [editEmploymentType, setEditEmploymentType] = useState("regular");
-  const [editHireDate, setEditHireDate] = useState("");
-  const [editTerminatedAt, setEditTerminatedAt] = useState("");
-  const [editStatus, setEditStatus] = useState("active");
-  // 員工個人出勤設定（2026-10-13）：預設班別（""＝依公司規則）與「允許在家上班打卡」。
-  const [editDefaultShiftId, setEditDefaultShiftId] = useState("");
-  const [editWfhPunch, setEditWfhPunch] = useState(false);
-  // 不計夜間加給（2026-10-13）：結算夜間分鐘寫 0、薪資與月表試算不發夜間加給（只影響這位員工）。
-  const [editNoNightPremium, setEditNoNightPremium] = useState(false);
   const [shifts, setShifts] = useState<Shift[]>([]);
   // 員工所屬公司（2026-10-25）：編輯下拉、列表篩選、多選批次指派。
   const [companies, setCompanies] = useState<Company[]>([]);
-  const [editCompanyId, setEditCompanyId] = useState("");
   const [companyFilter, setCompanyFilter] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [batchCompanyId, setBatchCompanyId] = useState("");
   const [batchBusy, setBatchBusy] = useState(false);
   const [batchError, setBatchError] = useState<string | null>(null);
-  // 列內編輯第二排：生日／身分證／戶籍地／匯款帳號（存在 employee_profiles，走 PUT profile，與上面的 PATCH employees 分開送）。
-  const [editPersonal, setEditPersonal] = useState<PersonalForm>(() => personalFormFrom({}));
-  const [editSaving, setEditSaving] = useState(false);
-  // 列內編輯儲存失敗的訊息：顯示在編輯區的「取消／儲存」上方（頁首的 error 在長清單裡可能不在視線內）。
-  const [editError, setEditError] = useState<string | null>(null);
-
   const [profileEmpId, setProfileEmpId] = useState<string | null>(null);
   const [profile, setProfile] = useState<ProfileAggregate | null>(null);
   const [profileValues, setProfileValues] = useState<Record<string, string>>({});
@@ -570,6 +485,21 @@ export default function EmployeesPage() {
     }
   }
 
+  const actions = useEmployeeAccountActions({
+    onChanged: fetchRows,
+    onOpenProfile: (target) => void openProfile(target.id),
+  });
+
+  // 員工內頁的「My Data」連回來時帶 ?profile=<id>：載入後直接展開那位員工的 My Data 維護區並捲過去。
+  useEffect(() => {
+    const target = new URLSearchParams(window.location.search).get("profile");
+    if (!target || !canManage) return;
+    void openProfile(target).then(() => {
+      document.getElementById("employee-profile-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    // 只在第一次進頁面時處理；canManage 從快取同步取得，之後變動不重開。
+  }, []);
+
   async function openProfile(employeeId: string) {
     setProfileEmpId(employeeId);
     setProfile(null);
@@ -624,16 +554,13 @@ export default function EmployeesPage() {
           setFormError(row?.error ? describeError(new Error(row.error), "邀請失敗") : "邀請失敗");
           return;
         }
-        setLinkResult({
-          empName: name.trim(),
-          result: {
+        actions.showLinkResult(name.trim(), {
             sent: row.sent === true,
             dryRun: res.dryRun,
             type: row.type ?? "invite",
             email: row.email ?? email.trim(),
             action: row.action,
             link: row.link,
-          },
         });
         setMessage(res.dryRun ? `已建立 ${name.trim()} 的帳號（未寄信，請複製下方連結轉交）` : `已建立 ${name.trim()} 的帳號並寄出邀請信`);
       }
@@ -651,81 +578,6 @@ export default function EmployeesPage() {
     } finally {
       setSubmitting(false);
     }
-  }
-
-  function cancelEdit() {
-    if (editSaving) return;
-    setEditingId(null);
-    setEditError(null);
-  }
-
-  function setPersonal(key: PersonalKey, value: string) {
-    setEditPersonal((form) => ({ ...form, [key]: value }));
-  }
-
-  /**
-   * 列內編輯的儲存：員工欄位（PATCH /employees/:id）照舊；個資欄位（生日／身分證／戶籍地／匯款帳號）
-   * 在 employee_profiles，**有變更才**打 PUT /employees/:id/profile，而且只送變更的欄位。
-   * 兩個請求不是同一個交易：PATCH 成功、PUT 失敗時員工欄位已生效，所以先重載列表再留在編輯列顯示錯誤，
-   * HR 修正後按儲存即可重送（PATCH 是冪等的）。成功後靜默重載（不經「載入中…」，橫向捲動位置才不會被洗掉）。
-   */
-  async function saveEdit(id: string) {
-    if (editSaving) return;
-    const current = rows.find((row) => row.id === id);
-    const personal = current ? personalChanges(current, editPersonal) : {};
-    setEditSaving(true);
-    setEditError(null);
-    // 個人出勤設定只在有變更時才送（DB 還沒套 0068 時，沒動到就不會被 409 擋下其他欄位的儲存）。
-    const nextShiftId = editDefaultShiftId || null;
-    const shiftChanged = (current?.default_shift_id ?? null) !== nextShiftId;
-    const wfhChanged = (current?.features?.wfhPunch === true) !== editWfhPunch;
-    const nightChanged = (current?.features?.noNightPremium === true) !== editNoNightPremium;
-    // 所屬公司也只在有變更時才送（DB 還沒套 0072 時，沒動到就不會被 409 擋下其他欄位）。
-    const nextCompanyId = editCompanyId || null;
-    const companyChanged = (current?.company_id ?? null) !== nextCompanyId;
-    const featurePatch = {
-      ...(wfhChanged ? { wfhPunch: editWfhPunch } : {}),
-      ...(nightChanged ? { noNightPremium: editNoNightPremium } : {}),
-    };
-    try {
-      await updateEmployee(id, {
-        ...(shiftChanged ? { defaultShiftId: nextShiftId } : {}),
-        ...(wfhChanged || nightChanged ? { features: featurePatch } : {}),
-        ...(companyChanged ? { companyId: nextCompanyId } : {}),
-        name: editName.trim() || undefined,
-        role: editRole,
-        deptId: editDeptId || null,
-        empNo: editEmpNo.trim() || null,
-        employmentType: editEmploymentType,
-        hireDate: editHireDate || null,
-        terminatedAt: editTerminatedAt || null,
-        status: editStatus,
-      });
-    } catch (err) {
-      setEditError(describeError(err, "更新失敗"));
-      setEditSaving(false);
-      return;
-    }
-    let personalError: string | null = null;
-    if (Object.keys(personal).length > 0) {
-      try {
-        await saveEmployeeProfile(id, personal);
-      } catch (err) {
-        personalError = err instanceof Error ? err.message : "更新失敗";
-      }
-    }
-    try {
-      await fetchRows();
-      if (profileEmpId === id) await loadProfile(id);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "重新載入失敗");
-    }
-    if (personalError) {
-      setEditError(`員工資料已儲存，但生日／身分證／戶籍地／匯款帳號沒有存成：${personalError}`);
-    } else {
-      setEditingId(null);
-    }
-    setEditSaving(false);
   }
 
   async function saveProfileFields(event: FormEvent) {
@@ -828,133 +680,6 @@ export default function EmployeesPage() {
     await loadProfile(profileEmpId);
   }
 
-  async function onDeactivate(id: string) {
-    if (!window.confirm("確定停用此員工？")) return;
-    try {
-      await deactivateEmployee(id);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "停用失敗");
-    }
-  }
-
-  async function onSendInvite(id: string, empName: string) {
-    setBusyId(id);
-    setError(null);
-    try {
-      let res: AccountLinkResult;
-      try {
-        res = await sendEmployeeInvite(id);
-      } catch (err) {
-        // 員工沒 Email（My Data 未填）→ 讓 HR 直接輸入要寄的信箱再試一次。
-        // email_required：老闆／HR 管理員／平台管理員／老闆指定的人，邀請信的收件信箱一律要明確輸入（My Data 的信箱 HR 改得動，
-        // 照那個信箱寄，連結會落到改信箱的人手上）。
-        const message = err instanceof Error ? err.message : "";
-        const missing = message.includes("no_email") ? "no_email" : message.includes("email_required") ? "email_required" : null;
-        if (!missing) throw err;
-        const typed = window.prompt(
-          missing === "email_required"
-            ? `「${empName}」是老闆、HR 管理員、平台管理員或老闆指定的人，寄邀請信前請明確輸入收件信箱（不使用 My Data 裡的信箱）：`
-            : `「${empName}」尚未有 Email，請輸入要寄送邀請信的信箱：`,
-          "",
-        );
-        if (!typed || !typed.trim()) return;
-        res = await sendEmployeeInvite(id, { email: typed.trim() });
-      }
-      setTempPassword(null);
-      setLinkResult({ empName, result: res });
-      setMessage(
-        res.dryRun
-          ? `未寄信（API 尚未設定寄信金鑰），請複製下方連結轉交 ${empName}`
-          : `已寄出${res.type === "recovery" ? "重設密碼信" : "邀請信"}給 ${empName}（${res.email}）`,
-      );
-      await load();
-    } catch (err) {
-      setError(accountErrorMessage(err, "寄送邀請信失敗"));
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function onSendReset(id: string, empName: string) {
-    setBusyId(id);
-    setError(null);
-    try {
-      const res = await sendEmployeeReset(id);
-      setTempPassword(null);
-      setLinkResult({ empName, result: res });
-      setMessage(
-        res.dryRun
-          ? `未寄信（API 尚未設定寄信金鑰），請複製下方連結轉交 ${empName}`
-          : `已寄出重設密碼信給 ${empName}（${res.email}）`,
-      );
-    } catch (err) {
-      setError(describeError(err, "寄送重設密碼信失敗"));
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  /** 備援：寄不了信時由系統產生暫時密碼（員工首次登入會被強制改密碼）。 */
-  async function onTempPassword(id: string, empName: string) {
-    if (!window.confirm(`為「${empName}」產生一組暫時密碼？\n（正常情況請用「寄重設密碼信」；此為寄不了信時的備援）`)) return;
-    setBusyId(id);
-    setError(null);
-    try {
-      const res = await resetEmployeePassword(id);
-      setLinkResult(null);
-      if (res.password) {
-        setTempPassword({ empName, password: res.password });
-        setMessage(`已為 ${empName} 產生暫時密碼（只顯示這一次，請複製後轉交；員工首次登入會被要求改密碼）`);
-      }
-    } catch (err) {
-      setError(describeError(err, "產生暫時密碼失敗"));
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  /** 開「設定密碼」面板（選單只在有 user_id 時顯示這個動作；沒帳號的員工走寄邀請信）。 */
-  function openSetPassword(employee: Employee) {
-    setSetPwTarget({ id: employee.id, name: employee.name });
-    setSetPwValue("");
-    setSetPwShow(false);
-    setSetPwError(null);
-    setSetPwDone(null);
-  }
-
-  function closeSetPassword() {
-    if (setPwBusy) return;
-    setSetPwTarget(null);
-    setSetPwValue("");
-    setSetPwDone(null);
-    setSetPwError(null);
-  }
-
-  /** 送出：API 依租戶開關決定走 GoTrue（太常見的密碼會 422）或直接寫 auth.users；成功後同仁下次登入須改密碼。 */
-  async function confirmSetPassword() {
-    if (!setPwTarget || setPwBusy) return;
-    const password = setPwValue;
-    if (password.length < 8) {
-      setSetPwError("密碼至少 8 碼");
-      return;
-    }
-    setSetPwBusy(true);
-    setBusyId(setPwTarget.id);
-    setSetPwError(null);
-    try {
-      await resetEmployeePassword(setPwTarget.id, password);
-      setSetPwDone({ empName: setPwTarget.name, password });
-      setSetPwValue("");
-      toast.show(`已設定 ${setPwTarget.name} 的密碼`, "success");
-    } catch (err) {
-      setSetPwError(describeError(err, "設定密碼失敗"));
-    } finally {
-      setSetPwBusy(false);
-      setBusyId(null);
-    }
-  }
-
   async function copyText(text: string, what = "連結") {
     try {
       await navigator.clipboard.writeText(text);
@@ -970,53 +695,6 @@ export default function EmployeesPage() {
       toast.show("已複製 Email", "success");
     } catch {
       toast.show("無法自動複製，請手動選取 Email", "error");
-    }
-  }
-
-  /** 進入列內編輯：把該列現值帶進編輯欄位（原本寫在「編輯」按鈕的 onClick 裡）。 */
-  function beginEdit(employee: EmployeeWithProfile) {
-    if (!canManage) return; // 會計沒有編輯入口；保險起見這裡也擋（PATCH 員工與 PUT profile 只給 HR）
-    setEditError(null);
-    setEditPersonal(personalFormFrom(employee));
-    setEditingId(employee.id);
-    setEditName(employee.name);
-    setEditRole(employee.role);
-    setEditDeptId(employee.dept_id ?? "");
-    setEditEmpNo(employee.emp_no ?? "");
-    setEditEmploymentType(employee.employment_type ?? "regular");
-    setEditHireDate(employee.hire_date ?? "");
-    setEditTerminatedAt(employee.terminated_at ?? "");
-    setEditStatus(employee.status);
-    setEditDefaultShiftId(employee.default_shift_id ?? "");
-    setEditCompanyId(employee.company_id ?? "");
-    setEditWfhPunch(employee.features?.wfhPunch === true);
-    setEditNoNightPremium(employee.features?.noNightPremium === true);
-  }
-
-  /** 「⋯」選單的項目 → 各自既有的 handler（顯示規則在 lib/employee-actions.ts）。 */
-  function runAction(key: EmployeeActionKey, employee: Employee) {
-    switch (key) {
-      case "profile":
-        void openProfile(employee.id);
-        break;
-      case "send-reset":
-        void onSendReset(employee.id, employee.name);
-        break;
-      case "set-password":
-        openSetPassword(employee);
-        break;
-      case "temp-password":
-        void onTempPassword(employee.id, employee.name);
-        break;
-      case "send-invite":
-        void onSendInvite(employee.id, employee.name);
-        break;
-      case "deactivate":
-        void onDeactivate(employee.id);
-        break;
-      case "audit":
-        setAuditTarget({ id: employee.id, name: employee.name });
-        break;
     }
   }
 
@@ -1083,47 +761,8 @@ export default function EmployeesPage() {
       {/* 資料異動待審是 HR 的核准佇列（核准／退回只有 HR 能打）；會計只會看到自己的待審單，按了必 403，所以不顯示。 */}
       {canManage && <ProfileChangeQueue onApplied={() => void load()} />}
 
-      {linkResult && (
-        <Card>
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0 flex-1">
-              <h2 className="text-sm font-medium text-gray-500">
-                {linkResult.result.type === "recovery" ? "重設密碼信" : "邀請信"} — {linkResult.empName}（{linkResult.result.email}）
-              </h2>
-              {linkResult.result.dryRun && linkResult.result.link ? (
-                <>
-                  <p className="mt-1 text-sm text-amber-700">
-                    API 尚未設定寄信金鑰（RESEND_API_KEY），信件沒有寄出。請複製下方連結用 LINE／口頭轉交給同仁，連結 24 小時內有效、只能用一次。
-                  </p>
-                  <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-                    <input readOnly className={`${inputCls} font-mono text-xs`} value={linkResult.result.link} onFocus={(event) => event.currentTarget.select()} />
-                    <button type="button" onClick={() => void copyText(linkResult.result.link ?? "")} className="shrink-0 rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">複製連結</button>
-                  </div>
-                </>
-              ) : (
-                <p className="mt-1 text-sm text-gray-600">已寄出，請同仁收信後點連結設定密碼（連結 24 小時內有效）。</p>
-              )}
-            </div>
-            <button type="button" onClick={() => setLinkResult(null)} className="text-sm text-gray-400 hover:underline">關閉</button>
-          </div>
-        </Card>
-      )}
-
-      {tempPassword && (
-        <Card>
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0 flex-1">
-              <h2 className="text-sm font-medium text-gray-500">暫時密碼 — {tempPassword.empName}</h2>
-              <p className="mt-1 text-sm text-amber-700">只顯示這一次。請複製後轉交同仁；同仁首次登入會被要求改成自己的密碼。</p>
-              <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-                <input readOnly className={`${inputCls} font-mono`} value={tempPassword.password} onFocus={(event) => event.currentTarget.select()} />
-                <button type="button" onClick={() => void copyText(tempPassword.password, "密碼")} className="shrink-0 rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">複製密碼</button>
-              </div>
-            </div>
-            <button type="button" onClick={() => setTempPassword(null)} className="text-sm text-gray-400 hover:underline">關閉</button>
-          </div>
-        </Card>
-      )}
+      {/* 帳號動作的結果卡（邀請信／重設密碼信連結、暫時密碼）與設定密碼面板、異動紀錄抽屜：與員工內頁共用。 */}
+      {actions.panels}
 
       {canManage && (
         <CollapsibleCard
@@ -1298,145 +937,6 @@ export default function EmployeesPage() {
               <tbody>
                 {visibleRows.map((employee) => (
                   <tr key={employee.id} className="border-b border-gray-50 align-top">
-                    {editingId === employee.id ? (
-                      <td colSpan={COLUMN_COUNT} className="py-3">
-                        {/* 編輯區釘在外框可視範圍的左側、寬度＝外框寬（100cqw，扣 1rem 讓出直向捲軸）：
-                            個資欄位讓表格比外框寬，不釘住的話輸入框會攤到要橫捲才看得到的地方，
-                            右下角的「取消／儲存」也是。whitespace-normal 蓋掉手機版 td 的 nowrap（錯誤訊息要能換行）。 */}
-                        <div className="sticky left-0 w-[calc(100cqw-1rem)] max-w-full whitespace-normal">
-                          <div className="grid grid-cols-1 gap-3 sm:grid-cols-8">
-                            <input className={inputCls} value={editName} onChange={(event) => setEditName(event.target.value)} />
-                            <input className={inputCls} value={editEmpNo} onChange={(event) => setEditEmpNo(event.target.value)} />
-                            <select className={inputCls} value={editDeptId} onChange={(event) => setEditDeptId(event.target.value)}>
-                              <option value="">不指定</option>
-                              {depts.map((dept) => <option key={dept.id} value={dept.id}>{dept.name}</option>)}
-                            </select>
-                            <select className={inputCls} value={editEmploymentType} onChange={(event) => setEditEmploymentType(event.target.value)}>
-                              {EMPLOYMENT_TYPES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-                            </select>
-                            <input type="date" className={inputCls} value={editHireDate} onChange={(event) => setEditHireDate(event.target.value)} />
-                            <input type="date" className={inputCls} value={editTerminatedAt} onChange={(event) => setEditTerminatedAt(event.target.value)} />
-                            <select
-                              className={inputCls}
-                              value={editRole}
-                              onChange={(event) => setEditRole(event.target.value)}
-                              disabled={roleChangeLockedFor(viewer, { id: employee.id, role: employee.role }, privilegePolicy)}
-                              title={
-                                roleChangeLockedFor(viewer, { id: employee.id, role: employee.role }, privilegePolicy)
-                                  ? ROLE_CHANGE_LOCKED_NOTE
-                                  : canAssignPlatform
-                                    ? undefined
-                                    : PLATFORM_ADMIN_ASSIGN_NOTE
-                              }
-                            >
-                              {roleOptionsFor(ROLES, viewer, employee.role).map((item) => (
-                                <option key={item.value} value={item.value} disabled={item.disabled}>{item.label}</option>
-                              ))}
-                            </select>
-                            <select className={inputCls} value={editStatus} onChange={(event) => setEditStatus(event.target.value)}>
-                              <option value="active">在職</option>
-                              <option value="inactive">停用</option>
-                            </select>
-                          </div>
-                          {roleChangeLockedFor(viewer, { id: employee.id, role: employee.role }, privilegePolicy) ? (
-                            <p className="mt-2 text-xs text-amber-700" data-testid="role-change-locked-note">{ROLE_CHANGE_LOCKED_NOTE}</p>
-                          ) : (
-                            !canAssignPlatform && <p className="mt-2 text-xs text-gray-400">{PLATFORM_ADMIN_ASSIGN_NOTE}</p>
-                          )}
-                          {/* 第二排：個資——生日／身分證／戶籍地址（寬欄）一列、匯款帳號四欄（銀行代碼／銀行名稱／帳號／戶名）一列。
-                              欄數跟著外框寬度走（@3xl＝外框 ≥ 48rem 才分 8 欄，與上一排的 8 欄上下對齊；較窄時 2 欄，
-                              免得身分證、日期在窄格裡被截掉）。身分證轉大寫、不驗格式（外籍居留證格式不同）。 */}
-                          <div className="mt-3 grid grid-cols-2 gap-3 @3xl:grid-cols-8">
-                            <PersonalField label="生日" className="@3xl:col-span-2">
-                              <input type="date" className={inputCls} value={editPersonal.birthday} onChange={(event) => setPersonal("birthday", event.target.value)} />
-                            </PersonalField>
-                            <PersonalField label="身分證字號" className="@3xl:col-span-2">
-                              <input
-                                className={inputCls}
-                                value={editPersonal.idNumber}
-                                onChange={(event) => setPersonal("idNumber", event.target.value.toUpperCase())}
-                                autoCapitalize="characters"
-                                autoComplete="off"
-                                spellCheck={false}
-                              />
-                            </PersonalField>
-                            <PersonalField label="戶籍地址" className="col-span-2 @3xl:col-span-4">
-                              <input className={inputCls} value={editPersonal.registeredAddress} onChange={(event) => setPersonal("registeredAddress", event.target.value)} autoComplete="off" />
-                            </PersonalField>
-                          </div>
-                          <div className="mt-3 grid grid-cols-2 gap-3 @3xl:grid-cols-8">
-                            <PersonalField label="銀行代碼">
-                              <input className={inputCls} value={editPersonal.bankCode} onChange={(event) => setPersonal("bankCode", event.target.value)} autoComplete="off" />
-                            </PersonalField>
-                            <PersonalField label="銀行名稱" className="@3xl:col-span-2">
-                              <input className={inputCls} value={editPersonal.bankName} onChange={(event) => setPersonal("bankName", event.target.value)} autoComplete="off" />
-                            </PersonalField>
-                            <PersonalField label="帳號" className="@3xl:col-span-3">
-                              <input className={inputCls} value={editPersonal.bankAccount} onChange={(event) => setPersonal("bankAccount", event.target.value)} autoComplete="off" />
-                            </PersonalField>
-                            <PersonalField label="戶名" className="@3xl:col-span-2">
-                              <input className={inputCls} value={editPersonal.accountHolder} onChange={(event) => setPersonal("accountHolder", event.target.value)} autoComplete="off" />
-                            </PersonalField>
-                          </div>
-                          {/* 第三排：所屬公司（2026-10-25，集團總覽依它歸屬人數與人事成本；未指派不分攤）＋個人出勤設定（2026-10-13）。預設班別＝這位員工平日的上下班時間（遲到、應下班、缺卡都照它）；
-                              「依公司規則」＝沒有個人班別，照公司的彈性上班規則。在家上班打卡＝員工端打卡卡片出現「在家上班」勾選框。 */}
-                          <div className="mt-3 grid grid-cols-2 gap-3 @3xl:grid-cols-8">
-                            <PersonalField label="所屬公司" className="@3xl:col-span-2">
-                              <select className={inputCls} value={editCompanyId} onChange={(event) => setEditCompanyId(event.target.value)}>
-                                <option value="">未指派</option>
-                                {companyOptions(companies, editCompanyId).map((option) => (
-                                  <option key={option.id} value={option.id}>{option.label}</option>
-                                ))}
-                              </select>
-                            </PersonalField>
-                            <PersonalField label="預設班別" className="@3xl:col-span-2">
-                              <select className={inputCls} value={editDefaultShiftId} onChange={(event) => setEditDefaultShiftId(event.target.value)}>
-                                <option value="">依公司規則</option>
-                                {shifts.map((shift) => (
-                                  <option key={shift.id} value={shift.id}>
-                                    {shift.name}（{shift.start_time.slice(0, 5)}–{shift.end_time.slice(0, 5)}）
-                                  </option>
-                                ))}
-                              </select>
-                            </PersonalField>
-                            <PersonalField label="在家上班" className="@3xl:col-span-2">
-                              <label className="flex h-[38px] items-center gap-2 text-sm text-gray-700">
-                                <input
-                                  type="checkbox"
-                                  checked={editWfhPunch}
-                                  onChange={(event) => setEditWfhPunch(event.target.checked)}
-                                  className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
-                                />
-                                允許在家上班打卡
-                              </label>
-                            </PersonalField>
-                            <PersonalField label="夜間加給" className="@3xl:col-span-2">
-                              <label className="flex h-[38px] items-center gap-2 text-sm text-gray-700">
-                                <input
-                                  type="checkbox"
-                                  checked={editNoNightPremium}
-                                  onChange={(event) => setEditNoNightPremium(event.target.checked)}
-                                  className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
-                                />
-                                不計夜間加給
-                              </label>
-                            </PersonalField>
-                          </div>
-                          {editError && (
-                            <div className="mt-3">
-                              <ErrorText>{editError}</ErrorText>
-                            </div>
-                          )}
-                          {/* 儲存／取消放右下角；主要動作「儲存」在最右邊。 */}
-                          <div className="mt-3 flex justify-end gap-4">
-                            <button onClick={cancelEdit} disabled={editSaving} className="text-sm text-gray-500 hover:underline disabled:opacity-50">取消</button>
-                            <button onClick={() => void saveEdit(employee.id)} disabled={editSaving} className="text-sm font-medium disabled:opacity-50" style={{ color: "var(--brand)" }}>
-                              {editSaving ? "儲存中…" : "儲存"}
-                            </button>
-                          </div>
-                        </div>
-                      </td>
-                    ) : (
                       <>
                         {canManage && (
                           <td className="py-3 pr-2">
@@ -1506,18 +1006,18 @@ export default function EmployeesPage() {
                           <td className={`${PIN_RIGHT_TD} whitespace-nowrap py-2 pl-3 text-right`}>
                             {/* 只留「編輯」＋「⋯」；其餘動作收進選單，顯示／disabled 規則在 lib/employee-actions.ts */}
                             <div className="flex items-center justify-end gap-1">
-                              <button
-                                type="button"
-                                onClick={() => beginEdit(employee)}
+                              {/* 2026-10-26：編輯改到員工內頁（原本是列下方展開的行內表單）。 */}
+                              <Link
+                                href={employeeDetailHref(employee.id)}
                                 className="rounded-md px-2 py-1.5 text-sm text-gray-600 hover:bg-gray-100 hover:text-gray-800"
                               >
                                 編輯
-                              </button>
+                              </Link>
                               <ActionMenu
                                 label={`${employee.name} 的更多操作`}
                                 items={employeeActionsFor(employee, {
                                   isSelf: selfUserId !== null && employee.user_id === selfUserId,
-                                  busy: busyId === employee.id,
+                                  busy: actions.busyId === employee.id,
                                   credentialsLocked: credentialsLockedOf(employee),
                                 }).map((spec) => ({
                                   key: spec.key,
@@ -1525,14 +1025,13 @@ export default function EmployeesPage() {
                                   tone: spec.tone,
                                   disabled: spec.disabled,
                                   title: spec.title,
-                                  onSelect: () => runAction(spec.key, employee),
+                                  onSelect: () => actions.run(spec.key, { id: employee.id, name: employee.name }),
                                 }))}
                               />
                             </div>
                           </td>
                         )}
                       </>
-                    )}
                   </tr>
                 ))}
               </tbody>
@@ -1542,6 +1041,7 @@ export default function EmployeesPage() {
       </Card>
 
       {profileEmpId && (
+        <div id="employee-profile-panel" className="scroll-mt-4">
         <Card>
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -1774,103 +1274,8 @@ export default function EmployeesPage() {
             </div>
           )}
         </Card>
+        </div>
       )}
-      {auditTarget && (
-        <AuditDrawer
-          table="employees"
-          recordId={auditTarget.id}
-          title={`${auditTarget.name} 的異動紀錄`}
-          onClose={() => setAuditTarget(null)}
-        />
-      )}
-      <BottomSheet open={setPwTarget !== null} onClose={closeSetPassword} title="設定密碼">
-        {setPwTarget && setPwDone && (
-          <div className="space-y-4" data-testid="set-password-done">
-            <p className="text-sm leading-6 text-gray-600">
-              已設定 <span className="font-medium text-gray-800">{setPwDone.empName}</span> 的密碼。只顯示這一次，請複製後轉交同仁；
-              同仁下次登入會被要求改成自己的密碼，舊裝置的登入已失效。
-            </p>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <input
-                readOnly
-                aria-label="已設定的密碼"
-                className={`${inputCls} font-mono`}
-                value={setPwDone.password}
-                onFocus={(event) => event.currentTarget.select()}
-              />
-              <Button variant="secondary" size="md" className="shrink-0" onClick={() => void copyText(setPwDone.password, "密碼")}>
-                複製密碼
-              </Button>
-            </div>
-            <Button variant="primary" size="lg" block onClick={closeSetPassword}>
-              關閉
-            </Button>
-          </div>
-        )}
-        {setPwTarget && !setPwDone && (
-          <form
-            className="space-y-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void confirmSetPassword();
-            }}
-          >
-            <p className="text-sm leading-6 text-gray-600">
-              請輸入要配發給 <span className="font-medium text-gray-800">{setPwTarget.name}</span> 的密碼（至少 8 碼）。
-              同仁下次登入會被要求自設新密碼；舊裝置的登入會失效。
-            </p>
-            <Field label="密碼" required htmlFor="employees-set-password-input" error={setPwError ?? undefined} hint="至少 8 碼。">
-              <div className="flex gap-2">
-                <Input
-                  ref={setPwInputRef}
-                  id="employees-set-password-input"
-                  type={setPwShow ? "text" : "password"}
-                  autoComplete="new-password"
-                  minLength={8}
-                  className="font-mono"
-                  value={setPwValue}
-                  aria-invalid={setPwError ? "true" : undefined}
-                  disabled={setPwBusy}
-                  onChange={(event) => {
-                    setSetPwValue(event.target.value);
-                    if (setPwError) setSetPwError(null);
-                  }}
-                />
-                <Button
-                  variant="secondary"
-                  size="md"
-                  className="shrink-0"
-                  aria-pressed={setPwShow}
-                  onClick={() => setSetPwShow((show) => !show)}
-                >
-                  {setPwShow ? "隱藏" : "顯示"}
-                </Button>
-              </div>
-            </Field>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={setPwBusy}
-              onClick={() => {
-                // 產生後直接切成明碼，HR 才看得到要抄給同仁的是什麼。
-                setSetPwValue(generateRandomPassword());
-                setSetPwShow(true);
-                setSetPwError(null);
-              }}
-            >
-              產生隨機密碼
-            </Button>
-            <div className="grid grid-cols-2 gap-3">
-              <Button variant="secondary" size="lg" onClick={closeSetPassword} disabled={setPwBusy}>
-                取消
-              </Button>
-              <Button type="submit" variant="primary" size="lg" loading={setPwBusy} disabled={setPwValue.length < 8}>
-                設定密碼
-              </Button>
-            </div>
-          </form>
-        )}
-      </BottomSheet>
     </>
   );
 }

@@ -302,6 +302,16 @@ describe("resolveAdminPath：detail 頁（isDetail／parentPath／title）", () 
     });
   });
 
+  it("/admin/employees/[id] → 員工資料（2026-10-26 員工內頁）", () => {
+    expect(resolveAdminPath("/admin/employees/e1")).toMatchObject({
+      section: "people",
+      tab: "employees",
+      title: "員工資料",
+      isDetail: true,
+      parentPath: "/admin/employees",
+    });
+  });
+
   it("/admin/announcements/[id] → 公告版本與簽收", () => {
     expect(resolveAdminPath("/admin/announcements/a1")).toMatchObject({
       section: "announce",
@@ -313,9 +323,8 @@ describe("resolveAdminPath：detail 頁（isDetail／parentPath／title）", () 
   });
 
   it("沒有 detail 的分頁其子路徑不是 detail（title 沿用分頁、parentPath null）", () => {
-    expect(resolveAdminPath("/admin/employees/zzz")).toMatchObject({
-      tab: "employees",
-      title: "員工主檔",
+    expect(resolveAdminPath("/admin/departments/zzz")).toMatchObject({
+      tab: "departments",
       isDetail: false,
       parentPath: null,
     });
@@ -732,13 +741,14 @@ describe("ADMIN_ROUTES", () => {
     }
   });
 
-  it("6 種 detail：projects／disbursements list／bonus／sheets／announcements／專案申請單", () => {
+  it("7 種 detail：projects／disbursements list／bonus／sheets／employees／announcements／專案申請單", () => {
     const details = ADMIN_ROUTES.filter((r) => r.detail).map((r) => `${r.prefix}${r.pattern ? "#pattern" : ""}`);
     expect(details).toEqual([
       "/admin/projects",
       "/admin/disbursements",
       "/admin/bonus-runs",
       "/admin/attendance-sheets",
+      "/admin/employees",
       "/admin/announcements",
       "/admin/projects#pattern",
     ]);
