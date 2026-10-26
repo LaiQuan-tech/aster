@@ -285,42 +285,6 @@ describe.skipIf(!ready)("批次匯入（Excel）— live", () => {
     })
   })
 
-  describe("onboardings", () => {
-    let b64: string
-    beforeAll(async () => {
-      b64 = await xlsxBase64("onboardings", [
-        ["陳小新", "2026-10-05", "本國籍", "台北", "正職", "業務部", "A001"],
-        ["林實習生", "2026-10-15", "", "", "intern", "", ""],
-        ["", "2026-10-15", "", "", "", "", ""], // 姓名必填
-        ["張三", "2026-10-15", "", "", "正職", "不存在的部門", ""],
-        ["李四", "2026-10-15", "", "", "正職", "", "Z999"],
-      ])
-    })
-
-    it("dryRun：valid 2、errors 3", async () => {
-      const res = await upload("onboardings", b64, true)
-      expect(res.status).toBe(200)
-      expect(res.body).toMatchObject({ kind: "onboardings", total: 5, valid: 2 })
-      expect((res.body.errors as Array<{ line: number }>).map((e) => e.line)).toEqual([4, 5, 6])
-      expect(await countRows("onboardings")).toBe(0)
-    })
-
-    it("實匯：imported 2；部門／主管／僱用類型對應正確、status=pending", async () => {
-      const res = await upload("onboardings", b64, false)
-      expect(res.status).toBe(200)
-      expect(res.body).toMatchObject({ valid: 2, imported: 2 })
-      const { data } = await supabaseAdmin
-        .from("onboardings")
-        .select("name, report_date, identity_type, region, employment_type, dept_id, manager_emp_id, status")
-        .eq("tenant_id", tenantId)
-        .order("name", { ascending: true })
-      expect(data).toEqual([
-        { name: "林實習生", report_date: "2026-10-15", identity_type: null, region: null, employment_type: "intern", dept_id: null, manager_emp_id: null, status: "pending" },
-        { name: "陳小新", report_date: "2026-10-05", identity_type: "本國籍", region: "台北", employment_type: "regular", dept_id: deptId, manager_emp_id: empAId, status: "pending" },
-      ])
-    })
-  })
-
   describe("employees（批次建立帳號）", () => {
     const NEW_EMAIL = `imp-${stamp}-new@example.com`
     const BIND_EMAIL = `imp-${stamp}-bind@example.com`

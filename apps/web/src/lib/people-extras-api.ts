@@ -1,8 +1,7 @@
 /**
- * WP8「人員／公告／通知」的 client＋型別（W5、W6、M7、M8、M10、M13）。
+ * WP8「人員／公告／通知」的 client＋型別（W5、W6、M8、M10、M13）。
  *
  * 對應後端：
- *   apps/api/src/routes/birthday-gifts.ts           生日紅包（M7）
  *   apps/api/src/routes/duty-rosters.ts             值日／總機輪播（M8）
  *   apps/api/src/routes/profile-change-requests.ts  員工改資料審核（W6）
  *   apps/api/src/routes/announcements.ts            年度篩選＋簽收分母（M10／W5）
@@ -12,87 +11,6 @@
  * 型別是手抄的：web 與 api 是各自的 build 邊界。
  */
 import { apiFetch } from "./api-client";
-
-/* ------------------------------------------------------------ 生日紅包 M7 -- */
-
-export interface BirthdayGift {
-  id: string;
-  employee_id: string;
-  year: number;
-  given_on: string | null;
-  amount: number | null;
-  photo_path: string | null;
-  photo_file_name: string | null;
-  note: string | null;
-  created_at: string;
-  updated_at: string | null;
-  employeeName?: string | null;
-  /** 短效（900 秒）signed URL；沒照片就是 null。 */
-  photoUrl?: string | null;
-}
-
-export interface BirthdayPerson {
-  employeeId: string;
-  name: string | null;
-  /** 原始生日 YYYY-MM-DD。 */
-  birthday: string;
-  /** 今年實際落在哪一天（2/29 在平年＝2/28）。 */
-  date: string;
-  age: number | null;
-  gift: BirthdayGift | null;
-}
-
-/** 當月壽星＋各自的登記狀態（month 省略＝本月，租戶時區）。 */
-export function getUpcomingBirthdays(month?: string) {
-  const qs = month ? `?month=${encodeURIComponent(month)}` : "";
-  return apiFetch<{ month: string; year: number; birthdays: BirthdayPerson[] }>(
-    `/birthday-gifts/upcoming${qs}`,
-  );
-}
-
-export function listBirthdayGifts(year?: number) {
-  const qs = year ? `?year=${year}` : "";
-  return apiFetch<{ year: number; gifts: BirthdayGift[]; totalAmount: number }>(`/birthday-gifts${qs}`);
-}
-
-export function createBirthdayGift(body: {
-  employeeId: string;
-  year: number;
-  givenOn?: string | null;
-  amount?: number | null;
-  note?: string | null;
-}) {
-  return apiFetch<{ gift: BirthdayGift }>("/birthday-gifts", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-}
-
-export function updateBirthdayGift(
-  id: string,
-  body: { givenOn?: string | null; amount?: number | null; note?: string | null },
-) {
-  return apiFetch<{ gift: BirthdayGift }>(`/birthday-gifts/${id}`, {
-    method: "PATCH",
-    body: JSON.stringify(body),
-  });
-}
-
-export function uploadBirthdayPhoto(
-  id: string,
-  body: { fileName: string; contentType: string; dataBase64: string },
-) {
-  return apiFetch<{ id: string; fileName: string; sizeBytes: number; photoUrl: string | null }>(
-    `/birthday-gifts/${id}/photo`,
-    { method: "POST", body: JSON.stringify(body) },
-  );
-}
-
-export function deleteBirthdayPhoto(id: string) {
-  return apiFetch<{ id: string; removed: boolean }>(`/birthday-gifts/${id}/photo`, {
-    method: "DELETE",
-  });
-}
 
 /* --------------------------------------------------- 值日／總機輪播 M8 -- */
 

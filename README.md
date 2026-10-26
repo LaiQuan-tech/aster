@@ -28,7 +28,6 @@ Monorepo（npm workspace + Turbo）｜`apps/web` Next.js 16｜`apps/api` Express
   | `detect-and-notify-attendance` | 每日 03:00 | `/internal/attendance/detect-and-notify` |
   | `auto-archive-projects` | 每日 04:00 | `/internal/projects/auto-archive` |
   | `project-alerts` | 每日 04:30 | `/internal/projects/alert-notify` |
-  | `birthday-reminder` | 每日 08:00 | `/internal/people/birthday-reminder`（生日紅包提醒，M7） |
   | `deliver-pending-notifications` | 每 5 分鐘 | `/internal/notifications/deliver-pending` |
   | `generate-attendance-sheets` | 每月 1 日 05:00 | `/internal/attendance-sheets/generate` |
   | `monthly-snapshot` | 每月 1 日 06:00 | `/internal/backups/monthly-snapshot`（分頁續打，帶 run 序號） |

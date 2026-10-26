@@ -6,7 +6,7 @@ export type AckKind = "consent_to_change" | "accept_on_hire"
  * 待簽列的共同寫入點（W5）。`versionIds × employeeIds` 的笛卡兒積各建一列
  * （signed_at 為 null＝待簽），**ignoreDuplicates**：重跑不覆蓋已簽好的紀錄。
  *
- * 回實際新建的筆數。**永不 throw**——呼叫端（報到完成、發佈公告、建員工）
+ * 回實際新建的筆數。**永不 throw**——呼叫端（發佈公告、建員工、批次邀請）
  * 的主要動作都已經成功，不該因為待簽清單建不出來而失敗。
  */
 export async function seedAcknowledgementsFor(
@@ -59,7 +59,7 @@ export async function activeEmployeeIds(tenantId: string): Promise<string[]> {
  * 某一版公告對**全體在職員工**建待簽列（W5）。
  *
  * 客戶原文：「20 個人 5 個沒簽」——要看得出分母，就得在**發佈／進版當下**
- * 把全員的待簽列建出來。原本只有「報到完成／員工自己開過／HR 登錄」三條路
+ * 把全員的待簽列建出來。原本只有「員工自己開過／HR 登錄」等路
  * 會產生列，沒開過 App 的人根本不在名單裡，於是「誰還沒簽」永遠少算。
  *
  * kind 固定 'consent_to_change'：這是在職員工對條款變更的同意，與新人到職
@@ -78,11 +78,11 @@ export async function seedVersionAcknowledgements(
 }
 
 /**
- * 新人報到時生成待簽清單（模組二第 3 條）。
+ * 新人到職（建立員工）時生成待簽清單（模組二第 3 條）。
  *
  * 客戶原文：「新進同仁需於**現行生效公告文件**之後續欄位進行補簽」——
  * 注意是**複數**：新人要簽的是所有現行生效且需簽收的規章，不是一份。
- * 故報到完成時一次把待簽項全部建出來，`announcement_acknowledgements`
+ * 故建立員工時一次把待簽項全部建出來，`announcement_acknowledgements`
  * 的「誰還沒簽」清單自然涵蓋新人，不必另做一套。
  *
  * `kind = 'accept_on_hire'`：新人補簽的法律性質是**接受既有勞動條件**
@@ -93,7 +93,7 @@ export async function seedVersionAcknowledgements(
  * 建立的是**待簽**項（signed_at 為 null）。實際簽署日要等紙本簽完由 HR
  * 登錄，不可從掃描檔推斷（傳閱單頂上是公告日期，不是補簽日期）。
  *
- * **永不 throw**：報到本身已經成功，不該因為待簽清單建不出來而失敗。
+ * **永不 throw**：建員工本身已經成功，不該因為待簽清單建不出來而失敗。
  * 回傳實際建立的筆數供呼叫端回報。
  */
 export async function seedHireAcknowledgements(
@@ -110,7 +110,7 @@ export async function seedHireAcknowledgements(
       .eq("requires_signature", true)
       .or(`effective_to.is.null,effective_to.gt.${onDate}`)
     if (error) {
-      console.error(`[onboarding] seed acknowledgements failed: ${error.message}`)
+      console.error(`[hire-ack] seed acknowledgements failed: ${error.message}`)
       return 0
     }
 
@@ -126,7 +126,7 @@ export async function seedHireAcknowledgements(
       kind: "accept_on_hire",
     })
   } catch (err) {
-    console.error("[onboarding] seed acknowledgements threw:", err)
+    console.error("[hire-ack] seed acknowledgements threw:", err)
     return 0
   }
 }

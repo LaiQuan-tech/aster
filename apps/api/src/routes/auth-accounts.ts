@@ -13,7 +13,7 @@ import {
   requestPasswordReset,
   sendEmployeeAccountLink,
 } from "../services/auth-invite.js"
-import { seedHireAcknowledgements } from "../services/onboarding-signatures.js"
+import { seedHireAcknowledgements } from "../services/hire-acknowledgements.js"
 import { assertCanManageCredentials, isProtectedAccount, type PrivilegeCaller } from "../services/privileged-accounts.js"
 import { loadPeriodUnlockPolicy } from "../services/period-lock.js"
 import { PASSWORD_TOO_LONG_REASON, passwordTooLong, passwordTooLongRejection } from "../services/password-update-error.js"

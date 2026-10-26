@@ -25,7 +25,7 @@ import { CalendarNotMigratedError, CalendarSchemaNotReadyError } from "../servic
  *        → 404 unknown_kind
  *        → 503 calendar_not_migrated（holidays：tenant_calendar_days 尚未建表）
  *
- * kind = punches | salary-adjustments | onboardings | employees | holidays（schedules 已隨班表功能移除 → 404 unknown_kind）。
+ * kind = punches | salary-adjustments | employees | holidays（schedules 已隨班表功能移除 → 404 unknown_kind）。
  * dryRun=true 只驗證不寫；否則只寫沒錯的列（跟既有 CSV 匯入一致）。
  * employees 的 options.dryRunInvite=true 是「建帳號但不寄信」（對應 bulkInviteFromCsv 的 dryRun），
  * 跟本端點的 dryRun 是兩回事。

@@ -1,22 +1,18 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { getTenantTimezone } from "../lib/tenant-tz.js"
-import { todayKey } from "../lib/tz.js"
 import { AnnualLeaveError, grantAnnualLeave } from "../services/annual-leave.js"
-import { remindBirthdays } from "../services/birthday.js"
 import { CalendarImportNotMigratedError, runHolidayImportJob } from "../services/holiday-import.js"
 
 /**
- * 排程端點（worker 呼叫；W1 年度給假、M7 生日提醒）——2026-09-23 WP9。
+ * 排程端點（worker 呼叫；W1 年度給假、國定假日匯入）——2026-09-23 WP9。
  *
  *   POST /internal/leave/annual-grant        body {asOf?, dryRun?}   worker 每日 01:30 台北
- *   POST /internal/people/birthday-reminder  body {date?}            worker 每日 08:00 台北
  *   POST /internal/calendar/holiday-import   body {date?, force?}    worker 每日 07:30 台北（國定假日年度匯入草稿，2026-10-17）
  *
  * 兩支都是「迴圈所有 `tenants.status='active'` 租戶、逐租戶 try/catch、一個租戶失敗
  * 不影響其他租戶」。日期一律**用租戶自己的時區**算今天（不是伺服器時區也不是寫死台北）：
- * `asOf`／`date` 省略時由 service（年度給假）或本檔（生日）取 `todayKey(tenantTz)`。
+ * `asOf` 省略時由 service（年度給假）取 `todayKey(tenantTz)`。
  *
  * 守門 `requireInternalToken`／`requireInternalJobsEnabled` 是從
  * `routes/internal-jobs.ts:92-110` **原樣複製**過來的（該檔屬別的工作包，不共用匯出以免
@@ -131,65 +127,6 @@ internalCronRouter.post(
         tenants: results.length,
         granted: results.reduce((sum, item) => sum + (item.ok ? item.granted : 0), 0),
         migrated: results.reduce((sum, item) => sum + (item.ok ? item.migrated : 0), 0),
-        skipped: results.reduce((sum, item) => sum + (item.ok ? item.skipped : 0), 0),
-        failed: results.filter((item) => !item.ok).length,
-        results,
-      })
-    } catch (err) {
-      next(err)
-    }
-  },
-)
-
-// ── M7 生日提醒 ───────────────────────────────────────────────────────
-
-const birthdayReminderSchema = z.object({
-  /** 基準日；省略＝各租戶自己時區的今天。 */
-  date: z.string().regex(dateRe).optional(),
-})
-
-type BirthdayJobResult =
-  | { tenantId: string; ok: true; date: string; queued: number; skipped: number }
-  | { tenantId: string; ok: false; error: string }
-
-/**
- * POST /internal/people/birthday-reminder — 每日提醒 HR 準備生日紅包。
- *
- * `remindBirthdays` 一次看兩個日子（今天、以及三天後的預告），同日同 key 不重發，
- * 所以一天跑一次以上不會洗版；`queued` 是這次真的排進 `notifications` 的則數。
- */
-internalCronRouter.post(
-  "/internal/people/birthday-reminder",
-  async (req: Request, res: Response, next: NextFunction) => {
-    if (!requireInternalToken(req, res)) return
-    if (!requireInternalJobsEnabled(res)) return
-    const parsed = birthdayReminderSchema.safeParse(req.body ?? {})
-    if (!parsed.success) {
-      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
-      return
-    }
-
-    try {
-      const tenantIds = await activeTenantIds("POST /internal/people/birthday-reminder")
-      const results: BirthdayJobResult[] = []
-      for (const tenantId of tenantIds) {
-        try {
-          const date = parsed.data.date ?? todayKey(await getTenantTimezone(tenantId))
-          const result = await remindBirthdays(tenantId, date)
-          results.push({ tenantId, ok: true, date, queued: result.queued, skipped: result.skipped })
-        } catch (err) {
-          results.push({
-            tenantId,
-            ok: false,
-            error: err instanceof Error ? err.message : "birthday_reminder_failed",
-          })
-        }
-      }
-
-      res.status(200).json({
-        ...(parsed.data.date ? { date: parsed.data.date } : {}),
-        tenants: results.length,
-        queued: results.reduce((sum, item) => sum + (item.ok ? item.queued : 0), 0),
         skipped: results.reduce((sum, item) => sum + (item.ok ? item.skipped : 0), 0),
         failed: results.filter((item) => !item.ok).length,
         results,

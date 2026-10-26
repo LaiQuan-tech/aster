@@ -89,8 +89,8 @@ export default function AnnouncementDetailPage() {
   const selected = versions.find((v) => v.id === selectedVersionId) ?? null;
 
   /**
-   * 補建待簽名單（W5）：2026-09-23 之前發佈的需簽收公告，待簽列只在「報到完成／
-   * 員工自己開過／HR 登錄」時才長出來，分母是錯的。這顆按鈕對現行版補齊全體在職員工。
+   * 補建待簽名單（W5）：2026-09-23 之前發佈的需簽收公告，待簽列只在「員工自己開過／
+   * HR 登錄」時才長出來，分母是錯的。這顆按鈕對現行版補齊全體在職員工。
    */
   async function seedAcks() {
     if (!selected) return;

@@ -20,6 +20,8 @@ dotenv.config({ path: resolve(process.cwd(), "../../.env") });
 const ADMIN_REDIRECTS = [
   { source: "/admin/form-records", destination: "/admin/approvals?status=all" },
   { source: "/admin/org-chart", destination: "/admin/departments" },
+  { source: "/admin/onboarding", destination: "/admin/employees" },
+  { source: "/admin/birthday-gifts", destination: "/admin/employees" },
 ];
 
 const nextConfig: NextConfig = {

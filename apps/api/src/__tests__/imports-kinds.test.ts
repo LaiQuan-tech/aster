@@ -64,7 +64,6 @@ describe("IMPORT_KIND_DEFS 一致性", () => {
     const headers = (k: (typeof IMPORT_KINDS)[number]) => IMPORT_KIND_DEFS[k].columns.map((c) => c.header)
     expect(headers("punches")).toEqual(["工號", "姓名", "日期", "時間", "類型"])
     expect(headers("salary-adjustments")).toEqual(["工號", "姓名", "生效日", "新薪資", "原因"])
-    expect(headers("onboardings")).toEqual(["姓名", "報到日", "身分別", "地區", "僱用類型", "部門", "主管工號"])
     expect(headers("employees")).toEqual(["姓名", "Email", "工號", "部門", "僱用類型", "到職日", "角色"])
     expect(headers("holidays")).toEqual(["日期", "名稱"])
   })
@@ -122,8 +121,8 @@ describe("buildImportWorkbook（write → reload）", () => {
     expect(emps.rowCount).toBe(3) // 已離職的不列
     expect(punches.getWorksheet("班別清單")).toBeUndefined()
 
-    const ob = await reload("onboardings")
-    expect(rowTexts(ob.getWorksheet("部門清單")!, 2)).toEqual(["業務部"])
+    const emp = await reload("employees")
+    expect(rowTexts(emp.getWorksheet("部門清單")!, 2)).toEqual(["業務部"])
   })
 
   it("有允許值的欄在範例列以下有下拉驗證", async () => {

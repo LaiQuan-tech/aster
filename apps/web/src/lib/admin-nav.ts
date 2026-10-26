@@ -146,7 +146,7 @@ export const ADMIN_SECTIONS: readonly AdminSection[] = [
   { key: "approvals", label: "假單與簽核", icon: "approvals", href: "/admin/approvals", desc: "簽核表單、假別餘額與月底核銷" },
   { key: "attendance", label: "出勤", icon: "attendance", href: "/admin/punch-records", desc: "打卡紀錄、出勤月表、遲到說明與值日" },
   { key: "payroll", label: "薪資與費用", icon: "payroll", href: "/admin/payroll", desc: "薪資、薪資單、稅務、報銷與預支" },
-  { key: "people", label: "人員", icon: "people", href: "/admin/employees", desc: "員工主檔、部門組織圖與到職" },
+  { key: "people", label: "人員", icon: "people", href: "/admin/employees", desc: "員工主檔與部門組織圖" },
   { key: "announce", label: "公告與資訊", icon: "announce", href: "/admin/announcements", desc: "公告與公司資訊頁" },
   { key: "settings", label: "設定", icon: "settings", href: "/admin/leave-types", desc: "假別、班別、行事曆、規則參數與站台" },
   { key: "system", label: "系統", icon: "system", href: "/admin/reports", desc: "報表、稽核紀錄、備份與通知" },
@@ -424,20 +424,6 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       desc: "維護單位名稱、上層單位與主管；右側同步顯示組織圖",
     },
     {
-      key: "onboarding",
-      label: "到職",
-      href: "/admin/onboarding",
-      title: "報到管理",
-      desc: "新進人員報到，完成後建立正式員工資料",
-    },
-    {
-      key: "birthdays",
-      label: "生日紅包",
-      href: "/admin/birthday-gifts",
-      title: "生日紅包登記",
-      desc: "本月壽星清單（到期前三天與當天通知 HR）；發了紅包登記金額、日期、備註並拍照留存",
-    },
-    {
       key: "recruitment",
       label: "招募",
       href: "/admin/recruitment",
@@ -683,6 +669,9 @@ export interface AdminRedirect {
 export const ADMIN_REDIRECTS: readonly AdminRedirect[] = [
   { source: "/admin/form-records", destination: "/admin/approvals?status=all" },
   { source: "/admin/org-chart", destination: "/admin/departments" },
+  // 2026-10-26 到職（報到管理）與生日紅包功能停用：舊網址導回員工主檔。
+  { source: "/admin/onboarding", destination: "/admin/employees" },
+  { source: "/admin/birthday-gifts", destination: "/admin/employees" },
 ];
 
 /* ------------------------------------------------------------- 路由表 --- */

@@ -17,15 +17,13 @@ import {
   isProtectedAccount,
   loadActor,
 } from "../privileged-accounts.js"
-import { loadDepartments, NameResolver, resolveEmployees, type EmployeeRef } from "./resolve.js"
+import { resolveEmployees, type EmployeeRef } from "./resolve.js"
 import {
   generateTenantCalendar,
   importManualPunches,
-  insertOnboardings,
   insertSalaryAdjustments,
   type HolidayInput,
   type ManualPunchRecord,
-  type OnboardingInput,
   type PunchType,
   type SalaryAdjustmentInput,
 } from "./writers.js"
@@ -277,58 +275,6 @@ async function runSalaryAdjustments(tenantId: string, rows: ParsedImportRow[], d
   return out
 }
 
-/* ── onboardings ──────────────────────────────────────────────────── */
-
-async function runOnboardings(tenantId: string, rows: ParsedImportRow[], dryRun: boolean) {
-  const [resolver, departments] = await Promise.all([resolveEmployees(tenantId), loadDepartments(tenantId)])
-  const deptByName = new NameResolver(departments)
-  const { valid, errors } = validateRows<OnboardingInput>(rows, (v) => {
-    const name = v.name.trim()
-    if (!name) return fail("「姓名」必填")
-    const reportDate = optionalDate(v.reportDate, "報到日")
-    if (!reportDate.ok) return reportDate
-    let employmentType = "regular"
-    if (v.employmentType.trim()) {
-      const mapped = EMPLOYMENT_TYPES.get(normalizeToken(v.employmentType))
-      if (!mapped) return fail(`「僱用類型」須為 ${allowed(EMPLOYMENT_TYPE_LABELS)}（填的是「${v.employmentType}」）`)
-      employmentType = mapped
-    }
-    let deptId: string | null = null
-    if (v.deptName.trim()) {
-      deptId = deptByName.get(v.deptName)
-      if (!deptId) return fail(`找不到部門「${v.deptName.trim()}」（見範本的「部門清單」）`)
-    }
-    let managerEmpId: string | null = null
-    if (v.managerEmpNo.trim()) {
-      const mgr = resolver.byEmpNoOnly(v.managerEmpNo)
-      if (!mgr.ok) return fail(`主管：${mgr.message}`)
-      managerEmpId = mgr.employee.id
-    }
-    return {
-      ok: true,
-      value: {
-        name,
-        reportDate: reportDate.value,
-        identityType: v.identityType.trim() || null,
-        region: v.region.trim() || null,
-        employmentType,
-        deptId,
-        managerEmpId,
-      },
-    }
-  })
-  const out: Partial<ImportRunResult> = { valid: valid.length, errors }
-  if (!dryRun) {
-    const { ids } = await insertOnboardings(
-      tenantId,
-      valid.map((r) => r.value),
-      "POST /imports/onboardings",
-    )
-    out.imported = ids.length
-  }
-  return out
-}
-
 /* ── employees（批次建立帳號 → bulkInviteFromCsv） ─────────────────── */
 
 interface EmployeeInviteRow {
@@ -557,9 +503,6 @@ export async function runImport(
       break
     case "salary-adjustments":
       partial = await runSalaryAdjustments(tenantId, rows, dryRun)
-      break
-    case "onboardings":
-      partial = await runOnboardings(tenantId, rows, dryRun)
       break
     case "employees":
       partial = await runEmployees(tenantId, rows, dryRun, options, opts.actorEmpId)

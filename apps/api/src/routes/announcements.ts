@@ -6,7 +6,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
-import { activeEmployeeIds, seedVersionAcknowledgements } from "../services/onboarding-signatures.js"
+import { activeEmployeeIds, seedVersionAcknowledgements } from "../services/hire-acknowledgements.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { dayWindowUtc } from "../lib/tz.js"
 
@@ -429,8 +429,8 @@ announcementsRouter.get(
 /**
  * POST /announcements/:id/acknowledgements/seed — 對既有版本補建待簽列（HR；W5）。
  *
- * 上線一次性的補救端點：2026-09-23 之前發佈的需簽收公告，待簽列只在「報到完成／
- * 員工自己開過／HR 登錄」時才長出來，所以分母是錯的。這支對指定版本（預設現行版）
+ * 上線一次性的補救端點：2026-09-23 之前發佈的需簽收公告，待簽列只在「員工自己開過／
+ * HR 登錄」時才長出來，所以分母是錯的。這支對指定版本（預設現行版）
  * 的**全體在職員工**補齊 `consent_to_change` 待簽列，已存在的列不動（ignoreDuplicates）。
  * 不需簽收的版本回 409，免得誤建一堆永遠不會簽的列。
  */
@@ -937,7 +937,7 @@ announcementsRouter.get(
  *     欄位補簽，那張紙不記錄他何時簽）。
  *
  * `kind` 決定這個簽名的法律性質，預設 'consent_to_change'；新人到職應帶
- * 'accept_on_hire'（由 onboarding 完成時自動建立）。
+ * 'accept_on_hire'（建立員工時自動建立）。
  */
 announcementsRouter.post(
   "/announcement-versions/:vid/acknowledge",

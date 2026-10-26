@@ -15,7 +15,6 @@
 export const IMPORT_KINDS = [
   "punches",
   "salary-adjustments",
-  "onboardings",
   "employees",
   "holidays",
 ] as const
@@ -150,34 +149,6 @@ export const IMPORT_KIND_DEFS: Record<ImportKind, ImportKindDef> = {
     ],
     extraSheets: ["employees"],
     notes: ["同一位員工同一個生效日在同一個檔案裡只能出現一次。", "這裡只登記調薪紀錄，薪資結構的本薪請另外在薪資設定更新。"],
-  },
-  onboardings: {
-    kind: "onboardings",
-    label: "批次報到",
-    description: "建立待報到人員（狀態為「未報到」），之後在報到管理完成報到即轉成員工。",
-    columns: [
-      { key: "name", header: "姓名", required: true, hint: "報到人員姓名。", example: "陳新人", width: 14 },
-      { key: "reportDate", header: "報到日", required: false, hint: DATE_HINT, example: "2026-10-01", width: 14 },
-      { key: "identityType", header: "身分別", required: false, hint: "自由文字（例 本國籍、外籍）。", example: "本國籍", width: 12 },
-      { key: "region", header: "地區", required: false, hint: "自由文字（例 台北、台中）。", example: "台北", width: 10 },
-      {
-        key: "employmentType",
-        header: "僱用類型",
-        required: false,
-        hint: "正職／兼職／約聘／實習／派遣（也接受 regular/parttime/contract/intern/dispatched）。留空＝正職。",
-        example: "正職",
-        options: Object.values(EMPLOYMENT_TYPE_LABELS),
-        width: 10,
-      },
-      { key: "deptName", header: "部門", required: false, hint: "部門名稱（見「部門清單」），須完全一致；留空＝未指定。", example: "業務部", width: 14 },
-      { key: "managerEmpNo", header: "主管工號", required: false, hint: "直屬主管的工號（見「員工清單」）；留空＝未指定。", example: "A001", width: 12 },
-    ],
-    examples: [
-      ["陳新人", "2026-10-01", "本國籍", "台北", "正職", "業務部", "A001"],
-      ["林實習", "2026-10-15", "本國籍", "台中", "實習", "", ""],
-    ],
-    extraSheets: ["departments", "employees"],
-    notes: ["這裡只建立報到名單，不會建立登入帳號；完成報到時才會建立員工資料。"],
   },
   employees: {
     kind: "employees",

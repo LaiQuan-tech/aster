@@ -27,9 +27,14 @@ const SCHEDULER_IDS = [
   "generate-attendance-sheets",
   "monthly-snapshot",
   "annual-leave-grant",
-  "birthday-reminder",
   "holiday-calendar-import",
 ];
+
+/**
+ * 已停用的排程 id（2026-10-26 生日紅包功能移除）。Redis 裡可能還留著舊的 repeat 設定；
+ * API 端點已不存在，且未知的 job 名稱會落到預設的每日結算端點，所以啟動時一律清掉。
+ */
+const RETIRED_SCHEDULER_IDS = ["birthday-reminder"];
 
 /** 月度快照是「一次呼叫做一段、帶游標續打」的分頁 API；這是續打次數上限（防迴圈跑不完）。 */
 const MONTHLY_SNAPSHOT_MAX_CALLS = 300;
@@ -70,8 +75,10 @@ async function postInternal(
 async function registerSchedulers() {
   if (!attendanceQueue || !maybeRedis) return;
 
+  const queue = attendanceQueue;
+  await Promise.allSettled(RETIRED_SCHEDULER_IDS.map((id) => queue.removeJobScheduler(id)));
+
   if (process.env.ENABLE_WORKER_SCHEDULERS !== "true") {
-    const queue = attendanceQueue;
     await Promise.allSettled(SCHEDULER_IDS.map((id) => queue.removeJobScheduler(id)));
     logger.warn("ENABLE_WORKER_SCHEDULERS is not true — job schedulers are paused");
     return;
@@ -129,13 +136,6 @@ async function registerSchedulers() {
     { pattern: "30 1 * * *", tz: "Asia/Taipei" },
     { name: "annual-leave-grant", data: {} },
   );
-  // 生日紅包提醒（M7）：每日 08:00 台北，提醒 HR 今天與三天後的壽星。排在上班時間，
-  // 通知投遞（每 5 分鐘）很快就會把它送出去。同日同 key 不重發。
-  await attendanceQueue.upsertJobScheduler(
-    "birthday-reminder",
-    { pattern: "0 8 * * *", tz: "Asia/Taipei" },
-    { name: "birthday-reminder", data: {} },
-  );
   // 國定假日年度匯入（2026-10-17）：每日 07:30 台北。7/1 起下一年沒有已核准行事曆 → API 抓人事行政總處
   // 辦公日曆建草稿並通知 HR；每月 1 日重抓當年與下一年，官方修正版與已核准不同 → 建新草稿並通知。
   // 只建草稿、從不自動核准；官方還沒公布那一年就什麼都不做，隔天再試。
@@ -168,7 +168,6 @@ async function registerSchedulers() {
         "generate-attendance-sheets": "/internal/attendance-sheets/generate",
         "monthly-snapshot": "/internal/backups/monthly-snapshot",
         "annual-leave-grant": "/internal/leave/annual-grant",
-        "birthday-reminder": "/internal/people/birthday-reminder",
         "holiday-calendar-import": "/internal/calendar/holiday-import",
       };
       const endpoint = endpointByJob[job.name] ?? "/internal/attendance/daily-settle";
@@ -302,7 +301,7 @@ if (process.env.REDIS_URL) {
     process.exit(1);
   });
   logger.info(
-    "Worker process started (attendance + detection + notifications + monthly snapshot + annual leave + birthdays + holiday calendar)",
+    "Worker process started (attendance + detection + notifications + monthly snapshot + annual leave + holiday calendar)",
   );
 } else {
   // Skeleton mode: no broker, so we only run the health server. This keeps the

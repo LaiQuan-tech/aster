@@ -140,12 +140,11 @@ describe("resolveAdminPath：最長前綴", () => {
     });
   });
 
-  it("2026-09-23 新分頁：現金給付（三節獎金／加班超額另計）、生日紅包、值日／總機", () => {
+  it("2026-09-23 新分頁：現金給付（三節獎金／加班超額另計）、值日／總機", () => {
     expect(resolveAdminPath("/admin/festival-bonuses")).toMatchObject({ section: "payroll", tab: "cash", sub: "festival", title: "三節／節慶獎金" });
     expect(resolveAdminPath("/admin/overtime-settlements")).toMatchObject({ section: "payroll", tab: "cash", sub: "otSettlements", title: "加班超額另計" });
-    expect(resolveAdminPath("/admin/birthday-gifts")).toMatchObject({ section: "people", tab: "birthdays", title: "生日紅包登記" });
     expect(resolveAdminPath("/admin/duty-rosters")).toMatchObject({ section: "attendance", tab: "duty", title: "值日生／總機輪播排班" });
-    for (const path of ["/admin/festival-bonuses", "/admin/overtime-settlements", "/admin/birthday-gifts", "/admin/duty-rosters"]) {
+    for (const path of ["/admin/festival-bonuses", "/admin/overtime-settlements", "/admin/duty-rosters"]) {
       expect(resolveAdminPath(path).module, path).toBeUndefined();
       expect(resolveAdminPath(path).narrow, path).toBe(false);
     }
@@ -406,39 +405,33 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
     ]);
   });
 
-  it("tabsForSection('people')：預設 4 個（含生日紅包）；{recruitment:true} 加進來且順序照表", () => {
-    expect(tabsForSection("people", null).map((t) => t.key)).toEqual(["employees", "departments", "onboarding", "birthdays"]);
-    expect(tabsForSection("people", {}).map((t) => t.key)).toEqual(["employees", "departments", "onboarding", "birthdays"]);
+  it("tabsForSection('people')：預設 2 個；{recruitment:true} 加進來且順序照表", () => {
+    expect(tabsForSection("people", null).map((t) => t.key)).toEqual(["employees", "departments"]);
+    expect(tabsForSection("people", {}).map((t) => t.key)).toEqual(["employees", "departments"]);
     expect(tabsForSection("people", { recruitment: true }).map((t) => t.key)).toEqual([
       "employees",
       "departments",
-      "onboarding",
-      "birthdays",
       "recruitment",
     ]);
     expect(tabsForSection("people", { employeeMail: true, kpi: true, recruitment: true }).map((t) => t.key)).toEqual([
       "employees",
       "departments",
-      "onboarding",
-      "birthdays",
       "recruitment",
       "kpi",
       "employeeMail",
     ]);
     // false／非 boolean 都算未啟用
-    expect(tabsForSection("people", { kpi: false }).map((t) => t.key)).toEqual(["employees", "departments", "onboarding", "birthdays"]);
+    expect(tabsForSection("people", { kpi: false }).map((t) => t.key)).toEqual(["employees", "departments"]);
   });
 
   it("includeTab 強制保留目前所在的隱藏分頁；不認得的 key／null 沒作用", () => {
     expect(tabsForSection("people", {}, { includeTab: "kpi" }).map((t) => t.key)).toEqual([
       "employees",
       "departments",
-      "onboarding",
-      "birthdays",
       "kpi",
     ]);
-    expect(tabsForSection("people", {}, { includeTab: null }).map((t) => t.key)).toEqual(["employees", "departments", "onboarding", "birthdays"]);
-    expect(tabsForSection("people", {}, { includeTab: "nope" })).toHaveLength(4);
+    expect(tabsForSection("people", {}, { includeTab: null }).map((t) => t.key)).toEqual(["employees", "departments"]);
+    expect(tabsForSection("people", {}, { includeTab: "nope" })).toHaveLength(2);
     expect(tabsForSection("system", null, { includeTab: "ai" }).map((t) => t.key)).toEqual([
       "reports",
       "audit",
@@ -574,7 +567,6 @@ describe("isAdminPathAllowed：直開網址的角色守門（2026-09-23 驗收�
       "/admin/approvals",
       "/admin/punch-records",
       "/admin/departments",
-      "/admin/birthday-gifts",
       "/admin/announcements",
       "/admin/leave-types",
       // 設定區只開選項清單，其餘（班別、行事曆、規則參數、員工端功能開放、站台、進階功能）仍是 HR 專屬
@@ -662,14 +654,13 @@ describe("isAdminPathAllowed：直開網址的角色守門（2026-09-23 驗收�
     expect(isAdminPathAllowed({ pathname: "/admin/shifts", roleNav: withSettings })).toBe(false);
   });
 
-  it("首頁老闆看板：會計看不到獎金／快照／壽星三張（目標頁未開放），放款／未收款／年度總額看得到", () => {
+  it("首頁老闆看板：會計看不到獎金／快照兩張（目標頁未開放），放款／未收款／年度總額看得到", () => {
     expect(allowed("/admin/bonus-runs")).toBe(false);
     expect(allowed("/admin/backups")).toBe(false);
-    expect(allowed("/admin/birthday-gifts")).toBe(false);
     expect(allowed("/admin/disbursements")).toBe(true);
     expect(allowed("/admin/projects/receivables")).toBe(true);
     expect(allowed("/admin/projects/annual")).toBe(true);
-    for (const href of ["/admin/bonus-runs", "/admin/backups", "/admin/birthday-gifts", "/admin/approvals", "/admin/company-info"]) {
+    for (const href of ["/admin/bonus-runs", "/admin/backups", "/admin/approvals", "/admin/company-info"]) {
       expect(isAdminPathAllowed({ pathname: href, roleNav: null }), href).toBe(true);
     }
   });
@@ -756,10 +747,12 @@ describe("ADMIN_ROUTES", () => {
 });
 
 describe("ADMIN_REDIRECTS 與 next.config.ts", () => {
-  it("兩條轉址：form-records → approvals?status=all、org-chart → departments", () => {
+  it("四條轉址：form-records → approvals?status=all、org-chart → departments、onboarding／birthday-gifts → employees", () => {
     expect(ADMIN_REDIRECTS).toEqual([
       { source: "/admin/form-records", destination: "/admin/approvals?status=all" },
       { source: "/admin/org-chart", destination: "/admin/departments" },
+      { source: "/admin/onboarding", destination: "/admin/employees" },
+      { source: "/admin/birthday-gifts", destination: "/admin/employees" },
     ]);
     // 轉址目標都解析得到自己的路由
     for (const redirect of ADMIN_REDIRECTS) {
@@ -788,8 +781,8 @@ describe("檔案系統覆蓋（app/admin/**/page.tsx）", () => {
 
   it("路由表裡的每個 prefix 都有頁面（尚未建立的新頁除外）", () => {
     const pages = new Set(staticAdminPages(ADMIN_APP_DIR, "/admin"));
-    // 2026-09-23：WP6／WP7／WP8 的五頁（disbursements/approvals、festival-bonuses、
-    // overtime-settlements、birthday-gifts、duty-rosters）已建，從豁免名單移除，讓本案例真的檢查它們。
+    // 2026-09-23：WP6／WP7／WP8 的四頁（disbursements/approvals、festival-bonuses、
+    // overtime-settlements、duty-rosters）已建，從豁免名單移除，讓本案例真的檢查它們。
     const pending = new Set([
       "/admin/settings/advanced",
       "/admin/module-settings/ess-tabs",

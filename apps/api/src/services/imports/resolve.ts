@@ -76,10 +76,6 @@ export class EmployeeResolver {
     return { ok: true, employee: sameName[0] }
   }
 
-  /** 只用工號找（onboardings 的主管工號）。 */
-  byEmpNoOnly(empNoRaw: string): ResolveOutcome {
-    return this.resolve(empNoRaw, "")
-  }
 }
 
 export async function resolveEmployees(tenantId: string): Promise<EmployeeResolver> {
@@ -97,20 +93,6 @@ export async function resolveEmployees(tenantId: string): Promise<EmployeeResolv
     hasUser: !!r.user_id,
   }))
   return new EmployeeResolver(all)
-}
-
-/** 名稱 → id 的小對照（班別、部門共用）：trim、去空白後比對；重名時取第一個。 */
-export class NameResolver {
-  private readonly map = new Map<string, string>()
-  constructor(readonly entries: Array<{ id: string; name: string }>) {
-    for (const e of entries) {
-      const k = squash(e.name)
-      if (!this.map.has(k)) this.map.set(k, e.id)
-    }
-  }
-  get(nameRaw: string): string | null {
-    return this.map.get(squash(nameRaw)) ?? null
-  }
 }
 
 export interface ShiftRef {

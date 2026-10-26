@@ -11,7 +11,6 @@ import { loadTenantWeekendPolicy, weekdayDayType, type WeekendPolicy } from "../
  * 這裡的每個函式都是從原本 routes 的 handler 抽出來的寫入段，行為不變：
  *   • importManualPunches      ← POST /punch/manual/import（先驗同租戶員工、逐筆 employee_not_found、source=manual）
  *   • insertSalaryAdjustments   ← POST /salary-adjustments/import
- *   • insertOnboardings         ← POST /onboardings/import（status=pending）
  *   • generateTenantCalendar    ← POST /calendar/generate（例假→regular_leave、休息日→rest_day、週間假日→fixed_holiday）
  * 呼叫端（route）負責決定 HTTP 狀態碼與回應形狀；這裡只回資料或丟 Error。
  */
@@ -104,42 +103,6 @@ export async function insertSalaryAdjustments(
     reason: r.reason ?? null,
   }))
   const { data, error } = await supabaseAdmin.from("salary_adjustments").insert(rows).select("id")
-  if (error) throw new Error(`${context}: ${error.message}`)
-  return { ids: (data ?? []).map((r) => r.id as string) }
-}
-
-/* ── 報到 ─────────────────────────────────────────────────────────── */
-
-export interface OnboardingInput {
-  name: string
-  /** YYYY-MM-DD */
-  reportDate?: string | null
-  identityType?: string | null
-  region?: string | null
-  /** 預設 regular。 */
-  employmentType?: string | null
-  deptId?: string | null
-  managerEmpId?: string | null
-}
-
-export async function insertOnboardings(
-  tenantId: string,
-  inputs: OnboardingInput[],
-  context = "insertOnboardings",
-): Promise<{ ids: string[] }> {
-  if (inputs.length === 0) return { ids: [] }
-  const rows = inputs.map((r) => ({
-    tenant_id: tenantId,
-    name: r.name,
-    report_date: r.reportDate ?? null,
-    identity_type: r.identityType ?? null,
-    region: r.region ?? null,
-    employment_type: r.employmentType ?? "regular",
-    dept_id: r.deptId ?? null,
-    manager_emp_id: r.managerEmpId ?? null,
-    status: "pending",
-  }))
-  const { data, error } = await supabaseAdmin.from("onboardings").insert(rows).select("id")
   if (error) throw new Error(`${context}: ${error.message}`)
   return { ids: (data ?? []).map((r) => r.id as string) }
 }

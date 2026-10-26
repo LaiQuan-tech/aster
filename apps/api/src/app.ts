@@ -33,7 +33,6 @@ import { aiRouter } from "./routes/ai.js"
 import { demoRouter } from "./routes/demo.js"
 import { kpiTemplatesRouter } from "./routes/kpi-templates.js"
 import { kpiReviewsRouter } from "./routes/kpi-reviews.js"
-import { onboardingsRouter } from "./routes/onboardings.js"
 import { employeeProfileRouter } from "./routes/employee-profile.js"
 import { recruitmentRouter } from "./routes/recruitment.js"
 import { payrollTaxRouter } from "./routes/payroll-tax.js"
@@ -68,7 +67,6 @@ import { importsRouter } from "./routes/imports.js"
 // 2026-09-23 需求補齊（WP0 先掛空 router 與 no-op middleware，功能 WP 只填檔案內容）
 import { overtimeSettlementsRouter } from "./routes/overtime-settlements.js"
 import { festivalBonusesRouter } from "./routes/festival-bonuses.js"
-import { birthdayGiftsRouter } from "./routes/birthday-gifts.js"
 import { dutyRostersRouter } from "./routes/duty-rosters.js"
 import { profileChangeRequestsRouter } from "./routes/profile-change-requests.js"
 import { internalCronRouter } from "./routes/internal-cron.js"
@@ -158,7 +156,6 @@ app.use(aiRouter)
 app.use(demoRouter)
 app.use(kpiTemplatesRouter)
 app.use(kpiReviewsRouter)
-app.use(onboardingsRouter)
 app.use(employeeProfileRouter)
 app.use(recruitmentRouter)
 app.use(payrollTaxRouter)
@@ -193,10 +190,9 @@ app.use(importsRouter) // /imports/:kind/template、/imports/:kind（批次匯�
 // 2026-09-23 需求補齊
 app.use(overtimeSettlementsRouter) // /my/overtime-cap、/overtime-settlements*（M1 加班超額另計；WP1）
 app.use(festivalBonusesRouter) // /festival-bonuses*（M6 三節獎金；WP7）
-app.use(birthdayGiftsRouter) // /birthday-gifts*（M7 生日紅包；WP8）
 app.use(dutyRostersRouter) // /duty-rosters*（M8 值日／總機；WP8）
 app.use(profileChangeRequestsRouter) // /profile-change-requests*（W6 員工改資料審核；WP8）
-app.use(internalCronRouter) // /internal/leave/annual-grant、/internal/people/birthday-reminder（WP9）
+app.use(internalCronRouter) // /internal/leave/annual-grant、（WP9）
 // 2026-10-11 集團總覽
 app.use(groupOverviewRouter) // /group-overview、/group-overview/detail（跨公司入帳收入／放款支出／專案毛利；HR）
 
