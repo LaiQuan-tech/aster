@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { Card, DetailHeading, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import AuditDrawer from "@/components/AuditDrawer";
 import {
+  approveBonusRun,
   deleteBonusRun,
   exportBonusRunXlsx,
   fmtMoney,
@@ -12,17 +13,22 @@ import {
   humanizeBonusError,
   patchBonusRun,
   payBonusRun,
+  returnBonusRun,
   reverseBonusRun,
+  submitBonusRun,
   todayKey,
   type BonusRunDetail,
 } from "@/lib/bonus-api";
 import Link from "next/link";
-import { ItemsTable, SkippedList, Stat, StatusBadge } from "../_components";
+import { ExcludedArchivedList, GrossProfitTable, ItemsTable, SkippedList, Stat, StatusBadge, WarningsList } from "../_components";
 
 /**
- * 批次明細：items 表（專案／員工／入帳比例／累計應發／已發／本季應發／超發紅字）。
- * draft：可改期別／基準日並重算、改備註、標記已發放（填發放日）、刪除（填理由）。
- * paid：唯讀＋匯出 Excel（草稿也能匯出，方便先拿去對）。
+ * 批次明細：毛利表（入帳／成本／毛利／比例）＋items 表（專案／員工／入帳比例／累計應發／已發／本季應發／超發紅字）。
+ * 狀態（2026-10-26 加核准）：
+ *   draft：可改期別／基準日並重算、改備註、送審（HR）、刪除（填理由）。
+ *   pending_approval：老闆（canApprove）可核准／退回（需原因）；HR 可重算，金額變了自動退回草稿。
+ *   approved：HR 標記已發放（填發放日）；老闆仍可退回。
+ *   paid：唯讀＋匯出 Excel（草稿也能匯出，方便先拿去對）。
  */
 export default function BonusRunDetailPage() {
   const params = useParams<{ id: string }>();
@@ -73,19 +79,49 @@ export default function BonusRunDetailPage() {
     }
   }
 
+  /** 寫入動作的回應不帶 canApprove（只有 GET 帶），沿用頁面載入時的值。 */
+  const keepDetail = useCallback((d: BonusRunDetail) => {
+    setDetail((prev) => ({ ...d, canApprove: d.canApprove ?? prev?.canApprove }));
+  }, []);
+
   const run = detail?.run ?? null;
   const isDraft = run?.status === "draft";
+  const isPending = run?.status === "pending_approval";
+  const isApproved = run?.status === "approved";
+  const canApprove = detail?.canApprove === true;
+
+  async function submit() {
+    if (!run) return;
+    if (!confirm(`將 ${run.label} 送給老闆核准？（本批合計 ${fmtMoney(run.totals.amount)} 元）`)) return;
+    await act("submit", async () => keepDetail(await submitBonusRun(id)));
+  }
+  async function approve() {
+    if (!run) return;
+    if (!confirm(`核准 ${run.label}？核准後 HR 才能發放（本批合計 ${fmtMoney(run.totals.amount)} 元）。`)) return;
+    await act("approve", async () => keepDetail(await approveBonusRun(id)));
+  }
+  async function sendBack() {
+    if (!run) return;
+    const reason = prompt(`退回 ${run.label} 給 HR？請填退回原因：`);
+    if (reason === null) return;
+    if (!reason.trim()) {
+      setError("退回原因必填");
+      return;
+    }
+    await act("return", async () => keepDetail(await returnBonusRun(id, reason.trim())));
+  }
 
   async function recompute() {
     await act("recompute", async () => {
       const d = await patchBonusRun(id, { asOf: fAsOf, label: fLabel.trim(), recompute: true });
-      setDetail(d);
+      keepDetail(d);
+      if (d.returnedToDraft) setError("重算後金額有變動，已退回草稿，請確認後重新送審。");
     });
   }
   async function saveNote() {
     await act("note", async () => {
       const d = await patchBonusRun(id, { note: fNote.trim() || null, label: fLabel.trim() });
-      setDetail(d);
+      keepDetail(d);
     });
   }
   async function pay() {
@@ -93,7 +129,7 @@ export default function BonusRunDetailPage() {
     if (!confirm(`確定將 ${run.label} 標記為已發放？發放後即凍結，不能再修改或刪除（金額 ${fmtMoney(run.totals.amount)} 元）。`)) return;
     await act("pay", async () => {
       const d = await payBonusRun(id, { paidOn: fPaidOn });
-      setDetail(d);
+      keepDetail(d);
       setShowPay(false);
     });
   }
@@ -190,6 +226,16 @@ export default function BonusRunDetailPage() {
         <Stat label="超發列" value={run.totals.overpaidCount > 0 ? `${run.totals.overpaidCount} 列（不自動追討）` : "無"} tone={run.totals.overpaidCount > 0 ? "down" : undefined} />
       </div>
 
+      {isDraft && run.returnReason && (
+        <Card>
+          <p className="text-sm text-amber-800">
+            這批曾被退回{run.returnedAt ? `（${new Date(run.returnedAt).toLocaleString("zh-TW")}）` : ""}：{run.returnReason}
+          </p>
+        </Card>
+      )}
+
+      <WarningsList warnings={detail.snapshot?.warnings ?? run.totals.warnings} />
+
       {run.kind === "reversal" && (
         <Card>
           <p className="text-sm text-rose-800">
@@ -199,7 +245,7 @@ export default function BonusRunDetailPage() {
             ) : (
               "被沖銷批次"
             )}{" "}
-            的每一列金額取負。{isDraft ? "發放後" : "已發放，"}該批在累計口徑上歸零，下一季重算等於它沒發生過。沖銷批次不能重算、不能改期別。
+            的每一列金額取負。{run.status === "paid" ? "已發放，" : "發放後"}該批在累計口徑上歸零，下一季重算等於它沒發生過。沖銷批次不能重算、不能改期別。
           </p>
         </Card>
       )}
@@ -235,13 +281,13 @@ export default function BonusRunDetailPage() {
             <button
               type="button"
               className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60 md:rounded-md"
-              onClick={run.kind === "reversal" ? () => void act("note", async () => setDetail(await patchBonusRun(id, { note: fNote.trim() || null }))) : saveNote}
+              onClick={run.kind === "reversal" ? () => void act("note", async () => keepDetail(await patchBonusRun(id, { note: fNote.trim() || null }))) : saveNote}
               disabled={busy !== null}
             >
               {busy === "note" ? "儲存中…" : run.kind === "reversal" ? "儲存備註" : "儲存期別／備註"}
             </button>
-            <PrimaryButton onClick={() => setShowPay((v) => !v)} disabled={busy !== null}>
-              標記已發放…
+            <PrimaryButton onClick={submit} disabled={busy !== null}>
+              {busy === "submit" ? "送審中…" : "送老闆核准"}
             </PrimaryButton>
             <button
               type="button"
@@ -251,6 +297,48 @@ export default function BonusRunDetailPage() {
             >
               {busy === "delete" ? "刪除中…" : "刪除草稿"}
             </button>
+          </div>
+        </Card>
+      ) : isPending || isApproved ? (
+        <Card>
+          <h2 className="mb-2 text-base font-semibold text-gray-800">{isPending ? "等待老闆核准" : "老闆已核准，可以發放"}</h2>
+          <p className="text-sm text-gray-600">
+            送審 {run.submittedAt ? new Date(run.submittedAt).toLocaleString("zh-TW") : "—"}
+            {isApproved && run.approvedAt ? `　核准 ${new Date(run.approvedAt).toLocaleString("zh-TW")}` : ""}
+            。入帳、成本或分潤設定變動時系統會自動重算；金額一變就退回草稿，需要重新送審。
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {canApprove && isPending && (
+              <PrimaryButton onClick={approve} disabled={busy !== null}>
+                {busy === "approve" ? "核准中…" : "核准"}
+              </PrimaryButton>
+            )}
+            {isApproved && (
+              <PrimaryButton onClick={() => setShowPay((v) => !v)} disabled={busy !== null}>
+                標記已發放…
+              </PrimaryButton>
+            )}
+            {canApprove && (
+              <button
+                type="button"
+                className="rounded-xl border border-red-200 px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-60 md:rounded-md"
+                onClick={sendBack}
+                disabled={busy !== null}
+              >
+                {busy === "return" ? "退回中…" : "退回草稿…"}
+              </button>
+            )}
+            {run.kind !== "reversal" && (
+              <button
+                type="button"
+                className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60 md:rounded-md"
+                onClick={recompute}
+                disabled={busy !== null}
+              >
+                {busy === "recompute" ? "重算中…" : "重算（金額變動會退回草稿）"}
+              </button>
+            )}
+            {!canApprove && isPending && <span className="text-xs text-gray-500">只有老闆能核准或退回。</span>}
           </div>
           {showPay && (
             <div className="mt-3 flex flex-wrap items-end gap-2 rounded-xl bg-gray-50 p-3">
@@ -293,9 +381,13 @@ export default function BonusRunDetailPage() {
 
       <Card>
         <h2 className="mb-3 text-base font-semibold text-gray-800">明細（{detail.items.length} 列）</h2>
+        <div className="mb-4">
+          <GrossProfitTable items={detail.items} />
+        </div>
         <ItemsTable items={detail.items} label={run.label} />
-        <div className="mt-3">
+        <div className="mt-3 space-y-3">
           <SkippedList skipped={skipped} />
+          <ExcludedArchivedList snapshot={detail.snapshot} />
         </div>
       </Card>
     </div>

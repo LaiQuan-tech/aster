@@ -30,6 +30,7 @@ import {
 } from "./project-application-store.js"
 import { isUniqueViolation, MAX_CODE_ATTEMPTS } from "./project-code.js"
 import { loadDisbursementNoFormat, nextDisbursementNo } from "./disbursement-no.js"
+import { recomputeBonusRunsBestEffort } from "./bonus-run-store.js"
 import { writeAuditLog } from "./audit.js"
 import { firstNewlyPickedInactive } from "./company-lifecycle.js"
 import { columnsExist } from "../lib/schema-compat.js"
@@ -2108,6 +2109,8 @@ export async function payDisbursement(
     actorEmpId: actor.empId,
     context: "POST /disbursements/:id/pay",
   })
+  // #3：放款付款＝專案成本增加 → 未發放的獎金批次重算（best-effort，失敗只 log）。
+  await recomputeBonusRunsBestEffort(tenantId, allocations.map((a) => a.project_id), "POST /disbursements/:id/pay")
   return getDisbursement(tenantId, id)
 }
 
@@ -2121,6 +2124,9 @@ export async function voidDisbursement(
   const current = await loadDisbursement(tenantId, id)
   if (!current) return null
   if (current.status === "void") throw new DisbursementError(409, "void")
+  const wasPaid = current.status === "paid"
+  // 只給事後的獎金重算用：讀不到不能擋作廢。
+  const voidedAllocations = wasPaid ? await loadAllocations(tenantId, [id]).catch(() => []) : []
   const cleared = await unsyncPaymentsOnVoid(tenantId, { id, disbursement_no: current.disbursement_no }, reason)
   const { data, error } = await supabaseAdmin
     .from("disbursements")
@@ -2140,6 +2146,8 @@ export async function voidDisbursement(
     actorEmpId: actor.empId,
     context: "POST /disbursements/:id/void",
   })
+  // #3：作廢已付放款＝專案成本減少 → 重算未發放批次（草稿作廢不影響成本，不重算）。
+  if (wasPaid) await recomputeBonusRunsBestEffort(tenantId, voidedAllocations.map((a) => a.project_id), "POST /disbursements/:id/void")
   return getDisbursement(tenantId, id)
 }
 

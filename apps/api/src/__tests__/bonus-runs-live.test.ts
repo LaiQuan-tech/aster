@@ -8,6 +8,8 @@ import { taipeiToday } from "../services/project-status"
 import { loadPaidBefore, buildSummary } from "../services/bonus-run-store"
 import { paidBeforeKey } from "../services/bonus-run"
 import { app } from "../app"
+import { setBonusBoss, submitAndApprove } from "./helpers/bonus-approval"
+import { amountFingerprint } from "../services/bonus-run"
 
 /**
  * D1 專案獎金季發放批次 — live 合約測試（仿 disbursements-live.test.ts）。
@@ -104,6 +106,8 @@ describe.skipIf(!migrated)("獎金季發放批次 — live", () => {
     adminToken = await signIn(adminEmail, adminPassword)
     const { data: hr } = await supabaseAdmin.from("employees").select("id").eq("tenant_id", tenantId).eq("user_id", provisioned.userId).single()
     adminEmpId = hr!.id as string
+    // #7：發放前要送審＋老闆核准；測試讓 HR 本人當老闆。
+    await setBonusBoss(tenantId, adminEmpId)
 
     // 成員 A 有登入帳號（驗 ESS /my/bonus-history）；成員 B 只有員工列。
     const empEmail = `bonus-${stamp}-emp@example.com`
@@ -238,6 +242,8 @@ describe.skipIf(!migrated)("獎金季發放批次 — live", () => {
     expect(tmp.status).toBe(201)
     const tmpId = tmp.body.run.id as string
 
+    await submitAndApprove(app, adminToken, q1Id)
+    await submitAndApprove(app, adminToken, tmpId)
     const pay = await asAdmin(request(app).post(`/bonus-runs/${q1Id}/pay`)).send({ paidOn: TODAY })
     expect(pay.status).toBe(200)
     expect(pay.body.run.status).toBe("paid")
@@ -250,6 +256,9 @@ describe.skipIf(!migrated)("獎金季發放批次 — live", () => {
 
     const recomputed = await asAdmin(request(app).patch(`/bonus-runs/${tmpId}`)).send({ recompute: true })
     expect(recomputed.status).toBe(200)
+    // 已核准的批次重算後金額變了 → 退回草稿（#7），所以之後才刪得掉
+    expect(recomputed.body.returnedToDraft).toBe(true)
+    expect(recomputed.body.run.status).toBe("draft")
     expect(byEmp(recomputed.body.items, empAId)).toMatchObject({ entitledCumulative: 4_000, paidBefore: 4_000, amount: 0, overpaid: false })
     expect(recomputed.body.run.totals.amount).toBe(0)
 
@@ -282,6 +291,7 @@ describe.skipIf(!migrated)("獎金季發放批次 — live", () => {
     const created = await asAdmin(request(app).post("/bonus-runs")).send({ asOf: TODAY, label: Q2 })
     expect(created.status).toBe(201)
     q2Id = created.body.run.id
+    await submitAndApprove(app, adminToken, q2Id)
     const pay = await asAdmin(request(app).post(`/bonus-runs/${q2Id}/pay`)).send({ paidOn: TODAY })
     expect(pay.status).toBe(200)
     expect(pay.body.run.status).toBe("paid")
@@ -501,7 +511,17 @@ describe.skipIf(!migrated)("pay 併發：同一 run 兩次同時 pay 只有一�
 
     const { data: run, error } = await supabaseAdmin
       .from("bonus_runs")
-      .insert({ tenant_id: tid, label: `race-${stamp3}`, as_of: TODAY, status: "draft", totals: {} })
+      // #7：發放只收已核准；直接插一筆已核准（沒有明細 → 指紋＝空清單）。
+      .insert({
+        tenant_id: tid,
+        label: `race-${stamp3}`,
+        as_of: TODAY,
+        status: "approved",
+        totals: {},
+        submitted_at: new Date().toISOString(),
+        approved_at: new Date().toISOString(),
+        approved_fingerprint: amountFingerprint([]),
+      })
       .select("id")
       .single()
     if (error || !run) throw new Error(`race draft: ${error?.message}`)

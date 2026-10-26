@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { round0 } from "./project-money.js"
 
 /**
@@ -42,8 +43,73 @@ import { round0 } from "./project-money.js"
  * 歷年加總永遠等於「累計應得」，這是老闆要的「歷年累計總表」對得起來的前提。
  */
 
-export const BONUS_RUN_STATUSES = ["draft", "paid"] as const
+export const BONUS_RUN_STATUSES = ["draft", "pending_approval", "approved", "paid"] as const
 export type BonusRunStatus = (typeof BONUS_RUN_STATUSES)[number]
+
+export const BONUS_RUN_STATUS_LABEL: Record<BonusRunStatus, string> = {
+  draft: "草稿",
+  pending_approval: "送審中",
+  approved: "已核准",
+  paid: "已發放",
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * 核准狀態機（#7，2026-10-26）——純函式；IO 在 bonus-run-store.ts
+ *
+ *   draft ──submit(HR)──▶ pending_approval ──approve(老闆)──▶ approved ──pay(HR)──▶ paid
+ *     ▲                     │ return(老闆，需原因)               │
+ *     └─────────────────────┴───────────────────────────────────┘
+ *   重算（手動 PATCH、入帳／成本／分潤設定變動的自動重算）在 pending_approval／approved 也會跑；
+ *   每列金額的指紋（amountFingerprint）跟送審時存的不同 → 退回 draft，需重新送審。
+ *   金額沒變 → 維持原狀態（例如只是成本拆分、備註變了）。
+ *   刪除只收 draft；發放只收 approved。沖銷批次走同一套。
+ * ────────────────────────────────────────────────────────────────── */
+
+export type BonusRunAction = "submit" | "approve" | "return" | "pay" | "delete"
+
+export type TransitionResult =
+  | { ok: true; next: BonusRunStatus }
+  | { ok: false; code: "not_draft" | "not_pending" | "not_returnable" | "not_approved" }
+
+export function transitionOf(status: string, action: BonusRunAction): TransitionResult {
+  switch (action) {
+    case "submit":
+      return status === "draft" ? { ok: true, next: "pending_approval" } : { ok: false, code: "not_draft" }
+    case "approve":
+      return status === "pending_approval" ? { ok: true, next: "approved" } : { ok: false, code: "not_pending" }
+    case "return":
+      return status === "pending_approval" || status === "approved"
+        ? { ok: true, next: "draft" }
+        : { ok: false, code: "not_returnable" }
+    case "pay":
+      if (status === "approved") return { ok: true, next: "paid" }
+      // 已發放再按一次沿用舊錯誤碼 not_draft（「已經不是可處理的狀態」）。
+      return { ok: false, code: status === "paid" ? "not_draft" : "not_approved" }
+    case "delete":
+      return status === "draft" ? { ok: true, next: "draft" } : { ok: false, code: "not_draft" }
+  }
+}
+
+/** 每列金額的指紋：(project, employee, amount) 排序後 sha256。stale 列（金額 0）呼叫端先濾掉。 */
+export function amountFingerprint(items: ReadonlyArray<{ projectId: string; employeeId: string; amount: number }>): string {
+  const lines = items
+    .map((i) => `${i.projectId}:${i.employeeId}:${Math.round(i.amount * 100)}`)
+    .sort()
+  return createHash("sha256").update(lines.join("|")).digest("hex")
+}
+
+/** 重算後的狀態：送審中／已核准且金額指紋變了 → 退回 draft。 */
+export function statusAfterRecompute(
+  status: string,
+  reviewedFingerprint: string | null,
+  newFingerprint: string,
+): { status: string; returned: boolean } {
+  if (status !== "pending_approval" && status !== "approved") return { status, returned: false }
+  if (reviewedFingerprint !== null && reviewedFingerprint === newFingerprint) return { status, returned: false }
+  return { status: "draft", returned: true }
+}
+
+export const AMOUNT_CHANGED_RETURN_REASON = "重算後金額與送審／核准時不同，系統自動退回草稿，請重新送審"
 
 export const SHARE_MODES = ["pool_pct", "fixed_amount"] as const
 export type ShareMode = (typeof SHARE_MODES)[number]
@@ -250,13 +316,18 @@ export function isDuplicateReplacedArchive(archiveReason: string | null | undefi
 
 export type ArchiveInclusion = { include: boolean; reason: "active" | "duplicate_replaced" | "archived_no_activity" | "archived_with_activity" }
 
-/** archivedOn：封存日（租戶當地 'YYYY-MM-DD'）；null＝未封存。lastActivityOn：最近一筆入帳／成本日。 */
+/**
+ * archivedOn：封存日（租戶當地 'YYYY-MM-DD'）；null＝未封存。lastActivityOn：最近一筆入帳／成本日。
+ * asOf：試算基準日；封存日在基準日之後（補做舊季批次）＝截至基準日還沒封存 → 當作未封存。
+ */
 export function archiveInclusionOf(
   archivedOn: string | null,
   archiveReason: string | null | undefined,
   lastActivityOn: string | null,
+  asOf?: string | null,
 ): ArchiveInclusion {
   if (archivedOn === null) return { include: true, reason: "active" }
+  if (asOf && archivedOn > asOf) return { include: true, reason: "active" }
   if (isDuplicateReplacedArchive(archiveReason)) return { include: false, reason: "duplicate_replaced" }
   if (lastActivityOn !== null && lastActivityOn >= archivedOn) return { include: true, reason: "archived_with_activity" }
   return { include: false, reason: "archived_no_activity" }

@@ -5,8 +5,15 @@ import { loadGrossProfitInput, summarizeProjectGrossProfit } from "./project-gro
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { isUniqueViolation } from "./project-code.js"
 import { writeAuditLog } from "./audit.js"
+import { enqueue } from "./notify.js"
+import { loadBossEmpId } from "./late-reports.js"
+import { bonusRunsHaveApproval } from "../lib/schema-compat.js"
 import {
+  AMOUNT_CHANGED_RETURN_REASON,
+  amountFingerprint,
   archiveInclusionOf,
+  statusAfterRecompute,
+  transitionOf,
   BONUS_BASIS_LABEL,
   buildBonusSummary,
   computeBonusRun,
@@ -67,8 +74,19 @@ export type Actor = { empId: string | null }
  * DB 列型別（snake_case）與序列化
  * ────────────────────────────────────────────────────────────────── */
 
-const RUN_COLS =
+const BASE_RUN_COLS =
   "id, tenant_id, label, as_of, status, kind, reverses_run_id, paid_on, totals, snapshot, note, created_by_emp_id, paid_by_emp_id, created_at, updated_at, deleted_at, deleted_by_emp_id, delete_reason"
+const APPROVAL_RUN_COLS =
+  "submitted_at, submitted_by_emp_id, approved_at, approved_by_emp_id, approved_amount, approved_fingerprint, returned_at, returned_by_emp_id, return_reason"
+
+/** migration 0073 未套時不 select 核准欄位（讀取照常；送審／核准／發放回 409 schema_not_ready）。 */
+async function runCols(): Promise<string> {
+  return (await bonusRunsHaveApproval()) ? `${BASE_RUN_COLS}, ${APPROVAL_RUN_COLS}` : BASE_RUN_COLS
+}
+
+async function requireApprovalSchema(): Promise<void> {
+  if (!(await bonusRunsHaveApproval())) throw new BonusRunError(409, "schema_not_ready", { migration: "0073" })
+}
 
 type RunRow = {
   id: string
@@ -89,6 +107,16 @@ type RunRow = {
   deleted_at: string | null
   deleted_by_emp_id: string | null
   delete_reason: string | null
+  // 0073 起（未套時不存在）
+  submitted_at?: string | null
+  submitted_by_emp_id?: string | null
+  approved_at?: string | null
+  approved_by_emp_id?: string | null
+  approved_amount?: string | number | null
+  approved_fingerprint?: string | null
+  returned_at?: string | null
+  returned_by_emp_id?: string | null
+  return_reason?: string | null
 }
 
 const ITEM_COLS =
@@ -159,6 +187,17 @@ export type SerializedRun = {
   paidByEmpId: string | null
   createdAt: string
   updatedAt: string
+  // ── 核准（#7）──
+  submittedAt: string | null
+  submittedByEmpId: string | null
+  approvedAt: string | null
+  approvedByEmpId: string | null
+  /** 核准（送審）當下的本批合計。 */
+  approvedAmount: number | null
+  /** 最近一次退回草稿（老闆退回或金額變動自動退回）。 */
+  returnedAt: string | null
+  returnedByEmpId: string | null
+  returnReason: string | null
 }
 
 export type SerializedItem = {
@@ -279,6 +318,14 @@ function serializeRun(row: RunRow, reversedBy?: { id: string; status: string } |
     paidByEmpId: row.paid_by_emp_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    submittedAt: row.submitted_at ?? null,
+    submittedByEmpId: row.submitted_by_emp_id ?? null,
+    approvedAt: row.approved_at ?? null,
+    approvedByEmpId: row.approved_by_emp_id ?? null,
+    approvedAmount: num(row.approved_amount),
+    returnedAt: row.returned_at ?? null,
+    returnedByEmpId: row.returned_by_emp_id ?? null,
+    returnReason: row.return_reason ?? null,
   }
 }
 
@@ -430,9 +477,9 @@ export async function loadInputs(tenantId: string, asOf: string, opts: LoadInput
   // 複製取代的原案不必撈金額（一律排除）。
   const tz = archiveRule === "bonus_run" && candidates.some((p) => p.archived_at) ? await getTenantTimezone(tenantId) : null
   const archivedOn = (p: ProjectRow): string | null => (p.archived_at ? localDateKey(p.archived_at, tz ?? "Asia/Taipei") : null)
-  const needMoney = candidates.filter((p) => archiveRule === "all" || archiveInclusionOf(archivedOn(p), p.archive_reason, null).reason !== "duplicate_replaced")
+  const needMoney = candidates.filter((p) => archiveRule === "all" || archiveInclusionOf(archivedOn(p), p.archive_reason, null, asOf).reason !== "duplicate_replaced")
   if (needMoney.length === 0) {
-    for (const p of candidates) archiveInclusion.set(p.id, archiveInclusionOf(archivedOn(p), p.archive_reason, null))
+    for (const p of candidates) archiveInclusion.set(p.id, archiveInclusionOf(archivedOn(p), p.archive_reason, null, asOf))
     return { projects: [], projectMeta, employeeMeta: new Map(), archiveInclusion }
   }
   const moneyIds = needMoney.map((p) => p.id)
@@ -441,7 +488,7 @@ export async function loadInputs(tenantId: string, asOf: string, opts: LoadInput
   const scoped = archiveRule === "all"
     ? needMoney
     : candidates.filter((p) => {
-        const inc = archiveInclusionOf(archivedOn(p), p.archive_reason, gp.get(p.id)?.lastActivityOn ?? null)
+        const inc = archiveInclusionOf(archivedOn(p), p.archive_reason, gp.get(p.id)?.lastActivityOn ?? null, asOf)
         archiveInclusion.set(p.id, inc)
         return inc.include
       })
@@ -748,7 +795,7 @@ function itemRowsOf(tenantId: string, runId: string, preview: PreviewResult) {
 export async function loadRun(tenantId: string, id: string): Promise<RunRow | null> {
   const { data, error } = await supabaseAdmin
     .from("bonus_runs")
-    .select(RUN_COLS)
+    .select(await runCols())
     .eq("tenant_id", tenantId)
     .eq("id", id)
     .is("deleted_at", null)
@@ -776,13 +823,13 @@ async function loadItemRows(tenantId: string, runId: string): Promise<ItemRow[]>
 export async function listRuns(tenantId: string): Promise<SerializedRun[]> {
   const { data, error } = await supabaseAdmin
     .from("bonus_runs")
-    .select(RUN_COLS)
+    .select(await runCols())
     .eq("tenant_id", tenantId)
     .is("deleted_at", null)
     .order("as_of", { ascending: false })
     .order("created_at", { ascending: false })
   if (error) throw new Error(`bonus-run listRuns: ${error.message}`)
-  const rows = (data ?? []) as RunRow[]
+  const rows = (data ?? []) as unknown as RunRow[]
   const reversedBy = new Map<string, { id: string; status: string }>()
   for (const r of rows) if (r.kind === "reversal" && r.reverses_run_id) reversedBy.set(r.reverses_run_id, { id: r.id, status: r.status })
   return rows.map((r) => serializeRun(r, reversedBy.get(r.id) ?? null))
@@ -826,18 +873,19 @@ export async function createRun(tenantId: string, actor: Actor, input: CreateRun
       label: input.label,
       as_of: input.asOf,
       status: "draft",
+      kind: "regular",
       totals: preview.totals,
       snapshot: preview.snapshot,
       note: input.note ?? null,
       created_by_emp_id: actor.empId,
     })
-    .select(RUN_COLS)
+    .select(await runCols())
     .single()
   if (error || !run) {
     if (isUniqueViolation(error)) throw new BonusRunError(409, "label_exists", { label: input.label })
     throw new Error(`bonus-run createRun: ${error?.message}`)
   }
-  const runRow = run as RunRow
+  const runRow = run as unknown as RunRow
   const rows = itemRowsOf(tenantId, runRow.id, preview)
   if (rows.length > 0) {
     const { error: iErr } = await supabaseAdmin.from("bonus_run_items").insert(rows)
@@ -864,17 +912,32 @@ export async function createRun(tenantId: string, actor: Actor, input: CreateRun
 
 export type UpdateRunInput = { label?: string; asOf?: string; note?: string | null }
 
-/** draft 才能改；asOf／label 變動或明確要求 recompute 時重算明細（見檔頭 stale 說明）。 */
+/** 未發放（可重算）的狀態。 */
+const UNPAID_STATUSES = ["draft", "pending_approval", "approved"] as const
+
+function liveItemsFingerprint(rows: ItemRow[]): string {
+  return amountFingerprint(
+    rows.filter((r) => !isStale(r)).map((r) => ({ projectId: r.project_id, employeeId: r.employee_id, amount: num(r.amount) ?? 0 })),
+  )
+}
+
+export type UpdateRunResult = RunDetail & { returnedToDraft: boolean }
+
+/**
+ * 未發放（draft／送審中／已核准）才能改；asOf／label 變動或明確要求 recompute 時重算明細（見檔頭 stale 說明）。
+ * 送審中／已核准的批次重算後每列金額指紋變了 → 退回 draft（清核准欄位、寫 returned_*），通知送審人（與老闆），
+ * 需要重新送審；金額沒變則維持原狀態。
+ */
 export async function updateRun(
   tenantId: string,
   actor: Actor,
   id: string,
   input: UpdateRunInput,
   opts: { recompute?: boolean } = {},
-): Promise<RunDetail | null> {
+): Promise<UpdateRunResult | null> {
   const current = await loadRun(tenantId, id)
   if (!current) return null
-  if (current.status !== "draft") throw new BonusRunError(409, "not_draft", { status: current.status })
+  if (!(UNPAID_STATUSES as readonly string[]).includes(current.status)) throw new BonusRunError(409, "not_draft", { status: current.status })
   // 沖銷批次的內容是原批取負，不是試算結果：重算會把它覆蓋成一般季批次。只准改備註。
   if (current.kind === "reversal" && (opts.recompute === true || input.asOf !== undefined || input.label !== undefined)) {
     throw new BonusRunError(409, "reversal_not_editable")
@@ -885,9 +948,21 @@ export async function updateRun(
   const recompute = opts.recompute === true || input.asOf !== undefined
   const patch: Record<string, unknown> = { label, as_of: asOf }
   if (input.note !== undefined) patch.note = input.note
+  let returnedToDraft = false
 
+  let expectStatus = current.status
   if (recompute) {
     const preview = await previewRun(tenantId, asOf, id)
+    // 送審中／已核准：先比金額指紋，變了就**先**把批次原子地退回 draft（WHERE status＝讀到的狀態），
+    // 再寫明細。順序不能反：先寫明細的話，併發的 payRun 可能用舊明細比對通過、卻把新金額凍結成已發放。
+    // 退回落地後 payRun 的 WHERE status='approved' 必然 0 列；payRun 先落地則這裡 0 列 → 409，明細不動。
+    const fp = amountFingerprint(preview.calc.map((i) => ({ projectId: i.projectId, employeeId: i.employeeId, amount: i.amount })))
+    const after = statusAfterRecompute(current.status, current.approved_fingerprint ?? null, fp)
+    if (after.returned) {
+      await transitionRow(tenantId, id, current.status, returnPatch(actor.empId, AMOUNT_CHANGED_RETURN_REASON), "updateRun (return to draft)")
+      returnedToDraft = true
+      expectStatus = "draft"
+    }
     const rows = itemRowsOf(tenantId, id, preview)
     if (rows.length > 0) {
       const { error: upErr } = await supabaseAdmin
@@ -924,41 +999,237 @@ export async function updateRun(
     patch.snapshot = preview.snapshot
   }
 
-  // 與 payRun 同一套原子更新：WHERE status='draft' ＋ 受影響列數。併發的 payRun 先落地時
+  // 與 payRun 同一套原子更新：WHERE status＝讀到的狀態 ＋ 受影響列數。併發的 payRun／核准先落地時
   // 這裡命中 0 列（不是 error），回 409 not_draft，而不是讓 trigger 丟 500。
   const { data: updated, error } = await supabaseAdmin
     .from("bonus_runs")
     .update(patch)
     .eq("tenant_id", tenantId)
     .eq("id", id)
-    .eq("status", "draft")
+    .eq("status", expectStatus)
     .select("id")
   if (error) {
     if (isUniqueViolation(error)) throw new BonusRunError(409, "label_exists", { label })
     if (isPaidFrozen(error)) throw new BonusRunError(409, "not_draft", { status: "paid" })
     throw new Error(`bonus-run updateRun: ${error.message}`)
   }
-  if (!updated || updated.length === 0) throw new BonusRunError(409, "not_draft", { status: "paid" })
+  if (!updated || updated.length === 0) throw new BonusRunError(409, "not_draft", { status: "changed" })
   await writeAuditLog({
     tenantId,
     tableName: "bonus_runs",
     recordId: id,
     action: "UPDATE",
-    oldRow: { label: current.label, as_of: current.as_of, note: current.note, totals: current.totals },
-    newRow: { ...patch, recomputed: recompute },
+    oldRow: { label: current.label, as_of: current.as_of, note: current.note, status: current.status, totals: current.totals },
+    newRow: { ...patch, recomputed: recompute, returned_to_draft: returnedToDraft },
     actorEmpId: actor.empId,
     context: "PATCH /bonus-runs/:id",
+  })
+  if (returnedToDraft) {
+    const title = `獎金批次 ${current.label} 金額變動，已退回草稿`
+    const body = `${AMOUNT_CHANGED_RETURN_REASON}（原狀態：${current.status === "approved" ? "已核准" : "送審中"}）。`
+    if (current.submitted_by_emp_id) {
+      await enqueue({ tenantId, employeeIds: [current.submitted_by_emp_id], type: "bonus_run", title, body, payload: { bonusRunId: id, event: "returned", auto: true } })
+    }
+    // 老闆不一定進得了後台：audience=boss 的通知連到 ESS 簽核頁（apps/web lib/ess-notifications.ts）。
+    const boss = await loadBossEmpId(tenantId).catch(() => null)
+    if (boss && boss !== current.submitted_by_emp_id) {
+      await enqueue({ tenantId, employeeIds: [boss], type: "bonus_run", title, body, payload: { bonusRunId: id, event: "returned", auto: true, audience: "boss" } })
+    }
+  }
+  const detail = await getRun(tenantId, id)
+  return detail ? { ...detail, returnedToDraft } : null
+}
+
+/** 退回草稿要寫的欄位：清送審／核准，記退回。 */
+function returnPatch(returnedByEmpId: string | null, reason: string): Record<string, unknown> {
+  return {
+    status: "draft",
+    submitted_at: null,
+    submitted_by_emp_id: null,
+    approved_at: null,
+    approved_by_emp_id: null,
+    approved_amount: null,
+    approved_fingerprint: null,
+    returned_at: new Date().toISOString(),
+    returned_by_emp_id: returnedByEmpId,
+    return_reason: reason,
+  }
+}
+
+function assertTransition(status: string, action: Parameters<typeof transitionOf>[1]): void {
+  const t = transitionOf(status, action)
+  if (!t.ok) throw new BonusRunError(409, t.code, { status })
+}
+
+/** 原子狀態轉移：WHERE status＝from；0 列＝被別人搶先 → 409。 */
+async function transitionRow(tenantId: string, id: string, from: string, patch: Record<string, unknown>, context: string): Promise<void> {
+  const { data, error } = await supabaseAdmin
+    .from("bonus_runs")
+    .update(patch)
+    .eq("tenant_id", tenantId)
+    .eq("id", id)
+    .eq("status", from)
+    .select("id")
+  if (error) {
+    if (isPaidFrozen(error)) throw new BonusRunError(409, "not_draft", { status: "paid" })
+    throw new Error(`bonus-run ${context}: ${error.message}`)
+  }
+  if (!data || data.length === 0) throw new BonusRunError(409, "status_changed", { expected: from })
+}
+
+function moneyText(n: number): string {
+  return `${Math.round(n).toLocaleString("en-US")} 元`
+}
+
+/** 老闆：租戶 features.approval.fallbackApproverEmpId；沒設 → 409 boss_not_configured。 */
+async function requireBoss(tenantId: string): Promise<string> {
+  const boss = await loadBossEmpId(tenantId)
+  if (!boss) throw new BonusRunError(409, "boss_not_configured")
+  return boss
+}
+
+/** 呼叫者是不是老闆（給 ESS 簽核頁／後台決定要不要顯示核准按鈕）。 */
+export async function isBonusApprover(tenantId: string, empId: string | null): Promise<boolean> {
+  if (!empId) return false
+  return (await loadBossEmpId(tenantId)) === empId
+}
+
+/** HR 送審：draft → pending_approval，記下金額指紋，通知老闆。 */
+export async function submitRun(tenantId: string, actor: Actor, id: string): Promise<RunDetail | null> {
+  await requireApprovalSchema()
+  const current = await loadRun(tenantId, id)
+  if (!current) return null
+  assertTransition(current.status, "submit")
+  const boss = await requireBoss(tenantId)
+  // 送審前先用最新資料重算一次（沖銷批次不重算）：草稿可能是改版前或很久以前算的，
+  // 老闆核准的必須是「現在算出來的」金額。
+  let latest = current
+  if (current.kind !== "reversal") {
+    await updateRun(tenantId, actor, id, {}, { recompute: true })
+    latest = (await loadRun(tenantId, id)) ?? current
+    assertTransition(latest.status, "submit")
+  }
+  const items = await loadItemRows(tenantId, id)
+  const totals = (latest.totals ?? EMPTY_TOTALS) as BonusTotals
+  const nowIso = new Date().toISOString()
+  await transitionRow(
+    tenantId,
+    id,
+    "draft",
+    {
+      status: "pending_approval",
+      submitted_at: nowIso,
+      submitted_by_emp_id: actor.empId,
+      approved_at: null,
+      approved_by_emp_id: null,
+      approved_amount: totals.amount ?? 0,
+      approved_fingerprint: liveItemsFingerprint(items),
+    },
+    "submitRun",
+  )
+  await writeAuditLog({
+    tenantId,
+    tableName: "bonus_runs",
+    recordId: id,
+    action: "UPDATE",
+    oldRow: { status: "draft" },
+    newRow: { status: "pending_approval", submitted_by_emp_id: actor.empId, amount: totals.amount ?? 0 },
+    actorEmpId: actor.empId,
+    context: "POST /bonus-runs/:id/submit",
+  })
+  await enqueue({
+    tenantId,
+    employeeIds: [boss],
+    type: "bonus_run",
+    title: `待核准：獎金批次 ${current.label}${current.kind === "reversal" ? "（沖銷）" : ""}`,
+    body: `本批合計 ${moneyText(totals.amount ?? 0)}，${totals.employeeCount ?? 0} 人、${totals.projectCount ?? 0} 案。請至「待我簽核」或後台獎金批次頁核准。`,
+    payload: { bonusRunId: id, event: "submitted", submittedByEmpId: actor.empId },
   })
   return getRun(tenantId, id)
 }
 
-/** draft → paid（凍結）。pay 前重抓 paid_before 逐列比對，不一致 → 409 stale_paid_before。 */
-export async function payRun(tenantId: string, actor: Actor, id: string, paidOn: string): Promise<RunDetail | null> {
+/** 老闆核准：pending_approval → approved。核准前再比一次金額指紋（送審後若被改過就不能核准）。 */
+export async function approveRun(tenantId: string, actor: Actor, id: string): Promise<RunDetail | null> {
+  await requireApprovalSchema()
   const current = await loadRun(tenantId, id)
   if (!current) return null
-  if (current.status !== "draft") throw new BonusRunError(409, "not_draft", { status: current.status })
+  const boss = await requireBoss(tenantId)
+  if (!actor.empId || actor.empId !== boss) throw new BonusRunError(403, "not_approver")
+  assertTransition(current.status, "approve")
+  const items = await loadItemRows(tenantId, id)
+  if (current.approved_fingerprint && liveItemsFingerprint(items) !== current.approved_fingerprint) {
+    throw new BonusRunError(409, "amount_changed")
+  }
+  await transitionRow(
+    tenantId,
+    id,
+    "pending_approval",
+    { status: "approved", approved_at: new Date().toISOString(), approved_by_emp_id: actor.empId },
+    "approveRun",
+  )
+  await writeAuditLog({
+    tenantId,
+    tableName: "bonus_runs",
+    recordId: id,
+    action: "UPDATE",
+    oldRow: { status: "pending_approval" },
+    newRow: { status: "approved", approved_by_emp_id: actor.empId },
+    actorEmpId: actor.empId,
+    context: "POST /bonus-runs/:id/approve",
+  })
+  await enqueue({
+    tenantId,
+    employeeIds: [current.submitted_by_emp_id ?? ""],
+    type: "bonus_run",
+    title: `獎金批次 ${current.label} 已核准`,
+    body: "老闆已核准，可以發放。",
+    payload: { bonusRunId: id, event: "approved", approvedByEmpId: actor.empId },
+  })
+  return getRun(tenantId, id)
+}
 
-  const items = (await loadItemRows(tenantId, id)).filter((r) => !isStale(r))
+/** 老闆退回（需原因）：pending_approval／approved → draft，通知送審人。 */
+export async function returnRun(tenantId: string, actor: Actor, id: string, reason: string): Promise<RunDetail | null> {
+  await requireApprovalSchema()
+  const current = await loadRun(tenantId, id)
+  if (!current) return null
+  const boss = await requireBoss(tenantId)
+  if (!actor.empId || actor.empId !== boss) throw new BonusRunError(403, "not_approver")
+  assertTransition(current.status, "return")
+  await transitionRow(tenantId, id, current.status, returnPatch(actor.empId, reason), "returnRun")
+  await writeAuditLog({
+    tenantId,
+    tableName: "bonus_runs",
+    recordId: id,
+    action: "UPDATE",
+    oldRow: { status: current.status },
+    newRow: { status: "draft", returned_by_emp_id: actor.empId, return_reason: reason },
+    actorEmpId: actor.empId,
+    context: "POST /bonus-runs/:id/return",
+  })
+  await enqueue({
+    tenantId,
+    employeeIds: [current.submitted_by_emp_id ?? ""],
+    type: "bonus_run",
+    title: `獎金批次 ${current.label} 已退回`,
+    body: `退回原因：${reason}`,
+    payload: { bonusRunId: id, event: "returned", returnedByEmpId: actor.empId },
+  })
+  return getRun(tenantId, id)
+}
+
+/** approved → paid（凍結）。只收已核准；pay 前重抓 paid_before 逐列比對，不一致 → 409 stale_paid_before。 */
+export async function payRun(tenantId: string, actor: Actor, id: string, paidOn: string): Promise<RunDetail | null> {
+  await requireApprovalSchema()
+  const current = await loadRun(tenantId, id)
+  if (!current) return null
+  assertTransition(current.status, "pay")
+
+  const allItems = await loadItemRows(tenantId, id)
+  if (current.approved_fingerprint && liveItemsFingerprint(allItems) !== current.approved_fingerprint) {
+    throw new BonusRunError(409, "amount_changed")
+  }
+  const items = allItems.filter((r) => !isStale(r))
   const paidBefore = await loadPaidBefore(tenantId, id)
   const mismatched = items.filter((r) => (num(r.paid_before) ?? 0) !== Math.round(paidBefore.get(paidBeforeKey(r.project_id, r.employee_id)) ?? 0))
   if (mismatched.length > 0) {
@@ -967,19 +1238,17 @@ export async function payRun(tenantId: string, actor: Actor, id: string, paidOn:
     })
   }
 
-  // 原子更新：WHERE 帶 status='draft' 且用 .select() 拿回受影響列數，取代先前的
+  // 原子更新：WHERE 帶 status='approved' 且用 .select() 拿回受影響列數，取代先前的
   // 「check-then-update」——兩個併發 pay 都通過前面的 current.status 檢查後，
-  // 只有先落地的那個真的把列從 draft 改成 paid；另一個的 WHERE 子句因為列已經
-  // 不是 draft 而完全不命中，Postgres 回 0 列、不是 error（DB trigger
-  // forbid_paid_bonus_mutation 也不會被觸發——它只在「有列被改」時才跑），
-  // 舊碼沒檢查受影響列數，等於讓後到的那個併發請求也拿到 200、重複記一次
-  // audit log。回 0 列視同「已經不是 draft」，一律 409 not_draft。
+  // 只有先落地的那個真的把列改成 paid；另一個的 WHERE 子句因為列已經不是 approved
+  // 而完全不命中，Postgres 回 0 列、不是 error（DB trigger forbid_paid_bonus_mutation
+  // 也不會被觸發——它只在「有列被改」時才跑）。回 0 列一律 409 not_draft。
   const { data: updated, error } = await supabaseAdmin
     .from("bonus_runs")
     .update({ status: "paid", paid_on: paidOn, paid_by_emp_id: actor.empId })
     .eq("tenant_id", tenantId)
     .eq("id", id)
-    .eq("status", "draft")
+    .eq("status", "approved")
     .select("id")
   if (error) throw new Error(`bonus-run payRun: ${error.message}`)
   if (!updated || updated.length === 0) {
@@ -990,7 +1259,7 @@ export async function payRun(tenantId: string, actor: Actor, id: string, paidOn:
     tableName: "bonus_runs",
     recordId: id,
     action: "UPDATE",
-    oldRow: { status: "draft", paid_on: null },
+    oldRow: { status: "approved", paid_on: null },
     newRow: { status: "paid", paid_on: paidOn, paid_by_emp_id: actor.empId, totals: current.totals },
     actorEmpId: actor.empId,
     context: "POST /bonus-runs/:id/pay",
@@ -1078,7 +1347,7 @@ export async function createReversalRun(tenantId: string, actor: Actor, runId: s
       note: reason,
       created_by_emp_id: actor.empId,
     })
-    .select(RUN_COLS)
+    .select(await runCols())
     .single()
   if (error || !run) {
     if (error && isUniqueViolation(error)) {
@@ -1087,7 +1356,7 @@ export async function createReversalRun(tenantId: string, actor: Actor, runId: s
     }
     throw new Error(`bonus-run createReversalRun: ${error?.message}`)
   }
-  const newRunId = run.id as string
+  const newRunId = (run as unknown as RunRow).id
   const rows = reversed.map((i, idx) => ({
     tenant_id: tenantId,
     run_id: newRunId,
@@ -1132,7 +1401,7 @@ export async function createReversalRun(tenantId: string, actor: Actor, runId: s
 export async function deleteRun(tenantId: string, actor: Actor, id: string, reason: string): Promise<boolean> {
   const current = await loadRun(tenantId, id)
   if (!current) return false
-  if (current.status !== "draft") throw new BonusRunError(409, "not_draft", { status: current.status })
+  assertTransition(current.status, "delete")
   const deletedAt = new Date().toISOString()
   const { error } = await supabaseAdmin
     .from("bonus_runs")
@@ -1161,13 +1430,13 @@ export async function deleteRun(tenantId: string, actor: Actor, id: string, reas
 async function loadPaidRunsWithItems(tenantId: string, employeeId?: string | null): Promise<{ runs: RunRow[]; items: ItemRow[] }> {
   const { data: runRows, error } = await supabaseAdmin
     .from("bonus_runs")
-    .select(RUN_COLS)
+    .select(await runCols())
     .eq("tenant_id", tenantId)
     .eq("status", "paid")
     .is("deleted_at", null)
     .order("as_of", { ascending: true })
   if (error) throw new Error(`bonus-run loadPaidRuns: ${error.message}`)
-  const runs = (runRows ?? []) as RunRow[]
+  const runs = (runRows ?? []) as unknown as RunRow[]
   if (runs.length === 0) return { runs, items: [] }
   const runIds = runs.map((r) => r.id)
   const itemRows = await fetchAll<ItemRow>(
@@ -1217,48 +1486,108 @@ export async function myBonusHistory(tenantId: string, employeeId: string): Prom
 export interface RecomputeDraftRunsResult {
   /** 重算成功的批次 id。 */
   recomputed: string[]
+  /** 重算後金額變動、從送審中／已核准退回草稿的批次 id（#7）。 */
+  returnedToDraft: string[]
   /** 重算失敗的批次（不擋呼叫端的主流程，只回報）。 */
   failed: Array<{ id: string; error: string }>
 }
 
 /**
- * M22：把該租戶所有 **draft 且 kind='regular'** 的獎金批次重算一次。
+ * M22：把該租戶所有**未發放**（draft／送審中／已核准）且 kind='regular' 的獎金批次重算一次。
  *
- * 獎金是「依請款入帳進度同比例拆發」，所以每一次 `POST /billings/:id/receive`
- * ／`/unreceive` 都會改變每個人的應得金額；但重算原本只有手動（preview 或
- * `PATCH /bonus-runs/:id?recompute=1`）。忘記按＝依舊資料發錢。這支在入帳事件
- * 成功後 best-effort 跑一次，讓 draft 永遠跟著最新入帳走。
+ * 獎金依入帳與成本（毛利制）累計計算，所以每一次入帳／退回入帳、放款付款／作廢、複委託付款、
+ * 合約額／追加減／趴數／比例變動都會改變每個人的應得金額；忘記按重算＝依舊資料發錢。
+ * 這支在那些事件成功後 best-effort 跑一次，讓未發放批次永遠跟著最新資料走。
+ * 送審中／已核准的批次重算後金額變了 → updateRun 會退回草稿（需重新送審）；金額沒變則維持原狀態。
  *
  * 刻意排除：
  *   • paid 批次——已發放就凍結（DB trigger 也會擋），不是這裡的事。
  *   • kind='reversal'——沖銷批次的內容是原批取負，重算會把它蓋成一般季批次
  *     （updateRun 本來就會丟 reversal_not_editable）。
  *
- * 失敗不丟例外：入帳已經寫進 DB 了，不能因為獎金重算失敗就讓入帳看起來沒成功。
+ * 失敗不丟例外：主流程已經寫進 DB 了，不能因為獎金重算失敗就讓它看起來沒成功。
  * 呼叫端把結果放進回應（`bonusRunsRecomputed`）並自行 log。
  */
 export async function recomputeDraftRegularRuns(tenantId: string): Promise<RecomputeDraftRunsResult> {
+  const statuses = (await bonusRunsHaveApproval()) ? [...UNPAID_STATUSES] : ["draft"]
   const { data, error } = await supabaseAdmin
     .from("bonus_runs")
     .select("id")
     .eq("tenant_id", tenantId)
-    .eq("status", "draft")
+    .in("status", statuses)
     .eq("kind", "regular")
     .is("deleted_at", null)
     .order("as_of", { ascending: true })
   if (error) throw new Error(`recomputeDraftRegularRuns (list): ${error.message}`)
 
   const recomputed: string[] = []
+  const returnedToDraft: string[] = []
   const failed: Array<{ id: string; error: string }> = []
   for (const row of (data ?? []) as Array<{ id: string }>) {
     try {
-      // actor 留 null：這不是某個人「編輯了批次」，是入帳事件連動的系統重算；
-      // 誰入的帳由 project_billings 那筆 audit 記著。
-      await updateRun(tenantId, { empId: null }, row.id, {}, { recompute: true })
+      // actor 留 null：這不是某個人「編輯了批次」，是資料事件連動的系統重算；
+      // 誰改了資料由那筆資料自己的 audit 記著。
+      const res = await updateRun(tenantId, { empId: null }, row.id, {}, { recompute: true })
       recomputed.push(row.id)
+      if (res?.returnedToDraft) returnedToDraft.push(row.id)
     } catch (err) {
       failed.push({ id: row.id, error: err instanceof Error ? err.message : String(err) })
     }
   }
-  return { recomputed, failed }
+  return { recomputed, returnedToDraft, failed }
+}
+
+/**
+ * #3 自動重算（2026-10-26）：某專案的合約額／追加減／成員趴數／獎金比例、或成本（放款付款、
+ * 複委託付款）變動後呼叫。
+ *
+ * 為什麼不是「只重算含這個案的批次」：批次的明細是整個租戶一起算的——專案第一次有成員、
+ * 封存案封存後進了尾款，都會讓「本來不在批次裡的案」出現；只挑含該案的批次會漏。所以等同
+ * recomputeDraftRegularRuns（租戶全部未發放 regular 批次），projectId 只用於 log／回報。
+ * 一般租戶同時只有 0～1 批未發放，成本可以接受。永遠不丟例外（列批次失敗也包成 failed）。
+ */
+export async function recomputeDraftRunsForProject(tenantId: string, projectId: string): Promise<RecomputeDraftRunsResult & { projectId: string }> {
+  try {
+    const res = await recomputeDraftRegularRuns(tenantId)
+    return { projectId, ...res }
+  } catch (err) {
+    return { projectId, recomputed: [], returnedToDraft: [], failed: [{ id: "*", error: err instanceof Error ? err.message : String(err) }] }
+  }
+}
+
+/**
+ * 成本／入帳寫入端用的 best-effort 包裝：重算失敗只 log，永遠不丟例外、不改變主流程回應。
+ * 回傳重算了哪些批次（呼叫端可放進回應）。
+ */
+export async function recomputeBonusRunsBestEffort(tenantId: string, projectIds: ReadonlyArray<string | null | undefined>, context: string): Promise<string[]> {
+  const ids = [...new Set(projectIds.filter((v): v is string => !!v))]
+  if (ids.length === 0) return []
+  const res = await recomputeDraftRunsForProject(tenantId, ids[0] as string)
+  if (res.failed.length > 0) {
+    console.warn(`[bonus-recompute] ${context}: ${res.failed.length} 批重算失敗`, res.failed)
+  }
+  return res.recomputed
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * 老闆的待核准清單（ESS 簽核頁「獎金批次」卡）
+ * ────────────────────────────────────────────────────────────────── */
+
+/** 送審中的批次（含明細，舊到新）。只給老闆看（路由先擋）。 */
+export async function listPendingApprovals(tenantId: string): Promise<RunDetail[]> {
+  if (!(await bonusRunsHaveApproval())) return []
+  const { data, error } = await supabaseAdmin
+    .from("bonus_runs")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("status", "pending_approval")
+    .is("deleted_at", null)
+    .order("submitted_at", { ascending: true })
+  if (error) throw new Error(`bonus-run listPendingApprovals: ${error.message}`)
+  const out: RunDetail[] = []
+  for (const row of (data ?? []) as Array<{ id: string }>) {
+    const detail = await getRun(tenantId, row.id)
+    if (detail) out.push(detail)
+  }
+  return out
 }

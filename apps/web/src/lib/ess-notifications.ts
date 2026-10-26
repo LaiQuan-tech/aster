@@ -11,6 +11,7 @@
  *   attendance_sheet  `{ sheetId, period, … }`
  *   anomaly           `{ anomalyType, from, to, detail }`
  *   late_report       `{ lateReportId, employeeId, workDate, lateMinutes }`（2026-10-11 遲到說明，給主管與老闆）
+ *   bonus_run         `{ bonusRunId, event: submitted|approved|returned, auto?, audience? }`（2026-10-26 獎金批次核准：送審給老闆、核准／退回給送審人）
  *   announcement      不看 payload 內容（正式 API 目前沒有產生點，只有 demo 種子；payload 也沒有公告 id）
  * 未讀 ＝ `payload.read !== true`（標記已讀是把 `read: true` 併進 payload）。
  */
@@ -29,6 +30,7 @@ export const TYPE_LABEL: Record<string, string> = {
   anomaly: "出勤異常",
   announcement: "公告",
   late_report: "遲到說明",
+  bonus_run: "獎金批次",
 };
 
 export function typeLabel(type: string | null | undefined): string {
@@ -101,6 +103,12 @@ export function notificationLink(n: NotificationLike): string | null {
     }
     case "late_report":
       return "/ess/approvals";
+    case "bonus_run": {
+      // 送審通知給老闆 → 簽核頁的「獎金批次」段；核准／退回通知給送審的 HR → 後台批次頁。
+      if (str(payload.event) === "submitted" || str(payload.audience) === "boss") return "/ess/approvals";
+      const id = str(payload.bonusRunId);
+      return id ? `/admin/bonus-runs/${id}` : "/admin/bonus-runs";
+    }
     case "announcement":
       return "/ess/announcements";
     default:

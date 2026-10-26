@@ -25,6 +25,7 @@ import {
 import { loadPaymentAcceptance, paymentsHaveAcceptance } from "../services/disbursements.js"
 import { firstNewlyPickedInactive } from "../services/company-lifecycle.js"
 import { writeAuditLog } from "../services/audit.js"
+import { recomputeBonusRunsBestEffort } from "../services/bonus-run-store.js"
 
 export const subcontractsRouter = Router()
 
@@ -407,6 +408,8 @@ subcontractsRouter.put(
         actorEmpId: scope.self.id,
         context: "PUT /projects/:id/subcontracts",
       })
+      // #3：副委託結構變動（期款金額重算等）後，順手重算未發放的獎金批次（best-effort；已付的副委託本來就刪不掉，成本多半不變）。
+      await recomputeBonusRunsBestEffort(tenantId, [projectId], "PUT /projects/:id/subcontracts")
       await respondSubcontracts(tenantId, projectId, res)
     } catch (err) {
       next(err)
@@ -723,6 +726,8 @@ subcontractsRouter.put(
         actorEmpId: scope.self.id,
         context: "PUT /projects/:id/subcontracts/:sid/payments",
       })
+      // #3：舊路徑（沒經放款單）標記已付／撤銷付款會改變專案成本 → 重算未發放的獎金批次（best-effort）。
+      await recomputeBonusRunsBestEffort(tenantId, [projectId], "PUT /projects/:id/subcontracts/:sid/payments")
       const payments = await loadPayments(tenantId, [subcontractId])
       const [serialized] = await withAcceptance(tenantId, [serializeSubcontract(sub, payments)])
       res.status(200).json({ subcontract: serialized })

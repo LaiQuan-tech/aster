@@ -3,7 +3,7 @@
  *
  * 只實作 API 路由實際用到的 PostgREST 子集：
  *   select / insert / update / delete、eq / neq / is / not / in / like / ilike / gt·gte·lt·lte /
- *   or（ilike／eq／is）、order / limit、single / maybeSingle、await（thenable），以及 rpc。
+ *   or（ilike／eq／is／lte·lt·gte·gt）、order / limit、single / maybeSingle、await（thenable），以及 rpc。
  * 另外支援 `range(from, to)`（分頁，含上界）與
  * `upsert(rows, { onConflict, ignoreDuplicates })`（`ignoreDuplicates` ＝ ON CONFLICT DO NOTHING，
  * 衝突的列略過；沒設＝衝突的列合併更新）。
@@ -78,6 +78,14 @@ function parseOr(expression: string): (row: Row) => boolean {
       if (op === "ilike") return matchesIlike(row[column], value)
       if (op === "eq") return String(row[column]) === value
       if (op === "is") return value === "null" ? (row[column] ?? null) === null : String(row[column]) === value
+      // 日期／數字比較（字串比較對 'YYYY-MM-DD' 正確）；null 一律不成立，同 Postgres。
+      if (op === "lte" || op === "lt" || op === "gte" || op === "gt") {
+        const v = row[column]
+        if (v === null || v === undefined) return false
+        const a = typeof v === "number" ? v : String(v)
+        const b = typeof v === "number" ? Number(value) : value
+        return op === "lte" ? a <= b : op === "lt" ? a < b : op === "gte" ? a >= b : a > b
+      }
       throw new Error(`fake-supabase: or() 不支援的運算子 ${op}`)
     })
 }

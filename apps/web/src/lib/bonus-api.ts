@@ -6,7 +6,19 @@
 import { apiFetch, apiDownload } from "./api-client"
 
 /* ---------------------------------------------------------------- 基本型別 -- */
-export type BonusRunStatus = "draft" | "paid"
+/** 2026-10-26 起：草稿 →（HR）送審 →（老闆）核准 → 發放。 */
+export type BonusRunStatus = "draft" | "pending_approval" | "approved" | "paid"
+/** 獎金池基礎：毛利制／舊制（手填獎金池）／固定金額。 */
+export type BonusBasis = "gross_profit" | "legacy_pool" | "fixed_amount"
+
+export interface BonusWarning {
+  projectId: string
+  kind: "over_contract"
+  overContractPct: number
+  message: string
+  code?: string | null
+  name?: string | null
+}
 export type BonusSkipReason = "no_contract" | "no_pool"
 
 export interface BonusSkipped {
@@ -25,6 +37,8 @@ export interface BonusTotals {
   projectCount: number
   overpaidCount: number
   skipped: BonusSkipped[]
+  /** 入帳超過合約等提醒（舊批次沒有）。 */
+  warnings?: BonusWarning[]
 }
 
 export type BonusRunKind = "regular" | "reversal"
@@ -47,6 +61,15 @@ export interface BonusRun {
   paidByEmpId: string | null
   createdAt: string
   updatedAt: string
+  // 核准（舊 API 沒有這些欄位）
+  submittedAt?: string | null
+  submittedByEmpId?: string | null
+  approvedAt?: string | null
+  approvedByEmpId?: string | null
+  approvedAmount?: number | null
+  returnedAt?: string | null
+  returnedByEmpId?: string | null
+  returnReason?: string | null
 }
 
 export interface BonusRunItem {
@@ -81,6 +104,14 @@ export interface BonusRunItem {
   amount: number
   overpaid: boolean
   overpaidBy: number
+  /** 2026-10-26 起：獎金池基礎與毛利明細；舊明細為 null／缺。 */
+  basis?: BonusBasis | null
+  revenue?: number
+  cost?: number | null
+  disbursementCost?: number | null
+  subcontractCost?: number | null
+  grossProfit?: number | null
+  overContractPct?: number | null
 }
 
 export interface BonusRunSnapshotProject {
@@ -99,12 +130,19 @@ export interface BonusRunSnapshot {
   asOf?: string
   projects?: BonusRunSnapshotProject[]
   skipped?: BonusSkipped[]
+  /** 封存而不列入的專案（複製取代的原案、封存後沒有新入帳／成本）。 */
+  excludedArchived?: Array<{ projectId: string; reason: string; code: string | null; name: string | null }>
+  warnings?: BonusWarning[]
 }
 
 export interface BonusRunDetail {
   run: BonusRun
   items: BonusRunItem[]
   snapshot: BonusRunSnapshot | null
+  /** 呼叫者是不是老闆（能核准／退回）。 */
+  canApprove?: boolean
+  /** PATCH 重算後從送審中／已核准退回草稿。 */
+  returnedToDraft?: boolean
 }
 
 export interface BonusRunPreview {
@@ -174,7 +212,27 @@ export function createBonusRun(body: { asOf: string; label: string; note?: strin
 }
 
 export function listBonusRuns() {
-  return apiFetch<{ runs: BonusRun[] }>("/bonus-runs")
+  return apiFetch<{ runs: BonusRun[]; canApprove?: boolean }>("/bonus-runs")
+}
+
+/** HR 送審（草稿 → 送審中，通知老闆）。 */
+export function submitBonusRun(id: string) {
+  return apiFetch<BonusRunDetail>(`/bonus-runs/${id}/submit`, { method: "POST", body: "{}" })
+}
+
+/** 老闆核准（送審中 → 已核准）。 */
+export function approveBonusRun(id: string) {
+  return apiFetch<BonusRunDetail>(`/bonus-runs/${id}/approve`, { method: "POST", body: "{}" })
+}
+
+/** 老闆退回草稿（需原因）。 */
+export function returnBonusRun(id: string, reason: string) {
+  return apiFetch<BonusRunDetail>(`/bonus-runs/${id}/return`, { method: "POST", body: JSON.stringify({ reason }) })
+}
+
+/** ESS 簽核頁：老闆的待核准獎金批次（非老闆回 canApprove=false、空清單）。 */
+export function getMyBonusApprovals() {
+  return apiFetch<{ canApprove: boolean; runs: BonusRunDetail[] }>("/my/bonus-approvals")
 }
 
 export function getBonusRun(id: string) {
@@ -217,7 +275,20 @@ export function getMyBonusHistory() {
 /* -------------------------------------------------------------------- 顯示 -- */
 export const BONUS_RUN_STATUS_LABELS: Record<BonusRunStatus, string> = {
   draft: "草稿",
+  pending_approval: "送審中",
+  approved: "已核准",
   paid: "已發放",
+}
+
+export const BONUS_BASIS_LABELS: Record<BonusBasis, string> = {
+  gross_profit: "毛利制",
+  legacy_pool: "舊制（手填獎金池）",
+  fixed_amount: "固定金額",
+}
+
+export const BONUS_ARCHIVE_EXCLUDE_LABELS: Record<string, string> = {
+  duplicate_replaced: "已複製成新案（原案不重複採計）",
+  archived_no_activity: "已封存，封存後沒有新入帳或成本",
 }
 
 export const BONUS_SKIP_REASON_LABELS: Record<BonusSkipReason, string> = {
@@ -227,7 +298,15 @@ export const BONUS_SKIP_REASON_LABELS: Record<BonusSkipReason, string> = {
 
 const BONUS_ERRORS: Record<string, string> = {
   label_exists: "這個期別已經有一筆批次（同期別只能一筆；先刪掉舊草稿再建）",
-  not_draft: "已發放的批次是凍結快照，不能修改或刪除",
+  not_draft: "這個狀態不能做這個動作（已發放的批次是凍結快照；送審中／已核准要先退回草稿才能刪除）",
+  not_approved: "要先送審並經老闆核准才能發放",
+  not_pending: "只有送審中的批次能核准",
+  not_returnable: "只有送審中或已核准的批次能退回",
+  not_approver: "只有老闆（租戶設定的最終核准人）能核准或退回",
+  boss_not_configured: "還沒設定老闆（最終核准人）——請先到「公司設定 → 簽核」設定老闆再送審",
+  amount_changed: "送審後金額有變動：老闆請按「退回」；HR 請按「重算」（會自動退回草稿）後重新送審",
+  status_changed: "狀態剛被別人改過，請重新整理",
+  schema_not_ready: "資料庫尚未套用獎金核准（migration 0073），請先通知管理員套用",
   stale_paid_before: "這份草稿建立後又有別的批次發放了，累計已發已過期——請先「重算」再發放",
   not_paid: "只有已發放的批次才能沖銷；草稿直接刪除即可",
   already_reversed: "這批已經有沖銷批次了（可能還是草稿，到批次列表找「-沖銷」那筆）",

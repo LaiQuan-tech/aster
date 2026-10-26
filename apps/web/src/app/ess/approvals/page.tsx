@@ -38,6 +38,7 @@ import { fmtMoney, relativeTime } from "@/lib/ess-format";
 import { describePeriodClosed } from "@/lib/period-closed";
 import { approvalPeriodText, approvalWhenText } from "@/lib/request-forms";
 import { LateReportsSection } from "./_components/LateReportsSection";
+import { BonusRunApprovalsSection } from "./_components/BonusRunApprovalsSection";
 import {
   BottomSheet,
   Button,
@@ -766,6 +767,7 @@ export default function ApprovalsPage() {
       )}
 
       {/* 遲到說明（2026-10-11）：主管看部屬的（唯讀）、老闆直接按「影響／不影響全勤」；沒有就不顯示 */}
+      {!loading && <BonusRunApprovalsSection />}
       {!loading && <LateReportsSection />}
 
       {/* 多選批次簽核：底部固定列（手機浮在底部分頁列之上，桌機貼底）＋預留空間，最後一張卡不會被蓋住 */}

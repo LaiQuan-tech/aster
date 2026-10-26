@@ -514,6 +514,13 @@
       "breakpoints": true
     },
     {
+      "idx": 73,
+      "version": "7",
+      "when": 1792400000000,
+      "tag": "0073_bonus_run_approval",
+      "breakpoints": true
+    },
+    {
       "idx": 74,
       "version": "7",
       "when": 1792500000000,

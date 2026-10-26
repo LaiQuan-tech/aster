@@ -110,3 +110,8 @@ export function punchRecordsHaveWfh(): Promise<boolean> {
 export function employeesHaveCompany(): Promise<boolean> {
   return columnsExist("employees", "company_id")
 }
+
+/** bonus_runs 送審／核准欄位（migration 0073，獎金批次核准）是否已在。 */
+export function bonusRunsHaveApproval(): Promise<boolean> {
+  return columnsExist("bonus_runs", "submitted_at, approved_fingerprint, return_reason")
+}

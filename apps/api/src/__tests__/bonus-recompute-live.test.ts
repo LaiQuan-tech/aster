@@ -6,6 +6,7 @@ import { provisionTenant } from "../services/tenants"
 import { taipeiToday } from "../services/project-status"
 import { purgeTestTenant } from "./helpers/purge"
 import { app } from "../app"
+import { setBonusBoss, submitAndApprove } from "./helpers/bonus-approval"
 
 /**
  * M22（2026-09-23）入帳後自動重算 draft 獎金批次 — live 合約測試。
@@ -143,6 +144,10 @@ describe.skipIf(!migrated)("M22 入帳自動重算 draft 獎金批次 — live",
   })
 
   it("批次發放後就凍結：再入帳不會改到 paid 批次，也不會讓入帳失敗", async () => {
+    // #7：發放前要送審＋老闆核准；測試讓 HR 本人當老闆。
+    const { data: hr } = await supabaseAdmin.from("employees").select("id").eq("tenant_id", tenantId).eq("role", "hr_admin").limit(1).single()
+    await setBonusBoss(tenantId, hr!.id as string)
+    await submitAndApprove(app, adminToken, runId)
     const paid = await asAdmin(request(app).post(`/bonus-runs/${runId}/pay`)).send({ paidOn: TODAY })
     expect(paid.status, JSON.stringify(paid.body)).toBe(200)
     expect(paid.body.run.status).toBe("paid")

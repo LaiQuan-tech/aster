@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, date, jsonb, timestamp, uniqueIndex, index,
+  pgTable, uuid, text, date, jsonb, numeric, timestamp, uniqueIndex, index,
 } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 import { tenants } from "./tenants"
@@ -36,7 +36,10 @@ export const bonusRuns = pgTable(
     label: text("label").notNull(),
     /** 試算基準日。 */
     asOf: date("as_of").notNull(),
-    /** 'draft' | 'paid'。合法值見 sql/0034 的 bonus_runs_status_chk。 */
+    /**
+     * 'draft' | 'pending_approval' | 'approved' | 'paid'。合法值見 sql/0063 的 bonus_runs_status_chk
+     * （2026-10-26 加入核准：草稿 →（HR）送審 →（老闆）核准 → 發放）。
+     */
     status: text("status").notNull().default("draft"),
     /**
      * 'regular'（季批次）| 'reversal'（沖銷批次，sql/0036）。
@@ -54,6 +57,18 @@ export const bonusRuns = pgTable(
     /** 試算當下的完整輸入快照，供追溯；可為 null。 */
     snapshot: jsonb("snapshot"),
     note: text("note"),
+    // ── 核准（migration 0073／sql/0063）；*_emp_id 只留痕、不設 FK ──
+    submittedAt: timestamp("submitted_at", { withTimezone: true }),
+    submittedByEmpId: uuid("submitted_by_emp_id"),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    approvedByEmpId: uuid("approved_by_emp_id"),
+    /** 核准當下的本批合計。 */
+    approvedAmount: numeric("approved_amount", { precision: 14, scale: 2 }),
+    /** 核准當下每列金額的指紋；重算後不同 → 退回草稿。 */
+    approvedFingerprint: text("approved_fingerprint"),
+    returnedAt: timestamp("returned_at", { withTimezone: true }),
+    returnedByEmpId: uuid("returned_by_emp_id"),
+    returnReason: text("return_reason"),
     createdByEmpId: uuid("created_by_emp_id").references(() => employees.id),
     /** 執行發放（status 改為 paid）的操作者。 */
     paidByEmpId: uuid("paid_by_emp_id").references(() => employees.id),

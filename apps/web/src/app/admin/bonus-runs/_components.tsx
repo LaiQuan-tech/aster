@@ -3,7 +3,18 @@
 import { Fragment } from "react";
 import Link from "next/link";
 import { Empty } from "@/components/admin-ui";
-import { BONUS_RUN_STATUS_LABELS, BONUS_SKIP_REASON_LABELS, fmtMoney, fmtPct, type BonusRun, type BonusRunPreview } from "@/lib/bonus-api";
+import {
+  BONUS_ARCHIVE_EXCLUDE_LABELS,
+  BONUS_BASIS_LABELS,
+  BONUS_RUN_STATUS_LABELS,
+  BONUS_SKIP_REASON_LABELS,
+  fmtMoney,
+  fmtPct,
+  type BonusRun,
+  type BonusRunPreview,
+  type BonusRunSnapshot,
+  type BonusWarning,
+} from "@/lib/bonus-api";
 import { buildBonusRegisterRows } from "@/lib/bonus-register";
 
 /**
@@ -23,12 +34,19 @@ export function Stat({ label, value, tone }: { label: string; value: string; ton
 }
 
 export function StatusBadge({ status }: { status: BonusRun["status"] }) {
-  const cls = status === "paid" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700";
+  const cls =
+    status === "paid"
+      ? "bg-emerald-50 text-emerald-700"
+      : status === "approved"
+        ? "bg-sky-50 text-sky-700"
+        : status === "pending_approval"
+          ? "bg-violet-50 text-violet-700"
+          : "bg-amber-50 text-amber-700";
   return <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>{BONUS_RUN_STATUS_LABELS[status] ?? status}</span>;
 }
 
 export function ItemsTable({ items, label = "" }: { items: BonusRunPreview["items"]; label?: string }) {
-  if (items.length === 0) return <Empty>沒有可發放的明細（沒有「未封存、有成員、有合約」的專案）</Empty>;
+  if (items.length === 0) return <Empty>沒有可發放的明細（沒有「有成員、可計算」的專案）</Empty>;
   const rows = buildBonusRegisterRows(items);
   const slotHeaders = ["經理", "組員1", "組員2", "組員3", "組員4", "支援"];
   return (
@@ -102,5 +120,110 @@ export function SkippedList({ skipped }: { skipped: Array<{ projectId: string; r
         ))}
       </ul>
     </div>
+  );
+}
+
+/**
+ * 獎金怎麼算出來的（2026-10-26 毛利制）：每案一列——入帳、成本（放款＋複委託）、毛利、比例、獎金池、
+ * 用哪一制。讓 HR／老闆對得出「為什麼是這個數字」。舊批次（沒有毛利欄位）整張不顯示。
+ */
+export function GrossProfitTable({ items }: { items: BonusRunPreview["items"] }) {
+  const byProject = new Map<string, BonusRunPreview["items"][number]>();
+  for (const it of items) if (!byProject.has(it.projectId)) byProject.set(it.projectId, it);
+  const rows = [...byProject.values()].filter((it) => it.basis != null);
+  if (rows.length === 0) return null;
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-max border-collapse whitespace-nowrap text-xs">
+        <thead>
+          <tr className="bg-gray-100 text-center font-semibold text-gray-700">
+            <th className="border border-gray-300 px-2 py-1.5">專案</th>
+            <th className="border border-gray-300 px-2 py-1.5">計算方式</th>
+            <th className="border border-gray-300 px-2 py-1.5">累計入帳（未稅）</th>
+            <th className="border border-gray-300 px-2 py-1.5">放款成本</th>
+            <th className="border border-gray-300 px-2 py-1.5">複委託付款</th>
+            <th className="border border-gray-300 px-2 py-1.5">累計毛利</th>
+            <th className="border border-gray-300 px-2 py-1.5">獎金比例</th>
+            <th className="border border-gray-300 px-2 py-1.5">累計獎金池</th>
+            <th className="border border-gray-300 px-2 py-1.5">入帳／合約</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((it) => {
+            const negative = (it.grossProfit ?? 0) < 0;
+            return (
+              <tr key={it.projectId}>
+                <td className="border border-gray-300 px-2 py-1">
+                  <Link href={`/admin/projects/${it.projectId}`} style={{ color: "var(--brand)" }}>
+                    {it.projectCode ? `${it.projectCode} ` : ""}
+                    {it.projectName ?? it.projectId}
+                  </Link>
+                </td>
+                <td className="border border-gray-300 px-2 py-1">
+                  {it.basis ? BONUS_BASIS_LABELS[it.basis] : "—"}
+                </td>
+                <td className="border border-gray-300 px-2 py-1 text-right">{fmtMoney(it.revenue ?? it.receivedTotal)}</td>
+                <td className="border border-gray-300 px-2 py-1 text-right">{fmtMoney(it.disbursementCost)}</td>
+                <td className="border border-gray-300 px-2 py-1 text-right">{fmtMoney(it.subcontractCost)}</td>
+                <td className={`border border-gray-300 px-2 py-1 text-right font-semibold ${negative ? "text-red-600" : ""}`}>
+                  {fmtMoney(it.grossProfit)}
+                  {negative && <span className="ml-1 font-normal">（負毛利，池以 0 計）</span>}
+                </td>
+                <td className="border border-gray-300 px-2 py-1 text-right">{it.bonusRatePct == null ? "—" : `${it.bonusRatePct}%`}</td>
+                <td className="border border-gray-300 px-2 py-1 text-right">{fmtMoney(it.bonusPool)}</td>
+                <td className={`border border-gray-300 px-2 py-1 text-right ${it.overContractPct ? "font-semibold text-amber-700" : ""}`}>
+                  {it.contractTotal ? fmtPct(it.receivedPct) : "—（無合約）"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <p className="mt-2 text-xs text-gray-500">
+        毛利制：每人累計應得＝max(0, 累計毛利) × 獎金比例 × 個人趴數，本次＝累計應得 − 已發。成本＝已匯款的放款（含代扣）＋沒經放款單、已標記付款的複委託期款。
+        舊制（手填獎金池）：獎金池 × 入帳比例（最多 100%）× 個人趴數。
+      </p>
+    </div>
+  );
+}
+
+export function WarningsList({ warnings }: { warnings: BonusWarning[] | undefined }) {
+  if (!warnings || warnings.length === 0) return null;
+  return (
+    <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm">
+      <p className="mb-1 font-medium text-amber-900">請留意（{warnings.length}）</p>
+      <ul className="space-y-0.5 text-amber-900">
+        {warnings.map((w) => (
+          <li key={`${w.projectId}-${w.kind}`}>
+            <Link href={`/admin/projects/${w.projectId}`} className="underline">
+              {w.code ? `${w.code} ` : ""}
+              {w.name ?? w.projectId}
+            </Link>
+            <span className="ml-2">{w.message}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+export function ExcludedArchivedList({ snapshot }: { snapshot: BonusRunSnapshot | null | undefined }) {
+  const list = snapshot?.excludedArchived ?? [];
+  if (list.length === 0) return null;
+  return (
+    <details className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm">
+      <summary className="cursor-pointer font-medium text-gray-700">封存而未列入 {list.length} 個專案</summary>
+      <ul className="mt-2 space-y-0.5 text-gray-700">
+        {list.map((e) => (
+          <li key={e.projectId}>
+            <Link href={`/admin/projects/${e.projectId}`} className="underline">
+              {e.code ? `${e.code} ` : ""}
+              {e.name ?? e.projectId}
+            </Link>
+            <span className="ml-2 text-xs text-gray-500">{BONUS_ARCHIVE_EXCLUDE_LABELS[e.reason] ?? e.reason}</span>
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }

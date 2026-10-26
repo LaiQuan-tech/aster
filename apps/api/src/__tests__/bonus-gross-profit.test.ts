@@ -179,6 +179,13 @@ describe("#4 封存專案納入規則", () => {
     expect(isDuplicateReplacedArchive("手動封存")).toBe(false)
   })
 
+  it("封存日在試算基準日之後（補做舊季批次）→ 截至基準日還沒封存，當作未封存納入", () => {
+    expect(archiveInclusionOf("2026-10-05", null, "2026-09-20", "2026-09-30")).toEqual({ include: true, reason: "active" })
+    // 複製取代的原案也一樣：基準日當時原案還在跑
+    expect(archiveInclusionOf("2026-10-05", "已由 X-1 取代：變更", "2026-09-20", "2026-09-30")).toEqual({ include: true, reason: "active" })
+    expect(archiveInclusionOf("2026-09-05", null, "2026-08-20", "2026-09-30")).toEqual({ include: false, reason: "archived_no_activity" })
+  })
+
   it("未封存 → 一律納入", () => {
     expect(archiveInclusionOf(null, null, null)).toEqual({ include: true, reason: "active" })
   })

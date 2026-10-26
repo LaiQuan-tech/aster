@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
-import { ItemsTable, SkippedList, Stat, StatusBadge } from "./_components";
+import { ExcludedArchivedList, GrossProfitTable, ItemsTable, SkippedList, Stat, StatusBadge, WarningsList } from "./_components";
 import {
   createBonusRun,
   defaultBonusLabel,
@@ -324,8 +324,11 @@ export default function BonusRunsPage() {
                   <Stat label="累計應發／已發" value={`${fmtMoney(preview.totals.entitledCumulative)}／${fmtMoney(preview.totals.paidBefore)}`} />
                   <Stat label="超發列" value={preview.totals.overpaidCount > 0 ? `${preview.totals.overpaidCount} 列` : "無"} tone={preview.totals.overpaidCount > 0 ? "down" : undefined} />
                 </div>
+                <WarningsList warnings={preview.snapshot.warnings ?? preview.totals.warnings} />
+                <GrossProfitTable items={preview.items} />
                 <ItemsTable items={preview.items} label={fLabel} />
                 <SkippedList skipped={preview.totals.skipped.map((s) => ({ ...s, ...(preview.snapshot.skipped ?? []).find((x) => x.projectId === s.projectId) }))} />
+                <ExcludedArchivedList snapshot={preview.snapshot} />
               </div>
             )}
           </div>
