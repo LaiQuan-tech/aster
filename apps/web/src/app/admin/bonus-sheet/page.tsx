@@ -14,6 +14,7 @@ import {
 import { gridGeometry } from "@/lib/statement-layout";
 import { resolveFit, useContainerWidth, useFitMode } from "@/components/FitToWidth";
 import { dominantFontPt, ptToPx } from "@/lib/fit-zoom";
+import { compactOpenSheet, readShowAllMembers, writeShowAllMembers } from "@/lib/bonus-sheet-columns";
 import { BonusSheetTable, bonusSheetPrintCss } from "./_components";
 
 /**
@@ -49,7 +50,17 @@ export default function BonusSheetPage() {
   const [paper, setPaper] = useState<"A3" | "A4">("A3");
   const [printing, setPrinting] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  /** 未結案顯示全部成員欄（預設精簡：只經理、組員1、組員2；記住選擇）。 */
+  const [showAllMembers, setShowAllMembers] = useState(false);
   const seq = useRef(0);
+
+  useEffect(() => {
+    setShowAllMembers(readShowAllMembers());
+  }, []);
+  const toggleShowAll = (value: boolean) => {
+    setShowAllMembers(value);
+    writeShowAllMembers(value);
+  };
 
   const load = useCallback(async () => {
     const mine = ++seq.current;
@@ -73,7 +84,12 @@ export default function BonusSheetPage() {
     void load();
   }, [load]);
 
-  const grid = data ? (tab === "open" ? data.sheets.open : data.sheets.closed) : null;
+  const fullGrid = data ? (tab === "open" ? data.sheets.open : data.sheets.closed) : null;
+  // 精簡檢視只在畫面上：列印（printing）一律畫完整格線；Excel 由 API 產生，本來就是完整版。
+  const grid = useMemo(
+    () => (fullGrid && tab === "open" && !showAllMembers && !printing ? compactOpenSheet(fullGrid) : fullGrid),
+    [fullGrid, tab, showAllMembers, printing],
+  );
   const tableWidth = useMemo(() => (grid ? gridGeometry(grid).width : 0), [grid]);
   const baseFontPx = useMemo(() => (grid ? ptToPx(dominantFontPt(grid.cells.map((c) => c.size))) : 16), [grid]);
   // 符合寬度：縮到表格外框內寬（扣左右 1px 框線）；字太小時停在最小可讀倍率、改左右捲動。
@@ -154,6 +170,12 @@ export default function BonusSheetPage() {
             </select>
           </div>
           <div className="ml-auto flex flex-wrap items-end gap-2">
+            {tab === "open" && (
+              <label className="flex min-h-10 items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={showAllMembers} onChange={(e) => toggleShowAll(e.target.checked)} />
+                顯示全部成員欄
+              </label>
+            )}
             <select aria-label="列印紙張" className={inputCls} value={paper} onChange={(e) => setPaper(e.target.value as "A3" | "A4")}>
               <option value="A3">A3 橫式</option>
               <option value="A4">A4 橫式</option>

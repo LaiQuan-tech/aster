@@ -111,6 +111,9 @@ export function BonusSheetTable({ grid, zoom = 1, printing = false }: { grid: St
             ) : (
               cell.text
             )}
+            {cell.hint && (
+              <span style={{ display: "block", fontSize: "8pt", color: "#6B7280", whiteSpace: "nowrap", lineHeight: 1.2 }}>{cell.hint}</span>
+            )}
           </Tag>
         );
       })}

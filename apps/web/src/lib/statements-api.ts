@@ -38,6 +38,8 @@ export interface GridCell {
   color?: string;
   /** 公司標誌格（專案獎金總表）：畫 /brand/aster-logo.svg，text 當替代文字。 */
   logo?: boolean;
+  /** 畫面專用的小字提示（例：精簡檢視隱藏了幾位成員）；不進 Excel。 */
+  hint?: string;
 }
 
 export interface StatementGrid {
