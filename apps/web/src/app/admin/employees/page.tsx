@@ -949,7 +949,10 @@ export default function EmployeesPage() {
                           </td>
                         )}
                         <td className="py-3 pr-4">
-                          <p className="font-medium text-gray-800">{employee.name}</p>
+                          {/* 2026-10-27：點姓名進員工內頁（出勤統計表／薪資明細表在內頁分頁）。會計也進得去（唯讀）。 */}
+                          <Link href={employeeDetailHref(employee.id)} className="font-medium text-gray-800 hover:underline">
+                            {employee.name}
+                          </Link>
                           <p className="text-xs text-gray-500">工號 {employee.emp_no ?? "—"}</p>
                           {(employee.default_shift_id || employee.features?.wfhPunch || employee.features?.noNightPremium) && (
                             <p className="text-xs text-gray-500">

@@ -62,8 +62,18 @@ import { listCompanies, type Company } from "@/lib/projects-ext-api";
 import { isHrRole } from "@/lib/roles";
 import { useSession } from "@/lib/use-session";
 import { useEmployeeAccountActions } from "../_components/useEmployeeAccountActions";
+import { EmployeeStatementsPanel, type StatementTab } from "../_components/EmployeeStatementsPanel";
 
 const UNSAVED_PROMPT = "這位員工的資料還沒儲存，確定要離開嗎？";
+
+/** 內頁分頁（2026-10-27）：員工資料｜出勤統計表｜薪資明細表（薪資明細表只有 HR／平台管理員看得到）。 */
+type DetailTab = "profile" | StatementTab;
+
+function tabFromLocation(): DetailTab {
+  if (typeof window === "undefined") return "profile";
+  const t = new URLSearchParams(window.location.search).get("tab");
+  return t === "attendance" || t === "payslip" ? t : "profile";
+}
 
 type DetailEmployee = EmployeeWithProfile & EditableEmployee;
 
@@ -192,6 +202,24 @@ export default function EmployeeDetailPage() {
     return () => {
       active = false;
     };
+  }, []);
+
+  const [tab, setTabState] = useState<DetailTab>("profile");
+  // 看過的統計表分頁保持掛載（切回員工資料再切回來不重抓）。
+  const [statementsOpened, setStatementsOpened] = useState(false);
+  useEffect(() => {
+    const initial = tabFromLocation();
+    setTabState(initial);
+    if (initial !== "profile") setStatementsOpened(true);
+  }, []);
+  const setTab = useCallback((next: DetailTab) => {
+    setTabState(next);
+    if (next !== "profile") setStatementsOpened(true);
+    // 分頁寫進網址（重新整理、分享連結停在同一頁），不新增瀏覽紀錄。
+    const url = new URL(window.location.href);
+    if (next === "profile") url.searchParams.delete("tab");
+    else url.searchParams.set("tab", next);
+    window.history.replaceState(window.history.state, "", url.toString());
   }, []);
 
   const [employee, setEmployee] = useState<DetailEmployee | null>(null);
@@ -447,6 +475,38 @@ export default function EmployeeDetailPage() {
         </div>
       </Card>
 
+      {/* 分頁：員工資料｜出勤統計表｜薪資明細表（會計看不到薪資明細表） */}
+      <div role="tablist" aria-label="員工內頁分頁" className="flex gap-1 overflow-x-auto rounded-xl border border-gray-200 bg-white p-1 print:hidden">
+        {(
+          [
+            ["profile", "員工資料"],
+            ["attendance", "出勤統計表"],
+            ...(canManage ? ([["payslip", "薪資明細表"]] as const) : []),
+          ] as ReadonlyArray<readonly [DetailTab, string]>
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={tab === key}
+            onClick={() => setTab(key)}
+            className={`whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium ${
+              tab === key ? "bg-gray-900 text-white" : "text-gray-600 hover:bg-gray-100"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {statementsOpened && (
+        <div hidden={tab === "profile"}>
+          <EmployeeStatementsPanel employeeId={employee.id} kind={tab === "payslip" && canManage ? "payslip" : "attendance"} />
+        </div>
+      )}
+
+      {tab === "profile" && (
+      <>
       {actions.panels}
 
       <div className="grid grid-cols-1 gap-4 md:gap-6 lg:grid-cols-2">
@@ -717,6 +777,8 @@ export default function EmployeeDetailPage() {
             </Button>
           </div>
         </div>
+      )}
+      </>
       )}
     </>
   );
