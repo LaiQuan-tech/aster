@@ -1,13 +1,15 @@
 -- =====================================================================
 -- 2026-10-26 專案分潤改版——獎金批次核准（migration 0073 ＝ sql/0063）
 --
--- 前提：已套到 0072（sql/0062，docs/套用-2026-10-25-員工所屬公司.sql）。整份可重跑（冪等）。
+-- 前提：已套到 0072（sql/0062，docs/套用-2026-10-25-員工所屬公司.sql）。整份可重跑（冪等），包在 BEGIN／COMMIT 交易裡（一錯全回滾）。
 -- 套用後跑 docs/驗證-2026-10-26-專案分潤毛利與核准.sql。
 -- 順序：**先套本檔、再部署 API 與網頁**。API 會探測欄位（lib/schema-compat bonusRunsHaveApproval）：
 --   沒套時批次列表／明細照常可讀，但送審／核准／退回／發放一律回 409 schema_not_ready
 --   （發放改成只收「已核准」，沒有核准欄位就無從核准）。
 -- 獎金池改毛利制、封存專案納入規則、入帳超過合約警示都是應用層計算，**不需要** DB 變更。
 -- =====================================================================
+
+BEGIN;
 
 -- ── 1. 欄位（＝ migration 0073）──────────────────────────────────────
 ALTER TABLE public.bonus_runs
@@ -37,6 +39,8 @@ ALTER TABLE public.bonus_runs ADD CONSTRAINT bonus_runs_submitted_chk
 ALTER TABLE public.bonus_runs DROP CONSTRAINT IF EXISTS bonus_runs_approved_chk;
 ALTER TABLE public.bonus_runs ADD CONSTRAINT bonus_runs_approved_chk
   CHECK (status <> 'approved' OR (approved_at IS NOT NULL AND approved_fingerprint IS NOT NULL));
+
+COMMIT;
 
 -- ── 還原 ────────────────────────────────────────────────────────────
 -- 先部署回不讀這些欄位的 API，並把 pending_approval／approved 的批次改回 draft：

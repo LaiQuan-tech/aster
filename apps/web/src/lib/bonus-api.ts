@@ -70,6 +70,8 @@ export interface BonusRun {
   returnedAt?: string | null
   returnedByEmpId?: string | null
   returnReason?: string | null
+  /** 送審人與核准人相同（老闆兼 HR 自己送審自己核准）。 */
+  selfApproved?: boolean
 }
 
 export interface BonusRunItem {
@@ -196,10 +198,26 @@ export interface BonusSummary {
   }
 }
 
-export interface MyBonusHistoryRow extends BonusRunItem {
+/** ESS 我的獎金歷史：精簡白名單（不含入帳／成本／毛利／獎金池／比例等可反推毛利的欄位）。 */
+export interface MyBonusHistoryRow {
+  id: string
+  runId: string
   label: string
   asOf: string
   paidOn: string | null
+  kind: BonusRunKind
+  projectId: string
+  projectCode: string | null
+  projectName: string | null
+  roleInProject: string | null
+  shareMode: string
+  sharePct: number | null
+  shareAmount: number | null
+  /** 本期金額。 */
+  amount: number
+  /** 該專案截至這一期本人累計已發。 */
+  paidCumulative: number
+  basis: BonusBasis | null
 }
 
 /* -------------------------------------------------------------------- 呼叫 -- */
@@ -293,7 +311,7 @@ export const BONUS_BASIS_LABELS: Record<BonusBasis, string> = {
 
 export const BONUS_ARCHIVE_EXCLUDE_LABELS: Record<string, string> = {
   duplicate_replaced: "已複製成新案（原案不重複採計）",
-  archived_no_activity: "已封存，封存後沒有新入帳或成本",
+  archived_settled: "已封存，所有成員的獎金都已結清",
 }
 
 export const BONUS_SKIP_REASON_LABELS: Record<BonusSkipReason, string> = {

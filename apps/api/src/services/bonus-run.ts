@@ -93,10 +93,13 @@ export function transitionOf(status: string, action: BonusRunAction): Transition
   }
 }
 
-/** 每列金額的指紋：(project, employee, amount) 排序後 sha256。stale 列（金額 0）呼叫端先濾掉。 */
+/** 每列金額的指紋：非 0 的 (project, employee, amount) 排序後 sha256。 */
 export function amountFingerprint(items: ReadonlyArray<{ projectId: string; employeeId: string; amount: number }>): string {
+  // 金額 0 的列不進指紋：只是「這個人這案這次沒錢」，有沒有那一列不影響發放金額。
   const lines = items
-    .map((i) => `${i.projectId}:${i.employeeId}:${Math.round(i.amount * 100)}`)
+    .map((i) => ({ key: `${i.projectId}:${i.employeeId}`, cents: Math.round(i.amount * 100) }))
+    .filter((i) => i.cents !== 0)
+    .map((i) => `${i.key}:${i.cents}`)
     .sort()
   return createHash("sha256").update(lines.join("|")).digest("hex")
 }
@@ -141,6 +144,8 @@ export type BonusProjectInput = {
   /** 成本拆分（顯示用）。 */
   disbursementCost?: number
   subcontractCost?: number
+  /** 已封存（非複製取代）：全部成員結清就不列（見 isSettled）。 */
+  archived?: boolean
   members: BonusMemberInput[]
 }
 
@@ -221,7 +226,12 @@ export type BonusTotals = {
   warnings?: BonusWarning[]
 }
 
-export type BonusRunCalc = { items: BonusItemCalc[]; totals: BonusTotals }
+export type BonusRunCalc = {
+  items: BonusItemCalc[]
+  totals: BonusTotals
+  /** 封存且已結清（或算不出來）而不列的專案。 */
+  settledArchived?: string[]
+}
 
 export const BONUS_RUN_KINDS = ["regular", "reversal"] as const
 export type BonusRunKind = (typeof BONUS_RUN_KINDS)[number]
@@ -304,11 +314,13 @@ export function overContractMessage(pct: number): string {
 }
 
 /* ──────────────────────────────────────────────────────────────────
- * 封存專案要不要納入試算（#4 結案後尾款）
+ * 封存專案要不要納入試算（#4 結案後尾款；2026-10-26 驗收修正）
  *   • 「複製專案而封存的原案」（archive_reason＝project-duplicate.ts archiveReasonFor：
  *     「已由 {新 code} 取代：…」）→ 一律排除：新案帶著同一批成員分潤，原案再算就重複採計。
- *   • 其他封存（結案自動封存、手動封存）→ 封存日當天或之後還有新入帳／成本才納入
- *     （尾款進來、保固支出），否則照舊不列（沒有新動靜就沒有新的應發）。
+ *   • 其他封存（結案自動封存、手動封存）→ 先照常計算；只要有任何成員「累計應得 ≠ 已發」
+ *     （還有沒發的，或超發）就納入，全部結清才不列（computeBonusRun 的 archived 旗標）。
+ *     例：10/5 進尾款、10/20 結案自動封存，之後沒有任何新動靜——尾款的獎金還沒發，仍要列。
+ *   • 封存日在試算基準日之後（補做舊季批次）＝基準日當時還沒封存 → 當作未封存。
  * ────────────────────────────────────────────────────────────────── */
 
 const DUPLICATE_ARCHIVE_RE = /^已由 .+ 取代：/
@@ -317,23 +329,19 @@ export function isDuplicateReplacedArchive(archiveReason: string | null | undefi
   return typeof archiveReason === "string" && DUPLICATE_ARCHIVE_RE.test(archiveReason)
 }
 
-export type ArchiveInclusion = { include: boolean; reason: "active" | "duplicate_replaced" | "archived_no_activity" | "archived_with_activity" }
+export type ArchiveStage = "active" | "duplicate_replaced" | "archived"
 
-/**
- * archivedOn：封存日（租戶當地 'YYYY-MM-DD'）；null＝未封存。lastActivityOn：最近一筆入帳／成本日。
- * asOf：試算基準日；封存日在基準日之後（補做舊季批次）＝截至基準日還沒封存 → 當作未封存。
- */
-export function archiveInclusionOf(
-  archivedOn: string | null,
-  archiveReason: string | null | undefined,
-  lastActivityOn: string | null,
-  asOf?: string | null,
-): ArchiveInclusion {
-  if (archivedOn === null) return { include: true, reason: "active" }
-  if (asOf && archivedOn > asOf) return { include: true, reason: "active" }
-  if (isDuplicateReplacedArchive(archiveReason)) return { include: false, reason: "duplicate_replaced" }
-  if (lastActivityOn !== null && lastActivityOn >= archivedOn) return { include: true, reason: "archived_with_activity" }
-  return { include: false, reason: "archived_no_activity" }
+/** archivedOn：封存日（租戶當地 'YYYY-MM-DD'）；null＝未封存。asOf：試算基準日。 */
+export function archiveStageOf(archivedOn: string | null, archiveReason: string | null | undefined, asOf?: string | null): ArchiveStage {
+  if (archivedOn === null) return "active"
+  if (asOf && archivedOn > asOf) return "active"
+  if (isDuplicateReplacedArchive(archiveReason)) return "duplicate_replaced"
+  return "archived"
+}
+
+/** 封存案是否已結清：每位成員累計應得＝已發（沒有待發、也沒有超發）。 */
+export function isSettled(items: ReadonlyArray<Pick<BonusItemCalc, "amount" | "overpaid">>): boolean {
+  return items.every((i) => i.amount === 0 && !i.overpaid)
 }
 
 /** 毛利制累計獎金池（未捨入）：max(0, 毛利) × 比例。 */
@@ -421,21 +429,22 @@ export function computeBonusRun(
   const projectIds = new Set<string>()
 
   const warnings: BonusWarning[] = []
+  const settledArchived: string[] = []
   for (const p of projects) {
     if (p.members.length === 0) continue
     const b = projectBonusBasisOf(p)
     const hasContract = p.contractTotal !== null && p.contractTotal > 0
     if (b.basis !== "gross_profit" && !hasContract) {
-      skipped.push({ projectId: p.projectId, reason: "no_contract" })
+      if (p.archived) settledArchived.push(p.projectId)
+      else skipped.push({ projectId: p.projectId, reason: "no_contract" })
       continue
     }
     if (b.basis === "legacy_pool" && (b.pool === null || !(b.pool > 0))) {
-      skipped.push({ projectId: p.projectId, reason: "no_pool" })
+      if (p.archived) settledArchived.push(p.projectId)
+      else skipped.push({ projectId: p.projectId, reason: "no_pool" })
       continue
     }
-    if (b.overContractPct !== null) {
-      warnings.push({ projectId: p.projectId, kind: "over_contract", overContractPct: b.overContractPct, message: overContractMessage(b.overContractPct) })
-    }
+    const projectItems: BonusItemCalc[] = []
     const rawPct = receivedPctOf(p.contractTotal, p.receivedTotal)
     const gpPoolRaw = b.basis === "gross_profit" ? grossProfitPoolRaw(b.grossProfit, p.bonusRatePct as number) : 0
     const previousRaw = previousReceived instanceof Map
@@ -455,7 +464,7 @@ export function computeBonusRun(
       const paid = round0(paidOf(paidBeforeKey(p.projectId, m.employeeId)))
       const diff = entitled - paid
       const overpaid = diff < 0
-      items.push({
+      projectItems.push({
         projectId: p.projectId,
         employeeId: m.employeeId,
         roleInProject: m.roleInProject ?? null,
@@ -486,8 +495,19 @@ export function computeBonusRun(
         overpaid,
         overpaidBy: overpaid ? -diff : 0,
       })
-      employees.add(m.employeeId)
-      projectIds.add(p.projectId)
+    }
+    // 封存案：全部結清 → 不列（不進明細、不進警示）。
+    if (p.archived && isSettled(projectItems)) {
+      settledArchived.push(p.projectId)
+      continue
+    }
+    if (b.overContractPct !== null) {
+      warnings.push({ projectId: p.projectId, kind: "over_contract", overContractPct: b.overContractPct, message: overContractMessage(b.overContractPct) })
+    }
+    for (const it of projectItems) {
+      items.push(it)
+      employees.add(it.employeeId)
+      projectIds.add(it.projectId)
     }
   }
 
@@ -502,7 +522,7 @@ export function computeBonusRun(
     skipped,
     warnings,
   }
-  return { items, totals }
+  return { items, totals, settledArchived }
 }
 
 /* ──────────────────────────────────────────────────────────────────

@@ -1871,6 +1871,10 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
     actorEmpId: actor.empId,
     context: "POST /disbursements",
   })
+  // #3：直接建成已匯款＝專案成本增加 → 排程重算未發放的獎金批次（非同步、失敗只 log）。
+  if (input.status === "paid") {
+    await recomputeBonusRunsBestEffort(tenantId, allocations.map((a) => a.projectId), "POST /disbursements (paid)")
+  }
   return (await getDisbursement(tenantId, row.id))!
 }
 

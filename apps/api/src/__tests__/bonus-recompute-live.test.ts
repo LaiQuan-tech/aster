@@ -7,6 +7,7 @@ import { taipeiToday } from "../services/project-status"
 import { purgeTestTenant } from "./helpers/purge"
 import { app } from "../app"
 import { setBonusBoss, submitAndApprove } from "./helpers/bonus-approval"
+import { flushBonusRecompute } from "../services/bonus-run-store"
 
 /**
  * M22（2026-09-23）入帳後自動重算 draft 獎金批次 — live 合約測試。
@@ -127,11 +128,12 @@ describe.skipIf(!migrated)("M22 入帳自動重算 draft 獎金批次 — live",
     expect(await itemAmount(runId)).toBe(4_000)
   })
 
-  it("第 2 期入帳（累計 70%）→ 回應帶 bonusRunsRecomputed，draft 自動變 7,000", async () => {
+  it("第 2 期入帳（累計 70%）→ 排程重算（非同步），draft 自動變 7,000", async () => {
     const res = await asAdmin(request(app).post(`/billings/${installments[1].id}/receive`)).send({ receivedOn: TODAY })
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     expect(res.body.summary.receivedTotal).toBe(700_000)
-    expect(res.body.bonusRunsRecomputed).toContain(runId)
+    // 2026-10-26 起重算改非同步排程：回應不等重算，等排程跑完再看
+    await flushBonusRecompute()
     // 沒有人按過「重算」，金額就跟上了
     expect(await itemAmount(runId)).toBe(7_000)
   })
@@ -139,7 +141,7 @@ describe.skipIf(!migrated)("M22 入帳自動重算 draft 獎金批次 — live",
   it("撤銷第 2 期入帳 → draft 自動退回 4,000", async () => {
     const res = await asAdmin(request(app).post(`/billings/${installments[1].id}/unreceive`)).send({ reason: "支票退票" })
     expect(res.status, JSON.stringify(res.body)).toBe(200)
-    expect(res.body.bonusRunsRecomputed).toContain(runId)
+    await flushBonusRecompute()
     expect(await itemAmount(runId)).toBe(4_000)
   })
 
@@ -155,7 +157,7 @@ describe.skipIf(!migrated)("M22 入帳自動重算 draft 獎金批次 — live",
     const res = await asAdmin(request(app).post(`/billings/${installments[1].id}/receive`)).send({ receivedOn: TODAY })
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     // paid 批次不在重算名單裡
-    expect(res.body.bonusRunsRecomputed).not.toContain(runId)
+    await flushBonusRecompute()
     // 金額仍是發放當下的 4,000
     expect(await itemAmount(runId)).toBe(4_000)
   })

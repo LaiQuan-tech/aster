@@ -8,8 +8,10 @@
 --   paid 仍由 sql/0034 forbid_paid_bonus_mutation 凍結；approved／pending_approval 不凍結
 --   （入帳／成本變動時系統要能重算，金額變了就退回 draft）。
 --   2026-10-26 前已發放的批次沒有核准欄位，CHECK 不回頭要求（paid 不檢查 approved_at）。
--- 前提：sql/0034、0036 與 migration 0073 已套用。冪等，可重複執行。
+-- 前提：sql/0034、0036 與 migration 0073 已套用。冪等，可重複執行；整段包在 BEGIN／COMMIT，一錯全回滾。
 -- =====================================================================
+
+BEGIN;
 
 ALTER TABLE public.bonus_runs DROP CONSTRAINT IF EXISTS bonus_runs_status_chk;
 ALTER TABLE public.bonus_runs ADD CONSTRAINT bonus_runs_status_chk
@@ -23,6 +25,8 @@ ALTER TABLE public.bonus_runs ADD CONSTRAINT bonus_runs_submitted_chk
 ALTER TABLE public.bonus_runs DROP CONSTRAINT IF EXISTS bonus_runs_approved_chk;
 ALTER TABLE public.bonus_runs ADD CONSTRAINT bonus_runs_approved_chk
   CHECK (status <> 'approved' OR (approved_at IS NOT NULL AND approved_fingerprint IS NOT NULL));
+
+COMMIT;
 
 -- ── 還原 ────────────────────────────────────────────────────────────
 -- 先把 pending_approval／approved 的批次改回 draft，再：

@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "../lib/supabase.js"
 import { shouldAutoArchive, taipeiToday, type AutoArchiveCandidate } from "./project-status.js"
+import { scheduleBonusRecompute } from "./bonus-run-store.js"
 
 /**
  * 自動封存終止已久的專案（模組四第 2 條）。
@@ -73,6 +74,8 @@ export async function autoArchiveProjects(params: {
 
   // 不寫 audit_logs：sql/0019 的 audit_all trigger 已經涵蓋 projects 的
   // UPDATE，再寫一筆只是同一件事記兩次。
+  // 封存會改變獎金試算的納入範圍（封存且結清的案不列）→ 排程重算未發放批次（非同步、失敗只 log）。
+  scheduleBonusRecompute(params.tenantId, "autoArchiveProjects")
   return { scanned: rows.length, archived: due.length, archivedIds: due.map((r) => r.id) }
 }
 

@@ -5,7 +5,9 @@
 --   → 應用層把批次退回 draft 並清掉核准欄位、寫 returned_*（return_reason 記原因），需重新送審。
 --   *_emp_id 只留痕、不設 FK（同 disbursements.submitted_by_emp_id）。
 -- 寫入一律經 API（service role）；不加 policy。audit_all trigger 整列 to_jsonb，新欄位自動入稽核。
--- 前提：已套到 0072（sql/0062）。可重跑（ADD COLUMN IF NOT EXISTS）。
+-- 前提：已套到 0072（sql/0062）。可重跑（ADD COLUMN IF NOT EXISTS）；整段包在 BEGIN／COMMIT，一錯全回滾。
+BEGIN;
+
 ALTER TABLE public.bonus_runs
   ADD COLUMN IF NOT EXISTS submitted_at timestamptz,
   ADD COLUMN IF NOT EXISTS submitted_by_emp_id uuid,
@@ -19,3 +21,5 @@ ALTER TABLE public.bonus_runs
 COMMENT ON COLUMN public.bonus_runs.submitted_at IS '最近一次送審時間（draft → pending_approval）';
 COMMENT ON COLUMN public.bonus_runs.approved_fingerprint IS '送審／核准當下每列金額的指紋；重算後不同 → 退回草稿需重新送審（2026-10-26）';
 COMMENT ON COLUMN public.bonus_runs.return_reason IS '最近一次退回草稿的原因（老闆退回需填；金額變動自動退回由系統填）';
+
+COMMIT;

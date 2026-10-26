@@ -2,6 +2,7 @@ import {
   computeBonusRun,
   paidBeforeKey,
   projectBonusBasisOf,
+  type ArchiveStage,
   type BonusBasis,
   type BonusProjectInput,
 } from "./bonus-run.js"
@@ -25,6 +26,9 @@ import { loadInputs, loadPaidBefore, tenantToday } from "./bonus-run-store.js"
  *   members[]        estimatedAmount＝截至今天的**累計應得**；paidAmount＝歷來已發放合計。
  *                    兩者相減（下限 0）就是下一批會發的金額；estimatedAmount < paidAmount 即「超發」。
  *   skipped          舊制／固定金額缺合約或缺獎金池時，試算會跳過這個案：'no_contract' | 'no_pool'；否則 null。
+ *   excludedReason   'duplicate_replaced'＝已複製成新案而封存的原案：試算永遠不會再發這個案，
+ *                    所以 members 的 estimatedAmount 一律等於 paidAmount（待發 0），ESS 不會顯示發不出來的錢。
+ *                    其他封存案沿用試算規則：只要還有沒結清的（含超發）就照算，結清了數字本來就相等。
  */
 
 export type BonusEstimateMember = {
@@ -46,6 +50,7 @@ export type ProjectBonusEstimate = {
   grossProfit: number
   overContractPct: number | null
   skipped: "no_contract" | "no_pool" | null
+  excludedReason: "duplicate_replaced" | null
   members: BonusEstimateMember[]
 }
 
@@ -53,12 +58,14 @@ export type ProjectBonusEstimate = {
 export function buildProjectBonusEstimates(
   inputs: BonusProjectInput[],
   paidBefore: ReadonlyMap<string, number>,
+  archiveStage: ReadonlyMap<string, ArchiveStage> = new Map(),
 ): ProjectBonusEstimate[] {
   const { items, totals } = computeBonusRun(inputs, paidBefore)
   const skipped = new Map(totals.skipped.map((s) => [s.projectId, s.reason]))
   return inputs.map((p) => {
     const b = projectBonusBasisOf(p)
     const skip = skipped.get(p.projectId) ?? null
+    const excluded = archiveStage.get(p.projectId) === "duplicate_replaced"
     const byEmp = new Map(items.filter((i) => i.projectId === p.projectId).map((i) => [i.employeeId, i]))
     return {
       projectId: p.projectId,
@@ -71,15 +78,18 @@ export function buildProjectBonusEstimates(
       grossProfit: b.grossProfit,
       overContractPct: b.overContractPct,
       skipped: skip,
+      excludedReason: excluded ? "duplicate_replaced" : null,
       members: p.members.map((m) => {
         const it = byEmp.get(m.employeeId)
         const paid = Math.round(paidBefore.get(paidBeforeKey(p.projectId, m.employeeId)) ?? 0)
+        const paidAmount = it ? it.paidBefore : paid
         return {
           employeeId: m.employeeId,
           sharePct: m.sharePct,
           shareAmount: m.shareAmount,
-          estimatedAmount: it ? it.entitledCumulative : 0,
-          paidAmount: it ? it.paidBefore : paid,
+          // 複製取代的原案：試算不會再發，應得＝已發（待發 0）。
+          estimatedAmount: excluded ? paidAmount : it ? it.entitledCumulative : 0,
+          paidAmount,
         }
       }),
     }
@@ -93,9 +103,10 @@ export async function estimateProjectBonus(tenantId: string, projectIds: readonl
   const asOf = await tenantToday(tenantId)
   const [inputs, paidBefore] = await Promise.all([
     loadInputs(tenantId, asOf, { projectIds: ids, archiveRule: "all" }),
-    loadPaidBefore(tenantId, null),
+    // 只撈這批專案的已發明細（不必掃整個租戶的歷史批次）。
+    loadPaidBefore(tenantId, null, ids),
   ])
-  const estimates = buildProjectBonusEstimates(inputs.projects, paidBefore)
+  const estimates = buildProjectBonusEstimates(inputs.projects, paidBefore, inputs.archiveStage)
   const order = new Map(ids.map((id, i) => [id, i]))
   return estimates.sort((a, b) => (order.get(a.projectId) ?? 0) - (order.get(b.projectId) ?? 0))
 }

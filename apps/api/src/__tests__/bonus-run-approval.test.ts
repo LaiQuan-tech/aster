@@ -8,7 +8,15 @@ vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase
 
 import { bonusRunsRouter } from "../routes/bonus-runs.js"
 import { estimateProjectBonus } from "../services/bonus-estimate.js"
-import { previewRun, recomputeDraftRunsForProject, tenantToday } from "../services/bonus-run-store.js"
+import {
+  flushBonusRecompute,
+  myBonusHistory,
+  previewRun,
+  recomputeDraftRegularRuns,
+  recomputeDraftRunsForProject,
+  scheduleBonusRecompute,
+  tenantToday,
+} from "../services/bonus-run-store.js"
 import { amountFingerprint, statusAfterRecompute, transitionOf } from "../services/bonus-run.js"
 import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
@@ -91,7 +99,7 @@ beforeEach(() => {
     project(P_DUP, "T-002", { archived_at: "2026-05-01T02:00:00.000Z", archive_reason: "已由 T-002-1 取代：合約變更" }),
     // 結案自動封存，封存後進了尾款 → 納入
     project(P_TAIL, "T-003", { archived_at: "2026-05-01T02:00:00.000Z" }),
-    // 結案自動封存，之後沒有動靜 → 不列
+    // 結案自動封存，沒有任何入帳（累計應得 0＝已發 0，已結清）→ 不列
     project(P_QUIET, "T-004", { archived_at: "2026-05-01T02:00:00.000Z" }),
   ]
   fake.db.project_members = [
@@ -104,7 +112,6 @@ beforeEach(() => {
     billing(P_DUP, 500_000, "2026-06-01"),
     billing(P_TAIL, 800_000, "2026-03-01"),
     billing(P_TAIL, 200_000, "2026-07-01"),
-    billing(P_QUIET, 900_000, "2026-03-01"),
   ]
   // 已匯款放款分攤到 P1：毛額 100 萬
   fake.db.disbursements = [{ id: DISB, tenant_id: TENANT_ID, status: "paid", paid_on: "2026-04-01" }]
@@ -123,7 +130,7 @@ async function createDraft(): Promise<string> {
 }
 
 describe("毛利制試算＋封存規則（store 接線）", () => {
-  it("P1：入帳 400 萬－放款 100 萬＝毛利 300 萬 × 10% × 趴數；複製取代原案與沒動靜的封存案不列、尾款案納入", async () => {
+  it("P1：入帳 400 萬－放款 100 萬＝毛利 300 萬 × 10% × 趴數；複製取代原案與已結清的封存案不列、還有沒發的封存案納入", async () => {
     const preview = await previewRun(TENANT_ID, "2026-09-30")
     const p1 = preview.items.filter((i) => i.projectId === P1)
     expect(p1.map((i) => [i.employeeId, i.entitledCumulative])).toEqual(
@@ -135,7 +142,7 @@ describe("毛利制試算＋封存規則（store 接線）", () => {
     expect(projects.has(P_QUIET)).toBe(false)
     expect(projects.has(P_TAIL)).toBe(true)
     const excluded = (preview.snapshot.excludedArchived as Array<{ projectId: string; reason: string }>).map((e) => [e.projectId, e.reason])
-    expect(excluded).toEqual(expect.arrayContaining([[P_DUP, "duplicate_replaced"], [P_QUIET, "archived_no_activity"]]))
+    expect(excluded).toEqual(expect.arrayContaining([[P_DUP, "duplicate_replaced"], [P_QUIET, "archived_settled"]]))
   })
 
   it("估算服務與試算同數字（含已封存的指定專案也照算）", async () => {
@@ -235,6 +242,40 @@ describe("核准狀態機（#7）", () => {
     expect(fake.db.bonus_runs.find((r) => r.id === id)?.status).toBe("approved")
   })
 
+  it("發放前用最新資料重算：核准後成本變了 → 409 amount_changed、退回草稿、通知送審人與老闆，不以舊金額發放", async () => {
+    const id = await createDraft()
+    await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
+    await req("post", `/bonus-runs/${id}/approve`, BOSS_TOKEN).send({})
+    // 核准後才付了一筆放款（還沒有任何排程跑過）
+    fake.db.disbursements.push({ id: "dddddddd-0000-4000-8000-000000000002", tenant_id: TENANT_ID, status: "paid", paid_on: "2026-09-01" })
+    fake.db.disbursement_allocations.push({ id: "al-2", tenant_id: TENANT_ID, project_id: P1, disbursement_id: "dddddddd-0000-4000-8000-000000000002", amount: "500000" })
+    const pay = await req("post", `/bonus-runs/${id}/pay`, HR_TOKEN).send({ paidOn: "2026-10-01" })
+    expect([pay.status, pay.body.error, pay.body.returnedToDraft]).toEqual([409, "amount_changed", true])
+    expect(fake.db.bonus_runs.find((r) => r.id === id)?.status).toBe("draft")
+    expect(fake.db.notifications.filter((n) => /退回草稿/.test(n.title)).map((n) => n.employee_id).sort()).toEqual([HR_ID, BOSS_ID].sort())
+  })
+
+  it("自動重算排程：同租戶多次觸發合併成一次", async () => {
+    const id = await createDraft()
+    const before = fake.writes.filter((w) => w.table === "bonus_runs" && w.action === "update").length
+    scheduleBonusRecompute(TENANT_ID, "a")
+    scheduleBonusRecompute(TENANT_ID, "b")
+    await recomputeDraftRunsForProject(TENANT_ID, P1)
+    await flushBonusRecompute()
+    const after = fake.writes.filter((w) => w.table === "bonus_runs" && w.action === "update").length
+    expect(after - before).toBe(1)
+    expect(fake.db.bonus_runs.find((r) => r.id === id)?.status).toBe("draft")
+  })
+
+  it("老闆兼 HR 自己送審自己核准：允許，但標註送審人與核准人相同；老闆設定大寫 uuid 也認得", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: HR_ID.toUpperCase() } } }]
+    const id = await createDraft()
+    await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
+    const ok = await req("post", `/bonus-runs/${id}/approve`, HR_TOKEN).send({})
+    expect(ok.status).toBe(200)
+    expect(ok.body.run).toMatchObject({ status: "approved", selfApproved: true })
+  })
+
   it("老闆沒設定 → 送審 409 boss_not_configured", async () => {
     fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: {} }]
     const id = await createDraft()
@@ -248,7 +289,7 @@ describe("核准狀態機（#7）", () => {
     await req("post", `/bonus-runs/${id}/approve`, BOSS_TOKEN).send({})
 
     // 金額沒變：重算後仍是 approved
-    const same = await recomputeDraftRunsForProject(TENANT_ID, P1)
+    const same = await recomputeDraftRegularRuns(TENANT_ID)
     expect(same.recomputed).toEqual([id])
     expect(same.returnedToDraft).toEqual([])
     expect(fake.db.bonus_runs.find((r) => r.id === id)?.status).toBe("approved")
@@ -258,7 +299,11 @@ describe("核准狀態機（#7）", () => {
     fake.db.project_subcontract_payments = [
       { id: "sp-1", tenant_id: TENANT_ID, subcontract_id: "s-1", paid_amount: "90000", withheld_amount: "10000", paid_on: "2026-08-01", disbursement_id: null },
     ]
-    const changed = await recomputeDraftRunsForProject(TENANT_ID, P1)
+    // 自動重算是非同步排程：呼叫立刻返回，flush 後才真的跑完
+    const scheduled = await recomputeDraftRunsForProject(TENANT_ID, P1)
+    expect(scheduled).toMatchObject({ scheduled: true, recomputed: [] })
+    await flushBonusRecompute()
+    const changed = { returnedToDraft: fake.db.bonus_runs.filter((r) => r.id === id && r.status === "draft").map((r) => r.id as string) }
     expect(changed.returnedToDraft).toEqual([id])
     const row = fake.db.bonus_runs.find((r) => r.id === id)!
     expect(row).toMatchObject({ status: "draft", approved_at: null, approved_fingerprint: null })
@@ -296,6 +341,26 @@ describe("核准狀態機（#7）", () => {
   })
 })
 
+describe("ESS /my/bonus-history 精簡輸出", () => {
+  it("只回白名單欄位：不含入帳／成本／毛利／獎金池／比例／累計應得／入帳比例", async () => {
+    const id = await createDraft()
+    await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
+    await req("post", `/bonus-runs/${id}/approve`, BOSS_TOKEN).send({})
+    await req("post", `/bonus-runs/${id}/pay`, HR_TOKEN).send({ paidOn: "2026-10-01" })
+    const res = await req("get", "/my/bonus-history", STAFF_TOKEN)
+    expect(res.status).toBe(200)
+    const row = res.body.rows.find((r: { projectId: string }) => r.projectId === P1)
+    expect(Object.keys(row).sort()).toEqual(
+      ["amount", "asOf", "basis", "id", "kind", "label", "paidCumulative", "paidOn", "projectCode", "projectId", "projectName", "roleInProject", "runId", "shareAmount", "shareMode", "sharePct"].sort(),
+    )
+    expect(row).toMatchObject({ amount: 90_000, paidCumulative: 90_000, sharePct: 30, label: "2026-Q3" })
+    const forbidden = ["revenue", "cost", "disbursementCost", "subcontractCost", "grossProfit", "bonusPool", "bonusRatePct", "entitledCumulative", "receivedTotal", "receivedPct", "contractTotal", "paidBefore"]
+    for (const r of res.body.rows) for (const k of forbidden) expect(r).not.toHaveProperty(k)
+    const svc = await myBonusHistory(TENANT_ID, STAFF_ID)
+    expect(svc.total).toBe(res.body.total)
+  })
+})
+
 describe("狀態機純函式", () => {
   it("transitionOf：每個動作只收對應狀態", () => {
     expect(transitionOf("draft", "submit")).toEqual({ ok: true, next: "pending_approval" })
@@ -322,5 +387,7 @@ describe("狀態機純函式", () => {
     expect(statusAfterRecompute("approved", a, c)).toEqual({ status: "draft", returned: true })
     expect(statusAfterRecompute("pending_approval", a, c)).toEqual({ status: "draft", returned: true })
     expect(statusAfterRecompute("draft", a, c)).toEqual({ status: "draft", returned: false })
+    // 金額 0 的列不影響指紋
+    expect(amountFingerprint([{ projectId: "p", employeeId: "a", amount: 1 }, { projectId: "p", employeeId: "b", amount: 2 }, { projectId: "q", employeeId: "z", amount: 0 }])).toBe(a)
   })
 })

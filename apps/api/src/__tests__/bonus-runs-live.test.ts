@@ -250,14 +250,14 @@ describe.skipIf(!migrated)("獎金季發放批次 — live", () => {
     expect(pay.body.run.paidOn).toBe(TODAY)
     expect(pay.body.run.paidByEmpId).toBe(adminEmpId)
 
+    // 發放前會用最新資料重算：q1 已發放 → tmp 的已發過期、金額改變 → 409 amount_changed 並退回草稿
     const stale = await asAdmin(request(app).post(`/bonus-runs/${tmpId}/pay`)).send({ paidOn: TODAY })
     expect(stale.status).toBe(409)
-    expect(stale.body.error).toBe("stale_paid_before")
+    expect(stale.body.error).toBe("amount_changed")
+    expect((await asAdmin(request(app).get(`/bonus-runs/${tmpId}`))).body.run.status).toBe("draft")
 
     const recomputed = await asAdmin(request(app).patch(`/bonus-runs/${tmpId}`)).send({ recompute: true })
     expect(recomputed.status).toBe(200)
-    // 已核准的批次重算後金額變了 → 退回草稿（#7），所以之後才刪得掉
-    expect(recomputed.body.returnedToDraft).toBe(true)
     expect(recomputed.body.run.status).toBe("draft")
     expect(byEmp(recomputed.body.items, empAId)).toMatchObject({ entitledCumulative: 4_000, paidBefore: 4_000, amount: 0, overpaid: false })
     expect(recomputed.body.run.totals.amount).toBe(0)

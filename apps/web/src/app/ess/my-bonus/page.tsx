@@ -120,13 +120,14 @@ export default function MyBonusPage() {
                     <th className="py-2 pr-3">期別</th>
                     <th className="py-2 pr-3">發放日</th>
                     <th className="py-2 pr-3">專案</th>
-                    <th className="py-2 pr-3">入帳比例</th>
+                    <th className="py-2 pr-3">我的趴數</th>
                     <th className="py-2 pr-3">本季發放</th>
+                    <th className="py-2 pr-3">累計已發</th>
                   </tr>
                 </thead>
                 <tbody>
                   {history.rows.map((r) => (
-                    <tr key={r.id ?? `${r.runId}:${r.projectId}`} className="border-b last:border-0">
+                    <tr key={r.id} className="border-b last:border-0">
                       <td className="py-2 pr-3 font-medium text-gray-800">{r.label}</td>
                       <td className="py-2 pr-3 text-gray-600">{r.paidOn ?? "—"}</td>
                       <td className="py-2 pr-3 text-gray-700">
@@ -135,8 +136,13 @@ export default function MyBonusPage() {
                           {r.projectName ?? r.projectId}
                         </Link>
                       </td>
-                      <td className="py-2 pr-3 text-gray-600">{Math.round(r.receivedPct * 1000) / 10}%</td>
+                      <td className="py-2 pr-3 text-gray-600">
+                        {r.shareMode === "fixed_amount" ? `固定 ${money(r.shareAmount)}` : r.sharePct == null ? "—" : `${r.sharePct}%`}
+                        {r.basis === "legacy_pool" && <span className="ml-1 rounded-full bg-gray-100 px-1.5 py-0.5 text-xs text-gray-600">舊制</span>}
+                        {r.kind === "reversal" && <span className="ml-1 rounded-full bg-rose-50 px-1.5 py-0.5 text-xs text-rose-700">沖銷</span>}
+                      </td>
                       <td className="py-2 pr-3 font-medium text-gray-900">{money(r.amount)}</td>
+                      <td className="py-2 pr-3 text-gray-600">{money(r.paidCumulative)}</td>
                     </tr>
                   ))}
                 </tbody>

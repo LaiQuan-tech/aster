@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import {
-  archiveInclusionOf,
+  archiveStageOf,
   computeBonusRun,
   isDuplicateReplacedArchive,
   overContractPctOf,
@@ -164,30 +164,46 @@ describe("舊制相容（只有手填獎金池）", () => {
   })
 })
 
-describe("#4 封存專案納入規則", () => {
+describe("#4 封存專案納入規則（累計應得 ≠ 已發就納入）", () => {
   it("複製取代的原案一律排除（archive_reason 與 project-duplicate.archiveReasonFor 同格式）", () => {
     const reason = archiveReasonFor("AT-115-013-1", "合約變更")
     expect(isDuplicateReplacedArchive(reason)).toBe(true)
-    expect(archiveInclusionOf("2026-05-01", reason, "2026-06-01")).toEqual({ include: false, reason: "duplicate_replaced" })
-  })
-
-  it("結案自動封存：封存後（含當天）有新入帳／成本 → 納入；沒有 → 不列", () => {
-    expect(archiveInclusionOf("2026-05-01", null, "2026-05-01")).toEqual({ include: true, reason: "archived_with_activity" })
-    expect(archiveInclusionOf("2026-05-01", null, "2026-07-10")).toEqual({ include: true, reason: "archived_with_activity" })
-    expect(archiveInclusionOf("2026-05-01", null, "2026-04-30")).toEqual({ include: false, reason: "archived_no_activity" })
-    expect(archiveInclusionOf("2026-05-01", null, null)).toEqual({ include: false, reason: "archived_no_activity" })
+    expect(archiveStageOf("2026-05-01", reason, "2026-06-01")).toBe("duplicate_replaced")
     expect(isDuplicateReplacedArchive("手動封存")).toBe(false)
   })
 
-  it("封存日在試算基準日之後（補做舊季批次）→ 截至基準日還沒封存，當作未封存納入", () => {
-    expect(archiveInclusionOf("2026-10-05", null, "2026-09-20", "2026-09-30")).toEqual({ include: true, reason: "active" })
-    // 複製取代的原案也一樣：基準日當時原案還在跑
-    expect(archiveInclusionOf("2026-10-05", "已由 X-1 取代：變更", "2026-09-20", "2026-09-30")).toEqual({ include: true, reason: "active" })
-    expect(archiveInclusionOf("2026-09-05", null, "2026-08-20", "2026-09-30")).toEqual({ include: false, reason: "archived_no_activity" })
+  it("封存日在試算基準日之後（補做舊季批次）→ 當作未封存；未封存 → active", () => {
+    expect(archiveStageOf("2026-10-05", null, "2026-09-30")).toBe("active")
+    expect(archiveStageOf("2026-10-05", "已由 X-1 取代：變更", "2026-09-30")).toBe("active")
+    expect(archiveStageOf("2026-09-05", null, "2026-09-30")).toBe("archived")
+    expect(archiveStageOf(null, null, "2026-09-30")).toBe("active")
   })
 
-  it("未封存 → 一律納入", () => {
-    expect(archiveInclusionOf(null, null, null)).toEqual({ include: true, reason: "active" })
+  it("★ 10/5 進尾款、10/20 結案自動封存、之後沒有新動靜：尾款獎金還沒發 → 仍納入", () => {
+    // 已發 9 萬中的 6 萬（尾款進來後累計應得 9 萬）
+    const paid = new Map([[paidBeforeKey("P1", "E1"), 60_000], [paidBeforeKey("P1", "E2"), 140_000]])
+    const p = gpProject({ archived: true })
+    const { items, settledArchived } = computeBonusRun([p], paid)
+    expect(settledArchived).toEqual([])
+    expect(items.map((i) => i.amount)).toEqual([30_000, 70_000])
+  })
+
+  it("封存且全部成員結清 → 不列（不進明細、不進警示）；有人超發 → 仍列（標超發）", () => {
+    const settled = new Map([[paidBeforeKey("P1", "E1"), 90_000], [paidBeforeKey("P1", "E2"), 210_000]])
+    const r1 = computeBonusRun([gpProject({ archived: true, receivedTotal: 12_000_000, cost: 9_000_000 })], settled)
+    expect(r1.items).toEqual([])
+    expect(r1.settledArchived).toEqual(["P1"])
+    expect(r1.totals.warnings).toEqual([])
+    const over = new Map([[paidBeforeKey("P1", "E1"), 100_000], [paidBeforeKey("P1", "E2"), 210_000]])
+    const r2 = computeBonusRun([gpProject({ archived: true })], over)
+    expect(r2.settledArchived).toEqual([])
+    expect(r2.items[0]).toMatchObject({ overpaid: true, overpaidBy: 10_000, amount: 0 })
+  })
+
+  it("封存且算不出來（舊制缺池）→ 不列也不進 skipped", () => {
+    const r = computeBonusRun([gpProject({ archived: true, bonusRatePct: null, bonusPool: null })], new Map())
+    expect(r.totals.skipped).toEqual([])
+    expect(r.settledArchived).toEqual(["P1"])
   })
 })
 
@@ -212,6 +228,13 @@ describe("估算服務與試算一致（bonus-estimate）", () => {
     expect(est[0]).toMatchObject({ basis: "gross_profit", pool: 300_000, revenue: 4_000_000, cost: 1_000_000, grossProfit: 3_000_000, overContractPct: null, skipped: null })
     expect(est[1]).toMatchObject({ basis: "legacy_pool", pool: 500_000 })
     expect(est[2].overContractPct).toBe(20)
+  })
+
+  it("複製取代的原案：估算的應得＝已發（待發 0），ESS 不顯示永遠不會發的金額", () => {
+    const paid = new Map([[paidBeforeKey("P1", "E1"), 10_000]])
+    const est = buildProjectBonusEstimates([gpProject()], paid, new Map([["P1", "duplicate_replaced" as const]]))
+    expect(est[0]!.excludedReason).toBe("duplicate_replaced")
+    expect(est[0]!.members.map((m) => [m.estimatedAmount, m.paidAmount])).toEqual([[10_000, 10_000], [0, 0]])
   })
 
   it("沒有成員的專案也回專案層數字；被試算跳過的案標 skipped", () => {

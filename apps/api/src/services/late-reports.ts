@@ -98,7 +98,8 @@ export async function loadBossEmpId(tenantId: string): Promise<string | null> {
     | { fallbackApproverEmpId?: unknown }
     | null
   const id = approval?.fallbackApproverEmpId
-  return typeof id === "string" && id.length > 0 ? id : null
+  // 設定值可能是大寫 uuid（手動貼上）：一律轉小寫，呼叫端拿 DB 的小寫 id 比對才不會誤判。
+  return typeof id === "string" && id.length > 0 ? id.toLowerCase() : null
 }
 
 /**

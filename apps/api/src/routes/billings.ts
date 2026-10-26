@@ -17,7 +17,7 @@ import { loadProjectScope } from "../services/project-scope.js"
 import { BILLING_KINDS, computeSchedule, effectiveBillingAmount } from "../services/project-money.js"
 import { serializeBilling } from "../services/project-application-store.js"
 import { writeAuditLog } from "../services/audit.js"
-import { recomputeDraftRegularRuns } from "../services/bonus-run-store.js"
+import { scheduleBonusRecompute } from "../services/bonus-run-store.js"
 import { logger } from "../lib/logger.js"
 
 export const billingsRouter = Router()
@@ -77,21 +77,13 @@ const receiveSchema = z.object({
 type Warning = "invoiced_before_billed" | "received_before_invoiced" | "received_before_billed"
 
 /**
- * M22：入帳／撤銷入帳成功後，把該租戶所有 draft 的一般獎金批次重算一次。
- * best-effort——錢已經入帳了，獎金重算失敗不能讓入帳看起來沒成功；失敗只 log，
- * 回應裡的 `bonusRunsRecomputed` 讓前端（與測試）看得到重算了幾批。
+ * M22：入帳／撤銷入帳成功後，排程重算該租戶所有未發放的一般獎金批次（2026-10-26 起非同步：
+ * 回應不等重算，同租戶短時間內多次觸發合併一次；見 bonus-run-store.ts scheduleBonusRecompute）。
+ * `bonusRunsRecomputed` 保留欄位相容，固定回空陣列。
  */
 async function recomputeBonusRuns(tenantId: string, context: string): Promise<string[]> {
-  try {
-    const result = await recomputeDraftRegularRuns(tenantId)
-    if (result.failed.length > 0) {
-      logger.warn({ tenantId, context, failed: result.failed }, "draft 獎金批次重算失敗（入帳已完成）")
-    }
-    return result.recomputed
-  } catch (err) {
-    logger.warn({ tenantId, context, err }, "draft 獎金批次重算失敗（入帳已完成）")
-    return []
-  }
+  scheduleBonusRecompute(tenantId, context)
+  return []
 }
 
 async function respondSchedule(

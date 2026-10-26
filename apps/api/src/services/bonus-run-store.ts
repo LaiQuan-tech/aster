@@ -8,17 +8,18 @@ import { writeAuditLog } from "./audit.js"
 import { enqueue } from "./notify.js"
 import { loadBossEmpId } from "./late-reports.js"
 import { bonusRunsHaveApproval } from "../lib/schema-compat.js"
+import { logger } from "../lib/logger.js"
 import {
   AMOUNT_CHANGED_RETURN_REASON,
   amountFingerprint,
-  archiveInclusionOf,
+  archiveStageOf,
   statusAfterRecompute,
   transitionOf,
   BONUS_BASIS_LABEL,
   buildBonusSummary,
   computeBonusRun,
   projectBonusBasisOf,
-  type ArchiveInclusion,
+  type ArchiveStage,
   type BonusBasis,
   paidBeforeKey,
   reversalItemsOf,
@@ -198,6 +199,8 @@ export type SerializedRun = {
   returnedAt: string | null
   returnedByEmpId: string | null
   returnReason: string | null
+  /** 送審人與核准人是同一人（老闆兼 HR 自己送審自己核准）。 */
+  selfApproved: boolean
 }
 
 export type SerializedItem = {
@@ -326,6 +329,7 @@ function serializeRun(row: RunRow, reversedBy?: { id: string; status: string } |
     returnedAt: row.returned_at ?? null,
     returnedByEmpId: row.returned_by_emp_id ?? null,
     returnReason: row.return_reason ?? null,
+    selfApproved: !!row.approved_by_emp_id && row.approved_by_emp_id === row.submitted_by_emp_id,
   }
 }
 
@@ -385,8 +389,8 @@ type LoadedInputs = {
   projects: BonusProjectInput[]
   projectMeta: Map<string, ProjectMeta>
   employeeMeta: Map<string, EmployeeMeta>
-  /** 封存專案的納入判斷（未封存的也會有一筆 active）；估算服務（archiveRule='all'）為空。 */
-  archiveInclusion: Map<string, ArchiveInclusion>
+  /** 每個候選專案的封存階段（active／duplicate_replaced／archived）。 */
+  archiveStage: Map<string, ArchiveStage>
 }
 
 export async function tenantToday(tenantId: string): Promise<string> {
@@ -410,8 +414,9 @@ export type LoadInputsOptions = {
   /** 只算這幾個專案（估算服務用）；省略＝租戶全部。 */
   projectIds?: readonly string[]
   /**
-   * 'bonus_run'（預設）：套封存規則（bonus-run.ts archiveInclusionOf——複製取代的原案排除、
-   * 其他封存案封存後有新入帳／成本才納入）。'all'：指定的專案一律納入（估算服務：P2 問哪個案就算哪個）。
+   * 'bonus_run'（預設）：套封存規則（bonus-run.ts archiveStageOf——複製取代的原案排除；其他封存案
+   * 標 archived，由 computeBonusRun 在全部成員結清時不列）。'all'：指定的專案一律回傳（估算服務自己依
+   * archiveStage 處理）。
    */
   archiveRule?: "bonus_run" | "all"
 }
@@ -427,7 +432,7 @@ export async function loadInputs(tenantId: string, asOf: string, opts: LoadInput
   let projects: ProjectRow[]
   if (opts.projectIds) {
     const ids = [...new Set(opts.projectIds)]
-    if (ids.length === 0) return { projects: [], projectMeta: new Map(), employeeMeta: new Map(), archiveInclusion: new Map() }
+    if (ids.length === 0) return { projects: [], projectMeta: new Map(), employeeMeta: new Map(), archiveStage: new Map() }
     const { data, error } = await supabaseAdmin.from("projects").select(cols).eq("tenant_id", tenantId).in("id", ids)
     if (error) throw new Error(`bonus-run loadInputs (projects): ${error.message}`)
     projects = (data ?? []) as ProjectRow[]
@@ -439,8 +444,8 @@ export async function loadInputs(tenantId: string, asOf: string, opts: LoadInput
     )
   }
   const projectMeta = new Map<string, ProjectMeta>(projects.map((p) => [p.id, { id: p.id, code: p.code, name: p.name }]))
-  const archiveInclusion = new Map<string, ArchiveInclusion>()
-  if (projects.length === 0) return { projects: [], projectMeta, employeeMeta: new Map(), archiveInclusion }
+  const archiveStage = new Map<string, ArchiveStage>()
+  if (projects.length === 0) return { projects: [], projectMeta, employeeMeta: new Map(), archiveStage }
   const ids = projects.map((p) => p.id)
 
   type MemberRow = { project_id: string; employee_id: string; role_in_project: string | null; share_pct: string | number | null; share_amount: string | number | null }
@@ -474,26 +479,14 @@ export async function loadInputs(tenantId: string, asOf: string, opts: LoadInput
   }
   // 試算只看有成員的案；估算服務（指定 projectIds）沒有成員也要回專案層數字。
   const candidates = opts.projectIds ? projects : projects.filter((p) => (membersByProject.get(p.id) ?? []).length > 0)
-  // 複製取代的原案不必撈金額（一律排除）。
-  const tz = archiveRule === "bonus_run" && candidates.some((p) => p.archived_at) ? await getTenantTimezone(tenantId) : null
+  const tz = candidates.some((p) => p.archived_at) ? await getTenantTimezone(tenantId) : null
   const archivedOn = (p: ProjectRow): string | null => (p.archived_at ? localDateKey(p.archived_at, tz ?? "Asia/Taipei") : null)
-  const needMoney = candidates.filter((p) => archiveRule === "all" || archiveInclusionOf(archivedOn(p), p.archive_reason, null, asOf).reason !== "duplicate_replaced")
-  if (needMoney.length === 0) {
-    for (const p of candidates) archiveInclusion.set(p.id, archiveInclusionOf(archivedOn(p), p.archive_reason, null, asOf))
-    return { projects: [], projectMeta, employeeMeta: new Map(), archiveInclusion }
-  }
-  const moneyIds = needMoney.map((p) => p.id)
-  const gp = summarizeProjectGrossProfit(moneyIds, await loadGrossProfitInput(tenantId, moneyIds, asOf))
-
-  const scoped = archiveRule === "all"
-    ? needMoney
-    : candidates.filter((p) => {
-        const inc = archiveInclusionOf(archivedOn(p), p.archive_reason, gp.get(p.id)?.lastActivityOn ?? null, asOf)
-        archiveInclusion.set(p.id, inc)
-        return inc.include
-      })
-  if (scoped.length === 0) return { projects: [], projectMeta, employeeMeta: new Map(), archiveInclusion }
+  for (const p of candidates) archiveStage.set(p.id, archiveStageOf(archivedOn(p), p.archive_reason, asOf))
+  // 試算：複製取代的原案一律排除（不必撈金額）；估算：全部回傳。
+  const scoped = archiveRule === "all" ? candidates : candidates.filter((p) => archiveStage.get(p.id) !== "duplicate_replaced")
+  if (scoped.length === 0) return { projects: [], projectMeta, employeeMeta: new Map(), archiveStage }
   const scopedIds = scoped.map((p) => p.id)
+  const gp = summarizeProjectGrossProfit(scopedIds, await loadGrossProfitInput(tenantId, scopedIds, asOf))
 
   type ContractRow = { project_id: string; doc_type: string; amount: string | number | null }
   const contractRows: ContractRow[] = []
@@ -548,14 +541,15 @@ export async function loadInputs(tenantId: string, asOf: string, opts: LoadInput
       cost: money?.cost ?? 0,
       disbursementCost: money?.disbursementCost ?? 0,
       subcontractCost: money?.subcontractCost ?? 0,
+      archived: archiveRule === "bonus_run" && archiveStage.get(p.id) === "archived",
       members: membersByProject.get(p.id) ?? [],
     }
   })
-  return { projects: inputs, projectMeta, employeeMeta, archiveInclusion }
+  return { projects: inputs, projectMeta, employeeMeta, archiveStage }
 }
 
 /** 先前 paid 且未刪的 runs 裡，同 (project, employee) 的 amount 合計。重算 draft 時排除自己。 */
-export async function loadPaidBefore(tenantId: string, excludeRunId?: string | null): Promise<Map<string, number>> {
+export async function loadPaidBefore(tenantId: string, excludeRunId?: string | null, projectIds?: readonly string[]): Promise<Map<string, number>> {
   let q = supabaseAdmin.from("bonus_runs").select("id").eq("tenant_id", tenantId).eq("status", "paid").is("deleted_at", null)
   if (excludeRunId) q = q.neq("id", excludeRunId)
   const { data: runs, error } = await q
@@ -564,17 +558,32 @@ export async function loadPaidBefore(tenantId: string, excludeRunId?: string | n
   const map = new Map<string, number>()
   if (runIds.length === 0) return map
   type PaidBeforeItemRow = { run_id: string; project_id: string; employee_id: string; amount: string | number | null }
-  const items = await fetchAll<PaidBeforeItemRow>(
-    (from, to) =>
-      supabaseAdmin
-        .from("bonus_run_items")
-        .select("run_id, project_id, employee_id, amount")
-        .eq("tenant_id", tenantId)
-        .in("run_id", runIds)
-        .order("id", { ascending: true })
-        .range(from, to),
-    "bonus-run loadPaidBefore (items)",
-  )
+  const items: PaidBeforeItemRow[] = []
+  // 指定專案（估算服務）：只撈這些專案的明細；id 清單分批，避免網址過長。
+  const projectChunks: Array<readonly string[] | null> = []
+  if (projectIds) {
+    const uniqIds = [...new Set(projectIds)]
+    if (uniqIds.length === 0) return map
+    for (let i = 0; i < uniqIds.length; i += 100) projectChunks.push(uniqIds.slice(i, i + 100))
+  } else {
+    projectChunks.push(null)
+  }
+  for (const chunk of projectChunks) {
+    items.push(
+      ...(await fetchAll<PaidBeforeItemRow>(
+        (from, to) => {
+          let q = supabaseAdmin
+            .from("bonus_run_items")
+            .select("run_id, project_id, employee_id, amount")
+            .eq("tenant_id", tenantId)
+            .in("run_id", runIds)
+          if (chunk) q = q.in("project_id", chunk as string[])
+          return q.order("id", { ascending: true }).range(from, to)
+        },
+        "bonus-run loadPaidBefore (items)",
+      )),
+    )
+  }
   for (const it of items) {
     const key = paidBeforeKey(it.project_id, it.employee_id)
     map.set(key, (map.get(key) ?? 0) + (num(it.amount) ?? 0))
@@ -644,13 +653,14 @@ export async function previewRun(tenantId: string, asOf: string, excludeRunId?: 
     loadPaidBefore(tenantId, excludeRunId),
     loadPreviousReceived(tenantId, asOf, excludeRunId),
   ])
-  const { items, totals } = computeBonusRun(inputs.projects, paidBefore, previousReceived)
+  const { items, totals, settledArchived = [] } = computeBonusRun(inputs.projects, paidBefore, previousReceived)
+  const settledSet = new Set(settledArchived)
   const skippedIds = new Set(totals.skipped.map((s) => s.projectId))
   const metaOf = (projectId: string) => inputs.projectMeta.get(projectId)
   const snapshot = {
     asOf,
     excludeRunId: excludeRunId ?? null,
-    projects: inputs.projects.map((p) => {
+    projects: inputs.projects.filter((p) => !settledSet.has(p.projectId)).map((p) => {
       const meta = metaOf(p.projectId)
       const b = projectBonusBasisOf(p)
       return {
@@ -671,7 +681,7 @@ export async function previewRun(tenantId: string, asOf: string, excludeRunId?: 
         subcontractCost: b.subcontractCost,
         grossProfit: b.grossProfit,
         overContractPct: b.overContractPct,
-        archived: inputs.archiveInclusion.get(p.projectId)?.reason === "archived_with_activity",
+        archived: inputs.archiveStage.get(p.projectId) === "archived",
         memberCount: p.members.length,
         skipped: skippedIds.has(p.projectId),
       }
@@ -681,10 +691,11 @@ export async function previewRun(tenantId: string, asOf: string, excludeRunId?: 
       code: metaOf(s.projectId)?.code ?? null,
       name: metaOf(s.projectId)?.name ?? null,
     })),
-    /** 封存而不列入的專案（複製取代的原案、封存後沒有新入帳／成本），供 HR 追溯。 */
-    excludedArchived: [...inputs.archiveInclusion.entries()]
-      .filter(([, inc]) => !inc.include)
-      .map(([projectId, inc]) => ({ projectId, reason: inc.reason, code: metaOf(projectId)?.code ?? null, name: metaOf(projectId)?.name ?? null })),
+    /** 封存而不列入的專案（複製取代的原案、封存且全部成員已結清），供 HR 追溯。 */
+    excludedArchived: [
+      ...[...inputs.archiveStage.entries()].filter(([, st]) => st === "duplicate_replaced").map(([projectId]) => ({ projectId, reason: "duplicate_replaced" })),
+      ...settledArchived.map((projectId) => ({ projectId, reason: "archived_settled" })),
+    ].map((e) => ({ ...e, code: metaOf(e.projectId)?.code ?? null, name: metaOf(e.projectId)?.name ?? null })),
     warnings: (totals.warnings ?? []).map((w) => ({ ...w, code: metaOf(w.projectId)?.code ?? null, name: metaOf(w.projectId)?.name ?? null })),
   }
   const serialized: SerializedItem[] = items.map((i) => {
@@ -1091,7 +1102,7 @@ async function requireBoss(tenantId: string): Promise<string> {
 /** 呼叫者是不是老闆（給 ESS 簽核頁／後台決定要不要顯示核准按鈕）。 */
 export async function isBonusApprover(tenantId: string, empId: string | null): Promise<boolean> {
   if (!empId) return false
-  return (await loadBossEmpId(tenantId)) === empId
+  return (await loadBossEmpId(tenantId)) === empId.toLowerCase()
 }
 
 /** HR 送審：draft → pending_approval，記下金額指紋，通知老闆。 */
@@ -1154,12 +1165,14 @@ export async function approveRun(tenantId: string, actor: Actor, id: string): Pr
   const current = await loadRun(tenantId, id)
   if (!current) return null
   const boss = await requireBoss(tenantId)
-  if (!actor.empId || actor.empId !== boss) throw new BonusRunError(403, "not_approver")
+  if (!actor.empId || actor.empId.toLowerCase() !== boss) throw new BonusRunError(403, "not_approver")
   assertTransition(current.status, "approve")
   const items = await loadItemRows(tenantId, id)
   if (current.approved_fingerprint && liveItemsFingerprint(items) !== current.approved_fingerprint) {
     throw new BonusRunError(409, "amount_changed")
   }
+  // 老闆本身是 HR 時可以自己送審自己核准（維持），但留下標註。
+  const selfApproved = !!current.submitted_by_emp_id && current.submitted_by_emp_id === actor.empId
   await transitionRow(
     tenantId,
     id,
@@ -1173,7 +1186,7 @@ export async function approveRun(tenantId: string, actor: Actor, id: string): Pr
     recordId: id,
     action: "UPDATE",
     oldRow: { status: "pending_approval" },
-    newRow: { status: "approved", approved_by_emp_id: actor.empId },
+    newRow: { status: "approved", approved_by_emp_id: actor.empId, ...(selfApproved ? { selfApproved: true, note: "送審人與核准人相同" } : {}) },
     actorEmpId: actor.empId,
     context: "POST /bonus-runs/:id/approve",
   })
@@ -1182,7 +1195,7 @@ export async function approveRun(tenantId: string, actor: Actor, id: string): Pr
     employeeIds: [current.submitted_by_emp_id ?? ""],
     type: "bonus_run",
     title: `獎金批次 ${current.label} 已核准`,
-    body: "老闆已核准，可以發放。",
+    body: selfApproved ? "已核准（送審人與核准人相同），可以發放。" : "老闆已核准，可以發放。",
     payload: { bonusRunId: id, event: "approved", approvedByEmpId: actor.empId },
   })
   return getRun(tenantId, id)
@@ -1194,7 +1207,7 @@ export async function returnRun(tenantId: string, actor: Actor, id: string, reas
   const current = await loadRun(tenantId, id)
   if (!current) return null
   const boss = await requireBoss(tenantId)
-  if (!actor.empId || actor.empId !== boss) throw new BonusRunError(403, "not_approver")
+  if (!actor.empId || actor.empId.toLowerCase() !== boss) throw new BonusRunError(403, "not_approver")
   assertTransition(current.status, "return")
   await transitionRow(tenantId, id, current.status, returnPatch(actor.empId, reason), "returnRun")
   await writeAuditLog({
@@ -1256,8 +1269,16 @@ export async function withdrawRun(tenantId: string, actor: Actor, id: string, re
 /** approved → paid（凍結）。只收已核准；pay 前重抓 paid_before 逐列比對，不一致 → 409 stale_paid_before。 */
 export async function payRun(tenantId: string, actor: Actor, id: string, paidOn: string): Promise<RunDetail | null> {
   await requireApprovalSchema()
-  const current = await loadRun(tenantId, id)
-  if (!current) return null
+  const before = await loadRun(tenantId, id)
+  if (!before) return null
+  assertTransition(before.status, "pay")
+  // 定案前用最新資料重算一次（沖銷批次不重算）：金額與核准時不同 → updateRun 已把批次退回草稿並通知
+  // 送審人與老闆，這裡回 409 amount_changed，絕不以舊金額發放。金額相同 → 繼續（明細已更新成最新）。
+  if (before.kind !== "reversal") {
+    const fresh = await updateRun(tenantId, actor, id, {}, { recompute: true })
+    if (fresh?.returnedToDraft) throw new BonusRunError(409, "amount_changed", { returnedToDraft: true })
+  }
+  const current = (await loadRun(tenantId, id)) ?? before
   assertTransition(current.status, "pay")
 
   const allItems = await loadItemRows(tenantId, id)
@@ -1499,18 +1520,75 @@ export async function buildSummary(tenantId: string, filter: { year?: number | n
   return buildBonusSummary(runInputs, itemInputs, filter)
 }
 
-export type MyBonusHistoryRow = SerializedItem & { label: string; asOf: string; paidOn: string | null }
+/**
+ * ESS「我的獎金」歷史列——**精簡白名單**（2026-10-26 驗收）：員工只看得到自己拿了多少。
+ * 刻意不含入帳／成本／毛利／獎金池／獎金比例／累計應得／入帳比例等任何可反推專案毛利的欄位
+ * （累計應得＝毛利×比例×趴數，趴數已知就能反推）。
+ */
+export type MyBonusHistoryRow = {
+  id: string
+  runId: string
+  /** 批次名稱（期別）與期間。 */
+  label: string
+  asOf: string
+  paidOn: string | null
+  /** regular＝季批次；reversal＝沖銷（金額為負）。 */
+  kind: BonusRunKind
+  projectId: string
+  projectCode: string | null
+  projectName: string | null
+  roleInProject: string | null
+  shareMode: string
+  sharePct: number | null
+  /** 固定金額制的本人金額（本人分潤設定，不涉毛利）。 */
+  shareAmount: number | null
+  /** 本期金額。 */
+  amount: number
+  /** 這個專案截至這一期（含）本人累計已發。 */
+  paidCumulative: number
+  /** 標籤：毛利制／舊制（手填獎金池）／固定金額；改版前的批次 null。 */
+  basis: BonusBasis | null
+}
 
-/** ESS：本人在各 paid 批次的明細（最新批次在前）。 */
+/** ESS：本人在各 paid 批次的明細（最新批次在前）。只回 MyBonusHistoryRow 白名單欄位。 */
 export async function myBonusHistory(tenantId: string, employeeId: string): Promise<{ rows: MyBonusHistoryRow[]; total: number }> {
   const { runs, items } = await loadPaidRunsWithItems(tenantId, employeeId)
   const runById = new Map(runs.map((r) => [r.id, r]))
-  const rows: MyBonusHistoryRow[] = items
-    .map((r) => {
-      const run = runById.get(r.run_id)!
-      return { ...serializeItem(r), label: run.label, asOf: run.as_of, paidOn: run.paid_on }
-    })
-    .sort((a, b) => (b.paidOn ?? b.asOf).localeCompare(a.paidOn ?? a.asOf) || b.label.localeCompare(a.label) || compareItems(a, b))
+  const chronological = items
+    .filter((r) => r.employee_id === employeeId)
+    .map((r) => ({ r, run: runById.get(r.run_id)! }))
+    .sort((a, b) => (a.run.paid_on ?? a.run.as_of).localeCompare(b.run.paid_on ?? b.run.as_of) || a.run.created_at.localeCompare(b.run.created_at))
+  const cumulative = new Map<string, number>()
+  const rows: MyBonusHistoryRow[] = chronological.map(({ r, run }) => {
+    const amount = num(r.amount) ?? 0
+    const paidCumulative = (cumulative.get(r.project_id) ?? 0) + amount
+    cumulative.set(r.project_id, paidCumulative)
+    const snap = r.snapshot ?? {}
+    return {
+      id: r.id,
+      runId: r.run_id,
+      label: run.label,
+      asOf: run.as_of,
+      paidOn: run.paid_on,
+      kind: (run.kind === "reversal" ? "reversal" : "regular") as BonusRunKind,
+      projectId: r.project_id,
+      projectCode: snap.projectCode ?? null,
+      projectName: snap.projectName ?? null,
+      roleInProject: snap.roleInProject ?? null,
+      shareMode: r.share_mode,
+      sharePct: num(r.share_pct),
+      shareAmount: num(r.share_amount),
+      amount,
+      paidCumulative,
+      basis: snap.basis ?? null,
+    }
+  })
+  rows.sort(
+    (a, b) =>
+      (b.paidOn ?? b.asOf).localeCompare(a.paidOn ?? a.asOf) ||
+      b.label.localeCompare(a.label) ||
+      (a.projectCode ?? "").localeCompare(b.projectCode ?? ""),
+  )
   return { rows, total: rows.reduce((s, r) => s + r.amount, 0) }
 }
 
@@ -1572,36 +1650,107 @@ export async function recomputeDraftRegularRuns(tenantId: string): Promise<Recom
   return { recomputed, returnedToDraft, failed }
 }
 
-/**
- * #3 自動重算（2026-10-26）：某專案的合約額／追加減／成員趴數／獎金比例、或成本（放款付款、
- * 複委託付款）變動後呼叫。
+/* ──────────────────────────────────────────────────────────────────
+ * #3 自動重算排程（2026-10-26 驗收：非同步、合併、不拖慢寫入回應）
  *
- * 為什麼不是「只重算含這個案的批次」：批次的明細是整個租戶一起算的——專案第一次有成員、
- * 封存案封存後進了尾款，都會讓「本來不在批次裡的案」出現；只挑含該案的批次會漏。所以等同
- * recomputeDraftRegularRuns（租戶全部未發放 regular 批次），projectId 只用於 log／回報。
- * 一般租戶同時只有 0～1 批未發放，成本可以接受。永遠不丟例外（列批次失敗也包成 failed）。
- */
-export async function recomputeDraftRunsForProject(tenantId: string, projectId: string): Promise<RecomputeDraftRunsResult & { projectId: string }> {
+ * 寫入端（入帳、放款付款／作廢、複委託、合約、分潤設定、封存…）只「排程」重算，不等它跑完：
+ *   • 同一租戶在 DEBOUNCE_MS 內的多次觸發合併成一次（一個請求裡連續改好幾筆也只算一次）；
+ *   • 正在跑時又被觸發 → 跑完再補跑一次（不會漏掉最後那筆變動，也不會兩個重算同時寫同一批）；
+ *   • 失敗只 log（主流程早就回應了）。
+ * 為什麼可以非同步：發放前 payRun 會再用最新資料重算比對一次，排程晚幾百毫秒不會讓錯的金額被發出去。
+ * ────────────────────────────────────────────────────────────────── */
+
+const DEBOUNCE_MS = 200
+
+type TenantRecomputeState = {
+  timer: ReturnType<typeof setTimeout> | null
+  running: Promise<void> | null
+  again: boolean
+  contexts: Set<string>
+}
+const recomputeStates = new Map<string, TenantRecomputeState>()
+
+function stateOf(tenantId: string): TenantRecomputeState {
+  let st = recomputeStates.get(tenantId)
+  if (!st) {
+    st = { timer: null, running: null, again: false, contexts: new Set() }
+    recomputeStates.set(tenantId, st)
+  }
+  return st
+}
+
+function startRecompute(tenantId: string): void {
+  const st = stateOf(tenantId)
+  st.timer = null
+  const contexts = [...st.contexts]
+  st.contexts.clear()
+  st.running = (async () => {
+    try {
+      const res = await recomputeDraftRegularRuns(tenantId)
+      if (res.failed.length > 0) logger.warn({ tenantId, contexts, failed: res.failed }, "bonus recompute: 部分批次重算失敗（主流程已完成）")
+    } catch (err) {
+      logger.warn({ tenantId, contexts, err: err instanceof Error ? err.message : String(err) }, "bonus recompute: 重算失敗（主流程已完成）")
+    } finally {
+      st.running = null
+      if (st.again) {
+        st.again = false
+        scheduleBonusRecompute(tenantId, "（補跑）")
+      } else if (!st.timer) {
+        recomputeStates.delete(tenantId)
+      }
+    }
+  })()
+}
+
+/** 排程重算該租戶全部未發放 regular 批次；立刻返回、永不丟例外。 */
+export function scheduleBonusRecompute(tenantId: string, context: string): void {
   try {
-    const res = await recomputeDraftRegularRuns(tenantId)
-    return { projectId, ...res }
+    const st = stateOf(tenantId)
+    st.contexts.add(context)
+    if (st.running) {
+      st.again = true
+      return
+    }
+    if (st.timer) return
+    st.timer = setTimeout(() => startRecompute(tenantId), DEBOUNCE_MS)
+    st.timer.unref?.()
   } catch (err) {
-    return { projectId, recomputed: [], returnedToDraft: [], failed: [{ id: "*", error: err instanceof Error ? err.message : String(err) }] }
+    logger.warn({ tenantId, context, err: err instanceof Error ? err.message : String(err) }, "bonus recompute: 排程失敗")
+  }
+}
+
+/** 測試／關機用：等所有已排程與進行中的重算跑完（含補跑）。 */
+export async function flushBonusRecompute(): Promise<void> {
+  for (let guard = 0; guard < 50 && recomputeStates.size > 0; guard++) {
+    for (const [tenantId, st] of [...recomputeStates.entries()]) {
+      if (st.timer) {
+        clearTimeout(st.timer)
+        startRecompute(tenantId)
+      }
+      if (st.running) await st.running
+    }
   }
 }
 
 /**
- * 成本／入帳寫入端用的 best-effort 包裝：重算失敗只 log，永遠不丟例外、不改變主流程回應。
- * 回傳重算了哪些批次（呼叫端可放進回應）。
+ * #3 自動重算：某專案的合約額／追加減／成員趴數／獎金比例、成本或封存狀態變動後呼叫（P2 與成本寫入端）。
+ *
+ * 批次明細是整個租戶一起算的——專案第一次有成員、封存案還沒結清，都會讓「本來不在批次裡的案」出現；
+ * 只挑含該案的批次會漏。所以排程的是租戶全部未發放 regular 批次，projectId 只用於 log。
+ * **非同步**：立刻返回（recomputed 為空、scheduled=true），實際重算由排程合併執行。
  */
+export async function recomputeDraftRunsForProject(
+  tenantId: string,
+  projectId: string,
+): Promise<RecomputeDraftRunsResult & { projectId: string; scheduled: true }> {
+  scheduleBonusRecompute(tenantId, `project:${projectId}`)
+  return { projectId, recomputed: [], returnedToDraft: [], failed: [], scheduled: true }
+}
+
+/** 成本／入帳寫入端用：排程重算（非同步、永不丟例外），回空陣列（相容舊呼叫端）。 */
 export async function recomputeBonusRunsBestEffort(tenantId: string, projectIds: ReadonlyArray<string | null | undefined>, context: string): Promise<string[]> {
-  const ids = [...new Set(projectIds.filter((v): v is string => !!v))]
-  if (ids.length === 0) return []
-  const res = await recomputeDraftRunsForProject(tenantId, ids[0] as string)
-  if (res.failed.length > 0) {
-    console.warn(`[bonus-recompute] ${context}: ${res.failed.length} 批重算失敗`, res.failed)
-  }
-  return res.recomputed
+  if (projectIds.some((v) => !!v)) scheduleBonusRecompute(tenantId, context)
+  return []
 }
 
 /* ──────────────────────────────────────────────────────────────────

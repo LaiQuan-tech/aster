@@ -316,6 +316,7 @@ export default function BonusRunDetailPage() {
           <p className="text-sm text-gray-600">
             送審 {run.submittedAt ? new Date(run.submittedAt).toLocaleString("zh-TW") : "—"}
             {isApproved && run.approvedAt ? `　核准 ${new Date(run.approvedAt).toLocaleString("zh-TW")}` : ""}
+            {isApproved && run.selfApproved ? "（送審人與核准人相同）" : ""}
             。入帳、成本或分潤設定變動時系統會自動重算；金額一變就退回草稿，需要重新送審。
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
