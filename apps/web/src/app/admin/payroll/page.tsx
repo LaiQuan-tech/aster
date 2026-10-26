@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useId, useMemo, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { Button, Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import {
   getSalaryStructure,
   putSalaryStructure,
@@ -400,16 +400,13 @@ export default function PayrollAdminPage() {
               <div>
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
                   <h3 className="text-sm font-medium text-gray-600">健保眷屬投保資料</h3>
-                  <button
+                  <Button variant="secondary" size="sm"
                     type="button"
                     onClick={() => setShowNhiForm((open) => !open)}
                     aria-expanded={showNhiForm}
-                    aria-controls={nhiPanelId}
-                    className="text-sm font-medium"
-                    style={{ color: "var(--brand)" }}
-                  >
+                    aria-controls={nhiPanelId}>
                     {showNhiForm ? "收合" : "＋ 新增健保眷屬"}
-                  </button>
+                  </Button>
                 </div>
                 {/* hidden 掛在不帶 display 類別的外層 div（form 本身是 grid，直接掛會被蓋掉）。 */}
                 <div id={nhiPanelId} hidden={!showNhiForm}>
@@ -455,16 +452,13 @@ export default function PayrollAdminPage() {
               <div>
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
                   <h3 className="text-sm font-medium text-gray-600">所得稅扶養親屬資料</h3>
-                  <button
+                  <Button variant="secondary" size="sm"
                     type="button"
                     onClick={() => setShowTaxForm((open) => !open)}
                     aria-expanded={showTaxForm}
-                    aria-controls={taxPanelId}
-                    className="text-sm font-medium"
-                    style={{ color: "var(--brand)" }}
-                  >
+                    aria-controls={taxPanelId}>
                     {showTaxForm ? "收合" : "＋ 新增扶養親屬"}
-                  </button>
+                  </Button>
                 </div>
                 <div id={taxPanelId} hidden={!showTaxForm}>
                   <form

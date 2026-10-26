@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Card, Empty, ErrorText, PrimaryButton, Segmented, inputCls, labelCls } from "@/components/admin-ui";
+import { Button, Card, Empty, ErrorText, PrimaryButton, Segmented, inputCls, labelCls } from "@/components/admin-ui";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { KpiScoreForm } from "@/components/KpiScoreForm";
 import { getEmployees, type Employee } from "@/lib/admin-api";
@@ -215,8 +215,8 @@ function TemplatesTab({ templates, reload, onError }: { templates: KpiTemplate[]
           <div className="mt-3 flex flex-wrap items-center gap-3">
             <button type="button" onClick={() => setItems((a) => [...a, emptyItem()])} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700">＋ 項目</button>
             <span className={`text-sm ${weightSum === 100 ? "text-gray-500" : "text-amber-700"}`}>權重合計 {weightSum}{weightSum !== 100 && "（慣例 100，總分才是 0–100）"}</span>
+            <Button type="button" variant="secondary" className="md:min-h-10" onClick={() => setEditing(null)}>取消</Button>
             <PrimaryButton type="button" onClick={() => void save()} disabled={busy || !valid}>{busy ? "儲存中…" : "儲存"}</PrimaryButton>
-            <button type="button" onClick={() => setEditing(null)} className="text-sm text-gray-500 hover:underline">取消</button>
           </div>
         </Card>
       )}

@@ -6,7 +6,7 @@
  * 篩選：資料表（多選）／動作／操作者／日期範圍／關鍵字；列可展開看欄位前後值；keyset 翻頁。
  */
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import { AuditActionBadge, AuditDiffTable, actorLabel } from "@/components/AuditDrawer";
 import { getEmployees, type Employee } from "@/lib/admin-api";
 import {
@@ -244,12 +244,8 @@ export default function AuditLogsPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            <PrimaryButton type="submit" disabled={loading}>
-              查詢
-            </PrimaryButton>
-            <button type="button" onClick={onReset} className="text-sm text-gray-500 hover:underline">
-              清除條件
-            </button>
+            <Button type="button" variant="secondary" className="md:min-h-10" onClick={onReset}>清除條件</Button>
+            <PrimaryButton type="submit" disabled={loading}>查詢</PrimaryButton>
           </div>
         </form>
       </Card>

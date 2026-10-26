@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { Card, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Button, Card, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import { statusLabel } from "@/lib/projects-api";
 import {
   duplicateProject,
@@ -323,9 +323,7 @@ export function DuplicateProjectDialog({ open, project, onClose, onDone }: Dupli
         <ErrorText>{error}</ErrorText>
 
         <div className="mt-5 flex flex-wrap items-center justify-end gap-3">
-          <button type="button" onClick={onClose} className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50" disabled={saving}>
-            取消
-          </button>
+          <Button type="button" variant="secondary" onClick={onClose} disabled={saving} className="md:min-h-10">取消</Button>
           <PrimaryButton type="submit" disabled={!canSubmit}>{saving ? "複製中…" : "建立新案"}</PrimaryButton>
         </div>
       </form>

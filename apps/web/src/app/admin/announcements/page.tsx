@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { Card, PrimaryButton, ErrorText, Empty, Pill, Segmented, inputCls, labelCls } from "@/components/admin-ui";
+import { Button, Card, PrimaryButton, ErrorText, Empty, Pill, Segmented, inputCls, labelCls } from "@/components/admin-ui";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { updateAnnouncement, deleteAnnouncement } from "@/lib/admin-api";
 import {
@@ -250,19 +250,8 @@ export default function AnnouncementsPage() {
                           onChange={(e) => setEditBody(e.target.value)}
                         />
                         <div className="flex gap-2">
-                          <button
-                            onClick={() => saveEdit(a.id)}
-                            className="text-sm font-medium"
-                            style={{ color: "var(--brand)" }}
-                          >
-                            儲存
-                          </button>
-                          <button
-                            onClick={() => setEditingId(null)}
-                            className="text-sm text-gray-500 hover:underline"
-                          >
-                            取消
-                          </button>
+                          <Button variant="secondary" size="sm" onClick={() => setEditingId(null)}>取消</Button>
+<Button size="sm" onClick={() => saveEdit(a.id)}>儲存</Button>
                         </div>
                       </div>
                     ) : (

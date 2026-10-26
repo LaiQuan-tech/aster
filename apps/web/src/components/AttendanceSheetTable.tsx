@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { Button } from "@/components/ess-ui";
 import { fmtHm } from "@/lib/ess-format";
 import { formatLeaveDurationMinutes, reformatLeaveSummary } from "@/lib/leave-duration";
 import {
@@ -586,29 +587,12 @@ function OverridePopover({
       />
       {err && <p className="mb-2 text-red-600">{err}</p>}
       <div className="flex items-center justify-between gap-2">
-        <button type="button" onClick={onClose} className="text-gray-500 hover:underline">
-          取消
-        </button>
+        <Button type="button" variant="secondary" size="sm" onClick={onClose}>取消</Button>
         <div className="flex gap-2">
           {day.overtime.override != null && (
-            <button
-              type="button"
-              onClick={() => void clearOverride()}
-              disabled={busy}
-              className="text-amber-600 hover:underline disabled:opacity-50"
-            >
-              清除覆寫
-            </button>
+            <Button type="button" variant="secondary" size="sm" onClick={() => void clearOverride()} disabled={busy}>清除覆寫</Button>
           )}
-          <button
-            type="button"
-            onClick={() => void save()}
-            disabled={busy || !canSave}
-            className="rounded px-2 py-1 font-medium text-white disabled:opacity-50"
-            style={{ backgroundColor: "var(--brand)" }}
-          >
-            儲存
-          </button>
+          <Button type="button" size="sm" onClick={() => void save()} disabled={busy || !canSave}>儲存</Button>
         </div>
       </div>
     </div>

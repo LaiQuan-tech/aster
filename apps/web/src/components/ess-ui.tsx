@@ -85,7 +85,7 @@ const BUTTON_VARIANT: Record<ButtonVariant, string> = {
 };
 
 const BUTTON_SIZE: Record<ButtonSize, string> = {
-  sm: "min-h-9 px-3 text-sm",
+  sm: "min-h-9 px-4 text-sm",
   md: "min-h-11 px-4 text-sm",
   lg: "min-h-12 px-5 text-base",
 };

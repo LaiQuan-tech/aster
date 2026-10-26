@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, EmptyState, InlineError, PrimaryButton, Skeleton, inputCls, labelCls, useToast } from "@/components/admin-ui";
+import { Button, Card, EmptyState, InlineError, PrimaryButton, Skeleton, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
 import {
   createDepartment,
@@ -226,8 +226,8 @@ export default function DepartmentsPage() {
                               />
                             </div>
                             <div className="flex items-center gap-3">
-                              <button onClick={() => void saveEdit(department.id)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>儲存</button>
-                              <button onClick={() => setEditingId(null)} className="text-sm text-gray-500 hover:underline">取消</button>
+                              <Button variant="secondary" size="sm" onClick={() => setEditingId(null)}>取消</Button>
+                              <Button size="sm" onClick={() => void saveEdit(department.id)}>儲存</Button>
                             </div>
                           </div>
                         </td>

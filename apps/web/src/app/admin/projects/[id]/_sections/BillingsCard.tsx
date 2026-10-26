@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment } from "react";
-import { Card, PrimaryButton, ErrorText, inputCls } from "@/components/admin-ui";
+import { Button, Card, PrimaryButton, ErrorText, inputCls } from "@/components/admin-ui";
 import {
   saveBillingSchedule,
   billInstallmentExt,
@@ -392,8 +392,8 @@ export function BillingsCard({
                             <span className="flex flex-wrap items-center gap-1.5">
                               <input className="w-28 rounded border border-gray-300 px-1.5 py-0.5" placeholder="發票號碼" value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} />
                               <input className="rounded border border-gray-300 px-1.5 py-0.5" type="date" value={invoicedOn} onChange={(e) => setInvoicedOn(e.target.value)} />
-                              <button type="button" className="rounded bg-gray-700 px-2 py-0.5 text-white" onClick={() => submitInvoice(saved.id)}>確認</button>
-                              <button type="button" className="text-gray-400" onClick={() => setInvoiceFormId(null)}>取消</button>
+                              <Button type="button" variant="secondary" size="sm" onClick={() => setInvoiceFormId(null)}>取消</Button>
+                              <Button type="button" size="sm" onClick={() => submitInvoice(saved.id)}>確認</Button>
                             </span>
                           ) : (
                             <button
@@ -425,8 +425,8 @@ export function BillingsCard({
                                   onChange={(e) => setReceivedAmount(e.target.value)}
                                 />
                               </label>
-                              <button type="button" className="rounded bg-gray-700 px-2 py-0.5 text-white" onClick={() => submitReceive(saved.id)}>確認</button>
-                              <button type="button" className="text-gray-400" onClick={() => setReceiveFormId(null)}>取消</button>
+                              <Button type="button" variant="secondary" size="sm" onClick={() => setReceiveFormId(null)}>取消</Button>
+                              <Button type="button" size="sm" onClick={() => submitReceive(saved.id)}>確認</Button>
                               <span className="basis-full text-[11px] text-amber-700">{RECEIVED_AMOUNT_HINT}</span>
                             </span>
                           ) : (

@@ -5,6 +5,7 @@
  * 掛在員工列表每列的「異動紀錄」、匯款單頁首等處；資料來自 GET /audit-logs。
  */
 import { useCallback, useEffect, useState } from "react";
+import { Button } from "@/components/ess-ui";
 import {
   AUDIT_ACTION_LABELS,
   formatAuditTime,
@@ -134,9 +135,7 @@ export default function AuditDrawer({
             <h2 className="text-base font-bold text-gray-900">{title}</h2>
             <p className="mt-0.5 text-xs text-gray-500">由資料庫層自動記錄，無法修改或刪除。最新的在最上面。</p>
           </div>
-          <button type="button" onClick={onClose} className="text-sm text-gray-500 hover:underline">
-            關閉
-          </button>
+          <Button type="button" variant="secondary" size="sm" onClick={onClose}>關閉</Button>
         </header>
 
         <div className="flex-1 overflow-y-auto px-5 py-4">

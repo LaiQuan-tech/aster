@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, InlineError } from "@/components/ess-ui";
+import { Button, Card, InlineError } from "@/components/ess-ui";
 import { getMeCached } from "@/lib/ess-state";
 import {
   getProfile,
@@ -179,13 +179,7 @@ function ProfileFieldsForm({
         ))}
       </div>
       <div className="flex items-center gap-3">
-        <button
-          type="submit"
-          className="rounded-md px-4 py-2 text-sm font-medium text-white"
-          style={{ backgroundColor: "var(--brand)" }}
-        >
-          儲存
-        </button>
+        <Button type="submit">儲存</Button>
         {msg && <span className="text-sm text-green-600">{msg}</span>}
       </div>
     </form>
@@ -436,9 +430,9 @@ export default function MyDataPage() {
               <div>
                 <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <h3 className="font-semibold text-gray-800">學歷資料</h3>
-                  <button onClick={() => setShowEduForm((s) => !s)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
+                  <Button variant="secondary" size="sm" onClick={() => setShowEduForm((s) => !s)}>
                     {showEduForm ? "收合" : "＋ 新增學歷"}
-                  </button>
+                  </Button>
                 </div>
                 {showEduForm && (
                   <form onSubmit={submitEdu} className="mb-4 space-y-3 rounded-lg bg-gray-50 p-4">
@@ -496,9 +490,7 @@ export default function MyDataPage() {
                       <input type="checkbox" checked={edu.isHighest} onChange={(e) => setEdu({ ...edu, isHighest: e.target.checked })} />
                       最高學歷
                     </label>
-                    <button type="submit" className="rounded-md px-4 py-2 text-sm font-medium text-white" style={{ backgroundColor: "var(--brand)" }}>
-                      新增
-                    </button>
+                    <Button type="submit">新增</Button>
                   </form>
                 )}
                 <ul className="divide-y divide-gray-100">
@@ -528,9 +520,9 @@ export default function MyDataPage() {
               <div>
                 <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <h3 className="font-semibold text-gray-800">證照資料</h3>
-                  <button onClick={() => setShowCertForm((s) => !s)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
+                  <Button variant="secondary" size="sm" onClick={() => setShowCertForm((s) => !s)}>
                     {showCertForm ? "收合" : "＋ 新增證照"}
-                  </button>
+                  </Button>
                 </div>
                 {showCertForm && (
                   <form onSubmit={submitCert} className="mb-4 space-y-3 rounded-lg bg-gray-50 p-4">
@@ -556,9 +548,7 @@ export default function MyDataPage() {
                         <input type="file" className={input} onChange={(e) => setCertAttachmentFile(e.target.files?.[0] ?? null)} />
                       </div>
                     </div>
-                    <button type="submit" className="rounded-md px-4 py-2 text-sm font-medium text-white" style={{ backgroundColor: "var(--brand)" }}>
-                      新增
-                    </button>
+                    <Button type="submit">新增</Button>
                   </form>
                 )}
                 <ul className="divide-y divide-gray-100">
@@ -593,9 +583,9 @@ export default function MyDataPage() {
             <div>
               <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <h3 className="font-semibold text-gray-800">工作經歷</h3>
-                <button onClick={() => setShowWorkForm((s) => !s)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
+                <Button variant="secondary" size="sm" onClick={() => setShowWorkForm((s) => !s)}>
                   {showWorkForm ? "收合" : "＋ 新增經歷"}
-                </button>
+                </Button>
               </div>
               {showWorkForm && (
                 <form onSubmit={submitWork} className="mb-4 space-y-3 rounded-lg bg-gray-50 p-4">
@@ -621,9 +611,7 @@ export default function MyDataPage() {
                       <textarea className={input} rows={3} value={work.description} onChange={(e) => setWork({ ...work, description: e.target.value })} />
                     </div>
                   </div>
-                  <button type="submit" className="rounded-md px-4 py-2 text-sm font-medium text-white" style={{ backgroundColor: "var(--brand)" }}>
-                    新增
-                  </button>
+                  <Button type="submit">新增</Button>
                 </form>
               )}
               <ul className="divide-y divide-gray-100">

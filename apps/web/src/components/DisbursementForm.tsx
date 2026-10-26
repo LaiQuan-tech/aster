@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { inputCls, labelCls, PrimaryButton, ErrorText } from "@/components/admin-ui";
+import { Button, inputCls, labelCls, PrimaryButton, ErrorText } from "@/components/admin-ui";
 import { vendorOptionLabel, type Vendor } from "@/lib/company-api";
 import { companyOptions } from "@/lib/company-options";
 import type { Company } from "@/lib/projects-ext-api";
@@ -346,8 +346,8 @@ export default function DisbursementForm({
         </div>
         <ErrorText>{error ?? localError}</ErrorText>
         <div className="flex items-center gap-3">
+          {onCancel && <Button type="button" variant="secondary" className="md:min-h-10" onClick={onCancel}>取消</Button>}
           <PrimaryButton onClick={handleSubmit} disabled={busy}>{busy ? "處理中…" : submitLabel}</PrimaryButton>
-          {onCancel && <button type="button" onClick={onCancel} className="text-sm text-gray-500 hover:underline">取消</button>}
         </div>
       </div>
     );
@@ -616,8 +616,8 @@ export default function DisbursementForm({
 
       <ErrorText>{error ?? localError}</ErrorText>
       <div className="flex items-center gap-3">
+        {onCancel && <Button type="button" variant="secondary" className="md:min-h-10" onClick={onCancel}>取消</Button>}
         <PrimaryButton onClick={handleSubmit} disabled={busy || !canSubmit}>{busy ? "處理中…" : submitLabel}</PrimaryButton>
-        {onCancel && <button type="button" onClick={onCancel} className="text-sm text-gray-500 hover:underline">取消</button>}
       </div>
     </div>
   );

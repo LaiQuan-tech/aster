@@ -1,6 +1,6 @@
 "use client";
 
-import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import { VendorCombo } from "@/components/VendorCombo";
 import type { Vendor } from "@/lib/company-api";
 import { companyOptions } from "@/lib/company-options";
@@ -242,7 +242,7 @@ export function ApplicationFieldsCard({
       <div className="mt-4 border-t pt-4">
         <div className="mb-2 flex items-center justify-between">
           <label className={labelCls}>科別與服務項目</label>
-          <button type="button" className="text-xs text-gray-500 hover:underline" onClick={addScopeRow}>＋ 新增一列</button>
+          <Button type="button" variant="secondary" size="sm" onClick={addScopeRow}>＋ 新增一列</Button>
         </div>
         {appForm.designScope.length === 0 ? (
           <Empty>尚未填寫</Empty>

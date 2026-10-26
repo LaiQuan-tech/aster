@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import {
+import { Button,
   Card,
   PrimaryButton,
   ErrorText,
@@ -532,16 +532,13 @@ function SheetUploader({
 
   return (
     <div className="border-t border-gray-200 pt-4">
-      <button
+      <Button variant="secondary" size="sm"
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        aria-controls={panelId}
-        className="text-sm font-medium"
-        style={{ color: "var(--brand)" }}
-      >
+        aria-controls={panelId}>
         {open ? "收合" : "＋ 新增一份掃描檔"}
-      </button>
+      </Button>
       <div id={panelId} hidden={!open} className="mt-3">
         <form onSubmit={onSubmit} className="space-y-3 rounded-xl bg-slate-50 p-3">
           <div className="grid gap-4 md:grid-cols-2">

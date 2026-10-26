@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Card, Empty, ErrorText, Pill, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Button, Card, Empty, ErrorText, Pill, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import {
   listClients, createClient, updateClient, deleteClient, humanizeClientError,
   INVOICE_TYPE_LABELS, PAYMENT_METHOD_LABELS,
@@ -296,8 +296,8 @@ export default function ClientsPage() {
             </div>
           </div>
           <div className="mt-3 flex items-center gap-3">
+            <Button type="button" variant="secondary" className="md:min-h-10" onClick={() => setEditing(null)}>取消</Button>
             <PrimaryButton type="button" onClick={() => void save()} disabled={busy || !form.name.trim()}>{busy ? "處理中…" : editing === "new" ? "新增客戶" : "儲存"}</PrimaryButton>
-            <button type="button" onClick={() => setEditing(null)} className="text-sm text-gray-500 hover:underline">取消</button>
           </div>
         </Card>
       )}

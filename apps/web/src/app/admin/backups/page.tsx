@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { Button, Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { MonthPicker } from "@/components/MonthPicker";
 import {
   listBackups,
@@ -521,9 +521,7 @@ function RowsViewer({ target, onClose }: { target: ViewerTarget; onClose: () => 
             {page ? `共 ${page.total.toLocaleString()} 列，目前顯示第 ${page.offset + 1}–${page.offset + page.rows.length} 列` : "載入中…"}
           </p>
         </div>
-        <button type="button" onClick={onClose} className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700">
-          關閉
-        </button>
+        <Button type="button" variant="secondary" size="sm" onClick={onClose}>關閉</Button>
       </div>
 
       {error ? (

@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Card, Empty, ErrorText, Pill, PrimaryButton, inputCls, labelCls, useToast } from "@/components/admin-ui";
+import { Button, Card, Empty, ErrorText, Pill, PrimaryButton, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import { buildRemittanceText, copyText } from "@/lib/remittance";
 import { getMeCached, peekMeCached } from "@/lib/ess-state";
 import { isHrRole } from "@/lib/roles";
@@ -316,8 +316,8 @@ export default function VendorsPage() {
             </div>
           </div>
           <div className="mt-3 flex items-center gap-3">
+            <Button type="button" variant="secondary" className="md:min-h-10" onClick={() => setEditing(null)}>取消</Button>
             <PrimaryButton type="button" onClick={() => void save()} disabled={busy || !form.name.trim()}>{busy ? "處理中…" : editing === "new" ? "新增廠商" : "儲存"}</PrimaryButton>
-            <button type="button" onClick={() => setEditing(null)} className="text-sm text-gray-500 hover:underline">取消</button>
           </div>
         </Card>
       )}

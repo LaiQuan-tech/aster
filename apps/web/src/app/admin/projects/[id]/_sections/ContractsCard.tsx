@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useId, type RefObject } from "react";
-import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   uploadProjectDocument,
   CONTRACT_SCAN_ACCEPT,
@@ -404,10 +404,8 @@ export function ContractsCard({
                               onChange={(e) => setNoteDrafts((drafts) => ({ ...drafts, [c.id]: e.target.value }))}
                             />
                             <div className="mt-2 flex items-center gap-3">
+                              <Button type="button" variant="secondary" className="md:min-h-10" onClick={() => cancelNote(c)}>取消</Button>
                               <PrimaryButton onClick={() => saveNote(c)}>儲存內容</PrimaryButton>
-                              <button type="button" className="text-sm text-gray-500 hover:underline" onClick={() => cancelNote(c)}>
-                                取消
-                              </button>
                               <span className="ml-auto text-xs text-gray-400">{noteDrafts[c.id].length}/2000</span>
                             </div>
                           </div>
@@ -443,16 +441,13 @@ export function ContractsCard({
       />
 
       <div className="mt-4 border-t pt-4">
-        <button
+        <Button variant="secondary" size="sm"
           type="button"
           onClick={() => setShowAddForm((open) => !open)}
           aria-expanded={showAddForm}
-          aria-controls={addPanelId}
-          className="text-sm font-medium"
-          style={{ color: "var(--brand)" }}
-        >
+          aria-controls={addPanelId}>
           {showAddForm ? "收合" : "＋ 新增文件"}
-        </button>
+        </Button>
         {/* 預設收起；收合只是 hidden、不卸載。送出成功後照舊清空欄位但維持展開，方便連續新增。 */}
         <div id={addPanelId} hidden={!showAddForm} className="mt-3 rounded-xl bg-slate-50 p-3">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">

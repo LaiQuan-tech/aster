@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
 import {
   getLeaveTypes,
@@ -392,12 +392,8 @@ export default function LeaveTypesPage() {
                       </label>
                     </div>
                     <div className="flex shrink-0 gap-2">
-                      <button onClick={() => saveEdit(lt.id)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
-                        儲存
-                      </button>
-                      <button onClick={() => setEditingId(null)} className="text-sm text-gray-500 hover:underline">
-                        取消
-                      </button>
+                      <Button variant="secondary" size="sm" onClick={() => setEditingId(null)}>取消</Button>
+                      <Button size="sm" onClick={() => saveEdit(lt.id)}>儲存</Button>
                     </div>
                   </>
                 ) : (
@@ -471,13 +467,7 @@ export default function LeaveTypesPage() {
                     <h3 className="font-medium text-gray-800">{label}</h3>
                     {hint && <p className="mt-0.5 text-xs text-gray-400">{hint}</p>}
                   </div>
-                  <button
-                    onClick={() => saveFlow(kind)}
-                    className="text-sm font-medium"
-                    style={{ color: "var(--brand)" }}
-                  >
-                    儲存
-                  </button>
+                  <Button size="sm" onClick={() => saveFlow(kind)}>儲存</Button>
                 </div>
                 <fieldset className="mb-3">
                   <legend className="mb-1 text-xs font-medium text-gray-500">簽核模式</legend>

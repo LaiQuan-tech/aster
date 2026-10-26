@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
+import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
 import {
   getShifts,
@@ -243,19 +243,8 @@ export default function ShiftsPage() {
                   <div className="space-y-3">
                     {fields(editDraft, setEditDraft)}
                     <div className="flex gap-2">
-                      <button
-                        onClick={() => saveEdit(s.id)}
-                        className="text-sm font-medium"
-                        style={{ color: "var(--brand)" }}
-                      >
-                        儲存
-                      </button>
-                      <button
-                        onClick={() => setEditingId(null)}
-                        className="text-sm text-gray-500 hover:underline"
-                      >
-                        取消
-                      </button>
+                      <Button variant="secondary" size="sm" onClick={() => setEditingId(null)}>取消</Button>
+<Button size="sm" onClick={() => saveEdit(s.id)}>儲存</Button>
                     </div>
                   </div>
                 ) : (

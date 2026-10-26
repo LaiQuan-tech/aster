@@ -2,7 +2,7 @@
 
 import { Fragment, useMemo, useState } from "react";
 import Link from "next/link";
-import { Card, PrimaryButton, ErrorText, Empty, inputCls } from "@/components/admin-ui";
+import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls } from "@/components/admin-ui";
 import { VendorCombo } from "@/components/VendorCombo";
 import type { Vendor } from "@/lib/company-api";
 import { companyOptions } from "@/lib/company-options";
@@ -460,7 +460,7 @@ export function SubcontractsCard({
                           </table>
                         </div>
                         <div className="mt-2 flex items-center gap-3">
-                          <button type="button" className="text-xs text-gray-500 hover:underline" onClick={() => addPaymentRow(row.id as string)}>＋ 新增一期</button>
+                          <Button type="button" variant="secondary" className="md:min-h-10" onClick={() => addPaymentRow(row.id as string)}>＋ 新增一期</Button>
                           <PrimaryButton type="button" onClick={() => saveSubcontractPayments(row.id as string)} disabled={savingPayments === row.id}>
                             {savingPayments === row.id ? "儲存中…" : "儲存期款"}
                           </PrimaryButton>

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Button, Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import { ExcludedArchivedList, GrossProfitTable, ItemsTable, SkippedList, Stat, StatusBadge, WarningsList } from "./_components";
 import {
   createBonusRun,
@@ -280,9 +280,7 @@ export default function BonusRunsPage() {
           <div className="my-6 w-full max-w-5xl rounded-2xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
             <div className="mb-3 flex items-center justify-between">
               <h3 className="text-lg font-semibold text-gray-900">新增季批次</h3>
-              <button type="button" className="text-sm text-gray-500 hover:text-gray-700" onClick={() => setShowCreate(false)} disabled={creating}>
-                關閉
-              </button>
+              <Button type="button" variant="secondary" size="sm" onClick={() => setShowCreate(false)} disabled={creating}>關閉</Button>
             </div>
             <div className="grid gap-3 md:grid-cols-3">
               <div>

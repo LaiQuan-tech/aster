@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { ClientCombo } from "@/components/ClientCombo";
 import { VendorCombo } from "@/components/VendorCombo";
-import { ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Button, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import type { Department, Employee } from "@/lib/admin-api";
 import type { Vendor } from "@/lib/company-api";
 import { companyOptions, isCompanyActive } from "@/lib/company-options";
@@ -206,7 +206,7 @@ export function ProjectApplicationForm({
         <div className="mt-4">
           <div className="mb-2 flex items-center justify-between">
             <label className={labelCls}>設計內容（科別／服務項目）</label>
-            <button type="button" className="text-sm text-[#1f4f7a]" onClick={() => patch("designScope", [...draft.designScope, { discipline: "", item: "", amount: "" }])}>＋ 新增一列</button>
+            <Button type="button" variant="secondary" size="sm" onClick={() => patch("designScope", [...draft.designScope, { discipline: "", item: "", amount: "" }])}>＋ 新增一列</Button>
           </div>
           <div className="space-y-2">
             {draft.designScope.map((row, index) => (
