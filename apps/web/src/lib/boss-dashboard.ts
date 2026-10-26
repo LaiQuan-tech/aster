@@ -3,9 +3,11 @@
  * 全部無 React、無 IO，有 vitest（lib/__tests__/boss-dashboard.test.ts）。
  *
  * 2026-10-25 業主說舊版「太複雜」→ 首頁只剩兩塊（老闆 10 秒看懂）：
- *   1. 頂部 4 個大數字（headlineTiles）：本年收入（會計改本月放款支出）／待簽核／未收款／在職人數（會計改本月出勤異常）。
- *   2. 「需要你處理」清單（todoItems）：只列數量 > 0 的項目，一行一項。
- * 資料：GET /dashboard/boss-summary（全部角色）＋ GET /group-overview（僅 HR／平台管理員，只取本年收入與毛利率）。
+ *   1. 頂部 4 個大數字（headlineTiles）：依版本（homeViewerOf，2026-10-26 老闆與一般 HR 分開）——
+ *      可看集團財務：本年收入／待簽核／未收款／在職人數；一般 HR：待簽核／本月出勤異常／未收款／在職人數；
+ *      會計：本月放款支出／待簽核／未收款／本月出勤異常。
+ *   2. 「需要你處理」清單（todoItems）：只列數量 > 0 的項目，一行一項；老闆多兩項專屬待辦（獎金批次待核准、遲到說明待決定）放最前。
+ * 資料：GET /dashboard/boss-summary（全部角色）＋ GET /group-overview（僅可看集團財務者，只取本年收入與毛利率）。
  * 每格各自降級：讀不到就顯示「—」不擋其他格；boss-summary 404（API 舊版）時待簽核退回只算假單。
  */
 import { ADMIN_TABS, isModuleEnabled, resolveAdminPath, type AdminModulesConfig } from "./admin-nav";
@@ -75,6 +77,11 @@ export const bossLinks = {
   /** 待發加班另計是「所有月份」的草稿合計 → 另計頁開「未付款＋所有月份」。 */
   overtimeDrafts: "/admin/overtime-settlements?status=draft&all=1",
   employees: "/admin/employees",
+  /** 老闆專屬：獎金批次列表（老闆在批次頁核准）；角色開不了後台那頁時改連 ESS 簽核頁。 */
+  bonusRuns: "/admin/bonus-runs",
+  /** 老闆專屬：遲到說明（老闆在這頁決定是否影響全勤）；開不了時改連 ESS 簽核頁。 */
+  lateReports: "/admin/late-reports",
+  essApprovals: "/ess/approvals",
 } as const;
 
 /* ------------------------------------------------------- 頂部大數字 --- */
@@ -95,7 +102,35 @@ export interface HeadlineTile {
   tone: Tone;
 }
 
-export type HomeViewer = "group" | "finance";
+/**
+ * 首頁版本（2026-10-26 業主：老闆與一般 HR 分開）：
+ *   • group＝可看集團財務（老闆、看得到集團財務的 HR、平台管理員）：本年收入／待簽核／未收款／在職人數；
+ *   • hr＝一般 HR（看不到集團財務）：待簽核／本月出勤異常／未收款／在職人數——不顯示收入、毛利率，也不打 /group-overview；
+ *   • finance＝會計（維持現狀）：本月放款支出／待簽核／未收款／本月出勤異常。
+ * 老闆專屬待辦不看版本，看 summary.scope.isBoss（todoItems）。
+ */
+export type HomeViewer = "group" | "hr" | "finance";
+
+/**
+ * 決定首頁版本。可不可以看集團財務：先看 /me.canSeeGroupFinancials（最早知道，收入那格不用等 boss-summary），
+ * 沒有就看 boss-summary 的 scope.groupFinancials；兩個都還沒有 → null（畫骨架、先不打 /group-overview）。
+ * 舊 API（boss-summary 404、或 scope 沒有 groupFinancials 欄）／boss-summary 失敗 → 退回舊判斷（HR／平台管理員＝可看）。
+ * 會計（及其他非 HR 角色）一律 finance。
+ */
+export function homeViewerOf(input: {
+  role: string | null | undefined;
+  /** /me.canSeeGroupFinancials；舊 API 沒有 → undefined。 */
+  canSeeGroupFinancials: boolean | null | undefined;
+  summary: SummaryLoad;
+}): HomeViewer | null {
+  const { role, canSeeGroupFinancials, summary } = input;
+  if (role !== "hr_admin" && role !== "platform_admin") return "finance";
+  if (typeof canSeeGroupFinancials === "boolean") return canSeeGroupFinancials ? "group" : "hr";
+  const fromSummary = summary.data?.scope.groupFinancials;
+  if (typeof fromSummary === "boolean") return fromSummary ? "group" : "hr";
+  if (summary.loading) return null;
+  return "group";
+}
 
 /** 有實際營運的公司家數（停用且整年沒數字的不算、被排除的不算）。 */
 export function activeCompanyCount(overview: GroupOverviewLite): number {
@@ -105,13 +140,13 @@ export function activeCompanyCount(overview: GroupOverviewLite): number {
 type ScopeKey = keyof BossSummary["scope"];
 
 /**
- * 頂部大數字（最多 4 格，順序固定）。viewer：group＝HR／平台管理員（本年收入、在職人數）；finance＝會計
- * （本月放款支出、本月出勤異常——會計看不到集團與人事）。
+ * 頂部大數字（最多 4 格，順序依版本固定，見 HomeViewer）。
  * 格子要不要畫：boss-summary 回來後看 scope（false＝這個角色沒權限 → 不畫）；還沒回來／失敗／舊 API → 看角色開不開得了那一頁。
  */
 export function headlineTiles(input: {
   viewer: HomeViewer;
   summary: SummaryLoad;
+  /** 只有 group 版會用到（其他版本不打 /group-overview）。 */
   overview: Load<GroupOverviewLite>;
   /** boss-summary 404 時退回的待簽假單數。 */
   pendingLeave: Load<number>;
@@ -122,127 +157,120 @@ export function headlineTiles(input: {
   const href = (path: string, gate = path) => (linkOn(gate) ? path : null);
   const visible = (key: ScopeKey, gate: string) => (s ? s.scope[key] !== false : linkOn(gate));
   const tile = (t: Omit<HeadlineTile, "note"> & { note?: string | null }): HeadlineTile => ({ note: null, ...t });
-  const tiles: HeadlineTile[] = [];
 
-  // 1. 本年收入（HR）／本月放款支出（會計）
-  if (viewer === "group") {
+  const revenue = (): HeadlineTile | null => {
     const o = overview.error ? null : overview.data;
     const n = o ? activeCompanyCount(o) : 0;
-    tiles.push(
-      tile({
-        key: "revenue",
-        label: "本年收入",
-        loading: overview.loading,
-        value: fmtWan(o?.group.revenue),
-        sub: o ? `毛利率 ${fmtPct1(o.group.grossMarginPct)}` : null,
-        note: n > 1 ? `${n} 家公司・點看各公司` : null,
-        href: href(bossLinks.groupOverview),
-        tone: "normal",
-      }),
-    );
-  } else if (visible("monthDisbursements", bossLinks.disbursements)) {
-    const d = s?.monthDisbursements ?? null;
-    tiles.push(
-      tile({
-        key: "monthDisbursements",
-        label: "本月放款支出",
-        loading: summary.loading,
-        value: fmtWan(d?.amount),
-        sub: d ? `${fmtCount(d.count)} 筆已匯款` : null,
-        href: href(bossLinks.disbursements),
-        tone: "normal",
-      }),
-    );
-  }
+    return tile({
+      key: "revenue",
+      label: "本年收入",
+      loading: overview.loading,
+      value: fmtWan(o?.group.revenue),
+      sub: o ? `毛利率 ${fmtPct1(o.group.grossMarginPct)}` : null,
+      note: n > 1 ? `${n} 家公司・點看各公司` : null,
+      href: href(bossLinks.groupOverview),
+      tone: "normal",
+    });
+  };
 
-  // 2. 待簽核（假單＋放款）
-  if (summary.outdated) {
-    if (linkOn(bossLinks.leaveApprovals)) {
+  const monthDisbursements = (): HeadlineTile | null => {
+    if (!visible("monthDisbursements", bossLinks.disbursements)) return null;
+    const d = s?.monthDisbursements ?? null;
+    return tile({
+      key: "monthDisbursements",
+      label: "本月放款支出",
+      loading: summary.loading,
+      value: fmtWan(d?.amount),
+      sub: d ? `${fmtCount(d.count)} 筆已匯款` : null,
+      href: href(bossLinks.disbursements),
+      tone: "normal",
+    });
+  };
+
+  // 待簽核（假單＋放款）
+  const approvals = (): HeadlineTile | null => {
+    if (summary.outdated) {
+      if (!linkOn(bossLinks.leaveApprovals)) return null;
       const n = pendingLeave.error ? null : pendingLeave.data;
-      tiles.push(
-        tile({
-          key: "approvals",
-          label: "待簽核",
-          loading: pendingLeave.loading,
-          value: fmtCount(n),
-          sub: n == null ? null : `假單 ${fmtCount(n)}`,
-          href: bossLinks.leaveApprovals,
-          tone: needsAttention(n) ? "attention" : "normal",
-        }),
-      );
+      return tile({
+        key: "approvals",
+        label: "待簽核",
+        loading: pendingLeave.loading,
+        value: fmtCount(n),
+        sub: n == null ? null : `假單 ${fmtCount(n)}`,
+        href: bossLinks.leaveApprovals,
+        tone: needsAttention(n) ? "attention" : "normal",
+      });
     }
-  } else {
     const showLeave = visible("leaveApprovals", bossLinks.leaveApprovals);
     const showDisb = visible("disbursementApprovals", bossLinks.disbursementApprovals);
-    if (showLeave || showDisb) {
-      const a = s?.approvals ?? null;
-      // 任一有權限的子項查詢失敗（null）→ 合計不可信，整格「—」；副標只列查得到的部分。
-      const partial = !!a && ((showLeave && a.leave === null) || (showDisb && a.disbursements === null));
-      const parts: string[] = [];
-      if (a && showLeave && a.leave !== null) parts.push(`假單 ${fmtCount(a.leave)}`);
-      if (a && showDisb && a.disbursements !== null) parts.push(`放款 ${fmtCount(a.disbursements)}`);
-      const total = partial ? null : a?.total;
-      tiles.push(
-        tile({
-          key: "approvals",
-          label: "待簽核",
-          loading: summary.loading,
-          value: fmtCount(total),
-          sub: parts.length > 0 ? parts.join("・") : null,
-          href: showLeave ? href(bossLinks.leaveApprovals) : href(bossLinks.disbursementApprovals),
-          tone: needsAttention(total) ? "attention" : "normal",
-        }),
-      );
-    }
-  }
+    if (!showLeave && !showDisb) return null;
+    const a = s?.approvals ?? null;
+    // 任一有權限的子項查詢失敗（null）→ 合計不可信，整格「—」；副標只列查得到的部分。
+    const partial = !!a && ((showLeave && a.leave === null) || (showDisb && a.disbursements === null));
+    const parts: string[] = [];
+    if (a && showLeave && a.leave !== null) parts.push(`假單 ${fmtCount(a.leave)}`);
+    if (a && showDisb && a.disbursements !== null) parts.push(`放款 ${fmtCount(a.disbursements)}`);
+    const total = partial ? null : a?.total;
+    return tile({
+      key: "approvals",
+      label: "待簽核",
+      loading: summary.loading,
+      value: fmtCount(total),
+      sub: parts.length > 0 ? parts.join("・") : null,
+      href: showLeave ? href(bossLinks.leaveApprovals) : href(bossLinks.disbursementApprovals),
+      tone: needsAttention(total) ? "attention" : "normal",
+    });
+  };
 
-  // 3. 未收款
-  if (visible("receivables", bossLinks.receivables)) {
+  const receivables = (): HeadlineTile | null => {
+    if (!visible("receivables", bossLinks.receivables)) return null;
     const r = s?.receivables ?? null;
-    tiles.push(
-      tile({
-        key: "receivables",
-        label: "未收款",
-        loading: summary.loading,
-        value: fmtWan(r?.unreceivedTotal),
-        sub: r ? `逾期 ${fmtCount(r.overdueCount)} 筆` : null,
-        href: href(bossLinks.receivables),
-        tone: needsAttention(r?.overdueCount) ? "attention" : "normal",
-      }),
-    );
-  }
+    return tile({
+      key: "receivables",
+      label: "未收款",
+      loading: summary.loading,
+      value: fmtWan(r?.unreceivedTotal),
+      sub: r ? `逾期 ${fmtCount(r.overdueCount)} 筆` : null,
+      href: href(bossLinks.receivables),
+      tone: needsAttention(r?.overdueCount) ? "attention" : "normal",
+    });
+  };
 
-  // 4. 在職人數（HR）／本月出勤異常（會計）
-  if (viewer === "group") {
-    if (visible("people", bossLinks.employees)) {
-      const p = s?.people ?? null;
-      tiles.push(
-        tile({
-          key: "people",
-          label: "在職人數",
-          loading: summary.loading,
-          value: fmtCount(p?.active),
-          sub: p ? `本月 +${fmtCount(p.hires)} / −${fmtCount(p.exits)}` : null,
-          href: href(bossLinks.employees),
-          tone: "normal",
-        }),
-      );
-    }
-  } else if (visible("attendance", bossLinks.attendanceSheets)) {
+  const people = (): HeadlineTile | null => {
+    if (!visible("people", bossLinks.employees)) return null;
+    const p = s?.people ?? null;
+    return tile({
+      key: "people",
+      label: "在職人數",
+      loading: summary.loading,
+      value: fmtCount(p?.active),
+      sub: p ? `本月 +${fmtCount(p.hires)} / −${fmtCount(p.exits)}` : null,
+      href: href(bossLinks.employees),
+      tone: "normal",
+    });
+  };
+
+  const attendance = (): HeadlineTile | null => {
+    if (!visible("attendance", bossLinks.attendanceSheets)) return null;
     const att = s?.attendance ?? null;
-    tiles.push(
-      tile({
-        key: "attendance",
-        label: "本月出勤異常",
-        loading: summary.loading,
-        value: fmtCount(att?.anomalies),
-        sub: att ? (att.sheetCount === 0 ? "本月月表尚未產生" : `${fmtCount(att.anomalySheets)} 張月表有異常`) : null,
-        href: s ? href(bossLinks.attendanceAnomalies(s.period), bossLinks.attendanceSheets) : null,
-        tone: needsAttention(att?.anomalies) ? "attention" : "normal",
-      }),
-    );
-  }
-  return tiles;
+    return tile({
+      key: "attendance",
+      label: "本月出勤異常",
+      loading: summary.loading,
+      value: fmtCount(att?.anomalies),
+      sub: att ? (att.sheetCount === 0 ? "本月月表尚未產生" : `${fmtCount(att.anomalySheets)} 張月表有異常`) : null,
+      href: s ? href(bossLinks.attendanceAnomalies(s.period), bossLinks.attendanceSheets) : null,
+      tone: needsAttention(att?.anomalies) ? "attention" : "normal",
+    });
+  };
+
+  const layout: Record<HomeViewer, Array<() => HeadlineTile | null>> = {
+    group: [revenue, approvals, receivables, people],
+    hr: [approvals, attendance, receivables, people],
+    finance: [monthDisbursements, approvals, receivables, attendance],
+  };
+  return layout[viewer].map((build) => build()).filter((t): t is HeadlineTile => t !== null);
 }
 
 /* ------------------------------------------------------ 需要你處理 --- */
@@ -250,7 +278,7 @@ export function headlineTiles(input: {
 export type TodoIcon = "alert" | "approval" | "money" | "clock" | "project";
 
 export interface TodoItem {
-  key: "compliance" | "leave" | "disbursements" | "projectAlerts" | "overCap" | "overtimeDrafts" | "anomalies";
+  key: "bonusRuns" | "lateReports" | "compliance" | "leave" | "disbursements" | "projectAlerts" | "overCap" | "overtimeDrafts" | "anomalies";
   icon: TodoIcon;
   text: string;
   /** 數字＋單位，例如「44 張」。 */
@@ -263,14 +291,18 @@ export interface TodoItem {
 export const TODO_LIMIT = 6;
 
 /**
- * 「需要你處理」：只列數量 > 0、且這個角色／模組開得了目標頁的項目，先急後緩（合規 → 簽核 → 示警 → 加班 → 出勤異常）。
+ * 「需要你處理」：只列數量 > 0、且這個角色／模組開得了目標頁的項目，先急後緩
+ * （老闆專屬待辦 → 合規 → 簽核 → 示警 → 加班 → 出勤異常）。
+ * 老闆專屬待辦只看 summary.bossTodo（後端 scope.isBoss 才給）：獎金批次待核准、遲到說明待決定；
+ * 後台那頁開不了時改連 ESS 簽核頁（老闆在那裡也能核准／決定），所以一定列得出來。
  * boss-summary 404（舊 API）時只剩假單（pendingLeave）。
  */
 export function todoItems(input: { summary: SummaryLoad; pendingLeave: Load<number>; linkOn: LinkOn }): TodoItem[] {
   const { summary, pendingLeave, linkOn } = input;
   const items: TodoItem[] = [];
-  const push = (gate: string, n: number | null | undefined, item: Omit<TodoItem, "count"> & { unit: string }) => {
-    if (!needsAttention(n) || !linkOn(gate)) return;
+  /** gate＝null：目標頁不用再檢查（已選好開得了的頁）。 */
+  const push = (gate: string | null, n: number | null | undefined, item: Omit<TodoItem, "count"> & { unit: string }) => {
+    if (!needsAttention(n) || (gate !== null && !linkOn(gate))) return;
     const { unit, ...rest } = item;
     items.push({ ...rest, count: `${fmtCount(n)} ${unit}` });
   };
@@ -285,6 +317,14 @@ export function todoItems(input: { summary: SummaryLoad; pendingLeave: Load<numb
   const att = s.attendance;
   const ot = s.overtime;
   const alerts = s.projectAlerts ?? null;
+  const boss = s.bossTodo ?? null;
+
+  if (boss) {
+    const bonusHref = linkOn(bossLinks.bonusRuns) ? bossLinks.bonusRuns : bossLinks.essApprovals;
+    const lateHref = linkOn(bossLinks.lateReports) ? bossLinks.lateReports : bossLinks.essApprovals;
+    push(null, boss.bonusRunsPendingApproval, { key: "bonusRuns", icon: "money", text: "獎金批次待你核准", unit: "批", href: bonusHref, tone: "attention" });
+    push(null, boss.lateReportsPending, { key: "lateReports", icon: "clock", text: "遲到說明待你決定", unit: "筆", href: lateHref, tone: "attention" });
+  }
 
   push(bossLinks.attendanceSheets, att?.compliance.total, { key: "compliance", icon: "alert", text: "合規警示（七休一、工時等）", unit: "筆", href: sheets, tone: "danger" });
   push(bossLinks.leaveApprovals, s.approvals.leave, { key: "leave", icon: "approval", text: "假單待簽核", unit: "張", href: bossLinks.leaveApprovals, tone: "attention" });
@@ -333,7 +373,8 @@ export function todoDataIncomplete(input: { summary: SummaryLoad; pendingLeave: 
     (sc.disbursementApprovals && s.approvals.disbursements === null) ||
     (sc.attendance && s.attendance === null) ||
     (sc.overtime && (s.overtime === null || s.overtime.overCapPeople === null || s.overtime.draftCount === null)) ||
-    (sc.projectAlerts === true && (s.projectAlerts ?? null) === null)
+    (sc.projectAlerts === true && (s.projectAlerts ?? null) === null) ||
+    (sc.isBoss === true && (!s.bossTodo || s.bossTodo.bonusRunsPendingApproval === null || s.bossTodo.lateReportsPending === null))
   );
 }
 

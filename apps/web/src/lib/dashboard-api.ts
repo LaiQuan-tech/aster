@@ -29,6 +29,13 @@ export interface BossScope {
   receivables?: boolean;
   projectAlerts?: boolean;
   monthDisbursements?: boolean;
+  /**
+   * 2026-10-26 依身分分版才有：可看集團財務（本年收入／毛利率）；false → 首頁不打 /group-overview、第 1 格改 HR 日常數字。
+   * 舊 API 沒回（undefined）→ 前端退回舊判斷（HR／平台管理員＝可看）。
+   */
+  groupFinancials?: boolean;
+  /** 呼叫者是老闆（features.approval.fallbackApproverEmpId）→ 有 bossTodo。舊 API 沒回＝不是。 */
+  isBoss?: boolean;
 }
 
 export interface BossSummary {
@@ -63,6 +70,8 @@ export interface BossSummary {
   projectAlerts?: { total: number; high: number } | null;
   /** 本月已匯款放款（會計首頁那格；HR 為 null）。舊 API 沒有此欄。 */
   monthDisbursements?: { count: number; amount: number } | null;
+  /** 老闆專屬待辦（scope.isBoss 才有）；數字 null＝該子查詢失敗。舊 API 沒有此欄。 */
+  bossTodo?: { bonusRunsPendingApproval: number | null; lateReportsPending: number | null } | null;
 }
 
 /** 首頁要的數字一次回傳（finance 層可打，依角色裁切）。 */

@@ -7,6 +7,7 @@ import {
   fmtWan,
   headlineTiles,
   homeLinkModuleEnabled,
+  homeViewerOf,
   needsAttention,
   readEnumParam,
   readFlagParam,
@@ -283,6 +284,109 @@ describe("需要你處理 todoItems", () => {
     const outdated: SummaryLoad = { loading: false, error: null, data: null, outdated: true };
     expect(todoItems({ summary: outdated, pendingLeave: done(5), linkOn: HR_LINK }).map((i) => [i.key, i.count])).toEqual([["leave", "5 張"]]);
     expect(todoItems({ summary: outdated, pendingLeave: done(0), linkOn: HR_LINK })).toEqual([]);
+  });
+});
+
+describe("依身分分版（2026-10-26：老闆／一般 HR／會計／平台管理員）", () => {
+  const withScope = (sum: BossSummary, extra: Partial<BossSummary["scope"]>, rest: Partial<BossSummary> = {}): BossSummary => ({
+    ...sum,
+    scope: { ...sum.scope, ...extra },
+    ...rest,
+  });
+  const bossSum = withScope(hrSummary(), { groupFinancials: true, isBoss: true }, { bossTodo: { bonusRunsPendingApproval: 2, lateReportsPending: 4 } });
+  const plainHrSum = withScope(hrSummary(), { groupFinancials: false, isBoss: false }, { bossTodo: null });
+  const platformSum = withScope(hrSummary(), { groupFinancials: true, isBoss: false }, { bossTodo: null });
+  const accountantSum = withScope(accSummary(), { groupFinancials: false, isBoss: false }, { bossTodo: null });
+  const PLATFORM_LINK = (href: string) => isAdminPathAllowed({ pathname: href, roleNav: roleNavOf("platform_admin", null), modules: null });
+
+  it("homeViewerOf：/me 旗標優先，其次 boss-summary scope；都不知道 → null；舊 API／失敗退回舊判斷；會計一律 finance", () => {
+    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: true, summary: loading() })).toBe("group");
+    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: false, summary: s(bossSum) })).toBe("hr");
+    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: undefined, summary: s(plainHrSum) })).toBe("hr");
+    expect(homeViewerOf({ role: "platform_admin", canSeeGroupFinancials: undefined, summary: s(platformSum) })).toBe("group");
+    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: undefined, summary: loading() })).toBeNull();
+    const outdated: SummaryLoad = { loading: false, error: null, data: null, outdated: true };
+    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: undefined, summary: outdated })).toBe("group");
+    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: undefined, summary: failed() })).toBe("group");
+    // 上一版 API（scope 沒有 groupFinancials）→ 舊判斷
+    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: undefined, summary: s(hrSummary()) })).toBe("group");
+    expect(homeViewerOf({ role: "accountant", canSeeGroupFinancials: undefined, summary: loading() })).toBe("finance");
+    expect(homeViewerOf({ role: "accountant", canSeeGroupFinancials: true, summary: s(accountantSum) })).toBe("finance");
+  });
+
+  it("老闆：4 格照舊（本年收入／待簽核／未收款／在職人數）；清單最前面是獎金批次待核准、遲到說明待決定", () => {
+    const tiles = headlineTiles({ viewer: "group", summary: s(bossSum), overview: done(overview(1)), pendingLeave: NONE, linkOn: HR_LINK });
+    expect(tiles.map((t) => t.key)).toEqual(["revenue", "approvals", "receivables", "people"]);
+    const items = todoItems({ summary: s(bossSum), pendingLeave: NONE, linkOn: HR_LINK });
+    expect(items.map((i) => [i.key, i.count])).toEqual([
+      ["bonusRuns", "2 批"],
+      ["lateReports", "4 筆"],
+      ["compliance", "3 筆"],
+      ["leave", "44 張"],
+      ["disbursements", "3 張"],
+      ["projectAlerts", "5 件"],
+      ["overCap", "1 人"],
+      ["overtimeDrafts", "2 筆"],
+      ["anomalies", "27 件"],
+    ]);
+    expect(items[0]).toMatchObject({ text: "獎金批次待你核准", href: bossLinks.bonusRuns });
+    expect(items[1]).toMatchObject({ text: "遲到說明待你決定", href: bossLinks.lateReports });
+    expect(todoDataIncomplete({ summary: s(bossSum), pendingLeave: NONE })).toBe(false);
+  });
+
+  it("老闆專屬待辦：後台頁開不了 → 改連 ESS 簽核頁（照樣列出）；數量 0 不列", () => {
+    const items = todoItems({ summary: s(bossSum), pendingLeave: NONE, linkOn: () => false });
+    expect(items.map((i) => [i.key, i.href])).toEqual([
+      ["bonusRuns", bossLinks.essApprovals],
+      ["lateReports", bossLinks.essApprovals],
+    ]);
+    const zero = { ...bossSum, bossTodo: { bonusRunsPendingApproval: 0, lateReportsPending: 0 } };
+    expect(todoItems({ summary: s(zero), pendingLeave: NONE, linkOn: HR_LINK }).some((i) => i.key === "bonusRuns" || i.key === "lateReports")).toBe(false);
+  });
+
+  it("老闆專屬待辦降級：某個數字 null → 那項不列、其他照列，清單標為不完整；bossTodo 整個 null 也算不完整", () => {
+    const half = { ...bossSum, bossTodo: { bonusRunsPendingApproval: null, lateReportsPending: 4 } };
+    const items = todoItems({ summary: s(half), pendingLeave: NONE, linkOn: HR_LINK });
+    expect(items.map((i) => i.key)).not.toContain("bonusRuns");
+    expect(items[0]?.key).toBe("lateReports");
+    expect(todoDataIncomplete({ summary: s(half), pendingLeave: NONE })).toBe(true);
+    expect(todoDataIncomplete({ summary: s({ ...bossSum, bossTodo: null }), pendingLeave: NONE })).toBe(true);
+    // 不是老闆：bossTodo null 是正常的
+    expect(todoDataIncomplete({ summary: s(plainHrSum), pendingLeave: NONE })).toBe(false);
+  });
+
+  it("一般 HR：待簽核／本月出勤異常／未收款／在職人數（+新進/−離職）；沒有收入、毛利率；清單沒有老闆專屬項", () => {
+    const tiles = headlineTiles({ viewer: "hr", summary: s(plainHrSum), overview: loading(), pendingLeave: NONE, linkOn: HR_LINK });
+    expect(tiles.map((t) => t.key)).toEqual(["approvals", "attendance", "receivables", "people"]);
+    const [appr, att, recv, people] = tiles;
+    expect(appr).toMatchObject({ value: "47", sub: "假單 44・放款 3", href: bossLinks.leaveApprovals });
+    expect(att).toMatchObject({ label: "本月出勤異常", value: "27", sub: "9 張月表有異常", href: bossLinks.attendanceAnomalies("2026-10") });
+    expect(recv).toMatchObject({ value: "250 萬" });
+    expect(people).toMatchObject({ value: "38", sub: "本月 +2 / −1" });
+    expect(tiles.some((t) => t.label.includes("收入") || (t.sub ?? "").includes("毛利"))).toBe(false);
+    // overview 不論狀態都不影響（一般 HR 不打 /group-overview）
+    expect(tiles.every((t) => !t.loading)).toBe(true);
+    const items = todoItems({ summary: s(plainHrSum), pendingLeave: NONE, linkOn: HR_LINK });
+    expect(items.some((i) => i.key === "bonusRuns" || i.key === "lateReports")).toBe(false);
+    expect(items[0]?.key).toBe("compliance");
+  });
+
+  it("會計：維持現狀（本月放款支出／待簽核／未收款／本月出勤異常），清單沒有老闆專屬項", () => {
+    const tiles = headlineTiles({ viewer: "finance", summary: s(accountantSum), overview: loading(), pendingLeave: NONE, linkOn: ACC_LINK });
+    expect(tiles.map((t) => t.key)).toEqual(["monthDisbursements", "approvals", "receivables", "attendance"]);
+    expect(todoItems({ summary: s(accountantSum), pendingLeave: NONE, linkOn: ACC_LINK }).map((i) => i.key)).toEqual([
+      "compliance",
+      "disbursements",
+      "projectAlerts",
+      "anomalies",
+    ]);
+  });
+
+  it("平台管理員：可看集團財務（本年收入那版）但不是老闆 → 沒有老闆專屬待辦", () => {
+    const tiles = headlineTiles({ viewer: "group", summary: s(platformSum), overview: done(overview(1)), pendingLeave: NONE, linkOn: PLATFORM_LINK });
+    expect(tiles.map((t) => t.key)).toEqual(["revenue", "approvals", "receivables", "people"]);
+    const items = todoItems({ summary: s(platformSum), pendingLeave: NONE, linkOn: PLATFORM_LINK });
+    expect(items.some((i) => i.key === "bonusRuns" || i.key === "lateReports")).toBe(false);
   });
 });
 

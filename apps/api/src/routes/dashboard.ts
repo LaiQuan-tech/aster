@@ -7,7 +7,9 @@ import { resolveSelf } from "../middleware/scope.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { todayKey } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
-import { buildBossSummary } from "../services/boss-summary.js"
+import { bossEmpIdOf, buildBossSummary } from "../services/boss-summary.js"
+import { loadGroupFinancialsAccess } from "../services/financial-visibility.js"
+import { logger } from "../lib/logger.js"
 
 export const dashboardRouter = Router()
 
@@ -123,7 +125,7 @@ dashboardRouter.get(
 )
 
 /**
- * GET /dashboard/boss-summary — 後台首頁（頂部 4 個大數字＋「需要你處理」清單）要的數字一次回傳（本年收入另走 /group-overview）。
+ * GET /dashboard/boss-summary — 後台首頁（2026-10-26 依身分分版：scope.groupFinancials＝canSeeGroupFinancials、scope.isBoss＋bossTodo）（頂部 4 個大數字＋「需要你處理」清單）要的數字一次回傳（本年收入另走 /group-overview）。
  * 口徑、角色裁切與失敗降級寫在 services/boss-summary.ts 檔頭。finance 層（HR／平台管理員／會計）可打，
  * 會計只拿到導覽開放給他的那幾欄，其餘為 null（`scope` 標示）。子查詢失敗只讓該欄 null，不回 500。
  */
@@ -152,7 +154,23 @@ dashboardRouter.get(
       const today = todayKey(tz)
       // features 讀不到（欄位異常）→ 當作沒設定：會計退回預設範圍，HR 不受影響。
       const features = tenant.error ? null : ((tenant.data as { features?: unknown } | null)?.features ?? null)
-      const summary = await buildBossSummary({ tenantId, role: self.role, features, period: today.slice(0, 7), today })
+      // 可看集團財務（老闆／platform_admin／被授權的 HR）：決定首頁第 1 格是不是本年收入。老闆 id 已在 features 裡，
+      // 帶進去省一次查詢（features 讀失敗 → 不帶，讓 helper 自己查）。判斷失敗 → 當作看不到（寧可少給，不洩漏）。
+      const groupFinancials = await loadGroupFinancialsAccess(tenantId, self, tenant.error ? undefined : bossEmpIdOf(features))
+        .then((a) => a.canSee)
+        .catch((err) => {
+          logger.warn({ err }, "boss-summary：集團財務可見性判斷失敗（當作看不到）")
+          return false
+        })
+      const summary = await buildBossSummary({
+        tenantId,
+        role: self.role,
+        features,
+        period: today.slice(0, 7),
+        today,
+        selfEmpId: self.id,
+        groupFinancials,
+      })
       res.status(200).json(summary)
     } catch (err) {
       next(err)

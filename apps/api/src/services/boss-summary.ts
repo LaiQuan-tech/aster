@@ -7,6 +7,7 @@ import { buildReceivables, loadP3Settings } from "./project-application-store.js
 import { overdueDays, type OverdueBasis } from "./project-money.js"
 import { currentAlerts } from "./project-alert-store.js"
 import { isVoidedBeyondCapDraft } from "./overtime-void.js"
+import { listLateReports } from "./late-reports.js"
 
 /**
  * 後台首頁（老闆看板）的彙總端點 GET /dashboard/boss-summary（2026-10-25 業主核准）。
@@ -22,6 +23,18 @@ import { isVoidedBeyondCapDraft } from "./overtime-void.js"
  *     requireHrAdmin）一律不給。
  *   • HR 不需要「本月放款支出」（首頁那格給 HR 顯示本年收入）→ 不查。
  *   看不到的區塊回 null，`scope` 告訴前端哪些是「沒權限」、哪些是「查詢失敗」。
+ *
+ * ── 依身分分版（2026-10-26 業主：老闆與一般 HR 首頁分開）───────────────────
+ *   • scope.groupFinancials：可不可以看集團財務（本年收入／毛利率，GET /group-overview）。由路由用
+ *     canSeeGroupFinancials 判斷後帶進來；前端據此決定第 1 格是「本年收入」還是 HR 日常數字，
+ *     看不到的人前端**不打** /group-overview（避免 403 噪音）。boss-summary 本身不回任何收入／毛利數字；
+ *     會計的「本月放款支出」維持現狀（是支出不是收入、跟放款分頁走，不受這個旗標影響）。
+ *   • scope.isBoss：呼叫者是不是老闆（features.approval.fallbackApproverEmpId，與遲到說明、獎金批次核准同一個人）。
+ *     platform_admin 不是老闆（除非本人就是那位員工）。老闆才查 bossTodo（老闆專屬待辦）：
+ *       – bonusRunsPendingApproval：bonus_runs status=pending_approval、未刪除的批次數（等老闆核准）；
+ *       – lateReportsPending：老闆還能決定的遲到說明（listLateReports decision=undecided，排除 lockedReason 非 null
+ *         與老闆自己的——與 ESS 簽核頁紅點 web lib/ess-badges.ts countPendingLateReports 同一套規則）。
+ *     子查詢各自 settle，失敗只讓該數字 null。
  *
  * ── 失敗降級 ──────────────────────────────────────────────────────────
  *   每個子查詢各自 try/catch（settle）：失敗只讓該欄為 null 並寫 warn log，整支不回 500。
@@ -63,6 +76,25 @@ export type BossScope = {
   receivables: boolean
   projectAlerts: boolean
   monthDisbursements: boolean
+  /** 可看集團財務（本年收入／毛利率）；false → 前端不打 /group-overview、第 1 格改 HR 日常數字。 */
+  groupFinancials: boolean
+  /** 呼叫者是老闆（features.approval.fallbackApproverEmpId）→ 有 bossTodo。 */
+  isBoss: boolean
+}
+
+/** bossSummaryScope 的角色部分（groupFinancials／isBoss 另由 buildBossSummary 依呼叫者補上）。 */
+export type BossRoleScope = Omit<BossScope, "groupFinancials" | "isBoss">
+
+/** 老闆的員工 id（features.approval.fallbackApproverEmpId，小寫）；沒設 → null。純函式，路由已讀好 features。 */
+export function bossEmpIdOf(features: unknown): string | null {
+  const approval = isRecord(features) ? features.approval : null
+  const id = isRecord(approval) ? approval.fallbackApproverEmpId : null
+  return typeof id === "string" && id.length > 0 ? id.toLowerCase() : null
+}
+
+/** 舊行為（R1 helper 接上前／路由沒帶時）：HR／平台管理員看得到集團財務。 */
+export function legacyGroupFinancials(role: string | null | undefined): boolean {
+  return role === "hr_admin" || role === "platform_admin"
 }
 
 /** 會計預設可見範圍——與 web lib/admin-nav.ts ACCOUNTANT_DEFAULT_NAV 同步。 */
@@ -99,7 +131,7 @@ export function accountantTabAllowed(features: unknown, section: string, tab: st
   return tabs.includes(tab)
 }
 
-export function bossSummaryScope(role: string | null | undefined, features: unknown): BossScope {
+export function bossSummaryScope(role: string | null | undefined, features: unknown): BossRoleScope {
   if (role === "hr_admin" || role === "platform_admin") {
     return {
       leaveApprovals: true,
@@ -283,11 +315,21 @@ export function summarizeReceivables(rows: readonly ReceivableLite[]): Receivabl
 export type ProjectAlertFacts = { total: number; high: number }
 export type MonthDisbursementFacts = { count: number; amount: number }
 
+export type LateReportLite = { employeeId: string; decision?: string | null; lockedReason?: string | null }
+
+/** 老闆還能決定的遲到說明筆數（未決定、未鎖定、不是老闆自己的）——鏡像 web lib/ess-badges.ts countPendingLateReports。 */
+export function countBossDecidableLateReports(rows: readonly LateReportLite[], bossEmpId: string | null): number {
+  const boss = bossEmpId?.toLowerCase() ?? null
+  return rows.filter(
+    (r) => (r.decision ?? null) === null && (r.lockedReason ?? null) === null && !(boss && r.employeeId.toLowerCase() === boss),
+  ).length
+}
+
 /* ──────────────────────────────────────────────────────────────────
  * 讀取（每支獨立，失敗由 settle 降級）
  * ────────────────────────────────────────────────────────────────── */
 
-export type BossSummaryCtx = { tenantId: string; period: string; today: string; features: unknown }
+export type BossSummaryCtx = { tenantId: string; period: string; today: string; features: unknown; bossEmpId: string | null }
 
 async function selectAllPages<T>(build: (from: number, to: number) => PromiseLike<{ data: unknown; error: { message: string } | null }>, label: string): Promise<T[]> {
   const out: T[] = []
@@ -436,6 +478,28 @@ async function loadMonthDisbursements(ctx: BossSummaryCtx): Promise<MonthDisburs
   return { count: rows.length, amount: sumMoney(rows.map((r) => r.amount)) }
 }
 
+async function loadBonusRunsPendingApproval(ctx: BossSummaryCtx): Promise<number> {
+  const rows = await selectAllPages<{ id: string }>(
+    (from, to) =>
+      supabaseAdmin
+        .from("bonus_runs")
+        .select("id")
+        .eq("tenant_id", ctx.tenantId)
+        .eq("status", "pending_approval")
+        .is("deleted_at", null)
+        .order("id", { ascending: true })
+        .range(from, to),
+    "boss-summary (bonus_runs)",
+  )
+  return rows.length
+}
+
+async function loadLateReportsPending(ctx: BossSummaryCtx): Promise<number> {
+  // 與 GET /late-reports?decision=undecided（老闆看全公司）同一個查詢；表未遷移時 listLateReports 自己回 []。
+  const rows = await listLateReports(ctx.tenantId, { decision: "undecided" })
+  return countBossDecidableLateReports(rows, ctx.bossEmpId)
+}
+
 export type BossSummaryLoaders = {
   pendingLeave: (ctx: BossSummaryCtx) => Promise<number>
   pendingDisbursements: (ctx: BossSummaryCtx) => Promise<{ count: number; amount: number }>
@@ -445,6 +509,8 @@ export type BossSummaryLoaders = {
   receivables: (ctx: BossSummaryCtx) => Promise<ReceivableFacts>
   projectAlerts: (ctx: BossSummaryCtx) => Promise<ProjectAlertFacts>
   monthDisbursements: (ctx: BossSummaryCtx) => Promise<MonthDisbursementFacts>
+  bonusRunsPendingApproval: (ctx: BossSummaryCtx) => Promise<number>
+  lateReportsPending: (ctx: BossSummaryCtx) => Promise<number>
 }
 
 export const defaultBossSummaryLoaders: BossSummaryLoaders = {
@@ -456,6 +522,8 @@ export const defaultBossSummaryLoaders: BossSummaryLoaders = {
   receivables: loadReceivables,
   projectAlerts: loadProjectAlerts,
   monthDisbursements: loadMonthDisbursements,
+  bonusRunsPendingApproval: loadBonusRunsPendingApproval,
+  lateReportsPending: loadLateReportsPending,
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -495,6 +563,13 @@ export type BossSummary = {
   projectAlerts: ProjectAlertFacts | null
   /** 本月已匯款的放款（會計首頁那格；HR 不查＝null）。 */
   monthDisbursements: MonthDisbursementFacts | null
+  /** 老闆專屬待辦（scope.isBoss 才有，否則 null）；各數字查詢失敗 → 該數字 null。 */
+  bossTodo: {
+    /** 等老闆核准的獎金批次數。 */
+    bonusRunsPendingApproval: number | null
+    /** 老闆還能決定的遲到說明筆數。 */
+    lateReportsPending: number | null
+  } | null
 }
 
 async function settle<T>(label: string, run: () => Promise<T>): Promise<T | null> {
@@ -509,13 +584,29 @@ async function settle<T>(label: string, run: () => Promise<T>): Promise<T | null
 const skip = Promise.resolve(null)
 
 export async function buildBossSummary(
-  input: { tenantId: string; role: string | null | undefined; features: unknown; period: string; today: string },
+  input: {
+    tenantId: string
+    role: string | null | undefined
+    features: unknown
+    period: string
+    today: string
+    /** 呼叫者的員工 id（判斷是不是老闆）；沒帶＝不是老闆。 */
+    selfEmpId?: string | null
+    /** 可看集團財務（路由用 canSeeGroupFinancials 判斷）；沒帶＝舊行為（HR／平台管理員）。 */
+    groupFinancials?: boolean
+  },
   loaders: BossSummaryLoaders = defaultBossSummaryLoaders,
 ): Promise<BossSummary> {
-  const scope = bossSummaryScope(input.role, input.features)
-  const ctx: BossSummaryCtx = { tenantId: input.tenantId, period: input.period, today: input.today, features: input.features }
+  const bossEmpId = bossEmpIdOf(input.features)
+  const isBoss = !!bossEmpId && !!input.selfEmpId && input.selfEmpId.toLowerCase() === bossEmpId
+  const scope: BossScope = {
+    ...bossSummaryScope(input.role, input.features),
+    groupFinancials: input.groupFinancials ?? legacyGroupFinancials(input.role),
+    isBoss,
+  }
+  const ctx: BossSummaryCtx = { tenantId: input.tenantId, period: input.period, today: input.today, features: input.features, bossEmpId }
 
-  const [leave, disb, sheets, drafts, people, receivables, alerts, monthDisb] = await Promise.all([
+  const [leave, disb, sheets, drafts, people, receivables, alerts, monthDisb, bonusPending, latePending] = await Promise.all([
     scope.leaveApprovals ? settle("pendingLeave", () => loaders.pendingLeave(ctx)) : skip,
     scope.disbursementApprovals ? settle("pendingDisbursements", () => loaders.pendingDisbursements(ctx)) : skip,
     scope.attendance || scope.overtime ? settle("sheetFacts", () => loaders.sheetFacts(ctx)) : skip,
@@ -524,6 +615,8 @@ export async function buildBossSummary(
     scope.receivables ? settle("receivables", () => loaders.receivables(ctx)) : skip,
     scope.projectAlerts ? settle("projectAlerts", () => loaders.projectAlerts(ctx)) : skip,
     scope.monthDisbursements ? settle("monthDisbursements", () => loaders.monthDisbursements(ctx)) : skip,
+    isBoss ? settle("bonusRunsPendingApproval", () => loaders.bonusRunsPendingApproval(ctx)) : skip,
+    isBoss ? settle("lateReportsPending", () => loaders.lateReportsPending(ctx)) : skip,
   ])
 
   const visibleCounts = [leave, disb?.count ?? null].filter((n): n is number => n !== null)
@@ -554,5 +647,6 @@ export async function buildBossSummary(
     receivables: scope.receivables ? receivables : null,
     projectAlerts: scope.projectAlerts ? alerts : null,
     monthDisbursements: scope.monthDisbursements ? monthDisb : null,
+    bossTodo: isBoss ? { bonusRunsPendingApproval: bonusPending, lateReportsPending: latePending } : null,
   }
 }
