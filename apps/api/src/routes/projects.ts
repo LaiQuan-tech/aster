@@ -531,6 +531,14 @@ function computeAmount(project: ProjectRow, pct: number | null, amount: number |
   return amount
 }
 
+/**
+ * 專案毛利（毛利／入帳／成本／累計獎金池）只有老闆與 HR（hr_admin／platform_admin）看得到
+ * （業主 2026-10-26）。經理／主辦／部門主管看得到分潤趴數與每人金額，但看不到毛利。
+ */
+function canSeeProjectProfit(self: { id: string; role: string }, bossEmpId: string | null): boolean {
+  return isHrRole(self.role) || (!!bossEmpId && bossEmpId === self.id.toLowerCase())
+}
+
 /** 分潤值的「沒有」：null／undefined／0 都算（新成員趴數 0 與未填視為同一件事）。 */
 function isZeroish(v: number | null | undefined): boolean {
   return v === null || v === undefined || Math.abs(v) < 1e-9
@@ -544,12 +552,12 @@ function sameShare(a: number | null | undefined, b: number | null | undefined): 
 }
 
 /**
- * 分潤改版 #6：非老闆送來的整批分潤版本是否動到分潤（獎金比例、既有成員趴數、新成員非 0 趴數）。
- * 成員移除與角色變更不算（那是名單維護，HR／負責人可做）。純函式，測試直接呼叫。
+ * 分潤改版 #6：非老闆送來的整批分潤版本是否動到分潤（獎金比例、既有成員趴數、新成員非 0 趴數、
+ * 移除趴數 > 0 的成員）。角色變更與移除趴數 0 的成員不算（名單維護，HR／負責人可做）。純函式。
  */
 export function shareRevisionChangesShares(
   currentBonusRatePct: number | null,
-  currentMembers: Array<{ employeeId: string; sharePct: number | null }>,
+  currentMembers: Array<{ employeeId: string; sharePct: number | null; shareAmount?: number | null }>,
   revision: { bonusRatePct: number | null; members: Array<{ employeeId: string; sharePct: number | null }> },
 ): boolean {
   if (!sameShare(revision.bonusRatePct, currentBonusRatePct)) return true
@@ -561,6 +569,11 @@ export function shareRevisionChangesShares(
     } else if (!isZeroish(m.sharePct)) {
       return true
     }
+  }
+  // 移除有趴數的成員＝把他的那份變成未分配，也是改分潤（業主 2026-10-26）。
+  const kept = new Set(revision.members.map((m) => m.employeeId.toLowerCase()))
+  for (const m of currentMembers) {
+    if (!kept.has(m.employeeId.toLowerCase()) && (!isZeroish(m.sharePct) || !isZeroish(m.shareAmount))) return true
   }
   return false
 }
@@ -640,6 +653,8 @@ async function loadScope(
       canSeeBonus: boolean
       /** 分潤寫入權（只有老闆／platform_admin，見 services/project-scope.ts bonusEditAccessOf）。 */
       bonusEdit: BonusEditAccess
+      /** 專案毛利（毛利／入帳／成本／累計獎金池）可見性：只有老闆與 HR（業主 2026-10-26）。 */
+      canSeeProfit: boolean
     }
   | { ok: false; status: number; error: string }
 > {
@@ -670,6 +685,7 @@ async function loadScope(
     canManage: access.finance,
     canSeeBonus: access.bonus,
     bonusEdit: bonusEditAccessOf(self, bossEmpId),
+    canSeeProfit: canSeeProjectProfit(self, bossEmpId),
   }
 }
 
@@ -1475,10 +1491,12 @@ projectsRouter.get(
         canEditBonus: scope.bonusEdit.canEdit,
         bossConfigured: scope.bonusEdit.bossConfigured,
         shareMode: scope.project.share_mode,
+        canSeeProfit: scope.canSeeProfit,
         // 獎金池＝估算服務的累計池（毛利制＝max(0,毛利)×比例；舊制＝手填獎金池；固定金額＝null）。
-        bonusPool: scope.canSeeBonus ? (est ? est.pool : num(scope.project.bonus_pool)) : null,
+        // 累計池等於洩漏毛利，只給老闆與 HR（canSeeProfit）。
+        bonusPool: scope.canSeeBonus && scope.canSeeProfit ? (est ? est.pool : num(scope.project.bonus_pool)) : null,
         bonusRatePct: scope.canSeeBonus ? num(scope.project.bonus_rate_pct) : null,
-        bonusEstimate: scope.canSeeBonus && est
+        bonusEstimate: scope.canSeeBonus && scope.canSeeProfit && est
           ? {
               basis: est.basis,
               pool: est.pool,
@@ -1728,6 +1746,25 @@ projectsRouter.delete(
         res.status(403).json({ error: "forbidden" })
         return
       }
+      // 業主 2026-10-26：移除「趴數或金額 > 0」的成員＝改分潤，只有老闆；趴數 0 的成員 HR／負責人仍可移除。
+      if (scope.bonusEdit.denial) {
+        const { data: target, error: tErr } = await supabaseAdmin
+          .from("project_members")
+          .select("id, share_pct, share_amount")
+          .eq("tenant_id", tenantId)
+          .eq("project_id", req.params.id)
+          .eq("id", req.params.memberId)
+          .maybeSingle()
+        if (tErr) throw new Error(`DELETE member (load): ${tErr.message}`)
+        if (!target) {
+          res.status(404).json({ error: "not_found" })
+          return
+        }
+        if (!isZeroish(num(target.share_pct as string | null)) || !isZeroish(num(target.share_amount as string | null))) {
+          res.status(scope.bonusEdit.denial.status).json({ error: scope.bonusEdit.denial.error })
+          return
+        }
+      }
       const { data, error } = await supabaseAdmin
         .from("project_members")
         .delete()
@@ -1785,7 +1822,7 @@ projectsRouter.put(
       if (scope.bonusEdit.denial) {
         const { data: currentMembers, error: curErr } = await supabaseAdmin
           .from("project_members")
-          .select("employee_id, share_pct")
+          .select("employee_id, share_pct, share_amount")
           .eq("tenant_id", tenantId)
           .eq("project_id", req.params.id)
         if (curErr) throw new Error(`PUT share-revision (load members): ${curErr.message}`)
@@ -1794,6 +1831,7 @@ projectsRouter.put(
           (currentMembers ?? []).map((m) => ({
             employeeId: m.employee_id as string,
             sharePct: num(m.share_pct as string | null),
+            shareAmount: num(m.share_amount as string | null),
           })),
           parsed.data,
         )
@@ -1924,6 +1962,8 @@ projectsRouter.get(
         [...new Set((data ?? []).map((m) => m.project_id as string))],
         "GET /my/project-shares",
       )
+      // 專案毛利只有老闆與 HR 看得到（業主 2026-10-26）；一般成員（含經理／主辦／部門主管）不回。
+      const canSeeProfit = canSeeProjectProfit(self, await loadProjectBossEmpId(tenantId))
       const shares = (data ?? []).map((m) => {
         const est = estimates?.get(m.project_id as string)
         const mine = memberEstimateOf(est, self.id)
@@ -1964,11 +2004,11 @@ projectsRouter.get(
           basis: est?.basis ?? null,
           /** 舊制（手填獎金池，未設獎金比例）——ESS 標「舊制」。 */
           legacy: est ? est.basis === "legacy_pool" : null,
-          /** 目前累計毛利（入帳未稅－已發生成本）；成員看得到自己所在專案的毛利（業主 2026-10-26 #1）。 */
-          grossProfit: est ? est.grossProfit : null,
+          /** 目前累計毛利（入帳未稅－已發生成本）；只有老闆與 HR 拿得到，其他人一律 null。 */
+          grossProfit: canSeeProfit && est ? est.grossProfit : null,
         }
       })
-      res.status(200).json({ shares })
+      res.status(200).json({ shares, canSeeProfit })
     } catch (err) {
       next(err)
     }

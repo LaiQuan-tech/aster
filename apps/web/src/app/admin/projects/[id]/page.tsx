@@ -103,8 +103,9 @@ export default function AdminProjectDetailPage() {
     canEditBonus: boolean;
     bossConfigured: boolean;
     grossProfit: number | null;
+    profitHidden: boolean;
     defaults: Partial<Record<ProjectMemberRole, number>>;
-  }>({ canEditBonus: false, bossConfigured: true, grossProfit: null, defaults: {} });
+  }>({ canEditBonus: false, bossConfigured: true, grossProfit: null, profitHidden: false, defaults: {} });
   const [adjustments, setAdjustments] = useState<ShareAdjustment[]>([]);
   const [documents, setDocuments] = useState<ProjectDocument[]>([]);
   /**
@@ -242,6 +243,8 @@ export default function AdminProjectDetailPage() {
         bossConfigured: m.bossConfigured ?? detail.access.bossConfigured ?? true,
         // 毛利制（有設獎金比例）才用毛利算獎金總額；舊制／固定金額沿用原畫面。
         grossProfit: m.bonusEstimate && m.bonusEstimate.basis !== "fixed_amount" ? m.bonusEstimate.grossProfit : null,
+        // 專案毛利只有老闆與 HR 看得到；經理／主辦／部門主管不在本機推算獎金總額。
+        profitHidden: m.canSeeProfit === false,
         defaults: (p3?.settings.defaultSharePctByRole ?? {}) as Partial<Record<ProjectMemberRole, number>>,
       });
       setAdjustments(adj.adjustments);
@@ -360,7 +363,7 @@ export default function AdminProjectDetailPage() {
       <MembersCard
         projectId={projectId} members={members} emps={emps} canBonus={canBonus}
         canEditBonus={shareMeta.canEditBonus} bossConfigured={shareMeta.bossConfigured}
-        defaultSharePctByRole={shareMeta.defaults} grossProfit={shareMeta.grossProfit}
+        defaultSharePctByRole={shareMeta.defaults} grossProfit={shareMeta.grossProfit} profitHidden={shareMeta.profitHidden}
         contractAmount={money?.amountUntaxed ?? null} receivedAmount={money?.receivedTotal ?? 0}
         bonusRatePct={project.bonusRatePct ?? null}
         setError={setError} load={load}

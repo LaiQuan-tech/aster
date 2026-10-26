@@ -152,6 +152,8 @@ export interface MembersResponse {
   canEditBonus?: boolean
   /** 租戶是否已指定老闆（沒有 → 提示先到公司設定指定）。 */
   bossConfigured?: boolean
+  /** 專案毛利（bonusEstimate、累計獎金池）可見性：只有老闆與 HR。 */
+  canSeeProfit?: boolean
   shareMode: ShareMode
   /** 累計獎金池（毛利制＝max(0,毛利)×比例；舊制＝手填獎金池）。 */
   bonusPool: number | null
@@ -232,7 +234,7 @@ export interface MyProjectShare {
   basis?: BonusBasis | null
   /** 舊制（手填獎金池、未設獎金比例）。 */
   legacy?: boolean | null
-  /** 目前累計毛利（入帳未稅－已發生成本）。 */
+  /** 目前累計毛利（入帳未稅－已發生成本）；只有老闆與 HR 拿得到，其他人 null。 */
   grossProfit?: number | null
 }
 
@@ -662,7 +664,7 @@ export function saveProjectShareRevision(
 }
 
 export function getMyProjectShares() {
-  return apiFetch<{ shares: MyProjectShare[] }>("/my/project-shares")
+  return apiFetch<{ shares: MyProjectShare[]; canSeeProfit?: boolean }>("/my/project-shares")
 }
 
 /* -------------------------------------------------------------- documents -- */

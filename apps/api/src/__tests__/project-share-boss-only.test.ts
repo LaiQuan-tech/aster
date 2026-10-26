@@ -156,6 +156,12 @@ describe("shareRevisionChangesShares — 非老闆送來的版本是否動到分
     ] })).toBe(false)
     expect(shareRevisionChangesShares(10, cur, { bonusRatePct: 10, members: [{ employeeId: E.manager, sharePct: 30 }] })).toBe(false)
   })
+  it("移除趴數 > 0（或金額 > 0）的成員 → 算；移除趴數 0／null 的成員 → 不算", () => {
+    expect(shareRevisionChangesShares(10, cur, { bonusRatePct: 10, members: [{ employeeId: E.member, sharePct: null }] })).toBe(true)
+    expect(shareRevisionChangesShares(10, [{ employeeId: E.member, sharePct: null, shareAmount: 5000 }], { bonusRatePct: 10, members: [] })).toBe(true)
+    expect(shareRevisionChangesShares(10, [{ employeeId: E.member, sharePct: 0, shareAmount: null }], { bonusRatePct: 10, members: [] })).toBe(false)
+  })
+
   it("改獎金比例、改既有成員趴數、新成員非 0 → 算", () => {
     expect(shareRevisionChangesShares(10, cur, { bonusRatePct: 12, members: [] })).toBe(true)
     expect(shareRevisionChangesShares(10, cur, { bonusRatePct: 10, members: [{ employeeId: E.manager, sharePct: 31 }] })).toBe(true)
@@ -201,13 +207,21 @@ describe("PUT /projects/:id/share-revision — 只有老闆可以改比例", () 
     expect(res.body.error).toBe("bonus_edit_boss_only")
   })
 
-  it("HR 只維護名單（加新人趴數 0、移除、換角色）→ 200", async () => {
+  it("HR 只維護名單（加新人趴數 0、移除趴數 0 的成員、換角色）→ 200", async () => {
+    fake.db.project_members.find((m: Row) => m.id === M2)!.share_pct = "0"
     const res = await putRevision(T.hr, { members: [
       { memberId: M1, employeeId: E.manager, roleInProject: "lead", sharePct: 30 },
       { employeeId: E.newbie, roleInProject: "member", sharePct: 0 },
     ] })
     expect(res.status).toBe(200)
     expect(rpcCount()).toBe(1)
+  })
+
+  it("HR 在整批版本裡移除有趴數的成員 → 403 bonus_edit_boss_only", async () => {
+    const res = await putRevision(T.hr, { members: [{ memberId: M1, employeeId: E.manager, roleInProject: "manager", sharePct: 30 }] })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe("bonus_edit_boss_only")
+    expect(rpcCount()).toBe(0)
   })
 
   it("HR 加新人但帶了非 0 趴數 → 403", async () => {
@@ -269,11 +283,32 @@ describe("POST／PATCH／DELETE /projects/:id/members — 名單可維護、趴�
     expect(recompute.calls.map((c) => c.context)).toContain("PATCH /projects/:id/members/:memberId")
   })
 
-  it("HR 移除成員 → 200（名單維護）並重算", async () => {
+  it("HR 移除趴數 > 0 的成員 → 403 bonus_edit_boss_only，成員還在", async () => {
+    const res = await as(T.hr, request(app).delete(`/projects/${PROJECT}/members/${M2}`))
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe("bonus_edit_boss_only")
+    expect(memberRow(E.member)).toBeDefined()
+  })
+
+  it("HR 移除趴數 0 的成員 → 200（名單維護）並重算", async () => {
+    memberRow(E.member)!.share_pct = "0"
     const res = await as(T.hr, request(app).delete(`/projects/${PROJECT}/members/${M2}`))
     expect(res.status).toBe(200)
     expect(memberRow(E.member)).toBeUndefined()
     expect(recompute.calls.map((c) => c.context)).toContain("DELETE /projects/:id/members/:memberId")
+  })
+
+  it("老闆移除趴數 > 0 的成員 → 200", async () => {
+    const res = await as(T.boss, request(app).delete(`/projects/${PROJECT}/members/${M2}`))
+    expect(res.status).toBe(200)
+    expect(memberRow(E.member)).toBeUndefined()
+  })
+
+  it("沒設老闆 → HR 移除有趴數的成員回 409", async () => {
+    setBoss(null)
+    const res = await as(T.hr, request(app).delete(`/projects/${PROJECT}/members/${M2}`))
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("boss_not_configured")
   })
 })
 
@@ -365,9 +400,22 @@ describe("#1 金額走估算服務", () => {
     expect(estimate.calls).toEqual([{ tenantId: TENANT_ID, projectIds: [PROJECT] }])
   })
 
-  it("GET /projects/:id/members（HR）：看得到但 canEditBonus=false", async () => {
+  it("GET /projects/:id/members（HR）：看得到毛利，但 canEditBonus=false", async () => {
     const res = await as(T.hr, request(app).get(`/projects/${PROJECT}/members`))
-    expect(res.body).toMatchObject({ canSeeBonus: true, canEditBonus: false, bonusPool: 80000 })
+    expect(res.body).toMatchObject({ canSeeBonus: true, canSeeProfit: true, canEditBonus: false, bonusPool: 80000 })
+    expect(res.body.bonusEstimate).toMatchObject({ grossProfit: 800000 })
+  })
+
+  it.each([
+    ["經理（成員角色 manager）", T.manager],
+    ["專案負責人（lead_emp_id）", T.lead],
+    ["部門主管", T.deptManager],
+  ])("GET /projects/:id/members（%s）：看得到趴數與每人金額，但沒有毛利／獎金池", async (_label, token) => {
+    const res = await as(token, request(app).get(`/projects/${PROJECT}/members`))
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ canSeeBonus: true, canSeeProfit: false, bonusPool: null, bonusEstimate: null })
+    const byEmp = Object.fromEntries((res.body.members as Row[]).map((m) => [m.employeeId, m]))
+    expect(byEmp[E.manager]).toMatchObject({ sharePct: 30, estimatedAmount: 24000, paidAmount: 10000, pendingAmount: 14000 })
   })
 
   it("GET /projects/:id/members（會計）：沒有金額、不打估算", async () => {
@@ -383,11 +431,31 @@ describe("#1 金額走估算服務", () => {
     const res = await as(T.member, request(app).get("/my/project-shares"))
     expect(res.status).toBe(200)
     const byProject = Object.fromEntries((res.body.shares as Row[]).map((s) => [s.projectId, s]))
+    expect(res.body.canSeeProfit).toBe(false)
+    // 一般成員看不到毛利（只有老闆與 HR），其餘自己的數字都在。
     expect(byProject[PROJECT]).toMatchObject({
       computedAmount: 16000, estimatedAmount: 16000, paidAmount: 20000, pendingAmount: 0,
-      grossProfit: 800000, basis: "gross_profit", legacy: false, sharePct: 20,
+      grossProfit: null, basis: "gross_profit", legacy: false, sharePct: 20, roleInProject: "member",
     })
-    expect(byProject[LEGACY_PROJECT]).toMatchObject({ estimatedAmount: 2500, legacy: true, basis: "legacy_pool" })
+    expect(byProject[LEGACY_PROJECT]).toMatchObject({ estimatedAmount: 2500, legacy: true, basis: "legacy_pool", grossProfit: null })
+    for (const share of res.body.shares as Row[]) {
+      expect(share).not.toHaveProperty("revenue")
+      expect(share).not.toHaveProperty("cost")
+      expect(share).not.toHaveProperty("pool")
+    }
+  })
+
+  it("GET /my/project-shares：經理也看不到毛利", async () => {
+    const res = await as(T.manager, request(app).get("/my/project-shares"))
+    expect(res.body.canSeeProfit).toBe(false)
+    expect(res.body.shares[0]).toMatchObject({ estimatedAmount: 24000, grossProfit: null })
+  })
+
+  it("GET /my/project-shares：HR 本人是成員 → 看得到毛利", async () => {
+    fake.db.project_members.push({ id: "eeeeeeee-0000-4000-8000-000000000009", tenant_id: TENANT_ID, project_id: PROJECT, employee_id: E.hr, role_in_project: "support", share_pct: "0", share_amount: null, created_at: "2026-01-04T00:00:00.000Z" })
+    const res = await as(T.hr, request(app).get("/my/project-shares"))
+    expect(res.body.canSeeProfit).toBe(true)
+    expect(res.body.shares[0]).toMatchObject({ projectId: PROJECT, grossProfit: 800000 })
   })
 
   it("估算服務失敗 → 退回舊算法，不 500", async () => {

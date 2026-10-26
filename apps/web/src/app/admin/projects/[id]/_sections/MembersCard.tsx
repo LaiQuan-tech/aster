@@ -26,6 +26,11 @@ interface MembersCardProps {
   /** 目前累計毛利（估算服務）；有值時獎金總額＝max(0,毛利)×比例（毛利制）。 */
   grossProfit?: number | null;
   bonusRatePct: number | null;
+  /**
+   * 專案毛利只有老闆與 HR 看得到（業主 2026-10-26）。true＝呼叫者看不到毛利（經理／主辦／部門主管）：
+   * 不在本機推算獎金總額（會反推出毛利），每人金額改顯示後端估算值。
+   */
+  profitHidden?: boolean;
   /** false＝不能換人／加人／移除（ESS 老闆頁沒有員工名冊，只調比例與角色）。預設 true。 */
   allowRosterEdit?: boolean;
   setError: Setter<string | null>;
@@ -43,7 +48,7 @@ function columnTitle(member: ShareDraftMember, members: ShareDraftMember[]): str
 /** Excel 橫向專案分潤編輯器：全部變更先留在本機，最後以一個 revision 原子儲存。 */
 export function MembersCard({
   projectId, members, emps, canBonus, canEditBonus = false, bossConfigured = true, defaultSharePctByRole,
-  contractAmount, receivedAmount, grossProfit, bonusRatePct, allowRosterEdit = true, setError, load,
+  contractAmount, receivedAmount, grossProfit, bonusRatePct, profitHidden = false, allowRosterEdit = true, setError, load,
 }: MembersCardProps) {
   const [draft, setDraft] = useState(() => hydrateShareDraft(members, bonusRatePct));
   const [reason, setReason] = useState("");
@@ -56,10 +61,16 @@ export function MembersCard({
   const orderedMembers = useMemo(() => orderShareMembers(draft.members), [draft.members]);
   const availableEmployees = useMemo(() => emps.filter((emp) => !draft.members.some((member) => member.employeeId === emp.id)), [draft.members, emps]);
   const calculation = useMemo(
-    () => calculateProjectShares({ contractAmount, bonusRatePct: draft.bonusRatePct, members: orderedMembers, grossProfit }),
-    [contractAmount, draft.bonusRatePct, orderedMembers, grossProfit],
+    () => calculateProjectShares({ contractAmount: profitHidden ? null : contractAmount, bonusRatePct: draft.bonusRatePct, members: orderedMembers, grossProfit: profitHidden ? null : grossProfit }),
+    [contractAmount, draft.bonusRatePct, orderedMembers, grossProfit, profitHidden],
   );
   const paidByEmployee = useMemo(() => new Map(members.map((m) => [m.employeeId, m.paidAmount ?? null])), [members]);
+  const serverAmountByEmployee = useMemo(() => new Map(members.map((m) => [m.employeeId, m.estimatedAmount ?? m.computedAmount ?? null])), [members]);
+  /** 伺服器上趴數或金額 > 0 的成員：移除＝改分潤，只有老闆（業主 2026-10-26）。 */
+  const hasShareOnServer = useMemo(
+    () => new Set(members.filter((m) => (m.sharePct ?? 0) > 0 || (m.shareAmount ?? 0) > 0).map((m) => m.employeeId)),
+    [members],
+  );
 
   function patchMember(employeeId: string, patch: Partial<ShareDraftMember>) {
     setDraft((current) => ({ ...current, members: current.members.map((member) => member.employeeId === employeeId ? { ...member, ...patch } : member) }));
@@ -118,14 +129,15 @@ export function MembersCard({
   }
 
   const lockedHint = bossConfigured ? "分潤比例僅老闆可修改" : "尚未指定老闆：分潤比例僅老闆可修改，請先到公司設定指定老闆";
-  const headers = ["合約金額", "已收款", ...(grossProfit != null ? ["目前毛利"] : []), "獎金比例", "獎金總額"];
+  const showProfit = grossProfit != null && !profitHidden;
+  const headers = ["合約金額", "已收款", ...(showProfit ? ["目前毛利"] : []), "獎金比例", "獎金總額"];
 
   return <Card>
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
       <div>
         <h2 className="text-sm font-semibold text-gray-700">專案獎金與分潤</h2>
         <p className="mt-0.5 text-xs text-gray-500">
-          {grossProfit != null ? "獎金總額＝目前毛利 × 獎金比例（隨入帳與成本累計變動）。" : "修改比例後金額即時連動。"}已發放歷史不變，差額會在下一次撥款調整。
+          {profitHidden ? "每人金額為截至今天的預估累計應得；專案毛利與獎金總額僅老闆與 HR 可見。" : showProfit ? "獎金總額＝目前毛利 × 獎金比例（隨入帳與成本累計變動）。" : "修改比例後金額即時連動。"}已發放歷史不變，差額會在下一次撥款調整。
         </p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -144,7 +156,7 @@ export function MembersCard({
         <tbody><tr>
           <td className="border border-black px-3 py-3 text-right text-sm">{fmtMoney(contractAmount)}</td>
           <td className="border border-black px-3 py-3 text-right text-sm">{fmtMoney(receivedAmount)}</td>
-          {grossProfit != null && <td className="border border-black px-3 py-3 text-right text-sm">{fmtMoney(grossProfit)}</td>}
+          {showProfit && <td className="border border-black px-3 py-3 text-right text-sm">{fmtMoney(grossProfit)}</td>}
           <td className="border border-black p-2"><div className="flex items-center justify-center gap-1"><input aria-label="專案獎金比例" className="w-20 rounded border border-gray-300 px-2 py-1 text-right disabled:bg-gray-50 disabled:text-gray-500" type="number" min="0" max="100" step="0.01" disabled={pctLocked} title={pctLocked ? lockedHint : undefined} value={draft.bonusRatePct ?? ""} onChange={(event) => setDraft((current) => ({ ...current, bonusRatePct: event.target.value === "" ? null : Number(event.target.value) }))} />%</div></td>
           <td className="border border-black px-3 py-3 text-right text-sm font-semibold">{fmtMoney(calculation.bonusTotal)}</td>
           {calculation.members.map((member) => {
@@ -161,9 +173,9 @@ export function MembersCard({
                 {PROJECT_MEMBER_ROLE_ORDER.map((role) => <option key={role} value={role}>{PROJECT_MEMBER_ROLE_LABELS[role]}</option>)}
               </select>
               <div className="mt-1 flex items-center justify-center gap-1"><input aria-label={`${member.name ?? member.employeeId}分潤比例`} className="w-20 rounded border border-gray-300 px-2 py-1 text-right disabled:bg-gray-50 disabled:text-gray-500" type="number" min="0" max="100" step="0.01" disabled={pctLocked} title={pctLocked ? lockedHint : undefined} value={member.sharePct} onChange={(event) => patchMember(member.employeeId, { sharePct: Number(event.target.value) })} />%</div>
-              <p className="mt-1 text-right text-sm font-medium">{fmtMoney(member.amount)}</p>
+              <p className="mt-1 text-right text-sm font-medium">{fmtMoney(member.amount ?? (profitHidden ? serverAmountByEmployee.get(member.employeeId) ?? null : null))}</p>
               {paid != null && <p className="text-right text-[11px] text-gray-500">已發 {fmtMoney(paid)}</p>}
-              {allowRosterEdit && <button type="button" className="mt-1 text-[11px] text-red-600 hover:underline" onClick={() => setDraft((current) => ({ ...current, members: current.members.filter((item) => item.employeeId !== member.employeeId) }))}>移除</button>}
+              {allowRosterEdit && !(pctLocked && hasShareOnServer.has(member.employeeId)) && <button type="button" className="mt-1 text-[11px] text-red-600 hover:underline" onClick={() => setDraft((current) => ({ ...current, members: current.members.filter((item) => item.employeeId !== member.employeeId) }))}>移除</button>}
             </td>;
           })}
           <td className={`border border-black px-3 py-3 text-right text-sm font-semibold ${calculation.unallocatedPct < 0 ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-800"}`}><div>{calculation.unallocatedPct}%</div><div>{fmtMoney(calculation.unallocatedAmount)}</div></td>
@@ -179,6 +191,6 @@ export function MembersCard({
       <div className="min-w-64 flex-1"><label className={labelCls}>變更原因（必填）</label><input className={inputCls} value={reason} onChange={(event) => setReason(event.target.value)} placeholder={canEditBonus ? "例：本期改由王員主辦，調整後續分潤" : "例：新增組員，趴數待老闆設定"} /></div>
       <PrimaryButton onClick={saveRevision} disabled={saving || !calculation.isValid}>{saving ? "儲存中…" : canEditBonus ? "整批儲存分潤" : "儲存成員名單"}</PrimaryButton>
     </div>
-    {pctLocked && allowRosterEdit && <p className="mt-2 text-xs text-gray-500">您可以加入／移除成員與調整角色；新成員趴數為 0，由老闆設定分潤比例。</p>}
+    {pctLocked && allowRosterEdit && <p className="mt-2 text-xs text-gray-500">您可以加入成員、調整角色，並移除趴數為 0 的成員；新成員趴數為 0，由老闆設定分潤比例。移除有趴數的成員須由老闆操作。</p>}
   </Card>;
 }

@@ -12,13 +12,18 @@ function money(n: number | null): string {
 
 export default function MyBonusPage() {
   const [shares, setShares] = useState<MyProjectShare[]>([]);
+  // 專案毛利只有老闆與 HR 看得到（業主 2026-10-26）；其他人不顯示這一欄。
+  const [canSeeProfit, setCanSeeProfit] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<{ rows: MyBonusHistoryRow[]; total: number } | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
   useEffect(() => {
     getMyProjectShares()
-      .then((r) => setShares(r.shares))
+      .then((r) => {
+        setShares(r.shares);
+        setCanSeeProfit(r.canSeeProfit === true);
+      })
       .catch((err) => setError(err instanceof Error ? err.message : "載入失敗"));
     // D1 已發放紀錄：只列已發放（paid）批次裡自己的明細；草稿看不到。
     getMyBonusHistory()
@@ -55,7 +60,7 @@ export default function MyBonusPage() {
                 <p className="text-xl font-bold text-gray-900">{money(pendingTotal)}</p>
               </div>
             </div>
-            <p className="mb-3 text-xs text-gray-400">預估應得＝依目前毛利（已入帳扣除已發生成本）與你的趴數累計算到今天的金額，會隨入帳與成本變動；實際以每季發放為準。</p>
+            <p className="mb-3 text-xs text-gray-400">預估應得＝依專案目前毛利與你的趴數累計算到今天的金額，會隨入帳與成本變動；實際以每季發放為準。</p>
             <div className="overflow-x-auto">
               <table className="w-full min-w-[640px] text-left text-sm">
                 <thead>
@@ -63,7 +68,7 @@ export default function MyBonusPage() {
                     <th className="py-2 pr-3">專案</th>
                     <th className="py-2 pr-3">角色</th>
                     <th className="py-2 pr-3">趴數</th>
-                    <th className="py-2 pr-3 text-right">目前毛利</th>
+                    {canSeeProfit && <th className="py-2 pr-3 text-right">目前毛利</th>}
                     <th className="py-2 pr-3 text-right">預估應得</th>
                     <th className="py-2 pr-3 text-right">已發</th>
                     <th className="py-2 pr-3 text-right">待發</th>
@@ -82,7 +87,7 @@ export default function MyBonusPage() {
                       <td className="py-2 pr-3 text-gray-700">
                         {s.shareMode === "pool_pct" ? (s.sharePct != null ? `${s.sharePct}%` : "—") : money(s.shareAmount)}
                       </td>
-                      <td className="py-2 pr-3 text-right text-gray-700">{s.legacy || s.basis === "fixed_amount" ? "—" : money(s.grossProfit ?? null)}</td>
+                      {canSeeProfit && <td className="py-2 pr-3 text-right text-gray-700">{s.legacy || s.basis === "fixed_amount" ? "—" : money(s.grossProfit ?? null)}</td>}
                       <td className="py-2 pr-3 text-right font-medium text-gray-900">{money(s.estimatedAmount ?? s.computedAmount)}</td>
                       <td className="py-2 pr-3 text-right text-gray-700">{money(s.paidAmount ?? null)}</td>
                       <td className="py-2 pr-3 text-right text-gray-700">{money(s.pendingAmount ?? null)}</td>
