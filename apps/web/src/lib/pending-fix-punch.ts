@@ -16,7 +16,15 @@
  *   - 背景輪詢比的是「併過暫定上班卡」的紀錄：加班過午夜（補卡日期已不是今天）照舊維持「上班中」，
  *     上班卡超過 16 小時才翻回「上班打卡」，跟真的上班卡同一套規則。
  */
-import { isCarryOverPunch, summarizePunches, type PunchLike, type PunchSummary } from "./punch-state";
+import {
+  isCarryOverPunch,
+  precheckForcedPunch,
+  summarizePunches,
+  type PunchLike,
+  type PunchPrecheck,
+  type PunchSummary,
+  type PunchType,
+} from "./punch-state";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** 補卡段的時間：`HH:MM`（表單一律送這種；容許尾巴帶秒）。 */
@@ -225,4 +233,20 @@ export const PENDING_FIX_PUNCH_CELL_SUFFIX = "（待核准）";
  */
 export function forgotPunchInHref(today: string): string {
   return `/ess/requests?kind=fix_punch&date=${encodeURIComponent(today)}&type=in`;
+}
+
+/**
+ * 狀態不明（今日打卡載入失敗）時員工自己選上班／下班（2026-10-26 驗收回饋）：按下時抓到的最新紀錄先併上待核准的
+ * 上班補卡（`pending`：這次重抓到的待簽核單，抓不到就用上次的），再交給 precheckForcedPunch——補卡撐起的「上班中」
+ * 選下班照送、選上班就不送（按鈕改回「下班打卡」）。`latest` 為 null（抓不到）→ 照選的送。
+ * 回傳的 `latest`（中止時）是併過暫定上班卡的紀錄，呼叫端可直接放進畫面（withPendingFixPunch 可重複呼叫）。
+ */
+export function precheckForcedPunchWithPending(
+  force: PunchType,
+  latest: ReadonlyArray<PunchLike> | null | undefined,
+  pending: ReadonlyArray<PendingFixPunchRequestLike> | null | undefined,
+  today: string,
+): PunchPrecheck<PunchLike> {
+  if (!latest) return precheckForcedPunch(force, null);
+  return precheckForcedPunch(force, withPendingFixPunch(latest, pending, today));
 }

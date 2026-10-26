@@ -89,6 +89,8 @@ export interface PunchResult {
   wfh?: boolean;
   /** 下班卡勾的晚餐（2026-10-17；沒問到＝null）。 */
   dinnerTaken?: boolean | null;
+  /** 2026-10-26：同一個 clientRequestId 的重送，伺服器回原本那筆（HTTP 200），沒有新增。 */
+  deduplicated?: boolean;
 }
 
 /**
@@ -420,6 +422,8 @@ export function postPunch(body: {
   wfh?: boolean;
   /** 2026-10-17：下班卡勾的「今天有用公司晚餐」（只有顯示勾選框時才帶，見 lib/dinner-prompt.ts）。 */
   dinnerTaken?: boolean;
+  /** 2026-10-26 打卡冪等：每次打卡一個請求 id，逾時重送沿用（同員工同 id 伺服器只寫一筆，重送回 200 原本那筆）。 */
+  clientRequestId?: string;
 }) {
   return apiFetch<PunchResult>("/punch", {
     method: "POST",

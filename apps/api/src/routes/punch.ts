@@ -61,6 +61,9 @@ const punchSchema = z.object({
   // 只有這張卡最後是 type='out' 才寫進 punch_records.dinner_taken（migration 0070；未套 → 忽略）；上班卡帶了也不理會。
   // 結算：月表手動值優先，其次當天任一張下班卡 true（services/settlement.ts）。
   dinnerTaken: z.boolean().optional(),
+  // 2026-10-26 打卡冪等：前端每次打卡產生一個 id（逾時重送沿用同一個）。同員工已有相同 id 的打卡 → 直接回原本那筆
+  // （200、deduplicated:true，不新增）。存在 punch_records.client_request_id（migration 0074；未套 → 不去重、照常寫）。
+  clientRequestId: z.string().trim().min(8).max(100).regex(/^[A-Za-z0-9_-]+$/).optional(),
   // NOTE: we deliberately do NOT read employeeId from the body. The punch is
   // always recorded for the token owner (anti-proxy-punch). Any employeeId a
   // client sends is ignored — kept lax here so a stray field doesn't 400.
@@ -159,6 +162,60 @@ async function firstInLateness(tenantId: string, employeeId: string, now: Date):
   }
 }
 
+/** 打卡冪等去重往回找多久（2026-10-26）：逾時重送通常在幾十秒內；唯一索引另外保證同一個 id 永遠只有一筆。 */
+export const PUNCH_IDEMPOTENCY_WINDOW_MS = 10 * 60_000
+
+/** punch_records.client_request_id（migration 0074）是否已套；沒套 → POST /punch 不去重、照常寫入。 */
+function punchRecordsHaveClientRequestId(): Promise<boolean> {
+  return columnsExist("punch_records", "client_request_id")
+}
+
+/**
+ * 同員工、同 clientRequestId 的打卡（`windowed`＝只找 PUNCH_IDEMPOTENCY_WINDOW_MS 內；唯一索引衝突後的補查不限）。
+ * 查詢失敗記 warn 回 null（當作沒有，照常寫——唯一索引仍會擋重複）。
+ */
+async function findPunchByClientRequestId(
+  tenantId: string,
+  employeeId: string,
+  clientRequestId: string,
+  now: Date,
+  windowed = true,
+): Promise<Record<string, unknown> | null> {
+  try {
+    let q = supabaseAdmin
+      .from("punch_records")
+      .select("*")
+      .eq("tenant_id", tenantId)
+      .eq("employee_id", employeeId)
+      .eq("client_request_id", clientRequestId)
+    if (windowed) q = q.gte("punch_at", new Date(now.getTime() - PUNCH_IDEMPOTENCY_WINDOW_MS).toISOString())
+    const { data, error } = await q.order("punch_at", { ascending: false }).limit(1).maybeSingle()
+    if (error) throw new Error(error.message)
+    return (data ?? null) as Record<string, unknown> | null
+  } catch (err) {
+    logger.warn({ err, tenantId, employeeId }, "POST /punch: idempotency lookup failed — writing normally")
+    return null
+  }
+}
+
+/** POST /punch 的回應（201 新寫入／200 冪等重送回原本那筆）。IP 只給 HR 看：record 剝掉 ip_address。 */
+function punchResponseBody(data: Record<string, unknown>, extra: Record<string, unknown>): Record<string, unknown> {
+  const { ip_address: _ipAddress, ...record } = data
+  return {
+    id: data.id,
+    type: data.type,
+    punchAt: data.punch_at,
+    source: data.source,
+    lat: data.lat,
+    lng: data.lng,
+    deviceId: data.device_id,
+    wfh: data.wfh === true,
+    dinnerTaken: typeof data.dinner_taken === "boolean" ? data.dinner_taken : null,
+    record,
+    ...extra,
+  }
+}
+
 /**
  * POST /punch — the authenticated employee clocks in/out for THEMSELVES.
  *
@@ -200,6 +257,11 @@ async function firstInLateness(tenantId: string, employeeId: string, now: Date):
  *
  * 晚餐勾選（2026-10-17）：`dinnerTaken`（boolean）只在這張卡是下班卡時寫進 punch_records.dinner_taken；
  * 201 多帶 `dinnerTaken`（沒寫＝null）。
+ *
+ * 打卡冪等（2026-10-26）：body 帶 `clientRequestId`（前端每次打卡一個，逾時重送沿用）且 0074 已套時，同員工
+ * 10 分鐘內已有同一個 id 的打卡 → 200 回原本那筆（同 201 的形狀，多帶 `deduplicated: true`），不新增、不跑冷卻／
+ * 遲到檢查；兩個請求同時到時唯一索引（tenant_id, employee_id, client_request_id）擋下第二筆，同樣回第一筆。
+ * 欄位沒套 → 不去重、照常寫入（部署順序不強制）。
  */
 punchRouter.post(
   "/punch",
@@ -218,7 +280,7 @@ punchRouter.post(
       res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
       return
     }
-    const { type, source, lat, lng, deviceId, geoStatus, wfh, dinnerTaken } = parsed.data
+    const { type, source, lat, lng, deviceId, geoStatus, wfh, dinnerTaken, clientRequestId } = parsed.data
     const now = new Date()
 
     try {
@@ -228,6 +290,16 @@ punchRouter.post(
         // cannot punch for anyone else).
         res.status(403).json({ error: "not_an_employee" })
         return
+      }
+
+      // 打卡冪等（2026-10-26）：逾時重送的同一次打卡 → 回原本那筆，不新增、也不跑冷卻／遲到檢查。
+      const idempotent = clientRequestId ? await punchRecordsHaveClientRequestId() : false
+      if (clientRequestId && idempotent) {
+        const prior = await findPunchByClientRequestId(tenantId, self.id, clientRequestId, now)
+        if (prior) {
+          res.status(200).json(punchResponseBody(prior, { deduplicated: true }))
+          return
+        }
       }
 
       // 在家上班打卡：沒開通卻帶 wfh=true → 400，不寫打卡（services/employee-features.ts）。
@@ -377,9 +449,19 @@ punchRouter.post(
           // 只在勾了才帶欄位：沒勾＝DB 預設 false，舊庫（0068 未套）一般打卡照常寫得進去。
           ...(wfhRequested ? { wfh: true } : {}),
           ...(writeDinner ? { dinner_taken: dinnerTaken } : {}),
+          ...(clientRequestId && idempotent ? { client_request_id: clientRequestId } : {}),
         })
         .select("*")
         .single()
+
+      // 同一個 clientRequestId 兩個請求同時到（逾時那次其實還在路上）：唯一索引擋下第二筆 → 回第一筆。
+      if (error && error.code === "23505" && clientRequestId && idempotent) {
+        const prior = await findPunchByClientRequestId(tenantId, self.id, clientRequestId, now, false)
+        if (prior) {
+          res.status(200).json(punchResponseBody(prior, { deduplicated: true }))
+          return
+        }
+      }
 
       if (error || !data) {
         next(new Error(`POST /punch: ${error?.message}`))
@@ -414,21 +496,9 @@ punchRouter.post(
         }
       }
 
-      // IP 只給 HR（GET /punch 後台列表）看：員工自己的回應不帶，record 也剝掉。
-      const { ip_address: _ipAddress, ...record } = data
-      res.status(201).json({
-        id: data.id,
-        type: data.type,
-        punchAt: data.punch_at,
-        source: data.source,
-        lat: data.lat,
-        lng: data.lng,
-        deviceId: data.device_id,
-        wfh: data.wfh === true,
-        dinnerTaken: typeof data.dinner_taken === "boolean" ? data.dinner_taken : null,
-        record,
-        ...(lateReport && lateness ? { lateReport: { id: lateReport.id, lateMinutes: lateness.lateMinutes } } : {}),
-      })
+      res.status(201).json(
+        punchResponseBody(data, lateReport && lateness ? { lateReport: { id: lateReport.id, lateMinutes: lateness.lateMinutes } } : {}),
+      )
     } catch (err) {
       next(err)
     }
