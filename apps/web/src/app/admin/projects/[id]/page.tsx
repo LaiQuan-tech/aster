@@ -1,9 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { DetailHeading, ErrorText, Empty } from "@/components/admin-ui";
+import { Button, DetailHeading, ErrorText, Empty } from "@/components/admin-ui";
 import { getDepartments, getEmployees, type Department, type Employee } from "@/lib/admin-api";
 import { listVendors, type Vendor } from "@/lib/company-api";
 import {
@@ -38,6 +37,7 @@ import {
   type BillingScheduleExt,
   type InstallmentInputExt,
   type SubcontractPayment,
+  type Subcontract,
   type Company,
   type ProjectListItem,
 } from "@/lib/projects-ext-api";
@@ -45,15 +45,14 @@ import { parentProjectChoices } from "../_components/project-application-form";
 import {
   humanError,
   todayKey,
-  appFormFrom,
   toSubRows,
   emptySubcontractsResponse,
   emptyBillingSchedule,
-  type AppForm,
   type SubRow,
 } from "./_sections/shared";
 import { ProjectSettingsCard } from "./_sections/ProjectSettingsCard";
-import { ApplicationFieldsCard } from "./_sections/ApplicationFieldsCard";
+import { ApplicationSheet } from "./_sections/ApplicationSheet";
+import { ShareModeCard } from "./_sections/ShareModeCard";
 import { RoleSharePctCard } from "../_components/RoleSharePctCard";
 import { effectiveRoleSharePct } from "@/lib/project-share-calculation";
 import { MoneyCard } from "./_sections/MoneyCard";
@@ -71,24 +70,6 @@ import { LineageCard, DuplicateProjectDialog } from "./_sections/LineageCard";
  * 每張 Card 的 JSX 與專屬 handler 在 ./_sections/*Card.tsx，state 與 setter 以 props 傳下去。
  */
 
-/**
- * W8：把專案的 engineers（jsonb）攤成表單狀態。欄位＝租戶設定的科別；專案上
- * 已經有值、但設定裡沒有的科別（改過設定、或 sql/0040 backfill 前的舊英文 key）
- * 一律保留在後面，免得一開畫面就把既有資料弄丟。
- */
-function engineersFormOf(
-  engineers: Record<string, { vendorId?: string | null; name: string | null } | null> | null | undefined,
-  disciplines: string[],
-): Record<string, { vendorId: string | null; name: string | null }> {
-  const keys = [...disciplines];
-  for (const key of Object.keys(engineers ?? {})) if (!keys.includes(key)) keys.push(key);
-  const out: Record<string, { vendorId: string | null; name: string | null }> = {};
-  for (const key of keys) {
-    const a = engineers?.[key];
-    out[key] = { vendorId: a?.vendorId ?? null, name: a?.name ?? null };
-  }
-  return out;
-}
 export default function AdminProjectDetailPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
@@ -165,10 +146,8 @@ export default function AdminProjectDetailPage() {
   const [statusEffectiveOn, setStatusEffectiveOn] = useState("");
   const [savingStatus, setSavingStatus] = useState(false);
 
-  // 申請單資料（模組五）
-  const [appForm, setAppForm] = useState<AppForm | null>(null);
-  const [savingApp, setSavingApp] = useState(false);
-  const [appSavedAt, setAppSavedAt] = useState<number | null>(null);
+  /** 已存檔的副委託（申請單表格的「發包單位」區塊用；編輯中的草稿是下面的 subDraft）。 */
+  const [savedSubs, setSavedSubs] = useState<Subcontract[]>([]);
 
   // 開票／收款的小表單（模組五）
   const [invoiceFormId, setInvoiceFormId] = useState<string | null>(null);
@@ -235,15 +214,12 @@ export default function AdminProjectDetailPage() {
           note: i.note,
         })),
       );
+      setSavedSubs(subs.subcontracts);
       const subRows = toSubRows(subs.subcontracts);
       setSubDraft(subRows);
       setOriginalSubIds(subRows.map((r) => r.id).filter((x): x is string => !!x));
       setPaymentsDraft(Object.fromEntries(subRows.filter((r) => r.id).map((r) => [r.id as string, r.payments ?? []])));
       setOriginalPayments(Object.fromEntries(subRows.filter((r) => r.id).map((r) => [r.id as string, r.payments ?? []])));
-      // shared.tsx 的 appFormFrom 只認得舊的三個英文 key；科別動態化之後改在這裡
-      // 依設定＋專案既有 key 重建 engineers 表單（舊 key 的資料仍看得到，存檔時
-      // 會以設定裡的科別為準改寫）。
-      setAppForm({ ...appFormFrom(detail.project), engineers: engineersFormOf(detail.project.engineers, disciplineList) });
       setMembers(m.members);
       setShareMeta({
         canEditBonus: m.canEditBonus ?? detail.access.editBonus ?? false,
@@ -279,7 +255,6 @@ export default function AdminProjectDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  const isPool = project?.shareMode === "pool_pct";
   const canFinance = access.finance;
   /** W4：分潤區（獎金池／成員趴數／異動史）。會計有 finance 但沒有 bonus。 */
   const canBonus = access.bonus;
@@ -331,30 +306,26 @@ export default function AdminProjectDetailPage() {
 
   return (
     <>
+      {/* 頁首動作：一律次要外框按鈕、大小一致，手機自動換行（DetailHeading 已 flex-wrap）。 */}
       <DetailHeading title={project.name} desc={headerDesc || undefined}>
         {canBonus && (
-          <Link href="/admin/bonus-runs" className="text-sm font-medium" style={{ color: "var(--brand)" }}>
-            追蹤獎金撥款 →
-          </Link>
+          <Button variant="secondary" size="sm" onClick={() => router.push("/admin/bonus-runs")}>
+            追蹤獎金撥款
+          </Button>
         )}
         {canFinance && (
-          <Link href={`/admin/disbursements/pivot?year=${project.fiscalYear}&groupBy=project`} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
-            查看年度專案放款 →
-          </Link>
+          <Button variant="secondary" size="sm" onClick={() => router.push(`/admin/disbursements/pivot?year=${project.fiscalYear ?? new Date().getFullYear()}&groupBy=project`)}>
+            查看年度專案放款
+          </Button>
         )}
         {canFinance && !project.reservedAt && (
-          <button
-            type="button"
-            onClick={() => setDupOpen(true)}
-            className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
-            data-testid="duplicate-project-button"
-          >
+          <Button variant="secondary" size="sm" onClick={() => setDupOpen(true)} data-testid="duplicate-project-button">
             複製為追加減／加做
-          </button>
+          </Button>
         )}
-        <Link href={`/admin/projects/${project.id}/application`} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
-          列印申請單 →
-        </Link>
+        <Button variant="secondary" size="sm" onClick={() => router.push(`/admin/projects/${project.id}/application`)}>
+          列印申請單
+        </Button>
       </DetailHeading>
 
       {/* C2 複製對話框：成功後導到新案（同一個 page 元件換 id 重新 load） */}
@@ -368,110 +339,28 @@ export default function AdminProjectDetailPage() {
         }}
       />
 
-      {/* 專案設定 */}
-      <ProjectSettingsCard project={project} depts={depts} emps={emps} isPool={isPool} canBonus={canBonus} canEditBonus={shareMeta.canEditBonus} canSeeProfit={access.profit !== false} saveProjectField={saveProjectField} error={error} />
-
-      {/* 本案公司人員與個人分潤：新增成員依本案「各角色分潤趴數」（申請單）帶入。 */}
-      <MembersCard
-        projectId={projectId} members={members} emps={emps} canBonus={canBonus}
-        canEditBonus={shareMeta.canEditBonus} bossConfigured={shareMeta.bossConfigured}
-        defaultSharePctByRole={shareMeta.defaults} grossProfit={shareMeta.grossProfit} taxInclusiveVatRate={shareMeta.taxInclusiveVatRate} profitHidden={shareMeta.profitHidden}
-        contractAmount={money?.amountUntaxed ?? null} receivedAmount={money?.receivedTotal ?? 0}
-        bonusRatePct={project.bonusRatePct ?? null}
-        setError={setError} load={load}
+      {/* ① 專案申請單（版面照公司 Word 申請單；格子內直接編輯，只送有變的欄位） */}
+      <ApplicationSheet
+        project={project}
+        canFinance={canFinance}
+        showProfit={access.profit !== false}
+        money={money}
+        billings={schedule?.installments ?? []}
+        subcontracts={savedSubs}
+        contracts={contracts}
+        companies={companies}
+        vendors={vendors}
+        disciplines={disciplines}
+        load={load}
       />
 
-      {/* C2 變更歷史：根案 → -1 → -2…，本案高亮、封存案灰字＋理由 */}
-      <LineageCard projectId={projectId} />
-
-      {/* 申請單資料（模組五） */}
-      {appForm && (
-        <ApplicationFieldsCard
-          project={project}
-          appForm={appForm} setAppForm={setAppForm}
-          savingApp={savingApp} setSavingApp={setSavingApp}
-          appSavedAt={appSavedAt} setAppSavedAt={setAppSavedAt}
-          contracts={contracts} vendors={vendors} companies={companies} canFinance={canFinance}
-          parentChoices={parentProjectChoices(mainProjects, project.id, project.parentProjectId)}
-          disciplines={disciplines}
-          error={error} setError={setError} load={load}
-          roleShareSection={canBonus ? (
-            <RoleSharePctCard
-              embedded
-              idPrefix="project-role-share"
-              title="各角色分潤趴數"
-              description={shareMeta.projectShareSet
-                ? "本案新增成員時依角色自動帶入（每位成員的趴數）。"
-                : "本案尚未設定，目前沿用新專案起始值；老闆儲存後即為本案自己的設定。"}
-              values={shareMeta.defaults}
-              canEdit={shareMeta.canEditBonus}
-              bossConfigured={shareMeta.bossConfigured}
-              allowUnset
-              onSave={async (value) => {
-                await updateProjectFields(project.id, { sharePctByRole: value });
-                await load();
-              }}
-            />
-          ) : null}
-        />
-      )}
-
-      {/* 金額（模組五，finance 權限才顯示） */}
-      {canFinance && money && <MoneyCard money={money} />}
-
-      {/* 合約與報價單（模組四第 3 條）。文件類型決定課不課印花稅。 */}
-      {canFinance && (
-        <ContractsCard
-          projectId={projectId} project={project} contracts={contracts} scansByContract={scansByContract}
-          cDocType={cDocType} setCDocType={setCDocType}
-          cOurRole={cOurRole} setCOurRole={setCOurRole}
-          cTitle={cTitle} setCTitle={setCTitle}
-          cCounterparty={cCounterparty} setCCounterparty={setCCounterparty}
-          cAmount={cAmount} setCAmount={setCAmount}
-          cSignedOn={cSignedOn} setCSignedOn={setCSignedOn}
-          cCopies={cCopies} setCCopies={setCCopies}
-          cContentNote={cContentNote} setCContentNote={setCContentNote}
-          noteDrafts={noteDrafts} setNoteDrafts={setNoteDrafts}
-          canSeeContractDocs={canSeeContractDocs}
-          savingContract={savingContract} setSavingContract={setSavingContract}
-          showAddForm={showContractForm} setShowAddForm={setShowContractForm}
-          contractFileRef={contractFileRef} pendingContractId={pendingContractId}
-          removeDoc={removeDoc}
-          error={error} setError={setError} load={load}
-        />
-      )}
-
-      {/* 請款期程（模組四第 4 條）＋ P3 開票／收款。金額一律系統算，不手動拉格。 */}
-      <BillingsCard
-        projectId={projectId}
-        schedule={schedule} setSchedule={setSchedule}
-        draft={draft} setDraft={setDraft}
-        savingSchedule={savingSchedule} setSavingSchedule={setSavingSchedule}
-        invoiceFormId={invoiceFormId} setInvoiceFormId={setInvoiceFormId}
-        invoiceNo={invoiceNo} setInvoiceNo={setInvoiceNo}
-        invoicedOn={invoicedOn} setInvoicedOn={setInvoicedOn}
-        receiveFormId={receiveFormId} setReceiveFormId={setReceiveFormId}
-        receivedOn={receivedOn} setReceivedOn={setReceivedOn}
-        receivedAmount={receivedAmount} setReceivedAmount={setReceivedAmount}
-        error={error} setError={setError} load={load}
+      {/* ② 申請單上沒有、系統要的設定：母案／部門／負責人／年度／預定起迄日 */}
+      <ProjectSettingsCard
+        project={project} depts={depts} emps={emps}
+        parentChoices={parentProjectChoices(mainProjects, project.id, project.parentProjectId)}
+        canEdit={canFinance}
+        saveProjectField={saveProjectField} error={error}
       />
-
-      {/* 副委託與協力技師（模組五） */}
-      {canFinance && (
-        <SubcontractsCard
-          projectId={projectId}
-          subDraft={subDraft} setSubDraft={setSubDraft}
-          originalSubIds={originalSubIds} setOriginalSubIds={setOriginalSubIds}
-          savingSubs={savingSubs} setSavingSubs={setSavingSubs}
-          subsSavedAt={subsSavedAt} setSubsSavedAt={setSubsSavedAt}
-          expandedSub={expandedSub} setExpandedSub={setExpandedSub}
-          paymentsDraft={paymentsDraft} setPaymentsDraft={setPaymentsDraft}
-          originalPayments={originalPayments} setOriginalPayments={setOriginalPayments}
-          savingPayments={savingPayments} setSavingPayments={setSavingPayments}
-          vendors={vendors} companies={companies} money={money} showProfit={access.profit !== false}
-          error={error} setError={setError} load={load}
-        />
-      )}
 
       {/* 案情狀態（模組四第 2 條）。與封存是兩軸。 */}
       <StatusCard
@@ -484,11 +373,108 @@ export default function AdminProjectDetailPage() {
         error={error} setError={setError} load={load}
       />
 
+      {/* 合約與報價單（模組四第 3 條）：申請單「訂單」「銷售金額」的來源。文件類型決定課不課印花稅。 */}
+      {canFinance && (
+        <div id="project-contracts" className="scroll-mt-20">
+          <ContractsCard
+            projectId={projectId} project={project} contracts={contracts} scansByContract={scansByContract}
+            cDocType={cDocType} setCDocType={setCDocType}
+            cOurRole={cOurRole} setCOurRole={setCOurRole}
+            cTitle={cTitle} setCTitle={setCTitle}
+            cCounterparty={cCounterparty} setCCounterparty={setCCounterparty}
+            cAmount={cAmount} setCAmount={setCAmount}
+            cSignedOn={cSignedOn} setCSignedOn={setCSignedOn}
+            cCopies={cCopies} setCCopies={setCCopies}
+            cContentNote={cContentNote} setCContentNote={setCContentNote}
+            noteDrafts={noteDrafts} setNoteDrafts={setNoteDrafts}
+            canSeeContractDocs={canSeeContractDocs}
+            savingContract={savingContract} setSavingContract={setSavingContract}
+            showAddForm={showContractForm} setShowAddForm={setShowContractForm}
+            contractFileRef={contractFileRef} pendingContractId={pendingContractId}
+            removeDoc={removeDoc}
+            error={error} setError={setError} load={load}
+          />
+        </div>
+      )}
+
+      {/* 金額：未收、請款／收款進度（模組五，finance 權限才顯示） */}
+      {canFinance && money && <MoneyCard money={money} />}
+
+      {/* 請款期程（模組四第 4 條）＋ P3 開票／收款：申請單「付款階段」的來源。金額一律系統算。 */}
+      <div id="project-billings" className="scroll-mt-20">
+        <BillingsCard
+          projectId={projectId}
+          schedule={schedule} setSchedule={setSchedule}
+          draft={draft} setDraft={setDraft}
+          savingSchedule={savingSchedule} setSavingSchedule={setSavingSchedule}
+          invoiceFormId={invoiceFormId} setInvoiceFormId={setInvoiceFormId}
+          invoiceNo={invoiceNo} setInvoiceNo={setInvoiceNo}
+          invoicedOn={invoicedOn} setInvoicedOn={setInvoicedOn}
+          receiveFormId={receiveFormId} setReceiveFormId={setReceiveFormId}
+          receivedOn={receivedOn} setReceivedOn={setReceivedOn}
+          receivedAmount={receivedAmount} setReceivedAmount={setReceivedAmount}
+          error={error} setError={setError} load={load}
+        />
+      </div>
+
+      {/* 副委託與協力技師（模組五）：申請單「發包單位」的來源；期款與放款連動也在這裡。 */}
+      {canFinance && (
+        <div id="project-subcontracts" className="scroll-mt-20">
+          <SubcontractsCard
+            projectId={projectId}
+            subDraft={subDraft} setSubDraft={setSubDraft}
+            originalSubIds={originalSubIds} setOriginalSubIds={setOriginalSubIds}
+            savingSubs={savingSubs} setSavingSubs={setSavingSubs}
+            subsSavedAt={subsSavedAt} setSubsSavedAt={setSubsSavedAt}
+            expandedSub={expandedSub} setExpandedSub={setExpandedSub}
+            paymentsDraft={paymentsDraft} setPaymentsDraft={setPaymentsDraft}
+            originalPayments={originalPayments} setOriginalPayments={setOriginalPayments}
+            savingPayments={savingPayments} setSavingPayments={setSavingPayments}
+            vendors={vendors} companies={companies} money={money} showProfit={access.profit !== false}
+            error={error} setError={setError} load={load}
+          />
+        </div>
+      )}
+
       {/* 文件（知識庫） */}
       <DocumentsCard projectId={projectId} fileRef={fileRef} projectLevelDocs={projectLevelDocs} canSeeContractDocs={canSeeContractDocs} removeDoc={removeDoc} setError={setError} load={load} />
 
-      {/* 分潤異動史 */}
+      {/* C2 變更歷史：根案 → -1 → -2…，本案高亮、封存案灰字＋理由 */}
+      <LineageCard projectId={projectId} />
+
+      {/* 分潤版本歷程 */}
       <AdjustmentsCard adjustments={adjustments} />
+
+      {/* ③ 最下方：專案獎金與分潤——分潤模式、各角色分潤趴數、獎金比例與成員分潤（業主 2026-10-27）。 */}
+      {canBonus && (
+        <ShareModeCard project={project} canEditBonus={shareMeta.canEditBonus} canSeeProfit={access.profit !== false} saveProjectField={saveProjectField} />
+      )}
+      {canBonus && (
+        <RoleSharePctCard
+          idPrefix="project-role-share"
+          title="各角色分潤趴數"
+          description={shareMeta.projectShareSet
+            ? "本案新增成員時依角色自動帶入（每位成員的趴數）。"
+            : "本案尚未設定，目前沿用新專案起始值；老闆儲存後即為本案自己的設定。"}
+          values={shareMeta.defaults}
+          canEdit={shareMeta.canEditBonus}
+          bossConfigured={shareMeta.bossConfigured}
+          allowUnset
+          onSave={async (value) => {
+            await updateProjectFields(project.id, { sharePctByRole: value });
+            await load();
+          }}
+        />
+      )}
+      {/* 本案公司人員與個人分潤：獎金比例＋成員趴數；新增成員依上方「各角色分潤趴數」帶入。 */}
+      <MembersCard
+        projectId={projectId} members={members} emps={emps} canBonus={canBonus}
+        canEditBonus={shareMeta.canEditBonus} bossConfigured={shareMeta.bossConfigured}
+        defaultSharePctByRole={shareMeta.defaults} grossProfit={shareMeta.grossProfit} taxInclusiveVatRate={shareMeta.taxInclusiveVatRate} profitHidden={shareMeta.profitHidden}
+        contractAmount={money?.amountUntaxed ?? null} receivedAmount={money?.receivedTotal ?? 0}
+        bonusRatePct={project.bonusRatePct ?? null}
+        setError={setError} load={load}
+      />
     </>
   );
 }

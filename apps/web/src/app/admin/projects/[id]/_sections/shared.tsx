@@ -4,12 +4,6 @@
  */
 import type { Dispatch, SetStateAction } from "react";
 import {
-  ENGINEER_DISCIPLINES,
-  type ProjectDetail,
-  type DesignScopeItem,
-  type InvoiceType,
-  type PaymentMethod,
-  type EngineerDiscipline,
   type Subcontract,
   type SubcontractsResponse,
   type BillingScheduleExt,
@@ -38,58 +32,6 @@ export function fmtMoney(n: number | null | undefined): string {
 }
 export function todayKey(): string {
   return new Date().toISOString().slice(0, 10);
-}
-
-export type EngineerFormValue = { vendorId: string | null; name: string | null };
-export type EngineersForm = Record<EngineerDiscipline, EngineerFormValue>;
-
-/**
- * 空的技師表單：科別不再寫死三個英文 key（W8 後 key ＝租戶自訂的中文科別），
- * 改由 `ENGINEER_DISCIPLINES`（預設 電機／空調／消防／汙水）動態產生。
- * ⚠️ 這只是「還沒拿到租戶設定」時的骨架；page.tsx 載入完會用 `engineersFormOf(engineers,
- * disciplineList)` 依實際 project_settings.disciplines ＋專案上既有的 key 整份重算並覆蓋。
- */
-export function emptyEngineersForm(): EngineersForm {
-  const out: EngineersForm = {};
-  for (const discipline of ENGINEER_DISCIPLINES) out[discipline] = { vendorId: null, name: null };
-  return out;
-}
-
-export interface AppForm {
-  /** 承接公司。"" ＝ 沿用租戶預設公司（專案上 company_id 為 null）；有值＝這案指定的公司。 */
-  companyId: string;
-  /** 母案（變更設計／追加／代墊才有）。"" ＝ 還沒指定，可事後補；主案恆為 ""。 */
-  parentProjectId: string;
-  siteAddress: string;
-  siteAreaM2: string;
-  designScope: DesignScopeItem[];
-  invoiceType: InvoiceType | "";
-  paymentMethod: PaymentMethod | "";
-  closingDay: string;
-  paymentDay: string;
-  otherExpenses: string;
-  engineers: EngineersForm;
-}
-
-export function appFormFrom(p: ProjectDetail): AppForm {
-  const engineers = emptyEngineersForm();
-  for (const d of ENGINEER_DISCIPLINES) {
-    const a = p.engineers?.[d];
-    if (a) engineers[d] = { vendorId: a.vendorId ?? null, name: a.name ?? null };
-  }
-  return {
-    companyId: p.companyId ?? "",
-    parentProjectId: p.parentProjectId ?? "",
-    siteAddress: p.siteAddress ?? "",
-    siteAreaM2: p.siteAreaM2 != null ? String(p.siteAreaM2) : "",
-    designScope: p.designScope ?? [],
-    invoiceType: (p.invoiceType as InvoiceType) ?? "",
-    paymentMethod: (p.paymentMethod as PaymentMethod) ?? "",
-    closingDay: p.closingDay ?? "",
-    paymentDay: p.paymentDay ?? "",
-    otherExpenses: p.otherExpenses != null ? String(p.otherExpenses) : "",
-    engineers,
-  };
 }
 
 export type SubRow = Subcontract & { _key: string };

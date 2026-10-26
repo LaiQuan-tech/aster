@@ -1,54 +1,66 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { Card, ErrorText, inputCls, labelCls } from "@/components/admin-ui";
-import { ClientCombo } from "@/components/ClientCombo";
 import type { Department, Employee } from "@/lib/admin-api";
-import { type ShareMode } from "@/lib/projects-api";
-import { listClients, type Client, type ProjectDetail, type UpdateProjectExtBody } from "@/lib/projects-ext-api";
+import type { ProjectDetail, UpdateProjectExtBody } from "@/lib/projects-ext-api";
+import { parentProjectPatch } from "../../_components/project-application-form";
 
 interface ProjectSettingsCardProps {
   project: ProjectDetail;
   depts: Department[];
   emps: Employee[];
-  isPool: boolean;
-  /** W4：分潤區（獎金池、角色預設趴數）的可見性。會計為 false。 */
-  canBonus: boolean;
-  /** 分潤改版 #6：分潤模式與獎金池只有老闆能改（看得到 ≠ 改得了）。 */
-  canEditBonus?: boolean;
-  /** 看得到集團財務（access.profit，2026-10-26）：獎金池總額屬集團財務，false＝欄位不畫。省略＝畫。 */
-  canSeeProfit?: boolean;
+  /**
+   * 「母案」下拉的選項（page.tsx 以 `parentProjectChoices` 算好）：同租戶的主案、已排除本案；
+   * 只有變更設計／追加／代墊會用到（主案不能掛母案，下拉不顯示）。
+   */
+  parentChoices: Array<{ id: string; label: string }>;
+  /** 後端 PATCH 需要 canManage（＝access.finance）；false 時欄位唯讀。 */
+  canEdit: boolean;
   saveProjectField: (patch: UpdateProjectExtBody) => Promise<void>;
   error: string | null;
 }
 
 /**
- * 專案設定（客戶／部門／負責人／分潤模式／年度／起迄日）。欄位即存，走
- * page.tsx 的 saveProjectField。客戶名冊自己抓（B4）——`[id]/page.tsx`
- * 目前沒有載入 clients，改成外部傳入要動到那支檔案，這裡改成自給自足即可。
- *
- * 實際公司人員與個人分潤由緊接在本卡下方的「專案獎金與分潤」整批編輯器維護；
- * 不把租戶級角色預設值混在單一專案頁，避免管理員誤以為正在設定本案人員。
+ * 申請單上沒有、但系統要的專案設定（母案／部門／負責人／歸屬年度／預定起迄日）。欄位即存，走
+ * page.tsx 的 saveProjectField。申請單上有的欄位（工程名稱、開案日期、承接公司、客戶…）
+ * 在上方的申請單表格裡改；分潤模式與獎金池在頁面最下方的「專案獎金與分潤」。
  */
-export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, canEditBonus = false, canSeeProfit = true, saveProjectField, error }: ProjectSettingsCardProps) {
-  const [clients, setClients] = useState<Client[]>([]);
-  useEffect(() => {
-    listClients().then((r) => setClients(r.clients)).catch(() => {});
-  }, []);
-
+export function ProjectSettingsCard({ project, depts, emps, parentChoices, canEdit, saveProjectField, error }: ProjectSettingsCardProps) {
+  const lockedTitle = canEdit ? undefined : "需要本案的財務權限才能修改";
   return (
     <Card>
-      <h2 className="mb-3 text-sm font-semibold text-gray-700">專案設定</h2>
+      <h2 className="mb-3 text-sm font-semibold text-gray-700">其他專案設定</h2>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <div className="sm:col-span-2">
-          <label className={labelCls}>客戶</label>
-          <ClientCombo clients={clients} clientId={project.clientId} onChange={(id) => saveProjectField({ clientId: id })} />
-        </div>
+        {project.kind !== "main" && (
+          <div className="sm:col-span-2">
+            <label className={labelCls} htmlFor="project-parent">母案</label>
+            <select
+              id="project-parent"
+              className={inputCls}
+              value={project.parentProjectId ?? ""}
+              disabled={!canEdit}
+              title={lockedTitle}
+              onChange={(e) => {
+                const patch = parentProjectPatch(project, e.target.value);
+                if (Object.keys(patch).length > 0) saveProjectField(patch);
+              }}
+            >
+              <option value="">未指定（可事後補上）</option>
+              {parentChoices.map((choice) => (
+                <option key={choice.id} value={choice.id}>{choice.label}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-gray-400">母案是選填，可隨時補上或清空；只能選主案，不能選自己。</p>
+          </div>
+        )}
         <div>
-          <label className={labelCls}>所屬部門</label>
+          <label className={labelCls} htmlFor="project-dept">所屬部門</label>
           <select
+            id="project-dept"
             className={inputCls}
             value={project.deptId ?? ""}
+            disabled={!canEdit}
+            title={lockedTitle}
             onChange={(e) => saveProjectField({ deptId: e.target.value || null })}
           >
             <option value="">不指定</option>
@@ -58,10 +70,13 @@ export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, ca
           </select>
         </div>
         <div>
-          <label className={labelCls}>專案負責人</label>
+          <label className={labelCls} htmlFor="project-lead">專案負責人</label>
           <select
+            id="project-lead"
             className={inputCls}
             value={project.leadEmpId ?? ""}
+            disabled={!canEdit}
+            title={lockedTitle}
             onChange={(e) => saveProjectField({ leadEmpId: e.target.value || null })}
           >
             <option value="">不指定</option>
@@ -71,42 +86,15 @@ export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, ca
           </select>
         </div>
         <div>
-          <label className={labelCls}>分潤模式</label>
-          <select
-            className={inputCls}
-            value={project.shareMode}
-            disabled={!canBonus || !canEditBonus}
-            title={canBonus && !canEditBonus ? "分潤比例僅老闆可修改" : undefined}
-            onChange={(e) => saveProjectField({ shareMode: e.target.value as ShareMode })}
-          >
-            <option value="pool_pct">獎金池 × 百分比</option>
-            <option value="fixed_amount">直接填每人金額</option>
-          </select>
-        </div>
-        {isPool && canBonus && canSeeProfit && (
-          <div>
-            <label className={labelCls}>獎金池總額</label>
-            <input
-              className={inputCls}
-              type="number"
-              min="0"
-              disabled={!canEditBonus}
-              title={!canEditBonus ? "分潤比例僅老闆可修改" : undefined}
-              defaultValue={project.bonusPool ?? ""}
-              onBlur={(e) => {
-                const v = e.target.value === "" ? null : Number(e.target.value);
-                if (v !== project.bonusPool) saveProjectField({ bonusPool: v });
-              }}
-            />
-          </div>
-        )}
-        <div>
-          <label className={labelCls}>歸屬年度</label>
+          <label className={labelCls} htmlFor="project-fiscal-year">歸屬年度</label>
           <input
+            id="project-fiscal-year"
             className={inputCls}
             type="number"
             min="2000"
             max="2100"
+            disabled={!canEdit}
+            title={lockedTitle}
             defaultValue={project.fiscalYear ?? ""}
             onBlur={(e) => {
               const v = e.target.value === "" ? null : Number(e.target.value);
@@ -117,26 +105,15 @@ export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, ca
             報表與獎金歸在哪一年。編號裡的年度是建立年，已印在合約上，不隨這裡改動。
           </p>
         </div>
+        <div className="hidden sm:block" aria-hidden="true" />
         <div>
-          <label className={labelCls}>開案日期</label>
+          <label className={labelCls} htmlFor="project-starts-on">預定起始日</label>
           <input
+            id="project-starts-on"
             className={inputCls}
             type="date"
-            defaultValue={project.openedOn ?? ""}
-            onBlur={(e) => {
-              const v = e.target.value || null;
-              if (v !== (project.openedOn ?? null)) saveProjectField({ openedOn: v });
-            }}
-          />
-          <p className="mt-1 text-xs text-gray-400">
-            申請單抬頭與年度總表的建立日期依據；舊案子若這裡是空的可手動補。
-          </p>
-        </div>
-        <div>
-          <label className={labelCls}>預定起始日</label>
-          <input
-            className={inputCls}
-            type="date"
+            disabled={!canEdit}
+            title={lockedTitle}
             defaultValue={project.startsOn ?? ""}
             onBlur={(e) => {
               const v = e.target.value || null;
@@ -145,10 +122,13 @@ export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, ca
           />
         </div>
         <div>
-          <label className={labelCls}>預定完工日</label>
+          <label className={labelCls} htmlFor="project-ends-on">預定完工日</label>
           <input
+            id="project-ends-on"
             className={inputCls}
             type="date"
+            disabled={!canEdit}
+            title={lockedTitle}
             defaultValue={project.endsOn ?? ""}
             onBlur={(e) => {
               const v = e.target.value || null;
@@ -156,7 +136,7 @@ export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, ca
             }}
           />
           <p className="mt-1 text-xs text-gray-400">
-            甘特圖與進度示警的依據。過了完工日還沒結案會被示警。
+            進度示警的依據：過了完工日還沒結案會被示警。
           </p>
         </div>
       </div>
