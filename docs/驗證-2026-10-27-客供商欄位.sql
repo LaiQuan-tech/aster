@@ -19,7 +19,7 @@ select conname, pg_get_constraintdef(oid) as def from pg_constraint where conrel
 
 -- ── 4. backfill：名冊類別 × 類別前綴 ─────────────────────────────────
 -- 預期（剛套完、資料搬遷前）：「技師／…」全為 engineer、「送審單位／…」全為 review_unit、其他全為 supplier（正式租戶 10/12 匯入：技師 10、送審 3）
-select roster_kind, case when category like '技師／%' then '技師／…' when category like '送審單位／%' then '送審單位／…' else '其他' end as category_prefix, count(*) from public.vendors where deleted_at is null group by 1, 2 order by 1, 2;
+select roster_kind, case when category like '技師／%' then '技師／…' when category like '送審單位／%' or category like '送審相關單位／%' then '送審單位／…' else '其他' end as category_prefix, count(*) from public.vendors where deleted_at is null group by 1, 2 order by 1, 2;
 
 -- ── 5. 沒有新增直接寫入 policy（寫入一律經 API）─────────────────────────
 -- 預期：與套用前相同的 policy 清單（本檔不動 policy）

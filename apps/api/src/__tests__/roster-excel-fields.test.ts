@@ -148,6 +148,19 @@ describe("廠商名冊：0076 沒套", () => {
     expect(writes("vendors", "insert")).toHaveLength(0)
   })
 
+  it("表單永遠帶 rosterKind：等於預設 supplier 視為沒帶（照常建立）；技師等非預設值才 409", async () => {
+    fake.injectError({ table: "vendors", action: "select", error: missing })
+    await as(STAFF_TOKEN, request(app).get("/vendors"))
+    const ok = await as(STAFF_TOKEN, request(app).post("/vendors")).send({ name: "測試廠商己", rosterKind: "supplier", seq: null })
+    expect(ok.status).toBe(201)
+    expect(writes("vendors", "insert")[0]?.payload).not.toHaveProperty("roster_kind")
+    const patched = await as(STAFF_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send({ rosterKind: "supplier", phone: "(00)5555-5555" })
+    expect(patched.status).toBe(200)
+    const blocked = await as(STAFF_TOKEN, request(app).post("/vendors")).send({ name: "測試技師庚", rosterKind: "engineer" })
+    expect(blocked.status).toBe(409)
+    expect(blocked.body.columns).toEqual(["roster_kind"])
+  })
+
   it("POST 新欄位全空 → 照常建立，寫入不帶新欄位", async () => {
     fake.injectError({ table: "vendors", action: "insert", error: { code: "PGRST204", message: "Could not find the 'roster_kind' column" } })
     const res = await as(STAFF_TOKEN, request(app).post("/vendors")).send({ name: "測試廠商戊", seq: null, subCategory: "", code: null })

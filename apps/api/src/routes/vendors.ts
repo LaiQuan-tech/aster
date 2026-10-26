@@ -81,10 +81,14 @@ async function withVendorCols<T>(
   return r
 }
 
-/** 0076 沒套時：body 裡非空的新欄位（有就該回 409）；空值（null／""）直接從寫入剔除，不擋舊畫面或清空的表單。 */
+/**
+ * 0076 沒套時：body 裡非空的新欄位（有就該回 409）；空值（null／""）直接從寫入剔除，不擋舊畫面或清空的表單。
+ * 名冊類別等於預設值 supplier 也視為沒帶——表單永遠會送 rosterKind，沒套前所有廠商本來就都是供應商。
+ */
 function rosterFieldsPresent(b: Partial<z.infer<typeof vendorBody>>): string[] {
   return ROSTER_FIELDS.filter(([k]) => {
     const v = b[k]
+    if (k === "rosterKind" && v === "supplier") return false
     return v !== undefined && v !== null && v !== ""
   }).map(([, col]) => col)
 }

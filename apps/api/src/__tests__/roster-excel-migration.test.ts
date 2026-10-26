@@ -196,3 +196,90 @@ describe("planRosterMigration — 比對與欄位", () => {
     expect(sql).toContain("GET DIAGNOSTICS n = ROW_COUNT; IF n <> 1 THEN RAISE EXCEPTION")
   })
 })
+
+describe("備註只在欄位最終值等於 Excel 原格時才刪", () => {
+  it("匯入後改過、FAX 衝突沒覆蓋 → 「傳真」行保留", () => {
+    const db = vendor({ id: "n1", name: "測試廠商庚", fax: "(00)9999-9999", updated_at: LATER, note: ["傳真：(00)0000-0001", MARK].join("\n") })
+    const plan = planRosterMigration({ rows: [row({ cells: { 公司名稱: "測試廠商庚", fax: "(00)0000-0001" } })], vendors: [db], clients: [] })
+    expect(plan.conflicts).toContainEqual({ table: "vendors", id: "n1", column: "fax" })
+    expect(plan.updates[0]?.set ?? {}).not.toHaveProperty("note")
+  })
+
+  it("沒人改過、FAX 照寫 → 同一行就刪", () => {
+    const db = vendor({ id: "n2", name: "測試廠商庚", note: ["傳真：(00)0000-0001", MARK].join("\n") })
+    const plan = planRosterMigration({ rows: [row({ cells: { 公司名稱: "測試廠商庚", fax: "(00)0000-0001" } })], vendors: [db], clients: [] })
+    expect(plan.updates[0].set).toMatchObject({ fax: "(00)0000-0001", note: MARK })
+  })
+
+  it("收款方式對應不到（不是匯款／支票）→ 被拒寫，「收款方式」行保留", () => {
+    const c = client({ id: "n3", name: "測試客戶辛", note: ["收款方式：月結三十天", MARK].join("\n") })
+    const plan = planRosterMigration({
+      rows: [row({ sheet: "客戶資料", kind: "client", headers: CLIENT_HEADERS, cells: { 公司名稱: "測試客戶辛", 收款方式: "月結三十天" } })],
+      vendors: [], clients: [c],
+    })
+    expect(plan.rejected).toContainEqual({ table: "clients", id: "n3", column: "payment_method", reason: "unknown_payment_method" })
+    expect(plan.updates[0]?.set ?? {}).not.toHaveProperty("note")
+  })
+
+  it("付款方式超長 → 被拒寫，「付款方式」行保留", () => {
+    const long = "月結".repeat(51)
+    const db = vendor({ id: "n4", name: "測試廠商壬", note: [`付款方式：${long}`, MARK].join("\n") })
+    const plan = planRosterMigration({ rows: [row({ cells: { 公司名稱: "測試廠商壬", 付款方式: long } })], vendors: [db], clients: [] })
+    expect(plan.rejected).toContainEqual({ table: "vendors", id: "n4", column: "payment_terms", reason: "too_long" })
+    expect(plan.updates[0]?.set ?? {}).not.toHaveProperty("note")
+    expect(plan.updates[0]?.set ?? {}).not.toHaveProperty("payment_terms")
+  })
+
+  it("憑證格略過 → 依賴它的窗口行保留", () => {
+    const db = vendor({ id: "n5", name: "測試廠商癸", note: ["Mobil原文（未能完整拆解）：0900-000-000", MARK].join("\n") })
+    const plan = planRosterMigration({ rows: [row({ cells: { 公司名稱: "測試廠商癸", mobil: "0900-000-000 id: test01" } })], vendors: [db], clients: [] })
+    expect(plan.skippedCredentialCells).toBe(1)
+    expect(plan.updates[0]?.set ?? {}).not.toHaveProperty("note")
+  })
+})
+
+describe("租戶範圍與補建新版列", () => {
+  const OTHER = "22222222-2222-4222-8222-222222222222"
+
+  it("只處理指定租戶：別租戶同名記錄不比對、不更新", () => {
+    const plan = planRosterMigration(
+      { rows: [row({ cells: { 公司名稱: "測試廠商子" } })], vendors: [vendor({ id: "x1", name: "測試廠商子", tenant_id: OTHER })], clients: [] },
+      { tenantId: T },
+    )
+    expect(plan.updates).toEqual([])
+    expect(plan.unmatchedExcel).toHaveLength(1)
+  })
+
+  it("新版沒對到的列 → INSERT（帶匯入標記、拒寫原格進備註、憑證不寫）；舊版沒對到的列不新增", () => {
+    const plan = planRosterMigration(
+      {
+        rows: [
+          row({ cells: { 簡稱: "測丑", 類別: "廠商", 細目: "消防", 公司名稱: "測試廠商丑", fax: "(00)0000-0003", mobil: "id: test01", 備註: "測試新增備註" } }),
+          row({ sheet: "客戶資料", kind: "client", headers: CLIENT_HEADERS, rowNumber: 5, cells: { 公司名稱: "測試客戶寅", 統編: "12345675／87654321", 區域: "測試市" } }),
+          row({ file: "old", headers: OLD_HEADERS, rowNumber: 7, cells: { 公司名稱: "測試舊廠商卯" } }),
+        ],
+        vendors: [], clients: [],
+      },
+      { tenantId: T, insertUnmatchedNew: true, insertMarker: "〔測試補建〕" },
+    )
+    expect(plan.inserts).toHaveLength(2)
+    const v = plan.inserts.find((i) => i.table === "vendors")!
+    expect(v.values).toEqual({
+      roster_kind: "supplier", short_name: "測丑", category: "廠商", sub_category: "消防", name: "測試廠商丑", fax: "(00)0000-0003",
+      note: "測試新增備註\n〔測試補建〕", source: "manual",
+    })
+    const c = plan.inserts.find((i) => i.table === "clients")!
+    expect(c.values).toEqual({ region: "測試市", name: "測試客戶寅", note: "統編（Excel 原格，未寫入欄位）：12345675／87654321\n〔測試補建〕" })
+    expect(plan.unmatchedExcel.filter((r) => r.file === "old")).toHaveLength(1)
+    const sql = planToSql(plan)
+    expect(sql).toContain("INSERT INTO public.vendors (tenant_id, roster_kind")
+    expect(sql).toContain("WHERE NOT EXISTS (SELECT 1 FROM public.clients WHERE tenant_id = '11111111-1111-4111-8111-111111111111' AND name = '測試客戶寅' AND deleted_at IS NULL)")
+    expect(sql).toContain("RAISE EXCEPTION 'already_exists")
+    expect(sql).not.toContain("test01")
+    expect(summarizePlan(plan).toInsert).toEqual({ vendors: 1, clients: 1 })
+  })
+
+  it("要補建卻沒給租戶 → 直接報錯", () => {
+    expect(() => planRosterMigration({ rows: [], vendors: [], clients: [] }, { insertUnmatchedNew: true })).toThrow()
+  })
+})

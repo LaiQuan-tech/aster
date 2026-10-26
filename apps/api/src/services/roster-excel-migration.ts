@@ -194,8 +194,15 @@ export interface NoteRebuild {
 /**
  * 重組備註：Excel「備註」原文（有的話）＋ 保留的行 ＋ 匯入標記行。
  * `cells`＝該列 Excel 原格（已剔除憑證格）；`remark`＝要放進備註的 Excel「備註」原文（null＝這份檔沒有／不寫）。
+ * `settled`＝「搬遷後欄位最終值確實等於 Excel 原格」的表頭。一行匯入內容只有在它對應的每一欄（Excel 有值的）
+ * 都 settled 時才刪——衝突沒覆蓋、被拒寫、超長、憑證略過、對應不到的值，該行一律保留。省略＝cells 全部視為 settled。
  */
-export function rebuildNote(note: string | null | undefined, cells: Record<string, string>, remark: string | null): NoteRebuild {
+export function rebuildNote(
+  note: string | null | undefined,
+  cells: Record<string, string>,
+  remark: string | null,
+  settled: Set<string> = new Set(Object.keys(cells)),
+): NoteRebuild {
   const lines = String(note ?? "").split(/\r?\n/)
   const markers: string[] = []
   const kept: string[] = []
@@ -211,8 +218,10 @@ export function rebuildNote(note: string | null | undefined, cells: Record<strin
     const base = m ? norm(m[1]) : ""
     const sources = m ? MOVABLE_LABELS[Object.keys(MOVABLE_LABELS).find((k) => norm(k) === base) ?? ""] : undefined
     if (m && sources) {
-      const hay = sources.map((h) => cells[h]).filter((v): v is string => !!v)
-      if (verifiedIn(m[2], hay)) {
+      const withValue = sources.filter((h) => !!cells[h])
+      const allSettled = withValue.length > 0 && withValue.every((h) => settled.has(h))
+      const hay = withValue.map((h) => cells[h])
+      if (allSettled && verifiedIn(m[2], hay)) {
         removed += 1
         continue
       }
@@ -274,8 +283,28 @@ export interface PlannedUpdate {
   source: { file: "new" | "old"; sheet: string; rowNumber: number }
 }
 
+export interface PlannedInsert {
+  table: "vendors" | "clients"
+  tenantId: string
+  values: Record<string, PlanValue>
+  source: { file: "new" | "old"; sheet: string; rowNumber: number }
+}
+
+export interface RosterPlanOptions {
+  /** 只處理這個租戶（其他租戶的列一律忽略）；要新增記錄時必填。 */
+  tenantId?: string
+  /** 新版 Excel 有、系統沒有的列：新增（舊版沒對到的列永遠不新增）。 */
+  insertUnmatchedNew?: boolean
+  /** 新增記錄備註最後一行的匯入標記。 */
+  insertMarker?: string
+}
+
+export const DEFAULT_INSERT_MARKER = "〔2026-10-27 由客供商基本資料匯入（補建）〕"
+
 export interface RosterPlan {
   updates: PlannedUpdate[]
+  /** 新增的記錄（業主決定補建的新版列）。 */
+  inserts: PlannedInsert[]
   /** 已比對到、但沒有任何欄位要改的記錄數。 */
   unchanged: number
   matched: { vendors: number; clients: number }
@@ -307,7 +336,7 @@ export function vendorKindOf(row: Pick<DbVendorRow, "roster_kind" | "category">)
   }
   const c = row.category ?? ""
   if (c.startsWith("技師／")) return "engineer"
-  if (c.startsWith("送審單位／")) return "review_unit"
+  if (c.startsWith("送審單位／") || c.startsWith("送審相關單位／")) return "review_unit"
   return "supplier"
 }
 
@@ -379,10 +408,17 @@ interface BuildCtx {
   /** 因為是憑證而略過的表頭：維持現值，不當成「Excel 是空白」。 */
   skipped: Set<string>
   set: Record<string, PlanValue>
+  /** 表頭 → 依 Excel 該寫成的欄位值（有提議過的才有）；備註刪行前比對最終值用。 */
+  expected: Map<string, { column: string; value: PlanValue }>
+  /** 被拒寫的 Excel 原格（新增記錄時寫進備註，不讓資料消失）。 */
+  rejectedRaw: Array<{ header: string; raw: string }>
+  /** 新增記錄才有：備註最後一行的匯入標記。 */
+  insertMarker?: string
 }
 
 /** 一欄的提議值；套用「沒人改過才覆蓋」規則，記錄衝突。 */
-function propose(ctx: BuildCtx, column: string, value: PlanValue) {
+function propose(ctx: BuildCtx, column: string, value: PlanValue, header?: string) {
+  if (header) ctx.expected.set(header, { column, value })
   const current = ctx.db[column]
   if (same(current, value)) return
   const currentEmpty = current === null || current === undefined || current === ""
@@ -401,9 +437,9 @@ function applyRules(ctx: BuildCtx, rules: FieldRule[], cells: Record<string, str
     if (ctx.skipped.has(rule.header)) continue
     const raw = cells[rule.header] ?? ""
     if (rule.type === "int") {
-      if (!raw) propose(ctx, rule.column, null)
-      else if (/^\d{1,5}$/.test(raw)) propose(ctx, rule.column, Number(raw))
-      else ctx.plan.rejected.push({ table: ctx.table, id: ctx.db.id, column: rule.column, reason: "not_integer" })
+      if (!raw) propose(ctx, rule.column, null, rule.header)
+      else if (/^\d{1,5}$/.test(raw)) propose(ctx, rule.column, Number(raw), rule.header)
+      else reject(ctx, rule.column, "not_integer", rule.header, raw)
       continue
     }
     if (rule.column === "website" && raw && looksLikeLoginUrl(raw)) {
@@ -411,12 +447,21 @@ function applyRules(ctx: BuildCtx, rules: FieldRule[], cells: Record<string, str
       continue
     }
     if (rule.max && raw.length > rule.max) {
-      ctx.plan.rejected.push({ table: ctx.table, id: ctx.db.id, column: rule.column, reason: "too_long" })
+      reject(ctx, rule.column, "too_long", rule.header, raw)
       continue
     }
-    propose(ctx, rule.column, raw || null)
+    propose(ctx, rule.column, raw || null, rule.header)
   }
 }
+
+function reject(ctx: BuildCtx, column: string, reason: string, header: string, raw: string) {
+  ctx.plan.rejected.push({ table: ctx.table, id: ctx.db.id, column, reason })
+  ctx.rejectedRaw.push({ header, raw })
+}
+
+const newCtx = (plan: RosterPlan, table: "vendors" | "clients", db: unknown, row: ExcelRosterRow, edited: boolean, skipped: Set<string>, insertMarker?: string): BuildCtx => ({
+  plan, table, db: db as BuildCtx["db"], row, edited, skipped, set: {}, expected: new Map(), rejectedRaw: [], insertMarker,
+})
 
 /** 剔除憑證格（計數）：回傳可用的儲存格，與因憑證而略過的表頭（那幾欄維持現值，不當成「Excel 是空白」）。 */
 function safeCells(plan: RosterPlan, row: ExcelRosterRow): { cells: Record<string, string>; skipped: Set<string> } {
@@ -433,17 +478,17 @@ function safeCells(plan: RosterPlan, row: ExcelRosterRow): { cells: Record<strin
   return { cells, skipped }
 }
 
-function buildVendor(plan: RosterPlan, db: DbVendorRow, row: ExcelRosterRow, edited: boolean): Record<string, PlanValue> {
+function buildVendor(plan: RosterPlan, db: DbVendorRow, row: ExcelRosterRow, edited: boolean, insertMarker?: string): Record<string, PlanValue> {
   const { cells, skipped } = safeCells(plan, row)
-  const ctx: BuildCtx = { plan, table: "vendors", db: db as unknown as BuildCtx["db"], row, edited, skipped, set: {} }
+  const ctx = newCtx(plan, "vendors", db, row, edited, skipped, insertMarker)
   if (row.kind !== "client") propose(ctx, "roster_kind", row.kind)
   applyRules(ctx, VENDOR_RULES, cells)
   // 統編：不唯一、不驗檢查碼（廠商名冊既有規則），但要是 8 碼
   if (row.headers.includes("統編") && !skipped.has("統編")) {
     const raw = cells["統編"] ?? ""
     const tax = raw ? normalizeTaxId(raw) : null
-    if (raw && !tax) plan.rejected.push({ table: "vendors", id: db.id, column: "tax_id", reason: "not_8_digits" })
-    else propose(ctx, "tax_id", tax)
+    if (raw && !tax) reject(ctx, "tax_id", "not_8_digits", "統編", raw)
+    else propose(ctx, "tax_id", tax, "統編")
   }
   // 職稱：10/12 從承辦窗口／細目拆出來的；原格回到 contact_name／sub_category 後就重複了
   if (!edited && db.title && ["承辦窗口", "細目"].some((h) => norm(cells[h]).includes(norm(db.title)))) propose(ctx, "title", null)
@@ -452,36 +497,54 @@ function buildVendor(plan: RosterPlan, db: DbVendorRow, row: ExcelRosterRow, edi
   return ctx.set
 }
 
-function buildClient(plan: RosterPlan, db: DbClientRow, row: ExcelRosterRow, edited: boolean, taxOwners: Map<string, string>): Record<string, PlanValue> {
+function buildClient(plan: RosterPlan, db: DbClientRow, row: ExcelRosterRow, edited: boolean, taxOwners: Map<string, string>, insertMarker?: string): Record<string, PlanValue> {
   const { cells, skipped } = safeCells(plan, row)
-  const ctx: BuildCtx = { plan, table: "clients", db: db as unknown as BuildCtx["db"], row, edited, skipped, set: {} }
+  const ctx = newCtx(plan, "clients", db, row, edited, skipped, insertMarker)
   applyRules(ctx, CLIENT_RULES, cells)
   // 統編：客戶要過檢查碼且同租戶唯一；不合格就維持現值（例：一格兩個統編）
   if (row.headers.includes("統編") && !skipped.has("統編")) {
     const raw = cells["統編"] ?? ""
     const tax = raw ? normalizeTaxId(raw) : null
-    if (raw && (!tax || !isValidTaiwanTaxId(tax))) plan.rejected.push({ table: "clients", id: db.id, column: "tax_id", reason: "invalid_tax_id" })
+    if (raw && (!tax || !isValidTaiwanTaxId(tax))) reject(ctx, "tax_id", "invalid_tax_id", "統編", raw)
     else if (tax && taxOwners.has(`${db.tenant_id}:${tax}`) && taxOwners.get(`${db.tenant_id}:${tax}`) !== db.id)
-      plan.rejected.push({ table: "clients", id: db.id, column: "tax_id", reason: "tax_id_taken" })
+      reject(ctx, "tax_id", "tax_id_taken", "統編", raw)
     else {
       const before = ctx.set.tax_id
-      propose(ctx, "tax_id", tax)
+      propose(ctx, "tax_id", tax, "統編")
       if (ctx.set.tax_id !== before && tax) taxOwners.set(`${db.tenant_id}:${tax}`, db.id)
     }
   }
   if (row.headers.includes("收款方式") && !skipped.has("收款方式")) {
     const raw = cells["收款方式"] ?? ""
-    if (!raw) propose(ctx, "payment_method", null)
-    else if (CLIENT_PAYMENT[raw]) propose(ctx, "payment_method", CLIENT_PAYMENT[raw])
-    else plan.rejected.push({ table: "clients", id: db.id, column: "payment_method", reason: "unknown_payment_method" })
+    if (!raw) propose(ctx, "payment_method", null, "收款方式")
+    else if (CLIENT_PAYMENT[raw]) propose(ctx, "payment_method", CLIENT_PAYMENT[raw], "收款方式")
+    else reject(ctx, "payment_method", "unknown_payment_method", "收款方式", raw)
   }
   const remark = row.headers.includes("備註") && !skipped.has("備註") ? cells["備註"] ?? null : null
   noteStep(ctx, cells, remark)
   return ctx.set
 }
 
+/** 最終值（這次要寫的，或沒動就是現值）確實等於 Excel 原格的表頭。 */
+function settledHeaders(ctx: BuildCtx, remark: string | null): Set<string> {
+  const out = new Set<string>()
+  for (const [header, { column, value }] of ctx.expected) {
+    const final = column in ctx.set ? ctx.set[column] : (ctx.db[column] as PlanValue | undefined)
+    if (same(final, value)) out.add(header)
+  }
+  if (remark !== null) out.add("備註")
+  return out
+}
+
 function noteStep(ctx: BuildCtx, cells: Record<string, string>, remark: string | null) {
-  const r = rebuildNote(ctx.db.note, cells, remark)
+  if (ctx.insertMarker) {
+    // 新增記錄：Excel 備註＋被拒寫的原格（例：一格兩個統編）＋匯入標記；憑證格從來不進來
+    const lines = [remark?.trim() || "", ...ctx.rejectedRaw.map((r) => `${r.header}（Excel 原格，未寫入欄位）：${r.raw}`), ctx.insertMarker].filter(Boolean)
+    ctx.set.note = lines.join("\n")
+    if (remark?.trim()) ctx.plan.notes.remarksAdded += 1
+    return
+  }
+  const r = rebuildNote(ctx.db.note, cells, remark, settledHeaders(ctx, remark))
   if (!same(r.note, ctx.db.note ?? null)) {
     ctx.set.note = r.note
     ctx.plan.notes.linesRemoved += r.removed
@@ -492,15 +555,20 @@ function noteStep(ctx: BuildCtx, cells: Record<string, string>, remark: string |
 
 /* ── 主流程 ───────────────────────────────────────────────────────── */
 
-export function planRosterMigration(input: { rows: ExcelRosterRow[]; vendors: DbVendorRow[]; clients: DbClientRow[] }): RosterPlan {
+export function planRosterMigration(
+  input: { rows: ExcelRosterRow[]; vendors: DbVendorRow[]; clients: DbClientRow[] },
+  opts: RosterPlanOptions = {},
+): RosterPlan {
+  if (opts.insertUnmatchedNew && !opts.tenantId) throw new Error("insertUnmatchedNew 需要 tenantId")
   const plan: RosterPlan = {
-    updates: [], unchanged: 0, matched: { vendors: 0, clients: 0 },
+    updates: [], inserts: [], unchanged: 0, matched: { vendors: 0, clients: 0 },
     unmatchedExcel: [], ambiguousExcel: [], unmatchedDb: [], namelessRows: 0,
     skippedCredentialCells: 0, skippedLoginUrls: 0, editedAfterImport: [], conflicts: [], rejected: [],
     notes: { linesRemoved: 0, linesKept: 0, remarksAdded: 0 },
   }
-  const liveVendors = input.vendors.filter((v) => !v.deleted_at)
-  const liveClients = input.clients.filter((c) => !c.deleted_at)
+  const inTenant = (r: { tenant_id: string }) => !opts.tenantId || r.tenant_id === opts.tenantId
+  const liveVendors = input.vendors.filter((v) => !v.deleted_at && inTenant(v))
+  const liveClients = input.clients.filter((c) => !c.deleted_at && inTenant(c))
   const vendorById = new Map(liveVendors.map((v) => [v.id, v]))
   const clientById = new Map(liveClients.map((c) => [c.id, c]))
   const taxOwners = new Map(liveClients.filter((c) => c.tax_id).map((c) => [`${c.tenant_id}:${c.tax_id}`, c.id]))
@@ -555,6 +623,22 @@ export function planRosterMigration(input: { rows: ExcelRosterRow[]; vendors: Db
     if (Object.keys(set).length === 0) plan.unchanged += 1
     else plan.updates.push({ table, id: db.id, tenantId: db.tenant_id, seenUpdatedAt: db.updated_at, set, source: { file: row.file, sheet: row.sheet, rowNumber: row.rowNumber } })
   }
+
+  if (opts.insertUnmatchedNew && opts.tenantId) {
+    const marker = opts.insertMarker ?? DEFAULT_INSERT_MARKER
+    for (const ref of plan.unmatchedExcel.filter((r) => r.file === "new")) {
+      const row = newRows.find((r) => r.sheet === ref.sheet && r.rowNumber === ref.rowNumber)!
+      const stub = { id: `new:${row.sheet}:${row.rowNumber}`, tenant_id: opts.tenantId, name: "", note: null, created_at: "", updated_at: "" }
+      const isClient = row.kind === "client"
+      const values = isClient
+        ? buildClient(plan, stub as DbClientRow, row, false, taxOwners, marker)
+        : buildVendor(plan, stub as DbVendorRow, row, false, marker)
+      // 名稱必填：缺全名時用簡稱（10/12 匯入同一做法）
+      values.name = row.cells["公司名稱"] || row.cells["簡稱"]
+      if (!isClient) values.source = "manual"
+      plan.inserts.push({ table: isClient ? "clients" : "vendors", tenantId: opts.tenantId, values, source: { file: row.file, sheet: row.sheet, rowNumber: row.rowNumber } })
+    }
+  }
   return plan
 }
 
@@ -566,6 +650,11 @@ export function summarizePlan(plan: RosterPlan) {
   return {
     matched: plan.matched,
     toUpdate: countBy(plan.updates, (u) => u.table),
+    toInsert: countBy(plan.inserts, (i) => i.table),
+    insertFieldCounts: plan.inserts.reduce<Record<string, number>>((acc, i) => {
+      for (const col of Object.keys(i.values)) acc[`${i.table}.${col}`] = (acc[`${i.table}.${col}`] ?? 0) + 1
+      return acc
+    }, {}),
     unchanged: plan.unchanged,
     fieldCounts: Object.fromEntries(Object.entries(fieldCounts).sort()),
     unmatchedExcel: countBy(plan.unmatchedExcel, (r) => `${r.file}:${r.sheet}`),
@@ -601,6 +690,15 @@ export function planToSql(plan: RosterPlan): string {
     lines.push(
       `  UPDATE public.${u.table} SET ${sets.join(", ")}, updated_at = now() WHERE tenant_id = ${sqlLiteral(u.tenantId)} AND id = ${sqlLiteral(u.id)} AND deleted_at IS NULL AND updated_at = ${sqlLiteral(u.seenUpdatedAt)}::timestamptz;`,
       `  GET DIAGNOSTICS n = ROW_COUNT; IF n <> 1 THEN RAISE EXCEPTION 'stale_or_missing %.%', ${sqlLiteral(u.table)}, ${sqlLiteral(u.id)}; END IF;`,
+    )
+  }
+  for (const ins of plan.inserts) {
+    const cols = ["tenant_id", ...Object.keys(ins.values)]
+    const vals = [sqlLiteral(ins.tenantId), ...Object.values(ins.values).map(sqlLiteral)]
+    const name = sqlLiteral(ins.values.name ?? null)
+    lines.push(
+      `  INSERT INTO public.${ins.table} (${cols.join(", ")}) SELECT ${vals.join(", ")} WHERE NOT EXISTS (SELECT 1 FROM public.${ins.table} WHERE tenant_id = ${sqlLiteral(ins.tenantId)} AND name = ${name} AND deleted_at IS NULL);`,
+      `  GET DIAGNOSTICS n = ROW_COUNT; IF n <> 1 THEN RAISE EXCEPTION 'already_exists %.%', ${sqlLiteral(ins.table)}, ${name}; END IF;`,
     )
   }
   lines.push("END $roster$;", "")

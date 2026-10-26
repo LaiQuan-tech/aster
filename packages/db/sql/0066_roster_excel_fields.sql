@@ -12,7 +12,8 @@
 --     region  text     區域
 --     code    text     編號
 --   backfill：只在「本次才新增 roster_kind」時跑一次——10/12 匯入把工作表寫在 category 前綴
---     （「技師／…」「送審單位／…」），據此標 engineer／review_unit，其餘維持預設 supplier。
+--     （「技師／…」「送審單位／…」；正式租戶 2026-10-27 唯讀實查：技師／10、送審單位／3、送審相關單位／0，
+--     後者一併涵蓋以防手動建檔用了工作表全名），據此標 engineer／review_unit，其餘維持預設 supplier。
 --   Excel 的帳號、密碼、登入網址類內容不建欄位（憑證不進名冊）。
 -- 寫入一律經 API（service role）；不新增直接寫入 policy，讀取 policy 不動；audit trigger 整列 to_jsonb，新欄位自動入稽核。
 -- 前提：已套到 0075（sql/0065）。可重跑（IF NOT EXISTS／DROP … IF EXISTS）。
@@ -26,7 +27,7 @@ BEGIN
   ) THEN
     ALTER TABLE public.vendors ADD COLUMN roster_kind text NOT NULL DEFAULT 'supplier';
     UPDATE public.vendors SET roster_kind = 'engineer' WHERE category LIKE '技師／%';
-    UPDATE public.vendors SET roster_kind = 'review_unit' WHERE category LIKE '送審單位／%';
+    UPDATE public.vendors SET roster_kind = 'review_unit' WHERE category LIKE '送審單位／%' OR category LIKE '送審相關單位／%';
   END IF;
 END $mig$;
 
