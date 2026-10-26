@@ -75,6 +75,9 @@ const ROUTE_TABS: readonly RouteTabRule[] = [
   { path: "/leave-balances", tab: "balances" },
   { path: "/my/attendance-sheet", tab: "sheet" },
   { path: "/payslips", tab: "payslips" },
+  // 員工端「我的薪資明細表」（Excel 版面，routes/employee-statements.ts）。
+  { path: "/my/payslip-statement", tab: "payslips" },
+  { path: "/my/payslip-statements", tab: "payslips" },
   // 員工端報銷（/expenses、/expense-categories）；HR／會計的設定與結算端點走同一個分頁。
   { path: "/expenses", tab: "expenses" },
   { path: "/expense-categories", tab: "expenses" },

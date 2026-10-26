@@ -6,10 +6,9 @@ import { requireFinance } from "../middleware/role.js"
 import { isFinanceRole, isHrRole } from "../middleware/scope.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
-import { getTenantTimezone } from "../lib/tenant-tz.js"
+import { resolveLetterhead } from "../lib/letterhead.js"
 import { buildAttendanceWorkbook, workbookToBuffer, toRocYear } from "../lib/xlsx/index.js"
 import { getSheetView, listSheets, SheetError } from "../services/attendance-sheets.js"
-import { loadDailyRegularHours } from "../services/daily-regular-hours.js"
 import { SHEET_TRANSITIONS, type SheetStatus, type SheetView } from "../services/attendance-sheet-types.js"
 
 export const exportsRouter = Router()
@@ -17,48 +16,9 @@ export const exportsRouter = Router()
 /**
  * xlsx 匯出端點 — 出勤統計表（P1 出勤月表）。實際的 SheetView 組裝／授權規則
  * 全部在 services/attendance-sheets.ts；這裡只負責：認人（HR 或本人）、決定
- * 要不要含 money、組信頭（tenants.name/branding，沒有地址就用常數）、呼叫
+ * 要不要含 money、組信頭（lib/letterhead.ts：tenants.name/branding，沒有地址就用常數）、呼叫
  * lib/xlsx 產生 workbook、回傳 xlsx 附件。
- *
- * 沒有 tenants.branding.address/phone 欄位（目前 schema 只有
- * {logoUrl, primaryColor, appName}），所以地址/電話一律先看 branding、
- * 沒有就退回常數——這是任務指示「沒有地址欄就用常數」的實作。
  */
-
-const DEFAULT_COMPANY_NAME = "亞斯特設計顧問有限公司"
-const DEFAULT_ADDRESS = "新北市三重區新北大道2段260號5樓之2"
-
-interface TenantBranding {
-  address?: string
-  phone?: string
-  appName?: string
-}
-
-interface Letterhead {
-  companyName: string
-  address: string
-  phone: string
-  tz: string
-  /** 1 天 ＝ 幾小時（規則 payroll.dailyRegularHours）：彙總區「請假合計(天時)」的換算基準，讀不到＝8。 */
-  hoursPerDay: number
-}
-
-async function resolveLetterhead(tenantId: string): Promise<Letterhead> {
-  const [tenantRes, tz, hoursPerDay] = await Promise.all([
-    supabaseAdmin.from("tenants").select("name, branding").eq("id", tenantId).maybeSingle(),
-    getTenantTimezone(tenantId),
-    loadDailyRegularHours(tenantId),
-  ])
-  if (tenantRes.error) throw new Error(`exports (tenant): ${tenantRes.error.message}`)
-  const branding = (tenantRes.data?.branding ?? {}) as TenantBranding
-  return {
-    companyName: tenantRes.data?.name || branding.appName || DEFAULT_COMPANY_NAME,
-    address: branding.address || DEFAULT_ADDRESS,
-    phone: branding.phone || "",
-    tz,
-    hoursPerDay,
-  }
-}
 
 // Resolve the caller's own employee row (id + role) in this tenant, or null.
 // 保留本地版（不用 middleware/scope.js 的 resolveSelf）是因為這裡順手 setActor；

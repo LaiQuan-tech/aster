@@ -4,6 +4,7 @@ import { logger } from "./lib/logger.js"
 import { adminTenantsRouter } from "./routes/admin-tenants.js"
 import { tenantRouter } from "./routes/tenant.js"
 import { employeesRouter } from "./routes/employees.js"
+import { employeeStatementsRouter } from "./routes/employee-statements.js"
 import { authAccountsRouter } from "./routes/auth-accounts.js"
 import { departmentsRouter } from "./routes/departments.js"
 import { shiftsRouter } from "./routes/shifts.js"
@@ -127,6 +128,7 @@ app.use(adminTenantsRouter)
 app.use(tenantRouter)
 app.use(authAccountsRouter) // /employees/bulk-invite、/employees/:id/invite|send-reset、/auth/forgot-password、/me/password*
 app.use(employeesRouter)
+app.use(employeeStatementsRouter) // /employees/:id/statements、出勤統計表／薪資明細表 xlsx、/my/payslip-statement(s)
 app.use(departmentsRouter)
 app.use(shiftsRouter)
 // 班表（/schedules）2026-10-11 隨班表功能移除（業主：不需要）：端點取消註冊 → 落到下面的 404。
