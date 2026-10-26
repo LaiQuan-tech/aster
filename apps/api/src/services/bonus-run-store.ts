@@ -2,6 +2,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { OUR_CONTRACT_ROLES } from "../lib/contract-role.js"
 import { localDateKey, todayKey } from "../lib/tz.js"
 import { loadGrossProfitInput, summarizeProjectGrossProfit } from "./project-gross-profit.js"
+import { DEFAULT_VAT_RATE } from "./project-money.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { isUniqueViolation } from "./project-code.js"
 import { writeAuditLog } from "./audit.js"
@@ -16,6 +17,8 @@ import {
   statusAfterRecompute,
   transitionOf,
   BONUS_BASIS_LABEL,
+  parseBonusPoolBasis,
+  type BonusPoolBasis,
   buildBonusSummary,
   computeBonusRun,
   projectBonusBasisOf,
@@ -167,6 +170,9 @@ export type ItemSnapshot = {
   subcontractCost?: number
   grossProfit?: number
   overContractPct?: number | null
+  /** 2026-10-27 起（Excel 含稅入帳制）：營業稅率與累計含稅入帳。 */
+  vatRate?: number
+  taxInclusiveRevenue?: number
 }
 
 export type SerializedRun = {
@@ -244,6 +250,9 @@ export type SerializedItem = {
   grossProfit: number | null
   /** 入帳超過合約幾 %；沒超過 null。 */
   overContractPct: number | null
+  /** 累計含稅入帳（Excel 制的計算基礎）與營業稅率；舊明細 null（選填：舊呼叫端建構的明細可省略）。 */
+  taxInclusiveRevenue?: number | null
+  vatRate?: number | null
 }
 
 export function num(v: string | number | null | undefined): number | null {
@@ -375,6 +384,8 @@ function serializeItem(row: ItemRow): SerializedItem {
     subcontractCost: typeof s.subcontractCost === "number" ? s.subcontractCost : null,
     grossProfit: typeof s.grossProfit === "number" ? s.grossProfit : null,
     overContractPct: typeof s.overContractPct === "number" ? s.overContractPct : null,
+    taxInclusiveRevenue: typeof s.taxInclusiveRevenue === "number" ? s.taxInclusiveRevenue : null,
+    vatRate: typeof s.vatRate === "number" ? s.vatRate : null,
   }
 }
 
@@ -391,6 +402,25 @@ type LoadedInputs = {
   employeeMeta: Map<string, EmployeeMeta>
   /** 每個候選專案的封存階段（active／duplicate_replaced／archived）。 */
   archiveStage: Map<string, ArchiveStage>
+  /** 租戶獎金池口徑與營業稅率（沒有任何專案時可能缺）。 */
+  poolBasis?: BonusPoolBasis
+  vatRate?: number
+}
+
+/** 租戶獎金池口徑：tenants.features.bonus.poolBasis；沒設／讀不到 → tax_inclusive_receipts（Excel 制）。 */
+export async function loadBonusPoolBasis(tenantId: string): Promise<BonusPoolBasis> {
+  const { data, error } = await supabaseAdmin.from("tenants").select("features").eq("id", tenantId).maybeSingle()
+  if (error) throw new Error(`bonus-run loadBonusPoolBasis: ${error.message}`)
+  const bonus = ((data?.features as Record<string, unknown> | null)?.bonus ?? null) as { poolBasis?: unknown } | null
+  return parseBonusPoolBasis(bonus?.poolBasis)
+}
+
+/** 營業稅率：project_settings.vat_rate（專案設定，租戶層）；沒設 → 5%。 */
+async function loadVatRate(tenantId: string): Promise<number> {
+  const { data, error } = await supabaseAdmin.from("project_settings").select("vat_rate").eq("tenant_id", tenantId).maybeSingle()
+  if (error) throw new Error(`bonus-run loadVatRate: ${error.message}`)
+  const v = num((data?.vat_rate as string | number | null | undefined) ?? null)
+  return v !== null && v >= 0 && v < 1 ? v : DEFAULT_VAT_RATE
 }
 
 export async function tenantToday(tenantId: string): Promise<string> {
@@ -486,7 +516,12 @@ export async function loadInputs(tenantId: string, asOf: string, opts: LoadInput
   const scoped = archiveRule === "all" ? candidates : candidates.filter((p) => archiveStage.get(p.id) !== "duplicate_replaced")
   if (scoped.length === 0) return { projects: [], projectMeta, employeeMeta: new Map(), archiveStage }
   const scopedIds = scoped.map((p) => p.id)
-  const gp = summarizeProjectGrossProfit(scopedIds, await loadGrossProfitInput(tenantId, scopedIds, asOf))
+  // 獎金池口徑與營業稅率（租戶設定）；成本只有毛利制用得到，Excel 含稅入帳制不撈成本。
+  const [poolBasis, vatRate] = await Promise.all([loadBonusPoolBasis(tenantId), loadVatRate(tenantId)])
+  const gp = summarizeProjectGrossProfit(
+    scopedIds,
+    await loadGrossProfitInput(tenantId, scopedIds, asOf, { includeCost: poolBasis === "gross_profit" }),
+  )
 
   type ContractRow = { project_id: string; doc_type: string; amount: string | number | null }
   const contractRows: ContractRow[] = []
@@ -542,10 +577,12 @@ export async function loadInputs(tenantId: string, asOf: string, opts: LoadInput
       disbursementCost: money?.disbursementCost ?? 0,
       subcontractCost: money?.subcontractCost ?? 0,
       archived: archiveRule === "bonus_run" && archiveStage.get(p.id) === "archived",
+      poolBasis,
+      vatRate,
       members: membersByProject.get(p.id) ?? [],
     }
   })
-  return { projects: inputs, projectMeta, employeeMeta, archiveStage }
+  return { projects: inputs, projectMeta, employeeMeta, archiveStage, poolBasis, vatRate }
 }
 
 /** 先前 paid 且未刪的 runs 裡，同 (project, employee) 的 amount 合計。重算 draft 時排除自己。 */
@@ -660,6 +697,9 @@ export async function previewRun(tenantId: string, asOf: string, excludeRunId?: 
   const snapshot = {
     asOf,
     excludeRunId: excludeRunId ?? null,
+    /** 2026-10-27 起：當次試算用的獎金池口徑與營業稅率（已發批次的舊快照沒有這兩鍵）。 */
+    poolBasis: inputs.poolBasis ?? null,
+    vatRate: inputs.vatRate ?? null,
     projects: inputs.projects.filter((p) => !settledSet.has(p.projectId)).map((p) => {
       const meta = metaOf(p.projectId)
       const b = projectBonusBasisOf(p)
@@ -676,10 +716,12 @@ export async function previewRun(tenantId: string, asOf: string, excludeRunId?: 
         projectNote: p.projectNote,
         contractTotal: p.contractTotal,
         receivedTotal: p.receivedTotal,
-        cost: b.cost,
-        disbursementCost: b.disbursementCost,
-        subcontractCost: b.subcontractCost,
-        grossProfit: b.grossProfit,
+        cost: b.basis === "gross_profit" ? b.cost : null,
+        disbursementCost: b.basis === "gross_profit" ? b.disbursementCost : null,
+        subcontractCost: b.basis === "gross_profit" ? b.subcontractCost : null,
+        grossProfit: b.basis === "gross_profit" ? b.grossProfit : null,
+        taxInclusiveRevenue: b.taxInclusiveRevenue,
+        contractPool: b.contractPool,
         overContractPct: b.overContractPct,
         archived: inputs.archiveStage.get(p.projectId) === "archived",
         memberCount: p.members.length,
@@ -732,15 +774,26 @@ export async function previewRun(tenantId: string, asOf: string, excludeRunId?: 
       overpaidBy: i.overpaidBy,
       basis: i.basis,
       revenue: i.receivedTotal,
-      cost: i.cost,
-      disbursementCost: i.disbursementCost,
-      subcontractCost: i.subcontractCost,
-      grossProfit: i.grossProfit,
+      ...costFieldsOf(i),
       overContractPct: i.overContractPct,
+      taxInclusiveRevenue: i.taxInclusiveRevenue,
+      vatRate: i.vatRate,
     }
   })
   serialized.sort(compareItems)
   return { asOf, items: serialized, totals, snapshot, calc: items, projectMeta: inputs.projectMeta, employeeMeta: inputs.employeeMeta }
+}
+
+/** 成本／毛利欄只在毛利制輸出；Excel 含稅入帳制不扣成本，這些欄位一律 null（畫面不顯示毛利）。 */
+function costFieldsOf(i: BonusItemCalc): Pick<SerializedItem, "cost" | "disbursementCost" | "subcontractCost" | "grossProfit"> {
+  if (i.basis !== "gross_profit") return { cost: null, disbursementCost: null, subcontractCost: null, grossProfit: null }
+  return { cost: i.cost, disbursementCost: i.disbursementCost, subcontractCost: i.subcontractCost, grossProfit: i.grossProfit }
+}
+
+/** 寫進明細快照用：非毛利制不存成本／毛利鍵。 */
+function costFieldsOrOmit(i: BonusItemCalc): Partial<ItemSnapshot> {
+  if (i.basis !== "gross_profit") return {}
+  return { cost: i.cost, disbursementCost: i.disbursementCost, subcontractCost: i.subcontractCost, grossProfit: i.grossProfit }
 }
 
 function compareItems(a: SerializedItem, b: SerializedItem): number {
@@ -772,11 +825,10 @@ function itemRowsOf(tenantId: string, runId: string, preview: PreviewResult) {
       overpaidBy: i.overpaidBy,
       stale: false,
       basis: i.basis,
-      cost: i.cost,
-      disbursementCost: i.disbursementCost,
-      subcontractCost: i.subcontractCost,
-      grossProfit: i.grossProfit,
+      ...costFieldsOrOmit(i),
       overContractPct: i.overContractPct,
+      taxInclusiveRevenue: i.taxInclusiveRevenue,
+      vatRate: i.vatRate,
     }
     return {
       tenant_id: tenantId,
@@ -1383,6 +1435,8 @@ export async function createReversalRun(tenantId: string, actor: Actor, runId: s
     subcontractCost: typeof r.snapshot?.subcontractCost === "number" ? r.snapshot.subcontractCost : 0,
     grossProfit: typeof r.snapshot?.grossProfit === "number" ? r.snapshot.grossProfit : (num(r.received_total) ?? 0),
     overContractPct: typeof r.snapshot?.overContractPct === "number" ? r.snapshot.overContractPct : null,
+    vatRate: typeof r.snapshot?.vatRate === "number" ? r.snapshot.vatRate : 0.05,
+    taxInclusiveRevenue: typeof r.snapshot?.taxInclusiveRevenue === "number" ? r.snapshot.taxInclusiveRevenue : (num(r.received_total) ?? 0),
     receivedPct: num(r.received_pct) ?? 0,
     previousReceived: typeof r.snapshot?.previousReceived === "number" ? r.snapshot.previousReceived : 0,
     previousReceivedPct: typeof r.snapshot?.previousReceivedPct === "number" ? r.snapshot.previousReceivedPct : 0,

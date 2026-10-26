@@ -9,6 +9,8 @@ import { writeAuditLog } from "../services/audit.js"
 import { canEditUnlockList, sameEmployeeSet, unlockPolicyOf } from "../services/period-lock.js"
 import { BOSS_SETTING_MESSAGE, bossChanged, canChangeBoss } from "../services/privileged-accounts.js"
 import { tenantWeekendPolicy, type WeekendPolicy } from "../services/day-type.js"
+import { parseBonusPoolBasis } from "../services/bonus-run.js"
+import { scheduleBonusRecompute } from "../services/bonus-run-store.js"
 
 /**
  * 改了例假／休息日（features.attendance.regularLeaveWeekday／restDayWeekday）→ 既有行事曆是依舊週休產生的，
@@ -188,6 +190,17 @@ export const tenantSettingsSchema = z.object({
         })
         .optional(),
       /**
+       * 專案獎金池口徑（2026-10-27 業主決定，services/bonus-run.ts BONUS_POOL_BASES）：
+       *   tax_inclusive_receipts（預設，沒設＝這個）＝公司原 Excel：累計含稅入帳 × 比例 × 個人%，不扣成本；
+       *   gross_profit＝毛利制（入帳−已發生成本）。只影響有設獎金比例的專案；舊制手填池、固定金額不變。
+       * 改這個值會改變所有未發放批次的金額，**只有老闆（或 platform_admin）能改**（403 not_boss）。
+       */
+      bonus: z
+        .object({
+          poolBasis: z.enum(["tax_inclusive_receipts", "gross_profit"]).optional(),
+        })
+        .optional(),
+      /**
        * 帳號安全：allowWeakInitialPassword=true 時，HR 配發的密碼略過 Supabase 的弱密碼／外洩
        * 密碼（HIBP）檢查——POST /employees（建帳號、帶 password）改以 bcrypt hash 交給 GoTrue
        * createUser（password_hash）；POST /employees/:id/reset-password 帶 password（後台「設定
@@ -278,7 +291,7 @@ tenantRouter.put(
       // payroll、approval 是巢狀設定：合併而不是整鍵覆蓋。payroll：之後在裡面加別的設定不會被只帶 periodUnlockEmpIds 的
       // 請求洗掉；approval：帶 `approval: {}` 不會把老闆洗成空（要清除老闆得明確帶 fallbackApproverEmpId: null）。
       // attendance 同理：只帶 regularLeaveWeekday 不會洗掉 blockApproveOnUnsettledLeave。
-      for (const key of ["payroll", "approval", "attendance"] as const) {
+      for (const key of ["payroll", "approval", "attendance", "bonus"] as const) {
         if (incomingFeatures[key] !== undefined) {
           features[key] = { ...asRecord(currentFeatures[key]), ...asRecord(incomingFeatures[key]) }
         }
@@ -363,6 +376,16 @@ tenantRouter.put(
           }
         }
       }
+      // 獎金池口徑（features.bonus.poolBasis）：有效值變了 → 只有老闆（或 platform_admin），以**目前**的老闆為準。
+      const poolBasisOf = (f: Record<string, unknown>) => parseBonusPoolBasis(asRecord(f.bonus).poolBasis)
+      const poolBasisChanged = poolBasisOf(currentFeatures) !== poolBasisOf(features)
+      if (poolBasisChanged) {
+        const self = await loadSelf()
+        if (!self || !canEditUnlockList(before, self)) {
+          res.status(403).json({ error: "not_boss", message: "只有老闆可以變更獎金計算方式" })
+          return
+        }
+      }
       // 請求有帶名單就存成去重、小寫的 id（比對一律小寫）——沒變更時也一樣，不留大小寫不一的髒值。
       if ((incomingFeatures.payroll as { periodUnlockEmpIds?: unknown } | undefined)?.periodUnlockEmpIds !== undefined) {
         features.payroll = {
@@ -406,6 +429,8 @@ tenantRouter.put(
         })
       }
       const calendarRegeneration = weekendChangeHint(tenantWeekendPolicy(currentFeatures), tenantWeekendPolicy(data.features))
+      // 獎金計算方式改了 → 未發放批次排程重算（非同步、失敗只 log；送審中／已核准金額變了會退回草稿）。
+      if (poolBasisChanged) scheduleBonusRecompute(tenantId, "PUT /api/tenant/settings (bonus.poolBasis)")
       res.status(200).json({ branding: data.branding, features: data.features, ...(calendarRegeneration ? { calendarRegeneration } : {}) })
     } catch (err) {
       next(err)

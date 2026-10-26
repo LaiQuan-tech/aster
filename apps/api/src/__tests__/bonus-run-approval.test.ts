@@ -92,7 +92,8 @@ beforeEach(() => {
     employee(BOSS_ID, BOSS_TOKEN, "employee", "老闆大頭"),
     employee(STAFF_ID, STAFF_TOKEN, "employee", "員工甲"),
   ]
-  fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: BOSS_ID } } }]
+  // 這支的金額案例以毛利制寫成（features.bonus.poolBasis='gross_profit'）；Excel 制的接線另見 bonus-excel-basis.test.ts。
+  fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: BOSS_ID }, bonus: { poolBasis: "gross_profit" } } }]
   fake.db.projects = [
     project(P1, "T-001"),
     // 複製取代的原案：封存後還有入帳也不列
@@ -282,7 +283,7 @@ describe("核准狀態機（#7）", () => {
   })
 
   it("老闆兼 HR 自己送審自己核准：允許，但標註送審人與核准人相同；老闆設定大寫 uuid 也認得", async () => {
-    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: HR_ID.toUpperCase() } } }]
+    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: HR_ID.toUpperCase() }, bonus: { poolBasis: "gross_profit" } } }]
     const id = await createDraft()
     await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
     const ok = await req("post", `/bonus-runs/${id}/approve`, HR_TOKEN).send({})
@@ -291,7 +292,7 @@ describe("核准狀態機（#7）", () => {
   })
 
   it("老闆沒設定 → 送審 409 boss_not_configured", async () => {
-    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: {} }]
+    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { bonus: { poolBasis: "gross_profit" } } }]
     const id = await createDraft()
     const res = await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
     expect([res.status, res.body.error]).toEqual([409, "boss_not_configured"])
@@ -472,7 +473,7 @@ describe("毛利欄位：只有老闆／platform_admin／授權 HR 看得到（2
   })
 
   it("老闆（HR 兼老闆）：看得到毛利", async () => {
-    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: HR_ID } } }]
+    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: HR_ID }, bonus: { poolBasis: "gross_profit" } } }]
     const preview = await req("post", "/bonus-runs/preview", HR_TOKEN).send({ asOf: "2026-09-30" })
     expect(preview.body.canSeeProfit).toBe(true)
     expect((preview.body.items as Array<Record<string, unknown>>).find((i) => i.projectId === P1)!.grossProfit).toBe(3_000_000)

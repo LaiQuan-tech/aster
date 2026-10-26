@@ -25,6 +25,11 @@ interface MembersCardProps {
   receivedAmount: number;
   /** 目前累計毛利（估算服務）；有值時獎金總額＝max(0,毛利)×比例（毛利制）。 */
   grossProfit?: number | null;
+  /**
+   * Excel 含稅入帳制（2026-10-27 起預設）：有值＝營業稅率，獎金總額＝含稅合約額（合約 × (1＋稅率)）× 比例，
+   * 與公司原 Excel「總獎金」同口徑；每次發放＝本次含稅入帳 × 比例 × 個人%。
+   */
+  taxInclusiveVatRate?: number | null;
   bonusRatePct: number | null;
   /**
    * 專案毛利只有老闆／platform_admin／授權 HR 看得到（業主 2026-10-26）。true＝呼叫者看不到毛利（未授權 HR、經理／主辦／部門主管）：
@@ -48,7 +53,7 @@ function columnTitle(member: ShareDraftMember, members: ShareDraftMember[]): str
 /** Excel 橫向專案分潤編輯器：全部變更先留在本機，最後以一個 revision 原子儲存。 */
 export function MembersCard({
   projectId, members, emps, canBonus, canEditBonus = false, bossConfigured = true, defaultSharePctByRole,
-  contractAmount, receivedAmount, grossProfit, bonusRatePct, profitHidden = false, allowRosterEdit = true, setError, load,
+  contractAmount, receivedAmount, grossProfit, taxInclusiveVatRate = null, bonusRatePct, profitHidden = false, allowRosterEdit = true, setError, load,
 }: MembersCardProps) {
   const [draft, setDraft] = useState(() => hydrateShareDraft(members, bonusRatePct));
   const [reason, setReason] = useState("");
@@ -60,9 +65,11 @@ export function MembersCard({
 
   const orderedMembers = useMemo(() => orderShareMembers(draft.members), [draft.members]);
   const availableEmployees = useMemo(() => emps.filter((emp) => !draft.members.some((member) => member.employeeId === emp.id)), [draft.members, emps]);
+  const taxIncl = taxInclusiveVatRate != null && grossProfit == null;
+  const bonusContractBase = taxIncl && contractAmount != null ? Math.round(contractAmount * (1 + (taxInclusiveVatRate as number))) : contractAmount;
   const calculation = useMemo(
-    () => calculateProjectShares({ contractAmount: profitHidden ? null : contractAmount, bonusRatePct: draft.bonusRatePct, members: orderedMembers, grossProfit: profitHidden ? null : grossProfit }),
-    [contractAmount, draft.bonusRatePct, orderedMembers, grossProfit, profitHidden],
+    () => calculateProjectShares({ contractAmount: profitHidden ? null : bonusContractBase, bonusRatePct: draft.bonusRatePct, members: orderedMembers, grossProfit: profitHidden ? null : grossProfit }),
+    [bonusContractBase, draft.bonusRatePct, orderedMembers, grossProfit, profitHidden],
   );
   const paidByEmployee = useMemo(() => new Map(members.map((m) => [m.employeeId, m.paidAmount ?? null])), [members]);
   const serverAmountByEmployee = useMemo(() => new Map(members.map((m) => [m.employeeId, m.estimatedAmount ?? m.computedAmount ?? null])), [members]);
@@ -131,14 +138,14 @@ export function MembersCard({
 
   const lockedHint = bossConfigured ? "分潤比例僅老闆可修改" : "尚未指定老闆：分潤比例僅老闆可修改，請先到公司設定指定老闆";
   const showProfit = grossProfit != null && !profitHidden;
-  const headers = ["合約金額", "已收款", ...(showProfit ? ["目前毛利"] : []), "獎金比例", "獎金總額"];
+  const headers = [taxIncl ? "合約金額（含稅）" : "合約金額", "已收款", ...(showProfit ? ["目前毛利"] : []), "獎金比例", "獎金總額"];
 
   return <Card>
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
       <div>
         <h2 className="text-sm font-semibold text-gray-700">專案獎金與分潤</h2>
         <p className="mt-0.5 text-xs text-gray-500">
-          {profitHidden ? "專案毛利、獎金比例與總額僅老闆與經授權人員可見（一般成員只看得到自己的預估應得）。" : showProfit ? "獎金總額＝目前毛利 × 獎金比例（隨入帳與成本累計變動）。" : "修改比例後金額即時連動。"}已發放歷史不變，差額會在下一次撥款調整。
+          {profitHidden ? "專案毛利、獎金比例與總額僅老闆與經授權人員可見（一般成員只看得到自己的預估應得）。" : showProfit ? "獎金總額＝目前毛利 × 獎金比例（隨入帳與成本累計變動）。" : taxIncl ? "獎金總額＝含稅合約額 × 獎金比例；每次發放＝本次含稅入帳 × 比例 × 個人%（不扣成本）。" : "修改比例後金額即時連動。"}已發放歷史不變，差額會在下一次撥款調整。
         </p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -155,7 +162,7 @@ export function MembersCard({
           <th className="border border-black px-3 py-2">尚未分配</th>
         </tr></thead>
         <tbody><tr>
-          <td className="border border-black px-3 py-3 text-right text-sm">{fmtMoney(contractAmount)}</td>
+          <td className="border border-black px-3 py-3 text-right text-sm">{fmtMoney(taxIncl ? bonusContractBase : contractAmount)}</td>
           <td className="border border-black px-3 py-3 text-right text-sm">{fmtMoney(receivedAmount)}</td>
           {showProfit && <td className="border border-black px-3 py-3 text-right text-sm">{fmtMoney(grossProfit)}</td>}
           <td className="border border-black p-2">{profitHidden ? <div className="text-sm text-gray-400" title="獎金比例僅老闆與經授權人員可見">—</div> : <div className="flex items-center justify-center gap-1"><input aria-label="專案獎金比例" className="w-20 rounded border border-gray-300 px-2 py-1 text-right disabled:bg-gray-50 disabled:text-gray-500" type="number" min="0" max="100" step="0.01" disabled={pctLocked} title={pctLocked ? lockedHint : undefined} value={draft.bonusRatePct ?? ""} onChange={(event) => setDraft((current) => ({ ...current, bonusRatePct: event.target.value === "" ? null : Number(event.target.value) }))} />%</div>}</td>

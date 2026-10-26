@@ -2,8 +2,9 @@ import { supabaseAdmin } from "../lib/supabase.js"
 
 /**
  * 專案「累計已實現毛利」——獎金試算（bonus-run-store.ts）、獎金估算（bonus-estimate.ts）
- * 與集團總覽（group-overview.ts 的支出毛額）共用的成本口徑。2026-10-26 業主決定 8：
- * 專案獎金池改用毛利。
+ * 與集團總覽（group-overview.ts 的支出毛額）共用的成本口徑。2026-10-26 業主決定 8 曾把獎金池改用毛利；
+ * 2026-10-27 業主改回公司原 Excel（含稅入帳 × 比例，不扣成本）為預設，毛利制保留為租戶設定
+ * features.bonus.poolBasis='gross_profit' 時的路徑——Excel 制下獎金只用這裡的入帳（includeCost=false）。
  *
  * ── 口徑 ───────────────────────────────────────────────────────────
  *   收入（revenue）＝Σ project_billings.received_amount（未稅；received_on ≤ asOf，
@@ -141,9 +142,35 @@ async function fetchAll<T>(
 }
 
 /** 撈指定專案截至 asOf 的入帳／放款分攤／舊路徑複委託付款，回 summarizeProjectGrossProfit 的輸入。 */
-export async function loadGrossProfitInput(tenantId: string, projectIds: readonly string[], asOf: string): Promise<GrossProfitInput> {
+export async function loadGrossProfitInput(
+  tenantId: string,
+  projectIds: readonly string[],
+  asOf: string,
+  opts: { includeCost?: boolean } = {},
+): Promise<GrossProfitInput> {
   const ids = [...new Set(projectIds)]
   if (ids.length === 0) return { billings: [], allocations: [], subcontractPayments: [] }
+  // includeCost=false：只要入帳（獎金 Excel 含稅入帳制不扣成本），不撈放款與複委託。
+  if (opts.includeCost === false) {
+    const billings: GrossProfitBillingRow[] = []
+    for (const chunk of chunks(ids)) {
+      billings.push(
+        ...(await fetchAll<GrossProfitBillingRow & { id: string }>("gross-profit billings", (from, to) =>
+          supabaseAdmin
+            .from("project_billings")
+            .select("id, project_id, received_amount, received_on")
+            .eq("tenant_id", tenantId)
+            .in("project_id", chunk)
+            .is("deleted_at", null)
+            .not("received_amount", "is", null)
+            .or(`received_on.is.null,received_on.lte.${asOf}`)
+            .order("id", { ascending: true })
+            .range(from, to),
+        )),
+      )
+    }
+    return { billings, allocations: [], subcontractPayments: [] }
+  }
 
   const billings: GrossProfitBillingRow[] = []
   const rawAllocs: Array<{ id: string; project_id: string; disbursement_id: string; amount: Numeric }> = []

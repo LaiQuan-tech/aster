@@ -130,7 +130,8 @@ export interface ProjectMember {
   pendingAmount?: number | null
 }
 
-export type BonusBasis = "gross_profit" | "legacy_pool" | "fixed_amount"
+/** tax_inclusive_receipts＝公司原 Excel（含稅入帳 × 比例，2026-10-27 起預設）；gross_profit＝毛利制（租戶設定可切換）。 */
+export type BonusBasis = "tax_inclusive_receipts" | "gross_profit" | "legacy_pool" | "fixed_amount"
 
 /** 專案層的估算數字（GET /projects/:id/members 的 bonusEstimate，只給看得到分潤的人）。 */
 export interface ProjectBonusEstimateSummary {
@@ -138,8 +139,13 @@ export interface ProjectBonusEstimateSummary {
   pool: number | null
   contractTotal: number | null
   revenue: number
-  cost: number
-  grossProfit: number
+  /** 成本／毛利只在毛利制有值；Excel 含稅入帳制為 null（畫面不顯示毛利）。 */
+  cost: number | null
+  grossProfit: number | null
+  /** 累計含稅入帳、營業稅率、Excel「總獎金」（含稅合約 × 比例）；舊版後端沒有。 */
+  taxInclusiveRevenue?: number
+  vatRate?: number
+  contractPool?: number | null
   overContractPct: number | null
   skipped: "no_contract" | "no_pool" | null
 }
@@ -155,7 +161,7 @@ export interface MembersResponse {
   /** 專案毛利（bonusEstimate、累計獎金池）可見性：老闆／platform_admin／授權 HR。 */
   canSeeProfit?: boolean
   shareMode: ShareMode
-  /** 累計獎金池（毛利制＝max(0,毛利)×比例；舊制＝手填獎金池）。 */
+  /** 累計獎金池（含稅入帳制＝累計含稅入帳×比例；毛利制＝max(0,毛利)×比例；舊制＝手填獎金池）。 */
   bonusPool: number | null
   bonusRatePct?: number | null
   bonusEstimate?: ProjectBonusEstimateSummary | null

@@ -190,7 +190,8 @@ export default function EssProjectDetailPage() {
                 defaultSharePctByRole={shareDefaults}
                 contractAmount={projectMoney?.amountUntaxed ?? null}
                 receivedAmount={projectMoney?.receivedTotal ?? 0}
-                grossProfit={membersRes.bonusEstimate && membersRes.bonusEstimate.basis !== "fixed_amount" ? membersRes.bonusEstimate.grossProfit : null}
+                grossProfit={membersRes.bonusEstimate && membersRes.bonusEstimate.basis === "gross_profit" ? membersRes.bonusEstimate.grossProfit : null}
+                taxInclusiveVatRate={membersRes.bonusEstimate && membersRes.bonusEstimate.basis === "tax_inclusive_receipts" ? (membersRes.bonusEstimate.vatRate ?? 0.05) : null}
                 bonusRatePct={membersRes.bonusRatePct ?? null}
                 allowRosterEdit={false}
                 setError={setShareError}

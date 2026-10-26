@@ -1682,6 +1682,10 @@ projectsRouter.get(
               revenue: est.revenue,
               cost: est.cost,
               grossProfit: est.grossProfit,
+              // 2026-10-27 Excel 含稅入帳制：含稅入帳、稅率、總獎金（含稅合約 × 比例）。
+              taxInclusiveRevenue: est.taxInclusiveRevenue,
+              vatRate: est.vatRate,
+              contractPool: est.contractPool,
               overContractPct: est.overContractPct,
               skipped: est.skipped,
             }

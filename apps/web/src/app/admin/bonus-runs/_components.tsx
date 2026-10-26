@@ -128,8 +128,8 @@ export function SkippedList({ skipped }: { skipped: Array<{ projectId: string; r
 }
 
 /**
- * 獎金怎麼算出來的（2026-10-26 毛利制）：每案一列——入帳、成本（放款＋複委託）、毛利、比例、獎金池、
- * 用哪一制。讓 HR／老闆對得出「為什麼是這個數字」。舊批次（沒有毛利欄位）整張不顯示。
+ * 獎金怎麼算出來的：每案一列——用哪一制、入帳（未稅／含稅）、比例、獎金池；毛利制另列成本（放款＋複委託）與毛利。
+ * 2026-10-27 起預設 Excel 含稅入帳制（不扣成本）：這時不顯示成本／毛利欄。舊批次（沒有 basis）整張不顯示。
  * 看不到集團財務的人（回應 canSeeProfit=false）呼叫端不畫這張表。
  */
 export function GrossProfitTable({ items }: { items: BonusRunPreview["items"] }) {
@@ -137,46 +137,53 @@ export function GrossProfitTable({ items }: { items: BonusRunPreview["items"] })
   for (const it of items) if (!byProject.has(it.projectId)) byProject.set(it.projectId, it);
   const rows = [...byProject.values()].filter((it) => it.basis != null);
   if (rows.length === 0) return null;
+  const showProfit = rows.some((it) => it.basis === "gross_profit");
+  const showTaxIncl = rows.some((it) => it.basis === "tax_inclusive_receipts");
+  const th = "border border-gray-300 px-2 py-1.5";
+  const td = "border border-gray-300 px-2 py-1";
   return (
     <div className="overflow-x-auto">
       <table className="min-w-max border-collapse whitespace-nowrap text-xs">
         <thead>
           <tr className="bg-gray-100 text-center font-semibold text-gray-700">
-            <th className="border border-gray-300 px-2 py-1.5">專案</th>
-            <th className="border border-gray-300 px-2 py-1.5">計算方式</th>
-            <th className="border border-gray-300 px-2 py-1.5">累計入帳（未稅）</th>
-            <th className="border border-gray-300 px-2 py-1.5">放款成本</th>
-            <th className="border border-gray-300 px-2 py-1.5">複委託付款</th>
-            <th className="border border-gray-300 px-2 py-1.5">累計毛利</th>
-            <th className="border border-gray-300 px-2 py-1.5">獎金比例</th>
-            <th className="border border-gray-300 px-2 py-1.5">累計獎金池</th>
-            <th className="border border-gray-300 px-2 py-1.5">入帳／合約</th>
+            <th className={th}>專案</th>
+            <th className={th}>計算方式</th>
+            <th className={th}>累計入帳（未稅）</th>
+            {showTaxIncl && <th className={th}>累計入帳（含稅）</th>}
+            {showProfit && <th className={th}>放款成本</th>}
+            {showProfit && <th className={th}>複委託付款</th>}
+            {showProfit && <th className={th}>累計毛利</th>}
+            <th className={th}>獎金比例</th>
+            <th className={th}>累計獎金池</th>
+            <th className={th}>入帳／合約</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((it) => {
-            const negative = (it.grossProfit ?? 0) < 0;
+            const isProfit = it.basis === "gross_profit";
+            const negative = isProfit && (it.grossProfit ?? 0) < 0;
             return (
               <tr key={it.projectId}>
-                <td className="border border-gray-300 px-2 py-1">
+                <td className={td}>
                   <Link href={`/admin/projects/${it.projectId}`} style={{ color: "var(--brand)" }}>
                     {it.projectCode ? `${it.projectCode} ` : ""}
                     {it.projectName ?? it.projectId}
                   </Link>
                 </td>
-                <td className="border border-gray-300 px-2 py-1">
-                  {it.basis ? BONUS_BASIS_LABELS[it.basis] : "—"}
-                </td>
-                <td className="border border-gray-300 px-2 py-1 text-right">{fmtMoney(it.revenue ?? it.receivedTotal)}</td>
-                <td className="border border-gray-300 px-2 py-1 text-right">{fmtMoney(it.disbursementCost)}</td>
-                <td className="border border-gray-300 px-2 py-1 text-right">{fmtMoney(it.subcontractCost)}</td>
-                <td className={`border border-gray-300 px-2 py-1 text-right font-semibold ${negative ? "text-red-600" : ""}`}>
-                  {fmtMoney(it.grossProfit)}
-                  {negative && <span className="ml-1 font-normal">（負毛利，池以 0 計）</span>}
-                </td>
-                <td className="border border-gray-300 px-2 py-1 text-right">{it.bonusRatePct == null ? "—" : `${it.bonusRatePct}%`}</td>
-                <td className="border border-gray-300 px-2 py-1 text-right">{fmtMoney(it.bonusPool)}</td>
-                <td className={`border border-gray-300 px-2 py-1 text-right ${it.overContractPct ? "font-semibold text-amber-700" : ""}`}>
+                <td className={td}>{it.basis ? BONUS_BASIS_LABELS[it.basis] : "—"}</td>
+                <td className={`${td} text-right`}>{fmtMoney(it.revenue ?? it.receivedTotal)}</td>
+                {showTaxIncl && <td className={`${td} text-right`}>{it.basis === "tax_inclusive_receipts" ? fmtMoney(it.taxInclusiveRevenue) : "—"}</td>}
+                {showProfit && <td className={`${td} text-right`}>{isProfit ? fmtMoney(it.disbursementCost) : "—"}</td>}
+                {showProfit && <td className={`${td} text-right`}>{isProfit ? fmtMoney(it.subcontractCost) : "—"}</td>}
+                {showProfit && (
+                  <td className={`${td} text-right font-semibold ${negative ? "text-red-600" : ""}`}>
+                    {isProfit ? fmtMoney(it.grossProfit) : "—"}
+                    {negative && <span className="ml-1 font-normal">（負毛利，池以 0 計）</span>}
+                  </td>
+                )}
+                <td className={`${td} text-right`}>{it.bonusRatePct == null ? "—" : `${it.bonusRatePct}%`}</td>
+                <td className={`${td} text-right`}>{fmtMoney(it.bonusPool)}</td>
+                <td className={`${td} text-right ${it.overContractPct ? "font-semibold text-amber-700" : ""}`}>
                   {it.contractTotal ? fmtPct(it.receivedPct) : "—（無合約）"}
                 </td>
               </tr>
@@ -185,7 +192,12 @@ export function GrossProfitTable({ items }: { items: BonusRunPreview["items"] })
         </tbody>
       </table>
       <p className="mt-2 text-xs text-gray-500">
-        毛利制：每人累計應得＝max(0, 累計毛利) × 獎金比例 × 個人趴數，本次＝累計應得 − 已發。成本＝已匯款的放款（含代扣）＋沒經放款單、已標記付款的複委託期款。
+        {showTaxIncl && (
+          <>含稅入帳制（公司原 Excel）：每人累計應得＝累計含稅入帳 × 獎金比例 × 個人趴數，本次＝累計應得 − 已發（不扣成本）。</>
+        )}
+        {showProfit && (
+          <>毛利制：每人累計應得＝max(0, 累計毛利) × 獎金比例 × 個人趴數，本次＝累計應得 − 已發。成本＝已匯款的放款（含代扣）＋沒經放款單、已標記付款的複委託期款。</>
+        )}
         舊制（手填獎金池）：獎金池 × 入帳比例（最多 100%）× 個人趴數。
       </p>
     </div>

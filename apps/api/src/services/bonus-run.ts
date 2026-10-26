@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { round0 } from "./project-money.js"
+import { DEFAULT_VAT_RATE, round0 } from "./project-money.js"
 
 /**
  * 專案獎金「季發放批次」的拆算——**純函式**，不碰 DB（IO 在 bonus-run-store.ts）。
@@ -146,6 +146,10 @@ export type BonusProjectInput = {
   subcontractCost?: number
   /** 已封存（非複製取代）：全部成員結清就不列（見 isSettled）。 */
   archived?: boolean
+  /** 租戶獎金池口徑；省略＝tax_inclusive_receipts（Excel 制）。 */
+  poolBasis?: BonusPoolBasis
+  /** 營業稅率（0.05＝5%，project_settings.vat_rate）；含稅入帳＝未稅入帳 × (1＋稅率)。省略＝0.05。 */
+  vatRate?: number
   members: BonusMemberInput[]
 }
 
@@ -153,10 +157,24 @@ export type BonusSkipReason = "no_contract" | "no_pool"
 export type BonusSkipped = { projectId: string; reason: BonusSkipReason }
 
 /** 獎金池基礎：毛利制／舊制手填獎金池／固定金額。 */
-export const BONUS_BASES = ["gross_profit", "legacy_pool", "fixed_amount"] as const
+export const BONUS_BASES = ["tax_inclusive_receipts", "gross_profit", "legacy_pool", "fixed_amount"] as const
 export type BonusBasis = (typeof BONUS_BASES)[number]
 
+/**
+ * 租戶的獎金池口徑（tenants.features.bonus.poolBasis，2026-10-27 業主決定）：
+ *   tax_inclusive_receipts（預設）＝公司原 Excel：每人累計應得＝累計含稅入帳 × 比例 × 個人趴數，不扣任何成本；
+ *   gross_profit＝10/26 的毛利制（保留程式路徑供日後切換）。只影響「有設獎金比例的 pool_pct 專案」。
+ */
+export const BONUS_POOL_BASES = ["tax_inclusive_receipts", "gross_profit"] as const
+export type BonusPoolBasis = (typeof BONUS_POOL_BASES)[number]
+export const DEFAULT_BONUS_POOL_BASIS: BonusPoolBasis = "tax_inclusive_receipts"
+
+export function parseBonusPoolBasis(v: unknown): BonusPoolBasis {
+  return v === "gross_profit" ? "gross_profit" : DEFAULT_BONUS_POOL_BASIS
+}
+
 export const BONUS_BASIS_LABEL: Record<BonusBasis, string> = {
+  tax_inclusive_receipts: "含稅入帳制",
   gross_profit: "毛利制",
   legacy_pool: "舊制（手填獎金池）",
   fixed_amount: "固定金額",
@@ -173,6 +191,11 @@ export type ProjectBonusBasis = {
   disbursementCost: number
   subcontractCost: number
   grossProfit: number
+  /** 營業稅率與累計含稅入帳（＝未稅入帳 × (1＋稅率)，到分）。 */
+  vatRate: number
+  taxInclusiveRevenue: number
+  /** Excel「總獎金」＝含稅合約額 × 比例（顯示用；沒合約或沒比例 → null）。 */
+  contractPool: number | null
   /** 實際入帳比例（未截斷，0 起，可 > 1）；沒有合約 → 0。 */
   receivedRatio: number
   /** 入帳超過合約幾 %（一位小數）；沒超過或沒合約 → null。 */
@@ -196,6 +219,8 @@ export type BonusItemCalc = {
   disbursementCost: number
   subcontractCost: number
   grossProfit: number
+  vatRate: number
+  taxInclusiveRevenue: number
   overContractPct: number | null
   previousReceived: number
   previousReceivedPct: number
@@ -357,14 +382,27 @@ export function projectBonusBasisOf(p: BonusProjectInput): ProjectBonusBasis {
   const revenue = p.receivedTotal
   const cost = p.cost ?? 0
   const grossProfit = Math.round((revenue - cost) * 100) / 100
+  const vatRate = p.vatRate ?? DEFAULT_VAT_RATE
+  const taxInclusiveRevenue = taxInclusiveOf(revenue, vatRate)
+  const poolBasis = p.poolBasis ?? DEFAULT_BONUS_POOL_BASIS
   const basis: BonusBasis =
-    p.shareMode === "pool_pct" ? (p.bonusRatePct !== null ? "gross_profit" : "legacy_pool") : "fixed_amount"
+    p.shareMode === "pool_pct"
+      ? p.bonusRatePct !== null
+        ? poolBasis === "gross_profit" ? "gross_profit" : "tax_inclusive_receipts"
+        : "legacy_pool"
+      : "fixed_amount"
   const pool =
     basis === "gross_profit"
       ? round0(grossProfitPoolRaw(grossProfit, p.bonusRatePct as number))
-      : basis === "legacy_pool"
-        ? p.bonusPool
-        : null
+      : basis === "tax_inclusive_receipts"
+        ? round0(taxInclusiveRevenue * (p.bonusRatePct as number) / 100)
+        : basis === "legacy_pool"
+          ? p.bonusPool
+          : null
+  const contractPool =
+    p.bonusRatePct !== null && p.contractTotal !== null && p.contractTotal > 0
+      ? round0(taxInclusiveOf(p.contractTotal, vatRate) * p.bonusRatePct / 100)
+      : null
   return {
     basis,
     pool,
@@ -373,9 +411,30 @@ export function projectBonusBasisOf(p: BonusProjectInput): ProjectBonusBasis {
     disbursementCost: p.disbursementCost ?? 0,
     subcontractCost: p.subcontractCost ?? 0,
     grossProfit,
+    vatRate,
+    taxInclusiveRevenue,
+    contractPool,
     receivedRatio: receivedRatioOf(p.contractTotal, revenue),
     overContractPct: overContractPctOf(p.contractTotal, revenue),
   }
+}
+
+/** 未稅 → 含稅（到分）。 */
+export function taxInclusiveOf(untaxed: number, vatRate: number): number {
+  return Math.round(untaxed * (1 + vatRate) * 100) / 100
+}
+
+/** 每人累計應得的「池基礎」（未捨入）：Excel 制＝含稅入帳 × 比例；毛利制＝max(0, 毛利) × 比例；其他 0（走舊算法）。 */
+function ratePoolRaw(b: ProjectBonusBasis, bonusRatePct: number | null): number {
+  if (bonusRatePct === null) return 0
+  if (b.basis === "gross_profit") return grossProfitPoolRaw(b.grossProfit, bonusRatePct)
+  if (b.basis === "tax_inclusive_receipts") return b.taxInclusiveRevenue * (bonusRatePct / 100)
+  return 0
+}
+
+/** 比例制（Excel 含稅入帳制或毛利制）：不需要合約、不乘入帳比例、不截 100%。 */
+export function isRateBasis(basis: BonusBasis): boolean {
+  return basis === "gross_profit" || basis === "tax_inclusive_receipts"
 }
 
 /** 累計應得（到元）。分潤設定缺值（pct／amount 為 null）→ 0，不丟例外。 */
@@ -434,7 +493,7 @@ export function computeBonusRun(
     if (p.members.length === 0) continue
     const b = projectBonusBasisOf(p)
     const hasContract = p.contractTotal !== null && p.contractTotal > 0
-    if (b.basis !== "gross_profit" && !hasContract) {
+    if (!isRateBasis(b.basis) && !hasContract) {
       if (p.archived) settledArchived.push(p.projectId)
       else skipped.push({ projectId: p.projectId, reason: "no_contract" })
       continue
@@ -446,7 +505,7 @@ export function computeBonusRun(
     }
     const projectItems: BonusItemCalc[] = []
     const rawPct = receivedPctOf(p.contractTotal, p.receivedTotal)
-    const gpPoolRaw = b.basis === "gross_profit" ? grossProfitPoolRaw(b.grossProfit, p.bonusRatePct as number) : 0
+    const ratePool = ratePoolRaw(b, p.bonusRatePct)
     const previousRaw = previousReceived instanceof Map
       ? previousReceived.get(p.projectId)
       : (previousReceived as Record<string, number>)[p.projectId]
@@ -456,10 +515,10 @@ export function computeBonusRun(
     const unallocatedPct = Math.max(0, Math.round((100 - allocatedPct) * 10000) / 10000)
     for (const m of p.members) {
       const entitled =
-        b.basis === "gross_profit"
+        isRateBasis(b.basis)
           ? m.sharePct === null
             ? 0
-            : round0(gpPoolRaw * (m.sharePct / 100))
+            : round0(ratePool * (m.sharePct / 100))
           : entitledCumulativeOf(p.shareMode, b.pool, m.sharePct, m.shareAmount, rawPct)
       const paid = round0(paidOf(paidBeforeKey(p.projectId, m.employeeId)))
       const diff = entitled - paid
@@ -480,6 +539,8 @@ export function computeBonusRun(
         disbursementCost: b.disbursementCost,
         subcontractCost: b.subcontractCost,
         grossProfit: b.grossProfit,
+        vatRate: b.vatRate,
+        taxInclusiveRevenue: b.taxInclusiveRevenue,
         overContractPct: b.overContractPct,
         previousReceived: previous,
         previousReceivedPct: pct4(receivedRatioOf(p.contractTotal, previous)),

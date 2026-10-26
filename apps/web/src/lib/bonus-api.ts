@@ -9,7 +9,8 @@ import { apiFetch, apiDownload } from "./api-client"
 /** 2026-10-26 起：草稿 →（HR）送審 →（老闆）核准 → 發放。 */
 export type BonusRunStatus = "draft" | "pending_approval" | "approved" | "paid"
 /** 獎金池基礎：毛利制／舊制（手填獎金池）／固定金額。 */
-export type BonusBasis = "gross_profit" | "legacy_pool" | "fixed_amount"
+/** tax_inclusive_receipts＝公司原 Excel（含稅入帳 × 比例，2026-10-27 起預設）；gross_profit＝毛利制（租戶設定可切換）。 */
+export type BonusBasis = "tax_inclusive_receipts" | "gross_profit" | "legacy_pool" | "fixed_amount"
 
 export interface BonusWarning {
   projectId: string
@@ -113,6 +114,9 @@ export interface BonusRunItem {
   disbursementCost?: number | null
   subcontractCost?: number | null
   grossProfit?: number | null
+  /** 累計含稅入帳（Excel 制的計算基礎）與營業稅率；舊明細沒有。 */
+  taxInclusiveRevenue?: number | null
+  vatRate?: number | null
   overContractPct?: number | null
 }
 
@@ -311,6 +315,7 @@ export const BONUS_RUN_STATUS_LABELS: Record<BonusRunStatus, string> = {
 }
 
 export const BONUS_BASIS_LABELS: Record<BonusBasis, string> = {
+  tax_inclusive_receipts: "含稅入帳制",
   gross_profit: "毛利制",
   legacy_pool: "舊制（手填獎金池）",
   fixed_amount: "固定金額",

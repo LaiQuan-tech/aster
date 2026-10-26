@@ -25,7 +25,9 @@ type ProjectLine = {
   projectId: string;
   title: string;
   basis: string;
+  isProfit: boolean;
   revenue: number;
+  taxInclusiveRevenue: number | null;
   cost: number | null;
   grossProfit: number | null;
   bonusRatePct: number | null;
@@ -39,7 +41,9 @@ function projectLines(items: BonusRunItem[]): ProjectLine[] {
       projectId: it.projectId,
       title: `${it.projectCode ? `${it.projectCode} ` : ""}${it.projectName ?? ""}`.trim() || it.projectId,
       basis: it.basis ? BONUS_BASIS_LABELS[it.basis] : "—",
+      isProfit: it.basis === "gross_profit",
       revenue: it.revenue ?? it.receivedTotal,
+      taxInclusiveRevenue: it.basis === "tax_inclusive_receipts" ? (it.taxInclusiveRevenue ?? null) : null,
       cost: it.cost ?? null,
       grossProfit: it.grossProfit ?? null,
       bonusRatePct: it.bonusRatePct ?? null,
@@ -182,8 +186,9 @@ export function BonusRunApprovalsSection() {
                     <p className="font-medium text-gray-800">{p.title}</p>
                     <p className="text-gray-600">
                       {p.basis}・入帳 {fmtMoney(p.revenue)}
-                      {p.cost != null && `・成本 ${fmtMoney(p.cost)}`}
-                      {p.grossProfit != null && `・毛利 ${fmtMoney(p.grossProfit)}`}
+                      {p.taxInclusiveRevenue != null && `（含稅 ${fmtMoney(p.taxInclusiveRevenue)}）`}
+                      {p.isProfit && p.cost != null && `・成本 ${fmtMoney(p.cost)}`}
+                      {p.isProfit && p.grossProfit != null && `・毛利 ${fmtMoney(p.grossProfit)}`}
                       {p.bonusRatePct != null && `・比例 ${p.bonusRatePct}%`}
                     </p>
                     <p className="text-gray-800">本次獎金 {fmtMoney(p.amount)} 元</p>

@@ -26,15 +26,15 @@ function oneProject(overrides: Partial<BonusProjectInput> = {}): BonusProjectInp
 }
 
 describe("bonus-run：入帳幾成就發幾成", () => {
-  it("有專案獎金率時（毛利制），獎金池＝累計毛利 × 比例，並取代舊 bonusPool", () => {
+  it("有專案獎金率時（預設 Excel 含稅入帳制），獎金池＝累計含稅入帳 × 比例，並取代舊 bonusPool", () => {
     const { items } = computeBonusRun([
       oneProject({ bonusRatePct: 2, bonusPool: 9_999_999, receivedTotal: 5_000_000 }),
     ], new Map())
     expect(items[0].bonusRatePct).toBe(2)
-    expect(items[0].basis).toBe("gross_profit")
-    // 沒有成本 → 毛利＝入帳 500 萬，池＝10 萬
-    expect(items[0].bonusPool).toBe(100_000)
-    expect(items[0].entitledCumulative).toBe(10_000)
+    expect(items[0].basis).toBe("tax_inclusive_receipts")
+    // 入帳 500 萬 × 1.05 ＝ 525 萬，池＝10.5 萬
+    expect(items[0].bonusPool).toBe(105_000)
+    expect(items[0].entitledCumulative).toBe(10_500)
   })
 
   it("獎金率調高後，以新累計應得扣除歷史已發，只補發差額", () => {
@@ -42,9 +42,9 @@ describe("bonus-run：入帳幾成就發幾成", () => {
     const { items } = computeBonusRun([
       oneProject({ bonusRatePct: 2, receivedTotal: 5_000_000 }),
     ], paid)
-    expect(items[0].entitledCumulative).toBe(10_000)
+    expect(items[0].entitledCumulative).toBe(10_500)
     expect(items[0].paidBefore).toBe(5_000)
-    expect(items[0].amount).toBe(5_000)
+    expect(items[0].amount).toBe(5_500)
   })
 
   it("帶出前次／本次請領、比例、尚未分配與專案備註", () => {
@@ -246,7 +246,7 @@ describe("bonus-run：紅字沖銷", () => {
     bonusRatePct: null, bonusPool: 100_000, contractTotal: 1_000_000, receivedTotal: 200_000, receivedPct: 0.2,
     previousReceived: 0, previousReceivedPct: 0, currentReceived: 200_000, currentReceivedPct: 0.2,
     unallocatedPct: 90, projectNote: null,
-    basis: "legacy_pool", cost: 0, disbursementCost: 0, subcontractCost: 0, grossProfit: 200_000, overContractPct: null,
+    basis: "legacy_pool", cost: 0, disbursementCost: 0, subcontractCost: 0, grossProfit: 200_000, vatRate: 0.05, taxInclusiveRevenue: 210_000, overContractPct: null,
     entitledCumulative: 2_000, paidBefore: 500, amount: 1_500, overpaid: false, overpaidBy: 0, ...over,
   })
   const totals = (items: BonusItemCalc[]): BonusTotals => ({

@@ -19,9 +19,11 @@ import { loadInputs, loadPaidBefore, tenantToday } from "./bonus-run-store.js"
  *   • 沒有成員的專案也回專案層數字（members 為空陣列）。
  *
  * 回傳每專案：
- *   pool             累計獎金池（毛利制＝max(0, 毛利) × 比例；舊制＝手填 bonus_pool；固定金額＝null）
- *   basis            'gross_profit' | 'legacy_pool' | 'fixed_amount'
- *   revenue／cost／grossProfit  累計已入帳（未稅）／累計已發生成本（毛額）／兩者相減
+ *   pool             累計獎金池（Excel 含稅入帳制＝累計含稅入帳 × 比例〔預設〕；毛利制＝max(0, 毛利) × 比例；
+ *                    舊制＝手填 bonus_pool；固定金額＝null）
+ *   basis            'tax_inclusive_receipts' | 'gross_profit' | 'legacy_pool' | 'fixed_amount'
+ *   revenue          累計已入帳（未稅）；taxInclusiveRevenue＝× (1＋營業稅率)；contractPool＝含稅合約 × 比例
+ *   cost／grossProfit 只在毛利制有值，其他 null
  *   overContractPct  入帳超過合約幾 %（沒超過 null）
  *   members[]        estimatedAmount＝截至今天的**累計應得**；paidAmount＝歷來已發放合計。
  *                    兩者相減（下限 0）就是下一批會發的金額；estimatedAmount < paidAmount 即「超發」。
@@ -46,8 +48,14 @@ export type ProjectBonusEstimate = {
   bonusRatePct: number | null
   contractTotal: number | null
   revenue: number
-  cost: number
-  grossProfit: number
+  /** 成本／毛利只在毛利制（features.bonus.poolBasis='gross_profit'）有意義；Excel 含稅入帳制為 null，畫面不顯示毛利。 */
+  cost: number | null
+  grossProfit: number | null
+  /** 累計含稅入帳（未稅入帳 × (1＋營業稅率)）＝Excel 制的計算基礎。 */
+  taxInclusiveRevenue: number
+  vatRate: number
+  /** Excel「總獎金」＝含稅合約額 × 比例；沒合約或沒比例 → null。 */
+  contractPool: number | null
   overContractPct: number | null
   skipped: "no_contract" | "no_pool" | null
   excludedReason: "duplicate_replaced" | null
@@ -74,8 +82,11 @@ export function buildProjectBonusEstimates(
       bonusRatePct: p.bonusRatePct,
       contractTotal: p.contractTotal,
       revenue: b.revenue,
-      cost: b.cost,
-      grossProfit: b.grossProfit,
+      cost: b.basis === "gross_profit" ? b.cost : null,
+      grossProfit: b.basis === "gross_profit" ? b.grossProfit : null,
+      taxInclusiveRevenue: b.taxInclusiveRevenue,
+      vatRate: b.vatRate,
+      contractPool: b.contractPool,
       overContractPct: b.overContractPct,
       skipped: skip,
       excludedReason: excluded ? "duplicate_replaced" : null,

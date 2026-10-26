@@ -106,11 +106,13 @@ export default function AdminProjectDetailPage() {
     canEditBonus: boolean;
     bossConfigured: boolean;
     grossProfit: number | null;
+    /** Excel 含稅入帳制的營業稅率（獎金總額＝含稅合約 × 比例）；其他制 null。 */
+    taxInclusiveVatRate: number | null;
     profitHidden: boolean;
     defaults: Partial<Record<ProjectMemberRole, number>>;
     /** 本案是否已有自己的設定（false＝沿用新專案起始值）。 */
     projectShareSet: boolean;
-  }>({ canEditBonus: false, bossConfigured: true, grossProfit: null, profitHidden: false, defaults: {}, projectShareSet: false });
+  }>({ canEditBonus: false, bossConfigured: true, grossProfit: null, taxInclusiveVatRate: null, profitHidden: false, defaults: {}, projectShareSet: false });
   const [adjustments, setAdjustments] = useState<ShareAdjustment[]>([]);
   const [documents, setDocuments] = useState<ProjectDocument[]>([]);
   /**
@@ -246,8 +248,9 @@ export default function AdminProjectDetailPage() {
       setShareMeta({
         canEditBonus: m.canEditBonus ?? detail.access.editBonus ?? false,
         bossConfigured: m.bossConfigured ?? detail.access.bossConfigured ?? true,
-        // 毛利制（有設獎金比例）才用毛利算獎金總額；舊制／固定金額沿用原畫面。
-        grossProfit: m.bonusEstimate && m.bonusEstimate.basis !== "fixed_amount" ? m.bonusEstimate.grossProfit : null,
+        // 毛利制才用毛利算獎金總額；Excel 含稅入帳制（預設）用含稅合約額；舊制／固定金額沿用原畫面。
+        grossProfit: m.bonusEstimate && m.bonusEstimate.basis === "gross_profit" ? m.bonusEstimate.grossProfit : null,
+        taxInclusiveVatRate: m.bonusEstimate && m.bonusEstimate.basis === "tax_inclusive_receipts" ? (m.bonusEstimate.vatRate ?? 0.05) : null,
         // 專案毛利只有老闆／platform_admin／授權 HR 看得到（canSeeProfit）；其他人不在本機推算獎金總額。
         profitHidden: m.canSeeProfit === false,
         defaults: effectiveRoleSharePct(
@@ -372,7 +375,7 @@ export default function AdminProjectDetailPage() {
       <MembersCard
         projectId={projectId} members={members} emps={emps} canBonus={canBonus}
         canEditBonus={shareMeta.canEditBonus} bossConfigured={shareMeta.bossConfigured}
-        defaultSharePctByRole={shareMeta.defaults} grossProfit={shareMeta.grossProfit} profitHidden={shareMeta.profitHidden}
+        defaultSharePctByRole={shareMeta.defaults} grossProfit={shareMeta.grossProfit} taxInclusiveVatRate={shareMeta.taxInclusiveVatRate} profitHidden={shareMeta.profitHidden}
         contractAmount={money?.amountUntaxed ?? null} receivedAmount={money?.receivedTotal ?? 0}
         bonusRatePct={project.bonusRatePct ?? null}
         setError={setError} load={load}

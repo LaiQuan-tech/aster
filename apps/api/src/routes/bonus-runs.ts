@@ -106,7 +106,7 @@ async function viewerOf(tenantId: string, req: Request): Promise<{ actor: Actor;
 /** 明細的毛利類欄位（可直接或反推出專案毛利）。 */
 const ITEM_PROFIT_KEYS = ["bonusRatePct", "bonusPool", "cost", "disbursementCost", "subcontractCost", "grossProfit"] as const
 /** 批次 snapshot.projects[] 的毛利類欄位。 */
-const SNAPSHOT_PROFIT_KEYS = ["bonusRatePct", "bonusPool", "effectivePool", "cost", "disbursementCost", "subcontractCost", "grossProfit"] as const
+const SNAPSHOT_PROFIT_KEYS = ["bonusRatePct", "bonusPool", "effectivePool", "contractPool", "cost", "disbursementCost", "subcontractCost", "grossProfit"] as const
 
 function maskItems(items: SerializedItem[]): SerializedItem[] {
   return items.map((i) => {

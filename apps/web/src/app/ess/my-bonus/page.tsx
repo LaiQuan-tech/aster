@@ -32,6 +32,8 @@ export default function MyBonusPage() {
   }, []);
 
   // 分潤改版 #1：預估應得（累計）＝估算服務；已發＝歷來已發放；待發＝兩者相減（下限 0）。
+  // 毛利欄只在毛利制有意義：Excel 含稅入帳制（預設）整欄不顯示。
+  const showProfitCol = canSeeProfit && shares.some((x) => x.basis === "gross_profit");
   const total = shares.reduce((s, x) => s + (x.estimatedAmount ?? x.computedAmount ?? 0), 0);
   const paidTotal = shares.reduce((s, x) => s + (x.paidAmount ?? 0), 0);
   const pendingTotal = shares.reduce((s, x) => s + (x.pendingAmount ?? 0), 0);
@@ -60,7 +62,11 @@ export default function MyBonusPage() {
                 <p className="text-xl font-bold text-gray-900">{money(pendingTotal)}</p>
               </div>
             </div>
-            <p className="mb-3 text-xs text-gray-400">預估應得＝依專案目前毛利與你的趴數累計算到今天的金額，會隨入帳與成本變動；實際以每季發放為準。</p>
+            <p className="mb-3 text-xs text-gray-400">
+              {shares.some((s) => s.basis === "gross_profit")
+                ? "預估應得＝依專案目前毛利 × 獎金比例 × 你的趴數，累計算到今天的金額，會隨入帳與成本變動；實際以每季發放為準。"
+                : "預估應得＝專案累計含稅入帳 × 獎金比例 × 你的趴數，累計算到今天的金額，會隨入帳變動；實際以每季發放為準。"}
+            </p>
             <div className="overflow-x-auto">
               <table className="w-full min-w-[640px] text-left text-sm">
                 <thead>
@@ -68,7 +74,7 @@ export default function MyBonusPage() {
                     <th className="py-2 pr-3">專案</th>
                     <th className="py-2 pr-3">角色</th>
                     <th className="py-2 pr-3">趴數</th>
-                    {canSeeProfit && <th className="py-2 pr-3 text-right">目前毛利</th>}
+                    {showProfitCol && <th className="py-2 pr-3 text-right">目前毛利</th>}
                     <th className="py-2 pr-3 text-right">預估應得</th>
                     <th className="py-2 pr-3 text-right">已發</th>
                     <th className="py-2 pr-3 text-right">待發</th>
@@ -87,7 +93,7 @@ export default function MyBonusPage() {
                       <td className="py-2 pr-3 text-gray-700">
                         {s.shareMode === "pool_pct" ? (s.sharePct != null ? `${s.sharePct}%` : "—") : money(s.shareAmount)}
                       </td>
-                      {canSeeProfit && <td className="py-2 pr-3 text-right text-gray-700">{s.legacy || s.basis === "fixed_amount" ? "—" : money(s.grossProfit ?? null)}</td>}
+                      {showProfitCol && <td className="py-2 pr-3 text-right text-gray-700">{s.basis === "gross_profit" ? money(s.grossProfit ?? null) : "—"}</td>}
                       <td className="py-2 pr-3 text-right font-medium text-gray-900">{money(s.estimatedAmount ?? s.computedAmount)}</td>
                       <td className="py-2 pr-3 text-right text-gray-700">{money(s.paidAmount ?? null)}</td>
                       <td className="py-2 pr-3 text-right text-gray-700">{money(s.pendingAmount ?? null)}</td>

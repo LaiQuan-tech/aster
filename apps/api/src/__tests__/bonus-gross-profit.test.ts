@@ -25,6 +25,8 @@ function gpProject(over: Partial<BonusProjectInput> = {}): BonusProjectInput {
     cost: 1_000_000,
     disbursementCost: 800_000,
     subcontractCost: 200_000,
+    // 這支測毛利制（features.bonus.poolBasis='gross_profit'）；Excel 含稅入帳制（預設）見 bonus-excel-basis.test.ts
+    poolBasis: "gross_profit",
     members: [
       { employeeId: "E1", sharePct: 30, shareAmount: null },
       { employeeId: "E2", sharePct: 70, shareAmount: null },
