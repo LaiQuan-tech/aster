@@ -1,12 +1,18 @@
 import { supabaseAdmin } from "../lib/supabase.js"
 import { OUR_CONTRACT_ROLES } from "../lib/contract-role.js"
-import { todayKey } from "../lib/tz.js"
+import { localDateKey, todayKey } from "../lib/tz.js"
+import { loadGrossProfitInput, summarizeProjectGrossProfit } from "./project-gross-profit.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { isUniqueViolation } from "./project-code.js"
 import { writeAuditLog } from "./audit.js"
 import {
+  archiveInclusionOf,
+  BONUS_BASIS_LABEL,
   buildBonusSummary,
   computeBonusRun,
+  projectBonusBasisOf,
+  type ArchiveInclusion,
+  type BonusBasis,
   paidBeforeKey,
   reversalItemsOf,
   reversalTotalsOf,
@@ -125,6 +131,13 @@ export type ItemSnapshot = {
   projectNote?: string | null
   overpaidBy?: number
   stale?: boolean
+  /** 2026-10-26 起：獎金池基礎與毛利明細（舊批次沒有這些鍵）。 */
+  basis?: BonusBasis
+  cost?: number
+  disbursementCost?: number
+  subcontractCost?: number
+  grossProfit?: number
+  overContractPct?: number | null
 }
 
 export type SerializedRun = {
@@ -177,6 +190,18 @@ export type SerializedItem = {
   amount: number
   overpaid: boolean
   overpaidBy: number
+  /** 獎金池基礎；2026-10-26 前建立的明細為 null。 */
+  basis: BonusBasis | null
+  /** 累計入帳（＝receivedTotal，未稅）。 */
+  revenue: number
+  /** 累計已發生專案成本（毛額）；舊明細 null。 */
+  cost: number | null
+  disbursementCost: number | null
+  subcontractCost: number | null
+  /** 累計已實現毛利；舊明細 null。 */
+  grossProfit: number | null
+  /** 入帳超過合約幾 %；沒超過 null。 */
+  overContractPct: number | null
 }
 
 export function num(v: string | number | null | undefined): number | null {
@@ -233,6 +258,7 @@ const EMPTY_TOTALS: BonusTotals = {
   projectCount: 0,
   overpaidCount: 0,
   skipped: [],
+  warnings: [],
 }
 
 function serializeRun(row: RunRow, reversedBy?: { id: string; status: string } | null): SerializedRun {
@@ -247,7 +273,7 @@ function serializeRun(row: RunRow, reversedBy?: { id: string; status: string } |
     reversedByRunId: reversedBy?.id ?? null,
     reversedByStatus: (reversedBy?.status as BonusRunStatus | undefined) ?? null,
     paidOn: row.paid_on,
-    totals: { ...EMPTY_TOTALS, ...t, skipped: Array.isArray(t.skipped) ? t.skipped : [] },
+    totals: { ...EMPTY_TOTALS, ...t, skipped: Array.isArray(t.skipped) ? t.skipped : [], warnings: Array.isArray(t.warnings) ? t.warnings : [] },
     note: row.note,
     createdByEmpId: row.created_by_emp_id,
     paidByEmpId: row.paid_by_emp_id,
@@ -291,6 +317,13 @@ function serializeItem(row: ItemRow): SerializedItem {
     amount: num(row.amount) ?? 0,
     overpaid: row.overpaid,
     overpaidBy: typeof s.overpaidBy === "number" ? s.overpaidBy : 0,
+    basis: s.basis ?? null,
+    revenue: num(row.received_total) ?? 0,
+    cost: typeof s.cost === "number" ? s.cost : null,
+    disbursementCost: typeof s.disbursementCost === "number" ? s.disbursementCost : null,
+    subcontractCost: typeof s.subcontractCost === "number" ? s.subcontractCost : null,
+    grossProfit: typeof s.grossProfit === "number" ? s.grossProfit : null,
+    overContractPct: typeof s.overContractPct === "number" ? s.overContractPct : null,
   }
 }
 
@@ -305,6 +338,8 @@ type LoadedInputs = {
   projects: BonusProjectInput[]
   projectMeta: Map<string, ProjectMeta>
   employeeMeta: Map<string, EmployeeMeta>
+  /** 封存專案的納入判斷（未封存的也會有一筆 active）；估算服務（archiveRule='all'）為空。 */
+  archiveInclusion: Map<string, ArchiveInclusion>
 }
 
 export async function tenantToday(tenantId: string): Promise<string> {
@@ -312,35 +347,73 @@ export async function tenantToday(tenantId: string): Promise<string> {
   return todayKey(tz)
 }
 
+type ProjectRow = {
+  id: string
+  code: string | null
+  name: string
+  description: string | null
+  share_mode: string
+  bonus_pool: string | null
+  bonus_rate_pct: string | null
+  archived_at: string | null
+  archive_reason: string | null
+}
+
+export type LoadInputsOptions = {
+  /** 只算這幾個專案（估算服務用）；省略＝租戶全部。 */
+  projectIds?: readonly string[]
+  /**
+   * 'bonus_run'（預設）：套封存規則（bonus-run.ts archiveInclusionOf——複製取代的原案排除、
+   * 其他封存案封存後有新入帳／成本才納入）。'all'：指定的專案一律納入（估算服務：P2 問哪個案就算哪個）。
+   */
+  archiveRule?: "bonus_run" | "all"
+}
+
 /**
- * 未封存且有成員的專案，含合約總額（我方承攬合約＋追加減，同 billing-store.contractTotal
- * 口徑）與截至 asOf 的實收合計（received_on ≤ asOf；沒填入帳日但有金額的也算——錢已經
- * 進來了，不能因為日期沒登記就從分母消失）。
+ * 有成員的專案（依封存規則篩），含合約總額（我方承攬合約＋追加減，同 billing-store.contractTotal
+ * 口徑）、截至 asOf 的實收合計（received_on ≤ asOf；沒填入帳日但有金額的也算——錢已經進來了，
+ * 不能因為日期沒登記就從分母消失）與累計已發生專案成本（services/project-gross-profit.ts）。
  */
-async function loadInputs(tenantId: string, asOf: string): Promise<LoadedInputs> {
-  const { data: projRows, error: projErr } = await supabaseAdmin
-    .from("projects")
-    .select("id, code, name, description, share_mode, bonus_pool, bonus_rate_pct")
-    .eq("tenant_id", tenantId)
-    .is("archived_at", null)
-  if (projErr) throw new Error(`bonus-run loadInputs (projects): ${projErr.message}`)
-  const projects = (projRows ?? []) as Array<{ id: string; code: string | null; name: string; description: string | null; share_mode: string; bonus_pool: string | null; bonus_rate_pct: string | null }>
+export async function loadInputs(tenantId: string, asOf: string, opts: LoadInputsOptions = {}): Promise<LoadedInputs> {
+  const archiveRule = opts.archiveRule ?? "bonus_run"
+  const cols = "id, code, name, description, share_mode, bonus_pool, bonus_rate_pct, archived_at, archive_reason"
+  let projects: ProjectRow[]
+  if (opts.projectIds) {
+    const ids = [...new Set(opts.projectIds)]
+    if (ids.length === 0) return { projects: [], projectMeta: new Map(), employeeMeta: new Map(), archiveInclusion: new Map() }
+    const { data, error } = await supabaseAdmin.from("projects").select(cols).eq("tenant_id", tenantId).in("id", ids)
+    if (error) throw new Error(`bonus-run loadInputs (projects): ${error.message}`)
+    projects = (data ?? []) as ProjectRow[]
+  } else {
+    projects = await fetchAll<ProjectRow>(
+      (from, to) =>
+        supabaseAdmin.from("projects").select(cols).eq("tenant_id", tenantId).order("id", { ascending: true }).range(from, to),
+      "bonus-run loadInputs (projects)",
+    )
+  }
   const projectMeta = new Map<string, ProjectMeta>(projects.map((p) => [p.id, { id: p.id, code: p.code, name: p.name }]))
-  if (projects.length === 0) return { projects: [], projectMeta, employeeMeta: new Map() }
+  const archiveInclusion = new Map<string, ArchiveInclusion>()
+  if (projects.length === 0) return { projects: [], projectMeta, employeeMeta: new Map(), archiveInclusion }
   const ids = projects.map((p) => p.id)
 
   type MemberRow = { project_id: string; employee_id: string; role_in_project: string | null; share_pct: string | number | null; share_amount: string | number | null }
-  const memberRows = await fetchAll<MemberRow>(
-    (from, to) =>
-      supabaseAdmin
-        .from("project_members")
-        .select("project_id, employee_id, role_in_project, share_pct, share_amount")
-        .eq("tenant_id", tenantId)
-        .in("project_id", ids)
-        .order("id", { ascending: true })
-        .range(from, to),
-    "bonus-run loadInputs (members)",
-  )
+  const memberRows: MemberRow[] = []
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100)
+    memberRows.push(
+      ...(await fetchAll<MemberRow>(
+        (from, to) =>
+          supabaseAdmin
+            .from("project_members")
+            .select("project_id, employee_id, role_in_project, share_pct, share_amount")
+            .eq("tenant_id", tenantId)
+            .in("project_id", chunk)
+            .order("id", { ascending: true })
+            .range(from, to),
+        "bonus-run loadInputs (members)",
+      )),
+    )
+  }
   const membersByProject = new Map<string, Array<{ employeeId: string; roleInProject: string | null; sharePct: number | null; shareAmount: number | null }>>()
   for (const m of memberRows) {
     const arr = membersByProject.get(m.project_id) ?? []
@@ -352,72 +425,86 @@ async function loadInputs(tenantId: string, asOf: string): Promise<LoadedInputs>
     })
     membersByProject.set(m.project_id, arr)
   }
-  const withMembers = projects.filter((p) => (membersByProject.get(p.id) ?? []).length > 0)
-  if (withMembers.length === 0) return { projects: [], projectMeta, employeeMeta: new Map() }
-  const scopedIds = withMembers.map((p) => p.id)
+  // 試算只看有成員的案；估算服務（指定 projectIds）沒有成員也要回專案層數字。
+  const candidates = opts.projectIds ? projects : projects.filter((p) => (membersByProject.get(p.id) ?? []).length > 0)
+  // 複製取代的原案不必撈金額（一律排除）。
+  const tz = archiveRule === "bonus_run" && candidates.some((p) => p.archived_at) ? await getTenantTimezone(tenantId) : null
+  const archivedOn = (p: ProjectRow): string | null => (p.archived_at ? localDateKey(p.archived_at, tz ?? "Asia/Taipei") : null)
+  const needMoney = candidates.filter((p) => archiveRule === "all" || archiveInclusionOf(archivedOn(p), p.archive_reason, null).reason !== "duplicate_replaced")
+  if (needMoney.length === 0) {
+    for (const p of candidates) archiveInclusion.set(p.id, archiveInclusionOf(archivedOn(p), p.archive_reason, null))
+    return { projects: [], projectMeta, employeeMeta: new Map(), archiveInclusion }
+  }
+  const moneyIds = needMoney.map((p) => p.id)
+  const gp = summarizeProjectGrossProfit(moneyIds, await loadGrossProfitInput(tenantId, moneyIds, asOf))
+
+  const scoped = archiveRule === "all"
+    ? needMoney
+    : candidates.filter((p) => {
+        const inc = archiveInclusionOf(archivedOn(p), p.archive_reason, gp.get(p.id)?.lastActivityOn ?? null)
+        archiveInclusion.set(p.id, inc)
+        return inc.include
+      })
+  if (scoped.length === 0) return { projects: [], projectMeta, employeeMeta: new Map(), archiveInclusion }
+  const scopedIds = scoped.map((p) => p.id)
 
   type ContractRow = { project_id: string; doc_type: string; amount: string | number | null }
-  const contractRows = await fetchAll<ContractRow>(
-    (from, to) =>
-      supabaseAdmin
-        .from("contracts")
-        .select("project_id, doc_type, amount")
-        .eq("tenant_id", tenantId)
-        .in("project_id", scopedIds)
-        .in("our_role", OUR_CONTRACT_ROLES)
-        .in("doc_type", ["contract", "change_order"])
-        .is("deleted_at", null)
-        .order("id", { ascending: true })
-        .range(from, to),
-    "bonus-run loadInputs (contracts)",
-  )
+  const contractRows: ContractRow[] = []
+  for (let i = 0; i < scopedIds.length; i += 100) {
+    const chunk = scopedIds.slice(i, i + 100)
+    contractRows.push(
+      ...(await fetchAll<ContractRow>(
+        (from, to) =>
+          supabaseAdmin
+            .from("contracts")
+            .select("project_id, doc_type, amount")
+            .eq("tenant_id", tenantId)
+            .in("project_id", chunk)
+            .in("our_role", OUR_CONTRACT_ROLES)
+            .in("doc_type", ["contract", "change_order"])
+            .is("deleted_at", null)
+            .order("id", { ascending: true })
+            .range(from, to),
+        "bonus-run loadInputs (contracts)",
+      )),
+    )
+  }
   const contractTotal = new Map<string, number>()
   for (const c of contractRows) {
     contractTotal.set(c.project_id, (contractTotal.get(c.project_id) ?? 0) + (num(c.amount) ?? 0))
   }
 
-  type BillingRow = { project_id: string; received_amount: string | number | null; received_on: string | null }
-  const billingRows = await fetchAll<BillingRow>(
-    (from, to) =>
-      supabaseAdmin
-        .from("project_billings")
-        .select("project_id, received_amount, received_on")
-        .eq("tenant_id", tenantId)
-        .in("project_id", scopedIds)
-        .is("deleted_at", null)
-        .not("received_amount", "is", null)
-        .or(`received_on.is.null,received_on.lte.${asOf}`)
-        .order("id", { ascending: true })
-        .range(from, to),
-    "bonus-run loadInputs (billings)",
-  )
-  const receivedTotal = new Map<string, number>()
-  for (const b of billingRows) {
-    receivedTotal.set(b.project_id, (receivedTotal.get(b.project_id) ?? 0) + (num(b.received_amount) ?? 0))
+  const empIds = [...new Set(scoped.flatMap((p) => (membersByProject.get(p.id) ?? []).map((m) => m.employeeId)))]
+  let employeeMeta = new Map<string, EmployeeMeta>()
+  if (empIds.length > 0) {
+    const { data: empRows, error: eErr } = await supabaseAdmin
+      .from("employees")
+      .select("id, name, emp_no")
+      .eq("tenant_id", tenantId)
+      .in("id", empIds)
+    if (eErr) throw new Error(`bonus-run loadInputs (employees): ${eErr.message}`)
+    employeeMeta = new Map<string, EmployeeMeta>(
+      ((empRows ?? []) as EmployeeMeta[]).map((e) => [e.id, { id: e.id, name: e.name, emp_no: e.emp_no ?? null }]),
+    )
   }
 
-  const empIds = [...new Set(memberRows.map((m) => m.employee_id))]
-  const { data: empRows, error: eErr } = await supabaseAdmin
-    .from("employees")
-    .select("id, name, emp_no")
-    .eq("tenant_id", tenantId)
-    .in("id", empIds)
-  if (eErr) throw new Error(`bonus-run loadInputs (employees): ${eErr.message}`)
-  const employeeMeta = new Map<string, EmployeeMeta>(
-    ((empRows ?? []) as EmployeeMeta[]).map((e) => [e.id, { id: e.id, name: e.name, emp_no: e.emp_no ?? null }]),
-  )
-
-  const inputs: BonusProjectInput[] = withMembers.map((p) => ({
-    projectId: p.id,
-    shareMode: p.share_mode,
-    bonusPool: num(p.bonus_pool),
-    bonusRatePct: num(p.bonus_rate_pct),
-    projectNote: p.description,
-    contractTotal: contractTotal.has(p.id) ? (contractTotal.get(p.id) as number) : null,
-    receivedTotal: receivedTotal.get(p.id) ?? 0,
-    members: membersByProject.get(p.id) ?? [],
-  }))
-  return { projects: inputs, projectMeta, employeeMeta }
+  const inputs: BonusProjectInput[] = scoped.map((p) => {
+    const money = gp.get(p.id)
+    return {
+      projectId: p.id,
+      shareMode: p.share_mode,
+      bonusPool: num(p.bonus_pool),
+      bonusRatePct: num(p.bonus_rate_pct),
+      projectNote: p.description,
+      contractTotal: contractTotal.has(p.id) ? (contractTotal.get(p.id) as number) : null,
+      receivedTotal: money?.revenue ?? 0,
+      cost: money?.cost ?? 0,
+      disbursementCost: money?.disbursementCost ?? 0,
+      subcontractCost: money?.subcontractCost ?? 0,
+      members: membersByProject.get(p.id) ?? [],
+    }
+  })
+  return { projects: inputs, projectMeta, employeeMeta, archiveInclusion }
 }
 
 /** 先前 paid 且未刪的 runs 裡，同 (project, employee) 的 amount 合計。重算 draft 時排除自己。 */
@@ -512,30 +599,46 @@ export async function previewRun(tenantId: string, asOf: string, excludeRunId?: 
   ])
   const { items, totals } = computeBonusRun(inputs.projects, paidBefore, previousReceived)
   const skippedIds = new Set(totals.skipped.map((s) => s.projectId))
+  const metaOf = (projectId: string) => inputs.projectMeta.get(projectId)
   const snapshot = {
     asOf,
     excludeRunId: excludeRunId ?? null,
     projects: inputs.projects.map((p) => {
-      const meta = inputs.projectMeta.get(p.projectId)
+      const meta = metaOf(p.projectId)
+      const b = projectBonusBasisOf(p)
       return {
         projectId: p.projectId,
         code: meta?.code ?? null,
         name: meta?.name ?? null,
         shareMode: p.shareMode,
+        basis: b.basis,
+        basisLabel: BONUS_BASIS_LABEL[b.basis],
         bonusPool: p.bonusPool,
+        effectivePool: b.pool,
         bonusRatePct: p.bonusRatePct,
         projectNote: p.projectNote,
         contractTotal: p.contractTotal,
         receivedTotal: p.receivedTotal,
+        cost: b.cost,
+        disbursementCost: b.disbursementCost,
+        subcontractCost: b.subcontractCost,
+        grossProfit: b.grossProfit,
+        overContractPct: b.overContractPct,
+        archived: inputs.archiveInclusion.get(p.projectId)?.reason === "archived_with_activity",
         memberCount: p.members.length,
         skipped: skippedIds.has(p.projectId),
       }
     }),
     skipped: totals.skipped.map((s) => ({
       ...s,
-      code: inputs.projectMeta.get(s.projectId)?.code ?? null,
-      name: inputs.projectMeta.get(s.projectId)?.name ?? null,
+      code: metaOf(s.projectId)?.code ?? null,
+      name: metaOf(s.projectId)?.name ?? null,
     })),
+    /** 封存而不列入的專案（複製取代的原案、封存後沒有新入帳／成本），供 HR 追溯。 */
+    excludedArchived: [...inputs.archiveInclusion.entries()]
+      .filter(([, inc]) => !inc.include)
+      .map(([projectId, inc]) => ({ projectId, reason: inc.reason, code: metaOf(projectId)?.code ?? null, name: metaOf(projectId)?.name ?? null })),
+    warnings: (totals.warnings ?? []).map((w) => ({ ...w, code: metaOf(w.projectId)?.code ?? null, name: metaOf(w.projectId)?.name ?? null })),
   }
   const serialized: SerializedItem[] = items.map((i) => {
     const p = inputs.projectMeta.get(i.projectId)
@@ -569,6 +672,13 @@ export async function previewRun(tenantId: string, asOf: string, excludeRunId?: 
       amount: i.amount,
       overpaid: i.overpaid,
       overpaidBy: i.overpaidBy,
+      basis: i.basis,
+      revenue: i.receivedTotal,
+      cost: i.cost,
+      disbursementCost: i.disbursementCost,
+      subcontractCost: i.subcontractCost,
+      grossProfit: i.grossProfit,
+      overContractPct: i.overContractPct,
     }
   })
   serialized.sort(compareItems)
@@ -603,6 +713,12 @@ function itemRowsOf(tenantId: string, runId: string, preview: PreviewResult) {
       projectNote: i.projectNote,
       overpaidBy: i.overpaidBy,
       stale: false,
+      basis: i.basis,
+      cost: i.cost,
+      disbursementCost: i.disbursementCost,
+      subcontractCost: i.subcontractCost,
+      grossProfit: i.grossProfit,
+      overContractPct: i.overContractPct,
     }
     return {
       tenant_id: tenantId,
@@ -923,8 +1039,14 @@ export async function createReversalRun(tenantId: string, actor: Actor, runId: s
     shareAmount: num(r.share_amount),
     bonusPool: num(r.bonus_pool),
     bonusRatePct: typeof r.snapshot?.bonusRatePct === "number" ? r.snapshot.bonusRatePct : null,
-    contractTotal: num(r.contract_total) ?? 0,
+    contractTotal: num(r.contract_total),
     receivedTotal: num(r.received_total) ?? 0,
+    basis: (r.snapshot?.basis ?? (r.share_mode === "fixed_amount" ? "fixed_amount" : "legacy_pool")) as BonusBasis,
+    cost: typeof r.snapshot?.cost === "number" ? r.snapshot.cost : 0,
+    disbursementCost: typeof r.snapshot?.disbursementCost === "number" ? r.snapshot.disbursementCost : 0,
+    subcontractCost: typeof r.snapshot?.subcontractCost === "number" ? r.snapshot.subcontractCost : 0,
+    grossProfit: typeof r.snapshot?.grossProfit === "number" ? r.snapshot.grossProfit : (num(r.received_total) ?? 0),
+    overContractPct: typeof r.snapshot?.overContractPct === "number" ? r.snapshot.overContractPct : null,
     receivedPct: num(r.received_pct) ?? 0,
     previousReceived: typeof r.snapshot?.previousReceived === "number" ? r.snapshot.previousReceived : 0,
     previousReceivedPct: typeof r.snapshot?.previousReceivedPct === "number" ? r.snapshot.previousReceivedPct : 0,

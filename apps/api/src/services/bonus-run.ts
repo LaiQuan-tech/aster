@@ -21,6 +21,18 @@ import { round0 } from "./project-money.js"
  *   entitled < paid_before → overpaid=true、差額記在 overpaidBy（UI 紅字，**不自動追討**：
  *   例如專案結案後合約總額下修，錢已經發出去，追不追是老闆的決定，系統只標出來）。
  *
+ * ── 2026-10-26 改版（業主決定 8／#4／#5）──────────────────────────────
+ *   獎金池三種基礎（basis），每個專案擇一：
+ *   • gross_profit（設了 bonus_rate_pct 的 pool_pct 專案）：
+ *       累計已實現毛利 GP＝累計入帳（未稅）－累計已發生專案成本（services/project-gross-profit.ts）
+ *       pool＝max(0, GP) × bonus_rate_pct/100；entitled＝pool × share_pct/100（不乘入帳比例、不截 100%）。
+ *       不需要合約（沒有合約只是算不出入帳比例與「超過合約」警示）。
+ *   • legacy_pool（pool_pct 但沒設比例、只有手填 bonus_pool）：維持舊算法
+ *       entitled＝bonus_pool × min(1, 入帳比例) × share_pct/100，結果標「舊制（手填獎金池）」。
+ *   • fixed_amount：entitled＝share_amount × min(1, 入帳比例)（舊算法，不變）。
+ *   received_pct 存**未截斷**的實際比例（可 > 1）；入帳超過合約 → overContractPct＝超出幾 %，
+ *   totals.warnings 列「入帳超過合約 N%」。舊制／固定金額的拆算仍以 min(1, 比例) 計，不會因超收多發。
+ *
  * 金額四捨五入到**元**（`round0`）；received_pct 存到小數 4 位，但拆算用未捨入的比例，
  * 避免 0.3333 × 大金額累積出幾十元的尾差。
  *
@@ -51,14 +63,47 @@ export type BonusProjectInput = {
   /** 有值時以合約額乘此比例衍生獎金池；null 才沿用 bonusPool。 */
   bonusRatePct: number | null
   projectNote: string | null
-  /** null＝沒有我方承攬合約 → 跳過。 */
+  /** null＝沒有我方承攬合約 → 舊制／固定金額跳過；毛利制照算。 */
   contractTotal: number | null
+  /** 累計已入帳（未稅）＝毛利的收入端。 */
   receivedTotal: number
+  /** 累計已發生專案成本（毛額）；省略＝0。見 services/project-gross-profit.ts。 */
+  cost?: number
+  /** 成本拆分（顯示用）。 */
+  disbursementCost?: number
+  subcontractCost?: number
   members: BonusMemberInput[]
 }
 
 export type BonusSkipReason = "no_contract" | "no_pool"
 export type BonusSkipped = { projectId: string; reason: BonusSkipReason }
+
+/** 獎金池基礎：毛利制／舊制手填獎金池／固定金額。 */
+export const BONUS_BASES = ["gross_profit", "legacy_pool", "fixed_amount"] as const
+export type BonusBasis = (typeof BONUS_BASES)[number]
+
+export const BONUS_BASIS_LABEL: Record<BonusBasis, string> = {
+  gross_profit: "毛利制",
+  legacy_pool: "舊制（手填獎金池）",
+  fixed_amount: "固定金額",
+}
+
+export type BonusWarning = { projectId: string; kind: "over_contract"; overContractPct: number; message: string }
+
+export type ProjectBonusBasis = {
+  basis: BonusBasis
+  /** 本專案（累計）獎金池；舊制沒填／毛利制沒比例 → null。fixed_amount 為 null。 */
+  pool: number | null
+  revenue: number
+  cost: number
+  disbursementCost: number
+  subcontractCost: number
+  grossProfit: number
+  /** 實際入帳比例（未截斷，0 起，可 > 1）；沒有合約 → 0。 */
+  receivedRatio: number
+  /** 入帳超過合約幾 %（一位小數）；沒超過或沒合約 → null。 */
+  overContractPct: number | null
+}
 
 export type BonusItemCalc = {
   projectId: string
@@ -69,8 +114,15 @@ export type BonusItemCalc = {
   shareAmount: number | null
   bonusPool: number | null
   bonusRatePct: number | null
-  contractTotal: number
+  /** 毛利制且沒有合約時為 null。 */
+  contractTotal: number | null
   receivedTotal: number
+  basis: BonusBasis
+  cost: number
+  disbursementCost: number
+  subcontractCost: number
+  grossProfit: number
+  overContractPct: number | null
   previousReceived: number
   previousReceivedPct: number
   currentReceived: number
@@ -96,6 +148,8 @@ export type BonusTotals = {
   projectCount: number
   overpaidCount: number
   skipped: BonusSkipped[]
+  /** 入帳超過合約等提醒（舊批次沒有這個鍵）。 */
+  warnings?: BonusWarning[]
 }
 
 export type BonusRunCalc = { items: BonusItemCalc[]; totals: BonusTotals }
@@ -141,6 +195,7 @@ export function reversalTotalsOf(totals: BonusTotals, items: BonusItemCalc[]): B
     projectCount: new Set(reversed.map((i) => i.projectId)).size,
     overpaidCount: 0,
     skipped: [],
+    warnings: [],
   }
 }
 
@@ -153,12 +208,92 @@ export function paidBeforeKey(projectId: string, employeeId: string): string {
   return `${projectId}:${employeeId}`
 }
 
-/** 入帳比例：分母 ≤ 0 → 0；收超過合約夾在 1。 */
-export function receivedPctOf(contractTotal: number | null, receivedTotal: number): number {
+/** 實際入帳比例（不截斷）：分母 ≤ 0 → 0；負數 → 0；收超過合約可 > 1。 */
+export function receivedRatioOf(contractTotal: number | null, receivedTotal: number): number {
   if (contractTotal === null || !(contractTotal > 0)) return 0
   const raw = receivedTotal / contractTotal
   if (!Number.isFinite(raw) || raw <= 0) return 0
+  return raw
+}
+
+/** 舊制／固定金額拆算用的入帳比例：分母 ≤ 0 → 0；收超過合約夾在 1。 */
+export function receivedPctOf(contractTotal: number | null, receivedTotal: number): number {
+  const raw = receivedRatioOf(contractTotal, receivedTotal)
   return raw >= 1 ? 1 : raw
+}
+
+/** 入帳超過合約幾 %（一位小數）；沒超過（含剛好收足）或沒合約 → null。 */
+export function overContractPctOf(contractTotal: number | null, receivedTotal: number): number | null {
+  if (contractTotal === null || !(contractTotal > 0)) return null
+  if (!(receivedTotal > contractTotal)) return null
+  const pct = Math.round(((receivedTotal - contractTotal) / contractTotal) * 1000) / 10
+  return pct > 0 ? pct : null
+}
+
+export function overContractMessage(pct: number): string {
+  return `入帳超過合約 ${pct}%`
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * 封存專案要不要納入試算（#4 結案後尾款）
+ *   • 「複製專案而封存的原案」（archive_reason＝project-duplicate.ts archiveReasonFor：
+ *     「已由 {新 code} 取代：…」）→ 一律排除：新案帶著同一批成員分潤，原案再算就重複採計。
+ *   • 其他封存（結案自動封存、手動封存）→ 封存日當天或之後還有新入帳／成本才納入
+ *     （尾款進來、保固支出），否則照舊不列（沒有新動靜就沒有新的應發）。
+ * ────────────────────────────────────────────────────────────────── */
+
+const DUPLICATE_ARCHIVE_RE = /^已由 .+ 取代：/
+
+export function isDuplicateReplacedArchive(archiveReason: string | null | undefined): boolean {
+  return typeof archiveReason === "string" && DUPLICATE_ARCHIVE_RE.test(archiveReason)
+}
+
+export type ArchiveInclusion = { include: boolean; reason: "active" | "duplicate_replaced" | "archived_no_activity" | "archived_with_activity" }
+
+/** archivedOn：封存日（租戶當地 'YYYY-MM-DD'）；null＝未封存。lastActivityOn：最近一筆入帳／成本日。 */
+export function archiveInclusionOf(
+  archivedOn: string | null,
+  archiveReason: string | null | undefined,
+  lastActivityOn: string | null,
+): ArchiveInclusion {
+  if (archivedOn === null) return { include: true, reason: "active" }
+  if (isDuplicateReplacedArchive(archiveReason)) return { include: false, reason: "duplicate_replaced" }
+  if (lastActivityOn !== null && lastActivityOn >= archivedOn) return { include: true, reason: "archived_with_activity" }
+  return { include: false, reason: "archived_no_activity" }
+}
+
+/** 毛利制累計獎金池（未捨入）：max(0, 毛利) × 比例。 */
+function grossProfitPoolRaw(grossProfit: number, bonusRatePct: number): number {
+  return Math.max(0, grossProfit) * (bonusRatePct / 100)
+}
+
+/**
+ * 專案層的獎金基礎（純函式）：用哪一制、池多少、收入／成本／毛利、入帳比例與超過合約。
+ * 獎金試算（computeBonusRun）與估算服務（bonus-estimate.ts）共用這一支。
+ */
+export function projectBonusBasisOf(p: BonusProjectInput): ProjectBonusBasis {
+  const revenue = p.receivedTotal
+  const cost = p.cost ?? 0
+  const grossProfit = Math.round((revenue - cost) * 100) / 100
+  const basis: BonusBasis =
+    p.shareMode === "pool_pct" ? (p.bonusRatePct !== null ? "gross_profit" : "legacy_pool") : "fixed_amount"
+  const pool =
+    basis === "gross_profit"
+      ? round0(grossProfitPoolRaw(grossProfit, p.bonusRatePct as number))
+      : basis === "legacy_pool"
+        ? p.bonusPool
+        : null
+  return {
+    basis,
+    pool,
+    revenue,
+    cost,
+    disbursementCost: p.disbursementCost ?? 0,
+    subcontractCost: p.subcontractCost ?? 0,
+    grossProfit,
+    receivedRatio: receivedRatioOf(p.contractTotal, revenue),
+    overContractPct: overContractPctOf(p.contractTotal, revenue),
+  }
 }
 
 /** 累計應得（到元）。分潤設定缺值（pct／amount 為 null）→ 0，不丟例外。 */
@@ -211,18 +346,24 @@ export function computeBonusRun(
   const employees = new Set<string>()
   const projectIds = new Set<string>()
 
+  const warnings: BonusWarning[] = []
   for (const p of projects) {
     if (p.members.length === 0) continue
-    if (p.contractTotal === null || !(p.contractTotal > 0)) {
+    const b = projectBonusBasisOf(p)
+    const hasContract = p.contractTotal !== null && p.contractTotal > 0
+    if (b.basis !== "gross_profit" && !hasContract) {
       skipped.push({ projectId: p.projectId, reason: "no_contract" })
       continue
     }
-    const effectiveBonusPool = effectiveBonusPoolOf(p.contractTotal, p.bonusRatePct, p.bonusPool)
-    if (p.shareMode === "pool_pct" && (effectiveBonusPool === null || !(effectiveBonusPool > 0))) {
+    if (b.basis === "legacy_pool" && (b.pool === null || !(b.pool > 0))) {
       skipped.push({ projectId: p.projectId, reason: "no_pool" })
       continue
     }
+    if (b.overContractPct !== null) {
+      warnings.push({ projectId: p.projectId, kind: "over_contract", overContractPct: b.overContractPct, message: overContractMessage(b.overContractPct) })
+    }
     const rawPct = receivedPctOf(p.contractTotal, p.receivedTotal)
+    const gpPoolRaw = b.basis === "gross_profit" ? grossProfitPoolRaw(b.grossProfit, p.bonusRatePct as number) : 0
     const previousRaw = previousReceived instanceof Map
       ? previousReceived.get(p.projectId)
       : (previousReceived as Record<string, number>)[p.projectId]
@@ -231,7 +372,12 @@ export function computeBonusRun(
     const allocatedPct = p.members.reduce((sum, member) => sum + (member.sharePct ?? 0), 0)
     const unallocatedPct = Math.max(0, Math.round((100 - allocatedPct) * 10000) / 10000)
     for (const m of p.members) {
-      const entitled = entitledCumulativeOf(p.shareMode, effectiveBonusPool, m.sharePct, m.shareAmount, rawPct)
+      const entitled =
+        b.basis === "gross_profit"
+          ? m.sharePct === null
+            ? 0
+            : round0(gpPoolRaw * (m.sharePct / 100))
+          : entitledCumulativeOf(p.shareMode, b.pool, m.sharePct, m.shareAmount, rawPct)
       const paid = round0(paidOf(paidBeforeKey(p.projectId, m.employeeId)))
       const diff = entitled - paid
       const overpaid = diff < 0
@@ -242,17 +388,24 @@ export function computeBonusRun(
         shareMode: p.shareMode,
         sharePct: m.sharePct,
         shareAmount: m.shareAmount,
-        bonusPool: effectiveBonusPool,
+        bonusPool: b.pool,
         bonusRatePct: p.bonusRatePct,
-        contractTotal: p.contractTotal,
+        contractTotal: hasContract ? p.contractTotal : null,
         receivedTotal: p.receivedTotal,
+        basis: b.basis,
+        cost: b.cost,
+        disbursementCost: b.disbursementCost,
+        subcontractCost: b.subcontractCost,
+        grossProfit: b.grossProfit,
+        overContractPct: b.overContractPct,
         previousReceived: previous,
-        previousReceivedPct: pct4(receivedPctOf(p.contractTotal, previous)),
+        previousReceivedPct: pct4(receivedRatioOf(p.contractTotal, previous)),
         currentReceived: current,
-        currentReceivedPct: pct4(receivedPctOf(p.contractTotal, current)),
+        currentReceivedPct: pct4(receivedRatioOf(p.contractTotal, current)),
         unallocatedPct,
         projectNote: p.projectNote,
-        receivedPct: pct4(rawPct),
+        // 存實際比例（未截斷）：超收的案子 HR 要看得到 120%，不是被夾成 100%。
+        receivedPct: pct4(b.receivedRatio),
         entitledCumulative: entitled,
         paidBefore: paid,
         amount: overpaid ? 0 : diff,
@@ -273,6 +426,7 @@ export function computeBonusRun(
     projectCount: projectIds.size,
     overpaidCount: items.filter((i) => i.overpaid).length,
     skipped,
+    warnings,
   }
   return { items, totals }
 }

@@ -4,6 +4,7 @@ import { isEmployedOn } from "./employment-status.js"
 import { defaultCompanyOf, loadTenantCompanies, type CompanyLite } from "./project-company.js"
 import { effectiveBillingAmount, pct1 } from "./project-money.js"
 import { isVoidedBeyondCapDraft } from "./overtime-void.js"
+import { disbursementGrossCents } from "./project-gross-profit.js"
 
 /**
  * 集團總覽（2026-10-11 業主拍板第一版）：跨公司彙總入帳收入、放款支出與專案毛利。
@@ -17,6 +18,8 @@ import { isVoidedBeyondCapDraft } from "./overtime-void.js"
  *     草稿／送簽中／已核准未付／作廢一律不計。⚠️ 反過來說，舊路徑手動標記已付、沒有經放款單的下包期款
  *     （project_subcontract_payments.disbursement_id 為空）不在 disbursements 裡，第一版不計入支出。
  *   • 專案毛利＝入帳收入－放款支出；毛利率＝毛利÷入帳收入（收入 0 → null，畫面顯示「—」）。不含人事成本。
+ *     單一專案的累計已實現毛利（獎金池用，2026-10-26）在 services/project-gross-profit.ts：同一個放款毛額口徑，
+ *     依 disbursement_allocations 落到專案，另計舊路徑（沒經放款單）已付的複委託期款。
  *
  * ── 未稅怎麼查證的（不必換算）────────────────────────────────────────
  *   `project_billings` 沒有含稅欄位，全表金額都是未稅，開票時才另外加 5% 營業稅、系統不存稅額：
@@ -659,8 +662,8 @@ export function buildGroupModel(data: GroupOverviewData): GroupModel {
       kind: "expense",
       companyId: resolveCompany(d.paying_company_id),
       month,
-      // 代扣前毛額＝實付淨額＋代扣合計。
-      cents: toCents(d.amount) + toCents(d.withheld_amount),
+      // 代扣前毛額＝實付淨額＋代扣合計（與專案毛利／獎金池同一支，見 services/project-gross-profit.ts）。
+      cents: disbursementGrossCents(d),
       affiliate: vendor?.is_affiliate === true,
       projectId: null,
       vendorKey: vendorKeyOf(d),
