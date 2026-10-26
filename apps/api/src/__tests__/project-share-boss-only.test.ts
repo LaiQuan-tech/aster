@@ -365,6 +365,35 @@ describe("PATCH /projects/:id 的獎金池／分潤模式 — 老闆限定", () 
   })
 })
 
+describe("PATCH /projects/:id 封存／解除封存 → 重算草稿批次", () => {
+  beforeEach(() => {
+    // 進行中的案子不能封存（archive_requires_non_active）；改成已結案。
+    fake.db.projects.find((p: Row) => p.id === PROJECT)!.status = "closed"
+  })
+
+  it("封存 → 觸發重算", async () => {
+    const res = await as(T.hr, request(app).patch(`/projects/${PROJECT}`)).send({ archived: true })
+    expect(res.status).toBe(200)
+    expect(recompute.calls).toEqual([{ tenantId: TENANT_ID, projectIds: [PROJECT], context: "PATCH /projects/:id" }])
+  })
+
+  it("解除封存 → 觸發重算", async () => {
+    fake.db.projects.find((p: Row) => p.id === PROJECT)!.archived_at = "2026-09-01T00:00:00.000Z"
+    const res = await as(T.hr, request(app).patch(`/projects/${PROJECT}`)).send({ archived: false })
+    expect(res.status).toBe(200)
+    expect(recompute.calls).toHaveLength(1)
+  })
+
+  it("已封存再送 archived:true（沒變動）、或只改案名 → 不重算", async () => {
+    const name = await as(T.hr, request(app).patch(`/projects/${PROJECT}`)).send({ name: "只改名" })
+    expect(name.status).toBe(200)
+    fake.db.projects.find((p: Row) => p.id === PROJECT)!.archived_at = "2026-09-01T00:00:00.000Z"
+    const same = await as(T.hr, request(app).patch(`/projects/${PROJECT}`)).send({ archived: true })
+    expect(same.status).toBe(200)
+    expect(recompute.calls).toHaveLength(0)
+  })
+})
+
 describe("PUT /project-settings — 角色預設趴數只有老闆", () => {
   const body = { defaultSharePctByRole: { manager: 20, lead: 10, support: 5, member: 2 } }
 

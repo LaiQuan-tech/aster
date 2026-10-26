@@ -1419,7 +1419,13 @@ projectsRouter.patch(
           changed_by_emp_id: scope.self.id,
         })
       }
-      if (bonusChanged) await recomputeDraftRunsAfterWrite(tenantId, [data.id as string], "PATCH /projects/:id")
+      // 封存／解除封存會改變這案進不進獎金批次（封存納入規則）→ 也要重算（best-effort）。
+      const archiveChanged =
+        Object.prototype.hasOwnProperty.call(patch, "archived_at") &&
+        !!patch.archived_at !== !!scope.project.archived_at
+      if (bonusChanged || archiveChanged) {
+        await recomputeDraftRunsAfterWrite(tenantId, [data.id as string], "PATCH /projects/:id")
+      }
       res.status(200).json({ id: data.id })
     } catch (err) {
       next(err)
