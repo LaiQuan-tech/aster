@@ -16,6 +16,8 @@ interface ProjectSettingsCardProps {
   canBonus: boolean;
   /** 分潤改版 #6：分潤模式與獎金池只有老闆能改（看得到 ≠ 改得了）。 */
   canEditBonus?: boolean;
+  /** 看得到集團財務（access.profit，2026-10-26）：獎金池總額屬集團財務，false＝欄位不畫。省略＝畫。 */
+  canSeeProfit?: boolean;
   saveProjectField: (patch: UpdateProjectExtBody) => Promise<void>;
   error: string | null;
 }
@@ -28,7 +30,7 @@ interface ProjectSettingsCardProps {
  * 實際公司人員與個人分潤由緊接在本卡下方的「專案獎金與分潤」整批編輯器維護；
  * 不把租戶級角色預設值混在單一專案頁，避免管理員誤以為正在設定本案人員。
  */
-export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, canEditBonus = false, saveProjectField, error }: ProjectSettingsCardProps) {
+export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, canEditBonus = false, canSeeProfit = true, saveProjectField, error }: ProjectSettingsCardProps) {
   const [clients, setClients] = useState<Client[]>([]);
   useEffect(() => {
     listClients().then((r) => setClients(r.clients)).catch(() => {});
@@ -81,7 +83,7 @@ export function ProjectSettingsCard({ project, depts, emps, isPool, canBonus, ca
             <option value="fixed_amount">直接填每人金額</option>
           </select>
         </div>
-        {isPool && canBonus && (
+        {isPool && canBonus && canSeeProfit && (
           <div>
             <label className={labelCls}>獎金池總額</label>
             <input

@@ -163,7 +163,15 @@ meRouter.get(
 
       const employmentType = (data.employment_type as string | null) ?? null
       const self = { id: data.id as string, role: data.role as string }
-      const bossEmpId = await loadProjectBossEmpId(tenantId)
+      // 查老闆失敗 → 兩個集團財務旗標降級為 false＋warn，不讓 /me 500（只是導覽可見性，API 各自守門）。
+      let bossLookupOk = true
+      let bossEmpId: string | null = null
+      try {
+        bossEmpId = await loadProjectBossEmpId(tenantId)
+      } catch (err) {
+        bossLookupOk = false
+        logger.warn({ tenantId, empId: data.id, err: err instanceof Error ? err.message : String(err) }, "GET /me: 讀老闆設定失敗，集團財務旗標回 false")
+      }
       res.status(200).json({
         id: data.id,
         name: data.name,
@@ -180,8 +188,8 @@ meRouter.get(
         defaultShift,
         companyId,
         companyName,
-        canSeeGroupFinancials: canSeeGroupFinancials(self, bossEmpId, features),
-        canGrantGroupFinancials: canGrantGroupFinancials(self, bossEmpId),
+        canSeeGroupFinancials: bossLookupOk && canSeeGroupFinancials(self, bossEmpId, features),
+        canGrantGroupFinancials: bossLookupOk && canGrantGroupFinancials(self, bossEmpId),
       })
     } catch (err) {
       next(err)

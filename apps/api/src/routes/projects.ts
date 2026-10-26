@@ -417,7 +417,8 @@ function serializeProject(
     leadEmpId: row.lead_emp_id,
     shareMode: row.share_mode,
     // 分潤池屬 bonus 段：會計與一般員工一律 null（W4）；列表端點一律不回。
-    bonusPool: bonus ? num(row.bonus_pool) : null,
+    // 2026-10-26 驗收：獎金池（× 入帳比例可反推毛利規模）也屬集團財務——要看得到分潤**且**看得到毛利（profit）才回。
+    bonusPool: profit ? num(row.bonus_pool) : null,
     // 獎金比例只給看得到毛利的人（canSeeProfit）：應得 ÷（比例 × 趴數）可反推毛利。
     bonusRatePct: profit ? num(row.bonus_rate_pct) : null,
     createdAt: row.created_at,

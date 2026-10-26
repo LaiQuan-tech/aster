@@ -357,7 +357,7 @@ export default function AdminProjectDetailPage() {
       />
 
       {/* 專案設定 */}
-      <ProjectSettingsCard project={project} depts={depts} emps={emps} isPool={isPool} canBonus={canBonus} canEditBonus={shareMeta.canEditBonus} saveProjectField={saveProjectField} error={error} />
+      <ProjectSettingsCard project={project} depts={depts} emps={emps} isPool={isPool} canBonus={canBonus} canEditBonus={shareMeta.canEditBonus} canSeeProfit={access.profit !== false} saveProjectField={saveProjectField} error={error} />
 
       {/* 本案公司人員與個人分潤：放在專案設定正下方，避免和全租戶角色預設混淆。 */}
       <MembersCard

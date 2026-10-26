@@ -651,3 +651,22 @@ describe("專案金額摘要：毛利／毛利率屬集團財務（2026-10-26 �
     })
   }
 })
+
+describe("專案獎金池（bonusPool）：看得到分潤且看得到集團財務才回（2026-10-26 驗收）", () => {
+  beforeEach(() => {
+    fake.db.projects = fake.db.projects.map((p: Row) => (p.id === PROJECT ? { ...p, bonus_pool: "120000" } : p))
+  })
+
+  it("GET /projects/:id：未授權 HR、經理、會計 bonusPool 為 null；老闆／授權 HR／platform 拿得到", async () => {
+    for (const token of [T.hr, T.manager, T.accountant]) {
+      const res = await as(token, request(app).get(`/projects/${PROJECT}`))
+      expect(res.status, token).toBe(200)
+      expect(res.body.project.bonusPool, token).toBeNull()
+    }
+    for (const token of [T.boss, T.grantedHr, T.platform]) {
+      const res = await as(token, request(app).get(`/projects/${PROJECT}`))
+      expect(res.body.project.bonusPool, token).toBe(120000)
+    }
+  })
+})
+

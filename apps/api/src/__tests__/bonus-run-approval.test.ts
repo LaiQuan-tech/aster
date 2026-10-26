@@ -436,6 +436,32 @@ describe("毛利欄位：只有老闆／platform_admin／授權 HR 看得到（2
     expect(stored.snapshot.grossProfit).toBe(3_000_000)
   })
 
+  it("匯出 xlsx：未授權 HR 移除「%／總獎金」欄（25 欄）；授權 HR 完整 27 欄", async () => {
+    const binaryParser = (res: request.Response, cb: (err: Error | null, body: unknown) => void) => {
+      const chunks: Buffer[] = []
+      const stream = res as unknown as NodeJS.ReadableStream
+      stream.on("data", (c: Buffer) => chunks.push(c))
+      stream.on("end", () => cb(null, Buffer.concat(chunks)))
+    }
+    const { default: ExcelJS } = await import("exceljs")
+    const columnsOf = async () => {
+      const res = await req("get", `/bonus-runs/${id}/export.xlsx`, HR_TOKEN).buffer(true).parse(binaryParser)
+      expect(res.status).toBe(200)
+      const wb = new ExcelJS.Workbook()
+      await wb.xlsx.load(res.body as unknown as ArrayBuffer)
+      const ws = wb.worksheets[0]!
+      return { count: ws.columnCount, row2: Array.from({ length: ws.columnCount }, (_, i) => ws.getRow(2).getCell(i + 1).value) }
+    }
+    const id = await createDraft()
+    const plain = await columnsOf()
+    expect(plain.count).toBe(25)
+    expect(plain.row2).not.toContain("總獎金")
+    fake.db.employees = fake.db.employees!.map((e) => (e.id === HR_ID ? { ...e, features: { seeGroupFinancials: true } } : e))
+    const granted = await columnsOf()
+    expect(granted.count).toBe(27)
+    expect(granted.row2).toContain("總獎金")
+  })
+
   it("授權 HR（features.seeGroupFinancials）：看得到毛利", async () => {
     fake.db.employees = fake.db.employees!.map((e) => (e.id === HR_ID ? { ...e, features: { seeGroupFinancials: true } } : e))
     const id = await createDraft()

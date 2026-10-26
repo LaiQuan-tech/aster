@@ -20,6 +20,21 @@ type ExportItem = SerializedItem & {
 }
 
 const WIDTHS = [6, 9, 15, 25, 13, 13, 9, 13, 9, 9, 9, 13, 13, 10, 9, 10, 9, 10, 9, 10, 9, 10, 9, 10, 9, 11, 24]
+/** 「獎金比例」底下的 %（第 11 欄）與總獎金（第 12 欄）：可反推毛利，看不到集團財務的人整欄移除（2026-10-26）。 */
+const PROFIT_COLS = new Set([11, 12])
+const FULL_COLS = 27
+
+/**
+ * 欄位對照：以完整版（27 欄）的欄號寫程式，`col(n)` 換成實際欄號。showProfit=false 時第 11、12 欄不存在
+ * （col 回 null），之後的欄位往左移 2 格。
+ */
+function columnMap(showProfit: boolean): (n: number) => number | null {
+  return (n) => {
+    if (showProfit) return n
+    if (PROFIT_COLS.has(n)) return null
+    return n > 12 ? n - PROFIT_COLS.size : n
+  }
+}
 
 function money(cell: ExcelJS.Cell, value: number | null | undefined): void {
   cell.value = value === null || value === undefined ? null : Math.round(value)
@@ -71,17 +86,23 @@ function memberSlots(items: ExportItem[]): Array<ExportItem | null> {
   return [managers[0] ?? null, ...teamSlots, supports[0] ?? null]
 }
 
-function setupHeaders(ws: ExcelJS.Worksheet, label: string): void {
-  ws.getRow(1).values = [
+function setupHeaders(ws: ExcelJS.Worksheet, label: string, showProfit: boolean): void {
+  // 第 1 列「獎金比例」寫在第 11 欄、合併到第 13 欄：移除時拿掉後面兩個空白格（12、13），標題留在第 11 欄；
+  // 第 2 列拿掉「%」「總獎金」（11、12）。
+  const drop = (values: string[], cols: number[]) => (showProfit ? values : values.filter((_, index) => !cols.includes(index + 1)))
+  ws.getRow(1).values = drop([
     "序號", label, "專案單號", "工程名稱", "未稅金額", "之前請領", "之前請領%", "本次請款", "本次款%", "累積 %",
     "獎金比例", "", "", "經理", "", "組員1", "", "組員2", "", "組員3", "", "組員4", "", "支援", "", "尚未分配", "備註",
-  ]
-  ws.getRow(2).values = ["", "", "", "", "", "", "", "", "", "", "%", "總獎金", "本次獎金", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+  ], [12, 13])
+  ws.getRow(2).values = drop(["", "", "", "", "", "", "", "", "", "", "%", "總獎金", "本次獎金", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], [11, 12])
 
-  for (const col of [...Array.from({ length: 10 }, (_, index) => index + 1), ...Array.from({ length: 14 }, (_, index) => index + 14)]) {
-    ws.mergeCells(1, col, 2, col)
+  const col = columnMap(showProfit)
+  for (const full of [...Array.from({ length: 10 }, (_, index) => index + 1), ...Array.from({ length: 14 }, (_, index) => index + 14)]) {
+    const c = col(full)!
+    ws.mergeCells(1, c, 2, c)
   }
-  ws.mergeCells(1, 11, 1, 13)
+  // 「獎金比例」橫跨 %／總獎金／本次獎金；只剩本次獎金時不合併。
+  if (showProfit) ws.mergeCells(1, 11, 1, 13)
 
   for (const rowNo of [1, 2]) {
     const row = ws.getRow(rowNo)
@@ -94,13 +115,31 @@ function setupHeaders(ws: ExcelJS.Worksheet, label: string): void {
   }
 }
 
-export async function buildBonusRunWorkbook(run: SerializedRun, items: SerializedItem[]): Promise<ExcelJS.Workbook> {
+/**
+ * `opts.showProfit=false`（看不到集團財務的人，routes/bonus-runs.ts 帶）：移除「%」與「總獎金」兩欄（不是留空），
+ * 合計列也不印總獎金。省略＝完整版。
+ */
+export async function buildBonusRunWorkbook(
+  run: SerializedRun,
+  items: SerializedItem[],
+  opts: { showProfit?: boolean } = {},
+): Promise<ExcelJS.Workbook> {
+  const showProfit = opts.showProfit !== false
+  const col = columnMap(showProfit)
   const { default: ExcelJSRuntime } = await import("exceljs")
   const wb = new ExcelJSRuntime.Workbook()
   wb.creator = "aster-hr"
   const ws = wb.addWorksheet(run.label, { views: [{ state: "frozen", ySplit: 2 }] })
-  WIDTHS.forEach((width, index) => { ws.getColumn(index + 1).width = width })
-  setupHeaders(ws, run.label)
+  WIDTHS.forEach((width, index) => {
+    const c = col(index + 1)
+    if (c !== null) ws.getColumn(c).width = width
+  })
+  setupHeaders(ws, run.label, showProfit)
+  /** 以完整版欄號取格子；被移除的欄回 null。 */
+  const cellOf = (row: ExcelJS.Row, full: number): ExcelJS.Cell | null => {
+    const c = col(full)
+    return c === null ? null : row.getCell(c)
+  }
 
   const projects = groupByProject(items)
   let rowNo = 3
@@ -127,24 +166,26 @@ export async function buildBonusRunWorkbook(run: SerializedRun, items: Serialize
     money(row.getCell(8), currentReceived)
     fractionPercentage(row.getCell(9), currentPct)
     fractionPercentage(row.getCell(10), first.receivedPct)
-    pointPercentage(row.getCell(11), first.bonusRatePct)
-    money(row.getCell(12), first.bonusPool)
-    money(row.getCell(13), projectItems.reduce((sum, item) => sum + item.amount, 0))
+    const rateCell = cellOf(row, 11)
+    if (rateCell) pointPercentage(rateCell, first.bonusRatePct)
+    const poolCell = cellOf(row, 12)
+    if (poolCell) money(poolCell, first.bonusPool)
+    money(cellOf(row, 13)!, projectItems.reduce((sum, item) => sum + item.amount, 0))
     slots.forEach((member, slotIndex) => {
       const nameCol = 14 + slotIndex * 2
-      row.getCell(nameCol).value = member?.employeeName ?? ""
-      if (member?.shareMode === "pool_pct") pointPercentage(row.getCell(nameCol + 1), member.sharePct)
-      else money(row.getCell(nameCol + 1), member?.shareAmount)
+      cellOf(row, nameCol)!.value = member?.employeeName ?? ""
+      if (member?.shareMode === "pool_pct") pointPercentage(cellOf(row, nameCol + 1)!, member.sharePct)
+      else money(cellOf(row, nameCol + 1)!, member?.shareAmount)
     })
-    pointPercentage(row.getCell(26), unallocated)
+    pointPercentage(cellOf(row, 26)!, unallocated)
     const overpaid = projectItems.filter((i) => i.overpaid).reduce((sum, i) => sum + i.overpaidBy, 0)
-    row.getCell(27).value = [
+    cellOf(row, 27)!.value = [
       first.projectNote,
       overflowMembers.length > 0 ? `其他分配：${overflowMembers.map((member) => `${member.employeeName ?? member.employeeId} ${member.shareMode === "pool_pct" ? `${member.sharePct ?? 0}%` : Math.round(member.shareAmount ?? 0).toLocaleString("zh-TW")}`).join("、")}` : null,
       overpaid > 0 ? `超發 ${Math.round(overpaid).toLocaleString("zh-TW")}` : null,
     ].filter(Boolean).join("；")
     row.eachCell({ includeEmpty: true }, (cell) => {
-      cell.font = { name: "新細明體", size: 10, color: Number(cell.col) === 26 && unallocated > 0 ? { argb: "FFFF0000" } : undefined }
+      cell.font = { name: "新細明體", size: 10, color: Number(cell.col) === col(26) && unallocated > 0 ? { argb: "FFFF0000" } : undefined }
       cell.border = BORDER
     })
     rowNo += 1
@@ -153,14 +194,15 @@ export async function buildBonusRunWorkbook(run: SerializedRun, items: Serialize
   const total = ws.getRow(rowNo)
   total.getCell(1).value = `合計（${projects.length} 案）`
   ws.mergeCells(rowNo, 1, rowNo, 10)
-  money(total.getCell(12), projects.reduce((sum, rows) => sum + (rows[0]?.bonusPool ?? 0), 0))
-  money(total.getCell(13), items.reduce((sum, item) => sum + item.amount, 0))
+  const totalPool = cellOf(total, 12)
+  if (totalPool) money(totalPool, projects.reduce((sum, rows) => sum + (rows[0]?.bonusPool ?? 0), 0))
+  money(cellOf(total, 13)!, items.reduce((sum, item) => sum + item.amount, 0))
   total.eachCell({ includeEmpty: true }, (cell) => {
     cell.font = { name: "新細明體", bold: true }
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFDDEBF7" } }
     cell.border = { ...BORDER, bottom: { style: "double" } }
   })
-  ws.autoFilter = { from: { row: 2, column: 1 }, to: { row: Math.max(2, rowNo - 1), column: 27 } }
+  ws.autoFilter = { from: { row: 2, column: 1 }, to: { row: Math.max(2, rowNo - 1), column: col(FULL_COLS)! } }
   ws.pageSetup = { orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9 }
   return wb
 }
@@ -169,6 +211,10 @@ export function bonusRunFilename(run: SerializedRun): string {
   return `獎金季發放-${run.label}.xlsx`
 }
 
-export async function bonusRunWorkbookBuffer(run: SerializedRun, items: SerializedItem[]): Promise<Buffer> {
-  return workbookToBuffer(await buildBonusRunWorkbook(run, items))
+export async function bonusRunWorkbookBuffer(
+  run: SerializedRun,
+  items: SerializedItem[],
+  opts: { showProfit?: boolean } = {},
+): Promise<Buffer> {
+  return workbookToBuffer(await buildBonusRunWorkbook(run, items, opts))
 }

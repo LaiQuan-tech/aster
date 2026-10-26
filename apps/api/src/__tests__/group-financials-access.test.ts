@@ -101,6 +101,18 @@ describe("GET /me — canSeeGroupFinancials／canGrantGroupFinancials", () => {
     expect(await me(T.accountant)).toMatchObject({ canSeeGroupFinancials: false, canGrantGroupFinancials: false })
     expect(await me(T.flaggedStaff)).toMatchObject({ canSeeGroupFinancials: false, canGrantGroupFinancials: false })
   })
+  it("查老闆設定失敗：不 500，兩個旗標降級為 false", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      for (let i = 0; i < 10; i++) fake.injectError({ table: "tenants", action: "select", error: { code: "XX000", message: "boom" } })
+      const res = await as(T.platform)(request(app).get("/me"))
+      expect(res.status).toBe(200)
+      expect(res.body).toMatchObject({ canSeeGroupFinancials: false, canGrantGroupFinancials: false })
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it("沒設老闆：只有 platform_admin 與授權 HR", async () => {
     seed(null)
     expect(await me(T.boss)).toMatchObject({ canSeeGroupFinancials: false, canGrantGroupFinancials: false })

@@ -263,7 +263,8 @@ bonusRunsRouter.get("/bonus-runs/:id/export.xlsx", ...guards, async (req: Reques
       return
     }
     const detail = maskProfit(raw, canSeeProfit)
-    const buffer = await bonusRunWorkbookBuffer(detail.run, detail.items)
+    // 看不到集團財務：毛利類欄位已遮成 null，xlsx 另外整欄移除「%／總獎金」（不是留空）。
+    const buffer = await bonusRunWorkbookBuffer(detail.run, detail.items, { showProfit: canSeeProfit })
     sendXlsx(res, buffer, bonusRunFilename(detail.run))
   } catch (err) {
     handleError(err, res, next)
