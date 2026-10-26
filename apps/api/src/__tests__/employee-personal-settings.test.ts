@@ -100,14 +100,14 @@ describe("GET /me — features／defaultShift", () => {
     seed({ wfhPunch: true, unknownKey: 1 }, SHIFT_ID)
     const res = await as(EMP_TOKEN)(request(app).get("/me"))
     expect(res.status).toBe(200)
-    expect(res.body.features).toEqual({ wfhPunch: true, noNightPremium: false, regularLeaveWeekday: null, restDayWeekday: null })
+    expect(res.body.features).toEqual({ wfhPunch: true, noNightPremium: false, regularLeaveWeekday: null, restDayWeekday: null, seeGroupFinancials: false })
     expect(res.body.defaultShift).toEqual({ id: SHIFT_ID, name: "午晚班", start: "14:30", end: "22:30" })
   })
 
   it("沒設定 → wfhPunch false、defaultShift null", async () => {
     seed({})
     const res = await as(EMP_TOKEN)(request(app).get("/me"))
-    expect(res.body.features).toEqual({ wfhPunch: false, noNightPremium: false, regularLeaveWeekday: null, restDayWeekday: null })
+    expect(res.body.features).toEqual({ wfhPunch: false, noNightPremium: false, regularLeaveWeekday: null, restDayWeekday: null, seeGroupFinancials: false })
     expect(res.body.defaultShift).toBeNull()
   })
 })

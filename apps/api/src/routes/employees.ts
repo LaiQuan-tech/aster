@@ -21,6 +21,8 @@ import {
 import { isPlatformAdminEmail } from "../middleware/platform.js"
 import { employeesHavePersonalSettings } from "../services/employee-shifts.js"
 import { normalizeEmployeeFeatures } from "../services/employee-features.js"
+import { canGrantGroupFinancials } from "../services/financial-visibility.js"
+import { loadProjectBossEmpId } from "../services/project-scope.js"
 import { employeesHaveCompany } from "../lib/schema-compat.js"
 import { checkProjectCompany, loadTenantCompanies } from "../services/project-company.js"
 import { companyInsertPatch, defaultCompanyIdForNewEmployee } from "../services/employee-company.js"
@@ -59,6 +61,8 @@ const updateSchema = z
         // 一例一休個人例假／休息日（0＝週日…6＝週六）；null＝清除、回到公司設定（services/day-type.ts）。
         regularLeaveWeekday: z.number().int().min(0).max(6).nullable().optional(),
         restDayWeekday: z.number().int().min(0).max(6).nullable().optional(),
+        // 2026-10-26 可看集團財務：只有老闆／platform_admin 能改（HR 帶這個鍵 → 403 group_financials_grant_forbidden）。
+        seeGroupFinancials: z.boolean().optional(),
       })
       .strict()
       .optional(),
@@ -434,6 +438,8 @@ employeesRouter.post(
  *     （本人除外），其他人 403 `not_boss`。不擋的話 HR 可以把另一位 HR 降成一般員工、重設他的密碼、再升回去，
  *     重設密碼那條保護就白做了。角色沒變（只改姓名等）不受影響。
  *   • 角色字串寫進去前統一成標準寫法（canonicalRole）。
+ *   • features.seeGroupFinancials（可看集團財務，2026-10-26）只有老闆或 platform_admin 能改，HR 帶這個鍵（不論 true／false、
+ *     改別人或自己）403 `group_financials_grant_forbidden`。其他 features 鍵 HR 照舊可改。
  */
 employeesRouter.patch(
   "/employees/:id",
@@ -516,6 +522,14 @@ employeesRouter.patch(
         }
         if (!shift) {
           res.status(400).json({ error: "shift_not_found" })
+          return
+        }
+      }
+      // 可看集團財務（2026-10-26）：授權旗標只有老闆／platform_admin 能改，HR（含改自己）一律 403。
+      if (parsed.data.features?.seeGroupFinancials !== undefined) {
+        const caller = await callerOf(req, tenantId)
+        if (!caller || !canGrantGroupFinancials(caller, await loadProjectBossEmpId(tenantId))) {
+          res.status(403).json({ error: "group_financials_grant_forbidden", message: "只有老闆或平台管理員可以設定「可看集團財務」" })
           return
         }
       }

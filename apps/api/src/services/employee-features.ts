@@ -11,6 +11,7 @@ import { employeesHavePersonalSettings } from "./employee-shifts.js"
  *   regularLeaveWeekday  個人例假日（一例一休的「例」，0＝週日…6＝週六；null＝依公司 tenants.features.attendance）。
  *   restDayWeekday       個人休息日（同上；null＝未設時：與公司例假日相同→公司休息日，否則→公司例假日那天）。
  *                        兩者的解讀見 services/day-type.ts（2026-10-17 一例一休）。
+ *   seeGroupFinancials   可看集團財務（2026-10-26；只對 hr_admin 有效、只有老闆／platform_admin 能改）。
  * 未知鍵原樣保留（PATCH 是合併寫入），讀取時只吐出已知鍵。
  */
 export interface EmployeeFeatures {
@@ -20,6 +21,11 @@ export interface EmployeeFeatures {
   regularLeaveWeekday?: number | null
   /** 個人休息日 0–6；null＝依預設推導（services/day-type.ts employeeWeekendPolicy）。 */
   restDayWeekday?: number | null
+  /**
+   * 可看集團財務（2026-10-26 業主：老闆與一般 HR 分開）。只對 hr_admin 有效，只有老闆／platform_admin 能改
+   * （見 services/financial-visibility.ts）。與出勤／薪資無關，不算進 hasAnyEmployeeFeature。
+   */
+  seeGroupFinancials?: boolean
 }
 
 /** 0–6 的整數 → 星期；其他（含字串、小數、null）→ null。純函式。 */
@@ -35,6 +41,7 @@ export function normalizeEmployeeFeatures(raw: unknown): EmployeeFeatures {
     noNightPremium: obj.noNightPremium === true,
     regularLeaveWeekday: asWeekday(obj.regularLeaveWeekday),
     restDayWeekday: asWeekday(obj.restDayWeekday),
+    seeGroupFinancials: obj.seeGroupFinancials === true,
   }
 }
 

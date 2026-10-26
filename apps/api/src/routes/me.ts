@@ -6,6 +6,8 @@ import { logger } from "../lib/logger.js"
 import { departmentsHaveManagerList, employeesHaveCompany } from "../lib/schema-compat.js"
 import { employeesHavePersonalSettings } from "../services/employee-shifts.js"
 import { normalizeEmployeeFeatures } from "../services/employee-features.js"
+import { canGrantGroupFinancials, canSeeGroupFinancials } from "../services/financial-visibility.js"
+import { loadProjectBossEmpId } from "../services/project-scope.js"
 
 export const meRouter = Router()
 
@@ -88,6 +90,10 @@ async function loadOwnCompany(tenantId: string, empId: string): Promise<{ compan
  *
  * 員工所屬公司（2026-10-25，migration 0072；未套 → 兩個都 null）：`companyId`、`companyName`。
  *
+ * `canSeeGroupFinancials`（2026-10-26）：看不看得到集團財務（集團總覽、專案毛利、首頁本年收入／毛利率）——
+ * 老闆／platform_admin／被授權的 hr_admin（features.seeGroupFinancials）。`canGrantGroupFinancials`：
+ * 能不能在員工編輯頁授權別人（老闆／platform_admin）。見 services/financial-visibility.ts。
+ *
  * Open to any authenticated tenant member: the ESS uses it to detect HR admins
  * (to surface the back-office link) and the admin console uses it as its gate.
  */
@@ -156,6 +162,8 @@ meRouter.get(
       const { companyId, companyName } = await loadOwnCompany(tenantId, data.id as string)
 
       const employmentType = (data.employment_type as string | null) ?? null
+      const self = { id: data.id as string, role: data.role as string }
+      const bossEmpId = await loadProjectBossEmpId(tenantId)
       res.status(200).json({
         id: data.id,
         name: data.name,
@@ -172,6 +180,8 @@ meRouter.get(
         defaultShift,
         companyId,
         companyName,
+        canSeeGroupFinancials: canSeeGroupFinancials(self, bossEmpId, features),
+        canGrantGroupFinancials: canGrantGroupFinancials(self, bossEmpId),
       })
     } catch (err) {
       next(err)
