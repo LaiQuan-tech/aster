@@ -124,7 +124,7 @@ describe("POST /projects — 專案申請單的 sharePctByRole", () => {
   })
 
   it("會計帶非 null 趴數 → 403 forbidden_bonus", async () => {
-    const res = await create(T.accountant, { sharePctByRole: { manager: 30 } })
+    const res = await create(T.accountant, { sharePctByRole: { manager: 30, lead: 20, support: 10, member: 5 } })
     expect(res.status).toBe(403)
     expect(res.body.error).toBe("forbidden_bonus")
     expect(projectInserts()).toHaveLength(0)
@@ -147,9 +147,12 @@ describe("POST /projects — 專案申請單的 sharePctByRole", () => {
     expect((projectInserts()[1]?.args.p_project as Row).share_pct_by_role).toBeNull()
   })
 
-  it("趴數超出 0–100 → 400 invalid_body", async () => {
-    const res = await create(T.platform, { sharePctByRole: { manager: 120 } })
-    expect(res.status).toBe(400)
+  it("趴數超出 0–100、缺角色或空物件 → 400 invalid_body（要取消本案設定請送 null）", async () => {
+    for (const sharePctByRole of [{ manager: 120, lead: 0, support: 0, member: 0 }, { manager: 30 }, {}]) {
+      const res = await create(T.platform, { sharePctByRole })
+      expect(res.status).toBe(400)
+    }
+    expect(projectInserts()).toHaveLength(0)
   })
 })
 

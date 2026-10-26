@@ -104,3 +104,18 @@ describe("複製專案（追加減／加做）— 承接公司", () => {
     expect(fake.db.projects.find((row) => row.id === SOURCE_ID)?.company_id).toBe(COMPANY_SECOND)
   })
 })
+
+describe("複製專案 — 本案各角色分潤趴數（share_pct_by_role，2026-10-27）", () => {
+  it("新案沿用原案的各角色分潤趴數", async () => {
+    fake.db.projects = [sourceRow({ share_pct_by_role: { manager: 25, lead: 15, support: 5, member: 2 } })]
+    const result = await duplicate()
+    expect(result.ok).toBe(true)
+    expect(writesTo("projects", "insert")[0]?.payload).toHaveProperty("share_pct_by_role", { manager: 25, lead: 15, support: 5, member: 2 })
+  })
+
+  it("原案未設定（null）→ 新案也是 null（退回新專案起始值）", async () => {
+    const result = await duplicate()
+    expect(result.ok).toBe(true)
+    expect(writesTo("projects", "insert")[0]?.payload).toHaveProperty("share_pct_by_role", null)
+  })
+})

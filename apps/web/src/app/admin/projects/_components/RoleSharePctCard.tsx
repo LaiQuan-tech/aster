@@ -95,7 +95,12 @@ export function RoleSharePctCard({
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  useEffect(() => setDraft(roleSharePctDraftOf(values)), [values]);
+  // 依「內容」重設：頁面每次 load() 都會給新物件，比物件參考的話，存別張卡時會把這裡還沒存的輸入洗掉。
+  const valuesKey = JSON.stringify(roleSharePctDraftOf(values));
+  useEffect(() => {
+    setDraft(roleSharePctDraftOf(values));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [valuesKey]);
 
   const total = PROJECT_MEMBER_ROLE_ORDER.reduce((sum, role) => sum + (Number(draft[role]) || 0), 0);
 

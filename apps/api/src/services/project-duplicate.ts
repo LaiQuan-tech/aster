@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { columnsExist } from "../lib/schema-compat.js"
 import { writeAuditLog } from "./audit.js"
 import { recomputeBillings } from "./billing-store.js"
 import {
@@ -231,6 +232,10 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
   // 絕不掛在非主案底下。
   const parentProjectId = (root.kind ?? "main") === "main" ? root.id : null
 
+  // 本案各角色分潤趴數（migration 0075）：新案沿用原案的設定（成員趴數也會複製，兩者一致）。
+  // 刻意不放進 SOURCE_COLS：遷移前上碼時整個來源查詢會因缺欄位而失敗；欄位沒套就不帶。
+  const sharePctByRole = await sourceSharePctByRole(tenantId, source.id)
+
   // ── 1. 新案本體（撞號重試） ──────────────────────────────────────
   const baseRow = {
     tenant_id: tenantId,
@@ -258,6 +263,7 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
     engineers: copy.engineers ? (source.engineers ?? {}) : {},
     // 同一家公司承接：追加減／加做的新案與原案是同一份業務，申請單抬頭不該變。
     company_id: source.company_id,
+    ...(sharePctByRole === undefined ? {} : { share_pct_by_role: sharePctByRole }),
   }
 
   let inserted: { id: string; code: string; name: string } | null = null
@@ -577,4 +583,17 @@ export async function loadLineage(
     }))
 
   return { rootId: root.id, projects }
+}
+
+/** 原案的 share_pct_by_role；欄位未套用（migration 0075 前）回 undefined＝新案不寫這欄。 */
+async function sourceSharePctByRole(tenantId: string, projectId: string): Promise<unknown | undefined> {
+  if (!(await columnsExist("projects", "share_pct_by_role"))) return undefined
+  const { data, error } = await supabaseAdmin
+    .from("projects")
+    .select("share_pct_by_role")
+    .eq("tenant_id", tenantId)
+    .eq("id", projectId)
+    .maybeSingle()
+  if (error) throw new Error(`sourceSharePctByRole: ${error.message}`)
+  return (data as { share_pct_by_role?: unknown } | null)?.share_pct_by_role ?? null
 }

@@ -129,9 +129,16 @@ export const PROJECT_MEMBER_ROLES = ["manager", "lead", "support", "member"] as 
 
 /**
  * 本案各角色分潤趴數（2026-10-27，`projects.share_pct_by_role`）：四角色 → 0–100。整鍵覆蓋，
- * UI 一律送完整四鍵；null＝本案未設定（新增成員時退回租戶的新專案起始值）。只有老闆／platform_admin 可設定。
+ * **四鍵必填**（缺鍵 400）——存成 `{}` 或缺角色會讓「未設定退回新專案起始值」失效；要取消本案設定請送 null。
+ * 只有老闆／platform_admin 可設定。
  */
-const sharePctByRoleSchema = z.record(z.enum(PROJECT_MEMBER_ROLES), z.number().min(0).max(100))
+const sharePctValue = z.number().min(0).max(100)
+const sharePctByRoleSchema = z.object({
+  manager: sharePctValue,
+  lead: sharePctValue,
+  support: sharePctValue,
+  member: sharePctValue,
+})
 
 const applicationFields = {
   /**
