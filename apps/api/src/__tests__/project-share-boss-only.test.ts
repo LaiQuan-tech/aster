@@ -394,6 +394,47 @@ describe("PATCH /projects/:id 封存／解除封存 → 重算草稿批次", () 
   })
 })
 
+describe("獎金比例與異動史：只有老闆與 HR 看得到比例（複驗 2026-10-26）", () => {
+  beforeEach(() => {
+    const adj = (id: string, field: string, employeeId: string | null, oldValue: string | null, newValue: string | null) => ({
+      id, tenant_id: TENANT_ID, project_id: PROJECT, employee_id: employeeId, change_set_id: null, field,
+      old_value: oldValue, new_value: newValue, reason: null, changed_by_emp_id: E.boss, created_at: `2026-10-0${id.slice(-1)}T00:00:00.000Z`,
+    })
+    fake.db.project_share_adjustments = [
+      adj("a1", "bonus_rate", null, "8", "10"),
+      adj("a2", "pool", null, "100000", "120000"),
+      adj("a3", "amount", E.member, "5000", "6000"),
+      adj("a4", "amount", E.manager, "3000", "4000"),
+      adj("a5", "pct", E.member, "10", "20"),
+      adj("a6", "role", E.member, null, null),
+    ]
+  })
+
+  it("GET /projects/:id（經理）：bonusRatePct 為 null；老闆／HR 拿得到", async () => {
+    const mgr = await as(T.manager, request(app).get(`/projects/${PROJECT}`))
+    expect(mgr.status).toBe(200)
+    expect(mgr.body.project.bonusRatePct).toBeNull()
+    for (const token of [T.boss, T.hr]) {
+      const res = await as(token, request(app).get(`/projects/${PROJECT}`))
+      expect(res.body.project.bonusRatePct).toBe(10)
+    }
+  })
+
+  it("GET /projects/:id/adjustments（經理）：沒有比例／獎金池異動與別人的金額異動，自己的金額異動與趴數異動保留", async () => {
+    const res = await as(T.manager, request(app).get(`/projects/${PROJECT}/adjustments`))
+    expect(res.status).toBe(200)
+    const ids = (res.body.adjustments as Row[]).map((a) => a.id).sort()
+    expect(ids).toEqual(["a4", "a5", "a6"])
+  })
+
+  it("GET /projects/:id/adjustments（老闆／HR）：全部看得到", async () => {
+    for (const token of [T.boss, T.hr]) {
+      const res = await as(token, request(app).get(`/projects/${PROJECT}/adjustments`))
+      expect((res.body.adjustments as Row[]).map((a) => a.id).sort()).toEqual(["a1", "a2", "a3", "a4", "a5", "a6"])
+    }
+  })
+})
+
 describe("PUT /project-settings — 角色預設趴數只有老闆", () => {
   const body = { defaultSharePctByRole: { manager: 20, lead: 10, support: 5, member: 2 } }
 

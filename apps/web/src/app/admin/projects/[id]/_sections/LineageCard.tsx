@@ -18,16 +18,20 @@ import {
 import { fmtMoney } from "./shared";
 
 type UnpaidBonusInfo = {
+  /** true＝估算服務暫時無法確認原案獎金（bonus_check_unavailable）。 */
+  unavailable?: boolean;
   unpaidCount: number;
   unpaidTotal?: number;
   unpaid?: Array<{ employeeId: string; name: string | null; estimatedAmount: number; paidAmount: number; unpaidAmount: number }>;
   canForce: boolean;
 };
 
-/** 409 original_has_unpaid_bonus 的回應內容（api-client 把回應 body 掛在 err.body）。 */
+/** 409 original_has_unpaid_bonus／bonus_check_unavailable 的回應內容（api-client 把回應 body 掛在 err.body）。 */
 function unpaidBonusInfoOf(err: unknown): UnpaidBonusInfo | null {
   const body = (err as { body?: unknown } | null)?.body as Record<string, unknown> | undefined;
-  if (!body || body.error !== "original_has_unpaid_bonus") return null;
+  if (!body) return null;
+  if (body.error === "bonus_check_unavailable") return { unavailable: true, unpaidCount: 0, canForce: body.canForce === true };
+  if (body.error !== "original_has_unpaid_bonus") return null;
   return {
     unpaidCount: Number(body.unpaidCount ?? 0),
     unpaidTotal: typeof body.unpaidTotal === "number" ? body.unpaidTotal : undefined,
@@ -286,8 +290,17 @@ export function DuplicateProjectDialog({ open, project, onClose, onDone }: Dupli
 
         {unpaid && (
           <div role="alert" className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-            <p className="font-medium">原案還有未發放的獎金{unpaid.unpaidTotal != null ? `（合計 ${fmtMoney(unpaid.unpaidTotal)} 元）` : `（${unpaid.unpaidCount} 位成員）`}</p>
-            <p className="mt-1 text-xs">請先發放原案獎金再複製並封存，或取消上方「將原案封存」。</p>
+            {unpaid.unavailable ? (
+              <>
+                <p className="font-medium">暫時無法確認原案獎金是否已發清</p>
+                <p className="mt-1 text-xs">請取消上方「將原案封存」後再複製，或由老闆強制複製並封存。</p>
+              </>
+            ) : (
+              <>
+                <p className="font-medium">原案還有未發放的獎金{unpaid.unpaidTotal != null ? `（合計 ${fmtMoney(unpaid.unpaidTotal)} 元）` : `（${unpaid.unpaidCount} 位成員）`}</p>
+                <p className="mt-1 text-xs">請先發放原案獎金再複製並封存，或取消上方「將原案封存」。</p>
+              </>
+            )}
             {unpaid.unpaid && unpaid.unpaid.length > 0 && (
               <ul className="mt-2 space-y-0.5 text-xs">
                 {unpaid.unpaid.map((m) => (

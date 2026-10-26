@@ -1131,6 +1131,7 @@ export function getProjectLineage(id: string) {
 
 export function humanizeDuplicateError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : fallback
+  if (msg.includes("bonus_check_unavailable")) return "暫時無法確認原案獎金是否已發清。請改選「不封存原案」，或由老闆強制複製並封存。"
   if (msg.includes("original_has_unpaid_bonus")) return "原案還有未發放的獎金，請先發放原案獎金再複製並封存，或改為不封存原案。"
   if (msg.includes("bonus_edit_boss_only") || msg.includes("boss_not_configured")) return humanizeBonusEditError(msg)
   if (msg.includes("reserved_project")) return "這是還沒有內容的空案，無法複製。"

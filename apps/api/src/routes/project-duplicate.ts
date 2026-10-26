@@ -63,7 +63,7 @@ export type UnpaidBonusMember = {
 /**
  * 驗收 #8（2026-10-26）：原案「累計應得 > 已發」的成員（估算服務判斷）。原案一封存，封存規則可能
  * 讓它不再進批次，這筆錢就發不出去——所以複製並封存前要先擋下。
- * 估算失敗回 null（不擋：複製是日常作業，估算服務壞掉不該讓人開不了追加減案），只記 log。
+ * 估算失敗回 null（呼叫端：要封存原案就 409 bonus_check_unavailable，不封存照常），並記 log。
  */
 export async function unpaidBonusOf(
   tenantId: string,
@@ -73,7 +73,7 @@ export async function unpaidBonusOf(
   try {
     est = (await estimateProjectBonus(tenantId, [projectId]))[0]
   } catch (err) {
-    console.warn(`[duplicate] 估算原案 ${projectId} 未發獎金失敗，略過檢查`, err)
+    console.warn(`[duplicate] 估算原案 ${projectId} 未發獎金失敗`, err)
     return null
   }
   if (!est) return { total: 0, members: [] }
@@ -134,9 +134,25 @@ projectDuplicateRouter.post(
 
       // 驗收 #8：原案還有「累計應得 > 已發」→ 封存前擋下（409），提示先發放原案獎金；老闆可 force。
       let forcedUnpaid: { total: number; members: UnpaidBonusMember[] } | null = null
+      let forcedUnchecked = false
       if (archiveOriginal) {
         const unpaid = await unpaidBonusOf(tenantId, scope.project.id)
-        if (unpaid && unpaid.total > 0) {
+        if (!unpaid) {
+          // 估算失敗＝無法確認原案獎金已發清：要封存就擋下（驗收 2026-10-26），老闆可 force。
+          if (!b.force) {
+            res.status(409).json({
+              error: "bonus_check_unavailable",
+              hint: "暫時無法確認原案獎金是否已發清。請改選「不封存原案」，或由老闆強制複製並封存。",
+              canForce: bonusEdit.canEdit,
+            })
+            return
+          }
+          if (bonusEdit.denial) {
+            res.status(bonusEdit.denial.status).json({ error: bonusEdit.denial.error })
+            return
+          }
+          forcedUnchecked = true
+        } else if (unpaid.total > 0) {
           if (!b.force) {
             // 金額明細是分潤資料：只給老闆與 HR；其他 finance 使用者（會計、負責人）只看到有幾位未發。
             const canSeeAmounts = bonusEdit.canEdit || isHrRole(scope.self.role)
@@ -190,6 +206,22 @@ projectDuplicateRouter.post(
           },
           actorEmpId: scope.self.id,
           context: "POST /projects/:id/duplicate (archive original)",
+        })
+      }
+      if (forcedUnchecked) {
+        await writeAuditLog({
+          tenantId,
+          tableName: "projects",
+          recordId: scope.project.id,
+          action: "UPDATE",
+          newRow: {
+            forced_duplicate_without_bonus_check: true,
+            new_project_id: result.project.id,
+            new_project_code: result.project.code,
+            reason: b.reason,
+          },
+          actorEmpId: scope.self.id,
+          context: "POST /projects/:id/duplicate (force: bonus check unavailable)",
         })
       }
       if (forcedUnpaid) {

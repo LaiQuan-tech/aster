@@ -390,9 +390,11 @@ async function defaultSharePctByRole(tenantId: string): Promise<Record<string, n
  */
 function serializeProject(
   row: ProjectRow,
-  opts: { finance: boolean; bonus?: boolean; hasSignedContract: boolean },
+  /** profit：獎金比例可見性（只有老闆與 HR，驗收 2026-10-26）；省略＝跟著 bonus。 */
+  opts: { finance: boolean; bonus?: boolean; profit?: boolean; hasSignedContract: boolean },
 ) {
   const bonus = opts.bonus ?? opts.finance
+  const profit = bonus && (opts.profit ?? bonus)
   return {
     hasSignedContract: opts.hasSignedContract,
     id: row.id,
@@ -415,7 +417,8 @@ function serializeProject(
     shareMode: row.share_mode,
     // 分潤池屬 bonus 段：會計與一般員工一律 null（W4）；列表端點一律不回。
     bonusPool: bonus ? num(row.bonus_pool) : null,
-    bonusRatePct: bonus ? num(row.bonus_rate_pct) : null,
+    // 獎金比例只給老闆與 HR：應得 ÷（比例 × 趴數）可反推毛利。
+    bonusRatePct: profit ? num(row.bonus_rate_pct) : null,
     createdAt: row.created_at,
     // P3
     clientId: row.client_id,
@@ -1112,7 +1115,7 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
     loadTenantCompanies(tenantId),
   ])
   const project = {
-    ...serializeProject(row, { finance, bonus, hasSignedContract: signed.has(row.id) }),
+    ...serializeProject(row, { finance, bonus, profit: scope.canSeeProfit, hasSignedContract: signed.has(row.id) }),
     client: client ? serializeClient(client) : null,
     // 承接公司的有效名稱（申請單／列印頁左上角用）：company_id 為 null 時是租戶預設公司。
     companyName: effectiveCompanyOf(row.company_id, companies)?.name ?? null,
@@ -1930,7 +1933,16 @@ projectsRouter.get(
         }
         for (const actor of actors ?? []) changedByNames.set(actor.id as string, actor.name as string)
       }
-      const adjustments = (data ?? []).map((a) => {
+      // 驗收（2026-10-26）：看得到分潤但看不到毛利的人（經理／主辦／部門主管）濾掉獎金比例與獎金池
+      // 的異動、以及別人的固定金額異動——這些都能反推毛利或別人的金額。自己的異動保留。
+      const HIDDEN_FOR_NON_PROFIT = new Set(["bonus_rate", "pool"])
+      const visible = (data ?? []).filter((a) => {
+        if (scope.canSeeProfit) return true
+        if (HIDDEN_FOR_NON_PROFIT.has(a.field as string)) return false
+        if (a.field === "amount" && a.employee_id !== scope.self.id) return false
+        return true
+      })
+      const adjustments = visible.map((a) => {
         const emp = rel1<{ name: string }>((a as { employees: unknown }).employees)
         return {
           id: a.id,

@@ -141,11 +141,34 @@ describe("POST /projects/:id/duplicate — 原案有未發獎金", () => {
     expect(h.audits.some((a) => String(a.context).includes("force"))).toBe(false)
   })
 
-  it("估算服務失敗 → 不擋（只記 log）", async () => {
+  it("估算服務失敗＋要封存原案 → 409 bonus_check_unavailable，不複製", async () => {
     h.estimateThrows = true
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
     const res = await dup("hr-user")
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: "bonus_check_unavailable", canForce: false })
+    expect(h.dupCalls).toHaveLength(0)
+    warn.mockRestore()
+  })
+
+  it("估算服務失敗＋不封存原案 → 照常複製", async () => {
+    h.estimateThrows = true
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const res = await dup("hr-user", { archiveOriginal: false })
     expect(res.status).toBe(201)
+    warn.mockRestore()
+  })
+
+  it("估算服務失敗＋HR 帶 force → 403；老闆帶 force → 201 並寫稽核", async () => {
+    h.estimateThrows = true
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const hr = await dup("hr-user", { force: true })
+    expect(hr.status).toBe(403)
+    expect(hr.body.error).toBe("bonus_edit_boss_only")
+    const boss = await dup("boss-user", { force: true })
+    expect(boss.status).toBe(201)
+    const audit = h.audits.find((a) => String(a.context).includes("bonus check unavailable"))
+    expect(audit?.newRow).toMatchObject({ forced_duplicate_without_bonus_check: true })
     warn.mockRestore()
   })
 })
