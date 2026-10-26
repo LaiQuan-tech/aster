@@ -500,6 +500,22 @@ describe("依身分分版：scope.isBoss／scope.groupFinancials／bossTodo（20
     expect(r.bossTodo).toEqual({ bonusRunsPendingApproval: 1, lateReportsPending: 1 })
   })
 
+  it("預設 loader：遲到說明超過 1000 筆也分頁讀完（不被 PostgREST 上限截斷），老闆自己的照樣排除", async () => {
+    seed(features)
+    fake.db.late_reports = Array.from({ length: 1205 }, (_, i) => ({
+      id: `lr-${String(i).padStart(5, "0")}`,
+      tenant_id: TENANT_ID,
+      employee_id: i === 0 ? BOSS.toLowerCase() : i % 2 ? EMP_A : EMP_B,
+      work_date: "2026-10-02",
+      punch_at: "2026-10-02T02:00:00Z",
+      late_minutes: 5,
+      reason: "塞車",
+      attendance_decision: null,
+    }))
+    const r = await buildBossSummary({ ...base, role: "hr_admin", selfEmpId: BOSS, groupFinancials: true }, STUB_HEAVY)
+    expect(r.bossTodo?.lateReportsPending).toBe(1204)
+  })
+
   it("路由：hr_admin 本人是老闆 → scope.isBoss＝true、有 bossTodo；不是老闆 → bossTodo null", async () => {
     seed({ approval: { fallbackApproverEmpId: HR_ID } })
     const boss = await get("/dashboard/boss-summary", HR_TOKEN)

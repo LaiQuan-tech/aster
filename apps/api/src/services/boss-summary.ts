@@ -7,7 +7,7 @@ import { buildReceivables, loadP3Settings } from "./project-application-store.js
 import { overdueDays, type OverdueBasis } from "./project-money.js"
 import { currentAlerts } from "./project-alert-store.js"
 import { isVoidedBeyondCapDraft } from "./overtime-void.js"
-import { listLateReports } from "./late-reports.js"
+import { lateReportLockedReason, loadLateReportLocks, type LateReportRow } from "./late-reports.js"
 
 /**
  * 後台首頁（老闆看板）的彙總端點 GET /dashboard/boss-summary（2026-10-25 業主核准）。
@@ -32,7 +32,7 @@ import { listLateReports } from "./late-reports.js"
  *   • scope.isBoss：呼叫者是不是老闆（features.approval.fallbackApproverEmpId，與遲到說明、獎金批次核准同一個人）。
  *     platform_admin 不是老闆（除非本人就是那位員工）。老闆才查 bossTodo（老闆專屬待辦）：
  *       – bonusRunsPendingApproval：bonus_runs status=pending_approval、未刪除的批次數（等老闆核准）；
- *       – lateReportsPending：老闆還能決定的遲到說明（listLateReports decision=undecided，排除 lockedReason 非 null
+ *       – lateReportsPending：老闆還能決定的遲到說明（late_reports 未決定、分頁讀完，排除 lockedReason 非 null
  *         與老闆自己的——與 ESS 簽核頁紅點 web lib/ess-badges.ts countPendingLateReports 同一套規則）。
  *     子查詢各自 settle，失敗只讓該數字 null。
  *
@@ -495,9 +495,35 @@ async function loadBonusRunsPendingApproval(ctx: BossSummaryCtx): Promise<number
 }
 
 async function loadLateReportsPending(ctx: BossSummaryCtx): Promise<number> {
-  // 與 GET /late-reports?decision=undecided（老闆看全公司）同一個查詢；表未遷移時 listLateReports 自己回 []。
-  const rows = await listLateReports(ctx.tenantId, { decision: "undecided" })
-  return countBossDecidableLateReports(rows, ctx.bossEmpId)
+  // 條件同 GET /late-reports?decision=undecided（老闆看全公司），但分頁讀完（listLateReports 單次查詢會被
+  // PostgREST 1000 筆上限截斷）、只取算數需要的欄位、不查姓名。鎖定判斷共用 loadLateReportLocks／lateReportLockedReason。
+  type Lite = Pick<LateReportRow, "id" | "employee_id" | "work_date">
+  const rows: Lite[] = []
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabaseAdmin
+      .from("late_reports")
+      .select("id, employee_id, work_date")
+      .eq("tenant_id", ctx.tenantId)
+      .is("attendance_decision", null)
+      .order("id", { ascending: true })
+      .range(from, from + PAGE_SIZE - 1)
+    if (error) {
+      if (isMissingTableError(error)) return 0 // 表未遷移：同 listLateReports 回 []
+      throw new Error(`boss-summary (late_reports): ${error.message}`)
+    }
+    const page = (data ?? []) as Lite[]
+    rows.push(...page)
+    if (page.length < PAGE_SIZE) break
+  }
+  const locks = await loadLateReportLocks(ctx.tenantId, rows as unknown as LateReportRow[])
+  return countBossDecidableLateReports(
+    rows.map((r) => ({
+      employeeId: r.employee_id,
+      decision: null,
+      lockedReason: lateReportLockedReason(r, locks.closedPeriods, locks.sheetStatuses),
+    })),
+    ctx.bossEmpId,
+  )
 }
 
 export type BossSummaryLoaders = {
