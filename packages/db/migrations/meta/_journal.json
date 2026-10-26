@@ -512,6 +512,13 @@
       "when": 1792300000000,
       "tag": "0072_employee_company",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1792500000000,
+      "tag": "0074_punch_client_request_id",
+      "breakpoints": true
     }
   ]
 }

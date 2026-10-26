@@ -174,3 +174,62 @@ describe("（假設）忘了打 23:47 下班卡、01:40 在家再上班", () => 
     expect(body.records[0]).toMatchObject({ punch_at: tp("2026-10-21 14:34"), carry_over: true })
   })
 })
+
+describe("打卡冪等（clientRequestId，2026-10-26）", () => {
+  const inserts = () => fake.writes.filter((w) => w.table === "punch_records" && w.action === "insert")
+  const REQ = "11111111-2222-4333-8444-555555555555"
+
+  it("逾時後重送同一個 id → 200 deduplicated 回原本那筆，只寫一筆", async () => {
+    setNow(tp("2026-10-25 23:35"))
+    const first = await as(request(app).post("/punch")).send({ type: "out", clientRequestId: REQ })
+    expect(first.status).toBe(201)
+    setNow(tp("2026-10-25 23:36"))
+    const again = await as(request(app).post("/punch")).send({ type: "out", clientRequestId: REQ })
+    expect(again.status).toBe(200)
+    expect(again.body).toMatchObject({ id: first.body.id, type: "out", punchAt: first.body.punchAt, deduplicated: true })
+    expect(again.body.record.ip_address).toBeUndefined()
+    expect(inserts()).toHaveLength(1)
+    expect(fake.db.punch_records).toHaveLength(1)
+    expect(fake.db.punch_records[0]).toMatchObject({ client_request_id: REQ })
+  })
+
+  it("不同 id → 各寫一筆", async () => {
+    setNow(tp("2026-10-25 14:22"))
+    expect((await as(request(app).post("/punch")).send({ type: "in", clientRequestId: `${REQ}-a` })).status).toBe(201)
+    setNow(tp("2026-10-25 17:30"))
+    expect((await as(request(app).post("/punch")).send({ type: "out", clientRequestId: `${REQ}-b` })).status).toBe(201)
+    expect(fake.db.punch_records).toHaveLength(2)
+  })
+
+  it("同 id 的舊卡已超過 10 分鐘視窗、唯一索引擋下 → 仍回原本那筆（200），不新增", async () => {
+    fake.uniques.punch_records = [["tenant_id", "employee_id", "client_request_id"]]
+    setNow(tp("2026-10-25 14:22"))
+    const first = await as(request(app).post("/punch")).send({ type: "in", clientRequestId: REQ })
+    expect(first.status).toBe(201)
+    setNow(tp("2026-10-25 15:00"))
+    const late = await as(request(app).post("/punch")).send({ type: "in", clientRequestId: REQ })
+    expect(late.status).toBe(200)
+    expect(late.body).toMatchObject({ id: first.body.id, deduplicated: true })
+    expect(fake.db.punch_records).toHaveLength(1)
+  })
+
+  it("clientRequestId 格式不對 → 400 invalid_body", async () => {
+    setNow(tp("2026-10-25 14:22"))
+    const res = await as(request(app).post("/punch")).send({ type: "in", clientRequestId: "bad id!" })
+    expect(res.status).toBe(400)
+  })
+})
+
+describe("打卡冪等：0074 未套（欄位不存在）→ 不去重、照常寫入", () => {
+  it("探測回 42703 → 兩次都 201、不帶 client_request_id 欄位", async () => {
+    const { resetColumnProbeCache } = await import("../lib/schema-compat.js")
+    resetColumnProbeCache()
+    fake.injectError({ table: "punch_records", action: "select", error: { message: 'column "client_request_id" does not exist', code: "42703" } })
+    setNow(tp("2026-10-25 14:22"))
+    const a = await as(request(app).post("/punch")).send({ type: "in", clientRequestId: "aaaaaaaa-0000-4000-8000-000000000001" })
+    expect(a.status).toBe(201)
+    const payload = fake.writes.find((w) => w.table === "punch_records" && w.action === "insert")?.payload as Record<string, unknown>
+    expect(payload).not.toHaveProperty("client_request_id")
+    resetColumnProbeCache()
+  })
+})

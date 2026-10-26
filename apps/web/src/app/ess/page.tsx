@@ -19,6 +19,7 @@ import {
   PENDING_FIX_PUNCH_CELL_SUFFIX,
   forgotPunchInHref,
   pendingFixPunchWithdrawn,
+  precheckForcedPunchWithPending,
   precheckPendingFixPunch,
   summarizeWithPendingFixPunch,
   withPendingFixPunch,
@@ -30,7 +31,6 @@ import {
   needsAnnouncementHint,
   longCarryOverOutHours,
   needsReInConfirm,
-  precheckForcedPunch,
   precheckPunch,
   punchCardActions,
   PUNCH_STATE_UNKNOWN_HINT,
@@ -42,6 +42,19 @@ import {
 } from "@/lib/punch-state";
 import { runWhileVisible } from "@/lib/visible-interval";
 import { isPromiseTimeout, withTimeout } from "@/lib/with-timeout";
+import {
+  LATE_CANCEL_BANNER,
+  UNCERTAIN_LOCK_MS,
+  UNCERTAIN_NOT_VERIFIED_NOTICE,
+  attemptFor,
+  clearLateCancelled,
+  isUncertainPunchError,
+  markLateCancelled,
+  readLateCancelled,
+  showLateCancelBanner,
+  uncertainBlocksPunch,
+  type PunchAttempt,
+} from "@/lib/punch-attempt";
 import { getMeCached, peekMeCached } from "@/lib/ess-state";
 import { WFH_SUFFIX, browserStorage, hasWfhPunch, readWfhChoice, wfhPunchEnabled, writeWfhChoice } from "@/lib/wfh-punch";
 import { dinnerBodyFor, showDinnerCheckbox, type DinnerPrompt } from "@/lib/dinner-prompt";
@@ -325,6 +338,16 @@ function Clock() {
   );
 }
 
+/** 「剛下班又再次上班」確認框（按下時與拿到最新紀錄後各可能問一次）。 */
+function confirmReIn(lastOutAt: string): boolean {
+  return window.confirm(`你在 ${fmtHm(lastOutAt)} 已打下班卡（已成功）。\n確定要再次上班打卡嗎？`);
+}
+
+/** 「跨日超過 12 小時才下班」確認框。 */
+function confirmLongCarryOut(workingSince: string, hours: number): boolean {
+  return window.confirm(`自昨天 ${fmtHm(workingSince)} 起已 ${hours} 小時，確定是下班？\n（若昨天忘了打下班卡，請取消後按「改打上班卡」）`);
+}
+
 /** 今天（瀏覽器時區，與 todayKey() 同一個日界）00:00 的 ms；預檢／輪詢判斷「畫面的上班卡是不是今天以前」用。 */
 function todayStartMs(): number {
   return Date.parse(`${todayKey()}T00:00:00`);
@@ -349,6 +372,7 @@ function PunchCard({
   dinnerVisible,
   dinner,
   onDinnerChange,
+  lateCancelBanner,
 }: {
   summary: PendingAwareSummary;
   loading: boolean;
@@ -374,6 +398,8 @@ function PunchCard({
   dinnerVisible: boolean;
   dinner: boolean;
   onDinnerChange: (checked: boolean) => void;
+  /** 今天按過遲到理由的「取消」、上班卡還沒打成功 → 持續橫幅（2026-10-26）。 */
+  lateCancelBanner: boolean;
 }) {
   // 按鈕由 punchCardActions 決定（lib/punch-state.ts）：除了送出中，永遠有可按的打卡鈕；上班中第一顆一定是
   // 「下班打卡」；載入失敗／逾時（狀態不明）→「上班打卡」「下班打卡」兩顆都可按。勾選框不影響按鈕。
@@ -390,6 +416,11 @@ function PunchCard({
 
   return (
     <Card>
+      {lateCancelBanner && (
+        <p role="alert" className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-center text-sm font-semibold text-red-700">
+          {LATE_CANCEL_BANNER}
+        </p>
+      )}
       {loadError && !punching && (
         <p className="mb-2 text-center text-sm font-medium text-amber-700">{PUNCH_STATE_UNKNOWN_HINT}</p>
       )}
@@ -535,6 +566,7 @@ function LateReasonSheet({
   value,
   error,
   submitting,
+  locked,
   onChange,
   onSubmit,
   onForgotPunch,
@@ -544,6 +576,8 @@ function LateReasonSheet({
   value: string;
   error: string | null;
   submitting: boolean;
+  /** 送出逾時後的短暫鎖定（5 秒）：「送出並打卡」暫時不能按。 */
+  locked: boolean;
   onChange: (next: string) => void;
   onSubmit: () => void;
   /** 沒給（沒開「請假」分頁、送不了補卡單）就不顯示「早上有到，只是忘了打卡」。 */
@@ -582,7 +616,7 @@ function LateReasonSheet({
           </div>
           {error && <InlineError>{error}</InlineError>}
           <div className="flex flex-col gap-2 pt-1">
-            <Button type="submit" size="lg" block loading={submitting} disabled={submitting}>
+            <Button type="submit" size="lg" block loading={submitting} disabled={submitting || locked}>
               送出並打卡
             </Button>
             {onForgotPunch && (
@@ -648,6 +682,19 @@ export default function EssHome() {
   const [fixPunchForbidden, setFixPunchForbidden] = useState(false);
 
   const summary = useMemo(() => summarizeWithPendingFixPunch(records), [records]);
+
+  /** 還沒有確定結果的那次打卡（冪等請求 id；成功或確定沒寫就清掉，lib/punch-attempt.ts）。 */
+  const attemptRef = useRef<PunchAttempt | null>(null);
+  /** 上次送出逾時／斷線，不知道有沒有寫進去：下次按下時一定要拿到最新紀錄才放行。 */
+  const uncertainRef = useRef(false);
+  /** 今天取消過遲到理由（上班卡沒寫入）的日期；首頁據此顯示「上班卡尚未打成功」橫幅。 */
+  const [lateCancelledDay, setLateCancelledDay] = useState<string | null>(null);
+  useEffect(() => {
+    const stored = readLateCancelled(browserStorage());
+    if (stored && stored !== todayKey()) clearLateCancelled(browserStorage()); // 換日就不再提示
+    else setLateCancelledDay(stored);
+  }, []);
+  const lateCancelBanner = showLateCancelBanner(lateCancelledDay, todayKey(), summary);
 
   // 在家上班打卡（2026-10-13）：只有 /me features.wfhPunch 開通的員工看得到勾選框；勾選狀態記住「今天」。
   const [wfhEnabled, setWfhEnabled] = useState(() => wfhPunchEnabled(peekMeCached()));
@@ -783,6 +830,24 @@ export default function EssHome() {
   );
 
   /**
+   * 打卡送出失敗後整理「這次打卡」（2026-10-26）：結果不明（逾時、斷線、5xx）→ 記成不明、鎖鈕 5 秒、背景重抓
+   * （寫進去了畫面就會跟上；下次按下必須拿到最新紀錄才放行，請求 id 沿用以便伺服器去重）；伺服器明確拒絕（4xx）
+   * → 清掉請求 id（下次是新的一次打卡）。
+   */
+  const settleFailedAttempt = useCallback(
+    (err: unknown) => {
+      if (isUncertainPunchError(err, isPromiseTimeout)) {
+        uncertainRef.current = true;
+        lockFor(UNCERTAIN_LOCK_MS);
+        void loadPunch({ quiet: true });
+      } else {
+        attemptRef.current = null;
+      }
+    },
+    [lockFor, loadPunch],
+  );
+
+  /**
    * 預檢沒送出（precheckPunch 回 send:false）：顯示提示、短暫鎖鈕，畫面換成最新紀錄；查不到最新紀錄而畫面又
    * 過期（unverified：上班卡已超過 16 小時）就整個重新載入（載入中鈕會鎖住，失敗給重試）。
    * 序號 +1：在這之前發出的背景抓取作廢，不會把最新紀錄蓋回去。
@@ -874,9 +939,16 @@ export default function EssHome() {
       // 先用回傳的 record 樂觀更新，再背景抓 /punch/today 對齊。序號先 +1：在這之前發出、晚到的
       // 抓取回應一律丟掉，不會把這筆樂觀更新蓋回去。
       const rec: PunchLike = res.record ?? { type: res.type, punch_at: res.punchAt };
+      attemptRef.current = null;
+      uncertainRef.current = false;
+      if (rec.type === "in") {
+        clearLateCancelled(browserStorage());
+        setLateCancelledDay(null);
+      }
       loadSeqRef.current += 1;
       // 重新併一次暫定上班卡：補卡撐起的上班中按了下班 → 今日已下班（上班欄仍顯示待核准的時間）。
-      setRecords((prev) => mergePending([...prev, rec]));
+      // 冪等重送回來的是原本那筆（deduplicated）：畫面上已有同一張（同 id）就不再加。
+      setRecords((prev) => mergePending(rec.id && prev.some((r) => r.id === rec.id) ? prev : [...prev, rec]));
       const lateNote = res.lateReport ? "（已送出遲到說明）" : "";
       const wfhNote = res.wfh ? WFH_SUFFIX : "";
       toast.show(`${rec.type === "in" ? "上班" : "下班"}打卡成功 ${fmtHm(rec.punch_at)}${wfhNote}${lateNote}`, "success");
@@ -911,15 +983,17 @@ export default function EssHome() {
     const screen = records;
     // 剛下班（10 分鐘內）又按「再次上班打卡」：先確認，避免以為沒打到又多一張上班卡（2026-10-15）。
     const shown = summarizePunches(screen);
+    let askedReIn = false;
+    let askedLong = false;
     if (!force && needsReInConfirm(shown, Date.now()) && shown.lastOutAt) {
-      const ok = window.confirm(`你在 ${fmtHm(shown.lastOutAt)} 已打下班卡（已成功）。\n確定要再次上班打卡嗎？`);
-      if (!ok) return;
+      if (!confirmReIn(shown.lastOutAt)) return;
+      askedReIn = true;
     }
     // 跨日下班、距上班已超過 12 小時：先確認是下班（昨天可能其實忘了打下班卡）。
     const longHours = force ? null : longCarryOverOutHours(shown, Date.now());
     if (longHours !== null && shown.workingSince) {
-      const ok = window.confirm(`自昨天 ${fmtHm(shown.workingSince)} 起已 ${longHours} 小時，確定是下班？\n（若昨天忘了打下班卡，請取消後按「改打上班卡」）`);
-      if (!ok) return;
+      if (!confirmLongCarryOut(shown.workingSince, longHours)) return;
+      askedLong = true;
     }
     loadSeqRef.current += 1; // 按下前發出、還沒回來的背景抓取作廢：打卡流程期間畫面只由這裡更新
     setPunching(true);
@@ -944,21 +1018,49 @@ export default function EssHome() {
       // 隔夜的「上班中」）就不送，畫面換成最新狀態＋提示＋短暫鎖鈕；抓不到（null）照畫面上的種類送，不擋打卡
       // （畫面「上班中」而上班卡已超過 16 小時例外：重新載入）。
       // 畫面要送上班卡時一併重抓待簽核單：今天已送出上班補卡（例如剛在別的分頁送）就不送，避免多一張上班卡。
+      // 狀態不明時不論選哪一種都重抓待簽核單：待核准的上班補卡要算進「上班中」（precheckForcedPunchWithPending）。
       const wantsIn = force ? force === "in" : shown.nextType === "in";
       const [fix, latest, freshPending] = await Promise.all([
         fixPromise,
         fetchTodayRecords(PUNCH_PRECHECK_WAIT_MS),
-        wantsIn ? refetchPendingForPunch() : Promise.resolve(null),
+        wantsIn || unknownState ? refetchPendingForPunch() : Promise.resolve(null),
       ]);
       if (!activeRef.current) return;
+      // 上次送出逾時／斷線（結果不明）：一定要拿到最新紀錄才放行，拿不到就不送、提示稍後再試（2026-10-26）。
+      if (uncertainBlocksPunch(uncertainRef.current, latest)) {
+        setPunchNotice(UNCERTAIN_NOT_VERIFIED_NOTICE);
+        lockFor(AFTER_PRECHECK_LOCK_MS);
+        void loadPunch({ quiet: true });
+        return;
+      }
+      if (latest) {
+        uncertainRef.current = false;
+        // 拿到最新紀錄＝狀態已知：寫回畫面、清掉「讀不到狀態」（2026-10-26 驗收回饋）。
+        setRecords(mergePending(latest));
+        setLoadError(null);
+      }
       const check =
-        unknownState && force ? precheckForcedPunch(force, latest) : precheckPunch(screen, latest, Date.now(), todayStartMs());
+        unknownState && force
+          ? precheckForcedPunchWithPending(force, latest, freshPending ?? pendingFixRef.current, todayKey())
+          : precheckPunch(screen, latest, Date.now(), todayStartMs());
       if (!check.send) {
         abortStalePunch(check);
         return;
       }
       const type = forceIn ? "in" : check.type;
       if (abortForPendingFixPunch(type, screen, latest, freshPending)) return;
+      // 用最新紀錄的摘要再確認一次（畫面可能是舊的、或狀態不明時根本沒問過）：剛下班 10 分鐘內又上班、跨日超過
+      // 12 小時才下班。「改打上班卡」出口（forceIn）本來就是員工自己確認過的，不再問。
+      if (latest && !forceIn) {
+        const fresh = summarizeWithPendingFixPunch(mergePending(latest));
+        const now = Date.now();
+        if (type === "in" && !askedReIn && needsReInConfirm(fresh, now) && fresh.lastOutAt && !confirmReIn(fresh.lastOutAt)) return;
+        const freshLong = type === "out" && !askedLong ? longCarryOverOutHours(fresh, now) : null;
+        if (freshLong !== null && fresh.workingSince && !confirmLongCarryOut(fresh.workingSince, freshLong)) return;
+      }
+      // 冪等：上次同一種卡結果不明（10 分鐘內）就沿用同一個請求 id，伺服器不會寫成兩張（lib/punch-attempt.ts）。
+      const attempt = attemptFor(attemptRef.current, type, Date.now());
+      attemptRef.current = attempt;
 
       // 沒拿到座標才帶 geoStatus；沒有新結果（這次也失敗）就用最近一次記下的原因。
       const body: Parameters<typeof postPunch>[0] = {
@@ -969,6 +1071,7 @@ export default function EssHome() {
         ...(wfhEnabled && wfh ? { wfh: true } : {}),
         // 晚餐：下班卡且畫面有顯示勾選框才帶（勾＝true、沒勾＝false）；按下當時重新比一次時間。
         ...dinnerBodyFor(type, showDinnerCheckbox(dinnerPrompt, shown.phase, Date.now()), dinner),
+        clientRequestId: attempt.id,
       };
       pendingBodyRef.current = body;
       // 狀態不明時二選一送出：遲到理由重送前的預檢改跟這次抓到的最新紀錄比（畫面上的紀錄不可信）。
@@ -987,10 +1090,7 @@ export default function EssHome() {
         return;
       }
       pendingBodyRef.current = null;
-      if (isPromiseTimeout(err)) {
-        // 不知道有沒有寫進去：背景重抓（寫進去了畫面就會跟上；再按時預檢也會擋重複的卡）。
-        void loadPunch({ quiet: true });
-      }
+      settleFailedAttempt(err);
       if (isPunchTooSoon(err)) {
         // 409 不帶 body 給前端，時間從 /punch/today 重抓（最後一筆 in/out 的時間）。
         let when = "";
@@ -1011,12 +1111,12 @@ export default function EssHome() {
     } finally {
       if (activeRef.current) setPunching(false);
     }
-  }, [punching, locked, loading, loadError, records, toast, afterPunchSuccess, setPunching, abortStalePunch, mergePending, refetchPendingForPunch, abortForPendingFixPunch, wfhEnabled, wfh, dinnerPrompt, dinner, loadPunch]);
+  }, [punching, locked, loading, loadError, records, toast, afterPunchSuccess, setPunching, abortStalePunch, mergePending, refetchPendingForPunch, abortForPendingFixPunch, wfhEnabled, wfh, dinnerPrompt, dinner, loadPunch, lockFor, settleFailedAttempt]);
 
   /** 遲到理由送出：驗證 1–500 字 → 確認最新狀態（precheckPunch）→ 帶 lateReason 原樣重送剛才那次打卡。 */
   const submitLateReason = useCallback(async () => {
     const body = pendingBodyRef.current;
-    if (!body || lateSubmitting) return;
+    if (!body || lateSubmitting || locked) return;
     const invalid = lateReasonError(lateReason);
     if (invalid) {
       setLateError(invalid);
@@ -1033,8 +1133,14 @@ export default function EssHome() {
       const [latest, freshPending] = body.type
         ? await Promise.all([fetchTodayRecords(PUNCH_PRECHECK_WAIT_MS), refetchPendingForPunch()])
         : [null, null];
-      const check = body.type ? precheckPunch(pendingScreenRef.current, latest, Date.now(), todayStartMs()) : null;
       if (!activeRef.current) return;
+      if (uncertainBlocksPunch(uncertainRef.current, latest)) {
+        setLateError(UNCERTAIN_NOT_VERIFIED_NOTICE);
+        void loadPunch({ quiet: true });
+        return;
+      }
+      if (latest) uncertainRef.current = false;
+      const check = body.type ? precheckPunch(pendingScreenRef.current, latest, Date.now(), todayStartMs()) : null;
       if (check && !check.send) {
         pendingBodyRef.current = null;
         setLateInfo(null);
@@ -1060,17 +1166,25 @@ export default function EssHome() {
         setLateInfo(late);
         setLateError("請填寫遲到原因");
       } else {
-        if (isPromiseTimeout(err)) void loadPunch({ quiet: true });
+        settleFailedAttempt(err);
         setLateError(punchErrorMessage(err, "送出失敗，請再試一次"));
       }
     } finally {
       if (activeRef.current) setLateSubmitting(false);
     }
-  }, [lateReason, lateSubmitting, afterPunchSuccess, setLateSubmitting, abortStalePunch, refetchPendingForPunch, abortForPendingFixPunch, loadPunch]);
+  }, [lateReason, lateSubmitting, locked, afterPunchSuccess, setLateSubmitting, abortStalePunch, refetchPendingForPunch, abortForPendingFixPunch, loadPunch, settleFailedAttempt]);
 
-  /** 取消：不打卡，關掉對話框（理由草稿保留，再按一次打卡可以接著寫）。 */
+  /**
+   * 取消：不打卡，關掉對話框（理由草稿保留，再按一次打卡可以接著寫）。上班卡沒有寫入 → 記住今天取消過，首頁顯示
+   * 持續橫幅「上班卡尚未打成功」直到今天有上班卡或換日（2026-10-26：員工以為打好了，晚上才發現沒有下班鈕）。
+   */
   const cancelLateReason = useCallback(() => {
     if (lateSubmitting) return;
+    if (pendingBodyRef.current?.type === "in") {
+      const day = todayKey();
+      markLateCancelled(browserStorage(), day);
+      setLateCancelledDay(day);
+    }
     pendingBodyRef.current = null;
     setLateInfo(null);
     setLateError(null);
@@ -1108,6 +1222,7 @@ export default function EssHome() {
         dinnerVisible={dinnerVisible}
         dinner={dinner}
         onDinnerChange={setDinner}
+        lateCancelBanner={!loading && lateCancelBanner}
       />
       <TodayTimes summary={summary} loading={loading} />
       <OvertimeCapCard />
@@ -1118,6 +1233,7 @@ export default function EssHome() {
         value={lateReason}
         error={lateError}
         submitting={lateSubmitting}
+        locked={locked}
         onChange={(next) => {
           setLateReason(next);
           if (lateError) setLateError(null);
