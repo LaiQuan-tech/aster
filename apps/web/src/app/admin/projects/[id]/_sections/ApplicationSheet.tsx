@@ -332,11 +332,21 @@ export function ApplicationSheet({
             {engineerKeys.map((d) => {
               const v = draft.engineers[d] ?? { vendorId: null, name: null };
               const stale = !disciplines.includes(d);
-              const name = v.name?.trim() || (v.vendorId && vendorNameById.get(v.vendorId)) || "";
+              // 不 trim：自由輸入打到一半的空白要留著（存檔時 normalizeEngineer 才修剪）。
+              const name = v.name ?? (v.vendorId ? vendorNameById.get(v.vendorId) ?? "" : "");
               return (
                 <div key={d}>
                   <span>{disciplineLabel(d)}:</span>
-                  {stale && <span className="ml-1 text-[11px] text-amber-700">（已不在科別設定）</span>}
+                  {stale && (
+                    <span className="ml-1 text-[11px] text-amber-700">
+                      （已不在科別設定）
+                      {editable && (
+                        <button type="button" className="ml-1 underline hover:text-red-600" onClick={() => setDraft((f) => ({ ...f, engineers: { ...f.engineers, [d]: { vendorId: null, name: null } } }))}>
+                          清除
+                        </button>
+                      )}
+                    </span>
+                  )}
                   {editable && !stale ? (
                     <input
                       aria-label={`協力技師（${disciplineLabel(d)}）`}
@@ -385,6 +395,11 @@ export function ApplicationSheet({
 
   // ---- 版面：上半部固定 10 列，接付款階段、空白分隔列、發包單位區塊 ----
   const cells: ReactNode[] = [];
+  /**
+   * 手機版是「標題｜內容」自動往下排，DOM 順序就是畫面順序；往下合併的格子（備註＝協力技師）
+   * 要緊接在它上一列同欄的標題（「備  註:」）後面，不然會被下一列的格子隔開。桌機有明確的格線位置，不受影響。
+   */
+  const labelIndexAt = new Map<string, number>();
   APPLICATION_SHEET_TOP_ROWS.forEach((rowCells, r) => {
     let col = 1;
     rowCells.forEach((cell, i) => {
@@ -404,12 +419,16 @@ export function ApplicationSheet({
             {cell.label}
           </Cell>,
         );
+        labelIndexAt.set(`${r}-${start}`, cells.length);
       } else if (cell.field) {
-        cells.push(
+        const node = (
           <Cell key={key} col={start} span={cell.span} row={r + 1} rowSpan={cell.rowSpan} kind="value" align={numericFields.has(cell.field) ? "right" : "left"} testId={`sheet-${cell.field}`}>
             {renderField(cell.field)}
-          </Cell>,
+          </Cell>
         );
+        const insertAt = (cell.rowSpan ?? 1) > 1 ? labelIndexAt.get(`${r - 1}-${start}`) : undefined;
+        if (insertAt !== undefined) cells.splice(insertAt, 0, node);
+        else cells.push(node);
       }
     });
   });

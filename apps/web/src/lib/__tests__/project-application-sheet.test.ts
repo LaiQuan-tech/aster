@@ -143,6 +143,15 @@ describe("草稿與只送變更欄位", () => {
     })
   })
 
+  it("清除已不在科別設定的舊科別 → 整份送（不含舊科別）", () => {
+    const p = fakeProject({ engineers: { 電機: { vendorId: "v1", name: "甲廠商" }, 舊科別: { vendorId: null, name: "乙" } } })
+    const d = applicationSheetDraftOf(p, disciplines)
+    d.engineers = { ...d.engineers, 舊科別: { vendorId: null, name: null } }
+    expect(applicationSheetPatch(p, d, opts)).toEqual({
+      engineers: { 電機: { vendorId: "v1", name: "甲廠商" }, 空調: null, 消防: null },
+    })
+  })
+
   it("看不到錢的人（非 finance）一律不送任何欄位", () => {
     const p = fakeProject()
     const d = { ...applicationSheetDraftOf(p, disciplines), siteAddress: "改了" }

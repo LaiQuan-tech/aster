@@ -248,8 +248,8 @@ function normalizeEngineer(value: { vendorId?: string | null; name?: string | nu
  *
  * - 看不到錢（canFinance=false）的人整份唯讀，回空物件（後端 PATCH 需要 canManage）。
  * - 其他支出、設計內容金額屬 finance；設計內容整份有變才整份送。
- * - 協力技師：只送設定裡的科別（後端對不認得的 key 回 unknown_discipline）；設定裡某科有變才整份送，
- *   這時已不在設定裡的舊科別會一併清掉（與原本「儲存申請單資料」相同）。
+ * - 協力技師：只送設定裡的科別（後端對不認得的 key 回 unknown_discipline）；設定裡某科有變、或使用者
+ *   清除了已不在設定裡的舊科別時才整份送，這時舊科別會一併清掉。
  */
 export function applicationSheetPatch(
   project: ProjectDetail,
@@ -296,9 +296,14 @@ export function applicationSheetPatch(
   // 後端把 null 存成 0（serializeProject 也回 0），所以 null 與 0 視為同值。
   if (other !== "invalid" && (other ?? 0) !== (project.otherExpenses ?? 0)) patch.otherExpenses = other;
 
-  const engineersChanged = opts.disciplines.some(
-    (d) => JSON.stringify(normalizeEngineer(draft.engineers[d])) !== JSON.stringify(normalizeEngineer(project.engineers?.[d])),
-  );
+  const engineersChanged =
+    opts.disciplines.some(
+      (d) => JSON.stringify(normalizeEngineer(draft.engineers[d])) !== JSON.stringify(normalizeEngineer(project.engineers?.[d])),
+    ) ||
+    // 已不在科別設定的舊科別：使用者按了「清除」（草稿清空、專案上仍有值）也要整份送，送出時自然不含它。
+    Object.keys(project.engineers ?? {}).some(
+      (k) => !opts.disciplines.includes(k) && normalizeEngineer(project.engineers?.[k]) !== null && normalizeEngineer(draft.engineers[k]) === null,
+    );
   if (engineersChanged) {
     const engineers: ProjectEngineers = {};
     for (const d of opts.disciplines) engineers[d] = normalizeEngineer(draft.engineers[d]);
