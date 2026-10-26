@@ -865,28 +865,7 @@ export function deleteProjectDocument(projectId: string, docId: string) {
   })
 }
 
-/* ------------------------------------------------- 專案總覽與進度示警 -- */
-
-export interface OverviewProject {
-  id: string
-  name: string
-  code: string | null
-  status: ProjectStatus
-  startsOn: string | null
-  endsOn: string | null
-  createdAt: string
-  leadEmpId: string | null
-  leadName: string | null
-  hasContract: boolean
-  contractTotal: number | null
-  billedTotal: number
-  scheduledTotal: number
-  lastActivity: string | null
-  alerts: { high: number; medium: number; low: number }
-}
-export function getProjectOverview() {
-  return apiFetch<{ today: string; projects: OverviewProject[] }>("/projects/overview")
-}
+/* ------------------------------------------------- 專案進度示警 -- */
 
 export type AlertSeverity = "high" | "medium" | "low"
 export interface ProjectAlert {

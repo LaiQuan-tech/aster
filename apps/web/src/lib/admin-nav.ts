@@ -170,13 +170,6 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       detail: { title: "專案明細" },
     },
     {
-      key: "overview",
-      label: "看板",
-      href: "/admin/projects/overview",
-      title: "專案總覽",
-      desc: "看板依案情狀態分欄，可拖拉改狀態。點卡片進專案。",
-    },
-    {
       key: "receivables",
       label: "請款與未收款",
       href: "/admin/projects/receivables",
@@ -672,6 +665,8 @@ export const ADMIN_REDIRECTS: readonly AdminRedirect[] = [
   // 2026-10-26 到職（報到管理）與生日紅包功能停用：舊網址導回員工主檔。
   { source: "/admin/onboarding", destination: "/admin/employees" },
   { source: "/admin/birthday-gifts", destination: "/admin/employees" },
+  // 2026-10-27 專案看板停用：舊網址導回專案列表。
+  { source: "/admin/projects/overview", destination: "/admin/projects" },
 ];
 
 /* ------------------------------------------------------------- 路由表 --- */
@@ -733,7 +728,7 @@ function matchesRoute(path: string, route: AdminRoute): boolean {
 }
 
 /**
- * 依 pathname 找對應路由：pattern 優先 → 最長前綴（`/admin/projects/overview` 只亮 overview，
+ * 依 pathname 找對應路由：pattern 優先 → 最長前綴（子路徑以最長前綴優先，
  * 不會被 `/admin/projects` 搶走）；`/admin` 只在精準相符時是首頁；未知路徑 → 首頁路由（title ""）。
  * `isDetail`＝該路由有 detail 且 path !== prefix（pattern 路由一律是 detail）；`parentPath`＝去掉最後一段。
  */
@@ -814,7 +809,7 @@ export interface RoleNavConfig {
 export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
   sections: ["home", "finance", "attendance", "payroll", "people", "settings"],
   tabs: {
-    finance: ["projects", "overview", "receivables", "disbursements", "reports", "directory"],
+    finance: ["projects", "receivables", "disbursements", "reports", "directory"],
     attendance: ["sheets"],
     payroll: ["expenses", "advances"],
     people: ["employees"],

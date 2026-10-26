@@ -168,7 +168,7 @@ app.use(attachmentsRouter)
 app.use(internalJobsRouter)
 app.use(personalNotesRouter)
 app.use(preferencesRouter)
-app.use(projectOverviewRouter) // /projects/overview、/projects/alerts 要在 /projects/:id 之前
+app.use(projectOverviewRouter) // /projects/alerts 要在 /projects/:id 之前
 app.use(projectsAnnualRouter) // /projects/annual、/projects/receivables 同上
 app.use(projectsRouter)
 app.use(projectDuplicateRouter) // /projects/:id/duplicate、/projects/:id/lineage（C2 複製專案）

@@ -77,7 +77,6 @@ export default function ProjectAlertsPage() {
             </button>
           ))}
           <div className="ml-auto flex items-center gap-2">
-            <Link href="/admin/projects/overview" className="text-sm text-gray-500 hover:underline">專案總覽</Link>
             <PrimaryButton type="button" onClick={() => void runDigest()} disabled={digestBusy || !aiAvailable || alerts.length === 0}>
               {digestBusy ? "整理中…" : "AI 摘要今天該做的事"}
             </PrimaryButton>

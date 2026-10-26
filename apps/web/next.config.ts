@@ -22,6 +22,7 @@ const ADMIN_REDIRECTS = [
   { source: "/admin/org-chart", destination: "/admin/departments" },
   { source: "/admin/onboarding", destination: "/admin/employees" },
   { source: "/admin/birthday-gifts", destination: "/admin/employees" },
+  { source: "/admin/projects/overview", destination: "/admin/projects" },
 ];
 
 const nextConfig: NextConfig = {
