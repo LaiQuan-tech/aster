@@ -124,11 +124,12 @@ describe.each([
 
 /**
  * 誰能設定「關係企業」：它會改變集團總覽的集團合計，所以只有 HR／平台管理員能設定或變更；
- * 會計（客戶名冊的 requireFinance 放行）與一般員工（廠商名冊全員可寫）仍可維護其他欄位，也可以重送跟現值一樣的值。
+ * 會計（客戶、廠商名冊都是 requireFinance 放行）仍可維護其他欄位，也可以重送跟現值一樣的值。
+ * 一般員工自 2026-10-27 起不能寫廠商名冊（見 roster-excel-fields.test.ts 的權限測試）。
  */
 describe.each([
   { label: "客戶", path: "/clients", table: "clients", key: "client", ids: { off: CLIENT_A, on: CLIENT_B }, restricted: [ACCOUNTANT_TOKEN] },
-  { label: "廠商", path: "/vendors", table: "vendors", key: "vendor", ids: { off: VENDOR_A, on: VENDOR_B }, restricted: [ACCOUNTANT_TOKEN, STAFF_TOKEN] },
+  { label: "廠商", path: "/vendors", table: "vendors", key: "vendor", ids: { off: VENDOR_A, on: VENDOR_B }, restricted: [ACCOUNTANT_TOKEN] },
 ])("$label：只有 HR／平台管理員能設定關係企業標記", ({ path, table, key, ids, restricted }) => {
   const flagOf = (id: string) => fake.db[table]?.find((r) => r.id === id)?.is_affiliate
 

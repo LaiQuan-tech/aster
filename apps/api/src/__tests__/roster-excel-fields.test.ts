@@ -13,7 +13,7 @@ import { fake, TENANT_ID } from "./helpers/fake-supabase.js"
  * 2026-10-27 名冊欄位對齊 Excel「客供商基本資料」（packages/db 0076）：
  *   廠商：名冊類別 rosterKind（工作表）、序 seq、細目 subCategory、編號 code、FAX fax、付款方式 paymentTerms；
  *   客戶：序 seq、區域 region、編號 code；承辦窗口／電話類欄位放寬長度（Excel 原格是整段文字）。
- * 權限沿用：廠商名冊全租戶可寫、客戶名冊會計以上可寫、刪除都限 HR。0076 沒套時：帶非空新欄位回 409。
+ * 權限：廠商、客戶名冊都是會計以上可寫（2026-10-27 起廠商也收窄）、刪除都限 HR。0076 沒套時：帶非空新欄位回 409。
  * ⚠️ 全部是明顯的假資料。
  */
 const app = express()
@@ -67,7 +67,7 @@ describe("廠商名冊：Excel 新欄位讀寫", () => {
   })
 
   it("POST 存新欄位（trim、空字串視為清除），回應帶回", async () => {
-    const res = await as(STAFF_TOKEN, request(app).post("/vendors")).send({
+    const res = await as(ACCOUNTANT_TOKEN, request(app).post("/vendors")).send({
       name: "測試送審單位丙", rosterKind: "review_unit", seq: 7, category: "電力", subCategory: "  測試細目丙 ", code: "", fax: "(00)1111-1111", paymentTerms: "現金",
     })
     expect(res.status).toBe(201)
@@ -78,19 +78,19 @@ describe("廠商名冊：Excel 新欄位讀寫", () => {
   })
 
   it("PATCH 只改新欄位：update 只帶那幾欄（與 updated_at）", async () => {
-    const res = await as(STAFF_TOKEN, request(app).patch(`/vendors/${VENDOR_B}`)).send({ rosterKind: "engineer", seq: 12, subCategory: "測試技師細目" })
+    const res = await as(ACCOUNTANT_TOKEN, request(app).patch(`/vendors/${VENDOR_B}`)).send({ rosterKind: "engineer", seq: 12, subCategory: "測試技師細目" })
     expect(res.status).toBe(200)
     expect(Object.keys(writes("vendors", "update")[0]?.payload as object).sort()).toEqual(["roster_kind", "seq", "sub_category", "updated_at"])
     expect(res.body.vendor).toMatchObject({ rosterKind: "engineer", seq: 12, subCategory: "測試技師細目" })
   })
 
   it("承辦窗口 300 字、TEL／FAX／Mobil 200 字可存（Excel 原格整段文字）；超過回 400", async () => {
-    const ok = await as(STAFF_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send({
+    const ok = await as(ACCOUNTANT_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send({
       contactName: "窗".repeat(300), phone: "1".repeat(200), fax: "2".repeat(200), mobile: "3".repeat(200), email: "e".repeat(500),
     })
     expect(ok.status).toBe(200)
     for (const body of [{ contactName: "窗".repeat(301) }, { phone: "1".repeat(201) }, { fax: "2".repeat(201) }, { mobile: "3".repeat(201) }, { email: "e".repeat(501) }]) {
-      const bad = await as(STAFF_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send(body)
+      const bad = await as(ACCOUNTANT_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send(body)
       expect(bad.status).toBe(400)
     }
   })
@@ -105,15 +105,37 @@ describe("廠商名冊：Excel 新欄位讀寫", () => {
     ["編號超過 40 字", { code: "X".repeat(41) }],
     ["付款方式超過 100 字", { paymentTerms: "付".repeat(101) }],
   ])("%s → 400 invalid_body，不寫入", async (_label, body) => {
-    const res = await as(STAFF_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send(body)
+    const res = await as(ACCOUNTANT_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send(body)
     expect(res.status).toBe(400)
     expect(res.body.error).toBe("invalid_body")
     expect(writes("vendors", "update")).toHaveLength(0)
   })
 
-  it("權限沿用：一般員工可改名冊欄位，但刪除限 HR", async () => {
-    const del = await as(STAFF_TOKEN, request(app).delete(`/vendors/${VENDOR_A}`))
-    expect(del.status).toBe(403)
+  it("權限（2026-10-27 業主決定）：新增／修改／名片辨識限會計與 HR，一般員工只能讀（403、不寫入）", async () => {
+    const list = await as(STAFF_TOKEN, request(app).get("/vendors"))
+    expect(list.status).toBe(200)
+    const post = await as(STAFF_TOKEN, request(app).post("/vendors")).send({ name: "測試廠商員工建" })
+    expect(post.status).toBe(403)
+    const patch = await as(STAFF_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send({ phone: "(00)6666-6666" })
+    expect(patch.status).toBe(403)
+    const scan = await as(STAFF_TOKEN, request(app).post("/vendors/card-scan")).send({ fileName: "a.png", contentType: "image/png", dataBase64: "AA==" })
+    expect(scan.status).toBe(403)
+    expect(writes("vendors", "insert")).toHaveLength(0)
+    expect(writes("vendors", "update")).toHaveLength(0)
+  })
+
+  it.each([["會計", ACCOUNTANT_TOKEN], ["HR", HR_TOKEN]])("%s可新增與修改廠商（201／200）", async (_label, token) => {
+    const post = await as(token, request(app).post("/vendors")).send({ name: `測試廠商${_label}建`, rosterKind: "engineer" })
+    expect(post.status).toBe(201)
+    const patch = await as(token, request(app).patch(`/vendors/${VENDOR_A}`)).send({ paymentTerms: "現金" })
+    expect(patch.status).toBe(200)
+  })
+
+  it("刪除限 HR：會計 403、HR 200", async () => {
+    const accDel = await as(ACCOUNTANT_TOKEN, request(app).delete(`/vendors/${VENDOR_A}`))
+    expect(accDel.status).toBe(403)
+    const staffDel = await as(STAFF_TOKEN, request(app).delete(`/vendors/${VENDOR_A}`))
+    expect(staffDel.status).toBe(403)
     const hrDel = await as(HR_TOKEN, request(app).delete(`/vendors/${VENDOR_A}`))
     expect(hrDel.status).toBe(200)
   })
@@ -142,7 +164,7 @@ describe("廠商名冊：0076 沒套", () => {
 
   it("POST 帶非空新欄位 → 409 migration_required，不寫入", async () => {
     fake.injectError({ table: "vendors", action: "insert", error: { code: "PGRST204", message: "Could not find the 'roster_kind' column" } })
-    const res = await as(STAFF_TOKEN, request(app).post("/vendors")).send({ name: "測試廠商丁", seq: 1, fax: "(00)2222-2222" })
+    const res = await as(ACCOUNTANT_TOKEN, request(app).post("/vendors")).send({ name: "測試廠商丁", seq: 1, fax: "(00)2222-2222" })
     expect(res.status).toBe(409)
     expect(res.body).toMatchObject({ error: "migration_required", columns: ["seq", "fax"] })
     expect(writes("vendors", "insert")).toHaveLength(0)
@@ -151,19 +173,19 @@ describe("廠商名冊：0076 沒套", () => {
   it("表單永遠帶 rosterKind：等於預設 supplier 視為沒帶（照常建立）；技師等非預設值才 409", async () => {
     fake.injectError({ table: "vendors", action: "select", error: missing })
     await as(STAFF_TOKEN, request(app).get("/vendors"))
-    const ok = await as(STAFF_TOKEN, request(app).post("/vendors")).send({ name: "測試廠商己", rosterKind: "supplier", seq: null })
+    const ok = await as(ACCOUNTANT_TOKEN, request(app).post("/vendors")).send({ name: "測試廠商己", rosterKind: "supplier", seq: null })
     expect(ok.status).toBe(201)
     expect(writes("vendors", "insert")[0]?.payload).not.toHaveProperty("roster_kind")
-    const patched = await as(STAFF_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send({ rosterKind: "supplier", phone: "(00)5555-5555" })
+    const patched = await as(ACCOUNTANT_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send({ rosterKind: "supplier", phone: "(00)5555-5555" })
     expect(patched.status).toBe(200)
-    const blocked = await as(STAFF_TOKEN, request(app).post("/vendors")).send({ name: "測試技師庚", rosterKind: "engineer" })
+    const blocked = await as(ACCOUNTANT_TOKEN, request(app).post("/vendors")).send({ name: "測試技師庚", rosterKind: "engineer" })
     expect(blocked.status).toBe(409)
     expect(blocked.body.columns).toEqual(["roster_kind"])
   })
 
   it("POST 新欄位全空 → 照常建立，寫入不帶新欄位", async () => {
     fake.injectError({ table: "vendors", action: "insert", error: { code: "PGRST204", message: "Could not find the 'roster_kind' column" } })
-    const res = await as(STAFF_TOKEN, request(app).post("/vendors")).send({ name: "測試廠商戊", seq: null, subCategory: "", code: null })
+    const res = await as(ACCOUNTANT_TOKEN, request(app).post("/vendors")).send({ name: "測試廠商戊", seq: null, subCategory: "", code: null })
     expect(res.status).toBe(201)
     const payload = writes("vendors", "insert")[0]?.payload as Record<string, unknown>
     for (const col of ["roster_kind", "seq", "sub_category", "code", "fax", "payment_terms"]) expect(payload).not.toHaveProperty(col)
@@ -172,10 +194,10 @@ describe("廠商名冊：0076 沒套", () => {
   it("記住沒套之後，PATCH 帶非空新欄位直接 409（不打 DB），只改舊欄位照常", async () => {
     fake.injectError({ table: "vendors", action: "select", error: missing })
     await as(STAFF_TOKEN, request(app).get("/vendors"))
-    const blocked = await as(STAFF_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send({ paymentTerms: "月結" })
+    const blocked = await as(ACCOUNTANT_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send({ paymentTerms: "月結" })
     expect(blocked.status).toBe(409)
     expect(writes("vendors", "update")).toHaveLength(0)
-    const ok = await as(STAFF_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send({ phone: "(00)3333-3333", paymentTerms: null })
+    const ok = await as(ACCOUNTANT_TOKEN, request(app).patch(`/vendors/${VENDOR_A}`)).send({ phone: "(00)3333-3333", paymentTerms: null })
     expect(ok.status).toBe(200)
     expect(Object.keys(writes("vendors", "update")[0]?.payload as object).sort()).toEqual(["phone", "updated_at"])
   })

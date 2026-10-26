@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireHrAdmin } from "../middleware/role.js"
+import { requireFinance, requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { sanitizeSearchTerm } from "../lib/search-term.js"
 import { isHrRole, resolveSelf } from "../middleware/scope.js"
@@ -14,7 +14,9 @@ export const vendorsRouter = Router()
 
 /**
  * 廠商名冊 + 名片建檔。
- * - 名冊全租戶可讀寫（往來窗口是大家都會用的資料）；刪除（軟刪）限 HR。
+ * - 名冊全租戶可讀（往來窗口是大家都會用的資料）；新增／修改／名片辨識限會計與 HR（requireFinance：
+ *   hr_admin、platform_admin、accountant，2026-10-27 業主決定——一般員工、主管只能讀）；刪除（軟刪）限 HR。
+ *   vendors 只有這支 router 會寫（報銷、放款、專案發包只存 vendor_id／名稱，不回寫名冊）。
  * - 名片：影像存私有 bucket vendor-cards，送 Gemini 抽欄位。抽出來的永遠是
  *   「建議值」，前端帶進表單讓人確認後才 POST /vendors；系統不會自己新增廠商。
  *   沒設 GEMINI_API_KEY 時 /card-scan 回 503，名冊本身照常可用。
@@ -144,7 +146,7 @@ const vendorBody = z.object({
 
 /**
  * 「關係企業」標記會改變集團總覽的集團合計（剔除付給這家廠商的放款），所以只有 HR／平台管理員能設定或變更；
- * 廠商名冊其他欄位仍是全租戶可寫。重送跟現值一樣的值不算變更。
+ * 會計仍可維護其他欄位。重送跟現值一樣的值不算變更。
  */
 const AFFILIATE_HR_ONLY = { error: "affiliate_hr_only", message: "只有 HR 管理員可以設定「關係企業」標記。" } as const
 
@@ -231,7 +233,7 @@ vendorsRouter.get("/vendors", requireAuth, requireTenant, async (req: Request, r
 })
 
 // ── POST /vendors ──────────────────────────────────────────────────────
-vendorsRouter.post("/vendors", requireAuth, requireTenant, async (req: Request, res: Response, next: NextFunction) => {
+vendorsRouter.post("/vendors", requireAuth, requireTenant, requireFinance, async (req: Request, res: Response, next: NextFunction) => {
   const tenantId = res.locals.tenantId as string
   const userId = req.auth?.userId
   const parsed = vendorBody.safeParse(req.body)
@@ -270,7 +272,7 @@ vendorsRouter.post("/vendors", requireAuth, requireTenant, async (req: Request, 
 })
 
 // ── PATCH /vendors/:id ─────────────────────────────────────────────────
-vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, async (req: Request, res: Response, next: NextFunction) => {
+vendorsRouter.patch("/vendors/:id", requireAuth, requireTenant, requireFinance, async (req: Request, res: Response, next: NextFunction) => {
   const tenantId = res.locals.tenantId as string
   const userId = req.auth?.userId
   const id = req.params.id as string
@@ -409,7 +411,7 @@ email、address、taxId（統一編號，8 碼數字，沒有就 null）、websi
 讀不到的欄位一律 null。不要編造；電話與 email 要照影像上的字元原樣。統一編號只在影像明確印有「統一編號」或「統編」時才填。`
 
 // ── POST /vendors/card-scan — 上傳名片影像並抽欄位（不建檔）───────────
-vendorsRouter.post("/vendors/card-scan", requireAuth, requireTenant, async (req: Request, res: Response, next: NextFunction) => {
+vendorsRouter.post("/vendors/card-scan", requireAuth, requireTenant, requireFinance, async (req: Request, res: Response, next: NextFunction) => {
   const tenantId = res.locals.tenantId as string
   const parsed = scanBody.safeParse(req.body)
   if (!parsed.success) {

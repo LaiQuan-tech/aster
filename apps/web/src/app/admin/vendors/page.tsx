@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Card, Empty, ErrorText, Pill, PrimaryButton, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import { buildRemittanceText, copyText } from "@/lib/remittance";
 import { getMeCached, peekMeCached } from "@/lib/ess-state";
-import { isHrRole } from "@/lib/roles";
+import { isAdminRole, isHrRole } from "@/lib/roles";
 import { humanizeAffiliateError } from "@/lib/affiliate";
 import {
   listVendors, createVendor, updateVendor, deleteVendor, getVendorCardUrl, scanVendorCard,
@@ -32,6 +32,9 @@ import { emptyVendorForm, vendorFormFrom, vendorFormToInput, type VendorForm, ty
  * 欄位對齊 Excel（2026-10-27）：列表欄位與順序＝業主的「客供商基本資料」（lib/roster-columns.ts），
  * 可橫向捲動、第一欄（簡稱）凍結；三個工作表（供應商／技師／送審相關單位）用上方頁籤篩選。
  * Excel 沒有的欄位（職稱、銀行帳戶、關係企業、名片）只在編輯表單的「其他」區。
+ *
+ * 權限（2026-10-27 業主決定）：新增／修改／名片辨識限會計與 HR（API requireFinance），刪除限 HR；
+ * 沒權限的人看不到「拍名片建檔／手動新增／編輯／刪除」，只能讀與複製帳號。
  */
 export default function VendorsPage() {
   const toast = useToast();
@@ -48,14 +51,21 @@ export default function VendorsPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   // 只有 HR／平台管理員能設定關係企業（其他角色 API 會 403）；取不到角色就當不能。
   const [canSetAffiliate, setCanSetAffiliate] = useState(() => isHrRole(peekMeCached()?.role));
+  // 新增／修改：會計與 HR（API requireFinance）；刪除：HR。取不到角色就當不能。
+  const [canEdit, setCanEdit] = useState(() => isAdminRole(peekMeCached()?.role));
+  const canDelete = canSetAffiliate;
   useEffect(() => {
     let active = true;
     getMeCached()
       .then((me) => {
-        if (active) setCanSetAffiliate(isHrRole(me.role));
+        if (!active) return;
+        setCanSetAffiliate(isHrRole(me.role));
+        setCanEdit(isAdminRole(me.role));
       })
       .catch(() => {
-        if (active) setCanSetAffiliate(false);
+        if (!active) return;
+        setCanSetAffiliate(false);
+        setCanEdit(false);
       });
     return () => {
       active = false;
@@ -207,14 +217,18 @@ export default function VendorsPage() {
         <div className="mb-3 flex flex-wrap items-center gap-3">
           <input className={`${inputCls} max-w-xs`} value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜尋名稱 / 簡稱 / 窗口 / 統編 / 電話 / 類別 / 細目" />
           <input ref={fileRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => void onPickCard(e.target.files?.[0])} />
-          <button type="button" onClick={() => fileRef.current?.click()} disabled={busy} className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 disabled:opacity-50">
-            📷 拍名片建檔
-          </button>
-          <PrimaryButton type="button" onClick={startNew}>手動新增</PrimaryButton>
+          {canEdit && (
+            <>
+              <button type="button" onClick={() => fileRef.current?.click()} disabled={busy} className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 disabled:opacity-50">
+                📷 拍名片建檔
+              </button>
+              <PrimaryButton type="button" onClick={startNew}>手動新增</PrimaryButton>
+            </>
+          )}
           <span className="text-sm text-gray-500">{shown.length} 家{kind !== "all" ? `（共 ${vendors.length} 家）` : ""}</span>
         </div>
         {shown.length === 0 ? (
-          <Empty>{q || kind !== "all" ? "沒有符合的廠商" : "尚無廠商。拍張名片或手動新增。"}</Empty>
+          <Empty>{q || kind !== "all" ? "沒有符合的廠商" : canEdit ? "尚無廠商。拍張名片或手動新增。" : "尚無廠商。"}</Empty>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-max min-w-full text-sm">
@@ -277,8 +291,12 @@ export default function VendorsPage() {
                       >
                         複製帳號
                       </button>
-                      <button type="button" onClick={() => void startEdit(v)} className="mr-3 text-xs text-gray-600 hover:underline">編輯</button>
-                      <button type="button" onClick={() => void remove(v)} className="text-xs text-gray-400 hover:text-red-600">刪除</button>
+                      {canEdit && (
+                        <button type="button" onClick={() => void startEdit(v)} className="mr-3 text-xs text-gray-600 hover:underline">編輯</button>
+                      )}
+                      {canDelete && (
+                        <button type="button" onClick={() => void remove(v)} className="text-xs text-gray-400 hover:text-red-600">刪除</button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -288,7 +306,7 @@ export default function VendorsPage() {
         )}
       </Card>
 
-      {editing !== null && (
+      {editing !== null && canEdit && (
         <Card>
           <h2 className="mb-3 text-sm font-semibold text-gray-700">{editing === "new" ? "新增廠商" : `編輯：${editing.name}`}</h2>
           {scanMsg && <p className="mb-3 rounded-md bg-blue-50 px-3 py-2 text-sm text-blue-800">{scanMsg}</p>}

@@ -30,7 +30,7 @@ import { clientFormFrom, clientFormToInput, emptyClientForm, type ClientForm, ty
  *
  * 欄位對齊 Excel（2026-10-27）：列表欄位與順序＝業主「客供商基本資料／客戶資料」（lib/roster-columns.ts），
  * 可橫向捲動、第一欄（簡稱）凍結。Excel 沒有的欄位（分類、發票聯式、結帳日、付款日、關係企業）只在編輯表單的「其他」區；
- * 分類仍可在上方篩選。
+ * 分類仍可在上方篩選。刪除限 HR（API requireHrAdmin），會計看不到刪除鈕。
  */
 export default function ClientsPage() {
   const categories = useOptionList("client_category");
@@ -212,7 +212,9 @@ export default function ClientsPage() {
                     })}
                     <td className="sticky right-0 z-10 whitespace-nowrap bg-white py-2 pl-3 text-right">
                       <button type="button" onClick={() => startEdit(c)} className="mr-3 text-xs text-gray-600 hover:underline">編輯</button>
-                      <button type="button" onClick={() => void remove(c)} className="text-xs text-gray-400 hover:text-red-600">刪除</button>
+                      {canSetAffiliate && (
+                        <button type="button" onClick={() => void remove(c)} className="text-xs text-gray-400 hover:text-red-600">刪除</button>
+                      )}
                     </td>
                   </tr>
                 ))}

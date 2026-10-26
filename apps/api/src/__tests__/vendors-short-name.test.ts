@@ -47,7 +47,7 @@ function seedVendor(id: string, name: string, shortName: string | null, extra: R
 
 beforeEach(() => {
   fake.reset()
-  fake.db.employees = [{ id: "bbbbbbbb-0000-4000-8000-000000000001", tenant_id: TENANT_ID, user_id: USER_TOKEN, role: "employee", dept_id: null }]
+  fake.db.employees = [{ id: "bbbbbbbb-0000-4000-8000-000000000001", tenant_id: TENANT_ID, user_id: USER_TOKEN, role: "accountant", dept_id: null }]
   fake.db.vendors = []
 })
 
