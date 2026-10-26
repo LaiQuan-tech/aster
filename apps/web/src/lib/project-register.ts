@@ -34,6 +34,9 @@ export const REGISTER_FIXED_HEADERS = [
 export const REGISTER_FIXED_WIDTHS = [5.18, 13, 11.18, 15.82, 25.45, 13.82, 13.18, 14.45, 12.82, 13.45, 12.82, 6.91, 11.45, 10.82, 8.63, 19] as const
 export const REGISTER_DISCIPLINE_WIDTH = 13
 
+/** 原檔預設隱藏的欄（0 起算）：I 已收帳款、J 應收帳款、K 已開發票、L 合約、M 簽證、N 發包。 */
+export const REGISTER_HIDDEN_COLUMNS: readonly number[] = [8, 9, 10, 11, 12, 13]
+
 /** 凍結窗格：原檔 F5 → 凍結 A:E（項次、專案單號、日期、客戶、工程名稱）與表頭。 */
 export const REGISTER_FROZEN_COLUMNS = 5
 
@@ -45,6 +48,10 @@ export interface RegisterColumn {
   align: RegisterAlign
   /** true＝金額類，無權限時顯示「—」。 */
   money: boolean
+  /** true＝原檔預設隱藏（I:N），畫面要按「顯示隱藏欄」才出現。 */
+  hidden: boolean
+  /** 在 registerRowCells 回傳陣列裡的位置（隱藏欄濾掉後仍對得到儲存格）。 */
+  index: number
 }
 
 export function registerColumns(disciplines: string[]): RegisterColumn[] {
@@ -54,10 +61,27 @@ export function registerColumns(disciplines: string[]): RegisterColumn[] {
     // 原檔除了備註（靠左）其餘置中；畫面上金額改靠右比較好對位數。
     align: header === "備註" ? "left" : i >= 5 && i <= 10 || header === "發包" ? "right" : "center",
     money: (i >= 5 && i <= 10) || header === "發包" || header === "備註",
+    hidden: REGISTER_HIDDEN_COLUMNS.includes(i),
+    index: i,
   }))
-  const disc: RegisterColumn[] = disciplines.map((header) => ({ header, width: REGISTER_DISCIPLINE_WIDTH, align: "right", money: true }))
+  const disc: RegisterColumn[] = disciplines.map((header, i) => ({
+    header,
+    width: REGISTER_DISCIPLINE_WIDTH,
+    align: "right",
+    money: true,
+    hidden: false,
+    index: REGISTER_FIXED_HEADERS.length + i,
+  }))
   return [...fixed, ...disc]
 }
+
+/** 畫面上要畫的欄：預設比照原檔藏起 I:N；`showHidden` 時全部顯示。 */
+export function visibleRegisterColumns(disciplines: string[], showHidden: boolean): RegisterColumn[] {
+  return registerColumns(disciplines).filter((c) => showHidden || !c.hidden)
+}
+
+/** 「顯示隱藏欄」的記憶（每位使用者自己的瀏覽器）。 */
+export const SHOW_HIDDEN_STORAGE_KEY = "aster.projects.register.showHidden"
 
 /**
  * Excel 字元寬 → px。原檔字型是 12pt 標楷體（比預設 Calibri 11 寬），畫面是 14px 字＋左右各 8px 留白，

@@ -6,6 +6,7 @@ import {
   formatRegisterMoney,
   registerColumns,
   registerRowCells,
+  visibleRegisterColumns,
   type ProjectRegisterCells,
 } from "../project-register";
 
@@ -38,6 +39,17 @@ describe("專案列表＝專案申請單總表欄位", () => {
     expect(registerColumns([]).slice(0, REGISTER_FROZEN_COLUMNS).map((c) => c.header)).toEqual([
       "項次", "專案單號", "日期", "客戶", "工程名稱",
     ]);
+  });
+
+  it("I:N（已收帳款…發包）比照原檔預設隱藏，打開後全部顯示；index 仍對得到儲存格", () => {
+    const hidden = visibleRegisterColumns(["空調"], false);
+    expect(hidden.map((c) => c.header)).toEqual([
+      "項次", "專案單號", "日期", "客戶", "工程名稱", "金額", "稅金", "含稅", "業務", "備註", "空調",
+    ]);
+    expect(hidden.map((c) => c.index)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 14, 15, 16]);
+    expect(visibleRegisterColumns(["空調"], true).map((c) => c.header)).toEqual([...REGISTER_FIXED_HEADERS, "空調"]);
+    // 沒有原檔以外的系統欄（狀態等）。
+    expect(visibleRegisterColumns([], true)).toHaveLength(16);
   });
 
   it("金額格式同原檔會計格式：千分位、0 顯示「-」、空值空白", () => {

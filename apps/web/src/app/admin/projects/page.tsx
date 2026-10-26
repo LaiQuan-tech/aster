@@ -9,7 +9,6 @@ import { listVendors, type Vendor } from "@/lib/company-api";
 import {
   getProjectSettings,
   updateProjectSettings,
-  statusLabel,
   PROJECT_STATUS_ORDER,
   PROJECT_STATUS_LABELS,
   PROJECT_SORT_LABELS,
@@ -38,19 +37,13 @@ import {
 import {
   MASKED,
   REGISTER_FROZEN_COLUMNS,
+  SHOW_HIDDEN_STORAGE_KEY,
   excelWidthToPx,
-  registerColumns,
   registerRowCells,
+  visibleRegisterColumns,
 } from "@/lib/project-register";
 import { ProjectApplicationForm } from "./_components/ProjectApplicationForm";
 import { createAndOpenProject } from "./_components/project-application-form";
-
-const STATUS_BADGE: Record<ProjectStatus, string> = {
-  active: "bg-green-50 text-green-700",
-  suspended: "bg-amber-50 text-amber-700",
-  closed: "bg-gray-100 text-gray-600",
-  terminated: "bg-red-50 text-red-700",
-};
 
 export default function AdminProjectsPage() {
   const router = useRouter();
@@ -58,6 +51,15 @@ export default function AdminProjectsPage() {
   // 總表的科別發包欄（Q 欄起；租戶設定順序，後端已依權限推好）。
   const [registerDisciplines, setRegisterDisciplines] = useState<string[]>([]);
   const [exporting, setExporting] = useState(false);
+  // 原檔 I:N（已收帳款…發包）預設隱藏；使用者打開後記在自己的瀏覽器。
+  const [showHiddenColumns, setShowHiddenColumns] = useState(false);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(SHOW_HIDDEN_STORAGE_KEY) === "1") setShowHiddenColumns(true);
+    } catch {
+      // 讀不到就用預設（隱藏）。
+    }
+  }, []);
   // 專案申請單整張可收放（業主 2026-10-07）：預設收起，點標題列展開、再點一下收起。
   // 收起只是 hidden，不卸載，填到一半的內容會保留。
   const [formOpen, setFormOpen] = useState(false);
@@ -195,13 +197,22 @@ export default function AdminProjectsPage() {
     }
   }
 
-  const columns = registerColumns(registerDisciplines);
+  const columns = visibleRegisterColumns(registerDisciplines, showHiddenColumns);
   // 凍結欄（A:E）的 left 位移：前面各欄寬的累加。
   const frozenLeft = columns.slice(0, REGISTER_FROZEN_COLUMNS).reduce<number[]>((acc, c, i) => {
     acc.push(i === 0 ? 0 : acc[i - 1] + excelWidthToPx(columns[i - 1].width));
     return acc;
   }, []);
-  const registerTableWidth = columns.reduce((sum, c) => sum + excelWidthToPx(c.width), 0) + 96;
+  const registerTableWidth = columns.reduce((sum, c) => sum + excelWidthToPx(c.width), 0);
+
+  function toggleHiddenColumns(next: boolean) {
+    setShowHiddenColumns(next);
+    try {
+      localStorage.setItem(SHOW_HIDDEN_STORAGE_KEY, next ? "1" : "0");
+    } catch {
+      // 無痕模式／封鎖儲存：只是這次有效，不影響畫面。
+    }
+  }
 
   /** 下載 Excel：沿用「年度總表」匯出（與原總表同版面），依歸屬年度；全部年度時取今年。 */
   async function exportXlsx() {
@@ -331,9 +342,15 @@ export default function AdminProjectsPage() {
               {exporting ? "匯出中…" : "下載 Excel"}
             </button>
           ) : null}
+          {/* 右上：顯示隱藏欄＋自動封存設定。 */}
+          <div className="ml-auto flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-1.5 text-sm text-gray-600" title="原 Excel 預設隱藏 I:N 欄">
+            <input type="checkbox" checked={showHiddenColumns} onChange={(e) => toggleHiddenColumns(e.target.checked)} />
+            顯示隱藏欄（已收帳款…發包）
+          </label>
 
           {settings && (
-            <div className="ml-auto flex items-center gap-2 text-sm text-gray-500">
+            <div className="flex items-center gap-2 text-sm text-gray-500">
               <label className="flex items-center gap-1.5">
                 <input
                   type="checkbox"
@@ -363,6 +380,7 @@ export default function AdminProjectsPage() {
               </span>
             </div>
           )}
+          </div>
         </div>
         {loading ? (
           <Empty>載入中…</Empty>
@@ -380,7 +398,6 @@ export default function AdminProjectsPage() {
             >
               <colgroup>
                 {columns.map((c) => <col key={c.header} style={{ width: excelWidthToPx(c.width) }} />)}
-                <col style={{ width: 96 }} />
               </colgroup>
               <thead>
                 <tr>
@@ -394,10 +411,6 @@ export default function AdminProjectsPage() {
                       {c.header}
                     </th>
                   ))}
-                  {/* 系統欄（原檔沒有）：案情篩選對得上、看得出封存。 */}
-                  <th scope="col" className="sticky top-0 z-20 border-b border-gray-300 bg-gray-100 px-2 py-2 text-center font-medium text-gray-500">
-                    狀態
-                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -411,6 +424,7 @@ export default function AdminProjectsPage() {
                     <tr
                       key={p.id}
                       className="group cursor-pointer"
+                      title={p.archivedAt ? "已封存" : undefined}
                       // 整列可點進明細；點到列內的連結／按鈕／表單元件時交給它自己處理。
                       onClick={(e) => {
                         if ((e.target as HTMLElement).closest("a,button,input,select,textarea,label")) return;
@@ -420,11 +434,14 @@ export default function AdminProjectsPage() {
                     >
                       {columns.map((c, i) => {
                         const frozen = i < REGISTER_FROZEN_COLUMNS;
-                        const text = cells[i];
+                        const text = cells[c.index];
                         return (
                           <td
                             key={c.header}
-                            className={`border-b border-r border-gray-200 bg-white px-2 py-1.5 group-hover:bg-cyan-50 ${
+                            // 已封存（勾「顯示已封存」才會出現）用淡灰底區分；凍結欄也要有底色才蓋得住捲過去的欄。
+                            className={`border-b border-r border-gray-200 px-2 py-1.5 group-hover:bg-cyan-50 ${
+                              p.archivedAt ? "bg-gray-100 text-gray-500" : "bg-white"
+                            } ${
                               frozen ? "sticky z-10" : ""
                             } ${c.align === "right" ? "whitespace-nowrap text-right tabular-nums" : c.align === "left" ? "break-words text-left" : "break-words text-center"} ${
                               text === MASKED ? "text-gray-300" : ""
@@ -432,7 +449,7 @@ export default function AdminProjectsPage() {
                             style={frozen ? { left: frozenLeft[i] } : undefined}
                             title={text === MASKED ? "無權限檢視此案金額" : undefined}
                           >
-                            {i === 1 ? (
+                            {c.index === 1 ? (
                               <Link
                                 href={href}
                                 className="font-mono text-xs font-medium hover:underline"
@@ -446,17 +463,6 @@ export default function AdminProjectsPage() {
                           </td>
                         );
                       })}
-                      <td className="border-b border-gray-200 bg-white px-2 py-1.5 text-center group-hover:bg-cyan-50">
-                        <span
-                          className={`rounded-full px-2 py-0.5 text-xs ${
-                            STATUS_BADGE[p.status as ProjectStatus] ?? "bg-gray-100 text-gray-500"
-                          }`}
-                          title={p.statusReason ?? undefined}
-                        >
-                          {statusLabel(p.status)}
-                        </span>
-                        {p.archivedAt && <span className="ml-1 text-xs text-gray-400">已封存</span>}
-                      </td>
                     </tr>
                   );
                 })}
