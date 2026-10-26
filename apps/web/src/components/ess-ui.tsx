@@ -90,6 +90,19 @@ const BUTTON_SIZE: Record<ButtonSize, string> = {
   lg: "min-h-12 px-5 text-base",
 };
 
+/**
+ * Button 的外觀 class，給「長得像按鈕的連結」（<Link className={buttonClass(...)}>）用：
+ * 保留中鍵／⌘點開新分頁，外觀與 <Button> 一致。primary 另需 style={{ backgroundColor: "var(--brand)" }}。
+ */
+export function buttonClass(variant: ButtonVariant = "primary", size: ButtonSize = "md", block?: boolean): string {
+  return cx(
+    "inline-flex items-center justify-center gap-2 rounded-xl font-medium transition active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60",
+    BUTTON_VARIANT[variant],
+    BUTTON_SIZE[size],
+    block && "w-full",
+  );
+}
+
 function Spinner({ className = "h-4 w-4" }: { className?: string }) {
   return (
     <svg className={cx("animate-spin", className)} viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -110,13 +123,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       type={type}
       disabled={disabled || loading}
       aria-busy={loading || undefined}
-      className={cx(
-        "inline-flex items-center justify-center gap-2 rounded-xl font-medium transition active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60",
-        BUTTON_VARIANT[variant],
-        BUTTON_SIZE[size],
-        block && "w-full",
-        className,
-      )}
+      className={cx(buttonClass(variant, size, block), className)}
       style={brand}
       {...rest}
     >

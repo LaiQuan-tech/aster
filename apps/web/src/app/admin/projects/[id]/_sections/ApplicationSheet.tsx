@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { Button, PrimaryButton } from "@/components/admin-ui";
 import { ClientCombo } from "@/components/ClientCombo";
 import type { Vendor } from "@/lib/company-api";
@@ -41,9 +41,12 @@ import {
   orderDocumentCells,
   rocDateParts,
   rocDots,
+  SHEET_FIELD_PRINT_BLOCK,
   type ApplicationSheetDraft,
+  type PrintBlockKey,
   type SheetField,
 } from "@/lib/project-application-sheet";
+
 import { selectedCompanyId } from "../../_components/project-application-form";
 import { fmtMoney } from "./shared";
 
@@ -92,12 +95,18 @@ function Cell({
     backgroundColor: shade ? SHADE : undefined,
   } as CSSProperties;
   const place = kind === "label" ? "col-start-1" : kind === "full" ? "col-span-2" : "col-start-2";
-  const alignCls = align === "center" ? "md:text-center md:justify-center" : align === "right" ? "md:text-right md:justify-end" : "";
+  // 列印時紙寬（A4 約 700px）比 md 斷點窄，所以每個 md: 都要有對應的 print:，才會印出 Word 格線而不是手機堆疊。
+  const alignCls =
+    align === "center"
+      ? "md:text-center md:justify-center print:text-center print:justify-center"
+      : align === "right"
+        ? "md:text-right md:justify-end print:text-right print:justify-end"
+        : "";
   return (
     <div
       style={style}
       data-testid={testId}
-      className={`${place} flex min-w-0 items-center border-b border-gray-300 bg-white px-1.5 py-1 text-[13px] leading-snug md:border-0 md:[grid-column:var(--gc)] md:[grid-row:var(--gr)] ${alignCls} ${kind === "label" ? "whitespace-pre text-gray-800" : ""} ${className}`}
+      className={`${place} flex min-w-0 items-center border-b border-gray-300 bg-white px-1.5 py-1 text-[13px] leading-snug md:border-0 md:[grid-column:var(--gc)] md:[grid-row:var(--gr)] print:border-0 print:px-1 print:py-0.5 print:text-[11px] print:[grid-column:var(--gc)] print:[grid-row:var(--gr)] ${alignCls} ${kind === "label" ? "whitespace-pre text-gray-800" : ""} ${className}`}
     >
       {children}
     </div>
@@ -158,7 +167,22 @@ interface ApplicationSheetProps {
   vendors: Vendor[];
   /** 協力技師的科別（租戶設定 project_settings.disciplines）。 */
   disciplines: string[];
-  load: () => Promise<void>;
+  /** 存檔後重新載入（edit 模式）。 */
+  load?: () => Promise<void>;
+  /**
+   * "edit"（專案明細頁，預設）：格子可編輯、有儲存列與未儲存提醒。
+   * "print"（列印申請單頁）：同一份版面的唯讀列印版——沒有輸入框、儲存列與說明文字，A4 直式。
+   */
+  mode?: "edit" | "print";
+  /**
+   * 受控草稿（edit 模式由 page.tsx 持有，下方其他卡片存檔整頁重抓時才不會清掉）。省略＝元件自己依專案建。
+   */
+  draft?: ApplicationSheetDraft;
+  onDraftChange?: Dispatch<SetStateAction<ApplicationSheetDraft>>;
+  /** 列印區塊勾選（print 模式）：未勾選的區塊內容格螢幕淡化、列印留白。省略＝全勾。 */
+  printChecked?: Partial<Record<PrintBlockKey, boolean>>;
+  /** 「訂單」格的來源覆寫（列印頁用 /application 回的 latestDocument；讀不到合約的人也印得出）。省略＝由 contracts 算。 */
+  latestDocument?: { docType: Contract["docType"]; signedOn: string | null } | null;
 }
 
 /**
@@ -178,16 +202,28 @@ export function ApplicationSheet({
   vendors,
   disciplines,
   load,
+  mode = "edit",
+  draft: controlledDraft,
+  onDraftChange,
+  printChecked,
+  latestDocument,
 }: ApplicationSheetProps) {
-  const [draft, setDraft] = useState<ApplicationSheetDraft>(() => applicationSheetDraftOf(project, disciplines));
+  const print = mode === "print";
+  const [localDraft, setLocalDraft] = useState<ApplicationSheetDraft>(() => applicationSheetDraftOf(project, disciplines));
+  const draft = controlledDraft ?? localDraft;
+  const setDraft = onDraftChange ?? setLocalDraft;
   const [clients, setClients] = useState<Client[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const editable = canFinance;
+  const editable = canFinance && !print;
+  const blockOn = (key: PrintBlockKey) => printChecked?.[key] ?? true;
+  /** 未勾選的列印區塊：螢幕淡化、列印時文字透明（格線與標題照印）。 */
+  const blankCls = (key: PrintBlockKey) => (blockOn(key) ? "" : "opacity-40 print:opacity-100 print:text-transparent print:**:text-transparent");
 
   useEffect(() => {
+    if (print) return;
     listClients().then((r) => setClients(r.clients)).catch(() => {});
-  }, []);
+  }, [print]);
 
   const patchOpts = { disciplines, canFinance };
   const patch = useMemo(() => applicationSheetPatch(project, draft, patchOpts), [project, draft, disciplines, canFinance]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -203,7 +239,7 @@ export function ApplicationSheet({
     setError(null);
     try {
       await updateProjectFields(project.id, patch);
-      await load();
+      await load?.();
     } catch (err) {
       setError(humanizeProjectExtError(err, "儲存申請單失敗"));
     } finally {
@@ -216,7 +252,7 @@ export function ApplicationSheet({
     clients.find((c) => c.id === draft.clientId) ?? (draft.clientId && draft.clientId === project.clientId ? project.client : null);
   // 名冊讀不到（或還沒載入）時至少放進本案目前的客戶，免得客戶名稱格看起來是空的。
   const clientChoices = project.client && !clients.some((c) => c.id === project.client?.id) ? [project.client, ...clients] : clients;
-  const orderDoc = latestOrderDocument(contracts);
+  const orderDoc = latestDocument !== undefined ? latestDocument : latestOrderDocument(contracts);
   const stageRows = applicationStageRows(billings);
   const subBlocks = applicationSubcontractBlocks(subcontracts);
   const companyChoices = companyOptions(companies, draft.companyId, { markDefault: true });
@@ -422,7 +458,7 @@ export function ApplicationSheet({
         labelIndexAt.set(`${r}-${start}`, cells.length);
       } else if (cell.field) {
         const node = (
-          <Cell key={key} col={start} span={cell.span} row={r + 1} rowSpan={cell.rowSpan} kind="value" align={numericFields.has(cell.field) ? "right" : "left"} testId={`sheet-${cell.field}`}>
+          <Cell key={key} col={start} span={cell.span} row={r + 1} rowSpan={cell.rowSpan} kind="value" align={numericFields.has(cell.field) ? "right" : "left"} testId={`sheet-${cell.field}`} className={blankCls(SHEET_FIELD_PRINT_BLOCK[cell.field])}>
             {renderField(cell.field)}
           </Cell>
         );
@@ -442,25 +478,25 @@ export function ApplicationSheet({
       <Cell key={`stage-${s.no}-0`} col={stageCols[0]} span={APPLICATION_STAGE_SPANS[0]} row={r} kind="label" shade testId={`sheet-stage-${s.no}`}>
         {`${s.no}.${s.milestone}`}
       </Cell>,
-      <Cell key={`stage-${s.no}-1`} col={stageCols[1]} span={APPLICATION_STAGE_SPANS[1]} row={r} kind="value" align="center">
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-1`} col={stageCols[1]} span={APPLICATION_STAGE_SPANS[1]} row={r} kind="value" align="center">
         {s.percentage != null ? `${s.percentage}%` : ""}
       </Cell>,
-      <Cell key={`stage-${s.no}-2`} col={stageCols[2]} span={APPLICATION_STAGE_SPANS[2]} row={r} kind="value" align="right">
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-2`} col={stageCols[2]} span={APPLICATION_STAGE_SPANS[2]} row={r} kind="value" align="right">
         {s.amount != null ? fmtMoney(s.amount) : ""}
       </Cell>,
-      <Cell key={`stage-${s.no}-3`} col={stageCols[3]} span={APPLICATION_STAGE_SPANS[3]} row={r} kind="value">
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-3`} col={stageCols[3]} span={APPLICATION_STAGE_SPANS[3]} row={r} kind="value">
         <span className="whitespace-pre">已於 {s.receivedOn ? rocDots(s.receivedOn) : "         "} 入賬</span>
       </Cell>,
       <Cell key={`stage-${s.no}-4`} col={stageCols[4]} span={APPLICATION_STAGE_SPANS[4]} row={r} kind="label" shade align="center">
         {guild ? "審迄還款:" : "發票號碼:"}
       </Cell>,
-      <Cell key={`stage-${s.no}-5`} col={stageCols[5]} span={APPLICATION_STAGE_SPANS[5]} row={r} kind="value">
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-5`} col={stageCols[5]} span={APPLICATION_STAGE_SPANS[5]} row={r} kind="value">
         {guild ? "" : [s.invoiceNo, rocDots(s.invoicedOn)].filter(Boolean).join(" ")}
       </Cell>,
     );
   }
   // Word 第 19 列：付款階段與發包單位之間的空白列。
-  cells.push(<Cell key="spacer" col={1} span={16} row={row++} kind="full" className="hidden h-6 md:flex" />);
+  cells.push(<Cell key="spacer" col={1} span={16} row={row++} kind="full" className="hidden h-6 md:flex print:flex print:h-5" />);
 
   const subCols = APPLICATION_SUBCONTRACT_SPANS.reduce<number[]>((acc, span, i) => [...acc, i === 0 ? 1 : acc[i - 1] + APPLICATION_SUBCONTRACT_SPANS[i - 1]], []);
   const summaryValues: ReactNode[] = [
@@ -490,7 +526,7 @@ export function ApplicationSheet({
       );
       block.forEach((s, j) =>
         cells.push(
-          <Cell key={`sub-${b}-${i}-${j}`} col={subCols[1 + j]} span={APPLICATION_SUBCONTRACT_SPANS[1 + j]} row={r} kind="value" align={i === 3 ? "right" : "center"}>
+          <Cell className={blankCls("subcontract")} key={`sub-${b}-${i}-${j}`} col={subCols[1 + j]} span={APPLICATION_SUBCONTRACT_SPANS[1 + j]} row={r} kind="value" align={i === 3 ? "right" : "center"}>
             {valueOf(s)}
           </Cell>,
         ),
@@ -499,7 +535,7 @@ export function ApplicationSheet({
         <Cell key={`sub-${b}-${i}-sl`} col={subCols[4]} span={APPLICATION_SUBCONTRACT_SPANS[4]} row={r} kind="label" shade align="right">
           {b === 0 ? APPLICATION_SUMMARY_LABELS[i] : ""}
         </Cell>,
-        <Cell key={`sub-${b}-${i}-sv`} col={subCols[5]} span={APPLICATION_SUBCONTRACT_SPANS[5]} row={r} kind="value" align="right" testId={b === 0 && i === 1 ? "sheet-other-expenses" : undefined}>
+        <Cell className={blankCls("subcontract")} key={`sub-${b}-${i}-sv`} col={subCols[5]} span={APPLICATION_SUBCONTRACT_SPANS[5]} row={r} kind="value" align="right" testId={b === 0 && i === 1 ? "sheet-other-expenses" : undefined}>
           {b === 0 ? summaryValues[i] : ""}
         </Cell>,
       );
@@ -507,8 +543,8 @@ export function ApplicationSheet({
   });
 
   return (
-    <section aria-label="專案申請單" className="rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-5" data-testid="application-sheet">
-      <div className="mx-auto w-full max-w-[960px] text-gray-900" style={{ fontFamily: SHEET_FONT }}>
+    <section aria-label="專案申請單" className="rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-5 print:rounded-none print:border-0 print:p-0 print:shadow-none" data-testid="application-sheet">
+      <div className="mx-auto w-full max-w-[960px] text-gray-900 print:max-w-none" style={{ fontFamily: SHEET_FONT }}>
         {/* 抬頭：標誌＋「專案申請單 民國　年　月　日」、承接公司、工程名稱／專案序號 */}
         <div className="flex flex-wrap items-end gap-x-6 gap-y-2">
           <img src="/brand/aster-logo.svg" alt="" aria-hidden="true" className="h-7 w-auto" />
@@ -545,14 +581,15 @@ export function ApplicationSheet({
 
         {/* 專案明細表：外框雙線、內框單線（gap-px 露出底色當格線）。 */}
         <div
-          className="grid grid-cols-[6.5rem_minmax(0,1fr)] border-[3px] border-double border-gray-800 md:gap-px md:bg-gray-800 md:[grid-template-columns:var(--cols)]"
+          className="grid grid-cols-[6.5rem_minmax(0,1fr)] border-[3px] border-double border-gray-800 md:gap-px md:bg-gray-800 md:[grid-template-columns:var(--cols)] print:gap-px print:bg-gray-800 print:[grid-template-columns:var(--cols)] print:break-inside-avoid"
           style={{ "--cols": GRID_TEMPLATE } as CSSProperties}
         >
           {cells}
         </div>
       </div>
 
-      <div className="mx-auto mt-3 flex w-full max-w-[960px] flex-col gap-2">
+      {!print && (
+      <div className="no-print mx-auto mt-3 flex w-full max-w-[960px] flex-col gap-2">
         {editable ? (
           <div className="flex flex-wrap items-center gap-3">
             <PrimaryButton onClick={save} disabled={saving || dirtyCount === 0 || validation.length > 0}>
@@ -579,6 +616,20 @@ export function ApplicationSheet({
           客戶的電話、發票地址、採購承辦、傳真、統一編號屬<a href="/admin/clients" className="underline">客戶名冊</a>，改名冊後所有專案一起更新。
         </p>
       </div>
+      )}
+
+      {/* 未儲存提醒：捲到下方其他卡片時也看得到（下方卡片存檔重新載入不會清掉草稿，但要提醒還沒存）。 */}
+      {editable && dirtyCount > 0 && (
+        <div role="status" className="no-print fixed inset-x-0 bottom-0 z-30 border-t border-amber-200 bg-amber-50/95 px-4 py-2 shadow-[0_-2px_8px_rgba(0,0,0,0.06)] backdrop-blur" data-testid="sheet-unsaved-bar">
+          <div className="mx-auto flex max-w-[960px] flex-wrap items-center gap-x-3 gap-y-1.5 text-sm text-amber-900">
+            <span className="mr-auto">申請單有 {dirtyCount} 個欄位尚未儲存。</span>
+            <Button type="button" variant="secondary" size="sm" onClick={() => document.querySelector('[data-testid="application-sheet"]')?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+              回到申請單
+            </Button>
+            <Button type="button" variant="primary" size="sm" onClick={save} disabled={saving || validation.length > 0}>{saving ? "儲存中…" : "儲存申請單"}</Button>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

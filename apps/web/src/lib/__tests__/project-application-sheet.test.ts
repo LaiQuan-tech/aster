@@ -16,6 +16,9 @@ import {
   orderDocumentCells,
   rocDateParts,
   rocDots,
+  rebaseApplicationSheetDraft,
+  PRINT_BLOCKS,
+  SHEET_FIELD_PRINT_BLOCK,
 } from "../project-application-sheet"
 import type { Contract } from "../projects-api"
 import type { BillingExt, ProjectDetail, Subcontract } from "../projects-ext-api"
@@ -251,5 +254,45 @@ describe("帶入格", () => {
 
   it("設計內容唯讀文字", () => {
     expect(designScopeText([{ discipline: "電機", item: "設計", amount: 1000 }, { discipline: "空調", item: null, amount: null }])).toBe("電機－設計 1,000、空調")
+  })
+})
+
+describe("重新載入時保留未儲存的草稿", () => {
+  it("動過的欄位保留草稿、沒動的換新值", () => {
+    const before = fakeProject()
+    const oldBase = applicationSheetDraftOf(before, disciplines)
+    const draft = { ...oldBase, siteAddress: "使用者改的地址" }
+    // 下方別張卡片存檔後重抓：名稱被別人改了、地址沒變
+    const after = fakeProject({ name: "別人改的名稱" })
+    const newBase = applicationSheetDraftOf(after, disciplines)
+    const rebased = rebaseApplicationSheetDraft(oldBase, newBase, draft)
+    expect(rebased.siteAddress).toBe("使用者改的地址")
+    expect(rebased.name).toBe("別人改的名稱")
+    expect(applicationSheetPatch(after, rebased, opts)).toEqual({ siteAddress: "使用者改的地址" })
+  })
+
+  it("協力技師逐科合併", () => {
+    const before = fakeProject()
+    const oldBase = applicationSheetDraftOf(before, disciplines)
+    const draft = { ...oldBase, engineers: { ...oldBase.engineers, 消防: { vendorId: null, name: "丙" } } }
+    const after = fakeProject({ engineers: { 電機: { vendorId: "v2", name: "新廠商" }, 空調: null } })
+    const rebased = rebaseApplicationSheetDraft(oldBase, applicationSheetDraftOf(after, disciplines), draft)
+    expect(rebased.engineers.電機).toEqual({ vendorId: "v2", name: "新廠商" })
+    expect(rebased.engineers.消防).toEqual({ vendorId: null, name: "丙" })
+  })
+
+  it("沒有任何修改 → 等於新值", () => {
+    const oldBase = applicationSheetDraftOf(fakeProject(), disciplines)
+    const newBase = applicationSheetDraftOf(fakeProject({ closingDay: "每月 1 日" }), disciplines)
+    expect(rebaseApplicationSheetDraft(oldBase, newBase, oldBase)).toEqual(newBase)
+  })
+})
+
+describe("列印區塊", () => {
+  it("每個內容格都歸到一個列印區塊，且區塊都在勾選清單裡", () => {
+    const fields = APPLICATION_SHEET_TOP_ROWS.flat().filter((c) => c.field).map((c) => c.field!)
+    const keys = new Set(PRINT_BLOCKS.map((b) => b.key))
+    for (const f of fields) expect(keys.has(SHEET_FIELD_PRINT_BLOCK[f])).toBe(true)
+    expect(PRINT_BLOCKS.map((b) => b.key)).toEqual(["customer", "sales", "payment", "engineers", "subcontract", "contracts"])
   })
 })

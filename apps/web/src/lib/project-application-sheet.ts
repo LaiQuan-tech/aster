@@ -132,6 +132,46 @@ export const SUBCONTRACTS_PER_BLOCK = 3;
 /** Word 付款階段固定 7 期＋第 8 列技師公會代墊；期數不足 7 期時補空白列維持版面。 */
 export const MIN_INSTALLMENT_ROWS = 7;
 
+/* ======================================================== 分區列印 == */
+
+/**
+ * 列印申請單的分區勾選（B6）。新版面是一張固定格線的表，不能整塊抽掉（會在格線裡留下黑洞），
+ * 所以取消勾選＝那一區的「內容格」列印時留白、標題與框線照印（像一張空白申請單）；螢幕上淡化。
+ * 「合約與印花稅」是表格下方另外一張表，取消勾選就整張不印（與舊版相同）。
+ */
+export type PrintBlockKey = "customer" | "sales" | "payment" | "engineers" | "subcontract" | "contracts";
+
+export const PRINT_BLOCKS: { key: PrintBlockKey; label: string }[] = [
+  { key: "customer", label: "客戶資料" },
+  { key: "sales", label: "銷售金額" },
+  { key: "payment", label: "付款階段" },
+  { key: "engineers", label: "協力技師" },
+  { key: "subcontract", label: "發包單位" },
+  { key: "contracts", label: "合約與印花稅" },
+];
+
+/** 上半部每個內容格屬於哪一個列印區塊；付款階段各列屬 payment、發包單位區塊屬 subcontract。 */
+export const SHEET_FIELD_PRINT_BLOCK: Record<SheetField, PrintBlockKey> = {
+  siteAddress: "customer",
+  siteAreaM2: "customer",
+  designScope: "customer",
+  clientName: "customer",
+  clientPhone: "customer",
+  invoiceAddress: "customer",
+  orderDocument: "customer",
+  clientContact: "customer",
+  clientFax: "customer",
+  clientTaxId: "customer",
+  invoiceType: "customer",
+  remarks: "engineers",
+  amountUntaxed: "sales",
+  taxAmount: "sales",
+  amountTotal: "sales",
+  closingDay: "payment",
+  paymentDay: "payment",
+  paymentMethod: "payment",
+};
+
 /* ============================================================ 草稿 == */
 
 export interface EngineerDraft {
@@ -313,6 +353,30 @@ export function applicationSheetPatch(
   return patch;
 }
 
+/**
+ * 重新載入專案後（下方其他卡片存檔會整頁重抓），把使用者在申請單上還沒存的修改疊回新資料上：
+ * 每個欄位若草稿跟「舊的載入值」一樣（沒動過）就換成新載入值，動過的保留使用者的輸入。
+ * 不會因為存了別張卡片就默默清掉申請單草稿。
+ */
+export function rebaseApplicationSheetDraft(
+  oldBase: ApplicationSheetDraft,
+  newBase: ApplicationSheetDraft,
+  draft: ApplicationSheetDraft,
+): ApplicationSheetDraft {
+  const out = { ...newBase } as Record<keyof ApplicationSheetDraft, unknown>;
+  for (const key of Object.keys(newBase) as Array<keyof ApplicationSheetDraft>) {
+    if (key === "engineers") continue;
+    if (JSON.stringify(draft[key]) !== JSON.stringify(oldBase[key])) out[key] = draft[key];
+  }
+  // 協力技師逐科合併：動過的科別保留草稿，其餘用新值。
+  const engineers: Record<string, EngineerDraft> = { ...newBase.engineers };
+  for (const [k, v] of Object.entries(draft.engineers)) {
+    if (JSON.stringify(v) !== JSON.stringify(oldBase.engineers[k])) engineers[k] = v;
+  }
+  out.engineers = engineers;
+  return out as unknown as ApplicationSheetDraft;
+}
+
 /** 未儲存的變更數（存檔鈕旁提示用）。 */
 export function applicationSheetDirtyCount(
   project: ProjectDetail,
@@ -368,7 +432,7 @@ export function latestOrderDocument(list: readonly Contract[]): Contract | null 
 }
 
 /** 「訂單:」格的勾選框：Word 原檔是「■合約書 110.7.20」。 */
-export function orderDocumentCells(doc: Contract | null): Array<{ label: string; checked: boolean; date: string }> {
+export function orderDocumentCells(doc: Pick<Contract, "docType" | "signedOn"> | null): Array<{ label: string; checked: boolean; date: string }> {
   return [
     { label: "合約書", checked: doc?.docType === "contract", date: doc?.docType === "contract" ? rocDots(doc.signedOn) : "" },
     { label: "報價單", checked: doc?.docType === "quotation", date: doc?.docType === "quotation" ? rocDots(doc.signedOn) : "" },

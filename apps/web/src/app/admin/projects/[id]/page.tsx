@@ -1,8 +1,18 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { Button, DetailHeading, ErrorText, Empty } from "@/components/admin-ui";
+import { buttonClass } from "@/components/ess-ui";
+import {
+  applicationSheetDraftOf,
+  applicationSheetPatch,
+  rebaseApplicationSheetDraft,
+  type ApplicationSheetDraft,
+} from "@/lib/project-application-sheet";
+import { unsavedChangesMessage } from "@/lib/unsaved-changes";
+import { useUnsavedChangesGuard } from "./_sections/useUnsavedChangesGuard";
 import { getDepartments, getEmployees, type Department, type Employee } from "@/lib/admin-api";
 import { listVendors, type Vendor } from "@/lib/company-api";
 import {
@@ -146,6 +156,12 @@ export default function AdminProjectDetailPage() {
   const [statusEffectiveOn, setStatusEffectiveOn] = useState("");
   const [savingStatus, setSavingStatus] = useState(false);
 
+  /**
+   * 申請單表格的草稿放在頁面這層：load() 會讓下方卡片整個卸載重掛，草稿放在 ApplicationSheet 裡會被清掉。
+   * sheetBaseRef＝上次載入時由專案算出的草稿，重新載入時用它判斷哪些欄位使用者動過（rebaseApplicationSheetDraft）。
+   */
+  const [sheetDraft, setSheetDraft] = useState<ApplicationSheetDraft | null>(null);
+  const sheetBaseRef = useRef<{ projectId: string; base: ApplicationSheetDraft } | null>(null);
   /** 已存檔的副委託（申請單表格的「發包單位」區塊用；編輯中的草稿是下面的 subDraft）。 */
   const [savedSubs, setSavedSubs] = useState<Subcontract[]>([]);
 
@@ -196,6 +212,16 @@ export default function AdminProjectDetailPage() {
       ]);
       const disciplineList = engineerDisciplinesOf(p3?.settings.disciplines ?? null);
       setDisciplines(disciplineList);
+      // 申請單草稿：沒動過的欄位換成新值、動過的保留；疊完若已跟專案一致（例如剛存好）就整份換新。
+      const newBase = applicationSheetDraftOf(detail.project, disciplineList);
+      const oldBase = sheetBaseRef.current?.projectId === detail.project.id ? sheetBaseRef.current.base : null;
+      sheetBaseRef.current = { projectId: detail.project.id, base: newBase };
+      setSheetDraft((prev) => {
+        if (!prev || !oldBase) return newBase;
+        const rebased = rebaseApplicationSheetDraft(oldBase, newBase, prev);
+        const pending = applicationSheetPatch(detail.project, rebased, { disciplines: disciplineList, canFinance: detail.access.finance });
+        return Object.keys(pending).length === 0 ? newBase : rebased;
+      });
       setProject(detail.project);
       setAccess(detail.access);
       setMoney(detail.money);
@@ -295,6 +321,11 @@ export default function AdminProjectDetailPage() {
     }
   }
 
+  // 申請單未儲存的欄位數：離開頁面（連結、上一頁、關分頁）前提醒。
+  const sheetDirtyCount =
+    project && sheetDraft ? Object.keys(applicationSheetPatch(project, sheetDraft, { disciplines, canFinance })).length : 0;
+  useUnsavedChangesGuard(sheetDirtyCount > 0, unsavedChangesMessage(sheetDirtyCount));
+
   if (loading) return <Empty>載入中…</Empty>;
   if (!project) return <ErrorText>{error ?? "找不到專案"}</ErrorText>;
 
@@ -309,23 +340,23 @@ export default function AdminProjectDetailPage() {
       {/* 頁首動作：一律次要外框按鈕、大小一致，手機自動換行（DetailHeading 已 flex-wrap）。 */}
       <DetailHeading title={project.name} desc={headerDesc || undefined}>
         {canBonus && (
-          <Button variant="secondary" size="sm" onClick={() => router.push("/admin/bonus-runs")}>
+          <Link href="/admin/bonus-runs" className={buttonClass("secondary", "sm")}>
             追蹤獎金撥款
-          </Button>
+          </Link>
         )}
         {canFinance && (
-          <Button variant="secondary" size="sm" onClick={() => router.push(`/admin/disbursements/pivot?year=${project.fiscalYear ?? new Date().getFullYear()}&groupBy=project`)}>
+          <Link href={`/admin/disbursements/pivot?year=${project.fiscalYear ?? new Date().getFullYear()}&groupBy=project`} className={buttonClass("secondary", "sm")}>
             查看年度專案放款
-          </Button>
+          </Link>
         )}
         {canFinance && !project.reservedAt && (
           <Button variant="secondary" size="sm" onClick={() => setDupOpen(true)} data-testid="duplicate-project-button">
             複製為追加減／加做
           </Button>
         )}
-        <Button variant="secondary" size="sm" onClick={() => router.push(`/admin/projects/${project.id}/application`)}>
+        <Link href={`/admin/projects/${project.id}/application`} className={buttonClass("secondary", "sm")}>
           列印申請單
-        </Button>
+        </Link>
       </DetailHeading>
 
       {/* C2 複製對話框：成功後導到新案（同一個 page 元件換 id 重新 load） */}
@@ -340,7 +371,10 @@ export default function AdminProjectDetailPage() {
       />
 
       {/* ① 專案申請單（版面照公司 Word 申請單；格子內直接編輯，只送有變的欄位） */}
+      {sheetDraft && (
       <ApplicationSheet
+        draft={sheetDraft}
+        onDraftChange={setSheetDraft as Dispatch<SetStateAction<ApplicationSheetDraft>>}
         project={project}
         canFinance={canFinance}
         showProfit={access.profit !== false}
@@ -353,6 +387,7 @@ export default function AdminProjectDetailPage() {
         disciplines={disciplines}
         load={load}
       />
+      )}
 
       {/* ② 申請單上沒有、系統要的設定：母案／部門／負責人／年度／預定起迄日 */}
       <ProjectSettingsCard
@@ -475,6 +510,8 @@ export default function AdminProjectDetailPage() {
         bonusRatePct={project.bonusRatePct ?? null}
         setError={setError} load={load}
       />
+      {/* 未儲存提醒列是 fixed 在底部，留出空間免得蓋住最下面的成員分潤。 */}
+      {sheetDirtyCount > 0 && <div aria-hidden="true" className="h-16" />}
     </>
   );
 }
