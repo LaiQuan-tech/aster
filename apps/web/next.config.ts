@@ -23,6 +23,9 @@ const ADMIN_REDIRECTS = [
   { source: "/admin/onboarding", destination: "/admin/employees" },
   { source: "/admin/birthday-gifts", destination: "/admin/employees" },
   { source: "/admin/projects/overview", destination: "/admin/projects" },
+  { source: "/admin/projects/annual", destination: "/admin/projects" },
+  { source: "/admin/projects/alerts", destination: "/admin/projects" },
+  { source: "/admin/stamp-duty", destination: "/admin/projects" },
 ];
 
 const nextConfig: NextConfig = {

@@ -121,19 +121,15 @@ describe("bossSummaryScope／accountantTabAllowed（鏡像 web roleNavOf）", ()
       overtime: false,
       people: false,
       receivables: true,
-      projectAlerts: true,
       monthDisbursements: true,
     })
-    // finance 只開 projects → 未收款／示警／放款相關都不給
+    // finance 只開 projects → 未收款／放款相關都不給
     const onlyProjects = { roles: { accountant: { tabs: { finance: ["projects"] } } } }
     expect(bossSummaryScope("accountant", onlyProjects)).toMatchObject({
       receivables: false,
-      projectAlerts: false,
       disbursementApprovals: false,
       monthDisbursements: false,
     })
-    // 專案示警跟「報表」分頁走（示警頁是它的子分頁）
-    expect(bossSummaryScope("accountant", { roles: { accountant: { tabs: { finance: ["reports"] } } } }).projectAlerts).toBe(true)
   })
 
   it("features.roles.accountant 覆蓋：拿掉出勤分區、或 finance 只開 projects", () => {
@@ -230,7 +226,6 @@ describe("buildBossSummary：失敗降級", () => {
     draftSettlements: async () => ({ count: 1, amount: 10, missingAmount: 0, latestPeriod: "2026-09" }),
     headcount: async () => ({ active: 5, hires: 1, exits: 0 }),
     receivables: async () => ({ unreceivedTotal: 1000, overdueCount: 2 }),
-    projectAlerts: async () => ({ total: 5, high: 2 }),
     monthDisbursements: async () => ({ count: 4, amount: 300 }),
     bonusRunsPendingApproval: async () => 2,
     lateReportsPending: async () => 3,
@@ -241,16 +236,14 @@ describe("buildBossSummary：失敗降級", () => {
     const boom = async () => {
       throw new Error("db down")
     }
-    const r = await buildBossSummary(base, { ...ok, pendingLeave: boom, headcount: boom, sheetFacts: boom, projectAlerts: boom })
+    const r = await buildBossSummary(base, { ...ok, pendingLeave: boom, headcount: boom, sheetFacts: boom })
     expect(r.approvals).toEqual({ leave: null, disbursements: 3, disbursementAmount: 100, total: 3 })
     expect(r.people).toBeNull()
     expect(r.attendance).toBeNull()
     expect(r.overtime).toEqual({ overCapPeople: null, draftCount: 1, draftAmount: 10, draftMissingAmount: 0, latestDraftPeriod: "2026-09" })
     expect(r.receivables).toEqual({ unreceivedTotal: 1000, overdueCount: 2 })
-    expect(r.projectAlerts).toBeNull()
     expect(r.monthDisbursements).toBeNull() // HR 不查
     expect(r.scope.people).toBe(true) // 有權限、只是查詢失敗
-    expect(r.scope.projectAlerts).toBe(true)
   })
 
   it("全部失敗 → 合計也是 null（不假裝 0）", async () => {
@@ -267,15 +260,14 @@ describe("buildBossSummary：失敗降級", () => {
       Object.entries(ok).map(([k, fn]) => [k, async (ctx: unknown) => (called.push(k), (fn as (c: unknown) => unknown)(ctx))]),
     ) as BossSummaryLoaders
     await buildBossSummary({ ...base, role: "accountant" }, spy)
-    expect(called.sort()).toEqual(["monthDisbursements", "pendingDisbursements", "projectAlerts", "receivables", "sheetFacts"])
+    expect(called.sort()).toEqual(["monthDisbursements", "pendingDisbursements", "receivables", "sheetFacts"])
   })
 })
 
-// 未收款／專案示警走既有的 buildReceivables／currentAlerts（各自有測試）；這裡換成固定值，只驗組裝。
+// 未收款走既有的 buildReceivables（有自己的測試）；這裡換成固定值，只驗組裝。
 const STUB_HEAVY: BossSummaryLoaders = {
   ...defaultBossSummaryLoaders,
   receivables: async () => ({ unreceivedTotal: 0, overdueCount: 0 }),
-  projectAlerts: async () => ({ total: 0, high: 0 }),
 }
 
 describe("GET /dashboard/boss-summary（fake supabase）", () => {
@@ -308,7 +300,6 @@ describe("GET /dashboard/boss-summary（fake supabase）", () => {
     expect(r.overtime).toEqual({ overCapPeople: 0, draftCount: 2, draftAmount: 1200.5, draftMissingAmount: 1, latestDraftPeriod: "2026-09" })
     expect(r.people).toEqual({ active: 3, hires: 0, exits: 0 })
     expect(r.receivables).toEqual({ unreceivedTotal: 0, overdueCount: 0 })
-    expect(r.projectAlerts).toEqual({ total: 0, high: 0 })
     expect(r.monthDisbursements).toBeNull()
   })
 
@@ -319,7 +310,6 @@ describe("GET /dashboard/boss-summary（fake supabase）", () => {
     )
     expect(r.monthDisbursements).toEqual({ count: 2, amount: 999.5 })
     expect(r.receivables).toEqual({ unreceivedTotal: 0, overdueCount: 0 })
-    expect(r.projectAlerts).toEqual({ total: 0, high: 0 })
     expect(r.people).toBeNull()
   })
 
@@ -342,7 +332,6 @@ describe("GET /dashboard/boss-summary（fake supabase）", () => {
     expect(res.body.people).toBeNull()
     expect(res.body.overtime).toBeNull()
     expect(res.body.scope.receivables).toBe(true)
-    expect(res.body.scope.projectAlerts).toBe(true)
     expect(res.body.attendance).not.toBeNull()
     expect(fake.reads).not.toContain("overtime_settlements")
     expect(fake.reads).not.toContain("leave_requests")
@@ -393,7 +382,6 @@ describe("依身分分版：scope.isBoss／scope.groupFinancials／bossTodo（20
     draftSettlements: async () => null,
     headcount: async () => ({ active: 5, hires: 0, exits: 0 }),
     receivables: async () => ({ unreceivedTotal: 0, overdueCount: 0 }),
-    projectAlerts: async () => ({ total: 0, high: 0 }),
     monthDisbursements: async () => ({ count: 0, amount: 0 }),
     bonusRunsPendingApproval: async () => 2,
     lateReportsPending: async () => 3,

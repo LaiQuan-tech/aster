@@ -224,34 +224,6 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       groupFinancials: true,
     },
     {
-      key: "reports",
-      label: "報表",
-      href: "/admin/projects/annual",
-      children: [
-        {
-          key: "annual",
-          label: "年度總表",
-          href: "/admin/projects/annual",
-          title: "年度專案申請單總表",
-          desc: "一列一案，依開案月份分區塊小計，最後年度總計；科別欄依租戶設定的順序排列",
-        },
-        {
-          key: "stampDuty",
-          label: "印花稅",
-          href: "/admin/stamp-duty",
-          title: "印花稅計算與申報備查清單",
-          desc: "凡我方為承攬人或雙重身分（各自貼）且已簽訂的合約與追加減帳，自動納入本清單。報價單不是契據，不課印花稅。",
-        },
-        {
-          key: "alerts",
-          label: "專案示警",
-          href: "/admin/projects/alerts",
-          title: "AI 進度示警",
-          desc: "依規則掃描所有未封存專案；急／注意等級每天早上推進通知中心",
-        },
-      ],
-    },
-    {
       key: "groupOverview",
       label: "集團總覽",
       href: "/admin/group-overview",
@@ -676,6 +648,10 @@ export const ADMIN_REDIRECTS: readonly AdminRedirect[] = [
   { source: "/admin/birthday-gifts", destination: "/admin/employees" },
   // 2026-10-27 專案看板停用：舊網址導回專案列表。
   { source: "/admin/projects/overview", destination: "/admin/projects" },
+  // 2026-10-27 報表分頁（年度總表／印花稅／專案示警）停用：舊網址導回專案列表。
+  { source: "/admin/projects/annual", destination: "/admin/projects" },
+  { source: "/admin/projects/alerts", destination: "/admin/projects" },
+  { source: "/admin/stamp-duty", destination: "/admin/projects" },
 ];
 
 /* ------------------------------------------------------------- 路由表 --- */
@@ -818,7 +794,7 @@ export interface RoleNavConfig {
 export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
   sections: ["home", "finance", "attendance", "payroll", "people", "settings"],
   tabs: {
-    finance: ["projects", "receivables", "disbursements", "reports", "directory"],
+    finance: ["projects", "receivables", "disbursements", "directory"],
     attendance: ["sheets"],
     payroll: ["expenses", "advances"],
     people: ["employees"],

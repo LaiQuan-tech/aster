@@ -6,9 +6,6 @@ import {
   isStampDutyApplicable,
   resolveStampDutyRequired,
   computeStampDuty,
-  lookbackFrom,
-  summarizeStampDuty,
-  type StampDutyRow,
 } from "../services/stamp-duty"
 
 /**
@@ -92,27 +89,6 @@ describe("B1：雙重身分 both（印花稅各自貼）", () => {
     expect(bothResult).toBe(true)
   })
 
-  it("summarizeStampDuty：both 與 contractor 同金額算出同額稅額（稅額照 contractor 算）", () => {
-    function row(ourRole: string): StampDutyRow {
-      return {
-        doc_type: "contract",
-        our_role: ourRole,
-        stamp_duty_required: "auto",
-        amount: "1000000",
-        stamp_duty_rate: "0.001",
-        stamp_duty_amount: null,
-        stamp_duty_paid_on: null,
-        signed_on: "2024-01-01",
-      }
-    }
-    const contractorSummary = summarizeStampDuty([row("contractor")])
-    const bothSummary = summarizeStampDuty([row("both")])
-    expect(bothSummary.dutiableCount).toBe(contractorSummary.dutiableCount)
-    expect(bothSummary.dutiableTotal).toBe(contractorSummary.dutiableTotal)
-    expect(bothSummary.unpaidTotal).toBe(contractorSummary.unpaidTotal)
-    expect(bothSummary.dutiableTotal).toBe(1000)
-  })
-
   it("client 不比照 both／contractor——我方是定作人仍不課", () => {
     expect(resolveStampDutyRequired({ docType: "contract", ourRole: "client", flag: "auto" })).toBe(false)
   })
@@ -122,26 +98,6 @@ describe("B1：stampDutyRequired = 'no'（不用貼）", () => {
   it("no 蓋過 contractor／both 原本會課稅的判定", () => {
     expect(resolveStampDutyRequired({ docType: "contract", ourRole: "contractor", flag: "no" })).toBe(false)
     expect(resolveStampDutyRequired({ docType: "contract", ourRole: "both", flag: "no" })).toBe(false)
-  })
-
-  it("summarizeStampDuty：稅額不計入應貼花，也不進未貼花——完全跳過這列", () => {
-    const s = summarizeStampDuty([
-      {
-        doc_type: "contract",
-        our_role: "contractor",
-        stamp_duty_required: "no",
-        amount: "5000000",
-        stamp_duty_rate: "0.001",
-        stamp_duty_amount: null,
-        stamp_duty_paid_on: null,
-        signed_on: "2024-01-01",
-      },
-    ])
-    expect(s.dutiableCount).toBe(0)
-    expect(s.dutiableTotal).toBe(0)
-    expect(s.unpaidCount).toBe(0)
-    expect(s.unpaidTotal).toBe(0)
-    expect(s.missingAmountCount).toBe(0)
   })
 })
 
@@ -171,79 +127,5 @@ describe("computeStampDuty", () => {
 
   it("份數 0 或負數不合理，回 null", () => {
     expect(computeStampDuty({ amount: 1_000_000, rate: 0.001, copies: 0 })).toBeNull()
-  })
-})
-
-describe("lookbackFrom", () => {
-  it("往前 N 年", () => {
-    expect(lookbackFrom("2026-09-12", 7)).toBe("2019-09-12")
-    expect(lookbackFrom("2026-09-12", 5)).toBe("2021-09-12")
-  })
-
-  it("閏日夾到當月最後一天", () => {
-    expect(lookbackFrom("2028-02-29", 7)).toBe("2021-02-28")
-  })
-})
-
-describe("summarizeStampDuty", () => {
-  function row(over: Partial<StampDutyRow>): StampDutyRow {
-    return {
-      doc_type: "contract",
-      our_role: "contractor",
-      stamp_duty_required: "auto",
-      amount: "1000000",
-      stamp_duty_rate: "0.001",
-      stamp_duty_amount: "1000",
-      stamp_duty_paid_on: null,
-      signed_on: "2024-01-01",
-      ...over,
-    }
-  }
-
-  it("只算應貼花的，報價單與下包合約不進總額", () => {
-    const s = summarizeStampDuty([
-      row({}),
-      row({ doc_type: "quotation" }),
-      row({ our_role: "client" }),
-    ])
-    expect(s.dutiableCount).toBe(1)
-    expect(s.dutiableTotal).toBe(1000)
-  })
-
-  it("已貼與未貼分開計——未貼才是這份清單的用途", () => {
-    const s = summarizeStampDuty([
-      row({ stamp_duty_paid_on: "2024-02-01" }),
-      row({}),
-      row({ amount: "2000000", stamp_duty_amount: "2000" }),
-    ])
-    expect(s.paidCount).toBe(1)
-    expect(s.paidTotal).toBe(1000)
-    expect(s.unpaidCount).toBe(2)
-    expect(s.unpaidTotal).toBe(3000)
-  })
-
-  it("⚠️ 應貼花卻沒金額另外計數，不併進「未貼 0 元」", () => {
-    // 併進去會看起來像沒事，而那正是要被追的一筆。
-    const s = summarizeStampDuty([row({ amount: null, stamp_duty_amount: null })])
-    expect(s.missingAmountCount).toBe(1)
-    expect(s.unpaidCount).toBe(0)
-    expect(s.dutiableTotal).toBe(0)
-  })
-
-  it("沒有凍結稅額時當場依凍結費率補算", () => {
-    const s = summarizeStampDuty([row({ stamp_duty_amount: null, stamp_duty_rate: "0.002" })])
-    expect(s.dutiableTotal).toBe(2000)
-  })
-
-  it("空清單不爆", () => {
-    expect(summarizeStampDuty([])).toEqual({
-      dutiableCount: 0,
-      dutiableTotal: 0,
-      paidCount: 0,
-      paidTotal: 0,
-      unpaidCount: 0,
-      unpaidTotal: 0,
-      missingAmountCount: 0,
-    })
   })
 })

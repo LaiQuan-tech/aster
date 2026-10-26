@@ -105,15 +105,11 @@ describe("resolveAdminPath：最長前綴", () => {
     expect(resolveAdminPath("/admin/projects/receivables")).toMatchObject({ tab: "receivables", title: "未收款追蹤" });
   });
 
-  it("/admin/projects/annual → reports 分頁的 annual 子分頁；印花稅／示警也掛在 reports 下", () => {
-    expect(resolveAdminPath("/admin/projects/annual")).toMatchObject({
-      section: "finance",
-      tab: "reports",
-      sub: "annual",
-      title: "年度專案申請單總表",
-    });
-    expect(resolveAdminPath("/admin/stamp-duty")).toMatchObject({ tab: "reports", sub: "stampDuty" });
-    expect(resolveAdminPath("/admin/projects/alerts")).toMatchObject({ tab: "reports", sub: "alerts", title: "AI 進度示警" });
+  it("報表分頁（年度總表／印花稅／專案示警，2026-10-27 移除）：舊網址不再有自己的路由，落回專案列表", () => {
+    for (const path of ["/admin/projects/annual", "/admin/stamp-duty", "/admin/projects/alerts"]) {
+      expect(resolveAdminPath(path).route.prefix, path).not.toBe(path);
+    }
+    expect(ADMIN_TABS.finance.map((t) => t.key)).not.toContain("reports");
   });
 
   it("/admin/disbursements/pivot → disbursements 分頁 sub pivot；/admin/disbursements → sub list；/approvals → sub approvals（不是匯款單 detail）", () => {
@@ -356,14 +352,13 @@ describe("ADMIN_SECTIONS", () => {
 });
 
 describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
-  it("finance 8 個分頁 key 順序固定（獎金分潤緊接獎金季發放；集團總覽排在報表之後、名冊之前）", () => {
+  it("finance 7 個分頁 key 順序固定（獎金分潤緊接獎金季發放；集團總覽排在名冊之前）", () => {
     expect(ADMIN_TABS.finance.map((t) => t.key)).toEqual([
       "projects",
       "receivables",
       "disbursements",
       "bonus",
       "bonusSheet",
-      "reports",
       "groupOverview",
       "directory",
     ]);
@@ -442,7 +437,7 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
       expect.objectContaining({ key: "approvals", label: "待簽核", href: "/admin/disbursements/approvals" }),
       expect.objectContaining({ key: "pivot", label: "年度總覽", href: "/admin/disbursements/pivot" }),
     ]);
-    expect(subTabsFor("finance", "reports").map((s) => s.key)).toEqual(["annual", "stampDuty", "alerts"]);
+    expect(subTabsFor("finance", "reports")).toEqual([]);
     expect(subTabsFor("finance", "directory").map((s) => s.key)).toEqual(["clients", "vendors", "companies"]);
     expect(subTabsFor("announce", "knowledge").map((s) => s.key)).toEqual(["docs", "ask"]);
     expect(subTabsFor("finance", "projects")).toEqual([]);
@@ -471,7 +466,7 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
     expect(NAV.sections).toEqual(["home", "finance", "attendance", "payroll", "people", "settings"]);
     const finance = tabsForSection("finance", null, { roleNav: NAV }).map((t) => t.key);
     expect(finance).not.toContain("bonus");
-    expect(finance).toEqual(["projects", "receivables", "disbursements", "reports", "directory"]);
+    expect(finance).toEqual(["projects", "receivables", "disbursements", "directory"]);
     const payroll = tabsForSection("payroll", null, { roleNav: NAV }).map((t) => t.key);
     expect(payroll).toEqual(["expenses", "advances"]);
     for (const key of ["payroll", "payslips", "tax", "cash"]) expect(payroll).not.toContain(key);
@@ -515,7 +510,7 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
     // 自訂範圍只列分區、沒列 tabs → 「該區全部分頁」，但 hrOnly 的仍然剔除
     const custom = roleNavOf("accountant", { roles: { accountant: { sections: ["finance"] } } });
     const customFinance = tabsForSection("finance", null, { roleNav: custom }).map((t) => t.key);
-    expect(customFinance).toEqual(["projects", "receivables", "disbursements", "bonus", "reports", "directory"]);
+    expect(customFinance).toEqual(["projects", "receivables", "disbursements", "bonus", "directory"]);
     // 就算把它明列進 tabs 白名單也不行（hrOnly 優先）
     const listed = roleNavOf("accountant", { roles: { accountant: { sections: ["finance"], tabs: { finance: ["projects", "groupOverview"] } } } });
     expect(tabsForSection("finance", null, { roleNav: listed }).map((t) => t.key)).toEqual(["projects"]);
@@ -585,9 +580,6 @@ describe("isAdminPathAllowed：直開網址的角色守門（2026-09-23 驗收�
       "/admin/projects/abc-123",
       "/admin/projects/abc-123/application",
       "/admin/projects/receivables",
-      "/admin/projects/annual",
-      "/admin/projects/alerts",
-      "/admin/stamp-duty",
       "/admin/disbursements",
       "/admin/disbursements/approvals",
       "/admin/disbursements/pivot",
@@ -644,12 +636,11 @@ describe("isAdminPathAllowed：直開網址的角色守門（2026-09-23 驗收�
     expect(isAdminPathAllowed({ pathname: "/admin/shifts", roleNav: withSettings })).toBe(false);
   });
 
-  it("首頁老闆看板：會計看不到獎金／快照兩張（目標頁未開放），放款／未收款／年度總額看得到", () => {
+  it("首頁老闆看板：會計看不到獎金／快照兩張（目標頁未開放），放款／未收款看得到", () => {
     expect(allowed("/admin/bonus-runs")).toBe(false);
     expect(allowed("/admin/backups")).toBe(false);
     expect(allowed("/admin/disbursements")).toBe(true);
     expect(allowed("/admin/projects/receivables")).toBe(true);
-    expect(allowed("/admin/projects/annual")).toBe(true);
     for (const href of ["/admin/bonus-runs", "/admin/backups", "/admin/approvals", "/admin/company-info"]) {
       expect(isAdminPathAllowed({ pathname: href, roleNav: null }), href).toBe(true);
     }
@@ -737,13 +728,16 @@ describe("ADMIN_ROUTES", () => {
 });
 
 describe("ADMIN_REDIRECTS 與 next.config.ts", () => {
-  it("五條轉址：form-records → approvals?status=all、org-chart → departments、onboarding／birthday-gifts → employees、projects/overview → projects", () => {
+  it("八條轉址：form-records → approvals?status=all、org-chart → departments、onboarding／birthday-gifts → employees、projects/overview／annual／alerts、stamp-duty → projects", () => {
     expect(ADMIN_REDIRECTS).toEqual([
       { source: "/admin/form-records", destination: "/admin/approvals?status=all" },
       { source: "/admin/org-chart", destination: "/admin/departments" },
       { source: "/admin/onboarding", destination: "/admin/employees" },
       { source: "/admin/birthday-gifts", destination: "/admin/employees" },
       { source: "/admin/projects/overview", destination: "/admin/projects" },
+      { source: "/admin/projects/annual", destination: "/admin/projects" },
+      { source: "/admin/projects/alerts", destination: "/admin/projects" },
+      { source: "/admin/stamp-duty", destination: "/admin/projects" },
     ]);
     // 轉址目標都解析得到自己的路由
     for (const redirect of ADMIN_REDIRECTS) {
@@ -792,7 +786,7 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
     expect(finance).not.toContain("groupOverview");
     expect(finance).not.toContain("bonusSheet");
     expect(finance).toEqual(ADMIN_TABS.finance.filter((t) => t.key !== "groupOverview" && t.key !== "bonusSheet").map((t) => t.key));
-    expect(finance).toEqual(expect.arrayContaining(["projects", "receivables", "disbursements", "bonus", "reports", "directory"]));
+    expect(finance).toEqual(expect.arrayContaining(["projects", "receivables", "disbursements", "bonus", "directory"]));
     // 沒有 hrOnly 分頁的分區：跟 ADMIN_TABS 完全一樣
     for (const section of SECTION_KEYS) {
       const expected = ADMIN_TABS[section].filter((t) => !t.hrOnly).map((t) => t.key);
@@ -806,9 +800,9 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
 
   it("nextRoleTabs：勾／取消單一分頁——沒有 tabs 鍵（＝全部）先展開再加減，只算可勾選的分頁，照表順序", () => {
     const configurable = configurableTabsForRole("finance").map((t) => t.key);
-    // 原本沒有 tabs 鍵＝該區全部：取消 reports → 其餘全留，且不含 hrOnly 的 groupOverview
-    expect(nextRoleTabs("finance", undefined, "reports", false)).toEqual(configurable.filter((k) => k !== "reports"));
-    expect(nextRoleTabs("finance", undefined, "reports", false)).not.toContain("groupOverview");
+    // 原本沒有 tabs 鍵＝該區全部：取消 directory → 其餘全留，且不含 hrOnly 的 groupOverview
+    expect(nextRoleTabs("finance", undefined, "directory", false)).toEqual(configurable.filter((k) => k !== "directory"));
+    expect(nextRoleTabs("finance", undefined, "directory", false)).not.toContain("groupOverview");
     // 已有清單：再勾回來 → 照表順序插回去（不是接在最後）
     expect(nextRoleTabs("finance", ["projects", "bonus"], "receivables", true)).toEqual(["projects", "receivables", "bonus"]);
     // 取消清單裡的一個

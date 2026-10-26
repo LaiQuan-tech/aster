@@ -25,9 +25,8 @@ export interface BossScope {
   attendance: boolean;
   overtime: boolean;
   people: boolean;
-  /** 以下三欄 2026-10-25 簡化版首頁才有；舊 API 沒回（undefined）→ 前端當「有權限、值讀不到」顯示「—」。 */
+  /** 以下兩欄 2026-10-25 簡化版首頁才有；舊 API 沒回（undefined）→ 前端當「有權限、值讀不到」顯示「—」。 */
   receivables?: boolean;
-  projectAlerts?: boolean;
   monthDisbursements?: boolean;
   /**
    * 2026-10-26 依身分分版才有：可看集團財務（本年收入／毛利率）；false → 首頁不打 /group-overview、第 1 格改 HR 日常數字。
@@ -66,8 +65,6 @@ export interface BossSummary {
   people: { active: number; hires: number; exits: number } | null;
   /** 未收款總額＋逾期筆數（＝應收頁 summary）。舊 API 沒有此欄。 */
   receivables?: { unreceivedTotal: number; overdueCount: number } | null;
-  /** 專案示警件數（high＝高風險）。舊 API 沒有此欄。 */
-  projectAlerts?: { total: number; high: number } | null;
   /** 本月已匯款放款（會計首頁那格；HR 為 null）。舊 API 沒有此欄。 */
   monthDisbursements?: { count: number; amount: number } | null;
   /** 老闆專屬待辦（scope.isBoss 才有）；數字 null＝該子查詢失敗。舊 API 沒有此欄。 */

@@ -23,7 +23,6 @@ const SCHEDULER_IDS = [
   "deliver-pending-notifications",
   "detect-and-notify-attendance",
   "auto-archive-projects",
-  "project-alerts",
   "generate-attendance-sheets",
   "monthly-snapshot",
   "annual-leave-grant",
@@ -31,10 +30,10 @@ const SCHEDULER_IDS = [
 ];
 
 /**
- * 已停用的排程 id（2026-10-26 生日紅包功能移除）。Redis 裡可能還留著舊的 repeat 設定；
+ * 已停用的排程 id（2026-10-26 生日紅包、2026-10-27 專案示警功能移除）。Redis 裡可能還留著舊的 repeat 設定；
  * API 端點已不存在，且未知的 job 名稱會落到預設的每日結算端點，所以啟動時一律清掉。
  */
-const RETIRED_SCHEDULER_IDS = ["birthday-reminder"];
+const RETIRED_SCHEDULER_IDS = ["birthday-reminder", "project-alerts"];
 
 /** 月度快照是「一次呼叫做一段、帶游標續打」的分頁 API；這是續打次數上限（防迴圈跑不完）。 */
 const MONTHLY_SNAPSHOT_MAX_CALLS = 300;
@@ -114,13 +113,6 @@ async function registerSchedulers() {
     { pattern: "0 4 * * *", tz: "Asia/Taipei" },
     { name: "auto-archive-projects", data: {} },
   );
-  // 專案進度示警：逾期請款、到期未結案等，通知 lead 與 HR。排在自動封存之後，
-  // 剛被封存的案子就不會再被示警。
-  await attendanceQueue.upsertJobScheduler(
-    "project-alerts",
-    { pattern: "30 4 * * *", tz: "Asia/Taipei" },
-    { name: "project-alerts", data: {} },
-  );
   // 出勤月表（P1）：每月 1 日 05:00 台北，對所有租戶產生上個月的月表草稿
   // （含結算）。排在每日結算之後，月底最後一天的打卡已入 attendance_days。
   await attendanceQueue.upsertJobScheduler(
@@ -172,7 +164,6 @@ async function registerSchedulers() {
         "deliver-pending-notifications": "/internal/notifications/deliver-pending",
         "detect-and-notify-attendance": "/internal/attendance/detect-and-notify",
         "auto-archive-projects": "/internal/projects/auto-archive",
-        "project-alerts": "/internal/projects/alert-notify",
         "generate-attendance-sheets": "/internal/attendance-sheets/generate",
         "monthly-snapshot": "/internal/backups/monthly-snapshot",
         "annual-leave-grant": "/internal/leave/annual-grant",

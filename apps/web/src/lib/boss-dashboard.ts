@@ -71,7 +71,6 @@ export const bossLinks = {
   disbursementApprovals: "/admin/disbursements/approvals?scope=all",
   disbursements: "/admin/disbursements",
   receivables: "/admin/projects/receivables",
-  projectAlerts: "/admin/projects/alerts",
   attendanceSheets: "/admin/attendance-sheets",
   attendanceAnomalies: (period: string) => `/admin/attendance-sheets?period=${encodeURIComponent(period)}&anomaly=1`,
   /** 待發加班另計是「所有月份」的草稿合計 → 另計頁開「未付款＋所有月份」。 */
@@ -278,7 +277,7 @@ export function headlineTiles(input: {
 export type TodoIcon = "alert" | "approval" | "money" | "clock" | "project";
 
 export interface TodoItem {
-  key: "bonusRuns" | "lateReports" | "compliance" | "leave" | "disbursements" | "projectAlerts" | "overCap" | "overtimeDrafts" | "anomalies";
+  key: "bonusRuns" | "lateReports" | "compliance" | "leave" | "disbursements" | "overCap" | "overtimeDrafts" | "anomalies";
   icon: TodoIcon;
   text: string;
   /** 數字＋單位，例如「44 張」。 */
@@ -292,7 +291,7 @@ export const TODO_LIMIT = 6;
 
 /**
  * 「需要你處理」：只列數量 > 0、且這個角色／模組開得了目標頁的項目，先急後緩
- * （老闆專屬待辦 → 合規 → 簽核 → 示警 → 加班 → 出勤異常）。
+ * （老闆專屬待辦 → 合規 → 簽核 → 加班 → 出勤異常）。
  * 老闆專屬待辦只看 summary.bossTodo（後端 scope.isBoss 才給）：獎金批次待核准、遲到說明待決定；
  * 後台那頁開不了時改連 ESS 簽核頁（老闆在那裡也能核准／決定），所以一定列得出來。
  * boss-summary 404（舊 API）時只剩假單（pendingLeave）。
@@ -316,7 +315,6 @@ export function todoItems(input: { summary: SummaryLoad; pendingLeave: Load<numb
   const sheets = bossLinks.attendanceAnomalies(s.period);
   const att = s.attendance;
   const ot = s.overtime;
-  const alerts = s.projectAlerts ?? null;
   const boss = s.bossTodo ?? null;
 
   if (boss) {
@@ -335,14 +333,6 @@ export function todoItems(input: { summary: SummaryLoad; pendingLeave: Load<numb
     unit: "張",
     href: bossLinks.disbursementApprovals,
     tone: "attention",
-  });
-  push(bossLinks.projectAlerts, alerts?.total, {
-    key: "projectAlerts",
-    icon: "project",
-    text: alerts && alerts.high > 0 ? `專案示警（${fmtCount(alerts.high)} 件高風險）` : "專案示警",
-    unit: "件",
-    href: bossLinks.projectAlerts,
-    tone: alerts && alerts.high > 0 ? "danger" : "attention",
   });
   push(bossLinks.attendanceSheets, ot?.overCapPeople, { key: "overCap", icon: "clock", text: "加班超過月上限", unit: "人", href: sheets, tone: "attention" });
   push(bossLinks.overtimeDrafts, ot?.draftCount, {
@@ -373,7 +363,6 @@ export function todoDataIncomplete(input: { summary: SummaryLoad; pendingLeave: 
     (sc.disbursementApprovals && s.approvals.disbursements === null) ||
     (sc.attendance && s.attendance === null) ||
     (sc.overtime && (s.overtime === null || s.overtime.overCapPeople === null || s.overtime.draftCount === null)) ||
-    (sc.projectAlerts === true && (s.projectAlerts ?? null) === null) ||
     (sc.isBoss === true && (!s.bossTodo || s.bossTodo.bonusRunsPendingApproval === null || s.bossTodo.lateReportsPending === null))
   );
 }

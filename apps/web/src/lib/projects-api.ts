@@ -323,38 +323,6 @@ export interface Contract {
   dutiable: boolean
 }
 
-export interface StampDutySummary {
-  dutiableCount: number
-  dutiableTotal: number
-  paidCount: number
-  paidTotal: number
-  unpaidCount: number
-  unpaidTotal: number
-  /** 應貼花卻沒填金額，算不出稅額。不併進「未貼 0 元」。 */
-  missingAmountCount: number
-  /** 應貼花卻沒有簽訂日，不在期間查詢裡但最該被追。 */
-  missingSignedOn: number
-}
-
-export interface StampDutyItem {
-  id: string
-  projectId: string
-  projectName: string | null
-  projectCode: string | null
-  docType: DocType
-  ourRole: OurRole
-  title: string
-  counterparty: string | null
-  amount: number | null
-  signedOn: string | null
-  copies: number
-  dutiable: boolean
-  stampDutyRate: number | null
-  stampDutyAmount: number | null
-  stampDutyPaidOn: string | null
-  stampDutyNote: string | null
-}
-
 export function getContracts(projectId: string) {
   return apiFetch<{ contracts: Contract[] }>(`/projects/${projectId}/contracts`)
 }
@@ -494,24 +462,6 @@ export function unbillInstallment(id: string, reason: string) {
     method: "POST",
     body: JSON.stringify({ reason }),
   })
-}
-
-export function getStampDutyReport(params?: {
-  from?: string
-  to?: string
-  unpaidOnly?: boolean
-}) {
-  const q = new URLSearchParams()
-  if (params?.from) q.set("from", params.from)
-  if (params?.to) q.set("to", params.to)
-  if (params?.unpaidOnly) q.set("unpaidOnly", "1")
-  const qs = q.toString()
-  return apiFetch<{
-    range: { from: string; to: string; lookbackYears: number }
-    summary: StampDutySummary
-    items: StampDutyItem[]
-    disclaimer: string
-  }>(`/reports/stamp-duty${qs ? `?${qs}` : ""}`)
 }
 
 /* --------------------------------------------------------------- settings -- */
@@ -869,28 +819,4 @@ export function deleteProjectDocument(projectId: string, docId: string) {
   return apiFetch<{ id: string }>(`/projects/${projectId}/documents/${docId}`, {
     method: "DELETE",
   })
-}
-
-/* ------------------------------------------------- 專案進度示警 -- */
-
-export type AlertSeverity = "high" | "medium" | "low"
-export interface ProjectAlert {
-  key: string
-  rule: string
-  severity: AlertSeverity
-  projectId: string
-  projectName: string
-  projectCode: string | null
-  leadEmpId: string | null
-  message: string
-  dueOn?: string
-  amount?: number
-  installmentNo?: number
-  daysOverdue?: number
-}
-export function getProjectAlerts() {
-  return apiFetch<{ today: string; alerts: ProjectAlert[]; ruleLabels: Record<string, string>; aiAvailable: boolean }>("/projects/alerts")
-}
-export function getProjectAlertDigest() {
-  return apiFetch<{ digest: string; model: string | null; alerts: number }>("/projects/alerts/digest", { method: "POST" })
 }

@@ -5,7 +5,6 @@ import { isMissingTableError } from "../lib/schema-compat.js"
 import { addDaysKey, monthRangeKeys } from "../lib/tz.js"
 import { buildReceivables, loadP3Settings } from "./project-application-store.js"
 import { overdueDays, type OverdueBasis } from "./project-money.js"
-import { currentAlerts } from "./project-alert-store.js"
 import { isVoidedBeyondCapDraft } from "./overtime-void.js"
 import { lateReportLockedReason, loadLateReportLocks, type LateReportRow } from "./late-reports.js"
 
@@ -56,7 +55,6 @@ import { lateReportLockedReason, loadLateReportLocks, type LateReportRow } from 
  *     （與 /dashboard/headcount 同一套欄位：沒填到職日視為一直在職）。
  *   • 未收款：與 GET /projects/receivables（status=open、不篩 state）同一份 buildReceivables＋租戶逾期起算基準——
  *     unreceivedTotal＝未收金額合計、overdueCount＝overdueDays > 0 的期別數（＝應收頁的 summary）。
- *   • 專案示警：與 GET /projects/alerts 同一份 currentAlerts；total＝全部件數、high＝高風險件數。
  *   • 本月放款支出：disbursements status=paid、匯款日落在本月的 amount 合計與張數（＝GET /disbursements/summary 的 monthTotal）。
  */
 
@@ -74,7 +72,6 @@ export type BossScope = {
   overtime: boolean
   people: boolean
   receivables: boolean
-  projectAlerts: boolean
   monthDisbursements: boolean
   /** 可看集團財務（本年收入／毛利率）；false → 前端不打 /group-overview、第 1 格改 HR 日常數字。 */
   groupFinancials: boolean
@@ -140,7 +137,6 @@ export function bossSummaryScope(role: string | null | undefined, features: unkn
       overtime: true,
       people: true,
       receivables: true,
-      projectAlerts: true,
       monthDisbursements: false,
     }
   }
@@ -153,8 +149,6 @@ export function bossSummaryScope(role: string | null | undefined, features: unkn
       overtime: false,
       people: false,
       receivables: accountantTabAllowed(features, "finance", "receivables"),
-      // 專案示警頁是「報表」分頁底下的子分頁（web admin-nav ADMIN_TABS.finance reports.children）。
-      projectAlerts: accountantTabAllowed(features, "finance", "reports"),
       monthDisbursements: disbursementsTab,
     }
   }
@@ -165,7 +159,6 @@ export function bossSummaryScope(role: string | null | undefined, features: unkn
     overtime: false,
     people: false,
     receivables: false,
-    projectAlerts: false,
     monthDisbursements: false,
   }
 }
@@ -312,7 +305,6 @@ export function summarizeReceivables(rows: readonly ReceivableLite[]): Receivabl
   }
 }
 
-export type ProjectAlertFacts = { total: number; high: number }
 export type MonthDisbursementFacts = { count: number; amount: number }
 
 export type LateReportLite = { employeeId: string; decision?: string | null; lockedReason?: string | null }
@@ -455,11 +447,6 @@ async function loadReceivables(ctx: BossSummaryCtx): Promise<ReceivableFacts> {
   )
 }
 
-async function loadProjectAlerts(ctx: BossSummaryCtx): Promise<ProjectAlertFacts> {
-  const alerts = await currentAlerts(ctx.tenantId, ctx.today)
-  return { total: alerts.length, high: alerts.filter((a) => a.severity === "high").length }
-}
-
 async function loadMonthDisbursements(ctx: BossSummaryCtx): Promise<MonthDisbursementFacts> {
   const { from: monthFrom, to: monthTo } = monthRangeKeys(ctx.period)
   const rows = await selectAllPages<{ id: string; amount: unknown }>(
@@ -533,7 +520,6 @@ export type BossSummaryLoaders = {
   draftSettlements: (ctx: BossSummaryCtx) => Promise<DraftSettlementFacts | null>
   headcount: (ctx: BossSummaryCtx) => Promise<HeadcountFacts>
   receivables: (ctx: BossSummaryCtx) => Promise<ReceivableFacts>
-  projectAlerts: (ctx: BossSummaryCtx) => Promise<ProjectAlertFacts>
   monthDisbursements: (ctx: BossSummaryCtx) => Promise<MonthDisbursementFacts>
   bonusRunsPendingApproval: (ctx: BossSummaryCtx) => Promise<number>
   lateReportsPending: (ctx: BossSummaryCtx) => Promise<number>
@@ -546,7 +532,6 @@ export const defaultBossSummaryLoaders: BossSummaryLoaders = {
   draftSettlements: loadDraftSettlements,
   headcount: loadHeadcount,
   receivables: loadReceivables,
-  projectAlerts: loadProjectAlerts,
   monthDisbursements: loadMonthDisbursements,
   bonusRunsPendingApproval: loadBonusRunsPendingApproval,
   lateReportsPending: loadLateReportsPending,
@@ -585,8 +570,6 @@ export type BossSummary = {
   people: HeadcountFacts | null
   /** 未收款總額＋逾期筆數。 */
   receivables: ReceivableFacts | null
-  /** 專案示警件數（含高風險件數）。 */
-  projectAlerts: ProjectAlertFacts | null
   /** 本月已匯款的放款（會計首頁那格；HR 不查＝null）。 */
   monthDisbursements: MonthDisbursementFacts | null
   /** 老闆專屬待辦（scope.isBoss 才有，否則 null）；各數字查詢失敗 → 該數字 null。 */
@@ -632,14 +615,13 @@ export async function buildBossSummary(
   }
   const ctx: BossSummaryCtx = { tenantId: input.tenantId, period: input.period, today: input.today, features: input.features, bossEmpId }
 
-  const [leave, disb, sheets, drafts, people, receivables, alerts, monthDisb, bonusPending, latePending] = await Promise.all([
+  const [leave, disb, sheets, drafts, people, receivables, monthDisb, bonusPending, latePending] = await Promise.all([
     scope.leaveApprovals ? settle("pendingLeave", () => loaders.pendingLeave(ctx)) : skip,
     scope.disbursementApprovals ? settle("pendingDisbursements", () => loaders.pendingDisbursements(ctx)) : skip,
     scope.attendance || scope.overtime ? settle("sheetFacts", () => loaders.sheetFacts(ctx)) : skip,
     scope.overtime ? settle("draftSettlements", () => loaders.draftSettlements(ctx)) : skip,
     scope.people ? settle("headcount", () => loaders.headcount(ctx)) : skip,
     scope.receivables ? settle("receivables", () => loaders.receivables(ctx)) : skip,
-    scope.projectAlerts ? settle("projectAlerts", () => loaders.projectAlerts(ctx)) : skip,
     scope.monthDisbursements ? settle("monthDisbursements", () => loaders.monthDisbursements(ctx)) : skip,
     isBoss ? settle("bonusRunsPendingApproval", () => loaders.bonusRunsPendingApproval(ctx)) : skip,
     isBoss ? settle("lateReportsPending", () => loaders.lateReportsPending(ctx)) : skip,
@@ -671,7 +653,6 @@ export async function buildBossSummary(
       : null,
     people: scope.people ? people : null,
     receivables: scope.receivables ? receivables : null,
-    projectAlerts: scope.projectAlerts ? alerts : null,
     monthDisbursements: scope.monthDisbursements ? monthDisb : null,
     bossTodo: isBoss ? { bonusRunsPendingApproval: bonusPending, lateReportsPending: latePending } : null,
   }

@@ -3,14 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const apiDownload = vi.fn(async () => undefined);
 vi.mock("../api-client", () => ({ apiFetch: vi.fn(), apiDownload: (...args: unknown[]) => apiDownload(...(args as [])) }));
 
-import { downloadAnnualProjectsXlsx, downloadProjectRegisterXlsx } from "../projects-ext-api";
+import { downloadProjectRegisterXlsx } from "../projects-ext-api";
 import { isTextSelected } from "../project-register";
 
 function query(call: unknown[]): URLSearchParams {
   return new URLSearchParams(String(call[0]).split("?")[1]);
 }
 
-describe("兩種總表匯出分開", () => {
+describe("專案列表匯出", () => {
   beforeEach(() => apiDownload.mockClear());
 
   it("專案列表「下載 Excel」帶 layout=register（與原 Excel 一模一樣）", async () => {
@@ -28,11 +28,6 @@ describe("兩種總表匯出分開", () => {
     const q = query(apiDownload.mock.calls[0] as unknown[]);
     expect(q.has("year")).toBe(false);
     expect((apiDownload.mock.calls[0] as unknown[])[1]).toBe("專案申請單總表_今年度.xlsx");
-  });
-
-  it("年度總表頁「匯出 xlsx」不帶 layout（維持原本含系統欄的版面）", async () => {
-    await downloadAnnualProjectsXlsx({ year: 115 });
-    expect(query(apiDownload.mock.calls[0] as unknown[]).has("layout")).toBe(false);
   });
 });
 

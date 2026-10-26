@@ -1090,13 +1090,10 @@ describe("B 批次驗收修正：改角色重算期程／部分入帳可逾期�
     expect((openAgain.body.receivables as Array<Record<string, unknown>>).some((r) => r.billingId === billingId)).toBe(false)
   })
 
-  it("問題 6：印花稅報表的 missingSignedOn 不計 stamp_duty_required='no' 的合約；auto 的沒簽訂日才計", async () => {
-    const proj = await createProject({ name: "B 批次：缺簽訂日排除不用貼" })
+  it("問題 6：stamp_duty_required='no' 的合約不課印花稅；auto 的才課，且可切換", async () => {
+    const proj = await createProject({ name: "B 批次：不用貼" })
     expect(proj.status).toBe(201)
     const projId = proj.body.id as string
-    const before = await asAdmin(request(app).get("/reports/stamp-duty"))
-    expect(before.status).toBe(200)
-    const base = before.body.summary.missingSignedOn as number
 
     const no = await asAdmin(request(app).post(`/projects/${projId}/contracts`)).send({
       docType: "contract",
@@ -1106,8 +1103,6 @@ describe("B 批次驗收修正：改角色重算期程／部分入帳可逾期�
     })
     expect(no.status).toBe(201)
     expect(no.body.contract.dutiable).toBe(false)
-    const afterNo = await asAdmin(request(app).get("/reports/stamp-duty"))
-    expect(afterNo.body.summary.missingSignedOn).toBe(base)
 
     const auto = await asAdmin(request(app).post(`/projects/${projId}/contracts`)).send({
       docType: "contract",
@@ -1116,16 +1111,13 @@ describe("B 批次驗收修正：改角色重算期程／部分入帳可逾期�
     })
     expect(auto.status).toBe(201)
     expect(auto.body.contract.dutiable).toBe(true)
-    const afterAuto = await asAdmin(request(app).get("/reports/stamp-duty"))
-    expect(afterAuto.body.summary.missingSignedOn).toBe(base + 1)
 
-    // 把 auto 那張改成 no → 又從這格消失；改回 auto → 回來。
     const flip = await asAdmin(request(app).patch(`/contracts/${auto.body.contract.id}`)).send({ stampDutyRequired: "no" })
     expect(flip.status).toBe(200)
-    expect((await asAdmin(request(app).get("/reports/stamp-duty"))).body.summary.missingSignedOn).toBe(base)
+    expect(flip.body.contract.dutiable).toBe(false)
     const flipBack = await asAdmin(request(app).patch(`/contracts/${auto.body.contract.id}`)).send({ stampDutyRequired: "auto" })
     expect(flipBack.status).toBe(200)
-    expect((await asAdmin(request(app).get("/reports/stamp-duty"))).body.summary.missingSignedOn).toBe(base + 1)
+    expect(flipBack.body.contract.dutiable).toBe(true)
   })
 })
 

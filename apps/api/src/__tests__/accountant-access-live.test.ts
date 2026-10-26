@@ -148,7 +148,7 @@ describe("W4 會計可以用的：專案金流、名冊、人員基本資料", (
     expect(sched.status, JSON.stringify(sched.body)).toBe(200)
   })
 
-  it("GET /projects/annual → 200（年度總表是會計的報表分頁）", async () => {
+  it("GET /projects/annual → 200（專案列表下載 Excel 的資料來源，會計可讀）", async () => {
     const res = await as(acctToken, request(app).get(`/projects/annual?year=${new Date().getFullYear()}`))
     expect(res.status, JSON.stringify(res.body)).toBe(200)
   })

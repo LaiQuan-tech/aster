@@ -632,54 +632,13 @@ describe("M4-3 合約／報價單與印花稅", () => {
     expect(res.body.contract.stampDutyAmount).toBe(2000)
   })
 
-  it("清單只收應貼花的，並分出已貼／未貼", async () => {
+  it("標記已貼花", async () => {
     const res = await request(server)
-      .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31")
-      .set("Authorization", `Bearer ${adminToken}`)
-    expect(res.status).toBe(200)
-    // 報價單與下包合約不進應貼花件數。本 describe 到此建了 6 張：報價單（不課）、
-    // 承攬契據、下包合約（我方定作人，不課）、追加減、兩份的契據、2019 補登的舊約
-    // → 應貼花 4。原斷言寫 5 從一開始就對不上自己的 fixture（寫測試時沒有環境可跑）。
-    expect(res.body.summary.dutiableCount).toBe(4)
-    expect(res.body.summary.paidCount).toBe(0)
-    expect(res.body.summary.unpaidCount).toBe(4)
-    expect(res.body.disclaimer).toContain("試算")
-  })
-
-  it("標記已貼花後移到已貼那一側", async () => {
-    await request(server)
       .patch(`/contracts/${contractId}`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ stampDutyPaidOn: "2024-04-15" })
-
-    const res = await request(server)
-      .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31")
-      .set("Authorization", `Bearer ${adminToken}`)
-    expect(res.body.summary.paidCount).toBe(1)
-    expect(res.body.summary.unpaidCount).toBe(3)
-  })
-
-  it("unpaidOnly=1 只回未貼花的", async () => {
-    const res = await request(server)
-      .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31&unpaidOnly=1")
-      .set("Authorization", `Bearer ${adminToken}`)
-    expect(res.body.items.every((i: { stampDutyPaidOn: string | null }) => !i.stampDutyPaidOn)).toBe(true)
-  })
-
-  it("⚠️ 應貼花但缺簽訂日的另外計數——不在任何區間查詢裡", async () => {
-    await addContract({ docType: "contract", title: "還沒填簽訂日的約", amount: 1_000_000 })
-
-    const res = await request(server)
-      .get("/reports/stamp-duty?from=2019-01-01&to=2026-12-31")
-      .set("Authorization", `Bearer ${adminToken}`)
-    expect(res.body.summary.missingSignedOn).toBeGreaterThanOrEqual(1)
-  })
-
-  it("預設區間回溯 7 年，不是 5 年", async () => {
-    const res = await request(server)
-      .get("/reports/stamp-duty")
-      .set("Authorization", `Bearer ${adminToken}`)
-    expect(res.body.range.lookbackYears).toBe(7)
+    expect(res.status).toBe(200)
+    expect(res.body.contract.stampDutyPaidOn).toBe("2024-04-15")
   })
 
   it("作廢要理由，且是軟刪除", async () => {

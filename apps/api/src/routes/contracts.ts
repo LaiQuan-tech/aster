@@ -2,7 +2,6 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
 import { canSeeContractDocs, loadProjectScope } from "../services/project-scope.js"
@@ -14,11 +13,7 @@ import {
   DEFAULT_LOOKBACK_YEARS,
   computeStampDuty,
   resolveStampDutyRequired,
-  summarizeStampDuty,
-  lookbackFrom,
-  type StampDutyRow,
 } from "../services/stamp-duty.js"
-import { taipeiToday } from "../services/project-status.js"
 import { recomputeBillings } from "../services/billing-store.js"
 import { recomputeDraftRunsAfterWrite } from "../services/project-bonus-recompute.js"
 import {
@@ -567,112 +562,6 @@ contractsRouter.delete(
       await recomputeBillings(tenantId, current.project_id as string)
       await recomputeDraftRunsAfterWrite(tenantId, [current.project_id as string], "DELETE /contracts/:id")
       res.status(200).json({ id: req.params.id })
-    } catch (err) {
-      next(err)
-    }
-  },
-)
-
-// ── GET /reports/stamp-duty — 印花稅計算與申報備查清單 ────────────────
-const reportSchema = z.object({
-  from: z.string().regex(dateRe).optional(),
-  to: z.string().regex(dateRe).optional(),
-  /** 只看未貼花的。清單真正的用途。 */
-  unpaidOnly: z.enum(["0", "1"]).optional(),
-})
-
-contractsRouter.get(
-  "/reports/stamp-duty",
-  requireAuth,
-  requireTenant,
-  requireFinance,
-  async (req: Request, res: Response, next: NextFunction) => {
-    const tenantId = res.locals.tenantId as string
-    const parsed = reportSchema.safeParse(req.query)
-    if (!parsed.success) {
-      res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
-      return
-    }
-    try {
-      const defaults = await tenantStampDutyDefaults(tenantId)
-      const today = taipeiToday()
-      const from = parsed.data.from ?? lookbackFrom(today, defaults.lookbackYears)
-      const to = parsed.data.to ?? today
-
-      // 未簽訂日期的列不進清單：沒有簽訂日就不成立「書立憑證」的時點，
-      // 也就無從判斷落在哪個核課期間內。它們另外用 missingSignedOn 回報。
-      const { data, error } = await supabaseAdmin
-        .from("contracts")
-        .select(
-          "id, project_id, doc_type, our_role, title, counterparty, amount, signed_on, copies, stamp_duty_required, stamp_duty_rate, stamp_duty_amount, stamp_duty_paid_on, stamp_duty_note, projects(name, code)",
-        )
-        .eq("tenant_id", tenantId)
-        .is("deleted_at", null)
-        .gte("signed_on", from)
-        .lte("signed_on", to)
-        .order("signed_on", { ascending: false })
-      if (error) {
-        next(new Error(`GET /reports/stamp-duty: ${error.message}`))
-        return
-      }
-
-      const raw = (data ?? []) as unknown as Array<Record<string, unknown>>
-      const summary = summarizeStampDuty(raw as unknown as StampDutyRow[])
-
-      let items = raw.map((r) => {
-        const proj = r.projects as { name?: string; code?: string } | null
-        const dutiable = resolveStampDutyRequired({
-          docType: r.doc_type as string,
-          ourRole: r.our_role as string,
-          flag: r.stamp_duty_required as string,
-        })
-        return {
-          id: r.id as string,
-          projectId: r.project_id as string,
-          projectName: proj?.name ?? null,
-          projectCode: proj?.code ?? null,
-          docType: r.doc_type as string,
-          ourRole: r.our_role as string,
-          title: r.title as string,
-          counterparty: (r.counterparty as string | null) ?? null,
-          amount: num(r.amount as string | null),
-          signedOn: r.signed_on as string | null,
-          copies: Number(r.copies ?? 1),
-          dutiable,
-          stampDutyRate: num(r.stamp_duty_rate as string | null),
-          stampDutyAmount: num(r.stamp_duty_amount as string | null),
-          stampDutyPaidOn: (r.stamp_duty_paid_on as string | null) ?? null,
-          stampDutyNote: (r.stamp_duty_note as string | null) ?? null,
-        }
-      })
-      if (parsed.data.unpaidOnly === "1") {
-        items = items.filter((i) => i.dutiable && !i.stampDutyPaidOn)
-      }
-
-      // 應貼花卻沒有簽訂日的合約：它們不在期間查詢裡，但正是最該被追的。
-      // our_role 包含 both——雙重身分我方仍須貼，漏掉會讓這格靜默低估。
-      // stamp_duty_required='no'（人工判定免貼：§6 免稅憑證等）的不算——那份
-      // 本來就不用追簽訂日去算稅，列進來只會讓這格永遠清不掉（B 批次問題 6）。
-      // 'yes' 強制課稅但 doc_type 是報價單的，仍受下面 doc_type 篩選排除：報價單
-      // 沒有「書立」時點可追，跟清單本體（items）同一套 signed_on 前提。
-      const { count: missingSignedOn } = await supabaseAdmin
-        .from("contracts")
-        .select("id", { count: "exact", head: true })
-        .eq("tenant_id", tenantId)
-        .is("deleted_at", null)
-        .is("signed_on", null)
-        .neq("stamp_duty_required", "no")
-        .in("our_role", ["contractor", "both"])
-        .in("doc_type", ["contract", "change_order"])
-
-      res.status(200).json({
-        range: { from, to, lookbackYears: defaults.lookbackYears },
-        summary: { ...summary, missingSignedOn: missingSignedOn ?? 0 },
-        items,
-        // 系統不報稅：這是試算與清單，不是申報值。
-        disclaimer:
-          "本清單為系統試算，非申報值。承攬契據認定、單價契約金額、繕寫份數、彙總繳納與免稅憑證請會計師確認。",
-      })
     } catch (err) {
       next(err)
     }

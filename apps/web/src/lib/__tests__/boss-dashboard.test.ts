@@ -42,7 +42,6 @@ function hrSummary(extra: Partial<BossSummary> = {}): BossSummary {
       overtime: true,
       people: true,
       receivables: true,
-      projectAlerts: true,
       monthDisbursements: false,
     },
     approvals: { leave: 44, disbursements: 3, disbursementAmount: 123_456, total: 47 },
@@ -55,7 +54,6 @@ function hrSummary(extra: Partial<BossSummary> = {}): BossSummary {
     overtime: { overCapPeople: 1, draftCount: 2, draftAmount: 12_000, draftMissingAmount: 0, latestDraftPeriod: "2026-09" },
     people: { active: 38, hires: 2, exits: 1 },
     receivables: { unreceivedTotal: 2_500_000, overdueCount: 4 },
-    projectAlerts: { total: 5, high: 2 },
     monthDisbursements: null,
     ...extra,
   };
@@ -70,13 +68,11 @@ function accSummary(extra: Partial<BossSummary> = {}): BossSummary {
       overtime: false,
       people: false,
       receivables: true,
-      projectAlerts: true,
       monthDisbursements: true,
     },
     approvals: { leave: null, disbursements: 3, disbursementAmount: 50_000, total: 3 },
     overtime: null,
     people: null,
-    projectAlerts: { total: 1, high: 0 },
     monthDisbursements: { count: 6, amount: 880_000 },
     ...extra,
   });
@@ -210,7 +206,7 @@ describe("頂部大數字 headlineTiles", () => {
   });
 
   it("上一版 API（scope 沒有 receivables 欄、也沒有 receivables 值）→ 未收款格照畫、顯示「—」", () => {
-    const { receivables: _r, projectAlerts: _p, monthDisbursements: _m, ...scope } = hrSummary().scope;
+    const { receivables: _r, monthDisbursements: _m, ...scope } = hrSummary().scope;
     const old = hrSummary({ scope, receivables: undefined });
     const tile = headlineTiles({ viewer: "group", summary: s(old), overview: done(overview(1)), pendingLeave: NONE, linkOn: HR_LINK }).find(
       (t) => t.key === "receivables",
@@ -226,13 +222,11 @@ describe("需要你處理 todoItems", () => {
       ["compliance", "3 筆"],
       ["leave", "44 張"],
       ["disbursements", "3 張"],
-      ["projectAlerts", "5 件"],
       ["overCap", "1 人"],
       ["overtimeDrafts", "2 筆"],
       ["anomalies", "27 件"],
     ]);
     expect(items[0]).toMatchObject({ tone: "danger", href: bossLinks.attendanceAnomalies("2026-10") });
-    expect(items.find((i) => i.key === "projectAlerts")).toMatchObject({ text: "專案示警（2 件高風險）", tone: "danger" });
     expect(items.find((i) => i.key === "overtimeDrafts")).toMatchObject({ text: "加班另計待發放・NT$ 1.2 萬", href: bossLinks.overtimeDrafts });
     expect(items.find((i) => i.key === "disbursements")?.text).toBe("放款單待簽核・NT$ 12.3 萬");
   });
@@ -242,15 +236,13 @@ describe("需要你處理 todoItems", () => {
       approvals: { leave: 0, disbursements: 0, disbursementAmount: 0, total: 0 },
       attendance: { sheetCount: 3, anomalies: 0, anomalySheets: 0, compliance: { total: 0, sevenDayRule: 0, regularLeaveWork: 0, dailyOver12h: 0, monthlyOtOver46h: 0 } },
       overtime: { overCapPeople: 0, draftCount: 0, draftAmount: 0, draftMissingAmount: 0, latestDraftPeriod: null },
-      projectAlerts: { total: 0, high: 0 },
     });
     expect(todoItems({ summary: s(zero), pendingLeave: NONE, linkOn: HR_LINK })).toEqual([]);
   });
 
   it("會計：沒有假單／加班另計（scope 為 null）；開不了的頁不列", () => {
     const items = todoItems({ summary: s(accSummary()), pendingLeave: NONE, linkOn: ACC_LINK });
-    expect(items.map((i) => i.key)).toEqual(["compliance", "disbursements", "projectAlerts", "anomalies"]);
-    expect(items.find((i) => i.key === "projectAlerts")).toMatchObject({ text: "專案示警", count: "1 件", tone: "attention" });
+    expect(items.map((i) => i.key)).toEqual(["compliance", "disbursements", "anomalies"]);
     expect(todoItems({ summary: s(accSummary()), pendingLeave: NONE, linkOn: () => false })).toEqual([]);
   });
 
@@ -264,7 +256,6 @@ describe("需要你處理 todoItems", () => {
   it("todoDataIncomplete：有權限的清單欄位為 null 才算不完整（清單空時改顯示「部分資料讀不到」）", () => {
     expect(todoDataIncomplete({ summary: s(hrSummary()), pendingLeave: NONE })).toBe(false);
     expect(todoDataIncomplete({ summary: s(hrSummary({ attendance: null })), pendingLeave: NONE })).toBe(true);
-    expect(todoDataIncomplete({ summary: s(hrSummary({ projectAlerts: null })), pendingLeave: NONE })).toBe(true);
     expect(
       todoDataIncomplete({ summary: s(hrSummary({ overtime: { overCapPeople: 0, draftCount: null, draftAmount: null, draftMissingAmount: null, latestDraftPeriod: null } })), pendingLeave: NONE }),
     ).toBe(true);
@@ -324,7 +315,6 @@ describe("依身分分版（2026-10-26：老闆／一般 HR／會計／平台管
       ["compliance", "3 筆"],
       ["leave", "44 張"],
       ["disbursements", "3 張"],
-      ["projectAlerts", "5 件"],
       ["overCap", "1 人"],
       ["overtimeDrafts", "2 筆"],
       ["anomalies", "27 件"],
@@ -377,7 +367,6 @@ describe("依身分分版（2026-10-26：老闆／一般 HR／會計／平台管
     expect(todoItems({ summary: s(accountantSum), pendingLeave: NONE, linkOn: ACC_LINK }).map((i) => i.key)).toEqual([
       "compliance",
       "disbursements",
-      "projectAlerts",
       "anomalies",
     ]);
   });
