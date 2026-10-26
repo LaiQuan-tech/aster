@@ -325,6 +325,8 @@ export interface RosterPlan {
   /** Excel 值不合格（統編檢查碼錯、超長、重複統編…）沒寫的欄位。 */
   rejected: Array<{ table: "vendors" | "clients"; id: string; column: string; reason: string }>
   notes: { linesRemoved: number; linesKept: number; remarksAdded: number }
+  /** 這次寫入的統編與同租戶其他客戶相同（0078 起允許，只提示）。 */
+  taxShared: Array<{ table: "clients"; id: string; sharedWith: number }>
   /** 併名記錄（10/12 把兩家公司名用「/」併成一筆）拆開：改名為剩下那家的筆數（另一家走補建）。 */
   mergedRenames: Array<{ table: "vendors" | "clients"; id: string }>
 }
@@ -499,7 +501,7 @@ function buildVendor(plan: RosterPlan, db: DbVendorRow, row: ExcelRosterRow, edi
   return ctx.set
 }
 
-function buildClient(plan: RosterPlan, db: DbClientRow, row: ExcelRosterRow, edited: boolean, taxOwners: Map<string, string>, insertMarker?: string): Record<string, PlanValue> {
+function buildClient(plan: RosterPlan, db: DbClientRow, row: ExcelRosterRow, edited: boolean, taxOwners: Map<string, Set<string>>, insertMarker?: string): Record<string, PlanValue> {
   const { cells, skipped } = safeCells(plan, row)
   const ctx = newCtx(plan, "clients", db, row, edited, skipped, insertMarker)
   applyRules(ctx, CLIENT_RULES, cells)
@@ -508,12 +510,17 @@ function buildClient(plan: RosterPlan, db: DbClientRow, row: ExcelRosterRow, edi
     const raw = cells["統編"] ?? ""
     const tax = raw ? normalizeTaxId(raw) : null
     if (raw && (!tax || !isValidTaiwanTaxId(tax))) reject(ctx, "tax_id", "invalid_tax_id", "統編", raw)
-    else if (tax && taxOwners.has(`${db.tenant_id}:${tax}`) && taxOwners.get(`${db.tenant_id}:${tax}`) !== db.id)
-      reject(ctx, "tax_id", "tax_id_taken", "統編", raw)
     else {
+      // 0078 起同統編可對應多個客戶名稱（與 API 一致）：照寫，只記提示
+      const key = `${db.tenant_id}:${tax}`
+      const others = tax ? [...(taxOwners.get(key) ?? [])].filter((id) => id !== db.id) : []
       const before = ctx.set.tax_id
       propose(ctx, "tax_id", tax, "統編")
-      if (ctx.set.tax_id !== before && tax) taxOwners.set(`${db.tenant_id}:${tax}`, db.id)
+      const willHave = "tax_id" in ctx.set ? ctx.set.tax_id : db.tax_id
+      if (tax && willHave === tax) {
+        if (others.length > 0 && ctx.set.tax_id !== before) plan.taxShared.push({ table: "clients", id: db.id, sharedWith: others.length })
+        taxOwners.set(key, new Set([...(taxOwners.get(key) ?? []), db.id]))
+      }
     }
   }
   if (row.headers.includes("收款方式") && !skipped.has("收款方式")) {
@@ -568,13 +575,19 @@ export function planRosterMigration(
     skippedCredentialCells: 0, skippedLoginUrls: 0, editedAfterImport: [], conflicts: [], rejected: [],
     notes: { linesRemoved: 0, linesKept: 0, remarksAdded: 0 },
     mergedRenames: [],
+    taxShared: [],
   }
   const inTenant = (r: { tenant_id: string }) => !opts.tenantId || r.tenant_id === opts.tenantId
   const liveVendors = input.vendors.filter((v) => !v.deleted_at && inTenant(v))
   const liveClients = input.clients.filter((c) => !c.deleted_at && inTenant(c))
   const vendorById = new Map(liveVendors.map((v) => [v.id, v]))
   const clientById = new Map(liveClients.map((c) => [c.id, c]))
-  const taxOwners = new Map(liveClients.filter((c) => c.tax_id).map((c) => [`${c.tenant_id}:${c.tax_id}`, c.id]))
+  const taxOwners = new Map<string, Set<string>>()
+  for (const c of liveClients) {
+    if (!c.tax_id) continue
+    const key = `${c.tenant_id}:${c.tax_id}`
+    taxOwners.set(key, new Set([...(taxOwners.get(key) ?? []), c.id]))
+  }
 
   const cands: Candidate[] = [
     ...liveVendors.filter((v) => hasImportMarker(v.note)).map((v) => ({
@@ -706,6 +719,7 @@ export function summarizePlan(plan: RosterPlan) {
     rejected: countBy(plan.rejected, (r) => `${r.table}.${r.column}:${r.reason}`),
     notes: plan.notes,
     mergedRenames: countBy(plan.mergedRenames, (r) => r.table),
+    taxShared: plan.taxShared.length,
   }
 }
 

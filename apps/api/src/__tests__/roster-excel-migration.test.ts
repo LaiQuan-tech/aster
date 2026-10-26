@@ -164,7 +164,7 @@ describe("planRosterMigration — 比對與欄位", () => {
     expect(plan.unmatchedDb.map((d) => d.id).sort()).toEqual(["a", "b"])
   })
 
-  it("客戶：序／區域／編號／Mobil／公司地址；統編要過檢查碼且不重複，不合格維持現值", () => {
+  it("客戶：序／區域／編號／Mobil／公司地址；統編要過檢查碼（不合格維持現值）；同統編照寫只提示（0078）", () => {
     const c1 = client({ id: "c1", name: "測試設計有限公司", short_name: "測設", note: ["區域：測試市", MARK].join("\n") })
     const c2 = client({ id: "c2", name: "測試建設股份有限公司", tax_id: null })
     const other = client({ id: "c3", name: "人工客戶", note: null, tax_id: "12345675" })
@@ -177,11 +177,10 @@ describe("planRosterMigration — 比對與欄位", () => {
     })
     const byId = Object.fromEntries(plan.updates.map((u) => [u.id, u.set]))
     expect(byId.c1).toEqual({ seq: 2, region: "測試市", contact_phone: "0900-111-111", invoice_address: "測試市測試路 1 號", note: MARK })
-    expect(byId.c2).toEqual({ payment_method: "check" })
-    expect(plan.rejected).toEqual([
-      { table: "clients", id: "c1", column: "tax_id", reason: "invalid_tax_id" },
-      { table: "clients", id: "c2", column: "tax_id", reason: "tax_id_taken" },
-    ])
+    expect(byId.c2).toEqual({ tax_id: "12345675", payment_method: "check" })
+    expect(plan.rejected).toEqual([{ table: "clients", id: "c1", column: "tax_id", reason: "invalid_tax_id" }])
+    expect(plan.taxShared).toEqual([{ table: "clients", id: "c2", sharedWith: 1 }])
+    expect(summarizePlan(plan).taxShared).toBe(1)
   })
 
   it("摘要只有筆數與欄位名；SQL 計畫以 updated_at 做樂觀鎖、單引號跳脫", () => {
@@ -289,7 +288,9 @@ describe("租戶範圍與補建新版列", () => {
     expect(plan.updates.find((u) => u.id === "m1")?.set).toMatchObject({ name: "測試甲事務所", region: "測試市" })
     expect(plan.mergedRenames).toEqual([{ table: "clients", id: "m1" }])
     expect(plan.inserts.map((i) => i.values.name)).toEqual(["測試乙股份有限公司"])
-    expect(plan.inserts[0].values).not.toHaveProperty("tax_id")
+    // 0078 起同統編允許：補建的那家也填同一組統編（只提示）
+    expect(plan.inserts[0].values).toMatchObject({ tax_id: "12345675" })
+    expect(plan.taxShared).toHaveLength(1)
     const sql = planToSql(plan)
     expect(sql.indexOf("UPDATE public.clients")).toBeLessThan(sql.indexOf("INSERT INTO public.clients"))
     expect(summarizePlan(plan).mergedRenames).toEqual({ clients: 1 })

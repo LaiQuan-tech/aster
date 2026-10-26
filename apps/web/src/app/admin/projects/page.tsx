@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Card, Empty, ErrorText } from "@/components/admin-ui";
+import { Card, Empty, ErrorText, useToast } from "@/components/admin-ui";
 import { getDepartments, getEmployees, getMe, type Department, type Employee } from "@/lib/admin-api";
 import { listVendors, type Vendor } from "@/lib/company-api";
 import {
@@ -26,6 +26,7 @@ import {
   getP3SettingsLite,
   engineerDisciplinesOf,
   humanizeClientError,
+  clientSaveWarningText,
   humanizeProjectExtError,
   downloadProjectRegisterXlsx,
   type ProjectListItem,
@@ -47,6 +48,7 @@ import { ProjectApplicationForm } from "./_components/ProjectApplicationForm";
 import { createAndOpenProject } from "./_components/project-application-form";
 
 export default function AdminProjectsPage() {
+  const toast = useToast();
   const router = useRouter();
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
   // 總表的科別發包欄（Q 欄起；租戶設定順序，後端已依權限推好）。
@@ -165,6 +167,9 @@ export default function AdminProjectsPage() {
     try {
       const res = await createClient(body);
       setClients((cs) => [...cs, res.client]);
+      // 0078 起同統編允許多個客戶名稱：存檔成功仍提示與哪幾家同統編
+      const warning = clientSaveWarningText(res);
+      if (warning) toast.show(warning, "info");
       return res.client;
     } catch (err) {
       setError(humanizeClientError(err, "新增客戶失敗"));

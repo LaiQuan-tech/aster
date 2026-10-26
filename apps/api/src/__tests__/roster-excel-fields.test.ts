@@ -315,6 +315,19 @@ describe("客戶統編允許重複（migration 0078）：存檔照常、回應�
     expect(unique.body).not.toHaveProperty("warnings")
   })
 
+  it("存檔成功後查同統編失敗 → 不回 500，照常回存檔結果、只是不附提示", async () => {
+    fake.injectError({ table: "clients", action: "select", error: { code: "57014", message: "canceling statement due to statement timeout" } })
+    const created = await as(HR_TOKEN, request(app).post("/clients")).send({ name: "測試成甲室內設計", taxId: TAX })
+    expect(created.status).toBe(201)
+    expect(created.body.client.taxId).toBe(TAX)
+    expect(created.body).not.toHaveProperty("warnings")
+    fake.injectError({ table: "clients", action: "select", error: { code: "57014", message: "canceling statement due to statement timeout" } })
+    const patched = await as(HR_TOKEN, request(app).patch(`/clients/${CLIENT_A}`)).send({ taxId: TAX })
+    expect(patched.status).toBe(200)
+    expect(patched.body).not.toHaveProperty("warnings")
+    expect(writes("clients", "update")[0]?.payload).toMatchObject({ tax_id: TAX })
+  })
+
   it("0078 還沒套（DB 唯一索引仍在，撞 23505）→ 照舊 409 tax_id_taken", async () => {
     fake.injectError({ table: "clients", action: "insert", error: { code: "23505", message: "duplicate key value violates unique constraint \"clients_tenant_tax_id_uq\"" } })
     const res = await as(HR_TOKEN, request(app).post("/clients")).send({ name: "測試成甲室內設計", taxId: TAX })

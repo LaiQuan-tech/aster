@@ -11,6 +11,7 @@ import { INVOICE_TYPES, PAYMENT_METHODS } from "../services/project-money.js"
 import { CLIENT_COLS, serializeClient, type ClientRow } from "../services/project-application-store.js"
 import { CLIENT_CATEGORY_LIST_KEY, checkOptionPick, findOptionList } from "../services/option-lists.js"
 import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { logger } from "../lib/logger.js"
 
 export const clientsRouter = Router()
 
@@ -187,6 +188,15 @@ async function clientsSharingTaxId(tenantId: string, taxId: string | null | unde
   if (error) throw new Error(`clientsSharingTaxId: ${error.message}`)
   return ((data ?? []) as Array<{ id: string; name: string }>).map((r) => ({ id: r.id, name: r.name }))
 }
+/** 存檔已成功才查的提示：查詢失敗不影響存檔結果（記 warn、不附提示），不能回 500 讓前端以為沒存。 */
+async function sharedTaxIdHint(tenantId: string, taxId: string | null | undefined, selfId: string): Promise<Array<{ id: string; name: string }>> {
+  try {
+    return await clientsSharingTaxId(tenantId, taxId, selfId)
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err), tenantId, clientId: selfId }, "clients: 同統編提示查詢失敗，略過提示")
+    return []
+  }
+}
 const taxWarnings = (taxId: string | null | undefined, shared: Array<{ id: string; name: string }>) =>
   shared.length > 0 ? { warnings: [{ code: "tax_id_shared", taxId, clients: shared }] } : {}
 
@@ -261,7 +271,7 @@ clientsRouter.post("/clients", requireAuth, requireTenant, requireFinance, async
       return
     }
     const created = serializeClientExt(data as ClientRowExt)
-    const shared = await clientsSharingTaxId(tenantId, created.taxId, created.id)
+    const shared = await sharedTaxIdHint(tenantId, created.taxId, created.id)
     res.status(201).json({ client: created, ...taxWarnings(created.taxId, shared) })
   } catch (err) {
     next(err)
@@ -360,7 +370,7 @@ clientsRouter.patch("/clients/:id", requireAuth, requireTenant, requireFinance, 
     }
     const updated = serializeClientExt(data as ClientRowExt)
     // 只在這次有動統編時提示（改別的欄位不重複提醒）
-    const shared = parsed.data.taxId ? await clientsSharingTaxId(tenantId, updated.taxId, updated.id) : []
+    const shared = parsed.data.taxId ? await sharedTaxIdHint(tenantId, updated.taxId, updated.id) : []
     res.status(200).json({ client: updated, ...taxWarnings(updated.taxId, shared) })
   } catch (err) {
     next(err)
