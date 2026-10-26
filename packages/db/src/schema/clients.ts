@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, boolean, integer, timestamp, index, uniqueIndex,
+  pgTable, uuid, text, boolean, integer, timestamp, index,
 } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 import { tenants } from "./tenants"
@@ -10,10 +10,8 @@ import { tenants } from "./tenants"
  * `closingDay`／`paymentDay`），供新建專案時預填、也可在專案上個別覆寫
  * （見 `projects` 的同名欄位）。
  *
- * 統編非必填（有些業主是自然人或尚未取得統編就先建檔），故唯一性只在
- * 「有填統編、且未軟刪除」的列之間比對（partial unique index）——比照
- * `project_billings_no_uq` 的 partial index 理由：NULL 互不相等，兩筆都留白
- * 的列不該互相卡住。軟刪除（`deletedAt`）：客戶名冊是往來紀錄，不實體刪。
+ * 統編非必填（有些業主是自然人或尚未取得統編就先建檔）。2026-10-28（0078）起同一統編可對應多個客戶名稱
+ * （同公司不同對外名稱），原本的 partial unique index 改為一般 partial index，重複時 API 只提示不擋。軟刪除（`deletedAt`）：客戶名冊是往來紀錄，不實體刪。
  */
 export const clients = pgTable(
   "clients",
@@ -56,7 +54,8 @@ export const clients = pgTable(
   },
   (table) => ({
     tenantNameIdx: index("clients_tenant_name_idx").on(table.tenantId, table.name),
-    tenantTaxIdUnique: uniqueIndex("clients_tenant_tax_id_uq")
+    // 0078（2026-10-28）：同統編可對應多個客戶名稱，唯一索引改一般索引；API 改為存檔並回 warnings 提示。
+    tenantTaxIdIdx: index("clients_tenant_tax_id_idx")
       .on(table.tenantId, table.taxId)
       .where(sql`${table.taxId} is not null and ${table.deletedAt} is null`),
   }),

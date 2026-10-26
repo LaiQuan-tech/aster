@@ -1,9 +1,9 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Button, Card, Empty, ErrorText, Pill, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
+import { Button, Card, Empty, ErrorText, Pill, PrimaryButton, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import {
-  listClients, createClient, updateClient, deleteClient, humanizeClientError,
+  listClients, createClient, updateClient, deleteClient, humanizeClientError, clientSaveWarningText,
   INVOICE_TYPE_LABELS, PAYMENT_METHOD_LABELS,
   type Client, type InvoiceType, type PaymentMethod, type ClientCategory,
 } from "@/lib/projects-ext-api";
@@ -33,6 +33,7 @@ import { clientFormFrom, clientFormToInput, emptyClientForm, type ClientForm, ty
  * 分類仍可在上方篩選。刪除限 HR（API requireHrAdmin），會計看不到刪除鈕。
  */
 export default function ClientsPage() {
+  const toast = useToast();
   const categories = useOptionList("client_category");
   /** 分類 code → 名稱；清單載入中先顯示「…」，免得閃過原始代碼。 */
   const categoryText = (code: string) => (categories.loading ? "…" : optionLabel(categories.items, code));
@@ -96,8 +97,9 @@ export default function ClientsPage() {
     setError(null);
     try {
       const body = parsed.input;
-      if (editing === "new") await createClient(body);
-      else await updateClient(editing.id, body);
+      const res = editing === "new" ? await createClient(body) : await updateClient(editing.id, body);
+      const warning = clientSaveWarningText(res);
+      if (warning) toast.show(warning, "info");
       setEditing(null);
       await load();
     } catch (err) {

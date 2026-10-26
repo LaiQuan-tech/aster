@@ -287,3 +287,39 @@ describe("客戶名冊：Excel 新欄位讀寫", () => {
     expect(Object.keys(writes("clients", "update")[0]?.payload as object).sort()).toEqual(["phone", "updated_at"])
   })
 })
+
+describe("客戶統編允許重複（migration 0078）：存檔照常、回應附提示", () => {
+  const TAX = "12345675"
+  beforeEach(() => {
+    fake.db.clients.push({ id: "aaaaaaaa-0000-4000-8000-0000000000b1", tenant_id: TENANT_ID, name: "測試成甲企業股份有限公司", short_name: null, tax_id: TAX, is_affiliate: false, deleted_at: null })
+    fake.db.clients.push({ id: "aaaaaaaa-0000-4000-8000-0000000000b2", tenant_id: TENANT_ID, name: "已刪的同統編客戶", short_name: null, tax_id: TAX, is_affiliate: false, deleted_at: "2026-10-01T00:00:00Z" })
+  })
+
+  it("POST 同統編 → 201、統編照存，warnings 列出同統編的其他客戶（不含已軟刪）", async () => {
+    const res = await as(ACCOUNTANT_TOKEN, request(app).post("/clients")).send({ name: "測試成甲室內設計", taxId: TAX })
+    expect(res.status).toBe(201)
+    expect(res.body.client.taxId).toBe(TAX)
+    expect(writes("clients", "insert")[0]?.payload).toMatchObject({ tax_id: TAX })
+    expect(res.body.warnings).toEqual([{ code: "tax_id_shared", taxId: TAX, clients: [{ id: "aaaaaaaa-0000-4000-8000-0000000000b1", name: "測試成甲企業股份有限公司" }] }])
+  })
+
+  it("PATCH 改成同統編 → 200 帶提示；只改別的欄位不提示；統編不重複也不提示", async () => {
+    const res = await as(HR_TOKEN, request(app).patch(`/clients/${CLIENT_A}`)).send({ taxId: TAX })
+    expect(res.status).toBe(200)
+    expect(res.body.warnings?.[0]?.clients.map((c: { name: string }) => c.name)).toEqual(["測試成甲企業股份有限公司"])
+    const other = await as(HR_TOKEN, request(app).patch(`/clients/${CLIENT_A}`)).send({ region: "測試區" })
+    expect(other.status).toBe(200)
+    expect(other.body).not.toHaveProperty("warnings")
+    const unique = await as(HR_TOKEN, request(app).post("/clients")).send({ name: "測試獨立客戶", taxId: "04595257" })
+    expect(unique.status).toBe(201)
+    expect(unique.body).not.toHaveProperty("warnings")
+  })
+
+  it("0078 還沒套（DB 唯一索引仍在，撞 23505）→ 照舊 409 tax_id_taken", async () => {
+    fake.injectError({ table: "clients", action: "insert", error: { code: "23505", message: "duplicate key value violates unique constraint \"clients_tenant_tax_id_uq\"" } })
+    const res = await as(HR_TOKEN, request(app).post("/clients")).send({ name: "測試成甲室內設計", taxId: TAX })
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("tax_id_taken")
+  })
+})
+

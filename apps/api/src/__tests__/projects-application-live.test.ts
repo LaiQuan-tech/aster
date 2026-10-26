@@ -267,10 +267,11 @@ describe("P3-2 客戶名冊", () => {
     clientId = ok.body.client.id
   })
 
-  it("統編重複 → 409 tax_id_taken", async () => {
+  it("統編重複（0078 起允許同統編多名稱）→ 201，回應附 tax_id_shared 提示", async () => {
     const dup = await asAdmin(request(app).post("/clients")).send({ name: "另一家", taxId: TAX_ID_A })
-    expect(dup.status).toBe(409)
-    expect(dup.body.error).toBe("tax_id_taken")
+    expect(dup.status).toBe(201)
+    expect(dup.body.warnings?.[0]?.code).toBe("tax_id_shared")
+    expect(dup.body.warnings[0].clients.map((c: { id: string }) => c.id)).toContain(clientId)
   })
 
   it("非 HR 不能寫，但讀得到；?q= 搜尋", async () => {

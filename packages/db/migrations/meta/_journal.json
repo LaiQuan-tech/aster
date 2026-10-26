@@ -540,6 +540,13 @@
       "when": 1792700000000,
       "tag": "0076_roster_excel_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1792800000000,
+      "tag": "0078_client_tax_id_shared",
+      "breakpoints": true
     }
   ]
 }

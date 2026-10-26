@@ -4,7 +4,7 @@ import {
   clientCellText, countVendorsByKind, filterVendorsByKind, parseSeqInput, vendorCategoryLabel, vendorCellText, vendorRosterKind,
 } from "../roster-columns";
 import { clientFormFrom, clientFormToInput, emptyClientForm, emptyVendorForm, vendorFormFrom, vendorFormToInput } from "../roster-forms";
-import { PAYMENT_METHOD_LABELS, type Client } from "../projects-ext-api";
+import { PAYMENT_METHOD_LABELS, clientSaveWarningText, humanizeClientError, type Client } from "../projects-ext-api";
 import type { Vendor } from "../company-api";
 
 /**
@@ -131,3 +131,17 @@ describe("表單 ⇄ API", () => {
     expect(blank.ok && blank.input).toMatchObject({ name: "測試客戶乙", region: null, seq: null, paymentMethod: null });
   });
 });
+
+describe("客戶存檔提示（0078 同統編允許多名稱）", () => {
+  it("有同統編的其他客戶 → 中文提示列出名稱；沒有 → null", () => {
+    expect(clientSaveWarningText({ warnings: [{ code: "tax_id_shared", taxId: "12345675", clients: [{ id: "a", name: "測試甲" }, { id: "b", name: "測試乙" }] }] }))
+      .toBe("已儲存。統一編號 12345675 與「測試甲」「測試乙」相同，請確認是同一家公司的不同名稱。");
+    expect(clientSaveWarningText({})).toBeNull();
+    expect(clientSaveWarningText({ warnings: [] })).toBeNull();
+  });
+
+  it("還看到 409 tax_id_taken＝資料庫尚未套 0078", () => {
+    expect(humanizeClientError(new Error("[409] tax_id_taken"), "x")).toContain("尚未更新");
+  });
+});
+

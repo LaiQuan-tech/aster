@@ -79,11 +79,24 @@ export type ClientInput = Partial<Omit<Client, "id" | "createdAt" | "updatedAt">
 export function listClients(q?: string) {
   return apiFetch<{ clients: Client[] }>(`/clients${q ? `?q=${encodeURIComponent(q)}` : ""}`)
 }
+/** 存檔成功但值得提醒的事（0078 起同統編允許多個客戶名稱：回「統編與誰相同」）。 */
+export interface ClientSaveWarning {
+  code: "tax_id_shared"
+  taxId: string
+  clients: Array<{ id: string; name: string }>
+}
+export type ClientSaveResult = { client: Client; warnings?: ClientSaveWarning[] }
 export function createClient(body: ClientInput) {
-  return apiFetch<{ client: Client }>("/clients", { method: "POST", body: JSON.stringify(body) })
+  return apiFetch<ClientSaveResult>("/clients", { method: "POST", body: JSON.stringify(body) })
 }
 export function updateClient(id: string, body: Partial<ClientInput>) {
-  return apiFetch<{ client: Client }>(`/clients/${id}`, { method: "PATCH", body: JSON.stringify(body) })
+  return apiFetch<ClientSaveResult>(`/clients/${id}`, { method: "PATCH", body: JSON.stringify(body) })
+}
+/** 存檔提示的中文（沒有提示回 null）。 */
+export function clientSaveWarningText(res: Pick<ClientSaveResult, "warnings">): string | null {
+  const shared = res.warnings?.find((w) => w.code === "tax_id_shared")
+  if (!shared || shared.clients.length === 0) return null
+  return `已儲存。統一編號 ${shared.taxId} 與「${shared.clients.map((c) => c.name).join("」「")}」相同，請確認是同一家公司的不同名稱。`
 }
 export function deleteClient(id: string) {
   return apiFetch<{ id: string }>(`/clients/${id}`, { method: "DELETE" })
@@ -92,7 +105,8 @@ export function deleteClient(id: string) {
 /** 常見錯誤碼人性化——客戶名冊統編重複／檢查碼錯誤、分類已停用或不存在。 */
 export function humanizeClientError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : fallback
-  if (msg.includes("tax_id_taken")) return "統一編號已被其他客戶使用。"
+  // 0078 之後同統編允許重複（只提示不擋）；還會看到這個錯誤＝資料庫尚未套用 0078
+  if (msg.includes("tax_id_taken")) return "統一編號已被其他客戶使用（資料庫尚未更新為允許同統編多名稱）。"
   if (msg.includes("category_inactive")) return "這個分類已停用，請改選其他分類（或到「設定 → 選項清單」重新啟用）。"
   if (msg.includes("invalid_category")) return "找不到這個分類，可能已被刪除，請重新整理後再選。"
   return msg
@@ -663,6 +677,11 @@ export interface ProjectDetail extends Project {
    * （或看不到），新增成員時退回租戶的新專案起始值（ProjectSettings.defaultSharePctByRole）。
    */
   sharePctByRole?: Partial<Record<ProjectMemberRole, number>> | null
+  /**
+   * 申請單付款階段「技師公會代墊」列的「審迄還款」（2026-10-28，migration 0077）：自由文字。
+   * null＝沒填（或資料庫尚未套用 0077；舊後端沒有這個鍵）。
+   */
+  guildRepaymentNote?: string | null
 }
 
 /** 合約精簡版（年度總表／專案明細內嵌用），比完整 Contract 少幾欄。 */
@@ -755,6 +774,8 @@ export interface UpdateProjectExtBody {
   companyId?: string | null
   /** 本案各角色分潤趴數。只有老闆／platform_admin 可改（真的有變才算）；null＝本案不設定。 */
   sharePctByRole?: Partial<Record<ProjectMemberRole, number>> | null
+  /** 審迄還款（自由文字 ≤200 字；null／空字串＝清空）。0077 未套時後端回 409 migration_required。 */
+  guildRepaymentNote?: string | null
 }
 
 /** 編輯專案（含 P3 新欄位）。code 一樣不在參數裡——不可變更（後端回 409 code_immutable）。 */
@@ -788,7 +809,7 @@ export function humanizeProjectExtError(err: unknown, fallback: string): string 
   if (msg.includes("billing_percentage_total_exceeded")) return "一般期款百分比合計不可超過 100%。"
   if (msg.includes("negative_installment_amount")) return "期款設定會使末期金額小於 0，請降低前期百分比或指定金額。"
   if (msg.includes("invalid_billing_total")) return "期款有效金額合計與合約金額不一致。"
-  if (msg.includes("migration_required")) return "這個欄位需要先套用資料庫遷移才能儲存（各角色預設趴數 0050、本案各角色分潤趴數 0075）。"
+  if (msg.includes("migration_required")) return "這個欄位需要先套用資料庫遷移才能儲存（各角色預設趴數 0050、本案各角色分潤趴數 0075、審迄還款 0077）。"
   return msg
 }
 

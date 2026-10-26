@@ -82,8 +82,9 @@ const MIGRATION_REQUIRED = (columns: string[]) => ({ error: MIGRATION_REQUIRED_C
  * - 寫：HR 才能新增／修改／軟刪。業主的統編、開票地址與付款慣例會被
  *   合約與請款文件引用，改錯的代價比廠商名冊高，所以收窄到 HR。
  * - 統編：8 碼＋檢查碼**都要過**（與 vendors 只標記不擋不同——業主統編
- *   會印在發票上，發票統編錯了是要作廢重開的）。重複回 409 `tax_id_taken`
- *   （partial unique index `clients_tenant_tax_id_uq` 是最後防線）。
+ *   會印在發票上，發票統編錯了是要作廢重開的）。2026-10-28（migration 0078）起同一統編可對應多個客戶名稱
+ *   （同公司不同對外名稱）：重複照常存檔，回應附 `warnings: [{ code: "tax_id_shared", taxId, clients }]` 提示；
+ *   0078 還沒套時 DB 唯一索引仍在，撞到就照舊回 409 `tax_id_taken`。
  * - 軟刪：名冊是往來紀錄，不實體刪；已被專案引用的客戶刪了仍能 join 回名字。
  */
 
@@ -175,7 +176,21 @@ function rosterFieldsPresent(b: Partial<z.infer<typeof clientBody>>): string[] {
   }).map(([, col]) => col)
 }
 
-/** clients 唯一的 unique index 就是統編那個（partial），23505 一律視為統編重複。 */
+/**
+ * 同租戶、未軟刪、統編相同的其他客戶（排除自己）。用來在回應附「統編與誰相同」的提示——不擋存檔。
+ */
+async function clientsSharingTaxId(tenantId: string, taxId: string | null | undefined, selfId: string | null): Promise<Array<{ id: string; name: string }>> {
+  if (!taxId) return []
+  let query = supabaseAdmin.from("clients").select("id, name").eq("tenant_id", tenantId).eq("tax_id", taxId).is("deleted_at", null)
+  if (selfId) query = query.neq("id", selfId)
+  const { data, error } = await query
+  if (error) throw new Error(`clientsSharingTaxId: ${error.message}`)
+  return ((data ?? []) as Array<{ id: string; name: string }>).map((r) => ({ id: r.id, name: r.name }))
+}
+const taxWarnings = (taxId: string | null | undefined, shared: Array<{ id: string; name: string }>) =>
+  shared.length > 0 ? { warnings: [{ code: "tax_id_shared", taxId, clients: shared }] } : {}
+
+/** 0078 前 clients 唯一的 unique index 就是統編那個（partial），23505 一律視為統編重複。 */
 function isTaxIdConflict(err: { code?: string | null } | null): boolean {
   return err?.code === "23505"
 }
@@ -245,7 +260,9 @@ clientsRouter.post("/clients", requireAuth, requireTenant, requireFinance, async
       next(new Error(`POST /clients: ${error?.message}`))
       return
     }
-    res.status(201).json({ client: serializeClientExt(data as ClientRowExt) })
+    const created = serializeClientExt(data as ClientRowExt)
+    const shared = await clientsSharingTaxId(tenantId, created.taxId, created.id)
+    res.status(201).json({ client: created, ...taxWarnings(created.taxId, shared) })
   } catch (err) {
     next(err)
   }
@@ -341,7 +358,10 @@ clientsRouter.patch("/clients/:id", requireAuth, requireTenant, requireFinance, 
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(200).json({ client: serializeClientExt(data as ClientRowExt) })
+    const updated = serializeClientExt(data as ClientRowExt)
+    // 只在這次有動統編時提示（改別的欄位不重複提醒）
+    const shared = parsed.data.taxId ? await clientsSharingTaxId(tenantId, updated.taxId, updated.id) : []
+    res.status(200).json({ client: updated, ...taxWarnings(updated.taxId, shared) })
   } catch (err) {
     next(err)
   }
