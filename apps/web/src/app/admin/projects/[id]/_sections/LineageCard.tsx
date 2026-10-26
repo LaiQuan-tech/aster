@@ -17,6 +17,25 @@ import {
 } from "@/lib/projects-ext-api";
 import { fmtMoney } from "./shared";
 
+type UnpaidBonusInfo = {
+  unpaidCount: number;
+  unpaidTotal?: number;
+  unpaid?: Array<{ employeeId: string; name: string | null; estimatedAmount: number; paidAmount: number; unpaidAmount: number }>;
+  canForce: boolean;
+};
+
+/** 409 original_has_unpaid_bonus 的回應內容（api-client 把回應 body 掛在 err.body）。 */
+function unpaidBonusInfoOf(err: unknown): UnpaidBonusInfo | null {
+  const body = (err as { body?: unknown } | null)?.body as Record<string, unknown> | undefined;
+  if (!body || body.error !== "original_has_unpaid_bonus") return null;
+  return {
+    unpaidCount: Number(body.unpaidCount ?? 0),
+    unpaidTotal: typeof body.unpaidTotal === "number" ? body.unpaidTotal : undefined,
+    unpaid: Array.isArray(body.unpaid) ? (body.unpaid as UnpaidBonusInfo["unpaid"]) : undefined,
+    canForce: body.canForce === true,
+  };
+}
+
 /**
  * C2 變更歷史（同源案時間線）＋「複製為追加減／加做」對話框。
  *
@@ -145,15 +164,15 @@ export function DuplicateProjectDialog({ open, project, onClose, onDone }: Dupli
   const [copyMembers, setCopyMembers] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 驗收 #8：原案還有未發放獎金 → 後端 409 original_has_unpaid_bonus；老闆可選擇強制複製並封存。
+  const [unpaid, setUnpaid] = useState<UnpaidBonusInfo | null>(null);
 
   if (!open) return null;
 
   const amountNum = Number(amount.replace(/,/g, ""));
   const canSubmit = amount.trim() !== "" && Number.isFinite(amountNum) && amountNum >= 0 && reason.trim() !== "" && !saving;
 
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    if (!canSubmit) return;
+  async function send(force: boolean) {
     setSaving(true);
     setError(null);
     try {
@@ -163,13 +182,23 @@ export function DuplicateProjectDialog({ open, project, onClose, onDone }: Dupli
         reason: reason.trim(),
         archiveOriginal,
         copy: { engineers: copyEngineers, subcontracts: copySubcontracts, billings: copyBillings, members: copyMembers },
+        ...(force ? { force: true } : {}),
       });
+      setUnpaid(null);
       onDone(res);
     } catch (err) {
-      setError(humanizeDuplicateError(err, "複製失敗"));
+      const info = unpaidBonusInfoOf(err);
+      setUnpaid(info);
+      setError(info ? null : humanizeDuplicateError(err, "複製失敗"));
     } finally {
       setSaving(false);
     }
+  }
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!canSubmit) return;
+    await send(false);
   }
 
   return (
@@ -255,6 +284,29 @@ export function DuplicateProjectDialog({ open, project, onClose, onDone }: Dupli
           </div>
         </div>
 
+        {unpaid && (
+          <div role="alert" className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            <p className="font-medium">原案還有未發放的獎金{unpaid.unpaidTotal != null ? `（合計 ${fmtMoney(unpaid.unpaidTotal)} 元）` : `（${unpaid.unpaidCount} 位成員）`}</p>
+            <p className="mt-1 text-xs">請先發放原案獎金再複製並封存，或取消上方「將原案封存」。</p>
+            {unpaid.unpaid && unpaid.unpaid.length > 0 && (
+              <ul className="mt-2 space-y-0.5 text-xs">
+                {unpaid.unpaid.map((m) => (
+                  <li key={m.employeeId}>{m.name ?? m.employeeId}：應得 {fmtMoney(m.estimatedAmount)}、已發 {fmtMoney(m.paidAmount)}、未發 {fmtMoney(m.unpaidAmount)}</li>
+                ))}
+              </ul>
+            )}
+            {unpaid.canForce && (
+              <button
+                type="button"
+                className="mt-2 rounded-md border border-amber-400 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+                disabled={saving}
+                onClick={() => send(true)}
+              >
+                仍要強制複製並封存（老闆，會留稽核紀錄）
+              </button>
+            )}
+          </div>
+        )}
         <ErrorText>{error}</ErrorText>
 
         <div className="mt-5 flex flex-wrap items-center justify-end gap-3">

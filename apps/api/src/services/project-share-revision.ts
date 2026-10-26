@@ -4,7 +4,8 @@ import { supabaseAdmin } from "../lib/supabase.js"
 export const PROJECT_SHARE_ROLES = ["manager", "lead", "support", "member"] as const
 
 export const projectShareRevisionSchema = z.object({
-  bonusRatePct: z.number().min(0).max(100).nullable(),
+  /** 省略＝沿用目前比例（路由端補上）；null＝未設（舊制）。 */
+  bonusRatePct: z.number().min(0).max(100).nullable().optional(),
   members: z.array(z.object({
     memberId: z.string().uuid().optional(),
     employeeId: z.string().uuid(),
@@ -14,7 +15,9 @@ export const projectShareRevisionSchema = z.object({
   reason: z.string(),
 })
 
-export type ProjectShareRevisionInput = z.infer<typeof projectShareRevisionSchema>
+export type ProjectShareRevisionInput = Omit<z.infer<typeof projectShareRevisionSchema>, "bonusRatePct"> & {
+  bonusRatePct: number | null
+}
 export type PreparedProjectShareRevision = Omit<ProjectShareRevisionInput, "members"> & {
   members: Array<Omit<ProjectShareRevisionInput["members"][number], "memberId"> & { memberId: string | null }>
 }

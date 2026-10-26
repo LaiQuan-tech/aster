@@ -162,6 +162,12 @@ describe("shareRevisionChangesShares — 非老闆送來的版本是否動到分
     expect(shareRevisionChangesShares(10, [{ employeeId: E.member, sharePct: 0, shareAmount: null }], { bonusRatePct: 10, members: [] })).toBe(false)
   })
 
+  it("獎金比例 null 與 0 是不同設定（驗收 #7）", () => {
+    expect(shareRevisionChangesShares(null, [], { bonusRatePct: 0, members: [] })).toBe(true)
+    expect(shareRevisionChangesShares(0, [], { bonusRatePct: null, members: [] })).toBe(true)
+    expect(shareRevisionChangesShares(null, [], { bonusRatePct: null, members: [] })).toBe(false)
+  })
+
   it("改獎金比例、改既有成員趴數、新成員非 0 → 算", () => {
     expect(shareRevisionChangesShares(10, cur, { bonusRatePct: 12, members: [] })).toBe(true)
     expect(shareRevisionChangesShares(10, cur, { bonusRatePct: 10, members: [{ employeeId: E.manager, sharePct: 31 }] })).toBe(true)
@@ -199,6 +205,32 @@ describe("PUT /projects/:id/share-revision — 只有老闆可以改比例", () 
     expect(res.body.error).toBe("bonus_edit_boss_only")
     expect(rpcCount()).toBe(0)
     expect(recompute.calls).toHaveLength(0)
+  })
+
+  it("HR 把舊制專案的獎金比例 null 改成 0 → 403（null 與 0 不同）", async () => {
+    const res = await as(T.hr, request(app).put(`/projects/${LEGACY_PROJECT}/share-revision`)).send({
+      reason: "改毛利制", bonusRatePct: 0, members: [{ memberId: M3, employeeId: E.member, roleInProject: "member", sharePct: 10 }],
+    })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe("bonus_edit_boss_only")
+  })
+
+  it("HR 把獎金比例 0 改成 null → 403", async () => {
+    fake.db.projects.find((p: Row) => p.id === PROJECT)!.bonus_rate_pct = "0"
+    const res = await putRevision(T.hr, { bonusRatePct: null })
+    expect(res.status).toBe(403)
+  })
+
+  it("經理只維護名單、不送 bonusRatePct（他看不到比例）→ 200，沿用目前比例", async () => {
+    const res = await as(T.manager, request(app).put(`/projects/${PROJECT}/share-revision`)).send({
+      reason: "換角色", members: [
+        { memberId: M1, employeeId: E.manager, roleInProject: "manager", sharePct: 30 },
+        { memberId: M2, employeeId: E.member, roleInProject: "support", sharePct: 20 },
+      ],
+    })
+    expect(res.status).toBe(200)
+    const call = fake.rpcCalls.find((c) => c.name === "apply_project_share_revision")
+    expect(call?.args.p_bonus_rate_pct).toBe(10)
   })
 
   it("HR 改獎金比例 → 403", async () => {
@@ -410,12 +442,35 @@ describe("#1 金額走估算服務", () => {
     ["經理（成員角色 manager）", T.manager],
     ["專案負責人（lead_emp_id）", T.lead],
     ["部門主管", T.deptManager],
-  ])("GET /projects/:id/members（%s）：看得到趴數與每人金額，但沒有毛利／獎金池", async (_label, token) => {
+  ])("GET /projects/:id/members（%s）：別人只看得到角色與趴數；沒有毛利／獎金池／獎金比例", async (_label, token) => {
     const res = await as(token, request(app).get(`/projects/${PROJECT}/members`))
     expect(res.status).toBe(200)
-    expect(res.body).toMatchObject({ canSeeBonus: true, canSeeProfit: false, bonusPool: null, bonusEstimate: null })
-    const byEmp = Object.fromEntries((res.body.members as Row[]).map((m) => [m.employeeId, m]))
-    expect(byEmp[E.manager]).toMatchObject({ sharePct: 30, estimatedAmount: 24000, paidAmount: 10000, pendingAmount: 14000 })
+    expect(res.body).toMatchObject({ canSeeBonus: true, canSeeProfit: false, bonusPool: null, bonusEstimate: null, bonusRatePct: null })
+    const self = fake.db.employees.find((e: Row) => e.user_id === token)!.id as string
+    for (const m of res.body.members as Row[]) {
+      if (m.employeeId === self) continue
+      expect(m).toHaveProperty("sharePct")
+      expect(m).toHaveProperty("roleInProject")
+      for (const k of ["computedAmount", "estimatedAmount", "paidAmount", "pendingAmount", "shareAmount"]) expect(m).not.toHaveProperty(k)
+    }
+  })
+
+  it("GET /projects/:id/members（經理本人）：自己那列有預估應得／已發／待發", async () => {
+    const res = await as(T.manager, request(app).get(`/projects/${PROJECT}/members`))
+    const mine = (res.body.members as Row[]).find((m) => m.employeeId === E.manager)
+    expect(mine).toMatchObject({ sharePct: 30, estimatedAmount: 24000, paidAmount: 10000, pendingAmount: 14000 })
+    const other = (res.body.members as Row[]).find((m) => m.employeeId === E.member)
+    expect(other).toEqual(expect.objectContaining({ sharePct: 20 }))
+    expect(other).not.toHaveProperty("estimatedAmount")
+  })
+
+  it("GET /projects/:id/members（老闆／HR）：看全部成員金額與獎金比例", async () => {
+    for (const token of [T.boss, T.hr]) {
+      const res = await as(token, request(app).get(`/projects/${PROJECT}/members`))
+      expect(res.body.bonusRatePct).toBe(10)
+      const other = (res.body.members as Row[]).find((m) => m.employeeId === E.member)
+      expect(other).toMatchObject({ estimatedAmount: 16000, paidAmount: 20000 })
+    }
   })
 
   it("GET /projects/:id/members（會計）：沒有金額、不打估算", async () => {

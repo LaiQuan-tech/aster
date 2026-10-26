@@ -1078,6 +1078,8 @@ export interface DuplicateProjectBody {
   /** 預設 true；demo／要保留舊案時帶 false。 */
   archiveOriginal?: boolean
   copy?: DuplicateCopyOptions
+  /** 原案還有未發放獎金時強制複製並封存（只有老闆可以）。 */
+  force?: boolean
 }
 
 export interface DuplicateProjectResponse {
@@ -1129,6 +1131,8 @@ export function getProjectLineage(id: string) {
 
 export function humanizeDuplicateError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : fallback
+  if (msg.includes("original_has_unpaid_bonus")) return "原案還有未發放的獎金，請先發放原案獎金再複製並封存，或改為不封存原案。"
+  if (msg.includes("bonus_edit_boss_only") || msg.includes("boss_not_configured")) return humanizeBonusEditError(msg)
   if (msg.includes("reserved_project")) return "這是還沒有內容的空案，無法複製。"
   if (msg.includes("root_code_missing")) return "根案沒有編號，無法產生複製案編號。"
   if (msg.includes("code_generation_failed")) return "編號產生失敗（併發撞號），請再試一次。"

@@ -655,7 +655,8 @@ export function getProjectAdjustments(projectId: string) {
 /** 一次儲存獎金比例與完整成員分配，後端在同一交易內寫入一組歷程。 */
 export function saveProjectShareRevision(
   projectId: string,
-  body: { bonusRatePct: number | null; members: ProjectShareRevisionMemberInput[]; reason: string },
+  /** bonusRatePct 省略＝沿用目前比例（看不到比例的經理／主辦只維護名單時不送）。 */
+  body: { bonusRatePct?: number | null; members: ProjectShareRevisionMemberInput[]; reason: string },
 ) {
   return apiFetch<ProjectShareRevisionResponse>(`/projects/${projectId}/share-revision`, {
     method: "PUT",

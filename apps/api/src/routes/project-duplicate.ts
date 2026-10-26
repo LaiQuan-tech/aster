@@ -6,6 +6,9 @@ import { todayKey } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { loadProjectScope, resolveBonusEditAccess } from "../services/project-scope.js"
 import { recomputeDraftRunsAfterWrite } from "../services/project-bonus-recompute.js"
+import { estimateProjectBonus } from "../services/bonus-estimate.js"
+import { isHrRole } from "../middleware/scope.js"
+import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
 import {
   duplicateProject,
@@ -45,7 +48,54 @@ const duplicateSchema = z.object({
   /** 預設封存原案；demo／保留舊案時帶 false。 */
   archiveOriginal: z.boolean().optional(),
   copy: copySchema.optional(),
+  /** 原案還有未發放的獎金時仍要複製並封存——只有老闆（或 platform_admin）可以帶，會寫稽核。 */
+  force: z.boolean().optional(),
 })
+
+export type UnpaidBonusMember = {
+  employeeId: string
+  name: string | null
+  estimatedAmount: number
+  paidAmount: number
+  unpaidAmount: number
+}
+
+/**
+ * 驗收 #8（2026-10-26）：原案「累計應得 > 已發」的成員（估算服務判斷）。原案一封存，封存規則可能
+ * 讓它不再進批次，這筆錢就發不出去——所以複製並封存前要先擋下。
+ * 估算失敗回 null（不擋：複製是日常作業，估算服務壞掉不該讓人開不了追加減案），只記 log。
+ */
+export async function unpaidBonusOf(
+  tenantId: string,
+  projectId: string,
+): Promise<{ total: number; members: UnpaidBonusMember[] } | null> {
+  let est
+  try {
+    est = (await estimateProjectBonus(tenantId, [projectId]))[0]
+  } catch (err) {
+    console.warn(`[duplicate] 估算原案 ${projectId} 未發獎金失敗，略過檢查`, err)
+    return null
+  }
+  if (!est) return { total: 0, members: [] }
+  const owed = est.members
+    .map((m) => ({ ...m, unpaidAmount: Math.max(0, Math.round(m.estimatedAmount - m.paidAmount)) }))
+    .filter((m) => m.unpaidAmount > 0)
+  if (owed.length === 0) return { total: 0, members: [] }
+  const { data: emps } = await supabaseAdmin
+    .from("employees")
+    .select("id, name")
+    .eq("tenant_id", tenantId)
+    .in("id", owed.map((m) => m.employeeId))
+  const nameOf = new Map((emps ?? []).map((e) => [e.id as string, (e.name as string | null) ?? null]))
+  const members = owed.map((m) => ({
+    employeeId: m.employeeId,
+    name: nameOf.get(m.employeeId) ?? null,
+    estimatedAmount: m.estimatedAmount,
+    paidAmount: m.paidAmount,
+    unpaidAmount: m.unpaidAmount,
+  }))
+  return { total: members.reduce((sum, m) => sum + m.unpaidAmount, 0), members }
+}
 
 // ── POST /projects/:id/duplicate ─────────────────────────────────────
 projectDuplicateRouter.post(
@@ -80,6 +130,32 @@ projectDuplicateRouter.post(
       // `warnings` 保留在回應裡（型別不變，前端不必改），只是現在永遠是空陣列。
       const archiveOriginal = b.archiveOriginal ?? true
       const warnings: string[] = []
+      const bonusEdit = await resolveBonusEditAccess(tenantId, scope.self)
+
+      // 驗收 #8：原案還有「累計應得 > 已發」→ 封存前擋下（409），提示先發放原案獎金；老闆可 force。
+      let forcedUnpaid: { total: number; members: UnpaidBonusMember[] } | null = null
+      if (archiveOriginal) {
+        const unpaid = await unpaidBonusOf(tenantId, scope.project.id)
+        if (unpaid && unpaid.total > 0) {
+          if (!b.force) {
+            // 金額明細是分潤資料：只給老闆與 HR；其他 finance 使用者（會計、負責人）只看到有幾位未發。
+            const canSeeAmounts = bonusEdit.canEdit || isHrRole(scope.self.role)
+            res.status(409).json({
+              error: "original_has_unpaid_bonus",
+              hint: "原案還有未發放的獎金，請先發放原案獎金再複製並封存；或改為不封存原案。",
+              unpaidCount: unpaid.members.length,
+              ...(canSeeAmounts ? { unpaidTotal: unpaid.total, unpaid: unpaid.members } : {}),
+              canForce: bonusEdit.canEdit,
+            })
+            return
+          }
+          if (bonusEdit.denial) {
+            res.status(bonusEdit.denial.status).json({ error: bonusEdit.denial.error })
+            return
+          }
+          forcedUnpaid = unpaid
+        }
+      }
       const result = await duplicateProject({
         tenantId,
         sourceProjectId: scope.project.id,
@@ -91,7 +167,7 @@ projectDuplicateRouter.post(
         copy: { ...DEFAULT_COPY_OPTIONS, ...(b.copy ?? {}) },
         openedOn: todayKey(tz),
         // 分潤改版 #6：只有老闆（或 platform_admin）複製時才照抄成員趴數，其他人複製 → 趴數 0。
-        copyMemberSharePct: (await resolveBonusEditAccess(tenantId, scope.self)).canEdit,
+        copyMemberSharePct: bonusEdit.canEdit,
       })
       if (!result.ok) {
         res.status(result.status).json({ error: result.error })
@@ -114,6 +190,24 @@ projectDuplicateRouter.post(
           },
           actorEmpId: scope.self.id,
           context: "POST /projects/:id/duplicate (archive original)",
+        })
+      }
+      if (forcedUnpaid) {
+        await writeAuditLog({
+          tenantId,
+          tableName: "projects",
+          recordId: scope.project.id,
+          action: "UPDATE",
+          newRow: {
+            forced_duplicate_with_unpaid_bonus: true,
+            new_project_id: result.project.id,
+            new_project_code: result.project.code,
+            unpaid_total: forcedUnpaid.total,
+            unpaid: forcedUnpaid.members.map((m) => ({ employee_id: m.employeeId, unpaid_amount: m.unpaidAmount })),
+            reason: b.reason,
+          },
+          actorEmpId: scope.self.id,
+          context: "POST /projects/:id/duplicate (force: original has unpaid bonus)",
         })
       }
       // 分潤改版 #3：追加減／加做成立 → 新案與原案（及其母案）的草稿獎金批次重算。

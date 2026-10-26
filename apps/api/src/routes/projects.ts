@@ -544,6 +544,17 @@ function isZeroish(v: number | null | undefined): boolean {
   return v === null || v === undefined || Math.abs(v) < 1e-9
 }
 
+/**
+ * 獎金比例是否相同：null（未設＝舊制）與 0（毛利制、比例 0）是**不同**的設定（驗收 #7），
+ * 非老闆把 null 改 0 或 0 改 null 都算改分潤。
+ */
+function sameRate(a: number | null | undefined, b: number | null | undefined): boolean {
+  const an = a ?? null
+  const bn = b ?? null
+  if (an === null || bn === null) return an === bn
+  return Math.abs(an - bn) < 1e-9
+}
+
 /** 兩個分潤值是否相同（null 與 0 視為相同，避免編輯器把 null 正規化成 0 被誤判成改分潤）。 */
 function sameShare(a: number | null | undefined, b: number | null | undefined): boolean {
   if (isZeroish(a) && isZeroish(b)) return true
@@ -560,7 +571,7 @@ export function shareRevisionChangesShares(
   currentMembers: Array<{ employeeId: string; sharePct: number | null; shareAmount?: number | null }>,
   revision: { bonusRatePct: number | null; members: Array<{ employeeId: string; sharePct: number | null }> },
 ): boolean {
-  if (!sameShare(revision.bonusRatePct, currentBonusRatePct)) return true
+  if (!sameRate(revision.bonusRatePct, currentBonusRatePct)) return true
   const current = new Map(currentMembers.map((m) => [m.employeeId.toLowerCase(), m.sharePct]))
   for (const m of revision.members) {
     const key = m.employeeId.toLowerCase()
@@ -1472,6 +1483,9 @@ projectsRouter.get(
         // 本人那一列一律帶自己的數字——那是他自己的錢，ESS 專案頁靠這個顯示。
         // 只有「看得到全名單但沒有分潤權限」的人（會計）拿到的是純名單。
         if (!scope.canSeeBonus && m.employee_id !== scope.self.id) return base
+        // 驗收 #4（2026-10-26）：看得到分潤但看不到毛利的人（經理／主辦／部門主管）只拿得到
+        // 別人的角色與趴數——金額（應得／已發／待發／固定金額）會讓人反推出毛利，只留給自己那列。
+        if (!scope.canSeeProfit && m.employee_id !== scope.self.id) return { ...base, sharePct: pct }
         const me = memberEstimateOf(est, m.employee_id as string)
         return {
           ...base,
@@ -1495,7 +1509,8 @@ projectsRouter.get(
         // 獎金池＝估算服務的累計池（毛利制＝max(0,毛利)×比例；舊制＝手填獎金池；固定金額＝null）。
         // 累計池等於洩漏毛利，只給老闆與 HR（canSeeProfit）。
         bonusPool: scope.canSeeBonus && scope.canSeeProfit ? (est ? est.pool : num(scope.project.bonus_pool)) : null,
-        bonusRatePct: scope.canSeeBonus ? num(scope.project.bonus_rate_pct) : null,
+        // 獎金比例也只給老闆與 HR：應得 ÷（比例 × 趴數）就是毛利。
+        bonusRatePct: scope.canSeeBonus && scope.canSeeProfit ? num(scope.project.bonus_rate_pct) : null,
         bonusEstimate: scope.canSeeBonus && scope.canSeeProfit && est
           ? {
               basis: est.basis,
@@ -1817,6 +1832,11 @@ projectsRouter.put(
         res.status(403).json({ error: "forbidden" })
         return
       }
+      // 沒帶 bonusRatePct＝沿用目前的比例（看不到比例的經理／主辦只維護名單時不送這個鍵）。
+      const revisionInput = {
+        ...parsed.data,
+        bonusRatePct: parsed.data.bonusRatePct === undefined ? num(scope.project.bonus_rate_pct) : parsed.data.bonusRatePct,
+      }
       // 分潤改版 #6：只有老闆能改獎金比例與趴數。HR／負責人送來的整批版本只能是「成員名單維護」
       // ——加人（趴數 0）、移除、換角色；任何既有成員趴數或獎金比例的變動都擋下。
       if (scope.bonusEdit.denial) {
@@ -1833,7 +1853,7 @@ projectsRouter.put(
             sharePct: num(m.share_pct as string | null),
             shareAmount: num(m.share_amount as string | null),
           })),
-          parsed.data,
+          revisionInput,
         )
         if (changesShare) {
           res.status(scope.bonusEdit.denial.status).json({ error: scope.bonusEdit.denial.error })
@@ -1844,7 +1864,7 @@ projectsRouter.put(
         tenantId,
         req.params.id as string,
         scope.self.id,
-        parsed.data,
+        revisionInput,
       )
       await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "PUT /projects/:id/share-revision")
       res.status(200).json(result)
