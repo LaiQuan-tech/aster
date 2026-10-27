@@ -38,6 +38,8 @@ export interface Me {
   canSeeGroupFinancials?: boolean;
   /** 能授權別人「可看集團財務」（老闆／platform_admin）。舊 API 沒有。 */
   canGrantGroupFinancials?: boolean;
+  /** 看得到首頁集團總覽與本年收入／毛利率（2026-10-27；只有在職 platform_admin）。舊 API 沒有。 */
+  canSeeGroupOverview?: boolean;
 }
 
 /** The caller's own employee profile; used to detect HR admins in the ESS. */

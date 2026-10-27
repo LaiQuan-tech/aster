@@ -15,7 +15,7 @@
  * - 角色範圍（W4，2026-09-23）：會計（employees.role='accountant'）的側欄只列開放的分區、
  *   分頁列只列開放的分頁（lib/admin-nav.ts 的 roleNavOf／sectionsForRole／tabsForSection；
  *   範圍可在「設定 → 進階功能 → 會計可用範圍」調整）。直開未開放的網址（2026-09-23 驗收修正）：
- *   isAdminPathAllowed 回 false 就不渲染 children，改畫整頁「此頁未開放給會計」（HR 限定頁，例如集團總覽，
+ *   isAdminPathAllowed 回 false 就不渲染 children，改畫整頁「此頁未開放給會計」（HR 限定頁，例如獎金分潤，
  *   改說「此頁僅限 HR／管理者」，見 offLimitsCopy）＋回首頁——以前照常
  *   渲染該頁，結果是 403 toast＋空殼頁（bonus-runs）或整頁正常（payroll）。HR／平台管理員不受影響
  *   （隱藏模組直開網址仍可用）。真正的防線仍在 API（requireFinance／requireHrAdmin），這裡只是
@@ -297,7 +297,8 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
   // W4：角色範圍。roleNav 為 null＝不限縮（HR／平台管理員與其他角色）。
   const roleNav = roleNavOf(me.role, state.features);
   const sections: AdminSection[] = sectionsForRole(roleNav, modules);
-  // 集團財務（集團總覽）只給老闆／platform_admin／授權 HR（/me.canSeeGroupFinancials，2026-10-26）。
+  // 集團財務頁（獎金分潤）只給老闆／platform_admin／授權 HR（/me.canSeeGroupFinancials，2026-10-26）。
+  // 集團總覽 2026-10-27 起移到首頁、只給在職 platform_admin（/me.canSeeGroupOverview），不在導覽裡。
   const canSeeGroupFinancials = canSeeGroupFinancialsOf(me);
   const tabs = tabsForSection(resolved.section, modules, { includeTab: resolved.tab, roleNav, canSeeGroupFinancials });
   const allowedTabKeys = roleNav?.tabs[resolved.section]
@@ -307,7 +308,7 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
   // 直開未開放給這個角色的網址：不渲染頁面本體（見檔頭說明）。HR／平台管理員永遠 true。
   const pathAllowed = isAdminPathAllowed({ pathname, roleNav, modules, canSeeGroupFinancials });
   const roleLabel = me.role === "accountant" ? "會計" : "此角色";
-  // 直開被擋的整頁說明：HR 限定頁（集團總覽）說「此頁僅限 HR／管理者」，其餘說「此頁未開放給{角色}」。
+  // 直開被擋的整頁說明：HR 限定頁（獎金分潤）說「此頁僅限 HR／管理者」，其餘說「此頁未開放給{角色}」。
   const offLimits = offLimitsCopy({ pathname, roleLabel, canSeeGroupFinancials });
   const isHome = resolved.title === "";
   const appName = state.branding?.appName ?? DEFAULT_APP_NAME;

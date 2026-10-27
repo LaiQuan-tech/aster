@@ -25,8 +25,10 @@ import { lateReportLockedReason, loadLateReportLocks, type LateReportRow } from 
  *   看不到的區塊回 null，`scope` 告訴前端哪些是「沒權限」、哪些是「查詢失敗」。
  *
  * ── 依身分分版（2026-10-26 業主：老闆與一般 HR 首頁分開）───────────────────
- *   • scope.groupFinancials：可不可以看集團財務（本年收入／毛利率，GET /group-overview）。由路由用
- *     canSeeGroupFinancials 判斷後帶進來；前端據此決定第 1 格是「本年收入」還是 HR 日常數字，
+ *   • scope.groupFinancials：可不可以看集團總覽（本年收入／毛利率與首頁集團總覽區塊，GET /group-overview）。
+ *     2026-10-27 業主「只有平台管理員才看得到」起，由路由用 financial-visibility.ts loadGroupOverviewAccess（在職
+ *     platform_admin）判斷後帶進來——不再是 canSeeGroupFinancials（老闆／授權 HR 不算）；欄位名沿用以相容前端。
+ *     前端據此決定第 1 格是「本年收入」還是 HR 日常數字，
  *     看不到的人前端**不打** /group-overview（避免 403 噪音）。boss-summary 本身不回任何收入／毛利數字；
  *     會計的「本月放款支出」維持現狀（是支出不是收入、跟放款分頁走，不受這個旗標影響）。
  *   • scope.isBoss：呼叫者是不是老闆（features.approval.fallbackApproverEmpId，與遲到說明、獎金批次核准同一個人）。
@@ -614,7 +616,7 @@ export async function buildBossSummary(
     today: string
     /** 呼叫者的員工 id（判斷是不是老闆）；沒帶＝不是老闆。 */
     selfEmpId?: string | null
-    /** 可看集團財務（路由用 canSeeGroupFinancials 判斷）；沒帶＝舊行為（HR／平台管理員）。 */
+    /** 可看集團總覽（路由用 loadGroupOverviewAccess 判斷＝在職 platform_admin）；沒帶＝舊行為（HR／平台管理員）。 */
     groupFinancials?: boolean
   },
   loaders: BossSummaryLoaders = defaultBossSummaryLoaders,

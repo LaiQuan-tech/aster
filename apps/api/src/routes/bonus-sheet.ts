@@ -20,7 +20,7 @@ export const bonusSheetRouter = Router()
  *   GET /bonus-sheet/export.xlsx（同參數）：兩張工作表「未結案」「已結案」。
  *
  * 權限：含獎金比例與總獎金（可反推毛利）＝集團財務——只有老闆、platform_admin、被授權的 hr_admin
- * （services/financial-visibility.ts canSeeGroupFinancials，同 routes/group-overview.ts）；其他人（含一般 HR、
+ * （services/financial-visibility.ts canSeeGroupFinancials；集團總覽 2026-10-27 起改成只有 platform_admin，這裡不變）；其他人（含一般 HR、
  * 會計）403 `group_financials_forbidden`。
  */
 async function requireGroupFinancials(req: Request, res: Response, next: NextFunction): Promise<void> {

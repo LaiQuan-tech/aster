@@ -1,13 +1,14 @@
 import type { SelfEmployee } from "../middleware/scope.js"
 import { loadEmployeeFeatures, type EmployeeFeatures } from "./employee-features.js"
 import { loadProjectBossEmpId } from "./project-scope.js"
-import { isBossOrPlatformAdmin } from "../lib/boss.js"
+import { isBossOrPlatformAdmin, isPlatformAdminRole } from "../lib/boss.js"
+import { supabaseAdmin } from "../lib/supabase.js"
 
 /**
  * 集團財務可見性（業主 2026-10-26：老闆與一般 HR 分開）。
  *
- * 「集團財務」＝集團總覽（收入、支出、毛利、人事成本、各公司）、專案毛利（毛利／入帳／成本／累計獎金池、
- * 獎金比例）、後台首頁的本年收入／毛利率。誰看得到：
+ * 「集團財務」＝專案毛利（毛利／入帳／成本／累計獎金池、獎金比例；routes/projects.ts）、獎金批次的毛利欄位
+ * （routes/bonus-runs.ts canSeeProfit）、獎金分潤總表（routes/bonus-sheet.ts）。誰看得到：
  *   • 老闆（tenants.features.approval.fallbackApproverEmpId，id 小寫比對；不一定是 hr_admin）
  *   • platform_admin（系統維護）
  *   • 被授權的 hr_admin（employees.features.seeGroupFinancials === true）
@@ -16,6 +17,11 @@ import { isBossOrPlatformAdmin } from "../lib/boss.js"
  *
  * 授權旗標只有老闆或 platform_admin 能改（PATCH /employees 帶 features.seeGroupFinancials，HR 改 → 403），
  * 見 canGrantGroupFinancials。
+ *
+ * ⚠️ 集團總覽（各公司收入、開票、支出、毛利、人事成本、月趨勢）與後台首頁的本年收入／毛利率**不走這條規則**：
+ * 2026-10-27 業主：「集團總覽的內容直接放到首頁，並且只有平台管理員才看得到。」→ 只開給在職的 platform_admin
+ * （canSeeGroupOverview／loadGroupOverviewAccess）。老闆若不是 platform_admin、被授權的 hr_admin 都看不到集團總覽，
+ * 但上面三項（專案毛利、獎金批次毛利、獎金分潤）照舊。
  */
 
 type Caller = Pick<SelfEmployee, "id" | "role">
@@ -58,4 +64,27 @@ export async function loadGroupFinancialsAccess(
   if (self.role !== "hr_admin") return { canSee: false, canGrant: false, bossEmpId: boss }
   const features = await loadEmployeeFeatures(tenantId, self.id)
   return { canSee: canSeeGroupFinancials(self, boss, features), canGrant: false, bossEmpId: boss }
+}
+
+/* ── 集團總覽（2026-10-27：只有在職的平台管理員） ───────────────────────── */
+
+/**
+ * 純函式：看不看得到集團總覽（首頁集團總覽區塊、首頁本年收入／毛利率、GET /group-overview*）。
+ * 業主 2026-10-27 原話「只有平台管理員才看得到」→ **照字面**：role = platform_admin（精確比對）且 status = 'active'。
+ * 刻意不用 isBossOrPlatformAdmin（不含「老闆」）、也不看 features.seeGroupFinancials。
+ */
+export function canSeeGroupOverview(self: { role?: string | null; status?: string | null } | null | undefined): boolean {
+  return !!self && isPlatformAdminRole(self.role) && self.status === "active"
+}
+
+/** 載入版：用登入者 user id 讀自己的 role／status（resolveSelf 不帶 status）。查不到員工列 → false；查詢錯誤往上丟。 */
+export async function loadGroupOverviewAccess(tenantId: string, userId: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from("employees")
+    .select("id, role, status")
+    .eq("tenant_id", tenantId)
+    .eq("user_id", userId)
+    .maybeSingle()
+  if (error) throw new Error(`group overview access: ${error.message}`)
+  return canSeeGroupOverview(data as { role?: string | null; status?: string | null } | null)
 }

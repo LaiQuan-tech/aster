@@ -1,9 +1,9 @@
 "use client";
 
 /**
- * 集團總覽頁的零件：數字卡、各公司表（點列展開下鑽）、月趨勢圖。
+ * 首頁集團總覽區塊的零件（2026-10-27 從 /admin/group-overview 搬來）：數字卡、各公司表（點列展開下鑽）、月趨勢圖。
  * 2026-10-25 加上人事：在職人數、人事成本、扣人事成本後（人事依員工所屬公司，未指派另列不分攤）。
- * 狀態與資料抓取在 page.tsx；金額格式、圖表座標等純邏輯在 lib/group-overview.ts（有單元測試）。
+ * 狀態與資料抓取在 _group-overview-section.tsx；金額格式、圖表座標等純邏輯在 lib/group-overview.ts（有單元測試）。
  */
 import { Fragment, useMemo, useState } from "react";
 import Link from "next/link";

@@ -42,15 +42,17 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
 })
 
-const HR_TOKEN = "hr-user"
+const GRANTED_HR_TOKEN = "hr-user" // hr_admin、被老闆授權看集團財務（features.seeGroupFinancials）
 const PLATFORM_TOKEN = "platform-user"
+const INACTIVE_PLATFORM_TOKEN = "inactive-platform-user" // platform_admin、status=inactive
 const ACCOUNTANT_TOKEN = "accountant-user"
 const STAFF_TOKEN = "staff-user"
 const PLAIN_HR_TOKEN = "plain-hr-user" // hr_admin、未授權看集團財務
-const BOSS_TOKEN = "boss-user" // 老闆（一般員工角色，靠 fallbackApproverEmpId）
+const BOSS_TOKEN = "boss-user" // 老闆（hr_admin 角色、靠 fallbackApproverEmpId，不是 platform_admin）
 const BOSS_ID = "bbbbbbbb-0000-4000-8000-000000000006"
 const as = (token: string, req: request.Test) => req.set("Authorization", `Bearer ${token}`)
-const asHr = (req: request.Test) => as(HR_TOKEN, req)
+/** 資料測試一律用在職 platform_admin（2026-10-27 起唯一看得到集團總覽的身分）。 */
+const asHr = (req: request.Test) => as(PLATFORM_TOKEN, req)
 
 const CO_A = "cccccccc-0000-4000-8000-00000000000a" // 預設公司
 const CO_B = "cccccccc-0000-4000-8000-00000000000b"
@@ -103,12 +105,16 @@ function disb(id: string, over: Row): Row {
 
 function seedMain() {
   fake.db.employees = [
-    // HR_TOKEN＝被老闆授權看集團財務的 HR（2026-10-26 起 HR 預設看不到）
-    { id: "bbbbbbbb-0000-4000-8000-000000000001", tenant_id: TENANT_ID, user_id: HR_TOKEN, role: "hr_admin", dept_id: null, features: { seeGroupFinancials: true } },
-    { id: "bbbbbbbb-0000-4000-8000-000000000005", tenant_id: TENANT_ID, user_id: PLAIN_HR_TOKEN, role: "hr_admin", dept_id: null, features: {} },
-    { id: BOSS_ID, tenant_id: TENANT_ID, user_id: BOSS_TOKEN, role: "employee", dept_id: null, features: {} },
-    { id: "bbbbbbbb-0000-4000-8000-000000000002", tenant_id: TENANT_ID, user_id: PLATFORM_TOKEN, role: "platform_admin", dept_id: null },
-    { id: "bbbbbbbb-0000-4000-8000-000000000003", tenant_id: TENANT_ID, user_id: ACCOUNTANT_TOKEN, role: "accountant", dept_id: null },
+    // GRANTED_HR_TOKEN＝被老闆授權看集團財務的 HR（2026-10-27 起仍看不到集團總覽）
+    { id: "bbbbbbbb-0000-4000-8000-000000000001", tenant_id: TENANT_ID, user_id: GRANTED_HR_TOKEN, role: "hr_admin", status: "active", dept_id: null, features: { seeGroupFinancials: true } },
+    { id: "bbbbbbbb-0000-4000-8000-000000000005", tenant_id: TENANT_ID, user_id: PLAIN_HR_TOKEN, role: "hr_admin", status: "active", dept_id: null, features: {} },
+    // 老闆：hr_admin 角色、靠 fallbackApproverEmpId（不是 platform_admin）
+    { id: BOSS_ID, tenant_id: TENANT_ID, user_id: BOSS_TOKEN, role: "hr_admin", status: "active", dept_id: null, features: { seeGroupFinancials: true } },
+    // PLATFORM_TOKEN＝在職 platform_admin：唯一看得到集團總覽的人（資料測試都用它）
+    { id: "bbbbbbbb-0000-4000-8000-000000000002", tenant_id: TENANT_ID, user_id: PLATFORM_TOKEN, role: "platform_admin", status: "active", dept_id: null },
+    // 離職的 platform_admin
+    { id: "bbbbbbbb-0000-4000-8000-000000000007", tenant_id: TENANT_ID, user_id: INACTIVE_PLATFORM_TOKEN, role: "platform_admin", status: "inactive", dept_id: null },
+    { id: "bbbbbbbb-0000-4000-8000-000000000003", tenant_id: TENANT_ID, user_id: ACCOUNTANT_TOKEN, role: "accountant", status: "active", dept_id: null },
     { id: "bbbbbbbb-0000-4000-8000-000000000004", tenant_id: TENANT_ID, user_id: STAFF_TOKEN, role: "employee", dept_id: null },
   ]
   fake.db.companies = [
@@ -227,31 +233,55 @@ const company = (body: Overview, id: string) => {
   return found as Overview["companies"][number]
 }
 
-describe("權限：老闆／platform_admin／被授權的 HR（2026-10-26）", () => {
-  it("沒帶 token → 401；一般員工、未授權 HR、會計 → 403 group_financials_forbidden", async () => {
-    for (const path of ["/group-overview?year=2026", `/group-overview/detail?companyId=${CO_A}&year=2026&kind=revenue`]) {
-      expect((await request(app).get(path)).status).toBe(401)
-      for (const token of [STAFF_TOKEN, PLAIN_HR_TOKEN, ACCOUNTANT_TOKEN]) {
+describe("權限：只有在職的 platform_admin（2026-10-27 業主：「只有平台管理員才看得到」）", () => {
+  const PATHS = ["/group-overview?year=2026", `/group-overview/detail?companyId=${CO_A}&year=2026&kind=revenue`]
+
+  it("在職 platform_admin → 200（總覽與下鑽）", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: BOSS_ID } } }]
+    for (const path of PATHS) {
+      const res = await as(PLATFORM_TOKEN, request(app).get(path))
+      expect(res.status, path).toBe(200)
+    }
+  })
+
+  it("老闆（非 platform_admin）、被授權看集團財務的 HR、離職的 platform_admin → 403 group_overview_forbidden", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: BOSS_ID } } }]
+    for (const path of PATHS) {
+      for (const token of [BOSS_TOKEN, GRANTED_HR_TOKEN, INACTIVE_PLATFORM_TOKEN]) {
         const res = await as(token, request(app).get(path))
-        expect(res.status, token).toBe(403)
-        expect(res.body.error).toBe("group_financials_forbidden")
+        expect(res.status, `${token} ${path}`).toBe(403)
+        expect(res.body.error).toBe("group_overview_forbidden")
       }
     }
   })
 
-  it("授權 HR、平台管理員、老闆（非 HR）都可讀；403 時完全不查業務資料表", async () => {
-    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: BOSS_ID } } }]
-    expect((await as(HR_TOKEN, request(app).get("/group-overview?year=2026"))).status).toBe(200)
-    expect((await as(PLATFORM_TOKEN, request(app).get("/group-overview?year=2026"))).status).toBe(200)
-    expect((await as(BOSS_TOKEN, request(app).get("/group-overview?year=2026"))).status).toBe(200)
+  it("沒帶 token → 401；一般員工、未授權 HR、會計 → 403", async () => {
+    for (const path of PATHS) {
+      expect((await request(app).get(path)).status).toBe(401)
+      for (const token of [STAFF_TOKEN, PLAIN_HR_TOKEN, ACCOUNTANT_TOKEN]) {
+        const res = await as(token, request(app).get(path))
+        expect(res.status, token).toBe(403)
+        expect(res.body.error).toBe("group_overview_forbidden")
+      }
+    }
+  })
 
+  it("沒有 status 欄位值（null）的 platform_admin 也不算在職 → 403；大小寫變體角色不算 platform_admin", async () => {
+    fake.db.employees = fake.db.employees!.map((e) => (e.user_id === PLATFORM_TOKEN ? { ...e, status: null } : e))
+    expect((await as(PLATFORM_TOKEN, request(app).get(PATHS[0]))).status).toBe(403)
+    fake.db.employees = fake.db.employees!.map((e) => (e.user_id === PLATFORM_TOKEN ? { ...e, status: "active", role: "Platform_Admin" } : e))
+    expect((await as(PLATFORM_TOKEN, request(app).get(PATHS[0]))).status).toBe(403)
+  })
+
+  it("403 時完全不查業務資料表", async () => {
     fake.reads.length = 0
-    await as(PLAIN_HR_TOKEN, request(app).get("/group-overview?year=2026"))
+    await as(GRANTED_HR_TOKEN, request(app).get("/group-overview?year=2026"))
+    await as(BOSS_TOKEN, request(app).get("/group-overview?year=2026"))
     expect(fake.reads.filter((t) => t !== "employees" && t !== "tenants")).toEqual([])
   })
 
   it("不是這個租戶的員工列（沒有 employees 紀錄）→ 403", async () => {
-    fake.db.employees = fake.db.employees!.filter((e) => e.user_id !== HR_TOKEN)
+    fake.db.employees = fake.db.employees!.filter((e) => e.user_id !== PLATFORM_TOKEN)
     const res = await asHr(request(app).get("/group-overview?year=2026"))
     expect(res.status).toBe(403)
   })
