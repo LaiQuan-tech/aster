@@ -169,7 +169,7 @@ export default function BonusRunDetailPage() {
     }
     await act("delete", async () => {
       await deleteBonusRun(id, reason.trim());
-      router.push("/admin/bonus-runs");
+      router.push("/admin/bonus-sheet");
     });
   }
 
@@ -199,7 +199,7 @@ export default function BonusRunDetailPage() {
       <DetailHeading
         title={
           <span className="inline-flex flex-wrap items-center gap-2">
-            獎金季發放 {run.label}
+            獎金批次 {run.label}
             <StatusBadge status={run.status} />
           </span>
         }
@@ -221,6 +221,15 @@ export default function BonusRunDetailPage() {
         <button type="button" className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 md:rounded-md" onClick={() => setAuditOpen(true)}>
           異動紀錄
         </button>
+        {/* 「獎金分潤」頁的專案獎金總表（公司格式）切到這一批；總表限看得到集團財務的人（canSeeProfit 同一個判斷）。 */}
+        {detail.canSeeProfit !== false && (
+          <Link
+            href={`/admin/bonus-sheet?run=${encodeURIComponent(run.id)}`}
+            className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 md:rounded-md"
+          >
+            在總表看
+          </Link>
+        )}
       </DetailHeading>
       {auditOpen && <AuditDrawer table="bonus_runs" recordId={run.id} title={`批次 ${run.label} 的異動紀錄`} onClose={() => setAuditOpen(false)} />}
 

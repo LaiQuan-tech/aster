@@ -24,7 +24,7 @@
  *     這個角色能不能看這一頁；AdminShell 不渲染未開放的頁、首頁卡片依它隱藏。HR 一律 true。
  *   - `AdminTab.hrOnly`（2026-10-11 集團總覽）：只給 HR／平台管理員的分頁。帶了 roleNav（會計）就一律不列，
  *     即使租戶自訂的會計範圍沒限縮該分區的分頁；直開網址同樣走 isAdminPathAllowed 擋掉。
- *   - `AdminTab.groupFinancials`（2026-10-26 老闆與一般 HR 分開）：集團財務頁（集團總覽；2026-10-27 起另有「獎金分潤」）。只有 /me.canSeeGroupFinancials
+ *   - `AdminTab.groupFinancials`（2026-10-26 老闆與一般 HR 分開）：集團財務頁（集團總覽；獎金分潤總表改在頁內區塊守門，見 finance 的 bonus 分頁）。只有 /me.canSeeGroupFinancials
  *     （老闆／platform_admin／被授權的 HR）才列、直開才放行——tabsForSection／isAdminPathAllowed 帶
  *     `canSeeGroupFinancials: false` 時剔除。讀 /me 走 canSeeGroupFinancialsOf（舊 API 缺欄位時退回 HR 角色）。
  *     API 守門在 routes/group-overview.ts（403 group_financials_forbidden）。
@@ -118,6 +118,8 @@ export interface AdminRoute {
   narrow?: boolean;
   module?: AdminModuleKey;
   detail?: AdminDetailDef;
+  /** detail 頁的返回目標；省略＝去掉最後一段（批次明細 /admin/bonus-runs/[id] 回 /admin/bonus-sheet）。 */
+  parent?: string;
 }
 
 export interface ResolvedAdminRoute {
@@ -208,20 +210,16 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       ],
     },
     {
+      // 2026-10-27 業主：「獎金季發放」併入「獎金分潤」，只留這一個分頁（key 沿用 bonus，會計可用範圍的既有設定照舊）。
+      // 頁面分區塊各自守門（app/admin/bonus-sheet/page.tsx）：儀表板＋發放批次＝HR（API requireHrAdmin）；
+      // 專案獎金總表＝看得到集團財務的 HR／平台管理員（API requireGroupFinancials），看不到的人整塊不畫。
+      // 分頁顯示條件＝兩者聯集（＝原「獎金季發放」的條件），所以這裡不帶 hrOnly／groupFinancials。
+      // 批次明細仍是 /admin/bonus-runs/[id]（ADMIN_ROUTES 的 pattern 路由，歸在這個分頁底下）。
       key: "bonus",
-      label: "獎金季發放",
-      href: "/admin/bonus-runs",
-      desc: "專案獎金隨請款入帳進度同比例拆發、按季發放；每季存成獨立快照，已發放不可覆蓋，歷年可累計對比",
-      detail: { title: "獎金批次" },
-    },
-    {
-      key: "bonusSheet",
       label: "獎金分潤",
       href: "/admin/bonus-sheet",
-      title: "專案獎金總表",
-      desc: "版面同公司現行「專案獎金總表」（未結案／已結案）；本次欄依所選獎金批次或基準日。含稅＝系統未稅金額×(1＋營業稅率)，總獎金＝含稅×獎金比例",
-      hrOnly: true,
-      groupFinancials: true,
+      title: "獎金分潤",
+      desc: "上方是季發放儀表板與發放批次（試算、送審、核准、發放、匯出）；下方是專案獎金總表（管理檢視／公司格式，公司格式的期別就是發放批次）",
     },
     {
       key: "groupOverview",
@@ -652,6 +650,8 @@ export const ADMIN_REDIRECTS: readonly AdminRedirect[] = [
   { source: "/admin/projects/annual", destination: "/admin/projects" },
   { source: "/admin/projects/alerts", destination: "/admin/projects" },
   { source: "/admin/stamp-duty", destination: "/admin/projects" },
+  // 2026-10-27 獎金季發放併入獎金分潤：批次列表舊網址導到合併頁（批次明細 /admin/bonus-runs/[id] 不轉）。
+  { source: "/admin/bonus-runs", destination: "/admin/bonus-sheet" },
 ];
 
 /* ------------------------------------------------------------- 路由表 --- */
@@ -698,6 +698,16 @@ export const ADMIN_ROUTES: readonly AdminRoute[] = [
     title: "專案申請單",
     detail: { title: "專案申請單" },
   },
+  {
+    // 獎金批次明細（2026-10-27 併入「獎金分潤」）：網址保留，導覽與返回鍵歸在獎金分潤底下。
+    pattern: /^\/admin\/bonus-runs\/[^/]+$/,
+    prefix: "/admin/bonus-runs",
+    section: "finance",
+    tab: "bonus",
+    title: "獎金批次",
+    detail: { title: "獎金批次" },
+    parent: "/admin/bonus-sheet",
+  },
 ];
 
 /** 去 query／hash／尾斜線；空字串回 "/"。 */
@@ -729,7 +739,7 @@ export function resolveAdminPath(pathname: string): ResolvedAdminRoute {
   if (!route) route = HOME_ROUTE;
   const isDetail = !!route.detail && path !== route.prefix;
   const detail = isDetail ? route.detail : undefined;
-  const parentPath = isDetail ? path.slice(0, path.lastIndexOf("/")) : null;
+  const parentPath = isDetail ? (route.parent ?? path.slice(0, path.lastIndexOf("/"))) : null;
   return {
     route,
     section: route.section,
@@ -788,7 +798,7 @@ export interface RoleNavConfig {
 
 /**
  * 會計預設範圍（業主決策 3）：專案與財務（發票／請款／入帳／放款／複委託付款；**不含**
- * 獎金季發放）、出勤月表、報銷與預支（**不含**薪資作業／薪資單／稅務／現金給付）、
+ * 獎金分潤／獎金批次）、出勤月表、報銷與預支（**不含**薪資作業／薪資單／稅務／現金給付）、
  * 員工基本資料、設定區的「選項清單」（2026-10-10）。tenants.features.roles.accountant 可整鍵覆蓋（roleNavOf）。
  */
 export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {

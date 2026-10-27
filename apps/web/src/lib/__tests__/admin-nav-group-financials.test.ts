@@ -5,6 +5,7 @@ import {
   isGroupFinancialsAdminPath,
   offLimitsCopy,
   tabsForSection,
+  type AdminSectionKey,
 } from "../admin-nav";
 
 // 集團財務（集團總覽）只給老闆／platform_admin／授權 HR（/me.canSeeGroupFinancials，2026-10-26）。
@@ -27,19 +28,18 @@ describe("集團財務導覽", () => {
     expect(isAdminPathAllowed({ pathname: "/admin/payroll", roleNav: null, canSeeGroupFinancials: false })).toBe(true);
   });
 
-  it("獎金分潤（2026-10-27）：集團財務頁、HR 限定——看不到集團財務的 HR、會計都不列也不放行", () => {
-    expect(financeKeys(false)).not.toContain("bonusSheet");
-    expect(financeKeys(true)).toContain("bonusSheet");
-    // 緊接在獎金季發放之後
-    const keys = financeKeys(true);
-    expect(keys.indexOf("bonusSheet")).toBe(keys.indexOf("bonus") + 1);
-    expect(isGroupFinancialsAdminPath("/admin/bonus-sheet")).toBe(true);
-    expect(isGroupFinancialsAdminPath("/admin/bonus-runs")).toBe(false);
-    expect(isAdminPathAllowed({ pathname: "/admin/bonus-sheet", roleNav: null, canSeeGroupFinancials: false })).toBe(false);
-    expect(isAdminPathAllowed({ pathname: "/admin/bonus-sheet", roleNav: null, canSeeGroupFinancials: true })).toBe(true);
-    // 會計（帶 roleNav）即使租戶把整個財務分區開給會計，hrOnly 仍剔除
-    const accountantNav = { sections: ["home", "finance"] as const, tabs: {} };
-    expect(tabsForSection("finance", null, { roleNav: { ...accountantNav, sections: [...accountantNav.sections] }, canSeeGroupFinancials: true }).map((t) => t.key)).not.toContain("bonusSheet");
+  it("獎金分潤（2026-10-27 併入獎金季發放）：分頁條件＝兩者聯集——HR 不論能否看集團財務都列；總表改在頁內守門", () => {
+    expect(financeKeys(false)).toContain("bonus");
+    expect(financeKeys(true)).toContain("bonus");
+    expect(financeKeys(true)).not.toContain("bonusSheet");
+    expect(isGroupFinancialsAdminPath("/admin/bonus-sheet")).toBe(false);
+    expect(isGroupFinancialsAdminPath("/admin/bonus-runs/r1")).toBe(false);
+    expect(isAdminPathAllowed({ pathname: "/admin/bonus-sheet", roleNav: null, canSeeGroupFinancials: false })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/bonus-runs/r1", roleNav: null, canSeeGroupFinancials: false })).toBe(true);
+    // 會計：預設範圍不含；租戶開了 bonus 才列（同原「獎金季發放」，頁內兩塊對會計仍不畫，見 bonus-page-access）
+    const accountantNav = { sections: ["home", "finance"] as AdminSectionKey[], tabs: {} };
+    expect(tabsForSection("finance", null, { roleNav: accountantNav, canSeeGroupFinancials: true }).map((t) => t.key)).toContain("bonus");
+    expect(tabsForSection("finance", null, { roleNav: { sections: ["home", "finance"], tabs: { finance: ["projects"] } }, canSeeGroupFinancials: true }).map((t) => t.key)).not.toContain("bonus");
   });
 
   it("被擋時的說明指向老闆授權", () => {

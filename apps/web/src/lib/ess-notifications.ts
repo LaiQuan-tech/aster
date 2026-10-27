@@ -107,7 +107,7 @@ export function notificationLink(n: NotificationLike): string | null {
       // 送審通知給老闆 → 簽核頁的「獎金批次」段；核准／退回通知給送審的 HR → 後台批次頁。
       if (str(payload.event) === "submitted" || str(payload.audience) === "boss") return "/ess/approvals";
       const id = str(payload.bonusRunId);
-      return id ? `/admin/bonus-runs/${id}` : "/admin/bonus-runs";
+      return id ? `/admin/bonus-runs/${id}` : "/admin/bonus-sheet";
     }
     case "announcement":
       return "/ess/announcements";

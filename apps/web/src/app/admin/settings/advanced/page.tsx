@@ -250,7 +250,7 @@ export default function AdvancedFeaturesPage() {
       <Card title="會計可用範圍">
         <p className="-mt-1 mb-3 text-sm text-gray-500">
           會計（員工角色設為「會計」的同仁）在後台看得到哪些分區與分頁。預設是
-          專案與財務（不含獎金季發放）、出勤月表、報銷與預支、員工基本資料。
+          專案與財務（不含獎金分潤）、出勤月表、報銷與預支、員工基本資料。
           <span className="block text-xs text-gray-400">
             這裡只管看不看得見；薪資、獎金與租戶設定的資料在 API 端就擋住了，勾回來也只會看到「無權限」。
             集團總覽等 HR 限定的頁面不在清單內（只有 HR／管理者能開）。

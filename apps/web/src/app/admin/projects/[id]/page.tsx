@@ -340,7 +340,7 @@ export default function AdminProjectDetailPage() {
       {/* 頁首動作：一律次要外框按鈕、大小一致，手機自動換行（DetailHeading 已 flex-wrap）。 */}
       <DetailHeading title={project.name} desc={headerDesc || undefined}>
         {canBonus && (
-          <Link href="/admin/bonus-runs" className={buttonClass("secondary", "sm")}>
+          <Link href="/admin/bonus-sheet" className={buttonClass("secondary", "sm")}>
             追蹤獎金撥款
           </Link>
         )}
