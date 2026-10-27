@@ -9,6 +9,7 @@ import { authAccountsRouter } from "./routes/auth-accounts.js"
 import { departmentsRouter } from "./routes/departments.js"
 import { shiftsRouter } from "./routes/shifts.js"
 import { punchRouter } from "./routes/punch.js"
+import { punchOverviewRouter } from "./routes/punch-overview.js"
 import { leaveTypesRouter } from "./routes/leave-types.js"
 import { approvalFlowsRouter } from "./routes/approval-flows.js"
 import { requestsRouter } from "./routes/requests.js"
@@ -133,6 +134,7 @@ app.use(departmentsRouter)
 app.use(shiftsRouter)
 // 班表（/schedules）2026-10-11 隨班表功能移除（業主：不需要）：端點取消註冊 → 落到下面的 404。
 app.use(punchRouter)
+app.use(punchOverviewRouter) // /attendance/punch-overview*（打卡紀錄頁的當日總覽／週表，2026-10-27）
 app.use(leaveTypesRouter)
 app.use(approvalFlowsRouter)
 app.use(requestsRouter)

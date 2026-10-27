@@ -622,6 +622,72 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
   // 月表產生／重算／送出都走這支，所以守門放在這裡一處，不會漏掉任何一條路。
   await assertDateRangeOpen(tenantId, from, to)
 
+  const { rows } = await computeAttendanceRows({ tenantId, from, to, employeeId })
+  if (rows.length === 0) return { settled: 0 }
+
+  const { error: upsertErr } = await supabaseAdmin
+    .from("attendance_days")
+    .upsert(rows, { onConflict: "tenant_id,employee_id,work_date" })
+  if (upsertErr) {
+    if (!isMissingColumnError(upsertErr)) throw new Error(`settleAttendance (upsert): ${upsertErr.message}`)
+    // Live DB predates 0038: persist the pre-P0 columns so settlement still
+    // lands; leave/outing/early-leave are dropped (logged once).
+    warnSchemaGapOnce("attendance_days.p0_columns", upsertErr)
+    const legacyRows = rows.map((r) => {
+      const copy: Record<string, unknown> = { ...r }
+      for (const col of P0_ATTENDANCE_COLUMNS) delete copy[col]
+      return copy
+    })
+    const { error: retryErr } = await supabaseAdmin
+      .from("attendance_days")
+      .upsert(legacyRows, { onConflict: "tenant_id,employee_id,work_date" })
+    if (retryErr) throw new Error(`settleAttendance (upsert, legacy columns): ${retryErr.message}`)
+  }
+
+  return { settled: rows.length }
+}
+
+/** 某員工某天的結算上下文（computeAttendanceRows 用的同一份班別／日別／請假時段）。 */
+export interface AttendanceDayContext {
+  dayType: DayType
+  /** 排班或個人預設班別；null＝走公司規則（彈性上班／整天）。 */
+  scheduledShift: ShiftDef | null
+  /** schedule＝排班列；default＝個人預設班別；null＝公司規則。 */
+  shiftSource: "schedule" | "default" | null
+  /** 實際結算用的班別（pickDayShift）。 */
+  shift: ShiftDef
+  /** 有應上下班時間（排班或彈性）＝遲到／早退有意義。 */
+  hasExpectedTimes: boolean
+  /** 加班起算基準的正常工時（分）。 */
+  regularMinutes: number
+  /** 班表淨工時（分）；沒排班 → null。 */
+  shiftNetMinutes: number | null
+  /** 已核准請假覆蓋的時段（naive local）。 */
+  leaveIntervals: TimeInterval[]
+}
+
+export interface ComputedAttendance {
+  tz: string
+  rules: RuleConfigLike
+  /** 與 settleAttendance 寫進 attendance_days 完全相同的列（未寫入）。 */
+  rows: Array<Record<string, unknown>>
+  /** 區間內已核准在家工作單覆蓋的 `${empId}|${date}`。 */
+  wfhKeys: Set<string>
+  dayContext(employeeId: string, date: DateKey): AttendanceDayContext
+}
+
+type RuleConfigLike = Awaited<ReturnType<typeof loadRuleConfigFor>>["rules"]
+
+/**
+ * settleAttendance 的計算段（2026-10-27 抽出，不寫 DB、不檢查發薪鎖定）：打卡配對 → 日別 → 班別 →
+ * 請假／在家／補休 → computeAttendanceDay，回傳要 upsert 進 attendance_days 的列。
+ * settleAttendance 與後台「打卡總覽」（services/punch-overview.ts）共用，兩邊判斷保證一致。
+ */
+export async function computeAttendanceRows({ tenantId, from, to, employeeId }: SettleInput): Promise<ComputedAttendance> {
+  if (!dateRe.test(from) || !dateRe.test(to)) {
+    throw new Error("computeAttendanceRows: from/to must be YYYY-MM-DD")
+  }
+  if (from > to) throw new Error("computeAttendanceRows: from must be <= to")
   const tz = await getTenantTimezone(tenantId)
   // 規則依「結算的是哪個月」選版（以結束日期所屬月份為準）——重跑舊月份的結算
   // 必須拿當時生效的規則，不能拿今天的。attendance-sheets 的 generateSheets /
@@ -909,28 +975,29 @@ export async function settleAttendance({ tenantId, from, to, employeeId }: Settl
     })
   }
 
-  if (rows.length === 0) return { settled: 0 }
-
-  const { error: upsertErr } = await supabaseAdmin
-    .from("attendance_days")
-    .upsert(rows, { onConflict: "tenant_id,employee_id,work_date" })
-  if (upsertErr) {
-    if (!isMissingColumnError(upsertErr)) throw new Error(`settleAttendance (upsert): ${upsertErr.message}`)
-    // Live DB predates 0038: persist the pre-P0 columns so settlement still
-    // lands; leave/outing/early-leave are dropped (logged once).
-    warnSchemaGapOnce("attendance_days.p0_columns", upsertErr)
-    const legacyRows = rows.map((r) => {
-      const copy: Record<string, unknown> = { ...r }
-      for (const col of P0_ATTENDANCE_COLUMNS) delete copy[col]
-      return copy
-    })
-    const { error: retryErr } = await supabaseAdmin
-      .from("attendance_days")
-      .upsert(legacyRows, { onConflict: "tenant_id,employee_id,work_date" })
-    if (retryErr) throw new Error(`settleAttendance (upsert, legacy columns): ${retryErr.message}`)
+  const dayContext = (empId: string, workDate: DateKey): AttendanceDayContext => {
+    const resolved = resolver.forDay(empId, workDate, dayTypeFor(empId, workDate))
+    const scheduledShift = resolved.shift
+    const dayType = dayTypeFor(empId, workDate)
+    const shift: ShiftDef = pickDayShift(
+      scheduledShift,
+      dayType,
+      flexShiftDef(rules, workDate),
+      dayType === "workday" ? unscheduledWorkday : unscheduledRestDay,
+    )
+    return {
+      dayType,
+      scheduledShift,
+      shiftSource: resolved.source,
+      shift,
+      hasExpectedTimes: !!scheduledShift || !!shift.flex,
+      regularMinutes: regularMinutesForDay(basis, scheduledShift, workDate, tz, regularMinutes),
+      shiftNetMinutes: scheduledShift ? shiftWindowUtc(workDate, scheduledShift, tz).workMinutes : null,
+      leaveIntervals: leaveIntervalsByKey.get(`${empId}|${workDate}`) ?? [],
+    }
   }
 
-  return { settled: rows.length }
+  return { tz, rules, rows, wfhKeys: wfhByKey, dayContext }
 }
 
 /** Exposed for the settlement unit tests (pure, no IO). */
