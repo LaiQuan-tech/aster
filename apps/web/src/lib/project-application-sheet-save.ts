@@ -591,6 +591,8 @@ export async function runApplicationSheetSave(
     if (ok) residual = { ...residual, clientEdits: {} };
   }
 
+  /** 銷售金額（合約）沒存成時，同次的開票／入帳不送：入帳金額取當下應收，會用舊合約算錯（驗收 2026-10-27）。 */
+  let contractOk = true;
   if (plan.contract) {
     const step = plan.contract;
     const label =
@@ -601,6 +603,7 @@ export async function runApplicationSheetSave(
       else await api.createQuotation({ amount: step.amount });
     });
     if (ok) residual = { ...residual, orderDocType: "", amountUntaxed: null };
+    contractOk = ok;
   }
 
   let stages = plan.stages;
@@ -661,6 +664,10 @@ export async function runApplicationSheetSave(
       steps.push({ section: "invoice", label, status: "skipped", message: "付款階段沒存成，這格未送出。" });
       continue;
     }
+    if (!contractOk) {
+      steps.push({ section: "invoice", label, status: "skipped", message: "銷售金額沒存成，這格未送出（避免用舊金額登記）。" });
+      continue;
+    }
     if (await attempt("invoice", label, () => api.invoiceBilling(id, inv.invoiceNo).then(() => undefined))) dropStageField(inv.key, "invoiceNo");
   }
   for (const rc of stages.receipts) {
@@ -668,6 +675,10 @@ export async function runApplicationSheetSave(
     const id = scheduleOk ? idOf.get(rc.key) : undefined;
     if (!id) {
       steps.push({ section: "receipt", label, status: "skipped", message: "付款階段沒存成，這格未送出。" });
+      continue;
+    }
+    if (!contractOk) {
+      steps.push({ section: "receipt", label, status: "skipped", message: "銷售金額沒存成，這格未送出（避免用舊金額登記）。" });
       continue;
     }
     if (await attempt("receipt", label, () => api.receiveBilling(id, rc.receivedOn).then(() => undefined))) dropStageField(rc.key, "receivedOn");
