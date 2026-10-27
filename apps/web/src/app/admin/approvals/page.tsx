@@ -64,7 +64,6 @@ import {
   BUCKET_LABEL,
   KIND_LABEL,
   KIND_OPTIONS,
-  actionsFor,
   applyClientFilters,
   bucketOf,
   buildApprovalLookup,
@@ -79,6 +78,7 @@ import {
   parseApprovalView,
   pendingCounts,
   resolveApproverId,
+  rowActionsFor,
   rowsForView,
   statsOf,
   statusParamFor,
@@ -655,7 +655,7 @@ function ApprovalsView() {
               <tbody>
                 {visible.map((row) => {
                   const bucket = bucketOf(row, ctx);
-                  const actions = actionsFor(bucket);
+                  const actions = rowActionsFor(row, bucket, ctx.meId);
                   const busy = busyId === row.id || busyId === "batch";
                   const canSelect = batchRow && row.status === "pending";
                   return (

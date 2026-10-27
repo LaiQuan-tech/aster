@@ -392,6 +392,14 @@ export class LateReportNotFoundError extends Error {
   }
 }
 
+/** 不能決定自己的遲到說明（2026-10-27 業主追加 E）→ 路由回 403 own_late_report。 */
+export class LateReportOwnDecisionError extends Error {
+  constructor() {
+    super("own_late_report")
+    this.name = "LateReportOwnDecisionError"
+  }
+}
+
 /** 那個月的出勤月表已核准／鎖定：薪資讀核准快照，這時改決定不會生效 → 擋下。 */
 export class LateReportSheetFrozenError extends Error {
   readonly status: string
@@ -426,6 +434,8 @@ export async function decideLateReport(input: {
   if (selErr) throw new Error(`late-reports (load): ${selErr.message}`)
   if (!current) throw new LateReportNotFoundError()
   const before = current as unknown as LateReportRow
+  // 自己的遲到說明不能自己決定（老闆、platform_admin 也一樣；2026-10-27 業主追加 E）。
+  if (before.employee_id.toLowerCase() === input.actorEmpId.toLowerCase()) throw new LateReportOwnDecisionError()
   // 發薪鎖定：那一天所在的月份已結算 → 409 period_closed（services/period-lock.ts）。先於下面的
   // sheet_frozen：月份已鎖就以「已結算」回答；月表只是核准、整月還沒鎖時才是 sheet_frozen（薪資讀核准快照）。
   await assertPeriodOpen(input.tenantId, before.work_date)

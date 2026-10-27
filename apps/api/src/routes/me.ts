@@ -1,3 +1,4 @@
+import { actorRoleOf, isActiveStatus } from "../lib/actor-status.js"
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
@@ -164,7 +165,9 @@ meRouter.get(
       const { companyId, companyName } = await loadOwnCompany(tenantId, data.id as string)
 
       const employmentType = (data.employment_type as string | null) ?? null
-      const self = { id: data.id as string, role: data.role as string }
+      // 有效角色：非在職（停用／離職）降成 employee——前端導覽只剩 ESS，老闆／集團財務旗標也一律 false（lib/actor-status.ts）。
+      const active = isActiveStatus(data.status as string | null)
+      const self = { id: data.id as string, role: actorRoleOf(data.id as string, data.role as string, data.status as string | null), active }
       // 查老闆失敗 → 兩個集團財務旗標降級為 false＋warn，不讓 /me 500（只是導覽可見性，API 各自守門）。
       let bossLookupOk = true
       let bossEmpId: string | null = null
@@ -177,7 +180,7 @@ meRouter.get(
       res.status(200).json({
         id: data.id,
         name: data.name,
-        role: data.role,
+        role: self.role,
         deptId: data.dept_id,
         empNo: data.emp_no,
         status: data.status,
@@ -185,7 +188,7 @@ meRouter.get(
         mustChangePassword: data.must_change_password === true,
         employmentType,
         essTabs: await resolveEssTabs(tenantId, employmentType),
-        isManager: await isDeptManager(tenantId, data.id as string),
+        isManager: active && (await isDeptManager(tenantId, data.id as string)),
         features,
         defaultShift,
         companyId,

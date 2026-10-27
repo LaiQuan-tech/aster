@@ -187,7 +187,7 @@ export function accountErrorMessage(err: unknown, fallback = "操作失敗"): st
     email_exists: "此 Email 已有登入帳號",
     not_found: "找不到這位員工",
     // 特權帳號邊界（2026-10-11）：受保護帳號的密碼／連結只有老闆或平台管理員能動；平台管理員角色只有平台管理員能指派。
-    not_boss: "只有老闆或平台管理員可以動老闆、HR、平台管理員（以及老闆指定的人）的密碼與角色",
+    not_boss: "只有老闆或平台管理員可以動老闆、HR、平台管理員（以及老闆指定的人）的密碼、角色與在職狀態",
     platform_admin_required: "「平台管理員」角色只有平台管理員可以指派",
     email_required: "這是老闆、HR、平台管理員或老闆指定的人：寄邀請信前請明確輸入收件信箱",
   };

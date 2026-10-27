@@ -1,3 +1,4 @@
+import { actorRoleOf } from "../lib/actor-status.js"
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
@@ -99,7 +100,7 @@ attendanceRouter.get(
     try {
       const { data: me, error: meErr } = await supabaseAdmin
         .from("employees")
-        .select("id, role")
+        .select("id, role, status")
         .eq("tenant_id", tenantId)
         .eq("user_id", userId)
         .maybeSingle()
@@ -108,7 +109,8 @@ attendanceRouter.get(
         return
       }
 
-      const isHr = !!me && ["hr_admin", "platform_admin"].includes(me.role)
+      // 有效角色：非在職降成 employee（lib/actor-status.ts）。
+      const isHr = !!me && ["hr_admin", "platform_admin"].includes(actorRoleOf(me.id as string, me.role as string, (me as { status?: string | null }).status))
 
       const buildQuery = (cols: string) => {
         let query = supabaseAdmin.from("attendance_days").select(cols).eq("tenant_id", tenantId)

@@ -8,6 +8,7 @@ import {
   decideLateReport,
   getLateReports,
   lateDecisionErrorMessage,
+  OWN_LATE_REPORT_NOTE,
   type LateDecisionFilter,
   type LateReport,
 } from "@/lib/late-reports-api";
@@ -182,7 +183,10 @@ export default function LateReportsPage() {
                         )}
                         {r.decisionNote && <p className="mt-1 text-xs text-gray-500">備註：{r.decisionNote}</p>}
                       </td>
-                      {canDecide && (
+                      {canDecide && r.own && (
+                        <td className="py-2 text-xs text-gray-500">{OWN_LATE_REPORT_NOTE}</td>
+                      )}
+                      {canDecide && !r.own && (
                         <td className="py-2">
                           <div className="flex min-w-[14rem] flex-col gap-2">
                             <input

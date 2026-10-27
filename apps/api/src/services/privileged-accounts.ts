@@ -1,3 +1,4 @@
+import { actorRoleOf, isActiveStatus } from "../lib/actor-status.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { canEditUnlockList, loadPeriodUnlockPolicy, type PeriodUnlockPolicy } from "./period-lock.js"
 
@@ -51,6 +52,8 @@ export function canonicalRole(role: string): string {
 export interface PrivilegeCaller {
   id: string
   role: string
+  /** false＝非在職（停用／離職）：不得行使老闆／平台管理員身分（lib/actor-status.ts）。省略＝在職。 */
+  active?: boolean
 }
 
 export interface AccountTarget {
@@ -63,6 +66,7 @@ export type PrivilegeCode = "not_boss" | "platform_admin_required"
 export const BOSS_SETTING_MESSAGE = "只有老闆或平台管理員可以更換老闆設定"
 export const CREDENTIALS_MESSAGE = "只有老闆或平台管理員可以重設老闆、HR 或平台管理員的密碼"
 export const ROLE_CHANGE_MESSAGE = "只有老闆或平台管理員可以變更老闆、HR 或平台管理員的角色"
+export const STATUS_CHANGE_MESSAGE = "只有老闆或平台管理員可以變更老闆、老闆指定的解鎖人、HR 或平台管理員的在職狀態"
 export const PLATFORM_ADMIN_ASSIGN_MESSAGE = "只有平台管理員可以指派「平台管理員」角色"
 
 /** 權限不足：一律 403 `{ error: code, message }`（middleware/privilege-error.ts 轉成回應）。 */
@@ -85,7 +89,7 @@ export function isPrivilegeError(err: unknown): err is PrivilegeError {
 
 /** 老闆（目前設定的那位）或 platform_admin。純函式。與「誰能改解鎖名單」同一個判準。 */
 export function isBossOrPlatformAdmin(policy: PeriodUnlockPolicy, caller: PrivilegeCaller): boolean {
-  return canEditUnlockList(policy, { id: caller.id, role: normalizeRole(caller.role) })
+  return canEditUnlockList(policy, { id: caller.id, role: normalizeRole(caller.role), active: caller.active })
 }
 
 /**
@@ -154,13 +158,15 @@ export async function loadActor(tenantId: string, actorEmpId: string | null | un
   if (!actorEmpId) return null
   const { data, error } = await supabaseAdmin
     .from("employees")
-    .select("id, role")
+    .select("id, role, status")
     .eq("tenant_id", tenantId)
     .eq("id", actorEmpId)
     .maybeSingle()
   if (error) throw new Error(`privileged-accounts (actor): ${error.message}`)
   if (!data) return null
-  return { id: data.id as string, role: data.role as string }
+  // 有效角色：非在職降成 employee、且不得行使老闆身分（lib/actor-status.ts）。
+  const status = (data as { status?: string | null }).status
+  return { id: data.id as string, role: actorRoleOf(data.id as string, data.role as string, status), active: isActiveStatus(status) }
 }
 
 /**
@@ -196,6 +202,34 @@ export async function assertCanChangeRole(
   if (!isProtectedAccount(target, policy)) return
   if (!caller || !canChangeRoleOf(caller, target, policy)) {
     throw new PrivilegeError("not_boss", ROLE_CHANGE_MESSAGE)
+  }
+}
+
+/**
+ * 能不能變更 `target` 的在職狀態（停用／復職）：判準同 canChangeRoleOf（2026-10-27 業主追加 G）——
+ * 受保護帳號（老闆、老闆指定的解鎖人、hr_admin、platform_admin）只有老闆或 platform_admin 能改（本人除外）。
+ * 不擋的話 HR 可以先停用另一位 HR／老闆（停用即失去權限），等於繞過角色保護。純函式。
+ */
+export function canChangeStatusOf(caller: PrivilegeCaller, target: AccountTarget, policy: PeriodUnlockPolicy): boolean {
+  return canChangeRoleOf(caller, target, policy)
+}
+
+/**
+ * 呼叫者不能把 `target` 的在職狀態從 `currentStatus` 改成 `newStatus` 就丟 PrivilegeError（403 `not_boss`）。
+ * 狀態沒變一律放行（員工管理頁每次儲存都會帶 status）。會讀一次租戶的解鎖政策。
+ */
+export async function assertCanChangeStatus(
+  tenantId: string,
+  caller: PrivilegeCaller | null,
+  target: AccountTarget & { status: string | null },
+  newStatus: string,
+  policyOverride?: PeriodUnlockPolicy,
+): Promise<void> {
+  if ((target.status ?? "active") === newStatus) return
+  const policy = policyOverride ?? (await loadPeriodUnlockPolicy(tenantId))
+  if (!isProtectedAccount(target, policy)) return
+  if (!caller || !canChangeStatusOf(caller, target, policy)) {
+    throw new PrivilegeError("not_boss", STATUS_CHANGE_MESSAGE)
   }
 }
 

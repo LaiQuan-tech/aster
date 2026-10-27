@@ -9,6 +9,7 @@ import { writeAuditLog } from "./audit.js"
 import { enqueue } from "./notify.js"
 import { loadBossEmpId } from "./late-reports.js"
 import { bossNotificationRecipients, isBossOrPlatformAdmin, isPlatformAdminRole, loadPlatformAdminEmpIds } from "../lib/boss.js"
+import { actorIsInactive } from "../lib/actor-status.js"
 import { bonusRunsHaveApproval } from "../lib/schema-compat.js"
 import { logger } from "../lib/logger.js"
 import {
@@ -76,7 +77,7 @@ export class BonusRunError extends Error {
 /**
  * 呼叫者。role＝employees.role（核准／退回判斷 platform_admin 用；沒帶＝不是 platform_admin）。
  */
-export type Actor = { empId: string | null; role?: string | null }
+export type Actor = { empId: string | null; role?: string | null; active?: boolean }
 
 /* ──────────────────────────────────────────────────────────────────
  * DB 列型別（snake_case）與序列化
@@ -1197,20 +1198,41 @@ async function requireBoss(tenantId: string): Promise<string> {
 
 /**
  * 能核准／退回的人：老闆（features.approval.fallbackApproverEmpId）或 platform_admin（2026-10-27 業主拍板，
- * 與 bonusEditAccessOf、isBossOrPlatformAdmin 同一慣例；同一個 platform_admin 可以自己送審自己核准，照舊標註 selfApproved）。
+ * 與 bonusEditAccessOf、isBossOrPlatformAdmin 同一慣例）。非在職的老闆／platform_admin 不算（lib/actor-status.ts）。
  * platform_admin 不需要老闆存在；其他人：沒設老闆 → 409 boss_not_configured、不是老闆 → 403 not_approver（維持原順序）。
+ * 送審人不能核准／退回自己送審的批次（2026-10-27 業主追加 F）——由 assertNotSubmitter 另外擋。
  */
 async function assertApprover(tenantId: string, actor: Actor): Promise<void> {
-  if (actor.empId && isPlatformAdminRole(actor.role)) return
+  if (actor.empId && isPlatformAdminRole(actor.role) && !actorIsInactive({ id: actor.empId, active: actor.active })) return
   const boss = await requireBoss(tenantId)
-  if (!isBossOrPlatformAdmin(boss, { id: actor.empId, role: actor.role })) throw new BonusRunError(403, "not_approver")
+  if (!isBossOrPlatformAdmin(boss, { id: actor.empId, role: actor.role, active: actor.active })) throw new BonusRunError(403, "not_approver")
+}
+
+/** 送審人本人不能核准／退回自己送審的批次（2026-10-27 業主追加 F；之前 platform_admin 可自己送審自己核准、只留標註）。 */
+function assertNotSubmitter(run: Pick<RunRow, "submitted_by_emp_id">, actor: Actor): void {
+  if (isSelfSubmitted(run, actor)) throw new BonusRunError(403, "self_approval_forbidden")
+}
+
+/** 這個批次是不是 actor 送審的。純函式。 */
+export function isSelfSubmitted(run: { submitted_by_emp_id?: string | null }, actor: Actor): boolean {
+  return !!run.submitted_by_emp_id && !!actor.empId && run.submitted_by_emp_id.toLowerCase() === actor.empId.toLowerCase()
 }
 
 /** 呼叫者能不能核准（老闆或 platform_admin；給 ESS 簽核頁／後台決定要不要顯示核准按鈕）。 */
 export async function isBonusApprover(tenantId: string, actor: Actor): Promise<boolean> {
   if (!actor.empId) return false
+  if (actorIsInactive({ id: actor.empId, active: actor.active })) return false
   if (isPlatformAdminRole(actor.role)) return true
-  return isBossOrPlatformAdmin(await loadBossEmpId(tenantId), { id: actor.empId, role: actor.role })
+  return isBossOrPlatformAdmin(await loadBossEmpId(tenantId), { id: actor.empId, role: actor.role, active: actor.active })
+}
+
+/** 核准通知用的核准人姓名（查不到 → null，內文退回「已核准」）。 */
+async function approverDisplayName(tenantId: string, empId: string | null): Promise<string | null> {
+  if (!empId) return null
+  const { data, error } = await supabaseAdmin.from("employees").select("name").eq("tenant_id", tenantId).eq("id", empId).maybeSingle()
+  if (error || !data) return null
+  const name = ((data as { name?: string | null }).name ?? "").trim()
+  return name || null
 }
 
 /** HR 送審：draft → pending_approval，記下金額指紋，通知老闆與所有 platform_admin。 */
@@ -1222,7 +1244,10 @@ export async function submitRun(tenantId: string, actor: Actor, id: string): Pro
   // 要有人能核准：老闆，或（2026-10-27 起視同老闆的）任一在職 platform_admin；都沒有 → 409 boss_not_configured。
   const boss = await loadBossEmpId(tenantId)
   if (!boss && (await loadPlatformAdminEmpIds(tenantId)).length === 0) throw new BonusRunError(409, "boss_not_configured")
-  const approvers = await bossNotificationRecipients(tenantId, boss)
+  // 送審通知不寄給操作者本人（追加 H）；送審人又不能核准自己送審的批次（追加 F）→ 扣掉自己後沒有人能核准就先擋，
+  // 不讓批次卡在「只有自己能核准」（改由其他 HR 送審，或請另一位平台管理員核准）。
+  const approvers = await bossNotificationRecipients(tenantId, boss, [actor.empId])
+  if (approvers.length === 0) throw new BonusRunError(409, "no_other_approver")
   // 送審前先用最新資料重算一次（沖銷批次不重算）：草稿可能是改版前或很久以前算的，
   // 老闆核准的必須是「現在算出來的」金額。
   let latest = current
@@ -1276,6 +1301,7 @@ export async function approveRun(tenantId: string, actor: Actor, id: string): Pr
   const current = await loadRun(tenantId, id)
   if (!current) return null
   await assertApprover(tenantId, actor)
+  assertNotSubmitter(current, actor)
   assertTransition(current.status, "approve")
   // 核准前也用最新資料重算比對（與發放同一支）：送審後入帳／成本變了 → 退回草稿、409，老闆不會核准過期的金額。
   await recomputeOrReturn(tenantId, actor, current)
@@ -1285,7 +1311,7 @@ export async function approveRun(tenantId: string, actor: Actor, id: string): Pr
   if (latest.approved_fingerprint && liveItemsFingerprint(items) !== latest.approved_fingerprint) {
     throw new BonusRunError(409, "amount_changed")
   }
-  // 老闆本身是 HR 時可以自己送審自己核准（維持），但留下標註。
+  // 送審人不能自己核准（assertNotSubmitter 已擋）；selfApproved 只剩舊資料（2026-10-27 前）會是 true。
   const selfApproved = !!current.submitted_by_emp_id && current.submitted_by_emp_id === actor.empId
   await transitionRow(
     tenantId,
@@ -1309,7 +1335,8 @@ export async function approveRun(tenantId: string, actor: Actor, id: string): Pr
     employeeIds: [current.submitted_by_emp_id ?? ""],
     type: "bonus_run",
     title: `獎金批次 ${current.label} 已核准`,
-    body: selfApproved ? "已核准（送審人與核准人相同），可以發放。" : "老闆已核准，可以發放。",
+    // 追加 H：platform_admin 核准時不要寫「老闆已核准」——寫實際核准人的名字。
+    body: `${(await approverDisplayName(tenantId, actor.empId)) ?? ""}已核准，可以發放。`,
     payload: { bonusRunId: id, event: "approved", approvedByEmpId: actor.empId },
   })
   return getRun(tenantId, id)
@@ -1321,6 +1348,7 @@ export async function returnRun(tenantId: string, actor: Actor, id: string, reas
   const current = await loadRun(tenantId, id)
   if (!current) return null
   await assertApprover(tenantId, actor)
+  assertNotSubmitter(current, actor)
   assertTransition(current.status, "return")
   await transitionRow(tenantId, id, current.status, returnPatch(actor.empId, reason), "returnRun")
   await writeAuditLog({
@@ -1366,7 +1394,8 @@ export async function withdrawRun(tenantId: string, actor: Actor, id: string, re
     context: "POST /bonus-runs/:id/withdraw",
   })
   const boss = await loadBossEmpId(tenantId).catch(() => null)
-  const bossAudience = await bossNotificationRecipients(tenantId, boss)
+  // 撤回通知不寄給操作者本人（追加 H：撤回的人若同時是平台管理員／老闆）。
+  const bossAudience = await bossNotificationRecipients(tenantId, boss, [actor.empId])
   if (bossAudience.length > 0) {
     await enqueue({
       tenantId,

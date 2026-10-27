@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
+import { actorRoleOf } from "../lib/actor-status.js"
 
 /**
  * Builds a middleware that authorises the current user against an allow-list of
@@ -22,7 +23,7 @@ export function requireRole(roles: string[]) {
 
     const { data, error } = await supabaseAdmin
       .from("employees")
-      .select("id, role")
+      .select("id, role, status")
       .eq("tenant_id", tenantId)
       .eq("user_id", userId)
       .maybeSingle()
@@ -35,7 +36,8 @@ export function requireRole(roles: string[]) {
     // 稽核：記下呼叫者，之後本請求所有 DB 寫入都由 trigger 記 actor（lib/request-context.ts）。
     setActor(data.id as string)
 
-    if (!roles.includes(data.role)) {
+    // 有效角色：非在職（status ≠ 'active'）一律當 employee（lib/actor-status.ts）——停用／離職帳號不得行使管理權限。
+    if (!roles.includes(actorRoleOf(data.id as string, data.role as string, (data as { status?: string | null }).status))) {
       res.status(403).json({ error: "forbidden" })
       return
     }

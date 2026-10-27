@@ -23,11 +23,14 @@ import { AsyncLocalStorage } from "node:async_hooks"
  */
 export interface RequestContext {
   actorEmpId?: string
+  /** 本請求解出、但已非在職的呼叫者 employee id（小寫；lib/actor-status.ts）。 */
+  inactiveActorEmpIds?: string[]
   route?: string | (() => string | undefined)
 }
 
 export interface ResolvedRequestContext {
   actorEmpId?: string
+  inactiveActorEmpIds?: string[]
   route?: string
 }
 
@@ -43,6 +46,14 @@ export function setActor(empId: string | null | undefined): void {
   if (store && empId) store.actorEmpId = empId
 }
 
+/** 記下本請求的呼叫者已非在職（lib/actor-status.ts actorRoleOf）；沒有 store 時靜默略過。 */
+export function markActorInactive(empId: string | null | undefined): void {
+  const store = storage.getStore()
+  if (!store || !empId) return
+  const key = empId.toLowerCase()
+  store.inactiveActorEmpIds = store.inactiveActorEmpIds ? [...new Set([...store.inactiveActorEmpIds, key])] : [key]
+}
+
 export function getRequestContext(): ResolvedRequestContext | undefined {
   const store = storage.getStore()
   if (!store) return undefined
@@ -52,5 +63,5 @@ export function getRequestContext(): ResolvedRequestContext | undefined {
   } catch {
     route = undefined
   }
-  return { actorEmpId: store.actorEmpId, route: route || undefined }
+  return { actorEmpId: store.actorEmpId, route: route || undefined, inactiveActorEmpIds: store.inactiveActorEmpIds }
 }

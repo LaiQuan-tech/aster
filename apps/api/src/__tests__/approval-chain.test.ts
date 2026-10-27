@@ -91,11 +91,12 @@ describe("pickApproverChain — list / manager", () => {
       steps: [one(HR2, "hr_admin")],
       source: "hr_admin",
     })
-    // 只有一位 HR 而 HR 自己請假：沒別人能簽，仍讓單能走。
+    // 只有一位 HR 而 HR 自己請假（2026-10-27 起自己的單不能簽）：交給老闆關——沒有老闆時名義簽核人寫本人，
+    // 實際由任一在職 platform_admin 簽（本人簽會被 own_request 擋）。
     expect(pickApproverChain(base({ employeeId: HR1, hrAdminEmpIds: [HR1] }))).toEqual({
       ok: true,
-      steps: [one(HR1, "hr_admin")],
-      source: "hr_admin",
+      steps: [one(HR1, "fallback")],
+      source: "fallback",
     })
   })
 
@@ -131,11 +132,12 @@ describe("pickApproverChain — manager_hr（主管逐級 → HR 覆核）", () 
     expect(self).toEqual({ ok: true, steps: [one(MGR, "manager"), { candidateEmpIds: [HR2], kind: "hr" }], source: "manager_hr" })
   })
 
-  it("排除後沒人 → 不排除（唯一的 HR 就是主管本人，仍讓單能走）", () => {
+  it("排除後沒人 → 不排除（唯一的 HR 就是主管本人，仍讓單能走）；但申請人本人一律拿掉", () => {
     const r = pickApproverChain(base({ flow, managerEmpIds: [MGR], hrAdminEmpIds: [MGR] }))
     expect(r).toEqual({ ok: true, steps: [one(MGR, "manager"), { candidateEmpIds: [MGR], kind: "hr" }], source: "manager_hr" })
+    // 唯一的 HR 就是申請人本人（2026-10-27 起自己的單不能簽）→ 整條沒人 → 交給老闆關（沒老闆＝名義寫本人、由 platform_admin 簽）。
     const onlySelf = pickApproverChain(base({ employeeId: HR1, flow, managerEmpIds: [], hrAdminEmpIds: [HR1] }))
-    expect(onlySelf).toEqual({ ok: true, steps: [{ candidateEmpIds: [HR1], kind: "hr" }], source: "manager_hr" })
+    expect(onlySelf).toEqual({ ok: true, steps: [{ candidateEmpIds: [HR1], kind: "fallback" }], source: "fallback" })
   })
 
   it("沒有主管 → 老闆當唯一主管關（kind=fallback）再 HR 覆核", () => {

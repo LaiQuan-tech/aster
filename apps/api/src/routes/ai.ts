@@ -1,3 +1,4 @@
+import { actorRoleOf } from "../lib/actor-status.js"
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
@@ -32,12 +33,15 @@ const askSchema = z.object({
 async function resolveCaller(tenantId: string, userId: string) {
   const { data, error } = await supabaseAdmin
     .from("employees")
-    .select("id, role")
+    .select("id, role, status")
     .eq("tenant_id", tenantId)
     .eq("user_id", userId)
     .maybeSingle()
   if (error) throw new Error(`AI resolve caller: ${error.message}`)
-  return data as { id: string; role: string } | null
+  if (!data) return null
+  // 有效角色：非在職降成 employee（lib/actor-status.ts）。
+  const row = data as { id: string; role: string; status?: string | null }
+  return { id: row.id, role: actorRoleOf(row.id, row.role, row.status) }
 }
 
 function handleAiError(err: unknown, res: Response, next: NextFunction) {

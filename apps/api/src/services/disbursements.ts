@@ -1848,7 +1848,7 @@ async function replaceAllocations(tenantId: string, disbursementId: string, next
 }
 
 /** 呼叫者：`role` 是 employees.role（`isHrRole` 判斷強制放行用；省略＝非 HR）。 */
-export type Actor = { empId: string | null; role?: string | null }
+export type Actor = { empId: string | null; role?: string | null; active?: boolean }
 
 /**
  * 建立匯款單。`status:'paid'` 立即連動期款（先驗證期款可付，再寫）。

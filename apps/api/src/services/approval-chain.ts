@@ -35,8 +35,9 @@
  * 老闆關（kind='fallback'）只寫老闆一人；任一在職 platform_admin 也能簽、也會收到通知，是在讀取端動態判斷
  * （services/approval-steps.ts stepActorStanding／stepNotifyRecipients），這裡不把 platform_admin 寫進候選。
  *
- * 「跳過本人」規則：主管鏈與老闆都跳過本人（老闆自己請假不該自己簽）；manager 模式
- * 的 hr_admin 退路與 manager_hr 的 HR 關：有別人就避開本人，只剩本人時仍讓單能走。
+ * 「跳過本人」規則：主管鏈與老闆都跳過本人（老闆自己請假不該自己簽）；2026-10-27 起**所有關卡**都不放申請人
+ * （withoutSelfApprovers：固定名單、HR 關、hr_admin 退路也一樣；某關只剩本人 → 略過該關；整條只剩本人 → 交給老闆關，
+ * 老闆是本人時由任一在職 platform_admin 簽）。
  */
 import { supabaseAdmin } from "../lib/supabase.js"
 import { managerChainOfEmployee } from "../middleware/scope.js"
@@ -65,6 +66,8 @@ export interface ChainCandidates {
   accountantEmpIds?: string[]
   /** 老闆必須是最後一關（零用金、出差／公出）；見檔頭。 */
   requireBossFinal?: boolean
+  /** 除了 employeeId 以外也不能簽的人（放款單：送簽人；2026-10-27 業主追加 D）。 */
+  excludeEmpIds?: string[]
 }
 
 /**
@@ -106,8 +109,33 @@ function hrAdminRetreat(c: ChainCandidates): ChainStep | null {
   return { candidateEmpIds: [other ?? hr[0]], kind: "hr_admin" }
 }
 
-/** 純判斷：候選來源 → 有序關卡（每關含候選清單與來源）。 */
+/**
+ * 自己的單不能簽（2026-10-27 業主追加 B）：把申請人（與 `excludeEmpIds`）從每一關的候選拿掉——
+ *   • 拿掉後還有人 → 照走；
+ *   • 拿掉後沒人（例如固定名單只列了本人、唯一的 HR 就是申請人）→ 這關略過（自動往下一關）；
+ *   • 整條都沒人 → 交給老闆（老闆關；老闆不是本人時寫老闆，否則寫申請人本人當名義簽核人——老闆關任一在職
+ *     platform_admin 都能簽，申請人自己簽會被 own_request 擋），不讓單卡在「只有自己能簽」。
+ * 純函式。
+ */
+export function withoutSelfApprovers(c: ChainCandidates, result: ChainResult): ChainResult {
+  if (!result.ok) return result
+  const self = new Set([c.employeeId, ...(c.excludeEmpIds ?? [])].filter((id): id is string => !!id))
+  const steps: ChainStep[] = []
+  for (const step of result.steps) {
+    const candidateEmpIds = step.candidateEmpIds.filter((id) => !self.has(id))
+    if (candidateEmpIds.length > 0) steps.push({ ...step, candidateEmpIds })
+  }
+  if (steps.length > 0) return { ...result, steps }
+  const boss = c.fallbackApproverEmpId && !self.has(c.fallbackApproverEmpId) ? c.fallbackApproverEmpId : null
+  return { ok: true, steps: [{ candidateEmpIds: [boss ?? c.employeeId], kind: "fallback" }], source: "fallback" }
+}
+
+/** 純判斷：候選來源 → 有序關卡（每關含候選清單與來源）。申請人一律不在候選內（withoutSelfApprovers）。 */
 export function pickApproverChain(c: ChainCandidates): ChainResult {
+  return withoutSelfApprovers(c, pickApproverChainRaw(c))
+}
+
+function pickApproverChainRaw(c: ChainCandidates): ChainResult {
   const list = dedupe(c.flow?.approverEmpIds ?? [])
   if (c.flow && c.flow.mode === "list" && list.length > 0) {
     return { ok: true, steps: list.map((id) => ({ candidateEmpIds: [id], kind: "list" })), source: "list" }
@@ -162,6 +190,10 @@ export function pickApproverChain(c: ChainCandidates): ChainResult {
  * 全部在職會計；`c.flow`＝applies_to='disbursement' 的列（list 名單非空才生效）。
  */
 export function pickDisbursementChain(c: ChainCandidates): ChainResult {
+  return withoutSelfApprovers(c, pickDisbursementChainRaw(c))
+}
+
+function pickDisbursementChainRaw(c: ChainCandidates): ChainResult {
   const list = dedupe(c.flow?.approverEmpIds ?? [])
   if (c.flow && c.flow.mode === "list" && list.length > 0) {
     return { ok: true, steps: list.map((id) => ({ candidateEmpIds: [id], kind: "list" })), source: "list" }

@@ -459,6 +459,22 @@ export function actionsFor(bucket: ApprovalBucket): RowActionSpec[] {
   }
 }
 
+/**
+ * 某一列實際顯示的操作（2026-10-27 職責分離）：在 actionsFor(bucket) 之上再收斂——
+ *   • 自己的單：拿掉核准／駁回／代理簽核（後端一律 403 own_request，所有關卡都一樣）；
+ *   • 老闆關：拿掉「代理簽核」（HR 不能代簽老闆關；老闆與 platform_admin 本來就在「待我簽核」直接簽）。
+ * 純函式。
+ */
+export function rowActionsFor(row: Pick<LeaveRequest, "employee_id" | "current_step_kind">, bucket: ApprovalBucket, meId: string | null): RowActionSpec[] {
+  const own = meId !== null && row.employee_id === meId;
+  const boss = isBossStepKind(row.current_step_kind);
+  return actionsFor(bucket).filter((action) => {
+    if (own && (action.key === "approve" || action.key === "reject" || action.key === "proxy_approve")) return false;
+    if (boss && action.key === "proxy_approve") return false;
+    return true;
+  });
+}
+
 /* --------------------------------------------------------- content ----- */
 
 /** ISO → `MM/DD HH:mm`；缺席／無效 → null（`new Date(null)` 會變成 1970 年，不能直接印）。 */

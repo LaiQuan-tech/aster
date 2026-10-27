@@ -1,3 +1,4 @@
+import { actorRoleOf, isActiveStatus } from "../lib/actor-status.js"
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
@@ -45,7 +46,7 @@ async function authorizeRequestAccess(
 ): Promise<{ ok: boolean; notFound?: boolean }> {
   const { data: me, error: meErr } = await supabaseAdmin
     .from("employees")
-    .select("id, role")
+    .select("id, role, status")
     .eq("tenant_id", tenantId)
     .eq("user_id", userId)
     .maybeSingle()
@@ -62,8 +63,11 @@ async function authorizeRequestAccess(
   if (lrErr) throw new Error(`attachments authorize (request): ${lrErr.message}`)
   if (!lr) return { ok: false, notFound: true }
 
-  const isHr = ["hr_admin", "platform_admin"].includes(me.role as string)
+  const meStatus = (me as { status?: string | null }).status
+  const isHr = ["hr_admin", "platform_admin"].includes(actorRoleOf(me.id as string, me.role as string, meStatus))
   if (isHr || lr.employee_id === me.id) return { ok: true }
+  // 非在職（停用／離職）帳號只看得到自己的單（不再以簽核人／主管身分看別人的附件；lib/actor-status.ts）。
+  if (!isActiveStatus(meStatus)) return { ok: false }
 
   // 任一關的簽核者或候選（多級簽核的 HR 覆核關）都可看附件。
   const { data: steps, error: stepsErr } = await supabaseAdmin

@@ -1,3 +1,4 @@
+import { actorRoleOf, isActiveStatus } from "../lib/actor-status.js"
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
@@ -10,6 +11,7 @@ import { enrichRequestRows } from "../services/request-enrich.js"
 import {
   BOSS_STEP_KIND,
   stepActorStanding,
+  canHrOverrideStep,
   stepCandidates,
   stepNotifyRecipients,
   stepSelectCols,
@@ -180,19 +182,27 @@ function asRequestRows(data: unknown): RequestListRow[] {
 const NIL_UUID = "00000000-0000-0000-0000-000000000000"
 
 // Resolve the caller's own employee row (id + role) in this tenant, or null.
+// role 是有效角色；active=false（停用／離職）→ 不得簽核任何關（stepActorStanding）。
 async function resolveSelf(
   tenantId: string,
   userId: string,
-): Promise<{ id: string; role: string } | null> {
+): Promise<{ id: string; role: string; active: boolean } | null> {
   const { data, error } = await supabaseAdmin
     .from("employees")
-    .select("id, role")
+    .select("id, role, status")
     .eq("tenant_id", tenantId)
     .eq("user_id", userId)
     .maybeSingle()
   if (error) throw new Error(`resolve self employee: ${error.message}`)
   if (data) setActor(data.id as string) // 稽核：本請求後續 DB 寫入由 trigger 記 actor
-  return data ? { id: data.id as string, role: data.role as string } : null
+  return data
+    ? {
+        id: data.id as string,
+        // 有效角色：非在職降成 employee、且不得簽核（lib/actor-status.ts）。
+        role: actorRoleOf(data.id as string, data.role as string, (data as { status?: string | null }).status),
+        active: isActiveStatus((data as { status?: string | null }).status),
+      }
+    : null
 }
 
 function isHrRole(role: string | undefined): boolean {
@@ -1036,7 +1046,8 @@ requestsRouter.get(
     }
     try {
       const self = await resolveSelf(tenantId, userId)
-      if (!self) {
+      // 非在職（停用／離職）帳號不是任何關的簽核人（2026-10-27 業主追加 A）。
+      if (!self || !self.active) {
         res.status(200).json({ requests: [] })
         return
       }
@@ -1090,10 +1101,11 @@ requestsRouter.get(
         next(new Error(`GET /requests/pending-approvals (requests): ${rowErr.message}`))
         return
       }
+      // 自己的單一律不列（不能簽自己的單，所有關卡；2026-10-27 業主追加 B）。
       const mine = asRequestRows(rows).filter(
         (r) =>
-          !!stepByRequest.get(r.id)?.has(r.current_step) ||
-          (r.employee_id !== self.id && !!bossStepByRequest.get(r.id)?.has(r.current_step)),
+          r.employee_id !== self.id &&
+          (!!stepByRequest.get(r.id)?.has(r.current_step) || !!bossStepByRequest.get(r.id)?.has(r.current_step)),
       )
       if (mine.length === 0) {
         res.status(200).json({ requests: [] })
@@ -1182,7 +1194,7 @@ async function decide(
   }
 }
 
-type DecisionActor = { id: string; role: string }
+type DecisionActor = { id: string; role: string; active?: boolean }
 
 /** 回應帶出的報銷撤回數（沒跑＝空物件）。 */
 function expenseClaimsField(w: TripClaimWithdrawal | null): {
@@ -1398,12 +1410,13 @@ async function decideOneRequest(params: {
 
   // 輪到我：是該關 approver_emp_id 或候選之一（多級簽核的 HR 覆核關任一 HR 皆可）；老闆關另外
   // 任一在職 platform_admin 也算（2026-10-27 業主：平台管理員就是老闆；動態判斷，進行中的單也適用）。
-  // 老闆關不能簽自己的單（不論角色，HR 代簽也不行）——同 approval-chain「老闆跳過本人」。
+  // 自己的單一律不能簽（所有關卡、HR 代簽、批次都一樣；2026-10-27 業主追加 B）；非在職帳號不能簽（追加 A）。
   const standing = stepActorStanding(step, actor, lr.employee_id)
   if (standing === "own_request") return { ok: false, id: requestId, error: "own_request" }
   const bossByPlatformAdmin = standing === "platform_admin"
   const isCandidate = standing === "candidate" || bossByPlatformAdmin
-  const canOverride = allowHrOverride && isHrRole(actor.role)
+  // HR 代簽：老闆關不准（追加 C：老闆關只限老闆本人或在職 platform_admin），其他關照舊。
+  const canOverride = allowHrOverride && canHrOverrideStep(step, actor)
   if (!isCandidate && !canOverride) {
     return { ok: false, id: requestId, error: "not_current_approver" }
   }

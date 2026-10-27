@@ -1,3 +1,4 @@
+import { actorRoleOf } from "../lib/actor-status.js"
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
@@ -26,13 +27,15 @@ export const exportsRouter = Router()
 async function resolveSelf(tenantId: string, userId: string): Promise<{ id: string; role: string } | null> {
   const { data, error } = await supabaseAdmin
     .from("employees")
-    .select("id, role")
+    .select("id, role, status")
     .eq("tenant_id", tenantId)
     .eq("user_id", userId)
     .maybeSingle()
   if (error) throw new Error(`exports (resolve self): ${error.message}`)
   if (data) setActor(data.id as string) // 稽核：本請求後續 DB 寫入由 trigger 記 actor
-  return data ? { id: data.id as string, role: data.role as string } : null
+  return data
+    ? { id: data.id as string, role: actorRoleOf(data.id as string, data.role as string, (data as { status?: string | null }).status) }
+    : null
 }
 
 /** 'YYYY-MM' → '115-06'（民國年，檔名用）。 */

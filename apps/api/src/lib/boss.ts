@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "./supabase.js"
+import { actorIsInactive } from "./actor-status.js"
 
 /**
  * 「老闆」身分的共用判準（2026-10-27 業主：以後平台管理員就是老闆）。
@@ -32,13 +33,17 @@ export function isConfiguredBoss(bossEmpId: string | null | undefined, empId: st
 }
 
 /**
- * 呼叫者算不算老闆：設定的老闆本人，或 platform_admin（不需要老闆已設定）。沒有員工 id → false。純函式。
+ * 呼叫者算不算老闆：設定的老闆本人，或 platform_admin（不需要老闆已設定）。沒有員工 id → false。
+ * 非在職的呼叫者一律 false（見 lib/actor-status.ts；讀請求情境的標記，其餘為純判斷）。
  */
 export function isBossOrPlatformAdmin(
   bossEmpId: string | null | undefined,
-  caller: { id?: string | null; role?: string | null } | null | undefined,
+  caller: { id?: string | null; role?: string | null; active?: boolean | null } | null | undefined,
 ): boolean {
   if (!caller?.id) return false
+  // 非在職（停用／離職）的老闆或平台管理員不得行使老闆身分（2026-10-27 業主追加；lib/actor-status.ts）：
+  // 呼叫端明確帶 active=false，或本請求解出呼叫者時已標記為非在職。
+  if (actorIsInactive(caller)) return false
   return isPlatformAdminRole(caller.role) || isConfiguredBoss(bossEmpId, caller.id)
 }
 

@@ -282,13 +282,11 @@ describe("核准狀態機（#7）", () => {
     expect(fake.db.bonus_runs.find((r) => r.id === id)?.status).toBe("draft")
   })
 
-  it("老闆兼 HR 自己送審自己核准：允許，但標註送審人與核准人相同；老闆設定大寫 uuid 也認得", async () => {
+  it("老闆兼 HR 自己送審 → 沒有別人能核准（沒有 platform_admin）→ 送審 409 no_other_approver（2026-10-27 追加 F）；老闆設定大寫 uuid 也認得", async () => {
     fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { approval: { fallbackApproverEmpId: HR_ID.toUpperCase() }, bonus: { poolBasis: "gross_profit" } } }]
     const id = await createDraft()
-    await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
-    const ok = await req("post", `/bonus-runs/${id}/approve`, HR_TOKEN).send({})
-    expect(ok.status).toBe(200)
-    expect(ok.body.run).toMatchObject({ status: "approved", selfApproved: true })
+    const sub = await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
+    expect([sub.status, sub.body.error]).toEqual([409, "no_other_approver"])
   })
 
   it("platform_admin（不是老闆）可以核准／退回；列表、明細、ESS 簽核頁 canApprove=true；稽核記實際操作者（2026-10-27）", async () => {
@@ -320,20 +318,60 @@ describe("核准狀態機（#7）", () => {
     expect(audits.some((a) => a.actor_emp_id === PA_ID && (a.new_row as Row)?.status === "draft")).toBe(true)
   })
 
-  it("platform_admin 自己送審自己核准：允許並標註 selfApproved；老闆沒設定時 platform_admin 仍可核准，HR 仍 409/403", async () => {
+  it("送審人不能核准／退回自己送審的批次（追加 F）：platform_admin 自己送審 → 自己核准／退回 403 self_approval_forbidden，明細 selfSubmitted；老闆照舊可核准", async () => {
     const PA_ID = "bbbbbbbb-0000-4000-8000-0000000000aa"
     fake.db.employees.push(employee(PA_ID, "user-pa", "platform_admin", "平台管理員"))
     const id = await createDraft()
     const sub = await req("post", `/bonus-runs/${id}/submit`, "user-pa").send({})
     expect(sub.status, JSON.stringify(sub.body)).toBe(200)
-    // 送審後老闆設定被清掉：一般 HR 照舊 409 boss_not_configured，platform_admin 可以核准
+    // 送審通知不寄給操作者本人（追加 H）：只有老闆收到。
+    const pending = fake.db.notifications.filter((n) => n.type === "bonus_run" && /待核准/.test(String(n.title)))
+    expect(pending.map((n) => n.employee_id)).toEqual([BOSS_ID])
+
+    const self = await req("post", `/bonus-runs/${id}/approve`, "user-pa").send({})
+    expect([self.status, self.body.error]).toEqual([403, "self_approval_forbidden"])
+    const selfBack = await req("post", `/bonus-runs/${id}/return`, "user-pa").send({ reason: "自己退" })
+    expect([selfBack.status, selfBack.body.error]).toEqual([403, "self_approval_forbidden"])
+    const detail = await req("get", `/bonus-runs/${id}`, "user-pa")
+    expect(detail.body).toMatchObject({ canApprove: true, selfSubmitted: true })
+    const ess = await req("get", "/my/bonus-approvals", "user-pa")
+    expect(ess.body.runs.map((r: { selfSubmitted: boolean }) => r.selfSubmitted)).toEqual([true])
+    const bossEss = await req("get", "/my/bonus-approvals", BOSS_TOKEN)
+    expect(bossEss.body.runs.map((r: { selfSubmitted: boolean }) => r.selfSubmitted)).toEqual([false])
+
+    const ok = await req("post", `/bonus-runs/${id}/approve`, BOSS_TOKEN).send({})
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    expect(ok.body.run).toMatchObject({ status: "approved", approvedByEmpId: BOSS_ID, selfApproved: false })
+  })
+
+  it("撤回通知不寄給操作者本人（追加 H）：platform_admin 撤回 HR 送審的批次 → 只通知老闆", async () => {
+    const PA_ID = "bbbbbbbb-0000-4000-8000-0000000000aa"
+    fake.db.employees.push(employee(PA_ID, "user-pa", "platform_admin", "平台管理員"))
+    const id = await createDraft()
+    await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
+    const w = await req("post", `/bonus-runs/${id}/withdraw`, "user-pa").send({ reason: "資料要補" })
+    expect(w.status, JSON.stringify(w.body)).toBe(200)
+    const withdrawn = fake.db.notifications.filter((n) => n.payload?.event === "withdrawn")
+    expect(withdrawn.map((n) => n.employee_id)).toEqual([BOSS_ID])
+  })
+
+  it("老闆沒設定時 platform_admin 仍可核准（HR 送審），HR 仍 409/403", async () => {
+    const PA_ID = "bbbbbbbb-0000-4000-8000-0000000000aa"
+    fake.db.employees.push(employee(PA_ID, "user-pa", "platform_admin", "平台管理員"))
+    const id = await createDraft()
+    const sub = await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
+    expect(sub.status, JSON.stringify(sub.body)).toBe(200)
     fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { bonus: { poolBasis: "gross_profit" } } }]
     const hr = await req("post", `/bonus-runs/${id}/approve`, HR_TOKEN).send({})
     expect([hr.status, hr.body.error]).toEqual([409, "boss_not_configured"])
     expect((await req("get", "/my/bonus-approvals", HR_TOKEN)).body).toEqual({ canApprove: false, runs: [] })
     const ok = await req("post", `/bonus-runs/${id}/approve`, "user-pa").send({})
     expect(ok.status, JSON.stringify(ok.body)).toBe(200)
-    expect(ok.body.run).toMatchObject({ status: "approved", approvedByEmpId: PA_ID, selfApproved: true })
+    expect(ok.body.run).toMatchObject({ status: "approved", approvedByEmpId: PA_ID, selfApproved: false })
+    // 追加 H：platform_admin 核准的通知不寫「老闆已核准」，寫實際核准人。
+    const approvedNotice = fake.db.notifications.find((n) => n.type === "bonus_run" && /已核准/.test(String(n.title)))
+    expect(String(approvedNotice?.body)).toBe("平台管理員已核准，可以發放。")
+    expect(String(approvedNotice?.body)).not.toContain("老闆")
   })
 
   it("老闆沒設定但有在職 platform_admin → 可以送審（通知 platform_admin）；沒有 platform_admin 才 409", async () => {

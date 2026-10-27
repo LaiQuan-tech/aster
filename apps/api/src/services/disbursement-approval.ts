@@ -6,6 +6,7 @@ import { loadChainCandidates, pickDisbursementChain, type ChainSource, type Chai
 import {
   BOSS_STEP_KIND,
   canActOnStep,
+  canHrOverrideStep,
   stepActorStanding,
   stepCandidates,
   stepNotifyRecipients,
@@ -212,18 +213,33 @@ function noticeBody(d: DisbursementRow, step: number, totalSteps: number, stepKi
 }
 
 /** 放款單的「申請人」＝建單人（沒有就送簽人）；簽核鏈也是從這個人算（老闆關跳過本人）。 */
-function ownerOf(d: DisbursementRow): string | null {
-  return d.created_by_emp_id ?? d.submitted_by_emp_id ?? null
+/** 「自己的單」：建單人＋送簽人都算（2026-10-27 業主追加 D）——兩人都不能簽這張單的任何一關。 */
+function requestersOf(d: Pick<DisbursementRow, "created_by_emp_id" | "submitted_by_emp_id">): string[] {
+  return uniq([d.created_by_emp_id, d.submitted_by_emp_id ?? null]).filter((id): id is string => !!id)
+}
+
+/**
+ * 同一輪簽核中 actor 是否已簽過本關之前的任一關（含代簽：acted_by_emp_id；舊列沒有 acted_by_emp_id 時看已核准關的
+ * approver_emp_id）。同一人不能簽兩關（2026-10-27 業主追加 D）。純函式。
+ */
+export function signedEarlierStep(rows: DisbursementStepRow[], step: Pick<DisbursementStepRow, "round" | "step_order">, actorEmpId: string): boolean {
+  const me = actorEmpId.toLowerCase()
+  return rows.some((r) => {
+    if (r.round !== step.round || r.step_order >= step.step_order) return false
+    if (r.decision === "pending") return false
+    const signer = r.acted_by_emp_id ?? (r.decision === "approved" ? r.approver_emp_id : null)
+    return !!signer && signer.toLowerCase() === me
+  })
 }
 
 /**
  * 輪到某關時要通知的人：該關候選；老闆關另加租戶所有在職 platform_admin（2026-10-27 業主：平台管理員就是老闆），
  * 去重、不寄建單人本人。查 platform_admin 失敗 → 只寄候選。
  */
-async function stepRecipients(tenantId: string, step: StepLike & { step_kind?: string | null }, owner: string | null): Promise<string[]> {
+async function stepRecipients(tenantId: string, step: StepLike & { step_kind?: string | null }, owners: Array<string | null>): Promise<string[]> {
   if (step.step_kind !== BOSS_STEP_KIND) return stepCandidates(step)
   const admins = await loadPlatformAdminEmpIds(tenantId).catch(() => [] as string[])
-  return stepNotifyRecipients(step, admins, [owner])
+  return stepNotifyRecipients(step, admins, owners)
 }
 
 function basePayload(d: DisbursementRow, extra: Record<string, unknown>): Record<string, unknown> {
@@ -311,7 +327,8 @@ export async function submitDisbursement(
   const chainOwner = current.created_by_emp_id ?? actor.empId
   if (!chainOwner) throw new DisbursementError(409, "no_approver_available")
   const candidates = await loadChainCandidates(tenantId, chainOwner, "disbursement")
-  const chain = pickDisbursementChain(candidates)
+  // 送簽人（可能不是建單人）也不能簽自己送的單（2026-10-27 業主追加 D）。
+  const chain = pickDisbursementChain({ ...candidates, excludeEmpIds: actor.empId ? [actor.empId] : [] })
   if (!chain.ok) throw new DisbursementError(409, chain.error)
 
   const round = (current.approval_round ?? 0) + 1
@@ -345,7 +362,7 @@ export async function submitDisbursement(
           candidate_emp_ids: chain.steps[0].candidateEmpIds,
           step_kind: chain.steps[0].kind,
         },
-        chainOwner,
+        [chainOwner, actor.empId],
       ),
       type: "approval",
       title: `待簽核：放款單 ${current.disbursement_no}`,
@@ -429,11 +446,16 @@ export async function decideDisbursement(params: {
 
   // 老闆關：任一在職 platform_admin 也是簽核人；建單人本人不能簽自己單子的老闆關（HR 代簽也不行）。
   // 動態判斷（不改寫既有關卡），已在簽核中的單也適用。同 routes/requests.ts decideOneRequest。
-  const standing = stepActorStanding(step, { id: actor.empId, role: actor.role }, ownerOf(current))
+  // 自己的單（建單人或送簽人）任何一關都不能簽（含 HR 代簽；追加 B／D）；非在職不能簽（追加 A）。
+  const stepActor = { id: actor.empId, role: actor.role, active: actor.active }
+  const standing = stepActorStanding(step, stepActor, requestersOf(current))
   if (standing === "own_request") throw new DisbursementError(403, "own_request")
   const isCandidate = standing === "candidate" || standing === "platform_admin"
-  const canOverride = allowHrOverride && isHrRole(actor.role)
+  // HR 代簽：老闆關不准（追加 C），其他關照舊。
+  const canOverride = allowHrOverride && canHrOverrideStep(step, stepActor)
   if (!isCandidate && !canOverride) throw new DisbursementError(403, "not_current_approver")
+  // 同一輪同一人不能簽兩關（含代簽；追加 D）。
+  if (signedEarlierStep(rows, step, actor.empId)) throw new DisbursementError(403, "already_signed_step")
   // 候選之一（含 platform_admin 簽老闆關）簽核 → approver_emp_id 改寫成實際簽的人；HR 代簽不改寫（同假單路徑）。
   const takeOver = isCandidate && step.approver_emp_id !== actor.empId
 
@@ -515,7 +537,7 @@ export async function decideDisbursement(params: {
     try {
       notified = await enqueue({
         tenantId,
-        employeeIds: await stepRecipients(tenantId, next, ownerOf(current)),
+        employeeIds: await stepRecipients(tenantId, next, requestersOf(current)),
         type: "approval",
         title: `待簽核：放款單 ${current.disbursement_no}`,
         body: noticeBody(current, next.step_order, totalSteps, next.step_kind),
@@ -766,7 +788,9 @@ export async function listPendingDisbursementApprovals(
     const rowSteps = byDisbursement.get(row.id) ?? []
     const step = currentStepOf(row, rowSteps)
     if (!step) continue
-    const mine = canActOnStep(step, { id: actor.empId, role: actor.role }, ownerOf(row))
+    const mine =
+      canActOnStep(step, { id: actor.empId, role: actor.role, active: actor.active }, requestersOf(row)) &&
+      !signedEarlierStep(rowSteps, step, actor.empId)
     if (!mine && !wantAll) continue
     picked.push({ row, step, total: rowSteps.filter((s) => s.round === step.round).length, mine })
   }

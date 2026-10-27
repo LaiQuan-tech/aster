@@ -266,8 +266,8 @@ describe("POST /requests/batch-decision — 主管（非 HR）批次簽自己待
 })
 
 describe("POST /requests/batch-decision — 一般員工呼叫", () => {
+  // 申請人本人另見下一個測試（2026-10-27 起回 own_request）。
   it.each([
-    ["申請人本人", STAFF_TOKEN],
     ["不相干的同事", OTHER_TOKEN],
     ["別張單的主管（不是這幾張的簽核人）", MGR2_TOKEN],
   ])("%s批次核准別人待簽的 2 張 → 每張都 not_current_approver、整批 200、什麼都不寫", async (_label, token) => {
@@ -290,6 +290,20 @@ describe("POST /requests/batch-decision — 一般員工呼叫", () => {
       expect(stepRows(id)[0].decision).toBe("pending")
     }
     expect(usedHours(LT_PLAIN)).toBe(0)
+  })
+
+  it("申請人本人批次核准自己的 2 張 → 每張都 own_request（自己的單一律不能簽）、整批 200、什麼都不寫", async () => {
+    const r1 = await fileLeave([MGR_ID])
+    const r2 = await fileLeave([MGR_ID])
+    const writesBefore = fake.writes.length
+    const res = await batch(STAFF_TOKEN, { ids: [r1, r2], action: "approve", comment: "我來簽" })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.results).toEqual([
+      { ok: false, id: r1, error: "own_request" },
+      { ok: false, id: r2, error: "own_request" },
+    ])
+    expect(fake.writes.slice(writesBefore)).toEqual([])
+    for (const id of [r1, r2]) expect(requestRow(id).status).toBe("pending")
   })
 
   it("一般員工批次駁回別人的單同樣被拒（駁回也不能越權）", async () => {

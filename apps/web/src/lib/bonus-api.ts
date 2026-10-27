@@ -147,6 +147,8 @@ export interface BonusRunDetail {
   snapshot: BonusRunSnapshot | null
   /** 呼叫者是不是老闆（能核准／退回）。 */
   canApprove?: boolean
+  /** 呼叫者就是送審人（2026-10-27）：不能核准／退回自己送審的批次，畫面隱藏按鈕並說明（見 SELF_SUBMITTED_NOTE）。 */
+  selfSubmitted?: boolean
   /** PATCH 重算後從送審中／已核准退回草稿。 */
   returnedToDraft?: boolean
   /**
@@ -332,6 +334,9 @@ export const BONUS_SKIP_REASON_LABELS: Record<BonusSkipReason, string> = {
 }
 
 const BONUS_ERRORS: Record<string, string> = {
+  // 2026-10-27 職責分離（放最前面：完整字串、不會被其他 code 包含）。
+  self_approval_forbidden: "你是這批的送審人，不能核准或退回自己送審的批次，請由其他老闆或平台管理員處理",
+  no_other_approver: "除了你之外沒有人能核准（送審人不能核准自己送審的批次）——請改由其他 HR 送審，或先新增一位平台管理員",
   label_exists: "這個期別已經有一筆批次（同期別只能一筆；先刪掉舊草稿再建）",
   not_draft: "這個狀態不能做這個動作（已發放的批次是凍結快照；送審中／已核准要先退回草稿才能刪除）",
   not_approved: "要先送審並經老闆核准才能發放",
@@ -352,6 +357,14 @@ const BONUS_ERRORS: Record<string, string> = {
   invalid_body: "欄位格式不正確",
   invalid_query: "查詢參數不正確",
   not_found: "找不到這筆批次（可能已刪除）",
+}
+
+/** 送審人看到的說明（隱藏核准／退回按鈕時顯示）。 */
+export const SELF_SUBMITTED_NOTE = "你是這批的送審人，不能核准或退回自己送審的批次，請由其他老闆或平台管理員處理。"
+
+/** 這個人能不能對這批按核准／退回：老闆或平台管理員，且不是送審人。純函式。 */
+export function canDecideBonusRun(detail: Pick<BonusRunDetail, "canApprove" | "selfSubmitted"> | null | undefined): boolean {
+  return detail?.canApprove === true && detail.selfSubmitted !== true
 }
 
 export function humanizeBonusError(err: unknown, fallback: string): string {

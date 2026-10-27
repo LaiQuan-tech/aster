@@ -112,10 +112,13 @@ describe("放款單老闆關：平台管理員也可簽", () => {
     expect(audit?.new_row).toMatchObject({ byProxy: false, bossByPlatformAdmin: true })
   })
 
-  it("hr_admin 照舊是 HR 代簽（approver_emp_id 不改寫），沒被放寬成老闆關簽核人", async () => {
+  it("hr_admin 不能 HR 代簽老闆關（2026-10-27 業主追加 C）→ 403 not_current_approver", async () => {
     await submittedBy(CLERK, "employee")
-    await decideDisbursement({ action: "approve", tenantId: TENANT_ID, id: DISB, actor: { empId: HR, role: "hr_admin" } })
-    expect(steps()[0]).toMatchObject({ approver_emp_id: BOSS, acted_by_emp_id: HR })
+    const err = await decideDisbursement({ action: "approve", tenantId: TENANT_ID, id: DISB, actor: { empId: HR, role: "hr_admin" } }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(DisbursementError)
+    expect((err as DisbursementError).code).toBe("not_current_approver")
+    expect(steps()[0]).toMatchObject({ decision: "pending", approver_emp_id: BOSS })
+    expect(header().status).toBe("pending_approval")
   })
 
   it("platform_admin 自己建的單：不通知自己、清單看不到、簽了 403 own_request；另一位可簽", async () => {

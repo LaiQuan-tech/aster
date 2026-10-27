@@ -1,6 +1,7 @@
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
 import { departmentsHaveManagerList } from "../lib/schema-compat.js"
+import { actorRoleOf, isActiveStatus } from "../lib/actor-status.js"
 
 /**
  * 共用授權/範圍 helper（收斂原本散落各 route 的 resolveSelf/isHrRole，並加上
@@ -10,8 +11,11 @@ import { departmentsHaveManagerList } from "../lib/schema-compat.js"
 
 export interface SelfEmployee {
   id: string
+  /** **有效角色**：非在職（status ≠ 'active'）一律降成 'employee'（lib/actor-status.ts）。 */
   role: string
   deptId: string | null
+  /** 在職（status = 'active'）。false → 不得行使任何管理／簽核／老闆權限（role 已降級）。 */
+  active?: boolean
 }
 
 export function isHrRole(role: string | null | undefined): boolean {
@@ -33,21 +37,27 @@ export function isAccountantRole(role: string | null | undefined): boolean {
   return role === "accountant"
 }
 
-/** 由 (tenantId, userId) 解出呼叫者的 employee {id, role, deptId}；查無回 null。 */
+/**
+ * 由 (tenantId, userId) 解出呼叫者的 employee {id, role, deptId, active}；查無回 null。
+ * role 是**有效角色**：非在職帳號降成 'employee'（仍可看自己的 ESS 資料），並在本請求標記為非在職
+ * （老闆／簽核人判斷會擋，見 lib/actor-status.ts）。
+ */
 export async function resolveSelf(tenantId: string, userId: string): Promise<SelfEmployee | null> {
   const { data, error } = await supabaseAdmin
     .from("employees")
-    .select("id, role, dept_id")
+    .select("id, role, dept_id, status")
     .eq("tenant_id", tenantId)
     .eq("user_id", userId)
     .maybeSingle()
   if (error) throw new Error(`resolveSelf: ${error.message}`)
   if (!data) return null
   setActor(data.id as string) // 稽核：本請求後續 DB 寫入由 trigger 記 actor
+  const status = (data.status as string | null | undefined) ?? null
   return {
     id: data.id as string,
-    role: data.role as string,
+    role: actorRoleOf(data.id as string, data.role as string, status),
     deptId: (data.dept_id as string | null) ?? null,
+    active: isActiveStatus(status),
   }
 }
 

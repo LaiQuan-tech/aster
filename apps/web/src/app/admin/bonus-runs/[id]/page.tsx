@@ -6,6 +6,7 @@ import { Card, DetailHeading, Empty, ErrorText, PrimaryButton, inputCls, labelCl
 import AuditDrawer from "@/components/AuditDrawer";
 import {
   approveBonusRun,
+  canDecideBonusRun,
   deleteBonusRun,
   exportBonusRunXlsx,
   fmtMoney,
@@ -15,6 +16,7 @@ import {
   payBonusRun,
   returnBonusRun,
   reverseBonusRun,
+  SELF_SUBMITTED_NOTE,
   submitBonusRun,
   todayKey,
   withdrawBonusRun,
@@ -82,14 +84,16 @@ export default function BonusRunDetailPage() {
 
   /** 寫入動作的回應不帶 canApprove（只有 GET 帶），沿用頁面載入時的值。 */
   const keepDetail = useCallback((d: BonusRunDetail) => {
-    setDetail((prev) => ({ ...d, canApprove: d.canApprove ?? prev?.canApprove }));
+    setDetail((prev) => ({ ...d, canApprove: d.canApprove ?? prev?.canApprove, selfSubmitted: d.selfSubmitted ?? prev?.selfSubmitted }));
   }, []);
 
   const run = detail?.run ?? null;
   const isDraft = run?.status === "draft";
   const isPending = run?.status === "pending_approval";
   const isApproved = run?.status === "approved";
-  const canApprove = detail?.canApprove === true;
+  // 送審人不能核准／退回自己送審的批次（2026-10-27）：老闆／平台管理員身分但是送審人 → 隱藏按鈕、顯示說明。
+  const selfSubmitted = detail?.canApprove === true && detail.selfSubmitted === true;
+  const canApprove = canDecideBonusRun(detail);
 
   async function submit() {
     if (!run) return;
@@ -369,8 +373,9 @@ export default function BonusRunDetailPage() {
                 {busy === "withdraw" ? "撤回中…" : "撤回送審…"}
               </button>
             )}
-            {!canApprove && isPending && <span className="text-xs text-gray-500">只有老闆或平台管理員能核准或退回；送審中 HR 可撤回。</span>}
-            {!canApprove && isApproved && <span className="text-xs text-gray-500">已核准後 HR 不能撤回，要改請老闆或平台管理員退回。</span>}
+            {selfSubmitted && (isPending || isApproved) && <span className="text-xs text-gray-500">{SELF_SUBMITTED_NOTE}</span>}
+            {!canApprove && !selfSubmitted && isPending && <span className="text-xs text-gray-500">只有老闆或平台管理員能核准或退回；送審中 HR 可撤回。</span>}
+            {!canApprove && !selfSubmitted && isApproved && <span className="text-xs text-gray-500">已核准後 HR 不能撤回，要改請老闆或平台管理員退回。</span>}
           </div>
           {showPay && (
             <div className="mt-3 flex flex-wrap items-end gap-2 rounded-xl bg-gray-50 p-3">

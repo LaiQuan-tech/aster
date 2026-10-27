@@ -245,14 +245,13 @@ describe("老闆關：platform_admin 簽核", () => {
     expect(res.body.error).toBe("not_current_approver")
   })
 
-  it("hr_admin 照舊只能 HR 代簽：記成 HR 代簽、approver_emp_id 不改寫（沒有被放寬成老闆關簽核人）", async () => {
+  it("hr_admin 不能 HR 代簽老闆關（2026-10-27 業主追加 C）→ 403 not_current_approver、什麼都不改", async () => {
     const id = await pettyAtBossStep()
     const res = await post(`/requests/${id}/approve`, HR_TOKEN).send({})
-    expect(res.status, JSON.stringify(res.body)).toBe(200)
-    expect(stepRows(id)[1]).toMatchObject({ approver_emp_id: BOSS_ID, acted_by_emp_id: HR_ID })
-    const audit = (fake.db.audit_logs ?? []).find((r) => r.record_id === id && String(r.context ?? "").includes("最終核准"))
-    expect(String(audit?.context)).toContain("HR 代簽")
-    expect(audit?.new_row).toMatchObject({ hrOverride: true, bossByPlatformAdmin: false })
+    expect(res.status, JSON.stringify(res.body)).toBe(403)
+    expect(res.body.error).toBe("not_current_approver")
+    expect(requestRow(id).status).toBe("pending")
+    expect(stepRows(id)[1]).toMatchObject({ decision: "pending", approver_emp_id: BOSS_ID })
   })
 })
 

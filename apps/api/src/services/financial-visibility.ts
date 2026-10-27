@@ -24,7 +24,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
  * 但上面三項（專案毛利、獎金批次毛利、獎金分潤）照舊。
  */
 
-type Caller = Pick<SelfEmployee, "id" | "role">
+type Caller = Pick<SelfEmployee, "id" | "role" | "active">
 
 /** 純函式：給定老闆 id 與本人的個人功能開關，判斷看不看得到集團財務。 */
 export function canSeeGroupFinancials(

@@ -1,3 +1,4 @@
+import { actorRoleOf } from "../lib/actor-status.js"
 import crypto from "node:crypto"
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
@@ -964,7 +965,7 @@ announcementsRouter.post(
       if (targetEmpId !== selfEmpId) {
         const { data: me, error: meErr } = await supabaseAdmin
           .from("employees")
-          .select("role")
+          .select("role, status")
           .eq("tenant_id", tenantId)
           .eq("id", selfEmpId)
           .maybeSingle()
@@ -972,7 +973,8 @@ announcementsRouter.post(
           next(new Error(`POST acknowledge (role): ${meErr.message}`))
           return
         }
-        if (!["hr_admin", "platform_admin"].includes((me?.role as string) ?? "")) {
+        // 有效角色：非在職降成 employee（lib/actor-status.ts）。
+        if (!["hr_admin", "platform_admin"].includes(actorRoleOf(selfEmpId, (me?.role as string) ?? "", (me as { status?: string | null } | null)?.status))) {
           res.status(403).json({ error: "hr_admin_required" })
           return
         }

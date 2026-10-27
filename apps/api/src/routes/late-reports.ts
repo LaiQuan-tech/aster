@@ -7,6 +7,7 @@ import {
   LATE_REASON_MAX,
   LateReportNotFoundError,
   LateReportSheetFrozenError,
+  LateReportOwnDecisionError,
   decideLateReport,
   lateReportScope,
   listLateReports,
@@ -75,7 +76,13 @@ lateReportsRouter.get(
         decision: decision ?? "all",
         employeeIds: scope.all ? undefined : scope.employeeIds,
       })
-      res.status(200).json({ lateReports, canDecide: scope.isBoss, scope: scope.all ? "all" : "team" })
+      // own：這筆是呼叫者自己的遲到說明——自己的不能自己決定（2026-10-27 業主追加 E），前端不給按鈕、紅點不算。
+      const selfId = self.id.toLowerCase()
+      res.status(200).json({
+        lateReports: lateReports.map((r) => ({ ...r, own: r.employeeId.toLowerCase() === selfId })),
+        canDecide: scope.isBoss,
+        scope: scope.all ? "all" : "team",
+      })
     } catch (err) {
       next(err)
     }
@@ -125,6 +132,10 @@ lateReportsRouter.post(
     } catch (err) {
       if (err instanceof LateReportNotFoundError) {
         res.status(404).json({ error: "not_found" })
+        return
+      }
+      if (err instanceof LateReportOwnDecisionError) {
+        res.status(403).json({ error: "own_late_report", message: "不能決定自己的遲到說明，請由其他老闆或平台管理員決定" })
         return
       }
       if (err instanceof LateReportSheetFrozenError) {

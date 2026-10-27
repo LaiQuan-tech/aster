@@ -1,3 +1,4 @@
+import { effectiveRole } from "../lib/actor-status.js"
 import type { Request, Response, NextFunction } from "express"
 import { getUserFromToken } from "../lib/supabase.js"
 import { supabaseAdmin } from "../lib/supabase.js"
@@ -209,14 +210,15 @@ async function identityOf(token: string): Promise<{ tenantId: string; role: stri
   if (user && typeof tenantId === "string" && tenantId) {
     const { data } = await supabaseAdmin
       .from("employees")
-      .select("role, employment_type")
+      .select("role, employment_type, status")
       .eq("tenant_id", tenantId)
       .eq("user_id", user.userId)
       .maybeSingle()
     if (data) {
       value = {
         tenantId,
-        role: (data.role as string | null) ?? "",
+        // 有效角色：非在職降成 employee（lib/actor-status.ts）。
+        role: effectiveRole((data.role as string | null) ?? "", (data as { status?: string | null }).status),
         employmentType: (data.employment_type as string | null) ?? null,
       }
     }

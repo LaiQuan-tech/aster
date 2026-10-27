@@ -13,6 +13,7 @@ import { seedHireAcknowledgements } from "../services/hire-acknowledgements.js"
 import {
   assertCanAssignRole,
   assertCanChangeRole,
+  assertCanChangeStatus,
   assertCanManageCredentials,
   canonicalRole,
   isPlatformAdminPromotion,
@@ -98,7 +99,7 @@ function generatePassword(): string {
 async function callerOf(req: Request, tenantId: string): Promise<PrivilegeCaller | null> {
   const userId = req.auth?.userId
   const self = userId ? await resolveSelf(tenantId, userId) : null
-  return self ? { id: self.id, role: self.role } : null
+  return self ? { id: self.id, role: self.role, active: self.active } : null
 }
 
 /**
@@ -559,6 +560,30 @@ employeesRouter.patch(
         patch.features = merged
       }
 
+      // 受保護帳號（老闆、老闆指定解鎖人、hr_admin、platform_admin）的在職狀態只有老闆或 platform_admin 能改（追加 G）。
+      if (parsed.data.status !== undefined) {
+        const { data: target, error: targetErr } = await supabaseAdmin
+          .from("employees")
+          .select("id, role, status")
+          .eq("tenant_id", tenantId)
+          .eq("id", id)
+          .maybeSingle()
+        if (targetErr) {
+          next(new Error(`PATCH /employees/${id} (load status): ${targetErr.message}`))
+          return
+        }
+        if (!target) {
+          res.status(404).json({ error: "not_found" })
+          return
+        }
+        await assertCanChangeStatus(
+          tenantId,
+          await callerOf(req, tenantId),
+          { id: String(id), role: target.role as string, status: (target.status as string | null) ?? null },
+          parsed.data.status,
+        )
+      }
+
       if (parsed.data.role !== undefined) {
         const { data: target, error: targetErr } = await supabaseAdmin
           .from("employees")
@@ -800,6 +825,27 @@ employeesRouter.post(
     const tenantId = res.locals.tenantId as string
     const { id } = req.params
     try {
+      // 受保護帳號只有老闆或 platform_admin 能停用（追加 G）。
+      const { data: target, error: targetErr } = await supabaseAdmin
+        .from("employees")
+        .select("id, role, status")
+        .eq("tenant_id", tenantId)
+        .eq("id", id)
+        .maybeSingle()
+      if (targetErr) {
+        next(new Error(`POST /employees/${id}/deactivate (load): ${targetErr.message}`))
+        return
+      }
+      if (!target) {
+        res.status(404).json({ error: "not_found" })
+        return
+      }
+      await assertCanChangeStatus(
+        tenantId,
+        await callerOf(req, tenantId),
+        { id: String(id), role: target.role as string, status: (target.status as string | null) ?? null },
+        "inactive",
+      )
       const { data, error } = await supabaseAdmin
         .from("employees")
         .update({ status: "inactive", terminated_at: new Date().toISOString().slice(0, 10) })

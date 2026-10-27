@@ -1,5 +1,7 @@
+import { actorIsInactive } from "../lib/actor-status.js"
+
 /**
- * approval_steps 的候選簽核人小工具（純函式，routes/requests.ts、
+ * approval_steps 的候選簽核人小工具（純函式；非在職判斷另讀請求情境標記，見 lib/actor-status.ts。routes/requests.ts、
  * routes/attachments.ts、services/request-enrich.ts 共用）。
  *
  * 一關的候選＝`candidate_emp_ids`（migration 0049）；null／空陣列＝只有
@@ -57,35 +59,60 @@ function sameId(a: string | null | undefined, b: string | null | undefined): boo
 export interface StepActor {
   id: string
   role?: string | null
+  /** false＝非在職（停用／離職）：不得簽任何關。省略＝在職（另會查本請求的非在職標記，見 lib/actor-status.ts）。 */
+  active?: boolean | null
+}
+
+/** 申請人：一個 id，或多個（放款單＝建單人＋送簽人）。 */
+export type StepRequester = string | null | undefined | ReadonlyArray<string | null | undefined>
+
+function requesterIds(requester: StepRequester): string[] {
+  const list = Array.isArray(requester) ? requester : [requester]
+  return (list as Array<string | null | undefined>).filter((id): id is string => !!id)
 }
 
 /**
  * actor 能不能以「這一關的簽核人」身分簽（核准／駁回）：
- *   • 老闆關且 actor 是申請人本人 → 不行（`own_request`；不論角色、不論是不是候選）。
+ *   • actor 是申請人本人（放款單＝建單人或送簽人）→ 不行（`own_request`；**所有關卡**、不論角色、不論是不是候選；
+ *     2026-10-27 業主追加 B，之前只擋老闆關）。HR 代簽也走不過——呼叫端在判斷代簽前先看這個結果。
+ *   • actor 非在職（停用／離職）→ 不行（`null`；2026-10-27 業主追加 A）。
  *   • 是 approver_emp_id 或候選之一 → 行（`candidate`）。
  *   • 老闆關且 actor 是 platform_admin → 行（`platform_admin`）。
- *   • 其他 → 不行（`null`）。HR 代簽（allowHrOverride）是另一條路，由呼叫端判斷。
- * 純函式。
+ *   （已在簽核中的舊單若某一關的候選只有申請人本人：非老闆關由 HR／平台管理員代簽或「變更簽核人」處理；
+ *     老闆關由任一在職 platform_admin 簽。新送的單在 approval-chain 已把申請人排除在候選外。）
+ *   • 其他 → 不行（`null`）。HR 代簽（allowHrOverride）是另一條路，由呼叫端判斷（老闆關不准 HR 代簽，見 canHrOverrideStep）。
+ * 純函式（另讀本請求的非在職標記）。
  */
 export function stepActorStanding(
   step: StepLike & { step_kind?: string | null },
   actor: StepActor,
-  requesterEmpId: string | null | undefined,
+  requester: StepRequester,
 ): "candidate" | "platform_admin" | "own_request" | null {
-  const boss = isBossStep(step)
-  if (boss && sameId(actor.id, requesterEmpId)) return "own_request"
+  if (requesterIds(requester).some((r) => sameId(actor.id, r))) return "own_request"
+  if (actorIsInactive(actor)) return null
   if (isStepCandidate(step, actor.id)) return "candidate"
-  if (boss && actor.role === "platform_admin") return "platform_admin"
+  if (actor.role === "platform_admin" && isBossStep(step)) return "platform_admin"
   return null
+}
+
+/**
+ * HR 代簽（allowHrOverride）能不能用在這一關：actor 是在職 hr_admin／platform_admin，且**不是老闆關**
+ * （2026-10-27 業主追加 C：老闆關只限老闆本人或在職 platform_admin——platform_admin 已由 stepActorStanding 放行，
+ * 不需要代簽這條路）。自己的單（own_request）呼叫端要先擋。純函式。
+ */
+export function canHrOverrideStep(step: { step_kind?: string | null }, actor: StepActor): boolean {
+  if (actorIsInactive(actor)) return false
+  if (actor.role !== "hr_admin" && actor.role !== "platform_admin") return false
+  return !isBossStep(step)
 }
 
 /** 輪到 actor 簽這一關嗎（`stepActorStanding` 是 candidate 或 platform_admin）。純函式。 */
 export function canActOnStep(
   step: StepLike & { step_kind?: string | null },
   actor: StepActor,
-  requesterEmpId: string | null | undefined,
+  requester: StepRequester,
 ): boolean {
-  const s = stepActorStanding(step, actor, requesterEmpId)
+  const s = stepActorStanding(step, actor, requester)
   return s === "candidate" || s === "platform_admin"
 }
 

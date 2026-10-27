@@ -203,7 +203,7 @@ describe("assertCanManageCredentials／loadActor — 會讀租戶的解鎖政策
   })
 
   it("loadActor：用員工 id 查角色；沒帶 id、別的租戶、查無都回 null", async () => {
-    expect(await loadActor(TENANT_ID, HR)).toEqual({ id: HR, role: "hr_admin" })
+    expect(await loadActor(TENANT_ID, HR)).toEqual({ id: HR, role: "hr_admin", active: true })
     expect(await loadActor(TENANT_ID, null)).toBeNull()
     expect(await loadActor(TENANT_ID, undefined)).toBeNull()
     expect(await loadActor(TENANT_ID, "ffffffff-ffff-4fff-8fff-ffffffffffff")).toBeNull()

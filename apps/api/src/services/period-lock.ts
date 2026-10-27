@@ -27,6 +27,7 @@ import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { localDateKey } from "../lib/tz.js"
 import { isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { isBossOrPlatformAdmin } from "../lib/boss.js"
+import { isInactiveActor } from "../lib/actor-status.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 純函式：日期歸月
@@ -386,12 +387,14 @@ export function canReopenPeriod(
   role?: string | null,
 ): boolean {
   if (!empId) return false
+  // 非在職（停用／離職）的老闆指定解鎖人也不行（lib/actor-status.ts）。
+  if (isInactiveActor(empId)) return false
   if (isBossOrPlatformAdmin(policy.bossEmpId, { id: empId, role })) return true
   return policy.designatedEmpIds.includes(lower(empId))
 }
 
 /** 只有老闆（或 platform_admin）能改「指定誰能解鎖」那份名單。純函式。 */
-export function canEditUnlockList(policy: PeriodUnlockPolicy, caller: { id: string; role: string }): boolean {
+export function canEditUnlockList(policy: PeriodUnlockPolicy, caller: { id: string; role: string; active?: boolean }): boolean {
   return isBossOrPlatformAdmin(policy.bossEmpId, caller)
 }
 

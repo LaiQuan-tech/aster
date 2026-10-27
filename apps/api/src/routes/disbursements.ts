@@ -185,7 +185,7 @@ function parseListQuery(query: Request["query"]):
 async function actorOf(tenantId: string, req: Request): Promise<Actor> {
   const userId = req.auth?.userId
   const self = userId ? await resolveSelf(tenantId, userId) : null
-  return { empId: self?.id ?? null, role: self?.role ?? null }
+  return { empId: self?.id ?? null, role: self?.role ?? null, active: self?.active }
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   getMyBonusApprovals,
   humanizeBonusError,
   returnBonusRun,
+  SELF_SUBMITTED_NOTE,
   type BonusRunDetail,
   type BonusRunItem,
 } from "@/lib/bonus-api";
@@ -208,6 +209,10 @@ export function BonusRunApprovalsSection() {
               </ul>
             </details>
 
+            {d.selfSubmitted ? (
+              // 送審人不能核准／退回自己送審的批次（2026-10-27）。
+              <p className="mt-3 rounded-lg bg-gray-50 p-2 text-sm text-gray-600">{SELF_SUBMITTED_NOTE}</p>
+            ) : (
             <div className="mt-3 flex gap-2">
               <Button block onClick={() => setApproving(d)} disabled={busyId !== null}>
                 核准
@@ -224,6 +229,7 @@ export function BonusRunApprovalsSection() {
                 退回
               </Button>
             </div>
+            )}
           </Card>
         );
       })}

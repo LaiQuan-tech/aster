@@ -1,3 +1,4 @@
+import { actorRoleOf } from "../lib/actor-status.js"
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
@@ -49,13 +50,14 @@ async function authorize(
 ): Promise<{ isHr: boolean; selfId: string } | null> {
   const { data, error } = await supabaseAdmin
     .from("employees")
-    .select("id, role")
+    .select("id, role, status")
     .eq("tenant_id", tenantId)
     .eq("user_id", userId)
     .maybeSingle()
   if (error) throw new Error(`profile authorize: ${error.message}`)
   if (!data) return null
-  const isHr = ["hr_admin", "platform_admin"].includes(data.role as string)
+  // 有效角色：非在職降成 employee（lib/actor-status.ts）。
+  const isHr = ["hr_admin", "platform_admin"].includes(actorRoleOf(data.id as string, data.role as string, (data as { status?: string | null }).status))
   if (!isHr && data.id !== empId) return null
   return { isHr, selfId: data.id as string }
 }

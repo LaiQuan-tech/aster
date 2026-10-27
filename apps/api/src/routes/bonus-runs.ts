@@ -12,6 +12,7 @@ import {
   BonusRunError,
   buildSummary,
   isBonusApprover,
+  isSelfSubmitted,
   listPendingApprovals,
   returnRun,
   submitRun,
@@ -93,7 +94,7 @@ const deleteBody = z.object({ reason: z.string().trim().min(1).max(500) })
 async function actorOf(tenantId: string, req: Request): Promise<Actor> {
   const userId = req.auth?.userId
   const self = userId ? await resolveSelf(tenantId, userId) : null
-  return { empId: self?.id ?? null, role: self?.role ?? null }
+  return { empId: self?.id ?? null, role: self?.role ?? null, active: self?.active }
 }
 
 /** 呼叫者＋看不看得到毛利（老闆／platform_admin／授權 HR）。 */
@@ -287,7 +288,12 @@ bonusRunsRouter.get("/bonus-runs/:id", ...guards, async (req: Request, res: Resp
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(200).json({ ...maskProfit(detail, canSeeProfit), canApprove: await isBonusApprover(tenantId, actor) })
+    // selfSubmitted：呼叫者就是送審人 → 不能核准／退回（追加 F），前端隱藏按鈕並說明。
+    res.status(200).json({
+      ...maskProfit(detail, canSeeProfit),
+      canApprove: await isBonusApprover(tenantId, actor),
+      selfSubmitted: isSelfSubmitted({ submitted_by_emp_id: detail.run.submittedByEmpId ?? null }, actor),
+    })
   } catch (err) {
     handleError(err, res, next)
   }
@@ -503,7 +509,10 @@ bonusRunsRouter.get("/my/bonus-approvals", requireAuth, requireTenant, async (re
       res.status(200).json({ canApprove: false, runs: [] })
       return
     }
-    const runs = await listPendingApprovals(tenantId)
+    const runs = (await listPendingApprovals(tenantId)).map((d) => ({
+      ...d,
+      selfSubmitted: isSelfSubmitted({ submitted_by_emp_id: d.run.submittedByEmpId ?? null }, actor),
+    }))
     res.status(200).json({ canApprove: true, runs })
   } catch (err) {
     handleError(err, res, next)
