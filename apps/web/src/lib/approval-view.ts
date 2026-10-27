@@ -149,6 +149,24 @@ export function isBossStepKind(kind: string | null | undefined): boolean {
   return kind === BOSS_STEP_KIND;
 }
 
+/** 「本關可簽：A、B」——老闆關補註「（老闆或平台管理員）」（放款待簽頁，與請假／出差一致）。沒有候選名字 → null（不顯示）。 */
+export function stepCandidatesLine(names: readonly string[], stepKind: string | null | undefined): string | null {
+  if (names.length === 0) return null;
+  return `本關可簽：${names.join("、")}${isBossStepKind(stepKind) ? BOSS_STEP_NOTE : ""}`;
+}
+
+/** 後端 403 own_request（不能簽自己的單）的中文；與 ESS 待我簽核（lib/ess-approval-batch）同文案。 */
+export const OWN_REQUEST_TEXT = "不能簽核自己的單。";
+
+/** 是不是 own_request：apiFetch 丟的 Error（`.code`／`.body.error`／訊息 `[403] own_request`）或批次逐張結果的錯誤碼字串。 */
+export function isOwnRequestError(err: unknown): boolean {
+  if (typeof err === "string") return err === "own_request";
+  if (err === null || typeof err !== "object") return false;
+  const e = err as { code?: unknown; error?: unknown; body?: { error?: unknown } | null; message?: unknown };
+  if (e.code === "own_request" || e.error === "own_request" || e.body?.error === "own_request") return true;
+  return typeof e.message === "string" && /^(?:\[\d{3}\]\s*)?own_request\b/.test(e.message.trim());
+}
+
 export type ApprovalBucket = "pending_mine" | "in_progress" | "approved" | "rejected" | "cancelled";
 
 export interface BucketContext {

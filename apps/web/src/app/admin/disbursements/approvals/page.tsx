@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton, Segmented } from "@/components/admin-ui";
 import { getMeCached } from "@/lib/ess-state";
 import { readEnumParam } from "@/lib/boss-dashboard";
+import { stepCandidatesLine } from "@/lib/approval-view";
 import {
   approveDisbursement,
   getPendingDisbursementApprovals,
@@ -182,7 +183,7 @@ export default function DisbursementApprovalsPage() {
                   </div>
                 </dl>
                 {d.candidateNames.length > 0 && (
-                  <p className="mt-1 text-xs text-gray-400">本關可簽：{d.candidateNames.join("、")}</p>
+                  <p className="mt-1 text-xs text-gray-400">{stepCandidatesLine(d.candidateNames, d.stepKind)}</p>
                 )}
                 {d.mine ? (
                   <div className="mt-3 flex flex-wrap items-center gap-2">

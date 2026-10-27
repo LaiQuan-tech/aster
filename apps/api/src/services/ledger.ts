@@ -186,7 +186,8 @@ async function debitLeaveBalance(
  * 未填或填 0 的預支金額不建列：不是每趟出差都要預支——員工送單時可選「費用方式」
  * （2026-10-11）：先預支（`advance_requested` > 0，這裡才開預支列）或自行墊付、回來報銷
  * （`advance_requested` 沒帶或 0，不開預支；憑證之後走月報銷，見 services/payroll-inputs）。
- * 重複核准（理論上不會發生）由 (request_id) 的既有列擋下，不重複開。
+ * 重複核准由 (request_id) 的既有列擋下，不重複開；同時插入時由唯一索引 advances_request_id_uq
+ * （migration 0079）擋下第二筆，23505 視為已開過（冪等）。
  */
 async function openAdvance(
   supabase: SupabaseClient,
@@ -214,7 +215,13 @@ async function openAdvance(
     amount,
     status: "requested",
   })
-  if (error) throw new Error(`ledger openAdvance: ${error.message}`)
+  if (error) {
+    // 同一張單被兩個請求同時最終核准（簽核端已加 pending 條件防護，這裡是最後一道）：
+    // advances(request_id) 的唯一索引（migration 0079）擋下第二筆 → 視為已開過，冪等、不 500。
+    // 索引尚未套用時不會有 23505，行為同舊版（先查再插）。
+    if ((error as { code?: string }).code === "23505") return
+    throw new Error(`ledger openAdvance: ${error.message}`)
+  }
 }
 
 const PUNCH_TYPES = new Set(["in", "out", "break_in", "break_out", "outing_in", "outing_out"])

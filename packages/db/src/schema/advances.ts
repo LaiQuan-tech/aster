@@ -1,6 +1,7 @@
 import {
-  pgTable, uuid, text, numeric, timestamp, index,
+  pgTable, uuid, text, numeric, timestamp, index, uniqueIndex,
 } from "drizzle-orm/pg-core"
+import { sql } from "drizzle-orm"
 import { tenants } from "./tenants"
 import { employees } from "./employees"
 import { leaveRequests } from "./leave-requests"
@@ -93,5 +94,12 @@ export const advances = pgTable(
       table.tenantId,
       table.recoveryPeriod,
     ),
+    /**
+     * 一張申請單最多一筆預支（migration 0079）：同時最終核准時擋下第二筆，
+     * ledger.openAdvance 撞 23505 視為已開過。request_id 是 NOT NULL，partial 條件只是保險。
+     */
+    requestIdUq: uniqueIndex("advances_request_id_uq")
+      .on(table.requestId)
+      .where(sql`${table.requestId} is not null`),
   }),
 )

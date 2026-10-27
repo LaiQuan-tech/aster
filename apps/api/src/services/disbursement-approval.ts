@@ -445,12 +445,40 @@ export async function decideDisbursement(params: {
     acted_by_emp_id: actor.empId,
     ...(takeOver ? { approver_emp_id: actor.empId } : {}),
   }
-  const { error: stepErr } = await supabaseAdmin
+  // 並發防護（2026-10-27 驗收）：只更新仍是 decision='pending' 的關卡、以 .select() 確認更新列數。
+  // 兩人同時按（核准＋核准、駁回＋核准）只有先寫進去的那位成立，另一位 409 not_pending，不做任何後續動作。
+  const { data: stepHit, error: stepErr } = await supabaseAdmin
     .from("disbursement_approval_steps")
     .update(stepPatch)
     .eq("tenant_id", tenantId)
     .eq("id", step.id)
+    .or("decision.eq.pending,decision.is.null")
+    .select("id")
   if (stepErr) throw new Error(`decideDisbursement (step): ${stepErr.message}`)
+  if ((stepHit ?? []).length === 0) throw new DisbursementError(409, "not_pending", { status: current.status })
+
+  /** 單頭狀態轉移：只在仍是 pending_approval、仍停在本關時才寫；0 列＝搶輸（單子同時被撤回…）→ 還原關卡、409。 */
+  const transitionHeader = async (patch: Record<string, unknown>, label: string): Promise<void> => {
+    const { data, error } = await supabaseAdmin
+      .from("disbursements")
+      .update(patch)
+      .eq("tenant_id", tenantId)
+      .eq("id", id)
+      .eq("status", "pending_approval")
+      .eq("current_step", step.step_order)
+      .select("id")
+    if (error) throw new Error(`decideDisbursement (${label}): ${error.message}`)
+    if ((data ?? []).length > 0) return
+    const { error: revertErr } = await supabaseAdmin
+      .from("disbursement_approval_steps")
+      .update({ decision: "pending", comment: null, acted_at: null, acted_by_emp_id: null, approver_emp_id: step.approver_emp_id })
+      .eq("tenant_id", tenantId)
+      .eq("id", step.id)
+      .eq("decision", stepPatch.decision as string)
+      .eq("acted_by_emp_id", actor.empId as string)
+    if (revertErr) logger.warn({ err: revertErr, disbursementId: id }, "decideDisbursement: revert step after lost header transition failed")
+    throw new DisbursementError(409, "not_pending")
+  }
 
   const actorName = (await employeeNames(tenantId, [actor.empId])).get(actor.empId) ?? "簽核人"
   const laterSteps = rows.filter((r) => r.round === round && r.step_order > step.step_order).sort((a, b) => a.step_order - b.step_order)
@@ -458,12 +486,7 @@ export async function decideDisbursement(params: {
 
   if (action === "reject") {
     const note = appendNote(current.note, `駁回（${actorName}）：${comment?.trim() || "未填理由"}`)
-    const { error } = await supabaseAdmin
-      .from("disbursements")
-      .update({ status: "draft", current_step: null, note, updated_at: actedAt })
-      .eq("tenant_id", tenantId)
-      .eq("id", id)
-    if (error) throw new Error(`decideDisbursement (reject header): ${error.message}`)
+    await transitionHeader({ status: "draft", current_step: null, note, updated_at: actedAt }, "reject header")
     notified = await notifyOwner(tenantId, current, {
       event: "rejected",
       round,
@@ -487,12 +510,7 @@ export async function decideDisbursement(params: {
 
   if (laterSteps.length > 0) {
     const next = laterSteps[0]
-    const { error } = await supabaseAdmin
-      .from("disbursements")
-      .update({ current_step: next.step_order, updated_at: actedAt })
-      .eq("tenant_id", tenantId)
-      .eq("id", id)
-    if (error) throw new Error(`decideDisbursement (advance): ${error.message}`)
+    await transitionHeader({ current_step: next.step_order, updated_at: actedAt }, "advance")
     const totalSteps = rows.filter((r) => r.round === round).length
     try {
       notified = await enqueue({
@@ -527,12 +545,7 @@ export async function decideDisbursement(params: {
     return { status: "pending_approval", currentStep: next.step_order, notified, disbursement: (await getDisbursement(tenantId, id))! }
   }
 
-  const { error } = await supabaseAdmin
-    .from("disbursements")
-    .update({ status: "approved", current_step: null, approved_at: actedAt, updated_at: actedAt })
-    .eq("tenant_id", tenantId)
-    .eq("id", id)
-  if (error) throw new Error(`decideDisbursement (approve header): ${error.message}`)
+  await transitionHeader({ status: "approved", current_step: null, approved_at: actedAt, updated_at: actedAt }, "approve header")
   notified = await notifyOwner(tenantId, current, {
     event: "approved",
     round,

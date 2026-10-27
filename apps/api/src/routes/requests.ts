@@ -1203,10 +1203,17 @@ type DecisionOutcome =
     }
   | { ok: false; id: string; error: string; period?: string }
 
+/** markStep／transitionRequest 搶輸（列已不在預期的前一狀態）時回的哨兵值，對應 HTTP 409 not_pending。 */
+const NOT_PENDING = "not_pending"
+
 /** 寫簽核關卡結果；acted_by_emp_id 記「實際按下核准／駁回的人」（HR 代簽時是 HR）。
  *  候選之一簽核時（多級簽核）同時把 approver_emp_id 改寫成實際簽的人；HR 代簽
  *  不改寫（approver_emp_id 仍是名義簽核者，代簽者只記在 acted_by_emp_id）。
- *  acted_by_emp_id 欄位尚未套用（migration 0042）時退回不寫該欄，不擋簽核。回錯誤訊息或 null。 */
+ *  acted_by_emp_id 欄位尚未套用（migration 0042）時退回不寫該欄，不擋簽核。回錯誤訊息或 null。
+ *
+ *  **並發防護（2026-10-27 驗收）**：只更新「仍是 decision='pending'（或舊資料的 null）」的那一列，並以 .select() 確認實際
+ *  更新列數；兩人幾乎同時按核准／駁回時只有一人寫得進去，另一人拿到 NOT_PENDING（→ 409），
+ *  呼叫端不得再做任何後續動作（推進下一關、最終核准副作用、通知）。 */
 async function markStep(
   stepId: string,
   patch: Record<string, unknown>,
@@ -1214,15 +1221,63 @@ async function markStep(
   opts: { takeOver?: boolean } = {},
 ): Promise<string | null> {
   const base = opts.takeOver ? { ...patch, approver_emp_id: actedByEmpId } : patch
-  const { error } = await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from("approval_steps")
     .update({ ...base, acted_by_emp_id: actedByEmpId })
     .eq("id", stepId)
-  if (!error) return null
+    .or("decision.eq.pending,decision.is.null")
+    .select("id")
+  if (!error) return (data ?? []).length > 0 ? null : NOT_PENDING
   if (!isMissingColumnError(error)) return error.message
   warnSchemaGapOnce("approval_steps.acted_by_emp_id", error)
-  const retry = await supabaseAdmin.from("approval_steps").update(base).eq("id", stepId)
-  return retry.error ? retry.error.message : null
+  const retry = await supabaseAdmin
+    .from("approval_steps")
+    .update(base)
+    .eq("id", stepId)
+    .or("decision.eq.pending,decision.is.null")
+    .select("id")
+  if (retry.error) return retry.error.message
+  return (retry.data ?? []).length > 0 ? null : NOT_PENDING
+}
+
+/** 關卡已寫入、但申請單狀態轉移搶輸（單子同時被撤回／註銷…）時，把剛寫的關卡還原成 pending（best-effort）。
+ *  只還原「仍是本人剛寫的結果」那一列，不會蓋掉別人的決定。 */
+async function revertStep(
+  step: { id: string; approver_emp_id: string },
+  decision: "approved" | "rejected",
+  actedByEmpId: string,
+): Promise<void> {
+  const patch = { decision: "pending", comment: null, acted_at: null, approver_emp_id: step.approver_emp_id }
+  let { error } = await supabaseAdmin
+    .from("approval_steps")
+    .update({ ...patch, acted_by_emp_id: null })
+    .eq("id", step.id)
+    .eq("decision", decision)
+    .eq("acted_by_emp_id", actedByEmpId)
+  if (error && isMissingColumnError(error)) {
+    ;({ error } = await supabaseAdmin.from("approval_steps").update(patch).eq("id", step.id).eq("decision", decision))
+  }
+  if (error) logger.warn({ err: error, stepId: step.id }, "decision: revert step after lost request transition failed")
+}
+
+/** 申請單狀態轉移（駁回／推進下一關／最終核准）：只在「仍是 pending、仍停在 expectedStep」時才寫，
+ *  並以 .select() 確認實際更新列數；0 列回 NOT_PENDING。回錯誤訊息或 null。 */
+async function transitionRequest(
+  tenantId: string,
+  requestId: string,
+  expectedStep: number,
+  patch: Record<string, unknown>,
+): Promise<string | null> {
+  const { data, error } = await supabaseAdmin
+    .from("leave_requests")
+    .update(patch)
+    .eq("tenant_id", tenantId)
+    .eq("id", requestId)
+    .eq("status", "pending")
+    .eq("current_step", expectedStep)
+    .select("id")
+  if (error) return error.message
+  return (data ?? []).length > 0 ? null : NOT_PENDING
 }
 
 /* ── W10：申請單狀態異動的**應用層**稽核（「為什麼」）─────────────────
@@ -1401,12 +1456,11 @@ async function decideOneRequest(params: {
     const stepFail = await markStep(step.id, { decision: "rejected", comment: comment ?? null, acted_at: actedAt }, actor.id, { takeOver })
     if (stepFail) return { ok: false, id: requestId, error: stepFail }
 
-    const { error: upReqErr } = await supabaseAdmin
-      .from("leave_requests")
-      .update({ status: "rejected" })
-      .eq("tenant_id", tenantId)
-      .eq("id", requestId)
-    if (upReqErr) return { ok: false, id: requestId, error: upReqErr.message }
+    const reqFail = await transitionRequest(tenantId, requestId, currentStep, { status: "rejected" })
+    if (reqFail) {
+      await revertStep(step, "rejected", actor.id)
+      return { ok: false, id: requestId, error: reqFail }
+    }
 
     await writeAuditLog({
       tenantId,
@@ -1469,12 +1523,11 @@ async function decideOneRequest(params: {
   if (laterSteps.length > 0) {
     // 推進到下一關；單子仍是 pending。通知下一關**全部候選**（內文與送出時相同）。
     const nextStep = currentStep + 1
-    const { error: upReqErr } = await supabaseAdmin
-      .from("leave_requests")
-      .update({ current_step: nextStep })
-      .eq("tenant_id", tenantId)
-      .eq("id", requestId)
-    if (upReqErr) return { ok: false, id: requestId, error: upReqErr.message }
+    const reqFail = await transitionRequest(tenantId, requestId, currentStep, { current_step: nextStep })
+    if (reqFail) {
+      await revertStep(step, "approved", actor.id)
+      return { ok: false, id: requestId, error: reqFail }
+    }
 
     await writeAuditLog({
       tenantId,
@@ -1515,12 +1568,11 @@ async function decideOneRequest(params: {
     return { ok: true, id: requestId, status: "pending", currentStep: nextStep, notified }
   }
 
-  const { error: upReqErr } = await supabaseAdmin
-    .from("leave_requests")
-    .update({ status: "approved" })
-    .eq("tenant_id", tenantId)
-    .eq("id", requestId)
-  if (upReqErr) return { ok: false, id: requestId, error: upReqErr.message }
+  const reqFail = await transitionRequest(tenantId, requestId, currentStep, { status: "approved" })
+  if (reqFail) {
+    await revertStep(step, "approved", actor.id)
+    return { ok: false, id: requestId, error: reqFail }
+  }
 
   await writeAuditLog({
     tenantId,

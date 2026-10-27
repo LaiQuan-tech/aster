@@ -74,6 +74,8 @@ import {
   csvText,
   employeeLabel,
   hasBatchRow,
+  isOwnRequestError,
+  OWN_REQUEST_TEXT,
   parseApprovalView,
   pendingCounts,
   resolveApproverId,
@@ -98,6 +100,8 @@ const BUCKET_TONE: Record<ApprovalBucket, PillTone> = {
 
 /** 核准／駁回／代理簽核／變更簽核人／註銷碰到已發薪鎖定的月份（409 period_closed）→「YYYY-MM 已結算，請洽管理者」。 */
 function errMsg(err: unknown, fallback: string): string {
+  // 單筆／代理簽核遇到 403 own_request（不能簽自己的單）→ 中文，不秀錯誤碼。
+  if (isOwnRequestError(err)) return OWN_REQUEST_TEXT;
   return errorMessageOf(err, fallback);
 }
 
