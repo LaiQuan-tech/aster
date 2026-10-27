@@ -269,7 +269,7 @@ export default function LeaveTypesPage() {
       const saved = approval?.fallbackApproverEmpId ?? "";
       setFallbackEmpId(saved);
       setFallbackSaved(saved);
-      setFallbackMsg(saved ? `已設定：${empName.get(saved) ?? saved}` : "已清除（找不到主管時退回 HR 管理員）");
+      setFallbackMsg(saved ? `已設定：${empName.get(saved) ?? saved}` : "已清除（找不到主管時退回 HR）");
       setError(null);
     } catch (err) {
       setError(privilegeErrorMessage(err, "boss") ?? (err instanceof Error ? err.message : "儲存簽核退路設定失敗"));
@@ -450,8 +450,8 @@ export default function LeaveTypesPage() {
         <h2 className="mb-1 text-sm font-medium text-gray-500">簽核流程</h2>
         <p className="mb-4 text-xs text-gray-400">
           每類申請可選「直屬主管」（依員工所屬部門的第 1 位主管單關簽核，主管是本人或未設定時往上層部門找）、
-          「主管逐級簽核 → HR 覆核」（部門主管依順序逐關簽核，最後由任一 HR 管理員覆核）或
-          「固定名單」（勾選的員工依勾選順序逐關簽核）。主管找不到時退回下方設定的簽核者，再沒有就退回第一位 HR 管理員。
+          「主管逐級簽核 → HR 覆核」（部門主管依順序逐關簽核，最後由任一 HR 覆核）或
+          「固定名單」（勾選的員工依勾選順序逐關簽核）。主管找不到時退回下方設定的簽核者，再沒有就退回第一位 HR。
           部門主管的順序在「單位」頁設定（第 1 位＝小主管）。
         </p>
         {flowMsg && <p className="mb-3 text-sm text-green-600">{flowMsg}</p>}
@@ -489,12 +489,12 @@ export default function LeaveTypesPage() {
                 {/* 名單勾選區只有固定名單模式會用到；其他模式隱藏（已勾的名單保留，切回時沿用） */}
                 {mode === "manager" ? (
                   <p className="text-xs text-gray-500">
-                    依申請人所屬部門的第 1 位主管單關簽核；找不到主管 → 下方「找不到主管時的簽核者」→ 第一位 HR 管理員。
+                    依申請人所屬部門的第 1 位主管單關簽核；找不到主管 → 下方「找不到主管時的簽核者」→ 第一位 HR。
                     {selected.length > 0 && "（已勾選的固定名單會保留，切回「固定名單」時沿用。）"}
                   </p>
                 ) : mode === "manager_hr" ? (
                   <p className="text-xs text-gray-500">
-                    依部門主管的順序逐關簽核（第 1 位主管→第 2 位…，子部門簽完接母部門），最後由任一 HR 管理員覆核。
+                    依部門主管的順序逐關簽核（第 1 位主管→第 2 位…，子部門簽完接母部門），最後由任一 HR 覆核。
                     沒有設主管的部門會由備援簽核人（老闆）代替主管關。
                     {selected.length > 0 && "（已勾選的固定名單會保留，切回「固定名單」時沿用。）"}
                   </p>
@@ -533,7 +533,7 @@ export default function LeaveTypesPage() {
         <h2 className="mb-1 text-sm font-medium text-gray-500">找不到主管時的簽核者（老闆）</h2>
         <p className="mb-4 text-xs text-gray-400">
           「直屬主管」模式下，申請人沒有部門、部門沒設主管、或主管就是本人且上層也找不到時，改由這位簽核；
-          未設定則退回第一位 HR 管理員。
+          未設定則退回第一位 HR。
         </p>
         {fallbackMsg && <p className="mb-3 text-sm text-green-600">{fallbackMsg}</p>}
         {/* 誰是老闆＝誰能重新開放已結算的月份，所以換老闆是特權操作：不是老闆也不是平台管理員的人看到唯讀並附說明。 */}
@@ -558,7 +558,7 @@ export default function LeaveTypesPage() {
               disabled={bossLocked}
               onChange={(e) => setFallbackEmpId(e.target.value)}
             >
-              <option value="">（未設定：退回 HR 管理員）</option>
+              <option value="">（未設定：退回 HR）</option>
               {activeEmployees.map((emp) => (
                 <option key={emp.id} value={emp.id}>
                   {emp.emp_no ? `${emp.emp_no} · ${emp.name}` : emp.name}

@@ -77,7 +77,7 @@ function Guard({ children }: { children: (me: Me) => React.ReactNode }) {
     return (
       <main className="min-h-dvh flex flex-col items-center justify-center gap-4 p-6 text-center">
         <h1 className="text-xl font-bold text-gray-800">無權限</h1>
-        <p className="text-gray-500">此頁面僅限 HR 管理員與會計存取。</p>
+        <p className="text-gray-500">此頁面僅限 HR 與會計存取。</p>
         <Link
           href="/ess"
           className="rounded-md px-4 py-2 text-sm font-medium text-white"

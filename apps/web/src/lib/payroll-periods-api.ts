@@ -616,6 +616,6 @@ export function unlockListSaveErrorMessage(err: unknown, fallback = "儲存失�
   const code = codeOf(err);
   if (code === "not_boss") return UNLOCK_LIST_BOSS_ONLY_NOTE;
   if (code === "invalid_employee") return "名單裡有不屬於本公司的員工，請重新整理頁面後再試";
-  if (code === "forbidden") return "目前的帳號沒有儲存設定的權限（需要 HR 管理員）";
+  if (code === "forbidden") return "目前的帳號沒有儲存設定的權限（需要 HR）";
   return apiErrorMessage(err, fallback);
 }

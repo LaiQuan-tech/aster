@@ -139,6 +139,8 @@ function enumMap(labels: Record<string, string>): Map<string, string> {
 const PUNCH_TYPES = enumMap(PUNCH_TYPE_LABELS)
 const EMPLOYMENT_TYPES = enumMap(EMPLOYMENT_TYPE_LABELS)
 const ROLES = enumMap(ROLE_LABELS)
+// 2026-10-27 角色名稱「HR 管理員」改叫「HR」：舊範本填的舊名稱照收。
+ROLES.set(normalizeToken("HR 管理員"), "hr_admin")
 
 function allowed(labels: Record<string, string>): string {
   return Object.values(labels).join("／")

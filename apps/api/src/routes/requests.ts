@@ -471,7 +471,7 @@ async function notifyStepApprover(params: {
   const { tenantId, lr, ctx, approverEmpIds, step, totalSteps, event } = params
   const reason = lr.reason ? `，事由：${lr.reason}` : ""
   const stepText = totalSteps > 1 ? `（第 ${step} 關，共 ${totalSteps} 關）` : ""
-  const hrText = params.stepKind === "hr" ? "本關為 HR 覆核，任一位 HR 管理員簽核即可。" : ""
+  const hrText = params.stepKind === "hr" ? "本關為 HR 覆核，任一位 HR 簽核即可。" : ""
   const extra = params.extraNote ? params.extraNote : ""
   return enqueue({
     tenantId,

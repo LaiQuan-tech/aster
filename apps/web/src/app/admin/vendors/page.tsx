@@ -368,7 +368,7 @@ export default function VendorsPage() {
                         關係企業（集團內姊妹公司）
                         <span className="block text-xs text-gray-400">
                           勾選後，付給這家廠商的放款在「集團總覽」的集團合計中會被剔除（各公司自己的數字照常包含）。
-                          {canSetAffiliate ? "" : "只有 HR 管理員可以設定。"}
+                          {canSetAffiliate ? "" : "只有 HR 可以設定。"}
                         </span>
                       </span>
                     </label>

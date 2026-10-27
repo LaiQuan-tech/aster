@@ -366,7 +366,7 @@ export function adjustmentErrorMessage(err: unknown, fallback = "儲存失敗"):
   const code = err instanceof Error ? (err as { code?: string }).code : undefined;
   if (code === "invalid_employee") return "找不到這位員工，請重新整理後再試";
   if (code === "invalid_body") return "欄位格式不正確：名稱 1–100 字、金額大於 0 且最多兩位小數、更正月份不能晚於薪資月份";
-  if (code === "forbidden") return "目前的帳號沒有權限（需要 HR 管理員）";
+  if (code === "forbidden") return "目前的帳號沒有權限（需要 HR）";
   if (code === "not_found") return "這筆加減項已不存在（可能剛被刪除），請重新整理";
   if (code === "conflict") return "這筆加減項剛被別人修改或刪除了，請重新整理再試";
   return apiErrorMessage(err, fallback);

@@ -345,7 +345,7 @@ export default function DashboardPage() {
               <option value="">全部</option>
               <option value="employee">一般員工</option>
               <option value="manager">主管</option>
-              <option value="hr_admin">HR 管理員</option>
+              <option value="hr_admin">HR</option>
             </select>
           </div>
           <div className="flex items-end">

@@ -90,7 +90,7 @@ export function useEmployeeAccountActions({ onChanged, onOpenProfile }: UseEmplo
         if (!missing) throw err;
         const typed = window.prompt(
           missing === "email_required"
-            ? `「${empName}」是老闆、HR 管理員、平台管理員或老闆指定的人，寄邀請信前請明確輸入收件信箱（不使用 My Data 裡的信箱）：`
+            ? `「${empName}」是老闆、HR、平台管理員或老闆指定的人，寄邀請信前請明確輸入收件信箱（不使用 My Data 裡的信箱）：`
             : `「${empName}」尚未有 Email，請輸入要寄送邀請信的信箱：`,
           "",
         );

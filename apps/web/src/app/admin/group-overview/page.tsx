@@ -26,7 +26,7 @@ import { CompanyTable, DataQualityNotice, StatCards, TrendCard, type DetailState
  */
 
 function errorText(err: unknown): string {
-  if ((err as ApiError | undefined)?.status === 403) return "集團總覽只開放給 HR 管理員（老闆），這個帳號沒有權限。";
+  if ((err as ApiError | undefined)?.status === 403) return "集團總覽只開放給 HR（老闆），這個帳號沒有權限。";
   return err instanceof Error ? err.message : "載入失敗";
 }
 

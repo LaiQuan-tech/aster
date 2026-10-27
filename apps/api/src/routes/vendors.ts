@@ -148,7 +148,7 @@ const vendorBody = z.object({
  * 「關係企業」標記會改變集團總覽的集團合計（剔除付給這家廠商的放款），所以只有 HR／平台管理員能設定或變更；
  * 會計仍可維護其他欄位。重送跟現值一樣的值不算變更。
  */
-const AFFILIATE_HR_ONLY = { error: "affiliate_hr_only", message: "只有 HR 管理員可以設定「關係企業」標記。" } as const
+const AFFILIATE_HR_ONLY = { error: "affiliate_hr_only", message: "只有 HR 可以設定「關係企業」標記。" } as const
 
 const scanBody = z.object({
   fileName: z.string().trim().min(1).max(200),

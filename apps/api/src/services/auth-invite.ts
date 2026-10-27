@@ -395,7 +395,7 @@ export async function sendEmployeeAccountLink(opts: {
     throw new AccountError(
       "email_required",
       400,
-      "這是老闆、HR 管理員、平台管理員或老闆指定的人：寄邀請信前請明確輸入收件信箱（不使用 My Data 裡的信箱）",
+      "這是老闆、HR、平台管理員或老闆指定的人：寄邀請信前請明確輸入收件信箱（不使用 My Data 裡的信箱）",
     )
   }
 

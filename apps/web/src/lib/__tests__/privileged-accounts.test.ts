@@ -96,10 +96,10 @@ describe("② 指派平台管理員角色", () => {
     { value: "employee", label: "一般員工" },
     { value: "manager", label: "主管" },
     { value: "accountant", label: "會計" },
-    { value: "hr_admin", label: "HR 管理員" },
+    { value: "hr_admin", label: "HR" },
   ];
 
-  it("roleOptionsFor：在 HR 管理員後面補『平台管理員』；沒權限的人看到的是停用並帶說明", () => {
+  it("roleOptionsFor：在 HR 後面補『平台管理員』；沒權限的人看到的是停用並帶說明", () => {
     const forHr = roleOptionsFor(base, hr);
     expect(forHr.map((o) => o.value)).toEqual(["employee", "manager", "accountant", "hr_admin", "platform_admin"]);
     const option = forHr.find((o) => o.value === "platform_admin");
@@ -215,6 +215,6 @@ describe("被擋時的友善訊息", () => {
     expect(accountErrorMessage(new Error("[403] platform_admin_required"))).toContain("平台管理員");
     // 受保護帳號、未開通：邀請信的收件信箱要明確輸入（400 email_required）
     expect(accountErrorMessage(new Error("[400] email_required"))).toContain("明確輸入收件信箱");
-    expect(accountErrorMessage(new Error("not_boss: 只有老闆或平台管理員可以重設老闆、HR 管理員或平台管理員的密碼"))).toContain("只有老闆或平台管理員");
+    expect(accountErrorMessage(new Error("not_boss: 只有老闆或平台管理員可以重設老闆、HR 或平台管理員的密碼"))).toContain("只有老闆或平台管理員");
   });
 });

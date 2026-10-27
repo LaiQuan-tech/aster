@@ -184,7 +184,7 @@ describe("顯示用", () => {
   it("角色標籤（含平台管理員）與狀態標籤", () => {
     expect(EMPLOYEE_ROLES.map((r) => r.value)).toEqual(["employee", "manager", "accountant", "hr_admin"]);
     expect(employeeRoleLabel("platform_admin")).toBe("平台管理員");
-    expect(employeeRoleLabel("hr_admin")).toBe("HR 管理員");
+    expect(employeeRoleLabel("hr_admin")).toBe("HR");
     expect(employeeRoleLabel("unknown")).toBe("unknown");
     expect(employeeStatusLabel("active")).toBe("在職");
     expect(employeeStatusLabel("inactive")).toBe("停用");

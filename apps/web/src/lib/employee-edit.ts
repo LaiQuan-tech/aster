@@ -167,7 +167,7 @@ export const EMPLOYEE_ROLES: { value: string; label: string }[] = [
   // W4：會計可進後台，但只看得到專案與財務／報銷／預支／出勤月表／人員基本資料，
   // 薪資作業、薪資單、獎金批次與分潤趴數一律看不到（守門在 API 的 requireFinance）。
   { value: "accountant", label: "會計" },
-  { value: "hr_admin", label: "HR 管理員" },
+  { value: "hr_admin", label: "HR" },
 ];
 
 export function employeeRoleLabel(role: string): string {

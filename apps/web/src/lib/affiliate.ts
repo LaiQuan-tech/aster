@@ -7,7 +7,7 @@
  */
 
 /** API 對非 HR 變更關係企業旗標回 403 affiliate_hr_only 時顯示的說明。 */
-export const AFFILIATE_HR_ONLY_TEXT = "只有 HR 管理員可以設定「關係企業」標記。";
+export const AFFILIATE_HR_ONLY_TEXT = "只有 HR 可以設定「關係企業」標記。";
 
 /**
  * 客戶／廠商表單送出的關係企業欄位：只在旗標有變動時才送（新增＝勾了才送）。

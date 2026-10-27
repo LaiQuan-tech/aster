@@ -31,7 +31,7 @@ export const IMPORT_KINDS: Record<ImportKind, ImportKindMeta> = {
   employees: {
     label: "批次建立帳號",
     columns: ["姓名", "Email", "工號", "部門", "僱用類型", "到職日", "角色"],
-    note: "只有姓名與 Email 必填；角色填「一般員工／主管／HR 管理員」，預設一般員工。工號或姓名對得上尚未開通帳號的既有員工會直接綁定，同名多人請補工號。",
+    note: "只有姓名與 Email 必填；角色填「一般員工／主管／HR」，預設一般員工。工號或姓名對得上尚未開通帳號的既有員工會直接綁定，同名多人請補工號。",
   },
   holidays: {
     label: "假日清單",

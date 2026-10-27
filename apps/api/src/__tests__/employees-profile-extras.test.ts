@@ -714,7 +714,7 @@ describe("PUT /employees/:empId/profile — 匯款四欄", () => {
     })
 
     it.each([
-      ["HR 管理員", "user-hr", ids.staff],
+      ["HR", "user-hr", ids.staff],
       ["平台管理員", "user-platform", ids.staff],
       ["HR 改自己", "user-hr", ids.hr],
     ])("%s 不受影響：editableFields 不含 bank 照樣直接寫入 200", async (_label, caller, target) => {

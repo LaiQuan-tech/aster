@@ -95,7 +95,7 @@ const dayField = z.string().trim().max(40).nullable().optional()
  * 「關係企業」標記會改變集團總覽的集團合計（剔除這家客戶的專案收入），所以只有 HR／平台管理員能設定或變更；
  * 會計（requireFinance 放行）仍可照常維護其他欄位。重送跟現值一樣的值不算變更。
  */
-const AFFILIATE_HR_ONLY = { error: "affiliate_hr_only", message: "只有 HR 管理員可以設定「關係企業」標記。" } as const
+const AFFILIATE_HR_ONLY = { error: "affiliate_hr_only", message: "只有 HR 可以設定「關係企業」標記。" } as const
 
 /**
  * 客戶分類（B4）：合法值是租戶「選項清單 → 客戶分類」（`option_items`，list_key＝client_category）裡**啟用**的

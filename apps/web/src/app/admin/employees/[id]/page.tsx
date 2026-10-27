@@ -724,7 +724,7 @@ export default function EmployeeDetailPage() {
                 hint={
                   form.role === "hr_admin"
                     ? "集團總覽、專案毛利、首頁本年收入／毛利率。只有老闆或平台管理員能設定。"
-                    : "只對 HR 管理員有效（這位目前不是 HR 管理員，勾了也看不到）。只有老闆或平台管理員能設定。"
+                    : "只對 HR 有效（這位目前不是 HR，勾了也看不到）。只有老闆或平台管理員能設定。"
                 }
                 checked={form.seeGroupFinancials}
                 onChange={(checked) => set("seeGroupFinancials", checked)}

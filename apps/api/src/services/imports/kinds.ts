@@ -80,7 +80,7 @@ export const EMPLOYMENT_TYPE_LABELS: Record<string, string> = {
 export const ROLE_LABELS: Record<string, string> = {
   employee: "一般員工",
   manager: "主管",
-  hr_admin: "HR 管理員",
+  hr_admin: "HR",
 }
 
 const EMP_NO_HINT = "員工的工號（見「員工清單」工作表）。工號與姓名至少填一個；工號空白時用姓名比對，同名者必須填工號。"
@@ -173,7 +173,7 @@ export const IMPORT_KIND_DEFS: Record<ImportKind, ImportKindDef> = {
         key: "role",
         header: "角色",
         required: false,
-        hint: "一般員工／主管／HR 管理員（也接受 employee/manager/hr_admin）。留空＝一般員工。",
+        hint: "一般員工／主管／HR（也接受 employee/manager/hr_admin）。留空＝一般員工。",
         example: "一般員工",
         options: Object.values(ROLE_LABELS),
         width: 12,

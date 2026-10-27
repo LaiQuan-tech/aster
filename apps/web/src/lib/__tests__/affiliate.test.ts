@@ -21,6 +21,6 @@ describe("關係企業欄位（客戶／廠商表單）", () => {
     expect(humanizeAffiliateError("affiliate_hr_only")).toBe(AFFILIATE_HR_ONLY_TEXT);
     expect(humanizeAffiliateError("[409] tax_id_taken")).toBe("[409] tax_id_taken");
     expect(humanizeAffiliateError("儲存失敗")).toBe("儲存失敗");
-    expect(AFFILIATE_HR_ONLY_TEXT).toBe("只有 HR 管理員可以設定「關係企業」標記。");
+    expect(AFFILIATE_HR_ONLY_TEXT).toBe("只有 HR 可以設定「關係企業」標記。");
   });
 });

@@ -43,7 +43,7 @@ export interface EmployeeActionInput {
 }
 
 /** 帳號動作被鎖住時的說明（同 lib/privileged-accounts.ts 的 CREDENTIALS_LOCKED_NOTE；這裡不 import 它，保持本檔零依賴）。 */
-const CREDENTIALS_LOCKED_TITLE = "只有老闆或平台管理員可以重設老闆、HR 管理員、平台管理員（以及老闆指定的人）的密碼";
+const CREDENTIALS_LOCKED_TITLE = "只有老闆或平台管理員可以重設老闆、HR、平台管理員（以及老闆指定的人）的密碼";
 
 export interface EmployeeActionContext {
   /**

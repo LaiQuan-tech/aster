@@ -685,7 +685,7 @@ describe("儲存名單失敗的訊息 unlockListSaveErrorMessage", () => {
     );
   });
 
-  it("400 invalid_employee、403 forbidden（不是 HR 管理員）、其餘照原文", () => {
+  it("400 invalid_employee、403 forbidden（不是 HR）、其餘照原文", () => {
     expect(unlockListSaveErrorMessage(apiError(400, { error: "invalid_employee", employeeIds: [EMP_B] }))).toContain("不屬於本公司");
     expect(unlockListSaveErrorMessage(apiError(403, { error: "forbidden" }))).toContain("沒有儲存設定的權限");
     expect(unlockListSaveErrorMessage(new Error("[500] kaboom"))).toBe("[500] kaboom");
