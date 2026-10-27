@@ -175,25 +175,21 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       detail: { title: "專案明細" },
     },
     {
-      key: "receivables",
-      label: "請款與未收款",
-      href: "/admin/projects/receivables",
-      title: "未收款追蹤",
-      desc: "每期一列的應收／未收清單；排序看的是專案未收比例與逾期天數，不是金額大小",
-    },
-    {
+      // 2026-10-27 業主：「請款與未收款」併入「放款」→ 一個分頁「請款與放款」。分頁 key 沿用 disbursements
+      // （租戶自訂的會計範圍存的是 key，沿用才不會讓會計的分頁消失；舊 key receivables 見 LEGACY_TAB_ALIASES）。
+      // 舊網址 /admin/projects/receivables 轉到 ?view=receivables（ADMIN_REDIRECTS）。
       key: "disbursements",
-      label: "放款",
+      label: "請款與放款",
       href: "/admin/disbursements",
-      title: "放款專區",
-      desc: "放款的單一真相：什麼時候、匯了多少、給誰；期款的已付狀態由這裡連動",
+      title: "請款與放款",
+      desc: "客戶請款（期別／發票／入帳／未收）與廠商付款（驗收／簽核／扣繳／實付）同一頁對照；已核准的放款單可打勾批次放款",
       children: [
         {
           key: "list",
-          label: "放款作業",
+          label: "請款與放款",
           href: "/admin/disbursements",
-          title: "放款專區",
-          desc: "放款的單一真相：什麼時候、匯了多少、給誰；期款的已付狀態由這裡連動",
+          title: "請款與放款",
+          desc: "客戶請款（期別／發票／入帳／未收）與廠商付款（驗收／簽核／扣繳／實付）同一頁對照；已核准的放款單可打勾批次放款",
           detail: { title: "匯款單" },
         },
         {
@@ -648,6 +644,8 @@ export const ADMIN_REDIRECTS: readonly AdminRedirect[] = [
   { source: "/admin/group-overview", destination: "/admin#group-overview" },
   // 2026-10-27 獎金季發放併入獎金分潤：批次列表舊網址導到合併頁（批次明細 /admin/bonus-runs/[id] 不轉）。
   { source: "/admin/bonus-runs", destination: "/admin/bonus-sheet" },
+  // 2026-10-27「請款與未收款」併入「請款與放款」：舊網址導到新頁的「應收催收」子檢視。
+  { source: "/admin/projects/receivables", destination: "/admin/disbursements?view=receivables" },
 ];
 
 /* ------------------------------------------------------------- 路由表 --- */
@@ -800,7 +798,7 @@ export interface RoleNavConfig {
 export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
   sections: ["home", "finance", "attendance", "payroll", "people", "settings"],
   tabs: {
-    finance: ["projects", "receivables", "disbursements", "directory"],
+    finance: ["projects", "disbursements", "directory"],
     attendance: ["sheets"],
     payroll: ["expenses", "advances"],
     people: ["employees"],
@@ -808,6 +806,13 @@ export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
     settings: ["optionLists"],
   },
 };
+
+/**
+ * 已合併掉的舊分頁 key → 現在承接它的分頁 key。租戶自訂的會計範圍（tenants.features.roles.accountant）
+ * 存的是分頁 key，合併後舊 key 要換成新 key，不然勾過舊分頁的會計會看不到合併後的頁。
+ * 2026-10-27：receivables（請款與未收款）併入 disbursements（請款與放款）。
+ */
+export const LEGACY_TAB_ALIASES: Readonly<Record<string, string>> = { receivables: "disbursements" };
 
 const SECTION_KEY_SET: ReadonlySet<string> = new Set<string>(ADMIN_SECTIONS.map((s) => s.key));
 
@@ -827,7 +832,8 @@ function sanitizeRoleNav(raw: { sections?: unknown; tabs?: unknown }, fallback: 
   if (raw.tabs && typeof raw.tabs === "object" && !Array.isArray(raw.tabs)) {
     for (const [key, value] of Object.entries(raw.tabs as Record<string, unknown>)) {
       if (!isSectionKey(key) || !Array.isArray(value)) continue;
-      tabs[key] = value.filter((v): v is string => typeof v === "string");
+      const keys = value.filter((v): v is string => typeof v === "string").map((v) => LEGACY_TAB_ALIASES[v] ?? v);
+      tabs[key] = [...new Set(keys)];
     }
   }
   return { sections: ADMIN_SECTIONS.map((s) => s.key).filter((k) => sections.has(k)), tabs };
@@ -917,7 +923,8 @@ export function nextRoleTabs(
   enabled: boolean,
 ): string[] {
   const all = configurableTabsForRole(section).map((tab) => tab.key);
-  const base = current ?? all;
+  // 已合併掉的舊 key（例如 receivables）先換成承接它的分頁，存回去時才不會被當成不認得的 key 丟掉。
+  const base = current ? current.map((key) => LEGACY_TAB_ALIASES[key] ?? key) : all;
   return enabled ? all.filter((key) => base.includes(key) || key === tabKey) : all.filter((key) => base.includes(key) && key !== tabKey);
 }
 

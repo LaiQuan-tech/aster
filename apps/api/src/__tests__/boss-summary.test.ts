@@ -138,6 +138,12 @@ describe("bossSummaryScope／accountantTabAllowed（鏡像 web roleNavOf）", ()
     expect(accountantTabAllowed(noAttendance, "finance", "disbursements")).toBe(true) // 沒列 tabs＝全部分頁
     const onlyProjects = { roles: { accountant: { sections: ["finance", "attendance"], tabs: { finance: ["projects"] } } } }
     expect(accountantTabAllowed(onlyProjects, "finance", "disbursements")).toBe(false)
+    // 2026-10-27 請款與未收款併入請款與放款：存舊 key receivables 的租戶視同勾了 disbursements（與 web LEGACY_TAB_ALIASES 同步）
+    const legacyOnly = { roles: { accountant: { sections: ["finance"], tabs: { finance: ["projects", "receivables"] } } } }
+    expect(accountantTabAllowed(legacyOnly, "finance", "disbursements")).toBe(true)
+    expect(bossSummaryScope("accountant", legacyOnly)).toMatchObject({ receivables: true, disbursementApprovals: true, monthDisbursements: true })
+    const newKey = { roles: { accountant: { sections: ["finance"], tabs: { finance: ["disbursements"] } } } }
+    expect(accountantTabAllowed(newKey, "finance", "receivables")).toBe(true)
     expect(accountantTabAllowed(onlyProjects, "attendance", "sheets")).toBe(true)
     // 格式不對 → 預設範圍
     expect(accountantTabAllowed({ roles: { accountant: "x" } }, "attendance", "sheets")).toBe(true)

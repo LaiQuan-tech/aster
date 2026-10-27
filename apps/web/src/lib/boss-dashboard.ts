@@ -76,7 +76,7 @@ export const bossLinks = {
   leaveApprovals: "/admin/approvals?status=pending",
   disbursementApprovals: "/admin/disbursements/approvals?scope=all",
   disbursements: "/admin/disbursements",
-  receivables: "/admin/projects/receivables",
+  receivables: "/admin/disbursements?view=receivables",
   attendanceSheets: "/admin/attendance-sheets",
   attendanceAnomalies: (period: string) => `/admin/attendance-sheets?period=${encodeURIComponent(period)}&anomaly=1`,
   /** 待發加班另計是「所有月份」的草稿合計 → 另計頁開「未付款＋所有月份」。 */

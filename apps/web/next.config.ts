@@ -28,6 +28,7 @@ const ADMIN_REDIRECTS = [
   { source: "/admin/stamp-duty", destination: "/admin/projects" },
   { source: "/admin/group-overview", destination: "/admin#group-overview" },
   { source: "/admin/bonus-runs", destination: "/admin/bonus-sheet" },
+  { source: "/admin/projects/receivables", destination: "/admin/disbursements?view=receivables" },
 ];
 
 const nextConfig: NextConfig = {
