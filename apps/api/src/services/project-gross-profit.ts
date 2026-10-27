@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { selectAllPages } from "../lib/select-all-pages.js"
 
 /**
  * 專案「累計已實現毛利」——獎金試算（bonus-run-store.ts）、獎金估算（bonus-estimate.ts）
@@ -116,7 +117,6 @@ export function summarizeProjectGrossProfit(projectIds: readonly string[], input
  * IO
  * ────────────────────────────────────────────────────────────────── */
 
-const PAGE_SIZE = 1000
 const ID_CHUNK = 100
 
 function chunks<T>(arr: readonly T[], size = ID_CHUNK): T[][] {
@@ -130,15 +130,8 @@ async function fetchAll<T>(
   context: string,
   build: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
 ): Promise<T[]> {
-  const rows: T[] = []
-  for (let offset = 0; ; offset += PAGE_SIZE) {
-    const { data, error } = await build(offset, offset + PAGE_SIZE - 1)
-    if (error) throw new Error(`${context}: ${error.message}`)
-    const batch = data ?? []
-    rows.push(...batch)
-    if (batch.length < PAGE_SIZE) break
-  }
-  return rows
+  // 委派共用 helper：依實際回傳列數推進、空頁才停（max-rows 小於 1000 也不會提早停）。
+  return selectAllPages<T>(build, context)
 }
 
 /** 撈指定專案截至 asOf 的入帳／放款分攤／舊路徑複委託付款，回 summarizeProjectGrossProfit 的輸入。 */

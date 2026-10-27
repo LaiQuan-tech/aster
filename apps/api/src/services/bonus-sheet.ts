@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { selectAllPages } from "../lib/select-all-pages.js"
 import { DEFAULT_COMPANY_NAME } from "../lib/letterhead.js"
 import { logger } from "../lib/logger.js"
 import type { StatementGrid } from "../lib/statements/grid.js"
@@ -206,24 +207,24 @@ export function projectsFromItems(items: readonly SerializedItem[], snapshot: Re
   return out
 }
 
+/** @internal 租戶全部專案（id 排序）扣掉 exclude 與複製取代的原案；匯出供分頁測試用。 */
+export async function listOtherProjectIds(tenantId: string, exclude: ReadonlySet<string>): Promise<string[]> {
+  const ids: string[] = []
+  const rows = await selectAllPages<{ id: string; archive_reason: string | null }>(
+    (from, to) =>
+      supabaseAdmin.from("projects").select("id, archive_reason").eq("tenant_id", tenantId).order("id", { ascending: true }).range(from, to),
+    "bonus-sheet (projects)",
+  )
+  for (const r of rows) if (!exclude.has(r.id) && !isDuplicateReplacedArchive(r.archive_reason)) ids.push(r.id)
+  return ids
+}
+
 /**
  * 批次明細以外的專案（租戶全部專案扣掉 exclude、扣掉複製取代的原案）：用獎金試算同一支 loadInputs 讀合約、
  * 截至基準日的入帳與成員（archiveRule 'all'、指定 projectIds＝沒有成員也回）。
  */
 async function loadOtherProjects(tenantId: string, asOf: string, exclude: ReadonlySet<string>): Promise<BonusSheetProject[]> {
-  const ids: string[] = []
-  for (let from = 0; ; from += 1000) {
-    const { data, error } = await supabaseAdmin
-      .from("projects")
-      .select("id, archive_reason")
-      .eq("tenant_id", tenantId)
-      .order("id", { ascending: true })
-      .range(from, from + 999)
-    if (error) throw new Error(`bonus-sheet (projects): ${error.message}`)
-    const rows = (data ?? []) as Array<{ id: string; archive_reason: string | null }>
-    for (const r of rows) if (!exclude.has(r.id) && !isDuplicateReplacedArchive(r.archive_reason)) ids.push(r.id)
-    if (rows.length < 1000) break
-  }
+  const ids = await listOtherProjectIds(tenantId, exclude)
   const out: BonusSheetProject[] = []
   for (let i = 0; i < ids.length; i += 100) {
     const inputs = await loadInputs(tenantId, asOf, { projectIds: ids.slice(i, i + 100), archiveRule: "all" })

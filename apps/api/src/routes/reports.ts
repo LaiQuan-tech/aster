@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { chunk, fetchAllPages } from "../lib/select-all-pages.js"
 import { toCsv, type CsvColumn } from "../lib/csv.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { dayWindowUtc } from "../lib/tz.js"
@@ -57,6 +58,41 @@ interface AttendanceDayRow {
   night_minutes: number
 }
 
+/**
+ * 出勤報表的每日列：全公司 × 區間很容易超過 PostgREST max-rows（1000）而被靜默截斷 → 分頁讀全；
+ * `empIds` 非 null 時 .in() 每批 ≤100 位員工（URL 長度）。依 (work_date, employee_id, id) 穩定排序；
+ * 呼叫端只做加總、最後再依姓名排序，輸出順序不受影響。@internal 匯出供分頁測試用。
+ */
+export async function loadAttendanceReportDays(
+  tenantId: string,
+  from: string,
+  to: string,
+  empIds: string[] | null,
+): Promise<{ days: AttendanceDayRow[]; error: { message: string } | null }> {
+  const fetchDays = (ids: string[] | null) =>
+    fetchAllPages<AttendanceDayRow>((rFrom, rTo) => {
+      let q = supabaseAdmin
+        .from("attendance_days")
+        .select("id, employee_id, worked_minutes, late_minutes, overtime_minutes, night_minutes")
+        .eq("tenant_id", tenantId)
+        .gte("work_date", from)
+        .lte("work_date", to)
+      if (ids) q = q.in("employee_id", ids)
+      return q
+        .order("work_date", { ascending: true })
+        .order("employee_id", { ascending: true })
+        .order("id", { ascending: true })
+        .range(rFrom, rTo)
+    }, "GET /reports/attendance (days)")
+  const days: AttendanceDayRow[] = []
+  for (const ids of empIds ? chunk(empIds, 100) : [null]) {
+    const r = await fetchDays(ids)
+    if (r.error) return { days: [], error: r.error }
+    days.push(...r.data)
+  }
+  return { days, error: null }
+}
+
 interface AttendanceAgg {
   employeeId: string
   employeeName: string
@@ -91,12 +127,12 @@ reportsRouter.get(
     try {
       // Employee roster (id → name), optionally filtered by department. This both
       // resolves names and constrains the aggregation to the dept's employees.
-      let empQuery = supabaseAdmin
-        .from("employees")
-        .select("id, name, dept_id")
-        .eq("tenant_id", tenantId)
-      if (deptId) empQuery = empQuery.eq("dept_id", deptId)
-      const { data: emps, error: empErr } = await empQuery
+      // PostgREST max-rows＝1000 會靜默截斷 → 分頁讀全（穩定排序以 id 收尾）。
+      const { data: emps, error: empErr } = await fetchAllPages<{ id: string; name: string | null }>((rFrom, rTo) => {
+        let q = supabaseAdmin.from("employees").select("id, name, dept_id").eq("tenant_id", tenantId)
+        if (deptId) q = q.eq("dept_id", deptId)
+        return q.order("id", { ascending: true }).range(rFrom, rTo)
+      }, "GET /reports/attendance (employees)")
       if (empErr) {
         next(new Error(`GET /reports/attendance (employees): ${empErr.message}`))
         return
@@ -105,14 +141,8 @@ reportsRouter.get(
       for (const e of emps ?? []) nameById.set(e.id as string, (e.name as string) ?? "")
       const allowedIds = new Set(nameById.keys())
 
-      let adQuery = supabaseAdmin
-        .from("attendance_days")
-        .select("employee_id, worked_minutes, late_minutes, overtime_minutes, night_minutes")
-        .eq("tenant_id", tenantId)
-        .gte("work_date", from)
-        .lte("work_date", to)
-      if (deptId) adQuery = adQuery.in("employee_id", Array.from(allowedIds))
-      const { data: days, error: adErr } = await adQuery
+      // 全公司 × 區間的每日出勤很容易超過 1000 列 → 分頁讀全（見 loadAttendanceReportDays）。
+      const { days, error: adErr } = await loadAttendanceReportDays(tenantId, from, to, deptId ? Array.from(allowedIds) : null)
       if (adErr) {
         next(new Error(`GET /reports/attendance (days): ${adErr.message}`))
         return

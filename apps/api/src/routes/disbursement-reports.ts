@@ -3,6 +3,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireFinance } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { selectAllPages } from "../lib/select-all-pages.js"
 import { todayKey } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { DISBURSEMENT_COLS, serializeMany, type DisbursementRow, type SerializedDisbursement } from "../services/disbursements.js"
@@ -32,7 +33,6 @@ export const disbursementReportsRouter = Router()
 
 // W4：放款樞紐屬「專案與財務」，會計看得到（同 routes/disbursements.ts 的 requireFinance）。
 const guards = [requireAuth, requireTenant, requireFinance] as const
-const PAGE_SIZE = 1000
 
 function parseGroupBy(v: unknown): DisbursementPivotGroupBy | null {
   if (typeof v !== "string") return null
@@ -54,27 +54,23 @@ function parseYear(v: unknown, todayYear: number): number | null {
  * paid_on 落在年度範圍）同 `buildSummary`。撈完照抄 `serializeMany` 一次批次
  * 補齊分攤／專案／公司名，形狀跟列表頁一致。
  */
-async function loadYearPaidDisbursements(tenantId: string, year: number): Promise<SerializedDisbursement[]> {
+/** @internal 匯出供分頁測試用。 */
+export async function loadYearPaidDisbursements(tenantId: string, year: number): Promise<SerializedDisbursement[]> {
   const from = `${year}-01-01`
   const to = `${year}-12-31`
-  const rows: DisbursementRow[] = []
-  let offset = 0
-  for (;;) {
-    const { data, error } = await supabaseAdmin
-      .from("disbursements")
-      .select(DISBURSEMENT_COLS)
-      .eq("tenant_id", tenantId)
-      .eq("status", "paid")
-      .gte("paid_on", from)
-      .lte("paid_on", to)
-      .order("id", { ascending: true })
-      .range(offset, offset + PAGE_SIZE - 1)
-    if (error) throw new Error(`loadYearPaidDisbursements: ${error.message}`)
-    const batch = (data ?? []) as unknown as DisbursementRow[]
-    rows.push(...batch)
-    if (batch.length < PAGE_SIZE) break
-    offset += PAGE_SIZE
-  }
+  const rows = await selectAllPages<DisbursementRow>(
+    (rFrom, rTo) =>
+      supabaseAdmin
+        .from("disbursements")
+        .select(DISBURSEMENT_COLS)
+        .eq("tenant_id", tenantId)
+        .eq("status", "paid")
+        .gte("paid_on", from)
+        .lte("paid_on", to)
+        .order("id", { ascending: true })
+        .range(rFrom, rTo),
+    "loadYearPaidDisbursements",
+  )
   return serializeMany(tenantId, rows)
 }
 

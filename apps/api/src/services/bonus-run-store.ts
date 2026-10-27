@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { selectAllPages } from "../lib/select-all-pages.js"
 import { OUR_CONTRACT_ROLES } from "../lib/contract-role.js"
 import { localDateKey, todayKey } from "../lib/tz.js"
 import { loadGrossProfitInput, summarizeProjectGrossProfit } from "./project-gross-profit.js"
@@ -266,14 +267,12 @@ export function num(v: string | number | null | undefined): number | null {
   return Number.isFinite(n) ? n : null
 }
 
-const RANGE_PAGE_SIZE = 1000
-
 /**
  * 共用分頁 fetcher：正式庫 PostgREST 設定 max-rows=1000，單次 `.select()` 超過
  * 這個數字會被「靜默」截斷（不是 error，`data` 就是只剩 1000 列）。任何筆數
  * 會隨資料量長大的查詢（跨專案／跨批次彙總，不是單一 run 的明細）都要繞過這
  * 個上限——樣板同 routes/disbursement-reports.ts 的 loadYearPaidDisbursements：
- * 用 `.range(offset, offset+999)` 一頁一頁撈，回傳 < 1000 列才算撈完。
+ * 委派 lib/select-all-pages.ts 的 selectAllPages（依實際列數推進、讀到空頁才停）。
  *
  * `build` 必須自己下穩定的 `.order()`（沒有明確排序，跨頁 `.range()` 不保證
  * 涵蓋所有列）＋`.range(from, to)`；這裡只負責分頁迴圈與錯誤訊息前綴
@@ -283,17 +282,8 @@ async function fetchAll<T>(
   build: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
   context: string,
 ): Promise<T[]> {
-  const rows: T[] = []
-  let offset = 0
-  for (;;) {
-    const { data, error } = await build(offset, offset + RANGE_PAGE_SIZE - 1)
-    if (error) throw new Error(`${context}: ${error.message}`)
-    const batch = data ?? []
-    rows.push(...batch)
-    if (batch.length < RANGE_PAGE_SIZE) break
-    offset += RANGE_PAGE_SIZE
-  }
-  return rows
+  // 委派共用 helper：依實際回傳列數推進、空頁才停（max-rows 小於 1000 也不會提早停）。
+  return selectAllPages<T>(build, context)
 }
 
 /**

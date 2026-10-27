@@ -134,9 +134,10 @@ describe("GET /companies — isActive 與使用量", () => {
     expect(res.body.companies).toHaveLength(4)
     const reads = (table: string) => fake.reads.filter((name) => name === table).length
     expect(reads("companies")).toBe(1)
-    expect(reads("projects")).toBe(1) // company_id
-    expect(reads("disbursements")).toBe(2) // paying_company_id／receipt_issuer_company_id
-    expect(reads("project_subcontract_payments")).toBe(2)
+    // 每條分頁查詢讀到空頁才停：有資料的欄位＝資料頁＋1 次空頁，沒資料＝1 次（不隨公司數增加）
+    expect(reads("projects")).toBe(2) // company_id
+    expect(reads("disbursements")).toBe(4) // paying_company_id／receipt_issuer_company_id（各＋空頁）
+    expect(reads("project_subcontract_payments")).toBe(4)
   })
 
   it("超過 PostgREST 單頁 1000 列也數得準：後面頁的公司不會被誤判成沒被用過", async () => {
@@ -152,7 +153,7 @@ describe("GET /companies — isActive 與使用量", () => {
     expect(usage.get(C_USED)).toMatchObject({ projects: 1000, total: 1000 })
     expect(usage.get(C_SECOND)).toMatchObject({ projects: 1, total: 1 })
     expect(usage.get(C_DEFAULT)).toMatchObject({ projects: 0, total: 0 })
-    expect(fake.reads.filter((name) => name === "projects")).toHaveLength(2)
+    expect(fake.reads.filter((name) => name === "projects")).toHaveLength(3) // 1000＋1＋空頁
   })
 
   it("某張來源表還沒套用（PGRST205）：那個來源算 0，名冊照樣讀得出來；其他錯誤不吞（500）", async () => {

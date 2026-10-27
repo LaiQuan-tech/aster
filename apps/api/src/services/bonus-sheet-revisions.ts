@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { chunk, selectAllPages } from "../lib/select-all-pages.js"
 import { localDateKey } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 
@@ -181,21 +182,20 @@ export async function loadShareRevisions(
   const ids = [...new Set(projectIds)]
   if (ids.length === 0) return result
   const rows: ShareAdjustmentRow[] = []
-  for (let i = 0; i < ids.length; i += 100) {
-    const chunk = ids.slice(i, i + 100)
-    for (let from = 0; ; from += 1000) {
-      const { data, error } = await supabaseAdmin
-        .from("project_share_adjustments")
-        .select("id, project_id, employee_id, change_set_id, field, old_value, new_value, reason, changed_by_emp_id, created_at")
-        .eq("tenant_id", tenantId)
-        .in("project_id", chunk)
-        .order("id", { ascending: true })
-        .range(from, from + 999)
-      if (error) throw new Error(`bonus-sheet (share adjustments): ${error.message}`)
-      const batch = (data ?? []) as ShareAdjustmentRow[]
-      rows.push(...batch)
-      if (batch.length < 1000) break
-    }
+  for (const idChunk of chunk(ids, 100)) {
+    rows.push(
+      ...(await selectAllPages<ShareAdjustmentRow>(
+        (from, to) =>
+          supabaseAdmin
+            .from("project_share_adjustments")
+            .select("id, project_id, employee_id, change_set_id, field, old_value, new_value, reason, changed_by_emp_id, created_at")
+            .eq("tenant_id", tenantId)
+            .in("project_id", idChunk)
+            .order("id", { ascending: true })
+            .range(from, to),
+        "bonus-sheet (share adjustments)",
+      )),
+    )
   }
   if (rows.length === 0) return result
 

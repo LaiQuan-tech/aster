@@ -4,6 +4,7 @@
  * 「沒 AI 也能查」是刻意的，客戶不會因為金鑰沒設就找不到文件。
  */
 import { supabaseAdmin } from "../lib/supabase.js"
+import { selectAllPages } from "../lib/select-all-pages.js"
 import { embedTexts, generateText, isGeminiConfigured } from "../lib/gemini.js"
 import { chunkText, extractText, UnsupportedFileError } from "./knowledge-text.js"
 
@@ -160,7 +161,6 @@ export interface SearchHit {
   similarity: number | null
 }
 
-const LINK_PAGE_SIZE = 1000
 const LINK_IN_CHUNK = 100
 
 /**
@@ -173,20 +173,19 @@ export async function contractLinkedDocumentIds(tenantId: string): Promise<Set<s
   // ① 所有「掛專案文件」的知識庫文件。分頁撈：PostgREST max-rows=1000 會靜默截斷，
   //    截斷＝漏擋，這道防線不能因為資料多了就悄悄失效（樣板同 services/bonus-run-store.ts fetchAll）。
   const linked: Array<{ id: string; project_document_id: string }> = []
-  for (let from = 0; ; from += LINK_PAGE_SIZE) {
-    const { data, error } = await supabaseAdmin
-      .from("knowledge_documents")
-      .select("id, project_document_id")
-      .eq("tenant_id", tenantId)
-      .eq("kind", "project_document")
-      .order("id", { ascending: true })
-      .range(from, from + LINK_PAGE_SIZE - 1)
-    if (error) throw new Error(`contractLinkedDocumentIds (docs): ${error.message}`)
-    const batch = data ?? []
-    for (const d of batch) {
-      if (d.project_document_id) linked.push({ id: d.id as string, project_document_id: d.project_document_id as string })
-    }
-    if (batch.length < LINK_PAGE_SIZE) break
+  const docs = await selectAllPages<{ id: string; project_document_id: string | null }>(
+    (from, to) =>
+      supabaseAdmin
+        .from("knowledge_documents")
+        .select("id, project_document_id")
+        .eq("tenant_id", tenantId)
+        .eq("kind", "project_document")
+        .order("id", { ascending: true })
+        .range(from, to),
+    "contractLinkedDocumentIds (docs)",
+  )
+  for (const d of docs) {
+    if (d.project_document_id) linked.push({ id: d.id as string, project_document_id: d.project_document_id as string })
   }
   if (linked.length === 0) return new Set()
 

@@ -311,7 +311,8 @@ describe("GET /option-lists/:key — 停用項與使用量的可見範圍", () =
   it("使用量是批次查：整份清單只掃一次來源資料表，不隨選項數增加", async () => {
     await as(HR_TOKEN, request(app).get(`/option-lists/${KEY}?manage=true`))
 
-    expect(fake.reads.filter((table) => table === "clients")).toHaveLength(1)
+    // 一批 code 一條分頁查詢：資料頁＋讀到空頁才停的 1 次（不隨選項數增加）
+    expect(fake.reads.filter((table) => table === "clients")).toHaveLength(2)
     expect(fake.reads.filter((table) => table === "option_items")).toHaveLength(1)
   })
 
@@ -336,7 +337,7 @@ describe("GET /option-lists/:key — 停用項與使用量的可見範圍", () =
     const usage = await loadOptionUsage(TENANT_ID, DEF, ["architect", "gov", "owner"])
 
     expect(usage).toEqual({ architect: 1000, gov: 1, owner: 0 })
-    expect(fake.reads.filter((table) => table === "clients")).toHaveLength(2)
+    expect(fake.reads.filter((table) => table === "clients")).toHaveLength(3) // 1000＋1＋空頁
   })
 
   it("沒有任何 code 時不打來源資料表；來源查詢出錯不吞（回 500，不能讓人在查不到時誤刪）", async () => {

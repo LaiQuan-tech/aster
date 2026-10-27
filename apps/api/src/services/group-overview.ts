@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { fetchAllPages, selectAllPages } from "../lib/select-all-pages.js"
 import { employeesHaveCompany, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { isEmployedOn } from "./employment-status.js"
 import { defaultCompanyOf, loadTenantCompanies, type CompanyLite } from "./project-company.js"
@@ -86,8 +87,7 @@ export const UNASSIGNED_COMPANY_NAME = "（未歸屬公司）"
 /** 下鑽列表最多回幾筆（依金額排序，超過的只算在 total／count 裡）。 */
 export const DETAIL_LIMIT = 50
 
-/** PostgREST max-rows＝1000：單次 select 超過會被靜默截斷，筆數會隨資料量長大的查詢一律用 `.range()` 分頁。 */
-const PAGE_SIZE = 1000
+// PostgREST max-rows＝1000：單次 select 超過會被靜默截斷，筆數會隨資料量長大的查詢一律走 lib/select-all-pages 分頁。
 /** `.in()` 的 id 清單分批大小（網址長度上限）。 */
 const ID_CHUNK = 100
 
@@ -319,15 +319,8 @@ async function fetchAllRows<T>(
   context: string,
   build: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
 ): Promise<T[]> {
-  const rows: T[] = []
-  for (let offset = 0; ; offset += PAGE_SIZE) {
-    const { data, error } = await build(offset, offset + PAGE_SIZE - 1)
-    if (error) throw new Error(`${context}: ${error.message}`)
-    const batch = data ?? []
-    rows.push(...batch)
-    if (batch.length < PAGE_SIZE) break
-  }
-  return rows
+  // 委派共用 helper：依實際回傳列數推進、空頁才停（max-rows 小於 1000 也不會提早停）。
+  return selectAllPages<T>(build, context)
 }
 
 /** 依 id 清單分批撈（名冊表；軟刪的也要撈——已被引用的客戶／廠商刪了仍要 join 回名字與關係企業標記）。 */
@@ -504,29 +497,30 @@ async function loadLegacySubcontractPayments(tenantId: string, from: string, to:
 }
 
 /** 該年的加班超額另計（draft＋paid）；表不存在（未套 sql/0040）→ null。 */
-async function loadOvertimeSettlements(tenantId: string, year: number): Promise<OvertimeSettlementInputRow[] | null> {
-  const rows: OvertimeSettlementInputRow[] = []
-  for (let offset = 0; ; offset += PAGE_SIZE) {
-    const { data, error } = await supabaseAdmin
-      .from("overtime_settlements")
-      .select("id, employee_id, period, amount, status, source, minutes, note")
-      .eq("tenant_id", tenantId)
-      .in("status", ["draft", "paid"])
-      .gte("period", `${year}-01`)
-      .lte("period", `${year}-12`)
-      .order("id", { ascending: true })
-      .range(offset, offset + PAGE_SIZE - 1)
-    if (error) {
-      if (isMissingTableError(error)) {
-        warnSchemaGapOnce("group-overview.overtime_settlements", error)
-        return null
-      }
-      throw new Error(`group-overview overtime_settlements: ${error.message}`)
+/** @internal 匯出供分頁測試用。 */
+export async function loadOvertimeSettlements(tenantId: string, year: number): Promise<OvertimeSettlementInputRow[] | null> {
+  const res = await fetchAllPages<OvertimeSettlementInputRow & { id: string }>(
+    (from, to) =>
+      supabaseAdmin
+        .from("overtime_settlements")
+        .select("id, employee_id, period, amount, status, source, minutes, note")
+        .eq("tenant_id", tenantId)
+        .in("status", ["draft", "paid"])
+        .gte("period", `${year}-01`)
+        .lte("period", `${year}-12`)
+        .order("id", { ascending: true })
+        .range(from, to),
+    "group-overview overtime_settlements",
+  )
+  if (res.error) {
+    const error = res.error
+    if (isMissingTableError(error)) {
+      warnSchemaGapOnce("group-overview.overtime_settlements", error)
+      return null
     }
-    const batch = (data ?? []) as unknown as Array<OvertimeSettlementInputRow & { id: string }>
-    rows.push(...batch)
-    if (batch.length < PAGE_SIZE) break
+    throw new Error(`group-overview overtime_settlements: ${error.message}`)
   }
+  const rows: OvertimeSettlementInputRow[] = res.data
   // offset 分頁遇到並發寫入可能在頁界重複一列 → 以 id 去重。
   return [...new Map((rows as Array<OvertimeSettlementInputRow & { id: string }>).map((row) => [row.id, row])).values()]
 }

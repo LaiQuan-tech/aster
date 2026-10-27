@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { selectAllPages } from "../lib/select-all-pages.js"
 import { FINANCE_ROLES } from "../middleware/scope.js"
 import { catalogCode } from "./catalog-code.js"
 
@@ -157,10 +158,9 @@ export async function loadOptionItem(tenantId: string, listKey: string, code: st
  * ────────────────────────────────────────────────────────────────── */
 
 /**
- * PostgREST max-rows＝1000，單次 select 超過會被「靜默」截斷（不是 error）。一頁一頁撈到不滿頁為止——
+ * PostgREST max-rows＝1000，單次 select 超過會被「靜默」截斷（不是 error）。用 lib/select-all-pages 分頁撈到空頁為止——
  * 不分頁的話，使用量大的選項會把別的選項的列擠出第一頁，被誤判成「沒被用過」而允許刪除。
  */
-const USAGE_PAGE_SIZE = 1000
 /** `.in()` 的 URL 有長度上限，code 分批帶。 */
 const USAGE_CODE_CHUNK = 100
 
@@ -182,20 +182,19 @@ export async function loadOptionUsage(
       def.usage.map(async (source) => {
         for (let i = 0; i < wanted.length; i += USAGE_CODE_CHUNK) {
           const chunk = wanted.slice(i, i + USAGE_CODE_CHUNK)
-          for (let from = 0; ; from += USAGE_PAGE_SIZE) {
-            const { data, error } = await supabaseAdmin
-              .from(source.table)
-              .select(`id, ${source.column}`)
-              .eq("tenant_id", tenantId)
-              .in(source.column, chunk)
-              // 跨頁 .range() 要有穩定排序才保證不重不漏。
-              .order("id", { ascending: true })
-              .range(from, from + USAGE_PAGE_SIZE - 1)
-            if (error) throw new Error(`loadOptionUsage (${def.key}: ${source.table}.${source.column}): ${error.message}`)
-            const rows = (data ?? []) as unknown as Array<Record<string, string>>
-            for (const row of rows) rowKeysByCode.get(row[source.column] as string)?.add(`${source.table}:${row.id}`)
-            if (rows.length < USAGE_PAGE_SIZE) break
-          }
+          const rows = await selectAllPages<Record<string, string>>(
+            (from, to) =>
+              supabaseAdmin
+                .from(source.table)
+                .select(`id, ${source.column}`)
+                .eq("tenant_id", tenantId)
+                .in(source.column, chunk)
+                // 跨頁 .range() 要有穩定排序才保證不重不漏。
+                .order("id", { ascending: true })
+                .range(from, to),
+            `loadOptionUsage (${def.key}: ${source.table}.${source.column})`,
+          )
+          for (const row of rows) rowKeysByCode.get(row[source.column] as string)?.add(`${source.table}:${row.id}`)
         }
       }),
     )

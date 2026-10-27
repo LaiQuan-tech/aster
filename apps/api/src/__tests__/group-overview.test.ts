@@ -606,8 +606,11 @@ describe("GET /group-overview — 查詢量與分頁", () => {
     await getOverview()
     const count = (table: string) => fake.reads.filter((t) => t === table).length
     expect(count("companies")).toBe(1)
-    expect(count("project_billings")).toBe(3) // 該年入帳、該年開票、沒有入帳日的金額各一條
-    expect(count("disbursements")).toBe(1)
+    // 分頁 helper 讀到空頁才停：有資料的查詢＝資料頁＋1 次空頁，空結果＝1 次（數字與公司家數無關）
+    const billingReads = count("project_billings")
+    const disbReads = count("disbursements")
+    expect(billingReads).toBe(5) // 該年入帳、該年開票、沒有入帳日的金額三條（前兩條有資料各多 1 次空頁）
+    expect(disbReads).toBe(2)
     expect(count("projects")).toBe(1)
     expect(count("clients")).toBe(1)
     expect(count("vendors")).toBe(1)
@@ -619,8 +622,8 @@ describe("GET /group-overview — 查詢量與分頁", () => {
     fake.reads.length = 0
     const body = await getOverview()
     expect(body.companies.length).toBeGreaterThanOrEqual(10)
-    expect(count("project_billings")).toBe(3)
-    expect(count("disbursements")).toBe(1)
+    expect(count("project_billings")).toBe(billingReads)
+    expect(count("disbursements")).toBe(disbReads)
   })
 
   it("放款超過 1000 筆：用 .range() 分頁撈完，一筆不漏", async () => {
@@ -629,7 +632,7 @@ describe("GET /group-overview — 查詢量與分頁", () => {
     fake.reads.length = 0
     const body = await getOverview()
     expect(company(body, CO_A).expense).toBe(23_050)
-    expect(fake.reads.filter((t) => t === "disbursements")).toHaveLength(3) // 1000＋1000＋305
+    expect(fake.reads.filter((t) => t === "disbursements")).toHaveLength(4) // 1000＋1000＋305＋空頁（讀到空頁才停）
   })
 
   it("入帳期別超過 1000 筆同樣分頁，且同一期同時在「入帳」與「開票」兩條查詢裡只算一次", async () => {
@@ -947,11 +950,16 @@ describe("GET /group-overview — 查詢契約", () => {
       const ranges = mine.filter((c) => c.method === "range")
       expect(orders.length, `${table} order`).toBe(ranges.length)
       expect(orders.every((c) => c.args[0] === "id"), `${table} order(id)`).toBe(true)
-      expect(ranges.every((c) => c.args[0] === 0 && c.args[1] === 999), `${table} range(0, 999)`).toBe(true)
+      // 第一頁 range(0, 999)；有資料時下一頁從實際列數接著讀（讀到空頁才停）
+      expect(ranges[0]?.args[0] === 0 && ranges[0]?.args[1] === 999, `${table} range(0, 999)`).toBe(true)
+      expect(ranges.every((c) => (c.args[1] as number) - (c.args[0] as number) === 999), `${table} range 頁大小`).toBe(true)
     }
     // 放款只撈已匯款、billings 只撈未軟刪
     expect(rec.calls.some((c) => c.table === "disbursements" && c.method === "eq" && c.args[0] === "status" && c.args[1] === "paid")).toBe(true)
-    expect(rec.calls.filter((c) => c.table === "project_billings" && c.method === "is" && c.args[0] === "deleted_at").length).toBe(3)
+    // 三條 billings 查詢的每一頁（含讀到空頁的那次）都帶 deleted_at is null
+    const billingPages = rec.calls.filter((c) => c.table === "project_billings" && c.method === "range").length
+    expect(billingPages).toBeGreaterThanOrEqual(3)
+    expect(rec.calls.filter((c) => c.table === "project_billings" && c.method === "is" && c.args[0] === "deleted_at").length).toBe(billingPages)
   })
 
   it("同一個 id 的放款出現兩次（offset 分頁遇到並發寫入可能在頁界重複）只算一次", async () => {

@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { fetchAllPages } from "../lib/select-all-pages.js"
 import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 
 /**
@@ -56,10 +57,9 @@ export const COMPANY_USAGE_SOURCES: readonly UsageSource[] = [
 ]
 
 /**
- * PostgREST max-rows＝1000，單次 select 超過會被「靜默」截斷（不是 error）。一頁一頁撈到不滿頁為止——
+ * PostgREST max-rows＝1000，單次 select 超過會被「靜默」截斷（不是 error）。用 lib/select-all-pages 分頁撈到空頁為止——
  * 不分頁的話，某間公司有 1000+ 筆時，後面公司的列會整批被擠出第一頁，被誤判成「沒被用過」。
  */
-const USAGE_PAGE_SIZE = 1000
 /** `.in()` 的 URL 有長度上限，公司 id 分批帶。 */
 const USAGE_ID_CHUNK = 100
 
@@ -71,15 +71,20 @@ async function referencingRows(
   const out: Array<{ rowId: string; companyId: string }> = []
   for (let i = 0; i < companyIds.length; i += USAGE_ID_CHUNK) {
     const chunk = companyIds.slice(i, i + USAGE_ID_CHUNK)
-    for (let from = 0; ; from += USAGE_PAGE_SIZE) {
-      const { data, error } = await supabaseAdmin
-        .from(source.table)
-        .select(`id, ${source.column}`)
-        .eq("tenant_id", tenantId)
-        .in(source.column, chunk)
-        // 跨頁 .range() 要有穩定排序才保證不重不漏。
-        .order("id", { ascending: true })
-        .range(from, from + USAGE_PAGE_SIZE - 1)
+    {
+      const res = await fetchAllPages<Record<string, string>>(
+        (from, to) =>
+          supabaseAdmin
+            .from(source.table)
+            .select(`id, ${source.column}`)
+            .eq("tenant_id", tenantId)
+            .in(source.column, chunk)
+            // 跨頁 .range() 要有穩定排序才保證不重不漏。
+            .order("id", { ascending: true })
+            .range(from, to),
+        `loadCompanyUsage (${source.table}.${source.column})`,
+      )
+      const error = res.error
       if (error) {
         // 還沒套用該表／欄位的環境（遷移未跑）：不可能有任何列引用它，算 0，不要讓整個名冊讀不出來。
         if (isMissingTableError(error) || isMissingColumnError(error)) {
@@ -88,9 +93,7 @@ async function referencingRows(
         }
         throw new Error(`loadCompanyUsage (${source.table}.${source.column}): ${error.message}`)
       }
-      const rows = (data ?? []) as unknown as Array<Record<string, string>>
-      for (const row of rows) out.push({ rowId: row.id as string, companyId: row[source.column] as string })
-      if (rows.length < USAGE_PAGE_SIZE) break
+      for (const row of res.data ?? []) out.push({ rowId: row.id as string, companyId: row[source.column] as string })
     }
   }
   return out
