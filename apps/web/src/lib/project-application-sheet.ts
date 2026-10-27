@@ -202,6 +202,56 @@ export interface ApplicationSheetDraft {
   engineers: Record<string, EngineerDraft>;
   /** 付款階段「技師公會代墊」列的「審迄還款」（自由文字，≤200 字；2026-10-28）。 */
   guildRepaymentNote: string;
+  /*
+   * ↓ 以下是「整張表直接編輯」（2026-10-29 業主：為什麼表格不能直接編輯？）新增的部分。
+   * 這些格子的資料不在專案上（客戶名冊、合約、請款期程、副委託），所以草稿只存「使用者改過的格子」
+   * （疊加層），是否真的有變由 project-application-sheet-save.ts 跟最新資料比對；
+   * 重新載入時疊加層原樣保留（rebaseApplicationSheetDraft 的通用規則：跟舊基準＝空物件不同就保留）。
+   */
+  /** 客戶名冊欄位（電話、發票地址、採購承辦、傳真、統編），只套用在草稿目前選的客戶上；換客戶時清空。 */
+  clientEdits: Partial<Record<ClientSheetField, string>>;
+  /** 訂單格新勾選的文件類型（本案還沒有該類文件時，儲存時建立）；"" ＝沒勾新的。 */
+  orderDocType: "" | "contract" | "quotation";
+  /** 銷售金額「未稅」格的輸入；null ＝沒動過（顯示系統現值）。 */
+  amountUntaxed: string | null;
+  /** 付款階段各列改過的格子；key 見 stageRowKey()。 */
+  stageEdits: Record<string, StageEdit>;
+  /** 發包單位各欄改過的格子；key 見 applicationSubcontractSlots()。 */
+  subEdits: Record<string, SubEdit>;
+  /** 使用者按「多開一組發包欄」多開的區塊數（每塊 3 欄）。 */
+  subExtraBlocks: number;
+}
+
+/** 申請單上屬於客戶名冊的格子（「採購承辦」＝聯絡人姓名＋電話兩個欄位）。 */
+export type ClientSheetField = "phone" | "invoiceAddress" | "contactName" | "contactPhone" | "fax" | "taxId";
+export const CLIENT_SHEET_FIELDS: readonly ClientSheetField[] = ["phone", "invoiceAddress", "contactName", "contactPhone", "fax", "taxId"];
+export const CLIENT_SHEET_FIELD_LABELS: Record<ClientSheetField, string> = {
+  phone: "電話",
+  invoiceAddress: "發票地址",
+  contactName: "採購承辦姓名",
+  contactPhone: "採購承辦電話",
+  fax: "傳真",
+  taxId: "統一編號",
+};
+
+/** 付款階段一列可直接改的格子（全部字串，輸入中途不轉型）。 */
+export interface StageEdit {
+  milestone?: string;
+  percentage?: string;
+  amount?: string;
+  /** 改了金額（＝人工指定）時的理由；後端要求必填，沿用既有理由時可不填。 */
+  overrideReason?: string;
+  receivedOn?: string;
+  invoiceNo?: string;
+}
+
+/** 發包單位一欄可直接改的格子。 */
+export interface SubEdit {
+  vendorName?: string;
+  contact?: string;
+  item?: string;
+  amount?: string;
+  billingBasis?: string;
 }
 
 /** 審迄還款的長度上限（與 API zod、DB CHECK projects_guild_repayment_note_len_chk 相同）。 */
@@ -241,6 +291,12 @@ export function applicationSheetDraftOf(project: ProjectDetail, disciplines: rea
     otherExpenses: project.otherExpenses != null ? String(project.otherExpenses) : "",
     engineers: engineerDraftOf(project.engineers, disciplines),
     guildRepaymentNote: project.guildRepaymentNote ?? "",
+    clientEdits: {},
+    orderDocType: "",
+    amountUntaxed: null,
+    stageEdits: {},
+    subEdits: {},
+    subExtraBlocks: 0,
   };
 }
 
@@ -464,6 +520,18 @@ export interface ApplicationStageRow {
   invoicedOn: string | null;
   /** 系統裡真的有這一期（false＝補版面的空白列）。 */
   exists: boolean;
+  /** 期別 id（空白列 null）。 */
+  id: string | null;
+  /** 已請款（金額凍結，表格裡不能改金額）。 */
+  billed: boolean;
+  /** 人工覆寫的理由（改金額時沿用）。 */
+  overrideReason: string | null;
+}
+
+/** 付款階段每一列在草稿 stageEdits 裡的 key：既有期別用 id，空白列用列號（公會代墊固定一列）。 */
+export function stageRowKey(row: Pick<ApplicationStageRow, "id" | "kind" | "no">): string {
+  if (row.id) return row.id;
+  return row.kind === "guild_advance" ? "new-guild" : `new-installment-${row.no}`;
 }
 
 /**
@@ -487,6 +555,9 @@ export function applicationStageRows(billings: readonly BillingExt[]): Applicati
       invoiceNo: b?.invoiceNo ?? null,
       invoicedOn: b?.invoicedOn ?? null,
       exists: !!b,
+      id: b?.id ?? null,
+      billed: !!b?.billedOn,
+      overrideReason: b?.overrideReason ?? null,
     });
   }
   rows.push({
@@ -499,6 +570,9 @@ export function applicationStageRows(billings: readonly BillingExt[]): Applicati
     invoiceNo: guild?.invoiceNo ?? null,
     invoicedOn: guild?.invoicedOn ?? null,
     exists: !!guild,
+    id: guild?.id ?? null,
+    billed: !!guild?.billedOn,
+    overrideReason: guild?.overrideReason ?? null,
   });
   return rows;
 }
@@ -512,6 +586,50 @@ export function applicationSubcontractBlocks(subcontracts: readonly Subcontract[
     blocks.push(block);
   }
   return blocks;
+}
+
+export interface SubcontractSlot {
+  /** 草稿 subEdits 的 key：既有副委託用 id，空欄用 `new-<全域欄位序號>`。 */
+  key: string;
+  sub: Subcontract | null;
+}
+
+/**
+ * 可編輯版的發包單位欄位：既有副委託依序排，空欄可直接填成新的一筆。
+ * 區塊數＝放得下既有筆數的最少區塊（至少一塊）＋使用者多開的區塊；另外確保草稿裡已填的新欄都畫得出來。
+ */
+export function applicationSubcontractSlots(
+  subcontracts: readonly Subcontract[],
+  extraBlocks = 0,
+  edits: Record<string, SubEdit> = {},
+): SubcontractSlot[][] {
+  const per = SUBCONTRACTS_PER_BLOCK;
+  let maxNewIndex = -1;
+  for (const key of Object.keys(edits)) {
+    const m = /^new-(\d+)$/.exec(key);
+    if (m) maxNewIndex = Math.max(maxNewIndex, Number(m[1]));
+  }
+  const baseBlocks = Math.max(1, Math.ceil(subcontracts.length / per));
+  const neededForEdits = Math.ceil((maxNewIndex + 1) / per);
+  const blockCount = Math.max(baseBlocks + Math.max(0, extraBlocks), neededForEdits);
+  const blocks: SubcontractSlot[][] = [];
+  for (let b = 0; b < blockCount; b++) {
+    const block: SubcontractSlot[] = [];
+    for (let j = 0; j < per; j++) {
+      const i = b * per + j;
+      const sub = subcontracts[i] ?? null;
+      block.push({ key: sub ? (sub.id ?? `saved-${i}`) : `new-${i}`, sub });
+    }
+    blocks.push(block);
+  }
+  return blocks;
+}
+
+/** 銷售金額：營業稅＝未稅 × 稅率四捨五入到元（同後端 computeMoney 的 round0），總額＝未稅＋稅。 */
+export function salesAmounts(untaxed: number | null, vatRate: number): { taxAmount: number | null; amountTotal: number | null } {
+  if (untaxed === null || !Number.isFinite(untaxed)) return { taxAmount: null, amountTotal: null };
+  const taxAmount = Math.round(untaxed * vatRate);
+  return { taxAmount, amountTotal: untaxed + taxAmount };
 }
 
 /** 設計內容的唯讀文字（科別－項目 金額，以「、」串起）。 */

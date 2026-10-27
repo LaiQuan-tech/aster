@@ -5,15 +5,27 @@ import { Button, PrimaryButton } from "@/components/admin-ui";
 import { ClientCombo } from "@/components/ClientCombo";
 import type { Vendor } from "@/lib/company-api";
 import { companyOptions } from "@/lib/company-options";
-import type { Contract } from "@/lib/projects-api";
+import { createContract, updateContract, type Contract } from "@/lib/projects-api";
 import {
   COMMON_DISCIPLINES,
   INVOICE_TYPE_LABELS,
   PAYMENT_METHOD_LABELS,
+  clientSaveWarningText,
   disciplineLabel,
+  getBillingSchedule,
+  getProjectSubcontracts,
+  humanizeBillingError,
+  humanizeClientError,
   humanizeProjectExtError,
+  humanizeSubcontractError,
+  invoiceBilling,
   listClients,
+  putProjectSubcontracts,
+  receiveBilling,
+  saveBillingSchedule,
+  updateClient,
   updateProjectFields,
+  upsertMainContract,
   type BillingExt,
   type Client,
   type Company,
@@ -31,11 +43,11 @@ import {
   APPLICATION_SUBCONTRACT_LABELS,
   APPLICATION_SUBCONTRACT_SPANS,
   APPLICATION_SUMMARY_LABELS,
+  CLIENT_SHEET_FIELD_LABELS,
   applicationSheetDraftOf,
   applicationSheetErrors,
-  applicationSheetPatch,
   applicationStageRows,
-  applicationSubcontractBlocks,
+  applicationSubcontractSlots,
   designScopeText,
   latestOrderDocument,
   orderDocumentCells,
@@ -43,13 +55,28 @@ import {
   rocDots,
   SHEET_FIELD_PRINT_BLOCK,
   GUILD_REPAYMENT_NOTE_MAX,
+  salesAmounts,
+  stageRowKey,
   type ApplicationSheetDraft,
+  type ClientSheetField,
   type PrintBlockKey,
   type SheetField,
+  type StageEdit,
+  type SubEdit,
 } from "@/lib/project-application-sheet";
+import {
+  applicationSheetPlan,
+  clientFieldValue,
+  resolveSheetClient,
+  runApplicationSheetSave,
+  stageBaseValues,
+  stageLocks,
+  type SheetSaveApi,
+  type SheetSaveStep,
+} from "@/lib/project-application-sheet-save";
 
 import { selectedCompanyId } from "../../_components/project-application-form";
-import { fmtMoney } from "./shared";
+import { fmtMoney, humanError } from "./shared";
 
 /** Word 原檔的淺藍底（shd DAEEF3）。 */
 const SHADE = "#DAEEF3";
@@ -57,11 +84,23 @@ const SHADE = "#DAEEF3";
 const SHEET_FONT = '"DFKai-SB", "BiauKai", "標楷體", "Kaiti TC", "STKaiti", serif';
 const GRID_TEMPLATE = APPLICATION_SHEET_COLUMNS.map((w) => `minmax(0, ${w}fr)`).join(" ");
 
-/** 格子內的輸入框：平常像表格文字，滑過／聚焦才顯示框線。 */
+/**
+ * 可編輯格子的底色（淡黃，像 Excel 的輸入格）：一眼分得出「可以填」與「系統算的／唯讀」（白底）。
+ * 標題格維持 Word 的淺藍底。列印模式不套（editable=false）。
+ */
+const EDITABLE_BG = "#FFF9E0";
+
+/** 格子內的輸入框：白底細框，看得出是輸入框；滑過加深、聚焦換品牌色外框。 */
 const cellInput =
-  "w-full min-w-0 rounded border border-transparent bg-transparent px-1 py-0.5 text-[13px] text-gray-900 hover:border-gray-300 focus:border-[var(--brand)] focus:bg-white focus:outline-none";
+  "w-full min-w-0 rounded-sm border border-amber-200 bg-white/90 px-1 py-0.5 text-[13px] text-gray-900 placeholder:text-gray-300 hover:border-amber-400 hover:bg-white focus:border-[var(--brand)] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[var(--brand)]/20 disabled:cursor-not-allowed disabled:opacity-60";
 
 type CellKind = "label" | "value" | "full";
+
+/** 存檔結果（放在頁面層：存完會整頁重新載入、本元件會重掛，結果要撐過那一下）。 */
+export interface ApplicationSheetSaveReport {
+  steps: SheetSaveStep[];
+  notices: string[];
+}
 
 /**
  * 一格。桌機（md 以上）照 Word 的 16 欄格線擺放（--gc／--gr）；手機改成「標題｜內容」兩欄往下堆疊，
@@ -78,6 +117,7 @@ function Cell({
   className = "",
   children,
   testId,
+  editable = false,
 }: {
   col: number;
   span: number;
@@ -89,11 +129,13 @@ function Cell({
   className?: string;
   children?: ReactNode;
   testId?: string;
+  /** 這格可以直接填（淡黃底）。 */
+  editable?: boolean;
 }) {
   const style = {
     "--gc": `${col} / span ${span}`,
     "--gr": `${row} / span ${rowSpan}`,
-    backgroundColor: shade ? SHADE : undefined,
+    backgroundColor: shade ? SHADE : editable ? EDITABLE_BG : undefined,
   } as CSSProperties;
   const place = kind === "label" ? "col-start-1" : kind === "full" ? "col-span-2" : "col-start-2";
   // 列印時紙寬（A4 約 700px）比 md 斷點窄，所以每個 md: 都要有對應的 print:，才會印出 Word 格線而不是手機堆疊。
@@ -107,6 +149,7 @@ function Cell({
     <div
       style={style}
       data-testid={testId}
+      data-editable={editable ? "true" : undefined}
       className={`${place} flex min-w-0 items-center border-b border-gray-300 bg-white px-1.5 py-1 text-[13px] leading-snug md:border-0 md:[grid-column:var(--gc)] md:[grid-row:var(--gr)] print:border-0 print:px-1 print:py-0.5 print:text-[11px] print:[grid-column:var(--gc)] print:[grid-row:var(--gr)] ${alignCls} ${kind === "label" ? "whitespace-pre text-gray-800" : ""} ${className}`}
     >
       {children}
@@ -184,12 +227,25 @@ interface ApplicationSheetProps {
   printChecked?: Partial<Record<PrintBlockKey, boolean>>;
   /** 「訂單」格的來源覆寫（列印頁用 /application 回的 latestDocument；讀不到合約的人也印得出）。省略＝由 contracts 算。 */
   latestDocument?: { docType: Contract["docType"]; signedOn: string | null } | null;
+  /**
+   * 能改客戶名冊（PATCH /clients/:id 只放行 HR／會計／平台管理員，比本案財務權限窄）。
+   * false＝客戶欄位唯讀並說明原因。省略＝true。
+   */
+  canEditClients?: boolean;
+  /** 客戶名冊（edit 模式由 page.tsx 隨 load() 一起重抓，存完客戶欄位才比得出已存成）。省略＝元件自己抓一次。 */
+  clients?: Client[];
+  /** 上次儲存的結果（page.tsx 持有；存完重新載入時本元件會重掛）。省略＝元件自己保存。 */
+  saveReport?: ApplicationSheetSaveReport | null;
+  onSaveReport?: (report: ApplicationSheetSaveReport | null) => void;
 }
 
 /**
  * 專案明細頁上半部：版面照公司 Word「專案申請單」（抬頭、專案明細表、付款階段、發包單位），
- * 欄位直接在格子內編輯，按「儲存申請單」只送有變的欄位（lib/project-application-sheet.ts）。
- * 銷售金額、付款階段、發包單位是由合約／請款期程／副委託帶入的唯讀格，在下方各卡片維護。
+ * 整張表像 Excel 一樣在格子裡直接改（淡黃底＝可填），按「儲存申請單」一次存：
+ * 專案欄位、客戶名冊（電話／發票地址／採購承辦／傳真／統編）、訂單與銷售金額（合約）、
+ * 付款階段（請款期程＋開票／入帳）、發包單位（副委託），各自走既有 API 與權限、只送有變的部分
+ * （lib/project-application-sheet-save.ts）。利潤、毛利率、營業稅、銷售總額是系統算的唯讀格。
+ * 已開票／已入帳要撤銷、人工指定金額的理由、副委託的期款與扣繳，仍在下方各卡片處理。
  */
 export function ApplicationSheet({
   project,
@@ -208,54 +264,106 @@ export function ApplicationSheet({
   onDraftChange,
   printChecked,
   latestDocument,
+  clients: clientsProp,
+  canEditClients = true,
+  saveReport: controlledReport,
+  onSaveReport,
 }: ApplicationSheetProps) {
   const print = mode === "print";
   const [localDraft, setLocalDraft] = useState<ApplicationSheetDraft>(() => applicationSheetDraftOf(project, disciplines));
   const draft = controlledDraft ?? localDraft;
   const setDraft = onDraftChange ?? setLocalDraft;
-  const [clients, setClients] = useState<Client[]>([]);
+  const [ownClients, setOwnClients] = useState<Client[]>([]);
+  const clients = clientsProp ?? ownClients;
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [localReport, setLocalReport] = useState<ApplicationSheetSaveReport | null>(null);
+  const report = controlledReport !== undefined ? controlledReport : localReport;
+  const setReport = onSaveReport ?? setLocalReport;
   const editable = canFinance && !print;
   const blockOn = (key: PrintBlockKey) => printChecked?.[key] ?? true;
   /** 未勾選的列印區塊：螢幕淡化、列印時文字透明（格線與標題照印）。 */
   const blankCls = (key: PrintBlockKey) => (blockOn(key) ? "" : "opacity-40 print:opacity-100 print:text-transparent print:**:text-transparent");
 
   useEffect(() => {
-    if (print) return;
-    listClients().then((r) => setClients(r.clients)).catch(() => {});
-  }, [print]);
+    if (print || clientsProp) return;
+    listClients().then((r) => setOwnClients(r.clients)).catch(() => {});
+  }, [print, clientsProp]);
 
-  const patchOpts = { disciplines, canFinance };
-  const patch = useMemo(() => applicationSheetPatch(project, draft, patchOpts), [project, draft, disciplines, canFinance]); // eslint-disable-line react-hooks/exhaustive-deps
-  const dirtyCount = Object.keys(patch).length;
-  const validation = applicationSheetErrors(draft, { canFinance });
+  // 客戶資料格：草稿裡選的客戶（還沒存也即時顯示它的名冊資料）。
+  const client: Client | null = resolveSheetClient(clients, project, draft.clientId);
+  const plan = useMemo(
+    () =>
+      applicationSheetPlan(
+        { project, canFinance: editable, canEditClient: canEditClients, disciplines, client, money, contracts, billings, subcontracts, vendors },
+        draft,
+      ),
+    [project, editable, canEditClients, disciplines, client, money, contracts, billings, subcontracts, vendors, draft],
+  );
+  const dirtyCount = plan.dirtyCount;
+  const validation = [...applicationSheetErrors(draft, { canFinance }), ...plan.errors];
 
   const set = <K extends keyof ApplicationSheetDraft>(key: K, value: ApplicationSheetDraft[K]) =>
     setDraft((d) => ({ ...d, [key]: value }));
+  const setClientField = (field: ClientSheetField, value: string) =>
+    setDraft((d) => ({ ...d, clientEdits: { ...d.clientEdits, [field]: value } }));
+  const setStage = (key: string, field: keyof StageEdit, value: string) =>
+    setDraft((d) => ({ ...d, stageEdits: { ...d.stageEdits, [key]: { ...d.stageEdits[key], [field]: value } } }));
+  const setSub = (key: string, field: keyof SubEdit, value: string) =>
+    setDraft((d) => ({ ...d, subEdits: { ...d.subEdits, [key]: { ...d.subEdits[key], [field]: value } } }));
+
+  const api: SheetSaveApi = {
+    updateProject: (body) => updateProjectFields(project.id, body),
+    updateClient: async (id, body) => clientSaveWarningText(await updateClient(id, body)),
+    upsertMainContract: (body) => upsertMainContract(project.id, body),
+    updateContract: (id, body) => updateContract(id, body),
+    createQuotation: (body) => createContract(project.id, { docType: "quotation", title: "報價單", amount: body.amount }),
+    saveBillingSchedule: (installments) => saveBillingSchedule(project.id, installments),
+    invoiceBilling: (id, invoiceNo) => invoiceBilling(id, { invoiceNo }),
+    receiveBilling: (id, receivedOn) => receiveBilling(id, { receivedOn }),
+    putSubcontracts: (list) => putProjectSubcontracts(project.id, { subcontracts: list }),
+    fetchBillings: async () => (await getBillingSchedule(project.id)).installments,
+    fetchSubcontracts: async () => (await getProjectSubcontracts(project.id)).subcontracts,
+    humanize: (section, err) => {
+      const msg = err instanceof Error ? err.message : "";
+      if (/\[403\]/.test(msg) && section === "client") return "沒有權限修改客戶名冊（限 HR／會計），請請他們改，或到客戶名冊頁處理。";
+      if (/\[403\]/.test(msg) && /forbidden\b/.test(msg)) return "沒有權限（後端拒絕）。";
+      switch (section) {
+        case "project":
+          return humanizeProjectExtError(err, "儲存失敗");
+        case "client":
+          return humanizeClientError(err, "儲存失敗");
+        case "contract":
+          return humanError(err, "儲存失敗");
+        case "subcontracts":
+          return humanizeSubcontractError(err, "儲存失敗");
+        default:
+          return humanizeBillingError(err, "儲存失敗");
+      }
+    },
+  };
 
   async function save() {
-    if (validation.length > 0 || dirtyCount === 0) return;
+    if (validation.length > 0 || dirtyCount === 0 || saving) return;
     setSaving(true);
-    setError(null);
+    setReport(null);
     try {
-      await updateProjectFields(project.id, patch);
-      await load?.();
-    } catch (err) {
-      setError(humanizeProjectExtError(err, "儲存申請單失敗"));
+      const result = await runApplicationSheetSave(plan, draft, api, {
+        project, canFinance: editable, canEditClient: canEditClients, disciplines, client, money, contracts, billings, subcontracts, vendors,
+      });
+      // 先把已存成的格子從草稿拿掉，再重新載入（沒存成的留著，下一次只送那些）。
+      setDraft(result.residual);
+      setReport({ steps: result.steps, notices: result.notices });
+      if (result.steps.some((st) => st.status === "ok")) await load?.();
     } finally {
       setSaving(false);
     }
   }
 
-  // 客戶資料格：草稿裡選的客戶（還沒存也即時顯示它的名冊資料）。
-  const client: Client | null =
-    clients.find((c) => c.id === draft.clientId) ?? (draft.clientId && draft.clientId === project.clientId ? project.client : null);
   // 名冊讀不到（或還沒載入）時至少放進本案目前的客戶，免得客戶名稱格看起來是空的。
   const clientChoices = project.client && !clients.some((c) => c.id === project.client?.id) ? [project.client, ...clients] : clients;
   const orderDoc = latestDocument !== undefined ? latestDocument : latestOrderDocument(contracts);
   const stageRows = applicationStageRows(billings);
-  const subBlocks = applicationSubcontractBlocks(subcontracts);
+  const subBlocks = applicationSubcontractSlots(subcontracts, editable ? draft.subExtraBlocks : 0, editable ? draft.subEdits : {});
   const companyChoices = companyOptions(companies, draft.companyId, { markDefault: true });
   const companyLabel =
     companyChoices.find((c) => c.id === selectedCompanyId(draft.companyId, companies))?.label ?? project.companyName ?? "";
@@ -265,6 +373,46 @@ export function ApplicationSheet({
   const vendorNameById = new Map(vendors.map((v) => [v.id, v.name]));
   const opened = rocDateParts(draft.openedOn);
   const moneyText = (n: number | null | undefined) => (canFinance && money ? fmtMoney(n) : "—");
+  // 銷售金額：未稅格有輸入就即時重算營業稅與總額（同後端：未稅 × 稅率四捨五入到元）。
+  const untaxedInput = draft.amountUntaxed;
+  const untaxedTyped = untaxedInput !== null && untaxedInput.trim() !== "" ? Number(untaxedInput) : null;
+  const sales =
+    editable && untaxedInput !== null
+      ? salesAmounts(untaxedTyped !== null && Number.isFinite(untaxedTyped) ? untaxedTyped : null, money?.vatRate ?? 0.05)
+      : { taxAmount: money?.taxAmount ?? null, amountTotal: money?.amountTotal ?? null };
+  const hasContractDoc = orderDoc?.docType === "contract";
+
+  /** 客戶名冊欄位：可編輯時是輸入框（改的是名冊那筆客戶）；沒選客戶時不能填。 */
+  function clientInput(field: ClientSheetField, extraCls = "") {
+    if (!editable || !client || !canEditClients) return clientFieldValue(client, field);
+    return (
+      <input
+        aria-label={CLIENT_SHEET_FIELD_LABELS[field]}
+        title="儲存時會同步更新客戶名冊"
+        className={`${cellInput} ${extraCls}`}
+        value={draft.clientEdits[field] ?? clientFieldValue(client, field)}
+        onChange={(e) => setClientField(field, e.target.value)}
+      />
+    );
+  }
+
+  /** 可直接填的格子（淡黃底）：唯讀計算格（營業稅、總額）與沒選客戶時的客戶欄位除外。 */
+  function fieldEditable(field: SheetField): boolean {
+    if (!editable) return false;
+    switch (field) {
+      case "taxAmount":
+      case "amountTotal":
+        return false;
+      case "clientPhone":
+      case "invoiceAddress":
+      case "clientContact":
+      case "clientFax":
+      case "clientTaxId":
+        return !!client && canEditClients;
+      default:
+        return true;
+    }
+  }
 
   function patchScopeRow(idx: number, next: Partial<DesignScopeItem>) {
     setDraft((d) => ({ ...d, designScope: d.designScope.map((r, i) => (i === idx ? { ...r, ...next } : r)) }));
@@ -312,14 +460,49 @@ export function ApplicationSheet({
       case "clientName":
         return editable ? (
           <div className="w-full [&_input]:max-w-none [&_input]:text-[13px]">
-            <ClientCombo clients={clientChoices} clientId={draft.clientId || null} onChange={(id) => set("clientId", id ?? "")} />
+            {/* 換客戶時清掉客戶欄位的修改（那些是改「原客戶」名冊用的）。 */}
+            <ClientCombo clients={clientChoices} clientId={draft.clientId || null} onChange={(id) => setDraft((d) => ({ ...d, clientId: id ?? "", clientEdits: {} }))} />
           </div>
         ) : (client?.name ?? "—");
       case "clientPhone":
-        return client?.phone || "";
+        return clientInput("phone");
       case "invoiceAddress":
-        return client?.invoiceAddress || "";
+        return clientInput("invoiceAddress");
       case "orderDocument":
+        if (editable) {
+          const contractChecked = hasContractDoc || draft.orderDocType === "contract";
+          const quotationChecked = draft.orderDocType === "contract" ? false : orderDoc?.docType === "quotation" || (!orderDoc && draft.orderDocType === "quotation");
+          const cellsNow = orderDocumentCells(orderDoc);
+          const opts: Array<{ type: "contract" | "quotation"; label: string; checked: boolean; date: string; canToggle: boolean; lockedTitle: string }> = [
+            { type: "contract", label: "合約書", checked: contractChecked, date: cellsNow[0].date, canToggle: !hasContractDoc, lockedTitle: "本案已有合約；要作廢或改簽訂日請到下方「合約與報價單」" },
+            { type: "quotation", label: "報價單", checked: quotationChecked, date: cellsNow[1].date, canToggle: !orderDoc, lockedTitle: "本案已有訂單文件；要改請到下方「合約與報價單」" },
+          ];
+          return (
+            <span className="flex flex-wrap items-center gap-x-2" data-testid="sheet-order-document" role="radiogroup" aria-label="訂單">
+              {opts.map((o) =>
+                o.canToggle ? (
+                  <button
+                    key={o.type}
+                    type="button"
+                    role="radio"
+                    aria-checked={o.checked}
+                    className="rounded-sm border border-amber-200 bg-white/90 px-1 hover:border-amber-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+                    onClick={() => set("orderDocType", draft.orderDocType === o.type ? "" : o.type)}
+                  >
+                    <span aria-hidden="true">{o.checked ? "■" : "□"}</span>{o.label}{o.date ? ` ${o.date}` : ""}
+                  </button>
+                ) : (
+                  <span key={o.type} role="radio" aria-checked={o.checked} title={o.lockedTitle}>
+                    {o.checked ? "■" : "□"}{o.label}{o.date ? ` ${o.date}` : ""}
+                  </span>
+                ),
+              )}
+              {plan.contract && (plan.contract.kind === "quotation-create" || (plan.contract.kind === "main" && plan.contract.created)) && (
+                <span className="text-[11px] text-amber-700">（儲存時建立）</span>
+              )}
+            </span>
+          );
+        }
         return (
           <span className="flex flex-wrap gap-x-2" data-testid="sheet-order-document">
             {orderDocumentCells(orderDoc).map((c) => (
@@ -328,11 +511,18 @@ export function ApplicationSheet({
           </span>
         );
       case "clientContact":
-        return [client?.contactName, client?.contactPhone].filter(Boolean).join(" ");
+        if (!editable || !client || !canEditClients) return [client?.contactName, client?.contactPhone].filter(Boolean).join(" ");
+        return (
+          <span className="flex w-full gap-1">
+            {/* basis-0＋grow 比例分寬（cellInput 自帶 w-full，用 width 會互搶）。 */}
+            {clientInput("contactName", "basis-0 grow-[5]")}
+            {clientInput("contactPhone", "basis-0 grow-[4]")}
+          </span>
+        );
       case "clientFax":
-        return client?.fax || "";
+        return clientInput("fax");
       case "clientTaxId":
-        return client?.taxId || "";
+        return clientInput("taxId");
       case "invoiceType":
         return (
           <span className="flex flex-wrap items-center gap-x-2">
@@ -412,11 +602,23 @@ export function ApplicationSheet({
           </div>
         );
       case "amountUntaxed":
-        return moneyText(money?.amountUntaxed);
+        if (!editable) return moneyText(money?.amountUntaxed);
+        return (
+          <input
+            aria-label="銷售金額（未稅）"
+            title={money?.amountSource === "quotation" ? "目前取自最新報價單" : undefined}
+            className={`${cellInput} text-right`}
+            type="number"
+            min="0"
+            inputMode="numeric"
+            value={draft.amountUntaxed ?? (money?.amountUntaxed != null ? String(money.amountUntaxed) : "")}
+            onChange={(e) => set("amountUntaxed", e.target.value)}
+          />
+        );
       case "taxAmount":
-        return moneyText(money?.taxAmount);
+        return moneyText(sales.taxAmount);
       case "amountTotal":
-        return moneyText(money?.amountTotal);
+        return moneyText(sales.amountTotal);
       case "closingDay":
         return editable ? (
           <input aria-label="結帳日" className={cellInput} value={draft.closingDay} placeholder={client?.closingDay ?? ""} onChange={(e) => set("closingDay", e.target.value)} />
@@ -459,7 +661,7 @@ export function ApplicationSheet({
         labelIndexAt.set(`${r}-${start}`, cells.length);
       } else if (cell.field) {
         const node = (
-          <Cell key={key} col={start} span={cell.span} row={r + 1} rowSpan={cell.rowSpan} kind="value" align={numericFields.has(cell.field) ? "right" : "left"} testId={`sheet-${cell.field}`} className={blankCls(SHEET_FIELD_PRINT_BLOCK[cell.field])}>
+          <Cell key={key} col={start} span={cell.span} row={r + 1} rowSpan={cell.rowSpan} kind="value" align={numericFields.has(cell.field) ? "right" : "left"} testId={`sheet-${cell.field}`} className={blankCls(SHEET_FIELD_PRINT_BLOCK[cell.field])} editable={fieldEditable(cell.field)}>
             {renderField(cell.field)}
           </Cell>
         );
@@ -475,23 +677,53 @@ export function ApplicationSheet({
   for (const s of stageRows) {
     const r = row++;
     const guild = s.kind === "guild_advance";
+    const key = stageRowKey(s);
+    const base = stageBaseValues(s);
+    const edit: StageEdit = editable ? (draft.stageEdits[key] ?? {}) : {};
+    const locks = stageLocks(s);
+    const val = (f: Exclude<keyof StageEdit, "overrideReason">) => edit[f] ?? base[f];
+    const rowLabel = guild ? "技師公會代墊" : `付款階段第 ${s.no} 列`;
     cells.push(
       <Cell key={`stage-${s.no}-0`} col={stageCols[0]} span={APPLICATION_STAGE_SPANS[0]} row={r} kind="label" shade testId={`sheet-stage-${s.no}`}>
-        {`${s.no}.${s.milestone}`}
+        {editable ? (
+          <span className="flex w-full items-center gap-0.5">
+            <span className="shrink-0">{s.no}.</span>
+            <input aria-label={`${rowLabel}項目說明`} className={cellInput} maxLength={200} placeholder={guild ? "" : "項目說明"} value={val("milestone")} onChange={(e) => setStage(key, "milestone", e.target.value)} />
+          </span>
+        ) : (
+          `${s.no}.${s.milestone}`
+        )}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-1`} col={stageCols[1]} span={APPLICATION_STAGE_SPANS[1]} row={r} kind="value" align="center">
-        {s.percentage != null ? `${s.percentage}%` : ""}
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-1`} col={stageCols[1]} span={APPLICATION_STAGE_SPANS[1]} row={r} kind="value" align="center" editable={editable && !locks.percentage}>
+        {editable && !locks.percentage ? (
+          <span className="flex w-full items-center gap-0.5">
+            <input aria-label={`${rowLabel}百分比`} className={`${cellInput} text-right`} type="number" min="0" max="100" inputMode="decimal" value={val("percentage")} onChange={(e) => setStage(key, "percentage", e.target.value)} />
+            <span className="shrink-0">%</span>
+          </span>
+        ) : s.percentage != null ? `${s.percentage}%` : ""}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-2`} col={stageCols[2]} span={APPLICATION_STAGE_SPANS[2]} row={r} kind="value" align="right">
-        {s.amount != null ? fmtMoney(s.amount) : ""}
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-2`} col={stageCols[2]} span={APPLICATION_STAGE_SPANS[2]} row={r} kind="value" align="right" editable={editable && !locks.amount}>
+        {editable && !locks.amount ? (
+          <input aria-label={`${rowLabel}金額`} title="填了就是人工指定金額；清空＝依百分比試算" className={`${cellInput} text-right`} type="number" min="0" inputMode="numeric" value={val("amount")} onChange={(e) => setStage(key, "amount", e.target.value)} />
+        ) : (
+          <span title={editable && locks.amount ? "已請款／已入帳，金額凍結" : undefined}>{s.amount != null ? fmtMoney(s.amount) : ""}</span>
+        )}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-3`} col={stageCols[3]} span={APPLICATION_STAGE_SPANS[3]} row={r} kind="value">
-        <span className="whitespace-pre">已於 {s.receivedOn ? rocDots(s.receivedOn) : "         "} 入賬</span>
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-3`} col={stageCols[3]} span={APPLICATION_STAGE_SPANS[3]} row={r} kind="value" editable={editable && !locks.receivedOn}>
+        {editable && !locks.receivedOn ? (
+          <span className="flex w-full items-center gap-1 whitespace-nowrap">
+            已於
+            <input aria-label={`${rowLabel}入帳日期`} className={`${cellInput} px-0.5`} type="date" value={val("receivedOn")} onChange={(e) => setStage(key, "receivedOn", e.target.value)} />
+            入賬
+          </span>
+        ) : (
+          <span className="whitespace-pre" title={editable && locks.receivedOn ? "已入帳；撤銷請到下方「分期請款期程」" : undefined}>已於 {s.receivedOn ? rocDots(s.receivedOn) : "         "} 入賬</span>
+        )}
       </Cell>,
       <Cell key={`stage-${s.no}-4`} col={stageCols[4]} span={APPLICATION_STAGE_SPANS[4]} row={r} kind="label" shade align="center">
         {guild ? "審迄還款:" : "發票號碼:"}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-5`} col={stageCols[5]} span={APPLICATION_STAGE_SPANS[5]} row={r} kind="value">
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-5`} col={stageCols[5]} span={APPLICATION_STAGE_SPANS[5]} row={r} kind="value" editable={editable && (guild || !locks.invoiceNo)}>
         {guild
           ? editable ? (
               <input
@@ -503,7 +735,11 @@ export function ApplicationSheet({
                 onChange={(e) => set("guildRepaymentNote", e.target.value)}
               />
             ) : draft.guildRepaymentNote
-          : [s.invoiceNo, rocDots(s.invoicedOn)].filter(Boolean).join(" ")}
+          : editable && !locks.invoiceNo ? (
+              <input aria-label={`${rowLabel}發票號碼`} title="儲存時登記開票（開票日＝今天，可到下方卡片撤銷重開）" className={cellInput} maxLength={40} placeholder="發票號碼" value={val("invoiceNo")} onChange={(e) => setStage(key, "invoiceNo", e.target.value)} />
+            ) : (
+              <span title={editable ? "已開票；撤銷請到下方「分期請款期程」" : undefined}>{[s.invoiceNo, rocDots(s.invoicedOn)].filter(Boolean).join(" ")}</span>
+            )}
       </Cell>,
     );
   }
@@ -520,26 +756,46 @@ export function ApplicationSheet({
     showProfit ? (canFinance && money?.grossMarginPct != null ? `${money.grossMarginPct}%` : "—") : <span title="屬集團財務，僅老闆與授權人員可見">—</span>,
     "",
   ];
+  const SUB_FIELD_BY_ROW = ["vendorName", "contact", "item", "amount", "billingBasis"] as const;
   subBlocks.forEach((block, b) => {
     APPLICATION_SUBCONTRACT_LABELS.forEach((label, i) => {
       const r = row++;
-      const valueOf = (s: Subcontract | null): ReactNode => {
-        if (!s) return "";
-        if (i === 0) return s.vendorName || "";
-        if (i === 1) return s.contact || "";
-        if (i === 2) return s.item || "";
-        if (i === 3) return fmtMoney(s.amount);
-        return s.billingBasis || "";
+      const field = SUB_FIELD_BY_ROW[i];
+      const valueOf = (sub: Subcontract | null): ReactNode => {
+        if (!sub) return "";
+        if (i === 0) return sub.vendorName || "";
+        if (i === 1) return sub.contact || "";
+        if (i === 2) return sub.item || "";
+        if (i === 3) return fmtMoney(sub.amount);
+        return sub.billingBasis || "";
+      };
+      const baseOf = (sub: Subcontract | null): string => {
+        if (!sub) return "";
+        if (field === "amount") return String(sub.amount ?? 0);
+        return sub[field] ?? "";
       };
       cells.push(
         <Cell key={`sub-${b}-${i}-l`} col={subCols[0]} span={APPLICATION_SUBCONTRACT_SPANS[0]} row={r} kind="label" shade align="center">
           {label}
         </Cell>,
       );
-      block.forEach((s, j) =>
+      block.forEach((slot, j) =>
         cells.push(
-          <Cell className={blankCls("subcontract")} key={`sub-${b}-${i}-${j}`} col={subCols[1 + j]} span={APPLICATION_SUBCONTRACT_SPANS[1 + j]} row={r} kind="value" align={i === 3 ? "right" : "center"}>
-            {valueOf(s)}
+          <Cell className={blankCls("subcontract")} key={`sub-${b}-${i}-${j}`} col={subCols[1 + j]} span={APPLICATION_SUBCONTRACT_SPANS[1 + j]} row={r} kind="value" align={i === 3 ? "right" : "center"} editable={editable}>
+            {editable ? (
+              <input
+                aria-label={`發包單位第 ${b * 3 + j + 1} 欄${label.replace(/[\s：]/g, "")}`}
+                className={`${cellInput} ${i === 3 ? "text-right" : "text-center"}`}
+                list={i === 0 ? "sheet-vendor-suggestions" : undefined}
+                type={i === 3 ? "number" : "text"}
+                min={i === 3 ? "0" : undefined}
+                inputMode={i === 3 ? "numeric" : undefined}
+                value={draft.subEdits[slot.key]?.[field] ?? baseOf(slot.sub)}
+                onChange={(e) => setSub(slot.key, field, e.target.value)}
+              />
+            ) : (
+              valueOf(slot.sub)
+            )}
           </Cell>,
         ),
       );
@@ -547,15 +803,20 @@ export function ApplicationSheet({
         <Cell key={`sub-${b}-${i}-sl`} col={subCols[4]} span={APPLICATION_SUBCONTRACT_SPANS[4]} row={r} kind="label" shade align="right">
           {b === 0 ? APPLICATION_SUMMARY_LABELS[i] : ""}
         </Cell>,
-        <Cell className={blankCls("subcontract")} key={`sub-${b}-${i}-sv`} col={subCols[5]} span={APPLICATION_SUBCONTRACT_SPANS[5]} row={r} kind="value" align="right" testId={b === 0 && i === 1 ? "sheet-other-expenses" : undefined}>
+        <Cell className={blankCls("subcontract")} key={`sub-${b}-${i}-sv`} col={subCols[5]} span={APPLICATION_SUBCONTRACT_SPANS[5]} row={r} kind="value" align="right" testId={b === 0 && i === 1 ? "sheet-other-expenses" : undefined} editable={editable && b === 0 && i === 1}>
           {b === 0 ? summaryValues[i] : ""}
         </Cell>,
       );
     });
   });
 
+  const failedSteps = report?.steps.filter((st) => st.status !== "ok") ?? [];
+  const okSteps = report?.steps.filter((st) => st.status === "ok") ?? [];
+
   return (
     <section aria-label="專案申請單" className="rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-5 print:rounded-none print:border-0 print:p-0 print:shadow-none" data-testid="application-sheet">
+      {/* 存檔中整張鎖住：存完會用「剩下的草稿」取代，存檔期間打的字會被蓋掉。 */}
+      <fieldset disabled={saving} className="m-0 min-w-0 border-0 p-0">
       <div className="mx-auto w-full max-w-[960px] text-gray-900 print:max-w-none" style={{ fontFamily: SHEET_FONT }}>
         {/* 抬頭：標誌＋「專案申請單 民國　年　月　日」、承接公司、工程名稱／專案序號 */}
         <div className="flex flex-wrap items-end gap-x-6 gap-y-2">
@@ -599,6 +860,7 @@ export function ApplicationSheet({
           {cells}
         </div>
       </div>
+      </fieldset>
 
       {!print && (
       <div className="no-print mx-auto mt-3 flex w-full max-w-[960px] flex-col gap-2">
@@ -610,22 +872,73 @@ export function ApplicationSheet({
             {dirtyCount > 0 ? (
               <>
                 <span className="text-sm text-amber-700">{dirtyCount} 個欄位尚未儲存</span>
-                <Button type="button" variant="ghost" size="sm" onClick={() => setDraft(applicationSheetDraftOf(project, disciplines))}>還原</Button>
+                <Button type="button" variant="ghost" size="sm" onClick={() => { setDraft(applicationSheetDraftOf(project, disciplines)); setReport(null); }}>還原</Button>
               </>
             ) : (
               <span className="text-sm text-gray-400">沒有未儲存的變更</span>
             )}
+            <Button type="button" variant="ghost" size="sm" className="ml-auto" onClick={() => set("subExtraBlocks", draft.subExtraBlocks + 1)}>
+              ＋ 多開一組發包欄
+            </Button>
           </div>
         ) : (
           <p className="text-sm text-gray-500">唯讀：修改申請單需要本案的財務權限（HR／會計／本案經理、主辦／部門主管）。</p>
         )}
+        {editable && plan.client && (
+          <p className="text-sm text-amber-800" data-testid="sheet-client-sync-hint">
+            儲存時會同步更新客戶名冊「{plan.client.name}」的{Object.keys(plan.client.body).map((f) => CLIENT_SHEET_FIELD_LABELS[f as ClientSheetField]).join("、")}（所有用這個客戶的專案都會一起變）。
+          </p>
+        )}
+        {editable && !canEditClients && client && (
+          <p className="text-xs text-gray-500">客戶的電話、發票地址、採購承辦、傳真、統一編號屬客戶名冊，只有 HR／會計能修改。</p>
+        )}
+        {editable && plan.stages.needsReason.length > 0 && (
+          <div className="space-y-1 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm" data-testid="sheet-override-reasons">
+            <p className="text-amber-900">付款階段改了金額＝人工指定金額，請說明理由（例如議價、業主要求）：</p>
+            {plan.stages.needsReason.map((r) => (
+              <label key={r.key} className="flex items-center gap-2">
+                <span className="shrink-0 text-amber-900">{r.label}</span>
+                <input
+                  aria-label={`付款階段${r.label}人工指定理由`}
+                  className={`${cellInput} max-w-md`}
+                  maxLength={1000}
+                  value={draft.stageEdits[r.key]?.overrideReason ?? ""}
+                  onChange={(e) => setStage(r.key, "overrideReason", e.target.value)}
+                />
+              </label>
+            ))}
+          </div>
+        )}
+        {editable && plan.warnings.length > 0 && (
+          <ul className="text-sm text-amber-700">{plan.warnings.map((m) => <li key={m}>{m}</li>)}</ul>
+        )}
         {validation.length > 0 && editable && (
           <ul className="text-sm text-red-600">{validation.map((m) => <li key={m}>{m}</li>)}</ul>
         )}
-        {error && <p className="text-sm text-red-600">{error}</p>}
-        <p className="text-xs text-gray-400">
-          銷售金額由下方<a href="#project-contracts" className="underline">合約與報價單</a>帶入；付款階段在<a href="#project-billings" className="underline">分期請款期程</a>維護；發包單位在<a href="#project-subcontracts" className="underline">副委託與協力技師</a>維護。
-          客戶的電話、發票地址、採購承辦、傳真、統一編號屬<a href="/admin/clients" className="underline">客戶名冊</a>，改名冊後所有專案一起更新。
+        {report && (
+          <div role="status" className="space-y-1 text-sm" data-testid="sheet-save-report">
+            {failedSteps.length > 0 && (
+              <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-red-700">
+                <p className="font-medium">以下部分沒有存成（其餘已儲存，修正後再按一次「儲存申請單」只會送這些）：</p>
+                <ul className="mt-1 list-disc pl-5">
+                  {failedSteps.map((st, i) => (
+                    <li key={`${st.section}-${i}`}>{st.label}：{st.status === "skipped" ? "未送出，" : ""}{st.message}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {okSteps.length > 0 && (
+              <p className="text-green-700">已儲存：{okSteps.map((st) => st.label).join("、")}。</p>
+            )}
+            {report.notices.map((n) => <p key={n} className="text-amber-700">{n}</p>)}
+          </div>
+        )}
+        <p className="text-xs text-gray-500">
+          <span className="mr-1 inline-block h-3 w-3 border border-amber-200 align-middle" style={{ backgroundColor: EDITABLE_BG }} aria-hidden="true" />
+          淡黃底的格子可以直接點進去改，改完按「儲存申請單」一次存；白底是系統算的（營業稅、銷售總額、發包小計、利潤、毛利率）。
+          電話、發票地址、採購承辦、傳真、統一編號存的是<a href="/admin/clients" className="underline">客戶名冊</a>那一筆（其他專案一起更新）；
+          訂單與銷售金額寫回<a href="#project-contracts" className="underline">合約與報價單</a>；付款階段寫回<a href="#project-billings" className="underline">分期請款期程</a>（填發票號碼＝登記開票、填入帳日＝登記入帳）；發包單位寫回<a href="#project-subcontracts" className="underline">副委託</a>。
+          已開票／已入帳要撤銷、人工指定金額的理由、副委託的扣繳與期款，在下方各卡片處理。
         </p>
       </div>
       )}

@@ -7,13 +7,14 @@ import { Button, DetailHeading, ErrorText, Empty } from "@/components/admin-ui";
 import { buttonClass } from "@/components/ess-ui";
 import {
   applicationSheetDraftOf,
-  applicationSheetPatch,
   rebaseApplicationSheetDraft,
   type ApplicationSheetDraft,
 } from "@/lib/project-application-sheet";
+import { applicationSheetPlan, resolveSheetClient, type SheetSaveContext } from "@/lib/project-application-sheet-save";
 import { unsavedChangesMessage } from "@/lib/unsaved-changes";
 import { useUnsavedChangesGuard } from "./_sections/useUnsavedChangesGuard";
-import { getDepartments, getEmployees, type Department, type Employee } from "@/lib/admin-api";
+import { getDepartments, getEmployees, getMe, type Department, type Employee } from "@/lib/admin-api";
+import { isAdminRole } from "@/lib/roles";
 import { listVendors, type Vendor } from "@/lib/company-api";
 import {
   getProjectMembers,
@@ -39,6 +40,7 @@ import {
   listCompanies,
   listProjectsExt,
   getP3SettingsLite,
+  listClients,
   loadContractsForProjectAccess,
   engineerDisciplinesOf,
   PROJECT_KIND_LABELS,
@@ -50,6 +52,7 @@ import {
   type SubcontractPayment,
   type Subcontract,
   type Company,
+  type Client,
   type ProjectListItem,
 } from "@/lib/projects-ext-api";
 import { parentProjectChoices } from "../_components/project-application-form";
@@ -62,7 +65,7 @@ import {
   type SubRow,
 } from "./_sections/shared";
 import { ProjectSettingsCard } from "./_sections/ProjectSettingsCard";
-import { ApplicationSheet } from "./_sections/ApplicationSheet";
+import { ApplicationSheet, type ApplicationSheetSaveReport } from "./_sections/ApplicationSheet";
 import { effectiveRoleSharePct } from "@/lib/project-share-calculation";
 import { ContractsCard } from "./_sections/ContractsCard";
 import { BillingsCard } from "./_sections/BillingsCard";
@@ -161,6 +164,15 @@ export default function AdminProjectDetailPage() {
   const sheetBaseRef = useRef<{ projectId: string; base: ApplicationSheetDraft } | null>(null);
   /** 已存檔的副委託（申請單表格的「發包單位」區塊用；編輯中的草稿是下面的 subDraft）。 */
   const [savedSubs, setSavedSubs] = useState<Subcontract[]>([]);
+  /** 客戶名冊（申請單客戶欄位的基準；跟著 load() 重抓，存完客戶欄位才比得出已存成）。 */
+  const [clients, setClients] = useState<Client[]>([]);
+  /**
+   * 能改客戶名冊：PATCH /clients/:id 是 requireFinance（HR／會計／平台管理員＝ADMIN_ROLES），比本案 finance 窄。
+   * 本案經理、主辦、部門主管在申請單上的客戶欄位維持唯讀，免得每次存檔都 403。讀不到 /me 就當不能改。
+   */
+  const [canEditClients, setCanEditClients] = useState(false);
+  /** 申請單上次儲存的結果（哪幾部分沒存成）；load() 會讓申請單重掛，所以放這層。 */
+  const [sheetSaveReport, setSheetSaveReport] = useState<ApplicationSheetSaveReport | null>(null);
 
   // 開票／收款的小表單（模組五）
   const [invoiceFormId, setInvoiceFormId] = useState<string | null>(null);
@@ -187,7 +199,7 @@ export default function AdminProjectDetailPage() {
       // access 由 detail 回應決定；先取得它，避免非 finance 使用者先打合約 API 收到 403，
       // 進而讓整頁 Promise.all 失敗。
       const detail = await getProjectDetail(projectId);
-      const [m, adj, docs, contractsForAccess, bs, subs, d, e, ven, comp, p3, mains] = await Promise.all([
+      const [m, adj, docs, contractsForAccess, bs, subs, d, e, ven, comp, p3, mains, cl, me] = await Promise.all([
         getProjectMembers(projectId),
         getProjectAdjustments(projectId),
         getProjectDocuments(projectId),
@@ -206,7 +218,11 @@ export default function AdminProjectDetailPage() {
         detail.project.kind === "main"
           ? Promise.resolve({ projects: [] as ProjectListItem[] })
           : listProjectsExt({ includeArchived: true, kinds: ["main"] }).catch(() => ({ projects: [] as ProjectListItem[] })),
+        // 客戶名冊只有可編輯申請單的人需要；讀不到就退回專案帶的 client。
+        detail.access.finance ? listClients().catch(() => ({ clients: [] as Client[] })) : Promise.resolve({ clients: [] as Client[] }),
+        getMe().catch(() => null),
       ]);
+      const clientsEditable = isAdminRole(me?.role);
       const disciplineList = engineerDisciplinesOf(p3?.settings.disciplines ?? null);
       setDisciplines(disciplineList);
       // 申請單草稿：沒動過的欄位換成新值、動過的保留；疊完若已跟專案一致（例如剛存好）就整份換新。
@@ -216,9 +232,25 @@ export default function AdminProjectDetailPage() {
       setSheetDraft((prev) => {
         if (!prev || !oldBase) return newBase;
         const rebased = rebaseApplicationSheetDraft(oldBase, newBase, prev);
-        const pending = applicationSheetPatch(detail.project, rebased, { disciplines: disciplineList, canFinance: detail.access.finance });
-        return Object.keys(pending).length === 0 ? newBase : rebased;
+        const pending = applicationSheetPlan(
+          {
+            project: detail.project,
+            canFinance: detail.access.finance,
+            canEditClient: clientsEditable,
+            disciplines: disciplineList,
+            client: resolveSheetClient(cl.clients, detail.project, rebased.clientId),
+            money: detail.money,
+            contracts: contractsForAccess,
+            billings: bs.installments,
+            subcontracts: subs.subcontracts,
+            vendors: ven.vendors,
+          },
+          rebased,
+        );
+        return pending.dirtyCount === 0 ? newBase : rebased;
       });
+      setClients(cl.clients);
+      setCanEditClients(clientsEditable);
       setProject(detail.project);
       setAccess(detail.access);
       setMoney(detail.money);
@@ -319,9 +351,22 @@ export default function AdminProjectDetailPage() {
     }
   }
 
-  // 申請單未儲存的欄位數：離開頁面（連結、上一頁、關分頁）前提醒。
-  const sheetDirtyCount =
-    project && sheetDraft ? Object.keys(applicationSheetPatch(project, sheetDraft, { disciplines, canFinance })).length : 0;
+  // 申請單未儲存的欄位數（含客戶名冊、合約、付款階段、發包單位格子）：離開頁面（連結、上一頁、關分頁）前提醒。
+  const sheetContext: SheetSaveContext | null = project
+    ? {
+        project,
+        canFinance,
+        canEditClient: canEditClients,
+        disciplines,
+        client: sheetDraft ? resolveSheetClient(clients, project, sheetDraft.clientId) : null,
+        money,
+        contracts,
+        billings: schedule?.installments ?? [],
+        subcontracts: savedSubs,
+        vendors,
+      }
+    : null;
+  const sheetDirtyCount = sheetContext && sheetDraft ? applicationSheetPlan(sheetContext, sheetDraft).dirtyCount : 0;
   useUnsavedChangesGuard(sheetDirtyCount > 0, unsavedChangesMessage(sheetDirtyCount));
 
   if (loading) return <Empty>載入中…</Empty>;
@@ -379,6 +424,10 @@ export default function AdminProjectDetailPage() {
         companies={companies}
         vendors={vendors}
         disciplines={disciplines}
+        clients={clients}
+        canEditClients={canEditClients}
+        saveReport={sheetSaveReport}
+        onSaveReport={setSheetSaveReport}
         load={load}
       />
       )}
@@ -426,7 +475,9 @@ export default function AdminProjectDetailPage() {
         </div>
       )}
 
-      {/* 請款期程（模組四第 4 條）＋ P3 開票／收款：申請單「付款階段」的來源。金額一律系統算。 */}
+      {/* 請款期程（模組四第 4 條）＋ P3 開票／收款：申請單「付款階段」以外的動作（請款／開票／入帳／人工指定金額）。
+          後端讀寫都要 finance，跟其他財務卡一樣只對 canFinance 顯示。 */}
+      {canFinance && (
       <div id="project-billings" className="scroll-mt-20">
         <BillingsCard
           projectId={projectId}
@@ -442,6 +493,7 @@ export default function AdminProjectDetailPage() {
           error={error} setError={setError} load={load}
         />
       </div>
+      )}
 
       {/* 副委託與協力技師（模組五）：申請單「發包單位」的來源；期款與放款連動也在這裡。 */}
       {canFinance && (
@@ -456,7 +508,7 @@ export default function AdminProjectDetailPage() {
             paymentsDraft={paymentsDraft} setPaymentsDraft={setPaymentsDraft}
             originalPayments={originalPayments} setOriginalPayments={setOriginalPayments}
             savingPayments={savingPayments} setSavingPayments={setSavingPayments}
-            vendors={vendors} companies={companies} money={money} showProfit={access.profit !== false}
+            companies={companies}
             error={error} setError={setError} load={load}
           />
         </div>

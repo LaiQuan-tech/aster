@@ -1,11 +1,8 @@
 "use client";
 
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useState } from "react";
 import Link from "next/link";
 import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls } from "@/components/admin-ui";
-import { VendorCombo } from "@/components/VendorCombo";
-import type { Vendor } from "@/lib/company-api";
-import { vendorCategoryLabel } from "@/lib/roster-columns";
 import { companyOptions } from "@/lib/company-options";
 import {
   putProjectSubcontracts,
@@ -14,12 +11,10 @@ import {
   type Subcontract,
   type SubcontractPayment,
   type SubcontractKind,
-  type OrderType,
-  type ProjectMoney,
   type Company,
 } from "@/lib/projects-ext-api";
 import { acceptSubcontractPayment } from "@/lib/disbursements-api";
-import { fmtMoney, newSubKey, toSubRows, type SubRow, type Setter } from "./shared";
+import { fmtMoney, toSubRows, type SubRow, type Setter } from "./shared";
 
 interface SubcontractsCardProps {
   projectId: string;
@@ -39,19 +34,20 @@ interface SubcontractsCardProps {
   setOriginalPayments: Setter<Record<string, SubcontractPayment[]>>;
   savingPayments: string | null;
   setSavingPayments: Setter<string | null>;
-  vendors: Vendor[];
   /** 全部公司（含已停用）；期款的公司下拉只列啟用的，加上該期目前已選的。唯讀顯示（已連動放款單）照原名。 */
   companies: Company[];
-  money: ProjectMoney | null;
-  /** 利潤／毛利率（集團財務，2026-10-26）；false＝不畫。省略＝畫。 */
-  showProfit?: boolean;
   error: string | null;
   setError: Setter<string | null>;
   load: () => Promise<void>;
 }
 
 /**
- * 副委託與協力技師（模組五）：下包／技師列表、每列展開的期款表，以及發包小計／利潤。
+ * 副委託與協力技師（模組五）：下包／技師列表與每列展開的期款表。
+ *
+ * 2026-10-29 申請單改成整張表直接編輯後：發包單位、聯絡資料、項目、發包金額、請款依據與「新增」
+ * 都改在上方申請單「發包單位」區塊；發包小計／其他支出／利潤／毛利率也看申請單右側。這張卡只留
+ * 申請單做不到的：類型（下包工程／技師簽證費）、代扣率、起扣門檻、移除（要理由）、每列期款表
+ * （驗收、匯款單、放款日、實付、放款公司、收據抬頭與編號）。「科別」「訂單類型」欄已移除（值原樣保留）。
  *
  * M5（2026-09-23）期款表多一欄「驗收」：沒驗收的期別按「驗收確認」才會記
  * `accepted_on`，**沒驗收就不能放款**（放款專區建單／送簽／付款都會 409
@@ -76,48 +72,15 @@ export function SubcontractsCard({
   setOriginalPayments,
   savingPayments,
   setSavingPayments,
-  vendors,
   companies,
-  money,
-  showProfit = true,
   error,
   setError,
   load,
 }: SubcontractsCardProps) {
-  // B4：廠商依類別篩（vendors.category 是自由文字，不是固定列舉——類別選項
-  // 就從目前名冊裡實際出現過的值取，不強加一份清單）。2026-10-27 名冊對齊 Excel 後類別只放大類、
-  // 細目另存 subCategory，篩選改用「類別／細目」合併字（vendorCategoryLabel），維持原本的分得夠細。
-  const [vendorCategoryFilter, setVendorCategoryFilter] = useState("");
   /** 正在送驗收確認的那一期（`subId:installmentNo`）。 */
   const [acceptingKey, setAcceptingKey] = useState<string | null>(null);
-  const vendorCategories = useMemo(
-    () => Array.from(new Set(vendors.map((v) => vendorCategoryLabel(v)).filter(Boolean))).sort(),
-    [vendors],
-  );
-  /** 篩選後的廠商清單，但這列目前選的廠商一定留著——不然篩一下會讓已選的
-   * 廠商從下拉裡消失，看起來像選到的東西不見了。 */
-  function vendorsForRow(row: SubRow) {
-    if (!vendorCategoryFilter) return vendors;
-    const filtered = vendors.filter((v) => vendorCategoryLabel(v) === vendorCategoryFilter);
-    if (row.vendorId && !filtered.some((v) => v.id === row.vendorId)) {
-      const cur = vendors.find((v) => v.id === row.vendorId);
-      if (cur) return [cur, ...filtered];
-    }
-    return filtered;
-  }
-
   function patchSub(idx: number, patch: Partial<Subcontract>) {
     setSubDraft((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
-  }
-  function addSubRow() {
-    setSubDraft((rows) => [
-      ...rows,
-      {
-        _key: newSubKey(), kind: "subcontract", discipline: "", vendorId: null, vendorName: "",
-        contact: "", item: "", amount: 0, billingBasis: "", orderType: null,
-        withholdingRate: 0.1, withholdingThreshold: 20000, note: "",
-      },
-    ]);
   }
   function removeSubRow(idx: number) {
     setSubDraft((rows) => rows.filter((_, i) => i !== idx));
@@ -145,6 +108,9 @@ export function SubcontractsCard({
         amount: r.amount || 0,
         billingBasis: r.billingBasis?.trim() || null,
         orderType: r.orderType || null,
+        // 卡片不編輯的欄位原樣帶回（後端整批 PUT 沒帶就會清成 null）。
+        contractId: r.contractId ?? null,
+        ...(r.sortOrder !== undefined ? { sortOrder: r.sortOrder } : {}),
         withholdingRate: r.withholdingRate,
         withholdingThreshold: r.withholdingThreshold,
         note: r.note?.trim() || null,
@@ -249,40 +215,18 @@ export function SubcontractsCard({
     <Card>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-semibold text-gray-700">副委託與協力技師</h2>
-        <div className="flex items-center gap-2">
-          {vendorCategories.length > 0 && (
-            <select
-              className="rounded-lg border border-gray-200 px-2 py-1.5 text-xs text-gray-600"
-              value={vendorCategoryFilter}
-              onChange={(e) => setVendorCategoryFilter(e.target.value)}
-              title="廠商下拉依類別篩選"
-            >
-              <option value="">廠商：全部類別</option>
-              {vendorCategories.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
-          )}
-          <button type="button" onClick={addSubRow} className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50">
-            ＋ 新增一列
-          </button>
-        </div>
+        <span className="text-xs text-gray-400">新增、單位、聯絡、項目、金額、請款依據請在上方申請單「發包單位」修改。</span>
       </div>
       {subDraft.length === 0 ? (
-        <Empty>尚無下包或技師</Empty>
+        <Empty>尚無下包或技師——請在上方申請單「發包單位」直接填寫後儲存。</Empty>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b text-left text-gray-500">
-                <th className="py-2 pr-2">類型</th>
-                <th className="py-2 pr-2">科別</th>
                 <th className="py-2 pr-2 min-w-[150px]">單位</th>
-                <th className="py-2 pr-2">聯絡</th>
-                <th className="py-2 pr-2">項目</th>
                 <th className="py-2 pr-2 text-right">金額</th>
-                <th className="py-2 pr-2">請款依據</th>
-                <th className="py-2 pr-2">訂單類型</th>
+                <th className="py-2 pr-2">類型</th>
                 <th className="py-2 pr-2 text-right">代扣率%</th>
                 <th className="py-2 pr-2 text-right">門檻</th>
                 <th className="py-2 pr-2"></th>
@@ -292,35 +236,16 @@ export function SubcontractsCard({
               {subDraft.map((row, idx) => (
                 <Fragment key={row._key}>
                   <tr className="border-b last:border-0 align-top">
+                    <td className="py-1.5 pr-2 text-gray-700">
+                      {/* 單位、項目、金額只讀：改在上方申請單「發包單位」。 */}
+                      {row.vendorName || <span className="text-gray-300">（未填單位）</span>}
+                      {row.item && <span className="block text-xs text-gray-400">{row.item}</span>}
+                    </td>
+                    <td className="py-1.5 pr-2 text-right text-gray-700">{fmtMoney(row.amount)}</td>
                     <td className="py-1.5 pr-2">
                       <select className={inputCls} value={row.kind} onChange={(e) => patchSub(idx, { kind: e.target.value as SubcontractKind })}>
                         <option value="subcontract">下包工程</option>
                         <option value="technician">技師簽證費</option>
-                      </select>
-                    </td>
-                    <td className="py-1.5 pr-2">
-                      <input className={inputCls} list="discipline-suggestions" value={row.discipline ?? ""} onChange={(e) => patchSub(idx, { discipline: e.target.value })} />
-                    </td>
-                    <td className="py-1.5 pr-2">
-                      <VendorCombo vendors={vendorsForRow(row)} vendorId={row.vendorId} name={row.vendorName} onChange={(v) => patchSub(idx, { vendorId: v.vendorId, vendorName: v.name })} />
-                    </td>
-                    <td className="py-1.5 pr-2">
-                      <input className={inputCls} value={row.contact ?? ""} onChange={(e) => patchSub(idx, { contact: e.target.value })} />
-                    </td>
-                    <td className="py-1.5 pr-2">
-                      <input className={inputCls} value={row.item ?? ""} onChange={(e) => patchSub(idx, { item: e.target.value })} />
-                    </td>
-                    <td className="py-1.5 pr-2">
-                      <input className={`${inputCls} text-right`} type="number" min="0" value={row.amount} onChange={(e) => patchSub(idx, { amount: Number(e.target.value) || 0 })} />
-                    </td>
-                    <td className="py-1.5 pr-2">
-                      <input className={inputCls} value={row.billingBasis ?? ""} onChange={(e) => patchSub(idx, { billingBasis: e.target.value })} />
-                    </td>
-                    <td className="py-1.5 pr-2">
-                      <select className={inputCls} value={row.orderType ?? ""} onChange={(e) => patchSub(idx, { orderType: (e.target.value || null) as OrderType | null })}>
-                        <option value="">未定</option>
-                        <option value="quotation">報價單</option>
-                        <option value="contract">合約</option>
                       </select>
                     </td>
                     <td className="py-1.5 pr-2">
@@ -350,7 +275,7 @@ export function SubcontractsCard({
                   </tr>
                   {row.id && expandedSub === row.id && (
                     <tr className="border-b bg-gray-50/60 last:border-0">
-                      <td colSpan={11} className="p-3">
+                      <td colSpan={6} className="p-3">
                         <div className="overflow-x-auto">
                           <table className="w-full text-xs">
                             <thead>
@@ -483,18 +408,6 @@ export function SubcontractsCard({
         <PrimaryButton onClick={saveSubcontracts} disabled={savingSubs}>{savingSubs ? "儲存中…" : "儲存副委託"}</PrimaryButton>
         {subsSavedAt && <span className="text-sm text-green-700">已儲存</span>}
       </div>
-      {money && (
-        <div className="mt-4 grid grid-cols-2 gap-4 border-t pt-4 text-sm sm:grid-cols-4">
-          <div><p className="text-xs text-gray-500">發包小計</p><p className="font-medium text-gray-800">{fmtMoney(money.subcontractTotal)}</p></div>
-          <div><p className="text-xs text-gray-500">其他支出</p><p className="font-medium text-gray-800">{fmtMoney(money.otherExpenses)}</p></div>
-          {showProfit && (
-            <>
-              <div><p className="text-xs text-gray-500">利潤</p><p className="font-medium text-gray-800">{fmtMoney(money.profit)}</p></div>
-              <div><p className="text-xs text-gray-500">毛利率</p><p className="font-medium text-gray-800">{money.grossMarginPct ?? "—"}{money.grossMarginPct != null && "%"}</p></div>
-            </>
-          )}
-        </div>
-      )}
       <ErrorText>{error}</ErrorText>
     </Card>
   );
