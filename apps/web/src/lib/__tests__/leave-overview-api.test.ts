@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   cellTone,
   daysHoursToHours,
+  defaultBucketId,
   expiringLabel,
   leaveDetailHref,
   remainingAfter,
@@ -45,6 +46,25 @@ describe("validateAdjustForm", () => {
     expect(validateAdjustForm({ ...base, leaveTypeId: "" }).error).toBe("請選擇假別");
     expect(validateAdjustForm({ ...base, days: "", hours: "" }).error).toBe("請輸入要調整的天數或時數");
     expect(validateAdjustForm({ ...base, days: "-1" }).error).toMatch(/不小於 0/);
+  });
+  it("超過上限 9999.99 小時 → 錯誤", () => {
+    expect(validateAdjustForm({ ...base, days: "", hours: "10000" }).error).toMatch(/不可超過 9999.99/);
+    expect(validateAdjustForm({ ...base, days: "", hours: "9999.99" })).toEqual({ deltaHours: 9999.99 });
+  });
+});
+
+describe("defaultBucketId（多桶時預設選期間含今天的那一個）", () => {
+  const a = { id: "a", period_start: "2026-01-01", period_end: "2026-12-31" };
+  const b = { id: "b", period_start: "2026-05-10", period_end: "2027-05-09" };
+  const old = { id: "old", period_start: "2025-01-01", period_end: "2025-12-31" };
+  it("只有一個桶 → 那一個；沒有 → 空", () => {
+    expect(defaultBucketId([old], "2026-10-27")).toBe("old");
+    expect(defaultBucketId([], "2026-10-27")).toBe("");
+  });
+  it("多個含今天 → 起日最新；都不含 → 空（強制使用者選）", () => {
+    expect(defaultBucketId([a, b, old], "2026-10-27")).toBe("b");
+    expect(defaultBucketId([a, old], "2026-10-27")).toBe("a");
+    expect(defaultBucketId([a, old], "2027-06-01")).toBe("");
   });
 });
 

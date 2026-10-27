@@ -172,6 +172,19 @@ export function LeaveOverviewPanel({
                             <p className="text-[11px] tabular-nums whitespace-nowrap text-gray-400">
                               {formatLeaveDuration(cell.used, perDay)}／{formatLeaveDuration(cell.total, perDay)}
                             </p>
+                            {cell.noActivePeriod && (
+                              <p className="text-[10px] whitespace-nowrap text-gray-400" title="這個假別沒有任何餘額桶的期間包含基準日">
+                                無有效期間
+                              </p>
+                            )}
+                            {(cell.overlapCount ?? 0) > 0 && (
+                              <p
+                                className="text-[10px] whitespace-nowrap text-amber-600"
+                                title={`另有 ${cell.overlapCount} 個期間也包含基準日；這裡顯示的是請假會扣的那一個（起日最新）`}
+                              >
+                                另有重疊期間
+                              </p>
+                            )}
                             {exp && (
                               <span
                                 className="mt-1 inline-block whitespace-nowrap rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-700"

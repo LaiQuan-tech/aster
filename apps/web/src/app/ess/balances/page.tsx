@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { Card, InlineError } from "@/components/ess-ui";
 import { getLeaveBalances, getLeaveTypes, type LeaveBalance, type LeaveType } from "@/lib/ess-api";
 import { balancePeriodLabel } from "@/lib/leave-balances-api";
-import { formatLeaveDuration } from "@/lib/leave-duration";
+import { formatLeaveDuration, formatLeaveRemaining } from "@/lib/leave-duration";
 
 /**
  * 我的假別額度：`leave_balances` 一列一個「期間桶」。特休週年制（W1，2026-09-23）後
@@ -33,6 +33,9 @@ export default function BalancesPage() {
 
   const typeName = (id: string) => types.find((t) => t.id === id)?.name ?? id.slice(0, 8);
   const fmt = (hours: number) => formatLeaveDuration(hours, hoursPerDay);
+  // 剩餘照實顯示：負數（超用，例如 HR 手動減少後）不夾成 0，寫「超用 …」並標紅。
+  const fmtRemaining = (hours: number) => formatLeaveRemaining(hours, hoursPerDay);
+  const isOverused = (hours: number) => Math.round(hours * 60) < 0;
 
   return (
     <div className="space-y-4">
@@ -42,7 +45,8 @@ export default function BalancesPage() {
           {balances.map((b) => {
             const entitled = Number(b.entitled) + Number(b.deferred);
             const used = Number(b.used);
-            const remaining = Math.max(0, entitled - used);
+            const remaining = entitled - used;
+            const overused = isOverused(remaining);
             const percent = entitled > 0 ? Math.min(100, Math.round((used / entitled) * 100)) : 0;
             return (
               <article key={b.id} className="rounded-2xl border border-gray-100 bg-gray-50 p-4">
@@ -51,8 +55,11 @@ export default function BalancesPage() {
                     <h3 className="font-semibold text-gray-900">{typeName(b.leave_type_id)}</h3>
                     <p className="text-xs text-gray-400">{balancePeriodLabel(b)}</p>
                   </div>
-                  <span className="rounded-full bg-white px-3 py-1 text-sm font-semibold" style={{ color: "var(--brand)" }}>
-                    剩 {fmt(remaining)}
+                  <span
+                    className={`rounded-full bg-white px-3 py-1 text-sm font-semibold ${overused ? "text-red-600" : ""}`}
+                    style={overused ? undefined : { color: "var(--brand)" }}
+                  >
+                    {overused ? fmtRemaining(remaining) : `剩 ${fmtRemaining(remaining)}`}
                   </span>
                 </div>
                 <div className="mt-4 h-2 overflow-hidden rounded-full bg-white">
@@ -87,7 +94,9 @@ export default function BalancesPage() {
                   <td className="py-2 pr-4 whitespace-nowrap text-xs text-gray-500">{balancePeriodLabel(b)}</td>
                   <td className="py-2 pr-4">{fmt(entitled)}</td>
                   <td className="py-2 pr-4">{fmt(used)}</td>
-                  <td className="py-2 font-medium">{fmt(Math.max(0, entitled - used))}</td>
+                  <td className={`py-2 font-medium ${isOverused(entitled - used) ? "text-red-600" : ""}`}>
+                    {fmtRemaining(entitled - used)}
+                  </td>
                 </tr>
               );
             })}

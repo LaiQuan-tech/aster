@@ -136,10 +136,12 @@ export const SNAPSHOT_TABLES: readonly SnapshotTableSpec[] = [
   { name: "approval_flows" },
   { name: "approval_steps" },
   { name: "leave_balances" },
+  { name: "leave_balance_adjustments" }, // 假別時數手動調整歷程（sql/0071；未套用的環境記 skipped）
   { name: "comp_time_ledger" },
   { name: "rule_configs" },
   { name: "salary_structures" },
   { name: "salary_adjustments" },
+  { name: "payroll_adjustments" }, // 薪資補扣款（sql/0055）
   { name: "payslips" },
   { name: "non_employee_income" },
   { name: "expense_categories" },

@@ -12,12 +12,17 @@
  * `allowNegative: true`（前端會先提示再送）。entitled 本身也不得 < 0（避免奇怪的負額度）。
  *
  * 併發：update 帶 `.eq("entitled", 調整前值)` 做樂觀鎖，同時有人改 → 409 conflict。
- * 歷程寫失敗 → 把 entitled 改回原值再報錯（不留下沒有歷程的調整）。
+ * 歷程寫失敗 → 把 entitled 改回原值再報錯（不留下沒有歷程的調整）；補償本身也帶
+ * `.eq("entitled", 調整後值)` 樂觀鎖並檢查列數，補償失敗 → 拋「需人工確認」錯誤。
+ *
+ * 沒指定桶：只取「期間包含今天」的桶（多個時與扣假 resolveBalanceBucket 同規則：起日最新）。
+ * 沒有這種桶時**不改**過期／未開始的桶，改新開一個期間含今天的手動桶，期間沿用該員該假別
+ * 既有桶的制度（週年制＝到職日週年期間、曆年制＝本年 1/1–12/31）；判斷不出 → 409 bucket_required。
  * 表未套用（PGRST205／42P01）→ 先探測，**在動餘額之前**就回 409 migration_required。
  */
 import { supabaseAdmin } from "../lib/supabase.js"
 import { isMissingTableError } from "../lib/schema-compat.js"
-import { leaveBalancesHavePeriod } from "./annual-leave.js"
+import { anniversaryPeriod, leaveBalancesHavePeriod } from "./annual-leave.js"
 
 export class LeaveAdjustmentError extends Error {
   constructor(
@@ -49,6 +54,8 @@ const ADJ_COLS =
   "id, tenant_id, employee_id, leave_type_id, balance_id, delta_hours, entitled_before, entitled_after, reason, created_by_emp_id, created_at"
 
 const round2 = (n: number) => Math.round(n * 100) / 100
+/** 單次調整上限（小時）；與 route 的 zod 上限一致。 */
+export const MAX_DELTA_HOURS = 9999.99
 const num = (v: unknown) => {
   const n = Number(v ?? 0)
   return Number.isFinite(n) ? n : 0
@@ -124,10 +131,13 @@ interface BucketRow {
 export async function adjustLeaveBalance(input: AdjustInput): Promise<AdjustResult> {
   const reason = input.reason.trim()
   if (!reason) throw new LeaveAdjustmentError(400, "reason_required", "請填寫調整原因")
-  if (!Number.isFinite(input.deltaHours) || input.deltaHours === 0) {
+  const delta = Number.isFinite(input.deltaHours) ? round2(input.deltaHours) : 0
+  if (delta === 0) {
     throw new LeaveAdjustmentError(400, "invalid_delta", "調整時數不可為 0")
   }
-  const delta = round2(input.deltaHours)
+  if (Math.abs(delta) > MAX_DELTA_HOURS) {
+    throw new LeaveAdjustmentError(400, "invalid_delta", `單次調整不可超過 ${MAX_DELTA_HOURS} 小時`)
+  }
 
   if (!(await adjustmentsTableReady())) {
     throw new LeaveAdjustmentError(
@@ -139,7 +149,12 @@ export async function adjustLeaveBalance(input: AdjustInput): Promise<AdjustResu
 
   // 員工與假別都必須屬於這個租戶（不信任 body 的 id）。
   const [{ data: emp, error: empErr }, { data: type, error: typeErr }] = await Promise.all([
-    supabaseAdmin.from("employees").select("id").eq("tenant_id", input.tenantId).eq("id", input.employeeId).maybeSingle(),
+    supabaseAdmin
+      .from("employees")
+      .select("id, hire_date")
+      .eq("tenant_id", input.tenantId)
+      .eq("id", input.employeeId)
+      .maybeSingle(),
     supabaseAdmin.from("leave_types").select("id").eq("tenant_id", input.tenantId).eq("id", input.leaveTypeId).maybeSingle(),
   ])
   if (empErr) throw new Error(`adjust: employee: ${empErr.message}`)
@@ -153,6 +168,8 @@ export async function adjustLeaveBalance(input: AdjustInput): Promise<AdjustResu
     : "id, employee_id, leave_type_id, entitled, deferred, used"
 
   let bucket: BucketRow | null = null
+  /** 要新開的桶的期間（null＝沒有任何桶 → 預設曆年）。 */
+  let newPeriod: { start: string; end: string } | null = null
   if (input.balanceId) {
     const { data, error } = await supabaseAdmin
       .from("leave_balances")
@@ -167,21 +184,33 @@ export async function adjustLeaveBalance(input: AdjustInput): Promise<AdjustResu
     }
     bucket = row
   } else {
-    // 沒指定桶：取期間包含今天的桶；沒有就取期間起日最新的一個。
+    // 沒指定桶：只取期間包含今天的桶（同 resolveBalanceBucket：起日最新者）。
     const { data, error } = await supabaseAdmin
       .from("leave_balances")
-      .select(cols)
+      .select(hasPeriod ? cols : `${cols}, year`)
       .eq("tenant_id", input.tenantId)
       .eq("employee_id", input.employeeId)
       .eq("leave_type_id", input.leaveTypeId)
     if (error) throw new Error(`adjust: buckets: ${error.message}`)
-    const rows = (data ?? []) as unknown as BucketRow[]
-    const active = rows.filter(
-      (r) => r.period_start && r.period_end && r.period_start <= input.today && input.today <= r.period_end,
-    )
-    const pool = active.length > 0 ? active : rows
-    bucket =
-      [...pool].sort((a, b) => ((a.period_start ?? "") < (b.period_start ?? "") ? 1 : -1))[0] ?? null
+    const rows = (data ?? []) as unknown as Array<BucketRow & { year?: number | string }>
+    if (!hasPeriod) {
+      // 舊庫（沒有期間欄）：一年一桶，取今年那一桶；沒有就新開今年的。
+      const year = Number(input.today.slice(0, 4))
+      bucket = rows.find((r) => Number(r.year) === year) ?? null
+    } else {
+      bucket = pickBucketContaining(rows, input.today)
+      if (!bucket && rows.length > 0) {
+        const period = inferNewPeriod(rows, (emp as { hire_date?: string | null }).hire_date ?? null, input.today)
+        if (!period) {
+          throw new LeaveAdjustmentError(
+            409,
+            "bucket_required",
+            "這個假別沒有包含今天的期間，且判斷不出要新開哪一段期間，請指定要調整的餘額桶",
+          )
+        }
+        newPeriod = period
+      }
+    }
   }
 
   let createdBalance = false
@@ -207,7 +236,10 @@ export async function adjustLeaveBalance(input: AdjustInput): Promise<AdjustResu
   const nowIso = new Date().toISOString()
   if (!bucket) {
     // 該假別還沒有任何桶：只能「增加」（減少在上面已被 entitled_negative 擋掉）。
-    const year = Number(input.today.slice(0, 4))
+    const calYear = Number(input.today.slice(0, 4))
+    const periodStart = newPeriod?.start ?? `${calYear}-01-01`
+    const periodEnd = newPeriod?.end ?? `${calYear}-12-31`
+    const year = Number(periodStart.slice(0, 4))
     const row: Record<string, unknown> = {
       tenant_id: input.tenantId,
       employee_id: input.employeeId,
@@ -218,8 +250,8 @@ export async function adjustLeaveBalance(input: AdjustInput): Promise<AdjustResu
       deferred: 0,
     }
     if (hasPeriod) {
-      row.period_start = `${year}-01-01`
-      row.period_end = `${year}-12-31`
+      row.period_start = periodStart
+      row.period_end = periodEnd
       row.source = "manual"
       row.note = `手動調整：${reason}`.slice(0, 500)
     }
@@ -258,15 +290,34 @@ export async function adjustLeaveBalance(input: AdjustInput): Promise<AdjustResu
     .select(ADJ_COLS)
     .single()
   if (logErr || !logRow) {
-    // 補償：不留下沒有歷程的調整。
+    // 補償：不留下沒有歷程的調整。補償也帶樂觀鎖並檢查列數，失敗要人工確認。
+    let compensateProblem: string | null = null
     if (createdBalance) {
-      await supabaseAdmin.from("leave_balances").delete().eq("tenant_id", input.tenantId).eq("id", bucket.id)
+      const { data: delRows, error: delErr } = await supabaseAdmin
+        .from("leave_balances")
+        .delete()
+        .eq("tenant_id", input.tenantId)
+        .eq("id", bucket.id)
+        .eq("entitled", entitledAfter)
+        .select("id")
+      if (delErr) compensateProblem = `刪除新開的餘額桶失敗：${delErr.message}`
+      else if (!delRows || (delRows as unknown[]).length === 0) compensateProblem = "新開的餘額桶已被其他人修改，未刪除"
     } else {
-      await supabaseAdmin
+      const { data: upRows, error: upErr } = await supabaseAdmin
         .from("leave_balances")
         .update({ entitled: entitledBefore, updated_at: new Date().toISOString() })
         .eq("tenant_id", input.tenantId)
         .eq("id", bucket.id)
+        .eq("entitled", entitledAfter)
+        .select("id")
+      if (upErr) compensateProblem = `改回原值失敗：${upErr.message}`
+      else if (!upRows || (upRows as unknown[]).length === 0) compensateProblem = "餘額已被其他人修改，未改回原值"
+    }
+    if (compensateProblem) {
+      throw new Error(
+        `adjust: 調整歷程寫入失敗（${logErr?.message ?? "no row"}），且補償失敗：${compensateProblem}——` +
+          `餘額桶 ${bucket.id} 的本期給假可能停在 ${entitledAfter}（原值 ${entitledBefore}），需人工確認`,
+      )
     }
     if (logErr && isMissingTableError(logErr)) {
       throw new LeaveAdjustmentError(409, "migration_required", "調整歷程表 leave_balance_adjustments 尚未建立")
@@ -280,4 +331,43 @@ export async function adjustLeaveBalance(input: AdjustInput): Promise<AdjustResu
     createdBalance,
     negative: remainingAfter < 0,
   }
+}
+
+/** 期間包含 `day` 的桶；多個時取起日最新者（與扣假 resolveBalanceBucket 同規則）。 */
+export function pickBucketContaining<T extends { period_start?: string | null; period_end?: string | null }>(
+  rows: T[],
+  day: string,
+): T | null {
+  const active = rows.filter((r) => r.period_start && r.period_end && r.period_start <= day && day <= r.period_end)
+  return [...active].sort((a, b) => ((a.period_start as string) < (b.period_start as string) ? 1 : -1))[0] ?? null
+}
+
+/**
+ * 沒有包含今天的桶時，新桶要開哪一段期間：看該員該假別起日最新的既有桶是哪一種制度。
+ *   • 曆年制（YYYY-01-01～YYYY-12-31）→ 今年 1/1–12/31
+ *   • 週年制（＝anniversaryPeriod(到職日, 該桶起日)）→ anniversaryPeriod(到職日, 今天)
+ * 都不像（或沒有到職日、今天早於到職日）→ null（呼叫端回 409 bucket_required）。
+ */
+export function inferNewPeriod(
+  rows: Array<{ period_start?: string | null; period_end?: string | null }>,
+  hireDate: string | null,
+  today: string,
+): { start: string; end: string } | null {
+  const withPeriod = rows.filter((r) => r.period_start && r.period_end)
+  const latest = [...withPeriod].sort((a, b) => ((a.period_start as string) < (b.period_start as string) ? 1 : -1))[0]
+  if (!latest) return null
+  const start = latest.period_start as string
+  const end = latest.period_end as string
+  if (hireDate) {
+    const ann = anniversaryPeriod(hireDate, start)
+    if (ann && ann.start === start && ann.end === end) {
+      const now = anniversaryPeriod(hireDate, today)
+      return now ? { start: now.start, end: now.end } : null
+    }
+  }
+  if (start.slice(5) === "01-01" && end.slice(5) === "12-31" && start.slice(0, 4) === end.slice(0, 4)) {
+    const y = today.slice(0, 4)
+    return { start: `${y}-01-01`, end: `${y}-12-31` }
+  }
+  return null
 }

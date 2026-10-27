@@ -1,7 +1,7 @@
 import type { Server } from "node:http"
 import express, { type NextFunction, type Request, type Response } from "express"
 import request from "supertest"
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 // 純測試：supabase 換成記憶體版（helpers/fake-supabase.ts），不連任何 DB。資料全為虛構。
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
@@ -9,11 +9,16 @@ vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase
 import { leaveBalancesRouter } from "../routes/leave-balances.js"
 import {
   buildLeaveOverview,
+  effectiveCell,
   pickEffectiveBuckets,
   referenceDate,
   sortLeaveTypes,
   summarizeBuckets,
 } from "../services/leave-overview.js"
+import { inferNewPeriod, pickBucketContaining } from "../services/leave-adjustments.js"
+import { SNAPSHOT_TABLES } from "../services/backup-snapshot.js"
+import { anniversaryPeriod } from "../services/annual-leave.js"
+import { DEFAULT_TIMEZONE, todayKey } from "../lib/tz.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID } from "./helpers/fake-supabase.js"
 
 /**
@@ -234,6 +239,163 @@ describe("POST /leave-balances/adjustments", () => {
   })
 })
 
+describe("POST /leave-balances/adjustments（驗收修正 2026-10-27）", () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  /** 讓第 n 次（從 1 起）對 leave_balances 的 update 在執行前先跑 `before`（模擬別人同時改）。 */
+  function beforeNthBalanceUpdate(n: number, before: () => void) {
+    const original = fake.from
+    let count = 0
+    vi.spyOn(fake, "from").mockImplementation((table: string) => {
+      const builder = original(table)
+      if (table === "leave_balances") {
+        const update = builder.update
+        builder.update = (value: Record<string, unknown>) => {
+          count += 1
+          if (count === n) before()
+          return update(value)
+        }
+      }
+      return builder
+    })
+  }
+  const row = (id: string) => fake.db.leave_balances!.find((b) => b.id === id)!
+
+  it("樂觀鎖：讀完後別人先改了 entitled → 409 conflict，不寫歷程", async () => {
+    beforeNthBalanceUpdate(1, () => (row(BUCKET).entitled = 60))
+    const res = await adjust(HR, { deltaHours: 8 })
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("conflict")
+    expect(row(BUCKET).entitled).toBe(60)
+    expect(fake.db.leave_balance_adjustments).toHaveLength(0)
+  })
+
+  it("補償帶樂觀鎖：歷程寫失敗且餘額已被別人改 → 不蓋掉別人的值，錯誤含「需人工確認」", async () => {
+    fake.injectError({ table: "leave_balance_adjustments", action: "insert", error: { code: "XX000", message: "boom" } })
+    beforeNthBalanceUpdate(2, () => (row(BUCKET).entitled = 70))
+    const res = await adjust(HR, { deltaHours: 8 })
+    expect(res.status).toBe(500)
+    expect(res.body.error).toContain("需人工確認")
+    expect(row(BUCKET).entitled).toBe(70)
+  })
+
+  it("補償 update 本身報錯 → 錯誤含「需人工確認」", async () => {
+    fake.injectError({ table: "leave_balance_adjustments", action: "insert", error: { code: "XX000", message: "boom" } })
+    beforeNthBalanceUpdate(2, () =>
+      fake.injectError({ table: "leave_balances", action: "update", error: { code: "XX000", message: "db down" } }),
+    )
+    const res = await adjust(HR, { deltaHours: 8 })
+    expect(res.status).toBe(500)
+    expect(res.body.error).toContain("需人工確認")
+    expect(res.body.error).toContain("db down")
+  })
+
+  it("非在職的 HR（status ≠ active）降權 → 403，不動資料", async () => {
+    fake.db.employees!.find((e) => e.id === HR_ID)!.status = "resigned"
+    const res = await adjust(HR, { deltaHours: 8 })
+    expect(res.status).toBe(403)
+    expect(row(BUCKET).entitled).toBe(56)
+    expect(fake.db.leave_balance_adjustments).toHaveLength(0)
+  })
+
+  it("四捨五入後為 0（0.004 小時）→ 400 invalid_delta", async () => {
+    const res = await adjust(HR, { deltaHours: 0.004 })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("invalid_delta")
+  })
+
+  it("超過上限 ±9999.99 → 400 invalid_body，不動資料", async () => {
+    for (const deltaHours of [10000, -10000]) {
+      const res = await adjust(HR, { deltaHours })
+      expect(res.status, String(deltaHours)).toBe(400)
+      expect(res.body.error).toBe("invalid_body")
+    }
+    expect(row(BUCKET).entitled).toBe(56)
+  })
+
+  it("沒指定桶、沒有含今天的桶（曆年制，只有去年的桶）→ 新開今年曆年手動桶，不動過期桶", async () => {
+    const y = new Date().getFullYear()
+    fake.db.leave_balances = [bucket(SICK_BUCKET, STAFF_ID, SICK, { year: y - 1, period_start: `${y - 1}-01-01`, period_end: `${y - 1}-12-31`, entitled: 240, used: 16 })]
+    const res = await adjust(HR, { deltaHours: 8, leaveTypeId: SICK, balanceId: undefined })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(res.body.createdBalance).toBe(true)
+    expect(row(SICK_BUCKET).entitled).toBe(240)
+    const created = fake.db.leave_balances!.find((b) => b.id !== SICK_BUCKET)!
+    expect(created).toMatchObject({ leave_type_id: SICK, entitled: 8, source: "manual", period_start: `${y}-01-01`, period_end: `${y}-12-31` })
+  })
+
+  it("沒指定桶、沒有含今天的桶（週年制）→ 依到職日新開本週年期間的手動桶", async () => {
+    const y = new Date().getFullYear()
+    const hire = `${y - 3}-01-02`
+    fake.db.employees!.find((e) => e.id === STAFF_ID)!.hire_date = hire
+    const expected = anniversaryPeriod(hire, todayKey(DEFAULT_TIMEZONE))!
+    // 既有桶：很久以前的一段週年期間（已過期）
+    fake.db.leave_balances = [bucket(OLD_BUCKET, STAFF_ID, ANNUAL, { period_start: `${y - 2}-01-02`, period_end: `${y - 1}-01-01`, entitled: 80, used: 80 })]
+    const res = await adjust(HR, { deltaHours: 8, balanceId: undefined })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(res.body.createdBalance).toBe(true)
+    expect(row(OLD_BUCKET).entitled).toBe(80)
+    const created = fake.db.leave_balances!.find((b) => b.id !== OLD_BUCKET)!
+    expect(created).toMatchObject({ entitled: 8, source: "manual", period_start: expected.start, period_end: expected.end })
+  })
+
+  it("沒指定桶、沒有含今天的桶且制度判斷不出 → 409 bucket_required，不動資料", async () => {
+    const y = new Date().getFullYear()
+    fake.db.leave_balances = [bucket(OLD_BUCKET, STAFF_ID, ANNUAL, { period_start: `${y - 1}-03-15`, period_end: `${y - 1}-08-20`, entitled: 24, used: 0 })]
+    const res = await adjust(HR, { deltaHours: 8, balanceId: undefined })
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("bucket_required")
+    expect(fake.db.leave_balances).toHaveLength(1)
+    expect(row(OLD_BUCKET).entitled).toBe(24)
+    expect(fake.db.leave_balance_adjustments).toHaveLength(0)
+  })
+
+  it("沒指定桶、有多個桶含今天 → 調起日最新的那一個（與扣假一致）", async () => {
+    const y = new Date().getFullYear()
+    fake.db.leave_balances = [
+      bucket(OLD_BUCKET, STAFF_ID, ANNUAL, { period_start: `${y - 1}-01-01`, period_end: `${y + 1}-12-31`, entitled: 10 }),
+      bucket(BUCKET, STAFF_ID, ANNUAL, { period_start: `${y}-01-01`, period_end: `${y}-12-31`, entitled: 20 }),
+    ]
+    const res = await adjust(HR, { deltaHours: 4, balanceId: undefined })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(row(BUCKET).entitled).toBe(24)
+    expect(row(OLD_BUCKET).entitled).toBe(10)
+  })
+})
+
+describe("leave-adjustments 純函式", () => {
+  it("pickBucketContaining：只取含當日者、多個取起日最新", () => {
+    const rows = [
+      { id: "a", period_start: "2026-01-01", period_end: "2026-12-31" },
+      { id: "b", period_start: "2026-05-10", period_end: "2027-05-09" },
+      { id: "c", period_start: "2025-01-01", period_end: "2025-12-31" },
+    ]
+    expect(pickBucketContaining(rows, "2026-10-27")?.id).toBe("b")
+    expect(pickBucketContaining(rows, "2027-06-01")).toBeNull()
+  })
+
+  it("inferNewPeriod：曆年制 → 今年 1/1–12/31；週年制 → 到職日週年期間；都不像 → null", () => {
+    expect(inferNewPeriod([{ period_start: "2025-01-01", period_end: "2025-12-31" }], null, "2026-10-27")).toEqual({
+      start: "2026-01-01",
+      end: "2026-12-31",
+    })
+    expect(inferNewPeriod([{ period_start: "2024-05-10", period_end: "2025-05-09" }], "2020-05-10", "2026-10-27")).toEqual({
+      start: "2026-05-10",
+      end: "2027-05-09",
+    })
+    expect(inferNewPeriod([{ period_start: "2024-05-10", period_end: "2025-05-09" }], null, "2026-10-27")).toBeNull()
+    expect(inferNewPeriod([{ period_start: "2025-03-15", period_end: "2025-08-20" }], "2020-05-10", "2026-10-27")).toBeNull()
+  })
+})
+
+describe("備份快照清單", () => {
+  it("含 leave_balance_adjustments 與 payroll_adjustments", () => {
+    const names = SNAPSHOT_TABLES.map((t) => t.name)
+    expect(names).toContain("leave_balance_adjustments")
+    expect(names).toContain("payroll_adjustments")
+  })
+})
+
 describe("GET /leave-balances/overview", () => {
   it("HR：一人一列、欄依常用排序（特休→病假）、只取目前有效桶、有 canAdjust", async () => {
     const res = await as(HR).get("/leave-balances/overview?year=2026&asOf=2026-10-27")
@@ -319,10 +481,21 @@ describe("leave-overview 純函式", () => {
     expect(referenceDate(2027, "2026-10-27")).toBe("2027-01-01")
   })
 
-  it("pickEffectiveBuckets：沒有包含參考日的桶 → 取起日最新的", () => {
-    const a = { id: "a", employee_id: "e", leave_type_id: "t", year: 2025, entitled: 1, used: 0, deferred: 0, period_start: "2025-01-01", period_end: "2025-06-30" }
+  it("pickEffectiveBuckets／effectiveCell：沒有包含參考日的桶 → 不算任何桶、顯示 0 並標無有效期間", () => {
+    const a = { id: "a", employee_id: "e", leave_type_id: "t", year: 2025, entitled: 8, used: 0, deferred: 0, period_start: "2025-01-01", period_end: "2025-06-30" }
     const b = { ...a, id: "b", period_start: "2025-07-01", period_end: "2025-09-30" }
-    expect(pickEffectiveBuckets([a, b], "2025-12-31").map((x) => x.id)).toEqual(["b"])
+    expect(pickEffectiveBuckets([a, b], "2025-12-31")).toEqual([])
+    const cell = effectiveCell([a, b], "2025-12-31", "2025-12-31")
+    expect(cell).toMatchObject({ total: 0, used: 0, remaining: 0, balanceIds: [], noActivePeriod: true })
+    expect(cell.overlapCount).toBeUndefined()
+  })
+
+  it("effectiveCell：多個桶都含參考日 → 只算起日最新那一個（與扣假一致）並標 overlapCount", () => {
+    const older = { id: "old", employee_id: "e", leave_type_id: "t", year: 2026, entitled: 56, used: 0, deferred: 0, period_start: "2026-01-01", period_end: "2026-12-31" }
+    const newer = { ...older, id: "new", entitled: 24, used: 4, period_start: "2026-05-10", period_end: "2027-05-09" }
+    const cell = effectiveCell([older, newer], "2026-10-27", "2026-10-27")
+    expect(cell).toMatchObject({ total: 24, used: 4, remaining: 20, balanceIds: ["new"], overlapCount: 1 })
+    expect(cell.noActivePeriod).toBeUndefined()
   })
 
   it("summarizeBuckets：30 天內到期且有剩餘 → expiring", () => {

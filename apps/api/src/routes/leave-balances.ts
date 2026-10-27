@@ -21,13 +21,12 @@ import {
   buildLeaveOverview,
   loadBalancesForYear,
   loadOverviewRefs,
-  pickEffectiveBuckets,
+  effectiveCell,
   referenceDate,
   sortLeaveTypes,
-  summarizeBuckets,
   type LeaveOverview,
 } from "../services/leave-overview.js"
-import { LeaveAdjustmentError, adjustLeaveBalance, listAdjustments } from "../services/leave-adjustments.js"
+import { LeaveAdjustmentError, MAX_DELTA_HOURS, adjustLeaveBalance, listAdjustments } from "../services/leave-adjustments.js"
 
 export const leaveBalancesRouter = Router()
 
@@ -466,11 +465,9 @@ leaveBalancesRouter.get(
       const typeIds = new Set(balances.map((b) => b.leave_type_id))
       const cards = sortLeaveTypes(refs.leaveTypes.filter((t) => typeIds.has(t.id))).map((t) => ({
         leaveType: t,
-        ...summarizeBuckets(
-          pickEffectiveBuckets(
-            balances.filter((b) => b.leave_type_id === t.id),
-            refDate,
-          ),
+        ...effectiveCell(
+          balances.filter((b) => b.leave_type_id === t.id),
+          refDate,
           today,
         ),
       }))
@@ -501,7 +498,7 @@ const adjustSchema = z.object({
   leaveTypeId: z.string().uuid(),
   balanceId: z.string().uuid().optional(),
   /** 正＝增加、負＝減少（小時）。前端把「天＋時」依 1 天＝N 小時換算後送來。 */
-  deltaHours: z.number().finite(),
+  deltaHours: z.number().finite().min(-MAX_DELTA_HOURS).max(MAX_DELTA_HOURS),
   reason: z.string().max(500),
   allowNegative: z.boolean().optional(),
 })

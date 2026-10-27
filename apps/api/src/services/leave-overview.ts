@@ -5,8 +5,10 @@
  *   total（entitled + deferred）／used／remaining（total − used）。
  *
  * 「目前有效」的規則（週年制下同一年可能重疊兩個特休桶，不能直接加總）：
- *   1. 期間包含參考日的桶（參考日＝今天若落在所選年度，否則該年 12/31，未來年度則 1/1）。
- *   2. 某假別沒有任何桶包含參考日 → 改取「與所選年度重疊、期間起日最新」的那一個桶。
+ *   1. 只算期間包含參考日的桶（參考日＝今天若落在所選年度，否則該年 12/31，未來年度則 1/1）。
+ *      同時有多個桶包含參考日 → 只取與扣假（ledger.resolveBalanceBucket）相同的那一個：
+ *      期間起日最新者；格子標 overlapCount 提示另有重疊期間。
+ *   2. 某假別沒有任何桶包含參考日 → 該格顯示 0，標 noActivePeriod（「無有效期間」）。
  *   3. 沒有期間欄（migration 0050 未套）的舊庫 → 所選年度的列全部算。
  * 快到期：被算進來的桶仍有剩餘、且 period_end 在今天起 EXPIRING_DAYS 天內（含今天）。
  *
@@ -58,6 +60,10 @@ export interface OverviewCell {
   periodStart: string | null
   /** 30 天內到期且仍有剩餘 → 到期日與那個桶的剩餘時數；否則 null。 */
   expiring: { date: string; hours: number; daysLeft: number } | null
+  /** 有桶但沒有任何桶的期間包含參考日 → true（格子顯示 0＋「無有效期間」）。 */
+  noActivePeriod?: boolean
+  /** 包含參考日的桶不只一個時，另外（沒算進來）的重疊桶數；0＝沒有重疊。 */
+  overlapCount?: number
 }
 
 export interface OverviewRow {
@@ -108,14 +114,30 @@ export function referenceDate(year: number, today: string): string {
   return y > year ? `${year}-12-31` : `${year}-01-01`
 }
 
-/** 挑出某員某假別「目前有效」的桶（規則見檔頭）。 */
+/**
+ * 挑出某員某假別「目前有效」的桶（規則見檔頭）：期間含參考日者，多個時取起日最新的那一個
+ * （與扣假 resolveBalanceBucket 同規則）；沒有 → 空陣列。舊庫（沒有期間）→ 全部。
+ */
 export function pickEffectiveBuckets<T extends OverviewBalanceRow>(buckets: T[], refDate: string): T[] {
-  if (buckets.length === 0) return []
-  if (buckets.some((b) => !b.period_start || !b.period_end)) return buckets // 舊庫：沒有期間
-  const active = buckets.filter((b) => (b.period_start as string) <= refDate && refDate <= (b.period_end as string))
-  if (active.length > 0) return active
-  const latest = [...buckets].sort((a, b) => ((a.period_start as string) < (b.period_start as string) ? 1 : -1))[0]
-  return latest ? [latest] : []
+  return pickEffective(buckets, refDate).picked
+}
+
+function pickEffective<T extends OverviewBalanceRow>(buckets: T[], refDate: string): { picked: T[]; overlapCount: number } {
+  if (buckets.length === 0) return { picked: [], overlapCount: 0 }
+  if (buckets.some((b) => !b.period_start || !b.period_end)) return { picked: buckets, overlapCount: 0 } // 舊庫：沒有期間
+  const active = buckets
+    .filter((b) => (b.period_start as string) <= refDate && refDate <= (b.period_end as string))
+    .sort((a, b) => ((a.period_start as string) < (b.period_start as string) ? 1 : -1))
+  return { picked: active.slice(0, 1), overlapCount: Math.max(0, active.length - 1) }
+}
+
+/** 某員某假別的格子：挑有效桶＋彙總＋「無有效期間」／重疊提示。 */
+export function effectiveCell(buckets: OverviewBalanceRow[], refDate: string, today: string): OverviewCell {
+  const { picked, overlapCount } = pickEffective(buckets, refDate)
+  const cell = summarizeBuckets(picked, today)
+  if (buckets.length > 0 && picked.length === 0) cell.noActivePeriod = true
+  if (overlapCount > 0) cell.overlapCount = overlapCount
+  return cell
 }
 
 export function summarizeBuckets(buckets: OverviewBalanceRow[], today: string): OverviewCell {
@@ -193,7 +215,7 @@ export function buildLeaveOverview(input: BuildOverviewInput): LeaveOverview {
   const rows: OverviewRow[] = employees.map((e) => {
     const cells: Record<string, OverviewCell> = {}
     for (const [typeId, buckets] of grouped.get(e.id) ?? []) {
-      const cell = summarizeBuckets(pickEffectiveBuckets(buckets, refDate), today)
+      const cell = effectiveCell(buckets, refDate, today)
       cells[typeId] = cell
       usedTypes.add(typeId)
       totals.total += cell.total

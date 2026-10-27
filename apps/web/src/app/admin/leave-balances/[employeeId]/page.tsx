@@ -21,6 +21,7 @@ import { formatLeaveDuration, formatLeaveRemaining } from "@/lib/leave-duration"
 import {
   adjustLeaveBalance,
   daysHoursToHours,
+  defaultBucketId,
   expiringLabel,
   getEmployeeLeaveDetail,
   remainingAfter,
@@ -100,19 +101,23 @@ function EmployeeLeaveDetailContent() {
   );
   const selectedCard = detail?.cards.find((c) => c.leaveType.id === leaveTypeId);
   const selectedBucket = bucketsOfType.find((b) => b.id === balanceId);
-  // 調整對象的「目前剩餘」：指定桶＝該桶；沒指定＝該假別目前有效桶的加總（API 會挑期間包含今天的桶）。
-  const currentRemaining = selectedBucket
+  // 調整對象的「目前剩餘」以所選桶為準；該假別還沒有桶＝0（增加時新開）；有桶但還沒選＝不預判。
+  const currentRemaining: number | null = selectedBucket
     ? Number(selectedBucket.entitled) + Number(selectedBucket.deferred) - Number(selectedBucket.used)
-    : (selectedCard?.remaining ?? 0);
+    : bucketsOfType.length === 0
+      ? 0
+      : null;
+  const mustPickBucket = bucketsOfType.length > 1;
   const previewHours = daysHoursToHours(days, hours, perDay ?? 8);
   const previewDelta = previewHours === null ? null : direction === "subtract" ? -previewHours : previewHours;
-  const after = previewDelta === null ? null : remainingAfter(currentRemaining, previewDelta);
+  const after = previewDelta === null || currentRemaining === null ? null : remainingAfter(currentRemaining, previewDelta);
   const wouldBeNegative = after !== null && after < 0;
 
   function pickType(id: string) {
     setLeaveTypeId(id);
-    const card = detail?.cards.find((c) => c.leaveType.id === id);
-    setBalanceId(card?.balanceIds.length === 1 ? card.balanceIds[0]! : "");
+    // 有桶就預設選期間包含今天的那一個（多桶時強制選，不給「自動」）。
+    const buckets = (detail?.balances ?? []).filter((b) => b.leave_type_id === id);
+    setBalanceId(defaultBucketId(buckets, localDateKey(new Date().toISOString())));
     setAllowNegative(false);
   }
 
@@ -123,6 +128,10 @@ function EmployeeLeaveDetailContent() {
     const v = validateAdjustForm({ direction, days, hours, reason, leaveTypeId }, perDay ?? 8);
     if (v.error !== undefined) {
       setFormError(v.error);
+      return;
+    }
+    if (mustPickBucket && !balanceId) {
+      setFormError("這個假別有多個期間，請選擇要調整的期間（餘額桶）");
       return;
     }
     if (wouldBeNegative && !allowNegative) {
@@ -208,8 +217,15 @@ function EmployeeLeaveDetailContent() {
                   已用 {formatLeaveDuration(card.used, perDay)}／總額 {formatLeaveDuration(card.total, perDay)}
                 </p>
                 <p className="mt-1 text-[11px] text-gray-400">
-                  {card.periodStart && card.periodEnd ? `${card.periodStart} ～ ${card.periodEnd}` : `${detail.year} 年`}
+                  {card.noActivePeriod
+                    ? "無有效期間"
+                    : card.periodStart && card.periodEnd
+                      ? `${card.periodStart} ～ ${card.periodEnd}`
+                      : `${detail.year} 年`}
                 </p>
+                {(card.overlapCount ?? 0) > 0 && (
+                  <p className="mt-0.5 text-[10px] text-amber-600">另有重疊期間（請假扣起日最新的那一個）</p>
+                )}
               </button>
             );
           })}
@@ -240,7 +256,11 @@ function EmployeeLeaveDetailContent() {
             <div className="sm:col-span-2">
               <label className={labelCls}>期間（餘額桶）</label>
               <select className={inputCls} value={balanceId} onChange={(event) => setBalanceId(event.target.value)} disabled={!leaveTypeId}>
-                <option value="">{bucketsOfType.length === 0 ? "（目前沒有，增加時自動新開本年度）" : "自動（期間包含今天的那一筆）"}</option>
+                {bucketsOfType.length === 0 ? (
+                  <option value="">（目前沒有，增加時自動新開本年度）</option>
+                ) : (
+                  (mustPickBucket || !balanceId) && <option value="">請選擇期間</option>
+                )}
                 {bucketsOfType.map((b) => (
                   <option key={b.id} value={b.id}>
                     {balancePeriodLabel(b)} · {balanceSourceLabel(b.source)} · 剩 {formatLeaveRemaining(Number(b.entitled) + Number(b.deferred) - Number(b.used), perDay)}
@@ -289,7 +309,7 @@ function EmployeeLeaveDetailContent() {
               />
             </div>
             <div className="text-sm text-gray-600 sm:col-span-4">
-              {leaveTypeId && previewHours !== null && previewHours > 0 ? (
+              {leaveTypeId && previewHours !== null && previewHours > 0 && currentRemaining !== null ? (
                 <p>
                   {direction === "add" ? "增加" : "減少"} {formatLeaveDuration(previewHours, perDay)}（{previewHours} 小時）：
                   剩餘 {formatLeaveRemaining(currentRemaining, perDay)} →{" "}

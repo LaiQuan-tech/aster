@@ -27,6 +27,10 @@ export interface OverviewCell {
   periodStart: string | null;
   periodEnd: string | null;
   expiring: { date: string; hours: number; daysLeft: number } | null;
+  /** 有桶但沒有任何桶的期間包含參考日（格子顯示 0＋「無有效期間」）。 */
+  noActivePeriod?: boolean;
+  /** 另有幾個期間也包含參考日（沒算進來；與扣假挑同一桶）。 */
+  overlapCount?: number;
 }
 
 export interface OverviewRow {
@@ -157,6 +161,24 @@ export function daysHoursToHours(days: string, hours: string, hoursPerDay = 8): 
 
 export type AdjustDirection = "add" | "subtract";
 
+/** 單次調整上限（小時），與 API zod 上限一致。 */
+export const MAX_ADJUST_HOURS = 9999.99;
+
+/**
+ * 調整表單預設要選哪個餘額桶：期間包含 `today` 的桶，多個時取起日最新者（與扣假同規則）；
+ * 沒有 → ""（呼叫端在多桶時強制使用者選）。只有一個桶 → 那一個。
+ */
+export function defaultBucketId(
+  buckets: Array<{ id: string; period_start?: string | null; period_end?: string | null }>,
+  today: string,
+): string {
+  if (buckets.length === 1) return buckets[0]!.id;
+  const active = buckets
+    .filter((b) => b.period_start && b.period_end && b.period_start <= today && today <= b.period_end)
+    .sort((a, b) => ((a.period_start as string) < (b.period_start as string) ? 1 : -1));
+  return active[0]?.id ?? "";
+}
+
 export interface AdjustFormInput {
   direction: AdjustDirection;
   days: string;
@@ -174,6 +196,7 @@ export function validateAdjustForm(
   const hours = daysHoursToHours(form.days, form.hours, hoursPerDay);
   if (hours === null) return { error: "天數與時數須為不小於 0 的數字" };
   if (hours === 0) return { error: "請輸入要調整的天數或時數" };
+  if (hours > MAX_ADJUST_HOURS) return { error: `單次調整不可超過 ${MAX_ADJUST_HOURS} 小時` };
   if (!form.reason.trim()) return { error: "請填寫調整原因" };
   return { deltaHours: form.direction === "subtract" ? -hours : hours };
 }
