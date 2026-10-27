@@ -1573,7 +1573,7 @@ export async function syncPaymentsOnPay(tenantId: string, d: SyncHeader, allocat
   const touched: string[] = []
   try {
     for (const a of targets) {
-      const { error } = await supabaseAdmin
+      const { data, error } = await supabaseAdmin
         .from("project_subcontract_payments")
         .update({
           paid_on: d.paid_on,
@@ -1587,15 +1587,33 @@ export async function syncPaymentsOnPay(tenantId: string, d: SyncHeader, allocat
         })
         .eq("tenant_id", tenantId)
         .eq("id", a.subcontract_payment_id!)
+        // 2026-10-27 驗收：兩張放款單分到同一期款並發付款時只能一張成功——期款仍未付、或本來就掛這張單才寫。
+        .or(`paid_on.is.null,disbursement_id.eq.${d.id}`)
+        .select("id")
       if (error) throw new Error(`syncPaymentsOnPay: ${error.message}`)
+      if (!data || data.length === 0) throw new DisbursementError(409, "payment_already_paid", { paymentId: a.subcontract_payment_id })
       touched.push(a.subcontract_payment_id!)
     }
   } catch (err) {
     // 寫到一半失敗：已寫的期款還原成寫入前的快照，不留半套「已付」（2026-10-27 驗收 B）。
-    await restorePaymentSnapshots(tenantId, touched.map((pid) => byId.get(pid)!))
+    try {
+      await restorePaymentSnapshots(tenantId, touched.map((pid) => byId.get(pid)!))
+    } catch (restoreErr) {
+      // 還原也失敗：部分期款已是「已付」——上層不可再把單頭退回未付（會變成期款已付卻掛在未付單上）。
+      throw new PaymentRestoreError(err, restoreErr)
+    }
     throw err
   }
   return touched
+}
+
+/** syncPaymentsOnPay 寫到一半失敗、且還原快照也失敗：部分期款已寫成已付，需人工確認。 */
+export class PaymentRestoreError extends Error {
+  constructor(cause: unknown, restoreErr: unknown) {
+    const m = (e: unknown) => (e instanceof Error ? e.message : String(e))
+    super(`期款寫入失敗且還原失敗：${m(cause)}；還原錯誤：${m(restoreErr)}`)
+    this.name = "PaymentRestoreError"
+  }
 }
 
 /** 期款連動欄位還原成快照（syncPaymentsOnPay 失敗時用）；還原本身失敗只能拋出，讓上層清楚回報。 */
@@ -2152,14 +2170,18 @@ export async function payDisbursement(
       })),
     )
   } catch (syncErr) {
+    if (syncErr instanceof PaymentRestoreError) {
+      // 期款還原也失敗：部分期款已付，單頭維持 paid（不退回），交人工確認。
+      throw new Error(`payDisbursement: ${syncErr.message}（單號 ${current.disbursement_no}，放款單維持已放款，需人工確認期款）`)
+    }
     // 期款寫入失敗（syncPaymentsOnPay 已把寫到一半的期款還原）：把單子的狀態條件式退回原狀，再把原因拋出去。
-    const { data: reverted, error: revertErr } = await supabaseAdmin
+    const paidBy = supabaseAdmin
       .from("disbursements")
       .update({ status: current.status, paid_on: current.paid_on, paid_by_emp_id: current.paid_by_emp_id ?? null, updated_at: new Date().toISOString() })
       .eq("tenant_id", tenantId)
       .eq("id", id)
       .eq("status", "paid")
-      .eq("paid_by_emp_id", actor.empId)
+    const { data: reverted, error: revertErr } = await (actor.empId ? paidBy.eq("paid_by_emp_id", actor.empId) : paidBy.is("paid_by_emp_id", null))
       .select("id")
       .maybeSingle()
     if (revertErr || !reverted) {
@@ -2169,6 +2191,20 @@ export async function payDisbursement(
       )
     }
     throw syncErr
+  }
+  // 2026-10-27 驗收：期款寫完再確認單頭仍是本次付款（作廢可能在搶狀態與寫期款之間插入）；不是就還原期款並 409。
+  {
+    const latest = await loadDisbursement(tenantId, id)
+    if (!latest || latest.status !== "paid") {
+      try {
+        await unsyncPaymentsOnVoid(tenantId, { id, disbursement_no: current.disbursement_no }, "付款期間單據已變更，期款還原")
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        throw new Error(`payDisbursement: 付款期間單據已被作廢且期款還原失敗（單號 ${current.disbursement_no}，需人工確認）：${msg}`)
+      }
+      if (latest?.status === "void") throw new DisbursementError(409, "void")
+      throw new DisbursementError(409, "status_changed", { status: latest?.status ?? null })
+    }
   }
   const row = data as unknown as DisbursementRow
   await notifyProjectLeads(tenantId, row, allocations)
@@ -2200,15 +2236,29 @@ export async function voidDisbursement(
   const wasPaid = current.status === "paid"
   // 只給事後的獎金重算用：讀不到不能擋作廢。
   const voidedAllocations = wasPaid ? await loadAllocations(tenantId, [id]).catch(() => []) : []
-  const cleared = await unsyncPaymentsOnVoid(tenantId, { id, disbursement_no: current.disbursement_no }, reason)
+  // 2026-10-27 驗收：先條件式搶下單頭狀態（與付款同一把鎖），搶到才清期款——避免付款在「清完期款、改單頭」之間寫入，
+  // 留下「期款已付卻掛在作廢單上」。
   const { data, error } = await supabaseAdmin
     .from("disbursements")
     .update({ status: "void", void_reason: reason, updated_at: new Date().toISOString() })
     .eq("tenant_id", tenantId)
     .eq("id", id)
+    .eq("status", current.status)
     .select(await disbursementCols())
-    .single()
-  if (error || !data) throw new Error(`voidDisbursement: ${error?.message}`)
+    .maybeSingle()
+  if (error) throw new Error(`voidDisbursement: ${error.message}`)
+  if (!data) {
+    const latest = await loadDisbursement(tenantId, id)
+    if (latest?.status === "void") throw new DisbursementError(409, "void")
+    throw new DisbursementError(409, "status_changed", { status: latest?.status ?? null })
+  }
+  let cleared: Awaited<ReturnType<typeof unsyncPaymentsOnVoid>>
+  try {
+    cleared = await unsyncPaymentsOnVoid(tenantId, { id, disbursement_no: current.disbursement_no }, reason)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(`voidDisbursement: 放款單已作廢但期款清除失敗（單號 ${current.disbursement_no}，需人工確認）：${msg}`)
+  }
   await writeAuditLog({
     tenantId,
     tableName: "disbursements",
