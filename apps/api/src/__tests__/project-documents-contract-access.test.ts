@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 /**
  * 合約掃描檔的權限、檔案類型與上傳大小（業主 2026-09-30 會議 A 批）——純測試。
  *
- * 可看／上傳／刪除合約掃描檔的人只有四種：hr_admin／platform_admin、該案 lead_emp_id、
+ * 可看／上傳／刪除合約掃描檔的人：hr_admin／platform_admin、老闆（fallbackApproverEmpId）、該案 lead_emp_id、
  * 該案成員角色 manager（經理）或 lead（主辦／承辦）。一般成員、非成員、部門主管、會計都不行。
  * supabase 換成記憶體版（helpers/fake-supabase.ts）＋一個只記錄呼叫的 storage 替身；不連任何 DB。
  */
@@ -95,6 +95,7 @@ const E = {
   support: emp(8),
   outsider: emp(9),
   deptManager: emp(10),
+  boss: emp(11), // 老闆（features.approval.fallbackApproverEmpId），不是該案成員
 }
 // token 直接當 userId（fake-supabase 的 getUserFromToken）。
 const T = {
@@ -108,6 +109,7 @@ const T = {
   support: "support-user",
   outsider: "outsider-user",
   deptManager: "dept-manager-user",
+  boss: "boss-user",
   ghost: "ghost-user", // 登入了，但這個租戶沒有 employees 列
 }
 
@@ -138,7 +140,10 @@ beforeEach(() => {
     { id: E.support, tenant_id: TENANT_ID, user_id: T.support, role: "employee", dept_id: null },
     { id: E.outsider, tenant_id: TENANT_ID, user_id: T.outsider, role: "employee", dept_id: null },
     { id: E.deptManager, tenant_id: TENANT_ID, user_id: T.deptManager, role: "employee", dept_id: DEPT },
+    { id: E.boss, tenant_id: TENANT_ID, user_id: T.boss, role: "employee", dept_id: null },
   ]
+  // 老闆 id 刻意用大寫存，驗證不分大小寫比對。
+  fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: E.boss.toUpperCase() } } }]
   fake.db.departments = [
     { id: DEPT, tenant_id: TENANT_ID, parent_id: null, name: "測試部門", manager_emp_id: E.deptManager, manager_emp_ids: [E.deptManager], created_at: "2026-01-01T00:00:00.000Z" },
   ]
@@ -323,6 +328,41 @@ describe("POST /projects/:id/documents（合約掃描）— 授權", () => {
       expect(res.body).toEqual({ error: "contract_not_in_project" })
     }
     expect(storage.uploaded).toHaveLength(0)
+  })
+})
+
+describe("老闆（features.approval.fallbackApproverEmpId）與 platform_admin 等同——看得到也傳得了合約掃描檔", () => {
+  it("老闆本人（不是該案成員）：GET 看得到合約掃描檔，旗標 canSeeContractDocs=true", async () => {
+    const res = await as(T.boss, request(app).get(`/projects/${PROJECT}/documents`))
+
+    expect(res.status).toBe(200)
+    expect(res.body.canSeeContractDocs).toBe(true)
+    expect(docsOf(res).sort()).toEqual(["doc-general", "doc-scan", "doc-voided-scan"])
+  })
+
+  it("老闆本人：可上傳合約掃描檔（201，記上傳者）", async () => {
+    const res = await as(T.boss, request(app).post(`/projects/${PROJECT}/documents`)).send({ ...PDF, contractId: CONTRACT })
+
+    expect(res.status).toBe(201)
+    expect(insertedDocs()[0]?.payload).toMatchObject({ contract_id: CONTRACT, uploaded_by_emp_id: E.boss })
+  })
+
+  it("老闆改設成別人後，原本的人就看不到；其他角色不因老闆設定而放寬", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: { approval: { fallbackApproverEmpId: E.hr } } }]
+    for (const token of [T.boss, T.member, T.accountant, T.deptManager, T.outsider]) {
+      const res = await as(token, request(app).get(`/projects/${PROJECT}/documents`))
+      expect(res.status, token).toBe(200)
+      expect(res.body.canSeeContractDocs, token).toBe(false)
+      expect(docsOf(res), token).toEqual(["doc-general"])
+    }
+  })
+
+  it("租戶沒設定老闆：platform_admin 照樣看得到，一般員工看不到", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: {} }]
+    const platform = await as(T.platform, request(app).get(`/projects/${PROJECT}/documents`))
+    expect(platform.body.canSeeContractDocs).toBe(true)
+    const boss = await as(T.boss, request(app).get(`/projects/${PROJECT}/documents`))
+    expect(boss.body.canSeeContractDocs).toBe(false)
   })
 })
 

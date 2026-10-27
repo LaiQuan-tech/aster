@@ -372,7 +372,7 @@ export function ContractsCard({
                           </button>
                         </div>
                       ) : (
-                        <span className="text-xs text-gray-300" title="合約掃描檔只有該案經理、承辦與 HR 看得到">
+                        <span className="text-xs text-gray-300" title="合約掃描檔只有該案經理、承辦、HR 與老闆看得到">
                           —
                         </span>
                       )}
@@ -393,7 +393,7 @@ export function ContractsCard({
                         {noteDrafts[c.id] !== undefined ? (
                           <div className="rounded-lg bg-slate-50 p-2">
                             <label className="mb-1 block text-xs text-gray-500" htmlFor={`contract-note-${c.id}`}>
-                              合約內容／說明（只有該案經理、承辦與 HR 看得到）
+                              合約內容／說明（只有該案經理、承辦、HR 與老闆看得到）
                             </label>
                             <textarea
                               id={`contract-note-${c.id}`}
@@ -453,21 +453,24 @@ export function ContractsCard({
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div>
               <label className={labelCls}>類型</label>
-              <select className={inputCls} value={cDocType} onChange={(e) => setCDocType(e.target.value as DocType)}>
+              <select className={inputCls} value={cDocType} onChange={(e) => setCDocType(e.target.value as DocType)} title="報價單不是契據，不課印花稅">
                 {(Object.keys(DOC_TYPE_LABELS) as DocType[]).map((v) => (
                   <option key={v} value={v}>{DOC_TYPE_LABELS[v]}</option>
                 ))}
               </select>
-              <p className="mt-1 text-xs text-gray-400">報價單不是契據，不課印花稅。</p>
             </div>
             <div>
               <label className={labelCls}>我方角色</label>
-              <select className={inputCls} value={cOurRole} onChange={(e) => setCOurRole(e.target.value as OurRole)}>
+              <select
+                className={inputCls}
+                value={cOurRole}
+                onChange={(e) => setCOurRole(e.target.value as OurRole)}
+                title="承攬契據由承攬人貼花，發包出去的由下包貼；各自貼＝雙方各執一份、各自負責己方，我方仍需貼"
+              >
                 {(Object.keys(OUR_ROLE_LABELS) as OurRole[]).map((v) => (
                   <option key={v} value={v}>{OUR_ROLE_LABELS[v]}</option>
                 ))}
               </select>
-              <p className="mt-1 text-xs text-gray-400">承攬契據由承攬人貼花，發包出去的由下包貼；各自貼＝雙方各執一份、各自負責己方，我方仍需貼。</p>
             </div>
             <div>
               <label className={labelCls}>文件名稱 *</label>
@@ -483,13 +486,11 @@ export function ContractsCard({
             </div>
             <div>
               <label className={labelCls}>簽訂日</label>
-              <input className={inputCls} type="date" value={cSignedOn} onChange={(e) => setCSignedOn(e.target.value)} />
-              <p className="mt-1 text-xs text-gray-400">沒有簽訂日就不算已簽約，也不會進印花稅清單。</p>
+              <input className={inputCls} type="date" value={cSignedOn} onChange={(e) => setCSignedOn(e.target.value)} title="沒有簽訂日就不算已簽約，也不會進印花稅清單" />
             </div>
             <div>
               <label className={labelCls}>份數</label>
-              <input className={inputCls} type="number" min="1" value={cCopies} onChange={(e) => setCCopies(e.target.value)} />
-              <p className="mt-1 text-xs text-gray-400">同一憑證繕寫兩份以上，各份均應貼用。</p>
+              <input className={inputCls} type="number" min="1" value={cCopies} onChange={(e) => setCCopies(e.target.value)} title="同一憑證繕寫兩份以上，各份均應貼用" />
             </div>
             {canSeeContractDocs && (
               <div className="sm:col-span-3">
@@ -501,8 +502,8 @@ export function ContractsCard({
                   value={cContentNote}
                   onChange={(e) => setCContentNote(e.target.value)}
                   placeholder="選填：合約重點、付款條件、特殊約定…"
+                  title="只有該案經理、承辦、HR 與老闆看得到；建立後也可以在合約列上編輯"
                 />
-                <p className="mt-1 text-xs text-gray-400">只有該案經理、承辦與 HR 看得到；建立後也可以在合約列上編輯。</p>
               </div>
             )}
           </div>
@@ -511,7 +512,7 @@ export function ContractsCard({
               {savingContract ? "新增中…" : "新增文件"}
             </PrimaryButton>
             <span className="text-xs text-gray-400">
-              印花稅為系統試算，非申報值；承攬契據認定與免稅憑證請會計師確認。
+              報價單不課印花稅；沒填簽訂日不算已簽約。印花稅為系統試算，請會計師確認。
             </span>
           </div>
         </div>

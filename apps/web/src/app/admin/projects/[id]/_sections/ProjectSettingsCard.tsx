@@ -21,7 +21,7 @@ interface ProjectSettingsCardProps {
 }
 
 /**
- * 申請單上沒有、但系統要的專案設定（母案／部門／負責人／歸屬年度／預定起迄日）。欄位即存，走
+ * 申請單上沒有、但系統要的專案設定（母案／部門／負責人／歸屬年度）。欄位即存，走
  * page.tsx 的 saveProjectField。申請單上有的欄位（工程名稱、開案日期、承接公司、客戶…）
  * 在上方的申請單表格裡改；分潤模式與獎金池在頁面最下方的「專案獎金與分潤」。
  */
@@ -102,41 +102,7 @@ export function ProjectSettingsCard({ project, depts, emps, parentChoices, canEd
             }}
           />
           <p className="mt-1 text-xs text-gray-400">
-            報表與獎金歸在哪一年。編號裡的年度是建立年，已印在合約上，不隨這裡改動。
-          </p>
-        </div>
-        <div className="hidden sm:block" aria-hidden="true" />
-        <div>
-          <label className={labelCls} htmlFor="project-starts-on">預定起始日</label>
-          <input
-            id="project-starts-on"
-            className={inputCls}
-            type="date"
-            disabled={!canEdit}
-            title={lockedTitle}
-            defaultValue={project.startsOn ?? ""}
-            onBlur={(e) => {
-              const v = e.target.value || null;
-              if (v !== (project.startsOn ?? null)) saveProjectField({ startsOn: v });
-            }}
-          />
-        </div>
-        <div>
-          <label className={labelCls} htmlFor="project-ends-on">預定完工日</label>
-          <input
-            id="project-ends-on"
-            className={inputCls}
-            type="date"
-            disabled={!canEdit}
-            title={lockedTitle}
-            defaultValue={project.endsOn ?? ""}
-            onBlur={(e) => {
-              const v = e.target.value || null;
-              if (v !== (project.endsOn ?? null)) saveProjectField({ endsOn: v });
-            }}
-          />
-          <p className="mt-1 text-xs text-gray-400">
-            進度示警的依據：過了完工日還沒結案會被示警。
+            獎金歸在哪一年。編號裡的年度是建立年，已印在合約上，不隨這裡改動。
           </p>
         </div>
       </div>

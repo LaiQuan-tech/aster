@@ -4,7 +4,8 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { resolveSelf, isFinanceRole, managedDeptIds } from "../middleware/scope.js"
-import { canSeeContractDocs } from "../services/project-scope.js"
+import { canSeeContractDocs, loadProjectBossEmpId } from "../services/project-scope.js"
+import { isBossOrPlatformAdmin } from "../lib/boss.js"
 import { BLOCKED_DOCUMENT_EXTENSIONS, isBlockedDocument } from "../lib/blocked-upload-types.js"
 
 export const projectDocumentsRouter = Router()
@@ -128,7 +129,7 @@ async function loadActiveContract(tenantId: string, projectId: string, contractI
 }
 
 /**
- * 一般專案文件的上傳授權：HR／會計／lead／專案成員（任一角色）／該專案所屬部門主管。
+ * 一般專案文件的上傳授權：HR／會計／lead／專案成員（任一角色）／該專案所屬部門主管／老闆。
  * 合約掃描檔不走這條——見 services/project-scope.ts 的 canSeeContractDocs（經理／承辦／lead／HR）。
  */
 async function canWriteDocs(
@@ -150,7 +151,8 @@ async function canWriteDocs(
     const managed = await managedDeptIds(tenantId, self.id)
     if (managed.includes(project.dept_id)) return true
   }
-  return false
+  // 老闆與 platform_admin 等同（業主 2026-10-27）；platform_admin 已由 isFinanceRole 涵蓋。
+  return isBossOrPlatformAdmin(await loadProjectBossEmpId(tenantId), self)
 }
 
 type UploadAuth =

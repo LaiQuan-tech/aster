@@ -57,8 +57,6 @@ export interface ProjectApplicationDraft {
   otherExpenses: string;
   deptId: string;
   leadEmpId: string;
-  startsOn: string;
-  endsOn: string;
   shareMode: ShareMode;
   bonusPool: string;
   /**
@@ -115,8 +113,6 @@ export function emptyProjectApplicationDraft(
     otherExpenses: "",
     deptId: "",
     leadEmpId: "",
-    startsOn: "",
-    endsOn: "",
     shareMode: "pool_pct",
     bonusPool: "",
     sharePctByRole: roleSharePctDraftOf(roleShareDefaults),
@@ -262,7 +258,6 @@ export function projectApplicationErrors(draft: ProjectApplicationDraft): string
     errors.push("期款設定會使末期金額小於 0，請降低前期百分比或指定金額");
   }
   if (schedule.unallocatedResidue !== 0) errors.push("期款有效金額合計與合約金額不一致");
-  if (draft.startsOn && draft.endsOn && draft.startsOn > draft.endsOn) errors.push("預定結束日不可早於開始日");
   return errors;
 }
 
@@ -326,8 +321,6 @@ export function toCreateProjectBody(draft: ProjectApplicationDraft): CreateProje
     otherExpenses: optionalNumber(draft.otherExpenses),
     deptId: draft.deptId || null,
     leadEmpId: draft.leadEmpId || null,
-    startsOn: optionalText(draft.startsOn),
-    endsOn: optionalText(draft.endsOn),
     shareMode: draft.shareMode,
     bonusPool: draft.shareMode === "pool_pct" ? optionalNumber(draft.bonusPool) : null,
     ...roleShareBodyOf(draft),

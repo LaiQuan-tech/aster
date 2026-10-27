@@ -51,9 +51,11 @@ function unpaidBonusInfoOf(err: unknown): UnpaidBonusInfo | null {
 
 interface LineageCardProps {
   projectId: string;
+  /** 使用者看得到頁首「複製為追加減／加做」按鈕時才 true；只有這時空白提示才叫人按它。 */
+  canDuplicate?: boolean;
 }
 
-export function LineageCard({ projectId }: LineageCardProps) {
+export function LineageCard({ projectId, canDuplicate = false }: LineageCardProps) {
   const [lineage, setLineage] = useState<LineageResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -76,6 +78,17 @@ export function LineageCard({ projectId }: LineageCardProps) {
   const projects = lineage?.projects ?? [];
   const chainLength = projects.length;
 
+  // 只有本案一案（沒有任何追加減／加做）：不佔一張卡，收成一行小字；載入中不顯示，避免閃一張空卡。
+  if (!error && (!lineage || chainLength <= 1)) {
+    if (!lineage) return null;
+    return (
+      <p className="px-1 text-xs text-gray-400" data-testid="lineage-single">
+        變更歷史：本案尚無追加減／加做的複製案
+        {canDuplicate ? "；要變更合約金額請用右上角「複製為追加減／加做」" : ""}。
+      </p>
+    );
+  }
+
   return (
     <Card>
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
@@ -86,10 +99,6 @@ export function LineageCard({ projectId }: LineageCardProps) {
       </div>
 
       {error && <ErrorText>{error}</ErrorText>}
-      {!error && !lineage && <p className="text-sm text-gray-400">載入中…</p>}
-      {lineage && chainLength <= 1 && (
-        <p className="text-sm text-gray-400">本案尚無追加減／加做的複製案。要變更合約金額請用右上角「複製為追加減／加做」。</p>
-      )}
 
       {lineage && chainLength > 1 && (
         <ol className="relative ml-2 border-l border-gray-200 pl-5" data-testid="lineage-timeline">

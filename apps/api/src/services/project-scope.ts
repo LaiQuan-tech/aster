@@ -209,8 +209,9 @@ export async function resolveBonusEditAccess(
 /**
  * 合約掃描檔（project_documents.contract_id 不為 null 的檔）與合約內容欄位
  * （contracts.content_note）的可見性（業主 2026-09-30 會議）。**比 finance 窄**，
- * 只有這四種人：
+ * 只有這幾種人：
  *   • hr_admin、platform_admin（isHrRole）
+ *   • 老闆（features.approval.fallbackApproverEmpId 本人；業主 2026-10-27：老闆與 platform_admin 等同，見 lib/boss.ts）
  *   • 該案 `projects.lead_emp_id`
  *   • 該案成員且 `role_in_project` 為 manager（經理）或 lead（主辦／承辦）
  * 其餘一律看不到——一般成員、非成員、**部門主管、會計**都不行（會計與部門主管仍有 finance，
@@ -226,7 +227,8 @@ export async function canSeeContractDocs(
 ): Promise<boolean> {
   if (isHrRole(self.role) || project.lead_emp_id === self.id) return true
   const role = membershipRole !== undefined ? membershipRole : await membershipRoleOf(tenantId, project.id, self.id)
-  return isLeadRole(role)
+  if (isLeadRole(role)) return true
+  return isBossOrPlatformAdmin(await loadProjectBossEmpId(tenantId), self)
 }
 
 /**

@@ -326,8 +326,6 @@ export function ProjectApplicationForm({
           <div><label className={labelCls}>專案負責人</label><select className={inputCls} value={draft.leadEmpId} onChange={(event) => patch("leadEmpId", event.target.value)}><option value="">不指定</option>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}{employee.emp_no ? `（${employee.emp_no}）` : ""}</option>)}</select></div>
           {visibility.showBonusFields ? <div><label className={labelCls}>分潤模式</label><select className={inputCls} value={draft.shareMode} onChange={(event) => patch("shareMode", event.target.value as ProjectApplicationDraft["shareMode"])}><option value="pool_pct">獎金池 × 百分比</option><option value="fixed_amount">直接填每人金額</option></select></div> : null}
           {draft.shareMode === "pool_pct" && visibility.showBonusFields ? <div><label className={labelCls}>獎金池總額</label><input className={inputCls} type="number" min="0" value={draft.bonusPool} onChange={(event) => patch("bonusPool", event.target.value)} /></div> : null}
-          <div><label className={labelCls}>預定開始日</label><input className={inputCls} type="date" value={draft.startsOn} onChange={(event) => patch("startsOn", event.target.value)} /></div>
-          <div><label className={labelCls}>預定結束日</label><input className={inputCls} type="date" value={draft.endsOn} onChange={(event) => patch("endsOn", event.target.value)} /></div>
           <div className="sm:col-span-2"><label className={labelCls}>說明</label><textarea className={inputCls} rows={3} value={draft.description} onChange={(event) => patch("description", event.target.value)} /></div>
         </div>
       </Section>

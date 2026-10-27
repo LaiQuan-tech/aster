@@ -65,7 +65,6 @@ import { ApplicationSheet } from "./_sections/ApplicationSheet";
 import { ShareModeCard } from "./_sections/ShareModeCard";
 import { RoleSharePctCard } from "../_components/RoleSharePctCard";
 import { effectiveRoleSharePct } from "@/lib/project-share-calculation";
-import { MoneyCard } from "./_sections/MoneyCard";
 import { ContractsCard } from "./_sections/ContractsCard";
 import { BillingsCard } from "./_sections/BillingsCard";
 import { SubcontractsCard } from "./_sections/SubcontractsCard";
@@ -329,11 +328,7 @@ export default function AdminProjectDetailPage() {
   if (loading) return <Empty>載入中…</Empty>;
   if (!project) return <ErrorText>{error ?? "找不到專案"}</ErrorText>;
 
-  const headerDesc = [
-    project.code ? `編號 ${project.code}（不可變更）` : null,
-    project.client?.name ? `客戶：${project.client.name}` : null,
-    project.kind !== "main" ? `類型：${PROJECT_KIND_LABELS[project.kind]}` : null,
-  ].filter(Boolean).join("　");
+  const headerDesc = project.kind !== "main" ? `類型：${PROJECT_KIND_LABELS[project.kind]}` : "";
 
   return (
     <>
@@ -432,9 +427,6 @@ export default function AdminProjectDetailPage() {
         </div>
       )}
 
-      {/* 金額：未收、請款／收款進度（模組五，finance 權限才顯示） */}
-      {canFinance && money && <MoneyCard money={money} />}
-
       {/* 請款期程（模組四第 4 條）＋ P3 開票／收款：申請單「付款階段」的來源。金額一律系統算。 */}
       <div id="project-billings" className="scroll-mt-20">
         <BillingsCard
@@ -475,7 +467,7 @@ export default function AdminProjectDetailPage() {
       <DocumentsCard projectId={projectId} fileRef={fileRef} projectLevelDocs={projectLevelDocs} canSeeContractDocs={canSeeContractDocs} removeDoc={removeDoc} setError={setError} load={load} />
 
       {/* C2 變更歷史：根案 → -1 → -2…，本案高亮、封存案灰字＋理由 */}
-      <LineageCard projectId={projectId} />
+      <LineageCard projectId={projectId} canDuplicate={canFinance && !project.reservedAt} />
 
       {/* 分潤版本歷程 */}
       <AdjustmentsCard adjustments={adjustments} />

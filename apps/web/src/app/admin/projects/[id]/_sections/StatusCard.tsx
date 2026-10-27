@@ -114,10 +114,9 @@ export function StatusCard({
             type="date"
             value={statusEffectiveOn}
             onChange={(e) => setStatusEffectiveOn(e.target.value)}
+            title="解約通知書／結案文件上的日期；留空用今天"
           />
-          <p className="mt-1 text-xs text-gray-400">
-            解約通知書／結案文件上的那一天，不是今天。留空才用今天。
-          </p>
+          <p className="mt-1 text-xs text-gray-400">留空＝今天</p>
         </div>
         <div>
           <label className={labelCls}>理由 *</label>
@@ -133,16 +132,14 @@ export function StatusCard({
         <PrimaryButton onClick={changeStatus} disabled={savingStatus || !newStatus}>
           {savingStatus ? "變更中…" : "變更狀態"}
         </PrimaryButton>
-        <span className="text-xs text-gray-400">
-          狀態變更不擋（結案後返工是真的），但一律留下理由與生效日。
-        </span>
+        <span className="text-xs text-gray-400">每次變更都會留下理由與生效日。</span>
       </div>
 
       <div className="mt-5 border-t pt-4">
-        <label className={labelCls}>封存（只影響列表是否顯示，與案情無關）</label>
+        <label className={labelCls}>封存（只影響列表顯示）</label>
         {project.status === "active" ? (
           <p className="text-sm text-gray-400">
-            「進行中」的專案不能封存。要收起來請先改成暫停、結案或已解約。
+            進行中的專案不能封存，請先改成暫停、結案或已解約。
           </p>
         ) : (
           <button
