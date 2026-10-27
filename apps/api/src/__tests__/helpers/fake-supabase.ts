@@ -78,6 +78,11 @@ function parseOr(expression: string): (row: Row) => boolean {
       if (op === "ilike") return matchesIlike(row[column], value)
       if (op === "eq") return String(row[column]) === value
       if (op === "is") return value === "null" ? (row[column] ?? null) === null : String(row[column]) === value
+      // 陣列包含單一值：`col.cs.{x}`（多值的 `{a,b}` 會被上面的逗號切開，不支援）。
+      if (op === "cs") {
+        const inner = value.replace(/^\{/, "").replace(/\}$/, "")
+        return Array.isArray(row[column]) && (row[column] as unknown[]).map(String).includes(inner)
+      }
       // 日期／數字比較（字串比較對 'YYYY-MM-DD' 正確）；null 一律不成立，同 Postgres。
       if (op === "lte" || op === "lt" || op === "gte" || op === "gt") {
         const v = row[column]

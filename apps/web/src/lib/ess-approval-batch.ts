@@ -119,6 +119,7 @@ export function isAllSelected(selected: readonly string[], allIds: readonly stri
 
 const ERROR_TEXT: Record<string, string> = {
   not_current_approver: "這張單目前不是輪到你簽核。",
+  own_request: "不能簽核自己的單。",
   not_pending: "這張單已被處理過（或已撤回），請重新整理。",
   not_found: "找不到這張單，可能已被註銷。",
   attachment_required: "此假別需要附件，申請人尚未上傳，無法核准（可駁回請其補件）。",

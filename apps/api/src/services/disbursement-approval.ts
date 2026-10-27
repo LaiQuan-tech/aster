@@ -3,7 +3,15 @@ import { logger } from "../lib/logger.js"
 import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { isHrRole } from "../middleware/scope.js"
 import { loadChainCandidates, pickDisbursementChain, type ChainSource, type ChainStep } from "./approval-chain.js"
-import { isStepCandidate, stepCandidates } from "./approval-steps.js"
+import {
+  BOSS_STEP_KIND,
+  canActOnStep,
+  stepActorStanding,
+  stepCandidates,
+  stepNotifyRecipients,
+  type StepLike,
+} from "./approval-steps.js"
+import { loadPlatformAdminEmpIds } from "../lib/boss.js"
 import { enqueue } from "./notify.js"
 import { writeAuditLog } from "./audit.js"
 import {
@@ -193,9 +201,29 @@ function moneyText(d: DisbursementRow): string {
 
 function noticeBody(d: DisbursementRow, step: number, totalSteps: number, stepKind: string | null): string {
   const stepText = totalSteps > 1 ? `（第 ${step} 關，共 ${totalSteps} 關）` : ""
-  const kindText = stepKind === "accountant" ? "本關為會計覆核，任一位會計簽核即可。" : ""
+  const kindText =
+    stepKind === "accountant"
+      ? "本關為會計覆核，任一位會計簽核即可。"
+      : stepKind === BOSS_STEP_KIND
+        ? "本關為老闆簽核，老闆或任一位平台管理員簽核即可。"
+        : ""
   const purpose = d.purpose ? `，用途：${d.purpose}` : ""
   return `放款單 ${d.disbursement_no}：收款方 ${d.payee_name}，實付 ${moneyText(d)}${purpose}。請至「待我簽核」處理${stepText}。${kindText}`
+}
+
+/** 放款單的「申請人」＝建單人（沒有就送簽人）；簽核鏈也是從這個人算（老闆關跳過本人）。 */
+function ownerOf(d: DisbursementRow): string | null {
+  return d.created_by_emp_id ?? d.submitted_by_emp_id ?? null
+}
+
+/**
+ * 輪到某關時要通知的人：該關候選；老闆關另加租戶所有在職 platform_admin（2026-10-27 業主：平台管理員就是老闆），
+ * 去重、不寄建單人本人。查 platform_admin 失敗 → 只寄候選。
+ */
+async function stepRecipients(tenantId: string, step: StepLike & { step_kind?: string | null }, owner: string | null): Promise<string[]> {
+  if (step.step_kind !== BOSS_STEP_KIND) return stepCandidates(step)
+  const admins = await loadPlatformAdminEmpIds(tenantId).catch(() => [] as string[])
+  return stepNotifyRecipients(step, admins, [owner])
 }
 
 function basePayload(d: DisbursementRow, extra: Record<string, unknown>): Record<string, unknown> {
@@ -310,7 +338,15 @@ export async function submitDisbursement(
   try {
     notified = await enqueue({
       tenantId,
-      employeeIds: chain.steps[0].candidateEmpIds,
+      employeeIds: await stepRecipients(
+        tenantId,
+        {
+          approver_emp_id: chain.steps[0].candidateEmpIds[0],
+          candidate_emp_ids: chain.steps[0].candidateEmpIds,
+          step_kind: chain.steps[0].kind,
+        },
+        chainOwner,
+      ),
       type: "approval",
       title: `待簽核：放款單 ${current.disbursement_no}`,
       body: noticeBody(current, 1, chain.steps.length, chain.steps[0].kind),
@@ -391,10 +427,14 @@ export async function decideDisbursement(params: {
   const step = currentStepOf(current, rows)
   if (!step) throw new DisbursementError(409, "current_step_not_found")
 
-  const isCandidate = isStepCandidate(step, actor.empId)
+  // 老闆關：任一在職 platform_admin 也是簽核人；建單人本人不能簽自己單子的老闆關（HR 代簽也不行）。
+  // 動態判斷（不改寫既有關卡），已在簽核中的單也適用。同 routes/requests.ts decideOneRequest。
+  const standing = stepActorStanding(step, { id: actor.empId, role: actor.role }, ownerOf(current))
+  if (standing === "own_request") throw new DisbursementError(403, "own_request")
+  const isCandidate = standing === "candidate" || standing === "platform_admin"
   const canOverride = allowHrOverride && isHrRole(actor.role)
   if (!isCandidate && !canOverride) throw new DisbursementError(403, "not_current_approver")
-  // 候選之一簽核 → approver_emp_id 改寫成實際簽的人；HR 代簽不改寫（同假單路徑）。
+  // 候選之一（含 platform_admin 簽老闆關）簽核 → approver_emp_id 改寫成實際簽的人；HR 代簽不改寫（同假單路徑）。
   const takeOver = isCandidate && step.approver_emp_id !== actor.empId
 
   const actedAt = new Date().toISOString()
@@ -438,7 +478,7 @@ export async function decideDisbursement(params: {
       recordId: id,
       action: "UPDATE",
       oldRow: current,
-      newRow: { status: "draft", decision: "rejected", round, stepOrder: step.step_order, comment: comment ?? null, byProxy: !isCandidate },
+      newRow: { status: "draft", decision: "rejected", round, stepOrder: step.step_order, comment: comment ?? null, byProxy: !isCandidate, bossByPlatformAdmin: standing === "platform_admin" },
       actorEmpId: actor.empId,
       context: "POST /disbursements/:id/reject",
     })
@@ -457,7 +497,7 @@ export async function decideDisbursement(params: {
     try {
       notified = await enqueue({
         tenantId,
-        employeeIds: stepCandidates(next),
+        employeeIds: await stepRecipients(tenantId, next, ownerOf(current)),
         type: "approval",
         title: `待簽核：放款單 ${current.disbursement_no}`,
         body: noticeBody(current, next.step_order, totalSteps, next.step_kind),
@@ -480,7 +520,7 @@ export async function decideDisbursement(params: {
       recordId: id,
       action: "UPDATE",
       oldRow: current,
-      newRow: { decision: "approved", round, stepOrder: step.step_order, nextStep: next.step_order, comment: comment ?? null, byProxy: !isCandidate },
+      newRow: { decision: "approved", round, stepOrder: step.step_order, nextStep: next.step_order, comment: comment ?? null, byProxy: !isCandidate, bossByPlatformAdmin: standing === "platform_admin" },
       actorEmpId: actor.empId,
       context: "POST /disbursements/:id/approve",
     })
@@ -507,7 +547,7 @@ export async function decideDisbursement(params: {
     recordId: id,
     action: "UPDATE",
     oldRow: current,
-    newRow: { status: "approved", round, stepOrder: step.step_order, comment: comment ?? null, byProxy: !isCandidate },
+    newRow: { status: "approved", round, stepOrder: step.step_order, comment: comment ?? null, byProxy: !isCandidate, bossByPlatformAdmin: standing === "platform_admin" },
     actorEmpId: actor.empId,
     context: "POST /disbursements/:id/approve",
   })
@@ -713,7 +753,7 @@ export async function listPendingDisbursementApprovals(
     const rowSteps = byDisbursement.get(row.id) ?? []
     const step = currentStepOf(row, rowSteps)
     if (!step) continue
-    const mine = isStepCandidate(step, actor.empId)
+    const mine = canActOnStep(step, { id: actor.empId, role: actor.role }, ownerOf(row))
     if (!mine && !wantAll) continue
     picked.push({ row, step, total: rowSteps.filter((s) => s.round === step.round).length, mine })
   }

@@ -684,3 +684,34 @@ describe("requestAmountLines／contentLines — 後台簽核頁的金額行", ()
     expect(requestAmountLines({ kind: "wfh", estimated_cost: 5 })).toEqual([]);
   });
 });
+
+/* ------------------------------------------- 老闆關（平台管理員也能簽）--- */
+
+describe("老闆關（step_kind=fallback）：platform_admin 也是簽核人（2026-10-27）", () => {
+  /** 第 2 關老闆關：候選只有老闆，申請人是 AMY。 */
+  const BOSS_STEP = request({
+    kind: "petty_cash",
+    current_step: 2,
+    current_approver_emp_id: BOSS,
+    current_candidate_emp_ids: [BOSS],
+    current_approver_names: ["老闆"],
+    current_step_kind: "fallback",
+    employee_id: AMY,
+  });
+
+  it("我是 platform_admin → 別人的老闆關歸「待簽核」；不是 platform_admin → 照舊「簽核中」", () => {
+    expect(bucketOf(BOSS_STEP, { ...CTX, meIsPlatformAdmin: true })).toBe("pending_mine");
+    expect(bucketOf(BOSS_STEP, CTX)).toBe("in_progress");
+    expect(bucketOf(BOSS_STEP, { ...CTX, meIsPlatformAdmin: false })).toBe("in_progress");
+  });
+
+  it("自己的單不算待我簽；非老闆關不受影響；me 尚未載入也不算", () => {
+    expect(bucketOf(request({ ...BOSS_STEP, employee_id: ME }), { ...CTX, meIsPlatformAdmin: true })).toBe("in_progress");
+    expect(bucketOf(request({ ...BOSS_STEP, current_step_kind: "manager" }), { ...CTX, meIsPlatformAdmin: true })).toBe("in_progress");
+    expect(bucketOf(BOSS_STEP, { ...CTX, meId: null, meIsPlatformAdmin: true })).toBe("in_progress");
+  });
+
+  it("「目前簽核人」加註（老闆或平台管理員）", () => {
+    expect(LOOKUP.approverLabel(BOSS_STEP)).toBe("第 2 關 · 老闆（老闆或平台管理員）");
+  });
+});

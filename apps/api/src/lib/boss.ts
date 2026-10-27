@@ -11,8 +11,9 @@ import { supabaseAdmin } from "./supabase.js"
  * services/boss-summary.ts（首頁老闆視角）、services/financial-visibility.ts（集團財務）、services/project-scope.ts（改分潤）。
  *
  * 寄給老闆的通知也同時寄給租戶所有在職 platform_admin（bossNotificationRecipients）。
- * 刻意不套用：簽核鏈的「老闆關」（services/approval-chain.ts）——那是把單子派給誰簽的路由，不是「呼叫者是不是老闆」；
- * platform_admin 屬 HR 角色，本來就能代簽（requests allowHrOverride）。
+ * 簽核鏈的「老闆關」（approval_steps／disbursement_approval_steps 的 step_kind='fallback'）：關卡仍只寫老闆一人，
+ * 「誰能簽／待我簽核／通知誰」在 services/approval-steps.ts（stepActorStanding、stepNotifyRecipients）動態擴充成
+ * 老闆＋任一在職 platform_admin（2026-10-27 業主追加），已在簽核中的單也適用；申請人本人不能簽自己單的老闆關。
  */
 
 export const PLATFORM_ADMIN_ROLE = "platform_admin"

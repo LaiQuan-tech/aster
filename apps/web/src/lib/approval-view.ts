@@ -135,6 +135,20 @@ export function resolveApproverId(row: ApproverRow, flowByKind: FlowByKind, fall
   return currentCandidateIds(row, flowByKind, fallbackHrId)[0] ?? null;
 }
 
+/**
+ * 老闆關（後端 step_kind = "fallback"：零用金／出差的最後一關、放款單的老闆關、找不到主管時退回老闆）。
+ * 2026-10-27 業主：平台管理員就是老闆——這一關老闆本人或任一在職 platform_admin 都能簽（任一人簽即過），
+ * 後端動態判斷（services/approval-steps.ts），候選欄位仍只列老闆。申請人本人不能簽自己單的老闆關。
+ */
+export const BOSS_STEP_KIND = "fallback";
+
+/** 「目前簽核人」與進度文字的老闆關加註（與 ESS 我的申請一致）。 */
+export const BOSS_STEP_NOTE = "（老闆或平台管理員）";
+
+export function isBossStepKind(kind: string | null | undefined): boolean {
+  return kind === BOSS_STEP_KIND;
+}
+
 export type ApprovalBucket = "pending_mine" | "in_progress" | "approved" | "rejected" | "cancelled";
 
 export interface BucketContext {
@@ -142,6 +156,8 @@ export interface BucketContext {
   meId: string | null;
   flowByKind: FlowByKind;
   fallbackHrId: string | null;
+  /** 登入者是 platform_admin：老闆關（不是自己的單）也算待我簽。省略＝false。 */
+  meIsPlatformAdmin?: boolean;
 }
 
 export function bucketOf(row: LeaveRequest, ctx: BucketContext): ApprovalBucket {
@@ -155,7 +171,12 @@ export function bucketOf(row: LeaveRequest, ctx: BucketContext): ApprovalBucket 
     default: {
       const candidates = currentCandidateIds(row, ctx.flowByKind, ctx.fallbackHrId);
       if (candidates.length === 0) return "pending_mine";
-      return ctx.meId !== null && candidates.includes(ctx.meId) ? "pending_mine" : "in_progress";
+      if (ctx.meId !== null && candidates.includes(ctx.meId)) return "pending_mine";
+      // 老闆關：platform_admin 也是簽核人（自己的單除外，後端會擋 own_request）。
+      if (ctx.meIsPlatformAdmin && isBossStepKind(row.current_step_kind) && ctx.meId !== null && row.employee_id !== ctx.meId) {
+        return "pending_mine";
+      }
+      return "in_progress";
     }
   }
 }
@@ -251,7 +272,7 @@ export function currentApproverLabel(
           .map((id) => employeeName(id))
           .filter((name): name is string => Boolean(name));
   if (names.length === 0) return `第 ${row.current_step} 關 · 依後端簽核鏈`;
-  const hrSuffix = row.current_step_kind === "hr" ? "（HR 覆核）" : "";
+  const hrSuffix = row.current_step_kind === "hr" ? "（HR 覆核）" : isBossStepKind(row.current_step_kind) ? BOSS_STEP_NOTE : "";
   return `第 ${row.current_step} 關 · ${names.join(CANDIDATE_JOINER)}${hrSuffix}`;
 }
 

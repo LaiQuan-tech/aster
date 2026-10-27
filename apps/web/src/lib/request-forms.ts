@@ -870,7 +870,8 @@ export function approvalChainSummary(steps: readonly CreatedStepName[]): string 
  * approved「已核准 · 09/17 10:21」、cancelled → null。欄位缺席時退化成 null（舊 API）。
  * 多級簽核（2026-09-22）起同一關可有多位候選：有 `current_approver_names` 就用它串「／」，
  * `current_step_kind === "hr"`（HR 覆核關）加註 →「等待 王小明／李小華（HR 覆核）簽核（第 3／3 關）」；
- * 沒有新欄位時維持原樣（用 `current_approver_name`）。
+ * `current_step_kind === "fallback"`（老闆關，2026-10-27 起老闆或任一平台管理員都能簽）加註 →
+ * 「等待 陳老闆（老闆或平台管理員）簽核（第 2／2 關）」；沒有新欄位時維持原樣（用 `current_approver_name`）。
  */
 export function approvalLine(
   r: Pick<
@@ -890,7 +891,7 @@ export function approvalLine(
     case "pending": {
       const names = (r.current_approver_names ?? []).map((n) => n.trim()).filter(Boolean);
       const name = names.length > 0 ? names.join(APPROVER_JOINER) : (r.current_approver_name ?? "").trim();
-      const hrNote = r.current_step_kind === "hr" ? "（HR 覆核）" : "";
+      const hrNote = r.current_step_kind === "hr" ? "（HR 覆核）" : r.current_step_kind === "fallback" ? "（老闆或平台管理員）" : "";
       const total = r.total_steps != null && Number(r.total_steps) > 0 ? Number(r.total_steps) : null;
       const step = r.current_step != null && Number(r.current_step) > 0 ? Number(r.current_step) : 1;
       const stepText = total && total > 1 ? `（第 ${step}／${total} 關）` : "";

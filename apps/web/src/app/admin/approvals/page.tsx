@@ -127,6 +127,8 @@ function ApprovalsView() {
 
   // 參考資料：mount 抓一次（登入者 id、員工、單位、簽核流程）
   const [meId, setMeId] = useState<string | null>(null);
+  // 老闆關（step_kind=fallback）platform_admin 也能簽 → 這類單對 platform_admin 歸「待簽核」（lib/approval-view bucketOf）。
+  const [meIsPlatformAdmin, setMeIsPlatformAdmin] = useState(false);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [flows, setFlows] = useState<ApprovalFlow[]>([]);
@@ -177,7 +179,10 @@ function ApprovalsView() {
         getApprovalFlows(),
       ]);
       if (!active) return;
-      if (meRes.status === "fulfilled") setMeId(meRes.value.id);
+      if (meRes.status === "fulfilled") {
+        setMeId(meRes.value.id);
+        setMeIsPlatformAdmin(meRes.value.role === "platform_admin");
+      }
       if (empRes.status === "fulfilled") setEmployees(empRes.value.employees);
       if (deptRes.status === "fulfilled") setDepartments(deptRes.value.departments);
       if (flowRes.status === "fulfilled") setFlows(flowRes.value.flows);
@@ -226,8 +231,8 @@ function ApprovalsView() {
 
   const lookup = useMemo(() => buildApprovalLookup(employees, departments, flows), [departments, employees, flows]);
   const ctx = useMemo<BucketContext>(
-    () => ({ meId, flowByKind: lookup.flowByKind, fallbackHrId: lookup.fallbackHrId }),
-    [lookup, meId],
+    () => ({ meId, flowByKind: lookup.flowByKind, fallbackHrId: lookup.fallbackHrId, meIsPlatformAdmin }),
+    [lookup, meId, meIsPlatformAdmin],
   );
   const filters = useMemo(() => ({ deptId, keyword }), [deptId, keyword]);
   const visible = useMemo(

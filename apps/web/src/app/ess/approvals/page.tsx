@@ -105,6 +105,7 @@ function friendlyError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   if (msg.includes("attachment_required")) return "此假別需要附件，申請人尚未上傳，無法核准（可駁回請其補件）。";
   if (msg.includes("not_current_approver")) return "這張單目前不是輪到你簽核。";
+  if (msg.includes("own_request")) return "不能簽核自己的單。";
   if (msg.includes("not_pending")) return "這張單已被處理過，請重新整理。";
   if (msg.includes("not_found")) return "找不到這張單，可能已被註銷。";
   return msg || "處理失敗";

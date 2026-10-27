@@ -32,6 +32,9 @@
  * pickApproverChain 的薄包裝；放款送簽（services/disbursement-approval.ts）用它＋
  * pickDisbursementChain），純函式可以單測（__tests__/approval-chain.test.ts）。
  *
+ * 老闆關（kind='fallback'）只寫老闆一人；任一在職 platform_admin 也能簽、也會收到通知，是在讀取端動態判斷
+ * （services/approval-steps.ts stepActorStanding／stepNotifyRecipients），這裡不把 platform_admin 寫進候選。
+ *
  * 「跳過本人」規則：主管鏈與老闆都跳過本人（老闆自己請假不該自己簽）；manager 模式
  * 的 hr_admin 退路與 manager_hr 的 HR 關：有別人就避開本人，只剩本人時仍讓單能走。
  */

@@ -7,7 +7,14 @@ import { setActor } from "../lib/request-context.js"
 import { applyApprovalEffects } from "../services/ledger.js"
 import { resolveApproverChain, type StepKind } from "../services/approval-chain.js"
 import { enrichRequestRows } from "../services/request-enrich.js"
-import { isStepCandidate, stepCandidates, stepSelectCols } from "../services/approval-steps.js"
+import {
+  BOSS_STEP_KIND,
+  stepActorStanding,
+  stepCandidates,
+  stepNotifyRecipients,
+  stepSelectCols,
+} from "../services/approval-steps.js"
+import { isPlatformAdminRole, loadPlatformAdminEmpIds } from "../lib/boss.js"
 import { enqueue } from "../services/notify.js"
 import { loadDailyRegularHours } from "../services/daily-regular-hours.js"
 import { writeAuditLog } from "../services/audit.js"
@@ -471,11 +478,17 @@ async function notifyStepApprover(params: {
   const { tenantId, lr, ctx, approverEmpIds, step, totalSteps, event } = params
   const reason = lr.reason ? `，事由：${lr.reason}` : ""
   const stepText = totalSteps > 1 ? `（第 ${step} 關，共 ${totalSteps} 關）` : ""
-  const hrText = params.stepKind === "hr" ? "本關為 HR 覆核，任一位 HR 簽核即可。" : ""
+  const hrText =
+    params.stepKind === "hr"
+      ? "本關為 HR 覆核，任一位 HR 簽核即可。"
+      : params.stepKind === BOSS_STEP_KIND
+        ? "本關為老闆簽核，老闆或任一位平台管理員簽核即可。"
+        : ""
   const extra = params.extraNote ? params.extraNote : ""
+  const recipients = await stepRecipients(tenantId, approverEmpIds, params.stepKind ?? null, lr.employee_id)
   return enqueue({
     tenantId,
-    employeeIds: approverEmpIds,
+    employeeIds: recipients,
     type: "approval",
     title: `待簽核：${ctx.applicantName} 的${kindLabel(lr.kind)}申請`,
     body: `${applicantLabel(ctx)} 申請${subjectLabel(lr, ctx)}，期間 ${periodText(lr.start_at, lr.end_at, lr.hours, { leave: lr.kind === "leave", hoursPerDay: ctx.dailyRegularHours, segments: lr.segments })}${reason}。請至「待我簽核」處理${stepText}。${hrText}${extra}`,
@@ -490,6 +503,25 @@ async function notifyStepApprover(params: {
       ...(params.beyondCap ? { beyondCap: params.beyondCap.beyondCap, beyondCapDetail: params.beyondCap } : {}),
     }),
   })
+}
+
+/**
+ * 輪到某一關時要通知的人：該關候選；老闆關（step_kind='fallback'）另加租戶所有在職 platform_admin，
+ * 去重、不寄申請人本人（services/approval-steps.ts stepNotifyRecipients）。查 platform_admin 失敗 → 只寄候選。
+ */
+async function stepRecipients(
+  tenantId: string,
+  candidateEmpIds: string[],
+  stepKind: string | null,
+  requesterEmpId: string,
+): Promise<string[]> {
+  if (stepKind !== BOSS_STEP_KIND) return candidateEmpIds
+  const admins = await loadPlatformAdminEmpIds(tenantId).catch(() => [] as string[])
+  return stepNotifyRecipients(
+    { approver_emp_id: candidateEmpIds[0] ?? "", candidate_emp_ids: candidateEmpIds, step_kind: stepKind },
+    admins,
+    [requesterEmpId],
+  )
 }
 
 /**
@@ -1020,7 +1052,27 @@ requestsRouter.get(
         set.add(s.step_order as number)
         stepByRequest.set(s.request_id as string, set)
       }
-      const candidateIds = Array.from(stepByRequest.keys())
+      // 老闆關：platform_admin 也是簽核人（2026-10-27 業主：平台管理員就是老闆）——全租戶待簽的老闆關都列進來，
+      // 但不含自己的單（stepActorStanding own_request）。step_kind 是 migration 0049 的欄位，未套用時沒有老闆關可認。
+      const bossStepByRequest = new Map<string, Set<number>>()
+      if (isPlatformAdminRole(self.role) && (await approvalStepsHaveCandidates())) {
+        const { data: bossSteps, error: bossErr } = await supabaseAdmin
+          .from("approval_steps")
+          .select("request_id, step_order")
+          .eq("tenant_id", tenantId)
+          .eq("step_kind", BOSS_STEP_KIND)
+          .eq("decision", "pending")
+        if (bossErr) {
+          next(new Error(`GET /requests/pending-approvals (boss steps): ${bossErr.message}`))
+          return
+        }
+        for (const s of bossSteps ?? []) {
+          const set = bossStepByRequest.get(s.request_id as string) ?? new Set<number>()
+          set.add(s.step_order as number)
+          bossStepByRequest.set(s.request_id as string, set)
+        }
+      }
+      const candidateIds = Array.from(new Set([...stepByRequest.keys(), ...bossStepByRequest.keys()]))
       if (candidateIds.length === 0) {
         res.status(200).json({ requests: [] })
         return
@@ -1038,7 +1090,11 @@ requestsRouter.get(
         next(new Error(`GET /requests/pending-approvals (requests): ${rowErr.message}`))
         return
       }
-      const mine = asRequestRows(rows).filter((r) => stepByRequest.get(r.id)?.has(r.current_step))
+      const mine = asRequestRows(rows).filter(
+        (r) =>
+          !!stepByRequest.get(r.id)?.has(r.current_step) ||
+          (r.employee_id !== self.id && !!bossStepByRequest.get(r.id)?.has(r.current_step)),
+      )
       if (mine.length === 0) {
         res.status(200).json({ requests: [] })
         return
@@ -1065,6 +1121,8 @@ const DECISION_ERROR_STATUS: Record<string, number> = {
   not_pending: 409,
   current_step_not_found: 409,
   not_current_approver: 403,
+  // 老闆關不能簽自己的單（stepActorStanding）。
+  own_request: 403,
   attachment_required: 409,
   // 發薪鎖定：這張單碰到已結算月（回應多帶 period）。
   period_closed: 409,
@@ -1283,8 +1341,13 @@ async function decideOneRequest(params: {
   if (!stepRow) return { ok: false, id: requestId, error: "current_step_not_found" }
   const step = stepRow as unknown as { id: string; approver_emp_id: string; step_order: number; candidate_emp_ids?: unknown; step_kind?: string | null }
 
-  // 輪到我：是該關 approver_emp_id 或候選之一（多級簽核的 HR 覆核關任一 HR 皆可）。
-  const isCandidate = isStepCandidate(step, actor.id)
+  // 輪到我：是該關 approver_emp_id 或候選之一（多級簽核的 HR 覆核關任一 HR 皆可）；老闆關另外
+  // 任一在職 platform_admin 也算（2026-10-27 業主：平台管理員就是老闆；動態判斷，進行中的單也適用）。
+  // 老闆關不能簽自己的單（不論角色，HR 代簽也不行）——同 approval-chain「老闆跳過本人」。
+  const standing = stepActorStanding(step, actor, lr.employee_id)
+  if (standing === "own_request") return { ok: false, id: requestId, error: "own_request" }
+  const bossByPlatformAdmin = standing === "platform_admin"
+  const isCandidate = standing === "candidate" || bossByPlatformAdmin
   const canOverride = allowHrOverride && isHrRole(actor.role)
   if (!isCandidate && !canOverride) {
     return { ok: false, id: requestId, error: "not_current_approver" }
@@ -1293,8 +1356,12 @@ async function decideOneRequest(params: {
   // 其他張照常），不丟例外——批次那層會把例外吞成 internal_error。
   const closedPeriods = await closedPeriodsOfRequest(tenantId, lr)
   if (closedPeriods.length > 0) return { ok: false, id: requestId, error: "period_closed", period: closedPeriods[0] }
-  // 候選之一簽核 → approver_emp_id 改寫成實際簽的人（HR 代簽不改寫，見 markStep）。
+  // 候選之一（含 platform_admin 簽老闆關）簽核 → approver_emp_id 改寫成實際簽的人（HR 代簽不改寫，見 markStep）。
   const takeOver = isCandidate && step.approver_emp_id !== actor.id
+  // 稽核 context 的加註：platform_admin 簽老闆關／候選代簽／HR 代簽。
+  const actedNote = bossByPlatformAdmin
+    ? "，平台管理員簽老闆關"
+    : `${takeOver ? "，候選代簽" : ""}${!isCandidate && canOverride ? "，HR 代簽" : ""}`
 
   // 通知內文（申請人／假別）與「附件必要」檢查共用的上下文。
   let ctx: RequestContext
@@ -1347,7 +1414,7 @@ async function decideOneRequest(params: {
       recordId: requestId,
       action: "UPDATE",
       actorEmpId: actor.id,
-      context: `駁回申請單（第 ${currentStep} 關${takeOver ? "，候選代簽" : ""}${!isCandidate && canOverride ? "，HR 代簽" : ""}）`,
+      context: `駁回申請單（第 ${currentStep} 關${actedNote}）`,
       oldRow: { status: "pending", current_step: currentStep },
       newRow: {
         status: "rejected",
@@ -1358,6 +1425,7 @@ async function decideOneRequest(params: {
         acted_by: actor.id,
         takeOver,
         hrOverride: !isCandidate && canOverride,
+        bossByPlatformAdmin,
       },
     })
 
@@ -1414,7 +1482,7 @@ async function decideOneRequest(params: {
       recordId: requestId,
       action: "UPDATE",
       actorEmpId: actor.id,
-      context: `核准並推進到第 ${nextStep} 關（共 ${currentStep + laterSteps.length} 關${takeOver ? "，候選代簽" : ""}${!isCandidate && canOverride ? "，HR 代簽" : ""}）`,
+      context: `核准並推進到第 ${nextStep} 關（共 ${currentStep + laterSteps.length} 關${actedNote}）`,
       oldRow: { status: "pending", current_step: currentStep },
       newRow: {
         status: "pending",
@@ -1425,6 +1493,7 @@ async function decideOneRequest(params: {
         acted_by: actor.id,
         takeOver,
         hrOverride: !isCandidate && canOverride,
+        bossByPlatformAdmin,
       },
     })
 
@@ -1459,7 +1528,7 @@ async function decideOneRequest(params: {
     recordId: requestId,
     action: "UPDATE",
     actorEmpId: actor.id,
-    context: `最終核准（第 ${currentStep} 關${takeOver ? "，候選代簽" : ""}${!isCandidate && canOverride ? "，HR 代簽" : ""}）`,
+    context: `最終核准（第 ${currentStep} 關${actedNote}）`,
     oldRow: { status: "pending", current_step: currentStep },
     newRow: {
       status: "approved",
@@ -1470,6 +1539,7 @@ async function decideOneRequest(params: {
       acted_by: actor.id,
       takeOver,
       hrOverride: !isCandidate && canOverride,
+      bossByPlatformAdmin,
     },
   })
 
@@ -1849,8 +1919,9 @@ requestsRouter.post(
         res.status(409).json({ error: "current_step_not_found" })
         return
       }
-      const step = stepRow as unknown as { approver_emp_id: string; candidate_emp_ids?: unknown }
-      const recipients = stepCandidates(step)
+      const step = stepRow as unknown as { approver_emp_id: string; candidate_emp_ids?: unknown; step_kind?: string | null }
+      // 老闆關另提醒所有在職 platform_admin（不含申請人本人）。
+      const recipients = await stepRecipients(tenantId, stepCandidates(step), step.step_kind ?? null, lr.employee_id as string)
 
       const { error: insertErr } = await supabaseAdmin.from("notifications").insert(
         recipients.map((employeeId) => ({
