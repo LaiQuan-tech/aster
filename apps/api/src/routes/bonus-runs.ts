@@ -53,7 +53,8 @@ export const bonusRunsRouter = Router()
  * **核准（#7，2026-10-26）**：草稿 →（HR）`POST /:id/submit` 送審 →（老闆）`POST /:id/approve` 核准
  * →（HR）`POST /:id/pay` 發放；老闆 `POST /:id/return {reason}` 退回草稿；HR `POST /:id/withdraw {reason}`
  * 撤回送審（限送審中，已核准後只能老闆退回；通知老闆）。老闆＝租戶
- * features.approval.fallbackApproverEmpId（沒設 → 409 boss_not_configured；非老闆 → 403 not_approver）。
+ * features.approval.fallbackApproverEmpId；**platform_admin 也能核准／退回**（2026-10-27，不需要老闆存在）。其他人：
+ * 沒設老闆 → 409 boss_not_configured；非老闆 → 403 not_approver。送審仍需要老闆已設定（通知對象）。
  * approve／return 不掛 requireHrAdmin（老闆不一定是 HR），身分在 service 裡比對。老闆在 ESS 簽核頁用
  * `GET /my/bonus-approvals` 看待核准批次（含明細），不必進後台。沖銷批次走同一套。
  *
@@ -92,7 +93,7 @@ const deleteBody = z.object({ reason: z.string().trim().min(1).max(500) })
 async function actorOf(tenantId: string, req: Request): Promise<Actor> {
   const userId = req.auth?.userId
   const self = userId ? await resolveSelf(tenantId, userId) : null
-  return { empId: self?.id ?? null }
+  return { empId: self?.id ?? null, role: self?.role ?? null }
 }
 
 /** 呼叫者＋看不看得到毛利（老闆／platform_admin／授權 HR）。 */
@@ -100,7 +101,7 @@ async function viewerOf(tenantId: string, req: Request): Promise<{ actor: Actor;
   const userId = req.auth?.userId
   const self = userId ? await resolveSelf(tenantId, userId) : null
   const canSeeProfit = self ? (await loadGroupFinancialsAccess(tenantId, self)).canSee : false
-  return { actor: { empId: self?.id ?? null }, canSeeProfit }
+  return { actor: { empId: self?.id ?? null, role: self?.role ?? null }, canSeeProfit }
 }
 
 /** 明細的毛利類欄位（可直接或反推出專案毛利）。 */
@@ -218,7 +219,7 @@ bonusRunsRouter.get("/bonus-runs", ...guards, async (req: Request, res: Response
   const tenantId = res.locals.tenantId as string
   try {
     const actor = await actorOf(tenantId, req)
-    const [runs, canApprove] = await Promise.all([listRuns(tenantId), isBonusApprover(tenantId, actor.empId)])
+    const [runs, canApprove] = await Promise.all([listRuns(tenantId), isBonusApprover(tenantId, actor)])
     res.status(200).json({ runs, canApprove })
   } catch (err) {
     handleError(err, res, next)
@@ -286,7 +287,7 @@ bonusRunsRouter.get("/bonus-runs/:id", ...guards, async (req: Request, res: Resp
       res.status(404).json({ error: "not_found" })
       return
     }
-    res.status(200).json({ ...maskProfit(detail, canSeeProfit), canApprove: await isBonusApprover(tenantId, actor.empId) })
+    res.status(200).json({ ...maskProfit(detail, canSeeProfit), canApprove: await isBonusApprover(tenantId, actor) })
   } catch (err) {
     handleError(err, res, next)
   }
@@ -493,12 +494,12 @@ bonusRunsRouter.delete("/bonus-runs/:id", ...guards, async (req: Request, res: R
   }
 })
 
-// ── GET /my/bonus-approvals — ESS 簽核頁：老闆看待核准的獎金批次（含明細）；非老闆回空清單 ──
+// ── GET /my/bonus-approvals — ESS 簽核頁：老闆／platform_admin 看待核准的獎金批次（含明細）；其他人回空清單 ──
 bonusRunsRouter.get("/my/bonus-approvals", requireAuth, requireTenant, async (req: Request, res: Response, next: NextFunction) => {
   const tenantId = res.locals.tenantId as string
   try {
     const actor = await actorOf(tenantId, req)
-    if (!(await isBonusApprover(tenantId, actor.empId))) {
+    if (!(await isBonusApprover(tenantId, actor))) {
       res.status(200).json({ canApprove: false, runs: [] })
       return
     }

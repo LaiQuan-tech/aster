@@ -1,6 +1,7 @@
 import type { SelfEmployee } from "../middleware/scope.js"
 import { loadEmployeeFeatures, type EmployeeFeatures } from "./employee-features.js"
 import { loadProjectBossEmpId } from "./project-scope.js"
+import { isBossOrPlatformAdmin } from "../lib/boss.js"
 
 /**
  * 集團財務可見性（業主 2026-10-26：老闆與一般 HR 分開）。
@@ -19,24 +20,19 @@ import { loadProjectBossEmpId } from "./project-scope.js"
 
 type Caller = Pick<SelfEmployee, "id" | "role">
 
-function isBoss(bossEmpId: string | null | undefined, empId: string): boolean {
-  return !!bossEmpId && bossEmpId.toLowerCase() === empId.toLowerCase()
-}
-
 /** 純函式：給定老闆 id 與本人的個人功能開關，判斷看不看得到集團財務。 */
 export function canSeeGroupFinancials(
   self: Caller,
   bossEmpId: string | null | undefined,
   features: Pick<EmployeeFeatures, "seeGroupFinancials"> | null | undefined,
 ): boolean {
-  if (self.role === "platform_admin") return true
-  if (isBoss(bossEmpId, self.id)) return true
+  if (isBossOrPlatformAdmin(bossEmpId, self)) return true
   return self.role === "hr_admin" && features?.seeGroupFinancials === true
 }
 
 /** 純函式：能不能授權／取消別人的「可看集團財務」（只有老闆或 platform_admin）。 */
 export function canGrantGroupFinancials(self: Caller, bossEmpId: string | null | undefined): boolean {
-  return self.role === "platform_admin" || isBoss(bossEmpId, self.id)
+  return isBossOrPlatformAdmin(bossEmpId, self)
 }
 
 export type GroupFinancialsAccess = {
@@ -58,7 +54,7 @@ export async function loadGroupFinancialsAccess(
   bossEmpId?: string | null,
 ): Promise<GroupFinancialsAccess> {
   const boss = bossEmpId !== undefined ? bossEmpId : await loadProjectBossEmpId(tenantId)
-  if (self.role === "platform_admin" || isBoss(boss, self.id)) return { canSee: true, canGrant: true, bossEmpId: boss }
+  if (isBossOrPlatformAdmin(boss, self)) return { canSee: true, canGrant: true, bossEmpId: boss }
   if (self.role !== "hr_admin") return { canSee: false, canGrant: false, bossEmpId: boss }
   const features = await loadEmployeeFeatures(tenantId, self.id)
   return { canSee: canSeeGroupFinancials(self, boss, features), canGrant: false, bossEmpId: boss }

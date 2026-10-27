@@ -337,6 +337,12 @@ describe("解鎖權限：老闆＋老闆指定的人；只有老闆（或 platfo
     expect(canReopenPeriod(policy, undefined)).toBe(false)
     // 沒有設定老闆也沒有名單 → 沒有人能解鎖（fail closed）。
     expect(canReopenPeriod(unlockPolicyOf({}), HR)).toBe(false)
+    // 2026-10-27：platform_admin 直接可以（不必在名單內、不需要老闆存在）；hr_admin 帶角色也不行
+    expect(canReopenPeriod(policy, HR, "platform_admin")).toBe(true)
+    expect(canReopenPeriod(unlockPolicyOf({}), HR, "platform_admin")).toBe(true)
+    expect(canReopenPeriod(policy, HR, "hr_admin")).toBe(false)
+    expect(canReopenPeriod(policy, BOSS, "employee")).toBe(true)
+    expect(canReopenPeriod(policy, null, "platform_admin")).toBe(false)
   })
 
   it("canEditUnlockList：只有老闆與 platform_admin；被指定的人、HR 都不行；沒設老闆時只剩 platform_admin", () => {

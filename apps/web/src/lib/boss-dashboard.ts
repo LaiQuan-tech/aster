@@ -106,7 +106,7 @@ export interface HeadlineTile {
  *   • group＝可看集團財務（老闆、看得到集團財務的 HR、平台管理員）：本年收入／待簽核／未收款／在職人數；
  *   • hr＝一般 HR（看不到集團財務）：待簽核／本月出勤異常／未收款／在職人數——不顯示收入、毛利率，也不打 /group-overview；
  *   • finance＝會計（維持現狀）：本月放款支出／待簽核／未收款／本月出勤異常。
- * 老闆專屬待辦不看版本，看 summary.scope.isBoss（todoItems）。
+ * 老闆專屬待辦不看版本，看 summary.bossTodo（後端 scope.isBoss＝老闆或 platform_admin 才給；todoItems）。
  */
 export type HomeViewer = "group" | "hr" | "finance";
 
@@ -292,7 +292,7 @@ export const TODO_LIMIT = 6;
 /**
  * 「需要你處理」：只列數量 > 0、且這個角色／模組開得了目標頁的項目，先急後緩
  * （老闆專屬待辦 → 合規 → 簽核 → 加班 → 出勤異常）。
- * 老闆專屬待辦只看 summary.bossTodo（後端 scope.isBoss 才給）：獎金批次待核准、遲到說明待決定；
+ * 老闆專屬待辦只看 summary.bossTodo（後端 scope.isBoss＝老闆或 platform_admin 才給）：獎金批次待核准、遲到說明待決定；
  * 後台那頁開不了時改連 ESS 簽核頁（老闆在那裡也能核准／決定），所以一定列得出來。
  * boss-summary 404（舊 API）時只剩假單（pendingLeave）。
  */

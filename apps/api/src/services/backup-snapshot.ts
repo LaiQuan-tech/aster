@@ -10,6 +10,7 @@ import { writeAuditLog } from "./audit.js"
 import { SheetError, lockSheet, unlockSheetsForPeriod } from "./attendance-sheets.js"
 import { enqueue } from "./notify.js"
 import { loadPeriodUnlockPolicy } from "./period-lock.js"
+import { bossNotificationRecipients } from "../lib/boss.js"
 import { evaluatePeriodChecklist, revertFinalizedPayslips, type PeriodChecklist } from "./payroll-period.js"
 
 /**
@@ -1227,7 +1228,7 @@ export interface ReopenPeriodResult {
 }
 
 /**
- * 通知老闆與 HR：「○○ 重新開放了 YYYY-MM，理由：…」（站內通知，投遞交給既有的每 5 分鐘 job）。
+ * 通知老闆、platform_admin 與 HR：「○○ 重新開放了 YYYY-MM，理由：…」（站內通知，投遞交給既有的每 5 分鐘 job）。
  * 失敗只記 log、回 0——重新開放已經成立，通知寫不進去不該把它變成錯誤。
  */
 async function notifyPeriodReopened(tenantId: string, period: string, actorEmpId: string, reason: string): Promise<number> {
@@ -1240,8 +1241,12 @@ async function notifyPeriodReopened(tenantId: string, period: string, actorEmpId
       .eq("role", "hr_admin")
       .eq("status", "active")
     if (hrErr) throw new Error(hrErr.message)
-    const recipients = [policy.bossEmpId, ...((hr ?? []) as Array<{ id: string }>).map((r) => r.id)].filter(
-      (id): id is string => typeof id === "string" && id.length > 0,
+    // 老闆＋所有 platform_admin（2026-10-27：平台管理員視同老闆，lib/boss.ts）＋所有 HR；去重。
+    const bossAudience = await bossNotificationRecipients(tenantId, policy.bossEmpId)
+    const recipients = Array.from(
+      new Set([...bossAudience, ...((hr ?? []) as Array<{ id: string }>).map((r) => r.id)].filter(
+        (id): id is string => typeof id === "string" && id.length > 0,
+      )),
     )
     if (recipients.length === 0) return 0
     const names = await employeeNames(tenantId, [actorEmpId])

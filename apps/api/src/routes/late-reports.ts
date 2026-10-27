@@ -19,7 +19,7 @@ import {
  *        老闆（features.approval.fallbackApproverEmpId）與 HR（hr_admin／platform_admin）看全公司；
  *        主管看自己管的部門（含子部門）的人；每個人都看得到自己的。回 { lateReports, canDecide }。
  *   POST /late-reports/:id/decision { decision: "affects"|"exempt", note? }
- *        **只有老闆**能決定（其他人 403 not_boss）；可改決定，寫 audit。沒帶 note＝不動原本的備註。
+ *        **只有老闆或 platform_admin**能決定（2026-10-27；其他人 403 not_boss）；可改決定，寫 audit。沒帶 note＝不動原本的備註。
  *        那個月的出勤月表已核准／鎖定 → 409 sheet_frozen（薪資讀核准快照，要先退回或重開月表）。
  *
  * 全勤：沒決定視為「影響全勤」，exempt 不影響（services/late-reports.ts lateAttendanceForPeriod）。
@@ -111,7 +111,7 @@ lateReportsRouter.post(
       }
       const scope = await lateReportScope(tenantId, self)
       if (!scope.isBoss) {
-        res.status(403).json({ error: "not_boss", message: "只有老闆可以決定遲到是否影響全勤" })
+        res.status(403).json({ error: "not_boss", message: "只有老闆或平台管理員可以決定遲到是否影響全勤" })
         return
       }
       const lateReport = await decideLateReport({

@@ -291,6 +291,61 @@ describe("核准狀態機（#7）", () => {
     expect(ok.body.run).toMatchObject({ status: "approved", selfApproved: true })
   })
 
+  it("platform_admin（不是老闆）可以核准／退回；列表、明細、ESS 簽核頁 canApprove=true；稽核記實際操作者（2026-10-27）", async () => {
+    const PA_ID = "bbbbbbbb-0000-4000-8000-0000000000aa"
+    fake.db.employees.push(employee(PA_ID, "user-pa", "platform_admin", "平台管理員"))
+    const id = await createDraft()
+    await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
+    // 待核准通知：老闆＋platform_admin（2026-10-27 平台管理員視同老闆），HR 不收
+    const pending = fake.db.notifications.filter((n) => n.type === "bonus_run" && /待核准/.test(String(n.title)))
+    expect(pending.map((n) => n.employee_id).sort()).toEqual([BOSS_ID, PA_ID].sort())
+
+    expect((await req("get", "/bonus-runs", "user-pa")).body.canApprove).toBe(true)
+    expect((await req("get", `/bonus-runs/${id}`, "user-pa")).body.canApprove).toBe(true)
+    expect((await req("get", "/bonus-runs", HR_TOKEN)).body.canApprove).toBe(false)
+    expect((await req("get", `/bonus-runs/${id}`, HR_TOKEN)).body.canApprove).toBe(false)
+    const mine = await req("get", "/my/bonus-approvals", "user-pa")
+    expect(mine.body.canApprove).toBe(true)
+    expect(mine.body.runs.map((r: { run: { id: string } }) => r.run.id)).toEqual([id])
+
+    const back = await req("post", `/bonus-runs/${id}/return`, "user-pa").send({ reason: "請補附件" })
+    expect(back.status, JSON.stringify(back.body)).toBe(200)
+    expect(back.body.run.status).toBe("draft")
+    await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
+    const ok = await req("post", `/bonus-runs/${id}/approve`, "user-pa").send({})
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    expect(ok.body.run).toMatchObject({ status: "approved", approvedByEmpId: PA_ID })
+    const audits = (fake.db.audit_logs ?? []).filter((a) => a.table_name === "bonus_runs" && a.record_id === id)
+    expect(audits.some((a) => a.actor_emp_id === PA_ID && (a.new_row as Row)?.status === "approved" && (a.new_row as Row)?.approved_by_emp_id === PA_ID)).toBe(true)
+    expect(audits.some((a) => a.actor_emp_id === PA_ID && (a.new_row as Row)?.status === "draft")).toBe(true)
+  })
+
+  it("platform_admin 自己送審自己核准：允許並標註 selfApproved；老闆沒設定時 platform_admin 仍可核准，HR 仍 409/403", async () => {
+    const PA_ID = "bbbbbbbb-0000-4000-8000-0000000000aa"
+    fake.db.employees.push(employee(PA_ID, "user-pa", "platform_admin", "平台管理員"))
+    const id = await createDraft()
+    const sub = await req("post", `/bonus-runs/${id}/submit`, "user-pa").send({})
+    expect(sub.status, JSON.stringify(sub.body)).toBe(200)
+    // 送審後老闆設定被清掉：一般 HR 照舊 409 boss_not_configured，platform_admin 可以核准
+    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { bonus: { poolBasis: "gross_profit" } } }]
+    const hr = await req("post", `/bonus-runs/${id}/approve`, HR_TOKEN).send({})
+    expect([hr.status, hr.body.error]).toEqual([409, "boss_not_configured"])
+    expect((await req("get", "/my/bonus-approvals", HR_TOKEN)).body).toEqual({ canApprove: false, runs: [] })
+    const ok = await req("post", `/bonus-runs/${id}/approve`, "user-pa").send({})
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    expect(ok.body.run).toMatchObject({ status: "approved", approvedByEmpId: PA_ID, selfApproved: true })
+  })
+
+  it("老闆沒設定但有在職 platform_admin → 可以送審（通知 platform_admin）；沒有 platform_admin 才 409", async () => {
+    const PA_ID = "bbbbbbbb-0000-4000-8000-0000000000aa"
+    fake.db.employees.push(employee(PA_ID, "user-pa", "platform_admin", "平台管理員"))
+    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { bonus: { poolBasis: "gross_profit" } } }]
+    const id = await createDraft()
+    const res = await req("post", `/bonus-runs/${id}/submit`, HR_TOKEN).send({})
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(fake.db.notifications.filter((n) => n.type === "bonus_run").map((n) => n.employee_id)).toEqual([PA_ID])
+  })
+
   it("老闆沒設定 → 送審 409 boss_not_configured", async () => {
     fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: { bonus: { poolBasis: "gross_profit" } } }]
     const id = await createDraft()

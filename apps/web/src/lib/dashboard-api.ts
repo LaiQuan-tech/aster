@@ -33,7 +33,7 @@ export interface BossScope {
    * 舊 API 沒回（undefined）→ 前端退回舊判斷（HR／平台管理員＝可看）。
    */
   groupFinancials?: boolean;
-  /** 呼叫者是老闆（features.approval.fallbackApproverEmpId）→ 有 bossTodo。舊 API 沒回＝不是。 */
+  /** 呼叫者是老闆（features.approval.fallbackApproverEmpId）或 platform_admin（2026-10-27 起視同老闆）→ 有 bossTodo。舊 API 沒回＝不是。 */
   isBoss?: boolean;
 }
 
@@ -67,7 +67,7 @@ export interface BossSummary {
   receivables?: { unreceivedTotal: number; overdueCount: number } | null;
   /** 本月已匯款放款（會計首頁那格；HR 為 null）。舊 API 沒有此欄。 */
   monthDisbursements?: { count: number; amount: number } | null;
-  /** 老闆專屬待辦（scope.isBoss 才有）；數字 null＝該子查詢失敗。舊 API 沒有此欄。 */
+  /** 老闆專屬待辦（scope.isBoss＝老闆或 platform_admin 才有）；數字 null＝該子查詢失敗。舊 API 沒有此欄。 */
   bossTodo?: { bonusRunsPendingApproval: number | null; lateReportsPending: number | null } | null;
 }
 

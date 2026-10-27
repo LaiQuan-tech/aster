@@ -16,7 +16,7 @@ import { PERIOD_RE, canReopenPeriod, getPeriodLockState, loadPeriodUnlockPolicy 
  *
  *   GET  /payroll-periods?months=12        最近 N 個月（預設 12、最多 36）每個月的狀態：open 開放中／closed 已結算
  *                                          （誰、何時）／reopened 已重新開放（誰、何時、理由）；另回 currentPeriod、
- *                                          canClose（HR）、canReopen（老闆或老闆指定的人）給前端決定顯示哪顆按鈕。
+ *                                          canClose（HR）、canReopen（老闆、老闆指定的人或 platform_admin）給前端決定顯示哪顆按鈕。
  *                                          HR 或可解鎖的人才看得到，其他人 403。
  *   GET  /payroll-periods/:period/checklist  HR：「完成本月發薪」前的檢查清單（四項各自完成數／應完成數、未完成清單、warnings）。
  *   POST /payroll-periods/:period/close      HR：四項全過才鎖（沒有強制略過）。未全過 → 409 `checklist_incomplete` 附整份清單；
@@ -94,7 +94,7 @@ payrollPeriodsRouter.get(
       }
       const policy = await loadPeriodUnlockPolicy(tenantId)
       const canClose = isHrRole(self.role)
-      const canReopen = canReopenPeriod(policy, self.id)
+      const canReopen = canReopenPeriod(policy, self.id, self.role)
       if (!canClose && !canReopen) {
         res.status(403).json({ error: "forbidden" })
         return
@@ -188,12 +188,12 @@ payrollPeriodsRouter.post(
         res.status(403).json({ error: "not_an_employee" })
         return
       }
-      // 先認人再看內容：只有老闆與老闆指定的人（HR 不是），其他人一律 403。
+      // 先認人再看內容：只有老闆、老闆指定的人與 platform_admin（HR 不是），其他人一律 403。
       const policy = await loadPeriodUnlockPolicy(tenantId)
-      if (!canReopenPeriod(policy, self.id)) {
+      if (!canReopenPeriod(policy, self.id, self.role)) {
         res.status(403).json({
           error: "unlock_forbidden",
-          message: "只有老闆或老闆指定的人可以重新開放已結算的月份",
+          message: "只有老闆、老闆指定的人或平台管理員可以重新開放已結算的月份",
         })
         return
       }

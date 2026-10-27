@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { isBossOrPlatformAdmin } from "../lib/boss.js"
 import { isEmployedOn } from "./employment-status.js"
 import { logger } from "../lib/logger.js"
 import { isMissingTableError } from "../lib/schema-compat.js"
@@ -29,10 +30,11 @@ import { lateReportLockedReason, loadLateReportLocks, type LateReportRow } from 
  *     看不到的人前端**不打** /group-overview（避免 403 噪音）。boss-summary 本身不回任何收入／毛利數字；
  *     會計的「本月放款支出」維持現狀（是支出不是收入、跟放款分頁走，不受這個旗標影響）。
  *   • scope.isBoss：呼叫者是不是老闆（features.approval.fallbackApproverEmpId，與遲到說明、獎金批次核准同一個人）。
- *     platform_admin 不是老闆（除非本人就是那位員工）。老闆才查 bossTodo（老闆專屬待辦）：
+ *     2026-10-27 業主：「以後平台管理員就是老闆」→ platform_admin 一律 isBoss（lib/boss.ts isBossOrPlatformAdmin，
+ *     沒設定老闆也算）。老闆才查 bossTodo（老闆專屬待辦）：
  *       – bonusRunsPendingApproval：bonus_runs status=pending_approval、未刪除的批次數（等老闆核准）；
- *       – lateReportsPending：老闆還能決定的遲到說明（late_reports 未決定、分頁讀完，排除 lockedReason 非 null
- *         與老闆自己的——與 ESS 簽核頁紅點 web lib/ess-badges.ts countPendingLateReports 同一套規則）。
+ *       – lateReportsPending：呼叫者還能決定的遲到說明（late_reports 未決定、分頁讀完，排除 lockedReason 非 null
+ *         與呼叫者自己的——與 ESS 簽核頁紅點 web lib/ess-badges.ts countPendingLateReports 同一套規則）。
  *     子查詢各自 settle，失敗只讓該數字 null。
  *
  * ── 失敗降級 ──────────────────────────────────────────────────────────
@@ -75,7 +77,7 @@ export type BossScope = {
   monthDisbursements: boolean
   /** 可看集團財務（本年收入／毛利率）；false → 前端不打 /group-overview、第 1 格改 HR 日常數字。 */
   groupFinancials: boolean
-  /** 呼叫者是老闆（features.approval.fallbackApproverEmpId）→ 有 bossTodo。 */
+  /** 呼叫者是老闆（features.approval.fallbackApproverEmpId）或 platform_admin（2026-10-27 起視同老闆）→ 有 bossTodo。 */
   isBoss: boolean
 }
 
@@ -309,7 +311,10 @@ export type MonthDisbursementFacts = { count: number; amount: number }
 
 export type LateReportLite = { employeeId: string; decision?: string | null; lockedReason?: string | null }
 
-/** 老闆還能決定的遲到說明筆數（未決定、未鎖定、不是老闆自己的）——鏡像 web lib/ess-badges.ts countPendingLateReports。 */
+/**
+ * 決定者還能決定的遲到說明筆數（未決定、未鎖定、不是決定者自己的）——鏡像 web lib/ess-badges.ts countPendingLateReports。
+ * 第二個參數＝決定者（呼叫者）的員工 id；老闆看首頁時就是老闆本人。
+ */
 export function countBossDecidableLateReports(rows: readonly LateReportLite[], bossEmpId: string | null): number {
   const boss = bossEmpId?.toLowerCase() ?? null
   return rows.filter(
@@ -321,7 +326,15 @@ export function countBossDecidableLateReports(rows: readonly LateReportLite[], b
  * 讀取（每支獨立，失敗由 settle 降級）
  * ────────────────────────────────────────────────────────────────── */
 
-export type BossSummaryCtx = { tenantId: string; period: string; today: string; features: unknown; bossEmpId: string | null }
+export type BossSummaryCtx = {
+  tenantId: string
+  period: string
+  today: string
+  features: unknown
+  bossEmpId: string | null
+  /** 呼叫者的員工 id（小寫；遲到說明待決定排除自己的）；沒帶 → 退回 bossEmpId。 */
+  selfEmpId?: string | null
+}
 
 async function selectAllPages<T>(build: (from: number, to: number) => PromiseLike<{ data: unknown; error: { message: string } | null }>, label: string): Promise<T[]> {
   const out: T[] = []
@@ -509,7 +522,7 @@ async function loadLateReportsPending(ctx: BossSummaryCtx): Promise<number> {
       decision: null,
       lockedReason: lateReportLockedReason(r, locks.closedPeriods, locks.sheetStatuses),
     })),
-    ctx.bossEmpId,
+    ctx.selfEmpId ?? ctx.bossEmpId,
   )
 }
 
@@ -572,7 +585,7 @@ export type BossSummary = {
   receivables: ReceivableFacts | null
   /** 本月已匯款的放款（會計首頁那格；HR 不查＝null）。 */
   monthDisbursements: MonthDisbursementFacts | null
-  /** 老闆專屬待辦（scope.isBoss 才有，否則 null）；各數字查詢失敗 → 該數字 null。 */
+  /** 老闆專屬待辦（scope.isBoss＝老闆或 platform_admin 才有，否則 null）；各數字查詢失敗 → 該數字 null。 */
   bossTodo: {
     /** 等老闆核准的獎金批次數。 */
     bonusRunsPendingApproval: number | null
@@ -607,13 +620,21 @@ export async function buildBossSummary(
   loaders: BossSummaryLoaders = defaultBossSummaryLoaders,
 ): Promise<BossSummary> {
   const bossEmpId = bossEmpIdOf(input.features)
-  const isBoss = !!bossEmpId && !!input.selfEmpId && input.selfEmpId.toLowerCase() === bossEmpId
+  // 2026-10-27：platform_admin 視同老闆（lib/boss.ts）。
+  const isBoss = isBossOrPlatformAdmin(bossEmpId, { id: input.selfEmpId, role: input.role })
   const scope: BossScope = {
     ...bossSummaryScope(input.role, input.features),
     groupFinancials: input.groupFinancials ?? legacyGroupFinancials(input.role),
     isBoss,
   }
-  const ctx: BossSummaryCtx = { tenantId: input.tenantId, period: input.period, today: input.today, features: input.features, bossEmpId }
+  const ctx: BossSummaryCtx = {
+    tenantId: input.tenantId,
+    period: input.period,
+    today: input.today,
+    features: input.features,
+    bossEmpId,
+    selfEmpId: input.selfEmpId ? input.selfEmpId.toLowerCase() : null,
+  }
 
   const [leave, disb, sheets, drafts, people, receivables, monthDisb, bonusPending, latePending] = await Promise.all([
     scope.leaveApprovals ? settle("pendingLeave", () => loaders.pendingLeave(ctx)) : skip,

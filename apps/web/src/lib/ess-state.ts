@@ -39,7 +39,7 @@ import {
 } from "@/lib/ess-api";
 import { countPendingLateReports } from "@/lib/ess-badges";
 import { getLateReports } from "@/lib/late-reports-api";
-import { isApprovalBoss } from "@/lib/payroll-periods-api";
+import { isBossOrPlatformAdmin } from "@/lib/payroll-periods-api";
 
 export interface EssState {
   /** 第一輪載入（四支 API 全部 settle）是否完成；完成前所有欄位是退化預設值。 */
@@ -49,7 +49,10 @@ export interface EssState {
   isAdmin: boolean;
   /** 任一部門主管（顯示「簽核」分頁）。 */
   isManager: boolean;
-  /** 老闆（tenants.features.approval.fallbackApproverEmpId 就是我）：簽核分頁永遠顯示，遲到說明要老闆決定。拿不到＝false。 */
+  /**
+   * 老闆＝tenants.features.approval.fallbackApproverEmpId 就是我，或我是 platform_admin（2026-10-27 起視同老闆；
+   * lib/payroll-periods-api.ts isBossOrPlatformAdmin）：簽核分頁永遠顯示，遲到說明／獎金批次由他決定。拿不到＝false。
+   */
   isBoss: boolean;
   /** 可見分頁 key；null＝不限縮（也是 /me 未回或失敗時的預設）。 */
   essTabs: string[] | null;
@@ -194,7 +197,7 @@ function load(force = false): Promise<void> {
     if (gen !== generation) return; // 已登出：丟棄
     const me = meRes.status === "fulfilled" ? meRes.value : null;
     const brand = brandRes.status === "fulfilled" ? brandRes.value : null;
-    const isBoss = isApprovalBoss(brand?.features ?? null, me?.id);
+    const isBoss = isBossOrPlatformAdmin(brand?.features ?? null, me);
     countsAt = Date.now();
     setSnapshot({
       loaded: true,
@@ -257,7 +260,7 @@ export function invalidateBranding() {
     .then((res) => {
       if (gen !== generation) return; // 已登出：丟棄
       // isBoss 是由 features 與 me 算出來的衍生值：老闆設定剛被改（交棒）時要一併重算，不然簽核分頁要等下一輪 load 才跟上。
-      const isBoss = isApprovalBoss(res.features ?? null, snapshot.me?.id);
+      const isBoss = isBossOrPlatformAdmin(res.features ?? null, snapshot.me);
       setSnapshot({
         branding: res.branding ?? null,
         features: res.features ?? null,

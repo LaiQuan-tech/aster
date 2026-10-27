@@ -26,6 +26,7 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { localDateKey } from "../lib/tz.js"
 import { isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { isBossOrPlatformAdmin } from "../lib/boss.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 純函式：日期歸月
@@ -346,7 +347,7 @@ export async function assertRequestsOpen(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 解鎖權限：老闆＋老闆指定的人
+// 解鎖權限：老闆＋老闆指定的人＋platform_admin
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface PeriodUnlockPolicy {
@@ -375,16 +376,23 @@ export function unlockPolicyOf(features: unknown): PeriodUnlockPolicy {
   return { bossEmpId: boss, designatedEmpIds: [...new Set(ids)] }
 }
 
-/** 老闆或老闆指定的人才能重新開放已結算的月份。純函式。 */
-export function canReopenPeriod(policy: PeriodUnlockPolicy, empId: string | null | undefined): boolean {
+/**
+ * 老闆、老闆指定的人、或 platform_admin（2026-10-27 業主拍板，不必在解鎖名單內、不需要老闆存在）才能重新開放
+ * 已結算的月份。role 省略＝不是 platform_admin。純函式。
+ */
+export function canReopenPeriod(
+  policy: PeriodUnlockPolicy,
+  empId: string | null | undefined,
+  role?: string | null,
+): boolean {
   if (!empId) return false
-  const id = lower(empId)
-  return policy.bossEmpId === id || policy.designatedEmpIds.includes(id)
+  if (isBossOrPlatformAdmin(policy.bossEmpId, { id: empId, role })) return true
+  return policy.designatedEmpIds.includes(lower(empId))
 }
 
 /** 只有老闆（或 platform_admin）能改「指定誰能解鎖」那份名單。純函式。 */
 export function canEditUnlockList(policy: PeriodUnlockPolicy, caller: { id: string; role: string }): boolean {
-  return caller.role === "platform_admin" || (!!policy.bossEmpId && policy.bossEmpId === lower(caller.id))
+  return isBossOrPlatformAdmin(policy.bossEmpId, caller)
 }
 
 /** 兩份名單是不是同一組人（不分順序、不分大小寫）。純函式。 */

@@ -212,7 +212,7 @@ export function closeOutcomeOf(err: unknown): Extract<PayrollCloseOutcome, { ok:
   return null;
 }
 
-const UNLOCK_FORBIDDEN_FALLBACK = "只有老闆或老闆指定的人可以重新開放已結算的月份";
+const UNLOCK_FORBIDDEN_FALLBACK = "只有老闆、老闆指定的人或平台管理員可以重新開放已結算的月份";
 
 const PERIOD_ERROR_TEXT: Record<string, string> = {
   checklist_incomplete: "檢查清單還沒全部通過，請先處理未完成的項目",
@@ -316,7 +316,7 @@ export function periodStatusText(row: PeriodStatusFields, tz?: string): string {
 /* ------------------------------------------------------------ 按鈕規則 --- */
 
 /** 重新開放鈕顯示不出來時（已結算、但呼叫者沒有解鎖權限）改顯示的說明。 */
-export const REOPEN_FORBIDDEN_HINT = "只有老闆或老闆指定的人可以重新開放";
+export const REOPEN_FORBIDDEN_HINT = "只有老闆、老闆指定的人或平台管理員可以重新開放";
 
 export interface PeriodActions {
   /** 顯示「完成 YYYY-MM 發薪並鎖定」：HR，且該月開放中或已重新開放。 */
@@ -531,6 +531,20 @@ export function approvalBossEmpIdOf(features: Record<string, unknown> | null | u
 export function isApprovalBoss(features: Record<string, unknown> | null | undefined, meId: string | null | undefined): boolean {
   const boss = approvalBossEmpIdOf(features);
   return !!boss && !!meId && lower(boss) === lower(meId);
+}
+
+/**
+ * 登入者算不算老闆：老闆本人或 platform_admin（2026-10-27 業主：「以後平台管理員就是老闆」；不需要老闆已設定）。
+ * 與後端 apps/api/src/lib/boss.ts isBossOrPlatformAdmin 同一判準。後端另外擋；前端用它決定 ESS 殼要不要永遠顯示
+ * 「簽核」分頁、要不要抓待決定的遲到說明紅點、能不能改解鎖名單。
+ */
+export function isBossOrPlatformAdmin(
+  features: Record<string, unknown> | null | undefined,
+  me: { id?: string | null; role?: string | null } | null | undefined,
+): boolean {
+  if (!me?.id) return false;
+  if (me.role === "platform_admin") return true;
+  return isApprovalBoss(features, me.id);
 }
 
 /**

@@ -424,10 +424,14 @@ describe("依身分分版：scope.isBoss／scope.groupFinancials／bossTodo（20
     expect(r.monthDisbursements).toEqual({ count: 0, amount: 0 })
   })
 
-  it("平台管理員：可看集團財務但不是老闆（除非本人就是老闆）", async () => {
+  it("平台管理員：視同老闆（2026-10-27「以後平台管理員就是老闆」）→ isBoss、有 bossTodo；沒設定老闆也算", async () => {
     const r = await buildBossSummary({ ...base, role: "platform_admin", selfEmpId: HR_ID, groupFinancials: true }, ok)
-    expect(r.scope).toMatchObject({ isBoss: false, groupFinancials: true })
-    expect(r.bossTodo).toBeNull()
+    expect(r.scope).toMatchObject({ isBoss: true, groupFinancials: true })
+    expect(r.bossTodo).toEqual({ bonusRunsPendingApproval: 2, lateReportsPending: 3 })
+    // 沒設定老闆也有
+    const noBoss = await buildBossSummary({ ...base, features: null, role: "platform_admin", selfEmpId: HR_ID }, ok)
+    expect(noBoss.scope).toMatchObject({ isBoss: true })
+    expect(noBoss.bossTodo).toEqual({ bonusRunsPendingApproval: 2, lateReportsPending: 3 })
     const self = await buildBossSummary({ ...base, role: "platform_admin", selfEmpId: BOSS.toLowerCase(), groupFinancials: true }, ok)
     expect(self.scope.isBoss).toBe(true)
     // 沒帶 groupFinancials → 舊判斷（HR／平台管理員＝可看）
@@ -502,6 +506,30 @@ describe("依身分分版：scope.isBoss／scope.groupFinancials／bossTodo（20
     }))
     const r = await buildBossSummary({ ...base, role: "hr_admin", selfEmpId: BOSS, groupFinancials: true }, STUB_HEAVY)
     expect(r.bossTodo?.lateReportsPending).toBe(1204)
+  })
+
+  it("預設 loader：platform_admin 看的遲到說明待決定排除他自己的（老闆的照算）", async () => {
+    seed(features)
+    fake.db.late_reports = [
+      { id: "lr1", tenant_id: TENANT_ID, employee_id: EMP_A, work_date: "2026-10-02", punch_at: "2026-10-02T02:00:00Z", late_minutes: 5, reason: "塞車", attendance_decision: null },
+      { id: "lr2", tenant_id: TENANT_ID, employee_id: HR_ID, work_date: "2026-10-02", punch_at: "2026-10-02T02:00:00Z", late_minutes: 5, reason: "塞車", attendance_decision: null },
+      { id: "lr3", tenant_id: TENANT_ID, employee_id: BOSS.toLowerCase(), work_date: "2026-10-02", punch_at: "2026-10-02T02:00:00Z", late_minutes: 5, reason: "塞車", attendance_decision: null },
+    ]
+    const r = await buildBossSummary({ ...base, role: "platform_admin", selfEmpId: HR_ID, groupFinancials: true }, STUB_HEAVY)
+    expect(r.bossTodo?.lateReportsPending).toBe(2)
+  })
+
+  it("路由：platform_admin（不是設定的老闆）→ scope.isBoss＝true、有 bossTodo；一般 HR 仍沒有", async () => {
+    seed({ approval: { fallbackApproverEmpId: EMP_A } })
+    fake.db.employees = fake.db.employees.map((e) => (e.id === HR_ID ? { ...e, role: "platform_admin" } : e))
+    const pa = await get("/dashboard/boss-summary", HR_TOKEN)
+    expect(pa.status).toBe(200)
+    expect(pa.body.scope).toMatchObject({ isBoss: true })
+    expect(pa.body.bossTodo).not.toBeNull()
+    seed({ approval: { fallbackApproverEmpId: EMP_A } })
+    const hr = await get("/dashboard/boss-summary", HR_TOKEN)
+    expect(hr.body.scope).toMatchObject({ isBoss: false })
+    expect(hr.body.bossTodo).toBeNull()
   })
 
   it("路由：hr_admin 本人是老闆 → scope.isBoss＝true、有 bossTodo；不是老闆 → bossTodo null", async () => {

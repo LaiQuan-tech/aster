@@ -8,6 +8,7 @@ import { isUniqueViolation } from "./project-code.js"
 import { writeAuditLog } from "./audit.js"
 import { enqueue } from "./notify.js"
 import { loadBossEmpId } from "./late-reports.js"
+import { bossNotificationRecipients, isBossOrPlatformAdmin, isPlatformAdminRole, loadPlatformAdminEmpIds } from "../lib/boss.js"
 import { bonusRunsHaveApproval } from "../lib/schema-compat.js"
 import { logger } from "../lib/logger.js"
 import {
@@ -72,7 +73,10 @@ export class BonusRunError extends Error {
   }
 }
 
-export type Actor = { empId: string | null }
+/**
+ * 呼叫者。role＝employees.role（核准／退回判斷 platform_admin 用；沒帶＝不是 platform_admin）。
+ */
+export type Actor = { empId: string | null; role?: string | null }
 
 /* ──────────────────────────────────────────────────────────────────
  * DB 列型別（snake_case）與序列化
@@ -1094,9 +1098,11 @@ export async function updateRun(
       await enqueue({ tenantId, employeeIds: [current.submitted_by_emp_id], type: "bonus_run", title, body, payload: { bonusRunId: id, event: "returned", auto: true } })
     }
     // 老闆不一定進得了後台：audience=boss 的通知連到 ESS 簽核頁（apps/web lib/ess-notifications.ts）。
+    // 老闆＋所有 platform_admin（2026-10-27：平台管理員視同老闆）；送審人上面已通知過，不重複。
     const boss = await loadBossEmpId(tenantId).catch(() => null)
-    if (boss && boss !== current.submitted_by_emp_id) {
-      await enqueue({ tenantId, employeeIds: [boss], type: "bonus_run", title, body, payload: { bonusRunId: id, event: "returned", auto: true, audience: "boss" } })
+    const bossAudience = await bossNotificationRecipients(tenantId, boss, [current.submitted_by_emp_id])
+    if (bossAudience.length > 0) {
+      await enqueue({ tenantId, employeeIds: bossAudience, type: "bonus_run", title, body, payload: { bonusRunId: id, event: "returned", auto: true, audience: "boss" } })
     }
   }
   const detail = await getRun(tenantId, id)
@@ -1162,19 +1168,34 @@ async function requireBoss(tenantId: string): Promise<string> {
   return boss
 }
 
-/** 呼叫者是不是老闆（給 ESS 簽核頁／後台決定要不要顯示核准按鈕）。 */
-export async function isBonusApprover(tenantId: string, empId: string | null): Promise<boolean> {
-  if (!empId) return false
-  return (await loadBossEmpId(tenantId)) === empId.toLowerCase()
+/**
+ * 能核准／退回的人：老闆（features.approval.fallbackApproverEmpId）或 platform_admin（2026-10-27 業主拍板，
+ * 與 bonusEditAccessOf、isBossOrPlatformAdmin 同一慣例；同一個 platform_admin 可以自己送審自己核准，照舊標註 selfApproved）。
+ * platform_admin 不需要老闆存在；其他人：沒設老闆 → 409 boss_not_configured、不是老闆 → 403 not_approver（維持原順序）。
+ */
+async function assertApprover(tenantId: string, actor: Actor): Promise<void> {
+  if (actor.empId && isPlatformAdminRole(actor.role)) return
+  const boss = await requireBoss(tenantId)
+  if (!isBossOrPlatformAdmin(boss, { id: actor.empId, role: actor.role })) throw new BonusRunError(403, "not_approver")
 }
 
-/** HR 送審：draft → pending_approval，記下金額指紋，通知老闆。 */
+/** 呼叫者能不能核准（老闆或 platform_admin；給 ESS 簽核頁／後台決定要不要顯示核准按鈕）。 */
+export async function isBonusApprover(tenantId: string, actor: Actor): Promise<boolean> {
+  if (!actor.empId) return false
+  if (isPlatformAdminRole(actor.role)) return true
+  return isBossOrPlatformAdmin(await loadBossEmpId(tenantId), { id: actor.empId, role: actor.role })
+}
+
+/** HR 送審：draft → pending_approval，記下金額指紋，通知老闆與所有 platform_admin。 */
 export async function submitRun(tenantId: string, actor: Actor, id: string): Promise<RunDetail | null> {
   await requireApprovalSchema()
   const current = await loadRun(tenantId, id)
   if (!current) return null
   assertTransition(current.status, "submit")
-  const boss = await requireBoss(tenantId)
+  // 要有人能核准：老闆，或（2026-10-27 起視同老闆的）任一在職 platform_admin；都沒有 → 409 boss_not_configured。
+  const boss = await loadBossEmpId(tenantId)
+  if (!boss && (await loadPlatformAdminEmpIds(tenantId)).length === 0) throw new BonusRunError(409, "boss_not_configured")
+  const approvers = await bossNotificationRecipients(tenantId, boss)
   // 送審前先用最新資料重算一次（沖銷批次不重算）：草稿可能是改版前或很久以前算的，
   // 老闆核准的必須是「現在算出來的」金額。
   let latest = current
@@ -1213,7 +1234,7 @@ export async function submitRun(tenantId: string, actor: Actor, id: string): Pro
   })
   await enqueue({
     tenantId,
-    employeeIds: [boss],
+    employeeIds: approvers,
     type: "bonus_run",
     title: `待核准：獎金批次 ${current.label}${current.kind === "reversal" ? "（沖銷）" : ""}`,
     body: `本批合計 ${moneyText(totals.amount ?? 0)}，${totals.employeeCount ?? 0} 人、${totals.projectCount ?? 0} 案。請至「待我簽核」或後台獎金批次頁核准。`,
@@ -1222,13 +1243,12 @@ export async function submitRun(tenantId: string, actor: Actor, id: string): Pro
   return getRun(tenantId, id)
 }
 
-/** 老闆核准：pending_approval → approved。核准前再比一次金額指紋（送審後若被改過就不能核准）。 */
+/** 老闆（或 platform_admin）核准：pending_approval → approved。核准前再比一次金額指紋（送審後若被改過就不能核准）。 */
 export async function approveRun(tenantId: string, actor: Actor, id: string): Promise<RunDetail | null> {
   await requireApprovalSchema()
   const current = await loadRun(tenantId, id)
   if (!current) return null
-  const boss = await requireBoss(tenantId)
-  if (!actor.empId || actor.empId.toLowerCase() !== boss) throw new BonusRunError(403, "not_approver")
+  await assertApprover(tenantId, actor)
   assertTransition(current.status, "approve")
   // 核准前也用最新資料重算比對（與發放同一支）：送審後入帳／成本變了 → 退回草稿、409，老闆不會核准過期的金額。
   await recomputeOrReturn(tenantId, actor, current)
@@ -1268,13 +1288,12 @@ export async function approveRun(tenantId: string, actor: Actor, id: string): Pr
   return getRun(tenantId, id)
 }
 
-/** 老闆退回（需原因）：pending_approval／approved → draft，通知送審人。 */
+/** 老闆（或 platform_admin）退回（需原因）：pending_approval／approved → draft，通知送審人。 */
 export async function returnRun(tenantId: string, actor: Actor, id: string, reason: string): Promise<RunDetail | null> {
   await requireApprovalSchema()
   const current = await loadRun(tenantId, id)
   if (!current) return null
-  const boss = await requireBoss(tenantId)
-  if (!actor.empId || actor.empId.toLowerCase() !== boss) throw new BonusRunError(403, "not_approver")
+  await assertApprover(tenantId, actor)
   assertTransition(current.status, "return")
   await transitionRow(tenantId, id, current.status, returnPatch(actor.empId, reason), "returnRun")
   await writeAuditLog({
@@ -1320,10 +1339,11 @@ export async function withdrawRun(tenantId: string, actor: Actor, id: string, re
     context: "POST /bonus-runs/:id/withdraw",
   })
   const boss = await loadBossEmpId(tenantId).catch(() => null)
-  if (boss) {
+  const bossAudience = await bossNotificationRecipients(tenantId, boss)
+  if (bossAudience.length > 0) {
     await enqueue({
       tenantId,
-      employeeIds: [boss],
+      employeeIds: bossAudience,
       type: "bonus_run",
       title: `獎金批次 ${current.label} 已由 HR 撤回`,
       body: `撤回原因：${reason}。不需再核准，HR 修正後會重新送審。`,

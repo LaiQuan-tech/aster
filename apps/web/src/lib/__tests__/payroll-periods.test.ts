@@ -23,6 +23,7 @@ import {
   filterUnlockCandidates,
   getPeriodChecklist,
   isApprovalBoss,
+  isBossOrPlatformAdmin,
   isChecklistReady,
   isForbiddenError,
   isValidReopenReason,
@@ -201,10 +202,10 @@ describe("按鈕顯示規則 periodActionsOf", () => {
     expect(actions("closed", true, false).showReopen).toBe(false);
   });
 
-  it("HR 但沒有解鎖權限：已結算的月份不顯示重新開放鈕，改顯示「只有老闆或老闆指定的人可以重新開放」", () => {
+  it("HR 但沒有解鎖權限：已結算的月份不顯示重新開放鈕，改顯示「只有老闆、老闆指定的人或平台管理員可以重新開放」", () => {
     const a = actions("closed", true, false);
-    expect(a).toEqual({ showClose: false, showReopen: false, reopenForbiddenHint: "只有老闆或老闆指定的人可以重新開放" });
-    expect(REOPEN_FORBIDDEN_HINT).toBe("只有老闆或老闆指定的人可以重新開放");
+    expect(a).toEqual({ showClose: false, showReopen: false, reopenForbiddenHint: "只有老闆、老闆指定的人或平台管理員可以重新開放" });
+    expect(REOPEN_FORBIDDEN_HINT).toBe("只有老闆、老闆指定的人或平台管理員可以重新開放");
   });
 
   it("說明文字只在「已結算且不能重新開放」時出現：開放中、已重新開放、有權限的人都沒有", () => {
@@ -414,7 +415,7 @@ describe("closeOutcomeOf／payrollPeriodErrorMessage", () => {
     ).toBe("只有老闆或老闆指定的人可以重新開放已結算的月份");
     // 後端沒附 message 時的保底
     expect(payrollPeriodErrorMessage(Object.assign(new Error("[403] unlock_forbidden"), { status: 403, code: "unlock_forbidden" }))).toBe(
-      "只有老闆或老闆指定的人可以重新開放已結算的月份",
+      "只有老闆、老闆指定的人或平台管理員可以重新開放已結算的月份",
     );
     expect(payrollPeriodErrorMessage(apiError(400, { error: "reason_too_short", message: "重新開放的理由至少 5 個字" }))).toBe(
       "重新開放的理由至少 5 個字",
@@ -592,6 +593,21 @@ describe("isApprovalBoss — 登入者是不是老闆（ESS 簽核分頁永遠�
     expect(isApprovalBoss({ approval: { fallbackApproverEmpId: BOSS } }, undefined)).toBe(false);
     expect(isApprovalBoss({ approval: { fallbackApproverEmpId: BOSS } }, "")).toBe(false);
     expect(isApprovalBoss({ approval: "not-an-object" }, BOSS)).toBe(false);
+  });
+});
+
+describe("isBossOrPlatformAdmin — 以後平台管理員就是老闆（2026-10-27）", () => {
+  it("老闆本人可以；platform_admin 可以（沒設定老闆也可以）；hr_admin、一般員工不行；沒登入不行", () => {
+    const features = { approval: { fallbackApproverEmpId: BOSS } };
+    expect(isBossOrPlatformAdmin(features, { id: BOSS, role: "employee" })).toBe(true);
+    expect(isBossOrPlatformAdmin(features, { id: EMP_A, role: "platform_admin" })).toBe(true);
+    expect(isBossOrPlatformAdmin({}, { id: EMP_A, role: "platform_admin" })).toBe(true);
+    expect(isBossOrPlatformAdmin(null, { id: EMP_A, role: "platform_admin" })).toBe(true);
+    expect(isBossOrPlatformAdmin(features, { id: EMP_A, role: "hr_admin" })).toBe(false);
+    expect(isBossOrPlatformAdmin({}, { id: EMP_A, role: "hr_admin" })).toBe(false);
+    expect(isBossOrPlatformAdmin(features, { id: EMP_A, role: "employee" })).toBe(false);
+    expect(isBossOrPlatformAdmin(features, null)).toBe(false);
+    expect(isBossOrPlatformAdmin(features, { id: null, role: "platform_admin" })).toBe(false);
   });
 });
 

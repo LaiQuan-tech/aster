@@ -352,6 +352,24 @@ describe("POST /payroll-periods/:period/reopen — 重新開放", () => {
     expect((fake.db.notifications ?? []).filter((n) => n.type === "payroll_period")).toHaveLength(0)
   })
 
+  it("platform_admin（不在解鎖名單、不是老闆）也可以重新開放；老闆沒設定且名單空也可以；記實際操作者（2026-10-27）", async () => {
+    const PA = "b0000000-0000-4000-8000-0000000000aa"
+    await closeIt()
+    fake.db.employees.push(employee(PA, "u-pa", "platform_admin", "平台管理員"))
+    const list = await as("u-pa").get("/payroll-periods")
+    expect(list.status).toBe(200)
+    expect(list.body).toMatchObject({ canClose: true, canReopen: true })
+    const res = await as("u-pa").post(`/payroll-periods/${PERIOD}/reopen`).send({ reason: "平台管理員協助更正" })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.reopenedByEmpId).toBe(PA)
+    expect(closeRowOf()).toMatchObject({ status: "reopened", reopened_by_emp_id: PA })
+
+    // 老闆沒設定、名單空：platform_admin 仍可以（HR 仍 403，見下一個案例）
+    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: {} }]
+    expect((await as(TOKENS.hr).get("/payroll-periods")).body.canReopen).toBe(false)
+    expect((await as("u-pa").get("/payroll-periods")).body.canReopen).toBe(true)
+  })
+
   it("一般員工、查無員工列的帳號：403；老闆沒設定且名單空 → 連 HR 都解不了（fail closed）", async () => {
     await closeIt()
     for (const token of [TOKENS.emp1, TOKENS.ghost]) {

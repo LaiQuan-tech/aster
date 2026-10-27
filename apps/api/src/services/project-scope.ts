@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { isBossOrPlatformAdmin } from "../lib/boss.js"
 import { resolveSelf, isHrRole, isFinanceRole, managedDeptIds, type SelfEmployee } from "../middleware/scope.js"
 
 /**
@@ -120,7 +121,7 @@ export async function resolveProjectAccess(
   // 分潤改版（2026-10-26）：老闆是唯一能改分潤的人，看不到就改不了——
   // 老闆對每一案都有 finance＋bonus（看合約額才算得出獎金總額）。
   const boss = bossEmpId !== undefined ? bossEmpId : await loadProjectBossEmpId(tenantId)
-  if (isSameEmp(boss, self.id)) return { finance: true, bonus: true }
+  if (isBossOrPlatformAdmin(boss, self)) return { finance: true, bonus: true }
 
   if (project.dept_id) {
     const managed = await managedDeptIds(tenantId, self.id)
@@ -147,7 +148,7 @@ export async function canSeeBonus(
   membershipRole?: string | null,
 ): Promise<boolean> {
   if (isHrRole(self.role) || project.lead_emp_id === self.id) return true
-  if (isSameEmp(await loadProjectBossEmpId(tenantId), self.id)) return true
+  if (isBossOrPlatformAdmin(await loadProjectBossEmpId(tenantId), self)) return true
   if (project.dept_id) {
     const managed = await managedDeptIds(tenantId, self.id)
     if (managed.includes(project.dept_id)) return true
@@ -174,10 +175,6 @@ export async function loadProjectBossEmpId(tenantId: string): Promise<string | n
   return typeof id === "string" && id.length > 0 ? id.toLowerCase() : null
 }
 
-function isSameEmp(bossEmpId: string | null, empId: string): boolean {
-  return !!bossEmpId && bossEmpId === empId.toLowerCase()
-}
-
 export type BonusEditAccess = {
   /** 可以改分潤（老闆本人或 platform_admin）。 */
   canEdit: boolean
@@ -190,7 +187,7 @@ export type BonusEditAccess = {
 /** 純函式：給定老闆 id 判斷某人能不能改分潤。 */
 export function bonusEditAccessOf(self: Pick<SelfEmployee, "id" | "role">, bossEmpId: string | null): BonusEditAccess {
   const bossConfigured = !!bossEmpId
-  if (self.role === "platform_admin" || isSameEmp(bossEmpId, self.id)) {
+  if (isBossOrPlatformAdmin(bossEmpId, self)) {
     return { canEdit: true, bossConfigured, denial: null }
   }
   return {

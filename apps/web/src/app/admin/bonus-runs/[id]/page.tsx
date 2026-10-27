@@ -27,7 +27,7 @@ import { ExcludedArchivedList, GrossProfitTable, ItemsTable, SkippedList, Stat, 
  * 批次明細：毛利表（入帳／成本／毛利／比例）＋items 表（專案／員工／入帳比例／累計應發／已發／本季應發／超發紅字）。
  * 狀態（2026-10-26 加核准）：
  *   draft：可改期別／基準日並重算、改備註、送審（HR）、刪除（填理由）。
- *   pending_approval：老闆（canApprove）可核准／退回（需原因）；HR 可撤回（需原因）、可重算，金額變了自動退回草稿。
+ *   pending_approval：老闆或 platform_admin（canApprove）可核准／退回（需原因）；HR 可撤回（需原因）、可重算，金額變了自動退回草稿。
  *   approved：HR 標記已發放（填發放日）；老闆仍可退回。
  *   paid：唯讀＋匯出 Excel（草稿也能匯出，方便先拿去對）。
  */
@@ -360,8 +360,8 @@ export default function BonusRunDetailPage() {
                 {busy === "withdraw" ? "撤回中…" : "撤回送審…"}
               </button>
             )}
-            {!canApprove && isPending && <span className="text-xs text-gray-500">只有老闆能核准或退回；送審中 HR 可撤回。</span>}
-            {!canApprove && isApproved && <span className="text-xs text-gray-500">已核准後 HR 不能撤回，要改請老闆退回。</span>}
+            {!canApprove && isPending && <span className="text-xs text-gray-500">只有老闆或平台管理員能核准或退回；送審中 HR 可撤回。</span>}
+            {!canApprove && isApproved && <span className="text-xs text-gray-500">已核准後 HR 不能撤回，要改請老闆或平台管理員退回。</span>}
           </div>
           {showPay && (
             <div className="mt-3 flex flex-wrap items-end gap-2 rounded-xl bg-gray-50 p-3">

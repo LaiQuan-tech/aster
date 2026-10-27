@@ -9,7 +9,7 @@ vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase
 
 import { punchRouter } from "../routes/punch.js"
 import { generateSheets, buildPayrollDays } from "../services/attendance-sheets.js"
-import { lateAttendanceForPeriod } from "../services/late-reports.js"
+import { lateAttendanceForPeriod, notifyLateReport } from "../services/late-reports.js"
 import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 /**
@@ -309,6 +309,39 @@ describe("POST /late-reports/:id/decision — 只有老闆", () => {
       expect(res.body.error).toBe("not_boss")
     }
     expect(fake.db.late_reports?.[0]?.attendance_decision ?? null).toBeNull()
+  })
+
+  it("platform_admin（不是老闆）也能決定、列表 canDecide=true、audit 記實際操作者；老闆沒設定也可以（2026-10-27）", async () => {
+    const PA = "e1000000-0000-4000-8000-0000000000aa"
+    fake.db.employees.push({ id: PA, tenant_id: TENANT_ID, user_id: "u-pa", role: "platform_admin", name: "平台管理員", dept_id: null, status: "active", hire_date: "2026-01-05", terminated_at: null })
+    setNow("2026-10-12", "15:00")
+    const list = await as("u-pa").get("/late-reports?period=2026-10")
+    expect(list.status).toBe(200)
+    expect(list.body).toMatchObject({ canDecide: true, scope: "all" })
+    const res = await as("u-pa").post(`/late-reports/${ID}/decision`).send({ decision: "exempt" })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.lateReport).toMatchObject({ decision: "exempt", decidedByEmpId: PA })
+    const audits = (fake.db.audit_logs ?? []).filter((a) => a.table_name === "late_reports")
+    expect(audits.at(-1)).toMatchObject({ record_id: ID, actor_emp_id: PA })
+
+    fake.db.tenants = [{ id: TENANT_ID, timezone: "Asia/Taipei", features: {} }]
+    expect((await as("u-pa").post(`/late-reports/${ID}/decision`).send({ decision: "affects" })).status).toBe(200)
+    // 老闆沒設定時 HR 仍不能決定
+    const hr = await as(TOKENS.hr).post(`/late-reports/${ID}/decision`).send({ decision: "exempt" })
+    expect([hr.status, hr.body.error]).toEqual([403, "not_boss"])
+    expect((await as(TOKENS.hr).get("/late-reports?period=2026-10")).body.canDecide).toBe(false)
+  })
+
+  it("遲到通知：直屬主管＋老闆＋所有在職 platform_admin，去重、不通知本人（platform_admin 自己遲到不寄給自己）", async () => {
+    const PA = "e1000000-0000-4000-8000-0000000000aa"
+    fake.db.employees.push({ id: PA, tenant_id: TENANT_ID, user_id: "u-pa", role: "platform_admin", name: "平台管理員", dept_id: DEPT, status: "active", hire_date: "2026-01-05", terminated_at: null })
+    fake.db.notifications = []
+    const base = { tenantId: TENANT_ID, reportId: ID, workDate: "2026-10-12", punchHm: "10:30", lateMinutes: 30, reason: "捷運故障" }
+    expect(await notifyLateReport({ ...base, employeeId: EMP, employeeName: "員工甲" })).toBe(3)
+    expect((fake.db.notifications ?? []).map((n) => n.employee_id).sort()).toEqual([MGR, BOSS, PA].sort())
+    fake.db.notifications = []
+    expect(await notifyLateReport({ ...base, employeeId: PA, employeeName: "平台管理員" })).toBe(2)
+    expect((fake.db.notifications ?? []).map((n) => n.employee_id).sort()).toEqual([MGR, BOSS].sort())
   })
 
   it("老闆決定「不影響全勤」→ 再改成「影響全勤」：兩次都寫 audit", async () => {

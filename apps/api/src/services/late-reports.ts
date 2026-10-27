@@ -13,6 +13,7 @@ import { isHrRole, managedDeptIds, managerOfEmployee, type SelfEmployee } from "
 import { enqueue } from "./notify.js"
 import { writeAuditLog } from "./audit.js"
 import { PERIOD_RE, assertPeriodOpen, findClosedPeriods } from "./period-lock.js"
+import { bossNotificationRecipients, isBossOrPlatformAdmin } from "../lib/boss.js"
 
 /**
  * 遲到說明（late_reports，2026-10-11 業主拍板）。
@@ -22,7 +23,7 @@ import { PERIOD_RE, assertPeriodOpen, findClosedPeriods } from "./period-lock.js
  *     手動補登、匯入不經過這裡。
  *   • 誰看得到（lateReportScope）：老闆（tenants.features.approval.fallbackApproverEmpId）與 HR
  *     （hr_admin／platform_admin）看全公司；主管看自己管的部門（含子部門）的人；每個人都看得到自己的。
- *   • 誰能決定（decideLateReport）：只有老闆。affects＝影響全勤、exempt＝不影響；可改決定，寫 audit。
+ *   • 誰能決定（decideLateReport）：老闆或 platform_admin（2026-10-27 起；判斷在 lateReportScope.isBoss）。affects＝影響全勤、exempt＝不影響；可改決定，寫 audit。
  *   • 全勤：沒決定視為影響（lateAttendanceForPeriod → @hr/rules lateAttendanceStatus）。
  *
  * 表不存在（舊庫沒套 0061）時讀取端回空、寫入端回 null，不讓打卡或月表掛掉。
@@ -167,7 +168,7 @@ export async function attachPunchToLateReport(tenantId: string, reportId: string
   if (error) logger.warn({ tenantId, reportId, error: error.message }, "late-reports: attach punch_record_id failed")
 }
 
-/** 通知直屬主管（主管鏈第一位）與老闆；不通知本人、去重。回入列筆數。 */
+/** 通知直屬主管（主管鏈第一位）、老闆與所有 platform_admin；不通知本人、去重。回入列筆數。 */
 export async function notifyLateReport(input: {
   tenantId: string
   employeeId: string
@@ -182,7 +183,11 @@ export async function notifyLateReport(input: {
     managerOfEmployee(input.tenantId, input.employeeId),
     loadBossEmpId(input.tenantId),
   ])
-  const recipients = Array.from(new Set([manager, boss].filter((id): id is string => !!id && id !== input.employeeId)))
+  // 老闆＋所有 platform_admin（2026-10-27：平台管理員視同老闆）；不通知本人、去重。
+  const bossAudience = await bossNotificationRecipients(input.tenantId, boss, [input.employeeId])
+  const recipients = Array.from(
+    new Set([manager, ...bossAudience].filter((id): id is string => !!id && id.toLowerCase() !== input.employeeId.toLowerCase())),
+  )
   if (recipients.length === 0) return 0
   return enqueue({
     tenantId: input.tenantId,
@@ -209,14 +214,17 @@ export interface LateReportScope {
   all: boolean
   /** 不是 all 時看得到的員工（本人＋管的部門的人）。 */
   employeeIds: string[]
-  /** 是不是老闆（只有老闆能決定）。 */
+  /**
+   * 能不能決定（是否影響全勤）：老闆或 platform_admin（2026-10-27 業主拍板）。欄位名沿用 isBoss，
+   * 路由據此回 canDecide 與擋 POST /late-reports/:id/decision。
+   */
   isBoss: boolean
 }
 
 /** 呼叫者看得到哪些人的遲到說明。 */
 export async function lateReportScope(tenantId: string, self: SelfEmployee): Promise<LateReportScope> {
   const bossId = await loadBossEmpId(tenantId)
-  const isBoss = !!bossId && bossId === self.id
+  const isBoss = isBossOrPlatformAdmin(bossId, self)
   if (isBoss || isHrRole(self.role)) return { all: true, employeeIds: [], isBoss }
   const ids = new Set<string>([self.id])
   const deptIds = await managedDeptIds(tenantId, self.id)
