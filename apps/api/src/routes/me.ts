@@ -6,7 +6,7 @@ import { logger } from "../lib/logger.js"
 import { departmentsHaveManagerList, employeesHaveCompany } from "../lib/schema-compat.js"
 import { employeesHavePersonalSettings } from "../services/employee-shifts.js"
 import { normalizeEmployeeFeatures } from "../services/employee-features.js"
-import { canGrantGroupFinancials, canSeeGroupFinancials } from "../services/financial-visibility.js"
+import { canGrantGroupFinancials, canSeeGroupFinancials, canSeeGroupOverview } from "../services/financial-visibility.js"
 import { loadProjectBossEmpId } from "../services/project-scope.js"
 
 export const meRouter = Router()
@@ -90,9 +90,11 @@ async function loadOwnCompany(tenantId: string, empId: string): Promise<{ compan
  *
  * 員工所屬公司（2026-10-25，migration 0072；未套 → 兩個都 null）：`companyId`、`companyName`。
  *
- * `canSeeGroupFinancials`（2026-10-26）：看不看得到集團財務（集團總覽、專案毛利、首頁本年收入／毛利率）——
+ * `canSeeGroupFinancials`（2026-10-26）：看不看得到集團財務（專案毛利、獎金批次毛利、獎金分潤總表）——
  * 老闆／platform_admin／被授權的 hr_admin（features.seeGroupFinancials）。`canGrantGroupFinancials`：
  * 能不能在員工編輯頁授權別人（老闆／platform_admin）。見 services/financial-visibility.ts。
+ * `canSeeGroupOverview`（2026-10-27）：看不看得到首頁的集團總覽區塊與本年收入／毛利率——只有在職 platform_admin
+ * （業主：「只有平台管理員才看得到」；與 GET /group-overview 的 403 同一條規則 canSeeGroupOverview）。
  *
  * Open to any authenticated tenant member: the ESS uses it to detect HR admins
  * (to surface the back-office link) and the admin console uses it as its gate.
@@ -190,6 +192,7 @@ meRouter.get(
         companyName,
         canSeeGroupFinancials: bossLookupOk && canSeeGroupFinancials(self, bossEmpId, features),
         canGrantGroupFinancials: bossLookupOk && canGrantGroupFinancials(self, bossEmpId),
+        canSeeGroupOverview: canSeeGroupOverview({ role: data.role as string, status: data.status as string | null }),
       })
     } catch (err) {
       next(err)

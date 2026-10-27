@@ -13,10 +13,15 @@ import {
   toggleExcluded,
   yearOptions,
 } from "@/lib/group-overview";
-import { CompanyTable, DataQualityNotice, StatCards, TrendCard, type DetailState } from "./_components";
+import { CompanyTable, DataQualityNotice, StatCards, TrendCard, type DetailState } from "./_group-overview-components";
+import { GROUP_OVERVIEW_ANCHOR } from "@/lib/boss-dashboard";
 
 /**
- * 集團總覽（2026-10-11 業主拍板第一版）：跨公司彙總入帳收入、放款支出與專案毛利。只有 HR（老闆）看得到。
+ * 後台首頁的「集團總覽」區塊（2026-10-27 業主：「集團總覽的內容直接放到首頁，並且只有平台管理員才看得到」）。
+ * 原本是 /admin/group-overview 整頁（舊網址導到 /admin#group-overview）；現在由 app/admin/page.tsx 在 group 版
+ * （＝/me.canSeeGroupOverview，在職 platform_admin）才掛上，API 也只放行在職 platform_admin（其他人 403）。
+ *
+ * 集團總覽（2026-10-11 業主拍板第一版）：跨公司彙總入帳收入、放款支出與專案毛利。
  * 2026-10-25 加上人事：各公司在職人數、人事成本（薪資單應發）與「扣人事成本後」；人事依員工所屬公司歸屬，
  * 未指派公司的員工另列一列、不分攤（但計入集團合計）。口徑與資料來源見後端
  * apps/api/src/services/group-overview.ts 檔頭：
@@ -26,11 +31,19 @@ import { CompanyTable, DataQualityNotice, StatCards, TrendCard, type DetailState
  */
 
 function errorText(err: unknown): string {
-  if ((err as ApiError | undefined)?.status === 403) return "集團總覽只開放給 HR（老闆），這個帳號沒有權限。";
+  if ((err as ApiError | undefined)?.status === 403) return "集團總覽只開放給平台管理員，這個帳號沒有權限。";
   return err instanceof Error ? err.message : "載入失敗";
 }
 
-export default function GroupOverviewPage() {
+export function GroupOverviewSection({
+  onDefaultResult,
+}: {
+  /**
+   * 預設條件（今年、全年、全部公司納入）那次載入的結果：首頁頂部「本年收入」格共用這份，不另打一次 /group-overview。
+   * 成功帶 data、失敗帶 error 訊息。之後切年度／月份／公司不會再呼叫（那格固定是本年）。
+   */
+  onDefaultResult?: (result: { data: GroupOverviewResult | null; error: string | null }) => void;
+} = {}) {
   const thisYear = new Date().getFullYear();
   const years = useMemo(() => yearOptions(thisYear), [thisYear]);
 
@@ -46,24 +59,42 @@ export default function GroupOverviewPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DetailState | null>(null);
   const seq = useRef(0);
+  const onDefaultRef = useRef(onDefaultResult);
+  useEffect(() => {
+    onDefaultRef.current = onDefaultResult;
+  }, [onDefaultResult]);
 
   const load = useCallback(async () => {
     const mine = ++seq.current;
+    const isDefault = year === thisYear && month === null && excluded.length === 0;
     setLoading(true);
     setError(null);
     try {
       const r = await getGroupOverview({ year, month, exclude: excluded });
+      if (isDefault) onDefaultRef.current?.({ data: r, error: null });
       if (mine === seq.current) setData(r);
     } catch (err) {
+      if (isDefault) onDefaultRef.current?.({ data: null, error: errorText(err) });
       if (mine === seq.current) setError(errorText(err));
     } finally {
       if (mine === seq.current) setLoading(false);
     }
-  }, [year, month, excluded]);
+  }, [year, month, excluded, thisYear]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 從舊網址 /admin/group-overview 轉址（或點本年收入格）進來時網址帶 #group-overview：這一區要等 /me 確認身分後
+  // 才掛上，瀏覽器原生的錨點捲動當下找不到元素，所以第一份資料畫出來後自己捲一次。
+  const scrolled = useRef(false);
+  useEffect(() => {
+    if (scrolled.current || !data) return;
+    scrolled.current = true;
+    if (typeof window !== "undefined" && window.location.hash === `#${GROUP_OVERVIEW_ANCHOR}`) {
+      document.getElementById(GROUP_OVERVIEW_ANCHOR)?.scrollIntoView({ block: "start" });
+    }
+  }, [data]);
 
   const loadDetail = useCallback(
     async (companyId: string) => {
@@ -100,50 +131,56 @@ export default function GroupOverviewPage() {
     : null;
 
   return (
-    <>
-      {/* 手機版頁首（AdminShell）不顯示說明文字，口徑在這裡補上；桌機版已在頁首 */}
-      <p className="text-xs text-gray-500 md:hidden">{OVERVIEW_BASIS_NOTE}</p>
-
+    <section id={GROUP_OVERVIEW_ANCHOR} aria-labelledby="go-heading" className="scroll-mt-20 space-y-4 pt-2 md:space-y-6">
       <Card>
-        <div className="flex flex-wrap items-end gap-3">
-          <div>
-            <label className={labelCls} htmlFor="go-year">年度</label>
-            <select id="go-year" className={inputCls} value={year} onChange={(e) => setYear(Number(e.target.value))}>
-              {years.map((y) => (
-                <option key={y} value={y}>
-                  {y}
-                </option>
-              ))}
-            </select>
+        <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
+          <div className="min-w-0">
+            <h2 id="go-heading" className="text-base font-semibold text-gray-900">
+              集團總覽
+              <span className="ml-2 align-middle text-xs font-normal text-gray-400">僅平台管理員可見</span>
+            </h2>
+            <p className="mt-0.5 max-w-2xl text-xs text-gray-500">{OVERVIEW_BASIS_NOTE}</p>
           </div>
-          <div>
-            <label className={labelCls} htmlFor="go-month">月份</label>
-            <select
-              id="go-month"
-              className={inputCls}
-              value={month ?? ""}
-              onChange={(e) => setMonth(e.target.value === "" ? null : Number(e.target.value))}
-            >
-              {MONTH_OPTIONS.map((m) => (
-                <option key={m.label} value={m.value ?? ""}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          {data && (
+          <div className="flex flex-wrap items-end gap-3">
             <div>
-              <label className={labelCls} htmlFor="go-trend">月趨勢對象</label>
-              <select id="go-trend" className={inputCls} value={trendValue} onChange={(e) => setTrendTarget(e.target.value)}>
-                <option value="group">集團合計</option>
-                {data.companies.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
+              <label className={labelCls} htmlFor="go-year">年度</label>
+              <select id="go-year" className={inputCls} value={year} onChange={(e) => setYear(Number(e.target.value))}>
+                {years.map((y) => (
+                  <option key={y} value={y}>
+                    {y}
                   </option>
                 ))}
               </select>
             </div>
-          )}
+            <div>
+              <label className={labelCls} htmlFor="go-month">月份</label>
+              <select
+                id="go-month"
+                className={inputCls}
+                value={month ?? ""}
+                onChange={(e) => setMonth(e.target.value === "" ? null : Number(e.target.value))}
+              >
+                {MONTH_OPTIONS.map((m) => (
+                  <option key={m.label} value={m.value ?? ""}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {data && (
+              <div>
+                <label className={labelCls} htmlFor="go-trend">月趨勢對象</label>
+                <select id="go-trend" className={inputCls} value={trendValue} onChange={(e) => setTrendTarget(e.target.value)}>
+                  <option value="group">集團合計</option>
+                  {data.companies.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
         </div>
 
         {data && (
@@ -211,6 +248,6 @@ export default function GroupOverviewPage() {
           <Empty>載入中…</Empty>
         </Card>
       ) : null}
-    </>
+    </section>
   );
 }

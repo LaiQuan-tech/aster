@@ -1,6 +1,6 @@
 /**
  * 後台首頁（app/admin/page.tsx）的讀取：GET /dashboard/boss-summary 一次拿齊「4 個大數字＋需要你處理」要的數字
- * （本年收入另由 GET /group-overview 提供，僅 HR）；boss-summary 404（API 還是舊版）時退回 getPendingRequestsCount 只算假單。
+ * （本年收入與集團總覽區塊另由 GET /group-overview 提供，2026-10-27 起只有在職平台管理員）；boss-summary 404（API 還是舊版）時退回 getPendingRequestsCount 只算假單。
  */
 import { apiFetch } from "./api-client";
 
@@ -29,8 +29,8 @@ export interface BossScope {
   receivables?: boolean;
   monthDisbursements?: boolean;
   /**
-   * 2026-10-26 依身分分版才有：可看集團財務（本年收入／毛利率）；false → 首頁不打 /group-overview、第 1 格改 HR 日常數字。
-   * 舊 API 沒回（undefined）→ 前端退回舊判斷（HR／平台管理員＝可看）。
+   * 2026-10-26 依身分分版才有：可看集團總覽（本年收入／毛利率、首頁集團總覽區塊；2026-10-27 起只有在職 platform_admin，
+   * 欄位名沿用）；false → 首頁不打 /group-overview、第 1 格改 HR 日常數字。舊 API 沒回（undefined）→ 前端退回「角色是 platform_admin」。
    */
   groupFinancials?: boolean;
   /** 呼叫者是老闆（features.approval.fallbackApproverEmpId）或 platform_admin（2026-10-27 起視同老闆）→ 有 bossTodo。舊 API 沒回＝不是。 */

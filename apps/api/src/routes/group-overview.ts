@@ -1,8 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
-import { resolveSelf } from "../middleware/scope.js"
-import { loadGroupFinancialsAccess } from "../services/financial-visibility.js"
+import { loadGroupOverviewAccess } from "../services/financial-visibility.js"
 import { todayKey } from "../lib/tz.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import {
@@ -22,9 +21,10 @@ export const groupOverviewRouter = Router()
  * 集團總覽（2026-10-11 業主拍板第一版）：跨公司彙總入帳收入、放款支出與專案毛利。
  * 口徑（未稅、入帳日／匯款日歸月、關係企業剔除、公司歸屬）與查證過程寫在 services/group-overview.ts 檔頭。
  *
- * 權限（2026-10-26 業主：老闆與一般 HR 分開）：老闆（fallbackApproverEmpId）、platform_admin、
- * 被授權的 hr_admin（employees.features.seeGroupFinancials）；其他人（含未授權 HR、會計）403
- * `group_financials_forbidden`。見 services/financial-visibility.ts。
+ * 權限（2026-10-27 業主：「集團總覽的內容直接放到首頁，並且只有平台管理員才看得到」）：只有在職的
+ * platform_admin（role 精確比對＋status='active'）；其他人——包括不是 platform_admin 的老闆、被授權看集團財務的
+ * hr_admin（features.seeGroupFinancials）、會計、離職的 platform_admin——一律 403 `group_overview_forbidden`。
+ * 見 services/financial-visibility.ts canSeeGroupOverview。前端畫在後台首頁（/admin#group-overview）。
  *
  *   GET /group-overview?year=YYYY[&month=MM][&exclude=<companyId,...>]
  *     各公司入帳收入／已開票（參考）／放款支出／毛利／毛利率／其中關係企業往來，集團合計（剔除關係企業
@@ -34,13 +34,12 @@ export const groupOverviewRouter = Router()
  *     下鑽：revenue 列專案（編號、名稱、客戶、入帳金額）、expense 列廠商（廠商、放款金額、筆數），
  *     依金額排序、最多 50 筆。
  */
-async function requireGroupFinancials(req: Request, res: Response, next: NextFunction): Promise<void> {
+async function requireGroupOverview(req: Request, res: Response, next: NextFunction): Promise<void> {
   const tenantId = res.locals.tenantId as string
   const userId = req.auth?.userId
   try {
-    const self = userId ? await resolveSelf(tenantId, userId) : null
-    if (!self || !(await loadGroupFinancialsAccess(tenantId, self)).canSee) {
-      res.status(403).json({ error: "group_financials_forbidden" })
+    if (!userId || !(await loadGroupOverviewAccess(tenantId, userId))) {
+      res.status(403).json({ error: "group_overview_forbidden" })
       return
     }
     next()
@@ -49,7 +48,7 @@ async function requireGroupFinancials(req: Request, res: Response, next: NextFun
   }
 }
 
-const guards = [requireAuth, requireTenant, requireGroupFinancials] as const
+const guards = [requireAuth, requireTenant, requireGroupOverview] as const
 
 /** 共用的 year／month 參數解析；year 省略時取租戶當地今年。 */
 async function resolvePeriod(

@@ -22,12 +22,15 @@
  *     真正的守門在 API（requireFinance／canSeeBonus）。
  *   - `isAdminPathAllowed({ pathname, roleNav, modules })`（2026-09-23 驗收修正）：直開網址時
  *     這個角色能不能看這一頁；AdminShell 不渲染未開放的頁、首頁卡片依它隱藏。HR 一律 true。
- *   - `AdminTab.hrOnly`（2026-10-11 集團總覽）：只給 HR／平台管理員的分頁。帶了 roleNav（會計）就一律不列，
+ *   - `AdminTab.hrOnly`（2026-10-11 集團總覽起；集團總覽 2026-10-27 已移到首頁，現在是「獎金分潤」）：只給 HR／平台管理員的分頁。帶了 roleNav（會計）就一律不列，
  *     即使租戶自訂的會計範圍沒限縮該分區的分頁；直開網址同樣走 isAdminPathAllowed 擋掉。
- *   - `AdminTab.groupFinancials`（2026-10-26 老闆與一般 HR 分開）：集團財務頁（集團總覽；2026-10-27 起另有「獎金分潤」）。只有 /me.canSeeGroupFinancials
+ *   - `AdminTab.groupFinancials`（2026-10-26 老闆與一般 HR 分開）：集團財務頁（現在是「獎金分潤」）。只有 /me.canSeeGroupFinancials
  *     （老闆／platform_admin／被授權的 HR）才列、直開才放行——tabsForSection／isAdminPathAllowed 帶
  *     `canSeeGroupFinancials: false` 時剔除。讀 /me 走 canSeeGroupFinancialsOf（舊 API 缺欄位時退回 HR 角色）。
- *     API 守門在 routes/group-overview.ts（403 group_financials_forbidden）。
+ *     API 守門在 routes/bonus-sheet.ts（403 group_financials_forbidden）。
+ *   - 集團總覽（2026-10-27 業主：「集團總覽的內容直接放到首頁，並且只有平台管理員才看得到」）：不再是分頁，
+ *     畫在後台首頁 /admin#group-overview，只給 /me.canSeeGroupOverview（在職 platform_admin）；舊網址
+ *     /admin/group-overview 走 ADMIN_REDIRECTS 導到首頁那一區。API 守門在 routes/group-overview.ts（403 group_overview_forbidden）。
  */
 
 export type AdminSectionKey =
@@ -220,15 +223,6 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       href: "/admin/bonus-sheet",
       title: "專案獎金總表",
       desc: "版面同公司現行「專案獎金總表」（未結案／已結案）；本次欄依所選獎金批次或基準日。含稅＝系統未稅金額×(1＋營業稅率)，總獎金＝含稅×獎金比例",
-      hrOnly: true,
-      groupFinancials: true,
-    },
-    {
-      key: "groupOverview",
-      label: "集團總覽",
-      href: "/admin/group-overview",
-      title: "集團總覽",
-      desc: "收入＝實際入帳（未稅）；支出＝已匯款放款＋未經放款單的已付複委託（代扣前）；專案毛利不含人事成本",
       hrOnly: true,
       groupFinancials: true,
     },
@@ -652,6 +646,8 @@ export const ADMIN_REDIRECTS: readonly AdminRedirect[] = [
   { source: "/admin/projects/annual", destination: "/admin/projects" },
   { source: "/admin/projects/alerts", destination: "/admin/projects" },
   { source: "/admin/stamp-duty", destination: "/admin/projects" },
+  // 2026-10-27 集團總覽分頁移到首頁（只給平台管理員）：舊網址導到首頁的集團總覽區塊。
+  { source: "/admin/group-overview", destination: "/admin#group-overview" },
 ];
 
 /* ------------------------------------------------------------- 路由表 --- */
@@ -874,7 +870,7 @@ export function tabsForSection(
 
 /**
  * /me 的 canSeeGroupFinancials（2026-10-26）。舊版 API 沒有這個欄位 → 退回改版前的規則（HR／平台管理員），
- * 免得前端先上線時 HR 的集團總覽入口消失；新 API 一定會回布林。
+ * 免得前端先上線時 HR 的獎金分潤入口消失；新 API 一定會回布林。
  */
 export function canSeeGroupFinancialsOf(me: { role: string; canSeeGroupFinancials?: boolean } | null | undefined): boolean {
   if (!me) return false;
@@ -890,7 +886,7 @@ export function isGroupFinancialsAdminPath(pathname: string): boolean {
 }
 
 /**
- * 「會計可用範圍」設定（設定 → 進階功能）列出來給人勾的分頁：**排除 `hrOnly`**（目前是財務分區的集團總覽）。
+ * 「會計可用範圍」設定（設定 → 進階功能）列出來給人勾的分頁：**排除 `hrOnly`**（目前是財務分區的獎金分潤）。
  * hrOnly 的分頁只要帶了 roleNav 就一律不列、直開網址也不放行（見 tabsForSection／isAdminPathAllowed），
  * 勾了也無效，列出來只會誤導人以為能開放給會計。順序照表。
  */
@@ -902,7 +898,7 @@ export function configurableTabsForRole(section: AdminSectionKey): AdminTab[] {
  * 「會計可用範圍」勾／取消單一分頁後，該分區存起來的分頁清單（照表順序）：
  *   • 只算可勾選的分頁（configurableTabsForRole，排除 hrOnly）；
  *   • `current` 是這個分區目前存的清單，undefined＝沒有 tabs 鍵＝該區全部分頁，先展開成完整清單再加減；
- *   • 清單裡殘留的 hrOnly 或不認得的 key 順手丟掉；勾一個不可勾選的 key（例如 groupOverview）不會加進去。
+ *   • 清單裡殘留的 hrOnly 或不認得的 key 順手丟掉；勾一個不可勾選的 key（例如 bonusSheet）不會加進去。
  */
 export function nextRoleTabs(
   section: AdminSectionKey,

@@ -7,7 +7,7 @@ vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase
 
 import { employeesRouter } from "../routes/employees.js"
 import { meRouter } from "../routes/me.js"
-import { canGrantGroupFinancials, canSeeGroupFinancials, loadGroupFinancialsAccess } from "../services/financial-visibility.js"
+import { canGrantGroupFinancials, canSeeGroupFinancials, canSeeGroupOverview, loadGroupFinancialsAccess } from "../services/financial-visibility.js"
 import { normalizeEmployeeFeatures } from "../services/employee-features.js"
 import { fake, TENANT_ID } from "./helpers/fake-supabase.js"
 
@@ -118,6 +118,28 @@ describe("GET /me — canSeeGroupFinancials／canGrantGroupFinancials", () => {
     expect(await me(T.boss)).toMatchObject({ canSeeGroupFinancials: false, canGrantGroupFinancials: false })
     expect(await me(T.grantedHr)).toMatchObject({ canSeeGroupFinancials: true })
     expect(await me(T.platform)).toMatchObject({ canSeeGroupFinancials: true, canGrantGroupFinancials: true })
+  })
+})
+
+describe("集團總覽可見性（2026-10-27：只有在職 platform_admin）", () => {
+  it("canSeeGroupOverview 純函式：只認 role=platform_admin（精確）＋status=active", () => {
+    expect(canSeeGroupOverview({ role: "platform_admin", status: "active" })).toBe(true)
+    expect(canSeeGroupOverview({ role: "platform_admin", status: "inactive" })).toBe(false)
+    expect(canSeeGroupOverview({ role: "platform_admin", status: null })).toBe(false)
+    expect(canSeeGroupOverview({ role: "Platform_Admin", status: "active" })).toBe(false)
+    expect(canSeeGroupOverview({ role: "hr_admin", status: "active" })).toBe(false)
+    expect(canSeeGroupOverview(null)).toBe(false)
+  })
+
+  it("GET /me canSeeGroupOverview：platform_admin true；老闆、授權 HR、會計、離職 platform_admin false（canSeeGroupFinancials 照舊）", async () => {
+    fake.db.employees!.push(row(emp(8), "inactive-platform-user", "platform_admin"))
+    fake.db.employees = fake.db.employees!.map((e) => (e.user_id === "inactive-platform-user" ? { ...e, status: "inactive" } : e))
+    const me = async (token: string) => (await as(token)(request(app).get("/me"))).body
+    expect(await me(T.platform)).toMatchObject({ canSeeGroupOverview: true, canSeeGroupFinancials: true })
+    expect(await me(T.boss)).toMatchObject({ canSeeGroupOverview: false, canSeeGroupFinancials: true })
+    expect(await me(T.grantedHr)).toMatchObject({ canSeeGroupOverview: false, canSeeGroupFinancials: true })
+    expect(await me(T.accountant)).toMatchObject({ canSeeGroupOverview: false })
+    expect(await me("inactive-platform-user")).toMatchObject({ canSeeGroupOverview: false })
   })
 })
 

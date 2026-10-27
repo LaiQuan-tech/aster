@@ -723,7 +723,7 @@ export default function EmployeeDetailPage() {
                 label="可看集團財務"
                 hint={
                   form.role === "hr_admin"
-                    ? "集團總覽、專案毛利、首頁本年收入／毛利率。只有老闆或平台管理員能設定。"
+                    ? "專案毛利、獎金批次的毛利欄、獎金分潤總表。集團總覽（首頁）只有平台管理員看得到，不受這個開關影響。只有老闆或平台管理員能設定。"
                     : "只對 HR 有效（這位目前不是 HR，勾了也看不到）。只有老闆或平台管理員能設定。"
                 }
                 checked={form.seeGroupFinancials}

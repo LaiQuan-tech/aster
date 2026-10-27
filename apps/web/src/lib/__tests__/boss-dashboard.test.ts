@@ -8,6 +8,7 @@ import {
   headlineTiles,
   homeLinkModuleEnabled,
   homeViewerOf,
+  GROUP_OVERVIEW_ANCHOR,
   needsAttention,
   readEnumParam,
   readFlagParam,
@@ -122,17 +123,17 @@ describe("頂部大數字 headlineTiles", () => {
     const tiles = headlineTiles({ viewer: "group", summary: s(hrSummary()), overview: done(overview(1)), pendingLeave: NONE, linkOn: HR_LINK });
     expect(tiles.map((t) => t.key)).toEqual(["revenue", "approvals", "receivables", "people"]);
     const [rev, appr, recv, people] = tiles;
-    expect(rev).toMatchObject({ label: "本年收入", value: "1,234.6 萬", sub: "毛利率 41.3%", note: null, href: "/admin/group-overview" });
+    expect(rev).toMatchObject({ label: "本年收入", value: "1,234.6 萬", sub: "毛利率 41.3%", note: null, href: "/admin#group-overview" });
     expect(appr).toMatchObject({ label: "待簽核", value: "47", sub: "假單 44・放款 3", href: bossLinks.leaveApprovals, tone: "attention" });
     expect(recv).toMatchObject({ label: "未收款", value: "250 萬", sub: "逾期 4 筆", href: bossLinks.receivables, tone: "attention" });
     expect(people).toMatchObject({ label: "在職人數", value: "38", sub: "本月 +2 / −1", href: bossLinks.employees });
   });
 
-  it("多家公司才在本年收入下加「N 家公司・點看各公司」（停用無數字、被排除的不算）", () => {
+  it("多家公司才在本年收入下加「N 家公司・往下看各公司」（停用無數字、被排除的不算）", () => {
     expect(activeCompanyCount(overview(1))).toBe(1);
     expect(activeCompanyCount(overview(3))).toBe(3);
     const [rev] = headlineTiles({ viewer: "group", summary: s(hrSummary()), overview: done(overview(3)), pendingLeave: NONE, linkOn: HR_LINK });
-    expect(rev?.note).toBe("3 家公司・點看各公司");
+    expect(rev?.note).toBe("3 家公司・往下看各公司");
   });
 
   it("會計：本月放款支出／待簽核（只有放款）／未收款／本月出勤異常；不見集團與人事", () => {
@@ -290,19 +291,31 @@ describe("依身分分版（2026-10-26：老闆／一般 HR／會計／平台管
   const accountantSum = withScope(accSummary(), { groupFinancials: false, isBoss: false }, { bossTodo: null });
   const PLATFORM_LINK = (href: string) => isAdminPathAllowed({ pathname: href, roleNav: roleNavOf("platform_admin", null), modules: null });
 
-  it("homeViewerOf：/me 旗標優先，其次 boss-summary scope；都不知道 → null；舊 API／失敗退回舊判斷；會計一律 finance", () => {
-    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: true, summary: loading() })).toBe("group");
-    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: false, summary: s(bossSum) })).toBe("hr");
-    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: undefined, summary: s(plainHrSum) })).toBe("hr");
-    expect(homeViewerOf({ role: "platform_admin", canSeeGroupFinancials: undefined, summary: s(platformSum) })).toBe("group");
-    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: undefined, summary: loading() })).toBeNull();
+  it("homeViewerOf（2026-10-27 只有平台管理員）：platform_admin 看 /me.canSeeGroupOverview，其次 boss-summary scope；都不知道 → null；舊 API／失敗退回 platform_admin＝group；hr_admin 一律 hr；會計一律 finance", () => {
+    // platform_admin
+    expect(homeViewerOf({ role: "platform_admin", canSeeGroupOverview: true, summary: loading() })).toBe("group");
+    expect(homeViewerOf({ role: "platform_admin", canSeeGroupOverview: false, summary: s(platformSum) })).toBe("hr"); // 例如離職
+    expect(homeViewerOf({ role: "platform_admin", canSeeGroupOverview: undefined, summary: s(platformSum) })).toBe("group");
+    expect(homeViewerOf({ role: "platform_admin", canSeeGroupOverview: undefined, summary: s(plainHrSum) })).toBe("hr");
+    expect(homeViewerOf({ role: "platform_admin", canSeeGroupOverview: undefined, summary: loading() })).toBeNull();
     const outdated: SummaryLoad = { loading: false, error: null, data: null, outdated: true };
-    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: undefined, summary: outdated })).toBe("group");
-    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: undefined, summary: failed() })).toBe("group");
-    // 上一版 API（scope 沒有 groupFinancials）→ 舊判斷
-    expect(homeViewerOf({ role: "hr_admin", canSeeGroupFinancials: undefined, summary: s(hrSummary()) })).toBe("group");
-    expect(homeViewerOf({ role: "accountant", canSeeGroupFinancials: undefined, summary: loading() })).toBe("finance");
-    expect(homeViewerOf({ role: "accountant", canSeeGroupFinancials: true, summary: s(accountantSum) })).toBe("finance");
+    expect(homeViewerOf({ role: "platform_admin", canSeeGroupOverview: undefined, summary: outdated })).toBe("group");
+    expect(homeViewerOf({ role: "platform_admin", canSeeGroupOverview: undefined, summary: failed() })).toBe("group");
+    // hr_admin（含老闆、被授權看集團財務的 HR）：不論旗標／scope 怎麼說都是 hr——收入格與集團總覽區塊不露
+    expect(homeViewerOf({ role: "hr_admin", canSeeGroupOverview: true, summary: s(bossSum) })).toBe("hr");
+    expect(homeViewerOf({ role: "hr_admin", canSeeGroupOverview: undefined, summary: s(bossSum) })).toBe("hr");
+    expect(homeViewerOf({ role: "hr_admin", canSeeGroupOverview: undefined, summary: loading() })).toBe("hr");
+    expect(homeViewerOf({ role: "hr_admin", canSeeGroupOverview: undefined, summary: outdated })).toBe("hr");
+    expect(homeViewerOf({ role: "hr_admin", canSeeGroupOverview: undefined, summary: failed() })).toBe("hr");
+    // 會計
+    expect(homeViewerOf({ role: "accountant", canSeeGroupOverview: undefined, summary: loading() })).toBe("finance");
+    expect(homeViewerOf({ role: "accountant", canSeeGroupOverview: true, summary: s(accountantSum) })).toBe("finance");
+  });
+
+  it("本年收入格連到同頁的集團總覽區塊（#group-overview），不受 linkOn 影響", () => {
+    expect(bossLinks.groupOverview).toBe(`/admin#${GROUP_OVERVIEW_ANCHOR}`);
+    const [rev] = headlineTiles({ viewer: "group", summary: s(platformSum), overview: done(overview(1)), pendingLeave: NONE, linkOn: () => false });
+    expect(rev).toMatchObject({ key: "revenue", href: "/admin#group-overview" });
   });
 
   it("老闆：4 格照舊（本年收入／待簽核／未收款／在職人數）；清單最前面是獎金批次待核准、遲到說明待決定", () => {

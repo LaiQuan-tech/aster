@@ -55,7 +55,8 @@ const slip = (employee_id: string, period: string, gross: number | string, statu
 
 function seed() {
   fake.db.employees = [
-    { id: E_HR, tenant_id: TENANT_ID, user_id: HR_TOKEN, role: "hr_admin", status: "active", company_id: null, features: { seeGroupFinancials: true } },
+    // 呼叫者：在職 platform_admin（2026-10-27 起集團總覽只開給平台管理員）；未指派公司，計入「未指派」人數。
+    { id: E_HR, tenant_id: TENANT_ID, user_id: HR_TOKEN, role: "platform_admin", status: "active", company_id: null, features: {} },
     { id: E_A1, tenant_id: TENANT_ID, user_id: null, role: "employee", status: "active", company_id: CO_A },
     { id: E_A2, tenant_id: TENANT_ID, user_id: null, role: "employee", status: "active", company_id: CO_A },
     { id: E_A_LEFT, tenant_id: TENANT_ID, user_id: null, role: "employee", status: "inactive", hire_date: "2025-01-01", terminated_at: "2026-06-30", company_id: CO_A },

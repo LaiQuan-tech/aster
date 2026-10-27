@@ -195,7 +195,7 @@ app.use(dutyRostersRouter) // /duty-rosters*（M8 值日／總機；WP8）
 app.use(profileChangeRequestsRouter) // /profile-change-requests*（W6 員工改資料審核；WP8）
 app.use(internalCronRouter) // /internal/leave/annual-grant、/internal/calendar/holiday-import（WP9；排程端點）
 // 2026-10-11 集團總覽
-app.use(groupOverviewRouter) // /group-overview、/group-overview/detail（跨公司入帳收入／放款支出／專案毛利；HR）
+app.use(groupOverviewRouter) // /group-overview、/group-overview/detail（跨公司入帳收入／放款支出／專案毛利；只有在職 platform_admin）
 // 2026-10-27 獎金分潤總表（版面同公司「專案獎金總表」；集團財務權限）
 app.use(bonusSheetRouter) // /bonus-sheet、/bonus-sheet/export.xlsx
 

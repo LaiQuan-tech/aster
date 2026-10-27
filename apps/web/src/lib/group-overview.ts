@@ -1,5 +1,5 @@
 /**
- * 集團總覽（/admin/group-overview）的純函式：金額／百分比格式、查詢字串、公司勾選、月趨勢圖的幾何。
+ * 集團總覽（後台首頁 #group-overview 區塊；2026-10-27 前是 /admin/group-overview）的純函式：金額／百分比格式、查詢字串、公司勾選、月趨勢圖的幾何。
  * 全部無 React、無 IO，有 vitest（lib/__tests__/group-overview.test.ts）。
  * 後端口徑見 apps/api/src/services/group-overview.ts 檔頭；型別在 lib/group-overview-api.ts。
  *

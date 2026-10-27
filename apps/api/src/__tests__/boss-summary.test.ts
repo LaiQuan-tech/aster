@@ -544,7 +544,7 @@ describe("依身分分版：scope.isBoss／scope.groupFinancials／bossTodo（20
     expect(acc.body.bossTodo).toBeNull()
   })
 
-  it("路由：scope.groupFinancials 接 canSeeGroupFinancials——老闆 true、一般 HR false、被授權的 HR true、會計 false", async () => {
+  it("路由：scope.groupFinancials＝可看集團總覽（2026-10-27 只有在職 platform_admin）——老闆（hr_admin）、被授權的 HR、會計、一般 HR、離職 platform_admin 都 false", async () => {
     seed({ approval: { fallbackApproverEmpId: EMP_A } })
     const plainHr = await get("/dashboard/boss-summary", HR_TOKEN)
     expect(plainHr.status).toBe(200)
@@ -555,13 +555,26 @@ describe("依身分分版：scope.isBoss／scope.groupFinancials／bossTodo（20
     const acc = await get("/dashboard/boss-summary", ACC_TOKEN)
     expect(acc.body.scope.groupFinancials).toBe(false)
 
+    // 被授權看集團財務的 HR：集團總覽仍看不到
     seed({ approval: { fallbackApproverEmpId: EMP_A } })
     fake.db.employees = fake.db.employees.map((e) => (e.id === HR_ID ? { ...e, features: { seeGroupFinancials: true } } : e))
     const granted = await get("/dashboard/boss-summary", HR_TOKEN)
-    expect(granted.body.scope).toMatchObject({ groupFinancials: true, isBoss: false })
+    expect(granted.body.scope).toMatchObject({ groupFinancials: false, isBoss: false })
 
+    // 老闆（hr_admin、不是 platform_admin）：isBoss 但看不到集團總覽
     seed({ approval: { fallbackApproverEmpId: HR_ID } })
     const boss = await get("/dashboard/boss-summary", HR_TOKEN)
-    expect(boss.body.scope).toMatchObject({ groupFinancials: true, isBoss: true })
+    expect(boss.body.scope).toMatchObject({ groupFinancials: false, isBoss: true })
+
+    // 在職 platform_admin：看得到
+    seed({ approval: { fallbackApproverEmpId: EMP_A } })
+    fake.db.employees = fake.db.employees.map((e) => (e.id === HR_ID ? { ...e, role: "platform_admin", status: "active" } : e))
+    const pa = await get("/dashboard/boss-summary", HR_TOKEN)
+    expect(pa.body.scope).toMatchObject({ groupFinancials: true, isBoss: true })
+
+    // 離職的 platform_admin：看不到
+    fake.db.employees = fake.db.employees.map((e) => (e.id === HR_ID ? { ...e, status: "inactive" } : e))
+    const left = await get("/dashboard/boss-summary", HR_TOKEN)
+    expect(left.body.scope.groupFinancials).toBe(false)
   })
 })

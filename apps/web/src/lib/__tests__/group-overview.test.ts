@@ -30,7 +30,6 @@ import {
   yearOptions,
   type TrendInputPoint,
 } from "../group-overview";
-import { ADMIN_TABS } from "../admin-nav";
 
 /** 12 個月全 0 的趨勢點，再蓋上指定月份。 */
 function monthly(overrides: Record<number, Partial<TrendInputPoint>> = {}): TrendInputPoint[] {
@@ -45,9 +44,7 @@ function monthly(overrides: Record<number, Partial<TrendInputPoint>> = {}): Tren
 }
 
 describe("口徑文字與導覽一致", () => {
-  it("頁首口徑與 admin-nav 集團總覽分頁的 desc 同一句；單一公司提示含新增公司的去處", () => {
-    const tab = ADMIN_TABS.finance.find((t) => t.key === "groupOverview");
-    expect(tab?.desc).toBe(OVERVIEW_BASIS_NOTE);
+  it("口徑文字（首頁集團總覽區塊標題下方）；單一公司提示含新增公司的去處", () => {
     expect(OVERVIEW_BASIS_NOTE).toBe("收入＝實際入帳（未稅）；支出＝已匯款放款＋未經放款單的已付複委託（代扣前）；專案毛利不含人事成本");
     expect(SINGLE_COMPANY_HINT).toContain("名冊 → 公司主體");
     expect(SINGLE_COMPANY_HINT).toContain("舊專案未填承接公司者計入預設公司");

@@ -7,7 +7,9 @@
  *      可看集團財務：本年收入／待簽核／未收款／在職人數；一般 HR：待簽核／本月出勤異常／未收款／在職人數；
  *      會計：本月放款支出／待簽核／未收款／本月出勤異常。
  *   2. 「需要你處理」清單（todoItems）：只列數量 > 0 的項目，一行一項；老闆多兩項專屬待辦（獎金批次待核准、遲到說明待決定）放最前。
- * 資料：GET /dashboard/boss-summary（全部角色）＋ GET /group-overview（僅可看集團財務者，只取本年收入與毛利率）。
+ *   3. 集團總覽區塊（2026-10-27 業主：「集團總覽的內容直接放到首頁，並且只有平台管理員才看得到」）：原本的
+ *      /admin/group-overview 整頁搬到首頁下方（#group-overview），只給 group 版（＝在職 platform_admin）。
+ * 資料：GET /dashboard/boss-summary（全部角色）＋ GET /group-overview（僅 group 版：本年收入格與集團總覽區塊）。
  * 每格各自降級：讀不到就顯示「—」不擋其他格；boss-summary 404（API 舊版）時待簽核退回只算假單。
  */
 import { ADMIN_TABS, isModuleEnabled, resolveAdminPath, type AdminModulesConfig } from "./admin-nav";
@@ -65,8 +67,12 @@ export interface GroupOverviewLite {
 
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
+/** 首頁集團總覽區塊的錨點 id（舊網址 /admin/group-overview 也導到這裡，見 admin-nav ADMIN_REDIRECTS）。 */
+export const GROUP_OVERVIEW_ANCHOR = "group-overview";
+
 export const bossLinks = {
-  groupOverview: "/admin/group-overview",
+  /** 同頁錨點：本年收入格點下去捲到首頁下方的集團總覽區塊。 */
+  groupOverview: `/admin#${GROUP_OVERVIEW_ANCHOR}`,
   leaveApprovals: "/admin/approvals?status=pending",
   disbursementApprovals: "/admin/disbursements/approvals?scope=all",
   disbursements: "/admin/disbursements",
@@ -102,29 +108,33 @@ export interface HeadlineTile {
 }
 
 /**
- * 首頁版本（2026-10-26 業主：老闆與一般 HR 分開）：
- *   • group＝可看集團財務（老闆、看得到集團財務的 HR、平台管理員）：本年收入／待簽核／未收款／在職人數；
- *   • hr＝一般 HR（看不到集團財務）：待簽核／本月出勤異常／未收款／在職人數——不顯示收入、毛利率，也不打 /group-overview；
+ * 首頁版本（2026-10-26 業主：老闆與一般 HR 分開；2026-10-27 起 group 只給平台管理員）：
+ *   • group＝在職 platform_admin（/me.canSeeGroupOverview）：本年收入／待簽核／未收款／在職人數＋下方集團總覽區塊；
+ *   • hr＝其他 HR（含不是 platform_admin 的老闆、被授權看集團財務的 HR）：待簽核／本月出勤異常／未收款／在職人數——
+ *     不顯示收入、毛利率，也不打 /group-overview；
  *   • finance＝會計（維持現狀）：本月放款支出／待簽核／未收款／本月出勤異常。
  * 老闆專屬待辦不看版本，看 summary.bossTodo（後端 scope.isBoss＝老闆或 platform_admin 才給；todoItems）。
  */
 export type HomeViewer = "group" | "hr" | "finance";
 
 /**
- * 決定首頁版本。可不可以看集團財務：先看 /me.canSeeGroupFinancials（最早知道，收入那格不用等 boss-summary），
- * 沒有就看 boss-summary 的 scope.groupFinancials；兩個都還沒有 → null（畫骨架、先不打 /group-overview）。
- * 舊 API（boss-summary 404、或 scope 沒有 groupFinancials 欄）／boss-summary 失敗 → 退回舊判斷（HR／平台管理員＝可看）。
- * 會計（及其他非 HR 角色）一律 finance。
+ * 決定首頁版本。可不可以看集團總覽：先看 /me.canSeeGroupOverview（最早知道，收入那格不用等 boss-summary），
+ * 沒有就看 boss-summary 的 scope.groupFinancials（2026-10-27 起後端同樣只給在職 platform_admin）；兩個都還沒有 → null
+ * （畫骨架、先不打 /group-overview）。舊 API／boss-summary 失敗 → 退回「角色是 platform_admin」（不再含一般 HR；
+ * 真正的防線是 API 的 403）。會計（及其他非 HR 角色）一律 finance。
+ * 刻意不看 /me.canSeeGroupFinancials（那是專案毛利／獎金分潤的授權，老闆與授權 HR 也是 true）。
  */
 export function homeViewerOf(input: {
   role: string | null | undefined;
-  /** /me.canSeeGroupFinancials；舊 API 沒有 → undefined。 */
-  canSeeGroupFinancials: boolean | null | undefined;
+  /** /me.canSeeGroupOverview；舊 API 沒有 → undefined。 */
+  canSeeGroupOverview: boolean | null | undefined;
   summary: SummaryLoad;
 }): HomeViewer | null {
-  const { role, canSeeGroupFinancials, summary } = input;
+  const { role, canSeeGroupOverview, summary } = input;
   if (role !== "hr_admin" && role !== "platform_admin") return "finance";
-  if (typeof canSeeGroupFinancials === "boolean") return canSeeGroupFinancials ? "group" : "hr";
+  // 只有 platform_admin 可能是 group：hr_admin 不論旗標怎麼說都是 hr（防舊 API／欄位錯置時把收入格露給 HR）。
+  if (role !== "platform_admin") return "hr";
+  if (typeof canSeeGroupOverview === "boolean") return canSeeGroupOverview ? "group" : "hr";
   const fromSummary = summary.data?.scope.groupFinancials;
   if (typeof fromSummary === "boolean") return fromSummary ? "group" : "hr";
   if (summary.loading) return null;
@@ -166,8 +176,9 @@ export function headlineTiles(input: {
       loading: overview.loading,
       value: fmtWan(o?.group.revenue),
       sub: o ? `毛利率 ${fmtPct1(o.group.grossMarginPct)}` : null,
-      note: n > 1 ? `${n} 家公司・點看各公司` : null,
-      href: href(bossLinks.groupOverview),
+      note: n > 1 ? `${n} 家公司・往下看各公司` : null,
+      // 同頁錨點（首頁下方的集團總覽區塊），不經 linkOn——看得到這格的人（group 版）一定看得到那一區。
+      href: bossLinks.groupOverview,
       tone: "normal",
     });
   };
