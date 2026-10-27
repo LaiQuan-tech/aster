@@ -2105,14 +2105,18 @@ export async function payDisbursement(
       withheld_amount: num(a.withheld_amount) ?? 0,
     })),
   )
+  // 條件更新（狀態仍是讀到的那個）：兩個請求同時付同一張單（例如批次放款逾時重按）時，
+  // 後到的那個更新不到任何列 → 409 already_paid，不會重複通知／寫稽核／重算獎金。
   const { data, error } = await supabaseAdmin
     .from("disbursements")
     .update({ status: "paid", paid_on: paidOn, paid_by_emp_id: actor.empId, updated_at: new Date().toISOString() })
     .eq("tenant_id", tenantId)
     .eq("id", id)
+    .eq("status", current.status)
     .select(await disbursementCols())
-    .single()
-  if (error || !data) throw new Error(`payDisbursement: ${error?.message}`)
+    .maybeSingle()
+  if (error) throw new Error(`payDisbursement: ${error.message}`)
+  if (!data) throw new DisbursementError(409, "already_paid")
   const row = data as unknown as DisbursementRow
   await notifyProjectLeads(tenantId, row, allocations)
   await writeAuditLog({

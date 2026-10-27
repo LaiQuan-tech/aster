@@ -99,12 +99,18 @@ export function legacyGroupFinancials(role: string | null | undefined): boolean 
 /** 會計預設可見範圍——與 web lib/admin-nav.ts ACCOUNTANT_DEFAULT_NAV 同步。 */
 const ACCOUNTANT_DEFAULT_SECTIONS: readonly string[] = ["home", "finance", "attendance", "payroll", "people", "settings"]
 const ACCOUNTANT_DEFAULT_TABS: Readonly<Record<string, readonly string[]>> = {
-  finance: ["projects", "overview", "receivables", "disbursements", "reports", "directory"],
+  finance: ["projects", "disbursements", "directory"],
   attendance: ["sheets"],
   payroll: ["expenses", "advances"],
   people: ["employees"],
   settings: ["optionLists"],
 }
+
+/**
+ * 已合併掉的舊分頁 key → 承接它的分頁（與 web lib/admin-nav.ts LEGACY_TAB_ALIASES 同步）。
+ * 2026-10-27：receivables（請款與未收款）併入 disbursements（請款與放款）。
+ */
+const LEGACY_TAB_ALIASES: Readonly<Record<string, string>> = { receivables: "disbursements" }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v)
@@ -119,7 +125,7 @@ export function accountantTabAllowed(features: unknown, section: string, tab: st
   const roles = isRecord(features) ? features.roles : null
   const raw = isRecord(roles) ? roles.accountant : null
   if (!isRecord(raw)) {
-    return ACCOUNTANT_DEFAULT_SECTIONS.includes(section) && (ACCOUNTANT_DEFAULT_TABS[section]?.includes(tab) ?? true)
+    return ACCOUNTANT_DEFAULT_SECTIONS.includes(section) && (ACCOUNTANT_DEFAULT_TABS[section]?.includes(LEGACY_TAB_ALIASES[tab] ?? tab) ?? true)
   }
   const sections = Array.isArray(raw.sections)
     ? raw.sections.filter((s): s is string => typeof s === "string")
@@ -127,7 +133,8 @@ export function accountantTabAllowed(features: unknown, section: string, tab: st
   if (!sections.includes(section)) return false
   const tabs = isRecord(raw.tabs) ? raw.tabs[section] : undefined
   if (!Array.isArray(tabs)) return true
-  return tabs.includes(tab)
+  const want = LEGACY_TAB_ALIASES[tab] ?? tab
+  return tabs.some((t) => typeof t === "string" && (LEGACY_TAB_ALIASES[t] ?? t) === want)
 }
 
 export function bossSummaryScope(role: string | null | undefined, features: unknown): BossRoleScope {
@@ -150,7 +157,8 @@ export function bossSummaryScope(role: string | null | undefined, features: unkn
       attendance: accountantTabAllowed(features, "attendance", "sheets"),
       overtime: false,
       people: false,
-      receivables: accountantTabAllowed(features, "finance", "receivables"),
+      // 未收款在「請款與放款」頁（2026-10-27 合併），可見性跟著該分頁走。
+      receivables: disbursementsTab,
       monthDisbursements: disbursementsTab,
     }
   }

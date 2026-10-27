@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Button, Card, Empty, ErrorText, inputCls } from "@/components/admin-ui";
 import { FitToWidth } from "@/components/FitToWidth";
@@ -77,7 +77,7 @@ export default function LedgerView({
   q: string;
   scope: "open" | "all";
   onScopeChange: (scope: "open" | "all") => void;
-  /** 有任何一筆放款成功後呼叫（頁面重抓資料）。 */
+  /** 批次送出、拿到逐筆結果後呼叫（頁面重抓資料，以伺服器為準）。 */
   onPaid: () => Promise<void> | void;
 }) {
   const [chip, setChip] = useState<LedgerChip>("all");
@@ -103,6 +103,20 @@ export default function LedgerView({
     for (const p of shown) for (const v of p.vendorRows) if (v.state === "ready_to_pay" && v.disbursement) ids.add(v.disbursement.id);
     return [...ids];
   }, [shown]);
+
+  // 資料重抓後（例如別人剛撤回簽核、或這張已放款），不再可放款的單自動取消勾選。
+  useEffect(() => {
+    setSelected((cur) => {
+      const next = new Set([...cur].filter((id) => checks.get(id)?.ok === true));
+      return next.size === cur.size ? cur : next;
+    });
+  }, [checks]);
+
+  /** 勾了但被目前篩選／關鍵字藏起來的單（仍會一起送出，底部列提示）。 */
+  const hiddenSelected = useMemo(() => {
+    const visible = new Set(selectableIds);
+    return [...selected].filter((id) => !visible.has(id)).length;
+  }, [selected, selectableIds]);
 
   const selectedList = useMemo(() => [...selected].map((id) => byId.get(id)).filter((d): d is Disbursement => !!d), [selected, byId]);
   const selectedTotal = selectedList.reduce((s, d) => s + d.amount, 0);
@@ -161,7 +175,8 @@ export default function LedgerView({
       for (const [id, reason] of Object.entries(applied.failures)) next[id] = { ok: false, reason };
       setResults(next);
       setSelected(applied.remaining);
-      if (applied.succeeded.length > 0) await onPaid();
+      // 不論成敗都重抓：有的單可能已寫成已放款但回報失敗（例如寫完之後的步驟出錯），畫面要以伺服器為準。
+      await onPaid();
     } catch (err) {
       // 整批請求失敗（網路／權限）：一筆都沒確認，勾選保留，可以再按一次。
       setPanelError(humanizeDisbursementError(err, "送出失敗，請再試一次"));
@@ -242,6 +257,7 @@ export default function LedgerView({
             <div className="flex flex-wrap items-center gap-3">
               <span className="text-sm text-gray-700">
                 已勾 <b>{selected.size}</b> 張放款單・實付合計 <b className="tabular-nums">{fmtMoney(selectedTotal)}</b>
+                {hiddenSelected > 0 && <span className="ml-2 text-xs text-amber-600">（其中 {hiddenSelected} 張不在目前篩選內，也會一起送出）</span>}
               </span>
               <div className="grow" />
               <Button variant="ghost" size="sm" onClick={() => setSelected(new Set())}>清除勾選</Button>
