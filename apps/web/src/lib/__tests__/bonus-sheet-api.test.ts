@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   bonusSheetQuery,
+  manageMemberAmounts,
+  manageMemberHead,
   payoutDateOf,
   payoutDateText,
   payoutTimeline,
+  ratioText,
   rowProjectMap,
   runOptionLabel,
   stickyOffsets,
+  type ManageMember,
   type ProjectPayoutRun,
   type ShareRevision,
 } from "../bonus-sheet-api";
@@ -59,5 +63,24 @@ describe("發放歷程（前端純函式）", () => {
     expect(rowProjectMap(undefined).size).toBe(0);
     expect(payoutDateText("2026-09-10")).toBe("2026/09/10");
     expect(payoutDateText(null)).toBe("—");
+  });
+});
+
+describe("管理檢視（前端純函式）", () => {
+  const m = (over: Partial<ManageMember> = {}): ManageMember => ({
+    employeeId: "e", name: "測試員甲", role: "manager", removed: false, shareMode: "pool_pct", sharePct: 40, shareAmount: null,
+    paid: 12000, total: 42000, unpaid: 30000, available: 2000, ...over,
+  });
+  it("manageMemberHead／manageMemberAmounts", () => {
+    expect(manageMemberHead(m())).toBe("經理 測試員甲 40%");
+    expect(manageMemberHead(m({ shareMode: "fixed_amount", sharePct: null, shareAmount: 30000, role: "support" }))).toBe("支援 測試員甲 固定 30,000");
+    expect(manageMemberHead(m({ removed: true }))).toBe("（已移除） 測試員甲");
+    expect(manageMemberAmounts(m())).toBe("已發 12,000／未發 30,000（可發 2,000）");
+    expect(manageMemberAmounts(m({ unpaid: null, available: 0 }))).toBe("已發 12,000");
+  });
+  it("ratioText", () => {
+    expect(ratioText(0.6)).toBe("60%");
+    expect(ratioText(0.3705, 1)).toBe("37.1%");
+    expect(ratioText(null)).toBe("");
   });
 });

@@ -16,7 +16,19 @@ import {
 } from "../lib/statements/bonus-sheet.js"
 import { BONUS_BASES, isDuplicateReplacedArchive, memberEntitledOf, projectBonusBasisOf, receivedRatioOf, type BonusBasis } from "./bonus-run.js"
 import { loadShareRevisions, revisionNoteOf, type ShareRevision } from "./bonus-sheet-revisions.js"
-import { getRun, listProjectRunItems, listRuns, loadInputs, previewRun, tenantToday, type SerializedItem, type SerializedRun } from "./bonus-run-store.js"
+import {
+  getRun,
+  listProjectRunItems,
+  listRuns,
+  loadInputs,
+  loadProjectPaymentTotals,
+  previewRun,
+  tenantToday,
+  type ProjectPaymentTotals,
+  type SerializedItem,
+  type SerializedRun,
+} from "./bonus-run-store.js"
+import { buildManageRows, manageTotalsOf, type ManageRow, type ManageTotals } from "./bonus-manage.js"
 import { loadP3Settings } from "./project-application-store.js"
 import { DEFAULT_VAT_RATE } from "./project-money.js"
 import { isTerminal } from "./project-status.js"
@@ -344,36 +356,7 @@ export async function loadBonusSheet(tenantId: string, query: { runId?: string |
   }
   const baseDate = asOf as string
 
-  const projects = projectsFromItems(items, snapshot)
-  try {
-    projects.push(...(await loadOtherProjects(tenantId, baseDate, new Set(projects.map((p) => p.projectId)))))
-  } catch (err) {
-    warn(warnings, "批次以外的專案讀取失敗，只列批次內的專案", err)
-  }
-  if (projects.length > 0) {
-    try {
-      const closed = await loadClosedIds(tenantId, projects.map((p) => p.projectId))
-      // 已結案但這一批還有本次入帳／本次獎金的案（例如收尾款那一季）留在「未結案」：已結案表沒有本次欄，
-      // 放過去本次獎金就看不到、合計對不上批次總額。
-      for (const p of projects) p.closed = closed.has(p.projectId) && !isInThisRound(p)
-    } catch (err) {
-      warn(warnings, "專案結案狀態讀取失敗，全部列在「未結案」", err)
-    }
-  }
-
-  // 分潤調整寫進備註（業主 2026-10-27）；讀不到只少這段，不擋總表。
-  if (projects.length > 0) {
-    try {
-      const roles = new Map(projects.map((p) => [p.projectId, new Map(p.members.map((m) => [m.employeeId, m.role]))]))
-      const revisions = await loadShareRevisions(tenantId, projects.map((p) => p.projectId), roles)
-      for (const p of projects) {
-        const revs = revisions.get(p.projectId)
-        if (revs) p.revisionNote = revisionNoteOf(revs)
-      }
-    } catch (err) {
-      warn(warnings, "分潤調整紀錄讀取失敗，備註暫不含分潤調整", err)
-    }
-  }
+  const projects = await assembleProjects(tenantId, items, snapshot, baseDate, warnings, { keepInRoundOpen: true })
 
   const ctx: BonusSheetContext = {
     companyName,
@@ -395,6 +378,103 @@ export async function loadBonusSheet(tenantId: string, query: { runId?: string |
     warnings,
     sheets: { open: buildOpenSheet(open, ctx), closed: buildClosedSheet(closed, ctx) },
     rowProjects: { open: rowProjectsOf(open, OPEN_HEADER_ROWS), closed: rowProjectsOf(closed, CLOSED_HEADER_ROWS) },
+  }
+}
+
+/**
+ * 批次（或試算）明細 → 每案一列，補上批次外的專案、結案分表、分潤調整備註。子資料失敗降級寫進 warnings。
+ * keepInRoundOpen：公司格式——已結案但這一批還有本次入帳／本次獎金的案留在「未結案」；管理檢視不需要。
+ */
+async function assembleProjects(
+  tenantId: string,
+  items: readonly SerializedItem[],
+  snapshot: Record<string, unknown> | null,
+  baseDate: string,
+  warnings: string[],
+  opts: { keepInRoundOpen: boolean },
+): Promise<BonusSheetProject[]> {
+  const projects = projectsFromItems(items, snapshot)
+  try {
+    projects.push(...(await loadOtherProjects(tenantId, baseDate, new Set(projects.map((p) => p.projectId)))))
+  } catch (err) {
+    warn(warnings, "批次以外的專案讀取失敗，只列批次內的專案", err)
+  }
+  if (projects.length > 0) {
+    try {
+      const closed = await loadClosedIds(tenantId, projects.map((p) => p.projectId))
+      // 已結案但這一批還有本次入帳／本次獎金的案（例如收尾款那一季）留在「未結案」：已結案表沒有本次欄，
+      // 放過去本次獎金就看不到、合計對不上批次總額。
+      for (const p of projects) p.closed = closed.has(p.projectId) && !(opts.keepInRoundOpen && isInThisRound(p))
+    } catch (err) {
+      warn(warnings, "專案結案狀態讀取失敗，全部列在「未結案」", err)
+    }
+  }
+
+  // 分潤調整寫進備註（業主 2026-10-27）；讀不到只少這段，不擋總表。
+  if (projects.length > 0) {
+    try {
+      const roles = new Map(projects.map((p) => [p.projectId, new Map(p.members.map((m) => [m.employeeId, m.role]))]))
+      const revisions = await loadShareRevisions(tenantId, projects.map((p) => p.projectId), roles)
+      for (const p of projects) {
+        const revs = revisions.get(p.projectId)
+        if (revs) p.revisionNote = revisionNoteOf(revs)
+      }
+    } catch (err) {
+      warn(warnings, "分潤調整紀錄讀取失敗，備註暫不含分潤調整", err)
+    }
+  }
+  return projects
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * 管理檢視（GET /bonus-sheet/manage）：網頁預設，口徑見 services/bonus-manage.ts
+ * ────────────────────────────────────────────────────────────────── */
+
+export type BonusManageResult = {
+  /** 累計應得的基準日（租戶今天）。 */
+  asOf: string
+  vatRate: number
+  counts: { open: number; closed: number }
+  warnings: string[]
+  rows: { open: ManageRow[]; closed: ManageRow[] }
+  totals: { open: ManageTotals; closed: ManageTotals }
+}
+
+export async function loadBonusManage(tenantId: string): Promise<BonusManageResult> {
+  const warnings: string[] = []
+  const vatRate = await loadP3Settings(tenantId)
+    .then((s) => s.vatRate)
+    .catch((err) => {
+      warn(warnings, "營業稅率讀取失敗，含稅金額暫以 5% 計", err)
+      return DEFAULT_VAT_RATE
+    })
+  const asOf = await tenantToday(tenantId)
+  let items: SerializedItem[] = []
+  let snapshot: Record<string, unknown> | null = null
+  try {
+    const preview = await previewRun(tenantId, asOf, null)
+    items = preview.items
+    snapshot = preview.snapshot
+  } catch (err) {
+    warn(warnings, "即時試算失敗，可發金額暫時算不出來（只列專案層數字）", err)
+  }
+  const projects = await assembleProjects(tenantId, items, snapshot, asOf, warnings, { keepInRoundOpen: false })
+  let payments: ProjectPaymentTotals = { paid: new Map(), unpaid: new Map() }
+  try {
+    payments = await loadProjectPaymentTotals(tenantId)
+  } catch (err) {
+    warn(warnings, "已發放紀錄讀取失敗，已發放暫以 0 計（未發放金額不可信）", err)
+  }
+  const rows = buildManageRows(projects, payments, vatRate)
+  const open = rows.filter((r) => !r.closed)
+  const closed = rows.filter((r) => r.closed)
+  return {
+    asOf,
+    vatRate,
+    counts: { open: open.length, closed: closed.length },
+    warnings,
+    rows: { open, closed },
+    totals: { open: manageTotalsOf(open), closed: manageTotalsOf(closed) },
   }
 }
 

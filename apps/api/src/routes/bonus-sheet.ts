@@ -3,7 +3,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { loadGroupFinancialsAccess } from "../services/financial-visibility.js"
-import { BonusSheetNotFound, loadBonusSheet, loadProjectPayouts } from "../services/bonus-sheet.js"
+import { BonusSheetNotFound, loadBonusManage, loadBonusSheet, loadProjectPayouts } from "../services/bonus-sheet.js"
 import { buildStatementWorkbook } from "../lib/xlsx/statement-grid.js"
 import { workbookToBuffer } from "../lib/xlsx/index.js"
 import { ASTER_LOGO_PNG_BASE64, ASTER_LOGO_PNG_HEIGHT, ASTER_LOGO_PNG_WIDTH } from "../lib/brand/aster-logo.js"
@@ -18,6 +18,8 @@ export const bonusSheetRouter = Router()
  *     { source, asOf, run, runs, periodLabel, mmdd, vatRate, counts, warnings, sheets: { open, closed } }
  *     runId＝指定獎金批次；asOf＝依基準日即時試算；都沒帶＝最新一般批次（沒有批次則今天的試算）。
  *   GET /bonus-sheet/export.xlsx（同參數）：兩張工作表「未結案」「已結案」。
+ *   GET /bonus-sheet/manage：管理檢視（網頁預設；每案獎金總額／已發放／未發放＝可發＋待收款、成員已發未發），
+ *     依租戶今天即時試算，口徑見 services/bonus-manage.ts。列印與 Excel 仍是公司格式。
  *   GET /bonus-sheet/projects/:projectId/payouts：單一專案每一次獎金發放的明細與時間點（畫面點開專案列才載，
  *     不放進總表回應——專案多時總表不必一次撈全部歷程）。草稿不列；累計只算已發放（含沖銷）。
  *
@@ -122,6 +124,14 @@ bonusSheetRouter.get("/bonus-sheet/projects/:projectId/payouts", ...guards, asyn
       return
     }
     res.status(200).json(result)
+  } catch (err) {
+    next(err)
+  }
+})
+
+bonusSheetRouter.get("/bonus-sheet/manage", ...guards, async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.status(200).json(await loadBonusManage(res.locals.tenantId as string))
   } catch (err) {
     next(err)
   }

@@ -295,7 +295,7 @@ function unallocCell(p: BonusSheetProject): CellInput {
   if (p.unallocatedPct === null) return { value: null, format: "pct1" }
   const amount = unallocatedAmountOf(p)
   const top = formatCellText(p.unallocatedPct / 100, "pct1")
-  return { value: amount === null ? top : `${top}\n累 ${thousands(amount, 0)}`, format: "text", wrap: true, size: 9 }
+  return { value: amount === null || p.unallocatedPct === 0 ? top : `${top}\n累 ${thousands(amount, 0)}`, format: "text", wrap: true, size: 9 }
 }
 
 /** 成員 % 欄的表頭：上行 %、下行金額（本輪＝本次；「累」＝累計應得）。 */

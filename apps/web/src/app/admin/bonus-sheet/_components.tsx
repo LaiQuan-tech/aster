@@ -1,8 +1,9 @@
 "use client";
 
 import { Fragment, useMemo, type CSSProperties, type MouseEvent, type ReactNode } from "react";
-import type { BorderStyle, GridCell, StatementGrid } from "@/lib/statements-api";
-import { borderCss, columnPx, coveredPositions, gridGeometry, gridRowCount, rowPx } from "@/lib/statement-layout";
+import type { GridCell, StatementGrid } from "@/lib/statements-api";
+import { columnPx, coveredPositions, gridGeometry, gridRowCount, rowPx } from "@/lib/statement-layout";
+import { cellTheme, THEME, type ThemedTitle } from "@/lib/bonus-sheet-theme";
 import {
   MEMBER_ROLE_LABEL,
   moneyText,
@@ -17,69 +18,34 @@ import {
 } from "@/lib/bonus-sheet-api";
 
 /**
- * 專案獎金總表：照 API 的格線（StatementGrid）畫 HTML table，重現公司 Excel 的版面——欄寬、列高、多列表頭與
- * 合併、細線／雙線、字級、粗體、底色（本次欄淡綠）、紅字欄、千分位與 %（API 已格式化）。
+/**
+ * 專案獎金總表（公司格式）：照 API 的格線（StatementGrid）畫 HTML table——欄寬、列高、多列表頭與合併、千分位與 %
+ * （API 已格式化）照原 Excel；配色與字體照後台風格（lib/bonus-sheet-theme.ts：無襯線、gray-200 細框、表頭 gray-50、
+ * 本輪欄品牌色淡底、紅字只給警示）。抬頭（標誌＋公司名＋表名＋本期）由頁面拿出來畫成卡片標題（title）。
+ * Excel 下載是 API 產生的原格式，不受這裡影響。
  *
- * 與 components/StatementTable 的差別：表很寬（33 欄），所以表頭列與前幾欄用 position: sticky 固定
- * （grid.freeze），橫向捲動時對得上是哪一案。sticky 在 border-collapse 下框線會掉，這裡改用
- * border-collapse: separate，每格只畫右／下框線，上／左框線只在相鄰格沒畫到時才補（避免線變兩倍粗）。
+ * 表很寬，表頭列與前幾欄用 position: sticky 固定（grid.freeze），橫向捲動時對得上是哪一案。sticky 在
+ * border-collapse 下框線會掉，這裡用 border-collapse: separate，每格只畫右／下框線（外框在容器上）。
  * 表頭列放在 <thead>，列印時每頁重複。
  */
 
-/** 原檔字型新細明體；Mac／手機沒有就用其他明體。 */
-const SHEET_FONT_STACK = '"PMingLiU", "新細明體", "MingLiU", "Apple LiSung", "LiSong Pro", "Songti TC", "Noto Serif TC", serif';
-
-type EdgeIndex = { bottoms: Map<string, BorderStyle>; rights: Set<string> };
-
-/** 每格實際畫出的下框線（"列:欄"＝該位置的下緣）與右框線。 */
-function edgeIndex(grid: StatementGrid): EdgeIndex {
-  const bottoms = new Map<string, BorderStyle>();
-  const rights = new Set<string>();
-  for (const c of grid.cells) {
-    const r2 = c.row + (c.rowSpan ?? 1) - 1;
-    const c2 = c.col + (c.colSpan ?? 1) - 1;
-    if (c.border?.bottom) for (let k = c.col; k <= c2; k += 1) bottoms.set(`${r2}:${k}`, c.border.bottom);
-    if (c.border?.right) for (let r = c.row; r <= r2; r += 1) rights.add(`${r}:${c2}`);
-  }
-  return { bottoms, rights };
-}
-
-function cellStyle(cell: GridCell, edges: EdgeIndex, sticky: { top: number | null; left: number | null }): CSSProperties {
-  const b = cell.border ?? {};
-  const r2 = cell.row + (cell.rowSpan ?? 1) - 1;
-  const c2 = cell.col + (cell.colSpan ?? 1) - 1;
-  let top: BorderStyle | undefined;
-  if (b.top) {
-    // 上一列沒畫下框線才補；表頭雙線例外：上一列只有細線時仍畫雙線（上一列已是雙線就不重疊）。
-    let missing = cell.row === 0;
-    for (let k = cell.col; k <= c2 && !missing; k += 1) {
-      const above = edges.bottoms.get(`${cell.row - 1}:${k}`);
-      if (!above || (b.top === "double" && above !== "double")) missing = true;
-    }
-    if (missing) top = b.top;
-  }
-  let left: BorderStyle | undefined;
-  if (b.left) {
-    let missing = cell.col === 0;
-    for (let r = cell.row; r <= r2 && !missing; r += 1) if (!edges.rights.has(`${r}:${cell.col - 1}`)) missing = true;
-    if (missing) left = b.left;
-  }
-  const numeric = typeof cell.value === "number";
+function cellStyle(cell: GridCell, header: boolean, warn: boolean, sticky: { top: number | null; left: number | null }): CSSProperties {
+  const t = cellTheme(cell, { header, warn });
   const style: CSSProperties = {
-    borderTop: borderCss(top),
-    borderBottom: borderCss(b.bottom),
-    borderLeft: borderCss(left),
-    borderRight: borderCss(b.right),
-    fontSize: `${cell.size ?? 12}pt`,
-    fontWeight: cell.bold ? 700 : 400,
-    textAlign: cell.align ?? (numeric ? "right" : "left"),
-    background: cell.fill ?? "#fff",
-    color: cell.negative ? "#FF0000" : (cell.color ?? "#000"),
-    whiteSpace: cell.wrap ? "pre-wrap" : "nowrap",
+    borderBottom: `1px solid ${THEME.border}`,
+    borderRight: `1px solid ${THEME.border}`,
+    fontSize: t.fontSize,
+    fontWeight: t.fontWeight,
+    textAlign: t.textAlign,
+    background: t.background,
+    color: t.color,
+    fontVariantNumeric: t.numeric ? "tabular-nums" : undefined,
+    // 數字格只照明確換行（「40.0 %」／「累 8,000」兩行），不在空白處折行。
+    whiteSpace: t.numeric ? "pre" : cell.wrap || header ? "pre-wrap" : "nowrap",
     overflow: "hidden",
-    padding: "0 3px",
+    padding: "3px 6px",
     verticalAlign: "middle",
-    lineHeight: 1.15,
+    lineHeight: 1.4,
   };
   if (sticky.top !== null || sticky.left !== null) {
     style.position = "sticky";
@@ -88,6 +54,23 @@ function cellStyle(cell: GridCell, edges: EdgeIndex, sticky: { top: number | nul
     style.zIndex = sticky.top !== null && sticky.left !== null ? 3 : sticky.top !== null ? 2 : 1;
   }
   return style;
+}
+
+/** 公司格式抬頭：ASTER 標誌＋公司名＋表名（＋本期），後台卡片標題樣式。 */
+export function BonusSheetTitle({ title }: { title: ThemedTitle }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-gray-200 px-3 py-2.5">
+      {title.logo && (
+        // eslint-disable-next-line @next/next/no-img-element -- 靜態 SVG 標誌，列印也要原尺寸
+        <img src="/brand/aster-logo.svg" alt="ASTER" style={{ height: 20, width: "auto" }} />
+      )}
+      {title.texts.map((t, i) => (
+        <h2 key={i} className={i === 0 ? "text-base font-semibold text-gray-800" : t.startsWith("本期") ? "text-sm font-medium text-[var(--brand)]" : "text-base font-semibold text-gray-800"}>
+          {t}
+        </h2>
+      ))}
+    </div>
+  );
 }
 
 /**
@@ -108,15 +91,20 @@ export function BonusSheetTable({
   zoom = 1,
   printing = false,
   expandable,
+  title,
+  warnColumns,
 }: {
   grid: StatementGrid;
   zoom?: number;
   printing?: boolean;
   expandable?: BonusSheetExpandable;
+  /** 抬頭（webThemeGrid().title）。 */
+  title?: ThemedTitle | null;
+  /** 「尚未分配」欄：不為 0 才紅字。 */
+  warnColumns?: ReadonlySet<number>;
 }) {
   const geometry = useMemo(() => gridGeometry(grid), [grid]);
   const covered = useMemo(() => coveredPositions(grid), [grid]);
-  const edges = useMemo(() => edgeIndex(grid), [grid]);
   const offsets = useMemo(() => stickyOffsets(grid), [grid]);
   const byPos = useMemo(() => new Map<string, GridCell>(grid.cells.map((c) => [`${c.row}:${c.col}`, c])), [grid]);
   const rows = gridRowCount(grid);
@@ -138,6 +126,7 @@ export function BonusSheetTable({
     return (
     <tr
       key={r}
+      className={r >= headRows ? "bs-row" : undefined}
       style={{ height: rowPx(grid.rowHeights[r] ?? 20.9), cursor: projectId ? "pointer" : undefined }}
       onClick={projectId ? onRowClick(projectId) : undefined}
       title={projectId ? (open ? "收合發放明細" : "點一下展開這個專案每一次的獎金發放明細") : undefined}
@@ -155,26 +144,26 @@ export function BonusSheetTable({
         }
         const Tag = r < headRows ? "th" : "td";
         return (
-          <Tag key={c} rowSpan={cell.rowSpan} colSpan={cell.colSpan} style={cellStyle(cell, edges, { top: stickyTop, left: stickyLeft })}>
+          <Tag key={c} rowSpan={cell.rowSpan} colSpan={cell.colSpan} style={cellStyle(cell, r < headRows, !!warnColumns?.has(c), { top: stickyTop, left: stickyLeft })}>
             {projectId && c === 0 && (
               <button
                 type="button"
                 aria-expanded={open}
                 aria-label={open ? `收合第 ${cell.text} 列的發放明細` : `展開第 ${cell.text} 列的發放明細`}
                 onClick={() => expandable?.onToggle(projectId)}
-                style={{ border: 0, background: "transparent", padding: 0, marginRight: 2, cursor: "pointer", color: "#1F2F86", fontSize: "8pt", lineHeight: 1 }}
+                style={{ border: 0, background: "transparent", padding: 0, marginRight: 3, cursor: "pointer", color: THEME.brand, fontSize: "10px", lineHeight: 1 }}
               >
                 {open ? "▾" : "▸"}
               </button>
             )}
             {cell.logo ? (
-              // eslint-disable-next-line @next/next/no-img-element -- 靜態 SVG 標誌，列印也要原尺寸
-              <img src="/brand/aster-logo.svg" alt={cell.text} style={{ display: "block", height: 30, width: "auto", margin: "0 auto" }} />
+              // eslint-disable-next-line @next/next/no-img-element -- 靜態 SVG 標誌（沒經過 webThemeGrid 的格線才會出現）
+              <img src="/brand/aster-logo.svg" alt={cell.text} style={{ display: "block", height: 20, width: "auto", margin: "0 auto" }} />
             ) : (
               cell.text
             )}
             {cell.hint && (
-              <span style={{ display: "block", fontSize: "8pt", color: "#6B7280", whiteSpace: "nowrap", lineHeight: 1.2 }}>{cell.hint}</span>
+              <span style={{ display: "block", fontSize: "11px", color: "#6B7280", whiteSpace: "nowrap", lineHeight: 1.3 }}>{cell.hint}</span>
             )}
           </Tag>
         );
@@ -190,7 +179,7 @@ export function BonusSheetTable({
     const width = Math.max(320, Math.min(expandable.viewportWidth, geometry.width * z));
     return (
       <tr key={`detail-${r}`} data-detail-for={projectId}>
-        <td colSpan={grid.columns.length} style={{ padding: 0, background: "#F8FAFC", borderBottom: "1px solid #000", borderRight: "1px solid #000", borderLeft: "1px solid #000" }}>
+        <td colSpan={grid.columns.length} style={{ padding: 0, background: "#F8FAFC", borderBottom: `1px solid ${THEME.border}` }}>
           {/* 抵銷表格縮放（zoom 1/z）＋sticky：明細固定在可視寬度內、維持正常字級。 */}
           <div style={{ position: "sticky", left: 0, width, zoom: 1 / z }}>{expandable.renderDetail(projectId)}</div>
         </td>
@@ -199,7 +188,11 @@ export function BonusSheetTable({
   };
 
   return (
-    <div className="bonus-sheet-print max-h-[75vh] overflow-auto rounded border border-gray-200 bg-white" data-printing={printing ? "1" : "0"}>
+    <div className="bonus-sheet-print overflow-hidden rounded-lg border border-gray-300 bg-white" data-printing={printing ? "1" : "0"}>
+      {/* 列 hover：整列淡灰（品牌淡底欄也一起變灰，方便對列）。 */}
+      <style>{`.bonus-sheet-print tr.bs-row:hover > td { background-color: ${THEME.headerBg} !important; }`}</style>
+      {title && <BonusSheetTitle title={title} />}
+      <div className="bonus-sheet-scroll max-h-[75vh] overflow-auto">
       <table
         aria-label={grid.title}
         style={{
@@ -209,8 +202,8 @@ export function BonusSheetTable({
           width: geometry.width,
           zoom,
           background: "#fff",
-          color: "#000",
-          fontFamily: SHEET_FONT_STACK,
+          color: THEME.text,
+          fontFamily: "inherit",
           ["--bonus-sheet-width" as string]: `${geometry.width}px`,
         }}
       >
@@ -229,6 +222,7 @@ export function BonusSheetTable({
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -242,7 +236,9 @@ export function bonusSheetPrintCss(paper: "A3" | "A4", tableWidth: number): stri
   @page { size: ${paper} landscape; margin: 10mm; }
   body * { visibility: hidden !important; }
   .bonus-sheet-print[data-printing="1"], .bonus-sheet-print[data-printing="1"] * { visibility: visible !important; }
-  .bonus-sheet-print[data-printing="1"] { position: absolute; left: 0; top: 0; max-height: none !important; overflow: visible !important; border: 0 !important; }
+  .bonus-sheet-print[data-printing="1"] { position: absolute; left: 0; top: 0; max-height: none !important; overflow: visible !important; }
+  .bonus-sheet-print[data-printing="1"] .bonus-sheet-scroll { max-height: none !important; overflow: visible !important; }
+  .bonus-sheet-print[data-printing="1"] * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .bonus-sheet-print[data-printing="1"] table { zoom: ${zoom.toFixed(4)} !important; }
   .bonus-sheet-print[data-printing="1"] th, .bonus-sheet-print[data-printing="1"] td { position: static !important; }
   .bonus-sheet-print[data-printing="1"] thead { display: table-header-group; }

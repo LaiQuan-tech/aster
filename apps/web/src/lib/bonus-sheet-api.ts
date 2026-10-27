@@ -209,3 +209,111 @@ export function payoutDateText(v: string | null | undefined): string {
 export function moneyText(n: number): string {
   return Math.round(n).toLocaleString("zh-TW");
 }
+
+/* ──────────────────────────────────────────────────────────────────
+ * 管理檢視（GET /bonus-sheet/manage；網頁預設）。口徑見 apps/api/src/services/bonus-manage.ts。
+ * ────────────────────────────────────────────────────────────────── */
+
+export type ManageMember = {
+  employeeId: string;
+  name: string | null;
+  role: string | null;
+  removed: boolean;
+  shareMode: string;
+  sharePct: number | null;
+  shareAmount: number | null;
+  paid: number;
+  total: number | null;
+  unpaid: number | null;
+  available: number | null;
+};
+
+export type ManageRow = {
+  projectId: string;
+  code: string | null;
+  name: string | null;
+  closed: boolean;
+  basis: "gross_profit" | "tax_inclusive_receipts" | "legacy_pool" | "fixed_amount" | null;
+  contractTaxed: number | null;
+  receivedTaxed: number;
+  receivedRatio: number | null;
+  bonusRatePct: number | null;
+  bonusTotal: number | null;
+  bonusTotalEstimated: boolean;
+  paid: number;
+  paidRatio: number | null;
+  unpaid: number | null;
+  available: number;
+  overpaid: number;
+  awaiting: number | null;
+  approvedUnpaid: number;
+  pendingApproval: number;
+  members: ManageMember[];
+  unallocated: { pct: number; amount: number | null } | null;
+  revisionNote: string | null;
+  note: string | null;
+};
+
+export type ManageTotals = { contractTaxed: number; receivedTaxed: number; bonusTotal: number; paid: number; unpaid: number; available: number; awaiting: number };
+
+export type BonusManageResult = {
+  asOf: string;
+  vatRate: number;
+  counts: { open: number; closed: number };
+  warnings: string[];
+  rows: { open: ManageRow[]; closed: ManageRow[] };
+  totals: { open: ManageTotals; closed: ManageTotals };
+};
+
+export function getBonusManage() {
+  return apiFetch<BonusManageResult>("/bonus-sheet/manage");
+}
+
+export type BonusSheetView = "manage" | "company";
+export const BONUS_SHEET_VIEW_STORAGE_KEY = "aster.admin.bonusSheet.view";
+
+/** 預設管理檢視；記住使用者選擇（讀不到儲存＝預設）。 */
+export function readBonusSheetView(): BonusSheetView {
+  try {
+    return window.localStorage.getItem(BONUS_SHEET_VIEW_STORAGE_KEY) === "company" ? "company" : "manage";
+  } catch {
+    return "manage";
+  }
+}
+
+export function writeBonusSheetView(view: BonusSheetView): void {
+  try {
+    window.localStorage.setItem(BONUS_SHEET_VIEW_STORAGE_KEY, view);
+  } catch {
+    /* 私密視窗／封鎖儲存：只影響這次 */
+  }
+}
+
+export const BASIS_LABEL: Record<NonNullable<ManageRow["basis"]>, string> = {
+  tax_inclusive_receipts: "含稅入帳制",
+  gross_profit: "毛利制",
+  legacy_pool: "舊制（手填獎金池）",
+  fixed_amount: "固定金額",
+};
+
+/** 比例 → 「60%」（到整數；null → 空）。 */
+export function ratioText(r: number | null | undefined, digits = 0): string {
+  if (r === null || r === undefined || !Number.isFinite(r)) return "";
+  const f = 10 ** digits;
+  return `${Math.round(r * 100 * f) / f}%`;
+}
+
+/** 成員分配第一行：「經理 測試員甲 40%」（固定金額：「固定 30,000」；已移除：「（已移除）」）。 */
+export function manageMemberHead(m: ManageMember): string {
+  const role = m.removed ? "（已移除）" : ((m.role && MEMBER_ROLE_LABEL[m.role]) ?? "");
+  const share = m.removed ? "" : m.shareMode === "pool_pct" ? (m.sharePct === null ? "—" : `${m.sharePct}%`) : m.shareAmount === null ? "—" : `固定 ${moneyText(m.shareAmount)}`;
+  return [role, m.name ?? "—", share].filter(Boolean).join(" ");
+}
+
+/** 成員分配第二行：「已發 12,000／未發 30,000（可發 2,000）」。 */
+export function manageMemberAmounts(m: ManageMember): string {
+  const parts = [`已發 ${moneyText(m.paid)}`];
+  if (m.unpaid !== null) parts.push(`未發 ${moneyText(m.unpaid)}`);
+  const head = parts.join("／");
+  return m.available ? `${head}（可發 ${moneyText(m.available)}）` : head;
+}

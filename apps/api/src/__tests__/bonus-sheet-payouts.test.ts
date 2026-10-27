@@ -10,14 +10,16 @@ vi.mock("../services/bonus-run-store.js", () => ({
   previewRun: vi.fn(),
   loadInputs: vi.fn(),
   listProjectRunItems: vi.fn(),
+  loadProjectPaymentTotals: vi.fn(),
   tenantToday: vi.fn(async () => "2026-10-27"),
 }))
 
 import { bonusSheetRouter } from "../routes/bonus-sheet.js"
-import { getRun, listProjectRunItems, listRuns, loadInputs, previewRun, type SerializedItem, type SerializedRun } from "../services/bonus-run-store.js"
+import { getRun, listProjectRunItems, listRuns, loadInputs, loadProjectPaymentTotals, previewRun, type PaidMember, type SerializedItem, type SerializedRun } from "../services/bonus-run-store.js"
+import { buildManageRow, manageTotalsOf } from "../services/bonus-manage.js"
 import { buildProjectPayouts, rowProjectsOf } from "../services/bonus-sheet.js"
 import { groupShareRevisions, revisionNoteOf, rocDate, type ShareAdjustmentRow } from "../services/bonus-sheet-revisions.js"
-import { OPEN_HEADER_ROWS, type BonusSheetProject } from "../lib/statements/bonus-sheet.js"
+import { OPEN_HEADER_ROWS, type BonusSheetMember, type BonusSheetProject } from "../lib/statements/bonus-sheet.js"
 import type { GridCell } from "../lib/statements/grid.js"
 import { fake, TENANT_ID } from "./helpers/fake-supabase.js"
 
@@ -212,7 +214,19 @@ beforeEach(() => {
     items: [item({ runId: q1.id, employeeId: E.b, employeeName: "測試員乙", roleInProject: "lead", sharePct: 25, amount: 3000, entitledCumulative: 3000 })],
     snapshot: { projects: [] },
   })
-  vi.mocked(previewRun).mockReset()
+  vi.mocked(previewRun).mockReset().mockResolvedValue({
+    asOf: "2026-10-27",
+    items: [item({ runId: "", employeeId: E.b, employeeName: "測試員乙", roleInProject: "lead", sharePct: 25, amount: 1000, entitledCumulative: 4000, paidBefore: 3000 })],
+    totals: run(1).totals,
+    snapshot: { projects: [] },
+    calc: [],
+    projectMeta: new Map(),
+    employeeMeta: new Map(),
+  })
+  vi.mocked(loadProjectPaymentTotals).mockReset().mockResolvedValue({
+    paid: new Map([[P1, new Map([[E.b, { amount: 3000, name: "測試員乙", empNo: null, role: "lead" }]])]]),
+    unpaid: new Map([[P1, { approved: 500, pending: 0 }]]),
+  })
   vi.mocked(loadInputs).mockReset().mockResolvedValue({ projects: [], projectMeta: new Map(), employeeMeta: new Map(), archiveStage: new Map() })
 })
 
@@ -278,5 +292,101 @@ describe("GET /bonus-sheet：rowProjects 與備註裡的分潤調整", () => {
     const res = await as(T.boss)(request(app).get("/bonus-sheet"))
     expect(res.status).toBe(200)
     expect(res.body.warnings).toContain("分潤調整紀錄讀取失敗，備註暫不含分潤調整")
+  })
+})
+
+// ── 管理檢視 ─────────────────────────────────────────────────────────
+
+function mgrMember(over: Partial<BonusSheetMember> & { employeeId: string }): BonusSheetMember {
+  return { name: `測試員${over.employeeId}`, empNo: null, role: "member", shareMode: "pool_pct", sharePct: 10, shareAmount: null, amount: 0, entitled: 0, ...over }
+}
+
+function mgrProject(over: Partial<BonusSheetProject> = {}): BonusSheetProject {
+  return {
+    projectId: "p1", code: "T-0001", name: "測試案一", closed: false, contractTotal: 1000000, receivedTotal: 600000, previousReceived: 600000,
+    currentReceived: 0, receivedRatio: 0.6, previousRatio: 0.6, currentRatio: 0, bonusRatePct: 10, pool: 63000, basis: "tax_inclusive_receipts",
+    currentBonus: 0, overpaidBy: 0, unallocatedPct: 20, note: null, skipped: null,
+    members: [
+      mgrMember({ employeeId: "甲", role: "manager", sharePct: 50, entitled: 31500 }),
+      mgrMember({ employeeId: "乙", role: "lead", sharePct: 30, entitled: 18900 }),
+    ],
+    ...over,
+  }
+}
+
+const paidOf = (entries: Array<[string, number, string?]>) => new Map<string, PaidMember>(entries.map(([id, amount, name]) => [id, { amount, name: name ?? `測試員${id}`, empNo: null, role: "member" }]))
+
+describe("buildManageRow（管理檢視口徑）", () => {
+  it("Excel 制：總額＝含稅合約×比例；未發放＝總額−已發；可發＝Σmax(0,應得−已發)；待收款＝未發−可發；未分配列", () => {
+    const r = buildManageRow(mgrProject(), paidOf([["甲", 20000], ["乙", 18900]]), { approved: 1200, pending: 300 }, 0.05)
+    expect(r).toMatchObject({
+      contractTaxed: 1050000, receivedTaxed: 630000, receivedRatio: 0.6, bonusTotal: 105000, bonusTotalEstimated: false,
+      paid: 38900, unpaid: 66100, available: 11500, overpaid: 0, awaiting: 54600, approvedUnpaid: 1200, pendingApproval: 300,
+    })
+    expect(r.paidRatio).toBeCloseTo(38900 / 105000)
+    expect(r.members.map((m) => [m.name, m.total, m.paid, m.unpaid, m.available])).toEqual([
+      ["測試員甲", 52500, 20000, 32500, 11500],
+      ["測試員乙", 31500, 18900, 12600, 0],
+    ])
+    expect(r.unallocated).toEqual({ pct: 20, amount: 21000 })
+  })
+
+  it("超發：已發 > 應得 → 可發 0、超發紅字；已移除但領過的成員另列", () => {
+    const r = buildManageRow(mgrProject(), paidOf([["甲", 35000], ["丙", 2000, "測試員丙"]]), undefined, 0.05)
+    expect(r.overpaid).toBe(3500 + 2000)
+    expect(r.available).toBe(18900) // 只有乙可發
+    expect(r.paid).toBe(37000)
+    const removed = r.members.find((m) => m.removed)!
+    expect(removed).toMatchObject({ name: "測試員丙", paid: 2000, total: null, available: 0 })
+  })
+
+  it("舊制手填池、固定金額、毛利制（估、待收款不算）、沒有成員", () => {
+    expect(buildManageRow(mgrProject({ basis: "legacy_pool", bonusRatePct: null, pool: 80000 }), undefined, undefined, 0.05)).toMatchObject({ bonusTotal: 80000, unpaid: 80000 })
+    const fixed = buildManageRow(
+      mgrProject({ basis: "fixed_amount", unallocatedPct: null, members: [mgrMember({ employeeId: "甲", shareMode: "fixed_amount", sharePct: null, shareAmount: 30000, entitled: 18000 })] }),
+      paidOf([["甲", 10000]]),
+      undefined,
+      0.05,
+    )
+    expect(fixed).toMatchObject({ bonusTotal: 30000, unpaid: 20000, available: 8000, awaiting: 12000, unallocated: null })
+    const gp = buildManageRow(mgrProject({ basis: "gross_profit", pool: 40000 }), paidOf([["甲", 10000]]), undefined, 0.05)
+    expect(gp).toMatchObject({ bonusTotal: 40000, bonusTotalEstimated: true, unpaid: 30000, awaiting: null })
+    expect(gp.members[0]).toMatchObject({ total: 31500, unpaid: 21500 }) // 毛利制個人總額＝目前累計應得
+    expect(gp.unallocated).toEqual({ pct: 20, amount: null })
+    const empty = buildManageRow(mgrProject({ basis: null, members: [], unallocatedPct: null, pool: null }), undefined, undefined, 0.05)
+    expect(empty).toMatchObject({ bonusTotal: 105000, paid: 0, unpaid: 105000, available: 0, unallocated: null, members: [] })
+  })
+
+  it("manageTotalsOf：合計（null 當 0）", () => {
+    const a = buildManageRow(mgrProject(), paidOf([["甲", 20000]]), undefined, 0.05)
+    const b = buildManageRow(mgrProject({ projectId: "p2", contractTotal: null }), undefined, undefined, 0.05)
+    expect(manageTotalsOf([a, b])).toMatchObject({ contractTaxed: 1050000, bonusTotal: 105000, paid: 20000, unpaid: 85000 })
+  })
+})
+
+describe("GET /bonus-sheet/manage", () => {
+  it("權限同總表；回每案一列＋合計", async () => {
+    for (const t of [T.hr, T.accountant, T.staff]) {
+      const res = await as(t)(request(app).get("/bonus-sheet/manage"))
+      expect(res.status, t).toBe(403)
+      expect(res.body).toEqual({ error: "group_financials_forbidden" })
+    }
+    expect(previewRun).not.toHaveBeenCalled()
+    expect(loadProjectPaymentTotals).not.toHaveBeenCalled()
+    const res = await as(T.platform)(request(app).get("/bonus-sheet/manage"))
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ asOf: "2026-10-27", vatRate: 0.05, counts: { open: 1, closed: 0 }, warnings: [] })
+    const row = res.body.rows.open[0]
+    expect(row).toMatchObject({ code: "T-0001", bonusTotal: 105000, paid: 3000, unpaid: 102000, available: 1000, approvedUnpaid: 500 })
+    expect(row.revisionNote).toContain("主辦 測試員乙 20%→25%")
+    expect(res.body.totals.open).toMatchObject({ bonusTotal: 105000, paid: 3000, unpaid: 102000, available: 1000 })
+    expect(previewRun).toHaveBeenCalledWith(TENANT_ID, "2026-10-27", null)
+  })
+
+  it("已發放紀錄讀不到 → 200＋warning", async () => {
+    vi.mocked(loadProjectPaymentTotals).mockRejectedValue(new Error("boom"))
+    const res = await as(T.boss)(request(app).get("/bonus-sheet/manage"))
+    expect(res.status).toBe(200)
+    expect(res.body.warnings).toContain("已發放紀錄讀取失敗，已發放暫以 0 計（未發放金額不可信）")
   })
 })

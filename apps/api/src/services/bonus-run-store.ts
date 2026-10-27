@@ -1700,6 +1700,76 @@ export async function listProjectRunItems(tenantId: string, projectId: string): 
   return { runs, items: rows.filter((r) => live.has(r.run_id) && !isStale(r)).map(serializeItem) }
 }
 
+export type PaidMember = { amount: number; name: string | null; empNo: string | null; role: string | null }
+export type ProjectPaymentTotals = {
+  /** 已發放（含沖銷）批次：projectId → employeeId → 合計金額（＋最近一次明細的姓名／角色）。 */
+  paid: Map<string, Map<string, PaidMember>>
+  /** 已核准未發放、送審中：projectId → 合計（不計入已發放）。 */
+  unpaid: Map<string, { approved: number; pending: number }>
+}
+
+/**
+ * 獎金分潤總表「管理檢視」（GET /bonus-sheet/manage）：全租戶各專案、各成員的已發放合計（同 loadPaidBefore 口徑：
+ * status=paid、未刪、含沖銷負數、stale 列已歸零不影響），與已核准／送審中尚未發放的金額。草稿不算。
+ */
+export async function loadProjectPaymentTotals(tenantId: string): Promise<ProjectPaymentTotals> {
+  const { data: runRows, error } = await supabaseAdmin
+    .from("bonus_runs")
+    .select("id, status, as_of, created_at")
+    .eq("tenant_id", tenantId)
+    .in("status", ["paid", "approved", "pending_approval"])
+    .is("deleted_at", null)
+  if (error) throw new Error(`bonus-run loadProjectPaymentTotals (runs): ${error.message}`)
+  const runs = (runRows ?? []) as Array<{ id: string; status: string; as_of: string; created_at: string }>
+  const out: ProjectPaymentTotals = { paid: new Map(), unpaid: new Map() }
+  if (runs.length === 0) return out
+  const statusOf = new Map(runs.map((r) => [r.id, r.status]))
+  const order = new Map([...runs].sort((a, b) => a.as_of.localeCompare(b.as_of) || a.created_at.localeCompare(b.created_at)).map((r, i) => [r.id, i]))
+  const runIds = runs.map((r) => r.id)
+  type Row = { run_id: string; project_id: string; employee_id: string; amount: string | number | null; snapshot: ItemSnapshot | null }
+  const rows: Row[] = []
+  for (let i = 0; i < runIds.length; i += 100) {
+    const chunk = runIds.slice(i, i + 100)
+    rows.push(
+      ...(await fetchAll<Row>(
+        (from, to) =>
+          supabaseAdmin
+            .from("bonus_run_items")
+            .select("run_id, project_id, employee_id, amount, snapshot")
+            .eq("tenant_id", tenantId)
+            .in("run_id", chunk)
+            .order("id", { ascending: true })
+            .range(from, to),
+        "bonus-run loadProjectPaymentTotals (items)",
+      )),
+    )
+  }
+  // 依批次先後套用，姓名／角色取最近一次。
+  rows.sort((a, b) => (order.get(a.run_id) ?? 0) - (order.get(b.run_id) ?? 0))
+  for (const r of rows) {
+    if (r.snapshot?.stale === true) continue
+    const amount = num(r.amount) ?? 0
+    const status = statusOf.get(r.run_id)
+    if (status === "paid") {
+      const byEmp = out.paid.get(r.project_id) ?? new Map<string, PaidMember>()
+      const prev = byEmp.get(r.employee_id)
+      byEmp.set(r.employee_id, {
+        amount: Math.round(((prev?.amount ?? 0) + amount) * 100) / 100,
+        name: r.snapshot?.employeeName ?? prev?.name ?? null,
+        empNo: r.snapshot?.empNo ?? prev?.empNo ?? null,
+        role: r.snapshot?.roleInProject ?? prev?.role ?? null,
+      })
+      out.paid.set(r.project_id, byEmp)
+    } else {
+      const u = out.unpaid.get(r.project_id) ?? { approved: 0, pending: 0 }
+      if (status === "approved") u.approved += amount
+      else u.pending += amount
+      out.unpaid.set(r.project_id, u)
+    }
+  }
+  return out
+}
+
 /* ──────────────────────────────────────────────────────────────────
  * M22：入帳後自動重算 draft 批次
  * ────────────────────────────────────────────────────────────────── */
