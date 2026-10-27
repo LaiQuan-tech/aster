@@ -4,10 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 // 純測試：supabase 換成記憶體版（helpers/fake-supabase.ts），不連任何 DB。
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
+// computeAttendanceRows 包一層 spy（行為不變），驗證「只看一人時只算那一人」。
+vi.mock("../services/settlement.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../services/settlement.js")>()
+  return { ...mod, computeAttendanceRows: vi.fn(mod.computeAttendanceRows) }
+})
 
 import { punchOverviewRouter } from "../routes/punch-overview.js"
-import { classifyDay, monthChunks, type ClassifyInput } from "../services/punch-overview.js"
-import { settleAttendance } from "../services/settlement.js"
+import { classifyDay, monthChunks, statsOf, type ClassifyInput } from "../services/punch-overview.js"
+import { computeAttendanceRows, settleAttendance } from "../services/settlement.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID } from "./helpers/fake-supabase.js"
 
 /**
@@ -377,5 +382,151 @@ describe("classifyDay（純函式）", () => {
       manualPunch: true,
     })
     expect(r.tags.map((t) => t.code)).toEqual(expect.arrayContaining(["holiday_work", "manual"]))
+  })
+})
+
+describe("驗收修正（2026-10-27）", () => {
+  it("部分請假（上午假）又沒打卡：假還沒結束 → 尚未上班；過了假單結束 → 未打卡＋請假標籤；照算應到", async () => {
+    approved(LEAVER, "leave", "2026-09-01T09:00:00+08:00", "2026-09-01T13:00:00+08:00", { leave_type_id: "lt-annual" })
+    vi.setSystemTime(new Date("2026-09-01T11:00:00+08:00"))
+    const before = (await asHr(request(app).get("/attendance/punch-overview"))).body as Body
+    const d1 = dayOf(before, LEAVER, "2026-09-01")!
+    expect(d1.status).toBe("not_yet")
+    expect(d1.tags.map((t) => t.code)).toContain("leave")
+
+    vi.setSystemTime(new Date("2026-09-01T14:00:00+08:00"))
+    const after = (await asHr(request(app).get("/attendance/punch-overview"))).body as Body
+    const d2 = dayOf(after, LEAVER, "2026-09-01")!
+    expect(d2.status).toBe("absent")
+    expect(d2.tags.map((t) => t.label).join()).toContain("請假")
+    expect(after.stats["2026-09-01"]!.onLeave).toBe(0)
+    expect(after.stats["2026-09-01"]!.expected).toBe(6)
+  })
+
+  it("多段卡（上、下、再上）：下午那段上班中 → 上班中、不標「有上班卡未配對」", async () => {
+    vi.setSystemTime(new Date("2026-09-01T15:00:00+08:00"))
+    punch(DAY, "in", "2026-09-01T09:00:00+08:00")
+    punch(DAY, "out", "2026-09-01T12:00:00+08:00")
+    punch(DAY, "in", "2026-09-01T13:00:00+08:00")
+    const body = (await asHr(request(app).get("/attendance/punch-overview"))).body as Body
+    const d = dayOf(body, DAY, "2026-09-01")!
+    expect(d.status).toBe("working")
+    expect(d.tags.map((t) => t.code)).not.toContain("missing_out")
+    // 下班時間＋4 小時後仍沒下班卡 → 未打下班卡
+    vi.setSystemTime(new Date("2026-09-01T23:00:00+08:00"))
+    const later = (await asHr(request(app).get("/attendance/punch-overview"))).body as Body
+    expect(dayOf(later, DAY, "2026-09-01")!.status).toBe("missing_out")
+  })
+
+  it("期間中途離職的人：週表列出、離職日之後不顯示；離職後的單日查詢不列", async () => {
+    vi.setSystemTime(new Date("2026-09-10T10:00:00+08:00"))
+    const GONE = "bbbbbbbb-0000-4000-8000-0000000000b1"
+    fake.db.employees!.push(emp(GONE, { status: "terminated", terminated_at: "2026-09-02", default_shift_id: SHIFT_DAY }))
+    punch(GONE, "in", "2026-09-01T09:00:00+08:00")
+    punch(GONE, "out", "2026-09-01T18:00:00+08:00")
+    const week = (await asHr(request(app).get("/attendance/punch-overview?from=2026-08-31&to=2026-09-06"))).body as Body
+    const row = week.employees.find((e) => e.id === GONE)!
+    expect(row).toBeDefined()
+    expect(row.days.map((d) => d.date)).toEqual(["2026-08-31", "2026-09-01", "2026-09-02"])
+    expect(dayOf(week, GONE, "2026-09-01")!.status).toBe("done")
+    const after = (await asHr(request(app).get("/attendance/punch-overview?date=2026-09-05"))).body as Body
+    expect(after.employees.some((e) => e.id === GONE)).toBe(false)
+    // 早就離職、期間內沒打卡 → 不列
+    fake.db.employees!.push(emp("bbbbbbbb-0000-4000-8000-0000000000b2", { status: "terminated", terminated_at: "2026-01-31" }))
+    const again = (await asHr(request(app).get("/attendance/punch-overview?from=2026-08-31&to=2026-09-06"))).body as Body
+    expect(again.employees.some((e) => e.id === "bbbbbbbb-0000-4000-8000-0000000000b2")).toBe(false)
+  })
+
+  it("假日出勤不算進已到（已到 ≤ 應到），另計 holidayWork", async () => {
+    vi.setSystemTime(new Date("2026-09-10T10:00:00+08:00"))
+    punch(DAY, "in", "2026-09-05T09:00:00+08:00")
+    punch(DAY, "out", "2026-09-05T12:00:00+08:00")
+    const body = (await asHr(request(app).get("/attendance/punch-overview?date=2026-09-05"))).body as Body
+    expect(body.stats["2026-09-05"]).toMatchObject({ expected: 0, arrived: 0, holidayWork: 1 })
+    const s = statsOf([])
+    expect(s.holidayWork).toBe(0)
+  })
+
+  it("只看一人（篩員工、或非 HR 只看自己）→ computeAttendanceRows 帶 employeeId，不重算全公司", async () => {
+    vi.setSystemTime(new Date("2026-09-03T10:00:00+08:00"))
+    const spy = vi.mocked(computeAttendanceRows)
+    spy.mockClear()
+    await asHr(request(app).get(`/attendance/punch-overview?date=2026-09-01&employeeId=${DAY}`))
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy.mock.calls[0]![0]).toMatchObject({ employeeId: DAY })
+    spy.mockClear()
+    await as("day-user")(request(app).get("/attendance/punch-overview?date=2026-09-01"))
+    expect(spy.mock.calls[0]![0]).toMatchObject({ employeeId: DAY })
+    spy.mockClear()
+    await asHr(request(app).get("/attendance/punch-overview?date=2026-09-01"))
+    expect(spy.mock.calls[0]![0].employeeId).toBeUndefined()
+  })
+
+  it("回應帶 includeIp：HR true、一般員工 false", async () => {
+    vi.setSystemTime(new Date("2026-09-03T10:00:00+08:00"))
+    expect((await asHr(request(app).get("/attendance/punch-overview?date=2026-09-01"))).body.includeIp).toBe(true)
+    expect((await as("day-user")(request(app).get("/attendance/punch-overview?date=2026-09-01"))).body.includeIp).toBe(false)
+  })
+})
+
+describe("超過 1000 筆：.range() 分頁撈完（PostgREST max-rows 靜默截斷）", () => {
+  const MANY = 60
+  const ids = Array.from({ length: MANY }, (_, i) => `eeeeeeee-0000-4000-8000-${String(i + 1).padStart(12, "0")}`)
+  const AUG_WORKDAYS = ["2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14", "2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31"]
+
+  beforeEach(() => {
+    vi.setSystemTime(new Date("2026-09-10T10:00:00+08:00"))
+    fake.db.employees!.push(...ids.map((id) => emp(id, { default_shift_id: SHIFT_DAY, name: `批量${id.slice(-3)}`, emp_no: `Z${id.slice(-3)}` })))
+    // 60 人 × 21 個工作日 × 2 張＝2,520 張卡（> 1000）
+    for (const id of ids) {
+      for (const d of AUG_WORKDAYS) {
+        punch(id, "in", `${d}T09:00:00+08:00`)
+        punch(id, "out", `${d}T18:00:00+08:00`)
+      }
+    }
+    fake.limits.maxRows = 1000
+  })
+
+  it("打卡總覽（31 天）：每人每個工作日都撈到（沒有被截斷成未打卡）", async () => {
+    const res = await asHr(request(app).get("/attendance/punch-overview?from=2026-08-01&to=2026-08-31"))
+    expect(res.status).toBe(200)
+    const body = res.body as Body
+    for (const id of ids) {
+      for (const d of AUG_WORKDAYS) expect(dayOf(body, id, d)?.status, `${id} ${d}`).toBe("done")
+    }
+    expect(body.stats["2026-08-31"]).toMatchObject({ arrived: MANY })
+  })
+
+  it("settleAttendance（出勤結算，影響薪資）：整月打卡分頁撈完，每人每天都有工時", async () => {
+    await settleAttendance({ tenantId: TENANT_ID, from: "2026-08-01", to: "2026-08-31" })
+    const rows = fake.db.attendance_days!.filter((r) => ids.includes(r.employee_id as string) && AUG_WORKDAYS.includes(r.work_date as string))
+    expect(rows).toHaveLength(MANY * AUG_WORKDAYS.length)
+    expect(rows.every((r) => r.worked_minutes === 480)).toBe(true)
+  })
+
+  it("settleAttendance：attendance_days 月表晚餐手動值超過 1000 列也全部讀到", async () => {
+    // 先結算一次建列，再把每一列的晚餐手動值設成 true（1,260 列 > 1000）
+    await settleAttendance({ tenantId: TENANT_ID, from: "2026-08-01", to: "2026-08-31" })
+    for (const r of fake.db.attendance_days!) r.dinner_taken = true
+    expect(fake.db.attendance_days!.length).toBeGreaterThan(1000)
+    await settleAttendance({ tenantId: TENANT_ID, from: "2026-08-01", to: "2026-08-31" })
+    const rows = fake.db.attendance_days!.filter((r) => ids.includes(r.employee_id as string))
+    expect(rows.every((r) => (r.anomaly as { flags?: { dinnerSource?: string } } | null)?.flags?.dinnerSource === "manual")).toBe(true)
+  })
+
+  it("員工超過 100 人：打卡查詢 .in() 分批（每批 ≤100），一人不漏", async () => {
+    fake.limits.maxRows = null
+    const extra = Array.from({ length: 190 }, (_, i) => `eeeeeeee-0000-4000-8000-${String(1000 + i).padStart(12, "0")}`)
+    fake.db.employees!.push(...extra.map((id) => emp(id, { name: `加${id.slice(-3)}`, emp_no: `Y${id.slice(-3)}` })))
+    for (const id of extra) {
+      punch(id, "in", "2026-08-31T09:00:00+08:00")
+      punch(id, "out", "2026-08-31T18:00:00+08:00")
+    }
+    fake.reads.length = 0
+    const body = (await asHr(request(app).get("/attendance/punch-overview?date=2026-08-31"))).body as Body
+    // 6 位原有＋60＋190＝256 人 → 3 批打卡查詢（＋結算計算自己那 1 條）
+    expect(body.employees).toHaveLength(256)
+    for (const id of [...ids, ...extra]) expect(dayOf(body, id, "2026-08-31")?.status, id).toBe("done")
+    expect(fake.reads.filter((t) => t === "punch_records").length).toBe(3 + 1)
   })
 })

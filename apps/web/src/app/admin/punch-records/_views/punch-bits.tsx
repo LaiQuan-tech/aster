@@ -36,12 +36,15 @@ export function PunchTime({
   dayKey,
   tz,
   label,
+  showIp = false,
   className = "",
 }: {
   punch: PunchBrief | null;
   dayKey: string;
   tz: string;
   label: string;
+  /** 只有 HR 拿得到 IP；非 HR 整行不顯示。 */
+  showIp?: boolean;
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -70,7 +73,7 @@ export function PunchTime({
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        aria-label={`${label} ${punchTimeLabel(punch.at, dayKey, tz)}，查看地點與 IP`}
+        aria-label={`${label} ${punchTimeLabel(punch.at, dayKey, tz)}，查看${showIp ? "地點與 IP" : "地點"}`}
         className="rounded px-0.5 font-medium tabular-nums text-gray-900 underline decoration-gray-300 decoration-dotted underline-offset-4 hover:bg-gray-100"
       >
         {punchTimeLabel(punch.at, dayKey, tz)}
@@ -85,7 +88,7 @@ export function PunchTime({
           <span className="mb-1 block font-semibold text-gray-900">{label}　{punchTimeLabel(punch.at, dayKey, tz)}</span>
           <span className="block">方式：{detail.source}{punch.wfh ? "（在家）" : ""}</span>
           <span className="block">地點：{detail.location}</span>
-          <span className="block break-all">IP：<span className="font-mono">{detail.ip}</span></span>
+          {showIp && <span className="block break-all">IP：<span className="font-mono">{detail.ip}</span></span>}
         </span>
       )}
     </span>

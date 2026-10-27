@@ -66,7 +66,10 @@ export interface OverviewEmployee {
 
 export interface OverviewStats {
   expected: number;
+  /** 「應到」的人當中已到的（已到 ≤ 應到）。 */
   arrived: number;
+  /** 假日出勤（非工作日有打卡）；不算進應到／已到。舊 API 沒有這欄。 */
+  holidayWork?: number;
   late: number;
   absent: number;
   onLeave: number;
@@ -83,6 +86,8 @@ export interface PunchOverview {
   dates: string[];
   employees: OverviewEmployee[];
   stats: Record<string, OverviewStats>;
+  /** 回應裡有沒有 IP（只有 HR 有）。 */
+  includeIp?: boolean;
 }
 
 export const MAX_RANGE_DAYS = 31;

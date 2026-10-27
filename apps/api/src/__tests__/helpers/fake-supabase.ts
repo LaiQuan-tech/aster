@@ -22,6 +22,8 @@
  *     與 Postgres 相同）。insert／update／upsert 讓兩列的某組欄位完全相同時整句失敗（code 23505、
  *     不動任何一列、不記進 `writes`）；upsert 的 `onConflict` 那組是仲裁索引，衝突時照 DO NOTHING／合併處理，
  *     其餘組仍會 23505。可驗證「同一批改名不會在中途撞到唯一索引」。
+ *   • `limits.maxRows = 1000`：仿 PostgREST max-rows——每次 select 最多回這麼多列、多的**靜默截斷**
+ *     （預設 null＝不限，與舊測試相容；reset 會清回 null）。用來驗證「沒分頁的查詢會漏資料」。
  *   • delete 若先呼叫了 `select()`，回傳被刪掉的列（仿 PostgREST `Prefer: return=representation`）。
  *
  * 用法（每個測試檔）：
@@ -145,6 +147,8 @@ export function createFakeSupabase() {
   const checks: Record<string, (row: Row) => string | null> = {}
   /** 唯一索引（見檔頭）：每個資料表一組一組的欄位。 */
   const uniques: Record<string, string[][]> = {}
+  /** 仿 PostgREST max-rows（見檔頭）。 */
+  const limits: { maxRows: number | null } = { maxRows: null }
   let idSeq = 0
 
   const nextId = () => `00000000-0000-4000-8000-${String(++idSeq).padStart(12, "0")}`
@@ -286,6 +290,7 @@ export function createFakeSupabase() {
       }
       if (rangeFrom !== null && rangeTo !== null) rows = rows.slice(rangeFrom, rangeTo + 1)
       if (max !== null) rows = rows.slice(0, max)
+      if (limits.maxRows !== null) rows = rows.slice(0, limits.maxRows)
       return respond(rows.map((row) => projectColumns(row, columns)))
     }
 
@@ -345,6 +350,7 @@ export function createFakeSupabase() {
     for (const key of Object.keys(checks)) delete checks[key]
     for (const key of Object.keys(uniques)) delete uniques[key]
     injected.length = 0
+    limits.maxRows = null
     idSeq = 0
   }
 
@@ -353,7 +359,7 @@ export function createFakeSupabase() {
     injected.push(entry)
   }
 
-  return { db, writes, reads, orFilters, rpcCalls, rpcHandlers, checks, uniques, injectError, from, rpc, reset }
+  return { db, writes, reads, orFilters, rpcCalls, rpcHandlers, checks, uniques, limits, injectError, from, rpc, reset }
 }
 
 export const fake = createFakeSupabase()

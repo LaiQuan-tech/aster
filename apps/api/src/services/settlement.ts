@@ -13,6 +13,7 @@ import {
   type ShiftDef,
   type TimeInterval,
 } from "@hr/rules"
+import { selectAllPages } from "../lib/select-all-pages.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import {
@@ -706,16 +707,17 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
   const winEnd = dayWindowUtc(addDaysKey(to, 1), tz).endIso
   // 晚餐勾選（punch_records.dinner_taken，migration 0070）：套了才撈。
   const punchHasDinner = await columnsExist("punch_records", "dinner_taken")
-  let punchQuery = supabaseAdmin
-    .from("punch_records")
-    .select(punchHasDinner ? "employee_id, type, punch_at, dinner_taken" : "employee_id, type, punch_at")
-    .eq("tenant_id", tenantId)
-    .gte("punch_at", winStart)
-    .lt("punch_at", winEnd)
-  if (employeeId) punchQuery = punchQuery.eq("employee_id", employeeId)
-  const { data: punchData, error: punchErr } = await punchQuery
-  if (punchErr) throw new Error(`settleAttendance (punches): ${punchErr.message}`)
-  const punches = (punchData ?? []) as unknown as PunchRow[]
+  // PostgREST 每次最多回 1000 列、超過靜默截斷 → .range() 分頁撈完（全公司一個月很容易超過 1000 張卡）。
+  const punches = await selectAllPages<PunchRow>((rFrom, rTo) => {
+    let q = supabaseAdmin
+      .from("punch_records")
+      .select(punchHasDinner ? "employee_id, type, punch_at, dinner_taken" : "employee_id, type, punch_at")
+      .eq("tenant_id", tenantId)
+      .gte("punch_at", winStart)
+      .lt("punch_at", winEnd)
+    if (employeeId) q = q.eq("employee_id", employeeId)
+    return q.order("punch_at", { ascending: true }).order("id", { ascending: true }).range(rFrom, rTo)
+  }, "settleAttendance (punches)")
 
   // --- 日別（services/day-type.ts，與打卡遲到判斷／月表／缺卡掃描同一支）--------------------
   // 行事曆有列就用；沒有＝依例假／休息日星期（員工個人設定優先，預設週日例假、週六休息日）。
@@ -824,16 +826,18 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
   // 最終值另記在 anomaly.flags.dinnerTaken／dinnerSource 供月表顯示。
   const dinnerByKey = new Map<string, boolean>()
   if (await columnsExist("attendance_days", "dinner_taken")) {
-    let dinnerQuery = supabaseAdmin
-      .from("attendance_days")
-      .select("employee_id, work_date, dinner_taken")
-      .eq("tenant_id", tenantId)
-      .gte("work_date", from)
-      .lte("work_date", to)
-    if (employeeId) dinnerQuery = dinnerQuery.eq("employee_id", employeeId)
-    const { data: dinnerData, error: dinnerErr } = await dinnerQuery
-    if (dinnerErr) throw new Error(`settleAttendance (dinner_taken): ${dinnerErr.message}`)
-    for (const r of (dinnerData ?? []) as Array<{ employee_id: string; work_date: string; dinner_taken: boolean | null }>) {
+    // 同上：attendance_days 一個月＝員工數×天數，超過 1000 列要分頁。
+    const dinnerData = await selectAllPages<{ employee_id: string; work_date: string; dinner_taken: boolean | null }>((rFrom, rTo) => {
+      let q = supabaseAdmin
+        .from("attendance_days")
+        .select("employee_id, work_date, dinner_taken")
+        .eq("tenant_id", tenantId)
+        .gte("work_date", from)
+        .lte("work_date", to)
+      if (employeeId) q = q.eq("employee_id", employeeId)
+      return q.order("employee_id", { ascending: true }).order("work_date", { ascending: true }).range(rFrom, rTo)
+    }, "settleAttendance (dinner_taken)")
+    for (const r of dinnerData) {
       if (r.dinner_taken != null) dinnerByKey.set(`${r.employee_id}|${r.work_date}`, r.dinner_taken === true)
     }
   }

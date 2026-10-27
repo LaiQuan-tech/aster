@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Empty, ErrorText } from "@/components/admin-ui";
 import { sheet } from "@/lib/sheet-styles";
 import { fmtHours, getPunchOverview, type OverviewFilter, type PunchOverview } from "@/lib/punch-overview";
@@ -18,23 +18,31 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: str
 }
 
 /** 當日總覽：一人一列（含沒打卡的），預設今天。 */
+/** 「今天」頁自動刷新間隔（頁面可見時）。 */
+const AUTO_REFRESH_MS = 5 * 60 * 1000;
+
 export function DayView({ filter }: { filter: OverviewFilter }) {
+  // ""＝今天（由 API 依租戶時區決定）。首次載入不帶日期、回應後也不回填 date → 不會因為 date 改變再打一次。
   const [date, setDate] = useState("");
   const [data, setData] = useState<PunchOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // 請求序號：只採用最後一次請求的回應，切日期很快時舊回應不會蓋掉新的。
+  const reqSeq = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++reqSeq.current;
     setLoading(true);
     try {
       const res = await getPunchOverview(date ? { date } : {}, filter);
+      if (seq !== reqSeq.current) return;
       setData(res);
-      if (!date) setDate(res.from);
       setError(null);
     } catch (err) {
+      if (seq !== reqSeq.current) return;
       setError(err instanceof Error ? err.message : "載入失敗");
     } finally {
-      setLoading(false);
+      if (seq === reqSeq.current) setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [date, filter.deptId, filter.employeeId]);
@@ -47,6 +55,24 @@ export function DayView({ filter }: { filter: OverviewFilter }) {
   const stats = data?.stats[day];
   const isToday = !!data && day === data.today;
 
+  // 「今天」頁：每 5 分鐘自動刷新（只在頁面可見時；切回分頁時若已過期立即刷新）。
+  const lastLoadAt = useRef(0);
+  useEffect(() => {
+    if (data) lastLoadAt.current = Date.now();
+  }, [data]);
+  useEffect(() => {
+    if (!isToday) return;
+    const tick = () => {
+      if (document.visibilityState === "visible" && Date.now() - lastLoadAt.current >= AUTO_REFRESH_MS) void load();
+    };
+    const timer = window.setInterval(tick, AUTO_REFRESH_MS);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, [isToday, load]);
+
   return (
     <Card>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -57,10 +83,10 @@ export function DayView({ filter }: { filter: OverviewFilter }) {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button type="button" className={inputCls} onClick={() => data && setDate(data.today)} disabled={isToday}>
+          <button type="button" className={inputCls} onClick={() => setDate("")} disabled={isToday}>
             今天
           </button>
-          <input type="date" aria-label="查詢日期" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
+          <input type="date" aria-label="查詢日期" className={inputCls} value={date || data?.from || ""} onChange={(e) => setDate(e.target.value)} />
           <button type="button" onClick={() => void load()} className={`${inputCls} text-gray-700`}>重新整理</button>
         </div>
       </div>
@@ -114,10 +140,10 @@ export function DayView({ filter }: { filter: OverviewFilter }) {
                       ) : "—"}
                     </td>
                     <td className={`${sheet.td} text-center`}>
-                      {d && <PunchTime punch={d.in} dayKey={day} tz={data.timezone} label="上班" />}
+                      {d && <PunchTime punch={d.in} dayKey={day} tz={data.timezone} label="上班" showIp={data.includeIp === true} />}
                     </td>
                     <td className={`${sheet.td} text-center`}>
-                      {d && <PunchTime punch={d.out} dayKey={day} tz={data.timezone} label="下班" />}
+                      {d && <PunchTime punch={d.out} dayKey={day} tz={data.timezone} label="下班" showIp={data.includeIp === true} />}
                     </td>
                     <td className={`${sheet.td} ${sheet.num} text-center`}>{d ? fmtHours(d.workedMinutes) : "—"}</td>
                     <td className={sheet.td}>

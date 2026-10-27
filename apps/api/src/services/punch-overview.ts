@@ -1,4 +1,5 @@
 import { computeAttendanceDay, type DayType, type ShiftDef } from "@hr/rules"
+import { chunk, selectAllPages } from "../lib/select-all-pages.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { columnsExist, punchRecordsHaveWfh } from "../lib/schema-compat.js"
@@ -98,8 +99,10 @@ export interface OverviewEmployee {
 export interface OverviewStats {
   /** 應到：工作日、在職、非整天請假／出差／公出。 */
   expected: number
-  /** 已到：有上班卡（含在家上班打卡）或核准在家上班。 */
+  /** 已到：「應到」的人當中有上班卡（含在家上班打卡）或核准在家上班（已到 ≤ 應到）。 */
   arrived: number
+  /** 假日出勤：非工作日（例假／休息日／國定假日）有打卡的人；不算進應到／已到。 */
+  holidayWork: number
   late: number
   /** 未打卡（已過上班時間仍無任何打卡）。 */
   absent: number
@@ -118,6 +121,8 @@ export interface PunchOverview {
   employees: OverviewEmployee[]
   /** 每一天的統計（當日總覽用 stats[date]）。 */
   stats: Record<DateKey, OverviewStats>
+  /** 回應裡有沒有 IP（只有 HR 有）；前端據此決定要不要顯示 IP 那一行。 */
+  includeIp: boolean
 }
 
 const MS_PER_MIN = 60_000
@@ -231,10 +236,20 @@ export interface ClassifyInput {
   expectedStartMs: number | null
   /** 應下班時刻（排班才有）；沒有 → null。 */
   expectedEndMs: number | null
+  /**
+   * 當天應上班分鐘（班表淨工時，沒排班＝每日正常工時）。請假分鐘 ≥ 這個數才算「整天請假」；
+   * 沒帶（舊呼叫端）→ 有請假分鐘就算整天。
+   */
+  expectedWorkMinutes?: number
   firstIn: string | null
   lastOut: string | null
   unpairedIn: number
   unpairedOut: number
+  /**
+   * 當天最後一張上下班卡是「還沒配對的上班卡」→ 那張卡的時間（多段卡：上、下、再上 → 下午那張）；否則 null。
+   * 沒帶 → 只看「只有上班卡、沒有下班卡」（firstIn）。
+   */
+  openInAt?: string | null
   /** computeAttendanceRows 的那一列（沒有＝當天沒有任何事實）。 */
   row: {
     worked_minutes?: number | null
@@ -292,16 +307,22 @@ export function classifyDay(input: ClassifyInput): ClassifyResult {
   let late = row?.late_minutes ?? 0
   let provisional = false
 
+  // 整天請假＝請假分鐘蓋滿當天應上班分鐘；部分請假又沒打卡 → 照常判斷未打卡／尚未上班（標籤另標請假）。
+  const fullDayLeave = leave > 0 && (input.expectedWorkMinutes == null || leave >= input.expectedWorkMinutes)
+  const openInAt = input.openInAt !== undefined
+    ? input.openInAt
+    : input.firstIn && !input.lastOut && input.unpairedIn > 0 ? input.firstIn : null
+
   if (!punched) {
     if (input.trip) status = input.trip
-    else if (leave > 0) status = "leave"
+    else if (fullDayLeave) status = "leave"
     else if (wfh) status = "wfh"
     else if (input.dayType !== "workday") status = "off"
     else if (input.date > input.today) status = "not_yet"
     else if (input.date === input.today && input.expectedStartMs != null && input.nowMs < input.expectedStartMs) status = "not_yet"
     else status = "absent"
-  } else if (input.firstIn && !input.lastOut && input.unpairedIn > 0) {
-    const inMs = new Date(input.firstIn).getTime()
+  } else if (openInAt && input.unpairedIn > 0) {
+    const inMs = new Date(openInAt).getTime()
     const openUntil = input.expectedEndMs != null ? input.expectedEndMs + OPEN_GRACE_AFTER_SHIFT_MS : inMs + OPEN_WITHOUT_SHIFT_MS
     if (input.nowMs <= openUntil) {
       status = "working"
@@ -312,6 +333,8 @@ export function classifyDay(input: ClassifyInput): ClassifyResult {
     } else {
       status = "missing_out"
     }
+    // 多段卡（上、下、再上）：前面有配對的段 → 那張落單的上班卡就是現在這段，不另標「未配對」。
+    if (input.unpairedOut > 0) tags.push({ code: "missing_in", label: "有下班卡未配對", tone: "danger" })
   } else if (!input.firstIn && input.lastOut) {
     status = "missing_in"
   } else {
@@ -352,12 +375,16 @@ export function classifyDay(input: ClassifyInput): ClassifyResult {
 
 /** 一天的統計（純函式）。 */
 export function statsOf(days: OverviewDay[]): OverviewStats {
-  const s: OverviewStats = { expected: 0, arrived: 0, late: 0, absent: 0, onLeave: 0, working: 0, missingOut: 0, notYet: 0 }
+  const s: OverviewStats = { expected: 0, arrived: 0, holidayWork: 0, late: 0, absent: 0, onLeave: 0, working: 0, missingOut: 0, notYet: 0 }
   for (const d of days) {
+    // 整天不在（classifyDay 只在請假分鐘蓋滿應上班分鐘時才給 leave；部分請假沒打卡＝未打卡／尚未上班，照算應到）。
     const fullDayAway = d.status === "leave" || d.status === "business_trip" || d.status === "outing"
     if (fullDayAway) s.onLeave += 1
-    if (d.dayType === "workday" && !fullDayAway) s.expected += 1
-    if (d.in || d.status === "wfh") s.arrived += 1
+    const expected = d.dayType === "workday" && !fullDayAway
+    if (expected) s.expected += 1
+    // 已到只算「應到」範圍內的人（已到 ≤ 應到）；假日出勤另計。
+    if (expected && (d.in || d.status === "wfh")) s.arrived += 1
+    if (d.dayType !== "workday" && (d.in || d.out)) s.holidayWork += 1
     if (d.lateMinutes > 0) s.late += 1
     if (d.status === "absent") s.absent += 1
     if (d.status === "working") s.working += 1
@@ -421,27 +448,31 @@ export async function buildPunchOverview(input: BuildOverviewInput): Promise<Pun
   const today = todayKey(tz, now)
   const dates = datesBetween(from, to)
 
-  // ── 員工（在職）──
-  let empQuery = supabaseAdmin
-    .from("employees")
-    .select("id, name, emp_no, dept_id, status, hire_date")
-    .eq("tenant_id", tenantId)
-    .eq("status", "active")
-  if (input.employeeIds) empQuery = empQuery.in("id", input.employeeIds.length ? input.employeeIds : ["00000000-0000-0000-0000-000000000000"])
-  if (input.employeeId) empQuery = empQuery.eq("id", input.employeeId)
-  if (input.deptId) empQuery = empQuery.eq("dept_id", input.deptId)
-  const { data: empData, error: empErr } = await empQuery
-  if (empErr) throw new Error(`punch-overview (employees): ${empErr.message}`)
-  const emps = ((empData ?? []) as Array<{ id: string; name: string; emp_no: string | null; dept_id: string | null; hire_date: string | null }>)
-    .slice()
-    .sort((a, b) => (a.emp_no ?? "~").localeCompare(b.emp_no ?? "~") || a.name.localeCompare(b.name))
-  const empIds = emps.map((e) => e.id)
+  // ── 員工：期間內有在職（在職中，或離職日落在期間內／之後）或期間內有打卡的人 ──
+  // 週表／過去日期查的是當時的狀況：期間中途才離職的人也要列出，只是離職日之後的格子不顯示。
+  type EmpRow = { id: string; name: string; emp_no: string | null; dept_id: string | null; status: string | null; hire_date: string | null; terminated_at: string | null }
+  const allEmps = await selectAllPages<EmpRow>((rFrom, rTo) => {
+    let q = supabaseAdmin
+      .from("employees")
+      .select("id, name, emp_no, dept_id, status, hire_date, terminated_at")
+      .eq("tenant_id", tenantId)
+    if (input.employeeIds) q = q.in("id", input.employeeIds.length ? input.employeeIds : ["00000000-0000-0000-0000-000000000000"])
+    if (input.employeeId) q = q.eq("id", input.employeeId)
+    if (input.deptId) q = q.eq("dept_id", input.deptId)
+    return q.order("id", { ascending: true }).range(rFrom, rTo)
+  }, "punch-overview (employees)")
+  const employedInRange = (e: EmpRow): boolean => {
+    if (e.hire_date && e.hire_date > to) return false
+    if (e.status === "active") return true
+    return !!e.terminated_at && e.terminated_at.slice(0, 10) >= from
+  }
 
   const stats: Record<DateKey, OverviewStats> = {}
-  if (empIds.length === 0) {
+  const emptyResult = (): PunchOverview => {
     for (const d of dates) stats[d] = statsOf([])
-    return { from, to, today, dates, employees: [], stats }
+    return { from, to, today, dates, employees: [], stats, includeIp }
   }
+  if (allEmps.length === 0) return emptyResult()
 
   // ── 部門名稱 ──
   const { data: deptData, error: deptErr } = await supabaseAdmin.from("departments").select("id, name").eq("tenant_id", tenantId)
@@ -452,16 +483,48 @@ export async function buildPunchOverview(input: BuildOverviewInput): Promise<Pun
   const cols = ["id", "employee_id", "type", "punch_at", "source", "lat", "lng", "geo_status"]
   if (await punchRecordsHaveWfh()) cols.push("wfh")
   if (includeIp && (await columnsExist("punch_records", "ip_address"))) cols.push("ip_address")
-  const { data: punchData, error: punchErr } = await supabaseAdmin
-    .from("punch_records")
-    .select(cols.join(", "))
-    .eq("tenant_id", tenantId)
-    .in("employee_id", empIds)
-    .gte("punch_at", dayWindowUtc(addDaysKey(from, -1), tz).startIso)
-    .lt("punch_at", dayWindowUtc(addDaysKey(to, 1), tz).endIso)
-    .order("punch_at", { ascending: true })
-  if (punchErr) throw new Error(`punch-overview (punches): ${punchErr.message}`)
-  const punches = (punchData ?? []) as unknown as PunchRow[]
+  // PostgREST 每次最多回 1000 列、超過靜默截斷 → .range() 分頁；.in() 每批 ≤100 位員工（URL 長度）。
+  const punchWinStart = dayWindowUtc(addDaysKey(from, -1), tz).startIso
+  const punchWinEnd = dayWindowUtc(addDaysKey(to, 1), tz).endIso
+  const punches: PunchRow[] = []
+  for (const ids of chunk(allEmps.map((e) => e.id), 100)) {
+    punches.push(
+      ...(await selectAllPages<PunchRow>(
+        (rFrom, rTo) =>
+          supabaseAdmin
+            .from("punch_records")
+            .select(cols.join(", "))
+            .eq("tenant_id", tenantId)
+            .in("employee_id", ids)
+            .gte("punch_at", punchWinStart)
+            .lt("punch_at", punchWinEnd)
+            .order("punch_at", { ascending: true })
+            .order("id", { ascending: true })
+            .range(rFrom, rTo),
+        "punch-overview (punches)",
+      )),
+    )
+  }
+  punches.sort((a, b) => new Date(a.punch_at).getTime() - new Date(b.punch_at).getTime())
+  const rangeStartIso = dayWindowUtc(from, tz).startIso
+  const rangeEndIso = dayWindowUtc(to, tz).endIso
+  const rangeStartMs = new Date(rangeStartIso).getTime()
+  const rangeEndMs = new Date(rangeEndIso).getTime()
+  const punchedInRange = new Set(
+    punches
+      .filter((p) => {
+        const ms = new Date(p.punch_at).getTime()
+        return ms >= rangeStartMs && ms < rangeEndMs
+      })
+      .map((p) => p.employee_id),
+  )
+
+  const emps = allEmps
+    .filter((e) => employedInRange(e) || punchedInRange.has(e.id))
+    .sort((a, b) => (a.emp_no ?? "~").localeCompare(b.emp_no ?? "~") || a.name.localeCompare(b.name))
+  const empIds = emps.map((e) => e.id)
+  if (empIds.length === 0) return emptyResult()
+
   const punchesByEmp = new Map<string, PunchRow[]>()
   const punchByInstant = new Map<string, PunchRow>()
   for (const p of punches) {
@@ -472,19 +535,30 @@ export async function buildPunchOverview(input: BuildOverviewInput): Promise<Pun
   }
 
   // ── 出差／公出（核准的 business_trip 單；不進結算，只標示）──
-  const { data: tripData, error: tripErr } = await supabaseAdmin
-    .from("leave_requests")
-    .select("employee_id, start_at, end_at, trip_type")
-    .eq("tenant_id", tenantId)
-    .eq("kind", "business_trip")
-    .eq("status", "approved")
-    .is("deleted_at", null)
-    .in("employee_id", empIds)
-    .lt("start_at", dayWindowUtc(to, tz).endIso)
-    .gt("end_at", dayWindowUtc(from, tz).startIso)
-  if (tripErr) throw new Error(`punch-overview (trips): ${tripErr.message}`)
+  type TripRow = { id: string; employee_id: string; start_at: string; end_at: string; trip_type: string | null }
+  const tripData: TripRow[] = []
+  for (const ids of chunk(empIds, 100)) {
+    tripData.push(
+      ...(await selectAllPages<TripRow>(
+        (rFrom, rTo) =>
+          supabaseAdmin
+            .from("leave_requests")
+            .select("id, employee_id, start_at, end_at, trip_type")
+            .eq("tenant_id", tenantId)
+            .eq("kind", "business_trip")
+            .eq("status", "approved")
+            .is("deleted_at", null)
+            .in("employee_id", ids)
+            .lt("start_at", rangeEndIso)
+            .gt("end_at", rangeStartIso)
+            .order("id", { ascending: true })
+            .range(rFrom, rTo),
+        "punch-overview (trips)",
+      )),
+    )
+  }
   const tripByKey = new Map<string, "business_trip" | "outing">()
-  for (const t of (tripData ?? []) as Array<{ employee_id: string; start_at: string; end_at: string; trip_type: string | null }>) {
+  for (const t of tripData) {
     const kind = t.trip_type === "outing" ? "outing" : "business_trip"
     const startDay = localDateKey(t.start_at, tz)
     // end_at 是排他上界：剛好落在午夜的結束不算進隔天。
@@ -497,9 +571,11 @@ export async function buildPunchOverview(input: BuildOverviewInput): Promise<Pun
   const leaveName = new Map(((ltData ?? []) as Array<{ code: string; name: string }>).map((l) => [l.code, l.name]))
 
   // ── 結算計算（逐月，與月表同一份）──
+  // 只看一位（篩選一人、或非 HR 只看自己）→ 只算那一位，不重算全公司。
+  const onlyEmployeeId = empIds.length === 1 ? empIds[0] : undefined
   const computed: Array<{ range: { from: DateKey; to: DateKey }; result: ComputedAttendance }> = []
   for (const range of monthChunks(from, to)) {
-    computed.push({ range, result: await computeAttendanceRows({ tenantId, from: range.from, to: range.to }) })
+    computed.push({ range, result: await computeAttendanceRows({ tenantId, from: range.from, to: range.to, employeeId: onlyEmployeeId }) })
   }
   const rowByKey = new Map<string, Record<string, unknown>>()
   for (const { result } of computed) {
@@ -527,8 +603,11 @@ export async function buildPunchOverview(input: BuildOverviewInput): Promise<Pun
     const list = punchesByEmp.get(e.id) ?? []
     const facts = derivePunchFacts(list, tz)
     const days: OverviewDay[] = []
+    const terminatedOn = e.status !== "active" && e.terminated_at ? e.terminated_at.slice(0, 10) : null
     for (const date of dates) {
       if (e.hire_date && date < e.hire_date) continue
+      // 離職日之後的格子不顯示（那天仍有打卡則照列）。
+      if (terminatedOn && date > terminatedOn && !facts.get(date)) continue
       const key = `${e.id}|${date}`
       const result = resultFor(date)
       const ctx = result.dayContext(e.id, date)
@@ -552,14 +631,22 @@ export async function buildPunchOverview(input: BuildOverviewInput): Promise<Pun
         .filter(([, minutes]) => minutes > 0)
         .map(([code]) => leaveName.get(code) ?? code)
       const dayPunches = list.filter((p) => localDateKey(p.punch_at, tz) === date)
+      // 當天最後一張上下班卡是沒配對的上班卡（且不比已配對的下班卡早）→ 現在這段還開著（多段卡下午上班中）。
+      const lastInOut = [...dayPunches].reverse().find((p) => p.type === "in" || p.type === "out")
+      const openInAt =
+        lastInOut?.type === "in" && (f?.unpairedIn ?? 0) > 0 && (!lastOut || new Date(lastOut).getTime() < new Date(lastInOut.punch_at).getTime())
+          ? lastInOut.punch_at
+          : null
       const cls = classifyDay({
         date,
         today,
         nowMs,
         dayType: ctx.dayType,
         hasExpectedTimes: ctx.hasExpectedTimes,
-        expectedStartMs: shift.startMs,
+        expectedStartMs: startAfterLeave(shift.startMs, ctx.leaveIntervals, tz),
         expectedEndMs: shift.endMs,
+        expectedWorkMinutes: ctx.shiftNetMinutes ?? ctx.regularMinutes,
+        openInAt,
         firstIn,
         lastOut,
         unpairedIn: f?.unpairedIn ?? 0,
@@ -586,5 +673,20 @@ export async function buildPunchOverview(input: BuildOverviewInput): Promise<Pun
   })
 
   for (const d of dates) stats[d] = statsOf(employees.flatMap((e) => e.days.filter((x) => x.date === d)))
-  return { from, to, today, dates, employees, stats }
+  return { from, to, today, dates, employees, stats, includeIp }
+}
+
+/**
+ * 應上班時刻被已核准請假蓋到（例如上午請假）→ 往後推到假單結束（可連續多張）。純函式。
+ * leaveIntervals 是 naive local 時鐘（computeAttendanceRows 的同一份），在 naive 空間比對再換回 UTC。
+ */
+export function startAfterLeave(startMs: number | null, leaveIntervals: AttendanceDayContext["leaveIntervals"], tz: string): number | null {
+  if (startMs == null || leaveIntervals.length === 0) return startMs
+  const naiveStart = toNaiveLocal(new Date(startMs), tz).getTime()
+  const ivs = leaveIntervals
+    .map((iv) => ({ from: new Date(iv.from).getTime(), to: new Date(iv.to).getTime() }))
+    .sort((a, b) => a.from - b.from)
+  let cur = naiveStart
+  for (const iv of ivs) if (iv.from <= cur && cur < iv.to) cur = iv.to
+  return startMs + (cur - naiveStart)
 }
