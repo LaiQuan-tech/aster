@@ -581,6 +581,7 @@ describe("依身分分版：scope.isBoss／scope.groupFinancials／bossTodo（20
     // 離職的 platform_admin：看不到
     fake.db.employees = fake.db.employees.map((e) => (e.id === HR_ID ? { ...e, status: "inactive" } : e))
     const left = await get("/dashboard/boss-summary", HR_TOKEN)
-    expect(left.body.scope.groupFinancials).toBe(false)
+    // 非在職一律降為一般員工（2026-10-27）：requireFinance 直接 403，更看不到集團總覽。
+    expect(left.status).toBe(403)
   })
 })

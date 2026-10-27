@@ -132,9 +132,11 @@ describe("pickApproverChain — manager_hr（主管逐級 → HR 覆核）", () 
     expect(self).toEqual({ ok: true, steps: [one(MGR, "manager"), { candidateEmpIds: [HR2], kind: "hr" }], source: "manager_hr" })
   })
 
-  it("排除後沒人 → 不排除（唯一的 HR 就是主管本人，仍讓單能走）；但申請人本人一律拿掉", () => {
+  it("唯一的 HR 就是主管本人（同人不能簽兩關）→ HR 覆核改由老闆關接手；沒老闆就只剩主管關；申請人本人一律拿掉", () => {
     const r = pickApproverChain(base({ flow, managerEmpIds: [MGR], hrAdminEmpIds: [MGR] }))
-    expect(r).toEqual({ ok: true, steps: [one(MGR, "manager"), { candidateEmpIds: [MGR], kind: "hr" }], source: "manager_hr" })
+    expect(r).toEqual({ ok: true, steps: [one(MGR, "manager")], source: "manager_hr" })
+    const withBoss = pickApproverChain(base({ flow, managerEmpIds: [MGR], fallbackApproverEmpId: BOSS, hrAdminEmpIds: [MGR] }))
+    expect(withBoss).toEqual({ ok: true, steps: [one(MGR, "manager"), one(BOSS, "fallback")], source: "manager_hr" })
     // 唯一的 HR 就是申請人本人（2026-10-27 起自己的單不能簽）→ 整條沒人 → 交給老闆關（沒老闆＝名義寫本人、由 platform_admin 簽）。
     const onlySelf = pickApproverChain(base({ employeeId: HR1, flow, managerEmpIds: [], hrAdminEmpIds: [HR1] }))
     expect(onlySelf).toEqual({ ok: true, steps: [{ candidateEmpIds: [HR1], kind: "fallback" }], source: "fallback" })

@@ -201,7 +201,12 @@ function pickApproverChainRaw(c: ChainCandidates): ChainResult {
     if (hr.length > 0) {
       const seen = new Set(steps.flatMap((s) => s.candidateEmpIds))
       const others = hr.filter((id) => id !== c.employeeId && !seen.has(id))
-      steps.push({ candidateEmpIds: others.length > 0 ? others : hr, kind: "hr" })
+      if (others.length > 0) steps.push({ candidateEmpIds: others, kind: "hr" })
+      // 2026-10-27 驗收：HR 都已在前面關卡（例如唯一的 HR 就是主管）——同人不能簽兩關，HR 覆核改由老闆關接手
+      // （老闆已在鏈內就略過）；前面沒有任何關卡時才留給 HR（扣掉申請人，交給 withoutSelfApprovers 處理）。
+      else if (steps.length > 0) {
+        if (boss && !seen.has(boss)) steps.push({ candidateEmpIds: [boss], kind: "fallback" })
+      } else steps.push({ candidateEmpIds: hr, kind: "hr" })
     }
     if (steps.length === 0) return { ok: false, error: "no_approver_available" }
     return { ok: true, steps, source: "manager_hr" }
