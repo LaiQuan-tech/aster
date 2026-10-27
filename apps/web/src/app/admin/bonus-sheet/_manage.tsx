@@ -7,7 +7,7 @@ import {
   availableOverlapText,
   manageMemberAmounts,
   removedPaidText,
-  manageMemberHead,
+  manageMemberHeadParts,
   moneyText,
   ratioText,
   type ManageRow,
@@ -145,7 +145,7 @@ export function ManageTable({
                       <ul className="space-y-0.5">
                         {r.members.map((m) => (
                           <li key={m.employeeId} className="leading-tight">
-                            <span className={m.removed ? "text-gray-500" : "text-gray-900"}>{manageMemberHead(m)}</span>
+                            <MemberHead m={m} />
                             <span className="block text-[11px] tabular-nums text-gray-600">{manageMemberAmounts(m)}</span>
                           </li>
                         ))}
@@ -203,5 +203,17 @@ export function ManageTable({
         )}
       </table>
     </div>
+  );
+}
+
+/** 成員分配第一行：角色　姓名（藍色）　％。 */
+function MemberHead({ m }: { m: Parameters<typeof manageMemberHeadParts>[0] }) {
+  const { role, name, share } = manageMemberHeadParts(m);
+  return (
+    <span className={m.removed ? "text-gray-500" : "text-gray-900"}>
+      {role && `${role} `}
+      <span className={m.removed ? "" : "font-medium text-blue-700"}>{name}</span>
+      {share && ` ${share}`}
+    </span>
   );
 }

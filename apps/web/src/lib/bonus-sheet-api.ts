@@ -337,9 +337,15 @@ export function ratioText(r: number | null | undefined, digits = 0): string {
 
 /** 成員分配第一行：「經理 測試員甲 40%」（固定金額：「固定 30,000」；已移除：「（已移除）」）。 */
 export function manageMemberHead(m: ManageMember): string {
+  const { role, name, share } = manageMemberHeadParts(m);
+  return [role, name, share].filter(Boolean).join(" ");
+}
+
+/** 成員分配第一行拆成三段（畫面上姓名用藍色）。 */
+export function manageMemberHeadParts(m: ManageMember): { role: string; name: string; share: string } {
   const role = m.removed ? "（已移除）" : ((m.role && MEMBER_ROLE_LABEL[m.role]) ?? "");
   const share = m.removed ? "" : m.shareMode === "pool_pct" ? (m.sharePct === null ? "—" : `${m.sharePct}%`) : m.shareAmount === null ? "—" : `固定 ${moneyText(m.shareAmount)}`;
-  return [role, m.name ?? "—", share].filter(Boolean).join(" ");
+  return { role, name: m.name ?? "—", share };
 }
 
 /** 成員分配第二行：「已發 12,000／未發 30,000（可發 2,000）」。 */
