@@ -497,6 +497,19 @@ describe("依序儲存與失敗回報", () => {
     expect(res.residual.clientEdits).toEqual({})
   })
 
+  it("銷售金額（合約）沒存成：同次的開票／入帳不送（入帳金額取當下應收，會用舊合約算錯），草稿留著", async () => {
+    const plan = applicationSheetPlan(ctx, fullDraft)
+    const api = fakeApi({ upsertMainContract: vi.fn(async () => { throw new Error("[500] boom") }) })
+    const res = await runApplicationSheetSave(plan, fullDraft, api)
+    expect(api.invoiceBilling).not.toHaveBeenCalled()
+    expect(api.receiveBilling).not.toHaveBeenCalled()
+    expect(res.steps.filter((s) => s.status === "skipped").map((s) => s.section)).toEqual(["invoice", "receipt"])
+    expect(res.residual.amountUntaxed).toBe("110000")
+    const left = Object.values(res.residual.stageEdits)
+    expect(left.some((e) => e.invoiceNo === "AB00000001")).toBe(true)
+    expect(left.some((e) => e.receivedOn === "2026-10-28")).toBe(true)
+  })
+
   it("新建期別的入帳失敗：期程已存成，剩下的入帳日改掛到新期別 id 上", async () => {
     const plan = applicationSheetPlan(ctx, fullDraft)
     const api = fakeApi({ receiveBilling: vi.fn(async () => { throw new Error("[400] amount_unknown") }) })
