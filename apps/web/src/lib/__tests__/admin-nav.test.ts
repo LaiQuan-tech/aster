@@ -299,6 +299,36 @@ describe("resolveAdminPath：detail 頁（isDetail／parentPath／title）", () 
     });
   });
 
+  it("/admin/clients/[id]、/admin/vendors/[id] → 名冊底下的內頁，返回鍵回原列表（2026-10-27）", () => {
+    expect(resolveAdminPath("/admin/clients/c1")).toMatchObject({
+      section: "finance",
+      tab: "directory",
+      sub: "clients",
+      title: "客戶資料",
+      isDetail: true,
+      parentPath: "/admin/clients",
+    });
+    expect(resolveAdminPath("/admin/clients/new")).toMatchObject({ sub: "clients", isDetail: true, parentPath: "/admin/clients" });
+    expect(resolveAdminPath("/admin/vendors/v1")).toMatchObject({
+      section: "finance",
+      tab: "directory",
+      sub: "vendors",
+      title: "廠商資料",
+      isDetail: true,
+      parentPath: "/admin/vendors",
+    });
+    expect(resolveAdminPath("/admin/vendors/new?kind=technician")).toMatchObject({ sub: "vendors", parentPath: "/admin/vendors" });
+    // 列表本身不是 detail（頁首照舊是名冊標題）。
+    expect(resolveAdminPath("/admin/clients")).toMatchObject({ title: "客戶名冊", isDetail: false, parentPath: null });
+    expect(resolveAdminPath("/admin/vendors")).toMatchObject({ title: "廠商名冊 · 名片建檔", isDetail: false, parentPath: null });
+  });
+
+  it("會計能開名冊列表就能開名冊內頁（跟著父分頁走）", () => {
+    const nav = roleNavOf("accountant", null);
+    expect(isAdminPathAllowed({ pathname: "/admin/clients", roleNav: nav })).toBe(isAdminPathAllowed({ pathname: "/admin/clients/c1", roleNav: nav }));
+    expect(isAdminPathAllowed({ pathname: "/admin/vendors", roleNav: nav })).toBe(isAdminPathAllowed({ pathname: "/admin/vendors/new", roleNav: nav }));
+  });
+
   it("/admin/announcements/[id] → 公告版本與簽收", () => {
     expect(resolveAdminPath("/admin/announcements/a1")).toMatchObject({
       section: "announce",
@@ -712,11 +742,13 @@ describe("ADMIN_ROUTES", () => {
     }
   });
 
-  it("7 種 detail：projects／disbursements list／bonus／sheets／employees／announcements／專案申請單", () => {
+  it("9 種 detail：projects／disbursements list／客戶／廠商／sheets／employees／announcements／專案申請單／獎金批次", () => {
     const details = ADMIN_ROUTES.filter((r) => r.detail).map((r) => `${r.prefix}${r.pattern ? "#pattern" : ""}`);
     expect(details).toEqual([
       "/admin/projects",
       "/admin/disbursements",
+      "/admin/clients",
+      "/admin/vendors",
       "/admin/attendance-sheets",
       "/admin/employees",
       "/admin/announcements",

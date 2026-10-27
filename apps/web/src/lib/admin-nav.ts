@@ -231,6 +231,8 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
           href: "/admin/clients",
           title: "客戶名冊",
           desc: "業主／開票對象；建案時可直接選用，發票聯式與付款方式會預填到新專案",
+          // 2026-10-27 客戶內頁 /admin/clients/[id]（新增＝/admin/clients/new）：列表按「編輯」改進內頁，返回鍵回客戶列表。
+          detail: { title: "客戶資料" },
         },
         {
           key: "vendors",
@@ -238,6 +240,8 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
           href: "/admin/vendors",
           title: "廠商名冊 · 名片建檔",
           desc: "往來廠商與窗口；拍名片自動帶入欄位，核對後建檔",
+          // 2026-10-27 廠商內頁 /admin/vendors/[id]（新增＝/admin/vendors/new，名片建檔在新增頁）：返回鍵回廠商列表。
+          detail: { title: "廠商資料" },
         },
         {
           key: "companies",

@@ -105,3 +105,20 @@ export function clientFormToInput(f: ClientForm, original: Client | null): FormR
     },
   };
 }
+
+/* ------------------------------------------------------------- 內頁 --- */
+
+/** 名冊內頁的「新增」網址片段：/admin/clients/new、/admin/vendors/new（與 [id] 同一頁）。 */
+export const NEW_ROSTER_ID = "new";
+
+/** 客戶／廠商內頁網址（id＝"new" 為新增頁）。 */
+export function rosterDetailHref(kind: "clients" | "vendors", id: string): string {
+  return `/admin/${kind}/${encodeURIComponent(id)}`;
+}
+
+/** 表單是否和基準不同（欄位逐一比對；新增頁的基準＝空白表單）。 */
+export function rosterFormDirty<T extends Record<string, unknown>>(form: T, baseline: T): boolean {
+  const keys = new Set([...Object.keys(form), ...Object.keys(baseline)]);
+  for (const k of keys) if (form[k] !== baseline[k]) return true;
+  return false;
+}

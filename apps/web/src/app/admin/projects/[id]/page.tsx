@@ -12,7 +12,7 @@ import {
 } from "@/lib/project-application-sheet";
 import { applicationSheetPlan, reportForProject, resolveSheetClient, type ProjectScopedReport, type SheetSaveContext } from "@/lib/project-application-sheet-save";
 import { unsavedChangesMessage } from "@/lib/unsaved-changes";
-import { useUnsavedChangesGuard } from "./_sections/useUnsavedChangesGuard";
+import { useUnsavedChangesGuard } from "@/components/useUnsavedChangesGuard";
 import { getDepartments, getEmployees, getMe, type Department, type Employee } from "@/lib/admin-api";
 import { isAdminRole } from "@/lib/roles";
 import { listVendors, type Vendor } from "@/lib/company-api";

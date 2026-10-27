@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { isLeavingLinkClick } from "@/lib/unsaved-changes";
 
@@ -14,7 +14,7 @@ import { isLeavingLinkClick } from "@/lib/unsaved-changes";
  *   先回到這筆的前一筆＝同一頁，這時問要不要離開；取消就再推回去，確定就真的再退一頁。
  *   變乾淨（存好了）時把多推的那筆退掉，免得之後要按兩次上一頁。
  */
-export function useUnsavedChangesGuard(dirty: boolean, message: string) {
+export function useUnsavedChangesGuard(dirty: boolean, message: string): { leave: (href: string) => void } {
   const router = useRouter();
   const dirtyRef = useRef(dirty);
   const messageRef = useRef(message);
@@ -24,6 +24,10 @@ export function useUnsavedChangesGuard(dirty: boolean, message: string) {
   const guardPushed = useRef(false);
   /** 自己呼叫 history.back() 引起的 popstate 要略過。 */
   const ignoreNextPop = useRef(false);
+  /** leave() 先退掉多推的那筆，等 popstate 回來再導到這個網址（避免導走後又被 history.back() 拉回來）。 */
+  const pendingLeave = useRef<string | null>(null);
+  /** 已呼叫 leave()：之後不再多推歷史紀錄、不再攔點擊。 */
+  const leavingRef = useRef(false);
 
   // 關閉分頁／重新整理
   useEffect(() => {
@@ -40,7 +44,7 @@ export function useUnsavedChangesGuard(dirty: boolean, message: string) {
   useEffect(() => {
     if (!dirty) return;
     const onClick = (event: MouseEvent) => {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || leavingRef.current) return;
       const anchor = (event.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
       if (!anchor) return;
       const leaving = isLeavingLinkClick({
@@ -66,6 +70,7 @@ export function useUnsavedChangesGuard(dirty: boolean, message: string) {
 
   // 上一頁
   useEffect(() => {
+    if (leavingRef.current) return;
     if (dirty && !guardPushed.current) {
       window.history.pushState({ asterUnsavedGuard: true }, "", window.location.href);
       guardPushed.current = true;
@@ -82,6 +87,9 @@ export function useUnsavedChangesGuard(dirty: boolean, message: string) {
     const onPopState = () => {
       if (ignoreNextPop.current) {
         ignoreNextPop.current = false;
+        const target = pendingLeave.current;
+        pendingLeave.current = null;
+        if (target) router.replace(target);
         return;
       }
       if (!guardPushed.current) return;
@@ -98,10 +106,33 @@ export function useUnsavedChangesGuard(dirty: boolean, message: string) {
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, []);
+  }, [router]);
 
   // 離開這一頁（元件卸載，例如確認後導走）時不要留著多推的那筆狀態旗標。
   useEffect(() => () => {
     guardPushed.current = false;
   }, []);
+
+  /**
+   * 程式導走（例如新增存檔後換到內頁、刪除後回列表）：不再詢問，以「取代目前這筆歷史紀錄」的方式導過去。
+   * 若最上面是多推的那筆，先退掉再導，免得歷史裡留一筆舊頁、或 dirty 變乾淨時的 history.back() 把人拉回來。
+   */
+  const leave = useCallback(
+    (href: string) => {
+      dirtyRef.current = false;
+      leavingRef.current = true;
+      if (guardPushed.current && window.history.state?.asterUnsavedGuard) {
+        guardPushed.current = false;
+        ignoreNextPop.current = true;
+        pendingLeave.current = href;
+        window.history.back();
+        return;
+      }
+      guardPushed.current = false;
+      router.replace(href);
+    },
+    [router],
+  );
+
+  return { leave };
 }

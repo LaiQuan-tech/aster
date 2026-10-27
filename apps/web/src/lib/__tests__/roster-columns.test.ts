@@ -4,7 +4,7 @@ import {
   CLIENT_EXCEL_COLUMNS, VENDOR_EXCEL_COLUMNS, VENDOR_ROSTER_KIND_LABELS,
   clientCellText, countVendorsByKind, filterVendorsByKind, parseSeqInput, vendorCategoryLabel, vendorCellText, vendorRosterKind,
 } from "../roster-columns";
-import { clientFormFrom, clientFormToInput, emptyClientForm, emptyVendorForm, vendorFormFrom, vendorFormToInput } from "../roster-forms";
+import { NEW_ROSTER_ID, clientFormFrom, clientFormToInput, emptyClientForm, emptyVendorForm, rosterDetailHref, rosterFormDirty, vendorFormFrom, vendorFormToInput } from "../roster-forms";
 import { PAYMENT_METHOD_LABELS, clientSaveWarningText, humanizeClientError, type Client } from "../projects-ext-api";
 import type { Vendor } from "../company-api";
 
@@ -161,5 +161,23 @@ describe("sortClientsByRegion", () => {
     expect(desc[desc.length - 1]).toBe("");
     expect(desc[0]).not.toBe(asc[0]);
     expect(rows[0].name).toBe("丙公司");
+  });
+});
+
+describe("名冊內頁（2026-10-27）", () => {
+  it("rosterDetailHref：客戶／廠商內頁網址，新增頁＝/new", () => {
+    expect(rosterDetailHref("clients", "c-1")).toBe("/admin/clients/c-1");
+    expect(rosterDetailHref("vendors", NEW_ROSTER_ID)).toBe("/admin/vendors/new");
+    expect(rosterDetailHref("clients", "a/b")).toBe("/admin/clients/a%2Fb");
+  });
+
+  it("rosterFormDirty：任何欄位不同（含勾選框）才算未儲存", () => {
+    const base = emptyClientForm();
+    expect(rosterFormDirty(base, emptyClientForm())).toBe(false);
+    expect(rosterFormDirty({ ...base, name: "虛構工程行" }, base)).toBe(true);
+    expect(rosterFormDirty({ ...base, isAffiliate: true }, base)).toBe(true);
+    const v = emptyVendorForm("engineer");
+    expect(rosterFormDirty(v, emptyVendorForm("engineer"))).toBe(false);
+    expect(rosterFormDirty(v, emptyVendorForm("supplier"))).toBe(true);
   });
 });
