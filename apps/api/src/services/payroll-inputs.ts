@@ -8,6 +8,7 @@ import {
   type RuleConfig,
   type SalaryStructure,
 } from "@hr/rules"
+import { fetchAllPages } from "../lib/select-all-pages.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
 import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
@@ -307,21 +308,28 @@ export async function loadAttendanceDays(
   nextFirst: string,
 ): Promise<AttendanceDayRow[]> {
   if (employeeIds.length === 0) return []
+  // 員工數×天數，40 人一個月就超過 PostgREST max-rows（1000）→ 分頁撈完（以主鍵 id 排序）。
   const load = (cols: string) =>
-    supabaseAdmin
-      .from("attendance_days")
-      .select(cols)
-      .eq("tenant_id", tenantId)
-      .in("employee_id", employeeIds)
-      .gte("work_date", first)
-      .lt("work_date", nextFirst)
+    fetchAllPages<AttendanceDayRow>(
+      (rFrom, rTo) =>
+        supabaseAdmin
+          .from("attendance_days")
+          .select(cols)
+          .eq("tenant_id", tenantId)
+          .in("employee_id", employeeIds)
+          .gte("work_date", first)
+          .lt("work_date", nextFirst)
+          .order("id", { ascending: true })
+          .range(rFrom, rTo),
+      "loadAttendanceDays",
+    )
   let attendance = await load(ATTENDANCE_P0_COLS)
   if (attendance.error && isMissingColumnError(attendance.error)) {
     warnSchemaGapOnce("attendance_days.p0_columns", attendance.error)
     attendance = await load(ATTENDANCE_BASE_COLS)
   }
   if (attendance.error) throw new Error(`loadAttendanceDays: ${attendance.error.message}`)
-  return (attendance.data ?? []) as unknown as AttendanceDayRow[]
+  return attendance.data ?? []
 }
 
 /** 假別 code → 扣薪比例（NULL 時 paid→0、unpaid→1）。 */

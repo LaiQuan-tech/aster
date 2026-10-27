@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { fetchAllPages, selectAllPages } from "../lib/select-all-pages.js"
 import { isBossOrPlatformAdmin } from "../lib/boss.js"
 import { isEmployedOn } from "./employment-status.js"
 import { logger } from "../lib/logger.js"
@@ -62,8 +63,7 @@ import { lateReportLockedReason, loadLateReportLocks, type LateReportRow } from 
  *   • 本月放款支出：disbursements status=paid、匯款日落在本月的 amount 合計與張數（＝GET /disbursements/summary 的 monthTotal）。
  */
 
-/** PostgREST max-rows＝1000：可能超過的查詢一律分頁。 */
-const PAGE_SIZE = 1000
+/** PostgREST max-rows＝1000：可能超過的查詢一律分頁（lib/select-all-pages：依實際列數推進、讀到空頁才停）。 */
 
 /* ──────────────────────────────────────────────────────────────────
  * 角色裁切
@@ -346,17 +346,6 @@ export type BossSummaryCtx = {
   selfEmpId?: string | null
 }
 
-async function selectAllPages<T>(build: (from: number, to: number) => PromiseLike<{ data: unknown; error: { message: string } | null }>, label: string): Promise<T[]> {
-  const out: T[] = []
-  for (let from = 0; ; from += PAGE_SIZE) {
-    const { data, error } = await build(from, from + PAGE_SIZE - 1)
-    if (error) throw new Error(`${label}: ${error.message}`)
-    const rows = (data ?? []) as T[]
-    out.push(...rows)
-    if (rows.length < PAGE_SIZE) return out
-  }
-}
-
 async function loadPendingLeave(ctx: BossSummaryCtx): Promise<number> {
   const rows = await selectAllPages<{ id: string }>(
     (from, to) =>
@@ -419,23 +408,22 @@ async function loadSheetFacts(ctx: BossSummaryCtx): Promise<SheetAnomalyFacts> {
 
 async function loadDraftSettlements(ctx: BossSummaryCtx): Promise<DraftSettlementFacts | null> {
   // 草稿不限期別、可能超過 PostgREST max-rows → 分頁讀完；表尚未遷移（0050 未套）→ null。
-  const rows: SettlementLite[] = []
-  for (let from = 0; ; from += PAGE_SIZE) {
-    const { data, error } = await supabaseAdmin
-      .from("overtime_settlements")
-      .select("id, period, amount, status, source, minutes, note")
-      .eq("tenant_id", ctx.tenantId)
-      .eq("status", "draft")
-      .order("id", { ascending: true })
-      .range(from, from + PAGE_SIZE - 1)
-    if (error) {
-      if (isMissingTableError(error)) return null
-      throw new Error(`boss-summary (overtime_settlements): ${error.message}`)
-    }
-    const page = (data ?? []) as SettlementLite[]
-    rows.push(...page)
-    if (page.length < PAGE_SIZE) break
+  const res = await fetchAllPages<SettlementLite>(
+    (from, to) =>
+      supabaseAdmin
+        .from("overtime_settlements")
+        .select("id, period, amount, status, source, minutes, note")
+        .eq("tenant_id", ctx.tenantId)
+        .eq("status", "draft")
+        .order("id", { ascending: true })
+        .range(from, to),
+    "boss-summary (overtime_settlements)",
+  )
+  if (res.error) {
+    if (isMissingTableError(res.error)) return null
+    throw new Error(`boss-summary (overtime_settlements): ${res.error.message}`)
   }
+  const rows = res.data
   return summarizeDraftSettlements(rows)
 }
 
@@ -508,23 +496,22 @@ async function loadLateReportsPending(ctx: BossSummaryCtx): Promise<number> {
   // 條件同 GET /late-reports?decision=undecided（老闆看全公司），但分頁讀完（listLateReports 單次查詢會被
   // PostgREST 1000 筆上限截斷）、只取算數需要的欄位、不查姓名。鎖定判斷共用 loadLateReportLocks／lateReportLockedReason。
   type Lite = Pick<LateReportRow, "id" | "employee_id" | "work_date">
-  const rows: Lite[] = []
-  for (let from = 0; ; from += PAGE_SIZE) {
-    const { data, error } = await supabaseAdmin
-      .from("late_reports")
-      .select("id, employee_id, work_date")
-      .eq("tenant_id", ctx.tenantId)
-      .is("attendance_decision", null)
-      .order("id", { ascending: true })
-      .range(from, from + PAGE_SIZE - 1)
-    if (error) {
-      if (isMissingTableError(error)) return 0 // 表未遷移：同 listLateReports 回 []
-      throw new Error(`boss-summary (late_reports): ${error.message}`)
-    }
-    const page = (data ?? []) as Lite[]
-    rows.push(...page)
-    if (page.length < PAGE_SIZE) break
+  const res = await fetchAllPages<Lite>(
+    (from, to) =>
+      supabaseAdmin
+        .from("late_reports")
+        .select("id, employee_id, work_date")
+        .eq("tenant_id", ctx.tenantId)
+        .is("attendance_decision", null)
+        .order("id", { ascending: true })
+        .range(from, to),
+    "boss-summary (late_reports)",
+  )
+  if (res.error) {
+    if (isMissingTableError(res.error)) return 0 // 表未遷移：同 listLateReports 回 []
+    throw new Error(`boss-summary (late_reports): ${res.error.message}`)
   }
+  const rows = res.data
   const locks = await loadLateReportLocks(ctx.tenantId, rows as unknown as LateReportRow[])
   return countBossDecidableLateReports(
     rows.map((r) => ({

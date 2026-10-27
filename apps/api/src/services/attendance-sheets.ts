@@ -20,6 +20,7 @@ import {
   type RuleConfig,
   type SalaryStructure,
 } from "@hr/rules"
+import { fetchAllPages, selectAllPages } from "../lib/select-all-pages.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { logger } from "../lib/logger.js"
 import { formatLeaveDurationMinutes } from "../lib/leave-duration.js"
@@ -972,14 +973,21 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
 
   // attendance_days (+anomaly), P0 columns with fallback
   const nextFirst = addDaysKey(to, 1)
+  // 整租戶一個月＝員工數×天數，40 人就超過 PostgREST max-rows（1000）→ 分頁撈完（以主鍵 id 排序）。
   const loadAd = (cols: string) =>
-    supabaseAdmin
-      .from("attendance_days")
-      .select(cols)
-      .eq("tenant_id", tenantId)
-      .in("employee_id", employeeIds)
-      .gte("work_date", from)
-      .lt("work_date", nextFirst)
+    fetchAllPages<AttendanceRowWithAnomaly>(
+      (rFrom, rTo) =>
+        supabaseAdmin
+          .from("attendance_days")
+          .select(cols)
+          .eq("tenant_id", tenantId)
+          .in("employee_id", employeeIds)
+          .gte("work_date", from)
+          .lt("work_date", nextFirst)
+          .order("id", { ascending: true })
+          .range(rFrom, rTo),
+      "attendance-sheets (attendance_days)",
+    )
   const P0 = "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type, anomaly, leave_minutes, leave_breakdown, outing_minutes, early_leave_minutes"
   const BASE = "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type, anomaly"
   // 晚餐勾選（attendance_days.dinner_taken，晚餐功能另加；未加 → 不撈）。
@@ -990,33 +998,45 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     ad = await loadAd(BASE)
   }
   if (ad.error) throw new Error(`attendance-sheets (attendance_days): ${ad.error.message}`)
-  for (const row of (ad.data ?? []) as unknown as AttendanceRowWithAnomaly[]) {
+  for (const row of ad.data ?? []) {
     facts.attendanceByKey.set(`${row.employee_id}|${row.work_date}`, row)
   }
 
   // 七休一跨月（2026-10-17）：月初前 6 天有出勤的日子（上月尾）。「有出勤」＝有工時或有打卡
   // （compliance.attendedDay，與 detection 同口徑）：attendance_days 的工時／未配對打卡，加上那幾天的打卡。
   const lookback = sevenDayLookbackFrom(from)
-  const { data: priorData, error: priorErr } = await supabaseAdmin
-    .from("attendance_days")
-    .select("employee_id, work_date, worked_minutes, anomaly")
-    .eq("tenant_id", tenantId)
-    .in("employee_id", employeeIds)
-    .gte("work_date", lookback)
-    .lt("work_date", from)
-  if (priorErr) throw new Error(`attendance-sheets (prior attendance_days): ${priorErr.message}`)
+  const priorData = await selectAllPages<{ employee_id: string; work_date: string; worked_minutes: number | null; anomaly: unknown }>(
+    (rFrom, rTo) =>
+      supabaseAdmin
+        .from("attendance_days")
+        .select("employee_id, work_date, worked_minutes, anomaly")
+        .eq("tenant_id", tenantId)
+        .in("employee_id", employeeIds)
+        .gte("work_date", lookback)
+        .lt("work_date", from)
+        .order("id", { ascending: true })
+        .range(rFrom, rTo),
+    "attendance-sheets (prior attendance_days)",
+  )
   const priorPunched = new Map<string, Set<DateKey>>()
   {
-    const { data: priorPunchData, error: priorPunchErr } = await supabaseAdmin
-      .from("punch_records")
-      .select("employee_id, type, punch_at")
-      .eq("tenant_id", tenantId)
-      .in("employee_id", employeeIds)
-      .gte("punch_at", dayWindowUtc(addDaysKey(lookback, -1), tz).startIso)
-      .lt("punch_at", dayWindowUtc(from, tz).endIso)
-    if (priorPunchErr) throw new Error(`attendance-sheets (prior punch_records): ${priorPunchErr.message}`)
+    // 月初前 7～8 天 × 全公司 × 每天 2～4 張卡，40 人就可能超過 1000 → 分頁。
+    const priorPunchData = await selectAllPages<{ employee_id: string; type: string; punch_at: string }>(
+      (rFrom, rTo) =>
+        supabaseAdmin
+          .from("punch_records")
+          .select("employee_id, type, punch_at")
+          .eq("tenant_id", tenantId)
+          .in("employee_id", employeeIds)
+          .gte("punch_at", dayWindowUtc(addDaysKey(lookback, -1), tz).startIso)
+          .lt("punch_at", dayWindowUtc(from, tz).endIso)
+          .order("punch_at", { ascending: true })
+          .order("id", { ascending: true })
+          .range(rFrom, rTo),
+      "attendance-sheets (prior punch_records)",
+    )
     const byEmp = new Map<string, Array<{ type: string; punch_at: string }>>()
-    for (const p of (priorPunchData ?? []) as Array<{ employee_id: string; type: string; punch_at: string }>) {
+    for (const p of priorPunchData) {
       const arr = byEmp.get(p.employee_id)
       if (arr) arr.push(p)
       else byEmp.set(p.employee_id, [p])
@@ -1033,7 +1053,7 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     if (set) set.add(date)
     else priorByEmp.set(empId, new Set([date]))
   }
-  for (const r of (priorData ?? []) as Array<{ employee_id: string; work_date: string; worked_minutes: number | null; anomaly: unknown }>) {
+  for (const r of priorData) {
     if (attendedDay({ workedMinutes: r.worked_minutes, anomaly: r.anomaly })) addPrior(r.employee_id, r.work_date)
   }
   for (const [empId, dates] of priorPunched) for (const d of dates) addPrior(empId, d)
@@ -1042,17 +1062,25 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
   // punches: local-day window widened by one day each side (cross-midnight pairs)
   const winStart = dayWindowUtc(addDaysKey(from, -1), tz).startIso
   const winEnd = dayWindowUtc(addDaysKey(to, 1), tz).endIso
-  const { data: punchData, error: punchErr } = await supabaseAdmin
-    .from("punch_records")
-    // wfh：在家上班打卡（migration 0068；未套 → 不撈，當天就只看 wfh 申請單）。
-    .select((await punchRecordsHaveWfh()) ? "employee_id, type, punch_at, source, wfh" : "employee_id, type, punch_at, source")
-    .eq("tenant_id", tenantId)
-    .in("employee_id", employeeIds)
-    .gte("punch_at", winStart)
-    .lt("punch_at", winEnd)
-  if (punchErr) throw new Error(`attendance-sheets (punches): ${punchErr.message}`)
+  // wfh：在家上班打卡（migration 0068；未套 → 不撈，當天就只看 wfh 申請單）。
+  const punchCols = (await punchRecordsHaveWfh()) ? "employee_id, type, punch_at, source, wfh" : "employee_id, type, punch_at, source"
+  // 全公司一個月的打卡遠超過 1000 張 → 分頁（與 settleAttendance 同排序：punch_at、id）。
+  const punchData = await selectAllPages<PunchRow>(
+    (rFrom, rTo) =>
+      supabaseAdmin
+        .from("punch_records")
+        .select(punchCols)
+        .eq("tenant_id", tenantId)
+        .in("employee_id", employeeIds)
+        .gte("punch_at", winStart)
+        .lt("punch_at", winEnd)
+        .order("punch_at", { ascending: true })
+        .order("id", { ascending: true })
+        .range(rFrom, rTo),
+    "attendance-sheets (punches)",
+  )
   const punchesByEmp = new Map<string, PunchRow[]>()
-  for (const p of (punchData ?? []) as unknown as PunchRow[]) {
+  for (const p of punchData) {
     const arr = punchesByEmp.get(p.employee_id)
     if (arr) arr.push(p)
     else punchesByEmp.set(p.employee_id, [p])
@@ -1116,18 +1144,23 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
   // wfh 恆 false；等假單種類加了 'wfh' 這裡不用改就會生效。
   const rangeStart = dayWindowUtc(from, tz).startIso
   const rangeEnd = dayWindowUtc(to, tz).endIso
-  const { data: wfhData, error: wfhErr } = await supabaseAdmin
-    .from("leave_requests")
-    .select("employee_id, start_at, end_at")
-    .eq("tenant_id", tenantId)
-    .eq("kind", "wfh")
-    .eq("status", "approved")
-    .is("deleted_at", null)
-    .in("employee_id", employeeIds)
-    .lt("start_at", rangeEnd)
-    .gt("end_at", rangeStart)
-  if (wfhErr) throw new Error(`attendance-sheets (wfh): ${wfhErr.message}`)
-  for (const r of (wfhData ?? []) as Array<{ employee_id: string; start_at: string; end_at: string }>) {
+  const wfhData = await selectAllPages<{ employee_id: string; start_at: string; end_at: string }>(
+    (rFrom, rTo) =>
+      supabaseAdmin
+        .from("leave_requests")
+        .select("employee_id, start_at, end_at")
+        .eq("tenant_id", tenantId)
+      .eq("kind", "wfh")
+      .eq("status", "approved")
+      .is("deleted_at", null)
+        .in("employee_id", employeeIds)
+        .lt("start_at", rangeEnd)
+        .gt("end_at", rangeStart)
+        .order("id", { ascending: true })
+        .range(rFrom, rTo),
+    "attendance-sheets (wfh)",
+  )
+  for (const r of wfhData) {
     const first = localDateKey(r.start_at, tz)
     // end_at is exclusive-ish: an end exactly at local midnight belongs to the previous day.
     const endMs = new Date(r.end_at).getTime() - 1
@@ -1139,18 +1172,23 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
 
   // M1：已核准的加班單（kind='ot'），切成覆蓋到的本地日——月表用它判斷「超過月上限
   // 的那幾天有沒有事先送加班單」。切法與上面的 wfh 相同（加班單幾乎都是單日）。
-  const { data: otData, error: otErr } = await supabaseAdmin
-    .from("leave_requests")
-    .select("employee_id, start_at, end_at")
-    .eq("tenant_id", tenantId)
-    .eq("kind", "ot")
-    .eq("status", "approved")
-    .is("deleted_at", null)
-    .in("employee_id", employeeIds)
-    .lt("start_at", rangeEnd)
-    .gt("end_at", rangeStart)
-  if (otErr) throw new Error(`attendance-sheets (approved ot): ${otErr.message}`)
-  for (const r of (otData ?? []) as Array<{ employee_id: string; start_at: string; end_at: string }>) {
+  const otData = await selectAllPages<{ employee_id: string; start_at: string; end_at: string }>(
+    (rFrom, rTo) =>
+      supabaseAdmin
+        .from("leave_requests")
+        .select("employee_id, start_at, end_at")
+        .eq("tenant_id", tenantId)
+      .eq("kind", "ot")
+      .eq("status", "approved")
+      .is("deleted_at", null)
+        .in("employee_id", employeeIds)
+        .lt("start_at", rangeEnd)
+        .gt("end_at", rangeStart)
+        .order("id", { ascending: true })
+        .range(rFrom, rTo),
+    "attendance-sheets (approved ot)",
+  )
+  for (const r of otData) {
     const first = localDateKey(r.start_at, tz)
     const endMs = new Date(r.end_at).getTime() - 1
     const last = localDateKey(new Date(Math.max(endMs, new Date(r.start_at).getTime())), tz)
@@ -1160,35 +1198,45 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
   }
 
   // pending leave requests overlapping the period
-  const { data: pendData, error: pendErr } = await supabaseAdmin
-    .from("leave_requests")
-    .select("employee_id")
-    .eq("tenant_id", tenantId)
-    .eq("kind", "leave")
-    .eq("status", "pending")
-    .is("deleted_at", null)
-    .in("employee_id", employeeIds)
-    .lt("start_at", rangeEnd)
-    .gt("end_at", rangeStart)
-  if (pendErr) throw new Error(`attendance-sheets (pending leave): ${pendErr.message}`)
-  for (const r of (pendData ?? []) as Array<{ employee_id: string }>) {
+  const pendData = await selectAllPages<{ employee_id: string }>(
+    (rFrom, rTo) =>
+      supabaseAdmin
+        .from("leave_requests")
+        .select("employee_id")
+        .eq("tenant_id", tenantId)
+      .eq("kind", "leave")
+      .eq("status", "pending")
+      .is("deleted_at", null)
+        .in("employee_id", employeeIds)
+        .lt("start_at", rangeEnd)
+        .gt("end_at", rangeStart)
+        .order("id", { ascending: true })
+        .range(rFrom, rTo),
+    "attendance-sheets (pending leave)",
+  )
+  for (const r of pendData) {
     facts.pendingLeaveByEmp.set(r.employee_id, (facts.pendingLeaveByEmp.get(r.employee_id) ?? 0) + 1)
   }
 
   // B8：已核准但尚未核銷（settled_at IS NULL）的假單，overlap 語意同上一段的 pending leave 查詢。
-  const { data: unsettledData, error: unsettledErr } = await supabaseAdmin
-    .from("leave_requests")
-    .select("employee_id")
-    .eq("tenant_id", tenantId)
-    .eq("kind", "leave")
-    .eq("status", "approved")
-    .is("settled_at", null)
-    .is("deleted_at", null)
-    .in("employee_id", employeeIds)
-    .lt("start_at", rangeEnd)
-    .gt("end_at", rangeStart)
-  if (unsettledErr) throw new Error(`attendance-sheets (unsettled leave): ${unsettledErr.message}`)
-  for (const r of (unsettledData ?? []) as Array<{ employee_id: string }>) {
+  const unsettledData = await selectAllPages<{ employee_id: string }>(
+    (rFrom, rTo) =>
+      supabaseAdmin
+        .from("leave_requests")
+        .select("employee_id")
+        .eq("tenant_id", tenantId)
+      .eq("kind", "leave")
+      .eq("status", "approved")
+      .is("settled_at", null)
+      .is("deleted_at", null)
+        .in("employee_id", employeeIds)
+        .lt("start_at", rangeEnd)
+        .gt("end_at", rangeStart)
+        .order("id", { ascending: true })
+        .range(rFrom, rTo),
+    "attendance-sheets (unsettled leave)",
+  )
+  for (const r of unsettledData) {
     facts.unsettledLeaveByEmp.set(r.employee_id, (facts.unsettledLeaveByEmp.get(r.employee_id) ?? 0) + 1)
   }
   facts.blockApproveOnUnsettledLeave = await tenantBlocksApproveOnUnsettledLeave(tenantId)

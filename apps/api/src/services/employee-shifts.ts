@@ -1,3 +1,4 @@
+import { selectAllPages } from "../lib/select-all-pages.js"
 import type { DayType, ShiftDef } from "@hr/rules"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { columnsExist, isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
@@ -107,16 +108,21 @@ export async function loadShiftResolver(opts: {
 }): Promise<ShiftResolver> {
   const { tenantId, from, to, employeeIds, activeOnly } = opts
 
-  let schedQuery = supabaseAdmin
-    .from("schedules")
-    .select("employee_id, work_date, shift_id")
-    .eq("tenant_id", tenantId)
-    .gte("work_date", from)
-    .lte("work_date", to)
-  if (employeeIds) schedQuery = schedQuery.in("employee_id", employeeIds)
-  const { data: schedData, error: schedErr } = await schedQuery
-  if (schedErr) throw new Error(`loadShiftResolver (schedules): ${schedErr.message}`)
-  const schedules = (schedData ?? []) as Array<{ employee_id: string; work_date: string; shift_id: string | null }>
+  // PostgREST 每次最多回 max-rows 列、超過靜默截斷 → 分頁撈完（40 人×30 天就超過 1000）；排序以主鍵 id 收尾，頁間穩定。
+  const schedules = await selectAllPages<{ employee_id: string; work_date: string; shift_id: string | null }>((rFrom, rTo) => {
+    let q = supabaseAdmin
+      .from("schedules")
+      .select("employee_id, work_date, shift_id")
+      .eq("tenant_id", tenantId)
+      .gte("work_date", from)
+      .lte("work_date", to)
+    if (employeeIds) q = q.in("employee_id", employeeIds)
+    return q
+      .order("employee_id", { ascending: true })
+      .order("work_date", { ascending: true })
+      .order("id", { ascending: true })
+      .range(rFrom, rTo)
+  }, "loadShiftResolver (schedules)")
 
   const defaultShiftIdByEmp = new Map<string, string>()
   const employmentByEmp = new Map<string, EmploymentWindow>()

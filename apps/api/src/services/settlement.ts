@@ -738,22 +738,24 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
   const leaveTypes = await loadLeaveTypes(tenantId)
   const rangeStart = dayWindowUtc(from, tz).startIso
   const rangeEnd = dayWindowUtc(to, tz).endIso
-  let leaveQuery = supabaseAdmin
-    .from("leave_requests")
-    .select("id, employee_id, leave_type_id, start_at, end_at, hours, segments")
-    .eq("tenant_id", tenantId)
-    .eq("kind", "leave")
-    .eq("status", "approved")
-    .is("deleted_at", null)
-    .lt("start_at", rangeEnd)
-    .gt("end_at", rangeStart)
-  if (employeeId) leaveQuery = leaveQuery.eq("employee_id", employeeId)
-  const { data: leaveData, error: leaveErr } = await leaveQuery
-  if (leaveErr) throw new Error(`settleAttendance (leave_requests): ${leaveErr.message}`)
+  // 假單／在家／補休加班單：全公司整月通常數百張，但大公司或長區間重跑可達上千 → 一律分頁（排序以主鍵 id，頁間穩定）。
+  const leaveData = await selectAllPages<LeaveRequestRow>((rFrom, rTo) => {
+    let q = supabaseAdmin
+      .from("leave_requests")
+      .select("id, employee_id, leave_type_id, start_at, end_at, hours, segments")
+      .eq("tenant_id", tenantId)
+      .eq("kind", "leave")
+      .eq("status", "approved")
+      .is("deleted_at", null)
+      .lt("start_at", rangeEnd)
+      .gt("end_at", rangeStart)
+    if (employeeId) q = q.eq("employee_id", employeeId)
+    return q.order("id", { ascending: true }).range(rFrom, rTo)
+  }, "settleAttendance (leave_requests)")
   const leaveByKey = new Map<string, DayLeave>()
   // 已核准請假覆蓋的時段（遲到／早退免計；這個查詢只撈 status='approved'，pending 不會進來）。
   const leaveIntervalsByKey = new Map<string, TimeInterval[]>()
-  for (const req of (leaveData ?? []) as LeaveRequestRow[]) {
+  for (const req of leaveData) {
     const code = req.leave_type_id ? (leaveTypes.get(req.leave_type_id)?.code ?? "unknown") : "unspecified"
     const reqDayTypeFor = (date: DateKey): DayType => dayTypeFor(req.employee_id, date)
     for (const slice of sliceLeave(req, { tz, from, to, regularMinutes, shiftFor, dayTypeFor: reqDayTypeFor, defaultLunch })) {
@@ -776,20 +778,21 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
 
   // --- approved 在家工作單（M2）：攤成本地日 ------------------------------------
   // kind='wfh' 是 2026-09 才加的假單種類；舊資料查不到列，wfhByKey 就是空的。
-  let wfhQuery = supabaseAdmin
-    .from("leave_requests")
-    .select("employee_id, start_at, end_at")
-    .eq("tenant_id", tenantId)
-    .eq("kind", "wfh")
-    .eq("status", "approved")
-    .is("deleted_at", null)
-    .lt("start_at", rangeEnd)
-    .gt("end_at", rangeStart)
-  if (employeeId) wfhQuery = wfhQuery.eq("employee_id", employeeId)
-  const { data: wfhData, error: wfhErr } = await wfhQuery
-  if (wfhErr) throw new Error(`settleAttendance (wfh): ${wfhErr.message}`)
+  const wfhData = await selectAllPages<{ employee_id: string; start_at: string; end_at: string }>((rFrom, rTo) => {
+    let q = supabaseAdmin
+      .from("leave_requests")
+      .select("employee_id, start_at, end_at")
+      .eq("tenant_id", tenantId)
+      .eq("kind", "wfh")
+      .eq("status", "approved")
+      .is("deleted_at", null)
+      .lt("start_at", rangeEnd)
+      .gt("end_at", rangeStart)
+    if (employeeId) q = q.eq("employee_id", employeeId)
+    return q.order("id", { ascending: true }).range(rFrom, rTo)
+  }, "settleAttendance (wfh)")
   const wfhByKey = new Set<string>()
-  for (const req of (wfhData ?? []) as Array<{ employee_id: string; start_at: string; end_at: string }>) {
+  for (const req of wfhData) {
     for (const d of sliceWfhDates(req, { tz, from, to })) wfhByKey.add(`${req.employee_id}|${d}`)
   }
 
@@ -797,21 +800,22 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
   // 已由 ledger.applyApprovalEffects 記進 comp_time_ledger，薪資引擎要從當天加班費扣掉這些分鐘才不會重複給付
   // （AttendanceDay.compTimeMinutes）。歸屬：加班單開始時間的租戶本地日。只認員工明示選補休的單；
   // 規則層 compTime=true 的整日轉補休由引擎自己處理，不在這裡重複計。
-  let compQuery = supabaseAdmin
-    .from("leave_requests")
-    .select("employee_id, start_at, hours")
-    .eq("tenant_id", tenantId)
-    .eq("kind", "ot")
-    .eq("status", "approved")
-    .eq("payout", "comp_time")
-    .is("deleted_at", null)
-    .gte("start_at", rangeStart)
-    .lt("start_at", rangeEnd)
-  if (employeeId) compQuery = compQuery.eq("employee_id", employeeId)
-  const { data: compData, error: compErr } = await compQuery
-  if (compErr) throw new Error(`settleAttendance (comp-time ot): ${compErr.message}`)
+  const compData = await selectAllPages<{ employee_id: string; start_at: string; hours: string | number | null }>((rFrom, rTo) => {
+    let q = supabaseAdmin
+      .from("leave_requests")
+      .select("employee_id, start_at, hours")
+      .eq("tenant_id", tenantId)
+      .eq("kind", "ot")
+      .eq("status", "approved")
+      .eq("payout", "comp_time")
+      .is("deleted_at", null)
+      .gte("start_at", rangeStart)
+      .lt("start_at", rangeEnd)
+    if (employeeId) q = q.eq("employee_id", employeeId)
+    return q.order("id", { ascending: true }).range(rFrom, rTo)
+  }, "settleAttendance (comp-time ot)")
   const compTimeByKey = new Map<string, number>()
-  for (const r of (compData ?? []) as Array<{ employee_id: string; start_at: string; hours: string | number | null }>) {
+  for (const r of compData) {
     const minutes = Math.round((Number(r.hours) || 0) * 60)
     if (minutes <= 0) continue
     const key = `${r.employee_id}|${localDateKey(r.start_at, tz)}`

@@ -524,9 +524,10 @@ describe("超過 1000 筆：.range() 分頁撈完（PostgREST max-rows 靜默截
     }
     fake.reads.length = 0
     const body = (await asHr(request(app).get("/attendance/punch-overview?date=2026-08-31"))).body as Body
-    // 6 位原有＋60＋190＝256 人 → 3 批打卡查詢（＋結算計算自己那 1 條）
+    // 6 位原有＋60＋190＝256 人 → 3 批打卡查詢（＋結算計算自己那 1 條）；
+    // selectAllPages 讀到空頁才停（防伺服器 max-rows < 1000 時提早停），每條各多一次空頁讀取 → ×2
     expect(body.employees).toHaveLength(256)
     for (const id of [...ids, ...extra]) expect(dayOf(body, id, "2026-08-31")?.status, id).toBe("done")
-    expect(fake.reads.filter((t) => t === "punch_records").length).toBe(3 + 1)
+    expect(fake.reads.filter((t) => t === "punch_records").length).toBe((3 + 1) * 2)
   })
 })
