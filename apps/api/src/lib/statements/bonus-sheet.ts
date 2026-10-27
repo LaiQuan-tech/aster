@@ -102,6 +102,11 @@ export type BonusSheetProject = {
   note: string | null
   /** 試算跳過（缺合約／缺獎金池）。 */
   skipped: "no_contract" | "no_pool" | null
+  /**
+   * 管理檢視用：依專案設定（含租戶獎金池口徑）推得的計算口徑，沒有成員時也有值（basis 在沒有成員時是 null）。
+   * 公司格式不讀這欄。
+   */
+  basisHint?: BonusBasis | null
   members: BonusSheetMember[]
   /** 分潤調整（備註換行附在後面）；沒有 null／省略。 */
   revisionNote?: string | null

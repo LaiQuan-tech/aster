@@ -17,6 +17,12 @@ import { excelPoolOf, sortProjects, taxed, type BonusSheetProject } from "../lib
  *       可發＝各現任成員 max(0, 引擎累計應得 − 該員已發放) 合計＝下一批試算會發的金額；
  *       超發＝各成員 max(0, 已發放 − 累計應得)（含已移除成員：應得視為 0），> 0 紅字；
  *       待收款＝未發放 − 可發（含尚未分配的比例；毛利制 null）。
+ *   • 試算跳過的案（缺合約／缺獎金池，2026-10-27 驗收）：仍帶現任成員與其％／固定金額（fillSkippedMembers），
+ *     獎金總額照口徑（固定金額＝合計；舊制＝獎金池；含稅入帳制缺合約＝0 並標「缺合約」）；引擎不發 → 可發＝0、
+ *     不算超發、未發放（整案與成員）不為負。
+ *   • 毛利制租戶沒有成員的案：不拿含稅合約 × 比例充當獎金總額（會灌大合計）→ 總額「—」、不計入合計。
+ *   • 可發與已核准未發的重疊：availableInApproved＝min(可發, 已核准未發)，畫面註「其中 Y 已在已核准批次」。
+ *   • 已移除成員已領（removedPaid）：成員未發合計（＋未分配）− removedPaid ＝ 整案未發放，畫面在成員區最後一行說明。
  *   • 成員：現任成員依角色排序，加上曾領過但已移除的人；每人 已發／未發（＝個人總額 − 已發，個人總額＝獎金總額 × 個人%，
  *     固定金額＝設定金額，毛利制＝目前累計應得）／可發。％合計未滿 100 → 「未分配 N%：獎金總額 × N%」。
  */
@@ -63,6 +69,14 @@ export type ManageRow = {
   approvedUnpaid: number
   pendingApproval: number
   members: ManageMember[]
+  /** 試算跳過的原因（缺合約／缺獎金池）；畫面標「缺合約」等。 */
+  skipped: "no_contract" | "no_pool" | null
+  /** 已移除成員（不在現任成員）領過的合計；讓成員未發合計與整案未發放對得上。 */
+  removedPaid: number
+  /** 可發之中已在「已核准未發放」批次裡的金額＝min(可發, 已核准未發)。 */
+  availableInApproved: number
+  /** 獎金總額刻意不算（毛利制租戶沒有成員的案）→ 畫面「—」、不計入合計。 */
+  bonusTotalOmitted: boolean
   /** 尚未分配（百分點）與金額；沒有未分配或固定金額制 null。 */
   unallocated: { pct: number; amount: number | null } | null
   /** 分潤調整紀錄（同公司格式備註的那段）。 */
@@ -79,6 +93,8 @@ export type ManageTotals = {
   unpaid: number
   available: number
   awaiting: number
+  /** 合計含毛利制估算（獎金總額是估計值；待收款不含毛利制）→ 合計列標註。 */
+  includesEstimate: boolean
 }
 
 const roleRank = (role: string | null) => (role === "manager" ? 0 : role === "lead" ? 1 : role === "member" ? 2 : role === "support" ? 3 : 4)
@@ -86,11 +102,18 @@ const round = (n: number) => Math.round(n)
 
 export function buildManageRow(p: BonusSheetProject, paidByEmp: ReadonlyMap<string, PaidMember> | undefined, unpaid: { approved: number; pending: number } | undefined, vatRate: number): ManageRow {
   const basis = p.basis
+  const skipped = p.skipped ?? null
   const poolMembers = p.members.filter((m) => m.shareMode === "pool_pct")
   let bonusTotal: number | null
+  let omitted = false
   if (basis === "fixed_amount") bonusTotal = p.members.reduce((s, m) => s + (m.shareAmount ?? 0), 0)
   else if (basis === "legacy_pool") bonusTotal = p.pool
   else if (basis === "gross_profit") bonusTotal = p.pool
+  else if (p.members.length === 0 && p.basisHint === "gross_profit") {
+    // 毛利制租戶沒有成員的案：含稅合約 × 比例不是這個租戶的口徑，不灌進合計。
+    bonusTotal = null
+    omitted = true
+  } else if (skipped === "no_contract") bonusTotal = 0 // 含稅入帳制缺合約：總額 0，畫面標「缺合約」
   else bonusTotal = excelPoolOf(p, vatRate) // Excel 制，或沒有成員（basis null）時照比例算
   if (bonusTotal !== null) bonusTotal = round(bonusTotal)
   const estimated = basis === "gross_profit"
@@ -119,7 +142,8 @@ export function buildManageRow(p: BonusSheetProject, paidByEmp: ReadonlyMap<stri
         shareAmount: m.shareAmount,
         paid: round(paid),
         total: total === null ? null : round(total),
-        unpaid: total === null ? null : round(total - paid),
+        // 被跳過的案引擎不發，未發放不為負（領超過的部分不算「還欠」）。
+        unpaid: total === null ? null : skipped ? Math.max(0, round(total - paid)) : round(total - paid),
         available: m.entitled === null ? null : Math.max(0, round(m.entitled - paid)),
       }
     })
@@ -134,7 +158,9 @@ export function buildManageRow(p: BonusSheetProject, paidByEmp: ReadonlyMap<stri
     const entitled = m.removed ? 0 : p.members.find((x) => x.employeeId === m.employeeId)?.entitled
     return entitled === null || entitled === undefined ? s : s + Math.max(0, round(m.paid - entitled))
   }, 0)
-  const unpaidTotal = bonusTotal === null ? null : bonusTotal - paid
+  const unpaidTotal = bonusTotal === null ? null : skipped ? Math.max(0, bonusTotal - paid) : bonusTotal - paid
+  const removedPaid = members.reduce((s, m) => s + (m.removed ? m.paid : 0), 0)
+  const approvedUnpaid = round(unpaid?.approved ?? 0)
   const allocated = poolMembers.reduce((s, m) => s + (m.sharePct ?? 0), 0)
   const unallocPct = basis === "fixed_amount" || p.members.length === 0 ? null : Math.max(0, Math.round((100 - allocated) * 10000) / 10000)
   return {
@@ -155,9 +181,13 @@ export function buildManageRow(p: BonusSheetProject, paidByEmp: ReadonlyMap<stri
     available,
     overpaid,
     awaiting: unpaidTotal === null || estimated ? null : unpaidTotal - available,
-    approvedUnpaid: round(unpaid?.approved ?? 0),
+    approvedUnpaid,
     pendingApproval: round(unpaid?.pending ?? 0),
     members,
+    skipped,
+    removedPaid,
+    availableInApproved: Math.max(0, Math.min(available, approvedUnpaid)),
+    bonusTotalOmitted: omitted,
     unallocated: unallocPct && unallocPct > 0 ? { pct: unallocPct, amount: bonusTotal === null || estimated ? null : round((bonusTotal * unallocPct) / 100) } : null,
     revisionNote: p.revisionNote?.trim() || null,
     note: p.note?.trim() || null,
@@ -174,6 +204,7 @@ export function manageTotalsOf(rows: readonly ManageRow[]): ManageTotals {
     unpaid: sum((r) => r.unpaid),
     available: sum((r) => r.available),
     awaiting: sum((r) => r.awaiting),
+    includesEstimate: rows.some((r) => r.bonusTotalEstimated && r.bonusTotal !== null),
   }
 }
 

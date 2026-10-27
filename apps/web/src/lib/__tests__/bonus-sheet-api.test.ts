@@ -84,3 +84,24 @@ describe("管理檢視（前端純函式）", () => {
     expect(ratioText(null)).toBe("");
   });
 });
+
+describe("管理檢視補充說明（2026-10-27 驗收）", () => {
+  it("availableOverlapText：可發裡已在已核准批次的金額；0／舊 API 不顯示", async () => {
+    const { availableOverlapText } = await import("../bonus-sheet-api");
+    expect(availableOverlapText({ availableInApproved: 5000 })).toBe("其中 5,000 已在已核准批次");
+    expect(availableOverlapText({ availableInApproved: 0 })).toBe("");
+    expect(availableOverlapText({})).toBe("");
+  });
+
+  it("removedPaidText：已移除成員已領；0／舊 API 不顯示", async () => {
+    const { removedPaidText } = await import("../bonus-sheet-api");
+    expect(removedPaidText({ removedPaid: 2000 })).toContain("已移除成員已領 2,000");
+    expect(removedPaidText({ removedPaid: 0 })).toBe("");
+    expect(removedPaidText({})).toBe("");
+  });
+
+  it("SKIPPED_LABEL：缺合約／缺獎金池", async () => {
+    const { SKIPPED_LABEL } = await import("../bonus-sheet-api");
+    expect(SKIPPED_LABEL).toEqual({ no_contract: "缺合約", no_pool: "缺獎金池" });
+  });
+});

@@ -3,7 +3,10 @@
 import { Fragment, type MouseEvent, type ReactNode } from "react";
 import {
   BASIS_LABEL,
+  SKIPPED_LABEL,
+  availableOverlapText,
   manageMemberAmounts,
+  removedPaidText,
   manageMemberHead,
   moneyText,
   ratioText,
@@ -109,7 +112,8 @@ export function ManageTable({
                   </td>
                   <td className="px-1.5 py-1.5 text-center tabular-nums">{r.bonusRatePct === null ? "—" : `${r.bonusRatePct}%`}</td>
                   <td className="px-1.5 py-1.5 text-right tabular-nums">
-                    {money(r.bonusTotal)}
+                    {r.bonusTotalOmitted ? <span title="毛利制：沒有成員的案不以含稅合約×比例估算，不計入合計">—</span> : money(r.bonusTotal)}
+                    {r.skipped && <span className="block text-[11px] font-semibold leading-tight text-amber-700">{SKIPPED_LABEL[r.skipped]}</span>}
                     {r.basis && r.basis !== "tax_inclusive_receipts" && (
                       <span className="block text-[11px] leading-tight text-gray-500">
                         {r.bonusTotalEstimated ? "毛利制・估（依目前毛利）" : BASIS_LABEL[r.basis]}
@@ -130,6 +134,7 @@ export function ManageTable({
                   <td className="px-1.5 py-1.5 text-right tabular-nums">
                     <span className={`block text-[14px] font-bold ${r.unpaid !== null && r.unpaid < 0 ? "text-red-600" : "text-gray-900"}`}>{money(r.unpaid)}</span>
                     <span className="block whitespace-nowrap text-[11px] leading-tight text-gray-600">可發 {moneyText(r.available)}</span>
+                    {availableOverlapText(r) && <span className="block text-[11px] leading-tight text-[var(--brand)]">{availableOverlapText(r)}</span>}
                     {r.awaiting !== null && <span className="block whitespace-nowrap text-[11px] leading-tight text-gray-500">待收款 {moneyText(r.awaiting)}</span>}
                     {r.overpaid > 0 && <span className="block text-[11px] font-semibold leading-tight text-red-600">超發 {moneyText(r.overpaid)}</span>}
                   </td>
@@ -149,6 +154,7 @@ export function ManageTable({
                             未分配 {r.unallocated.pct}%{r.unallocated.amount !== null && `：${moneyText(r.unallocated.amount)}`}
                           </li>
                         )}
+                        {removedPaidText(r) && <li className="text-[11px] leading-tight text-gray-500">{removedPaidText(r)}</li>}
                       </ul>
                     )}
                   </td>
@@ -187,6 +193,9 @@ export function ManageTable({
                 <span className="block text-[14px]">{moneyText(totals.unpaid)}</span>
                 <span className="block whitespace-nowrap text-[11px] font-normal text-gray-600">可發 {moneyText(totals.available)}</span>
                 <span className="block whitespace-nowrap text-[11px] font-normal text-gray-500">待收款 {moneyText(totals.awaiting)}</span>
+                {totals.includesEstimate && (
+                  <span className="block text-[11px] font-normal leading-tight text-amber-700">含毛利制估算，待收款不含毛利制</span>
+                )}
               </td>
               <td colSpan={2} />
             </tr>

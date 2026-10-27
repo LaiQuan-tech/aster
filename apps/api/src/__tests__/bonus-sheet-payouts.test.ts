@@ -17,7 +17,7 @@ vi.mock("../services/bonus-run-store.js", () => ({
 import { bonusSheetRouter } from "../routes/bonus-sheet.js"
 import { getRun, listProjectRunItems, listRuns, loadInputs, loadProjectPaymentTotals, previewRun, type PaidMember, type SerializedItem, type SerializedRun } from "../services/bonus-run-store.js"
 import { buildManageRow, manageTotalsOf } from "../services/bonus-manage.js"
-import { buildProjectPayouts, rowProjectsOf } from "../services/bonus-sheet.js"
+import { buildProjectPayouts, fillSkippedMembers, rowProjectsOf } from "../services/bonus-sheet.js"
 import { groupShareRevisions, revisionNoteOf, rocDate, type ShareAdjustmentRow } from "../services/bonus-sheet-revisions.js"
 import { OPEN_HEADER_ROWS, type BonusSheetMember, type BonusSheetProject } from "../lib/statements/bonus-sheet.js"
 import type { GridCell } from "../lib/statements/grid.js"
@@ -364,6 +364,79 @@ describe("buildManageRow（管理檢視口徑）", () => {
   })
 })
 
+describe("管理檢視驗收意見（2026-10-27）", () => {
+  const skippedFixed = () =>
+    mgrProject({
+      contractTotal: null, receivedTotal: 0, receivedRatio: 0, previousReceived: 0, previousRatio: 0, bonusRatePct: null, pool: null,
+      basis: null, unallocatedPct: null, skipped: "no_contract", members: [],
+    })
+
+  it("fillSkippedMembers：被跳過的案補上現任成員與固定金額（累計應得 null），口徑由專案設定推得", () => {
+    const p = skippedFixed()
+    fillSkippedMembers([p], {
+      projects: [{ projectId: "p1", shareMode: "fixed_amount", bonusPool: null, bonusRatePct: null, projectNote: null, contractTotal: null, receivedTotal: 0, members: [{ employeeId: "甲", roleInProject: "manager", sharePct: null, shareAmount: 30000 }] }],
+      employeeMeta: new Map([["甲", { name: "測試員甲", emp_no: null } as never]]),
+    })
+    expect(p.basis).toBe("fixed_amount")
+    expect(p.members).toEqual([expect.objectContaining({ employeeId: "甲", name: "測試員甲", shareMode: "fixed_amount", shareAmount: 30000, entitled: null, amount: 0 })])
+  })
+
+  it("指定金額 3 萬、無合約（被跳過）、成員甲已發 5,000：總額 30,000、未發 25,000、可發 0、不超發、甲不是已移除", () => {
+    const p = skippedFixed()
+    p.basis = "fixed_amount"
+    p.members = [mgrMember({ employeeId: "甲", role: "manager", shareMode: "fixed_amount", sharePct: null, shareAmount: 30000, entitled: null })]
+    const r = buildManageRow(p, paidOf([["甲", 5000]]), undefined, 0.05)
+    expect(r).toMatchObject({ skipped: "no_contract", bonusTotal: 30000, paid: 5000, unpaid: 25000, available: 0, overpaid: 0, removedPaid: 0 })
+    expect(r.members).toEqual([expect.objectContaining({ employeeId: "甲", removed: false, total: 30000, paid: 5000, unpaid: 25000, available: null })])
+  })
+
+  it("含稅入帳制無合約（被跳過）：總額 0、標缺合約；已發過的錢不讓未發放變負數、可發 0", () => {
+    const p = skippedFixed()
+    p.basis = "tax_inclusive_receipts"
+    p.bonusRatePct = 10
+    p.unallocatedPct = 50
+    p.members = [mgrMember({ employeeId: "甲", sharePct: 50, entitled: null })]
+    const r = buildManageRow(p, paidOf([["甲", 5000]]), undefined, 0.05)
+    expect(r).toMatchObject({ skipped: "no_contract", bonusTotal: 0, unpaid: 0, available: 0, overpaid: 0 })
+    expect(r.members[0]).toMatchObject({ removed: false, total: 0, unpaid: 0 })
+  })
+
+  it("舊制被跳過：總額＝獎金池", () => {
+    const p = skippedFixed()
+    p.basis = "legacy_pool"
+    p.pool = 80000
+    p.skipped = "no_contract"
+    p.members = [mgrMember({ employeeId: "甲", sharePct: 100, entitled: null })]
+    expect(buildManageRow(p, undefined, undefined, 0.05)).toMatchObject({ bonusTotal: 80000, unpaid: 80000, available: 0 })
+  })
+
+  it("removedPaid：已移除成員領過的錢，成員未發合計＋未分配 − removedPaid ＝ 整案未發放", () => {
+    const r = buildManageRow(mgrProject(), paidOf([["甲", 20000], ["丙", 2000, "測試員丙"]]), undefined, 0.05)
+    expect(r.removedPaid).toBe(2000)
+    const memberUnpaid = r.members.filter((m) => !m.removed).reduce((s, m) => s + (m.unpaid ?? 0), 0)
+    expect(memberUnpaid + (r.unallocated?.amount ?? 0) - r.removedPaid).toBe(r.unpaid)
+  })
+
+  it("availableInApproved＝min(可發, 已核准未發)", () => {
+    expect(buildManageRow(mgrProject(), paidOf([["甲", 20000]]), { approved: 5000, pending: 0 }, 0.05).availableInApproved).toBe(5000)
+    expect(buildManageRow(mgrProject(), paidOf([["甲", 20000], ["乙", 18900]]), { approved: 50000, pending: 0 }, 0.05).availableInApproved).toBe(11500)
+    expect(buildManageRow(mgrProject(), undefined, undefined, 0.05).availableInApproved).toBe(0)
+  })
+
+  it("毛利制租戶沒有成員的案：不用含稅合約×比例灌大總額（—、不計入合計）；合計標註含毛利制估算", () => {
+    const empty = buildManageRow(mgrProject({ basis: null, basisHint: "gross_profit", members: [], unallocatedPct: null, pool: null }), undefined, undefined, 0.05)
+    expect(empty).toMatchObject({ bonusTotal: null, bonusTotalOmitted: true, unpaid: null })
+    const gp = buildManageRow(mgrProject({ basis: "gross_profit", pool: 40000 }), paidOf([["甲", 10000]]), undefined, 0.05)
+    const excel = buildManageRow(mgrProject({ projectId: "p3" }), undefined, undefined, 0.05)
+    const totals = manageTotalsOf([empty, gp, excel])
+    expect(totals.bonusTotal).toBe(40000 + 105000)
+    expect(totals.includesEstimate).toBe(true)
+    expect(manageTotalsOf([excel]).includesEstimate).toBe(false)
+    // Excel 制租戶沒有成員：照舊用含稅合約 × 比例
+    expect(buildManageRow(mgrProject({ basis: null, basisHint: "tax_inclusive_receipts", members: [], unallocatedPct: null, pool: null }), undefined, undefined, 0.05).bonusTotal).toBe(105000)
+  })
+})
+
 describe("GET /bonus-sheet/manage", () => {
   it("權限同總表；回每案一列＋合計", async () => {
     for (const t of [T.hr, T.accountant, T.staff]) {
@@ -381,6 +454,31 @@ describe("GET /bonus-sheet/manage", () => {
     expect(row.revisionNote).toContain("主辦 測試員乙 20%→25%")
     expect(res.body.totals.open).toMatchObject({ bonusTotal: 105000, paid: 3000, unpaid: 102000, available: 1000 })
     expect(previewRun).toHaveBeenCalledWith(TENANT_ID, "2026-10-27", null)
+  })
+
+  it("試算跳過的案（缺合約）：管理檢視帶入現任成員，已領的現任成員不被標已移除、可發 0", async () => {
+    vi.mocked(previewRun).mockResolvedValue({
+      asOf: "2026-10-27",
+      items: [],
+      totals: run(1).totals,
+      snapshot: { projects: [{ projectId: P1, code: "T-0001", name: "測試案一", basis: "fixed_amount", contractTotal: null, receivedTotal: 0 }], skipped: [{ projectId: P1, reason: "no_contract" }] },
+      calc: [],
+      projectMeta: new Map(),
+      employeeMeta: new Map(),
+    })
+    vi.mocked(loadInputs).mockImplementation(async (_t, _a, opts) => ({
+      projects: (opts?.projectIds ?? []).includes(P1)
+        ? [{ projectId: P1, shareMode: "fixed_amount", bonusPool: null, bonusRatePct: null, projectNote: null, contractTotal: null, receivedTotal: 0, members: [{ employeeId: E.b, roleInProject: "lead", sharePct: null, shareAmount: 30000 }] }]
+        : [],
+      projectMeta: new Map(),
+      employeeMeta: new Map([[E.b, { name: "測試員乙", emp_no: null } as never]]),
+      archiveStage: new Map(),
+    }))
+    const res = await as(T.boss)(request(app).get("/bonus-sheet/manage"))
+    expect(res.status).toBe(200)
+    const row = res.body.rows.open.find((r: { projectId: string }) => r.projectId === P1)
+    expect(row).toMatchObject({ skipped: "no_contract", bonusTotal: 30000, paid: 3000, unpaid: 27000, available: 0, overpaid: 0, removedPaid: 0 })
+    expect(row.members).toEqual([expect.objectContaining({ employeeId: E.b, removed: false, total: 30000, paid: 3000 })])
   })
 
   it("已發放紀錄讀不到 → 200＋warning", async () => {

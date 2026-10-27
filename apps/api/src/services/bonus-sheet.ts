@@ -247,6 +247,7 @@ async function loadOtherProjects(tenantId: string, asOf: string, exclude: Readon
         bonusRatePct: p.bonusRatePct,
         pool: b.pool,
         basis: p.members.length > 0 ? b.basis : null,
+        basisHint: b.basis,
         currentBonus: 0,
         overpaidBy: 0,
         unallocatedPct: p.members.length > 0 && p.shareMode === "pool_pct" ? Math.max(0, Math.round((100 - allocated) * 10000) / 10000) : null,
@@ -271,6 +272,46 @@ async function loadOtherProjects(tenantId: string, asOf: string, exclude: Readon
   }
   return out
 }
+
+/**
+ * 純函式（2026-10-27 驗收）：試算跳過（缺合約／缺獎金池）的案，快照裡沒有成員——補上現任成員與其％／固定金額，
+ * 管理檢視才不會把領過錢的現任成員當成「已移除」、獎金總額（固定金額合計）也算得出來。
+ * 被跳過的案引擎不發錢：累計應得一律 null（可發＝0、不算超發）。原地修改 projects。
+ */
+export function fillSkippedMembers(projects: BonusSheetProject[], inputs: Pick<LoadedInputsLike, "projects" | "employeeMeta">): void {
+  const byId = new Map(inputs.projects.map((ip) => [ip.projectId, ip]))
+  for (const p of projects) {
+    if (!p.skipped || p.members.length > 0) continue
+    const ip = byId.get(p.projectId)
+    if (!ip) continue
+    const b = projectBonusBasisOf(ip)
+    p.basisHint = b.basis
+    if (ip.members.length === 0) continue
+    p.basis = p.basis ?? b.basis
+    if (p.basis === "fixed_amount") p.pool = null
+    if (p.basis === "legacy_pool" && p.pool === null) p.pool = ip.bonusPool ?? null
+    p.members = ip.members.map((m) => {
+      const e = inputs.employeeMeta.get(m.employeeId)
+      return {
+        employeeId: m.employeeId,
+        name: e?.name ?? null,
+        empNo: e?.emp_no ?? null,
+        role: m.roleInProject ?? null,
+        shareMode: ip.shareMode,
+        sharePct: m.sharePct,
+        shareAmount: m.shareAmount,
+        amount: 0,
+        entitled: null,
+      }
+    })
+    if (ip.shareMode === "pool_pct") {
+      const allocated = ip.members.reduce((s, m) => s + (m.sharePct ?? 0), 0)
+      p.unallocatedPct = Math.max(0, Math.round((100 - allocated) * 10000) / 10000)
+    }
+  }
+}
+
+type LoadedInputsLike = Awaited<ReturnType<typeof loadInputs>>
 
 /** 已結案：status 結案／解約，或已封存。 */
 async function loadClosedIds(tenantId: string, projectIds: readonly string[]): Promise<Set<string>> {
@@ -391,9 +432,19 @@ async function assembleProjects(
   snapshot: Record<string, unknown> | null,
   baseDate: string,
   warnings: string[],
-  opts: { keepInRoundOpen: boolean },
+  opts: { keepInRoundOpen: boolean; fillSkippedMembers?: boolean },
 ): Promise<BonusSheetProject[]> {
   const projects = projectsFromItems(items, snapshot)
+  if (opts.fillSkippedMembers) {
+    const skippedIds = projects.filter((p) => p.skipped && p.members.length === 0).map((p) => p.projectId)
+    try {
+      for (let i = 0; i < skippedIds.length; i += 100) {
+        fillSkippedMembers(projects, await loadInputs(tenantId, baseDate, { projectIds: skippedIds.slice(i, i + 100), archiveRule: "all" }))
+      }
+    } catch (err) {
+      warn(warnings, "被試算跳過的專案成員讀取失敗，這些案的成員與獎金總額暫時不完整", err)
+    }
+  }
   try {
     projects.push(...(await loadOtherProjects(tenantId, baseDate, new Set(projects.map((p) => p.projectId)))))
   } catch (err) {
@@ -458,7 +509,7 @@ export async function loadBonusManage(tenantId: string): Promise<BonusManageResu
   } catch (err) {
     warn(warnings, "即時試算失敗，可發金額暫時算不出來（只列專案層數字）", err)
   }
-  const projects = await assembleProjects(tenantId, items, snapshot, asOf, warnings, { keepInRoundOpen: false })
+  const projects = await assembleProjects(tenantId, items, snapshot, asOf, warnings, { keepInRoundOpen: false, fillSkippedMembers: true })
   let payments: ProjectPaymentTotals = { paid: new Map(), unpaid: new Map() }
   try {
     payments = await loadProjectPaymentTotals(tenantId)

@@ -249,12 +249,44 @@ export type ManageRow = {
   approvedUnpaid: number;
   pendingApproval: number;
   members: ManageMember[];
+  /** 試算跳過（缺合約／缺獎金池）；舊 API 沒有這欄。 */
+  skipped?: "no_contract" | "no_pool" | null;
+  /** 已移除成員已領合計（成員未發合計＋未分配 − 這個 ＝ 整案未發放）。 */
+  removedPaid?: number;
+  /** 可發之中已在已核准未發批次的金額。 */
+  availableInApproved?: number;
+  /** 毛利制租戶沒有成員的案：獎金總額刻意不算（—、不計入合計）。 */
+  bonusTotalOmitted?: boolean;
   unallocated: { pct: number; amount: number | null } | null;
   revisionNote: string | null;
   note: string | null;
 };
 
-export type ManageTotals = { contractTaxed: number; receivedTaxed: number; bonusTotal: number; paid: number; unpaid: number; available: number; awaiting: number };
+export type ManageTotals = {
+  contractTaxed: number;
+  receivedTaxed: number;
+  bonusTotal: number;
+  paid: number;
+  unpaid: number;
+  available: number;
+  awaiting: number;
+  /** 合計含毛利制估算（待收款不含毛利制）。 */
+  includesEstimate?: boolean;
+};
+
+export const SKIPPED_LABEL: Record<"no_contract" | "no_pool", string> = { no_contract: "缺合約", no_pool: "缺獎金池" };
+
+/** 「可發」旁的重疊說明：其中 Y 已在已核准批次（0 或舊 API → 空字串）。 */
+export function availableOverlapText(r: Pick<ManageRow, "availableInApproved">): string {
+  const y = r.availableInApproved ?? 0;
+  return y > 0 ? `其中 ${moneyText(y)} 已在已核准批次` : "";
+}
+
+/** 成員區最後一行：已移除成員已領 X（讓成員未發合計對得上整案未發放；0 或舊 API → 空字串）。 */
+export function removedPaidText(r: Pick<ManageRow, "removedPaid">): string {
+  const x = r.removedPaid ?? 0;
+  return x !== 0 ? `已移除成員已領 ${moneyText(x)}（成員未發合計扣掉這筆＝整案未發放）` : "";
+}
 
 export type BonusManageResult = {
   asOf: string;
