@@ -6,6 +6,8 @@ import type { ApiError } from "@/lib/api-client";
 import {
   downloadBonusSheetXlsx,
   getBonusSheet,
+  getProjectPayouts,
+  rowProjectMap,
   runOptionLabel,
   RUN_STATUS_LABEL,
   type BonusSheetResult,
@@ -15,7 +17,7 @@ import { gridGeometry } from "@/lib/statement-layout";
 import { resolveFit, useContainerWidth, useFitMode } from "@/components/FitToWidth";
 import { dominantFontPt, ptToPx } from "@/lib/fit-zoom";
 import { compactOpenSheet, readShowAllMembers, writeShowAllMembers } from "@/lib/bonus-sheet-columns";
-import { BonusSheetTable, bonusSheetPrintCss } from "./_components";
+import { BonusSheetTable, ProjectPayoutDetail, bonusSheetPrintCss, type BonusSheetExpandable, type PayoutsState } from "./_components";
 
 /**
  * 獎金分潤總表（2026-10-27 業主）：版面同公司現行 Excel「專案獎金總表」（未結案／已結案兩張表），
@@ -52,6 +54,9 @@ export default function BonusSheetPage() {
   const [downloading, setDownloading] = useState(false);
   /** 未結案顯示全部成員欄（預設精簡：只經理、組員1、組員2；記住選擇）。 */
   const [showAllMembers, setShowAllMembers] = useState(false);
+  /** 點開的專案（發放歷程）：預設收合、可同時展開多個；明細展開時才載（快取到離開頁面）。 */
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [payouts, setPayouts] = useState<Record<string, PayoutsState>>({});
   const seq = useRef(0);
 
   useEffect(() => {
@@ -84,7 +89,35 @@ export default function BonusSheetPage() {
     void load();
   }, [load]);
 
+  const loadPayouts = useCallback(async (projectId: string) => {
+    setPayouts((m) => ({ ...m, [projectId]: { status: "loading" } }));
+    try {
+      const r = await getProjectPayouts(projectId);
+      setPayouts((m) => ({ ...m, [projectId]: { status: "ok", data: r } }));
+    } catch (err) {
+      const e = err as ApiError | undefined;
+      const message = e?.status === 403 ? "沒有權限查看發放明細。" : e?.status === 404 ? "找不到這個專案。" : err instanceof Error ? err.message : "載入失敗";
+      setPayouts((m) => ({ ...m, [projectId]: { status: "error", message } }));
+    }
+  }, []);
+
+  const toggleProject = useCallback(
+    (projectId: string) => {
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        if (next.has(projectId)) next.delete(projectId);
+        else next.add(projectId);
+        return next;
+      });
+      const st = payouts[projectId];
+      if (!st || st.status === "error") void loadPayouts(projectId);
+    },
+    [payouts, loadPayouts],
+  );
+
   const fullGrid = data ? (tab === "open" ? data.sheets.open : data.sheets.closed) : null;
+  const rowProject = useMemo(() => rowProjectMap(data?.rowProjects?.[tab]), [data, tab]);
+  const expandedHere = useMemo(() => [...rowProject.values()].filter((id) => expanded.has(id)).length, [rowProject, expanded]);
   // 精簡檢視只在畫面上：列印（printing）一律畫完整格線；Excel 由 API 產生，本來就是完整版。
   const grid = useMemo(
     () => (fullGrid && tab === "open" && !showAllMembers && !printing ? compactOpenSheet(fullGrid) : fullGrid),
@@ -197,7 +230,8 @@ export default function BonusSheetPage() {
                 ? `本次＝依 ${data.asOf} 即時試算（不寫入，尚未建立批次）。`
                 : "目前沒有可顯示的資料。"}
             含稅＝系統未稅金額 ×（1＋營業稅 {Math.round(data.vatRate * 1000) / 10}%）；已收款＝上一個已發放批次時的累計入帳，本次請款＝之後到基準日的入帳；
-            總獎金＝含稅 × 獎金比例；本次獎金與各成員本次金額＝所選批次（或試算）的金額。
+            總獎金＝含稅 × 獎金比例；本次獎金＝所選批次（或試算）的金額。成員與尚未分配格：上行 %、下行金額——本期有發的列是本次金額，
+            「累」＝累計應得（不在本期的列；尚未分配一律是累計）。期別寫在表頭標題區「本期：…」。備註最後列出專案進行中的分潤調整。
           </p>
         )}
         {data && data.warnings.length > 0 && (
@@ -221,13 +255,32 @@ export default function BonusSheetPage() {
               {k === "open" ? "未結案" : "已結案"}（{data.counts[k]}）
             </button>
           ))}
+          <span className="ml-auto self-center text-xs text-gray-500">點專案列（或序號旁 ▸）展開每一次的獎金發放明細</span>
+          {expandedHere > 0 && (
+            <Button onClick={() => setExpanded(new Set())}>全部收合（{expandedHere}）</Button>
+          )}
         </div>
       )}
 
       {loading && !data && <p className="text-sm text-gray-500">載入中…</p>}
       {grid && (
         <div ref={sheetWrapRef} className={loading ? "opacity-60" : undefined}>
-          <BonusSheetTable grid={grid} zoom={zoom} printing={printing} />
+          <BonusSheetTable
+            grid={grid}
+            zoom={zoom}
+            printing={printing}
+            expandable={
+              printing || rowProject.size === 0
+                ? undefined
+                : ({
+                    rowProject,
+                    expanded,
+                    onToggle: toggleProject,
+                    viewportWidth: Math.max(0, sheetWrapPx - 2),
+                    renderDetail: (projectId) => <ProjectPayoutDetail state={payouts[projectId]} onRetry={() => void loadPayouts(projectId)} />,
+                  } satisfies BonusSheetExpandable)
+            }
+          />
         </div>
       )}
     </div>

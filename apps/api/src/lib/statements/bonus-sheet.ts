@@ -1,14 +1,17 @@
 import { parseRunLabel, quarterOf, type BonusBasis } from "../../services/bonus-run.js"
-import { GridBuilder, type CellFormat, type CellInput, type GridBorder, type StatementGrid } from "./grid.js"
+import { GridBuilder, formatCellText, thousands, type CellInput, type GridBorder, type StatementGrid } from "./grid.js"
 
 /**
  * 「專案獎金總表」（公司現行 Excel：03-02-專案獎金總表）的格線——純函式，無 IO。
  *
  * 2026-10-27 業主：後台「專案與財務」加「獎金分潤」頁籤，格式要跟公司現行的專案獎金總表一模一樣，
  * 老闆一眼對得上原本的表。原檔有四張工作表，這裡重現其中兩張資料表：
- *   • 「未結案」（33 欄 A–AG）：序號｜日期(V)｜專案單號｜工程名稱｜含稅｜已收款｜已收款%｜本次請款%｜累積%｜
- *     本次請款｜累積%｜本次獎金｜獎金比例 %／總獎金｜經理｜組員1–3（姓名｜%｜本次金額）｜組員4｜支援（姓名｜%）｜
- *     尚未分配｜備註。表頭兩列＋一列 10pt 間隔列，本次欄（H／J／L）淡綠底，有本次的列已收款欄淡藍底、灰字。
+ *   • 「未結案」：序號｜專案單號｜工程名稱｜含稅｜已收款｜已收款%｜本次請款%｜累積%｜本次請款｜累積%｜本次獎金｜
+ *     獎金比例 %／總獎金｜經理｜組員1–4｜支援（姓名｜%＋金額）｜尚未分配（%＋金額）｜備註。表頭兩列＋一列 10pt 間隔列，
+ *     本次欄淡綠底，有本次的列已收款欄淡藍底、灰字。
+ *     2026-10-27 業主調整（與原檔不同處）：拿掉原檔 B 欄「本期標記」（期別表頭＋列上的 V），期別改寫在標題區
+ *     「本期：2026. 07-09」；成員與尚未分配格改成同格兩行（上行 %、下行金額），原檔經理／組員1–3 的「本次金額」欄
+ *     因此拿掉（金額已在同格）。
  *   • 「已結案」（22 欄 A–V）：序號｜專案單號｜工程名稱｜含稅｜已收款｜已收款%｜獎金比例 %／金額｜
  *     經理／組員1–4／支援（姓名｜%）｜尚未分配｜（備註）。
  *   「分配說明」（級距說明文字）與「115 7-9」（單季撥款表＝獎金季發放的匯出，lib/xlsx/bonus-runs.ts）不在這裡。
@@ -26,6 +29,10 @@ import { GridBuilder, type CellFormat, type CellInput, type GridBorder, type Sta
  *   • 本次獎金＝該批次（或即時試算）該案各成員本次金額合計，成員本次金額＝批次明細的 amount
  *     （引擎算法＝含稅入帳×比例×個人%，與原檔 L＝J×M、Q＝L×P 一致）。
  *   • 不在批次內的專案（沒有成員、或試算不列的案）沒有「本次」，累計入帳都算在已收款。
+ *   • 成員格下行金額（2026-10-27 業主）：本輪的列（isInThisRound）＝該成員本次金額；不在本輪的列＝該成員累計應得
+ *     （批次明細的 entitled_cumulative；批次外的案用同一引擎算法即時算），數字前加「累」字。尚未分配的金額一律是
+ *     累計口徑（「累」）＝成員累計應得合計 ÷ 已分配% × 未分配%（池按 % 等比分）；固定金額制沒有未分配金額。
+ *   • 備註（2026-10-27 業主）：系統註記與專案說明之後，換行列出專案進行中的分潤調整（services/bonus-sheet-revisions.ts）。
  *   • 成員：經理（manager）1 位、組員1–4（lead 主辦優先，再 member）、支援（support）1 位；
  *     多出來的成員寫進備註「其他分配：…」。組員4 與支援在原檔沒有本次金額欄，照原檔。
  */
@@ -59,6 +66,8 @@ export type BonusSheetMember = {
   shareAmount: number | null
   /** 本次金額（批次或試算的 amount）。 */
   amount: number
+  /** 累計應得（批次 entitled_cumulative，或批次外即時算）；算不出 null。 */
+  entitled: number | null
 }
 
 export type BonusSheetProject = {
@@ -94,6 +103,8 @@ export type BonusSheetProject = {
   /** 試算跳過（缺合約／缺獎金池）。 */
   skipped: "no_contract" | "no_pool" | null
   members: BonusSheetMember[]
+  /** 分潤調整（備註換行附在後面）；沒有 null／省略。 */
+  revisionNote?: string | null
 }
 
 export type BonusSheetContext = {
@@ -142,7 +153,7 @@ export function mmddOf(asOf: string, slash = false): string {
   return slash ? `${mm}/${dd}` : `${mm}${dd}`
 }
 
-/** 這一列算不算「本次」（打 V、本次欄上色）：有本次入帳或有本次獎金。 */
+/** 這一列算不算「本次」（本次欄上色、成員金額用本次）：有本次入帳或有本次獎金。 */
 export function isInThisRound(p: Pick<BonusSheetProject, "currentReceived" | "currentBonus">): boolean {
   return p.currentReceived > 0 || p.currentBonus !== 0
 }
@@ -186,7 +197,7 @@ const SKIP_TEXT = { no_contract: "未列入獎金試算：缺合約", no_pool: "
 
 /** 備註欄：系統註記（制度、跳過、多出的成員、超發）在前，專案說明在後。 */
 export function noteOf(p: BonusSheetProject, overflow: readonly BonusSheetMember[]): string {
-  return [
+  const base = [
     p.basis === "legacy_pool" ? `舊制（手填獎金池${p.pool !== null ? ` ${Math.round(p.pool).toLocaleString("zh-TW")}` : ""}）` : p.basis === "fixed_amount" ? "固定金額" : null,
     p.skipped ? SKIP_TEXT[p.skipped] : null,
     overflow.length > 0 ? `其他分配：${overflow.map((m) => `${m.name ?? "—"} ${shareText(m)}`).join("、")}` : null,
@@ -195,6 +206,37 @@ export function noteOf(p: BonusSheetProject, overflow: readonly BonusSheetMember
   ]
     .filter(Boolean)
     .join("；")
+  const rev = p.revisionNote?.trim()
+  return rev ? (base ? `${base}\n分潤調整：\n${rev}` : `分潤調整：\n${rev}`) : base
+}
+
+/** 成員格下行：本輪＝本次金額；否則「累」＋累計應得；沒有就空。 */
+export function memberAmountLine(m: Pick<BonusSheetMember, "amount" | "entitled">, inRound: boolean): string {
+  if (inRound) return m.amount === 0 ? "0" : formatCellText(Math.round(m.amount), "intRed")
+  return m.entitled === null ? "" : `累 ${thousands(Math.round(m.entitled), 0)}`
+}
+
+/** 尚未分配的累計金額：成員累計應得合計 ÷ 已分配% × 未分配%；固定金額制或沒有已分配% null。 */
+export function unallocatedAmountOf(p: Pick<BonusSheetProject, "members" | "unallocatedPct">): number | null {
+  if (p.unallocatedPct === null) return null
+  const pool = p.members.filter((m) => m.shareMode === "pool_pct")
+  const allocated = pool.reduce((s, m) => s + (m.sharePct ?? 0), 0)
+  if (allocated <= 0 || pool.some((m) => m.entitled === null)) return null
+  const entitled = pool.reduce((s, m) => s + (m.entitled ?? 0), 0)
+  return Math.round((entitled / allocated) * p.unallocatedPct)
+}
+
+/** 備註欄列高：依換行與欄寬估行數（中文字約 2 個字寬單位），至少 base。 */
+export function noteRowHeight(note: string, colWidthChars: number, fontPt: number, base: number): number {
+  if (!note) return base
+  const perLine = Math.max(4, Math.floor((colWidthChars * 2 * 10) / (fontPt * 2.1)))
+  let lines = 0
+  for (const seg of note.split("\n")) {
+    let w = 0
+    for (const ch of seg) w += /[\u0000-\u00ff]/.test(ch) ? 1 : 2
+    lines += Math.max(1, Math.ceil(w / perLine))
+  }
+  return Math.max(base, Math.ceil(lines * fontPt * 1.25 + 4))
 }
 
 /** 依專案單號、名稱排序（原檔依序號＝單號順序）。 */
@@ -209,49 +251,73 @@ export function sortProjects(projects: readonly BonusSheetProject[]): BonusSheet
  * ────────────────────────────────────────────────────────────────── */
 
 /** 原檔欄寬（A–AG；沒設的欄＝預設 8.43）。 */
-export const OPEN_COLUMNS = [
+const ORIGINAL_OPEN_COLUMNS = [
   5.82, 8.43, 8.43, 11.18, 14.91, 11.91, 8.73, 7.54, 7.54, 12.09, 6.27, 10.54, 9.45, 8.43, 8.82, 8.43, 9.91, 8.82, 8.43,
   8.43, 8.82, 8.43, 8.43, 8.82, 8.43, 8.43, 8.82, 8.43, 8.82, 8.18, 8.82, 18.82, 0.54,
 ]
+/** 拿掉的原檔欄：B（本期標記）與經理／組員1–3 的本次金額欄（原 Q／T／W／Z）。 */
+const REMOVED_OPEN_COLUMNS = new Set([1, 16, 19, 22, 25])
+export const OPEN_COLUMNS = ORIGINAL_OPEN_COLUMNS.filter((_, i) => !REMOVED_OPEN_COLUMNS.has(i))
 
-/** 經理、組員1–4、支援的欄（0 起算）；amount＝本次金額欄（組員4、支援沒有）。 */
-export const OPEN_SLOTS: ReadonlyArray<{ label: string; name: number; pct: number; amount: number | null }> = [
-  { label: "經理", name: 14, pct: 15, amount: 16 },
-  { label: "組員1", name: 17, pct: 18, amount: 19 },
-  { label: "組員2", name: 20, pct: 21, amount: 22 },
-  { label: "組員3", name: 23, pct: 24, amount: 25 },
-  { label: "組員4", name: 26, pct: 27, amount: null },
-  { label: "支援", name: 28, pct: 29, amount: null },
+/** 經理、組員1–4、支援的欄（0 起算）：姓名｜%＋金額（同格兩行）。 */
+export const OPEN_SLOTS: ReadonlyArray<{ label: string; name: number; pct: number }> = [
+  { label: "經理", name: 13, pct: 14 },
+  { label: "組員1", name: 15, pct: 16 },
+  { label: "組員2", name: 17, pct: 18 },
+  { label: "組員3", name: 19, pct: 20 },
+  { label: "組員4", name: 21, pct: 22 },
+  { label: "支援", name: 23, pct: 24 },
 ]
-const O = { seq: 0, mark: 1, code: 2, name: 3, contract: 4, prev: 5, prevPct: 6, curPct: 7, cumPct: 8, cur: 9, cumPct2: 10, bonus: 11, rate: 12, pool: 13, unalloc: 30, note: 31 } as const
-const OPEN_LAST = 31 // AF（AG 只是 0.54 寬的留白欄）
+const O = { seq: 0, code: 1, name: 2, contract: 3, prev: 4, prevPct: 5, curPct: 6, cumPct: 7, cur: 8, cumPct2: 9, bonus: 10, rate: 11, pool: 12, unalloc: 25, note: 26 } as const
+const OPEN_LAST = 26 // 備註（最後一欄只是 0.54 寬的留白欄）
 export const OPEN_HEADER_ROWS = 5 // 標題 2 列＋表頭 2 列＋間隔列
 
 function slotsOf(s: MemberSlots): Array<BonusSheetMember | null> {
   return [s.manager, ...s.team, s.support]
 }
 
-function pctCell(m: BonusSheetMember): CellInput {
-  if (m.shareMode === "pool_pct") return { value: m.sharePct === null ? null : m.sharePct / 100, format: "pct1" }
-  return { value: m.shareAmount === null ? null : Math.round(m.shareAmount), format: "intRed" }
+/** 成員格（同格兩行）：上行 %（固定金額制＝設定金額）、下行金額（memberAmountLine）。 */
+function pctCell(m: BonusSheetMember, inRound: boolean): CellInput {
+  const top =
+    m.shareMode === "pool_pct"
+      ? m.sharePct === null
+        ? "—"
+        : formatCellText(m.sharePct / 100, "pct1")
+      : m.shareAmount === null
+        ? "—"
+        : formatCellText(Math.round(m.shareAmount), "intRed")
+  const bottom = memberAmountLine(m, inRound)
+  return { value: bottom ? `${top}\n${bottom}` : top, format: "text", wrap: true, size: 9 }
 }
+
+/** 尚未分配格：上行 %、下行「累」＋金額。 */
+function unallocCell(p: BonusSheetProject): CellInput {
+  if (p.unallocatedPct === null) return { value: null, format: "pct1" }
+  const amount = unallocatedAmountOf(p)
+  const top = formatCellText(p.unallocatedPct / 100, "pct1")
+  return { value: amount === null ? top : `${top}\n累 ${thousands(amount, 0)}`, format: "text", wrap: true, size: 9 }
+}
+
+/** 成員 % 欄的表頭：上行 %、下行金額（本輪＝本次；「累」＝累計應得）。 */
+export const MEMBER_HEAD_HINT = "%\n金額"
 
 export function buildOpenSheet(projectsIn: readonly BonusSheetProject[], ctx: BonusSheetContext): StatementGrid {
   const g = new GridBuilder()
   const projects = sortProjects(projectsIn)
 
-  // ── 標題（1–2 列）：A–C 文字標誌、D–G 公司名稱、M–AF 表名 ──
-  g.set(0, 0, { value: BONUS_SHEET_WORDMARK, logo: true, rowSpan: 2, colSpan: 3, bold: true, size: 18, color: NAVY, align: "center" })
-  g.set(0, 3, { value: ctx.companyName, rowSpan: 2, colSpan: 4, size: 12, align: "center", border: { bottom: "thin" } })
-  g.set(0, 12, { value: "獎金分配(員工自行向行政申報)", rowSpan: 2, colSpan: OPEN_LAST - 12 + 1, size: 16, align: "center", border: { bottom: "thin" } })
-  for (let c = 0; c <= 2; c += 1) g.border(1, c, { bottom: "thin" })
-  for (let c = 7; c <= 11; c += 1) g.border(1, c, { bottom: "double" })
+  // ── 標題（1–2 列）：A–B 文字標誌、C–F 公司名稱、G–K 本期（期別）、L–AE 表名 ──
+  // 2026-10-27 業主：拿掉原檔 B 欄「本期標記」（表頭期別＋列上的 V）；期別改放標題區，本輪列的底色照舊。
+  g.set(0, 0, { value: BONUS_SHEET_WORDMARK, logo: true, rowSpan: 2, colSpan: 2, bold: true, size: 18, color: NAVY, align: "center" })
+  g.set(0, 2, { value: ctx.companyName, rowSpan: 2, colSpan: 4, size: 12, align: "center", border: { bottom: "thin" } })
+  g.set(0, 6, { value: `本期：${ctx.periodLabel}`, rowSpan: 2, colSpan: 5, size: 11, bold: true, align: "center" })
+  g.set(0, 11, { value: "獎金分配(員工自行向行政申報)", rowSpan: 2, colSpan: OPEN_LAST - 11 + 1, size: 16, align: "center", border: { bottom: "thin" } })
+  for (let c = 0; c <= 1; c += 1) g.border(1, c, { bottom: "thin" })
+  for (let c = 6; c <= 10; c += 1) g.border(1, c, { bottom: "double" })
 
   // ── 表頭（3–4 列）──
   const head = (col: number, text: string, opts: Partial<CellInput> = {}) =>
     g.set(2, col, { value: text, rowSpan: 2, bold: true, size: 10, align: "center", wrap: true, border: { left: "thin", right: "thin", top: "double", bottom: "double" }, ...opts })
   head(O.seq, "序號")
-  head(O.mark, ctx.periodLabel)
   head(O.code, "專案單號")
   head(O.name, "工程名稱")
   head(O.contract, "含稅", { color: GRAY_TEXT })
@@ -272,11 +338,7 @@ export function buildOpenSheet(projectsIn: readonly BonusSheetProject[], ctx: Bo
   g.set(3, O.pool, { value: "總獎金", size: 12, align: "center", border: { ...THIN, bottom: "double" } })
   for (const slot of OPEN_SLOTS) {
     head(slot.name, slot.label)
-    for (const col of [slot.pct, slot.amount]) {
-      if (col === null) continue
-      g.set(2, col, { value: null, border: { left: "thin", right: "thin", top: "double" } })
-      g.set(3, col, { value: null, border: { left: "thin", right: "thin", bottom: "double" } })
-    }
+    head(slot.pct, MEMBER_HEAD_HINT, { size: 8, bold: false })
   }
   head(O.unalloc, "尚未分配")
   head(O.note, "備註")
@@ -299,7 +361,6 @@ export function buildOpenSheet(projectsIn: readonly BonusSheetProject[], ctx: Bo
     const set = (col: number, input: CellInput) => g.set(r, col, { size: 12, border: THIN, ...input })
     const curTaxed = taxed(p.currentReceived, ctx.vatRate) ?? 0
     set(O.seq, { value: index + 1, size: 8, align: "center" })
-    set(O.mark, { value: inRound ? "V" : null, size: 8, align: "center" })
     set(O.code, { value: p.code ?? "", size: 8, align: "left" })
     set(O.name, { value: p.name ?? "", align: "center", wrap: true })
     set(O.contract, { value: taxed(p.contractTotal, ctx.vatRate), format: "intRed", ...grayText })
@@ -316,15 +377,15 @@ export function buildOpenSheet(projectsIn: readonly BonusSheetProject[], ctx: Bo
     slotsOf(slots).forEach((m, i) => {
       const slot = OPEN_SLOTS[i]!
       set(slot.name, { value: m?.name ?? (m ? "—" : null), fill: GRAY_FILL, align: "center" })
-      set(slot.pct, { ...(m ? pctCell(m) : { value: null, format: "pct1" }), color: RED, align: "center" })
-      if (slot.amount !== null) set(slot.amount, { value: m && m.amount !== 0 ? Math.round(m.amount) : null, format: "intRed" })
+      set(slot.pct, { ...(m ? pctCell(m, inRound) : { value: null, format: "pct1" }), color: RED, align: "center" })
     })
-    set(O.unalloc, { value: p.unallocatedPct === null ? null : p.unallocatedPct / 100, format: "pct1", color: RED, align: "center" })
-    set(O.note, { value: noteOf(p, slots.overflow) || null, size: 10, wrap: true, color: BLUE_TEXT, align: "left" })
+    set(O.unalloc, { ...unallocCell(p), color: RED, align: "center" })
+    const note = noteOf(p, slots.overflow)
+    set(O.note, { value: note || null, size: 10, wrap: true, color: BLUE_TEXT, align: "left" })
     if (inRound) sumCur += curTaxed
     sumBonus += inRound ? Math.round(p.currentBonus) : 0
     sumPool += excelPoolOf(p, ctx.vatRate) ?? 0
-    rowHeights.push(34)
+    rowHeights.push(noteRowHeight(note, OPEN_COLUMNS[O.note]!, 10, 34))
     r += 1
   })
 
@@ -345,7 +406,7 @@ export function buildOpenSheet(projectsIn: readonly BonusSheetProject[], ctx: Bo
     rowHeights,
     font: BONUS_SHEET_FONT,
     cells: g.build(),
-    freeze: { rows: 4, cols: 4 },
+    freeze: { rows: 4, cols: 3 },
     page: { orientation: "landscape", paperSize: 8, printTitleRows: [1, 4] },
   }
 }
@@ -389,7 +450,7 @@ export function buildClosedSheet(projectsIn: readonly BonusSheetProject[], ctx: 
   g.set(3, C.pool, { value: "金額", size: 12, align: "center", border: THIN })
   for (const slot of CLOSED_SLOTS) {
     head(slot.name, slot.label, { fill: GRAY_FILL })
-    head(slot.pct, null)
+    head(slot.pct, MEMBER_HEAD_HINT, { size: 8, bold: false })
   }
   head(C.unalloc, "尚未分配", { fill: GRAY_FILL })
   head(C.note, null)
@@ -408,15 +469,17 @@ export function buildClosedSheet(projectsIn: readonly BonusSheetProject[], ctx: 
     set(C.rate, { value: p.bonusRatePct === null ? null : p.bonusRatePct / 100, format: "pct1", color: RED, align: "center" })
     set(C.pool, { value: excelPoolOf(p, ctx.vatRate), format: "intRed", color: RED })
     const slots = memberSlots(p.members)
+    // 已結案表沒有本次欄：成員金額一律是累計應得（「累」）。
     slotsOf(slots).forEach((m, i) => {
       const slot = CLOSED_SLOTS[i]!
       set(slot.name, { value: m?.name ?? (m ? "—" : null), fill: GRAY_FILL, align: "center" })
-      set(slot.pct, { ...(m ? pctCell(m) : { value: null, format: "pct1" as CellFormat }), color: RED, align: "center" })
+      set(slot.pct, { ...(m ? pctCell(m, false) : { value: null, format: "pct1" }), color: RED, align: "center" })
     })
-    set(C.unalloc, { value: p.unallocatedPct === null ? null : p.unallocatedPct / 100, format: "pct1", color: RED, align: "center" })
-    set(C.note, { value: noteOf(p, slots.overflow) || null, size: 10, wrap: true, align: "left" })
+    set(C.unalloc, { ...unallocCell(p), color: RED, align: "center" })
+    const note = noteOf(p, slots.overflow)
+    set(C.note, { value: note || null, size: 10, wrap: true, align: "left" })
     sumPool += excelPoolOf(p, ctx.vatRate) ?? 0
-    rowHeights.push(51)
+    rowHeights.push(noteRowHeight(note, CLOSED_COLUMNS[C.note]!, 10, 51))
     r += 1
   })
   for (let c = 0; c <= CLOSED_LAST; c += 1) g.set(r, c, { value: null, size: 12, border: THIN })

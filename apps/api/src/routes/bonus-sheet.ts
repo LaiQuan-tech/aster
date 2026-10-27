@@ -3,7 +3,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { loadGroupFinancialsAccess } from "../services/financial-visibility.js"
-import { BonusSheetNotFound, loadBonusSheet } from "../services/bonus-sheet.js"
+import { BonusSheetNotFound, loadBonusSheet, loadProjectPayouts } from "../services/bonus-sheet.js"
 import { buildStatementWorkbook } from "../lib/xlsx/statement-grid.js"
 import { workbookToBuffer } from "../lib/xlsx/index.js"
 import { ASTER_LOGO_PNG_BASE64, ASTER_LOGO_PNG_HEIGHT, ASTER_LOGO_PNG_WIDTH } from "../lib/brand/aster-logo.js"
@@ -18,6 +18,8 @@ export const bonusSheetRouter = Router()
  *     { source, asOf, run, runs, periodLabel, mmdd, vatRate, counts, warnings, sheets: { open, closed } }
  *     runId＝指定獎金批次；asOf＝依基準日即時試算；都沒帶＝最新一般批次（沒有批次則今天的試算）。
  *   GET /bonus-sheet/export.xlsx（同參數）：兩張工作表「未結案」「已結案」。
+ *   GET /bonus-sheet/projects/:projectId/payouts：單一專案每一次獎金發放的明細與時間點（畫面點開專案列才載，
+ *     不放進總表回應——專案多時總表不必一次撈全部歷程）。草稿不列；累計只算已發放（含沖銷）。
  *
  * 權限：含獎金比例與總獎金（可反推毛利）＝集團財務——只有老闆、platform_admin、被授權的 hr_admin
  * （services/financial-visibility.ts canSeeGroupFinancials，同 routes/group-overview.ts）；其他人（含一般 HR、
@@ -102,6 +104,25 @@ bonusSheetRouter.get("/bonus-sheet/export.xlsx", ...guards, async (req: Request,
       res.status(404).json({ error: "not_found" })
       return
     }
+    next(err)
+  }
+})
+
+bonusSheetRouter.get("/bonus-sheet/projects/:projectId/payouts", ...guards, async (req: Request, res: Response, next: NextFunction) => {
+  const tenantId = res.locals.tenantId as string
+  const projectId = String(req.params.projectId ?? "")
+  if (!UUID_RE.test(projectId)) {
+    res.status(400).json({ error: "invalid_query", param: "projectId" })
+    return
+  }
+  try {
+    const result = await loadProjectPayouts(tenantId, projectId)
+    if (!result) {
+      res.status(404).json({ error: "not_found" })
+      return
+    }
+    res.status(200).json(result)
+  } catch (err) {
     next(err)
   }
 })

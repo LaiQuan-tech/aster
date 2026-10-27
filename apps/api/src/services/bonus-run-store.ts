@@ -1677,6 +1677,29 @@ export async function myBonusHistory(tenantId: string, employeeId: string): Prom
   return { rows, total: rows.reduce((s, r) => s + r.amount, 0) }
 }
 
+/**
+ * 獎金分潤總表的「發放歷程」（GET /bonus-sheet/projects/:projectId/payouts，services/bonus-sheet.ts
+ * loadProjectPayouts）：單一專案在每個未刪批次（任何狀態；草稿由呼叫端決定要不要列）的明細列。
+ * 只用 (tenant, project) 撈明細，不載其他專案；軟刪批次的明細與 stale 列（已不在成員名單、金額已歸零）不回。
+ */
+export async function listProjectRunItems(tenantId: string, projectId: string): Promise<{ runs: SerializedRun[]; items: SerializedItem[] }> {
+  const runs = await listRuns(tenantId)
+  if (runs.length === 0) return { runs, items: [] }
+  const live = new Set(runs.map((r) => r.id))
+  const rows = await fetchAll<ItemRow>(
+    (from, to) =>
+      supabaseAdmin
+        .from("bonus_run_items")
+        .select(ITEM_COLS)
+        .eq("tenant_id", tenantId)
+        .eq("project_id", projectId)
+        .order("id", { ascending: true })
+        .range(from, to),
+    "bonus-run listProjectRunItems",
+  )
+  return { runs, items: rows.filter((r) => live.has(r.run_id) && !isStale(r)).map(serializeItem) }
+}
+
 /* ──────────────────────────────────────────────────────────────────
  * M22：入帳後自動重算 draft 批次
  * ────────────────────────────────────────────────────────────────── */

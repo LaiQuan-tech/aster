@@ -1,22 +1,22 @@
 import type { GridCell, StatementGrid } from "./statements-api";
 
 /**
- * 獎金分潤總表「未結案」的精簡檢視（2026-10-27 業主）：畫面預設隱藏組員3、組員4、支援、最右邊的空白分隔欄、
- * 重複的第二個「累積 %」欄，以及經理／組員1／組員2 的本次金額欄（姓名與 % 保留），讓 1280（可用寬約 990px）／
- * 1440 寬的螢幕配合「符合寬度」一頁看完；右上「顯示全部成員欄」可切回完整版（記住選擇）。
- * 下載 Excel 與列印一律是完整版面（列印時頁面改畫完整格線）。純函式。
+ * 獎金分潤總表「未結案」的精簡檢視（2026-10-27 業主）：畫面預設隱藏組員3、組員4、支援、最右邊的空白分隔欄與
+ * 重複的第二個「累積 %」欄，讓 1280（可用寬約 990px）／1440 寬的螢幕配合「符合寬度」一頁看完；右上「顯示全部
+ * 成員欄」可切回完整版（記住選擇）。下載 Excel 與列印一律是完整版面（列印時頁面改畫完整格線）。純函式。
+ * 成員格是同格兩行（上 %、下金額），顯示出來的成員一定有金額（原本的「本次金額」欄已併進成員格）。
  *
- * 欄號對照 apps/api/src/lib/statements/bonus-sheet.ts 的 OPEN_SLOTS／OPEN_COLUMNS（0 起算）：
- *   第二個累積%＝10；經理／組員1／組員2 的本次金額＝16／19／22；組員3＝23–25、組員4＝26–27、支援＝28–29、
- *   AG 空白分隔欄＝32；備註＝31。
+ * 欄號對照 apps/api/src/lib/statements/bonus-sheet.ts 的 OPEN_SLOTS／OPEN_COLUMNS（0 起算；已拿掉本期標記欄）：
+ *   第二個累積%＝9；經理＝13–14、組員1＝15–16、組員2＝17–18、組員3＝19–20、組員4＝21–22、支援＝23–24、
+ *   尚未分配＝25、備註＝26、空白分隔欄＝27。
  */
 
 /** 精簡檢視隱藏的欄。 */
-export const OPEN_COMPACT_HIDDEN_COLUMNS: readonly number[] = [10, 16, 19, 22, 23, 24, 25, 26, 27, 28, 29, 32];
+export const OPEN_COMPACT_HIDDEN_COLUMNS: readonly number[] = [9, 19, 20, 21, 22, 23, 24, 27];
 /** 被隱藏的成員姓名欄（組員3、組員4、支援）：該列有人就提示「另有 N 位成員」。 */
-export const OPEN_HIDDEN_MEMBER_NAME_COLUMNS: readonly number[] = [23, 26, 28];
+export const OPEN_HIDDEN_MEMBER_NAME_COLUMNS: readonly number[] = [19, 21, 23];
 /** 提示寫在備註欄。 */
-export const OPEN_NOTE_COLUMN = 31;
+export const OPEN_NOTE_COLUMN = 26;
 
 export const SHOW_ALL_MEMBERS_STORAGE_KEY = "aster.admin.bonusSheet.showAllMembers";
 
