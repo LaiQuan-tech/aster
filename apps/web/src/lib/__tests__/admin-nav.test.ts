@@ -199,6 +199,14 @@ describe("resolveAdminPath：最長前綴", () => {
     expect(resolveAdminPath("/admin/leave-settlement")).toMatchObject({ section: "approvals", tab: "settlement" });
     expect(resolveAdminPath("/admin/leave-types")).toMatchObject({ section: "settings", tab: "leaveTypes" });
     expect(resolveAdminPath("/admin/leave-balances")).toMatchObject({ section: "approvals", tab: "balances" });
+    // 員工假別內頁：歸在假別餘額底下、返回回總覽（2026-10-27）。
+    expect(resolveAdminPath("/admin/leave-balances/abc")).toMatchObject({
+      section: "approvals",
+      tab: "balances",
+      isDetail: true,
+      title: "員工假別明細",
+      parentPath: "/admin/leave-balances",
+    });
     expect(resolveAdminPath("/admin/attendance-settlement")).toMatchObject({
       section: "attendance",
       tab: "settlement",
@@ -742,13 +750,14 @@ describe("ADMIN_ROUTES", () => {
     }
   });
 
-  it("9 種 detail：projects／disbursements list／客戶／廠商／sheets／employees／announcements／專案申請單／獎金批次", () => {
+  it("10 種 detail：projects／disbursements list／客戶／廠商／假別餘額員工內頁／sheets／employees／announcements／專案申請單／獎金批次", () => {
     const details = ADMIN_ROUTES.filter((r) => r.detail).map((r) => `${r.prefix}${r.pattern ? "#pattern" : ""}`);
     expect(details).toEqual([
       "/admin/projects",
       "/admin/disbursements",
       "/admin/clients",
       "/admin/vendors",
+      "/admin/leave-balances",
       "/admin/attendance-sheets",
       "/admin/employees",
       "/admin/announcements",

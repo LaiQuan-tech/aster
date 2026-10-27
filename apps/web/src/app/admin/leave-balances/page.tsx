@@ -1,13 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Card, PrimaryButton, ErrorText, Empty, Segmented, inputCls, labelCls } from "@/components/admin-ui";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
+import { useSearchParams } from "next/navigation";
+import { LeaveOverviewPanel } from "./_overview";
 import {
+  getDepartments,
   getEmployees,
   getLeaveBalancesAdmin,
   getLeaveTypes,
   getRequests,
+  type Department,
   type Employee,
   type LeaveBalance,
   type LeaveRequest,
@@ -32,9 +36,11 @@ import {
 import { sheet } from "@/lib/sheet-styles";
 
 const yearNow = new Date().getFullYear();
+// 2026-10-27：預設改為「剩餘總覽」（一人一列、欄＝假別）；舊的一桶一列表格保留為「餘額明細」，避免功能消失。
 const tabs = [
+  { id: "overview", label: "剩餘總覽" },
   { id: "special", label: "特殊假確認" },
-  { id: "query", label: "剩餘假別時數" },
+  { id: "query", label: "餘額明細" },
   { id: "register", label: "年度請假表" },
   { id: "grant", label: "年度給假" },
 ] as const;
@@ -55,8 +61,21 @@ const SKIP_REASONS: Record<string, string> = {
   already_granted: "本期已有餘額桶",
 };
 
+// useSearchParams 需要 Suspense 邊界（next build 的 CSR bailout 規則）。
 export default function LeaveBalancesPage() {
-  const [activeTab, setActiveTab] = useState<TabId>("query");
+  return (
+    <Suspense fallback={<Empty>載入中…</Empty>}>
+      <LeaveBalancesContent />
+    </Suspense>
+  );
+}
+
+function LeaveBalancesContent() {
+  const searchParams = useSearchParams();
+  const [activeTab, setActiveTab] = useState<TabId>("overview");
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [deptId, setDeptId] = useState("");
+  const [nameQuery, setNameQuery] = useState("");
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [leaveTypes, setLeaveTypes] = useState<LeaveType[]>([]);
   const [balances, setBalances] = useState<LeaveBalance[]>([]);
@@ -66,7 +85,11 @@ export default function LeaveBalancesPage() {
   const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
   const [leaveRegister, setLeaveRegister] = useState<EmployeeLeaveRegister | null>(null);
   const [employeeId, setEmployeeId] = useState("");
-  const [year, setYear] = useState(yearNow);
+  // 內頁「返回」帶 ?year= 回來時沿用同一年度。
+  const [year, setYear] = useState(() => {
+    const y = Number(searchParams?.get("year"));
+    return Number.isInteger(y) && y >= 2000 && y <= 2100 ? y : yearNow;
+  });
   const [editEmployeeId, setEditEmployeeId] = useState("");
   const [editLeaveTypeId, setEditLeaveTypeId] = useState("");
   const [entitled, setEntitled] = useState("");
@@ -155,6 +178,13 @@ export default function LeaveBalancesPage() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    // 單位清單只用於總覽篩選；讀不到不擋頁面。
+    getDepartments()
+      .then((r) => setDepartments(r.departments))
+      .catch(() => setDepartments([]));
+  }, []);
+
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
     setMessage(null);
@@ -238,20 +268,50 @@ export default function LeaveBalancesPage() {
             <input type="number" className={inputCls} value={year} onChange={(event) => setYear(Number(event.target.value))} />
             <p className="mt-1 text-xs text-gray-400">週年制下＝「期間與這一年重疊」的餘額桶</p>
           </div>
-          <div className="sm:col-span-2">
-            <label className={labelCls}>工號 / 姓名</label>
-            <select className={inputCls} value={employeeId} onChange={(event) => setEmployeeId(event.target.value)}>
-              <option value="">全部人員</option>
-              {employees.map((employee) => (
-                <option key={employee.id} value={employee.id}>{names.employeeMap.get(employee.id)}</option>
-              ))}
-            </select>
-          </div>
-          <div className="flex items-end">
-            <PrimaryButton onClick={() => void load()}>搜尋</PrimaryButton>
-          </div>
+          {activeTab === "overview" ? (
+            <>
+              <div>
+                <label className={labelCls}>單位</label>
+                <select className={inputCls} value={deptId} onChange={(event) => setDeptId(event.target.value)}>
+                  <option value="">全部單位</option>
+                  {departments.map((department) => (
+                    <option key={department.id} value={department.id}>{department.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="sm:col-span-2">
+                <label className={labelCls}>工號 / 姓名</label>
+                <input
+                  type="search"
+                  className={inputCls}
+                  placeholder="輸入姓名或工號篩選"
+                  value={nameQuery}
+                  onChange={(event) => setNameQuery(event.target.value)}
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="sm:col-span-2">
+                <label className={labelCls}>工號 / 姓名</label>
+                <select className={inputCls} value={employeeId} onChange={(event) => setEmployeeId(event.target.value)}>
+                  <option value="">全部人員</option>
+                  {employees.map((employee) => (
+                    <option key={employee.id} value={employee.id}>{names.employeeMap.get(employee.id)}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-end">
+                <PrimaryButton onClick={() => void load()}>搜尋</PrimaryButton>
+              </div>
+            </>
+          )}
         </div>
       </Card>
+
+      {activeTab === "overview" && (
+        <LeaveOverviewPanel year={year} departments={departments} deptId={deptId} q={nameQuery} />
+      )}
 
       {activeTab === "special" && (
         <Card>
@@ -312,7 +372,8 @@ export default function LeaveBalancesPage() {
               <p className="mt-1 text-2xl font-semibold text-green-700">{formatLeaveRemaining(totals.entitled + totals.deferred - totals.used, hoursPerDay)}</p>
             </div>
           </div>
-          <h2 className="mb-4 text-sm font-medium text-gray-500">剩餘假別時數</h2>
+          <h2 className="mb-1 text-sm font-medium text-gray-500">餘額明細（一個餘額桶一列）</h2>
+          <p className="mb-4 text-xs text-gray-400">要看每個人各假別剩多少，請用「剩餘總覽」；要手動增減時數，請在總覽點員工進內頁。</p>
           {loading ? (
             <Empty>載入中…</Empty>
           ) : balances.length === 0 ? (

@@ -14,6 +14,20 @@ import {
   leaveBalancesHavePeriod,
 } from "../services/annual-leave.js"
 import { loadDailyRegularHours } from "../services/daily-regular-hours.js"
+import { DEFAULT_TIMEZONE, todayKey } from "../lib/tz.js"
+import { toRocYear, workbookToBuffer } from "../lib/xlsx/index.js"
+import { buildLeaveOverviewWorkbook } from "../lib/xlsx/leave-overview.js"
+import {
+  buildLeaveOverview,
+  loadBalancesForYear,
+  loadOverviewRefs,
+  pickEffectiveBuckets,
+  referenceDate,
+  sortLeaveTypes,
+  summarizeBuckets,
+  type LeaveOverview,
+} from "../services/leave-overview.js"
+import { LeaveAdjustmentError, adjustLeaveBalance, listAdjustments } from "../services/leave-adjustments.js"
 
 export const leaveBalancesRouter = Router()
 
@@ -294,6 +308,234 @@ leaveBalancesRouter.post(
     } catch (err) {
       if (err instanceof AnnualLeaveError) {
         res.status(409).json({ error: err.code, message: err.message })
+        return
+      }
+      next(err)
+    }
+  },
+)
+
+
+/* ───────────────────────── 假別剩餘總覽／員工內頁／手動調整（2026-10-27） ─────────────────────────
+ * 權限沿用 GET /leave-balances：HR／平台管理員看全租戶；其他角色只看得到自己（總覽只回自己一列、
+ * 內頁只能開自己的）。調整（POST）只有 HR／平台管理員（requireHrAdmin）。
+ */
+
+const overviewQuerySchema = z.object({
+  year: z.coerce.number().int().min(2000).max(2100).optional(),
+  deptId: z.string().uuid().optional(),
+  q: z.string().max(100).optional(),
+  /** 測試／回溯用的基準日；省略＝今天（台北）。 */
+  asOf: z.string().regex(DATE_KEY).optional(),
+})
+
+async function buildOverviewFor(req: Request, res: Response): Promise<{ overview: LeaveOverview; dailyRegularHours: number; isHr: boolean } | null> {
+  const tenantId = res.locals.tenantId as string
+  const userId = req.auth?.userId
+  if (!userId) {
+    res.status(401).json({ error: "unauthorized" })
+    return null
+  }
+  const parsed = overviewQuerySchema.safeParse(req.query)
+  if (!parsed.success) {
+    res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
+    return null
+  }
+  const today = parsed.data.asOf ?? todayKey(DEFAULT_TIMEZONE)
+  const year = parsed.data.year ?? Number(today.slice(0, 4))
+  const self = await resolveSelf(tenantId, userId)
+  const isHr = isHrRole(self?.role)
+  const [refs, balances, dailyRegularHours] = await Promise.all([
+    loadOverviewRefs(tenantId),
+    loadBalancesForYear(tenantId, year, isHr ? undefined : (self?.id ?? NIL_UUID)),
+    loadDailyRegularHours(tenantId),
+  ])
+  const employees = isHr ? refs.employees : refs.employees.filter((e) => e.id === self?.id)
+  const overview = buildLeaveOverview({
+    year,
+    today,
+    employees,
+    leaveTypes: refs.leaveTypes,
+    balances,
+    departments: refs.departments,
+    deptId: parsed.data.deptId,
+    q: parsed.data.q,
+  })
+  return { overview, dailyRegularHours, isHr }
+}
+
+/** GET /leave-balances/overview?year=&deptId=&q= — 一人一列的假別剩餘總覽。 */
+leaveBalancesRouter.get(
+  "/leave-balances/overview",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const result = await buildOverviewFor(req, res)
+      if (!result) return
+      res.status(200).json({ ...result.overview, dailyRegularHours: result.dailyRegularHours, canAdjust: result.isHr })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/** GET /leave-balances/overview/export.xlsx — 總覽匯出 Excel（套用同樣的年度／單位／姓名篩選）。 */
+leaveBalancesRouter.get(
+  "/leave-balances/overview/export.xlsx",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const result = await buildOverviewFor(req, res)
+      if (!result) return
+      const wb = await buildLeaveOverviewWorkbook(result.overview, result.dailyRegularHours)
+      const buffer = await workbookToBuffer(wb)
+      const filename = `${toRocYear(result.overview.year)}年假別剩餘總覽.xlsx`
+      res
+        .status(200)
+        .type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        .setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`)
+        .send(buffer)
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+const detailQuerySchema = z.object({
+  year: z.coerce.number().int().min(2000).max(2100).optional(),
+  asOf: z.string().regex(DATE_KEY).optional(),
+})
+
+/**
+ * GET /leave-balances/employees/:employeeId?year= — 員工假別內頁：
+ * 每個假別一張卡（目前有效桶的加總）、所有與該年重疊的餘額桶、調整歷程。
+ */
+leaveBalancesRouter.get(
+  "/leave-balances/employees/:employeeId",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
+    const employeeId = String(req.params.employeeId ?? "")
+    if (!z.string().uuid().safeParse(employeeId).success) {
+      res.status(400).json({ error: "invalid_employee_id" })
+      return
+    }
+    const parsed = detailQuerySchema.safeParse(req.query)
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const self = await resolveSelf(tenantId, userId)
+      const isHr = isHrRole(self?.role)
+      if (!isHr && self?.id !== employeeId) {
+        res.status(403).json({ error: "forbidden", message: "只能查看自己的假別" })
+        return
+      }
+      const { data: emp, error: empErr } = await supabaseAdmin
+        .from("employees")
+        .select("id, name, emp_no, dept_id, hire_date, status")
+        .eq("tenant_id", tenantId)
+        .eq("id", employeeId)
+        .maybeSingle()
+      if (empErr) {
+        next(new Error(`GET leave detail employee: ${empErr.message}`))
+        return
+      }
+      if (!emp) {
+        res.status(404).json({ error: "employee_not_found" })
+        return
+      }
+      const today = parsed.data.asOf ?? todayKey(DEFAULT_TIMEZONE)
+      const year = parsed.data.year ?? Number(today.slice(0, 4))
+      const [refs, balances, dailyRegularHours, adj] = await Promise.all([
+        loadOverviewRefs(tenantId),
+        loadBalancesForYear(tenantId, year, employeeId),
+        loadDailyRegularHours(tenantId),
+        listAdjustments(tenantId, employeeId),
+      ])
+      const refDate = referenceDate(year, today)
+      const typeIds = new Set(balances.map((b) => b.leave_type_id))
+      const cards = sortLeaveTypes(refs.leaveTypes.filter((t) => typeIds.has(t.id))).map((t) => ({
+        leaveType: t,
+        ...summarizeBuckets(
+          pickEffectiveBuckets(
+            balances.filter((b) => b.leave_type_id === t.id),
+            refDate,
+          ),
+          today,
+        ),
+      }))
+      const empRow = emp as { dept_id: string | null }
+      res.status(200).json({
+        year,
+        asOf: today,
+        employee: {
+          ...emp,
+          dept_name: refs.departments.find((d) => d.id === empRow.dept_id)?.name ?? null,
+        },
+        leaveTypes: sortLeaveTypes(refs.leaveTypes),
+        cards,
+        balances,
+        adjustments: adj.adjustments,
+        adjustmentsAvailable: adj.available,
+        dailyRegularHours,
+        canAdjust: isHr,
+      })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+const adjustSchema = z.object({
+  employeeId: z.string().uuid(),
+  leaveTypeId: z.string().uuid(),
+  balanceId: z.string().uuid().optional(),
+  /** 正＝增加、負＝減少（小時）。前端把「天＋時」依 1 天＝N 小時換算後送來。 */
+  deltaHours: z.number().finite(),
+  reason: z.string().max(500),
+  allowNegative: z.boolean().optional(),
+})
+
+/** POST /leave-balances/adjustments — HR／平台管理員手動增減某員某假別的時數（原因必填、寫歷程）。 */
+leaveBalancesRouter.post(
+  "/leave-balances/adjustments",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const parsed = adjustSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      const reasonIssue = parsed.error.issues.some((i) => i.path[0] === "reason")
+      res.status(400).json({
+        error: reasonIssue ? "reason_required" : "invalid_body",
+        message: reasonIssue ? "請填寫調整原因" : "欄位格式不正確",
+        details: parsed.error.flatten(),
+      })
+      return
+    }
+    try {
+      const self = req.auth?.userId ? await resolveSelf(tenantId, req.auth.userId) : null
+      const result = await adjustLeaveBalance({
+        tenantId,
+        actorEmpId: self?.id ?? null,
+        today: todayKey(DEFAULT_TIMEZONE),
+        ...parsed.data,
+      })
+      res.status(201).json(result)
+    } catch (err) {
+      if (err instanceof LeaveAdjustmentError) {
+        res.status(err.status).json({ error: err.code, message: err.message, ...err.extra })
         return
       }
       next(err)

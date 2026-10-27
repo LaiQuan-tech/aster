@@ -266,7 +266,8 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       label: "假別餘額",
       href: "/admin/leave-balances",
       title: "假別時數管理",
-      desc: "特殊假確認、剩餘時數查詢、年度給假與全員批次給假",
+      desc: "剩餘總覽（一人一列）、特殊假確認、餘額明細、年度給假；點員工進內頁可手動增減時數",
+      detail: { title: "員工假別明細" },
     },
     {
       key: "settlement",

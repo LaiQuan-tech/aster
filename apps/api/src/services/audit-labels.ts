@@ -32,6 +32,7 @@ export const AUDIT_TABLE_LABELS: Record<string, string> = {
   approval_flows: "簽核流程",
   leave_types: "假別",
   leave_balances: "假別時數",
+  leave_balance_adjustments: "假別時數手動調整",
   comp_time_ledger: "補休帳",
   punch_records: "打卡紀錄",
   attendance_days: "出勤日",
