@@ -21,7 +21,9 @@ import {
   RECEIVABLE_STATE_BADGE_CLASS,
   type BillingScheduleExt,
   type InstallmentInputExt,
+  type ProjectMoney,
 } from "@/lib/projects-ext-api";
+import { receiptSummaryText } from "@/lib/project-application-sheet";
 import { fmtMoney, todayKey, humanError, type Setter } from "./shared";
 
 interface BillingsCardProps {
@@ -48,6 +50,8 @@ interface BillingsCardProps {
   error: string | null;
   setError: Setter<string | null>;
   load: () => Promise<void>;
+  /** 收款彙總（GET /projects/:id 的 money；金額卡移除後在標題列顯示「已收／未收（收款%）」）。 */
+  money?: ProjectMoney | null;
 }
 
 /**
@@ -80,7 +84,9 @@ export function BillingsCard({
   error,
   setError,
   load,
+  money,
 }: BillingsCardProps) {
+  const receiptSummary = receiptSummaryText(money);
   function patchDraft(idx: number, patch: Partial<InstallmentInputExt>) {
     setDraft((d) => d.map((row, i) => (i === idx ? { ...row, ...patch } : row)));
   }
@@ -194,6 +200,11 @@ export function BillingsCard({
                 ` ＋追加減 ${schedule.contract.changeOrders > 0 ? "+" : ""}${schedule.contract.changeOrders.toLocaleString()}`}
               ）
             </span>
+          </span>
+        )}
+        {receiptSummary && (
+          <span className="text-xs text-gray-500 sm:ml-auto" data-testid="receipt-summary">
+            {receiptSummary}
           </span>
         )}
       </div>

@@ -330,3 +330,11 @@ export function validateShareRevisionInput(input: { bonusRatePct: number | null;
   if (input.reasonRequired && input.reason.trim() === "") return "本案已有核准或發放過的獎金紀錄，請填寫變更原因"
   return null
 }
+
+/**
+ * PUT share-revision 回應的轉換結果提示：要把舊「指定金額」案轉百分比、但改模式那步沒成功（modeConverted:false）
+ * → 比例與％其實已存，提醒再按一次儲存完成轉換；其他情況回 null。
+ */
+export function shareModeConversionNotice(res: { modeConverted?: boolean } | null | undefined): string | null {
+  return res?.modeConverted === false ? "比例已存，模式尚未轉換，請再按一次儲存。" : null
+}

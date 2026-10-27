@@ -8,6 +8,7 @@ import {
   roleSharePctDraftOf,
   pctAfterRoleChange,
   orderShareMembers,
+  shareModeConversionNotice,
   type ShareDraftMember,
 } from "../project-share-calculation"
 
@@ -156,5 +157,14 @@ describe("各角色分潤趴數（2026-10-27 改為每個專案各自設定）",
     expect(parseRoleSharePctDraft(roleSharePctDraftOf(null))).toEqual({ ok: true, value: { manager: 0, lead: 0, support: 0, member: 0 } })
     const bad = parseRoleSharePctDraft({ manager: "101", lead: "", support: "", member: "" })
     expect(bad.ok).toBe(false)
+  })
+})
+
+describe("指定金額轉百分比的轉換結果提示", () => {
+  it("modeConverted:false → 提示比例已存、模式尚未轉換；true／沒帶／沒有回應 → 不提示", () => {
+    expect(shareModeConversionNotice({ modeConverted: false })).toBe("比例已存，模式尚未轉換，請再按一次儲存。")
+    expect(shareModeConversionNotice({ modeConverted: true })).toBeNull()
+    expect(shareModeConversionNotice({})).toBeNull()
+    expect(shareModeConversionNotice(undefined)).toBeNull()
   })
 })

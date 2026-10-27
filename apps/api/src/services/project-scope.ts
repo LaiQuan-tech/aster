@@ -61,6 +61,9 @@ export async function canManageProject(
   // 會計（W4 決策 3）對**全租戶**的專案金流都有 finance 權限：發票／請款／入帳／
   // 放款／複委託付款就是他的工作。分潤區另判（canSeeBonus，會計一律 false）。
   if (isFinanceRole(self.role) || project.lead_emp_id === self.id) return true
+  // 老闆（業主 2026-10-27：老闆＝平台管理員權限）：resolveProjectAccess 給老闆 finance（看得到、可編輯申請單），
+  // 寫入端（billings／subcontracts／contracts 走 loadProjectScope）也要認老闆，否則按儲存一堆 403。只放寬老闆本人。
+  if (isBossOrPlatformAdmin(await loadProjectBossEmpId(tenantId), self)) return true
   if (project.dept_id) {
     const managed = await managedDeptIds(tenantId, self.id)
     if (managed.includes(project.dept_id)) return true
@@ -239,8 +242,9 @@ export async function financeProjectIds(
   tenantId: string,
   self: SelfEmployee,
 ): Promise<Set<string> | null> {
-  // HR 與會計都是「全部」（W4）。
+  // HR 與會計都是「全部」（W4）；老闆同（每一案都有 finance，與 resolveProjectAccess／canManageProject 一致）。
   if (isFinanceRole(self.role)) return null
+  if (isBossOrPlatformAdmin(await loadProjectBossEmpId(tenantId), self)) return null
   const ids = new Set<string>()
   const managed = await managedDeptIds(tenantId, self.id)
 

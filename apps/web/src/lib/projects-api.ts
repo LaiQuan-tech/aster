@@ -205,6 +205,11 @@ export interface ProjectShareRevisionResponse {
     unallocatedAmount?: number | null
   }
   members?: ProjectMember[]
+  shareMode?: ShareMode
+  /**
+   * 只有本次要把舊「指定金額」案轉百分比時才有：false＝比例／％已存，但改模式那步沒成功（再按一次儲存即可完成）。
+   */
+  modeConverted?: boolean
 }
 
 export interface ProjectDocument {

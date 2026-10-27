@@ -290,6 +290,57 @@ describe("指定金額（fixed_amount）停用與舊案轉百分比", () => {
     expect(fake.db.projects.find((p: Row) => p.id === PROJECT)?.share_mode).toBe("pool_pct")
   })
 
+  it("PATCH 把沒有獎金比例的舊 fixed_amount 案改成 pool_pct → 400 bonus_rate_required，模式不動", async () => {
+    const res = await as(T.boss, request(app).patch(`/projects/${FIXED_PROJECT}`)).send({ shareMode: "pool_pct" })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("bonus_rate_required")
+    expect(fake.db.projects.find((p: Row) => p.id === FIXED_PROJECT)?.share_mode).toBe("fixed_amount")
+  })
+
+  it("PATCH 把已有獎金比例的舊 fixed_amount 案改成 pool_pct → 200", async () => {
+    fake.db.projects.find((p: Row) => p.id === FIXED_PROJECT)!.bonus_rate_pct = "8"
+    const res = await as(T.boss, request(app).patch(`/projects/${FIXED_PROJECT}`)).send({ shareMode: "pool_pct" })
+    expect(res.status).toBe(200)
+    expect(fake.db.projects.find((p: Row) => p.id === FIXED_PROJECT)?.share_mode).toBe("pool_pct")
+  })
+
+  it("轉換時 RPC 成功但改模式那步失敗 → 200 但 modeConverted:false、模式仍是 fixed_amount、不留 share_mode 異動", async () => {
+    fake.injectError({ table: "projects", action: "update", error: { message: "boom" } })
+    const res = await as(T.boss, request(app).put(`/projects/${FIXED_PROJECT}/share-revision`)).send({
+      shareMode: "pool_pct", bonusRatePct: 8, reason: "x",
+      members: [{ memberId: M4, employeeId: E.member, roleInProject: "member", sharePct: 40 }],
+    })
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ modeConverted: false, shareMode: "fixed_amount" })
+    expect(rpcCount()).toBe(1)
+    expect(fake.db.projects.find((p: Row) => p.id === FIXED_PROJECT)?.share_mode).toBe("fixed_amount")
+    expect(fake.db.project_share_adjustments).toEqual([])
+  })
+
+  it("轉換成功 → modeConverted:true；沒有要轉換 → 回應不帶 modeConverted", async () => {
+    const ok = await as(T.boss, request(app).put(`/projects/${FIXED_PROJECT}/share-revision`)).send({
+      shareMode: "pool_pct", bonusRatePct: 8, reason: "x",
+      members: [{ memberId: M4, employeeId: E.member, roleInProject: "member", sharePct: 40 }],
+    })
+    expect(ok.body.modeConverted).toBe(true)
+    const plain = await putRevision(T.boss, { shareMode: "pool_pct" })
+    expect(plain.status).toBe(200)
+    expect("modeConverted" in plain.body).toBe(false)
+  })
+
+  it("轉換時留痕寫入失敗 → 仍 200 且 modeConverted:true（只記 log）", async () => {
+    fake.injectError({ table: "project_share_adjustments", action: "insert", error: { message: "boom" } })
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {})
+    const res = await as(T.boss, request(app).put(`/projects/${FIXED_PROJECT}/share-revision`)).send({
+      shareMode: "pool_pct", bonusRatePct: 8, reason: "x",
+      members: [{ memberId: M4, employeeId: E.member, roleInProject: "member", sharePct: 40 }],
+    })
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ modeConverted: true, shareMode: "pool_pct" })
+    expect(spy).toHaveBeenCalled()
+    spy.mockRestore()
+  })
+
   it("PATCH 舊 fixed_amount 專案、表單整份送回原值 → 照常 200（只改案名）", async () => {
     const res = await as(T.hr, request(app).patch(`/projects/${FIXED_PROJECT}`)).send({ shareMode: "fixed_amount", name: "改名" })
     expect(res.status).toBe(200)

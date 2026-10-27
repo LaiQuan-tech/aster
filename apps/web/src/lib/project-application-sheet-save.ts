@@ -385,18 +385,21 @@ export interface SubPlan {
   changes: number;
   errors: string[];
   warnings: string[];
+  /** 草稿裡對不到任何欄位的 subEdits key（空欄已被別人新增的副委託佔走，或那筆已被移除）。 */
+  orphanKeys: string[];
 }
 
 export function subcontractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): SubPlan {
-  const out: SubPlan = { subcontracts: null, changes: 0, errors: [], warnings: [] };
+  const out: SubPlan = { subcontracts: null, changes: 0, errors: [], warnings: [], orphanKeys: [] };
   if (!ctx.canFinance) return out;
   const slots = applicationSubcontractSlots(ctx.subcontracts, draft.subExtraBlocks, draft.subEdits).flat();
   const slotKeys = new Set(slots.map((sl) => sl.key));
-  const orphanCount = Object.entries(draft.subEdits).filter(
-    ([key, edit]) => !slotKeys.has(key) && Object.values(edit).some((v) => trimmed(v) !== ""),
-  ).length;
+  out.orphanKeys = Object.entries(draft.subEdits)
+    .filter(([key, edit]) => !slotKeys.has(key) && Object.values(edit).some((v) => trimmed(v) !== ""))
+    .map(([key]) => key);
+  const orphanCount = out.orphanKeys.length;
   if (orphanCount > 0) {
-    out.warnings.push(`發包單位有 ${orphanCount} 欄的修改對不到副委託（已在別處移除），不會送出；請按「還原」後重填。`);
+    out.warnings.push(`發包單位有 ${orphanCount} 欄的修改對不到副委託（已在別處新增或移除），不會送出；請按「還原」後重填。`);
   }
   const payload = ctx.subcontracts.map(subPayloadOf);
   let nextSort = ctx.subcontracts.reduce((m, s, i) => Math.max(m, s.sortOrder ?? i), -1) + 1;
@@ -672,18 +675,46 @@ export async function runApplicationSheetSave(
 
   if (plan.subcontracts) {
     let subs = plan.subcontracts;
+    /** 重抓後對不到的修改（空欄「new-<序號>」被別人剛新增的副委託佔走等）：不能當成已存。 */
+    let orphanKeys: string[] = [];
     const ok = await attempt("subcontracts", "發包單位", async () => {
       if (ctx && api.fetchSubcontracts) {
         const replanned = subcontractPlan({ ...ctx, subcontracts: await api.fetchSubcontracts() }, draft);
         if (replanned.errors.length > 0) throw new Error(replanned.errors.join(" "));
-        notices.push(...replanned.warnings);
-        if (!replanned.subcontracts) return; // 最新資料已跟草稿一致，不必再送
+        orphanKeys = replanned.orphanKeys;
+        if (!replanned.subcontracts) return; // 最新資料已跟草稿一致（或只剩對不到的修改），不必再送
         subs = replanned.subcontracts;
       }
       await api.putSubcontracts(subs);
     });
-    if (ok) residual = { ...residual, subEdits: {}, subExtraBlocks: 0 };
+    if (ok && orphanKeys.length > 0) {
+      // 對得到的欄位已存；對不到的不送、草稿保留，這步改標失敗並說明原因（同付款階段：不默默吞掉）。
+      const step = steps[steps.length - 1];
+      steps[steps.length - 1] = {
+        ...step,
+        status: "failed",
+        message: `有 ${orphanKeys.length} 欄的修改對不到副委託（存檔前別人剛新增或移除了副委託，空欄位置已變），這幾欄沒有送出、草稿已保留；請看過最新的發包單位後按「還原」重填。`,
+      };
+      const kept: Record<string, SubEdit> = {};
+      for (const key of orphanKeys) kept[key] = draft.subEdits[key];
+      residual = { ...residual, subEdits: kept };
+    } else if (ok) {
+      residual = { ...residual, subEdits: {}, subExtraBlocks: 0 };
+    }
   }
 
   return { steps, notices, residual };
+}
+
+/* ===================================================== 存檔結果歸屬 == */
+
+/** 存檔結果連同它屬於哪一案一起存：頁面換專案（例如複製為追加減後導到新案）時，上一案的結果不能顯示在新案上。 */
+export interface ProjectScopedReport<T> {
+  projectId: string;
+  report: T;
+}
+
+/** 只回傳屬於目前這一案的存檔結果；別案的（或沒有）回 null。純函式。 */
+export function reportForProject<T>(stored: ProjectScopedReport<T> | null, projectId: string): T | null {
+  return stored && stored.projectId === projectId ? stored.report : null;
 }

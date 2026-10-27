@@ -18,6 +18,7 @@ import {
   newShareRow,
   orderShareMembers,
   shareBonusTotalOf,
+  shareModeConversionNotice,
   shareRevisionBodyOf,
   shareRowAfterEmployeeChange,
   shareRowAfterRoleChange,
@@ -124,9 +125,12 @@ export function BonusShareCard({
     setSaving(true);
     setError(null);
     try {
-      await saveProjectShareRevision(projectId, shareRevisionBodyOf({ rows, bonusRatePct: rate, includeRate: !profitHidden, reason, convertToPool }));
+      const res = await saveProjectShareRevision(projectId, shareRevisionBodyOf({ rows, bonusRatePct: rate, includeRate: !profitHidden, reason, convertToPool }));
       setReason("");
       await load();
+      // load() 會清掉頁面錯誤並讓本卡重掛，所以轉換沒完成的提示放在 load 之後、用頁面層的 setError。
+      const notice = shareModeConversionNotice(res);
+      if (notice) setError(notice);
     } catch (e) {
       setError(humanizeBonusEditError(e instanceof Error ? e.message : "儲存分潤失敗"));
     } finally {

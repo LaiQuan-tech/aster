@@ -10,7 +10,7 @@ import {
   rebaseApplicationSheetDraft,
   type ApplicationSheetDraft,
 } from "@/lib/project-application-sheet";
-import { applicationSheetPlan, resolveSheetClient, type SheetSaveContext } from "@/lib/project-application-sheet-save";
+import { applicationSheetPlan, reportForProject, resolveSheetClient, type ProjectScopedReport, type SheetSaveContext } from "@/lib/project-application-sheet-save";
 import { unsavedChangesMessage } from "@/lib/unsaved-changes";
 import { useUnsavedChangesGuard } from "./_sections/useUnsavedChangesGuard";
 import { getDepartments, getEmployees, getMe, type Department, type Employee } from "@/lib/admin-api";
@@ -171,8 +171,12 @@ export default function AdminProjectDetailPage() {
    * 本案經理、主辦、部門主管在申請單上的客戶欄位維持唯讀，免得每次存檔都 403。讀不到 /me 就當不能改。
    */
   const [canEditClients, setCanEditClients] = useState(false);
-  /** 申請單上次儲存的結果（哪幾部分沒存成）；load() 會讓申請單重掛，所以放這層。 */
-  const [sheetSaveReport, setSheetSaveReport] = useState<ApplicationSheetSaveReport | null>(null);
+  /**
+   * 申請單上次儲存的結果（哪幾部分沒存成）；load() 會讓申請單重掛，所以放這層。
+   * 連同所屬專案一起存：換專案（複製為追加減後導到新案等）時不把上一案的結果顯示在新案上。
+   */
+  const [sheetSaveStored, setSheetSaveStored] = useState<ProjectScopedReport<ApplicationSheetSaveReport> | null>(null);
+  const sheetSaveReport = reportForProject(sheetSaveStored, projectId);
 
   // 開票／收款的小表單（模組五）
   const [invoiceFormId, setInvoiceFormId] = useState<string | null>(null);
@@ -427,7 +431,7 @@ export default function AdminProjectDetailPage() {
         clients={clients}
         canEditClients={canEditClients}
         saveReport={sheetSaveReport}
-        onSaveReport={setSheetSaveReport}
+        onSaveReport={(report) => setSheetSaveStored(report ? { projectId, report } : null)}
         load={load}
       />
       )}
@@ -491,6 +495,7 @@ export default function AdminProjectDetailPage() {
           receivedOn={receivedOn} setReceivedOn={setReceivedOn}
           receivedAmount={receivedAmount} setReceivedAmount={setReceivedAmount}
           error={error} setError={setError} load={load}
+          money={money}
         />
       </div>
       )}

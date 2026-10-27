@@ -12,6 +12,7 @@ import {
   applicationSheetPlan,
   changeOrderTotal,
   clientSheetPatch,
+  reportForProject,
   resolveSheetClient,
   runApplicationSheetSave,
   stageLocks,
@@ -534,6 +535,34 @@ describe("依序儲存與失敗回報", () => {
     expect(sent[0]).toMatchObject({ id: "s1", item: "弱電", contact: "別人改的電話" })
   })
 
+  it("重抓副委託時空欄已被別人新增的副委託佔走：對得到的照存，對不到的不送、該步標失敗並保留草稿", async () => {
+    const draft = draftOf(ctx, { subEdits: { s1: { item: "弱電" }, "new-1": { vendorName: "新廠商", amount: "3000" } }, subExtraBlocks: 0 })
+    const plan = applicationSheetPlan(ctx, draft)
+    expect(plan.subcontracts).not.toBeNull()
+    const othersSub = fakeSub({ id: "s-other", vendorName: "別人加的", sortOrder: 1 })
+    const api = fakeApi({ fetchSubcontracts: vi.fn(async () => [fakeSub({}), othersSub]) })
+    const res = await runApplicationSheetSave(plan, draft, api, ctx)
+    const sent = (api.putSubcontracts as ReturnType<typeof vi.fn>).mock.calls[0][0] as Subcontract[]
+    // 別人加的那筆原樣帶回、不被「新廠商」蓋掉，也不另外多建一筆
+    expect(sent).toHaveLength(2)
+    expect(sent[0]).toMatchObject({ id: "s1", item: "弱電" })
+    expect(sent[1]).toMatchObject({ id: "s-other", vendorName: "別人加的" })
+    const step = res.steps.find((s) => s.section === "subcontracts")
+    expect(step).toMatchObject({ status: "failed", label: "發包單位" })
+    expect(step?.message).toMatch(/1 欄的修改對不到副委託.*草稿已保留/)
+    expect(res.residual.subEdits).toEqual({ "new-1": { vendorName: "新廠商", amount: "3000" } })
+  })
+
+  it("重抓後只剩對不到的修改：不送 PUT，但也不標成功、草稿保留", async () => {
+    const draft = draftOf(ctx, { subEdits: { "new-1": { item: "空調" } } })
+    const plan = applicationSheetPlan(ctx, draft)
+    const api = fakeApi({ fetchSubcontracts: vi.fn(async () => [fakeSub({}), fakeSub({ id: "s-other", sortOrder: 1 })]) })
+    const res = await runApplicationSheetSave(plan, draft, api, ctx)
+    expect(api.putSubcontracts).not.toHaveBeenCalled()
+    expect(res.steps.find((s) => s.section === "subcontracts")?.status).toBe("failed")
+    expect(res.residual.subEdits).toEqual({ "new-1": { item: "空調" } })
+  })
+
   it("重抓期程失敗：期程與開票／入帳都不送，清楚標出", async () => {
     const plan = applicationSheetPlan(ctx, fullDraft)
     const api = fakeApi({ fetchBillings: vi.fn(async () => { throw new Error("網路錯誤") }) })
@@ -541,5 +570,14 @@ describe("依序儲存與失敗回報", () => {
     expect(api.saveBillingSchedule).not.toHaveBeenCalled()
     expect(res.steps.filter((s) => s.section === "billings" || s.section === "invoice" || s.section === "receipt").map((s) => s.status)).toEqual(["failed", "skipped", "skipped"])
     expect(res.residual.stageEdits).toEqual(fullDraft.stageEdits)
+  })
+})
+
+describe("存檔結果歸屬到專案（換專案時清掉上一案的結果）", () => {
+  const stored = { projectId: "p1", report: { steps: [], notices: ["x"] } }
+  it("同一案 → 回傳結果；換到別案 → null；沒有結果 → null", () => {
+    expect(reportForProject(stored, "p1")).toBe(stored.report)
+    expect(reportForProject(stored, "p2")).toBeNull()
+    expect(reportForProject(null, "p1")).toBeNull()
   })
 })

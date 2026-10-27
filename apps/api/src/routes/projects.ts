@@ -1460,6 +1460,17 @@ projectsRouter.patch(
         res.status(scope.bonusEdit.denial.status).json({ error: scope.bonusEdit.denial.error })
         return
       }
+      // 舊「指定金額」案經 PATCH 改成 pool_pct：同 PUT share-revision 的轉換規則，一定要有獎金比例，
+      // 否則轉過去會變成沒有獎金池的舊制案（試算整案跳過）。PATCH 不收獎金比例，所以本案必須已經有；
+      // 要同時設比例請走 PUT /projects/:id/share-revision（shareMode＋bonusRatePct 一起送）。
+      if (
+        b.shareMode === "pool_pct" &&
+        scope.project.share_mode !== "pool_pct" &&
+        num(scope.project.bonus_rate_pct) === null
+      ) {
+        res.status(400).json({ error: "bonus_rate_required" })
+        return
+      }
       // 2026-10-27：本案各角色分潤趴數——同獎金池，真的有變才算改分潤；會計 forbidden_bonus，其他非老闆 403／409。
       let sharePctChange: { next: Record<string, number> | null } | null = null
       if (b.sharePctByRole !== undefined) {
@@ -2114,6 +2125,9 @@ projectsRouter.put(
       // 轉百分比放在 RPC 成功之後：RPC 失敗（驗證不過）就完全不動模式；若這一步失敗，專案仍是
       // fixed_amount（引擎照舊用固定金額，錢不會算錯），重送同一份即可完成轉換。
       let shareMode = scope.project.share_mode
+      // 轉換那步的結果要明講：比例／趴數已由 RPC 存好，若改模式失敗卻只回 200，前端會以為轉完了。
+      // modeConverted:false ＝「比例已存，模式尚未轉換」，前端提示再按一次儲存（重送同一份即可完成）。
+      let modeConverted: boolean | undefined
       if (convertToPool) {
         const { data: converted, error: convErr } = await supabaseAdmin
           .from("projects")
@@ -2123,8 +2137,9 @@ projectsRouter.put(
           .eq("share_mode", scope.project.share_mode)
           .select("id")
           .maybeSingle()
-        if (convErr) throw new Error(`PUT share-revision (convert share_mode): ${convErr.message}`)
-        if (converted) {
+        if (convErr) console.error(`PUT share-revision (convert share_mode): ${convErr.message}`)
+        modeConverted = !convErr && !!converted
+        if (modeConverted) {
           shareMode = "pool_pct"
           // 留痕：field='share_mode'，1＝百分比（pool_pct）、2＝指定金額（fixed_amount）；與本次整批同一個 change set。
           const { error: adjErr } = await supabaseAdmin.from("project_share_adjustments").insert({
@@ -2143,7 +2158,7 @@ projectsRouter.put(
       }
       await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "PUT /projects/:id/share-revision")
       // 獎金比例只給看得到毛利的人（老闆／platform_admin／授權 HR）：經理只維護名單時，後端補上的目前比例不可原樣回傳（可反推毛利）。
-      const body = { ...result, shareMode }
+      const body = { ...result, shareMode, ...(modeConverted === undefined ? {} : { modeConverted }) }
       res.status(200).json(scope.canSeeProfit ? body : { ...body, bonusRatePct: null })
     } catch (err) {
       if (err instanceof ProjectShareRevisionError) {

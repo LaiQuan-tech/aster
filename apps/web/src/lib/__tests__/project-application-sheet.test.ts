@@ -19,6 +19,7 @@ import {
   rebaseApplicationSheetDraft,
   PRINT_BLOCKS,
   SHEET_FIELD_PRINT_BLOCK,
+  receiptSummaryText,
 } from "../project-application-sheet"
 import type { Contract } from "../projects-api"
 import type { BillingExt, ProjectDetail, Subcontract } from "../projects-ext-api"
@@ -307,5 +308,15 @@ describe("列印區塊", () => {
     const keys = new Set(PRINT_BLOCKS.map((b) => b.key))
     for (const f of fields) expect(keys.has(SHEET_FIELD_PRINT_BLOCK[f])).toBe(true)
     expect(PRINT_BLOCKS.map((b) => b.key)).toEqual(["customer", "sales", "payment", "engineers", "subcontract", "contracts"])
+  })
+})
+
+describe("收款彙總一行字（請款期程卡標題列）", () => {
+  it("已收／未收／收款%（未稅口徑，千分位）", () => {
+    expect(receiptSummaryText({ receivedTotal: 300000, unreceived: 700000, receiptProgressPct: 30 })).toBe("已收 300,000／未收 700,000（收款 30%）")
+  })
+  it("沒有合約金額：未收與進度顯示 —；沒有 money 回 null", () => {
+    expect(receiptSummaryText({ receivedTotal: 0, unreceived: null, receiptProgressPct: null })).toBe("已收 0／未收 —（收款 —）")
+    expect(receiptSummaryText(null)).toBeNull()
   })
 })

@@ -14,6 +14,7 @@ import type {
   PaymentMethod,
   ProjectDetail,
   ProjectEngineers,
+  ProjectMoney,
   Subcontract,
   UpdateProjectExtBody,
 } from "./projects-ext-api";
@@ -637,4 +638,15 @@ export function designScopeText(rows: readonly DesignScopeItem[]): string {
   return normalizeScope(rows)
     .map((row) => `${row.discipline}${row.item ? `－${row.item}` : ""}${row.amount != null ? ` ${row.amount.toLocaleString()}` : ""}`)
     .join("、");
+}
+
+/**
+ * 收款彙總一行字（金額卡移除後補在請款期程卡標題列）：「已收 X／未收 Y（收款 Z%）」，口徑同後端 computeMoney（未稅）。
+ * 沒有 money（沒有 finance 權限或還沒載入）回 null；未收／進度算不出來（沒有合約金額）顯示「—」。純函式。
+ */
+export function receiptSummaryText(money: Pick<ProjectMoney, "receivedTotal" | "unreceived" | "receiptProgressPct"> | null | undefined): string | null {
+  if (!money) return null;
+  const fmt = (n: number | null) => (n == null ? "—" : Math.round(n).toLocaleString("zh-TW"));
+  const pct = money.receiptProgressPct == null ? "—" : `${money.receiptProgressPct}%`;
+  return `已收 ${fmt(money.receivedTotal)}／未收 ${fmt(money.unreceived)}（收款 ${pct}）`;
 }
