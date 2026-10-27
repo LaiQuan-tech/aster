@@ -888,6 +888,12 @@ export type PayableRow = {
   projectAmountUntaxed: number | null
   /** 該案已封存（C2 複製封存原案後，未付期款仍列，前端灰標）。 */
   archived: boolean
+  /**
+   * 驗收日（M5 `accepted_on`）；null＝未驗收。驗收欄位尚未套用時一律 null，
+   * 並以 `PayablesResult.acceptanceTracked=false` 告知前端「這個庫沒有驗收概念」。
+   * 「請款與放款」頁用它判斷哪些期款能放款（未驗收的不能勾）。
+   */
+  acceptedOn: string | null
 }
 
 export type PayableGroup = {
@@ -903,6 +909,8 @@ export type PayableGroup = {
 
 export type PayablesResult = {
   today: string
+  /** false＝驗收欄位尚未套用（migration 0050），`acceptedOn` 一律 null、放款不檢查驗收。 */
+  acceptanceTracked: boolean
   payables: PayableRow[]
   groups: PayableGroup[]
   summary: { count: number; grossTotal: number; withheldTotal: number; netTotal: number }
@@ -1049,9 +1057,12 @@ export async function buildPayables(
         projectReceivedTotal: prog?.received ?? 0,
         projectAmountUntaxed: prog?.amountUntaxed ?? null,
         archived: project.archived_at !== null,
+        acceptedOn: null,
       })
     }
   }
+  const acceptance = await loadPaymentAcceptance(tenantId, rows.map((r) => r.subcontractPaymentId))
+  if (acceptance) for (const r of rows) r.acceptedOn = acceptance.get(r.subcontractPaymentId)?.accepted_on ?? null
   rows.sort(
     (a, b) =>
       (a.vendorName ?? "").localeCompare(b.vendorName ?? "", "zh-Hant") ||
@@ -1082,6 +1093,7 @@ export async function buildPayables(
   }
   return {
     today,
+    acceptanceTracked: acceptance !== null,
     payables: rows,
     groups: [...groupMap.values()],
     summary: {

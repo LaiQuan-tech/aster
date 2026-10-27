@@ -203,6 +203,8 @@ export interface Payable {
   projectAmountUntaxed?: number | null
   /** 該案已封存但期款未付（C2 複製封存原案後仍要付）；列上打灰標。 */
   archived?: boolean
+  /** 驗收日（M5）；null＝未驗收。舊 API 沒這欄位時 undefined（視同不檢查，見 getPayables 的 acceptanceTracked）。 */
+  acceptedOn?: string | null
 }
 
 /** 依廠商分組的應付清單彙總（GET /disbursements/payables 的 groups）。 */
@@ -318,6 +320,8 @@ export function getDisbursementSummary(params: { from?: string; to?: string } = 
 export function getPayables(params: { vendorId?: string; projectId?: string } = {}) {
   return apiFetch<{
     today: string
+    /** false／缺欄位＝驗收欄位未套用或舊 API：acceptedOn 不可信，不檢查驗收。 */
+    acceptanceTracked?: boolean
     payables: Payable[]
     groups: PayableGroup[]
     summary: { count: number; grossTotal: number; withheldTotal: number; netTotal: number }
@@ -357,6 +361,31 @@ export function payDisbursement(
     method: "POST",
     body: JSON.stringify(body),
   })
+}
+
+/** 打勾放款（「請款與放款」頁）：逐筆走單筆付款規則，回逐筆結果；成功的不要重送。 */
+export interface BatchPayResponse {
+  results: Array<
+    | { id: string; ok: true; disbursement: Disbursement }
+    | { id: string; ok: false; status: number; error: string; details?: Record<string, unknown> }
+  >
+  summary: { total: number; succeeded: number; failed: number }
+}
+
+export function batchPayDisbursements(body: { paidOn: string; items: Array<{ id: string; amount?: number }> }) {
+  return apiFetch<BatchPayResponse>("/disbursements/batch-pay", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+/** 批次付款逐筆錯誤碼 → 中文（精準比對；找不到退回原碼）。 */
+export function describeBatchPayError(code: string, details?: Record<string, unknown>): string {
+  if (code === "acceptance_required" && typeof details?.installmentNo === "number") {
+    return `第 ${details.installmentNo} 期尚未驗收，請先在專案頁按「驗收確認」。`
+  }
+  if (code === "approval_required") return "放款單尚未簽核完成（草稿或送簽中），核准後才能放款。"
+  return DISBURSEMENT_ERRORS[code] ?? code
 }
 
 /* ------------------------------------------------------------ M4 簽核鏈 -- */
@@ -511,6 +540,9 @@ export const DISBURSEMENT_METHOD_LABELS: Record<DisbursementMethod, string> = {
 // 否則短 code 會先誤判命中。新增 code 時請留意這點，別直接塞在最前面。
 export const DISBURSEMENT_ERRORS: Record<string, string> = {
   // M4／M5（放在最前面：都是完整字串，不會被其他 code 包含）
+  amount_locked: "實付與核准金額不同：已核准的金額不能直接改，請撤回簽核、改單後重新送簽。",
+  duplicate_item: "同一張放款單在這批出現兩次，只處理第一次。",
+  internal_error: "伺服器處理這筆時發生錯誤，請稍後再試。",
   acceptance_force_forbidden: "只有 HR 可以強制放行未驗收的期款。",
   acceptance_not_available: "驗收功能所需的資料庫欄位尚未套用，請聯絡管理員。",
   acceptance_required: "分攤到的複委託期款還沒驗收確認，請先在專案頁按「驗收確認」。",

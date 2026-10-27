@@ -26,6 +26,7 @@ const ADMIN_REDIRECTS = [
   { source: "/admin/projects/annual", destination: "/admin/projects" },
   { source: "/admin/projects/alerts", destination: "/admin/projects" },
   { source: "/admin/stamp-duty", destination: "/admin/projects" },
+  { source: "/admin/projects/receivables", destination: "/admin/disbursements?view=receivables" },
 ];
 
 const nextConfig: NextConfig = {

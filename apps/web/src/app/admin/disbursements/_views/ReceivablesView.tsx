@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Card, Empty, ErrorText } from "@/components/admin-ui";
 import {
@@ -11,6 +11,7 @@ import {
   type ReceivablesResponse,
   type ReceivableState,
 } from "@/lib/projects-ext-api";
+import { matchesKeyword } from "@/lib/billing-disbursement";
 
 function fmtMoney(n: number | null | undefined): string {
   return n == null ? "—" : n.toLocaleString();
@@ -25,12 +26,16 @@ const STATE_CHIPS: Array<{ value: ReceivableState | "all"; label: string }> = [
 ];
 
 /**
- * 未收款追蹤（模組五）：每期一列的應收／未收清單，預設只看還沒收完的。
+ * 「請款與放款」頁的「應收催收」子檢視（原「請款與未收款」分頁 /admin/projects/receivables，2026-10-27 併入；
+ * 舊網址轉到 /admin/disbursements?view=receivables）。
+ * 每期一列的應收／未收清單，預設只看還沒收完的。
  * 排序（後端已排好）：專案未收比例 desc → 逾期天數 desc → 編號 → 期別——
  * 「先追誰」看比例，不是看金額大小。
  * B5：加了狀態篩選 chips 與三段狀態＋逾期的顏色 badge，逾期基準由後端讀租戶設定。
+ * 合併後：頁首統計卡改由整頁共用（未收合計／逾期），這裡只在篩選列顯示本次篩選的筆數與未收；
+ * 關鍵字框整頁共用（`q`，比對專案編號／名稱／客戶）。
  */
-export default function ReceivablesPage() {
+export default function ReceivablesView({ q }: { q: string }) {
   const [status, setStatus] = useState<"open" | "all">("open");
   const [stateFilter, setStateFilter] = useState<ReceivableState | "all">("all");
   const [data, setData] = useState<ReceivablesResponse | null>(null);
@@ -52,6 +57,13 @@ export default function ReceivablesPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const rows = useMemo(
+    () => (data?.receivables ?? []).filter((r) => matchesKeyword(q, r.code, r.projectName, r.clientName, r.invoiceNo)),
+    [data, q],
+  );
+  const shownUnreceived = rows.reduce((s, r) => s + (r.unreceived ?? 0), 0);
+  const shownOverdue = rows.filter((r) => r.state === "overdue").length;
 
   return (
     <>
@@ -93,25 +105,21 @@ export default function ReceivablesPage() {
               逾期基準：{data.basis === "invoiced" ? "開票日" : "請款日"}
             </span>
           )}
+          {data && (
+            <span className="ml-auto text-xs text-gray-600">
+              {rows.length} 筆・未收 <span className="font-semibold text-red-600">{fmtMoney(shownUnreceived)}</span>
+              {shownOverdue > 0 && <span className="ml-2 text-amber-600">逾期 {shownOverdue} 筆</span>}
+            </span>
+          )}
         </div>
         <ErrorText>{error}</ErrorText>
       </Card>
 
-      {data && (
-        <Card>
-          <div className="grid grid-cols-3 gap-4">
-            <div><p className="text-xs text-gray-500">筆數</p><p className="text-xl font-semibold text-gray-900">{data.summary.count}</p></div>
-            <div><p className="text-xs text-gray-500">未收合計</p><p className="text-xl font-semibold text-red-600">{fmtMoney(data.summary.unreceivedTotal)}</p></div>
-            <div><p className="text-xs text-gray-500">逾期筆數</p><p className="text-xl font-semibold text-amber-600">{data.summary.overdueCount}</p></div>
-          </div>
-        </Card>
-      )}
-
       <Card>
         {loading ? (
           <Empty>載入中…</Empty>
-        ) : !data || data.receivables.length === 0 ? (
-          <Empty>{status === "open" ? "目前沒有未收完的期別" : "沒有資料"}</Empty>
+        ) : !data || rows.length === 0 ? (
+          <Empty>{q.trim() ? "沒有符合關鍵字的期別" : status === "open" ? "目前沒有未收完的期別" : "沒有資料"}</Empty>
         ) : (
           <div className="overflow-x-auto">
             {/* 1280px 桌機不需左右捲動：編號／客戶併入專案欄、發票號碼併入開票日欄；長文字換行，日期與金額不換行。 */}
@@ -133,7 +141,7 @@ export default function ReceivablesPage() {
                 </tr>
               </thead>
               <tbody>
-                {data.receivables.map((r) => (
+                {rows.map((r) => (
                   <tr key={r.billingId} className="border-b align-top last:border-0">
                     <td className="min-w-[12rem] py-1.5 pr-2">
                       <div className="flex flex-wrap items-baseline gap-x-1.5">

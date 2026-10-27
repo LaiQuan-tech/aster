@@ -34,6 +34,7 @@ import {
   submitDisbursement,
   withdrawDisbursement,
 } from "../services/disbursement-approval.js"
+import { BATCH_PAY_MAX_ITEMS, payDisbursementsBatch } from "../services/disbursement-batch-pay.js"
 import { disbursementsFilename, disbursementsWorkbookBuffer } from "../lib/xlsx/disbursements.js"
 
 export const disbursementsRouter = Router()
@@ -49,7 +50,7 @@ export const disbursementsRouter = Router()
  * 業務規則全部在 services/disbursements.ts 與 services/disbursement-approval.ts；
  * 這裡只做認人、zod、查詢字串解析、錯誤碼對應、xlsx 回傳。
  *
- * 路由順序：`/disbursements/summary`、`/payables`、`/pending-approvals`、`/export.xlsx`
+ * 路由順序：`/disbursements/summary`、`/payables`、`/pending-approvals`、`/export.xlsx`、`/batch-pay`
  * 這些靜態路徑先註冊，`/:id` 在後，且 `:id` 不是 uuid 時 `next()`——同 projects-annual.ts。
  */
 
@@ -109,6 +110,27 @@ const payBody = z.object({
   forceReason: z.string().trim().max(500).nullish(),
   forceAcceptance: z.boolean().optional(),
 })
+/**
+ * 打勾放款（「請款與放款」頁）。刻意沒有 forceReason／forceAcceptance：批次不開強制例外
+ * （.strict() 讓前端誤帶強制旗標時直接 400，而不是被默默忽略）。
+ */
+const batchPayBody = z
+  .object({
+    paidOn: dateKey.nullish(),
+    items: z
+      .array(
+        z
+          .object({
+            id: z.string().uuid(),
+            paidOn: dateKey.nullish(),
+            amount: z.number().nonnegative().max(1e12).nullish(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(BATCH_PAY_MAX_ITEMS),
+  })
+  .strict()
 const voidBody = z.object({ reason: z.string().trim().min(1).max(500) })
 const submitBody = z.object({
   forceReason: z.string().trim().max(500).nullish(),
@@ -395,6 +417,29 @@ disbursementsRouter.post("/disbursements/:id/pay", ...guards, async (req: Reques
       return
     }
     res.status(200).json({ disbursement })
+  } catch (err) {
+    handleError(err, res, next)
+  }
+})
+
+// ── POST /disbursements/batch-pay {paidOn?, items:[{id, paidOn?, amount?}]} ──
+/**
+ * 打勾放款：逐筆走既有 `payDisbursement`（只收 approved、不開強制例外、未驗收照擋、實付須等於核准金額），
+ * 每筆各自寫入、互不影響，回 200 ＋ 逐筆結果（`ok:false` 帶與單筆端點相同的錯誤碼）。
+ * 權限同單筆付款：requireFinance（HR／平台管理員／會計）。
+ */
+disbursementsRouter.post("/disbursements/batch-pay", ...guards, async (req: Request, res: Response, next: NextFunction) => {
+  const tenantId = res.locals.tenantId as string
+  const parsed = batchPayBody.safeParse(req.body ?? {})
+  if (!parsed.success) {
+    res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+    return
+  }
+  try {
+    const actor = await actorOf(tenantId, req)
+    const results = await payDisbursementsBatch(tenantId, actor, parsed.data)
+    const succeeded = results.filter((r) => r.ok).length
+    res.status(200).json({ results, summary: { total: results.length, succeeded, failed: results.length - succeeded } })
   } catch (err) {
     handleError(err, res, next)
   }
