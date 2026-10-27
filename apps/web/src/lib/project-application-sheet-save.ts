@@ -48,6 +48,11 @@ import {
 export interface SheetSaveContext {
   project: ProjectDetail;
   canFinance: boolean;
+  /**
+   * 能改客戶名冊（PATCH /clients/:id 是 requireFinance＝HR／會計／平台管理員，比本案 finance 窄：
+   * 本案經理、主辦、部門主管改不了）。false 時客戶格唯讀、不進存檔計畫。省略＝true。
+   */
+  canEditClient?: boolean;
   disciplines: readonly string[];
   /** 草稿目前選的客戶（名冊讀不到時是專案帶的 client；沒選＝null）。 */
   client: Client | null;
@@ -213,9 +218,6 @@ export function stageLocks(row: ApplicationStageRow) {
   };
 }
 
-/** 表格裡金額格改了，人工覆寫的理由（後端要求必填）：沿用既有理由，沒有就註明出處。 */
-export const SHEET_OVERRIDE_REASON = "於專案申請單表格直接指定金額";
-
 export interface StagePlan {
   /** PUT /billings 的整批內容（含所有既有期別）；說明／%／金額都沒變＝null。 */
   installments: InstallmentInputExt[] | null;
@@ -223,8 +225,12 @@ export interface StagePlan {
   created: Array<{ key: string; installmentNo: number; label: string }>;
   invoices: Array<{ key: string; label: string; invoiceNo: string }>;
   receipts: Array<{ key: string; label: string; receivedOn: string }>;
+  /** 改了金額、要使用者填人工指定理由的列（沒有既有理由可沿用）。 */
+  needsReason: Array<{ key: string; label: string }>;
   changes: number;
   errors: string[];
+  /** 草稿裡對不到任何列的修改（那一列已被別處新增／移除）：不送出，提醒使用者。 */
+  warnings: string[];
 }
 
 function stageLabel(row: ApplicationStageRow): string {
@@ -232,7 +238,7 @@ function stageLabel(row: ApplicationStageRow): string {
 }
 
 export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): StagePlan {
-  const out: StagePlan = { installments: null, created: [], invoices: [], receipts: [], changes: 0, errors: [] };
+  const out: StagePlan = { installments: null, created: [], invoices: [], receipts: [], needsReason: [], changes: 0, errors: [], warnings: [] };
   if (!ctx.canFinance) return out;
   const rows = applicationStageRows(ctx.billings);
   const byId = new Map(ctx.billings.map((b) => [b.id, b]));
@@ -249,6 +255,13 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
   }));
   let nextNo = ctx.billings.reduce((m, b) => Math.max(m, b.installmentNo), 0) + 1;
   let scheduleChanged = false;
+  const rowKeys = new Set(rows.map(stageRowKey));
+  const orphans = Object.entries(draft.stageEdits).filter(
+    ([key, edit]) => !rowKeys.has(key) && Object.values(edit).some((v) => trimmed(v) !== ""),
+  );
+  if (orphans.length > 0) {
+    out.warnings.push(`付款階段有 ${orphans.length} 列的修改對不到期別（期程已在別處變動），不會送出；請按「還原」後重填。`);
+  }
 
   for (const row of rows) {
     const key = stageRowKey(row);
@@ -279,6 +292,16 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     const rowScheduleChanges = (milestoneChanged ? 1 : 0) + (percentage !== undefined ? 1 : 0) + (amount !== undefined ? 1 : 0);
     out.changes += rowScheduleChanges + (receivedOn ? 1 : 0) + (invoiceNo ? 1 : 0);
 
+    // 人工指定金額要理由（後端 override_reason_required）：沿用既有理由，否則要使用者自己填，不代填。
+    let overrideReason: string | null = null;
+    if (amount != null) {
+      overrideReason = trimmed(edit.overrideReason) || row.overrideReason || "";
+      if (!overrideReason) {
+        out.needsReason.push({ key, label });
+        out.errors.push(`付款階段${label}改了金額（人工指定），請填理由。`);
+      }
+    }
+
     // 入帳要算得出金額（後端 amount_unknown）：這列存完後要有金額或百分比。
     const amountAfter = amount !== undefined ? amount : row.amount;
     const pctAfter = percentage !== undefined ? percentage : row.percentage;
@@ -300,7 +323,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
       if (percentage !== undefined) target.percentage = percentage;
       if (amount !== undefined) {
         target.overrideAmount = amount;
-        target.overrideReason = amount === null ? null : saved.overrideReason || SHEET_OVERRIDE_REASON;
+        target.overrideReason = amount === null ? null : overrideReason;
       }
     } else {
       // 空白列：說明／%／金額任一有填才新增一期；只填發票或入帳日也要先建出這一期。
@@ -314,7 +337,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
         milestone: milestoneChanged ? textOrNull(edit.milestone) : row.kind === "guild_advance" ? row.milestone : null,
         plannedOn: null,
         overrideAmount: amount ?? null,
-        overrideReason: amount != null ? SHEET_OVERRIDE_REASON : null,
+        overrideReason: amount != null ? overrideReason : null,
         note: null,
       });
       out.created.push({ key, installmentNo, label });
@@ -361,12 +384,20 @@ export interface SubPlan {
   subcontracts: Subcontract[] | null;
   changes: number;
   errors: string[];
+  warnings: string[];
 }
 
 export function subcontractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): SubPlan {
-  const out: SubPlan = { subcontracts: null, changes: 0, errors: [] };
+  const out: SubPlan = { subcontracts: null, changes: 0, errors: [], warnings: [] };
   if (!ctx.canFinance) return out;
   const slots = applicationSubcontractSlots(ctx.subcontracts, draft.subExtraBlocks, draft.subEdits).flat();
+  const slotKeys = new Set(slots.map((sl) => sl.key));
+  const orphanCount = Object.entries(draft.subEdits).filter(
+    ([key, edit]) => !slotKeys.has(key) && Object.values(edit).some((v) => trimmed(v) !== ""),
+  ).length;
+  if (orphanCount > 0) {
+    out.warnings.push(`發包單位有 ${orphanCount} 欄的修改對不到副委託（已在別處移除），不會送出；請按「還原」後重填。`);
+  }
   const payload = ctx.subcontracts.map(subPayloadOf);
   let nextSort = ctx.subcontracts.reduce((m, s, i) => Math.max(m, s.sortOrder ?? i), -1) + 1;
   let changed = false;
@@ -443,18 +474,20 @@ export interface SheetSavePlan {
   /** 未儲存的格子數（存檔鈕旁、離開頁面提醒）。 */
   dirtyCount: number;
   errors: string[];
+  warnings: string[];
 }
 
 export function applicationSheetPlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): SheetSavePlan {
   const projectPatch = applicationSheetPatch(ctx.project, draft, { disciplines: ctx.disciplines, canFinance: ctx.canFinance });
   const projectCount = Object.keys(projectPatch).length;
-  const clientBody = ctx.canFinance ? clientSheetPatch(ctx.client, draft.clientEdits) : null;
+  const canEditClient = ctx.canFinance && ctx.canEditClient !== false;
+  const clientBody = canEditClient ? clientSheetPatch(ctx.client, draft.clientEdits) : null;
   const contract = contractPlan(ctx, draft);
   const stages = stagePlan(ctx, draft);
   const subs = subcontractPlan(ctx, draft);
   const errors = [...contract.errors, ...stages.errors, ...subs.errors];
   const taxId = draft.clientEdits.taxId;
-  if (ctx.client && taxId !== undefined && trimmed(taxId) !== "" && !/^\d{8}$/.test(trimmed(taxId))) {
+  if (canEditClient && ctx.client && taxId !== undefined && trimmed(taxId) !== "" && !/^\d{8}$/.test(trimmed(taxId))) {
     errors.push("統一編號須為 8 碼數字。");
   }
   return {
@@ -466,6 +499,7 @@ export function applicationSheetPlan(ctx: SheetSaveContext, draft: ApplicationSh
     dirtyCount:
       projectCount + (clientBody ? Object.keys(clientBody).length : 0) + contract.changes + stages.changes + subs.changes,
     errors,
+    warnings: [...stages.warnings, ...subs.warnings],
   };
 }
 
@@ -492,6 +526,12 @@ export interface SheetSaveApi {
   invoiceBilling(id: string, invoiceNo: string): Promise<unknown>;
   receiveBilling(id: string, receivedOn: string): Promise<unknown>;
   putSubcontracts(subcontracts: Subcontract[]): Promise<unknown>;
+  /**
+   * 整批 PUT 前重抓最新清單（選填）：用最新資料重建 payload 再套上這次的修改，
+   * 免得頁面開了很久、別人剛新增的期別被當成「不在清單裡」軟刪除，或剛改的欄位被舊值蓋回。
+   */
+  fetchBillings?(): Promise<BillingExt[]>;
+  fetchSubcontracts?(): Promise<Subcontract[]>;
   humanize(section: SheetSaveSection, err: unknown): string;
 }
 
@@ -517,6 +557,7 @@ export async function runApplicationSheetSave(
   plan: SheetSavePlan,
   draft: ApplicationSheetDraft,
   api: SheetSaveApi,
+  ctx?: SheetSaveContext,
 ): Promise<SheetSaveResult> {
   const steps: SheetSaveStep[] = [];
   const notices: string[] = [];
@@ -559,7 +600,21 @@ export async function runApplicationSheetSave(
     if (ok) residual = { ...residual, orderDocType: "", amountUntaxed: null };
   }
 
-  const stages = plan.stages;
+  let stages = plan.stages;
+  if (stages.installments && ctx && api.fetchBillings) {
+    try {
+      const fresh = await api.fetchBillings();
+      const replanned = stagePlan({ ...ctx, billings: fresh }, draft);
+      if (replanned.errors.length > 0) throw new Error(replanned.errors.join(" "));
+      notices.push(...replanned.warnings);
+      stages = replanned;
+    } catch (err) {
+      steps.push({ section: "billings", label: "付款階段（重抓最新期程）", status: "failed", message: api.humanize("billings", err) });
+      stages = { ...stages, installments: null, invoices: [], receipts: [], created: [] };
+      for (const inv of plan.stages.invoices) steps.push({ section: "invoice", label: `付款階段${inv.label}發票號碼`, status: "skipped", message: "付款階段沒存成，這格未送出。" });
+      for (const rc of plan.stages.receipts) steps.push({ section: "receipt", label: `付款階段${rc.label}入帳日期`, status: "skipped", message: "付款階段沒存成，這格未送出。" });
+    }
+  }
   /** 草稿 key → 已存在的期別 id（既有列 key 就是 id；新建的存完才知道）。 */
   const idOf = new Map<string, string>();
   for (const key of Object.keys(draft.stageEdits)) if (!key.startsWith("new-")) idOf.set(key, key);
@@ -576,7 +631,7 @@ export async function runApplicationSheetSave(
     if (scheduleOk) {
       const next: Record<string, StageEdit> = {};
       for (const [key, edit] of Object.entries(residual.stageEdits)) {
-        const rest = withoutKeys(edit, ["milestone", "percentage", "amount"]);
+        const rest = withoutKeys(edit, ["milestone", "percentage", "amount", "overrideReason"]);
         if (Object.keys(rest).length === 0) continue;
         next[idOf.get(key) ?? key] = rest;
       }
@@ -616,8 +671,17 @@ export async function runApplicationSheetSave(
   }
 
   if (plan.subcontracts) {
-    const subs = plan.subcontracts;
-    const ok = await attempt("subcontracts", "發包單位", () => api.putSubcontracts(subs).then(() => undefined));
+    let subs = plan.subcontracts;
+    const ok = await attempt("subcontracts", "發包單位", async () => {
+      if (ctx && api.fetchSubcontracts) {
+        const replanned = subcontractPlan({ ...ctx, subcontracts: await api.fetchSubcontracts() }, draft);
+        if (replanned.errors.length > 0) throw new Error(replanned.errors.join(" "));
+        notices.push(...replanned.warnings);
+        if (!replanned.subcontracts) return; // 最新資料已跟草稿一致，不必再送
+        subs = replanned.subcontracts;
+      }
+      await api.putSubcontracts(subs);
+    });
     if (ok) residual = { ...residual, subEdits: {}, subExtraBlocks: 0 };
   }
 

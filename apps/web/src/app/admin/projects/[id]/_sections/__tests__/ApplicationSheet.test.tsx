@@ -51,7 +51,7 @@ const subcontracts: Subcontract[] = [{
   amount: 20000, billingBasis: "完工", orderType: null, withholdingRate: 0.1, withholdingThreshold: 20000, note: null,
 }]
 
-function render(opts: { canFinance?: boolean; mode?: "edit" | "print"; draft?: Partial<ApplicationSheetDraft> } = {}) {
+function render(opts: { canFinance?: boolean; canEditClients?: boolean; mode?: "edit" | "print"; draft?: Partial<ApplicationSheetDraft> } = {}) {
   const draft = { ...applicationSheetDraftOf(project, []), ...opts.draft }
   return renderToStaticMarkup(
     <ApplicationSheet
@@ -66,6 +66,7 @@ function render(opts: { canFinance?: boolean; mode?: "edit" | "print"; draft?: P
       vendors={[]}
       disciplines={[]}
       clients={[client]}
+      canEditClients={opts.canEditClients}
       mode={opts.mode}
       draft={draft}
       onDraftChange={() => {}}
@@ -128,6 +129,26 @@ describe("申請單表格：可直接編輯", () => {
     expect(html).toContain('aria-label="發包單位第 3 欄發包金額"')
     expect(html).toContain("80,000")
     expect(html).toContain("80%")
+  })
+})
+
+describe("申請單表格：權限與提示", () => {
+  it("沒有客戶名冊寫入權（本案經理／主辦）：客戶欄位唯讀並說明，其他格照樣可填", () => {
+    const html = render({ canEditClients: false })
+    expect(html).not.toContain('aria-label="電話"')
+    expect(cell(html, "sheet-clientPhone")).not.toContain("data-editable")
+    expect(html).toContain("只有 HR／會計能修改")
+    expect(html).toContain('aria-label="設計地點"')
+  })
+
+  it("付款階段改了金額：出現人工指定理由輸入框，未填前存檔鈕停用並列出原因", () => {
+    const html = render({ draft: { stageEdits: { b1: { amount: "45000" } } } })
+    expect(html).toContain('aria-label="付款階段第 1 列人工指定理由"')
+    expect(html).toContain("付款階段第 1 列改了金額（人工指定），請填理由。")
+  })
+
+  it("表格包在 fieldset 裡（存檔中整張鎖住）", () => {
+    expect(render()).toMatch(/<fieldset[^>]*class="m-0 min-w-0 border-0 p-0"/)
   })
 })
 

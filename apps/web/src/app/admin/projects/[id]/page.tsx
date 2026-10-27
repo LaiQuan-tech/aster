@@ -13,7 +13,8 @@ import {
 import { applicationSheetPlan, resolveSheetClient, type SheetSaveContext } from "@/lib/project-application-sheet-save";
 import { unsavedChangesMessage } from "@/lib/unsaved-changes";
 import { useUnsavedChangesGuard } from "./_sections/useUnsavedChangesGuard";
-import { getDepartments, getEmployees, type Department, type Employee } from "@/lib/admin-api";
+import { getDepartments, getEmployees, getMe, type Department, type Employee } from "@/lib/admin-api";
+import { isAdminRole } from "@/lib/roles";
 import { listVendors, type Vendor } from "@/lib/company-api";
 import {
   getProjectMembers,
@@ -168,6 +169,11 @@ export default function AdminProjectDetailPage() {
   const [savedSubs, setSavedSubs] = useState<Subcontract[]>([]);
   /** 客戶名冊（申請單客戶欄位的基準；跟著 load() 重抓，存完客戶欄位才比得出已存成）。 */
   const [clients, setClients] = useState<Client[]>([]);
+  /**
+   * 能改客戶名冊：PATCH /clients/:id 是 requireFinance（HR／會計／平台管理員＝ADMIN_ROLES），比本案 finance 窄。
+   * 本案經理、主辦、部門主管在申請單上的客戶欄位維持唯讀，免得每次存檔都 403。讀不到 /me 就當不能改。
+   */
+  const [canEditClients, setCanEditClients] = useState(false);
   /** 申請單上次儲存的結果（哪幾部分沒存成）；load() 會讓申請單重掛，所以放這層。 */
   const [sheetSaveReport, setSheetSaveReport] = useState<ApplicationSheetSaveReport | null>(null);
 
@@ -196,7 +202,7 @@ export default function AdminProjectDetailPage() {
       // access 由 detail 回應決定；先取得它，避免非 finance 使用者先打合約 API 收到 403，
       // 進而讓整頁 Promise.all 失敗。
       const detail = await getProjectDetail(projectId);
-      const [m, adj, docs, contractsForAccess, bs, subs, d, e, ven, comp, p3, mains, cl] = await Promise.all([
+      const [m, adj, docs, contractsForAccess, bs, subs, d, e, ven, comp, p3, mains, cl, me] = await Promise.all([
         getProjectMembers(projectId),
         getProjectAdjustments(projectId),
         getProjectDocuments(projectId),
@@ -217,7 +223,9 @@ export default function AdminProjectDetailPage() {
           : listProjectsExt({ includeArchived: true, kinds: ["main"] }).catch(() => ({ projects: [] as ProjectListItem[] })),
         // 客戶名冊只有可編輯申請單的人需要；讀不到就退回專案帶的 client。
         detail.access.finance ? listClients().catch(() => ({ clients: [] as Client[] })) : Promise.resolve({ clients: [] as Client[] }),
+        getMe().catch(() => null),
       ]);
+      const clientsEditable = isAdminRole(me?.role);
       const disciplineList = engineerDisciplinesOf(p3?.settings.disciplines ?? null);
       setDisciplines(disciplineList);
       // 申請單草稿：沒動過的欄位換成新值、動過的保留；疊完若已跟專案一致（例如剛存好）就整份換新。
@@ -231,6 +239,7 @@ export default function AdminProjectDetailPage() {
           {
             project: detail.project,
             canFinance: detail.access.finance,
+            canEditClient: clientsEditable,
             disciplines: disciplineList,
             client: resolveSheetClient(cl.clients, detail.project, rebased.clientId),
             money: detail.money,
@@ -244,6 +253,7 @@ export default function AdminProjectDetailPage() {
         return pending.dirtyCount === 0 ? newBase : rebased;
       });
       setClients(cl.clients);
+      setCanEditClients(clientsEditable);
       setProject(detail.project);
       setAccess(detail.access);
       setMoney(detail.money);
@@ -348,6 +358,7 @@ export default function AdminProjectDetailPage() {
     ? {
         project,
         canFinance,
+        canEditClient: canEditClients,
         disciplines,
         client: sheetDraft ? resolveSheetClient(clients, project, sheetDraft.clientId) : null,
         money,
@@ -420,6 +431,7 @@ export default function AdminProjectDetailPage() {
         vendors={vendors}
         disciplines={disciplines}
         clients={clients}
+        canEditClients={canEditClients}
         saveReport={sheetSaveReport}
         onSaveReport={setSheetSaveReport}
         load={load}

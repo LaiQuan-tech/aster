@@ -239,6 +239,8 @@ export interface StageEdit {
   milestone?: string;
   percentage?: string;
   amount?: string;
+  /** 改了金額（＝人工指定）時的理由；後端要求必填，沿用既有理由時可不填。 */
+  overrideReason?: string;
   receivedOn?: string;
   invoiceNo?: string;
 }

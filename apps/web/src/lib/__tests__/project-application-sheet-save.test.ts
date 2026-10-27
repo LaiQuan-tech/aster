@@ -9,7 +9,6 @@ import {
   type ApplicationSheetDraft,
 } from "../project-application-sheet"
 import {
-  SHEET_OVERRIDE_REASON,
   applicationSheetPlan,
   changeOrderTotal,
   clientSheetPatch,
@@ -219,6 +218,14 @@ describe("客戶名冊欄位", () => {
     expect(clientSheetPatch(null, { phone: "x" })).toBeNull()
   })
 
+  it("沒有客戶名冊寫入權（本案經理／主辦／部門主管）：客戶修改不進計畫、不擋存檔", () => {
+    const ctx = ctxOf({ canEditClient: false })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { clientEdits: { phone: "x", taxId: "1" }, siteAddress: "新地點" }))
+    expect(plan.client).toBeNull()
+    expect(plan.errors).toEqual([])
+    expect(plan.dirtyCount).toBe(1)
+  })
+
   it("計畫帶出客戶 id／名稱，統編格式不對擋下來", () => {
     const ctx = ctxOf()
     const plan = applicationSheetPlan(ctx, draftOf(ctx, { clientEdits: { contactName: "李測試", taxId: "123" } }))
@@ -301,12 +308,16 @@ describe("付款階段", () => {
     expect(stageLocks(rows[rows.length - 1]).invoiceNo).toBe(true)
   })
 
-  it("改說明／%／金額 → 整批 PUT 含全部既有期別（預定日原值帶回）；金額＝人工指定並附理由", () => {
+  it("改說明／%／金額 → 整批 PUT 含全部既有期別（預定日原值帶回）；金額＝人工指定，理由由使用者填", () => {
     const ctx = ctxOf({ billings })
-    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { milestone: " 訂金 ", percentage: "40", amount: "41000" } } }))
+    const noReason = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { amount: "41000" } } }))
+    expect(noReason.errors).toContain("付款階段第 1 列改了金額（人工指定），請填理由。")
+    expect(noReason.stages.needsReason).toEqual([{ key: "b1", label: "第 1 列" }])
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { milestone: " 訂金 ", percentage: "40", amount: "41000", overrideReason: " 業主議價 " } } }))
+    expect(plan.errors).toEqual([])
     expect(plan.dirtyCount).toBe(3)
     expect(plan.stages.installments).toHaveLength(2)
-    expect(plan.stages.installments?.[0]).toMatchObject({ id: "b1", milestone: "訂金", percentage: 40, overrideAmount: 41000, overrideReason: SHEET_OVERRIDE_REASON, plannedOn: "2026-11-01" })
+    expect(plan.stages.installments?.[0]).toMatchObject({ id: "b1", milestone: "訂金", percentage: 40, overrideAmount: 41000, overrideReason: "業主議價", plannedOn: "2026-11-01" })
     expect(plan.stages.installments?.[1]).toMatchObject({ id: "b2", percentage: 70, overrideAmount: null })
   })
 
@@ -337,10 +348,10 @@ describe("付款階段", () => {
     const rows = applicationStageRows(billings)
     expect(stageRowKey(rows[2])).toBe("new-installment-3")
     expect(stageRowKey(rows[rows.length - 1])).toBe("new-guild")
-    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { "new-installment-3": { milestone: "保留款", percentage: "10" }, "new-guild": { amount: "5000" } } }))
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { "new-installment-3": { milestone: "保留款", percentage: "10" }, "new-guild": { amount: "5000", overrideReason: "公會核定" } } }))
     expect(plan.stages.installments).toHaveLength(4)
     expect(plan.stages.installments?.[2]).toMatchObject({ installmentNo: 3, kind: "installment", milestone: "保留款", percentage: 10, overrideAmount: null })
-    expect(plan.stages.installments?.[3]).toMatchObject({ installmentNo: 4, kind: "guild_advance", milestone: "技師公會代墊", overrideAmount: 5000, overrideReason: SHEET_OVERRIDE_REASON })
+    expect(plan.stages.installments?.[3]).toMatchObject({ installmentNo: 4, kind: "guild_advance", milestone: "技師公會代墊", overrideAmount: 5000, overrideReason: "公會核定" })
     expect(plan.stages.created).toEqual([
       { key: "new-installment-3", installmentNo: 3, label: "第 3 列" },
       { key: "new-guild", installmentNo: 4, label: "技師公會代墊" },
@@ -389,6 +400,17 @@ describe("發包單位", () => {
   })
 })
 
+describe("對不到列的修改", () => {
+  it("付款階段／發包單位的修改對不到任何列 → 不送、不算未儲存、給提醒", () => {
+    const ctx = ctxOf({ billings: [fakeBilling({})], subcontracts: [fakeSub({})] })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { "gone-id": { milestone: "x" } }, subEdits: { "gone-sub": { item: "y" } } }))
+    expect(plan.dirtyCount).toBe(0)
+    expect(plan.warnings).toHaveLength(2)
+    expect(plan.warnings[0]).toMatch(/付款階段有 1 列/)
+    expect(plan.warnings[1]).toMatch(/發包單位有 1 欄/)
+  })
+})
+
 describe("重新載入時保留疊加層", () => {
   it("客戶／付款階段／發包單位的修改在 rebase 後都還在", () => {
     const ctx = ctxOf()
@@ -433,6 +455,7 @@ describe("依序儲存與失敗回報", () => {
     clientEdits: { fax: "02-0000-0003" },
     amountUntaxed: "110000",
     stageEdits: { b1: { milestone: "訂金", invoiceNo: "AB00000001" }, "new-installment-2": { percentage: "70", receivedOn: "2026-10-28" } },
+    subExtraBlocks: 0,
     subEdits: { s1: { item: "弱電" } },
   })
 
@@ -488,5 +511,35 @@ describe("依序儲存與失敗回報", () => {
     expect(res.notices).toEqual(["已儲存。統一編號 87654321 與「測試客戶丙」相同"])
     expect(api.updateClient).toHaveBeenCalledTimes(1)
     expect(api.calls).toEqual([])
+  })
+
+  it("整批 PUT 前重抓最新期程：別人剛新增的期別會一起帶回，不會被軟刪除", async () => {
+    const plan = applicationSheetPlan(ctx, fullDraft)
+    const othersRow = fakeBilling({ id: "b-other", installmentNo: 5, milestone: "別人加的" })
+    const api = fakeApi({ fetchBillings: vi.fn(async () => [fakeBilling({}), othersRow]) })
+    const res = await runApplicationSheetSave(plan, fullDraft, api, ctx)
+    const sent = (api.saveBillingSchedule as ReturnType<typeof vi.fn>).mock.calls[0][0] as Array<{ id?: string; installmentNo: number }>
+    expect(sent.map((r) => r.id)).toEqual(["b1", "b-other"])
+    // 原本要填的第 2 列已被別人的期別佔走：不送、明講，草稿留著讓使用者決定
+    expect(api.receiveBilling).not.toHaveBeenCalled()
+    expect(res.notices.some((n) => n.includes("對不到期別"))).toBe(true)
+    expect(res.residual.stageEdits["new-installment-2"]).toEqual({ receivedOn: "2026-10-28" })
+  })
+
+  it("整批 PUT 前重抓最新副委託：別人剛改的欄位不被舊值蓋回", async () => {
+    const plan = applicationSheetPlan(ctx, fullDraft)
+    const api = fakeApi({ fetchSubcontracts: vi.fn(async () => [fakeSub({ contact: "別人改的電話" })]) })
+    await runApplicationSheetSave(plan, fullDraft, api, ctx)
+    const sent = (api.putSubcontracts as ReturnType<typeof vi.fn>).mock.calls[0][0] as Subcontract[]
+    expect(sent[0]).toMatchObject({ id: "s1", item: "弱電", contact: "別人改的電話" })
+  })
+
+  it("重抓期程失敗：期程與開票／入帳都不送，清楚標出", async () => {
+    const plan = applicationSheetPlan(ctx, fullDraft)
+    const api = fakeApi({ fetchBillings: vi.fn(async () => { throw new Error("網路錯誤") }) })
+    const res = await runApplicationSheetSave(plan, fullDraft, api, ctx)
+    expect(api.saveBillingSchedule).not.toHaveBeenCalled()
+    expect(res.steps.filter((s) => s.section === "billings" || s.section === "invoice" || s.section === "receipt").map((s) => s.status)).toEqual(["failed", "skipped", "skipped"])
+    expect(res.residual.stageEdits).toEqual(fullDraft.stageEdits)
   })
 })
