@@ -12,10 +12,22 @@ export const projectShareRevisionSchema = z.object({
     roleInProject: z.enum(PROJECT_SHARE_ROLES),
     sharePct: z.number().min(0).max(100).nullable(),
   })).max(500),
-  reason: z.string(),
+  /**
+   * 2026-10-27 分潤簡化：省略/空白時由路由決定——本案已有核准／發放過的獎金紀錄 → 400 reason_required；
+   * 沒有 → 自動填 DEFAULT_SHARE_REVISION_REASON（DB RPC 仍要求非空原因，所以一定會補上）。
+   */
+  reason: z.string().max(500).optional().default(""),
+  /**
+   * 'pool_pct'＝順便把舊的「指定金額」專案轉成百分比模式（只有老闆／platform_admin；必須有獎金比例）。
+   * 'fixed_amount' 已停用，路由回 400 share_mode_fixed_amount_retired。
+   */
+  shareMode: z.enum(["pool_pct", "fixed_amount"]).optional(),
 })
 
-export type ProjectShareRevisionInput = Omit<z.infer<typeof projectShareRevisionSchema>, "bonusRatePct"> & {
+/** 尚無核准／發放紀錄時，未填變更原因自動帶入的文字（留在 project_share_adjustments.reason）。 */
+export const DEFAULT_SHARE_REVISION_REASON = "初次設定（尚無核准／發放紀錄，未填原因）"
+
+export type ProjectShareRevisionInput = Omit<z.infer<typeof projectShareRevisionSchema>, "bonusRatePct" | "shareMode"> & {
   bonusRatePct: number | null
 }
 export type PreparedProjectShareRevision = Omit<ProjectShareRevisionInput, "members"> & {

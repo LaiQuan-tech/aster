@@ -16,13 +16,11 @@ import {
 } from "@/lib/projects-api";
 import {
   getProjectDetail,
-  updateProjectFields,
   disciplineLabel,
   type ProjectDetail,
   type ProjectMoney,
 } from "@/lib/projects-ext-api";
-import { MembersCard } from "@/app/admin/projects/[id]/_sections/MembersCard";
-import { RoleSharePctCard } from "@/app/admin/projects/_components/RoleSharePctCard";
+import { BonusShareCard } from "@/app/admin/projects/[id]/_sections/BonusShareCard";
 import { effectiveRoleSharePct } from "@/lib/project-share-calculation";
 
 function money(n: number | null): string {
@@ -164,35 +162,22 @@ export default function EssProjectDetailPage() {
           {/* 老闆：分潤編輯器（比例與角色；加人／移除仍由 HR／負責人在後台）。 */}
           {membersRes?.canEditBonus && (
             <>
-              {/* 老闆：本案各角色分潤趴數（專案申請單的同一組設定；新增成員時依角色帶入）。 */}
-              <RoleSharePctCard
-                idPrefix="ess-project-role-share"
-                title="各角色分潤趴數"
-                description={project.sharePctByRole != null
-                  ? "本案新增成員時依角色自動帶入（每位成員的趴數）。"
-                  : "本案尚未設定，目前沿用新專案起始值；儲存後即為本案自己的設定。"}
-                values={shareDefaults}
-                canEdit
-                bossConfigured={membersRes.bossConfigured !== false}
-                allowUnset
-                onSave={async (value) => {
-                  await updateProjectFields(projectId, { sharePctByRole: value });
-                  await load();
-                }}
-              />
-              <MembersCard
+              {/* 2026-10-27 三卡合一：獎金比例＋每列 角色｜員工｜％；ESS 沒有員工名冊，不能換人／加列／移除。 */}
+              <BonusShareCard
                 projectId={projectId}
+                shareMode={membersRes.shareMode}
                 members={membersRes.members}
                 emps={membersRes.members.map((mm) => ({ id: mm.employeeId, name: mm.name ?? mm.employeeId, emp_no: mm.empNo }))}
                 canBonus
                 canEditBonus
                 bossConfigured={membersRes.bossConfigured !== false}
                 defaultSharePctByRole={shareDefaults}
-                contractAmount={projectMoney?.amountUntaxed ?? null}
-                receivedAmount={projectMoney?.receivedTotal ?? 0}
-                grossProfit={membersRes.bonusEstimate && membersRes.bonusEstimate.basis === "gross_profit" ? membersRes.bonusEstimate.grossProfit : null}
-                taxInclusiveVatRate={membersRes.bonusEstimate && membersRes.bonusEstimate.basis === "tax_inclusive_receipts" ? (membersRes.bonusEstimate.vatRate ?? 0.05) : null}
+                contractAmount={membersRes.bonusEstimate?.contractTotal ?? projectMoney?.amountUntaxed ?? null}
+                estimate={membersRes.bonusEstimate ?? null}
                 bonusRatePct={membersRes.bonusRatePct ?? null}
+                legacyBonusPool={membersRes.bonusEstimate?.basis === "legacy_pool" ? membersRes.bonusPool : null}
+                profitHidden={membersRes.canSeeProfit === false}
+                reasonRequired={membersRes.reasonRequired ?? true}
                 allowRosterEdit={false}
                 setError={setShareError}
                 load={load}

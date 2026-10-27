@@ -243,7 +243,8 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
     description: source.description,
     dept_id: source.dept_id,
     lead_emp_id: source.lead_emp_id,
-    share_mode: source.share_mode,
+    // 2026-10-27 分潤簡化：指定金額模式停用，新案一律百分比（固定金額本來就不複製）。
+    share_mode: "pool_pct",
     bonus_pool: null,
     starts_on: source.starts_on,
     ends_on: source.ends_on,

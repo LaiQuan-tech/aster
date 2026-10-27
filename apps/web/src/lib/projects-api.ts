@@ -147,6 +147,10 @@ export interface ProjectBonusEstimateSummary {
   vatRate?: number
   contractPool?: number | null
   overContractPct: number | null
+  /** 租戶獎金池口徑（2026-10-27 分潤簡化；舊版後端沒有＝tax_inclusive_receipts）。 */
+  poolBasis?: "tax_inclusive_receipts" | "gross_profit"
+  /** 舊制／指定金額專案設定比例後的累計毛利（只在毛利制租戶有值）。 */
+  projectedGrossProfit?: number | null
   skipped: "no_contract" | "no_pool" | null
 }
 
@@ -165,6 +169,8 @@ export interface MembersResponse {
   bonusPool: number | null
   bonusRatePct?: number | null
   bonusEstimate?: ProjectBonusEstimateSummary | null
+  /** 本案已有核准／發放過的獎金紀錄 → 改分潤要填變更原因（舊版後端沒有＝視為必填）。 */
+  reasonRequired?: boolean
   members: ProjectMember[]
 }
 
@@ -612,7 +618,11 @@ export function getProjectAdjustments(projectId: string) {
 export function saveProjectShareRevision(
   projectId: string,
   /** bonusRatePct 省略＝沿用目前比例（看不到比例的經理／主辦只維護名單時不送）。 */
-  body: { bonusRatePct?: number | null; members: ProjectShareRevisionMemberInput[]; reason: string },
+  /**
+   * reason 空白：後端在本案尚無核准／發放紀錄時自動填「初次設定」，否則 400 reason_required。
+   * shareMode 'pool_pct'＝把舊的指定金額專案轉成百分比（只有老闆，且必須有獎金比例）。
+   */
+  body: { bonusRatePct?: number | null; members: ProjectShareRevisionMemberInput[]; reason: string; shareMode?: "pool_pct" },
 ) {
   return apiFetch<ProjectShareRevisionResponse>(`/projects/${projectId}/share-revision`, {
     method: "PUT",

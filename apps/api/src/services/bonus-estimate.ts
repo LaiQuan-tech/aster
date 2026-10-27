@@ -1,5 +1,8 @@
 import {
   computeBonusRun,
+  DEFAULT_BONUS_POOL_BASIS,
+  isRateBasis,
+  type BonusPoolBasis,
   paidBeforeKey,
   projectBonusBasisOf,
   type ArchiveStage,
@@ -57,6 +60,13 @@ export type ProjectBonusEstimate = {
   /** Excel「總獎金」＝含稅合約額 × 比例；沒合約或沒比例 → null。 */
   contractPool: number | null
   overContractPct: number | null
+  /** 租戶的獎金池口徑（設了獎金比例的百分比專案會走哪一制）。 */
+  poolBasis: BonusPoolBasis
+  /**
+   * 舊制／指定金額專案「設定獎金比例並轉百分比後」會用到的累計毛利：只在租戶是毛利制時有值，
+   * 給專案頁試算獎金總額（2026-10-27 分潤簡化）；已是比例制的專案看 grossProfit。
+   */
+  projectedGrossProfit: number | null
   skipped: "no_contract" | "no_pool" | null
   excludedReason: "duplicate_replaced" | null
   members: BonusEstimateMember[]
@@ -88,6 +98,8 @@ export function buildProjectBonusEstimates(
       vatRate: b.vatRate,
       contractPool: b.contractPool,
       overContractPct: b.overContractPct,
+      poolBasis: p.poolBasis ?? DEFAULT_BONUS_POOL_BASIS,
+      projectedGrossProfit: !isRateBasis(b.basis) && (p.poolBasis ?? DEFAULT_BONUS_POOL_BASIS) === "gross_profit" ? b.grossProfit : null,
       skipped: skip,
       excludedReason: excluded ? "duplicate_replaced" : null,
       members: p.members.map((m) => {

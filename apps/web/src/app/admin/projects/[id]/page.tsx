@@ -23,6 +23,7 @@ import {
   getContracts,
   type ProjectMember,
   type ProjectMemberRole,
+  type ProjectBonusEstimateSummary,
   type ShareAdjustment,
   type ProjectDocument,
   type ProjectStatus,
@@ -62,15 +63,13 @@ import {
 } from "./_sections/shared";
 import { ProjectSettingsCard } from "./_sections/ProjectSettingsCard";
 import { ApplicationSheet } from "./_sections/ApplicationSheet";
-import { ShareModeCard } from "./_sections/ShareModeCard";
-import { RoleSharePctCard } from "../_components/RoleSharePctCard";
 import { effectiveRoleSharePct } from "@/lib/project-share-calculation";
 import { MoneyCard } from "./_sections/MoneyCard";
 import { ContractsCard } from "./_sections/ContractsCard";
 import { BillingsCard } from "./_sections/BillingsCard";
 import { SubcontractsCard } from "./_sections/SubcontractsCard";
 import { StatusCard } from "./_sections/StatusCard";
-import { MembersCard } from "./_sections/MembersCard";
+import { BonusShareCard } from "./_sections/BonusShareCard";
 import { DocumentsCard } from "./_sections/DocumentsCard";
 import { AdjustmentsCard } from "./_sections/AdjustmentsCard";
 import { LineageCard, DuplicateProjectDialog } from "./_sections/LineageCard";
@@ -91,19 +90,18 @@ export default function AdminProjectDetailPage() {
   const [access, setAccess] = useState<ProjectAccess>({ finance: true, bonus: true });
   const [money, setMoney] = useState<ProjectMoney | null>(null);
   const [members, setMembers] = useState<ProjectMember[]>([]);
-  // 分潤改版：寫入權（只有老闆）、老闆是否已指定、估算的目前毛利、各角色趴數。
-  // defaults＝本案各角色分潤趴數（申請單，2026-10-27）；本案未設定時退回租戶的新專案起始值。
+  // 獎金分潤卡（2026-10-27 三卡合一）：寫入權（只有老闆）、老闆是否已指定、估算服務的專案層數字、
+  // 新增一列時帶入的角色預設％（本案 share_pct_by_role；未設定退回租戶的新專案起始值）、變更原因是否必填。
   const [shareMeta, setShareMeta] = useState<{
     canEditBonus: boolean;
     bossConfigured: boolean;
-    grossProfit: number | null;
-    /** Excel 含稅入帳制的營業稅率（獎金總額＝含稅合約 × 比例）；其他制 null。 */
-    taxInclusiveVatRate: number | null;
+    estimate: ProjectBonusEstimateSummary | null;
+    bonusRatePct: number | null;
+    legacyBonusPool: number | null;
     profitHidden: boolean;
+    reasonRequired: boolean;
     defaults: Partial<Record<ProjectMemberRole, number>>;
-    /** 本案是否已有自己的設定（false＝沿用新專案起始值）。 */
-    projectShareSet: boolean;
-  }>({ canEditBonus: false, bossConfigured: true, grossProfit: null, taxInclusiveVatRate: null, profitHidden: false, defaults: {}, projectShareSet: false });
+  }>({ canEditBonus: false, bossConfigured: true, estimate: null, bonusRatePct: null, legacyBonusPool: null, profitHidden: false, reasonRequired: true, defaults: {} });
   const [adjustments, setAdjustments] = useState<ShareAdjustment[]>([]);
   const [documents, setDocuments] = useState<ProjectDocument[]>([]);
   /**
@@ -250,16 +248,17 @@ export default function AdminProjectDetailPage() {
       setShareMeta({
         canEditBonus: m.canEditBonus ?? detail.access.editBonus ?? false,
         bossConfigured: m.bossConfigured ?? detail.access.bossConfigured ?? true,
-        // 毛利制才用毛利算獎金總額；Excel 含稅入帳制（預設）用含稅合約額；舊制／固定金額沿用原畫面。
-        grossProfit: m.bonusEstimate && m.bonusEstimate.basis === "gross_profit" ? m.bonusEstimate.grossProfit : null,
-        taxInclusiveVatRate: m.bonusEstimate && m.bonusEstimate.basis === "tax_inclusive_receipts" ? (m.bonusEstimate.vatRate ?? 0.05) : null,
+        estimate: m.bonusEstimate ?? null,
+        bonusRatePct: m.bonusRatePct ?? detail.project.bonusRatePct ?? null,
+        legacyBonusPool: m.bonusEstimate?.basis === "legacy_pool" ? m.bonusPool : null,
         // 專案毛利只有老闆／platform_admin／授權 HR 看得到（canSeeProfit）；其他人不在本機推算獎金總額。
         profitHidden: m.canSeeProfit === false,
+        // 舊版後端沒有這個鍵 → 保守視為必填。
+        reasonRequired: m.reasonRequired ?? true,
         defaults: effectiveRoleSharePct(
           detail.project.sharePctByRole,
           (p3?.settings.defaultSharePctByRole ?? null) as Partial<Record<ProjectMemberRole, number>> | null,
         ),
-        projectShareSet: detail.project.sharePctByRole != null,
       });
       setAdjustments(adj.adjustments);
       setDocuments(docs.documents);
@@ -477,39 +476,20 @@ export default function AdminProjectDetailPage() {
       {/* C2 變更歷史：根案 → -1 → -2…，本案高亮、封存案灰字＋理由 */}
       <LineageCard projectId={projectId} />
 
-      {/* 分潤版本歷程 */}
-      <AdjustmentsCard adjustments={adjustments} />
-
-      {/* ③ 最下方：專案獎金與分潤——分潤模式、各角色分潤趴數、獎金比例與成員分潤（業主 2026-10-27）。 */}
-      {canBonus && (
-        <ShareModeCard project={project} canEditBonus={shareMeta.canEditBonus} canSeeProfit={access.profit !== false} saveProjectField={saveProjectField} />
-      )}
-      {canBonus && (
-        <RoleSharePctCard
-          idPrefix="project-role-share"
-          title="各角色分潤趴數"
-          description={shareMeta.projectShareSet
-            ? "本案新增成員時依角色自動帶入（每位成員的趴數）。"
-            : "本案尚未設定，目前沿用新專案起始值；老闆儲存後即為本案自己的設定。"}
-          values={shareMeta.defaults}
-          canEdit={shareMeta.canEditBonus}
-          bossConfigured={shareMeta.bossConfigured}
-          allowUnset
-          onSave={async (value) => {
-            await updateProjectFields(project.id, { sharePctByRole: value });
-            await load();
-          }}
-        />
-      )}
-      {/* 本案公司人員與個人分潤：獎金比例＋成員趴數；新增成員依上方「各角色分潤趴數」帶入。 */}
-      <MembersCard
-        projectId={projectId} members={members} emps={emps} canBonus={canBonus}
-        canEditBonus={shareMeta.canEditBonus} bossConfigured={shareMeta.bossConfigured}
-        defaultSharePctByRole={shareMeta.defaults} grossProfit={shareMeta.grossProfit} taxInclusiveVatRate={shareMeta.taxInclusiveVatRate} profitHidden={shareMeta.profitHidden}
-        contractAmount={money?.amountUntaxed ?? null} receivedAmount={money?.receivedTotal ?? 0}
-        bonusRatePct={project.bonusRatePct ?? null}
+      {/* ③ 最下方：獎金分潤（2026-10-27 業主要求三卡合一：獎金比例＋每列 角色｜員工｜％）。
+          沒有分潤權限的人（會計）只看到唯讀成員名單（角色＋姓名）。 */}
+      <BonusShareCard
+        projectId={projectId} shareMode={project.shareMode} members={members} emps={emps}
+        canBonus={canBonus} canEditBonus={shareMeta.canEditBonus} bossConfigured={shareMeta.bossConfigured}
+        defaultSharePctByRole={shareMeta.defaults}
+        // 合約額優先用估算服務的口徑（與獎金引擎同一個合約總額，含追加減）；沒有才退回金額卡。
+        contractAmount={shareMeta.estimate?.contractTotal ?? money?.amountUntaxed ?? null}
+        estimate={shareMeta.estimate} bonusRatePct={shareMeta.bonusRatePct} legacyBonusPool={shareMeta.legacyBonusPool}
+        profitHidden={shareMeta.profitHidden} reasonRequired={shareMeta.reasonRequired}
         setError={setError} load={load}
       />
+      {/* 分潤版本歷程：放在分潤卡下方、預設收起，只給看得到分潤的人。 */}
+      {canBonus && <AdjustmentsCard adjustments={adjustments} />}
       {/* 未儲存提醒列是 fixed 在底部，留出空間免得蓋住最下面的成員分潤。 */}
       {sheetDirtyCount > 0 && <div aria-hidden="true" className="h-16" />}
     </>

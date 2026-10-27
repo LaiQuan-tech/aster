@@ -64,9 +64,11 @@ import {
 import { maskRegisterRows, type RegisterRow } from "../services/project-register.js"
 import {
   applyProjectShareRevision,
+  DEFAULT_SHARE_REVISION_REASON,
   ProjectShareRevisionError,
   projectShareRevisionSchema,
 } from "../services/project-share-revision.js"
+import { projectHasReviewedBonus } from "../services/bonus-run-store.js"
 import type { MainContractInput } from "../services/main-contract.js"
 import type { NewBillingInput } from "../services/billing-store.js"
 import { AtomicProjectCreationError, createProjectApplicationAtomic } from "../services/project-creation.js"
@@ -964,6 +966,11 @@ projectsRouter.post(
       return
     }
     const b = parsed.data
+    // 2026-10-27 分潤簡化：「指定金額（fixed_amount）」模式停用，新專案一律 pool_pct（百分比）。
+    if (b.shareMode === "fixed_amount") {
+      res.status(400).json({ error: "share_mode_fixed_amount_retired" })
+      return
+    }
     const self = req.auth?.userId ? await resolveSelf(tenantId, req.auth.userId) : null
     if (!self) {
       res.status(403).json({ error: "forbidden" })
@@ -1433,6 +1440,12 @@ projectsRouter.patch(
         return
       }
 
+      // 2026-10-27 分潤簡化：不再接受把模式「改成」fixed_amount（停用）。既有 fixed_amount 舊案的
+      // 表單整份送回原值不算改，照舊放行（讀取與其他欄位不受影響）；舊案改百分比走 PUT share-revision。
+      if (b.shareMode === "fixed_amount" && scope.project.share_mode !== "fixed_amount") {
+        res.status(400).json({ error: "share_mode_fixed_amount_retired" })
+        return
+      }
       // 獎金池屬 bonus 段：會計有 finance 權限但不得改（也看不到）分潤數字。
       if ((b.bonusPool !== undefined || b.shareMode !== undefined) && !scope.canSeeBonus) {
         res.status(403).json({ error: "forbidden_bonus" })
@@ -1719,9 +1732,14 @@ projectsRouter.get(
               vatRate: est.vatRate,
               contractPool: est.contractPool,
               overContractPct: est.overContractPct,
+              // 2026-10-27 分潤簡化：舊制／指定金額專案設定比例後的試算口徑。
+              poolBasis: est.poolBasis,
+              projectedGrossProfit: est.projectedGrossProfit,
               skipped: est.skipped,
             }
           : null,
+        // 2026-10-27：本案已有核准／發放過的獎金紀錄 → 改分潤要填變更原因（PUT share-revision 同規則）。
+        reasonRequired: scope.canSeeBonus ? await projectHasReviewedBonus(tenantId, scope.project.id) : false,
         members,
       })
     } catch (err) {
@@ -2032,10 +2050,29 @@ projectsRouter.put(
         res.status(403).json({ error: "forbidden" })
         return
       }
+      const { shareMode: requestedMode, ...revisionBody } = parsed.data
+      // 2026-10-27 分潤簡化：指定金額模式停用，不能經整批儲存設回 fixed_amount。
+      if (requestedMode === "fixed_amount") {
+        res.status(400).json({ error: "share_mode_fixed_amount_retired" })
+        return
+      }
       // 沒帶 bonusRatePct＝沿用目前的比例（看不到比例的經理／主辦只維護名單時不送這個鍵）。
       const revisionInput = {
-        ...parsed.data,
-        bonusRatePct: parsed.data.bonusRatePct === undefined ? num(scope.project.bonus_rate_pct) : parsed.data.bonusRatePct,
+        ...revisionBody,
+        bonusRatePct: revisionBody.bonusRatePct === undefined ? num(scope.project.bonus_rate_pct) : revisionBody.bonusRatePct,
+      }
+      // 舊「指定金額」專案轉百分比：改的是全案的計算方式＝改分潤，只有老闆／platform_admin；
+      // 而且一定要有獎金比例，否則轉過去會變成沒有獎金池的舊制案（試算整案跳過）。
+      const convertToPool = requestedMode === "pool_pct" && scope.project.share_mode !== "pool_pct"
+      if (convertToPool) {
+        if (scope.bonusEdit.denial) {
+          res.status(scope.bonusEdit.denial.status).json({ error: scope.bonusEdit.denial.error })
+          return
+        }
+        if (revisionInput.bonusRatePct === null) {
+          res.status(400).json({ error: "bonus_rate_required" })
+          return
+        }
       }
       // 分潤改版 #6：只有老闆能改獎金比例與趴數。HR／負責人送來的整批版本只能是「成員名單維護」
       // ——加人（趴數 0）、移除、換角色；任何既有成員趴數或獎金比例的變動都擋下。
@@ -2060,15 +2097,54 @@ projectsRouter.put(
           return
         }
       }
+      // 變更原因：本案已有核准／發放過的獎金紀錄才必填；否則可留空，自動帶入「初次設定」（RPC 要求非空）。
+      if (revisionInput.reason.trim() === "") {
+        if (await projectHasReviewedBonus(tenantId, req.params.id as string)) {
+          res.status(400).json({ error: "reason_required" })
+          return
+        }
+        revisionInput.reason = DEFAULT_SHARE_REVISION_REASON
+      }
       const result = await applyProjectShareRevision(
         tenantId,
         req.params.id as string,
         scope.self.id,
         revisionInput,
       )
+      // 轉百分比放在 RPC 成功之後：RPC 失敗（驗證不過）就完全不動模式；若這一步失敗，專案仍是
+      // fixed_amount（引擎照舊用固定金額，錢不會算錯），重送同一份即可完成轉換。
+      let shareMode = scope.project.share_mode
+      if (convertToPool) {
+        const { data: converted, error: convErr } = await supabaseAdmin
+          .from("projects")
+          .update({ share_mode: "pool_pct" })
+          .eq("tenant_id", tenantId)
+          .eq("id", req.params.id)
+          .eq("share_mode", scope.project.share_mode)
+          .select("id")
+          .maybeSingle()
+        if (convErr) throw new Error(`PUT share-revision (convert share_mode): ${convErr.message}`)
+        if (converted) {
+          shareMode = "pool_pct"
+          // 留痕：field='share_mode'，1＝百分比（pool_pct）、2＝指定金額（fixed_amount）；與本次整批同一個 change set。
+          const { error: adjErr } = await supabaseAdmin.from("project_share_adjustments").insert({
+            tenant_id: tenantId,
+            project_id: req.params.id,
+            employee_id: null,
+            change_set_id: result.changeSetId || null,
+            field: "share_mode",
+            old_value: scope.project.share_mode === "fixed_amount" ? 2 : null,
+            new_value: 1,
+            reason: revisionInput.reason.trim(),
+            changed_by_emp_id: scope.self.id,
+          })
+          if (adjErr) console.error(`PUT share-revision (share_mode adjustment): ${adjErr.message}`)
+        }
+      }
       await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "PUT /projects/:id/share-revision")
       // 獎金比例只給看得到毛利的人（老闆／platform_admin／授權 HR）：經理只維護名單時，後端補上的目前比例不可原樣回傳（可反推毛利）。
-      res.status(200).json(scope.canSeeProfit ? result : { ...result, bonusRatePct: null })
+      const body = { ...result, shareMode }
+      res.status(200).json(scope.canSeeProfit ? body : { ...body, bonusRatePct: null })
     } catch (err) {
       if (err instanceof ProjectShareRevisionError) {
         res.status(err.httpStatus).json({ error: err.code })

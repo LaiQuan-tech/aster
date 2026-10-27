@@ -632,6 +632,33 @@ export async function loadPaidBefore(tenantId: string, excludeRunId?: string | n
   return map
 }
 
+/**
+ * 本案是否已有「核准或已發放」的獎金紀錄（2026-10-27 分潤簡化：有的話改分潤必須填變更原因）。
+ * 判斷：未刪除、狀態 approved／paid 的批次裡，有任何一列是這個專案（金額 0 的列也算，保守）。
+ */
+export async function projectHasReviewedBonus(tenantId: string, projectId: string): Promise<boolean> {
+  const { data: runs, error } = await supabaseAdmin
+    .from("bonus_runs")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .in("status", ["approved", "paid"])
+    .is("deleted_at", null)
+  if (error) throw new Error(`bonus-run projectHasReviewedBonus (runs): ${error.message}`)
+  const runIds = (runs ?? []).map((r) => r.id as string)
+  for (let i = 0; i < runIds.length; i += 100) {
+    const { data: items, error: itemErr } = await supabaseAdmin
+      .from("bonus_run_items")
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .eq("project_id", projectId)
+      .in("run_id", runIds.slice(i, i + 100))
+      .limit(1)
+    if (itemErr) throw new Error(`bonus-run projectHasReviewedBonus (items): ${itemErr.message}`)
+    if ((items ?? []).length > 0) return true
+  }
+  return false
+}
+
 /** 各專案最近一個已發放 regular 批次的凍結累計收款，供「之前／本次請領」拆分。 */
 export async function loadPreviousReceived(tenantId: string, asOf: string, excludeRunId?: string | null): Promise<Map<string, number>> {
   let q = supabaseAdmin

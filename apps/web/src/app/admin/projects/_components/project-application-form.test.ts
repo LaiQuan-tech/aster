@@ -163,6 +163,13 @@ describe("project application form model", () => {
     expect(projectApplicationErrors(draft)).toContain("一般期款百分比合計不可超過 100%（目前 160%）");
   });
 
+  it("新專案一律送 pool_pct（指定金額模式停用，2026-10-27）", () => {
+    const draft = emptyProjectApplicationDraft("2026-10-01", []);
+    draft.name = "舊草稿帶指定金額";
+    draft.shareMode = "fixed_amount";
+    expect(toCreateProjectBody(draft).shareMode).toBe("pool_pct");
+  });
+
   it("strips bonus fields from an accountant payload", () => {
     const draft = emptyProjectApplicationDraft("2026-10-01", []);
     draft.name = "會計建立的案子";
