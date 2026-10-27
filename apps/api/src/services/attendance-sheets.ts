@@ -20,7 +20,7 @@ import {
   type RuleConfig,
   type SalaryStructure,
 } from "@hr/rules"
-import { fetchAllPages, selectAllPages } from "../lib/select-all-pages.js"
+import { chunk, fetchAllPages, selectAllPages } from "../lib/select-all-pages.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { logger } from "../lib/logger.js"
 import { formatLeaveDurationMinutes } from "../lib/leave-duration.js"
@@ -2513,13 +2513,25 @@ export async function unacknowledgedErrorsForPeriod(
   }
   const empBySheet = new Map(((sheets ?? []) as Array<{ id: string; employee_id: string }>).map((r) => [r.id, r.employee_id] as const))
   if (empBySheet.size === 0) return []
-  const { data: days, error: dayErr } = await supabaseAdmin
-    .from("attendance_sheet_days")
-    .select("sheet_id, work_date, anomalies, anomaly_ack")
-    .eq("tenant_id", tenantId)
-    .in("sheet_id", Array.from(empBySheet.keys()))
-    .order("work_date", { ascending: true })
-  if (dayErr) throw wrapDbError("unacknowledgedErrorsForPeriod (days)", dayErr)
+  // 2026-10-27：分頁讀全（45 人×31 天就超過 PostgREST 1000 列上限，截斷會讓薪資閘門漏擋未說明的異常）。
+  const sheetIds = Array.from(empBySheet.keys())
+  const days: unknown[] = []
+  for (const ids of chunk(sheetIds)) {
+    const res = await fetchAllPages(
+      (from, to) =>
+        supabaseAdmin
+          .from("attendance_sheet_days")
+          .select("id, sheet_id, work_date, anomalies, anomaly_ack")
+          .eq("tenant_id", tenantId)
+          .in("sheet_id", ids)
+          .order("work_date", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, to),
+      "unacknowledgedErrorsForPeriod (days)",
+    )
+    if (res.error) throw wrapDbError("unacknowledgedErrorsForPeriod (days)", res.error)
+    days.push(...res.data)
+  }
   const out: UnacknowledgedAnomaly[] = []
   for (const d of (days ?? []) as Array<{ sheet_id: string; work_date: string; anomalies: SheetAnomaly[] | null; anomaly_ack: string | null }>) {
     if (d.anomaly_ack && d.anomaly_ack.trim().length > 0) continue

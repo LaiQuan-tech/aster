@@ -14,6 +14,7 @@ import { enqueue } from "./notify.js"
 import { writeAuditLog } from "./audit.js"
 import { PERIOD_RE, assertPeriodOpen, findClosedPeriods } from "./period-lock.js"
 import { bossNotificationRecipients, isBossOrPlatformAdmin } from "../lib/boss.js"
+import { fetchAllPages } from "../lib/select-all-pages.js"
 
 /**
  * 遲到說明（late_reports，2026-10-11 業主拍板）。
@@ -497,14 +498,18 @@ export async function loadLateReportsForPeriod(
   const out = new Map<string, LateReportRow[]>()
   if (employeeIds && employeeIds.length === 0) return out
   const { from, to } = monthRangeKeys(period)
-  let query = supabaseAdmin
-    .from("late_reports")
-    .select(COLS)
-    .eq("tenant_id", tenantId)
-    .gte("work_date", from)
-    .lt("work_date", addDaysKey(to, 1))
-  if (employeeIds) query = query.in("employee_id", employeeIds)
-  const { data, error } = await query
+  // 2026-10-27：分頁讀全（薪資用它決定全勤豁免，截斷會影響全勤獎金）。
+  const build = (rangeFrom: number, rangeTo: number) => {
+    let query = supabaseAdmin
+      .from("late_reports")
+      .select(COLS)
+      .eq("tenant_id", tenantId)
+      .gte("work_date", from)
+      .lt("work_date", addDaysKey(to, 1))
+    if (employeeIds) query = query.in("employee_id", employeeIds)
+    return query.order("work_date", { ascending: true }).order("id", { ascending: true }).range(rangeFrom, rangeTo)
+  }
+  const { data, error } = await fetchAllPages<unknown>(build, "late-reports (period)")
   if (error) {
     if (isMissingTableError(error)) {
       warnSchemaGapOnce("late_reports", error)
