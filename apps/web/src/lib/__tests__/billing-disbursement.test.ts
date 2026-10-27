@@ -162,7 +162,7 @@ describe("buildLedger：每個專案的客戶請款 × 廠商付款", () => {
     expect(p.vendorRows[0].disbursement).toMatchObject({ id: "d-1", payingCompanyName: "測試公司甲", receiptRef: "R-001", projectCount: 1 });
     // 作廢的單不影響狀態（sp-3 仍是待建單）
     expect(p.vendorRows.find((v) => v.installmentNo === 3)?.disbursement).toBeNull();
-    expect(p.totals).toEqual({ billingAmount: 400000, unreceived: 400000, overdueCount: 1, unpaidNet: 180000, readyToPayNet: 45000 });
+    expect(p.totals).toEqual({ billingAmount: 400000, unreceived: 400000, overdueCount: 1, unpaidNet: 180000, unpaidNetUnlinked: 0, readyToPayNet: 45000 });
   });
 
   it("已核准但期款被取消驗收 → approved_unaccepted（不能勾）", () => {
@@ -188,6 +188,28 @@ describe("buildLedger：每個專案的客戶請款 × 廠商付款", () => {
       expect(p.vendorRows[0]).toMatchObject({ state: "paid", disbursement: { paidOn: "2026-10-20", projectCount: 2 } });
       expect(p.totals.unpaidNet).toBe(0);
     }
+  });
+
+  it("未放款含沒有掛期款的放款單分攤：另計 unpaidNetUnlinked，讓畫面標註「含未掛期款的放款單」（應付清單 netTotal 不含）", () => {
+    const [p] = buildLedger({
+      receivables: [],
+      payables: [payable()],
+      disbursements: [
+        disbursement(),
+        disbursement({
+          id: "d-5",
+          disbursementNo: "D-TEST-005",
+          status: "draft",
+          allocations: [{ id: "a-5", projectId: P1, subcontractPaymentId: null, amount: 12000, withheldAmount: 0, netAmount: 12000 }],
+        }),
+      ],
+      acceptanceTracked: true,
+      includePaid: false,
+    });
+    // 應付清單只有 sp-1（淨 45,000）；對照總表未放款＝45,000＋未掛期款 12,000
+    expect(p.totals.unpaidNet).toBe(57000);
+    expect(p.totals.unpaidNetUnlinked).toBe(12000);
+    expect(p.totals.unpaidNet - p.totals.unpaidNetUnlinked).toBe(45000);
   });
 
   it("有可放款的專案排前面", () => {

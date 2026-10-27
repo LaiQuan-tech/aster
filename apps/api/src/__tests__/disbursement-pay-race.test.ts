@@ -68,4 +68,118 @@ describe("payDisbursement 條件更新（並發重複付款防線）", () => {
       fake.from = realFrom
     }
   })
+
+  describe("先搶狀態、搶到才寫期款（2026-10-27 驗收 B）", () => {
+    const PAY = "ffffffff-0000-4000-8000-0000000000p1".replace("p1", "01")
+    const SUB = "ffffffff-0000-4000-8000-000000000a01"
+    const PROJECT = "aaaaaaaa-0000-4000-8000-000000000001"
+
+    function seedWithPayment(status: string) {
+      seed(status)
+      fake.db.disbursement_allocations = [
+        {
+          id: "bbbbbbbb-0000-4000-8000-000000000001", tenant_id: TENANT_ID, disbursement_id: DISB, project_id: PROJECT,
+          subcontract_payment_id: PAY, amount: 1000, withheld_amount: 0, note: null, created_at: "2026-10-01T00:00:00Z",
+        },
+      ]
+      fake.db.project_subcontract_payments = [
+        {
+          id: PAY, tenant_id: TENANT_ID, subcontract_id: SUB, installment_no: 1, percentage: null, amount: 1000, override_amount: null,
+          override_reason: null, due_when: null, paid_on: null, paid_amount: null, withheld_amount: 0, paying_company_id: null,
+          receipt_issuer_company_id: null, receipt_ref: null, disbursement_id: null, note: null,
+          accepted_on: "2026-10-01", accepted_by_emp_id: null, acceptance_note: null,
+          created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z",
+        },
+      ]
+    }
+
+    /** 在本請求寫 paid 之前，模擬另一個請求先改了單子狀態。 */
+    function raceBeforePaidUpdate(mutate: (row: Record<string, unknown>) => void): () => void {
+      const realFrom = fake.from
+      let done = false
+      fake.from = ((table: string) => {
+        const builder = realFrom(table)
+        if (table === "disbursements" && !done) {
+          const update = builder.update.bind(builder)
+          builder.update = ((payload: Record<string, unknown>) => {
+            if (payload.status === "paid") {
+              done = true
+              mutate(fake.db.disbursements[0])
+            }
+            return update(payload)
+          }) as typeof builder.update
+        }
+        return builder
+      }) as typeof fake.from
+      return () => {
+        fake.from = realFrom
+      }
+    }
+
+    it("一般情況：單子 paid、期款寫成已付並掛本單", async () => {
+      seedWithPayment("approved")
+      const out = await payDisbursement(TENANT_ID, ACTOR, DISB, { paidOn: "2026-10-27" })
+      expect(out?.status).toBe("paid")
+      expect(fake.db.project_subcontract_payments[0]).toMatchObject({ paid_on: "2026-10-27", paid_amount: 1000, disbursement_id: DISB })
+    })
+
+    it("付款與作廢競態：讀到 approved 後被作廢 → 409 void，期款完全沒被寫", async () => {
+      seedWithPayment("approved")
+      const restore = raceBeforePaidUpdate((row) => {
+        row.status = "void"
+      })
+      try {
+        const err = await payDisbursement(TENANT_ID, ACTOR, DISB, { paidOn: "2026-10-27" }).catch((e) => e)
+        expect(err).toBeInstanceOf(DisbursementError)
+        expect((err as DisbursementError).code).toBe("void")
+        expect(fake.db.disbursements[0].status).toBe("void")
+        expect(fake.db.project_subcontract_payments[0]).toMatchObject({ paid_on: null, paid_amount: null, disbursement_id: null })
+        expect(fake.writes.filter((w) => w.table === "project_subcontract_payments")).toEqual([])
+      } finally {
+        restore()
+      }
+    })
+
+    it("付款與撤回競態：讀到 approved 後被撤回成 draft → 409 status_changed，期款沒被寫", async () => {
+      seedWithPayment("approved")
+      const restore = raceBeforePaidUpdate((row) => {
+        row.status = "draft"
+      })
+      try {
+        const err = await payDisbursement(TENANT_ID, ACTOR, DISB, { paidOn: "2026-10-27" }).catch((e) => e)
+        expect((err as DisbursementError).code).toBe("status_changed")
+        expect(fake.db.project_subcontract_payments[0].paid_on).toBeNull()
+      } finally {
+        restore()
+      }
+    })
+
+    it("兩個不同放款日並發付款：只有一個成功，期款的已付日＝勝者的日期、不被敗者覆寫", async () => {
+      seedWithPayment("approved")
+      const results = await Promise.allSettled([
+        payDisbursement(TENANT_ID, ACTOR, DISB, { paidOn: "2026-10-20" }),
+        payDisbursement(TENANT_ID, ACTOR, DISB, { paidOn: "2026-10-27" }),
+      ])
+      const ok = results.filter((r) => r.status === "fulfilled")
+      const bad = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[]
+      expect(ok).toHaveLength(1)
+      expect(bad).toHaveLength(1)
+      expect((bad[0].reason as DisbursementError).code).toBe("already_paid")
+      const winnerDate = fake.db.disbursements[0].paid_on
+      expect(["2026-10-20", "2026-10-27"]).toContain(winnerDate)
+      expect(fake.db.project_subcontract_payments[0]).toMatchObject({ paid_on: winnerDate, disbursement_id: DISB })
+      expect(fake.writes.filter((w) => w.table === "project_subcontract_payments" && w.action === "update")).toHaveLength(1)
+    })
+
+    it("期款寫入失敗：單子狀態退回 approved、期款維持未付，錯誤往上拋", async () => {
+      seedWithPayment("approved")
+      fake.injectError({ table: "project_subcontract_payments", action: "update", error: { message: "boom (fake)" } })
+      const err = await payDisbursement(TENANT_ID, ACTOR, DISB, { paidOn: "2026-10-27" }).catch((e) => e)
+      expect(err).toBeInstanceOf(Error)
+      expect(String((err as Error).message)).toContain("boom")
+      expect(fake.db.disbursements[0]).toMatchObject({ status: "approved", paid_on: null, paid_by_emp_id: null })
+      expect(fake.db.project_subcontract_payments[0]).toMatchObject({ paid_on: null, disbursement_id: null })
+    })
+  })
 })
+

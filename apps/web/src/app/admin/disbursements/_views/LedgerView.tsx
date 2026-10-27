@@ -380,6 +380,14 @@ function ProjectBlock({
         </span>
         <span className="text-xs text-gray-600">
           未放款 <b className="tabular-nums text-gray-900">{fmtMoney(p.totals.unpaidNet)}</b>
+          {p.totals.unpaidNetUnlinked !== 0 && (
+            <span
+              className="ml-1 text-amber-700"
+              title="應付清單只算掛在複委託期款上的金額；這裡另外含沒有掛期款的放款單分攤，所以會比應付清單多。"
+            >
+              （含未掛期款的放款單 {fmtMoney(p.totals.unpaidNetUnlinked)}）
+            </span>
+          )}
         </span>
         <span className="text-xs text-gray-600">
           可放款 <b className="tabular-nums text-emerald-700">{fmtMoney(p.totals.readyToPayNet)}</b>

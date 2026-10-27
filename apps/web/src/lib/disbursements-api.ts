@@ -557,6 +557,7 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   pending_approval: "送簽中的放款單不可修改，要改請先撤回簽核。",
   not_pending: "這張單目前不在送簽中，請重新整理。",
   not_draft: "只有草稿可以送簽，請重新整理。",
+  status_changed: "這張放款單剛被別人改了狀態（例如撤回簽核），沒有付款；請重新整理後再確認。",
   approved: "已核准的單只能改用途／收據編號／發票資訊／備註；要改其他欄位請先撤回簽核。",
   allocation_mismatch: "分攤合計金額與毛額不符。",
   payment_already_paid: "選到的期款已由其他匯款標記為已付。",

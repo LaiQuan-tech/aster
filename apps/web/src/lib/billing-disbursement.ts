@@ -124,6 +124,11 @@ export interface ProjectLedger {
     overdueCount: number;
     /** 未放款（不含已放款列）的淨額合計。 */
     unpaidNet: number;
+    /**
+     * unpaidNet 裡「沒有掛期款」的放款單分攤（不在應付清單的列：沒指期款、或指到已不在應付清單的期款）。
+     * 應付清單的 netTotal 不含這些，所以畫面要標註「含未掛期款的放款單」才對得上（2026-10-27 驗收 C）。
+     */
+    unpaidNetUnlinked: number;
     readyToPayNet: number;
   };
 }
@@ -241,7 +246,7 @@ export function buildLedger(input: BuildLedgerInput): ProjectLedger[] {
         receiptProgressPct: null,
         billings: [],
         vendorRows: [],
-        totals: { billingAmount: 0, unreceived: 0, overdueCount: 0, unpaidNet: 0, readyToPayNet: 0 },
+        totals: { billingAmount: 0, unreceived: 0, overdueCount: 0, unpaidNet: 0, unpaidNetUnlinked: 0, readyToPayNet: 0 },
       };
       projects.set(projectId, p);
     } else {
@@ -321,6 +326,9 @@ export function buildLedger(input: BuildLedgerInput): ProjectLedger[] {
     p.totals.unreceived = round2(p.billings.reduce((s, b) => s + (b.unreceived ?? 0), 0));
     p.totals.overdueCount = p.billings.filter((b) => b.state === "overdue").length;
     p.totals.unpaidNet = round2(p.vendorRows.filter((v) => v.state !== "paid").reduce((s, v) => s + v.netAmount, 0));
+    p.totals.unpaidNetUnlinked = round2(
+      p.vendorRows.filter((v) => v.state !== "paid" && v.key.startsWith("alloc:")).reduce((s, v) => s + v.netAmount, 0),
+    );
     p.totals.readyToPayNet = round2(p.vendorRows.filter((v) => v.state === "ready_to_pay").reduce((s, v) => s + v.netAmount, 0));
   }
   // 有可放款的專案排前面，其次未收比例高（同應收催收的「先追誰」），最後照專案編號。
