@@ -288,9 +288,18 @@ describe("POST /projects primary contract", () => {
     const forbidden = await request(app)
       .post("/projects")
       .set("Authorization", "Bearer finance-user")
-      .send({ name: "會計不可碰獎金", code: "BONUS-NO", shareMode: "fixed_amount", bonusPool: 10_000 })
+      .send({ name: "會計不可碰獎金", code: "BONUS-NO", shareMode: "pool_pct", bonusPool: 10_000 })
     expect(forbidden.status).toBe(403)
     expect(forbidden.body.error).toBe("forbidden_bonus")
+    expect(h.db.projects).toHaveLength(0)
+
+    // 2026-10-27 分潤簡化：指定金額模式停用——任何人建案帶 fixed_amount 都 400，不建案。
+    const retired = await request(app)
+      .post("/projects")
+      .set("Authorization", "Bearer hr-user")
+      .send({ name: "指定金額停用", code: "BONUS-FIXED", shareMode: "fixed_amount" })
+    expect(retired.status).toBe(400)
+    expect(retired.body.error).toBe("share_mode_fixed_amount_retired")
     expect(h.db.projects).toHaveLength(0)
 
     // 分潤改版 #6：只有老闆可以設定獎金池。沒設老闆 → 409；HR 不是老闆 → 403。

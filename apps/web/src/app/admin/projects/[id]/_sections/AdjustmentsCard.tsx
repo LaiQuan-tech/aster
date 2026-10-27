@@ -1,6 +1,7 @@
 "use client";
 
-import { Card, Empty } from "@/components/admin-ui";
+import { Empty } from "@/components/admin-ui";
+import { CollapsibleCard } from "@/components/CollapsibleCard";
 import type { ShareAdjustment } from "@/lib/projects-api";
 import { fmtMoney } from "./shared";
 
@@ -8,7 +9,7 @@ interface AdjustmentsCardProps {
   adjustments: ShareAdjustment[];
 }
 
-/** 分潤異動紀錄（唯讀）。 */
+/** 分潤版本歷程（唯讀）。2026-10-27 起放在「獎金分潤」卡下方、預設收起，只給看得到分潤的人（page.tsx 判斷）。 */
 export function AdjustmentsCard({ adjustments }: AdjustmentsCardProps) {
   const groups = adjustments.reduce<Array<{ key: string; items: ShareAdjustment[] }>>((result, adjustment) => {
     const key = adjustment.changeSetId ?? `legacy:${adjustment.id}`;
@@ -19,7 +20,7 @@ export function AdjustmentsCard({ adjustments }: AdjustmentsCardProps) {
   }, []);
 
   function fieldLabel(field: string): string {
-    return ({ pct: "成員比例", amount: "固定金額", pool: "獎金池", bonus_rate: "獎金比例", role: "專案角色", member_add: "加入成員", member_remove: "移除成員" } as Record<string, string>)[field] ?? field;
+    return ({ pct: "成員比例", amount: "固定金額", pool: "獎金池", bonus_rate: "獎金比例", role: "專案角色", member_add: "加入成員", member_remove: "移除成員", share_mode: "分潤模式" } as Record<string, string>)[field] ?? field;
   }
 
   function valueText(value: number | string | null): string {
@@ -28,14 +29,14 @@ export function AdjustmentsCard({ adjustments }: AdjustmentsCardProps) {
   }
 
   function adjustmentValueText(field: string, value: number | string | null): string {
+    if (field === "share_mode" && typeof value === "number") return ({ 1: "百分比", 2: "指定金額" } as Record<number, string>)[value] ?? String(value);
     if (field === "role" && typeof value === "number") return ({ 1: "經理", 2: "主辦", 3: "組員", 4: "支援" } as Record<number, string>)[value] ?? String(value);
     if ((field === "pct" || field === "bonus_rate" || field === "member_add" || field === "member_remove") && typeof value === "number") return `${value}%`;
     return valueText(value);
   }
 
   return (
-    <Card>
-      <h2 className="mb-3 text-sm font-semibold text-gray-700">分潤版本歷程</h2>
+    <CollapsibleCard title={`分潤版本歷程（${groups.length}）`} hint="每次儲存分潤留一個版本：誰、何時、原因、改了什麼。">
       {groups.length === 0 ? (
         <Empty>尚無異動</Empty>
       ) : (
@@ -54,6 +55,6 @@ export function AdjustmentsCard({ adjustments }: AdjustmentsCardProps) {
           })}
         </div>
       )}
-    </Card>
+    </CollapsibleCard>
   );
 }

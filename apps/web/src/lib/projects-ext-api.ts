@@ -790,6 +790,12 @@ export function updateProjectFields(id: string, body: UpdateProjectExtBody) {
 export function humanizeBonusEditError(msg: string): string {
   if (msg.includes("boss_not_configured")) return "尚未指定老闆。分潤比例僅老闆可修改，請先到「公司設定 → 簽核」指定老闆。"
   if (msg.includes("bonus_edit_boss_only")) return "分潤比例僅老闆可修改。"
+  if (msg.includes("reason_required")) return "本案已有核准或發放過的獎金紀錄，請填寫變更原因。"
+  if (msg.includes("bonus_rate_required")) return "此專案原為指定金額，請先填寫獎金比例再儲存。"
+  if (msg.includes("share_mode_fixed_amount_retired")) return "「指定金額」分潤模式已停用，請改用獎金比例 × 各成員％。"
+  if (msg.includes("share_pct_exceeds_100")) return "分潤比例合計不可超過 100%。"
+  if (msg.includes("duplicate_employee")) return "同一位員工只能出現一次。"
+  if (msg.includes("invalid_member")) return "成員資料已變動，請重新整理頁面後再試。"
   return msg
 }
 

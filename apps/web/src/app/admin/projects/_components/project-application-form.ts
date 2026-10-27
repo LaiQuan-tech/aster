@@ -321,8 +321,9 @@ export function toCreateProjectBody(draft: ProjectApplicationDraft): CreateProje
     otherExpenses: optionalNumber(draft.otherExpenses),
     deptId: draft.deptId || null,
     leadEmpId: draft.leadEmpId || null,
-    shareMode: draft.shareMode,
-    bonusPool: draft.shareMode === "pool_pct" ? optionalNumber(draft.bonusPool) : null,
+    // 2026-10-27 分潤簡化：指定金額（fixed_amount）停用，新專案一律百分比；後端收到 fixed_amount 會 400。
+    shareMode: "pool_pct",
+    bonusPool: optionalNumber(draft.bonusPool),
     ...roleShareBodyOf(draft),
   };
 }
