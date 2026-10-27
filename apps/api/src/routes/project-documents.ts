@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { resolveSelf, isFinanceRole, managedDeptIds } from "../middleware/scope.js"
+import { actorIsInactive } from "../lib/actor-status.js"
 import { canSeeContractDocs, loadProjectBossEmpId } from "../services/project-scope.js"
 import { isBossOrPlatformAdmin } from "../lib/boss.js"
 import { BLOCKED_DOCUMENT_EXTENSIONS, isBlockedDocument } from "../lib/blocked-upload-types.js"
@@ -138,6 +139,8 @@ async function canWriteDocs(
   project: { dept_id: string | null; lead_emp_id: string | null },
   projectId: string,
 ): Promise<boolean> {
+  // 非在職不靠 lead／成員／部門主管身分上傳（2026-10-27 安全驗收 D）。
+  if (actorIsInactive(self)) return false
   if (isFinanceRole(self.role) || project.lead_emp_id === self.id) return true
   const { data: membership } = await supabaseAdmin
     .from("project_members")
@@ -148,7 +151,7 @@ async function canWriteDocs(
     .maybeSingle()
   if (membership) return true
   if (project.dept_id) {
-    const managed = await managedDeptIds(tenantId, self.id)
+    const managed = await managedDeptIds(tenantId, self)
     if (managed.includes(project.dept_id)) return true
   }
   // 老闆與 platform_admin 等同（業主 2026-10-27）；platform_admin 已由 isFinanceRole 涵蓋。

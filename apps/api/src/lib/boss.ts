@@ -69,10 +69,13 @@ export async function bossNotificationRecipients(
   exclude: ReadonlyArray<string | null | undefined> = [],
 ): Promise<string[]> {
   const admins = await loadPlatformAdminEmpIds(tenantId).catch(() => [] as string[])
+  // 非在職（停用／離職）的老闆不收「寄給老闆」的通知、也不算可核准的人（2026-10-27 安全驗收 L3／C）。
+  // 查不到在職狀態（查詢失敗）→ 照舊算進去（通知是盡力而為）。
+  const boss = bossEmpId && (await activeEmpIdsAmong(tenantId, [bossEmpId]).catch(() => [bossEmpId.toLowerCase()])).length > 0 ? bossEmpId : null
   const skip = new Set(exclude.filter((id): id is string => !!id).map((id) => id.toLowerCase()))
   const out: string[] = []
   const seen = new Set<string>()
-  for (const id of [bossEmpId, ...admins]) {
+  for (const id of [boss, ...admins]) {
     if (!id) continue
     const key = id.toLowerCase()
     if (seen.has(key) || skip.has(key)) continue
@@ -80,4 +83,61 @@ export async function bossNotificationRecipients(
     out.push(key)
   }
   return out
+}
+
+/** 這些員工中哪些是本租戶在職員工（小寫 id）。 */
+export async function activeEmpIdsAmong(tenantId: string, empIds: ReadonlyArray<string | null | undefined>): Promise<string[]> {
+  const ids = Array.from(new Set(empIds.filter((id): id is string => !!id).map((id) => id.toLowerCase())))
+  if (ids.length === 0) return []
+  const { data, error } = await supabaseAdmin.from("employees").select("id").eq("tenant_id", tenantId).eq("status", "active").in("id", ids)
+  if (error) throw new Error(`boss (active check): ${error.message}`)
+  return ((data ?? []) as Array<{ id: string }>).map((r) => r.id.toLowerCase())
+}
+
+/** 租戶設定的老闆（features.approval.fallbackApproverEmpId，小寫）；沒設定回 null。不檢查在職。 */
+export async function loadConfiguredBossEmpId(tenantId: string): Promise<string | null> {
+  const { data, error } = await supabaseAdmin.from("tenants").select("features").eq("id", tenantId).maybeSingle()
+  if (error) throw new Error(`boss (tenant): ${error.message}`)
+  const approval = ((data?.features as Record<string, unknown> | null | undefined)?.approval ?? null) as
+    | { fallbackApproverEmpId?: unknown }
+    | null
+  const id = approval?.fallbackApproverEmpId
+  return typeof id === "string" && id.length > 0 ? id.toLowerCase() : null
+}
+
+/**
+ * 某張單的老闆關有沒有「能簽的老闆」（2026-10-27 安全驗收 L3）：在職的設定老闆、任一在職 platform_admin、
+ * 或該關目前的候選（`stepCandidateEmpIds`，例如老闆／平台管理員改派過的人）中，扣掉 `exclude`
+ * （申請人、放款單建單人／送簽人／草稿編輯人、本輪已簽過前面關卡的人）後還有沒有人。
+ * 沒有 → 呼叫端允許在職、非申請人的 hr_admin 代簽這一關（記稽核「無可用老闆／平台管理員，HR 代簽」）。
+ */
+export async function bossStepHasEligibleSigner(
+  tenantId: string,
+  opts: BossSignerQuery,
+): Promise<boolean> {
+  return (await bossSignerChecker(tenantId))(opts)
+}
+
+export type BossSignerQuery = {
+  exclude: ReadonlyArray<string | null | undefined>
+  stepCandidateEmpIds?: ReadonlyArray<string | null | undefined>
+}
+
+/** 同 bossStepHasEligibleSigner，但平台管理員名單與老闆只查一次（列表一次判斷多張單用）。 */
+export async function bossSignerChecker(tenantId: string): Promise<(opts: BossSignerQuery) => Promise<boolean>> {
+  const [admins, boss] = await Promise.all([loadPlatformAdminEmpIds(tenantId), loadConfiguredBossEmpId(tenantId)])
+  const activeMemo = new Map<string, boolean>()
+  return async (opts) => {
+    const skip = new Set(opts.exclude.filter((id): id is string => !!id).map((id) => id.toLowerCase()))
+    if (admins.some((id) => !skip.has(id))) return true
+    const others = [...new Set([boss, ...(opts.stepCandidateEmpIds ?? [])].filter((id): id is string => !!id).map((id) => id.toLowerCase()))].filter(
+      (id) => !skip.has(id),
+    )
+    const unknown = others.filter((id) => !activeMemo.has(id))
+    if (unknown.length > 0) {
+      const active = new Set(await activeEmpIdsAmong(tenantId, unknown))
+      for (const id of unknown) activeMemo.set(id, active.has(id))
+    }
+    return others.some((id) => activeMemo.get(id) === true)
+  }
 }

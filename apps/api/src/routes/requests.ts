@@ -1,4 +1,4 @@
-import { actorRoleOf, isActiveStatus } from "../lib/actor-status.js"
+import { actorIsInactive, actorRoleOf, isActiveStatus } from "../lib/actor-status.js"
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
@@ -10,13 +10,17 @@ import { resolveApproverChain, type StepKind } from "../services/approval-chain.
 import { enrichRequestRows } from "../services/request-enrich.js"
 import {
   BOSS_STEP_KIND,
+  CHANGE_APPROVER_DENIAL_MESSAGE,
+  CHANGE_APPROVER_DENIAL_STATUS,
+  changeApproverDenial,
+  isBossStep,
   stepActorStanding,
   canHrOverrideStep,
   stepCandidates,
   stepNotifyRecipients,
   stepSelectCols,
 } from "../services/approval-steps.js"
-import { isPlatformAdminRole, loadPlatformAdminEmpIds } from "../lib/boss.js"
+import { bossStepHasEligibleSigner, isPlatformAdminRole, loadConfiguredBossEmpId, loadPlatformAdminEmpIds } from "../lib/boss.js"
 import { enqueue } from "../services/notify.js"
 import { loadDailyRegularHours } from "../services/daily-regular-hours.js"
 import { writeAuditLog } from "../services/audit.js"
@@ -663,8 +667,8 @@ requestsRouter.post(
       const chain = await resolveApproverChain(tenantId, kind, self.id, { flowKind, requireBossFinal })
       if (!chain.ok) {
         // No approver can be determined — refuse rather than create a request
-        // nobody can ever action.
-        res.status(409).json({ error: chain.error })
+        // nobody can ever action（含「老闆關沒有任何非申請人、在職的老闆／平台管理員／HR 能簽」，安全驗收 B）。
+        res.status(409).json({ error: chain.error, message: "找不到可以簽核這張單的人（需要非申請人、在職的老闆、平台管理員或 HR），請聯絡管理員設定簽核人" })
         return
       }
       const chainSteps = chain.steps
@@ -1133,8 +1137,10 @@ const DECISION_ERROR_STATUS: Record<string, number> = {
   not_pending: 409,
   current_step_not_found: 409,
   not_current_approver: 403,
-  // 老闆關不能簽自己的單（stepActorStanding）。
+  // 自己的單不能簽（stepActorStanding）。
   own_request: 403,
+  // 同一張單同一人不能簽兩關（含代簽；L1）。
+  already_signed_step: 403,
   attachment_required: 409,
   // 發薪鎖定：這張單碰到已結算月（回應多帶 period）。
   period_closed: 409,
@@ -1370,6 +1376,30 @@ async function recomputeBeyondCapAtApproval(
   }
 }
 
+/**
+ * 這張單本關之前已經簽過（核准）的人（小寫 id）：acted_by_emp_id（實際按的人，含代簽）；舊列沒有 acted_by_emp_id
+ * 時看 approver_emp_id。acted_by_emp_id 欄位未套用（migration 0042）→ 只看 approver_emp_id。回錯誤訊息或集合。
+ */
+async function earlierSignersOf(tenantId: string, requestId: string, stepOrder: number): Promise<Set<string> | string> {
+  const query = (cols: string) =>
+    supabaseAdmin
+      .from("approval_steps")
+      .select(cols)
+      .eq("tenant_id", tenantId)
+      .eq("request_id", requestId)
+      .lt("step_order", stepOrder)
+  let { data, error } = await query("step_order, approver_emp_id, decision, acted_by_emp_id")
+  if (error && isMissingColumnError(error)) ({ data, error } = await query("step_order, approver_emp_id, decision"))
+  if (error) return error.message
+  const out = new Set<string>()
+  for (const r of (data ?? []) as unknown as Array<{ approver_emp_id: string; decision: string | null; acted_by_emp_id?: string | null }>) {
+    if (r.decision !== "approved") continue
+    const signer = r.acted_by_emp_id ?? r.approver_emp_id
+    if (signer) out.add(signer.toLowerCase())
+  }
+  return out
+}
+
 async function decideOneRequest(params: {
   action: "approve" | "reject"
   tenantId: string
@@ -1415,11 +1445,24 @@ async function decideOneRequest(params: {
   if (standing === "own_request") return { ok: false, id: requestId, error: "own_request" }
   const bossByPlatformAdmin = standing === "platform_admin"
   const isCandidate = standing === "candidate" || bossByPlatformAdmin
-  // HR 代簽：老闆關不准（追加 C：老闆關只限老闆本人或在職 platform_admin），其他關照舊。
-  const canOverride = allowHrOverride && canHrOverrideStep(step, actor)
+  // 同一張單同一人不能簽兩關（含代簽；2026-10-27 安全驗收 L1，與放款單一致）。
+  const earlier = await earlierSignersOf(tenantId, requestId, step.step_order)
+  if (typeof earlier === "string") return { ok: false, id: requestId, error: earlier }
+  const signedBefore = earlier.has(actor.id.toLowerCase())
+  // HR 代簽：老闆關原則上不准（追加 C：老闆關只限老闆本人或在職 platform_admin），其他關照舊。
+  // L3：這張單的老闆關找不到任何「非申請人、在職、沒簽過前面關卡」的老闆／平台管理員 → 允許在職、非申請人的 HR 代簽。
+  let bossStepHrFallback = false
+  if (allowHrOverride && !isCandidate && !signedBefore && isBossStep(step) && isHrRole(actor.role) && !actorIsInactive(actor)) {
+    bossStepHrFallback = !(await bossStepHasEligibleSigner(tenantId, {
+      exclude: [lr.employee_id, ...earlier],
+      stepCandidateEmpIds: stepCandidates(step),
+    }))
+  }
+  const canOverride = allowHrOverride && canHrOverrideStep(step, actor, { bossStepHrFallback })
   if (!isCandidate && !canOverride) {
     return { ok: false, id: requestId, error: "not_current_approver" }
   }
+  if (signedBefore) return { ok: false, id: requestId, error: "already_signed_step" }
   // 發薪鎖定：這張單碰到已結算月（日期、segments、跨月區間）→ 不能核准也不能駁回。逐張回結果（批次簽核
   // 其他張照常），不丟例外——批次那層會把例外吞成 internal_error。
   const closedPeriods = await closedPeriodsOfRequest(tenantId, lr)
@@ -1429,7 +1472,9 @@ async function decideOneRequest(params: {
   // 稽核 context 的加註：platform_admin 簽老闆關／候選代簽／HR 代簽。
   const actedNote = bossByPlatformAdmin
     ? "，平台管理員簽老闆關"
-    : `${takeOver ? "，候選代簽" : ""}${!isCandidate && canOverride ? "，HR 代簽" : ""}`
+    : bossStepHrFallback && !isCandidate
+      ? "，無可用老闆／平台管理員，HR 代簽"
+      : `${takeOver ? "，候選代簽" : ""}${!isCandidate && canOverride ? "，HR 代簽" : ""}`
 
   // 通知內文（申請人／假別）與「附件必要」檢查共用的上下文。
   let ctx: RequestContext
@@ -1493,6 +1538,7 @@ async function decideOneRequest(params: {
         takeOver,
         hrOverride: !isCandidate && canOverride,
         bossByPlatformAdmin,
+        ...(bossStepHrFallback && !isCandidate ? { bossStepHrFallback: true, note: "無可用老闆／平台管理員，HR 代簽" } : {}),
       },
     })
 
@@ -1560,6 +1606,7 @@ async function decideOneRequest(params: {
         takeOver,
         hrOverride: !isCandidate && canOverride,
         bossByPlatformAdmin,
+        ...(bossStepHrFallback && !isCandidate ? { bossStepHrFallback: true, note: "無可用老闆／平台管理員，HR 代簽" } : {}),
       },
     })
 
@@ -1795,7 +1842,7 @@ requestsRouter.post(
 
       const { data: lr, error: lrErr } = await supabaseAdmin
         .from("leave_requests")
-        .select("id, kind, status, current_step, start_at, end_at, segments")
+        .select("id, kind, status, current_step, start_at, end_at, segments, employee_id")
         .eq("tenant_id", tenantId)
         .is("deleted_at", null)
         .eq("id", requestId)
@@ -1812,12 +1859,17 @@ requestsRouter.post(
         res.status(409).json({ error: "not_pending" })
         return
       }
+      // 自己的單不能改派任何關卡（2026-10-27 安全驗收 M1）：需由其他 HR／平台管理員處理。
+      if (self && (lr.employee_id as string | null)?.toLowerCase() === self.id.toLowerCase()) {
+        res.status(403).json({ error: "own_request", message: CHANGE_APPROVER_DENIAL_MESSAGE.own_request })
+        return
+      }
       // 發薪鎖定：這張單碰到已結算月 → 409 period_closed。
       await assertRequestOpen(tenantId, lr)
 
       const { data: target, error: targetErr } = await supabaseAdmin
         .from("employees")
-        .select("id, status")
+        .select("id, status, role")
         .eq("tenant_id", tenantId)
         .eq("id", parsed.data.approverEmpId)
         .maybeSingle()
@@ -1846,8 +1898,22 @@ requestsRouter.post(
         res.status(409).json({ error: "current_step_not_found" })
         return
       }
-      const step = stepRow as unknown as { id: string; approver_emp_id: string; step_order: number; candidate_emp_ids?: unknown }
+      const step = stepRow as unknown as { id: string; approver_emp_id: string; step_order: number; candidate_emp_ids?: unknown; step_kind?: string | null }
       const previousCandidateEmpIds = stepCandidates(step)
+
+      // 改派授權（2026-10-27 安全驗收 H1／M1）：老闆關只有老闆本人或在職 platform_admin 能改派、且只能改派給老闆或
+      // 在職 platform_admin（hr_admin 不能把老闆關改派給自己再以候選身分核准）；任何關卡都不能改派給申請人本人或操作者自己。
+      const denial = changeApproverDenial({
+        step,
+        actor: self!,
+        requester: lr.employee_id as string,
+        target: { id: target.id as string, role: (target as { role?: string | null }).role ?? null },
+        bossEmpId: isBossStep(step) ? await loadConfiguredBossEmpId(tenantId) : null,
+      })
+      if (denial) {
+        res.status(CHANGE_APPROVER_DENIAL_STATUS[denial]).json({ error: denial, message: CHANGE_APPROVER_DENIAL_MESSAGE[denial] })
+        return
+      }
 
       const { error: updateErr } = await supabaseAdmin
         .from("approval_steps")

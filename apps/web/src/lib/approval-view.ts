@@ -461,16 +461,26 @@ export function actionsFor(bucket: ApprovalBucket): RowActionSpec[] {
 
 /**
  * 某一列實際顯示的操作（2026-10-27 職責分離）：在 actionsFor(bucket) 之上再收斂——
- *   • 自己的單：拿掉核准／駁回／代理簽核（後端一律 403 own_request，所有關卡都一樣）；
- *   • 老闆關：拿掉「代理簽核」（HR 不能代簽老闆關；老闆與 platform_admin 本來就在「待我簽核」直接簽）。
+ *   • 自己的單：拿掉核准／駁回／代理簽核／變更簽核人（後端一律 403 own_request，所有關卡都一樣；
+ *     變更簽核人需由其他 HR／平台管理員處理，安全驗收 M1）；
+ *   • 老闆關：拿掉「代理簽核」（HR 不能代簽老闆關；老闆與 platform_admin 本來就在「待我簽核」直接簽）——
+ *     除非後端標 boss_step_hr_fallback（沒有任何可簽的老闆／平台管理員，安全驗收 L3）；
+ *     「變更簽核人」只對老闆本人或在職 platform_admin 顯示（`canActAsBoss`；安全驗收 H1，後端同樣擋）。
  * 純函式。
  */
-export function rowActionsFor(row: Pick<LeaveRequest, "employee_id" | "current_step_kind">, bucket: ApprovalBucket, meId: string | null): RowActionSpec[] {
+export function rowActionsFor(
+  row: Pick<LeaveRequest, "employee_id" | "current_step_kind"> & { boss_step_hr_fallback?: boolean },
+  bucket: ApprovalBucket,
+  meId: string | null,
+  opts: { canActAsBoss?: boolean } = {},
+): RowActionSpec[] {
   const own = meId !== null && row.employee_id === meId;
   const boss = isBossStepKind(row.current_step_kind);
   return actionsFor(bucket).filter((action) => {
-    if (own && (action.key === "approve" || action.key === "reject" || action.key === "proxy_approve")) return false;
-    if (boss && action.key === "proxy_approve") return false;
+    if (own && (action.key === "approve" || action.key === "reject" || action.key === "proxy_approve" || action.key === "change_approver")) return false;
+    // 例外：老闆關找不到任何可簽的老闆／平台管理員（後端標 boss_step_hr_fallback）→ HR 可代簽（L3，避免單子永久卡住）。
+    if (boss && action.key === "proxy_approve" && !row.boss_step_hr_fallback) return false;
+    if (boss && action.key === "change_approver" && !opts.canActAsBoss) return false;
     return true;
   });
 }

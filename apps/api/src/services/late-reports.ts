@@ -227,7 +227,7 @@ export async function lateReportScope(tenantId: string, self: SelfEmployee): Pro
   const isBoss = isBossOrPlatformAdmin(bossId, self)
   if (isBoss || isHrRole(self.role)) return { all: true, employeeIds: [], isBoss }
   const ids = new Set<string>([self.id])
-  const deptIds = await managedDeptIds(tenantId, self.id)
+  const deptIds = await managedDeptIds(tenantId, self)
   if (deptIds.length > 0) {
     const { data, error } = await supabaseAdmin.from("employees").select("id").eq("tenant_id", tenantId).in("dept_id", deptIds)
     if (error) throw new Error(`late-reports (scope employees): ${error.message}`)

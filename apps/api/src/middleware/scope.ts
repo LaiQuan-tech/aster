@@ -1,7 +1,7 @@
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
 import { departmentsHaveManagerList } from "../lib/schema-compat.js"
-import { actorRoleOf, isActiveStatus } from "../lib/actor-status.js"
+import { actorIsInactive, actorRoleOf, isActiveStatus } from "../lib/actor-status.js"
 
 /**
  * 共用授權/範圍 helper（收斂原本散落各 route 的 resolveSelf/isHrRole，並加上
@@ -123,7 +123,14 @@ export async function loadDepartments(tenantId: string): Promise<DepartmentRow[]
  * manager_emp_ids 任一順位（含舊欄位 manager_emp_id）。
  * 一次載入該租戶全部 departments 後在記憶體建樹（部門數少，簡單可靠）。
  */
-export async function managedDeptIds(tenantId: string, empId: string): Promise<string[]> {
+export async function managedDeptIds(
+  tenantId: string,
+  who: string | { id: string; active?: boolean | null },
+): Promise<string[]> {
+  // 非在職（停用／離職）的部門主管不再管任何部門（2026-10-27 安全驗收 D）：看部屬出勤／遲到說明、審月表、
+  // 部門主管身分的專案權限全部失效。傳 SelfEmployee（帶 active）最可靠；只傳 id 時看本請求的非在職標記。
+  if (actorIsInactive(typeof who === "string" ? { id: who } : who)) return []
+  const empId = typeof who === "string" ? who : who.id
   const rows = await loadDepartments(tenantId)
   const childrenOf = new Map<string, string[]>()
   for (const r of rows) {

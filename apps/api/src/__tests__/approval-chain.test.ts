@@ -212,10 +212,30 @@ describe("pickApproverChain — requireBossFinal（跨縣市出差：老闆最�
     expect(pickApproverChain(base({ requireBossFinal: true }))).toEqual({ ok: false, error: "no_approver_available" })
   })
 
-  it("list 名單非空時名單優先（requireBossFinal 不改變 HR 明訂的名單）；mode=manager 走 boss_final", () => {
+  it("list 名單非空時名單照走，但 requireBossFinal 一定補上老闆關（安全驗收 H3）；mode=manager 走 boss_final", () => {
     expect(
       pickApproverChain(base({ requireBossFinal: true, flow: { mode: "list", approverEmpIds: [L1] }, managerEmpIds: [MGR], fallbackApproverEmpId: BOSS })),
-    ).toEqual({ ok: true, steps: [one(L1, "list")], source: "list" })
+    ).toEqual({ ok: true, steps: [one(L1, "list"), one(BOSS, "fallback")], source: "list" })
+    // 老闆列在名單中間 → 移到最後當老闆關（不在名單裡簽兩次）
+    expect(
+      pickApproverChain(base({ requireBossFinal: true, flow: { mode: "list", approverEmpIds: [BOSS, L1] }, fallbackApproverEmpId: BOSS })),
+    ).toEqual({ ok: true, steps: [one(L1, "list"), one(BOSS, "fallback")], source: "list" })
+    // 名單只有老闆 → 只剩老闆關
+    expect(
+      pickApproverChain(base({ requireBossFinal: true, flow: { mode: "list", approverEmpIds: [BOSS] }, fallbackApproverEmpId: BOSS })),
+    ).toEqual({ ok: true, steps: [one(BOSS, "fallback")], source: "list" })
+    // 沒設老闆 → 與預設鏈一致，不補
+    expect(pickApproverChain(base({ requireBossFinal: true, flow: { mode: "list", approverEmpIds: [L1] } }))).toEqual({
+      ok: true,
+      steps: [one(L1, "list")],
+      source: "list",
+    })
+    // 不需要老闆關的類型（requireBossFinal 未帶）→ 名單照舊
+    expect(pickApproverChain(base({ flow: { mode: "list", approverEmpIds: [L1] }, fallbackApproverEmpId: BOSS }))).toEqual({
+      ok: true,
+      steps: [one(L1, "list")],
+      source: "list",
+    })
     expect(
       pickApproverChain(base({ requireBossFinal: true, flow: { mode: "manager", approverEmpIds: [] }, managerEmpIds: [MGR, MGR2], fallbackApproverEmpId: BOSS })),
     ).toEqual({ ok: true, steps: [one(MGR, "manager"), one(MGR2, "manager"), one(BOSS, "fallback")], source: "boss_final" })
@@ -350,7 +370,7 @@ describe("零用金／出差／公出的簽核關卡：flowRouteFor ＋ pickAppr
     })
   })
 
-  it("HR 在後台設了固定名單（mode=list 且名單非空）→ 名單照走、優先於預設的主管＋老闆（既有行為不變）", () => {
+  it("HR 在後台設了固定名單（mode=list 且名單非空）→ 名單照走、優先於主管鏈，但最後一定補老闆關（安全驗收 H3）", () => {
     for (const [kind, scope] of [
       ["petty_cash", null],
       ["business_trip", "local"],
@@ -358,7 +378,7 @@ describe("零用金／出差／公出的簽核關卡：flowRouteFor ＋ pickAppr
     ] as const) {
       expect(chainOf(kind, scope, { ...withManager, flow: { mode: "list", approverEmpIds: [L1] } })).toEqual({
         ok: true,
-        steps: [one(L1, "list")],
+        steps: [one(L1, "list"), one(BOSS, "fallback")],
         source: "list",
       })
     }
@@ -439,10 +459,10 @@ describe("pickDisbursementChain — 放款鏈（主管逐關 → 會計 → 老�
     })
   })
 
-  it("list 模式名單非空 → 照名單逐關（去重、kind=list），其餘來源忽略；名單空 → 走預設鏈", () => {
+  it("list 模式名單非空 → 照名單逐關（去重、kind=list）＋老闆關收尾（H3），其餘來源忽略；名單空 → 走預設鏈", () => {
     expect(
       pickDisbursementChain(base({ flow: { mode: "list", approverEmpIds: [L1, L2, L1] }, managerEmpIds: [MGR], accountantEmpIds: [ACC1], fallbackApproverEmpId: BOSS })),
-    ).toEqual({ ok: true, steps: [one(L1, "list"), one(L2, "list")], source: "list" })
+    ).toEqual({ ok: true, steps: [one(L1, "list"), one(L2, "list"), one(BOSS, "fallback")], source: "list" })
     expect(
       pickDisbursementChain(base({ flow: { mode: "list", approverEmpIds: [] }, managerEmpIds: [MGR], accountantEmpIds: [ACC1], fallbackApproverEmpId: BOSS })),
     ).toEqual({

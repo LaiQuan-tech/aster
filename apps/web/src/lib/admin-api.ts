@@ -624,6 +624,8 @@ export interface LeaveRequest {
   current_approver_names?: string[];
   /** 目前關卡種類：manager｜hr｜list｜fallback｜hr_admin。 */
   current_step_kind?: string;
+  /** 現行關卡是老闆關且沒有可簽的老闆／平台管理員 → HR 可代簽（安全驗收 L3）。 */
+  boss_step_hr_fallback?: boolean;
   /* ── 月加班上限（M1，2026-09-23）：kind=ot 送單時累計超過上限即標記；舊 API 沒回時缺席 ── */
   beyond_cap?: boolean;
   beyond_cap_detail?: BeyondCapDetail | null;

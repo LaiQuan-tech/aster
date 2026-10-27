@@ -106,13 +106,23 @@ export const DISBURSEMENT_COLS =
 export const DISBURSEMENT_COLS_APPROVAL =
   "id, tenant_id, disbursement_no, status, payee_kind, vendor_id, payee_name, payee_bank_name, payee_bank_account, payee_bank_code, paying_company_id, paying_company_name, paying_bank_account, method, paid_on, amount, withheld_amount, receipt_issuer_company_id, receipt_ref, has_invoice, invoice_no, purpose, note, void_reason, paid_by_emp_id, created_by_emp_id, created_at, updated_at, current_step, approval_round, submitted_at, submitted_by_emp_id, approved_at"
 
+/** 再加上草稿編輯人（migration 0080 edited_by_emp_ids；2026-10-27 安全驗收 M2）。 */
+export const DISBURSEMENT_COLS_APPROVAL_EDITORS =
+  "id, tenant_id, disbursement_no, status, payee_kind, vendor_id, payee_name, payee_bank_name, payee_bank_account, payee_bank_code, paying_company_id, paying_company_name, paying_bank_account, method, paid_on, amount, withheld_amount, receipt_issuer_company_id, receipt_ref, has_invoice, invoice_no, purpose, note, void_reason, paid_by_emp_id, created_by_emp_id, created_at, updated_at, current_step, approval_round, submitted_at, submitted_by_emp_id, approved_at, edited_by_emp_ids"
+
+/** disbursements.edited_by_emp_ids（migration 0080）是否已套用；未套用時不記錄、也不納入「自己的單」（退回舊行為）。 */
+export function disbursementsHaveEditors(): Promise<boolean> {
+  return columnsExist("disbursements", "edited_by_emp_ids")
+}
+
 /** disbursements 的簽核欄位（migration 0050）是否已套用（探測一次、之後分支）。 */
 export function disbursementsHaveApproval(): Promise<boolean> {
   return columnsExist("disbursements", "current_step, approval_round, submitted_at, submitted_by_emp_id, approved_at")
 }
 /** 讀 disbursements 時要帶的欄位（已套用簽核欄位就一起帶回來）。 */
 export async function disbursementCols(): Promise<string> {
-  return (await disbursementsHaveApproval()) ? DISBURSEMENT_COLS_APPROVAL : DISBURSEMENT_COLS
+  if (!(await disbursementsHaveApproval())) return DISBURSEMENT_COLS
+  return (await disbursementsHaveEditors()) ? DISBURSEMENT_COLS_APPROVAL_EDITORS : DISBURSEMENT_COLS_APPROVAL
 }
 /** `project_subcontract_payments` 的驗收欄位（migration 0050）是否已套用。 */
 export function paymentsHaveAcceptance(): Promise<boolean> {
@@ -158,6 +168,8 @@ export type DisbursementRow = {
   submitted_at?: string | null
   submitted_by_emp_id?: string | null
   approved_at?: string | null
+  /** 曾編輯過這張單（PATCH）的人（migration 0080；未套用時沒有）。算「自己的單」，不能簽也不能改派。 */
+  edited_by_emp_ids?: string[] | null
 }
 
 export type AllocationRow = {
@@ -1981,6 +1993,29 @@ export async function updateDisbursement(
     throw new DisbursementError(409, "pending_approval", { hint: "送簽中的放款單不可修改；要改請先撤回簽核。" })
   }
   const nowIso = new Date().toISOString()
+  const trackEditors = await disbursementsHaveEditors()
+  /** 編輯人名單（M2）：把這次的操作者加進去（欄位未套用時不寫）。 */
+  const editorsPatch = (): Record<string, unknown> =>
+    trackEditors && actor.empId
+      ? { edited_by_emp_ids: [...new Set([...(current.edited_by_emp_ids ?? []), actor.empId.toLowerCase()])] }
+      : {}
+  /**
+   * 條件寫入（2026-10-27 安全驗收 M2：之前「先讀 status 再無條件寫入」有 TOCTOU——讀完到寫入之間單子可能已被送簽／
+   * 核准）：只在 status 仍是讀到的值、updated_at 也沒變（樂觀鎖，防兩人同時改互蓋、編輯人名單漏記）時才寫；
+   * 0 列＝搶輸 → 409 `conflict`（請重新整理再改）。
+   */
+  // 表上有 set_updated_at trigger（sql/0029）：寫入後 updated_at 由 DB 決定，所以回傳寫入後的值給下一次條件寫入用。
+  const guardedUpdate = async (fields: Record<string, unknown>, label: string, expectUpdatedAt: string | null): Promise<string | null> => {
+    let q = supabaseAdmin.from("disbursements").update(fields).eq("tenant_id", tenantId).eq("id", id).eq("status", current.status)
+    q = expectUpdatedAt ? q.eq("updated_at", expectUpdatedAt) : q.is("updated_at", null)
+    const { data, error } = await q.select("id, updated_at")
+    if (error) throw new Error(`updateDisbursement (${label}): ${error.message}`)
+    const hit = (data ?? []) as Array<{ updated_at?: string | null }>
+    if (hit.length === 0) {
+      throw new DisbursementError(409, "conflict", { hint: "這張放款單剛被其他人修改、送簽或核准，請重新整理後再改。" })
+    }
+    return hit[0].updated_at ?? null
+  }
 
   // approved 與 paid 同一套限縮：已核准的內容不能再偷改（要改先撤回）。
   const frozen = current.status === "paid" || current.status === "approved"
@@ -2007,8 +2042,7 @@ export async function updateDisbursement(
     if (patch.purpose !== undefined) fields.purpose = patch.purpose?.trim() || null
     if (patch.hasInvoice !== undefined) fields.has_invoice = patch.hasInvoice
     if (patch.invoiceNo !== undefined) fields.invoice_no = patch.invoiceNo?.trim() || null
-    const { error } = await supabaseAdmin.from("disbursements").update(fields).eq("tenant_id", tenantId).eq("id", id)
-    if (error) throw new Error(`updateDisbursement (${frozenCode}): ${error.message}`)
+    await guardedUpdate(fields, frozenCode, current.updated_at ?? null)
     if (current.status === "paid" && fields.receipt_ref !== undefined && fields.receipt_ref !== current.receipt_ref) {
       // 收據編號是連動寫進期款的，改了要跟著走。
       const { error: pErr } = await supabaseAdmin
@@ -2056,14 +2090,12 @@ export async function updateDisbursement(
         { force: patch.forceAcceptance === true, reason: patch.forceReason, context: "PATCH /disbursements/:id" },
       )
     }
+    // 先「佔住」這張草稿：條件寫入 updated_at＋編輯人（仍是 draft、沒被別人改過才成立，否則 409），
+    // 之後分攤與單頭才寫——送簽／別人的修改搶在中間時不會改到已送簽的單（M2）。
+    const claimedAt = await guardedUpdate({ updated_at: nowIso, ...editorsPatch() }, "draft claim", current.updated_at ?? null)
     // 分攤先寫：唯一預期中的失敗（409 allocation_not_removable）發生在還沒動到單頭之前。
     if (patch.allocations !== undefined) await replaceAllocations(tenantId, id, allocations)
-    const { error } = await supabaseAdmin
-      .from("disbursements")
-      .update({ ...header, updated_at: nowIso })
-      .eq("tenant_id", tenantId)
-      .eq("id", id)
-    if (error) throw new Error(`updateDisbursement (draft): ${error.message}`)
+    await guardedUpdate({ ...header, updated_at: nowIso }, "draft", claimedAt)
   }
 
   await writeAuditLog({

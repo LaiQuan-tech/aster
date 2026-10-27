@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin, requireFinance } from "../middleware/role.js"
 import { isHrRole, isFinanceRole, managedDeptIds, resolveSelf, type SelfEmployee } from "../middleware/scope.js"
+import { actorIsInactive } from "../lib/actor-status.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { todayKey, monthRangeKeys, dayWindowUtc } from "../lib/tz.js"
@@ -155,7 +156,7 @@ async function requireCaller(req: Request, res: Response): Promise<Caller | null
 
 /** Employee ids a non-HR caller may see: own + everyone in the departments they manage. */
 async function visibleEmployeeIds(tenantId: string, self: SelfEmployee): Promise<string[]> {
-  const deptIds = await managedDeptIds(tenantId, self.id)
+  const deptIds = await managedDeptIds(tenantId, self)
   const ids = new Set<string>([self.id])
   if (deptIds.length > 0) {
     const { data, error } = await supabaseAdmin
@@ -169,11 +170,19 @@ async function visibleEmployeeIds(tenantId: string, self: SelfEmployee): Promise
   return Array.from(ids)
 }
 
+/**
+ * 呼叫者是不是這張月表指定的主管（manager_emp_id）。非在職（停用／離職）的主管不算（2026-10-27 安全驗收 D）：
+ * 不能再看、審核或退回部屬月表。
+ */
+function isAssignedManager(caller: Caller, sheet: Pick<SheetRow, "manager_emp_id">): boolean {
+  return caller.self.active !== false && !actorIsInactive(caller.self) && !!sheet.manager_emp_id && sheet.manager_emp_id === caller.self.id
+}
+
 /** May the caller read this sheet? HR → yes; owner → yes; assigned manager → yes; dept manager → yes. */
 async function canRead(tenantId: string, caller: Caller, sheet: SheetRow): Promise<boolean> {
   if (caller.isHr) return true
   if (sheet.employee_id === caller.self.id) return true
-  if (sheet.manager_emp_id === caller.self.id) return true
+  if (isAssignedManager(caller, sheet)) return true
   const visible = await visibleEmployeeIds(tenantId, caller.self)
   return visible.includes(sheet.employee_id)
 }
@@ -464,7 +473,7 @@ attendanceSheetsRouter.post(
       const caller = await requireCaller(req, res)
       if (!caller) return
       const sheet = await loadSheet(tenantId, id)
-      if (!caller.isHr && sheet.manager_emp_id !== caller.self.id) {
+      if (!caller.isHr && !isAssignedManager(caller, sheet)) {
         res.status(403).json({ error: "forbidden" })
         return
       }
@@ -528,7 +537,7 @@ attendanceSheetsRouter.post(
       const caller = await requireCaller(req, res)
       if (!caller) return
       const sheet = await loadSheet(tenantId, id)
-      if (!caller.isHr && sheet.manager_emp_id !== caller.self.id) {
+      if (!caller.isHr && !isAssignedManager(caller, sheet)) {
         res.status(403).json({ error: "forbidden" })
         return
       }

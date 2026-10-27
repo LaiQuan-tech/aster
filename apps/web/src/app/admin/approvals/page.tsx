@@ -655,7 +655,7 @@ function ApprovalsView() {
               <tbody>
                 {visible.map((row) => {
                   const bucket = bucketOf(row, ctx);
-                  const actions = rowActionsFor(row, bucket, ctx.meId);
+                  const actions = rowActionsFor(row, bucket, ctx.meId, { canActAsBoss: meIsPlatformAdmin });
                   const busy = busyId === row.id || busyId === "batch";
                   const canSelect = batchRow && row.status === "pending";
                   return (

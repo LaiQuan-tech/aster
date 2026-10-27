@@ -207,21 +207,23 @@ describe("出差／公出：不分 trip_type、不分 tripScope，一律主管�
   it("flowKind 維持原本對應：跨縣市查 business_trip_intercity、市內公出查 business_trip", async () => {
     // 只替跨縣市設固定名單 → 跨縣市照名單，市內公出照預設（主管＋老闆）
     fake.db.approval_flows = [{ tenant_id: TENANT_ID, applies_to: "business_trip_intercity", mode: "list", approver_emp_ids: [HR_ID] }]
-    expect((await file(STAFF_TOKEN, TRIP_INTERCITY)).approvers).toEqual([HR_ID])
+    // 固定名單也一定以老闆關收尾（2026-10-27 安全驗收 H3）。
+    expect((await file(STAFF_TOKEN, TRIP_INTERCITY)).approvers).toEqual([HR_ID, BOSS_ID])
     expect((await file(STAFF_TOKEN, OUTING)).approvers).toEqual([MGR_ID, BOSS_ID])
 
     // 只替市內公出（business_trip）設固定名單 → 市內照名單，跨縣市照預設（主管＋老闆）
     fake.db.approval_flows = [{ tenant_id: TENANT_ID, applies_to: "business_trip", mode: "list", approver_emp_ids: [HR_ID] }]
-    expect((await file(STAFF_TOKEN, OUTING)).approvers).toEqual([HR_ID])
+    expect((await file(STAFF_TOKEN, OUTING)).approvers).toEqual([HR_ID, BOSS_ID])
     expect((await file(STAFF_TOKEN, TRIP_INTERCITY)).approvers).toEqual([MGR_ID, BOSS_ID])
   })
 
-  it("零用金的 flow 查 petty_cash：HR 設了固定名單就照名單（名單優先於預設的主管＋老闆）", async () => {
+  it("零用金的 flow 查 petty_cash：HR 設了固定名單就照名單，但最後一定補上老闆關（安全驗收 H3）", async () => {
     fake.db.approval_flows = [{ tenant_id: TENANT_ID, applies_to: "petty_cash", mode: "list", approver_emp_ids: [HR_ID] }]
     const f = await file(STAFF_TOKEN, PETTY)
 
     expect(f.source).toBe("list")
-    expect(f.approvers).toEqual([HR_ID])
+    expect(f.approvers).toEqual([HR_ID, BOSS_ID])
+    expect(f.kinds).toEqual(["list", "fallback"])
   })
 })
 

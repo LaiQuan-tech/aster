@@ -1,4 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
+import { forgetEssIdentityOf } from "../middleware/ess-tab-guard.js"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
@@ -621,6 +622,7 @@ employeesRouter.patch(
         res.status(404).json({ error: "not_found" })
         return
       }
+      forgetEssIdentityOf(tenantId, data.id as string)
       res.status(200).json({ id: data.id })
     } catch (err) {
       next(err)
@@ -871,6 +873,7 @@ employeesRouter.post(
         newRow: { status: "inactive" },
         context: "POST /employees/:id/deactivate — 停用員工",
       })
+      forgetEssIdentityOf(tenantId, data.id as string)
       res.status(200).json({ id: data.id, status: "inactive" })
     } catch (err) {
       next(err)

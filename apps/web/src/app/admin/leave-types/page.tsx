@@ -249,7 +249,9 @@ export default function LeaveTypesPage() {
       setError(null);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "儲存簽核流程失敗");
+      const msg = err instanceof Error ? err.message : "";
+      // 零用金／出差／放款這類一定要老闆簽的單據，流程只有老闆或平台管理員能改（後端 403 boss_only_flow；安全驗收 H3）。
+      setError(msg.includes("boss_only_flow") ? "這類單據需要老闆簽核，簽核流程只有老闆或平台管理員能修改。" : msg || "儲存簽核流程失敗");
     }
   }
 

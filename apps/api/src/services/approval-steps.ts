@@ -100,10 +100,70 @@ export function stepActorStanding(
  * （2026-10-27 業主追加 C：老闆關只限老闆本人或在職 platform_admin——platform_admin 已由 stepActorStanding 放行，
  * 不需要代簽這條路）。自己的單（own_request）呼叫端要先擋。純函式。
  */
-export function canHrOverrideStep(step: { step_kind?: string | null }, actor: StepActor): boolean {
+export function canHrOverrideStep(
+  step: { step_kind?: string | null },
+  actor: StepActor,
+  opts: { bossStepHrFallback?: boolean } = {},
+): boolean {
   if (actorIsInactive(actor)) return false
   if (actor.role !== "hr_admin" && actor.role !== "platform_admin") return false
-  return !isBossStep(step)
+  // L3（2026-10-27 安全驗收）：這張單的老闆關找不到任何「非申請人、在職、本輪沒簽過」的老闆或 platform_admin
+  // （呼叫端用 lib/boss.ts bossStepHasEligibleSigner 判斷後帶 bossStepHrFallback=true）→ 允許在職、非申請人的 HR 代簽，
+  // 不讓單永久卡住；稽核記「無可用老闆／平台管理員，HR 代簽」。
+  if (isBossStep(step)) return opts.bossStepHrFallback === true
+  return true
+}
+
+/* ── 變更簽核人（change-approver）的授權（2026-10-27 安全驗收 H1／H2／M1）──────────
+ * 只有 HR／平台管理員能呼叫（路由守門）；這裡再判斷「這一次改派」合不合規：
+ *   • 操作者是該單申請人（放款單＝建單人／送簽人／草稿編輯人）→ own_request（任何關卡都不能改，需由其他 HR／平台管理員處理）。
+ *   • 改派對象是申請人本人 → approver_is_requester；改派給操作者自己 → cannot_assign_self（不能自己指派自己再簽）。
+ *   • 目前關卡是老闆關：操作者必須是在職的老闆本人或在職 platform_admin（boss_step_boss_only），
+ *     改派對象也必須是老闆或在職 platform_admin（boss_step_target_not_boss）——hr_admin 不能藉改派繞過「老闆關不准 HR 代簽」。
+ * 改派對象在職與否由呼叫端先查（不在職 → 404／400）。純函式（另讀本請求的非在職標記）。
+ */
+export type ChangeApproverDenial =
+  | "own_request"
+  | "approver_is_requester"
+  | "cannot_assign_self"
+  | "boss_step_boss_only"
+  | "boss_step_target_not_boss"
+
+export const CHANGE_APPROVER_DENIAL_STATUS: Record<ChangeApproverDenial, number> = {
+  own_request: 403,
+  approver_is_requester: 400,
+  cannot_assign_self: 400,
+  boss_step_boss_only: 403,
+  boss_step_target_not_boss: 400,
+}
+
+export const CHANGE_APPROVER_DENIAL_MESSAGE: Record<ChangeApproverDenial, string> = {
+  own_request: "這是你自己的單，不能變更它的簽核人，請由其他 HR 或平台管理員處理",
+  approver_is_requester: "不能把簽核人改成申請人本人",
+  cannot_assign_self: "不能把簽核人改成自己",
+  boss_step_boss_only: "老闆關只有老闆本人或平台管理員能變更簽核人",
+  boss_step_target_not_boss: "老闆關只能改派給老闆或在職平台管理員",
+}
+
+export function changeApproverDenial(params: {
+  step: { step_kind?: string | null }
+  actor: StepActor
+  requester: StepRequester
+  target: { id: string; role?: string | null }
+  bossEmpId: string | null
+}): ChangeApproverDenial | null {
+  const { step, actor, requester, target, bossEmpId } = params
+  const requesters = requesterIds(requester)
+  if (requesters.some((r) => sameId(actor.id, r))) return "own_request"
+  if (requesters.some((r) => sameId(target.id, r))) return "approver_is_requester"
+  if (sameId(target.id, actor.id)) return "cannot_assign_self"
+  if (isBossStep(step)) {
+    const actorIsBoss = !actorIsInactive(actor) && (actor.role === "platform_admin" || sameId(actor.id, bossEmpId))
+    if (!actorIsBoss) return "boss_step_boss_only"
+    const targetIsBoss = target.role === "platform_admin" || sameId(target.id, bossEmpId)
+    if (!targetIsBoss) return "boss_step_target_not_boss"
+  }
+  return null
 }
 
 /** 輪到 actor 簽這一關嗎（`stepActorStanding` 是 candidate 或 platform_admin）。純函式。 */

@@ -153,7 +153,7 @@ function fresh<T>(entry: Cached<T> | undefined): entry is Cached<T> {
 }
 
 /** token → 身分（解不出來就是 null，交給後面的 requireAuth 回 401）。 */
-const identityCache = new Map<string, Cached<{ tenantId: string; role: string; employmentType: string | null } | null>>()
+const identityCache = new Map<string, Cached<{ tenantId: string; role: string; employmentType: string | null; empId?: string } | null>>()
 /** tenantId → tenants.features.essTabs。 */
 const featureCache = new Map<string, Cached<Record<string, unknown> | null>>()
 
@@ -161,6 +161,18 @@ const featureCache = new Map<string, Cached<Record<string, unknown> | null>>()
 export function resetEssTabGuardCache(): void {
   identityCache.clear()
   featureCache.clear()
+}
+
+/**
+ * 某員工被停用／改角色／改身分類別時清掉他的身分快取（2026-10-27 安全驗收 Info：TTL 60 秒內不必等過期）。
+ * 只清本程序的快取——多個 API 執行個體（serverless）各自還是最多 60 秒後失效；這支 middleware 只做「多擋一層」，
+ * 真正的權限判斷（requireRole／resolveSelf）每次請求都即時讀 employees.status，不受此快取影響。
+ */
+export function forgetEssIdentityOf(tenantId: string, empId: string): void {
+  const id = empId.toLowerCase()
+  for (const [key, entry] of identityCache) {
+    if (entry.value && entry.value.tenantId === tenantId && entry.value.empId === id) identityCache.delete(key)
+  }
 }
 
 /**
@@ -201,16 +213,16 @@ export function essTabsFor(cfg: Record<string, unknown> | null, employmentType: 
   return null
 }
 
-async function identityOf(token: string): Promise<{ tenantId: string; role: string; employmentType: string | null } | null> {
+async function identityOf(token: string): Promise<{ tenantId: string; role: string; employmentType: string | null; empId?: string } | null> {
   const hit = identityCache.get(token)
   if (fresh(hit)) return hit.value
-  let value: { tenantId: string; role: string; employmentType: string | null } | null = null
+  let value: { tenantId: string; role: string; employmentType: string | null; empId?: string } | null = null
   const user = await getUserFromToken(token)
   const tenantId = user?.appMetadata?.tenant_id
   if (user && typeof tenantId === "string" && tenantId) {
     const { data } = await supabaseAdmin
       .from("employees")
-      .select("role, employment_type, status")
+      .select("id, role, employment_type, status")
       .eq("tenant_id", tenantId)
       .eq("user_id", user.userId)
       .maybeSingle()
@@ -220,6 +232,7 @@ async function identityOf(token: string): Promise<{ tenantId: string; role: stri
         // 有效角色：非在職降成 employee（lib/actor-status.ts）。
         role: effectiveRole((data.role as string | null) ?? "", (data as { status?: string | null }).status),
         employmentType: (data.employment_type as string | null) ?? null,
+        empId: typeof (data as { id?: unknown }).id === "string" ? ((data as { id: string }).id).toLowerCase() : undefined,
       }
     }
   }

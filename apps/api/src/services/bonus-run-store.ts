@@ -1208,14 +1208,19 @@ async function assertApprover(tenantId: string, actor: Actor): Promise<void> {
   if (!isBossOrPlatformAdmin(boss, { id: actor.empId, role: actor.role, active: actor.active })) throw new BonusRunError(403, "not_approver")
 }
 
-/** 送審人本人不能核准／退回自己送審的批次（2026-10-27 業主追加 F；之前 platform_admin 可自己送審自己核准、只留標註）。 */
-function assertNotSubmitter(run: Pick<RunRow, "submitted_by_emp_id">, actor: Actor): void {
+/**
+ * 批次的建立者與送審人都不能核准／退回這個批次（2026-10-27 業主追加 F 只擋送審人；安全驗收 L2 起建立者也擋——
+ * 建立者可以算好批次交給別人送審，再自己核准）。
+ */
+function assertNotSubmitter(run: Pick<RunRow, "submitted_by_emp_id" | "created_by_emp_id">, actor: Actor): void {
   if (isSelfSubmitted(run, actor)) throw new BonusRunError(403, "self_approval_forbidden")
 }
 
-/** 這個批次是不是 actor 送審的。純函式。 */
-export function isSelfSubmitted(run: { submitted_by_emp_id?: string | null }, actor: Actor): boolean {
-  return !!run.submitted_by_emp_id && !!actor.empId && run.submitted_by_emp_id.toLowerCase() === actor.empId.toLowerCase()
+/** 這個批次是不是 actor 建立或送審的（＝不能自己核准／退回）。純函式。 */
+export function isSelfSubmitted(run: { submitted_by_emp_id?: string | null; created_by_emp_id?: string | null }, actor: Actor): boolean {
+  if (!actor.empId) return false
+  const me = actor.empId.toLowerCase()
+  return [run.submitted_by_emp_id, run.created_by_emp_id].some((id) => !!id && id.toLowerCase() === me)
 }
 
 /** 呼叫者能不能核准（老闆或 platform_admin；給 ESS 簽核頁／後台決定要不要顯示核准按鈕）。 */
@@ -1246,7 +1251,8 @@ export async function submitRun(tenantId: string, actor: Actor, id: string): Pro
   if (!boss && (await loadPlatformAdminEmpIds(tenantId)).length === 0) throw new BonusRunError(409, "boss_not_configured")
   // 送審通知不寄給操作者本人（追加 H）；送審人又不能核准自己送審的批次（追加 F）→ 扣掉自己後沒有人能核准就先擋，
   // 不讓批次卡在「只有自己能核准」（改由其他 HR 送審，或請另一位平台管理員核准）。
-  const approvers = await bossNotificationRecipients(tenantId, boss, [actor.empId])
+  // 能核准的人＝在職老闆＋在職 platform_admin（bossNotificationRecipients 已排除非在職老闆），扣掉送審人與建立者（L2）。
+  const approvers = await bossNotificationRecipients(tenantId, boss, [actor.empId, current.created_by_emp_id])
   if (approvers.length === 0) throw new BonusRunError(409, "no_other_approver")
   // 送審前先用最新資料重算一次（沖銷批次不重算）：草稿可能是改版前或很久以前算的，
   // 老闆核准的必須是「現在算出來的」金額。

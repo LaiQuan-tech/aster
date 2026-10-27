@@ -5,6 +5,8 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { normaliseMode, type ApprovalFlowMode } from "../services/approval-chain.js"
+import { resolveSelf } from "../middleware/scope.js"
+import { isBossOrPlatformAdmin, loadConfiguredBossEmpId } from "../lib/boss.js"
 
 export const approvalFlowsRouter = Router()
 
@@ -48,6 +50,9 @@ const putSchema = z.object({
   // （與舊行為相容：有名單就走名單）。
   mode: modeSchema.optional(),
 })
+
+/** 一定要有老闆關的 applies_to（routes/requests.ts flowRouteFor 的 requireBossFinal 類型＋放款單）。 */
+export const BOSS_GATED_KINDS: ReadonlySet<string> = new Set(["petty_cash", "business_trip", "business_trip_intercity", "disbursement"])
 
 const SELECT_COLS = "id, tenant_id, applies_to, approver_emp_ids, mode, created_at"
 
@@ -105,6 +110,15 @@ approvalFlowsRouter.put(
     }
 
     try {
+      // 需要老闆關的單據類型（零用金、出差／公出、放款單）的簽核流程只有老闆本人或在職 platform_admin 能改
+      // （2026-10-27 安全驗收 H3）；其他類型維持 HR 可改。固定名單模式本身也一定以老闆關收尾（services/approval-chain.ts）。
+      if (BOSS_GATED_KINDS.has(kind)) {
+        const self = await resolveSelf(tenantId, req.auth!.userId)
+        if (!isBossOrPlatformAdmin(await loadConfiguredBossEmpId(tenantId), self)) {
+          res.status(403).json({ error: "boss_only_flow", message: "這類單據需要老闆簽核，簽核流程只有老闆或平台管理員能修改" })
+          return
+        }
+      }
       let mode = parsed.data.mode
       if (!mode) {
         const { data: existing, error: existingErr } = await supabaseAdmin

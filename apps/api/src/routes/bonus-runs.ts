@@ -292,7 +292,7 @@ bonusRunsRouter.get("/bonus-runs/:id", ...guards, async (req: Request, res: Resp
     res.status(200).json({
       ...maskProfit(detail, canSeeProfit),
       canApprove: await isBonusApprover(tenantId, actor),
-      selfSubmitted: isSelfSubmitted({ submitted_by_emp_id: detail.run.submittedByEmpId ?? null }, actor),
+      selfSubmitted: isSelfSubmitted({ submitted_by_emp_id: detail.run.submittedByEmpId ?? null, created_by_emp_id: detail.run.createdByEmpId ?? null }, actor),
     })
   } catch (err) {
     handleError(err, res, next)
@@ -511,7 +511,7 @@ bonusRunsRouter.get("/my/bonus-approvals", requireAuth, requireTenant, async (re
     }
     const runs = (await listPendingApprovals(tenantId)).map((d) => ({
       ...d,
-      selfSubmitted: isSelfSubmitted({ submitted_by_emp_id: d.run.submittedByEmpId ?? null }, actor),
+      selfSubmitted: isSelfSubmitted({ submitted_by_emp_id: d.run.submittedByEmpId ?? null, created_by_emp_id: d.run.createdByEmpId ?? null }, actor),
     }))
     res.status(200).json({ canApprove: true, runs })
   } catch (err) {

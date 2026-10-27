@@ -7,12 +7,15 @@ import {
   BOSS_STEP_KIND,
   canActOnStep,
   canHrOverrideStep,
+  changeApproverDenial,
+  CHANGE_APPROVER_DENIAL_MESSAGE,
+  CHANGE_APPROVER_DENIAL_STATUS,
   stepActorStanding,
   stepCandidates,
   stepNotifyRecipients,
   type StepLike,
 } from "./approval-steps.js"
-import { loadPlatformAdminEmpIds } from "../lib/boss.js"
+import { bossSignerChecker, bossStepHasEligibleSigner, loadConfiguredBossEmpId, loadPlatformAdminEmpIds } from "../lib/boss.js"
 import { enqueue } from "./notify.js"
 import { writeAuditLog } from "./audit.js"
 import {
@@ -212,10 +215,23 @@ function noticeBody(d: DisbursementRow, step: number, totalSteps: number, stepKi
   return `放款單 ${d.disbursement_no}：收款方 ${d.payee_name}，實付 ${moneyText(d)}${purpose}。請至「待我簽核」處理${stepText}。${kindText}`
 }
 
-/** 放款單的「申請人」＝建單人（沒有就送簽人）；簽核鏈也是從這個人算（老闆關跳過本人）。 */
-/** 「自己的單」：建單人＋送簽人都算（2026-10-27 業主追加 D）——兩人都不能簽這張單的任何一關。 */
-function requestersOf(d: Pick<DisbursementRow, "created_by_emp_id" | "submitted_by_emp_id">): string[] {
-  return uniq([d.created_by_emp_id, d.submitted_by_emp_id ?? null]).filter((id): id is string => !!id)
+/**
+ * 「自己的單」：建單人＋送簽人（2026-10-27 業主追加 D）＋曾編輯過草稿的人（安全驗收 M2；`edited_by_emp_ids`，
+ * migration 0080——欄位未套用時沒有這組人，退回只看建單人＋送簽人）——這些人都不能簽、也不能改派這張單的任何一關。
+ * 簽核鏈從建單人算（老闆關跳過本人）。
+ */
+export function requestersOf(
+  d: Pick<DisbursementRow, "created_by_emp_id" | "submitted_by_emp_id"> & { edited_by_emp_ids?: string[] | null },
+): string[] {
+  return uniq([d.created_by_emp_id, d.submitted_by_emp_id ?? null, ...(d.edited_by_emp_ids ?? [])]).filter((id): id is string => !!id)
+}
+
+/** 同一輪本關之前已簽過（核准）的人（小寫；含代簽：acted_by_emp_id，舊列看 approver_emp_id）。 */
+function earlierSigners(rows: DisbursementStepRow[], step: Pick<DisbursementStepRow, "round" | "step_order">): string[] {
+  return rows
+    .filter((r) => r.round === step.round && r.step_order < step.step_order && r.decision === "approved")
+    .map((r) => (r.acted_by_emp_id ?? r.approver_emp_id)?.toLowerCase())
+    .filter((id): id is string => !!id)
 }
 
 /**
@@ -327,9 +343,14 @@ export async function submitDisbursement(
   const chainOwner = current.created_by_emp_id ?? actor.empId
   if (!chainOwner) throw new DisbursementError(409, "no_approver_available")
   const candidates = await loadChainCandidates(tenantId, chainOwner, "disbursement")
-  // 送簽人（可能不是建單人）也不能簽自己送的單（2026-10-27 業主追加 D）。
-  const chain = pickDisbursementChain({ ...candidates, excludeEmpIds: actor.empId ? [actor.empId] : [] })
-  if (!chain.ok) throw new DisbursementError(409, chain.error)
+  // 送簽人（可能不是建單人）與草稿編輯人也不能簽自己送／改的單（2026-10-27 業主追加 D、安全驗收 M2）。
+  const excludeEmpIds = uniq([actor.empId, ...(current.edited_by_emp_ids ?? [])]).filter((v) => v !== chainOwner)
+  const chain = pickDisbursementChain({ ...candidates, excludeEmpIds })
+  if (!chain.ok) {
+    throw new DisbursementError(409, chain.error, {
+      hint: "找不到可以簽核這張單的人（需要非建單人／送簽人、在職的老闆、平台管理員或 HR），請聯絡管理員設定簽核人。",
+    })
+  }
 
   const round = (current.approval_round ?? 0) + 1
   const stepRows = buildStepRows(tenantId, id, round, chain.steps)
@@ -362,7 +383,7 @@ export async function submitDisbursement(
           candidate_emp_ids: chain.steps[0].candidateEmpIds,
           step_kind: chain.steps[0].kind,
         },
-        [chainOwner, actor.empId],
+        [chainOwner, ...excludeEmpIds],
       ),
       type: "approval",
       title: `待簽核：放款單 ${current.disbursement_no}`,
@@ -451,11 +472,21 @@ export async function decideDisbursement(params: {
   const standing = stepActorStanding(step, stepActor, requestersOf(current))
   if (standing === "own_request") throw new DisbursementError(403, "own_request")
   const isCandidate = standing === "candidate" || standing === "platform_admin"
-  // HR 代簽：老闆關不准（追加 C），其他關照舊。
-  const canOverride = allowHrOverride && canHrOverrideStep(step, stepActor)
+  const signedBefore = signedEarlierStep(rows, step, actor.empId)
+  // HR 代簽：老闆關原則上不准（追加 C），其他關照舊。L3：這張單的老闆關找不到任何「非建單人／送簽人／編輯人、在職、
+  // 本輪沒簽過前面關卡」的老闆／平台管理員 → 允許在職、非申請人的 HR 代簽（稽核記「無可用老闆／平台管理員，HR 代簽」）。
+  let bossStepHrFallback = false
+  if (allowHrOverride && !isCandidate && !signedBefore && step.step_kind === BOSS_STEP_KIND && isHrRole(actor.role ?? undefined) && actor.active !== false) {
+    bossStepHrFallback = !(await bossStepHasEligibleSigner(tenantId, {
+      exclude: [...requestersOf(current), ...earlierSigners(rows, step)],
+      stepCandidateEmpIds: stepCandidates(step),
+    }))
+  }
+  const canOverride = allowHrOverride && canHrOverrideStep(step, stepActor, { bossStepHrFallback })
   if (!isCandidate && !canOverride) throw new DisbursementError(403, "not_current_approver")
   // 同一輪同一人不能簽兩關（含代簽；追加 D）。
-  if (signedEarlierStep(rows, step, actor.empId)) throw new DisbursementError(403, "already_signed_step")
+  if (signedBefore) throw new DisbursementError(403, "already_signed_step")
+  const hrFallbackAudit = bossStepHrFallback && !isCandidate ? { bossStepHrFallback: true, auditNote: "無可用老闆／平台管理員，HR 代簽" } : {}
   // 候選之一（含 platform_admin 簽老闆關）簽核 → approver_emp_id 改寫成實際簽的人；HR 代簽不改寫（同假單路徑）。
   const takeOver = isCandidate && step.approver_emp_id !== actor.empId
 
@@ -523,7 +554,7 @@ export async function decideDisbursement(params: {
       recordId: id,
       action: "UPDATE",
       oldRow: current,
-      newRow: { status: "draft", decision: "rejected", round, stepOrder: step.step_order, comment: comment ?? null, byProxy: !isCandidate, bossByPlatformAdmin: standing === "platform_admin" },
+      newRow: { status: "draft", decision: "rejected", round, stepOrder: step.step_order, comment: comment ?? null, byProxy: !isCandidate, bossByPlatformAdmin: standing === "platform_admin", ...hrFallbackAudit },
       actorEmpId: actor.empId,
       context: "POST /disbursements/:id/reject",
     })
@@ -560,7 +591,7 @@ export async function decideDisbursement(params: {
       recordId: id,
       action: "UPDATE",
       oldRow: current,
-      newRow: { decision: "approved", round, stepOrder: step.step_order, nextStep: next.step_order, comment: comment ?? null, byProxy: !isCandidate, bossByPlatformAdmin: standing === "platform_admin" },
+      newRow: { decision: "approved", round, stepOrder: step.step_order, nextStep: next.step_order, comment: comment ?? null, byProxy: !isCandidate, bossByPlatformAdmin: standing === "platform_admin", ...hrFallbackAudit },
       actorEmpId: actor.empId,
       context: "POST /disbursements/:id/approve",
     })
@@ -582,7 +613,7 @@ export async function decideDisbursement(params: {
     recordId: id,
     action: "UPDATE",
     oldRow: current,
-    newRow: { status: "approved", round, stepOrder: step.step_order, comment: comment ?? null, byProxy: !isCandidate, bossByPlatformAdmin: standing === "platform_admin" },
+    newRow: { status: "approved", round, stepOrder: step.step_order, comment: comment ?? null, byProxy: !isCandidate, bossByPlatformAdmin: standing === "platform_admin", ...hrFallbackAudit },
     actorEmpId: actor.empId,
     context: "POST /disbursements/:id/approve",
   })
@@ -633,9 +664,14 @@ export async function changeDisbursementApprover(
   if (!current) return null
   if (current.status !== "pending_approval") throw new DisbursementError(409, "not_pending", { status: current.status })
 
+  // 自己的單（建單人／送簽人／草稿編輯人）不能改派任何關卡（2026-10-27 安全驗收 H2／M1）。
+  if (actor.empId && requestersOf(current).some((r) => r.toLowerCase() === actor.empId!.toLowerCase())) {
+    throw new DisbursementError(403, "own_request", { message: CHANGE_APPROVER_DENIAL_MESSAGE.own_request })
+  }
+
   const { data: target, error: targetErr } = await supabaseAdmin
     .from("employees")
-    .select("id, status")
+    .select("id, status, role")
     .eq("tenant_id", tenantId)
     .eq("id", approverEmpId)
     .maybeSingle()
@@ -645,6 +681,17 @@ export async function changeDisbursementApprover(
   const rows = await loadSteps(tenantId, [id])
   const step = currentStepOf(current, rows)
   if (!step) throw new DisbursementError(409, "current_step_not_found")
+
+  // 改派授權（H2）：老闆關只有老闆本人或在職 platform_admin 能改派、且只能改派給老闆或在職 platform_admin；
+  // 任何關卡都不能改派給建單人／送簽人／草稿編輯人或操作者自己。
+  const denial = changeApproverDenial({
+    step,
+    actor: { id: actor.empId ?? "", role: actor.role, active: actor.active },
+    requester: requestersOf(current),
+    target: { id: target.id as string, role: (target as { role?: string | null }).role ?? null },
+    bossEmpId: step.step_kind === BOSS_STEP_KIND ? await loadConfiguredBossEmpId(tenantId) : null,
+  })
+  if (denial) throw new DisbursementError(CHANGE_APPROVER_DENIAL_STATUS[denial], denial, { message: CHANGE_APPROVER_DENIAL_MESSAGE[denial] })
 
   const { error } = await supabaseAdmin
     .from("disbursement_approval_steps")
@@ -784,13 +831,27 @@ export async function listPendingDisbursementApprovals(
 
   const wantAll = opts.scope === "all"
   const picked: Array<{ row: DisbursementRow; step: DisbursementStepRow; total: number; mine: boolean }> = []
+  // L3：HR 看老闆關時，若這張單找不到可簽的老闆／平台管理員，HR 也算「輪到我」（同 decideDisbursement 的判斷）。
+  const actorIsHr = isHrRole(actor.role ?? undefined) && actor.active !== false
+  let checker: Awaited<ReturnType<typeof bossSignerChecker>> | null = null
   for (const row of rows) {
     const rowSteps = byDisbursement.get(row.id) ?? []
     const step = currentStepOf(row, rowSteps)
     if (!step) continue
-    const mine =
-      canActOnStep(step, { id: actor.empId, role: actor.role, active: actor.active }, requestersOf(row)) &&
+    const requesters = requestersOf(row)
+    let mine =
+      canActOnStep(step, { id: actor.empId, role: actor.role, active: actor.active }, requesters) &&
       !signedEarlierStep(rowSteps, step, actor.empId)
+    if (
+      !mine &&
+      actorIsHr &&
+      step.step_kind === BOSS_STEP_KIND &&
+      !requesters.some((r) => r.toLowerCase() === actor.empId!.toLowerCase()) &&
+      !signedEarlierStep(rowSteps, step, actor.empId)
+    ) {
+      checker ??= await bossSignerChecker(tenantId)
+      mine = !(await checker({ exclude: [...requesters, ...earlierSigners(rowSteps, step)], stepCandidateEmpIds: stepCandidates(step) }))
+    }
     if (!mine && !wantAll) continue
     picked.push({ row, step, total: rowSteps.filter((s) => s.round === step.round).length, mine })
   }

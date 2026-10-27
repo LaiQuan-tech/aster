@@ -230,13 +230,15 @@ describe("C. 老闆關不准 HR 代簽；其他關照舊", () => {
     expect(stepRows(f.id)[0]).toMatchObject({ approver_emp_id: MGR_ID, acted_by_emp_id: HR_ID })
   })
 
-  it("老闆關：hr_admin 403；HR 改派老闆關給特定人後，platform_admin 仍可簽（保留）", async () => {
+  it("老闆關：hr_admin 403；HR 也不能改派老闆關（安全驗收 H1）；platform_admin 改派給老闆後，platform_admin 仍可簽", async () => {
     const f = await file(T.staff, PETTY)
     await post(`/requests/${f.id}/approve`, T.mgr).send({})
     const hr = await post(`/requests/${f.id}/approve`, T.hr).send({})
     expect([hr.status, hr.body.error]).toEqual([403, "not_current_approver"])
     const change = await post(`/requests/${f.id}/change-approver`, T.hr).send({ approverEmpId: ACC_ID })
-    expect(change.status, JSON.stringify(change.body)).toBe(200)
+    expect([change.status, change.body.error]).toEqual([403, "boss_step_boss_only"])
+    const byPa = await post(`/requests/${f.id}/change-approver`, T.pa).send({ approverEmpId: BOSS_ID })
+    expect(byPa.status, JSON.stringify(byPa.body)).toBe(200)
     const pa = await post(`/requests/${f.id}/approve`, T.pa).send({})
     expect(pa.status, JSON.stringify(pa.body)).toBe(200)
     expect(requestRow(f.id).status).toBe("approved")

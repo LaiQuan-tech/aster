@@ -326,7 +326,8 @@ describe("放款付款公司／收據抬頭 × 停用公司", () => {
     const res = await as(request(app).patch(`/disbursements/${DISB_ID}`)).send({ note: "改個備註" })
 
     expect(res.status).toBe(200)
-    expect(disbursementUpdates()).toHaveLength(1)
+    // 兩次條件寫入：先佔住草稿（updated_at＋編輯人，安全驗收 M2），再寫單頭。
+    expect(disbursementUpdates()).toHaveLength(2)
     expect(storedDisbursement()).toMatchObject({ paying_company_id: C_INACTIVE, note: "改個備註" })
   })
 

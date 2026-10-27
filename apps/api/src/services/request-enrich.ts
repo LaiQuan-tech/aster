@@ -18,7 +18,9 @@
  */
 import { supabaseAdmin } from "../lib/supabase.js"
 import { approvalStepsHaveCandidates, isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
-import { stepCandidates, stepSelectCols } from "./approval-steps.js"
+import { isBossStep, stepCandidates, stepSelectCols } from "./approval-steps.js"
+import { bossSignerChecker } from "../lib/boss.js"
+import { logger } from "../lib/logger.js"
 
 export interface EnrichStep {
   step_order: number
@@ -105,6 +107,11 @@ export interface EnrichedFields {
   current_approver_name: string | null
   /** 現行關卡來源（manager／hr／list／fallback／hr_admin）；舊列或無關卡為 null。 */
   current_step_kind: string | null
+  /**
+   * 現行關卡是待簽的老闆關，且找不到任何非申請人、在職、沒簽過前面關卡的老闆／平台管理員 → true：
+   * HR 可代簽這一關（2026-10-27 安全驗收 L3；web 據此才顯示「代理簽核」）。只是畫面提示，後端核准時會再精確判斷一次。
+   */
+  boss_step_hr_fallback: boolean
   /** 整條簽核鏈（依 step_order），每關含候選與姓名。 */
   steps: EnrichedStep[]
   /** rejected → 駁回那一關的意見；approved → 最後一關核准的意見；其餘 null。 */
@@ -192,6 +199,7 @@ export function mergeEnrichment<T extends EnrichableRow>(
       current_approver_names: candidateNames,
       current_approver_name: formatApproverNames(candidateNames, current?.step_kind ?? null),
       current_step_kind: current?.step_kind ?? null,
+      boss_step_hr_fallback: false,
       steps: steps.map((s) => {
         const ids = stepCandidates(s)
         return {
@@ -371,5 +379,19 @@ export async function enrichRequestRows<T extends EnrichableRow>(
   }
   const employeesById = await loadEmployees(tenantId, Array.from(employeeIds))
 
-  return mergeEnrichment(rows, { employeesById, leaveTypesById, attachmentCountByRequest, stepsByRequest, departmentNameById })
+  const merged = mergeEnrichment(rows, { employeesById, leaveTypesById, attachmentCountByRequest, stepsByRequest, departmentNameById })
+  // L3：待簽老闆關有沒有人能簽（沒有 → HR 可代簽）。只對「現行關卡是待簽老闆關」的列查，平台管理員／老闆只查一次。
+  const bossRows = merged.filter((r) => r.status === "pending" && isBossStep({ step_kind: r.current_step_kind }))
+  if (bossRows.length > 0) {
+    try {
+      const check = await bossSignerChecker(tenantId)
+      for (const r of bossRows) {
+        const earlier = r.steps.filter((s) => s.step_order < r.current_step && s.decision === "approved").map((s) => s.approver_emp_id)
+        r.boss_step_hr_fallback = !(await check({ exclude: [r.employee_id, ...earlier], stepCandidateEmpIds: r.current_candidate_emp_ids }))
+      }
+    } catch (err) {
+      logger.warn({ err, tenantId }, "enrich requests: boss-step signer check failed — boss_step_hr_fallback left false")
+    }
+  }
+  return merged
 }

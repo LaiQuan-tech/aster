@@ -60,6 +60,8 @@ export const disbursements = pgTable(
     submittedAt: timestamp("submitted_at", { withTimezone: true }),
     submittedByEmpId: uuid("submitted_by_emp_id"),
     approvedAt: timestamp("approved_at", { withTimezone: true }),
+    /** 曾編輯過草稿（PATCH）的人（migration 0080）；與建單人、送簽人同樣算「自己的單」，不能簽也不能改派。 */
+    editedByEmpIds: uuid("edited_by_emp_ids").array().notNull().default([]),
     /** 'vendor' 廠商 | 'other' 其他（自由文字收款方，無主檔）。 */
     payeeKind: text("payee_kind").notNull(),
     vendorId: uuid("vendor_id").references(() => vendors.id),
