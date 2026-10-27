@@ -138,7 +138,7 @@ export default function ClientsPage() {
   );
 
   /** 第一欄（簡稱）凍結：沒填簡稱時以灰字帶出公司名稱，捲到右邊仍認得是哪一家。 */
-  const stickyCell = "sticky left-0 z-10 bg-white";
+  const stickyCell = "sticky left-0 z-10 bg-white group-hover:bg-gray-50";
 
   return (
     <>
@@ -173,21 +173,21 @@ export default function ClientsPage() {
           <div className="overflow-x-auto">
             <table className="w-max min-w-full text-sm">
               <thead>
-                <tr className="border-b text-left text-xs text-gray-500">
+                <tr className="border-b border-gray-200 bg-gray-50 text-left text-xs font-medium text-gray-600">
                   {CLIENT_EXCEL_COLUMNS.map((col, i) => (
-                    <th key={col.key} scope="col" className={`whitespace-nowrap py-2 pr-3 ${i === 0 ? `${stickyCell} pl-1` : ""}`}>{col.header}</th>
+                    <th key={col.key} scope="col" className={`whitespace-nowrap py-2 pr-3 ${i === 0 ? "sticky left-0 z-10 bg-gray-50 pl-2" : ""}`}>{col.header}</th>
                   ))}
-                  <th scope="col" className="sticky right-0 z-10 bg-white py-2 pl-3"><span className="sr-only">操作</span></th>
+                  <th scope="col" className="sticky right-0 z-10 bg-gray-50 py-2 pl-3 pr-2"><span className="sr-only">操作</span></th>
                 </tr>
               </thead>
               <tbody>
                 {shown.map((c) => (
-                  <tr key={c.id} className="border-b align-top last:border-0">
+                  <tr key={c.id} className="group border-b border-gray-100 align-top last:border-0 hover:bg-gray-50">
                     {CLIENT_EXCEL_COLUMNS.map((col, i) => {
                       const value = clientCellText(c, col.key, PAYMENT_METHOD_LABELS);
                       if (i === 0) {
                         return (
-                          <th key={col.key} scope="row" className={`${stickyCell} whitespace-nowrap py-2 pl-1 pr-3 text-left font-medium text-gray-900`}>
+                          <th key={col.key} scope="row" className={`${stickyCell} whitespace-nowrap py-2 pl-2 pr-3 text-left font-medium text-gray-900`}>
                             {value || <span className="font-normal text-gray-400" title="未填簡稱，顯示公司名稱">{c.name}</span>}
                           </th>
                         );
@@ -212,7 +212,7 @@ export default function ClientsPage() {
                         </td>
                       );
                     })}
-                    <td className="sticky right-0 z-10 whitespace-nowrap bg-white py-2 pl-3 text-right">
+                    <td className="sticky right-0 z-10 whitespace-nowrap bg-white py-2 pl-3 pr-2 text-right group-hover:bg-gray-50">
                       <button type="button" onClick={() => startEdit(c)} className="mr-3 text-xs text-gray-600 hover:underline">編輯</button>
                       {canSetAffiliate && (
                         <button type="button" onClick={() => void remove(c)} className="text-xs text-gray-400 hover:text-red-600">刪除</button>

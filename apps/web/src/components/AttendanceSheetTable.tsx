@@ -246,11 +246,11 @@ export function AttendanceSheetTable({
         </div>
       )}
 
-      <div className="overflow-x-auto rounded-xl border border-gray-100">
+      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
         {/* 最小寬 900px（原 1180px）：內容／外出／備註欄可換行，1280px 桌機後台不需左右捲動；手機仍可橫捲。 */}
-        <table className="w-full min-w-[900px] text-left text-sm">
+        <table className="w-full min-w-[900px] text-left text-[13px] leading-[1.4] text-gray-900">
           <thead>
-            <tr className="border-b border-gray-200 bg-gray-50/60 text-xs text-gray-500">
+            <tr className="border-b border-gray-200 bg-gray-50 text-xs font-medium text-gray-600">
               <th className="py-2 pl-3 pr-2">日期</th>
               <th className="py-2 pr-2">星期</th>
               <th className="py-2 pr-2">起</th>
@@ -348,7 +348,7 @@ function DayRow({
   const hasOverride = day.overtime.override != null;
   const beyondCap = day.overtime.beyondCap ?? 0;
   return (
-    <tr className={`border-b border-gray-50 align-top ${rowTone(day, noPunch)}${hidden ? " hidden print:table-row" : ""}`}>
+    <tr className={`border-b border-gray-100 align-top ${rowTone(day, noPunch) || "hover:bg-gray-50"}${hidden ? " hidden print:table-row" : ""}`}>
       <td className="whitespace-nowrap py-2 pl-3 pr-2 tabular-nums">{day.date}</td>
       <td className="py-2 pr-2">{weekdayLabel(day.date)}</td>
       <td className="py-2 pr-2 tabular-nums">{hhmm(day.firstIn)}</td>

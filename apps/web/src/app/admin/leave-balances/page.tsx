@@ -29,6 +29,7 @@ import {
   getEmployeeLeaveRegister,
   type EmployeeLeaveRegister,
 } from "@/lib/leave-register-api";
+import { sheet } from "@/lib/sheet-styles";
 
 const yearNow = new Date().getFullYear();
 const tabs = [
@@ -397,39 +398,39 @@ export default function LeaveBalancesPage() {
           ) : !leaveRegister ? (
             <Empty>查無員工資料</Empty>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full border-collapse text-sm">
+            <div className={sheet.frame}>
+              <table className={`min-w-full ${sheet.table}`}>
                 <thead>
-                  <tr className="bg-gray-50 text-xs text-gray-700">
-                    <th className="border border-black px-3 py-2 text-center font-medium">月份</th>
+                  <tr>
+                    <th className={sheet.th}>月份</th>
                     {leaveRegister.register.leaveTypes.map((type) => (
-                      <th key={type.id} className="border border-black px-3 py-2 text-center font-medium">{type.name}</th>
+                      <th key={type.id} className={sheet.th}>{type.name}</th>
                     ))}
-                    <th className="border border-black px-3 py-2 text-center font-medium">合計</th>
+                    <th className={sheet.th}>合計</th>
                   </tr>
                 </thead>
                 <tbody>
                   {leaveRegister.register.months.map((month) => (
-                    <tr key={month.month}>
-                      <td className="border border-black px-3 py-2 text-center">{month.month}月</td>
+                    <tr key={month.month} className={sheet.row}>
+                      <td className={`${sheet.td} text-center`}>{month.month}月</td>
                       {leaveRegister.register.leaveTypes.map((type) => (
-                        <td key={type.id} className="border border-black px-3 py-2 text-center whitespace-nowrap">
+                        <td key={type.id} className={`${sheet.td} text-center tabular-nums whitespace-nowrap`}>
                           {formatLeaveDuration(month.hoursByType[type.id] ?? 0, registerPerDay)}
                         </td>
                       ))}
-                      <td className="border border-black px-3 py-2 text-center font-medium whitespace-nowrap">
+                      <td className={`${sheet.td} text-center font-medium tabular-nums whitespace-nowrap`}>
                         {formatLeaveDuration(month.totalHours, registerPerDay)}
                       </td>
                     </tr>
                   ))}
-                  <tr className="bg-gray-50 font-semibold">
-                    <td className="border border-black px-3 py-2 text-center">總計</td>
+                  <tr className={sheet.totalRow}>
+                    <td className={`${sheet.td} text-center`}>總計</td>
                     {leaveRegister.register.leaveTypes.map((type) => (
-                      <td key={type.id} className="border border-black px-3 py-2 text-center whitespace-nowrap">
+                      <td key={type.id} className={`${sheet.td} text-center tabular-nums whitespace-nowrap`}>
                         {formatLeaveDuration(leaveRegister.register.totals.hoursByType[type.id] ?? 0, registerPerDay)}
                       </td>
                     ))}
-                    <td className="border border-black px-3 py-2 text-center whitespace-nowrap">
+                    <td className={`${sheet.td} text-center tabular-nums whitespace-nowrap`}>
                       {formatLeaveDuration(leaveRegister.register.totals.totalHours, registerPerDay)}
                     </td>
                   </tr>

@@ -1,5 +1,6 @@
 "use client";
 
+import { sheet } from "@/lib/sheet-styles";
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { listVendors, type Vendor } from "@/lib/company-api";
@@ -85,40 +86,40 @@ export function ApplicationDocument({
       {/* M17：合約與印花稅。合約本體在專案明細頁維護，這裡只印摘要。 */}
       {contracts && (
         <section className={`mt-4 rounded-2xl border border-gray-200 bg-white p-3 sm:p-5 print:mt-3 print:rounded-none print:border-0 print:p-0 ${contractsOn ? "" : "no-print opacity-40"}`} data-testid="application-contracts">
-          <h2 className="mb-1 flex items-center gap-2 text-xs font-semibold text-gray-700">
+          <h2 className={`mb-2 flex items-center gap-2 ${sheet.title}`}>
             合約與印花稅
             {!contractsOn && <span className="no-print rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-normal text-amber-700">列印時不印</span>}
           </h2>
           {contracts.length === 0 ? (
-            <p className="text-[11px] text-gray-500">尚無合約或報價單。</p>
+            <p className="text-sm text-gray-500">尚無合約或報價單。</p>
           ) : (
-            <div className="overflow-x-auto print:overflow-visible">
-              <table className="w-full border-collapse border border-gray-400 text-center text-[11px]">
+            <div className={`${sheet.frame} print:overflow-visible`}>
+              <table className={`${sheet.table} text-center`}>
                 <thead>
-                  <tr className="bg-gray-50 print:bg-gray-100">
-                    <th className="border border-gray-400 px-2 py-1">類型</th>
-                    <th className="border border-gray-400 px-2 py-1">名稱</th>
-                    <th className="border border-gray-400 px-2 py-1">對方</th>
-                    <th className="border border-gray-400 px-2 py-1">我方角色</th>
-                    <th className="border border-gray-400 px-2 py-1 text-right">金額</th>
-                    <th className="border border-gray-400 px-2 py-1">簽訂日</th>
-                    <th className="border border-gray-400 px-2 py-1">印花稅率</th>
-                    <th className="border border-gray-400 px-2 py-1 text-right">印花稅額</th>
-                    <th className="border border-gray-400 px-2 py-1">貼花</th>
+                  <tr>
+                    <th className={sheet.th}>類型</th>
+                    <th className={sheet.th}>名稱</th>
+                    <th className={sheet.th}>對方</th>
+                    <th className={sheet.th}>我方角色</th>
+                    <th className={`${sheet.th} !text-right`}>金額</th>
+                    <th className={sheet.th}>簽訂日</th>
+                    <th className={sheet.th}>印花稅率</th>
+                    <th className={`${sheet.th} !text-right`}>印花稅額</th>
+                    <th className={sheet.th}>貼花</th>
                   </tr>
                 </thead>
                 <tbody>
                   {contracts.map((c) => (
-                    <tr key={c.id}>
-                      <td className="border border-gray-400 px-2 py-1">{DOC_TYPE_LABELS[c.docType]}</td>
-                      <td className="border border-gray-400 px-2 py-1 text-left">{c.title || "—"}</td>
-                      <td className="border border-gray-400 px-2 py-1">{c.counterparty || "—"}</td>
-                      <td className="border border-gray-400 px-2 py-1">{OUR_ROLE_SHORT_LABELS[c.ourRole]}</td>
-                      <td className="border border-gray-400 px-2 py-1 text-right">{fmtMoney(c.amount)}</td>
-                      <td className="border border-gray-400 px-2 py-1">{c.signedOn ?? "—"}</td>
-                      <td className="border border-gray-400 px-2 py-1">{c.dutiable ? formatDutyRate(c.stampDutyRate) : "不課"}</td>
-                      <td className="border border-gray-400 px-2 py-1 text-right">{c.dutiable ? fmtMoney(c.stampDutyAmount) : "—"}</td>
-                      <td className="border border-gray-400 px-2 py-1">
+                    <tr key={c.id} className={sheet.row}>
+                      <td className={sheet.td}>{DOC_TYPE_LABELS[c.docType]}</td>
+                      <td className={`${sheet.td} text-left`}>{c.title || "—"}</td>
+                      <td className={sheet.td}>{c.counterparty || "—"}</td>
+                      <td className={sheet.td}>{OUR_ROLE_SHORT_LABELS[c.ourRole]}</td>
+                      <td className={`${sheet.td} ${sheet.num}`}>{fmtMoney(c.amount)}</td>
+                      <td className={sheet.td}>{c.signedOn ?? "—"}</td>
+                      <td className={sheet.td}>{c.dutiable ? formatDutyRate(c.stampDutyRate) : "不課"}</td>
+                      <td className={`${sheet.td} ${sheet.num}`}>{c.dutiable ? fmtMoney(c.stampDutyAmount) : "—"}</td>
+                      <td className={sheet.td}>
                         {!c.dutiable ? "—" : c.stampDutyPaidOn ? `已貼 ${c.stampDutyPaidOn}` : "未貼"}
                       </td>
                     </tr>

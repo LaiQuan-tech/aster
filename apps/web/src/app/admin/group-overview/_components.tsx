@@ -396,7 +396,7 @@ export function CompanyTable({
             )}
           </tbody>
           <tfoot>
-            <tr className="border-t-2 border-gray-800 font-semibold">
+            <tr className="border-t border-gray-300 bg-gray-50 font-semibold">
               <td className="py-2 pr-3">
                 集團合計
                 <span className="ml-2 text-xs font-normal text-gray-500">（已剔除關係企業往來，不含未納入的公司；人事含未指派）</span>
@@ -600,7 +600,7 @@ export function TrendCard({
               ))}
             </tbody>
             <tfoot>
-              <tr className="border-t-2 border-gray-800 font-semibold">
+              <tr className="border-t border-gray-300 bg-gray-50 font-semibold">
                 <td className="py-2 pr-3">全年</td>
                 <td className="py-2 pr-3 text-right">{fmtMoney(total((p) => p.revenue))}</td>
                 <td className="py-2 pr-3 text-right text-gray-500">{fmtMoney(total((p) => p.invoiced))}</td>

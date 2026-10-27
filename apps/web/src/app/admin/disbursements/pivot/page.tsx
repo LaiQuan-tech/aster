@@ -166,7 +166,7 @@ export default function DisbursementPivotPage() {
                 ))}
               </tbody>
               <tfoot>
-                <tr className="border-t-2 border-gray-800 font-semibold">
+                <tr className="border-t border-gray-300 bg-gray-50 font-semibold">
                   <td className="py-2 pr-2">合計（{pivot.rows.length} {groupLabel}）</td>
                   {pivot.totals.months.map((m, i) => (
                     <td key={i} className="whitespace-nowrap py-2 pr-1.5 text-right tabular-nums">

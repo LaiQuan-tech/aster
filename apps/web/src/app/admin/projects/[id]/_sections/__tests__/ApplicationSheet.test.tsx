@@ -153,7 +153,7 @@ describe("申請單表格：權限與提示", () => {
 })
 
 describe("申請單表格：唯讀情境", () => {
-  it("列印模式：沒有任何輸入框、沒有淡黃底", () => {
+  it("列印模式：沒有任何輸入框、沒有可填格標記", () => {
     const html = render({ mode: "print" })
     expect(html).not.toContain("<input")
     expect(html).not.toContain("data-editable")

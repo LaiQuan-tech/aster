@@ -1,13 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { GridCell, StatementGrid } from "@/lib/statements-api";
 import { FitModeBar, resolveFit, useFitMode } from "@/components/FitToWidth";
-import { dominantFontPt, ptToPx } from "@/lib/fit-zoom";
+import { gridBannerRows, gridCellWebStyle } from "@/lib/sheet-styles";
 import {
-  BORDER_PX,
-  STATEMENT_FONT_STACK,
-  borderCss,
   columnPx,
   coveredPositions,
   gridGeometry,
@@ -17,7 +14,9 @@ import {
 
 /**
  * 出勤統計表／薪資明細表：照 API 給的格線（StatementGrid）畫 HTML table，重現公司 Excel 的版面——
- * 欄寬、列高、合併（colSpan/rowSpan）、細／中／粗框線、字級、粗體、底色、對齊、數字格式（API 已格式化）。
+ * 欄寬、列高、合併（colSpan/rowSpan）、對齊、數字格式（API 已格式化）照原檔；視覺（字型、字級、框線、底色）
+ * 2026-10-27 起改成後台樣式（lib/sheet-styles.ts gridCellWebStyle）：無襯線字、表頭淡灰底、1px 灰框線、
+ * 原黃底強調格改品牌淡底。PDF 下載（lib/statement-pdf.ts）維持原 Excel 樣式不變。
  *
  * 寬度：桌機照 Excel 等比例（欄寬 × 8px）；`fit` 時縮放到容器寬（手機員工端）；
  * `fitControl`（後台）時預設「符合寬度」縮到容器寬、可切「實際大小」（記住選擇），縮到字太小才水平捲動；
@@ -37,29 +36,6 @@ const PRINT_CSS = `
 
 /** A4 直式扣掉 10mm 邊界的可印寬度（96dpi）。 */
 const A4_PRINTABLE_PX = Math.floor((190 / 25.4) * 96);
-
-function cellStyle(cell: GridCell, fontStack: string): CSSProperties {
-  const b = cell.border ?? {};
-  const side = (s?: keyof typeof BORDER_PX) => borderCss(s);
-  const numeric = typeof cell.value === "number";
-  return {
-    borderTop: side(b.top),
-    borderBottom: side(b.bottom),
-    borderLeft: side(b.left),
-    borderRight: side(b.right),
-    fontSize: `${cell.size ?? 12}pt`,
-    fontWeight: cell.bold ? 700 : 400,
-    fontFamily: fontStack,
-    textAlign: cell.align ?? (numeric ? "right" : "left"),
-    background: cell.fill,
-    color: cell.negative ? "#c00000" : (cell.color ?? "#000"),
-    whiteSpace: cell.wrap ? "normal" : "nowrap",
-    overflow: "visible",
-    padding: "0 3px",
-    verticalAlign: "middle",
-    lineHeight: 1.15,
-  };
-}
 
 export function StatementTable({
   grid,
@@ -81,6 +57,7 @@ export function StatementTable({
   const covered = useMemo(() => coveredPositions(grid), [grid]);
   const byPos = useMemo(() => new Map<string, GridCell>(grid.cells.map((c) => [`${c.row}:${c.col}`, c])), [grid]);
   const rows = gridRowCount(grid);
+  const bannerRows = useMemo(() => gridBannerRows(grid.cells), [grid]);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
   const [containerPx, setContainerPx] = useState(0);
@@ -88,7 +65,8 @@ export function StatementTable({
   const [contentPx, setContentPx] = useState(0);
   const appliedZoomRef = useRef(1);
   const [fitMode, setFitMode] = useFitMode();
-  const baseFontPx = useMemo(() => ptToPx(dominantFontPt(grid.cells.map((c) => c.size))), [grid]);
+  // 畫面字級統一 13px（gridCellWebStyle），「字太小」的判斷照實際畫面字級算。
+  const baseFontPx = 13;
   const controlled = fitControl && !fit ? resolveFit(fitMode, Math.max(0, containerPx - 4), Math.max(geometry.width, contentPx), baseFontPx) : null;
 
   useEffect(() => {
@@ -97,7 +75,14 @@ export function StatementTable({
     const update = () => {
       const w = el.clientWidth;
       setContainerPx(w);
-      if (fitControl) setContentPx(Math.ceil(el.scrollWidth / (appliedZoomRef.current || 1)));
+      if (fitControl) {
+        // 內容實際寬：有溢出（scrollWidth > clientWidth）才用 scrollWidth；沒溢出時 scrollWidth 就等於容器寬，
+        // 拿它當內容寬會被誤判成「比畫面寬」而一路縮到最小字級（表比容器窄卻被縮成 56%），改量表格本身。
+        const z = appliedZoomRef.current || 1;
+        const table = el.querySelector("table");
+        const natural = el.scrollWidth > el.clientWidth + 1 ? el.scrollWidth : (table?.getBoundingClientRect().width ?? 0);
+        setContentPx(Math.ceil(natural / z));
+      }
       if (w > 0) setZoom(Math.min(1, w / geometry.width));
     };
     update();
@@ -129,7 +114,8 @@ export function StatementTable({
             width: geometry.width,
             zoom: appliedZoom,
             background: "#fff",
-            color: "#000",
+            printColorAdjust: "exact",
+            WebkitPrintColorAdjust: "exact",
           }}
         >
           <colgroup>
@@ -150,7 +136,7 @@ export function StatementTable({
                       key={c}
                       rowSpan={cell.rowSpan}
                       colSpan={cell.colSpan}
-                      style={cellStyle(cell, STATEMENT_FONT_STACK)}
+                      style={gridCellWebStyle(cell, { banner: r < bannerRows, bannerTitle: r === 0 })}
                       data-money={cell.money ? "1" : undefined}
                     >
                       {cell.text}

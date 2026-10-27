@@ -35,11 +35,12 @@ import {
 } from "./project-application-form";
 import { RoleSharePctInputs, RoleShareReadOnlyBadge } from "./RoleSharePctCard";
 import { roleSharePctDraftOf, type RoleSharePct } from "@/lib/project-share-calculation";
+import { sheet } from "@/lib/sheet-styles";
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="border border-slate-300">
-      <h3 className="border-b border-slate-300 bg-cyan-50 px-4 py-2 text-center text-base font-bold tracking-[0.18em] text-slate-800">
+    <section className="overflow-hidden rounded-lg border border-gray-200">
+      <h3 className="border-b border-gray-200 bg-gray-50 px-4 py-2 text-sm font-semibold text-gray-900">
         {title}
       </h3>
       <div className="p-4">{children}</div>
@@ -171,10 +172,10 @@ export function ProjectApplicationForm({
 
   return (
     <form onSubmit={submit} className="space-y-4">
-      <div className="border-b-2 border-slate-800 pb-3 text-slate-900">
+      <div className="border-b border-gray-200 pb-3 text-gray-900">
         <div className="flex flex-wrap items-end justify-between gap-2">
           <div>
-            <p className="text-2xl font-black tracking-wide text-[#1f4f7a]">ASTER</p>
+            <img src="/brand/aster-logo.svg" alt="ASTER" className="h-6 w-auto" />
             {/* 左上角：這案由哪間公司承接（名冊 → 公司主體）。只有一間也照樣顯示成只有一個選項的下拉。 */}
             <label className={`${labelCls} mt-1`} htmlFor="project-company">承接公司</label>
             <select
@@ -193,7 +194,7 @@ export function ProjectApplicationForm({
               )}
             </select>
           </div>
-          <h2 className="text-xl font-bold tracking-[0.2em]">專案申請單</h2>
+          <h2 className={sheet.title}>專案申請單</h2>
           <div className="grid grid-cols-[auto_12rem] items-center gap-2 text-sm">
             <span>開案日期</span>
             <input className={inputCls} type="date" value={draft.openedOn} onChange={(event) => patch("openedOn", event.target.value)} />
@@ -272,10 +273,10 @@ export function ProjectApplicationForm({
 
       {visibility.showFinanceFields ? (
         <Section title="銷售金額">
-          <div className="grid grid-cols-1 overflow-hidden border border-slate-300 text-center sm:grid-cols-3">
-            <label className="border-b border-slate-300 sm:border-b-0 sm:border-r"><span className="block bg-slate-50 px-3 py-2 font-semibold">合約金額（未稅）</span><input className="w-full border-t border-slate-300 px-3 py-3 text-right" type="number" min="0" value={draft.contractAmount} onChange={(event) => patch("contractAmount", event.target.value)} placeholder="可直接輸入" /></label>
-            <div className="border-b border-slate-300 sm:border-b-0 sm:border-r"><span className="block bg-slate-50 px-3 py-2 font-semibold">營業稅（{vatRate * 100}%）</span><p className="px-3 py-3 text-right tabular-nums">{money(amounts.taxAmount)}</p></div>
-            <div><span className="block bg-slate-50 px-3 py-2 font-semibold">含稅總額</span><p className="px-3 py-3 text-right font-semibold tabular-nums">{money(amounts.amountTotal)}</p></div>
+          <div className="grid grid-cols-1 overflow-hidden rounded-lg border border-gray-300 text-center text-[13px] sm:grid-cols-3">
+            <label className="border-b border-gray-200 sm:border-b-0 sm:border-r"><span className="block bg-gray-50 px-3 py-2 text-xs font-medium text-gray-600">合約金額（未稅）</span><input className="w-full border-t border-gray-200 px-3 py-3 text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[var(--brand)]" type="number" min="0" value={draft.contractAmount} onChange={(event) => patch("contractAmount", event.target.value)} placeholder="可直接輸入" /></label>
+            <div className="border-b border-gray-200 sm:border-b-0 sm:border-r"><span className="block bg-gray-50 px-3 py-2 text-xs font-medium text-gray-600">營業稅（{vatRate * 100}%）</span><p className="px-3 py-3 text-right tabular-nums">{money(amounts.taxAmount)}</p></div>
+            <div><span className="block bg-gray-50 px-3 py-2 text-xs font-medium text-gray-600">含稅總額</span><p className="px-3 py-3 text-right font-semibold tabular-nums">{money(amounts.amountTotal)}</p></div>
           </div>
         </Section>
       ) : null}
@@ -287,13 +288,13 @@ export function ProjectApplicationForm({
             <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-700">一般期款合計 {money(schedule.effectiveTotal)}</span>
             {schedule.rows.some((row) => row.residueApplied !== 0) ? <span className="rounded-full bg-amber-50 px-3 py-1 text-amber-700">末期已吸收尾差</span> : null}
           </div>
-          <div className="overflow-x-auto">
-            <table className="min-w-[980px] w-full border-collapse text-sm">
-              <thead><tr className="bg-slate-50"><th className="border border-slate-300 p-2">期別</th><th className="border border-slate-300 p-2">名稱</th><th className="border border-slate-300 p-2">%</th><th className="border border-slate-300 p-2">預估金額</th><th className="border border-slate-300 p-2">指定金額</th><th className="border border-slate-300 p-2">指定理由</th><th className="border border-slate-300 p-2">預計日</th><th className="border border-slate-300 p-2">備註</th></tr></thead>
+          <div className={sheet.frame}>
+            <table className={`min-w-[980px] ${sheet.table}`}>
+              <thead><tr><th className={`${sheet.th} whitespace-nowrap`}>期別</th><th className={`${sheet.th} whitespace-nowrap`}>名稱</th><th className={`${sheet.th} whitespace-nowrap`}>%</th><th className={`${sheet.th} whitespace-nowrap`}>預估金額</th><th className={`${sheet.th} whitespace-nowrap`}>指定金額</th><th className={`${sheet.th} whitespace-nowrap`}>指定理由</th><th className={`${sheet.th} whitespace-nowrap`}>預計日</th><th className={`${sheet.th} whitespace-nowrap`}>備註</th></tr></thead>
               <tbody>{draft.billings.map((row, index) => {
                 const computed = schedule.rows.find((item) => item.installmentNo === row.installmentNo);
                 const update = (next: Partial<(typeof draft.billings)[number]>) => patch("billings", draft.billings.map((item, rowIndex) => rowIndex === index ? { ...item, ...next } : item));
-                return <tr key={row.installmentNo}><td className="border border-slate-300 p-2 text-center">{row.installmentNo}</td><td className="border border-slate-300 p-1"><input className={inputCls} value={row.milestone} onChange={(event) => update({ milestone: event.target.value })} /></td><td className="border border-slate-300 p-1"><input className={inputCls} type="number" min="0" max="100" step="any" value={row.percentage} onChange={(event) => update({ percentage: event.target.value })} /></td><td className={`border border-slate-300 p-2 text-right tabular-nums ${(computed?.effectiveAmount ?? 0) < 0 ? "bg-red-50 text-red-700" : ""}`}>{money(computed?.effectiveAmount ?? null)}{computed?.residueApplied ? <span className="ml-1 block text-[10px] text-amber-700">尾差 {computed.residueApplied > 0 ? "+" : ""}{computed.residueApplied.toLocaleString()}</span> : null}</td><td className="border border-slate-300 p-1"><input className={inputCls} type="number" min="0" value={row.overrideAmount} onChange={(event) => update({ overrideAmount: event.target.value })} /></td><td className="border border-slate-300 p-1"><input className={inputCls} value={row.overrideReason} onChange={(event) => update({ overrideReason: event.target.value })} /></td><td className="border border-slate-300 p-1"><input className={inputCls} type="date" value={row.plannedOn} onChange={(event) => update({ plannedOn: event.target.value })} /></td><td className="border border-slate-300 p-1"><input className={inputCls} value={row.note} onChange={(event) => update({ note: event.target.value })} /></td></tr>;
+                return <tr key={row.installmentNo} className={sheet.row}><td className={`${sheet.td} text-center tabular-nums`}>{row.installmentNo}</td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.milestone} onChange={(event) => update({ milestone: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} type="number" min="0" max="100" step="any" value={row.percentage} onChange={(event) => update({ percentage: event.target.value })} /></td><td className={`${sheet.td} ${sheet.num} ${(computed?.effectiveAmount ?? 0) < 0 ? "bg-red-50 text-red-700" : ""}`}>{money(computed?.effectiveAmount ?? null)}{computed?.residueApplied ? <span className="ml-1 block text-[10px] text-amber-700">尾差 {computed.residueApplied > 0 ? "+" : ""}{computed.residueApplied.toLocaleString()}</span> : null}</td><td className={`${sheet.td} !p-1`}><input className={sheet.input} type="number" min="0" value={row.overrideAmount} onChange={(event) => update({ overrideAmount: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.overrideReason} onChange={(event) => update({ overrideReason: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} type="date" value={row.plannedOn} onChange={(event) => update({ plannedOn: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.note} onChange={(event) => update({ note: event.target.value })} /></td></tr>;
               })}</tbody>
             </table>
           </div>

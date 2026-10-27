@@ -75,24 +75,20 @@ import {
   type SheetSaveStep,
 } from "@/lib/project-application-sheet-save";
 
+import { sheet } from "@/lib/sheet-styles";
 import { selectedCompanyId } from "../../_components/project-application-form";
 import { fmtMoney, humanError } from "./shared";
 
-/** Word 原檔的淺藍底（shd DAEEF3）。 */
-const SHADE = "#DAEEF3";
-/** Word 原檔字型是標楷體；沒有就退回系統楷體／襯線。 */
-const SHEET_FONT = '"DFKai-SB", "BiauKai", "標楷體", "Kaiti TC", "STKaiti", serif';
 const GRID_TEMPLATE = APPLICATION_SHEET_COLUMNS.map((w) => `minmax(0, ${w}fr)`).join(" ");
 
 /**
- * 可編輯格子的底色（淡黃，像 Excel 的輸入格）：一眼分得出「可以填」與「系統算的／唯讀」（白底）。
- * 標題格維持 Word 的淺藍底。列印模式不套（editable=false）。
+ * 格子內的輸入框（2026-10-27 起跟後台輸入框同一套淡框＋品牌色聚焦，lib/sheet-styles.ts）：
+ * 可填的格子裡一定有這個框，一眼分得出「可以填」與「系統算的／唯讀」（沒有框）。列印模式沒有輸入框。
  */
-const EDITABLE_BG = "#FFF9E0";
-
-/** 格子內的輸入框：白底細框，看得出是輸入框；滑過加深、聚焦換品牌色外框。 */
-const cellInput =
-  "w-full min-w-0 rounded-sm border border-amber-200 bg-white/90 px-1 py-0.5 text-[13px] text-gray-900 placeholder:text-gray-300 hover:border-amber-400 hover:bg-white focus:border-[var(--brand)] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[var(--brand)]/20 disabled:cursor-not-allowed disabled:opacity-60";
+const cellInput = sheet.input;
+/** 格子裡的 ■／□ 選項鈕（可編輯時）：跟輸入框同樣的淡框。 */
+const cellChoice =
+  "rounded-md border border-gray-300 bg-white px-1 hover:border-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]";
 
 type CellKind = "label" | "value" | "full";
 
@@ -129,13 +125,12 @@ function Cell({
   className?: string;
   children?: ReactNode;
   testId?: string;
-  /** 這格可以直接填（淡黃底）。 */
+  /** 這格可以直接填（格內有淡框輸入框；data-editable 給測試／樣式用）。 */
   editable?: boolean;
 }) {
   const style = {
     "--gc": `${col} / span ${span}`,
     "--gr": `${row} / span ${rowSpan}`,
-    backgroundColor: shade ? SHADE : editable ? EDITABLE_BG : undefined,
   } as CSSProperties;
   const place = kind === "label" ? "col-start-1" : kind === "full" ? "col-span-2" : "col-start-2";
   // 列印時紙寬（A4 約 700px）比 md 斷點窄，所以每個 md: 都要有對應的 print:，才會印出 Word 格線而不是手機堆疊。
@@ -150,7 +145,7 @@ function Cell({
       style={style}
       data-testid={testId}
       data-editable={editable ? "true" : undefined}
-      className={`${place} flex min-w-0 items-center border-b border-gray-300 bg-white px-1.5 py-1 text-[13px] leading-snug md:border-0 md:[grid-column:var(--gc)] md:[grid-row:var(--gr)] print:border-0 print:px-1 print:py-0.5 print:text-[11px] print:[grid-column:var(--gc)] print:[grid-row:var(--gr)] ${alignCls} ${kind === "label" ? "whitespace-pre text-gray-800" : ""} ${className}`}
+      className={`${place} flex min-w-0 items-center border-b border-gray-200 ${shade ? "bg-gray-50" : "bg-white"} px-2 py-1 text-[13px] leading-[1.4] md:border-0 md:[grid-column:var(--gc)] md:[grid-row:var(--gr)] print:border-0 print:px-1 print:py-0.5 print:text-[11px] print:[grid-column:var(--gc)] print:[grid-row:var(--gr)] ${alignCls} ${kind === "label" ? "whitespace-pre text-xs font-medium text-gray-600" : "text-gray-900"} ${className}`}
     >
       {children}
     </div>
@@ -182,7 +177,7 @@ function CheckBoxes<T extends string>({
             type="button"
             role="radio"
             aria-checked={checked}
-            className="rounded px-0.5 hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+            className={cellChoice}
             onClick={() => onChange(checked ? "" : o.value)}
           >
             {mark}{o.label}
@@ -241,7 +236,7 @@ interface ApplicationSheetProps {
 
 /**
  * 專案明細頁上半部：版面照公司 Word「專案申請單」（抬頭、專案明細表、付款階段、發包單位），
- * 整張表像 Excel 一樣在格子裡直接改（淡黃底＝可填），按「儲存申請單」一次存：
+ * 整張表像 Excel 一樣在格子裡直接改（格內有淡框輸入框＝可填），按「儲存申請單」一次存：
  * 專案欄位、客戶名冊（電話／發票地址／採購承辦／傳真／統編）、訂單與銷售金額（合約）、
  * 付款階段（請款期程＋開票／入帳）、發包單位（副委託），各自走既有 API 與權限、只送有變的部分
  * （lib/project-application-sheet-save.ts）。利潤、毛利率、營業稅、銷售總額是系統算的唯讀格。
@@ -396,7 +391,7 @@ export function ApplicationSheet({
     );
   }
 
-  /** 可直接填的格子（淡黃底）：唯讀計算格（營業稅、總額）與沒選客戶時的客戶欄位除外。 */
+  /** 可直接填的格子（格內有輸入框）：唯讀計算格（營業稅、總額）與沒選客戶時的客戶欄位除外。 */
   function fieldEditable(field: SheetField): boolean {
     if (!editable) return false;
     switch (field) {
@@ -459,7 +454,7 @@ export function ApplicationSheet({
         );
       case "clientName":
         return editable ? (
-          <div className="w-full [&_input]:max-w-none [&_input]:text-[13px]">
+          <div className="w-full [&_input]:max-w-none [&_input]:rounded-md [&_input]:px-1.5 [&_input]:py-0.5 [&_input]:text-[13px]">
             {/* 換客戶時清掉客戶欄位的修改（那些是改「原客戶」名冊用的）。 */}
             <ClientCombo clients={clientChoices} clientId={draft.clientId || null} onChange={(id) => setDraft((d) => ({ ...d, clientId: id ?? "", clientEdits: {} }))} />
           </div>
@@ -486,7 +481,7 @@ export function ApplicationSheet({
                     type="button"
                     role="radio"
                     aria-checked={o.checked}
-                    className="rounded-sm border border-amber-200 bg-white/90 px-1 hover:border-amber-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+                    className={cellChoice}
                     onClick={() => set("orderDocType", draft.orderDocType === o.type ? "" : o.type)}
                   >
                     <span aria-hidden="true">{o.checked ? "■" : "□"}</span>{o.label}{o.date ? ` ${o.date}` : ""}
@@ -648,7 +643,7 @@ export function ApplicationSheet({
       const key = `top-${r}-${i}`;
       if (cell.title) {
         cells.push(
-          <Cell key={key} col={start} span={cell.span} row={r + 1} kind="full" shade align="center" className="justify-center py-1.5 text-base font-bold tracking-[0.3em]">
+          <Cell key={key} col={start} span={cell.span} row={r + 1} kind="full" shade align="center" className="justify-center py-1.5 text-sm font-semibold text-gray-900">
             {cell.label}
           </Cell>,
         );
@@ -817,44 +812,44 @@ export function ApplicationSheet({
     <section aria-label="專案申請單" className="rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-5 print:rounded-none print:border-0 print:p-0 print:shadow-none" data-testid="application-sheet">
       {/* 存檔中整張鎖住：存完會用「剩下的草稿」取代，存檔期間打的字會被蓋掉。 */}
       <fieldset disabled={saving} className="m-0 min-w-0 border-0 p-0">
-      <div className="mx-auto w-full max-w-[960px] text-gray-900 print:max-w-none" style={{ fontFamily: SHEET_FONT }}>
-        {/* 抬頭：標誌＋「專案申請單 民國　年　月　日」、承接公司、工程名稱／專案序號 */}
-        <div className="flex flex-wrap items-end gap-x-6 gap-y-2">
-          <img src="/brand/aster-logo.svg" alt="" aria-hidden="true" className="h-7 w-auto" />
-          <h2 className="text-xl font-bold">專案申請單</h2>
-          <span className="flex flex-wrap items-center gap-1 text-base font-bold">
-            民國<span className="min-w-[2.5em] border-b border-gray-800 text-center">{opened?.year ?? ""}</span>年
-            <span className="min-w-[1.5em] border-b border-gray-800 text-center">{opened?.month ?? ""}</span>月
-            <span className="min-w-[1.5em] border-b border-gray-800 text-center">{opened?.day ?? ""}</span>日
+      <div className="mx-auto w-full max-w-[960px] text-gray-900 print:max-w-none">
+        {/* 抬頭（後台卡片標題樣式）：標誌＋「專案申請單 民國　年　月　日」、承接公司、工程名稱／專案序號 */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <img src="/brand/aster-logo.svg" alt="" aria-hidden="true" className="h-6 w-auto" />
+          <h2 className={sheet.title}>專案申請單</h2>
+          <span className="flex flex-wrap items-center gap-1 text-sm text-gray-600">
+            民國<span className="min-w-[2.5em] border-b border-gray-300 text-center text-gray-900 tabular-nums">{opened?.year ?? ""}</span>年
+            <span className="min-w-[1.5em] border-b border-gray-300 text-center text-gray-900 tabular-nums">{opened?.month ?? ""}</span>月
+            <span className="min-w-[1.5em] border-b border-gray-300 text-center text-gray-900 tabular-nums">{opened?.day ?? ""}</span>日
             {editable && (
-              <input aria-label="開案日期" type="date" className="ml-1 rounded border border-gray-300 px-1 py-0.5 font-sans text-xs font-normal" value={draft.openedOn} onChange={(e) => set("openedOn", e.target.value)} />
+              <input aria-label="開案日期" type="date" className={`${cellInput} ml-1 !w-auto text-xs`} value={draft.openedOn} onChange={(e) => set("openedOn", e.target.value)} />
             )}
           </span>
         </div>
-        <div className="mt-1 text-base" data-testid="application-company-name">
+        <div className="mt-1 text-sm text-gray-500" data-testid="application-company-name">
           {editable && companyChoices.length > 0 ? (
-            <select aria-label="承接公司" className="max-w-full rounded border border-transparent bg-transparent px-1 py-0.5 text-base hover:border-gray-300 focus:border-[var(--brand)] focus:outline-none" value={selectedCompanyId(draft.companyId, companies)} onChange={(e) => set("companyId", e.target.value)}>
+            <select aria-label="承接公司" className="max-w-full rounded-md border border-transparent bg-transparent px-1 py-0.5 text-sm text-gray-700 hover:border-gray-300 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-[var(--brand)]" value={selectedCompanyId(draft.companyId, companies)} onChange={(e) => set("companyId", e.target.value)}>
               {companyChoices.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
             </select>
           ) : (
             companyLabel
           )}
         </div>
-        <div className="mb-1 flex flex-wrap items-center justify-between gap-x-6 gap-y-1 text-base">
+        <div className="mb-2 mt-1 flex flex-wrap items-center justify-between gap-x-6 gap-y-1 text-sm">
           <label className="flex min-w-0 flex-1 items-center gap-1">
-            <span className="shrink-0">工程名稱：</span>
+            <span className="shrink-0 text-gray-600">工程名稱：</span>
             {editable ? (
-              <input aria-label="工程名稱" className={`${cellInput} text-base`} value={draft.name} onChange={(e) => set("name", e.target.value)} />
+              <input aria-label="工程名稱" className={`${cellInput} text-sm`} value={draft.name} onChange={(e) => set("name", e.target.value)} />
             ) : (
-              <span>{draft.name}</span>
+              <span className="font-medium text-gray-900">{draft.name}</span>
             )}
           </label>
-          <span className="shrink-0">專案序號：<span className="font-mono">{project.code ?? "—"}</span></span>
+          <span className="shrink-0 text-gray-600">專案序號：<span className="font-mono text-gray-900">{project.code ?? "—"}</span></span>
         </div>
 
-        {/* 專案明細表：外框雙線、內框單線（gap-px 露出底色當格線）。 */}
+        {/* 專案明細表：外框 gray-300、內框 1px gray-200（gap-px 露出底色當格線）。 */}
         <div
-          className="grid grid-cols-[6.5rem_minmax(0,1fr)] border-[3px] border-double border-gray-800 md:gap-px md:bg-gray-800 md:[grid-template-columns:var(--cols)] print:gap-px print:bg-gray-800 print:[grid-template-columns:var(--cols)] print:break-inside-avoid"
+          className="grid grid-cols-[6.5rem_minmax(0,1fr)] overflow-hidden rounded-lg border border-gray-300 md:gap-px md:bg-gray-200 md:[grid-template-columns:var(--cols)] print:gap-px print:bg-gray-200 print:[print-color-adjust:exact] print:[grid-template-columns:var(--cols)] print:break-inside-avoid"
           style={{ "--cols": GRID_TEMPLATE } as CSSProperties}
         >
           {cells}
@@ -934,8 +929,8 @@ export function ApplicationSheet({
           </div>
         )}
         <p className="text-xs text-gray-500">
-          <span className="mr-1 inline-block h-3 w-3 border border-amber-200 align-middle" style={{ backgroundColor: EDITABLE_BG }} aria-hidden="true" />
-          淡黃底的格子可以直接點進去改，改完按「儲存申請單」一次存；白底是系統算的（營業稅、銷售總額、發包小計、利潤、毛利率）。
+          <span className="mr-1 inline-block h-3 w-5 rounded-sm border border-gray-300 bg-white align-middle" aria-hidden="true" />
+          有輸入框的格子可以直接點進去改，改完按「儲存申請單」一次存；沒有框的是系統算的（營業稅、銷售總額、發包小計、利潤、毛利率）。
           電話、發票地址、採購承辦、傳真、統一編號存的是<a href="/admin/clients" className="underline">客戶名冊</a>那一筆（其他專案一起更新）；
           訂單與銷售金額寫回<a href="#project-contracts" className="underline">合約與報價單</a>；付款階段寫回<a href="#project-billings" className="underline">分期請款期程</a>（填發票號碼＝登記開票、填入帳日＝登記入帳）；發包單位寫回<a href="#project-subcontracts" className="underline">副委託</a>。
           已開票／已入帳要撤銷、人工指定金額的理由、副委託的扣繳與期款，在下方各卡片處理。

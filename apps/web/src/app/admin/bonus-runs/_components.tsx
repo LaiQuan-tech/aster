@@ -16,6 +16,7 @@ import {
   type BonusWarning,
 } from "@/lib/bonus-api";
 import { buildBonusRegisterRows } from "@/lib/bonus-register";
+import { sheet } from "@/lib/sheet-styles";
 
 /**
  * 獎金季發放列表頁與明細頁共用的小元件（放這裡而不是 page.tsx：app router 的
@@ -54,20 +55,20 @@ export function ItemsTable({ items, label = "", canSeeProfit = true }: { items: 
   const rows = buildBonusRegisterRows(items);
   const slotHeaders = ["經理", "組員1", "組員2", "組員3", "組員4", "支援"];
   return (
-    <div className="overflow-x-auto">
-      <table className="min-w-max border-collapse whitespace-nowrap text-xs">
+    <div className={sheet.frame}>
+      <table className="min-w-max border-collapse whitespace-nowrap text-[13px] leading-[1.4] text-gray-900">
         <thead>
-          <tr className="bg-gray-100 text-center font-semibold text-gray-700">
-            <th className="border border-black px-2 py-2" rowSpan={2}>序號</th><th className="border border-black px-2 py-2" rowSpan={2}>{label || "期別"}</th>
-            <th className="border border-black px-2 py-2" rowSpan={2}>專案單號</th><th className="border border-black px-2 py-2" rowSpan={2}>工程名稱</th><th className="border border-black px-2 py-2" rowSpan={2}>未稅金額</th>
-            <th className="border border-black px-2 py-2" rowSpan={2}>之前請領</th><th className="border border-black px-2 py-2" rowSpan={2}>之前請領%</th>
-            <th className="border border-black px-2 py-2" rowSpan={2}>本次請款</th><th className="border border-black px-2 py-2" rowSpan={2}>本次款%</th><th className="border border-black px-2 py-2" rowSpan={2}>累積 %</th>
-            <th className="border border-black px-2 py-1" colSpan={canSeeProfit ? 3 : 1}>獎金比例</th>
-            {slotHeaders.flatMap((header) => [<th key={`${header}-name`} className="border border-black px-2 py-2" rowSpan={2}>{header}</th>, <th key={`${header}-pct`} className="border border-black px-2 py-2" rowSpan={2} aria-label={`${header}比例`} />])}
-            <th className="border border-black px-2 py-2" rowSpan={2}>尚未分配</th><th className="border border-black px-2 py-2" rowSpan={2}>備註</th>
+          <tr className="bg-gray-50 text-center text-xs font-medium text-gray-600">
+            <th className="border border-gray-200 px-2.5 py-2" rowSpan={2}>序號</th><th className="border border-gray-200 px-2.5 py-2" rowSpan={2}>{label || "期別"}</th>
+            <th className="border border-gray-200 px-2.5 py-2" rowSpan={2}>專案單號</th><th className="border border-gray-200 px-2.5 py-2" rowSpan={2}>工程名稱</th><th className="border border-gray-200 px-2.5 py-2" rowSpan={2}>未稅金額</th>
+            <th className="border border-gray-200 px-2.5 py-2" rowSpan={2}>之前請領</th><th className="border border-gray-200 px-2.5 py-2" rowSpan={2}>之前請領%</th>
+            <th className="border border-gray-200 px-2.5 py-2" rowSpan={2}>本次請款</th><th className="border border-gray-200 px-2.5 py-2" rowSpan={2}>本次款%</th><th className="border border-gray-200 px-2.5 py-2" rowSpan={2}>累積 %</th>
+            <th className="border border-gray-200 px-2.5 py-1.5" colSpan={canSeeProfit ? 3 : 1}>獎金比例</th>
+            {slotHeaders.flatMap((header) => [<th key={`${header}-name`} className="border border-gray-200 px-2.5 py-2" rowSpan={2}>{header}</th>, <th key={`${header}-pct`} className="border border-gray-200 px-2.5 py-2" rowSpan={2} aria-label={`${header}比例`} />])}
+            <th className="border border-gray-200 px-2.5 py-2" rowSpan={2}>尚未分配</th><th className="border border-gray-200 px-2.5 py-2" rowSpan={2}>備註</th>
           </tr>
-          <tr className="bg-gray-100 text-center font-semibold text-gray-700">
-            {canSeeProfit && <><th className="border border-black px-2 py-1">%</th><th className="border border-black px-2 py-1">總獎金</th></>}<th className="border border-black px-2 py-1">本次獎金</th>
+          <tr className="bg-gray-50 text-center text-xs font-medium text-gray-600">
+            {canSeeProfit && <><th className="border border-gray-200 px-2.5 py-1.5">%</th><th className="border border-gray-200 px-2.5 py-1.5">總獎金</th></>}<th className="border border-gray-200 px-2.5 py-1.5">本次獎金</th>
           </tr>
         </thead>
         <tbody>
@@ -79,29 +80,29 @@ export function ItemsTable({ items, label = "", canSeeProfit = true }: { items: 
             const members = [register.manager, ...register.team, register.support];
             const overpaid = register.items.reduce((sum, item) => sum + (item.overpaid ? item.overpaidBy : 0), 0);
             return (
-            <tr key={it.projectId} className={overpaid > 0 ? "bg-red-50/60" : "bg-white"}>
-              <td className="border border-black px-2 py-1.5 text-center">{index + 1}</td><td className="border border-black px-2 py-1.5 text-center">{label || "—"}</td>
-              <td className="border border-black px-2 py-1.5">
+            <tr key={it.projectId} className={overpaid > 0 ? "bg-red-50/60" : sheet.row}>
+              <td className="border border-gray-200 px-2.5 py-1.5 text-center">{index + 1}</td><td className="border border-gray-200 px-2.5 py-1.5 text-center">{label || "—"}</td>
+              <td className="border border-gray-200 px-2.5 py-1.5">
                 <Link href={`/admin/projects/${it.projectId}`} style={{ color: "var(--brand)" }}>
                   {it.projectCode ?? "—"}
                 </Link>
               </td>
-              <td className="border border-black px-2 py-1.5 text-gray-800">{it.projectName ?? it.projectId}</td>
-              <td className="border border-black px-2 py-1.5 text-right">{fmtMoney(it.contractTotal)}</td><td className="border border-black px-2 py-1.5 text-right">{fmtMoney(previousReceived)}</td>
-              <td className="border border-black px-2 py-1.5 text-right">{fmtPct(it.previousReceivedPct ?? (it.contractTotal ? previousReceived / it.contractTotal : 0))}</td><td className="border border-black px-2 py-1.5 text-right">{fmtMoney(currentReceived)}</td>
-              <td className="border border-black px-2 py-1.5 text-right">{fmtPct(it.currentReceivedPct ?? (it.contractTotal ? currentReceived / it.contractTotal : 0))}</td><td className="border border-black px-2 py-1.5 text-right">{fmtPct(it.receivedPct)}</td>
-              {canSeeProfit && <><td className="border border-black px-2 py-1.5 text-right">{it.bonusRatePct == null ? "—" : `${it.bonusRatePct}%`}</td><td className="border border-black px-2 py-1.5 text-right">{fmtMoney(it.bonusPool)}</td></>}
-              <td className={`border border-black px-2 py-1.5 text-right font-semibold ${overpaid > 0 ? "text-red-600" : ""}`}>{fmtMoney(register.currentBonus)}</td>
-              {members.map((member, memberIndex) => <Fragment key={member?.employeeId ?? `empty-${memberIndex}`}><td className="border border-black px-2 py-1.5">{member?.employeeName ?? ""}</td><td className="border border-black px-2 py-1.5 text-right">{member ? (member.shareMode === "pool_pct" ? `${member.sharePct ?? 0}%` : fmtMoney(member.shareAmount)) : ""}</td></Fragment>)}
-              <td className={`border border-black px-2 py-1.5 text-right ${unallocatedPct > 0 ? "font-semibold text-red-600" : ""}`}>{unallocatedPct}%</td>
-              <td className="border border-black px-2 py-1.5">
+              <td className="border border-gray-200 px-2.5 py-1.5">{it.projectName ?? it.projectId}</td>
+              <td className="border border-gray-200 px-2.5 py-1.5 text-right tabular-nums">{fmtMoney(it.contractTotal)}</td><td className="border border-gray-200 px-2.5 py-1.5 text-right tabular-nums">{fmtMoney(previousReceived)}</td>
+              <td className="border border-gray-200 px-2.5 py-1.5 text-right tabular-nums">{fmtPct(it.previousReceivedPct ?? (it.contractTotal ? previousReceived / it.contractTotal : 0))}</td><td className="border border-gray-200 px-2.5 py-1.5 text-right tabular-nums">{fmtMoney(currentReceived)}</td>
+              <td className="border border-gray-200 px-2.5 py-1.5 text-right tabular-nums">{fmtPct(it.currentReceivedPct ?? (it.contractTotal ? currentReceived / it.contractTotal : 0))}</td><td className="border border-gray-200 px-2.5 py-1.5 text-right tabular-nums">{fmtPct(it.receivedPct)}</td>
+              {canSeeProfit && <><td className="border border-gray-200 px-2.5 py-1.5 text-right tabular-nums">{it.bonusRatePct == null ? "—" : `${it.bonusRatePct}%`}</td><td className="border border-gray-200 px-2.5 py-1.5 text-right tabular-nums">{fmtMoney(it.bonusPool)}</td></>}
+              <td className={`border border-gray-200 px-2.5 py-1.5 text-right tabular-nums font-semibold ${overpaid > 0 ? "text-red-600" : ""}`}>{fmtMoney(register.currentBonus)}</td>
+              {members.map((member, memberIndex) => <Fragment key={member?.employeeId ?? `empty-${memberIndex}`}><td className="border border-gray-200 px-2.5 py-1.5">{member?.employeeName ?? ""}</td><td className="border border-gray-200 px-2.5 py-1.5 text-right tabular-nums">{member ? (member.shareMode === "pool_pct" ? `${member.sharePct ?? 0}%` : fmtMoney(member.shareAmount)) : ""}</td></Fragment>)}
+              <td className={`border border-gray-200 px-2.5 py-1.5 text-right tabular-nums ${unallocatedPct > 0 ? "font-semibold text-red-600" : ""}`}>{unallocatedPct}%</td>
+              <td className="border border-gray-200 px-2.5 py-1.5">
                 {overpaid > 0 ? <span className="font-medium text-red-600">超發 {fmtMoney(overpaid)}</span> : (it.projectNote ?? "—")}
                 {register.overflowMembers.length > 0 && <div className="mt-1 text-amber-700">其他分配：{register.overflowMembers.map((member) => `${member.employeeName ?? member.employeeId} ${member.shareMode === "pool_pct" ? `${member.sharePct ?? 0}%` : fmtMoney(member.shareAmount)}`).join("、")}</div>}
               </td>
             </tr>
           )})}
         </tbody>
-        <tfoot><tr className="bg-blue-50 font-semibold"><td className="border border-black px-2 py-2 text-right" colSpan={canSeeProfit ? 12 : 10}>合計（{rows.length} 案）</td><td className="border border-black px-2 py-2 text-right">{fmtMoney(rows.reduce((sum, row) => sum + row.currentBonus, 0))}</td><td className="border border-black" colSpan={14} /></tr></tfoot>
+        <tfoot><tr className={sheet.totalRow}><td className="border border-gray-200 px-2.5 py-2 text-right" colSpan={canSeeProfit ? 12 : 10}>合計（{rows.length} 案）</td><td className="border border-gray-200 px-2.5 py-2 text-right">{fmtMoney(rows.reduce((sum, row) => sum + row.currentBonus, 0))}</td><td className="border border-gray-200" colSpan={14} /></tr></tfoot>
       </table>
     </div>
   );
@@ -139,13 +140,14 @@ export function GrossProfitTable({ items }: { items: BonusRunPreview["items"] })
   if (rows.length === 0) return null;
   const showProfit = rows.some((it) => it.basis === "gross_profit");
   const showTaxIncl = rows.some((it) => it.basis === "tax_inclusive_receipts");
-  const th = "border border-gray-300 px-2 py-1.5";
-  const td = "border border-gray-300 px-2 py-1";
+  const th = "border border-gray-200 px-2.5 py-2";
+  const td = "border border-gray-200 px-2.5 py-1.5";
   return (
-    <div className="overflow-x-auto">
-      <table className="min-w-max border-collapse whitespace-nowrap text-xs">
+    <div>
+      <div className={sheet.frame}>
+      <table className="min-w-max border-collapse whitespace-nowrap text-[13px] leading-[1.4] text-gray-900">
         <thead>
-          <tr className="bg-gray-100 text-center font-semibold text-gray-700">
+          <tr className="bg-gray-50 text-center text-xs font-medium text-gray-600">
             <th className={th}>專案</th>
             <th className={th}>計算方式</th>
             <th className={th}>累計入帳（未稅）</th>
@@ -163,7 +165,7 @@ export function GrossProfitTable({ items }: { items: BonusRunPreview["items"] })
             const isProfit = it.basis === "gross_profit";
             const negative = isProfit && (it.grossProfit ?? 0) < 0;
             return (
-              <tr key={it.projectId}>
+              <tr key={it.projectId} className={sheet.row}>
                 <td className={td}>
                   <Link href={`/admin/projects/${it.projectId}`} style={{ color: "var(--brand)" }}>
                     {it.projectCode ? `${it.projectCode} ` : ""}
@@ -171,19 +173,19 @@ export function GrossProfitTable({ items }: { items: BonusRunPreview["items"] })
                   </Link>
                 </td>
                 <td className={td}>{it.basis ? BONUS_BASIS_LABELS[it.basis] : "—"}</td>
-                <td className={`${td} text-right`}>{fmtMoney(it.revenue ?? it.receivedTotal)}</td>
-                {showTaxIncl && <td className={`${td} text-right`}>{it.basis === "tax_inclusive_receipts" ? fmtMoney(it.taxInclusiveRevenue) : "—"}</td>}
-                {showProfit && <td className={`${td} text-right`}>{isProfit ? fmtMoney(it.disbursementCost) : "—"}</td>}
-                {showProfit && <td className={`${td} text-right`}>{isProfit ? fmtMoney(it.subcontractCost) : "—"}</td>}
+                <td className={`${td} text-right tabular-nums`}>{fmtMoney(it.revenue ?? it.receivedTotal)}</td>
+                {showTaxIncl && <td className={`${td} text-right tabular-nums`}>{it.basis === "tax_inclusive_receipts" ? fmtMoney(it.taxInclusiveRevenue) : "—"}</td>}
+                {showProfit && <td className={`${td} text-right tabular-nums`}>{isProfit ? fmtMoney(it.disbursementCost) : "—"}</td>}
+                {showProfit && <td className={`${td} text-right tabular-nums`}>{isProfit ? fmtMoney(it.subcontractCost) : "—"}</td>}
                 {showProfit && (
-                  <td className={`${td} text-right font-semibold ${negative ? "text-red-600" : ""}`}>
+                  <td className={`${td} text-right tabular-nums font-semibold ${negative ? "text-red-600" : ""}`}>
                     {isProfit ? fmtMoney(it.grossProfit) : "—"}
                     {negative && <span className="ml-1 font-normal">（負毛利，池以 0 計）</span>}
                   </td>
                 )}
-                <td className={`${td} text-right`}>{it.bonusRatePct == null ? "—" : `${it.bonusRatePct}%`}</td>
-                <td className={`${td} text-right`}>{fmtMoney(it.bonusPool)}</td>
-                <td className={`${td} text-right ${it.overContractPct ? "font-semibold text-amber-700" : ""}`}>
+                <td className={`${td} text-right tabular-nums`}>{it.bonusRatePct == null ? "—" : `${it.bonusRatePct}%`}</td>
+                <td className={`${td} text-right tabular-nums`}>{fmtMoney(it.bonusPool)}</td>
+                <td className={`${td} text-right tabular-nums ${it.overContractPct ? "font-semibold text-amber-700" : ""}`}>
                   {it.contractTotal ? fmtPct(it.receivedPct) : "—（無合約）"}
                 </td>
               </tr>
@@ -191,6 +193,7 @@ export function GrossProfitTable({ items }: { items: BonusRunPreview["items"] })
           })}
         </tbody>
       </table>
+      </div>
       <p className="mt-2 text-xs text-gray-500">
         {showTaxIncl && (
           <>含稅入帳制（公司原 Excel）：每人累計應得＝累計含稅入帳 × 獎金比例 × 個人趴數，本次＝累計應得 − 已發（不扣成本）。</>
