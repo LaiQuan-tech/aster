@@ -19,7 +19,7 @@ import { buildBonusRegisterRows } from "@/lib/bonus-register";
 import { sheet } from "@/lib/sheet-styles";
 
 /**
- * 獎金季發放列表頁與明細頁共用的小元件（放這裡而不是 page.tsx：app router 的
+ * 獎金批次（「獎金分潤」頁的發放批次區塊 bonus-sheet/_runs.tsx）與批次明細頁共用的小元件（放這裡而不是 page.tsx：app router 的
  * page 檔只能 export default 與路由設定，多 export 會被型別檢查擋下）。
  */
 

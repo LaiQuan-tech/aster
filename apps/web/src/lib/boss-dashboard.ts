@@ -82,8 +82,8 @@ export const bossLinks = {
   /** 待發加班另計是「所有月份」的草稿合計 → 另計頁開「未付款＋所有月份」。 */
   overtimeDrafts: "/admin/overtime-settlements?status=draft&all=1",
   employees: "/admin/employees",
-  /** 老闆專屬：獎金批次列表（老闆在批次頁核准）；角色開不了後台那頁時改連 ESS 簽核頁。 */
-  bonusRuns: "/admin/bonus-runs",
+  /** 老闆專屬：獎金批次列表（「獎金分潤」分頁上方的發放批次，老闆點進批次核准）；角色開不了後台那頁時改連 ESS 簽核頁。 */
+  bonusRuns: "/admin/bonus-sheet",
   /** 老闆專屬：遲到說明（老闆在這頁決定是否影響全勤）；開不了時改連 ESS 簽核頁。 */
   lateReports: "/admin/late-reports",
   essApprovals: "/ess/approvals",

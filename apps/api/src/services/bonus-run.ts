@@ -432,6 +432,19 @@ function ratePoolRaw(b: ProjectBonusBasis, bonusRatePct: number | null): number 
   return 0
 }
 
+/**
+ * 單一成員的累計應得（到元），與 computeBonusRun 同一算法（比例制＝池基礎×個人%；舊制／固定金額＝entitledCumulativeOf）。
+ * 給獎金分潤總表顯示「不在本輪的專案」成員累計應得用（2026-10-27）。
+ */
+export function memberEntitledOf(
+  p: Pick<BonusProjectInput, "shareMode" | "bonusRatePct" | "contractTotal" | "receivedTotal">,
+  b: ProjectBonusBasis,
+  m: { sharePct: number | null; shareAmount: number | null },
+): number {
+  if (isRateBasis(b.basis)) return m.sharePct === null ? 0 : round0(ratePoolRaw(b, p.bonusRatePct) * (m.sharePct / 100))
+  return entitledCumulativeOf(p.shareMode, b.pool, m.sharePct, m.shareAmount, receivedPctOf(p.contractTotal, p.receivedTotal))
+}
+
 /** 比例制（Excel 含稅入帳制或毛利制）：不需要合約、不乘入帳比例、不截 100%。 */
 export function isRateBasis(basis: BonusBasis): boolean {
   return basis === "gross_profit" || basis === "tax_inclusive_receipts"

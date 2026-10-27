@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
-import { ExcludedArchivedList, GrossProfitTable, ItemsTable, SkippedList, Stat, StatusBadge, WarningsList } from "./_components";
+import { ExcludedArchivedList, GrossProfitTable, ItemsTable, SkippedList, Stat, StatusBadge, WarningsList } from "../bonus-runs/_components";
 import {
   createBonusRun,
   defaultBonusLabel,
@@ -20,11 +20,22 @@ import {
 } from "@/lib/bonus-api";
 
 /**
- * 獎金季發放：歷年累計總表（只算已發放）＋批次列表＋「新增季批次」試算→建立草稿。
- * 規則：入帳幾成就發幾成、每季一批、草稿可改可刪、已發放凍結不可覆蓋（後端
- * services/bonus-run.ts 檔頭）。獎金池仍由專案頁人工填，這裡只做拆算與快照。
+ * 「獎金分潤」分頁上半部（原「獎金季發放」頁，2026-10-27 業主併入獎金分潤）：
+ *   • 儀表板：歷年累計（只算已發放）——年度合計／歷年累計／最近一期／較上季，與各員工累計（年度篩選只影響儀表板）。
+ *   • 發放批次：所有批次與狀態（草稿／待核准／已核准／已發放、沖銷），點期別進批次明細（送審、核准／退回、撤回、
+ *     標記發放、匯出都在明細頁）；「＋ 新增季批次」試算→建立草稿。
+ *     原儀表板的「各季發放」表（只列已發放）與這張清單重複，已拿掉——已發放的批次在這裡都看得到發放日、金額、人數、案數。
+ *   • `onShowInSheet`（看得到總表的人才有）：每列「在總表看」把下方公司格式切到這一批；`shownRunId`＝目前總表顯示的批次，該列標示出來。
+ * 規則：入帳幾成就發幾成、每季一批、草稿可改可刪、已發放凍結不可覆蓋（後端 services/bonus-run.ts 檔頭）。
+ * 獎金池仍由專案頁人工填，這裡只做拆算與快照。API 是 requireHrAdmin；毛利類欄位依 canSeeProfit 遮罩（後端處理）。
  */
-export default function BonusRunsPage() {
+export function BonusRunsSection({
+  shownRunId = null,
+  onShowInSheet,
+}: {
+  shownRunId?: string | null;
+  onShowInSheet?: (runId: string) => void;
+}) {
   const router = useRouter();
   const [runs, setRuns] = useState<BonusRun[]>([]);
   const [summary, setSummary] = useState<BonusSummary | null>(null);
@@ -109,7 +120,7 @@ export default function BonusRunsPage() {
   const cmp = summary?.comparison ?? null;
 
   return (
-    <div className="space-y-4">
+    <div className="no-print space-y-4">
       {error && (
         <Card>
           <ErrorText>{error}</ErrorText>
@@ -119,7 +130,7 @@ export default function BonusRunsPage() {
       {/* ── 歷年累計總表 ─────────────────────────────────────────── */}
       <Card>
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-base font-semibold text-gray-800">歷年累計總表（只計已發放）</h2>
+          <h2 className="text-base font-semibold text-gray-800">季發放儀表板（只計已發放）</h2>
           <label className="flex items-center gap-2 text-sm text-gray-600">
             年度
             <select className={`${inputCls} w-auto`} value={year ?? ""} onChange={(e) => setYear(e.target.value ? Number(e.target.value) : null)}>
@@ -148,36 +159,7 @@ export default function BonusRunsPage() {
                 tone={cmp?.delta == null ? undefined : cmp.delta >= 0 ? "up" : "down"}
               />
             </div>
-            <div className="grid gap-4 lg:grid-cols-2">
-              <div className="overflow-x-auto">
-                <p className="mb-1 text-xs font-medium text-gray-500">各季發放</p>
-                <table className="w-full whitespace-nowrap text-sm">
-                  <thead>
-                    <tr className="border-b text-left text-xs text-gray-500">
-                      <th className="py-1.5 pr-2">期別</th>
-                      <th className="py-1.5 pr-2">發放日</th>
-                      <th className="py-1.5 pr-2 text-right">金額</th>
-                      <th className="py-1.5 pr-2 text-right">人數</th>
-                      <th className="py-1.5 pr-2 text-right">案數</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {summary.byQuarter.map((q) => (
-                      <tr key={q.runId} className="border-b last:border-0">
-                        <td className="py-1.5 pr-2">
-                          <Link href={`/admin/bonus-runs/${q.runId}`} className="font-medium" style={{ color: "var(--brand)" }}>
-                            {q.label}
-                          </Link>
-                        </td>
-                        <td className="py-1.5 pr-2 text-gray-600">{q.paidOn ?? "—"}</td>
-                        <td className="py-1.5 pr-2 text-right font-medium text-gray-900">{fmtMoney(q.amount)}</td>
-                        <td className="py-1.5 pr-2 text-right text-gray-600">{q.employeeCount}</td>
-                        <td className="py-1.5 pr-2 text-right text-gray-600">{q.projectCount}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+            <div>
               <div className="overflow-x-auto">
                 <p className="mb-1 text-xs font-medium text-gray-500">各員工累計{cmp?.latest && cmp.previous ? `（含 ${cmp.latest.label} vs ${cmp.previous.label}）` : ""}</p>
                 <table className="w-full whitespace-nowrap text-sm">
@@ -217,7 +199,10 @@ export default function BonusRunsPage() {
       {/* ── 批次列表 ─────────────────────────────────────────────── */}
       <Card>
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-base font-semibold text-gray-800">發放批次</h2>
+          <div>
+            <h2 className="text-base font-semibold text-gray-800">發放批次</h2>
+            <p className="text-xs text-gray-500">點期別或「批次明細」進去送審、核准／退回、撤回、標記發放與匯出 Excel{onShowInSheet ? "；「在總表看」把下方公司格式切到這一批" : ""}。</p>
+          </div>
           <PrimaryButton onClick={openCreate}>＋ 新增季批次</PrimaryButton>
         </div>
         {loading && runs.length === 0 ? (
@@ -238,11 +223,14 @@ export default function BonusRunsPage() {
                   <th className="py-1.5 pr-2 text-right">案數</th>
                   <th className="py-1.5 pr-2 text-right">超發</th>
                   <th className="py-1.5 pr-2">備註</th>
+                  <th className="py-1.5 pr-2 text-right">
+                    <span className="sr-only">操作</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {runs.map((r) => (
-                  <tr key={r.id} className="border-b last:border-0">
+                  <tr key={r.id} className={`border-b last:border-0 ${r.id === shownRunId ? "bg-sky-50/70" : ""}`} aria-current={r.id === shownRunId ? "true" : undefined}>
                     <td className="py-1.5 pr-2">
                       <Link href={`/admin/bonus-runs/${r.id}`} className="font-medium" style={{ color: "var(--brand)" }}>
                         {r.label}
@@ -266,6 +254,21 @@ export default function BonusRunsPage() {
                       {r.totals.overpaidCount > 0 ? `${r.totals.overpaidCount} 列` : "—"}
                     </td>
                     <td className="max-w-[16rem] truncate py-1.5 pr-2 text-gray-500">{r.note ?? ""}</td>
+                    <td className="py-1.5 pr-2 text-right">
+                      <div className="flex justify-end gap-3 text-xs">
+                        {onShowInSheet &&
+                          (r.id === shownRunId ? (
+                            <span className="text-sky-700">總表顯示中</span>
+                          ) : (
+                            <button type="button" className="underline-offset-2 hover:underline" style={{ color: "var(--brand)" }} onClick={() => onShowInSheet(r.id)}>
+                              在總表看
+                            </button>
+                          ))}
+                        <Link href={`/admin/bonus-runs/${r.id}`} className="underline-offset-2 hover:underline" style={{ color: "var(--brand)" }}>
+                          批次明細
+                        </Link>
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>

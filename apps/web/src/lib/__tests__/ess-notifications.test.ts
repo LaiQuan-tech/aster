@@ -30,7 +30,7 @@ describe("notificationLink — 遲到說明（2026-10-11）", () => {
   it("bonus_run：送審（給老闆）→ 簽核頁；核准／退回（給 HR）→ 後台批次頁；Pill「獎金批次」", () => {
     expect(notificationLink(notif("bonus_run", { bonusRunId: "r1", event: "submitted" }))).toBe("/ess/approvals");
     expect(notificationLink(notif("bonus_run", { bonusRunId: "r1", event: "returned" }))).toBe("/admin/bonus-runs/r1");
-    expect(notificationLink(notif("bonus_run", { event: "approved" }))).toBe("/admin/bonus-runs");
+    expect(notificationLink(notif("bonus_run", { event: "approved" }))).toBe("/admin/bonus-sheet");
     expect(notificationLink(notif("bonus_run", { bonusRunId: "r1", event: "returned", audience: "boss" }))).toBe("/ess/approvals");
     expect(typeLabel("bonus_run")).toBe("獎金批次");
   });

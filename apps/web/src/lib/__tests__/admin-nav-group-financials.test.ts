@@ -6,10 +6,12 @@ import {
   isGroupFinancialsAdminPath,
   offLimitsCopy,
   tabsForSection,
+  type AdminSectionKey,
 } from "../admin-nav";
 
-// 集團財務頁（獎金分潤）只給老闆／platform_admin／授權 HR（/me.canSeeGroupFinancials，2026-10-26）。
-// 集團總覽 2026-10-27 起移到首頁、只給在職 platform_admin，不再是分頁（舊網址轉址到 /admin#group-overview）。
+// 集團財務（/me.canSeeGroupFinancials，2026-10-26）只給老闆／platform_admin／授權 HR。
+// 2026-10-27 起：集團總覽移到首頁、只給在職 platform_admin，不再是分頁（舊網址轉址到 /admin#group-overview）；
+// 獎金分潤併入獎金季發放，專案獎金總表改在頁內區塊守門——目前沒有分頁帶 groupFinancials（機制保留）。
 describe("集團財務導覽", () => {
   const financeKeys = (canSeeGroupFinancials?: boolean) =>
     tabsForSection("finance", null, { canSeeGroupFinancials }).map((t) => t.key);
@@ -20,31 +22,29 @@ describe("集團財務導覽", () => {
     expect(isGroupFinancialsAdminPath("/admin/group-overview")).toBe(false);
   });
 
-  it("canSeeGroupFinancials=false 剔除獎金分潤；true／省略保留；其他頁不受影響", () => {
-    expect(financeKeys(false)).not.toContain("bonusSheet");
-    expect(financeKeys(true)).toContain("bonusSheet");
-    expect(financeKeys(undefined)).toContain("bonusSheet");
+  it("目前沒有集團財務分頁：canSeeGroupFinancials 不論 true／false／省略，財務分頁清單都一樣；其他頁不受影響", () => {
+    expect(financeKeys(false)).toEqual(financeKeys(true));
+    expect(financeKeys(undefined)).toEqual(financeKeys(true));
     expect(isGroupFinancialsAdminPath("/admin/projects")).toBe(false);
     expect(isAdminPathAllowed({ pathname: "/admin/payroll", roleNav: null, canSeeGroupFinancials: false })).toBe(true);
   });
 
-  it("獎金分潤（2026-10-27）：集團財務頁、HR 限定——看不到集團財務的 HR、會計都不列也不放行", () => {
-    expect(financeKeys(false)).not.toContain("bonusSheet");
-    expect(financeKeys(true)).toContain("bonusSheet");
-    // 緊接在獎金季發放之後
-    const keys = financeKeys(true);
-    expect(keys.indexOf("bonusSheet")).toBe(keys.indexOf("bonus") + 1);
-    expect(isGroupFinancialsAdminPath("/admin/bonus-sheet")).toBe(true);
-    expect(isGroupFinancialsAdminPath("/admin/bonus-runs")).toBe(false);
-    expect(isAdminPathAllowed({ pathname: "/admin/bonus-sheet", roleNav: null, canSeeGroupFinancials: false })).toBe(false);
-    expect(isAdminPathAllowed({ pathname: "/admin/bonus-sheet", roleNav: null, canSeeGroupFinancials: true })).toBe(true);
-    // 會計（帶 roleNav）即使租戶把整個財務分區開給會計，hrOnly 仍剔除
-    const accountantNav = { sections: ["home", "finance"] as const, tabs: {} };
-    expect(tabsForSection("finance", null, { roleNav: { ...accountantNav, sections: [...accountantNav.sections] }, canSeeGroupFinancials: true }).map((t) => t.key)).not.toContain("bonusSheet");
+  it("獎金分潤（2026-10-27 併入獎金季發放）：分頁條件＝兩者聯集——HR 不論能否看集團財務都列；總表改在頁內守門", () => {
+    expect(financeKeys(false)).toContain("bonus");
+    expect(financeKeys(true)).toContain("bonus");
+    expect(financeKeys(true)).not.toContain("bonusSheet");
+    expect(isGroupFinancialsAdminPath("/admin/bonus-sheet")).toBe(false);
+    expect(isGroupFinancialsAdminPath("/admin/bonus-runs/r1")).toBe(false);
+    expect(isAdminPathAllowed({ pathname: "/admin/bonus-sheet", roleNav: null, canSeeGroupFinancials: false })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/bonus-runs/r1", roleNav: null, canSeeGroupFinancials: false })).toBe(true);
+    // 會計：預設範圍不含；租戶開了 bonus 才列（同原「獎金季發放」，頁內兩塊對會計仍不畫，見 bonus-page-access）
+    const accountantNav = { sections: ["home", "finance"] as AdminSectionKey[], tabs: {} };
+    expect(tabsForSection("finance", null, { roleNav: accountantNav, canSeeGroupFinancials: true }).map((t) => t.key)).toContain("bonus");
+    expect(tabsForSection("finance", null, { roleNav: { sections: ["home", "finance"], tabs: { finance: ["projects"] } }, canSeeGroupFinancials: true }).map((t) => t.key)).not.toContain("bonus");
   });
 
-  it("被擋時的說明指向老闆授權", () => {
-    expect(offLimitsCopy({ pathname: "/admin/bonus-sheet", roleLabel: "此角色", canSeeGroupFinancials: false }).title).toBe("此頁僅限老闆與授權人員");
+  it("被擋時的說明：獎金分潤已不是集團財務頁，看不到集團財務也照一般文案；其他頁維持原說法", () => {
+    expect(offLimitsCopy({ pathname: "/admin/bonus-sheet", roleLabel: "此角色", canSeeGroupFinancials: false }).title).toBe("此頁未開放給此角色");
     expect(offLimitsCopy({ pathname: "/admin/payroll", roleLabel: "會計", canSeeGroupFinancials: false }).title).toBe("此頁未開放給會計");
   });
 

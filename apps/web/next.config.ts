@@ -27,6 +27,7 @@ const ADMIN_REDIRECTS = [
   { source: "/admin/projects/alerts", destination: "/admin/projects" },
   { source: "/admin/stamp-duty", destination: "/admin/projects" },
   { source: "/admin/group-overview", destination: "/admin#group-overview" },
+  { source: "/admin/bonus-runs", destination: "/admin/bonus-sheet" },
 ];
 
 const nextConfig: NextConfig = {

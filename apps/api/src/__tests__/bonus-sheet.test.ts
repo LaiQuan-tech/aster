@@ -45,7 +45,7 @@ import { fake, TENANT_ID } from "./helpers/fake-supabase.js"
 const ctx = { companyName: "測試公司", vatRate: 0.05, periodLabel: "2026. 07-09", mmdd: "0909" }
 
 function member(over: Partial<BonusSheetMember> & { employeeId: string }): BonusSheetMember {
-  return { name: `測試員${over.employeeId}`, empNo: null, role: "member", shareMode: "pool_pct", sharePct: 10, shareAmount: null, amount: 0, ...over }
+  return { name: `測試員${over.employeeId}`, empNo: null, role: "member", shareMode: "pool_pct", sharePct: 10, shareAmount: null, amount: 0, entitled: null, ...over }
 }
 
 function project(over: Partial<BonusSheetProject> = {}): BonusSheetProject {
@@ -144,71 +144,102 @@ describe("buildOpenSheet（未結案）", () => {
   const r1 = OPEN_HEADER_ROWS
   const r2 = OPEN_HEADER_ROWS + 1
 
-  it("欄數／欄寬／凍結／版面照原檔", () => {
-    expect(grid.columns).toHaveLength(33)
+  it("欄數／欄寬／凍結／版面：原檔 33 欄拿掉本期標記與 4 個本次金額欄", () => {
+    expect(grid.columns).toHaveLength(28)
     expect(grid.columns).toEqual(OPEN_COLUMNS)
-    expect(grid.freeze).toEqual({ rows: 4, cols: 4 })
+    expect(OPEN_COLUMNS.slice(0, 3)).toEqual([5.82, 8.43, 11.18])
+    expect(OPEN_COLUMNS.at(-2)).toBe(18.82)
+    expect(grid.freeze).toEqual({ rows: 4, cols: 3 })
     expect(grid.page).toMatchObject({ orientation: "landscape", paperSize: 8, printTitleRows: [1, 4] })
     expect(grid.rowHeights.slice(0, 5)).toEqual([16.5, 17.5, 31, 21, 10])
   })
 
   it("表頭字串與合併", () => {
     const headers: Array<[number, number, string]> = [
-      [2, 0, "序號"], [2, 1, "2026. 07-09"], [2, 2, "專案單號"], [2, 3, "工程名稱"], [2, 4, "含稅"], [2, 5, "已收款"], [2, 6, "已收款%"],
-      [2, 7, "本次\n請款%"], [3, 7, "0909"], [2, 8, "累積 %"], [2, 9, "本次\n請款"], [3, 9, "0909"], [2, 10, "累積 %"],
-      [2, 11, "本次\n獎金"], [3, 11, "09/09"], [2, 12, "獎金比例"], [3, 12, "%"], [3, 13, "總獎金"],
-      [2, 14, "經理"], [2, 17, "組員1"], [2, 20, "組員2"], [2, 23, "組員3"], [2, 26, "組員4"], [2, 28, "支援"], [2, 30, "尚未分配"], [2, 31, "備註"],
+      [2, 0, "序號"], [2, 1, "專案單號"], [2, 2, "工程名稱"], [2, 3, "含稅"], [2, 4, "已收款"], [2, 5, "已收款%"],
+      [2, 6, "本次\n請款%"], [3, 6, "0909"], [2, 7, "累積 %"], [2, 8, "本次\n請款"], [3, 8, "0909"], [2, 9, "累積 %"],
+      [2, 10, "本次\n獎金"], [3, 10, "09/09"], [2, 11, "獎金比例"], [3, 11, "%"], [3, 12, "總獎金"],
+      [2, 13, "經理"], [2, 14, "%\n金額"], [2, 15, "組員1"], [2, 17, "組員2"], [2, 19, "組員3"], [2, 21, "組員4"], [2, 23, "支援"], [2, 24, "%\n金額"],
+      [2, 25, "尚未分配"], [2, 26, "備註"],
     ]
     for (const [r, c, text] of headers) expect(at(grid, r, c)?.value, `${r}:${c}`).toBe(text)
+    // 本期標記欄已拿掉：表頭不再有期別欄，期別在標題區
+    expect(grid.cells.some((c) => c.row >= 2 && c.value === "2026. 07-09")).toBe(false)
+    expect(at(grid, 0, 6)).toMatchObject({ value: "本期：2026. 07-09", rowSpan: 2, colSpan: 5 })
     expect(at(grid, 2, 0)).toMatchObject({ rowSpan: 2 })
-    expect(at(grid, 2, 12)).toMatchObject({ colSpan: 2 })
-    expect(at(grid, 0, 12)).toMatchObject({ value: "獎金分配(員工自行向行政申報)", rowSpan: 2, colSpan: 20 })
-    expect(at(grid, 0, 0)).toMatchObject({ value: "ASTER", logo: true, rowSpan: 2, colSpan: 3 })
-    expect(at(grid, 0, 3)).toMatchObject({ value: "測試公司", colSpan: 4 })
+    expect(at(grid, 2, 11)).toMatchObject({ colSpan: 2 })
+    expect(at(grid, 0, 11)).toMatchObject({ value: "獎金分配(員工自行向行政申報)", rowSpan: 2, colSpan: 16 })
+    expect(at(grid, 0, 0)).toMatchObject({ value: "ASTER", logo: true, rowSpan: 2, colSpan: 2 })
+    expect(at(grid, 0, 2)).toMatchObject({ value: "測試公司", colSpan: 4 })
     // 表頭雙線、本次欄淡綠
     expect(at(grid, 2, 0)?.border).toMatchObject({ top: "double", bottom: "double" })
-    for (const c of [7, 9, 11]) expect(at(grid, 2, c)?.fill).toBe("#E2EFDA")
+    for (const c of [6, 8, 10]) expect(at(grid, 2, c)?.fill).toBe("#E2EFDA")
   })
 
-  it("資料列：含稅＝未稅×1.05、百分比、紅字欄、本次列上色與 V", () => {
-    expect(at(grid, r1, 1)?.value).toBe("V")
-    expect(at(grid, r1, 4)).toMatchObject({ value: 1050000, text: "1,050,000" })
-    expect(at(grid, r1, 5)).toMatchObject({ value: 420000, fill: "#DDEBF7" })
-    expect(at(grid, r1, 6)).toMatchObject({ value: 0.4, text: "40%" })
-    expect(at(grid, r1, 7)).toMatchObject({ value: 0.2, fill: "#E2EFDA" })
-    expect(at(grid, r1, 8)?.text).toBe("60%")
-    expect(at(grid, r1, 9)).toMatchObject({ value: 210000, fill: "#E2EFDA" })
-    expect(at(grid, r1, 11)).toMatchObject({ value: 12000, fill: "#E2EFDA" })
-    expect(at(grid, r1, 12)).toMatchObject({ text: "10.0 %", color: "#FF0000" })
-    // 總獎金＝含稅×比例（原檔 N＝M×E）：1,050,000 × 10%
-    expect(at(grid, r1, 13)).toMatchObject({ value: 105000, color: "#FF0000" })
-    // 經理、組員1（主辦優先）、組員2
-    expect(at(grid, r1, 14)).toMatchObject({ value: "測試員甲", fill: "#E7E6E6" })
-    expect(at(grid, r1, 15)).toMatchObject({ text: "40.0 %", color: "#FF0000" })
-    expect(at(grid, r1, 16)?.value).toBe(6000)
-    expect(at(grid, r1, 17)?.value).toBe("測試員丙")
-    expect(at(grid, r1, 20)?.value).toBe("測試員乙")
-    expect(at(grid, r1, 30)).toMatchObject({ text: "20.0 %", color: "#FF0000" })
-    // 沒有本次的列：不打 V、不上色、本次欄空白
-    expect(at(grid, r2, 1)?.value).toBeNull()
-    expect(at(grid, r2, 7)?.fill).toBeUndefined()
-    expect(at(grid, r2, 9)?.value).toBeNull()
-    expect(at(grid, r2, 5)?.fill).toBeUndefined()
+  it("資料列：含稅＝未稅×1.05、百分比、紅字欄、本次列上色（沒有 V 欄）", () => {
+    expect(at(grid, r1, 1)?.value).toBe("T-0001")
+    expect(grid.cells.some((c) => c.value === "V")).toBe(false)
+    expect(at(grid, r1, 3)).toMatchObject({ value: 1050000, text: "1,050,000" })
+    expect(at(grid, r1, 4)).toMatchObject({ value: 420000, fill: "#DDEBF7" })
+    expect(at(grid, r1, 5)).toMatchObject({ value: 0.4, text: "40%" })
+    expect(at(grid, r1, 6)).toMatchObject({ value: 0.2, fill: "#E2EFDA" })
+    expect(at(grid, r1, 7)?.text).toBe("60%")
+    expect(at(grid, r1, 8)).toMatchObject({ value: 210000, fill: "#E2EFDA" })
+    expect(at(grid, r1, 10)).toMatchObject({ value: 12000, fill: "#E2EFDA" })
+    expect(at(grid, r1, 11)).toMatchObject({ text: "10.0 %", color: "#FF0000" })
+    // 總獎金＝含稅×比例：1,050,000 × 10%
+    expect(at(grid, r1, 12)).toMatchObject({ value: 105000, color: "#FF0000" })
+    // 經理、組員1（主辦優先）、組員2；成員格同格兩行：上 %、下本次金額
+    expect(at(grid, r1, 13)).toMatchObject({ value: "測試員甲", fill: "#E7E6E6" })
+    expect(at(grid, r1, 14)).toMatchObject({ value: "40.0 %\n6,000", wrap: true, color: "#FF0000" })
+    expect(at(grid, r1, 15)?.value).toBe("測試員丙")
+    expect(at(grid, r1, 16)?.value).toBe("20.0 %\n3,000")
+    expect(at(grid, r1, 17)?.value).toBe("測試員乙")
+    // 尚未分配：成員累計應得未知（entitled null）→ 只有 %
+    expect(at(grid, r1, 25)).toMatchObject({ value: "20.0 %", color: "#FF0000" })
+    // 沒有本次的列：不上色、本次欄空白
+    expect(at(grid, r2, 6)?.fill).toBeUndefined()
+    expect(at(grid, r2, 8)?.value).toBeNull()
+    expect(at(grid, r2, 4)?.fill).toBeUndefined()
+  })
+
+  it("非本輪的列：成員與尚未分配下行＝「累」累計應得", () => {
+    const g = buildOpenSheet(
+      [
+        project({
+          currentReceived: 0,
+          currentBonus: 0,
+          unallocatedPct: 20,
+          members: [member({ employeeId: "甲", role: "manager", sharePct: 50, entitled: 25000 }), member({ employeeId: "乙", sharePct: 30, entitled: 15000 })],
+        }),
+      ],
+      ctx,
+    )
+    expect(at(g, r1, 14)?.value).toBe("50.0 %\n累 25,000")
+    expect(at(g, r1, 16)?.value).toBe("30.0 %\n累 15,000")
+    // 未分配＝(25,000＋15,000) ÷ 80% × 20%
+    expect(at(g, r1, 25)?.value).toBe("20.0 %\n累 10,000")
+  })
+
+  it("備註：分潤調整換行附在系統註記後；列高依行數加高", () => {
+    const g = buildOpenSheet([project({ note: "說明文字", revisionNote: "115/03/10 主辦 測試員丙 20%→25%（原因：測試）\n115/05/01 獎金比例 3%→4%" })], ctx)
+    expect(at(g, r1, 26)?.value).toBe("說明文字\n分潤調整：\n115/03/10 主辦 測試員丙 20%→25%（原因：測試）\n115/05/01 獎金比例 3%→4%")
+    expect(g.rowHeights[r1]!).toBeGreaterThan(34)
   })
 
   it("合計列：本次請款、本次獎金、總獎金", () => {
     const tr = OPEN_HEADER_ROWS + 2
-    expect(at(grid, tr, 3)?.value).toBe("合計")
-    expect(at(grid, tr, 9)?.value).toBe(210000)
-    expect(at(grid, tr, 11)?.value).toBe(12000)
-    expect(at(grid, tr, 13)?.value).toBe(210000)
+    expect(at(grid, tr, 2)?.value).toBe("合計")
+    expect(at(grid, tr, 8)?.value).toBe(210000)
+    expect(at(grid, tr, 10)?.value).toBe(12000)
+    expect(at(grid, tr, 12)?.value).toBe(210000)
   })
 
   it("固定金額成員：% 欄顯示金額；沒合約的百分比空白", () => {
     const g = buildOpenSheet([project({ contractTotal: null, members: [member({ employeeId: "丁", role: "manager", shareMode: "fixed_amount", sharePct: null, shareAmount: 30000 })] })], ctx)
-    expect(at(g, r1, 15)).toMatchObject({ value: 30000, text: "30,000" })
-    expect(at(g, r1, 6)?.value).toBeNull()
-    expect(at(g, r1, 4)?.value).toBeNull()
+    expect(at(g, r1, 14)).toMatchObject({ value: "30,000\n0" })
+    expect(at(g, r1, 5)?.value).toBeNull()
+    expect(at(g, r1, 3)?.value).toBeNull()
   })
 })
 
@@ -224,6 +255,9 @@ describe("buildClosedSheet（已結案）", () => {
     expect(at(g, 3, 7)?.value).toBe("金額")
     expect(at(g, 4, 4)?.value).toBe(630000)
     expect(at(g, 4, 7)).toMatchObject({ value: 105000, color: "#FF0000" })
+    // 已結案表成員格：上 %、下「累」累計應得
+    expect(at(g, 2, 9)?.value).toBe("%\n金額")
+    expect(at(buildClosedSheet([project({ closed: true, members: [member({ employeeId: "甲", role: "manager", sharePct: 40, entitled: 8000 })] })], ctx), 4, 9)?.value).toBe("40.0 %\n累 8,000")
   })
 })
 
@@ -271,31 +305,34 @@ describe("xlsx 版面", () => {
     await back.xlsx.load(buf as ArrayBuffer)
     expect(back.worksheets.map((w) => w.name)).toEqual(["未結案", "已結案"])
     const ws = back.getWorksheet("未結案")!
-    expect(ws.columnCount).toBe(32) // A–AF 有格子；AG 只是欄寬
-    expect(ws.getColumn(33).width).toBeCloseTo(0.54)
+    expect(ws.columnCount).toBe(27) // A–AA 有格子；AB 只是欄寬
+    expect(ws.getColumn(28).width).toBeCloseTo(0.54)
     const merges = (ws.model as unknown as { merges: string[] }).merges
-    for (const m of ["A1:C2", "D1:G2", "M1:AF2", "A3:A4", "B3:B4", "M3:N3", "O3:O4", "R3:R4", "AA3:AA4", "AC3:AC4", "AE3:AE4", "AF3:AF4"]) expect(merges).toContain(m)
+    for (const m of ["A1:B2", "C1:F2", "G1:K2", "L1:AA2", "A3:A4", "B3:B4", "L3:M3", "N3:N4", "O3:O4", "P3:P4", "Z3:Z4", "AA3:AA4"]) expect(merges).toContain(m)
+    expect(ws.getCell("G1").value).toBe("本期：2026. 07-09")
     // 標誌：兩張表左上各插一張圖，標誌格不寫字
     expect(ws.getImages()).toHaveLength(1)
     expect(ws.getImages()[0]!.range.tl.nativeRow).toBe(0)
     expect(ws.getCell("A1").value).toBeNull()
     expect(back.getWorksheet("已結案")!.getImages()).toHaveLength(1)
     expect(ws.getCell("A3").value).toBe("序號")
-    expect(ws.getCell("H3").value).toBe("本次\n請款%")
-    expect(ws.getCell("H4").value).toBe("0909")
-    expect(ws.getCell("M3").value).toBe("獎金比例")
-    expect(ws.getCell("N4").value).toBe("總獎金")
-    expect(ws.getCell("O3").value).toBe("經理")
-    expect(ws.getCell("AE3").value).toBe("尚未分配")
+    expect(ws.getCell("G3").value).toBe("本次\n請款%")
+    expect(ws.getCell("G4").value).toBe("0909")
+    expect(ws.getCell("L3").value).toBe("獎金比例")
+    expect(ws.getCell("M4").value).toBe("總獎金")
+    expect(ws.getCell("N3").value).toBe("經理")
+    expect(ws.getCell("O6").value).toBe("40.0 %\n6,000") // 同格兩行
+    expect(ws.getCell("O6").alignment?.wrapText).toBe(true)
+    expect(ws.getCell("Z3").value).toBe("尚未分配")
     // 合併格的框線畫在範圍邊緣：A3:A4 上緣在 A3、下緣在 A4
     expect(ws.getCell("A3").border?.top?.style).toBe("double")
     expect(ws.getCell("A4").border?.bottom?.style).toBe("double")
-    expect((ws.getCell("H3").fill as ExcelJS.FillPattern).fgColor?.argb).toBe("FFE2EFDA")
-    expect(ws.getCell("M6").numFmt).toMatch(/^0\.0\\? %$/) // 原檔「0.0\ %」（exceljs 讀回時去掉跳脫）
-    expect(ws.getCell("M6").font?.color?.argb).toBe("FFFF0000")
-    expect(ws.getCell("E6").numFmt).toBe("#,##0;[Red]-#,##0")
-    expect(ws.getCell("E6").value).toBe(1050000)
-    expect(ws.views[0]).toMatchObject({ state: "frozen", xSplit: 4, ySplit: 4 })
+    expect((ws.getCell("G3").fill as ExcelJS.FillPattern).fgColor?.argb).toBe("FFE2EFDA")
+    expect(ws.getCell("L6").numFmt).toMatch(/^0\.0\\? %$/) // 原檔「0.0\ %」（exceljs 讀回時去掉跳脫）
+    expect(ws.getCell("L6").font?.color?.argb).toBe("FFFF0000")
+    expect(ws.getCell("D6").numFmt).toBe("#,##0;[Red]-#,##0")
+    expect(ws.getCell("D6").value).toBe(1050000)
+    expect(ws.views[0]).toMatchObject({ state: "frozen", xSplit: 3, ySplit: 4 })
     expect(ws.pageSetup).toMatchObject({ orientation: "landscape", paperSize: 8 })
     const ws2 = back.getWorksheet("已結案")!
     expect(ws2.getCell("G3").value).toBe("獎金比例")
@@ -415,12 +452,12 @@ describe("GET /bonus-sheet — 資料與降級", () => {
     const cells = res.body.sheets.open.cells as GridCell[]
     const row = cells.find((c) => c.value === "T-0003")!.row
     const cell = (col: number) => cells.find((c) => c.row === row && c.col === col)
-    expect(cell(4)?.value).toBe(210000) // 含稅
-    expect(cell(5)?.value).toBe(105000) // 已收款（累計都算之前）
-    expect(cell(9)?.value).toBeNull() // 沒有本次請款
-    expect(cell(13)?.value).toBe(21000) // 總獎金＝含稅×比例
-    expect(cell(14)?.value).toBeNull() // 經理空白
-    expect(cell(30)?.value).toBeNull() // 沒成員 → 尚未分配空白
+    expect(cell(3)?.value).toBe(210000) // 含稅
+    expect(cell(4)?.value).toBe(105000) // 已收款（累計都算之前）
+    expect(cell(8)?.value).toBeNull() // 沒有本次請款
+    expect(cell(12)?.value).toBe(21000) // 總獎金＝含稅×比例
+    expect(cell(13)?.value).toBeNull() // 經理空白
+    expect(cell(25)?.value).toBeNull() // 沒成員 → 尚未分配空白
   })
 
   it("asOf → 即時試算", async () => {

@@ -5,14 +5,30 @@ import type { StatementGrid } from "../lib/statements/grid.js"
 import {
   buildClosedSheet,
   buildOpenSheet,
+  CLOSED_HEADER_ROWS,
   isInThisRound,
+  OPEN_HEADER_ROWS,
+  sortProjects,
   mmddOf,
   periodLabelOf,
   type BonusSheetContext,
   type BonusSheetProject,
 } from "../lib/statements/bonus-sheet.js"
-import { BONUS_BASES, isDuplicateReplacedArchive, projectBonusBasisOf, receivedRatioOf, type BonusBasis } from "./bonus-run.js"
-import { getRun, listRuns, loadInputs, previewRun, tenantToday, type SerializedItem, type SerializedRun } from "./bonus-run-store.js"
+import { BONUS_BASES, isDuplicateReplacedArchive, memberEntitledOf, projectBonusBasisOf, receivedRatioOf, type BonusBasis } from "./bonus-run.js"
+import { loadShareRevisions, revisionNoteOf, type ShareRevision } from "./bonus-sheet-revisions.js"
+import {
+  getRun,
+  listProjectRunItems,
+  listRuns,
+  loadInputs,
+  loadProjectPaymentTotals,
+  previewRun,
+  tenantToday,
+  type ProjectPaymentTotals,
+  type SerializedItem,
+  type SerializedRun,
+} from "./bonus-run-store.js"
+import { buildManageRows, manageTotalsOf, type ManageRow, type ManageTotals } from "./bonus-manage.js"
 import { loadP3Settings } from "./project-application-store.js"
 import { DEFAULT_VAT_RATE } from "./project-money.js"
 import { isTerminal } from "./project-status.js"
@@ -49,6 +65,17 @@ export type BonusSheetResult = {
   counts: { open: number; closed: number }
   warnings: string[]
   sheets: { open: StatementGrid; closed: StatementGrid }
+  /**
+   * 格線資料列 → 專案（畫面點開專案列載入發放歷程用；row＝格線列號，0 起算）。只給畫面，Excel／列印不受影響。
+   */
+  rowProjects: { open: BonusSheetRowProject[]; closed: BonusSheetRowProject[] }
+}
+
+export type BonusSheetRowProject = { row: number; projectId: string }
+
+/** 與 buildOpenSheet／buildClosedSheet 同一個排序：第 i 案在格線第 headerRows＋i 列。 */
+export function rowProjectsOf(projects: readonly BonusSheetProject[], headerRows: number): BonusSheetRowProject[] {
+  return sortProjects(projects).map((p, i) => ({ row: headerRows + i, projectId: p.projectId }))
 }
 
 type SnapshotProject = {
@@ -140,6 +167,7 @@ export function projectsFromItems(items: readonly SerializedItem[], snapshot: Re
         sharePct: r.sharePct,
         shareAmount: r.shareAmount,
         amount: r.amount,
+        entitled: r.entitledCumulative,
       })),
     })
   }
@@ -235,6 +263,7 @@ async function loadOtherProjects(tenantId: string, asOf: string, exclude: Readon
             sharePct: m.sharePct,
             shareAmount: m.shareAmount,
             amount: 0,
+            entitled: memberEntitledOf(p, b, m),
           }
         }),
       })
@@ -327,22 +356,7 @@ export async function loadBonusSheet(tenantId: string, query: { runId?: string |
   }
   const baseDate = asOf as string
 
-  const projects = projectsFromItems(items, snapshot)
-  try {
-    projects.push(...(await loadOtherProjects(tenantId, baseDate, new Set(projects.map((p) => p.projectId)))))
-  } catch (err) {
-    warn(warnings, "批次以外的專案讀取失敗，只列批次內的專案", err)
-  }
-  if (projects.length > 0) {
-    try {
-      const closed = await loadClosedIds(tenantId, projects.map((p) => p.projectId))
-      // 已結案但這一批還有本次入帳／本次獎金的案（例如收尾款那一季）留在「未結案」：已結案表沒有本次欄，
-      // 放過去本次獎金就看不到、合計對不上批次總額。
-      for (const p of projects) p.closed = closed.has(p.projectId) && !isInThisRound(p)
-    } catch (err) {
-      warn(warnings, "專案結案狀態讀取失敗，全部列在「未結案」", err)
-    }
-  }
+  const projects = await assembleProjects(tenantId, items, snapshot, baseDate, warnings, { keepInRoundOpen: true })
 
   const ctx: BonusSheetContext = {
     companyName,
@@ -363,5 +377,284 @@ export async function loadBonusSheet(tenantId: string, query: { runId?: string |
     counts: { open: open.length, closed: closed.length },
     warnings,
     sheets: { open: buildOpenSheet(open, ctx), closed: buildClosedSheet(closed, ctx) },
+    rowProjects: { open: rowProjectsOf(open, OPEN_HEADER_ROWS), closed: rowProjectsOf(closed, CLOSED_HEADER_ROWS) },
   }
+}
+
+/**
+ * 批次（或試算）明細 → 每案一列，補上批次外的專案、結案分表、分潤調整備註。子資料失敗降級寫進 warnings。
+ * keepInRoundOpen：公司格式——已結案但這一批還有本次入帳／本次獎金的案留在「未結案」；管理檢視不需要。
+ */
+async function assembleProjects(
+  tenantId: string,
+  items: readonly SerializedItem[],
+  snapshot: Record<string, unknown> | null,
+  baseDate: string,
+  warnings: string[],
+  opts: { keepInRoundOpen: boolean },
+): Promise<BonusSheetProject[]> {
+  const projects = projectsFromItems(items, snapshot)
+  try {
+    projects.push(...(await loadOtherProjects(tenantId, baseDate, new Set(projects.map((p) => p.projectId)))))
+  } catch (err) {
+    warn(warnings, "批次以外的專案讀取失敗，只列批次內的專案", err)
+  }
+  if (projects.length > 0) {
+    try {
+      const closed = await loadClosedIds(tenantId, projects.map((p) => p.projectId))
+      // 已結案但這一批還有本次入帳／本次獎金的案（例如收尾款那一季）留在「未結案」：已結案表沒有本次欄，
+      // 放過去本次獎金就看不到、合計對不上批次總額。
+      for (const p of projects) p.closed = closed.has(p.projectId) && !(opts.keepInRoundOpen && isInThisRound(p))
+    } catch (err) {
+      warn(warnings, "專案結案狀態讀取失敗，全部列在「未結案」", err)
+    }
+  }
+
+  // 分潤調整寫進備註（業主 2026-10-27）；讀不到只少這段，不擋總表。
+  if (projects.length > 0) {
+    try {
+      const roles = new Map(projects.map((p) => [p.projectId, new Map(p.members.map((m) => [m.employeeId, m.role]))]))
+      const revisions = await loadShareRevisions(tenantId, projects.map((p) => p.projectId), roles)
+      for (const p of projects) {
+        const revs = revisions.get(p.projectId)
+        if (revs) p.revisionNote = revisionNoteOf(revs)
+      }
+    } catch (err) {
+      warn(warnings, "分潤調整紀錄讀取失敗，備註暫不含分潤調整", err)
+    }
+  }
+  return projects
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * 管理檢視（GET /bonus-sheet/manage）：網頁預設，口徑見 services/bonus-manage.ts
+ * ────────────────────────────────────────────────────────────────── */
+
+export type BonusManageResult = {
+  /** 累計應得的基準日（租戶今天）。 */
+  asOf: string
+  vatRate: number
+  counts: { open: number; closed: number }
+  warnings: string[]
+  rows: { open: ManageRow[]; closed: ManageRow[] }
+  totals: { open: ManageTotals; closed: ManageTotals }
+}
+
+export async function loadBonusManage(tenantId: string): Promise<BonusManageResult> {
+  const warnings: string[] = []
+  const vatRate = await loadP3Settings(tenantId)
+    .then((s) => s.vatRate)
+    .catch((err) => {
+      warn(warnings, "營業稅率讀取失敗，含稅金額暫以 5% 計", err)
+      return DEFAULT_VAT_RATE
+    })
+  const asOf = await tenantToday(tenantId)
+  let items: SerializedItem[] = []
+  let snapshot: Record<string, unknown> | null = null
+  try {
+    const preview = await previewRun(tenantId, asOf, null)
+    items = preview.items
+    snapshot = preview.snapshot
+  } catch (err) {
+    warn(warnings, "即時試算失敗，可發金額暫時算不出來（只列專案層數字）", err)
+  }
+  const projects = await assembleProjects(tenantId, items, snapshot, asOf, warnings, { keepInRoundOpen: false })
+  let payments: ProjectPaymentTotals = { paid: new Map(), unpaid: new Map() }
+  try {
+    payments = await loadProjectPaymentTotals(tenantId)
+  } catch (err) {
+    warn(warnings, "已發放紀錄讀取失敗，已發放暫以 0 計（未發放金額不可信）", err)
+  }
+  const rows = buildManageRows(projects, payments, vatRate)
+  const open = rows.filter((r) => !r.closed)
+  const closed = rows.filter((r) => r.closed)
+  return {
+    asOf,
+    vatRate,
+    counts: { open: open.length, closed: closed.length },
+    warnings,
+    rows: { open, closed },
+    totals: { open: manageTotalsOf(open), closed: manageTotalsOf(closed) },
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * 單一專案的發放歷程（GET /bonus-sheet/projects/:projectId/payouts）
+ * ────────────────────────────────────────────────────────────────── */
+
+/**
+ * 成員該次的差額標記：
+ *   • reversal：紅字沖銷批次（金額為負，等於追回原批）。
+ *   • clawback：一般批次金額為負（引擎正常不會產生；舊資料或手動調整才有）＝追扣。
+ *   • overpaid：累計應得 < 已發放（超發），本次 0、差額記在 overpaidBy，**不自動追討**（bonus-run.ts）。
+ *   • top_up：前一次已發放紀錄是沖銷 → 這次重算把被沖掉的補回來＝補發。
+ */
+export type PayoutAdjustment = "reversal" | "clawback" | "overpaid" | "top_up"
+
+export type ProjectPayoutMember = {
+  employeeId: string
+  name: string | null
+  empNo: string | null
+  /** manager／lead／member／support（批次凍結當下）。 */
+  role: string | null
+  shareMode: string
+  sharePct: number | null
+  shareAmount: number | null
+  /** 這次的金額（沖銷為負）。 */
+  amount: number
+  /** 這次之前已發放（批次凍結值）。 */
+  paidBefore: number
+  /** 超發差額（>0 才有意義）。 */
+  overpaidBy: number
+  adjustment: PayoutAdjustment | null
+}
+
+export type ProjectPayoutRun = {
+  runId: string
+  label: string
+  kind: SerializedRun["kind"]
+  status: SerializedRun["status"]
+  asOf: string
+  submittedAt: string | null
+  approvedAt: string | null
+  /** 實際發放日（paid 才有）。 */
+  paidOn: string | null
+  /** 沖銷批次：被沖銷的批次期別。 */
+  reversesLabel: string | null
+  /** 這批已被（有效的）沖銷批次沖掉；含沖銷草稿＝沖銷中。 */
+  reversedByStatus: SerializedRun["status"] | null
+  /** 本專案這次的發放總額（成員金額合計）。 */
+  total: number
+  /** 只有已發放的批次計入累計。 */
+  countsTowardPaid: boolean
+  /** 截至這次（含）累計已發放。 */
+  cumulativePaid: number
+  members: ProjectPayoutMember[]
+}
+
+export type ProjectPayoutsResult = {
+  project: { id: string; code: string | null; name: string | null }
+  /** 依時間排序（舊 → 新）；草稿不列。 */
+  runs: ProjectPayoutRun[]
+  /** 累計已發放＝已發放（含沖銷）批次金額合計＝下一批試算扣掉的「已發放」（loadPaidBefore 口徑）。 */
+  paidTotal: number
+  /** 已核准／送審中、尚未發放的金額合計（不計入累計）。 */
+  pendingTotal: number
+  /** 沒列出的草稿批次數（草稿會隨入帳自動重算，金額未定）。 */
+  draftCount: number
+  /** 分潤調整（依時間舊 → 新；畫面與發放紀錄依時間穿插）。 */
+  revisions: ShareRevision[]
+  warnings: string[]
+}
+
+const roleRank = (role: string | null) => (role === "manager" ? 0 : role === "lead" ? 1 : role === "member" ? 2 : role === "support" ? 3 : 4)
+
+/** 排序時間：已發放用發放日，其餘用核准／送審日，最後用基準日。 */
+function payoutTimeKey(r: SerializedRun): string {
+  return r.paidOn ?? r.approvedAt?.slice(0, 10) ?? r.submittedAt?.slice(0, 10) ?? r.asOf
+}
+
+/** 純函式：批次清單＋本專案的明細列 → 依時間排序的發放歷程。草稿不列（只回筆數）。 */
+export function buildProjectPayouts(
+  project: ProjectPayoutsResult["project"],
+  runs: readonly SerializedRun[],
+  items: readonly SerializedItem[],
+  revisions: readonly ShareRevision[] = [],
+): ProjectPayoutsResult {
+  const byRun = new Map<string, SerializedItem[]>()
+  for (const it of items) {
+    if (it.projectId !== project.id || !it.runId) continue
+    const arr = byRun.get(it.runId) ?? []
+    arr.push(it)
+    byRun.set(it.runId, arr)
+  }
+  const labelById = new Map(runs.map((r) => [r.id, r.label]))
+  const involved = runs.filter((r) => byRun.has(r.id))
+  const draftCount = involved.filter((r) => r.status === "draft").length
+  const ordered = involved
+    .filter((r) => r.status !== "draft")
+    .sort((a, b) => payoutTimeKey(a).localeCompare(payoutTimeKey(b)) || a.createdAt.localeCompare(b.createdAt))
+
+  const warnings: string[] = []
+  let cumulative = 0
+  // 每位成員：累計已發放、最近一次已發放紀錄是不是沖銷（判斷補發）。
+  const paidByEmp = new Map<string, number>()
+  const lastPaidWasReversal = new Map<string, boolean>()
+  const out: ProjectPayoutRun[] = ordered.map((r) => {
+    const rows = [...(byRun.get(r.id) ?? [])].sort(
+      (a, b) => roleRank(a.roleInProject) - roleRank(b.roleInProject) || (a.empNo ?? "").localeCompare(b.empNo ?? "") || (a.employeeName ?? "").localeCompare(b.employeeName ?? ""),
+    )
+    const paid = r.status === "paid"
+    let mismatch = false
+    const members: ProjectPayoutMember[] = rows.map((it) => {
+      const adjustment: PayoutAdjustment | null =
+        r.kind === "reversal"
+          ? "reversal"
+          : it.amount < 0
+            ? "clawback"
+            : it.overpaid && it.overpaidBy > 0
+              ? "overpaid"
+              : it.amount > 0 && lastPaidWasReversal.get(it.employeeId)
+                ? "top_up"
+                : null
+      if (paid) {
+        const before = paidByEmp.get(it.employeeId) ?? 0
+        if (Math.abs(before - it.paidBefore) >= 1) mismatch = true
+        paidByEmp.set(it.employeeId, before + it.amount)
+        if (it.amount !== 0) lastPaidWasReversal.set(it.employeeId, r.kind === "reversal")
+      }
+      return {
+        employeeId: it.employeeId,
+        name: it.employeeName,
+        empNo: it.empNo,
+        role: it.roleInProject,
+        shareMode: it.shareMode,
+        sharePct: it.sharePct,
+        shareAmount: it.shareAmount,
+        amount: it.amount,
+        paidBefore: it.paidBefore,
+        overpaidBy: it.overpaid ? it.overpaidBy : 0,
+        adjustment,
+      }
+    })
+    const total = Math.round(members.reduce((s, m) => s + m.amount, 0) * 100) / 100
+    if (paid) cumulative = Math.round((cumulative + total) * 100) / 100
+    if (mismatch) warnings.push(`${r.label}：批次記錄的「之前已發放」與歷程累計不一致（可能有已刪除或排序不同的批次），以各批次凍結金額為準`)
+    return {
+      runId: r.id,
+      label: r.label,
+      kind: r.kind,
+      status: r.status,
+      asOf: r.asOf,
+      submittedAt: r.submittedAt,
+      approvedAt: r.approvedAt,
+      paidOn: r.paidOn,
+      reversesLabel: r.reversesRunId ? (labelById.get(r.reversesRunId) ?? null) : null,
+      reversedByStatus: r.reversedByStatus,
+      total,
+      countsTowardPaid: paid,
+      cumulativePaid: cumulative,
+      members,
+    }
+  })
+  const pendingTotal = Math.round(out.filter((r) => !r.countsTowardPaid).reduce((s, r) => s + r.total, 0) * 100) / 100
+  return { project, runs: out, paidTotal: cumulative, pendingTotal, draftCount, revisions: [...revisions], warnings }
+}
+
+/** IO：專案不存在（或別租戶）→ null（路由回 404）。 */
+export async function loadProjectPayouts(tenantId: string, projectId: string): Promise<ProjectPayoutsResult | null> {
+  const { data, error } = await supabaseAdmin.from("projects").select("id, code, name").eq("tenant_id", tenantId).eq("id", projectId).maybeSingle()
+  if (error) throw new Error(`bonus-sheet payouts (project): ${error.message}`)
+  if (!data) return null
+  const { runs, items } = await listProjectRunItems(tenantId, projectId)
+  let revisions: ShareRevision[] = []
+  let revisionError: unknown = null
+  try {
+    revisions = (await loadShareRevisions(tenantId, [projectId])).get(projectId) ?? []
+  } catch (err) {
+    revisionError = err
+  }
+  const result = buildProjectPayouts({ id: data.id as string, code: (data.code as string | null) ?? null, name: (data.name as string | null) ?? null }, runs, items, revisions)
+  if (revisionError) warn(result.warnings, "分潤調整紀錄讀取失敗，暫不顯示分潤調整", revisionError)
+  return result
 }
