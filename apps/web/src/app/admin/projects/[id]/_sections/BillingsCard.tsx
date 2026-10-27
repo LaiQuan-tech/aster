@@ -21,7 +21,6 @@ import {
   RECEIVABLE_STATE_BADGE_CLASS,
   type BillingScheduleExt,
   type InstallmentInputExt,
-  type BillingKind,
 } from "@/lib/projects-ext-api";
 import { fmtMoney, todayKey, humanError, type Setter } from "./shared";
 
@@ -51,7 +50,13 @@ interface BillingsCardProps {
   load: () => Promise<void>;
 }
 
-/** 分期請款期程（模組四第 4 條）＋ P3 開票／收款。金額一律系統算，不手動拉格。 */
+/**
+ * 分期請款期程（模組四第 4 條）＋ P3 開票／收款。金額一律系統算，不手動拉格。
+ *
+ * 2026-10-29 申請單改成整張表直接編輯後，期別、項目說明、百分比、一般分期／公會代墊、新增一期
+ * 都改在上方申請單「付款階段」；這張卡只留申請單做不到的動作：標記請款／取消、標記開票／取消、
+ * 標記入帳（入帳日、金額）／取消、人工指定金額與理由、合計與百分比警告。「預定日」欄已移除。
+ */
 export function BillingsCard({
   projectId,
   schedule,
@@ -80,31 +85,22 @@ export function BillingsCard({
     setDraft((d) => d.map((row, i) => (i === idx ? { ...row, ...patch } : row)));
   }
 
-  function addRow() {
-    const nextNo = draft.reduce((m, r) => Math.max(m, r.installmentNo), 0) + 1;
-    setDraft((d) => [...d, { installmentNo: nextNo, percentage: null, milestone: "" }]);
-  }
-
-  function removeRow(idx: number) {
-    setDraft((d) => d.filter((_, i) => i !== idx));
-  }
-
-  /** 平均分配百分比——這正是客戶說的「不要用 Excel 拉格」。 */
-  function splitEvenly() {
-    if (draft.length === 0) return;
-    const pct = Math.round((100 / draft.length) * 1000) / 1000;
-    setDraft((d) => d.map((row) => ({ ...row, percentage: pct })));
-  }
+  /** 人工指定金額或理由跟已存檔的不同（才顯示儲存鈕）。 */
+  const overrideDirty = draft.some((row) => {
+    const saved = schedule?.installments.find((i) => i.id === row.id);
+    return !!saved && ((row.overrideAmount ?? null) !== (saved.overrideAmount ?? null) || (row.overrideReason ?? "") !== (saved.overrideReason ?? ""));
+  });
 
   async function saveSchedule() {
     setSavingSchedule(true);
     setError(null);
     try {
+      // 整批端點：draft 是由已存檔的期程建出來的（含期別、說明、百分比、預定日原值），這裡只改了人工指定金額與理由。
       const res = await saveBillingSchedule(projectId, draft);
       setSchedule(res);
       await load();
     } catch (err) {
-      setError(humanizeBillingError(err, humanError(err, "儲存期程失敗")));
+      setError(humanizeBillingError(err, humanError(err, "儲存人工指定金額失敗")));
     } finally {
       setSavingSchedule(false);
     }
@@ -206,17 +202,18 @@ export function BillingsCard({
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b text-left text-gray-500">
-              <th className="py-2 pr-2 w-14">期</th>
-              <th className="py-2 pr-2">階段</th>
-              <th className="py-2 pr-2 w-24">百分比</th>
-              <th className="py-2 pr-2 w-36">預定日</th>
+              <th className="py-2 pr-2">期別</th>
               <th className="py-2 pr-2 text-right">系統試算</th>
-              <th className="py-2 pr-2 w-32 text-right">人工指定</th>
+              <th className="py-2 pr-2 w-40 text-right">人工指定</th>
               <th className="py-2 pr-2">狀態</th>
-              <th className="py-2 pr-2"></th>
             </tr>
           </thead>
           <tbody>
+            {draft.length === 0 && (
+              <tr>
+                <td colSpan={4} className="py-3 text-sm text-gray-400">還沒有期別——請在上方申請單「付款階段」直接填寫後儲存。</td>
+              </tr>
+            )}
             {draft.map((rowDraft, idx) => {
               const saved = schedule?.installments.find((i) => i.id === rowDraft.id);
               const billed = !!saved?.billedOn;
@@ -241,56 +238,13 @@ export function BillingsCard({
               return (
                 <Fragment key={rowDraft.id ?? `new-${idx}`}>
                   <tr className="border-b last:border-0">
-                    <td className="py-2 pr-2">
-                      <input
-                        className={`${inputCls} w-12`}
-                        type="number"
-                        min="1"
-                        value={rowDraft.installmentNo}
-                        disabled={locked}
-                        onChange={(e) => patchDraft(idx, { installmentNo: Number(e.target.value) })}
-                      />
-                    </td>
-                    <td className="py-2 pr-2">
-                      <input
-                        className={inputCls}
-                        value={rowDraft.milestone ?? ""}
-                        placeholder="開工款／完成 50%／驗收款／保留款"
-                        onChange={(e) => patchDraft(idx, { milestone: e.target.value })}
-                      />
-                      <select
-                        className="mt-1 w-full rounded border border-gray-200 px-1 py-0.5 text-[11px] text-gray-500"
-                        value={rowDraft.kind ?? "installment"}
-                        disabled={locked}
-                        onChange={(e) => patchDraft(idx, { kind: e.target.value as BillingKind })}
-                      >
-                        <option value="installment">一般分期</option>
-                        <option value="guild_advance">技師公會代墊</option>
-                      </select>
-                    </td>
-                    <td className="py-2 pr-2">
-                      <input
-                        className={inputCls}
-                        type="number"
-                        step="0.001"
-                        min="0"
-                        max="100"
-                        value={rowDraft.percentage ?? ""}
-                        disabled={locked}
-                        onChange={(e) =>
-                          patchDraft(idx, {
-                            percentage: e.target.value === "" ? null : Number(e.target.value),
-                          })
-                        }
-                      />
-                    </td>
-                    <td className="py-2 pr-2">
-                      <input
-                        className={inputCls}
-                        type="date"
-                        value={rowDraft.plannedOn ?? ""}
-                        onChange={(e) => patchDraft(idx, { plannedOn: e.target.value || null })}
-                      />
+                    <td className="py-2 pr-2 text-gray-700">
+                      {/* 期別與說明只讀：改在上方申請單「付款階段」。 */}
+                      <span>第 {rowDraft.installmentNo} 期</span>
+                      {rowDraft.milestone && <span className="ml-1">{rowDraft.milestone}</span>}
+                      {rowDraft.kind === "guild_advance" && (
+                        <span className="ml-1 rounded bg-purple-50 px-1.5 py-0.5 text-[10px] text-purple-700">{BILLING_KIND_LABELS.guild_advance}</span>
+                      )}
                     </td>
                     <td className="py-2 pr-2 text-right text-gray-600">
                       {saved?.calculatedAmount == null ? (
@@ -360,27 +314,11 @@ export function BillingsCard({
                         <span className="text-xs text-gray-400">存檔後可請款</span>
                       )}
                     </td>
-                    <td className="py-2 pr-2 text-right">
-                      {!locked && (
-                        <button
-                          type="button"
-                          className="text-xs text-gray-400 hover:text-red-600"
-                          onClick={() => removeRow(idx)}
-                        >
-                          移除
-                        </button>
-                      )}
-                    </td>
                   </tr>
                   {saved && (
                     <tr className="border-b bg-gray-50/60 text-xs last:border-0">
-                      <td colSpan={8} className="py-1.5 pl-8 pr-2">
+                      <td colSpan={4} className="py-1.5 pl-8 pr-2">
                         <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-                          {saved.kind === "guild_advance" && (
-                            <span className="rounded bg-purple-50 px-1.5 py-0.5 text-[10px] text-purple-700">
-                              {BILLING_KIND_LABELS.guild_advance}
-                            </span>
-                          )}
                           {/* 開票 */}
                           {saved.invoicedOn ? (
                             <button type="button" className="text-green-700 hover:underline" onClick={() => cancelInvoice(saved.id)}>
@@ -449,18 +387,17 @@ export function BillingsCard({
           {schedule && draft.length > 0 && (
             <tfoot>
               <tr className="border-t-2 font-medium">
-                <td className="py-2 pr-2" colSpan={2}>合計</td>
                 <td className="py-2 pr-2">
-                  <span className={schedule.summary.percentageTotal === 100 ? "text-gray-700" : "text-amber-600"}>
+                  合計
+                  <span className={`ml-2 ${schedule.summary.percentageTotal === 100 ? "text-gray-700" : "text-amber-600"}`}>
                     {schedule.summary.percentageTotal}%
                     {schedule.summary.percentageTotal !== 100 && " ⚠️"}
                   </span>
                 </td>
-                <td className="py-2 pr-2"></td>
                 <td className="py-2 pr-2 text-right" colSpan={2}>
                   {fmtMoney(schedule.summary.effectiveTotal)}
                 </td>
-                <td className="py-2 pr-2 text-xs text-gray-500" colSpan={2}>
+                <td className="py-2 pr-2 text-xs text-gray-500">
                   已請款 {fmtMoney(schedule.summary.billedTotal)}／
                   未請款 {fmtMoney(schedule.summary.unbilledTotal)}
                   {schedule.summary.guildAdvanceTotal !== 0 && `／公會代墊 ${fmtMoney(schedule.summary.guildAdvanceTotal)}`}
@@ -481,31 +418,18 @@ export function BillingsCard({
         <p className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-800">
           有 {fmtMoney(schedule.summary.unallocatedResidue)} 元無法分配——
           所有期別都已請款或已人工指定金額，沒有期別可以吸收差額。
-          請新增一期，或調整人工指定的金額。
+          請在上方申請單「付款階段」新增一期，或調整人工指定的金額。
         </p>
       )}
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
-        <PrimaryButton onClick={saveSchedule} disabled={savingSchedule}>
-          {savingSchedule ? "儲存中…" : "儲存期程"}
-        </PrimaryButton>
-        <button
-          type="button"
-          className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
-          onClick={addRow}
-        >
-          ＋ 新增一期
-        </button>
-        <button
-          type="button"
-          className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
-          onClick={splitEvenly}
-          disabled={draft.length === 0}
-        >
-          平均分配百分比
-        </button>
+        {overrideDirty && (
+          <PrimaryButton onClick={saveSchedule} disabled={savingSchedule}>
+            {savingSchedule ? "儲存中…" : "儲存人工指定金額"}
+          </PrimaryButton>
+        )}
         <span className="text-xs text-gray-400">
-          金額一律由系統算：末期自動吸收四捨五入的尾差，合計必然等於合約金額。
+          期別、項目說明、百分比與新增一期請在上方申請單「付款階段」修改。金額一律由系統算：末期自動吸收四捨五入的尾差，合計必然等於合約金額。
         </span>
       </div>
       <ErrorText>{error}</ErrorText>
