@@ -95,7 +95,7 @@ describe("放款單老闆關：平台管理員也可簽", () => {
     expect(noticesTo(PA)).toHaveLength(1)
     expect(noticesTo(PA2)).toHaveLength(1)
     expect(noticesTo(HR)).toHaveLength(0)
-    expect(String(noticesTo(PA)[0].body)).toContain("老闆或任一位平台管理員")
+    expect(String(noticesTo(PA)[0].body)).toContain("任一位平台管理員（老闆）")
 
     const list = await listPendingDisbursementApprovals(TENANT_ID, { empId: PA, role: "platform_admin" })
     expect(list.map((d) => [d.id, d.mine])).toEqual([[DISB, true]])

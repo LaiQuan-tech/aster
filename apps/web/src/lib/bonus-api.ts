@@ -335,7 +335,7 @@ export const BONUS_SKIP_REASON_LABELS: Record<BonusSkipReason, string> = {
 
 const BONUS_ERRORS: Record<string, string> = {
   // 2026-10-27 職責分離（放最前面：完整字串、不會被其他 code 包含）。
-  self_approval_forbidden: "你是這批的送審人，不能核准或退回自己送審的批次，請由其他老闆或平台管理員處理",
+  self_approval_forbidden: "你是這批的送審人，不能核准或退回自己送審的批次，請由其他平台管理員（老闆）處理",
   no_other_approver: "除了你之外沒有人能核准（送審人不能核准自己送審的批次）——請改由其他 HR 送審，或先新增一位平台管理員",
   label_exists: "這個期別已經有一筆批次（同期別只能一筆；先刪掉舊草稿再建）",
   not_draft: "這個狀態不能做這個動作（已發放的批次是凍結快照；送審中／已核准要先退回草稿才能刪除）",
@@ -360,7 +360,7 @@ const BONUS_ERRORS: Record<string, string> = {
 }
 
 /** 送審人看到的說明（隱藏核准／退回按鈕時顯示）。 */
-export const SELF_SUBMITTED_NOTE = "你是這批的送審人，不能核准或退回自己送審的批次，請由其他老闆或平台管理員處理。"
+export const SELF_SUBMITTED_NOTE = "你是這批的送審人，不能核准或退回自己送審的批次，請由其他平台管理員（老闆）處理。"
 
 /** 這個人能不能對這批按核准／退回：老闆或平台管理員，且不是送審人。純函式。 */
 export function canDecideBonusRun(detail: Pick<BonusRunDetail, "canApprove" | "selfSubmitted"> | null | undefined): boolean {

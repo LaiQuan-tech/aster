@@ -171,7 +171,7 @@ export const EMPLOYEE_ROLES: { value: string; label: string }[] = [
 ];
 
 export function employeeRoleLabel(role: string): string {
-  if (role === "platform_admin") return "平台管理員";
+  if (role === "platform_admin") return "平台管理員（老闆）";
   return EMPLOYEE_ROLES.find((item) => item.value === role)?.label ?? role;
 }
 

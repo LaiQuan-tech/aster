@@ -30,18 +30,18 @@ export interface PrivilegeTarget {
 }
 
 /** 設定頁唯讀時、以及後端回 403 not_boss（換老闆）時都顯示這句。 */
-export const BOSS_SETTING_LOCKED_NOTE = "只有老闆或平台管理員可以更換老闆設定";
+export const BOSS_SETTING_LOCKED_NOTE = "只有平台管理員（老闆）可以更換老闆設定";
 /** 還沒有老闆時的提示（HR 可以先做第一次設定）。 */
 export const BOSS_SETTING_BOOTSTRAP_NOTE =
-  "目前還沒有設定老闆，可以先指定一位；設定之後要換人，只有老闆本人或平台管理員能改。";
+  "目前還沒有設定老闆，可以先指定一位；設定之後要換人，只有平台管理員（老闆）能改。";
 /** 老闆本人看到的提示（交棒後自己就不能再改回來）。 */
 export const BOSS_SETTING_HANDOVER_NOTE = "你是目前的老闆，可以交棒給別人；交棒之後就不能再自己改回來。";
 /** 員工列表：重設密碼、寄重設／邀請信這幾個動作被停用時的說明。 */
-export const CREDENTIALS_LOCKED_NOTE = "只有老闆或平台管理員可以重設老闆、HR、平台管理員（以及老闆指定的人）的密碼";
+export const CREDENTIALS_LOCKED_NOTE = "只有平台管理員（老闆）可以重設老闆、HR、平台管理員（以及老闆指定的人）的密碼";
 /** 角色下拉：沒有權限指派平台管理員時的說明。 */
 export const PLATFORM_ADMIN_ASSIGN_NOTE = "「平台管理員」角色只有平台管理員可以指派";
 /** 角色下拉：目標是受保護帳號、登入者不能變更它的角色時的說明。 */
-export const ROLE_CHANGE_LOCKED_NOTE = "只有老闆或平台管理員可以變更老闆、HR、平台管理員（以及老闆指定的人）的角色";
+export const ROLE_CHANGE_LOCKED_NOTE = "只有平台管理員（老闆）可以變更老闆、HR、平台管理員（以及老闆指定的人）的角色";
 
 const PLATFORM_ADMIN = "platform_admin";
 const HR_ADMIN = "hr_admin";
@@ -118,8 +118,8 @@ export function roleOptionsFor(
   const alreadyPlatform = !!currentRole && lower(currentRole) === PLATFORM_ADMIN;
   const allowed = canAssignPlatformAdmin(viewer) || alreadyPlatform;
   const platformOption: RoleOption = allowed
-    ? { value: PLATFORM_ADMIN, label: "平台管理員" }
-    : { value: PLATFORM_ADMIN, label: "平台管理員（僅平台管理員可指派）", disabled: true };
+    ? { value: PLATFORM_ADMIN, label: "平台管理員（老闆）" }
+    : { value: PLATFORM_ADMIN, label: "平台管理員（老闆）— 僅平台管理員可指派", disabled: true };
   return [...withoutPlatform.slice(0, at), platformOption, ...withoutPlatform.slice(at)];
 }
 

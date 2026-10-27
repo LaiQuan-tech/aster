@@ -891,7 +891,7 @@ export function approvalLine(
     case "pending": {
       const names = (r.current_approver_names ?? []).map((n) => n.trim()).filter(Boolean);
       const name = names.length > 0 ? names.join(APPROVER_JOINER) : (r.current_approver_name ?? "").trim();
-      const hrNote = r.current_step_kind === "hr" ? "（HR 覆核）" : r.current_step_kind === "fallback" ? "（老闆或平台管理員）" : "";
+      const hrNote = r.current_step_kind === "hr" ? "（HR 覆核）" : r.current_step_kind === "fallback" ? "（平台管理員（老闆））" : "";
       const total = r.total_steps != null && Number(r.total_steps) > 0 ? Number(r.total_steps) : null;
       const step = r.current_step != null && Number(r.current_step) > 0 ? Number(r.current_step) : 1;
       const stepText = total && total > 1 ? `（第 ${step}／${total} 關）` : "";

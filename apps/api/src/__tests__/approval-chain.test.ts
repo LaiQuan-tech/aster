@@ -230,10 +230,10 @@ describe("pickApproverChain — requireBossFinal（跨縣市出差：老闆最�
       error: "no_approver_available",
     })
     expect(pickApproverChain(base({ requireBossFinal: true, platformAdminEmpIds: [] }))).toEqual({ ok: false, error: "no_approver_available" })
-    // 老闆未設定、platform_admin 是主管 → 名義優先挑沒在前面關卡的 platform_admin
+    // 老闆未設定、platform_admin 是主管 → 第三輪 S1：platform_admin 不出現在主管關，只在老闆關
     expect(pickApproverChain(base({ requireBossFinal: true, managerEmpIds: [PA1], platformAdminEmpIds: [PA1, PA2] }))).toEqual({
       ok: true,
-      steps: [one(PA1, "manager"), one(PA2, "fallback")],
+      steps: [one(PA1, "fallback")],
       source: "boss_final",
     })
   })

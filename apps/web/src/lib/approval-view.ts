@@ -143,7 +143,7 @@ export function resolveApproverId(row: ApproverRow, flowByKind: FlowByKind, fall
 export const BOSS_STEP_KIND = "fallback";
 
 /** 「目前簽核人」與進度文字的老闆關加註（與 ESS 我的申請一致）。 */
-export const BOSS_STEP_NOTE = "（老闆或平台管理員）";
+export const BOSS_STEP_NOTE = "（平台管理員（老闆））";
 
 export function isBossStepKind(kind: string | null | undefined): boolean {
   return kind === BOSS_STEP_KIND;

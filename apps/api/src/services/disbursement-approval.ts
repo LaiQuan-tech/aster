@@ -8,17 +8,30 @@ import {
   bossGateStep,
   canActOnStep,
   canHrOverrideStep,
+  chainHasBossStep,
+  isBossStep,
+  isStepCandidate,
+  legacyBossGateBlocks,
+  standingCanAct,
+  type BossGateCtx,
   changeApproverDenial,
   CHANGE_APPROVER_DENIAL_MESSAGE,
   CHANGE_APPROVER_DENIAL_STATUS,
   stepActorStanding,
   stepCandidates,
-  stepNotifyRecipients,
   type StepLike,
 } from "./approval-steps.js"
-import { actorReassignedRequest, bossSignerChecker, bossStepHasEligibleSigner, loadConfiguredBossEmpId, loadPlatformAdminEmpIds } from "../lib/boss.js"
+import {
+  actorReassignedRequest,
+  bossSignerChecker,
+  bossSignerState,
+  bossStepNotifyRecipients,
+  isConfiguredBoss,
+  isPlatformAdminRole,
+  loadConfiguredBossEmpId,
+} from "../lib/boss.js"
 import { enqueue } from "./notify.js"
-import { writeAuditLog } from "./audit.js"
+import { writeAuditLog, writeAuditLogStrict } from "./audit.js"
 import {
   DisbursementError,
   appendNote,
@@ -210,7 +223,7 @@ function noticeBody(d: DisbursementRow, step: number, totalSteps: number, stepKi
     stepKind === "accountant"
       ? "本關為會計覆核，任一位會計簽核即可。"
       : stepKind === BOSS_STEP_KIND
-        ? "本關為老闆簽核，老闆或任一位平台管理員簽核即可。"
+        ? "本關為老闆簽核，任一位平台管理員（老闆）簽核即可。"
         : ""
   const purpose = d.purpose ? `，用途：${d.purpose}` : ""
   return `放款單 ${d.disbursement_no}：收款方 ${d.payee_name}，實付 ${moneyText(d)}${purpose}。請至「待我簽核」處理${stepText}。${kindText}`
@@ -250,13 +263,38 @@ export function signedEarlierStep(rows: DisbursementStepRow[], step: Pick<Disbur
 }
 
 /**
- * 輪到某關時要通知的人：該關候選；老闆關另加租戶所有在職 platform_admin（2026-10-27 業主：平台管理員就是老闆），
- * 去重、不寄建單人本人。查 platform_admin 失敗 → 只寄候選。
+ * 放款單的老闆關判斷上下文（一律需要老闆關）：帶上設定的老闆；S2（第三輪安全驗收）：本輪鏈裡完全沒有老闆關的舊單，
+ * 最後一關視為老闆關。
  */
-async function stepRecipients(tenantId: string, step: StepLike & { step_kind?: string | null }, owners: Array<string | null>): Promise<string[]> {
-  if (step.step_kind !== BOSS_STEP_KIND) return stepCandidates(step)
-  const admins = await loadPlatformAdminEmpIds(tenantId).catch(() => [] as string[])
-  return stepNotifyRecipients(step, admins, owners)
+function disbursementGateCtx(bossEmpId: string | null, rows: DisbursementStepRow[], step: Pick<DisbursementStepRow, "round" | "step_order">): BossGateCtx {
+  const roundRows = rows.filter((r) => r.round === step.round)
+  const ctx: BossGateCtx = { requiresBoss: true, bossEmpId }
+  if (roundRows.length > 0) {
+    ctx.chainHasBossStep = chainHasBossStep(roundRows, ctx)
+    ctx.isLastStep = !roundRows.some((r) => r.step_order > step.step_order)
+  }
+  return ctx
+}
+
+/**
+ * 輪到某關時要通知的人：非老闆關＝該關候選；老闆關（含視為老闆關的關卡，第三輪驗收 5）＝候選＋目前設定且在職的老闆＋
+ * 所有在職 platform_admin；沒有任何可用老闆／平台管理員時另通知可 L3 代簽的非建單人在職 HR（第三輪驗收 4）。
+ * 不寄建單人／送簽人／編輯人。查詢失敗 → 只寄候選。
+ */
+async function stepRecipients(
+  tenantId: string,
+  step: StepLike & { step_kind?: string | null },
+  owners: Array<string | null>,
+  earlier: string[] = [],
+  ctx?: BossGateCtx,
+): Promise<string[]> {
+  try {
+    const gate = bossGateStep(step, ctx ?? { requiresBoss: true, bossEmpId: await loadConfiguredBossEmpId(tenantId) })
+    if (!isBossStep(gate)) return stepCandidates(step)
+    return await bossStepNotifyRecipients(tenantId, { candidateEmpIds: stepCandidates(step), requesters: owners, earlier })
+  } catch {
+    return stepCandidates(step)
+  }
 }
 
 function basePayload(d: DisbursementRow, extra: Record<string, unknown>): Record<string, unknown> {
@@ -356,7 +394,13 @@ export async function submitDisbursement(
   const round = (current.approval_round ?? 0) + 1
   const stepRows = buildStepRows(tenantId, id, round, chain.steps)
   const { error: stepErr } = await supabaseAdmin.from("disbursement_approval_steps").insert(stepRows)
-  if (stepErr) throw new Error(`submitDisbursement (steps): ${stepErr.message}`)
+  if (stepErr) {
+    // 第三輪驗收 7：兩次送簽同時進來撞 (disbursement_id, round, step_order) 唯一索引 → 409 conflict（不是 500）。
+    if ((stepErr as { code?: string }).code === "23505") {
+      throw new DisbursementError(409, "conflict", { hint: "這張放款單已在送簽中，請重新整理後再確認。" })
+    }
+    throw new Error(`submitDisbursement (steps): ${stepErr.message}`)
+  }
 
   const submittedAt = new Date().toISOString()
   // 第二輪安全驗收 L5：單頭只在「仍是草稿、且讀取後沒被改過（updated_at 相同）」時才轉成待簽核——
@@ -487,27 +531,43 @@ export async function decideDisbursement(params: {
   // 自己的單（建單人或送簽人）任何一關都不能簽（含 HR 代簽；追加 B／D）；非在職不能簽（追加 A）。
   const stepActor = { id: actor.empId, role: actor.role, active: actor.active }
   // 放款單一律需要老闆關：候選含老闆的關卡視為老闆關（第二輪安全驗收 H1；舊單老闆在主管鏈上時那關是 kind='manager'）。
-  const gate = bossGateStep(step, { requiresBoss: true, bossEmpId: await loadConfiguredBossEmpId(tenantId) })
-  const standing = stepActorStanding(gate, stepActor, requestersOf(current))
+  // 第三輪驗收 2：老闆關也放行目前設定的老闆；S2：本輪鏈裡完全沒有老闆的舊單，最後一關視為老闆關。
+  const bossEmpId = await loadConfiguredBossEmpId(tenantId)
+  const gateCtx = disbursementGateCtx(bossEmpId, rows, step)
+  const gate = bossGateStep(step, gateCtx)
+  const standing = stepActorStanding(gate, stepActor, requestersOf(current), { bossEmpId })
   if (standing === "own_request") throw new DisbursementError(403, "own_request")
-  const isCandidate = standing === "candidate" || standing === "platform_admin"
-  const signedBefore = signedEarlierStep(rows, step, actor.empId)
-  // HR 代簽：老闆關原則上不准（追加 C），其他關照舊。L3：這張單的老闆關找不到任何「非建單人／送簽人／編輯人、在職、
-  // 本輪沒簽過前面關卡」的老闆／平台管理員 → 允許在職、非申請人的 HR 代簽（稽核記「無可用老闆／平台管理員，HR 代簽」）。
+  const isCandidate = standingCanAct(standing)
+  let signedBefore = signedEarlierStep(rows, step, actor.empId)
+  const earlier = earlierSigners(rows, step)
+  // 老闆關可簽者狀態（第三輪 S1）：fresh＝扣掉簽過前面關卡的人仍有老闆／平台管理員可簽；any＝只扣申請人仍有。
+  const bossState = isBossStep(gate)
+    ? await bossSignerState(tenantId, { requesters: requestersOf(current), earlier, stepCandidateEmpIds: stepCandidates(step) })
+    : null
+  // S1 防禦性例外：唯一可簽的老闆／平台管理員已簽過前面關卡 → 不開放 HR 代簽，改允許他簽老闆關。
+  const actorBossish =
+    isPlatformAdminRole(actor.role) || isConfiguredBoss(bossEmpId, actor.empId) || (isBossStep(step) && isStepCandidate(step, actor.empId))
+  const bossSignedEarlierWaiver = signedBefore && isCandidate && !!bossState && !bossState.fresh && bossState.any && actorBossish
+  if (bossSignedEarlierWaiver) signedBefore = false
+  // HR 代簽：老闆關原則上不准（追加 C），其他關照舊。L3：完全找不到「非建單人／送簽人／編輯人、在職」的老闆／平台管理員
+  // （不論是否簽過前面關卡，S1）→ 允許在職、非申請人、本輪沒簽過的 HR 代簽。第二輪 M2：改派過的 HR 不能 L3 代簽。
   let bossStepHrFallback = false
-  // 第二輪 M2：曾對這張單做過「變更簽核人」的 HR 不能用 L3 退路代簽。
-  if (allowHrOverride && !isCandidate && !signedBefore && gate.step_kind === BOSS_STEP_KIND && isHrRole(actor.role ?? undefined) && actor.active !== false) {
-    bossStepHrFallback =
-      !(await bossStepHasEligibleSigner(tenantId, {
-        exclude: [...requestersOf(current), ...earlierSigners(rows, step)],
-        stepCandidateEmpIds: stepCandidates(step),
-      })) && !(await actorReassignedRequest(tenantId, "disbursements", id, actor.empId))
+  if (allowHrOverride && !isCandidate && !signedBefore && isBossStep(gate) && isHrRole(actor.role ?? undefined) && actor.active !== false && bossState && !bossState.any) {
+    bossStepHrFallback = !(await actorReassignedRequest(tenantId, "disbursements", id, actor.empId))
   }
   const canOverride = allowHrOverride && canHrOverrideStep(gate, stepActor, { bossStepHrFallback })
   if (!isCandidate && !canOverride) throw new DisbursementError(403, "not_current_approver")
   // 同一輪同一人不能簽兩關（含代簽；追加 D）。
   if (signedBefore) throw new DisbursementError(403, "already_signed_step")
-  const hrFallbackAudit = bossStepHrFallback && !isCandidate ? { bossStepHrFallback: true, auditNote: "無可用老闆／平台管理員，HR 代簽" } : {}
+  // S2：舊單鏈裡沒有任何老闆關 → 最終核准必須是老闆／平台管理員（沒有任何可用老闆／平台管理員時照 L3 放行）。
+  if (action === "approve" && legacyBossGateBlocks({ ctx: gateCtx, actor: stepActor, noEligibleBossSigner: !!bossState && !bossState.any })) {
+    throw new DisbursementError(409, "boss_step_required", { message: "這張單的簽核鏈沒有老闆關，最後一關需由平台管理員（老闆）核准" })
+  }
+  const hrFallbackAudit = {
+    ...(bossStepHrFallback && !isCandidate ? { bossStepHrFallback: true, auditNote: "無可用老闆／平台管理員，HR 代簽" } : {}),
+    ...(standing === "boss" ? { bossByCurrentBoss: true } : {}),
+    ...(bossSignedEarlierWaiver ? { bossSignedEarlierWaiver: true } : {}),
+  }
   // 候選之一（含 platform_admin 簽老闆關）簽核 → approver_emp_id 改寫成實際簽的人；HR 代簽不改寫（同假單路徑）。
   const takeOver = isCandidate && step.approver_emp_id !== actor.empId
 
@@ -589,7 +649,7 @@ export async function decideDisbursement(params: {
     try {
       notified = await enqueue({
         tenantId,
-        employeeIds: await stepRecipients(tenantId, next, requestersOf(current)),
+        employeeIds: await stepRecipients(tenantId, next, requestersOf(current), [...earlier, actor.empId.toLowerCase()], disbursementGateCtx(bossEmpId, rows, next)),
         type: "approval",
         title: `待簽核：放款單 ${current.disbursement_no}`,
         body: noticeBody(current, next.step_order, totalSteps, next.step_kind),
@@ -708,7 +768,7 @@ export async function changeDisbursementApprover(
   // 老闆 id 一律要帶（非老闆關不准改派給老闆／平台管理員，第二輪 M2）；候選含老闆的關卡視為老闆關（第二輪 H1）。
   const bossEmpId = await loadConfiguredBossEmpId(tenantId)
   const denial = changeApproverDenial({
-    step: bossGateStep(step, { requiresBoss: true, bossEmpId }),
+    step: bossGateStep(step, disbursementGateCtx(bossEmpId, rows, step)),
     actor: { id: actor.empId ?? "", role: actor.role, active: actor.active },
     requester: requestersOf(current),
     target: { id: target.id as string, role: (target as { role?: string | null }).role ?? null },
@@ -716,6 +776,17 @@ export async function changeDisbursementApprover(
   })
   if (denial) throw new DisbursementError(CHANGE_APPROVER_DENIAL_STATUS[denial], denial, { message: CHANGE_APPROVER_DENIAL_MESSAGE[denial] })
 
+  // 第三輪安全驗收 S3：改派紀錄是「改派過的 HR 不能 L3 代簽」的依據——先寫稽核（失敗就丟例外、不改派），再改關卡。
+  await writeAuditLogStrict({
+    tenantId,
+    tableName: "disbursements",
+    recordId: id,
+    action: "UPDATE",
+    oldRow: current,
+    newRow: { changeApprover: true, round: step.round, stepOrder: step.step_order, previousApproverEmpId: step.approver_emp_id, approverEmpId },
+    actorEmpId: actor.empId,
+    context: "POST /disbursements/:id/change-approver",
+  })
   const { error } = await supabaseAdmin
     .from("disbursement_approval_steps")
     .update({ approver_emp_id: approverEmpId, candidate_emp_ids: [approverEmpId] })
@@ -745,16 +816,6 @@ export async function changeDisbursementApprover(
     logger.warn({ err, disbursementId: id }, "changeDisbursementApprover: notification failed")
   }
 
-  await writeAuditLog({
-    tenantId,
-    tableName: "disbursements",
-    recordId: id,
-    action: "UPDATE",
-    oldRow: current,
-    newRow: { changeApprover: true, round: step.round, stepOrder: step.step_order, previousApproverEmpId: step.approver_emp_id, approverEmpId },
-    actorEmpId: actor.empId,
-    context: "POST /disbursements/:id/change-approver",
-  })
   return { stepOrder: step.step_order, previousApproverEmpId: step.approver_emp_id, notified }
 }
 
@@ -863,20 +924,19 @@ export async function listPendingDisbursementApprovals(
     const rawStep = currentStepOf(row, rowSteps)
     if (!rawStep) continue
     // 候選含老闆的關卡視為老闆關（第二輪 H1）：platform_admin 也看得到、L3 判斷同老闆關。
-    const step = bossGateStep(rawStep, { requiresBoss: true, bossEmpId })
+    const step = bossGateStep(rawStep, disbursementGateCtx(bossEmpId, rowSteps, rawStep))
     const requesters = requestersOf(row)
-    let mine =
-      canActOnStep(step, { id: actor.empId, role: actor.role, active: actor.active }, requesters) &&
-      !signedEarlierStep(rowSteps, step, actor.empId)
-    if (
-      !mine &&
-      actorIsHr &&
-      step.step_kind === BOSS_STEP_KIND &&
-      !requesters.some((r) => r.toLowerCase() === actor.empId!.toLowerCase()) &&
-      !signedEarlierStep(rowSteps, step, actor.empId)
-    ) {
+    const isMineRequest = requesters.some((r) => r.toLowerCase() === actor.empId!.toLowerCase())
+    const canAct = canActOnStep(step, { id: actor.empId, role: actor.role, active: actor.active }, requesters, { bossEmpId })
+    const signedEarlier = signedEarlierStep(rowSteps, step, actor.empId)
+    let mine = canAct && !signedEarlier
+    if (!mine && !isMineRequest && step.step_kind === BOSS_STEP_KIND && (canAct || (actorIsHr && !signedEarlier))) {
+      // 老闆關：S1 例外（唯一的老闆／平台管理員已簽前面關卡 → 仍輪到他）與 L3（完全沒有老闆／平台管理員 → HR 可代簽）。
       checker ??= await bossSignerChecker(tenantId)
-      mine = !(await checker({ exclude: [...requesters, ...earlierSigners(rowSteps, step)], stepCandidateEmpIds: stepCandidates(step) }))
+      const state = await bossSignerState(tenantId, { requesters, earlier: earlierSigners(rowSteps, step), stepCandidateEmpIds: stepCandidates(step) }, checker)
+      const actorBossish =
+        isPlatformAdminRole(actor.role) || isConfiguredBoss(bossEmpId, actor.empId) || (isBossStep(rawStep) && isStepCandidate(rawStep, actor.empId))
+      mine = canAct ? actorBossish && !state.fresh && state.any : !state.any
     }
     if (!mine && !wantAll) continue
     picked.push({ row, step, total: rowSteps.filter((s) => s.round === step.round).length, mine })

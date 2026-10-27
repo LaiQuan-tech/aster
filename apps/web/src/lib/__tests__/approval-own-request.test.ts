@@ -26,9 +26,9 @@ describe("own_request 文案", () => {
 });
 
 describe("放款待簽：本關可簽標籤", () => {
-  it("老闆關（fallback）補註「（老闆或平台管理員）」", () => {
+  it("老闆關（fallback）補註「（平台管理員（老闆））」", () => {
     expect(stepCandidatesLine(["老闆大頭"], "fallback")).toBe(`本關可簽：老闆大頭${BOSS_STEP_NOTE}`);
-    expect(BOSS_STEP_NOTE).toBe("（老闆或平台管理員）");
+    expect(BOSS_STEP_NOTE).toBe("（平台管理員（老闆））");
   });
   it("其他關不補註；沒名字不顯示", () => {
     expect(stepCandidatesLine(["主管甲", "主管乙"], "manager")).toBe("本關可簽：主管甲、主管乙");

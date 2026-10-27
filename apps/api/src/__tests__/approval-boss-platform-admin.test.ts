@@ -146,7 +146,7 @@ describe("老闆關：通知老闆＋所有在職 platform_admin", () => {
     expect(noticesTo(HR_ID)).toHaveLength(0)
     // 申請人只會收到結果通知，不會收到「待簽核」。
     expect(noticesTo(STAFF_ID).filter((n) => String(n.title).startsWith("待簽核"))).toHaveLength(0)
-    expect(String(noticesTo(PA_ID)[0].body)).toContain("老闆或任一位平台管理員")
+    expect(String(noticesTo(PA_ID)[0].body)).toContain("任一位平台管理員（老闆）")
     expect(noticesTo(PA_ID)[0].payload).toMatchObject({ requestId: id, stepKind: "fallback", currentStep: 2 })
   })
 

@@ -419,10 +419,10 @@ describe("requestTitle / approvalLine / needsAttachment / remainingHours", () =>
     ).toBe("等待 王小明 簽核（第 1／3 關）");
   });
 
-  it("approvalLine 老闆關（kind=fallback）加註「老闆或平台管理員」", () => {
+  it("approvalLine 老闆關（kind=fallback）加註「平台管理員（老闆）」", () => {
     expect(
       approvalLine(row({ current_approver_names: ["陳老闆"], current_step_kind: "fallback", current_step: 2, total_steps: 2 })),
-    ).toBe("等待 陳老闆（老闆或平台管理員）簽核（第 2／2 關）");
+    ).toBe("等待 陳老闆（平台管理員（老闆））簽核（第 2／2 關）");
   });
 
   it("approvalLine 新欄位空陣列／空白 → 退回 current_approver_name；只有 kind=hr 沒名字 → 不加註", () => {

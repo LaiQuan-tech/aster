@@ -49,3 +49,22 @@ export async function writeAuditLog(entry: AuditEntry): Promise<void> {
     console.error(`[audit] write threw (${entry.tableName}/${entry.action}):`, err)
   }
 }
+
+/**
+ * 同 writeAuditLog，但寫入失敗會丟例外（不吞）。用在「稽核紀錄本身是後續授權判斷依據」的地方——
+ * 例：變更簽核人的紀錄決定該 HR 之後能不能用 L3 退路代簽老闆關（lib/boss.ts actorReassignedRequest；第三輪安全驗收 S3），
+ * 寫不進去就整個改派不成立（呼叫端先寫稽核、再改關卡）。
+ */
+export async function writeAuditLogStrict(entry: AuditEntry): Promise<void> {
+  const { error } = await supabaseAdmin.from("audit_logs").insert({
+    tenant_id: entry.tenantId,
+    table_name: entry.tableName,
+    record_id: entry.recordId ?? null,
+    action: entry.action,
+    old_row: entry.oldRow ?? null,
+    new_row: entry.newRow ?? null,
+    actor_emp_id: entry.actorEmpId ?? getRequestContext()?.actorEmpId ?? null,
+    context: entry.context ?? getRequestContext()?.route ?? null,
+  })
+  if (error) throw new Error(`[audit] strict write failed (${entry.tableName}/${entry.action}): ${error.message}`)
+}

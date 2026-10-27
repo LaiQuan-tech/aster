@@ -711,7 +711,7 @@ describe("老闆關（step_kind=fallback）：platform_admin 也是簽核人（2
     expect(bucketOf(BOSS_STEP, { ...CTX, meId: null, meIsPlatformAdmin: true })).toBe("in_progress");
   });
 
-  it("「目前簽核人」加註（老闆或平台管理員）", () => {
-    expect(LOOKUP.approverLabel(BOSS_STEP)).toBe("第 2 關 · 老闆（老闆或平台管理員）");
+  it("「目前簽核人」加註（平台管理員（老闆））", () => {
+    expect(LOOKUP.approverLabel(BOSS_STEP)).toBe("第 2 關 · 老闆（平台管理員（老闆））");
   });
 });

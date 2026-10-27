@@ -256,7 +256,7 @@ const SNAKE: Record<keyof SaveProfileBody, string> = {
 
 function roleLabel(role: string): string {
   // platform_admin 不在下拉的固定清單裡（只有 platform_admin 能指派，選項由 roleOptionsFor 依登入者補上），列表仍要顯示中文。
-  if (role === "platform_admin") return "平台管理員";
+  if (role === "platform_admin") return "平台管理員（老闆）";
   return ROLES.find((item) => item.value === role)?.label ?? role;
 }
 

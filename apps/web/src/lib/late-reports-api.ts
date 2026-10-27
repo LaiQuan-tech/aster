@@ -40,7 +40,7 @@ export interface LateReport {
 }
 
 /** 自己的遲到說明取代按鈕的灰字。 */
-export const OWN_LATE_REPORT_NOTE = "這是你自己的遲到說明，請由其他老闆或平台管理員決定。";
+export const OWN_LATE_REPORT_NOTE = "這是你自己的遲到說明，請由其他平台管理員（老闆）決定。";
 
 export interface LateReportList {
   lateReports: LateReport[];
@@ -74,7 +74,7 @@ export const LATE_SHEET_FROZEN_MESSAGE = "本月出勤表已核准或鎖定，�
  */
 const LATE_DECISION_ERROR_TEXT: Record<string, string> = {
   not_boss: "只有老闆可以決定遲到是否影響全勤",
-  own_late_report: "不能決定自己的遲到說明，請由其他老闆或平台管理員決定",
+  own_late_report: "不能決定自己的遲到說明，請由其他平台管理員（老闆）決定",
   not_found: "找不到這筆遲到說明，請重新整理後再試",
   invalid_body: "送出的內容格式不正確",
   not_an_employee: "此帳號尚未對應到員工資料",

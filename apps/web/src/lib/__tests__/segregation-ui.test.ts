@@ -52,7 +52,7 @@ describe("放款單／遲到說明／員工狀態 錯誤文案", () => {
     expect(humanizeDisbursementError(new Error("[403] already_signed_step"), "x")).toContain("同一輪不能再簽下一關");
   });
   it("遲到說明：own_late_report 有中文（API 附中文 message 時優先用它）", () => {
-    expect(lateDecisionErrorMessage(new Error("[403] own_late_report"))).toBe("不能決定自己的遲到說明，請由其他老闆或平台管理員決定");
+    expect(lateDecisionErrorMessage(new Error("[403] own_late_report"))).toBe("不能決定自己的遲到說明，請由其他平台管理員（老闆）決定");
     expect(OWN_LATE_REPORT_NOTE).toContain("自己的遲到說明");
   });
   it("員工在職狀態：not_boss 文案含在職狀態", () => {

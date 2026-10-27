@@ -167,3 +167,63 @@ export async function actorReassignedRequest(
     return row.decision === "change_approver" || row.changeApprover === true
   })
 }
+
+/**
+ * 老闆關「誰能簽」的兩種狀態（第三輪安全驗收 S1）：
+ *   fresh＝扣掉申請人與本輪已簽過前面關卡的人後，仍有可簽的老闆／平台管理員／該關候選；
+ *   any  ＝只扣掉申請人（不管有沒有簽過前面關卡）仍有可簽的人。
+ * 用法：L3（HR 代簽老闆關）只在 `!any`（真的沒有任何老闆／平台管理員）時開放；`!fresh && any`（唯一的老闆／平台管理員
+ * 已簽過前面關卡）→ 不開放 HR 代簽，改讓該老闆／平台管理員簽老闆關（同人兩關限制對老闆關的老闆／平台管理員例外，僅限此情況）。
+ */
+export async function bossSignerState(
+  tenantId: string,
+  opts: { requesters: ReadonlyArray<string | null | undefined>; earlier: ReadonlyArray<string | null | undefined>; stepCandidateEmpIds?: ReadonlyArray<string | null | undefined> },
+  checker?: (q: BossSignerQuery) => Promise<boolean>,
+): Promise<{ fresh: boolean; any: boolean }> {
+  const check = checker ?? (await bossSignerChecker(tenantId))
+  const any = await check({ exclude: opts.requesters, stepCandidateEmpIds: opts.stepCandidateEmpIds })
+  if (!any) return { fresh: false, any: false }
+  const fresh = await check({ exclude: [...opts.requesters, ...opts.earlier], stepCandidateEmpIds: opts.stepCandidateEmpIds })
+  return { fresh, any }
+}
+
+/** 全部在職 hr_admin（小寫 id）：老闆關沒有可用老闆／平台管理員時，通知能以 L3 代簽的人（第三輪驗收 4）。 */
+export async function loadActiveHrAdminEmpIds(tenantId: string): Promise<string[]> {
+  const { data, error } = await supabaseAdmin.from("employees").select("id").eq("tenant_id", tenantId).eq("role", "hr_admin").eq("status", "active")
+  if (error) throw new Error(`boss (hr admins): ${error.message}`)
+  return ((data ?? []) as Array<{ id: string }>).map((r) => r.id.toLowerCase())
+}
+
+/**
+ * 老闆關的通知收件人（第三輪驗收 2／4）：候選＋目前設定且在職的老闆＋所有在職 platform_admin（不寄 `exclude`）；
+ * 若扣掉申請人後沒有任何可簽的老闆／平台管理員（L3 情況）→ 另寄所有在職、非申請人、本輪沒簽過前面關卡的 hr_admin。
+ * 盡力而為：查詢失敗只回候選。
+ */
+export async function bossStepNotifyRecipients(
+  tenantId: string,
+  params: { candidateEmpIds: ReadonlyArray<string>; requesters: ReadonlyArray<string | null | undefined>; earlier?: ReadonlyArray<string | null | undefined> },
+): Promise<string[]> {
+  const skip = new Set(params.requesters.filter((id): id is string => !!id).map((id) => id.toLowerCase()))
+  const out: string[] = []
+  const seen = new Set<string>()
+  const push = (id: string | null | undefined) => {
+    if (!id) return
+    const key = id.toLowerCase()
+    if (seen.has(key) || skip.has(key)) return
+    seen.add(key)
+    out.push(id)
+  }
+  params.candidateEmpIds.forEach(push)
+  try {
+    const boss = await loadConfiguredBossEmpId(tenantId)
+    for (const id of await bossNotificationRecipients(tenantId, boss, params.requesters)) push(id)
+    const any = await bossStepHasEligibleSigner(tenantId, { exclude: params.requesters, stepCandidateEmpIds: params.candidateEmpIds })
+    if (!any) {
+      const earlier = new Set((params.earlier ?? []).filter((id): id is string => !!id).map((id) => id.toLowerCase()))
+      for (const id of await loadActiveHrAdminEmpIds(tenantId)) if (!earlier.has(id)) push(id)
+    }
+  } catch {
+    /* 通知盡力而為 */
+  }
+  return out
+}

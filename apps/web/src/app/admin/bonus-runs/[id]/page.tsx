@@ -374,8 +374,8 @@ export default function BonusRunDetailPage() {
               </button>
             )}
             {selfSubmitted && (isPending || isApproved) && <span className="text-xs text-gray-500">{SELF_SUBMITTED_NOTE}</span>}
-            {!canApprove && !selfSubmitted && isPending && <span className="text-xs text-gray-500">只有老闆或平台管理員能核准或退回；送審中 HR 可撤回。</span>}
-            {!canApprove && !selfSubmitted && isApproved && <span className="text-xs text-gray-500">已核准後 HR 不能撤回，要改請老闆或平台管理員退回。</span>}
+            {!canApprove && !selfSubmitted && isPending && <span className="text-xs text-gray-500">只有平台管理員（老闆）能核准或退回；送審中 HR 可撤回。</span>}
+            {!canApprove && !selfSubmitted && isApproved && <span className="text-xs text-gray-500">已核准後 HR 不能撤回，要改請平台管理員（老闆）退回。</span>}
           </div>
           {showPay && (
             <div className="mt-3 flex flex-wrap items-end gap-2 rounded-xl bg-gray-50 p-3">

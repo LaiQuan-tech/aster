@@ -146,19 +146,47 @@ export function withoutSelfApprovers(c: ChainCandidates, result: ChainResult): C
 }
 
 /**
- * B（2026-10-27 安全驗收）：鏈裡每一個老闆關都要有「非申請人、在職」的人能簽——老闆（候選中非申請人者；
- * 老闆在 loadChainCandidates 已確認在職）、任一 platform_admin、或（L3 退路）任一 hr_admin。都沒有 →
- * no_approver_available（不建出永遠卡住的單）。`platformAdminEmpIds` 未提供（純函式單測）→ 不判斷。
+ * B（2026-10-27 安全驗收）＋第三輪驗收 1／3：鏈裡每一個老闆關都要有「非申請人、在職、**且不在前面關卡**」的人能簽，
+ * 否則同人不能簽兩關會讓老闆關卡死：
+ *   • 老闆關的可簽者＝該關候選（非申請人）、設定的老闆（loadChainCandidates 已確認在職）、任一在職 platform_admin。
+ *     有可簽者但全都出現在前面關卡 → 保留一位（該關名義簽核人優先）給老闆關：把他從前面關卡拿掉（某關因此沒人就略過）。
+ *   • 沒有任何可簽者（老闆／platform_admin 都沒有，只能走 L3 由非申請人在職 HR 代簽）→ 同理保留一位 HR：
+ *     有不在前面關卡的 HR 就不動；否則把一位 HR（優先挑拿掉後不會讓某關變空的人）從前面關卡拿掉；
+ *     連 HR 都沒有 → no_approver_available（不建出永遠卡住的單）。
+ *   這樣只會讓前面關卡「少一位候選／略過一關」，不會多給任何人簽核權（不削弱規則）。
+ * `platformAdminEmpIds` 未提供（純函式單測）→ 不知道 platform_admin，只處理第一種（有可簽者）情況。
  */
 function assertBossStepsSignable(c: ChainCandidates, self: ReadonlySet<string>, result: ChainResult): ChainResult {
-  if (!result.ok || c.platformAdminEmpIds === undefined) return result
-  const others = (ids: readonly string[] | undefined) => (ids ?? []).some((id) => !!id && !self.has(id))
-  for (const step of result.steps) {
+  if (!result.ok) return result
+  let steps = result.steps
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]
     if (step.kind !== "fallback") continue
-    const bossOk = step.candidateEmpIds.some((id) => !self.has(id))
-    if (!bossOk && !others(c.platformAdminEmpIds) && !others(c.hrAdminEmpIds)) return { ok: false, error: "no_approver_available" }
+    const prior = steps.slice(0, i)
+    const inPrior = (id: string) => prior.some((s) => s.candidateEmpIds.includes(id))
+    const bossSigners = dedupe([
+      ...step.candidateEmpIds,
+      ...(c.fallbackApproverEmpId ? [c.fallbackApproverEmpId] : []),
+      ...(c.platformAdminEmpIds ?? []),
+    ]).filter((id) => !self.has(id))
+    let reserve: string
+    if (bossSigners.length > 0) {
+      if (bossSigners.some((id) => !inPrior(id))) continue
+      reserve = step.candidateEmpIds.find((id) => !self.has(id)) ?? bossSigners[0]
+    } else {
+      if (c.platformAdminEmpIds === undefined) continue
+      const hr = dedupe(c.hrAdminEmpIds).filter((id) => !self.has(id))
+      if (hr.length === 0) return { ok: false, error: "no_approver_available" }
+      if (hr.some((id) => !inPrior(id))) continue
+      reserve = hr.find((id) => prior.every((s) => !s.candidateEmpIds.includes(id) || s.candidateEmpIds.length > 1)) ?? hr[0]
+    }
+    const newPrior = prior
+      .map((s) => ({ ...s, candidateEmpIds: s.candidateEmpIds.filter((id) => id !== reserve) }))
+      .filter((s) => s.candidateEmpIds.length > 0)
+    steps = [...newPrior, ...steps.slice(i)]
+    i = newPrior.length
   }
-  return result
+  return { ...result, steps }
 }
 
 /**
@@ -181,9 +209,21 @@ function bossFinalStep(c: ChainCandidates, prior: readonly ChainStep[]): ChainSt
   return { candidateEmpIds: [bossNominal(c, new Set(prior.flatMap((s) => s.candidateEmpIds)))], kind: "fallback" }
 }
 
-/** 設定的老闆（不是申請人時）；需要老闆關的單據要把他從前面關卡拿掉（老闆只在最後的老闆關出現，避免同人兩關）。 */
+/** 設定的老闆（不是申請人時）。 */
 function configuredBoss(c: ChainCandidates): string | null {
   return c.fallbackApproverEmpId && c.fallbackApproverEmpId !== c.employeeId ? c.fallbackApproverEmpId : null
+}
+
+/**
+ * 需要老闆關的單據：只能在最後的老闆關出現的人＝設定的老闆＋全部在職 platform_admin（第三輪安全驗收 S1／第 3 項：
+ * HR 把唯一的平台管理員設成部門主管，不能讓他先簽主管關、再讓老闆關「沒人能簽」而人為製造 L3 退路）。
+ * 主管關、固定名單、HR 覆核關、會計關一律排除這些人。
+ */
+function bossOnlyIds(c: ChainCandidates): Set<string> {
+  const out = new Set<string>(dedupe(c.platformAdminEmpIds ?? []))
+  const boss = configuredBoss(c)
+  if (boss) out.add(boss)
+  return out
 }
 
 /**
@@ -192,8 +232,8 @@ function configuredBoss(c: ChainCandidates): string | null {
  * 就是申請人時也補，名義簽核人見 bossNominal）。
  */
 function listWithBossFinal(c: ChainCandidates, list: readonly string[]): ChainResult {
-  const boss = configuredBoss(c)
-  const steps: ChainStep[] = list.filter((id) => id !== boss).map((id) => ({ candidateEmpIds: [id], kind: "list" as const }))
+  const bossOnly = bossOnlyIds(c)
+  const steps: ChainStep[] = list.filter((id) => !bossOnly.has(id)).map((id) => ({ candidateEmpIds: [id], kind: "list" as const }))
   steps.push(bossFinalStep(c, steps))
   return { ok: true, steps, source: "list" }
 }
@@ -218,9 +258,10 @@ function pickApproverChainRaw(c: ChainCandidates): ChainResult {
     const steps: ChainStep[] = []
     if (c.requireBossFinal) {
       // 需要老闆關（第二輪 H1）：主管逐關（老闆從主管鏈移除）→ HR 覆核（排除申請人、前面關卡的人與老闆）→ 老闆關收尾。
-      for (const id of managers.filter((m) => m !== boss)) steps.push({ candidateEmpIds: [id], kind: "manager" })
+      const bossOnly = bossOnlyIds(c)
+      for (const id of managers.filter((m) => !bossOnly.has(m))) steps.push({ candidateEmpIds: [id], kind: "manager" })
       const seen = new Set(steps.flatMap((s) => s.candidateEmpIds))
-      const others = hr.filter((id) => id !== c.employeeId && !seen.has(id) && id !== boss)
+      const others = hr.filter((id) => id !== c.employeeId && !seen.has(id) && !bossOnly.has(id))
       if (others.length > 0) steps.push({ candidateEmpIds: others, kind: "hr" })
       steps.push(bossFinalStep(c, steps))
       return { ok: true, steps, source: "manager_hr" }
@@ -247,7 +288,8 @@ function pickApproverChainRaw(c: ChainCandidates): ChainResult {
   if (c.requireBossFinal) {
     // 主管鏈每人一關（老闆從主管鏈移除，第二輪 H1）→ 一定以老闆關收尾（老闆未設定／就是申請人時名義寫
     // platform_admin，第二輪 M4）；HR 不再當退路關卡（只能在老闆關沒有可用簽核人時以 L3 代簽留痕）。
-    const steps: ChainStep[] = managers.filter((id) => id !== boss).map((id) => ({ candidateEmpIds: [id], kind: "manager" as const }))
+    const bossOnly = bossOnlyIds(c)
+    const steps: ChainStep[] = managers.filter((id) => !bossOnly.has(id)).map((id) => ({ candidateEmpIds: [id], kind: "manager" as const }))
     steps.push(bossFinalStep(c, steps))
     return { ok: true, steps, source: "boss_final" }
   }
@@ -277,13 +319,13 @@ function pickDisbursementChainRaw(c: ChainCandidates): ChainResult {
   // 放款單一律要老闆關：固定名單也以老闆關收尾（H3）。
   if (c.flow && c.flow.mode === "list" && list.length > 0) return listWithBossFinal(c, list)
 
-  const boss = configuredBoss(c)
-  // 老闆從主管鏈／會計關移除，只在最後的老闆關出現（第二輪 H1）。
-  const managers = dedupe(c.managerEmpIds).filter((id) => id !== c.employeeId && id !== boss)
+  const bossOnly = bossOnlyIds(c)
+  // 老闆與全部 platform_admin 從主管鏈／會計關移除，只在最後的老闆關出現（第二輪 H1、第三輪 S1）。
+  const managers = dedupe(c.managerEmpIds).filter((id) => id !== c.employeeId && !bossOnly.has(id))
   const steps: ChainStep[] = managers.map((id) => ({ candidateEmpIds: [id], kind: "manager" as const }))
 
   const seen = new Set<string>(managers)
-  const accountants = dedupe(c.accountantEmpIds ?? []).filter((id) => id !== c.employeeId && !seen.has(id) && id !== boss)
+  const accountants = dedupe(c.accountantEmpIds ?? []).filter((id) => id !== c.employeeId && !seen.has(id) && !bossOnly.has(id))
   if (accountants.length > 0) steps.push({ candidateEmpIds: accountants, kind: "accountant" })
 
   // 一定以老闆關收尾（第二輪 M4）；HR 不再當退路關卡。

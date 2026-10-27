@@ -64,10 +64,10 @@ export interface AccountTarget {
 
 export type PrivilegeCode = "not_boss" | "platform_admin_required"
 
-export const BOSS_SETTING_MESSAGE = "只有老闆或平台管理員可以更換老闆設定"
-export const CREDENTIALS_MESSAGE = "只有老闆或平台管理員可以重設老闆、HR 或平台管理員的密碼"
-export const ROLE_CHANGE_MESSAGE = "只有老闆或平台管理員可以變更老闆、HR 或平台管理員的角色"
-export const STATUS_CHANGE_MESSAGE = "只有老闆或平台管理員可以變更老闆、老闆指定的解鎖人、HR 或平台管理員的在職狀態"
+export const BOSS_SETTING_MESSAGE = "只有平台管理員（老闆）可以更換老闆設定"
+export const CREDENTIALS_MESSAGE = "只有平台管理員（老闆）可以重設老闆、HR 或平台管理員的密碼"
+export const ROLE_CHANGE_MESSAGE = "只有平台管理員（老闆）可以變更老闆、HR 或平台管理員的角色"
+export const STATUS_CHANGE_MESSAGE = "只有平台管理員（老闆）可以變更老闆、老闆指定的解鎖人、HR 或平台管理員的在職狀態"
 export const PLATFORM_ADMIN_ASSIGN_MESSAGE = "只有平台管理員可以指派「平台管理員」角色"
 
 /** 權限不足：一律 403 `{ error: code, message }`（middleware/privilege-error.ts 轉成回應）。 */

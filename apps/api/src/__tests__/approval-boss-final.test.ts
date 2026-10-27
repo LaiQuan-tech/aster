@@ -351,7 +351,7 @@ describe("費用方式：先預支才建預支，自行墊付不建（核准後�
 })
 
 describe("已送出、尚在簽核中的單不回溯改關卡", () => {
-  it("舊規則送出的零用金單（approval_steps 只有主管一關）→ 主管簽完就 approved，不會憑空多出老闆關", async () => {
+  it("舊規則送出的零用金單（approval_steps 只有主管一關）→ 不多出關卡，但最後一關要老闆簽（S2：主管 409 boss_step_required）", async () => {
     // 改規則之前送出的單：approval_steps 在送單當下就寫好了，只有主管一關。
     fake.db.leave_requests = [
       {
@@ -380,11 +380,14 @@ describe("已送出、尚在簽核中的單不回溯改關卡", () => {
       },
     ]
 
+    // 第三輪安全驗收 S2：鏈裡完全沒有老闆關的舊單，最後一關視為老闆關——主管（候選）不能直接完成最終核准，
+    // 要由老闆／平台管理員（老闆）簽；不回溯改關卡（仍只有一關）。
     const res = await post("/requests/eeeeeeee-0000-4000-8000-000000000001/approve", MGR_TOKEN).send({ comment: "ok" })
-
-    expect(res.status, JSON.stringify(res.body)).toBe(200)
-    expect(res.body.status).toBe("approved")
+    expect([res.status, res.body.error]).toEqual([409, "boss_step_required"])
+    // 駁回不受影響（不是核准）— 這裡不測；老闆簽 → approved。
+    const boss = await post("/requests/eeeeeeee-0000-4000-8000-000000000001/approve", BOSS_TOKEN).send({ comment: "ok" })
+    expect(boss.status, JSON.stringify(boss.body)).toBe(200)
+    expect(boss.body.status).toBe("approved")
     expect(stepRows("eeeeeeee-0000-4000-8000-000000000001")).toHaveLength(1)
-    expect(noticesTo(BOSS_ID)).toHaveLength(0)
   })
 })

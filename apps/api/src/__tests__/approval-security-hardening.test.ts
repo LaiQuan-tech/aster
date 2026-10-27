@@ -280,7 +280,7 @@ describe("L1 一般申請單同一人不能簽兩關（含代簽）", () => {
     expect(requestRow(f.id).status).toBe("approved")
   })
 
-  it("不卡死：簽過前一關的老闆不能再簽老闆關 → 有平台管理員由平台管理員簽；沒有就允許 HR 代簽（L3）", async () => {
+  it("不卡死：簽過前一關的老闆不能再簽老闆關 → 有平台管理員由平台管理員簽；唯一的老闆已簽前面關卡時由他例外簽（S1），HR 不能代簽", async () => {
     const f = await pettyAtBossStep()
     // 模擬舊資料：第一關其實是老闆簽的（例如老闆當時也是部門主管）。
     stepRows(f.id)[0].acted_by_emp_id = BOSS_ID
@@ -289,8 +289,10 @@ describe("L1 一般申請單同一人不能簽兩關（含代簽）", () => {
     // 有在職平台管理員 → HR 仍不能代簽老闆關
     expect((await post(`/requests/${f.id}/approve`, T.hr).send({})).body.error).toBe("not_current_approver")
     removeEmployee(PA_ID)
-    const hr = await post(`/requests/${f.id}/approve`, T.hr).send({})
-    expect(hr.status, JSON.stringify(hr.body)).toBe(200)
+    // 第三輪 S1：「因簽過前面關卡被排除的人」是老闆 → 不開放 HR 代簽（L3），改允許老闆簽老闆關
+    expect((await post(`/requests/${f.id}/approve`, T.hr).send({})).body.error).toBe("not_current_approver")
+    const boss2 = await post(`/requests/${f.id}/approve`, T.boss).send({})
+    expect(boss2.status, JSON.stringify(boss2.body)).toBe(200)
     expect(requestRow(f.id).status).toBe("approved")
   })
 })

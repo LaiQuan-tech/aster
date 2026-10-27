@@ -152,7 +152,7 @@ describe("validateEmployeeForm", () => {
   });
 });
 
-describe("canGrantGroupFinancialsView：只有老闆或平台管理員", () => {
+describe("canGrantGroupFinancialsView：只有平台管理員（老闆）", () => {
   const policy = { bossEmpId: "boss-1", designated: [] };
   it("平台管理員 → true", () => {
     expect(canGrantGroupFinancialsView({ id: "x", role: "platform_admin" }, policy)).toBe(true);
@@ -183,7 +183,7 @@ describe("canGrantGroupFinancialsOf：/me.canGrantGroupFinancials 優先", () =>
 describe("顯示用", () => {
   it("角色標籤（含平台管理員）與狀態標籤", () => {
     expect(EMPLOYEE_ROLES.map((r) => r.value)).toEqual(["employee", "manager", "accountant", "hr_admin"]);
-    expect(employeeRoleLabel("platform_admin")).toBe("平台管理員");
+    expect(employeeRoleLabel("platform_admin")).toBe("平台管理員（老闆）");
     expect(employeeRoleLabel("hr_admin")).toBe("HR");
     expect(employeeRoleLabel("unknown")).toBe("unknown");
     expect(employeeStatusLabel("active")).toBe("在職");
@@ -200,7 +200,7 @@ describe("describeEmployeeError", () => {
     expect(describeEmployeeError(new Error("[409] schema_not_ready"), "x")).toContain("資料庫尚未套用");
     expect(describeEmployeeError(new Error("[400] shift_not_found"), "x")).toContain("班別不存在");
     expect(describeEmployeeError(new Error("[403] group_financials_grant_forbidden"), "x")).toContain("可看集團財務");
-    expect(describeEmployeeError(new Error("[403] not_boss"), "x")).toContain("只有老闆或平台管理員");
+    expect(describeEmployeeError(new Error("[403] not_boss"), "x")).toContain("只有平台管理員（老闆）");
   });
   it("查不到 → 原字串；空 → fallback", () => {
     expect(describeEmployeeError(new Error("[500] boom happened"), "更新失敗")).toBe("[500] boom happened");

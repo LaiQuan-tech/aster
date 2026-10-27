@@ -530,7 +530,7 @@ employeesRouter.patch(
       if (parsed.data.features?.seeGroupFinancials !== undefined) {
         const caller = await callerOf(req, tenantId)
         if (!caller || !canGrantGroupFinancials(caller, await loadProjectBossEmpId(tenantId))) {
-          res.status(403).json({ error: "group_financials_grant_forbidden", message: "只有老闆或平台管理員可以設定「可看集團財務」" })
+          res.status(403).json({ error: "group_financials_grant_forbidden", message: "只有平台管理員（老闆）可以設定「可看集團財務」" })
           return
         }
       }

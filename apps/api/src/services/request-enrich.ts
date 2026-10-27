@@ -386,8 +386,8 @@ export async function enrichRequestRows<T extends EnrichableRow>(
     try {
       const check = await bossSignerChecker(tenantId)
       for (const r of bossRows) {
-        const earlier = r.steps.filter((s) => s.step_order < r.current_step && s.decision === "approved").map((s) => s.approver_emp_id)
-        r.boss_step_hr_fallback = !(await check({ exclude: [r.employee_id, ...earlier], stepCandidateEmpIds: r.current_candidate_emp_ids }))
+        // 第三輪 S1：L3 只在完全沒有非申請人、在職的老闆／平台管理員時開放（簽過前面關卡的老闆／平台管理員改由他例外簽）。
+        r.boss_step_hr_fallback = !(await check({ exclude: [r.employee_id], stepCandidateEmpIds: r.current_candidate_emp_ids }))
       }
     } catch (err) {
       logger.warn({ err, tenantId }, "enrich requests: boss-step signer check failed — boss_step_hr_fallback left false")

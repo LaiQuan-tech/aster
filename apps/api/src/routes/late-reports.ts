@@ -118,7 +118,7 @@ lateReportsRouter.post(
       }
       const scope = await lateReportScope(tenantId, self)
       if (!scope.isBoss) {
-        res.status(403).json({ error: "not_boss", message: "只有老闆或平台管理員可以決定遲到是否影響全勤" })
+        res.status(403).json({ error: "not_boss", message: "只有平台管理員（老闆）可以決定遲到是否影響全勤" })
         return
       }
       const lateReport = await decideLateReport({
@@ -135,7 +135,7 @@ lateReportsRouter.post(
         return
       }
       if (err instanceof LateReportOwnDecisionError) {
-        res.status(403).json({ error: "own_late_report", message: "不能決定自己的遲到說明，請由其他老闆或平台管理員決定" })
+        res.status(403).json({ error: "own_late_report", message: "不能決定自己的遲到說明，請由其他平台管理員（老闆）決定" })
         return
       }
       if (err instanceof LateReportSheetFrozenError) {

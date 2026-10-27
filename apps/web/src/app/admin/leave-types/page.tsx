@@ -251,7 +251,7 @@ export default function LeaveTypesPage() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
       // 零用金／出差／放款這類一定要老闆簽的單據，流程只有老闆或平台管理員能改（後端 403 boss_only_flow；安全驗收 H3）。
-      setError(msg.includes("boss_only_flow") ? "這類單據需要老闆簽核，簽核流程只有老闆或平台管理員能修改。" : msg || "儲存簽核流程失敗");
+      setError(msg.includes("boss_only_flow") ? "這類單據需要老闆簽核，簽核流程只有平台管理員（老闆）能修改。" : msg || "儲存簽核流程失敗");
     }
   }
 
@@ -260,7 +260,7 @@ export default function LeaveTypesPage() {
     // 老闆本人把老闆換成別人（或清除）之後，自己就不能再改回來——先讓他確認。
     if (needsBossHandoverConfirm(viewer, fallbackSaved, fallbackEmpId)) {
       const next = fallbackEmpId ? (empName.get(fallbackEmpId) ?? fallbackEmpId) : "（未設定）";
-      if (!window.confirm(`把老闆換成「${next}」之後，你就不能再自己改回來，只有新的老闆或平台管理員能更換。確定嗎？`)) return;
+      if (!window.confirm(`把老闆換成「${next}」之後，你就不能再自己改回來，只有新老闆本人或任一位平台管理員（老闆）能更換。確定嗎？`)) return;
     }
     setFallbackSaving(true);
     try {

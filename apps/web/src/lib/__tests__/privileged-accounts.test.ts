@@ -63,7 +63,7 @@ describe("① 換老闆設定", () => {
     expect(canChangeBossSetting(null, BOSS)).toBe(true);
   });
 
-  it("bossSettingNote：HR 看到『只有老闆或平台管理員…』、沒老闆時看到可先設定、老闆本人看到交棒提醒、平台管理員不需要提醒", () => {
+  it("bossSettingNote：HR 看到『只有平台管理員（老闆）…』、沒老闆時看到可先設定、老闆本人看到交棒提醒、平台管理員不需要提醒", () => {
     expect(bossSettingNote(hr, BOSS)).toEqual({ tone: "locked", text: BOSS_SETTING_LOCKED_NOTE });
     expect(bossSettingNote(hr, null)).toEqual({ tone: "bootstrap", text: BOSS_SETTING_BOOTSTRAP_NOTE });
     expect(bossSettingNote(boss, BOSS)).toEqual({ tone: "handover", text: BOSS_SETTING_HANDOVER_NOTE });
@@ -107,7 +107,7 @@ describe("② 指派平台管理員角色", () => {
     expect(option?.label).toContain("僅平台管理員可指派");
 
     const forPa = roleOptionsFor(base, pa);
-    expect(forPa.find((o) => o.value === "platform_admin")).toEqual({ value: "platform_admin", label: "平台管理員" });
+    expect(forPa.find((o) => o.value === "platform_admin")).toEqual({ value: "platform_admin", label: "平台管理員（老闆）" });
   });
 
   it("目標本來就是平台管理員時保持可選（下拉才有目前的值，存檔不會把角色改掉）；其他目標仍停用", () => {
@@ -117,7 +117,7 @@ describe("② 指派平台管理員角色", () => {
   });
 
   it("不重複：base 已含 platform_admin 時只留一個", () => {
-    const withPlatform = [...base, { value: "platform_admin", label: "平台管理員" }];
+    const withPlatform = [...base, { value: "platform_admin", label: "平台管理員（老闆）" }];
     expect(roleOptionsFor(withPlatform, pa).filter((o) => o.value === "platform_admin")).toHaveLength(1);
   });
 });
@@ -211,10 +211,10 @@ describe("被擋時的友善訊息", () => {
   });
 
   it("accountErrorMessage（員工管理頁的錯誤翻譯表）也認得這兩個代碼；批次建立的列錯誤『not_boss: …』同樣翻得出來", () => {
-    expect(accountErrorMessage(new Error("[403] not_boss"))).toContain("只有老闆或平台管理員");
+    expect(accountErrorMessage(new Error("[403] not_boss"))).toContain("只有平台管理員（老闆）");
     expect(accountErrorMessage(new Error("[403] platform_admin_required"))).toContain("平台管理員");
     // 受保護帳號、未開通：邀請信的收件信箱要明確輸入（400 email_required）
     expect(accountErrorMessage(new Error("[400] email_required"))).toContain("明確輸入收件信箱");
-    expect(accountErrorMessage(new Error("not_boss: 只有老闆或平台管理員可以重設老闆、HR 或平台管理員的密碼"))).toContain("只有老闆或平台管理員");
+    expect(accountErrorMessage(new Error("not_boss: 只有平台管理員（老闆）可以重設老闆、HR 或平台管理員的密碼"))).toContain("只有平台管理員（老闆）");
   });
 });

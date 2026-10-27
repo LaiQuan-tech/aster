@@ -69,20 +69,51 @@ export function requestKindRequiresBoss(kind: string | null | undefined): boolea
  * 舊單（第二輪之前送出）老闆在申請人主管鏈上時，老闆那關是 kind='manager'、沒有另外的老闆關；新單雖已把老闆移到最後的
  * 老闆關，仍防禦性地比照（HR 代簽／改派、platform_admin 可簽、L3 判斷都照老闆關處理）。只在讀取端判斷、不改資料。純函式。
  */
-export function treatAsBossStep(
-  step: StepLike & { step_kind?: string | null },
-  ctx: { requiresBoss: boolean; bossEmpId: string | null | undefined },
-): boolean {
+export interface BossGateCtx {
+  requiresBoss: boolean
+  bossEmpId: string | null | undefined
+  /**
+   * 第三輪安全驗收 S2：整條鏈（本輪）有沒有任何老闆關（step_kind='fallback' 或候選含老闆）。明確為 false、且 `isLastStep`
+   * → 舊單（第二輪之前送出、鏈裡完全沒有老闆）的最後一關視為老闆關：老闆／平台管理員可簽、出現在待我簽核、HR 不能代簽；
+   * 候選身分的非老闆最終核准另由呼叫端擋（boss_step_required，見 legacyBossGateBlocks）。省略＝不判斷（舊行為）。
+   */
+  chainHasBossStep?: boolean
+  isLastStep?: boolean
+}
+
+export function treatAsBossStep(step: StepLike & { step_kind?: string | null }, ctx: BossGateCtx): boolean {
   if (isBossStep(step)) return true
-  if (!ctx.requiresBoss || !ctx.bossEmpId) return false
+  if (!ctx.requiresBoss) return false
+  if (ctx.chainHasBossStep === false && ctx.isLastStep === true) return true
+  if (!ctx.bossEmpId) return false
   return stepCandidates(step).some((id) => sameId(id, ctx.bossEmpId))
 }
 
-/** treatAsBossStep 成立時回一份 step_kind 改成 'fallback' 的副本（給 stepActorStanding／canHrOverrideStep／changeApproverDenial 用）。 */
-export function bossGateStep<S extends StepLike & { step_kind?: string | null }>(
-  step: S,
+/** 鏈（本輪全部關卡）裡有沒有老闆關（不含 S2 的合成判斷）。純函式。 */
+export function chainHasBossStep(
+  steps: ReadonlyArray<StepLike & { step_kind?: string | null }>,
   ctx: { requiresBoss: boolean; bossEmpId: string | null | undefined },
-): S {
+): boolean {
+  return steps.some((s) => treatAsBossStep(s, { requiresBoss: ctx.requiresBoss, bossEmpId: ctx.bossEmpId }))
+}
+
+/**
+ * S2：舊單最後一關被「合成」為老闆關（鏈裡本來沒有老闆關）時，核准者必須是老闆或在職 platform_admin——候選身分的
+ * HR／主管不能直接完成最終核准（409 boss_step_required）；但完全沒有可用老闆／platform_admin 時（L3 情況）照舊可簽。純函式。
+ */
+export function legacyBossGateBlocks(params: {
+  ctx: BossGateCtx
+  actor: StepActor
+  noEligibleBossSigner: boolean
+}): boolean {
+  const { ctx, actor, noEligibleBossSigner } = params
+  if (!ctx.requiresBoss || ctx.chainHasBossStep !== false || ctx.isLastStep !== true) return false
+  if (actor.role === "platform_admin" || sameId(actor.id, ctx.bossEmpId)) return false
+  return !noEligibleBossSigner
+}
+
+/** treatAsBossStep 成立時回一份 step_kind 改成 'fallback' 的副本（給 stepActorStanding／canHrOverrideStep／changeApproverDenial 用）。 */
+export function bossGateStep<S extends StepLike & { step_kind?: string | null }>(step: S, ctx: BossGateCtx): S {
   return !isBossStep(step) && treatAsBossStep(step, ctx) ? { ...step, step_kind: BOSS_STEP_KIND } : step
 }
 
@@ -108,6 +139,8 @@ function requesterIds(requester: StepRequester): string[] {
  *   • actor 非在職（停用／離職）→ 不行（`null`；2026-10-27 業主追加 A）。
  *   • 是 approver_emp_id 或候選之一 → 行（`candidate`）。
  *   • 老闆關且 actor 是 platform_admin → 行（`platform_admin`）。
+ *   • 老闆關且 actor 是**目前設定**的老闆（`opts.bossEmpId`；送簽後才設定／換人的新老闆）→ 行（`boss`；第三輪驗收 2，
+ *     與 lib/boss.ts bossSignerChecker 的「可簽者」判準一致）。
  *   （已在簽核中的舊單若某一關的候選只有申請人本人：非老闆關由 HR／平台管理員代簽或「變更簽核人」處理；
  *     老闆關由任一在職 platform_admin 簽。新送的單在 approval-chain 已把申請人排除在候選外。）
  *   • 其他 → 不行（`null`）。HR 代簽（allowHrOverride）是另一條路，由呼叫端判斷（老闆關不准 HR 代簽，見 canHrOverrideStep）。
@@ -117,12 +150,21 @@ export function stepActorStanding(
   step: StepLike & { step_kind?: string | null },
   actor: StepActor,
   requester: StepRequester,
-): "candidate" | "platform_admin" | "own_request" | null {
+  opts: { bossEmpId?: string | null } = {},
+): StepStanding {
   if (requesterIds(requester).some((r) => sameId(actor.id, r))) return "own_request"
   if (actorIsInactive(actor)) return null
   if (isStepCandidate(step, actor.id)) return "candidate"
   if (actor.role === "platform_admin" && isBossStep(step)) return "platform_admin"
+  if (isBossStep(step) && sameId(actor.id, opts.bossEmpId)) return "boss"
   return null
+}
+
+export type StepStanding = "candidate" | "platform_admin" | "boss" | "own_request" | null
+
+/** standing 是不是「本關簽核人」（候選、平台管理員簽老闆關、目前老闆簽老闆關）。 */
+export function standingCanAct(s: StepStanding): boolean {
+  return s === "candidate" || s === "platform_admin" || s === "boss"
 }
 
 /**
@@ -150,7 +192,8 @@ export function canHrOverrideStep(
  *   • 改派對象是申請人本人 → approver_is_requester；改派給操作者自己 → cannot_assign_self（不能自己指派自己再簽）。
  *   • 目前關卡是老闆關：操作者必須是在職的老闆本人或在職 platform_admin（boss_step_boss_only），
  *     改派對象也必須是老闆或在職 platform_admin（boss_step_target_not_boss）——hr_admin 不能藉改派繞過「老闆關不准 HR 代簽」。
- *   • 目前關卡不是老闆關：不能改派給老闆或 platform_admin（non_boss_step_target_boss；第二輪 M2）。
+ *   • 目前關卡不是老闆關：不能改派給老闆或 platform_admin（non_boss_step_target_boss；第二輪 M2）——第三輪驗收 6 起只限
+ *     需要老闆關的單種（零用金、出差）與放款單（`requiresBoss`，省略＝true）；請假等其他單種照常可改派給他們。
  *   `step` 請先過 bossGateStep（舊單候選含老闆的關卡視為老闆關）；`bossEmpId` 一律要帶（非老闆關也要比對改派對象）。
  * 改派對象在職與否由呼叫端先查（不在職 → 404／400）。純函式（另讀本請求的非在職標記）。
  */
@@ -175,9 +218,9 @@ export const CHANGE_APPROVER_DENIAL_MESSAGE: Record<ChangeApproverDenial, string
   own_request: "這是你自己的單，不能變更它的簽核人，請由其他 HR 或平台管理員處理",
   approver_is_requester: "不能把簽核人改成申請人本人",
   cannot_assign_self: "不能把簽核人改成自己",
-  boss_step_boss_only: "老闆關只有老闆本人或平台管理員能變更簽核人",
-  boss_step_target_not_boss: "老闆關只能改派給老闆或在職平台管理員",
-  non_boss_step_target_boss: "老闆與平台管理員只在老闆關簽核，其他關卡不能改派給他們",
+  boss_step_boss_only: "老闆關只有平台管理員（老闆）能變更簽核人",
+  boss_step_target_not_boss: "老闆關只能改派給在職平台管理員（老闆）",
+  non_boss_step_target_boss: "平台管理員（老闆）只在老闆關簽核，其他關卡不能改派給他們",
 }
 
 export function changeApproverDenial(params: {
@@ -186,8 +229,10 @@ export function changeApproverDenial(params: {
   requester: StepRequester
   target: { id: string; role?: string | null }
   bossEmpId: string | null
+  requiresBoss?: boolean
 }): ChangeApproverDenial | null {
   const { step, actor, requester, target, bossEmpId } = params
+  const requiresBoss = params.requiresBoss !== false
   const requesters = requesterIds(requester)
   if (requesters.some((r) => sameId(actor.id, r))) return "own_request"
   if (requesters.some((r) => sameId(target.id, r))) return "approver_is_requester"
@@ -197,7 +242,7 @@ export function changeApproverDenial(params: {
     if (!actorIsBoss) return "boss_step_boss_only"
     const targetIsBoss = target.role === "platform_admin" || sameId(target.id, bossEmpId)
     if (!targetIsBoss) return "boss_step_target_not_boss"
-  } else if (target.role === "platform_admin" || sameId(target.id, bossEmpId)) {
+  } else if (requiresBoss && (target.role === "platform_admin" || sameId(target.id, bossEmpId))) {
     // 第二輪安全驗收 M2：非老闆關不准改派給老闆或 platform_admin——否則 HR 可把主管關改派給唯一的平台管理員，
     // 他簽了之後老闆關就「沒有沒簽過的人」，人為製造 L3 退路讓 HR 代簽老闆關。
     return "non_boss_step_target_boss"
@@ -210,9 +255,9 @@ export function canActOnStep(
   step: StepLike & { step_kind?: string | null },
   actor: StepActor,
   requester: StepRequester,
+  opts: { bossEmpId?: string | null } = {},
 ): boolean {
-  const s = stepActorStanding(step, actor, requester)
-  return s === "candidate" || s === "platform_admin"
+  return standingCanAct(stepActorStanding(step, actor, requester, opts))
 }
 
 /**

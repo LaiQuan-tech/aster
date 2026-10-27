@@ -14,18 +14,29 @@ import {
   CHANGE_APPROVER_DENIAL_STATUS,
   changeApproverDenial,
   bossGateStep,
+  chainHasBossStep,
   isBossStep,
+  isStepCandidate,
+  legacyBossGateBlocks,
   requestKindRequiresBoss,
   stepActorStanding,
+  standingCanAct,
   canHrOverrideStep,
   stepCandidates,
-  stepNotifyRecipients,
   stepSelectCols,
+  type BossGateCtx,
 } from "../services/approval-steps.js"
-import { actorReassignedRequest, bossStepHasEligibleSigner, isPlatformAdminRole, loadConfiguredBossEmpId, loadPlatformAdminEmpIds } from "../lib/boss.js"
+import {
+  actorReassignedRequest,
+  bossSignerState,
+  bossStepNotifyRecipients,
+  isConfiguredBoss,
+  isPlatformAdminRole,
+  loadConfiguredBossEmpId,
+} from "../lib/boss.js"
 import { enqueue } from "../services/notify.js"
 import { loadDailyRegularHours } from "../services/daily-regular-hours.js"
-import { writeAuditLog } from "../services/audit.js"
+import { writeAuditLog, writeAuditLogStrict } from "../services/audit.js"
 import { tripClaimWithdrawalNote, withdrawClaimsOfTrip, type TripClaimWithdrawal } from "../services/trip-claim-withdrawal.js"
 import { assertRequestOpen, closedPeriodsOfRequest, isRealDateKey } from "../services/period-lock.js"
 import {
@@ -499,10 +510,10 @@ async function notifyStepApprover(params: {
     params.stepKind === "hr"
       ? "本關為 HR 覆核，任一位 HR 簽核即可。"
       : params.stepKind === BOSS_STEP_KIND
-        ? "本關為老闆簽核，老闆或任一位平台管理員簽核即可。"
+        ? "本關為老闆簽核，任一位平台管理員（老闆）簽核即可。"
         : ""
   const extra = params.extraNote ? params.extraNote : ""
-  const recipients = await stepRecipients(tenantId, approverEmpIds, params.stepKind ?? null, lr.employee_id)
+  const recipients = await stepRecipients(tenantId, approverEmpIds, params.stepKind ?? null, lr, step, params.actedByEmpId ? [params.actedByEmpId] : [])
   return enqueue({
     tenantId,
     employeeIds: recipients,
@@ -522,23 +533,64 @@ async function notifyStepApprover(params: {
   })
 }
 
+type ChainStepRow = { step_order: number; approver_emp_id: string; candidate_emp_ids?: unknown; step_kind?: string | null }
+
+/** 這張單的全部關卡（step_order 升冪）；回錯誤訊息或列。 */
+async function loadRequestSteps(tenantId: string, requestId: string): Promise<ChainStepRow[] | string> {
+  const multi = await approvalStepsHaveCandidates()
+  const { data, error } = await supabaseAdmin
+    .from("approval_steps")
+    .select(stepSelectCols("step_order, approver_emp_id", multi))
+    .eq("tenant_id", tenantId)
+    .eq("request_id", requestId)
+    .order("step_order", { ascending: true })
+  if (error) return error.message
+  return (data ?? []) as unknown as ChainStepRow[]
+}
+
 /**
- * 輪到某一關時要通知的人：該關候選；老闆關（step_kind='fallback'）另加租戶所有在職 platform_admin，
- * 去重、不寄申請人本人（services/approval-steps.ts stepNotifyRecipients）。查 platform_admin 失敗 → 只寄候選。
+ * 某張單某一關的「老闆關判斷上下文」（bossGateStep 用）：需要老闆關的單種（零用金、出差）帶上設定的老闆，並看整條鏈有沒有
+ * 老闆關、這關是不是最後一關（第三輪安全驗收 S2：舊單鏈裡完全沒有老闆 → 最後一關視為老闆關）。
+ */
+function bossGateCtxOf(kind: string | null | undefined, bossEmpId: string | null, allSteps: ChainStepRow[] | null, stepOrder: number): BossGateCtx {
+  const requiresBoss = requestKindRequiresBoss(kind)
+  const ctx: BossGateCtx = { requiresBoss, bossEmpId: requiresBoss ? bossEmpId : null }
+  if (requiresBoss && allSteps && allSteps.length > 0) {
+    ctx.chainHasBossStep = chainHasBossStep(allSteps, ctx)
+    ctx.isLastStep = !allSteps.some((s) => s.step_order > stepOrder)
+  }
+  return ctx
+}
+
+/**
+ * 輪到某一關時要通知的人：非老闆關＝該關候選；老闆關（step_kind='fallback'，或需要老闆關的單種裡視為老闆關的關卡，
+ * 第三輪驗收 5）＝候選＋目前設定且在職的老闆＋所有在職 platform_admin；沒有任何可用老闆／平台管理員時另通知可 L3 代簽的
+ * 非申請人在職 HR（第三輪驗收 4；lib/boss.ts bossStepNotifyRecipients）。不寄申請人本人。查詢失敗 → 只寄候選。
  */
 async function stepRecipients(
   tenantId: string,
   candidateEmpIds: string[],
   stepKind: string | null,
-  requesterEmpId: string,
+  lr: { id: string; kind: string; employee_id: string },
+  stepOrder: number,
+  alsoSigned: string[] = [],
 ): Promise<string[]> {
-  if (stepKind !== BOSS_STEP_KIND) return candidateEmpIds
-  const admins = await loadPlatformAdminEmpIds(tenantId).catch(() => [] as string[])
-  return stepNotifyRecipients(
-    { approver_emp_id: candidateEmpIds[0] ?? "", candidate_emp_ids: candidateEmpIds, step_kind: stepKind },
-    admins,
-    [requesterEmpId],
-  )
+  try {
+    const step = { approver_emp_id: candidateEmpIds[0] ?? "", candidate_emp_ids: candidateEmpIds, step_kind: stepKind }
+    const requiresBoss = requestKindRequiresBoss(lr.kind)
+    const bossEmpId = requiresBoss ? await loadConfiguredBossEmpId(tenantId) : null
+    const all = requiresBoss ? await loadRequestSteps(tenantId, lr.id) : null
+    const gate = bossGateStep(step, bossGateCtxOf(lr.kind, bossEmpId, typeof all === "string" ? null : all, stepOrder))
+    if (!isBossStep(gate)) return candidateEmpIds.filter((id) => id !== lr.employee_id)
+    const earlier = await earlierSignersOf(tenantId, lr.id, stepOrder)
+    return await bossStepNotifyRecipients(tenantId, {
+      candidateEmpIds,
+      requesters: [lr.employee_id],
+      earlier: [...(typeof earlier === "string" ? [] : earlier), ...alsoSigned],
+    })
+  } catch {
+    return candidateEmpIds
+  }
 }
 
 /**
@@ -1070,24 +1122,49 @@ requestsRouter.get(
         set.add(s.step_order as number)
         stepByRequest.set(s.request_id as string, set)
       }
-      // 老闆關：platform_admin 也是簽核人（2026-10-27 業主：平台管理員就是老闆）——全租戶待簽的老闆關都列進來，
-      // 但不含自己的單（stepActorStanding own_request）。step_kind 是 migration 0049 的欄位，未套用時沒有老闆關可認。
+      // 老闆關：platform_admin 與目前設定的老闆也是簽核人（2026-10-27 業主：平台管理員就是老闆；第三輪驗收 2）——全租戶待簽、
+      // 現行關卡是老闆關的單都列進來，但不含自己的單。老闆關的判斷套 bossGateStep（第三輪驗收 5：舊單候選含老闆的關卡、
+      // S2：鏈裡完全沒有老闆的舊單最後一關）。step_kind 是 migration 0049 的欄位，未套用時只認候選。
       const bossStepByRequest = new Map<string, Set<number>>()
-      if (isPlatformAdminRole(self.role) && (await approvalStepsHaveCandidates())) {
-        const { data: bossSteps, error: bossErr } = await supabaseAdmin
-          .from("approval_steps")
-          .select("request_id, step_order")
+      const bossEmpIdForSelf = await loadConfiguredBossEmpId(tenantId)
+      const selfIsBossish = isPlatformAdminRole(self.role) || isConfiguredBoss(bossEmpIdForSelf, self.id)
+      if (selfIsBossish && (await approvalStepsHaveCandidates())) {
+        const { data: pendReqs, error: pendErr } = await supabaseAdmin
+          .from("leave_requests")
+          .select("id, kind, current_step, employee_id")
           .eq("tenant_id", tenantId)
-          .eq("step_kind", BOSS_STEP_KIND)
-          .eq("decision", "pending")
-        if (bossErr) {
-          next(new Error(`GET /requests/pending-approvals (boss steps): ${bossErr.message}`))
+          .is("deleted_at", null)
+          .eq("status", "pending")
+        if (pendErr) {
+          next(new Error(`GET /requests/pending-approvals (boss requests): ${pendErr.message}`))
           return
         }
-        for (const s of bossSteps ?? []) {
-          const set = bossStepByRequest.get(s.request_id as string) ?? new Set<number>()
-          set.add(s.step_order as number)
-          bossStepByRequest.set(s.request_id as string, set)
+        const reqs = ((pendReqs ?? []) as Array<{ id: string; kind: string; current_step: number; employee_id: string }>).filter(
+          (r) => r.employee_id !== self.id,
+        )
+        if (reqs.length > 0) {
+          const { data: allSteps, error: bossErr } = await supabaseAdmin
+            .from("approval_steps")
+            .select("request_id, step_order, approver_emp_id, candidate_emp_ids, step_kind")
+            .eq("tenant_id", tenantId)
+            .in("request_id", reqs.map((r) => r.id))
+          if (bossErr) {
+            next(new Error(`GET /requests/pending-approvals (boss steps): ${bossErr.message}`))
+            return
+          }
+          const byReq = new Map<string, Array<ChainStepRow & { request_id: string }>>()
+          for (const st of (allSteps ?? []) as Array<ChainStepRow & { request_id: string }>) {
+            const arr = byReq.get(st.request_id) ?? []
+            arr.push(st)
+            byReq.set(st.request_id, arr)
+          }
+          for (const r of reqs) {
+            const steps = byReq.get(r.id) ?? []
+            const cur = steps.find((st) => st.step_order === r.current_step)
+            if (!cur) continue
+            if (!isBossStep(bossGateStep(cur, bossGateCtxOf(r.kind, bossEmpIdForSelf, steps, r.current_step)))) continue
+            bossStepByRequest.set(r.id, new Set([r.current_step]))
+          }
         }
       }
       const candidateIds = Array.from(new Set([...stepByRequest.keys(), ...bossStepByRequest.keys()]))
@@ -1144,6 +1221,8 @@ const DECISION_ERROR_STATUS: Record<string, number> = {
   own_request: 403,
   // 同一張單同一人不能簽兩關（含代簽；L1）。
   already_signed_step: 403,
+  // 舊單鏈裡沒有老闆關：最後一關要由老闆／平台管理員（老闆）核准（第三輪安全驗收 S2）。
+  boss_step_required: 409,
   attachment_required: 409,
   // 發薪鎖定：這張單碰到已結算月（回應多帶 period）。
   period_closed: 409,
@@ -1445,32 +1524,47 @@ async function decideOneRequest(params: {
   // 任一在職 platform_admin 也算（2026-10-27 業主：平台管理員就是老闆；動態判斷，進行中的單也適用）。
   // 自己的單一律不能簽（所有關卡、HR 代簽、批次都一樣；2026-10-27 業主追加 B）；非在職帳號不能簽（追加 A）。
   // 需要老闆關的單據（零用金、出差）：候選含老闆的關卡一律視為老闆關（第二輪安全驗收 H1；舊單老闆那關是 kind='manager'）。
-  const requiresBoss = requestKindRequiresBoss(lr.kind)
-  const gate = bossGateStep(step, { requiresBoss, bossEmpId: requiresBoss ? await loadConfiguredBossEmpId(tenantId) : null })
-  const standing = stepActorStanding(gate, actor, lr.employee_id)
+  // 第三輪驗收 2：老闆關也放行「目前設定、在職、非申請人、本輪未簽過」的老闆（送簽後才設定／換人的新老闆），與
+  // lib/boss.ts bossSignerChecker 的可簽判準一致。S2：鏈裡完全沒有老闆的舊單，最後一關視為老闆關。
+  const bossEmpId = await loadConfiguredBossEmpId(tenantId)
+  const allSteps = requestKindRequiresBoss(lr.kind) ? await loadRequestSteps(tenantId, requestId) : null
+  if (typeof allSteps === "string") return { ok: false, id: requestId, error: allSteps }
+  const gateCtx = bossGateCtxOf(lr.kind, bossEmpId, allSteps, step.step_order)
+  const gate = bossGateStep(step, gateCtx)
+  const standing = stepActorStanding(gate, actor, lr.employee_id, { bossEmpId })
   if (standing === "own_request") return { ok: false, id: requestId, error: "own_request" }
   const bossByPlatformAdmin = standing === "platform_admin"
-  const isCandidate = standing === "candidate" || bossByPlatformAdmin
+  const bossByCurrentBoss = standing === "boss"
+  const isCandidate = standingCanAct(standing)
   // 同一張單同一人不能簽兩關（含代簽；2026-10-27 安全驗收 L1，與放款單一致）。
   const earlier = await earlierSignersOf(tenantId, requestId, step.step_order)
   if (typeof earlier === "string") return { ok: false, id: requestId, error: earlier }
-  const signedBefore = earlier.has(actor.id.toLowerCase())
+  let signedBefore = earlier.has(actor.id.toLowerCase())
+  // 老闆關可簽者狀態（第三輪 S1）：fresh＝扣掉簽過前面關卡的人仍有老闆／平台管理員可簽；any＝只扣申請人仍有。
+  const bossState = isBossStep(gate)
+    ? await bossSignerState(tenantId, { requesters: [lr.employee_id], earlier: [...earlier], stepCandidateEmpIds: stepCandidates(step) })
+    : null
+  // S1 防禦性例外：唯一可簽的老闆／平台管理員已簽過前面關卡（!fresh && any）→ 不開放 HR 代簽，改允許他簽老闆關。
+  const actorBossish =
+    isPlatformAdminRole(actor.role) || isConfiguredBoss(bossEmpId, actor.id) || (isBossStep(step) && isStepCandidate(step, actor.id))
+  const bossSignedEarlierWaiver = signedBefore && isCandidate && !!bossState && !bossState.fresh && bossState.any && actorBossish
+  if (bossSignedEarlierWaiver) signedBefore = false
   // HR 代簽：老闆關原則上不准（追加 C：老闆關只限老闆本人或在職 platform_admin），其他關照舊。
-  // L3：這張單的老闆關找不到任何「非申請人、在職、沒簽過前面關卡」的老闆／平台管理員 → 允許在職、非申請人的 HR 代簽。
+  // L3：這張單的老闆關找不到任何「非申請人、在職」的老闆／平台管理員（不論是否簽過前面關卡，S1）→ 允許在職、非申請人、
+  // 本輪沒簽過的 HR 代簽。第二輪 M2：曾對這張單做過「變更簽核人」的 HR 不能用 L3 退路代簽。
   let bossStepHrFallback = false
-  // 第二輪 M2：曾對這張單做過「變更簽核人」的 HR 不能用 L3 退路代簽（防止先改派、再人為製造「老闆關沒人能簽」）。
-  if (allowHrOverride && !isCandidate && !signedBefore && isBossStep(gate) && isHrRole(actor.role) && !actorIsInactive(actor)) {
-    bossStepHrFallback =
-      !(await bossStepHasEligibleSigner(tenantId, {
-        exclude: [lr.employee_id, ...earlier],
-        stepCandidateEmpIds: stepCandidates(step),
-      })) && !(await actorReassignedRequest(tenantId, "leave_requests", requestId, actor.id))
+  if (allowHrOverride && !isCandidate && !signedBefore && isBossStep(gate) && isHrRole(actor.role) && !actorIsInactive(actor) && bossState && !bossState.any) {
+    bossStepHrFallback = !(await actorReassignedRequest(tenantId, "leave_requests", requestId, actor.id))
   }
   const canOverride = allowHrOverride && canHrOverrideStep(gate, actor, { bossStepHrFallback })
   if (!isCandidate && !canOverride) {
     return { ok: false, id: requestId, error: "not_current_approver" }
   }
   if (signedBefore) return { ok: false, id: requestId, error: "already_signed_step" }
+  // S2：舊單鏈裡沒有任何老闆關 → 最終核准必須是老闆／平台管理員（沒有任何可用老闆／平台管理員時照 L3 放行）。
+  if (action === "approve" && legacyBossGateBlocks({ ctx: gateCtx, actor, noEligibleBossSigner: !!bossState && !bossState.any })) {
+    return { ok: false, id: requestId, error: "boss_step_required" }
+  }
   // 發薪鎖定：這張單碰到已結算月（日期、segments、跨月區間）→ 不能核准也不能駁回。逐張回結果（批次簽核
   // 其他張照常），不丟例外——批次那層會把例外吞成 internal_error。
   const closedPeriods = await closedPeriodsOfRequest(tenantId, lr)
@@ -1478,8 +1572,12 @@ async function decideOneRequest(params: {
   // 候選之一（含 platform_admin 簽老闆關）簽核 → approver_emp_id 改寫成實際簽的人（HR 代簽不改寫，見 markStep）。
   const takeOver = isCandidate && step.approver_emp_id !== actor.id
   // 稽核 context 的加註：platform_admin 簽老闆關／候選代簽／HR 代簽。
-  const actedNote = bossByPlatformAdmin
+  const actedNote = bossSignedEarlierWaiver
+    ? "，唯一可簽的老闆／平台管理員已簽前面關卡，例外簽老闆關"
+    : bossByPlatformAdmin
     ? "，平台管理員簽老闆關"
+    : bossByCurrentBoss
+    ? "，目前設定的老闆簽老闆關"
     : bossStepHrFallback && !isCandidate
       ? "，無可用老闆／平台管理員，HR 代簽"
       : `${takeOver ? "，候選代簽" : ""}${!isCandidate && canOverride ? "，HR 代簽" : ""}`
@@ -1546,6 +1644,8 @@ async function decideOneRequest(params: {
         takeOver,
         hrOverride: !isCandidate && canOverride,
         bossByPlatformAdmin,
+        ...(bossByCurrentBoss ? { bossByCurrentBoss: true } : {}),
+        ...(bossSignedEarlierWaiver ? { bossSignedEarlierWaiver: true } : {}),
         ...(bossStepHrFallback && !isCandidate ? { bossStepHrFallback: true, note: "無可用老闆／平台管理員，HR 代簽" } : {}),
       },
     })
@@ -1614,6 +1714,8 @@ async function decideOneRequest(params: {
         takeOver,
         hrOverride: !isCandidate && canOverride,
         bossByPlatformAdmin,
+        ...(bossByCurrentBoss ? { bossByCurrentBoss: true } : {}),
+        ...(bossSignedEarlierWaiver ? { bossSignedEarlierWaiver: true } : {}),
         ...(bossStepHrFallback && !isCandidate ? { bossStepHrFallback: true, note: "無可用老闆／平台管理員，HR 代簽" } : {}),
       },
     })
@@ -1910,7 +2012,12 @@ requestsRouter.post(
       const previousCandidateEmpIds = stepCandidates(step)
       // 老闆 id 一律要帶（非老闆關也要擋「改派給老闆」，第二輪 M2）；需要老闆關的單據候選含老闆 → 視為老闆關（第二輪 H1）。
       const bossEmpId = await loadConfiguredBossEmpId(tenantId)
-      const gate = bossGateStep(step, { requiresBoss: requestKindRequiresBoss(lr.kind as string), bossEmpId })
+      const allSteps = requestKindRequiresBoss(lr.kind as string) ? await loadRequestSteps(tenantId, requestId) : null
+      if (typeof allSteps === "string") {
+        next(new Error(`POST /requests/${requestId}/change-approver (steps): ${allSteps}`))
+        return
+      }
+      const gate = bossGateStep(step, bossGateCtxOf(lr.kind as string, bossEmpId, allSteps, step.step_order))
 
       // 改派授權（2026-10-27 安全驗收 H1／M1）：老闆關只有老闆本人或在職 platform_admin 能改派、且只能改派給老闆或
       // 在職 platform_admin（hr_admin 不能把老闆關改派給自己再以候選身分核准）；任何關卡都不能改派給申請人本人或操作者自己。
@@ -1920,27 +2027,16 @@ requestsRouter.post(
         requester: lr.employee_id as string,
         target: { id: target.id as string, role: (target as { role?: string | null }).role ?? null },
         bossEmpId,
+        // 第三輪驗收 6：「非老闆關不能改派給老闆／平台管理員」只限需要老闆關的單種（請假等照常可改派）。
+        requiresBoss: requestKindRequiresBoss(lr.kind as string),
       })
       if (denial) {
         res.status(CHANGE_APPROVER_DENIAL_STATUS[denial]).json({ error: denial, message: CHANGE_APPROVER_DENIAL_MESSAGE[denial] })
         return
       }
 
-      const { error: updateErr } = await supabaseAdmin
-        .from("approval_steps")
-        .update({
-          approver_emp_id: parsed.data.approverEmpId,
-          comment: parsed.data.comment ?? null,
-          ...(multi ? { candidate_emp_ids: [parsed.data.approverEmpId] } : {}),
-        })
-        .eq("tenant_id", tenantId)
-        .eq("id", step.id)
-      if (updateErr) {
-        next(new Error(`POST /requests/${requestId}/change-approver (update): ${updateErr.message}`))
-        return
-      }
-
-      await writeAuditLog({
+      // 第三輪安全驗收 S3：改派紀錄是之後「改派過的 HR 不能 L3 代簽」的依據——先寫稽核（失敗就丟例外 → 500、不改派），再改關卡。
+      await writeAuditLogStrict({
         tenantId,
         tableName: "leave_requests",
         recordId: requestId,
@@ -1963,6 +2059,20 @@ requestsRouter.post(
           acted_by: self?.id ?? null,
         },
       })
+
+      const { error: updateErr } = await supabaseAdmin
+        .from("approval_steps")
+        .update({
+          approver_emp_id: parsed.data.approverEmpId,
+          comment: parsed.data.comment ?? null,
+          ...(multi ? { candidate_emp_ids: [parsed.data.approverEmpId] } : {}),
+        })
+        .eq("tenant_id", tenantId)
+        .eq("id", step.id)
+      if (updateErr) {
+        next(new Error(`POST /requests/${requestId}/change-approver (update): ${updateErr.message}`))
+        return
+      }
 
       await supabaseAdmin.from("notifications").insert({
         tenant_id: tenantId,
@@ -2062,8 +2172,14 @@ requestsRouter.post(
         return
       }
       const step = stepRow as unknown as { approver_emp_id: string; candidate_emp_ids?: unknown; step_kind?: string | null }
-      // 老闆關另提醒所有在職 platform_admin（不含申請人本人）。
-      const recipients = await stepRecipients(tenantId, stepCandidates(step), step.step_kind ?? null, lr.employee_id as string)
+      // 老闆關另提醒老闆與所有在職 platform_admin（沒有時提醒可 L3 代簽的 HR；不含申請人本人）。
+      const recipients = await stepRecipients(
+        tenantId,
+        stepCandidates(step),
+        step.step_kind ?? null,
+        { id: requestId, kind: lr.kind as string, employee_id: lr.employee_id as string },
+        lr.current_step as number,
+      )
 
       const { error: insertErr } = await supabaseAdmin.from("notifications").insert(
         recipients.map((employeeId) => ({

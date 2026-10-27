@@ -115,7 +115,7 @@ approvalFlowsRouter.put(
       if (BOSS_GATED_KINDS.has(kind)) {
         const self = await resolveSelf(tenantId, req.auth!.userId)
         if (!isBossOrPlatformAdmin(await loadConfiguredBossEmpId(tenantId), self)) {
-          res.status(403).json({ error: "boss_only_flow", message: "這類單據需要老闆簽核，簽核流程只有老闆或平台管理員能修改" })
+          res.status(403).json({ error: "boss_only_flow", message: "這類單據需要老闆簽核，簽核流程只有平台管理員（老闆）能修改" })
           return
         }
       }
