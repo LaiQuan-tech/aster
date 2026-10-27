@@ -632,7 +632,7 @@ export function ApplicationSheet({
 
       {/* 未儲存提醒：捲到下方其他卡片時也看得到（下方卡片存檔重新載入不會清掉草稿，但要提醒還沒存）。 */}
       {editable && dirtyCount > 0 && (
-        <div role="status" className="no-print fixed inset-x-0 bottom-0 z-30 border-t border-amber-200 bg-amber-50/95 px-4 py-2 shadow-[0_-2px_8px_rgba(0,0,0,0.06)] backdrop-blur" data-testid="sheet-unsaved-bar">
+        <div role="status" className="no-print fixed inset-x-0 bottom-0 z-30 border-t border-amber-200 bg-amber-50/95 px-4 py-2 lg:pr-44 shadow-[0_-2px_8px_rgba(0,0,0,0.06)] backdrop-blur" data-testid="sheet-unsaved-bar">
           <div className="mx-auto flex max-w-[960px] flex-wrap items-center gap-x-3 gap-y-1.5 text-sm text-amber-900">
             <span className="mr-auto">申請單有 {dirtyCount} 個欄位尚未儲存。</span>
             <Button type="button" variant="secondary" size="sm" onClick={() => document.querySelector('[data-testid="application-sheet"]')?.scrollIntoView({ behavior: "smooth", block: "start" })}>

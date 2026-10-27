@@ -461,7 +461,7 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
                     <BackLink href={resolved.parentPath} label={backLabel} />
                   </div>
                 )}
-                <main className="space-y-4 md:space-y-6">{children}</main>
+                <main className="space-y-4 pb-24 md:space-y-6">{children}</main>
               </>
             )}
           </div>

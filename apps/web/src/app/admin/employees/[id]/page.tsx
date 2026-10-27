@@ -759,7 +759,7 @@ export default function EmployeeDetailPage() {
 
       {/* 儲存列：固定在頁面底部（長頁面捲到哪都按得到）；主要動作「儲存」在最右邊。 */}
       {canManage && (
-        <div className="sticky bottom-0 z-30 rounded-xl border border-gray-200 bg-white/95 px-4 py-3 shadow-sm backdrop-blur">
+        <div className="sticky bottom-0 z-30 rounded-xl border border-gray-200 bg-white/95 px-4 py-3 shadow-sm backdrop-blur lg:pr-44">
           {saveError && (
             <div className="mb-2">
               <ErrorText>{saveError}</ErrorText>
