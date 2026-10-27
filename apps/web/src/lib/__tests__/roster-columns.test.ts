@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  sortClientsByRegion,
   CLIENT_EXCEL_COLUMNS, VENDOR_EXCEL_COLUMNS, VENDOR_ROSTER_KIND_LABELS,
   clientCellText, countVendorsByKind, filterVendorsByKind, parseSeqInput, vendorCategoryLabel, vendorCellText, vendorRosterKind,
 } from "../roster-columns";
@@ -13,7 +14,7 @@ import type { Vendor } from "../company-api";
  * ⚠️ 資料都是明顯的假值（repo 是公開的）。
  */
 const EXCEL_VENDOR_HEADERS = ["簡稱", "序", "類別", "細目", "編號", "公司名稱", "TEL", "FAX", "承辦窗口", "Mobil", "E-mail", "公司地址", "統編", "付款方式", "備註", "網址"];
-const EXCEL_CLIENT_HEADERS = ["簡稱", "序", "區域", "編號", "公司名稱", "TEL", "FAX", "承辦窗口", "Mobil", "e-mail", "公司地址", "統編", "收款方式", "備註"];
+const EXCEL_CLIENT_HEADERS = ["區域", "簡稱", "編號", "公司名稱", "TEL", "FAX", "承辦窗口", "Mobil", "e-mail", "公司地址", "統編", "收款方式", "備註"];
 
 const vendor = (over: Partial<Vendor> = {}): Vendor => ({
   id: "v1", name: "測試廠商甲有限公司", shortName: "測試甲", isAffiliate: false, rosterKind: "engineer", seq: 3,
@@ -54,7 +55,7 @@ describe("列表欄位對齊 Excel", () => {
     const c = client();
     const cells = Object.fromEntries(CLIENT_EXCEL_COLUMNS.map((col) => [col.header, clientCellText(c, col.key, PAYMENT_METHOD_LABELS)]));
     expect(cells).toEqual({
-      簡稱: "測試客甲", 序: "2", 區域: "測試市", 編號: "T0001", 公司名稱: "測試客戶甲設計有限公司", TEL: "(00)1111-1111", FAX: "",
+      簡稱: "測試客甲", 區域: "測試市", 編號: "T0001", 公司名稱: "測試客戶甲設計有限公司", TEL: "(00)1111-1111", FAX: "",
       承辦窗口: "測試承辦", Mobil: "0900-111-111", "e-mail": "b@example.test", 公司地址: "測試市測試路 2 號", 統編: "", 收款方式: "匯款", 備註: "",
     });
   });
@@ -145,3 +146,20 @@ describe("客戶存檔提示（0078 同統編允許多名稱）", () => {
   });
 });
 
+describe("sortClientsByRegion", () => {
+  const rows = [
+    { name: "丙公司", shortName: "丙", region: "台北市" },
+    { name: "甲公司", shortName: null, region: null },
+    { name: "乙公司", shortName: "乙", region: "新北市" },
+    { name: "丁公司", shortName: "丁", region: "台北市" },
+  ];
+  it("空白區域排最後；同區域依簡稱；desc 反向區域但空白仍最後", () => {
+    const asc = sortClientsByRegion(rows, "asc").map((r) => r.region ?? "");
+    expect(asc[asc.length - 1]).toBe("");
+    expect(asc.slice(0, 3).sort()).toEqual(["台北市", "台北市", "新北市"].sort());
+    const desc = sortClientsByRegion(rows, "desc").map((r) => r.region ?? "");
+    expect(desc[desc.length - 1]).toBe("");
+    expect(desc[0]).not.toBe(asc[0]);
+    expect(rows[0].name).toBe("丙公司");
+  });
+});

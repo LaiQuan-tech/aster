@@ -11,7 +11,7 @@ import { OPTION_INACTIVE_MARK, optionChoices, optionLabel, useOptionList } from 
 import { getMeCached, peekMeCached } from "@/lib/ess-state";
 import { isHrRole } from "@/lib/roles";
 import { humanizeAffiliateError } from "@/lib/affiliate";
-import { CLIENT_EXCEL_COLUMNS, clientCellText } from "@/lib/roster-columns";
+import { CLIENT_EXCEL_COLUMNS, clientCellText, sortClientsByRegion } from "@/lib/roster-columns";
 import { clientFormFrom, clientFormToInput, emptyClientForm, type ClientForm, type ClientTextKey } from "@/lib/roster-forms";
 
 /**
@@ -84,7 +84,9 @@ export default function ClientsPage() {
     setError(null);
   }
 
-  const shown = categoryFilter ? clients.filter((c) => c.category === categoryFilter) : clients;
+  const [regionSort, setRegionSort] = useState<"asc" | "desc" | null>(null);
+  const filtered = categoryFilter ? clients.filter((c) => c.category === categoryFilter) : clients;
+  const shown = regionSort ? sortClientsByRegion(filtered, regionSort) : filtered;
 
   async function save() {
     if (!form.name.trim() || editing === null) return;
@@ -138,7 +140,9 @@ export default function ClientsPage() {
   );
 
   /** 第一欄（簡稱）凍結：沒填簡稱時以灰字帶出公司名稱，捲到右邊仍認得是哪一家。 */
-  const stickyCell = "sticky left-0 z-10 bg-white group-hover:bg-gray-50";
+  // 左側凍結兩欄：區域（固定寬）＋簡稱（接在區域右邊）。
+  const stickyColClass = (key: string, bg: string) =>
+    key === "region" ? `sticky left-0 z-10 w-20 min-w-20 max-w-20 pl-2 ${bg}` : key === "shortName" ? `sticky left-20 z-10 ${bg}` : "";
 
   return (
     <>
@@ -174,8 +178,22 @@ export default function ClientsPage() {
             <table className="w-max min-w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-200 bg-gray-50 text-left text-xs font-medium text-gray-600">
-                  {CLIENT_EXCEL_COLUMNS.map((col, i) => (
-                    <th key={col.key} scope="col" className={`whitespace-nowrap py-2 pr-3 ${i === 0 ? "sticky left-0 z-10 bg-gray-50 pl-2" : ""}`}>{col.header}</th>
+                  {CLIENT_EXCEL_COLUMNS.map((col) => (
+                    <th key={col.key} scope="col" className={`whitespace-nowrap py-2 pr-3 ${stickyColClass(col.key, "bg-gray-50")}`} aria-sort={col.key === "region" && regionSort ? (regionSort === "asc" ? "ascending" : "descending") : undefined}>
+                      {col.key === "region" ? (
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-1 hover:text-gray-900"
+                          onClick={() => setRegionSort((s) => (s === null ? "asc" : s === "asc" ? "desc" : null))}
+                          title="依區域排序（再按一次反向，第三次取消）"
+                        >
+                          {col.header}
+                          <span aria-hidden className={regionSort ? "text-[var(--brand)]" : "text-gray-400"}>{regionSort === "asc" ? "▲" : regionSort === "desc" ? "▼" : "↕"}</span>
+                        </button>
+                      ) : (
+                        col.header
+                      )}
+                    </th>
                   ))}
                   <th scope="col" className="sticky right-0 z-10 bg-gray-50 py-2 pl-3 pr-2"><span className="sr-only">操作</span></th>
                 </tr>
@@ -183,11 +201,18 @@ export default function ClientsPage() {
               <tbody>
                 {shown.map((c) => (
                   <tr key={c.id} className="group border-b border-gray-100 align-top last:border-0 hover:bg-gray-50">
-                    {CLIENT_EXCEL_COLUMNS.map((col, i) => {
+                    {CLIENT_EXCEL_COLUMNS.map((col) => {
                       const value = clientCellText(c, col.key, PAYMENT_METHOD_LABELS);
-                      if (i === 0) {
+                      if (col.key === "region") {
                         return (
-                          <th key={col.key} scope="row" className={`${stickyCell} whitespace-nowrap py-2 pl-2 pr-3 text-left font-medium text-gray-900`}>
+                          <td key={col.key} className={`${stickyColClass(col.key, "bg-white group-hover:bg-gray-50")} whitespace-nowrap py-2 pr-3 text-gray-600`}>
+                            {value || "—"}
+                          </td>
+                        );
+                      }
+                      if (col.key === "shortName") {
+                        return (
+                          <th key={col.key} scope="row" className={`${stickyColClass(col.key, "bg-white group-hover:bg-gray-50")} whitespace-nowrap py-2 pr-3 text-left font-medium text-gray-900`}>
                             {value || <span className="font-normal text-gray-400" title="未填簡稱，顯示公司名稱">{c.name}</span>}
                           </th>
                         );
@@ -231,7 +256,6 @@ export default function ClientsPage() {
           <h2 className="mb-3 text-sm font-semibold text-gray-700">{editing === "new" ? "新增客戶" : `編輯：${editing.name}`}</h2>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {F("shortName", "簡稱", { ph: "選填，最長 40 字", maxLength: 40 })}
-            {F("seq", "序", { ph: "整數" })}
             {F("region", "區域", { ph: "例：台北市", maxLength: 40 })}
             {F("code", "編號", { maxLength: 40 })}
             {F("name", "公司名稱 *", { maxLength: 200, wide: true })}

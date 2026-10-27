@@ -51,11 +51,11 @@ export const VENDOR_EXCEL_COLUMNS: ReadonlyArray<RosterColumn<VendorColumnKey>> 
   { header: "網址", key: "website" },
 ];
 
-/** Excel「客戶資料」的 14 欄（A:N）。「公司地址」存在 invoiceAddress、「Mobil」存在 contactPhone、「收款方式」存在 paymentMethod。 */
+/** Excel「客戶資料」的欄位（原 14 欄 A:N，2026-10-27 起不顯示「序」、區域移到第一欄）。「公司地址」存在 invoiceAddress、「Mobil」存在 contactPhone、「收款方式」存在 paymentMethod。 */
 export const CLIENT_EXCEL_COLUMNS: ReadonlyArray<RosterColumn<ClientColumnKey>> = [
-  { header: "簡稱", key: "shortName" },
-  { header: "序", key: "seq" },
+  // 2026-10-27 業主：拿掉「序」、「區域」放第一欄（資料欄位 seq 保留，只是不顯示）。
   { header: "區域", key: "region" },
+  { header: "簡稱", key: "shortName" },
   { header: "編號", key: "code" },
   { header: "公司名稱", key: "name" },
   { header: "TEL", key: "phone", multiline: true },
@@ -112,4 +112,17 @@ export function parseSeqInput(raw: string): number | null | "invalid" {
   if (!s) return null;
   if (!/^\d{1,5}$/.test(s)) return "invalid";
   return Number(s);
+}
+
+/** 客戶列表依「區域」排序（2026-10-27 業主）：空白區域排最後，同區域依簡稱（沒簡稱用公司名稱）排。 */
+export function sortClientsByRegion<T extends { region?: string | null; shortName?: string | null; name: string }>(rows: readonly T[], dir: "asc" | "desc"): T[] {
+  const label = (r: T) => (r.shortName ?? "").trim() || r.name;
+  return [...rows].sort((a, b) => {
+    const ra = (a.region ?? "").trim();
+    const rb = (b.region ?? "").trim();
+    if (!ra !== !rb) return ra ? -1 : 1;
+    const c = ra.localeCompare(rb, "zh-Hant");
+    if (c !== 0) return dir === "asc" ? c : -c;
+    return label(a).localeCompare(label(b), "zh-Hant");
+  });
 }
