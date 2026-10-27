@@ -5,6 +5,7 @@ import { isHrRole } from "../middleware/scope.js"
 import { loadChainCandidates, pickDisbursementChain, type ChainSource, type ChainStep } from "./approval-chain.js"
 import {
   BOSS_STEP_KIND,
+  bossGateStep,
   canActOnStep,
   canHrOverrideStep,
   changeApproverDenial,
@@ -15,7 +16,7 @@ import {
   stepNotifyRecipients,
   type StepLike,
 } from "./approval-steps.js"
-import { bossSignerChecker, bossStepHasEligibleSigner, loadConfiguredBossEmpId, loadPlatformAdminEmpIds } from "../lib/boss.js"
+import { actorReassignedRequest, bossSignerChecker, bossStepHasEligibleSigner, loadConfiguredBossEmpId, loadPlatformAdminEmpIds } from "../lib/boss.js"
 import { enqueue } from "./notify.js"
 import { writeAuditLog } from "./audit.js"
 import {
@@ -358,7 +359,9 @@ export async function submitDisbursement(
   if (stepErr) throw new Error(`submitDisbursement (steps): ${stepErr.message}`)
 
   const submittedAt = new Date().toISOString()
-  const { error: upErr } = await supabaseAdmin
+  // 第二輪安全驗收 L5：單頭只在「仍是草稿、且讀取後沒被改過（updated_at 相同）」時才轉成待簽核——
+  // 送簽期間另一請求編輯草稿／並行送簽 → 0 列，刪掉剛插入的關卡並回 409（不讓沒被這條鏈審過的內容進簽核）。
+  let headerQuery = supabaseAdmin
     .from("disbursements")
     .update({
       status: "pending_approval",
@@ -370,7 +373,21 @@ export async function submitDisbursement(
     })
     .eq("tenant_id", tenantId)
     .eq("id", id)
+    .eq("status", "draft")
+  if (current.updated_at) headerQuery = headerQuery.eq("updated_at", current.updated_at)
+  const { data: upRows, error: upErr } = await headerQuery.select("id")
   if (upErr) throw new Error(`submitDisbursement (header): ${upErr.message}`)
+  if ((upRows ?? []).length === 0) {
+    const { error: cleanupErr } = await supabaseAdmin
+      .from("disbursement_approval_steps")
+      .delete()
+      .eq("tenant_id", tenantId)
+      .eq("disbursement_id", id)
+      .eq("round", round)
+      .eq("decision", "pending")
+    if (cleanupErr) logger.warn({ err: cleanupErr, disbursementId: id }, "submitDisbursement: cleanup steps after lost header transition failed")
+    throw new DisbursementError(409, "conflict", { hint: "這張放款單在送簽期間被修改或已送出，請重新整理後再送簽。" })
+  }
 
   let notified = 0
   try {
@@ -469,20 +486,24 @@ export async function decideDisbursement(params: {
   // 動態判斷（不改寫既有關卡），已在簽核中的單也適用。同 routes/requests.ts decideOneRequest。
   // 自己的單（建單人或送簽人）任何一關都不能簽（含 HR 代簽；追加 B／D）；非在職不能簽（追加 A）。
   const stepActor = { id: actor.empId, role: actor.role, active: actor.active }
-  const standing = stepActorStanding(step, stepActor, requestersOf(current))
+  // 放款單一律需要老闆關：候選含老闆的關卡視為老闆關（第二輪安全驗收 H1；舊單老闆在主管鏈上時那關是 kind='manager'）。
+  const gate = bossGateStep(step, { requiresBoss: true, bossEmpId: await loadConfiguredBossEmpId(tenantId) })
+  const standing = stepActorStanding(gate, stepActor, requestersOf(current))
   if (standing === "own_request") throw new DisbursementError(403, "own_request")
   const isCandidate = standing === "candidate" || standing === "platform_admin"
   const signedBefore = signedEarlierStep(rows, step, actor.empId)
   // HR 代簽：老闆關原則上不准（追加 C），其他關照舊。L3：這張單的老闆關找不到任何「非建單人／送簽人／編輯人、在職、
   // 本輪沒簽過前面關卡」的老闆／平台管理員 → 允許在職、非申請人的 HR 代簽（稽核記「無可用老闆／平台管理員，HR 代簽」）。
   let bossStepHrFallback = false
-  if (allowHrOverride && !isCandidate && !signedBefore && step.step_kind === BOSS_STEP_KIND && isHrRole(actor.role ?? undefined) && actor.active !== false) {
-    bossStepHrFallback = !(await bossStepHasEligibleSigner(tenantId, {
-      exclude: [...requestersOf(current), ...earlierSigners(rows, step)],
-      stepCandidateEmpIds: stepCandidates(step),
-    }))
+  // 第二輪 M2：曾對這張單做過「變更簽核人」的 HR 不能用 L3 退路代簽。
+  if (allowHrOverride && !isCandidate && !signedBefore && gate.step_kind === BOSS_STEP_KIND && isHrRole(actor.role ?? undefined) && actor.active !== false) {
+    bossStepHrFallback =
+      !(await bossStepHasEligibleSigner(tenantId, {
+        exclude: [...requestersOf(current), ...earlierSigners(rows, step)],
+        stepCandidateEmpIds: stepCandidates(step),
+      })) && !(await actorReassignedRequest(tenantId, "disbursements", id, actor.empId))
   }
-  const canOverride = allowHrOverride && canHrOverrideStep(step, stepActor, { bossStepHrFallback })
+  const canOverride = allowHrOverride && canHrOverrideStep(gate, stepActor, { bossStepHrFallback })
   if (!isCandidate && !canOverride) throw new DisbursementError(403, "not_current_approver")
   // 同一輪同一人不能簽兩關（含代簽；追加 D）。
   if (signedBefore) throw new DisbursementError(403, "already_signed_step")
@@ -684,12 +705,14 @@ export async function changeDisbursementApprover(
 
   // 改派授權（H2）：老闆關只有老闆本人或在職 platform_admin 能改派、且只能改派給老闆或在職 platform_admin；
   // 任何關卡都不能改派給建單人／送簽人／草稿編輯人或操作者自己。
+  // 老闆 id 一律要帶（非老闆關不准改派給老闆／平台管理員，第二輪 M2）；候選含老闆的關卡視為老闆關（第二輪 H1）。
+  const bossEmpId = await loadConfiguredBossEmpId(tenantId)
   const denial = changeApproverDenial({
-    step,
+    step: bossGateStep(step, { requiresBoss: true, bossEmpId }),
     actor: { id: actor.empId ?? "", role: actor.role, active: actor.active },
     requester: requestersOf(current),
     target: { id: target.id as string, role: (target as { role?: string | null }).role ?? null },
-    bossEmpId: step.step_kind === BOSS_STEP_KIND ? await loadConfiguredBossEmpId(tenantId) : null,
+    bossEmpId,
   })
   if (denial) throw new DisbursementError(CHANGE_APPROVER_DENIAL_STATUS[denial], denial, { message: CHANGE_APPROVER_DENIAL_MESSAGE[denial] })
 
@@ -834,10 +857,13 @@ export async function listPendingDisbursementApprovals(
   // L3：HR 看老闆關時，若這張單找不到可簽的老闆／平台管理員，HR 也算「輪到我」（同 decideDisbursement 的判斷）。
   const actorIsHr = isHrRole(actor.role ?? undefined) && actor.active !== false
   let checker: Awaited<ReturnType<typeof bossSignerChecker>> | null = null
+  const bossEmpId = rows.length > 0 ? await loadConfiguredBossEmpId(tenantId) : null
   for (const row of rows) {
     const rowSteps = byDisbursement.get(row.id) ?? []
-    const step = currentStepOf(row, rowSteps)
-    if (!step) continue
+    const rawStep = currentStepOf(row, rowSteps)
+    if (!rawStep) continue
+    // 候選含老闆的關卡視為老闆關（第二輪 H1）：platform_admin 也看得到、L3 判斷同老闆關。
+    const step = bossGateStep(rawStep, { requiresBoss: true, bossEmpId })
     const requesters = requestersOf(row)
     let mine =
       canActOnStep(step, { id: actor.empId, role: actor.role, active: actor.active }, requesters) &&

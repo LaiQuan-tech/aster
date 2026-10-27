@@ -182,6 +182,9 @@ describe("POST /requests — 對象是本人或沒帶 → 照常", () => {
   })
 
   it("零用金預支：HR 帶自己的 id → 201，預支金額照存、記在 HR 名下", async () => {
+    // 零用金一定要有老闆關（2026-10-27 第二輪安全驗收 M4）：本租戶沒設老闆、唯一的 HR 就是申請人 → 需要一位在職
+    // platform_admin 當老闆關的簽核人，否則依業主規則應 409 no_approver_available。
+    fake.db.employees.push(employee("bbbbbbbb-0000-4000-8000-0000000000aa", "user-pa", "platform_admin", "平台管理員"))
     const res = await post("/requests", HR_TOKEN).send(
       requestBody("petty_cash", { onBehalfOfEmployeeId: HR_ID, advanceRequested: 3000, reason: "採買活動物資" }),
     )

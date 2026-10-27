@@ -141,3 +141,29 @@ export async function bossSignerChecker(tenantId: string): Promise<(opts: BossSi
     return others.some((id) => activeMemo.get(id) === true)
   }
 }
+
+/**
+ * actor 是否曾對這張單做過「變更簽核人」（讀 audit_logs：leave_requests 的 new_row.decision='change_approver'；
+ * 放款單的 new_row.changeApprover=true）。第二輪安全驗收 M2：做過改派的 HR 不能再用 L3 退路代簽同一張單的老闆關。
+ * 查詢失敗 → 視為做過（fail closed：寧可不給 L3 代簽）。
+ */
+export async function actorReassignedRequest(
+  tenantId: string,
+  tableName: "leave_requests" | "disbursements",
+  recordId: string,
+  actorEmpId: string,
+): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from("audit_logs")
+    .select("actor_emp_id, new_row")
+    .eq("tenant_id", tenantId)
+    .eq("table_name", tableName)
+    .eq("record_id", recordId)
+  if (error) return true
+  const me = actorEmpId.toLowerCase()
+  return ((data ?? []) as Array<{ actor_emp_id?: string | null; new_row?: unknown }>).some((r) => {
+    if ((r.actor_emp_id ?? "").toLowerCase() !== me) return false
+    const row = (r.new_row ?? {}) as Record<string, unknown>
+    return row.decision === "change_approver" || row.changeApprover === true
+  })
+}

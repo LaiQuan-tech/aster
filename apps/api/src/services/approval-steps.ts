@@ -56,6 +56,36 @@ function sameId(a: string | null | undefined, b: string | null | undefined): boo
   return !!a && !!b && a.toLowerCase() === b.toLowerCase()
 }
 
+/**
+ * 需要老闆關的申請單種類（leave_requests.kind；同 routes/requests.ts flowRouteFor 的 requireBossFinal）：零用金、出差／公出
+ * （含跨縣市）。放款單一律需要老闆關（呼叫端直接帶 requiresBoss=true）。
+ */
+export function requestKindRequiresBoss(kind: string | null | undefined): boolean {
+  return kind === "petty_cash" || kind === "business_trip"
+}
+
+/**
+ * 「視為老闆關」（2026-10-27 第二輪安全驗收 H1）：step_kind='fallback'；或單據需要老闆關、且這一關的候選含老闆——
+ * 舊單（第二輪之前送出）老闆在申請人主管鏈上時，老闆那關是 kind='manager'、沒有另外的老闆關；新單雖已把老闆移到最後的
+ * 老闆關，仍防禦性地比照（HR 代簽／改派、platform_admin 可簽、L3 判斷都照老闆關處理）。只在讀取端判斷、不改資料。純函式。
+ */
+export function treatAsBossStep(
+  step: StepLike & { step_kind?: string | null },
+  ctx: { requiresBoss: boolean; bossEmpId: string | null | undefined },
+): boolean {
+  if (isBossStep(step)) return true
+  if (!ctx.requiresBoss || !ctx.bossEmpId) return false
+  return stepCandidates(step).some((id) => sameId(id, ctx.bossEmpId))
+}
+
+/** treatAsBossStep 成立時回一份 step_kind 改成 'fallback' 的副本（給 stepActorStanding／canHrOverrideStep／changeApproverDenial 用）。 */
+export function bossGateStep<S extends StepLike & { step_kind?: string | null }>(
+  step: S,
+  ctx: { requiresBoss: boolean; bossEmpId: string | null | undefined },
+): S {
+  return !isBossStep(step) && treatAsBossStep(step, ctx) ? { ...step, step_kind: BOSS_STEP_KIND } : step
+}
+
 export interface StepActor {
   id: string
   role?: string | null
@@ -120,6 +150,8 @@ export function canHrOverrideStep(
  *   • 改派對象是申請人本人 → approver_is_requester；改派給操作者自己 → cannot_assign_self（不能自己指派自己再簽）。
  *   • 目前關卡是老闆關：操作者必須是在職的老闆本人或在職 platform_admin（boss_step_boss_only），
  *     改派對象也必須是老闆或在職 platform_admin（boss_step_target_not_boss）——hr_admin 不能藉改派繞過「老闆關不准 HR 代簽」。
+ *   • 目前關卡不是老闆關：不能改派給老闆或 platform_admin（non_boss_step_target_boss；第二輪 M2）。
+ *   `step` 請先過 bossGateStep（舊單候選含老闆的關卡視為老闆關）；`bossEmpId` 一律要帶（非老闆關也要比對改派對象）。
  * 改派對象在職與否由呼叫端先查（不在職 → 404／400）。純函式（另讀本請求的非在職標記）。
  */
 export type ChangeApproverDenial =
@@ -128,6 +160,7 @@ export type ChangeApproverDenial =
   | "cannot_assign_self"
   | "boss_step_boss_only"
   | "boss_step_target_not_boss"
+  | "non_boss_step_target_boss"
 
 export const CHANGE_APPROVER_DENIAL_STATUS: Record<ChangeApproverDenial, number> = {
   own_request: 403,
@@ -135,6 +168,7 @@ export const CHANGE_APPROVER_DENIAL_STATUS: Record<ChangeApproverDenial, number>
   cannot_assign_self: 400,
   boss_step_boss_only: 403,
   boss_step_target_not_boss: 400,
+  non_boss_step_target_boss: 400,
 }
 
 export const CHANGE_APPROVER_DENIAL_MESSAGE: Record<ChangeApproverDenial, string> = {
@@ -143,6 +177,7 @@ export const CHANGE_APPROVER_DENIAL_MESSAGE: Record<ChangeApproverDenial, string
   cannot_assign_self: "不能把簽核人改成自己",
   boss_step_boss_only: "老闆關只有老闆本人或平台管理員能變更簽核人",
   boss_step_target_not_boss: "老闆關只能改派給老闆或在職平台管理員",
+  non_boss_step_target_boss: "老闆與平台管理員只在老闆關簽核，其他關卡不能改派給他們",
 }
 
 export function changeApproverDenial(params: {
@@ -162,6 +197,10 @@ export function changeApproverDenial(params: {
     if (!actorIsBoss) return "boss_step_boss_only"
     const targetIsBoss = target.role === "platform_admin" || sameId(target.id, bossEmpId)
     if (!targetIsBoss) return "boss_step_target_not_boss"
+  } else if (target.role === "platform_admin" || sameId(target.id, bossEmpId)) {
+    // 第二輪安全驗收 M2：非老闆關不准改派給老闆或 platform_admin——否則 HR 可把主管關改派給唯一的平台管理員，
+    // 他簽了之後老闆關就「沒有沒簽過的人」，人為製造 L3 退路讓 HR 代簽老闆關。
+    return "non_boss_step_target_boss"
   }
   return null
 }

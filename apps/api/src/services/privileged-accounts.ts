@@ -1,4 +1,4 @@
-import { actorRoleOf, isActiveStatus } from "../lib/actor-status.js"
+import { actorIsInactive, actorRoleOf, isActiveStatus } from "../lib/actor-status.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { canEditUnlockList, loadPeriodUnlockPolicy, type PeriodUnlockPolicy } from "./period-lock.js"
 
@@ -11,7 +11,8 @@ import { canEditUnlockList, loadPeriodUnlockPolicy, type PeriodUnlockPolicy } fr
  *
  *   ① 更換老闆設定（PUT /api/tenant/settings 的 approval.fallbackApproverEmpId）
  *        → 目前有老闆時，只有老闆本人（可以交棒給別人）或 platform_admin 能換／清除；
- *          **還沒有老闆**（null）時，任何 HR 可以做第一次設定（否則沒人能設定，是鎖死的初始狀態）。
+ *          **還沒有老闆**（null）時：有在職 platform_admin → 只限 platform_admin；沒有才允許 HR 做第一次設定；
+ *          HR 任何情況都不能把自己設成老闆（2026-10-27 第二輪安全驗收 M3）。
  *   ② 指派 platform_admin 角色（建立員工、改角色、批次建立帳號的 CSV 角色欄）
  *        → 只有 platform_admin。HR 不能指派，也不能把自己升上去。**只擋「變成」**：目標本來就是
  *          platform_admin 時，帶著原值存檔（員工管理頁每次儲存都會帶 role）照常通過。
@@ -93,12 +94,25 @@ export function isBossOrPlatformAdmin(policy: PeriodUnlockPolicy, caller: Privil
 }
 
 /**
- * 能不能把老闆設定從 `before` 換成別的值（含清除）。純函式。
- * 目前沒有老闆（bossEmpId＝null）→ 任何 HR 可做第一次設定；有老闆 → 只有老闆本人或 platform_admin。
+ * 能不能把老闆設定從 `before` 換成 `opts.newBossEmpId`（null＝清除）。純函式。
+ *   • 有老闆 → 只有老闆本人（交棒）或 platform_admin。
+ *   • 沒有老闆（bossEmpId＝null，第一次設定）→ 租戶有在職 platform_admin（`opts.hasActivePlatformAdmin`）時只限
+ *     platform_admin；沒有在職 platform_admin 才允許 HR 做第一次設定（否則沒人能設定，是鎖死的初始狀態）。
+ *   • 任何情況 hr_admin 都不能把**自己**設成老闆（2026-10-27 第二輪安全驗收 M3：HR 自封老闆就能簽自己需要老闆關的單）。
  * 呼叫端只在 before／after 的老闆不同時才問這個。
  */
-export function canChangeBoss(before: PeriodUnlockPolicy, caller: PrivilegeCaller): boolean {
-  return before.bossEmpId === null || isBossOrPlatformAdmin(before, caller)
+export function canChangeBoss(
+  before: PeriodUnlockPolicy,
+  caller: PrivilegeCaller,
+  opts: { newBossEmpId?: string | null; hasActivePlatformAdmin?: boolean } = {},
+): boolean {
+  const callerRole = normalizeRole(caller.role)
+  if (actorIsInactive(caller)) return false
+  const target = opts.newBossEmpId ?? null
+  if (callerRole === HR_ADMIN_ROLE && target !== null && target.toLowerCase() === caller.id.toLowerCase()) return false
+  if (before.bossEmpId !== null) return isBossOrPlatformAdmin(before, caller)
+  if (opts.hasActivePlatformAdmin === true) return callerRole === PLATFORM_ADMIN_ROLE
+  return callerRole === HR_ADMIN_ROLE || callerRole === PLATFORM_ADMIN_ROLE
 }
 
 /** 老闆設定有沒有變（兩邊都是小寫 id 或 null）。純函式。 */

@@ -59,11 +59,13 @@ describe("送簽：pickDisbursementChain → buildStepRows", () => {
     expect(rows.every((r) => r.decision === "pending" && r.round === 1 && r.disbursement_id === DISB && r.tenant_id === TENANT)).toBe(true)
   })
 
-  it("建單人是老闆 → 老闆關跳過（只剩主管＋會計兩關）", () => {
+  it("建單人是老闆 → 仍有老闆關（第二輪 M4），名義簽核人寫在職 platform_admin，老闆本人不在任何關卡", () => {
+    const PA = "00000000-0000-4000-8000-0000000000a1"
     const rows = rowsFor(
-      candidates({ employeeId: BOSS, managerEmpIds: [MGR], accountantEmpIds: [ACC1, ACC2], fallbackApproverEmpId: BOSS }),
+      candidates({ employeeId: BOSS, managerEmpIds: [MGR], accountantEmpIds: [ACC1, ACC2], fallbackApproverEmpId: BOSS, platformAdminEmpIds: [PA] }),
     )
-    expect(rows.map((r) => r.step_kind)).toEqual(["manager", "accountant"])
+    expect(rows.map((r) => r.step_kind)).toEqual(["manager", "accountant", "fallback"])
+    expect(rows[2].approver_emp_id).toBe(PA)
     expect(rows.some((r) => r.approver_emp_id === BOSS)).toBe(false)
   })
 
@@ -77,7 +79,7 @@ describe("送簽：pickDisbursementChain → buildStepRows", () => {
   })
 
   it("誰都沒有 → no_approver_available（送簽被擋，不會留下沒人能簽的單）", () => {
-    expect(pickDisbursementChain(candidates())).toEqual({ ok: false, error: "no_approver_available" })
+    expect(pickDisbursementChain(candidates({ platformAdminEmpIds: [] }))).toEqual({ ok: false, error: "no_approver_available" })
   })
 })
 

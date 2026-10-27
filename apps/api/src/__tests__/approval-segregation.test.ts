@@ -206,7 +206,7 @@ describe("B. 自己的單一律不能簽", () => {
     expect(mh).toEqual({ ok: true, steps: [{ candidateEmpIds: [MGR_ID], kind: "manager" }], source: "manager_hr" })
   })
 
-  it("整條只剩本人且沒有老闆 → 老闆關名義寫本人：本人簽 own_request、平台管理員可簽", async () => {
+  it("整條只剩本人且沒有老闆 → 老闆關名義寫在職 platform_admin（第二輪 M4）：本人簽 own_request、平台管理員可簽", async () => {
     fake.db.tenants = [{ id: TENANT_ID, features: {} }]
     // HR 小草沒有部門、沒有老闆、另一位 HR 存在 → 鏈是 hr_admin 退路（HR 小花），不受影響。
     const f = await file(T.hr2, LEAVE)
@@ -214,7 +214,7 @@ describe("B. 自己的單一律不能簽", () => {
     // 只剩一位 HR（本人）→ 交給老闆關。
     fake.db.employees = fake.db.employees.filter((e) => e.id !== HR_ID)
     const g = await file(T.hr2, LEAVE)
-    expect(stepRows(g.id)[0]).toMatchObject({ approver_emp_id: HR2_ID, step_kind: "fallback" })
+    expect(stepRows(g.id)[0]).toMatchObject({ approver_emp_id: PA_ID, step_kind: "fallback" })
     const self = await post(`/requests/${g.id}/approve`, T.hr2).send({})
     expect([self.status, self.body.error]).toEqual([403, "own_request"])
     expect(await pendingIds(T.pa)).toEqual([g.id])

@@ -638,3 +638,224 @@ describe("D 停用的部門主管不再有部門主管權限", () => {
     expect(again.body.error).not.toBe("forbidden")
   })
 })
+
+/* ──────────────────────────────────────────────────────────────────
+ * 2026-10-27 第二輪安全驗收（實跑 PoC）——每項一個反例：
+ *   H1 老闆在申請人主管鏈上時，零用金／出差／放款鏈裡老闆那關是 kind='manager' → HR 可代簽或改派
+ *   M2 HR 把主管關改派給唯一的平台管理員 → 人為製造 L3 退路；改派過的 HR 用 L3 代簽
+ *   M3 老闆未設定時 HR 把自己設成老闆（見 privilege-boundary-routes.test.ts／privileged-accounts.test.ts）
+ *   M4 老闆未設定或就是申請人時不產生老闆關
+ *   L5 放款送簽單頭寫入沒有條件（送簽期間草稿被改）
+ * ────────────────────────────────────────────────────────────────── */
+
+const moveToBossDept = (id: string) => {
+  ;(fake.db.employees.find((e) => e.id === id) as Row).dept_id = DEPT_BOSS
+}
+
+describe("第二輪 H1 老闆在主管鏈上：老闆一律以老闆關（fallback）出現在最後", () => {
+  it("PoC 反例：員工的直屬主管就是老闆 → 零用金只有一關且是老闆關；HR 代簽 403、HR 改派 403；老闆簽 200", async () => {
+    moveToBossDept(STAFF_ID)
+    const f = await file(T.staff, PETTY)
+    expect(f.kinds).toEqual(["fallback"])
+    expect(stepRows(f.id).map((s) => s.approver_emp_id)).toEqual([BOSS_ID])
+    expect((await post(`/requests/${f.id}/approve`, T.hr).send({})).body.error).toBe("not_current_approver")
+    const change = await post(`/requests/${f.id}/change-approver`, T.hr).send({ approverEmpId: HR2_ID })
+    expect([change.status, change.body.error]).toEqual([403, "boss_step_boss_only"])
+    expect(requestRow(f.id).status).toBe("pending")
+    expect((await post(`/requests/${f.id}/approve`, T.boss).send({})).status).toBe(200)
+    expect(requestRow(f.id).status).toBe("approved")
+  })
+
+  it("老闆在主管鏈中間（部門主管＝[主管, 老闆]）→ 主管關 → 老闆關（老闆不重複出現）", async () => {
+    fake.db.departments = fake.db.departments.map((d) => (d.id === DEPT_OPS ? { ...d, manager_emp_ids: [MGR_ID, BOSS_ID] } : d))
+    const f = await file(T.staff, PETTY)
+    expect(f.kinds).toEqual(["manager", "fallback"])
+    expect(stepRows(f.id).map((s) => s.approver_emp_id)).toEqual([MGR_ID, BOSS_ID])
+  })
+
+  it("放款單：建單人的主管就是老闆 → 會計關 → 老闆關；HR 代簽／改派老闆關都被擋", async () => {
+    moveToBossDept(STAFF_ID)
+    fake.db.disbursements = [draft(STAFF_ID)]
+    await submitDisbursement(TENANT_ID, { empId: STAFF_ID, role: "employee" }, DISB)
+    expect(dSteps().map((s) => s.step_kind)).toEqual(["accountant", "fallback"])
+    await decide(ACC_ID, "accountant")
+    expect(code(await decide(HR_ID, "hr_admin"))).toBe("not_current_approver")
+    expect(code(await change(HR_ID, "hr_admin", HR2_ID))).toBe("boss_step_boss_only")
+    expect(await decide(BOSS_ID, "employee")).toMatchObject({ status: "approved" })
+  })
+
+  it("已在簽核中的舊單（老闆那關存成 kind=manager）：讀取時視為老闆關——HR 代簽／改派被擋、平台管理員可簽；資料不改", async () => {
+    moveToBossDept(STAFF_ID)
+    const f = await file(T.staff, PETTY)
+    stepRows(f.id)[0].step_kind = "manager" // 模擬第二輪之前送出的單
+    expect((await post(`/requests/${f.id}/approve`, T.hr).send({})).body.error).toBe("not_current_approver")
+    const change = await post(`/requests/${f.id}/change-approver`, T.hr).send({ approverEmpId: HR2_ID })
+    expect([change.status, change.body.error]).toEqual([403, "boss_step_boss_only"])
+    expect(stepRows(f.id)[0].step_kind).toBe("manager")
+    expect((await post(`/requests/${f.id}/approve`, T.pa).send({})).status).toBe(200)
+    expect(requestRow(f.id).status).toBe("approved")
+  })
+
+  it("舊放款單（老闆那關 kind=manager）同樣視為老闆關", async () => {
+    fake.db.disbursements = [draft(STAFF_ID)]
+    await submitDisbursement(TENANT_ID, { empId: STAFF_ID, role: "employee" }, DISB)
+    await decide(MGR_ID, "manager")
+    await decide(ACC_ID, "accountant")
+    dSteps()[2].step_kind = "manager"
+    expect(code(await decide(HR_ID, "hr_admin"))).toBe("not_current_approver")
+    expect(code(await change(HR_ID, "hr_admin", HR2_ID))).toBe("boss_step_boss_only")
+    expect(await decide(PA_ID, "platform_admin")).toMatchObject({ status: "approved" })
+  })
+
+  it("不需要老闆關的請假單不受影響：老闆是直屬主管時那關仍是主管關，HR 代簽照舊", async () => {
+    moveToBossDept(STAFF_ID)
+    const f = await file(T.staff, LEAVE)
+    expect(f.kinds).toEqual(["manager"])
+    expect((await post(`/requests/${f.id}/approve`, T.hr).send({})).status).toBe(200)
+  })
+})
+
+describe("第二輪 M2 L3 退路不能人為製造", () => {
+  it("PoC 反例：HR 把主管關改派給唯一的平台管理員 → 400 non_boss_step_target_boss；改派給老闆也一樣", async () => {
+    const f = await file(T.staff, PETTY)
+    const toPa = await post(`/requests/${f.id}/change-approver`, T.hr).send({ approverEmpId: PA_ID })
+    expect([toPa.status, toPa.body.error]).toEqual([400, "non_boss_step_target_boss"])
+    const toBoss = await post(`/requests/${f.id}/change-approver`, T.hr).send({ approverEmpId: BOSS_ID })
+    expect([toBoss.status, toBoss.body.error]).toEqual([400, "non_boss_step_target_boss"])
+    expect(stepRows(f.id)[0].approver_emp_id).toBe(MGR_ID)
+  })
+
+  it("放款單：非老闆關改派給平台管理員／老闆 → non_boss_step_target_boss", async () => {
+    fake.db.disbursements = [draft(STAFF_ID)]
+    await submitDisbursement(TENANT_ID, { empId: STAFF_ID, role: "employee" }, DISB)
+    expect(code(await change(HR_ID, "hr_admin", PA_ID))).toBe("non_boss_step_target_boss")
+    expect(code(await change(HR_ID, "hr_admin", BOSS_ID))).toBe("non_boss_step_target_boss")
+  })
+
+  it("曾對該單改派過的 HR 不能用 L3 退路代簽老闆關；沒改派過的 HR 可以", async () => {
+    const f = await file(T.staff, PETTY)
+    expect((await post(`/requests/${f.id}/change-approver`, T.hr).send({ approverEmpId: ACC_ID })).status).toBe(200)
+    expect((await post(`/requests/${f.id}/approve`, T.acc).send({})).status).toBe(200)
+    setStatus(BOSS_ID, "inactive")
+    removeEmployee(PA_ID)
+    expect((await post(`/requests/${f.id}/approve`, T.hr).send({})).body.error).toBe("not_current_approver")
+    const other = await post(`/requests/${f.id}/approve`, T.hr2).send({})
+    expect(other.status, JSON.stringify(other.body)).toBe(200)
+    expect(requestRow(f.id).status).toBe("approved")
+  })
+
+  it("放款單：改派過的 HR 不能 L3 代簽", async () => {
+    const HR3_ID = "bbbbbbbb-0000-4000-8000-00000000000a"
+    fake.db.employees.push(employee(HR3_ID, "user-hr3", "hr_admin", "HR 小樹"))
+    fake.db.disbursements = [draft(STAFF_ID)]
+    await submitDisbursement(TENANT_ID, { empId: STAFF_ID, role: "employee" }, DISB)
+    expect(await change(HR_ID, "hr_admin", HR2_ID)).toMatchObject({ stepOrder: 1 })
+    await decide(HR2_ID, "hr_admin")
+    await decide(ACC_ID, "accountant")
+    setStatus(BOSS_ID, "inactive")
+    removeEmployee(PA_ID)
+    expect(code(await decide(HR_ID, "hr_admin"))).toBe("not_current_approver")
+    expect(await decide(HR3_ID, "hr_admin")).toMatchObject({ status: "approved" })
+  })
+
+  it("純函式：非老闆關改派給 platform_admin／老闆 → non_boss_step_target_boss", () => {
+    const mgr = { step_kind: "manager" }
+    const deny = (target: Row) =>
+      changeApproverDenial({ step: mgr, actor: { id: HR_ID, role: "hr_admin" }, requester: STAFF_ID, target: target as never, bossEmpId: BOSS_ID })
+    expect(deny({ id: PA_ID, role: "platform_admin" })).toBe("non_boss_step_target_boss")
+    expect(deny({ id: BOSS_ID, role: "employee" })).toBe("non_boss_step_target_boss")
+    expect(deny({ id: ACC_ID, role: "accountant" })).toBeNull()
+  })
+})
+
+describe("第二輪 M4 老闆未設定或就是申請人：需要老闆關的單仍一定有老闆關", () => {
+  it("PoC 反例：老闆未設定 → 零用金仍是 主管關 → 老闆關（名義＝平台管理員）；HR 代簽 403、平台管理員簽 200", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: {} }]
+    const f = await file(T.staff, PETTY)
+    expect(f.kinds).toEqual(["manager", "fallback"])
+    expect(stepRows(f.id)[1].approver_emp_id).toBe(PA_ID)
+    expect((await post(`/requests/${f.id}/approve`, T.mgr).send({})).status).toBe(200)
+    expect((await post(`/requests/${f.id}/approve`, T.hr).send({})).body.error).toBe("not_current_approver")
+    expect((await post(`/requests/${f.id}/approve`, T.pa).send({})).status).toBe(200)
+    expect(requestRow(f.id).status).toBe("approved")
+  })
+
+  it("老闆未設定、也沒有平台管理員 → 仍有老闆關，由非申請人在職 HR 以 L3 代簽並留痕", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: {} }]
+    removeEmployee(PA_ID)
+    const f = await file(T.staff, PETTY)
+    expect(f.kinds).toEqual(["manager", "fallback"])
+    expect((await post(`/requests/${f.id}/approve`, T.mgr).send({})).status).toBe(200)
+    expect(requestRow(f.id).status).toBe("pending")
+    const hr = await post(`/requests/${f.id}/approve`, T.hr).send({})
+    expect(hr.status, JSON.stringify(hr.body)).toBe(200)
+    expect(requestRow(f.id).status).toBe("approved")
+    expect(auditContexts().some((c) => c.includes("無可用老闆／平台管理員，HR 代簽"))).toBe(true)
+  })
+
+  it("老闆本人送零用金 → 老闆關名義寫平台管理員；老闆簽 own_request、平台管理員簽 200", async () => {
+    const f = await file(T.boss, PETTY)
+    expect(f.kinds).toEqual(["fallback"])
+    expect(stepRows(f.id)[0].approver_emp_id).toBe(PA_ID)
+    expect((await post(`/requests/${f.id}/approve`, T.boss).send({})).body.error).toBe("own_request")
+    expect((await post(`/requests/${f.id}/approve`, T.hr).send({})).body.error).toBe("not_current_approver")
+    expect((await post(`/requests/${f.id}/approve`, T.pa).send({})).status).toBe(200)
+  })
+
+  it("老闆未設定的固定名單 → 名單關 → 老闆關（名義＝平台管理員）", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: {} }]
+    fake.db.approval_flows = [{ id: "f1", tenant_id: TENANT_ID, applies_to: "petty_cash", mode: "list", approver_emp_ids: [HR2_ID] }]
+    const f = await file(T.staff, PETTY)
+    expect(f.kinds).toEqual(["list", "fallback"])
+    expect(stepRows(f.id).map((s) => s.approver_emp_id)).toEqual([HR2_ID, PA_ID])
+  })
+
+  it("放款單：老闆未設定 → 主管 → 會計 → 老闆關（名義＝平台管理員）", async () => {
+    fake.db.tenants = [{ id: TENANT_ID, features: {} }]
+    fake.db.disbursements = [draft(STAFF_ID)]
+    await submitDisbursement(TENANT_ID, { empId: STAFF_ID, role: "employee" }, DISB)
+    expect(dSteps().map((s) => [s.step_kind, s.approver_emp_id])).toEqual([
+      ["manager", MGR_ID],
+      ["accountant", ACC_ID],
+      ["fallback", PA_ID],
+    ])
+  })
+
+  it("老闆是申請人、沒有平台管理員、也沒有非申請人 HR → 409 no_approver_available", async () => {
+    removeEmployee(PA_ID)
+    removeEmployee(HR_ID)
+    removeEmployee(HR2_ID)
+    const res = await post("/requests", T.boss).send(PETTY)
+    expect([res.status, res.body.error]).toEqual([409, "no_approver_available"])
+  })
+})
+
+describe("第二輪 L5 放款送簽：單頭條件寫入", () => {
+  it("PoC 反例：送簽寫入關卡後、單頭轉換前草稿被改 → 409 conflict，剛插入的關卡刪掉，單仍是草稿", async () => {
+    fake.db.disbursements = [draft(STAFF_ID)]
+    const origFrom = fake.from
+    let raced = false
+    fake.from = ((table: string) => {
+      const builder = origFrom(table) as unknown as Record<string, (...args: unknown[]) => unknown>
+      if (table === "disbursement_approval_steps" && !raced) {
+        const insert = builder.insert
+        builder.insert = (...args: unknown[]) => {
+          raced = true
+          header().updated_at = "2027-01-02T00:00:00.000Z"
+          header().payee_bank_account = "999-000"
+          return insert(...args)
+        }
+      }
+      return builder
+    }) as typeof fake.from
+    try {
+      const err = await submitDisbursement(TENANT_ID, { empId: STAFF_ID, role: "employee" }, DISB).catch((e: unknown) => e)
+      expect(code(err)).toBe("conflict")
+    } finally {
+      fake.from = origFrom
+    }
+    expect(raced).toBe(true)
+    expect(dSteps()).toEqual([])
+    expect(header()).toMatchObject({ status: "draft", approval_round: 0 })
+  })
+})

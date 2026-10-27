@@ -176,11 +176,11 @@ describe("零用金：主管＋老闆兩層", () => {
     expect(noticesTo(BOSS_ID)).toHaveLength(1)
   })
 
-  it("主管就是老闆 → 一關（不重複）", async () => {
+  it("主管就是老闆 → 一關（不重複），且是老闆關（kind=fallback；第二輪 H1：不再以 manager 出現讓 HR 代簽）", async () => {
     const f = await file(STAFF2_TOKEN, PETTY)
 
     expect(f.approvers).toEqual([BOSS_ID])
-    expect(f.kinds).toEqual(["manager"])
+    expect(f.kinds).toEqual(["fallback"])
   })
 })
 
@@ -227,23 +227,30 @@ describe("出差／公出：不分 trip_type、不分 tripScope，一律主管�
   })
 })
 
-describe("老闆本人送單：沿用「跳本人」邏輯", () => {
-  it("老闆是部門根主管、沒有上層 → 老闆關跳過，退到第一位 hr_admin（一關）", async () => {
+describe("老闆本人送單：仍一定有老闆關（第二輪 M4）", () => {
+  it("老闆是部門根主管、沒有上層、租戶沒有 platform_admin → 老闆關名義寫老闆本人；本人不能簽，HR 以 L3 代簽並留痕", async () => {
     const f = await file(BOSS_TOKEN, PETTY)
 
-    expect(f.source).toBe("hr_admin")
-    expect(f.approvers).toEqual([HR_ID])
-    expect(f.kinds).toEqual(["hr_admin"])
+    expect(f.source).toBe("boss_final")
+    expect(f.approvers).toEqual([BOSS_ID])
+    expect(f.kinds).toEqual(["fallback"])
+
+    const own = await post(`/requests/${f.id}/approve`, BOSS_TOKEN).send({})
+    expect(own.status).toBe(403)
+    const hr = await post(`/requests/${f.id}/approve`, HR_TOKEN).send({})
+    expect(hr.status, JSON.stringify(hr.body)).toBe(200)
+    expect(requestRow(f.id).status).toBe("approved")
+    expect((fake.db.audit_logs ?? []).some((a) => String(a.context ?? "").includes("無可用老闆／平台管理員，HR 代簽"))).toBe(true)
   })
 
-  it("老闆在子部門、上面還有部門主管 → 只剩主管那一關（不會自己簽自己）", async () => {
+  it("老闆在子部門、上面還有部門主管 → 主管關＋老闆關（名義寫老闆本人，沒有 platform_admin 時由 HR 以 L3 代簽）", async () => {
     const boss = fake.db.employees?.find((e) => e.id === BOSS_ID) as Row
     boss.dept_id = DEPT_SUB
     const f = await file(BOSS_TOKEN, OUTING)
 
     expect(f.source).toBe("boss_final")
-    expect(f.approvers).toEqual([MGR_ID])
-    expect(f.kinds).toEqual(["manager"])
+    expect(f.approvers).toEqual([MGR_ID, BOSS_ID])
+    expect(f.kinds).toEqual(["manager", "fallback"])
   })
 
   it("連 hr_admin 都沒有的租戶 → 409 no_approver_available（單不會建立）", async () => {

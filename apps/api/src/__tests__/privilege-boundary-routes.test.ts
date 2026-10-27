@@ -176,12 +176,22 @@ describe("① PUT /api/tenant/settings — 換老闆設定", () => {
     expect(bossNow()).toBe(HR)
   })
 
-  it("老闆本人可以清除老闆設定 → 200；清除後 HR 是『沒有老闆』的初始狀態，可以做第一次設定", async () => {
+  it("老闆本人可以清除老闆設定 → 200；清除後租戶有在職 platform_admin → 第一次設定只限 platform_admin（第二輪 M3），HR 不能自封老闆", async () => {
     const clear = await as(T.boss).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: null } } })
     expect(clear.status, JSON.stringify(clear.body)).toBe(200)
     expect(bossNow()).toBeNull()
 
-    const bootstrap = await as(T.hr).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: HR } } })
+    // PoC 反例：老闆未設定時 HR 把自己設成老闆 → 之後就能簽自己需要老闆關的單。現在 → 403，設定不變。
+    const selfCrown = await as(T.hr).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: HR } } })
+    expect(selfCrown.status).toBe(403)
+    expect(selfCrown.body.error).toBe("not_boss")
+    expect(bossNow()).toBeNull()
+    // 有在職 platform_admin 時，HR 連設定別人也不行。
+    const hrOther = await as(T.hr).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: BOSS } } })
+    expect(hrOther.status).toBe(403)
+    expect(bossNow()).toBeNull()
+
+    const bootstrap = await as(T.pa).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: HR } } })
     expect(bootstrap.status, JSON.stringify(bootstrap.body)).toBe(200)
     expect(bossNow()).toBe(HR)
     const audits = (fake.db.audit_logs ?? []).filter((a) => a.table_name === "tenants" && String(a.context).includes("老闆"))
@@ -204,18 +214,22 @@ describe("① PUT /api/tenant/settings — 換老闆設定", () => {
     expect(handOver.body).toMatchObject({ error: "invalid_employee", employeeIds: [ghost] })
     expect(bossNow()).toBe(BOSS)
 
-    seed({}) // 沒有老闆
-    const bootstrap = await as(T.hr).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: ghost } } })
+    seed({}) // 沒有老闆（有在職 platform_admin → 由 platform_admin 做第一次設定）
+    const bootstrap = await as(T.pa).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: ghost } } })
     expect(bootstrap.status).toBe(400)
     expect(bossNow()).toBeNull()
 
     fake.db.employees.push({ ...employee("e0000000-0000-4000-8000-0000000000aa", "u-other", "employee", "別租戶"), tenant_id: "99999999-9999-4999-8999-999999999999" })
-    const otherTenant = await as(T.hr).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: "e0000000-0000-4000-8000-0000000000aa" } } })
+    const otherTenant = await as(T.pa).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: "e0000000-0000-4000-8000-0000000000aa" } } })
     expect(otherTenant.status).toBe(400)
   })
 
-  it("沒有老闆時 HR 做第一次設定 → 200；設定之後 HR 自己（不是那位老闆）就不能再換了", async () => {
+  it("沒有老闆、也沒有在職 platform_admin 時 HR 才能做第一次設定（但不能設自己）→ 200；設定之後 HR 自己（不是那位老闆）就不能再換了", async () => {
     seed({})
+    for (const e of fake.db.employees) if (e.role === "platform_admin") e.status = "inactive"
+    const selfCrown = await as(T.hr).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: HR } } })
+    expect(selfCrown.status).toBe(403)
+    expect(bossNow()).toBeNull()
     const first = await as(T.hr).put("/api/tenant/settings").send({ features: { approval: { fallbackApproverEmpId: BOSS } } })
     expect(first.status, JSON.stringify(first.body)).toBe(200)
     expect(bossNow()).toBe(BOSS)

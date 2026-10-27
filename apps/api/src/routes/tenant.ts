@@ -1,6 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
+import { loadPlatformAdminEmpIds } from "../lib/boss.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
@@ -319,12 +320,15 @@ tenantRouter.put(
       const after = unlockPolicyOf(features)
 
       // 更換老闆設定（2026-10-11 業主拍板）：誰是老闆就是誰能重新開放已結算的月份，所以不能讓 HR 自己指定。
-      // 目前有老闆 → 只有老闆本人（可以交棒）或 platform_admin；還沒有老闆 → 任何 HR 可做第一次設定。否則 403 not_boss。
+      // 目前有老闆 → 只有老闆本人（可以交棒）或 platform_admin；還沒有老闆 → 有在職 platform_admin 時只限 platform_admin，
+      // 沒有才允許 HR 做第一次設定；HR 不能把自己設成老闆。否則 403 not_boss。
       const bossIsChanging = bossChanged(before, after)
       let bossActorId: string | null = null
       if (bossIsChanging) {
         const self = await loadSelf()
-        if (!self || !canChangeBoss(before, self)) {
+        // 第一次設定老闆：租戶有在職 platform_admin 時只限 platform_admin；HR 任何情況都不能把自己設成老闆（第二輪 M3）。
+        const hasActivePlatformAdmin = before.bossEmpId === null ? (await loadPlatformAdminEmpIds(tenantId)).length > 0 : false
+        if (!self || !canChangeBoss(before, self, { newBossEmpId: after.bossEmpId, hasActivePlatformAdmin })) {
           res.status(403).json({ error: "not_boss", message: BOSS_SETTING_MESSAGE })
           return
         }

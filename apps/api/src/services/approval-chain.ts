@@ -12,18 +12,18 @@
  *               的人（排除後沒人就不排除）。整條鏈是空的 → no_approver_available。
  *
  * `requireBossFinal`（老闆簽核才成立；2026-10-11 起零用金與出差／公出一律帶上，
- *   之前只有 W2 跨縣市出差，見 routes/requests.ts flowRouteFor）：
- *   無 flow／mode=manager／list 名單空 → 主管鏈**每人一關** → 老闆最後一關（老闆已在
- *   主管鏈內就不重複、老闆是本人就跳過）；沒有部門主管 → 只剩老闆一關；主管與老闆都沒有
- *   （含「老闆本人送單、又沒有主管」）→ 第一位 hr_admin 退路（有第二位 HR 時避開本人）。
- *   list 名單非空 → 名單照走，但最後一定補上老闆關（2026-10-27 安全驗收 H3：HR 不能用固定名單拿掉老闆關；
- *   老闆在名單中間 → 移到最後；老闆沒設定或就是申請人 → 不補，同預設鏈）。manager_hr → 主管逐關 → 老闆（不在
- *   前面關卡時插入）→ HR 覆核（覆核關維持在最後，性質是覆核不是核准）。
+ *   之前只有 W2 跨縣市出差，見 routes/requests.ts flowRouteFor）——2026-10-27 第二輪安全驗收 H1／M4 起：
+ *   **一定以老闆關（kind='fallback'）收尾**，老闆只出現在這一關（在主管鏈／固定名單／會計關／HR 覆核關裡的老闆一律移除，
+ *   避免同人兩關，也避免老闆那關以 kind='manager' 出現而被 HR 代簽／改派）。老闆關的名義簽核人＝老闆；老闆未設定或就是
+ *   申請人 → 在職 platform_admin 之一；都沒有 → 申請人本人（名義，實際走 L3：非申請人在職 HR 代簽留痕；連 HR 都沒有 →
+ *   no_approver_available，見 assertBossStepsSignable）。HR 不再是退路關卡（hr_admin 退路只剩不需要老闆關的單據）。
+ *     無 flow／mode=manager／list 名單空 → 主管鏈每人一關 → 老闆關。
+ *     list 名單非空 → 名單照走 → 老闆關（H3：HR 不能用固定名單拿掉老闆關）。
+ *     manager_hr → 主管逐關 → HR 覆核（排除老闆）→ 老闆關。
  *
- * 放款鏈（M4，純函式 pickDisbursementChain；表是 disbursement_approval_steps）：
- *   list 名單非空 → 名單照走＋老闆關收尾（H3）；否則 建單人主管鏈逐關 → 會計關（候選＝全部在職會計，
- *   排除本人與前面關卡已出現的人；排除後沒人就略過這關）→ 老闆（跳本人、不重複）；
- *   整條空 → 第一位 hr_admin 退路 → no_approver_available。
+ * 放款鏈（M4，純函式 pickDisbursementChain；表是 disbursement_approval_steps）：一律需要老闆關。
+ *   list 名單非空 → 名單照走＋老闆關收尾；否則 建單人主管鏈逐關 → 會計關（候選＝全部在職會計，
+ *   排除本人、前面關卡已出現的人與老闆；排除後沒人就略過這關）→ 老闆關（同上）。
  *
  * 主管鏈（middleware/scope.ts managerChainOfEmployee）：申請人部門的
  * departments.manager_emp_ids 依序 → 母部門 → … → 根；已跳過本人、已去重；
@@ -119,8 +119,8 @@ function hrAdminRetreat(c: ChainCandidates): ChainStep | null {
  * 自己的單不能簽（2026-10-27 業主追加 B）：把申請人（與 `excludeEmpIds`）從每一關的候選拿掉——
  *   • 拿掉後還有人 → 照走；
  *   • 拿掉後沒人（例如固定名單只列了本人、唯一的 HR 就是申請人）→ 這關略過（自動往下一關）；
- *   • 整條都沒人 → 交給老闆（老闆關；老闆不是本人時寫老闆，否則寫申請人本人當名義簽核人——老闆關任一在職
- *     platform_admin 都能簽，申請人自己簽會被 own_request 擋），不讓單卡在「只有自己能簽」。
+ *   • 整條都沒人 → 交給老闆（老闆關；老闆不是本人時寫老闆，否則寫在職 platform_admin 之一，連 platform_admin 也沒有才寫
+ *     申請人本人當名義簽核人——老闆關任一在職 platform_admin 都能簽，申請人自己簽會被 own_request 擋），不讓單卡在「只有自己能簽」。
  * 純函式。
  */
 export function withoutSelfApprovers(c: ChainCandidates, result: ChainResult): ChainResult {
@@ -137,9 +137,10 @@ export function withoutSelfApprovers(c: ChainCandidates, result: ChainResult): C
   }
   if (steps.length > 0) return assertBossStepsSignable(c, self, { ...result, steps })
   const boss = c.fallbackApproverEmpId && !self.has(c.fallbackApproverEmpId) ? c.fallbackApproverEmpId : null
+  const admin = dedupe(c.platformAdminEmpIds ?? []).find((id) => !self.has(id)) ?? null
   return assertBossStepsSignable(c, self, {
     ok: true,
-    steps: [{ candidateEmpIds: [boss ?? c.employeeId], kind: "fallback" }],
+    steps: [{ candidateEmpIds: [boss ?? admin ?? c.employeeId], kind: "fallback" }],
     source: "fallback",
   })
 }
@@ -161,15 +162,39 @@ function assertBossStepsSignable(c: ChainCandidates, self: ReadonlySet<string>, 
 }
 
 /**
+ * 老闆關的名義簽核人（2026-10-27 第二輪安全驗收 H1／M4）：
+ *   老闆有設定且不是申請人 → 老闆；否則（老闆未設定、或老闆就是申請人）→ 在職 platform_admin 之一（排除申請人與
+ *   `excludeEmpIds`，優先挑沒出現在前面關卡 `avoid` 的人）；連 platform_admin 都沒有 → 申請人本人（名義上；本人簽會被
+ *   own_request 擋，實際由 L3 退路的非申請人在職 HR 代簽並留痕，見 approval-steps.ts canHrOverrideStep）。
+ * 老闆關的實際簽核人在讀取端動態判斷：老闆本人或任一在職、非申請人的 platform_admin（stepActorStanding）。純函式。
+ */
+function bossNominal(c: ChainCandidates, avoid: ReadonlySet<string> = new Set()): string {
+  const boss = c.fallbackApproverEmpId && c.fallbackApproverEmpId !== c.employeeId ? c.fallbackApproverEmpId : null
+  if (boss) return boss
+  const self = new Set([c.employeeId, ...(c.excludeEmpIds ?? [])].filter((id): id is string => !!id))
+  const admins = dedupe(c.platformAdminEmpIds ?? []).filter((id) => !self.has(id))
+  return admins.find((id) => !avoid.has(id)) ?? admins[0] ?? c.employeeId
+}
+
+/** 需要老闆關的單據的最後一關：kind='fallback'，名義簽核人見 bossNominal。 */
+function bossFinalStep(c: ChainCandidates, prior: readonly ChainStep[]): ChainStep {
+  return { candidateEmpIds: [bossNominal(c, new Set(prior.flatMap((s) => s.candidateEmpIds)))], kind: "fallback" }
+}
+
+/** 設定的老闆（不是申請人時）；需要老闆關的單據要把他從前面關卡拿掉（老闆只在最後的老闆關出現，避免同人兩關）。 */
+function configuredBoss(c: ChainCandidates): string | null {
+  return c.fallbackApproverEmpId && c.fallbackApproverEmpId !== c.employeeId ? c.fallbackApproverEmpId : null
+}
+
+/**
  * 需要老闆關的單據類型（零用金、出差／公出、放款單）在固定名單模式也要以老闆關收尾（2026-10-27 安全驗收 H3）：
- * 名單照走（去掉老闆本人——老闆一律移到最後那一關），最後補上老闆關（kind='fallback'）。
- * 老闆沒設定（或老闆就是申請人）時與預設鏈一致：不補（老闆關由 platform_admin 簽的情境見 withoutSelfApprovers）。
+ * 名單照走（去掉老闆本人——老闆一律移到最後那一關），最後一定補上老闆關（kind='fallback'；第二輪 M4：老闆未設定或
+ * 就是申請人時也補，名義簽核人見 bossNominal）。
  */
 function listWithBossFinal(c: ChainCandidates, list: readonly string[]): ChainResult {
-  const boss = c.fallbackApproverEmpId && c.fallbackApproverEmpId !== c.employeeId ? c.fallbackApproverEmpId : null
+  const boss = configuredBoss(c)
   const steps: ChainStep[] = list.filter((id) => id !== boss).map((id) => ({ candidateEmpIds: [id], kind: "list" as const }))
-  if (boss) steps.push({ candidateEmpIds: [boss], kind: "fallback" })
-  if (steps.length === 0) return { ok: false, error: "no_approver_available" }
+  steps.push(bossFinalStep(c, steps))
   return { ok: true, steps, source: "list" }
 }
 
@@ -186,15 +211,22 @@ function pickApproverChainRaw(c: ChainCandidates): ChainResult {
   }
 
   const managers = dedupe(c.managerEmpIds).filter((id) => id !== c.employeeId)
-  const boss = c.fallbackApproverEmpId && c.fallbackApproverEmpId !== c.employeeId ? c.fallbackApproverEmpId : null
+  const boss = configuredBoss(c)
   const hr = dedupe(c.hrAdminEmpIds)
 
   if (c.flow && c.flow.mode === "manager_hr") {
     const steps: ChainStep[] = []
+    if (c.requireBossFinal) {
+      // 需要老闆關（第二輪 H1）：主管逐關（老闆從主管鏈移除）→ HR 覆核（排除申請人、前面關卡的人與老闆）→ 老闆關收尾。
+      for (const id of managers.filter((m) => m !== boss)) steps.push({ candidateEmpIds: [id], kind: "manager" })
+      const seen = new Set(steps.flatMap((s) => s.candidateEmpIds))
+      const others = hr.filter((id) => id !== c.employeeId && !seen.has(id) && id !== boss)
+      if (others.length > 0) steps.push({ candidateEmpIds: others, kind: "hr" })
+      steps.push(bossFinalStep(c, steps))
+      return { ok: true, steps, source: "manager_hr" }
+    }
     if (managers.length > 0) {
       for (const id of managers) steps.push({ candidateEmpIds: [id], kind: "manager" })
-      // requireBossFinal：老闆不在主管鏈內時，插在 HR 覆核之前。
-      if (c.requireBossFinal && boss && !managers.includes(boss)) steps.push({ candidateEmpIds: [boss], kind: "fallback" })
     } else if (boss) {
       steps.push({ candidateEmpIds: [boss], kind: "fallback" })
     }
@@ -213,13 +245,11 @@ function pickApproverChainRaw(c: ChainCandidates): ChainResult {
   }
 
   if (c.requireBossFinal) {
-    // 主管鏈每人一關 → 老闆最後一關（已在主管鏈內就不重複）；皆無 → hr_admin 退路。
-    const steps: ChainStep[] = managers.map((id) => ({ candidateEmpIds: [id], kind: "manager" as const }))
-    if (boss && !managers.includes(boss)) steps.push({ candidateEmpIds: [boss], kind: "fallback" })
-    if (steps.length > 0) return { ok: true, steps, source: "boss_final" }
-    const retreat = hrAdminRetreat(c)
-    if (retreat) return { ok: true, steps: [retreat], source: "hr_admin" }
-    return { ok: false, error: "no_approver_available" }
+    // 主管鏈每人一關（老闆從主管鏈移除，第二輪 H1）→ 一定以老闆關收尾（老闆未設定／就是申請人時名義寫
+    // platform_admin，第二輪 M4）；HR 不再當退路關卡（只能在老闆關沒有可用簽核人時以 L3 代簽留痕）。
+    const steps: ChainStep[] = managers.filter((id) => id !== boss).map((id) => ({ candidateEmpIds: [id], kind: "manager" as const }))
+    steps.push(bossFinalStep(c, steps))
+    return { ok: true, steps, source: "boss_final" }
   }
 
   // manager（沒有 flow、mode=manager、或 list 但名單空）：只取主管鏈第一位。
@@ -247,23 +277,18 @@ function pickDisbursementChainRaw(c: ChainCandidates): ChainResult {
   // 放款單一律要老闆關：固定名單也以老闆關收尾（H3）。
   if (c.flow && c.flow.mode === "list" && list.length > 0) return listWithBossFinal(c, list)
 
-  const managers = dedupe(c.managerEmpIds).filter((id) => id !== c.employeeId)
+  const boss = configuredBoss(c)
+  // 老闆從主管鏈／會計關移除，只在最後的老闆關出現（第二輪 H1）。
+  const managers = dedupe(c.managerEmpIds).filter((id) => id !== c.employeeId && id !== boss)
   const steps: ChainStep[] = managers.map((id) => ({ candidateEmpIds: [id], kind: "manager" as const }))
 
   const seen = new Set<string>(managers)
-  const accountants = dedupe(c.accountantEmpIds ?? []).filter((id) => id !== c.employeeId && !seen.has(id))
-  if (accountants.length > 0) {
-    steps.push({ candidateEmpIds: accountants, kind: "accountant" })
-    for (const id of accountants) seen.add(id)
-  }
+  const accountants = dedupe(c.accountantEmpIds ?? []).filter((id) => id !== c.employeeId && !seen.has(id) && id !== boss)
+  if (accountants.length > 0) steps.push({ candidateEmpIds: accountants, kind: "accountant" })
 
-  const boss = c.fallbackApproverEmpId && c.fallbackApproverEmpId !== c.employeeId ? c.fallbackApproverEmpId : null
-  if (boss && !seen.has(boss)) steps.push({ candidateEmpIds: [boss], kind: "fallback" })
-
-  if (steps.length > 0) return { ok: true, steps, source: "disbursement" }
-  const retreat = hrAdminRetreat(c)
-  if (retreat) return { ok: true, steps: [retreat], source: "hr_admin" }
-  return { ok: false, error: "no_approver_available" }
+  // 一定以老闆關收尾（第二輪 M4）；HR 不再當退路關卡。
+  steps.push(bossFinalStep(c, steps))
+  return { ok: true, steps, source: "disbursement" }
 }
 
 /** DB 的 mode 值 → 型別；三個合法值原樣保留（DB 有 CHECK，其餘只可能是舊資料的 null）。 */

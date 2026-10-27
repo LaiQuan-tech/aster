@@ -78,6 +78,18 @@ describe("isBossOrPlatformAdmin／canChangeBoss／bossChanged — 換老闆", ()
     expect(canChangeBoss(noBoss, { id: HR, role: "hr_admin" })).toBe(true)
   })
 
+  it("canChangeBoss（第二輪 M3）：有在職 platform_admin 時第一次設定只限 platform_admin；HR 任何情況都不能把自己設成老闆", () => {
+    expect(canChangeBoss(noBoss, { id: HR, role: "hr_admin" }, { newBossEmpId: BOSS, hasActivePlatformAdmin: true })).toBe(false)
+    expect(canChangeBoss(noBoss, { id: PA, role: "platform_admin" }, { newBossEmpId: BOSS, hasActivePlatformAdmin: true })).toBe(true)
+    expect(canChangeBoss(noBoss, { id: HR, role: "hr_admin" }, { newBossEmpId: BOSS, hasActivePlatformAdmin: false })).toBe(true)
+    expect(canChangeBoss(noBoss, { id: HR, role: "hr_admin" }, { newBossEmpId: HR, hasActivePlatformAdmin: false })).toBe(false)
+    expect(canChangeBoss(noBoss, { id: HR, role: "hr_admin" }, { newBossEmpId: HR.toUpperCase(), hasActivePlatformAdmin: false })).toBe(false)
+    expect(canChangeBoss(noBoss, { id: DESIGNEE, role: "employee" }, { newBossEmpId: BOSS, hasActivePlatformAdmin: false })).toBe(false)
+    // 老闆（角色是 hr_admin）交棒給別的 HR 可以；HR 不能藉任何狀態自封。
+    expect(canChangeBoss(withBoss, { id: BOSS, role: "hr_admin" }, { newBossEmpId: HR })).toBe(true)
+    expect(canChangeBoss(withBoss, { id: HR, role: "hr_admin" }, { newBossEmpId: HR })).toBe(false)
+  })
+
   it("bossChanged：看有效值（小寫、null）——同一個人不算更換；設定→清除、清除→設定都算", () => {
     const upper = unlockPolicyOf({ approval: { fallbackApproverEmpId: BOSS.toUpperCase() } })
     expect(bossChanged(withBoss, upper)).toBe(false)

@@ -28,6 +28,8 @@ const HR1 = "00000000-0000-4000-8000-00000000c001"
 const HR2 = "00000000-0000-4000-8000-00000000c002"
 const L1 = "00000000-0000-4000-8000-00000000d001"
 const L2 = "00000000-0000-4000-8000-00000000d002"
+const PA1 = "00000000-0000-4000-8000-0000000000a1"
+const PA2 = "00000000-0000-4000-8000-0000000000a2"
 
 function base(over: Partial<ChainCandidates> = {}): ChainCandidates {
   return {
@@ -184,34 +186,56 @@ describe("pickApproverChain — requireBossFinal（跨縣市出差：老闆最�
     })
   })
 
-  it("老闆已在主管鏈內（部門根主管就是老闆）→ 不重複加最後一關", () => {
+  it("老闆已在主管鏈內（部門根主管就是老闆）→ 從主管鏈移除，改以老闆關（fallback）出現在最後（第二輪 H1：不能是 kind=manager 讓 HR 代簽）", () => {
     const r = pickApproverChain(base({ requireBossFinal: true, managerEmpIds: [MGR, BOSS], fallbackApproverEmpId: BOSS }))
-    expect(r).toEqual({ ok: true, steps: [one(MGR, "manager"), one(BOSS, "manager")], source: "boss_final" })
+    expect(r).toEqual({ ok: true, steps: [one(MGR, "manager"), one(BOSS, "fallback")], source: "boss_final" })
+    // 老闆在主管鏈中間也一樣移到最後
+    expect(pickApproverChain(base({ requireBossFinal: true, managerEmpIds: [BOSS, MGR2], fallbackApproverEmpId: BOSS }))).toEqual({
+      ok: true,
+      steps: [one(MGR2, "manager"), one(BOSS, "fallback")],
+      source: "boss_final",
+    })
   })
 
-  it("無主管 → 只有老闆一關；老闆是申請人本人 → 跳過老闆、退回 hr_admin", () => {
+  it("無主管 → 只有老闆一關；老闆是申請人本人 → 仍有老闆關，名義寫在職 platform_admin（第二輪 M4；HR 不再是退路關卡）", () => {
     expect(pickApproverChain(base({ requireBossFinal: true, fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1] }))).toEqual({
       ok: true,
       steps: [one(BOSS, "fallback")],
       source: "boss_final",
     })
     expect(
-      pickApproverChain(base({ employeeId: BOSS, requireBossFinal: true, fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1, HR2] })),
-    ).toEqual({ ok: true, steps: [one(HR1, "hr_admin")], source: "hr_admin" })
+      pickApproverChain(
+        base({ employeeId: BOSS, requireBossFinal: true, fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1, HR2], platformAdminEmpIds: [PA1] }),
+      ),
+    ).toEqual({ ok: true, steps: [one(PA1, "fallback")], source: "boss_final" })
+    // 老闆就是申請人、也沒有 platform_admin → 老闆關名義寫本人（本人簽會被 own_request 擋），實際由非申請人在職 HR 以 L3 代簽留痕
+    expect(
+      pickApproverChain(base({ employeeId: BOSS, requireBossFinal: true, fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1, HR2], platformAdminEmpIds: [] })),
+    ).toEqual({ ok: true, steps: [one(BOSS, "fallback")], source: "boss_final" })
   })
 
-  it("無主管無老闆 → 第一位 hr_admin（避開本人）；連 HR 也沒有 → no_approver_available", () => {
-    expect(pickApproverChain(base({ requireBossFinal: true, hrAdminEmpIds: [HR1, HR2] }))).toEqual({
+  it("無主管無老闆 → 老闆關名義寫 platform_admin；沒有 platform_admin → 名義寫本人走 L3；連非申請人 HR 也沒有 → no_approver_available（第二輪 M4）", () => {
+    expect(pickApproverChain(base({ requireBossFinal: true, hrAdminEmpIds: [HR1, HR2], platformAdminEmpIds: [PA1] }))).toEqual({
       ok: true,
-      steps: [one(HR1, "hr_admin")],
-      source: "hr_admin",
+      steps: [one(PA1, "fallback")],
+      source: "boss_final",
     })
-    expect(pickApproverChain(base({ employeeId: HR1, requireBossFinal: true, hrAdminEmpIds: [HR1, HR2] }))).toEqual({
+    expect(pickApproverChain(base({ requireBossFinal: true, hrAdminEmpIds: [HR1, HR2], platformAdminEmpIds: [] }))).toEqual({
       ok: true,
-      steps: [one(HR2, "hr_admin")],
-      source: "hr_admin",
+      steps: [one(EMP, "fallback")],
+      source: "boss_final",
     })
-    expect(pickApproverChain(base({ requireBossFinal: true }))).toEqual({ ok: false, error: "no_approver_available" })
+    expect(pickApproverChain(base({ employeeId: HR1, requireBossFinal: true, hrAdminEmpIds: [HR1], platformAdminEmpIds: [] }))).toEqual({
+      ok: false,
+      error: "no_approver_available",
+    })
+    expect(pickApproverChain(base({ requireBossFinal: true, platformAdminEmpIds: [] }))).toEqual({ ok: false, error: "no_approver_available" })
+    // 老闆未設定、platform_admin 是主管 → 名義優先挑沒在前面關卡的 platform_admin
+    expect(pickApproverChain(base({ requireBossFinal: true, managerEmpIds: [PA1], platformAdminEmpIds: [PA1, PA2] }))).toEqual({
+      ok: true,
+      steps: [one(PA1, "manager"), one(PA2, "fallback")],
+      source: "boss_final",
+    })
   })
 
   it("list 名單非空時名單照走，但 requireBossFinal 一定補上老闆關（安全驗收 H3）；mode=manager 走 boss_final", () => {
@@ -226,10 +250,10 @@ describe("pickApproverChain — requireBossFinal（跨縣市出差：老闆最�
     expect(
       pickApproverChain(base({ requireBossFinal: true, flow: { mode: "list", approverEmpIds: [BOSS] }, fallbackApproverEmpId: BOSS })),
     ).toEqual({ ok: true, steps: [one(BOSS, "fallback")], source: "list" })
-    // 沒設老闆 → 與預設鏈一致，不補
-    expect(pickApproverChain(base({ requireBossFinal: true, flow: { mode: "list", approverEmpIds: [L1] } }))).toEqual({
+    // 沒設老闆 → 也一定補老闆關，名義寫在職 platform_admin（第二輪 M4）
+    expect(pickApproverChain(base({ requireBossFinal: true, flow: { mode: "list", approverEmpIds: [L1] }, platformAdminEmpIds: [PA1] }))).toEqual({
       ok: true,
-      steps: [one(L1, "list")],
+      steps: [one(L1, "list"), one(PA1, "fallback")],
       source: "list",
     })
     // 不需要老闆關的類型（requireBossFinal 未帶）→ 名單照舊
@@ -243,11 +267,15 @@ describe("pickApproverChain — requireBossFinal（跨縣市出差：老闆最�
     ).toEqual({ ok: true, steps: [one(MGR, "manager"), one(MGR2, "manager"), one(BOSS, "fallback")], source: "boss_final" })
   })
 
-  it("manager_hr＋requireBossFinal：主管逐關 → 老闆（不在鏈內時插入）→ HR 覆核維持最後", () => {
+  it("manager_hr＋requireBossFinal：主管逐關 → HR 覆核 → 老闆關收尾（第二輪 H1：老闆一律在最後、從主管鏈／HR 關移除）", () => {
     const flow = { mode: "manager_hr" as const, approverEmpIds: [] }
     expect(
       pickApproverChain(base({ requireBossFinal: true, flow, managerEmpIds: [MGR], fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1] })),
-    ).toEqual({ ok: true, steps: [one(MGR, "manager"), one(BOSS, "fallback"), { candidateEmpIds: [HR1], kind: "hr" }], source: "manager_hr" })
+    ).toEqual({ ok: true, steps: [one(MGR, "manager"), { candidateEmpIds: [HR1], kind: "hr" }, one(BOSS, "fallback")], source: "manager_hr" })
+    // 老闆在主管鏈上、又是 hr_admin → 主管關與 HR 關都拿掉老闆，只在最後的老闆關出現
+    expect(
+      pickApproverChain(base({ requireBossFinal: true, flow, managerEmpIds: [MGR, BOSS], fallbackApproverEmpId: BOSS, hrAdminEmpIds: [BOSS, HR1] })),
+    ).toEqual({ ok: true, steps: [one(MGR, "manager"), { candidateEmpIds: [HR1], kind: "hr" }, one(BOSS, "fallback")], source: "manager_hr" })
   })
 
   it("requireBossFinal 未帶／false 時既有行為不變（manager 模式只取主管鏈第一位）", () => {
@@ -334,7 +362,7 @@ describe("零用金／出差／公出的簽核關卡：flowRouteFor ＋ pickAppr
     })
   })
 
-  it("主管就是老闆 → 一關（不重複）", () => {
+  it("主管就是老闆 → 一關（不重複），而且是老闆關（kind=fallback，第二輪 H1）", () => {
     for (const [kind, scope] of [
       ["petty_cash", null],
       ["business_trip", "local"],
@@ -342,31 +370,24 @@ describe("零用金／出差／公出的簽核關卡：flowRouteFor ＋ pickAppr
     ] as const) {
       expect(chainOf(kind, scope, { managerEmpIds: [BOSS], fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1] })).toEqual({
         ok: true,
-        steps: [one(BOSS, "manager")],
+        steps: [one(BOSS, "fallback")],
         source: "boss_final",
       })
     }
   })
 
-  it("老闆本人送單：老闆關跳過本人——有上層主管只剩主管關；沒有主管就退到第一位 hr_admin；都沒有 → no_approver_available", () => {
-    // 老闆自己（employeeId = BOSS）在某部門、上面還有主管 → 只剩主管那一關
-    expect(chainOf("petty_cash", null, { employeeId: BOSS, managerEmpIds: [MGR], fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1] })).toEqual({
+  it("老闆本人送單：仍一定有老闆關（第二輪 M4）——名義寫在職 platform_admin；沒有就名義寫本人走 L3；連 HR 都沒有 → no_approver_available", () => {
+    // 老闆自己（employeeId = BOSS）在某部門、上面還有主管 → 主管關 → 老闆關（名義＝platform_admin）
+    expect(
+      chainOf("petty_cash", null, { employeeId: BOSS, managerEmpIds: [MGR], fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1], platformAdminEmpIds: [PA1] }),
+    ).toEqual({ ok: true, steps: [one(MGR, "manager"), one(PA1, "fallback")], source: "boss_final" })
+    // 沒有主管、也沒有 platform_admin → 老闆關名義寫本人（本人簽被 own_request 擋），由非申請人 HR 以 L3 代簽留痕
+    expect(chainOf("business_trip", "local", { employeeId: BOSS, fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1, HR2], platformAdminEmpIds: [] })).toEqual({
       ok: true,
-      steps: [one(MGR, "manager")],
+      steps: [one(BOSS, "fallback")],
       source: "boss_final",
     })
-    // 沒有主管（老闆通常是部門根主管，主管鏈排除本人後是空的）→ 退到 hr_admin（避開本人）
-    expect(chainOf("business_trip", "local", { employeeId: BOSS, fallbackApproverEmpId: BOSS, hrAdminEmpIds: [HR1, HR2] })).toEqual({
-      ok: true,
-      steps: [one(HR1, "hr_admin")],
-      source: "hr_admin",
-    })
-    expect(chainOf("business_trip", "local", { employeeId: HR1, fallbackApproverEmpId: HR1, hrAdminEmpIds: [HR1, HR2] })).toEqual({
-      ok: true,
-      steps: [one(HR2, "hr_admin")],
-      source: "hr_admin",
-    })
-    expect(chainOf("petty_cash", null, { employeeId: BOSS, fallbackApproverEmpId: BOSS })).toEqual({
+    expect(chainOf("petty_cash", null, { employeeId: BOSS, fallbackApproverEmpId: BOSS, platformAdminEmpIds: [] })).toEqual({
       ok: false,
       error: "no_approver_available",
     })
@@ -443,15 +464,23 @@ describe("pickDisbursementChain — 放款鏈（主管逐關 → 會計 → 老�
     })
   })
 
-  it("建單人是老闆 → 老闆關跳過；老闆同時是主管鏈上的人 → 不重複；會計同時是主管 → 會計關排除他", () => {
-    expect(pickDisbursementChain(base({ employeeId: BOSS, managerEmpIds: [MGR], accountantEmpIds: [ACC1], fallbackApproverEmpId: BOSS }))).toEqual({
+  it("建單人是老闆 → 仍有老闆關（名義＝platform_admin，第二輪 M4）；老闆在主管鏈上 → 從主管鏈移除、老闆關在最後（第二輪 H1）；會計同時是主管 → 會計關排除他", () => {
+    expect(
+      pickDisbursementChain(base({ employeeId: BOSS, managerEmpIds: [MGR], accountantEmpIds: [ACC1], fallbackApproverEmpId: BOSS, platformAdminEmpIds: [PA1] })),
+    ).toEqual({
       ok: true,
-      steps: [one(MGR, "manager"), { candidateEmpIds: [ACC1], kind: "accountant" }],
+      steps: [one(MGR, "manager"), { candidateEmpIds: [ACC1], kind: "accountant" }, one(PA1, "fallback")],
       source: "disbursement",
     })
     expect(pickDisbursementChain(base({ managerEmpIds: [MGR, BOSS], accountantEmpIds: [ACC1], fallbackApproverEmpId: BOSS }))).toEqual({
       ok: true,
-      steps: [one(MGR, "manager"), one(BOSS, "manager"), { candidateEmpIds: [ACC1], kind: "accountant" }],
+      steps: [one(MGR, "manager"), { candidateEmpIds: [ACC1], kind: "accountant" }, one(BOSS, "fallback")],
+      source: "disbursement",
+    })
+    // 老闆也是會計 → 會計關排除老闆
+    expect(pickDisbursementChain(base({ managerEmpIds: [MGR], accountantEmpIds: [BOSS, ACC1], fallbackApproverEmpId: BOSS }))).toEqual({
+      ok: true,
+      steps: [one(MGR, "manager"), { candidateEmpIds: [ACC1], kind: "accountant" }, one(BOSS, "fallback")],
       source: "disbursement",
     })
     expect(pickDisbursementChain(base({ managerEmpIds: [ACC1], accountantEmpIds: [ACC1, ACC2], fallbackApproverEmpId: BOSS }))).toEqual({
@@ -474,10 +503,14 @@ describe("pickDisbursementChain — 放款鏈（主管逐關 → 會計 → 老�
     })
   })
 
-  it("主管、會計、老闆全空 → 第一位 hr_admin 退路（避開本人）；連 HR 也沒有 → no_approver_available", () => {
-    expect(pickDisbursementChain(base({ hrAdminEmpIds: [HR1, HR2] }))).toEqual({ ok: true, steps: [one(HR1, "hr_admin")], source: "hr_admin" })
-    expect(pickDisbursementChain(base({ employeeId: HR1, hrAdminEmpIds: [HR1, HR2] }))).toEqual({ ok: true, steps: [one(HR2, "hr_admin")], source: "hr_admin" })
-    expect(pickDisbursementChain(base())).toEqual({ ok: false, error: "no_approver_available" })
+  it("主管、會計、老闆全空 → 老闆關（名義＝platform_admin；沒有就名義寫建單人、HR 以 L3 代簽）；連非建單人 HR 也沒有 → no_approver_available（第二輪 M4）", () => {
+    expect(pickDisbursementChain(base({ hrAdminEmpIds: [HR1, HR2], platformAdminEmpIds: [PA1] }))).toEqual({ ok: true, steps: [one(PA1, "fallback")], source: "disbursement" })
+    expect(pickDisbursementChain(base({ employeeId: HR1, hrAdminEmpIds: [HR1, HR2], platformAdminEmpIds: [] }))).toEqual({
+      ok: true,
+      steps: [one(HR1, "fallback")],
+      source: "disbursement",
+    })
+    expect(pickDisbursementChain(base({ platformAdminEmpIds: [] }))).toEqual({ ok: false, error: "no_approver_available" })
   })
 
   it("STEP_KINDS 含 accountant（落 step_kind 用）", () => {

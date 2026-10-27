@@ -13,14 +13,16 @@ import {
   CHANGE_APPROVER_DENIAL_MESSAGE,
   CHANGE_APPROVER_DENIAL_STATUS,
   changeApproverDenial,
+  bossGateStep,
   isBossStep,
+  requestKindRequiresBoss,
   stepActorStanding,
   canHrOverrideStep,
   stepCandidates,
   stepNotifyRecipients,
   stepSelectCols,
 } from "../services/approval-steps.js"
-import { bossStepHasEligibleSigner, isPlatformAdminRole, loadConfiguredBossEmpId, loadPlatformAdminEmpIds } from "../lib/boss.js"
+import { actorReassignedRequest, bossStepHasEligibleSigner, isPlatformAdminRole, loadConfiguredBossEmpId, loadPlatformAdminEmpIds } from "../lib/boss.js"
 import { enqueue } from "../services/notify.js"
 import { loadDailyRegularHours } from "../services/daily-regular-hours.js"
 import { writeAuditLog } from "../services/audit.js"
@@ -271,8 +273,9 @@ function kindLabel(kind: string): string {
  * flowKind 維持原本的對應：跨縣市／海外出差（tripScope 有帶且不是 'local'）查
  * `business_trip_intercity`；市內公出（'local' 或沒帶）查 `business_trip`；零用金查
  * `petty_cash`；其餘種類（請假／加班／補卡／在家工作）查自己的 kind、不加老闆關。
- * HR 在後台為某條流程設了固定名單（mode=list 且名單非空）時，名單照走、優先於預設鏈
- * （requireBossFinal 一向不改 HR 明訂的名單，見 services/approval-chain.ts）。
+ * HR 在後台為某條流程設了固定名單（mode=list 且名單非空）時，名單照走、優先於預設鏈，但 requireBossFinal 的單據
+ * **一定以老闆關收尾**（2026-10-27 安全驗收 H3 起：名單裡的老闆移到最後、沒列老闆也會補上；第二輪 M4 起老闆未設定或
+ * 就是申請人時也補，名義簽核人寫在職 platform_admin，見 services/approval-chain.ts）。
  *
  * 只影響**新送出的單**：進行中的單，關卡在送單當下已寫進 approval_steps，不會回頭補老闆關。
  */
@@ -1441,7 +1444,10 @@ async function decideOneRequest(params: {
   // 輪到我：是該關 approver_emp_id 或候選之一（多級簽核的 HR 覆核關任一 HR 皆可）；老闆關另外
   // 任一在職 platform_admin 也算（2026-10-27 業主：平台管理員就是老闆；動態判斷，進行中的單也適用）。
   // 自己的單一律不能簽（所有關卡、HR 代簽、批次都一樣；2026-10-27 業主追加 B）；非在職帳號不能簽（追加 A）。
-  const standing = stepActorStanding(step, actor, lr.employee_id)
+  // 需要老闆關的單據（零用金、出差）：候選含老闆的關卡一律視為老闆關（第二輪安全驗收 H1；舊單老闆那關是 kind='manager'）。
+  const requiresBoss = requestKindRequiresBoss(lr.kind)
+  const gate = bossGateStep(step, { requiresBoss, bossEmpId: requiresBoss ? await loadConfiguredBossEmpId(tenantId) : null })
+  const standing = stepActorStanding(gate, actor, lr.employee_id)
   if (standing === "own_request") return { ok: false, id: requestId, error: "own_request" }
   const bossByPlatformAdmin = standing === "platform_admin"
   const isCandidate = standing === "candidate" || bossByPlatformAdmin
@@ -1452,13 +1458,15 @@ async function decideOneRequest(params: {
   // HR 代簽：老闆關原則上不准（追加 C：老闆關只限老闆本人或在職 platform_admin），其他關照舊。
   // L3：這張單的老闆關找不到任何「非申請人、在職、沒簽過前面關卡」的老闆／平台管理員 → 允許在職、非申請人的 HR 代簽。
   let bossStepHrFallback = false
-  if (allowHrOverride && !isCandidate && !signedBefore && isBossStep(step) && isHrRole(actor.role) && !actorIsInactive(actor)) {
-    bossStepHrFallback = !(await bossStepHasEligibleSigner(tenantId, {
-      exclude: [lr.employee_id, ...earlier],
-      stepCandidateEmpIds: stepCandidates(step),
-    }))
+  // 第二輪 M2：曾對這張單做過「變更簽核人」的 HR 不能用 L3 退路代簽（防止先改派、再人為製造「老闆關沒人能簽」）。
+  if (allowHrOverride && !isCandidate && !signedBefore && isBossStep(gate) && isHrRole(actor.role) && !actorIsInactive(actor)) {
+    bossStepHrFallback =
+      !(await bossStepHasEligibleSigner(tenantId, {
+        exclude: [lr.employee_id, ...earlier],
+        stepCandidateEmpIds: stepCandidates(step),
+      })) && !(await actorReassignedRequest(tenantId, "leave_requests", requestId, actor.id))
   }
-  const canOverride = allowHrOverride && canHrOverrideStep(step, actor, { bossStepHrFallback })
+  const canOverride = allowHrOverride && canHrOverrideStep(gate, actor, { bossStepHrFallback })
   if (!isCandidate && !canOverride) {
     return { ok: false, id: requestId, error: "not_current_approver" }
   }
@@ -1900,15 +1908,18 @@ requestsRouter.post(
       }
       const step = stepRow as unknown as { id: string; approver_emp_id: string; step_order: number; candidate_emp_ids?: unknown; step_kind?: string | null }
       const previousCandidateEmpIds = stepCandidates(step)
+      // 老闆 id 一律要帶（非老闆關也要擋「改派給老闆」，第二輪 M2）；需要老闆關的單據候選含老闆 → 視為老闆關（第二輪 H1）。
+      const bossEmpId = await loadConfiguredBossEmpId(tenantId)
+      const gate = bossGateStep(step, { requiresBoss: requestKindRequiresBoss(lr.kind as string), bossEmpId })
 
       // 改派授權（2026-10-27 安全驗收 H1／M1）：老闆關只有老闆本人或在職 platform_admin 能改派、且只能改派給老闆或
       // 在職 platform_admin（hr_admin 不能把老闆關改派給自己再以候選身分核准）；任何關卡都不能改派給申請人本人或操作者自己。
       const denial = changeApproverDenial({
-        step,
+        step: gate,
         actor: self!,
         requester: lr.employee_id as string,
         target: { id: target.id as string, role: (target as { role?: string | null }).role ?? null },
-        bossEmpId: isBossStep(step) ? await loadConfiguredBossEmpId(tenantId) : null,
+        bossEmpId,
       })
       if (denial) {
         res.status(CHANGE_APPROVER_DENIAL_STATUS[denial]).json({ error: denial, message: CHANGE_APPROVER_DENIAL_MESSAGE[denial] })
