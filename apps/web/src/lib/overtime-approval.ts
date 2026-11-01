@@ -85,16 +85,25 @@ function numOrNull(value: unknown): number | null {
   return null;
 }
 
-/** 從物件（API 409 body 或批次結果的一項）讀上限欄位；error 不是 overtime_cap_exceeded → null。 */
+/** 503 上限檢查暫時失敗（伺服器沒能算出累計，單子沒有送出／核准）。 */
+export const OVERTIME_CAP_CHECK_FAILED_CODE = "overtime_cap_check_failed";
+
+/**
+ * 從物件讀上限欄位；error 不是 overtime_cap_exceeded → null。
+ * 數字可能扁平放在物件上（單筆 409 body：`{ error, limit, capHours, currentHours, requestedHours }`），
+ * 也可能包在 `cap` 裡（批次核准結果的一項：`{ ok:false, id, error, cap: { limit, capHours, … } }`）；`cap` 優先。
+ */
 export function overtimeCapFromBody(body: unknown): OvertimeCapExceeded | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
   if (b.error !== OVERTIME_CAP_CODE) return null;
+  const nested = b.cap && typeof b.cap === "object" && !Array.isArray(b.cap) ? (b.cap as Record<string, unknown>) : {};
+  const pick = (key: string) => (nested[key] !== undefined && nested[key] !== null ? nested[key] : b[key]);
   return {
-    limit: b.limit === "daily" ? "daily" : "monthly",
-    capHours: numOrNull(b.capHours),
-    currentHours: numOrNull(b.currentHours),
-    requestedHours: numOrNull(b.requestedHours),
+    limit: pick("limit") === "daily" ? "daily" : "monthly",
+    capHours: numOrNull(pick("capHours")),
+    currentHours: numOrNull(pick("currentHours")),
+    requestedHours: numOrNull(pick("requestedHours")),
   };
 }
 
@@ -112,27 +121,42 @@ export function fmtCapHours(hours: number): string {
 }
 
 /**
- * 上限錯誤的人話。`verb`＝「送出」（員工送單）或「核准」（主管核准）。
+ * 上限錯誤的人話。`verb`＝「送出」（員工送單）或「核准」（主管核准）。上限數值讀租戶規則，前端不寫死。
  *   monthly：「本月加班已核准 38 小時，這張 4 小時會超過 40 小時上限，無法核准」
- *   daily：  「當天工時會超過 12 小時上限（這張 4 小時），無法核准」
- * 數字缺漏時退回不帶數字的說法。
+ *   daily：  「當天正常工時加已核准加班共 8 小時，這張 5 小時會讓當天工時超過 12 小時上限，無法核准」
+ *            （currentHours＝當天正常工時（平日 8、非工作日 0）＋當天已核准加班時數）
+ * 數字缺漏時退回不帶數字的說法（「超過每月加班上限」／「超過每日工時上限」）。
  */
 export function overtimeCapMessage(info: OvertimeCapExceeded, verb: "送出" | "核准"): string {
   const { limit, capHours, currentHours, requestedHours } = info;
-  const cap = capHours !== null ? `${fmtCapHours(capHours)} 小時` : limit === "daily" ? "12 小時" : "40 小時";
   const req = requestedHours !== null ? `這張 ${fmtCapHours(requestedHours)} 小時` : "這張加班單";
   if (limit === "daily") {
+    const cap = capHours !== null ? `每日工時 ${fmtCapHours(capHours)} 小時上限` : "每日工時上限";
     if (currentHours !== null) {
-      return `當天已有 ${fmtCapHours(currentHours)} 小時，${req}會讓當天工時超過 ${cap}上限，無法${verb}`;
+      return `當天正常工時加已核准加班共 ${fmtCapHours(currentHours)} 小時，${req}會讓當天工時超過${cap}，無法${verb}`;
     }
-    return `當天工時會超過 ${cap}上限（${req}），無法${verb}`;
+    return `${req}會讓當天工時超過${cap}，無法${verb}`;
   }
-  if (currentHours !== null) return `本月加班已核准 ${fmtCapHours(currentHours)} 小時，${req}會超過 ${cap}上限，無法${verb}`;
-  return `${req}會超過本月加班 ${cap}上限，無法${verb}`;
+  const cap = capHours !== null ? `每月加班 ${fmtCapHours(capHours)} 小時上限` : "每月加班上限";
+  if (currentHours !== null) return `本月加班已核准 ${fmtCapHours(currentHours)} 小時，${req}會超過${cap}，無法${verb}`;
+  return `${req}會超過${cap}，無法${verb}`;
 }
 
-/** describeError 用：是上限錯誤就回人話，否則 null。 */
+/** 503 overtime_cap_check_failed 的人話。 */
+export function overtimeCapCheckFailedMessage(verb: "送出" | "核准"): string {
+  return `加班上限檢查暫時失敗，這張單尚未${verb}，請稍後再試`;
+}
+
+/** apiFetch 丟出的 Error 是不是 503 overtime_cap_check_failed。 */
+export function isOvertimeCapCheckFailed(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const e = err as Error & { code?: string };
+  return e.code === OVERTIME_CAP_CHECK_FAILED_CODE || e.message.includes(OVERTIME_CAP_CHECK_FAILED_CODE);
+}
+
+/** describeError 用：加班上限相關錯誤（409 超過上限／503 檢查失敗）就回人話，否則 null。 */
 export function overtimeCapErrorText(err: unknown, verb: "送出" | "核准"): string | null {
+  if (isOvertimeCapCheckFailed(err)) return overtimeCapCheckFailedMessage(verb);
   const info = overtimeCapExceededOf(err);
   return info ? overtimeCapMessage(info, verb) : null;
 }

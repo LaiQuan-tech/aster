@@ -120,7 +120,7 @@ export default function UnapprovedOvertimePage() {
           </div>
         </div>
         <p className="mt-3 text-xs text-gray-500">
-          加班費照算；這裡只列出沒有事前核准加班單的日子，請提醒員工補送加班單、主管核准（核准上限：每月 40 小時、每日工時 12 小時）。
+          加班費照算；這裡只列出沒有事前核准加班單的日子，請提醒員工補送加班單、主管核准（核准有每月加班上限與每日工時上限，數值依公司規則）。
         </p>
       </Card>
 
