@@ -31,6 +31,7 @@ import {
   recordLateReport,
 } from "../services/late-reports.js"
 import { lateReportsRouter } from "./late-reports.js"
+import { punchOvertimeNotice } from "../services/overtime-approval.js"
 
 export const punchRouter = Router()
 // 遲到說明 API（GET /late-reports、POST /late-reports/:id/decision）由打卡產生，掛在打卡路由底下。
@@ -237,6 +238,10 @@ function punchResponseBody(data: Record<string, unknown>, extra: Record<string, 
  *   409 { error: "punch_too_soon", retryAfterSeconds, last: { id, type, punchAt } }
  * so a double tap on the front page yields exactly one row. HR back-fills
  * (`/punch/manual`, `/punch/manual/import`) are NOT subject to the cooldown.
+ *
+ * 加班事前核准制（2026-11-01）：上班卡落在休息日／國定假日且當天沒有已核准加班單 → 201 多帶
+ * `overtimeNotice: { kind: "unapproved_overtime_day", dayType, message }`；落在例假 → `kind: "regular_leave_day"`。
+ * 同時站內通知直屬主管（同人同日一次；只寫站內，不寄 Email／LINE）。打卡照常成功（services/overtime-approval.ts）。
  *
  * 201 body: `{ id, type, punchAt, source, lat, lng, deviceId, record }` —
  * the original three fields keep their names and types; `record` is the full
@@ -499,8 +504,19 @@ punchRouter.post(
         }
       }
 
+      // 加班事前核准制（2026-11-01）：上班卡落在休息日／國定假日（無已核准加班單）或例假 → 201 多帶
+      // overtimeNotice，並站內通知直屬主管（同人同日一次、不寄 Email／LINE）。打卡永遠不擋；檢查失敗＝不帶。
+      // 只看上班卡：下班卡可能是跨午夜的前一天班，日別會判錯；平日不在打卡當下判斷。
+      const overtimeNotice =
+        resolvedType === "in"
+          ? await punchOvertimeNotice({ tenantId, employeeId: self.id, now })
+          : null
+
       res.status(201).json(
-        punchResponseBody(data, lateReport && lateness ? { lateReport: { id: lateReport.id, lateMinutes: lateness.lateMinutes } } : {}),
+        punchResponseBody(data, {
+          ...(lateReport && lateness ? { lateReport: { id: lateReport.id, lateMinutes: lateness.lateMinutes } } : {}),
+          ...(overtimeNotice ? { overtimeNotice } : {}),
+        }),
       )
     } catch (err) {
       next(err)

@@ -8,6 +8,7 @@ import { chunk, fetchAllPages } from "../lib/select-all-pages.js"
 import { toCsv, type CsvColumn } from "../lib/csv.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { dayWindowUtc } from "../lib/tz.js"
+import { loadUnapprovedOvertimeReport } from "../services/overtime-approval.js"
 
 export const reportsRouter = Router()
 
@@ -567,6 +568,54 @@ reportsRouter.get(
           { key: "count", label: "人數" },
         ],
         rows: csvRows,
+      })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// --- /reports/unapproved-overtime --------------------------------------------
+
+const unapprovedOvertimeQuery = z.object({
+  period: z.string().regex(periodRe, "period must be YYYY-MM"),
+  format: z.string().optional(),
+})
+
+/**
+ * GET /reports/unapproved-overtime?period=YYYY-MM — 加班事前核准制（2026-11-01）月報：當月每位員工
+ * 「沒有已核准加班單」的加班日（休息日／例假／國定假日出勤＝當天工時；平日＝延長工時），依 totalMinutes 降冪。
+ * 權限同其他 HR 報表（hr_admin／platform_admin、租戶綁定）。回
+ * `{ period, rows: [{ employeeId, employeeName, employeeNo, days: [{ workDate, dayType, minutes }], totalMinutes }] }`；
+ * `?format=csv` 每個加班日一列。分頁讀全（services/overtime-approval.ts loadUnapprovedOvertimeReport）。
+ */
+reportsRouter.get(
+  "/reports/unapproved-overtime",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const parsed = unapprovedOvertimeQuery.safeParse(req.query)
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const report = await loadUnapprovedOvertimeReport(tenantId, parsed.data.period)
+      respond(req, res, { period: report.period, rows: report.rows }, {
+        filename: `unapproved-overtime-${report.period}.csv`,
+        columns: [
+          { key: "employeeNo", label: "員工編號" },
+          { key: "employeeName", label: "姓名" },
+          { key: "workDate", label: "日期" },
+          { key: "dayType", label: "日別" },
+          { key: "minutes", label: "未核准加班分鐘" },
+          { key: "totalMinutes", label: "當月合計分鐘" },
+        ],
+        rows: report.rows.flatMap((r) =>
+          r.days.map((d) => ({ employeeNo: r.employeeNo ?? "", employeeName: r.employeeName, workDate: d.workDate, dayType: d.dayType, minutes: d.minutes, totalMinutes: r.totalMinutes })),
+        ),
       })
     } catch (err) {
       next(err)

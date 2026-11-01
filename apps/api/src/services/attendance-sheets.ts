@@ -45,6 +45,7 @@ import { coveredByRequests, loadApprovedAbsences } from "./absence-cover.js"
 import { tenantBlocksApproveOnUnsettledLeave } from "./leave-settlement.js"
 import { pairPunchesTz, wfhPunchDates } from "./punch-pairing.js"
 import { capMinutesFor } from "./overtime-cap.js"
+import { approvedOtDateKeysOf } from "./overtime-approval.js"
 import {
   attendedDay,
   consecutiveWorkRuns,
@@ -507,7 +508,9 @@ function fmtHm(minutes: number): string {
  *   leave_overlap_work；warn：late / early_leave / overtime_override /
  *   overtime_over_daily_cap / holiday_work / outing_unpaired / manual_punch /
  *   cross_midnight；info：meal_deducted、overtime_beyond_cap；
- *   error（M1）：overtime_beyond_cap_unapproved。
+ *   error（M1）：overtime_beyond_cap_unapproved；error（2026-11-01 加班事前核准制）：overtime_unapproved
+ *   （休息日／國定假日出勤或平日延長工時 > 0 而當天沒有已核准加班單；例假改在 regular_leave_work 訊息補述，
+ *   當天已有 overtime_beyond_cap_unapproved 也不重複；ctx.approvedOtDates 沒給則不判）。
  * 一例一休合規（2026-10-17，services/compliance.ts，日級、可填說明，薪資執行前閘門會檢查 error）：
  *   error：seven_day_rule（依日曆連續出勤第 7 天起，含上月尾）、regular_leave_work（例假出勤，
  *   取代該日的 holiday_work）、daily_over_12h（正常＋延長 > 12h，休息日亦同）、monthly_ot_over_46h
@@ -544,6 +547,9 @@ export function computeAnomalies(
   const capHours = Math.round((capMinutes / 60) * 100) / 100
   const beyondCapMode = ctx.beyondCap ?? resolveOvertimeBeyondCap(ctx.rules)
   const approvedOtDates = ctx.approvedOtDates ?? new Set<DateKey>()
+  // 加班事前核准制（overtime_unapproved）只在呼叫端有給 approvedOtDates 時判斷：生產路徑一定會給；
+  // 沒給（手工 fixture）＝不知道有沒有核准單，不判，以免把「不知道」當成「沒核准」。
+  const otApprovalChecked = ctx.approvedOtDates !== undefined
   const sorted = [...days].sort((a, b) => a.work_date.localeCompare(b.work_date))
   // 七休一：「有出勤」＝有工時或有打卡（含上月尾，跨月連續也算）。
   // 判斷式與 detection 共用 compliance.attendedDay。
@@ -618,11 +624,16 @@ export function computeAnomalies(
     }
     if (dayType === REGULAR_LEAVE && (worked > 0 || punched)) {
       const compDayOwed = facts.compDayOwed ?? 0
+      // 加班事前核准制（2026-11-01）：例假出勤沒有已核准加班單 → 不另發 overtime_unapproved，
+      // 改在這條 error 的訊息補一句、detail 標 overtimeApproved=false（同一天不重複兩條同義 error）。
+      const regularLeaveUnapproved = otApprovalChecked && !approvedOtDates.has(day.work_date)
       push({
         code: "regular_leave_work",
         severity: "error",
-        detail: { workedMinutes: worked, compDayOwed },
-        message: regularLeaveWorkMessage(fmtHm(worked), compDayOwed),
+        detail: regularLeaveUnapproved ? { workedMinutes: worked, compDayOwed, overtimeApproved: false } : { workedMinutes: worked, compDayOwed },
+        message:
+          regularLeaveWorkMessage(fmtHm(worked), compDayOwed) +
+          (regularLeaveUnapproved ? "；當日沒有已核准的加班單，請補送加班單經主管核准或填寫說明" : ""),
       })
     }
     const dayTotal = dailyTotalWorkMinutes({
@@ -706,6 +717,7 @@ export function computeAnomalies(
     }
 
     // ── M1 月加班上限超額 ──
+    let beyondCapUnapproved = false
     if (beyondCapMinutes > 0) {
       push({
         code: "overtime_beyond_cap",
@@ -717,11 +729,31 @@ export function computeAnomalies(
             : `本月加班累計已超過 ${capHours} 小時上限，這天有 ${fmtHm(beyondCapMinutes)} 屬超額`,
       })
       if (!approvedOtDates.has(day.work_date)) {
+        beyondCapUnapproved = true
         push({
           code: "overtime_beyond_cap_unapproved",
           severity: "error",
           detail: { beyondCapMinutes, capMinutes },
           message: `超額加班 ${fmtHm(beyondCapMinutes)} 當日沒有已核准的加班單，請先補送加班單經主管核准`,
+        })
+      }
+    }
+
+    // ── 加班事前核准制（2026-11-01）──
+    // 休息日／國定假日有出勤、或平日（含特休日出勤）有延長工時，而當天沒有已核准的加班單 → error。
+    // 例假已由 regular_leave_work 表示（訊息已補核准提醒）；當天已發 overtime_beyond_cap_unapproved
+    // （同一根因：沒有核准單）也不再重複。只標異常、不動任何分鐘，加班費照打卡算。
+    if (otApprovalChecked && dayType !== REGULAR_LEAVE && !beyondCapUnapproved && !approvedOtDates.has(day.work_date)) {
+      const offDayWork = dayType !== "workday" && worked > 0
+      if (offDayWork || effective > 0) {
+        const offLabel = dayType === "rest_day" ? "休息日" : dayType === "fixed_holiday" ? "國定假日" : null
+        push({
+          code: "overtime_unapproved",
+          severity: "error",
+          detail: { dayType, workedMinutes: worked, overtimeMinutes: effective },
+          message: offDayWork
+            ? `${offLabel ?? "假日"}出勤未經主管核准，請補送加班單或填寫說明`
+            : `延長工時 ${fmtHm(effective)} 未經主管核准，請補送加班單或填寫說明`,
         })
       }
     }
@@ -1188,14 +1220,7 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
         .range(rFrom, rTo),
     "attendance-sheets (approved ot)",
   )
-  for (const r of otData) {
-    const first = localDateKey(r.start_at, tz)
-    const endMs = new Date(r.end_at).getTime() - 1
-    const last = localDateKey(new Date(Math.max(endMs, new Date(r.start_at).getTime())), tz)
-    for (let d = first; d <= last; d = addDaysKey(d, 1)) {
-      if (d >= from && d <= to) facts.approvedOtByKey.add(`${r.employee_id}|${d}`)
-    }
-  }
+  for (const key of approvedOtDateKeysOf(otData, tz, from, to)) facts.approvedOtByKey.add(key)
 
   // pending leave requests overlapping the period
   const pendData = await selectAllPages<{ employee_id: string }>(

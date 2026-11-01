@@ -178,8 +178,8 @@ describe("monthly_ot_over_46h（capCountableMinutes 口徑，error）", () => {
     const hits = weekdays.filter((d) => codesOn(r, d).includes("monthly_ot_over_46h"))
     expect(hits).toEqual(["2026-10-12"])
     expect(find(r, "2026-10-12", "monthly_ot_over_46h")).toMatchObject({ severity: "error", detail: { totalMinutes: 2880, capMinutes: 2760 } })
-    // 月級門檻（36/40/46）同口徑：48h → 46 門檻 error
-    expect(r.month.find((a) => a.code === "monthly_ot_threshold")).toMatchObject({ severity: "error", detail: { threshold: 46 } })
+    // 月級門檻同口徑：新預設 30/36/40（2026-11-01 加班事前核准制，達上限 40h 前提醒）→ 48h 落在 40 門檻 error
+    expect(r.month.find((a) => a.code === "monthly_ot_threshold")).toMatchObject({ severity: "error", detail: { threshold: 40 } })
   })
 
   it("國定假日 8h 內與例假的加班分鐘不算進 46 小時", () => {

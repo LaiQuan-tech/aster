@@ -25,7 +25,8 @@ import {
  *   其他連帶變化：例假的加班分鐘顯示為保底後的值（4h 顯示 8h）、不計入月加班上限；月表多出 error 級的
  *   regular_leave_work（例假出勤）異常，requireAnomalyAck 開著時要填說明才能跑薪資。
  *   要完全照新版（法定整套＋照分鐘＋晚餐勾選）得另外存一版新規則。
- * 其餘：單日加班上限 240 分與月累計警示 36/40/46 小時只供異常判定不裁切、時薪 = 本薪 ÷ 240、
+ * 其餘：單日加班上限 240 分與月累計警示 30/36/40 小時（2026-11-01 加班事前核准制：達月上限 40h 前先提醒；
+ * 原 36/40/46）只供異常判定不裁切、時薪 = 本薪 ÷ 240、
  * 22:00–06:00 夜間、月薪制 8h 正常工時。Tenants override any of this via PUT /rule-config.
  */
 export const DEFAULT_RULE_CONFIG: RuleConfig = {
@@ -38,7 +39,7 @@ export const DEFAULT_RULE_CONFIG: RuleConfig = {
     rounding: { ...NEW_TENANT_OVERTIME_ROUNDING },
     mealBreak: { ...NEW_TENANT_OVERTIME_MEAL_BREAK },
     dailyCapMinutes: 240,
-    monthlyAlertHours: [36, 40, 46],
+    monthlyAlertHours: [30, 36, 40],
   },
   night: { window: { from: "22:00", to: "06:00" }, multiplier: 1.34 },
   payroll: { method: "monthly", dailyRegularHours: 8, hourlyWageDivisor: 240 },

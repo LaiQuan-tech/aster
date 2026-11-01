@@ -44,6 +44,11 @@ export type AnomalyCode =
   | "overtime_beyond_cap"
   /** M1：同上，且該日沒有已核准的加班單 → 超額時數不該逕自計入（error）。 */
   | "overtime_beyond_cap_unapproved"
+  /**
+   * 2026-11-01 加班事前核准制：休息日／國定假日出勤、或平日延長工時 > 0，而當天沒有已核准的加班單（error）。
+   * 加班費照打卡算不受影響；加班單核准後重算即消失。
+   */
+  | "overtime_unapproved"
   | "consecutive_late"
   | "pending_leave_in_period"
   | "no_salary_structure"

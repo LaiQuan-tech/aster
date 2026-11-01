@@ -3,7 +3,7 @@
  *
  * 只實作 API 路由實際用到的 PostgREST 子集：
  *   select / insert / update / delete、eq / neq / is / not / in / like / ilike / gt·gte·lt·lte /
- *   or（ilike／eq／is／lte·lt·gte·gt）、order / limit、single / maybeSingle、await（thenable），以及 rpc。
+ *   or（ilike／eq／is／lte·lt·gte·gt）、contains（jsonb 淺層 @>）、order / limit、single / maybeSingle、await（thenable），以及 rpc。
  * 另外支援 `range(from, to)`（分頁，含上界）與
  * `upsert(rows, { onConflict, ignoreDuplicates })`（`ignoreDuplicates` ＝ ON CONFLICT DO NOTHING，
  * 衝突的列略過；沒設＝衝突的列合併更新）。
@@ -311,6 +311,14 @@ export function createFakeSupabase() {
         predicates.push((row) => (row[column] ?? null) !== (value ?? null))
         return builder
       },
+      // jsonb 包含（`@>`）的淺層子集：value 的每個鍵都要與列上該 jsonb 欄位同鍵的值相等。
+      contains: (column: string, value: Row) =>
+        (predicates.push((row) => {
+          const target = row[column]
+          if (!target || typeof target !== "object") return false
+          return Object.entries(value).every(([k, v]) => JSON.stringify((target as Row)[k]) === JSON.stringify(v))
+        }),
+        builder),
       in: (column: string, values: unknown[]) => (predicates.push((row) => values.includes(row[column])), builder),
       like: (column: string, pattern: string) => (predicates.push((row) => matchesLike(row[column], pattern, "")), builder),
       ilike: (column: string, pattern: string) => (predicates.push((row) => matchesIlike(row[column], pattern)), builder),
