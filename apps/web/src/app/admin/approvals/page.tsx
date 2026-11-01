@@ -60,7 +60,7 @@ import { getMeCached, invalidateEssState } from "@/lib/ess-state";
 // 標記文案與 ESS「我的申請」共用一份（純字串常數，不牽連 ESS 的資料層）。
 import { BEYOND_CAP_LABEL } from "@/lib/request-forms";
 import { errorMessageOf, periodClosedMessage } from "@/lib/period-closed";
-import { overtimeCapErrorText } from "@/lib/overtime-approval";
+import { overtimeBatchItemText, overtimeCapErrorText } from "@/lib/overtime-approval";
 import {
   BUCKET_LABEL,
   KIND_LABEL,
@@ -346,7 +346,9 @@ function ApprovalsView() {
         const failed = result.results.find((item) => !item.ok);
         // period_closed 是整批 200、只有這張失敗；月份在逐張結果裡，不能只丟錯誤碼。
         if (failed && !failed.ok) {
-          throw new Error(failed.error === "period_closed" ? periodClosedMessage(failed.period) : failed.error);
+          if (failed.error === "period_closed") throw new Error(periodClosedMessage(failed.period));
+          // 加班上限（數字在 failed.cap，日／月上限分開說）／上限檢查失敗 → 與 ESS 批次同一套人話。
+          throw new Error(overtimeBatchItemText(failed, "核准") ?? failed.error);
         }
         throw new Error("代理簽核失敗");
       }

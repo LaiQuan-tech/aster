@@ -12,6 +12,7 @@ import {
 import { normalizeUnapprovedOvertime, unapprovedOvertimeCsv, isReportNotDeployed } from "../unapproved-overtime-api";
 import { DAY_ANOMALY_FALLBACK_TEXT, dayAnomalyText } from "../attendance-sheets-api";
 import { describeBatchError, summarizeBatch } from "../ess-approval-batch";
+import { overtimeBatchItemText } from "../overtime-approval";
 
 /** 模擬 apiFetch 丟出的 Error（lib/api-client.ts：message＝error 碼、code、status、body）。 */
 function apiError(status: number, body: Record<string, unknown>): Error {
@@ -99,7 +100,7 @@ describe("overtime_cap_exceeded（409）→ 人話", () => {
       (id) => id,
     );
     expect(summary.failures[0].reason).toBe("本月加班已核准 38 小時，這張 4 小時會超過每月加班 40 小時上限，無法核准。");
-    expect(summary.failures[1].reason).toBe(describeBatchError("overtime_cap_exceeded"));
+    expect(summary.failures[1].reason).toBe("這張加班單會超過每月加班上限，無法核准。");
     expect(summary.failures[2].reason).toBe("當天正常工時加已核准加班共 8 小時，這張 5 小時會讓當天工時超過每日工時 12 小時上限，無法核准。");
   });
 });
@@ -185,5 +186,30 @@ describe("未核准加班報表", () => {
     expect(isReportNotDeployed(apiError(404, { error: "not_found" }))).toBe(true);
     expect(isReportNotDeployed(apiError(500, { error: "internal_error" }))).toBe(false);
     expect(isReportNotDeployed("x")).toBe(false);
+  });
+});
+
+describe("overtimeBatchItemText：批次結果逐張（後台 HR 代理簽核與 ESS 批次共用）", () => {
+  it("日上限的數字在 cap 裡 → 說日上限、帶數字（不會被說成月上限）", () => {
+    const item = { ok: false, id: "r1", error: "overtime_cap_exceeded", cap: { limit: "daily", capHours: 12, currentHours: 8, requestedHours: 5 } };
+    expect(overtimeBatchItemText(item, "核准")).toBe("當天正常工時加已核准加班共 8 小時，這張 5 小時會讓當天工時超過每日工時 12 小時上限，無法核准。");
+  });
+
+  it("月上限 cap、扁平欄位、沒附數字、503 檢查失敗", () => {
+    expect(
+      overtimeBatchItemText({ error: "overtime_cap_exceeded", cap: { limit: "monthly", capHours: 40, currentHours: 38, requestedHours: 4 } }, "核准"),
+    ).toBe("本月加班已核准 38 小時，這張 4 小時會超過每月加班 40 小時上限，無法核准。");
+    expect(overtimeBatchItemText({ error: "overtime_cap_exceeded", limit: "daily", capHours: 10 }, "核准")).toBe(
+      "這張加班單會讓當天工時超過每日工時 10 小時上限，無法核准。",
+    );
+    expect(overtimeBatchItemText({ error: "overtime_cap_exceeded" }, "核准")).toBe("這張加班單會超過每月加班上限，無法核准。");
+    expect(overtimeBatchItemText({ error: "overtime_cap_check_failed" }, "核准")).toBe("加班上限檢查暫時失敗，這張單尚未核准，請稍後再試。");
+  });
+
+  it("其他錯誤／不是物件 → null（呼叫端走原本的說法）", () => {
+    expect(overtimeBatchItemText({ error: "period_closed", period: "2026-10" }, "核准")).toBeNull();
+    expect(overtimeBatchItemText({ error: "not_current_approver" }, "核准")).toBeNull();
+    expect(overtimeBatchItemText(null, "核准")).toBeNull();
+    expect(overtimeBatchItemText("overtime_cap_exceeded", "核准")).toBeNull();
   });
 });

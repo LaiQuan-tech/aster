@@ -677,7 +677,14 @@ export function batchDecideRequests(body: {
     results: Array<
       | { ok: true; id: string; status: RequestStatus; currentStep: number }
       // period_closed（這張單碰到已發薪鎖定的月份）時多帶最早已結算月 period；整批仍是 HTTP 200。
-      | { ok: false; id: string; error: string; period?: string }
+      // overtime_cap_exceeded（2026-11）時上限數字在 cap（讀法見 lib/overtime-approval.ts overtimeBatchItemText）。
+      | {
+          ok: false;
+          id: string;
+          error: string;
+          period?: string;
+          cap?: { limit?: "monthly" | "daily"; capHours?: number; currentHours?: number; requestedHours?: number };
+        }
     >;
   }>("/requests/batch-decision", {
     method: "POST",

@@ -16,9 +16,8 @@ import { PERIOD_CLOSED_CODE, periodClosedMessage, periodClosedPeriod } from "./p
 import {
   OVERTIME_CAP_CHECK_FAILED_CODE,
   OVERTIME_CAP_CODE,
+  overtimeBatchItemText,
   overtimeCapCheckFailedMessage,
-  overtimeCapFromBody,
-  overtimeCapMessage,
 } from "./overtime-approval";
 
 export type BatchAction = "approve" | "reject";
@@ -195,10 +194,9 @@ export function summarizeBatch(
       okCount += 1;
       if (action === "approve" && result.status === "pending") advancedCount += 1;
     } else {
-      // 加班上限：伺服器有附數字就用帶數字的人話（同單筆核准），沒附走 describeBatchError 的通用說法。
-      const parsed = result.error === OVERTIME_CAP_CODE ? overtimeCapFromBody(result) : null;
-      const cap = parsed && parsed.capHours !== null ? parsed : null;
-      failures.push({ id: result.id, label: labelOf(result.id), reason: cap ? `${overtimeCapMessage(cap, "核准")}。` : describeBatchError(result.error, result.period) });
+      // 加班上限（數字在 result.cap）／上限檢查失敗：同一套人話（lib/overtime-approval.ts），其他走 describeBatchError。
+      const reason = overtimeBatchItemText(result, "核准") ?? describeBatchError(result.error, result.period);
+      failures.push({ id: result.id, label: labelOf(result.id), reason });
     }
   }
   return { action, total: results.length, okCount, failedCount: failures.length, advancedCount, failures };

@@ -161,6 +161,18 @@ export function overtimeCapErrorText(err: unknown, verb: "送出" | "核准"): s
   return info ? overtimeCapMessage(info, verb) : null;
 }
 
+/**
+ * 批次核准（POST /requests/batch-decision）逐張結果裡的加班上限錯誤 → 人話（帶句號）；其他錯誤 → null。
+ * 數字在 `item.cap.*`（扁平欄位也相容）；ESS 批次與後台 HR 代理簽核共用，日上限／月上限才不會被說錯。
+ */
+export function overtimeBatchItemText(item: unknown, verb: "送出" | "核准"): string | null {
+  if (!item || typeof item !== "object") return null;
+  const error = (item as { error?: unknown }).error;
+  if (error === OVERTIME_CAP_CHECK_FAILED_CODE) return `${overtimeCapCheckFailedMessage(verb)}。`;
+  const cap = overtimeCapFromBody(item);
+  return cap ? `${overtimeCapMessage(cap, verb)}。` : null;
+}
+
 /* ---------------------------------------------------------- 時:分 --- */
 
 /** 分鐘 → 「時:分」（125 → "2:05"；負數／非數字當 0）。 */
