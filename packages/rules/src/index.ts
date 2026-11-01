@@ -27,6 +27,7 @@ export {
   type ResolvedOvertimeMealBreak,
   resolveOvertimeDailyCapMinutes,
   resolveOvertimeMonthlyAlertHours,
+  resolveOvertimeRequirePreApproval,
   resolveHourlyWageDivisor,
   resolvePayrollGates,
   resolveLateEarlyDeductionEnabled,

@@ -45,7 +45,7 @@ import { coveredByRequests, loadApprovedAbsences } from "./absence-cover.js"
 import { tenantBlocksApproveOnUnsettledLeave } from "./leave-settlement.js"
 import { pairPunchesTz, wfhPunchDates } from "./punch-pairing.js"
 import { capMinutesFor } from "./overtime-cap.js"
-import { approvedOtDateKeysOf } from "./overtime-approval.js"
+import { approvedOtDatesFor, preApprovalRequired, type ApprovedOtSpan } from "./overtime-approval.js"
 import {
   attendedDay,
   consecutiveWorkRuns,
@@ -510,7 +510,8 @@ function fmtHm(minutes: number): string {
  *   cross_midnight；info：meal_deducted、overtime_beyond_cap；
  *   error（M1）：overtime_beyond_cap_unapproved；error（2026-11-01 加班事前核准制）：overtime_unapproved
  *   （休息日／國定假日出勤或平日延長工時 > 0 而當天沒有已核准加班單；例假改在 regular_leave_work 訊息補述，
- *   當天已有 overtime_beyond_cap_unapproved 也不重複；ctx.approvedOtDates 沒給則不判）。
+ *   當天已有 overtime_beyond_cap_unapproved 也不重複；只在規則 overtime.requirePreApproval=true 且 ctx.approvedOtDates
+ *   有給時判）。
  * 一例一休合規（2026-10-17，services/compliance.ts，日級、可填說明，薪資執行前閘門會檢查 error）：
  *   error：seven_day_rule（依日曆連續出勤第 7 天起，含上月尾）、regular_leave_work（例假出勤，
  *   取代該日的 holiday_work）、daily_over_12h（正常＋延長 > 12h，休息日亦同）、monthly_ot_over_46h
@@ -547,9 +548,10 @@ export function computeAnomalies(
   const capHours = Math.round((capMinutes / 60) * 100) / 100
   const beyondCapMode = ctx.beyondCap ?? resolveOvertimeBeyondCap(ctx.rules)
   const approvedOtDates = ctx.approvedOtDates ?? new Set<DateKey>()
-  // 加班事前核准制（overtime_unapproved）只在呼叫端有給 approvedOtDates 時判斷：生產路徑一定會給；
-  // 沒給（手工 fixture）＝不知道有沒有核准單，不判，以免把「不知道」當成「沒核准」。
-  const otApprovalChecked = ctx.approvedOtDates !== undefined
+  // 加班事前核准制（overtime_unapproved、例假補述）只在 (a) 該月選到的規則版本 overtime.requirePreApproval=true
+  // （由版本生效日控制，歷史月份與沒存規則的租戶不判）且 (b) 呼叫端有給 approvedOtDates（生產路徑一定會給；
+  // 手工 fixture 沒給＝不知道有沒有核准單）時判斷。
+  const otApprovalChecked = preApprovalRequired(ctx.rules) && ctx.approvedOtDates !== undefined
   const sorted = [...days].sort((a, b) => a.work_date.localeCompare(b.work_date))
   // 七休一：「有出勤」＝有工時或有打卡（含上月尾，跨月連續也算）。
   // 判斷式與 detection 共用 compliance.attendedDay。
@@ -955,7 +957,8 @@ interface MonthFacts {
   scheduleByKey: Map<string, { shiftNetMinutes: number | null }>
   wfhByKey: Set<string>
   /** M1：已核准加班單覆蓋到的 `empId|date`（判「超額日有沒有加班單」用）。 */
-  approvedOtByKey: Set<string>
+  /** 已核准加班單（員工 → 時段）；「已核准日」在 anomalyContextFor 依當日出勤時段判（approvedOtDatesFor）。 */
+  approvedOtSpansByEmp: Map<string, ApprovedOtSpan[]>
   /** 日別查詢器（services/day-type.ts：行事曆 → 例假／休息日星期，員工個人設定優先；與結算同一支）。 */
   dayTypes: DayTypeResolver
   leaveNameByCode: Map<string, string>
@@ -991,7 +994,7 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
     punchFactsByEmp: new Map(),
     scheduleByKey: new Map(),
     wfhByKey: new Set(),
-    approvedOtByKey: new Set(),
+    approvedOtSpansByEmp: new Map(),
     dayTypes: buildDayTypeResolver({ calendar: new Map(), tenantPolicy: DEFAULT_WEEKEND_POLICY }),
     leaveNameByCode: new Map(),
     pendingLeaveByEmp: new Map(),
@@ -1220,7 +1223,11 @@ async function loadMonthFacts(tenantId: string, period: string, employeeIds: str
         .range(rFrom, rTo),
     "attendance-sheets (approved ot)",
   )
-  for (const key of approvedOtDateKeysOf(otData, tz, from, to)) facts.approvedOtByKey.add(key)
+  for (const r of otData) {
+    const list = facts.approvedOtSpansByEmp.get(r.employee_id) ?? []
+    list.push(r)
+    facts.approvedOtSpansByEmp.set(r.employee_id, list)
+  }
 
   // pending leave requests overlapping the period
   const pendData = await selectAllPages<{ employee_id: string }>(
@@ -1376,10 +1383,14 @@ function anomalyContextFor(employeeId: string, facts: MonthFacts): AnomalyContex
       ...(adFlags.compDayOwed ? { compDayOwed: adFlags.compDayOwed } : {}),
     })
   }
-  const approvedOtDates = new Set<DateKey>()
-  for (let d = facts.from; d <= facts.to; d = addDaysKey(d, 1)) {
-    if (facts.approvedOtByKey.has(`${employeeId}|${d}`)) approvedOtDates.add(d)
-  }
+  // 已核准日：加班單時段與當日出勤時段（first_in～last_out，跨午夜併入上班日）重疊才算；缺卡日退回覆蓋日。
+  const approvedOtDates = approvedOtDatesFor(
+    facts.approvedOtSpansByEmp.get(employeeId) ?? [],
+    punchFacts ?? new Map(),
+    facts.tz,
+    facts.from,
+    facts.to,
+  )
   return {
     tz: facts.tz,
     rules: facts.rules,

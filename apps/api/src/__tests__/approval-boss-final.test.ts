@@ -266,7 +266,7 @@ describe("老闆本人送單：仍一定有老闆關（第二輪 M4）", () => {
 describe("請假、加班、補卡不受影響（仍是直屬主管單關）", () => {
   it.each([
     ["請假", { kind: "leave", leaveTypeId: LT_ID, hours: 8, ...WHEN }],
-    ["加班", { kind: "ot", payout: "pay", hours: 2, ...WHEN }],
+    ["加班", { kind: "ot", payout: "pay", hours: 8, ...WHEN }], // 2026-11-01：hours 須與起訖差一致（伺服器驗證）,
     [
       "補卡",
       {

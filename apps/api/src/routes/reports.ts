@@ -8,7 +8,7 @@ import { chunk, fetchAllPages } from "../lib/select-all-pages.js"
 import { toCsv, type CsvColumn } from "../lib/csv.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { dayWindowUtc } from "../lib/tz.js"
-import { loadUnapprovedOvertimeReport } from "../services/overtime-approval.js"
+import { loadUnapprovedOvertimeReport } from "../services/unapproved-overtime-report.js"
 
 export const reportsRouter = Router()
 
@@ -578,7 +578,8 @@ reportsRouter.get(
 // --- /reports/unapproved-overtime --------------------------------------------
 
 const unapprovedOvertimeQuery = z.object({
-  period: z.string().regex(periodRe, "period must be YYYY-MM"),
+  // 月份必須是 01–12（2026-13、2026-00 → 400 invalid_query）。
+  period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, "period must be YYYY-MM (month 01–12)"),
   format: z.string().optional(),
 })
 

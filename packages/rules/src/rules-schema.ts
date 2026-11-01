@@ -155,6 +155,9 @@ export type FixedHolidayPay = z.infer<typeof FixedHolidayPaySchema>;
 //   beyondCap         超過上限的處理 (省略 = settle_separately)
 //   regularLeavePay   例假出勤加發計法 (省略 = max_rest_day)
 //   fixedHolidayPay   國定假日出勤加發計法 (省略 = statutory)
+//   requirePreApproval 加班事前核准制 (2026-11-01;省略 = false)。true 時 API 才判月表 overtime_unapproved、
+//                     打卡提醒/主管通知、加班單核准上限 (月 monthlyCapHours、日 12h)。只看該月選到的規則版本,
+//                     所以由版本生效日控制從哪個月開始,歷史月份不受影響。引擎本身不讀。
 const OvertimeSchema = z.object({
   rules: z.array(OvertimeRuleSchema),
   rounding: OvertimeRoundingSchema.optional(),
@@ -166,6 +169,7 @@ const OvertimeSchema = z.object({
   beyondCap: OvertimeBeyondCapSchema.optional(),
   regularLeavePay: RegularLeavePaySchema.optional(),
   fixedHolidayPay: FixedHolidayPaySchema.optional(),
+  requirePreApproval: z.boolean().optional(),
 });
 
 // 夜間加給：window 時段視窗 ("HH:MM"，允許跨午夜如 00:00–08:30)，multiplier 倍率。
@@ -424,7 +428,9 @@ export function resolveOvertimeRule(rules: RuleConfig, when: OvertimeWhen): Over
   return when === "regular_leave" ? DEFAULT_REGULAR_LEAVE_RULE : undefined;
 }
 export const DEFAULT_OVERTIME_DAILY_CAP_MINUTES = 240;
-export const DEFAULT_OVERTIME_MONTHLY_ALERT_HOURS: readonly number[] = [36, 40, 46];
+// 2026-11-01 加班事前核准制：達月上限（monthlyCapHours 預設 40）前提醒——30、36 提醒，40 為上限（原 36/40/46）。
+// 只供 API 判月級提醒異常（monthly_ot_threshold）與首頁卡顯示，引擎不讀，不影響任何金額。
+export const DEFAULT_OVERTIME_MONTHLY_ALERT_HOURS: readonly number[] = [30, 36, 40];
 export const DEFAULT_HOURLY_WAGE_DIVISOR = 240;
 export const DEFAULT_REQUIRE_APPROVED_SHEET = false;
 export const DEFAULT_REQUIRE_ANOMALY_ACK = true;
@@ -546,6 +552,11 @@ export function resolveOvertimeBasis(rules: RuleConfig): OvertimeBasis {
 /** 月加班上限 (小時;省略 → 40)。 */
 export function resolveOvertimeMonthlyCapHours(rules: RuleConfig): number {
   return rules.overtime.monthlyCapHours ?? DEFAULT_OVERTIME_MONTHLY_CAP_HOURS;
+}
+
+/** 加班事前核准制 (省略 → false:沒設的規則版本一律不判,歷史月份不會突然冒出異常)。 */
+export function resolveOvertimeRequirePreApproval(rules: RuleConfig): boolean {
+  return rules.overtime.requirePreApproval === true;
 }
 
 export const DEFAULT_REGULAR_LEAVE_PAY: RegularLeavePay = "max_rest_day";

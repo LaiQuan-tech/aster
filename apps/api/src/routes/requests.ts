@@ -6,7 +6,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
 import { applyApprovalEffects } from "../services/ledger.js"
-import { checkOtRequestCaps, type OtCapExceeded } from "../services/overtime-approval.js"
+import { checkOtRequestCaps, splitMinutesByLocalDay, validateOtRequestTimes, type OtCapExceeded } from "../services/overtime-approval.js"
 import { findSheet, recomputeSheet } from "../services/attendance-sheets.js"
 import { resolveApproverChain, type StepKind } from "../services/approval-chain.js"
 import { enrichRequestRows } from "../services/request-enrich.js"
@@ -680,7 +680,7 @@ requestsRouter.post(
       leaveTypeId,
       startAt,
       endAt,
-      hours,
+      hours: hoursInput,
       reason,
       agentName,
       payout,
@@ -716,6 +716,24 @@ requestsRouter.post(
       // → 409 `{ error: "period_closed", period }`（services/period-lock.ts；全域錯誤處理轉成回應）。
       await assertRequestOpen(tenantId, { start_at: startAt, end_at: endAt, segments })
 
+      // 加班單時數以伺服器算的起訖差為準（2026-11-01 驗收）：用戶端 hours 由員工自填，可送 0／負數繞過上限、
+      // 又讓整段日期算成「已核准」。起訖顛倒 → 400 invalid_ot_range；跨度 > 24h → 400 ot_span_too_long；
+      // 帶了 hours 但 ≤ 0 或與起訖差相差超過 1 分鐘 → 400 invalid_ot_hours（附 expectedHours）。
+      // 通過後一律寫入伺服器算的時數（加班單沒有扣休息的既有邏輯，員工端表單本來就送起訖差）。
+      let hours = hoursInput
+      if (kind === "ot") {
+        const v = validateOtRequestTimes(startAt, endAt, hoursInput ?? null)
+        if (!v.ok) {
+          res.status(400).json({
+            error: v.error,
+            ...(v.expectedHours != null ? { expectedHours: v.expectedHours } : {}),
+            ...(v.maxHours != null ? { maxHours: v.maxHours } : {}),
+          })
+          return
+        }
+        hours = v.hours
+      }
+
       // Resolve the approver chain for this kind (services/approval-chain.ts):
       // 固定名單／直屬主管／主管逐級＋HR 覆核 → 老闆（tenant features）→ 第一位 hr_admin → 409。
       // 零用金與出差／公出一律「主管逐關 → 老闆最後一關」（flowRouteFor，2026-10-11）；
@@ -733,20 +751,18 @@ requestsRouter.post(
       // approver_emp_id（＝第一候選），201 回應仍以記憶體中的鏈回完整候選。
       const multi = await approvalStepsHaveCandidates()
 
-      // 加班事前核准制（2026-11-01）：核准關卡上限——本月「已核准＋本張」> 月上限（規則 monthlyCapHours，
-      // 預設 40h）或當天「正常＋已核准延長＋本張」> 12h → 409 overtime_cap_exceeded，不建單。
-      // 上限檢查本身失敗（規則／時區讀不到）只記 log 放行，不讓一張加班單因系統問題送不出去；
-      // 核准時會再檢查一次。打卡不受影響（出勤照實記、加班費照打卡算）。
+      // 加班事前核准制（2026-11-01）：核准關卡上限——某月「已核准＋本張落在該月」> 月上限（規則 monthlyCapHours，
+      // 預設 40h）或某天「正常＋已核准延長＋本張落在該天」> 12h → 409 overtime_cap_exceeded，不建單。只在該月規則
+      // requirePreApproval=true 時檢查（services/overtime-approval.ts）。檢查本身失敗（規則／DB 讀不到）→ 503
+      // overtime_cap_check_failed（可重試），不默默放行。打卡不受影響（出勤照實記、加班費照打卡算）。
       if (kind === "ot") {
         let capExceeded: OtCapExceeded | null = null
         try {
-          capExceeded = await checkOtRequestCaps({
-            tenantId,
-            employeeId: self.id,
-            request: { start_at: startAt, end_at: endAt, hours: hours ?? null },
-          })
+          capExceeded = await checkOtRequestCaps({ tenantId, employeeId: self.id, request: { start_at: startAt, end_at: endAt } })
         } catch (capErr) {
-          logger.warn({ err: capErr, tenantId, employeeId: self.id }, "POST /requests: overtime cap check failed — allowed")
+          logger.warn({ err: capErr, tenantId, employeeId: self.id }, "POST /requests: overtime cap check failed")
+          res.status(503).json({ error: "overtime_cap_check_failed" })
+          return
         }
         if (capExceeded) {
           res.status(409).json(capExceeded)
@@ -1251,6 +1267,8 @@ const DECISION_ERROR_STATUS: Record<string, number> = {
   period_closed: 409,
   // 加班事前核准制：核准後會超過月上限（40h）或單日 12h（回應帶 limit／capHours／currentHours／requestedHours）。
   overtime_cap_exceeded: 409,
+  // 上限檢查本身失敗（規則／DB 讀不到）：可重試。
+  overtime_cap_check_failed: 503,
 }
 
 async function decide(
@@ -1602,21 +1620,12 @@ async function decideOneRequest(params: {
   // 其他張照常），不丟例外——批次那層會把例外吞成 internal_error。
   const closedPeriods = await closedPeriodsOfRequest(tenantId, lr)
   if (closedPeriods.length > 0) return { ok: false, id: requestId, error: "period_closed", period: closedPeriods[0] }
-  // 加班事前核准制（2026-11-01）：每一關核准前都重算上限（本月已核准〔排除本張〕＋本張 > 月上限，或當天
-  // 正常＋已核准延長＋本張 > 12h）→ 409 overtime_cap_exceeded，關卡不寫入。駁回不受限。檢查失敗只記 log 放行。
+  // 加班事前核准制（2026-11-01）：每一關核准前都重算上限（某月已核准〔排除本張〕＋本張落在該月 > 月上限，或某天
+  // 正常＋已核准延長＋本張落在該天 > 12h；時數用起訖差）→ 409 overtime_cap_exceeded，關卡不寫入。駁回不受限。
+  // 檢查失敗 → 503 overtime_cap_check_failed（可重試），不默默放行。最終核准寫入後另有併發重查（見下）。
   if (action === "approve" && lr.kind === "ot") {
-    let cap: OtCapExceeded | null = null
-    try {
-      cap = await checkOtRequestCaps({
-        tenantId,
-        employeeId: lr.employee_id as string,
-        request: { start_at: lr.start_at as string, end_at: lr.end_at as string, hours: lr.hours ?? null },
-        excludeRequestId: requestId,
-      })
-    } catch (capErr) {
-      logger.warn({ err: capErr, tenantId, requestId }, "decideOneRequest: overtime cap check failed — allowed")
-    }
-    if (cap) return { ok: false, id: requestId, error: "overtime_cap_exceeded", cap }
+    const capOutcome = await otCapOutcome(tenantId, lr, requestId)
+    if (capOutcome) return capOutcome
   }
   // 候選之一（含 platform_admin 簽老闆關）簽核 → approver_emp_id 改寫成實際簽的人（HR 代簽不改寫，見 markStep）。
   const takeOver = isCandidate && step.approver_emp_id !== actor.id
@@ -1793,6 +1802,23 @@ async function decideOneRequest(params: {
     return { ok: false, id: requestId, error: reqFail }
   }
 
+  // 併發防護（2026-11-01 驗收）：同員工兩張加班單同時最終核准，各自的前置檢查都看不到對方。寫成 approved 之後
+  // 以「其他已核准單（含剛被併發核准的）＋本張」再查一次；超過 → 本張退回 pending／本關回 pending，回 409
+  // （或查詢失敗回 503），不做任何核准副作用。兩張同時退回時各自重送一次即可（保守，寧可多退不可超額）。
+  if (lr.kind === "ot") {
+    const after = await otCapOutcome(tenantId, lr, requestId)
+    if (after) {
+      await supabaseAdmin
+        .from("leave_requests")
+        .update({ status: "pending" })
+        .eq("tenant_id", tenantId)
+        .eq("id", requestId)
+        .eq("status", "approved")
+      await revertStep(step, "approved", actor.id)
+      return after
+    }
+  }
+
   await writeAuditLog({
     tenantId,
     tableName: "leave_requests",
@@ -1835,7 +1861,7 @@ async function decideOneRequest(params: {
 
   // 加班事前核准制（2026-11-01）：加班單最終核准 → 該月月表若仍可編輯（draft／returned），立即重算
   // 異常（不重跑結算），overtime_unapproved／overtime_beyond_cap_unapproved 當場消失。best-effort。
-  if (lr.kind === "ot") await refreshOtSheetAfterApproval(tenantId, lr.employee_id as string, lr.start_at as string)
+  if (lr.kind === "ot") await refreshOtSheetAfterApproval(tenantId, lr.employee_id as string, lr.start_at as string, lr.end_at as string)
 
   // M1：加班單最終核准 → 以已核准重算月上限標記；仍超額就在核准通知加一句「另行給付」。
   const approvalBeyondCap =
@@ -1870,16 +1896,42 @@ async function decideOneRequest(params: {
 }
 
 /**
- * 加班單最終核准後刷新該員工該月的月表異常（draft／returned 才動；已送出／核准／鎖定的月表不碰）。
- * 月份以租戶時區的 start_at 歸月（與月表切日一致）。失敗只記 log：核准已成立，下次重算／送出時也會更新。
+ * 加班單上限檢查 → DecisionOutcome（null＝通過）。超限 → overtime_cap_exceeded（409，帶 cap）；
+ * 檢查失敗 → overtime_cap_check_failed（503）。
  */
-async function refreshOtSheetAfterApproval(tenantId: string, employeeId: string, startAt: string): Promise<void> {
+async function otCapOutcome(
+  tenantId: string,
+  lr: { employee_id: unknown; start_at: unknown; end_at: unknown },
+  requestId: string,
+): Promise<DecisionOutcome | null> {
+  try {
+    const cap = await checkOtRequestCaps({
+      tenantId,
+      employeeId: lr.employee_id as string,
+      request: { start_at: lr.start_at as string, end_at: lr.end_at as string },
+      excludeRequestId: requestId,
+    })
+    return cap ? { ok: false, id: requestId, error: "overtime_cap_exceeded", cap } : null
+  } catch (err) {
+    logger.warn({ err, tenantId, requestId }, "decideOneRequest: overtime cap check failed")
+    return { ok: false, id: requestId, error: "overtime_cap_check_failed" }
+  }
+}
+
+/**
+ * 加班單最終核准後刷新該員工月表異常：起訖涉及的**每個月**（租戶時區）都重算，只動 draft／returned
+ * （已送出／核准／鎖定的月表不碰）。失敗只記 log：核准已成立，下次重算／送出時也會更新。
+ */
+async function refreshOtSheetAfterApproval(tenantId: string, employeeId: string, startAt: string, endAt: string): Promise<void> {
   try {
     const tz = await getTenantTimezone(tenantId)
-    const period = localDateKey(startAt, tz).slice(0, 7)
-    const sheet = await findSheet(tenantId, employeeId, period)
-    if (!sheet || (sheet.status !== "draft" && sheet.status !== "returned")) return
-    await recomputeSheet(tenantId, sheet.id, { settle: false })
+    const periods = new Set([localDateKey(startAt, tz).slice(0, 7)])
+    for (const d of splitMinutesByLocalDay(startAt, endAt, tz).keys()) periods.add(d.slice(0, 7))
+    for (const period of periods) {
+      const sheet = await findSheet(tenantId, employeeId, period)
+      if (!sheet || (sheet.status !== "draft" && sheet.status !== "returned")) continue
+      await recomputeSheet(tenantId, sheet.id, { settle: false })
+    }
   } catch (err) {
     logger.warn({ err, tenantId, employeeId }, "decideOneRequest: refresh attendance sheet after ot approval failed")
   }

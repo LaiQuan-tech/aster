@@ -15,6 +15,7 @@ import {
   resolveOvertimeDailyCapMinutes,
   resolveOvertimeMealBreak,
   resolveOvertimeMonthlyAlertHours,
+  resolveOvertimeRequirePreApproval,
   resolveOvertimeRounding,
   resolvePayrollGates,
 } from "../rules-schema";
@@ -984,7 +985,9 @@ describe("規則五 亞斯特 115-06 五份出勤表", () => {
       });
       expect(resolveOvertimeMealBreak(legacy)).toEqual({ mode: "auto", afterMinutes: 180, deductMinutes: 30 });
       expect(resolveOvertimeDailyCapMinutes(legacy)).toBe(240);
-      expect(resolveOvertimeMonthlyAlertHours(legacy)).toEqual([36, 40, 46]);
+      // 2026-11-01：備用預設改 30/36/40（與 DEFAULT_RULE_CONFIG 一致；只影響月級提醒，不影響金額）
+      expect(resolveOvertimeMonthlyAlertHours(legacy)).toEqual([30, 36, 40]);
+      expect(resolveOvertimeRequirePreApproval(legacy)).toBe(false);
       expect(resolveHourlyWageDivisor(legacy)).toBe(240);
       expect(resolvePayrollGates(legacy)).toEqual({
         requireApprovedSheet: false,

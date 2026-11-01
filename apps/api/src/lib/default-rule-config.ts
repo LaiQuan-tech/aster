@@ -26,7 +26,9 @@ import {
  *   regular_leave_work（例假出勤）異常，requireAnomalyAck 開著時要填說明才能跑薪資。
  *   要完全照新版（法定整套＋照分鐘＋晚餐勾選）得另外存一版新規則。
  * 其餘：單日加班上限 240 分與月累計警示 30/36/40 小時（2026-11-01 加班事前核准制：達月上限 40h 前先提醒；
- * 原 36/40/46）只供異常判定不裁切、時薪 = 本薪 ÷ 240、
+ * 原 36/40/46）只供異常判定不裁切；加班事前核准制 overtime.requirePreApproval **刻意不設（＝false）**：沒存過規則的
+ * 租戶每個月（含歷史月份）都吃這份預設，設 true 會讓舊月份重算時突然冒出 overtime_unapproved error、擋薪資。
+ * 要啟用請存一版新規則並指定生效日（正式租戶 v2 自 2026-11-01 起開啟）、時薪 = 本薪 ÷ 240、
  * 22:00–06:00 夜間、月薪制 8h 正常工時。Tenants override any of this via PUT /rule-config.
  */
 export const DEFAULT_RULE_CONFIG: RuleConfig = {
