@@ -192,6 +192,57 @@ describe("3. 上限：建立 409、核准 409、批次結構、503、併發回�
     expect((fake.db.approval_steps ?? []).find((s) => s.request_id === id)?.decision).toBe("pending")
   })
 
+  it("併發重查超過、但退回 pending 的寫入失敗 → 500（不回 409），寫一筆退回失敗稽核", async () => {
+    const id = await filePending("2026-10-24", 13, 18)
+    const original = fake.from.bind(fake)
+    let injected = false
+    vi.spyOn(supabaseAdmin, "from").mockImplementation((t: string) => {
+      const builder = original(t)
+      if (t !== "leave_requests") return builder
+      const update = builder.update
+      builder.update = (value: Row) => {
+        if (value?.status === "approved" && !injected) {
+          injected = true
+          fake.db.leave_requests.push(approvedOt("ot-race", "2026-10-28", 18, 23))
+        }
+        if (value?.status === "pending") fake.injectError({ table: "leave_requests", action: "update", error: { message: "write failed" } })
+        return update(value)
+      }
+      return builder
+    })
+    const res = await post(`/requests/${id}/approve`, MGR_TOKEN).send({})
+    expect(res.status, JSON.stringify(res.body)).toBe(500)
+    expect(res.body.error).toContain("overtime_cap_recheck_revert_failed")
+    expect(requestRow(id).status).toBe("approved")
+    const audits = (fake.db.audit_logs ?? []).filter((r) => r.record_id === id)
+    expect(audits.some((r) => String(r.context).startsWith("overtime cap recheck revert FAILED"))).toBe(true)
+    // 沒有走到核准成功的稽核（「最終核准（第 N 關…）」）
+    expect(audits.some((r) => String(r.context).startsWith("最終核准（"))).toBe(false)
+  })
+
+  it("併發重查成功退回 → audit_logs 有 overtime cap recheck reverted approval", async () => {
+    const id = await filePending("2026-10-24", 13, 18)
+    const original = fake.from.bind(fake)
+    let injected = false
+    vi.spyOn(supabaseAdmin, "from").mockImplementation((t: string) => {
+      const builder = original(t)
+      if (t !== "leave_requests") return builder
+      const update = builder.update
+      builder.update = (value: Row) => {
+        if (value?.status === "approved" && !injected) {
+          injected = true
+          fake.db.leave_requests.push(approvedOt("ot-race", "2026-10-28", 18, 23))
+        }
+        return update(value)
+      }
+      return builder
+    })
+    const res = await post(`/requests/${id}/approve`, MGR_TOKEN).send({})
+    expect(res.status).toBe(409)
+    const audit = (fake.db.audit_logs ?? []).find((r) => r.record_id === id && String(r.context).startsWith("overtime cap recheck reverted approval"))
+    expect(audit).toMatchObject({ action: "UPDATE", new_row: { status: "pending" } })
+  })
+
   it("沒超過 → 正常核准 200", async () => {
     const id = await filePending("2026-10-27", 18, 22)
     const res = await post(`/requests/${id}/approve`, MGR_TOKEN).send({})

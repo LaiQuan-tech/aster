@@ -1808,13 +1808,39 @@ async function decideOneRequest(params: {
   if (lr.kind === "ot") {
     const after = await otCapOutcome(tenantId, lr, requestId)
     if (after) {
-      await supabaseAdmin
+      const { error: revertErr } = await supabaseAdmin
         .from("leave_requests")
         .update({ status: "pending" })
         .eq("tenant_id", tenantId)
         .eq("id", requestId)
         .eq("status", "approved")
+        .select("id")
+      if (revertErr) {
+        // 退不回去＝這張單仍是 approved 而且超過上限：不能回 409 假裝已退回。記 error、寫稽核、回 500 讓人處理。
+        logger.error({ err: revertErr, tenantId, requestId }, "decideOneRequest: overtime cap recheck failed to revert approval")
+        await writeAuditLog({
+          tenantId,
+          tableName: "leave_requests",
+          recordId: requestId,
+          action: "UPDATE",
+          actorEmpId: actor.id,
+          context: "overtime cap recheck revert FAILED：最終核准後重查超過上限，退回 pending 失敗，單子仍為 approved",
+          oldRow: { status: "approved" },
+          newRow: { status: "approved", revertError: revertErr.message, recheck: after.cap ?? after.error },
+        })
+        return { ok: false, id: requestId, error: "overtime_cap_recheck_revert_failed" }
+      }
       await revertStep(step, "approved", actor.id)
+      await writeAuditLog({
+        tenantId,
+        tableName: "leave_requests",
+        recordId: requestId,
+        action: "UPDATE",
+        actorEmpId: actor.id,
+        context: "overtime cap recheck reverted approval：最終核准寫入後重查超過加班上限（併發核准），退回 pending、本關回 pending",
+        oldRow: { status: "approved", current_step: currentStep },
+        newRow: { status: "pending", current_step: currentStep, recheck: after.cap ?? after.error },
+      })
       return after
     }
   }
@@ -1903,7 +1929,7 @@ async function otCapOutcome(
   tenantId: string,
   lr: { employee_id: unknown; start_at: unknown; end_at: unknown },
   requestId: string,
-): Promise<DecisionOutcome | null> {
+): Promise<Extract<DecisionOutcome, { ok: false }> | null> {
   try {
     const cap = await checkOtRequestCaps({
       tenantId,
