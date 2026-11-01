@@ -60,6 +60,7 @@ import { getMeCached, invalidateEssState } from "@/lib/ess-state";
 // 標記文案與 ESS「我的申請」共用一份（純字串常數，不牽連 ESS 的資料層）。
 import { BEYOND_CAP_LABEL } from "@/lib/request-forms";
 import { errorMessageOf, periodClosedMessage } from "@/lib/period-closed";
+import { overtimeCapErrorText } from "@/lib/overtime-approval";
 import {
   BUCKET_LABEL,
   KIND_LABEL,
@@ -102,7 +103,8 @@ const BUCKET_TONE: Record<ApprovalBucket, PillTone> = {
 function errMsg(err: unknown, fallback: string): string {
   // 單筆／代理簽核遇到 403 own_request（不能簽自己的單）→ 中文，不秀錯誤碼。
   if (isOwnRequestError(err)) return OWN_REQUEST_TEXT;
-  return errorMessageOf(err, fallback);
+  // 409 overtime_cap_exceeded（加班單核准會超過月 40／日 12 小時上限）→ 帶數字的人話。
+  return overtimeCapErrorText(err, "核准") ?? errorMessageOf(err, fallback);
 }
 
 function dateOnly(iso: string): string {

@@ -7,6 +7,7 @@
  */
 import { useId, useRef, type ChangeEvent, type ReactNode } from "react";
 import { friendlyError } from "@/lib/attendance-sheets-api";
+import { overtimeCapErrorText } from "@/lib/overtime-approval";
 import type { CreateRequestBody } from "@/lib/ess-api";
 import {
   EXPENSE_METHOD_FIELD_LABEL,
@@ -45,7 +46,8 @@ const HAS_CJK_RE = /[\u3000-\u9fff\uff00-\uffef]/;
  */
 export function describeError(err: unknown, fallback: string): string {
   if (isNetworkFailure(err)) return NETWORK_FAILURE_MESSAGE;
-  const text = attachmentTooLargeText(err) ?? requestErrorText(err) ?? friendlyError(err, fallback);
+  // 409 overtime_cap_exceeded（2026-11 加班事前核准制：月 40／日 12 小時上限）→ 帶數字的人話。
+  const text = overtimeCapErrorText(err, "送出") ?? attachmentTooLargeText(err) ?? requestErrorText(err) ?? friendlyError(err, fallback);
   // friendlyError 查不到對照時會把 Error.message 原樣丟回來；原樣又沒有半個中文字＝英文代碼，不上畫面。
   if (err instanceof Error && text === err.message && !HAS_CJK_RE.test(text)) {
     console.warn("[申請] 無法辨識的錯誤，畫面只顯示通用說法", err);

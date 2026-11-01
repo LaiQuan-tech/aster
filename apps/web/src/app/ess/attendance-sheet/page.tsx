@@ -14,6 +14,7 @@ import {
   listAttendanceSheets,
   patchAttendanceSheetDay,
   submitAttendanceSheet,
+  dayAnomalyText,
   friendlyError,
   mergeDayPatch,
   unacknowledgedErrors,
@@ -221,7 +222,7 @@ export default function AttendanceSheetPage() {
                   <ul className="list-disc space-y-0.5 pl-4">
                     {blockers.map((b, i) => (
                       <li key={`${b.date}-${i}`}>
-                        {b.date}：{b.anomaly.message}
+                        {b.date}：{dayAnomalyText(b.anomaly)}
                       </li>
                     ))}
                   </ul>

@@ -518,6 +518,16 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       desc: "出勤、請假/表單、薪資與人力快照報表：可篩選、可預覽表格、可下載 CSV。",
     },
     {
+      // 2026-11 加班事前核准制：有加班分鐘、卻沒有已核准加班單的日子（GET /reports/unapproved-overtime）。
+      // 權限同其他 HR 報表（API requireHrAdmin）→ hrOnly：會計即使自訂範圍含系統分區也不列、直開擋下。
+      key: "unapprovedOvertime",
+      label: "未核准加班",
+      href: "/admin/reports/unapproved-overtime",
+      title: "未核准加班報表",
+      desc: "有加班分鐘、但沒有事前核准加班單的日子（休息日／國定假日／例假／平日），依月份列出每位員工；可展開看每天明細、匯出 CSV。",
+      hrOnly: true,
+    },
+    {
       key: "dashboard",
       label: "人力分析",
       href: "/admin/dashboard",

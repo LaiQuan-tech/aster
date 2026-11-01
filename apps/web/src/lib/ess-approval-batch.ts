@@ -13,6 +13,7 @@
  */
 import { apiFetch, type ApiError } from "./api-client";
 import { PERIOD_CLOSED_CODE, periodClosedMessage, periodClosedPeriod } from "./period-closed";
+import { OVERTIME_CAP_CODE, overtimeCapFromBody, overtimeCapMessage } from "./overtime-approval";
 
 export type BatchAction = "approve" | "reject";
 
@@ -24,6 +25,11 @@ export type BatchItemResult =
       error: string;
       /** `error: "period_closed"`（這張單碰到已發薪鎖定的月份）時伺服器附的最早已結算月 'YYYY-MM'。 */
       period?: string;
+      /** `error: "overtime_cap_exceeded"`（2026-11 加班核准上限）時伺服器可能附的數字；沒附就用通用說法。 */
+      limit?: "monthly" | "daily";
+      capHours?: number;
+      currentHours?: number;
+      requestedHours?: number;
     };
 
 export interface BatchDecisionResponse {
@@ -124,6 +130,7 @@ const ERROR_TEXT: Record<string, string> = {
   not_pending: "這張單已被處理過（或已撤回），請重新整理。",
   not_found: "找不到這張單，可能已被註銷。",
   attachment_required: "此假別需要附件，申請人尚未上傳，無法核准（可駁回請其補件）。",
+  [OVERTIME_CAP_CODE]: "這張加班單會超過加班上限（每月 40 小時／每日工時 12 小時），無法核准。",
   current_step_not_found: "這張單的簽核關卡資料有問題，請聯絡人資。",
   internal_error: "系統暫時無法處理這張單，結果不確定，請重新整理確認。",
   no_result: "伺服器沒有回報這張單的結果，請重新整理確認。",
@@ -180,7 +187,9 @@ export function summarizeBatch(
       okCount += 1;
       if (action === "approve" && result.status === "pending") advancedCount += 1;
     } else {
-      failures.push({ id: result.id, label: labelOf(result.id), reason: describeBatchError(result.error, result.period) });
+      // 加班上限：伺服器有附數字就用帶數字的人話（同單筆核准），沒附走 describeBatchError 的通用說法。
+      const cap = result.error === OVERTIME_CAP_CODE && result.capHours !== undefined ? overtimeCapFromBody(result) : null;
+      failures.push({ id: result.id, label: labelOf(result.id), reason: cap ? `${overtimeCapMessage(cap, "核准")}。` : describeBatchError(result.error, result.period) });
     }
   }
   return { action, total: results.length, okCount, failedCount: failures.length, advancedCount, failures };

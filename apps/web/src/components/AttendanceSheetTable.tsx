@@ -14,6 +14,7 @@ import {
   type SheetFilterScope,
 } from "@/lib/attendance-day-filter";
 import {
+  dayAnomalyText,
   friendlyError,
   otTierLabelsOf,
   visibleMonthAnomalies,
@@ -645,10 +646,10 @@ function AnomalyCell({
         {day.anomalies.map((anomaly, i) => (
           <span
             key={`${anomaly.code}-${i}`}
-            title={anomaly.message}
-            className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${SEVERITY_STYLE[anomaly.severity]}`}
+            title={dayAnomalyText(anomaly)}
+            className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${SEVERITY_STYLE[anomaly.severity] ?? SEVERITY_STYLE.info}`}
           >
-            {anomaly.message}
+            {dayAnomalyText(anomaly)}
           </span>
         ))}
       </div>

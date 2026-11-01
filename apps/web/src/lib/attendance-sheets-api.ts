@@ -64,7 +64,9 @@ export type AnomalyCode =
   /** 單日正常＋延長工時超過 12 小時（error）。 */
   | "daily_over_12h"
   /** 月延長工時累計跨過 46 小時的那天（error）。 */
-  | "monthly_ot_over_46h";
+  | "monthly_ot_over_46h"
+  /** 2026-11 加班事前核准制：這天有加班分鐘，但沒有已核准的加班單（error；加班費照算）。 */
+  | "overtime_unapproved";
 
 export interface SheetAnomaly {
   code: AnomalyCode;
@@ -512,6 +514,29 @@ export const MONTH_ANOMALY_FALLBACK_TEXT: Partial<Record<AnomalyCode, string>> =
   late_reports_undecided: "本月有遲到說明老闆尚未決定（視為影響全勤）",
   no_salary_structure: "尚未設定薪資結構，無法試算金額",
 };
+
+/**
+ * 日級異常的中文標籤（API message 空白時用；顏色一律依 severity，與其他 error 異常一致）。
+ * 目前日級異常 API 都會帶中文 message，這張表是新代碼上線初期／舊快照缺 message 時的保險。
+ */
+export const DAY_ANOMALY_FALLBACK_TEXT: Partial<Record<AnomalyCode, string>> = {
+  overtime_unapproved: "加班未事前核准",
+  overtime_beyond_cap_unapproved: "超過月加班上限且未核准",
+  regular_leave_work: "例假出勤",
+  daily_over_12h: "單日工時超過 12 小時",
+  monthly_ot_over_46h: "月加班超過 46 小時",
+  seven_day_rule: "連續出勤超過 6 天",
+};
+
+/** 日級異常要顯示的文字：API 的 message；空白時用代碼對照的中文；都沒有就用代碼原文。 */
+export function dayAnomalyText(anomaly: { code?: unknown; message?: unknown }): string {
+  if (typeof anomaly.message === "string" && anomaly.message.trim()) return anomaly.message.trim();
+  const code = typeof anomaly.code === "string" ? anomaly.code : "";
+  const byCode = Object.prototype.hasOwnProperty.call(DAY_ANOMALY_FALLBACK_TEXT, code)
+    ? DAY_ANOMALY_FALLBACK_TEXT[code as AnomalyCode]
+    : undefined;
+  return byCode ?? code;
+}
 
 /** 代碼也不認得時的通用說法。 */
 export const MONTH_ANOMALY_GENERIC_TEXT = "本月出勤有一項需要留意的狀況";

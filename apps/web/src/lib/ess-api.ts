@@ -97,6 +97,11 @@ export interface PunchResult {
   dinnerTaken?: boolean | null;
   /** 2026-10-26：同一個 clientRequestId 的重送，伺服器回原本那筆（HTTP 200），沒有新增。 */
   deduplicated?: boolean;
+  /**
+   * 2026-11 加班事前核准制：今天的打卡落在需要核准加班單的日子、卻沒有已核准的加班單（打卡照常成功）。
+   * 舊 API 沒有這欄；讀取一律經 lib/overtime-approval.ts 的 overtimeNoticeOf（容忍缺欄位／kind 不認得）。
+   */
+  overtimeNotice?: { kind: "unapproved_overtime_day" | "regular_leave_day"; dayType: string; message: string };
 }
 
 /**

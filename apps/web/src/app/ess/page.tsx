@@ -14,6 +14,7 @@ import {
   type PunchResult,
 } from "@/lib/ess-api";
 import { fmtHm, todayKey, weekdayLabel } from "@/lib/ess-format";
+import { overtimeNoticeOf, overtimeRequestHref, type OvertimeNotice } from "@/lib/overtime-approval";
 import { LATE_REASON_MAX, lateReasonError, lateReasonPrompt } from "@/lib/late-reason";
 import {
   PENDING_FIX_PUNCH_CELL_SUFFIX,
@@ -58,7 +59,7 @@ import {
 import { getMeCached, peekMeCached } from "@/lib/ess-state";
 import { WFH_SUFFIX, browserStorage, hasWfhPunch, readWfhChoice, wfhPunchEnabled, writeWfhChoice } from "@/lib/wfh-punch";
 import { dinnerBodyFor, showDinnerCheckbox, type DinnerPrompt } from "@/lib/dinner-prompt";
-import { BottomSheet, Button, Card, Icon, InlineError, Textarea, useToast } from "@/components/ess-ui";
+import { BottomSheet, Button, Card, Icon, InlineError, Textarea, buttonClass, useToast } from "@/components/ess-ui";
 import { OvertimeCapCard } from "./_components/OvertimeCapCard";
 import { DutyTodayCard } from "./_components/DutyTodayCard";
 
@@ -373,6 +374,8 @@ function PunchCard({
   dinner,
   onDinnerChange,
   lateCancelBanner,
+  overtimeNotice,
+  onDismissOvertimeNotice,
 }: {
   summary: PendingAwareSummary;
   loading: boolean;
@@ -400,6 +403,9 @@ function PunchCard({
   onDinnerChange: (checked: boolean) => void;
   /** 今天按過遲到理由的「取消」、上班卡還沒打成功 → 持續橫幅（2026-10-26）。 */
   lateCancelBanner: boolean;
+  /** 2026-11 加班事前核准制：打卡成功但這天的加班沒有已核准的加班單（或今天是例假）。 */
+  overtimeNotice: { notice: OvertimeNotice; date: string } | null;
+  onDismissOvertimeNotice: () => void;
 }) {
   // 按鈕由 punchCardActions 決定（lib/punch-state.ts）：除了送出中，永遠有可按的打卡鈕；上班中第一顆一定是
   // 「下班打卡」；載入失敗／逾時（狀態不明）→「上班打卡」「下班打卡」兩顆都可按。勾選框不影響按鈕。
@@ -472,6 +478,9 @@ function PunchCard({
           {notice}
         </p>
       )}
+      {overtimeNotice && (
+        <OvertimeNoticeBanner notice={overtimeNotice.notice} date={overtimeNotice.date} onDismiss={onDismissOvertimeNotice} />
+      )}
       {loadError && (
         <div className="mt-3 flex flex-col items-center gap-2">
           <InlineError>{loadError}</InlineError>
@@ -494,6 +503,40 @@ function PunchCard({
       {/* 告知：打卡會存座標（GPS）與來源 IP（後端 POST /punch 記 punch_records.ip_address），IP 只有 HR 看得到。 */}
       <p className="mt-2 text-center text-xs text-gray-500">打卡時會記錄位置與網路 IP，供公司查核出勤</p>
     </Card>
+  );
+}
+
+/* ---------------------------------------------- OvertimeNoticeBanner --- */
+
+/**
+ * 打卡成功後的加班提醒（2026-11 加班事前核准制；打卡本身照常顯示成功）：
+ *   - unapproved_overtime_day：黃色警示＋「送加班單」（員工加班申請頁，預選打卡當天）。
+ *   - regular_leave_day：紅色強烈警示（例假依法不得出勤）。
+ */
+function OvertimeNoticeBanner({ notice, date, onDismiss }: { notice: OvertimeNotice; date: string; onDismiss: () => void }) {
+  const severe = notice.kind === "regular_leave_day";
+  return (
+    <div
+      role="alert"
+      className={
+        severe
+          ? "mt-3 rounded-xl border-2 border-red-300 bg-red-50 px-4 py-3 text-red-800"
+          : "mt-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900"
+      }
+    >
+      <p className="text-sm font-semibold">{severe ? "今天是例假日，請立即告知主管" : "加班尚未核准"}</p>
+      <p className="mt-1 text-sm">{notice.message}</p>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {!severe && (
+          <Link href={overtimeRequestHref(date)} className={buttonClass("primary", "sm")} style={{ backgroundColor: "var(--brand)" }}>
+            送加班單
+          </Link>
+        )}
+        <Button variant="ghost" size="sm" onClick={onDismiss}>
+          知道了
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -649,6 +692,8 @@ export default function EssHome() {
   const [punchError, setPunchError] = useState<string | null>(null);
   /** 預檢發現狀態變了、沒送出時的提示（下一次按打卡時清掉）。 */
   const [punchNotice, setPunchNotice] = useState<string | null>(null);
+  /** 2026-11 加班事前核准制：打卡成功回來的 overtimeNotice（＋打卡當天，給「送加班單」預選日期）；下一次按打卡或按「知道了」清掉。 */
+  const [overtimeNotice, setOvertimeNotice] = useState<{ notice: OvertimeNotice; date: string } | null>(null);
   const [hintCount, setHintCount] = useState(0);
   // 遲到理由對話框：伺服器回 late_reason_required 時打開；pendingBody＝剛才那次打卡的內容（含定位），
   // 送出理由時原樣重送。
@@ -949,6 +994,9 @@ export default function EssHome() {
       // 重新併一次暫定上班卡：補卡撐起的上班中按了下班 → 今日已下班（上班欄仍顯示待核准的時間）。
       // 冪等重送回來的是原本那筆（deduplicated）：畫面上已有同一張（同 id）就不再加。
       setRecords((prev) => mergePending(rec.id && prev.some((r) => r.id === rec.id) ? prev : [...prev, rec]));
+      // 打卡照常成功；落在需要事前核准加班單的日子才顯示提醒（舊 API 沒有這欄 → null）。
+      const otNotice = overtimeNoticeOf(res);
+      setOvertimeNotice(otNotice ? { notice: otNotice, date: todayKey() } : null);
       const lateNote = res.lateReport ? "（已送出遲到說明）" : "";
       const wfhNote = res.wfh ? WFH_SUFFIX : "";
       toast.show(`${rec.type === "in" ? "上班" : "下班"}打卡成功 ${fmtHm(rec.punch_at)}${wfhNote}${lateNote}`, "success");
@@ -999,6 +1047,7 @@ export default function EssHome() {
     setPunching(true);
     setPunchError(null);
     setPunchNotice(null);
+    setOvertimeNotice(null);
     try {
       const cached = fixRef.current;
       const fixPromise: Promise<GeoFix | null> =
@@ -1223,6 +1272,8 @@ export default function EssHome() {
         dinner={dinner}
         onDinnerChange={setDinner}
         lateCancelBanner={!loading && lateCancelBanner}
+        overtimeNotice={overtimeNotice}
+        onDismissOvertimeNotice={() => setOvertimeNotice(null)}
       />
       <TodayTimes summary={summary} loading={loading} />
       <OvertimeCapCard />

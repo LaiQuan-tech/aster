@@ -456,6 +456,7 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
     expect(tabsForSection("people", {}, { includeTab: "nope" })).toHaveLength(2);
     expect(tabsForSection("system", null, { includeTab: "ai" }).map((t) => t.key)).toEqual([
       "reports",
+      "unapprovedOvertime",
       "audit",
       "backups",
       "notifications",
@@ -532,9 +533,9 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
     expect(sectionsForRole({ sections: ["home", "system"], tabs: { system: ["nope"] } }).map((s) => s.key)).toEqual(["home"]);
   });
 
-  it("hrOnly 機制保留，但目前沒有分頁帶 hrOnly（集團總覽 2026-10-27 移到首頁；獎金分潤同日併入、改在頁內區塊守門，見 lib/bonus-page-access.ts）", () => {
+  it("hrOnly 目前只有「未核准加班」報表（2026-11；集團總覽 2026-10-27 移到首頁；獎金分潤同日併入、改在頁內區塊守門，見 lib/bonus-page-access.ts）", () => {
     const hrOnlyKeys = (Object.values(ADMIN_TABS).flat() as Array<{ key: string; hrOnly?: boolean }>).filter((t) => t.hrOnly).map((t) => t.key);
-    expect(hrOnlyKeys).toEqual([]);
+    expect(hrOnlyKeys).toEqual(["unapprovedOvertime"]);
     expect(ADMIN_TABS.finance.find((t) => t.key === "bonus")).toMatchObject({ href: "/admin/bonus-sheet" });
     expect(ADMIN_TABS.finance.find((t) => t.key === "bonus")).not.toHaveProperty("hrOnly");
     expect(ADMIN_TABS.finance.find((t) => t.key === "bonus")).not.toHaveProperty("groupFinancials");
@@ -879,8 +880,8 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
     expect(both?.tabs.finance).toEqual(["disbursements"]);
   });
 
-  it("目前沒有 hrOnly 分頁（新增 hrOnly 分頁時，下面的路徑與提示測試會自動涵蓋）", () => {
-    expect(HR_ONLY_TABS.map(({ section, tab }) => `${section}/${tab.key}`)).toEqual([]);
+  it("目前的 hrOnly 分頁只有系統／未核准加班（2026-11；下面的路徑與提示測試會自動涵蓋）", () => {
+    expect(HR_ONLY_TABS.map(({ section, tab }) => `${section}/${tab.key}`)).toEqual(["system/unapprovedOvertime"]);
   });
 
   it("isHrOnlyAdminPath：HR 限定頁（含 query／尾斜線／子路徑）→ true；其他頁、首頁、未知路徑 → false", () => {
@@ -921,5 +922,28 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
     for (const list of Object.values(ACCOUNTANT_DEFAULT_NAV.tabs)) {
       for (const key of keys) expect(list ?? []).not.toContain(key);
     }
+  });
+});
+
+describe("未核准加班報表（2026-11 加班事前核准制）：系統分區、HR／平台管理員限定", () => {
+  it("在系統分區、緊接報表中心；網址解析到自己的分頁（不被 /admin/reports 搶走）", () => {
+    expect(tabsForSection("system", null).map((t) => t.key).slice(0, 2)).toEqual(["reports", "unapprovedOvertime"]);
+    expect(resolveAdminPath("/admin/reports/unapproved-overtime")).toMatchObject({
+      section: "system",
+      tab: "unapprovedOvertime",
+      title: "未核准加班報表",
+      isDetail: false,
+    });
+    expect(resolveAdminPath("/admin/reports")).toMatchObject({ section: "system", tab: "reports" });
+  });
+
+  it("HR／平台管理員看得到、直開放行；會計（預設或自訂含系統分區）都不列、直開擋下", () => {
+    expect(isAdminPathAllowed({ pathname: "/admin/reports/unapproved-overtime", roleNav: null })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/reports/unapproved-overtime", roleNav: ACCOUNTANT_DEFAULT_NAV })).toBe(false);
+    const custom = roleNavOf("accountant", { roles: { accountant: { sections: ["system"] } } });
+    expect(tabsForSection("system", null, { roleNav: custom }).map((t) => t.key)).not.toContain("unapprovedOvertime");
+    expect(isAdminPathAllowed({ pathname: "/admin/reports/unapproved-overtime", roleNav: custom })).toBe(false);
+    expect(isHrOnlyAdminPath("/admin/reports/unapproved-overtime")).toBe(true);
+    expect(configurableTabsForRole("system").map((t) => t.key)).not.toContain("unapprovedOvertime");
   });
 });
