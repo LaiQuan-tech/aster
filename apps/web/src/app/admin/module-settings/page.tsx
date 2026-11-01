@@ -129,6 +129,8 @@ interface OvertimeParamsForm {
   /* 2026-10-17 驗收修正：例假／國定假日加發計法 */
   regularLeavePay: RegularLeavePay;
   fixedHolidayPay: FixedHolidayPay;
+  /* 2026-11 加班事前核准制：overtime.requirePreApproval（省略＝false）。 */
+  requirePreApproval: boolean;
 }
 
 const DEFAULT_OT_FORM: OvertimeParamsForm = {
@@ -140,7 +142,7 @@ const DEFAULT_OT_FORM: OvertimeParamsForm = {
   mealAfterMinutes: "180",
   mealDeductMinutes: "30",
   dailyCapMinutes: "240",
-  monthlyAlertHours: ["36", "40", "46"],
+  monthlyAlertHours: ["30", "36", "40"],
   hourlyWageDivisor: "240",
   fixedHolidayMinChargeHours: "8",
   weekdayTiers: ASTER_STATUTORY_TIERS,
@@ -153,6 +155,7 @@ const DEFAULT_OT_FORM: OvertimeParamsForm = {
   beyondCap: "settle_separately",
   regularLeavePay: "max_rest_day",
   fixedHolidayPay: "statutory",
+  requirePreApproval: false,
 };
 
 function tiersToForm(tiers: OvertimeTier[] | undefined): [TierFormRow, TierFormRow, TierFormRow] {
@@ -166,7 +169,8 @@ function tiersToForm(tiers: OvertimeTier[] | undefined): [TierFormRow, TierFormR
 }
 
 function alertHoursToForm(hours: number[] | undefined): [string, string, string] {
-  const source = hours && hours.length > 0 ? hours : [36, 40, 46];
+  // 與 API 預設一致（2026-11 起 [30, 36, 40]）。
+  const source = hours && hours.length > 0 ? hours : [30, 36, 40];
   const at = (i: number) => (source[i] !== undefined ? String(source[i]) : "");
   return [at(0), at(1), at(2)];
 }
@@ -204,6 +208,7 @@ function hydrateOvertimeForm(config: RuleConfig): OvertimeParamsForm {
     // 與 @hr/rules resolveRegularLeavePay／resolveFixedHolidayPay 同一組預設。
     regularLeavePay: ot.regularLeavePay ?? "max_rest_day",
     fixedHolidayPay: ot.fixedHolidayPay ?? "statutory",
+    requirePreApproval: ot.requirePreApproval === true,
   };
 }
 
@@ -762,6 +767,7 @@ export default function ModuleSettingsPage() {
           beyondCap: otForm.beyondCap,
           regularLeavePay: otForm.regularLeavePay,
           fixedHolidayPay: otForm.fixedHolidayPay,
+          requirePreApproval: otForm.requirePreApproval,
         },
         payroll: {
           ...base.payroll,
@@ -1161,7 +1167,7 @@ export default function ModuleSettingsPage() {
                         />
                       ))}
                     </div>
-                    <p className="mt-1 text-xs text-gray-400">預設 36 / 40 / 46 小時，供結算頁分級提醒</p>
+                    <p className="mt-1 text-xs text-gray-400">預設 30 / 36 / 40 小時，供結算頁分級提醒</p>
                   </div>
                 </div>
 
@@ -1303,6 +1309,14 @@ export default function ModuleSettingsPage() {
                       onChange={(e) => patchOt({ requireAnomalyAck: e.target.checked })}
                     />
                     結算薪資前須異常已確認
+                  </label>
+                  <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700 sm:col-span-3">
+                    <input
+                      type="checkbox"
+                      checked={otForm.requirePreApproval}
+                      onChange={(e) => patchOt({ requirePreApproval: e.target.checked })}
+                    />
+                    加班須事前核准（未核准的假日／延長工時出勤列為異常）
                   </label>
                 </div>
 

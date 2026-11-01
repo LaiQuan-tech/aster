@@ -72,6 +72,8 @@ export interface RuleConfigOvertimeExt extends RuleConfigOvertime {
   regularLeavePay?: RegularLeavePay;
   /** 省略 = statutory。 */
   fixedHolidayPay?: FixedHolidayPay;
+  /** 2026-11 加班事前核准制：未核准的假日／延長工時出勤列為異常（overtime_unapproved）。省略 = false。 */
+  requirePreApproval?: boolean;
 }
 
 /**

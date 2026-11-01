@@ -25,7 +25,7 @@ export interface OvertimeCap {
   pendingRequestMinutes?: number;
   /** settled／approved 兩者取大者超過上限的部分（0 = 還沒超；待簽不計）。 */
   beyondCapMinutes: number;
-  /** 法定警示門檻（小時），例如 [36, 40, 46]；前端用來決定顏色。 */
+  /** 法定警示門檻（小時），例如 [30, 36, 40]；前端用來決定顏色。 */
   alertHours: number[];
 }
 

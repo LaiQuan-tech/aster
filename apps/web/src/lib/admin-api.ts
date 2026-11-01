@@ -1695,7 +1695,7 @@ export interface RuleConfigOvertime {
   mealBreak?: OvertimeMealBreak | null;
   /** 單日加班上限（分）；引擎只回傳不裁切，供 API 判異常。省略 = 240。 */
   dailyCapMinutes?: number;
-  /** 月累計加班警示門檻（小時，由小到大）；省略 = [36, 40, 46]。 */
+  /** 月累計加班警示門檻（小時，由小到大）；省略 = [30, 36, 40]（2026-11 起的 API 預設）。 */
   monthlyAlertHours?: number[];
 }
 
