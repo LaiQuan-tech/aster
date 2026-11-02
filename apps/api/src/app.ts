@@ -78,6 +78,10 @@ import { essTabGuard } from "./middleware/ess-tab-guard.js"
 import { periodClosedErrorHandler } from "./middleware/period-closed.js"
 import { privilegeErrorHandler } from "./middleware/privilege-error.js"
 import { runWithRequestContext } from "./lib/request-context.js"
+import { bearerOf, isInternalToken, isLoopbackAddress, resolveInternalIdentity } from "./lib/internal-identity.js"
+import { mcpPublicRouter } from "./routes/mcp-oauth.js"
+import { mcpRouter } from "./routes/mcp.js"
+import { mcpKeysRouter } from "./routes/mcp-keys.js"
 
 const WEB_ORIGINS = (process.env.WEB_ORIGINS ?? "http://localhost:3000")
   .split(",")
@@ -85,6 +89,11 @@ const WEB_ORIGINS = (process.env.WEB_ORIGINS ?? "http://localhost:3000")
   .filter(Boolean)
 
 export const app = express()
+
+// MCP 連接（2026-11-02）：OAuth 中繼資料／DCR／token／撤銷與 /mcp 端點要給 claude.ai、ChatGPT 等外部用戶端打，
+// CORS 與 body parser 自己處理（routes/mcp-oauth.ts、routes/mcp.ts），所以掛在全站 CORS（只放行 WEB_ORIGINS）之前。
+app.use(mcpPublicRouter)
+app.use(mcpRouter)
 
 // CORS — restrict to the configured web origins.
 app.use(
@@ -105,12 +114,25 @@ app.use(express.json({ limit: "12mb" }))
 // `next()` 必須在 run() 內呼叫，Express 5 之後的 middleware／async handler 才會
 // 落在同一個 store。route 延遲解析：req.route.path（'/employees/:id' 這種 pattern）
 // 要到 route 層 match 後才有。
-app.use((req: Request, _res: Response, next: NextFunction) => {
+app.use((req: Request, res: Response, next: NextFunction) => {
+  // MCP 程序內派送（lib/internal-identity.ts）：內部 token 只准 loopback 來源；稽核 context 前面標 [mcp:<用戶端>]，
+  // DB trigger audit_row() 與 writeAuditLog 記的 context 因此都看得出「經由 MCP、哪個用戶端」。
+  const bearer = bearerOf(req.headers.authorization)
+  let via: string | null = null
+  if (isInternalToken(bearer)) {
+    const identity = resolveInternalIdentity(bearer)
+    if (!identity || !isLoopbackAddress(req.socket?.remoteAddress)) {
+      res.status(401).json({ error: "invalid_token" })
+      return
+    }
+    via = identity.via
+  }
   runWithRequestContext(
     {
       route: () => {
         const pattern = (req.route as { path?: unknown } | undefined)?.path
-        return `${req.method} ${typeof pattern === "string" ? pattern : req.path}`
+        const route = `${req.method} ${typeof pattern === "string" ? pattern : req.path}`
+        return via ? `[mcp:${via}] ${route}` : route
       },
     },
     () => next(),
@@ -200,6 +222,8 @@ app.use(internalCronRouter) // /internal/leave/annual-grant、/internal/calendar
 app.use(groupOverviewRouter) // /group-overview、/group-overview/detail（跨公司入帳收入／放款支出／專案毛利；只有在職 platform_admin）
 // 2026-10-27 獎金分潤總表（版面同公司「專案獎金總表」；集團財務權限）
 app.use(bonusSheetRouter) // /bonus-sheet、/bonus-sheet/export.xlsx
+// 2026-11-02 MCP 連接：個人存取金鑰、已授權的 AI 應用（本人自助；MCP 自己不能打這組）
+app.use(mcpKeysRouter) // /me/mcp/keys*、/me/mcp/grants*
 
 // 404 fallback.
 app.use((_req: Request, res: Response) => {

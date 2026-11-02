@@ -99,6 +99,8 @@ export interface AdminTab {
   hrOnly?: boolean;
   /** 集團財務頁（2026-10-26）：只給 /me.canSeeGroupFinancials（老闆／platform_admin／授權 HR）。 */
   groupFinancials?: boolean;
+  /** 個人設定頁（2026-11-02 AI 連接）：管的是登入者自己的東西，任何能進後台的角色都列、直開都放行（不受會計範圍限縮）。 */
+  personal?: boolean;
   detail?: AdminDetailDef;
   /** 有子分頁時，路由由子分頁產生（tab 本身的 href 應等於第一個子分頁的 href）。 */
   children?: AdminSubTab[];
@@ -503,6 +505,15 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       narrow: true,
     },
     {
+      key: "aiAccess",
+      label: "AI 連接",
+      href: "/admin/settings/ai-access",
+      title: "AI 連接（個人）",
+      desc: "在 Claude、ChatGPT 等 AI 工具以你本人的身分操作系統：連接網址、個人存取金鑰、已授權的 AI 應用（隨時可撤銷）",
+      narrow: true,
+      personal: true,
+    },
+    {
       key: "advanced",
       label: "進階功能",
       href: "/admin/settings/advanced",
@@ -893,7 +904,7 @@ export function tabsForSection(
     (tab) =>
       tab.key === keep ||
       (isModuleEnabled(modules, tab.module) &&
-        (!allowedSet || allowedSet.has(tab.key)) &&
+        (!allowedSet || allowedSet.has(tab.key) || tab.personal === true) &&
         !(restricted && tab.hrOnly) &&
         !(noGroupFinancials && tab.groupFinancials)),
   );
@@ -1040,6 +1051,7 @@ export function isAdminPathAllowed(opts: {
   const resolved = resolveAdminPath(path);
   // 未知路徑會退回首頁路由（exact），但 path 不是 /admin → 不放行。
   if (resolved.route.exact || resolved.tab === null) return false;
+  if (ADMIN_TABS[resolved.section].find((tab) => tab.key === resolved.tab)?.personal === true) return true;
   if (!roleNav.sections.includes(resolved.section)) return false;
   return tabsForSection(resolved.section, opts.modules ?? null, { roleNav }).some((tab) => tab.key === resolved.tab);
 }

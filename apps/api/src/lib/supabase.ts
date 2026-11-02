@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 import { getRequestContext } from "./request-context.js"
+import { resolveInternalIdentity, isInternalToken } from "./internal-identity.js"
 
 const url = process.env.SUPABASE_URL ?? ""
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? ""
@@ -62,6 +63,8 @@ export interface AuthedUser {
  */
 export async function getUserFromToken(token: string): Promise<AuthedUser | null> {
   if (!token) return null
+  // MCP 程序內派送（lib/internal-identity.ts）：內部 token 只認本程序登記表，查無就 401，不送去 Supabase。
+  if (isInternalToken(token)) return resolveInternalIdentity(token)?.user ?? null
   const {
     data: { user },
     error,
@@ -71,5 +74,32 @@ export async function getUserFromToken(token: string): Promise<AuthedUser | null
     userId: user.id,
     email: user.email ?? null,
     appMetadata: user.app_metadata ?? {},
+  }
+}
+
+export interface AuthUserRecord extends AuthedUser {
+  /** Supabase Auth 帳號被停權（banned_until 在未來）。 */
+  banned: boolean
+}
+
+/**
+ * 以 service role 讀 Supabase Auth 帳號（MCP 每次請求重新讀：停權、換租戶立即生效）。
+ * 查無或錯誤 → null。
+ */
+export async function getAuthUserById(userId: string): Promise<AuthUserRecord | null> {
+  if (!userId) return null
+  try {
+    const { data, error } = await supabaseAdmin.auth.admin.getUserById(userId)
+    const user = data?.user
+    if (error || !user) return null
+    const bannedUntil = (user as { banned_until?: string | null }).banned_until
+    return {
+      userId: user.id,
+      email: user.email ?? null,
+      appMetadata: user.app_metadata ?? {},
+      banned: !!bannedUntil && Date.parse(bannedUntil) > Date.now(),
+    }
+  } catch {
+    return null
   }
 }

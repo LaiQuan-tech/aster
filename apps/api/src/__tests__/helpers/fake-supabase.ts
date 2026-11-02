@@ -34,6 +34,8 @@
  * ⚠️ 這裡所有識別碼、名稱都是明顯的假值；不要在 repo 裡放真實公司／人名／統編。
  */
 
+import { isInternalToken, resolveInternalIdentity } from "../../lib/internal-identity.js"
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Row = Record<string, any>
 
@@ -379,7 +381,22 @@ export function fakeSupabaseModule() {
       from: (table: string) => fake.from(table),
       rpc: (name: string, args: Row) => fake.rpc(name, args),
     },
-    getUserFromToken: async (token: string) =>
-      token ? { userId: token, email: null, appMetadata: { tenant_id: TENANT_ID } } : null,
+    // MCP 程序內派送的內部 token（lib/internal-identity.ts）照真實行為解析：查得到回登記的身分，查不到 401。
+    getUserFromToken: async (token: string) => {
+      if (isInternalToken(token)) return resolveInternalIdentity(token)?.user ?? null
+      return token ? { userId: token, email: null, appMetadata: { tenant_id: TENANT_ID } } : null
+    },
+    // Supabase Auth 帳號：預設「存在、未停權、租戶＝TENANT_ID」；測試可在 fake.db.__auth_users 放
+    // { id, tenant_id, banned?, missing? } 覆寫（停權、換租戶、帳號刪除）。
+    getAuthUserById: async (userId: string) => {
+      const row = (fake.db.__auth_users ?? []).find((r) => r.id === userId)
+      if (row?.missing) return null
+      return {
+        userId,
+        email: null,
+        appMetadata: { tenant_id: row?.tenant_id ?? TENANT_ID },
+        banned: !!row?.banned,
+      }
+    },
   }
 }

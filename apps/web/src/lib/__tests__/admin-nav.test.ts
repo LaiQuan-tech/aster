@@ -187,6 +187,7 @@ describe("resolveAdminPath：最長前綴", () => {
       "essTabs",
       "site",
       "optionLists",
+      "aiAccess",
       "advanced",
     ]);
     expect(ADMIN_SECTIONS.find((s) => s.key === "settings")?.href).toBe("/admin/leave-types");
@@ -481,13 +482,14 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
     expect(subTabsFor("home", undefined)).toEqual([]);
   });
 
-  it("narrow 只有 shifts／essTabs／site／optionLists／advanced 五頁", () => {
+  it("narrow 只有 shifts／essTabs／site／optionLists／aiAccess／advanced 六頁", () => {
     const narrowRoutes = ADMIN_ROUTES.filter((r) => r.narrow).map((r) => r.prefix);
     expect(narrowRoutes).toEqual([
       "/admin/shifts",
       "/admin/module-settings/ess-tabs",
       "/admin/company-space",
       "/admin/option-lists",
+      "/admin/settings/ai-access",
       "/admin/settings/advanced",
     ]);
     expect(resolveAdminPath("/admin/shifts").narrow).toBe(true);
@@ -508,12 +510,18 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
     for (const key of ["payroll", "payslips", "tax", "cash"]) expect(payroll).not.toContain(key);
     expect(tabsForSection("attendance", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["sheets"]);
     expect(tabsForSection("people", { recruitment: true }, { roleNav: NAV }).map((t) => t.key)).toEqual(["employees"]);
-    // 設定區只開選項清單（客戶分類的管理權限比照客戶名冊的寫入）；假別、班別、規則參數、進階功能等仍是 HR 專屬
-    expect(tabsForSection("settings", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["optionLists"]);
+    // 設定區只開選項清單（客戶分類的管理權限比照客戶名冊的寫入）＋個人頁「AI 連接」（personal：管自己的金鑰，任何角色都有）；
+    // 假別、班別、規則參數、進階功能等仍是 HR 專屬
+    expect(tabsForSection("settings", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["optionLists", "aiAccess"]);
     // 沒列在 tabs 的分區＝該區全部（module 開關照舊）
     expect(tabsForSection("system", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["reports", "audit", "backups", "notifications"]);
     // includeTab 仍強制保留（直開未開放網址時分頁列標「未開放」）
     expect(tabsForSection("payroll", null, { roleNav: NAV, includeTab: "payslips" }).map((t) => t.key)).toEqual(["payslips", "expenses", "advances"]);
+  });
+
+  it("個人頁 AI 連接（personal）：會計範圍再怎麼限縮，直開網址都放行", () => {
+    expect(isAdminPathAllowed({ pathname: "/admin/settings/ai-access", roleNav: { sections: ["home"], tabs: {} } })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/settings/advanced", roleNav: { sections: ["home"], tabs: {} } })).toBe(false);
   });
 
   it("sectionsForRole：null → 9 個分區原樣；會計 → 6 個且 href 改成該區第一個可見分頁", () => {

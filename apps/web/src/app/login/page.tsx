@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { safeNextPath } from "@/lib/mcp-access-api";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
 import { authErrorMessage, validateLoginInput } from "@/lib/auth-error-messages";
 import { useSession } from "@/lib/use-session";
@@ -18,9 +19,15 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  // 登入後要回去的站內頁（例：AI 連接的 OAuth 同意頁帶 ?next=）；只收站內路徑，其他一律回 /ess。
+  const nextPath = (): string => {
+    if (typeof window === "undefined") return "/ess";
+    return safeNextPath(new URLSearchParams(window.location.search).get("next")) ?? "/ess";
+  };
+
   // Already signed in → skip the form.
   useEffect(() => {
-    if (!loading && session) router.replace("/ess");
+    if (!loading && session) router.replace(nextPath());
   }, [loading, session, router]);
 
   // 若之前勾選「記住帳號」，載入時自動帶入 email 並勾起。
@@ -78,7 +85,7 @@ export default function LoginPage() {
       } catch {
         /* localStorage 不可用時略過 */
       }
-      router.replace("/ess");
+      router.replace(nextPath());
     } catch (err) {
       setError(authErrorMessage(err, "sign-in"));
     } finally {

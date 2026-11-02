@@ -35,6 +35,19 @@ const nextConfig: NextConfig = {
   async redirects() {
     return ADMIN_REDIRECTS.map((redirect) => ({ ...redirect, permanent: false }));
   },
+  // AI 連接的 OAuth 同意頁（2026-11-02）不得被別的網站嵌在 iframe 裡（防點擊劫持騙按「同意」）。
+  async headers() {
+    return [
+      {
+        source: "/oauth/:path*",
+        headers: [
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
+          { key: "Referrer-Policy", value: "no-referrer" },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;
