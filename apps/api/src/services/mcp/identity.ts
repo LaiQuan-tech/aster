@@ -60,7 +60,7 @@ export async function resolveMcpIdentity(bearer: string | null): Promise<McpIden
   if (!grant || grant.revoked_at || isExpired(grant.expires_at)) return null
   const account = await checkAccount(grant.tenant_id, grant.user_id)
   if (!account) return null
-  void touchGrant(grant)
+  await touchGrant(grant)
   return {
     user: account.user,
     tenantId: grant.tenant_id,

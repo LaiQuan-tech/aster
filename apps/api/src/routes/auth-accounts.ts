@@ -16,6 +16,7 @@ import {
 import { seedHireAcknowledgements } from "../services/hire-acknowledgements.js"
 import { assertCanManageCredentials, isProtectedAccount, type PrivilegeCaller } from "../services/privileged-accounts.js"
 import { loadPeriodUnlockPolicy } from "../services/period-lock.js"
+import { revokeMcpAccessSafely } from "../services/mcp/revoke.js"
 import { PASSWORD_TOO_LONG_REASON, passwordTooLong, passwordTooLongRejection } from "../services/password-update-error.js"
 
 /**
@@ -285,6 +286,8 @@ authAccountsRouter.post(
         currentPassword: parsed.data.currentPassword,
         newPassword: parsed.data.newPassword,
       })
+      // 改密碼 → 撤銷本人所有 MCP 授權與個人金鑰（資安驗收 L4）。
+      await revokeMcpAccessSafely(tenantId, userId)
       res.status(200).json({ ok: true })
     } catch (err) {
       if (sendAccountError(res, err)) return
@@ -307,6 +310,8 @@ authAccountsRouter.post(
     }
     try {
       const result = await clearMustChangePassword({ tenantId, userId, context: "POST /me/password-done" })
+      // 自設／重設密碼完成 → 撤銷本人所有 MCP 授權與個人金鑰（資安驗收 L4）。
+      await revokeMcpAccessSafely(tenantId, userId)
       if (!result.employeeId) {
         res.status(404).json({ error: "not_found" })
         return

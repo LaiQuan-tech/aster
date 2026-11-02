@@ -68,8 +68,33 @@ export function revokeAuthorizedApp(id: string): Promise<unknown> {
   return apiFetch(`/me/mcp/grants/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-/** 登入後要回到的站內路徑：只接受 `/` 開頭、不是 `//`（避免開放轉址）。 */
-export function safeNextPath(next: string | null | undefined): string | null {
-  if (!next || !next.startsWith("/") || next.startsWith("//") || next.includes("\\")) return null;
-  return next;
+export interface PendingAction {
+  id: string;
+  clientName: string;
+  method: string;
+  path: string;
+  query: Record<string, unknown> | null;
+  body: unknown;
+  summary: string;
+  status: "pending" | "executing" | "done" | "failed" | "rejected" | "expired";
+  resultStatus: number | null;
+  result: string | null;
+  expiresAt: string;
+  decidedAt: string | null;
+  createdAt: string;
+}
+
+export async function listPendingActions(): Promise<PendingAction[]> {
+  return (await apiFetch<{ actions: PendingAction[] }>("/me/mcp/pending")).actions;
+}
+
+export function getPendingAction(id: string): Promise<PendingAction> {
+  return apiFetch<PendingAction>(`/me/mcp/pending/${encodeURIComponent(id)}`);
+}
+
+export function decidePendingAction(id: string, approve: boolean): Promise<PendingAction> {
+  return apiFetch<PendingAction>(`/me/mcp/pending/${encodeURIComponent(id)}/decision`, {
+    method: "POST",
+    body: JSON.stringify({ approve }),
+  });
 }

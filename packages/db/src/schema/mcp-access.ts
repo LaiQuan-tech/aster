@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, jsonb, timestamp, index } from "drizzle-orm/pg-core"
+import { pgTable, uuid, text, jsonb, timestamp, index, integer } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 import { employees } from "./employees"
 
@@ -100,5 +100,35 @@ export const mcpConfirmations = pgTable(
   },
   (table) => ({
     expiresIdx: index("mcp_confirmations_expires_idx").on(table.expiresAt),
+  }),
+)
+
+/** 最高風險操作的待確認（migration 0083 ＝ sql/0073）：使用者本人在後台確認後才由 API 執行。 */
+export const mcpPendingActions = pgTable(
+  "mcp_pending_actions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    userId: uuid("user_id").notNull(),
+    employeeId: uuid("employee_id").references(() => employees.id, { onDelete: "set null" }),
+    grantId: uuid("grant_id").references(() => mcpGrants.id, { onDelete: "set null" }),
+    clientName: text("client_name").notNull(),
+    method: text("method").notNull(),
+    path: text("path").notNull(),
+    query: jsonb("query"),
+    body: jsonb("body"),
+    summary: text("summary").notNull(),
+    /** pending／executing／done／failed／rejected（逾時由讀取端顯示為 expired） */
+    status: text("status").notNull().default("pending"),
+    resultStatus: integer("result_status"),
+    result: text("result"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    tenantUserIdx: index("mcp_pending_actions_tenant_user_idx").on(table.tenantId, table.userId, table.createdAt),
   }),
 )

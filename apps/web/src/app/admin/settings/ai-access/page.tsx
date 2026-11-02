@@ -14,15 +14,26 @@ import { apiErrorMessage } from "@/lib/api-client";
 import {
   createPersonalKey,
   listAuthorizedApps,
+  listPendingActions,
   listPersonalKeys,
   mcpServerUrl,
   revokeAuthorizedApp,
   revokePersonalKey,
   type AuthorizedApp,
+  type PendingAction,
   type PersonalKey,
 } from "@/lib/mcp-access-api";
 
 const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString("zh-TW", { hour12: false }) : "—");
+
+const PENDING_LABEL: Record<PendingAction["status"], string> = {
+  pending: "待確認",
+  executing: "執行中",
+  done: "已執行",
+  failed: "失敗",
+  rejected: "已拒絕",
+  expired: "已逾時",
+};
 
 type Pending = { kind: "key" | "app"; id: string; name: string } | null;
 
@@ -30,6 +41,7 @@ export default function AiAccessPage() {
   const toast = useToast();
   const [keys, setKeys] = useState<PersonalKey[] | null>(null);
   const [apps, setApps] = useState<AuthorizedApp[] | null>(null);
+  const [actions, setActions] = useState<PendingAction[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [days, setDays] = useState("90");
@@ -42,13 +54,15 @@ export default function AiAccessPage() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [k, a] = await Promise.all([listPersonalKeys(), listAuthorizedApps()]);
+      const [k, a, p] = await Promise.all([listPersonalKeys(), listAuthorizedApps(), listPendingActions()]);
       setKeys(k);
       setApps(a);
+      setActions(p);
     } catch (err) {
       setError(apiErrorMessage(err, "載入失敗"));
       setKeys([]);
       setApps([]);
+      setActions([]);
     }
   }, []);
 
@@ -118,8 +132,42 @@ export default function AiAccessPage() {
             Claude Code：先在下方產生個人金鑰，再執行
             <code className="mx-1 break-all rounded bg-gray-50 px-1">{`claude mcp add --transport http aster ${url} --header "Authorization: Bearer <金鑰>"`}</code>
           </li>
-          <li>薪資結算、放款、獎金發放、刪除、權限與規則變更等危險操作，AI 會先給預覽，你確認後它才會執行。</li>
+          <li>最高風險操作（薪資計算、放款、獎金發放、權限帳號、規則設定、刪除…）AI 不能自己完成，要你在本頁「待確認操作」或 AI 給的網址確認；其他危險操作 AI 會先給預覽、你在對話裡同意後才執行。</li>
         </ul>
+      </Card>
+
+      <Card title="待確認操作">
+        <p className="text-sm text-gray-600">
+          AI 要做最高風險的動作（薪資計算／定案／寄送、期間鎖定與重開、放款與作廢、獎金核准發放、權限帳號、規則設定、刪除…）時不能自己完成，會在這裡留一筆等你確認（10 分鐘內有效）。
+        </p>
+        <div className="mt-3">
+          {actions === null ? (
+            <Skeleton lines={2} />
+          ) : actions.length === 0 ? (
+            <p className="text-sm text-gray-400">目前沒有待確認操作。</p>
+          ) : (
+            <ul className="divide-y divide-gray-100">
+              {actions.map((p) => (
+                <li key={p.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="font-medium text-gray-900">
+                      {p.summary}{" "}
+                      <Pill tone={p.status === "pending" ? "amber" : p.status === "done" ? "green" : p.status === "failed" ? "red" : "gray"}>
+                        {PENDING_LABEL[p.status]}
+                      </Pill>
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {p.clientName}・建立 {fmt(p.createdAt)}・期限 {fmt(p.expiresAt)}
+                    </p>
+                  </div>
+                  <a href={`/mcp/confirm/${p.id}`} className="text-sm font-medium" style={{ color: "var(--brand)" }}>
+                    {p.status === "pending" ? "檢視並確認 →" : "檢視 →"}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </Card>
 
       <Card title="個人存取金鑰">

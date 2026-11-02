@@ -2,6 +2,7 @@ import express, { Router, type NextFunction, type Request, type RequestHandler, 
 import type { IncomingMessage, RequestListener } from "node:http"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
 import { bearerOf } from "../lib/internal-identity.js"
+import { clientIpOf } from "../lib/client-ip.js"
 import { logger } from "../lib/logger.js"
 import { MCP_SCOPE, isMcpConfigured, isOriginAllowed, publicBaseUrl } from "../services/mcp/config.js"
 import { resolveMcpIdentity } from "../services/mcp/identity.js"
@@ -76,7 +77,7 @@ mcpRouter.post(MCP_PATH, originGuard, express.json({ limit: "4mb" }), async (req
   }
   if (!identity) return unauthorized(req, res, true)
 
-  const server = createMcpServer({ app: req.app as unknown as RequestListener, identity })
+  const server = createMcpServer({ app: req.app as unknown as RequestListener, identity, clientIp: clientIpOf(req) })
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
   res.on("close", () => {
     void transport.close()

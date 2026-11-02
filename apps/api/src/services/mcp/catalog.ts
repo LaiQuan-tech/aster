@@ -195,3 +195,22 @@ export function searchEndpoints(app: object, opts: { keyword?: string; method?: 
       .every((word) => e.path.toLowerCase().includes(word) || e.desc.toLowerCase().includes(word))
   })
 }
+
+/**
+ * 路徑標準化（資安驗收 H1／M1）：送出前用 WHATWG URL 解析，結果必須與原字串完全相同，
+ * 且不得含 %（任何百分比編碼，含 %2e／%2f）、dot-segment（/./、/../、結尾 /. 或 /..）、反斜線、空白或控制字元。
+ * 不通過 → 回錯誤訊息（呼叫端回 400）；通過 → 回 { canon }。封鎖／危險比對一律用 canon（再轉小寫）。
+ */
+export function canonicalizePath(path: unknown): { canon: string } | { error: string } {
+  if (typeof path !== "string" || !path.startsWith("/") || path.length > 300) return { error: "path 必須以 / 開頭（例：/requests）" }
+  if (/[\x00-\x20\x7f\\%?#]/.test(path)) return { error: "path 不可含 %、?、#、反斜線、空白或控制字元；查詢參數請放 query" }
+  if (path.startsWith("//") || /\/\.\.?(\/|$)/.test(path)) return { error: "path 不可含 //、/./、/../ 這類路徑片段" }
+  let canon: string
+  try {
+    canon = new URL(path, "http://x").pathname
+  } catch {
+    return { error: "path 格式不正確" }
+  }
+  if (canon !== path) return { error: "path 不是標準形式（解析後與原字串不同）" }
+  return { canon }
+}

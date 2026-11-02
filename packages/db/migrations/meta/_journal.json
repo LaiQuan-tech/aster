@@ -582,6 +582,13 @@
       "when": 1793200000000,
       "tag": "0082_mcp_access",
       "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1793300000000,
+      "tag": "0083_mcp_pending_actions",
+      "breakpoints": true
     }
   ]
 }

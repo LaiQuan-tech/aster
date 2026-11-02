@@ -115,8 +115,10 @@ app.use(express.json({ limit: "12mb" }))
 // 落在同一個 store。route 延遲解析：req.route.path（'/employees/:id' 這種 pattern）
 // 要到 route 層 match 後才有。
 app.use((req: Request, res: Response, next: NextFunction) => {
-  // MCP 程序內派送（lib/internal-identity.ts）：內部 token 只准 loopback 來源；稽核 context 前面標 [mcp:<用戶端>]，
-  // DB trigger audit_row() 與 writeAuditLog 記的 context 因此都看得出「經由 MCP、哪個用戶端」。
+  // MCP 程序內派送（lib/internal-identity.ts）：稽核 context 前面標 [mcp:<用戶端>]，DB trigger audit_row() 與
+  // writeAuditLog 記的 context 因此都看得出「經由 MCP、哪個用戶端」。
+  // 注意：下面的 loopback 來源檢查**不是防線**（Vercel 等平台上外部請求的 remoteAddress 也可能是 127.0.0.1），
+  // 只是多一道便宜的過濾；真正的防線是內部 token 只存在本程序記憶體、256 bit 隨機、派送完立刻刪除（查無即 401）。
   const bearer = bearerOf(req.headers.authorization)
   let via: string | null = null
   if (isInternalToken(bearer)) {

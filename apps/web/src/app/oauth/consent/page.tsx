@@ -14,6 +14,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "@/lib/use-session";
 import { apiErrorMessage } from "@/lib/api-client";
 import { decideConsent, describeConsent, type ConsentInfo } from "@/lib/mcp-access-api";
+import { consentTrust } from "@/lib/mcp-safety";
 
 function ConsentInner() {
   const router = useRouter();
@@ -66,12 +67,31 @@ function ConsentInner() {
           <p className="text-sm text-gray-500">載入中…</p>
         ) : (
           <>
-            <p className="text-base text-gray-900">
-              <strong>{info.clientName}</strong> 想以你的身分操作亞斯特（權限同你的後台權限）。
-            </p>
+            {(() => {
+              const trust = consentTrust(info.clientName, info.redirectHost);
+              return (
+                <>
+                  {!trust.verified ? (
+                    <div role="alert" className="mb-4 rounded-lg border-2 border-red-500 bg-red-50 p-4">
+                      <p className="text-base font-bold text-red-700">⚠ 未驗證的應用，請確認你信任它</p>
+                      <p className="mt-1 text-sm text-red-700">同意後，授權會交給這個網域：</p>
+                      <p className="mt-1 break-all font-mono text-2xl font-bold text-red-800">{trust.hostname}</p>
+                      <p className="mt-2 text-sm text-red-700">不是 claude.ai／claude.com／chatgpt.com，也不是你自己電腦上的程式。若不認得，請按「拒絕」。</p>
+                    </div>
+                  ) : null}
+                  <p className="text-base text-gray-900">
+                    <strong>{info.clientName}</strong>
+                    {trust.nameMismatch ? (
+                      <span className="ml-2 rounded bg-red-100 px-1.5 py-0.5 text-sm font-bold text-red-700">⚠ 名稱與網域不符</span>
+                    ) : null}{" "}
+                    想以你的身分操作亞斯特（權限同你的後台權限）。
+                  </p>
+                </>
+              );
+            })()}
             <ul className="mt-4 space-y-2 text-sm text-gray-600 list-disc pl-5">
               <li>它能做的事和你在後台能做的完全一樣，不會更多；每筆操作都記在你名下，並標示經由 AI（MCP）。</li>
-              <li>薪資結算、放款、獎金發放、刪除、權限與規則變更等危險操作，AI 會先給你預覽，你確認後才會執行。</li>
+              <li>薪資結算、放款、獎金發放、刪除、權限與規則變更等最高風險操作，AI 不能自己完成，必須由你在後台確認頁按「確認執行」；其他危險操作會先給預覽、你同意後才執行。</li>
               <li>同意後會回到 <span className="font-mono">{info.redirectHost}</span>。隨時可在「設定 → AI 連接」撤銷。</li>
               {session?.user?.email ? <li>目前登入：{session.user.email}</li> : null}
             </ul>

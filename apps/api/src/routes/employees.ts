@@ -1,4 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from "express"
+import { revokeMcpAccessSafely } from "../services/mcp/revoke.js"
 import { forgetEssIdentityOf } from "../middleware/ess-tab-guard.js"
 import { z } from "zod"
 import { requireAuth } from "../middleware/auth.js"
@@ -806,6 +807,8 @@ employeesRouter.post(
           ? "POST /employees/:id/reset-password — 管理員設定員工密碼"
           : "POST /employees/:id/reset-password — 產生暫時密碼",
       })
+      // 重設密碼 → 撤銷該員工所有 MCP 授權與個人金鑰（資安驗收 L4）。
+      await revokeMcpAccessSafely(tenantId, emp.user_id as string | null)
       // 只有後端產生時才回傳明碼（供 HR 配發）；HR 自填則不回傳。
       res.status(200).json({ id, password: hrProvided ? undefined : password })
     } catch (err) {

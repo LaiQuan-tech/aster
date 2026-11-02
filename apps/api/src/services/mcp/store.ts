@@ -3,6 +3,7 @@ import {
   ACCESS_TOKEN_TTL_SEC,
   AUTH_CODE_TTL_SEC,
   CONFIRM_TOKEN_TTL_SEC,
+  PENDING_ACTION_TTL_SEC,
   REFRESH_TOKEN_TTL_SEC,
   TOKEN_PREFIX,
 } from "./config.js"
@@ -292,4 +293,152 @@ export async function consumeConfirmation(
 
 export function isExpired(expiresAt: string | null | undefined): boolean {
   return !!expiresAt && Date.parse(expiresAt) <= Date.now()
+}
+
+// ── 最高風險操作：待使用者在後台確認（mcp_pending_actions）────────────────
+
+export type PendingStatus = "pending" | "executing" | "done" | "failed" | "rejected" | "expired"
+
+export interface PendingActionRow {
+  id: string
+  tenant_id: string
+  user_id: string
+  employee_id: string | null
+  grant_id: string | null
+  client_name: string
+  method: string
+  path: string
+  query: Record<string, unknown> | null
+  body: unknown
+  summary: string
+  status: PendingStatus
+  result_status: number | null
+  result: string | null
+  expires_at: string
+  decided_at: string | null
+  created_at: string
+}
+
+const PENDING_COLS =
+  "id, tenant_id, user_id, employee_id, grant_id, client_name, method, path, query, body, summary, status, result_status, result, expires_at, decided_at, created_at"
+
+/** 讀出時把「過期還沒決定」顯示成 expired（DB 不必有排程去改）。 */
+function withExpiry(row: PendingActionRow): PendingActionRow {
+  return row.status === "pending" && isExpired(row.expires_at) ? { ...row, status: "expired" } : row
+}
+
+export async function createPendingAction(input: {
+  tenant_id: string
+  user_id: string
+  employee_id: string | null
+  grant_id: string | null
+  client_name: string
+  method: string
+  path: string
+  query: Record<string, unknown> | null
+  body: unknown
+  summary: string
+}): Promise<PendingActionRow> {
+  const { data, error } = await supabaseAdmin
+    .from("mcp_pending_actions")
+    .insert({
+      ...input,
+      body: input.body === undefined ? null : input.body,
+      status: "pending",
+      expires_at: iso(Date.now() + PENDING_ACTION_TTL_SEC * 1000),
+    })
+    .select(PENDING_COLS)
+  if (error) fail("createPendingAction", error)
+  const row = ((data ?? []) as PendingActionRow[])[0]
+  if (!row) fail("createPendingAction", { message: "no row returned" })
+  return row
+}
+
+/** 只回本人＋本租戶的；別人的、別租戶的一律當不存在。 */
+export async function getPendingAction(id: string, scope: { tenantId: string; userId: string }): Promise<PendingActionRow | null> {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null
+  const { data, error } = await supabaseAdmin
+    .from("mcp_pending_actions")
+    .select(PENDING_COLS)
+    .eq("id", id)
+    .eq("tenant_id", scope.tenantId)
+    .eq("user_id", scope.userId)
+    .maybeSingle()
+  if (error) fail("getPendingAction", error)
+  return data ? withExpiry(data as PendingActionRow) : null
+}
+
+export async function listPendingActions(scope: { tenantId: string; userId: string }): Promise<PendingActionRow[]> {
+  const { data, error } = await supabaseAdmin
+    .from("mcp_pending_actions")
+    .select(PENDING_COLS)
+    .eq("tenant_id", scope.tenantId)
+    .eq("user_id", scope.userId)
+    .order("created_at", { ascending: false })
+    .limit(30)
+  if (error) fail("listPendingActions", error)
+  return ((data ?? []) as PendingActionRow[]).map(withExpiry)
+}
+
+/** 原子地把 pending（未過期）改成 executing／rejected；回改到的列（null＝已決定、已過期或不存在）。 */
+export async function decidePendingAction(
+  id: string,
+  scope: { tenantId: string; userId: string },
+  next: "executing" | "rejected",
+): Promise<PendingActionRow | null> {
+  const { data, error } = await supabaseAdmin
+    .from("mcp_pending_actions")
+    .update({ status: next, decided_at: nowIso() })
+    .eq("id", id)
+    .eq("tenant_id", scope.tenantId)
+    .eq("user_id", scope.userId)
+    .eq("status", "pending")
+    .gt("expires_at", nowIso())
+    .select(PENDING_COLS)
+  if (error) fail("decidePendingAction", error)
+  return ((data ?? []) as PendingActionRow[])[0] ?? null
+}
+
+export async function finishPendingAction(id: string, result: { status: "done" | "failed"; resultStatus: number | null; result: string }): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("mcp_pending_actions")
+    .update({ status: result.status, result_status: result.resultStatus, result: result.result.slice(0, 60_000) })
+    .eq("id", id)
+  if (error) fail("finishPendingAction", error)
+}
+
+// ── 撤銷某使用者的所有 MCP 授權與金鑰（改密碼／重設密碼時；資安驗收 L4）──
+
+export async function revokeAllGrantsForUser(tenantId: string, userId: string): Promise<number> {
+  const { data, error } = await supabaseAdmin
+    .from("mcp_grants")
+    .update({ revoked_at: nowIso() })
+    .eq("tenant_id", tenantId)
+    .eq("user_id", userId)
+    .is("revoked_at", null)
+    .select("id")
+  if (error) fail("revokeAllGrantsForUser", error)
+  return (data ?? []).length
+}
+
+// ── DCR 用戶端：總量上限＋90 天未使用清理（資安驗收 L2）──────────────────
+
+/** 刪掉 90 天沒用過的用戶端（從沒用過的看建立時間），回目前剩下的數量（最多數到 limit+1）。 */
+export async function pruneAndCountClients(idleDays: number, limit: number): Promise<number> {
+  const cutoff = iso(Date.now() - idleDays * 86_400_000)
+  const a = await supabaseAdmin.from("mcp_oauth_clients").delete().not("last_used_at", "is", null).lt("last_used_at", cutoff)
+  if (a.error) fail("pruneClients(last_used)", a.error)
+  const b = await supabaseAdmin.from("mcp_oauth_clients").delete().is("last_used_at", null).lt("created_at", cutoff)
+  if (b.error) fail("pruneClients(never_used)", b.error)
+  const { data, error } = await supabaseAdmin.from("mcp_oauth_clients").select("client_id").limit(limit + 1)
+  if (error) fail("countClients", error)
+  return (data ?? []).length
+}
+
+export async function touchClient(clientId: string): Promise<void> {
+  try {
+    await supabaseAdmin.from("mcp_oauth_clients").update({ last_used_at: nowIso() }).eq("client_id", clientId)
+  } catch {
+    /* ignore */
+  }
 }

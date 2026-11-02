@@ -3,7 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { safeNextPath } from "@/lib/mcp-access-api";
+import { safeNextPath } from "@/lib/mcp-safety";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
 import { authErrorMessage, validateLoginInput } from "@/lib/auth-error-messages";
 import { useSession } from "@/lib/use-session";
@@ -19,10 +19,10 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  // 登入後要回去的站內頁（例：AI 連接的 OAuth 同意頁帶 ?next=）；只收站內路徑，其他一律回 /ess。
+  // 登入後要回去的站內頁：只收同源的 /oauth/consent 與 /mcp/confirm/<id>（lib/mcp-safety.ts），其他一律回 /ess。
   const nextPath = (): string => {
     if (typeof window === "undefined") return "/ess";
-    return safeNextPath(new URLSearchParams(window.location.search).get("next")) ?? "/ess";
+    return safeNextPath(new URLSearchParams(window.location.search).get("next"), window.location.origin) ?? "/ess";
   };
 
   // Already signed in → skip the form.

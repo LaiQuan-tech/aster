@@ -7,6 +7,8 @@ import { logger } from "../lib/logger.js"
 import { writeAuditLog } from "../services/audit.js"
 import {
   AUTH_REQUEST_TTL_SEC,
+  CLIENT_IDLE_PRUNE_DAYS,
+  MAX_OAUTH_CLIENTS,
   MCP_SCOPE,
   McpNotConfiguredError,
   SUPPORTED_SCOPES,
@@ -31,7 +33,9 @@ import {
   isExpired,
   issueOAuthTokens,
   linkCodeToGrant,
+  pruneAndCountClients,
   revokeGrant,
+  touchClient,
   type OAuthClient,
 } from "../services/mcp/store.js"
 
@@ -203,6 +207,11 @@ mcpPublicRouter.post("/oauth/register", guardConfigured, async (req: Request, re
     }
     const rawName = typeof body.client_name === "string" ? body.client_name.replace(/[\x00-\x1f\x7f]/g, "").trim() : ""
     const clientName = (rawName || "MCP 用戶端").slice(0, 100)
+    // 總量上限＋順便清掉 90 天沒用的用戶端（資安驗收 L2）。
+    if ((await pruneAndCountClients(CLIENT_IDLE_PRUNE_DAYS, MAX_OAUTH_CLIENTS)) >= MAX_OAUTH_CLIENTS) {
+      res.status(503).json({ error: "temporarily_unavailable", error_description: "已註冊的用戶端數量達上限，請聯絡管理員" })
+      return
+    }
     const clientId = randomToken(TOKEN_PREFIX.client, 16)
     const clientSecret = method === "none" ? null : randomToken(TOKEN_PREFIX.clientSecret)
     const metadata: Record<string, unknown> = {}
@@ -444,6 +453,7 @@ mcpPublicRouter.post("/oauth/token", guardConfigured, async (req: Request, res: 
         resource: row.resource ?? resource ?? mcpResourceUrl(req),
       })
       await linkCodeToGrant(row.code_hash, grant.id)
+      void touchClient(client.client_id)
       const tokens = await issueOAuthTokens(grant.id)
       await writeAuditLog({
         tenantId: row.tenant_id,
@@ -484,6 +494,7 @@ mcpPublicRouter.post("/oauth/token", guardConfigured, async (req: Request, res: 
       const account = await checkAccount(grant.tenant_id, grant.user_id)
       if (!account) return tokenError(res, 400, "invalid_grant", "帳號已停用或租戶已變更")
       const tokens = await issueOAuthTokens(grant.id)
+      void touchClient(client.client_id)
       res.setHeader("Cache-Control", "no-store")
       res.json({
         access_token: tokens.accessToken,

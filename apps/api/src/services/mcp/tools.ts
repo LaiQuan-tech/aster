@@ -4,14 +4,14 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 import { z } from "zod"
 import { viaLabel } from "../../lib/internal-identity.js"
 import { writeAuditLog } from "../audit.js"
-import { isBlockedPath, searchEndpoints } from "./catalog.js"
+import { canonicalizePath, isBlockedPath, searchEndpoints } from "./catalog.js"
 import { compactJson, filterByKeyword } from "./compact.js"
-import { CONFIRM_TOKEN_TTL_SEC } from "./config.js"
+import { CONFIRM_TOKEN_TTL_SEC, PENDING_ACTION_TTL_SEC, webBaseUrl } from "./config.js"
 import { sha256Hex, stableStringify } from "./crypto.js"
 import { dangerOf } from "./danger.js"
 import { dispatchAsUser, type DispatchResult } from "./dispatch.js"
 import type { McpIdentity } from "./identity.js"
-import { consumeConfirmation, createConfirmation } from "./store.js"
+import { consumeConfirmation, createConfirmation, createPendingAction, getPendingAction } from "./store.js"
 
 /**
  * MCP 工具（2026-11-02）。所有工具最後都走 runApi()：
@@ -21,11 +21,16 @@ import { consumeConfirmation, createConfirmation } from "./store.js"
  */
 
 export const SERVER_NAME = "aster-hr"
-export const SERVER_VERSION = "1.0.0"
+export const SERVER_VERSION = "1.1.0"
+
+/** 單一工具呼叫的總截止（對應 vercel.json maxDuration 60 秒）。 */
+export const TOOL_DEADLINE_MS = 50_000
 
 export interface ToolContext {
   app: RequestListener
   identity: McpIdentity
+  /** 外層 MCP 請求的用戶端 IP（x-forwarded-for 第一段），派送時轉給既有 route（打卡記 IP 用）。 */
+  clientIp?: string | null
 }
 
 export interface ApiCall {
@@ -43,12 +48,11 @@ function textResult(text: string, isError = false): CallToolResult {
   return { content: [{ type: "text", text }], ...(isError ? { isError: true } : {}) }
 }
 
-/** path 只能是站內相對路徑：/ 開頭、不含 ?#、..、//、反斜線或控制字元。 */
+/** path 只能是站內、標準化後不變的相對路徑（catalog.ts canonicalizePath）；封鎖清單用標準化後的路徑比對。 */
 export function validatePath(path: string): string | null {
-  if (typeof path !== "string" || !path.startsWith("/") || path.length > 300) return "path 必須以 / 開頭（例：/requests）"
-  if (/[?#\\\s]/.test(path) || path.includes("..") || path.includes("//")) return "path 不可含 ?、#、..、// 或空白；查詢參數請放 query"
-  if (/[\x00-\x1f\x7f]/.test(path)) return "path 含不合法字元"
-  if (isBlockedPath(path)) return "這個端點不開放經 MCP 呼叫（OAuth／金鑰管理／內部排程／密碼）"
+  const result = canonicalizePath(path)
+  if ("error" in result) return result.error
+  if (isBlockedPath(result.canon)) return "這個端點不開放經 MCP 呼叫（OAuth／金鑰管理／內部排程／密碼）"
   return null
 }
 
@@ -68,7 +72,7 @@ function describeCall(call: ApiCall): string {
   return parts.join("\n")
 }
 
-function formatResult(result: DispatchResult, paging: Paging, prefix?: string): CallToolResult {
+export function formatResult(result: DispatchResult, paging: Paging, prefix?: string): CallToolResult {
   const isError = result.status >= 400
   const head = `HTTP ${result.status}${prefix ? `｜${prefix}` : ""}`
   if (result.binary) {
@@ -102,6 +106,33 @@ export async function runApi(
   const { identity } = ctx
 
   const danger = dangerOf(method, call.path, call.body)
+  if (danger?.tier === "high") {
+    // 最高風險：AI 不能自己完成。建立待確認操作，請使用者本人到後台確認（routes/mcp-keys.ts /me/mcp/pending）。
+    const pending = await createPendingAction({
+      tenant_id: identity.tenantId,
+      user_id: identity.user.userId,
+      employee_id: identity.employeeId,
+      grant_id: identity.grant.id,
+      client_name: identity.clientName,
+      method,
+      path: call.path,
+      query: call.query ?? null,
+      body: call.body,
+      summary: `${danger.label}｜${method} ${call.path}`.slice(0, 500),
+    })
+    const url = `${webBaseUrl()}/mcp/confirm/${pending.id}`
+    return textResult(
+      [
+        `⛔ 最高風險操作，AI 不能自行執行：${danger.label}`,
+        describeCall(normalized),
+        "",
+        `已建立待確認操作（id: ${pending.id}，${PENDING_ACTION_TTL_SEC / 60} 分鐘內有效、只能決定一次）。`,
+        `請使用者本人打開這個網址，登入後檢視完整內容並按「確認執行」或「拒絕」：`,
+        url,
+        `之後可用 get_pending_action（id: ${pending.id}）查狀態與執行結果。`,
+      ].join("\n"),
+    )
+  }
   if (danger) {
     const argsHash = argsHashOf(normalized)
     if (!opts.confirmToken) {
@@ -110,11 +141,11 @@ export async function runApi(
         user_id: identity.user.userId,
         tenant_id: identity.tenantId,
         args_hash: argsHash,
-        summary: `${danger}｜${method} ${call.path}`.slice(0, 500),
+        summary: `${danger.label}｜${method} ${call.path}`.slice(0, 500),
       })
       return textResult(
         [
-          `⚠️ 危險操作，尚未執行：${danger}`,
+          `⚠️ 危險操作，尚未執行：${danger.label}`,
           `將以「${identity.employeeName ?? "你"}」本人的身分（後台權限照舊）執行：`,
           describeCall(normalized),
           "",
@@ -134,7 +165,7 @@ export async function runApi(
     }
   }
 
-  const result = await dispatchAsUser(ctx.app, identity.user, identity.clientName, normalized)
+  const result = await dispatchAsUser(ctx.app, identity.user, identity.clientName, normalized, { clientIp: ctx.clientIp })
 
   if (method !== "GET") {
     const via = viaLabel(identity.clientName)
@@ -159,9 +190,9 @@ export async function runApi(
   }
 
   if (opts.transform && result.status < 400 && result.json !== undefined) {
-    return formatResult({ ...result, json: opts.transform(result.json) }, opts.paging ?? {}, danger ? `已執行：${danger}` : undefined)
+    return formatResult({ ...result, json: opts.transform(result.json) }, opts.paging ?? {}, danger ? `已執行：${danger.label}` : undefined)
   }
-  return formatResult(result, opts.paging ?? {}, danger ? `已執行：${danger}` : undefined)
+  return formatResult(result, opts.paging ?? {}, danger ? `已執行：${danger.label}` : undefined)
 }
 
 // ── 參數 schema 片段 ───────────────────────────────────────────────────
@@ -218,10 +249,20 @@ export function createMcpServer(ctx: ToolContext): McpServer {
     server.registerTool(name, { title, description, inputSchema: shape, annotations: { title, ...annotations } }, (async (
       args: z.objectOutputType<S, z.ZodTypeAny>,
     ) => {
+      // 整個工具呼叫的總截止（Vercel maxDuration 60 秒，留餘裕給回應）；逾時回清楚的錯誤，不讓函式被平台砍掉。
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const deadline = new Promise<CallToolResult>((resolve) => {
+        timer = setTimeout(
+          () => resolve(textResult(`工具執行逾時（超過 ${TOOL_DEADLINE_MS / 1000} 秒）。請縮小查詢範圍（日期區間、篩選條件、limit）後再試；寫入類操作請先查詢確認是否已生效再重送。`, true)),
+          TOOL_DEADLINE_MS,
+        )
+      })
       try {
-        return await handler(args)
+        return await Promise.race([handler(args), deadline])
       } catch (err) {
         return textResult(`工具執行失敗：${err instanceof Error ? err.message : String(err)}`, true)
+      } finally {
+        clearTimeout(timer)
       }
     }) as never)
   }
@@ -337,15 +378,12 @@ export function createMcpServer(ctx: ToolContext): McpServer {
         ["放款單", "/disbursements/pending-approvals"],
         ["獎金批次", "/my/bonus-approvals"],
       ]
-      const parts: string[] = []
-      let anyError = true
-      for (const [label, path] of sections) {
-        const r = await runApi(ctx, "my_pending_approvals", { method: "GET", path }, { paging: a })
-        if (!r.isError) anyError = false
+      const results = await Promise.all(sections.map(([, path]) => runApi(ctx, "my_pending_approvals", { method: "GET", path }, { paging: a })))
+      const parts = results.map((r, i) => {
         const text = (r.content[0] as { text: string }).text
-        parts.push(`## ${label}\n${r.isError && text.startsWith("HTTP 403") ? "（你沒有這類簽核權限）" : text}`)
-      }
-      return textResult(parts.join("\n\n"), anyError)
+        return `## ${sections[i]![0]}\n${r.isError && text.startsWith("HTTP 403") ? "（你沒有這類簽核權限）" : text}`
+      })
+      return textResult(parts.join("\n\n"), results.every((r) => r.isError))
     },
   )
 
@@ -417,8 +455,8 @@ export function createMcpServer(ctx: ToolContext): McpServer {
     },
     READ,
     async (a) => {
-      const parts = [await runApi(ctx, "get_project", { method: "GET", path: `/projects/${seg(a.projectId)}` })]
-      for (const sub of a.include ?? []) parts.push(await runApi(ctx, "get_project", { method: "GET", path: `/projects/${seg(a.projectId)}/${sub}` }))
+      const paths = [`/projects/${seg(a.projectId)}`, ...(a.include ?? []).map((sub) => `/projects/${seg(a.projectId)}/${sub}`)]
+      const parts = await Promise.all(paths.map((path) => runApi(ctx, "get_project", { method: "GET", path })))
       const labels = ["專案", ...(a.include ?? [])]
       return textResult(
         parts.map((p, i) => `## ${labels[i]}\n${(p.content[0] as { text: string }).text}`).join("\n\n"),
@@ -476,18 +514,20 @@ export function createMcpServer(ctx: ToolContext): McpServer {
   reg(
     "get_report",
     "報表",
-    "查報表：attendance 出勤、payroll 薪資、leave 請假、headcount 人力、unapproved-overtime 未核准加班（HR 權限）。",
+    "查報表：attendance 出勤（必填 from、to）、payroll 薪資、leave 請假、headcount 人力、unapproved-overtime 未核准加班（HR 權限）。",
     {
       type: z.enum(["attendance", "payroll", "leave", "headcount", "unapproved-overtime"]),
-      from: dateKey.optional(),
-      to: dateKey.optional(),
+      from: dateKey.optional().describe("起日 YYYY-MM-DD（attendance 必填）"),
+      to: dateKey.optional().describe("迄日 YYYY-MM-DD（attendance 必填）"),
       period: period.optional(),
       deptId: id.optional(),
       ...paging,
     },
     READ,
     async (a) =>
-      runApi(ctx, "get_report", {
+      a.type === "attendance" && (!a.from || !a.to)
+        ? textResult("attendance 報表必須帶 from 與 to（YYYY-MM-DD）。", true)
+        : runApi(ctx, "get_report", {
         method: "GET",
         path: `/reports/${a.type}`,
         query: { from: a.from, to: a.to, period: a.period, deptId: a.deptId },
@@ -524,6 +564,29 @@ export function createMcpServer(ctx: ToolContext): McpServer {
 
   reg("my_notifications", "我的通知", "查寄給我的通知。", { unread: z.boolean().optional(), ...paging }, READ, async (a) =>
     runApi(ctx, "my_notifications", { method: "GET", path: "/notifications", query: { scope: "mine", unread: a.unread ? "1" : undefined } }, { paging: a }),
+  )
+
+  reg(
+    "get_pending_action",
+    "查待確認操作",
+    "查最高風險操作（需使用者在後台確認的）目前狀態：pending 等待確認、done 已執行、failed 執行失敗、rejected 被拒絕、expired 逾時；已執行的會附結果。",
+    { id: z.string().max(64).describe("建立待確認操作時回傳的 id") },
+    READ,
+    async (a) => {
+      const row = await getPendingAction(a.id, { tenantId: ctx.identity.tenantId, userId: ctx.identity.user.userId })
+      if (!row) return textResult("查無此待確認操作（或不是你建立的）。", true)
+      const label = { pending: "等待使用者確認", executing: "執行中", done: "已執行", failed: "執行失敗", rejected: "使用者已拒絕", expired: "已逾時未確認" }[row.status]
+      return textResult(
+        [
+          `狀態：${row.status}（${label}）`,
+          `操作：${row.summary}`,
+          row.status === "pending" ? `確認網址：${webBaseUrl()}/mcp/confirm/${row.id}（到 ${row.expires_at}）` : null,
+          row.result ? `結果：\n${row.result}` : null,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      )
+    },
   )
 
   reg(

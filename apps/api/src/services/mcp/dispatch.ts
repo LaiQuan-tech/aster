@@ -1,6 +1,6 @@
 import { createServer, type RequestListener, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
-import { registerInternalIdentity } from "../../lib/internal-identity.js"
+import { registerInternalIdentity, viaLabel } from "../../lib/internal-identity.js"
 import type { AuthedUser } from "../../lib/supabase.js"
 
 /**
@@ -67,6 +67,7 @@ export async function dispatchAsUser(
   user: AuthedUser,
   via: string,
   req: DispatchRequest,
+  opts: { clientIp?: string | null } = {},
 ): Promise<DispatchResult> {
   const port = await loopbackPort(app)
   const { token, release } = registerInternalIdentity(user, via)
@@ -78,10 +79,14 @@ export async function dispatchAsUser(
       headers: {
         authorization: `Bearer ${token}`,
         accept: "application/json",
+        // 外層（AI 用戶端）請求的原始 IP：打卡等記 IP 的 route 照 lib/client-ip.ts 讀 x-forwarded-for（資安驗收 L3）。
+        // 沒有就標 mcp-dispatch 的 loopback 不填，route 會記成 127.0.0.1／null。
+        ...(opts.clientIp ? { "x-forwarded-for": opts.clientIp } : {}),
+        "x-mcp-dispatch": viaLabel(via),
         ...(hasBody ? { "content-type": "application/json" } : {}),
       },
       body: hasBody ? JSON.stringify(req.body) : undefined,
-      signal: AbortSignal.timeout(55_000),
+      signal: AbortSignal.timeout(45_000),
     })
     const contentType = res.headers.get("content-type") ?? ""
     if (contentType.includes("application/json")) {
