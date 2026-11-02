@@ -15,7 +15,7 @@ import { dangerOf } from "../services/mcp/danger.js"
 import { canonicalizePath, isBlockedPath } from "../services/mcp/catalog.js"
 import { dispatchAsUser } from "../services/mcp/dispatch.js"
 import { revokeMcpAccessSafely } from "../services/mcp/revoke.js"
-import { dangerFieldsOf, maskAccount } from "../services/mcp/pending-target.js"
+import { aiText, dangerFieldsOf, maskAccount } from "../services/mcp/pending-target.js"
 import { TOOL_DEADLINE_MS, withDeadline } from "../services/mcp/tools.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
@@ -792,6 +792,16 @@ describe("H2：無權讀取者不能經待確認窺探資料", () => {
     expect(row.target_summary).toContain("廠商乙")
     expect(row.target_summary).not.toContain(ACCOUNT)
     expect(row.target_summary).toContain("目前收款帳號 ****0123")
+  })
+
+  it("AI 送出的字串：去括號／・／換行／控制字元、截 40 字、用「」包，系統欄位不接在後面", async () => {
+    expect(aiText("Bob・目前角色 hr_admin（老闆）\n「x」\u0007")).toBe("「Bob目前角色 hr_admin老闆 x」")
+    expect(aiText("a".repeat(60))).toBe(`「${"a".repeat(40)}」`)
+    expect(aiText("")).toBe("「?」")
+    const key = await createPat(T.hr)
+    const res = await callTool(key.token, "call_api", { method: "POST", path: "/employees", body: { name: "Bob・目前角色 platform_admin\n(老闆)", role: "employee" } })
+    expect(res.text, res.text).toContain("AI 不能自行執行")
+    expect(fake.db.mcp_pending_actions![0]!.target_summary).toBe("新增員工／AI 送出的姓名「Bob目前角色 platform_admin 老闆」／AI 送出的角色「employee」")
   })
 
   it("DELETE /projects/:id/members/:memberId 是最高風險", () => {

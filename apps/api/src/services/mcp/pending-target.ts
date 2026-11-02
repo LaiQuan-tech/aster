@@ -81,6 +81,20 @@ export function maskAccount(value: unknown): string {
 
 const str = (v: unknown) => (v === null || v === undefined || v === "" ? "?" : String(v))
 const money = (v: unknown) => (typeof v === "number" || (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v))) ? `${Number(v).toLocaleString("zh-TW")} 元` : "?")
+/**
+ * AI 送出的字串放進摘要前的處理：去掉控制字元、換行、「・」與各式括號，截 40 字，再用「」包起來，
+ * 讓確認頁看得出哪段是 AI 給的、也不能偽造出系統欄位的樣子（例：姓名「Bob・目前角色 hr_admin」）。
+ */
+export function aiText(value: unknown): string {
+  const cleaned = String(value ?? "")
+    .replace(/[\x00-\x1f\x7f\u2028\u2029]/g, " ")
+    .replace(/[・‧·•()（）[\]【】「」『』{}<>《》〈〉〔〕｛｝［］＜＞"'`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 40)
+  return `「${cleaned || "?"}」`
+}
+
 const isUuid = (v: string) => /^[0-9a-f-]{36}$/i.test(v)
 
 function listOf(json: unknown, key: string): Row[] {
@@ -117,14 +131,14 @@ export async function describeTarget(get: UserGet, method: string, path: string,
 
   switch (seg[0]) {
     case "employees": {
-      if (!seg[1]) return { ok: true, summary: `新增員工（AI 送出的姓名）：${str(b.name)}${b.role ? `・角色 ${str(b.role)}` : ""}` }
+      if (!seg[1]) return { ok: true, summary: `新增員工／AI 送出的姓名${aiText(b.name)}${b.role !== undefined ? `／AI 送出的角色${aiText(b.role)}` : ""}` }
       if (!isUuid(id)) return { ok: true, summary: null }
       return fromList("/employees", "employees", id, employeeText)
     }
     case "disbursements": {
       if (seg[1] === "batch-pay") {
         const ids = Array.isArray(b.ids) ? b.ids : Array.isArray(b.disbursementIds) ? b.disbursementIds : []
-        return { ok: true, summary: `批次放款：${ids.length} 張放款單（AI 送出的清單）` }
+        return { ok: true, summary: `批次放款／AI 送出的清單 ${ids.length} 張` }
       }
       if (!isUuid(id)) return { ok: true, summary: null }
       const r = await read(`/disbursements/${id}`)
@@ -142,9 +156,9 @@ export async function describeTarget(get: UserGet, method: string, path: string,
       return { ok: true, summary: `發薪期間 ${id}` }
     }
     case "payroll":
-      return { ok: true, summary: seg[1] === "run" ? `薪資計算（AI 送出的期間）：${str(b.period)}` : null }
+      return { ok: true, summary: seg[1] === "run" ? `薪資計算／AI 送出的期間${aiText(b.period)}` : null }
     case "payslips": {
-      if (seg[1] === "send-batch") return { ok: true, summary: `批次寄送薪資單（AI 送出的期間）：${str(b.period)}` }
+      if (seg[1] === "send-batch") return { ok: true, summary: `批次寄送薪資單／AI 送出的期間${aiText(b.period)}` }
       if (!isUuid(id)) return { ok: true, summary: null }
       const r = await read(`/payslips/${id}`)
       if (!r.ok) return r
@@ -166,7 +180,7 @@ export async function describeTarget(get: UserGet, method: string, path: string,
       return { ok: true, summary: `專案「${str(pr.name ?? pr.id)}」${pr.code ? `（${str(pr.code)}）` : ""}` }
     }
     case "vendors": {
-      if (!seg[1]) return { ok: true, summary: `新增廠商（AI 送出的名稱）：${str(b.name)}` }
+      if (!seg[1]) return { ok: true, summary: `新增廠商／AI 送出的名稱${aiText(b.name)}` }
       if (!isUuid(id)) return { ok: true, summary: null }
       return fromList("/vendors", "vendors", id, (v) => {
         const account = v.bankAccount ?? v.bank_account
