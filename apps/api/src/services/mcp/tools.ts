@@ -11,6 +11,7 @@ import { sha256Hex, stableStringify } from "./crypto.js"
 import { dangerOf } from "./danger.js"
 import { dispatchAsUser, type DispatchResult } from "./dispatch.js"
 import type { McpIdentity } from "./identity.js"
+import { checkPendingBody, describeTarget } from "./pending-target.js"
 import { consumeConfirmation, createConfirmation, createPendingAction, getPendingAction } from "./store.js"
 
 /**
@@ -108,7 +109,11 @@ export async function runApi(
   const danger = dangerOf(method, call.path, call.body)
   if (danger?.tier === "high") {
     // 最高風險：AI 不能自己完成。建立待確認操作，請使用者本人到後台確認（routes/mcp-keys.ts /me/mcp/pending）。
+    const bodyError = checkPendingBody(call.body)
+    if (bodyError) return textResult(`未建立待確認操作：${bodyError}`, true)
+    const target = await describeTarget(identity.tenantId, method, call.path, call.body)
     const pending = await createPendingAction({
+      target_summary: target,
       tenant_id: identity.tenantId,
       user_id: identity.user.userId,
       employee_id: identity.employeeId,
@@ -124,6 +129,7 @@ export async function runApi(
     return textResult(
       [
         `⛔ 最高風險操作，AI 不能自行執行：${danger.label}`,
+        `對象：${target ?? "無法辨識對象"}`,
         describeCall(normalized),
         "",
         `已建立待確認操作（id: ${pending.id}，${PENDING_ACTION_TTL_SEC / 60} 分鐘內有效、只能決定一次）。`,
@@ -195,6 +201,28 @@ export async function runApi(
   return formatResult(result, opts.paging ?? {}, danger ? `已執行：${danger.label}` : undefined)
 }
 
+/** 工具呼叫加總截止：超過 ms 先回逾時錯誤（原本的 promise 讓它自己結束）。 */
+export async function withDeadline(work: Promise<CallToolResult>, ms = TOOL_DEADLINE_MS): Promise<CallToolResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<CallToolResult>((resolve) => {
+    timer = setTimeout(
+      () =>
+        resolve(
+          textResult(
+            `工具執行逾時（超過 ${ms / 1000} 秒）。請縮小查詢範圍（日期區間、篩選條件、limit）後再試；寫入類操作請先查詢確認是否已生效再重送。`,
+            true,
+          ),
+        ),
+      ms,
+    )
+  })
+  try {
+    return await Promise.race([work, deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 // ── 參數 schema 片段 ───────────────────────────────────────────────────
 
 const dateKey = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "格式 YYYY-MM-DD")
@@ -250,19 +278,10 @@ export function createMcpServer(ctx: ToolContext): McpServer {
       args: z.objectOutputType<S, z.ZodTypeAny>,
     ) => {
       // 整個工具呼叫的總截止（Vercel maxDuration 60 秒，留餘裕給回應）；逾時回清楚的錯誤，不讓函式被平台砍掉。
-      let timer: ReturnType<typeof setTimeout> | undefined
-      const deadline = new Promise<CallToolResult>((resolve) => {
-        timer = setTimeout(
-          () => resolve(textResult(`工具執行逾時（超過 ${TOOL_DEADLINE_MS / 1000} 秒）。請縮小查詢範圍（日期區間、篩選條件、limit）後再試；寫入類操作請先查詢確認是否已生效再重送。`, true)),
-          TOOL_DEADLINE_MS,
-        )
-      })
       try {
-        return await Promise.race([handler(args), deadline])
+        return await withDeadline(handler(args))
       } catch (err) {
         return textResult(`工具執行失敗：${err instanceof Error ? err.message : String(err)}`, true)
-      } finally {
-        clearTimeout(timer)
       }
     }) as never)
   }

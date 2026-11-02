@@ -12,7 +12,9 @@ import {
   createGrant,
   decidePendingAction,
   finishPendingAction,
+  getGrant,
   getPendingAction,
+  isExpired,
   issuePat,
   listGrants,
   listPendingActions,
@@ -25,6 +27,7 @@ import { viaLabel } from "../lib/internal-identity.js"
 import { canonicalizePath, isBlockedPath } from "../services/mcp/catalog.js"
 import { dispatchAsUser } from "../services/mcp/dispatch.js"
 import { formatResult } from "../services/mcp/tools.js"
+import { dangerFieldsOf } from "../services/mcp/pending-target.js"
 import { clientIpOf } from "../lib/client-ip.js"
 
 /**
@@ -203,6 +206,8 @@ function pendingView(row: PendingActionRow) {
     query: row.query,
     body: row.body,
     summary: row.summary,
+    targetSummary: row.target_summary,
+    dangerFields: dangerFieldsOf(row.body),
     status: row.status,
     resultStatus: row.result_status,
     result: row.result,
@@ -265,13 +270,28 @@ mcpKeysRouter.post("/me/mcp/pending/:id/decision", ...guards, async (req: Reques
       res.status(403).json({ error: "forbidden", message: "帳號已停用或路徑不合法，未執行" })
       return
     }
-    const result = await dispatchAsUser(
-      req.app as unknown as RequestListener,
-      req.auth!,
-      `${claimed.client_name} confirmed`,
-      { method: claimed.method, path: claimed.path, query: claimed.query ?? undefined, body: claimed.body ?? undefined },
-      { clientIp: clientIpOf(req) },
-    )
+    // 來源授權／金鑰必須仍有效（資安複驗 N3）：撤銷後建立的待確認不得再執行。
+    const grant = claimed.grant_id ? await getGrant(claimed.grant_id) : null
+    if (!grant || grant.revoked_at || isExpired(grant.expires_at)) {
+      await finishPendingAction(id, { status: "failed", resultStatus: null, result: "來源 AI 授權或金鑰已撤銷／過期，未執行" })
+      res.status(409).json({ error: "grant_revoked", message: "來源 AI 授權或金鑰已撤銷／過期，未執行" })
+      return
+    }
+    let result
+    try {
+      result = await dispatchAsUser(
+        req.app as unknown as RequestListener,
+        req.auth!,
+        `${claimed.client_name} confirmed`,
+        { method: claimed.method, path: claimed.path, query: claimed.query ?? undefined, body: claimed.body ?? undefined },
+        { clientIp: clientIpOf(req) },
+      )
+    } catch (err) {
+      // 執行拋錯 → failed＋錯誤訊息，不留在 executing。
+      await finishPendingAction(id, { status: "failed", resultStatus: null, result: `執行失敗：${err instanceof Error ? err.message : String(err)}` })
+      res.status(502).json({ error: "execution_failed", message: "執行失敗，請到後台查核是否已生效" })
+      return
+    }
     const text = (formatResult(result, {}).content[0] as { text: string }).text
     await finishPendingAction(id, { status: result.status < 400 ? "done" : "failed", resultStatus: result.status, result: text })
     await writeAuditLog({

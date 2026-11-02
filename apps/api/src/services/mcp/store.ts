@@ -18,6 +18,7 @@ import { hashToken, randomToken } from "./crypto.js"
 export class McpStoreError extends Error {}
 
 const iso = (ms: number) => new Date(ms).toISOString()
+const NEVER_AUTHORIZED_PRUNE_HOURS = 24
 const nowIso = () => new Date().toISOString()
 
 function fail(where: string, error: { message: string } | null): never {
@@ -172,12 +173,28 @@ export async function listGrants(tenantId: string, userId: string, kind: "oauth"
 }
 
 /** 撤銷整個授權（連帶它所有 access／refresh token 失效：驗 token 時一律回查 grant.revoked_at）。 */
+/** 撤銷授權／金鑰時，它建立、還沒決定的待確認操作一律改成 rejected（資安複驗 N3）。失敗不擋撤銷。 */
+export async function rejectPendingForGrants(grantIds: string[]): Promise<void> {
+  if (!grantIds.length) return
+  try {
+    await supabaseAdmin
+      .from("mcp_pending_actions")
+      .update({ status: "rejected", decided_at: nowIso(), result: "來源授權或金鑰已撤銷，自動拒絕" })
+      .in("grant_id", grantIds)
+      .eq("status", "pending")
+  } catch {
+    /* ignore */
+  }
+}
+
 export async function revokeGrant(id: string, scope?: { tenantId: string; userId: string }): Promise<GrantRow | null> {
   let q = supabaseAdmin.from("mcp_grants").update({ revoked_at: nowIso() }).eq("id", id).is("revoked_at", null)
   if (scope) q = q.eq("tenant_id", scope.tenantId).eq("user_id", scope.userId)
   const { data, error } = await q.select(GRANT_COLS)
   if (error) fail("revokeGrant", error)
-  return ((data ?? []) as GrantRow[])[0] ?? null
+  const row = ((data ?? []) as GrantRow[])[0] ?? null
+  if (row) await rejectPendingForGrants([row.id])
+  return row
 }
 
 /** last_used_at 每 5 分鐘最多寫一次（避免每個 MCP 請求都寫 DB）。失敗不影響請求。 */
@@ -311,6 +328,8 @@ export interface PendingActionRow {
   query: Record<string, unknown> | null
   body: unknown
   summary: string
+  /** 路徑中的對象解析成的人可讀摘要（pending-target.ts describeTarget）；null＝無法辨識。 */
+  target_summary: string | null
   status: PendingStatus
   result_status: number | null
   result: string | null
@@ -320,11 +339,18 @@ export interface PendingActionRow {
 }
 
 const PENDING_COLS =
-  "id, tenant_id, user_id, employee_id, grant_id, client_name, method, path, query, body, summary, status, result_status, result, expires_at, decided_at, created_at"
+  "id, tenant_id, user_id, employee_id, grant_id, client_name, method, path, query, body, summary, target_summary, status, result_status, result, expires_at, decided_at, created_at"
 
 /** 讀出時把「過期還沒決定」顯示成 expired（DB 不必有排程去改）。 */
+export const EXECUTING_STALE_MS = 2 * 60 * 1000
+
 function withExpiry(row: PendingActionRow): PendingActionRow {
-  return row.status === "pending" && isExpired(row.expires_at) ? { ...row, status: "expired" } : row
+  if (row.status === "pending" && isExpired(row.expires_at)) return { ...row, status: "expired" }
+  // 執行中超過 2 分鐘（函式被平台砍掉等）→ 視為失敗，不讓它永遠卡在 executing。
+  if (row.status === "executing" && row.decided_at && Date.now() - Date.parse(row.decided_at) > EXECUTING_STALE_MS) {
+    return { ...row, status: "failed", result: row.result ?? "執行逾時或中斷（超過 2 分鐘沒有結果），請到後台查核是否已生效" }
+  }
+  return row
 }
 
 export async function createPendingAction(input: {
@@ -338,6 +364,7 @@ export async function createPendingAction(input: {
   query: Record<string, unknown> | null
   body: unknown
   summary: string
+  target_summary: string | null
 }): Promise<PendingActionRow> {
   const { data, error } = await supabaseAdmin
     .from("mcp_pending_actions")
@@ -418,21 +445,39 @@ export async function revokeAllGrantsForUser(tenantId: string, userId: string): 
     .is("revoked_at", null)
     .select("id")
   if (error) fail("revokeAllGrantsForUser", error)
-  return (data ?? []).length
+  const ids = ((data ?? []) as Array<{ id: string }>).map((r) => r.id)
+  await rejectPendingForGrants(ids)
+  return ids.length
 }
 
 // ── DCR 用戶端：總量上限＋90 天未使用清理（資安驗收 L2）──────────────────
 
-/** 刪掉 90 天沒用過的用戶端（從沒用過的看建立時間），回目前剩下的數量（最多數到 limit+1）。 */
+/** 刪掉 90 天沒用過的用戶端、以及建立 24 小時仍未完成授權的用戶端，回目前剩下的數量（最多數到 limit+1）。 */
 export async function pruneAndCountClients(idleDays: number, limit: number): Promise<number> {
   const cutoff = iso(Date.now() - idleDays * 86_400_000)
   const a = await supabaseAdmin.from("mcp_oauth_clients").delete().not("last_used_at", "is", null).lt("last_used_at", cutoff)
   if (a.error) fail("pruneClients(last_used)", a.error)
-  const b = await supabaseAdmin.from("mcp_oauth_clients").delete().is("last_used_at", null).lt("created_at", cutoff)
+  // 從未完成授權（沒換過 token）的用戶端 24 小時就清掉（資安複驗 N2）。
+  const neverUsedCutoff = iso(Date.now() - NEVER_AUTHORIZED_PRUNE_HOURS * 3_600_000)
+  const b = await supabaseAdmin.from("mcp_oauth_clients").delete().is("last_used_at", null).lt("created_at", neverUsedCutoff)
   if (b.error) fail("pruneClients(never_used)", b.error)
-  const { data, error } = await supabaseAdmin.from("mcp_oauth_clients").select("client_id").limit(limit + 1)
-  if (error) fail("countClients", error)
-  return (data ?? []).length
+  const count = async () => {
+    const { data, error } = await supabaseAdmin.from("mcp_oauth_clients").select("client_id").limit(limit + 1)
+    if (error) fail("countClients", error)
+    return (data ?? []).length
+  }
+  let n = await count()
+  if (n >= limit) {
+    // 滿了：先清「建立超過 1 小時仍未完成授權」的（正在走授權流程的給 1 小時），再判斷（資安複驗 N2）。
+    const c = await supabaseAdmin
+      .from("mcp_oauth_clients")
+      .delete()
+      .is("last_used_at", null)
+      .lt("created_at", iso(Date.now() - 3_600_000))
+    if (c.error) fail("pruneClients(full)", c.error)
+    n = await count()
+  }
+  return n
 }
 
 export async function touchClient(clientId: string): Promise<void> {

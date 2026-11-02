@@ -31,6 +31,47 @@ export interface Danger {
 const hasAnyKey = (keys: string[]) => (body: unknown) =>
   !!body && typeof body === "object" && keys.some((k) => Object.prototype.hasOwnProperty.call(body, k))
 
+/** body 任何一層含銀行相關鍵（bankCode／bank_name／bankAccount／accountHolder／account_holder／任何 bank* 鍵）。 */
+function hasBankKey(body: unknown): boolean {
+  if (Array.isArray(body)) return body.some(hasBankKey)
+  if (!body || typeof body !== "object") return false
+  return Object.entries(body as Record<string, unknown>).some(
+    ([k, v]) => /bank|account_?holder/i.test(k) || hasBankKey(v),
+  )
+}
+
+/**
+ * DELETE 預設中風險（confirm_token）；以下前綴（錢／權限相關）的 DELETE 才是最高風險（功能複驗 2）。
+ * 比對不分大小寫、以路徑前綴判斷。
+ */
+export const HIGH_RISK_DELETE_PREFIXES = [
+  "/payroll-adjustments", // 薪資加減項
+  "/salary-adjustments", // 調薪
+  "/salary",
+  "/payroll",
+  "/payslips",
+  "/vendors", // 廠商（收款帳號）
+  "/companies", // 公司名冊
+  "/departments", // 部門（簽核鏈）
+  "/bonus-runs", // 獎金批次
+  "/festival-bonuses",
+  "/overtime-settlements",
+  "/leave-types", // 假別
+  "/calendar/days", // 行事曆日
+  "/employees", // 員工（含個資、照片）
+  "/educations",
+  "/certifications",
+  "/work-history",
+  "/approval-flows", // 角色／簽核相關
+  "/disbursements", // 放款
+  "/billings", // 請款
+  "/contracts",
+  "/advances",
+  "/expense",
+  "/nhi-dependents", // 影響薪資扣繳
+  "/income-tax-dependents",
+] as const
+
 /** 員工資料裡屬於「角色／權限／帳號狀態」的欄位（PATCH /employees/:id 帶到任一個＝最高風險）。 */
 const EMPLOYEE_PRIVILEGE_KEYS = ["role", "status", "user_id", "userId", "features", "terminatedAt", "terminated_at", "companyId", "company_id"]
 
@@ -120,10 +161,14 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "POST", path: "/projects/:id/subcontracts/:sid/payments/:installmentNo/accept", label: "複委託付款驗收" },
   { method: "POST", path: "/attendance-sheets/:id/approve", label: "核定出勤月表（鎖定）" },
   // 功能驗收追加（2026-11-02）：最高風險（需後台確認）
-  { method: "PUT", path: "/employees/:empId/profile", tier: "high", label: "修改員工個人資料（含銀行帳號）" },
-  { method: "POST", path: "/profile-change-requests/:id/approve", tier: "high", label: "核准員工改資料（含銀行帳號）" },
-  { method: "POST", path: "/vendors", tier: "high", label: "新增廠商（收款帳號）" },
-  { method: "PATCH", path: "/vendors/:id", tier: "high", label: "修改廠商（收款帳號）" },
+  // 員工個資／廠商：只有改到銀行欄位才是最高風險，其餘中風險（功能複驗 1）。規則依序比對、第一條符合的生效。
+  { method: "PUT", path: "/employees/:empId/profile", tier: "high", label: "修改員工銀行帳號", when: hasBankKey },
+  { method: "PUT", path: "/employees/:empId/profile", label: "修改員工個人資料" },
+  { method: "POST", path: "/profile-change-requests/:id/approve", tier: "high", label: "核准員工改資料（可能含銀行帳號）" },
+  { method: "POST", path: "/vendors", tier: "high", label: "新增廠商（含收款帳號）", when: hasBankKey },
+  { method: "POST", path: "/vendors", label: "新增廠商" },
+  { method: "PATCH", path: "/vendors/:id", tier: "high", label: "修改廠商收款帳號", when: hasBankKey },
+  { method: "PATCH", path: "/vendors/:id", label: "修改廠商" },
   { method: "POST", path: "/salary-adjustments", tier: "high", label: "新增薪資調整" },
   { method: "PATCH", path: "/salary-adjustments/:id", tier: "high", label: "修改薪資調整" },
   {
@@ -149,6 +194,14 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "PUT", path: "/employee-mailboxes/:employeeId", label: "修改員工信箱" },
   { method: "POST", path: "/duty-rosters/generate", label: "產生值日表" },
   { method: "POST", path: "/kpi-reviews/:id/finalize", label: "KPI 考核定案" },
+  // 功能複驗 4：中風險補列
+  { method: "PATCH", path: "/attendance-sheets/:id/days/:date", label: "修改出勤月表日資料" },
+  { method: "POST", path: "/attendance-sheets/generate", label: "產生出勤月表" },
+  { method: "POST", path: "/attendance-sheets/:id/recompute", label: "重算出勤月表" },
+  { method: "POST", path: "/shifts", label: "新增班別" },
+  { method: "PATCH", path: "/shifts/:id", label: "修改班別" },
+  { method: "PATCH", path: "/contracts/:id", label: "修改合約" },
+  { method: "POST", path: "/projects/:id/contracts", label: "新增合約" },
 ]
 
 /**
@@ -182,6 +235,7 @@ const SAFE_WRITES: ReadonlyArray<{ method: string; path: string }> = [
   { method: "POST", path: "/disbursements/:id/withdraw" },
   { method: "POST", path: "/disbursements/:id/attachments" },
   { method: "POST", path: "/disbursements" },
+  { method: "POST", path: "/bonus-runs/preview" }, // 只試算、不落地
 ]
 
 function patternToRegExp(pattern: string): RegExp {
@@ -204,7 +258,10 @@ export function dangerOf(method: string, path: string, body?: unknown): Danger |
   const p = path.toLowerCase()
   const hit = COMPILED.find(({ rule, re }) => rule.method === m && re.test(p) && (!rule.when || rule.when(body)))
   if (hit) return { label: hit.rule.label, tier: hit.rule.tier ?? "medium" }
-  if (m === "DELETE") return { label: "刪除資料", tier: "high" }
+  if (m === "DELETE") {
+    const high = HIGH_RISK_DELETE_PREFIXES.some((prefix) => p === prefix || p.startsWith(`${prefix}/`))
+    return { label: high ? "刪除錢／權限相關資料" : "刪除資料", tier: high ? "high" : "medium" }
+  }
   if (m !== "GET" && m !== "HEAD" && SENSITIVE_WRITE_PREFIXES.some((prefix) => p.startsWith(prefix))) {
     if (SAFE_COMPILED.some((w) => w.method === m && w.re.test(p))) return null
     return { label: "薪資／獎金／金流／規則相關的寫入", tier: "medium" }

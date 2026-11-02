@@ -120,6 +120,8 @@ export const mcpPendingActions = pgTable(
     query: jsonb("query"),
     body: jsonb("body"),
     summary: text("summary").notNull(),
+    /** 對象摘要（migration 0084）；null＝無法辨識 */
+    targetSummary: text("target_summary"),
     /** pending／executing／done／failed／rejected（逾時由讀取端顯示為 expired） */
     status: text("status").notNull().default("pending"),
     resultStatus: integer("result_status"),

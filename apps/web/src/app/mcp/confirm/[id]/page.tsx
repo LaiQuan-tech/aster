@@ -77,6 +77,29 @@ export default function ConfirmPendingActionPage() {
           !error ? <p className="text-sm text-gray-500">載入中…</p> : null
         ) : (
           <>
+            {action.targetSummary ? (
+              <div className="mb-4 rounded-lg border-2 border-amber-400 bg-amber-50 p-4">
+                <p className="text-xs font-medium text-amber-800">操作對象</p>
+                <p className="mt-1 text-lg font-bold text-gray-900">{action.targetSummary}</p>
+              </div>
+            ) : (
+              <div role="alert" className="mb-4 rounded-lg border-2 border-red-500 bg-red-50 p-4">
+                <p className="text-lg font-bold text-red-700">⚠ 無法辨識對象，請小心</p>
+                <p className="mt-1 text-sm text-red-700">系統無法把這個操作對應到具體的人或單據。請仔細核對下方 API 路徑與內容，不確定就按「拒絕」。</p>
+              </div>
+            )}
+            {action.dangerFields.length > 0 ? (
+              <div role="alert" className="mb-4 rounded-lg border-2 border-red-500 bg-red-50 p-4">
+                <p className="text-sm font-bold text-red-700">⚠ 這次會改到以下敏感欄位，請逐一核對：</p>
+                <ul className="mt-2 flex flex-wrap gap-2">
+                  {action.dangerFields.map((f) => (
+                    <li key={f} className="rounded bg-white px-2 py-0.5 font-mono text-sm font-bold text-red-800 ring-1 ring-red-300">
+                      {f}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
             <dl className="grid grid-cols-[6rem_1fr] gap-x-3 gap-y-2 text-sm">
               <dt className="text-gray-500">操作</dt>
               <dd className="font-medium text-gray-900">{action.summary}</dd>

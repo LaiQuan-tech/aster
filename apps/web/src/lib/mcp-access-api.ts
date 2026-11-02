@@ -76,6 +76,10 @@ export interface PendingAction {
   query: Record<string, unknown> | null;
   body: unknown;
   summary: string;
+  /** 對象摘要（員工姓名／放款單號＋金額＋受款人…）；null＝無法辨識。 */
+  targetSummary: string | null;
+  /** body 裡的高敏感欄位路徑（role、bankAccount、amount…）。 */
+  dangerFields: string[];
   status: "pending" | "executing" | "done" | "failed" | "rejected" | "expired";
   resultStatus: number | null;
   result: string | null;

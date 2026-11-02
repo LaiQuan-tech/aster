@@ -15,6 +15,7 @@ import { dangerOf } from "../services/mcp/danger.js"
 import { canonicalizePath, isBlockedPath } from "../services/mcp/catalog.js"
 import { dispatchAsUser } from "../services/mcp/dispatch.js"
 import { revokeMcpAccessSafely } from "../services/mcp/revoke.js"
+import { TOOL_DEADLINE_MS, withDeadline } from "../services/mcp/tools.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 /**
@@ -487,16 +488,27 @@ describe("危險操作（中風險）二段確認 confirm_token", () => {
       ["PUT", "/rule-config"],
       ["PUT", "/approval-flows/leave"],
       ["POST", "/admin/tenants"],
-      ["DELETE", "/clients/abc"],
-      ["PUT", "/employees/x/profile"],
       ["POST", "/profile-change-requests/x/approve"],
-      ["POST", "/vendors"],
-      ["PATCH", "/vendors/x"],
       ["POST", "/salary-adjustments"],
       ["PATCH", "/salary-adjustments/x"],
     ] as const) expect(tier(m, p), `${m} ${p}`).toBe("high")
     for (const key of ["role", "status", "terminatedAt", "companyId", "user_id", "features"]) expect(tier("PATCH", "/employees/x", { [key]: 1 })).toBe("high")
     expect(tier("PATCH", "/employees/x", { name: "x" })).toBeNull()
+    // 銀行欄位才是最高風險（功能複驗 1）
+    for (const body of [{ bankAccount: "1" }, { bank_code: "1" }, { accountHolder: "x" }, { account_holder: "x" }, { payout: { bankName: "x" } }]) {
+      expect(tier("PUT", "/employees/x/profile", body), JSON.stringify(body)).toBe("high")
+      expect(tier("POST", "/vendors", body)).toBe("high")
+      expect(tier("PATCH", "/vendors/x", body)).toBe("high")
+    }
+    expect(tier("PUT", "/employees/x/profile", { phone: "1" })).toBe("medium")
+    expect(tier("POST", "/vendors", { name: "x" })).toBe("medium")
+    expect(tier("PATCH", "/vendors/x", { phone: "1" })).toBe("medium")
+    // DELETE：錢／權限相關才最高，其餘中風險（功能複驗 2）
+    for (const p of ["/payroll-adjustments/x", "/salary-adjustments/x", "/vendors/x", "/companies/x", "/departments/x", "/bonus-runs/x", "/leave-types/x", "/calendar/days/2026-10-10", "/employees/x/profile/photo", "/disbursements/x/attachments/a", "/contracts/x", "/nhi-dependents/x"])
+      expect(tier("DELETE", p), p).toBe("high")
+    for (const p of ["/clients/x", "/announcements/x", "/kpi-templates/x", "/knowledge/documents/x", "/duty-rosters/x", "/option-lists/k/c"])
+      expect(tier("DELETE", p), p).toBe("medium")
+    expect(tier("POST", "/bonus-runs/preview")).toBeNull()
     expect(tier("PATCH", "/departments/x", { managerEmpIds: [] })).toBe("high")
     expect(tier("PATCH", "/departments/x", { name: "x" })).toBeNull()
     for (const [m, p] of [
@@ -528,6 +540,13 @@ describe("危險操作（中風險）二段確認 confirm_token", () => {
       ["PUT", "/employee-mailboxes/x"],
       ["POST", "/duty-rosters/generate"],
       ["POST", "/kpi-reviews/x/finalize"],
+      ["PATCH", "/attendance-sheets/x/days/2026-10-01"],
+      ["POST", "/attendance-sheets/generate"],
+      ["POST", "/attendance-sheets/x/recompute"],
+      ["POST", "/shifts"],
+      ["PATCH", "/shifts/x"],
+      ["PATCH", "/contracts/x"],
+      ["POST", "/projects/x/contracts"],
       ["PUT", "/salary/x"],
       ["POST", "/payroll-something-new"], // 前綴保守規則：沒列到的新端點也算
       ["POST", "/bonus-sheet/whatever"],
@@ -619,6 +638,152 @@ describe("最高風險操作：只能由使用者在後台確認（M4）", () =>
     const id = idOf((await callTool(key.token, "call_api", CLOSE)).text)
     for (const row of fake.db.mcp_pending_actions ?? []) row.tenant_id = OTHER_TENANT_ID
     expect((await request(app).get(`/me/mcp/pending/${id}`).set("Authorization", `Bearer ${T.hr}`)).status).toBe(404)
+  })
+})
+
+describe("待確認操作防誤導與生命週期（N1／N3／Info）", () => {
+  const idOf = (text: string) => /id: ([0-9a-f-]{36})/.exec(text)?.[1] as string
+  const detail = (id: string, token = T.hr) => request(app).get(`/me/mcp/pending/${id}`).set("Authorization", `Bearer ${token}`)
+  const decide = (id: string, approve = true) => request(app).post(`/me/mcp/pending/${id}/decision`).set("Authorization", `Bearer ${T.hr}`).send({ approve })
+
+  it("body 超過 8KB／超過 40 個欄位／巢狀過深 → 不建立待確認", async () => {
+    const key = await createPat(T.hr)
+    const path = `/employees/${HR2_ID}`
+    const big = await callTool(key.token, "call_api", { method: "PATCH", path, body: { role: "employee", note: "x".repeat(9000) } })
+    expect(big.isError).toBe(true)
+    expect(big.text).toContain("8KB")
+    const many = Object.fromEntries(Array.from({ length: 41 }, (_, i) => [`k${i}`, 1]))
+    const wide = await callTool(key.token, "call_api", { method: "PATCH", path, body: { role: "employee", ...many } })
+    expect(wide.text).toContain("欄位超過")
+    const deep = await callTool(key.token, "call_api", { method: "PATCH", path, body: { role: "x", a: { b: { c: { d: { e: 1 } } } } } })
+    expect(deep.text).toContain("巢狀")
+    expect(fake.db.mcp_pending_actions ?? []).toHaveLength(0)
+  })
+
+  it("對象摘要：員工姓名＋目前角色；確認頁列出危險欄位", async () => {
+    const key = await createPat(T.hr)
+    const res = await callTool(key.token, "call_api", { method: "PATCH", path: `/employees/${HR2_ID}`, body: { role: "employee", name: "x" } })
+    expect(res.text).toContain("對象：員工 HR 小草")
+    const d = await detail(idOf(res.text))
+    expect(d.body.targetSummary).toContain("HR 小草")
+    expect(d.body.targetSummary).toContain("hr_admin")
+    expect(d.body.dangerFields).toEqual(["role"])
+  })
+
+  it("對象摘要：期間、放款單（單號＋金額＋受款人）；解析不到 → null（確認頁顯示無法辨識）", async () => {
+    const key = await createPat(T.hr)
+    const DISB = "ffffffff-0000-4000-8000-000000000001"
+    fake.db.disbursements = [{ id: DISB, tenant_id: TENANT_ID, disbursement_no: "D-0001", amount: 12345, payee_name: "受款人甲", status: "approved" }]
+    const period = await callTool(key.token, "call_api", { method: "POST", path: "/payroll-periods/2026-10/close", body: {} })
+    expect((await detail(idOf(period.text))).body.targetSummary).toBe("發薪期間 2026-10")
+    const pay = await callTool(key.token, "call_api", { method: "POST", path: `/disbursements/${DISB}/pay`, body: {} })
+    const t = (await detail(idOf(pay.text))).body.targetSummary as string
+    expect(t).toContain("D-0001")
+    expect(t).toContain("12,345")
+    expect(t).toContain("受款人甲")
+    const unknown = await callTool(key.token, "call_api", { method: "DELETE", path: "/departments/11111111-2222-4333-8444-555555555555" })
+    expect(unknown.text).toContain("對象：無法辨識對象")
+    expect((await detail(idOf(unknown.text))).body.targetSummary).toBeNull()
+    // 別租戶的放款單解析不到
+    fake.db.disbursements[0]!.tenant_id = OTHER_TENANT_ID
+    const other = await callTool(key.token, "call_api", { method: "POST", path: `/disbursements/${DISB}/void`, body: {} })
+    expect((await detail(idOf(other.text))).body.targetSummary).toBeNull()
+  })
+
+  it("撤銷金鑰 → 它建立的待確認自動 rejected；確認時來源授權已失效 → 不執行", async () => {
+    const key = await createPat(T.hr)
+    const id1 = idOf((await callTool(key.token, "call_api", { method: "POST", path: "/payroll-periods/2026-10/close", body: {} })).text)
+    const id2 = idOf((await callTool(key.token, "call_api", { method: "POST", path: "/payroll-periods/2026-09/close", body: {} })).text)
+    // 模擬「撤銷沒連帶處理到」的情況：直接把 grant 標成撤銷 → 確認時仍要擋
+    const grant = fake.db.mcp_grants!.find((g) => g.id === key.id)!
+    grant.revoked_at = "2026-11-01T00:00:00.000Z"
+    const blocked = await decide(id2)
+    expect([blocked.status, blocked.body.error]).toEqual([409, "grant_revoked"])
+    grant.revoked_at = null
+    expect((await request(app).delete(`/me/mcp/keys/${key.id}`).set("Authorization", `Bearer ${T.hr}`)).status).toBe(200)
+    expect((await detail(id1)).body.status).toBe("rejected")
+    expect((await decide(id1)).status).toBe(409)
+    expect((fake.db.audit_logs ?? []).filter((r) => r.table_name === "mcp_calls")).toHaveLength(0)
+  })
+
+  it("改密碼（/me/password-done）撤銷授權時，待確認也一併 rejected", async () => {
+    const key = await createPat(T.hr)
+    const id = idOf((await callTool(key.token, "call_api", { method: "POST", path: "/payroll-periods/2026-10/close", body: {} })).text)
+    await request(app).post("/me/password-done").set("Authorization", `Bearer ${T.hr}`).send({})
+    expect((await detail(id)).body.status).toBe("rejected")
+  })
+
+  it("執行拋錯 → failed＋錯誤訊息；executing 超過 2 分鐘 → 顯示 failed", async () => {
+    const key = await createPat(T.hr)
+    const id = idOf((await callTool(key.token, "call_api", { method: "POST", path: "/payroll-periods/2026-10/close", body: {} })).text)
+    const spy = vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new Error("socket hang up"))
+    const res = await decide(id)
+    spy.mockRestore()
+    expect(res.status).toBe(502)
+    const d = await detail(id)
+    expect(d.body.status).toBe("failed")
+    expect(d.body.result).toContain("socket hang up")
+
+    const id2 = idOf((await callTool(key.token, "call_api", { method: "POST", path: "/payroll-periods/2026-09/close", body: {} })).text)
+    const row = fake.db.mcp_pending_actions!.find((r) => r.id === id2)!
+    row.status = "executing"
+    row.decided_at = new Date(Date.now() - 3 * 60 * 1000).toISOString()
+    const st = await callTool(key.token, "get_pending_action", { id: id2 })
+    expect(st.text).toContain("狀態：failed")
+  })
+})
+
+describe("DCR 未授權用戶端清理（N2）", () => {
+  const row = (i: number, createdAt: string, lastUsed: string | null): Row => ({
+    client_id: `aster_c_n2_${i}`,
+    client_secret_hash: null,
+    client_name: "seed",
+    redirect_uris: [REDIRECT],
+    token_endpoint_auth_method: "none",
+    metadata: {},
+    created_at: createdAt,
+    last_used_at: lastUsed,
+  })
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString()
+
+  it("建立超過 24 小時仍未授權的用戶端在註冊時清掉；授權過的保留", async () => {
+    fake.db.mcp_oauth_clients = [row(1, ago(25 * 3600_000), null), row(2, ago(25 * 3600_000), ago(3600_000)), row(3, ago(3600_000 / 2), null)]
+    const ok = await request(app).post("/oauth/register").send({ redirect_uris: [REDIRECT] })
+    expect(ok.status).toBe(201)
+    expect(fake.db.mcp_oauth_clients.map((c) => c.client_id)).toEqual(["aster_c_n2_2", "aster_c_n2_3", ok.body.client_id])
+  })
+
+  it("總量滿時先清建立超過 1 小時的未授權用戶端再判斷；全是已授權的 → 503", async () => {
+    const recent = ago(60_000)
+    fake.db.mcp_oauth_clients = [...Array.from({ length: 999 }, (_, i) => row(i, recent, recent)), row(9999, ago(2 * 3600_000), null)]
+    const ok = await request(app).post("/oauth/register").send({ redirect_uris: [REDIRECT] })
+    expect(ok.status).toBe(201)
+    expect(fake.db.mcp_oauth_clients.some((c) => c.client_id === "aster_c_n2_9999")).toBe(false)
+    fake.db.mcp_oauth_clients = Array.from({ length: 1000 }, (_, i) => row(i, recent, recent))
+    expect((await request(app).post("/oauth/register").send({ redirect_uris: [REDIRECT] })).status).toBe(503)
+  })
+})
+
+describe("工具總截止（50 秒）", () => {
+  it("超過 TOOL_DEADLINE_MS → 回逾時錯誤；時間內完成照常回", async () => {
+    vi.useFakeTimers()
+    try {
+      const never = new Promise<never>(() => {})
+      const pending = withDeadline(never as never)
+      await vi.advanceTimersByTimeAsync(TOOL_DEADLINE_MS - 1)
+      let settled = false
+      void pending.then(() => (settled = true))
+      await Promise.resolve()
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      const res = await pending
+      expect(res.isError).toBe(true)
+      expect((res.content[0] as { text: string }).text).toContain("工具執行逾時（超過 50 秒）")
+      const fast = await withDeadline(Promise.resolve({ content: [{ type: "text", text: "ok" }] }))
+      expect((fast.content[0] as { text: string }).text).toBe("ok")
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
