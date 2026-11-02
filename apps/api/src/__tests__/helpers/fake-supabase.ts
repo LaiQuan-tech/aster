@@ -380,6 +380,8 @@ export function fakeSupabaseModule() {
     supabaseAdmin: {
       from: (table: string) => fake.from(table),
       rpc: (name: string, args: Row) => fake.rpc(name, args),
+      // Auth admin 只模擬 listUsers（員工名冊補 email 用；回空清單＝email 一律 null）。
+      auth: { admin: { listUsers: async () => ({ data: { users: [] }, error: null }) } },
     },
     // MCP 程序內派送的內部 token（lib/internal-identity.ts）照真實行為解析：查得到回登記的身分，查不到 401。
     getUserFromToken: async (token: string) => {

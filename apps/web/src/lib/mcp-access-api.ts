@@ -80,6 +80,8 @@ export interface PendingAction {
   targetSummary: string | null;
   /** body 裡的高敏感欄位路徑（role、bankAccount、amount…）。 */
   dangerFields: string[];
+  /** 沒列出的其他提醒欄位數。 */
+  dangerFieldsMore: number;
   status: "pending" | "executing" | "done" | "failed" | "rejected" | "expired";
   resultStatus: number | null;
   result: string | null;

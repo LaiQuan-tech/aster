@@ -88,7 +88,7 @@ export default function ConfirmPendingActionPage() {
                 <p className="mt-1 text-sm text-red-700">系統無法把這個操作對應到具體的人或單據。請仔細核對下方 API 路徑與內容，不確定就按「拒絕」。</p>
               </div>
             )}
-            {action.dangerFields.length > 0 ? (
+            {action.dangerFields.length > 0 || action.dangerFieldsMore > 0 ? (
               <div role="alert" className="mb-4 rounded-lg border-2 border-red-500 bg-red-50 p-4">
                 <p className="text-sm font-bold text-red-700">⚠ 這次會改到以下敏感欄位，請逐一核對：</p>
                 <ul className="mt-2 flex flex-wrap gap-2">
@@ -98,6 +98,9 @@ export default function ConfirmPendingActionPage() {
                     </li>
                   ))}
                 </ul>
+                {action.dangerFieldsMore > 0 ? (
+                  <p className="mt-2 text-sm font-bold text-red-700">另有 {action.dangerFieldsMore} 個欄位未列出，請展開下方內容逐項核對。</p>
+                ) : null}
               </div>
             ) : null}
             <dl className="grid grid-cols-[6rem_1fr] gap-x-3 gap-y-2 text-sm">

@@ -160,6 +160,7 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "PUT", path: "/projects/:id/subcontracts", label: "修改複委託" },
   { method: "POST", path: "/projects/:id/subcontracts/:sid/payments/:installmentNo/accept", label: "複委託付款驗收" },
   { method: "POST", path: "/attendance-sheets/:id/approve", label: "核定出勤月表（鎖定）" },
+  { method: "DELETE", path: "/projects/:id/members/:memberId", tier: "high", label: "移除專案成員（影響分潤）" },
   // 功能驗收追加（2026-11-02）：最高風險（需後台確認）
   // 員工個資／廠商：只有改到銀行欄位才是最高風險，其餘中風險（功能複驗 1）。規則依序比對、第一條符合的生效。
   { method: "PUT", path: "/employees/:empId/profile", tier: "high", label: "修改員工銀行帳號", when: hasBankKey },

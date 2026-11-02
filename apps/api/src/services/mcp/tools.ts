@@ -111,9 +111,21 @@ export async function runApi(
     // 最高風險：AI 不能自己完成。建立待確認操作，請使用者本人到後台確認（routes/mcp-keys.ts /me/mcp/pending）。
     const bodyError = checkPendingBody(call.body)
     if (bodyError) return textResult(`未建立待確認操作：${bodyError}`, true)
-    const target = await describeTarget(identity.tenantId, method, call.path, call.body)
+    // 對象摘要：以本人身分打對應 GET（權限照舊）；讀不到 → 不建立、原樣回錯誤。摘要只給確認頁，不回給 AI（資安複驗 H2）。
+    const target = await describeTarget(
+      async (path, query) => {
+        const r = await dispatchAsUser(ctx.app, identity.user, identity.clientName, { method: "GET", path, query }, { clientIp: ctx.clientIp })
+        return { status: r.status, json: r.json }
+      },
+      method,
+      call.path,
+      call.body,
+    )
+    if (!target.ok) {
+      return textResult(`HTTP ${target.status}｜未建立待確認操作：你讀不到這個對象（或它不存在）。\n${JSON.stringify(target.json ?? null).slice(0, 500)}`, true)
+    }
     const pending = await createPendingAction({
-      target_summary: target,
+      target_summary: target.summary,
       tenant_id: identity.tenantId,
       user_id: identity.user.userId,
       employee_id: identity.employeeId,
@@ -128,9 +140,7 @@ export async function runApi(
     const url = `${webBaseUrl()}/mcp/confirm/${pending.id}`
     return textResult(
       [
-        `⛔ 最高風險操作，AI 不能自行執行：${danger.label}`,
-        `對象：${target ?? "無法辨識對象"}`,
-        describeCall(normalized),
+        `⛔ 最高風險操作，AI 不能自行執行（動作類型：${danger.label}）`,
         "",
         `已建立待確認操作（id: ${pending.id}，${PENDING_ACTION_TTL_SEC / 60} 分鐘內有效、只能決定一次）。`,
         `請使用者本人打開這個網址，登入後檢視完整內容並按「確認執行」或「拒絕」：`,

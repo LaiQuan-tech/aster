@@ -15,6 +15,7 @@ import { dangerOf } from "../services/mcp/danger.js"
 import { canonicalizePath, isBlockedPath } from "../services/mcp/catalog.js"
 import { dispatchAsUser } from "../services/mcp/dispatch.js"
 import { revokeMcpAccessSafely } from "../services/mcp/revoke.js"
+import { dangerFieldsOf, maskAccount } from "../services/mcp/pending-target.js"
 import { TOOL_DEADLINE_MS, withDeadline } from "../services/mcp/tools.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
@@ -660,34 +661,40 @@ describe("待確認操作防誤導與生命週期（N1／N3／Info）", () => {
     expect(fake.db.mcp_pending_actions ?? []).toHaveLength(0)
   })
 
-  it("對象摘要：員工姓名＋目前角色；確認頁列出危險欄位", async () => {
+  it("對象摘要：以本人身分讀 GET 組出、只存在 pending 不回給 AI；確認頁列出危險欄位", async () => {
     const key = await createPat(T.hr)
     const res = await callTool(key.token, "call_api", { method: "PATCH", path: `/employees/${HR2_ID}`, body: { role: "employee", name: "x" } })
-    expect(res.text).toContain("對象：員工 HR 小草")
+    expect(res.text, res.text).toContain("AI 不能自行執行")
+    expect(res.text).not.toContain("HR 小草")
+    expect(res.text).not.toContain("對象")
     const d = await detail(idOf(res.text))
     expect(d.body.targetSummary).toContain("HR 小草")
     expect(d.body.targetSummary).toContain("hr_admin")
     expect(d.body.dangerFields).toEqual(["role"])
+    expect(d.body.dangerFieldsMore).toBe(0)
   })
 
-  it("對象摘要：期間、放款單（單號＋金額＋受款人）；解析不到 → null（確認頁顯示無法辨識）", async () => {
+  it("沒有對應 GET 的資源 → 摘要 null（確認頁顯示無法辨識）；讀不到的對象（不存在／別租戶）→ 不建立 pending", async () => {
     const key = await createPat(T.hr)
-    const DISB = "ffffffff-0000-4000-8000-000000000001"
-    fake.db.disbursements = [{ id: DISB, tenant_id: TENANT_ID, disbursement_no: "D-0001", amount: 12345, payee_name: "受款人甲", status: "approved" }]
-    const period = await callTool(key.token, "call_api", { method: "POST", path: "/payroll-periods/2026-10/close", body: {} })
-    expect((await detail(idOf(period.text))).body.targetSummary).toBe("發薪期間 2026-10")
-    const pay = await callTool(key.token, "call_api", { method: "POST", path: `/disbursements/${DISB}/pay`, body: {} })
-    const t = (await detail(idOf(pay.text))).body.targetSummary as string
-    expect(t).toContain("D-0001")
-    expect(t).toContain("12,345")
-    expect(t).toContain("受款人甲")
-    const unknown = await callTool(key.token, "call_api", { method: "DELETE", path: "/departments/11111111-2222-4333-8444-555555555555" })
-    expect(unknown.text).toContain("對象：無法辨識對象")
+    const unknown = await callTool(key.token, "call_api", { method: "DELETE", path: "/companies/11111111-2222-4333-8444-555555555555" })
+    expect(unknown.text).toContain("AI 不能自行執行")
     expect((await detail(idOf(unknown.text))).body.targetSummary).toBeNull()
-    // 別租戶的放款單解析不到
-    fake.db.disbursements[0]!.tenant_id = OTHER_TENANT_ID
-    const other = await callTool(key.token, "call_api", { method: "POST", path: `/disbursements/${DISB}/void`, body: {} })
-    expect((await detail(idOf(other.text))).body.targetSummary).toBeNull()
+    const before = (fake.db.mcp_pending_actions ?? []).length
+    const missing = await callTool(key.token, "call_api", { method: "PATCH", path: `/employees/11111111-2222-4333-8444-555555555555`, body: { role: "employee" } })
+    expect(missing.isError).toBe(true)
+    expect(missing.text).toContain("未建立待確認操作")
+    expect((fake.db.mcp_pending_actions ?? []).length).toBe(before)
+  })
+
+  it("dangerFieldsOf：權限／金流鍵不受上限，其他提醒鍵超過 30 個顯示總數", () => {
+    const body: Record<string, unknown> = { role: "x", bankAccount: "1", managerEmpIds: [], terminatedAt: null }
+    for (let i = 0; i < 35; i++) body[`total${i}`] = i
+    const r = dangerFieldsOf(body)
+    expect(r.fields).toEqual(expect.arrayContaining(["role", "bankAccount", "managerEmpIds", "terminatedAt"]))
+    expect(r.fields).toHaveLength(4 + 30)
+    expect(r.more).toBe(5)
+    expect(maskAccount("9876543210123")).toBe("****0123")
+    expect(maskAccount("12")).toBe("****")
   })
 
   it("撤銷金鑰 → 它建立的待確認自動 rejected；確認時來源授權已失效 → 不執行", async () => {
@@ -730,6 +737,65 @@ describe("待確認操作防誤導與生命週期（N1／N3／Info）", () => {
     row.decided_at = new Date(Date.now() - 3 * 60 * 1000).toISOString()
     const st = await callTool(key.token, "get_pending_action", { id: id2 })
     expect(st.text).toContain("狀態：failed")
+  })
+})
+
+describe("H2：無權讀取者不能經待確認窺探資料", () => {
+  const ACCOUNT = "9876543210123"
+  const VENDOR = "aaaaaaaa-0000-4000-8000-000000000001"
+  const PAYSLIP = "aaaaaaaa-0000-4000-8000-000000000002"
+  const SALADJ = "aaaaaaaa-0000-4000-8000-000000000003"
+  const RUN = "aaaaaaaa-0000-4000-8000-000000000004"
+  const DISB = "aaaaaaaa-0000-4000-8000-000000000005"
+  const seed = () => {
+    fake.db.vendors = [{ id: VENDOR, tenant_id: TENANT_ID, name: "廠商乙", bank_name: "測試銀行", bank_account: ACCOUNT, bank_code: "999", deleted_at: null }]
+    fake.db.payslips = [{ id: PAYSLIP, tenant_id: TENANT_ID, employee_id: HR2_ID, period: "2026-10", gross: 77777, base: 77777, status: "draft" }]
+    fake.db.salary_adjustments = [{ id: SALADJ, tenant_id: TENANT_ID, employee_id: HR2_ID, effective_date: "2026-10-01", new_salary: 77777 }]
+    fake.db.bonus_runs = [{ id: RUN, tenant_id: TENANT_ID, label: "Q3 獎金", status: "submitted", approved_amount: 77777, totals: { total: 77777 }, deleted_at: null }]
+    fake.db.disbursements = [{ id: DISB, tenant_id: TENANT_ID, disbursement_no: "D-9", amount: 77777, payee_name: "受款人乙", payee_bank_account: ACCOUNT, status: "approved" }]
+  }
+  const leaks = (text: string) => text.includes(ACCOUNT) || text.includes("77777") || text.includes("77,777") || text.includes("0123")
+
+  it.each([
+    ["POST", `/payslips/${PAYSLIP}/finalize`, {}],
+    ["PATCH", `/salary-adjustments/${SALADJ}`, { newSalary: 1 }],
+    ["POST", `/bonus-runs/${RUN}/approve`, {}],
+    ["POST", `/disbursements/${DISB}/pay`, {}],
+    ["PATCH", `/employees/${HR2_ID}`, { role: "employee" }],
+  ] as const)("員工 %s %s → 讀不到就不建 pending，回應不含帳號或金額", async (method, path, body) => {
+    seed()
+    const key = await createPat(T.staff)
+    const res = await callTool(key.token, "call_api", { method, path, body })
+    expect(res.isError, res.text).toBe(true)
+    expect(res.text).toContain("未建立待確認操作")
+    expect(leaks(res.text)).toBe(false)
+    expect(fake.db.mcp_pending_actions ?? []).toHaveLength(0)
+  })
+
+  it("員工對廠商改帳號：廠商名冊員工讀得到（帳號被遮），pending 摘要與回應都不含帳號", async () => {
+    seed()
+    const key = await createPat(T.staff)
+    const res = await callTool(key.token, "call_api", { method: "PATCH", path: `/vendors/${VENDOR}`, body: { bankAccount: "1111222233334444" } })
+    expect(leaks(res.text)).toBe(false)
+    for (const row of fake.db.mcp_pending_actions ?? []) {
+      expect(leaks(String(row.target_summary ?? ""))).toBe(false)
+    }
+  })
+
+  it("HR 對廠商改帳號：pending 摘要的帳號只露末 4 碼，AI 回應完全不含", async () => {
+    seed()
+    const key = await createPat(T.hr)
+    const res = await callTool(key.token, "call_api", { method: "PATCH", path: `/vendors/${VENDOR}`, body: { bankAccount: "1111222233334444" } })
+    expect(res.text, res.text).toContain("AI 不能自行執行")
+    expect(leaks(res.text)).toBe(false)
+    const row = fake.db.mcp_pending_actions![0]!
+    expect(row.target_summary).toContain("廠商乙")
+    expect(row.target_summary).not.toContain(ACCOUNT)
+    expect(row.target_summary).toContain("目前收款帳號 ****0123")
+  })
+
+  it("DELETE /projects/:id/members/:memberId 是最高風險", () => {
+    expect(dangerOf("DELETE", "/projects/x/members/m")?.tier).toBe("high")
   })
 })
 
