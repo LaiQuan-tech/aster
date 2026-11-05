@@ -21,3 +21,21 @@ export function imageExtOf(fileName: string): string {
 export function isAllowedImage(fileName: string, contentType: string | null | undefined): boolean {
   return IMAGE_EXTENSIONS.includes(imageExtOf(fileName)) && IMAGE_CONTENT_TYPES.includes(normalizeImageContentType(contentType))
 }
+
+/** 嚴格 base64（標準字母表、長度 4 的倍數、結尾最多兩個 =；不收空白與 data: 前綴）。 */
+export function isStrictBase64(text: string): boolean {
+  return text.length > 0 && text.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(text)
+}
+
+const HEIF_BRANDS = ["heic", "heix", "hevc", "hevx", "heim", "heis", "hevm", "hevs", "mif1", "msf1"]
+
+/** 依檔頭判斷影像格式（jpeg／png／webp／heic）；不是這幾種回 null。 */
+export function sniffImageType(bytes: Uint8Array): "image/jpeg" | "image/png" | "image/webp" | "image/heic" | null {
+  const b = bytes
+  const ascii = (from: number, to: number) => String.fromCharCode(...Array.from(b.subarray(from, to)))
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg"
+  if (b.length >= 8 && [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((v, i) => b[i] === v)) return "image/png"
+  if (b.length >= 12 && ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") return "image/webp"
+  if (b.length >= 12 && ascii(4, 8) === "ftyp" && HEIF_BRANDS.includes(ascii(8, 12))) return "image/heic"
+  return null
+}

@@ -29,6 +29,8 @@ export const vehicles = pgTable(
     seats: integer("seats"),
     status: text("status").notNull().default("available"),
     currentOdometer: integer("current_odometer").notNull().default(0),
+    odometerSetAt: timestamp("odometer_set_at", { withTimezone: true }),
+    odometerSetValue: integer("odometer_set_value"),
     maintenanceIntervalKm: integer("maintenance_interval_km"),
     maintenanceIntervalMonths: integer("maintenance_interval_months"),
     lastMaintenanceOn: date("last_maintenance_on"),

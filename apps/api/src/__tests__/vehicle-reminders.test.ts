@@ -204,3 +204,13 @@ describe("通知投遞通道（公務車只發站內）", () => {
     }
   })
 })
+
+describe("replayOdometer（純函式）", () => {
+  it("基準之後的事件取 max；基準之前的事件忽略；沒有基準從 0", async () => {
+    const { replayOdometer } = await import("../services/vehicle-odometer.js")
+    const ev = (at: string, odometer: number) => ({ at, odometer, source: "x" })
+    expect(replayOdometer({ at: null, value: null }, [ev("2026-01-01", 100), ev("2026-02-01", 90)])).toBe(100)
+    expect(replayOdometer({ at: "2026-03-01", value: 50 }, [ev("2026-01-01", 100), ev("2026-04-01", 60)])).toBe(60)
+    expect(replayOdometer({ at: "2026-03-01", value: 500 }, [ev("2026-04-01", 60)])).toBe(500)
+  })
+})

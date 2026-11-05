@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS public.vehicles (
   seats integer,
   status text NOT NULL DEFAULT 'available',     -- available 可用 / maintenance 維修中 / retired 停用
   current_odometer integer NOT NULL DEFAULT 0,  -- 目前里程（km），還車時取 max 更新
+  odometer_set_at timestamptz,                  -- HR 手動設定目前里程（新增車輛／PATCH）的時間；重算里程的基準點
+  odometer_set_value integer,                   -- 當時設定的里程
   maintenance_interval_km integer,              -- 每 N 公里保養（null＝不依里程）
   maintenance_interval_months integer,          -- 每 N 個月保養（null＝不依日期）
   last_maintenance_on date,
@@ -27,6 +29,9 @@ CREATE TABLE IF NOT EXISTS public.vehicles (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+-- 冪等：表已存在（舊版草案）時補欄位
+ALTER TABLE public.vehicles ADD COLUMN IF NOT EXISTS odometer_set_at timestamptz;
+ALTER TABLE public.vehicles ADD COLUMN IF NOT EXISTS odometer_set_value integer;
 CREATE UNIQUE INDEX IF NOT EXISTS vehicles_tenant_plate_uidx ON public.vehicles (tenant_id, plate_no);
 CREATE INDEX IF NOT EXISTS vehicles_tenant_status_idx ON public.vehicles (tenant_id, status);
 DO $$ BEGIN

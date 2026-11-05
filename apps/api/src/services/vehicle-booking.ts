@@ -14,7 +14,7 @@ import { publicAlert, type KeyedAlert, type VehicleAlert } from "./vehicle-remin
  */
 
 export const VEHICLE_COLS =
-  "id, tenant_id, plate_no, model, seats, status, current_odometer, maintenance_interval_km, maintenance_interval_months, " +
+  "id, tenant_id, plate_no, model, seats, status, current_odometer, odometer_set_at, odometer_set_value, maintenance_interval_km, maintenance_interval_months, " +
   "last_maintenance_on, last_maintenance_odometer, next_maintenance_on, next_maintenance_odometer, insurance_expires_on, " +
   "license_tax_due_on, note, created_at, updated_at"
 

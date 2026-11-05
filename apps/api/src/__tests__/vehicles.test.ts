@@ -420,7 +420,7 @@ describe("費用 PUT /vehicle-trips/:id/costs", () => {
 })
 
 describe("照片 POST /vehicle-trips/:id/photos", () => {
-  const png = Buffer.from("fake-png-bytes").toString("base64")
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]).toString("base64")
   beforeEach(() => {
     fake.db.vehicle_trips = [trip()]
   })
@@ -769,5 +769,103 @@ describe("驗收追加（2026-11-05）", () => {
     const ok = await as(HR).put("/vehicle-settings", { maxDaysAhead: 30 })
     expect(ok.status).toBe(200)
     expect(ok.body.settings.maxDaysAhead).toBe(30)
+  })
+})
+
+describe("第二輪驗收：里程", () => {
+  const T_OLD = "b6000000-0000-4000-8000-000000000011"
+  const T_NEW = "b6000000-0000-4000-8000-000000000012"
+  const B_OLD = "b4000000-0000-4000-8000-000000000011"
+  const B_NEW = "b4000000-0000-4000-8000-000000000012"
+  const iso = (h: number) => at(h)
+  function twoTrips(newer: Row = {}) {
+    fake.db.vehicle_bookings = [booking(B_OLD, { status: "completed" }), booking(B_NEW, { status: "completed" })]
+    fake.db.vehicle_trips = [
+      trip({ id: T_OLD, booking_id: B_OLD, checked_out_at: iso(-72), start_odometer: 10000, returned_at: iso(-70), end_odometer: 10100, condition_status: "ok" }),
+      trip({ id: T_NEW, booking_id: B_NEW, checked_out_at: iso(-48), start_odometer: 10100, returned_at: iso(-46), end_odometer: 10300, condition_status: "ok", ...newer }),
+    ]
+    fake.db.vehicles!.find((v) => v.id === CAR)!.current_odometer = 10300
+  }
+  const current = () => fake.db.vehicles!.find((v) => v.id === CAR)!.current_odometer
+
+  it("(1) 取車里程 9999999 → 400 odometer_jump_too_large（員工與 HR 更正皆擋）", async () => {
+    fake.db.vehicle_bookings = [booking(BOOKING)]
+    const res = await as(STAFF).post(`/vehicle-bookings/${BOOKING}/checkout`, { startOdometer: 9999999 })
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "odometer_jump_too_large", maxKm: 3000 })
+    expect(fake.db.vehicle_trips).toEqual([])
+    const ok = await as(STAFF).post(`/vehicle-bookings/${BOOKING}/checkout`, { startOdometer: 13000 })
+    expect(ok.status).toBe(201)
+    const hr = await as(HR).patch(`/vehicle-trips/${ok.body.trip.id}`, { startOdometer: 9999999, reason: "x" })
+    expect(hr.status).toBe(400)
+    expect(hr.body.error).toBe("odometer_jump_too_large")
+  })
+
+  it("(2) 保養登記 15000 之後更正舊行程 → 目前里程仍 15000", async () => {
+    twoTrips()
+    expect((await as(HR).post(`/vehicles/${CAR}/maintenance`, { servicedOn: "2026-11-04", odometer: 15000 })).status).toBe(201)
+    expect(current()).toBe(15000)
+    const res = await as(HR).patch(`/vehicle-trips/${T_OLD}`, { endOdometer: 10090, reason: "更正" })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(current()).toBe(15000)
+  })
+
+  it("(3) 在外未還那趟的出車里程不被更正舊行程蓋掉", async () => {
+    twoTrips({ returned_at: null, end_odometer: null, condition_status: null, start_odometer: 10500 })
+    fake.db.vehicles!.find((v) => v.id === CAR)!.current_odometer = 10500
+    const res = await as(HR).patch(`/vehicle-trips/${T_OLD}`, { endOdometer: 10090, reason: "更正" })
+    expect(res.status).toBe(200)
+    expect(current()).toBe(10500)
+    // 更正在外那趟的出車里程（未還車）→ 目前里程跟著變
+    const fix = await as(HR).patch(`/vehicle-trips/${T_NEW}`, { startOdometer: 10350, reason: "出車登錯" })
+    expect(fix.status, JSON.stringify(fix.body)).toBe(200)
+    expect(current()).toBe(10350)
+  })
+
+  it("(4) HR 手動設定里程後，更正較舊行程不會蓋掉手動值", async () => {
+    twoTrips()
+    expect((await as(HR).patch(`/vehicles/${CAR}`, { currentOdometer: 20000 })).status).toBe(200)
+    expect(fake.db.vehicles!.find((v) => v.id === CAR)!.odometer_set_value).toBe(20000)
+    const res = await as(HR).patch(`/vehicle-trips/${T_NEW}`, { endOdometer: 10250, reason: "更正" })
+    expect(res.status).toBe(200)
+    expect(current()).toBe(20000)
+  })
+
+  it("(5) 更正最新那趟 → 目前里程正確變動（含變小）；更正舊那趟不變", async () => {
+    twoTrips()
+    expect((await as(HR).patch(`/vehicle-trips/${T_OLD}`, { endOdometer: 10050, reason: "更正" })).status).toBe(200)
+    expect(current()).toBe(10300)
+    expect((await as(HR).patch(`/vehicle-trips/${T_NEW}`, { endOdometer: 10200, reason: "變小" })).status).toBe(200)
+    expect(current()).toBe(10200)
+    expect((await as(HR).patch(`/vehicle-trips/${T_NEW}`, { endOdometer: 10400, reason: "變大" })).status).toBe(200)
+    expect(current()).toBe(10400)
+  })
+})
+
+describe("第二輪驗收：照片檔頭與費用上限", () => {
+  it("副檔名／MIME 是圖但檔頭不是 → 400；非嚴格 base64 → 400 invalid_base64", async () => {
+    fake.db.vehicle_trips = [trip()]
+    const fakeImg = Buffer.from("this is not an image").toString("base64")
+    const a = await as(STAFF).post(`/vehicle-trips/${TRIP}/photos`, { phase: "checkout", fileName: "a.jpg", contentType: "image/jpeg", dataBase64: fakeImg })
+    expect(a.status).toBe(400)
+    expect(a.body.error).toBe("unsupported_file_type")
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16]).toString("base64")
+    const b = await as(STAFF).post(`/vehicle-trips/${TRIP}/photos`, { phase: "checkout", fileName: "a.jpg", contentType: "image/jpeg", dataBase64: `${jpeg}!!` })
+    expect(b.status).toBe(400)
+    expect(b.body.error).toBe("invalid_base64")
+    const ok = await as(STAFF).post(`/vehicle-trips/${TRIP}/photos`, { phase: "checkout", fileName: "a.jpg", contentType: "image/jpeg", dataBase64: jpeg })
+    expect(ok.status).toBe(201)
+  })
+
+  it("單筆費用 > 1,000,000 → 400 amount_too_large（還車與 PUT costs）", async () => {
+    fake.db.vehicle_bookings = [booking(BOOKING)]
+    fake.db.vehicle_trips = [trip()]
+    const big = [{ costType: "fuel", amount: 1_000_001, paidBy: "employee", incurredOn: "2026-11-04" }]
+    const a = await as(STAFF).post(`/vehicle-trips/${TRIP}/return`, { endOdometer: 10010, conditionStatus: "ok", costs: big })
+    expect(a.status).toBe(400)
+    expect(a.body).toEqual({ error: "amount_too_large", maxAmount: 1_000_000 })
+    expect(fake.db.vehicle_trips![0].returned_at).toBeNull()
+    const b = await as(STAFF).put(`/vehicle-trips/${TRIP}/costs`, { costs: big })
+    expect(b.body.error).toBe("amount_too_large")
   })
 })

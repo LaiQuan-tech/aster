@@ -12,9 +12,10 @@ import { actorRoleOf, isActiveStatus } from "../lib/actor-status.js"
 import { approvalStepsHaveCandidates } from "../lib/schema-compat.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { todayKey } from "../lib/tz.js"
-import { IMAGE_EXTENSIONS, imageExtOf, isAllowedImage, normalizeImageContentType } from "../lib/image-upload-types.js"
+import { IMAGE_EXTENSIONS, imageExtOf, isAllowedImage, isStrictBase64, normalizeImageContentType, sniffImageType } from "../lib/image-upload-types.js"
 import { logger } from "../lib/logger.js"
 import { writeAuditLog } from "../services/audit.js"
+import { computeVehicleOdometer } from "../services/vehicle-odometer.js"
 import { enqueue } from "../services/notify.js"
 import { assertRequestOpen } from "../services/period-lock.js"
 import { isStepCandidate, stepSelectCols } from "../services/approval-steps.js"
@@ -331,7 +332,14 @@ vehiclesRouter.post(
     fillNextMaintenance(row, row)
     const { data, error } = await supabaseAdmin
       .from("vehicles")
-      .insert({ tenant_id: tenantId, ...row, created_by_emp_id: self.id })
+      .insert({
+        tenant_id: tenantId,
+        ...row,
+        // 里程重算的基準點（services/vehicle-odometer.ts）：新增車輛＝第一次手動設定。
+        odometer_set_at: nowIso(),
+        odometer_set_value: row.current_odometer ?? 0,
+        created_by_emp_id: self.id,
+      })
       .select(VEHICLE_COLS)
       .single()
     if (error?.code === "23505") {
@@ -370,6 +378,11 @@ vehiclesRouter.patch(
       return
     }
     fillNextMaintenance({ ...before, ...patch }, patch)
+    // HR 手動設定里程＝新的重算基準點（之後更正較舊的行程不會蓋掉這個值）。
+    if (patch.current_odometer !== undefined) {
+      patch.odometer_set_at = nowIso()
+      patch.odometer_set_value = patch.current_odometer
+    }
     let after = before
     if (Object.keys(patch).length > 0) {
       const { data, error } = await supabaseAdmin
@@ -451,6 +464,7 @@ vehiclesRouter.post(
         cost: parsed.data.cost ?? null,
         note: parsed.data.note ?? null,
         created_by_emp_id: self.id,
+        created_at: nowIso(), // 里程事件的時間（services/vehicle-odometer.ts）
       })
       .select("id, serviced_on, odometer, cost, note, created_by_emp_id, created_at")
       .single()
@@ -759,6 +773,11 @@ vehiclesRouter.post(
       res.status(400).json({ error: "odometer_below_current", currentOdometer: current })
       return
     }
+    // 出車里程不得比目前里程多出 3000 km 以上（防手誤多打位數；HR 要調大請走 PATCH /vehicles）。
+    if (parsed.data.startOdometer > current + MAX_TRIP_KM) {
+      res.status(400).json({ error: "odometer_jump_too_large", maxKm: MAX_TRIP_KM, currentOdometer: current })
+      return
+    }
     const { data: openTrip, error: oErr } = await supabaseAdmin
       .from("vehicle_trips")
       .select("id")
@@ -815,6 +834,16 @@ vehiclesRouter.post(
   }),
 )
 
+/** 公務車單筆費用上限（2026-11-05 第二輪驗收；只限公務車費用，不動既有報銷）。 */
+const MAX_COST_AMOUNT = 1_000_000
+
+/** 有任何一行超過上限 → 回 400 amount_too_large 並回 true。 */
+function rejectLargeAmounts(res: Response, costs: Array<{ amount: number }> | undefined): boolean {
+  if (!costs?.some((c) => c.amount > MAX_COST_AMOUNT)) return false
+  res.status(400).json({ error: "amount_too_large", maxAmount: MAX_COST_AMOUNT })
+  return true
+}
+
 const costLineSchema = z.object({
   costType: z.enum(["fuel", "toll", "parking", "other"]),
   amount: z.number().positive().max(9_999_999_999).multipleOf(0.01),
@@ -848,6 +877,7 @@ vehiclesRouter.post(
     if (!id) return
     const parsed = returnSchema.safeParse(req.body)
     if (!parsed.success) return bad(res, parsed.error)
+    if (rejectLargeAmounts(res, parsed.data.costs)) return
     const trip = await loadTrip(tenantId, id)
     if (!trip || (trip.employee_id !== self.id && !self.isHr)) {
       res.status(404).json({ error: "not_found" })
@@ -1016,25 +1046,14 @@ vehiclesRouter.get(
 )
 
 /**
- * HR 更正里程後重算車輛目前里程（2026-11-05 驗收追加）：以該車**最新一筆已還車紀錄的還車里程**為準（可以變小——
- * 原本只在變大時回寫，打錯一位數就永遠改不回來），並讓因錯誤里程提前寫下的里程保養去重紀錄失效；
- * 重算後若真的到門檻就照常即時提醒。
+ * HR 更正里程後重算車輛目前里程（第二輪驗收）：以 services/vehicle-odometer.ts 的重放規則為準——
+ * 最近一次手動設定為基準，之後的出車／還車／保養事件取 max。更正較舊、非最大的行程不改目前里程；
+ * 更正的正是撐起目前里程的那筆才會變（可以變小）。保養去重紀錄跟著新的目前里程失效；到門檻照常即時提醒。
  */
-async function recomputeVehicleOdometer(tenantId: string, vehicleId: string, actorEmpId: string, reason: string): Promise<void> {
-  const { data: latest, error } = await supabaseAdmin
-    .from("vehicle_trips")
-    .select("id, end_odometer, returned_at")
-    .eq("tenant_id", tenantId)
-    .eq("vehicle_id", vehicleId)
-    .not("returned_at", "is", null)
-    .order("returned_at", { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  throwVehicleDbError("recompute odometer (latest trip)", error)
-  if (!latest || latest.end_odometer == null) return
+async function recomputeVehicleOdometer(tenantId: string, vehicleId: string, actorEmpId: string, reason: string, tripId: string): Promise<void> {
   const vehicle = await loadVehicle(tenantId, vehicleId)
   if (!vehicle) return
-  const next = Number(latest.end_odometer)
+  const next = await computeVehicleOdometer(tenantId, vehicle as Parameters<typeof computeVehicleOdometer>[1])
   const before = Number(vehicle.current_odometer ?? 0)
   let after = vehicle
   if (next !== before) {
@@ -1055,7 +1074,7 @@ async function recomputeVehicleOdometer(tenantId: string, vehicleId: string, act
       actorEmpId,
       context: `HR 更正用車紀錄後重算里程：${reason}`,
       oldRow: { current_odometer: before },
-      newRow: { current_odometer: next, source_trip_id: latest.id },
+      newRow: { current_odometer: next, corrected_trip_id: tripId },
     })
   }
   const settings = await loadVehicleSettings(tenantId)
@@ -1112,6 +1131,14 @@ vehiclesRouter.patch(
       res.status(400).json({ error: "distance_too_large", maxKm: MAX_TRIP_KM })
       return
     }
+    if (d.startOdometer !== undefined && d.startOdometer > Number(trip.start_odometer)) {
+      const v = await loadVehicle(tenantId, trip.vehicle_id)
+      const current = Number(v?.current_odometer ?? 0)
+      if (d.startOdometer > current + MAX_TRIP_KM) {
+        res.status(400).json({ error: "odometer_jump_too_large", maxKm: MAX_TRIP_KM, currentOdometer: current })
+        return
+      }
+    }
     const status = d.conditionStatus ?? trip.condition_status
     const note = d.conditionNote !== undefined ? d.conditionNote : trip.condition_note
     if (status === "issue" && !note) {
@@ -1140,8 +1167,9 @@ vehiclesRouter.patch(
       const oldRow: Row = {}
       for (const k of Object.keys(patch)) oldRow[k] = trip[k] ?? null
       await writeAuditLog({ tenantId, tableName: "vehicle_trips", recordId: id, action: "UPDATE", actorEmpId: self.id, context: `HR 更正用車紀錄：${d.reason}`, oldRow, newRow: { ...patch, reason: d.reason } })
-      if (trip.returned_at && (d.startOdometer !== undefined || d.endOdometer !== undefined)) {
-        await recomputeVehicleOdometer(tenantId, trip.vehicle_id, self.id, d.reason as string)
+      // 未還車也要重算（更正的是在外那趟的出車里程時，目前里程跟著變）。
+      if (d.startOdometer !== undefined || d.endOdometer !== undefined) {
+        await recomputeVehicleOdometer(tenantId, trip.vehicle_id, self.id, d.reason as string, id)
       }
     }
     res.status(200).json({ trip: await loadTripDto(tenantId, id, { selfId: self.id, isHr: self.isHr }) })
@@ -1165,6 +1193,7 @@ vehiclesRouter.put(
     if (!trip) return
     const parsed = putCostsSchema.safeParse(req.body)
     if (!parsed.success) return bad(res, parsed.error)
+    if (rejectLargeAmounts(res, parsed.data.costs)) return
     const onBehalf = trip.employee_id !== self.id
     if (onBehalf && !parsed.data.reason) {
       res.status(400).json({ error: "reason_required" })
@@ -1243,6 +1272,10 @@ vehiclesRouter.post(
       res.status(400).json({ error: "unsupported_file_type", supported: IMAGE_EXTENSIONS.map((e) => e.slice(1)) })
       return
     }
+    if (!isStrictBase64(parsed.data.dataBase64)) {
+      res.status(400).json({ error: "invalid_base64" })
+      return
+    }
     const bytes = Buffer.from(parsed.data.dataBase64, "base64")
     if (bytes.length === 0) {
       res.status(400).json({ error: "invalid_base64" })
@@ -1250,6 +1283,11 @@ vehiclesRouter.post(
     }
     if (bytes.length > MAX_PHOTO_BYTES) {
       res.status(413).json({ error: "file_too_large", maxBytes: MAX_PHOTO_BYTES })
+      return
+    }
+    // 檔頭（magic bytes）必須真的是允許的影像格式；改副檔名／MIME 的非影像檔一律擋。
+    if (!sniffImageType(bytes)) {
+      res.status(400).json({ error: "unsupported_file_type", supported: IMAGE_EXTENSIONS.map((e) => e.slice(1)) })
       return
     }
     const { data: existing, error: cErr } = await supabaseAdmin.from("vehicle_trip_photos").select("id").eq("tenant_id", tenantId).eq("trip_id", trip.id)
