@@ -138,6 +138,7 @@ export function CostRowsEditor({
             <Input
               aria-label={`第 ${index + 1} 行備註`}
               placeholder="備註（選填）"
+              maxLength={200}
               value={d.note}
               disabled={disabled}
               onChange={(e) => update(d.key, { note: e.target.value })}

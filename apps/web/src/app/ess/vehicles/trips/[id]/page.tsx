@@ -348,7 +348,7 @@ export default function EssVehicleTripPage() {
                 error={retError?.field === "conditionNote" ? retError.message : undefined}
                 hint="會通知 HR 處理"
               >
-                <Textarea id="rt-cnote" value={ret.conditionNote} maxLength={1000} onChange={(e) => setRet({ ...ret, conditionNote: e.target.value })} className="min-h-16" />
+                <Textarea id="rt-cnote" value={ret.conditionNote} maxLength={500} onChange={(e) => setRet({ ...ret, conditionNote: e.target.value })} className="min-h-16" />
               </Field>
             )}
             <Field label="還車照片（選填）">

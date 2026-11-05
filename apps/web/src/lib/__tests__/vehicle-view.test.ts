@@ -229,6 +229,12 @@ describe("vehicleErrorMessage：§3.2 全部錯誤碼都有中文", () => {
     "not_trip_owner",
     "category_requires_trip",
     "invalid_employee",
+    // veh-api 實作新增（2026-11-05）
+    "invalid_range",
+    "invalid_base64",
+    "already_claimed",
+    "not_claimable",
+    "claim_failed",
   ];
   it("每個碼都有對照，且訊息含中文、不是碼本身", () => {
     for (const code of ALL_CODES) {
@@ -280,5 +286,28 @@ describe("localInputToIso／photoPickError", () => {
     expect(photoPickError({ name: "a.gif", type: "image/gif", size: 1000 })).toContain("只收");
     expect(photoPickError({ name: "a.jpg", type: "image/jpeg", size: 0 })).toContain("空");
     expect(photoPickError({ name: "a.jpg", type: "image/jpeg", size: 26 * 1024 * 1024 })).toContain("25 MB");
+  });
+});
+
+describe("veh-api 實作新增的錯誤碼與附帶欄位", () => {
+  it("附帶欄位帶進訊息：too_many_photos.max、range_too_long.maxDays、invalid_category.field、not_cancellable／booking_not_approved.status", () => {
+    expect(vehicleErrorMessage(apiErr(409, "too_many_photos", { max: 12 }))).toBe("每趟最多 12 張照片");
+    expect(vehicleErrorMessage(apiErr(400, "range_too_long", { maxDays: 31 }))).toBe("查詢區間最長 31 天");
+    expect(vehicleErrorMessage(apiErr(400, "invalid_category", { field: "tollCategoryId" }))).toBe("「過路費」選的報銷類別不存在或已停用");
+    expect(vehicleErrorMessage(apiErr(409, "not_cancellable", { status: "completed" }))).toBe("這筆預約已完成，不能再取消");
+    expect(vehicleErrorMessage(apiErr(409, "booking_not_approved", { status: "pending" }))).toBe("預約目前簽核中，核准後才能取車");
+    expect(vehicleErrorMessage(apiErr(400, "invalid_range"))).toBe("結束時間要晚於開始時間");
+    expect(vehicleErrorMessage(apiErr(409, "trip_not_returned"))).toContain("尚未還車");
+  });
+  it("轉報銷逐行錯誤：already_claimed／not_claimable／not_found／claim_failed／period_closed 都是中文", () => {
+    const summary = claimResultSummary([
+      { ok: false, error: "already_claimed" },
+      { ok: false, error: "not_claimable" },
+      { ok: false, error: "not_found" },
+      { ok: false, error: "claim_failed" },
+      { ok: false, error: "period_closed" },
+    ]);
+    expect(summary).toMatch(/^0 筆已轉報銷、5 筆失敗：/);
+    expect(summary).not.toMatch(/[a-z]_[a-z]/);
   });
 });

@@ -265,7 +265,7 @@ export default function AdminVehicleDetailPage() {
             </Field>
           </div>
           <Field label="內容／備註" htmlFor="mt-note">
-            <Textarea id="mt-note" value={m.note} maxLength={1000} onChange={(e) => setM({ ...m, note: e.target.value })} className="min-h-16" />
+            <Textarea id="mt-note" value={m.note} maxLength={500} onChange={(e) => setM({ ...m, note: e.target.value })} className="min-h-16" />
           </Field>
           <p className="text-xs text-gray-500">儲存後依保養間隔重算下次保養日／里程；里程大於目前里程時一併更新。</p>
           {mError && <InlineError>{mError}</InlineError>}

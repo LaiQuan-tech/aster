@@ -71,7 +71,11 @@ export default function AdminVehicleSettingsPage() {
       if (!v.trim() || !Number.isInteger(n) || n < 0) return setError("數字欄位請填非負整數");
       parsed[k] = n;
     }
-    if (parsed.maxBookingHours < 1) return setError("單次預約上限至少 1 小時");
+    // API 範圍：提醒天數 1–180、保養提前 0–10000 km、預約上限 1–720 小時、提前取車 0–1440 分鐘。
+    if (parsed.reminderLeadDays < 1 || parsed.reminderLeadDays > 180) return setError("到期提醒天數請填 1–180");
+    if (parsed.maintenanceLeadKm > 10000) return setError("保養提前公里數最多 10000");
+    if (parsed.maxBookingHours < 1 || parsed.maxBookingHours > 720) return setError("單次預約上限請填 1–720 小時");
+    if (parsed.checkoutEarlyMinutes > 1440) return setError("提前取車最多 1440 分鐘");
     setBusy(true);
     try {
       const res = await saveVehicleSettings({

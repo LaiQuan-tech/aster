@@ -348,7 +348,12 @@ export const VEHICLE_ERROR_TEXT: Record<string, string> = {
   unsupported_file_type: "只收 JPG、PNG、HEIC、WebP 照片",
   file_too_large: "照片超過 3 MB，請改傳較小的照片",
   too_many_photos: "每趟最多 12 張照片",
-  trip_not_returned: "還車後才能轉報銷",
+  trip_not_returned: "這趟尚未還車，還車後才能轉報銷或更正還車資料",
+  invalid_range: "結束時間要晚於開始時間",
+  invalid_base64: "照片檔案讀取失敗，請重新選擇照片",
+  already_claimed: "這筆費用已經轉報銷過了",
+  not_claimable: "公司支付的費用不需報銷",
+  claim_failed: "建立報銷單失敗，請稍後再試",
   vehicle_settings_incomplete: "HR 尚未設定費用對應的報銷類別，暫時無法轉報銷",
   invalid_category: "報銷類別不存在或已停用",
   trip_request_required: "這個報銷類別需要綁出差單，不能用於用車費用",
@@ -383,6 +388,14 @@ function fmtWhen(iso: unknown): string | null {
 }
 
 const COST_TYPE_SET = new Set<string>(COST_TYPES);
+
+/** PUT /vehicle-settings 的 400 invalid_category 附 field（哪個欄位的類別有問題）。 */
+const CATEGORY_FIELD_LABEL: Record<string, string> = {
+  fuelCategoryId: COST_TYPE_LABEL.fuel,
+  tollCategoryId: COST_TYPE_LABEL.toll,
+  parkingCategoryId: COST_TYPE_LABEL.parking,
+  otherCategoryId: COST_TYPE_LABEL.other,
+};
 
 /**
  * 錯誤（ApiError、錯誤碼字串、一般 Error）→ 給人看的中文。認得的碼用 VEHICLE_ERROR_TEXT，附帶欄位補進句子：
@@ -428,6 +441,16 @@ export function vehicleErrorMessage(err: unknown, fallback = "操作失敗，請
   if (code === "vehicle_unavailable" && typeof body.status === "string") {
     const label = VEHICLE_STATUS_LABEL[body.status as VehicleStatus];
     if (label) return `這台車目前${label}，不可預約`;
+  }
+  if (code === "too_many_photos" && typeof body.max === "number") return `每趟最多 ${body.max} 張照片`;
+  if (code === "range_too_long" && typeof body.maxDays === "number") return `查詢區間最長 ${body.maxDays} 天`;
+  if (code === "invalid_category" && typeof body.field === "string") {
+    const label = CATEGORY_FIELD_LABEL[body.field];
+    if (label) return `「${label}」選的報銷類別不存在或已停用`;
+  }
+  if ((code === "not_cancellable" || code === "booking_not_approved") && typeof body.status === "string") {
+    const label = BOOKING_STATUS_LABEL[body.status as BookingStatus];
+    if (label) return code === "not_cancellable" ? `這筆預約${label}，不能再取消` : `預約目前${label}，核准後才能取車`;
   }
   if (code && VEHICLE_ERROR_TEXT[code]) return VEHICLE_ERROR_TEXT[code];
   if (err && typeof err === "object") {

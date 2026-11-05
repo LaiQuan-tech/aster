@@ -82,6 +82,8 @@ export default function AdminVehicleTripDetailPage() {
     if (end !== null && (!Number.isInteger(end) || end < 0)) return setFixError("還車里程請填整數公里");
     if (end !== null && end < start) return setFixError("還車里程不可小於出車里程");
     if (fix.conditionStatus === "issue" && !fix.conditionNote.trim()) return setFixError("車況有問題時請說明狀況");
+    // API：purpose 不可為空字串（min 1）；destination／conditionNote／note 清空時送 null。
+    if (fix.purpose !== (trip.purpose ?? "") && !fix.purpose.trim()) return setFixError("用途不可清空");
     setFixBusy(true);
     try {
       const res = await updateVehicleTrip(trip.id, {
@@ -89,10 +91,10 @@ export default function AdminVehicleTripDetailPage() {
         ...(start !== trip.startOdometer ? { startOdometer: start } : {}),
         ...(end !== null && end !== trip.endOdometer ? { endOdometer: end } : {}),
         ...(fix.purpose !== (trip.purpose ?? "") ? { purpose: fix.purpose.trim() } : {}),
-        ...(fix.destination !== (trip.destination ?? "") ? { destination: fix.destination.trim() } : {}),
+        ...(fix.destination !== (trip.destination ?? "") ? { destination: fix.destination.trim() || null } : {}),
         ...(fix.conditionStatus && fix.conditionStatus !== trip.conditionStatus ? { conditionStatus: fix.conditionStatus } : {}),
-        ...(fix.conditionNote !== (trip.conditionNote ?? "") ? { conditionNote: fix.conditionNote.trim() } : {}),
-        ...(fix.note !== (trip.note ?? "") ? { note: fix.note.trim() } : {}),
+        ...(fix.conditionNote !== (trip.conditionNote ?? "") ? { conditionNote: fix.conditionNote.trim() || null } : {}),
+        ...(fix.note !== (trip.note ?? "") ? { note: fix.note.trim() || null } : {}),
       });
       setTrip({ ...res.trip, photos: res.trip.photos ?? trip.photos });
       setFixOpen(false);

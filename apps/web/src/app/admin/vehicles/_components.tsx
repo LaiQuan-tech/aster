@@ -79,6 +79,11 @@ function toInput(d: Draft): { ok: true; body: VehicleInput } | { ok: false; mess
     nextMaintenanceOdometer: intOrNull(d.nextMaintenanceOdometer),
   };
   for (const [k, v] of Object.entries(nums)) if (Number.isNaN(v)) return { ok: false, message: `${FIELD_LABEL[k] ?? k}請填非負整數` };
+  // API：座位數 1–60、保養間隔（公里）≥ 1、保養間隔（月）1–120。
+  if (nums.seats !== null && (nums.seats < 1 || nums.seats > 60)) return { ok: false, message: "座位數請填 1–60" };
+  if (nums.maintenanceIntervalKm !== null && nums.maintenanceIntervalKm < 1) return { ok: false, message: "保養間隔（公里）至少 1" };
+  if (nums.maintenanceIntervalMonths !== null && (nums.maintenanceIntervalMonths < 1 || nums.maintenanceIntervalMonths > 120))
+    return { ok: false, message: "保養間隔（月）請填 1–120" };
   return {
     ok: true,
     body: {
@@ -170,10 +175,10 @@ export function VehicleFormSheet({
       >
         <div className="grid grid-cols-2 gap-3">
           <Field label="車牌" required htmlFor="vf-plate">
-            <Input id="vf-plate" value={draft.plateNo} maxLength={20} placeholder="ABC-1234" onChange={(e) => set({ plateNo: e.target.value })} />
+            <Input id="vf-plate" value={draft.plateNo} maxLength={30} placeholder="ABC-1234" onChange={(e) => set({ plateNo: e.target.value })} />
           </Field>
           <Field label="車型" required htmlFor="vf-model">
-            <Input id="vf-model" value={draft.model} maxLength={60} onChange={(e) => set({ model: e.target.value })} />
+            <Input id="vf-model" value={draft.model} maxLength={100} onChange={(e) => set({ model: e.target.value })} />
           </Field>
           <Field label="座位數" htmlFor="vf-seats">
             <Input id="vf-seats" inputMode="numeric" value={draft.seats} onChange={(e) => set({ seats: e.target.value })} />
@@ -228,7 +233,7 @@ export function VehicleFormSheet({
           </Field>
         </div>
         <Field label="備註" htmlFor="vf-note">
-          <Textarea id="vf-note" value={draft.note} maxLength={1000} onChange={(e) => set({ note: e.target.value })} className="min-h-16" />
+          <Textarea id="vf-note" value={draft.note} maxLength={500} onChange={(e) => set({ note: e.target.value })} className="min-h-16" />
         </Field>
         {error && <InlineError>{error}</InlineError>}
         <Button type="submit" block size="lg" loading={busy}>

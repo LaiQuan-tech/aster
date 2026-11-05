@@ -189,8 +189,10 @@ export default function EssVehiclesPage() {
     const rangeErr = bookingRangeError(startIso, endIso, settings?.maxBookingHours);
     if (rangeErr) return setFormError(rangeErr);
     if (!form.purpose.trim()) return setFormError("請填寫用途");
-    const passengers = form.passengers.trim() ? Number(form.passengers) : undefined;
-    if (passengers !== undefined && (!Number.isInteger(passengers) || passengers < 0)) return setFormError("乘客數請填整數");
+    // API：passengers 為 1–60 的整數（省略＝沒填）；填 0 視同沒填。
+    const paxRaw = form.passengers.trim() ? Number(form.passengers) : undefined;
+    if (paxRaw !== undefined && (!Number.isInteger(paxRaw) || paxRaw < 0 || paxRaw > 60)) return setFormError("乘客數請填 0–60 的整數");
+    const passengers = paxRaw ? paxRaw : undefined;
     // 前端預檢（當天時段有載入時）；最終以 API 409 為準。
     const local = overlaps(slots ?? [], startIso, endIso, { vehicleId: form.vehicleId });
     if (local.length > 0) {
@@ -484,16 +486,16 @@ export default function EssVehiclesPage() {
               </Field>
             </div>
             <Field label="用途" required htmlFor="vb-purpose">
-              <Input id="vb-purpose" value={form.purpose} maxLength={200} placeholder="例：拜訪客戶、送件" onChange={(e) => setForm({ ...form, purpose: e.target.value })} />
+              <Input id="vb-purpose" value={form.purpose} maxLength={250} placeholder="例：拜訪客戶、送件" onChange={(e) => setForm({ ...form, purpose: e.target.value })} />
             </Field>
             <Field label="目的地" htmlFor="vb-dest">
-              <Input id="vb-dest" value={form.destination} maxLength={200} onChange={(e) => setForm({ ...form, destination: e.target.value })} />
+              <Input id="vb-dest" value={form.destination} maxLength={250} onChange={(e) => setForm({ ...form, destination: e.target.value })} />
             </Field>
             <Field label="乘客數（不含駕駛）" htmlFor="vb-pax">
               <Input id="vb-pax" inputMode="numeric" value={form.passengers} onChange={(e) => setForm({ ...form, passengers: e.target.value })} />
             </Field>
             <Field label="備註" htmlFor="vb-remark">
-              <Textarea id="vb-remark" value={form.remark} maxLength={500} onChange={(e) => setForm({ ...form, remark: e.target.value })} className="min-h-16" />
+              <Textarea id="vb-remark" value={form.remark} maxLength={250} onChange={(e) => setForm({ ...form, remark: e.target.value })} className="min-h-16" />
             </Field>
             {formError && <InlineError>{formError}</InlineError>}
             {conflicts.length > 0 && (

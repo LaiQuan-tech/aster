@@ -235,10 +235,10 @@ export interface TripPatch {
   startOdometer?: number;
   endOdometer?: number;
   purpose?: string;
-  destination?: string;
+  destination?: string | null;
   conditionStatus?: ConditionStatus;
-  conditionNote?: string;
-  note?: string;
+  conditionNote?: string | null;
+  note?: string | null;
   /** 更正理由（必填）。 */
   reason: string;
 }
