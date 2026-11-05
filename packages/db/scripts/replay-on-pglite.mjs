@@ -30,10 +30,12 @@ import { readFileSync, readdirSync } from "node:fs"
 import { join, resolve, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 
-let PGlite, vector
+let PGlite, vector, btree_gist
 try {
   ;({ PGlite } = await import("@electric-sql/pglite"))
   ;({ vector } = await import("@electric-sql/pglite/vector"))
+  // btree_gist：migration 0085（公務車）vehicle_bookings 的時段防重疊 exclusion constraint（uuid = 需要它）
+  ;({ btree_gist } = await import("@electric-sql/pglite/contrib/btree_gist"))
 } catch {
   console.error("缺 @electric-sql/pglite：npm install（它是 @hr/db 的 devDependency）")
   process.exit(2)
@@ -80,8 +82,8 @@ do $$ begin
 end $$;
 `
 
-// pgvector：migration 0037 起 knowledge_chunks.embedding 用 vector(768)
-const newDb = () => new PGlite({ extensions: { vector } })
+// pgvector：migration 0037 起 knowledge_chunks.embedding 用 vector(768)；btree_gist：migration 0085 起
+const newDb = () => new PGlite({ extensions: { vector, btree_gist } })
 const db = newDb()
 let failed = 0
 

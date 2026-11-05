@@ -27,6 +27,7 @@ const SCHEDULER_IDS = [
   "monthly-snapshot",
   "annual-leave-grant",
   "holiday-calendar-import",
+  "vehicle-reminders",
 ];
 
 /**
@@ -144,6 +145,13 @@ async function registerSchedulers() {
     { pattern: "30 7 * * *", tz: "Asia/Taipei" },
     { name: "holiday-calendar-import", data: {} },
   );
+  // 公務車到期提醒（2026-11-05）：每日 08:00 台北。保養（日期／里程）、保險、牌照稅到期與逾時未還車；
+  // 只跑開了公務車模組的租戶。API 端以 vehicle_reminder_log 去重，同一到期點只通知一次，重跑安全。
+  await attendanceQueue.upsertJobScheduler(
+    "vehicle-reminders",
+    { pattern: "0 8 * * *", tz: "Asia/Taipei" },
+    { name: "vehicle-reminders", data: {} },
+  );
 
   attendanceWorker = new Worker(
     "attendance",
@@ -168,6 +176,7 @@ async function registerSchedulers() {
         "monthly-snapshot": "/internal/backups/monthly-snapshot",
         "annual-leave-grant": "/internal/leave/annual-grant",
         "holiday-calendar-import": "/internal/calendar/holiday-import",
+        "vehicle-reminders": "/internal/vehicles/reminders",
       };
       const endpoint = endpointByJob[job.name];
       if (!endpoint) {

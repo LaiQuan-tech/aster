@@ -19,7 +19,7 @@ Monorepo（npm workspace + Turbo）｜`apps/web` Next.js 16｜`apps/api` Express
   全部透過 API 的 `/internal/*` 端點執行。Railway 專案 `aster`（帳號 gathertaiwan@gmail.com）
   底下兩個服務：`Redis`（BullMQ 用）與 `worker`。
 
-  **9 支排程**（台北時間；啟動 log 會把 `SCHEDULER_IDS` 整串印出來，數量對不上就是沒部署新版）：
+  **9 支排程**（2026-11-05 加入 `vehicle-reminders` 後實數 9 個 id；台北時間；啟動 log 會把 `SCHEDULER_IDS` 整串印出來，數量對不上就是沒部署新版）：
 
   | 排程 id | 時間 | 打的端點 |
   |---|---|---|
@@ -30,6 +30,8 @@ Monorepo（npm workspace + Turbo）｜`apps/web` Next.js 16｜`apps/api` Express
   | `deliver-pending-notifications` | 每 5 分鐘 | `/internal/notifications/deliver-pending` |
   | `generate-attendance-sheets` | 每月 1 日 05:00 | `/internal/attendance-sheets/generate` |
   | `monthly-snapshot` | 每月 1 日 06:00 | `/internal/backups/monthly-snapshot`（分頁續打，帶 run 序號） |
+  | `holiday-calendar-import` | 每日 07:30 | `/internal/calendar/holiday-import`（國定假日年度匯入草稿） |
+  | `vehicle-reminders` | 每日 08:00 | `/internal/vehicles/reminders`（公務車保養／保險／牌照稅到期、逾時未還車提醒，2026-11-05；只跑開了公務車模組的租戶） |
 
   - **部署方式是 `railway up`，不是 GitHub 自動部署**：這個 Railway 帳號沒接 LaiQuan-tech 這個
     GitHub 組織（`railway add --repo` 回 repo not found），所以改 worker 程式後要在 repo 根目錄跑

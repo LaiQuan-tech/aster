@@ -452,6 +452,8 @@ export async function evaluatePeriodChecklist(tenantId: string, period: string):
       .select("id")
       .eq("tenant_id", tenantId)
       .eq("status", "pending")
+      // 公務車預約（2026-11-05）與發薪無關，簽核中也不該擋關帳。
+      .neq("kind", "vehicle_booking")
       .is("deleted_at", null)
       .lt("start_at", rangeEnd)
       .gt("end_at", rangeStart),

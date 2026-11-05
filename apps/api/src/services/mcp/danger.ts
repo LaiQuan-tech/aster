@@ -203,6 +203,11 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "PATCH", path: "/shifts/:id", label: "修改班別" },
   { method: "PATCH", path: "/contracts/:id", label: "修改合約" },
   { method: "POST", path: "/projects/:id/contracts", label: "新增合約" },
+  // 2026-11-05 公務車：中風險（confirm_token）。預約取消／取車／還車、車輛主檔（POST/PATCH /vehicles*）是日常動作，不列。
+  { method: "POST", path: "/vehicle-trips/:id/expense-claims", label: "用車費用轉報銷（建立報銷單）" },
+  { method: "PUT", path: "/vehicle-trips/:id/costs", label: "修改用車費用" },
+  { method: "PATCH", path: "/vehicle-trips/:id", label: "更正用車紀錄（里程）" },
+  { method: "PUT", path: "/vehicle-settings", label: "變更公務車設定（報銷類別對應、提醒對象）" },
 ]
 
 /**

@@ -3,12 +3,15 @@ import { z } from "zod"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { AnnualLeaveError, grantAnnualLeave } from "../services/annual-leave.js"
 import { CalendarImportNotMigratedError, runHolidayImportJob } from "../services/holiday-import.js"
+import { runVehicleReminders } from "../services/vehicle-reminders.js"
+import { VehicleSchemaMissingError } from "../services/vehicle-settings.js"
 
 /**
  * 排程端點（worker 呼叫；W1 年度給假、國定假日匯入）——2026-09-23 WP9。
  *
  *   POST /internal/leave/annual-grant        body {asOf?, dryRun?}   worker 每日 01:30 台北
  *   POST /internal/calendar/holiday-import   body {date?, force?}    worker 每日 07:30 台北（國定假日年度匯入草稿，2026-10-17）
+ *   POST /internal/vehicles/reminders        body {date?, dryRun?}   worker 每日 08:00 台北（公務車到期提醒，2026-11-05）
  *
  * 兩支都是「迴圈所有 `tenants.status='active'` 租戶、逐租戶 try/catch、一個租戶失敗
  * 不影響其他租戶」。日期一律**用租戶自己的時區**算今天（不是伺服器時區也不是寫死台北）：
@@ -179,6 +182,74 @@ internalCronRouter.post(
         res.status(200).json({ skipped: "calendar_import_not_migrated", detail: err.message })
         return
       }
+      next(err)
+    }
+  },
+)
+
+// ── 公務車到期提醒（2026-11-05）────────────────────────────────────────
+
+const vehicleRemindersSchema = z.object({
+  /** 基準日；省略＝各租戶自己時區的今天。 */
+  date: z.string().regex(dateRe).optional(),
+  /** 只算不寫（不寫去重紀錄、不發通知）。 */
+  dryRun: z.boolean().optional(),
+})
+
+type VehicleReminderJobResult =
+  | { tenantId: string; ok: true; sent: number; skipped: number }
+  | { tenantId: string; ok: false; error: string }
+
+/**
+ * POST /internal/vehicles/reminders — 保養（日期／里程）、保險、牌照稅到期與逾時未還車提醒。
+ * 只跑 `features.adminModules.vehicles === true` 的 active 租戶；逐租戶 try/catch。
+ * 冪等：vehicle_reminder_log unique(vehicle_id, kind, due_key)，同一到期點只通知一次（同日重跑＝全部 skipped）。
+ */
+internalCronRouter.post(
+  "/internal/vehicles/reminders",
+  async (req: Request, res: Response, next: NextFunction) => {
+    if (!requireInternalToken(req, res)) return
+    if (!requireInternalJobsEnabled(res)) return
+    const parsed = vehicleRemindersSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const { data, error } = await supabaseAdmin.from("tenants").select("id, features").eq("status", "active")
+      if (error) throw new Error(`POST /internal/vehicles/reminders (tenants): ${error.message}`)
+      const tenantIds = ((data ?? []) as Array<{ id: string; features: unknown }>)
+        .filter((t) => {
+          const modules = (t.features as { adminModules?: Record<string, unknown> } | null)?.adminModules
+          return !!modules && modules.vehicles === true
+        })
+        .map((t) => t.id)
+      const results: VehicleReminderJobResult[] = []
+      for (const tenantId of tenantIds) {
+        try {
+          const r = await runVehicleReminders(tenantId, {
+            ...(parsed.data.date ? { date: parsed.data.date } : {}),
+            ...(parsed.data.dryRun === true ? { dryRun: true } : {}),
+          })
+          results.push({ tenantId, ok: true, sent: r.sent, skipped: r.skipped })
+        } catch (err) {
+          results.push({
+            tenantId,
+            ok: false,
+            error: err instanceof VehicleSchemaMissingError ? "migration_required" : err instanceof Error ? err.message : "vehicle_reminders_failed",
+          })
+        }
+      }
+      res.status(200).json({
+        ...(parsed.data.date ? { date: parsed.data.date } : {}),
+        dryRun: parsed.data.dryRun === true,
+        tenants: results.length,
+        sent: results.reduce((sum, r) => sum + (r.ok ? r.sent : 0), 0),
+        skipped: results.reduce((sum, r) => sum + (r.ok ? r.skipped : 0), 0),
+        failed: results.filter((r) => !r.ok).length,
+        results,
+      })
+    } catch (err) {
       next(err)
     }
   },

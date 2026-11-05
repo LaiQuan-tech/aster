@@ -94,6 +94,12 @@ const ROUTE_TABS: readonly RouteTabRule[] = [
   { path: "/ai", tab: "ai" },
   { path: "/company-pages", tab: "company" },
   { path: "/notifications", tab: "notifications" },
+  // 公務車（2026-11-05）：員工端「公務車」分頁。/vehicle-settings 的 GET 給預約／還車畫面讀上限與類別對應，同樣歸 vehicles。
+  // 建立預約走 POST /requests（kind='vehicle_booking'）→ 見 tabsForRequest 依 body.kind 特判。
+  { path: "/vehicle-bookings", tab: "vehicles" },
+  { path: "/vehicle-trips", tab: "vehicles" },
+  { path: "/vehicle-settings", tab: "vehicles" },
+  { path: "/vehicles", tab: "vehicles" },
   // /schedules（個人班表）2026-10-11 隨班表功能移除：端點已取消註冊（404），不再列在對照表。
 ]
 
@@ -132,6 +138,25 @@ export function tabsForRoute(method: string, path: string): string[] {
     if (matches(clean, rule)) return [rule.tab, ...(rule.alsoTabs ?? [])]
   }
   return []
+}
+
+/**
+ * 純函式：同 tabsForRoute，但會看 body——`POST /requests` 且 `body.kind === "vehicle_booking"` 算「公務車」分頁
+ * （2026-11-05；express.json 在本 middleware 之前，所以拿得到 body）。其他一律照路徑判斷。
+ * 這只是「多擋一層」：真正擋在 POST /requests handler 的模組開關檢查。
+ */
+export function tabsForRequest(method: string, path: string, body?: unknown): string[] {
+  const clean = (path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path).toLowerCase()
+  if (
+    method.toUpperCase() === "POST" &&
+    clean === "/requests" &&
+    body &&
+    typeof body === "object" &&
+    (body as { kind?: unknown }).kind === "vehicle_booking"
+  ) {
+    return ["vehicles"]
+  }
+  return tabsForRoute(method, path)
 }
 
 /** 純函式：某個請求的**主要**分頁；不在對照表內回 null（＝不擋）。多分頁共用的路由看 `tabsForRoute`。 */
@@ -248,7 +273,7 @@ async function identityOf(token: string): Promise<{ tenantId: string; role: stri
  */
 export async function essTabGuard(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const tabs = tabsForRoute(req.method, req.path)
+    const tabs = tabsForRequest(req.method, req.path, req.body)
     if (tabs.length === 0) {
       next()
       return

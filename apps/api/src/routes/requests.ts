@@ -55,6 +55,8 @@ import { formatLeaveDuration } from "../lib/leave-duration.js"
 import { localDateKey } from "../lib/tz.js"
 import { approvalStepsHaveCandidates, columnsExist, isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { logger } from "../lib/logger.js"
+import { isModuleEnabled } from "../middleware/module.js"
+import { cancelSlot, linkBookingToRequest, reserveVehicleSlot } from "../services/vehicle-booking.js"
 
 export const requestsRouter = Router()
 
@@ -66,7 +68,9 @@ export const requestsRouter = Router()
 // 是同一個機制，差別只在授權來源，沒有理由另建一套簽核。
 // 'wfh' 在家工作／加做申報（M2，2026-09-23）：同樣走簽核管線，核准後由
 // services/settlement.ts 把該日視為在家工作（無打卡即以班表淨工時計）。
-const KINDS = ["leave", "ot", "fix_punch", "business_trip", "petty_cash", "wfh"] as const
+// 'vehicle_booking' 公務車預約（2026-11-05）：同樣走簽核管線（預設直屬主管單關）；時段另存
+// vehicle_bookings（exclusion constraint 防重疊），核准／駁回／撤回由 DB trigger 同步回預約。
+const KINDS = ["leave", "ot", "fix_punch", "business_trip", "petty_cash", "wfh", "vehicle_booking"] as const
 
 // 與 services/ledger.ts PUNCH_TYPES 及 punch_records.type 同一組值。
 const PUNCH_SEGMENT_TYPES = ["in", "out", "break_in", "break_out", "outing_in", "outing_out"] as const
@@ -122,6 +126,9 @@ const createSchema = z.object({
    */
   advanceRequested: z.number().nonnegative().optional(),
   remark: z.string().trim().max(250).optional(),
+  // ── 公務車預約（2026-11-05），僅 kind='vehicle_booking' 採用 ──────────
+  vehicleId: z.string().uuid().optional(),
+  passengers: z.number().int().min(1).max(60).optional(),
 })
 
 const decisionSchema = z.object({
@@ -268,6 +275,7 @@ const KIND_LABEL: Record<string, string> = {
   business_trip: "公出/出差",
   petty_cash: "零用金預支",
   wfh: "在家工作",
+  vehicle_booking: "公務車預約",
 }
 
 function kindLabel(kind: string): string {
@@ -301,6 +309,8 @@ export function flowRouteFor(
     const intercity = !!tripScope && tripScope !== "local"
     return { flowKind: intercity ? "business_trip_intercity" : "business_trip", requireBossFinal: true }
   }
+  // 公務車預約（vehicle_booking）也落在這裡：查自己的 flow、不加老闆關＝預設直屬主管單關
+  // （無主管 → 老闆 → hr_admin，services/approval-chain.ts）；HR 可在「假別與簽核流程」另設 list／manager_hr。
   return { flowKind: kind, requireBossFinal: false }
 }
 
@@ -691,8 +701,12 @@ requestsRouter.post(
       advanceRequested,
       remark,
       onBehalfOfEmployeeId,
-      segments,
+      vehicleId,
+      passengers,
     } = parsed.data
+    // 公務車預約不吃請假／加班欄位（segments、假別、時數、出差欄位一律不寫）。
+    const isVehicle = kind === "vehicle_booking"
+    const segments = isVehicle ? undefined : parsed.data.segments
 
     try {
       const self = await resolveSelf(tenantId, userId)
@@ -712,6 +726,22 @@ requestsRouter.post(
         return
       }
 
+      // 公務車預約（2026-11-05）：模組沒開 → 403（API 也擋，不只前端）；必帶車與用途。
+      if (isVehicle) {
+        if (!(await isModuleEnabled(tenantId, "vehicles"))) {
+          res.status(403).json({ error: "module_disabled", module: "vehicles" })
+          return
+        }
+        if (!vehicleId) {
+          res.status(400).json({ error: "vehicle_required" })
+          return
+        }
+        if (!reason) {
+          res.status(400).json({ error: "purpose_required" })
+          return
+        }
+      }
+
       // 發薪鎖定（2026-10-11）：任何日期或 segment 落在已結算月就擋，跨月單只要碰到已結算月也擋
       // → 409 `{ error: "period_closed", period }`（services/period-lock.ts；全域錯誤處理轉成回應）。
       await assertRequestOpen(tenantId, { start_at: startAt, end_at: endAt, segments })
@@ -720,7 +750,7 @@ requestsRouter.post(
       // 又讓整段日期算成「已核准」。起訖顛倒 → 400 invalid_ot_range；跨度 > 24h → 400 ot_span_too_long；
       // 帶了 hours 但 ≤ 0 或與起訖差相差超過 1 分鐘 → 400 invalid_ot_hours（附 expectedHours）。
       // 通過後一律寫入伺服器算的時數（加班單沒有扣休息的既有邏輯，員工端表單本來就送起訖差）。
-      let hours = hoursInput
+      let hours = isVehicle ? undefined : hoursInput
       if (kind === "ot") {
         const v = validateOtRequestTimes(startAt, endAt, hoursInput ?? null)
         if (!v.ok) {
@@ -795,6 +825,27 @@ requestsRouter.post(
       }
       const hasBeyondCapCols = await leaveRequestsHaveBeyondCap()
 
+      // 公務車預約：鏈解析成功之後、建申請單之前先佔時段（vehicle_bookings，exclusion constraint）。
+      // 撞時段 → 409 vehicle_booking_conflict，**不建任何申請單**；後面任何一步失敗都要 cancelSlot 釋放。
+      let slot: { bookingId: string; vehicle: { id: string; plateNo: string; model: string } } | null = null
+      if (isVehicle) {
+        const reserved = await reserveVehicleSlot({
+          tenantId,
+          employeeId: self.id,
+          vehicleId: vehicleId as string,
+          startAt,
+          endAt,
+          purpose: reason as string,
+          destination: location ?? null,
+          passengers: passengers ?? null,
+        })
+        if (!reserved.ok) {
+          res.status(reserved.status).json(reserved.body)
+          return
+        }
+        slot = { bookingId: reserved.bookingId, vehicle: reserved.vehicle }
+      }
+
       // Create the request (pending, step 1).
       const { data: created, error: reqErr } = await supabaseAdmin
         .from("leave_requests")
@@ -802,15 +853,16 @@ requestsRouter.post(
           tenant_id: tenantId,
           employee_id: self.id,
           kind,
-          leave_type_id: leaveTypeId ?? null,
+          leave_type_id: isVehicle ? null : (leaveTypeId ?? null),
           start_at: startAt,
           end_at: endAt,
           hours: hours ?? null,
           reason: reason ?? null,
-          agent_name: agentName ?? null,
+          agent_name: isVehicle ? null : (agentName ?? null),
           payout: kind === "ot" ? (payout ?? null) : null,
           trip_type: kind === "business_trip" ? (tripType ?? null) : null,
-          location: kind === "business_trip" ? (location ?? null) : null,
+          // 公務車預約：location＝目的地（2026-11-05）。
+          location: kind === "business_trip" || isVehicle ? (location ?? null) : null,
           trip_scope: kind === "business_trip" ? (tripScope ?? null) : null,
           // 預估花費：出差給簽核者判斷；零用金「自行墊付」（不預支）時，這是簽核者要核的金額
           // （預支金額則是 advance_requested，沒預支＝null／0，核准時不開 advances，見 services/ledger.openAdvance）。
@@ -830,10 +882,29 @@ requestsRouter.post(
         .select("id")
         .single()
       if (reqErr || !created) {
+        if (slot) await cancelSlot(tenantId, slot.bookingId)
         next(new Error(`POST /requests (insert): ${reqErr?.message}`))
         return
       }
       const requestId = created.id as string
+
+      // 公務車預約：時段連上申請單；失敗 → 申請單軟刪（同下方 steps 失敗的回滾寫法）＋釋放時段。
+      if (slot) {
+        try {
+          await linkBookingToRequest(tenantId, slot.bookingId, requestId)
+        } catch (linkErr) {
+          await supabaseAdmin
+            .from("leave_requests")
+            .update({
+              deleted_at: new Date().toISOString(),
+              delete_reason: "建單失敗自動回滾：公務車預約連結失敗",
+            })
+            .eq("id", requestId)
+          await cancelSlot(tenantId, slot.bookingId)
+          next(linkErr)
+          return
+        }
+      }
 
       // Materialise the ordered approval steps.
       const stepRows = chainSteps.map((step, i) => ({
@@ -860,6 +931,8 @@ requestsRouter.post(
             delete_reason: "建單失敗自動回滾：簽核鏈建立失敗",
           })
           .eq("id", requestId)
+        // 公務車預約：DB trigger 會在軟刪時把預約設 cancelled；這裡再明確釋放一次（trigger 未套用的環境也安全）。
+        if (slot) await cancelSlot(tenantId, slot.bookingId)
         next(new Error(`POST /requests (steps): ${stepErr?.message}`))
         return
       }
@@ -867,14 +940,14 @@ requestsRouter.post(
       // 通知第 1 關簽核者（best-effort：入列失敗只記 log，不影響 201）。
       let notified = 0
       try {
-        const ctx = await loadRequestContext(tenantId, self.id, leaveTypeId ?? null, kind)
+        const ctx = await loadRequestContext(tenantId, self.id, isVehicle ? null : (leaveTypeId ?? null), kind)
         notified = await notifyStepApprover({
           tenantId,
           lr: {
             id: requestId,
             kind,
             employee_id: self.id,
-            leave_type_id: leaveTypeId ?? null,
+            leave_type_id: isVehicle ? null : (leaveTypeId ?? null),
             start_at: startAt,
             end_at: endAt,
             hours: hours ?? null,
@@ -888,7 +961,9 @@ requestsRouter.post(
           totalSteps: chainSteps.length,
           event: "submitted",
           actedByEmpId: self.id,
-          extraNote: beyondCapNote(beyondCap),
+          extraNote: slot
+            ? `車輛：${slot.vehicle.plateNo}（${slot.vehicle.model}）；目的地：${location ?? "—"}`
+            : beyondCapNote(beyondCap),
           beyondCap,
         })
       } catch (notifyErr) {
@@ -907,6 +982,8 @@ requestsRouter.post(
         notified,
         // M1：非加班單一律 null；加班單回整份判定（前端可據此即時提示「將另行給付」）。
         beyondCap,
+        // 公務車預約才有（2026-11-05）。
+        ...(slot ? { vehicleBookingId: slot.bookingId } : {}),
         steps: steps.map((s) => {
           const chainStep = chainSteps[(s.step_order as number) - 1]
           const candidateEmpIds = chainStep?.candidateEmpIds ?? [s.approver_emp_id as string]

@@ -50,7 +50,7 @@ const SECTION_LABELS: Array<[string, string]> = [
   ["/leave-settlement", "特休結算"],
   ["/comp-time", "補休"],
   ["/approval-flows", "簽核流程"],
-  ["/requests", "申請單（請假／加班／補卡／出差／零用金／居家）"],
+  ["/requests", "申請單（請假／加班／補卡／出差／零用金／居家／公務車預約）"],
   ["/announcement", "公告"],
   ["/me", "我的帳號"],
   ["/my/", "我的資料"],
@@ -102,6 +102,11 @@ const SECTION_LABELS: Array<[string, string]> = [
   ["/duty-rosters", "值日／總機"],
   ["/profile-change-requests", "員工改資料審核"],
   ["/group-overview", "集團總覽"],
+  // 2026-11-05 公務車（長的放前）
+  ["/vehicle-bookings", "公務車預約"],
+  ["/vehicle-trips", "用車紀錄（取車／還車／費用）"],
+  ["/vehicle-settings", "公務車設定"],
+  ["/vehicles", "公務車"],
   ["/api/tenant", "公司設定"],
   ["/admin/tenants", "租戶管理"],
 ]
@@ -130,6 +135,8 @@ const SPECIFIC: Record<string, string> = {
   "GET /my/bonus-approvals": "輪到我簽的獎金批次",
   "GET /dashboard/boss-summary": "老闆摘要（財務層以上）",
   "GET /audit-logs": "稽核紀錄（HR）",
+  "GET /vehicles/availability": "公務車已被預約的時段；query: from, to, vehicleId",
+  "POST /vehicle-bookings/:id/checkout": "取車（body: startOdometer）",
 }
 
 function sectionOf(path: string): string {

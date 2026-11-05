@@ -393,5 +393,63 @@ export async function enrichRequestRows<T extends EnrichableRow>(
       logger.warn({ err, tenantId }, "enrich requests: boss-step signer check failed — boss_step_hr_fallback left false")
     }
   }
+  await attachVehicleBookings(tenantId, merged as unknown as Array<Record<string, unknown>>)
   return merged
+}
+
+/** 公務車預約（2026-11-05）：GET /requests 列上的補充欄位（snake_case，沿用本端點慣例）。 */
+export interface RequestVehicleBooking {
+  id: string
+  vehicle_id: string
+  plate_no: string
+  model: string
+  destination: string | null
+  passengers: number | null
+  status: string
+}
+
+/**
+ * kind='vehicle_booking' 的列補 `vehicle_booking`（查不到＝null）；其他 kind 不帶此鍵。
+ * 表未套用（migration 0085）或查詢失敗 → 一律 null 並記 log，不讓整張列表 500。
+ */
+export async function attachVehicleBookings(tenantId: string, rows: Array<Record<string, unknown>>): Promise<void> {
+  const targets = rows.filter((r) => r.kind === "vehicle_booking")
+  if (targets.length === 0) return
+  for (const r of targets) r.vehicle_booking = null
+  try {
+    const ids = targets.map((r) => r.id as string)
+    const { data: bookings, error } = await supabaseAdmin
+      .from("vehicle_bookings")
+      .select("id, vehicle_id, request_id, destination, passengers, status")
+      .eq("tenant_id", tenantId)
+      .in("request_id", ids)
+    if (error) throw new Error(error.message)
+    const list = (bookings ?? []) as Array<Record<string, unknown>>
+    const vehicleIds = Array.from(new Set(list.map((b) => b.vehicle_id as string)))
+    const vehicleById = new Map<string, { plate_no: string; model: string }>()
+    if (vehicleIds.length > 0) {
+      const { data: vehicles, error: vErr } = await supabaseAdmin.from("vehicles").select("id, plate_no, model").eq("tenant_id", tenantId).in("id", vehicleIds)
+      if (vErr) throw new Error(vErr.message)
+      for (const v of (vehicles ?? []) as Array<Record<string, unknown>>) {
+        vehicleById.set(v.id as string, { plate_no: v.plate_no as string, model: v.model as string })
+      }
+    }
+    const byRequest = new Map(list.map((b) => [b.request_id as string, b]))
+    for (const r of targets) {
+      const b = byRequest.get(r.id as string)
+      if (!b) continue
+      const v = vehicleById.get(b.vehicle_id as string)
+      r.vehicle_booking = {
+        id: b.id as string,
+        vehicle_id: b.vehicle_id as string,
+        plate_no: v?.plate_no ?? "",
+        model: v?.model ?? "",
+        destination: (b.destination as string | null) ?? null,
+        passengers: b.passengers == null ? null : Number(b.passengers),
+        status: b.status as string,
+      } satisfies RequestVehicleBooking
+    }
+  } catch (err) {
+    logger.warn({ err, tenantId }, "enrich requests: vehicle bookings lookup failed — vehicle_booking left null")
+  }
 }

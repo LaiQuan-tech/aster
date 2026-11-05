@@ -596,6 +596,13 @@
       "when": 1793400000000,
       "tag": "0084_mcp_pending_target",
       "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1793500000000,
+      "tag": "0085_vehicles",
+      "breakpoints": true
     }
   ]
 }

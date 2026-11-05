@@ -1050,3 +1050,27 @@ describe("內部派送 token 的邊界", () => {
     expect(res.text).toContain("要看下一頁請帶 offset=10")
   })
 })
+
+describe("公務車（2026-11-05）危險分級", () => {
+  it("4 條中風險規則；預約／取車／還車／車輛主檔不列", async () => {
+    const { isDangerousPattern } = await import("../services/mcp/danger.js")
+    const tier = (m: string, p: string, b?: unknown) => dangerOf(m, p, b)?.tier ?? null
+    expect(tier("POST", "/vehicle-trips/abc/expense-claims")).toBe("medium")
+    expect(tier("PUT", "/vehicle-trips/abc/costs")).toBe("medium")
+    expect(tier("PATCH", "/vehicle-trips/abc")).toBe("medium")
+    expect(tier("PUT", "/vehicle-settings")).toBe("medium")
+    expect(dangerOf("POST", "/vehicle-trips/abc/expense-claims")?.label).toContain("報銷")
+    expect(isDangerousPattern("POST", "/vehicles")).toBe(false)
+    expect(isDangerousPattern("PATCH", "/vehicles/:id")).toBe(false)
+    expect(isDangerousPattern("POST", "/vehicles/:id/maintenance")).toBe(false)
+    expect(isDangerousPattern("POST", "/vehicle-bookings/:id/checkout")).toBe(false)
+    expect(isDangerousPattern("POST", "/vehicle-bookings/:id/cancel")).toBe(false)
+    expect(isDangerousPattern("POST", "/vehicle-trips/:id/return")).toBe(false)
+    expect(isDangerousPattern("POST", "/vehicle-trips/:id/photos")).toBe(false)
+    expect(isDangerousPattern("GET", "/vehicle-settings")).toBe(false)
+    // 預約走既有 POST /requests：非危險（與其他申請單一致）
+    expect(dangerOf("POST", "/requests", { kind: "vehicle_booking" })).toBeNull()
+    // 既有缺口（不在本次範圍）：POST /expenses 本身不在危險清單
+    expect(dangerOf("POST", "/expenses")).toBeNull()
+  })
+})

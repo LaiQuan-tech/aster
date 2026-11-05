@@ -16,6 +16,7 @@ export const approvalFlowsRouter = Router()
 //                             主管逐關 → 老闆最後一關（services/approval-chain.ts requireBossFinal）
 //   wfh                     — 在家工作申請單（新 kind）
 //   disbursement            — 放款單送簽（主管鏈 → 會計 → 老闆；list 模式照名單）
+//   vehicle_booking         — 公務車預約（2026-11-05；無 flow 時預設直屬主管單關，不加老闆關）
 const kindSchema = z.enum([
   "leave",
   "ot",
@@ -25,6 +26,7 @@ const kindSchema = z.enum([
   "business_trip_intercity",
   "wfh",
   "disbursement",
+  "vehicle_booking",
 ])
 
 // 簽核模式（migration 0042 approval_flows.mode，CHECK in ('manager','list','manager_hr')，

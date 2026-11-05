@@ -346,6 +346,7 @@ export type BossSummaryCtx = {
   selfEmpId?: string | null
 }
 
+/** 待簽核申請單總數（所有 kind）。刻意**含**公務車預約（vehicle_booking，2026-11-05）：這是「待簽核」總數，不只假單。 */
 async function loadPendingLeave(ctx: BossSummaryCtx): Promise<number> {
   const rows = await selectAllPages<{ id: string }>(
     (from, to) =>

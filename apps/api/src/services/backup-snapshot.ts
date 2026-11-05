@@ -150,6 +150,14 @@ export const SNAPSHOT_TABLES: readonly SnapshotTableSpec[] = [
   { name: "expense_claim_attachments" },
   { name: "expense_settlements" },
   { name: "advances" },
+  // 2026-11-05 公務車（sql/0075）。不收：vehicle_reminder_log（提醒去重，無業務意義）、vehicle_settings（主鍵是 tenant_id、
+  // 沒有 id 欄，快照分頁 order by id 會失敗；只是幾個設定值）。照片檔案本身不進快照（同報銷憑證）。
+  { name: "vehicles" },
+  { name: "vehicle_maintenance_logs" },
+  { name: "vehicle_bookings" },
+  { name: "vehicle_trips" },
+  { name: "vehicle_trip_costs" },
+  { name: "vehicle_trip_photos" },
   { name: "projects" },
   { name: "project_settings" },
   { name: "project_members" },

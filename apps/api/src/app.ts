@@ -13,6 +13,7 @@ import { punchOverviewRouter } from "./routes/punch-overview.js"
 import { leaveTypesRouter } from "./routes/leave-types.js"
 import { approvalFlowsRouter } from "./routes/approval-flows.js"
 import { requestsRouter } from "./routes/requests.js"
+import { vehiclesRouter } from "./routes/vehicles.js"
 import { announcementsRouter } from "./routes/announcements.js"
 import { meRouter } from "./routes/me.js"
 import { ruleConfigRouter } from "./routes/rule-config.js"
@@ -224,6 +225,8 @@ app.use(internalCronRouter) // /internal/leave/annual-grant、/internal/calendar
 app.use(groupOverviewRouter) // /group-overview、/group-overview/detail（跨公司入帳收入／放款支出／專案毛利；只有在職 platform_admin）
 // 2026-10-27 獎金分潤總表（版面同公司「專案獎金總表」；集團財務權限）
 app.use(bonusSheetRouter) // /bonus-sheet、/bonus-sheet/export.xlsx
+// 2026-11-05 公務車
+app.use(vehiclesRouter) // /vehicles*、/vehicle-bookings*、/vehicle-trips*、/vehicle-settings（預約建立走 POST /requests kind='vehicle_booking'）
 // 2026-11-02 MCP 連接：個人存取金鑰、已授權的 AI 應用（本人自助；MCP 自己不能打這組）
 app.use(mcpKeysRouter) // /me/mcp/keys*、/me/mcp/grants*
 

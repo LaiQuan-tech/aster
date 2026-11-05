@@ -15,6 +15,7 @@ export const meRouter = Router()
 /**
  * intern 沒另外設定時的 ESS 分頁清單；其他身分類別預設全部（null）。
  * 「個人班表」（schedule）2026-10-11 隨班表功能移除（與 middleware/ess-tab-guard.ts、web ess-tabs.ts 同步）。
+ * 「公務車」（vehicles，2026-11-05）刻意不在預設清單：實習生預設看不到，HR 在「員工端功能開放」勾選才開。
  */
 const INTERN_DEFAULT_ESS_TABS = ["home", "punches", "requests", "notifications", "mydata"]
 
