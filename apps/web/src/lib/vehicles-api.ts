@@ -148,6 +148,8 @@ export interface VehicleSettings {
   reminderEmpIds: string[];
   maxBookingHours: number;
   checkoutEarlyMinutes: number;
+  /** 預約開始時間最多可選到今天＋幾天（1–365，預設 90；舊 API 沒有此欄）。 */
+  maxDaysAhead?: number;
 }
 
 export interface MaintenanceLog {

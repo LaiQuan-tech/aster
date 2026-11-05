@@ -24,7 +24,7 @@ export default function AdminVehicleSettingsPage() {
   const [settings, setSettings] = useState<VehicleSettings | null>(null);
   const [categories, setCategories] = useState<ExpenseCategory[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
-  const [nums, setNums] = useState({ reminderLeadDays: "", maintenanceLeadKm: "", maxBookingHours: "", checkoutEarlyMinutes: "" });
+  const [nums, setNums] = useState({ reminderLeadDays: "", maintenanceLeadKm: "", maxBookingHours: "", checkoutEarlyMinutes: "", maxDaysAhead: "" });
   const [empQuery, setEmpQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -40,6 +40,7 @@ export default function AdminVehicleSettingsPage() {
           maintenanceLeadKm: String(s.settings.maintenanceLeadKm),
           maxBookingHours: String(s.settings.maxBookingHours),
           checkoutEarlyMinutes: String(s.settings.checkoutEarlyMinutes),
+          maxDaysAhead: String(s.settings.maxDaysAhead ?? 90),
         });
         setCategories(c.categories);
         setEmployees(e.employees.filter((x) => x.status !== "terminated" && !x.terminated_at));
@@ -76,6 +77,7 @@ export default function AdminVehicleSettingsPage() {
     if (parsed.maintenanceLeadKm > 10000) return setError("保養提前公里數最多 10000");
     if (parsed.maxBookingHours < 1 || parsed.maxBookingHours > 720) return setError("單次預約上限請填 1–720 小時");
     if (parsed.checkoutEarlyMinutes > 1440) return setError("提前取車最多 1440 分鐘");
+    if (parsed.maxDaysAhead < 1 || parsed.maxDaysAhead > 365) return setError("可預約天數請填 1–365");
     setBusy(true);
     try {
       const res = await saveVehicleSettings({
@@ -88,6 +90,7 @@ export default function AdminVehicleSettingsPage() {
         maintenanceLeadKm: parsed.maintenanceLeadKm,
         maxBookingHours: parsed.maxBookingHours,
         checkoutEarlyMinutes: parsed.checkoutEarlyMinutes,
+        maxDaysAhead: parsed.maxDaysAhead,
       });
       setSettings(res.settings);
       toast.show("設定已儲存", "success");
@@ -142,6 +145,9 @@ export default function AdminVehicleSettingsPage() {
           </Field>
           <Field label="可提前取車（分鐘）" htmlFor="vs-early">
             <Input id="vs-early" inputMode="numeric" value={nums.checkoutEarlyMinutes} onChange={(e) => setNums({ ...nums, checkoutEarlyMinutes: e.target.value })} />
+          </Field>
+          <Field label="最多可預約幾天後（天）" htmlFor="vs-ahead" hint="1–365，預設 90">
+            <Input id="vs-ahead" inputMode="numeric" value={nums.maxDaysAhead} onChange={(e) => setNums({ ...nums, maxDaysAhead: e.target.value })} />
           </Field>
         </div>
       </Card>

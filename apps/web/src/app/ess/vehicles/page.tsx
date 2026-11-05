@@ -39,6 +39,7 @@ import {
   bookingRangeError,
   checkoutOdometerError,
   conflictSlotsOf,
+  BOOKING_MAX_DAYS_AHEAD,
   bookingMaxInput,
   dateToLocalInput,
   fmtKm,
@@ -187,7 +188,7 @@ export default function EssVehiclesPage() {
     if (!form.vehicleId) return setFormError("請選擇車輛");
     const startIso = localInputToIso(form.start);
     const endIso = localInputToIso(form.end);
-    const rangeErr = bookingRangeError(startIso, endIso, settings?.maxBookingHours);
+    const rangeErr = bookingRangeError(startIso, endIso, settings?.maxBookingHours, { maxDaysAhead });
     if (rangeErr) return setFormError(rangeErr);
     if (!form.purpose.trim()) return setFormError("請填寫用途");
     // API：passengers 為 1–60 的整數（省略＝沒填）；填 0 視同沒填。
@@ -304,6 +305,8 @@ export default function EssVehiclesPage() {
   }, [slots]);
 
   const loading = vehicles === null || bookings === null;
+  // 可預約天數：讀公務車設定（1–365），讀不到用 90。
+  const maxDaysAhead = settings?.maxDaysAhead && settings.maxDaysAhead > 0 ? settings.maxDaysAhead : BOOKING_MAX_DAYS_AHEAD;
 
   return (
     <div className="space-y-4">
@@ -480,7 +483,7 @@ export default function EssVehiclesPage() {
             </Field>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="開始" required htmlFor="vb-start">
-                <Input id="vb-start" type="datetime-local" min={dateToLocalInput(new Date())} max={bookingMaxInput()} value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} />
+                <Input id="vb-start" type="datetime-local" min={dateToLocalInput(new Date())} max={bookingMaxInput(new Date(), maxDaysAhead)} value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} />
               </Field>
               <Field label="結束" required htmlFor="vb-end" hint={settings?.maxBookingHours ? `單次最長 ${settings.maxBookingHours} 小時` : undefined}>
                 <Input id="vb-end" type="datetime-local" min={form.start || undefined} value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} />

@@ -330,6 +330,8 @@ describe("veh-api 實作新增的錯誤碼與附帶欄位", () => {
       { ok: false, error: "period_closed" },
     ]);
     expect(summary).toMatch(/^0 筆已轉報銷、5 筆失敗：/);
+    expect(claimResultSummary([{ ok: false, error: "vehicle_settings_incomplete" }])).toContain("公務車 → 設定");
+    expect(vehicleErrorMessage(apiErr(400, "reason_required"))).toContain("理由");
     expect(summary).not.toMatch(/[a-z]_[a-z]/);
   });
 });
