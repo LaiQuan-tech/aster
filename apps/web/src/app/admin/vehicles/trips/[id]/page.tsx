@@ -22,6 +22,7 @@ import {
 import { CostList, CostRowsEditor, PhotoGrid, costToDraft, draftsToCosts, type CostDraft } from "@/components/vehicle-ui";
 import { fmtDateTime, localDateKey, todayKey } from "@/lib/ess-format";
 import { CONDITION_LABEL, distanceOf, fmtKm, vehicleErrorMessage } from "@/lib/vehicle-view";
+import { useEssState } from "@/lib/ess-state";
 import { getVehicleTrip, saveTripCosts, updateVehicleTrip, type ConditionStatus, type VehicleTrip } from "@/lib/vehicles-api";
 
 export default function AdminVehicleTripDetailPage() {
@@ -40,6 +41,8 @@ export default function AdminVehicleTripDetailPage() {
   const [costs, setCosts] = useState<CostDraft[] | null>(null);
   const [costError, setCostError] = useState<string | null>(null);
   const [costBusy, setCostBusy] = useState(false);
+  const [costReason, setCostReason] = useState("");
+  const myId = useEssState().me?.id ?? null;
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -111,11 +114,15 @@ export default function AdminVehicleTripDetailPage() {
     setCostError(null);
     const parsed = draftsToCosts(costs);
     if (!parsed.ok) return setCostError(parsed.message);
+    // HR 修改他人的費用要填理由（記稽核）；自己的用車紀錄不用。
+    const othersTrip = trip.employeeId !== myId;
+    if (othersTrip && !costReason.trim()) return setCostError("修改他人的費用請填寫理由");
     setCostBusy(true);
     try {
-      const res = await saveTripCosts(trip.id, parsed.costs);
+      const res = await saveTripCosts(trip.id, parsed.costs, othersTrip ? costReason.trim() : undefined);
       setTrip({ ...res.trip, photos: res.trip.photos ?? trip.photos });
       setCosts(null);
+      setCostReason("");
       toast.show("費用已儲存", "success");
     } catch (err) {
       setCostError(vehicleErrorMessage(err, "儲存失敗"));
@@ -194,6 +201,11 @@ export default function AdminVehicleTripDetailPage() {
               </div>
             )}
             <CostRowsEditor drafts={costs} onChange={setCosts} defaultDate={trip.returnedAt ? localDateKey(trip.returnedAt) : todayKey()} disabled={costBusy} />
+            {trip.employeeId !== myId && (
+              <Field label="修改理由" required htmlFor="tc-reason" hint="修改他人的費用會記在稽核紀錄">
+                <Input id="tc-reason" value={costReason} maxLength={250} onChange={(e) => setCostReason(e.target.value)} />
+              </Field>
+            )}
             {costError && <InlineError>{costError}</InlineError>}
             <div className="flex gap-2">
               <Button onClick={() => void saveCosts()} loading={costBusy}>

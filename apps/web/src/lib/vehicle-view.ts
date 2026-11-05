@@ -206,13 +206,25 @@ export function overlaps(
   });
 }
 
-/** 預約起訖檢查（送單前）：缺、結束不晚於開始、超過上限時數。回 null＝通過。 */
-export function bookingRangeError(start: string, end: string, maxHours?: number | null): string | null {
+/**
+ * 預約起訖檢查（送單前）：缺、結束不晚於開始、超過上限時數、開始超過今天＋maxDaysAhead 天（預設 90，算到該日 23:59 當地）。
+ * 回 null＝通過。`now` 可注入（測試）。
+ */
+export function bookingRangeError(
+  start: string,
+  end: string,
+  maxHours?: number | null,
+  opts: { now?: Date; maxDaysAhead?: number } = {},
+): string | null {
   if (!start || !end) return "請選擇開始與結束時間";
   const s = ms(start);
   const e = ms(end);
   if (!Number.isFinite(s) || !Number.isFinite(e)) return "時間格式不正確";
   if (e <= s) return "結束時間要晚於開始時間";
+  const maxDays = opts.maxDaysAhead ?? 90;
+  const now = opts.now ?? new Date();
+  const limit = new Date(now.getFullYear(), now.getMonth(), now.getDate() + maxDays, 23, 59, 59).getTime();
+  if (s > limit) return `最多只能預約 ${maxDays} 天內的時段`;
   if (maxHours && maxHours > 0 && e - s > maxHours * 3_600_000) return `單次預約最長 ${maxHours} 小時`;
   return null;
 }
@@ -267,19 +279,30 @@ function pad2(n: number): string {
 }
 
 /**
- * `<input type="datetime-local">` 的值（`YYYY-MM-DDTHH:mm`，當地時間）→ 帶時區位移的 ISO
- * （`2026-11-05T09:00:00+08:00`）。格式不對 → ""。`offsetMinutes` 可注入（測試）；省略＝瀏覽器時區在該時刻的位移。
+ * `<input type="datetime-local">` 的值（`YYYY-MM-DDTHH:mm`，當地時間）→ **UTC** ISO（`toISOString()`，
+ * 例：台北 `2026-11-05T09:00` → `2026-11-05T01:00:00.000Z`）。2026-11-05 驗收：曾送 `+08:00` 位移格式被 API 400，
+ * 一律改送 UTC（API 端也會放寬接受位移，雙保險）。格式不對 → ""。
+ * `offsetMinutes`（當地相對 UTC 的分鐘數，台北 480）可注入（測試）；省略＝瀏覽器時區。
  */
 export function localInputToIso(value: string, offsetMinutes?: number): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value.trim());
   if (!m) return "";
-  const [, y, mo, d, h, mi] = m;
-  const local = new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi));
-  if (Number.isNaN(local.getTime())) return "";
-  const offset = offsetMinutes ?? -local.getTimezoneOffset();
-  const sign = offset >= 0 ? "+" : "-";
-  const abs = Math.abs(offset);
-  return `${y}-${mo}-${d}T${h}:${mi}:00${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`;
+  const [y, mo, d, h, mi] = m.slice(1).map(Number) as [number, number, number, number, number];
+  const date =
+    offsetMinutes === undefined
+      ? new Date(y, mo - 1, d, h, mi)
+      : new Date(Date.UTC(y, mo - 1, d, h, mi) - offsetMinutes * 60_000);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString();
+}
+
+/** 預約開始時間最多可選到今天＋幾天（業主：90 天；API 另有 booking_too_far 以租戶設定為準）。 */
+export const BOOKING_MAX_DAYS_AHEAD = 90;
+
+/** datetime-local 的 max 屬性：今天＋maxDays 的 23:59（當地）。 */
+export function bookingMaxInput(now: Date = new Date(), maxDays = BOOKING_MAX_DAYS_AHEAD): string {
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + maxDays, 23, 59);
+  return dateToLocalInput(d);
 }
 
 /** Date → datetime-local 值（當地時間）。 */
@@ -350,6 +373,8 @@ export const VEHICLE_ERROR_TEXT: Record<string, string> = {
   too_many_photos: "每趟最多 12 張照片",
   trip_not_returned: "這趟尚未還車，還車後才能轉報銷或更正還車資料",
   invalid_range: "結束時間要晚於開始時間",
+  distance_too_large: "單趟里程超過上限，請確認還車里程是否輸入錯誤",
+  booking_too_far: "預約開始時間超過可預約的天數",
   invalid_base64: "照片檔案讀取失敗，請重新選擇照片",
   already_claimed: "這筆費用已經轉報銷過了",
   not_claimable: "公司支付的費用不需報銷",
@@ -442,6 +467,10 @@ export function vehicleErrorMessage(err: unknown, fallback = "操作失敗，請
     const label = VEHICLE_STATUS_LABEL[body.status as VehicleStatus];
     if (label) return `這台車目前${label}，不可預約`;
   }
+  if (code === "distance_too_large" && typeof body.maxKm === "number") {
+    return `單趟里程超過上限（${body.maxKm.toLocaleString("en-US")} km），請確認里程是否輸入錯誤`;
+  }
+  if (code === "booking_too_far" && typeof body.maxDaysAhead === "number") return `最多只能預約 ${body.maxDaysAhead} 天內的時段`;
   if (code === "too_many_photos" && typeof body.max === "number") return `每趟最多 ${body.max} 張照片`;
   if (code === "range_too_long" && typeof body.maxDays === "number") return `查詢區間最長 ${body.maxDays} 天`;
   if (code === "invalid_category" && typeof body.field === "string") {

@@ -8,6 +8,7 @@ import {
   alertText,
   alertTone,
   bookingActions,
+  bookingMaxInput,
   bookingRangeError,
   canShowClaimButton,
   checkoutOdometerError,
@@ -118,7 +119,16 @@ describe("overlaps（半開區間）／bookingRangeError", () => {
     expect(bookingRangeError("2026-11-05T03:00:00Z", "2026-11-05T03:00:00Z")).toBe("結束時間要晚於開始時間");
     expect(bookingRangeError("2026-11-05T00:00:00Z", "2026-11-05T09:00:00Z", 8)).toBe("單次預約最長 8 小時");
     expect(bookingRangeError("2026-11-05T00:00:00Z", "2026-11-05T08:00:00Z", 8)).toBeNull();
-    expect(bookingRangeError("2026-11-05T00:00:00Z", "2026-11-06T08:00:00Z")).toBeNull();
+    expect(bookingRangeError("2026-11-05T00:00:00Z", "2026-11-06T08:00:00Z", null, { now: new Date("2026-11-05T00:00:00Z") })).toBeNull();
+  });
+  it("bookingRangeError：開始超過今天＋90 天擋（可調）", () => {
+    const now = new Date(2026, 10, 5, 10, 0);
+    const inRange = new Date(2026, 10, 5 + 90, 12, 0).toISOString();
+    const tooFar = new Date(2026, 10, 5 + 91, 9, 0).toISOString();
+    const after = (iso: string) => new Date(new Date(iso).getTime() + 3_600_000).toISOString();
+    expect(bookingRangeError(inRange, after(inRange), null, { now })).toBeNull();
+    expect(bookingRangeError(tooFar, after(tooFar), null, { now })).toBe("最多只能預約 90 天內的時段");
+    expect(bookingRangeError(tooFar, after(tooFar), null, { now, maxDaysAhead: 120 })).toBeNull();
   });
 });
 
@@ -235,6 +245,8 @@ describe("vehicleErrorMessage：§3.2 全部錯誤碼都有中文", () => {
     "already_claimed",
     "not_claimable",
     "claim_failed",
+    "distance_too_large",
+    "booking_too_far",
   ];
   it("每個碼都有對照，且訊息含中文、不是碼本身", () => {
     for (const code of ALL_CODES) {
@@ -271,12 +283,20 @@ describe("vehicleErrorMessage：§3.2 全部錯誤碼都有中文", () => {
 });
 
 describe("localInputToIso／photoPickError", () => {
-  it("datetime-local → 帶位移 ISO；格式不對 → 空字串", () => {
-    expect(localInputToIso("2026-11-05T09:00", 480)).toBe("2026-11-05T09:00:00+08:00");
-    expect(localInputToIso("2026-11-05T09:00", -330)).toBe("2026-11-05T09:00:00-05:30");
-    expect(localInputToIso("2026-11-05T09:00", 0)).toBe("2026-11-05T09:00:00+00:00");
+  it("datetime-local → UTC ISO（toISOString，不送 +08:00 位移）；格式不對 → 空字串", () => {
+    expect(localInputToIso("2026-11-05T09:00", 480)).toBe("2026-11-05T01:00:00.000Z");
+    expect(localInputToIso("2026-11-05T05:00", 480)).toBe("2026-11-04T21:00:00.000Z");
+    expect(localInputToIso("2026-11-05T09:00", -330)).toBe("2026-11-05T14:30:00.000Z");
+    expect(localInputToIso("2026-11-05T09:00", 0)).toBe("2026-11-05T09:00:00.000Z");
     expect(localInputToIso("2026/11/05 09:00")).toBe("");
-    expect(Number.isNaN(Date.parse(localInputToIso("2026-11-05T09:00")))).toBe(false);
+    const browser = localInputToIso("2026-11-05T09:00");
+    expect(browser.endsWith("Z")).toBe(true);
+    expect(browser).not.toMatch(/[+-]\d{2}:\d{2}$/);
+    expect(new Date(browser).getHours()).toBe(9);
+  });
+  it("bookingMaxInput：今天＋90 天 23:59", () => {
+    expect(bookingMaxInput(new Date(2026, 10, 5, 10, 0))).toBe("2027-02-03T23:59");
+    expect(bookingMaxInput(new Date(2026, 10, 5), 1)).toBe("2026-11-06T23:59");
   });
   it("photoPickError：只收 jpg/png/heic/heif/webp；空檔、超過 25MB 擋", () => {
     expect(photoPickError({ name: "a.jpg", type: "image/jpeg", size: 1000 })).toBeNull();
@@ -297,6 +317,8 @@ describe("veh-api 實作新增的錯誤碼與附帶欄位", () => {
     expect(vehicleErrorMessage(apiErr(409, "not_cancellable", { status: "completed" }))).toBe("這筆預約已完成，不能再取消");
     expect(vehicleErrorMessage(apiErr(409, "booking_not_approved", { status: "pending" }))).toBe("預約目前簽核中，核准後才能取車");
     expect(vehicleErrorMessage(apiErr(400, "invalid_range"))).toBe("結束時間要晚於開始時間");
+    expect(vehicleErrorMessage(apiErr(400, "distance_too_large", { maxKm: 2000 }))).toBe("單趟里程超過上限（2,000 km），請確認里程是否輸入錯誤");
+    expect(vehicleErrorMessage(apiErr(400, "booking_too_far", { maxDaysAhead: 90 }))).toBe("最多只能預約 90 天內的時段");
     expect(vehicleErrorMessage(apiErr(409, "trip_not_returned"))).toContain("尚未還車");
   });
   it("轉報銷逐行錯誤：already_claimed／not_claimable／not_found／claim_failed／period_closed 都是中文", () => {

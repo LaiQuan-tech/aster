@@ -39,6 +39,7 @@ import {
   bookingRangeError,
   checkoutOdometerError,
   conflictSlotsOf,
+  bookingMaxInput,
   dateToLocalInput,
   fmtKm,
   localInputToIso,
@@ -479,10 +480,10 @@ export default function EssVehiclesPage() {
             </Field>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="開始" required htmlFor="vb-start">
-                <Input id="vb-start" type="datetime-local" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} />
+                <Input id="vb-start" type="datetime-local" min={dateToLocalInput(new Date())} max={bookingMaxInput()} value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} />
               </Field>
               <Field label="結束" required htmlFor="vb-end" hint={settings?.maxBookingHours ? `單次最長 ${settings.maxBookingHours} 小時` : undefined}>
-                <Input id="vb-end" type="datetime-local" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} />
+                <Input id="vb-end" type="datetime-local" min={form.start || undefined} value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} />
               </Field>
             </div>
             <Field label="用途" required htmlFor="vb-purpose">

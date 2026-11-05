@@ -355,11 +355,14 @@ export function updateVehicleTrip(id: string, body: TripPatch) {
   return apiFetch<{ trip: VehicleTrip }>(`/vehicle-trips/${encodeURIComponent(id)}`, { method: "PATCH", body: json(body) });
 }
 
-/** 整批覆寫未請款（claimState none）的費用行；已請款的行不可改不可刪（409 cost_already_claimed）。 */
-export function saveTripCosts(id: string, costs: TripCostInput[]) {
+/**
+ * 整批覆寫未請款（claimState none）的費用行；已請款的行不可改不可刪（409 cost_already_claimed）。
+ * HR 修改他人費用須帶理由（`reason`；2026-11-05 驗收追加，欄位名待與 API 最新實作對齊）。
+ */
+export function saveTripCosts(id: string, costs: TripCostInput[], reason?: string) {
   return apiFetch<{ trip: VehicleTrip }>(`/vehicle-trips/${encodeURIComponent(id)}/costs`, {
     method: "PUT",
-    body: json({ costs }),
+    body: json(reason ? { costs, reason } : { costs }),
   });
 }
 
