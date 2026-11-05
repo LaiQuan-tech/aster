@@ -29,7 +29,8 @@ export type EssTabKey =
   | "company"
   | "notifications"
   | "mydata"
-  | "announcements";
+  | "announcements"
+  | "vehicles";
 
 export interface EssTab {
   key: EssTabKey;
@@ -61,6 +62,8 @@ export const ESS_TABS: readonly EssTab[] = [
   { key: "notifications", label: "通知中心", short: "通知", href: "/ess/notifications" },
   { key: "mydata", label: "我的資料", short: "資料", href: "/ess/mydata" },
   { key: "announcements", label: "公告", short: "公告", href: "/ess/announcements" },
+  // 2026-11-05 公務車（追加在最後，key 不可改名）：另受後台模組開關 features.adminModules.vehicles 控制（見 tabsWithModules）。
+  { key: "vehicles", label: "公務車", short: "用車", href: "/ess/vehicles" },
 ];
 
 /**
@@ -93,6 +96,29 @@ export function visibleTabs<T extends EssTabLike>(
   if (allowedKeys == null) return [...tabs];
   const allowed = new Set(allowedKeys);
   return tabs.filter((tab) => ALWAYS_VISIBLE_TAB_KEYS.has(tab.key) || allowed.has(tab.key));
+}
+
+/* ------------------------------------------------------ 模組開關 --- */
+
+/**
+ * 需要後台模組開關（tenants.features.adminModules[module] === true）才顯示的分頁 → 模組 key。
+ * 2026-11-05 公務車：模組關閉時員工端「更多」不列、直開 /ess/vehicles* 由 EssShell 顯示 GatePanel。
+ * （不 import admin-nav，避免員工端 bundle 拉進整份後台路由表；讀法與 adminModulesOf／isModuleEnabled 相同：必須明確 true。）
+ */
+export const MODULE_GATED_TABS: Readonly<Partial<Record<EssTabKey, string>>> = { vehicles: "vehicles" };
+
+/** 這個分頁的模組開關是否開啟；不需要模組的分頁永遠 true。features 為 null（尚未載入）→ 需要模組的分頁視為關閉。 */
+export function isEssTabModuleEnabled(key: string, features: Record<string, unknown> | null | undefined): boolean {
+  const moduleKey = MODULE_GATED_TABS[key as EssTabKey];
+  if (!moduleKey) return true;
+  const raw = features?.adminModules;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  return (raw as Record<string, unknown>)[moduleKey] === true;
+}
+
+/** 依模組開關過濾分頁（順序不變）；與 visibleTabs（essTabs 限縮）疊加使用。 */
+export function tabsWithModules<T extends EssTabLike>(tabs: readonly T[], features: Record<string, unknown> | null | undefined): T[] {
+  return tabs.filter((tab) => isEssTabModuleEnabled(tab.key, features));
 }
 
 /* ------------------------------------------------------ 底部分頁列 --- */
@@ -155,7 +181,7 @@ export interface EssMoreGroupDef {
 export const MORE_GROUPS: readonly EssMoreGroupDef[] = [
   { title: "差勤", keys: ["punches", "sheet", "balances"] },
   { title: "薪資與費用", keys: ["payslips", "expenses", "bonus"] },
-  { title: "公司", keys: ["announcements", "company", "jobs", "projects"] },
+  { title: "公司", keys: ["announcements", "company", "jobs", "projects", "vehicles"] },
   { title: "個人", keys: ["kpi", "mydata"] },
 ];
 
@@ -164,9 +190,13 @@ export interface EssMoreGroup {
   items: EssTab[];
 }
 
-/** 依 essTabs 過濾後的「更多」分組：空組不回傳、底列 key 不重列。 */
-export function moreGroups(essTabs: readonly string[] | null | undefined): EssMoreGroup[] {
-  const visible = new Map(visibleTabs(ESS_TABS, essTabs).map((t) => [t.key, t] as const));
+/** 依 essTabs 過濾後的「更多」分組：空組不回傳、底列 key 不重列。`features` 有給時再套模組開關（tabsWithModules）。 */
+export function moreGroups(
+  essTabs: readonly string[] | null | undefined,
+  features?: Record<string, unknown> | null,
+): EssMoreGroup[] {
+  const base = visibleTabs(ESS_TABS, essTabs);
+  const visible = new Map((features === undefined ? base : tabsWithModules(base, features)).map((t) => [t.key, t] as const));
   const bottom = new Set<string>(BOTTOM_TAB_KEYS);
   const out: EssMoreGroup[] = [];
   for (const group of MORE_GROUPS) {

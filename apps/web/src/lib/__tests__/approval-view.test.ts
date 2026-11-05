@@ -27,6 +27,8 @@ import {
   rowsForView,
   statsOf,
   statusParamFor,
+  vehicleBookingPeriod,
+  vehicleBookingSummary,
   viewOptions,
   type BucketContext,
 } from "../approval-view";
@@ -147,11 +149,12 @@ const PENDING_ROWS = ALL_ROWS.filter((r) => r.status === "pending");
 /* ---------------------------------------------------------------- view --- */
 
 describe("KIND_LABEL／KIND_OPTIONS 涵蓋六種表單（零用金預支曾漏掉→後台類型欄空白；2026-09-23 加在家工作）", () => {
-  it("六種 kind 都有中文標籤，且篩選選項一致", () => {
-    const kinds = ["leave", "ot", "fix_punch", "business_trip", "petty_cash", "wfh"] as const;
+  it("七種 kind 都有中文標籤，且篩選選項一致（2026-11-05 加公務車預約）", () => {
+    const kinds = ["leave", "ot", "fix_punch", "business_trip", "petty_cash", "wfh", "vehicle_booking"] as const;
     for (const k of kinds) expect(KIND_LABEL[k]).toBeTruthy();
     expect(KIND_LABEL.petty_cash).toBe("零用金預支");
     expect(KIND_LABEL.wfh).toBe("在家工作");
+    expect(KIND_LABEL.vehicle_booking).toBe("公務車預約");
     expect(KIND_OPTIONS.map((o) => o.value)).toEqual([...kinds]);
   });
 });
@@ -713,5 +716,69 @@ describe("老闆關（step_kind=fallback）：platform_admin 也是簽核人（2
 
   it("「目前簽核人」加註（平台管理員（老闆））", () => {
     expect(LOOKUP.approverLabel(BOSS_STEP)).toBe("第 2 關 · 老闆（平台管理員（老闆））");
+  });
+});
+
+describe("公務車預約（2026-11-05）：vehicleBookingSummary／contentLines", () => {
+  const TZ_ROW = {
+    kind: "vehicle_booking" as const,
+    start_at: "2026-11-05T01:00:00.000Z",
+    end_at: "2026-11-05T04:00:00.000Z",
+    location: "客戶端（範例）",
+    vehicle_booking: {
+      id: "b1",
+      vehicle_id: "v1",
+      plate_no: "TEST-001",
+      model: "小客車",
+      destination: "測試目的地",
+      passengers: 2,
+      status: "pending" as const,
+    },
+  };
+  const s = fmtHm(TZ_ROW.start_at);
+  const e = fmtHm(TZ_ROW.end_at);
+
+  it("車牌 · 車型 · 目的地（vehicle_booking.destination 優先）· 同日時段", () => {
+    const text = vehicleBookingSummary(TZ_ROW);
+    expect(text.startsWith("TEST-001 · 小客車 · 測試目的地 · ")).toBe(true);
+    expect(text.endsWith(`${s}–${e}`)).toBe(true);
+    expect(vehicleBookingSummary(TZ_ROW, { withPeriod: false })).toBe("TEST-001 · 小客車 · 測試目的地");
+  });
+
+  it("沒有 vehicle_booking 物件（舊 API）退回 location；非 vehicle_booking → 空字串", () => {
+    expect(vehicleBookingSummary({ ...TZ_ROW, vehicle_booking: null }, { withPeriod: false })).toBe("客戶端（範例）");
+    expect(vehicleBookingSummary({ ...TZ_ROW, kind: "leave" })).toBe("");
+  });
+
+  it("vehicleBookingPeriod：跨日用 →；無效 → —", () => {
+    expect(vehicleBookingPeriod("2026-11-05T01:00:00Z", "2026-11-07T01:00:00Z")).toContain(" → ");
+    expect(vehicleBookingPeriod("bad", null)).toBe("—");
+  });
+
+  it("contentLines：期間不套天／時換算；第二行車輛摘要、用途、乘客", () => {
+    const row = {
+      ...TZ_ROW,
+      id: "r1",
+      tenant_id: "t",
+      employee_id: "e",
+      leave_type_id: null,
+      hours: 3,
+      reason: "拜訪客戶",
+      agent_name: null,
+      payout: null,
+      trip_type: null,
+      remark: null,
+      segments: null,
+      status: "pending",
+      current_step: 1,
+      current_approver_emp_id: null,
+      created_at: "2026-11-01T00:00:00Z",
+    } as unknown as LeaveRequest;
+    const lines = contentLines(row);
+    expect(lines[0]).not.toContain("小時");
+    expect(lines[0]).not.toContain("天");
+    expect(lines[1]).toBe("TEST-001 · 小客車 · 測試目的地");
+    expect(lines).toContain("用途：拜訪客戶");
+    expect(lines).toContain("乘客：2 人");
   });
 });

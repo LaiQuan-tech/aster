@@ -51,7 +51,8 @@ export type AdminModuleKey =
   | "knowledge"
   | "dashboard"
   | "employeeMail"
-  | "attendanceSettlement";
+  | "attendanceSettlement"
+  | "vehicles";
 
 /** tenants.features.adminModules：module key → 是否列在導覽；缺席＝隱藏。 */
 export type AdminModulesConfig = Partial<Record<AdminModuleKey, boolean>>;
@@ -514,6 +515,47 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       personal: true,
     },
     {
+      // 2026-11-05 公務車管理：沒有「行政／總務」分區，業主指示放在模組設定（規則參數／進階功能）所在的「設定」分區。
+      // 模組關閉時分頁不列；/admin/vehicles* 頁面本身也由 app/admin/vehicles/layout.tsx 擋下（比其他隱藏模組嚴格）。
+      key: "vehicles",
+      label: "公務車",
+      href: "/admin/vehicles",
+      module: "vehicles",
+      children: [
+        {
+          key: "list",
+          label: "車輛",
+          href: "/admin/vehicles",
+          title: "公務車 · 車輛",
+          desc: "車輛主檔、保養／保險／牌照稅到期與目前里程；改成維修中或停用時會列出受影響的預約",
+          detail: { title: "車輛資料" },
+        },
+        {
+          key: "bookings",
+          label: "預約總覽",
+          href: "/admin/vehicles/bookings",
+          title: "公務車 · 預約總覽",
+          desc: "全公司的用車預約；簽核本身在「假單與簽核」（種類選「公務車預約」），這裡可代為取消並通知本人",
+        },
+        {
+          key: "trips",
+          label: "用車紀錄",
+          href: "/admin/vehicles/trips",
+          title: "公務車 · 用車紀錄",
+          desc: "取車／還車里程、車況照片、費用與報銷狀態；可更正里程（需填理由）",
+          detail: { title: "用車紀錄" },
+        },
+        {
+          key: "settings",
+          label: "設定",
+          href: "/admin/vehicles/settings",
+          title: "公務車 · 設定",
+          desc: "費用對應的報銷類別、到期提醒、單次預約上限與提前取車時間",
+          narrow: true,
+        },
+      ],
+    },
+    {
       key: "advanced",
       label: "進階功能",
       href: "/admin/settings/advanced",
@@ -584,7 +626,7 @@ export interface AdminModuleDef {
   section: AdminSectionKey;
 }
 
-/** 7 個預設隱藏的模組（「設定 → 進階功能」勾回）；每個都對到 ADMIN_ROUTES 裡一條帶 module 的路由。 */
+/** 8 個預設隱藏的模組（「設定 → 進階功能」勾回；2026-11-05 加公務車）；每個都對到 ADMIN_ROUTES 裡一條帶 module 的路由。 */
 export const ADMIN_MODULES: readonly AdminModuleDef[] = [
   {
     key: "recruitment",
@@ -634,6 +676,13 @@ export const ADMIN_MODULES: readonly AdminModuleDef[] = [
     desc: "依薪資年月、資料類型、結算狀態與截止日完成設定、全數拋轉與下載",
     href: "/admin/attendance-settlement",
     section: "attendance",
+  },
+  {
+    key: "vehicles",
+    label: "公務車",
+    desc: "車輛主檔、預約、取還車紀錄、保養與到期提醒；關閉時後台與員工端的公務車頁面一併隱藏",
+    href: "/admin/vehicles",
+    section: "settings",
   },
 ];
 

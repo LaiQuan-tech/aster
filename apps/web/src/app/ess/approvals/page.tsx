@@ -89,6 +89,7 @@ const KIND_LABEL: Record<RequestKind, string> = {
   business_trip: "公出/出差",
   petty_cash: "零用金預支",
   wfh: "在家工作",
+  vehicle_booking: "公務車預約",
 };
 
 const PAYOUT_LABEL: Record<"pay" | "comp_time", string> = {
@@ -591,13 +592,30 @@ export default function ApprovalsPage() {
                     <dt className="text-gray-400">期間</dt>
                     {/* 期間文字由 lib/request-forms.ts 的 approvalPeriodText 組（可單測）：整天型（出差、在家工作）只有日期，公出保留時刻 */}
                     <dd className="whitespace-pre-line">{approvalPeriodText(row)}</dd>
-                    <dt className="text-gray-400">事由</dt>
+                    {row.kind === "vehicle_booking" && (
+                      <>
+                        {/* 公務車預約（2026-11-05）：車牌 · 車型（GET /requests/pending-approvals 列上的 vehicle_booking） */}
+                        <dt className="text-gray-400">車輛</dt>
+                        <dd className="break-words">
+                          {[row.vehicle_booking?.plate_no, row.vehicle_booking?.model].filter(Boolean).join(" · ") || (
+                            <span className="text-gray-400">（未帶出車輛資料）</span>
+                          )}
+                        </dd>
+                        {row.vehicle_booking?.passengers != null && row.vehicle_booking.passengers > 0 && (
+                          <>
+                            <dt className="text-gray-400">乘客</dt>
+                            <dd>{row.vehicle_booking.passengers} 人</dd>
+                          </>
+                        )}
+                      </>
+                    )}
+                    <dt className="text-gray-400">{row.kind === "vehicle_booking" ? "用途" : "事由"}</dt>
                     <dd className="whitespace-pre-wrap break-words">
                       {reason ? reason : <span className="text-gray-400">（未填）</span>}
                     </dd>
                     {row.location && (
                       <>
-                        <dt className="text-gray-400">地點</dt>
+                        <dt className="text-gray-400">{row.kind === "vehicle_booking" ? "目的地" : "地點"}</dt>
                         <dd className="break-words">{row.location}</dd>
                       </>
                     )}

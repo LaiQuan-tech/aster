@@ -141,7 +141,7 @@ export default function EssMorePage() {
   const router = useRouter();
   const [loggingOut, setLoggingOut] = useState(false);
 
-  const groups = moreGroups(state.essTabs);
+  const groups = moreGroups(state.essTabs, state.features);
   const links = internalLinksOf(state.features);
   const me = state.me;
 

@@ -188,6 +188,7 @@ describe("resolveAdminPath：最長前綴", () => {
       "site",
       "optionLists",
       "aiAccess",
+      "vehicles",
       "advanced",
     ]);
     expect(ADMIN_SECTIONS.find((s) => s.key === "settings")?.href).toBe("/admin/leave-types");
@@ -482,7 +483,7 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
     expect(subTabsFor("home", undefined)).toEqual([]);
   });
 
-  it("narrow 只有 shifts／essTabs／site／optionLists／aiAccess／advanced 六頁", () => {
+  it("narrow 只有 shifts／essTabs／site／optionLists／aiAccess／公務車設定／advanced 七頁", () => {
     const narrowRoutes = ADMIN_ROUTES.filter((r) => r.narrow).map((r) => r.prefix);
     expect(narrowRoutes).toEqual([
       "/admin/shifts",
@@ -490,6 +491,7 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
       "/admin/company-space",
       "/admin/option-lists",
       "/admin/settings/ai-access",
+      "/admin/vehicles/settings",
       "/admin/settings/advanced",
     ]);
     expect(resolveAdminPath("/admin/shifts").narrow).toBe(true);
@@ -693,8 +695,8 @@ describe("isAdminPathAllowed：直開網址的角色守門（2026-09-23 驗收�
 });
 
 describe("ADMIN_MODULES／isModuleEnabled／adminModulesOf", () => {
-  it("7 個隱藏模組，每個對到一條帶 module 的路由（href／section 一致）", () => {
-    expect(ADMIN_MODULES).toHaveLength(7);
+  it("8 個隱藏模組，每個對到一條帶 module 的路由（href／section 一致）", () => {
+    expect(ADMIN_MODULES).toHaveLength(8);
     expect(ADMIN_MODULES.map((m) => m.key)).toEqual([
       "recruitment",
       "kpi",
@@ -703,6 +705,7 @@ describe("ADMIN_MODULES／isModuleEnabled／adminModulesOf", () => {
       "dashboard",
       "employeeMail",
       "attendanceSettlement",
+      "vehicles",
     ]);
     for (const mod of ADMIN_MODULES) {
       const routes = ADMIN_ROUTES.filter((r) => r.module === mod.key && r.prefix === mod.href);
@@ -711,9 +714,9 @@ describe("ADMIN_MODULES／isModuleEnabled／adminModulesOf", () => {
       expect(mod.label.length).toBeGreaterThan(0);
       expect(mod.desc.length).toBeGreaterThan(0);
     }
-    // 帶 module 的路由只會是這 7 個模組（knowledge 有 docs／ask 兩條）
+    // 帶 module 的路由只會是這 8 個模組（knowledge 有 docs／ask 兩條；vehicles 有車輛／預約／紀錄／設定四條）
     const moduleRoutes = ADMIN_ROUTES.filter((r) => r.module);
-    expect(moduleRoutes).toHaveLength(8);
+    expect(moduleRoutes).toHaveLength(12);
     expect(new Set(moduleRoutes.map((r) => r.module))).toEqual(new Set(ADMIN_MODULES.map((m) => m.key)));
   });
 
@@ -759,7 +762,7 @@ describe("ADMIN_ROUTES", () => {
     }
   });
 
-  it("10 種 detail：projects／disbursements list／客戶／廠商／假別餘額員工內頁／sheets／employees／announcements／專案申請單／獎金批次", () => {
+  it("12 種 detail：projects／disbursements list／客戶／廠商／假別餘額員工內頁／sheets／employees／announcements／公務車車輛／公務車用車紀錄／專案申請單／獎金批次", () => {
     const details = ADMIN_ROUTES.filter((r) => r.detail).map((r) => `${r.prefix}${r.pattern ? "#pattern" : ""}`);
     expect(details).toEqual([
       "/admin/projects",
@@ -770,6 +773,8 @@ describe("ADMIN_ROUTES", () => {
       "/admin/attendance-sheets",
       "/admin/employees",
       "/admin/announcements",
+      "/admin/vehicles",
+      "/admin/vehicles/trips",
       "/admin/projects#pattern",
       "/admin/bonus-runs#pattern",
     ]);
@@ -953,5 +958,33 @@ describe("未核准加班報表（2026-11 加班事前核准制）：系統分�
     expect(isAdminPathAllowed({ pathname: "/admin/reports/unapproved-overtime", roleNav: custom })).toBe(false);
     expect(isHrOnlyAdminPath("/admin/reports/unapproved-overtime")).toBe(true);
     expect(configurableTabsForRole("system").map((t) => t.key)).not.toContain("unapprovedOvertime");
+  });
+});
+
+describe("公務車模組（2026-11-05）", () => {
+  it("預設隱藏；勾選後出現在設定分區（進階功能之前）", () => {
+    expect(tabsForSection("settings", null).map((t) => t.key)).not.toContain("vehicles");
+    expect(tabsForSection("settings", { vehicles: false }).map((t) => t.key)).not.toContain("vehicles");
+    const keys = tabsForSection("settings", { vehicles: true }).map((t) => t.key);
+    expect(keys).toContain("vehicles");
+    expect(keys.indexOf("vehicles")).toBe(keys.indexOf("advanced") - 1);
+    expect(ADMIN_MODULES.find((m) => m.key === "vehicles")).toMatchObject({ href: "/admin/vehicles", section: "settings" });
+    expect(adminModulesOf({ adminModules: { vehicles: true } })).toEqual({ vehicles: true });
+  });
+
+  it("路由：車輛列表／預約總覽／用車紀錄／設定；車輛與用車紀錄的子路徑是 detail", () => {
+    expect(resolveAdminPath("/admin/vehicles")).toMatchObject({ section: "settings", tab: "vehicles", sub: "list", isDetail: false, module: "vehicles" });
+    expect(resolveAdminPath("/admin/vehicles/bookings")).toMatchObject({ tab: "vehicles", sub: "bookings", isDetail: false });
+    expect(resolveAdminPath("/admin/vehicles/trips")).toMatchObject({ tab: "vehicles", sub: "trips", isDetail: false });
+    expect(resolveAdminPath("/admin/vehicles/settings")).toMatchObject({ tab: "vehicles", sub: "settings", narrow: true, isDetail: false });
+    expect(resolveAdminPath("/admin/vehicles/trips/xxx")).toMatchObject({ sub: "trips", isDetail: true, title: "用車紀錄", parentPath: "/admin/vehicles/trips" });
+    expect(resolveAdminPath("/admin/vehicles/abc")).toMatchObject({ sub: "list", isDetail: true, title: "車輛資料", parentPath: "/admin/vehicles" });
+    expect(subTabsFor("settings", "vehicles").map((t) => t.key)).toEqual(["list", "bookings", "trips", "settings"]);
+  });
+
+  it("會計看不到（預設範圍的設定區只有選項清單），直開也不放行", () => {
+    expect(tabsForSection("settings", { vehicles: true }, { roleNav: ACCOUNTANT_DEFAULT_NAV }).map((t) => t.key)).not.toContain("vehicles");
+    expect(isAdminPathAllowed({ pathname: "/admin/vehicles", roleNav: ACCOUNTANT_DEFAULT_NAV, modules: { vehicles: true } })).toBe(false);
+    expect(isAdminPathAllowed({ pathname: "/admin/vehicles/trips/x", roleNav: ACCOUNTANT_DEFAULT_NAV, modules: { vehicles: true } })).toBe(false);
   });
 });

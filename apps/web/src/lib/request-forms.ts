@@ -41,6 +41,7 @@ export const KIND_LABEL: Record<RequestKind, string> = {
   business_trip: "公出／出差",
   petty_cash: "零用金預支",
   wfh: "在家工作",
+  vehicle_booking: "公務車預約",
 };
 
 /** 種類切換列的短標（手機 390px 五顆要放得下）。 */
@@ -51,6 +52,7 @@ export const KIND_SHORT: Record<RequestKind, string> = {
   business_trip: "公出",
   petty_cash: "預支",
   wfh: "在家",
+  vehicle_booking: "用車",
 };
 
 /**

@@ -49,6 +49,8 @@ const KINDS: { kind: ApprovalFlowKind; label: string; hint?: string }[] = [
     hint: "出差範圍選「跨縣市」或「海外」時走這條；不設定＝主管逐關簽完後由老闆最後簽核。",
   },
   { kind: "petty_cash", label: "零用金預支" },
+  // 公務車預約（2026-11-05）：只有開啟公務車模組時才有人會送這種單；不設定＝直屬主管單關。
+  { kind: "vehicle_booking", label: "公務車預約", hint: "預設：直屬主管單關（找不到主管 → 老闆 → HR）。" },
   {
     kind: "disbursement",
     label: "放款單",

@@ -28,6 +28,7 @@ import {
   ALWAYS_VISIBLE_TAB_KEYS,
   bottomTabs,
   isBottomRootPath,
+  isEssTabModuleEnabled,
   parentPathFor,
   routeForPath,
   type BottomTab,
@@ -113,11 +114,12 @@ export function EssShell({ children }: { children: ReactNode }) {
   const activeKey: BottomTabKey = tabs.some((t) => t.key === routeKey) ? routeKey : "more";
 
   // gate：optimistic——只有 /me 已回（essTabs 是陣列）且明確不含這個 key 才擋。
+  // 模組開關（2026-11-05 公務車）：features 已回且該分頁的模組沒開 → 一樣擋（features 未回前不擋，避免閃一下）。
   const gated =
     route.key !== null &&
     !ALWAYS_VISIBLE_TAB_KEYS.has(route.key) &&
-    state.essTabs !== null &&
-    !state.essTabs.includes(route.key);
+    ((state.essTabs !== null && !state.essTabs.includes(route.key)) ||
+      (state.loaded && !isEssTabModuleEnabled(route.key, state.features)));
 
   const appName = state.branding?.appName ?? DEFAULT_APP_NAME;
   const userName = state.me?.name?.trim() ?? "";

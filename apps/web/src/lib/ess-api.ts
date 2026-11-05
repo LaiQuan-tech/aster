@@ -5,6 +5,7 @@
 import { apiFetch } from "./api-client";
 import { prepareUploadFile } from "./upload-prep";
 import type { DinnerPrompt } from "./dinner-prompt";
+import type { RequestVehicleBooking } from "./admin-api";
 
 export interface Branding {
   primaryColor?: string;
@@ -181,7 +182,9 @@ export type RequestKind =
   /** 零用金預支（模組三第 3 條），走與出差預支相同的簽核管線。 */
   | "petty_cash"
   /** 在家工作（M2，2026-09-23）：只用 startAt／endAt／hours／reason；核准日無打卡以班表淨工時計。 */
-  | "wfh";
+  | "wfh"
+  /** 公務車預約（2026-11-05）：只在 /ess/vehicles 建立（lib/vehicles-api.ts），請假申請頁的種類列不出現。 */
+  | "vehicle_booking";
 
 /**
  * 加班單超過月上限的標記明細（M1；services/overtime-cap.ts beyondCapCheck）。
@@ -234,6 +237,8 @@ export interface LeaveRequest {
   estimated_cost?: string | number | null;
   advance_requested?: string | number | null;
   agent_name?: string | null;
+  /** 公務車預約摘要（kind vehicle_booking 才有；snake_case 沿用 GET /requests 慣例）。 */
+  vehicle_booking?: RequestVehicleBooking | null;
   /** GET /requests?scope=mine 的 enrich 欄位（2026-09 新版 API 才有）。 */
   employee_name?: string | null;
   leave_type_name?: string | null;

@@ -209,3 +209,17 @@ describe("summarizeSegments", () => {
     );
   });
 });
+
+describe("notificationLink — 公務車（2026-11-05）", () => {
+  it("取消通知 → 員工端公務車頁；車況異常 → 後台用車紀錄；到期提醒 → 車輛頁（逾時未還 → 用車紀錄）", () => {
+    expect(notificationLink(notif("vehicle_booking_cancelled", { vehicleId: "v1", bookingId: "b1" }))).toBe("/ess/vehicles");
+    expect(notificationLink(notif("vehicle_condition", { vehicleId: "v1", tripId: "t1" }))).toBe("/admin/vehicles/trips/t1");
+    expect(notificationLink(notif("vehicle_condition", { vehicleId: "v1" }))).toBe("/admin/vehicles/trips");
+    expect(notificationLink(notif("vehicle_reminder", { vehicleId: "v1", kind: "insurance" }))).toBe("/admin/vehicles/v1");
+    expect(notificationLink(notif("vehicle_reminder", { vehicleId: "v1", kind: "overdue_return", tripId: "t9" }))).toBe("/admin/vehicles/trips/t9");
+    expect(notificationLink(notif("vehicle_reminder", {}))).toBe("/admin/vehicles");
+    expect(TYPE_LABEL.vehicle_reminder).toBe("公務車提醒");
+    expect(TYPE_LABEL.vehicle_condition).toBe("車況異常");
+    expect(TYPE_LABEL.vehicle_booking_cancelled).toBe("用車取消");
+  });
+});

@@ -15,7 +15,7 @@
  */
 import type { ApprovalFlow, Department, Employee, LeaveRequest, RequestKind, RequestStatus } from "./admin-api";
 import type { LeaveSegment } from "./ess-api";
-import { localDateKey, fmtHm, fmtMoney } from "./ess-format";
+import { localDateKey, fmtHm, fmtMoney, fmtDateTime as fmtMdHm } from "./ess-format";
 import { summarizeSegment } from "./ess-notifications";
 import { formatLeaveDuration, formatRequestHours } from "./leave-duration";
 import { hasWorkdayGap } from "./leave-gaps";
@@ -74,6 +74,7 @@ export const KIND_LABEL: Record<RequestKind, string> = {
   business_trip: "公出/出差",
   petty_cash: "零用金預支",
   wfh: "在家工作",
+  vehicle_booking: "公務車預約",
 };
 
 export const KIND_OPTIONS: ReadonlyArray<{ value: RequestKind; label: string }> = [
@@ -83,6 +84,7 @@ export const KIND_OPTIONS: ReadonlyArray<{ value: RequestKind; label: string }> 
   { value: "business_trip", label: "公出/出差" },
   { value: "petty_cash", label: "零用金預支" },
   { value: "wfh", label: "在家工作" },
+  { value: "vehicle_booking", label: "公務車預約" },
 ];
 
 /** 「工號 · 姓名」；沒有工號只顯示姓名。 */
@@ -563,6 +565,17 @@ export function contentLines(row: LeaveRequest): string[] {
   const start = fmtDateTime(row.start_at) ?? "—";
   const end = fmtDateTime(row.end_at);
   const period = end && end !== start ? `${start} → ${end}` : start;
+  // 公務車預約（2026-11-05）：期間不套天／時換算；第二行「車牌 · 車型 · 目的地」，再來用途與乘客數。
+  if (row.kind === "vehicle_booking") {
+    const lines = [period];
+    const vehicle = vehicleBookingSummary(row, { withPeriod: false });
+    if (vehicle) lines.push(vehicle);
+    if (row.reason) lines.push(`用途：${row.reason}`);
+    const passengers = row.vehicle_booking?.passengers;
+    if (passengers != null && passengers > 0) lines.push(`乘客：${passengers} 人`);
+    if (row.remark) lines.push(row.remark);
+    return lines;
+  }
   const lines = [row.hours != null ? `${period}（${formatRequestHours(row.kind, row.hours)}）` : period];
   if (row.kind === "leave") {
     const segs = leaveSegmentsOf(row.segments);
@@ -578,4 +591,37 @@ export function contentLines(row: LeaveRequest): string[] {
   lines.push(...requestAmountLines(row));
   if (row.payout) lines.push(`加班給付：${row.payout === "pay" ? "加班費" : "補休"}`);
   return lines;
+}
+
+/* ------------------------------------------------------ 公務車預約 --- */
+
+/** 「MM/DD HH:mm–HH:mm」（同日）或「MM/DD HH:mm → MM/DD HH:mm」（跨日）；起無效 → "—"。 */
+export function vehicleBookingPeriod(startAt: string, endAt: string | null | undefined, tz?: string): string {
+  const start = fmtMdHm(startAt, tz);
+  if (start === "—") return "—";
+  if (!endAt) return start;
+  const end = fmtMdHm(endAt, tz);
+  if (end === "—" || end === start) return start;
+  return end.slice(0, 5) === start.slice(0, 5) ? `${start}–${end.slice(6)}` : `${start} → ${end}`;
+}
+
+/**
+ * 公務車預約在簽核卡／表格的摘要：「ABC-1234 · 小客車 · 目的地 · 11/05 09:00–12:00」。
+ * 車牌／車型來自列上的 `vehicle_booking`（GET /requests enrich，snake_case）；目的地以 vehicle_booking.destination
+ * 為準，沒有再用申請單的 location。不是 vehicle_booking、或舊 API 沒帶 vehicle_booking 物件 → 只剩目的地＋時段
+ * （連目的地都沒有時仍回時段）。`withPeriod: false` 不附時段（contentLines 第一行已有期間）。
+ */
+export function vehicleBookingSummary(
+  row: Pick<LeaveRequest, "kind" | "start_at" | "end_at" | "location"> & { vehicle_booking?: LeaveRequest["vehicle_booking"] },
+  opts: { withPeriod?: boolean; tz?: string } = {},
+): string {
+  if (row.kind !== "vehicle_booking") return "";
+  const vb = row.vehicle_booking ?? null;
+  const parts: string[] = [];
+  if (vb?.plate_no) parts.push(vb.plate_no);
+  if (vb?.model) parts.push(vb.model);
+  const destination = (vb?.destination ?? row.location ?? "").trim();
+  if (destination) parts.push(destination);
+  if (opts.withPeriod !== false) parts.push(vehicleBookingPeriod(row.start_at, row.end_at, opts.tz));
+  return parts.join(" · ");
 }

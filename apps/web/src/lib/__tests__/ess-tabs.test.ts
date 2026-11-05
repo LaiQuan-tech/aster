@@ -10,9 +10,11 @@ import {
   MORE_GROUPS,
   bottomTabs,
   isBottomRootPath,
+  isEssTabModuleEnabled,
   moreGroups,
   parentPathFor,
   routeForPath,
+  tabsWithModules,
   visibleTabs,
 } from "../ess-tabs";
 
@@ -83,7 +85,7 @@ describe("visibleTabs（ESS 分頁限縮純函式）", () => {
 });
 
 describe("ESS_TABS（key 順序與新分頁）", () => {
-  it("舊 key 順序不變、announcements 追加在最後、請假／打卡短標", () => {
+  it("舊 key 順序不變、announcements 之後追加 vehicles（2026-11-05）、請假／打卡短標", () => {
     const keys = ESS_TABS.map((t) => t.key);
     expect(keys.slice(0, 15)).toEqual([
       "home",
@@ -102,7 +104,7 @@ describe("ESS_TABS（key 順序與新分頁）", () => {
       "notifications",
       "mydata",
     ]);
-    expect(keys[keys.length - 1]).toBe("announcements");
+    expect(keys.slice(15)).toEqual(["announcements", "vehicles"]);
     expect(ESS_TABS.find((t) => t.key === "announcements")?.href).toBe("/ess/announcements");
     expect(ESS_TABS.find((t) => t.key === "requests")).toMatchObject({ label: "請假申請", short: "請假" });
     expect(ESS_TABS.find((t) => t.key === "home")?.short).toBe("打卡");
@@ -273,5 +275,44 @@ describe("parentPathFor（返回鍵目標）與 isBottomRootPath", () => {
     expect(isBottomRootPath("/ess/requests/")).toBe(true);
     expect(isBottomRootPath("/ess/punches")).toBe(false);
     expect(isBottomRootPath("/ess/projects/abc")).toBe(false);
+  });
+});
+
+describe("公務車分頁與模組開關（2026-11-05）", () => {
+  const ON = { adminModules: { vehicles: true } };
+  it("isEssTabModuleEnabled：vehicles 要 adminModules.vehicles === true；其他分頁永遠 true", () => {
+    expect(isEssTabModuleEnabled("vehicles", ON)).toBe(true);
+    expect(isEssTabModuleEnabled("vehicles", { adminModules: { vehicles: false } })).toBe(false);
+    expect(isEssTabModuleEnabled("vehicles", { adminModules: { vehicles: "true" } })).toBe(false);
+    expect(isEssTabModuleEnabled("vehicles", {})).toBe(false);
+    expect(isEssTabModuleEnabled("vehicles", null)).toBe(false);
+    expect(isEssTabModuleEnabled("expenses", null)).toBe(true);
+    expect(isEssTabModuleEnabled("home", {})).toBe(true);
+  });
+
+  it("tabsWithModules：模組未開時剔除 vehicles，順序不變", () => {
+    expect(tabsWithModules(ESS_TABS, {}).map((t) => t.key)).not.toContain("vehicles");
+    expect(tabsWithModules(ESS_TABS, ON).map((t) => t.key)).toEqual(ESS_TABS.map((t) => t.key));
+  });
+
+  it("moreGroups：帶 features 時模組未開「公司」組不列公務車；開了才列；不帶 features 維持舊行為", () => {
+    const company = (groups: ReturnType<typeof moreGroups>) => groups.find((g) => g.title === "公司")?.items.map((i) => i.key);
+    expect(company(moreGroups(null, {}))).not.toContain("vehicles");
+    expect(company(moreGroups(null, null))).not.toContain("vehicles");
+    expect(company(moreGroups(null, ON))).toEqual(["announcements", "company", "jobs", "projects", "vehicles"]);
+    expect(company(moreGroups(null))).toContain("vehicles");
+  });
+
+  it("essTabs 限縮仍生效：模組開了但身分類別沒勾 vehicles → 不列", () => {
+    const company = moreGroups(["home", "company"], ON).find((g) => g.title === "公司")?.items.map((i) => i.key);
+    expect(company).toEqual(["announcements", "company"]);
+    expect(moreGroups(INTERN_DEFAULT_ESS_TABS, ON).flatMap((g) => g.items.map((i) => i.key))).not.toContain("vehicles");
+  });
+
+  it("路由：/ess/vehicles 與 /ess/vehicles/trips/x 都是 vehicles 分頁；子頁返回 /ess/vehicles", () => {
+    expect(routeForPath("/ess/vehicles")).toMatchObject({ key: "vehicles", title: "公務車" });
+    expect(routeForPath("/ess/vehicles/trips/abc").key).toBe("vehicles");
+    expect(parentPathFor("/ess/vehicles/trips/abc")).toBe("/ess/vehicles");
+    expect(bottomTabs({ essTabs: null, isManager: false, pendingApprovals: 0 }).map((t) => t.key)).not.toContain("vehicles");
   });
 });

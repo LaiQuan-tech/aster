@@ -582,7 +582,21 @@ export function deleteShift(id: string) {
 
 export type RequestStatus = "pending" | "approved" | "rejected" | "cancelled";
 /** `wfh`＝在家工作（M2，2026-09-23）：只用 start_at／end_at／hours／reason。 */
-export type RequestKind = "leave" | "ot" | "fix_punch" | "business_trip" | "petty_cash" | "wfh";
+export type RequestKind = "leave" | "ot" | "fix_punch" | "business_trip" | "petty_cash" | "wfh" | "vehicle_booking";
+
+/**
+ * 公務車預約（kind `vehicle_booking`，2026-11-05）在 GET /requests、/requests/pending-approvals 列上多帶的摘要
+ * （snake_case，沿用該端點慣例）；其他 kind 不帶此鍵或為 null。
+ */
+export interface RequestVehicleBooking {
+  id: string;
+  vehicle_id: string;
+  plate_no: string;
+  model: string;
+  destination: string | null;
+  passengers: number | null;
+  status: "pending" | "approved" | "rejected" | "cancelled" | "completed";
+}
 
 /** 加班單超過月上限的標記明細（services/overtime-cap.ts beyondCapCheck）。 */
 export interface BeyondCapDetail {
@@ -629,6 +643,8 @@ export interface LeaveRequest {
   /* ── 月加班上限（M1，2026-09-23）：kind=ot 送單時累計超過上限即標記；舊 API 沒回時缺席 ── */
   beyond_cap?: boolean;
   beyond_cap_detail?: BeyondCapDetail | null;
+  /** 公務車預約摘要（kind vehicle_booking 才有；舊 API 缺席）。 */
+  vehicle_booking?: RequestVehicleBooking | null;
 }
 
 export interface RequestQuery {
