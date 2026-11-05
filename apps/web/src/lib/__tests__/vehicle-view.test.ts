@@ -322,6 +322,9 @@ describe("veh-api 實作新增的錯誤碼與附帶欄位", () => {
     expect(vehicleErrorMessage(apiErr(400, "invalid_range"))).toBe("結束時間要晚於開始時間");
     expect(vehicleErrorMessage(apiErr(400, "distance_too_large", { maxKm: 2000 }))).toBe("單趟里程超過上限（2,000 km），請確認里程是否輸入錯誤");
     expect(vehicleErrorMessage(apiErr(400, "odometer_jump_too_large", { maxKm: 5000 }))).toContain("5,000 km");
+    expect(vehicleErrorMessage(apiErr(400, "odometer_jump_too_large", { maxKm: 5000, currentOdometer: 12000 }))).toContain("（12,000 km）多超過 5,000 km");
+    expect(vehicleErrorMessage(apiErr(400, "amount_too_large", { maxAmount: 100000 }))).toBe("單筆費用不可超過 NT$ 100,000，請確認是否輸入錯誤");
+    expect(vehicleErrorMessage(apiErr(400, "unsupported_file_type"))).toContain("只接受 JPG、PNG、WebP、HEIC");
     expect(vehicleErrorMessage(apiErr(400, "booking_too_far", { maxDaysAhead: 90 }))).toBe("最多只能預約 90 天內的時段");
     expect(vehicleErrorMessage(apiErr(409, "trip_not_returned"))).toContain("尚未還車");
   });

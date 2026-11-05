@@ -369,7 +369,7 @@ export const VEHICLE_ERROR_TEXT: Record<string, string> = {
   condition_note_required: "車況有問題時請說明狀況",
   already_returned: "這趟已經還車了，請重新整理",
   cost_already_claimed: "部分費用已轉報銷，不能修改或刪除",
-  unsupported_file_type: "只收 JPG、PNG、HEIC、WebP 照片",
+  unsupported_file_type: "只接受 JPG、PNG、WebP、HEIC 照片（檔案內容與格式不符也會被拒），請重新拍照或改傳其他照片",
   file_too_large: "照片超過 3 MB，請改傳較小的照片",
   too_many_photos: "每趟最多 12 張照片",
   trip_not_returned: "這趟尚未還車，還車後才能轉報銷或更正還車資料",
@@ -475,7 +475,13 @@ export function vehicleErrorMessage(err: unknown, fallback = "操作失敗，請
     return `單趟里程超過上限（${body.maxKm.toLocaleString("en-US")} km），請確認里程是否輸入錯誤`;
   }
   if (code === "odometer_jump_too_large" && typeof body.maxKm === "number") {
+    if (typeof body.currentOdometer === "number") {
+      return `取車里程比車輛目前里程（${body.currentOdometer.toLocaleString("en-US")} km）多超過 ${body.maxKm.toLocaleString("en-US")} km，請確認輸入是否正確，或請管理員調整車輛里程`;
+    }
     return `取車里程比車輛目前里程多超過 ${body.maxKm.toLocaleString("en-US")} km，請確認輸入是否正確，或請管理員調整車輛里程`;
+  }
+  if (code === "amount_too_large" && typeof body.maxAmount === "number") {
+    return `單筆費用不可超過 NT$ ${body.maxAmount.toLocaleString("en-US")}，請確認是否輸入錯誤`;
   }
   if (code === "booking_too_far" && typeof body.maxDaysAhead === "number") return `最多只能預約 ${body.maxDaysAhead} 天內的時段`;
   if (code === "too_many_photos" && typeof body.max === "number") return `每趟最多 ${body.max} 張照片`;
