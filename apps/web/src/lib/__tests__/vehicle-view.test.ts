@@ -250,6 +250,7 @@ describe("vehicleErrorMessage：§3.2 全部錯誤碼都有中文", () => {
     "odometer_jump_too_large",
     "amount_too_large",
     "invalid_photo",
+    "odometer_out_of_sequence",
   ];
   it("每個碼都有對照，且訊息含中文、不是碼本身", () => {
     for (const code of ALL_CODES) {
@@ -323,6 +324,11 @@ describe("veh-api 實作新增的錯誤碼與附帶欄位", () => {
     expect(vehicleErrorMessage(apiErr(400, "distance_too_large", { maxKm: 2000 }))).toBe("單趟里程超過上限（2,000 km），請確認里程是否輸入錯誤");
     expect(vehicleErrorMessage(apiErr(400, "odometer_jump_too_large", { maxKm: 5000 }))).toContain("5,000 km");
     expect(vehicleErrorMessage(apiErr(400, "odometer_jump_too_large", { maxKm: 5000, currentOdometer: 12000 }))).toContain("（12,000 km）多超過 5,000 km");
+    expect(vehicleErrorMessage(apiErr(400, "odometer_out_of_sequence", { prevEnd: 1200, nextStart: 1500 }))).toBe(
+      "更正後的里程與前後趟順序衝突（前一趟還車里程 1,200 km、下一趟出車里程 1,500 km），請確認",
+    );
+    expect(vehicleErrorMessage(apiErr(400, "odometer_out_of_sequence", { prevEnd: null, nextStart: 1500 }))).toContain("下一趟出車里程 1,500 km");
+    expect(vehicleErrorMessage(apiErr(400, "odometer_out_of_sequence", { prevEnd: null, nextStart: null }))).toBe(VEHICLE_ERROR_TEXT.odometer_out_of_sequence);
     expect(vehicleErrorMessage(apiErr(400, "amount_too_large", { maxAmount: 100000 }))).toBe("單筆費用不可超過 NT$ 100,000，請確認是否輸入錯誤");
     expect(vehicleErrorMessage(apiErr(400, "unsupported_file_type"))).toContain("只接受 JPG、PNG、WebP、HEIC");
     expect(vehicleErrorMessage(apiErr(400, "booking_too_far", { maxDaysAhead: 90 }))).toBe("最多只能預約 90 天內的時段");

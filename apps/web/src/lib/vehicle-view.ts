@@ -378,6 +378,7 @@ export const VEHICLE_ERROR_TEXT: Record<string, string> = {
   booking_too_far: "預約開始時間超過可預約的天數",
   odometer_jump_too_large: "取車里程比車輛目前里程多太多，請確認輸入是否正確，或請管理員調整車輛里程",
   amount_too_large: "單筆費用金額過高，請確認是否輸入錯誤",
+  odometer_out_of_sequence: "更正後的里程與前後趟的里程順序衝突，請確認",
   invalid_photo: "照片檔案無法辨識（格式與內容不符），請改傳 JPG、PNG 或重新拍照",
   invalid_base64: "照片檔案讀取失敗，請重新選擇照片",
   already_claimed: "這筆費用已經轉報銷過了",
@@ -479,6 +480,14 @@ export function vehicleErrorMessage(err: unknown, fallback = "操作失敗，請
       return `取車里程比車輛目前里程（${body.currentOdometer.toLocaleString("en-US")} km）多超過 ${body.maxKm.toLocaleString("en-US")} km，請確認輸入是否正確，或請管理員調整車輛里程`;
     }
     return `取車里程比車輛目前里程多超過 ${body.maxKm.toLocaleString("en-US")} km，請確認輸入是否正確，或請管理員調整車輛里程`;
+  }
+  if (code === "odometer_out_of_sequence") {
+    const fmt = (v: unknown) => (typeof v === "number" ? `${v.toLocaleString("en-US")} km` : null);
+    const parts = [
+      fmt(body.prevEnd) ? `前一趟還車里程 ${fmt(body.prevEnd)}` : null,
+      fmt(body.nextStart) ? `下一趟出車里程 ${fmt(body.nextStart)}` : null,
+    ].filter(Boolean);
+    if (parts.length > 0) return `更正後的里程與前後趟順序衝突（${parts.join("、")}），請確認`;
   }
   if (code === "amount_too_large" && typeof body.maxAmount === "number") {
     return `單筆費用不可超過 NT$ ${body.maxAmount.toLocaleString("en-US")}，請確認是否輸入錯誤`;

@@ -231,6 +231,8 @@ export interface ReturnVehicleBody {
   conditionNote?: string;
   note?: string;
   costs?: TripCostInput[];
+  /** HR 代員工還車且有填費用時必填（缺 → 400 reason_required）。 */
+  reason?: string;
 }
 
 export interface TripPatch {

@@ -58,7 +58,7 @@ export default function EssVehicleTripPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // 還車表單
-  const [ret, setRet] = useState({ endOdometer: "", purpose: "", destination: "", conditionNote: "", note: "" });
+  const [ret, setRet] = useState({ endOdometer: "", purpose: "", destination: "", conditionNote: "", note: "", reason: "" });
   const [condition, setCondition] = useState<ConditionStatus>("ok");
   const [retCosts, setRetCosts] = useState<CostDraft[]>([]);
   const [retPhotos, setRetPhotos] = useState<File[]>([]);
@@ -134,6 +134,9 @@ export default function EssVehicleTripPage() {
     if (!v.ok) return setRetError({ field: v.field, message: v.message });
     const costs = draftsToCosts(retCosts);
     if (!costs.ok) return setRetError({ message: costs.message });
+    // HR 代員工還車且有填費用 → 理由必填（API 缺 reason 回 400 reason_required）。
+    const proxyWithCosts = !isOwner && costs.costs.length > 0;
+    if (proxyWithCosts && !ret.reason.trim()) return setRetError({ message: "代員工還車並填寫費用時，請填寫理由" });
     setRetBusy(true);
     try {
       const res = await returnVehicle(trip.id, {
@@ -144,6 +147,7 @@ export default function EssVehicleTripPage() {
         ...(condition === "issue" ? { conditionNote: ret.conditionNote.trim() } : {}),
         ...(ret.note.trim() ? { note: ret.note.trim() } : {}),
         ...(costs.costs.length > 0 ? { costs: costs.costs.map(({ id: _id, ...rest }) => rest) } : {}),
+        ...(proxyWithCosts ? { reason: ret.reason.trim() } : {}),
       });
       const failed = await uploadAll(trip.id, "return", retPhotos);
       setRetPhotos([]);
@@ -367,6 +371,11 @@ export default function EssVehicleTripPage() {
             <Field label="備註" htmlFor="rt-note">
               <Input id="rt-note" value={ret.note} maxLength={500} onChange={(e) => setRet({ ...ret, note: e.target.value })} />
             </Field>
+            {!isOwner && retCosts.some((d) => d.amount.trim()) && (
+              <Field label="代還車填費用的理由" required htmlFor="rt-reason" hint={`你正在代 ${trip.employeeName} 還車；理由會記在稽核紀錄`}>
+                <Input id="rt-reason" value={ret.reason} maxLength={250} onChange={(e) => setRet({ ...ret, reason: e.target.value })} />
+              </Field>
+            )}
             {retError && !retError.field && <InlineError>{retError.message}</InlineError>}
             <Button type="submit" block size="lg" loading={retBusy}>
               確認還車
