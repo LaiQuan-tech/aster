@@ -860,6 +860,8 @@ const returnSchema = z.object({
   conditionNote: z.string().trim().max(500).optional(),
   note: z.string().trim().max(500).optional(),
   costs: z.array(costLineSchema).max(MAX_COST_LINES).optional(),
+  /** HR 代還車且代填費用時必填（比照 PUT costs）。 */
+  reason: z.string().trim().min(1).max(250).optional(),
 })
 
 async function loadTrip(tenantId: string, id: string): Promise<Row | null> {
@@ -900,10 +902,14 @@ vehiclesRouter.post(
       res.status(400).json({ error: "condition_note_required" })
       return
     }
+    const onBehalf = trip.employee_id !== self.id
+    if (onBehalf && (parsed.data.costs?.length ?? 0) > 0 && !parsed.data.reason) {
+      res.status(400).json({ error: "reason_required" })
+      return
+    }
     const now = new Date()
     const tz = await getTenantTimezone(tenantId)
     const today = todayKey(tz, now)
-    const onBehalf = trip.employee_id !== self.id
     const noteText = parsed.data.note ?? null
     const { data: updated, error } = await supabaseAdmin
       .from("vehicle_trips")
@@ -969,7 +975,7 @@ vehiclesRouter.post(
       recordId: id,
       action: "UPDATE",
       actorEmpId: self.id,
-      context: onBehalf ? "HR 代還公務車" : "公務車還車",
+      context: onBehalf ? `HR 代還公務車${parsed.data.reason ? `：${parsed.data.reason}` : ""}` : "公務車還車",
       oldRow: { returned_at: null },
       newRow: { end_odometer: parsed.data.endOdometer, condition_status: parsed.data.conditionStatus, costs: costs.length },
     })
@@ -1086,6 +1092,35 @@ async function recomputeVehicleOdometer(tenantId: string, vehicleId: string, act
   }
 }
 
+/** 同車前一趟／下一趟（依取車時間）。 */
+async function neighbourTrips(tenantId: string, trip: Row): Promise<{ prev: Row | null; next: Row | null }> {
+  const [{ data: prev, error: pErr }, { data: next, error: nErr }] = await Promise.all([
+    supabaseAdmin
+      .from("vehicle_trips")
+      .select("id, checked_out_at, start_odometer, end_odometer")
+      .eq("tenant_id", tenantId)
+      .eq("vehicle_id", trip.vehicle_id)
+      .neq("id", trip.id)
+      .lt("checked_out_at", trip.checked_out_at)
+      .order("checked_out_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    supabaseAdmin
+      .from("vehicle_trips")
+      .select("id, checked_out_at, start_odometer, end_odometer")
+      .eq("tenant_id", tenantId)
+      .eq("vehicle_id", trip.vehicle_id)
+      .neq("id", trip.id)
+      .gt("checked_out_at", trip.checked_out_at)
+      .order("checked_out_at", { ascending: true })
+      .limit(1)
+      .maybeSingle(),
+  ])
+  throwVehicleDbError("trip sequence (prev)", pErr)
+  throwVehicleDbError("trip sequence (next)", nErr)
+  return { prev: (prev as Row | null) ?? null, next: (next as Row | null) ?? null }
+}
+
 const patchTripSchema = z.object({
   startOdometer: nonNegInt.optional(),
   endOdometer: nonNegInt.optional(),
@@ -1131,11 +1166,20 @@ vehiclesRouter.patch(
       res.status(400).json({ error: "distance_too_large", maxKm: MAX_TRIP_KM })
       return
     }
-    if (d.startOdometer !== undefined && d.startOdometer > Number(trip.start_odometer)) {
+    if (d.startOdometer !== undefined || d.endOdometer !== undefined) {
+      // 跳幅：出車／還車里程都不得超過「扣掉本趟貢獻後的目前里程」+ 3000（避免出車 +3000、還車再 +3000 一次跳 6000）。
       const v = await loadVehicle(tenantId, trip.vehicle_id)
-      const current = Number(v?.current_odometer ?? 0)
-      if (d.startOdometer > current + MAX_TRIP_KM) {
-        res.status(400).json({ error: "odometer_jump_too_large", maxKm: MAX_TRIP_KM, currentOdometer: current })
+      const baseline = v ? await computeVehicleOdometer(tenantId, v as Parameters<typeof computeVehicleOdometer>[1], { excludeTripId: id }) : 0
+      if (Math.max(start, end ?? 0) > baseline + MAX_TRIP_KM) {
+        res.status(400).json({ error: "odometer_jump_too_large", maxKm: MAX_TRIP_KM, currentOdometer: baseline })
+        return
+      }
+      // 時序一致：本趟 start ≥ 同車前一趟（依取車時間）的 end；本趟 end ≤ 同車下一趟的 start。
+      const seq = await neighbourTrips(tenantId, trip)
+      const prevEnd = seq.prev ? Number(seq.prev.end_odometer ?? seq.prev.start_odometer) : null
+      const nextStart = seq.next ? Number(seq.next.start_odometer) : null
+      if ((prevEnd != null && start < prevEnd) || (nextStart != null && (end ?? start) > nextStart)) {
+        res.status(400).json({ error: "odometer_out_of_sequence", prevEnd, nextStart })
         return
       }
     }

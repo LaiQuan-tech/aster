@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS public.vehicles (
 -- 冪等：表已存在（舊版草案）時補欄位
 ALTER TABLE public.vehicles ADD COLUMN IF NOT EXISTS odometer_set_at timestamptz;
 ALTER TABLE public.vehicles ADD COLUMN IF NOT EXISTS odometer_set_value integer;
+-- 既有列補基準（以當時的目前里程為手動設定值）；只補 NULL，重跑不變。
+UPDATE public.vehicles SET odometer_set_at = now(), odometer_set_value = current_odometer WHERE odometer_set_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS vehicles_tenant_plate_uidx ON public.vehicles (tenant_id, plate_no);
 CREATE INDEX IF NOT EXISTS vehicles_tenant_status_idx ON public.vehicles (tenant_id, status);
 DO $$ BEGIN
@@ -247,6 +249,8 @@ CREATE TABLE IF NOT EXISTS public.vehicle_settings (
   updated_by_emp_id uuid,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+-- 冪等：表已存在（早期版本沒有此欄）時補上；須在 CHECK 之前
+ALTER TABLE public.vehicle_settings ADD COLUMN IF NOT EXISTS max_days_ahead integer NOT NULL DEFAULT 90;
 DO $$ BEGIN
   ALTER TABLE public.vehicle_settings ADD CONSTRAINT vehicle_settings_ranges_chk
     CHECK (reminder_lead_days BETWEEN 1 AND 180 AND maintenance_lead_km BETWEEN 0 AND 10000

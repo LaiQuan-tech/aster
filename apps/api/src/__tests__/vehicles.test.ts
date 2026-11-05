@@ -90,6 +90,8 @@ function vehicle(id: string, extra: Row = {}): Row {
     seats: 5,
     status: "available",
     current_odometer: 10000,
+    odometer_set_at: at(-24 * 365),
+    odometer_set_value: 10000,
     maintenance_interval_km: 5000,
     maintenance_interval_months: 6,
     last_maintenance_on: "2026-06-01",
@@ -867,5 +869,68 @@ describe("第二輪驗收：照片檔頭與費用上限", () => {
     expect(fake.db.vehicle_trips![0].returned_at).toBeNull()
     const b = await as(STAFF).put(`/vehicle-trips/${TRIP}/costs`, { costs: big })
     expect(b.body.error).toBe("amount_too_large")
+  })
+})
+
+describe("第三輪驗收", () => {
+  const T1 = "b6000000-0000-4000-8000-000000000021"
+  const T2 = "b6000000-0000-4000-8000-000000000022"
+  const T3 = "b6000000-0000-4000-8000-000000000023"
+  function threeTrips() {
+    fake.db.vehicle_bookings = [booking(BOOKING, { status: "completed" })]
+    fake.db.vehicle_trips = [
+      trip({ id: T1, booking_id: "b4000000-0000-4000-8000-000000000021", checked_out_at: at(-96), start_odometer: 10000, returned_at: at(-95), end_odometer: 10100, condition_status: "ok" }),
+      trip({ id: T2, booking_id: "b4000000-0000-4000-8000-000000000022", checked_out_at: at(-72), start_odometer: 10100, returned_at: at(-71), end_odometer: 10200, condition_status: "ok" }),
+      trip({ id: T3, booking_id: "b4000000-0000-4000-8000-000000000023", checked_out_at: at(-48), start_odometer: 10200, returned_at: at(-47), end_odometer: 10300, condition_status: "ok" }),
+    ]
+    fake.db.vehicles!.find((v) => v.id === CAR)!.current_odometer = 10300
+  }
+
+  it("HR 更正：出車 +3000、還車再 +3000（一次跳 6000）→ 400 odometer_jump_too_large", async () => {
+    threeTrips()
+    const res = await as(HR).patch(`/vehicle-trips/${T3}`, { startOdometer: 13000, endOdometer: 16000, reason: "x" })
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "odometer_jump_too_large", maxKm: 3000, currentOdometer: 10200 })
+    const endOnly = await as(HR).patch(`/vehicle-trips/${T3}`, { startOdometer: 12000, endOdometer: 14000, reason: "x" })
+    expect(endOnly.status).toBe(400)
+    expect(endOnly.body.error).toBe("odometer_jump_too_large")
+  })
+
+  it("HR 更正時序：start < 前一趟 end、end > 下一趟 start → 400 odometer_out_of_sequence", async () => {
+    threeTrips()
+    const a = await as(HR).patch(`/vehicle-trips/${T2}`, { startOdometer: 10050, reason: "x" })
+    expect(a.status).toBe(400)
+    expect(a.body).toEqual({ error: "odometer_out_of_sequence", prevEnd: 10100, nextStart: 10200 })
+    const b = await as(HR).patch(`/vehicle-trips/${T2}`, { endOdometer: 10250, reason: "x" })
+    expect(b.status).toBe(400)
+    expect(b.body.error).toBe("odometer_out_of_sequence")
+    const ok = await as(HR).patch(`/vehicle-trips/${T2}`, { endOdometer: 10180, reason: "x" })
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    const last = await as(HR).patch(`/vehicle-trips/${T3}`, { endOdometer: 10400, reason: "x" })
+    expect(last.status).toBe(200)
+    expect(last.body.trip.endOdometer).toBe(10400)
+  })
+
+  it("HR 代還車且代填費用 → 需 reason；不填費用不用", async () => {
+    fake.db.vehicle_bookings = [booking(BOOKING)]
+    fake.db.vehicle_trips = [trip()]
+    const line = [{ costType: "fuel", amount: 500, paidBy: "employee", incurredOn: "2026-11-04" }]
+    const a = await as(HR).post(`/vehicle-trips/${TRIP}/return`, { endOdometer: 10050, conditionStatus: "ok", costs: line })
+    expect(a.status).toBe(400)
+    expect(a.body.error).toBe("reason_required")
+    expect(fake.db.vehicle_trips![0].returned_at).toBeNull()
+    const b = await as(HR).post(`/vehicle-trips/${TRIP}/return`, { endOdometer: 10050, conditionStatus: "ok", costs: line, reason: "員工出差中，代為登記" })
+    expect(b.status).toBe(200)
+    expect((fake.db.audit_logs ?? []).some((x) => String(x.context).includes("員工出差中"))).toBe(true)
+  })
+
+  it("odometer_set_at 為 NULL → 以 current_odometer 為底（不從 0 起算、不往下修）", async () => {
+    threeTrips()
+    const v = fake.db.vehicles!.find((x) => x.id === CAR)!
+    v.odometer_set_at = null
+    v.odometer_set_value = null
+    const res = await as(HR).patch(`/vehicle-trips/${T3}`, { endOdometer: 10250, reason: "x" })
+    expect(res.status).toBe(200)
+    expect(v.current_odometer).toBe(10300)
   })
 })

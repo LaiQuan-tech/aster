@@ -18,10 +18,13 @@ export interface OdometerEvent {
   source: string
 }
 
-/** 純函式：基準（手動設定）之後的事件取 max；沒有基準＝從 0、所有事件都算。 */
+/**
+ * 純函式：基準（手動設定）之後的事件取 max。沒有基準時間（理論上 migration 已補值，不會發生）＝防禦性地以
+ * 傳入的 value（呼叫端給 current_odometer）為底、所有事件都算——寧可不往下修，也不從 0 起算。
+ */
 export function replayOdometer(base: { at: string | null; value: number | null }, events: OdometerEvent[]): number {
   const baseAt = base.at ? new Date(base.at).getTime() : Number.NEGATIVE_INFINITY
-  let current = base.at ? Number(base.value ?? 0) : 0
+  let current = Number(base.value ?? 0)
   for (const e of events) {
     const t = new Date(e.at).getTime()
     if (Number.isNaN(t) || t < baseAt) continue
@@ -34,6 +37,8 @@ export function replayOdometer(base: { at: string | null; value: number | null }
 export async function computeVehicleOdometer(
   tenantId: string,
   vehicle: { id: string; odometer_set_at?: string | null; odometer_set_value?: number | null; current_odometer?: number | null },
+  /** 排除某趟的事件（HR 更正時算「扣掉本趟貢獻後」的基準）。 */
+  opts: { excludeTripId?: string } = {},
 ): Promise<number> {
   const [{ data: trips, error: tErr }, { data: logs, error: lErr }] = await Promise.all([
     supabaseAdmin
@@ -47,11 +52,16 @@ export async function computeVehicleOdometer(
   throwVehicleDbError("recompute odometer (maintenance)", lErr)
   const events: OdometerEvent[] = []
   for (const t of (trips ?? []) as Array<Record<string, unknown>>) {
+    if (opts.excludeTripId && t.id === opts.excludeTripId) continue
     if (t.checked_out_at && t.start_odometer != null) events.push({ at: String(t.checked_out_at), odometer: Number(t.start_odometer), source: `trip:${t.id}:start` })
     if (t.returned_at && t.end_odometer != null) events.push({ at: String(t.returned_at), odometer: Number(t.end_odometer), source: `trip:${t.id}:end` })
   }
   for (const l of (logs ?? []) as Array<Record<string, unknown>>) {
     if (l.created_at && l.odometer != null) events.push({ at: String(l.created_at), odometer: Number(l.odometer), source: `maintenance:${l.id}` })
   }
-  return replayOdometer({ at: vehicle.odometer_set_at ?? null, value: vehicle.odometer_set_value ?? null }, events)
+  const hasBase = !!vehicle.odometer_set_at
+  return replayOdometer(
+    { at: vehicle.odometer_set_at ?? null, value: hasBase ? (vehicle.odometer_set_value ?? null) : (vehicle.current_odometer ?? 0) },
+    events,
+  )
 }
