@@ -121,14 +121,14 @@ describe("overlaps（半開區間）／bookingRangeError", () => {
     expect(bookingRangeError("2026-11-05T00:00:00Z", "2026-11-05T08:00:00Z", 8)).toBeNull();
     expect(bookingRangeError("2026-11-05T00:00:00Z", "2026-11-06T08:00:00Z", null, { now: new Date("2026-11-05T00:00:00Z") })).toBeNull();
   });
-  it("bookingRangeError：開始超過今天＋90 天擋（可調）", () => {
-    const now = new Date(2026, 10, 5, 10, 0);
-    const inRange = new Date(2026, 10, 5 + 90, 12, 0).toISOString();
-    const tooFar = new Date(2026, 10, 5 + 91, 9, 0).toISOString();
-    const after = (iso: string) => new Date(new Date(iso).getTime() + 3_600_000).toISOString();
-    expect(bookingRangeError(inRange, after(inRange), null, { now })).toBeNull();
-    expect(bookingRangeError(tooFar, after(tooFar), null, { now })).toBe("最多只能預約 90 天內的時段");
-    expect(bookingRangeError(tooFar, after(tooFar), null, { now, maxDaysAhead: 120 })).toBeNull();
+  it("bookingRangeError：以「現在＋N×24h」為界（與 API 一致），可調", () => {
+    const now = new Date("2026-11-05T02:00:00Z");
+    const limit = now.getTime() + 90 * 86_400_000;
+    const iso = (t: number) => new Date(t).toISOString();
+    expect(bookingRangeError(iso(limit), iso(limit + 3_600_000), null, { now })).toBeNull();
+    // 同一天稍晚（舊版算到 23:59 會放行）→ 擋
+    expect(bookingRangeError(iso(limit + 60_000), iso(limit + 3_600_000), null, { now })).toBe("最多只能預約 90 天內的時段");
+    expect(bookingRangeError(iso(limit + 60_000), iso(limit + 3_600_000), null, { now, maxDaysAhead: 120 })).toBeNull();
   });
 });
 
@@ -247,6 +247,9 @@ describe("vehicleErrorMessage：§3.2 全部錯誤碼都有中文", () => {
     "claim_failed",
     "distance_too_large",
     "booking_too_far",
+    "odometer_jump_too_large",
+    "amount_too_large",
+    "invalid_photo",
   ];
   it("每個碼都有對照，且訊息含中文、不是碼本身", () => {
     for (const code of ALL_CODES) {
@@ -318,6 +321,7 @@ describe("veh-api 實作新增的錯誤碼與附帶欄位", () => {
     expect(vehicleErrorMessage(apiErr(409, "booking_not_approved", { status: "pending" }))).toBe("預約目前簽核中，核准後才能取車");
     expect(vehicleErrorMessage(apiErr(400, "invalid_range"))).toBe("結束時間要晚於開始時間");
     expect(vehicleErrorMessage(apiErr(400, "distance_too_large", { maxKm: 2000 }))).toBe("單趟里程超過上限（2,000 km），請確認里程是否輸入錯誤");
+    expect(vehicleErrorMessage(apiErr(400, "odometer_jump_too_large", { maxKm: 5000 }))).toContain("5,000 km");
     expect(vehicleErrorMessage(apiErr(400, "booking_too_far", { maxDaysAhead: 90 }))).toBe("最多只能預約 90 天內的時段");
     expect(vehicleErrorMessage(apiErr(409, "trip_not_returned"))).toContain("尚未還車");
   });

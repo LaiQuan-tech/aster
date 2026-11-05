@@ -207,7 +207,8 @@ export function overlaps(
 }
 
 /**
- * 預約起訖檢查（送單前）：缺、結束不晚於開始、超過上限時數、開始超過今天＋maxDaysAhead 天（預設 90，算到該日 23:59 當地）。
+ * 預約起訖檢查（送單前）：缺、結束不晚於開始、超過上限時數、開始晚於「現在＋maxDaysAhead×24 小時」（預設 90；
+ * 與 API services/vehicle-booking.ts 同一條式子，日期選擇器的 max 只是放寬到該日方便選，最終以此為準）。
  * 回 null＝通過。`now` 可注入（測試）。
  */
 export function bookingRangeError(
@@ -223,7 +224,7 @@ export function bookingRangeError(
   if (e <= s) return "結束時間要晚於開始時間";
   const maxDays = opts.maxDaysAhead ?? 90;
   const now = opts.now ?? new Date();
-  const limit = new Date(now.getFullYear(), now.getMonth(), now.getDate() + maxDays, 23, 59, 59).getTime();
+  const limit = now.getTime() + maxDays * 86_400_000;
   if (s > limit) return `最多只能預約 ${maxDays} 天內的時段`;
   if (maxHours && maxHours > 0 && e - s > maxHours * 3_600_000) return `單次預約最長 ${maxHours} 小時`;
   return null;
@@ -375,6 +376,9 @@ export const VEHICLE_ERROR_TEXT: Record<string, string> = {
   invalid_range: "結束時間要晚於開始時間",
   distance_too_large: "單趟里程超過上限，請確認還車里程是否輸入錯誤",
   booking_too_far: "預約開始時間超過可預約的天數",
+  odometer_jump_too_large: "取車里程比車輛目前里程多太多，請確認輸入是否正確，或請管理員調整車輛里程",
+  amount_too_large: "單筆費用金額過高，請確認是否輸入錯誤",
+  invalid_photo: "照片檔案無法辨識（格式與內容不符），請改傳 JPG、PNG 或重新拍照",
   invalid_base64: "照片檔案讀取失敗，請重新選擇照片",
   already_claimed: "這筆費用已經轉報銷過了",
   not_claimable: "公司支付的費用不需報銷",
@@ -469,6 +473,9 @@ export function vehicleErrorMessage(err: unknown, fallback = "操作失敗，請
   }
   if (code === "distance_too_large" && typeof body.maxKm === "number") {
     return `單趟里程超過上限（${body.maxKm.toLocaleString("en-US")} km），請確認里程是否輸入錯誤`;
+  }
+  if (code === "odometer_jump_too_large" && typeof body.maxKm === "number") {
+    return `取車里程比車輛目前里程多超過 ${body.maxKm.toLocaleString("en-US")} km，請確認輸入是否正確，或請管理員調整車輛里程`;
   }
   if (code === "booking_too_far" && typeof body.maxDaysAhead === "number") return `最多只能預約 ${body.maxDaysAhead} 天內的時段`;
   if (code === "too_many_photos" && typeof body.max === "number") return `每趟最多 ${body.max} 張照片`;
