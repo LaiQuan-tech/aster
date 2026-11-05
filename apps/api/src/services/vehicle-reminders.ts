@@ -217,7 +217,7 @@ async function sendAlert(
     type: "vehicle_reminder",
     title: `公務車提醒：${vehicle.plate_no}`,
     body: `${vehicle.plate_no}（${vehicle.model}）${alert.label}`,
-    payload: { vehicleId: vehicle.id, plateNo: vehicle.plate_no, kind: alert.kind, ...(alert.tripId ? { tripId: alert.tripId } : {}) },
+    payload: { channels: [], vehicleId: vehicle.id, plateNo: vehicle.plate_no, kind: alert.kind, ...(alert.tripId ? { tripId: alert.tripId } : {}) },
   })
   return true
 }
@@ -273,3 +273,32 @@ export async function notifyOdometerMaintenance(tenantId: string, vehicle: Remin
   return sendAlert(tenantId, vehicle, alert, recipients)
 }
 
+/**
+ * 里程被更正（調小）後，讓「因錯誤里程而提前寫下」的里程保養去重紀錄失效（2026-11-05 驗收追加）：
+ * kind='maintenance_odometer'、due_key='km:N' 且目前里程 < N − maintenanceLeadKm（＝其實還沒到門檻）→ 刪掉，
+ * 之後真正到門檻時（還車即時檢查或每日排程）才會再提醒。回刪除筆數。
+ */
+export async function resetOdometerReminders(
+  tenantId: string,
+  vehicleId: string,
+  currentOdometer: number,
+  settings: Pick<VehicleSettings, "maintenanceLeadKm">,
+): Promise<number> {
+  const { data, error } = await supabaseAdmin
+    .from("vehicle_reminder_log")
+    .select("id, due_key")
+    .eq("tenant_id", tenantId)
+    .eq("vehicle_id", vehicleId)
+    .eq("kind", "maintenance_odometer")
+  throwVehicleDbError("reset odometer reminders (load)", error)
+  const stale = ((data ?? []) as Array<{ id: string; due_key: string }>)
+    .filter((r) => {
+      const m = /^km:(\d+)$/.exec(r.due_key)
+      return !!m && currentOdometer < Number(m[1]) - settings.maintenanceLeadKm
+    })
+    .map((r) => r.id)
+  if (stale.length === 0) return 0
+  const { error: delErr } = await supabaseAdmin.from("vehicle_reminder_log").delete().eq("tenant_id", tenantId).in("id", stale)
+  throwVehicleDbError("reset odometer reminders (delete)", delErr)
+  return stale.length
+}

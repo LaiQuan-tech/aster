@@ -224,6 +224,7 @@ export const vehicleSettings = pgTable("vehicle_settings", {
   reminderEmpIds: uuid("reminder_emp_ids").array().notNull().default(sql`'{}'::uuid[]`),
   maxBookingHours: integer("max_booking_hours").notNull().default(72),
   checkoutEarlyMinutes: integer("checkout_early_minutes").notNull().default(60),
+  maxDaysAhead: integer("max_days_ahead").notNull().default(90),
   updatedByEmpId: uuid("updated_by_emp_id"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 })

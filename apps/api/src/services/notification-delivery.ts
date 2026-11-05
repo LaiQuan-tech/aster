@@ -65,10 +65,11 @@ function csvEnv(name: string): string[] {
     .filter(Boolean)
 }
 
-function deliveryChannels(row: NotificationRow): DeliveryChannel[] {
+export function deliveryChannels(row: NotificationRow): DeliveryChannel[] {
   if (row.channel === "email" || row.channel === "line") return [row.channel]
-  const payloadChannels = Array.isArray(row.payload?.channels) ? row.payload.channels : []
-  const raw = payloadChannels.length > 0 ? payloadChannels : csvEnv("NOTIFICATION_DEFAULT_CHANNELS")
+  // payload.channels 是陣列就照它（**空陣列＝只發站內**，例：公務車通知 2026-11-05）；沒有這個鍵才退回 env 預設。
+  // 既有入列（notify.buildNotificationRows）只在 env 有值時才寫 channels，所以舊列行為不變。
+  const raw = Array.isArray(row.payload?.channels) ? (row.payload.channels as unknown[]) : csvEnv("NOTIFICATION_DEFAULT_CHANNELS")
   return Array.from(
     new Set(raw.filter((item): item is DeliveryChannel => item === "email" || item === "line")),
   )

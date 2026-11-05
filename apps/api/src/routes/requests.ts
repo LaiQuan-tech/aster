@@ -78,8 +78,10 @@ const PUNCH_SEGMENT_TYPES = ["in", "out", "break_in", "break_out", "outing_in", 
 const createSchema = z.object({
   kind: z.enum(KINDS),
   leaveTypeId: z.string().uuid().optional(),
-  startAt: z.string().datetime(),
-  endAt: z.string().datetime(),
+  // 時間：公務車預約（2026-11-05）接受帶時區位移的 ISO（例 2026-11-06T09:00:00+08:00，Web 的 datetime-local 轉出來就是這樣）；
+  // 其他 kind 維持原本只收 UTC（Z）——見下方 superRefine，避免改動既有種類的驗證行為。
+  startAt: z.string().datetime({ offset: true }),
+  endAt: z.string().datetime({ offset: true }),
   hours: z.number().optional(),
   reason: z.string().trim().min(1).max(250).optional(),
   // 代申請已移除（2026-10-11，業主要求員工端不再提供「代同仁申請」）。欄位留在 schema 只為了偵測：
@@ -129,6 +131,14 @@ const createSchema = z.object({
   // ── 公務車預約（2026-11-05），僅 kind='vehicle_booking' 採用 ──────────
   vehicleId: z.string().uuid().optional(),
   passengers: z.number().int().min(1).max(60).optional(),
+}).superRefine((value, ctx) => {
+  if (value.kind === "vehicle_booking") return
+  const utcOnly = z.string().datetime()
+  for (const key of ["startAt", "endAt"] as const) {
+    if (!utcOnly.safeParse(value[key]).success) {
+      ctx.addIssue({ code: z.ZodIssueCode.invalid_string, validation: "datetime", message: "Invalid datetime", path: [key] })
+    }
+  }
 })
 
 const decisionSchema = z.object({
@@ -688,8 +698,6 @@ requestsRouter.post(
     const {
       kind,
       leaveTypeId,
-      startAt,
-      endAt,
       hours: hoursInput,
       reason,
       agentName,
@@ -706,6 +714,9 @@ requestsRouter.post(
     } = parsed.data
     // 公務車預約不吃請假／加班欄位（segments、假別、時數、出差欄位一律不寫）。
     const isVehicle = kind === "vehicle_booking"
+    // 公務車預約可帶 +08:00 位移；一律正規化成 UTC ISO 再往下用（其他 kind 本來就只收 Z）。
+    const startAt = isVehicle ? new Date(parsed.data.startAt).toISOString() : parsed.data.startAt
+    const endAt = isVehicle ? new Date(parsed.data.endAt).toISOString() : parsed.data.endAt
     const segments = isVehicle ? undefined : parsed.data.segments
 
     try {

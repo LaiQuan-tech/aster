@@ -27,6 +27,8 @@ export const PHOTO_BUCKET = "vehicle-photos"
 export const MAX_PHOTO_BYTES = 3 * 1024 * 1024
 export const MAX_PHOTOS_PER_TRIP = 12
 export const MAX_COST_LINES = 20
+/** 單趟里程上限（還車 − 出車；2026-11-05 驗收追加，防手誤多打一位數）。 */
+export const MAX_TRIP_KM = 3000
 
 export const TRIP_COLS =
   "id, tenant_id, vehicle_id, booking_id, employee_id, checked_out_at, start_odometer, odometer_override_reason, returned_at, " +
@@ -296,19 +298,28 @@ export async function createTripExpenseClaims(input: {
   )
   if (missing.length > 0) return { ok: false, status: 409, body: { error: "vehicle_settings_incomplete", costTypes: missing } }
 
-  for (const cost of targets) {
-    const costId = cost.id as string
-    // CAS：none → creating；0 列＝別的請求搶先（或已請款）。
+  for (const target of targets) {
+    const costId = target.id as string
+    // CAS：none → creating；0 列＝別的請求搶先（或已請款）。returning 取回**鎖定當下**的列：
+    // 建報銷單一律用這份（金額、日期、類型、備註），不用迴圈前讀到的舊值——避免同時有人 PUT costs 改了金額。
     const { data: locked, error: lockErr } = await supabaseAdmin
       .from("vehicle_trip_costs")
       .update({ claim_state: "creating", updated_at: new Date().toISOString() })
       .eq("tenant_id", tenantId)
       .eq("id", costId)
       .eq("claim_state", "none")
-      .select("id")
+      .eq("paid_by", "employee")
+      .select(COST_COLS)
     throwVehicleDbError("trip claims (lock)", lockErr)
-    if (!locked || (locked as Row[]).length === 0) {
+    const cost = ((locked ?? []) as Row[])[0]
+    if (!cost) {
       results.push({ costId, ok: false, error: "already_claimed" })
+      continue
+    }
+    if (!COST_TYPE_CATEGORY_KEY[cost.cost_type as CostType] || !settings[COST_TYPE_CATEGORY_KEY[cost.cost_type as CostType]]) {
+      // 鎖定前類型被改成沒對應類別的種類：退回、該行回設定不全。
+      await supabaseAdmin.from("vehicle_trip_costs").update({ claim_state: "none" }).eq("tenant_id", tenantId).eq("id", costId).eq("claim_state", "creating")
+      results.push({ costId, ok: false, error: "vehicle_settings_incomplete" })
       continue
     }
     const release = async () => {

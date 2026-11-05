@@ -189,3 +189,18 @@ describe("POST /internal/vehicles/reminders", () => {
     expect(fake.db.notifications ?? []).toEqual([])
   })
 })
+
+describe("通知投遞通道（公務車只發站內）", () => {
+  it("payload.channels＝[] → 不走 email／line（即使 env 有預設）；沒有 channels 鍵才退回 env", async () => {
+    const { deliveryChannels } = await import("../services/notification-delivery.js")
+    process.env.NOTIFICATION_DEFAULT_CHANNELS = "email,line"
+    try {
+      type R = Parameters<typeof deliveryChannels>[0]
+      expect(deliveryChannels({ channel: "inapp", payload: { channels: [] } } as unknown as R)).toEqual([])
+      expect(deliveryChannels({ channel: "inapp", payload: {} } as unknown as R).sort()).toEqual(["email", "line"])
+      expect(deliveryChannels({ channel: "inapp", payload: { channels: ["line"] } } as unknown as R)).toEqual(["line"])
+    } finally {
+      delete process.env.NOTIFICATION_DEFAULT_CHANNELS
+    }
+  })
+})

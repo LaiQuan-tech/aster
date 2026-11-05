@@ -242,6 +242,7 @@ CREATE TABLE IF NOT EXISTS public.vehicle_settings (
   reminder_emp_ids uuid[] NOT NULL DEFAULT '{}',   -- 除了 hr_admin 以外也要收提醒的人（總務）
   max_booking_hours integer NOT NULL DEFAULT 72,
   checkout_early_minutes integer NOT NULL DEFAULT 60,
+  max_days_ahead integer NOT NULL DEFAULT 90,       -- 最多可預約到幾天後
   updated_by_emp_id uuid,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -249,6 +250,9 @@ DO $$ BEGIN
   ALTER TABLE public.vehicle_settings ADD CONSTRAINT vehicle_settings_ranges_chk
     CHECK (reminder_lead_days BETWEEN 1 AND 180 AND maintenance_lead_km BETWEEN 0 AND 10000
        AND max_booking_hours BETWEEN 1 AND 720 AND checkout_early_minutes BETWEEN 0 AND 1440);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE public.vehicle_settings ADD CONSTRAINT vehicle_settings_days_ahead_chk CHECK (max_days_ahead BETWEEN 1 AND 365);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- RLS（API only）＋ 稽核

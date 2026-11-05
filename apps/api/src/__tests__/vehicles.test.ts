@@ -620,6 +620,7 @@ describe("設定 /vehicle-settings", () => {
       reminderEmpIds: [],
       maxBookingHours: 72,
       checkoutEarlyMinutes: 60,
+      maxDaysAhead: 90,
     })
     const trip = await as(HR).put("/vehicle-settings", { fuelCategoryId: CAT_TRIP })
     expect(trip.status).toBe(400)
@@ -673,5 +674,100 @@ describe("備份快照清單", () => {
       expect(names, t).toContain(t)
     }
     expect(names).not.toContain("vehicle_reminder_log")
+  })
+})
+
+describe("驗收追加（2026-11-05）", () => {
+  it("單趟里程 > 3000 km → 400 distance_too_large（還車與 HR 更正）", async () => {
+    fake.db.vehicle_bookings = [booking(BOOKING)]
+    fake.db.vehicle_trips = [trip()]
+    const a = await as(STAFF).post(`/vehicle-trips/${TRIP}/return`, { endOdometer: 13001, conditionStatus: "ok" })
+    expect(a.status).toBe(400)
+    expect(a.body).toEqual({ error: "distance_too_large", maxKm: 3000 })
+    const ok = await as(STAFF).post(`/vehicle-trips/${TRIP}/return`, { endOdometer: 13000, conditionStatus: "ok" })
+    expect(ok.status).toBe(200)
+    const b = await as(HR).patch(`/vehicle-trips/${TRIP}`, { endOdometer: 13500, reason: "x" })
+    expect(b.status).toBe(400)
+    expect(b.body).toEqual({ error: "distance_too_large", maxKm: 3000 })
+  })
+
+  it("HR 更正里程（調小）→ 車輛里程以最新還車紀錄重算、錯誤里程產生的保養去重紀錄失效，之後到門檻仍會提醒", async () => {
+    fake.db.vehicle_bookings = [booking(BOOKING)]
+    fake.db.vehicle_trips = [trip()]
+    // 員工多打一位數：10000 → 12600（達保養門檻 13000−500）→ 寫了去重紀錄
+    const r = await as(STAFF).post(`/vehicle-trips/${TRIP}/return`, { endOdometer: 12600, conditionStatus: "ok" })
+    expect(r.status).toBe(200)
+    expect(fake.db.vehicles!.find((v) => v.id === CAR)!.current_odometer).toBe(12600)
+    expect(fake.db.vehicle_reminder_log).toHaveLength(1)
+    const fix = await as(HR).patch(`/vehicle-trips/${TRIP}`, { endOdometer: 10260, reason: "員工多打一位數" })
+    expect(fix.status, JSON.stringify(fix.body)).toBe(200)
+    expect(fake.db.vehicles!.find((v) => v.id === CAR)!.current_odometer).toBe(10260)
+    expect(fake.db.vehicle_reminder_log).toEqual([])
+    expect((fake.db.audit_logs ?? []).some((a) => a.table_name === "vehicles" && a.new_row?.current_odometer === 10260)).toBe(true)
+    // 真的到門檻時再提醒
+    const fix2 = await as(HR).patch(`/vehicle-trips/${TRIP}`, { endOdometer: 12700, reason: "再更正" })
+    expect(fix2.status).toBe(200)
+    expect(fake.db.vehicle_reminder_log).toHaveLength(1)
+    expect((fake.db.notifications ?? []).filter((n) => n.type === "vehicle_reminder")).toHaveLength(2)
+  })
+
+  it("轉報銷以鎖定當下的金額建單（讀取後金額被改 → 用新金額）", async () => {
+    fake.db.vehicle_trips = [trip({ returned_at: at(-1), end_odometer: 10100, condition_status: "ok" })]
+    fake.db.vehicle_trip_costs = [cost(COST_A)]
+    fake.db.vehicle_settings = [{ tenant_id: TENANT_ID, fuel_category_id: CAT_FUEL }]
+    const original = fake.from.bind(fake)
+    const spy = vi.spyOn(fake, "from").mockImplementation((table: string) => {
+      const builder = original(table)
+      if (table !== "vehicle_trip_costs") return builder
+      const update = builder.update
+      builder.update = (payload: Row) => {
+        // 模擬：迴圈前讀到 850，鎖定前另一個請求把金額改成 999
+        if (payload.claim_state === "creating") fake.db.vehicle_trip_costs![0].amount = "999.00"
+        return update(payload)
+      }
+      return builder
+    })
+    try {
+      const res = await as(STAFF).post(`/vehicle-trips/${TRIP}/expense-claims`)
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      expect(fake.db.expense_claims![0].amount).toBe(999)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("公務車通知一律只發站內：payload.channels＝[]（即使 env 預設 email）", async () => {
+    process.env.NOTIFICATION_DEFAULT_CHANNELS = "email,line"
+    try {
+      fake.db.vehicle_bookings = [booking(BOOKING, { request_id: null, start_at: at(24), end_at: at(26) })]
+      expect((await as(HR).post(`/vehicle-bookings/${BOOKING}/cancel`, { reason: "送修" })).status).toBe(200)
+      fake.db.vehicle_bookings = [booking(BOOKING2)]
+      fake.db.vehicle_trips = [trip({ booking_id: BOOKING2 })]
+      expect((await as(STAFF).post(`/vehicle-trips/${TRIP}/return`, { endOdometer: 12600, conditionStatus: "issue", conditionNote: "刮傷" })).status).toBe(200)
+      const notes = fake.db.notifications ?? []
+      expect(new Set(notes.map((n) => n.type))).toEqual(new Set(["vehicle_booking_cancelled", "vehicle_condition", "vehicle_reminder"]))
+      for (const n of notes) expect(n.payload.channels, n.type).toEqual([])
+    } finally {
+      delete process.env.NOTIFICATION_DEFAULT_CHANNELS
+    }
+  })
+
+  it("HR 修改別人的費用需填理由；本人不用", async () => {
+    fake.db.vehicle_trips = [trip({ returned_at: at(-1), end_odometer: 10100, condition_status: "ok" })]
+    const line = { costType: "parking", amount: 60, paidBy: "employee", incurredOn: "2026-11-04" }
+    const noReason = await as(HR).put(`/vehicle-trips/${TRIP}/costs`, { costs: [line] })
+    expect(noReason.status).toBe(400)
+    expect(noReason.body.error).toBe("reason_required")
+    const ok = await as(HR).put(`/vehicle-trips/${TRIP}/costs`, { costs: [line], reason: "收據金額更正" })
+    expect(ok.status).toBe(200)
+    expect((fake.db.audit_logs ?? []).some((a) => a.table_name === "vehicle_trip_costs" && String(a.context).includes("收據金額更正"))).toBe(true)
+    const own = await as(STAFF).put(`/vehicle-trips/${TRIP}/costs`, { costs: [line] })
+    expect(own.status).toBe(200)
+  })
+
+  it("設定可存 maxDaysAhead", async () => {
+    const ok = await as(HR).put("/vehicle-settings", { maxDaysAhead: 30 })
+    expect(ok.status).toBe(200)
+    expect(ok.body.settings.maxDaysAhead).toBe(30)
   })
 })

@@ -150,6 +150,39 @@ describe("POST /requests kind=vehicle_booking — 驗證", () => {
   })
 })
 
+describe("POST /requests kind=vehicle_booking — 時區位移與日期上限（驗收追加）", () => {
+  const plus8 = (iso: string) => {
+    const d = new Date(new Date(iso).getTime() + 8 * 3600_000)
+    return d.toISOString().replace(/\.\d{3}Z$/, "+08:00")
+  }
+
+  it("startAt／endAt 帶 +08:00 → 201，存成同一時刻的 UTC", async () => {
+    const start = future(48)
+    const end = future(51)
+    const res = await as(STAFF).post("/requests", body({ startAt: plus8(start), endAt: plus8(end) }))
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(fake.db.vehicle_bookings![0]).toMatchObject({ start_at: start, end_at: end })
+    expect(new Date(fake.db.leave_requests![0].start_at).toISOString()).toBe(start)
+  })
+
+  it("其他 kind 帶 +08:00 仍 400 invalid_body（不改既有驗證）", async () => {
+    const res = await as(STAFF).post("/requests", { kind: "wfh", startAt: plus8(future(48)), endAt: plus8(future(56)), reason: "在家" })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("invalid_body")
+    expect(res.body.details.fieldErrors.startAt).toBeTruthy()
+  })
+
+  it("開始時間超過 90 天後 → 400 booking_too_far＋maxDaysAhead；設定可調", async () => {
+    const res = await as(STAFF).post("/requests", body({ startAt: future(91 * 24), endAt: future(91 * 24 + 2) }))
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: "booking_too_far", maxDaysAhead: 90 })
+    fake.db.vehicle_settings = [{ tenant_id: TENANT_ID, max_days_ahead: 7 }]
+    const b = await as(STAFF).post("/requests", body({ startAt: future(8 * 24), endAt: future(8 * 24 + 2) }))
+    expect(b.body).toEqual({ error: "booking_too_far", maxDaysAhead: 7 })
+    expect(fake.db.leave_requests).toEqual([])
+  })
+})
+
 describe("POST /requests kind=vehicle_booking — 建單", () => {
   it("成功：申請單（用途／目的地）＋直屬主管一關＋預約已連 request＋201 vehicleBookingId；通知含車牌", async () => {
     const res = await as(STAFF).post("/requests", body({ leaveTypeId: "a9000000-0000-4000-8000-000000000001", hours: 9 }))

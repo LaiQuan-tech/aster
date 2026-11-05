@@ -31,6 +31,8 @@ export interface VehicleSettings {
   reminderEmpIds: string[]
   maxBookingHours: number
   checkoutEarlyMinutes: number
+  /** 最多可預約到幾天後（2026-11-05 驗收追加；預設 90）。 */
+  maxDaysAhead: number
 }
 
 export const DEFAULT_VEHICLE_SETTINGS: VehicleSettings = {
@@ -43,11 +45,12 @@ export const DEFAULT_VEHICLE_SETTINGS: VehicleSettings = {
   reminderEmpIds: [],
   maxBookingHours: 72,
   checkoutEarlyMinutes: 60,
+  maxDaysAhead: 90,
 }
 
 export const SETTINGS_COLS =
   "tenant_id, fuel_category_id, toll_category_id, parking_category_id, other_category_id, reminder_lead_days, " +
-  "maintenance_lead_km, reminder_emp_ids, max_booking_hours, checkout_early_minutes"
+  "maintenance_lead_km, reminder_emp_ids, max_booking_hours, checkout_early_minutes, max_days_ahead"
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function settingsFromRow(row: Record<string, any> | null | undefined): VehicleSettings {
@@ -63,6 +66,7 @@ export function settingsFromRow(row: Record<string, any> | null | undefined): Ve
     reminderEmpIds: Array.isArray(row.reminder_emp_ids) ? (row.reminder_emp_ids as string[]) : [],
     maxBookingHours: num(row.max_booking_hours, DEFAULT_VEHICLE_SETTINGS.maxBookingHours),
     checkoutEarlyMinutes: num(row.checkout_early_minutes, DEFAULT_VEHICLE_SETTINGS.checkoutEarlyMinutes),
+    maxDaysAhead: num(row.max_days_ahead, DEFAULT_VEHICLE_SETTINGS.maxDaysAhead),
   }
 }
 

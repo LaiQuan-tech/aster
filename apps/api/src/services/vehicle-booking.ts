@@ -177,6 +177,9 @@ export async function reserveVehicleSlot(input: {
     if (start.getTime() < now.getTime() - BOOKING_PAST_TOLERANCE_MS) {
       return { ok: false, status: 400, body: { error: "booking_in_past" } }
     }
+    if (start.getTime() > now.getTime() + settings.maxDaysAhead * 86400_000) {
+      return { ok: false, status: 400, body: { error: "booking_too_far", maxDaysAhead: settings.maxDaysAhead } }
+    }
 
     const startIso = start.toISOString()
     const endIso = end.toISOString()

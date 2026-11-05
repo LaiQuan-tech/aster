@@ -32,6 +32,7 @@ import {
 } from "../services/vehicle-booking.js"
 import {
   MAX_COST_LINES,
+  MAX_TRIP_KM,
   MAX_PHOTOS_PER_TRIP,
   MAX_PHOTO_BYTES,
   PHOTO_BUCKET,
@@ -49,6 +50,7 @@ import {
   notifyOdometerMaintenance,
   overdueReturnAlerts,
   reminderRecipients,
+  resetOdometerReminders,
   type KeyedAlert,
 } from "../services/vehicle-reminders.js"
 import {
@@ -395,6 +397,10 @@ vehiclesRouter.patch(
         newRow: { ...patch, ...(odometerReason ? { odometer_reason: odometerReason } : {}) },
         context: "修改公務車",
       })
+      // 里程調小／保養門檻改變：因舊值提前寫下的里程保養去重紀錄失效（之後真的到門檻才再提醒）。
+      if ("current_odometer" in patch || "next_maintenance_odometer" in patch) {
+        await resetOdometerReminders(tenantId, id, Number(after.current_odometer ?? 0), await loadVehicleSettings(tenantId))
+      }
     }
     let affectedBookings: unknown[] = []
     if (after.status !== "available" && before.status !== after.status) {
@@ -692,7 +698,7 @@ vehiclesRouter.post(
         type: "vehicle_booking_cancelled",
         title: `公務車預約已被取消：${plateNo}`,
         body: `理由：${reason}`,
-        payload: { vehicleId: booking.vehicle_id, plateNo, bookingId: id },
+        payload: { channels: [], vehicleId: booking.vehicle_id, plateNo, bookingId: id },
       })
     }
     const [dto] = await serializeBookings(tenantId, [after], { selfId: self.id, isHr: self.isHr })
@@ -856,6 +862,10 @@ vehiclesRouter.post(
       res.status(400).json({ error: "odometer_less_than_start", startOdometer })
       return
     }
+    if (parsed.data.endOdometer - startOdometer > MAX_TRIP_KM) {
+      res.status(400).json({ error: "distance_too_large", maxKm: MAX_TRIP_KM })
+      return
+    }
     if (parsed.data.conditionStatus === "issue" && !parsed.data.conditionNote) {
       res.status(400).json({ error: "condition_note_required" })
       return
@@ -944,7 +954,7 @@ vehiclesRouter.post(
           type: "vehicle_condition",
           title: `公務車車況異常：${vehicleAfter.plate_no}`,
           body: parsed.data.conditionNote ?? null,
-          payload: { vehicleId: trip.vehicle_id, plateNo: vehicleAfter.plate_no, bookingId: trip.booking_id, tripId: id },
+          payload: { channels: [], vehicleId: trip.vehicle_id, plateNo: vehicleAfter.plate_no, bookingId: trip.booking_id, tripId: id },
         })
       }
       if (vehicleAfter) await notifyOdometerMaintenance(tenantId, vehicleAfter as Parameters<typeof notifyOdometerMaintenance>[1], settings)
@@ -1005,6 +1015,58 @@ vehiclesRouter.get(
   }),
 )
 
+/**
+ * HR 更正里程後重算車輛目前里程（2026-11-05 驗收追加）：以該車**最新一筆已還車紀錄的還車里程**為準（可以變小——
+ * 原本只在變大時回寫，打錯一位數就永遠改不回來），並讓因錯誤里程提前寫下的里程保養去重紀錄失效；
+ * 重算後若真的到門檻就照常即時提醒。
+ */
+async function recomputeVehicleOdometer(tenantId: string, vehicleId: string, actorEmpId: string, reason: string): Promise<void> {
+  const { data: latest, error } = await supabaseAdmin
+    .from("vehicle_trips")
+    .select("id, end_odometer, returned_at")
+    .eq("tenant_id", tenantId)
+    .eq("vehicle_id", vehicleId)
+    .not("returned_at", "is", null)
+    .order("returned_at", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  throwVehicleDbError("recompute odometer (latest trip)", error)
+  if (!latest || latest.end_odometer == null) return
+  const vehicle = await loadVehicle(tenantId, vehicleId)
+  if (!vehicle) return
+  const next = Number(latest.end_odometer)
+  const before = Number(vehicle.current_odometer ?? 0)
+  let after = vehicle
+  if (next !== before) {
+    const { data: v, error: upErr } = await supabaseAdmin
+      .from("vehicles")
+      .update({ current_odometer: next, updated_at: nowIso() })
+      .eq("tenant_id", tenantId)
+      .eq("id", vehicleId)
+      .select(VEHICLE_COLS)
+      .single()
+    throwVehicleDbError("recompute odometer (vehicle)", upErr)
+    after = v as Row
+    await writeAuditLog({
+      tenantId,
+      tableName: "vehicles",
+      recordId: vehicleId,
+      action: "UPDATE",
+      actorEmpId,
+      context: `HR 更正用車紀錄後重算里程：${reason}`,
+      oldRow: { current_odometer: before },
+      newRow: { current_odometer: next, source_trip_id: latest.id },
+    })
+  }
+  const settings = await loadVehicleSettings(tenantId)
+  await resetOdometerReminders(tenantId, vehicleId, next, settings)
+  try {
+    await notifyOdometerMaintenance(tenantId, after as Parameters<typeof notifyOdometerMaintenance>[1], settings)
+  } catch (err) {
+    logger.warn({ err, tenantId, vehicleId }, "recompute odometer: maintenance reminder failed")
+  }
+}
+
 const patchTripSchema = z.object({
   startOdometer: nonNegInt.optional(),
   endOdometer: nonNegInt.optional(),
@@ -1046,6 +1108,10 @@ vehiclesRouter.patch(
       res.status(400).json({ error: "odometer_less_than_start", startOdometer: start })
       return
     }
+    if (end != null && end - start > MAX_TRIP_KM) {
+      res.status(400).json({ error: "distance_too_large", maxKm: MAX_TRIP_KM })
+      return
+    }
     const status = d.conditionStatus ?? trip.condition_status
     const note = d.conditionNote !== undefined ? d.conditionNote : trip.condition_note
     if (status === "issue" && !note) {
@@ -1074,11 +1140,8 @@ vehiclesRouter.patch(
       const oldRow: Row = {}
       for (const k of Object.keys(patch)) oldRow[k] = trip[k] ?? null
       await writeAuditLog({ tenantId, tableName: "vehicle_trips", recordId: id, action: "UPDATE", actorEmpId: self.id, context: `HR 更正用車紀錄：${d.reason}`, oldRow, newRow: { ...patch, reason: d.reason } })
-      if (end != null) {
-        const vehicle = await loadVehicle(tenantId, trip.vehicle_id)
-        if (vehicle && end > Number(vehicle.current_odometer ?? 0)) {
-          await supabaseAdmin.from("vehicles").update({ current_odometer: end, updated_at: nowIso() }).eq("tenant_id", tenantId).eq("id", trip.vehicle_id)
-        }
+      if (trip.returned_at && (d.startOdometer !== undefined || d.endOdometer !== undefined)) {
+        await recomputeVehicleOdometer(tenantId, trip.vehicle_id, self.id, d.reason as string)
       }
     }
     res.status(200).json({ trip: await loadTripDto(tenantId, id, { selfId: self.id, isHr: self.isHr }) })
@@ -1086,6 +1149,8 @@ vehiclesRouter.patch(
 )
 
 const putCostsSchema = z.object({
+  /** HR 修改別人的費用時必填（進稽核；比照更正里程）。 */
+  reason: z.string().trim().min(1).max(250).optional(),
   costs: z
     .array(costLineSchema.extend({ id: z.string().uuid().optional(), incurredOn: z.string().regex(dateRe) }))
     .max(MAX_COST_LINES),
@@ -1100,6 +1165,11 @@ vehiclesRouter.put(
     if (!trip) return
     const parsed = putCostsSchema.safeParse(req.body)
     if (!parsed.success) return bad(res, parsed.error)
+    const onBehalf = trip.employee_id !== self.id
+    if (onBehalf && !parsed.data.reason) {
+      res.status(400).json({ error: "reason_required" })
+      return
+    }
     const { data: existing, error } = await supabaseAdmin
       .from("vehicle_trip_costs")
       .select("id, claim_state, cost_type, amount, paid_by, incurred_on, note")
@@ -1145,9 +1215,9 @@ vehiclesRouter.put(
       recordId: trip.id,
       action: "UPDATE",
       actorEmpId: self.id,
-      context: "修改用車費用",
+      context: onBehalf ? `HR 修改用車費用：${parsed.data.reason}` : "修改用車費用",
       oldRow: { costs: rows.filter((r) => r.claim_state === "none") },
-      newRow: { costs: parsed.data.costs },
+      newRow: { costs: parsed.data.costs, ...(onBehalf ? { reason: parsed.data.reason } : {}) },
     })
     res.status(200).json({ trip: await loadTripDto(tenantId, trip.id, { selfId: self.id, isHr: self.isHr }) })
   }),
@@ -1293,6 +1363,7 @@ const settingsSchema = z.object({
   reminderEmpIds: z.array(z.string().uuid()).max(50).optional(),
   maxBookingHours: z.number().int().min(1).max(720).optional(),
   checkoutEarlyMinutes: z.number().int().min(0).max(1440).optional(),
+  maxDaysAhead: z.number().int().min(1).max(365).optional(),
 })
 
 const SETTINGS_FIELD_COL: Record<string, string> = {
@@ -1305,6 +1376,7 @@ const SETTINGS_FIELD_COL: Record<string, string> = {
   reminderEmpIds: "reminder_emp_ids",
   maxBookingHours: "max_booking_hours",
   checkoutEarlyMinutes: "checkout_early_minutes",
+  maxDaysAhead: "max_days_ahead",
 }
 
 /** PUT /vehicle-settings — HR；報銷類別須存在、啟用、且不是「需出差核准」的類別。 */
