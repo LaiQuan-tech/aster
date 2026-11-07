@@ -30,12 +30,13 @@
  *
  * ── 補休（2026-11-08 驗收追加）────────────────────────────────────────
  *   補休額度記在另一本帳 `comp_time_ledger`（加班轉補休 append hours_earned；HR 手動 POST /comp-time/adjust append
- *   hours_used），可用＝Σ earned − Σ used。補休假別（isCompLeaveType）若沒有 leave_balances 額度桶，就改用補休帳：
+ *   hours_used），可用＝Σ earned − Σ used。補休假別（isCompLeaveType：code comp／comp_time 或名稱＝補休）若沒有 leave_balances 額度桶，就改用補休帳：
  *   送單時本單＋簽核中補休假單 > 可用 → 400；每關核准前本單 > 可用 → 409；最終核准 append 一列 hours_used
  *   （source_request_id＝假單）後重查，超過就撤掉自己那列 → 409（見 debitCompTimeChecked）。
  */
 import type { SupabaseClient } from "@supabase/supabase-js"
 import { supabaseAdmin } from "../lib/supabase.js"
+import { logger } from "../lib/logger.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { localDateKey } from "../lib/tz.js"
 import { resolveBalanceBucket, resolveHours, type BalanceBucket } from "./ledger.js"
@@ -135,13 +136,13 @@ export async function pendingHoursInBucket(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * 補休假別：名稱含「補休」或 code 為 comp／comp_time／compensatory（與 leave-overview 的「補休」排序規則同一個判斷依據：
- * 系統沒有「這個假別對應補休帳」的設定欄）。
+ * 補休假別：code 為 comp／comp_time，或名稱（去空白）完全等於「補休」。
+ * 系統沒有「這個假別對應補休帳」的設定欄；刻意不用「名稱含補休」——「國定假日補休」「颱風補休」不是扣補休帳的假。
  */
 export function isCompLeaveType(type: { code?: string | null; name?: string | null } | null | undefined): boolean {
   if (!type) return false
-  if ((type.name ?? "").includes("補休")) return true
-  return /^comp(_?time|ensatory)?$/i.test((type.code ?? "").trim())
+  if ((type.name ?? "").replace(/\s+/g, "") === "補休") return true
+  return /^comp(_time)?$/i.test((type.code ?? "").trim())
 }
 
 async function leaveTypeIsComp(tenantId: string, leaveTypeId: string): Promise<boolean> {
@@ -275,22 +276,18 @@ async function debitCompTimeChecked(
     .single()
   if (insErr || !inserted) throw new Error(`leave cap comp debit: ${insErr?.message}`)
   const rowId = (inserted as { id: string }).id
-  const after = await compTimeAvailable(t.tenantId, t.employeeId, supabase)
+  let after: number
+  try {
+    after = await compTimeAvailable(t.tenantId, t.employeeId, supabase)
+  } catch (err) {
+    // 重查讀不到（呼叫端會回 503、假單退回待簽核）→ 先撤掉自己剛寫的那列，否則補休帳被扣、假單卻沒核准，重核准又再扣一次。
+    await rollbackCompRow(t, rowId, requestedHours, supabase, "沖回：補休額度重查失敗，假單核准已退回")
+    throw err
+  }
   if (after >= -EPS) return { status: "debited", ledger: "comp", compRowId: rowId }
 
   // 超過了（併發）→ 撤掉自己這一列。
-  const { error: delErr } = await supabase.from("comp_time_ledger").delete().eq("id", rowId)
-  if (delErr) {
-    const { error: revErr } = await supabase.from("comp_time_ledger").insert({
-      tenant_id: t.tenantId,
-      employee_id: t.employeeId,
-      source_request_id: t.requestId ?? null,
-      hours_earned: 0,
-      hours_used: -requestedHours,
-      note: "沖回：補休額度不足，假單核准已退回",
-    })
-    if (revErr) throw new Error(`leave cap comp debit rollback failed: ${delErr.message} / ${revErr.message}`)
-  }
+  await rollbackCompRow(t, rowId, requestedHours, supabase, "沖回：補休額度不足，假單核准已退回")
   const info = evaluateLeaveCap({ leaveTypeId: t.leaveTypeId, remainingHours: round2(after + requestedHours), requestedHours }) ?? {
     error: LEAVE_BALANCE_INSUFFICIENT,
     leaveTypeId: t.leaveTypeId,
@@ -298,6 +295,36 @@ async function debitCompTimeChecked(
     availableHours: Math.max(0, round2(after + requestedHours)),
   }
   return { status: "insufficient", info }
+}
+
+/**
+ * 撤掉 debitCompTimeChecked 寫的那列：先刪；刪不掉就補一列等額沖回（hours_used 為負）並記 error log；兩者都失敗 → 丟例外（記 error）。
+ */
+async function rollbackCompRow(
+  t: CapTarget & { requestId?: string },
+  rowId: string,
+  requestedHours: number,
+  supabase: SupabaseClient,
+  note: string,
+): Promise<void> {
+  const { error: delErr } = await supabase.from("comp_time_ledger").delete().eq("id", rowId)
+  if (!delErr) return
+  logger.error({ err: delErr, tenantId: t.tenantId, rowId, requestId: t.requestId }, "leave cap: comp_time_ledger row delete failed, posting reversal")
+  const { error: revErr } = await supabase.from("comp_time_ledger").insert({
+    tenant_id: t.tenantId,
+    employee_id: t.employeeId,
+    source_request_id: t.requestId ?? null,
+    hours_earned: 0,
+    hours_used: -requestedHours,
+    note,
+  })
+  if (revErr) {
+    logger.error(
+      { err: revErr, tenantId: t.tenantId, rowId, requestId: t.requestId, hours: requestedHours },
+      "leave cap: comp_time_ledger rollback FAILED — 補休帳多扣，需人工沖回",
+    )
+    throw new Error(`leave cap comp debit rollback failed: ${delErr.message} / ${revErr.message}`)
+  }
 }
 
 /**

@@ -13,7 +13,7 @@
  * 規則（任何一條不過 → 400，error 見下）：
  *   1. 結束必須晚於開始 → invalid_leave_range
  *   2. 有帶 hours：必須是 > 0 的有限數，且 ≤ 起訖牆鐘時數（+0.01）→ invalid_leave_hours（附 maxHours）
- *   3. 有 segments：每段 hours > 0 且 ≤ 該段起訖（endTime ≤ startTime 視為跨午夜，+24h）；日期不得重複；
+ *   3. 有 segments：每段 hours ≥ 0.5（員工端最小單位）且 ≤ 該段起訖（endTime ≤ startTime 視為跨午夜，+24h）；日期不得重複；
  *      日期必須落在起訖的本地日範圍內 → invalid_leave_segments；
  *      hours 有帶時必須等於各段加總（誤差 0.01）→ invalid_leave_hours（附 expectedHours）；沒帶 → 用加總。
  *   4. 沒有 segments 且起訖跨了本地日 → leave_segments_required
@@ -22,6 +22,8 @@
 import { localDateKey } from "../lib/tz.js"
 
 const TOLERANCE = 0.01
+/** 每段最少 0.5 小時（與員工端請假最小單位一致；依班別算出的半天如 3.88 不受影響）。 */
+export const MIN_SEGMENT_HOURS = 0.5
 
 export interface LeaveSegmentInput {
   date: string
@@ -92,8 +94,8 @@ export function validateLeaveRequestHours(input: {
   const seen = new Set<string>()
   let sum = 0
   for (const seg of segments) {
-    if (!Number.isFinite(seg.hours) || seg.hours <= 0) {
-      return { ok: false, error: "invalid_leave_segments", message: `${seg.date} 的請假時數必須大於 0` }
+    if (!Number.isFinite(seg.hours) || seg.hours < MIN_SEGMENT_HOURS - 0.001) {
+      return { ok: false, error: "invalid_leave_segments", message: `${seg.date} 的請假時數至少 ${MIN_SEGMENT_HOURS} 小時` }
     }
     if (seg.hours > segmentMinutes(seg) / 60 + TOLERANCE) {
       return { ok: false, error: "invalid_leave_segments", message: `${seg.date} 的請假時數超過該段起訖時間` }

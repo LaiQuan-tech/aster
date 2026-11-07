@@ -93,7 +93,11 @@ describe("leave_balance_insufficient 錯誤的人話", () => {
 describe("驗收追加", () => {
   it("isCompLeaveType 與 API 同規則", () => {
     expect(isCompLeaveType({ code: "comp", name: "補休假" })).toBe(true);
-    expect(isCompLeaveType({ code: "x", name: "補休" })).toBe(true);
+    expect(isCompLeaveType({ code: "COMP_TIME", name: "其他" })).toBe(true);
+    expect(isCompLeaveType({ code: "x", name: " 補 休 " })).toBe(true);
+    expect(isCompLeaveType({ code: "holiday_comp", name: "國定假日補休" })).toBe(false);
+    expect(isCompLeaveType({ code: "typhoon", name: "颱風補休" })).toBe(false);
+    expect(isCompLeaveType({ code: "compensatory", name: "其他" })).toBe(false);
     expect(isCompLeaveType({ code: "company_trip", name: "公司旅遊" })).toBe(false);
   });
 

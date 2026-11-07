@@ -44,13 +44,13 @@ export function quotaRemainingHours(
 }
 
 /**
- * 補休假別：名稱含「補休」或 code 為 comp／comp_time／compensatory（與 API isCompLeaveType 同一判斷）。
- * 沒有 leave_balances 額度桶時，補休的額度看補休帳（GET /comp-time?scope=mine 的 balance）。
+ * 補休假別：code 為 comp／comp_time，或名稱（去空白）完全等於「補休」（與 API isCompLeaveType 同一判斷；
+ * 「國定假日補休」「颱風補休」不算）。沒有 leave_balances 額度桶時，補休的額度看補休帳（GET /comp-time?scope=mine 的 balance）。
  */
 export function isCompLeaveType(type: { code?: string | null; name?: string | null } | null | undefined): boolean {
   if (!type) return false;
-  if ((type.name ?? "").includes("補休")) return true;
-  return /^comp(_?time|ensatory)?$/i.test((type.code ?? "").trim());
+  if ((type.name ?? "").replace(/\s+/g, "") === "補休") return true;
+  return /^comp(_time)?$/i.test((type.code ?? "").trim());
 }
 
 export interface LeaveBalanceInsufficient {

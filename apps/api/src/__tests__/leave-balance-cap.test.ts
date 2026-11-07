@@ -406,6 +406,14 @@ describe("validateLeaveRequestHours（純函式）", () => {
     expect(v(S, E, 16, [seg("2027-06-07", "09:00", "18:00", 8), seg("2027-06-09", "09:00", "18:00", 8)])).toMatchObject({ ok: false, error: "invalid_leave_segments" })
   })
 
+  it("每段至少 0.5 小時（0.4 → invalid_leave_segments）；0.5 與依班別的半天 3.88 照過", () => {
+    const S = tpe("2027-06-07", "09:00")
+    const E = tpe("2027-06-08", "18:00")
+    expect(v(S, E, 8.4, [seg("2027-06-07", "09:00", "18:00", 8), seg("2027-06-08", "09:00", "09:30", 0.4)])).toMatchObject({ ok: false, error: "invalid_leave_segments" })
+    expect(v(S, E, 8.5, [seg("2027-06-07", "09:00", "18:00", 8), seg("2027-06-08", "09:00", "09:30", 0.5)])).toEqual({ ok: true, hours: 8.5 })
+    expect(v(S, E, 11.88, [seg("2027-06-07", "09:00", "18:00", 8), seg("2027-06-08", "08:30", "12:23", 3.88)])).toEqual({ ok: true, hours: 11.88 })
+  })
+
   it("跨午夜的大夜班段（22:00–06:00）算 8 小時", () => {
     expect(v(tpe("2027-06-03", "22:00"), tpe("2027-06-04", "06:00"), 8, [seg("2027-06-03", "22:00", "06:00", 8)])).toEqual({ ok: true, hours: 8 })
   })
@@ -474,9 +482,14 @@ const compRows = () => (fake.db.comp_time_ledger ?? []).filter((r) => r.employee
 const compBalance = () => compRows().reduce((sum, r) => sum + Number(r.hours_earned) - Number(r.hours_used), 0)
 
 describe("補休：依補休帳可用時數擋", () => {
-  it("isCompLeaveType：名稱含補休或 code 為 comp／comp_time", () => {
+  it("isCompLeaveType：code 為 comp／comp_time，或名稱（去空白）＝補休；國定假日補休／颱風補休不算", () => {
     expect(isCompLeaveType({ code: "x", name: "補休" })).toBe(true)
+    expect(isCompLeaveType({ code: "x", name: " 補 休 " })).toBe(true)
     expect(isCompLeaveType({ code: "comp_time", name: "其他" })).toBe(true)
+    expect(isCompLeaveType({ code: "COMP", name: "其他" })).toBe(true)
+    expect(isCompLeaveType({ code: "holiday_comp", name: "國定假日補休" })).toBe(false)
+    expect(isCompLeaveType({ code: "typhoon", name: "颱風補休" })).toBe(false)
+    expect(isCompLeaveType({ code: "compensatory", name: "其他" })).toBe(false)
     expect(isCompLeaveType({ code: "company_trip", name: "公司旅遊假" })).toBe(false)
     expect(isCompLeaveType({ code: "annual", name: "特休" })).toBe(false)
   })
@@ -563,6 +576,73 @@ describe("補休：依補休帳可用時數擋", () => {
     expect(r.status).toBe("insufficient")
     expect(compBalance()).toBe(0)
     expect(compRows().filter((x) => x.note === "請補休（假單核准自動扣）")).toHaveLength(0)
+  })
+
+  it.each([
+    ["刪除成功", false],
+    ["刪除失敗 → 補一筆等額沖回", true],
+  ])("寫入後重查補休帳失敗（%s）→ 丟錯，補休帳可用時數不變", async (_label, deleteFails) => {
+    fake.db.comp_time_ledger = [compRow({ hours_earned: 8 })]
+    // 第 N 次讀 comp_time_ledger 失敗：第 1 次（寫入前查可用）成功、第 2 次（寫入後重查）失敗。
+    let reads = 0
+    const proxy = {
+      from: (table: string) => {
+        const b = fake.from(table)
+        if (table !== "comp_time_ledger") return b
+        const origSelect = b.select
+        b.select = (cols?: string) => {
+          if (cols === "hours_earned, hours_used") {
+            reads += 1
+            if (reads === 2) fake.injectError({ table: "comp_time_ledger", action: "select", error: { message: "read boom", code: "XX000" } })
+          }
+          return origSelect(cols)
+        }
+        const origDelete = b.delete
+        b.delete = () => {
+          if (deleteFails) fake.injectError({ table: "comp_time_ledger", action: "delete", error: { message: "delete boom", code: "XX000" } })
+          return origDelete()
+        }
+        return b
+      },
+    }
+    await expect(
+      debitLeaveBalanceChecked(
+        { tenantId: TENANT_ID, employeeId: STAFF_ID, leaveTypeId: LT_COMP, startAt: "2027-06-03T01:00:00.000Z", endAt: "2027-06-03T09:00:00.000Z", hours: 8 },
+        proxy as never,
+      ),
+    ).rejects.toThrow(/read boom/)
+    expect(compBalance()).toBe(8)
+    if (deleteFails) expect(compRows().some((r) => Number(r.hours_used) === -8)).toBe(true)
+    else expect(compRows()).toHaveLength(1)
+  })
+
+  it("核准路徑：重查補休帳失敗 → 503、假單回 pending、補休帳不變；之後重核准只扣一次", async () => {
+    fake.db.comp_time_ledger = [compRow({ hours_earned: 8 })]
+    const id = await file(leaveOn("2027-06-03", 8, LT_COMP))
+    // 核准前檢查 1 次、最終扣款前 1 次、寫入後重查第 3 次 → 讓第 3 次失敗。
+    let n = 0
+    const orig = fake.from
+    const spy = vi.spyOn(fake, "from").mockImplementation((table: string) => {
+      const b = orig(table)
+      if (table === "comp_time_ledger") {
+        const sel = b.select
+        b.select = (cols?: string) => {
+          if (cols === "hours_earned, hours_used" && ++n === 3) fake.injectError({ table: "comp_time_ledger", action: "select", error: { message: "read boom", code: "XX000" } })
+          return sel(cols)
+        }
+      }
+      return b
+    })
+    const res = await post(`/requests/${id}/approve`, MGR_TOKEN).send({})
+    spy.mockRestore()
+    expect(res.status, JSON.stringify(res.body)).toBe(503)
+    expect(res.body.error).toBe("leave_balance_check_failed")
+    expect(requestRow(id)).toMatchObject({ status: "pending" })
+    expect(compBalance()).toBe(8)
+    const again = await post(`/requests/${id}/approve`, MGR_TOKEN).send({})
+    expect(again.status, JSON.stringify(again.body)).toBe(200)
+    expect(compBalance()).toBe(0)
+    expect(compRows().filter((r) => Number(r.hours_used) > 0)).toHaveLength(1)
   })
 
   it("補休假別若 HR 在 leave_balances 設了額度桶 → 用那個桶判斷（不看補休帳）", async () => {
