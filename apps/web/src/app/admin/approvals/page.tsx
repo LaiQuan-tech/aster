@@ -61,6 +61,7 @@ import { getMeCached, invalidateEssState } from "@/lib/ess-state";
 import { BEYOND_CAP_LABEL } from "@/lib/request-forms";
 import { errorMessageOf, periodClosedMessage } from "@/lib/period-closed";
 import { overtimeBatchItemText, overtimeCapErrorText } from "@/lib/overtime-approval";
+import { leaveBalanceBatchItemText, leaveBalanceErrorText } from "@/lib/leave-balance-cap";
 import {
   BUCKET_LABEL,
   KIND_LABEL,
@@ -104,7 +105,8 @@ function errMsg(err: unknown, fallback: string): string {
   // 單筆／代理簽核遇到 403 own_request（不能簽自己的單）→ 中文，不秀錯誤碼。
   if (isOwnRequestError(err)) return OWN_REQUEST_TEXT;
   // 409 overtime_cap_exceeded（加班單核准會超過月 40／日 12 小時上限）→ 帶數字的人話。
-  return overtimeCapErrorText(err, "核准") ?? errorMessageOf(err, fallback);
+  // 409 leave_balance_insufficient（有額度假別核准會超過剩餘）→「此假別剩餘 X，申請 Y，超過額度無法核准」。
+  return overtimeCapErrorText(err, "核准") ?? leaveBalanceErrorText(err, "核准") ?? errorMessageOf(err, fallback);
 }
 
 function dateOnly(iso: string): string {
@@ -348,7 +350,7 @@ function ApprovalsView() {
         if (failed && !failed.ok) {
           if (failed.error === "period_closed") throw new Error(periodClosedMessage(failed.period));
           // 加班上限（數字在 failed.cap，日／月上限分開說）／上限檢查失敗 → 與 ESS 批次同一套人話。
-          throw new Error(overtimeBatchItemText(failed, "核准") ?? failed.error);
+          throw new Error(overtimeBatchItemText(failed, "核准") ?? leaveBalanceBatchItemText(failed, "核准") ?? failed.error);
         }
         throw new Error("代理簽核失敗");
       }

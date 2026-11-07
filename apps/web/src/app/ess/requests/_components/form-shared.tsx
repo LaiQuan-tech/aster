@@ -8,6 +8,7 @@
 import { useId, useRef, type ChangeEvent, type ReactNode } from "react";
 import { friendlyError } from "@/lib/attendance-sheets-api";
 import { overtimeCapErrorText } from "@/lib/overtime-approval";
+import { leaveBalanceErrorText } from "@/lib/leave-balance-cap";
 import type { CreateRequestBody } from "@/lib/ess-api";
 import {
   EXPENSE_METHOD_FIELD_LABEL,
@@ -44,10 +45,16 @@ const HAS_CJK_RE = /[\u3000-\u9fff\uff00-\uffef]/;
  *      原始錯誤改記在 console。前端自己擋下的（UploadPrepError）等本來就是中文的訊息照舊原樣顯示。
  * `fallback` 只在丟出來的不是 Error（字串之類）或沒有訊息時用，各呼叫點（請假送出、附件補傳與撤回、載入申請）傳自己的中文說法。
  */
-export function describeError(err: unknown, fallback: string): string {
+export function describeError(err: unknown, fallback: string, opts: { hoursPerDay?: number } = {}): string {
   if (isNetworkFailure(err)) return NETWORK_FAILURE_MESSAGE;
   // 409 overtime_cap_exceeded（2026-11 加班事前核准制：月 40／日 12 小時上限）→ 帶數字的人話。
-  const text = overtimeCapErrorText(err, "送出") ?? attachmentTooLargeText(err) ?? requestErrorText(err) ?? friendlyError(err, fallback);
+  // 400 leave_balance_insufficient（2026-11-08 有額度假別超過剩餘）→「此假別剩餘 X，申請 Y，超過額度無法送出」（天＋時，opts.hoursPerDay）。
+  const text =
+    overtimeCapErrorText(err, "送出") ??
+    leaveBalanceErrorText(err, "送出", opts.hoursPerDay) ??
+    attachmentTooLargeText(err) ??
+    requestErrorText(err) ??
+    friendlyError(err, fallback);
   // friendlyError 查不到對照時會把 Error.message 原樣丟回來；原樣又沒有半個中文字＝英文代碼，不上畫面。
   if (err instanceof Error && text === err.message && !HAS_CJK_RE.test(text)) {
     console.warn("[申請] 無法辨識的錯誤，畫面只顯示通用說法", err);
@@ -259,18 +266,21 @@ export function SubmitBar({
   submitting,
   error,
   label = "送出申請",
+  disabled = false,
   children,
 }: {
   submitting: boolean;
   error: string | null;
   label?: string;
+  /** 停用送出鈕（原因由呼叫端用 error 或 children 顯示）。 */
+  disabled?: boolean;
   children?: ReactNode;
 }) {
   return (
     <div className="space-y-3 pt-1">
       {children}
       <InlineError>{error}</InlineError>
-      <Button type="submit" size="lg" block loading={submitting}>
+      <Button type="submit" size="lg" block loading={submitting} disabled={disabled}>
         {submitting ? "送出中…" : label}
       </Button>
     </div>

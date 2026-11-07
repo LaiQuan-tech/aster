@@ -37,6 +37,7 @@ import { requestAmountsOf } from "@/lib/approval-view";
 import { fmtMoney, relativeTime } from "@/lib/ess-format";
 import { describePeriodClosed } from "@/lib/period-closed";
 import { overtimeCapErrorText } from "@/lib/overtime-approval";
+import { leaveBalanceErrorText } from "@/lib/leave-balance-cap";
 import { approvalPeriodText, approvalWhenText } from "@/lib/request-forms";
 import { LateReportsSection } from "./_components/LateReportsSection";
 import { BonusRunApprovalsSection } from "./_components/BonusRunApprovalsSection";
@@ -107,6 +108,9 @@ function friendlyError(err: unknown): string {
   // 409 overtime_cap_exceeded（加班單核准會超過月 40／日 12 小時上限）→ 帶數字的人話。
   const cap = overtimeCapErrorText(err, "核准");
   if (cap) return cap;
+  // 409 leave_balance_insufficient（有額度假別核准會超過剩餘）→ 帶天＋時的人話。
+  const balance = leaveBalanceErrorText(err, "核准");
+  if (balance) return balance;
   const msg = err instanceof Error ? err.message : String(err);
   if (msg.includes("attachment_required")) return "此假別需要附件，申請人尚未上傳，無法核准（可駁回請其補件）。";
   if (msg.includes("not_current_approver")) return "這張單目前不是輪到你簽核。";

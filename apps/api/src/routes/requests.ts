@@ -6,6 +6,13 @@ import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
 import { applyApprovalEffects } from "../services/ledger.js"
+import {
+  LEAVE_BALANCE_CHECK_FAILED,
+  checkLeaveBalanceForApproval,
+  checkLeaveBalanceForCreate,
+  debitLeaveBalanceChecked,
+  type LeaveBalanceInsufficient,
+} from "../services/leave-balance-cap.js"
 import { checkOtRequestCaps, splitMinutesByLocalDay, validateOtRequestTimes, type OtCapExceeded } from "../services/overtime-approval.js"
 import { findSheet, recomputeSheet } from "../services/attendance-sheets.js"
 import { resolveApproverChain, type StepKind } from "../services/approval-chain.js"
@@ -836,6 +843,24 @@ requestsRouter.post(
       }
       const hasBeyondCapCols = await leaveRequestsHaveBeyondCap()
 
+      // 請假額度上限（2026-11-08，services/leave-balance-cap.ts）：有額度的假別（申請起日所屬餘額桶 entitled＋deferred > 0）
+      // 本單＋同桶簽核中假單 > 剩餘 → 400 leave_balance_insufficient，不建單。沒有桶／entitled=0 的記帳桶（事假等）不擋。
+      // 檢查本身失敗 → 503 leave_balance_check_failed（可重試），不默默放行。
+      if (kind === "leave" && leaveTypeId) {
+        let insufficient: LeaveBalanceInsufficient | null = null
+        try {
+          insufficient = await checkLeaveBalanceForCreate({ tenantId, employeeId: self.id, leaveTypeId, startAt, endAt, hours })
+        } catch (capErr) {
+          logger.warn({ err: capErr, tenantId, employeeId: self.id }, "POST /requests: leave balance check failed")
+          res.status(503).json({ error: LEAVE_BALANCE_CHECK_FAILED })
+          return
+        }
+        if (insufficient) {
+          res.status(400).json(insufficient)
+          return
+        }
+      }
+
       // 公務車預約：鏈解析成功之後、建申請單之前先佔時段（vehicle_bookings，exclusion constraint）。
       // 撞時段 → 409 vehicle_booking_conflict，**不建任何申請單**；後面任何一步失敗都要 cancelSlot 釋放。
       let slot: { bookingId: string; vehicle: { id: string; plateNo: string; model: string } } | null = null
@@ -1357,6 +1382,10 @@ const DECISION_ERROR_STATUS: Record<string, number> = {
   overtime_cap_exceeded: 409,
   // 上限檢查本身失敗（規則／DB 讀不到）：可重試。
   overtime_cap_check_failed: 503,
+  // 請假額度上限（2026-11-08）：有額度的假別核准後會超過剩餘（回應帶 leaveTypeId／requestedHours／availableHours）。
+  leave_balance_insufficient: 409,
+  // 額度檢查／扣款本身失敗：可重試，核准未成立。
+  leave_balance_check_failed: 503,
 }
 
 async function decide(
@@ -1401,7 +1430,9 @@ async function decide(
           .json(
             outcome.cap
               ? outcome.cap
-              : outcome.period
+              : outcome.balance
+                ? outcome.balance
+                : outcome.period
                 ? { error: outcome.error, period: outcome.period }
                 : { error: outcome.error },
           )
@@ -1440,7 +1471,7 @@ type DecisionOutcome =
       /** 公出／出差單駁回時自動撤回綁定報銷的結果（2026-10-17）；其他情況缺席。 */
       expenseClaims?: { withdrawn: number; kept: number; failed: boolean }
     }
-  | { ok: false; id: string; error: string; period?: string; cap?: OtCapExceeded }
+  | { ok: false; id: string; error: string; period?: string; cap?: OtCapExceeded; balance?: LeaveBalanceInsufficient }
 
 /** markStep／transitionRequest 搶輸（列已不在預期的前一狀態）時回的哨兵值，對應 HTTP 409 not_pending。 */
 const NOT_PENDING = "not_pending"
@@ -1715,6 +1746,12 @@ async function decideOneRequest(params: {
     const capOutcome = await otCapOutcome(tenantId, lr, requestId)
     if (capOutcome) return capOutcome
   }
+  // 請假額度上限（2026-11-08）：有額度的假別每一關核准前都檢查「本單 > 剩餘」→ 409 leave_balance_insufficient，關卡不寫入。
+  // 駁回不受限。最終核准另在寫入 approved 後以樂觀鎖「檢查＋扣」（見下），擋住併發核准。
+  if (action === "approve" && lr.kind === "leave" && lr.leave_type_id) {
+    const balOutcome = await leaveBalanceOutcome(tenantId, lr, requestId)
+    if (balOutcome) return balOutcome
+  }
   // 候選之一（含 platform_admin 簽老闆關）簽核 → approver_emp_id 改寫成實際簽的人（HR 代簽不改寫，見 markStep）。
   const takeOver = isCandidate && step.approver_emp_id !== actor.id
   // 稽核 context 的加註：platform_admin 簽老闆關／候選代簽／HR 代簽。
@@ -1933,6 +1970,63 @@ async function decideOneRequest(params: {
     }
   }
 
+  // 請假額度上限（2026-11-08）：有額度的假別在這裡「檢查＋扣」一次完成（樂觀鎖 CAS，services/leave-balance-cap.ts）。
+  // 兩張同時最終核准只會有一張扣得到；不足（或檢查失敗）→ 本張退回 pending、本關回 pending，回 409（503），不做任何核准副作用。
+  let leaveAlreadyDebited = false
+  if (lr.kind === "leave" && lr.leave_type_id) {
+    let failure: Extract<DecisionOutcome, { ok: false }> | null = null
+    try {
+      const debit = await debitLeaveBalanceChecked({
+        tenantId,
+        employeeId: lr.employee_id,
+        leaveTypeId: lr.leave_type_id,
+        startAt: lr.start_at,
+        endAt: lr.end_at,
+        hours: lr.hours,
+      })
+      if (debit.status === "debited") leaveAlreadyDebited = true
+      else if (debit.status === "insufficient") failure = { ok: false, id: requestId, error: debit.info.error, balance: debit.info }
+    } catch (err) {
+      logger.warn({ err, tenantId, requestId }, "decideOneRequest: leave balance checked debit failed")
+      failure = { ok: false, id: requestId, error: LEAVE_BALANCE_CHECK_FAILED }
+    }
+    if (failure) {
+      const { error: revertErr } = await supabaseAdmin
+        .from("leave_requests")
+        .update({ status: "pending" })
+        .eq("tenant_id", tenantId)
+        .eq("id", requestId)
+        .eq("status", "approved")
+        .select("id")
+      if (revertErr) {
+        logger.error({ err: revertErr, tenantId, requestId }, "decideOneRequest: leave balance check failed to revert approval")
+        await writeAuditLog({
+          tenantId,
+          tableName: "leave_requests",
+          recordId: requestId,
+          action: "UPDATE",
+          actorEmpId: actor.id,
+          context: "leave balance revert FAILED：最終核准後額度不足／檢查失敗，退回 pending 失敗，單子仍為 approved（未扣餘額）",
+          oldRow: { status: "approved" },
+          newRow: { status: "approved", revertError: revertErr.message, recheck: failure.balance ?? failure.error },
+        })
+        return { ok: false, id: requestId, error: "leave_balance_revert_failed" }
+      }
+      await revertStep(step, "approved", actor.id)
+      await writeAuditLog({
+        tenantId,
+        tableName: "leave_requests",
+        recordId: requestId,
+        action: "UPDATE",
+        actorEmpId: actor.id,
+        context: "leave balance check reverted approval：最終核准時假別額度不足（或檢查失敗），退回 pending、本關回 pending",
+        oldRow: { status: "approved", current_step: currentStep },
+        newRow: { status: "pending", current_step: currentStep, recheck: failure.balance ?? failure.error },
+      })
+      return failure
+    }
+  }
+
   await writeAuditLog({
     tenantId,
     tableName: "leave_requests",
@@ -1971,7 +2065,7 @@ async function decideOneRequest(params: {
     advance_requested: (lr.advance_requested as string | number | null) ?? null,
     segments: (lr.segments as Array<Record<string, unknown>> | null) ?? null,
     reason: (lr.reason as string | null) ?? null,
-  })
+  }, { leaveAlreadyDebited })
 
   // 加班事前核准制（2026-11-01）：加班單最終核准 → 該月月表若仍可編輯（draft／returned），立即重算
   // 異常（不重跑結算），overtime_unapproved／overtime_beyond_cap_unapproved 當場消失。best-effort。
@@ -2029,6 +2123,32 @@ async function otCapOutcome(
   } catch (err) {
     logger.warn({ err, tenantId, requestId }, "decideOneRequest: overtime cap check failed")
     return { ok: false, id: requestId, error: "overtime_cap_check_failed" }
+  }
+}
+
+/**
+ * 請假額度檢查（核准前，每一關）→ DecisionOutcome（null＝通過或不限額）。不足 → leave_balance_insufficient（409，帶 balance）；
+ * 檢查失敗 → leave_balance_check_failed（503）。
+ */
+async function leaveBalanceOutcome(
+  tenantId: string,
+  lr: { employee_id: string; leave_type_id: string | null; start_at: string; end_at: string; hours: unknown },
+  requestId: string,
+): Promise<Extract<DecisionOutcome, { ok: false }> | null> {
+  if (!lr.leave_type_id) return null
+  try {
+    const info = await checkLeaveBalanceForApproval({
+      tenantId,
+      employeeId: lr.employee_id,
+      leaveTypeId: lr.leave_type_id,
+      startAt: lr.start_at,
+      endAt: lr.end_at,
+      hours: lr.hours,
+    })
+    return info ? { ok: false, id: requestId, error: info.error, balance: info } : null
+  } catch (err) {
+    logger.warn({ err, tenantId, requestId }, "decideOneRequest: leave balance check failed")
+    return { ok: false, id: requestId, error: LEAVE_BALANCE_CHECK_FAILED }
   }
 }
 

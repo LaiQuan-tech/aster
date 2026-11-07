@@ -38,7 +38,7 @@ function hoursBetween(startAt: string, endAt: string): number {
 
 /** Resolve the effective hours for a request: explicit `hours` wins, else derive
  * from start/end, else 0. */
-function resolveHours(req: ApprovedRequest): number {
+export function resolveHours(req: Pick<ApprovedRequest, "hours" | "start_at" | "end_at">): number {
   if (req.hours != null) {
     const n = Number(req.hours)
     if (Number.isFinite(n)) return n
@@ -86,17 +86,49 @@ async function creditCompTime(
  * 同一個 `year` 底下可能同時存在曆年列與週年列（唯一鍵已改成 period_start），
  * 所以退回曆年桶那一段用 limit(1) 取最早建立的一列，不用 maybeSingle（會因多列報錯）。
  */
+export interface BalanceBucket {
+  id: string
+  /** used 的數值。 */
+  used: number
+  /** used 讀回的原值（PostgREST 可能回字串 "8.00"）；樂觀鎖 `.eq("used", usedRaw)` 用。 */
+  usedRaw: string | number | null
+  entitled: number
+  deferred: number
+  /** 期間（期間欄未套、或走曆年退回時可能缺）。 */
+  periodStart: string | null
+  periodEnd: string | null
+  year: number | null
+}
+
+const numOr0 = (v: unknown) => {
+  const n = Number(v ?? 0)
+  return Number.isFinite(n) ? n : 0
+}
+
+function toBucket(row: Record<string, unknown>): BalanceBucket {
+  return {
+    id: row.id as string,
+    used: numOr0(row.used),
+    usedRaw: (row.used as string | number | null | undefined) ?? null,
+    entitled: numOr0(row.entitled),
+    deferred: numOr0(row.deferred),
+    periodStart: (row.period_start as string | null | undefined) ?? null,
+    periodEnd: (row.period_end as string | null | undefined) ?? null,
+    year: row.year == null ? null : Number(row.year),
+  }
+}
+
 export async function resolveBalanceBucket(
   supabase: SupabaseClient,
   tenantId: string,
   employeeId: string,
   leaveTypeId: string,
   startAtLocalDate: string,
-): Promise<{ id: string; used: number } | null> {
+): Promise<BalanceBucket | null> {
   if (await leaveBalancesHavePeriod()) {
     const { data, error } = await supabase
       .from("leave_balances")
-      .select("id, used")
+      .select("id, used, entitled, deferred, year, period_start, period_end")
       .eq("tenant_id", tenantId)
       .eq("employee_id", employeeId)
       .eq("leave_type_id", leaveTypeId)
@@ -105,14 +137,14 @@ export async function resolveBalanceBucket(
       .order("period_start", { ascending: false })
       .limit(1)
     if (error) throw new Error(`ledger resolveBalanceBucket (period): ${error.message}`)
-    const row = (data ?? [])[0] as { id: string; used: string | number | null } | undefined
-    if (row) return { id: row.id, used: Number(row.used ?? 0) }
+    const row = (data ?? [])[0] as Record<string, unknown> | undefined
+    if (row) return toBucket(row)
   }
 
   const year = Number(startAtLocalDate.slice(0, 4))
   const { data, error } = await supabase
     .from("leave_balances")
-    .select("id, used")
+    .select("id, used, entitled, deferred, year")
     .eq("tenant_id", tenantId)
     .eq("employee_id", employeeId)
     .eq("leave_type_id", leaveTypeId)
@@ -120,8 +152,9 @@ export async function resolveBalanceBucket(
     .order("created_at", { ascending: true })
     .limit(1)
   if (error) throw new Error(`ledger resolveBalanceBucket (year): ${error.message}`)
-  const row = (data ?? [])[0] as { id: string; used: string | number | null } | undefined
-  return row ? { id: row.id, used: Number(row.used ?? 0) } : null
+  const row = (data ?? [])[0] as Record<string, unknown> | undefined
+  // 曆年退回：這一列的範圍就是該年 1/1～12/31（計算簽核中假單是否落在同一桶用）。
+  return row ? { ...toBucket(row), periodStart: null, periodEnd: null, year } : null
 }
 
 /**
@@ -349,16 +382,22 @@ async function materializeFixPunch(
  *
  * MUST be best-effort: a ledger failure logs and returns without throwing so it
  * can never turn a successful approval into a 500. Reject/cancel never call this.
+ *
+ * `opts.leaveAlreadyDebited`：有額度假別（services/leave-balance-cap.ts）在最終核准時已經「檢查＋扣」
+ * 過餘額（樂觀鎖、不足就退回核准），呼叫端傳 true，這裡就不再扣。
  */
 export async function applyApprovalEffects(
   supabase: SupabaseClient,
   tenantId: string,
   req: ApprovedRequest,
+  opts: { leaveAlreadyDebited?: boolean } = {},
 ): Promise<void> {
   try {
     const hours = resolveHours(req)
 
     if (req.kind === "leave" && req.leave_type_id) {
+      // 有額度假別：核准時已由 services/leave-balance-cap.ts 以樂觀鎖「檢查＋扣」一起做掉，這裡不能再扣一次。
+      if (opts.leaveAlreadyDebited) return
       if (hours > 0) {
         await debitLeaveBalance(supabase, tenantId, req, req.leave_type_id, hours)
       }

@@ -19,6 +19,7 @@ import {
   overtimeBatchItemText,
   overtimeCapCheckFailedMessage,
 } from "./overtime-approval";
+import { LEAVE_BALANCE_CHECK_FAILED_CODE, leaveBalanceBatchItemText, leaveBalanceCheckFailedMessage } from "./leave-balance-cap";
 
 export type BatchAction = "approve" | "reject";
 
@@ -36,6 +37,8 @@ export type BatchItemResult =
       capHours?: number;
       currentHours?: number;
       requestedHours?: number;
+      /** `error: "leave_balance_insufficient"`（2026-11-08 請假額度上限）時伺服器附的數字。 */
+      balance?: { leaveTypeId?: string; requestedHours?: number; availableHours?: number };
     };
 
 export interface BatchDecisionResponse {
@@ -138,6 +141,7 @@ const ERROR_TEXT: Record<string, string> = {
   attachment_required: "此假別需要附件，申請人尚未上傳，無法核准（可駁回請其補件）。",
   [OVERTIME_CAP_CODE]: "這張加班單會超過每月加班上限或每日工時上限，無法核准。",
   [OVERTIME_CAP_CHECK_FAILED_CODE]: `${overtimeCapCheckFailedMessage("核准")}。`,
+  [LEAVE_BALANCE_CHECK_FAILED_CODE]: `${leaveBalanceCheckFailedMessage("核准")}。`,
   current_step_not_found: "這張單的簽核關卡資料有問題，請聯絡人資。",
   internal_error: "系統暫時無法處理這張單，結果不確定，請重新整理確認。",
   no_result: "伺服器沒有回報這張單的結果，請重新整理確認。",
@@ -195,7 +199,9 @@ export function summarizeBatch(
       if (action === "approve" && result.status === "pending") advancedCount += 1;
     } else {
       // 加班上限（數字在 result.cap）／上限檢查失敗：同一套人話（lib/overtime-approval.ts），其他走 describeBatchError。
-      const reason = overtimeBatchItemText(result, "核准") ?? describeBatchError(result.error, result.period);
+      // 請假額度不足（數字在 result.balance，lib/leave-balance-cap.ts）同理。
+      const reason =
+        overtimeBatchItemText(result, "核准") ?? leaveBalanceBatchItemText(result, "核准") ?? describeBatchError(result.error, result.period);
       failures.push({ id: result.id, label: labelOf(result.id), reason });
     }
   }

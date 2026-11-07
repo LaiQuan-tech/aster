@@ -270,7 +270,7 @@ function RequestsView() {
           setSubmitError(
             result.stage === "prepare"
               ? withFileName(result.file.name, describeError(result.error, "附件無法使用，請換一個檔案"), files.length > 1)
-              : describeError(result.error, "送出失敗，請稍後再試"),
+              : describeError(result.error, "送出失敗，請稍後再試", { hoursPerDay }),
           );
           return;
         }
@@ -283,12 +283,12 @@ function RequestsView() {
         showSuccess(created, summary, { uploadWarning, fillExpenseHref: fillExpenseHrefFor(body, created.requestId) });
         void loadRequests();
       } catch (err) {
-        setSubmitError(describeError(err, "送出失敗，請稍後再試"));
+        setSubmitError(describeError(err, "送出失敗，請稍後再試", { hoursPerDay }));
       } finally {
         setSubmitting(false);
       }
     },
-    [loadRequests, showSuccess],
+    [loadRequests, showSuccess, hoursPerDay],
   );
 
   // 自行墊付＋當場填的報銷明細：先準備憑證 → 建公出單 → 逐筆建報銷（綁公出單）＋傳憑證。
@@ -311,7 +311,7 @@ function RequestsView() {
           setSubmitError(
             result.stage === "prepare"
               ? `報銷第 ${result.index + 1} 筆的憑證無法使用：${expenseErrorMessage(result.error, "請換一個檔案", "upload")}（申請還沒送出）`
-              : describeError(result.error, "送出失敗，請稍後再試"),
+              : describeError(result.error, "送出失敗，請稍後再試", { hoursPerDay }),
           );
           return;
         }
@@ -334,12 +334,12 @@ function RequestsView() {
         });
         void loadRequests();
       } catch (err) {
-        setSubmitError(describeError(err, "送出失敗，請稍後再試"));
+        setSubmitError(describeError(err, "送出失敗，請稍後再試", { hoursPerDay }));
       } finally {
         setSubmitting(false);
       }
     },
-    [loadRequests, showSuccess],
+    [loadRequests, showSuccess, hoursPerDay],
   );
 
   const common = { initialDate, submitting, submitError, onSubmit: submit };

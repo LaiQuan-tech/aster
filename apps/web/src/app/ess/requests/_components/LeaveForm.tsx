@@ -32,7 +32,8 @@ import {
   type ShiftLike,
 } from "@/lib/leave-hours";
 import { formatLeaveDuration } from "@/lib/leave-duration";
-import { buildCreateBody, describeBody, isBuildError, remainingHours } from "@/lib/request-forms";
+import { buildCreateBody, describeBody, isBuildError } from "@/lib/request-forms";
+import { quotaRemainingHours } from "@/lib/leave-balance-cap";
 import { AttachmentField, ReasonField, SubmitBar, SummaryLine, validateFiles, type FormCommonProps } from "./form-shared";
 import { useLeaveCalendar } from "./use-leave-calendar";
 
@@ -127,8 +128,14 @@ export function LeaveForm({
   const requiresAttachment = selectedType?.requiresAttachment === true;
   // 餘額桶依到職週年切期間，所以要用「申請起日」去找桶（後端扣假也看起日＝最早的那天），跨週年期的單才算得對。
   const bucketDate = isRange ? (list.segments[0]?.date ?? dayDates[0] ?? startDate) : startDate;
-  const remaining = leaveTypeId ? remainingHours(balances, leaveTypeId, bucketDate) : null;
-  const overBalance = remaining != null && !formError && totalHours > remaining;
+  // 有額度的假別（桶 entitled＋deferred > 0）才有剩餘；不限額（沒有桶／entitled=0 的記帳桶，如事假）→ null、不擋。
+  // 超過剩餘 → 送出鈕停用並顯示原因（2026-11-08 業主：超過額度不能送出；API 另以簽核中假單一起算，最後以 API 為準）。
+  const remaining = leaveTypeId ? quotaRemainingHours(balances, leaveTypeId, bucketDate) : null;
+  const overBalance = remaining != null && !formError && totalHours > remaining + 0.001;
+  const overBalanceText =
+    remaining != null
+      ? `此假別剩餘 ${formatLeaveDuration(Math.max(0, remaining), hoursPerDay)}，申請 ${formatLeaveDuration(totalHours, hoursPerDay)}，超過額度無法送出`
+      : "";
 
   function newRow(date: string): LeaveDayRow {
     rowSeq.current += 1;
@@ -171,6 +178,7 @@ export function LeaveForm({
     setLocalError(null);
     if (leaveTypes && leaveTypes.length > 0 && !leaveTypeId) return setLocalError("請選擇假別");
     if (formError) return setLocalError(formError);
+    if (overBalance) return setLocalError(overBalanceText);
     if (requiresAttachment && files.length === 0) return setLocalError("此假別需要附上憑證");
     const fileError = validateFiles(files);
     if (fileError) return setLocalError(fileError);
@@ -408,7 +416,7 @@ export function LeaveForm({
             {remaining == null ? "此假別尚未設定額度" : `剩餘 ${formatLeaveDuration(Math.max(0, remaining), hoursPerDay)}`}
           </SummaryLine>
         )}
-        {overBalance && <SummaryLine tone="red">申請時數超過剩餘額度</SummaryLine>}
+        {overBalance && <SummaryLine tone="red">{overBalanceText}</SummaryLine>}
       </div>
 
       <ReasonField value={reason} onChange={setReason} placeholder="選填，最多 250 字" />
@@ -429,7 +437,11 @@ export function LeaveForm({
         />
       )}
 
-      <SubmitBar submitting={submitting} error={localError === "此假別需要附上憑證" ? submitError : (localError ?? submitError)} />
+      <SubmitBar
+        submitting={submitting}
+        disabled={overBalance}
+        error={localError === "此假別需要附上憑證" || localError === overBalanceText ? submitError : (localError ?? submitError)}
+      />
     </form>
   );
 }
