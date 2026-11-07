@@ -2,8 +2,9 @@
 
 /**
  * 請假（單位精細到小時，2026-10-11）：假別 → 單日｜多日 → 事由 → （需憑證假別才出現附件且必填）→ 送出。
- *   單日：全天｜上午｜下午｜指定時數（開始時間＋請幾小時；開始時間從上班時間起每 1 小時一格、
- *         不能落在午休，時數 1 小時為單位、最多到下班前可請的時數；結束時間由系統算、跳過午休）。
+ *   單日：全天｜上午｜下午｜指定時數（開始時間＋請幾小時；開始時間從上班時間起每 30 分一格、
+ *         不能落在午休，時數 0.5 小時為單位（2026-11-08 業主決定，所有假別一律）、最多到下班前可請的時數；
+ *         結束時間由系統算、跳過午休，例 11:30 起 1.5 小時 → 11:30–14:00）。
  *         上午／下午以午休為界（2026-10-11 業主決定）：日班上午 09:00–12:00、下午 13:00–18:00；
  *         選了上午／下午會多一行說明（`describeHalfDays`），不涵蓋午休的班別維持各半。
  *   多日（2026-10-12 業主：自己挑日期、一天一天新增，日期可以不連續，例 10/12、10/14 下午、10/20）：
@@ -12,7 +13,7 @@
  *         整份清單是一張假單（segments 依日期排序），主管簽一張；算法與檢查見 lib/leave-day-list。
  * 時數即時算：單日摘要「09:00–12:00，共 3 時」；多日逐日列出「10/12（一）全天」
  * 「10/14（三）下午 13:00–18:00 5 時」…再加「合計 2 天 5 時」「剩餘 6 天」「申請時數超過剩餘額度」。
- * 畫面只用 1 小時步進，後端不強制最小單位。
+ * 畫面用 30 分（0.5 小時）步進，後端不強制最小單位（全天／上午／下午依班別算，可能不是 0.5 的倍數）。
  * 請假時數的顯示一律天＋時（2026-10-11 業主決定，1 天 ＝ `hoursPerDay` 小時，API 隨餘額回，缺席用 8）；
  * 「指定時數」的下拉與「最多 N 小時」是輸入選項，維持小時。時數的計算與送出的 body 仍全是小時。
  * 班表功能已移除（2026-10-11）：每天都用預設班別（`defaultShift`，日班）算時數與時間選項。
@@ -22,7 +23,14 @@ import { Button, Field, Input, Segmented, Select } from "@/components/ess-ui";
 import type { LeaveBalance, LeaveType } from "@/lib/ess-api";
 import { addDays, fmtDateWithWeekday, todayKey } from "@/lib/ess-format";
 import { describeLeaveDayRow, nextLeaveDate, resolveLeaveDayList, type LeaveDayRow } from "@/lib/leave-day-list";
-import { MAX_LEAVE_SEGMENTS, describeHalfDays, resolveLeavePick, type LeavePeriod, type ShiftLike } from "@/lib/leave-hours";
+import {
+  MAX_LEAVE_SEGMENTS,
+  describeHalfDays,
+  hoursCountOptions,
+  resolveLeavePick,
+  type LeavePeriod,
+  type ShiftLike,
+} from "@/lib/leave-hours";
 import { formatLeaveDuration } from "@/lib/leave-duration";
 import { buildCreateBody, describeBody, isBuildError, remainingHours } from "@/lib/request-forms";
 import { AttachmentField, ReasonField, SubmitBar, SummaryLine, validateFiles, type FormCommonProps } from "./form-shared";
@@ -70,7 +78,7 @@ export function LeaveForm({
   const [mode, setMode] = useState<DateMode>("single");
   const [startDate, setStartDate] = useState(initialDate || todayKey());
   const [period, setPeriod] = useState<LeavePeriod>("full");
-  // 單日「指定時數」：開始時間（空字串＝上班時間）＋請幾小時（0＝預設 1 小時）。
+  // 單日「指定時數」：開始時間（空字串＝上班時間）＋請幾小時（0.5 一格；0＝預設 1 小時）。
   const [hoursStart, setHoursStart] = useState("");
   const [hoursCount, setHoursCount] = useState(0);
   // 多日：自選日期清單（每列＝日期＋時段），第一次切到「多日」才建立；與單日的選擇各自保留。
@@ -93,7 +101,7 @@ export function LeaveForm({
   const dayTypeByDate = useLeaveCalendar(calStart, addDays(calLast, 31));
   const shiftOn = (_date: string): ShiftLike => defaultShift;
 
-  // 單日：時間選項（1 小時一格、以那天的班別為準）、預設值與時數都由純函式算（見 resolveLeavePick）：
+  // 單日：時間選項（30 分一格、以那天的班別為準）、預設值與時數都由純函式算（見 resolveLeavePick）：
   // 選的值不在選項裡就退回預設——開始＝上班時間、時數 1 小時。
   const pick = useMemo(
     () =>
@@ -281,14 +289,14 @@ export function LeaveForm({
                           label="時數"
                           required
                           htmlFor={`${dateId}-hours`}
-                          hint={`最多 ${Math.max(view.maxHours, 1)} 小時${hasBreak ? "，午休不算" : ""}`}
+                          hint={`最多 ${Math.max(view.maxHours, 0.5)} 小時${hasBreak ? "，午休不算" : ""}`}
                         >
                           <Select
                             id={`${dateId}-hours`}
                             value={String(view.hoursCountValue)}
                             onChange={(e) => updateDay(view.id, { hoursCount: Number(e.target.value) })}
                           >
-                            {Array.from({ length: Math.max(view.maxHours, 1) }, (_, i) => i + 1).map((n) => (
+                            {hoursCountOptions(view.maxHours).map((n) => (
                               <option key={n} value={n}>
                                 {n} 小時
                               </option>
@@ -352,7 +360,7 @@ export function LeaveForm({
                   ))}
                 </Select>
               </Field>
-              <Field label="時數" required htmlFor={ids.hCount} hint={`最多 ${Math.max(maxHours, 1)} 小時${hasBreak ? "，午休不算" : ""}`}>
+              <Field label="時數" required htmlFor={ids.hCount} hint={`最多 ${Math.max(maxHours, 0.5)} 小時${hasBreak ? "，午休不算" : ""}`}>
                 <Select
                   id={ids.hCount}
                   value={String(hoursCountValue)}
@@ -361,7 +369,7 @@ export function LeaveForm({
                     setLocalError(null);
                   }}
                 >
-                  {Array.from({ length: Math.max(maxHours, 1) }, (_, i) => i + 1).map((n) => (
+                  {hoursCountOptions(maxHours).map((n) => (
                     <option key={n} value={n}>
                       {n} 小時
                     </option>

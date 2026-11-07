@@ -139,6 +139,31 @@ describe("resolveLeaveDayList — 不連續的日期清單", () => {
     expect(formatLeaveDuration(full.totalHours, 7.5)).toBe("2 天 6 時");
   });
 
+  it("指定時數 0.5 小時一格（2026-11-08）：11:30 起 1.5 小時 → 11:30–14:00（午休不算）、17:30 起 0.5 小時；合計 1 天 2 時 30 分；body 帶小數時數", () => {
+    const list = resolveLeaveDayList(
+      [row("a", "2026-10-20", "hours", "11:30", 1.5), row("b", "2026-10-21", "hours", "17:30", 0.5), row("c", "2026-10-22")],
+      ctx(),
+    );
+    expect(list.error).toBeUndefined();
+    expect(list.segments).toEqual([
+      { date: "2026-10-20", startTime: "11:30", endTime: "14:00", hours: 1.5 },
+      { date: "2026-10-21", startTime: "17:30", endTime: "18:00", hours: 0.5 },
+      FULL("2026-10-22"),
+    ]);
+    expect(list.rows[0].maxHours).toBe(5.5);
+    expect(list.rows[1].maxHours).toBe(0.5);
+    expect(list.totalHours).toBe(10);
+    expect(list.segments.slice(0, 2).map((seg) => describeLeaveDayRow(seg, DAY_SHIFT))).toEqual([
+      "10/20（二）11:30–14:00 1 時 30 分",
+      "10/21（三）17:30–18:00 30 分",
+    ]);
+    const half = resolveLeaveDayList([row("a", "2026-10-20", "hours", "09:00", 2.5)], ctx());
+    expect(formatLeaveDuration(half.totalHours)).toBe("2 時 30 分");
+    const body = ok(buildCreateBody("leave", { leaveTypeId: "lt-annual", segments: half.segments, hours: half.totalHours, reason: "" }));
+    expect(body.hours).toBe(2.5);
+    expect(body.segments).toEqual([{ date: "2026-10-20", startTime: "09:00", endTime: "11:30", hours: 2.5 }]);
+  });
+
   it("日期沒填、清單空的、超過 31 天、中間隔一整個月 → 擋送出", () => {
     const blank = resolveLeaveDayList([row("a", "2026-10-12"), row("b", "")], ctx());
     expect(blank.rows[1].error).toBe("請選擇日期");

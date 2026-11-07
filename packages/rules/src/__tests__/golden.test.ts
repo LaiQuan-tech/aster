@@ -676,6 +676,23 @@ describe("規則五 亞斯特 115-06 五份出勤表", () => {
       expect(labels).toEqual(["請假扣款(sick)", "請假扣款(personal)"]);
       expect(linesSum(slip)).toBeCloseTo(slip.net, 2);
     });
+
+    it("請假 0.5 小時一格 (2026-11-08):事假 30 分全扣 → 93.75 (時薪 187.5 × 0.5);再加 1.5h 病假半薪 → +140.63", () => {
+      const half = days.map((d) =>
+        d.date === "2026-06-09" ? { ...d, leaves: [{ code: "personal", minutes: 30, deductRate: 1 }] } : d,
+      );
+      const slip = computePayslip(half, salary, rules);
+      expect(slip.leaveDeduction).toBeCloseTo(93.75, 2);
+      expect(slip.lines.filter((l) => l.label.startsWith("請假扣款"))).toEqual([{ label: "請假扣款(personal)", amount: -93.75 }]);
+      expect(linesSum(slip)).toBeCloseTo(slip.net, 2);
+
+      const both = half.map((d) =>
+        d.date === "2026-06-10" ? { ...d, leaves: [{ code: "sick", minutes: 90, deductRate: 0.5 }] } : d,
+      );
+      const slip2 = computePayslip(both, salary, rules);
+      expect(slip2.leaveDeduction).toBeCloseTo(93.75 + 140.63, 2);
+      expect(linesSum(slip2)).toBeCloseTo(slip2.net, 2);
+    });
   });
 
   // -----------------------------------------------------------------------

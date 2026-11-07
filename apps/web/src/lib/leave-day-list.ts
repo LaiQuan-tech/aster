@@ -48,7 +48,7 @@ export interface LeaveDayRow {
 export interface LeaveDayRowView {
   id: string;
   date: string;
-  /** 指定時數的開始時間選項（那天的班別、1 小時一格、避開午休）。 */
+  /** 指定時數的開始時間選項（那天的班別、30 分一格、避開午休）。 */
   startOptions: string[];
   hoursStartValue: string;
   maxHours: number;

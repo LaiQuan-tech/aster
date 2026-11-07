@@ -15,15 +15,17 @@
  *     （日班 → 上午 09:00–12:00 3h／下午 13:00–18:00 5h）。不涵蓋午休的班別（午班、夜班，午休是舊推算）
  *     與沒有休息的班別維持各半，見 `halfDayWindow`。已送出的半天假不回溯，只影響新單。
  *   - 自訂＝牆鐘差，扣除與午休的重疊。
- *   - 指定時數（2026-10-11）＝從某個開始時間起請 N 小時（1 小時一格），結束時間由系統往後算、
- *     跳過午休（例：日班 09:00 起 5 小時 → 09:00–15:00，午休 12:00–13:00 不算請假）。
+ *   - 指定時數（2026-10-11）＝從某個開始時間起請 N 小時（2026-11-08 業主決定：所有假別一律 0.5 小時一格），
+ *     結束時間由系統往後算、跳過午休（例：日班 09:00 起 5 小時 → 09:00–15:00、11:30 起 1.5 小時 → 11:30–14:00，
+ *     午休 12:00–13:00 不算請假）。時數不是 0.5 的倍數 → error。
  *   - 多日：逐日產一段；跳過 `rest_day`／`fixed_holiday`、以及行事曆沒裁定的週六日；
  *     行事曆裁定 `workday` 的週末（補班）保留；範圍內沒有工作日 → error。
  *     首日可從 `startTime` 請到下班、末日可從上班請到 `endTime`、中間整天（省略＝整天）；
  *     首日或末日若是休息日／國定假日就整天不計，開始／結束時間對它沒有意義。
  *   - 單日：不跳過，但假日給 warning（仍可送出）。
  *   - 時數四捨五入到小數 2 位。
- *   - 畫面上時間選項一律 1 小時一格（`startTimeOptions`／`endTimeOptions`）；後端不強制最小單位。
+ *   - 畫面上時間選項一律 30 分一格（`startTimeOptions`／`endTimeOptions`）、時數選項 0.5 小時一格
+ *     （`hoursCountOptions`）。後端不強制最小單位：全天／上午／下午依班別算，可能不是 0.5 的倍數（例 09:00–17:45 休 60 → 7.75）。
  *
  * 時間字串一律 `HH:mm`；也接受 DB `time` 欄位的 `HH:mm:ss`（PostgREST 會回 "09:00:00"）。
  * 日期字串一律 `YYYY-MM-DD`（dateKey，不做時區換算）。
@@ -349,36 +351,48 @@ export function customHours(shift: ShiftLike, start: string, end: string): numbe
   return round2(workMinutesBetween(w, a, b) / 60);
 }
 
-/* ---------------------------------------------- 1 小時一格的時間選項 --- */
+/* -------------------------------------- 30 分一格的時間選項（0.5 小時） --- */
+
+/** 請假的最小單位（分鐘）：2026-11-08 業主決定所有假別一律 0.5 小時（30 分）。 */
+export const LEAVE_STEP_MINUTES = 30;
+/** 同上，以小時表示。 */
+export const LEAVE_STEP_HOURS = LEAVE_STEP_MINUTES / 60;
+
+/** `hours` 是 0.5 小時的正整數倍（容忍浮點誤差）。 */
+export function isLeaveStepMultiple(hours: number): boolean {
+  if (!Number.isFinite(hours) || hours <= 0) return false;
+  const units = (hours * 60) / LEAVE_STEP_MINUTES;
+  return Math.abs(units - Math.round(units)) < 1e-6;
+}
 
 /**
- * 「開始時間」選項：從班別上班時間起每 60 分一格（到下班前至少還剩 1 小時可請），
+ * 「開始時間」選項：從班別上班時間起每 30 分一格（到下班前至少還剩 30 分可請），
  * 落在午休（含起點、不含終點）內的格子不給——例：日班 09:00–18:00 休 60（午休 12:00–13:00）→
- * 09:00、10:00、11:00、13:00、14:00、15:00、16:00、17:00（12:00 在午休裡）。
+ * 09:00、09:30 … 11:30、13:00、13:30 … 17:30（12:00、12:30 在午休裡）。
  * 單日「指定時數」的開始時間與多日的首日開始時間都用這份。
  */
 export function startTimeOptions(shift: ShiftLike): string[] {
   const w = shiftWindow(shift);
   const bw = breakWindowOf(w);
   const out: string[] = [];
-  for (let t = w.start; t < w.end; t += 60) {
+  for (let t = w.start; t < w.end; t += LEAVE_STEP_MINUTES) {
     if (w.breakMin > 0 && t >= bw.start && t < bw.end) continue;
-    if (workMinutesBetween(w, t, w.end) < 60 - EPS) continue;
+    if (workMinutesBetween(w, t, w.end) < LEAVE_STEP_MINUTES - EPS) continue;
     out.push(fmtMinutes(t));
   }
   return out;
 }
 
 /**
- * 「結束時間」選項（多日的末日用）：上班時間 +1 小時起每 60 分一格，最後一格固定是下班時間
+ * 「結束時間」選項：上班時間 +30 分起每 30 分一格，最後一格固定是下班時間
  * （＝整天）。午休內的格子不給：起點 12:00（請到午休開始）可選，12:00 之後到 13:00 的略過
- * （13:00 與 12:00 請的時數一樣）。日班 → 10:00、11:00、12:00、14:00、15:00、16:00、17:00、18:00。
+ * （13:00 與 12:00 請的時數一樣）。日班 → 09:30 … 12:00、13:30 … 17:30、18:00。
  */
 export function endTimeOptions(shift: ShiftLike): string[] {
   const w = shiftWindow(shift);
   const bw = breakWindowOf(w);
   const out: string[] = [];
-  for (let t = w.start + 60; t < w.end; t += 60) {
+  for (let t = w.start + LEAVE_STEP_MINUTES; t < w.end; t += LEAVE_STEP_MINUTES) {
     if (w.breakMin > 0 && t > bw.start && t <= bw.end) continue;
     out.push(fmtMinutes(t));
   }
@@ -387,7 +401,7 @@ export function endTimeOptions(shift: ShiftLike): string[] {
 }
 
 /**
- * 從 `start` 起到下班前最多可請幾個整小時（扣午休，無條件捨去）。
+ * 從 `start` 起到下班前最多可請幾小時（扣午休，以 0.5 小時為單位無條件捨去：剩 50 分 → 0.5）。
  * `start` 格式不對、不在班別時間內、或落在午休內 → 0。
  */
 export function maxHoursFrom(shift: ShiftLike, start: string): number {
@@ -398,12 +412,22 @@ export function maxHoursFrom(shift: ShiftLike, start: string): number {
   const bw = breakWindowOf(w);
   if (a < w.start || a >= w.end) return 0;
   if (w.breakMin > 0 && a >= bw.start && a < bw.end) return 0;
-  return Math.floor((workMinutesBetween(w, a, w.end) + EPS) / 60);
+  return (Math.floor((workMinutesBetween(w, a, w.end) + EPS) / LEAVE_STEP_MINUTES) * LEAVE_STEP_MINUTES) / 60;
+}
+
+/**
+ * 「時數」下拉的選項：0.5、1、1.5 … 到 `maxHours`（0.5 一格）。`maxHours` 不到 0.5（或不是數字）→ `[0.5]`，
+ * 讓表單至少有一個選項（真的不能請時 computeLeaveSegments 會給 error）。
+ */
+export function hoursCountOptions(maxHours: number): number[] {
+  const units = Number.isFinite(maxHours) ? Math.floor((maxHours * 60 + EPS) / LEAVE_STEP_MINUTES) : 0;
+  return Array.from({ length: Math.max(units, 1) }, (_, i) => ((i + 1) * LEAVE_STEP_MINUTES) / 60);
 }
 
 /**
  * 從 `start` 起請 `hours` 小時的結束時間（`HH:mm`）：往後數工作分鐘、跳過午休，
- * 例：日班 09:00 起 3 小時 → 12:00（剛好到午休開始）、4 小時 → 14:00（午休 12:00–13:00 不算）。
+ * 例：日班 09:00 起 3 小時 → 12:00（剛好到午休開始）、4 小時 → 14:00（午休 12:00–13:00 不算）、
+ * 11:00 起 1.5 小時 → 13:30（午休前 1 小時、午休後 30 分）。
  * `start` 不合法（見 maxHoursFrom）、`hours` 不是正數、或超過下班時間 → null。
  */
 export function endTimeForHours(shift: ShiftLike, start: string, hours: number): string | null {
@@ -513,6 +537,7 @@ function segmentFor(date: string, shift: ShiftLike, input: LeaveHoursInput): Lea
       if (a == null) return { error: "請選擇開始時間" };
       const count = Number(input.hoursCount);
       if (!Number.isFinite(count) || count <= 0) return { error: "請選擇請假時數" };
+      if (!isLeaveStepMultiple(count)) return { error: "請假時數以 0.5 小時為單位" };
       if (maxHoursFrom(shift, input.hoursStart as string) <= 0) return { error: "開始時間要在上班時間內，且不能落在午休" };
       const end = endTimeForHours(shift, input.hoursStart as string, count);
       if (end == null) return { error: "請假時數超過當天開始時間之後可請的時數" };
@@ -625,7 +650,7 @@ export interface LeavePickState {
   period: LeavePeriod;
   /** 單日「指定時數」的開始時間。 */
   hoursStart: string;
-  /** 單日「指定時數」的時數（0＝預設 1 小時）。 */
+  /** 單日「指定時數」的時數（0.5 一格；0＝預設 1 小時，可請不到 1 小時就是上限 0.5）。 */
   hoursCount: number;
   /** 多日的首日開始時間。 */
   rangeStart: string;
@@ -651,7 +676,7 @@ export interface LeavePick {
 /**
  * 請假表單的「選項＋預設值＋時數」一次算完（純函式，表單元件只負責畫）：
  * 時間選項以各自那天的班別為準；使用者選的值不在選項裡（換了日期、班別不同）
- * 就退回預設——開始＝上班時間、結束＝下班時間（＝整天）、時數 1 小時，且時數不超過
+ * 就退回預設——開始＝上班時間、結束＝下班時間（＝整天）、時數 1 小時（最少 0.5），且時數不超過
  * 該開始時間之後可請的上限。多日模式選到同一天＝那天的一段時間（開始時間到結束時間，扣午休）。
  */
 export function resolveLeavePick(
@@ -672,7 +697,7 @@ export function resolveLeavePick(
   const endOptions = endTimeOptions(endShift);
   const hoursStartValue = pickOption(startOptions, state.hoursStart, "first");
   const maxHours = maxHoursFrom(startShift, hoursStartValue);
-  const hoursCountValue = Math.min(Math.max(state.hoursCount || 1, 1), Math.max(maxHours, 1));
+  const hoursCountValue = Math.min(Math.max(state.hoursCount || 1, LEAVE_STEP_HOURS), Math.max(maxHours, LEAVE_STEP_HOURS));
   const rangeStartValue = pickOption(startOptions, state.rangeStart, "first");
   const rangeEndValue = pickOption(endOptions, state.rangeEnd, "last");
   const sameDayRange = range && state.endDate === state.startDate;

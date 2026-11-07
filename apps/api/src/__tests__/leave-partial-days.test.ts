@@ -9,6 +9,8 @@ vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase
 
 import { periodText, requestsRouter } from "../routes/requests.js"
 import { buildLeaveRegister } from "../services/leave-register.js"
+import { buildLeaveRegisterWorkbook } from "../lib/xlsx/leave-register.js"
+import { formatLeaveSummary } from "../services/attendance-sheets.js"
 import { __internal } from "../services/settlement.js"
 import { zonedTimeToUtc } from "../lib/tz.js"
 import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
@@ -395,5 +397,143 @@ describe("年度請假表（leave-register）— 部分天逐日逐月歸屬", (
     expect(register.months[5].totalHours).toBe(4)
     expect(register.months[6].totalHours).toBe(3)
     expect(register.totals.totalHours).toBe(7)
+  })
+})
+
+/* ------------------------------------------------------------------------
+ * 請假 0.5 小時一格（2026-11-08 業主決定：所有假別一律以 0.5 小時為最小單位）。
+ * 員工端（apps/web lib/leave-hours）開始時間 30 分一格、時數 0.5 一格；後端整條路徑要對 0.5 小時正確：
+ *   建單原樣存 → 核准扣假（numeric 加總不走樣）→ 月結切片分鐘數 → 月表摘要 → 年度請假表與匯出。
+ * 扣薪（請假分鐘 × 時薪 × 扣薪比例）的 30 分案例在 packages/rules 的 golden.test.ts。
+ * ---------------------------------------------------------------------- */
+describe("請假 0.5 小時一格 — 建單、扣假", () => {
+  const HALF = { date: "2027-06-15", startTime: "17:30", endTime: "18:00", hours: 0.5 }
+  const ONE_HALF = { date: "2027-06-16", startTime: "11:30", endTime: "14:00", hours: 1.5 } // 跨午休 12:00–13:00
+  const bodyOf = (seg: typeof HALF) => ({
+    kind: "leave",
+    leaveTypeId: LEAVE_TYPE_ID,
+    startAt: at(seg.date, seg.startTime),
+    endAt: at(seg.date, seg.endTime),
+    hours: seg.hours,
+    segments: [seg],
+  })
+
+  it("30 分（17:30–18:00）與 1.5 小時跨午休（11:30–14:00）→ 201，hours／segments 原樣存下；通知寫「30 分」「1 時 30 分」", async () => {
+    const a = await post("/requests", STAFF_TOKEN).send(bodyOf(HALF))
+    const b = await post("/requests", STAFF_TOKEN).send(bodyOf(ONE_HALF))
+    expect(a.status, JSON.stringify(a.body)).toBe(201)
+    expect(b.status, JSON.stringify(b.body)).toBe(201)
+    const stored = (fake.db.leave_requests ?? []) as Row[]
+    expect(stored.map((row) => row.hours)).toEqual([0.5, 1.5])
+    expect(stored.map((row) => (row.segments as Row[])[0])).toEqual([HALF, ONE_HALF])
+    const bodies = (fake.db.notifications ?? []).map((n) => String(n.body))
+    expect(bodies.some((t) => t.includes("（30 分）"))).toBe(true)
+    expect(bodies.some((t) => t.includes("（1 時 30 分）"))).toBe(true)
+  })
+
+  it("核准 0.5 → 已使用 0.5；再核准 1.5 → 2；再核准 15 → 17（小數加總不走樣）", async () => {
+    const a = await post("/requests", STAFF_TOKEN).send(bodyOf(HALF))
+    const b = await post("/requests", STAFF_TOKEN).send(bodyOf(ONE_HALF))
+    const c = await post("/requests", STAFF_TOKEN).send(PARTIAL)
+    expect((await post(`/requests/${a.body.requestId}/approve`, MGR_TOKEN).send({})).status).toBe(200)
+    expect(fake.db.leave_balances?.[0]?.used).toBe(0.5)
+    expect((await post(`/requests/${b.body.requestId}/approve`, MGR_TOKEN).send({})).status).toBe(200)
+    expect(fake.db.leave_balances?.[0]?.used).toBe(2)
+    expect((await post(`/requests/${c.body.requestId}/approve`, MGR_TOKEN).send({})).status).toBe(200)
+    expect(fake.db.leave_balances?.[0]?.used).toBe(17)
+  })
+
+  it("餘額存成字串（PostgREST 回 numeric 是 \"8.50\"）也照數字加：8.50 + 0.5 → 9，不會變字串串接", async () => {
+    ;(fake.db.leave_balances?.[0] as Row).used = "8.50"
+    const a = await post("/requests", STAFF_TOKEN).send(bodyOf(HALF))
+    expect((await post(`/requests/${a.body.requestId}/approve`, MGR_TOKEN).send({})).status).toBe(200)
+    expect(fake.db.leave_balances?.[0]?.used).toBe(9)
+  })
+})
+
+describe("請假 0.5 小時一格 — 月結切片、月表摘要", () => {
+  const DAY: ShiftDef = { start: "09:00", end: "18:00", breakMinutes: 60 }
+  const ctx = {
+    tz: TPE,
+    from: "2027-06-01",
+    to: "2027-06-30",
+    regularMinutes: 480,
+    shiftFor: (): ShiftDef | null => DAY,
+    dayTypeFor: (): DayType => "workday",
+  }
+  const base = { id: "r1", employee_id: "e1", leave_type_id: LEAVE_TYPE_ID }
+
+  it("segments 0.5 → 30 分；1.5 跨午休（11:30–14:00）→ 90 分；多日 4.5＋8＋2.5 → 270／480／150", () => {
+    const one = (date: string, s: string, e: string, hours: number) => ({
+      ...base,
+      start_at: at(date, s),
+      end_at: at(date, e),
+      hours: String(hours),
+      segments: [{ date, startTime: s, endTime: e, hours }],
+    })
+    expect(__internal.sliceLeave(one("2027-06-15", "17:30", "18:00", 0.5), ctx)).toEqual([{ date: "2027-06-15", minutes: 30 }])
+    expect(__internal.sliceLeave(one("2027-06-16", "11:30", "14:00", 1.5), ctx)).toEqual([{ date: "2027-06-16", minutes: 90 }])
+    const multi = {
+      ...base,
+      start_at: at("2027-06-08", "13:30"),
+      end_at: at("2027-06-10", "11:30"),
+      hours: "15",
+      segments: [
+        { date: "2027-06-08", startTime: "13:30", endTime: "18:00", hours: 4.5 },
+        { date: "2027-06-09", startTime: "09:00", endTime: "18:00", hours: 8 },
+        { date: "2027-06-10", startTime: "09:00", endTime: "11:30", hours: 2.5 },
+      ],
+    }
+    expect(__internal.sliceLeave(multi, ctx)).toEqual([
+      { date: "2027-06-08", minutes: 270 },
+      { date: "2027-06-09", minutes: 480 },
+      { date: "2027-06-10", minutes: 150 },
+    ])
+  })
+
+  it("沒有 segments、只有起訖與 hours 0.5 → 30 分", () => {
+    const req = { ...base, start_at: at("2027-06-15", "17:30"), end_at: at("2027-06-15", "18:00"), hours: "0.5", segments: null }
+    expect(__internal.sliceLeave(req, ctx)).toEqual([{ date: "2027-06-15", minutes: 30 }])
+  })
+
+  it("出勤月表摘要（leave_summary）：30 分 →「特休 0.5h」、90 分＋事假 30 分 →「特休 1.5h；事假 0.5h」", () => {
+    const names = new Map([
+      ["annual", "特休"],
+      ["personal", "事假"],
+    ])
+    expect(formatLeaveSummary({ annual: 30 }, names)).toBe("特休 0.5h")
+    expect(formatLeaveSummary({ annual: 90, personal: 30 }, names)).toBe("特休 1.5h；事假 0.5h")
+  })
+})
+
+describe("請假 0.5 小時一格 — 年度請假表與匯出", () => {
+  const types = [{ id: LEAVE_TYPE_ID, code: "annual", name: "特休" }]
+
+  it("6 月 0.5＋1.5、7 月 2.5 → 6 月 2 小時、7 月 2.5 小時；xlsx 文字版「2 時」「2 時 30 分」，數字版 2／2.5", async () => {
+    const register = buildLeaveRegister({
+      year: 2027,
+      dailyRegularHours: 8,
+      leaveTypes: types,
+      timezone: TPE,
+      requests: [
+        { leave_type_id: LEAVE_TYPE_ID, start_at: at("2027-06-15", "17:30"), end_at: at("2027-06-15", "18:00"), hours: "0.5", segments: [{ date: "2027-06-15", startTime: "17:30", endTime: "18:00", hours: 0.5 }] },
+        { leave_type_id: LEAVE_TYPE_ID, start_at: at("2027-06-16", "11:30"), end_at: at("2027-06-16", "14:00"), hours: 1.5, segments: [{ date: "2027-06-16", startTime: "11:30", endTime: "14:00", hours: 1.5 }] },
+        { leave_type_id: LEAVE_TYPE_ID, start_at: at("2027-07-01", "09:00"), end_at: at("2027-07-01", "11:30"), hours: 2.5, segments: null },
+      ],
+    })
+    expect(register.months[5].hoursByType[LEAVE_TYPE_ID]).toBe(2)
+    expect(register.months[6].hoursByType[LEAVE_TYPE_ID]).toBe(2.5)
+    expect(register.totals.totalHours).toBe(4.5)
+
+    const workbook = await buildLeaveRegisterWorkbook({ employeeName: "測試員工", hireDate: null, register })
+    const text = workbook.worksheets[0]
+    const numbers = workbook.worksheets[1]
+    expect(text.getCell("A9").value).toBe("6月")
+    expect(text.getCell("B9").value).toBe("2 時")
+    expect(text.getCell("B10").value).toBe("2 時 30 分")
+    expect(text.getCell("B16").value).toBe("4 時 30 分")
+    expect(numbers.getCell("B9").value).toBe(2)
+    expect(numbers.getCell("B10").value).toBe(2.5)
+    expect(numbers.getCell("B16").value).toBe(4.5)
   })
 })
