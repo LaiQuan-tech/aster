@@ -28,6 +28,7 @@ import {
   fileExpense,
   getExpenseSettingsForMe,
   getLeaveBalances,
+  getMyCompTime,
   getLeaveTypes,
   getMyExpenseCategories,
   getMyExpenses,
@@ -148,6 +149,8 @@ function RequestsView() {
   // 參考資料（best-effort：任何一支失敗都退化，不擋表單）
   const [leaveTypes, setLeaveTypes] = useState<LeaveType[] | null>(null);
   const [balances, setBalances] = useState<LeaveBalance[]>([]);
+  // 補休帳可用時數（補休假別沒有額度桶時，請假表單用它判斷超額；讀不到＝null，交給 API 擋）。
+  const [compTimeBalance, setCompTimeBalance] = useState<number | null>(null);
   // 1 天 ＝ 幾小時（規則 payroll.dailyRegularHours，隨 GET /leave-balances 回；缺席＝8）：只用在把請假時數顯示成天＋時。
   const [hoursPerDay, setHoursPerDay] = useState<number | undefined>(undefined);
   const [shifts, setShifts] = useState<Shift[]>([]);
@@ -195,12 +198,13 @@ function RequestsView() {
   useEffect(() => {
     let active = true;
     (async () => {
-      const [lt, bal, sh, cfg, cats] = await Promise.allSettled([
+      const [lt, bal, sh, cfg, cats, comp] = await Promise.allSettled([
         getLeaveTypes(),
         getLeaveBalances(),
         getShifts(),
         getExpenseSettingsForMe(),
         getMyExpenseCategories(),
+        getMyCompTime(),
       ]);
       if (!active) return;
       setLeaveTypes(lt.status === "fulfilled" ? (lt.value.leaveTypes ?? []) : []);
@@ -211,6 +215,7 @@ function RequestsView() {
       if (sh.status === "fulfilled") setShifts(sh.value.shifts ?? []);
       if (cfg.status === "fulfilled") setAdvanceThreshold(cfg.value.settings?.advanceThreshold ?? null);
       if (cats.status === "fulfilled") setExpenseCategories(cats.value.categories ?? []);
+      if (comp.status === "fulfilled" && Number.isFinite(Number(comp.value.balance))) setCompTimeBalance(Number(comp.value.balance));
     })();
     void loadRequests();
     return () => {
@@ -353,6 +358,7 @@ function RequestsView() {
             {...common}
             leaveTypes={leaveTypes}
             balances={balances}
+            compTimeBalance={compTimeBalance}
             defaultShift={defaultShift}
             hoursPerDay={hoursPerDay}
           />

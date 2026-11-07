@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   bucketHasQuota,
+  isCompLeaveType,
   leaveBalanceBatchItemText,
   leaveBalanceErrorText,
   leaveBalanceFromBody,
@@ -86,5 +87,20 @@ describe("leave_balance_insufficient 錯誤的人話", () => {
     const summary = summarizeBatch("approve", [item as never], () => "員工甲");
     expect(JSON.stringify(summary)).toContain("此假別剩餘 4 時，申請 1 天，超過額度無法核准");
     expect(describeBatchError("leave_balance_check_failed")).toContain("假別額度檢查暫時失敗");
+  });
+});
+
+describe("驗收追加", () => {
+  it("isCompLeaveType 與 API 同規則", () => {
+    expect(isCompLeaveType({ code: "comp", name: "補休假" })).toBe(true);
+    expect(isCompLeaveType({ code: "x", name: "補休" })).toBe(true);
+    expect(isCompLeaveType({ code: "company_trip", name: "公司旅遊" })).toBe(false);
+  });
+
+  it("退回失敗（500 leave_balance_revert_failed）→ 中文，單筆與批次都是", () => {
+    const err = apiError(500, { error: "leave_balance_revert_failed" });
+    expect(leaveBalanceErrorText(err, "核准")).toContain("退回待簽核失敗");
+    expect(leaveBalanceBatchItemText({ ok: false, id: "r1", error: "leave_balance_revert_failed" }, "核准")).toContain("退回待簽核失敗");
+    expect(describeBatchError("leave_balance_revert_failed")).toContain("退回待簽核失敗");
   });
 });

@@ -33,7 +33,7 @@ import {
 } from "@/lib/leave-hours";
 import { formatLeaveDuration } from "@/lib/leave-duration";
 import { buildCreateBody, describeBody, isBuildError } from "@/lib/request-forms";
-import { quotaRemainingHours } from "@/lib/leave-balance-cap";
+import { isCompLeaveType, quotaRemainingHours } from "@/lib/leave-balance-cap";
 import { AttachmentField, ReasonField, SubmitBar, SummaryLine, validateFiles, type FormCommonProps } from "./form-shared";
 import { useLeaveCalendar } from "./use-leave-calendar";
 
@@ -55,6 +55,8 @@ export interface LeaveFormProps extends FormCommonProps {
   /** null＝還在載入。空陣列＝租戶沒有假別（顯示單一「一般請假」）。 */
   leaveTypes: LeaveType[] | null;
   balances: LeaveBalance[];
+  /** 補休帳可用時數（GET /comp-time?scope=mine）；讀不到＝null（補休就不在前端擋，交給 API）。 */
+  compTimeBalance?: number | null;
   /** 每天都用這個班別（請假頁傳租戶最早建立的班別＝日班；班表功能已移除）。 */
   defaultShift: ShiftLike;
   /** 1 天 ＝ 幾小時（規則 payroll.dailyRegularHours，隨 GET /leave-balances 回）：只用在把時數顯示成天＋時；缺席＝8。 */
@@ -67,6 +69,7 @@ const NO_SCHEDULED_SHIFTS: Record<string, ShiftLike | undefined> = {};
 export function LeaveForm({
   leaveTypes,
   balances,
+  compTimeBalance = null,
   defaultShift,
   hoursPerDay,
   initialDate,
@@ -130,7 +133,10 @@ export function LeaveForm({
   const bucketDate = isRange ? (list.segments[0]?.date ?? dayDates[0] ?? startDate) : startDate;
   // 有額度的假別（桶 entitled＋deferred > 0）才有剩餘；不限額（沒有桶／entitled=0 的記帳桶，如事假）→ null、不擋。
   // 超過剩餘 → 送出鈕停用並顯示原因（2026-11-08 業主：超過額度不能送出；API 另以簽核中假單一起算，最後以 API 為準）。
-  const remaining = leaveTypeId ? quotaRemainingHours(balances, leaveTypeId, bucketDate) : null;
+  // 補休假別沒有額度桶 → 看補休帳（與 API 同規則）。
+  const bucketRemaining = leaveTypeId ? quotaRemainingHours(balances, leaveTypeId, bucketDate) : null;
+  const remaining =
+    bucketRemaining == null && isCompLeaveType(selectedType) && compTimeBalance != null ? compTimeBalance : bucketRemaining;
   const overBalance = remaining != null && !formError && totalHours > remaining + 0.001;
   const overBalanceText =
     remaining != null

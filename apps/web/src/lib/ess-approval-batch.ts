@@ -19,7 +19,13 @@ import {
   overtimeBatchItemText,
   overtimeCapCheckFailedMessage,
 } from "./overtime-approval";
-import { LEAVE_BALANCE_CHECK_FAILED_CODE, leaveBalanceBatchItemText, leaveBalanceCheckFailedMessage } from "./leave-balance-cap";
+import {
+  LEAVE_BALANCE_CHECK_FAILED_CODE,
+  LEAVE_BALANCE_REVERT_FAILED_CODE,
+  LEAVE_BALANCE_REVERT_FAILED_MESSAGE,
+  leaveBalanceBatchItemText,
+  leaveBalanceCheckFailedMessage,
+} from "./leave-balance-cap";
 
 export type BatchAction = "approve" | "reject";
 
@@ -142,6 +148,7 @@ const ERROR_TEXT: Record<string, string> = {
   [OVERTIME_CAP_CODE]: "這張加班單會超過每月加班上限或每日工時上限，無法核准。",
   [OVERTIME_CAP_CHECK_FAILED_CODE]: `${overtimeCapCheckFailedMessage("核准")}。`,
   [LEAVE_BALANCE_CHECK_FAILED_CODE]: `${leaveBalanceCheckFailedMessage("核准")}。`,
+  [LEAVE_BALANCE_REVERT_FAILED_CODE]: `${LEAVE_BALANCE_REVERT_FAILED_MESSAGE}。`,
   current_step_not_found: "這張單的簽核關卡資料有問題，請聯絡人資。",
   internal_error: "系統暫時無法處理這張單，結果不確定，請重新整理確認。",
   no_result: "伺服器沒有回報這張單的結果，請重新整理確認。",

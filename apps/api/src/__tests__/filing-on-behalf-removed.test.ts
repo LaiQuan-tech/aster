@@ -172,7 +172,10 @@ describe("POST /requests — 對象是本人或沒帶 → 照常", () => {
       { date: "2027-06-01", startTime: "09:00", endTime: "18:00", hours: 8 },
       { date: "2027-06-02", startTime: "09:00", endTime: "18:00", hours: 8 },
     ]
-    const res = await post("/requests", STAFF_TOKEN).send(requestBody("leave", { hours: 16, segments }))
+    // 起訖要涵蓋兩段（2026-11-08 起請假時數有伺服器端驗證：hours＝各段加總、不超過起訖、segments 在起訖內）。
+    const res = await post("/requests", STAFF_TOKEN).send(
+      requestBody("leave", { hours: 16, segments, startAt: "2027-06-01T01:00:00.000Z", endAt: "2027-06-02T10:00:00.000Z" }),
+    )
 
     expect(res.status, JSON.stringify(res.body)).toBe(201)
     expect(fake.db.leave_requests).toHaveLength(1)

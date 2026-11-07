@@ -13,6 +13,10 @@ import { todayKey } from "./ess-format";
 
 export const LEAVE_BALANCE_INSUFFICIENT_CODE = "leave_balance_insufficient";
 export const LEAVE_BALANCE_CHECK_FAILED_CODE = "leave_balance_check_failed";
+export const LEAVE_BALANCE_REVERT_FAILED_CODE = "leave_balance_revert_failed";
+/** 額度不足、退回待簽核卻失敗（500）：單子仍是已核准、未扣額度。 */
+export const LEAVE_BALANCE_REVERT_FAILED_MESSAGE =
+  "假別額度不足，但退回待簽核失敗：這張單目前仍是「已核准」（尚未扣額度），請聯絡管理員處理";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const num = (v: unknown) => {
@@ -37,6 +41,16 @@ export function quotaRemainingHours(
   const bucket = balanceBucketFor(balances, leaveTypeId, asOf);
   if (!bucket || !bucketHasQuota(bucket)) return null;
   return round2(num(bucket.entitled) + num(bucket.deferred) - num(bucket.used));
+}
+
+/**
+ * 補休假別：名稱含「補休」或 code 為 comp／comp_time／compensatory（與 API isCompLeaveType 同一判斷）。
+ * 沒有 leave_balances 額度桶時，補休的額度看補休帳（GET /comp-time?scope=mine 的 balance）。
+ */
+export function isCompLeaveType(type: { code?: string | null; name?: string | null } | null | undefined): boolean {
+  if (!type) return false;
+  if ((type.name ?? "").includes("補休")) return true;
+  return /^comp(_?time|ensatory)?$/i.test((type.code ?? "").trim());
 }
 
 export interface LeaveBalanceInsufficient {
@@ -101,6 +115,10 @@ function isCheckFailed(err: unknown): boolean {
 /** describeError 用：額度相關錯誤（400/409 不足、503 檢查失敗）→ 人話；否則 null。 */
 export function leaveBalanceErrorText(err: unknown, verb: "送出" | "核准", hoursPerDay?: number): string | null {
   if (isCheckFailed(err)) return leaveBalanceCheckFailedMessage(verb);
+  if (err instanceof Error) {
+    const e = err as Error & { code?: string };
+    if (e.code === LEAVE_BALANCE_REVERT_FAILED_CODE || e.message.includes(LEAVE_BALANCE_REVERT_FAILED_CODE)) return LEAVE_BALANCE_REVERT_FAILED_MESSAGE;
+  }
   const info = leaveBalanceInsufficientOf(err);
   return info ? leaveBalanceMessage(info, verb, hoursPerDay) : null;
 }
@@ -110,6 +128,7 @@ export function leaveBalanceBatchItemText(item: unknown, verb: "送出" | "核�
   if (!item || typeof item !== "object") return null;
   const error = (item as { error?: unknown }).error;
   if (error === LEAVE_BALANCE_CHECK_FAILED_CODE) return `${leaveBalanceCheckFailedMessage(verb)}。`;
+  if (error === LEAVE_BALANCE_REVERT_FAILED_CODE) return `${LEAVE_BALANCE_REVERT_FAILED_MESSAGE}。`;
   const info = leaveBalanceFromBody(item);
   return info ? `${leaveBalanceMessage(info, verb, hoursPerDay)}。` : null;
 }

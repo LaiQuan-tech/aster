@@ -116,7 +116,7 @@ const SPECIFIC: Record<string, string> = {
   "GET /employees": "員工名冊（財務層以上）",
   "GET /requests": "申請單清單；query: status, kind, employeeId, from, to, scope=mine",
   "GET /requests/pending-approvals": "輪到我簽的申請單",
-  "POST /requests": "送出申請（本人）",
+  "POST /requests": "送出申請（本人）；請假：hours＞0 且不超過起訖，跨日須帶 segments[{date,startTime,endTime,hours}]、hours＝各段加總",
   "POST /requests/:id/approve": "核准申請單（body: comment?）",
   "POST /requests/:id/reject": "駁回申請單（body: comment?）",
   "POST /requests/batch-decision": "批次簽核（body: ids[], action, comment?）",

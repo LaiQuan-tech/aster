@@ -13,6 +13,8 @@ const NIL_UUID = "00000000-0000-0000-0000-000000000000"
 
 const listQuerySchema = z.object({
   employeeId: z.string().uuid().optional(),
+  // scope=mine：任何角色（含 HR）都只回自己的補休帳——ESS 請假表單顯示補休剩餘用（2026-11-08）。
+  scope: z.enum(["mine"]).optional(),
 })
 
 const adjustSchema = z
@@ -93,7 +95,7 @@ compTimeRouter.get(
       res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
       return
     }
-    const { employeeId } = parsed.data
+    const { employeeId, scope } = parsed.data
 
     try {
       const self = await resolveSelf(tenantId, userId)
@@ -104,7 +106,7 @@ compTimeRouter.get(
         .select(SELECT_COLS)
         .eq("tenant_id", tenantId)
 
-      if (isHr) {
+      if (isHr && scope !== "mine") {
         if (employeeId) query = query.eq("employee_id", employeeId)
       } else {
         // Non-HR: always pinned to self (an id from another scope reveals nothing).

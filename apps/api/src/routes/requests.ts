@@ -6,6 +6,7 @@ import { requireTenant } from "../middleware/tenant.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
 import { applyApprovalEffects } from "../services/ledger.js"
+import { validateLeaveRequestHours } from "../services/leave-hours-validate.js"
 import {
   LEAVE_BALANCE_CHECK_FAILED,
   checkLeaveBalanceForApproval,
@@ -781,6 +782,28 @@ requestsRouter.post(
         }
         hours = v.hours
       }
+      // 請假單時數的伺服器端驗證（2026-11-08，services/leave-hours-validate.ts）：hours 與每段 > 0、不超過起訖、
+      // 等於各段加總；跨日必須帶 segments。不過 → 400（invalid_leave_range／invalid_leave_hours／invalid_leave_segments／
+      // leave_segments_required），否則額度上限可以用負數／低報時數繞過。通過後寫入驗過的時數。
+      if (kind === "leave") {
+        const v = validateLeaveRequestHours({
+          startAt,
+          endAt,
+          hours: hoursInput ?? null,
+          segments: segments ?? null,
+          tz: await getTenantTimezone(tenantId),
+        })
+        if (!v.ok) {
+          res.status(400).json({
+            error: v.error,
+            message: v.message,
+            ...(v.maxHours != null ? { maxHours: v.maxHours } : {}),
+            ...(v.expectedHours != null ? { expectedHours: v.expectedHours } : {}),
+          })
+          return
+        }
+        hours = v.hours ?? undefined
+      }
 
       // Resolve the approver chain for this kind (services/approval-chain.ts):
       // 固定名單／直屬主管／主管逐級＋HR 覆核 → 老闆（tenant features）→ 第一位 hr_admin → 409。
@@ -1386,6 +1409,13 @@ const DECISION_ERROR_STATUS: Record<string, number> = {
   leave_balance_insufficient: 409,
   // 額度檢查／扣款本身失敗：可重試，核准未成立。
   leave_balance_check_failed: 503,
+  // 額度不足要退回 pending 卻失敗：單子仍是 approved（未扣額度），需人工處理（回應帶中文 message）。
+  leave_balance_revert_failed: 500,
+}
+
+/** 決策錯誤的中文說明（回應的 message；前端也有同一句對照）。 */
+const DECISION_ERROR_MESSAGE: Record<string, string> = {
+  leave_balance_revert_failed: "假別額度不足，但退回待簽核失敗：這張單目前仍是「已核准」（尚未扣額度），請聯絡管理員處理",
 }
 
 async function decide(
@@ -1434,7 +1464,9 @@ async function decide(
                 ? outcome.balance
                 : outcome.period
                 ? { error: outcome.error, period: outcome.period }
-                : { error: outcome.error },
+                : DECISION_ERROR_MESSAGE[outcome.error]
+                  ? { error: outcome.error, message: DECISION_ERROR_MESSAGE[outcome.error] }
+                  : { error: outcome.error },
           )
         return
       }
@@ -1983,8 +2015,10 @@ async function decideOneRequest(params: {
         startAt: lr.start_at,
         endAt: lr.end_at,
         hours: lr.hours,
+        requestId,
       })
-      if (debit.status === "debited") leaveAlreadyDebited = true
+      // 補休帳扣的是另一本帳：leave_balances 的記帳桶照舊由 applyApprovalEffects 累加（既有行為、畫面不變）。
+      if (debit.status === "debited" && debit.ledger === "balance") leaveAlreadyDebited = true
       else if (debit.status === "insufficient") failure = { ok: false, id: requestId, error: debit.info.error, balance: debit.info }
     } catch (err) {
       logger.warn({ err, tenantId, requestId }, "decideOneRequest: leave balance checked debit failed")

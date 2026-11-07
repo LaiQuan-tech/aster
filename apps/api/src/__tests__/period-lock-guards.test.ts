@@ -243,7 +243,22 @@ describe("打卡", () => {
 // 申請單
 // ─────────────────────────────────────────────────────────────────────────────
 
-const leaveBody = (startAt: string, endAt: string, extra: Row = {}) => ({ kind: "leave", leaveTypeId: LT, startAt, endAt, hours: 8, ...extra })
+/**
+ * 請假單 body。跨本地日時逐日帶 segments（每天 09:00–18:00 8 小時、hours＝加總）——2026-11-08 起請假時數有伺服器端驗證，
+ * 跨日沒有 segments 會 400 leave_segments_required。
+ */
+const leaveBody = (startAt: string, endAt: string, extra: Row = {}): Row => {
+  const localDay = (iso: string) => new Date(new Date(iso).getTime() + 8 * 3_600_000).toISOString().slice(0, 10)
+  const first = localDay(startAt)
+  const last = localDay(endAt)
+  if (first === last) return { kind: "leave", leaveTypeId: LT, startAt, endAt, hours: 8, ...extra }
+  const segments: Row[] = []
+  for (let d = first; d <= last; d = new Date(new Date(`${d}T00:00:00Z`).getTime() + 86_400_000).toISOString().slice(0, 10)) {
+    segments.push({ date: d, startTime: "09:00", endTime: "18:00", hours: 8 })
+  }
+  const { hours: _ignored, ...rest } = extra
+  return { kind: "leave", leaveTypeId: LT, startAt, endAt, hours: 8 * segments.length, segments, ...rest }
+}
 const requestRow = (id: string): Row => (fake.db.leave_requests ?? []).find((r) => r.id === id) as Row
 
 /** 員工甲送一張請假單（簽核鏈：主管）；回 requestId。 */

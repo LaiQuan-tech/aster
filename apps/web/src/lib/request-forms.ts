@@ -197,6 +197,11 @@ export const REQUEST_ERROR_MESSAGES: Record<string, string> = {
   // 這條只是保底（舊版頁面還開著時走的是舊程式碼，看不到這句）。
   filing_on_behalf_removed: "代為申請功能已移除，申請單只能以本人身分送出，請重新整理頁面後再試",
   attachment_required: "此假別需要附上憑證",
+  // 2026-11-08 請假時數伺服器端驗證（API services/leave-hours-validate.ts）；表單正常操作不會遇到。
+  invalid_leave_range: "請假結束時間必須晚於開始時間",
+  invalid_leave_hours: "請假時數不正確（須大於 0、不超過起訖時間，且等於各日時段加總），請重新選擇日期與時段",
+  invalid_leave_segments: "請假的各日時段不正確（每段須大於 0、不超過該段起訖、日期不重複），請重新選擇",
+  leave_segments_required: "跨日請假必須逐日列出時段，請改用多日模式選擇日期",
   not_pending: "這張申請已不是待簽核狀態",
   not_found: "找不到這張申請",
   invalid_body: "送出的內容格式不正確，請檢查日期與時間",

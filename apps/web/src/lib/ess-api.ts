@@ -375,6 +375,11 @@ export interface LeaveBalance {
  * 我的假別額度（ESS 專用；後台用 admin-api 的 getLeaveBalancesAdmin）。一律帶 `scope=mine`：
  * HR／會計帳號在員工端也只拿自己的桶——請假表單的「剩餘時數」才不會拿到別人的額度。
  */
+/** 我的補休帳可用時數（GET /comp-time?scope=mine，Σ earned − Σ used；小時）。 */
+export function getMyCompTime() {
+  return apiFetch<{ balance: number }>("/comp-time?scope=mine");
+}
+
 export function getLeaveBalances() {
   // dailyRegularHours：1 天 ＝ 幾小時（規則參數，預設 8），只給畫面把小時顯示成「天＋時」用
   // （lib/leave-duration.ts）；balances 的數字仍是小時。舊版 API 沒有這欄 → 缺席時用 8。
