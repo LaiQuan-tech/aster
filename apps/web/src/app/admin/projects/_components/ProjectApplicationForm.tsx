@@ -37,6 +37,7 @@ import { RoleSharePctInputs, RoleShareReadOnlyBadge } from "./RoleSharePctCard";
 import { roleSharePctDraftOf, type RoleSharePct } from "@/lib/project-share-calculation";
 import { sheet } from "@/lib/sheet-styles";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="overflow-hidden rounded-lg border border-gray-200">
@@ -324,7 +325,7 @@ export function ProjectApplicationForm({
           <div><label className={labelCls}>案件類型</label><select className={inputCls} value={draft.kind} onChange={(event) => patch("kind", event.target.value as ProjectApplicationDraft["kind"])}>{PROJECT_KIND_ORDER.map((kind) => <option key={kind} value={kind}>{PROJECT_KIND_LABELS[kind]}</option>)}</select></div>
           {draft.kind !== "main" ? <div><label className={labelCls}>母案</label><select className={inputCls} value={draft.parentProjectId} onChange={(event) => patch("parentProjectId", event.target.value)}><option value="">先不選（之後可在專案明細補）</option>{mainProjects.map((project) => <option key={project.id} value={project.id}>{project.code ? `${project.code}　` : ""}{project.name}</option>)}</select></div> : null}
           <div><label className={labelCls}>所屬部門</label><select className={inputCls} value={draft.deptId} onChange={(event) => patch("deptId", event.target.value)}><option value="">不指定</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select></div>
-          <div><label className={labelCls}>專案負責人</label><select className={inputCls} value={draft.leadEmpId} onChange={(event) => patch("leadEmpId", event.target.value)}><option value="">不指定</option>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}{employee.emp_no ? `（${employee.emp_no}）` : ""}</option>)}</select></div>
+          <div><label className={labelCls}>專案負責人</label><EmployeeCombobox options={employees.map((employee) => ({ id: employee.id, label: `${employee.name}${employee.emp_no ? `（${employee.emp_no}）` : ""}`, searchText: `${employee.emp_no ?? ""} ${employee.name}` }))} value={draft.leadEmpId} onChange={(id) => patch("leadEmpId", id)} emptyLabel="不指定" ariaLabel="專案負責人" /></div>
           {/* 2026-10-27 分潤簡化：「指定金額」模式停用，新專案一律百分比（draft.shareMode 固定 pool_pct），不再顯示模式下拉。 */}
           {draft.shareMode === "pool_pct" && visibility.showBonusFields ? <div><label className={labelCls}>獎金池總額</label><input className={inputCls} type="number" min="0" value={draft.bonusPool} onChange={(event) => patch("bonusPool", event.target.value)} /></div> : null}
           <div className="sm:col-span-2"><label className={labelCls}>說明</label><textarea className={inputCls} rows={3} value={draft.description} onChange={(event) => patch("description", event.target.value)} /></div>

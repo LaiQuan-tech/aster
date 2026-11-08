@@ -31,6 +31,7 @@ import {
 } from "@/lib/project-share-calculation";
 import { fmtMoney, type Setter } from "./shared";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 /** 員工下拉只需要這三個欄位（ESS 老闆頁沒有完整員工名冊，用成員名單湊）。 */
 type EmployeeOption = Pick<Employee, "id" | "name" | "emp_no">;
 
@@ -213,13 +214,20 @@ export function BonusShareCard({
                 {lockedPerson ? (
                   <p className="px-1 py-1.5 font-medium">{row.name ?? row.employeeId}{row.empNo ? <span className="ml-1 text-xs text-gray-400">{row.empNo}</span> : null}</p>
                 ) : (
-                  <select aria-label={`${PROJECT_MEMBER_ROLE_LABELS[row.roleInProject]}員工`} className="w-full min-w-36 rounded border border-gray-300 px-2 py-1.5" value={row.employeeId} onChange={(e) => {
-                    const emp = emps.find((x) => x.id === e.target.value) ?? null;
-                    patchRow(row.key, (r) => shareRowAfterEmployeeChange(r, emp, originalOf ? { memberId: originalOf.id, employeeId: originalOf.employeeId } : undefined));
-                  }}>
-                    <option value="">請選擇員工</option>
-                    {emps.filter((emp) => emp.id === row.employeeId || !rows.some((r) => r.employeeId === emp.id)).map((emp) => <option key={emp.id} value={emp.id}>{emp.name}{emp.emp_no ? `（${emp.emp_no}）` : ""}</option>)}
-                  </select>
+                  <EmployeeCombobox
+                    className="min-w-36"
+                    inputClassName="w-full rounded border border-gray-300 px-2 py-1.5"
+                    ariaLabel={`${PROJECT_MEMBER_ROLE_LABELS[row.roleInProject]}員工`}
+                    options={emps
+                      .filter((emp) => emp.id === row.employeeId || !rows.some((r) => r.employeeId === emp.id))
+                      .map((emp) => ({ id: emp.id, label: `${emp.name}${emp.emp_no ? `（${emp.emp_no}）` : ""}`, searchText: `${emp.emp_no ?? ""} ${emp.name}` }))}
+                    value={row.employeeId}
+                    onChange={(id) => {
+                      const emp = emps.find((x) => x.id === id) ?? null;
+                      patchRow(row.key, (r) => shareRowAfterEmployeeChange(r, emp, originalOf ? { memberId: originalOf.id, employeeId: originalOf.employeeId } : undefined));
+                    }}
+                    emptyLabel="請選擇員工"
+                  />
                 )}
                 {isFixed && original?.shareAmount != null && <p className="px-1 text-[11px] text-gray-500">原指定金額 {fmtMoney(original.shareAmount)}</p>}
               </td>

@@ -5,6 +5,7 @@ import type { Department, Employee } from "@/lib/admin-api";
 import type { ProjectDetail, UpdateProjectExtBody } from "@/lib/projects-ext-api";
 import { parentProjectPatch } from "../../_components/project-application-form";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 interface ProjectSettingsCardProps {
   project: ProjectDetail;
   depts: Department[];
@@ -71,19 +72,16 @@ export function ProjectSettingsCard({ project, depts, emps, parentChoices, canEd
         </div>
         <div>
           <label className={labelCls} htmlFor="project-lead">專案負責人</label>
-          <select
+          <EmployeeCombobox
             id="project-lead"
-            className={inputCls}
+            options={emps.map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}` }))}
             value={project.leadEmpId ?? ""}
             disabled={!canEdit}
             title={lockedTitle}
-            onChange={(e) => saveProjectField({ leadEmpId: e.target.value || null })}
-          >
-            <option value="">不指定</option>
-            {emps.map((e) => (
-              <option key={e.id} value={e.id}>{e.name}</option>
-            ))}
-          </select>
+            onChange={(id) => saveProjectField({ leadEmpId: id || null })}
+            emptyLabel="不指定"
+            ariaLabel="專案負責人"
+          />
         </div>
         <div>
           <label className={labelCls} htmlFor="project-fiscal-year">歸屬年度</label>

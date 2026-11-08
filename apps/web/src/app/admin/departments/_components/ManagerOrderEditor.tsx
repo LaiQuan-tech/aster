@@ -6,10 +6,10 @@
  * 順序＝簽核順序（manager_hr 模式逐關簽核；manager 模式只取第 1 位）。
  * 純狀態邏輯在 `lib/manager-order.ts`（有單元測試），本檔只負責畫面與事件。
  */
-import { inputCls } from "@/components/admin-ui";
 import type { Employee } from "@/lib/admin-api";
 import { add, moveDown, moveUp, positionLabel, remove } from "@/lib/manager-order";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 export interface ManagerOrderEditorProps {
   /** 有序主管 id（index 0＝小主管）。 */
   value: readonly string[];
@@ -77,23 +77,17 @@ export function ManagerOrderEditor({ value, onChange, employees, employeeName, i
           ))}
         </ol>
       )}
-      <select
-        className={inputCls}
-        aria-label="新增主管"
+      <EmployeeCombobox
+        ariaLabel="新增主管"
+        options={available.map((employee) => ({ id: employee.id, label: nameOf(employee.id), searchText: `${employee.emp_no ?? ""} ${employee.name}` }))}
         value=""
+        clearable={false}
         disabled={disabled || available.length === 0}
-        onChange={(event) => {
-          const id = event.target.value;
+        placeholder={available.length === 0 ? "沒有可新增的員工" : value.length === 0 ? "新增主管…" : "新增下一位主管…"}
+        onChange={(id) => {
           if (id) onChange(add(value, id));
         }}
-      >
-        <option value="">{available.length === 0 ? "沒有可新增的員工" : value.length === 0 ? "新增主管…" : "新增下一位主管…"}</option>
-        {available.map((employee) => (
-          <option key={employee.id} value={employee.id}>
-            {nameOf(employee.id)}
-          </option>
-        ))}
-      </select>
+      />
     </div>
   );
 }

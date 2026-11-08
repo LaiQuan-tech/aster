@@ -15,6 +15,7 @@ import {
   type Department,
 } from "@/lib/admin-api";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 const inputCls =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 const labelCls = "mb-1 block text-xs font-medium text-gray-500";
@@ -202,12 +203,13 @@ export function RecordsView({
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
             <div>
               <label className={labelCls}>員工</label>
-              <select className={inputCls} value={mEmp} onChange={(e) => setMEmp(e.target.value)}>
-                <option value="">請選擇</option>
-                {employees.map((e) => (
-                  <option key={e.id} value={e.id}>{e.name}</option>
-                ))}
-              </select>
+              <EmployeeCombobox
+                options={employees.map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}` }))}
+                value={mEmp}
+                onChange={setMEmp}
+                emptyLabel="請選擇"
+                ariaLabel="員工"
+              />
             </div>
             <div>
               <label className={labelCls}>時間</label>
@@ -310,12 +312,13 @@ export function RecordsView({
           </div>
           <div>
             <label className={labelCls}>員工</label>
-            <select className={inputCls} value={fEmp} onChange={(e) => setFEmp(e.target.value)}>
-              <option value="">全部</option>
-              {employees.map((e) => (
-                <option key={e.id} value={e.id}>{e.name}</option>
-              ))}
-            </select>
+            <EmployeeCombobox
+              options={employees.map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}` }))}
+              value={fEmp}
+              onChange={setFEmp}
+              emptyLabel="全部"
+              ariaLabel="員工"
+            />
           </div>
           <div>
             <label className={labelCls}>查詢日期（起）</label>

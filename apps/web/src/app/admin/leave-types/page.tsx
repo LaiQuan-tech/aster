@@ -29,6 +29,8 @@ import {
   type PrivilegeViewer,
 } from "@/lib/privileged-accounts";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employeeOptionsOf } from "@/lib/employee-combobox";
 /**
  * 可設定簽核流程的申請種類。
  *
@@ -555,20 +557,15 @@ export default function LeaveTypesPage() {
             <label className={labelCls} htmlFor="fallback-approver">
               簽核者
             </label>
-            <select
+            <EmployeeCombobox
               id="fallback-approver"
-              className={inputCls}
+              options={employeeOptionsOf(activeEmployees)}
               value={fallbackEmpId}
               disabled={bossLocked}
-              onChange={(e) => setFallbackEmpId(e.target.value)}
-            >
-              <option value="">（未設定：退回 HR）</option>
-              {activeEmployees.map((emp) => (
-                <option key={emp.id} value={emp.id}>
-                  {emp.emp_no ? `${emp.emp_no} · ${emp.name}` : emp.name}
-                </option>
-              ))}
-            </select>
+              onChange={setFallbackEmpId}
+              emptyLabel="（未設定：退回 HR）"
+              ariaLabel="簽核者"
+            />
           </div>
           <PrimaryButton type="button" onClick={saveFallback} disabled={bossLocked || fallbackSaving || fallbackEmpId === fallbackSaved}>
             {fallbackSaving ? "儲存中…" : "儲存"}

@@ -35,6 +35,7 @@ import {
 } from "@/lib/leave-register-api";
 import { sheet } from "@/lib/sheet-styles";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 const yearNow = new Date().getFullYear();
 // 2026-10-27：預設改為「剩餘總覽」（一人一列、欄＝假別）；舊的一桶一列表格保留為「餘額明細」，避免功能消失。
 const tabs = [
@@ -294,12 +295,13 @@ function LeaveBalancesContent() {
             <>
               <div className="sm:col-span-2">
                 <label className={labelCls}>工號 / 姓名</label>
-                <select className={inputCls} value={employeeId} onChange={(event) => setEmployeeId(event.target.value)}>
-                  <option value="">全部人員</option>
-                  {employees.map((employee) => (
-                    <option key={employee.id} value={employee.id}>{names.employeeMap.get(employee.id)}</option>
-                  ))}
-                </select>
+                <EmployeeCombobox
+                  options={employees.map((employee) => ({ id: employee.id, label: names.employeeMap.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}` }))}
+                  value={employeeId}
+                  onChange={setEmployeeId}
+                  emptyLabel="全部人員"
+                  ariaLabel="工號 / 姓名"
+                />
               </div>
               <div className="flex items-end">
                 <PrimaryButton onClick={() => void load()}>搜尋</PrimaryButton>
@@ -600,12 +602,14 @@ function LeaveBalancesContent() {
             <form onSubmit={onSubmit} className="grid grid-cols-1 gap-4 sm:grid-cols-5">
               <div>
                 <label className={labelCls}>員工</label>
-                <select className={inputCls} value={editEmployeeId} onChange={(event) => setEditEmployeeId(event.target.value)} disabled={batchAll}>
-                  <option value="">請選擇</option>
-                  {employees.map((employee) => (
-                    <option key={employee.id} value={employee.id}>{names.employeeMap.get(employee.id)}</option>
-                  ))}
-                </select>
+                <EmployeeCombobox
+                  options={employees.map((employee) => ({ id: employee.id, label: names.employeeMap.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}` }))}
+                  value={editEmployeeId}
+                  onChange={setEditEmployeeId}
+                  emptyLabel="請選擇"
+                  disabled={batchAll}
+                  ariaLabel="員工"
+                />
               </div>
               <div>
                 <label className={labelCls}>假別</label>

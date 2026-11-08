@@ -90,6 +90,7 @@ import {
   type BucketContext,
 } from "@/lib/approval-view";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 type RequestAttachment = { id: string; fileName: string; sizeBytes: number; contentType: string; url: string };
 
 const BUCKET_TONE: Record<ApprovalBucket, PillTone> = {
@@ -795,22 +796,16 @@ function ApprovalsView() {
                               case "change_approver":
                                 return (
                                   <span key={action.key} className="inline-flex flex-wrap items-center gap-2">
-                                    <select
-                                      className="rounded-md border border-gray-300 px-2 py-1.5 text-xs"
-                                      aria-label="新的簽核人"
+                                    <EmployeeCombobox
+                                      className="w-56 max-w-full"
+                                      inputClassName="w-full rounded-md border border-gray-300 px-2 py-1.5 text-xs"
+                                      ariaLabel="新的簽核人"
+                                      options={lookup.approverCandidates.map((employee) => ({ id: employee.id, label: employeeLabel(employee), searchText: `${(employee as { emp_no?: string | null }).emp_no ?? ""} ${employee.name}` }))}
                                       value={approverDrafts[row.id] ?? defaultApproverId(row)}
                                       disabled={busy}
-                                      onChange={(event) =>
-                                        setApproverDrafts((drafts) => ({ ...drafts, [row.id]: event.target.value }))
-                                      }
-                                    >
-                                      <option value="">選擇簽核人</option>
-                                      {lookup.approverCandidates.map((employee) => (
-                                        <option key={employee.id} value={employee.id}>
-                                          {employeeLabel(employee)}
-                                        </option>
-                                      ))}
-                                    </select>
+                                      onChange={(id) => setApproverDrafts((drafts) => ({ ...drafts, [row.id]: id }))}
+                                      emptyLabel="選擇簽核人"
+                                    />
                                     <button
                                       type="button"
                                       onClick={() => void changeApprover(row)}

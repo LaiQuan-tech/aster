@@ -25,6 +25,8 @@ import {
   type OvertimeSettlement,
 } from "@/lib/cash-payouts-api";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employeeOptionsOf } from "@/lib/employee-combobox";
 /**
  * 加班超額另計（M1，2026-09-22 業主決策 1）。月加班超過上限（預設 40 小時）的分鐘
  * **不進薪資單**——出勤月表核准時自動在這裡開一列草稿，由老闆／HR 另以現金、補休或
@@ -209,21 +211,16 @@ export default function OvertimeSettlementsPage() {
           </div>
           <div>
             <label className={labelCls}>員工</label>
-            <select
-              className={inputCls}
+            <EmployeeCombobox
+              options={employeeOptionsOf(employees)}
               value={filterEmpId}
-              onChange={(e) => {
-                setFilterEmpId(e.target.value);
-                if (!e.target.value && statusFilter !== "draft") setAllMonths(false);
+              onChange={(id) => {
+                setFilterEmpId(id);
+                if (!id && statusFilter !== "draft") setAllMonths(false);
               }}
-            >
-              <option value="">全部員工</option>
-              {employees.map((e) => (
-                <option key={e.id} value={e.id}>
-                  {e.emp_no ? `${e.emp_no} · ${e.name}` : e.name}
-                </option>
-              ))}
-            </select>
+              emptyLabel="全部員工"
+              ariaLabel="員工"
+            />
           </div>
           {allMonthsAvailable && (
             <label className="flex items-center gap-1.5 pb-2 text-sm text-gray-600">
@@ -325,14 +322,13 @@ export default function OvertimeSettlementsPage() {
         <div className="flex flex-wrap items-end gap-3">
           <div className="min-w-56">
             <label className={labelCls}>員工</label>
-            <select className={inputCls} value={manualEmpId} onChange={(e) => setManualEmpId(e.target.value)}>
-              <option value="">請選擇</option>
-              {employees.map((e) => (
-                <option key={e.id} value={e.id}>
-                  {e.emp_no ? `${e.emp_no} · ${e.name}` : e.name}
-                </option>
-              ))}
-            </select>
+            <EmployeeCombobox
+              options={employeeOptionsOf(employees)}
+              value={manualEmpId}
+              onChange={setManualEmpId}
+              emptyLabel="請選擇"
+              ariaLabel="員工"
+            />
           </div>
           <div>
             <label className={labelCls}>分鐘</label>

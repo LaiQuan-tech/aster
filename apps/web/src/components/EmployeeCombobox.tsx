@@ -38,6 +38,7 @@ export function EmployeeCombobox({
   className,
   inputClassName,
   testId,
+  title,
 }: {
   options: readonly EmployeeOption[];
   value: string;
@@ -55,6 +56,8 @@ export function EmployeeCombobox({
   className?: string;
   inputClassName?: string;
   testId?: string;
+  /** 輸入框的 title（例：唯讀原因提示）。 */
+  title?: string;
 }) {
   const autoId = useId();
   const inputId = id ?? `${autoId}-input`;
@@ -64,6 +67,8 @@ export function EmployeeCombobox({
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const [state, setState] = useState<ComboState>(CLOSED);
+  // 清單用 position: fixed 依輸入框位置擺放：放在表格（overflow-x-auto）或卡片（overflow-hidden）裡也不會被裁掉。
+  const [pos, setPos] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
 
   const allOptions = useMemo<EmployeeOption[]>(
     () => (emptyLabel !== undefined ? [{ id: "", label: emptyLabel }, ...options] : [...options]),
@@ -86,6 +91,29 @@ export function EmployeeCombobox({
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
+  }, [state.open]);
+
+  useEffect(() => {
+    if (!state.open) {
+      setPos(null);
+      return;
+    }
+    const place = () => {
+      const r = inputRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const below = window.innerHeight - r.bottom - 8;
+      const above = r.top - 8;
+      const maxHeight = Math.max(160, Math.min(288, below >= 200 || below >= above ? below : above));
+      const top = below >= 200 || below >= above ? r.bottom + 4 : Math.max(8, r.top - 4 - maxHeight);
+      setPos({ top, left: r.left, width: Math.max(r.width, 192), maxHeight });
+    };
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
   }, [state.open]);
 
   // 反白的選項捲進可視範圍
@@ -130,6 +158,7 @@ export function EmployeeCombobox({
           aria-activedescendant={state.open && state.active >= 0 ? optionId(state.active) : undefined}
           aria-label={ariaLabel}
           aria-required={required || undefined}
+          title={title}
           className={[inputClassName ?? defaultInputCls, "pr-14"].join(" ")}
           value={shownText}
           placeholder={showEmptyPlaceholder}
@@ -171,7 +200,8 @@ export function EmployeeCombobox({
           id={listId}
           role="listbox"
           aria-label={ariaLabel ?? "員工"}
-          className="absolute z-50 mt-1 max-h-72 w-full min-w-[12rem] overflow-y-auto rounded-md border border-gray-200 bg-white py-1 text-sm shadow-lg"
+          className="fixed z-[60] overflow-y-auto rounded-md border border-gray-200 bg-white py-1 text-sm shadow-lg"
+          style={pos ? { top: pos.top, left: pos.left, width: pos.width, maxHeight: pos.maxHeight } : { visibility: "hidden" }}
         >
           {list.length === 0 && (
             <li role="presentation" className="px-3 py-2 text-gray-400">

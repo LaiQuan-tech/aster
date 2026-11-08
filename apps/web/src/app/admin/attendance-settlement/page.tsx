@@ -12,6 +12,7 @@ import {
 } from "@/lib/admin-api";
 import { errorMessageOf } from "@/lib/period-closed";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 const monthNow = new Date().toISOString().slice(0, 7);
 
 type DataType = "all" | "worked" | "late" | "overtime" | "night" | "anomaly";
@@ -242,14 +243,13 @@ export default function AttendanceSettlementPage() {
             </div>
             <div className="lg:col-span-2">
               <label className={labelCls}>工號 / 姓名</label>
-              <select className={inputCls} value={employeeId} onChange={(event) => setEmployeeId(event.target.value)}>
-                <option value="">全部人員</option>
-                {employees.map((employee) => (
-                  <option key={employee.id} value={employee.id}>
-                    {employeeName.get(employee.id)}
-                  </option>
-                ))}
-              </select>
+              <EmployeeCombobox
+                options={employees.map((employee) => ({ id: employee.id, label: employeeName.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}` }))}
+                value={employeeId}
+                onChange={setEmployeeId}
+                emptyLabel="全部人員"
+                ariaLabel="工號 / 姓名"
+              />
             </div>
             <div>
               <label className={labelCls}>截止日</label>

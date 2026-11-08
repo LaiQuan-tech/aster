@@ -7,6 +7,7 @@ import { RecordsView } from "./_views/RecordsView";
 import { DayView } from "./_views/DayView";
 import { WeekView } from "./_views/WeekView";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 type Tab = "day" | "week" | "records";
 
 const TABS: { value: Tab; label: string }[] = [
@@ -67,12 +68,13 @@ export default function PunchRecordsPage() {
             </div>
             <div className="w-44">
               <label className={labelCls}>員工</label>
-              <select className={inputCls} value={fEmp} onChange={(e) => setFEmp(e.target.value)}>
-                <option value="">全部</option>
-                {empOptions.map((e) => (
-                  <option key={e.id} value={e.id}>{e.emp_no ? `${e.emp_no} ${e.name}` : e.name}</option>
-                ))}
-              </select>
+              <EmployeeCombobox
+                options={empOptions.map((e) => ({ id: e.id, label: e.emp_no ? `${e.emp_no} ${e.name}` : e.name, searchText: `${e.emp_no ?? ""} ${e.name}` }))}
+                value={fEmp}
+                onChange={setFEmp}
+                emptyLabel="全部"
+                ariaLabel="員工"
+              />
             </div>
           </div>
         )}

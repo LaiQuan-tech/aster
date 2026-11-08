@@ -24,6 +24,7 @@ import {
 } from "@/lib/admin-api";
 import { getAnnouncementAckSummary, seedAnnouncementAcks } from "@/lib/people-extras-api";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 const CHANGE_LABEL: Record<AnnouncementVersion["change_type"], string> = {
   initial: "首版",
   amendment: "條款增修",
@@ -424,20 +425,15 @@ function PaperSignatureForm({
             <label className={labelCls} htmlFor="sig-emp">
               員工
             </label>
-            <select
+            <EmployeeCombobox
               id="sig-emp"
+              options={employees.map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}` }))}
               value={employeeId}
-              onChange={(e) => setEmployeeId(e.target.value)}
+              onChange={setEmployeeId}
               required
-              className={inputCls}
-            >
-              <option value="">請選擇</option>
-              {employees.map((e) => (
-                <option key={e.id} value={e.id}>
-                  {e.name}
-                </option>
-              ))}
-            </select>
+              emptyLabel="請選擇"
+              ariaLabel="員工"
+            />
           </div>
           <div>
             <label className={labelCls} htmlFor="sig-date">

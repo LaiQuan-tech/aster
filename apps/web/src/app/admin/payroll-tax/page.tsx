@@ -16,6 +16,7 @@ import {
   type NonEmployeeIncome,
 } from "@/lib/admin-api";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 const inputCls =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 const labelCls = "mb-1 block text-xs font-medium text-gray-500";
@@ -155,12 +156,14 @@ export default function PayrollTaxPage() {
         <div className="mb-4 flex flex-wrap items-end gap-3">
           <div>
             <label className={labelCls}>員工</label>
-            <select className={inputCls} value={adjustmentEmployeeId} onChange={(event) => setAdjustmentEmployeeId(event.target.value)}>
-              <option value="">全部員工</option>
-              {employees.map((employee) => (
-                <option key={employee.id} value={employee.id}>{empName(employee.id)}</option>
-              ))}
-            </select>
+            <EmployeeCombobox
+              className="w-72 max-w-full"
+              options={employees.map((employee) => ({ id: employee.id, label: empName(employee.id), searchText: `${employee.emp_no ?? ""} ${employee.name}` }))}
+              value={adjustmentEmployeeId}
+              onChange={setAdjustmentEmployeeId}
+              emptyLabel="全部員工"
+              ariaLabel="員工"
+            />
           </div>
           <PrimaryButton type="button" onClick={() => void loadAdjustments()}>查詢</PrimaryButton>
         </div>

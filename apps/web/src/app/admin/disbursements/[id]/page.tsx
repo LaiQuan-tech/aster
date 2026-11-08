@@ -33,6 +33,8 @@ import { getEmployees, type Employee } from "@/lib/admin-api";
 import { getMeCached } from "@/lib/ess-state";
 import type { ApiError } from "@/lib/api-client";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employeeOptionsOf } from "@/lib/employee-combobox";
 function fmtMoney(n: number | null | undefined): string {
   return n == null ? "—" : n.toLocaleString();
 }
@@ -418,15 +420,14 @@ export default function DisbursementDetailPage() {
           {changeApproverOpen && (
             <div className="no-print mb-3 flex flex-wrap items-center gap-2 rounded-md bg-gray-50 p-3">
               <label className="text-sm text-gray-600">改由誰簽第 {d.currentStep ?? 1} 關</label>
-              <select className="rounded border border-gray-300 px-2 py-1 text-sm" value={nextApproverId} onChange={(e) => setNextApproverId(e.target.value)}>
-                <option value="">請選擇</option>
-                {employees.map((e) => (
-                  <option key={e.id} value={e.id}>
-                    {e.emp_no ? `${e.emp_no} · ` : ""}
-                    {e.name}
-                  </option>
-                ))}
-              </select>
+              <EmployeeCombobox
+                className="w-64 max-w-full"
+                options={employeeOptionsOf(employees)}
+                value={nextApproverId}
+                onChange={setNextApproverId}
+                emptyLabel="請選擇"
+                ariaLabel={`改由誰簽第 ${d.currentStep ?? 1} 關`}
+              />
               <PrimaryButton onClick={() => void handleChangeApprover()} disabled={saving || !nextApproverId}>
                 {saving ? "處理中…" : "確認變更"}
               </PrimaryButton>

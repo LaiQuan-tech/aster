@@ -19,6 +19,7 @@ import {
   type AuditTable,
 } from "@/lib/audit-api";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 const PAGE_SIZE = 50;
 
 /** 篩選器預設只展開常用的幾張表；其餘收在「更多」。 */
@@ -207,15 +208,14 @@ export default function AuditLogsPage() {
               <label htmlFor="audit-actor" className={labelCls}>
                 操作者
               </label>
-              <select id="audit-actor" value={actorEmpId} onChange={(e) => setActorEmpId(e.target.value)} className={inputCls}>
-                <option value="">全部</option>
-                {employeeOptions.map((e) => (
-                  <option key={e.id} value={e.id}>
-                    {e.name}
-                    {e.emp_no ? `（${e.emp_no}）` : ""}
-                  </option>
-                ))}
-              </select>
+              <EmployeeCombobox
+                id="audit-actor"
+                options={employeeOptions.map((e) => ({ id: e.id, label: `${e.name}${e.emp_no ? `（${e.emp_no}）` : ""}`, searchText: `${e.emp_no ?? ""} ${e.name}` }))}
+                value={actorEmpId}
+                onChange={setActorEmpId}
+                emptyLabel="全部"
+                ariaLabel="操作者"
+              />
             </div>
             <div>
               <label htmlFor="audit-from" className={labelCls}>

@@ -14,6 +14,7 @@ import {
 } from "@/lib/late-reports-api";
 import { lateDecisionLabel, lateDecisionTone, periodOf, sortLateReports } from "@/lib/late-reason";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 /**
  * 後台「出勤 → 遲到說明」（2026-10-11 業主拍板）。
  *
@@ -118,14 +119,14 @@ export default function LateReportsPage() {
             <label className={labelCls} htmlFor="late-employee">
               員工
             </label>
-            <select id="late-employee" className={inputCls} value={employeeId} onChange={(e) => setEmployeeId(e.target.value)}>
-              <option value="">全部</option>
-              {employees.map((e) => (
-                <option key={e.id} value={e.id}>
-                  {e.name}
-                </option>
-              ))}
-            </select>
+            <EmployeeCombobox
+              id="late-employee"
+              options={employees.map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}` }))}
+              value={employeeId}
+              onChange={setEmployeeId}
+              emptyLabel="全部"
+              ariaLabel="員工"
+            />
           </div>
           <div className="flex items-end">
             <p className="text-sm text-gray-500">

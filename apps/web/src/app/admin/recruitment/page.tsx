@@ -29,6 +29,7 @@ import {
   type Offer,
 } from "@/lib/admin-api";
 
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 const REQ_STATUS_LABEL: Record<JobRequisition["status"], string> = {
   draft: "草稿",
   pending_approval: "待審核",
@@ -540,10 +541,13 @@ export default function RecruitmentPage() {
           </div>
           <div>
             <label className={labelCls}>面試官</label>
-            <select className={inputCls} value={interviewerEmpId} onChange={(event) => setInterviewerEmpId(event.target.value)}>
-              <option value="">未指定</option>
-              {employees.map((employee) => <option key={employee.id} value={employee.id}>{employeeName.get(employee.id)}</option>)}
-            </select>
+            <EmployeeCombobox
+              options={employees.map((employee) => ({ id: employee.id, label: employeeName.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}` }))}
+              value={interviewerEmpId}
+              onChange={setInterviewerEmpId}
+              emptyLabel="未指定"
+              ariaLabel="面試官"
+            />
           </div>
           <div>
             <label className={labelCls}>時間</label>
@@ -563,10 +567,13 @@ export default function RecruitmentPage() {
         <h2 className="mb-4 text-sm font-medium text-gray-500">面試紀錄表 / 面試行事曆</h2>
         <div className="mb-4">
           <label className={labelCls}>行事曆篩選：面試官</label>
-          <select className={inputCls} value={interviewerFilter} onChange={(event) => setInterviewerFilter(event.target.value)}>
-            <option value="">公司面試行事曆</option>
-            {employees.map((employee) => <option key={employee.id} value={employee.id}>{employeeName.get(employee.id)}</option>)}
-          </select>
+          <EmployeeCombobox
+            options={employees.map((employee) => ({ id: employee.id, label: employeeName.get(employee.id) ?? employee.name, searchText: `${employee.emp_no ?? ""} ${employee.name}` }))}
+            value={interviewerFilter}
+            onChange={setInterviewerFilter}
+            emptyLabel="公司面試行事曆"
+            ariaLabel="行事曆篩選：面試官"
+          />
         </div>
 
         {filteredInterviews.length === 0 ? (
