@@ -461,6 +461,11 @@ export function buildPayslipStatementGrid(data: StatementData): StatementGrid {
     ? Math.round((money.netWithExpenses - netPay(money) - nonTaxable) * 100) / 100
     : null
   let rr = H + 1
+  // 實發金額正下方（同欄 9–11）放文字說明，不參與加總；支出等列往下排。
+  if (taxFreeAllowance) {
+    g.set(rr, 9, { value: `（其中免稅津貼 ${Math.round(taxFreeAllowance).toLocaleString("en-US")}）`, colSpan: 3, size: 10, align: "right" })
+    rr += 1
+  }
   g.set(rr, 8, { value: "支出", bold: true, align: "right" })
   g.set(rr, 9, amt(expenseShown, "acct"))
   rr += 1
@@ -469,9 +474,7 @@ export function buildPayslipStatementGrid(data: StatementData): StatementGrid {
     g.set(rr, 9, amt(nonTaxable, "acct"))
     rr += 1
   }
-  if (taxFreeAllowance) {
-    g.set(H + 1, 10, { value: `（其中免稅津貼 ${Math.round(taxFreeAllowance).toLocaleString("en-US")}）`, colSpan: 2, size: 10, align: "right" })
-  }
+
   g.set(rr, 8, { value: "薪資+支出", bold: true, align: "right" })
   g.set(rr, 9, amt(money ? money.netWithExpenses : null, "acct"))
 

@@ -531,3 +531,74 @@ describe("第三輪：分頁、期間篩選、提醒失敗不 500、勞退設定
     expect(bd(EMP)).toMatchObject({ base: 1600, pensionWage: 3000, pensionWageSource: "auto" })
   })
 })
+
+describe("最後一輪：定案後複查失敗退回草稿、定案中勞退設定被改、afterWrite 過期檢查出錯不 500", () => {
+  /** 讓第 n 次對 table 的查詢之前執行 hook（fake.from 每次呼叫都會經過這裡）。 */
+  function hookFrom(table: string, hook: (nth: number) => void): () => void {
+    const orig = fake.from
+    let n = 0
+    fake.from = ((t: string) => {
+      if (t === table) hook(++n)
+      return orig(t)
+    }) as typeof fake.from
+    return () => {
+      fake.from = orig
+    }
+  }
+
+  it("定案更新後複查固定津貼時讀取失敗 → 薪資單退回草稿、回 500", async () => {
+    await runPayroll(OCT, EMP)
+    const restore = hookFrom("employee_fixed_allowances", (nth) => {
+      if (nth === 2) fake.injectError({ table: "employee_fixed_allowances", action: "select", error: { code: "XX000", message: "boom" } })
+    })
+    try {
+      const res = await as(T.hr).post(`/payslips/${slipOf(EMP).id as string}/finalize`)
+      expect(res.status).toBe(500)
+      expect(res.body.error).toContain("已退回草稿")
+    } finally {
+      restore()
+    }
+    expect(slipOf(EMP).status).toBe("draft")
+  })
+
+  it("定案更新後複查加減項時讀取失敗（既有加減項那支）→ 同樣退回草稿、回 500", async () => {
+    await runPayroll(OCT, EMP)
+    const restore = hookFrom("payroll_adjustments", (nth) => {
+      if (nth === 2) fake.injectError({ table: "payroll_adjustments", action: "select", error: { code: "XX000", message: "boom" } })
+    })
+    try {
+      expect((await as(T.hr).post(`/payslips/${slipOf(EMP).id as string}/finalize`)).status).toBe(500)
+    } finally {
+      restore()
+    }
+    expect(slipOf(EMP).status).toBe("draft")
+  })
+
+  it("定案過程中勞退設定被改（更新之後才讀到新值）→ 退回草稿、回 409 pension_settings_stale", async () => {
+    await runPayroll(OCT, EMP)
+    const restore = hookFrom("salary_structures", () => {
+      const slip = (fake.db.payslips ?? []).find((p) => p.employee_id === EMP && p.period === OCT)
+      if (slip?.status === "finalized") {
+        const row = fake.db.salary_structures!.find((r) => r.employee_id === EMP)!
+        row.pension_wage = 45800
+      }
+    })
+    try {
+      const res = await as(T.hr).post(`/payslips/${slipOf(EMP).id as string}/finalize`)
+      expect(res.status).toBe(409)
+      expect(res.body.error).toBe("pension_settings_stale")
+    } finally {
+      restore()
+    }
+    expect(slipOf(EMP).status).toBe("draft")
+  })
+
+  it("新增津貼時過期檢查出錯 → 寫入已成功仍回 201（stalePeriods 空），不 500", async () => {
+    await runPayroll(OCT, EMP)
+    fake.injectError({ table: "payslips", action: "select", error: { code: "XX000", message: "boom" } })
+    const res = await create()
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(res.body.stalePeriods).toEqual([])
+    expect(fake.db.employee_fixed_allowances).toHaveLength(1)
+  })
+})

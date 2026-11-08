@@ -253,11 +253,11 @@ describe("驗收修正（2026-10-27）", () => {
     const grid = buildPayslipStatementGrid(data)
     const T = 4 + 15
     expect(cellAt(grid, T + 1, 9)!.value).toBe(31550) // 實發金額
-    expect(cellAt(grid, T + 2, 9)!.value).toBe(1000) // 支出＝只有代墊，沒有多算 3,000
+    expect(cellAt(grid, T + 3, 9)!.value).toBe(1000) // 支出＝只有代墊，沒有多算 3,000（說明列佔了實發正下方一列）
     const values = grid.cells.map((c) => c.value)
     expect(values).toContain(32550) // 薪資+支出
     // 實發下方是**文字**說明（不參與加總），不是金額格
-    expect(cellAt(grid, T + 2, 10)).toMatchObject({ value: "（其中免稅津貼 3,000）" })
+    expect(cellAt(grid, T + 2, 9)).toMatchObject({ value: "（其中免稅津貼 3,000）", colSpan: 3 }) // 實發金額正下方
     expect(values.filter((v) => v === 3000)).toHaveLength(0)
     // 福利區列出伙食費免稅名目，但應發合計不含它（試算版沒有逐筆名目 → 以「伙食費」呈現）
     expect(grid.cells.some((c) => c.value === "伙食費(免稅)")).toBe(true)

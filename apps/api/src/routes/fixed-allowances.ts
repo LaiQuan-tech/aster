@@ -20,7 +20,7 @@ import { loadRuleConfigFor, salarySelectCols, toSalaryStructure, type SalaryRow 
 import {
   FIXED_ALLOWANCE_COLS,
   loadFixedAllowanceRows,
-  staleDraftPayslips,
+  staleDraftPayslipsSafe,
   toFixedAllowanceView,
   type FixedAllowanceRow,
   type FixedAllowanceView,
@@ -130,7 +130,8 @@ function overlapWarnings(rows: FixedAllowanceRow[]) {
 /** CRUD 之後：同名重疊提醒＋草稿過期的期別。 */
 async function afterWrite(tenantId: string, employeeId: string) {
   const rows = await loadFixedAllowanceRows(tenantId, [employeeId])
-  const stale = await staleDraftPayslips(tenantId, [employeeId])
+  // 寫入已成功：過期檢查出錯只記 log、不回 stalePeriods，不可讓請求變 500（staleDraftPayslipsSafe）。
+  const stale = await staleDraftPayslipsSafe(tenantId, [employeeId])
   return { warnings: overlapWarnings(rows), stalePeriods: [...new Set(stale.map((s) => s.period))] }
 }
 
@@ -213,7 +214,7 @@ fixedAllowancesRouter.get(
       const rows = await loadFixedAllowanceRows(tenantId, [employeeId])
       const period = todayKey(await getTenantTimezone(tenantId)).slice(0, 7)
       const active = activeFixedAllowancesForPeriod(rows, period)
-      const stale = await staleDraftPayslips(tenantId, [employeeId])
+      const stale = await staleDraftPayslipsSafe(tenantId, [employeeId])
       res.status(200).json({
         fixedAllowances: rows.map(toFixedAllowanceView),
         summary: {

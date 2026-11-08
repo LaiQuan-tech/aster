@@ -693,31 +693,53 @@ payrollRouter.post(
       // 更新之後再比對一次加減項：上面「檢查」與這裡「更新」之間剛好有人新增／修改／刪除的話，退回草稿並回 409
       // （另一邊的加減項端點也會在寫入後查一次是否已定稿並還原——兩邊至少有一邊會發現，不會有補發漏進已定稿的薪資單）。
       if (typeof updated.employee_id === "string") {
-        const after = await loadAdjustmentsByEmployee(tenantId, updated.period as string, [updated.employee_id as string])
-        const afterFixed = await loadFixedAllowancesByEmployee(tenantId, updated.period as string, [updated.employee_id as string])
-        const fixedChanged =
-          fixedAllowancesStale(embeddedFixedAllowancesOf(existing.breakdown), afterFixed.get(updated.employee_id as string)) ||
-          pensionSettingsStale(existing.breakdown, await currentPensionSettings(tenantId, updated.employee_id as string))
-        if (fixedChanged || adjustmentsStale(embeddedAdjustmentsOf(existing.breakdown), after.get(updated.employee_id as string))) {
-          const { error: revertErr } = await supabaseAdmin
+        const empId = updated.employee_id as string
+        const revertToDraft = async () =>
+          supabaseAdmin
             .from("payslips")
             .update({ status: "draft", updated_at: new Date().toISOString() })
             .eq("tenant_id", tenantId)
             .eq("id", id)
             .eq("status", "finalized")
+        // 二次檢查本身失敗（讀不到加減項／固定津貼／勞退設定）：不能確定沒有異動 → 先退回草稿再回 500，不留下沒驗過的定稿。
+        let stale: "adjustments_stale" | "fixed_allowances_stale" | "pension_settings_stale" | null = null
+        try {
+          const after = await loadAdjustmentsByEmployee(tenantId, updated.period as string, [empId])
+          const afterFixed = await loadFixedAllowancesByEmployee(tenantId, updated.period as string, [empId])
+          const afterPension = await currentPensionSettings(tenantId, empId)
+          if (adjustmentsStale(embeddedAdjustmentsOf(existing.breakdown), after.get(empId))) stale = "adjustments_stale"
+          else if (fixedAllowancesStale(embeddedFixedAllowancesOf(existing.breakdown), afterFixed.get(empId))) stale = "fixed_allowances_stale"
+          else if (pensionSettingsStale(existing.breakdown, afterPension)) stale = "pension_settings_stale"
+        } catch (checkErr) {
+          const { error: revertErr } = await revertToDraft()
+          logger.error(
+            { err: checkErr, tenantId, payslipId: id, reverted: !revertErr, revertError: revertErr?.message },
+            "finalize: post-update re-check failed — reverted to draft",
+          )
+          next(
+            new Error(
+              revertErr
+                ? `POST /payslips/${id}/finalize (re-check): 定稿後複查失敗，且薪資單無法自動退回草稿，請人工確認`
+                : `POST /payslips/${id}/finalize (re-check): 定稿後複查失敗，薪資單已退回草稿，請稍後再試`,
+            ),
+          )
+          return
+        }
+        if (stale) {
+          const { error: revertErr } = await revertToDraft()
           if (revertErr) {
             // 退不回草稿：不能回 409 假裝沒定稿（薪資單其實是 finalized、加減項卻沒跟上）。記 log、回 500，請人工處理。
-            logger.error({ tenantId, payslipId: id, reason: revertErr.message }, "finalize: adjustments changed during finalize and revert to draft FAILED — needs manual check")
-            next(new Error(`POST /payslips/${id}/finalize (revert): 加減項在定稿時有異動，但薪資單無法自動退回草稿，請人工確認`))
+            logger.error({ tenantId, payslipId: id, reason: revertErr.message, stale }, "finalize: inputs changed during finalize and revert to draft FAILED — needs manual check")
+            next(new Error(`POST /payslips/${id}/finalize (revert): 薪資輸入在定稿時有異動，但薪資單無法自動退回草稿，請人工確認`))
             return
           }
-          logger.warn({ tenantId, payslipId: id }, "finalize: adjustments changed during finalize, reverted to draft")
+          logger.warn({ tenantId, payslipId: id, stale }, "finalize: inputs changed during finalize, reverted to draft")
+          const what =
+            stale === "adjustments_stale" ? "加減項（前期更正）" : stale === "fixed_allowances_stale" ? "固定津貼" : "勞退月提繳工資或「適用勞退新制」"
           res.status(409).json({
-            error: fixedChanged ? "fixed_allowances_stale" : "adjustments_stale",
+            error: stale,
             period: updated.period,
-            message: fixedChanged
-              ? `${updated.period as string} 的固定津貼或勞退設定剛好有異動，薪資單已退回草稿，請重新執行薪資再定稿`
-              : `${updated.period as string} 的加減項（前期更正）剛好有異動，薪資單已退回草稿，請重新執行薪資再定稿`,
+            message: `${updated.period as string} 的${what}剛好有異動，薪資單已退回草稿，請重新執行薪資再定稿`,
           })
           return
         }
