@@ -247,6 +247,8 @@ export function FixedAllowancesCard({
           {w.message}
         </p>
       ))}
+      {/* 手機寬度下 .admin-shell table 有 min-width 720px（globals.css）：外層自己捲，不要撐破卡片（卡片 overflow-hidden 會把右半邊切掉）。 */}
+      <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
         <thead>
           <tr className="border-b border-gray-200 text-xs text-gray-500">
@@ -292,6 +294,7 @@ export function FixedAllowancesCard({
           )}
         </tbody>
       </table>
+      </div>
       {summary && summary.activeTotal > 0 && (
         <p className="mt-2 text-xs text-gray-500">
           {summary.period} 有效的固定津貼合計 {fmt(summary.activeTotal)} 元（計入投保 {fmt(summary.activeInsurableTotal)} 元）。

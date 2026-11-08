@@ -286,7 +286,8 @@ export function PeriodLockCard() {
                 className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between"
                 data-testid={`period-row-${row.period}`}
               >
-                <div className="min-w-0">
+                {/* 左欄 flex-1＋min-w-0：長狀態文字（含重新開放理由）在左欄內換行；右欄按鈕 shrink-0 不被擠掉、也不被卡片 overflow-hidden 切掉。 */}
+                <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium tabular-nums text-gray-900">{row.period}</span>
                     {row.period === data.currentPeriod && <Pill tone="blue">本月</Pill>}
@@ -300,7 +301,7 @@ export function PeriodLockCard() {
                     </p>
                   )}
                 </div>
-                <div className="flex flex-wrap items-center gap-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-2 sm:max-w-[50%] sm:shrink-0 sm:justify-end">
                   {actions.showClose && (
                     <Button size="sm" onClick={() => openClose(row.period)} data-testid="period-close-btn">
                       {closeButtonLabel(row.period)}

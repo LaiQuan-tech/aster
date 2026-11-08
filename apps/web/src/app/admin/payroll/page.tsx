@@ -22,6 +22,8 @@ import { loadPayrollEmployees } from "@/lib/payroll-employees";
 import { errorMessageOf } from "@/lib/period-closed";
 import { PayrollAdjustmentsCard } from "./_components/PayrollAdjustmentsCard";
 import { FixedAllowancesCard } from "./_components/FixedAllowancesCard";
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { employeeOptionsOf } from "@/lib/employee-combobox";
 import { pensionWageHintText, pensionWageInputCheck, type FixedAllowanceSummary } from "@/lib/fixed-allowances-api";
 import { PeriodLockCard } from "./_components/PeriodLockCard";
 import { payrollGateText } from "@/lib/payroll-gate";
@@ -54,7 +56,6 @@ export default function PayrollAdminPage() {
   const [loadedPension, setLoadedPension] = useState<{ wage: string; newSystem: boolean }>({ wage: "", newSystem: true });
   const [allowanceSummary, setAllowanceSummary] = useState<FixedAllowanceSummary | null>(null);
   const [allowanceReloadKey, setAllowanceReloadKey] = useState(0);
-  const [employeeKeyword, setEmployeeKeyword] = useState("");
   const [employeeIdentityById, setEmployeeIdentityById] = useState<Record<string, string>>({});
   const [salaryMsg, setSalaryMsg] = useState<string | null>(null);
   // M12：API 依投保級距表自動選出來的級距（留空投保薪資時才會回）。
@@ -91,15 +92,11 @@ export default function PayrollAdminPage() {
   // 每執行一次薪資作業加 1：「薪資加減項（前期更正）」卡重新讀一次，草稿薪資單跟上了就拿掉「草稿未更新」的提醒。
   const [adjustmentsRefresh, setAdjustmentsRefresh] = useState(0);
 
-  const visibleEmployees = useMemo(() => {
-    const term = employeeKeyword.trim().toLowerCase();
-    if (!term) return employees;
-    return employees.filter((employee) => {
-      return [employee.name, employee.emp_no, employee.id, employeeIdentityById[employee.id]]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(term));
-    });
-  }, [employeeIdentityById, employeeKeyword, employees]);
+  // 員工選單（可搜尋 combobox）：工號、姓名、身分證、員工 ID 都可搜（原本「工號／身分證／姓名搜尋」框＋原生 select 合併）。
+  const employeeOptions = useMemo(
+    () => employeeOptionsOf(employees, (e) => [employeeIdentityById[e.id], e.id].filter(Boolean).join(" ")),
+    [employeeIdentityById, employees],
+  );
 
   useEffect(() => {
     let active = true;
@@ -338,23 +335,17 @@ export default function PayrollAdminPage() {
       <Card>
         <h2 className="mb-4 text-sm font-medium text-gray-500">員工薪資保險資料</h2>
         <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <div>
-            <label className={labelCls}>工號 / 身分證 / 姓名搜尋</label>
-            <input
-              className={inputCls}
-              value={employeeKeyword}
-              onChange={(event) => setEmployeeKeyword(event.target.value)}
+          <div className="min-w-0 sm:col-span-2">
+            <label className={labelCls} htmlFor="payroll-employee">員工（輸入工號、姓名、身分證或員工 ID 搜尋）</label>
+            <EmployeeCombobox
+              id="payroll-employee"
+              options={employeeOptions}
+              value={empId}
+              onChange={onPickEmployee}
               placeholder="輸入工號、姓名、身分證或員工 ID"
+              ariaLabel="員工"
+              testId="payroll-employee-combobox"
             />
-          </div>
-          <div className="sm:col-span-2">
-            <label className={labelCls}>員工</label>
-            <select className={inputCls} value={empId} onChange={(event) => onPickEmployee(event.target.value)}>
-              <option value="">請選擇</option>
-              {visibleEmployees.map((employee) => (
-                <option key={employee.id} value={employee.id}>{empName(employee.id)}</option>
-              ))}
-            </select>
             {selectedIdentity && (
               <p className="mt-1 text-xs text-gray-500">證件號碼：{selectedIdentity}</p>
             )}
@@ -604,14 +595,16 @@ export default function PayrollAdminPage() {
             <label className={labelCls}>薪資期間</label>
             <input type="month" className={inputCls} value={runPeriod} onChange={(e) => setRunPeriod(e.target.value)} />
           </div>
-          <div>
-            <label className={labelCls}>執行對象</label>
-            <select className={inputCls} value={runEmployeeId} onChange={(event) => setRunEmployeeId(event.target.value)}>
-              <option value="">全部員工</option>
-              {employees.map((employee) => (
-                <option key={employee.id} value={employee.id}>{empName(employee.id)}</option>
-              ))}
-            </select>
+          <div className="w-full min-w-0 sm:w-72">
+            <label className={labelCls} htmlFor="payroll-run-employee">執行對象</label>
+            <EmployeeCombobox
+              id="payroll-run-employee"
+              options={employeeOptions}
+              value={runEmployeeId}
+              onChange={setRunEmployeeId}
+              emptyLabel="全部員工"
+              ariaLabel="執行對象"
+            />
           </div>
           <PrimaryButton type="submit">執行</PrimaryButton>
           {runMsg && (
