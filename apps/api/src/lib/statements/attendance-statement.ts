@@ -76,14 +76,17 @@ export function dayContent(day: SheetDayView): string {
   return parts.join("／")
 }
 
-/** 小結列「加給」＝應發 − 本薪 − 加班費（夜間加給＋全勤獎金＋定額補貼＋課稅補發）。 */
+/**
+ * 小結列「加給」＝應發 − 本薪 − 加班費（夜間加給＋全勤獎金＋定額補貼＋課稅補發＋固定津貼應稅部分）
+ * ＋固定津貼免稅部分（伙食費免稅額內，不在應發但員工有領到；2026-11-08），本薪＋加班＋加給−應扣＝實領。
+ */
 export function allowanceTotal(money: StatementMoney): number {
-  return Math.round((money.gross - money.base - money.overtimePay) * 100) / 100
+  return Math.round((money.gross - money.base - money.overtimePay + (money.fixedAllowancesTaxFree ?? 0)) * 100) / 100
 }
 
-/** 實領（不含代墊支出）＝應發 − 應扣。 */
+/** 實領（不含代墊支出）＝應發 − 應扣 ＋ 固定津貼免稅部分（與 Email／員工薪資單／工資清冊的實發一致；沒有津貼時與以前相同）。 */
 export function netPay(money: StatementMoney): number {
-  return Math.round((money.gross - money.totalDeductions) * 100) / 100
+  return Math.round((money.gross - money.totalDeductions + (money.fixedAllowancesTaxFree ?? 0)) * 100) / 100
 }
 
 export function buildAttendanceStatementGrid(data: StatementData): StatementGrid {

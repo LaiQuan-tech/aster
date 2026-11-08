@@ -58,9 +58,11 @@ import { disbursementGrossCents, subcontractPaymentGrossCents } from "./project-
  *   • 在職人數（headcount）＝今天（租戶當地）在職：到職日 ≤ 今天且（沒有離職日或離職日 ≥ 今天），與後台首頁人事區
  *     （services/boss-summary.ts）同一個 helper（services/employment-status.ts isEmployedOn）；依員工**目前**的所屬公司歸屬，
  *     換年度／月份不變。
- *   • 人事成本（payrollCost）＝**應發（gross）口徑**：期間內（payslips.period 'YYYY-MM' 落在年度／月份）已產生的薪資單
- *     應發合計，草稿與已定稿都算（畫面附註草稿張數）。gross **未扣**請假／遲到早退扣款、**不含**雇主負擔（勞健保、勞退
- *     雇主提繳——payslips 沒有這些欄位）、**不含**加班超額另計（overtime_settlements）與各種獎金（獎金試算、三節獎金）。
+ *   • 人事成本（payrollCost）＝**人事成本合計口徑**（2026-11-08，與薪資明細表／工資清冊 CSV 的「人事成本合計」同一個定義）：
+ *     期間內（payslips.period 'YYYY-MM' 落在年度／月份）已產生的薪資單「應發 gross ＋ 固定津貼免稅部分
+ *     breakdown.fixedAllowancesTaxFree ＋ 雇主勞退提撥 breakdown.employerPension」合計，草稿與已定稿都算（畫面附註草稿張數）。
+ *     **未扣**請假／遲到早退扣款、**不含**雇主勞健保負擔（系統未計算）、**不含**加班超額另計（overtime_settlements）
+ *     與各種獎金（獎金試算、三節獎金）。舊薪資單沒有那兩個欄位 → 當 0（＝只有應發，不回溯補算）。
  *     同樣依員工**目前**的所屬公司歸屬，離職員工的薪資單照算。口徑文字在 PAYROLL_BASIS_NOTE（API 回應 payroll.basisNote）。
  *   • 補充（頁面以 gross 為主、這兩個只做補充顯示）：
  *       payrollCostNet          ＝ gross −（breakdown.leaveDeduction ＋ breakdown.lateEarlyDeduction）；舊薪資單沒有這兩鍵當 0。
@@ -69,7 +71,7 @@ import { disbursementGrossCents, subcontractPaymentGrossCents } from "./project-
  *   • monthly[] 每個月另有 payrollCost（依 payslip period；那個月整個租戶沒有任何薪資單 → null），首頁「本月」可直接取。
  *   • company_id 為 NULL（未指派）、指到不在本租戶名冊的公司、或 0072 還沒套 → 列在「未指派」
  *     （group.unassignedHeadcount／unassignedPayrollCost），**不分攤**到任何公司。
- *   • 各公司「扣人事成本後」＝毛利－該公司人事成本（gross）。集團合計的人事成本＝納入合計的公司＋未指派（集團整體真的付出去的錢），
+ *   • 各公司「扣人事成本後」＝毛利－該公司人事成本（人事成本合計口徑）。集團合計的人事成本＝納入合計的公司＋未指派（集團整體真的付出去的錢），
  *     集團「扣人事成本後」＝集團毛利－集團人事成本。
  *   • 期間內一張薪資單都沒有（例如正式庫還沒跑過薪資）→ payrollCost／payrollCostNet／扣人事成本後一律 null
  *     （畫面顯示「尚無薪資資料」），不用 0 假裝「人事成本是零」。
@@ -200,7 +202,8 @@ export type OvertimeSettlementInputRow = {
 }
 
 /** 人事成本的口徑說明（API 回應 payroll.basisNote、頁面照抄）。 */
-export const PAYROLL_BASIS_NOTE = "應發（gross）口徑：未扣請假／遲到扣款、不含雇主負擔、加班另計與獎金"
+export const PAYROLL_BASIS_NOTE =
+  "人事成本合計口徑（應發＋免稅津貼＋雇主勞退提撥）：未扣請假／遲到扣款、不含雇主勞健保負擔、加班另計與獎金"
 
 export type GroupOverviewData = {
   year: number
@@ -533,6 +536,14 @@ function slipDeductionCents(breakdown: unknown): number {
   return num(b.leaveDeduction) + num(b.lateEarlyDeduction)
 }
 
+/** 人事成本在應發之外的部分：固定津貼免稅部分＋雇主勞退提撥（2026-11-08）；舊薪資單沒有這兩鍵當 0。 */
+export function slipEmployerSideCents(breakdown: unknown): number {
+  if (!breakdown || typeof breakdown !== "object" || Array.isArray(breakdown)) return 0
+  const b = breakdown as Record<string, unknown>
+  const num = (v: unknown): number => (typeof v === "number" || typeof v === "string" ? toCents(v) : 0)
+  return num(b.fixedAllowancesTaxFree) + num(b.employerPension)
+}
+
 /** 'YYYY-MM' → 這一年的月份（1–12）；不是這一年或格式不對回 null。 */
 export function monthOfPeriod(period: string | null | undefined, year: number): number | null {
   if (!period) return null
@@ -788,7 +799,7 @@ export function buildGroupModel(data: GroupOverviewData): GroupModel {
     const month = monthOfPeriod(slip.period, year)
     if (month === null) continue
     const key = employeeCompany.get(slip.employee_id) ?? UNASSIGNED_EMPLOYEES_KEY
-    addTo(people.payroll, key, month, toCents(slip.gross))
+    addTo(people.payroll, key, month, toCents(slip.gross) + slipEmployerSideCents(slip.breakdown))
     addTo(people.deductions, key, month, slipDeductionCents(slip.breakdown))
     bump(people.slips, month)
     if (slip.status !== "finalized") bump(people.draftSlips, month)
@@ -874,13 +885,13 @@ export type CompanyOverview = {
   monthly: MonthPoint[]
   /** 目前在職人數（依員工所屬公司）。 */
   headcount: number
-  /** 期間內薪資單應發（gross）合計（依員工所屬公司）；期間內沒有任何薪資單 → null（尚無薪資資料）。口徑見 PAYROLL_BASIS_NOTE。 */
+  /** 期間內薪資單人事成本合計（應發＋免稅津貼＋雇主勞退，依員工所屬公司）；期間內沒有任何薪資單 → null（尚無薪資資料）。口徑見 PAYROLL_BASIS_NOTE。 */
   payrollCost: number | null
   /** 補充：gross −（請假＋遲到早退扣款）；沒有薪資資料 → null。 */
   payrollCostNet: number | null
   /** 補充：同期加班超額另計（草稿＋已付）金額合計；表不存在 → null。 */
   overtimeSettlementCost: number | null
-  /** 毛利－人事成本（gross）；payrollCost 為 null 時也是 null。 */
+  /** 毛利－人事成本（人事成本合計口徑）；payrollCost 為 null 時也是 null。 */
   grossProfitAfterPayroll: number | null
 }
 
@@ -898,7 +909,7 @@ export type GroupTotals = {
   monthly: MonthPoint[]
   /** 在職人數：納入合計的公司＋未指派。 */
   headcount: number
-  /** 人事成本（gross）：納入合計的公司＋未指派；沒有薪資資料 → null。 */
+  /** 人事成本（人事成本合計口徑）：納入合計的公司＋未指派；沒有薪資資料 → null。 */
   payrollCost: number | null
   /** 補充：gross −（請假＋遲到早退扣款），納入公司＋未指派；沒有薪資資料 → null。 */
   payrollCostNet: number | null
@@ -920,10 +931,10 @@ export type PayrollSummary = {
   draftSlipCount: number
   /** employees.company_id（0072）已套；false＝全部人列在未指派。 */
   companyAssignmentReady: boolean
-  /** 薪資成本是否含雇主負擔（勞健保、勞退雇主提繳）；目前 payslips 沒有這些欄位，固定 false。 */
+  /** 薪資成本是否含雇主**勞健保**負擔；系統未計算，固定 false（雇主勞退提撥已含在人事成本，見 basis）。 */
   employerCostIncluded: false
-  /** 人事成本的口徑：固定 "gross"（應發）。 */
-  basis: "gross"
+  /** 人事成本的口徑：固定 "labor_cost"（應發＋免稅津貼＋雇主勞退提撥）。 */
+  basis: "labor_cost"
   /** 口徑說明文字（PAYROLL_BASIS_NOTE），頁面照抄。 */
   basisNote: string
   /** overtime_settlements 表存在（false → overtimeSettlementCost 全是 null）。 */
@@ -1127,7 +1138,7 @@ export function summarizeGroupOverview(
       draftSlipCount,
       companyAssignmentReady: people.companyAssignmentReady,
       employerCostIncluded: false,
-      basis: "gross",
+      basis: "labor_cost",
       basisNote: PAYROLL_BASIS_NOTE,
       overtimeSettlementAvailable: people.overtimeAvailable,
       overtimeSettlementCount: periodMonths.reduce((s, m) => s + (people.overtimeRows[m - 1] as number), 0),

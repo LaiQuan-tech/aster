@@ -153,7 +153,7 @@ export const PAYROLL_BASIS_NOTE = "人事成本以員工所屬公司歸屬，未
 /** 人事成本為 null（期間內沒有任何薪資單）時畫面上的字。 */
 export const NO_PAYROLL_TEXT = "尚無薪資資料";
 
-/** 後端 payroll.basisNote 的預設值（舊版 API 沒帶時用）。 */
+/** 後端 payroll.basisNote 的預設值（舊版 API 沒帶時用；新版 API 一律帶 basisNote＝人事成本合計口徑）。 */
 export const PAYROLL_GROSS_NOTE = "應發（gross）口徑：未扣請假／遲到扣款、不含雇主負擔、加班另計與獎金";
 
 export type PayrollSummaryLike = {

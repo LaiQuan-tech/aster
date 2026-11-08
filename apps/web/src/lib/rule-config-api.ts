@@ -83,6 +83,13 @@ export interface RuleConfigOvertimeExt extends RuleConfigOvertime {
 /** 雇主勞退提撥（2026-11-08）：employerRate 以比例儲存（0.06＝6%），允許 0.06–1；省略＝6%。 */
 export interface RuleConfigPension {
   employerRate?: number;
+  /** 勞退月提繳分級表（含生效日）；省略＝系統內建 115 年版。 */
+  wageBrackets?: { effectiveFrom: string; levels: number[] }[];
+}
+
+/** 固定津貼課稅（2026-11-08）：伙食費每月免稅額（整數元）；省略＝3,000。 */
+export interface RuleConfigAllowance {
+  mealTaxFreeMonthly?: number;
 }
 
 export interface RuleConfigExt extends Omit<RuleConfig, "overtime" | "insurance"> {
@@ -90,6 +97,7 @@ export interface RuleConfigExt extends Omit<RuleConfig, "overtime" | "insurance"
   insurance?: RuleConfigInsurance;
   leave?: RuleConfigLeave;
   pension?: RuleConfigPension;
+  allowance?: RuleConfigAllowance;
 }
 
 /** 把 admin-api 的 `RuleConfig` 當成擴充型別看（執行期同一個物件，只是型別收窄）。 */

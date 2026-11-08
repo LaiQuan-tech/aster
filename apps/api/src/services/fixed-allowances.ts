@@ -99,3 +99,72 @@ export async function loadFixedAllowancesByEmployee(
   }
   return out
 }
+
+/* ── 草稿薪資單過期偵測（比照 services/payroll-adjustments.ts adjustmentsStale）──────────────────── */
+
+type ComparableAllowance = {
+  id?: string | null
+  name?: string | null
+  amount?: number | string | null
+  insurable?: boolean | null
+  taxType?: string | null
+}
+
+/** 一筆津貼的指紋：id、名稱、金額（整數元）、計入投保、課稅方式。備註、起迄日不進薪資單，不算（起迄日影響的是「當月有沒有」）。 */
+function allowanceFingerprint(item: ComparableAllowance): string {
+  return [
+    item.id ?? "",
+    String(item.name ?? "").trim(),
+    String(Math.round(Number(item.amount ?? 0))),
+    item.insurable === true ? "1" : "0",
+    item.taxType === "meal_exempt" ? "meal_exempt" : "taxable",
+  ].join("|")
+}
+
+/** 薪資單內嵌的固定津貼（breakdown.fixedAllowances）跟現在當月有效的是不是同一組；不一致＝草稿過期，要重新執行薪資作業。 */
+export function fixedAllowancesStale(
+  embedded: readonly ComparableAllowance[] | null | undefined,
+  current: readonly ComparableAllowance[] | null | undefined,
+): boolean {
+  const a = (embedded ?? []).map(allowanceFingerprint).sort()
+  const b = (current ?? []).map(allowanceFingerprint).sort()
+  return a.length !== b.length || a.some((v, i) => v !== b[i])
+}
+
+/** 薪資單的 breakdown 裡內嵌的固定津貼；舊薪資單（沒有這個欄位）＝空。 */
+export function embeddedFixedAllowancesOf(breakdown: unknown): ComparableAllowance[] {
+  const list = (breakdown as { fixedAllowances?: unknown } | null | undefined)?.fixedAllowances
+  return Array.isArray(list) ? (list as ComparableAllowance[]) : []
+}
+
+/**
+ * 這些員工的**草稿**薪資單裡，內嵌的固定津貼跟現在不一致的那些（`${employeeId}|${period}`）。
+ * 已定案的不算（定案的不再改）。給 CRUD 回應的 stalePeriods 與薪資單列表的提醒用。
+ */
+export async function staleDraftPayslips(
+  tenantId: string,
+  employeeIds: string[],
+): Promise<Array<{ employeeId: string; period: string; payslipId: string }>> {
+  if (employeeIds.length === 0) return []
+  const { data, error } = await supabaseAdmin
+    .from("payslips")
+    .select("id, employee_id, period, status, breakdown")
+    .eq("tenant_id", tenantId)
+    .in("employee_id", employeeIds)
+    .eq("status", "draft")
+  if (error) throw new Error(`staleDraftPayslips: ${error.message}`)
+  const drafts = (data ?? []) as Array<{ id: string; employee_id: string; period: string; breakdown: unknown }>
+  if (drafts.length === 0) return []
+  const rows = await loadFixedAllowanceRows(tenantId, employeeIds)
+  const out: Array<{ employeeId: string; period: string; payslipId: string }> = []
+  for (const d of drafts) {
+    const current = activeFixedAllowancesForPeriod(
+      rows.filter((r) => r.employee_id === d.employee_id),
+      d.period,
+    )
+    if (fixedAllowancesStale(embeddedFixedAllowancesOf(d.breakdown), current)) {
+      out.push({ employeeId: d.employee_id, period: d.period, payslipId: d.id })
+    }
+  }
+  return out.sort((a, b) => a.period.localeCompare(b.period))
+}

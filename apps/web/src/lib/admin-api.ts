@@ -1285,6 +1285,10 @@ export interface SalaryStructure {
   /** 工讀生時薪制(C5)的約定每週工時／工天數；PostgREST 回字串，可能為 null。 */
   agreed_hours_per_week?: string | null;
   agreed_days_per_week?: string | null;
+  /** 勞退月提繳工資（migration 0086；null＝依分級表自動算）；舊版 API／未套用時沒有。 */
+  pension_wage?: number | string | null;
+  /** 適用勞退新制（migration 0086，預設 true）；舊版 API／未套用時沒有。 */
+  pension_new_system?: boolean | null;
 }
 
 export function getSalaryStructure(employeeId: string) {
@@ -1303,6 +1307,8 @@ export function putSalaryStructure(
     pensionVoluntaryRate?: number | null;
     agreedHoursPerWeek?: number | null;
     agreedDaysPerWeek?: number | null;
+    pensionWage?: number | null;
+    pensionNewSystem?: boolean;
   },
 ) {
   return apiFetch<{

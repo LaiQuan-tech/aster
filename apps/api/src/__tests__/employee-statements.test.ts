@@ -19,7 +19,7 @@ import {
   type GridCell,
   type StatementGrid,
 } from "../lib/statements/grid.js"
-import { buildAttendanceStatementGrid, dayContent, isListedDay, leaveNamesOf, netPay } from "../lib/statements/attendance-statement.js"
+import { allowanceTotal, buildAttendanceStatementGrid, dayContent, isListedDay, leaveNamesOf, netPay } from "../lib/statements/attendance-statement.js"
 import { absenceRows, buildPayslipStatementGrid, overtimeBlocks, ptoShare } from "../lib/statements/payslip-statement.js"
 import { buildStatementWorkbook } from "../lib/xlsx/statement-grid.js"
 import { mealNoteFor, moneyFromBreakdown, moneyFromPreview } from "../services/employee-statements.js"
@@ -240,6 +240,29 @@ describe("驗收修正（2026-10-27）", () => {
     const net = cellAt(grid, T + 1, 9)!.value as number
     expect(gross - ins - abs).toBeCloseTo(net, 2)
     expect(net).toBeCloseTo(netPay(data.money), 2)
+  })
+
+  it("固定津貼免稅部分（伙食費 3,000）：試算版實發含免稅津貼、支出不多算、薪資+支出不少算（2026-11-08）", () => {
+    const data = fakeStatementData()
+    data.money = moneyFromPreview({
+      base: 30000, hourlyWage: 125, otPay: 0, otPayByTier: { tier1: 0, tier2: 0, tier3: 0 }, leaveDeduction: 300,
+      lateEarlyDeduction: 0, laborInsurance: 700, healthInsurance: 450, pensionVoluntary: 0, advance: 0,
+      gross: 30000, totalDeductions: 1450, expenses: 1000, net: 31550, netPlusExpenses: 32550, fixedAllowancesTaxFree: 3000,
+    })
+    expect(netPay(data.money)).toBe(31550)
+    const grid = buildPayslipStatementGrid(data)
+    const T = 4 + 15
+    expect(cellAt(grid, T + 1, 9)!.value).toBe(31550) // 實發金額
+    expect(cellAt(grid, T + 2, 9)!.value).toBe(1000) // 支出＝只有代墊，沒有多算 3,000
+    const values = grid.cells.map((c) => c.value)
+    expect(values).toContain(32550) // 薪資+支出
+  })
+
+  it("固定津貼免稅部分：薪資單版（moneyFromBreakdown）實領也加回；出勤統計表「加給」含免稅津貼，本薪＋加班＋加給−應扣＝實領", () => {
+    const money = moneyFromBreakdown({ ...fakeBreakdown(), fixedAllowancesTaxFree: 3000 }, "draft")!
+    expect(netPay(money)).toBeCloseTo(money.gross - money.totalDeductions + 3000, 2)
+    expect(allowanceTotal(money)).toBeCloseTo(money.gross - money.base - money.overtimePay + 3000, 2)
+    expect(money.base + money.overtimePay + allowanceTotal(money) - money.totalDeductions).toBeCloseTo(netPay(money), 2)
   })
 
   it("max_weekday 下特休拆分：比例夾在 0–1、無負值、兩列加總＝引擎分段", () => {

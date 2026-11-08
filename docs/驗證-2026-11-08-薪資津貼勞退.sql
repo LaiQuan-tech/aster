@@ -1,5 +1,5 @@
--- 2026-11-08 薪資：員工固定津貼（migration 0086 ＝ sql/0076）套用後驗證。唯讀＋交易內實測（最後 ROLLBACK，不留任何資料）。
--- 每一段回一張表；ok 欄全為 true 才算通過。雇主勞退提撥率存在 rule_configs.config.pension（jsonb），不需驗表。
+-- 2026-11-08 薪資：員工固定津貼＋勞退月提繳工資（migration 0086 ＝ sql/0076）套用後驗證。唯讀＋交易內實測（最後 ROLLBACK，不留任何資料）。
+-- 每一段回一張表；ok 欄全為 true 才算通過。雇主提撥率／勞退分級表／伙食費免稅額存在 rule_configs.config（jsonb），不需驗表。
 
 -- 1. 表存在、RLS 開、掛 audit_all、沒有任何 policy（只由 API service role 存取）
 SELECT c.relname AS table_name,
@@ -35,6 +35,18 @@ SELECT count(*) = 4 AS ok, string_agg(conname, ', ' ORDER BY conname) AS checks
                    'employee_fixed_allowances_name_chk', 'employee_fixed_allowances_dates_chk');
 SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'employee_fixed_allowances_tenant_emp_idx') AS ok,
        'index employee_fixed_allowances_tenant_emp_idx' AS item;
+
+-- 3b. salary_structures 新增兩欄＋CHECK；既有列 pension_wage 全為 NULL、pension_new_system 全為 true（純新增，不改既有資料）
+SELECT count(*) = 2 AS ok, string_agg(column_name || ':' || data_type || ':' || is_nullable || ':' || coalesce(column_default, ''), ', ') AS columns
+  FROM information_schema.columns
+ WHERE table_schema = 'public' AND table_name = 'salary_structures'
+   AND ((column_name = 'pension_wage' AND data_type = 'integer' AND is_nullable = 'YES')
+     OR (column_name = 'pension_new_system' AND data_type = 'boolean' AND is_nullable = 'NO' AND column_default = 'true'));
+SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.salary_structures'::regclass AND conname = 'salary_structures_pension_wage_chk') AS ok,
+       'salary_structures_pension_wage_chk' AS item;
+SELECT count(*) FILTER (WHERE pension_wage IS NOT NULL OR pension_new_system IS DISTINCT FROM true) = 0 AS ok,
+       count(*) AS existing_rows, '既有列未被改動（pension_wage NULL、pension_new_system true）' AS item
+  FROM public.salary_structures;
 
 -- 4. 交易內實測（ROLLBACK）
 BEGIN;
@@ -91,11 +103,25 @@ BEGIN
   EXCEPTION WHEN foreign_key_violation THEN
     INSERT INTO _fa_check (item, ok, detail) VALUES ('不存在的員工被擋（23503）', true, SQLSTATE);
   END;
+
+  -- 4g. salary_structures：新列預設適用新制、提繳工資 NULL；提繳工資 0 → 23514
+  INSERT INTO public.salary_structures (tenant_id, employee_id) VALUES (t, e);
+  SELECT coalesce(pension_wage::text, 'null') || '/' || pension_new_system::text INTO got FROM public.salary_structures WHERE employee_id = e;
+  INSERT INTO _fa_check (item, ok, detail) VALUES ('salary_structures 新列預設 pension_wage NULL／適用新制', got = 'null/true', got);
+  BEGIN
+    UPDATE public.salary_structures SET pension_wage = 0 WHERE employee_id = e;
+    INSERT INTO _fa_check (item, ok, detail) VALUES ('提繳工資 0 被擋（23514）', false, '竟然更新成功');
+  EXCEPTION WHEN check_violation THEN
+    INSERT INTO _fa_check (item, ok, detail) VALUES ('提繳工資 0 被擋（23514）', true, SQLSTATE);
+  END;
+  UPDATE public.salary_structures SET pension_wage = 45800, pension_new_system = false WHERE employee_id = e;
+  SELECT pension_wage::text || '/' || pension_new_system::text INTO got FROM public.salary_structures WHERE employee_id = e;
+  INSERT INTO _fa_check (item, ok, detail) VALUES ('提繳工資 45800、不適用新制可寫入', got = '45800/false', got);
 END $$;
 SELECT item, ok, detail FROM _fa_check ORDER BY seq;
 ROLLBACK;
 
--- 5. 既有資料未被動到（純新增）：payslips／salary_structures 欄位數與套用前相同（目視比對；本 migration 不 ALTER 任何既有表）
+-- 5. 欄位數（目視比對）：payslips 不變；salary_structures 比套用前多 2（pension_wage、pension_new_system）
 SELECT 'payslips' AS table_name, count(*) AS columns FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'payslips'
 UNION ALL
 SELECT 'salary_structures', count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'salary_structures';

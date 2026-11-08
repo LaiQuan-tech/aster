@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, numeric, jsonb, timestamp, uniqueIndex } from "drizzle-orm/pg-core"
+import { pgTable, uuid, text, numeric, jsonb, timestamp, uniqueIndex, integer, boolean } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 import { employees } from "./employees"
 
@@ -42,6 +42,10 @@ export const salaryStructures = pgTable(
     // 勞工自願提繳退休金比例 (0–0.06，勞退條例 §14 III)。NULL/0 = 不自提。
     // 上限不做 DB CHECK：法規參數不寫死，由 API 以 @hr/rules 的常數把關。
     pensionVoluntaryRate: numeric("pension_voluntary_rate"),
+    // 2026-11-08（migration 0086）：勞退月提繳工資（NULL＝依分級表以本薪＋計入投保固定津貼自動算）、
+    // 是否適用勞退新制（false → 雇主提撥與勞工自提都 0）。
+    pensionWage: integer("pension_wage"),
+    pensionNewSystem: boolean("pension_new_system").notNull().default(true),
     /** 工讀生時薪制的約定每週工時／工天數，可空。 */
     agreedHoursPerWeek: numeric("agreed_hours_per_week", { precision: 5, scale: 2 }),
     agreedDaysPerWeek: numeric("agreed_days_per_week", { precision: 3, scale: 1 }),

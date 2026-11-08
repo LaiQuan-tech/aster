@@ -443,10 +443,10 @@ export function buildPayslipStatementGrid(data: StatementData): StatementGrid {
   // 支出、薪資+支出（原檔 X27、X31；X31 沒有標籤，這裡補上「薪資+支出」）
   // 實發（含支出）＝實發＋代墊支出＋不課稅補發；不課稅補發另列「補發」，不混在「支出」裡。
   const nonTaxable = money?.adjustmentNonTaxable ?? 0
-  // 固定津貼的免稅部分（伙食費 2,400 內）另列「免稅津貼」，不混在「支出」裡（2026-11-08）。
+  // 實發金額（netPay）已含固定津貼的免稅部分（伙食費免稅額內，2026-11-08），這裡只把它另列一行「其中免稅津貼」供核對，不混在「支出」裡。
   const taxFreeAllowance = money?.fixedAllowancesTaxFree ?? 0
   const expenseShown = money
-    ? Math.round((money.netWithExpenses - netPay(money) - nonTaxable - taxFreeAllowance) * 100) / 100
+    ? Math.round((money.netWithExpenses - netPay(money) - nonTaxable) * 100) / 100
     : null
   let rr = H + 1
   g.set(rr, 8, { value: "支出", bold: true, align: "right" })
@@ -458,7 +458,7 @@ export function buildPayslipStatementGrid(data: StatementData): StatementGrid {
     rr += 1
   }
   if (taxFreeAllowance) {
-    g.set(rr, 8, { value: "免稅津貼", bold: true, align: "right" })
+    g.set(rr, 8, { value: "實發含免稅津貼", bold: true, align: "right" })
     g.set(rr, 9, amt(taxFreeAllowance, "acct"))
     rr += 1
   }

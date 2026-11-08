@@ -65,6 +65,12 @@ export {
   resolveInsuranceBrackets,
   bracketFor,
   resolvePensionEmployerRate,
+  resolvePensionWageLevels,
+  resolveMealTaxFreeMonthly,
+  PENSION_WAGE_LEVELS_2026,
+  DEFAULT_PENSION_WAGE_BRACKETS,
+  DEFAULT_MEAL_TAX_FREE_MONTHLY,
+  type PensionWageBracketSet,
   PENSION_EMPLOYER_RATE_MIN,
   PENSION_EMPLOYER_RATE_MAX,
   DEFAULT_PENSION_EMPLOYER_RATE,
@@ -109,6 +115,7 @@ export {
   computePayslip,
   employerPensionOf,
   resolveAttendanceDeduction,
+  resolvePensionWage,
   splitFixedAllowances,
 } from "./payroll-engine.js";
 export {
@@ -116,6 +123,8 @@ export {
   MEAL_ALLOWANCE_TAX_FREE_MONTHLY,
   activeFixedAllowancesForPeriod,
   insurableFixedAllowanceTotal,
+  sameNameOverlaps,
+  type SameNameOverlap,
   type FixedAllowanceRowLike,
 } from "./fixed-allowances.js";
 export {

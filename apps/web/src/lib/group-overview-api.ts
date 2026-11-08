@@ -90,9 +90,9 @@ export interface GroupPayrollSummary {
   draftSlipCount: number;
   /** 員工所屬公司欄位（migration 0072）已套；false＝全部人列在未指派。 */
   companyAssignmentReady: boolean;
-  /** 薪資成本是否含雇主負擔（勞健保、勞退雇主提繳）；目前固定 false（只有應發）。 */
+  /** 薪資成本是否含雇主勞健保負擔；固定 false（系統未計算）。雇主勞退提撥自 2026-11-08 起已含在人事成本（basis "labor_cost"）。 */
   employerCostIncluded: boolean;
-  /** 人事成本口徑（"gross"）與說明文字。 */
+  /** 人事成本口徑（"labor_cost"＝應發＋免稅津貼＋雇主勞退；舊版 API "gross"）與說明文字。 */
   basis?: string;
   basisNote?: string;
   /** 加班超額另計：表是否存在、期間內筆數／草稿／沒有金額的筆數。 */

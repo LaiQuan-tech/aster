@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { parseRuleConfig, resolvePensionEmployerRate } from "../rules-schema";
-import { computePayslip, employerPensionOf, splitFixedAllowances } from "../payroll-engine";
+import {
+  PENSION_WAGE_LEVELS_2026,
+  parseRuleConfig,
+  resolveMealTaxFreeMonthly,
+  resolvePensionEmployerRate,
+  resolvePensionWageLevels,
+} from "../rules-schema";
+import { computePayslip, employerPensionOf, resolvePensionWage, splitFixedAllowances } from "../payroll-engine";
 import {
   activeFixedAllowancesForPeriod,
   insurableFixedAllowanceTotal,
   MEAL_ALLOWANCE_TAX_FREE_MONTHLY,
+  sameNameOverlaps,
   type FixedAllowanceRowLike,
 } from "../fixed-allowances";
 import type { AttendanceDay, FixedAllowanceInput, PayslipBreakdown, SalaryStructure } from "../types";
@@ -13,10 +20,12 @@ import preAllowances from "./fixtures/payroll-regression-pre-allowances.json";
 
 /**
  * 固定津貼＋雇主勞退提撥 (2026-11-08)。⚠️ 金額、名稱都是假資料。
- *   • 應稅津貼全額進 gross；伙食費合計 2,400 內免稅 (不進 gross、只加 net)、超過部分應稅
- *   • 計入／不計入投保：只影響提示合計，不改保費
- *   • 生效期間外不帶入
- *   • 雇主勞退 = 投保薪資 × 提撥率 (預設 6%、可自訂 6%–100%)，四捨五入到元，不影響實發
+ *   • 應稅津貼全額進 gross；伙食費合計 3,000 (規則可調) 內免稅 (不進 gross、只加 net)、超過部分應稅
+ *   • 計入／不計入投保：不改勞健保保費；計入的進勞退月提繳工資的自動計算
+ *   • 生效期間外不帶入；同名津貼同月重疊提醒
+ *   • 勞退月提繳工資：有填照填；留空 = (本薪 + 計入投保津貼) 依分級表向上取級距
+ *   • 雇主勞退 = 月提繳工資 × 提撥率 (預設 6%、可自訂 6%–100%)，四捨五入到元，不影響實發；勞工自提同基數
+ *   • 不適用勞退新制 → 雇主與自提都 0
  *   • 無津貼員工：除新增的雇主勞退三欄外，輸出與改動前 (commit 925f80e) 逐欄相同
  */
 
@@ -85,64 +94,76 @@ describe("固定津貼：應稅", () => {
   });
 });
 
-describe("固定津貼：伙食費 2,400 免稅額", () => {
-  it("2,400 以內全額免稅：不進 gross、只加 net；明細標「(免稅)」，列在應扣之後", () => {
+describe("固定津貼：伙食費免稅額（預設 3,000）", () => {
+  it("3,000 以內全額免稅：不進 gross、只加 net；明細標「(免稅)」，列在應扣之後", () => {
     const base = run([]);
-    const b = run([allowance({ name: "伙食津貼", amount: 2400, taxType: "meal_exempt" })]);
+    const b = run([allowance({ name: "伙食津貼", amount: 3000, taxType: "meal_exempt", insurable: false })]);
+    expect(MEAL_ALLOWANCE_TAX_FREE_MONTHLY).toBe(3000);
+    expect(resolveMealTaxFreeMonthly(rules())).toBe(3000);
     expect(b.gross).toBe(base.gross);
-    expect(b.net).toBe(base.net + 2400);
-    expect(b.fixedAllowancesTaxFree).toBe(2400);
+    expect(b.net).toBe(base.net + 3000);
+    expect(b.fixedAllowancesTaxFree).toBe(3000);
     expect(b.fixedAllowancesTaxable).toBe(0);
     const idx = b.lines.findIndex((l) => l.label === "伙食津貼(免稅)");
-    expect(b.lines[idx]).toEqual({ label: "伙食津貼(免稅)", amount: 2400 });
+    expect(b.lines[idx]).toEqual({ label: "伙食津貼(免稅)", amount: 3000 });
     expect(idx).toBeGreaterThan(b.lines.findIndex((l) => l.label === "勞保費"));
     expect(sumLines(b)).toBe(b.net);
   });
 
-  it("低於 2,400 (1,800)：全額免稅", () => {
+  it("低於免稅額 (1,800)：全額免稅", () => {
     const b = run([allowance({ name: "伙食津貼", amount: 1800, taxType: "meal_exempt" })]);
     expect(b.fixedAllowancesTaxFree).toBe(1800);
     expect(b.fixedAllowancesTaxable).toBe(0);
   });
 
-  it("超過 2,400 (3,000)：2,400 免稅、600 應稅進 gross；兩條明細", () => {
+  it("超過 3,000 (3,600)：3,000 免稅、600 應稅進 gross；兩條明細", () => {
     const base = run([]);
-    const b = run([allowance({ name: "伙食津貼", amount: 3000, taxType: "meal_exempt" })]);
+    const b = run([allowance({ name: "伙食津貼", amount: 3600, taxType: "meal_exempt", insurable: false })]);
     expect(b.gross).toBe(base.gross + 600);
-    expect(b.net).toBe(base.net + 3000);
+    expect(b.net).toBe(base.net + 3600);
     expect(b.lines).toContainEqual({ label: "伙食津貼(超過免稅額)", amount: 600 });
-    expect(b.lines).toContainEqual({ label: "伙食津貼(免稅)", amount: 2400 });
-    expect(b.fixedAllowances?.[0]).toMatchObject({ taxableAmount: 600, taxFreeAmount: 2400 });
+    expect(b.lines).toContainEqual({ label: "伙食津貼(免稅)", amount: 3000 });
+    expect(b.fixedAllowances?.[0]).toMatchObject({ taxableAmount: 600, taxFreeAmount: 3000 });
     expect(sumLines(b)).toBe(b.net);
   });
 
-  it("多筆伙食費合計計算免稅額 (1,500 + 1,500 → 免稅 2,400、應稅 600)；應稅津貼不吃免稅額", () => {
+  it("多筆伙食費合計計算免稅額 (2,000 + 1,600 → 免稅 3,000、應稅 600)；應稅津貼不吃免稅額", () => {
     const b = run([
-      allowance({ name: "早餐津貼", amount: 1500, taxType: "meal_exempt" }),
+      allowance({ name: "早餐津貼", amount: 2000, taxType: "meal_exempt" }),
       allowance({ name: "職務加給", amount: 2000 }),
-      allowance({ name: "午餐津貼", amount: 1500, taxType: "meal_exempt" }),
+      allowance({ name: "午餐津貼", amount: 1600, taxType: "meal_exempt" }),
     ]);
     expect(b.fixedAllowances?.map((f) => [f.name, f.taxableAmount, f.taxFreeAmount])).toEqual([
-      ["早餐津貼", 0, 1500],
+      ["早餐津貼", 0, 2000],
       ["職務加給", 2000, 0],
-      ["午餐津貼", 600, 900],
+      ["午餐津貼", 600, 1000],
     ]);
-    expect(b.fixedAllowancesTaxFree).toBe(MEAL_ALLOWANCE_TAX_FREE_MONTHLY);
+    expect(b.fixedAllowancesTaxFree).toBe(3000);
     expect(b.fixedAllowancesTaxable).toBe(2600);
-    expect(b.fixedAllowancesTotal).toBe(5000);
+    expect(b.fixedAllowancesTotal).toBe(5600);
+  });
+
+  it("規則參數可調免稅額（allowance.mealTaxFreeMonthly = 2,400 → 3,000 中 600 應稅）；schema 擋負數與小數", () => {
+    const r = rules({ allowance: { mealTaxFreeMonthly: 2400 } });
+    const b = run([allowance({ name: "伙食津貼", amount: 3000, taxType: "meal_exempt", insurable: false })], salary, r);
+    expect(b.fixedAllowances?.[0]).toMatchObject({ taxableAmount: 600, taxFreeAmount: 2400 });
+    expect(() => rules({ allowance: { mealTaxFreeMonthly: -1 } })).toThrow();
+    expect(() => rules({ allowance: { mealTaxFreeMonthly: 10.5 } })).toThrow();
   });
 });
 
 describe("固定津貼：計入／不計入投保", () => {
-  it("計入投保只進 fixedAllowancesInsurable 提示合計，保費與不計入時完全相同", () => {
+  it("計入投保：勞健保保費不變（投保級距是 HR 申報的）；勞退月提繳工資自動計算含這筆（40,000 + 3,000 → 43,900）", () => {
     const yes = run([allowance({ insurable: true })]);
     const no = run([allowance({ insurable: false })]);
     expect(yes.fixedAllowancesInsurable).toBe(3000);
     expect(no.fixedAllowancesInsurable).toBe(0);
     expect(yes.laborInsurance).toBe(no.laborInsurance);
     expect(yes.healthInsurance).toBe(no.healthInsurance);
-    expect(yes.employerPension).toBe(no.employerPension);
     expect(yes.net).toBe(no.net);
+    expect(no.pensionWage).toBe(40100); // 40,000 → 第 32 級 40,100
+    expect(yes.pensionWage).toBe(43900); // 43,000 → 第 34 級 43,900
+    expect(yes.employerPension).toBe(2634);
   });
 
   it("insurableFixedAllowanceTotal 只加總 insurable 的", () => {
@@ -192,7 +213,7 @@ describe("固定津貼：生效期間", () => {
 });
 
 describe("雇主勞退提撥（公司負擔）", () => {
-  it("預設 6%：40,100 × 6% = 2,406；不影響 gross／net／lines", () => {
+  it("預設 6%：本薪 40,000 → 提繳工資 40,100 × 6% = 2,406；不影響 gross／net／lines", () => {
     const base = computePayslip(oneDay, { ...salary, laborInsuredSalary: undefined }, rules());
     const b = run([]);
     expect(b.employerPensionRate).toBe(0.06);
@@ -203,8 +224,9 @@ describe("雇主勞退提撥（公司負擔）", () => {
     expect(b.net).toBe(base.net - b.laborInsurance); // 只差在有沒有扣勞保，雇主勞退不扣員工
   });
 
-  it("自訂費率 7.5%：45,800 × 7.5% = 3,435", () => {
-    const b = run([], { ...salary, laborInsuredSalary: 45800 }, rules({ pension: { employerRate: 0.075 } }));
+  it("自訂費率 7.5%：提繳工資 45,800（手填）× 7.5% = 3,435", () => {
+    const b = run([], { ...salary, pensionWage: 45800 }, rules({ pension: { employerRate: 0.075 } }));
+    expect(b.pensionWageSource).toBe("manual");
     expect(b.employerPensionRate).toBe(0.075);
     expect(b.employerPension).toBe(3435);
   });
@@ -216,10 +238,45 @@ describe("雇主勞退提撥（公司負擔）", () => {
     expect(employerPensionOf(33300, 0.065)).toBe(2165); // 2164.5 → 2165
   });
 
-  it("沒有投保薪資 → 沒有雇主勞退欄位", () => {
-    const b = run([], { ...salary, laborInsuredSalary: undefined });
+  it("沒有本薪也沒有投保薪資、也沒填提繳工資 → 沒有雇主勞退欄位", () => {
+    const b = run([], { method: "hourly", hourlyWage: 200 });
     expect(b.employerPension).toBeUndefined();
     expect(b.pensionWage).toBeUndefined();
+  });
+
+  it("沒有勞保投保薪資但有提繳工資（手填）也能算", () => {
+    const b = run([], { method: "monthly", baseSalary: 30000, pensionWage: 30300 });
+    expect(b.laborInsurance).toBe(0);
+    expect(b.employerPension).toBe(1818);
+  });
+
+  it("沒有勞保投保薪資、留空 → 依本薪自動算（30,000 → 30,300）", () => {
+    const b = run([], { method: "monthly", baseSalary: 30000 });
+    expect(b.pensionWage).toBe(30300);
+    expect(b.employerPension).toBe(1818);
+  });
+
+  it("時薪制沒有月本薪 → 以勞保投保薪資為基數（27,470 → 27,600）", () => {
+    const b = computePayslip(oneDay, { method: "hourly", hourlyWage: 200, laborInsuredSalary: 27470 }, rules());
+    expect(b.pensionWage).toBe(27600);
+  });
+
+  it("分級表：62 級、第 1 級 1,500、最高 150,000；超過最高級取 150,000；介於級距向上取", () => {
+    expect(PENSION_WAGE_LEVELS_2026).toHaveLength(62);
+    expect(PENSION_WAGE_LEVELS_2026[0]).toBe(1500);
+    expect(PENSION_WAGE_LEVELS_2026[61]).toBe(150000);
+    const r = rules();
+    expect(resolvePensionWage({ baseSalary: 200000 }, [], r, "2030-03")?.wage).toBe(150000);
+    expect(resolvePensionWage({ baseSalary: 29501 }, [], r, "2030-03")?.wage).toBe(30300);
+    expect(resolvePensionWage({ baseSalary: 29500 }, [], r, "2030-03")?.wage).toBe(29500);
+    expect(resolvePensionWage({ baseSalary: 1000 }, [], r, "2030-03")?.wage).toBe(1500);
+  });
+
+  it("分級表依月份選版：規則設 2031-01-01 生效的新表，2030-12 用內建、2031-01 用新表", () => {
+    const r = rules({ pension: { wageBrackets: [{ effectiveFrom: "2031-01-01", levels: [30000, 50000] }] } });
+    expect(resolvePensionWageLevels(r, "2030-12-01").effectiveFrom).toBe("2026-01-01");
+    expect(resolvePensionWage({ baseSalary: 40000 }, [], r, "2030-12")?.wage).toBe(40100);
+    expect(resolvePensionWage({ baseSalary: 40000 }, [], r, "2031-01")?.wage).toBe(50000);
   });
 
   it("規則：低於 6% 或高於 100% 被 schema 擋下；100% 可存；未設 = 6%", () => {
@@ -230,16 +287,33 @@ describe("雇主勞退提撥（公司負擔）", () => {
     expect(resolvePensionEmployerRate(rules({ pension: {} }))).toBe(0.06);
   });
 
-  it("自提率照舊正確顯示：自提 6% 扣員工、雇主 6% 不扣員工", () => {
+  it("自提率照舊正確顯示：自提 6% 扣員工、雇主 6% 不扣員工（同基數）", () => {
     const b = run([], { ...salary, pensionVoluntaryRate: 0.06 });
     expect(b.pensionVoluntary).toBe(2406);
     expect(b.lines).toContainEqual({ label: "勞工自願提繳退休金", amount: -2406 });
     expect(b.employerPension).toBe(2406);
   });
+
+  it("★ 行為改變：高薪有自提，自提改以提繳工資為基數（本薪 60,000、勞保 45,800、自提 6%：2,748 → 3,648）", () => {
+    const b = run([], { method: "monthly", baseSalary: 60000, laborInsuredSalary: 45800, healthInsuredSalary: 45800, pensionVoluntaryRate: 0.06 });
+    expect(b.pensionWage).toBe(60800);
+    expect(b.pensionVoluntary).toBe(3648);
+    expect(b.employerPension).toBe(3648);
+    expect(b.laborInsurance).toBe(1145); // 勞保仍以勞保投保薪資算
+  });
+
+  it("不適用勞退新制：雇主提撥與自提都 0，只帶 pensionNewSystem: false", () => {
+    const b = run([], { ...salary, pensionVoluntaryRate: 0.06, pensionNewSystem: false });
+    expect(b.pensionVoluntary).toBe(0);
+    expect(b.employerPension).toBeUndefined();
+    expect(b.pensionWage).toBeUndefined();
+    expect(b.pensionNewSystem).toBe(false);
+    expect(b.lines.some((l) => l.label === "勞工自願提繳退休金")).toBe(false);
+  });
 });
 
 describe("回歸：沒有固定津貼的員工與改動前完全一致", () => {
-  const EMPLOYER_KEYS = ["employerPension", "employerPensionRate", "pensionWage"];
+  const EMPLOYER_KEYS = ["employerPension", "employerPensionRate", "pensionWage", "pensionWageSource"];
   for (const s of REGRESSION_SCENARIOS) {
     it(s.name, () => {
       const now = computePayslip(s.days, s.salary, parseRuleConfig(s.rules), s.expenses, s.allowances, s.adjustments) as unknown as Record<string, unknown>;
@@ -258,5 +332,20 @@ describe("splitFixedAllowances", () => {
     expect(splitFixedAllowances([allowance({ amount: 1000.4 }), allowance({ amount: 0 }), allowance({ amount: -5 })])).toEqual([
       { name: "職務加給", amount: 1000, insurable: true, taxType: "taxable", taxableAmount: 1000, taxFreeAmount: 0 },
     ]);
+  });
+});
+
+describe("sameNameOverlaps（同名津貼同月重疊）", () => {
+  const r = (id: string, name: string, from: string, to: string | null): FixedAllowanceRowLike => ({
+    id, name, amount: 1000, insurable: true, tax_type: "taxable", effective_from: from, effective_to: to,
+  });
+  it("舊約 3/15 止、新約 3/16 起 → 3 月重疊", () => {
+    expect(sameNameOverlaps([r("a", "職務加給", "2030-01-01", "2030-03-15"), r("b", "職務加給 ", "2030-03-16", null)])).toEqual([
+      { name: "職務加給", ids: ["a", "b"], months: ["2030-03"] },
+    ]);
+  });
+  it("前後月接續（2/28 止、3/1 起）、不同名稱 → 沒有重疊", () => {
+    expect(sameNameOverlaps([r("a", "職務加給", "2030-01-01", "2030-02-28"), r("b", "職務加給", "2030-03-01", null)])).toEqual([]);
+    expect(sameNameOverlaps([r("a", "職務加給", "2030-01-01", null), r("b", "伙食津貼", "2030-01-01", null)])).toEqual([]);
   });
 });

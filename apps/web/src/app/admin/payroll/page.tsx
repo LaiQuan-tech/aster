@@ -22,6 +22,7 @@ import { loadPayrollEmployees } from "@/lib/payroll-employees";
 import { errorMessageOf } from "@/lib/period-closed";
 import { PayrollAdjustmentsCard } from "./_components/PayrollAdjustmentsCard";
 import { FixedAllowancesCard } from "./_components/FixedAllowancesCard";
+import { pensionWageHintText, type FixedAllowanceSummary } from "@/lib/fixed-allowances-api";
 import { PeriodLockCard } from "./_components/PeriodLockCard";
 import { payrollGateText } from "@/lib/payroll-gate";
 
@@ -46,6 +47,13 @@ export default function PayrollAdminPage() {
   const [healthGrade, setHealthGrade] = useState("");
   // 畫面用「%」(0–6)，API 用比例 (0–0.06)
   const [pensionPct, setPensionPct] = useState("");
+  // 2026-11-08 勞退月提繳工資（空白＝依分級表自動算）／適用勞退新制。loaded* 是讀進來的值：沒改就不送，
+  // migration 0086 還沒套用的環境存薪資資料才不會被 409 擋下。
+  const [pensionWage, setPensionWage] = useState("");
+  const [pensionNewSystem, setPensionNewSystem] = useState(true);
+  const [loadedPension, setLoadedPension] = useState<{ wage: string; newSystem: boolean }>({ wage: "", newSystem: true });
+  const [allowanceSummary, setAllowanceSummary] = useState<FixedAllowanceSummary | null>(null);
+  const [allowanceReloadKey, setAllowanceReloadKey] = useState(0);
   const [employeeKeyword, setEmployeeKeyword] = useState("");
   const [employeeIdentityById, setEmployeeIdentityById] = useState<Record<string, string>>({});
   const [salaryMsg, setSalaryMsg] = useState<string | null>(null);
@@ -130,6 +138,11 @@ export default function PayrollAdminPage() {
           ? String(Math.round(Number(salary.pension_voluntary_rate) * 10000) / 100)
           : "",
       );
+      const wage = salary.pension_wage != null && Number(salary.pension_wage) > 0 ? String(Number(salary.pension_wage)) : "";
+      const newSystem = salary.pension_new_system !== false;
+      setPensionWage(wage);
+      setPensionNewSystem(newSystem);
+      setLoadedPension({ wage, newSystem });
     } catch {
       setMethod("monthly");
       setBaseSalary("");
@@ -140,6 +153,9 @@ export default function PayrollAdminPage() {
       setLaborGrade("");
       setHealthGrade("");
       setPensionPct("");
+      setPensionWage("");
+      setPensionNewSystem(true);
+      setLoadedPension({ wage: "", newSystem: true });
     }
     try {
       const [nhi, tax] = await Promise.all([getNhiDependents(id), getTaxDependents(id)]);
@@ -173,7 +189,11 @@ export default function PayrollAdminPage() {
         ...(laborGrade ? { laborInsuredSalary: Number(laborGrade) } : {}),
         ...(healthGrade ? { healthInsuredSalary: Number(healthGrade) } : {}),
         pensionVoluntaryRate: pensionPct ? Number(pensionPct) / 100 : null,
+        ...(pensionWage.trim() !== loadedPension.wage ? { pensionWage: pensionWage.trim() ? Math.round(Number(pensionWage)) : null } : {}),
+        ...(pensionNewSystem !== loadedPension.newSystem ? { pensionNewSystem } : {}),
       });
+      setLoadedPension({ wage: pensionWage.trim(), newSystem: pensionNewSystem });
+      setAllowanceReloadKey((n) => n + 1);
       setSalaryMsg("已儲存");
       const s = res.insuredSuggested;
       if (s) {
@@ -396,7 +416,37 @@ export default function PayrollAdminPage() {
                   <label className={labelCls}>勞退自提率（%，0–6）</label>
                   <input type="number" min={0} max={6} step={0.5} className={inputCls} value={pensionPct} onChange={(e) => setPensionPct(e.target.value)} />
                 </div>
+                <div>
+                  <label className={labelCls}>勞退月提繳工資（留空＝依分級表自動算）</label>
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    className={inputCls}
+                    value={pensionWage}
+                    disabled={!pensionNewSystem}
+                    placeholder={allowanceSummary?.pension?.autoWage != null ? `自動：${allowanceSummary.pension.autoWage}` : ""}
+                    onChange={(e) => setPensionWage(e.target.value)}
+                    data-testid="pension-wage"
+                  />
+                </div>
+                <label className="flex items-center gap-2 self-end pb-2 text-sm text-gray-600">
+                  <input type="checkbox" checked={pensionNewSystem} onChange={(e) => setPensionNewSystem(e.target.checked)} data-testid="pension-new-system" />
+                  適用勞退新制（取消＝雇主提撥與自提都為 0）
+                </label>
               </div>
+              {(() => {
+                const hint = pensionWageHintText(
+                  allowanceSummary?.pension ? { ...allowanceSummary.pension, newSystem: pensionNewSystem } : null,
+                  pensionWage,
+                );
+                return hint ? <p className="text-xs text-gray-500">{hint} 雇主提撥與勞工自提都以此為基數。</p> : null;
+              })()}
+              {allowanceSummary?.pension?.nationalityHint && (
+                <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800" data-testid="pension-nationality-hint">
+                  {allowanceSummary.pension.nationalityHint}
+                </p>
+              )}
               <div className="flex flex-wrap items-center gap-3">
                 <PrimaryButton type="submit">儲存薪資資料</PrimaryButton>
                 {salaryMsg && <span className="text-sm text-green-600">{salaryMsg}</span>}
@@ -407,7 +457,13 @@ export default function PayrollAdminPage() {
             </form>
 
             {/* 2026-11-08 員工固定津貼：每月執行薪資時自動帶入；合計提示用上方表單目前的本薪與勞保級距。 */}
-            <FixedAllowancesCard employeeId={empId} baseSalary={baseSalary} laborGrade={laborGrade} />
+            <FixedAllowancesCard
+              employeeId={empId}
+              baseSalary={baseSalary}
+              laborGrade={laborGrade}
+              onSummary={setAllowanceSummary}
+              reloadKey={allowanceReloadKey}
+            />
 
             <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2">
               <div>

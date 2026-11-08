@@ -166,6 +166,8 @@ export interface SheetMoney {
   expenses: number
   net: number
   netPlusExpenses: number
+  /** 固定津貼的免稅部分（伙食費免稅額內；已含在 net／netPlusExpenses、不在 gross）。舊快照沒有＝0。 */
+  fixedAllowancesTaxFree?: number
 }
 
 /** Full sheet view returned by GET /attendance-sheets/:id (and similar). */

@@ -31,7 +31,7 @@ import {
   type RuleConfigExt,
   type RuleConfigVersionFull,
 } from "@/lib/rule-config-api";
-import { parseEmployerRatePct } from "@/lib/fixed-allowances-api";
+import { parseEmployerRatePct, parseMealTaxFree, parsePensionLevels } from "@/lib/fixed-allowances-api";
 import { RuleConfigDiff } from "@/components/RuleConfigDiff";
 
 /**
@@ -318,6 +318,21 @@ function parseBracketList(input: string): number[] {
     .sort((a, b) => a - b);
 }
 
+/** config.allowance.mealTaxFreeMonthly → 表單字串；沒設定回空白（＝預設 3,000）。 */
+function mealTaxFreeOf(config: unknown): string {
+  const v = (config as { allowance?: { mealTaxFreeMonthly?: unknown } } | null)?.allowance?.mealTaxFreeMonthly;
+  return typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+}
+
+/** config.pension.wageBrackets → 表單列（levels 以逗號串起來）；沒設定＝[]（＝系統內建 115 年版）。 */
+function pensionBracketsOf(config: unknown): Array<{ effectiveFrom: string; levels: string }> {
+  const list = (config as { pension?: { wageBrackets?: unknown } } | null)?.pension?.wageBrackets;
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((b): b is { effectiveFrom: string; levels: number[] } => !!b && typeof b === "object" && typeof (b as { effectiveFrom?: unknown }).effectiveFrom === "string" && Array.isArray((b as { levels?: unknown }).levels))
+    .map((b) => ({ effectiveFrom: b.effectiveFrom, levels: b.levels.join(", ") }));
+}
+
 /** config.pension.employerRate（比例）→ 表單「%」字串；沒設定回空白（＝預設 6%）。 */
 function employerRatePctOf(config: unknown): string {
   const rate = (config as { pension?: { employerRate?: unknown } } | null)?.pension?.employerRate;
@@ -566,6 +581,8 @@ export default function ModuleSettingsPage() {
   const [insuranceEffectiveDate, setInsuranceEffectiveDate] = useState("");
   // 2026-11-08 雇主勞退提撥率（畫面用「%」，存比例）；空白＝未設定（預設 6%）。
   const [pensionPct, setPensionPct] = useState("");
+  const [mealTaxFree, setMealTaxFree] = useState("");
+  const [pensionBrackets, setPensionBrackets] = useState<Array<{ effectiveFrom: string; levels: string }>>([]);
   const [pensionEffectiveMode, setPensionEffectiveMode] = useState<EffectiveMode>("nextMonth");
   const [pensionEffectiveDate, setPensionEffectiveDate] = useState("");
   const [annualForm, setAnnualForm] = useState<AnnualLeaveForm>(DEFAULT_ANNUAL_FORM);
@@ -600,6 +617,8 @@ export default function ModuleSettingsPage() {
         setOtForm(hydrateOvertimeForm(res.config));
         setInsuranceForm(hydrateInsuranceForm(res.config.insurance));
         setPensionPct(employerRatePctOf(res.config));
+        setMealTaxFree(mealTaxFreeOf(res.config));
+        setPensionBrackets(pensionBracketsOf(res.config));
         setAnnualForm(hydrateAnnualLeaveForm(res.config));
       })
       .catch((err) => setError(err instanceof Error ? err.message : "載入模組設定失敗"));
@@ -884,10 +903,34 @@ export default function ModuleSettingsPage() {
       setError(parsed.error);
       return;
     }
+    const meal = parseMealTaxFree(mealTaxFree);
+    if (!meal.ok) {
+      setError(meal.error);
+      return;
+    }
+    const brackets: { effectiveFrom: string; levels: number[] }[] = [];
+    for (const b of pensionBrackets) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(b.effectiveFrom.trim())) {
+        setError("勞退月提繳分級表：每一組都要有生效日（YYYY-MM-DD）");
+        return;
+      }
+      const levels = parsePensionLevels(b.levels);
+      if (!levels.ok) {
+        setError(`勞退月提繳分級表（${b.effectiveFrom}）：${levels.error}`);
+        return;
+      }
+      brackets.push({ effectiveFrom: b.effectiveFrom.trim(), levels: levels.levels });
+    }
+    brackets.sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
     try {
+      const pension = {
+        ...(parsed.rate === null ? {} : { employerRate: parsed.rate }),
+        ...(brackets.length > 0 ? { wageBrackets: brackets } : {}),
+      };
       const merged: RuleConfigExt = {
         ...asExtConfig(ruleConfig.config),
-        pension: parsed.rate === null ? undefined : { employerRate: parsed.rate },
+        pension: Object.keys(pension).length > 0 ? pension : undefined,
+        allowance: meal.value === null ? undefined : { mealTaxFreeMonthly: meal.value },
       };
       const res = await saveRuleConfig(merged, toEffectiveOpts(pensionEffectiveMode, pensionEffectiveDate));
       setMessage(describeSaveResult(res.version, res.effectiveFrom));
@@ -896,7 +939,7 @@ export default function ModuleSettingsPage() {
       });
       void reloadRuleVersions();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "儲存雇主勞退提撥率失敗");
+      setError(err instanceof Error ? err.message : "儲存勞退與伙食費參數失敗");
     }
   }
 
@@ -1737,10 +1780,11 @@ export default function ModuleSettingsPage() {
       {panel === "insurance" && (
         <Card>
           <div className="mb-4">
-            <h2 className="text-base font-semibold text-gray-900">雇主勞退提撥率</h2>
+            <h2 className="text-base font-semibold text-gray-900">勞退與伙食費參數</h2>
             <p className="mt-1 text-sm text-gray-500">
-              每月執行薪資時計算雇主勞退提撥 ＝ 月提繳工資（員工的勞保投保薪資）× 提撥率，四捨五入到元。
-              這是公司成本，不從員工實發扣除，列在薪資單「公司負擔」與工資清冊的人事成本。法定不得低於 6%；留白＝6%。
+              每月執行薪資時計算雇主勞退提撥 ＝ 勞退月提繳工資 × 提撥率，四捨五入到元；勞工自提用同一個提繳工資。
+              提繳工資在員工薪資資料填寫，留空＝本薪＋計入投保的固定津貼依下方分級表向上取級距。
+              雇主提撥是公司成本，不從員工實發扣除，列在薪資單「公司負擔」與工資清冊的人事成本。法定不得低於 6%；留白＝6%。
             </p>
           </div>
           {ruleConfig ? (
@@ -1759,6 +1803,73 @@ export default function ModuleSettingsPage() {
                   data-testid="employer-pension-rate"
                 />
               </div>
+              <div className="max-w-xs">
+                <label className={labelCls}>伙食費每月免稅額（元）</label>
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  placeholder="3000"
+                  className={inputCls}
+                  value={mealTaxFree}
+                  onChange={(e) => setMealTaxFree(e.target.value)}
+                  data-testid="meal-tax-free"
+                />
+                <p className="mt-1 text-xs text-gray-400">
+                  固定津貼課稅方式選「伙食費」者，每人每月合計在此金額內免稅、超過部分應稅。留白＝3,000（營利事業所得稅查核準則第 88 條，112 年起）。
+                </p>
+              </div>
+              <div className="rounded-md border border-gray-200 p-3">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium text-gray-700">勞退月提繳分級表（含生效日）</p>
+                    <p className="mt-1 text-xs text-gray-400">
+                      留空＝系統內建 115 年 1 月 1 日生效版（62 級，1,500～150,000）。勞動部公告新表時新增一組、填生效日與全部級距（由小到大，逗號分隔）。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setPensionBrackets((prev) => [...prev, { effectiveFrom: `${new Date().getFullYear() + 1}-01-01`, levels: "" }])}
+                    className="shrink-0 rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700"
+                  >
+                    新增一組
+                  </button>
+                </div>
+                {pensionBrackets.length === 0 ? (
+                  <p className="text-xs text-gray-400">使用系統內建分級表。</p>
+                ) : (
+                  <div className="space-y-3">
+                    {pensionBrackets.map((b, i) => (
+                      <div key={i} className="rounded-md bg-gray-50 p-3">
+                        <div className="mb-2 flex flex-wrap items-end gap-3">
+                          <div>
+                            <label className={labelCls}>生效日</label>
+                            <input
+                              type="date"
+                              className="rounded-md border border-gray-300 px-2 py-1.5 text-sm"
+                              value={b.effectiveFrom}
+                              onChange={(e) => setPensionBrackets((prev) => prev.map((x, idx) => (idx === i ? { ...x, effectiveFrom: e.target.value } : x)))}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setPensionBrackets((prev) => prev.filter((_, idx) => idx !== i))}
+                            className="mb-1.5 text-xs text-red-600 hover:underline"
+                          >
+                            刪除這一組
+                          </button>
+                        </div>
+                        <textarea
+                          className="h-20 w-full rounded-md border border-gray-300 p-2 font-mono text-xs"
+                          placeholder="1500, 3000, 4500, …, 147900, 150000"
+                          value={b.levels}
+                          onChange={(e) => setPensionBrackets((prev) => prev.map((x, idx) => (idx === i ? { ...x, levels: e.target.value } : x)))}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
               <EffectiveDateFields
                 mode={pensionEffectiveMode}
                 date={pensionEffectiveDate}
@@ -1767,7 +1878,7 @@ export default function ModuleSettingsPage() {
                 groupName="pension-effective-mode"
               />
               <div>
-                <PrimaryButton onClick={onSavePensionRate}>儲存雇主勞退提撥率</PrimaryButton>
+                <PrimaryButton onClick={onSavePensionRate}>儲存勞退與伙食費參數</PrimaryButton>
               </div>
             </div>
           ) : (

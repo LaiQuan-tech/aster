@@ -11,6 +11,7 @@ import { periodClosedErrorHandler } from "../middleware/period-closed.js"
 import { fixedAllowancesRouter } from "../routes/fixed-allowances.js"
 import { payrollRouter } from "../routes/payroll.js"
 import { reportsRouter } from "../routes/reports.js"
+import { salaryRouter } from "../routes/salary.js"
 import { renderPayslipHtml, renderPayslipText } from "../services/payslip-html.js"
 import { buildPayrollInputs, computeFromInputs } from "../services/payroll-inputs.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
@@ -18,7 +19,10 @@ import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supab
 /**
  * 員工固定津貼 API（/salary/:employeeId/fixed-allowances、/fixed-allowances/:id）＋ 薪資執行帶入 ＋ 雇主勞退提撥（2026-11-08）。
  *   • HR 專用（與 /salary 同一層權限）；一般員工 403；別租戶的員工／津貼 404
- *   • 薪資執行：當月有效的津貼帶入、生效期間外與軟刪除的不帶；應稅進 gross、伙食費 2,400 內免稅只加 net
+ *   • 薪資執行：當月有效的津貼帶入、生效期間外與軟刪除的不帶；應稅進 gross、伙食費 3,000 內免稅只加 net
+ *   • 勞退月提繳工資（salary_structures.pension_wage）手填優先，留空依分級表自動算；適用勞退新制旗標
+ *   • 草稿過期：執行薪資後改津貼 → 列表標 fixed_allowances_stale、CRUD 回 stalePeriods、定案 409 fixed_allowances_stale
+ *   • 同名津貼同月重疊 → warnings
  *   • 雇主勞退：投保薪資 × 6%（規則可改），不扣實發
  *   • 已定案的薪資單、已結算的月份不被重算（歷史不回溯改寫）
  *   • 資料表未套用 → 薪資執行照常
@@ -30,6 +34,7 @@ app.use(express.json())
 app.use(fixedAllowancesRouter)
 app.use(payrollRouter)
 app.use(reportsRouter)
+app.use(salaryRouter)
 app.use(periodClosedErrorHandler)
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
@@ -56,6 +61,7 @@ const as = (token: string) => ({
   get: (path: string) => request(server).get(path).set("Authorization", `Bearer ${token}`),
   post: (path: string) => request(server).post(path).set("Authorization", `Bearer ${token}`),
   patch: (path: string) => request(server).patch(path).set("Authorization", `Bearer ${token}`),
+  put: (path: string) => request(server).put(path).set("Authorization", `Bearer ${token}`),
   delete: (path: string) => request(server).delete(path).set("Authorization", `Bearer ${token}`),
 })
 
@@ -194,24 +200,24 @@ describe("POST /payroll/run — 固定津貼帶入＋雇主勞退", () => {
     expect(res.body.insuredSalaryReview).toEqual([])
   })
 
-  it("應稅＋伙食費超過 2,400：gross +3,600（3,000 應稅 + 600 超過免稅額）、net +6,000；明細各自一列", async () => {
+  it("應稅＋伙食費超過 3,000：gross +3,600（3,000 應稅 + 600 超過免稅額）、net +6,600；明細各自一列", async () => {
     await runPayroll()
     const base = { gross: bd(EMP).gross as number, net: bd(EMP).net as number }
     fake.db.employee_fixed_allowances = [
       allowanceRow({ id: "fa-1" }),
-      allowanceRow({ id: "fa-2", name: "伙食津貼", amount: 3000, tax_type: "meal_exempt", insurable: false }),
+      allowanceRow({ id: "fa-2", name: "伙食津貼", amount: 3600, tax_type: "meal_exempt", insurable: false }),
     ]
     const res = await runPayroll()
     expect(res.status).toBe(201)
     const b = bd(EMP)
     expect(b.gross).toBe(base.gross + 3600)
-    expect(b.net).toBe(base.net + 6000)
+    expect(b.net).toBe(base.net + 6600)
     expect(slipOf(EMP).gross).toBe(base.gross + 3600) // payslips.gross（扣繳基礎）也跟著
-    expect(b.fixedAllowancesTaxFree).toBe(2400)
+    expect(b.fixedAllowancesTaxFree).toBe(3000)
     expect(b.lines).toEqual(expect.arrayContaining([
       { label: "職務加給", amount: 3000 },
       { label: "伙食津貼(超過免稅額)", amount: 600 },
-      { label: "伙食津貼(免稅)", amount: 2400 },
+      { label: "伙食津貼(免稅)", amount: 3000 },
     ]))
     // 底薪 40,000 ＋ 計入投保 3,000 ＝ 43,000 > 勞保級距 40,100 → 提示（不自動改級距）
     expect(res.body.insuredSalaryReview).toEqual([
@@ -310,24 +316,25 @@ describe("歷史薪資單不回溯改寫", () => {
 
 describe("顯示：工資清冊與 Email 薪資條", () => {
   it("工資清冊：固定津貼兩欄、雇主勞退與人事成本合計（CSV 合計列）", async () => {
-    fake.db.employee_fixed_allowances = [allowanceRow({ name: "伙食津貼", amount: 2400, tax_type: "meal_exempt" })]
+    fake.db.employee_fixed_allowances = [allowanceRow({ name: "伙食津貼", amount: 3000, tax_type: "meal_exempt", insurable: false })]
     await runPayroll()
     const json = await as(T.hr).get(`/reports/payroll?period=${OCT}`)
     const row = (json.body.rows as Array<Record<string, number | string>>).find((r) => r.employeeId === EMP)!
-    expect(row).toMatchObject({ fixedAllowancesTaxable: 0, fixedAllowancesTaxFree: 2400, employerPension: 2406 })
-    expect(row.laborCost).toBe((row.gross as number) + 2400 + 2406)
-    expect(json.body.total.employerPension).toBe(2406 * 2) // 兩人投保薪資都是 40,100
+    expect(row).toMatchObject({ fixedAllowancesTaxable: 0, fixedAllowancesTaxFree: 3000, employerPension: 2406 })
+    expect(row.laborCost).toBe((row.gross as number) + 3000 + 2406)
+    // EMP 本薪 40,000 → 提繳工資 40,100 → 2,406；EMP2 本薪 50,000 → 50,600 → 3,036
+    expect(json.body.total.employerPension).toBe(2406 + 3036)
     const csv = await as(T.hr).get(`/reports/payroll?period=${OCT}&format=csv`)
     const lines = csv.text.replace(/^﻿/, "").trim().split(/\r?\n/)
     const header = lines[0].split(",")
     expect(header.indexOf("固定津貼(應稅)")).toBeLessThan(header.indexOf("應發合計"))
     expect(header.indexOf("固定津貼(伙食費免稅)")).toBeLessThan(header.indexOf("實發金額"))
     const total = lines[lines.length - 1].split(",")
-    expect(total[header.indexOf("雇主勞退提撥(公司負擔)")]).toBe(String(2406 * 2))
+    expect(total[header.indexOf("雇主勞退提撥(公司負擔)")]).toBe(String(2406 + 3036))
   })
 
   it("Email 薪資條：津貼明細、公司負擔段；舊薪資單沒有公司負擔段", async () => {
-    fake.db.employee_fixed_allowances = [allowanceRow({ name: "伙食津貼", amount: 3000, tax_type: "meal_exempt" })]
+    fake.db.employee_fixed_allowances = [allowanceRow({ name: "伙食津貼", amount: 3600, tax_type: "meal_exempt", insurable: false })]
     await runPayroll()
     const slip = slipOf(EMP)
     const input = { payslip: slip as never, breakdown: slip.breakdown as never, employeeName: "員工甲" }
@@ -339,5 +346,110 @@ describe("顯示：工資清冊與 Email 薪資條", () => {
     expect(renderPayslipText(input)).toContain("【公司負擔（不從實發扣除）】")
     const old = renderPayslipHtml({ payslip: { period: OCT, gross: 100, status: "finalized" } as never, breakdown: { net: 100 } as never, employeeName: "員工甲" })
     expect(old).not.toContain("公司負擔")
+  })
+})
+
+describe("第二輪：勞退月提繳工資／適用勞退新制", () => {
+  it("PUT /salary 存手填提繳工資與新制旗標；GET 讀得回；薪資執行用手填值（45,800 × 6% = 2,748），source=manual", async () => {
+    const put = await as(T.hr).put(`/salary/${EMP}`).send({ pensionWage: 45800, laborInsuredSalary: 40100, healthInsuredSalary: 40100 })
+    expect(put.status, JSON.stringify(put.body)).toBe(200)
+    expect(fake.db.salary_structures?.find((r) => r.employee_id === EMP)).toMatchObject({ pension_wage: 45800 })
+    const got = await as(T.hr).get(`/salary/${EMP}`)
+    expect(got.body.salary.pension_wage).toBe(45800)
+    await runPayroll()
+    expect(bd(EMP)).toMatchObject({ pensionWage: 45800, pensionWageSource: "manual", employerPension: 2748 })
+  })
+
+  it("提繳工資驗證：非整數、0、負數 → 400", async () => {
+    expect((await as(T.hr).put(`/salary/${EMP}`).send({ pensionWage: 100.5 })).status).toBe(400)
+    expect((await as(T.hr).put(`/salary/${EMP}`).send({ pensionWage: 0 })).status).toBe(400)
+  })
+
+  it("留空：本薪＋計入投保的固定津貼依分級表（40,000 + 3,000 → 43,900），GET 津貼 summary.pension.autoWage 同值", async () => {
+    fake.db.employee_fixed_allowances = [allowanceRow({ effective_from: "2020-01-01" })] // summary 看的是今天所屬月份
+    await runPayroll()
+    expect(bd(EMP)).toMatchObject({ pensionWage: 43900, pensionWageSource: "auto", employerPension: 2634 })
+    const list = await as(T.hr).get(`/salary/${EMP}/fixed-allowances`)
+    expect(list.body.summary.pension).toMatchObject({ autoWage: 43900, manualWage: null, newSystem: true, levelsEffectiveFrom: "2026-01-01" })
+  })
+
+  it("不適用勞退新制：雇主提撥與自提都 0（自提 6% 也不扣）", async () => {
+    fake.db.salary_structures = [{ ...salary(EMP, "40000"), pension_voluntary_rate: "0.06", pension_new_system: false }, salary(EMP2, "50000")]
+    await runPayroll()
+    expect(bd(EMP).pensionVoluntary).toBe(0)
+    expect(bd(EMP).employerPension).toBeUndefined()
+    expect(bd(EMP).pensionNewSystem).toBe(false)
+  })
+
+  it("沒有勞保投保薪資但有提繳工資也能算", async () => {
+    fake.db.salary_structures = [{ ...salary(EMP, "30000", null), pension_wage: 30300 }]
+    await runPayroll(OCT, EMP)
+    expect(bd(EMP).laborInsurance).toBe(0)
+    expect(bd(EMP)).toMatchObject({ pensionWage: 30300, employerPension: 1818 })
+  })
+
+  it("★ 行為改變：高薪有自提 → 自提以提繳工資為基數（本薪 60,000、勞保 45,800、6%：3,648，原 2,748）", async () => {
+    fake.db.salary_structures = [{ ...salary(EMP, "60000", "45800"), pension_voluntary_rate: "0.06" }]
+    await runPayroll(OCT, EMP)
+    expect(bd(EMP)).toMatchObject({ pensionWage: 60800, pensionVoluntary: 3648, employerPension: 3648 })
+  })
+
+  it("國籍提示：外籍只建議、不自動改旗標；本國不提示", async () => {
+    fake.db.employee_profiles = [{ id: "pf-1", tenant_id: TENANT_ID, employee_id: EMP, nationality: "越南" }]
+    const res = await as(T.hr).get(`/salary/${EMP}/fixed-allowances`)
+    expect(res.body.summary.pension.nationalityHint).toContain("越南")
+    expect(res.body.summary.pension.newSystem).toBe(true)
+    fake.db.employee_profiles = [{ id: "pf-1", tenant_id: TENANT_ID, employee_id: EMP, nationality: "中華民國" }]
+    expect((await as(T.hr).get(`/salary/${EMP}/fixed-allowances`)).body.summary.pension.nationalityHint).toBeNull()
+  })
+})
+
+describe("第二輪：草稿過期偵測（比照加減項）", () => {
+  it("執行薪資後新增津貼 → CRUD 回 stalePeriods、列表標 fixed_allowances_stale、定案 409；重新執行後可定案", async () => {
+    await runPayroll(OCT, EMP)
+    const created = await create({ effectiveFrom: "2030-01-01" })
+    expect(created.status).toBe(201)
+    expect(created.body.stalePeriods).toEqual([OCT])
+    const list = await as(T.hr).get(`/payslips?period=${OCT}`)
+    expect(list.body.payslips.find((p: Row) => p.employee_id === EMP).fixed_allowances_stale).toBe(true)
+    const blocked = await as(T.hr).post(`/payslips/${slipOf(EMP).id as string}/finalize`)
+    expect(blocked.status).toBe(409)
+    expect(blocked.body.error).toBe("fixed_allowances_stale")
+    expect(slipOf(EMP).status).toBe("draft")
+    await runPayroll(OCT, EMP)
+    expect((await as(T.hr).get(`/salary/${EMP}/fixed-allowances`)).body.stalePeriods).toEqual([])
+    const ok = await as(T.hr).post(`/payslips/${slipOf(EMP).id as string}/finalize`)
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+  })
+
+  it("修改金額、刪除也會讓草稿過期；員工自己看列表（scope=mine）不帶這個標記", async () => {
+    const id = (await create()).body.fixedAllowance.id as string
+    await runPayroll(OCT, EMP)
+    const patched = await as(T.hr).patch(`/fixed-allowances/${id}`).send({ amount: 3100 })
+    expect(patched.body.stalePeriods).toEqual([OCT])
+    await runPayroll(OCT, EMP)
+    const del = await as(T.hr).delete(`/fixed-allowances/${id}`)
+    expect(del.body.stalePeriods).toEqual([OCT])
+    const mine = await as(T.emp).get(`/payslips?scope=mine`)
+    expect(mine.body.payslips[0].fixed_allowances_stale).toBeUndefined()
+  })
+
+  it("沒有津貼的員工：舊草稿不會被誤判過期，照常定案", async () => {
+    await runPayroll(OCT, EMP2)
+    const ok = await as(T.hr).post(`/payslips/${slipOf(EMP2).id as string}/finalize`)
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+  })
+})
+
+describe("第二輪：同名津貼同月重疊提醒", () => {
+  it("舊約 3/15 止、新約 3/16 起 → warnings same_name_overlap（2030-03）；接續到月底就沒有", async () => {
+    await create({ effectiveFrom: "2030-01-01", effectiveTo: "2030-03-15" })
+    const second = await create({ effectiveFrom: "2030-03-16" })
+    expect(second.body.warnings).toEqual([expect.objectContaining({ code: "same_name_overlap", name: "職務加給", months: ["2030-03"] })])
+    const list = await as(T.hr).get(`/salary/${EMP}/fixed-allowances`)
+    expect(list.body.warnings).toHaveLength(1)
+    const firstId = list.body.fixedAllowances[0].id as string
+    const fixed = await as(T.hr).patch(`/fixed-allowances/${firstId}`).send({ effectiveTo: "2030-02-28" })
+    expect(fixed.body.warnings).toEqual([])
   })
 })

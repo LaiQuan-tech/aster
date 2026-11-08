@@ -11,12 +11,16 @@ import {
   formFromAllowance,
   getFixedAllowances,
   insuredHintText,
+  midMonthHint,
+  staleNoticeText,
   TAX_TYPE_LABEL,
   updateFixedAllowance,
   type AllowanceTaxType,
   type FixedAllowance,
   type FixedAllowanceForm,
+  type FixedAllowanceNotices,
   type FixedAllowanceSummary,
+  type FixedAllowanceWarning,
 } from "@/lib/fixed-allowances-api";
 
 const inputCls =
@@ -27,15 +31,21 @@ const labelCls = "mb-1 block text-xs font-medium text-gray-500";
  * 員工固定津貼（2026-11-08）：掛在「員工薪資保險資料」選定員工之下。新增／修改／刪除（軟刪除）。
  * 每月執行薪資時自動帶入當月有效的津貼；已產生的薪資單不受之後的修改影響（草稿要重新執行薪資作業）。
  * `baseSalary`／`laborGrade` 是上方表單目前的值，用來提示「固定津貼＋底薪」合計（系統不自動改投保級距）。
+ * `onSummary`：把 API 回的 summary（含勞退月提繳工資自動值、國籍提示）交給上層薪資表單顯示。
+ * `reloadKey`：上層存了薪資資料（本薪／提繳工資）後加 1，重新讀一次 summary。
  */
 export function FixedAllowancesCard({
   employeeId,
   baseSalary,
   laborGrade,
+  onSummary,
+  reloadKey = 0,
 }: {
   employeeId: string;
   baseSalary: string;
   laborGrade: string;
+  onSummary?: (summary: FixedAllowanceSummary | null) => void;
+  reloadKey?: number;
 }) {
   const [items, setItems] = useState<FixedAllowance[]>([]);
   const [summary, setSummary] = useState<FixedAllowanceSummary | null>(null);
@@ -45,7 +55,14 @@ export function FixedAllowancesCard({
   const [form, setForm] = useState<FixedAllowanceForm>(EMPTY_FIXED_ALLOWANCE_FORM);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [warnings, setWarnings] = useState<FixedAllowanceWarning[]>([]);
+  const [stalePeriods, setStalePeriods] = useState<string[]>([]);
   const panelId = useId();
+
+  const applyNotices = useCallback((n: FixedAllowanceNotices) => {
+    setWarnings(n.warnings ?? []);
+    setStalePeriods(n.stalePeriods ?? []);
+  }, []);
 
   const reload = useCallback(async () => {
     setLoadError(null);
@@ -53,12 +70,17 @@ export function FixedAllowancesCard({
       const res = await getFixedAllowances(employeeId);
       setItems(res.fixedAllowances);
       setSummary(res.summary);
+      onSummary?.(res.summary);
+      applyNotices(res);
     } catch (err) {
       setItems([]);
       setSummary(null);
+      onSummary?.(null);
       setLoadError(apiErrorMessage(err, "載入固定津貼失敗"));
     }
-  }, [employeeId]);
+    // onSummary 由上層每次 render 重建，不放進依賴（避免無限重讀）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employeeId, applyNotices]);
 
   useEffect(() => {
     setShowForm(false);
@@ -66,7 +88,7 @@ export function FixedAllowancesCard({
     setForm(EMPTY_FIXED_ALLOWANCE_FORM);
     setFormError(null);
     void reload();
-  }, [reload]);
+  }, [reload, reloadKey]);
 
   function patch(partial: Partial<FixedAllowanceForm>) {
     setForm((prev) => ({ ...prev, ...partial }));
@@ -99,6 +121,7 @@ export function FixedAllowancesCard({
     try {
       if (editingId) await updateFixedAllowance(editingId, built.body);
       else await createFixedAllowance(employeeId, built.body);
+      // 提醒（同名重疊、草稿過期）由 reload 的 GET 一併帶回。
       setShowForm(false);
       setEditingId(null);
       setForm(EMPTY_FIXED_ALLOWANCE_FORM);
@@ -121,6 +144,8 @@ export function FixedAllowancesCard({
   }
 
   const hint = summary ? insuredHintText(baseSalary, laborGrade, summary.activeInsurableTotal) : null;
+  const midHint = midMonthHint(form);
+  const staleText = staleNoticeText(stalePeriods);
   const fmt = (n: number) => n.toLocaleString("zh-TW");
 
   return (
@@ -129,7 +154,7 @@ export function FixedAllowancesCard({
         <div>
           <h3 className="text-sm font-medium text-gray-600">固定津貼</h3>
           <p className="text-xs text-gray-400">
-            每月執行薪資時自動帶入當月有效的津貼（月中生效／終止當月照全額）；應稅併入應發，伙食費每月合計 2,400 元內免稅。
+            每月執行薪資時自動帶入當月有效的津貼（月中生效／終止當月整月帶入）；應稅併入應發，伙食費每月合計在免稅額內免稅（規則參數，預設 3,000）。
           </p>
         </div>
         <Button
@@ -184,6 +209,11 @@ export function FixedAllowancesCard({
             <input type="checkbox" checked={form.insurable} onChange={(e) => patch({ insurable: e.target.checked })} />
             計入投保薪資（經常性給與）
           </label>
+          {midHint && (
+            <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 sm:col-span-3" data-testid="fixed-allowance-mid-month-hint">
+              {midHint}
+            </p>
+          )}
           <div className="sm:col-span-3">
             <label className={labelCls}>備註（選填）</label>
             <input className={inputCls} value={form.note} onChange={(e) => patch({ note: e.target.value })} />
@@ -203,6 +233,16 @@ export function FixedAllowancesCard({
       </div>
 
       {loadError && <ErrorText>{loadError}</ErrorText>}
+      {staleText && (
+        <p className="mb-2 rounded-md bg-rose-50 px-3 py-2 text-xs text-rose-800" role="alert" data-testid="fixed-allowances-stale">
+          {staleText}
+        </p>
+      )}
+      {warnings.map((w) => (
+        <p key={`${w.name}-${w.months.join()}`} className="mb-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800" data-testid="fixed-allowances-overlap">
+          {w.message}
+        </p>
+      ))}
       <table className="w-full text-left text-sm">
         <thead>
           <tr className="border-b border-gray-200 text-xs text-gray-500">

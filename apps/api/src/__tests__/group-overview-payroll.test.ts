@@ -125,8 +125,8 @@ describe("GET /group-overview — 人事（在職人數、薪資成本）", () =
       draftSlipCount: 1,
       companyAssignmentReady: true,
       employerCostIncluded: false,
-      basis: "gross",
-      basisNote: "應發（gross）口徑：未扣請假／遲到扣款、不含雇主負擔、加班另計與獎金",
+      basis: "labor_cost",
+      basisNote: "人事成本合計口徑（應發＋免稅津貼＋雇主勞退提撥）：未扣請假／遲到扣款、不含雇主勞健保負擔、加班另計與獎金",
     })
   })
 
@@ -137,6 +137,13 @@ describe("GET /group-overview — 人事（在職人數、薪資成本）", () =
     )
     const body = await getOverview()
     expect(company(body, CO_B).headcount).toBe(2)
+  })
+
+  it("人事成本＝應發＋固定津貼免稅部分＋雇主勞退提撥（與工資清冊「人事成本合計」同口徑，2026-11-08）；舊薪資單只有應發", async () => {
+    fake.db.payslips!.find((p) => p.employee_id === E_B1)!.breakdown = { fixedAllowancesTaxFree: 3000, employerPension: 3048 }
+    const body = await getOverview()
+    expect(company(body, CO_B).payrollCost).toBe(50000 + 3000 + 3048)
+    expect(company(body, CO_A).payrollCost).toBe(110000.5) // 沒有那兩鍵的舊薪資單 → 只有應發
   })
 
   it("補充：payrollCostNet＝gross−請假−遲到早退扣款；overtimeSettlementCost＝同期另計（草稿＋已付、沒金額不計），按員工公司", async () => {

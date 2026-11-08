@@ -32,25 +32,30 @@
  *
  * 固定津貼(第 7 個參數 extras.fixedAllowances,2026-11-08):HR 在員工薪資資料設定、每月自動帶入的津貼。
  *   • 應稅(taxable) → 全額進 gross(併入扣繳基礎),lines 列在 gross 之前,名稱即津貼名稱
- *   • 伙食費(meal_exempt) → 本張薪資單所有伙食費合計 2,400 元以內免稅:免稅部分不進 gross、只加在實發
+ *   • 伙食費(meal_exempt) → 本張薪資單所有伙食費合計在免稅額內(規則 allowance.mealTaxFreeMonthly,預設 3,000)免稅:免稅部分不進 gross、只加在實發
  *     (lines 列在應扣之後,標「(免稅)」);超過部分應稅、進 gross(lines 標「(超過免稅額)」)
  *   • 保險以投保薪資為基數,不受影響;「計入投保」的合計放 fixedAllowancesInsurable 供 HR 核對級距
  *   沒有有效津貼的薪資單不會出現任何 fixedAllowances* 欄位(輸出與以前完全相同)。
  *
- * 雇主勞退提撥(公司負擔,2026-11-08):employerPension = round(勞保投保薪資 × 雇主提撥率),
- * 提撥率取 rules.pension.employerRate(預設 6%,允許 6%–100%)。不從實發扣除、不進 lines、不影響 gross/net;
- * 只有投保薪資 > 0 時才有 employerPension/employerPensionRate/pensionWage 三個欄位。
+ * 勞退(2026-11-08):月提繳工資 pensionWage = 員工薪資資料「勞退月提繳工資」(有填就照填),留空 = (本薪 + 計入投保的
+ * 固定津貼) 依勞退月提繳分級表 (rules.pension.wageBrackets,依 extras.period 選版;預設 115 年版) 向上取級距;沒有本薪
+ * (時薪／日薪制) 時以勞保投保薪資為基數。雇主提撥 employerPension = round(pensionWage × rules.pension.employerRate
+ * (預設 6%,允許 6%–100%)),不從實發扣除、不進 lines;勞工自提 pensionVoluntary = round(pensionWage × 自提率)
+ * (**與雇主同基數**;原本用勞保投保薪資——高薪且有自提的員工實發會因此改變)。不適用勞退新制 (pensionNewSystem=false)
+ * → 兩者都 0。
  */
 
 import { nhiEmployeePremium } from "./tw-tax.js";
-import { MEAL_ALLOWANCE_TAX_FREE_MONTHLY } from "./fixed-allowances.js";
+import { MEAL_ALLOWANCE_TAX_FREE_MONTHLY, insurableFixedAllowanceTotal } from "./fixed-allowances.js";
 import { overtimeMinutesBeforeMinCharge } from "./worktime-engine.js";
 import {
   resolveFixedHolidayPay,
   resolveHourlyWageDivisor,
   resolveLateEarlyDeductionEnabled,
   resolveOvertimeRule,
+  resolveMealTaxFreeMonthly,
   resolvePensionEmployerRate,
+  resolvePensionWageLevels,
   resolveRegularLeavePay,
   type OvertimeWhen,
   type RuleConfig,
@@ -92,11 +97,14 @@ export function adjustmentDisplayLabel(label: string, relatedPeriod?: string | n
 
 /**
  * 固定津貼 → 每筆的應稅／免稅切分 (整數元)。純函式。
- * 伙食費 (meal_exempt) 依輸入順序吃 2,400 元的每月免稅額,吃完後的部分應稅;應稅津貼全額應稅。
+ * 伙食費 (meal_exempt) 依輸入順序吃每月免稅額 (mealTaxFreeMonthly,預設 3,000),吃完後的部分應稅;應稅津貼全額應稅。
  * 金額先四捨五入到元,<= 0 或非有限數字的略過。
  */
-export function splitFixedAllowances(inputs: readonly FixedAllowanceInput[]): PayslipFixedAllowanceLine[] {
-  let mealExemptLeft = MEAL_ALLOWANCE_TAX_FREE_MONTHLY;
+export function splitFixedAllowances(
+  inputs: readonly FixedAllowanceInput[],
+  mealTaxFreeMonthly: number = MEAL_ALLOWANCE_TAX_FREE_MONTHLY,
+): PayslipFixedAllowanceLine[] {
+  let mealExemptLeft = Math.max(0, Math.round(mealTaxFreeMonthly));
   const out: PayslipFixedAllowanceLine[] = [];
   for (const a of inputs) {
     const amount = Math.round(Number(a.amount));
@@ -128,6 +136,36 @@ export function employerPensionOf(pensionWage: number, rate: number): number {
   if (!(pensionWage > 0) || !(rate > 0)) return 0;
   const ppm = Math.round(rate * 1_000_000);
   return Math.round((Math.round(pensionWage) * ppm) / 1_000_000);
+}
+
+/**
+ * 勞退月提繳工資 (整數元)。純函式。
+ *   • salary.pensionWage > 0 (HR 申報值) → 照用,source = manual
+ *   • 否則 auto:基數 = 本薪 (baseSalary > 0) 或勞保投保薪資 (沒有月本薪的時薪／日薪制) + 計入投保的固定津貼,
+ *     依該月適用的分級表取「≥ 基數的最小級距」(超過最高級取最高級);基數 <= 0 → null (不提繳)
+ */
+export function resolvePensionWage(
+  salary: SalaryStructure,
+  fixedAllowances: readonly FixedAllowanceInput[],
+  rules: RuleConfig,
+  period?: string,
+): { wage: number; source: "manual" | "auto" } | null {
+  if (salary.pensionWage !== undefined && salary.pensionWage > 0) {
+    return { wage: Math.round(salary.pensionWage), source: "manual" };
+  }
+  const base =
+    salary.baseSalary !== undefined && salary.baseSalary > 0
+      ? salary.baseSalary
+      : salary.laborInsuredSalary !== undefined && salary.laborInsuredSalary > 0
+        ? salary.laborInsuredSalary
+        : 0;
+  const total = Math.round(base) + insurableFixedAllowanceTotal(fixedAllowances);
+  if (total <= 0) return null;
+  const date = period ? `${period}-01` : "9999-12-31";
+  const { levels } = resolvePensionWageLevels(rules, date);
+  if (levels.length === 0) return { wage: total, source: "auto" };
+  for (const v of levels) if (v >= total) return { wage: v, source: "auto" };
+  return { wage: levels[levels.length - 1]!, source: "auto" };
 }
 
 /** 時薪專用:四捨五入到小數 4 位 (客戶薪資表「平日每小時工資額」的精度)。 */
@@ -458,7 +496,7 @@ export function computePayslip(
   for (const a of adjustmentLines) if (a.treatment === "earning") lines.push(adjustmentLine(a));
 
   // 固定津貼:應稅部分在 gross 之前進 lines;免稅部分 (伙食費 2,400 內) 放到應扣之後,同不課稅補發的位置。
-  const fixedLines = splitFixedAllowances(extras.fixedAllowances ?? []);
+  const fixedLines = splitFixedAllowances(extras.fixedAllowances ?? [], resolveMealTaxFreeMonthly(rules));
   let fixedTaxable = 0;
   let fixedTaxFree = 0;
   let fixedInsurable = 0;
@@ -538,9 +576,11 @@ export function computePayslip(
           ins.health.employeeShare,
         )
       : 0;
-  const pensionVoluntary = roundYuan(
-    (salary.laborInsuredSalary ?? 0) * (salary.pensionVoluntaryRate ?? 0),
-  );
+  // 勞退:雇主提撥與勞工自提同一個基數 (月提繳工資);不適用新制 → 都 0。
+  const pensionNewSystem = salary.pensionNewSystem !== false;
+  const pension = pensionNewSystem ? resolvePensionWage(salary, extras.fixedAllowances ?? [], rules, extras.period) : null;
+  const pensionWage = pension?.wage ?? 0;
+  const pensionVoluntary = pensionWage > 0 ? employerPensionOf(pensionWage, salary.pensionVoluntaryRate ?? 0) : 0;
   const advance = round(salary.advance ?? 0);
   const totalDeductions = round(
     laborInsurance +
@@ -571,7 +611,6 @@ export function computePayslip(
   for (const f of fixedLines) if (f.taxFreeAmount > 0) lines.push({ label: `${f.name}(免稅)`, amount: f.taxFreeAmount });
 
   // --- 公司負擔:雇主勞退提撥 (不影響 gross/net/lines) ---------------------------
-  const pensionWage = Math.round(salary.laborInsuredSalary ?? 0);
   const employerPensionRate = resolvePensionEmployerRate(rules);
   const employerPension = employerPensionOf(pensionWage, employerPensionRate);
 
@@ -612,7 +651,10 @@ export function computePayslip(
           fixedAllowancesInsurable: fixedInsurable,
         }
       : {}),
-    // 公司負擔:只有月提繳工資 > 0 才帶。
-    ...(pensionWage > 0 ? { employerPension, employerPensionRate, pensionWage } : {}),
+    // 公司負擔:只有適用新制且月提繳工資 > 0 才帶;不適用新制只帶 pensionNewSystem: false。
+    ...(pensionWage > 0
+      ? { employerPension, employerPensionRate, pensionWage, pensionWageSource: pension!.source }
+      : {}),
+    ...(pensionNewSystem ? {} : { pensionNewSystem: false as const }),
   };
 }

@@ -311,17 +311,61 @@ const AttendanceSchema = z
   })
   .optional();
 
-// 雇主勞退提撥 (2026-11-08):勞工退休金條例 §14 I 雇主每月提繳率「不得低於」6%。
+// 勞退 (2026-11-08):勞工退休金條例 §14 I 雇主每月提繳率「不得低於」6%;雇主提撥與勞工自提**同一個基數**(月提繳工資)。
 //   employerRate  雇主提撥率,以比例儲存 (0.06 = 6%);允許 0.06–1 (上限 100% 防呆)。省略 = 0.06。
-// 月提繳工資來源:員工的勞保投保薪資 (salary_structures.labor_insured_salary;系統沒有獨立的勞退提繳工資欄位)。
-// 這是公司成本,不從員工實發扣除;只記在薪資單 breakdown 的「公司負擔」區 (employerPension)。
-// 整段可省略 = 預設 6% (resolvePensionEmployerRate)。
+//   wageBrackets  勞工退休金月提繳分級表 (含生效日,可逐年調整);每組 levels 由小到大。省略 = 系統內建
+//                 DEFAULT_PENSION_WAGE_BRACKETS (勞動部 114-11-24 勞動福3字第1140153598號令,115-01-01 生效)。
+// 月提繳工資:員工薪資資料「勞退月提繳工資」有填就照填 (HR 申報值優先);留空 = (本薪 + 計入投保的固定津貼)
+// 依分級表向上取到級距 (payroll-engine resolvePensionWage)。
+// 雇主提撥是公司成本,不從員工實發扣除;只記在薪資單 breakdown 的「公司負擔」區 (employerPension)。
 export const PENSION_EMPLOYER_RATE_MIN = 0.06;
 export const PENSION_EMPLOYER_RATE_MAX = 1;
 export const DEFAULT_PENSION_EMPLOYER_RATE = 0.06;
+
+/**
+ * 勞工退休金月提繳分級表 (115 年 1 月 1 日生效,共 62 級;第 1 級 1,500 元、第 62 級 150,000 元)。
+ * 來源:勞動部 114 年 11 月 24 日勞動福3字第1140153598號令;勞保局「勞退月提繳分級表」
+ * https://www.bli.gov.tw/0101077.html (檔案 https://www.bli.gov.tw/Files/25709)。
+ * 實際工資落在某級距區間 → 取該級的月提繳工資 (= ≥ 實際工資的最小級距;147,901 元以上 = 150,000)。
+ */
+export const PENSION_WAGE_LEVELS_2026: readonly number[] = [
+  1500, 3000, 4500, 6000, 7500,
+  8700, 9900, 11100, 12540, 13500,
+  15840, 16500, 17280, 17880, 19047, 20008, 21009, 22000, 23100,
+  24000, 25250, 26400, 27600, 28590, 29500,
+  30300, 31800, 33300, 34800, 36300,
+  38200, 40100, 42000, 43900, 45800,
+  48200, 50600, 53000, 55400, 57800,
+  60800, 63800, 66800, 69800, 72800,
+  76500, 80200, 83900, 87600,
+  92100, 96600, 101100, 105600, 110100,
+  115500, 120900, 126300, 131700, 137100, 142500, 147900, 150000,
+];
+
+const PensionWageBracketSetSchema = z.object({
+  effectiveFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected 'YYYY-MM-DD'"),
+  levels: z.array(z.number().int().positive()).min(1),
+});
+export type PensionWageBracketSet = z.infer<typeof PensionWageBracketSetSchema>;
+
+export const DEFAULT_PENSION_WAGE_BRACKETS: readonly PensionWageBracketSet[] = [
+  { effectiveFrom: "2026-01-01", levels: [...PENSION_WAGE_LEVELS_2026] },
+];
+
 const PensionSchema = z
   .object({
     employerRate: z.number().min(PENSION_EMPLOYER_RATE_MIN).max(PENSION_EMPLOYER_RATE_MAX).optional(),
+    wageBrackets: z.array(PensionWageBracketSetSchema).optional(),
+  })
+  .optional();
+
+// 固定津貼課稅 (2026-11-08):
+//   mealTaxFreeMonthly  伙食費每人每月免稅額 (整數元)。省略 = 3,000
+//                       (營利事業所得稅查核準則第 88 條,112-12-11 修正、溯自 112-01-01 適用;原 2,400)。
+export const DEFAULT_MEAL_TAX_FREE_MONTHLY = 3000;
+const AllowanceSchema = z
+  .object({
+    mealTaxFreeMonthly: z.number().int().min(0).max(100000).optional(),
   })
   .optional();
 
@@ -335,6 +379,7 @@ export const RuleConfigSchema = z.object({
   leave: LeaveSchema,
   attendance: AttendanceSchema,
   pension: PensionSchema,
+  allowance: AllowanceSchema,
 });
 
 export type RuleConfig = z.infer<typeof RuleConfigSchema>;
@@ -648,4 +693,24 @@ export function resolvePensionEmployerRate(rules: RuleConfig): number {
   const r = rules.pension?.employerRate;
   if (typeof r !== "number" || !Number.isFinite(r)) return DEFAULT_PENSION_EMPLOYER_RATE;
   return Math.min(PENSION_EMPLOYER_RATE_MAX, Math.max(PENSION_EMPLOYER_RATE_MIN, r));
+}
+
+/**
+ * 某日適用的勞退月提繳分級表 (由小到大):規則設了 wageBrackets 就取生效日 ≤ date 的最新一組;
+ * 沒設、或規則裡全部晚於 date → 系統內建 (115 年版)。
+ */
+export function resolvePensionWageLevels(rules: RuleConfig, date: string): { effectiveFrom: string; levels: number[] } {
+  let picked: PensionWageBracketSet | null = null;
+  for (const s of rules.pension?.wageBrackets ?? []) {
+    if (s.effectiveFrom > date) continue;
+    if (!picked || s.effectiveFrom > picked.effectiveFrom) picked = s;
+  }
+  const set = picked ?? DEFAULT_PENSION_WAGE_BRACKETS[DEFAULT_PENSION_WAGE_BRACKETS.length - 1]!;
+  return { effectiveFrom: set.effectiveFrom, levels: [...set.levels].sort((a, b) => a - b) };
+}
+
+/** 伙食費每月免稅額 (整數元):規則有設就用,沒設 = 3,000。 */
+export function resolveMealTaxFreeMonthly(rules: RuleConfig): number {
+  const v = rules.allowance?.mealTaxFreeMonthly;
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v) : DEFAULT_MEAL_TAX_FREE_MONTHLY;
 }

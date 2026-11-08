@@ -44,6 +44,12 @@ import {
 import { exemptDatesOf, loadLateReportsForPeriod, undecidedCountOf } from "../services/late-reports.js"
 import { PERIOD_RE, assertPeriodOpen } from "../services/period-lock.js"
 import { adjustmentsStale, embeddedAdjustmentsOf, loadAdjustmentsByEmployee } from "../services/payroll-adjustments.js"
+import {
+  embeddedFixedAllowancesOf,
+  fixedAllowancesStale,
+  loadFixedAllowancesByEmployee,
+  staleDraftPayslips,
+} from "../services/fixed-allowances.js"
 
 export const payrollRouter = Router()
 
@@ -362,7 +368,7 @@ payrollRouter.post(
             // 一次性加減項（前期更正）：課稅補發進 gross、扣回進應扣、不課稅補發只加實發（引擎檔頭）。
             adjustmentsByEmployee.get(sal.employee_id) ?? [],
             // 員工固定津貼（2026-11-08）：當月有效的自動帶入；應稅進 gross、伙食費 2,400 內免稅只加實發（引擎檔頭）。
-            { fixedAllowances: inputs.fixedAllowancesByEmployee?.get(sal.employee_id) ?? [] },
+            { fixedAllowances: inputs.fixedAllowancesByEmployee?.get(sal.employee_id) ?? [], period },
           )
         } catch (err) {
           // The engine refuses to guess a wage (no hourly_wage AND no base
@@ -507,7 +513,14 @@ payrollRouter.get(
         next(new Error(`GET /payslips: ${error.message}`))
         return
       }
-      res.status(200).json({ payslips: data ?? [] })
+      // 固定津貼（2026-11-08）：HR 看的草稿薪資單，內嵌的津貼跟現在當月有效的不一致 → 標 fixed_allowances_stale（要重新執行）。
+      let rows = (data ?? []) as unknown as Array<Record<string, unknown>>
+      if (isHr && scope !== "mine" && rows.some((r) => r.status === "draft")) {
+        const ids = [...new Set(rows.filter((r) => r.status === "draft").map((r) => String(r.employee_id)))]
+        const stale = new Set((await staleDraftPayslips(tenantId, ids)).map((x) => x.payslipId))
+        rows = rows.map((r) => (stale.has(String(r.id)) ? { ...r, fixed_allowances_stale: true } : r))
+      }
+      res.status(200).json({ payslips: rows })
     } catch (err) {
       next(err)
     }
@@ -603,6 +616,18 @@ payrollRouter.post(
       }
       // 一次性加減項（前期更正）有異動、草稿還沒跟上 → 擋下來請先重新執行薪資作業。不擋的話，定稿之後這個月就不能再改，
       // 那筆補發／扣回會永遠沒進薪資單（services/payroll-adjustments.ts 的 adjustmentsStale）。
+      // 固定津貼（2026-11-08）比照加減項：執行薪資之後改了津貼、草稿還沒跟上 → 擋下來請先重新執行。
+      if (typeof existing.employee_id === "string") {
+        const currentFixed = await loadFixedAllowancesByEmployee(tenantId, existing.period as string, [existing.employee_id])
+        if (fixedAllowancesStale(embeddedFixedAllowancesOf(existing.breakdown), currentFixed.get(existing.employee_id))) {
+          res.status(409).json({
+            error: "fixed_allowances_stale",
+            period: existing.period,
+            message: `${existing.period as string} 的固定津貼有異動，薪資單還沒跟上，請先回薪資作業重新執行 ${existing.period as string} 的薪資再定稿`,
+          })
+          return
+        }
+      }
       if (typeof existing.employee_id === "string") {
         const current = await loadAdjustmentsByEmployee(tenantId, existing.period as string, [existing.employee_id])
         if (adjustmentsStale(embeddedAdjustmentsOf(existing.breakdown), current.get(existing.employee_id))) {
@@ -630,7 +655,9 @@ payrollRouter.post(
       // （另一邊的加減項端點也會在寫入後查一次是否已定稿並還原——兩邊至少有一邊會發現，不會有補發漏進已定稿的薪資單）。
       if (typeof updated.employee_id === "string") {
         const after = await loadAdjustmentsByEmployee(tenantId, updated.period as string, [updated.employee_id as string])
-        if (adjustmentsStale(embeddedAdjustmentsOf(existing.breakdown), after.get(updated.employee_id as string))) {
+        const afterFixed = await loadFixedAllowancesByEmployee(tenantId, updated.period as string, [updated.employee_id as string])
+        const fixedChanged = fixedAllowancesStale(embeddedFixedAllowancesOf(existing.breakdown), afterFixed.get(updated.employee_id as string))
+        if (fixedChanged || adjustmentsStale(embeddedAdjustmentsOf(existing.breakdown), after.get(updated.employee_id as string))) {
           const { error: revertErr } = await supabaseAdmin
             .from("payslips")
             .update({ status: "draft", updated_at: new Date().toISOString() })
@@ -645,9 +672,11 @@ payrollRouter.post(
           }
           logger.warn({ tenantId, payslipId: id }, "finalize: adjustments changed during finalize, reverted to draft")
           res.status(409).json({
-            error: "adjustments_stale",
+            error: fixedChanged ? "fixed_allowances_stale" : "adjustments_stale",
             period: updated.period,
-            message: `${updated.period as string} 的加減項（前期更正）剛好有異動，薪資單已退回草稿，請重新執行薪資再定稿`,
+            message: fixedChanged
+              ? `${updated.period as string} 的固定津貼剛好有異動，薪資單已退回草稿，請重新執行薪資再定稿`
+              : `${updated.period as string} 的加減項（前期更正）剛好有異動，薪資單已退回草稿，請重新執行薪資再定稿`,
           })
           return
         }

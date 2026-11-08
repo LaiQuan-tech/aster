@@ -1,13 +1,19 @@
--- 2026-11-08 薪資：員工固定津貼（migration 0086 ＝ sql/0076）＋雇主勞退提撥（規則參數 rule_configs.config.pension，免改表）。
--- 前提：已套 0085（sql/0075）。純新增、冪等、包在交易內；不動既有表與資料。套用後跑 docs/驗證-2026-11-08-薪資津貼勞退.sql。
--- 雇主提撥率不需 SQL：後台「設定 → 規則參數 → 勞健保」分頁的「雇主勞退提撥率」卡片設定（未設定＝6%）。
--- 已用 `npm run db:replay -- --base-migration 53 --base-sql 62 docs/套用-2026-11-08-薪資津貼勞退.sql
+-- 2026-11-08 薪資：員工固定津貼＋勞退月提繳工資（migration 0086 ＝ sql/0076）。
+-- 前提：已套 0085（sql/0075）。純新增、冪等、包在交易內；不動既有資料（salary_structures 只 ADD COLUMN IF NOT EXISTS，
+--   新欄位 pension_wage 一律 NULL＝依分級表自動算、pension_new_system 一律 true）。套用後跑 docs/驗證-2026-11-08-薪資津貼勞退.sql。
+-- 雇主提撥率、勞退月提繳分級表、伙食費免稅額不需 SQL：後台「設定 → 規則參數 → 勞健保」分頁的「勞退與伙食費參數」卡片
+--   （未設定＝6%、系統內建 115 年分級表、3,000）。
+-- 已用 `npm run db:replay -- --base-migration 53 --base-sql 62 --seed docs/test/replay-seed-2026-11-08-salary-pension.sql docs/套用-2026-11-08-薪資津貼勞退.sql
 --   --verify docs/驗證-2026-11-08-薪資津貼勞退.sql` 在 pglite 上套兩遍（驗冪等）＋驗證全部通過。
---   （本檔只依賴 tenants／employees／audit_row()，base 到 sql/0062 即具備；sql/0063 起 raw 檔無法直接在 raw base 上重放，見 10-28 套用檔說明。）
+--   （本檔只依賴 tenants／employees／salary_structures／audit_row()，base 到 sql/0062 即具備；sql/0063 起 raw 檔無法直接在 raw base 上重放，見 10-28 套用檔說明。）
 BEGIN;
 
--- 2026-11-08 員工固定津貼：每位員工可設多筆每月固定津貼（名稱、月金額、是否計入投保、課稅方式、生效起迄日），
--- 薪資執行（POST /payroll/run）自動帶入當月有效的津貼。雇主勞退提撥率放在規則參數（rule_configs.config.pension），不需改表。
+-- 2026-11-08 員工固定津貼＋勞退月提繳工資：
+--   1. employee_fixed_allowances：每位員工可設多筆每月固定津貼（名稱、月金額、是否計入投保、課稅方式、生效起迄日），
+--      薪資執行（POST /payroll/run）自動帶入當月有效的津貼。
+--   2. salary_structures 加兩欄：pension_wage（勞退月提繳工資，選填；NULL＝依分級表自動算）、
+--      pension_new_system（是否適用勞退新制，預設 true；false → 雇主提撥與自提都 0）。
+--   雇主提撥率、勞退月提繳分級表、伙食費免稅額放在規則參數（rule_configs.config.pension／allowance），不需改表。
 -- 前提：已套到 0085（sql/0075）。純新增、可重跑（IF NOT EXISTS／duplicate_object）；不動既有表與資料。
 -- 只由 API（service role）存取：RLS 開、不給 policy；掛 audit_all。刪除走 deleted_at 軟刪。
 CREATE TABLE IF NOT EXISTS public.employee_fixed_allowances (
@@ -46,7 +52,16 @@ DROP TRIGGER IF EXISTS audit_all ON public.employee_fixed_allowances;
 CREATE TRIGGER audit_all AFTER INSERT OR DELETE OR UPDATE ON public.employee_fixed_allowances
   FOR EACH ROW EXECUTE FUNCTION audit_row();
 
--- ── 還原（新表刪除會連資料一起丟）──
+-- 勞退月提繳工資／適用勞退新制（既有表只加欄、不改既有資料：pension_wage 一律 NULL＝自動算、pension_new_system 一律 true）
+ALTER TABLE public.salary_structures ADD COLUMN IF NOT EXISTS pension_wage integer;
+ALTER TABLE public.salary_structures ADD COLUMN IF NOT EXISTS pension_new_system boolean NOT NULL DEFAULT true;
+DO $$ BEGIN
+  ALTER TABLE public.salary_structures ADD CONSTRAINT salary_structures_pension_wage_chk CHECK (pension_wage IS NULL OR (pension_wage > 0 AND pension_wage <= 9999999));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── 還原（新表刪除會連資料一起丟；新欄位刪除會丟掉 HR 填的提繳工資與新制旗標）──
 -- DROP TABLE IF EXISTS public.employee_fixed_allowances;
+-- ALTER TABLE public.salary_structures DROP CONSTRAINT IF EXISTS salary_structures_pension_wage_chk,
+--   DROP COLUMN IF EXISTS pension_wage, DROP COLUMN IF EXISTS pension_new_system;
 
 COMMIT;

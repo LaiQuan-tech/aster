@@ -25,7 +25,10 @@ import {
 } from "@/lib/fixed-allowances-api";
 
 /** M3：`sent_at`／`sent_to` 在 migration 0050 之後才有（lib/admin-api.ts 是 WP0 的檔，不改）。 */
-type PayslipRow = Payslip & PayslipSendFields;
+type PayslipRow = Payslip & PayslipSendFields & {
+  /** 2026-11-08：草稿內嵌的固定津貼跟現在不一致（API 只對 HR 的草稿標）；要重新執行薪資作業才能定案。 */
+  fixed_allowances_stale?: boolean;
+};
 
 function fmtSentAt(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -368,7 +371,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                   <th className="py-2 pr-3 text-right">夜間</th>
                   <th className="py-2 pr-3 text-right">全勤</th>
                   <th className="py-2 pr-3 text-right">補貼</th>
-                  <th className="py-2 pr-3 text-right" title="員工固定津貼合計（含伙食費免稅部分）">固定津貼</th>
+                  <th className="py-2 pr-3 text-right" title="員工固定津貼的應稅部分（已含在應發）">固定津貼(應稅)</th>
                   <th className="py-2 pr-3 text-right font-semibold">應發</th>
                   <th className="py-2 pr-3 text-right">勞保</th>
                   <th className="py-2 pr-3 text-right">健保</th>
@@ -377,6 +380,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                   <th className="py-2 pr-3 text-right">請假扣款</th>
                   <th className="py-2 pr-3 text-right">遲到早退扣款</th>
                   <th className="py-2 pr-3 text-right">代墊</th>
+                  <th className="py-2 pr-3 text-right" title="固定津貼的免稅部分（伙食費免稅額內）：不在應發、加在實發">免稅津貼</th>
                   <th className="py-2 pr-3 text-right font-semibold">實發</th>
                   <th className="py-2 pr-3 text-right" title="公司負擔，不從實發扣除">雇主勞退</th>
                   <th className="py-2 pr-3">狀態</th>
@@ -411,7 +415,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(p.night_pay), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(p.attendance_bonus), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).allowances), 0))}</td>
-                  <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).fixedAllowancesTotal), 0))}</td>
+                  <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).fixedAllowancesTaxable), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(totals.gross)}</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).laborInsurance), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).healthInsurance), 0))}</td>
@@ -420,6 +424,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).leaveDeduction), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).lateEarlyDeduction), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(totals.expenses)}</td>
+                  <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).fixedAllowancesTaxFree), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(totals.net)}</td>
                   <td className="py-2 pr-3 text-right">{money(totals.employerPension)}</td>
                   <td colSpan={3} />
@@ -485,6 +490,15 @@ function PayslipRow({
               含更正 {adjustments.all.length} 筆
             </span>
           )}
+          {p.status !== "finalized" && p.fixed_allowances_stale && (
+            <span
+              className="ml-2 rounded-full bg-rose-50 px-2 py-0.5 text-xs font-normal text-rose-700"
+              title="固定津貼在執行薪資之後有異動：請到薪資作業重新執行本月薪資，否則無法定案"
+              data-testid="payslip-fixed-allowances-stale"
+            >
+              固定津貼有異動，需重新執行
+            </span>
+          )}
         </td>
         <td className="py-2 pr-3 text-right text-gray-500">{money(n(b.hourlyWage))}</td>
         <td className="py-2 pr-3 text-right">{money(n(p.base))}</td>
@@ -492,7 +506,7 @@ function PayslipRow({
         <td className="py-2 pr-3 text-right">{money(n(p.night_pay))}</td>
         <td className="py-2 pr-3 text-right">{money(n(p.attendance_bonus))}</td>
         <td className="py-2 pr-3 text-right">{money(n(b.allowances))}</td>
-        <td className="py-2 pr-3 text-right">{money(n(b.fixedAllowancesTotal))}</td>
+        <td className="py-2 pr-3 text-right">{money(n(b.fixedAllowancesTaxable))}</td>
         <td className="py-2 pr-3 text-right font-medium">{money(n(p.gross))}</td>
         <td className="py-2 pr-3 text-right text-rose-700">{money(n(b.laborInsurance))}</td>
         <td className="py-2 pr-3 text-right text-rose-700">{money(n(b.healthInsurance))}</td>
@@ -501,6 +515,7 @@ function PayslipRow({
         <td className="py-2 pr-3 text-right text-rose-700">{money(n(b.leaveDeduction))}</td>
         <td className="py-2 pr-3 text-right text-rose-700">{money(n(b.lateEarlyDeduction))}</td>
         <td className="py-2 pr-3 text-right">{money(n(b.expenses))}</td>
+        <td className="py-2 pr-3 text-right">{money(n(b.fixedAllowancesTaxFree))}</td>
         <td className="py-2 pr-3 text-right font-semibold text-emerald-700">{money(netOf(p))}</td>
         <td className="py-2 pr-3 text-right text-violet-700">{money(n(b.employerPension))}</td>
         <td className="py-2 pr-3">
@@ -541,7 +556,7 @@ function PayslipRow({
       </tr>
       {open && (
         <tr className="border-b border-gray-100 bg-gray-50/60">
-          <td colSpan={21} className="px-4 py-3">
+          <td colSpan={22} className="px-4 py-3">
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               {ot.length > 0 && (
                 <div>

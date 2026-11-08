@@ -2,10 +2,12 @@
  * 員工固定津貼＋雇主勞退提撥（2026-11-08）——API 呼叫、表單驗證與薪資單顯示的純函式。
  *
  * 固定津貼：HR 在「員工薪資保險資料」逐人設定（名稱、月金額、是否計入投保、課稅方式、生效起迄日），
- * 薪資執行時自動帶入當月有效的津貼。應稅的進應發（扣繳基礎）；伙食費每月合計 2,400 元以內免稅、只加在實發，超過部分應稅。
- * 「計入投保」只用於提示「底薪＋計入投保津貼」合計，系統不自動改投保級距。
+ * 薪資執行時自動帶入當月有效的津貼（月中起訖當月整月帶入）。應稅的進應發（扣繳基礎）；伙食費每月合計在免稅額內
+ * （規則參數，預設 3,000）免稅、只加在實發，超過部分應稅。「計入投保」：勞健保級距不自動改（只提示合計）；
+ * 勞退月提繳工資留空時，自動計算會含計入投保的津貼。
  *
- * 雇主勞退提撥（公司負擔）：月提繳工資（＝勞保投保薪資）× 雇主提撥率（規則參數，預設 6%），不從實發扣除。
+ * 勞退：月提繳工資（員工薪資資料手填，留空＝本薪＋計入投保津貼依分級表自動取級距）× 雇主提撥率（規則參數，預設 6%）
+ * ＝雇主提撥（公司負擔，不從實發扣除）；勞工自提同一個基數。不適用勞退新制 → 兩者都 0。
  *
  * 後端：apps/api/src/routes/fixed-allowances.ts、packages/rules/src/payroll-engine.ts。
  * 純函式不 import React／DOM（單元測試 __tests__/fixed-allowances.test.ts）。
@@ -18,7 +20,7 @@ export type AllowanceTaxType = "taxable" | "meal_exempt";
 
 export const TAX_TYPE_LABEL: Record<AllowanceTaxType, string> = {
   taxable: "應稅",
-  meal_exempt: "伙食費（每月 2,400 內免稅）",
+  meal_exempt: "伙食費（每月合計免稅額內免稅，預設 3,000）",
 };
 
 export interface FixedAllowance {
@@ -34,11 +36,37 @@ export interface FixedAllowance {
   updatedAt: string;
 }
 
+export interface PensionSummary {
+  /** 依本月分級表自動算的月提繳工資（本薪＋計入投保津貼）；算不出來＝null。 */
+  autoWage: number | null;
+  levelsEffectiveFrom: string;
+  /** 員工薪資資料手填的提繳工資；沒填＝null。 */
+  manualWage: number | null;
+  newSystem: boolean;
+  nationality: string | null;
+  /** 國籍看起來不是本國 → 建議確認是否適用新制（只建議，不自動判斷）。 */
+  nationalityHint: string | null;
+}
+
 export interface FixedAllowanceSummary {
   /** 'YYYY-MM'（今天所屬月份） */
   period: string;
   activeTotal: number;
   activeInsurableTotal: number;
+  pension?: PensionSummary | null;
+}
+
+export interface FixedAllowanceWarning {
+  code: "same_name_overlap";
+  name: string;
+  months: string[];
+  message: string;
+}
+
+/** CRUD 回應附帶的提醒：同名同月重疊、需要重新執行的草稿期別。 */
+export interface FixedAllowanceNotices {
+  warnings?: FixedAllowanceWarning[];
+  stalePeriods?: string[];
 }
 
 export interface FixedAllowanceBody {
@@ -54,27 +82,49 @@ export interface FixedAllowanceBody {
 /* ── API ──────────────────────────────────────────────────────────── */
 
 export function getFixedAllowances(employeeId: string) {
-  return apiFetch<{ fixedAllowances: FixedAllowance[]; summary: FixedAllowanceSummary }>(
+  return apiFetch<{ fixedAllowances: FixedAllowance[]; summary: FixedAllowanceSummary } & FixedAllowanceNotices>(
     `/salary/${encodeURIComponent(employeeId)}/fixed-allowances`,
   );
 }
 
 export function createFixedAllowance(employeeId: string, body: FixedAllowanceBody) {
-  return apiFetch<{ fixedAllowance: FixedAllowance }>(`/salary/${encodeURIComponent(employeeId)}/fixed-allowances`, {
+  return apiFetch<{ fixedAllowance: FixedAllowance } & FixedAllowanceNotices>(`/salary/${encodeURIComponent(employeeId)}/fixed-allowances`, {
     method: "POST",
     body: JSON.stringify(body),
   });
 }
 
 export function updateFixedAllowance(id: string, body: Partial<FixedAllowanceBody>) {
-  return apiFetch<{ fixedAllowance: FixedAllowance }>(`/fixed-allowances/${encodeURIComponent(id)}`, {
+  return apiFetch<{ fixedAllowance: FixedAllowance } & FixedAllowanceNotices>(`/fixed-allowances/${encodeURIComponent(id)}`, {
     method: "PATCH",
     body: JSON.stringify(body),
   });
 }
 
 export function deleteFixedAllowance(id: string) {
-  return apiFetch<{ ok: true }>(`/fixed-allowances/${encodeURIComponent(id)}`, { method: "DELETE" });
+  return apiFetch<{ ok: true } & FixedAllowanceNotices>(`/fixed-allowances/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** 草稿過期提醒文字（stalePeriods 空 → null）。 */
+export function staleNoticeText(stalePeriods: readonly string[] | undefined): string | null {
+  if (!stalePeriods || stalePeriods.length === 0) return null;
+  return `${stalePeriods.join("、")} 的草稿薪資單還沒跟上固定津貼的異動：請到「執行薪資/獎金作業」重新執行該月薪資，否則無法定案。`;
+}
+
+/**
+ * 月中起訖提示：起日不是 1 號、或迄日不是月底 → 當月仍整月帶入（不按日計）。純函式。
+ */
+export function midMonthHint(form: Pick<FixedAllowanceForm, "effectiveFrom" | "effectiveTo">): string | null {
+  const parts: string[] = [];
+  if (DATE_RE.test(form.effectiveFrom) && !form.effectiveFrom.endsWith("-01")) parts.push(`起日 ${form.effectiveFrom}`);
+  const to = form.effectiveTo.trim();
+  if (DATE_RE.test(to)) {
+    const [y, m, d] = to.split("-").map(Number);
+    const last = new Date(Date.UTC(y!, m!, 0)).getUTCDate();
+    if (d !== last) parts.push(`迄日 ${to}`);
+  }
+  if (parts.length === 0) return null;
+  return `${parts.join("、")}落在月中：當月整月帶入，如需按日計請手動調整（例：改起迄日或以薪資加減項補扣）。`;
 }
 
 /* ── 表單驗證（純函式） ──────────────────────────────────────────────── */
@@ -182,6 +232,8 @@ export interface BreakdownAllowanceFields {
   employerPension?: number;
   employerPensionRate?: number;
   pensionWage?: number;
+  pensionWageSource?: "manual" | "auto";
+  pensionNewSystem?: false;
 }
 
 export interface FixedAllowanceDisplayLine {
@@ -190,7 +242,7 @@ export interface FixedAllowanceDisplayLine {
   amount: number;
   taxableAmount: number;
   taxFreeAmount: number;
-  /** 例「應稅」「免稅」「免稅 2,400＋應稅 600」 */
+  /** 例「應稅」「免稅」「免稅 3,000＋應稅 600」 */
   taxNote: string;
 }
 
@@ -221,6 +273,34 @@ export function laborCostOf(gross: number, b: BreakdownAllowanceFields | null | 
 }
 
 /* ── 規則參數：雇主勞退提撥率（%） ─────────────────────────────────── */
+
+/** 表單「伙食費每月免稅額」字串 → 整數元；空白＝不設定（預設 3,000）。 */
+export function parseMealTaxFree(input: string): { ok: true; value: number | null } | { ok: false; error: string } {
+  const raw = input.trim();
+  if (raw === "") return { ok: true, value: null };
+  if (!/^\d+$/.test(raw)) return { ok: false, error: "伙食費免稅額請填 0 以上的整數元" };
+  const v = Number(raw);
+  if (v > 100000) return { ok: false, error: "伙食費免稅額超出範圍" };
+  return { ok: true, value: v };
+}
+
+/** 分級表文字（逗號／空白分隔）→ 由小到大的正整數陣列；有非數字回錯誤。 */
+export function parsePensionLevels(input: string): { ok: true; levels: number[] } | { ok: false; error: string } {
+  const tokens = input.split(/[\s,，、]+/).map((t) => t.trim()).filter(Boolean);
+  if (tokens.length === 0) return { ok: false, error: "分級表至少要有一個級距" };
+  const nums = tokens.map((t) => Number(t.replace(/元$/, "")));
+  if (nums.some((n) => !Number.isInteger(n) || n <= 0)) return { ok: false, error: "分級表只能填正整數（元）" };
+  return { ok: true, levels: [...new Set(nums)].sort((a, b) => a - b) };
+}
+
+/** 勞退月提繳工資欄位下方的說明（自動值、手填值、與分級表版本）。 */
+export function pensionWageHintText(p: PensionSummary | null | undefined, manualInput: string): string | null {
+  if (!p) return null;
+  const fmt = (n: number) => n.toLocaleString("zh-TW");
+  if (!p.newSystem) return "不適用勞退新制：雇主提撥與勞工自提都為 0。";
+  const auto = p.autoWage != null ? `依分級表（${p.levelsEffectiveFrom} 版）自動算：本薪＋計入投保的固定津貼 → ${fmt(p.autoWage)}` : "無法自動計算（沒有本薪也沒有投保薪資）";
+  return manualInput.trim() ? `目前以手填值計算；留空則${auto}。` : `留空＝${auto}。`;
+}
 
 /** 表單「%」字串 → 比例；6–100 以外或不是數字回錯誤訊息。空白＝不設定（預設 6%）。 */
 export function parseEmployerRatePct(input: string): { ok: true; rate: number | null } | { ok: false; error: string } {

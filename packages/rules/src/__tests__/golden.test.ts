@@ -719,14 +719,25 @@ describe("規則五 亞斯特 115-06 五份出勤表", () => {
       expect(slip.overtimePay).toBeCloseTo(9599.62, 2);
     });
 
-    it("勞保 1145、健保 1644、自提 2748 → 實領 55062.62", () => {
-      const slip = computePayslip(days, salary, rules);
+    it("勞保 1145、健保 1644、自提 2748 → 實領 55062.62（客戶 Excel 以 45,800 為自提基數 → 勞退月提繳工資申報 45,800）", () => {
+      // 2026-11-08 起自提改以「勞退月提繳工資」為基數（與雇主提撥同基數）。客戶 Excel 的自提 2748 = 45,800 × 6%，
+      // 等於該員申報的提繳工資是 45,800 → 員工薪資資料「勞退月提繳工資」填 45800，數字與 Excel 一致。
+      const slip = computePayslip(days, { ...salary, pensionWage: 45800 }, rules);
       expect(slip.laborInsurance).toBe(1145);
       expect(slip.healthInsurance).toBe(1644);
       expect(slip.pensionVoluntary).toBe(2748);
       expect(slip.totalDeductions).toBe(5537);
       expect(slip.net).toBeCloseTo(55062.62, 2);
       expect(linesSum(slip)).toBeCloseTo(slip.net, 2);
+    });
+
+    it("★ 行為改變：勞退月提繳工資留空 → 依分級表 51,000 → 53,000，自提 3,180（原以勞保 45,800 算 2,748），實領少 432", () => {
+      const slip = computePayslip(days, salary, rules);
+      expect(slip.pensionWage).toBe(53000);
+      expect(slip.pensionWageSource).toBe("auto");
+      expect(slip.pensionVoluntary).toBe(3180);
+      expect(slip.employerPension).toBe(3180);
+      expect(slip.net).toBeCloseTo(55062.62 - 432, 2);
     });
   });
 

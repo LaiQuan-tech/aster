@@ -130,6 +130,8 @@ export function moneyFromPreview(m: SheetMoney): StatementMoney {
     expenses: num(m.expenses),
     netWithExpenses: num(m.netPlusExpenses),
     segments: null,
+    // 月表試算的 allowances 已含固定津貼應稅部分（attendance-sheets toMoney），免稅部分另帶，實領／支出才算得對。
+    fixedAllowancesTaxFree: num(m.fixedAllowancesTaxFree),
   }
 }
 

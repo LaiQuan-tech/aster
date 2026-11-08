@@ -110,6 +110,8 @@ export const AUDIT_FIELD_LABELS: Record<string, string> = {
   labor_insured_salary: "勞保投保薪資",
   health_insured_salary: "健保投保薪資",
   pension_voluntary_rate: "勞退自提比例",
+  pension_wage: "勞退月提繳工資",
+  pension_new_system: "適用勞退新制",
   agreed_hours_per_week: "約定每週時數",
   agreed_days_per_week: "約定每週天數",
   changed_by_emp_id: "調整人",

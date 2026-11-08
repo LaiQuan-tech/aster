@@ -1,6 +1,12 @@
 import { Router, type NextFunction, type Request, type Response } from "express"
 import { z } from "zod"
-import { activeFixedAllowancesForPeriod, insurableFixedAllowanceTotal } from "@hr/rules"
+import {
+  activeFixedAllowancesForPeriod,
+  insurableFixedAllowanceTotal,
+  resolvePensionWage,
+  resolvePensionWageLevels,
+  sameNameOverlaps,
+} from "@hr/rules"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
@@ -10,9 +16,11 @@ import { isMissingTableError } from "../lib/schema-compat.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { todayKey } from "../lib/tz.js"
 import { writeAuditLog } from "../services/audit.js"
+import { loadRuleConfigFor, salarySelectCols, toSalaryStructure, type SalaryRow } from "../services/payroll-inputs.js"
 import {
   FIXED_ALLOWANCE_COLS,
   loadFixedAllowanceRows,
+  staleDraftPayslips,
   toFixedAllowanceView,
   type FixedAllowanceRow,
   type FixedAllowanceView,
@@ -26,8 +34,13 @@ import {
  *   PATCH  /fixed-allowances/:id                  修改上述任一欄（員工不能改，要換人就刪掉重建）
  *   DELETE /fixed-allowances/:id                  軟刪除（deleted_at；薪資執行與列表都排除）
  *
- * 金額：整數元、0–9,999,999。taxType：taxable 應稅／meal_exempt 伙食費（每月合計 2,400 內免稅，超過應稅）。
- * insurable：是否計入投保薪資——**只用於提示**（員工薪資資料頁與薪資執行回應的 insuredSalaryReview），不自動改投保級距。
+ * 金額：整數元、0–9,999,999。taxType：taxable 應稅／meal_exempt 伙食費（每月合計在免稅額內免稅——規則參數，預設 3,000——超過應稅）。
+ * insurable：是否計入投保薪資——勞健保級距**不自動改**（只提示，見 insuredSalaryReview）；勞退月提繳工資留空時，自動計算會含這筆。
+ *
+ * 回應附帶的提醒（2026-11-08 第二輪）：
+ *   • warnings：[{ code: "same_name_overlap", name, months, message }]——同名津貼的有效期間落在同一個月（整月帶入 → 重複給付）
+ *   • stalePeriods：這位員工有哪些**草稿**薪資單內嵌的津貼跟現在不一致（要重新執行薪資作業；定案會被擋 409 fixed_allowances_stale）
+ * GET 另回 summary.pension：勞退月提繳工資自動計算值（本月適用的分級表）、目前手填值、是否適用新制、國籍提示（只建議，不自動判斷）。
  *
  * 已產生的薪資單內嵌當時的津貼明細（payslips.breakdown.fixedAllowances），之後改津貼不會回溯改寫已定案／已結算的薪資單：
  * 薪資執行本來就跳過已定案的薪資單、已結算的月份整批 409 period_closed（routes/payroll.ts）。草稿薪資單要重新執行才會跟上。
@@ -103,6 +116,65 @@ function datesError(from: string, to: string | null | undefined): string | null 
   return null
 }
 
+/** 同名津貼同月重疊的提醒（只看這位員工未刪除的列）。 */
+function overlapWarnings(rows: FixedAllowanceRow[]) {
+  return sameNameOverlaps(rows).map((o) => ({
+    code: "same_name_overlap" as const,
+    name: o.name,
+    ids: o.ids,
+    months: o.months,
+    message: `「${o.name}」有兩筆在 ${o.months.join("、")} 同時有效：薪資執行是當月整月帶入，這幾個月會重複給付。請調整起迄日（例：舊的迄日設在上個月底）或手動以加減項調整。`,
+  }))
+}
+
+/** CRUD 之後：同名重疊提醒＋草稿過期的期別。 */
+async function afterWrite(tenantId: string, employeeId: string) {
+  const rows = await loadFixedAllowanceRows(tenantId, [employeeId])
+  const stale = await staleDraftPayslips(tenantId, [employeeId])
+  return { warnings: overlapWarnings(rows), stalePeriods: stale.map((s) => s.period) }
+}
+
+const FOREIGN_HINT_RE = /中華民國|臺灣|台灣|taiwan|^roc$|r\.o\.c|^tw$/i
+
+/** 員工薪資資料頁的勞退提示：自動計算的提繳工資、手填值、新制旗標、國籍建議。失敗不擋（回 null）。 */
+async function pensionSummary(tenantId: string, employeeId: string, period: string, rows: FixedAllowanceRow[]) {
+  try {
+    const { rules } = await loadRuleConfigFor(tenantId, period)
+    const { data: sal } = await supabaseAdmin
+      .from("salary_structures")
+      .select(await salarySelectCols())
+      .eq("tenant_id", tenantId)
+      .eq("employee_id", employeeId)
+      .maybeSingle()
+    const row = sal as unknown as SalaryRow | null
+    const active = activeFixedAllowancesForPeriod(rows, period)
+    const structure = row ? toSalaryStructure(row) : {}
+    const auto = resolvePensionWage({ ...structure, pensionWage: undefined }, active, rules, period)
+    const levels = resolvePensionWageLevels(rules, `${period}-01`)
+    let nationality: string | null = null
+    const prof = await supabaseAdmin
+      .from("employee_profiles")
+      .select("nationality")
+      .eq("tenant_id", tenantId)
+      .eq("employee_id", employeeId)
+      .maybeSingle()
+    if (!prof.error) nationality = ((prof.data as { nationality?: string | null } | null)?.nationality ?? null) || null
+    const foreign = !!nationality && !FOREIGN_HINT_RE.test(nationality.trim())
+    return {
+      autoWage: auto?.wage ?? null,
+      levelsEffectiveFrom: levels.effectiveFrom,
+      manualWage: row?.pension_wage != null && Number(row.pension_wage) > 0 ? Number(row.pension_wage) : null,
+      newSystem: row?.pension_new_system !== false,
+      nationality,
+      nationalityHint: foreign
+        ? `國籍為「${nationality}」：外籍員工須取得永久居留（或與本國人結婚取得居留）才適用勞退新制，請確認後再決定是否取消「適用勞退新制」。系統不會自動判斷。`
+        : null,
+    }
+  } catch {
+    return null
+  }
+}
+
 function auditShape(v: FixedAllowanceView) {
   return {
     employee_id: v.employeeId,
@@ -137,13 +209,17 @@ fixedAllowancesRouter.get(
       const rows = await loadFixedAllowanceRows(tenantId, [employeeId])
       const period = todayKey(await getTenantTimezone(tenantId)).slice(0, 7)
       const active = activeFixedAllowancesForPeriod(rows, period)
+      const stale = await staleDraftPayslips(tenantId, [employeeId])
       res.status(200).json({
         fixedAllowances: rows.map(toFixedAllowanceView),
         summary: {
           period,
           activeTotal: active.reduce((acc, a) => acc + a.amount, 0),
           activeInsurableTotal: insurableFixedAllowanceTotal(active),
+          pension: await pensionSummary(tenantId, employeeId, period, rows),
         },
+        warnings: overlapWarnings(rows),
+        stalePeriods: stale.map((s) => s.period),
       })
     } catch (err) {
       next(err)
@@ -215,7 +291,7 @@ fixedAllowancesRouter.post(
         actorEmpId,
         context: "POST /salary/:employeeId/fixed-allowances — 新增員工固定津貼",
       })
-      res.status(201).json({ fixedAllowance: view })
+      res.status(201).json({ fixedAllowance: view, ...(await afterWrite(tenantId, employeeId)) })
     } catch (err) {
       next(err)
     }
@@ -307,7 +383,7 @@ fixedAllowancesRouter.patch(
         actorEmpId: await callerEmpId(req, tenantId),
         context: "PATCH /fixed-allowances/:id — 修改員工固定津貼",
       })
-      res.status(200).json({ fixedAllowance: view })
+      res.status(200).json({ fixedAllowance: view, ...(await afterWrite(tenantId, view.employeeId)) })
     } catch (err) {
       next(err)
     }
@@ -353,7 +429,7 @@ fixedAllowancesRouter.delete(
         actorEmpId: await callerEmpId(req, tenantId),
         context: "DELETE /fixed-allowances/:id — 刪除員工固定津貼（軟刪除）",
       })
-      res.status(200).json({ ok: true })
+      res.status(200).json({ ok: true, ...(await afterWrite(tenantId, existing.employee_id)) })
     } catch (err) {
       next(err)
     }

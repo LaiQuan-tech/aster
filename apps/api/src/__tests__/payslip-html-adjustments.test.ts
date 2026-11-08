@@ -98,8 +98,10 @@ describe("沒有加減項的薪資單（含舊資料沒有 adjustments 欄位）
   it("沒有 adjustments → 沒有『更正』字樣，也沒有多出來的列", () => {
     const plain = renderPayslipHtml(inputFor([]))
     expect(plain).not.toContain("更正")
-    // 應發 6 列＋應扣 7 列＋實發 2 列＋逐項明細 2 列（本俸、全勤基準）＝17，沒有因為新功能多出任何列。
-    expect(plain.match(/<tr>/g)).toHaveLength(6 + 7 + 2 + 2)
+    // 應發 6 列＋應扣 7 列＋實發 2 列＋逐項明細 2 列（本俸、全勤基準）＝17，沒有因為加減項多出任何列；
+    // 另加「公司負擔」2 列（雇主勞退提撥＋合計；2026-11-08 起本薪 40,000 依分級表自動算提繳工資 40,100）。
+    expect(plain.match(/<tr>/g)).toHaveLength(6 + 7 + 2 + 2 + 2)
+    expect(plain).toContain("雇主勞退提撥（月提繳工資 40,100 × 6%）")
     const legacy = renderPayslipHtml({ payslip: { period: "2026-08", gross: "100" }, employeeName: "舊資料", breakdown: {} })
     expect(legacy).not.toContain("更正")
   })

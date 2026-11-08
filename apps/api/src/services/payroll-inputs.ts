@@ -12,7 +12,7 @@ import {
 import { fetchAllPages } from "../lib/select-all-pages.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
-import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { columnsExist, isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { DEFAULT_TIMEZONE, todayKey } from "../lib/tz.js"
 import { sumClaimsForPayroll, type PayrollClaimRow } from "./payroll-claims.js"
 import { loadAdjustmentsByEmployee } from "./payroll-adjustments.js"
@@ -48,10 +48,24 @@ export interface SalaryRow {
   labor_insured_salary: string | null
   health_insured_salary: string | null
   pension_voluntary_rate: string | null
+  /** migration 0086（2026-11-08）：勞退月提繳工資（NULL＝自動算）、是否適用勞退新制。正式庫沒套前不存在 → undefined。 */
+  pension_wage?: string | number | null
+  pension_new_system?: boolean | null
 }
 
 export const SALARY_COLS =
   "employee_id, method, base_salary, daily_wage, hourly_wage, labor_insured_salary, health_insured_salary, pension_voluntary_rate"
+
+/** migration 0086 的兩欄。 */
+export const SALARY_PENSION_COLS = "pension_wage, pension_new_system"
+
+/**
+ * salary_structures 的 select 欄位：0086 已套用就帶勞退兩欄，沒套就退回舊欄位集（select 不存在的欄位 PostgREST 直接 500，
+ * 會把整個薪資執行打掛——比照 routes/payroll.ts payslipSelectCols 的探測寫法）。沒套時引擎走預設：自動算、適用新制。
+ */
+export async function salarySelectCols(): Promise<string> {
+  return (await columnsExist("salary_structures", SALARY_PENSION_COLS)) ? `${SALARY_COLS}, ${SALARY_PENSION_COLS}` : SALARY_COLS
+}
 
 /** Stored attendance_days row as the payroll run reads it. */
 export interface AttendanceDayRow {
@@ -112,6 +126,10 @@ export function toSalaryStructure(row: SalaryRow, nhiDependents = 0, advance = 0
     nhiDependents,
     pensionVoluntaryRate:
       row.pension_voluntary_rate != null ? Number(row.pension_voluntary_rate) : undefined,
+    // 勞退月提繳工資：有填（> 0）＝ HR 申報值；空＝引擎依分級表自動算（本薪＋計入投保的固定津貼）。
+    pensionWage: row.pension_wage != null && Number(row.pension_wage) > 0 ? Number(row.pension_wage) : undefined,
+    // 適用勞退新制：只有明確 false 才是不適用（欄位未套用／NULL＝適用）。
+    pensionNewSystem: row.pension_new_system === false ? false : undefined,
     advance,
   }
 }
@@ -386,7 +404,7 @@ export async function loadPayrollInputs(
   const { rules, version } = await loadRuleConfigFor(tenantId, period)
 
   // --- salary structures (the run is salary-driven) --------------------------
-  let salQuery = supabaseAdmin.from("salary_structures").select(SALARY_COLS).eq("tenant_id", tenantId)
+  let salQuery = supabaseAdmin.from("salary_structures").select(await salarySelectCols()).eq("tenant_id", tenantId)
   if (employeeIds) {
     if (employeeIds.length === 0) {
       return {
@@ -406,7 +424,7 @@ export async function loadPayrollInputs(
   const { data: salData, error: salErr } = await salQuery
   if (salErr) throw new Error(`loadPayrollInputs (salaries): ${salErr.message}`)
   const salaryByEmployee = new Map<string, SalaryRow>()
-  for (const row of (salData ?? []) as SalaryRow[]) salaryByEmployee.set(row.employee_id, row)
+  for (const row of (salData ?? []) as unknown as SalaryRow[]) salaryByEmployee.set(row.employee_id, row)
 
   const scopeIds = employeeIds ?? Array.from(salaryByEmployee.keys())
   const empty: PayrollInputs = {
@@ -526,6 +544,8 @@ export async function loadPayrollInputs(
 
 /** One employee's engine-ready inputs (the attendance-sheet money preview). */
 export interface EmployeePayrollInputs {
+  /** 計算月份 'YYYY-MM'（引擎選勞退月提繳分級表的版本用）。 */
+  period?: string
   rules: RuleConfig
   ruleConfigVersion: number
   /** null when the employee has no salary_structures row. */
@@ -551,6 +571,7 @@ export async function buildPayrollInputs(
   const batch = await loadPayrollInputs(tenantId, period, [employeeId])
   const salaryRow = batch.salaryByEmployee.get(employeeId) ?? null
   return {
+    period,
     rules: batch.rules,
     ruleConfigVersion: batch.ruleConfigVersion,
     salaryRow,
@@ -579,5 +600,6 @@ export function computeFromInputs(
   const policy = applyNightPolicy(inputs.features, days, inputs.rules)
   return computePayslip(policy.days, inputs.salary, policy.rules, inputs.expenses, inputs.allowances, inputs.adjustments, {
     fixedAllowances: inputs.fixedAllowances ?? [],
+    period: inputs.period,
   })
 }

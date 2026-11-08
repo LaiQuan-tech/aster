@@ -12,7 +12,8 @@ import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { writeAuditLog } from "../services/audit.js"
 import { logger } from "../lib/logger.js"
-import { loadRuleConfigFor } from "../services/payroll-inputs.js"
+import { loadRuleConfigFor, SALARY_PENSION_COLS } from "../services/payroll-inputs.js"
+import { columnsExist } from "../lib/schema-compat.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { todayKey } from "../lib/tz.js"
 
@@ -74,6 +75,11 @@ function numOrNull(v: unknown): number | null {
 const SELECT_COLS =
   "id, tenant_id, employee_id, method, base_salary, daily_wage, hourly_wage, allowances, labor_insured_salary, health_insured_salary, pension_voluntary_rate, agreed_hours_per_week, agreed_days_per_week, created_at"
 
+/** 0086 的勞退兩欄已套用才 select（沒套用時 select 不存在的欄位 PostgREST 會 500）。 */
+async function selectCols(): Promise<string> {
+  return (await columnsExist("salary_structures", SALARY_PENSION_COLS)) ? `${SELECT_COLS}, ${SALARY_PENSION_COLS}` : SELECT_COLS
+}
+
 // Numeric columns are returned by PostgREST as strings; the client coerces.
 const upsertSchema = z
   .object({
@@ -94,6 +100,10 @@ const upsertSchema = z
     // 工讀生時薪制(C5)的約定每週工時／工天數；可空，無關聯限制(不要求兩者同填)。
     agreedHoursPerWeek: z.number().nonnegative().nullable().optional(),
     agreedDaysPerWeek: z.number().nonnegative().nullable().optional(),
+    // 2026-11-08（migration 0086）：勞退月提繳工資（整數元；null＝依分級表以本薪＋計入投保固定津貼自動算）、
+    // 是否適用勞退新制（false → 雇主提撥與勞工自提都 0，例：無永久居留的外籍員工）。
+    pensionWage: z.number().int().positive().max(9_999_999).nullable().optional(),
+    pensionNewSystem: z.boolean().optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
   // C5：時薪制的本俸基準就是 hourlyWage，引擎對 hourlyWage<=0 直接丟錯（不猜）。
@@ -124,7 +134,7 @@ salaryRouter.get(
     try {
       const { data, error } = await supabaseAdmin
         .from("salary_structures")
-        .select(SELECT_COLS)
+        .select(await selectCols())
         .eq("tenant_id", tenantId)
         .eq("employee_id", employeeId)
         .maybeSingle()
@@ -179,6 +189,14 @@ salaryRouter.put(
       row.agreed_hours_per_week = parsed.data.agreedHoursPerWeek
     if (parsed.data.agreedDaysPerWeek !== undefined)
       row.agreed_days_per_week = parsed.data.agreedDaysPerWeek
+    if (parsed.data.pensionWage !== undefined || parsed.data.pensionNewSystem !== undefined) {
+      if (!(await columnsExist("salary_structures", SALARY_PENSION_COLS))) {
+        res.status(409).json({ error: "migration_required", message: "勞退月提繳工資／適用勞退新制欄位尚未套用（migration 0086）" })
+        return
+      }
+      if (parsed.data.pensionWage !== undefined) row.pension_wage = parsed.data.pensionWage
+      if (parsed.data.pensionNewSystem !== undefined) row.pension_new_system = parsed.data.pensionNewSystem
+    }
 
     // M12：沒帶投保薪資 → 以今日適用的級距表自動選（選不出來就維持原樣，不擋存檔）。
     let insuredSuggested: InsuredSuggestion | null = null

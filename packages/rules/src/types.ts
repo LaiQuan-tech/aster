@@ -195,8 +195,15 @@ export interface SalaryStructure {
   healthInsuredSalary?: number;
   /** 健保眷屬人數 (本人不計);健保自付額 = 費率 × 自付比例 × (1 + 眷屬數)。 */
   nhiDependents?: number;
-  /** 勞工自願提繳退休金比例 (0–0.06);以勞保投保薪資為基數。 */
+  /** 勞工自願提繳退休金比例 (0–0.06);以**勞退月提繳工資**為基數 (與雇主提撥同基數;2026-11-08 起,原為勞保投保薪資)。 */
   pensionVoluntaryRate?: number;
+  /**
+   * 勞退月提繳工資 (HR 申報值,整數元)。未提供 = 引擎自動算:(本薪 + 計入投保的固定津貼) 依勞退月提繳分級表向上取級距;
+   * 沒有本薪 (時薪／日薪制) 時以勞保投保薪資為基數 (見 payroll-engine resolvePensionWage)。
+   */
+  pensionWage?: number;
+  /** 是否適用勞退新制;預設 true。false (例:無永久居留的外籍員工) → 雇主提撥與勞工自提都為 0。 */
+  pensionNewSystem?: boolean;
   /** 本期預支金額 (扣項)。 */
   advance?: number;
 }
@@ -246,6 +253,8 @@ export interface PayslipFixedAllowanceLine {
 export interface PayrollExtras {
   /** 本期有效的固定津貼。預設無。 */
   fixedAllowances?: readonly FixedAllowanceInput[];
+  /** 計算月份 'YYYY-MM' (選勞退月提繳分級表的版本用);省略 = 規則裡最新的一組。 */
+  period?: string;
 }
 
 /** 薪資單逐項。amount 正為加項、負為扣項。 */
@@ -388,20 +397,24 @@ export interface PayslipBreakdown {
   fixedAllowancesTotal?: number;
   /** 固定津貼應稅部分合計,已計入 gross。 */
   fixedAllowancesTaxable?: number;
-  /** 固定津貼免稅部分合計 (伙食費 2,400 內),不進 gross、直接加在 net。 */
+  /** 固定津貼免稅部分合計 (伙食費免稅額內,預設 3,000),不進 gross、直接加在 net。 */
   fixedAllowancesTaxFree?: number;
   /** 標記「計入投保薪資」的固定津貼合計 (只供提示,不影響保費)。 */
   fixedAllowancesInsurable?: number;
   /**
-   * 雇主勞退提撥 (公司負擔,2026-11-08)。**不從員工實發扣除、不在 lines 裡**;只有月提繳工資 > 0 時才有這三個欄位。
+   * 雇主勞退提撥 (公司負擔,2026-11-08)。**不從員工實發扣除、不在 lines 裡**;只有適用勞退新制且月提繳工資 > 0 時才有。
    *   employerPension = round(pensionWage × employerPensionRate) (四捨五入到元)
-   * pensionWage 取員工的勞保投保薪資 (系統沒有獨立的勞退提繳工資欄位)。
+   * 勞工自提 pensionVoluntary 用同一個 pensionWage 當基數。
    */
   employerPension?: number;
   /** 本張薪資單採用的雇主提撥率 (比例,例 0.06)。 */
   employerPensionRate?: number;
-  /** 月提繳工資 (= 勞保投保薪資)。 */
+  /** 勞退月提繳工資 (HR 申報值,或依分級表自動算)。 */
   pensionWage?: number;
+  /** pensionWage 的來源:manual = 員工薪資資料有填;auto = 依分級表自動算。 */
+  pensionWageSource?: "manual" | "auto";
+  /** 只有「不適用勞退新制」時才有 (= false):雇主提撥與勞工自提都為 0。 */
+  pensionNewSystem?: false;
 }
 
 /** 加班費的一個分段 (例:平日前 2 小時 1.334 倍)。 */
