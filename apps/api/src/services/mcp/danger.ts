@@ -46,6 +46,7 @@ function hasBankKey(body: unknown): boolean {
  */
 export const HIGH_RISK_DELETE_PREFIXES = [
   "/payroll-adjustments", // 薪資加減項
+  "/fixed-allowances", // 員工固定津貼（2026-11-08）
   "/salary-adjustments", // 調薪
   "/salary",
   "/payroll",
@@ -150,6 +151,9 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   // M3（資安驗收 2026-11-02）補列：錢相關的建立／修改
   { method: "POST", path: "/payroll-adjustments", label: "新增薪資加減項" },
   { method: "PATCH", path: "/payroll-adjustments/:id", label: "修改薪資加減項" },
+  // 2026-11-08 員工固定津貼（每月自動帶入薪資單）：新增／修改中風險，刪除照 HIGH_RISK_DELETE_PREFIXES 最高風險。
+  { method: "POST", path: "/salary/:employeeId/fixed-allowances", label: "新增員工固定津貼" },
+  { method: "PATCH", path: "/fixed-allowances/:id", label: "修改員工固定津貼" },
   { method: "PATCH", path: "/festival-bonuses/:id", label: "修改三節獎金" },
   { method: "POST", path: "/bonus-runs", label: "建立獎金批次" },
   { method: "PATCH", path: "/bonus-runs/:id", label: "修改獎金批次" },

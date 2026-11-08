@@ -56,6 +56,7 @@ const SECTION_LABELS: Array<[string, string]> = [
   ["/my/", "我的資料"],
   ["/rule-config", "差勤／薪資規則"],
   ["/salary-adjustments", "薪資調整"],
+  ["/fixed-allowances", "員工固定津貼"],
   ["/salary", "薪資結構"],
   ["/calendar", "行事曆"],
   ["/payroll-periods", "發薪期間（鎖定）"],

@@ -64,6 +64,10 @@ export {
   resolveAnnualLeavePolicy,
   resolveInsuranceBrackets,
   bracketFor,
+  resolvePensionEmployerRate,
+  PENSION_EMPLOYER_RATE_MIN,
+  PENSION_EMPLOYER_RATE_MAX,
+  DEFAULT_PENSION_EMPLOYER_RATE,
   type RuleConfig,
   type OvertimeWhen,
   type OvertimeRounding,
@@ -100,7 +104,20 @@ export {
   type LunchWindow,
   type LunchShiftLike,
 } from "./lunch-window.js";
-export { adjustmentDisplayLabel, computePayslip, resolveAttendanceDeduction } from "./payroll-engine.js";
+export {
+  adjustmentDisplayLabel,
+  computePayslip,
+  employerPensionOf,
+  resolveAttendanceDeduction,
+  splitFixedAllowances,
+} from "./payroll-engine.js";
+export {
+  FIXED_ALLOWANCE_TAX_TYPES,
+  MEAL_ALLOWANCE_TAX_FREE_MONTHLY,
+  activeFixedAllowancesForPeriod,
+  insurableFixedAllowanceTotal,
+  type FixedAllowanceRowLike,
+} from "./fixed-allowances.js";
 export {
   lateAttendanceStatus,
   normalizeLateDecision,

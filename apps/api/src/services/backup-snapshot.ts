@@ -142,6 +142,7 @@ export const SNAPSHOT_TABLES: readonly SnapshotTableSpec[] = [
   { name: "salary_structures" },
   { name: "salary_adjustments" },
   { name: "payroll_adjustments" }, // 薪資補扣款（sql/0055）
+  { name: "employee_fixed_allowances" }, // 員工固定津貼（sql/0076；未套用的環境記 skipped）
   { name: "payslips" },
   { name: "non_employee_income" },
   { name: "expense_categories" },

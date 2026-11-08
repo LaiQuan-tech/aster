@@ -51,6 +51,12 @@ export interface PayslipBreakdownLike {
   lines?: Array<{ label: string; amount: number }>
   /** 一次性加減項（前期更正）；只有本期有加減項的薪資單才有。 */
   adjustments?: PayslipAdjustmentLike[]
+  /** 員工固定津貼（2026-11-08）；只有本期有有效津貼的薪資單才有。 */
+  fixedAllowances?: Array<{ name: string; amount: number; taxableAmount?: number; taxFreeAmount?: number }>
+  /** 雇主勞退提撥（公司負擔，不從實發扣除）；只有有投保薪資的薪資單才有。 */
+  employerPension?: number
+  employerPensionRate?: number
+  pensionWage?: number
 }
 
 /** PostgREST 的 numeric 欄位回字串；這裡一律接受 string | number | null。 */
@@ -136,6 +142,27 @@ function adjustmentRows(b: PayslipBreakdownLike, treatment: AdjustmentTreatment)
     })
 }
 
+/**
+ * 固定津貼資料列：應稅部分列在應發（伙食費超過 2,400 的部分標「(超過免稅額)」），免稅部分列在實發（標「(免稅)」）。
+ * 與引擎 lines 的標題一致；三處顯示（後台列印、員工、Email）規則一致。舊薪資單沒有這個欄位 → 不出列。
+ */
+function fixedAllowanceRows(b: PayslipBreakdownLike, part: "taxable" | "tax_free"): Row[] {
+  const rows: Row[] = []
+  for (const f of b.fixedAllowances ?? []) {
+    const taxFree = n(f.taxFreeAmount)
+    const taxable = f.taxableAmount !== undefined ? n(f.taxableAmount) : n(f.amount) - taxFree
+    if (part === "taxable" && taxable > 0) rows.push([taxFree > 0 ? `${f.name}(超過免稅額)` : f.name, money(taxable)])
+    if (part === "tax_free" && taxFree > 0) rows.push([`${f.name}(免稅)`, money(taxFree)])
+  }
+  return rows
+}
+
+/** 雇主提撥率的顯示（0.06 → "6%"、0.075 → "7.5%"）。 */
+export function pensionRateLabel(rate: number | undefined): string {
+  if (typeof rate !== "number" || !Number.isFinite(rate)) return "—"
+  return `${Math.round(rate * 10000) / 100}%`
+}
+
 function tableHtml(rows: Row[], sumIndex: number): string {
   const tds = rows.map(([label, value], i) => {
     const bold = i === sumIndex ? "font-weight:600;background:#f7f7f7;" : ""
@@ -155,6 +182,7 @@ function sections(p: PayslipLike, b: PayslipBreakdownLike): Array<{ title: strin
         ["夜間加給", money(n(p.night_pay))],
         ["全勤獎金", money(n(p.attendance_bonus))],
         ["定額補貼", money(n(b.allowances))],
+        ...fixedAllowanceRows(b, "taxable"),
         ...adjustmentRows(b, "earning"),
         ["應發合計", money(n(p.gross))],
       ],
@@ -177,9 +205,25 @@ function sections(p: PayslipLike, b: PayslipBreakdownLike): Array<{ title: strin
       rows: [
         ["代墊支出（不計薪資所得）", money(n(b.expenses))],
         ...adjustmentRows(b, "non_taxable"),
+        ...fixedAllowanceRows(b, "tax_free"),
         ["實發金額", money(netOf(p, b))],
       ],
     },
+    // 公司負擔（2026-11-08）：雇主勞退提撥，不從實發扣除。舊薪資單／沒有投保薪資的沒有這段。
+    ...(typeof b.employerPension === "number"
+      ? [
+          {
+            title: "公司負擔（不從實發扣除）",
+            rows: [
+              [
+                `雇主勞退提撥（月提繳工資 ${money(n(b.pensionWage))} × ${pensionRateLabel(b.employerPensionRate)}）`,
+                money(b.employerPension),
+              ] as Row,
+              ["公司負擔合計", money(b.employerPension)] as Row,
+            ],
+          },
+        ]
+      : []),
   ]
 }
 

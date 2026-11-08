@@ -57,6 +57,10 @@ export interface StatementMoney {
   netWithExpenses: number
   /** 逐段加班費（when × 倍率）；試算＝null。 */
   segments: OvertimeSegment[] | null
+  /** 員工固定津貼應稅部分（已含在 gross；2026-11-08）。舊資料沒有＝0。 */
+  fixedAllowancesTaxable?: number
+  /** 員工固定津貼免稅部分（伙食費 2,400 內；不在 gross、含在 netWithExpenses）。 */
+  fixedAllowancesTaxFree?: number
 }
 
 export interface StatementExpense {

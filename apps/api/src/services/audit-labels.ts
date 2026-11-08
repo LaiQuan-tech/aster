@@ -25,6 +25,7 @@ export const AUDIT_TABLE_LABELS: Record<string, string> = {
   salary_adjustments: "薪資調整",
   payslips: "薪資單",
   payroll_adjustments: "薪資加減項（前期更正）",
+  employee_fixed_allowances: "員工固定津貼",
   period_closes: "月結",
   rule_configs: "差勤／薪資規則",
   leave_requests: "申請單（假單／加班／補打卡／出差／預支）",
@@ -230,6 +231,10 @@ export const AUDIT_FIELD_LABELS: Record<string, string> = {
   // 薪資加減項（payroll_adjustments；2026-10-11）
   taxable: "課稅（併入薪資所得）",
   related_period: "更正月份",
+  // 員工固定津貼（employee_fixed_allowances；2026-11-08）
+  insurable: "計入投保薪資",
+  tax_type: "課稅方式",
+  effective_to: "生效迄日",
   created_by_emp_id: "建立者",
   created_at: "建立時間",
   updated_at: "更新時間",

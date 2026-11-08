@@ -80,10 +80,16 @@ export interface RuleConfigOvertimeExt extends RuleConfigOvertime {
  * `RuleConfig` 加上本次新增的鍵。可以直接餵給 `saveRuleConfig`（欄位是 schema 認得的
  * optional 鍵，後端 parseRuleConfig 會驗）。
  */
+/** 雇主勞退提撥（2026-11-08）：employerRate 以比例儲存（0.06＝6%），允許 0.06–1；省略＝6%。 */
+export interface RuleConfigPension {
+  employerRate?: number;
+}
+
 export interface RuleConfigExt extends Omit<RuleConfig, "overtime" | "insurance"> {
   overtime: RuleConfigOvertimeExt;
   insurance?: RuleConfigInsurance;
   leave?: RuleConfigLeave;
+  pension?: RuleConfigPension;
 }
 
 /** 把 admin-api 的 `RuleConfig` 當成擴充型別看（執行期同一個物件，只是型別收窄）。 */

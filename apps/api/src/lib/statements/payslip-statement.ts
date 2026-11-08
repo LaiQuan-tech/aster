@@ -257,6 +257,7 @@ export function earningRows(money: StatementMoney | null): { wages: AmountRow[];
     const bonusBase = Math.round((money.attendanceBonus + money.attendanceDeduction) * 100) / 100
     if (bonusBase) welfare.push({ label: "全勤獎金", amount: bonusBase })
     if (money.allowances) welfare.push({ label: "定額補貼", amount: money.allowances })
+    if (money.fixedAllowancesTaxable) welfare.push({ label: "固定津貼", amount: money.fixedAllowancesTaxable })
     if (money.adjustmentEarnings) welfare.push({ label: "前期更正補發", amount: money.adjustmentEarnings })
   }
   return { wages, welfare }
@@ -442,8 +443,10 @@ export function buildPayslipStatementGrid(data: StatementData): StatementGrid {
   // 支出、薪資+支出（原檔 X27、X31；X31 沒有標籤，這裡補上「薪資+支出」）
   // 實發（含支出）＝實發＋代墊支出＋不課稅補發；不課稅補發另列「補發」，不混在「支出」裡。
   const nonTaxable = money?.adjustmentNonTaxable ?? 0
+  // 固定津貼的免稅部分（伙食費 2,400 內）另列「免稅津貼」，不混在「支出」裡（2026-11-08）。
+  const taxFreeAllowance = money?.fixedAllowancesTaxFree ?? 0
   const expenseShown = money
-    ? Math.round((money.netWithExpenses - netPay(money) - nonTaxable) * 100) / 100
+    ? Math.round((money.netWithExpenses - netPay(money) - nonTaxable - taxFreeAllowance) * 100) / 100
     : null
   let rr = H + 1
   g.set(rr, 8, { value: "支出", bold: true, align: "right" })
@@ -452,6 +455,11 @@ export function buildPayslipStatementGrid(data: StatementData): StatementGrid {
   if (nonTaxable) {
     g.set(rr, 8, { value: "補發", bold: true, align: "right" })
     g.set(rr, 9, amt(nonTaxable, "acct"))
+    rr += 1
+  }
+  if (taxFreeAllowance) {
+    g.set(rr, 8, { value: "免稅津貼", bold: true, align: "right" })
+    g.set(rr, 9, amt(taxFreeAllowance, "acct"))
     rr += 1
   }
   g.set(rr, 8, { value: "薪資+支出", bold: true, align: "right" })

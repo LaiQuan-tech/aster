@@ -1,0 +1,224 @@
+{
+  "月薪、加班、夜間、遲到、請假、自提、眷屬、代墊、定額補貼、加減項": {
+    "base": 41234,
+    "regularPay": 41234,
+    "hourlyWage": 171.8083,
+    "overtimePay": 2068.57,
+    "nightPay": 17.18,
+    "attendanceBonus": 700,
+    "attendanceDeduction": 300,
+    "allowances": 1800,
+    "compTimeMinutes": 0,
+    "gross": 46596.75,
+    "overtimeSegments": [
+      {
+        "when": "weekday_ot",
+        "multiplier": 1.34,
+        "hours": 2,
+        "amount": 460.45
+      },
+      {
+        "when": "weekday_ot",
+        "multiplier": 1.67,
+        "hours": 1,
+        "amount": 286.92
+      },
+      {
+        "when": "rest_day",
+        "multiplier": 1.34,
+        "hours": 2,
+        "amount": 460.45
+      },
+      {
+        "when": "rest_day",
+        "multiplier": 1.67,
+        "hours": 3,
+        "amount": 860.76
+      }
+    ],
+    "laborInsurance": 1050,
+    "healthInsurance": 1954,
+    "pensionVoluntary": 1260,
+    "advance": 500,
+    "leaveDeduction": 687.23,
+    "lateEarlyDeduction": 48.68,
+    "totalDeductions": 5820.91,
+    "expenses": 1234.5,
+    "net": 42010.34,
+    "lines": [
+      {
+        "label": "本俸(月薪)",
+        "amount": 41234
+      },
+      {
+        "label": "加班費",
+        "amount": 2068.57
+      },
+      {
+        "label": "夜間加給",
+        "amount": 17.18
+      },
+      {
+        "label": "全勤獎金(基準)",
+        "amount": 1000
+      },
+      {
+        "label": "全勤遲到扣款",
+        "amount": -300
+      },
+      {
+        "label": "定額補貼",
+        "amount": 1800
+      },
+      {
+        "label": "補發加班費(更正 2030-02)",
+        "amount": 777
+      },
+      {
+        "label": "勞保費",
+        "amount": -1050
+      },
+      {
+        "label": "健保費",
+        "amount": -1954
+      },
+      {
+        "label": "勞工自願提繳退休金",
+        "amount": -1260
+      },
+      {
+        "label": "預支",
+        "amount": -500
+      },
+      {
+        "label": "請假扣款(personal)",
+        "amount": -687.23
+      },
+      {
+        "label": "遲到早退扣款",
+        "amount": -48.68
+      },
+      {
+        "label": "扣回溢付",
+        "amount": -321
+      },
+      {
+        "label": "支出(代墊)",
+        "amount": 1234.5
+      }
+    ],
+    "adjustmentEarnings": 777,
+    "adjustmentDeductions": 321,
+    "adjustmentDeductionsTaxable": 0,
+    "adjustmentNonTaxable": 0,
+    "adjustments": [
+      {
+        "id": "adj-1",
+        "label": "補發加班費",
+        "amount": 777,
+        "taxable": true,
+        "relatedPeriod": "2030-02",
+        "treatment": "earning"
+      },
+      {
+        "id": "adj-2",
+        "label": "扣回溢付",
+        "amount": -321,
+        "taxable": false,
+        "relatedPeriod": null,
+        "treatment": "deduction"
+      }
+    ]
+  },
+  "時薪制、無保險": {
+    "base": 2548,
+    "regularPay": 2548,
+    "hourlyWage": 196,
+    "overtimePay": 525.28,
+    "nightPay": 0,
+    "attendanceBonus": 1000,
+    "attendanceDeduction": 0,
+    "allowances": 0,
+    "compTimeMinutes": 0,
+    "gross": 4073.28,
+    "overtimeSegments": [
+      {
+        "when": "weekday_ot",
+        "multiplier": 1.34,
+        "hours": 2,
+        "amount": 525.28
+      }
+    ],
+    "laborInsurance": 0,
+    "healthInsurance": 0,
+    "pensionVoluntary": 0,
+    "advance": 0,
+    "leaveDeduction": 0,
+    "lateEarlyDeduction": 0,
+    "totalDeductions": 0,
+    "expenses": 0,
+    "net": 4073.28,
+    "lines": [
+      {
+        "label": "本俸(時薪)",
+        "amount": 2548
+      },
+      {
+        "label": "加班費",
+        "amount": 525.28
+      },
+      {
+        "label": "全勤獎金(基準)",
+        "amount": 1000
+      }
+    ]
+  },
+  "出勤天數制、投保最高級距": {
+    "base": 4800,
+    "regularPay": 4800,
+    "hourlyWage": 200,
+    "overtimePay": 0,
+    "nightPay": 0,
+    "attendanceBonus": 0,
+    "attendanceDeduction": 1000,
+    "allowances": 0,
+    "compTimeMinutes": 0,
+    "gross": 4800,
+    "overtimeSegments": [],
+    "laborInsurance": 1145,
+    "healthInsurance": 785,
+    "pensionVoluntary": 0,
+    "advance": 0,
+    "leaveDeduction": 0,
+    "lateEarlyDeduction": 150,
+    "totalDeductions": 2080,
+    "expenses": 0,
+    "net": 2720,
+    "lines": [
+      {
+        "label": "本俸(出勤天數)",
+        "amount": 4800
+      },
+      {
+        "label": "全勤獎金(基準)",
+        "amount": 1000
+      },
+      {
+        "label": "全勤遲到扣款",
+        "amount": -1000
+      },
+      {
+        "label": "勞保費",
+        "amount": -1145
+      },
+      {
+        "label": "健保費",
+        "amount": -785
+      },
+      {
+        "label": "遲到早退扣款",
+        "amount": -150
+      }
+    ]
+  }
+}

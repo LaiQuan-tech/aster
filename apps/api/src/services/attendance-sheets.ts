@@ -1878,7 +1878,8 @@ function toMoney(breakdown: ReturnType<typeof computePayslip>, rules: RuleConfig
     otPayByTier: otPayByTierFromSegments(breakdown.overtimeSegments, rules),
     nightPay: breakdown.nightPay,
     attendanceBonus: breakdown.attendanceBonus,
-    allowances: breakdown.allowances,
+    // 補貼欄 = 定額補貼 ＋ 固定津貼的應稅部分（兩者都已在 gross 裡，月表「應發」才對得上）。
+    allowances: round2(breakdown.allowances + (breakdown.fixedAllowancesTaxable ?? 0)),
     leaveDeduction: breakdown.leaveDeduction,
     lateEarlyDeduction: breakdown.lateEarlyDeduction,
     laborInsurance: breakdown.laborInsurance,
@@ -1889,7 +1890,8 @@ function toMoney(breakdown: ReturnType<typeof computePayslip>, rules: RuleConfig
     totalDeductions: breakdown.totalDeductions,
     expenses: breakdown.expenses,
     // Excel 的「實發」不含代墊支出；引擎的 net 已加上 expenses，故拆回兩欄。
-    net: round2(breakdown.gross - breakdown.totalDeductions),
+    // 固定津貼的免稅部分（伙食費 2,400 內）不在 gross 裡、但員工有領到 → 加回實發。沒有固定津貼時與以前完全相同。
+    net: round2(breakdown.gross - breakdown.totalDeductions + (breakdown.fixedAllowancesTaxFree ?? 0)),
     netPlusExpenses: breakdown.net,
   }
 }
@@ -2064,7 +2066,9 @@ async function composeLiveView(
       // 個人開關「不計夜間加給」：與薪資執行同一個入口（employee-features.applyNightPolicy）。
       const policy = applyNightPolicy(inputs.features, payrollDays, inputs.rules)
       money = toMoney(
-        computePayslip(policy.days, inputs.salary, policy.rules, inputs.expenses, inputs.allowances, inputs.adjustments),
+        computePayslip(policy.days, inputs.salary, policy.rules, inputs.expenses, inputs.allowances, inputs.adjustments, {
+          fixedAllowances: inputs.fixedAllowances ?? [],
+        }),
         inputs.rules,
       )
     } catch (err) {

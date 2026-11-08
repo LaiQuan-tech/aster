@@ -21,6 +21,7 @@ import { buildNhiDependentBody, buildTaxDependentBody, dependentErrorMessage } f
 import { loadPayrollEmployees } from "@/lib/payroll-employees";
 import { errorMessageOf } from "@/lib/period-closed";
 import { PayrollAdjustmentsCard } from "./_components/PayrollAdjustmentsCard";
+import { FixedAllowancesCard } from "./_components/FixedAllowancesCard";
 import { PeriodLockCard } from "./_components/PeriodLockCard";
 import { payrollGateText } from "@/lib/payroll-gate";
 
@@ -268,11 +269,20 @@ export default function PayrollAdminPage() {
       const lateWarnings = (result.warnings ?? []).map((w) => `${empName(w.employeeId)} ${w.message}`);
       // 併進薪資單的一次性加減項（前期更正）筆數，讓 HR 核對（API 回 adjustmentCount；舊版 API 沒有就不顯示）。
       const adjustmentCount = (result as { adjustmentCount?: number }).adjustmentCount ?? 0;
+      // 固定津貼「計入投保」後，底薪＋津貼高於勞保投保級距的人（系統不自動改級距，只提醒）。
+      const insuredReview =
+        (result as { insuredSalaryReview?: Array<{ employeeId: string; total: number; laborInsuredSalary: number | null }> })
+          .insuredSalaryReview ?? [];
       setRunMsg({
         ok: true,
         text:
           `已執行 ${runPeriod} 薪資作業：產生 ${result.generated} 筆，略過已定案 ${result.skipped.length} 筆` +
           (adjustmentCount > 0 ? `；含加減項（前期更正）${adjustmentCount} 筆` : "") +
+          (insuredReview.length > 0
+            ? `；請確認投保級距（底薪＋計入投保的固定津貼高於勞保級距）：${insuredReview
+                .map((r) => `${empName(r.employeeId)} ${r.total.toLocaleString("zh-TW")}／級距 ${r.laborInsuredSalary == null ? "未設定" : r.laborInsuredSalary.toLocaleString("zh-TW")}`)
+                .join("、")}`
+            : "") +
           (lateWarnings.length > 0 ? `；提醒：${lateWarnings.join("；")}` : ""),
       });
       setAdjustmentsRefresh((n) => n + 1);
@@ -395,6 +405,9 @@ export default function PayrollAdminPage() {
                 <p className="rounded-md bg-sky-50 px-3 py-2 text-xs text-sky-800">{insuredHint}</p>
               )}
             </form>
+
+            {/* 2026-11-08 員工固定津貼：每月執行薪資時自動帶入；合計提示用上方表單目前的本薪與勞保級距。 */}
+            <FixedAllowancesCard employeeId={empId} baseSalary={baseSalary} laborGrade={laborGrade} />
 
             <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2">
               <div>

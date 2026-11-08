@@ -201,6 +201,53 @@ export interface SalaryStructure {
   advance?: number;
 }
 
+/**
+ * 固定津貼的課稅方式 (2026-11-08):
+ *   • taxable      應稅:全額併入應發 gross (扣繳基礎)
+ *   • meal_exempt  伙食費:同一張薪資單所有伙食費**合計**每月 MEAL_ALLOWANCE_TAX_FREE_MONTHLY (2,400) 元以內免稅,
+ *                  超過部分應稅 (所得稅法施行細則/財政部函釋的伙食費免稅額)
+ */
+export type FixedAllowanceTaxType = "taxable" | "meal_exempt";
+
+/**
+ * 員工固定津貼的引擎輸入 (當月有效的那幾筆;生效期間由呼叫端以 activeFixedAllowancesForPeriod 篩好)。
+ * 資料來源是 employee_fixed_allowances 表 (HR 在「員工薪資保險資料」逐人維護)。
+ */
+export interface FixedAllowanceInput {
+  /** 資料庫列 id;帶了就記進薪資單明細。 */
+  id?: string;
+  /** 給員工看的名稱,例「職務加給」「伙食津貼」。 */
+  name: string;
+  /** 月金額 (整數元,>= 0);0 的略過。 */
+  amount: number;
+  /**
+   * 是否計入投保薪資 (勞健保／勞退提繳工資的經常性給與)。**引擎不會因此改保費**——投保薪資是 HR 另行申報的
+   * 級距 (salary_structures.labor_insured_salary),這個旗標只用來在介面／薪資執行回應提示「底薪 + 計入投保津貼」合計。
+   */
+  insurable: boolean;
+  taxType: FixedAllowanceTaxType;
+}
+
+/** 薪資單上的一筆固定津貼 (引擎輸出,存進 payslips.breakdown.fixedAllowances)。 */
+export interface PayslipFixedAllowanceLine {
+  id?: string;
+  name: string;
+  /** 月金額 (整數元) = taxableAmount + taxFreeAmount。 */
+  amount: number;
+  insurable: boolean;
+  taxType: FixedAllowanceTaxType;
+  /** 應稅部分 (已計入 gross)。 */
+  taxableAmount: number;
+  /** 免稅部分 (只有伙食費會有;不進 gross,直接加在 net)。 */
+  taxFreeAmount: number;
+}
+
+/** computePayslip 的第 7 個參數 (選填的擴充輸入)。 */
+export interface PayrollExtras {
+  /** 本期有效的固定津貼。預設無。 */
+  fixedAllowances?: readonly FixedAllowanceInput[];
+}
+
 /** 薪資單逐項。amount 正為加項、負為扣項。 */
 export interface PayslipLine {
   label: string;
@@ -328,6 +375,33 @@ export interface PayslipBreakdown {
   adjustmentNonTaxable?: number;
   /** 每一筆加減項(依輸入順序)。 */
   adjustments?: PayslipAdjustmentLine[];
+  /**
+   * 固定津貼 (2026-11-08)。**只有本期有有效的固定津貼時才有這五個欄位** (舊薪資單、沒有津貼的員工都沒有)。
+   * 對帳:
+   *   gross = … + fixedAllowancesTaxable
+   *   net   = gross − totalDeductions + expenses + adjustmentNonTaxable + fixedAllowancesTaxFree
+   * 應稅部分併入 gross (扣繳基礎,與課稅補發同一個處理);伙食費免稅額內的部分不進 gross、直接加在實發。
+   * 保費不受影響 (以投保薪資為基數);計入投保的合計見 fixedAllowancesInsurable,供 HR 核對投保級距。
+   */
+  fixedAllowances?: PayslipFixedAllowanceLine[];
+  /** 固定津貼合計 (= 應稅 + 免稅)。 */
+  fixedAllowancesTotal?: number;
+  /** 固定津貼應稅部分合計,已計入 gross。 */
+  fixedAllowancesTaxable?: number;
+  /** 固定津貼免稅部分合計 (伙食費 2,400 內),不進 gross、直接加在 net。 */
+  fixedAllowancesTaxFree?: number;
+  /** 標記「計入投保薪資」的固定津貼合計 (只供提示,不影響保費)。 */
+  fixedAllowancesInsurable?: number;
+  /**
+   * 雇主勞退提撥 (公司負擔,2026-11-08)。**不從員工實發扣除、不在 lines 裡**;只有月提繳工資 > 0 時才有這三個欄位。
+   *   employerPension = round(pensionWage × employerPensionRate) (四捨五入到元)
+   * pensionWage 取員工的勞保投保薪資 (系統沒有獨立的勞退提繳工資欄位)。
+   */
+  employerPension?: number;
+  /** 本張薪資單採用的雇主提撥率 (比例,例 0.06)。 */
+  employerPensionRate?: number;
+  /** 月提繳工資 (= 勞保投保薪資)。 */
+  pensionWage?: number;
 }
 
 /** 加班費的一個分段 (例:平日前 2 小時 1.334 倍)。 */

@@ -297,6 +297,8 @@ reportsRouter.get(
         // 一次性加減項（前期更正；沒有加減項的薪資單這三欄是 0）：課稅補發已含在應發合計、扣回已含在應扣合計、
         // 不課稅補發只加在實發——列出來工資清冊的欄位才對得起來。
         adjustmentEarnings: bdNum(s.breakdown, "adjustmentEarnings"),
+        // 員工固定津貼（2026-11-08；沒有津貼／舊薪資單是 0）：應稅部分已含在應發合計；伙食費 2,400 內免稅只加在實發。
+        fixedAllowancesTaxable: bdNum(s.breakdown, "fixedAllowancesTaxable"),
         gross: Number(s.gross),
         laborInsurance: bdNum(s.breakdown, "laborInsurance"),
         healthInsurance: bdNum(s.breakdown, "healthInsurance"),
@@ -310,7 +312,12 @@ reportsRouter.get(
         totalDeductions: bdNum(s.breakdown, "totalDeductions"),
         expenses: bdNum(s.breakdown, "expenses"),
         adjustmentNonTaxable: bdNum(s.breakdown, "adjustmentNonTaxable"),
+        fixedAllowancesTaxFree: bdNum(s.breakdown, "fixedAllowancesTaxFree"),
         net: s.breakdown && typeof s.breakdown.net === "number" ? (s.breakdown.net as number) : Number(s.gross),
+        // 公司負擔（2026-11-08）：雇主勞退提撥，不從實發扣；舊薪資單沒有這個欄位 → 0（不回溯補算）。
+        employerPension: bdNum(s.breakdown, "employerPension"),
+        // 人事成本合計 = 應發合計 ＋ 固定津貼免稅部分 ＋ 雇主勞退提撥（雇主勞健保負擔系統未計算，不含）。
+        laborCost: Math.round((Number(s.gross) + bdNum(s.breakdown, "fixedAllowancesTaxFree") + bdNum(s.breakdown, "employerPension")) * 100) / 100,
         status: s.status,
       }))
       rows.sort((x, y) => x.employeeName.localeCompare(y.employeeName))
@@ -322,6 +329,8 @@ reportsRouter.get(
         totalDeductions: sum("totalDeductions"),
         expenses: sum("expenses"),
         net: sum("net"),
+        employerPension: sum("employerPension"),
+        laborCost: sum("laborCost"),
       }
 
       // CSV gets the per-employee rows plus an appended total row.
@@ -336,6 +345,7 @@ reportsRouter.get(
           attendanceBonus: sum("attendanceBonus"),
           allowances: sum("allowances"),
           adjustmentEarnings: sum("adjustmentEarnings"),
+          fixedAllowancesTaxable: sum("fixedAllowancesTaxable"),
           gross: total.gross,
           laborInsurance: sum("laborInsurance"),
           healthInsurance: sum("healthInsurance"),
@@ -347,7 +357,10 @@ reportsRouter.get(
           totalDeductions: total.totalDeductions,
           expenses: total.expenses,
           adjustmentNonTaxable: sum("adjustmentNonTaxable"),
+          fixedAllowancesTaxFree: sum("fixedAllowancesTaxFree"),
           net: total.net,
+          employerPension: total.employerPension,
+          laborCost: total.laborCost,
           status: "",
         },
       ]
@@ -363,6 +376,7 @@ reportsRouter.get(
           { key: "attendanceBonus", label: "全勤獎金" },
           { key: "allowances", label: "定額補貼" },
           { key: "adjustmentEarnings", label: "加減項補發(前期更正)" },
+          { key: "fixedAllowancesTaxable", label: "固定津貼(應稅)" },
           { key: "gross", label: "應發合計" },
           { key: "laborInsurance", label: "勞保自付" },
           { key: "healthInsurance", label: "健保自付" },
@@ -373,7 +387,10 @@ reportsRouter.get(
           { key: "totalDeductions", label: "應扣合計" },
           { key: "expenses", label: "代墊支出" },
           { key: "adjustmentNonTaxable", label: "加減項不課稅補發(前期更正)" },
+          { key: "fixedAllowancesTaxFree", label: "固定津貼(伙食費免稅)" },
           { key: "net", label: "實發金額" },
+          { key: "employerPension", label: "雇主勞退提撥(公司負擔)" },
+          { key: "laborCost", label: "人事成本合計(應發+免稅津貼+雇主勞退)" },
           { key: "status", label: "狀態" },
         ],
         rows: csvRows,

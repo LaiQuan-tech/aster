@@ -2,7 +2,13 @@ import { actorRoleOf } from "../lib/actor-status.js"
 import { Router, type Request, type Response, type NextFunction } from "express"
 import { applyNightPolicy } from "../services/employee-features.js"
 import { z } from "zod"
-import { computePayslip, resolvePayrollGates, undecidedLateWarning, type AttendanceDay } from "@hr/rules"
+import {
+  computePayslip,
+  insurableFixedAllowanceTotal,
+  resolvePayrollGates,
+  undecidedLateWarning,
+  type AttendanceDay,
+} from "@hr/rules"
 import { requireAuth } from "../middleware/auth.js"
 import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
@@ -355,6 +361,8 @@ payrollRouter.post(
             allowancesByEmployee.get(sal.employee_id) ?? 0,
             // 一次性加減項（前期更正）：課稅補發進 gross、扣回進應扣、不課稅補發只加實發（引擎檔頭）。
             adjustmentsByEmployee.get(sal.employee_id) ?? [],
+            // 員工固定津貼（2026-11-08）：當月有效的自動帶入；應稅進 gross、伙食費 2,400 內免稅只加實發（引擎檔頭）。
+            { fixedAllowances: inputs.fixedAllowancesByEmployee?.get(sal.employee_id) ?? [] },
           )
         } catch (err) {
           // The engine refuses to guess a wage (no hourly_wage AND no base
@@ -406,12 +414,35 @@ payrollRouter.post(
         .filter(([, amount]) => amount > 0)
         .map(([employeeId, amount]) => ({ employeeId, allowanceTotal: amount }))
 
+      // 固定津貼「計入投保」的人：底薪 ＋ 計入投保的固定津貼 > 目前勞保投保薪資 → 列出來供 HR 核對級距。
+      // 投保薪資是 HR 申報的級距（salary_structures.labor_insured_salary），系統**不會**自動改，只提示。
+      const insuredSalaryReview: Array<{
+        employeeId: string
+        baseSalary: number
+        insurableAllowances: number
+        total: number
+        laborInsuredSalary: number | null
+      }> = []
+      for (const row of rows) {
+        const id = row.employee_id as string
+        const insurable = insurableFixedAllowanceTotal(inputs.fixedAllowancesByEmployee?.get(id) ?? [])
+        if (insurable <= 0) continue
+        const sal = inputs.salaryByEmployee.get(id)
+        const baseSalary = Math.round(Number(sal?.base_salary ?? 0)) || 0
+        const labor = sal?.labor_insured_salary != null ? Number(sal.labor_insured_salary) : null
+        const total = baseSalary + insurable
+        if (labor === null || total > labor) {
+          insuredSalaryReview.push({ employeeId: id, baseSalary, insurableAllowances: insurable, total, laborInsuredSalary: labor })
+        }
+      }
+
       res.status(201).json({
         generated: rows.length,
         skipped,
         skippedDetails,
         missingInsuredSalary,
         allowanceReview,
+        insuredSalaryReview,
         adjustmentCount,
         unapprovedSheets,
         // 只提醒這次有產生薪資單的人（已定案／略過的不列）。

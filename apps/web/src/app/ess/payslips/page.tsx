@@ -6,9 +6,10 @@ import { getMyPayslips, type MyPayslip } from "@/lib/ess-api";
 import type { PayslipSendFields } from "@/lib/cash-payouts-api";
 import { adjustmentDisplayOf, signedMoney, TREATMENT_LABEL } from "@/lib/payroll-adjustments-api";
 import { MyPayslipStatementCard } from "./MyPayslipStatementCard";
+import { fixedAllowanceDisplayOf, pensionRatePct, type BreakdownAllowanceFields } from "@/lib/fixed-allowances-api";
 
 /** 薪資單 breakdown 上員工端用得到的欄位（API 的 GET /payslips?scope=mine 本來就帶 breakdown；舊資料可能是 {}）。 */
-interface MyBreakdown {
+interface MyBreakdown extends BreakdownAllowanceFields {
   totalDeductions?: number;
   expenses?: number;
   net?: number;
@@ -31,7 +32,8 @@ function PayslipDetail({ p }: { p: MyPayslipRow }) {
   const b = p.breakdown ?? null;
   const adjustments = adjustmentDisplayOf(b);
   const lines = b?.lines ?? [];
-  if (!b || (lines.length === 0 && adjustments.all.length === 0)) {
+  const fixed = fixedAllowanceDisplayOf(b);
+  if (!b || (lines.length === 0 && adjustments.all.length === 0 && fixed.length === 0)) {
     return <p className="text-sm text-gray-400">這張薪資單沒有逐項明細。</p>;
   }
   return (
@@ -45,6 +47,20 @@ function PayslipDetail({ p }: { p: MyPayslipRow }) {
                 <span className="text-gray-800">{a.label}</span>
                 <span className="text-xs text-gray-400">{TREATMENT_LABEL[a.treatment]}</span>
                 <span className={`tabular-nums ${a.signed < 0 ? "text-rose-700" : "text-emerald-700"}`}>{signedMoney(a.signed)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {fixed.length > 0 && (
+        <div data-testid="my-payslip-fixed-allowances">
+          <p className="mb-1 text-xs font-semibold text-gray-500">固定津貼</p>
+          <ul className="divide-y divide-gray-100">
+            {fixed.map((f) => (
+              <li key={f.key} className="flex flex-wrap items-baseline justify-between gap-x-3 py-1">
+                <span className="text-gray-800">{f.name}</span>
+                <span className="text-xs text-gray-400">{f.taxNote}</span>
+                <span className="tabular-nums text-emerald-700">{fmt(f.amount)}</span>
               </li>
             ))}
           </ul>
@@ -64,6 +80,17 @@ function PayslipDetail({ p }: { p: MyPayslipRow }) {
         <dt className="font-medium text-gray-700">實發金額</dt>
         <dd className="text-right font-medium tabular-nums">{fmt(typeof b.net === "number" ? b.net : Number(p.gross))}</dd>
       </dl>
+      {typeof b.employerPension === "number" && (
+        <div data-testid="my-payslip-employer">
+          <p className="mb-1 text-xs font-semibold text-gray-500">公司負擔（不從實發扣除）</p>
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="text-gray-700">
+              雇主勞退提撥（月提繳工資 {fmt(Number(b.pensionWage ?? 0))} × {pensionRatePct(b.employerPensionRate)}）
+            </span>
+            <span className="tabular-nums">{fmt(b.employerPension)}</span>
+          </div>
+        </div>
+      )}
       {lines.length > 0 && (
         <div>
           <p className="mb-1 text-xs font-semibold text-gray-500">逐項明細</p>

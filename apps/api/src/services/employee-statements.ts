@@ -98,6 +98,8 @@ export function moneyFromBreakdown(breakdown: Record<string, unknown>, status: s
     expenses: num(breakdown.expenses),
     netWithExpenses: num(breakdown.net),
     segments,
+    fixedAllowancesTaxable: num(breakdown.fixedAllowancesTaxable),
+    fixedAllowancesTaxFree: num(breakdown.fixedAllowancesTaxFree),
   }
 }
 

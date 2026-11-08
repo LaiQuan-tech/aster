@@ -17,6 +17,12 @@ import {
   type PayslipSendFields,
 } from "@/lib/cash-payouts-api";
 import { adjustmentDisplayOf, adjustmentPrintRows, signedMoney, TREATMENT_LABEL } from "@/lib/payroll-adjustments-api";
+import {
+  fixedAllowanceDisplayOf,
+  laborCostOf,
+  pensionRatePct,
+  type BreakdownAllowanceFields,
+} from "@/lib/fixed-allowances-api";
 
 /** M3：`sent_at`／`sent_to` 在 migration 0050 之後才有（lib/admin-api.ts 是 WP0 的檔，不改）。 */
 type PayslipRow = Payslip & PayslipSendFields;
@@ -63,8 +69,10 @@ function n(v: string | number | undefined | null): number {
 function money(v: number): string {
   return v.toLocaleString("zh-TW");
 }
-function bd(p: Payslip): PayslipBreakdown {
-  return p.breakdown ?? {};
+/** breakdown ＋ 2026-11-08 固定津貼／公司負擔欄位（舊薪資單沒有，一律以 0／不顯示呈現）。 */
+type Breakdown = PayslipBreakdown & BreakdownAllowanceFields;
+function bd(p: Payslip): Breakdown {
+  return (p.breakdown ?? {}) as Breakdown;
 }
 /** 實發：有 breakdown 用引擎算的；沒有就等於應發（舊資料沒扣項）。 */
 function netOf(p: Payslip): number {
@@ -115,9 +123,11 @@ export default function PayslipsPage() {
   );
 
   const totals = useMemo(() => {
-    const t = { gross: 0, deductions: 0, expenses: 0, net: 0, draft: 0, finalized: 0, sent: 0 };
+    const t = { gross: 0, deductions: 0, expenses: 0, net: 0, employerPension: 0, laborCost: 0, draft: 0, finalized: 0, sent: 0 };
     for (const p of payslips) {
       t.gross += n(p.gross);
+      t.employerPension += n(bd(p).employerPension);
+      t.laborCost += laborCostOf(n(p.gross), bd(p));
       t.deductions += n(bd(p).totalDeductions);
       t.expenses += n(bd(p).expenses);
       t.net += netOf(p);
@@ -220,6 +230,21 @@ export default function PayslipsPage() {
     const lines = (b.lines ?? []).map(
       (l) => `<tr><td>${esc(l.label)}</td><td style="text-align:right">${money(l.amount)}</td></tr>`,
     );
+    const fixed = fixedAllowanceDisplayOf(b);
+    const fixedTaxableRows = fixed
+      .filter((f) => f.taxableAmount > 0)
+      .map((f) => `<tr><td>${esc(f.taxFreeAmount > 0 ? `${f.name}(超過免稅額)` : f.name)}</td><td style="text-align:right">${money(f.taxableAmount)}</td></tr>`)
+      .join("");
+    const fixedTaxFreeRows = fixed
+      .filter((f) => f.taxFreeAmount > 0)
+      .map((f) => `<tr><td>${esc(f.name)}(免稅)</td><td style="text-align:right">${money(f.taxFreeAmount)}</td></tr>`)
+      .join("");
+    const employerSection =
+      typeof b.employerPension === "number"
+        ? `<h2>公司負擔（不從實發扣除）</h2><table>
+<tr><td>雇主勞退提撥（月提繳工資 ${money(n(b.pensionWage))} × ${pensionRatePct(b.employerPensionRate)}）</td><td style="text-align:right">${money(b.employerPension)}</td></tr>
+<tr class="sum"><td>公司負擔合計</td><td style="text-align:right">${money(b.employerPension)}</td></tr></table>`
+        : "";
     const ot = (b.overtimeSegments ?? []).map(
       (s) =>
         `<tr><td>${esc(OT_LABEL[s.when] ?? s.when)} × ${s.multiplier}</td><td style="text-align:right">${s.hours} 小時</td><td style="text-align:right">${money(s.amount)}</td></tr>`,
@@ -237,6 +262,7 @@ table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6p
 <tr><td>夜間加給</td><td style="text-align:right">${money(n(p.night_pay))}</td></tr>
 <tr><td>全勤獎金</td><td style="text-align:right">${money(n(p.attendance_bonus))}</td></tr>
 <tr><td>定額補貼</td><td style="text-align:right">${money(n(b.allowances))}</td></tr>
+${fixedTaxableRows}
 ${adjustmentPrintRows(b, "earning", { money, esc })}
 <tr class="sum"><td>應發合計</td><td style="text-align:right">${money(n(p.gross))}</td></tr></table>
 <h2>應扣</h2><table>
@@ -251,7 +277,9 @@ ${adjustmentPrintRows(b, "deduction", { money, esc })}
 <h2>實發</h2><table>
 <tr><td>代墊支出（不計薪資所得）</td><td style="text-align:right">${money(n(b.expenses))}</td></tr>
 ${adjustmentPrintRows(b, "non_taxable", { money, esc })}
+${fixedTaxFreeRows}
 <tr class="sum"><td>實發金額</td><td style="text-align:right">${money(netOf(p))}</td></tr></table>
+${employerSection}
 ${ot.length ? `<h2>加班費分段</h2><table>${ot.join("")}</table>` : ""}
 ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
 <script>window.print()</script></body></html>`);
@@ -299,7 +327,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
           </Link>
         </div>
 
-        <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+        <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-6">
           <div className="rounded-xl bg-slate-50 p-4">
             <p className="text-xs text-slate-500">應發合計</p>
             <p className="mt-1 text-xl font-semibold text-slate-900">{money(totals.gross)}</p>
@@ -311,6 +339,14 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
           <div className="rounded-xl bg-emerald-50 p-4">
             <p className="text-xs text-emerald-600">實發合計</p>
             <p className="mt-1 text-xl font-semibold text-emerald-700">{money(totals.net)}</p>
+          </div>
+          <div className="rounded-xl bg-violet-50 p-4" title="公司負擔，不從員工實發扣除">
+            <p className="text-xs text-violet-700">雇主勞退提撥合計</p>
+            <p className="mt-1 text-xl font-semibold text-violet-800">{money(totals.employerPension)}</p>
+          </div>
+          <div className="rounded-xl bg-slate-100 p-4" title="應發合計 ＋ 固定津貼免稅部分 ＋ 雇主勞退提撥（雇主勞健保負擔未計）">
+            <p className="text-xs text-slate-600">人事成本合計</p>
+            <p className="mt-1 text-xl font-semibold text-slate-900">{money(Math.round(totals.laborCost * 100) / 100)}</p>
           </div>
           <div className="rounded-xl bg-amber-50 p-4">
             <p className="text-xs text-amber-700">草稿 / 全部</p>
@@ -332,6 +368,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                   <th className="py-2 pr-3 text-right">夜間</th>
                   <th className="py-2 pr-3 text-right">全勤</th>
                   <th className="py-2 pr-3 text-right">補貼</th>
+                  <th className="py-2 pr-3 text-right" title="員工固定津貼合計（含伙食費免稅部分）">固定津貼</th>
                   <th className="py-2 pr-3 text-right font-semibold">應發</th>
                   <th className="py-2 pr-3 text-right">勞保</th>
                   <th className="py-2 pr-3 text-right">健保</th>
@@ -341,6 +378,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                   <th className="py-2 pr-3 text-right">遲到早退扣款</th>
                   <th className="py-2 pr-3 text-right">代墊</th>
                   <th className="py-2 pr-3 text-right font-semibold">實發</th>
+                  <th className="py-2 pr-3 text-right" title="公司負擔，不從實發扣除">雇主勞退</th>
                   <th className="py-2 pr-3">狀態</th>
                   <th className="py-2 pr-3">寄送</th>
                   <th className="py-2">操作</th>
@@ -373,6 +411,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(p.night_pay), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(p.attendance_bonus), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).allowances), 0))}</td>
+                  <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).fixedAllowancesTotal), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(totals.gross)}</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).laborInsurance), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).healthInsurance), 0))}</td>
@@ -382,6 +421,7 @@ ${lines.length ? `<h2>逐項明細</h2><table>${lines.join("")}</table>` : ""}
                   <td className="py-2 pr-3 text-right">{money(rows.reduce((s, p) => s + n(bd(p).lateEarlyDeduction), 0))}</td>
                   <td className="py-2 pr-3 text-right">{money(totals.expenses)}</td>
                   <td className="py-2 pr-3 text-right">{money(totals.net)}</td>
+                  <td className="py-2 pr-3 text-right">{money(totals.employerPension)}</td>
                   <td colSpan={3} />
                 </tr>
               </tbody>
@@ -409,7 +449,7 @@ function PayslipRow({
   onSend,
 }: {
   p: PayslipRow;
-  b: PayslipBreakdown;
+  b: Breakdown;
   open: boolean;
   name: string;
   busy: boolean;
@@ -422,7 +462,9 @@ function PayslipRow({
   const ot = b.overtimeSegments ?? [];
   // 一次性加減項（前期更正）：薪資單逐項列出，標「(更正 YYYY-MM)」；舊薪資單沒有。
   const adjustments = adjustmentDisplayOf(b);
-  const hasDetail = lines.length > 0 || ot.length > 0 || adjustments.all.length > 0;
+  const fixed = fixedAllowanceDisplayOf(b);
+  const hasEmployer = typeof b.employerPension === "number";
+  const hasDetail = lines.length > 0 || ot.length > 0 || adjustments.all.length > 0 || fixed.length > 0 || hasEmployer;
   return (
     <>
       <tr className="border-b border-gray-50">
@@ -450,6 +492,7 @@ function PayslipRow({
         <td className="py-2 pr-3 text-right">{money(n(p.night_pay))}</td>
         <td className="py-2 pr-3 text-right">{money(n(p.attendance_bonus))}</td>
         <td className="py-2 pr-3 text-right">{money(n(b.allowances))}</td>
+        <td className="py-2 pr-3 text-right">{money(n(b.fixedAllowancesTotal))}</td>
         <td className="py-2 pr-3 text-right font-medium">{money(n(p.gross))}</td>
         <td className="py-2 pr-3 text-right text-rose-700">{money(n(b.laborInsurance))}</td>
         <td className="py-2 pr-3 text-right text-rose-700">{money(n(b.healthInsurance))}</td>
@@ -459,6 +502,7 @@ function PayslipRow({
         <td className="py-2 pr-3 text-right text-rose-700">{money(n(b.lateEarlyDeduction))}</td>
         <td className="py-2 pr-3 text-right">{money(n(b.expenses))}</td>
         <td className="py-2 pr-3 text-right font-semibold text-emerald-700">{money(netOf(p))}</td>
+        <td className="py-2 pr-3 text-right text-violet-700">{money(n(b.employerPension))}</td>
         <td className="py-2 pr-3">
           <span className={`rounded-full px-2 py-0.5 text-xs ${p.status === "finalized" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
             {p.status === "finalized" ? "已定案" : "草稿"}
@@ -497,7 +541,7 @@ function PayslipRow({
       </tr>
       {open && (
         <tr className="border-b border-gray-100 bg-gray-50/60">
-          <td colSpan={19} className="px-4 py-3">
+          <td colSpan={21} className="px-4 py-3">
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               {ot.length > 0 && (
                 <div>
@@ -527,6 +571,37 @@ function PayslipRow({
                           <td className={`py-0.5 text-right ${a.signed < 0 ? "text-rose-700" : ""}`}>{signedMoney(a.signed)}</td>
                         </tr>
                       ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {fixed.length > 0 && (
+                <div data-testid="payslip-fixed-allowances-block">
+                  <p className="mb-1 text-xs font-semibold text-gray-500">固定津貼</p>
+                  <table className="w-full text-xs">
+                    <tbody>
+                      {fixed.map((f) => (
+                        <tr key={f.key}>
+                          <td className="py-0.5 pr-3 text-gray-700">{f.name}</td>
+                          <td className="py-0.5 pr-3 text-gray-400">{f.taxNote}</td>
+                          <td className="py-0.5 text-right">{money(f.amount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {hasEmployer && (
+                <div data-testid="payslip-employer-block">
+                  <p className="mb-1 text-xs font-semibold text-gray-500">公司負擔（不從實發扣除）</p>
+                  <table className="w-full text-xs">
+                    <tbody>
+                      <tr>
+                        <td className="py-0.5 pr-3 text-gray-700">
+                          雇主勞退提撥（月提繳工資 {money(n(b.pensionWage))} × {pensionRatePct(b.employerPensionRate)}）
+                        </td>
+                        <td className="py-0.5 text-right text-violet-700">{money(n(b.employerPension))}</td>
+                      </tr>
                     </tbody>
                   </table>
                 </div>

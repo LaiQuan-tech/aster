@@ -311,6 +311,20 @@ const AttendanceSchema = z
   })
   .optional();
 
+// 雇主勞退提撥 (2026-11-08):勞工退休金條例 §14 I 雇主每月提繳率「不得低於」6%。
+//   employerRate  雇主提撥率,以比例儲存 (0.06 = 6%);允許 0.06–1 (上限 100% 防呆)。省略 = 0.06。
+// 月提繳工資來源:員工的勞保投保薪資 (salary_structures.labor_insured_salary;系統沒有獨立的勞退提繳工資欄位)。
+// 這是公司成本,不從員工實發扣除;只記在薪資單 breakdown 的「公司負擔」區 (employerPension)。
+// 整段可省略 = 預設 6% (resolvePensionEmployerRate)。
+export const PENSION_EMPLOYER_RATE_MIN = 0.06;
+export const PENSION_EMPLOYER_RATE_MAX = 1;
+export const DEFAULT_PENSION_EMPLOYER_RATE = 0.06;
+const PensionSchema = z
+  .object({
+    employerRate: z.number().min(PENSION_EMPLOYER_RATE_MIN).max(PENSION_EMPLOYER_RATE_MAX).optional(),
+  })
+  .optional();
+
 export const RuleConfigSchema = z.object({
   attendance_bonus: AttendanceBonusSchema,
   overtime: OvertimeSchema,
@@ -320,6 +334,7 @@ export const RuleConfigSchema = z.object({
   leave_deduction: LeaveDeductionSchema,
   leave: LeaveSchema,
   attendance: AttendanceSchema,
+  pension: PensionSchema,
 });
 
 export type RuleConfig = z.infer<typeof RuleConfigSchema>;
@@ -623,4 +638,14 @@ export function bracketFor(amount: number, list: readonly number[]): number | nu
   if (sorted.length === 0) return null;
   for (const v of sorted) if (v >= amount) return v;
   return sorted[sorted.length - 1];
+}
+
+/**
+ * 雇主勞退提撥率 (比例):規則有設就用 (schema 已擋在 0.06–1),沒設 = 6%。
+ * 舊資料若繞過 schema 存了範圍外的值,一樣夾回 0.06–1,不讓薪資單出現低於法定的提撥。
+ */
+export function resolvePensionEmployerRate(rules: RuleConfig): number {
+  const r = rules.pension?.employerRate;
+  if (typeof r !== "number" || !Number.isFinite(r)) return DEFAULT_PENSION_EMPLOYER_RATE;
+  return Math.min(PENSION_EMPLOYER_RATE_MAX, Math.max(PENSION_EMPLOYER_RATE_MIN, r));
 }

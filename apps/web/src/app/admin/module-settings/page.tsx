@@ -31,6 +31,7 @@ import {
   type RuleConfigExt,
   type RuleConfigVersionFull,
 } from "@/lib/rule-config-api";
+import { parseEmployerRatePct } from "@/lib/fixed-allowances-api";
 import { RuleConfigDiff } from "@/components/RuleConfigDiff";
 
 /**
@@ -317,6 +318,12 @@ function parseBracketList(input: string): number[] {
     .sort((a, b) => a - b);
 }
 
+/** config.pension.employerRate（比例）→ 表單「%」字串；沒設定回空白（＝預設 6%）。 */
+function employerRatePctOf(config: unknown): string {
+  const rate = (config as { pension?: { employerRate?: unknown } } | null)?.pension?.employerRate;
+  return typeof rate === "number" && Number.isFinite(rate) ? String(Math.round(rate * 10000) / 100) : "";
+}
+
 /** 由目前 config.insurance（unknown）安全解析表單初值；形狀不對或缺省一律回退成空白（=未設定）。 */
 function hydrateInsuranceForm(insurance: unknown): InsuranceParamsForm {
   if (!insurance || typeof insurance !== "object") return DEFAULT_INSURANCE_FORM;
@@ -557,6 +564,10 @@ export default function ModuleSettingsPage() {
   const [insuranceForm, setInsuranceForm] = useState<InsuranceParamsForm>(DEFAULT_INSURANCE_FORM);
   const [insuranceEffectiveMode, setInsuranceEffectiveMode] = useState<EffectiveMode>("nextMonth");
   const [insuranceEffectiveDate, setInsuranceEffectiveDate] = useState("");
+  // 2026-11-08 雇主勞退提撥率（畫面用「%」，存比例）；空白＝未設定（預設 6%）。
+  const [pensionPct, setPensionPct] = useState("");
+  const [pensionEffectiveMode, setPensionEffectiveMode] = useState<EffectiveMode>("nextMonth");
+  const [pensionEffectiveDate, setPensionEffectiveDate] = useState("");
   const [annualForm, setAnnualForm] = useState<AnnualLeaveForm>(DEFAULT_ANNUAL_FORM);
   const [annualEffectiveMode, setAnnualEffectiveMode] = useState<EffectiveMode>("nextMonth");
   const [annualEffectiveDate, setAnnualEffectiveDate] = useState("");
@@ -588,6 +599,7 @@ export default function ModuleSettingsPage() {
         setDraft(JSON.stringify(res.config, null, 2));
         setOtForm(hydrateOvertimeForm(res.config));
         setInsuranceForm(hydrateInsuranceForm(res.config.insurance));
+        setPensionPct(employerRatePctOf(res.config));
         setAnnualForm(hydrateAnnualLeaveForm(res.config));
       })
       .catch((err) => setError(err instanceof Error ? err.message : "載入模組設定失敗"));
@@ -855,6 +867,36 @@ export default function ModuleSettingsPage() {
       void reloadRuleVersions(); // 版本歷史表格同步補上剛存的這一版，不 await（非關鍵路徑）。
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存勞健保費率失敗");
+    }
+  }
+
+  /** 雇主勞退提撥率：只覆蓋 config.pension，其餘規則原樣保留後整包 PUT（後端 schema 再擋 6%–100%）。 */
+  async function onSavePensionRate() {
+    if (!ruleConfig) return;
+    setError(null);
+    setMessage(null);
+    if (pensionEffectiveMode === "custom" && !pensionEffectiveDate) {
+      setError("請選擇指定生效日期");
+      return;
+    }
+    const parsed = parseEmployerRatePct(pensionPct);
+    if (!parsed.ok) {
+      setError(parsed.error);
+      return;
+    }
+    try {
+      const merged: RuleConfigExt = {
+        ...asExtConfig(ruleConfig.config),
+        pension: parsed.rate === null ? undefined : { employerRate: parsed.rate },
+      };
+      const res = await saveRuleConfig(merged, toEffectiveOpts(pensionEffectiveMode, pensionEffectiveDate));
+      setMessage(describeSaveResult(res.version, res.effectiveFrom));
+      await reloadRuleConfig().catch(() => {
+        // 存檔已成功；重新整理失敗不影響這次存檔結果。
+      });
+      void reloadRuleVersions();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "儲存雇主勞退提撥率失敗");
     }
   }
 
@@ -1684,6 +1726,48 @@ export default function ModuleSettingsPage() {
 
               <div>
                 <PrimaryButton onClick={onSaveInsuranceParams}>儲存勞健保費率</PrimaryButton>
+              </div>
+            </div>
+          ) : (
+            <Empty>載入中…</Empty>
+          )}
+        </Card>
+      )}
+
+      {panel === "insurance" && (
+        <Card>
+          <div className="mb-4">
+            <h2 className="text-base font-semibold text-gray-900">雇主勞退提撥率</h2>
+            <p className="mt-1 text-sm text-gray-500">
+              每月執行薪資時計算雇主勞退提撥 ＝ 月提繳工資（員工的勞保投保薪資）× 提撥率，四捨五入到元。
+              這是公司成本，不從員工實發扣除，列在薪資單「公司負擔」與工資清冊的人事成本。法定不得低於 6%；留白＝6%。
+            </p>
+          </div>
+          {ruleConfig ? (
+            <div className="space-y-4">
+              <div className="max-w-xs">
+                <label className={labelCls}>雇主提撥率（%，6–100）</label>
+                <input
+                  type="number"
+                  min={6}
+                  max={100}
+                  step="any"
+                  placeholder="6"
+                  className={inputCls}
+                  value={pensionPct}
+                  onChange={(e) => setPensionPct(e.target.value)}
+                  data-testid="employer-pension-rate"
+                />
+              </div>
+              <EffectiveDateFields
+                mode={pensionEffectiveMode}
+                date={pensionEffectiveDate}
+                onModeChange={setPensionEffectiveMode}
+                onDateChange={setPensionEffectiveDate}
+                groupName="pension-effective-mode"
+              />
+              <div>
+                <PrimaryButton onClick={onSavePensionRate}>儲存雇主勞退提撥率</PrimaryButton>
               </div>
             </div>
           ) : (

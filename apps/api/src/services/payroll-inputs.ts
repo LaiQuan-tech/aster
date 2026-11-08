@@ -4,6 +4,7 @@ import {
   parseRuleConfig,
   type AttendanceDay,
   type DayType,
+  type FixedAllowanceInput,
   type PayrollAdjustment,
   type RuleConfig,
   type SalaryStructure,
@@ -15,6 +16,7 @@ import { isMissingColumnError, warnSchemaGapOnce } from "../lib/schema-compat.js
 import { DEFAULT_TIMEZONE, todayKey } from "../lib/tz.js"
 import { sumClaimsForPayroll, type PayrollClaimRow } from "./payroll-claims.js"
 import { loadAdjustmentsByEmployee } from "./payroll-adjustments.js"
+import { loadFixedAllowancesByEmployee } from "./fixed-allowances.js"
 import { leaveDeductRate, loadLeaveTypes } from "./settlement.js"
 import { applyNightPolicy, loadEmployeeFeaturesMap, type EmployeeFeatures } from "./employee-features.js"
 import { asDayTypeOrWorkday } from "./day-type.js"
@@ -362,6 +364,11 @@ export interface PayrollInputs {
   adjustmentsByEmployee: Map<string, PayrollAdjustment[]>
   /** 員工個人功能開關（只收有開關打開的人；noNightPremium 在引擎入口由 applyNightPolicy 套用）。 */
   featuresByEmployee?: Map<string, EmployeeFeatures>
+  /**
+   * 本期有效的員工固定津貼（employee_fixed_allowances；2026-11-08）→ 引擎第 7 個參數 extras.fixedAllowances。
+   * 只收有有效津貼的人；資料表未套用時為空 Map。
+   */
+  fixedAllowancesByEmployee?: Map<string, FixedAllowanceInput[]>
 }
 
 /**
@@ -499,9 +506,12 @@ export async function loadPayrollInputs(
   // 放進哪一期由那一列的 period 決定（HR 在薪資作業頁逐人維護）；軟刪除的不算。見 services/payroll-adjustments.ts。
   const adjustmentsByEmployee = await loadAdjustmentsByEmployee(tenantId, period, scopeIds)
   const featuresByEmployee = await loadEmployeeFeaturesMap(tenantId, scopeIds)
+  // --- 本期有效的員工固定津貼（2026-11-08）：每月自動帶入；生效期間判斷見 @hr/rules activeFixedAllowancesForPeriod。
+  const fixedAllowancesByEmployee = await loadFixedAllowancesByEmployee(tenantId, period, scopeIds)
 
   return {
     featuresByEmployee,
+    fixedAllowancesByEmployee,
     rules,
     ruleConfigVersion: version,
     salaryByEmployee,
@@ -529,6 +539,8 @@ export interface EmployeePayrollInputs {
   adjustments: PayrollAdjustment[]
   /** 員工個人功能開關（noNightPremium → 引擎入口 applyNightPolicy）。 */
   features: EmployeeFeatures | null
+  /** 本期有效的固定津貼（試算與薪資執行用同一份）。 */
+  fixedAllowances?: FixedAllowanceInput[]
 }
 
 export async function buildPayrollInputs(
@@ -554,6 +566,7 @@ export async function buildPayrollInputs(
     allowances: batch.allowancesByEmployee.get(employeeId) ?? 0,
     adjustments: batch.adjustmentsByEmployee.get(employeeId) ?? [],
     features: batch.featuresByEmployee?.get(employeeId) ?? null,
+    fixedAllowances: batch.fixedAllowancesByEmployee?.get(employeeId) ?? [],
   }
 }
 
@@ -564,5 +577,7 @@ export function computeFromInputs(
 ): ReturnType<typeof computePayslip> | null {
   if (!inputs.salary) return null
   const policy = applyNightPolicy(inputs.features, days, inputs.rules)
-  return computePayslip(policy.days, inputs.salary, policy.rules, inputs.expenses, inputs.allowances, inputs.adjustments)
+  return computePayslip(policy.days, inputs.salary, policy.rules, inputs.expenses, inputs.allowances, inputs.adjustments, {
+    fixedAllowances: inputs.fixedAllowances ?? [],
+  })
 }

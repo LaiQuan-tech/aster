@@ -29,15 +29,28 @@
  *     工資清冊分欄列出(adjustmentDeductionsTaxable),年度申報時才知道全年應發合計裡有多少是已收回的
  *   • 保險以投保薪資為基數,不受影響
  * 每一筆都在 lines 與 adjustments 逐項列出,標題帶「(更正 YYYY-MM)」,薪資單任何一版(後台、員工、Email)都看得到。
+ *
+ * 固定津貼(第 7 個參數 extras.fixedAllowances,2026-11-08):HR 在員工薪資資料設定、每月自動帶入的津貼。
+ *   • 應稅(taxable) → 全額進 gross(併入扣繳基礎),lines 列在 gross 之前,名稱即津貼名稱
+ *   • 伙食費(meal_exempt) → 本張薪資單所有伙食費合計 2,400 元以內免稅:免稅部分不進 gross、只加在實發
+ *     (lines 列在應扣之後,標「(免稅)」);超過部分應稅、進 gross(lines 標「(超過免稅額)」)
+ *   • 保險以投保薪資為基數,不受影響;「計入投保」的合計放 fixedAllowancesInsurable 供 HR 核對級距
+ *   沒有有效津貼的薪資單不會出現任何 fixedAllowances* 欄位(輸出與以前完全相同)。
+ *
+ * 雇主勞退提撥(公司負擔,2026-11-08):employerPension = round(勞保投保薪資 × 雇主提撥率),
+ * 提撥率取 rules.pension.employerRate(預設 6%,允許 6%–100%)。不從實發扣除、不進 lines、不影響 gross/net;
+ * 只有投保薪資 > 0 時才有 employerPension/employerPensionRate/pensionWage 三個欄位。
  */
 
 import { nhiEmployeePremium } from "./tw-tax.js";
+import { MEAL_ALLOWANCE_TAX_FREE_MONTHLY } from "./fixed-allowances.js";
 import { overtimeMinutesBeforeMinCharge } from "./worktime-engine.js";
 import {
   resolveFixedHolidayPay,
   resolveHourlyWageDivisor,
   resolveLateEarlyDeductionEnabled,
   resolveOvertimeRule,
+  resolvePensionEmployerRate,
   resolveRegularLeavePay,
   type OvertimeWhen,
   type RuleConfig,
@@ -45,11 +58,14 @@ import {
 import {
   overtimeWhenFor,
   type AttendanceDay,
+  type FixedAllowanceInput,
   type OvertimeSegment,
   type PayrollAdjustment,
   type PayrollMethod,
+  type PayrollExtras,
   type PayslipAdjustmentLine,
   type PayslipBreakdown,
+  type PayslipFixedAllowanceLine,
   type PayslipLine,
   type SalaryStructure,
 } from "./types.js";
@@ -72,6 +88,46 @@ export function adjustmentDisplayLabel(label: string, relatedPeriod?: string | n
   if (!relatedPeriod) return name;
   const tag = `更正 ${relatedPeriod}`;
   return name.includes(tag) ? name : `${name}(${tag})`;
+}
+
+/**
+ * 固定津貼 → 每筆的應稅／免稅切分 (整數元)。純函式。
+ * 伙食費 (meal_exempt) 依輸入順序吃 2,400 元的每月免稅額,吃完後的部分應稅;應稅津貼全額應稅。
+ * 金額先四捨五入到元,<= 0 或非有限數字的略過。
+ */
+export function splitFixedAllowances(inputs: readonly FixedAllowanceInput[]): PayslipFixedAllowanceLine[] {
+  let mealExemptLeft = MEAL_ALLOWANCE_TAX_FREE_MONTHLY;
+  const out: PayslipFixedAllowanceLine[] = [];
+  for (const a of inputs) {
+    const amount = Math.round(Number(a.amount));
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+    const taxType = a.taxType === "meal_exempt" ? "meal_exempt" : "taxable";
+    let taxFreeAmount = 0;
+    if (taxType === "meal_exempt") {
+      taxFreeAmount = Math.min(amount, mealExemptLeft);
+      mealExemptLeft -= taxFreeAmount;
+    }
+    out.push({
+      ...(a.id ? { id: a.id } : {}),
+      name: String(a.name ?? "").trim() || "固定津貼",
+      amount,
+      insurable: a.insurable === true,
+      taxType,
+      taxableAmount: amount - taxFreeAmount,
+      taxFreeAmount,
+    });
+  }
+  return out;
+}
+
+/**
+ * 雇主勞退提撥 = 月提繳工資 × 提撥率,四捨五入到元。提撥率先換成百萬分之一的整數再乘,
+ * 避免 45,800 × 0.06 = 2748.0000000000005 這類浮點殘差在 .5 邊界上翻錯邊。
+ */
+export function employerPensionOf(pensionWage: number, rate: number): number {
+  if (!(pensionWage > 0) || !(rate > 0)) return 0;
+  const ppm = Math.round(rate * 1_000_000);
+  return Math.round((Math.round(pensionWage) * ppm) / 1_000_000);
 }
 
 /** 時薪專用:四捨五入到小數 4 位 (客戶薪資表「平日每小時工資額」的精度)。 */
@@ -247,6 +303,8 @@ export function computePayslip(
    * 每筆在 lines 與 breakdown.adjustments 逐項列出,標題帶「(更正 YYYY-MM)」。
    */
   adjustments: readonly PayrollAdjustment[] = [],
+  /** 擴充輸入:本期有效的固定津貼 (見檔頭)。預設無。 */
+  extras: PayrollExtras = {},
 ): PayslipBreakdown {
   const method: PayrollMethod = salary.method ?? rules.payroll.method;
   // 時薪制(工讀生/Part-time,C5)不可退而求其次用 baseSalary÷divisor 猜時薪——
@@ -399,8 +457,22 @@ export function computePayslip(
   // 課稅的補發跟定額補貼一樣在 gross 之前進 lines,「lines 加總 = gross」的對帳維持成立。
   for (const a of adjustmentLines) if (a.treatment === "earning") lines.push(adjustmentLine(a));
 
+  // 固定津貼:應稅部分在 gross 之前進 lines;免稅部分 (伙食費 2,400 內) 放到應扣之後,同不課稅補發的位置。
+  const fixedLines = splitFixedAllowances(extras.fixedAllowances ?? []);
+  let fixedTaxable = 0;
+  let fixedTaxFree = 0;
+  let fixedInsurable = 0;
+  for (const f of fixedLines) {
+    fixedTaxable += f.taxableAmount;
+    fixedTaxFree += f.taxFreeAmount;
+    if (f.insurable) fixedInsurable += f.amount;
+    if (f.taxableAmount > 0) {
+      lines.push({ label: f.taxFreeAmount > 0 ? `${f.name}(超過免稅額)` : f.name, amount: f.taxableAmount });
+    }
+  }
+
   const gross = round(
-    base + overtimePay + nightPay + attendanceBonus + allowancesTotal + adjustmentEarnings,
+    base + overtimePay + nightPay + attendanceBonus + allowancesTotal + adjustmentEarnings + fixedTaxable,
   );
 
   // --- 請假扣款 / 遲到早退扣款 (扣項,不動 gross) ---------------------------
@@ -483,7 +555,7 @@ export function computePayslip(
   // 代墊支出是「代收代付」,不是薪資所得 → 不進 gross,直接加在實發。
   // 不課稅的補發 (加減項) 稅務性質相同,同樣只加在實發。
   const expensesTotal = round(expenses);
-  const net = round(gross - totalDeductions + expensesTotal + adjustmentNonTaxable);
+  const net = round(gross - totalDeductions + expensesTotal + adjustmentNonTaxable + fixedTaxFree);
 
   if (laborInsurance !== 0) lines.push({ label: "勞保費", amount: -laborInsurance });
   if (healthInsurance !== 0) lines.push({ label: "健保費", amount: -healthInsurance });
@@ -496,6 +568,12 @@ export function computePayslip(
   for (const a of adjustmentLines) if (a.treatment === "deduction") lines.push(adjustmentLine(a));
   if (expensesTotal !== 0) lines.push({ label: "支出(代墊)", amount: expensesTotal });
   for (const a of adjustmentLines) if (a.treatment === "non_taxable") lines.push(adjustmentLine(a));
+  for (const f of fixedLines) if (f.taxFreeAmount > 0) lines.push({ label: `${f.name}(免稅)`, amount: f.taxFreeAmount });
+
+  // --- 公司負擔:雇主勞退提撥 (不影響 gross/net/lines) ---------------------------
+  const pensionWage = Math.round(salary.laborInsuredSalary ?? 0);
+  const employerPensionRate = resolvePensionEmployerRate(rules);
+  const employerPension = employerPensionOf(pensionWage, employerPensionRate);
 
   return {
     base,
@@ -524,5 +602,17 @@ export function computePayslip(
     ...(adjustmentLines.length > 0
       ? { adjustmentEarnings, adjustmentDeductions, adjustmentDeductionsTaxable, adjustmentNonTaxable, adjustments: adjustmentLines }
       : {}),
+    // 只有本期真的有有效的固定津貼才帶這五個欄位 (沒有津貼的薪資單輸出與以前完全相同)。
+    ...(fixedLines.length > 0
+      ? {
+          fixedAllowances: fixedLines,
+          fixedAllowancesTotal: fixedTaxable + fixedTaxFree,
+          fixedAllowancesTaxable: fixedTaxable,
+          fixedAllowancesTaxFree: fixedTaxFree,
+          fixedAllowancesInsurable: fixedInsurable,
+        }
+      : {}),
+    // 公司負擔:只有月提繳工資 > 0 才帶。
+    ...(pensionWage > 0 ? { employerPension, employerPensionRate, pensionWage } : {}),
   };
 }
