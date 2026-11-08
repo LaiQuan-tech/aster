@@ -193,7 +193,7 @@ describe("薪資明細表：加班分段對應 Excel 列", () => {
     expect(gridRowCount(grid)).toBe(4 + 15 + 4)
     const total = 4 + 15
     expect(cellAt(grid, total, 1)?.text).toBe("30,000")
-    expect(cellAt(grid, total + 1, 2)?.text).toBe("125.0")
+    expect(cellAt(grid, total + 1, 2)?.text).toBe("125.00") // 時薪一律 2 位小數（2026-11-08 統一口徑）
     expect(cellAt(grid, total + 1, 9)).toMatchObject({ colSpan: 3, border: { top: "medium" } })
     // 實發 = 應發 − 應扣（系統數字）
     const b = fakeBreakdown()

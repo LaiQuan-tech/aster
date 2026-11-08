@@ -125,7 +125,6 @@ export default function LateReportsPage() {
               value={employeeId}
               onChange={setEmployeeId}
               emptyLabel="全部"
-              ariaLabel="員工"
             />
           </div>
           <div className="flex items-end">

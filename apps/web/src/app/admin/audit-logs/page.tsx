@@ -214,7 +214,6 @@ export default function AuditLogsPage() {
                 value={actorEmpId}
                 onChange={setActorEmpId}
                 emptyLabel="全部"
-                ariaLabel="操作者"
               />
             </div>
             <div>

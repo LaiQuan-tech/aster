@@ -6,6 +6,8 @@ import {
   CLOSED,
   comboReduce,
   filterEmployeeOptions,
+  keyIntent,
+  placeListbox,
   type ComboAction,
   type ComboState,
   type EmployeeOption,
@@ -39,6 +41,7 @@ export function EmployeeCombobox({
   inputClassName,
   testId,
   title,
+  labelledBy,
 }: {
   options: readonly EmployeeOption[];
   value: string;
@@ -58,6 +61,8 @@ export function EmployeeCombobox({
   testId?: string;
   /** 輸入框的 title（例：唯讀原因提示）。 */
   title?: string;
+  /** 可見 label 的 id（有就用 aria-labelledby；有可見 label 時請不要再給 ariaLabel）。 */
+  labelledBy?: string;
 }) {
   const autoId = useId();
   const inputId = id ?? `${autoId}-input`;
@@ -101,11 +106,10 @@ export function EmployeeCombobox({
     const place = () => {
       const r = inputRef.current?.getBoundingClientRect();
       if (!r) return;
-      const below = window.innerHeight - r.bottom - 8;
-      const above = r.top - 8;
-      const maxHeight = Math.max(160, Math.min(288, below >= 200 || below >= above ? below : above));
-      const top = below >= 200 || below >= above ? r.bottom + 4 : Math.max(8, r.top - 4 - maxHeight);
-      setPos({ top, left: r.left, width: Math.max(r.width, 192), maxHeight });
+      const p = placeListbox(r, window.innerHeight);
+      // 輸入框捲出可視範圍 → 關閉清單（不要留一塊浮在畫面上的清單）
+      if (p.close) setState(CLOSED);
+      else setPos({ top: p.top, left: p.left, width: p.width, maxHeight: p.maxHeight });
     };
     place();
     window.addEventListener("scroll", place, true);
@@ -130,13 +134,10 @@ export function EmployeeCombobox({
   }, [required, value]);
 
   function onKeyDown(e: KeyboardEvent<HTMLInputElement>) {
-    if (["ArrowDown", "ArrowUp", "Enter", "Escape", "Home", "End"].includes(e.key)) {
-      if (e.key !== "Enter" || state.open) e.preventDefault();
-      if ((e.key === "Home" || e.key === "End") && !state.open) return;
-      dispatch({ type: "key", key: e.key });
-    } else if (e.key === "Tab") {
-      dispatch({ type: "key", key: "Tab" });
-    }
+    // 規則在 lib keyIntent（有單元測試）：Enter 一律不送出表單；Home／End 不攔截（讓游標移動）。
+    const intent = keyIntent(e.key);
+    if (intent.preventDefault) e.preventDefault();
+    if (intent.dispatch) dispatch({ type: "key", key: e.key });
   }
 
   const shownText = state.open ? state.query : (selected && selected.id !== "" ? selected.label : "");
@@ -154,9 +155,10 @@ export function EmployeeCombobox({
           autoComplete="off"
           aria-autocomplete="list"
           aria-expanded={state.open}
-          aria-controls={listId}
+          aria-controls={state.open ? listId : undefined}
           aria-activedescendant={state.open && state.active >= 0 ? optionId(state.active) : undefined}
           aria-label={ariaLabel}
+          aria-labelledby={labelledBy}
           aria-required={required || undefined}
           title={title}
           className={[inputClassName ?? defaultInputCls, "pr-14"].join(" ")}

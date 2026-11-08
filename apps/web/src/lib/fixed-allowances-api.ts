@@ -60,6 +60,8 @@ export interface FixedAllowanceSummary {
   activeTotal: number;
   activeInsurableTotal: number;
   pension?: PensionSummary | null;
+  /** 本月規則的時薪除數（payroll.hourlyWageDivisor，預設 240）；舊版 API 沒有。 */
+  hourlyWageDivisor?: number | null;
 }
 
 export interface FixedAllowanceWarning {
@@ -270,6 +272,18 @@ export function fixedAllowanceDisplayOf(b: BreakdownAllowanceFields | null | und
     const taxNote = taxFree > 0 && taxable > 0 ? `免稅 ${fmtInt(taxFree)}＋應稅 ${fmtInt(taxable)}` : taxFree > 0 ? "免稅" : "應稅";
     return { key: f.id ?? `${i}`, name: f.name, amount: Number(f.amount) || 0, taxableAmount: taxable, taxFreeAmount: taxFree, taxNote };
   });
+}
+
+/** 時薪（基準時薪、加班時薪基數）一律 2 位小數：166.6667 → "166.67"（與 Email、Excel、月表 xlsx 同口徑）。 */
+export function hourlyRateText(v: number | null | undefined): string {
+  const x = Number(v);
+  return Number.isFinite(x) ? x.toLocaleString("zh-TW", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
+}
+
+/** 加班費基數勾選框的說明：除數取規則參數（payroll.hourlyWageDivisor）；拿不到寫「時薪除數」。 */
+export function overtimeBaseHint(divisor: number | null | undefined): string {
+  const d = typeof divisor === "number" && Number.isFinite(divisor) && divisor > 0 ? String(divisor) : "時薪除數";
+  return `計入加班費基數（月薪制：加班時薪 ＝（本薪＋計入的津貼）÷ ${d}）`;
 }
 
 /** 雇主提撥率顯示：0.06 → "6%"。 */

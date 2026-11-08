@@ -693,3 +693,17 @@ describe("加班費時薪基數含固定津貼（2026-11-08）", () => {
     expect(withAllowance.amount).toBe(210) // 1h × 50,400 ÷ 240
   })
 })
+
+describe("時薪顯示口徑（Email）與加班基數除數", () => {
+  it("Email 基準時薪、加班時薪基數都是 2 位小數", async () => {
+    const { renderPayslipHtml, renderPayslipText } = await import("../services/payslip-html.js")
+    const input = { payslip: { period: OCT, gross: 40000, status: "draft" } as never, breakdown: { hourlyWage: 166.6667, overtimeHourlyBase: 179.1667, net: 40000 } as never, employeeName: "員工甲" }
+    expect(renderPayslipHtml(input)).toContain("基準時薪 166.67　加班時薪基數 179.17（含固定津貼）")
+    expect(renderPayslipText(input)).toContain("基準時薪 166.67　加班時薪基數 179.17（含固定津貼）")
+  })
+
+  it("GET 津貼 summary 帶本月規則的時薪除數（預設 240）", async () => {
+    const res = await as(T.hr).get(`/salary/${EMP}/fixed-allowances`)
+    expect(res.body.summary.hourlyWageDivisor).toBe(240)
+  })
+})

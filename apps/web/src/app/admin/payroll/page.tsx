@@ -343,7 +343,6 @@ export default function PayrollAdminPage() {
               value={empId}
               onChange={onPickEmployee}
               placeholder="輸入工號、姓名、身分證或員工 ID"
-              ariaLabel="員工"
               testId="payroll-employee-combobox"
             />
             {selectedIdentity && (
@@ -603,7 +602,6 @@ export default function PayrollAdminPage() {
               value={runEmployeeId}
               onChange={setRunEmployeeId}
               emptyLabel="全部員工"
-              ariaLabel="執行對象"
             />
           </div>
           <PrimaryButton type="submit">執行</PrimaryButton>

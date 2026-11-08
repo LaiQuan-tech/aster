@@ -99,6 +99,11 @@ export function money(v: number): string {
   return Math.round(v).toLocaleString("zh-TW")
 }
 
+/** 時薪（基準時薪、加班時薪基數）一律 2 位小數，與後台列印、薪資明細 Excel、月表 xlsx／卡片同一個口徑。 */
+export function hourlyRate(v: number): string {
+  return v.toLocaleString("zh-TW", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
 /** HTML escape（與畫面列印版的 `esc()` 同一份，另補上引號）。 */
 export function esc(s: string): string {
   return s
@@ -241,7 +246,7 @@ export function renderPayslipHtml(input: RenderPayslipInput): string {
   parts.push(
     `<div style="font-family:ui-sans-serif,system-ui,'Noto Sans TC',sans-serif;color:#111;max-width:680px">`,
     `<h1 style="font-size:20px;margin:0 0 4px">薪資單　${esc(displayName(input.employeeName, input.empNo))}</h1>`,
-    `<div style="color:#777;font-size:12px">期間 ${esc(p.period)}　狀態 ${p.status === "finalized" ? "已定案" : "草稿"}　基準時薪 ${money(n(b.hourlyWage))}${typeof b.overtimeHourlyBase === "number" ? `　加班時薪基數 ${b.overtimeHourlyBase}（含固定津貼）` : ""}</div>`,
+    `<div style="color:#777;font-size:12px">期間 ${esc(p.period)}　狀態 ${p.status === "finalized" ? "已定案" : "草稿"}　基準時薪 ${hourlyRate(n(b.hourlyWage))}${typeof b.overtimeHourlyBase === "number" ? `　加班時薪基數 ${hourlyRate(b.overtimeHourlyBase)}（含固定津貼）` : ""}</div>`,
   )
 
   for (const s of sections(p, b)) {
@@ -285,7 +290,7 @@ export function renderPayslipText(input: RenderPayslipInput): string {
   const b = input.breakdown ?? {}
   const out: string[] = [
     `薪資單　${displayName(input.employeeName, input.empNo)}`,
-    `期間 ${p.period}　狀態 ${p.status === "finalized" ? "已定案" : "草稿"}　基準時薪 ${money(n(b.hourlyWage))}${typeof b.overtimeHourlyBase === "number" ? `　加班時薪基數 ${b.overtimeHourlyBase}（含固定津貼）` : ""}`,
+    `期間 ${p.period}　狀態 ${p.status === "finalized" ? "已定案" : "草稿"}　基準時薪 ${hourlyRate(n(b.hourlyWage))}${typeof b.overtimeHourlyBase === "number" ? `　加班時薪基數 ${hourlyRate(b.overtimeHourlyBase)}（含固定津貼）` : ""}`,
   ]
   for (const s of sections(p, b)) {
     out.push("", `【${s.title}】`)

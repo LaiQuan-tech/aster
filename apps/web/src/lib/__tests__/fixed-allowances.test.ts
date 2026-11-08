@@ -4,6 +4,8 @@ import {
   EMPTY_FIXED_ALLOWANCE_FORM,
   fixedAllowanceDisplayOf,
   formFromAllowance,
+  hourlyRateText,
+  overtimeBaseHint,
   insuredHintText,
   laborCostOf,
   midMonthHint,
@@ -144,5 +146,18 @@ describe("加班費基數勾選框（2026-11-08）", () => {
     expect(
       formFromAllowance({ id: "x", employeeId: "e", name: "a", amount: 1, insurable: true, taxType: "taxable", effectiveFrom: "2030-01-01", effectiveTo: null, note: null, updatedAt: "" }).overtimeBase,
     ).toBe(true);
+  });
+});
+
+describe("時薪顯示口徑與加班基數說明", () => {
+  it("時薪一律 2 位小數；勾選框除數取規則，拿不到寫「時薪除數」", () => {
+    expect(hourlyRateText(166.6667)).toBe("166.67");
+    expect(hourlyRateText(179.1667)).toBe("179.17");
+    expect(hourlyRateText(200)).toBe("200.00");
+    expect(hourlyRateText(undefined)).toBe("—");
+    expect(overtimeBaseHint(240)).toContain("÷ 240");
+    expect(overtimeBaseHint(30 * 8)).toContain("÷ 240");
+    expect(overtimeBaseHint(225)).toContain("÷ 225");
+    expect(overtimeBaseHint(null)).toContain("÷ 時薪除數");
   });
 });

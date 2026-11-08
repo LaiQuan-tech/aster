@@ -18,6 +18,7 @@ import {
 } from "@/lib/cash-payouts-api";
 import { adjustmentDisplayOf, adjustmentPrintRows, signedMoney, TREATMENT_LABEL } from "@/lib/payroll-adjustments-api";
 import {
+  hourlyRateText,
   fixedAllowanceDisplayOf,
   laborCostOf,
   pensionRatePct,
@@ -260,7 +261,7 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:14px;margin:20px 0 6px;color:#555}
 table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6px 8px;font-size:13px;text-align:left}
 .sum td{font-weight:600;background:#f7f7f7}.muted{color:#777;font-size:12px}</style></head><body>
 <h1>薪資單　${esc(empName(p.employee_id))}</h1>
-<div class="muted">期間 ${p.period}　狀態 ${p.status === "finalized" ? "已定案" : "草稿"}　基準時薪 ${money(n(b.hourlyWage))}${typeof b.overtimeHourlyBase === "number" ? `　加班時薪基數 ${money(b.overtimeHourlyBase)}（含固定津貼）` : ""}</div>
+<div class="muted">期間 ${p.period}　狀態 ${p.status === "finalized" ? "已定案" : "草稿"}　基準時薪 ${hourlyRateText(n(b.hourlyWage))}${typeof b.overtimeHourlyBase === "number" ? `　加班時薪基數 ${hourlyRateText(b.overtimeHourlyBase)}（含固定津貼）` : ""}</div>
 <h2>應發</h2><table>
 <tr><td>本薪</td><td style="text-align:right">${money(n(p.base))}</td></tr>
 <tr><td>加班費</td><td style="text-align:right">${money(n(p.overtime_pay))}</td></tr>
@@ -513,9 +514,9 @@ function PayslipRow({
         </td>
         <td
           className="py-2 pr-3 text-right text-gray-500"
-          title={typeof b.overtimeHourlyBase === "number" ? `加班時薪基數（含計入的固定津貼）；基準時薪 ${money(n(b.hourlyWage))} 用於請假扣款` : undefined}
+          title={typeof b.overtimeHourlyBase === "number" ? `加班時薪基數（含計入的固定津貼）；基準時薪 ${hourlyRateText(n(b.hourlyWage))} 用於請假扣款` : undefined}
         >
-          {money(n(b.overtimeHourlyBase ?? b.hourlyWage))}
+          {hourlyRateText(n(b.overtimeHourlyBase ?? b.hourlyWage))}
           {typeof b.overtimeHourlyBase === "number" && <span className="ml-1 text-[10px] text-sky-600">加班</span>}
         </td>
         <td className="py-2 pr-3 text-right">{money(n(p.base))}</td>

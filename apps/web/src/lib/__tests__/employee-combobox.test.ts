@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
-import { CLOSED, comboReduce, employeeLabel, employeeOptionsOf, filterEmployeeOptions, type EmployeeOption } from "../employee-combobox";
+import {
+  CLOSED,
+  comboReduce,
+  employeeLabel,
+  employeeOptionsOf,
+  filterEmployeeOptions,
+  keyIntent,
+  placeListbox,
+  type EmployeeOption,
+} from "../employee-combobox";
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 
 // 可搜尋員工選單（2026-11-08）。假資料。
@@ -21,11 +30,10 @@ describe("employeeOptionsOf／employeeLabel", () => {
 });
 
 describe("filterEmployeeOptions", () => {
-  it("工號、姓名、身分證（extra）、員工 ID 都可搜；不分大小寫；多個字都要命中", () => {
+  it("工號、姓名、身分證（extra）可搜；不分大小寫；多個字都要命中", () => {
     expect(filterEmployeeOptions(opts, "a002").map((o) => o.id)).toEqual(["e2"]);
     expect(filterEmployeeOptions(opts, "小").map((o) => o.id)).toEqual(["e1", "e2"]);
     expect(filterEmployeeOptions(opts, "b1234").map((o) => o.id)).toEqual(["e2"]);
-    expect(filterEmployeeOptions(opts, "e3").map((o) => o.id)).toEqual(["e3"]);
     expect(filterEmployeeOptions(opts, "A00 明").map((o) => o.id)).toEqual(["e1"]);
     expect(filterEmployeeOptions(opts, "不存在")).toEqual([]);
   });
@@ -95,5 +103,46 @@ describe("EmployeeCombobox 靜態渲染（a11y）", () => {
     expect(html).toContain('placeholder="全部員工"');
     expect(html).toContain("disabled");
     expect(html).not.toContain("清除選擇");
+  });
+});
+
+describe("第二輪審查修正", () => {
+  it("不自動搜 id；只有把 id 放進 searchText 的頁面（薪資作業頁）才能用員工 ID 搜", () => {
+    expect(filterEmployeeOptions(opts, "e3")).toEqual([]);
+    const withId = employeeOptionsOf(emps, (e) => e.id);
+    expect(filterEmployeeOptions(withId, "e3").map((o) => o.id)).toEqual(["e3"]);
+  });
+  it("keyIntent：Enter 一律攔截（關著也只開清單、不送表單）；Home／End 與一般字元不攔截；Tab 不攔截但關閉", () => {
+    expect(keyIntent("Enter")).toEqual({ preventDefault: true, dispatch: true });
+    expect(keyIntent("ArrowDown")).toEqual({ preventDefault: true, dispatch: true });
+    expect(keyIntent("Escape")).toEqual({ preventDefault: true, dispatch: true });
+    expect(keyIntent("Home")).toEqual({ preventDefault: false, dispatch: false });
+    expect(keyIntent("End")).toEqual({ preventDefault: false, dispatch: false });
+    expect(keyIntent("a")).toEqual({ preventDefault: false, dispatch: false });
+    expect(keyIntent("Tab")).toEqual({ preventDefault: false, dispatch: true });
+    // 關著按 Enter → 狀態機只打開、不選
+    const r = comboReduce(CLOSED, { type: "key", key: "Enter" }, opts, "e1");
+    expect(r.state.open).toBe(true);
+    expect(r.select).toBeUndefined();
+  });
+  it("placeListbox：輸入框捲出畫面 → close；下方空間夠放下方；上方時清單底緣不壓住輸入框", () => {
+    expect(placeListbox({ top: -60, bottom: -20, left: 0, width: 300 }, 800)).toEqual({ close: true });
+    expect(placeListbox({ top: 820, bottom: 860, left: 0, width: 300 }, 800)).toEqual({ close: true });
+    const below = placeListbox({ top: 100, bottom: 140, left: 10, width: 300 }, 800);
+    expect(below).toMatchObject({ close: false, top: 144, left: 10, width: 300, maxHeight: 288 });
+    const above = placeListbox({ top: 700, bottom: 740, left: 10, width: 100 }, 800);
+    if (above.close) throw new Error("should not close");
+    expect(above.width).toBe(192);
+    expect(above.top + above.maxHeight).toBeLessThanOrEqual(700 - 4); // 清單底緣在輸入框上緣之上
+    expect(above.top).toBeGreaterThanOrEqual(8);
+    const tight = placeListbox({ top: 60, bottom: 100, left: 0, width: 300 }, 130); // 兩邊都很擠
+    if (tight.close) throw new Error("should not close");
+    expect(tight.top >= 100 || tight.top + tight.maxHeight <= 60).toBe(true);
+  });
+  it("aria-controls 只在開啟時才有；沒給 ariaLabel 時不輸出 aria-label，可用 aria-labelledby", () => {
+    const html = renderToStaticMarkup(createElement(EmployeeCombobox, { options: opts, value: "", onChange: () => {}, id: "x", labelledBy: "x-label" }));
+    expect(html).not.toContain("aria-controls");
+    expect(html).not.toMatch(/<input[^>]*aria-label=/);
+    expect(html).toContain('aria-labelledby="x-label"');
   });
 });

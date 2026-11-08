@@ -27,7 +27,8 @@ export function filterEmployeeOptions(options: readonly EmployeeOption[], query:
   if (terms.length === 0) return [...options];
   return options.filter((o) => {
     if (o.id === "") return false;
-    const hay = `${o.label} ${o.searchText ?? ""} ${o.id} ${o.note ?? ""}`.toLowerCase();
+    // 只搜顯示文字＋searchText（不自動串入 id：要用員工 ID 搜的頁面自己把 id 放進 searchText，例：薪資作業頁）。
+    const hay = `${o.label} ${o.searchText ?? ""} ${o.note ?? ""}`.toLowerCase();
     return terms.every((t) => hay.includes(t));
   });
 }
@@ -125,6 +126,42 @@ export function comboReduce(
       }
     }
   }
+}
+
+/**
+ * 輸入框按鍵的處理（純函式）：要不要 preventDefault、要不要交給 comboReduce。
+ *   • Enter：一律 preventDefault（清單關著時只打開清單，不送出表單；開著時選取）
+ *   • ↑↓／Esc：攔截並交給狀態機
+ *   • Tab：不攔截（讓焦點移走），但關閉清單
+ *   • Home／End 與其他鍵：不攔截（讓游標在輸入框內移動）
+ */
+export function keyIntent(key: string): { preventDefault: boolean; dispatch: boolean } {
+  if (key === "Enter" || key === "ArrowDown" || key === "ArrowUp" || key === "Escape") return { preventDefault: true, dispatch: true };
+  if (key === "Tab") return { preventDefault: false, dispatch: true };
+  return { preventDefault: false, dispatch: false };
+}
+
+/**
+ * 清單擺放（純函式）：依輸入框的 viewport 座標決定清單放下方或上方、可用高度。
+ *   • 輸入框整個捲出可視範圍 → { close: true }（呼叫端關閉清單）
+ *   • 下方空間 ≥ 200 或比上方大 → 放下方；否則放上方，且清單底緣在輸入框上緣之上（不壓住輸入框）
+ *   • 高度最多 288，最少不超過該側實際可用空間
+ */
+export function placeListbox(
+  rect: { top: number; bottom: number; left: number; width: number },
+  viewportHeight: number,
+): { close: true } | { close: false; top: number; left: number; width: number; maxHeight: number } {
+  if (rect.bottom <= 0 || rect.top >= viewportHeight) return { close: true };
+  const gap = 4;
+  const margin = 8;
+  const below = viewportHeight - rect.bottom - gap - margin;
+  const above = rect.top - gap - margin;
+  const width = Math.max(rect.width, 192);
+  if (below >= 200 || below >= above) {
+    return { close: false, top: rect.bottom + gap, left: rect.left, width, maxHeight: Math.max(0, Math.min(288, below)) };
+  }
+  const maxHeight = Math.max(0, Math.min(288, above));
+  return { close: false, top: rect.top - gap - maxHeight, left: rect.left, width, maxHeight };
 }
 
 /** 標準顯示：「工號 · 姓名」；沒有工號就只顯示姓名。 */

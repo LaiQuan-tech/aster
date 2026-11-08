@@ -432,7 +432,6 @@ function PaperSignatureForm({
               onChange={setEmployeeId}
               required
               emptyLabel="請選擇"
-              ariaLabel="員工"
             />
           </div>
           <div>

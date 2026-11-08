@@ -3,6 +3,7 @@ import { z } from "zod"
 import {
   activeFixedAllowancesForPeriod,
   insurableFixedAllowanceTotal,
+  resolveHourlyWageDivisor,
   resolvePensionWage,
   resolvePensionWageLevels,
   sameNameOverlaps,
@@ -240,6 +241,10 @@ fixedAllowancesRouter.get(
           activeTotal: active.reduce((acc, a) => acc + a.amount, 0),
           activeInsurableTotal: insurableFixedAllowanceTotal(active),
           pension: await pensionSummary(tenantId, employeeId, period, rows),
+          // 加班費基數勾選框的說明用（本月規則的時薪除數；讀不到就不帶，畫面寫「時薪除數」）
+          hourlyWageDivisor: await loadRuleConfigFor(tenantId, period)
+            .then(({ rules }) => resolveHourlyWageDivisor(rules))
+            .catch(() => null),
         },
         warnings: overlapWarnings(rows),
         stalePeriods: [...new Set(stale.map((s) => s.period))],

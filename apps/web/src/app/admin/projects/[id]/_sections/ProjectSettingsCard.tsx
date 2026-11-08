@@ -80,7 +80,6 @@ export function ProjectSettingsCard({ project, depts, emps, parentChoices, canEd
             title={lockedTitle}
             onChange={(id) => saveProjectField({ leadEmpId: id || null })}
             emptyLabel="不指定"
-            ariaLabel="專案負責人"
           />
         </div>
         <div>

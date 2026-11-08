@@ -12,6 +12,7 @@ import {
   getFixedAllowances,
   insuredHintText,
   midMonthHint,
+  overtimeBaseHint,
   staleNoticeText,
   TAX_TYPE_LABEL,
   updateFixedAllowance,
@@ -211,7 +212,7 @@ export function FixedAllowancesCard({
           </label>
           <label className="flex items-center gap-2 self-end pb-2 text-sm text-gray-600 sm:col-start-3">
             <input type="checkbox" checked={form.overtimeBase} onChange={(e) => patch({ overtimeBase: e.target.checked })} data-testid="fixed-allowance-overtime-base" />
-            計入加班費基數（月薪制：加班時薪 ＝（本薪＋計入的津貼）÷ 240）
+            {overtimeBaseHint(summary?.hourlyWageDivisor)}
           </label>
           {midHint && (
             <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 sm:col-span-3" data-testid="fixed-allowance-mid-month-hint">

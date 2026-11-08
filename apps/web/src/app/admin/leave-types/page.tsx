@@ -564,7 +564,6 @@ export default function LeaveTypesPage() {
               disabled={bossLocked}
               onChange={setFallbackEmpId}
               emptyLabel="（未設定：退回 HR）"
-              ariaLabel="簽核者"
             />
           </div>
           <PrimaryButton type="button" onClick={saveFallback} disabled={bossLocked || fallbackSaving || fallbackEmpId === fallbackSaved}>
