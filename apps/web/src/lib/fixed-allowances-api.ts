@@ -33,6 +33,8 @@ export interface FixedAllowance {
   effectiveFrom: string;
   effectiveTo: string | null;
   note: string | null;
+  /** 計入加班費時薪基數（月薪制；舊版 API 沒有＝計入）。 */
+  overtimeBase?: boolean;
   updatedAt: string;
 }
 
@@ -78,6 +80,7 @@ export interface FixedAllowanceBody {
   amount: number;
   insurable: boolean;
   taxType: AllowanceTaxType;
+  overtimeBase: boolean;
   effectiveFrom: string;
   effectiveTo: string | null;
   note: string | null;
@@ -138,6 +141,7 @@ export interface FixedAllowanceForm {
   amount: string;
   insurable: boolean;
   taxType: AllowanceTaxType;
+  overtimeBase: boolean;
   effectiveFrom: string;
   effectiveTo: string;
   note: string;
@@ -148,6 +152,7 @@ export const EMPTY_FIXED_ALLOWANCE_FORM: FixedAllowanceForm = {
   amount: "",
   insurable: true,
   taxType: "taxable",
+  overtimeBase: true,
   effectiveFrom: "",
   effectiveTo: "",
   note: "",
@@ -176,6 +181,7 @@ export function buildFixedAllowanceBody(
       amount,
       insurable: form.insurable,
       taxType: form.taxType,
+      overtimeBase: form.overtimeBase,
       effectiveFrom: form.effectiveFrom,
       effectiveTo: to || null,
       note: form.note.trim() || null,
@@ -189,6 +195,7 @@ export function formFromAllowance(a: FixedAllowance): FixedAllowanceForm {
     amount: String(a.amount),
     insurable: a.insurable,
     taxType: a.taxType,
+    overtimeBase: a.overtimeBase !== false,
     effectiveFrom: a.effectiveFrom,
     effectiveTo: a.effectiveTo ?? "",
     note: a.note ?? "",
@@ -229,7 +236,11 @@ export interface BreakdownAllowanceFields {
     taxType?: AllowanceTaxType;
     taxableAmount?: number;
     taxFreeAmount?: number;
+    overtimeBase?: boolean;
   }>;
+  /** 加班類給付的時薪基數（月薪制含計入加班基數的固定津貼）。 */
+  overtimeHourlyBase?: number;
+  hourlyWage?: number;
   fixedAllowancesTotal?: number;
   fixedAllowancesTaxable?: number;
   fixedAllowancesTaxFree?: number;

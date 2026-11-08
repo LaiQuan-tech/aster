@@ -439,7 +439,10 @@ function writeMoneySection(
   ws.getCell("O5").alignment = { horizontal: "center" }
   const metadata = [
     ["職稱", view.title ?? "—", "姓名", view.employeeName, "月份", view.period, "到職日", view.hireDate ?? "—"],
-    ["工號", view.employeeNo ?? "—", "部門", view.department ?? "—", "基準時薪", money.hourlyWage],
+    // 加班費的時薪基數：月薪制含計入加班基數的固定津貼時改標「加班時薪基數」（2026-11-08），否則照舊「基準時薪」。
+    money.overtimeHourlyBase !== undefined
+      ? ["工號", view.employeeNo ?? "—", "部門", view.department ?? "—", "加班時薪基數", money.overtimeHourlyBase]
+      : ["工號", view.employeeNo ?? "—", "部門", view.department ?? "—", "基準時薪", money.hourlyWage],
   ]
   metadata.forEach((values, rowIndex) => {
     const rowNumber = 6 + rowIndex

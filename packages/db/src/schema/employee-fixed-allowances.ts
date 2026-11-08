@@ -24,6 +24,8 @@ export const employeeFixedAllowances = pgTable(
     amount: integer("amount").notNull(),
     insurable: boolean("insurable").notNull().default(true),
     taxType: text("tax_type").notNull().default("taxable"),
+    // migration 0087：計入加班費時薪基數（月薪制）；預設 true。
+    overtimeBase: boolean("overtime_base").notNull().default(true),
     effectiveFrom: date("effective_from").notNull(),
     effectiveTo: date("effective_to"),
     note: text("note"),

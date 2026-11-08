@@ -37,6 +37,12 @@
  *   • 保險以投保薪資為基數,不受影響;「計入投保」的合計放 fixedAllowancesInsurable 供 HR 核對級距
  *   沒有有效津貼的薪資單不會出現任何 fixedAllowances* 欄位(輸出與以前完全相同)。
  *
+ * 加班時薪基數(2026-11-08 業主確認):月薪制的加班類給付 (平日延長、休息日、例假、國定假日／特休出勤——即所有
+ * overtime 規則——以及夜間加給) 改用 overtimeHourlyBase = round4((本薪 + 當月有效且「計入加班費基數」的固定津貼)
+ * ÷ hourlyWageDivisor);員工明示了 hourlyWage 的月薪制 = round4(明示時薪 + 該津貼合計 ÷ divisor)。
+ * 請假扣款、遲到早退扣款維持原本的 hourlyWage (不含津貼);時薪制／日薪制不攤入津貼。沒有計入加班基數的津貼
+ * → 與原本完全相同,且不出現 overtimeHourlyBase 欄位。
+ *
  * 勞退(2026-11-08):月提繳工資 pensionWage = 員工薪資資料「勞退月提繳工資」(有填就照填),留空 = (本薪 + 計入投保的
  * 固定津貼) 依勞退月提繳分級表 (rules.pension.wageBrackets,依 extras.period 選版;內建 114／115 年版) 向上取級距;
  * 時薪／日薪制 (沒有月本薪) 以當月本俸為基數;算不出來標 pensionWageMissing。手填值夾到分級表最高級。雇主提撥 employerPension = round(pensionWage × rules.pension.employerRate
@@ -121,6 +127,7 @@ export function splitFixedAllowances(
       amount,
       insurable: a.insurable === true,
       taxType,
+      overtimeBase: a.overtimeBase !== false,
       taxableAmount: amount - taxFreeAmount,
       taxFreeAmount,
     });
@@ -171,6 +178,36 @@ export function resolvePensionWage(
   if (levels.length === 0) return { wage: total, source: "auto" };
   for (const v of levels) if (v >= total) return { wage: v, source: "auto" };
   return { wage: max, source: "auto" };
+}
+
+/**
+ * 加班類給付的時薪基數 (純函式):月薪制 + 當月有效且 overtimeBase !== false 的固定津貼 (> 0) 才調整,否則 = hourlyWage。
+ *   • 沒明示時薪 → round4((本薪 + 津貼) ÷ divisor) (與 resolveHourlyWage 同一個捨入)
+ *   • 明示時薪   → round4(明示時薪 + 津貼 ÷ divisor)
+ * 時薪制／日薪制一律回 hourlyWage (津貼不攤入)。
+ */
+export function resolveOvertimeHourlyBase(
+  salary: SalaryStructure,
+  rules: RuleConfig,
+  method: PayrollMethod,
+  hourlyWage: number,
+  fixedAllowances: readonly FixedAllowanceInput[],
+): number {
+  if (method !== "monthly") return hourlyWage;
+  const otAllowances = overtimeBaseAllowanceTotal(fixedAllowances);
+  if (otAllowances <= 0) return hourlyWage;
+  const divisor = resolveHourlyWageDivisor(rules);
+  if (salary.hourlyWage !== undefined && salary.hourlyWage > 0) return round4(salary.hourlyWage + otAllowances / divisor);
+  if (salary.baseSalary !== undefined && salary.baseSalary > 0) return round4((salary.baseSalary + otAllowances) / divisor);
+  return hourlyWage;
+}
+
+/** 當月有效且「計入加班費基數」(overtimeBase !== false) 的固定津貼合計 (整數元;含伙食費,與課稅無關)。 */
+export function overtimeBaseAllowanceTotal(fixedAllowances: readonly FixedAllowanceInput[]): number {
+  return fixedAllowances.reduce((acc, a) => {
+    const amount = Math.round(Number(a.amount));
+    return acc + (a.overtimeBase !== false && Number.isFinite(amount) && amount > 0 ? amount : 0);
+  }, 0);
 }
 
 /** 時薪專用:四捨五入到小數 4 位 (客戶薪資表「平日每小時工資額」的精度)。 */
@@ -358,6 +395,8 @@ export function computePayslip(
   }
   const hourlyWage = resolveHourlyWage(salary, rules);
   const flatHourly = rules.payroll.overtimeFlatHourly;
+  // 加班類給付的時薪基數：月薪制＋計入加班基數的固定津貼（見檔頭）。請假／遲到早退扣款仍用 hourlyWage。
+  const overtimeHourly = resolveOvertimeHourlyBase(salary, rules, method, hourlyWage, extras.fixedAllowances ?? []);
 
   const isHourly = method === "hourly";
 
@@ -412,10 +451,10 @@ export function computePayslip(
     }
 
     // 法定 (該日規則) 的算法;例假 max_rest_day／國定假日 max_weekday 另算一個「比較用」的算法,取金額高者。
-    let chosen = priceOvertimeDay(rule, day.overtimeMinutes, day.compTimeMinutes, hourlyWage, flatHourly);
+    let chosen = priceOvertimeDay(rule, day.overtimeMinutes, day.compTimeMinutes, overtimeHourly, flatHourly);
     const alt = alternativeOvertimeBasis(day, when, rule, rules);
     if (alt) {
-      const altPriced = priceOvertimeDay(alt.rule, alt.minutes, day.compTimeMinutes, hourlyWage, flatHourly);
+      const altPriced = priceOvertimeDay(alt.rule, alt.minutes, day.compTimeMinutes, overtimeHourly, flatHourly);
       if (altPriced.amount > chosen.amount + 1e-9) chosen = altPriced;
     }
     compTimeMinutes += chosen.compMinutes;
@@ -433,7 +472,7 @@ export function computePayslip(
   // --- 夜間加給 ----------------------------------------------------------
   const totalNightMinutes = days.reduce((acc, d) => acc + d.nightMinutes, 0);
   const nightPay = round(
-    (totalNightMinutes / 60) * hourlyWage * rules.night.multiplier,
+    (totalNightMinutes / 60) * overtimeHourly * rules.night.multiplier,
   );
 
   // --- 全勤獎金 (全月累計遲到 → 階梯扣款,從 base 扣) ----------------------
@@ -625,6 +664,8 @@ export function computePayslip(
     base,
     regularPay: base,
     hourlyWage,
+    // 只有月薪制且有計入加班基數的固定津貼時才帶（加班費／夜間加給用這個時薪；沒有就與以前相同）。
+    ...(overtimeHourly !== hourlyWage ? { overtimeHourlyBase: overtimeHourly } : {}),
     overtimePay,
     nightPay,
     attendanceBonus,

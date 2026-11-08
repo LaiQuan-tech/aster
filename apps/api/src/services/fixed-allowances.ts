@@ -1,6 +1,6 @@
 import { activeFixedAllowancesForPeriod, type FixedAllowanceInput, type FixedAllowanceRowLike } from "@hr/rules"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { columnsExist, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { chunk, fetchAllPages } from "../lib/select-all-pages.js"
 import { logger } from "../lib/logger.js"
 
@@ -17,6 +17,16 @@ import { logger } from "../lib/logger.js"
 export const FIXED_ALLOWANCE_COLS =
   "id, tenant_id, employee_id, name, amount, insurable, tax_type, effective_from, effective_to, note, created_at, updated_at"
 
+/** migration 0087（2026-11-08）：計入加班費基數。 */
+export const OVERTIME_BASE_COL = "overtime_base"
+
+/** 固定津貼的 select 欄位：0087 已套用才帶 overtime_base（沒套時 select 不存在的欄位會 500；沒有＝視為 true）。 */
+export async function fixedAllowanceSelectCols(): Promise<string> {
+  return (await columnsExist("employee_fixed_allowances", OVERTIME_BASE_COL))
+    ? `${FIXED_ALLOWANCE_COLS}, ${OVERTIME_BASE_COL}`
+    : FIXED_ALLOWANCE_COLS
+}
+
 export interface FixedAllowanceRow {
   id: string
   tenant_id: string
@@ -30,6 +40,8 @@ export interface FixedAllowanceRow {
   note: string | null
   created_at: string
   updated_at: string
+  /** migration 0087；未套用時沒有（＝計入）。 */
+  overtime_base?: boolean | null
 }
 
 export interface FixedAllowanceView {
@@ -42,6 +54,8 @@ export interface FixedAllowanceView {
   effectiveFrom: string
   effectiveTo: string | null
   note: string | null
+  /** 計入加班費時薪基數（月薪制）；0087 未套用時一律 true。 */
+  overtimeBase: boolean
   updatedAt: string
 }
 
@@ -56,6 +70,7 @@ export function toFixedAllowanceView(row: FixedAllowanceRow): FixedAllowanceView
     effectiveFrom: String(row.effective_from).slice(0, 10),
     effectiveTo: row.effective_to ? String(row.effective_to).slice(0, 10) : null,
     note: row.note ?? null,
+    overtimeBase: row.overtime_base !== false,
     updatedAt: row.updated_at,
   }
 }
@@ -80,12 +95,13 @@ export async function loadFixedAllowanceRows(
   range?: { from: string; to: string },
 ): Promise<FixedAllowanceRow[]> {
   if (employeeIds.length === 0) return []
+  const cols = await fixedAllowanceSelectCols()
   const out: FixedAllowanceRow[] = []
   for (const ids of chunk([...new Set(employeeIds)], 100)) {
     const res = await fetchAllPages<FixedAllowanceRow>((from, to) => {
       let q = supabaseAdmin
         .from("employee_fixed_allowances")
-        .select(FIXED_ALLOWANCE_COLS)
+        .select(cols)
         .eq("tenant_id", tenantId)
         .in("employee_id", ids)
         .is("deleted_at", null)
@@ -138,9 +154,10 @@ type ComparableAllowance = {
   amount?: number | string | null
   insurable?: boolean | null
   taxType?: string | null
+  overtimeBase?: boolean | null
 }
 
-/** 一筆津貼的指紋：id、名稱、金額（整數元）、計入投保、課稅方式。備註、起迄日不進薪資單，不算（起迄日影響的是「當月有沒有」）。 */
+/** 一筆津貼的指紋：id、名稱、金額（整數元）、計入投保、課稅方式、計入加班基數（舊薪資單沒有這鍵＝計入）。備註、起迄日不進薪資單，不算（起迄日影響的是「當月有沒有」）。 */
 function allowanceFingerprint(item: ComparableAllowance): string {
   return [
     item.id ?? "",
@@ -148,6 +165,7 @@ function allowanceFingerprint(item: ComparableAllowance): string {
     String(Math.round(Number(item.amount ?? 0))),
     item.insurable === true ? "1" : "0",
     item.taxType === "meal_exempt" ? "meal_exempt" : "taxable",
+    item.overtimeBase === false ? "ot0" : "ot1",
   ].join("|")
 }
 

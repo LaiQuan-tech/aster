@@ -233,6 +233,8 @@ export interface FixedAllowanceInput {
    */
   insurable: boolean;
   taxType: FixedAllowanceTaxType;
+  /** 是否計入加班費時薪基數 (經常性給與;與課稅無關)。預設 true;只影響月薪制。 */
+  overtimeBase?: boolean;
 }
 
 /** 薪資單上的一筆固定津貼 (引擎輸出,存進 payslips.breakdown.fixedAllowances)。 */
@@ -243,6 +245,8 @@ export interface PayslipFixedAllowanceLine {
   amount: number;
   insurable: boolean;
   taxType: FixedAllowanceTaxType;
+  /** 計入加班費時薪基數。 */
+  overtimeBase: boolean;
   /** 應稅部分 (已計入 gross)。 */
   taxableAmount: number;
   /** 免稅部分 (只有伙食費會有;不進 gross,直接加在 net)。 */
@@ -321,6 +325,11 @@ export interface PayslipBreakdown {
    * hourlyWageDivisor (四捨五入到小數 4 位,例 37000 ÷ 240 = 154.1667)。
    */
   hourlyWage: number;
+  /**
+   * 加班類給付 (加班費、夜間加給) 採用的時薪基數 (2026-11-08):月薪制 + 計入加班基數的固定津貼。
+   * 只有與 hourlyWage 不同時才有;請假／遲到早退扣款仍用 hourlyWage。
+   */
+  overtimeHourlyBase?: number;
   /** 加班費現金總額 (compTime 的部分不計入此)。 */
   overtimePay: number;
   /** 夜間加給總額。 */

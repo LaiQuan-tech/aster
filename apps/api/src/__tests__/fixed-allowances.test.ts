@@ -7,6 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
 
 import { clearTenantTimezoneCache } from "../lib/tenant-tz.js"
+import { resetColumnProbeCache } from "../lib/schema-compat.js"
 import { periodClosedErrorHandler } from "../middleware/period-closed.js"
 import { fixedAllowancesRouter } from "../routes/fixed-allowances.js"
 import { payrollRouter } from "../routes/payroll.js"
@@ -600,5 +601,95 @@ describe("最後一輪：定案後複查失敗退回草稿、定案中勞退設�
     expect(res.status, JSON.stringify(res.body)).toBe(201)
     expect(res.body.stalePeriods).toEqual([])
     expect(fake.db.employee_fixed_allowances).toHaveLength(1)
+  })
+})
+
+describe("加班費時薪基數含固定津貼（2026-11-08）", () => {
+  const otDay = (date: string): Row => ({
+    id: `ad-${date}`, tenant_id: TENANT_ID, employee_id: EMP, work_date: date, worked_minutes: 600, late_minutes: 0,
+    overtime_minutes: 120, night_minutes: 0, day_type: "workday", anomaly: null,
+  })
+
+  it("預設計入：本薪 40,000 ＋ 3,000 → 加班時薪 179.1667，breakdown 帶 overtimeHourlyBase；基準時薪 166.6667 不變", async () => {
+    fake.db.attendance_days = [otDay(`${OCT}-02`)]
+    await runPayroll(OCT, EMP)
+    const before = bd(EMP).overtimePay as number
+    const created = await create()
+    expect(created.body.fixedAllowance.overtimeBase).toBe(true)
+    await runPayroll(OCT, EMP)
+    const b = bd(EMP)
+    expect(b.hourlyWage).toBe(166.6667)
+    expect(b.overtimeHourlyBase).toBe(179.1667)
+    expect(b.overtimePay).toBeGreaterThan(before)
+    expect(b.fixedAllowances[0].overtimeBase).toBe(true)
+  })
+
+  it("取消計入 → 加班費回到不含津貼；草稿因指紋改變而過期", async () => {
+    fake.db.attendance_days = [otDay(`${OCT}-02`)]
+    await runPayroll(OCT, EMP)
+    const noAllowance = bd(EMP).overtimePay as number
+    const id = (await create()).body.fixedAllowance.id as string
+    await runPayroll(OCT, EMP)
+    const patched = await as(T.hr).patch(`/fixed-allowances/${id}`).send({ overtimeBase: false })
+    expect(patched.status, JSON.stringify(patched.body)).toBe(200)
+    expect(patched.body.fixedAllowance.overtimeBase).toBe(false)
+    expect(patched.body.stalePeriods).toEqual([OCT])
+    expect((await as(T.hr).post(`/payslips/${slipOf(EMP).id as string}/finalize`)).body.error).toBe("fixed_allowances_stale")
+    await runPayroll(OCT, EMP)
+    expect(bd(EMP).overtimePay).toBe(noAllowance)
+    expect(bd(EMP).overtimeHourlyBase).toBeUndefined()
+  })
+
+  it("migration 0087 未套用（overtime_base 欄位不存在）→ 不 500、視為計入；要存「不計入」回 409 migration_required", async () => {
+    resetColumnProbeCache()
+    const realFrom = fake.from
+    fake.from = ((t: string) => {
+      const b = realFrom(t)
+      if (t !== "employee_fixed_allowances") return b
+      const origSelect = b.select
+      b.select = (cols?: string) => {
+        if (cols && cols.includes("overtime_base")) fake.injectError({ table: t, action: "select", error: { code: "42703", message: "column overtime_base does not exist" } })
+        return origSelect(cols)
+      }
+      return b
+    }) as typeof fake.from
+    try {
+      fake.db.attendance_days = [otDay(`${OCT}-02`)]
+      fake.db.employee_fixed_allowances = [allowanceRow()]
+      const res = await runPayroll(OCT, EMP)
+      expect(res.status, JSON.stringify(res.body)).toBe(201)
+      expect(bd(EMP).overtimeHourlyBase).toBe(179.1667)
+      const list = await as(T.hr).get(`/salary/${EMP}/fixed-allowances`)
+      expect(list.status).toBe(200)
+      expect(list.body.fixedAllowances[0].overtimeBase).toBe(true)
+      const rejected = await create({ overtimeBase: false })
+      expect(rejected.status).toBe(409)
+      expect(rejected.body.error).toBe("migration_required")
+    } finally {
+      fake.from = realFrom
+      resetColumnProbeCache()
+    }
+  })
+
+  it("出勤月表試算的超額另計金額與薪資單同一個加班基數（beyondCapSettlementAmount 帶入津貼）", async () => {
+    const { beyondCapSettlementAmount } = await import("../services/attendance-sheets.js")
+    const { parseRuleConfig } = await import("@hr/rules")
+    const rules = parseRuleConfig({
+      attendance_bonus: { base: 0, tiers: [{ lateMinutesUpTo: null, deduct: 0 }] },
+      overtime: { rules: [{ when: "weekday_ot", multiplier: 1 }] },
+      night: { window: { from: "22:00", to: "06:00" }, multiplier: 0.2 },
+      payroll: { method: "monthly", dailyRegularHours: 8 },
+    })
+    const day = { date: `${OCT}-02`, workedMinutes: 600, lateMinutes: 0, overtimeMinutes: 120, nightMinutes: 0, dayType: "workday" as const }
+    const capped = [{ ...day, overtimeMinutes: 60 }]
+    const salaryS = { method: "monthly" as const, baseSalary: 48000 }
+    const plain = beyondCapSettlementAmount({ salary: salaryS, rules, features: null }, capped, [day])
+    const withAllowance = beyondCapSettlementAmount(
+      { salary: salaryS, rules, features: null, period: OCT, fixedAllowances: [{ name: "職務加給", amount: 2400, insurable: true, taxType: "taxable" }] },
+      capped,
+      [day],
+    )
+    expect(plain.amount).toBe(200) // 1h × 48,000 ÷ 240
+    expect(withAllowance.amount).toBe(210) // 1h × 50,400 ÷ 240
   })
 })

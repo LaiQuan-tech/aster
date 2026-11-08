@@ -438,7 +438,8 @@ export function buildPayslipStatementGrid(data: StatementData): StatementGrid {
   const H = T + 1
   const grossShown = money && wageSum != null && welfareSum != null && otSum != null ? wageSum + otSum + welfareSum : null
   g.set(H, 0, { value: "平日每小時工資額", colSpan: 2, size: 16, bold: true, ...center })
-  g.set(H, 2, { ...amt(money?.hourlyWage, "dec1"), colSpan: 2, ...center })
+  // 平日每小時工資額＝加班費的計算基數（月薪制含計入加班基數的固定津貼；2026-11-08）。
+  g.set(H, 2, { ...amt(money ? (money.overtimeHourlyBase ?? money.hourlyWage) : null, "dec1"), colSpan: 2, ...center })
   g.set(H, 4, { value: "應發薪資", colSpan: 2, size: 16, bold: true, ...center })
   g.set(H, 6, amt(grossShown, "int"))
   g.set(H, 7, { value: "實發金額", colSpan: 2, size: 16, bold: true, ...center })

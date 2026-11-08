@@ -3,6 +3,7 @@ import {
   buildFixedAllowanceBody,
   EMPTY_FIXED_ALLOWANCE_FORM,
   fixedAllowanceDisplayOf,
+  formFromAllowance,
   insuredHintText,
   laborCostOf,
   midMonthHint,
@@ -24,7 +25,7 @@ describe("buildFixedAllowanceBody", () => {
   it("合法表單 → body（迄日空白＝null、備註空白＝null）", () => {
     expect(buildFixedAllowanceBody(form())).toEqual({
       ok: true,
-      body: { name: "職務加給", amount: 3000, insurable: true, taxType: "taxable", effectiveFrom: "2030-03-01", effectiveTo: null, note: null },
+      body: { name: "職務加給", amount: 3000, insurable: true, taxType: "taxable", overtimeBase: true, effectiveFrom: "2030-03-01", effectiveTo: null, note: null },
     });
   });
   it("金額要 0 以上整數；名稱必填；迄日不可早於起日", () => {
@@ -132,5 +133,16 @@ describe("第三輪：手填提繳工資檢查、時薪制提示", () => {
     const p = { autoWage: null, levelsEffectiveFrom: "2026-01-01", manualWage: null, newSystem: true, nationality: null, nationalityHint: null };
     expect(pensionWageHintText({ ...p, method: "hourly" }, "")).toContain("當月本俸");
     expect(pensionWageHintText({ ...p, method: "monthly" }, "")).toContain("算不出勞退提繳工資");
+  });
+});
+
+describe("加班費基數勾選框（2026-11-08）", () => {
+  it("預設計入；取消勾選 → body.overtimeBase false；舊版 API 沒帶這欄 → 表單視為計入", () => {
+    expect(EMPTY_FIXED_ALLOWANCE_FORM.overtimeBase).toBe(true);
+    const r = buildFixedAllowanceBody(form({ overtimeBase: false }));
+    expect(r.ok && r.body.overtimeBase).toBe(false);
+    expect(
+      formFromAllowance({ id: "x", employeeId: "e", name: "a", amount: 1, insurable: true, taxType: "taxable", effectiveFrom: "2030-01-01", effectiveTo: null, note: null, updatedAt: "" }).overtimeBase,
+    ).toBe(true);
   });
 });

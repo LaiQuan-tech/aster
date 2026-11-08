@@ -12,13 +12,14 @@ import { requireTenant } from "../middleware/tenant.js"
 import { requireHrAdmin } from "../middleware/role.js"
 import { resolveSelf } from "../middleware/scope.js"
 import { supabaseAdmin } from "../lib/supabase.js"
-import { isMissingTableError } from "../lib/schema-compat.js"
+import { columnsExist, isMissingTableError } from "../lib/schema-compat.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { todayKey } from "../lib/tz.js"
 import { writeAuditLog } from "../services/audit.js"
 import { loadRuleConfigFor, salarySelectCols, toSalaryStructure, type SalaryRow } from "../services/payroll-inputs.js"
 import {
-  FIXED_ALLOWANCE_COLS,
+  fixedAllowanceSelectCols,
+  OVERTIME_BASE_COL,
   loadFixedAllowanceRows,
   staleDraftPayslipsSafe,
   toFixedAllowanceView,
@@ -74,6 +75,8 @@ const createSchema = z.object({
   amount: amountSchema,
   insurable: z.boolean().optional(),
   taxType: taxTypeSchema.optional(),
+  // 計入加班費時薪基數（月薪制，2026-11-08）；預設 true。
+  overtimeBase: z.boolean().optional(),
   effectiveFrom: dateSchema,
   effectiveTo: dateSchema.nullable().optional(),
   note: noteSchema.nullable().optional(),
@@ -85,6 +88,7 @@ const patchSchema = z
     amount: amountSchema.optional(),
     insurable: z.boolean().optional(),
     taxType: taxTypeSchema.optional(),
+    overtimeBase: z.boolean().optional(),
     effectiveFrom: dateSchema.optional(),
     effectiveTo: dateSchema.nullable().optional(),
     note: noteSchema.nullable().optional(),
@@ -180,6 +184,19 @@ async function pensionSummary(tenantId: string, employeeId: string, period: stri
   }
 }
 
+/**
+ * migration 0087 未套用時的「計入加班費基數」：沒帶或帶 true → 照常（欄位不存在＝一律計入）；帶 false → 409，
+ * 因為存不進去、又不能假裝成功。回傳 null＝可繼續（otColumn 表示欄位存不存在）。
+ */
+async function overtimeBaseGuard(res: Response, value: boolean | undefined): Promise<{ otColumn: boolean } | null> {
+  const otColumn = await columnsExist(TABLE, OVERTIME_BASE_COL)
+  if (!otColumn && value === false) {
+    res.status(409).json({ error: "migration_required", message: "「計入加班費基數」欄位尚未套用（migration 0087）" })
+    return null
+  }
+  return { otColumn }
+}
+
 function auditShape(v: FixedAllowanceView) {
   return {
     employee_id: v.employeeId,
@@ -187,6 +204,7 @@ function auditShape(v: FixedAllowanceView) {
     amount: v.amount,
     insurable: v.insurable,
     tax_type: v.taxType,
+    overtime_base: v.overtimeBase,
     effective_from: v.effectiveFrom,
     effective_to: v.effectiveTo,
     note: v.note,
@@ -261,6 +279,9 @@ fixedAllowancesRouter.post(
         res.status(404).json({ error: "not_found" })
         return
       }
+      const guard = await overtimeBaseGuard(res, body.overtimeBase)
+      if (!guard) return
+      const { otColumn } = guard
       const actorEmpId = await callerEmpId(req, tenantId)
       const { data, error } = await supabaseAdmin
         .from(TABLE)
@@ -271,12 +292,13 @@ fixedAllowancesRouter.post(
           amount: body.amount,
           insurable: body.insurable ?? true,
           tax_type: body.taxType ?? "taxable",
+          ...(body.overtimeBase !== undefined && otColumn ? { overtime_base: body.overtimeBase } : {}),
           effective_from: body.effectiveFrom,
           effective_to: body.effectiveTo ?? null,
           note: body.note ? body.note : null,
           created_by_emp_id: actorEmpId,
         })
-        .select(FIXED_ALLOWANCE_COLS)
+        .select(await fixedAllowanceSelectCols())
         .single()
       if (error || !data) {
         if (isMissingTableError(error)) {
@@ -307,7 +329,7 @@ fixedAllowancesRouter.post(
 async function loadOne(tenantId: string, id: string): Promise<FixedAllowanceRow | null | "missing_table"> {
   const { data, error } = await supabaseAdmin
     .from(TABLE)
-    .select(FIXED_ALLOWANCE_COLS)
+    .select(await fixedAllowanceSelectCols())
     .eq("tenant_id", tenantId)
     .eq("id", id)
     .is("deleted_at", null)
@@ -357,6 +379,11 @@ fixedAllowancesRouter.patch(
       if (body.amount !== undefined) patch.amount = body.amount
       if (body.insurable !== undefined) patch.insurable = body.insurable
       if (body.taxType !== undefined) patch.tax_type = body.taxType
+      if (body.overtimeBase !== undefined) {
+        const guard = await overtimeBaseGuard(res, body.overtimeBase)
+        if (!guard) return
+        if (guard.otColumn) patch.overtime_base = body.overtimeBase
+      }
       if (body.effectiveFrom !== undefined) patch.effective_from = body.effectiveFrom
       if (body.effectiveTo !== undefined) patch.effective_to = body.effectiveTo
       if (body.note !== undefined) patch.note = body.note ? body.note : null
@@ -367,7 +394,7 @@ fixedAllowancesRouter.patch(
         .eq("tenant_id", tenantId)
         .eq("id", id)
         .is("deleted_at", null)
-        .select(FIXED_ALLOWANCE_COLS)
+        .select(await fixedAllowanceSelectCols())
         .maybeSingle()
       if (error) {
         next(new Error(`PATCH /fixed-allowances/${id}: ${error.message}`))

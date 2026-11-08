@@ -117,6 +117,8 @@ export {
   employerPensionOf,
   resolveAttendanceDeduction,
   resolvePensionWage,
+  resolveOvertimeHourlyBase,
+  overtimeBaseAllowanceTotal,
   splitFixedAllowances,
 } from "./payroll-engine.js";
 export {

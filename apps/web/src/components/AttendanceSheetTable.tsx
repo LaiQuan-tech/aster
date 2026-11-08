@@ -736,7 +736,10 @@ function MoneyCard({ money: m, tierLabels }: { money: SheetMoney; tierLabels: [s
   return (
     <div className="rounded-xl border border-gray-100 bg-white p-4 shadow-sm">
       <p className="mb-3 text-sm font-semibold text-gray-700">薪資試算</p>
-      <p className="mb-3 text-xs text-gray-500">基準時薪 {money(m.hourlyWage)}</p>
+      <p className="mb-3 text-xs text-gray-500">
+        基準時薪 {money(m.hourlyWage)}
+        {m.overtimeHourlyBase !== undefined && <>　加班時薪基數 {money(m.overtimeHourlyBase)}（含固定津貼）</>}
+      </p>
       <div className="grid gap-4 text-sm md:grid-cols-3">
         {sections.map((section) => (
           <section key={section.title} aria-label={section.title}>

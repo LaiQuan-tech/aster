@@ -27,6 +27,8 @@ export interface FixedAllowanceRowLike {
   amount: number | string;
   insurable: boolean;
   tax_type: string;
+  /** migration 0087:計入加班費基數;欄位不存在 (未套用) 或 NULL → 視為 true。 */
+  overtime_base?: boolean | null;
   /** 'YYYY-MM-DD' */
   effective_from: string;
   /** 'YYYY-MM-DD' 或 null (= 無迄日) */
@@ -63,6 +65,7 @@ export function activeFixedAllowancesForPeriod(
       amount,
       insurable: row.insurable === true,
       taxType: row.tax_type as FixedAllowanceTaxType,
+      overtimeBase: row.overtime_base !== false,
     });
   }
   return out;

@@ -209,6 +209,10 @@ export function FixedAllowancesCard({
             <input type="checkbox" checked={form.insurable} onChange={(e) => patch({ insurable: e.target.checked })} />
             計入投保薪資（經常性給與）
           </label>
+          <label className="flex items-center gap-2 self-end pb-2 text-sm text-gray-600 sm:col-start-3">
+            <input type="checkbox" checked={form.overtimeBase} onChange={(e) => patch({ overtimeBase: e.target.checked })} data-testid="fixed-allowance-overtime-base" />
+            計入加班費基數（月薪制：加班時薪 ＝（本薪＋計入的津貼）÷ 240）
+          </label>
           {midHint && (
             <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 sm:col-span-3" data-testid="fixed-allowance-mid-month-hint">
               {midHint}
@@ -250,6 +254,7 @@ export function FixedAllowancesCard({
             <th className="py-1.5 pr-3 text-right">月金額</th>
             <th className="py-1.5 pr-3">課稅</th>
             <th className="py-1.5 pr-3">計入投保</th>
+            <th className="py-1.5 pr-3">計入加班基數</th>
             <th className="py-1.5 pr-3">生效期間</th>
             <th className="py-1.5">操作</th>
           </tr>
@@ -264,6 +269,7 @@ export function FixedAllowancesCard({
               <td className="py-1.5 pr-3 text-right tabular-nums">{fmt(a.amount)}</td>
               <td className="py-1.5 pr-3 text-xs text-gray-600">{a.taxType === "meal_exempt" ? "伙食費" : "應稅"}</td>
               <td className="py-1.5 pr-3 text-xs text-gray-600">{a.insurable ? "是" : "否"}</td>
+              <td className="py-1.5 pr-3 text-xs text-gray-600">{a.overtimeBase === false ? "否" : "是"}</td>
               <td className="py-1.5 pr-3 text-xs text-gray-600">
                 {a.effectiveFrom} ～ {a.effectiveTo ?? "（無迄日）"}
               </td>
@@ -279,7 +285,7 @@ export function FixedAllowancesCard({
           ))}
           {items.length === 0 && (
             <tr>
-              <td colSpan={6} className="py-1.5 text-gray-400">
+              <td colSpan={7} className="py-1.5 text-gray-400">
                 無
               </td>
             </tr>

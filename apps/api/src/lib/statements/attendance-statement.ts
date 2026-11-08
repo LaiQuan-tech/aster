@@ -154,13 +154,13 @@ export function buildAttendanceStatementGrid(data: StatementData): StatementGrid
   g.set(f + 1, 0, { value: "加保日：", ...center })
   g.set(f + 1, 1, { value: rocDate(data.insuredSince), ...center })
   g.set(f + 1, 5, { value: "加班費", align: "right" })
-  g.set(f + 1, 6, moneyCell(money ? money.hourlyWage * OT_RATE_FIRST : null, { format: "num0", align: "left" }))
+  g.set(f + 1, 6, moneyCell(money ? (money.overtimeHourlyBase ?? money.hourlyWage) * OT_RATE_FIRST : null, { format: "num0", align: "left" }))
 
   // 第 3 列：給付日期／薪資月份（每小時 ×1.666667）
   g.set(f + 2, 0, { value: "給付日期:", ...center })
   g.set(f + 2, 1, { value: rocDate(data.payDate), align: "left" })
   g.set(f + 2, 2, { value: `薪資月份:${rocPeriodPadded(data.period)}`, colSpan: 2, align: "right" })
-  g.set(f + 2, 6, moneyCell(money ? money.hourlyWage * OT_RATE_NEXT : null, { format: "num0", align: "left" }))
+  g.set(f + 2, 6, moneyCell(money ? (money.overtimeHourlyBase ?? money.hourlyWage) * OT_RATE_NEXT : null, { format: "num0", align: "left" }))
 
   // 第 4–5 列：小結
   const h = f + 3

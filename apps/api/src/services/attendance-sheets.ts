@@ -1853,7 +1853,7 @@ export const BEYOND_CAP_MISSING_SALARY_HINT = "缺薪資資料，金額未計"
  * 國定假日取高者等規則也一致。員工沒有薪資資料 → amount null、reason 'missing_salary'。
  */
 export function beyondCapSettlementAmount(
-  inputs: Pick<EmployeePayrollInputs, "salary" | "rules" | "features"> | null,
+  inputs: (Pick<EmployeePayrollInputs, "salary" | "rules" | "features"> & Partial<Pick<EmployeePayrollInputs, "fixedAllowances" | "period">>) | null,
   cappedDays: AttendanceDayInput[],
   uncappedDays: AttendanceDayInput[],
 ): BeyondCapAmount {
@@ -1861,7 +1861,11 @@ export function beyondCapSettlementAmount(
   try {
     const otPay = (days: AttendanceDayInput[]) => {
       const policy = applyNightPolicy(inputs.features, days, inputs.rules)
-      return computePayslip(policy.days, inputs.salary as SalaryStructure, policy.rules).overtimePay
+      // 加班時薪基數含計入的固定津貼（2026-11-08）：另計金額與薪資單加班費用同一個基數。
+      return computePayslip(policy.days, inputs.salary as SalaryStructure, policy.rules, 0, 0, [], {
+        fixedAllowances: inputs.fixedAllowances ?? [],
+        period: inputs.period,
+      }).overtimePay
     }
     return { amount: round2(Math.max(0, otPay(uncappedDays) - otPay(cappedDays))) }
   } catch {
@@ -1874,6 +1878,8 @@ function toMoney(breakdown: ReturnType<typeof computePayslip>, rules: RuleConfig
   return {
     base: breakdown.base,
     hourlyWage: breakdown.hourlyWage,
+    // 加班類給付的時薪基數（月薪制含計入的固定津貼；2026-11-08）。沒有＝同 hourlyWage。
+    ...(breakdown.overtimeHourlyBase !== undefined ? { overtimeHourlyBase: breakdown.overtimeHourlyBase } : {}),
     otPay: breakdown.overtimePay,
     otPayByTier: otPayByTierFromSegments(breakdown.overtimeSegments, rules),
     nightPay: breakdown.nightPay,

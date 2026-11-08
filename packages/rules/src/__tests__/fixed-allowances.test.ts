@@ -79,7 +79,7 @@ describe("固定津貼：應稅", () => {
     expect(b.fixedAllowancesTaxable).toBe(3000);
     expect(b.fixedAllowancesTaxFree).toBe(0);
     expect(b.fixedAllowances).toEqual([
-      { name: "職務加給", amount: 3000, insurable: true, taxType: "taxable", taxableAmount: 3000, taxFreeAmount: 0 },
+      { name: "職務加給", amount: 3000, insurable: true, taxType: "taxable", overtimeBase: true, taxableAmount: 3000, taxFreeAmount: 0 },
     ]);
     expect(sumLines(b)).toBe(b.net);
   });
@@ -192,7 +192,7 @@ describe("固定津貼：生效期間", () => {
   it("迄日在上個月 → 不帶入；迄日在當月第一天 → 帶入（月中終止當月照全額）", () => {
     expect(activeFixedAllowancesForPeriod([row({ effective_from: "2030-01-01", effective_to: "2030-02-28" })], "2030-03")).toHaveLength(0);
     expect(activeFixedAllowancesForPeriod([row({ effective_from: "2030-01-01", effective_to: "2030-03-01" })], "2030-03")).toEqual([
-      { id: "fa-1", name: "職務加給", amount: 3000, insurable: true, taxType: "taxable" },
+      { id: "fa-1", name: "職務加給", amount: 3000, insurable: true, taxType: "taxable", overtimeBase: true },
     ]);
   });
 
@@ -367,7 +367,7 @@ describe("回歸：沒有固定津貼的員工與改動前完全一致", () => {
 describe("splitFixedAllowances", () => {
   it("金額先四捨五入到元、0 與負數略過", () => {
     expect(splitFixedAllowances([allowance({ amount: 1000.4 }), allowance({ amount: 0 }), allowance({ amount: -5 })])).toEqual([
-      { name: "職務加給", amount: 1000, insurable: true, taxType: "taxable", taxableAmount: 1000, taxFreeAmount: 0 },
+      { name: "職務加給", amount: 1000, insurable: true, taxType: "taxable", overtimeBase: true, taxableAmount: 1000, taxFreeAmount: 0 },
     ]);
   });
 });

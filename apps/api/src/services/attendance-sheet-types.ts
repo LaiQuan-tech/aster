@@ -168,6 +168,8 @@ export interface SheetMoney {
   netPlusExpenses: number
   /** 固定津貼的免稅部分（伙食費免稅額內；已含在 net／netPlusExpenses、不在 gross）。舊快照沒有＝0。 */
   fixedAllowancesTaxFree?: number
+  /** 加班類給付的時薪基數（月薪制含計入加班基數的固定津貼）；與 hourlyWage 相同時沒有。 */
+  overtimeHourlyBase?: number
 }
 
 /** Full sheet view returned by GET /attendance-sheets/:id (and similar). */
