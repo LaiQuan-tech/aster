@@ -313,14 +313,33 @@ const AttendanceSchema = z
 
 // 勞退 (2026-11-08):勞工退休金條例 §14 I 雇主每月提繳率「不得低於」6%;雇主提撥與勞工自提**同一個基數**(月提繳工資)。
 //   employerRate  雇主提撥率,以比例儲存 (0.06 = 6%);允許 0.06–1 (上限 100% 防呆)。省略 = 0.06。
-//   wageBrackets  勞工退休金月提繳分級表 (含生效日,可逐年調整);每組 levels 由小到大。省略 = 系統內建
-//                 DEFAULT_PENSION_WAGE_BRACKETS (勞動部 114-11-24 勞動福3字第1140153598號令,115-01-01 生效)。
+//   wageBrackets  勞工退休金月提繳分級表 (含生效日,可逐年調整);每組 levels 由小到大。省略 (或規則裡全部晚於計算月份)
+//                 = 系統內建 DEFAULT_PENSION_WAGE_BRACKETS,依月份選版:114 年版 (2025-01-01 起)、115 年版 (2026-01-01 起)。
 // 月提繳工資:員工薪資資料「勞退月提繳工資」有填就照填 (HR 申報值優先);留空 = (本薪 + 計入投保的固定津貼)
 // 依分級表向上取到級距 (payroll-engine resolvePensionWage)。
 // 雇主提撥是公司成本,不從員工實發扣除;只記在薪資單 breakdown 的「公司負擔」區 (employerPension)。
 export const PENSION_EMPLOYER_RATE_MIN = 0.06;
 export const PENSION_EMPLOYER_RATE_MAX = 1;
 export const DEFAULT_PENSION_EMPLOYER_RATE = 0.06;
+
+/**
+ * 勞工退休金月提繳分級表 (114 年 1 月 1 日生效,共 62 級;第 1 級 1,500 元、第 62 級 150,000 元;第 25 級 28,800)。
+ * 來源:勞動部 113 年 11 月 18 日勞動福3字第1130153681號令;勞保局「勞退月提繳分級表」
+ * https://www.bli.gov.tw/0101077.html (檔案 https://www.bli.gov.tw/Files/24831)。
+ */
+export const PENSION_WAGE_LEVELS_2025: readonly number[] = [
+  1500, 3000, 4500, 6000, 7500,
+  8700, 9900, 11100, 12540, 13500,
+  15840, 16500, 17280, 17880, 19047, 20008, 21009, 22000, 23100,
+  24000, 25250, 26400, 27600, 28590, 28800,
+  30300, 31800, 33300, 34800, 36300,
+  38200, 40100, 42000, 43900, 45800,
+  48200, 50600, 53000, 55400, 57800,
+  60800, 63800, 66800, 69800, 72800,
+  76500, 80200, 83900, 87600,
+  92100, 96600, 101100, 105600, 110100,
+  115500, 120900, 126300, 131700, 137100, 142500, 147900, 150000,
+];
 
 /**
  * 勞工退休金月提繳分級表 (115 年 1 月 1 日生效,共 62 級;第 1 級 1,500 元、第 62 級 150,000 元)。
@@ -348,7 +367,9 @@ const PensionWageBracketSetSchema = z.object({
 });
 export type PensionWageBracketSet = z.infer<typeof PensionWageBracketSetSchema>;
 
+/** 系統內建的分級表 (依生效日由舊到新);早於最舊一版的月份也用最舊一版 (114 年版)。 */
 export const DEFAULT_PENSION_WAGE_BRACKETS: readonly PensionWageBracketSet[] = [
+  { effectiveFrom: "2025-01-01", levels: [...PENSION_WAGE_LEVELS_2025] },
   { effectiveFrom: "2026-01-01", levels: [...PENSION_WAGE_LEVELS_2026] },
 ];
 
@@ -695,17 +716,25 @@ export function resolvePensionEmployerRate(rules: RuleConfig): number {
   return Math.min(PENSION_EMPLOYER_RATE_MAX, Math.max(PENSION_EMPLOYER_RATE_MIN, r));
 }
 
-/**
- * 某日適用的勞退月提繳分級表 (由小到大):規則設了 wageBrackets 就取生效日 ≤ date 的最新一組;
- * 沒設、或規則裡全部晚於 date → 系統內建 (115 年版)。
- */
-export function resolvePensionWageLevels(rules: RuleConfig, date: string): { effectiveFrom: string; levels: number[] } {
+/** 一串分級表裡生效日 ≤ date 的最新一組;沒有 → null。 */
+function pickBracketSet(sets: readonly PensionWageBracketSet[], date: string): PensionWageBracketSet | null {
   let picked: PensionWageBracketSet | null = null;
-  for (const s of rules.pension?.wageBrackets ?? []) {
+  for (const s of sets) {
     if (s.effectiveFrom > date) continue;
     if (!picked || s.effectiveFrom > picked.effectiveFrom) picked = s;
   }
-  const set = picked ?? DEFAULT_PENSION_WAGE_BRACKETS[DEFAULT_PENSION_WAGE_BRACKETS.length - 1]!;
+  return picked;
+}
+
+/**
+ * 某日適用的勞退月提繳分級表 (由小到大):規則設了 wageBrackets 就取生效日 ≤ date 的最新一組;
+ * 沒設、或規則裡全部晚於 date → 系統內建也**依日期選版** (114 年版／115 年版;早於 114 年版的日期用 114 年版)。
+ */
+export function resolvePensionWageLevels(rules: RuleConfig, date: string): { effectiveFrom: string; levels: number[] } {
+  const set =
+    pickBracketSet(rules.pension?.wageBrackets ?? [], date) ??
+    pickBracketSet(DEFAULT_PENSION_WAGE_BRACKETS, date) ??
+    DEFAULT_PENSION_WAGE_BRACKETS[0]!;
   return { effectiveFrom: set.effectiveFrom, levels: [...set.levels].sort((a, b) => a - b) };
 }
 

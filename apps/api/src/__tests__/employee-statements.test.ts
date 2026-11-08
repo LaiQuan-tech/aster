@@ -256,6 +256,28 @@ describe("驗收修正（2026-10-27）", () => {
     expect(cellAt(grid, T + 2, 9)!.value).toBe(1000) // 支出＝只有代墊，沒有多算 3,000
     const values = grid.cells.map((c) => c.value)
     expect(values).toContain(32550) // 薪資+支出
+    // 實發下方是**文字**說明（不參與加總），不是金額格
+    expect(cellAt(grid, T + 2, 10)).toMatchObject({ value: "（其中免稅津貼 3,000）" })
+    expect(values.filter((v) => v === 3000)).toHaveLength(0)
+    // 福利區列出伙食費免稅名目，但應發合計不含它（試算版沒有逐筆名目 → 以「伙食費」呈現）
+    expect(grid.cells.some((c) => c.value === "伙食費(免稅)")).toBe(true)
+    expect(grid.cells.some((c) => c.value === "3,000 不計應發")).toBe(true)
+    expect(cellAt(grid, T + 1, 6)!.value).toBe(30000)
+  })
+
+  it("薪資單版：福利區依逐筆名目列出免稅部分（伙食津貼(免稅)），應發不變", () => {
+    const data = fakeStatementData()
+    const before = buildPayslipStatementGrid(data)
+    data.money = moneyFromBreakdown(
+      { ...fakeBreakdown(), net: (fakeBreakdown().net as number) + 3000, fixedAllowancesTaxFree: 3000, fixedAllowances: [{ name: "伙食津貼", amount: 3000, taxableAmount: 0, taxFreeAmount: 3000 }] },
+      "draft",
+    )
+    const grid = buildPayslipStatementGrid(data)
+    expect(grid.cells.some((c) => c.value === "伙食津貼(免稅)")).toBe(true)
+    const grossOf = (g: StatementGrid) => g.cells.find((c) => c.value === "應發薪資")
+    expect(grossOf(grid)).toBeTruthy()
+    const T = 4 + 15
+    expect(cellAt(grid, T + 1, 6)!.value).toBe(cellAt(before, T + 1, 6)!.value)
   })
 
   it("固定津貼免稅部分：薪資單版（moneyFromBreakdown）實領也加回；出勤統計表「加給」含免稅津貼，本薪＋加班＋加給−應扣＝實領", () => {

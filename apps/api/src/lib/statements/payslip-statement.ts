@@ -191,6 +191,8 @@ export interface AmountRow {
   label: string
   hours?: number | null
   amount: number | null
+  /** 只顯示文字、不參與加總的說明（例：免稅伙食費「3,000 不計應發」）；有 note 時 amount 為 null。 */
+  note?: string
 }
 
 function sumByLeaveName(view: SheetView | null, pattern: RegExp): number | null {
@@ -259,6 +261,16 @@ export function earningRows(money: StatementMoney | null): { wages: AmountRow[];
     if (money.allowances) welfare.push({ label: "定額補貼", amount: money.allowances })
     if (money.fixedAllowancesTaxable) welfare.push({ label: "固定津貼", amount: money.fixedAllowancesTaxable })
     if (money.adjustmentEarnings) welfare.push({ label: "前期更正補發", amount: money.adjustmentEarnings })
+    // 固定津貼免稅部分（伙食費免稅額內）：列出名目，但**不參與應發加總**（不在 gross；實發另含）。
+    const taxFreeItems =
+      money.fixedAllowanceTaxFreeItems && money.fixedAllowanceTaxFreeItems.length > 0
+        ? money.fixedAllowanceTaxFreeItems
+        : money.fixedAllowancesTaxFree
+          ? [{ name: "伙食費", amount: money.fixedAllowancesTaxFree }]
+          : []
+    for (const item of taxFreeItems) {
+      welfare.push({ label: `${item.name}(免稅)`, amount: null, note: `${Math.round(item.amount).toLocaleString("en-US")} 不計應發` })
+    }
   }
   return { wages, welfare }
 }
@@ -364,7 +376,7 @@ export function buildPayslipStatementGrid(data: StatementData): StatementGrid {
   subHead(B + welfareHeaderRow, "福利")
   welfare.forEach((w, i) => {
     g.set(B + welfareHeaderRow + 1 + i, 0, { value: w.label })
-    g.set(B + welfareHeaderRow + 1 + i, 1, amt(w.amount, "int"))
+    g.set(B + welfareHeaderRow + 1 + i, 1, w.note !== undefined ? { value: w.note, size: 10, align: "right" } : amt(w.amount, "int"))
   })
 
   // 中：加班別
@@ -443,7 +455,7 @@ export function buildPayslipStatementGrid(data: StatementData): StatementGrid {
   // 支出、薪資+支出（原檔 X27、X31；X31 沒有標籤，這裡補上「薪資+支出」）
   // 實發（含支出）＝實發＋代墊支出＋不課稅補發；不課稅補發另列「補發」，不混在「支出」裡。
   const nonTaxable = money?.adjustmentNonTaxable ?? 0
-  // 實發金額（netPay）已含固定津貼的免稅部分（伙食費免稅額內，2026-11-08），這裡只把它另列一行「其中免稅津貼」供核對，不混在「支出」裡。
+  // 實發金額（netPay）已含固定津貼的免稅部分（伙食費免稅額內，2026-11-08）：在實發下方放一格**文字說明**（不參與任何加總）。
   const taxFreeAllowance = money?.fixedAllowancesTaxFree ?? 0
   const expenseShown = money
     ? Math.round((money.netWithExpenses - netPay(money) - nonTaxable) * 100) / 100
@@ -458,9 +470,7 @@ export function buildPayslipStatementGrid(data: StatementData): StatementGrid {
     rr += 1
   }
   if (taxFreeAllowance) {
-    g.set(rr, 8, { value: "實發含免稅津貼", bold: true, align: "right" })
-    g.set(rr, 9, amt(taxFreeAllowance, "acct"))
-    rr += 1
+    g.set(H + 1, 10, { value: `（其中免稅津貼 ${Math.round(taxFreeAllowance).toLocaleString("en-US")}）`, colSpan: 2, size: 10, align: "right" })
   }
   g.set(rr, 8, { value: "薪資+支出", bold: true, align: "right" })
   g.set(rr, 9, amt(money ? money.netWithExpenses : null, "acct"))

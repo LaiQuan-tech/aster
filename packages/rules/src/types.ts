@@ -415,6 +415,10 @@ export interface PayslipBreakdown {
   pensionWageSource?: "manual" | "auto";
   /** 只有「不適用勞退新制」時才有 (= false):雇主提撥與勞工自提都為 0。 */
   pensionNewSystem?: false;
+  /** 員工薪資資料手填的月提繳工資原值 (有填才有;夾到分級表最高級之前的值)。草稿過期比對用。 */
+  pensionWageInput?: number;
+  /** 適用新制但算不出月提繳工資 (沒有手填、月薪制沒本薪、時薪／日薪制當月本俸為 0) → true;雇主提撥與自提都是 0,要人工確認。 */
+  pensionWageMissing?: true;
 }
 
 /** 加班費的一個分段 (例:平日前 2 小時 1.334 倍)。 */

@@ -61,6 +61,8 @@ export interface StatementMoney {
   fixedAllowancesTaxable?: number
   /** 員工固定津貼免稅部分（伙食費 2,400 內；不在 gross、含在 netWithExpenses）。 */
   fixedAllowancesTaxFree?: number
+  /** 免稅部分的逐筆名目（薪資單版從 breakdown.fixedAllowances 取；試算版沒有逐筆 → 以「伙食費」一筆呈現）。 */
+  fixedAllowanceTaxFreeItems?: Array<{ name: string; amount: number }>
 }
 
 export interface StatementExpense {

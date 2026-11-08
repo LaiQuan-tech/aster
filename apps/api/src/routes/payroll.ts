@@ -48,8 +48,23 @@ import {
   embeddedFixedAllowancesOf,
   fixedAllowancesStale,
   loadFixedAllowancesByEmployee,
-  staleDraftPayslips,
+  pensionSettingsStale,
+  staleDraftPayslipsSafe,
+  type PensionSettingsRow,
 } from "../services/fixed-allowances.js"
+import { salarySelectCols } from "../services/payroll-inputs.js"
+
+/** 定案檢查用：員工薪資資料目前的勞退兩欄（沒有薪資資料／0086 未套 → null＝沒手填、適用新制）。 */
+async function currentPensionSettings(tenantId: string, employeeId: string): Promise<PensionSettingsRow | null> {
+  const { data, error } = await supabaseAdmin
+    .from("salary_structures")
+    .select(await salarySelectCols())
+    .eq("tenant_id", tenantId)
+    .eq("employee_id", employeeId)
+    .maybeSingle()
+  if (error) throw new Error(`finalize (salary_structures): ${error.message}`)
+  return (data as unknown as PensionSettingsRow | null) ?? null
+}
 
 export const payrollRouter = Router()
 
@@ -325,6 +340,8 @@ payrollRouter.post(
       // 而不會報錯，薪資單看起來正常但實發被高估——必須回報給呼叫端，
       // 否則錯誤會一路靜默到員工的存摺。
       const missingInsuredSalary: string[] = []
+      // 適用勞退新制卻算不出月提繳工資的人（沒手填、時薪／日薪制當月本俸 0…）：雇主提撥與自提都 0，要列出來，不可靜默。
+      const missingPensionWage: string[] = []
       const rows: Array<Record<string, unknown>> = []
       let adjustmentCount = 0 // 這次併進薪資單的一次性加減項（前期更正）筆數，回給畫面核對
       const negativeNetWarnings: Array<{ employeeId: string; code: "negative_net"; message: string }> = []
@@ -379,6 +396,7 @@ payrollRouter.post(
           continue
         }
         adjustmentCount += breakdown.adjustments?.length ?? 0
+        if (breakdown.pensionWageMissing) missingPensionWage.push(sal.employee_id)
         // 實發為負（例如扣回比當月薪資還大）：薪資單照算，但提醒 HR 確認金額。
         if (breakdown.net < 0) {
           negativeNetWarnings.push({
@@ -447,6 +465,7 @@ payrollRouter.post(
         skipped,
         skippedDetails,
         missingInsuredSalary,
+        missingPensionWage,
         allowanceReview,
         insuredSalaryReview,
         adjustmentCount,
@@ -513,12 +532,23 @@ payrollRouter.get(
         next(new Error(`GET /payslips: ${error.message}`))
         return
       }
-      // 固定津貼（2026-11-08）：HR 看的草稿薪資單，內嵌的津貼跟現在當月有效的不一致 → 標 fixed_allowances_stale（要重新執行）。
+      // 固定津貼／勞退設定（2026-11-08）：HR 看的草稿薪資單，內嵌的津貼或勞退設定跟現在不一致 → 標
+      // fixed_allowances_stale／pension_settings_stale（要重新執行）。只看本次查詢的期別；查不到就不標、記 log，列表照常回。
       let rows = (data ?? []) as unknown as Array<Record<string, unknown>>
       if (isHr && scope !== "mine" && rows.some((r) => r.status === "draft")) {
-        const ids = [...new Set(rows.filter((r) => r.status === "draft").map((r) => String(r.employee_id)))]
-        const stale = new Set((await staleDraftPayslips(tenantId, ids)).map((x) => x.payslipId))
-        rows = rows.map((r) => (stale.has(String(r.id)) ? { ...r, fixed_allowances_stale: true } : r))
+        const drafts = rows.filter((r) => r.status === "draft")
+        const ids = [...new Set(drafts.map((r) => String(r.employee_id)))]
+        const periods = period ? [period] : [...new Set(drafts.map((r) => String(r.period)))]
+        const stale = new Map((await staleDraftPayslipsSafe(tenantId, ids, periods)).map((x) => [x.payslipId, x.reasons]))
+        rows = rows.map((r) => {
+          const reasons = stale.get(String(r.id))
+          if (!reasons) return r
+          return {
+            ...r,
+            ...(reasons.includes("fixed_allowances") ? { fixed_allowances_stale: true } : {}),
+            ...(reasons.includes("pension_settings") ? { pension_settings_stale: true } : {}),
+          }
+        })
       }
       res.status(200).json({ payslips: rows })
     } catch (err) {
@@ -627,6 +657,15 @@ payrollRouter.post(
           })
           return
         }
+        // 勞退設定（手填提繳工資、適用新制）在執行薪資之後改過 → 同樣擋（雇主提撥率是規則參數，不比）。
+        if (pensionSettingsStale(existing.breakdown, await currentPensionSettings(tenantId, existing.employee_id))) {
+          res.status(409).json({
+            error: "pension_settings_stale",
+            period: existing.period,
+            message: `${existing.period as string} 之後員工的勞退月提繳工資或「適用勞退新制」有異動，薪資單還沒跟上，請先重新執行 ${existing.period as string} 的薪資再定稿`,
+          })
+          return
+        }
       }
       if (typeof existing.employee_id === "string") {
         const current = await loadAdjustmentsByEmployee(tenantId, existing.period as string, [existing.employee_id])
@@ -656,7 +695,9 @@ payrollRouter.post(
       if (typeof updated.employee_id === "string") {
         const after = await loadAdjustmentsByEmployee(tenantId, updated.period as string, [updated.employee_id as string])
         const afterFixed = await loadFixedAllowancesByEmployee(tenantId, updated.period as string, [updated.employee_id as string])
-        const fixedChanged = fixedAllowancesStale(embeddedFixedAllowancesOf(existing.breakdown), afterFixed.get(updated.employee_id as string))
+        const fixedChanged =
+          fixedAllowancesStale(embeddedFixedAllowancesOf(existing.breakdown), afterFixed.get(updated.employee_id as string)) ||
+          pensionSettingsStale(existing.breakdown, await currentPensionSettings(tenantId, updated.employee_id as string))
         if (fixedChanged || adjustmentsStale(embeddedAdjustmentsOf(existing.breakdown), after.get(updated.employee_id as string))) {
           const { error: revertErr } = await supabaseAdmin
             .from("payslips")
@@ -675,7 +716,7 @@ payrollRouter.post(
             error: fixedChanged ? "fixed_allowances_stale" : "adjustments_stale",
             period: updated.period,
             message: fixedChanged
-              ? `${updated.period as string} 的固定津貼剛好有異動，薪資單已退回草稿，請重新執行薪資再定稿`
+              ? `${updated.period as string} 的固定津貼或勞退設定剛好有異動，薪資單已退回草稿，請重新執行薪資再定稿`
               : `${updated.period as string} 的加減項（前期更正）剛好有異動，薪資單已退回草稿，請重新執行薪資再定稿`,
           })
           return

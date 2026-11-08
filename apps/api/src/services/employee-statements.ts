@@ -100,6 +100,12 @@ export function moneyFromBreakdown(breakdown: Record<string, unknown>, status: s
     segments,
     fixedAllowancesTaxable: num(breakdown.fixedAllowancesTaxable),
     fixedAllowancesTaxFree: num(breakdown.fixedAllowancesTaxFree),
+    fixedAllowanceTaxFreeItems: (Array.isArray(breakdown.fixedAllowances)
+      ? (breakdown.fixedAllowances as Array<{ name?: unknown; taxFreeAmount?: unknown }>)
+      : []
+    )
+      .filter((f) => num(f.taxFreeAmount) > 0)
+      .map((f) => ({ name: String(f.name ?? "伙食費"), amount: num(f.taxFreeAmount) })),
   }
 }
 

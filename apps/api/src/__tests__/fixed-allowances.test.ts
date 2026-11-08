@@ -453,3 +453,81 @@ describe("第二輪：同名津貼同月重疊提醒", () => {
     expect(fixed.body.warnings).toEqual([])
   })
 })
+
+describe("第三輪：分頁、期間篩選、提醒失敗不 500、勞退設定過期、手填上限、算不出提繳工資", () => {
+  it("固定津貼列超過 PostgREST max-rows 也不會漏（分頁），且只撈與該期相關的列（期間條件下推）", async () => {
+    fake.limits.maxRows = 2
+    fake.db.employee_fixed_allowances = [
+      allowanceRow({ id: "fa-a1", name: "舊津貼一", effective_from: "2028-01-01", effective_to: "2028-12-31" }),
+      allowanceRow({ id: "fa-a2", name: "舊津貼二", effective_from: "2029-01-01", effective_to: "2029-06-30" }),
+      allowanceRow({ id: "fa-a3", name: "職務加給", effective_from: "2030-01-01" }),
+      allowanceRow({ id: "fa-a4", name: "專業加給", amount: 1000, effective_from: "2030-02-01" }),
+      allowanceRow({ id: "fa-a5", name: "伙食津貼", amount: 1000, tax_type: "meal_exempt", effective_from: "2030-03-01" }),
+    ]
+    const res = await runPayroll(OCT, EMP)
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect((bd(EMP).fixedAllowances as Row[]).map((f) => f.name).sort()).toEqual(["伙食津貼", "專業加給", "職務加給"].sort())
+    expect(fake.orFilters).toContain(`effective_to.is.null,effective_to.gte.${OCT}-01`)
+    // 員工薪資資料頁的清單（不帶期間）也分頁撈完
+    fake.limits.maxRows = 2
+    expect((await as(T.hr).get(`/salary/${EMP}/fixed-allowances`)).body.fixedAllowances).toHaveLength(5)
+  })
+
+  it("GET /payslips：過期提醒查詢失敗 → 不標記、記 log，列表照常 200", async () => {
+    fake.db.employee_fixed_allowances = [allowanceRow()]
+    await runPayroll(OCT, EMP)
+    fake.db.employee_fixed_allowances = []
+    fake.injectError({ table: "employee_fixed_allowances", action: "select", error: { code: "XX000", message: "boom" } })
+    const list = await as(T.hr).get(`/payslips?period=${OCT}`)
+    expect(list.status).toBe(200)
+    expect(list.body.payslips.find((p: Row) => p.employee_id === EMP).fixed_allowances_stale).toBeUndefined()
+  })
+
+  it("定案時的檢查維持嚴格：同樣的查詢失敗 → 500，薪資單不會被定案", async () => {
+    await runPayroll(OCT, EMP)
+    fake.injectError({ table: "employee_fixed_allowances", action: "select", error: { code: "XX000", message: "boom" } })
+    const res = await as(T.hr).post(`/payslips/${slipOf(EMP).id as string}/finalize`)
+    expect(res.status).toBe(500)
+    expect(slipOf(EMP).status).toBe("draft")
+  })
+
+  it("執行薪資後改勞退月提繳工資／取消新制 → 列表標 pension_settings_stale、定案 409 pension_settings_stale；重新執行後可定案", async () => {
+    await runPayroll(OCT, EMP)
+    await as(T.hr).put(`/salary/${EMP}`).send({ pensionWage: 45800, laborInsuredSalary: 40100, healthInsuredSalary: 40100 })
+    const list = await as(T.hr).get(`/payslips?period=${OCT}`)
+    expect(list.body.payslips.find((p: Row) => p.employee_id === EMP).pension_settings_stale).toBe(true)
+    const blocked = await as(T.hr).post(`/payslips/${slipOf(EMP).id as string}/finalize`)
+    expect(blocked.status).toBe(409)
+    expect(blocked.body.error).toBe("pension_settings_stale")
+    await runPayroll(OCT, EMP)
+    await as(T.hr).put(`/salary/${EMP}`).send({ pensionNewSystem: false, laborInsuredSalary: 40100, healthInsuredSalary: 40100 })
+    expect((await as(T.hr).post(`/payslips/${slipOf(EMP).id as string}/finalize`)).body.error).toBe("pension_settings_stale")
+    await runPayroll(OCT, EMP)
+    const ok = await as(T.hr).post(`/payslips/${slipOf(EMP).id as string}/finalize`)
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+  })
+
+  it("手填提繳工資上限 150,000：150,001 → 400、150,000 → 200；GET summary 帶分級表級距供畫面提醒", async () => {
+    expect((await as(T.hr).put(`/salary/${EMP}`).send({ pensionWage: 150001 })).status).toBe(400)
+    expect((await as(T.hr).put(`/salary/${EMP}`).send({ pensionWage: 150000, laborInsuredSalary: 40100, healthInsuredSalary: 40100 })).status).toBe(200)
+    const summary = (await as(T.hr).get(`/salary/${EMP}/fixed-allowances`)).body.summary.pension
+    expect(summary.levels).toHaveLength(62)
+    expect(summary.levels[61]).toBe(150000)
+  })
+
+  it("時薪制當月沒有工時、沒手填 → 薪資執行回 missingPensionWage（不靜默 0）；有工時就以當月本俸算", async () => {
+    fake.db.salary_structures = [
+      { ...salary(EMP, "0", null), method: "hourly", base_salary: null, hourly_wage: "200" },
+    ]
+    const res = await runPayroll(OCT, EMP)
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(res.body.missingPensionWage).toEqual([EMP])
+    expect(bd(EMP).pensionWageMissing).toBe(true)
+    fake.db.attendance_days = [
+      { id: "ad-1", tenant_id: TENANT_ID, employee_id: EMP, work_date: `${OCT}-02`, worked_minutes: 480, late_minutes: 0, overtime_minutes: 0, night_minutes: 0, day_type: "workday", anomaly: null },
+    ]
+    const res2 = await runPayroll(OCT, EMP)
+    expect(res2.body.missingPensionWage).toEqual([])
+    expect(bd(EMP)).toMatchObject({ base: 1600, pensionWage: 3000, pensionWageSource: "auto" })
+  })
+})

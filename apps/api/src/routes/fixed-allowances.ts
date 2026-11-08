@@ -131,7 +131,7 @@ function overlapWarnings(rows: FixedAllowanceRow[]) {
 async function afterWrite(tenantId: string, employeeId: string) {
   const rows = await loadFixedAllowanceRows(tenantId, [employeeId])
   const stale = await staleDraftPayslips(tenantId, [employeeId])
-  return { warnings: overlapWarnings(rows), stalePeriods: stale.map((s) => s.period) }
+  return { warnings: overlapWarnings(rows), stalePeriods: [...new Set(stale.map((s) => s.period))] }
 }
 
 const FOREIGN_HINT_RE = /中華民國|臺灣|台灣|taiwan|^roc$|r\.o\.c|^tw$/i
@@ -149,6 +149,7 @@ async function pensionSummary(tenantId: string, employeeId: string, period: stri
     const row = sal as unknown as SalaryRow | null
     const active = activeFixedAllowancesForPeriod(rows, period)
     const structure = row ? toSalaryStructure(row) : {}
+    // 時薪／日薪制的自動值要看當月本俸（執行薪資時才知道），這裡算不出來就回 null，畫面說明「依當月本俸自動算」。
     const auto = resolvePensionWage({ ...structure, pensionWage: undefined }, active, rules, period)
     const levels = resolvePensionWageLevels(rules, `${period}-01`)
     let nationality: string | null = null
@@ -163,8 +164,11 @@ async function pensionSummary(tenantId: string, employeeId: string, period: stri
     return {
       autoWage: auto?.wage ?? null,
       levelsEffectiveFrom: levels.effectiveFrom,
+      // 分級表全部級距：畫面判斷手填值「不在分級表級距上」用（非級距值允許，只提醒）。
+      levels: levels.levels,
       manualWage: row?.pension_wage != null && Number(row.pension_wage) > 0 ? Number(row.pension_wage) : null,
       newSystem: row?.pension_new_system !== false,
+      method: row?.method ?? null,
       nationality,
       nationalityHint: foreign
         ? `國籍為「${nationality}」：外籍員工須取得永久居留（或與本國人結婚取得居留）才適用勞退新制，請確認後再決定是否取消「適用勞退新制」。系統不會自動判斷。`
@@ -219,7 +223,7 @@ fixedAllowancesRouter.get(
           pension: await pensionSummary(tenantId, employeeId, period, rows),
         },
         warnings: overlapWarnings(rows),
-        stalePeriods: stale.map((s) => s.period),
+        stalePeriods: [...new Set(stale.map((s) => s.period))],
       })
     } catch (err) {
       next(err)

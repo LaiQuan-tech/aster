@@ -1,5 +1,6 @@
 "use client";
 
+import { SHEET_MONEY_STRONG, sheetMoneySections } from "@/lib/attendance-sheet-money";
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ess-ui";
 import { fmtHm } from "@/lib/ess-format";
@@ -730,41 +731,8 @@ function SummaryRow({ totals, tierLabels, outingMinutes }: { totals: SheetTotals
 }
 
 function MoneyCard({ money: m, tierLabels }: { money: SheetMoney; tierLabels: [string, string, string] }) {
-  const sections = [
-    {
-      title: "應發",
-      rows: [
-        ["本薪", m.base],
-        [`加班費 ${tierLabels[0]}`, m.otPayByTier.tier1],
-        [`加班費 ${tierLabels[1]}`, m.otPayByTier.tier2],
-        [`加班費 ${tierLabels[2]}`, m.otPayByTier.tier3],
-        ["夜間加給", m.nightPay],
-        ["全勤獎金", m.attendanceBonus],
-        ["定額補貼", m.allowances],
-        ["應發合計", m.gross],
-      ] as Array<[string, number | undefined]>,
-    },
-    {
-      title: "應扣",
-      rows: [
-        ["勞保自付", m.laborInsurance],
-        ["健保自付", m.healthInsurance],
-        ["勞退自提", m.pensionVoluntary],
-        ["預支扣回", m.advance],
-        ["請假扣款", m.leaveDeduction],
-        ["遲到早退扣款", m.lateEarlyDeduction],
-        ["應扣合計", m.totalDeductions],
-      ] as Array<[string, number | undefined]>,
-    },
-    {
-      title: "實發",
-      rows: [
-        ["實發金額", m.net],
-        ["代墊支出（不計薪資所得）", m.expenses],
-        ["薪資＋代墊", m.netPlusExpenses],
-      ] as Array<[string, number]>,
-    },
-  ];
+  // 三段資料列（含 2026-11-08 的「免稅津貼（不計應發）」）在 lib/attendance-sheet-money.ts，有單元測試。
+  const sections = sheetMoneySections(m, tierLabels);
   return (
     <div className="rounded-xl border border-gray-100 bg-white p-4 shadow-sm">
       <p className="mb-3 text-sm font-semibold text-gray-700">薪資試算</p>
@@ -775,7 +743,7 @@ function MoneyCard({ money: m, tierLabels }: { money: SheetMoney; tierLabels: [s
             <h3 className="mb-2 border-b border-gray-200 pb-1 text-xs font-semibold text-gray-600">{section.title}</h3>
             <div className="space-y-2">
               {section.rows.map(([label, value]) => {
-                const strong = ["應發合計", "應扣合計", "實發金額", "薪資＋代墊"].includes(label);
+                const strong = SHEET_MONEY_STRONG.includes(label);
                 return <MoneyRow key={label} label={label} value={moneyIfAvailable(value)} strong={strong} />;
               })}
             </div>

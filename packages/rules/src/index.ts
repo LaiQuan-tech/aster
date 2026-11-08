@@ -67,6 +67,7 @@ export {
   resolvePensionEmployerRate,
   resolvePensionWageLevels,
   resolveMealTaxFreeMonthly,
+  PENSION_WAGE_LEVELS_2025,
   PENSION_WAGE_LEVELS_2026,
   DEFAULT_PENSION_WAGE_BRACKETS,
   DEFAULT_MEAL_TAX_FREE_MONTHLY,

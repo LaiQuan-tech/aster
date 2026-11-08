@@ -28,6 +28,8 @@ import {
 type PayslipRow = Payslip & PayslipSendFields & {
   /** 2026-11-08：草稿內嵌的固定津貼跟現在不一致（API 只對 HR 的草稿標）；要重新執行薪資作業才能定案。 */
   fixed_allowances_stale?: boolean;
+  /** 草稿算的時候用的勞退設定（手填提繳工資、適用新制）跟現在不一致。 */
+  pension_settings_stale?: boolean;
 };
 
 function fmtSentAt(iso: string | null | undefined): string {
@@ -488,6 +490,15 @@ function PayslipRow({
               data-testid="payslip-has-adjustments"
             >
               含更正 {adjustments.all.length} 筆
+            </span>
+          )}
+          {p.status !== "finalized" && p.pension_settings_stale && (
+            <span
+              className="ml-2 rounded-full bg-rose-50 px-2 py-0.5 text-xs font-normal text-rose-700"
+              title="勞退月提繳工資或「適用勞退新制」在執行薪資之後有異動：請到薪資作業重新執行本月薪資，否則無法定案"
+              data-testid="payslip-pension-settings-stale"
+            >
+              勞退設定有異動，需重新執行
             </span>
           )}
           {p.status !== "finalized" && p.fixed_allowances_stale && (

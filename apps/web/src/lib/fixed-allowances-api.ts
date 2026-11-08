@@ -40,6 +40,10 @@ export interface PensionSummary {
   /** 依本月分級表自動算的月提繳工資（本薪＋計入投保津貼）；算不出來＝null。 */
   autoWage: number | null;
   levelsEffectiveFrom: string;
+  /** 本月適用分級表的全部級距（由小到大）；舊版 API 沒有。 */
+  levels?: number[];
+  /** 計薪方式（時薪／日薪制的自動值要到執行薪資才算得出來）。 */
+  method?: string | null;
   /** 員工薪資資料手填的提繳工資；沒填＝null。 */
   manualWage: number | null;
   newSystem: boolean;
@@ -298,8 +302,38 @@ export function pensionWageHintText(p: PensionSummary | null | undefined, manual
   if (!p) return null;
   const fmt = (n: number) => n.toLocaleString("zh-TW");
   if (!p.newSystem) return "不適用勞退新制：雇主提撥與勞工自提都為 0。";
-  const auto = p.autoWage != null ? `依分級表（${p.levelsEffectiveFrom} 版）自動算：本薪＋計入投保的固定津貼 → ${fmt(p.autoWage)}` : "無法自動計算（沒有本薪也沒有投保薪資）";
+  const hourlyLike = p.method === "hourly" || p.method === "by_attendance_days";
+  const auto =
+    p.autoWage != null
+      ? `依分級表（${p.levelsEffectiveFrom} 版）自動算：本薪＋計入投保的固定津貼 → ${fmt(p.autoWage)}`
+      : hourlyLike
+        ? `執行薪資時依當月本俸（時薪×正常工時／出勤天數×日薪）＋計入投保的固定津貼，按分級表（${p.levelsEffectiveFrom} 版）自動取級`
+        : "無法自動計算（沒有本薪）：執行薪資時會列入「算不出勞退提繳工資」名單，請手填";
   return manualInput.trim() ? `目前以手填值計算；留空則${auto}。` : `留空＝${auto}。`;
+}
+
+/** 手填勞退月提繳工資上限＝分級表最高級。 */
+export const PENSION_WAGE_MANUAL_MAX = 150_000;
+
+/**
+ * 手填提繳工資的提醒（不擋存檔，除非超過上限或不是正整數）：
+ *   • 不是正整數／超過 150,000 → error（API 也會擋）
+ *   • 不在本月分級表的級距上 → warning「不在分級表級距上」（勞保局只收級距值，請確認）
+ */
+export function pensionWageInputCheck(
+  input: string,
+  levels: readonly number[] | undefined,
+): { error: string | null; warning: string | null } {
+  const raw = input.trim();
+  if (!raw) return { error: null, warning: null };
+  if (!/^\d+$/.test(raw) || Number(raw) <= 0) return { error: "勞退月提繳工資請填正整數（元）", warning: null };
+  const v = Number(raw);
+  if (v > PENSION_WAGE_MANUAL_MAX) return { error: `勞退月提繳工資最高 ${PENSION_WAGE_MANUAL_MAX.toLocaleString("zh-TW")}（分級表最高級）`, warning: null };
+  if (levels && levels.length > 0 && !levels.includes(v)) {
+    const up = levels.find((l) => l >= v);
+    return { error: null, warning: `${v.toLocaleString("zh-TW")} 不在分級表級距上${up ? `（對應級距 ${up.toLocaleString("zh-TW")}）` : ""}，請確認與勞保局申報一致。` };
+  }
+  return { error: null, warning: null };
 }
 
 /** 表單「%」字串 → 比例；6–100 以外或不是數字回錯誤訊息。空白＝不設定（預設 6%）。 */

@@ -22,7 +22,7 @@ import { loadPayrollEmployees } from "@/lib/payroll-employees";
 import { errorMessageOf } from "@/lib/period-closed";
 import { PayrollAdjustmentsCard } from "./_components/PayrollAdjustmentsCard";
 import { FixedAllowancesCard } from "./_components/FixedAllowancesCard";
-import { pensionWageHintText, type FixedAllowanceSummary } from "@/lib/fixed-allowances-api";
+import { pensionWageHintText, pensionWageInputCheck, type FixedAllowanceSummary } from "@/lib/fixed-allowances-api";
 import { PeriodLockCard } from "./_components/PeriodLockCard";
 import { payrollGateText } from "@/lib/payroll-gate";
 
@@ -175,6 +175,11 @@ export default function PayrollAdminPage() {
     if (!empId) return;
     setSalaryMsg(null);
     setInsuredHint(null);
+    const wageCheck = pensionWageInputCheck(pensionWage, allowanceSummary?.pension?.levels);
+    if (wageCheck.error) {
+      setSalaryMsg(wageCheck.error);
+      return;
+    }
     try {
       // M12：投保級距留空＝不帶欄位，API 會依「投保級距表」以投保基數自動選一級
       //（月薪制基數＝本薪；時薪制＝時薪 × 每週約定時數 × 52 ÷ 12），並把選到的值回來。
@@ -290,6 +295,8 @@ export default function PayrollAdminPage() {
       // 併進薪資單的一次性加減項（前期更正）筆數，讓 HR 核對（API 回 adjustmentCount；舊版 API 沒有就不顯示）。
       const adjustmentCount = (result as { adjustmentCount?: number }).adjustmentCount ?? 0;
       // 固定津貼「計入投保」後，底薪＋津貼高於勞保投保級距的人（系統不自動改級距，只提醒）。
+      // 適用勞退新制卻算不出提繳工資的人（雇主提撥與自提都是 0）：列出來請 HR 手填或確認。
+      const missingPension = (result as { missingPensionWage?: string[] }).missingPensionWage ?? [];
       const insuredReview =
         (result as { insuredSalaryReview?: Array<{ employeeId: string; total: number; laborInsuredSalary: number | null }> })
           .insuredSalaryReview ?? [];
@@ -298,6 +305,9 @@ export default function PayrollAdminPage() {
         text:
           `已執行 ${runPeriod} 薪資作業：產生 ${result.generated} 筆，略過已定案 ${result.skipped.length} 筆` +
           (adjustmentCount > 0 ? `；含加減項（前期更正）${adjustmentCount} 筆` : "") +
+          (missingPension.length > 0
+            ? `；算不出勞退提繳工資（雇主提撥與自提為 0，請到員工薪資資料手填）：${missingPension.map((id) => empName(id)).join("、")}`
+            : "") +
           (insuredReview.length > 0
             ? `；請確認投保級距（底薪＋計入投保的固定津貼高於勞保級距）：${insuredReview
                 .map((r) => `${empName(r.employeeId)} ${r.total.toLocaleString("zh-TW")}／級距 ${r.laborInsuredSalary == null ? "未設定" : r.laborInsuredSalary.toLocaleString("zh-TW")}`)
@@ -421,6 +431,7 @@ export default function PayrollAdminPage() {
                   <input
                     type="number"
                     min={1}
+                    max={150000}
                     step={1}
                     className={inputCls}
                     value={pensionWage}
@@ -441,6 +452,15 @@ export default function PayrollAdminPage() {
                   pensionWage,
                 );
                 return hint ? <p className="text-xs text-gray-500">{hint} 雇主提撥與勞工自提都以此為基數。</p> : null;
+              })()}
+              {(() => {
+                const w = pensionWageInputCheck(pensionWage, allowanceSummary?.pension?.levels);
+                const text = w.error ?? w.warning;
+                return text ? (
+                  <p className={`rounded-md px-3 py-2 text-xs ${w.error ? "bg-rose-50 text-rose-800" : "bg-amber-50 text-amber-800"}`} data-testid="pension-wage-level-hint">
+                    {text}
+                  </p>
+                ) : null;
               })()}
               {allowanceSummary?.pension?.nationalityHint && (
                 <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800" data-testid="pension-nationality-hint">

@@ -38,8 +38,8 @@
  *   沒有有效津貼的薪資單不會出現任何 fixedAllowances* 欄位(輸出與以前完全相同)。
  *
  * 勞退(2026-11-08):月提繳工資 pensionWage = 員工薪資資料「勞退月提繳工資」(有填就照填),留空 = (本薪 + 計入投保的
- * 固定津貼) 依勞退月提繳分級表 (rules.pension.wageBrackets,依 extras.period 選版;預設 115 年版) 向上取級距;沒有本薪
- * (時薪／日薪制) 時以勞保投保薪資為基數。雇主提撥 employerPension = round(pensionWage × rules.pension.employerRate
+ * 固定津貼) 依勞退月提繳分級表 (rules.pension.wageBrackets,依 extras.period 選版;內建 114／115 年版) 向上取級距;
+ * 時薪／日薪制 (沒有月本薪) 以當月本俸為基數;算不出來標 pensionWageMissing。手填值夾到分級表最高級。雇主提撥 employerPension = round(pensionWage × rules.pension.employerRate
  * (預設 6%,允許 6%–100%)),不從實發扣除、不進 lines;勞工自提 pensionVoluntary = round(pensionWage × 自提率)
  * (**與雇主同基數**;原本用勞保投保薪資——高薪且有自提的員工實發會因此改變)。不適用勞退新制 (pensionNewSystem=false)
  * → 兩者都 0。
@@ -140,32 +140,37 @@ export function employerPensionOf(pensionWage: number, rate: number): number {
 
 /**
  * 勞退月提繳工資 (整數元)。純函式。
- *   • salary.pensionWage > 0 (HR 申報值) → 照用,source = manual
- *   • 否則 auto:基數 = 本薪 (baseSalary > 0) 或勞保投保薪資 (沒有月本薪的時薪／日薪制) + 計入投保的固定津貼,
- *     依該月適用的分級表取「≥ 基數的最小級距」(超過最高級取最高級);基數 <= 0 → null (不提繳)
+ *   • salary.pensionWage > 0 (HR 申報值) → 照用,但夾到該月分級表最高級 (150,000);不在級距上也照用 (API／UI 只提醒)。
+ *     source = manual
+ *   • 否則 auto:月薪制 (且有本薪) 基數 = 本薪;時薪／日薪制 (或月薪制沒填本薪) 基數 = **當月本俸** (opts.actualBase:
+ *     時薪 × 正常工時、出勤天數 × 日薪),再 + 計入投保的固定津貼,依該月適用的分級表取「≥ 基數的最小級距」
+ *     (超過最高級取最高級)。基數 <= 0 → null (呼叫端標 pensionWageMissing,不靜默給 0)。
  */
 export function resolvePensionWage(
   salary: SalaryStructure,
   fixedAllowances: readonly FixedAllowanceInput[],
   rules: RuleConfig,
   period?: string,
+  opts: { method?: PayrollMethod; actualBase?: number } = {},
 ): { wage: number; source: "manual" | "auto" } | null {
-  if (salary.pensionWage !== undefined && salary.pensionWage > 0) {
-    return { wage: Math.round(salary.pensionWage), source: "manual" };
-  }
-  const base =
-    salary.baseSalary !== undefined && salary.baseSalary > 0
-      ? salary.baseSalary
-      : salary.laborInsuredSalary !== undefined && salary.laborInsuredSalary > 0
-        ? salary.laborInsuredSalary
-        : 0;
-  const total = Math.round(base) + insurableFixedAllowanceTotal(fixedAllowances);
-  if (total <= 0) return null;
   const date = period ? `${period}-01` : "9999-12-31";
   const { levels } = resolvePensionWageLevels(rules, date);
+  const max = levels.length > 0 ? levels[levels.length - 1]! : Infinity;
+  if (salary.pensionWage !== undefined && salary.pensionWage > 0) {
+    return { wage: Math.min(Math.round(salary.pensionWage), max), source: "manual" };
+  }
+  const method = opts.method ?? salary.method ?? "monthly";
+  const base =
+    method === "monthly" && salary.baseSalary !== undefined && salary.baseSalary > 0
+      ? salary.baseSalary
+      : opts.actualBase !== undefined && opts.actualBase > 0
+        ? opts.actualBase
+        : 0;
+  if (base <= 0) return null;
+  const total = Math.round(base) + insurableFixedAllowanceTotal(fixedAllowances);
   if (levels.length === 0) return { wage: total, source: "auto" };
   for (const v of levels) if (v >= total) return { wage: v, source: "auto" };
-  return { wage: levels[levels.length - 1]!, source: "auto" };
+  return { wage: max, source: "auto" };
 }
 
 /** 時薪專用:四捨五入到小數 4 位 (客戶薪資表「平日每小時工資額」的精度)。 */
@@ -578,7 +583,9 @@ export function computePayslip(
       : 0;
   // 勞退:雇主提撥與勞工自提同一個基數 (月提繳工資);不適用新制 → 都 0。
   const pensionNewSystem = salary.pensionNewSystem !== false;
-  const pension = pensionNewSystem ? resolvePensionWage(salary, extras.fixedAllowances ?? [], rules, extras.period) : null;
+  const pension = pensionNewSystem
+    ? resolvePensionWage(salary, extras.fixedAllowances ?? [], rules, extras.period, { method, actualBase: base })
+    : null;
   const pensionWage = pension?.wage ?? 0;
   const pensionVoluntary = pensionWage > 0 ? employerPensionOf(pensionWage, salary.pensionVoluntaryRate ?? 0) : 0;
   const advance = round(salary.advance ?? 0);
@@ -656,5 +663,7 @@ export function computePayslip(
       ? { employerPension, employerPensionRate, pensionWage, pensionWageSource: pension!.source }
       : {}),
     ...(pensionNewSystem ? {} : { pensionNewSystem: false as const }),
+    ...(salary.pensionWage !== undefined && salary.pensionWage > 0 ? { pensionWageInput: Math.round(salary.pensionWage) } : {}),
+    ...(pensionNewSystem && !pension ? { pensionWageMissing: true as const } : {}),
   };
 }

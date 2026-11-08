@@ -11,6 +11,7 @@ import {
   parsePensionLevels,
   pensionRatePct,
   pensionWageHintText,
+  pensionWageInputCheck,
   staleNoticeText,
   TAX_TYPE_LABEL,
 } from "../fixed-allowances-api";
@@ -114,5 +115,22 @@ describe("第二輪：伙食費 3,000、月中提示、草稿過期、勞退參�
     expect(pensionWageHintText(p, "")).toContain("43,900");
     expect(pensionWageHintText(p, "45800")).toContain("手填值");
     expect(pensionWageHintText({ ...p, newSystem: false }, "")).toContain("都為 0");
+  });
+});
+
+describe("第三輪：手填提繳工資檢查、時薪制提示", () => {
+  const levels = [28590, 29500, 30300, 45800, 150000];
+  it("非級距值 → warning（不擋）；超過 150,000、非整數 → error；級距值 → 無提醒", () => {
+    expect(pensionWageInputCheck("41000", levels).warning).toContain("不在分級表級距上");
+    expect(pensionWageInputCheck("41000", levels).error).toBeNull();
+    expect(pensionWageInputCheck("150001", levels).error).toContain("150,000");
+    expect(pensionWageInputCheck("100.5", levels).error).not.toBeNull();
+    expect(pensionWageInputCheck("45800", levels)).toEqual({ error: null, warning: null });
+    expect(pensionWageInputCheck("", levels)).toEqual({ error: null, warning: null });
+  });
+  it("時薪／日薪制沒有自動值 → 說明執行薪資時依當月本俸算；月薪制沒本薪 → 說明會列入名單", () => {
+    const p = { autoWage: null, levelsEffectiveFrom: "2026-01-01", manualWage: null, newSystem: true, nationality: null, nationalityHint: null };
+    expect(pensionWageHintText({ ...p, method: "hourly" }, "")).toContain("當月本俸");
+    expect(pensionWageHintText({ ...p, method: "monthly" }, "")).toContain("算不出勞退提繳工資");
   });
 });

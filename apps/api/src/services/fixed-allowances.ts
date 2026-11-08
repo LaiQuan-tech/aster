@@ -1,6 +1,8 @@
 import { activeFixedAllowancesForPeriod, type FixedAllowanceInput, type FixedAllowanceRowLike } from "@hr/rules"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { chunk, fetchAllPages } from "../lib/select-all-pages.js"
+import { logger } from "../lib/logger.js"
 
 /**
  * 員工固定津貼（employee_fixed_allowances；migration 0086 ＝ sql/0076；2026-11-08）。
@@ -58,25 +60,53 @@ export function toFixedAllowanceView(row: FixedAllowanceRow): FixedAllowanceView
   }
 }
 
-/** 某些員工的所有（未刪除）固定津貼列；資料表不存在 → []。 */
-export async function loadFixedAllowanceRows(tenantId: string, employeeIds: string[]): Promise<FixedAllowanceRow[]> {
+/** 'YYYY-MM' → 該月第一天／最後一天（'YYYY-MM-DD'）。 */
+export function periodDateRange(period: string): { from: string; to: string } {
+  const [y, m] = period.split("-").map(Number)
+  const last = new Date(Date.UTC(y!, m!, 0)).getUTCDate()
+  return { from: `${period}-01`, to: `${period}-${String(last).padStart(2, "0")}` }
+}
+
+/**
+ * 某些員工的（未刪除）固定津貼列。資料表不存在 → []。
+ *
+ * `range` 有給就只撈與這段日期**相關**的列（effective_from ≤ range.to 且（effective_to 為空或 ≥ range.from）），
+ * 沒給＝該員工全部（員工薪資資料頁的清單）。PostgREST 每次最多 1000 列會**靜默截斷**——一律以 fetchAllPages
+ * 依 id 穩定分頁撈完；員工 id 每 100 個一批（避免 .in() 網址過長）。回傳依生效起日、建立時間排序。
+ */
+export async function loadFixedAllowanceRows(
+  tenantId: string,
+  employeeIds: string[],
+  range?: { from: string; to: string },
+): Promise<FixedAllowanceRow[]> {
   if (employeeIds.length === 0) return []
-  const { data, error } = await supabaseAdmin
-    .from("employee_fixed_allowances")
-    .select(FIXED_ALLOWANCE_COLS)
-    .eq("tenant_id", tenantId)
-    .in("employee_id", employeeIds)
-    .is("deleted_at", null)
-    .order("effective_from", { ascending: true })
-    .order("created_at", { ascending: true })
-  if (error) {
-    if (isMissingTableError(error)) {
-      warnSchemaGapOnce("employee_fixed_allowances", error)
-      return []
+  const out: FixedAllowanceRow[] = []
+  for (const ids of chunk([...new Set(employeeIds)], 100)) {
+    const res = await fetchAllPages<FixedAllowanceRow>((from, to) => {
+      let q = supabaseAdmin
+        .from("employee_fixed_allowances")
+        .select(FIXED_ALLOWANCE_COLS)
+        .eq("tenant_id", tenantId)
+        .in("employee_id", ids)
+        .is("deleted_at", null)
+      if (range) q = q.lte("effective_from", range.to).or(`effective_to.is.null,effective_to.gte.${range.from}`)
+      return q.order("id", { ascending: true }).range(from, to)
+    }, "loadFixedAllowanceRows")
+    if (res.error) {
+      if (isMissingTableError(res.error)) {
+        warnSchemaGapOnce("employee_fixed_allowances", res.error)
+        return []
+      }
+      throw new Error(`loadFixedAllowanceRows: ${res.error.message}`)
     }
-    throw new Error(`loadFixedAllowanceRows: ${error.message}`)
+    out.push(...res.data)
   }
-  return (data ?? []) as unknown as FixedAllowanceRow[]
+  return out.sort(
+    (a, b) =>
+      String(a.effective_from).localeCompare(String(b.effective_from)) ||
+      String(a.created_at).localeCompare(String(b.created_at)) ||
+      String(a.id).localeCompare(String(b.id)),
+  )
 }
 
 /** `period`（'YYYY-MM'）當月有效的固定津貼，依員工分組（引擎輸入的形狀）。 */
@@ -85,7 +115,7 @@ export async function loadFixedAllowancesByEmployee(
   period: string,
   employeeIds: string[],
 ): Promise<Map<string, FixedAllowanceInput[]>> {
-  const rows = await loadFixedAllowanceRows(tenantId, employeeIds)
+  const rows = await loadFixedAllowanceRows(tenantId, employeeIds, periodDateRange(period))
   const byEmployee = new Map<string, FixedAllowanceRowLike[]>()
   for (const row of rows) {
     const arr = byEmployee.get(row.employee_id)
@@ -137,34 +167,105 @@ export function embeddedFixedAllowancesOf(breakdown: unknown): ComparableAllowan
   return Array.isArray(list) ? (list as ComparableAllowance[]) : []
 }
 
+/* ── 勞退設定（手填提繳工資、適用新制）的過期比對 ─────────────────────────────── */
+
+/** 員工薪資資料的勞退兩欄（salary_structures.pension_wage／pension_new_system；未套 migration＝undefined）。 */
+export interface PensionSettingsRow {
+  pension_wage?: string | number | null
+  pension_new_system?: boolean | null
+}
+
 /**
- * 這些員工的**草稿**薪資單裡，內嵌的固定津貼跟現在不一致的那些（`${employeeId}|${period}`）。
- * 已定案的不算（定案的不再改）。給 CRUD 回應的 stalePeriods 與薪資單列表的提醒用。
+ * 薪資單算的時候用的勞退設定（breakdown.pensionWageInput／pensionNewSystem）跟現在員工薪資資料的是不是同一組。
+ * 舊薪資單沒有這兩鍵＝當時「沒手填、適用新制」。
+ */
+export function pensionSettingsStale(breakdown: unknown, current: PensionSettingsRow | null | undefined): boolean {
+  const b = (breakdown ?? {}) as { pensionWageInput?: unknown; pensionNewSystem?: unknown }
+  const embeddedWage = typeof b.pensionWageInput === "number" && b.pensionWageInput > 0 ? Math.round(b.pensionWageInput) : null
+  const embeddedNew = b.pensionNewSystem !== false
+  const curWage = current?.pension_wage != null && Number(current.pension_wage) > 0 ? Math.round(Number(current.pension_wage)) : null
+  const curNew = current?.pension_new_system !== false
+  return embeddedWage !== curWage || embeddedNew !== curNew
+}
+
+export type StaleReason = "fixed_allowances" | "pension_settings"
+
+export interface StaleDraft {
+  employeeId: string
+  period: string
+  payslipId: string
+  reasons: StaleReason[]
+}
+
+/**
+ * 這些員工的**草稿**薪資單裡，內嵌的固定津貼或勞退設定跟現在不一致的那些（已定案的不算）。
+ * `periods` 有給就只看這幾期（GET /payslips 只看本次查詢的期別）。全部查詢都分頁＋員工 id 分批；固定津貼只撈與各期相關的列。
  */
 export async function staleDraftPayslips(
   tenantId: string,
   employeeIds: string[],
-): Promise<Array<{ employeeId: string; period: string; payslipId: string }>> {
+  periods?: string[],
+): Promise<StaleDraft[]> {
   if (employeeIds.length === 0) return []
-  const { data, error } = await supabaseAdmin
-    .from("payslips")
-    .select("id, employee_id, period, status, breakdown")
-    .eq("tenant_id", tenantId)
-    .in("employee_id", employeeIds)
-    .eq("status", "draft")
-  if (error) throw new Error(`staleDraftPayslips: ${error.message}`)
-  const drafts = (data ?? []) as Array<{ id: string; employee_id: string; period: string; breakdown: unknown }>
+  const drafts: Array<{ id: string; employee_id: string; period: string; breakdown: unknown }> = []
+  for (const ids of chunk([...new Set(employeeIds)], 100)) {
+    const res = await fetchAllPages<{ id: string; employee_id: string; period: string; breakdown: unknown }>((from, to) => {
+      let q = supabaseAdmin
+        .from("payslips")
+        .select("id, employee_id, period, status, breakdown")
+        .eq("tenant_id", tenantId)
+        .in("employee_id", ids)
+        .eq("status", "draft")
+      if (periods && periods.length > 0) q = q.in("period", periods)
+      return q.order("id", { ascending: true }).range(from, to)
+    }, "staleDraftPayslips")
+    if (res.error) throw new Error(`staleDraftPayslips: ${res.error.message}`)
+    drafts.push(...res.data)
+  }
   if (drafts.length === 0) return []
-  const rows = await loadFixedAllowanceRows(tenantId, employeeIds)
-  const out: Array<{ employeeId: string; period: string; payslipId: string }> = []
-  for (const d of drafts) {
-    const current = activeFixedAllowancesForPeriod(
-      rows.filter((r) => r.employee_id === d.employee_id),
-      d.period,
+
+  // 勞退設定：員工薪資資料（0086 未套用時沒有這兩欄 → 一律視為「沒手填、適用新制」）
+  const { salarySelectCols } = await import("./payroll-inputs.js")
+  const cols = await salarySelectCols()
+  const pensionByEmployee = new Map<string, PensionSettingsRow>()
+  const draftEmployees = [...new Set(drafts.map((d) => d.employee_id))]
+  for (const ids of chunk(draftEmployees, 100)) {
+    const res = await fetchAllPages<{ employee_id: string } & PensionSettingsRow>(
+      (from, to) =>
+        supabaseAdmin
+          .from("salary_structures")
+          .select(cols)
+          .eq("tenant_id", tenantId)
+          .in("employee_id", ids)
+          .order("employee_id", { ascending: true })
+          .range(from, to),
+      "staleDraftPayslips (salary)",
     )
-    if (fixedAllowancesStale(embeddedFixedAllowancesOf(d.breakdown), current)) {
-      out.push({ employeeId: d.employee_id, period: d.period, payslipId: d.id })
+    if (res.error) throw new Error(`staleDraftPayslips (salary): ${res.error.message}`)
+    for (const r of res.data) pensionByEmployee.set(r.employee_id, r)
+  }
+
+  const out: StaleDraft[] = []
+  const byPeriod = new Map<string, typeof drafts>()
+  for (const d of drafts) byPeriod.set(d.period, [...(byPeriod.get(d.period) ?? []), d])
+  for (const [period, list] of byPeriod) {
+    const current = await loadFixedAllowancesByEmployee(tenantId, period, [...new Set(list.map((d) => d.employee_id))])
+    for (const d of list) {
+      const reasons: StaleReason[] = []
+      if (fixedAllowancesStale(embeddedFixedAllowancesOf(d.breakdown), current.get(d.employee_id))) reasons.push("fixed_allowances")
+      if (pensionSettingsStale(d.breakdown, pensionByEmployee.get(d.employee_id))) reasons.push("pension_settings")
+      if (reasons.length > 0) out.push({ employeeId: d.employee_id, period: d.period, payslipId: d.id, reasons })
     }
   }
   return out.sort((a, b) => a.period.localeCompare(b.period))
+}
+
+/** GET /payslips 用的寬鬆版：失敗回空集合並記 log（列表不可因為提醒查不到而 500）；定案檢查不走這支。 */
+export async function staleDraftPayslipsSafe(tenantId: string, employeeIds: string[], periods?: string[]): Promise<StaleDraft[]> {
+  try {
+    return await staleDraftPayslips(tenantId, employeeIds, periods)
+  } catch (err) {
+    logger.warn({ err, tenantId }, "staleDraftPayslips failed — payslip list returned without stale markers")
+    return []
+  }
 }

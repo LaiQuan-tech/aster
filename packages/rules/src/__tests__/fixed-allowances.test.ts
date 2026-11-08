@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  PENSION_WAGE_LEVELS_2025,
   PENSION_WAGE_LEVELS_2026,
   parseRuleConfig,
   resolveMealTaxFreeMonthly,
@@ -238,10 +239,11 @@ describe("雇主勞退提撥（公司負擔）", () => {
     expect(employerPensionOf(33300, 0.065)).toBe(2165); // 2164.5 → 2165
   });
 
-  it("沒有本薪也沒有投保薪資、也沒填提繳工資 → 沒有雇主勞退欄位", () => {
-    const b = run([], { method: "hourly", hourlyWage: 200 });
+  it("算不出提繳工資（時薪制當月沒有工時、沒手填）→ 沒有雇主勞退欄位，標 pensionWageMissing（不靜默）", () => {
+    const b = computePayslip([], { method: "hourly", hourlyWage: 200, laborInsuredSalary: 27470 }, rules(), 0, 0, [], { period: "2030-03" });
     expect(b.employerPension).toBeUndefined();
     expect(b.pensionWage).toBeUndefined();
+    expect(b.pensionWageMissing).toBe(true);
   });
 
   it("沒有勞保投保薪資但有提繳工資（手填）也能算", () => {
@@ -256,9 +258,44 @@ describe("雇主勞退提撥（公司負擔）", () => {
     expect(b.employerPension).toBe(1818);
   });
 
-  it("時薪制沒有月本薪 → 以勞保投保薪資為基數（27,470 → 27,600）", () => {
-    const b = computePayslip(oneDay, { method: "hourly", hourlyWage: 200, laborInsuredSalary: 27470 }, rules());
-    expect(b.pensionWage).toBe(27600);
+  it("時薪制：以當月本俸（時薪 × 正常工時）＋計入投保津貼為基數，不再依賴勞保級距（8h × 200 = 1,600 → 3,000）", () => {
+    const b = computePayslip(oneDay, { method: "hourly", hourlyWage: 200, laborInsuredSalary: 27470 }, rules(), 0, 0, [], { period: "2030-03" });
+    expect(b.base).toBe(1600);
+    expect(b.pensionWage).toBe(3000);
+    expect(b.pensionWageMissing).toBeUndefined();
+    const withAllowance = computePayslip(oneDay, { method: "hourly", hourlyWage: 200 }, rules(), 0, 0, [], {
+      period: "2030-03",
+      fixedAllowances: [allowance({ amount: 1500 })],
+    });
+    expect(withAllowance.pensionWage).toBe(4500); // 1,600 + 1,500 = 3,100 → 第 3 級 4,500
+  });
+
+  it("日薪制：出勤天數 × 日薪（22 天 × 1,500 = 33,000 → 33,300）", () => {
+    const days = Array.from({ length: 22 }, (_, i) => ({ ...oneDay[0]!, date: `2030-03-${String(i + 1).padStart(2, "0")}` }));
+    const b = computePayslip(days, { method: "by_attendance_days", dailyWage: 1500, hourlyWage: 187.5 }, rules(), 0, 0, [], { period: "2030-03" });
+    expect(b.pensionWage).toBe(33300);
+  });
+
+  it("手填提繳工資夾到該版分級表最高級（200,000 → 150,000），pensionWageInput 記原值；非級距值照用", () => {
+    const b = run([], { ...salary, pensionWage: 200000 });
+    expect(b.pensionWage).toBe(150000);
+    expect(b.pensionWageInput).toBe(200000);
+    expect(run([], { ...salary, pensionWage: 41000 }).pensionWage).toBe(41000);
+  });
+
+  it("內建分級表依月份選版：28,700 → 2025 年 28,800（114 年版）、2026 年 29,500（115 年版）；2024 年用 114 年版", () => {
+    const r = rules();
+    expect(resolvePensionWage({ baseSalary: 28700 }, [], r, "2025-06")?.wage).toBe(28800);
+    expect(resolvePensionWage({ baseSalary: 28700 }, [], r, "2026-01")?.wage).toBe(29500);
+    expect(resolvePensionWage({ baseSalary: 28700 }, [], r, "2024-06")?.wage).toBe(28800);
+    expect(PENSION_WAGE_LEVELS_2025).toHaveLength(62);
+    expect(PENSION_WAGE_LEVELS_2025[24]).toBe(28800);
+    expect(PENSION_WAGE_LEVELS_2025[61]).toBe(150000);
+  });
+
+  it("規則有分級表但全部晚於計算月份 → 內建表也依月份選版（2025-06 → 114 年版）", () => {
+    const r = rules({ pension: { wageBrackets: [{ effectiveFrom: "2031-01-01", levels: [30000, 50000] }] } });
+    expect(resolvePensionWageLevels(r, "2025-06-01").effectiveFrom).toBe("2025-01-01");
   });
 
   it("分級表：62 級、第 1 級 1,500、最高 150,000；超過最高級取 150,000；介於級距向上取", () => {

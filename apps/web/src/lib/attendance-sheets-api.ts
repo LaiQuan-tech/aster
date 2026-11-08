@@ -176,6 +176,8 @@ export interface SheetMoney {
   expenses: number;
   net: number;
   netPlusExpenses: number;
+  /** 固定津貼免稅部分（伙食費免稅額內；不在 gross、已含在 net）。2026-11-08 起才有，舊快照沒有＝0。 */
+  fixedAllowancesTaxFree?: number;
 }
 
 /** GET /attendance-sheets/:id、/my/attendance-sheet 回傳的完整月表。 */

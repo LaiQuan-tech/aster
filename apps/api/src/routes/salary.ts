@@ -72,6 +72,9 @@ function numOrNull(v: unknown): number | null {
   return Number.isFinite(x) ? x : null
 }
 
+/** 手填勞退月提繳工資上限＝分級表最高級。 */
+export const PENSION_WAGE_MANUAL_MAX = 150_000
+
 const SELECT_COLS =
   "id, tenant_id, employee_id, method, base_salary, daily_wage, hourly_wage, allowances, labor_insured_salary, health_insured_salary, pension_voluntary_rate, agreed_hours_per_week, agreed_days_per_week, created_at"
 
@@ -102,7 +105,8 @@ const upsertSchema = z
     agreedDaysPerWeek: z.number().nonnegative().nullable().optional(),
     // 2026-11-08（migration 0086）：勞退月提繳工資（整數元；null＝依分級表以本薪＋計入投保固定津貼自動算）、
     // 是否適用勞退新制（false → 雇主提撥與勞工自提都 0，例：無永久居留的外籍員工）。
-    pensionWage: z.number().int().positive().max(9_999_999).nullable().optional(),
+    // 上限 150,000＝勞退月提繳分級表最高級（114／115 年版皆同）；引擎另依該月分級表最高級再夾一次。
+    pensionWage: z.number().int().positive().max(PENSION_WAGE_MANUAL_MAX).nullable().optional(),
     pensionNewSystem: z.boolean().optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })

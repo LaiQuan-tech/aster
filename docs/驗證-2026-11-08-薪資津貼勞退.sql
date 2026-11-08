@@ -36,7 +36,8 @@ SELECT count(*) = 4 AS ok, string_agg(conname, ', ' ORDER BY conname) AS checks
 SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'employee_fixed_allowances_tenant_emp_idx') AS ok,
        'index employee_fixed_allowances_tenant_emp_idx' AS item;
 
--- 3b. salary_structures 新增兩欄＋CHECK；既有列 pension_wage 全為 NULL、pension_new_system 全為 true（純新增，不改既有資料）
+-- 3b. salary_structures 新增兩欄（型別、可否為空、預設值）＋CHECK。可重跑：HR 之後填了提繳工資／取消新制也照樣通過，
+--     所以這裡**不**檢查既有列的值（「套用當下不改既有資料」由 db:replay 的種子＋本檔 4g 實測驗證）。
 SELECT count(*) = 2 AS ok, string_agg(column_name || ':' || data_type || ':' || is_nullable || ':' || coalesce(column_default, ''), ', ') AS columns
   FROM information_schema.columns
  WHERE table_schema = 'public' AND table_name = 'salary_structures'
@@ -44,9 +45,6 @@ SELECT count(*) = 2 AS ok, string_agg(column_name || ':' || data_type || ':' || 
      OR (column_name = 'pension_new_system' AND data_type = 'boolean' AND is_nullable = 'NO' AND column_default = 'true'));
 SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.salary_structures'::regclass AND conname = 'salary_structures_pension_wage_chk') AS ok,
        'salary_structures_pension_wage_chk' AS item;
-SELECT count(*) FILTER (WHERE pension_wage IS NOT NULL OR pension_new_system IS DISTINCT FROM true) = 0 AS ok,
-       count(*) AS existing_rows, '既有列未被改動（pension_wage NULL、pension_new_system true）' AS item
-  FROM public.salary_structures;
 
 -- 4. 交易內實測（ROLLBACK）
 BEGIN;
@@ -121,7 +119,7 @@ END $$;
 SELECT item, ok, detail FROM _fa_check ORDER BY seq;
 ROLLBACK;
 
--- 5. 欄位數（目視比對）：payslips 不變；salary_structures 比套用前多 2（pension_wage、pension_new_system）
+-- 5. 欄位數（目視參考）：payslips 不變；salary_structures 比套用前多 2（pension_wage、pension_new_system）
 SELECT 'payslips' AS table_name, count(*) AS columns FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'payslips'
 UNION ALL
 SELECT 'salary_structures', count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'salary_structures';

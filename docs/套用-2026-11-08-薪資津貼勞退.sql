@@ -4,7 +4,7 @@
 -- 雇主提撥率、勞退月提繳分級表、伙食費免稅額不需 SQL：後台「設定 → 規則參數 → 勞健保」分頁的「勞退與伙食費參數」卡片
 --   （未設定＝6%、系統內建 115 年分級表、3,000）。
 -- 已用 `npm run db:replay -- --base-migration 53 --base-sql 62 --seed docs/test/replay-seed-2026-11-08-salary-pension.sql docs/套用-2026-11-08-薪資津貼勞退.sql
---   --verify docs/驗證-2026-11-08-薪資津貼勞退.sql` 在 pglite 上套兩遍（驗冪等）＋驗證全部通過。
+--   --verify docs/驗證-2026-11-08-薪資津貼勞退.sql --verify docs/test/replay-verify-2026-11-08-salary-pension.sql` 在 pglite 上套兩遍（驗冪等）＋驗證全部通過。
 --   （本檔只依賴 tenants／employees／salary_structures／audit_row()，base 到 sql/0062 即具備；sql/0063 起 raw 檔無法直接在 raw base 上重放，見 10-28 套用檔說明。）
 BEGIN;
 
