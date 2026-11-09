@@ -232,7 +232,8 @@ describe("客戶名冊欄位", () => {
     const plan = applicationSheetPlan(ctx, draftOf(ctx, { clientEdits: { contactName: "李測試", taxId: "123" } }))
     expect(plan.client).toEqual({ id: "c1", name: "測試客戶甲", body: { contactName: "李測試", taxId: "123" } })
     expect(plan.dirtyCount).toBe(2)
-    expect(plan.errors).toContain("統一編號須為 8 碼數字。")
+    expect(plan.errors.map((e) => e.message)).toContain("統一編號須為 8 碼數字。")
+    expect(plan.errors.find((e) => e.message.includes("統一編號"))?.field).toBe("taxId")
   })
 
   it("resolveSheetClient：名冊優先，找不到才用本案帶的 client；沒選回 null", () => {
@@ -262,8 +263,9 @@ describe("訂單與銷售金額", () => {
     // 輸入跟現值一樣＝沒變
     expect(applicationSheetPlan(ctx, draftOf(ctx, { amountUntaxed: "105000" })).contract).toBeNull()
     // 不能清空、不能小於追加減
-    expect(applicationSheetPlan(ctx, draftOf(ctx, { amountUntaxed: "" })).errors[0]).toMatch(/合約金額不能清空/)
-    expect(applicationSheetPlan(ctx, draftOf(ctx, { amountUntaxed: "100" })).errors[0]).toMatch(/不能小於追加減/)
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { amountUntaxed: "" })).errors[0].message).toMatch(/合約金額不能清空/)
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { amountUntaxed: "" })).errors[0].field).toBe("amountUntaxed")
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { amountUntaxed: "100" })).errors[0].message).toMatch(/不能小於追加減/)
   })
 
   it("只有報價單：改未稅 → PATCH 那張報價單（不變成合約）", () => {
@@ -285,9 +287,10 @@ describe("訂單與銷售金額", () => {
     const ctx = ctxOf()
     expect(applicationSheetPlan(ctx, draftOf(ctx, { orderDocType: "quotation", amountUntaxed: "50000" })).contract).toEqual({ kind: "quotation-create", amount: 50000 })
     expect(applicationSheetPlan(ctx, draftOf(ctx, { orderDocType: "quotation" })).contract).toEqual({ kind: "quotation-create", amount: null })
-    expect(applicationSheetPlan(ctx, draftOf(ctx, { orderDocType: "contract" })).errors[0]).toMatch(/勾選「合約書」要一併填/)
-    expect(applicationSheetPlan(ctx, draftOf(ctx, { amountUntaxed: "50000" })).errors[0]).toMatch(/請先在「訂單」格勾選/)
-    expect(applicationSheetPlan(ctx, draftOf(ctx, { amountUntaxed: "-1" })).errors[0]).toMatch(/0 以上/)
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { orderDocType: "contract" })).errors[0].message).toMatch(/勾選「合約書」要一併填/)
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { amountUntaxed: "50000" })).errors[0].message).toMatch(/請先在「訂單」格勾選/)
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { amountUntaxed: "50000" })).errors.map((e) => e.field)).toEqual(["orderDocType", "amountUntaxed"])
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { amountUntaxed: "-1" })).errors[0].message).toMatch(/0 以上/)
   })
 
   it("已有合約時再勾合約書不算變更（不會重建）", () => {
@@ -304,15 +307,16 @@ describe("付款階段", () => {
 
   it("鎖定規則：已入帳不能改%/金額/入帳日，已開票不能改發票，公會代墊那格是審迄還款", () => {
     const rows = applicationStageRows(billings)
-    expect(stageLocks(rows[0])).toEqual({ milestone: false, percentage: false, amount: false, receivedOn: false, invoiceNo: false })
-    expect(stageLocks(rows[1])).toEqual({ milestone: false, percentage: true, amount: true, receivedOn: true, invoiceNo: true })
+    expect(stageLocks(rows[0])).toEqual({ milestone: false, percentage: false, amount: false, receivedOn: false, invoiceNo: false, invoicedOn: false })
+    expect(stageLocks(rows[1])).toEqual({ milestone: false, percentage: true, amount: true, receivedOn: true, invoiceNo: true, invoicedOn: true })
     expect(stageLocks(rows[rows.length - 1]).invoiceNo).toBe(true)
   })
 
   it("改說明／%／金額 → 整批 PUT 含全部既有期別（預定日原值帶回）；金額＝人工指定，理由由使用者填", () => {
     const ctx = ctxOf({ billings })
     const noReason = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { amount: "41000" } } }))
-    expect(noReason.errors).toContain("付款階段第 1 列改了金額（人工指定），請填理由。")
+    expect(noReason.errors.map((e) => e.message)).toContain("付款階段第 1 列改了金額（人工指定），請填理由。")
+    expect(noReason.errors[0].field).toBe("stage:b1:overrideReason")
     expect(noReason.stages.needsReason).toEqual([{ key: "b1", label: "第 1 列" }])
     const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { milestone: " 訂金 ", percentage: "40", amount: "41000", overrideReason: " 業主議價 " } } }))
     expect(plan.errors).toEqual([])
@@ -337,9 +341,25 @@ describe("付款階段", () => {
 
   it("只填發票號碼／入帳日 → 不動期程，直接登記開票／入帳", () => {
     const ctx = ctxOf({ billings })
-    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { invoiceNo: " AB12345678 ", receivedOn: "2026-10-28" } } }))
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { invoiceNo: " AB12345678 ", invoicedOn: "2026-10-27", receivedOn: "2026-10-28" } } }))
     expect(plan.stages.installments).toBeNull()
-    expect(plan.stages.invoices).toEqual([{ key: "b1", label: "第 1 列", invoiceNo: "AB12345678" }])
+    expect(plan.stages.invoices).toEqual([{ key: "b1", label: "第 1 列", invoiceNo: "AB12345678", invoicedOn: "2026-10-27" }])
+    expect(plan.dirtyCount).toBe(2)
+  })
+
+  it("發票日期格式錯擋存；只填發票日期沒號碼不擋也不送", () => {
+    const ctx = ctxOf({ billings })
+    const bad = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { invoiceNo: "AB1", invoicedOn: "2026/10/27" } } }))
+    expect(bad.errors.map((e) => e.message).join()).toContain("發票日期格式不對")
+    expect(bad.errors[0].field).toBe("stage:b1:invoicedOn")
+    const lone = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { invoicedOn: "2026-10-27" } } }))
+    expect(lone.errors).toEqual([])
+    expect(lone.stages.invoices).toEqual([])
+  })
+
+  it("開票日期與入帳日同送", () => {
+    const ctx = ctxOf({ billings })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { invoiceNo: " AB12345678 ", invoicedOn: "2026-10-27", receivedOn: "2026-10-28" } } }))
     expect(plan.stages.receipts).toEqual([{ key: "b1", label: "第 1 列", receivedOn: "2026-10-28" }])
     expect(plan.dirtyCount).toBe(2)
   })
@@ -361,8 +381,9 @@ describe("付款階段", () => {
 
   it("驗證：百分比超過 100、入帳卻算不出金額", () => {
     const ctx = ctxOf({ billings })
-    expect(applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { percentage: "120" } } })).errors[0]).toMatch(/0～100/)
-    expect(applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { "new-installment-3": { receivedOn: "2026-10-28" } } })).errors[0]).toMatch(/要先有金額或百分比/)
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { percentage: "120" } } })).errors[0].message).toMatch(/0～100/)
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { percentage: "120" } } })).errors[0].field).toBe("stage:b1:percentage")
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { "new-installment-3": { receivedOn: "2026-10-28" } } })).errors[0].message).toMatch(/要先有金額或百分比/)
   })
 })
 
@@ -392,7 +413,8 @@ describe("發包單位", () => {
     const plan = applicationSheetPlan(ctx, draftOf(ctx, { subEdits: { "new-2": { vendorName: "新廠商", item: "空調", amount: "3000", billingBasis: "驗收" } } }))
     expect(plan.subcontracts?.[2]).toMatchObject({ kind: "subcontract", vendorName: "新廠商", item: "空調", amount: 3000, billingBasis: "驗收", withholdingRate: 0.1, withholdingThreshold: 20000, sortOrder: 2 })
     expect(plan.subcontracts?.[2].id).toBeUndefined()
-    expect(applicationSheetPlan(ctx, draftOf(ctx, { subEdits: { s1: { amount: "abc" } } })).errors[0]).toMatch(/發包金額/)
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { subEdits: { s1: { amount: "abc" } } })).errors[0].message).toMatch(/發包金額/)
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { subEdits: { s1: { amount: "abc" } } })).errors[0].field).toBe("sub:s1:amount")
   })
 
   it("填回原值不算變更", () => {

@@ -86,6 +86,9 @@ const GRID_TEMPLATE = APPLICATION_SHEET_COLUMNS.map((w) => `minmax(0, ${w}fr)`).
  * 可填的格子裡一定有這個框，一眼分得出「可以填」與「系統算的／唯讀」（沒有框）。列印模式沒有輸入框。
  */
 const cellInput = sheet.input;
+/** 驗證擋住儲存的格子：淡紅底＋紅框，列印不顯示。 */
+const INVALID_CELL_CLS = "bg-red-50! ring-1 ring-inset ring-red-400 print:bg-white! print:ring-0";
+const INVALID_INPUT_CLS = "bg-red-50 ring-1 ring-red-400 print:bg-transparent print:ring-0";
 /** 格子裡的 ■／□ 選項鈕（可編輯時）：跟輸入框同樣的淡框。 */
 const cellChoice =
   "rounded-md border border-gray-300 bg-white px-1 hover:border-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]";
@@ -114,6 +117,8 @@ function Cell({
   children,
   testId,
   editable = false,
+  errField,
+  invalid = false,
 }: {
   col: number;
   span: number;
@@ -127,6 +132,10 @@ function Cell({
   testId?: string;
   /** 這格可以直接填（格內有淡框輸入框；data-editable 給測試／樣式用）。 */
   editable?: boolean;
+  /** 這格對應的驗證錯誤 field（空白分隔；點「無法儲存」時據此捲動並 focus）。 */
+  errField?: string;
+  /** 這格有驗證錯誤：淡紅底＋紅框（列印不顯示）。 */
+  invalid?: boolean;
 }) {
   const style = {
     "--gc": `${col} / span ${span}`,
@@ -145,7 +154,9 @@ function Cell({
       style={style}
       data-testid={testId}
       data-editable={editable ? "true" : undefined}
-      className={`${place} flex min-w-0 items-center border-b border-gray-200 ${shade ? "bg-gray-50" : "bg-white"} px-2 py-1 text-[13px] leading-[1.4] md:border-0 md:[grid-column:var(--gc)] md:[grid-row:var(--gr)] print:border-0 print:px-1 print:py-0.5 print:text-[11px] print:[grid-column:var(--gc)] print:[grid-row:var(--gr)] ${alignCls} ${kind === "label" ? "whitespace-pre text-xs font-medium text-gray-600" : "text-gray-900"} ${className}`}
+      data-err-field={errField}
+      data-invalid={invalid ? "true" : undefined}
+      className={`${place} flex min-w-0 items-center border-b border-gray-200 ${shade ? "bg-gray-50" : "bg-white"} px-2 py-1 text-[13px] leading-[1.4] md:border-0 md:[grid-column:var(--gc)] md:[grid-row:var(--gr)] print:border-0 print:px-1 print:py-0.5 print:text-[11px] print:[grid-column:var(--gc)] print:[grid-row:var(--gr)] ${alignCls} ${kind === "label" ? "whitespace-pre text-xs font-medium text-gray-600" : "text-gray-900"} ${invalid ? INVALID_CELL_CLS : ""} ${className}`}
     >
       {children}
     </div>
@@ -295,11 +306,25 @@ export function ApplicationSheet({
     [project, editable, canEditClients, disciplines, client, money, contracts, billings, subcontracts, vendors, draft],
   );
   const dirtyCount = plan.dirtyCount;
-  const validation = [...applicationSheetErrors(draft, { canFinance }), ...plan.errors];
+  const validationErrors = [...applicationSheetErrors(draft, { canFinance }), ...plan.errors];
+  const validation = [...new Set(validationErrors.map((e) => e.message))];
+  const errFields = new Set(validationErrors.map((e) => e.field));
+  const isBad = (...fields: string[]) => editable && fields.some((f) => errFields.has(f));
+  const errAttr = (...fields: string[]) => ({ errField: fields.join(" "), invalid: isBad(...fields) });
   const blockedHint = validation.length > 0
     ? `無法儲存：${validation[0]}${validation.length > 1 ? `（還有 ${validation.length - 1} 項，見下方）` : ""}`
     : null;
   const blockedTitle = validation.length > 0 ? validation.join("\n") : undefined;
+  /** 捲到第一個有錯的格子並 focus（點按鈕旁的紅字提示）。 */
+  const focusFirstError = () => {
+    const first = validationErrors[0];
+    if (!first) return;
+    const root = document.querySelector('[data-testid="application-sheet"]');
+    const target = [...(root?.querySelectorAll<HTMLElement>("[data-err-field]") ?? [])].find((el) => el.dataset.errField?.split(" ").includes(first.field));
+    if (!target) return;
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+    (target.matches("input,button,select,textarea") ? target : target.querySelector<HTMLElement>("input,button,select,textarea"))?.focus({ preventScroll: true });
+  };
 
   const set = <K extends keyof ApplicationSheetDraft>(key: K, value: ApplicationSheetDraft[K]) =>
     setDraft((d) => ({ ...d, [key]: value }));
@@ -317,7 +342,7 @@ export function ApplicationSheet({
     updateContract: (id, body) => updateContract(id, body),
     createQuotation: (body) => createContract(project.id, { docType: "quotation", title: "報價單", amount: body.amount }),
     saveBillingSchedule: (installments) => saveBillingSchedule(project.id, installments),
-    invoiceBilling: (id, invoiceNo) => invoiceBilling(id, { invoiceNo }),
+    invoiceBilling: (id, invoiceNo, invoicedOn) => invoiceBilling(id, invoicedOn ? { invoiceNo, invoicedOn } : { invoiceNo }),
     receiveBilling: (id, receivedOn) => receiveBilling(id, { receivedOn }),
     putSubcontracts: (list) => putProjectSubcontracts(project.id, { subcontracts: list }),
     fetchBillings: async () => (await getBillingSchedule(project.id)).installments,
@@ -439,7 +464,7 @@ export function ApplicationSheet({
         return (
           <div className="w-full space-y-1 py-0.5">
             {draft.designScope.map((row, idx) => (
-              <div key={idx} className="flex flex-wrap items-center gap-1 sm:flex-nowrap">
+              <div key={idx} data-err-field={`designScope:${idx}`} className={`flex flex-wrap items-center gap-1 sm:flex-nowrap ${isBad(`designScope:${idx}`) ? "rounded bg-red-50 ring-1 ring-red-400 print:bg-transparent print:ring-0" : ""}`}>
                 <input aria-label={`設計內容第 ${idx + 1} 列科別`} className={`${cellInput} sm:w-24 sm:flex-none`} list="sheet-discipline-suggestions" placeholder="科別" value={row.discipline} onChange={(e) => patchScopeRow(idx, { discipline: e.target.value })} />
                 <input aria-label={`設計內容第 ${idx + 1} 列項目`} className={`${cellInput} flex-1`} placeholder="服務項目" value={row.item ?? ""} onChange={(e) => patchScopeRow(idx, { item: e.target.value })} />
                 <input aria-label={`設計內容第 ${idx + 1} 列金額`} className={`${cellInput} text-right sm:w-32 sm:flex-none`} type="number" min="0" placeholder="金額" value={row.amount ?? ""} onChange={(e) => patchScopeRow(idx, { amount: e.target.value === "" ? null : Number(e.target.value) })} />
@@ -629,6 +654,12 @@ export function ApplicationSheet({
     }
   }
 
+  const SHEET_FIELD_ERR: Partial<Record<SheetField, string[]>> = {
+    siteAreaM2: ["siteAreaM2"],
+    orderDocument: ["orderDocType"],
+    amountUntaxed: ["amountUntaxed"],
+    clientTaxId: ["taxId"],
+  };
   const numericFields = new Set<SheetField>(["amountUntaxed", "taxAmount", "amountTotal"]);
 
   // ---- 版面：上半部固定 10 列，接付款階段、空白分隔列、發包單位區塊 ----
@@ -660,7 +691,7 @@ export function ApplicationSheet({
         labelIndexAt.set(`${r}-${start}`, cells.length);
       } else if (cell.field) {
         const node = (
-          <Cell key={key} col={start} span={cell.span} row={r + 1} rowSpan={cell.rowSpan} kind="value" align={numericFields.has(cell.field) ? "right" : "left"} testId={`sheet-${cell.field}`} className={blankCls(SHEET_FIELD_PRINT_BLOCK[cell.field])} editable={fieldEditable(cell.field)}>
+          <Cell key={key} col={start} span={cell.span} row={r + 1} rowSpan={cell.rowSpan} kind="value" align={numericFields.has(cell.field) ? "right" : "left"} testId={`sheet-${cell.field}`} className={blankCls(SHEET_FIELD_PRINT_BLOCK[cell.field])} editable={fieldEditable(cell.field)} {...errAttr(...(SHEET_FIELD_ERR[cell.field] ?? []))}>
             {renderField(cell.field)}
           </Cell>
         );
@@ -693,7 +724,7 @@ export function ApplicationSheet({
           `${s.no}.${s.milestone}`
         )}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-1`} col={stageCols[1]} span={APPLICATION_STAGE_SPANS[1]} row={r} kind="value" align="center" editable={editable && !locks.percentage}>
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-1`} col={stageCols[1]} span={APPLICATION_STAGE_SPANS[1]} row={r} kind="value" align="center" editable={editable && !locks.percentage} {...errAttr(`stage:${key}:percentage`)}>
         {editable && !locks.percentage ? (
           <span className="flex w-full items-center gap-0.5">
             <input aria-label={`${rowLabel}百分比`} className={`${cellInput} text-right`} type="number" min="0" max="100" inputMode="decimal" value={val("percentage")} onChange={(e) => setStage(key, "percentage", e.target.value)} />
@@ -701,28 +732,17 @@ export function ApplicationSheet({
           </span>
         ) : s.percentage != null ? `${s.percentage}%` : ""}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-2`} col={stageCols[2]} span={APPLICATION_STAGE_SPANS[2]} row={r} kind="value" align="right" editable={editable && !locks.amount}>
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-2`} col={stageCols[2]} span={APPLICATION_STAGE_SPANS[2]} row={r} kind="value" align="right" editable={editable && !locks.amount} {...errAttr(`stage:${key}:amount`, `stage:${key}:overrideReason`)}>
         {editable && !locks.amount ? (
           <input aria-label={`${rowLabel}金額`} title="填了就是人工指定金額；清空＝依百分比試算" className={`${cellInput} text-right`} type="number" min="0" inputMode="numeric" value={val("amount")} onChange={(e) => setStage(key, "amount", e.target.value)} />
         ) : (
           <span title={editable && locks.amount ? "已請款／已入帳，金額凍結" : undefined}>{s.amount != null ? fmtMoney(s.amount) : ""}</span>
         )}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-3`} col={stageCols[3]} span={APPLICATION_STAGE_SPANS[3]} row={r} kind="value" editable={editable && !locks.receivedOn}>
-        {editable && !locks.receivedOn ? (
-          <span className="flex w-full items-center gap-1 whitespace-nowrap">
-            已於
-            <input aria-label={`${rowLabel}入帳日期`} className={`${cellInput} px-0.5`} type="date" value={val("receivedOn")} onChange={(e) => setStage(key, "receivedOn", e.target.value)} />
-            入賬
-          </span>
-        ) : (
-          <span className="whitespace-pre" title={editable && locks.receivedOn ? "已入帳；撤銷請到下方「分期請款期程」" : undefined}>已於 {s.receivedOn ? rocDots(s.receivedOn) : "         "} 入賬</span>
-        )}
-      </Cell>,
-      <Cell key={`stage-${s.no}-4`} col={stageCols[4]} span={APPLICATION_STAGE_SPANS[4]} row={r} kind="label" shade align="center">
+      <Cell key={`stage-${s.no}-3`} col={stageCols[3]} span={APPLICATION_STAGE_SPANS[3]} row={r} kind="label" shade align="center">
         {guild ? "審迄還款:" : "發票號碼:"}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-5`} col={stageCols[5]} span={APPLICATION_STAGE_SPANS[5]} row={r} kind="value" editable={editable && (guild || !locks.invoiceNo)}>
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-4`} col={stageCols[4]} span={guild ? APPLICATION_STAGE_SPANS[4] + APPLICATION_STAGE_SPANS[5] + APPLICATION_STAGE_SPANS[6] : APPLICATION_STAGE_SPANS[4]} row={r} kind="value" editable={editable && (guild || !locks.invoiceNo)} {...errAttr(guild ? "guildRepaymentNote" : `stage:${key}:invoiceNo`)}>
         {guild
           ? editable ? (
               <input
@@ -735,10 +755,35 @@ export function ApplicationSheet({
               />
             ) : draft.guildRepaymentNote
           : editable && !locks.invoiceNo ? (
-              <input aria-label={`${rowLabel}發票號碼`} title="儲存時登記開票（開票日＝今天，可到下方卡片撤銷重開）" className={cellInput} maxLength={40} placeholder="發票號碼" value={val("invoiceNo")} onChange={(e) => setStage(key, "invoiceNo", e.target.value)} />
+              <input aria-label={`${rowLabel}發票號碼`} title="儲存時登記開票（發票日期未填＝今天，可到下方卡片撤銷重開）" className={cellInput} maxLength={40} placeholder="發票號碼" value={val("invoiceNo")} onChange={(e) => setStage(key, "invoiceNo", e.target.value)} />
             ) : (
-              <span title={editable ? "已開票；撤銷請到下方「分期請款期程」" : undefined}>{[s.invoiceNo, rocDots(s.invoicedOn)].filter(Boolean).join(" ")}</span>
+              <span title={editable ? "已開票；撤銷請到下方「分期請款期程」" : undefined}>{s.invoiceNo ?? ""}</span>
             )}
+      </Cell>,
+      ...(guild
+        ? []
+        : [
+            <Cell key={`stage-${s.no}-5`} col={stageCols[5]} span={APPLICATION_STAGE_SPANS[5]} row={r} kind="label" shade align="center">
+              發票日期:
+            </Cell>,
+            <Cell className={blankCls("payment")} key={`stage-${s.no}-6`} col={stageCols[6]} span={APPLICATION_STAGE_SPANS[6]} row={r} kind="value" editable={editable && !locks.invoicedOn} {...errAttr(`stage:${key}:invoicedOn`)}>
+              {editable && !locks.invoicedOn ? (
+                <input aria-label={`${rowLabel}發票日期`} title="未填＝登記開票當天" className={`${cellInput} px-0.5`} type="date" value={val("invoicedOn")} onChange={(e) => setStage(key, "invoicedOn", e.target.value)} />
+              ) : (
+                <span title={editable ? "已開票；撤銷請到下方「分期請款期程」" : undefined}>{s.invoicedOn ? rocDots(s.invoicedOn) : ""}</span>
+              )}
+            </Cell>,
+          ]),
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-7`} col={stageCols[7]} span={APPLICATION_STAGE_SPANS[7]} row={r} kind="value" editable={editable && !locks.receivedOn} {...errAttr(`stage:${key}:receivedOn`)}>
+        {editable && !locks.receivedOn ? (
+          <span className="flex w-full items-center gap-1 whitespace-nowrap">
+            已於
+            <input aria-label={`${rowLabel}入帳日期`} className={`${cellInput} px-0.5`} type="date" value={val("receivedOn")} onChange={(e) => setStage(key, "receivedOn", e.target.value)} />
+            入帳
+          </span>
+        ) : (
+          <span className="whitespace-pre" title={editable && locks.receivedOn ? "已入帳；撤銷請到下方「分期請款期程」" : undefined}>已於 {s.receivedOn ? rocDots(s.receivedOn) : "         "} 入帳</span>
+        )}
       </Cell>,
     );
   }
@@ -780,7 +825,7 @@ export function ApplicationSheet({
       );
       block.forEach((slot, j) =>
         cells.push(
-          <Cell className={blankCls("subcontract")} key={`sub-${b}-${i}-${j}`} col={subCols[1 + j]} span={APPLICATION_SUBCONTRACT_SPANS[1 + j]} row={r} kind="value" align={i === 3 ? "right" : "center"} editable={editable}>
+          <Cell className={blankCls("subcontract")} key={`sub-${b}-${i}-${j}`} col={subCols[1 + j]} span={APPLICATION_SUBCONTRACT_SPANS[1 + j]} row={r} kind="value" align={i === 3 ? "right" : "center"} editable={editable} {...(i === 3 ? errAttr(`sub:${slot.key}:amount`) : {})}>
             {editable ? (
               <input
                 aria-label={`發包單位第 ${b * 3 + j + 1} 欄${label.replace(/[\s：]/g, "")}`}
@@ -802,7 +847,7 @@ export function ApplicationSheet({
         <Cell key={`sub-${b}-${i}-sl`} col={subCols[4]} span={APPLICATION_SUBCONTRACT_SPANS[4]} row={r} kind="label" shade align="right">
           {b === 0 ? APPLICATION_SUMMARY_LABELS[i] : ""}
         </Cell>,
-        <Cell className={blankCls("subcontract")} key={`sub-${b}-${i}-sv`} col={subCols[5]} span={APPLICATION_SUBCONTRACT_SPANS[5]} row={r} kind="value" align="right" testId={b === 0 && i === 1 ? "sheet-other-expenses" : undefined} editable={editable && b === 0 && i === 1}>
+        <Cell className={blankCls("subcontract")} key={`sub-${b}-${i}-sv`} col={subCols[5]} span={APPLICATION_SUBCONTRACT_SPANS[5]} row={r} kind="value" align="right" testId={b === 0 && i === 1 ? "sheet-other-expenses" : undefined} editable={editable && b === 0 && i === 1} {...(b === 0 && i === 1 ? errAttr("otherExpenses") : {})}>
           {b === 0 ? summaryValues[i] : ""}
         </Cell>,
       );
@@ -843,7 +888,7 @@ export function ApplicationSheet({
           <label className="flex min-w-0 flex-1 items-center gap-1">
             <span className="shrink-0 text-gray-600">工程名稱：</span>
             {editable ? (
-              <input aria-label="工程名稱" className={`${cellInput} text-sm`} value={draft.name} onChange={(e) => set("name", e.target.value)} />
+              <input aria-label="工程名稱" data-err-field="name" className={`${cellInput} text-sm ${isBad("name") ? INVALID_INPUT_CLS : ""}`} value={draft.name} onChange={(e) => set("name", e.target.value)} />
             ) : (
               <span className="font-medium text-gray-900">{draft.name}</span>
             )}
@@ -873,7 +918,7 @@ export function ApplicationSheet({
             {dirtyCount > 0 ? (
               <>
                 <span className="text-sm text-amber-700">{dirtyCount} 個欄位尚未儲存</span>
-                {blockedHint && <span className="text-sm text-red-600" data-testid="sheet-blocked-hint">{blockedHint}</span>}
+                {blockedHint && <button type="button" className="text-left text-sm text-red-600 underline decoration-dotted" data-testid="sheet-blocked-hint" onClick={focusFirstError}>{blockedHint}</button>}
                 <Button type="button" variant="ghost" size="sm" onClick={() => { setDraft(applicationSheetDraftOf(project, disciplines)); setReport(null); }}>還原</Button>
               </>
             ) : (
@@ -902,7 +947,8 @@ export function ApplicationSheet({
                 <span className="shrink-0 text-amber-900">{r.label}</span>
                 <input
                   aria-label={`付款階段${r.label}人工指定理由`}
-                  className={`${cellInput} max-w-md`}
+                  data-err-field={`stage:${r.key}:overrideReason`}
+                  className={`${cellInput} max-w-md ${isBad(`stage:${r.key}:overrideReason`) ? INVALID_INPUT_CLS : ""}`}
                   maxLength={1000}
                   value={draft.stageEdits[r.key]?.overrideReason ?? ""}
                   onChange={(e) => setStage(r.key, "overrideReason", e.target.value)}
@@ -949,7 +995,7 @@ export function ApplicationSheet({
       {editable && dirtyCount > 0 && (
         <div role="status" className="no-print fixed inset-x-0 bottom-0 z-30 border-t border-amber-200 bg-amber-50/95 px-4 py-2 lg:pr-44 shadow-[0_-2px_8px_rgba(0,0,0,0.06)] backdrop-blur" data-testid="sheet-unsaved-bar">
           <div className="mx-auto flex max-w-[960px] flex-wrap items-center gap-x-3 gap-y-1.5 text-sm text-amber-900">
-            <span className="mr-auto">申請單有 {dirtyCount} 個欄位尚未儲存。{blockedHint && <span className="ml-2 text-red-600">{blockedHint}</span>}</span>
+            <span className="mr-auto">申請單有 {dirtyCount} 個欄位尚未儲存。{blockedHint && <button type="button" className="ml-2 text-left text-red-600 underline decoration-dotted" onClick={focusFirstError}>{blockedHint}</button>}</span>
             <Button type="button" variant="secondary" size="sm" onClick={() => document.querySelector('[data-testid="application-sheet"]')?.scrollIntoView({ behavior: "smooth", block: "start" })}>
               回到申請單
             </Button>

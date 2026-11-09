@@ -39,6 +39,7 @@ import {
   type ApplicationSheetDraft,
   type ApplicationStageRow,
   type ClientSheetField,
+  type SheetError,
   type StageEdit,
   type SubEdit,
 } from "./project-application-sheet";
@@ -137,8 +138,8 @@ export type ContractStep =
  * - 什麼都沒有又沒勾 → 不知道該記成合約還是報價單，擋下來請使用者先勾。
  * 取消勾選既有文件＝作廢合約，要理由，留在下方「合約與報價單」卡處理。
  */
-export function contractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): { step: ContractStep | null; changes: number; errors: string[] } {
-  const errors: string[] = [];
+export function contractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): { step: ContractStep | null; changes: number; errors: SheetError[] } {
+  const errors: SheetError[] = [];
   if (!ctx.canFinance) return { step: null, changes: 0, errors };
   const orderDoc = latestOrderDocument(ctx.contracts);
   const hasContractDoc = orderDoc?.docType === "contract";
@@ -152,7 +153,7 @@ export function contractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft
   const source = ctx.money?.amountSource ?? null;
   const parsed = draft.amountUntaxed === null ? base : parseNumber(draft.amountUntaxed, { min: 0 });
   if (parsed === "invalid") {
-    errors.push("銷售金額（未稅）必須是 0 以上的數字。");
+    errors.push({ field: "amountUntaxed", message: "銷售金額（未稅）必須是 0 以上的數字。" });
     return { step: null, changes: 0, errors };
   }
   const amountChanged = draft.amountUntaxed !== null && parsed !== base;
@@ -162,12 +163,12 @@ export function contractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft
   const changeOrders = changeOrderTotal(ctx.contracts);
   const toMain = (amount: number | null, created: boolean): ContractStep | null => {
     if (amount === null) {
-      errors.push(created ? "勾選「合約書」要一併填銷售金額（未稅）。" : "合約金額不能清空（要作廢合約請到下方「合約與報價單」）。");
+      errors.push({ field: "amountUntaxed", message: created ? "勾選「合約書」要一併填銷售金額（未稅）。" : "合約金額不能清空（要作廢合約請到下方「合約與報價單」）。" });
       return null;
     }
     const main = amount - changeOrders;
     if (main < 0) {
-      errors.push(`銷售金額（未稅）不能小於追加減帳合計 ${changeOrders.toLocaleString()}。`);
+      errors.push({ field: "amountUntaxed", message: `銷售金額（未稅）不能小於追加減帳合計 ${changeOrders.toLocaleString()}。` });
       return null;
     }
     return { kind: "main", amount: main, created };
@@ -178,7 +179,10 @@ export function contractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft
   else if (source === "contract") step = toMain(parsed, false);
   else if (orderDoc?.docType === "quotation") step = { kind: "quotation-update", id: orderDoc.id, amount: parsed };
   else if (pending === "quotation") step = { kind: "quotation-create", amount: parsed };
-  else errors.push("本案還沒有合約或報價單：請先在「訂單」格勾選合約書或報價單，再填銷售金額。");
+  else {
+    const message = "本案還沒有合約或報價單：請先在「訂單」格勾選合約書或報價單，再填銷售金額。";
+    errors.push({ field: "orderDocType", message }, { field: "amountUntaxed", message });
+  }
   return { step, changes, errors };
 }
 
@@ -190,6 +194,7 @@ interface StageBase {
   amount: string;
   receivedOn: string;
   invoiceNo: string;
+  invoicedOn: string;
 }
 
 export function stageBaseValues(row: ApplicationStageRow): StageBase {
@@ -199,6 +204,7 @@ export function stageBaseValues(row: ApplicationStageRow): StageBase {
     amount: row.amount != null ? String(row.amount) : "",
     receivedOn: row.receivedOn ?? "",
     invoiceNo: row.invoiceNo ?? "",
+    invoicedOn: row.invoicedOn ?? "",
   };
 }
 
@@ -215,6 +221,8 @@ export function stageLocks(row: ApplicationStageRow) {
     receivedOn: received,
     /** 已開票的要先撤銷開票（要理由）；公會代墊列那格在 Word 上是「審迄還款」。 */
     invoiceNo: !!row.invoiceNo || row.kind === "guild_advance",
+    /** 發票日期跟著開票走：已開票的要先撤銷開票；公會代墊列沒有發票。 */
+    invoicedOn: !!row.invoiceNo || !!row.invoicedOn || row.kind === "guild_advance",
   };
 }
 
@@ -223,12 +231,12 @@ export interface StagePlan {
   installments: InstallmentInputExt[] | null;
   /** 新增的期別：草稿 key → 期別編號（存完用編號找回新 id）。 */
   created: Array<{ key: string; installmentNo: number; label: string }>;
-  invoices: Array<{ key: string; label: string; invoiceNo: string }>;
+  invoices: Array<{ key: string; label: string; invoiceNo: string; invoicedOn: string }>;
   receipts: Array<{ key: string; label: string; receivedOn: string }>;
   /** 改了金額、要使用者填人工指定理由的列（沒有既有理由可沿用）。 */
   needsReason: Array<{ key: string; label: string }>;
   changes: number;
-  errors: string[];
+  errors: SheetError[];
   /** 草稿裡對不到任何列的修改（那一列已被別處新增／移除）：不送出，提醒使用者。 */
   warnings: string[];
 }
@@ -275,19 +283,21 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     let percentage: number | null | undefined;
     if (edit.percentage !== undefined && !locks.percentage) {
       const p = parseNumber(edit.percentage, { min: 0, max: 100 });
-      if (p === "invalid") out.errors.push(`付款階段${label}的百分比必須是 0～100 的數字。`);
+      if (p === "invalid") out.errors.push({ field: `stage:${key}:percentage`, message: `付款階段${label}的百分比必須是 0～100 的數字。` });
       else if (p !== row.percentage) percentage = p;
     }
     let amount: number | null | undefined;
     if (edit.amount !== undefined && !locks.amount) {
       const a = parseNumber(edit.amount, { min: 0 });
-      if (a === "invalid") out.errors.push(`付款階段${label}的金額必須是 0 以上的數字。`);
+      if (a === "invalid") out.errors.push({ field: `stage:${key}:amount`, message: `付款階段${label}的金額必須是 0 以上的數字。` });
       else if (a !== row.amount) amount = a;
     }
     const receivedOn = !locks.receivedOn && edit.receivedOn !== undefined ? trimmed(edit.receivedOn) : "";
     const invoiceNo = !locks.invoiceNo && edit.invoiceNo !== undefined ? trimmed(edit.invoiceNo) : "";
-    if (receivedOn && !dateRe.test(receivedOn)) out.errors.push(`付款階段${label}的入帳日期格式不對。`);
-    if (invoiceNo.length > 40) out.errors.push(`付款階段${label}的發票號碼最多 40 字。`);
+    const invoicedOn = !locks.invoicedOn && edit.invoicedOn !== undefined ? trimmed(edit.invoicedOn) : "";
+    if (receivedOn && !dateRe.test(receivedOn)) out.errors.push({ field: `stage:${key}:receivedOn`, message: `付款階段${label}的入帳日期格式不對。` });
+    if (invoicedOn && !dateRe.test(invoicedOn)) out.errors.push({ field: `stage:${key}:invoicedOn`, message: `付款階段${label}的發票日期格式不對。` });
+    if (invoiceNo.length > 40) out.errors.push({ field: `stage:${key}:invoiceNo`, message: `付款階段${label}的發票號碼最多 40 字。` });
 
     const rowScheduleChanges = (milestoneChanged ? 1 : 0) + (percentage !== undefined ? 1 : 0) + (amount !== undefined ? 1 : 0);
     out.changes += rowScheduleChanges + (receivedOn ? 1 : 0) + (invoiceNo ? 1 : 0);
@@ -298,7 +308,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
       overrideReason = trimmed(edit.overrideReason) || row.overrideReason || "";
       if (!overrideReason) {
         out.needsReason.push({ key, label });
-        out.errors.push(`付款階段${label}改了金額（人工指定），請填理由。`);
+        out.errors.push({ field: `stage:${key}:overrideReason`, message: `付款階段${label}改了金額（人工指定），請填理由。` });
       }
     }
 
@@ -306,13 +316,13 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     const amountAfter = amount !== undefined ? amount : row.amount;
     const pctAfter = percentage !== undefined ? percentage : row.percentage;
     if (receivedOn && amountAfter == null && pctAfter == null) {
-      out.errors.push(`付款階段${label}要先有金額或百分比，才能登記入帳日期。`);
+      out.errors.push({ field: `stage:${key}:receivedOn`, message: `付款階段${label}要先有金額或百分比，才能登記入帳日期。` });
     }
 
     if (row.id) {
       if (rowScheduleChanges === 0) {
         if (receivedOn && dateRe.test(receivedOn)) out.receipts.push({ key, label, receivedOn });
-        if (invoiceNo) out.invoices.push({ key, label, invoiceNo });
+        if (invoiceNo) out.invoices.push({ key, label, invoiceNo, invoicedOn: dateRe.test(invoicedOn) ? invoicedOn : "" });
         continue;
       }
       const target = payload.find((p) => p.id === row.id);
@@ -343,7 +353,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
       out.created.push({ key, installmentNo, label });
     }
     if (receivedOn && dateRe.test(receivedOn)) out.receipts.push({ key, label, receivedOn });
-    if (invoiceNo) out.invoices.push({ key, label, invoiceNo });
+    if (invoiceNo) out.invoices.push({ key, label, invoiceNo, invoicedOn: dateRe.test(invoicedOn) ? invoicedOn : "" });
   }
   if (scheduleChanged) out.installments = payload;
   return out;
@@ -383,7 +393,7 @@ function subPayloadOf(s: Subcontract): Subcontract {
 export interface SubPlan {
   subcontracts: Subcontract[] | null;
   changes: number;
-  errors: string[];
+  errors: SheetError[];
   warnings: string[];
   /** 草稿裡對不到任何欄位的 subEdits key（空欄已被別人新增的副委託佔走，或那筆已被移除）。 */
   orphanKeys: string[];
@@ -414,7 +424,7 @@ export function subcontractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDr
       if (f === "amount") {
         const n = parseNumber(v, { min: 0, max: 1e12 });
         if (n === "invalid") {
-          out.errors.push(`發包單位第 ${idx + 1} 欄的發包金額必須是 0 以上的數字。`);
+          out.errors.push({ field: `sub:${slot.key}:amount`, message: `發包單位第 ${idx + 1} 欄的發包金額必須是 0 以上的數字。` });
           continue;
         }
         if ((n ?? 0) !== Number(subBaseValue(slot.sub, "amount") || 0)) diff.amount = String(n ?? 0);
@@ -476,7 +486,7 @@ export interface SheetSavePlan {
   subcontracts: Subcontract[] | null;
   /** 未儲存的格子數（存檔鈕旁、離開頁面提醒）。 */
   dirtyCount: number;
-  errors: string[];
+  errors: SheetError[];
   warnings: string[];
 }
 
@@ -491,7 +501,7 @@ export function applicationSheetPlan(ctx: SheetSaveContext, draft: ApplicationSh
   const errors = [...contract.errors, ...stages.errors, ...subs.errors];
   const taxId = draft.clientEdits.taxId;
   if (canEditClient && ctx.client && taxId !== undefined && trimmed(taxId) !== "" && !/^\d{8}$/.test(trimmed(taxId))) {
-    errors.push("統一編號須為 8 碼數字。");
+    errors.push({ field: "taxId", message: "統一編號須為 8 碼數字。" });
   }
   return {
     project: projectCount > 0 ? projectPatch : null,
@@ -526,7 +536,7 @@ export interface SheetSaveApi {
   updateContract(id: string, body: { amount: number | null }): Promise<unknown>;
   createQuotation(body: { amount: number | null }): Promise<unknown>;
   saveBillingSchedule(installments: InstallmentInputExt[]): Promise<{ installments: Array<{ id: string; installmentNo: number }> }>;
-  invoiceBilling(id: string, invoiceNo: string): Promise<unknown>;
+  invoiceBilling(id: string, invoiceNo: string, invoicedOn?: string): Promise<unknown>;
   receiveBilling(id: string, receivedOn: string): Promise<unknown>;
   putSubcontracts(subcontracts: Subcontract[]): Promise<unknown>;
   /**
@@ -611,7 +621,7 @@ export async function runApplicationSheetSave(
     try {
       const fresh = await api.fetchBillings();
       const replanned = stagePlan({ ...ctx, billings: fresh }, draft);
-      if (replanned.errors.length > 0) throw new Error(replanned.errors.join(" "));
+      if (replanned.errors.length > 0) throw new Error(replanned.errors.map((e) => e.message).join(" "));
       notices.push(...replanned.warnings);
       stages = replanned;
     } catch (err) {
@@ -668,7 +678,7 @@ export async function runApplicationSheetSave(
       steps.push({ section: "invoice", label, status: "skipped", message: "銷售金額沒存成，這格未送出（避免用舊金額登記）。" });
       continue;
     }
-    if (await attempt("invoice", label, () => api.invoiceBilling(id, inv.invoiceNo).then(() => undefined))) dropStageField(inv.key, "invoiceNo");
+    if (await attempt("invoice", label, () => api.invoiceBilling(id, inv.invoiceNo, inv.invoicedOn || undefined).then(() => undefined))) { dropStageField(inv.key, "invoiceNo"); dropStageField(inv.key, "invoicedOn"); }
   }
   for (const rc of stages.receipts) {
     const label = `付款階段${rc.label}入帳日期`;
@@ -691,7 +701,7 @@ export async function runApplicationSheetSave(
     const ok = await attempt("subcontracts", "發包單位", async () => {
       if (ctx && api.fetchSubcontracts) {
         const replanned = subcontractPlan({ ...ctx, subcontracts: await api.fetchSubcontracts() }, draft);
-        if (replanned.errors.length > 0) throw new Error(replanned.errors.join(" "));
+        if (replanned.errors.length > 0) throw new Error(replanned.errors.map((e) => e.message).join(" "));
         orphanKeys = replanned.orphanKeys;
         if (!replanned.subcontracts) return; // 最新資料已跟草稿一致（或只剩對不到的修改），不必再送
         subs = replanned.subcontracts;
