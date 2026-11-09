@@ -188,6 +188,8 @@ export default function AdminProjectDetailPage() {
 
   // 副委託與協力技師（模組五）
   const [subDraft, setSubDraft] = useState<SubRow[]>([]);
+  /** migration 0089 是否已套用（未套用時副委託卡不開放「事務所」與代扣日期／發票欄）。 */
+  const [firmSupported, setFirmSupported] = useState(true);
   const [originalSubIds, setOriginalSubIds] = useState<string[]>([]);
   const [savingSubs, setSavingSubs] = useState(false);
   const [subsSavedAt, setSubsSavedAt] = useState<number | null>(null);
@@ -274,6 +276,7 @@ export default function AdminProjectDetailPage() {
         })),
       );
       setSavedSubs(subs.subcontracts);
+      setFirmSupported(subs.features?.firmInvoice !== false);
       const subRows = toSubRows(subs.subcontracts);
       setSubDraft(subRows);
       setOriginalSubIds(subRows.map((r) => r.id).filter((x): x is string => !!x));
@@ -514,6 +517,7 @@ export default function AdminProjectDetailPage() {
             originalPayments={originalPayments} setOriginalPayments={setOriginalPayments}
             savingPayments={savingPayments} setSavingPayments={setSavingPayments}
             companies={companies}
+            firmSupported={firmSupported}
             error={error} setError={setError} load={load}
           />
         </div>

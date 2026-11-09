@@ -624,6 +624,13 @@
       "when": 1793800000000,
       "tag": "0088_salary_insured_history",
       "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1793900000000,
+      "tag": "0089_subcontract_firm_invoice",
+      "breakpoints": true
     }
   ]
 }

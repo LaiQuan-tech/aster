@@ -25,6 +25,7 @@ import {
 import { loadPaymentAcceptance, paymentsHaveAcceptance } from "../services/disbursements.js"
 import { firstNewlyPickedInactive } from "../services/company-lifecycle.js"
 import { writeAuditLog } from "../services/audit.js"
+import { columnsExist } from "../lib/schema-compat.js"
 import { recomputeBonusRunsBestEffort } from "../services/bonus-run-store.js"
 
 export const subcontractsRouter = Router()
@@ -65,9 +66,54 @@ export const subcontractsRouter = Router()
  * 一律 409 `linked_to_disbursement`——單一真相在匯款單，要改就作廢那張單。
  * 沒有 `disbursement_id` 的舊路徑（手動標記已付）維持原樣，專案頁顯示
  * 「手動標記」，放款專區列表可用 `manualPaid=1` 找出來補單。
+ *
+ * ── 事務所／代扣日期／發票（2026-11-10，migration 0089）─────────────────
+ * 類型多一種 `firm`（事務所）。firm 記 `withholdingDate`（代扣日期），其他類型記
+ * `invoiceNo`（≤40）＋`invoiceDate`（發票）；**存檔時不相關的那一組一律存 null**
+ * （類型切換不會留下殘值）。三欄在 payload 裡「沒帶」＝沿用 DB 現值（申請單的整批 PUT
+ * 不認得這三欄，不能被它清掉）；帶 null＝清空。日期必須是真實存在的 YYYY-MM-DD。
+ * 欄位尚未套用（0089 未套）時：讀取回 null、寫入略過三欄；類型選 firm 回 409
+ * `migration_required`（kind CHECK 也還沒放寬，硬寫會 500）。回應帶
+ * `features.firmInvoice` 讓前端決定要不要開放「事務所」。
  */
 
 const dateRe = /^\d{4}-\d{2}-\d{2}$/
+
+/** YYYY-MM-DD 且是真實存在的日期（擋 2026-02-30 這種 regex 會放行、Postgres 會 500 的值）。 */
+export function isRealDate(v: string): boolean {
+  if (!dateRe.test(v)) return false
+  const [y, m, d] = v.split("-").map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, d))
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d
+}
+const realDate = z.string().refine(isRealDate, { message: "invalid_date" })
+
+/** migration 0089 的三欄。 */
+const SUB_EXTRA_COLS = "withholding_date, invoice_no, invoice_date"
+const subExtrasAvailable = () => columnsExist("project_subcontracts", SUB_EXTRA_COLS)
+
+/**
+ * 依類型決定這一列要寫哪幾個 0089 欄位：firm → 代扣日期（發票清 null）；其他 → 發票（代扣日期清 null）。
+ * 「沒帶」的欄位不出現在回傳物件裡＝沿用 DB 現值。純函式，測試直接打。
+ */
+export function subcontractExtraFields(p: {
+  kind?: string
+  withholdingDate?: string | null
+  invoiceNo?: string | null
+  invoiceDate?: string | null
+}): Record<string, string | null> {
+  const out: Record<string, string | null> = {}
+  if ((p.kind ?? "subcontract") === "firm") {
+    if (p.withholdingDate !== undefined) out.withholding_date = p.withholdingDate || null
+    out.invoice_no = null
+    out.invoice_date = null
+  } else {
+    out.withholding_date = null
+    if (p.invoiceNo !== undefined) out.invoice_no = p.invoiceNo?.trim() || null
+    if (p.invoiceDate !== undefined) out.invoice_date = p.invoiceDate || null
+  }
+  return out
+}
 
 const subcontractItem = z.object({
   id: z.string().uuid().optional(),
@@ -83,6 +129,11 @@ const subcontractItem = z.object({
   contractId: z.string().uuid().nullish(),
   withholdingRate: z.number().min(0).max(1).nullish(),
   withholdingThreshold: z.number().int().min(0).max(1e9).nullish(),
+  /** 0089：代扣日期（firm 用）。 */
+  withholdingDate: realDate.nullish(),
+  /** 0089：發票號碼／日期（firm 以外用）。 */
+  invoiceNo: z.string().trim().max(40).nullish(),
+  invoiceDate: realDate.nullish(),
   sortOrder: z.number().int().min(0).max(9999).optional(),
   note: z.string().trim().max(2000).nullish(),
 })
@@ -147,7 +198,31 @@ async function withAcceptance<T extends { payments?: Array<Record<string, unknow
   return subcontracts
 }
 
+/**
+ * 0089 三欄：serializeSubcontract 是共用純函式（SUBCONTRACT_COLS 也被年度表等共用），
+ * 比照 withAcceptance 在這裡另查後掛回去。欄位未套用時一律 null。
+ */
+async function withExtras<T extends { id: string }>(tenantId: string, subcontracts: T[], available: boolean) {
+  const byId = new Map<string, { withholding_date: string | null; invoice_no: string | null; invoice_date: string | null }>()
+  if (available && subcontracts.length > 0) {
+    const { data, error } = await supabaseAdmin
+      .from("project_subcontracts")
+      .select(`id, ${SUB_EXTRA_COLS}`)
+      .eq("tenant_id", tenantId)
+      .in("id", subcontracts.map((s) => s.id))
+    if (error) throw new Error(`withExtras: ${error.message}`)
+    for (const r of (data ?? []) as Array<{ id: string; withholding_date: string | null; invoice_no: string | null; invoice_date: string | null }>) {
+      byId.set(r.id, r)
+    }
+  }
+  return subcontracts.map((s) => {
+    const r = byId.get(s.id)
+    return { ...s, withholdingDate: r?.withholding_date ?? null, invoiceNo: r?.invoice_no ?? null, invoiceDate: r?.invoice_date ?? null }
+  })
+}
+
 async function respondSubcontracts(tenantId: string, projectId: string, res: Response, status = 200) {
+  const extrasAvailable = await subExtrasAvailable()
   const subs = await loadSubcontracts(tenantId, projectId)
   const payments = await loadPayments(tenantId, subs.map((s) => s.id))
   const bySub = new Map<string, PaymentRow[]>()
@@ -156,7 +231,11 @@ async function respondSubcontracts(tenantId: string, projectId: string, res: Res
     if (arr) arr.push(p)
     else bySub.set(p.subcontract_id, [p])
   }
-  const serialized = await withAcceptance(tenantId, subs.map((s) => serializeSubcontract(s, bySub.get(s.id) ?? [])))
+  const serialized = await withExtras(
+    tenantId,
+    await withAcceptance(tenantId, subs.map((s) => serializeSubcontract(s, bySub.get(s.id) ?? []))),
+    extrasAvailable,
+  )
   const subcontractTotal = serialized.filter((s) => s.kind !== "technician").reduce((a, s) => a + s.amount, 0)
   const technicianTotal = serialized.filter((s) => s.kind === "technician").reduce((a, s) => a + s.amount, 0)
   res.status(status).json({
@@ -168,6 +247,8 @@ async function respondSubcontracts(tenantId: string, projectId: string, res: Res
       paidTotal: serialized.reduce((a, s) => a + s.summary.paidTotal, 0),
       withheldTotal: serialized.reduce((a, s) => a + s.summary.withheldTotal, 0),
     },
+    /** firmInvoice=false：migration 0089 未套用，前端不開放「事務所」與代扣日期／發票欄。 */
+    features: { firmInvoice: extrasAvailable },
   })
 }
 
@@ -292,6 +373,11 @@ subcontractsRouter.put(
         return
       }
       const payload = parsed.data.subcontracts
+      const extrasAvailable = await subExtrasAvailable()
+      if (!extrasAvailable && payload.some((p) => p.kind === "firm")) {
+        res.status(409).json({ error: "migration_required", feature: "subcontract_firm" })
+        return
+      }
       const existing = await loadSubcontracts(tenantId, projectId)
       const existingById = new Map(existing.map((s) => [s.id, s]))
 
@@ -365,6 +451,7 @@ subcontractsRouter.put(
           sort_order: p.sortOrder ?? i,
           note: p.note ?? null,
           updated_at: nowIso,
+          ...(extrasAvailable ? subcontractExtraFields(p) : {}),
         }
         if (p.id) {
           const { error } = await supabaseAdmin
@@ -729,7 +816,11 @@ subcontractsRouter.put(
       // #3：舊路徑（沒經放款單）標記已付／撤銷付款會改變專案成本 → 重算未發放的獎金批次（best-effort）。
       await recomputeBonusRunsBestEffort(tenantId, [projectId], "PUT /projects/:id/subcontracts/:sid/payments")
       const payments = await loadPayments(tenantId, [subcontractId])
-      const [serialized] = await withAcceptance(tenantId, [serializeSubcontract(sub, payments)])
+      const [serialized] = await withExtras(
+        tenantId,
+        await withAcceptance(tenantId, [serializeSubcontract(sub, payments)]),
+        await subExtrasAvailable(),
+      )
       res.status(200).json({ subcontract: serialized })
     } catch (err) {
       next(err)
@@ -828,7 +919,11 @@ subcontractsRouter.post(
         return
       }
       const payments = await loadPayments(tenantId, [subcontractId])
-      const [serialized] = await withAcceptance(tenantId, [serializeSubcontract(subData as unknown as SubcontractRow, payments)])
+      const [serialized] = await withExtras(
+        tenantId,
+        await withAcceptance(tenantId, [serializeSubcontract(subData as unknown as SubcontractRow, payments)]),
+        await subExtrasAvailable(),
+      )
       res.status(200).json({ subcontract: serialized, acceptedOn })
     } catch (err) {
       next(err)

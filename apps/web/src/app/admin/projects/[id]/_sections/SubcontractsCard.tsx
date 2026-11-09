@@ -14,6 +14,15 @@ import {
   type Company,
 } from "@/lib/projects-ext-api";
 import { acceptSubcontractPayment } from "@/lib/disbursements-api";
+import {
+  SUBCONTRACT_KIND_OPTIONS,
+  THRESHOLD_TIP,
+  WITHHOLDING_TIP,
+  isFirmKind,
+  kindChangePatch,
+  subcontractExtraPayload,
+  withholdingHints,
+} from "@/lib/subcontract-firm";
 import { fmtMoney, toSubRows, type SubRow, type Setter } from "./shared";
 
 interface SubcontractsCardProps {
@@ -36,6 +45,8 @@ interface SubcontractsCardProps {
   setSavingPayments: Setter<string | null>;
   /** 全部公司（含已停用）；期款的公司下拉只列啟用的，加上該期目前已選的。唯讀顯示（已連動放款單）照原名。 */
   companies: Company[];
+  /** migration 0089 已套用（false＝不開放「事務所」與代扣日期／發票欄；預設 true）。 */
+  firmSupported?: boolean;
   error: string | null;
   setError: Setter<string | null>;
   load: () => Promise<void>;
@@ -48,6 +59,9 @@ interface SubcontractsCardProps {
  * 都改在上方申請單「發包單位」區塊；發包小計／其他支出／利潤／毛利率也看申請單右側。這張卡只留
  * 申請單做不到的：類型（下包工程／技師簽證費）、代扣率、起扣門檻、移除（要理由）、每列期款表
  * （驗收、匯款單、放款日、實付、放款公司、收據抬頭與編號）。「科別」「訂單類型」欄已移除（值原樣保留）。
+ *
+ * 2026-11-10 類型多「事務所」：事務所列顯示代扣率%／代扣日期／起扣門檻（＋代扣提醒），其他類型改顯示
+ * 發票號碼／發票日期；存檔時不相關那組送 null（邏輯在 lib/subcontract-firm.ts）。提醒不擋存。
  *
  * M5（2026-09-23）期款表多一欄「驗收」：沒驗收的期別按「驗收確認」才會記
  * `accepted_on`，**沒驗收就不能放款**（放款專區建單／送簽／付款都會 409
@@ -73,6 +87,7 @@ export function SubcontractsCard({
   savingPayments,
   setSavingPayments,
   companies,
+  firmSupported = true,
   error,
   setError,
   load,
@@ -113,6 +128,8 @@ export function SubcontractsCard({
         ...(r.sortOrder !== undefined ? { sortOrder: r.sortOrder } : {}),
         withholdingRate: r.withholdingRate,
         withholdingThreshold: r.withholdingThreshold,
+        // 0089：依類型只送相關那組（事務所＝代扣日期；其他＝發票），另一組送 null。
+        ...subcontractExtraPayload(r),
         note: r.note?.trim() || null,
       }));
       const res = await putProjectSubcontracts(projectId, { subcontracts: body, deleteReason });
@@ -220,16 +237,19 @@ export function SubcontractsCard({
       {subDraft.length === 0 ? (
         <Empty>尚無下包或技師——請在上方申請單「發包單位」直接填寫後儲存。</Empty>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+        <div className="overflow-x-auto print:overflow-visible" data-testid="subcontracts-table-wrap">
+          <table className="w-full min-w-[820px] text-sm print:min-w-0 print:text-[11px]">
             <thead>
               <tr className="border-b text-left text-gray-500">
                 <th className="py-2 pr-2 min-w-[150px]">單位</th>
                 <th className="py-2 pr-2 text-right">金額</th>
-                <th className="py-2 pr-2">類型</th>
-                <th className="py-2 pr-2 text-right">代扣率%</th>
-                <th className="py-2 pr-2 text-right">門檻</th>
-                <th className="py-2 pr-2"></th>
+                <th className="py-2 pr-2 min-w-[120px]">類型</th>
+                <th className="py-2 pr-2 min-w-[130px]" title={WITHHOLDING_TIP}>
+                  代扣率%／發票號碼 <span className="cursor-help text-gray-400" aria-label={WITHHOLDING_TIP}>ⓘ</span>
+                </th>
+                <th className="py-2 pr-2 min-w-[150px]">代扣日期／發票日期</th>
+                <th className="py-2 pr-2 min-w-[100px] text-right" title={THRESHOLD_TIP}>起扣門檻</th>
+                <th className="py-2 pr-2 print:hidden"></th>
               </tr>
             </thead>
             <tbody>
@@ -243,26 +263,87 @@ export function SubcontractsCard({
                     </td>
                     <td className="py-1.5 pr-2 text-right text-gray-700">{fmtMoney(row.amount)}</td>
                     <td className="py-1.5 pr-2">
-                      <select className={inputCls} value={row.kind} onChange={(e) => patchSub(idx, { kind: e.target.value as SubcontractKind })}>
-                        <option value="subcontract">下包工程</option>
-                        <option value="technician">技師簽證費</option>
+                      <select
+                        className={inputCls}
+                        aria-label="類型"
+                        value={row.kind}
+                        onChange={(e) => patchSub(idx, kindChangePatch(row, e.target.value as SubcontractKind))}
+                      >
+                        {SUBCONTRACT_KIND_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value} disabled={o.value === "firm" && !firmSupported && row.kind !== "firm"}>
+                            {o.label}{o.value === "firm" && !firmSupported ? "（資料庫未更新）" : ""}
+                          </option>
+                        ))}
                       </select>
                     </td>
-                    <td className="py-1.5 pr-2">
-                      <input
-                        className={`${inputCls} text-right`}
-                        type="number"
-                        min="0"
-                        max="100"
-                        step="0.1"
-                        value={Math.round(row.withholdingRate * 1000) / 10}
-                        onChange={(e) => patchSub(idx, { withholdingRate: (Number(e.target.value) || 0) / 100 })}
-                      />
-                    </td>
-                    <td className="py-1.5 pr-2">
-                      <input className={`${inputCls} text-right`} type="number" min="0" value={row.withholdingThreshold} onChange={(e) => patchSub(idx, { withholdingThreshold: Number(e.target.value) || 0 })} />
-                    </td>
-                    <td className="py-1.5 pr-2 text-right whitespace-nowrap">
+                    {isFirmKind(row.kind) ? (
+                      <>
+                        <td className="py-1.5 pr-2">
+                          <input
+                            className={`${inputCls} text-right`}
+                            type="number"
+                            min="0"
+                            max="100"
+                            step="0.1"
+                            aria-label="代扣率%"
+                            title={WITHHOLDING_TIP}
+                            value={Math.round(row.withholdingRate * 1000) / 10}
+                            onChange={(e) => patchSub(idx, { withholdingRate: (Number(e.target.value) || 0) / 100 })}
+                          />
+                          <span className="mt-0.5 block text-[11px] text-gray-400">代扣率%</span>
+                        </td>
+                        <td className="py-1.5 pr-2">
+                          <input
+                            className={inputCls}
+                            type="date"
+                            aria-label="代扣日期"
+                            value={row.withholdingDate ?? ""}
+                            disabled={!firmSupported}
+                            onChange={(e) => patchSub(idx, { withholdingDate: e.target.value || null })}
+                          />
+                          <span className="mt-0.5 block text-[11px] text-gray-400">代扣日期</span>
+                        </td>
+                        <td className="py-1.5 pr-2">
+                          <input
+                            className={`${inputCls} text-right`}
+                            type="number"
+                            min="0"
+                            aria-label="起扣門檻"
+                            title={THRESHOLD_TIP}
+                            value={row.withholdingThreshold}
+                            onChange={(e) => patchSub(idx, { withholdingThreshold: Number(e.target.value) || 0 })}
+                          />
+                        </td>
+                      </>
+                    ) : (
+                      <>
+                        <td className="py-1.5 pr-2">
+                          <input
+                            className={inputCls}
+                            maxLength={40}
+                            aria-label="發票號碼"
+                            placeholder="例：AB12345678"
+                            value={row.invoiceNo ?? ""}
+                            disabled={!firmSupported}
+                            onChange={(e) => patchSub(idx, { invoiceNo: e.target.value })}
+                          />
+                          <span className="mt-0.5 block text-[11px] text-gray-400">發票號碼</span>
+                        </td>
+                        <td className="py-1.5 pr-2">
+                          <input
+                            className={inputCls}
+                            type="date"
+                            aria-label="發票日期"
+                            value={row.invoiceDate ?? ""}
+                            disabled={!firmSupported}
+                            onChange={(e) => patchSub(idx, { invoiceDate: e.target.value || null })}
+                          />
+                          <span className="mt-0.5 block text-[11px] text-gray-400">發票日期</span>
+                        </td>
+                        <td className="py-1.5 pr-2 text-right text-gray-300">—</td>
+                      </>
+                    )}
+                    <td className="py-1.5 pr-2 text-right whitespace-nowrap print:hidden">
                       {row.id ? (
                         <button type="button" className="mr-2 text-xs text-gray-500 hover:underline" onClick={() => toggleExpand(row.id as string)}>
                           {expandedSub === row.id ? "收合期款" : "期款"}
@@ -273,9 +354,10 @@ export function SubcontractsCard({
                       <button type="button" className="text-xs text-gray-400 hover:text-red-600" onClick={() => removeSubRow(idx)}>移除</button>
                     </td>
                   </tr>
+                  <SubcontractHintRow row={row} onClearRate={() => patchSub(idx, { withholdingRate: 0 })} />
                   {row.id && expandedSub === row.id && (
                     <tr className="border-b bg-gray-50/60 last:border-0">
-                      <td colSpan={6} className="p-3">
+                      <td colSpan={7} className="p-3">
                         <div className="overflow-x-auto">
                           <table className="w-full text-xs">
                             <thead>
@@ -410,5 +492,40 @@ export function SubcontractsCard({
       </div>
       <ErrorText>{error}</ErrorText>
     </Card>
+  );
+}
+
+/**
+ * 每列下方的提醒（不擋存）：
+ * - 事務所：金額 > 20,000 且代扣率 0 → 黃色「請確認是否需代扣 10%」；金額 ≥ 20,000 → 提醒二代健保補充保費 2.11%。
+ * - 其他類型但仍存著代扣率（舊資料預設 10%）：期款仍會依它代扣，提示一下並給「改為不代扣」。
+ */
+function SubcontractHintRow({ row, onClearRate }: { row: SubRow; onClearRate: () => void }) {
+  const hints = withholdingHints(row);
+  const legacyRate = !isFirmKind(row.kind) && (Number(row.withholdingRate) || 0) > 0;
+  if (!hints.confirmWithholding && !hints.supplementaryPremium && !legacyRate) return null;
+  return (
+    <tr className="border-b last:border-0" data-testid="subcontract-hint-row">
+      <td colSpan={7} className="pb-2 pr-2">
+        <div className="flex flex-wrap gap-2 text-xs">
+          {hints.confirmWithholding && (
+            <span className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-amber-800" data-testid="hint-confirm-withholding">
+              金額超過 20,000，請確認是否需代扣 10%
+            </span>
+          )}
+          {hints.supplementaryPremium && (
+            <span className="rounded border border-amber-200 bg-amber-50/60 px-2 py-0.5 text-amber-700" data-testid="hint-supplementary-premium">
+              金額達 20,000 以上，另需代扣二代健保補充保費 2.11%
+            </span>
+          )}
+          {legacyRate && (
+            <span className="text-gray-500" data-testid="hint-legacy-rate">
+              此列沿用舊設定代扣 {Math.round(row.withholdingRate * 1000) / 10}%（期款仍會代扣）。
+              <button type="button" className="ml-1 underline hover:text-gray-700 print:hidden" onClick={onClearRate}>改為不代扣</button>
+            </span>
+          )}
+        </div>
+      </td>
+    </tr>
   );
 }

@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, integer, numeric, timestamp, index,
+  pgTable, uuid, text, integer, numeric, timestamp, index, date,
 } from "drizzle-orm/pg-core"
 import { tenants } from "./tenants"
 import { projects } from "./projects"
@@ -32,7 +32,7 @@ export const projectSubcontracts = pgTable(
     projectId: uuid("project_id")
       .notNull()
       .references(() => projects.id),
-    /** 'subcontract' 下包工程 | 'technician' 技師簽證費 */
+    /** 'subcontract' 下包工程 | 'technician' 技師簽證費 | 'firm' 事務所（migration 0089） */
     kind: text("kind").notNull().default("subcontract"),
     discipline: text("discipline"),
     vendorId: uuid("vendor_id").references(() => vendors.id),
@@ -50,6 +50,11 @@ export const projectSubcontracts = pgTable(
       .default("0.10"),
     /** 起扣門檻，預設 20,000。 */
     withholdingThreshold: integer("withholding_threshold").notNull().default(20000),
+    /** 代扣日期（只有 kind='firm' 用；其他類型 API 存 null）。migration 0089。 */
+    withholdingDate: date("withholding_date"),
+    /** 發票號碼（≤40）／發票日期（kind≠'firm' 用；firm 時 API 存 null）。migration 0089。 */
+    invoiceNo: text("invoice_no"),
+    invoiceDate: date("invoice_date"),
     sortOrder: integer("sort_order").notNull().default(0),
     note: text("note"),
     createdByEmpId: uuid("created_by_emp_id"),

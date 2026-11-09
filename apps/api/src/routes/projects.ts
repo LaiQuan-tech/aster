@@ -42,7 +42,7 @@ import {
   INVOICE_TYPES,
   PAYMENT_METHODS,
   BILLING_KINDS,
-  SUBCONTRACT_KINDS,
+  INITIAL_SUBCONTRACT_KINDS,
   DEFAULT_WITHHOLDING_RATE,
   DEFAULT_WITHHOLDING_THRESHOLD,
   DEFAULT_VAT_RATE,
@@ -192,7 +192,7 @@ const initialBillingSchema = z.object({
 })
 
 const initialSubcontractSchema = z.object({
-  kind: z.enum(SUBCONTRACT_KINDS).optional(),
+  kind: z.enum(INITIAL_SUBCONTRACT_KINDS).optional(),
   discipline: z.string().trim().max(40).nullish(),
   vendorId: z.string().uuid().nullish(),
   vendorName: z.string().trim().max(120).nullish(),

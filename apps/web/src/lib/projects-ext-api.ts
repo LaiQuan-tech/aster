@@ -511,7 +511,8 @@ export function humanizeBillingError(err: unknown, fallback: string): string {
   return msg
 }
 
-export type SubcontractKind = "subcontract" | "technician"
+/** firm＝事務所（2026-11-10，migration 0089）：記代扣率＋代扣日期；其他類型記發票號碼／日期。 */
+export type SubcontractKind = "subcontract" | "technician" | "firm"
 export type OrderType = "quotation" | "contract"
 
 export interface SubcontractPayment {
@@ -572,6 +573,11 @@ export interface Subcontract {
   contractId?: string | null
   withholdingRate: number
   withholdingThreshold: number
+  /** 代扣日期（只有 firm 用）。GET 一律帶（0089 未套用＝null）；PUT 沒帶＝沿用。 */
+  withholdingDate?: string | null
+  /** 發票號碼（≤40）／發票日期（firm 以外用）。同上。 */
+  invoiceNo?: string | null
+  invoiceDate?: string | null
   sortOrder?: number
   note: string | null
   createdAt?: string
@@ -591,6 +597,8 @@ export interface SubcontractsListSummary {
 export interface SubcontractsResponse {
   subcontracts: Subcontract[]
   summary: SubcontractsListSummary
+  /** firmInvoice=false：migration 0089 未套用（不開放事務所／代扣日期／發票）。舊 API 不帶。 */
+  features?: { firmInvoice: boolean }
 }
 
 export function getProjectSubcontracts(projectId: string) {
@@ -642,6 +650,7 @@ export const SUBCONTRACT_ERRORS: Record<string, string> = {
   override_reason_required: "人工指定金額必須填理由。",
   reason_required: "把已付款的期別改回未付，必須填理由。",
   amount_unknown: "算不出金額，無法標記已付。",
+  migration_required: "資料庫尚未更新（副委託事務所／發票欄位），暫時不能選「事務所」，請聯絡管理員。",
 }
 export function humanizeSubcontractError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : fallback

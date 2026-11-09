@@ -28,8 +28,15 @@ import { isOurContract } from "../lib/contract-role.js"
 export const BILLING_KINDS = ["installment", "guild_advance"] as const
 export type BillingKind = (typeof BILLING_KINDS)[number]
 
-export const SUBCONTRACT_KINDS = ["subcontract", "technician"] as const
+/**
+ * 副委託類型。'firm'（事務所，2026-11-10，migration 0089 放寬 kind CHECK）只在專案頁副委託卡
+ * （PUT /projects/:id/subcontracts）可選，成本歸「下包」那一桶（非 technician 一律算下包）。
+ * 建案（create_project_application_atomic）仍只收舊兩種：見 INITIAL_SUBCONTRACT_KINDS。
+ */
+export const SUBCONTRACT_KINDS = ["subcontract", "technician", "firm"] as const
 export type SubcontractKind = (typeof SUBCONTRACT_KINDS)[number]
+/** 建案申請一次帶入的副委託類型（不含 firm：建案路徑沒有 0089 降級判斷，未套用時會撞 CHECK）。 */
+export const INITIAL_SUBCONTRACT_KINDS = ["subcontract", "technician"] as const
 
 export const PROJECT_KINDS = ["main", "change", "addition", "advance"] as const
 export type ProjectKind = (typeof PROJECT_KINDS)[number]
