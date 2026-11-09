@@ -1,298 +1,203 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useState, type FormEvent } from "react";
-import Link from "next/link";
-import { Button, Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
-import {
-  getSalaryStructure,
-  putSalaryStructure,
-  runPayroll,
-  getNhiDependents,
-  addNhiDependent,
-  deleteNhiDependent,
-  getTaxDependents,
-  addTaxDependent,
-  deleteTaxDependent,
-  type Employee,
-  type NhiDependent,
-  type TaxDependent,
-} from "@/lib/admin-api";
-import { buildNhiDependentBody, buildTaxDependentBody, dependentErrorMessage } from "@/lib/payroll-dependents";
-import { loadPayrollEmployees } from "@/lib/payroll-employees";
-import { errorMessageOf } from "@/lib/period-closed";
-import { PayrollAdjustmentsCard } from "./_components/PayrollAdjustmentsCard";
-import { FixedAllowancesCard } from "./_components/FixedAllowancesCard";
-import { EmployeeCombobox } from "@/components/EmployeeCombobox";
-import { employeeOptionsOf } from "@/lib/employee-combobox";
-import { pensionWageHintText, pensionWageInputCheck, type FixedAllowanceSummary } from "@/lib/fixed-allowances-api";
-import { PeriodLockCard } from "./_components/PeriodLockCard";
+/**
+ * 後台「月結發薪」（2026-11-09 業主核准：原「薪資資料與執行」/admin/payroll 與「薪資單」/admin/payslips 合併成一頁）。
+ * 一頁看到當月每位員工還有什麼沒就緒，在列表逐一處理，全部就緒才「完成 YYYY-MM 發薪並鎖定」。
+ *
+ *   - 頂部：月份；步驟條 ①檢查待辦 ②執行薪資 ③核對並定案 ④寄送薪資條 ⑤鎖定（lib/payroll-month-api.ts stepViews）；
+ *     合計卡（原薪資單頁）；「執行薪資（全部）」「全部定案」「批次寄送 Email」「匯出工資清冊 CSV」（原邏輯與錯誤處理，
+ *     含 anomalies_unacknowledged／period_closed 等閘門訊息）。
+ *   - 員工清單（GET /payroll-periods/:period/employees；可搜尋、篩選 全部／未就緒／已就緒／有提醒）：
+ *     待簽申請、出勤月表、遲到說明、核銷／報銷、薪資單（狀態＋實發）。點選 → 明細面板（_components/EmployeeMonthPanel）。
+ *   - 底部：鎖定區（_components/PeriodLockCard：未全過時按鈕停用並列出卡在誰、哪一項；重新開放與權限照舊；最近 12 個月收合）、
+ *     薪資加減項（前期更正，#payroll-adjustments）、工資清冊明細（原薪資單頁的全表，收合）。
+ *   - 員工薪資保險資料（基本薪資、投保、勞退、固定津貼、健保眷屬、扶養親屬）搬到員工內頁的「薪資」分頁
+ *     （/admin/employees/[id]?tab=salary）。
+ *   - 網址：?period=YYYY-MM&employee=<id>；舊網址 /admin/payslips（帶 period）由 next.config 轉址過來。
+ * 權限：HR／平台管理員（逐人列表與檢查清單 API 為 requireHrAdmin；會計的導覽看不到這頁）。
+ */
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Button, Card, ErrorText, Input, Segmented } from "@/components/admin-ui";
+import { apiDownload, apiErrorMessage } from "@/lib/api-client";
+import { finalizePayslip, getEmployees, getPayslips, runPayroll, type Employee } from "@/lib/admin-api";
+import { sendPayslip, sendPayslipsBatch } from "@/lib/cash-payouts-api";
+import { getMeCached } from "@/lib/ess-state";
 import { payrollGateText } from "@/lib/payroll-gate";
+import {
+  ROSTER_FILTER_LABEL,
+  filterRoster,
+  getPeriodEmployees,
+  lateCell,
+  lockBlockersOf,
+  payslipCell,
+  requestsCell,
+  rosterCounts,
+  rosterLabel,
+  settlementCell,
+  sheetCell,
+  stepViews,
+  type Cell,
+  type PeriodEmployeesResponse,
+  type RosterFilter,
+} from "@/lib/payroll-month-api";
+import { payrollPeriodErrorMessage } from "@/lib/payroll-periods-api";
+import { errorMessageOf } from "@/lib/period-closed";
+import { EmployeeMonthPanel } from "./_components/EmployeeMonthPanel";
+import { PayrollAdjustmentsCard } from "./_components/PayrollAdjustmentsCard";
+import { PeriodLockCard } from "./_components/PeriodLockCard";
+import { SEND_SKIP_LABEL, money, payslipTotalsOf, PayslipLedgerTable, type PayslipRow } from "./_components/payslip-bits";
 
-const inputCls =
-  "w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
-const labelCls = "mb-1 block text-xs font-medium text-gray-500";
+const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
-export default function PayrollAdminPage() {
+function readUrl(): { period: string | null; employee: string | null } {
+  if (typeof window === "undefined") return { period: null, employee: null };
+  const q = new URLSearchParams(window.location.search);
+  const period = q.get("period");
+  return { period: period && PERIOD_RE.test(period) ? period : null, employee: q.get("employee") };
+}
+
+function writeUrl(period: string, employee: string | null) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("period", period);
+  if (employee) url.searchParams.set("employee", employee);
+  else url.searchParams.delete("employee");
+  window.history.replaceState(window.history.state, "", url.toString());
+}
+
+const TONE_CLASS: Record<Cell["tone"], string> = {
+  ok: "text-gray-500",
+  warn: "text-amber-700",
+  bad: "text-red-700 font-medium",
+  none: "text-gray-300",
+};
+const DOT_CLASS: Record<Cell["tone"], string> = {
+  ok: "bg-green-500",
+  warn: "bg-amber-500",
+  bad: "bg-red-500",
+  none: "bg-gray-200",
+};
+
+function CellView({ cell }: { cell: Cell }) {
+  return (
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap ${TONE_CLASS[cell.tone]}`}>
+      <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${DOT_CLASS[cell.tone]}`} aria-hidden />
+      {cell.text}
+    </span>
+  );
+}
+
+export default function PayrollMonthPage() {
+  const [period, setPeriod] = useState(() => new Date().toISOString().slice(0, 7));
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [urlReady, setUrlReady] = useState(false);
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [meId, setMeId] = useState<string | null>(null);
+  const [data, setData] = useState<PeriodEmployeesResponse | null>(null);
+  const [payslips, setPayslips] = useState<PayslipRow[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // 員工薪資保險資料
-  const [empId, setEmpId] = useState("");
-  const [method, setMethod] = useState<"monthly" | "by_attendance_days" | "hourly">("monthly");
-  const [baseSalary, setBaseSalary] = useState("");
-  const [dailyWage, setDailyWage] = useState("");
-  const [hourlyWage, setHourlyWage] = useState("");
-  // 工讀生時薪制(C5)的約定每週工時／工天數；純參考用途，不影響薪資試算。
-  const [agreedHoursPerWeek, setAgreedHoursPerWeek] = useState("");
-  const [agreedDaysPerWeek, setAgreedDaysPerWeek] = useState("");
-  const [laborGrade, setLaborGrade] = useState("");
-  const [healthGrade, setHealthGrade] = useState("");
-  // 畫面用「%」(0–6)，API 用比例 (0–0.06)
-  const [pensionPct, setPensionPct] = useState("");
-  // 2026-11-08 勞退月提繳工資（空白＝依分級表自動算）／適用勞退新制。loaded* 是讀進來的值：沒改就不送，
-  // migration 0086 還沒套用的環境存薪資資料才不會被 409 擋下。
-  const [pensionWage, setPensionWage] = useState("");
-  const [pensionNewSystem, setPensionNewSystem] = useState(true);
-  const [loadedPension, setLoadedPension] = useState<{ wage: string; newSystem: boolean }>({ wage: "", newSystem: true });
-  const [allowanceSummary, setAllowanceSummary] = useState<FixedAllowanceSummary | null>(null);
-  const [allowanceReloadKey, setAllowanceReloadKey] = useState(0);
-  const [employeeIdentityById, setEmployeeIdentityById] = useState<Record<string, string>>({});
-  const [salaryMsg, setSalaryMsg] = useState<string | null>(null);
-  // M12：API 依投保級距表自動選出來的級距（留空投保薪資時才會回）。
-  const [insuredHint, setInsuredHint] = useState<string | null>(null);
-  const [nhiDeps, setNhiDeps] = useState<NhiDependent[]>([]);
-  const [taxDeps, setTaxDeps] = useState<TaxDependent[]>([]);
-  const [nhiName, setNhiName] = useState("");
-  const [nhiRelationship, setNhiRelationship] = useState("");
-  const [nhiIdNumber, setNhiIdNumber] = useState("");
-  const [nhiInsured, setNhiInsured] = useState(true);
-  const [taxName, setTaxName] = useState("");
-  const [taxRelationship, setTaxRelationship] = useState("");
-  const [taxIdNumber, setTaxIdNumber] = useState("");
-  const [taxBirthYear, setTaxBirthYear] = useState("");
-  // 「＋ 新增」子表單預設收起（比照員工詳細資料的學歷／證照）。收合只是 hidden、不卸載，
-  // 填到一半的欄位會保留；送出成功後照舊清空欄位但維持展開，方便連續新增。
-  const [showNhiForm, setShowNhiForm] = useState(false);
-  const [showTaxForm, setShowTaxForm] = useState(false);
-  // 兩個子表單各自的送出狀態與錯誤：錯誤顯示在各自面板裡（姓名空白的提示也走這裡）。改任何欄位、重新送出、
-  // 換員工時清掉；送出中停用按鈕防連點。失敗時欄位原樣保留，方便修正後重送。
-  const [nhiSubmitting, setNhiSubmitting] = useState(false);
-  const [nhiError, setNhiError] = useState<string | null>(null);
-  const [taxSubmitting, setTaxSubmitting] = useState(false);
-  const [taxError, setTaxError] = useState<string | null>(null);
-  const nhiPanelId = useId();
-  const taxPanelId = useId();
-
-  // 執行薪資作業（查詢／列印／定案在薪資明細表 /admin/payslips）
-  const currentPeriod = new Date().toISOString().slice(0, 7);
-  const [runPeriod, setRunPeriod] = useState(currentPeriod);
-  const [runEmployeeId, setRunEmployeeId] = useState("");
-  // ok=false 是錯誤（紅字）：例如該月已發薪鎖定（409 period_closed）。
+  const [busy, setBusy] = useState(false);
   const [runMsg, setRunMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  // 每執行一次薪資作業加 1：「薪資加減項（前期更正）」卡重新讀一次，草稿薪資單跟上了就拿掉「草稿未更新」的提醒。
-  const [adjustmentsRefresh, setAdjustmentsRefresh] = useState(0);
+  const [sendMsg, setSendMsg] = useState<string | null>(null);
+  const [filter, setFilter] = useState<RosterFilter>("all");
+  const [keyword, setKeyword] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [lockKey, setLockKey] = useState(0);
+  const [adjFocus, setAdjFocus] = useState<{ employeeId: string; period: string; nonce: number } | null>(null);
 
-  // 員工選單（可搜尋 combobox）：工號、姓名、身分證、員工 ID 都可搜（原本「工號／身分證／姓名搜尋」框＋原生 select 合併）。
-  const employeeOptions = useMemo(
-    () => employeeOptionsOf(employees, (e) => [employeeIdentityById[e.id], e.id].filter(Boolean).join(" ")),
-    [employeeIdentityById, employees],
+  // 網址 → 初始月份與員工（舊網址 /admin/payslips?period= 轉過來也吃得到）。
+  useEffect(() => {
+    const u = readUrl();
+    if (u.period) setPeriod(u.period);
+    if (u.employee) setSelectedId(u.employee);
+    setUrlReady(true);
+  }, []);
+  useEffect(() => {
+    if (urlReady) writeUrl(period, selectedId);
+  }, [period, selectedId, urlReady]);
+
+  useEffect(() => {
+    getEmployees()
+      .then((r) => setEmployees(r.employees))
+      .catch((err) => setError(err instanceof Error ? err.message : "載入員工失敗"));
+    getMeCached()
+      .then((me) => setMeId(me.id))
+      .catch(() => setMeId(null));
+  }, []);
+
+  const load = useCallback(async () => {
+    if (!urlReady) return;
+    setLoading(true);
+    try {
+      const [list, slips] = await Promise.all([getPeriodEmployees(period), getPayslips(period)]);
+      setData(list);
+      setPayslips(slips.payslips as PayslipRow[]);
+      setError(null);
+    } catch (err) {
+      setError(payrollPeriodErrorMessage(err, "載入月結資料失敗"));
+    } finally {
+      setLoading(false);
+    }
+  }, [period, urlReady]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  /** 任何動作之後：重抓逐人列表、薪資單、鎖定卡、加減項卡。 */
+  const afterChange = useCallback(() => {
+    void load();
+    setLockKey((k) => k + 1);
+    setRefreshKey((k) => k + 1);
+  }, [load]);
+
+  const empName = useCallback(
+    (id: string) => {
+      const e = employees.find((x) => x.id === id);
+      if (e) return e.emp_no ? `${e.emp_no} · ${e.name}` : e.name;
+      const r = data?.employees.find((x) => x.employeeId === id);
+      return r ? rosterLabel(r) : id.slice(0, 8);
+    },
+    [employees, data],
   );
 
-  useEffect(() => {
-    let active = true;
-    // 清單與證號一次批次請求帶回（以前是清單＋每位員工各一支 profile 的 1+N）。
-    loadPayrollEmployees()
-      .then((r) => {
-        if (!active) return;
-        setEmployees(r.employees);
-        setEmployeeIdentityById(r.identityById);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : "載入員工失敗"));
-    return () => {
-      active = false;
-    };
-  }, []);
+  const rows = useMemo(() => data?.employees ?? [], [data]);
+  const visible = useMemo(() => filterRoster(rows, filter, keyword), [rows, filter, keyword]);
+  const counts = useMemo(() => rosterCounts(rows), [rows]);
+  const steps = useMemo(() => stepViews(rows, data?.status ?? null), [rows, data]);
+  const blockers = useMemo(() => (data ? lockBlockersOf(rows) : null), [data, rows]);
+  const totals = useMemo(() => payslipTotalsOf(payslips), [payslips]);
+  const ledgerRows = useMemo(
+    () => [...payslips].sort((a, b) => empName(a.employee_id).localeCompare(empName(b.employee_id))),
+    [payslips, empName],
+  );
+  const selected = rows.find((r) => r.employeeId === selectedId) ?? null;
+  const selectedSlip = selected ? (payslips.find((p) => p.employee_id === selected.employeeId) ?? null) : null;
+  const locked = data?.status === "closed";
 
-  const loadEmployee = useCallback(async (id: string) => {
-    setSalaryMsg(null);
-    setInsuredHint(null);
-    setNhiDeps([]);
-    setTaxDeps([]);
-    if (!id) return;
-    // Structure may 404 for a new employee — treat as blank.
-    try {
-      const { salary } = await getSalaryStructure(id);
-      setMethod(salary.method);
-      setBaseSalary(salary.base_salary ?? "");
-      setDailyWage(salary.daily_wage ?? "");
-      setHourlyWage(salary.hourly_wage ?? "");
-      setAgreedHoursPerWeek(salary.agreed_hours_per_week ?? "");
-      setAgreedDaysPerWeek(salary.agreed_days_per_week ?? "");
-      setLaborGrade(salary.labor_insured_salary ?? "");
-      setHealthGrade(salary.health_insured_salary ?? "");
-      setPensionPct(
-        salary.pension_voluntary_rate != null
-          ? String(Math.round(Number(salary.pension_voluntary_rate) * 10000) / 100)
-          : "",
-      );
-      const wage = salary.pension_wage != null && Number(salary.pension_wage) > 0 ? String(Number(salary.pension_wage)) : "";
-      const newSystem = salary.pension_new_system !== false;
-      setPensionWage(wage);
-      setPensionNewSystem(newSystem);
-      setLoadedPension({ wage, newSystem });
-    } catch {
-      setMethod("monthly");
-      setBaseSalary("");
-      setDailyWage("");
-      setHourlyWage("");
-      setAgreedHoursPerWeek("");
-      setAgreedDaysPerWeek("");
-      setLaborGrade("");
-      setHealthGrade("");
-      setPensionPct("");
-      setPensionWage("");
-      setPensionNewSystem(true);
-      setLoadedPension({ wage: "", newSystem: true });
-    }
-    try {
-      const [nhi, tax] = await Promise.all([getNhiDependents(id), getTaxDependents(id)]);
-      setNhiDeps(nhi["nhi-dependents"]);
-      setTaxDeps(tax["income-tax-dependents"]);
-    } catch {
-      /* dependents lists are best-effort */
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadEmployee(empId);
-  }, [empId, loadEmployee]);
-
-  async function onSaveSalary(e: FormEvent) {
-    e.preventDefault();
-    if (!empId) return;
-    setSalaryMsg(null);
-    setInsuredHint(null);
-    const wageCheck = pensionWageInputCheck(pensionWage, allowanceSummary?.pension?.levels);
-    if (wageCheck.error) {
-      setSalaryMsg(wageCheck.error);
-      return;
-    }
-    try {
-      // M12：投保級距留空＝不帶欄位，API 會依「投保級距表」以投保基數自動選一級
-      //（月薪制基數＝本薪；時薪制＝時薪 × 每週約定時數 × 52 ÷ 12），並把選到的值回來。
-      // 填了就完全照填的存，手動覆寫永遠優先。
-      const res = await putSalaryStructure(empId, {
-        method,
-        baseSalary: baseSalary ? Number(baseSalary) : null,
-        dailyWage: dailyWage ? Number(dailyWage) : null,
-        hourlyWage: hourlyWage ? Number(hourlyWage) : 0,
-        agreedHoursPerWeek: agreedHoursPerWeek ? Number(agreedHoursPerWeek) : null,
-        agreedDaysPerWeek: agreedDaysPerWeek ? Number(agreedDaysPerWeek) : null,
-        ...(laborGrade ? { laborInsuredSalary: Number(laborGrade) } : {}),
-        ...(healthGrade ? { healthInsuredSalary: Number(healthGrade) } : {}),
-        pensionVoluntaryRate: pensionPct ? Number(pensionPct) / 100 : null,
-        ...(pensionWage.trim() !== loadedPension.wage ? { pensionWage: pensionWage.trim() ? Math.round(Number(pensionWage)) : null } : {}),
-        ...(pensionNewSystem !== loadedPension.newSystem ? { pensionNewSystem } : {}),
-      });
-      setLoadedPension({ wage: pensionWage.trim(), newSystem: pensionNewSystem });
-      setAllowanceReloadKey((n) => n + 1);
-      setSalaryMsg("已儲存");
-      const s = res.insuredSuggested;
-      if (s) {
-        if (!laborGrade && s.labor !== null) setLaborGrade(String(s.labor));
-        if (!healthGrade && s.health !== null) setHealthGrade(String(s.health));
-        setInsuredHint(
-          `已依投保級距表（${s.effectiveFrom} 生效）自動選級距：投保基數 ${s.base.toLocaleString("zh-TW")}` +
-            `　勞保 ${s.labor === null ? "—" : s.labor.toLocaleString("zh-TW")}` +
-            `　健保 ${s.health === null ? "—" : s.health.toLocaleString("zh-TW")}。要改就直接覆寫欄位再存一次。`,
-        );
+  function pick(id: string) {
+    setSelectedId(id);
+    // 手機：面板在清單下方，捲過去。
+    requestAnimationFrame(() => {
+      if (window.matchMedia("(max-width: 1023px)").matches) {
+        document.getElementById("payroll-employee-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
       }
-    } catch (err) {
-      setSalaryMsg(err instanceof Error ? err.message : "儲存失敗");
-    }
-  }
-
-  // 換員工時順手清掉上一位的新增錯誤（錯誤描述的是那一位的送出，不該掛在這一位的面板上）。
-  function onPickEmployee(id: string) {
-    setEmpId(id);
-    setNhiError(null);
-    setTaxError(null);
-  }
-
-  async function onAddNhi(e: FormEvent) {
-    e.preventDefault();
-    if (!empId || nhiSubmitting) return;
-    const built = buildNhiDependentBody(empId, {
-      name: nhiName,
-      relationship: nhiRelationship,
-      idNumber: nhiIdNumber,
-      insured: nhiInsured,
     });
-    if (!built.ok) {
-      setNhiError(built.error);
-      return;
-    }
-    setNhiError(null);
-    setNhiSubmitting(true);
-    try {
-      await addNhiDependent(built.body);
-    } catch (err) {
-      // 面板若在送出途中被收起，錯誤掛在 hidden 的面板裡就看不到，所以失敗時順手展開。
-      setNhiError(dependentErrorMessage(err, "新增健保眷屬"));
-      setShowNhiForm(true);
-      setNhiSubmitting(false);
-      return;
-    }
-    setNhiName("");
-    setNhiRelationship("");
-    setNhiIdNumber("");
-    setNhiInsured(true);
-    await loadEmployee(empId);
-    setNhiSubmitting(false);
   }
 
-  async function onAddTax(e: FormEvent) {
-    e.preventDefault();
-    if (!empId || taxSubmitting) return;
-    const built = buildTaxDependentBody(empId, {
-      name: taxName,
-      relationship: taxRelationship,
-      idNumber: taxIdNumber,
-      birthYear: taxBirthYear,
-    });
-    if (!built.ok) {
-      setTaxError(built.error);
-      return;
-    }
-    setTaxError(null);
-    setTaxSubmitting(true);
-    try {
-      await addTaxDependent(built.body);
-    } catch (err) {
-      setTaxError(dependentErrorMessage(err, "新增扶養親屬"));
-      setShowTaxForm(true);
-      setTaxSubmitting(false);
-      return;
-    }
-    setTaxName("");
-    setTaxRelationship("");
-    setTaxIdNumber("");
-    setTaxBirthYear("");
-    await loadEmployee(empId);
-    setTaxSubmitting(false);
-  }
+  /* -------------------------------------------------------- 全體動作 --- */
 
-  async function onRun(e: FormEvent) {
-    e.preventDefault();
+  async function runAll() {
+    if (busy) return;
     setRunMsg(null);
+    setBusy(true);
     try {
-      const result = await runPayroll(runPeriod, runEmployeeId || undefined);
+      const result = await runPayroll(period);
       // 遲到說明老闆還沒決定的人（視為影響全勤）一併提醒（2026-10-11）。
       const lateWarnings = (result.warnings ?? []).map((w) => `${empName(w.employeeId)} ${w.message}`);
-      // 併進薪資單的一次性加減項（前期更正）筆數，讓 HR 核對（API 回 adjustmentCount；舊版 API 沒有就不顯示）。
+      // 併進薪資單的一次性加減項（前期更正）筆數（API 回 adjustmentCount；舊版 API 沒有就不顯示）。
       const adjustmentCount = (result as { adjustmentCount?: number }).adjustmentCount ?? 0;
-      // 固定津貼「計入投保」後，底薪＋津貼高於勞保投保級距的人（系統不自動改級距，只提醒）。
-      // 適用勞退新制卻算不出提繳工資的人（雇主提撥與自提都是 0）：列出來請 HR 手填或確認。
+      // 適用勞退新制卻算不出提繳工資的人；底薪＋計入投保的固定津貼高於勞保級距的人（系統不自動改級距，只提醒）。
       const missingPension = (result as { missingPensionWage?: string[] }).missingPensionWage ?? [];
       const insuredReview =
         (result as { insuredSalaryReview?: Array<{ employeeId: string; total: number; laborInsuredSalary: number | null }> })
@@ -300,10 +205,10 @@ export default function PayrollAdminPage() {
       setRunMsg({
         ok: true,
         text:
-          `已執行 ${runPeriod} 薪資作業：產生 ${result.generated} 筆，略過已定案 ${result.skipped.length} 筆` +
+          `已執行 ${period} 薪資作業：產生 ${result.generated} 筆，略過已定案 ${result.skipped.length} 筆` +
           (adjustmentCount > 0 ? `；含加減項（前期更正）${adjustmentCount} 筆` : "") +
           (missingPension.length > 0
-            ? `；算不出勞退提繳工資（雇主提撥與自提為 0，請到員工薪資資料手填）：${missingPension.map((id) => empName(id)).join("、")}`
+            ? `；算不出勞退提繳工資（雇主提撥與自提為 0，請到員工內頁的「薪資」分頁手填）：${missingPension.map((id) => empName(id)).join("、")}`
             : "") +
           (insuredReview.length > 0
             ? `；請確認投保級距（底薪＋計入投保的固定津貼高於勞保級距）：${insuredReview
@@ -312,316 +217,309 @@ export default function PayrollAdminPage() {
             : "") +
           (lateWarnings.length > 0 ? `；提醒：${lateWarnings.join("；")}` : ""),
       });
-      setAdjustmentsRefresh((n) => n + 1);
+      afterChange();
     } catch (err) {
-      // 該月已發薪鎖定 → 409 period_closed →「YYYY-MM 已結算，請洽管理者」（要重算，先請老闆或老闆指定的人重新開放）。
-      // 這期月表還有 error 級、沒填說明的日異常 → 409 anomalies_unacknowledged（2026-10-17 薪資執行前閘門），列出待處理項目。
+      // 已發薪鎖定 → 409 period_closed；月表還有 error 級、沒填說明的日異常 → 409 anomalies_unacknowledged（列出待處理項目）。
       setRunMsg({ ok: false, text: payrollGateText(err, empName) ?? errorMessageOf(err, "執行失敗") });
+    } finally {
+      setBusy(false);
     }
   }
 
-  const empName = (id: string) => {
-    const employee = employees.find((item) => item.id === id);
-    if (!employee) return id.slice(0, 8);
-    return employee.emp_no ? `${employee.emp_no} · ${employee.name}` : employee.name;
-  };
-  const selectedIdentity = empId ? employeeIdentityById[empId] : "";
-  const taxStatusLabel = (status: TaxDependent["support_status"]) => (status === "claimed" ? "扶養中" : status);
+  async function finalizeAll() {
+    const drafts = payslips.filter((p) => p.status !== "finalized");
+    if (drafts.length === 0) return;
+    if (!confirm(`確定將 ${period} 的 ${drafts.length} 張草稿全部定案？定案後不可再重算。`)) return;
+    setBusy(true);
+    let current: PayslipRow | null = null;
+    try {
+      for (const p of drafts) {
+        current = p;
+        await finalizePayslip(p.id);
+      }
+      afterChange();
+    } catch (err) {
+      // 已定案成功的那幾張要看得到：先重新載入，再顯示失敗訊息（帶上是哪一位；例如 409 adjustments_stale＝加減項有異動，
+      // 要先重新執行薪資）。顯示 API 的中文說明，不是代碼。
+      afterChange();
+      setError(`${current ? `${empName(current.employee_id)}：` : ""}${apiErrorMessage(err, "定案失敗")}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 寄送失敗：優先顯示 API 附的中文說明（例如 409 mail_not_configured），沒有才退回代碼。 */
+  function describeSendError(err: unknown, fallback: string): string {
+    const msg = apiErrorMessage(err, fallback);
+    return msg === fallback ? msg : `${fallback}：${msg}`;
+  }
+
+  /** 批次寄送：只寄已定案的，未寄成功的逐筆列出原因。 */
+  async function sendBatch() {
+    const finalized = payslips.filter((p) => p.status === "finalized");
+    if (finalized.length === 0) return;
+    if (!confirm(`確定把 ${period} 的 ${finalized.length} 張已定案薪資單寄給本人？`)) return;
+    setBusy(true);
+    setSendMsg(null);
+    try {
+      const res = await sendPayslipsBatch(period);
+      const skipped = res.skipped.filter((s) => s.reason !== "not_finalized");
+      setSendMsg(
+        `已寄出 ${res.sent} 張` +
+          (skipped.length > 0
+            ? `；未寄出 ${skipped.length} 張（${skipped.map((s) => `${empName(s.employeeId)}：${SEND_SKIP_LABEL[s.reason] ?? s.reason}`).join("、")}）`
+            : ""),
+      );
+      afterChange();
+      setError(null);
+    } catch (err) {
+      setError(describeSendError(err, "批次寄送失敗"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function finalizeOne(id: string) {
+    setBusy(true);
+    try {
+      await finalizePayslip(id);
+      afterChange();
+    } catch (err) {
+      setError(apiErrorMessage(err, "定案失敗"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendOne(p: PayslipRow) {
+    setBusy(true);
+    try {
+      await sendPayslip(p.id);
+      afterChange();
+      setError(null);
+    } catch (err) {
+      setError(describeSendError(err, "寄送失敗"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /* ------------------------------------------------------------- 畫面 --- */
 
   return (
-    <>
-      {error && <div className="mb-3"><ErrorText>{error}</ErrorText></div>}
+    <div className="min-w-0 space-y-4">
+      {error && <ErrorText>{error}</ErrorText>}
 
       <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">員工薪資保險資料</h2>
-        <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <div className="min-w-0 sm:col-span-2">
-            <label className={labelCls} htmlFor="payroll-employee">員工（輸入工號、姓名、身分證或員工 ID 搜尋）</label>
-            <EmployeeCombobox
-              id="payroll-employee"
-              options={employeeOptions}
-              value={empId}
-              onChange={onPickEmployee}
-              placeholder="輸入工號、姓名、身分證或員工 ID"
-              testId="payroll-employee-combobox"
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="block text-xs font-medium text-gray-500">
+            發薪月份
+            <Input
+              type="month"
+              value={period}
+              onChange={(e) => e.target.value && setPeriod(e.target.value)}
+              className="mt-1 w-40"
+              data-testid="payroll-period"
             />
-            {selectedIdentity && (
-              <p className="mt-1 text-xs text-gray-500">證件號碼：{selectedIdentity}</p>
-            )}
+          </label>
+          <Button onClick={() => void runAll()} disabled={busy || locked} data-testid="payroll-run-all">
+            執行薪資（全部）
+          </Button>
+          <Button variant="secondary" onClick={() => void finalizeAll()} disabled={busy || totals.draft === 0}>
+            全部定案（{totals.draft}）
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => void sendBatch()}
+            disabled={busy || totals.finalized === 0}
+            title="把本期已定案的薪資單寄到每位同仁的公司信箱（無則個人信箱／登入信箱）"
+          >
+            批次寄送 Email（{totals.finalized}）
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => apiDownload(`/reports/payroll?period=${period}&format=csv`, `工資清冊_${period}.csv`).catch((e) => setError(e.message))}
+          >
+            匯出工資清冊 CSV
+          </Button>
+        </div>
+        {runMsg && (
+          <p role={runMsg.ok ? "status" : "alert"} className={`mt-3 break-words text-sm ${runMsg.ok ? "text-green-700" : "text-red-600"}`}>
+            {runMsg.text}
+          </p>
+        )}
+        {sendMsg && <p className="mt-2 break-words text-sm text-gray-600">{sendMsg}</p>}
+        {locked && <p className="mt-2 text-sm text-green-700">{period} 已完成發薪並鎖定；要改請由老闆或老闆指定的人在下方重新開放。</p>}
+
+        <ol className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5" data-testid="payroll-steps">
+          {steps.map((s) => (
+            <li
+              key={s.key}
+              className={`min-w-0 rounded-xl border px-3 py-2 ${s.done ? "border-green-200 bg-green-50/60" : "border-gray-200 bg-white"}`}
+            >
+              <p className={`text-xs font-medium ${s.done ? "text-green-700" : "text-gray-500"}`}>
+                {"①②③④⑤"[s.no - 1]} {s.label}
+              </p>
+              <p className={`mt-0.5 text-sm font-semibold tabular-nums ${s.done ? "text-green-800" : "text-gray-900"}`}>{loading && !data ? "…" : s.progress}</p>
+            </li>
+          ))}
+        </ol>
+
+        <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-6">
+          <div className="rounded-xl bg-slate-50 p-3">
+            <p className="text-xs text-slate-500">應發合計</p>
+            <p className="mt-1 text-lg font-semibold text-slate-900">{money(totals.gross)}</p>
+          </div>
+          <div className="rounded-xl bg-rose-50 p-3">
+            <p className="text-xs text-rose-600">應扣合計</p>
+            <p className="mt-1 text-lg font-semibold text-rose-700">{money(totals.deductions)}</p>
+          </div>
+          <div className="rounded-xl bg-emerald-50 p-3">
+            <p className="text-xs text-emerald-600">實發合計</p>
+            <p className="mt-1 text-lg font-semibold text-emerald-700">{money(totals.net)}</p>
+          </div>
+          <div className="rounded-xl bg-violet-50 p-3" title="公司負擔，不從員工實發扣除">
+            <p className="text-xs text-violet-700">雇主勞退提撥合計</p>
+            <p className="mt-1 text-lg font-semibold text-violet-800">{money(totals.employerPension)}</p>
+          </div>
+          <div className="rounded-xl bg-slate-100 p-3" title="應發合計 ＋ 固定津貼免稅部分 ＋ 雇主勞退提撥（雇主勞健保負擔未計）">
+            <p className="text-xs text-slate-600">人事成本合計</p>
+            <p className="mt-1 text-lg font-semibold text-slate-900">{money(Math.round(totals.laborCost * 100) / 100)}</p>
+          </div>
+          <div className="rounded-xl bg-amber-50 p-3">
+            <p className="text-xs text-amber-700">草稿 / 全部</p>
+            <p className="mt-1 text-lg font-semibold text-amber-800">
+              {totals.draft} / {payslips.length}
+            </p>
           </div>
         </div>
-        {empId && (
-          <>
-            <form onSubmit={onSaveSalary} className="space-y-3">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <div>
-                  <label className={labelCls}>計薪方式</label>
-                  <select
-                    className={inputCls}
-                    value={method}
-                    onChange={(e) => setMethod(e.target.value as "monthly" | "by_attendance_days" | "hourly")}
-                  >
-                    <option value="monthly">月薪</option>
-                    <option value="by_attendance_days">按出勤天數</option>
-                    <option value="hourly">時薪制</option>
-                  </select>
-                </div>
-                <div>
-                  <label className={labelCls}>本薪（月）</label>
-                  <input type="number" className={inputCls} value={baseSalary} onChange={(e) => setBaseSalary(e.target.value)} />
-                </div>
-                <div>
-                  <label className={labelCls}>日薪</label>
-                  <input type="number" className={inputCls} value={dailyWage} onChange={(event) => setDailyWage(event.target.value)} />
-                </div>
-                <div>
-                  <label className={labelCls}>{method === "hourly" ? "時薪（本俸＋加班費基準）" : "時薪（加班費基準）"}</label>
-                  <input type="number" className={inputCls} value={hourlyWage} onChange={(e) => setHourlyWage(e.target.value)} />
-                </div>
-                {method === "hourly" && (
-                  <>
-                    <div>
-                      <label className={labelCls}>約定每週工時（小時）</label>
-                      <input
-                        type="number"
-                        min={0}
-                        step="any"
-                        className={inputCls}
-                        value={agreedHoursPerWeek}
-                        onChange={(e) => setAgreedHoursPerWeek(e.target.value)}
-                      />
-                    </div>
-                    <div>
-                      <label className={labelCls}>約定每週工天數</label>
-                      <input
-                        type="number"
-                        min={0}
-                        step="any"
-                        className={inputCls}
-                        value={agreedDaysPerWeek}
-                        onChange={(e) => setAgreedDaysPerWeek(e.target.value)}
-                      />
-                    </div>
-                  </>
-                )}
-                <div>
-                  <label className={labelCls}>勞保投保級距（留空＝依級距表自動選）</label>
-                  <input type="number" className={inputCls} value={laborGrade} onChange={(e) => setLaborGrade(e.target.value)} />
-                </div>
-                <div>
-                  <label className={labelCls}>健保投保級距（留空＝依級距表自動選）</label>
-                  <input type="number" className={inputCls} value={healthGrade} onChange={(e) => setHealthGrade(e.target.value)} />
-                </div>
-                <div>
-                  <label className={labelCls}>勞退自提率（%，0–6）</label>
-                  <input type="number" min={0} max={6} step={0.5} className={inputCls} value={pensionPct} onChange={(e) => setPensionPct(e.target.value)} />
-                </div>
-                <div>
-                  <label className={labelCls}>勞退月提繳工資（留空＝依分級表自動算）</label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={150000}
-                    step={1}
-                    className={inputCls}
-                    value={pensionWage}
-                    disabled={!pensionNewSystem}
-                    placeholder={allowanceSummary?.pension?.autoWage != null ? `自動：${allowanceSummary.pension.autoWage}` : ""}
-                    onChange={(e) => setPensionWage(e.target.value)}
-                    data-testid="pension-wage"
-                  />
-                </div>
-                <label className="flex items-center gap-2 self-end pb-2 text-sm text-gray-600">
-                  <input type="checkbox" checked={pensionNewSystem} onChange={(e) => setPensionNewSystem(e.target.checked)} data-testid="pension-new-system" />
-                  適用勞退新制（取消＝雇主提撥與自提都為 0）
-                </label>
-              </div>
-              {(() => {
-                const hint = pensionWageHintText(
-                  allowanceSummary?.pension ? { ...allowanceSummary.pension, newSystem: pensionNewSystem } : null,
-                  pensionWage,
-                );
-                return hint ? <p className="text-xs text-gray-500">{hint} 雇主提撥與勞工自提都以此為基數。</p> : null;
-              })()}
-              {(() => {
-                const w = pensionWageInputCheck(pensionWage, allowanceSummary?.pension?.levels);
-                const text = w.error ?? w.warning;
-                return text ? (
-                  <p className={`rounded-md px-3 py-2 text-xs ${w.error ? "bg-rose-50 text-rose-800" : "bg-amber-50 text-amber-800"}`} data-testid="pension-wage-level-hint">
-                    {text}
-                  </p>
-                ) : null;
-              })()}
-              {allowanceSummary?.pension?.nationalityHint && (
-                <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800" data-testid="pension-nationality-hint">
-                  {allowanceSummary.pension.nationalityHint}
-                </p>
-              )}
-              <div className="flex flex-wrap items-center gap-3">
-                <PrimaryButton type="submit">儲存薪資資料</PrimaryButton>
-                {salaryMsg && <span className="text-sm text-green-600">{salaryMsg}</span>}
-              </div>
-              {insuredHint && (
-                <p className="rounded-md bg-sky-50 px-3 py-2 text-xs text-sky-800">{insuredHint}</p>
-              )}
-            </form>
-
-            {/* 2026-11-08 員工固定津貼：每月執行薪資時自動帶入；合計提示用上方表單目前的本薪與勞保級距。 */}
-            <FixedAllowancesCard
-              employeeId={empId}
-              baseSalary={baseSalary}
-              laborGrade={laborGrade}
-              onSummary={setAllowanceSummary}
-              reloadKey={allowanceReloadKey}
-            />
-
-            <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2">
-              <div>
-                <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-                  <h3 className="text-sm font-medium text-gray-600">健保眷屬投保資料</h3>
-                  <Button variant="secondary" size="sm"
-                    type="button"
-                    onClick={() => setShowNhiForm((open) => !open)}
-                    aria-expanded={showNhiForm}
-                    aria-controls={nhiPanelId}>
-                    {showNhiForm ? "收合" : "＋ 新增健保眷屬"}
-                  </Button>
-                </div>
-                {/* hidden 掛在不帶 display 類別的外層 div（form 本身是 grid，直接掛會被蓋掉）。 */}
-                <div id={nhiPanelId} hidden={!showNhiForm}>
-                  {/* form 的 onChange 會收到底下所有欄位冒泡上來的變更：改任何一欄就清掉錯誤。 */}
-                  <form
-                    onSubmit={onAddNhi}
-                    onChange={() => setNhiError(null)}
-                    className="mb-3 grid grid-cols-1 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-2"
-                  >
-                    <input className={inputCls} value={nhiName} onChange={(event) => setNhiName(event.target.value)} placeholder="眷屬姓名" />
-                    <input className={inputCls} value={nhiRelationship} onChange={(event) => setNhiRelationship(event.target.value)} placeholder="關係" />
-                    <input className={inputCls} value={nhiIdNumber} onChange={(event) => setNhiIdNumber(event.target.value)} placeholder="身分證字號" />
-                    <label className="flex items-center gap-2 text-sm text-gray-600">
-                      <input type="checkbox" checked={nhiInsured} onChange={(event) => setNhiInsured(event.target.checked)} />
-                      投保中
-                    </label>
-                    <button
-                      type="submit"
-                      disabled={nhiSubmitting}
-                      className="rounded-md border px-3 py-2 text-sm font-medium disabled:opacity-50"
-                      style={{ color: "var(--brand)" }}
-                    >
-                      {nhiSubmitting ? "新增中…" : "新增健保眷屬"}
-                    </button>
-                    {nhiError && <ErrorText className="sm:col-span-2">{nhiError}</ErrorText>}
-                  </form>
-                </div>
-                <ul className="divide-y divide-gray-100 text-sm">
-                  {nhiDeps.map((d) => (
-                    <li key={d.id} className="flex items-center justify-between py-1.5">
-                      <span>
-                        {d.name}
-                        <span className="text-xs text-gray-500">
-                          {" "}｜{d.relationship ?? "—"}｜{d.id_number ?? "無證號"}｜{d.insured ? "投保中" : "未投保"}
-                        </span>
-                      </span>
-                      <button onClick={() => deleteNhiDependent(d.id).then(() => loadEmployee(empId))} className="text-red-600 hover:underline">刪除</button>
-                    </li>
-                  ))}
-                  {nhiDeps.length === 0 && <li className="py-1.5 text-gray-400">無</li>}
-                </ul>
-              </div>
-              <div>
-                <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-                  <h3 className="text-sm font-medium text-gray-600">所得稅扶養親屬資料</h3>
-                  <Button variant="secondary" size="sm"
-                    type="button"
-                    onClick={() => setShowTaxForm((open) => !open)}
-                    aria-expanded={showTaxForm}
-                    aria-controls={taxPanelId}>
-                    {showTaxForm ? "收合" : "＋ 新增扶養親屬"}
-                  </Button>
-                </div>
-                <div id={taxPanelId} hidden={!showTaxForm}>
-                  <form
-                    onSubmit={onAddTax}
-                    onChange={() => setTaxError(null)}
-                    className="mb-3 grid grid-cols-1 gap-2 rounded-xl bg-slate-50 p-3 sm:grid-cols-2"
-                  >
-                    <input className={inputCls} value={taxName} onChange={(event) => setTaxName(event.target.value)} placeholder="親屬姓名" />
-                    <input className={inputCls} value={taxRelationship} onChange={(event) => setTaxRelationship(event.target.value)} placeholder="關係" />
-                    <input className={inputCls} value={taxIdNumber} onChange={(event) => setTaxIdNumber(event.target.value)} placeholder="身分證字號" />
-                    <input className={inputCls} type="number" value={taxBirthYear} onChange={(event) => setTaxBirthYear(event.target.value)} placeholder="出生年" />
-                    <button
-                      type="submit"
-                      disabled={taxSubmitting}
-                      className="rounded-md border px-3 py-2 text-sm font-medium disabled:opacity-50"
-                      style={{ color: "var(--brand)" }}
-                    >
-                      {taxSubmitting ? "新增中…" : "新增扶養親屬"}
-                    </button>
-                    {taxError && <ErrorText className="sm:col-span-2">{taxError}</ErrorText>}
-                  </form>
-                </div>
-                <ul className="divide-y divide-gray-100 text-sm">
-                  {taxDeps.map((d) => (
-                    <li key={d.id} className="flex items-center justify-between py-1.5">
-                      <span>
-                        {d.name}
-                        <span className="text-xs text-gray-500">
-                          {" "}｜{d.relationship ?? "—"}｜{d.id_number ?? "無證號"}｜出生年 {d.birth_year ?? "—"}｜{taxStatusLabel(d.support_status)}
-                        </span>
-                      </span>
-                      <button onClick={() => deleteTaxDependent(d.id).then(() => loadEmployee(empId))} className="text-red-600 hover:underline">停用扶養</button>
-                    </li>
-                  ))}
-                  {taxDeps.length === 0 && <li className="py-1.5 text-gray-400">無</li>}
-                </ul>
-              </div>
-            </div>
-          </>
-        )}
       </Card>
 
-      {/* 月結與發薪鎖定（2026-10-11）：每個月一個月結開關；先於「執行薪資」，因為鎖住的月份不能再執行。 */}
-      <PeriodLockCard />
-
-      {/* 前期更正（2026-10-11）：已匯款的月份不改原薪資單，在下月薪資補發或扣回；薪資單逐項列出並標「更正 YYYY-MM」。
-          先於「執行薪資」，因為加減項要在執行之前加好（或加完再重新執行）。#payroll-adjustments 是重新開放對話框裡「前往前期更正」的錨點。 */}
-      <PayrollAdjustmentsCard employees={employees} refreshKey={adjustmentsRefresh} />
-
-      <Card>
-        <h2 className="mb-4 text-sm font-medium text-gray-500">執行薪資/獎金作業</h2>
-        <form onSubmit={onRun} className="flex flex-wrap items-end gap-3">
-          <div>
-            <label className={labelCls}>薪資期間</label>
-            <input type="month" className={inputCls} value={runPeriod} onChange={(e) => setRunPeriod(e.target.value)} />
-          </div>
-          <div className="w-full min-w-0 sm:w-72">
-            <label className={labelCls} htmlFor="payroll-run-employee">執行對象</label>
-            <EmployeeCombobox
-              id="payroll-run-employee"
-              options={employeeOptions}
-              value={runEmployeeId}
-              onChange={setRunEmployeeId}
-              emptyLabel="全部員工"
+      <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">
+        <Card>
+          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <Input value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="搜尋工號或姓名" className="sm:w-56" aria-label="搜尋員工" />
+            <Segmented
+              size="sm"
+              compact
+              aria-label="篩選員工"
+              value={filter}
+              onChange={setFilter}
+              options={(Object.keys(ROSTER_FILTER_LABEL) as RosterFilter[]).map((k) => ({ value: k, label: `${ROSTER_FILTER_LABEL[k]} ${counts[k]}` }))}
             />
           </div>
-          <PrimaryButton type="submit">執行</PrimaryButton>
-          {runMsg && (
-            <span role={runMsg.ok ? "status" : "alert"} className={`text-sm ${runMsg.ok ? "text-green-600" : "text-red-600"}`}>
-              {runMsg.text}
-            </span>
+
+          {loading && !data ? (
+            <p className="text-sm text-gray-400">載入中…</p>
+          ) : visible.length === 0 ? (
+            <p className="py-6 text-center text-sm text-gray-400">{rows.length === 0 ? `${period} 沒有在職員工` : "沒有符合條件的員工"}</p>
+          ) : (
+            <>
+              {/* 手機：每人一張小卡 */}
+              <ul className="divide-y divide-gray-100 sm:hidden" data-testid="payroll-roster-mobile">
+                {visible.map((r) => (
+                  <li key={r.employeeId}>
+                    <button
+                      type="button"
+                      onClick={() => pick(r.employeeId)}
+                      className={`w-full px-1 py-2.5 text-left ${selectedId === r.employeeId ? "bg-gray-50" : ""}`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="min-w-0 truncate font-medium text-gray-900">{rosterLabel(r)}</span>
+                        <span className={`shrink-0 text-xs font-medium ${r.ready ? "text-green-700" : "text-red-700"}`}>{r.ready ? "✓ 已就緒" : "● 未就緒"}</span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                        <span>月表 <CellView cell={sheetCell(r)} /></span>
+                        <span>薪資單 <CellView cell={payslipCell(r)} /></span>
+                        {r.pendingRequests.total > 0 && <span>待簽 <CellView cell={requestsCell(r)} /></span>}
+                        {r.undecidedLateReports > 0 && <span>遲到 <CellView cell={lateCell(r)} /></span>}
+                        {(r.unsettledLeaves > 0 || r.submittedExpenses.count > 0) && <CellView cell={settlementCell(r)} />}
+                      </div>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {/* 桌機：表格 */}
+              <div className="hidden overflow-x-auto sm:block">
+                <table className="w-full text-left text-sm" data-testid="payroll-roster">
+                  <thead>
+                    <tr className="border-b border-gray-200 text-xs text-gray-500">
+                      <th className="py-2 pr-3">員工</th>
+                      <th className="py-2 pr-3">待簽申請</th>
+                      <th className="py-2 pr-3">出勤月表</th>
+                      <th className="py-2 pr-3">遲到說明</th>
+                      <th className="py-2 pr-3">核銷／報銷</th>
+                      <th className="py-2">薪資單（實發）</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visible.map((r) => (
+                      <tr
+                        key={r.employeeId}
+                        onClick={() => pick(r.employeeId)}
+                        className={`cursor-pointer border-b border-gray-50 hover:bg-gray-50 ${selectedId === r.employeeId ? "bg-gray-50" : ""}`}
+                        data-testid={`payroll-roster-row-${r.employeeId}`}
+                      >
+                        <td className="py-2 pr-3">
+                          <button type="button" className="flex items-center gap-2 text-left font-medium text-gray-900 hover:underline">
+                            <span className={r.ready ? "text-green-600" : "text-red-600"} aria-label={r.ready ? "已就緒" : "未就緒"}>
+                              {r.ready ? "✓" : "●"}
+                            </span>
+                            <span className="whitespace-nowrap">{rosterLabel(r)}</span>
+                          </button>
+                        </td>
+                        <td className="py-2 pr-3"><CellView cell={requestsCell(r)} /></td>
+                        <td className="py-2 pr-3"><CellView cell={sheetCell(r)} /></td>
+                        <td className="py-2 pr-3"><CellView cell={lateCell(r)} /></td>
+                        <td className="py-2 pr-3"><CellView cell={settlementCell(r)} /></td>
+                        <td className="py-2"><CellView cell={payslipCell(r)} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
-        </form>
-      </Card>
+        </Card>
 
-      <Card>
-        <p className="text-sm text-gray-600">
-          薪資單的查詢、逐項明細、列印、匯出工資清冊與定案，都在
-          <Link href="/admin/payslips" className="ml-1 font-medium hover:underline" style={{ color: "var(--brand)" }}>
-            薪資明細表
-          </Link>
-          。
-        </p>
-      </Card>
-    </>
+        <div id="payroll-employee-panel" className="min-w-0 scroll-mt-4 lg:sticky lg:top-4 lg:self-start">
+          <Card>
+            {selected ? (
+              <EmployeeMonthPanel
+                key={`${selected.employeeId}-${period}`}
+                row={selected}
+                period={period}
+                payslip={selectedSlip}
+                meId={meId}
+                locked={locked}
+                empName={empName}
+                onChanged={afterChange}
+                onEditAdjustments={() => setAdjFocus((f) => ({ employeeId: selected.employeeId, period, nonce: (f?.nonce ?? 0) + 1 }))}
+                onClose={() => setSelectedId(null)}
+              />
+            ) : (
+              <p className="py-6 text-center text-sm text-gray-400">點選左側員工，查看並處理這個月還沒就緒的項目</p>
+            )}
+          </Card>
+        </div>
+      </div>
+
+      {/* 月結與發薪鎖定：全部就緒才能鎖；卡住的人點名字跳過去。重新開放與權限照舊；最近 12 個月收合。 */}
+      <PeriodLockCard key={lockKey} period={period} blockers={blockers} onPickEmployee={pick} onChanged={afterChange} />
+
+      {/* 前期更正：#payroll-adjustments 是重新開放對話框裡「前往前期更正」的錨點。 */}
+      <PayrollAdjustmentsCard employees={employees} refreshKey={refreshKey} focus={adjFocus} />
+
+      <details className="rounded-xl border border-gray-200 bg-white p-4 md:p-5" data-testid="payroll-ledger">
+        <summary className="cursor-pointer select-none text-sm font-medium text-gray-600">工資清冊明細（{payslips.length} 張，逐列應發／應扣／實發）</summary>
+        <div className="mt-3 min-w-0">
+          {payslips.length === 0 ? (
+            <p className="text-sm text-gray-400">{period} 沒有薪資單</p>
+          ) : (
+            <PayslipLedgerTable rows={ledgerRows} totals={totals} empName={empName} busy={busy} onFinalize={(id) => void finalizeOne(id)} onSend={(p) => void sendOne(p)} />
+          )}
+        </div>
+      </details>
+    </div>
   );
 }

@@ -16,7 +16,7 @@
  *   - `ADMIN_REDIRECTS`：舊網址轉址；apps/web/next.config.ts 維持同一份（單元測試對照）。
  *   - 角色導覽（2026-09-23 W4 會計角色）：`RoleNavConfig`／`ACCOUNTANT_DEFAULT_NAV`／
  *     `roleNavOf(role, features)`／`sectionsForRole()`／`tabsForSection(…, { roleNav })`——
- *     會計只看得到「專案與財務／出勤統計表／報銷預支／員工」，以及「設定」裡的「選項清單」
+ *     會計只看得到「專案與財務／出勤統計表／費用與給付／員工」，以及「設定」裡的「選項清單」
  *     （2026-10-10：客戶分類的管理權限比照客戶名冊的寫入，會計也能管），範圍可由
  *     tenants.features.roles.accountant 覆蓋（設定 → 進階功能）。這只是導覽可見性，
  *     真正的守門在 API（requireFinance／canSeeBonus）。
@@ -153,7 +153,7 @@ export const ADMIN_SECTIONS: readonly AdminSection[] = [
   { key: "finance", label: "專案與財務", icon: "finance", href: "/admin/projects", desc: "專案、請款放款、獎金與名冊" },
   { key: "approvals", label: "假單與簽核", icon: "approvals", href: "/admin/approvals", desc: "簽核表單、假別餘額與月底核銷" },
   { key: "attendance", label: "出勤", icon: "attendance", href: "/admin/punch-records", desc: "打卡紀錄與遲到說明、出勤統計表與月表簽核、值日" },
-  { key: "payroll", label: "薪資與費用", icon: "payroll", href: "/admin/payroll", desc: "薪資、薪資單、稅務、報銷與預支" },
+  { key: "payroll", label: "薪資與費用", icon: "payroll", href: "/admin/payroll", desc: "月結發薪、費用與給付（報銷、預支、稅務、現金給付）" },
   { key: "people", label: "人員", icon: "people", href: "/admin/employees", desc: "員工主檔與部門組織圖" },
   { key: "announce", label: "公告與資訊", icon: "announce", href: "/admin/announcements", desc: "公告與公司資訊頁" },
   { key: "settings", label: "設定", icon: "settings", href: "/admin/leave-types", desc: "假別、班別、行事曆、規則參數與站台" },
@@ -314,61 +314,22 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
   ],
   payroll: [
     {
+      // 2026-11-09「薪資資料與執行」＋「薪資單」合併成「月結發薪」（舊網址 /admin/payslips 轉址過來）；
+      // 員工薪資保險資料搬到員工內頁的「薪資」分頁。
       key: "payroll",
-      label: "薪資資料與執行",
+      label: "月結發薪",
       href: "/admin/payroll",
-      title: "薪資作業",
-      desc: "員工薪資保險資料與執行薪資作業；薪資單查詢與定案在薪資明細表",
+      title: "月結發薪",
+      desc: "當月每位員工還有什麼沒就緒，逐一處理；執行薪資、核對定案、寄送薪資條，全部就緒才完成發薪並鎖定",
     },
     {
-      key: "payslips",
-      label: "薪資單",
-      href: "/admin/payslips",
-      title: "薪資明細表",
-      desc: "工資清冊：各期薪資單的應發、應扣與實發，逐列明細、列印與定案",
-    },
-    {
-      key: "tax",
-      label: "稅務申報",
-      href: "/admin/payroll-tax",
-      title: "薪資法規",
-      desc: "批次調薪、非員工所得、二代健保補充保費試算、申報匯出",
-    },
-    {
-      key: "cash",
-      label: "現金給付",
-      href: "/admin/festival-bonuses",
-      desc: "不進薪資單的現金給付：三節獎金與加班超額另計；只有老闆與 HR 看得到",
-      children: [
-        {
-          key: "festival",
-          label: "三節獎金",
-          href: "/admin/festival-bonuses",
-          title: "三節／節慶獎金",
-          desc: "選節日、年份與基準日一鍵產生全員建議金額（去年同期優先、到職未滿一年按月折算），逐人加減後一次發放並凍結",
-        },
-        {
-          key: "otSettlements",
-          label: "加班超額另計",
-          href: "/admin/overtime-settlements",
-          title: "加班超額另計",
-          desc: "月加班超過上限的分鐘不進薪資單，月表核准時自動列在這裡；逐筆標記以現金／補休／併薪資給付，付款後凍結",
-        },
-      ],
-    },
-    {
+      // 2026-11-09「稅務申報／現金給付（三節獎金、加班超額另計）／報銷／預支」合併成「費用與給付」；
+      // 舊網址轉到 ?section=tax／festival／overtime／advances（ADMIN_REDIRECTS）。HR 專屬區塊由頁內依權限隱藏。
       key: "expenses",
-      label: "報銷",
+      label: "費用與給付",
       href: "/admin/expenses",
-      title: "日常費用月結",
-      desc: "同仁線上填報、月結一次性核銷。省的是逐筆事前審核，不是憑證。",
-    },
-    {
-      key: "advances",
-      label: "預支",
-      href: "/admin/advances",
-      title: "員工預支",
-      desc: "出差預支與零用金預支共用同一條流程：核准 → 撥款 → 以實際報銷沖抵。核准與撥款是兩件事。",
+      title: "費用與給付",
+      desc: "報銷月結、員工預支、稅務申報、三節獎金與加班超額另計",
     },
   ],
   people: [
@@ -721,6 +682,13 @@ export const ADMIN_REDIRECTS: readonly AdminRedirect[] = [
   { source: "/admin/attendance-sheets/:id", destination: "/admin/attendance-statements?sheet=:id" },
   // 2026-11-09「遲到說明」分頁併入打卡紀錄的「遲到說明」檢視（帶的 query 原樣保留）。
   { source: "/admin/late-reports", destination: "/admin/punch-records?view=late" },
+  // 2026-11-09「薪資單」併入「月結發薪」（帶的 period 等 query 原樣保留；Next 轉址預設帶過去）。
+  { source: "/admin/payslips", destination: "/admin/payroll" },
+  // 2026-11-09 稅務申報／三節獎金／加班超額另計／預支併入「費用與給付」的對應區塊（其他 query 原樣保留）。
+  { source: "/admin/payroll-tax", destination: "/admin/expenses?section=tax" },
+  { source: "/admin/festival-bonuses", destination: "/admin/expenses?section=festival" },
+  { source: "/admin/overtime-settlements", destination: "/admin/expenses?section=overtime" },
+  { source: "/admin/advances", destination: "/admin/expenses?section=advances" },
 ];
 
 /* ------------------------------------------------------------- 路由表 --- */
@@ -867,7 +835,7 @@ export interface RoleNavConfig {
 
 /**
  * 會計預設範圍（業主決策 3）：專案與財務（發票／請款／入帳／放款／複委託付款；**不含**
- * 獎金分潤／獎金批次）、出勤統計表（含月表簽核）、報銷與預支（**不含**薪資作業／薪資單／稅務／現金給付）、
+ * 獎金分潤／獎金批次）、出勤統計表（含月表簽核）、費用與給付（報銷、預支；**不含**月結發薪，稅務／現金給付區塊頁內隱藏）、
  * 員工基本資料、設定區的「選項清單」（2026-10-10）。tenants.features.roles.accountant 可整鍵覆蓋（roleNavOf）。
  */
 export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
@@ -875,7 +843,8 @@ export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
   tabs: {
     finance: ["projects", "disbursements", "directory"],
     attendance: ["statements"],
-    payroll: ["expenses", "advances"],
+    // 2026-11-09 報銷、預支併入「費用與給付」：會計看得到這一頁，HR 專屬區塊（稅務、現金給付）由頁內依權限隱藏。
+    payroll: ["expenses"],
     people: ["employees"],
     // 設定區只開「選項清單」：客戶分類的管理權限比照客戶名冊的寫入（API 是 requireFinance 層）。
     settings: ["optionLists"],
@@ -886,9 +855,18 @@ export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
  * 已合併掉的舊分頁 key → 現在承接它的分頁 key。租戶自訂的會計範圍（tenants.features.roles.accountant）
  * 存的是分頁 key，合併後舊 key 要換成新 key，不然勾過舊分頁的會計會看不到合併後的頁。
  * 2026-10-27：receivables（請款與未收款）併入 disbursements（請款與放款）。
- * 2026-11-09：sheets（出勤月表與月結）併入 statements（出勤統計表）；lateReports（遲到說明）併入 punches（打卡紀錄）。
+ * 2026-11-09：sheets（出勤月表與月結）併入 statements（出勤統計表）；lateReports（遲到說明）併入 punches（打卡紀錄）；
+ *   payslips（薪資單）併入 payroll（月結發薪）；tax（稅務申報）、cash（現金給付）、advances（預支）併入 expenses（費用與給付）。
  */
-export const LEGACY_TAB_ALIASES: Readonly<Record<string, string>> = { receivables: "disbursements", sheets: "statements", lateReports: "punches" };
+export const LEGACY_TAB_ALIASES: Readonly<Record<string, string>> = {
+  receivables: "disbursements",
+  sheets: "statements",
+  lateReports: "punches",
+  payslips: "payroll",
+  tax: "expenses",
+  cash: "expenses",
+  advances: "expenses",
+};
 
 const SECTION_KEY_SET: ReadonlySet<string> = new Set<string>(ADMIN_SECTIONS.map((s) => s.key));
 

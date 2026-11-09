@@ -65,7 +65,7 @@ function requestApproverLink(payload: Record<string, unknown>): string {
  *   profile_change_request  → `/admin/employees`（HR 審核資料異動）
  *   profile_change_reviewed → `/ess/mydata`
  *   calendar_import_*   → `/admin/calendar`
- *   payroll_period      → `/admin/payroll`
+ *   payroll_period      → `/admin/payroll?period=YYYY-MM`（月結發薪頁；沒有月份＝`/admin/payroll`）
  *   overtime_unapproved_punch → `/ess/approvals`（主管：請同仁補送加班單後在這裡核准）
  *   其他類型／缺 payload → null
  */
@@ -157,8 +157,11 @@ export function notificationLink(n: NotificationLinkInput): string | null {
     case "calendar_import_revision":
     case "calendar_import_fetch_failed":
       return "/admin/calendar"
-    case "payroll_period":
-      return "/admin/payroll"
+    case "payroll_period": {
+      // 2026-11-09 月結發薪頁吃 ?period=：直接開到通知講的那個月（格式不對就開預設月份）。
+      const period = str(payload.period)
+      return period && /^\d{4}-(0[1-9]|1[0-2])$/.test(period) ? `/admin/payroll?period=${period}` : "/admin/payroll"
+    }
     case "overtime_unapproved_punch":
       return "/ess/approvals"
     default:

@@ -406,7 +406,7 @@ export const CHECKLIST_FIX_HREF: Record<ChecklistKey, string> = {
   sheets: "/admin/attendance-statements",
   leave_settlement: "/admin/leave-settlement",
   expense_settlement: "/admin/expenses",
-  payslips: "/admin/payslips",
+  payslips: "/admin/payroll",
 };
 
 const CHECKLIST_LABEL: Record<ChecklistKey, string> = {

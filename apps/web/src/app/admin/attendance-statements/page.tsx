@@ -35,7 +35,7 @@ import { SheetReviewBar } from "./_components/SheetReviewBar";
 /**
  * 後台「出勤統計表」（2026-11-09 業主：原「出勤月表與月結」/admin/attendance-sheets 併入，一頁完成「看＋簽核＋結算進度」）。
  *
- *   - 頂部：月份、部門、只看異常、狀態磚（含張數，點磚＝依狀態篩選，再點取消）、月結鎖定進度（唯讀，連到薪資作業）、
+ *   - 頂部：月份、部門、只看異常、狀態磚（含張數，點磚＝依狀態篩選，再點取消）、月結鎖定進度（唯讀，連到月結發薪）、
  *     「產生月表」「匯出整批 Excel」（API 同原列表頁：generate／export.xlsx，requireFinance）。
  *   - 左側（桌機）／上方可收合（手機）：員工清單（components 見 _components/EmployeeRoster），可搜尋（EmployeeCombobox 同款篩選）。
  *   - 右側：月表狀態列（_components/SheetReviewBar：狀態、時間、異常清單、核准／退回／重開／重算／匯出單張、逐日月表與快照）
@@ -50,11 +50,11 @@ function prevPeriod(period: string, back: number): string {
   return new Date(Date.UTC(y, m - 1 - back, 1)).toISOString().slice(0, 7);
 }
 
-/** 月結的唯一入口在薪資作業頁（HR 完成發薪並鎖定；老闆或老闆指定的人重新開放）。 */
+/** 月結的唯一入口在月結發薪頁（HR 完成發薪並鎖定；老闆或老闆指定的人重新開放）。 */
 function PayrollLink() {
   return (
     <Link href="/admin/payroll" className="text-xs font-medium hover:underline" style={{ color: "var(--brand)" }}>
-      到薪資作業完成發薪／重新開放
+      到月結發薪完成發薪／重新開放
     </Link>
   );
 }
@@ -316,7 +316,7 @@ export default function AttendanceStatementsPage() {
           </div>
         </div>
 
-        {/* 月結狀態（唯讀）。完成發薪並鎖定／重新開放統一在薪資作業頁。 */}
+        {/* 月結狀態（唯讀）。完成發薪並鎖定／重新開放統一在月結發薪頁。 */}
         <div className="mt-3 flex flex-wrap items-center gap-2 text-sm" data-testid="period-close-badge">
           {periodClose ? (
             <>

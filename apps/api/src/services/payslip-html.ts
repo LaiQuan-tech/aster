@@ -1,7 +1,7 @@
 /**
  * 薪資條 Email 版面（M3，2026-09-23）——**純函式，不連 DB、不寄信**。
  *
- * 欄位與後台列印版（`apps/web/src/app/admin/payslips/page.tsx` 的 `printOne`）一致：
+ * 欄位與後台列印版（`apps/web/src/app/admin/payroll/_components/payslip-bits.tsx` 的 `printPayslip`）一致：
  * 應發（本薪／加班費／夜間加給／全勤獎金／定額補貼／應發合計）→ 應扣（勞保／健保／
  * 勞退自提／預支扣回／請假扣款／遲到早退扣款／應扣合計）→ 實發（代墊支出／實發金額），
  * 之後才是加班費分段與逐項明細。三段的順序與標題是驗收條件，改動前先看

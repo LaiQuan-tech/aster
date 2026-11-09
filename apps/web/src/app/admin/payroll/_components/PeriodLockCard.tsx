@@ -46,6 +46,7 @@ import {
   type PeriodStatus,
 } from "@/lib/payroll-periods-api";
 import { listPayrollAdjustments, relatedAdjustmentsNote, type PayrollAdjustmentWithState } from "@/lib/payroll-adjustments-api";
+import type { LockBlocker } from "@/lib/payroll-month-api";
 
 /** 狀態文字的顏色：開放中灰、已結算綠、已重新開放琥珀（文字本身已寫明狀態，顏色只是輔助）。 */
 const STATUS_TEXT_CLASS: Record<PeriodStatus, string> = {
@@ -54,7 +55,18 @@ const STATUS_TEXT_CLASS: Record<PeriodStatus, string> = {
   reopened: "text-amber-700",
 };
 
-export function PeriodLockCard() {
+export interface PeriodLockCardProps {
+  /** 月結發薪頁選的月份：卡片上方顯示這個月的鎖定鈕與「卡在誰、哪一項」。省略＝只列最近 12 個月（舊版）。 */
+  period?: string;
+  /** 這個月還卡住鎖定的人與項目（lib/payroll-month-api.ts lockBlockersOf）；null＝還沒載入。有人卡住時鎖定鈕停用。 */
+  blockers?: LockBlocker[] | null;
+  /** 點卡住名單裡的名字：頁面跳到該員工。 */
+  onPickEmployee?: (employeeId: string) => void;
+  /** 鎖定／重新開放成功後（頁面重抓逐人列表與薪資單）。 */
+  onChanged?: () => void;
+}
+
+export function PeriodLockCard({ period, blockers = null, onPickEmployee, onChanged }: PeriodLockCardProps = {}) {
   const [data, setData] = useState<PayrollPeriodsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -156,6 +168,7 @@ export function PeriodLockCard() {
         setChecklist(null);
         setNotice(closeSuccessMessage(period));
         await reload();
+        onChanged?.();
         return;
       }
       if (outcome.error === "already_closed") {
@@ -164,6 +177,7 @@ export function PeriodLockCard() {
         setChecklist(null);
         setNotice(`${period} 已經完成發薪並鎖定（剛剛已有人鎖定了）`);
         await reload();
+        onChanged?.();
         return;
       }
       // 409 checklist_incomplete：用伺服器回的整份清單更新面板（沒附就重抓一次）。
@@ -228,6 +242,7 @@ export function PeriodLockCard() {
       setReason("");
       setNotice(reopenSuccessMessage(res));
       await reload();
+      onChanged?.();
     } catch (err) {
       setReopenError(payrollPeriodErrorMessage(err, "重新開放失敗"));
       // 這個月份的狀態可能剛被別人改掉（已重新開放、或根本沒鎖）：把列表重抓一次讓畫面對上，對話框留著顯示原因。
@@ -277,6 +292,78 @@ export function PeriodLockCard() {
       ) : forbidden ? (
         <p className="text-sm text-gray-500">只有 HR 與老闆指定的人可以查看月結狀態。</p>
       ) : data ? (
+        <>
+        {period && (() => {
+          const row: PayrollPeriodRow = data.periods.find((p) => p.period === period) ?? {
+            period,
+            status: "open",
+            closedAt: null,
+            closedByEmpId: null,
+            closedByName: null,
+            reopenedAt: null,
+            reopenedByEmpId: null,
+            reopenedByName: null,
+            reopenReason: null,
+            sheetCount: 0,
+            lockedCount: 0,
+          };
+          const actions = periodActionsOf(row.status, data);
+          const blocked = blockers === null || blockers.length > 0;
+          return (
+            <div className="mb-3 rounded-xl border border-gray-200 p-3" data-testid="period-lock-selected">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0 flex-1">
+                  <span className="font-medium tabular-nums text-gray-900">{row.period}</span>
+                  <p className={`mt-0.5 break-words text-sm ${STATUS_TEXT_CLASS[row.status] ?? "text-gray-500"}`}>{periodStatusText(row)}</p>
+                </div>
+                <div className="flex min-w-0 flex-wrap items-center gap-2 sm:shrink-0 sm:justify-end">
+                  {actions.showClose && (
+                    <Button onClick={() => openClose(row.period)} disabled={blocked} data-testid="period-close-btn">
+                      {closeButtonLabel(row.period)}
+                    </Button>
+                  )}
+                  {actions.showReopen && (
+                    <Button variant="secondary" onClick={() => openReopen(row.period)} data-testid="period-reopen-btn">
+                      重新開放
+                    </Button>
+                  )}
+                  {actions.reopenForbiddenHint && (
+                    <span className="text-xs text-gray-400" data-testid="period-reopen-forbidden">
+                      {actions.reopenForbiddenHint}
+                    </span>
+                  )}
+                </div>
+              </div>
+              {actions.showClose && blockers && blockers.length > 0 && (
+                <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-800" data-testid="period-lock-blockers">
+                  <p className="mb-1 font-medium">還有 {blockers.length} 位沒就緒，全部就緒才能鎖定：</p>
+                  <ul className="space-y-0.5">
+                    {blockers.slice(0, 30).map((b) => (
+                      <li key={b.employeeId}>
+                        {onPickEmployee ? (
+                          <button type="button" onClick={() => onPickEmployee(b.employeeId)} className="font-medium underline">
+                            {b.label}
+                          </button>
+                        ) : (
+                          <span className="font-medium">{b.label}</span>
+                        )}
+                        ：{b.items.join("、")}
+                      </li>
+                    ))}
+                    {blockers.length > 30 && <li>還有 {blockers.length - 30} 位（用上方「未就緒」篩選查看）</li>}
+                  </ul>
+                </div>
+              )}
+              {actions.showClose && blockers && blockers.length === 0 && (
+                <p className="mt-2 text-xs text-green-700">全部員工都已就緒，可以完成發薪並鎖定。</p>
+              )}
+            </div>
+          );
+        })()}
+        <details open={!period} className="group">
+          {period && (
+            <summary className="cursor-pointer select-none text-xs font-medium text-gray-500 hover:text-gray-700">最近 12 個月狀態</summary>
+          )}
         <ul className="divide-y divide-gray-100" data-testid="period-lock-list">
           {data.periods.map((row: PayrollPeriodRow) => {
             const actions = periodActionsOf(row.status, data);
@@ -322,6 +409,8 @@ export function PeriodLockCard() {
             );
           })}
         </ul>
+        </details>
+        </>
       ) : null}
 
       {/* 完成發薪並鎖定：先看檢查清單，四項全過才能確認。 */}

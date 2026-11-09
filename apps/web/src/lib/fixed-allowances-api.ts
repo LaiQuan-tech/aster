@@ -117,7 +117,7 @@ export function deleteFixedAllowance(id: string) {
 /** 草稿過期提醒文字（stalePeriods 空 → null）。 */
 export function staleNoticeText(stalePeriods: readonly string[] | undefined): string | null {
   if (!stalePeriods || stalePeriods.length === 0) return null;
-  return `${stalePeriods.join("、")} 的草稿薪資單還沒跟上固定津貼的異動：請到「執行薪資/獎金作業」重新執行該月薪資，否則無法定案。`;
+  return `${stalePeriods.join("、")} 的草稿薪資單還沒跟上固定津貼的異動：請到「月結發薪」重新執行該月薪資，否則無法定案。`;
 }
 
 /**

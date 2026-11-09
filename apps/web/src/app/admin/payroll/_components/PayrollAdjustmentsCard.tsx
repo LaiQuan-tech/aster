@@ -53,9 +53,13 @@ interface Props {
   employees: Employee[];
   /** 頁面上每執行一次薪資作業就加 1，卡片重新讀一次（草稿薪資單是否跟上了）。 */
   refreshKey?: number;
+  /**
+   * 月結發薪頁的員工明細按「加減項」：切到該月、用姓名篩出這位員工並捲到卡片（nonce 每按一次加 1）。
+   */
+  focus?: { employeeId: string; period: string; nonce: number } | null;
 }
 
-export function PayrollAdjustmentsCard({ employees, refreshKey = 0 }: Props) {
+export function PayrollAdjustmentsCard({ employees, refreshKey = 0, focus = null }: Props) {
   const toast = useToast();
   const [period, setPeriod] = useState(currentMonth);
   const [rows, setRows] = useState<PayrollAdjustmentWithState[]>([]);
@@ -128,6 +132,15 @@ export function PayrollAdjustmentsCard({ employees, refreshKey = 0 }: Props) {
     setStaleIds([]);
     setNotes({});
   }, [period]);
+
+  useEffect(() => {
+    if (!focus) return;
+    const e = employees.find((x) => x.id === focus.employeeId);
+    setPeriod(focus.period);
+    setKeyword(e ? (e.emp_no ?? e.name) : "");
+    document.getElementById("payroll-adjustments")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.nonce]);
 
   const byEmployee = useMemo(() => {
     const map = new Map<string, PayrollAdjustmentWithState[]>();
@@ -272,7 +285,7 @@ export function PayrollAdjustmentsCard({ employees, refreshKey = 0 }: Props) {
         )}
         {staleEmployees.size > 0 && (
           <p role="status" data-testid="adjustments-stale-banner" className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
-            有 {staleEmployees.size} 位員工的草稿薪資單還沒跟上加減項（{[...staleEmployees].map(nameOf).join("、")}）：請到下方「執行薪資/獎金作業」重新執行 {period}
+            有 {staleEmployees.size} 位員工的草稿薪資單還沒跟上加減項（{[...staleEmployees].map(nameOf).join("、")}）：請按上方「執行薪資（全部）」或員工明細的「重算此人」重新執行 {period}
             的薪資，否則無法定稿。
           </p>
         )}
