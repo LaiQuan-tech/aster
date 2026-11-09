@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { formatMoney } from "@/lib/money";
 import { apiDownload } from "@/lib/api-client";
 import { fmtHm, localDateKey } from "@/lib/ess-format";
 import { formatRequestHours } from "@/lib/leave-duration";
@@ -21,14 +22,13 @@ import {
 const today = new Date().toISOString().slice(0, 10);
 const month = new Date().toISOString().slice(0, 7);
 const monthStart = `${month}-01`;
-const numberFmt = new Intl.NumberFormat("zh-TW");
 
 function minutesToHours(minutes: number) {
   return `${(minutes / 60).toFixed(1)}h`;
 }
 
 function money(value: number) {
-  return `$${numberFmt.format(value)}`;
+  return `$${formatMoney(value, { maximumFractionDigits: 3 })}`;
 }
 
 /** ISO → 當地「YYYY-MM-DD HH:mm」；原本直接切 ISO 字串會變成 UTC，比台北少 8 小時。 */

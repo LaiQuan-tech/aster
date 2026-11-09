@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { Button, PrimaryButton } from "@/components/admin-ui";
 import { ClientCombo } from "@/components/ClientCombo";
+import { MoneyInput } from "@/components/MoneyInput";
 import type { Vendor } from "@/lib/company-api";
 import { companyOptions } from "@/lib/company-options";
 import { createContract, updateContract, type Contract } from "@/lib/projects-api";
@@ -72,10 +73,12 @@ import {
   resolveSheetClient,
   runApplicationSheetSave,
   stageBaseValues,
+  stageContractTotal,
   stageLocks,
   type SheetSaveApi,
   type SheetSaveStep,
 } from "@/lib/project-application-sheet-save";
+import { applyStageAmountEdit, applyStagePctEdit, formatStagePct, releaseTypedPercentages, stageAmountDisplay, stagePctDisplay, stageScheduleSummary } from "@/lib/project-application-stage-amounts";
 
 import { sheet } from "@/lib/sheet-styles";
 import { selectedCompanyId } from "../../_components/project-application-form";
@@ -410,6 +413,10 @@ export function ApplicationSheet({
       ? salesAmounts(untaxedTyped !== null && Number.isFinite(untaxedTyped) ? untaxedTyped : null, money?.vatRate ?? 0.05)
       : { taxAmount: money?.taxAmount ?? null, amountTotal: money?.amountTotal ?? null };
   const hasContractDoc = orderDoc?.docType === "contract";
+  // 付款階段：金額為主、% ＝金額 ÷ 銷售金額（未稅）。總額取合約（後端試算口徑），沒有合約時用畫面上的未稅。
+  const stageTotal = editable
+    ? (stageContractTotal(money, contracts, draft) ?? (untaxedTyped !== null && Number.isFinite(untaxedTyped) ? untaxedTyped : (money?.amountUntaxed ?? null)))
+    : null;
 
   /** 客戶名冊欄位：可編輯時是輸入框（改的是名冊那筆客戶）；沒選客戶時不能填。 */
   function clientInput(field: ClientSheetField, extraCls = "") {
@@ -472,7 +479,7 @@ export function ApplicationSheet({
               <div key={idx} data-err-field={`designScope:${idx}`} className={`flex flex-wrap items-center gap-1 sm:flex-nowrap ${isBad(`designScope:${idx}`) ? "rounded bg-red-50 ring-1 ring-red-400 print:bg-transparent print:ring-0" : ""}`}>
                 <input aria-label={`設計內容第 ${idx + 1} 列科別`} className={`${cellInput} sm:w-24 sm:flex-none`} list="sheet-discipline-suggestions" placeholder="科別" value={row.discipline} onChange={(e) => patchScopeRow(idx, { discipline: e.target.value })} />
                 <input aria-label={`設計內容第 ${idx + 1} 列項目`} className={`${cellInput} flex-1`} placeholder="服務項目" value={row.item ?? ""} onChange={(e) => patchScopeRow(idx, { item: e.target.value })} />
-                <input aria-label={`設計內容第 ${idx + 1} 列金額`} className={`${cellInput} text-right sm:w-32 sm:flex-none`} type="number" min="0" placeholder="金額" value={row.amount ?? ""} onChange={(e) => patchScopeRow(idx, { amount: e.target.value === "" ? null : Number(e.target.value) })} />
+                <MoneyInput aria-label={`設計內容第 ${idx + 1} 列金額`} className={`${cellInput} text-right sm:w-32 sm:flex-none`} placeholder="金額" value={row.amount ?? ""} onValueChange={(v) => patchScopeRow(idx, { amount: v === "" ? null : Number(v) })} />
                 <button type="button" className="shrink-0 px-1 text-xs text-gray-400 hover:text-red-600" onClick={() => setDraft((d) => ({ ...d, designScope: d.designScope.filter((_, i) => i !== idx) }))}>
                   移除
                 </button>
@@ -633,15 +640,12 @@ export function ApplicationSheet({
       case "amountUntaxed":
         if (!editable) return moneyText(money?.amountUntaxed);
         return (
-          <input
+          <MoneyInput
             aria-label="銷售金額（未稅）"
             title={money?.amountSource === "quotation" ? "目前取自最新報價單" : undefined}
             className={`${cellInput} text-right`}
-            type="number"
-            min="0"
-            inputMode="numeric"
             value={draft.amountUntaxed ?? (money?.amountUntaxed != null ? String(money.amountUntaxed) : "")}
-            onChange={(e) => set("amountUntaxed", e.target.value)}
+            onValueChange={(v) => setDraft((d) => ({ ...d, amountUntaxed: v, stageEdits: releaseTypedPercentages(d.stageEdits) }))}
           />
         );
       case "taxAmount":
@@ -731,34 +735,51 @@ export function ApplicationSheet({
     const edit: StageEdit = editable ? (draft.stageEdits[key] ?? {}) : {};
     const locks = stageLocks(s);
     const val = (f: Exclude<keyof StageEdit, "overrideReason">) => edit[f] ?? base[f];
+    const rowEdit = editable ? draft.stageEdits[key] : undefined;
+    const patchStage = (next: StageEdit) => setDraft((d) => ({ ...d, stageEdits: { ...d.stageEdits, [key]: next } }));
+    const pctText = stagePctDisplay(s, rowEdit, stageTotal);
     const rowLabel = guild ? "技師公會代墊" : `付款階段第 ${s.no} 列`;
     cells.push(
       <Cell key={`stage-${s.no}-0`} col={stageCols[0]} span={S[0]} row={r} kind="label" shade testId={`sheet-stage-${s.no}`}>
         {editable ? (
           <span className="flex w-full min-w-0 items-center gap-0.5">
             <span className="shrink-0">{s.no}.</span>
-            <input aria-label={`${rowLabel}項目說明`} className={cellInput} maxLength={200} placeholder="項目說明" title="名稱、百分比、金額都清空並儲存＝移除這一期（已請款／開票／入帳的不能移除）" value={val("milestone")} onChange={(e) => setStage(key, "milestone", e.target.value)} />
+            <input aria-label={`${rowLabel}項目說明`} className={cellInput} maxLength={200} placeholder="項目說明" title="名稱、金額、%、備註都清空並儲存＝移除這一期（已請款／開票／入帳的不能移除）" value={val("milestone")} onChange={(e) => setStage(key, "milestone", e.target.value)} />
           </span>
         ) : (
           <span className="truncate" title={`${s.no}.${s.milestone}`}>{`${s.no}.${s.milestone}`}</span>
         )}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-1`} col={stageCols[1]} span={S[1]} row={r} kind="value" align="center" editable={editable && !locks.percentage} {...errAttr(`stage:${key}:percentage`)}>
-        {mLabel("百分比")}
-        {editable && !locks.percentage ? (
-          <span className="flex w-full min-w-0 items-center gap-0.5">
-            <input aria-label={`${rowLabel}百分比`} className={`${cellInput} text-right`} type="number" min="0" max="100" inputMode="decimal" value={val("percentage")} onChange={(e) => setStage(key, "percentage", e.target.value)} />
-            <span className="shrink-0">%</span>
-          </span>
-        ) : s.percentage != null ? `${s.percentage}%` : ""}
-      </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-2`} col={stageCols[2]} span={S[2]} row={r} kind="value" align="right" testId={`sheet-stage-${s.no}-amount`} editable={editable && !locks.amount} {...errAttr(`stage:${key}:amount`, `stage:${key}:overrideReason`)}>
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-1`} col={stageCols[1]} span={S[1]} row={r} kind="value" align="right" testId={`sheet-stage-${s.no}-amount`} editable={editable && !locks.amount} {...errAttr(`stage:${key}:amount`, `stage:${key}:overrideReason`)}>
         {mLabel("金額")}
         {editable && !locks.amount ? (
-          <input aria-label={`${rowLabel}金額`} title="填了就是人工指定金額；清空＝依百分比試算" className={`${cellInput} text-right tabular-nums`} type="number" min="0" inputMode="numeric" value={val("amount")} onChange={(e) => setStage(key, "amount", e.target.value)} />
+          <MoneyInput
+            aria-label={`${rowLabel}金額`}
+            title="輸入金額，% 自動算出（金額 ÷ 銷售金額（未稅））"
+            className={`${cellInput} text-right tabular-nums`}
+            value={stageAmountDisplay(s, rowEdit)}
+            onValueChange={(v) => patchStage(applyStageAmountEdit(rowEdit, v))}
+          />
         ) : (
           <span className="tabular-nums" title={editable && locks.amount ? "已請款／已入帳，金額凍結" : undefined}>{s.amount != null ? fmtMoney(s.amount) : ""}</span>
         )}
+      </Cell>,
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-2`} col={stageCols[2]} span={S[2]} row={r} kind="value" align="center" testId={`sheet-stage-${s.no}-pct`} editable={editable && !locks.percentage && !locks.amount} {...errAttr(`stage:${key}:percentage`)}>
+        {mLabel("百分比")}
+        {editable && !locks.percentage && !locks.amount ? (
+          <span className="flex w-full min-w-0 items-center gap-0.5">
+            <input
+              aria-label={`${rowLabel}百分比`}
+              title="也可以填 %，會反算金額（以金額為準存檔）"
+              className={`${cellInput} text-right tabular-nums`}
+              type="text"
+              inputMode="decimal"
+              value={pctText}
+              onChange={(e) => patchStage(applyStagePctEdit(s, rowEdit, e.target.value.replace(/[^\d.]/g, ""), stageTotal))}
+            />
+            <span className="shrink-0">%</span>
+          </span>
+        ) : pctText !== "" ? `${pctText}%` : ""}
       </Cell>,
       guild ? (
         <Cell className={blankCls("payment")} key={`stage-${s.no}-3`} col={stageCols[3]} span={S[3] + S[4]} row={r} kind="value" testId="sheet-guild-repayment" editable={editable} {...errAttr("guildRepaymentNote")}>
@@ -806,7 +827,25 @@ export function ApplicationSheet({
           <span title={editable && locks.receivedOn ? "已入帳；撤銷請到下方「分期請款期程」" : undefined}>{s.receivedOn ? rocDots(s.receivedOn) : ""}</span>
         )}
       </Cell>,
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-6`} col={stageCols[6]} span={S[6]} row={r} kind="value" testId={`sheet-stage-${s.no}-note`} editable={editable} {...errAttr(`stage:${key}:note`)}>
+        {mLabel("備註")}
+        {editable ? (
+          <input aria-label={`${rowLabel}備註`} className={cellInput} maxLength={1000} value={val("note")} onChange={(e) => setStage(key, "note", e.target.value)} />
+        ) : (
+          <span className="min-w-0 whitespace-normal break-words">{s.note}</span>
+        )}
+      </Cell>,
     );
+  }
+  if (editable && stageTotal !== null && stageTotal > 0) {
+    const sum = stageScheduleSummary(stageRows, draft.stageEdits, stageRowKey, stageTotal);
+    if (sum.amountTotal > 0 && sum.diff !== 0) {
+      cells.push(
+        <Cell key="stage-sum-hint" col={1} span={16} row={row++} kind="full" testId="sheet-stage-sum-hint" className="text-xs text-amber-800 print:hidden">
+          各期金額合計 {fmtMoney(sum.amountTotal)}（{formatStagePct(sum.pctTotal)}%），與銷售金額（未稅）{fmtMoney(stageTotal)} 差 {fmtMoney(sum.diff)}；存檔後差額會加到最後一期。
+        </Cell>,
+      );
+    }
   }
   // Word 第 19 列：付款階段與發包單位之間的空白列。
   cells.push(<Cell key="spacer" col={1} span={16} row={row++} kind="full" className="hidden h-6 md:flex print:flex print:h-5" />);
@@ -815,7 +854,7 @@ export function ApplicationSheet({
   const summaryValues: ReactNode[] = [
     moneyText(money?.subcontractTotal),
     editable ? (
-      <input key="other" aria-label="其他支出" className={`${cellInput} text-right tabular-nums`} type="number" min="0" value={draft.otherExpenses} onChange={(e) => set("otherExpenses", e.target.value)} />
+      <MoneyInput key="other" aria-label="其他支出" className={`${cellInput} text-right tabular-nums`} value={draft.otherExpenses} onValueChange={(v) => set("otherExpenses", v)} />
     ) : moneyText(money?.otherExpenses),
     showProfit ? moneyText(money?.profit) : <span title="屬集團財務，僅老闆與授權人員可見">—</span>,
     showProfit ? (canFinance && money?.grossMarginPct != null ? `${money.grossMarginPct}%` : "—") : <span title="屬集團財務，僅老闆與授權人員可見">—</span>,

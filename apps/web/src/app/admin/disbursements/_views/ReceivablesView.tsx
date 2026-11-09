@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { formatMoney } from "@/lib/money";
 import Link from "next/link";
 import { Card, Empty, ErrorText } from "@/components/admin-ui";
 import {
@@ -14,7 +15,7 @@ import {
 import { matchesKeyword } from "@/lib/billing-disbursement";
 
 function fmtMoney(n: number | null | undefined): string {
-  return n == null ? "—" : n.toLocaleString();
+  return n == null ? "—" : formatMoney(n, { maximumFractionDigits: 3 });
 }
 
 /** B5 篩選 chips：全部／已請款未開票／已開票未入帳／逾期。 */

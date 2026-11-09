@@ -4,6 +4,7 @@
  * 的 SerializedRun／SerializedItem／BonusSummary。刻意獨立成新檔、不改 projects-api.ts。
  */
 import { apiFetch, apiDownload } from "./api-client"
+import { formatMoney } from "@/lib/money"
 
 /* ---------------------------------------------------------------- 基本型別 -- */
 /** 2026-10-26 起：草稿 →（HR）送審 →（老闆）核准 → 發放。 */
@@ -392,7 +393,7 @@ export function defaultBonusLabel(dateKey: string): string {
 }
 
 export function fmtMoney(n: number | null | undefined): string {
-  return n == null ? "—" : Math.round(n).toLocaleString("zh-TW")
+  return formatMoney(n)
 }
 
 export function fmtPct(p: number | null | undefined): string {

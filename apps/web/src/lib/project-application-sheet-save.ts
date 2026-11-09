@@ -20,6 +20,8 @@
  * ⚠️ vitest 沒設 `@/` 別名：只能用相對路徑。
  */
 import { isOurContract, type Contract } from "./projects-api";
+import { formatMoney } from "./money";
+import { amountFromPct, formatStagePct, pctFromAmount, savedOverrideOf, stageScheduleSummary } from "./project-application-stage-amounts";
 import type {
   BillingExt,
   Client,
@@ -189,6 +191,21 @@ export function contractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft
 
 /* ======================================================== 付款階段 == */
 
+/**
+ * 付款階段試算用的合約總額：後端只在「有合約（或這次勾了合約書）」時依 % 試算（billing-store contractTotal）；
+ * 只有報價單＝null（不預填，避免存檔後金額變空白）。未稅格有輸入就用草稿值。
+ */
+export function stageContractTotal(
+  money: ProjectMoney | null,
+  contracts: readonly Contract[],
+  draft: Pick<ApplicationSheetDraft, "amountUntaxed" | "orderDocType">,
+): number | null {
+  const pendingContract = draft.orderDocType === "contract" && latestOrderDocument(contracts)?.docType !== "contract";
+  if (money?.amountSource !== "contract" && !pendingContract) return null;
+  const parsed = draft.amountUntaxed === null ? (money?.amountUntaxed ?? null) : parseNumber(draft.amountUntaxed, { min: 0 });
+  return parsed === "invalid" ? null : parsed;
+}
+
 interface StageBase {
   milestone: string;
   percentage: string;
@@ -196,6 +213,7 @@ interface StageBase {
   receivedOn: string;
   invoiceNo: string;
   invoicedOn: string;
+  note: string;
 }
 
 export function stageBaseValues(row: ApplicationStageRow): StageBase {
@@ -206,6 +224,7 @@ export function stageBaseValues(row: ApplicationStageRow): StageBase {
     receivedOn: row.receivedOn ?? "",
     invoiceNo: row.invoiceNo ?? "",
     invoicedOn: row.invoicedOn ?? "",
+    note: row.note ?? "",
   };
 }
 
@@ -236,7 +255,7 @@ export interface StagePlan {
   removed: Array<{ key: string; label: string }>;
   invoices: Array<{ key: string; label: string; invoiceNo: string; invoicedOn: string }>;
   receipts: Array<{ key: string; label: string; receivedOn: string }>;
-  /** 改了金額、要使用者填人工指定理由的列（沒有既有理由可沿用）。 */
+  /** 改了金額、要使用者填人工指定理由的列（沒有合約總額、只能人工指定時；沒有既有理由可沿用）。 */
   needsReason: Array<{ key: string; label: string }>;
   changes: number;
   errors: SheetError[];
@@ -269,7 +288,7 @@ export function isEmptyShellBilling(b: BillingExt): boolean {
 /** 這次的修改有沒有在該列填進任何內容（說明／%／金額／發票／日期）。 */
 function stageEditFills(edit: StageEdit | undefined): boolean {
   if (!edit) return false;
-  return (["milestone", "percentage", "amount", "receivedOn", "invoiceNo", "invoicedOn"] as const).some((f) => trimmed(edit[f]) !== "");
+  return (["milestone", "percentage", "amount", "receivedOn", "invoiceNo", "invoicedOn", "note"] as const).some((f) => trimmed(edit[f]) !== "");
 }
 
 export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): StagePlan {
@@ -288,6 +307,11 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     overrideReason: b.overrideReason,
     note: b.note,
   }));
+  // 金額為主：有合約總額時，金額換成剛好算回同一金額的 % 存（後端以 % 試算），不必人工指定、不要理由。
+  const total = stageContractTotal(ctx.money, ctx.contracts, draft);
+  const savedTotal = ctx.money?.amountSource === "contract" ? (ctx.money.amountUntaxed ?? null) : null;
+  /** 未稅變了：金額不動、% 依新總額重算 → 每列都要重送 %。 */
+  const totalChanged = total !== null && total !== savedTotal;
   let nextNo = ctx.billings.reduce((m, b) => Math.max(m, b.installmentNo), 0) + 1;
   let scheduleChanged = false;
   const rowKeys = new Set(rows.map(stageRowKey));
@@ -314,37 +338,64 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
       out.warnings.push(`付款階段${label}在系統裡是空白期別（下方「分期請款期程」仍顯示），儲存時會一併移除。`);
       continue;
     }
-    if (!edit) continue;
+    if (!edit && !totalChanged) continue;
+    const e: StageEdit = edit ?? {};
     const base = stageBaseValues(row);
     const locks = stageLocks(row);
 
-    const milestoneChanged = edit.milestone !== undefined && trimmed(edit.milestone) !== trimmed(base.milestone);
+    const milestoneChanged = e.milestone !== undefined && trimmed(e.milestone) !== trimmed(base.milestone);
     let percentage: number | null | undefined;
-    if (edit.percentage !== undefined && !locks.percentage) {
-      const p = parseNumber(edit.percentage, { min: 0, max: 100 });
-      if (p === "invalid") out.errors.push({ field: `stage:${key}:percentage`, message: `付款階段${label}的百分比必須是 0～100 的數字。` });
-      else if (p !== row.percentage) percentage = p;
-    }
     let amount: number | null | undefined;
-    if (edit.amount !== undefined && !locks.amount) {
-      const a = parseNumber(edit.amount, { min: 0 });
-      if (a === "invalid") out.errors.push({ field: `stage:${key}:amount`, message: `付款階段${label}的金額必須是 0 以上的數字。` });
-      else if (a !== row.amount) amount = a;
+    const savedOverride = savedOverrideOf(row, ctx.billings);
+    const amountEdited = e.amount !== undefined || e.percentage !== undefined;
+    if (total !== null && total > 0 && !locks.amount && (amountEdited || (totalChanged && row.exists))) {
+      // 目標金額：金額格 > % 格反算 > 原金額（只有未稅變了）。
+      let target: number | null | "invalid";
+      if (e.amount !== undefined) target = parseNumber(e.amount, { min: 0 });
+      else if (e.percentage !== undefined) {
+        const p = parseNumber(e.percentage, { min: 0, max: 100 });
+        target = p === "invalid" ? "invalid" : p === null ? null : amountFromPct(p, total);
+      } else target = row.amount;
+      if (target === "invalid") {
+        const field = e.amount !== undefined ? "amount" : "percentage";
+        out.errors.push({ field: `stage:${key}:${field}`, message: field === "amount" ? `付款階段${label}的金額必須是 0 以上的數字。` : `付款階段${label}的百分比必須是 0～100 的數字。` });
+      } else if (target !== null && target > total) {
+        out.errors.push({ field: `stage:${key}:amount`, message: `付款階段${label}的金額不能大於銷售金額（未稅）${formatMoney(total)}。` });
+      } else {
+        const p = target === null ? null : pctFromAmount(target, total);
+        if (p !== row.percentage) percentage = p;
+        // 以金額為主＝不是人工指定：既有的人工指定金額一併取消（金額已由 % 算回）。
+        if (savedOverride !== null) amount = null;
+      }
+    } else {
+      // 沒有合約總額（後端不試算）或金額凍結：沿用舊規則——% 照填、改金額＝人工指定（要理由）。
+      if (e.percentage !== undefined && !locks.percentage) {
+        const p = parseNumber(e.percentage, { min: 0, max: 100 });
+        if (p === "invalid") out.errors.push({ field: `stage:${key}:percentage`, message: `付款階段${label}的百分比必須是 0～100 的數字。` });
+        else if (p !== row.percentage) percentage = p;
+      }
+      if (e.amount !== undefined && !locks.amount) {
+        const a = parseNumber(e.amount, { min: 0 });
+        if (a === "invalid") out.errors.push({ field: `stage:${key}:amount`, message: `付款階段${label}的金額必須是 0 以上的數字。` });
+        else if (a === null) amount = savedOverride !== null ? null : undefined;
+        else if (a !== savedOverride) amount = a;
+      }
     }
-    const receivedOn = !locks.receivedOn && edit.receivedOn !== undefined ? trimmed(edit.receivedOn) : "";
-    const invoiceNo = !locks.invoiceNo && edit.invoiceNo !== undefined ? trimmed(edit.invoiceNo) : "";
-    const invoicedOn = !locks.invoicedOn && edit.invoicedOn !== undefined ? trimmed(edit.invoicedOn) : "";
+    const noteChanged = e.note !== undefined && trimmed(e.note) !== trimmed(base.note);
+    const receivedOn = !locks.receivedOn && e.receivedOn !== undefined ? trimmed(e.receivedOn) : "";
+    const invoiceNo = !locks.invoiceNo && e.invoiceNo !== undefined ? trimmed(e.invoiceNo) : "";
+    const invoicedOn = !locks.invoicedOn && e.invoicedOn !== undefined ? trimmed(e.invoicedOn) : "";
     if (receivedOn && !dateRe.test(receivedOn)) out.errors.push({ field: `stage:${key}:receivedOn`, message: `付款階段${label}的入帳日期格式不對。` });
     if (invoicedOn && !dateRe.test(invoicedOn)) out.errors.push({ field: `stage:${key}:invoicedOn`, message: `付款階段${label}的發票日期格式不對。` });
     if (invoiceNo.length > 40) out.errors.push({ field: `stage:${key}:invoiceNo`, message: `付款階段${label}的發票號碼最多 40 字。` });
 
-    const rowScheduleChanges = (milestoneChanged ? 1 : 0) + (percentage !== undefined ? 1 : 0) + (amount !== undefined ? 1 : 0);
+    const rowScheduleChanges = (milestoneChanged ? 1 : 0) + (percentage !== undefined ? 1 : 0) + (amount !== undefined ? 1 : 0) + (noteChanged ? 1 : 0);
     out.changes += rowScheduleChanges + (receivedOn ? 1 : 0) + (invoiceNo ? 1 : 0);
 
     // 人工指定金額要理由（後端 override_reason_required）：沿用既有理由，否則要使用者自己填，不代填。
     let overrideReason: string | null = null;
     if (amount != null) {
-      overrideReason = trimmed(edit.overrideReason) || row.overrideReason || "";
+      overrideReason = trimmed(e.overrideReason) || row.overrideReason || "";
       if (!overrideReason) {
         out.needsReason.push({ key, label });
         out.errors.push({ field: `stage:${key}:overrideReason`, message: `付款階段${label}改了金額（人工指定），請填理由。` });
@@ -369,9 +420,10 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
       if (!target || !saved) continue;
       scheduleChanged = true;
       // 整列清空：名稱、%、人工金額存完都是空，而且這次沒填發票／入帳 → 移除這一期。
-      const milestoneAfter = milestoneChanged ? trimmed(edit.milestone) : trimmed(base.milestone);
+      const milestoneAfter = milestoneChanged ? trimmed(e.milestone) : trimmed(base.milestone);
+      const noteAfter = noteChanged ? trimmed(e.note) : trimmed(base.note);
       const overrideAfter = amount !== undefined ? amount : saved.overrideAmount;
-      const cleared = milestoneAfter === "" && pctAfter == null && overrideAfter == null && !receivedOn && !invoiceNo && !invoicedOn;
+      const cleared = milestoneAfter === "" && noteAfter === "" && pctAfter == null && overrideAfter == null && !receivedOn && !invoiceNo && !invoicedOn;
       if (cleared) {
         if (!saved.billedOn && !saved.invoiceNo && !saved.invoicedOn && !saved.receivedOn) {
           payload.splice(payload.indexOf(target), 1);
@@ -381,7 +433,8 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
         // 已請款／開票／入帳的期別後端不准移除（409）：名稱照存空白，其他格維持原值，並說明原因（不默默還原）。
         out.warnings.push(`付款階段${label}已請款／開票或入帳，不能整列移除：項目說明會存成空白、其他格維持原值；要移除請先到下方「分期請款期程」撤銷。`);
       }
-      if (milestoneChanged) target.milestone = textOrNull(edit.milestone);
+      if (milestoneChanged) target.milestone = textOrNull(e.milestone);
+      if (noteChanged) target.note = textOrNull(e.note);
       if (percentage !== undefined) target.percentage = percentage;
       if (amount !== undefined) {
         target.overrideAmount = amount;
@@ -396,16 +449,24 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
         installmentNo,
         kind: row.kind,
         percentage: percentage ?? null,
-        milestone: milestoneChanged ? textOrNull(edit.milestone) : null,
+        milestone: milestoneChanged ? textOrNull(e.milestone) : null,
         plannedOn: null,
         overrideAmount: amount ?? null,
         overrideReason: amount != null ? overrideReason : null,
-        note: null,
+        note: noteChanged ? textOrNull(e.note) : null,
       });
       out.created.push({ key, installmentNo, label });
     }
     if (receivedOn && dateRe.test(receivedOn)) out.receipts.push({ key, label, receivedOn });
     if (invoiceNo) out.invoices.push({ key, label, invoiceNo, invoicedOn: dateRe.test(invoicedOn) ? invoicedOn : "" });
+  }
+  if (scheduleChanged && total !== null && total > 0) {
+    const summary = stageScheduleSummary(rows, draft.stageEdits, stageRowKey, total);
+    if (summary.diff !== null && summary.diff !== 0) {
+      out.warnings.push(
+        `付款階段各期金額合計 ${formatMoney(summary.amountTotal)}（${formatStagePct(summary.pctTotal)}%）與銷售金額（未稅）${formatMoney(total)} 差 ${formatMoney(summary.diff)}：存檔後差額會加到最後一期（系統尾差規則）。`,
+      );
+    }
   }
   if (scheduleChanged) out.installments = payload;
   return out;
@@ -720,7 +781,7 @@ export async function runApplicationSheetSave(
     if (scheduleOk) {
       const next: Record<string, StageEdit> = {};
       for (const [key, edit] of Object.entries(residual.stageEdits)) {
-        const rest = withoutKeys(edit, ["milestone", "percentage", "amount", "overrideReason"]);
+        const rest = withoutKeys(edit, ["milestone", "percentage", "amount", "overrideReason", "note"]);
         if (Object.keys(rest).length === 0) continue;
         next[idOf.get(key) ?? key] = rest;
       }

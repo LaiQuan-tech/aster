@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { formatMoney } from "@/lib/money";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Card, Empty, ErrorText, Segmented, inputCls } from "@/components/admin-ui";
 import { listVendors, type Vendor } from "@/lib/company-api";
@@ -34,7 +35,7 @@ import PayablesView, { type PayableGroupView } from "./_views/PayablesView";
 import RecordsView from "./_views/RecordsView";
 
 function fmtMoney(n: number | null | undefined): string {
-  return n == null ? "—" : n.toLocaleString();
+  return n == null ? "—" : formatMoney(n, { maximumFractionDigits: 3 });
 }
 
 /**

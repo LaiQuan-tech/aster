@@ -122,12 +122,13 @@ export const APPLICATION_SHEET_TOP_ROWS: readonly (readonly SheetCell[])[] = [
 ];
 
 /**
- * 付款階段每一列的跨欄：階段｜%｜金額｜發票號碼｜發票日期｜入帳日期。欄名只在付款階段上方的小表頭印一次，
+ * 付款階段每一列的跨欄：階段｜金額｜%｜發票號碼｜發票日期｜入帳日期｜備註（2026-11-09 業主：金額為主要輸入、
+ * 金額與 % 對調，入帳日期右邊加備註＝期別 note）。欄名只在付款階段上方的小表頭印一次，
  * 各列只放值（不再每列夾「發票號碼:」標籤格——16 欄格線裡單欄太窄，標籤會溢出蓋住金額）。
  * 公會代墊列：說明「審迄還款」吃掉發票號碼＋發票日期兩格。
  */
-export const APPLICATION_STAGE_SPANS = [2, 1, 2, 4, 3, 4] as const;
-export const APPLICATION_STAGE_HEADERS = ["階段", "%", "金額", "發票號碼", "發票日期", "入帳日期"] as const;
+export const APPLICATION_STAGE_SPANS = [2, 2, 1, 3, 3, 2, 3] as const;
+export const APPLICATION_STAGE_HEADERS = ["階段", "金額", "%", "發票號碼", "發票日期", "入帳日期", "備註"] as const;
 
 /**
  * 發包區（2026-11-09 業主改版）：每家發包單位一列、由上到下排；表頭一列「#｜發包單位｜聯絡資料｜項目｜發包金額｜請款依據｜（移除）」，
@@ -257,6 +258,8 @@ export interface StageEdit {
   invoiceNo?: string;
   /** 發票日期（YYYY-MM-DD）；沒填＝登記開票當天（後端預設）。 */
   invoicedOn?: string;
+  /** 備註（期別 note）。 */
+  note?: string;
 }
 
 /** 發包單位一欄可直接改的格子。 */
@@ -319,7 +322,7 @@ export function applicationSheetDraftOf(project: ProjectDetail, disciplines: rea
 /* ============================================================ 驗證 == */
 
 function parseOptionalNumber(value: string): number | null | "invalid" {
-  const trimmed = value.trim();
+  const trimmed = value.trim().replace(/,/g, "");
   if (trimmed === "") return null;
   const n = Number(trimmed);
   return Number.isFinite(n) && n >= 0 ? n : "invalid";
@@ -556,6 +559,8 @@ export interface ApplicationStageRow {
   billed: boolean;
   /** 人工覆寫的理由（改金額時沿用）。 */
   overrideReason: string | null;
+  /** 備註（期別 note；空白列 ""）。 */
+  note: string;
 }
 
 /** 付款階段每一列在草稿 stageEdits 裡的 key：既有期別用 id，空白列用列號（公會代墊固定一列）。 */
@@ -588,6 +593,7 @@ export function applicationStageRows(billings: readonly BillingExt[]): Applicati
       id: b?.id ?? null,
       billed: !!b?.billedOn,
       overrideReason: b?.overrideReason ?? null,
+      note: b?.note ?? "",
     });
   }
   rows.push({
@@ -605,6 +611,7 @@ export function applicationStageRows(billings: readonly BillingExt[]): Applicati
     id: guild?.id ?? null,
     billed: !!guild?.billedOn,
     overrideReason: guild?.overrideReason ?? null,
+    note: guild?.note ?? "",
   });
   return rows;
 }

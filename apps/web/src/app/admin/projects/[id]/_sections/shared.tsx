@@ -3,6 +3,7 @@
  * B0 拆檔時自 page.tsx 原封搬出，內容不變。
  */
 import type { Dispatch, SetStateAction } from "react";
+import { formatMoney } from "@/lib/money";
 import {
   type Subcontract,
   type SubcontractsResponse,
@@ -28,7 +29,7 @@ export const STATUS_ERRORS: Record<string, string> = {
 };
 
 export function fmtMoney(n: number | null | undefined): string {
-  return n == null ? "—" : n.toLocaleString();
+  return n == null ? "—" : formatMoney(n, { maximumFractionDigits: 3 });
 }
 export function todayKey(): string {
   return new Date().toISOString().slice(0, 10);

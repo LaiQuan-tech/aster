@@ -3,6 +3,7 @@
 /** 三節獎金區塊（原 /admin/festival-bonuses 整頁，2026-11-09 併入「費用與給付」；功能不變）。 */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { apiDownload } from "@/lib/api-client";
 import {
@@ -192,12 +193,11 @@ export function FestivalSection({
           </div>
           <div>
             <label className={labelCls}>基準金額（每人）</label>
-            <input
-              type="number"
+            <MoneyInput
               className={inputCls}
               value={baseAmount}
               placeholder="例 10000"
-              onChange={(e) => setBaseAmount(e.target.value)}
+              onValueChange={(v) => setBaseAmount(v)}
             />
           </div>
           <PrimaryButton type="button" onClick={() => void onPrepare()} disabled={busy}>
@@ -349,10 +349,9 @@ function BonusRow({
         {paid ? (
           <span className="font-semibold text-emerald-700">{money(row.final_amount)}</span>
         ) : (
-          <input
-            type="number"
+          <MoneyInput
             value={finalAmount}
-            onChange={(e) => setFinalAmount(e.target.value)}
+            onValueChange={(v) => setFinalAmount(v)}
             onBlur={() => {
               const next = finalAmount === "" ? null : Number(finalAmount);
               if (next !== row.final_amount) void onSave(row, { finalAmount: next });

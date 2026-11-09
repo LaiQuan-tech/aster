@@ -192,7 +192,7 @@ export function parentProjectPatch(
 }
 
 function optionalNumber(value: string): number | null {
-  const normalized = value.trim();
+  const normalized = value.trim().replace(/,/g, "");
   return normalized === "" ? null : Number(normalized);
 }
 
@@ -215,7 +215,7 @@ export function projectApplicationAmounts(
 
 function invalidNonnegative(value: string): boolean {
   if (value.trim() === "") return false;
-  const parsed = Number(value);
+  const parsed = Number(value.trim().replace(/,/g, ""));
   return !Number.isFinite(parsed) || parsed < 0;
 }
 

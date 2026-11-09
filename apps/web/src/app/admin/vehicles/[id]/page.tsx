@@ -5,6 +5,7 @@
  * 該車近期預約與用車紀錄。改成維修中／停用時列出受影響的預約（AffectedBookingsSheet）。
  */
 import { useCallback, useEffect, useState } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
@@ -261,7 +262,7 @@ export default function AdminVehicleDetailPage() {
               <Input id="mt-odo" inputMode="numeric" value={m.odometer} onChange={(e) => setM({ ...m, odometer: e.target.value })} />
             </Field>
             <Field label="費用（元）" htmlFor="mt-cost">
-              <Input id="mt-cost" inputMode="decimal" value={m.cost} onChange={(e) => setM({ ...m, cost: e.target.value })} />
+              <MoneyInput allowDecimal fieldStyle id="mt-cost" value={m.cost} onValueChange={(v) => setM({ ...m, cost: v })} />
             </Field>
           </div>
           <Field label="內容／備註" htmlFor="mt-note">

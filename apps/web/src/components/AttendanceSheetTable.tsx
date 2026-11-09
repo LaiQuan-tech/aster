@@ -1,6 +1,7 @@
 "use client";
 
 import { SHEET_MONEY_STRONG, sheetMoneySections } from "@/lib/attendance-sheet-money";
+import { formatMoney } from "@/lib/money";
 import { hourlyRateText } from "@/lib/fixed-allowances-api";
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ess-ui";
@@ -81,7 +82,7 @@ function longMinutes(minutes: number): string {
 }
 
 function money(value: number): string {
-  return Math.round(value).toLocaleString("zh-TW");
+  return formatMoney(value);
 }
 
 function moneyIfAvailable(value: number | undefined): string {

@@ -6,6 +6,7 @@
  * 只給 HR／平台管理員（員工內頁的 canManage）；API 端守門不變。
  */
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import { BottomSheet, Button, Card, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import {
   getSalaryStructure,
@@ -317,15 +318,15 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
             </div>
             <div>
               <label className={labelCls}>本薪（月）</label>
-              <input type="number" className={inputCls} value={baseSalary} onChange={(e) => setBaseSalary(e.target.value)} />
+              <MoneyInput className={inputCls} value={baseSalary} onValueChange={(v) => setBaseSalary(v)} />
             </div>
             <div>
               <label className={labelCls}>日薪</label>
-              <input type="number" className={inputCls} value={dailyWage} onChange={(event) => setDailyWage(event.target.value)} />
+              <MoneyInput allowDecimal className={inputCls} value={dailyWage} onValueChange={(v) => setDailyWage(v)} />
             </div>
             <div>
               <label className={labelCls}>{method === "hourly" ? "時薪（本俸＋加班費基準）" : "時薪（加班費基準）"}</label>
-              <input type="number" className={inputCls} value={hourlyWage} onChange={(e) => setHourlyWage(e.target.value)} />
+              <MoneyInput allowDecimal className={inputCls} value={hourlyWage} onValueChange={(v) => setHourlyWage(v)} />
             </div>
             {method === "hourly" && (
               <>
@@ -355,11 +356,11 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
             )}
             <div>
               <label className={labelCls}>勞保投保級距（留空＝依級距表自動選）</label>
-              <input type="number" className={inputCls} value={laborGrade} onChange={(e) => setLaborGrade(e.target.value)} />
+              <MoneyInput className={inputCls} value={laborGrade} onValueChange={(v) => setLaborGrade(v)} />
             </div>
             <div>
               <label className={labelCls}>健保投保級距（留空＝依級距表自動選）</label>
-              <input type="number" className={inputCls} value={healthGrade} onChange={(e) => setHealthGrade(e.target.value)} />
+              <MoneyInput className={inputCls} value={healthGrade} onValueChange={(v) => setHealthGrade(v)} />
             </div>
             <div>
               <label className={labelCls}>勞退自提率（%，0–6）</label>
@@ -367,16 +368,12 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
             </div>
             <div>
               <label className={labelCls}>勞退月提繳工資（留空＝依分級表自動算）</label>
-              <input
-                type="number"
-                min={1}
-                max={150000}
-                step={1}
+              <MoneyInput
                 className={inputCls}
                 value={pensionWage}
                 disabled={!pensionNewSystem}
                 placeholder={allowanceSummary?.pension?.autoWage != null ? `自動：${allowanceSummary.pension.autoWage}` : ""}
-                onChange={(e) => setPensionWage(e.target.value)}
+                onValueChange={(v) => setPensionWage(v)}
                 data-testid="pension-wage"
               />
             </div>

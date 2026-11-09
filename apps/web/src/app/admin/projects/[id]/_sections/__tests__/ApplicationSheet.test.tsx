@@ -51,14 +51,14 @@ const subcontracts: Subcontract[] = [{
   amount: 20000, billingBasis: "完工", orderType: null, withholdingRate: 0.1, withholdingThreshold: 20000, note: null,
 }]
 
-function render(opts: { canFinance?: boolean; canEditClients?: boolean; mode?: "edit" | "print"; draft?: Partial<ApplicationSheetDraft> } = {}) {
+function render(opts: { canFinance?: boolean; canEditClients?: boolean; mode?: "edit" | "print"; draft?: Partial<ApplicationSheetDraft>; money?: ProjectMoney } = {}) {
   const draft = { ...applicationSheetDraftOf(project, []), ...opts.draft }
   return renderToStaticMarkup(
     <ApplicationSheet
       project={project}
       canFinance={opts.canFinance ?? true}
       showProfit
-      money={money}
+      money={opts.money ?? money}
       billings={billings}
       subcontracts={subcontracts}
       contracts={contracts}
@@ -135,21 +135,24 @@ describe("申請單表格：可直接編輯", () => {
     expect(html).not.toContain("入賬")
   })
 
-  it("付款階段欄名只在小表頭印一次（階段｜%｜金額｜發票號碼｜發票日期｜入帳日期），各列不再夾標籤格", () => {
+  it("付款階段欄名只在小表頭印一次（階段｜金額｜%｜發票號碼｜發票日期｜入帳日期｜備註），各列不再夾標籤格", () => {
     for (const mode of ["edit", "print"] as const) {
       const html = render({ mode })
-      const heads = ["階段", "%", "金額", "發票號碼", "發票日期", "入帳日期"]
+      const heads = ["階段", "金額", "%", "發票號碼", "發票日期", "入帳日期", "備註"]
       heads.forEach((h, i) => expect(cell(html, `sheet-stage-head-${i}`)).toContain(`>${h}</div>`))
       expect(html).not.toContain("發票號碼:")
       expect(html).not.toContain("發票日期:")
       expect(html).not.toContain("已於")
-      // 表頭在第 11 列（上半部 10 列之後），格線跨欄 2+1+2+4+3+4＝16
-      expect(cell(html, "sheet-stage-head-3")).toContain("--gc:6 / span 4")
-      expect(cell(html, "sheet-stage-head-4")).toContain("--gc:10 / span 3")
-      expect(cell(html, "sheet-stage-head-5")).toContain("--gc:13 / span 4")
+      // 表頭在第 11 列（上半部 10 列之後），格線跨欄 2+2+1+3+3+2+3＝16
+      expect(cell(html, "sheet-stage-head-1")).toContain("--gc:3 / span 2")
+      expect(cell(html, "sheet-stage-head-2")).toContain("--gc:5 / span 1")
+      expect(cell(html, "sheet-stage-head-3")).toContain("--gc:6 / span 3")
+      expect(cell(html, "sheet-stage-head-4")).toContain("--gc:9 / span 3")
+      expect(cell(html, "sheet-stage-head-5")).toContain("--gc:12 / span 2")
+      expect(cell(html, "sheet-stage-head-6")).toContain("--gc:14 / span 3")
       // 公會代墊列：審迄還款說明佔發票號碼＋發票日期兩格，標籤完整
       const guild = cell(html, "sheet-guild-repayment")
-      expect(guild).toContain("--gc:6 / span 7")
+      expect(guild).toContain("--gc:6 / span 6")
       expect(guild).toContain("審迄還款:")
     }
     // 已開票已入帳列唯讀顯示民國日期
@@ -182,8 +185,19 @@ describe("申請單表格：權限與提示", () => {
     expect(html).toContain('aria-label="設計地點"')
   })
 
-  it("付款階段改了金額：出現人工指定理由輸入框，未填前存檔鈕停用並列出原因", () => {
+  it("付款階段金額為主：輸入金額 % 自動算出、不要人工指定理由；備註欄可填", () => {
     const html = render({ draft: { stageEdits: { b1: { amount: "45000" } } } })
+    expect(html).not.toContain('aria-label="付款階段第 1 列人工指定理由"')
+    expect(cell(html, "sheet-stage-1-amount")).toContain('value="45,000"')
+    expect(cell(html, "sheet-stage-1-pct")).toContain('value="45"')
+    expect(html).toContain('aria-label="付款階段第 1 列備註"')
+    const i = (t: string) => html.indexOf(t)
+    expect(i("第 1 列金額")).toBeLessThan(i("第 1 列百分比"))
+    expect(i("第 1 列入帳日期")).toBeLessThan(i("第 1 列備註"))
+  })
+
+  it("沒有合約（只有報價單）時改金額＝人工指定：出現理由輸入框，未填前列出原因", () => {
+    const html = render({ money: { ...money, amountSource: "quotation" }, draft: { stageEdits: { b1: { amount: "45000" } } } })
     expect(html).toContain('aria-label="付款階段第 1 列人工指定理由"')
     expect(html).toContain("付款階段第 1 列改了金額（人工指定），請填理由。")
   })

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import Link from "next/link";
 import { Button, Card, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import { statusLabel } from "@/lib/projects-api";
@@ -250,13 +251,12 @@ export function DuplicateProjectDialog({ open, project, onClose, onDone }: Dupli
           </div>
           <div>
             <label className={labelCls} htmlFor="dup-amount">新合約金額（未稅）*</label>
-            <input
+            <MoneyInput
               id="dup-amount"
               className={inputCls}
-              inputMode="numeric"
               value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              placeholder="例如 2000000"
+              onValueChange={(v) => setAmount(v)}
+              placeholder="例如 2,000,000"
             />
           </div>
           <div className="sm:col-span-2">

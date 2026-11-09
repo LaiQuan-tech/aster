@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Button, ErrorText } from "@/components/admin-ui";
 import { apiErrorMessage } from "@/lib/api-client";
 import {
@@ -178,13 +179,10 @@ export function FixedAllowancesCard({
           </div>
           <div>
             <label className={labelCls}>月金額（元）</label>
-            <input
-              type="number"
-              min={0}
-              step={1}
+            <MoneyInput
               className={inputCls}
               value={form.amount}
-              onChange={(e) => patch({ amount: e.target.value })}
+              onValueChange={(v) => patch({ amount: v })}
             />
           </div>
           <div>

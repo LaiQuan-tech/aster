@@ -9,6 +9,7 @@
  * 純邏輯在 lib/vehicle-view.ts。
  */
 import { useId, useRef, type ChangeEvent } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Button, Input, Pill, Select } from "@/components/ess-ui";
 import { fmtMoney } from "@/lib/ess-format";
 import {
@@ -109,13 +110,12 @@ export function CostRowsEditor({
                 </option>
               ))}
             </Select>
-            <Input
+            <MoneyInput allowDecimal fieldStyle
               aria-label={`第 ${index + 1} 行金額`}
-              inputMode="decimal"
               placeholder="金額（元）"
               value={d.amount}
               disabled={disabled}
-              onChange={(e) => update(d.key, { amount: e.target.value })}
+              onValueChange={(v) => update(d.key, { amount: v })}
             />
             <Select
               aria-label={`第 ${index + 1} 行付款方`}

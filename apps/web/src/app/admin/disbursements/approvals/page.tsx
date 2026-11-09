@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { formatMoney } from "@/lib/money";
 import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton, Segmented } from "@/components/admin-ui";
 import { getMeCached } from "@/lib/ess-state";
@@ -16,7 +17,7 @@ import {
 } from "@/lib/disbursements-api";
 
 function fmtMoney(n: number | null | undefined): string {
-  return n == null ? "—" : n.toLocaleString();
+  return n == null ? "—" : formatMoney(n, { maximumFractionDigits: 3 });
 }
 function fmtWhen(iso: string | null | undefined): string {
   return iso ? iso.slice(0, 16).replace("T", " ") : "—";

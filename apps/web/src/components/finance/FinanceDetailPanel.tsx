@@ -9,6 +9,7 @@
  * 錯誤訊息沿用各原頁的寫法（err.message；期別鎖定走 errorMessageOf）。
  */
 import { useEffect, useState } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Button, Empty, ErrorText, Pill } from "@/components/admin-ui";
 import {
   getExpenseAttachments,
@@ -431,7 +432,7 @@ function OvertimeDetail({
         </div>
         <div>
           <label className={labelCls} htmlFor="ot-amount">金額</label>
-          <input id="ot-amount" type="number" className={fieldCls} value={amount} onChange={(e) => setAmount(e.target.value)} />
+          <MoneyInput id="ot-amount" className={fieldCls} value={amount} onValueChange={(v) => setAmount(v)} />
         </div>
         <div className="sm:col-span-2">
           <label className={labelCls} htmlFor="ot-note">備註</label>
@@ -494,7 +495,7 @@ function FestivalDetail({ item, sources, onDone }: { item: QueueItem; sources: D
       <div className="grid gap-3 sm:grid-cols-2">
         <div>
           <label className={labelCls} htmlFor="fb-final">實發金額（留空＝照建議）</label>
-          <input id="fb-final" type="number" className={fieldCls} value={finalAmount} onChange={(e) => setFinalAmount(e.target.value)} />
+          <MoneyInput id="fb-final" className={fieldCls} value={finalAmount} onValueChange={(v) => setFinalAmount(v)} />
         </div>
         <div>
           <label className={labelCls} htmlFor="fb-note">備註</label>

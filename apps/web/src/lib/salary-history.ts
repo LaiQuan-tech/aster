@@ -5,6 +5,7 @@
  * 後端：apps/api/src/routes/salary-history.ts（列表、補登、軟刪）、routes/salary.ts（存薪資資料時自動寫一筆）。
  */
 import { apiFetch } from "./api-client";
+import { formatMoney } from "@/lib/money";
 
 export interface SalaryAdjustmentView {
   id: string;
@@ -111,7 +112,7 @@ export function salaryFormChanges(loaded: SalaryFormValues, current: SalaryFormV
 
 /** 金額顯示：33000 → 「33,000」；null → emptyLabel。 */
 export function fmtAmount(n: number | null | undefined, emptyLabel = "—"): string {
-  return n === null || n === undefined ? emptyLabel : Math.round(n).toLocaleString("zh-TW");
+  return formatMoney(n, { empty: emptyLabel });
 }
 
 /** 「33,000 → 38,200」；前後相同只顯示一個值；兩者皆空＝「—」。 */

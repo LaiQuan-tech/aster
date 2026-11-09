@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useId, type RefObject } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls, labelCls } from "@/components/admin-ui";
 import {
   uploadProjectDocument,
@@ -482,7 +483,7 @@ export function ContractsCard({
             </div>
             <div>
               <label className={labelCls}>金額</label>
-              <input className={inputCls} type="number" value={cAmount} onChange={(e) => setCAmount(e.target.value)} placeholder="追加減帳可填負數" />
+              <MoneyInput allowNegative className={inputCls} value={cAmount} onValueChange={(v) => setCAmount(v)} placeholder="追加減帳可填負數" />
             </div>
             <div>
               <label className={labelCls}>簽訂日</label>
