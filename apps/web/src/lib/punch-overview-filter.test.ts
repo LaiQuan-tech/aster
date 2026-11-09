@@ -66,6 +66,13 @@ describe("當日總覽統計卡篩選", () => {
     expect(filterEmployeesByDay([x], DAY, "arrived")).toHaveLength(0);
   });
 
+  it("兼職不排班：沒來（工作日 off「未排班」）不算應到；有來照算應到／已到", () => {
+    const pt = { label: "兼職（不排班）", source: "parttime", start: null, end: null, crossesMidnight: false };
+    const idle = emp("pt-idle", { status: "off", statusLabel: "未排班", shift: pt });
+    const came = emp("pt-came", { status: "working", shift: pt }, true);
+    expect(countByFilter([idle, came], DAY)).toMatchObject({ expected: 1, arrived: 1, absent: 0, late: 0 });
+  });
+
   it("parseDayFilter 未知值回全部", () => {
     expect(parseDayFilter("late")).toBe("late");
     expect(parseDayFilter("zzz")).toBe("all");

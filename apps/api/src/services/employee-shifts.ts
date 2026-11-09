@@ -13,6 +13,12 @@ import type { DateKey } from "../lib/tz.js"
  *   3. 以上皆無 → null（呼叫端走公司規則：工作日＝彈性上班 attendance.flex，例假日＝整天不扣午休）。
  * 個人預設班別只套**工作日**（dayType === "workday"；例假 regular_leave、休息日、國定假日都不套）：非工作日沒有「應上班時間」，來加班照沒排班的規則算（整天、不扣午休），
  * 才不會把週末出勤套成平日班別而算出遲到。
+ *
+ * 兼職不排班（2026-11-09 業主：「兼職不是照 10 點開始算」）：`employees.employment_type = 'parttime'` 且當天
+ * 沒有排班、也沒有個人預設班別 → **沒有應上班時間**：不套公司彈性上班（attendance.flex），不判遲到／早退／
+ * 缺卡／曠職、不產生遲到說明、不影響全勤；照實記錄上下班時間與工時（時薪制照實際工時）。
+ * 判斷一律走 `isUnscheduledPartTime`（ResolvedDayShift.unscheduledPartTime），打卡遲到檢查、結算、
+ * 打卡總覽共用；兼職有排班或個人預設班別 → 照該班別判（不受影響）。正職不受影響。
  */
 
 export type DayShiftSource = "schedule" | "default"
@@ -21,6 +27,25 @@ export interface ResolvedDayShift {
   shift: ShiftDef | null
   /** schedule＝排班列；default＝員工個人預設班別；null＝走公司規則。 */
   source: DayShiftSource | null
+  /**
+   * 兼職且當天沒有排班、沒有個人預設班別（isUnscheduledPartTime）→ true：沒有應上班時間，
+   * 呼叫端**不套**公司彈性上班，遲到／早退／缺卡都不判。其餘 false。
+   */
+  unscheduledPartTime: boolean
+}
+
+/** employees.employment_type 的兼職值（員工編輯頁「兼職」）。 */
+export const PART_TIME_EMPLOYMENT_TYPE = "parttime"
+
+/**
+ * 純函式（各判斷點共用）：兼職、且當天沒有排班也沒有個人預設班別 → true。
+ * true 時沒有「應上班時間」：不判遲到／早退／缺卡／曠職、不產生遲到說明、不影響全勤，工時照實記錄。
+ */
+export function isUnscheduledPartTime(input: {
+  employmentType: string | null | undefined
+  source: DayShiftSource | null
+}): boolean {
+  return input.employmentType === PART_TIME_EMPLOYMENT_TYPE && input.source === null
 }
 
 export interface EmploymentWindow {
@@ -45,11 +70,15 @@ export function resolveDayShift(input: {
   dayType: DayType
   date?: DateKey
   employment?: EmploymentWindow | null
+  /** employees.employment_type；省略＝不是兼職。 */
+  employmentType?: string | null
 }): ResolvedDayShift {
-  if (input.scheduledShift) return { shift: input.scheduledShift, source: "schedule" }
+  if (input.scheduledShift) return { shift: input.scheduledShift, source: "schedule", unscheduledPartTime: false }
   const employed = input.date ? withinEmployment(input.date, input.employment) : true
-  if (input.dayType === "workday" && input.defaultShift && employed) return { shift: input.defaultShift, source: "default" }
-  return { shift: null, source: null }
+  if (input.dayType === "workday" && input.defaultShift && employed) {
+    return { shift: input.defaultShift, source: "default", unscheduledPartTime: false }
+  }
+  return { shift: null, source: null, unscheduledPartTime: isUnscheduledPartTime({ employmentType: input.employmentType, source: null }) }
 }
 
 interface ShiftRow {
@@ -91,6 +120,8 @@ export interface ShiftResolver {
   defaultShiftOf(employeeId: string): ShiftDef | null
   /** 有個人預設班別的員工的在職期間（其他員工 → null，不需要）。 */
   employmentOf(employeeId: string): EmploymentWindow | null
+  /** 是不是兼職（employees.employment_type = 'parttime'）。 */
+  isPartTime(employeeId: string): boolean
 }
 
 /**
@@ -148,6 +179,22 @@ export async function loadShiftResolver(opts: {
     }
   }
 
+  // 兼職員工（isUnscheduledPartTime）：employment_type 是 NOT NULL 預設 'regular' 的老欄位；
+  // 萬一舊庫沒有 → 視為沒有兼職（維持原行為）。
+  const partTimeEmpIds = new Set<string>()
+  {
+    let ptQuery = supabaseAdmin
+      .from("employees")
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .eq("employment_type", PART_TIME_EMPLOYMENT_TYPE)
+    if (employeeIds) ptQuery = ptQuery.in("id", employeeIds)
+    const { data: ptData, error: ptErr } = await ptQuery
+    if (ptErr && isMissingColumnError(ptErr)) warnSchemaGapOnce("employees.employment_type", ptErr)
+    else if (ptErr) throw new Error(`loadShiftResolver (employees.employment_type): ${ptErr.message}`)
+    for (const e of (ptData ?? []) as Array<{ id: string }>) partTimeEmpIds.add(e.id)
+  }
+
   const shiftIds = Array.from(
     new Set([
       ...schedules.map((s) => s.shift_id).filter((id): id is string => !!id),
@@ -184,6 +231,9 @@ export async function loadShiftResolver(opts: {
         dayType,
         date,
         employment: employmentByEmp.get(employeeId) ?? null,
+        // 舊排班列 shift_id 空／班別已刪仍算「有排班」→ 不當兼職不排班。
+        employmentType:
+          partTimeEmpIds.has(employeeId) && !scheduledByKey.has(`${employeeId}|${date}`) ? PART_TIME_EMPLOYMENT_TYPE : null,
       })
     },
     scheduleOf: (employeeId, date) => {
@@ -194,5 +244,6 @@ export async function loadShiftResolver(opts: {
     employeesWithDefault: () => Array.from(defaultShiftIdByEmp.keys()).filter((id) => !!defaultOf(id)),
     defaultShiftOf: defaultOf,
     employmentOf: (employeeId) => employmentByEmp.get(employeeId) ?? null,
+    isPartTime: (employeeId) => partTimeEmpIds.has(employeeId),
   }
 }

@@ -14,6 +14,7 @@ describe("resolveDayShift — 四個讀取點共用的優先序", () => {
     expect(resolveDayShift({ scheduledShift: SCHEDULED, defaultShift: PERSONAL, dayType: "workday" })).toEqual({
       shift: SCHEDULED,
       source: "schedule",
+      unscheduledPartTime: false,
     })
   })
 
@@ -25,12 +26,13 @@ describe("resolveDayShift — 四個讀取點共用的優先序", () => {
     expect(resolveDayShift({ scheduledShift: null, defaultShift: PERSONAL, dayType: "workday" })).toEqual({
       shift: PERSONAL,
       source: "default",
+      unscheduledPartTime: false,
     })
   })
 
   it("沒排班的例假日／國定假日 → 不套個人預設班別（走公司規則：整天、不扣午休）", () => {
     for (const dayType of ["rest_day", "fixed_holiday"] as const) {
-      expect(resolveDayShift({ scheduledShift: null, defaultShift: PERSONAL, dayType })).toEqual({ shift: null, source: null })
+      expect(resolveDayShift({ scheduledShift: null, defaultShift: PERSONAL, dayType })).toEqual({ shift: null, source: null, unscheduledPartTime: false })
     }
   })
 
@@ -38,6 +40,7 @@ describe("resolveDayShift — 四個讀取點共用的優先序", () => {
     expect(resolveDayShift({ scheduledShift: undefined, defaultShift: undefined, dayType: "workday" })).toEqual({
       shift: null,
       source: null,
+      unscheduledPartTime: false,
     })
   })
 })

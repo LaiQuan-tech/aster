@@ -288,9 +288,12 @@ export function dayMatchesFilter(d: OverviewDay, key: DayFilterKey): boolean {
   }
 }
 
-/** 應到人數（workday 且非整天不在）。 */
+/**
+ * 應到人數（workday 且非整天不在）。工作日的 off＝兼職不排班又沒打卡（後端 classifyDay 給「未排班」），
+ * 本來就不用來，不算應到（與後端 statsOf 一致）。
+ */
 export function isExpected(d: OverviewDay): boolean {
-  return d.dayType === "workday" && !fullDayAway(d);
+  return d.dayType === "workday" && !fullDayAway(d) && d.status !== "off";
 }
 
 /** 沒有該日資料（未到職）的員工只出現在「全部」。 */

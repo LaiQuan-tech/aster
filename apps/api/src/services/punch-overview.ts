@@ -61,8 +61,11 @@ export interface PunchBrief {
 
 export interface OverviewShift {
   label: string
-  /** schedule＝排班；default＝個人預設班別；flex＝公司彈性上班；company＝公司預設（不限時段）；none＝非工作日。 */
-  source: "schedule" | "default" | "flex" | "company" | "none"
+  /**
+   * schedule＝排班；default＝個人預設班別；flex＝公司彈性上班；company＝公司預設（不限時段）；none＝非工作日；
+   * parttime＝兼職不排班（沒有應上班時間，employee-shifts.ts isUnscheduledPartTime）。
+   */
+  source: "schedule" | "default" | "flex" | "company" | "none" | "parttime"
   start: string | null
   end: string | null
   crossesMidnight: boolean
@@ -182,10 +185,14 @@ export function fmtMinutesShort(minutes: number): string {
   return `${h}h`
 }
 
+/** 兼職不排班的班別欄文字（2026-11-09 業主）。 */
+export const PART_TIME_UNSCHEDULED_LABEL = "兼職（不排班）"
+
 /** 班別顯示與應上下班時刻（UTC 毫秒）。純函式。 */
 export function describeShift(
   date: DateKey,
-  ctx: Pick<AttendanceDayContext, "dayType" | "scheduledShift" | "shiftSource" | "shift">,
+  ctx: Pick<AttendanceDayContext, "dayType" | "scheduledShift" | "shiftSource" | "shift"> &
+    Partial<Pick<AttendanceDayContext, "unscheduledPartTime">>,
   tz: string,
 ): OverviewShift & { startMs: number | null; endMs: number | null } {
   const sched = ctx.scheduledShift
@@ -207,6 +214,9 @@ export function describeShift(
   }
   if (ctx.dayType !== "workday") {
     return { label: DAY_TYPE_LABEL[ctx.dayType], source: "none", start: null, end: null, crossesMidnight: false, startMs: null, endMs: null }
+  }
+  if (ctx.unscheduledPartTime) {
+    return { label: PART_TIME_UNSCHEDULED_LABEL, source: "parttime", start: null, end: null, crossesMidnight: false, startMs: null, endMs: null }
   }
   const flex = ctx.shift.flex
   if (flex) {
@@ -266,6 +276,11 @@ export interface ClassifyInput {
   trip: "business_trip" | "outing" | null
   leaveNames: string[]
   manualPunch: boolean
+  /**
+   * 兼職不排班（employee-shifts.ts isUnscheduledPartTime）：沒有應上班時間 → 不算未打卡／尚未上班
+   * （沒打卡＝休假「未排班」）、不標遲到／早退。沒帶＝false。
+   */
+  unscheduledPartTime?: boolean
 }
 
 export interface ClassifyResult {
@@ -297,14 +312,16 @@ export function classifyDay(input: ClassifyInput): ClassifyResult {
   const worked = row?.worked_minutes ?? 0
   const overtime = row?.overtime_minutes ?? 0
   const leave = row?.leave_minutes ?? 0
-  const early = row?.early_leave_minutes ?? 0
+  const early = input.unscheduledPartTime === true ? 0 : (row?.early_leave_minutes ?? 0)
   const punched = !!input.firstIn || !!input.lastOut
   const flags = dayFlagsOf(row?.anomaly)
   const wfh = input.wfhApproved || input.wfhPunch || flags.wfh === true
   const tags: OverviewTag[] = []
 
   let status: OverviewStatus
-  let late = row?.late_minutes ?? 0
+  // 兼職不排班沒有應上班時間：遲到／早退一律不標（舊結算列殘留的分鐘數也不顯示）。
+  const noExpected = input.unscheduledPartTime === true
+  let late = noExpected ? 0 : (row?.late_minutes ?? 0)
   let provisional = false
 
   // 整天請假＝請假分鐘蓋滿當天應上班分鐘；部分請假又沒打卡 → 照常判斷未打卡／尚未上班（標籤另標請假）。
@@ -318,6 +335,7 @@ export function classifyDay(input: ClassifyInput): ClassifyResult {
     else if (fullDayLeave) status = "leave"
     else if (wfh) status = "wfh"
     else if (input.dayType !== "workday") status = "off"
+    else if (input.unscheduledPartTime) status = "off"
     else if (input.date > input.today) status = "not_yet"
     else if (input.date === input.today && input.expectedStartMs != null && input.nowMs < input.expectedStartMs) status = "not_yet"
     else status = "absent"
@@ -326,7 +344,7 @@ export function classifyDay(input: ClassifyInput): ClassifyResult {
     const openUntil = input.expectedEndMs != null ? input.expectedEndMs + OPEN_GRACE_AFTER_SHIFT_MS : inMs + OPEN_WITHOUT_SHIFT_MS
     if (input.nowMs <= openUntil) {
       status = "working"
-      if (late === 0 && input.provisionalLateMinutes > 0) {
+      if (late === 0 && !noExpected && input.provisionalLateMinutes > 0) {
         late = input.provisionalLateMinutes
         provisional = true
       }
@@ -358,7 +376,12 @@ export function classifyDay(input: ClassifyInput): ClassifyResult {
   if (punched && input.dayType !== "workday") tags.push({ code: "holiday_work", label: `${DAY_TYPE_LABEL[input.dayType]}出勤`, tone: "warn" })
   if (input.manualPunch) tags.push({ code: "manual", label: "補登", tone: "muted" })
 
-  const statusLabel = status === "off" ? DAY_TYPE_LABEL[input.dayType] : STATUS_LABEL[status]
+  const statusLabel =
+    status === "off"
+      ? input.dayType === "workday" && input.unscheduledPartTime
+        ? "未排班"
+        : DAY_TYPE_LABEL[input.dayType]
+      : STATUS_LABEL[status]
   return {
     status,
     statusLabel,
@@ -380,7 +403,8 @@ export function statsOf(days: OverviewDay[]): OverviewStats {
     // 整天不在（classifyDay 只在請假分鐘蓋滿應上班分鐘時才給 leave；部分請假沒打卡＝未打卡／尚未上班，照算應到）。
     const fullDayAway = d.status === "leave" || d.status === "business_trip" || d.status === "outing"
     if (fullDayAway) s.onLeave += 1
-    const expected = d.dayType === "workday" && !fullDayAway
+    // 工作日的 off 只會是兼職不排班又沒打卡（classifyDay）：本來就不用來，不算應到。
+    const expected = d.dayType === "workday" && !fullDayAway && d.status !== "off"
     if (expected) s.expected += 1
     // 已到只算「應到」範圍內的人（已到 ≤ 應到）；假日出勤另計。
     if (expected && (d.in || d.status === "wfh")) s.arrived += 1
@@ -658,6 +682,7 @@ export async function buildPunchOverview(input: BuildOverviewInput): Promise<Pun
         trip: tripByKey.get(key) ?? null,
         leaveNames,
         manualPunch: f?.manualPunch ?? false,
+        unscheduledPartTime: ctx.unscheduledPartTime,
       })
       const { startMs: _s, endMs: _e, ...shiftOut } = shift
       days.push({

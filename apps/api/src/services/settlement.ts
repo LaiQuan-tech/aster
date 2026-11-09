@@ -422,7 +422,7 @@ export interface ArrivalLateness {
   lateMinutes: number
   /** 應上班的時間 'HH:MM'：彈性＝startUntil（10:00）、有排班／個人預設班別＝班別上班時間；不適用 → null。 */
   threshold: string | null
-  /** shift＝有排班或個人預設班別（employee-shifts.ts）；flex＝沒班別的工作日（彈性上班）；none＝沒有應上班時間（例假日、彈性關閉）。 */
+  /** shift＝有排班或個人預設班別（employee-shifts.ts）；flex＝沒班別的工作日（彈性上班）；none＝沒有應上班時間（例假日、彈性關閉、兼職不排班）。 */
   mode: "shift" | "flex" | "none"
 }
 
@@ -450,9 +450,16 @@ export async function lateMinutesForArrival(input: {
   // 當天班別（services/employee-shifts.ts，與結算／月表／缺卡掃描同一支）：排班（歷史資料）→ 個人預設班別
   // （只限工作日）→ 沒有＝工作日走彈性上班。
   const resolver = await loadShiftResolver({ tenantId, from: workDate, to: workDate, employeeIds: [employeeId] })
-  const scheduledShift = resolver.forDay(employeeId, workDate, dayType).shift
+  const resolvedShift = resolver.forDay(employeeId, workDate, dayType)
+  const scheduledShift = resolvedShift.shift
 
-  const shift = pickDayShift(scheduledShift, dayType, flexShiftDef(rules, workDate), unscheduledShiftDef(rules, dayType))
+  // 兼職不排班（employee-shifts.ts isUnscheduledPartTime）：不套彈性上班 → mode 'none'、不判遲到、不要求遲到說明。
+  const shift = pickDayShift(
+    scheduledShift,
+    dayType,
+    resolvedShift.unscheduledPartTime ? null : flexShiftDef(rules, workDate),
+    unscheduledShiftDef(rules, dayType),
+  )
   const mode: ArrivalLateness["mode"] = scheduledShift ? "shift" : shift.flex ? "flex" : "none"
   if (mode === "none") return { workDate, lateMinutes: 0, threshold: null, mode }
 
@@ -534,8 +541,14 @@ export async function dinnerPromptForOpenShift(input: {
   const dayTypes = await loadDayTypeResolver({ tenantId, from: workDate, to: workDate, employeeIds: [employeeId] })
   const dayType: DayType = dayTypes.forDay(employeeId, workDate)
   const resolver = await loadShiftResolver({ tenantId, from: workDate, to: workDate, employeeIds: [employeeId] })
-  const scheduledShift = resolver.forDay(employeeId, workDate, dayType).shift
-  const shift = pickDayShift(scheduledShift, dayType, flexShiftDef(rules, workDate), unscheduledShiftDef(rules, dayType))
+  const resolvedShift = resolver.forDay(employeeId, workDate, dayType)
+  const scheduledShift = resolvedShift.shift
+  const shift = pickDayShift(
+    scheduledShift,
+    dayType,
+    resolvedShift.unscheduledPartTime ? null : flexShiftDef(rules, workDate),
+    unscheduledShiftDef(rules, dayType),
+  )
   const regular = regularMinutesForDay(
     resolveOvertimeBasis(rules),
     scheduledShift,
@@ -655,6 +668,8 @@ export interface AttendanceDayContext {
   scheduledShift: ShiftDef | null
   /** schedule＝排班列；default＝個人預設班別；null＝公司規則。 */
   shiftSource: "schedule" | "default" | null
+  /** 兼職且當天沒有排班／個人預設班別（employee-shifts.ts isUnscheduledPartTime）：沒有應上班時間。 */
+  unscheduledPartTime: boolean
   /** 實際結算用的班別（pickDayShift）。 */
   shift: ShiftDef
   /** 有應上下班時間（排班或彈性）＝遲到／早退有意義。 */
@@ -729,6 +744,10 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
   // 都沒有＝「沒排班」：工作日＝彈性上班、例假日＝整天不扣午休。
   const resolver = await loadShiftResolver({ tenantId, from, to, employeeIds: employeeId ? [employeeId] : undefined })
   const shiftFor = (empId: string, date: DateKey): ShiftDef | null => resolver.forDay(empId, date, dayTypeFor(empId, date)).shift
+  // 兼職不排班（employee-shifts.ts isUnscheduledPartTime）→ 不套彈性上班：工作日改用「整天＋預設午休」，
+  // 沒有應上下班時間 → 遲到／早退歸零、工時照實。其餘員工照公司彈性上班。
+  const flexFor = (empId: string, date: DateKey): ShiftDef | null =>
+    resolver.forDay(empId, date, dayTypeFor(empId, date)).unscheduledPartTime ? null : flexShiftDef(rules, date)
   // 沒排班的日子：工作日＝整天＋租戶預設午休（彈性上班生效後改彈性）；例假日／國定假日＝整天、不扣午休。
   const unscheduledWorkday = unscheduledShiftDef(rules, "workday")
   const unscheduledRestDay = unscheduledShiftDef(rules, "rest_day")
@@ -899,7 +918,7 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
     const shift: ShiftDef = pickDayShift(
       scheduledShift,
       dayType,
-      flexShiftDef(rules, workDate),
+      flexFor(empId, workDate),
       dayType === "workday" ? unscheduledWorkday : unscheduledRestDay,
     )
     // 遲到／早退有意義＝有排班，或用彈性上班（有應上下班時間）；其餘歸零。
@@ -990,13 +1009,14 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
     const shift: ShiftDef = pickDayShift(
       scheduledShift,
       dayType,
-      flexShiftDef(rules, workDate),
+      resolved.unscheduledPartTime ? null : flexShiftDef(rules, workDate),
       dayType === "workday" ? unscheduledWorkday : unscheduledRestDay,
     )
     return {
       dayType,
       scheduledShift,
       shiftSource: resolved.source,
+      unscheduledPartTime: resolved.unscheduledPartTime,
       shift,
       hasExpectedTimes: !!scheduledShift || !!shift.flex,
       regularMinutes: regularMinutesForDay(basis, scheduledShift, workDate, tz, regularMinutes),
