@@ -117,3 +117,13 @@ describe("renderPayslipText / payslipMailSubject", () => {
     expect(payslipMailSubject("2026-08")).toBe("2026-08 薪資單")
   })
 })
+
+describe("薪資條信附「線上查看」連結（2026-11-09）", () => {
+  it("有 onlineUrl → HTML 與純文字都附「線上查看：WEB_URL/ess/payslips」；沒有 → 不加", () => {
+    const withUrl = { ...input, onlineUrl: "https://hr.example.test/ess/payslips" }
+    expect(renderPayslipText(withUrl)).toContain("線上查看：https://hr.example.test/ess/payslips")
+    expect(renderPayslipHtml(withUrl)).toContain('線上查看：<a href="https://hr.example.test/ess/payslips">')
+    expect(renderPayslipText(input)).not.toContain("線上查看")
+    expect(renderPayslipHtml(input)).not.toContain("線上查看")
+  })
+})

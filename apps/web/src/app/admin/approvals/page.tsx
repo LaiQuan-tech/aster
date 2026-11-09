@@ -21,6 +21,13 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  APPROVAL_HIGHLIGHT_MISSING,
+  highlightDomId,
+  highlightState,
+  isHighlighted,
+  parseHighlightId,
+} from "@/lib/approval-highlight";
+import {
   BottomSheet,
   Button,
   Card,
@@ -91,6 +98,7 @@ import {
 } from "@/lib/approval-view";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { LeaveBalanceSummaryText } from "@/components/LeaveBalanceSummary";
 type RequestAttachment = { id: string; fileName: string; sizeBytes: number; contentType: string; url: string };
 
 const BUCKET_TONE: Record<ApprovalBucket, PillTone> = {
@@ -130,6 +138,8 @@ function ApprovalsView() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const view: ApprovalView = parseApprovalView(searchParams.get("status"));
+  const highlightId = parseHighlightId(searchParams.get("id"));
+  const scrolledHighlightRef = useRef<string | null>(null);
   const statusParam = statusParamFor(view);
   const batchRow = hasBatchRow(view);
   const toast = useToast();
@@ -471,6 +481,14 @@ function ApprovalsView() {
   /* ------------------------------------------------------------ render --- */
 
   const showSkeleton = loading || !refsLoaded;
+  // 通知信連結 ?status=pending&id=<requestId>：載入後捲到並醒目該列；不在本頁清單 → 提示（lib/approval-highlight.ts）。
+  const highlight = highlightState(highlightId, showSkeleton, visible.map((row) => row.id));
+  useEffect(() => {
+    if (highlight !== "found" || !highlightId || scrolledHighlightRef.current === highlightId) return;
+    scrolledHighlightRef.current = highlightId;
+    const target = visible.find((row) => isHighlighted(highlightId, row.id));
+    if (target) document.getElementById(highlightDomId(target.id))?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+  }, [highlight, highlightId, visible]);
 
   return (
     <>
@@ -591,6 +609,11 @@ function ApprovalsView() {
       </Card>
 
       <Card>
+        {highlight === "missing" && (
+          <p role="status" className="mb-4 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            {APPROVAL_HIGHLIGHT_MISSING}
+          </p>
+        )}
         {batchRow && (
           <div className="mb-4 grid grid-cols-1 gap-3 lg:grid-cols-[1fr_auto_auto]">
             <div>
@@ -666,7 +689,11 @@ function ApprovalsView() {
                   const busy = busyId === row.id || busyId === "batch";
                   const canSelect = batchRow && row.status === "pending";
                   return (
-                    <tr key={row.id} className="border-b border-gray-50 align-top">
+                    <tr
+                      key={row.id}
+                      id={highlightDomId(row.id)}
+                      className={`scroll-mt-20 border-b border-gray-50 align-top${isHighlighted(highlightId, row.id) ? " bg-amber-50 outline outline-2 outline-[var(--brand)]" : ""}`}
+                    >
                       {batchRow && (
                         <td className="py-3 pr-4">
                           <input
@@ -698,6 +725,9 @@ function ApprovalsView() {
                             {line}
                           </p>
                         ))}
+                        {row.kind === "leave" && row.leaveBalance && (
+                          <LeaveBalanceSummaryText balance={row.leaveBalance} hours={row.hours} className="mt-1 block text-xs" />
+                        )}
                       </td>
                       <td className="py-3 pr-4 text-gray-600">{lookup.approverLabel(row)}</td>
                       <td className="py-3 pr-4">

@@ -596,6 +596,8 @@ export function cancelRequest(id: string) {
  * 假別／附件數／關卡進度（非 HR 拿不到 GET /employees，名稱只能由這裡來）。
  */
 export interface PendingApproval extends LeaveRequest {
+  /** 簽核中的請假列：剩餘假摘要（API 批次附加；簽核人／HR 才有）。 */
+  leaveBalance?: import("./leave-balance-summary").LeaveBalanceSummary | null;
   /** 第一位候選（相容欄位）；`current_candidate_emp_ids`／`current_approver_names`／`current_step_kind` 自 LeaveRequest 繼承。 */
   current_approver_emp_id: string | null;
   employee_name: string | null;

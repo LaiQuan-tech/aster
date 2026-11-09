@@ -1,5 +1,7 @@
 import { supabaseAdmin } from "../lib/supabase.js"
 import { sendMail } from "../lib/resend.js"
+import { webUrl } from "./auth-invite.js"
+import { absoluteAppUrl, notificationLinkOrFallback, notificationNeedsAction } from "@hr/rules"
 
 type DeliveryChannel = "email" | "line"
 
@@ -118,8 +120,42 @@ export function allowedChannels(
   return channels.filter((channel) => prefs[channel] !== false)
 }
 
-function messageText(row: NotificationRow): string {
-  return row.body ? `${row.title}\n\n${row.body}` : row.title
+type MessageRow = Pick<NotificationRow, "type" | "title" | "body" | "payload">
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+}
+
+/**
+ * Email／LINE 的內容（2026-11-09）：標題＋內文＋「前往處理：<完整網址>」（非待辦類用「查看：」）。
+ * 連結由 @hr/rules notificationLink 決定（與 web 通知列表同一份），沒有對應頁時退回 /ess/notifications；
+ * 網址根用 WEB_URL（auth-invite.webUrl，與帳號邀請信同源）。未登入點開會先到登入頁，登入後回到這一頁。
+ */
+export function composeNotificationMessage(row: MessageRow, baseUrl: string = webUrl()) {
+  const url = absoluteAppUrl(baseUrl, notificationLinkOrFallback(row))
+  const action = notificationNeedsAction(row)
+  const linkLabel = action ? "前往處理" : "查看"
+  const head = row.body ? `${row.title}\n\n${row.body}` : row.title
+  const text = `${head}\n\n${linkLabel}：${url}`
+  const bodyHtml = row.body
+    ? row.body
+        .split("\n")
+        .map((line) => escapeHtml(line))
+        .join("<br>")
+    : ""
+  const html = [
+    `<div style="font-family:-apple-system,'Noto Sans TC',sans-serif;font-size:15px;line-height:1.7;color:#1f2937">`,
+    `<p style="font-size:17px;font-weight:600">${escapeHtml(row.title)}</p>`,
+    bodyHtml ? `<p>${bodyHtml}</p>` : "",
+    `<p><a href="${escapeHtml(url)}" style="display:inline-block;padding:10px 18px;background:#1F4E79;color:#fff;border-radius:6px;text-decoration:none">${linkLabel}</a></p>`,
+    `<p style="font-size:13px;color:#6b7280">按鈕無法點擊時，請複製下列網址到瀏覽器開啟：<br><a href="${escapeHtml(url)}">${escapeHtml(url)}</a></p>`,
+    `<p style="font-size:12px;color:#9ca3af">此信由系統自動寄出，請勿直接回覆。</p>`,
+    `</div>`,
+  ].join("")
+  // LINE 單則上限 5000 字：截內文，網址一定保留在最後。
+  const tail = `\n\n${linkLabel}：${url}`
+  const lineText = head.length + tail.length > 5000 ? `${head.slice(0, 5000 - tail.length - 1)}…${tail}` : `${head}${tail}`
+  return { url, text, html, lineText }
 }
 
 async function authEmail(userId: string | null): Promise<string | null> {
@@ -129,12 +165,13 @@ async function authEmail(userId: string | null): Promise<string | null> {
   return data.user?.email ?? null
 }
 
-async function sendEmail(to: string, row: NotificationRow): Promise<void> {
-  // 走 lib/resend.ts 的唯一 Resend 呼叫點（帳號邀請信也用同一個）。
-  await sendMail({ to, subject: row.title, text: messageText(row) })
+export async function sendNotificationEmail(to: string, row: MessageRow): Promise<void> {
+  // 走 lib/resend.ts 的唯一 Resend 呼叫點（帳號邀請信也用同一個）；純文字＋HTML 兩版都送。
+  const { text, html } = composeNotificationMessage(row)
+  await sendMail({ to, subject: row.title, text, html })
 }
 
-async function sendLine(to: string, row: NotificationRow): Promise<void> {
+export async function sendNotificationLine(to: string, row: MessageRow): Promise<void> {
   const token = process.env.LINE_CHANNEL_ACCESS_TOKEN
   if (!token) throw new Error("LINE_CHANNEL_ACCESS_TOKEN missing")
 
@@ -146,7 +183,7 @@ async function sendLine(to: string, row: NotificationRow): Promise<void> {
     },
     body: JSON.stringify({
       to,
-      messages: [{ type: "text", text: messageText(row).slice(0, 5000) }],
+      messages: [{ type: "text", text: composeNotificationMessage(row).lineText }],
     }),
   })
   if (!response.ok) {
@@ -299,11 +336,11 @@ export async function deliverPendingNotifications(
             profile?.personal_email ??
             (await authEmail(employee?.user_id ?? null))
           if (!to) throw new Error("recipient email missing")
-          await sendEmail(to, row)
+          await sendNotificationEmail(to, row)
         } else {
           const to = lineUserId(row, profile)
           if (!to) throw new Error("LINE user id missing in notification payload")
-          await sendLine(to, row)
+          await sendNotificationLine(to, row)
         }
         result.sent.push(channel)
       } catch (err) {

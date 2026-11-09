@@ -675,3 +675,30 @@ describe("額度不足但退回 pending 失敗", () => {
     expect(res.body.message).toContain("退回待簽核失敗")
   })
 })
+
+describe("簽核清單附剩餘假摘要 leaveBalance（2026-11-09）", () => {
+  const get = (path: string, token: string) => request(server).get(path).set("Authorization", `Bearer ${token}`)
+
+  it("GET /requests/pending-approvals（主管）與 GET /requests?status=pending（HR）：請假列帶 leaveBalance，排除本單", async () => {
+    fake.db.leave_balances = [bucket({ entitled: 24, used: 8 })]
+    const a = await file(leaveOn("2027-06-03", 4))
+    await file(leaveOn("2027-06-04", 4))
+    const res = await get("/requests/pending-approvals", MGR_TOKEN)
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    const row = (res.body.requests as Row[]).find((r) => r.id === a) as Row
+    expect(row.leaveBalance).toEqual({ capped: true, source: "balance", remainingHours: 16, pendingHours: 4, usedHours: 8, hoursPerDay: 8 })
+
+    const hr = await get("/requests?status=pending", HR_TOKEN)
+    expect(hr.status).toBe(200)
+    expect(((hr.body.requests as Row[]).find((r) => r.id === a) as Row).leaveBalance?.remainingHours).toBe(16)
+  })
+
+  it("申請人自己的 ?scope=mine 與非簽核人的自己單不附（不繞過餘額分頁守門）", async () => {
+    fake.db.leave_balances = [bucket({ entitled: 24, used: 0 })]
+    await file(leaveOn("2027-06-03", 4))
+    const mine = await get("/requests?scope=mine", STAFF_TOKEN)
+    expect((mine.body.requests as Row[])[0].leaveBalance).toBeUndefined()
+    const own = await get("/requests", STAFF_TOKEN)
+    expect((own.body.requests as Row[])[0].leaveBalance).toBeUndefined()
+  })
+})

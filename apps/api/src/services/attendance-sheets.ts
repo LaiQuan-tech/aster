@@ -2476,6 +2476,16 @@ async function hrAdminIds(tenantId: string): Promise<string[]> {
   return (data ?? []).map((r) => r.id as string)
 }
 
+/**
+ * 收件角色（寄信連結用，@hr/rules notificationLink）：送審給主管 → ESS 月表頁；主管審完／另行給付提醒給 HR → 後台月表；
+ * 其餘（核准、退回、重新開放、鎖定）給本人 → ESS 月表頁。
+ */
+export function sheetRecipientRole(action: string): "manager" | "hr" | "employee" {
+  if (action === "submitted") return "manager"
+  if (action === "manager_reviewed" || action === "beyond_cap_settlement") return "hr"
+  return "employee"
+}
+
 /** Enqueue an in-app 'attendance_sheet' notification per recipient; never fails the transition. */
 async function notify(
   tenantId: string,
@@ -2495,7 +2505,7 @@ async function notify(
     body,
     channel: "inapp",
     status: "pending",
-    payload: { sheetId: sheet.id, period: sheet.period, employeeId: sheet.employee_id, status: sheet.status, action },
+    payload: { sheetId: sheet.id, period: sheet.period, employeeId: sheet.employee_id, status: sheet.status, action, recipientRole: sheetRecipientRole(action) },
   }))
   const { error } = await supabaseAdmin.from("notifications").insert(rows)
   if (error) logger.warn({ err: error.message, sheetId: sheet.id, action }, "attendance-sheets: notification not queued")

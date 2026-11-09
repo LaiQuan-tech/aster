@@ -150,3 +150,12 @@ export {
   NHI_MAX_DEPENDENTS,
   PENSION_VOLUNTARY_RATE_MAX,
 } from "./tw-tax.js";
+// 2026-11-09 通知 → 站內頁面路徑（API 寄信與 web 通知列表共用）
+export {
+  notificationLink,
+  notificationLinkOrFallback,
+  notificationNeedsAction,
+  absoluteAppUrl,
+  NOTIFICATIONS_FALLBACK_PATH,
+  type NotificationLinkInput,
+} from "./notification-link.js";
