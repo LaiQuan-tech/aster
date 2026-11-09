@@ -838,6 +838,45 @@ describe("付款階段金額為主：存後金額＝畫面金額", () => {
     expect(plan.stages.installments?.[0]).toMatchObject({ id: "a", percentage: 25 })
   })
 
+  it("期程原本超額配置（人工指定 70 萬＋兩期各 50%，末期 -20 萬）：改一期後仍超額 → 擋存並指出超額原因，不指向沒碰的列", () => {
+    const rows = [mk("a", 1, 50, 500000), mk("b", 2, 0, 700000, { percentage: null, overrideAmount: 700000, overrideReason: "談定" }), mk("c", 3, 50, -200000, { residueApplied: -700000 })]
+    const ctx = ctxOf({ billings: rows, money: fakeMoney({ amountUntaxed: 1000000, amountSource: "contract" }) })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { a: { amount: "400000" } } }))
+    expect(plan.errors).toHaveLength(1)
+    expect(plan.errors[0].field).toBe("stage:a:amount")
+    expect(plan.errors[0].message).toMatch(/超額配置 100,000 元.*人工指定金額：第 2 列/)
+  })
+
+  it("超額配置的負數列沒動、其他期調整後不再超額：負數列不重送，後端吸收成 0 以上（存後＝畫面＋尾差）", async () => {
+    const rows = [mk("a", 1, 50, 500000), mk("b", 2, 0, 700000, { percentage: null, overrideAmount: 700000, overrideReason: "談定" }), mk("c", 3, 50, -200000, { residueApplied: -700000 })]
+    const ctx = ctxOf({ billings: rows, money: fakeMoney({ amountUntaxed: 1000000, amountSource: "contract" }) })
+    const draft = draftOf(ctx, { stageEdits: { a: { amount: "200000" } } })
+    const plan = applicationSheetPlan(ctx, draft)
+    expect(plan.errors).toEqual([])
+    const sent = plan.stages.installments ?? []
+    expect(sent.every((i) => (i.percentage ?? 0) >= 0)).toBe(true)
+    expect(sent.find((i) => i.id === "c")).toMatchObject({ percentage: 50 })
+    expect(amountsAfterSave(sent, 1000000)).toEqual([200000, 700000, 100000])
+    const api = fakeApi({ fetchBillings: vi.fn(async () => rows) })
+    await runApplicationSheetSave(plan, draft, api, ctx)
+    expect(amountsAfterSave(vi.mocked(api.saveBillingSchedule).mock.calls[0][0], 1000000)).toEqual([200000, 700000, 100000])
+  })
+
+  it("負數列後面新增一期（負數列不再是最後吸收尾差者）→ 擋存並指出該列", () => {
+    const rows = [mk("a", 1, 50, 500000), mk("b", 2, 0, 700000, { percentage: null, overrideAmount: 700000, overrideReason: "談定" }), mk("c", 3, 50, -200000)]
+    const ctx = ctxOf({ billings: rows, money: fakeMoney({ amountUntaxed: 1000000, amountSource: "contract" }) })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { a: { amount: "100000" }, "new-installment-4": { milestone: "保留款", amount: "0" } } }))
+    expect(plan.errors.map((e) => e.field)).toEqual(["stage:c:amount"])
+    expect(plan.errors[0].message).toMatch(/第 3 列目前是負數/)
+  })
+
+  it("未稅變動且有已入帳未請款的期別：提示其金額會依新未稅重算", () => {
+    const rows = [mk("a", 1, 30, 300000, { receivedOn: "2026-10-25" }), mk("b", 2, 70, 700000)]
+    const ctx = ctxOf({ billings: rows, money: fakeMoney({ amountUntaxed: 1000000, amountSource: "contract" }) })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { amountUntaxed: "1500000" }))
+    expect(plan.warnings.join()).toMatch(/第 1 列已入帳但未請款.*30%.*重算/)
+  })
+
   it("合約金額存失敗：付款階段不送、標示跳過", async () => {
     const old = [mk("a", 1, 40, 400000), mk("b", 2, 60, 600000)]
     const ctx = ctxOf({ billings: old, contracts: [contract], money: fakeMoney({ amountUntaxed: 1000000, amountSource: "contract" }) })
