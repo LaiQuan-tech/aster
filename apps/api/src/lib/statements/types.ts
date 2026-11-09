@@ -77,6 +77,8 @@ export interface StatementExpense {
 export interface StatementSalaryInfo {
   laborInsuredSalary: number | null
   nhiDependents: number | null
+  /** 投保薪資（勞保）調整歷程：生效日 ≤ 該月底的最近 3 筆、舊→新（2026-11-10；舊資料／表未套用＝空或沒有）。 */
+  insuredAdjustments?: Array<{ effectiveOn: string; laborInsuredSalary: number }>
 }
 
 /** 行事曆當日（tenant_calendar_days）：假日名稱（雙十節、颱風假…）與日別。 */

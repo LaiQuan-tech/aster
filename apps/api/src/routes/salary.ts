@@ -16,6 +16,9 @@ import { loadRuleConfigFor, SALARY_PENSION_COLS } from "../services/payroll-inpu
 import { columnsExist } from "../lib/schema-compat.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { todayKey } from "../lib/tz.js"
+import { getRequestContext } from "../lib/request-context.js"
+import { resolveSelf } from "../middleware/scope.js"
+import { recordSalarySaveHistory, type SaveHistoryResult } from "../services/salary-history.js"
 
 export const salaryRouter = Router()
 
@@ -108,8 +111,17 @@ const upsertSchema = z
     // 上限 150,000＝勞退月提繳分級表最高級（114／115 年版皆同）；引擎另依該月分級表最高級再夾一次。
     pensionWage: z.number().int().positive().max(PENSION_WAGE_MANUAL_MAX).nullable().optional(),
     pensionNewSystem: z.boolean().optional(),
+    // 2026-11-10 調薪／投保調整歷程：本薪或勞健保投保薪資／勞退月提繳工資有變時寫一筆紀錄的生效日與原因。
+    // 只影響紀錄，不影響存進 salary_structures 的值。沒帶生效日＝租戶今天。
+    change: z
+      .object({
+        effectiveDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        reason: z.string().trim().max(500).nullable().optional(),
+        note: z.string().trim().max(500).nullable().optional(),
+      })
+      .optional(),
   })
-  .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
+  .refine((b) => Object.keys(b).some((k) => k !== "change"), { message: "no fields to update" })
   // C5：時薪制的本俸基準就是 hourlyWage，引擎對 hourlyWage<=0 直接丟錯（不猜）。
   // 在 API 層就擋：改成 hourly 的那次 PUT 必須同時帶 >0 的時薪，否則存進去的是
   // 一個結算時必炸的設定。錯誤碼由 handler 轉成 400 hourly_wage_required。
@@ -239,6 +251,21 @@ salaryRouter.put(
       }
     }
 
+    // 2026-11-10 歷程：存檔前的本薪／投保三項（存檔後比對，有變才寫紀錄）。讀不到不擋存檔。
+    const pensionCols = await columnsExist("salary_structures", SALARY_PENSION_COLS)
+    let before: Record<string, unknown> | null = null
+    try {
+      const { data: prevRow } = await supabaseAdmin
+        .from("salary_structures")
+        .select(`base_salary, labor_insured_salary, health_insured_salary${pensionCols ? ", pension_wage" : ""}`)
+        .eq("tenant_id", tenantId)
+        .eq("employee_id", employeeId)
+        .maybeSingle()
+      before = (prevRow as Record<string, unknown> | null) ?? null
+    } catch {
+      before = null
+    }
+
     try {
       const { data, error } = await supabaseAdmin
         .from("salary_structures")
@@ -260,7 +287,37 @@ salaryRouter.put(
         newRow: changed,
         context: "PUT /salary/:employeeId — 儲存薪資結構",
       })
-      res.status(200).json({ id: data.id, ...(insuredSuggested ? { insuredSuggested } : {}) })
+      // 歷程（只是紀錄）：upsert 只改有帶的欄位，沒帶的沿用存檔前的值。
+      let history: SaveHistoryResult | null = null
+      try {
+        const pick = (col: string) => (col in row ? numOrNull(row[col]) : numOrNull(before?.[col]))
+        const change = parsed.data.change
+        history = await recordSalarySaveHistory({
+          tenantId,
+          employeeId: String(employeeId),
+          effectiveDate: change?.effectiveDate ?? todayKey(await getTenantTimezone(tenantId)),
+          reason: change?.reason?.trim() || null,
+          note: change?.note?.trim() || null,
+          actorEmpId:
+            getRequestContext()?.actorEmpId ??
+            (req.auth?.userId ? ((await resolveSelf(tenantId, req.auth.userId))?.id ?? null) : null),
+          prevBase: numOrNull(before?.base_salary),
+          nextBase: pick("base_salary"),
+          prevInsured: {
+            labor: numOrNull(before?.labor_insured_salary),
+            health: numOrNull(before?.health_insured_salary),
+            pension: pensionCols ? numOrNull(before?.pension_wage) : null,
+          },
+          nextInsured: {
+            labor: pick("labor_insured_salary"),
+            health: pick("health_insured_salary"),
+            pension: pensionCols ? pick("pension_wage") : null,
+          },
+        })
+      } catch (err) {
+        logger.warn({ err, tenantId, employeeId }, "salary: 歷程紀錄失敗（薪資資料已存）")
+      }
+      res.status(200).json({ id: data.id, ...(insuredSuggested ? { insuredSuggested } : {}), ...(history ? { history } : {}) })
     } catch (err) {
       next(err)
     }

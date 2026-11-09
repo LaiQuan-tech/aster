@@ -25,6 +25,7 @@ import { findSheet, generateSheets, sheetViewFromRow } from "./attendance-sheets
 import { PeriodClosedError, isPeriodClosed } from "./period-lock.js"
 import { buildPayrollInputs, loadRuleConfigFor } from "./payroll-inputs.js"
 import { paysViaMonthlyPayroll } from "./payroll-claims.js"
+import { loadInsuredAdjustmentsForStatement } from "./salary-history.js"
 
 /**
  * 員工內頁「出勤統計表／薪資明細表」（2026-10-27 業主：格式要跟公司現行 Excel 一模一樣）的資料彙總。
@@ -285,6 +286,8 @@ async function loadSalaryInfo(tenantId: string, employeeId: string, period: stri
   return {
     laborInsuredSalary: insured != null && Number(insured) > 0 ? Number(insured) : null,
     nhiDependents: inputs.salary?.nhiDependents ?? null,
+    // 2026-11-10 表尾「投保薪資調整」：生效日在該月底以前的最近 3 筆（表未套用＝空）。
+    insuredAdjustments: await loadInsuredAdjustmentsForStatement(tenantId, employeeId, monthRangeKeys(period).to),
   }
 }
 

@@ -6,7 +6,7 @@
  * 只給 HR／平台管理員（員工內頁的 canManage）；API 端守門不變。
  */
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
-import { Button, Card, ErrorText, PrimaryButton } from "@/components/admin-ui";
+import { BottomSheet, Button, Card, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import {
   getSalaryStructure,
   putSalaryStructure,
@@ -22,6 +22,8 @@ import {
 import { buildNhiDependentBody, buildTaxDependentBody, dependentErrorMessage } from "@/lib/payroll-dependents";
 import { pensionWageHintText, pensionWageInputCheck, type FixedAllowanceSummary } from "@/lib/fixed-allowances-api";
 import { FixedAllowancesCard } from "../../payroll/_components/FixedAllowancesCard";
+import { salaryFormChanges, todayDateKey, type SalaryFormValues } from "@/lib/salary-history";
+import { SalaryHistorySection } from "./SalaryHistorySection";
 
 const inputCls =
   "w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
@@ -50,6 +52,15 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
   const [allowanceSummary, setAllowanceSummary] = useState<FixedAllowanceSummary | null>(null);
   const [allowanceReloadKey, setAllowanceReloadKey] = useState(0);
   const [salaryMsg, setSalaryMsg] = useState<string | null>(null);
+  // 2026-11-10 調薪／投保調整歷程：讀進來的本薪與投保三項（存檔前比對，有變就先問生效日與原因）。
+  const [loadedValues, setLoadedValues] = useState<SalaryFormValues>({ baseSalary: "", laborGrade: "", healthGrade: "", pensionWage: "" });
+  const [changePrompt, setChangePrompt] = useState<{ base: boolean; insured: boolean } | null>(null);
+  const [changeDate, setChangeDate] = useState("");
+  const [changeReason, setChangeReason] = useState("");
+  const [changeNote, setChangeNote] = useState("");
+  const [changeError, setChangeError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [historyReloadKey, setHistoryReloadKey] = useState(0);
   // M12：API 依投保級距表自動選出來的級距（留空投保薪資時才會回）。
   const [insuredHint, setInsuredHint] = useState<string | null>(null);
   const [nhiDeps, setNhiDeps] = useState<NhiDependent[]>([]);
@@ -102,6 +113,12 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
       setPensionWage(wage);
       setPensionNewSystem(newSystem);
       setLoadedPension({ wage, newSystem });
+      setLoadedValues({
+        baseSalary: salary.base_salary ?? "",
+        laborGrade: salary.labor_insured_salary ?? "",
+        healthGrade: salary.health_insured_salary ?? "",
+        pensionWage: wage,
+      });
     } catch {
       setMethod("monthly");
       setBaseSalary("");
@@ -115,6 +132,7 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
       setPensionWage("");
       setPensionNewSystem(true);
       setLoadedPension({ wage: "", newSystem: true });
+      setLoadedValues({ baseSalary: "", laborGrade: "", healthGrade: "", pensionWage: "" });
     }
     try {
       const [nhi, tax] = await Promise.all([getNhiDependents(id), getTaxDependents(id)]);
@@ -127,7 +145,7 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
 
   async function onSaveSalary(e: FormEvent) {
     e.preventDefault();
-    if (!empId) return;
+    if (!empId || saving) return;
     setSalaryMsg(null);
     setInsuredHint(null);
     const wageCheck = pensionWageInputCheck(pensionWage, allowanceSummary?.pension?.levels);
@@ -135,6 +153,31 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
       setSalaryMsg(wageCheck.error);
       return;
     }
+    // 本薪或投保三項有變 → 先問生效日（預設今天）與原因，確認後才存（存檔時 API 寫一筆調薪／投保調整紀錄）。
+    const changes = salaryFormChanges(loadedValues, { baseSalary, laborGrade, healthGrade, pensionWage: pensionWage.trim() });
+    if (changes.base || changes.insured) {
+      setChangeDate(todayDateKey());
+      setChangeReason("");
+      setChangeNote("");
+      setChangeError(null);
+      setChangePrompt(changes);
+      return;
+    }
+    await saveSalary();
+  }
+
+  async function onConfirmChange() {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(changeDate)) {
+      setChangeError("請填生效日");
+      return;
+    }
+    const ok = await saveSalary({ effectiveDate: changeDate, reason: changeReason.trim() || null, note: changeNote.trim() || null });
+    if (ok) setChangePrompt(null);
+  }
+
+  async function saveSalary(change?: { effectiveDate: string; reason: string | null; note: string | null }): Promise<boolean> {
+    if (!empId) return false;
+    setSaving(true);
     try {
       // M12：投保級距留空＝不帶欄位，API 會依「投保級距表」以投保基數自動選一級
       //（月薪制基數＝本薪；時薪制＝時薪 × 每週約定時數 × 52 ÷ 12），並把選到的值回來。
@@ -151,11 +194,17 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
         pensionVoluntaryRate: pensionPct ? Number(pensionPct) / 100 : null,
         ...(pensionWage.trim() !== loadedPension.wage ? { pensionWage: pensionWage.trim() ? Math.round(Number(pensionWage)) : null } : {}),
         ...(pensionNewSystem !== loadedPension.newSystem ? { pensionNewSystem } : {}),
+        ...(change ? { change } : {}),
       });
       setLoadedPension({ wage: pensionWage.trim(), newSystem: pensionNewSystem });
       setAllowanceReloadKey((n) => n + 1);
-      setSalaryMsg("已儲存");
+      setHistoryReloadKey((n) => n + 1);
+      const warn = res.history?.warnings?.length ? `（${res.history.warnings.join(" ")}）` : "";
+      setSalaryMsg(`已儲存${warn}`);
       const s = res.insuredSuggested;
+      const savedLabor = !laborGrade && s?.labor != null ? String(s.labor) : laborGrade;
+      const savedHealth = !healthGrade && s?.health != null ? String(s.health) : healthGrade;
+      setLoadedValues({ baseSalary, laborGrade: savedLabor, healthGrade: savedHealth, pensionWage: pensionWage.trim() });
       if (s) {
         if (!laborGrade && s.labor !== null) setLaborGrade(String(s.labor));
         if (!healthGrade && s.health !== null) setHealthGrade(String(s.health));
@@ -165,8 +214,14 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
             `　健保 ${s.health === null ? "—" : s.health.toLocaleString("zh-TW")}。要改就直接覆寫欄位再存一次。`,
         );
       }
+      return true;
     } catch (err) {
-      setSalaryMsg(err instanceof Error ? err.message : "儲存失敗");
+      const msg = err instanceof Error ? err.message : "儲存失敗";
+      setSalaryMsg(msg);
+      if (change) setChangeError(msg);
+      return false;
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -352,13 +407,53 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
             </p>
           )}
           <div className="flex flex-wrap items-center gap-3">
-            <PrimaryButton type="submit">儲存薪資資料</PrimaryButton>
+            <PrimaryButton type="submit" disabled={saving}>{saving ? "儲存中…" : "儲存薪資資料"}</PrimaryButton>
             {salaryMsg && <span className="text-sm text-green-600">{salaryMsg}</span>}
           </div>
           {insuredHint && (
             <p className="rounded-md bg-sky-50 px-3 py-2 text-xs text-sky-800">{insuredHint}</p>
           )}
         </form>
+
+        <BottomSheet
+          open={changePrompt !== null}
+          onClose={() => (saving ? undefined : setChangePrompt(null))}
+          title={changePrompt?.base && changePrompt?.insured ? "本薪與投保薪資有變動" : changePrompt?.base ? "本薪有變動" : "投保薪資有變動"}
+        >
+          <div className="space-y-3" data-testid="salary-change-dialog">
+            <p className="text-sm text-gray-600">
+              存檔後會寫一筆{changePrompt?.base ? "「調薪紀錄」" : ""}
+              {changePrompt?.base && changePrompt?.insured ? "與" : ""}
+              {changePrompt?.insured ? "「勞健保調整紀錄」" : ""}
+              ，請填生效日。只是紀錄，不影響薪資計算。
+            </p>
+            <div>
+              <label className={labelCls}>生效日</label>
+              <input type="date" className={inputCls} value={changeDate} onChange={(e) => { setChangeDate(e.target.value); setChangeError(null); }} data-testid="salary-change-date" />
+            </div>
+            {changePrompt?.base && (
+              <div>
+                <label className={labelCls}>調薪原因（選填）</label>
+                <input className={inputCls} maxLength={500} value={changeReason} onChange={(e) => setChangeReason(e.target.value)} placeholder="例：年度調薪、職務調整" />
+              </div>
+            )}
+            {changePrompt?.insured && (
+              <div>
+                <label className={labelCls}>投保調整原因／備註（選填）</label>
+                <input className={inputCls} maxLength={500} value={changeNote} onChange={(e) => setChangeNote(e.target.value)} placeholder="例：投保薪資調整" />
+              </div>
+            )}
+            {changeError && <ErrorText>{changeError}</ErrorText>}
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <Button variant="secondary" type="button" onClick={() => setChangePrompt(null)} disabled={saving}>
+                取消
+              </Button>
+              <Button type="button" onClick={() => void onConfirmChange()} loading={saving}>
+                儲存
+              </Button>
+            </div>
+          </div>
+        </BottomSheet>
 
         {/* 2026-11-08 員工固定津貼：每月執行薪資時自動帶入；合計提示用上方表單目前的本薪與勞保級距。 */}
         <FixedAllowancesCard
@@ -368,6 +463,9 @@ export function EmployeePayrollPanel({ employeeId }: { employeeId: string }) {
           onSummary={setAllowanceSummary}
           reloadKey={allowanceReloadKey}
         />
+
+        {/* 2026-11-10 調薪歷程＋勞健保調整歷程 */}
+        <SalaryHistorySection employeeId={empId} reloadKey={historyReloadKey} />
 
         <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2">
           <div>

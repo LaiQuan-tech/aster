@@ -154,6 +154,9 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   // 2026-11-08 員工固定津貼（每月自動帶入薪資單）：新增／修改中風險，刪除照 HIGH_RISK_DELETE_PREFIXES 最高風險。
   { method: "POST", path: "/salary/:employeeId/fixed-allowances", label: "新增員工固定津貼" },
   { method: "PATCH", path: "/fixed-allowances/:id", label: "修改員工固定津貼" },
+  // 2026-11-10 調薪／投保調整歷程補登（只寫紀錄，不改目前本薪／級距）：中風險；軟刪照 HIGH_RISK_DELETE_PREFIXES（/salary）最高風險。
+  { method: "POST", path: "/salary/:employeeId/salary-adjustments", label: "補登調薪紀錄" },
+  { method: "POST", path: "/salary/:employeeId/insured-changes", label: "補登投保調整紀錄" },
   { method: "PATCH", path: "/festival-bonuses/:id", label: "修改三節獎金" },
   { method: "POST", path: "/bonus-runs", label: "建立獎金批次" },
   { method: "PATCH", path: "/bonus-runs/:id", label: "修改獎金批次" },

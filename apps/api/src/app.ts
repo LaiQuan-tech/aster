@@ -19,6 +19,7 @@ import { meRouter } from "./routes/me.js"
 import { ruleConfigRouter } from "./routes/rule-config.js"
 import { salaryRouter } from "./routes/salary.js"
 import { fixedAllowancesRouter } from "./routes/fixed-allowances.js"
+import { salaryHistoryRouter } from "./routes/salary-history.js"
 import { attendanceRouter } from "./routes/attendance.js"
 import { attendanceSheetsRouter } from "./routes/attendance-sheets.js"
 import { exportsRouter } from "./routes/exports.js"
@@ -169,6 +170,7 @@ app.use(meRouter)
 app.use(ruleConfigRouter)
 app.use(salaryRouter)
 app.use(fixedAllowancesRouter) // /salary/:employeeId/fixed-allowances、/fixed-allowances/:id（員工固定津貼；2026-11-08）
+app.use(salaryHistoryRouter) // /salary/:employeeId/history、salary-adjustments、insured-changes（調薪／投保調整歷程；2026-11-10）
 app.use(attendanceRouter)
 app.use(attendanceSheetsRouter)
 app.use(exportsRouter)

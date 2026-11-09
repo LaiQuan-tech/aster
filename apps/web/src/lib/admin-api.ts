@@ -1311,10 +1311,14 @@ export function putSalaryStructure(
     agreedDaysPerWeek?: number | null;
     pensionWage?: number | null;
     pensionNewSystem?: boolean;
+    /** 2026-11-10 調薪／投保調整歷程：本薪或投保三項有變時那筆紀錄的生效日（預設今天）、調薪原因、投保備註。 */
+    change?: { effectiveDate?: string; reason?: string | null; note?: string | null };
   },
 ) {
   return apiFetch<{
     id: string;
+    /** 這次存檔寫了哪些歷程紀錄（沒變＝沒有這個欄位）；warnings＝紀錄寫入失敗或資料表未套用。 */
+    history?: { salaryAdjustmentId: string | null; insuredChangeId: string | null; warnings: string[] };
     /**
      * 勞健保級距自動選的結果（API routes/salary.ts 的 InsuredSuggestion）；只有這次 PUT
      * 真的自動選了才回，沒有級距表時 labor／health 會是 null。

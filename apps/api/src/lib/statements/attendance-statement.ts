@@ -342,7 +342,12 @@ export function buildAttendanceStatementGrid(data: StatementData): StatementGrid
   // 凍結月份用到目前行事曆的假日名稱 → 加註（列 46，原檔加給歷程那列，系統不產生加給歷程）。
   if (data.attendance?.frozen && infos.some((i) => i?.label))
     g.set(S + 2, 0, { value: "註：已核准凍結版本；假日名稱為目前行事曆資料", colSpan: LAST + 1, align: "left", size: 10 })
-  if (data.salary?.laborInsuredSalary)
+  // 2026-11-10：有投保薪資調整歷程 → 列 47 改寫成客戶紙本的寫法「投保薪資調整：114.3.26 33000、115.4.21 38200」
+  //（民國年、依生效日舊→新、最多最近 3 筆）；沒有歷程照舊顯示目前投保薪資。
+  const insuredLine = insuredAdjustmentLine(data.salary?.insuredAdjustments)
+  if (insuredLine)
+    g.set(S + 3, 0, { value: insuredLine, colSpan: LAST + 1, align: "left", money: true })
+  else if (data.salary?.laborInsuredSalary)
     g.set(S + 3, 0, {
       value: `投保薪資 ${data.salary.laborInsuredSalary.toLocaleString("en-US")}`,
       colSpan: LAST + 1,
@@ -370,6 +375,15 @@ export function buildAttendanceStatementGrid(data: StatementData): StatementGrid
       printArea: "A1:N47",
     },
   }
+}
+
+/** 「投保薪資調整：114.3.26 33000、115.4.21 38200」；沒有紀錄回 null。最多取最後 3 筆（呼叫端已排序舊→新）。 */
+export function insuredAdjustmentLine(
+  items: Array<{ effectiveOn: string; laborInsuredSalary: number }> | null | undefined,
+): string | null {
+  if (!items || items.length === 0) return null
+  const sorted = [...items].sort((a, b) => a.effectiveOn.localeCompare(b.effectiveOn)).slice(-3)
+  return `投保薪資調整：${sorted.map((i) => `${rocDate(i.effectiveOn)} ${Math.round(i.laborInsuredSalary)}`).join("、")}`
 }
 
 function round1(n: number): number {
