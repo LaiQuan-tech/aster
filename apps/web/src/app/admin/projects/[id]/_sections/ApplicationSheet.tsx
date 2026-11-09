@@ -73,10 +73,12 @@ import {
   resolveSheetClient,
   runApplicationSheetSave,
   stageBaseValues,
+  stageContractTotal,
   stageLocks,
   type SheetSaveApi,
   type SheetSaveStep,
 } from "@/lib/project-application-sheet-save";
+import { applyStagePercentageEdit, releaseAutoEqualAmounts, savedOverrideOf, stageAmountView, stageAutoAmounts } from "@/lib/project-application-stage-amounts";
 
 import { sheet } from "@/lib/sheet-styles";
 import { selectedCompanyId } from "../../_components/project-application-form";
@@ -287,6 +289,8 @@ export function ApplicationSheet({
   const [saving, setSaving] = useState(false);
   /** 正在輸入的發包金額格（slot key）：聚焦時顯示純數字方便改，離開後顯示千分位。 */
   const [editingSubAmount, setEditingSubAmount] = useState<string | null>(null);
+  /** 付款階段：改 % 時把原本人工指定的金額重算覆蓋的列（key），金額格下方提示一次。 */
+  const [stageRecalced, setStageRecalced] = useState<Record<string, boolean>>({});
   const [localReport, setLocalReport] = useState<ApplicationSheetSaveReport | null>(null);
   const report = controlledReport !== undefined ? controlledReport : localReport;
   const setReport = onSaveReport ?? setLocalReport;
@@ -392,6 +396,8 @@ export function ApplicationSheet({
   const clientChoices = project.client && !clients.some((c) => c.id === project.client?.id) ? [project.client, ...clients] : clients;
   const orderDoc = latestDocument !== undefined ? latestDocument : latestOrderDocument(contracts);
   const stageRows = applicationStageRows(billings);
+  // 付款階段金額依 % 預填（未稅 × %，尾差由最後一期吸收；同後端 computeInstallments）。
+  const stageAutos = stageAutoAmounts(stageRows, billings, editable ? draft.stageEdits : {}, editable ? stageContractTotal(money, contracts, draft) : null);
   const subRows = applicationSubcontractRows(subcontracts, editable ? draft.subExtraRows : 0, editable ? draft.subEdits : {});
   const subRemoved = new Set(editable ? draft.subRemovedIds : []);
   const companyChoices = companyOptions(companies, draft.companyId, { markDefault: true });
@@ -639,7 +645,7 @@ export function ApplicationSheet({
             title={money?.amountSource === "quotation" ? "目前取自最新報價單" : undefined}
             className={`${cellInput} text-right`}
             value={draft.amountUntaxed ?? (money?.amountUntaxed != null ? String(money.amountUntaxed) : "")}
-            onValueChange={(v) => set("amountUntaxed", v)}
+            onValueChange={(v) => setDraft((d) => ({ ...d, amountUntaxed: v, stageEdits: releaseAutoEqualAmounts(d.stageEdits, stageAutos) }))}
           />
         );
       case "taxAmount":
@@ -729,6 +735,9 @@ export function ApplicationSheet({
     const edit: StageEdit = editable ? (draft.stageEdits[key] ?? {}) : {};
     const locks = stageLocks(s);
     const val = (f: Exclude<keyof StageEdit, "overrideReason">) => edit[f] ?? base[f];
+    const savedOverride = savedOverrideOf(s, billings);
+    const autoAmount = stageAutos.get(key) ?? null;
+    const amountView = stageAmountView(s, editable ? draft.stageEdits[key] : undefined, savedOverride, autoAmount);
     const rowLabel = guild ? "技師公會代墊" : `付款階段第 ${s.no} 列`;
     cells.push(
       <Cell key={`stage-${s.no}-0`} col={stageCols[0]} span={S[0]} row={r} kind="label" shade testId={`sheet-stage-${s.no}`}>
@@ -745,7 +754,21 @@ export function ApplicationSheet({
         {mLabel("百分比")}
         {editable && !locks.percentage ? (
           <span className="flex w-full min-w-0 items-center gap-0.5">
-            <input aria-label={`${rowLabel}百分比`} className={`${cellInput} text-right`} type="number" min="0" max="100" inputMode="decimal" value={val("percentage")} onChange={(e) => setStage(key, "percentage", e.target.value)} />
+            <input
+              aria-label={`${rowLabel}百分比`}
+              className={`${cellInput} text-right`}
+              type="number"
+              min="0"
+              max="100"
+              inputMode="decimal"
+              value={val("percentage")}
+              onChange={(e) => {
+                const pct = e.target.value;
+                const { stageEdits, recalculated } = applyStagePercentageEdit(draft.stageEdits, s, pct, savedOverride, autoAmount);
+                setDraft((d) => ({ ...d, stageEdits: { ...d.stageEdits, [key]: stageEdits[key] } }));
+                if (recalculated) setStageRecalced((m) => ({ ...m, [key]: true }));
+              }}
+            />
             <span className="shrink-0">%</span>
           </span>
         ) : s.percentage != null ? `${s.percentage}%` : ""}
@@ -753,7 +776,32 @@ export function ApplicationSheet({
       <Cell className={blankCls("payment")} key={`stage-${s.no}-2`} col={stageCols[2]} span={S[2]} row={r} kind="value" align="right" testId={`sheet-stage-${s.no}-amount`} editable={editable && !locks.amount} {...errAttr(`stage:${key}:amount`, `stage:${key}:overrideReason`)}>
         {mLabel("金額")}
         {editable && !locks.amount ? (
-          <MoneyInput aria-label={`${rowLabel}金額`} title="填了就是人工指定金額；清空＝依百分比試算" className={`${cellInput} text-right tabular-nums`} value={val("amount")} onValueChange={(v) => setStage(key, "amount", v)} />
+          <span className="flex w-full min-w-0 flex-col items-stretch">
+            <MoneyInput
+              aria-label={`${rowLabel}金額`}
+              title={
+                amountView.manual
+                  ? `人工指定金額${amountView.auto !== null ? `；依 % 應為 ${fmtMoney(amountView.auto)}` : ""}（清空＝依 % 試算）`
+                  : "依 % 自動試算，可直接改（改了＝人工指定，要填理由）"
+              }
+              data-manual={amountView.manual ? "true" : undefined}
+              className={`${cellInput} text-right tabular-nums ${amountView.manual ? "text-amber-800" : ""}`}
+              value={amountView.display}
+              onValueChange={(v) => {
+                setStage(key, "amount", v);
+                if (stageRecalced[key]) setStageRecalced(({ [key]: _drop, ...rest }) => rest);
+              }}
+            />
+            {amountView.manual && amountView.auto !== null ? (
+              <span className="text-right text-[11px] leading-tight text-amber-700 print:hidden" data-testid={`sheet-stage-${s.no}-expected`}>
+                依 % 應為 {fmtMoney(amountView.auto)}
+              </span>
+            ) : stageRecalced[key] ? (
+              <span className="text-right text-[11px] leading-tight text-emerald-700 print:hidden" data-testid={`sheet-stage-${s.no}-recalced`}>
+                金額已依 % 重新計算
+              </span>
+            ) : null}
+          </span>
         ) : (
           <span className="tabular-nums" title={editable && locks.amount ? "已請款／已入帳，金額凍結" : undefined}>{s.amount != null ? fmtMoney(s.amount) : ""}</span>
         )}
@@ -1040,7 +1088,10 @@ export function ApplicationSheet({
             <p className="text-amber-900">付款階段改了金額＝人工指定金額，請說明理由（例如議價、業主要求）：</p>
             {plan.stages.needsReason.map((r) => (
               <label key={r.key} className="flex items-center gap-2">
-                <span className="shrink-0 text-amber-900">{r.label}</span>
+                <span className="shrink-0 text-amber-900">
+                  {r.label}
+                  {r.expected !== null && <span className="ml-1 text-xs text-amber-700">（依 % 應為 {fmtMoney(r.expected)}）</span>}
+                </span>
                 <input
                   aria-label={`付款階段${r.label}人工指定理由`}
                   data-err-field={`stage:${r.key}:overrideReason`}

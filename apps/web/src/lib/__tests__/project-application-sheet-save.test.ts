@@ -318,7 +318,7 @@ describe("付款階段", () => {
     const noReason = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { amount: "41000" } } }))
     expect(noReason.errors.map((e) => e.message)).toContain("付款階段第 1 列改了金額（人工指定），請填理由。")
     expect(noReason.errors[0].field).toBe("stage:b1:overrideReason")
-    expect(noReason.stages.needsReason).toEqual([{ key: "b1", label: "第 1 列" }])
+    expect(noReason.stages.needsReason).toEqual([{ key: "b1", label: "第 1 列", expected: null }])
     const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { milestone: " 訂金 ", percentage: "40", amount: "41000", overrideReason: " 業主議價 " } } }))
     expect(plan.errors).toEqual([])
     expect(plan.dirtyCount).toBe(3)

@@ -20,6 +20,8 @@
  * ⚠️ vitest 沒設 `@/` 別名：只能用相對路徑。
  */
 import { isOurContract, type Contract } from "./projects-api";
+import { formatMoney } from "./money";
+import { savedOverrideOf, stageAutoAmounts } from "./project-application-stage-amounts";
 import type {
   BillingExt,
   Client,
@@ -189,6 +191,21 @@ export function contractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft
 
 /* ======================================================== 付款階段 == */
 
+/**
+ * 付款階段試算用的合約總額：後端只在「有合約（或這次勾了合約書）」時依 % 試算（billing-store contractTotal）；
+ * 只有報價單＝null（不預填，避免存檔後金額變空白）。未稅格有輸入就用草稿值。
+ */
+export function stageContractTotal(
+  money: ProjectMoney | null,
+  contracts: readonly Contract[],
+  draft: Pick<ApplicationSheetDraft, "amountUntaxed" | "orderDocType">,
+): number | null {
+  const pendingContract = draft.orderDocType === "contract" && latestOrderDocument(contracts)?.docType !== "contract";
+  if (money?.amountSource !== "contract" && !pendingContract) return null;
+  const parsed = draft.amountUntaxed === null ? (money?.amountUntaxed ?? null) : parseNumber(draft.amountUntaxed, { min: 0 });
+  return parsed === "invalid" ? null : parsed;
+}
+
 interface StageBase {
   milestone: string;
   percentage: string;
@@ -236,8 +253,8 @@ export interface StagePlan {
   removed: Array<{ key: string; label: string }>;
   invoices: Array<{ key: string; label: string; invoiceNo: string; invoicedOn: string }>;
   receipts: Array<{ key: string; label: string; receivedOn: string }>;
-  /** 改了金額、要使用者填人工指定理由的列（沒有既有理由可沿用）。 */
-  needsReason: Array<{ key: string; label: string }>;
+  /** 改了金額、要使用者填人工指定理由的列（沒有既有理由可沿用）；expected＝依 % 應為多少（無法試算＝null）。 */
+  needsReason: Array<{ key: string; label: string; expected: number | null }>;
   changes: number;
   errors: SheetError[];
   /** 草稿裡對不到任何列的修改（那一列已被別處新增／移除）：不送出，提醒使用者。 */
@@ -288,6 +305,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     overrideReason: b.overrideReason,
     note: b.note,
   }));
+  const autos = stageAutoAmounts(rows, ctx.billings, draft.stageEdits, stageContractTotal(ctx.money, ctx.contracts, draft));
   let nextNo = ctx.billings.reduce((m, b) => Math.max(m, b.installmentNo), 0) + 1;
   let scheduleChanged = false;
   const rowKeys = new Set(rows.map(stageRowKey));
@@ -328,8 +346,12 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     let amount: number | null | undefined;
     if (edit.amount !== undefined && !locks.amount) {
       const a = parseNumber(edit.amount, { min: 0 });
+      const savedOverride = savedOverrideOf(row, ctx.billings);
+      const auto = autos.get(key) ?? null;
       if (a === "invalid") out.errors.push({ field: `stage:${key}:amount`, message: `付款階段${label}的金額必須是 0 以上的數字。` });
-      else if (a !== row.amount) amount = a;
+      // 清空或等於依 % 試算的值＝跟著 % 走：取消既有人工指定（沒有就不算變更）。
+      else if (a === null || (auto !== null && a === auto)) amount = savedOverride !== null ? null : undefined;
+      else if (a !== savedOverride) amount = a;
     }
     const receivedOn = !locks.receivedOn && edit.receivedOn !== undefined ? trimmed(edit.receivedOn) : "";
     const invoiceNo = !locks.invoiceNo && edit.invoiceNo !== undefined ? trimmed(edit.invoiceNo) : "";
@@ -346,8 +368,10 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     if (amount != null) {
       overrideReason = trimmed(edit.overrideReason) || row.overrideReason || "";
       if (!overrideReason) {
-        out.needsReason.push({ key, label });
-        out.errors.push({ field: `stage:${key}:overrideReason`, message: `付款階段${label}改了金額（人工指定），請填理由。` });
+        const expected = autos.get(key) ?? null;
+        out.needsReason.push({ key, label, expected });
+        const hint = expected !== null ? `，依 % 應為 ${formatMoney(expected)}` : "";
+        out.errors.push({ field: `stage:${key}:overrideReason`, message: `付款階段${label}改了金額（人工指定${hint}），請填理由。` });
       }
     }
 

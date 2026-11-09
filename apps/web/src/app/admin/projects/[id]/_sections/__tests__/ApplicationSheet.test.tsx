@@ -185,7 +185,7 @@ describe("申請單表格：權限與提示", () => {
   it("付款階段改了金額：出現人工指定理由輸入框，未填前存檔鈕停用並列出原因", () => {
     const html = render({ draft: { stageEdits: { b1: { amount: "45000" } } } })
     expect(html).toContain('aria-label="付款階段第 1 列人工指定理由"')
-    expect(html).toContain("付款階段第 1 列改了金額（人工指定），請填理由。")
+    expect(html).toMatch(/付款階段第 1 列改了金額（人工指定，依 % 應為 [\d,]+），請填理由。/)
   })
 
   it("表格包在 fieldset 裡（存檔中整張鎖住）", () => {
