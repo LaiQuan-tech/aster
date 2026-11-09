@@ -74,6 +74,8 @@ describe("改金額／改 %／改未稅", () => {
     expect(e).toEqual({ percentage: "12.5", amount: "178571" });
     expect(stagePctDisplay(r1, e, 1428571)).toBe("12.5");
     expect(applyStagePctEdit(r1, undefined, "", 100000)).toEqual({ percentage: "", amount: "" });
+    // 只有報價單（沒有合約總額）：填 % 不連帶寫金額，不會變成人工指定。
+    expect(applyStagePctEdit(r1, undefined, "40", null)).toEqual({ percentage: "40" });
   });
 
   it("改未稅重算 %：金額不動", () => {
@@ -140,6 +142,12 @@ describe("存檔計畫：金額為主不要理由", () => {
   it("金額大於未稅擋存", () => {
     const plan = applicationSheetPlan(ctxOf(twoStages), draftOf({ b1: { amount: "100001" } }));
     expect(plan.errors[0]).toMatchObject({ field: "stage:b1:amount" });
+  });
+
+  it("只有報價單：只填 % 照送 %、不要理由", () => {
+    const plan = applicationSheetPlan(ctxOf(twoStages, { ...money, amountSource: "quotation" }), draftOf({ b1: { percentage: "40" } }));
+    expect(plan.errors).toEqual([]);
+    expect(plan.stages.installments?.[0]).toMatchObject({ percentage: 40, overrideAmount: null });
   });
 
   it("沒有合約（只有報價單）：改金額仍是人工指定、要理由", () => {

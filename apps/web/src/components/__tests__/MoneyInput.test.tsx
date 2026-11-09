@@ -63,7 +63,16 @@ describe("sanitizeMoneyInput（打字／貼上）", () => {
 
   it("預設不收負號與小數點", () => {
     expect(sanitizeMoneyInput("-500")).toBe("500");
-    expect(sanitizeMoneyInput("12.5")).toBe("125");
+    expect(sanitizeMoneyInput("12.5")).toBe("12");
+  });
+
+  it("不收小數：小數點後捨去，不放大", () => {
+    expect(sanitizeMoneyInput("12,000.00")).toBe("12000");
+    expect(sanitizeMoneyInput("1234.56")).toBe("1234");
+    expect(sanitizeMoneyInput(".5")).toBe("");
+    // 舊資料小數字串：未聚焦顯示不放大
+    expect(moneyInputDisplay("1234.5", false)).toBe("1,234.5");
+    expect(moneyInputDisplay(1500.75, false)).toBe("1,500.75");
   });
 
   it("allowNegative／allowDecimal", () => {

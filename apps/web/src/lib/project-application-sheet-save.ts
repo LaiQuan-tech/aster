@@ -291,6 +291,37 @@ function stageEditFills(edit: StageEdit | undefined): boolean {
   return (["milestone", "percentage", "amount", "receivedOn", "invoiceNo", "invoicedOn", "note"] as const).some((f) => trimmed(edit[f]) !== "");
 }
 
+/** 金額為主模式：有合約總額，且未稅變了或任一可編輯期別改了金額／%。 */
+function stageAmountMode(rows: readonly ApplicationStageRow[], draft: ApplicationSheetDraft, total: number | null, totalChanged: boolean): boolean {
+  if (total === null || !(total > 0)) return false;
+  if (totalChanged) return true;
+  return rows.some((r) => {
+    const e = draft.stageEdits[stageRowKey(r)];
+    return !!e && !stageLocks(r).amount && (e.amount !== undefined || e.percentage !== undefined);
+  });
+}
+
+/**
+ * 存檔前把畫面上看到的金額「釘」進草稿：之後重抓期程時（合約金額可能已先存成新值，後端已依新總額重算各期），
+ * 沒動過的期別仍以使用者看到的金額為準換算 %，存後金額＝畫面金額。只用於重新規劃，不回寫未儲存草稿。
+ */
+export function pinStageScreenAmounts(ctx: SheetSaveContext, draft: ApplicationSheetDraft): ApplicationSheetDraft {
+  if (!ctx.canFinance) return draft;
+  const rows = applicationStageRows(ctx.billings);
+  const total = stageContractTotal(ctx.money, ctx.contracts, draft);
+  const savedTotal = ctx.money?.amountSource === "contract" ? (ctx.money.amountUntaxed ?? null) : null;
+  if (!stageAmountMode(rows, draft, total, total !== null && total !== savedTotal)) return draft;
+  const stageEdits = { ...draft.stageEdits };
+  for (const r of rows) {
+    const key = stageRowKey(r);
+    const e = stageEdits[key];
+    if (!r.exists || stageLocks(r).amount || r.amount == null || savedOverrideOf(r, ctx.billings) !== null) continue;
+    if (e?.amount !== undefined || e?.percentage !== undefined) continue;
+    stageEdits[key] = { ...(e ?? {}), amount: String(r.amount) };
+  }
+  return { ...draft, stageEdits };
+}
+
 export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): StagePlan {
   const out: StagePlan = { installments: null, created: [], removed: [], invoices: [], receipts: [], needsReason: [], changes: 0, errors: [], warnings: [] };
   if (!ctx.canFinance) return out;
@@ -312,6 +343,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
   const savedTotal = ctx.money?.amountSource === "contract" ? (ctx.money.amountUntaxed ?? null) : null;
   /** 未稅變了：金額不動、% 依新總額重算 → 每列都要重送 %。 */
   const totalChanged = total !== null && total !== savedTotal;
+  const mode = stageAmountMode(rows, draft, total, totalChanged);
   let nextNo = ctx.billings.reduce((m, b) => Math.max(m, b.installmentNo), 0) + 1;
   let scheduleChanged = false;
   const rowKeys = new Set(rows.map(stageRowKey));
@@ -338,7 +370,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
       out.warnings.push(`付款階段${label}在系統裡是空白期別（下方「分期請款期程」仍顯示），儲存時會一併移除。`);
       continue;
     }
-    if (!edit && !totalChanged) continue;
+    if (!edit && !mode) continue;
     const e: StageEdit = edit ?? {};
     const base = stageBaseValues(row);
     const locks = stageLocks(row);
@@ -348,7 +380,9 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     let amount: number | null | undefined;
     const savedOverride = savedOverrideOf(row, ctx.billings);
     const amountEdited = e.amount !== undefined || e.percentage !== undefined;
-    if (total !== null && total > 0 && !locks.amount && (amountEdited || (totalChanged && row.exists))) {
+    // 金額為主模式（任一期金額／% 或未稅有變）：所有可編輯期別都以畫面金額換算 % 一起送，存後各期＝畫面值
+    // （吸收尾差的期別換人時也不會默默變動）。沒被編輯的人工指定列不動（金額本來就固定，理由保留）。
+    if (mode && total !== null && !locks.amount && (amountEdited || (row.exists && savedOverride === null))) {
       // 目標金額：金額格 > % 格反算 > 原金額（只有未稅變了）。
       let target: number | null | "invalid";
       if (e.amount !== undefined) target = parseNumber(e.amount, { min: 0 });
@@ -751,10 +785,16 @@ export async function runApplicationSheetSave(
   }
 
   let stages = plan.stages;
+  if (stages.installments && plan.contract && !contractOk) {
+    // 合約金額沒存成：期別 % 依新總額換算，送出會讓金額錯位 → 付款階段整段不送（發票／入帳同樣跳過）。
+    steps.push({ section: "billings", label: "付款階段（項目說明／金額／%）", status: "skipped", message: "銷售金額沒存成，付款階段未送出（避免依舊金額換算）。" });
+    stages = { ...stages, installments: null, created: [] };
+  }
   if (stages.installments && ctx && api.fetchBillings) {
     try {
       const fresh = await api.fetchBillings();
-      const replanned = stagePlan({ ...ctx, billings: fresh }, draft);
+      // 以「存檔前畫面上的金額」為準重新規劃（合約金額已先存成新值時，重抓的期程金額已依新總額變動）。
+      const replanned = stagePlan({ ...ctx, billings: fresh }, pinStageScreenAmounts(ctx, draft));
       if (replanned.errors.length > 0) throw new Error(replanned.errors.map((e) => e.message).join(" "));
       notices.push(...replanned.warnings);
       stages = replanned;
