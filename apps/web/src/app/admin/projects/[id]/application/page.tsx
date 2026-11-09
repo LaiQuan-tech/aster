@@ -1,6 +1,7 @@
 "use client";
 
 import { sheet } from "@/lib/sheet-styles";
+import { formatMoney } from "@/lib/money";
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { listVendors, type Vendor } from "@/lib/company-api";
@@ -36,7 +37,7 @@ function formatDutyRate(rate: number | null | undefined): string {
 }
 
 function fmtMoney(n: number | null | undefined): string {
-  return n == null ? "—" : n.toLocaleString();
+  return n == null ? "—" : formatMoney(n, { maximumFractionDigits: 3 });
 }
 
 /**

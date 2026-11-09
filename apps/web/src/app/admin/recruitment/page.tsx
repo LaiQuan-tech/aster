@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
 import { fmtHm, localDateKey } from "@/lib/ess-format";
@@ -619,7 +620,7 @@ export default function RecruitmentPage() {
           </div>
           <div>
             <label className={labelCls}>核薪</label>
-            <input type="number" className={inputCls} value={offerSalary} onChange={(event) => setOfferSalary(event.target.value)} />
+            <MoneyInput className={inputCls} value={offerSalary} onValueChange={(v) => setOfferSalary(v)} />
           </div>
           <div>
             <label className={labelCls}>預計到職日</label>

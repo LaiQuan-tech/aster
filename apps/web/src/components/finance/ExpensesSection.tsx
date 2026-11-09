@@ -8,6 +8,7 @@
  * 期別由合併頁頂部的月份選擇決定。逐筆退件在合併頁的明細面板。
  */
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import {
   Card,
   ErrorText,
@@ -693,12 +694,10 @@ function CategoryManager({
               <label className={labelCls} htmlFor="cat-cap">
                 月限額（留空＝無上限）
               </label>
-              <input
+              <MoneyInput
                 id="cat-cap"
-                type="number"
-                min="0"
                 value={cap}
-                onChange={(e) => setCap(e.target.value)}
+                onValueChange={(v) => setCap(v)}
                 className={inputCls}
               />
             </div>

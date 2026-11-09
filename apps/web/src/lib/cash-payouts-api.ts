@@ -10,6 +10,7 @@
  * 新 feature 一律另開 `lib/<feature>-api.ts`（§3.4 檔案互斥原則），不擠 admin-api.ts。
  */
 import { apiFetch } from "./api-client";
+import { formatMoney } from "@/lib/money";
 import type { Payslip } from "./admin-api";
 
 /* ── 薪資條寄送（M3）────────────────────────────────────────────────── */
@@ -216,8 +217,7 @@ export function overtimeSettlementExportPath(period?: string): string {
 /* ── 共用小工具 ────────────────────────────────────────────────────── */
 
 export function money(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
-  return Math.round(value).toLocaleString("zh-TW");
+  return formatMoney(value);
 }
 
 /** 分鐘 → 「X 小時 Y 分」。 */

@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { formatMoney } from "@/lib/money";
 import Link from "next/link";
 import { Card, InlineError } from "@/components/ess-ui";
 import { getMyProjectShares, memberRoleLabel, type MyProjectShare } from "@/lib/projects-api";
 import { getMyBonusHistory, type MyBonusHistoryRow } from "@/lib/bonus-api";
 
 function money(n: number | null): string {
-  return n == null ? "—" : n.toLocaleString("zh-TW");
+  return n == null ? "—" : formatMoney(n, { maximumFractionDigits: 3 });
 }
 
 export default function MyBonusPage() {

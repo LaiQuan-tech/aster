@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Button, Card, PrimaryButton, ErrorText, inputCls } from "@/components/admin-ui";
 import {
   saveBillingSchedule,
@@ -282,15 +283,14 @@ export function BillingsCard({
                       )}
                     </td>
                     <td className="py-2 pr-2">
-                      <input
+                      <MoneyInput
                         className={`${inputCls} text-right`}
-                        type="number"
                         placeholder="—"
                         value={rowDraft.overrideAmount ?? ""}
                         disabled={locked}
-                        onChange={(e) =>
+                        onValueChange={(v) =>
                           patchDraft(idx, {
-                            overrideAmount: e.target.value === "" ? null : Number(e.target.value),
+                            overrideAmount: v === "" ? null : Number(v),
                           })
                         }
                       />
@@ -369,15 +369,13 @@ export function BillingsCard({
                               <input className="rounded border border-gray-300 px-1.5 py-0.5" type="date" value={receivedOn} onChange={(e) => setReceivedOn(e.target.value)} />
                               <label className="flex items-center gap-1 text-gray-600">
                                 <span>{RECEIVED_AMOUNT_LABEL}</span>
-                                <input
+                                <MoneyInput
                                   className="w-28 rounded border border-gray-300 px-1.5 py-0.5 text-right"
-                                  type="number"
-                                  min="0"
                                   aria-label={RECEIVED_AMOUNT_LABEL}
                                   title={RECEIVED_AMOUNT_HINT}
                                   placeholder={receivedAmountPlaceholder(saved.effectiveAmount)}
                                   value={receivedAmount}
-                                  onChange={(e) => setReceivedAmount(e.target.value)}
+                                  onValueChange={(v) => setReceivedAmount(v)}
                                 />
                               </label>
                               <Button type="button" variant="secondary" size="sm" onClick={() => setReceiveFormId(null)}>取消</Button>

@@ -319,7 +319,7 @@ export function applicationSheetDraftOf(project: ProjectDetail, disciplines: rea
 /* ============================================================ 驗證 == */
 
 function parseOptionalNumber(value: string): number | null | "invalid" {
-  const trimmed = value.trim();
+  const trimmed = value.trim().replace(/,/g, "");
   if (trimmed === "") return null;
   const n = Number(trimmed);
   return Number.isFinite(n) && n >= 0 ? n : "invalid";

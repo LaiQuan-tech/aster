@@ -3,6 +3,7 @@
 /** 加班超額另計區塊（原 /admin/overtime-settlements 整頁，2026-11-09 併入「費用與給付」；功能不變，月份預設跟頂部）。 */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
@@ -371,11 +372,10 @@ export function OvertimeSection({
           </div>
           <div>
             <label className={labelCls}>金額（選填）</label>
-            <input
-              type="number"
+            <MoneyInput
               className={inputCls}
               value={manualAmount}
-              onChange={(e) => setManualAmount(e.target.value)}
+              onValueChange={(v) => setManualAmount(v)}
             />
           </div>
           <div className="min-w-48">
@@ -463,10 +463,9 @@ function SettlementRow({
         {paid ? (
           <span className="font-semibold text-emerald-700">{money(row.amount)}</span>
         ) : (
-          <input
-            type="number"
+          <MoneyInput
             value={amount}
-            onChange={(e) => setAmount(e.target.value)}
+            onValueChange={(v) => setAmount(v)}
             onBlur={() => {
               const next = amount === "" ? null : Number(amount);
               if (next !== row.amount) void onSave(row, { amount: next });

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { formatMoney } from "@/lib/money";
 import Link from "next/link";
 import { Card, Empty, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
 import { vendorOptionLabel, type Vendor } from "@/lib/company-api";
@@ -21,7 +22,7 @@ import {
 import { buildRemittanceText, copyText } from "@/lib/remittance";
 
 function fmtMoney(n: number | null | undefined): string {
-  return n == null ? "—" : n.toLocaleString();
+  return n == null ? "—" : formatMoney(n, { maximumFractionDigits: 3 });
 }
 
 /**

@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useState } from "react";
+import { formatMoney } from "@/lib/money";
 import { Card, InlineError, Pill } from "@/components/ess-ui";
 import { getMyPayslips, type MyPayslip } from "@/lib/ess-api";
 import type { PayslipSendFields } from "@/lib/cash-payouts-api";
@@ -20,7 +21,7 @@ interface MyBreakdown extends BreakdownAllowanceFields {
 type MyPayslipRow = MyPayslip & PayslipSendFields & { breakdown?: MyBreakdown | null };
 
 function fmt(n: number): string {
-  return Number.isFinite(n) ? n.toLocaleString("zh-TW", { maximumFractionDigits: 2 }) : "—";
+  return formatMoney(n, { maximumFractionDigits: 2 });
 }
 
 /**
@@ -109,8 +110,7 @@ function PayslipDetail({ p }: { p: MyPayslipRow }) {
 }
 
 function money(value: string): string {
-  const amount = Number(value);
-  return Number.isFinite(amount) ? amount.toLocaleString("zh-TW") : value;
+  return formatMoney(value, { maximumFractionDigits: 3, empty: value });
 }
 
 /** 「已寄至 xxx（09/23 10:05）」——收件地址讓同仁自己確認信箱對不對。 */
@@ -198,10 +198,10 @@ export default function PayslipsPage() {
               <Fragment key={p.id}>
               <tr className="border-b border-gray-50">
                 <td className="py-2 pr-4 font-medium text-gray-800">{p.period}</td>
-                <td className="py-2 pr-4">{p.base}</td>
-                <td className="py-2 pr-4">{p.overtime_pay}</td>
-                <td className="py-2 pr-4">{p.attendance_bonus}</td>
-                <td className="py-2 pr-4 font-medium">{p.gross}</td>
+                <td className="py-2 pr-4">{formatMoney(p.base)}</td>
+                <td className="py-2 pr-4">{formatMoney(p.overtime_pay)}</td>
+                <td className="py-2 pr-4">{formatMoney(p.attendance_bonus)}</td>
+                <td className="py-2 pr-4 font-medium">{formatMoney(p.gross)}</td>
                 <td className="py-2 pr-4">
                   <Pill tone={p.status === "finalized" ? "green" : "amber"}>
                     {p.status === "finalized" ? "已定案" : "草稿"}

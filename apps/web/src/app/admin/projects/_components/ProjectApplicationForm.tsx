@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { formatMoney } from "@/lib/money";
+import { MoneyInput } from "@/components/MoneyInput";
 import { ClientCombo } from "@/components/ClientCombo";
 import { VendorCombo } from "@/components/VendorCombo";
 import { Button, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
@@ -50,7 +52,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 }
 
 function money(value: number | null): string {
-  return value == null ? "—" : value.toLocaleString("zh-TW");
+  return value == null ? "—" : formatMoney(value, { maximumFractionDigits: 3 });
 }
 
 interface ProjectApplicationFormProps {
@@ -234,7 +236,7 @@ export function ProjectApplicationForm({
               <div key={index} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_2fr_10rem_auto]">
                 <input className={inputCls} list="project-discipline-options" value={row.discipline} placeholder="科別" onChange={(event) => patch("designScope", draft.designScope.map((item, rowIndex) => rowIndex === index ? { ...item, discipline: event.target.value } : item))} />
                 <input className={inputCls} value={row.item} placeholder="服務項目" onChange={(event) => patch("designScope", draft.designScope.map((item, rowIndex) => rowIndex === index ? { ...item, item: event.target.value } : item))} />
-                {visibility.showFinanceFields ? <input className={inputCls} type="number" min="0" value={row.amount} placeholder="金額" onChange={(event) => patch("designScope", draft.designScope.map((item, rowIndex) => rowIndex === index ? { ...item, amount: event.target.value } : item))} /> : <span />}
+                {visibility.showFinanceFields ? <MoneyInput className={inputCls} value={row.amount} placeholder="金額" onValueChange={(v) => patch("designScope", draft.designScope.map((item, rowIndex) => rowIndex === index ? { ...item, amount: v } : item))} /> : <span />}
                 <button type="button" className="px-2 text-sm text-red-500" onClick={() => patch("designScope", draft.designScope.filter((_, rowIndex) => rowIndex !== index))}>移除</button>
               </div>
             ))}
@@ -275,7 +277,7 @@ export function ProjectApplicationForm({
       {visibility.showFinanceFields ? (
         <Section title="銷售金額">
           <div className="grid grid-cols-1 overflow-hidden rounded-lg border border-gray-300 text-center text-[13px] sm:grid-cols-3">
-            <label className="border-b border-gray-200 sm:border-b-0 sm:border-r"><span className="block bg-gray-50 px-3 py-2 text-xs font-medium text-gray-600">合約金額（未稅）</span><input className="w-full border-t border-gray-200 px-3 py-3 text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[var(--brand)]" type="number" min="0" value={draft.contractAmount} onChange={(event) => patch("contractAmount", event.target.value)} placeholder="可直接輸入" /></label>
+            <label className="border-b border-gray-200 sm:border-b-0 sm:border-r"><span className="block bg-gray-50 px-3 py-2 text-xs font-medium text-gray-600">合約金額（未稅）</span><MoneyInput className="w-full border-t border-gray-200 px-3 py-3 text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[var(--brand)]" value={draft.contractAmount} onValueChange={(v) => patch("contractAmount", v)} placeholder="可直接輸入" /></label>
             <div className="border-b border-gray-200 sm:border-b-0 sm:border-r"><span className="block bg-gray-50 px-3 py-2 text-xs font-medium text-gray-600">營業稅（{vatRate * 100}%）</span><p className="px-3 py-3 text-right tabular-nums">{money(amounts.taxAmount)}</p></div>
             <div><span className="block bg-gray-50 px-3 py-2 text-xs font-medium text-gray-600">含稅總額</span><p className="px-3 py-3 text-right font-semibold tabular-nums">{money(amounts.amountTotal)}</p></div>
           </div>
@@ -295,7 +297,7 @@ export function ProjectApplicationForm({
               <tbody>{draft.billings.map((row, index) => {
                 const computed = schedule.rows.find((item) => item.installmentNo === row.installmentNo);
                 const update = (next: Partial<(typeof draft.billings)[number]>) => patch("billings", draft.billings.map((item, rowIndex) => rowIndex === index ? { ...item, ...next } : item));
-                return <tr key={row.installmentNo} className={sheet.row}><td className={`${sheet.td} text-center tabular-nums`}>{row.installmentNo}</td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.milestone} onChange={(event) => update({ milestone: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} type="number" min="0" max="100" step="any" value={row.percentage} onChange={(event) => update({ percentage: event.target.value })} /></td><td className={`${sheet.td} ${sheet.num} ${(computed?.effectiveAmount ?? 0) < 0 ? "bg-red-50 text-red-700" : ""}`}>{money(computed?.effectiveAmount ?? null)}{computed?.residueApplied ? <span className="ml-1 block text-[10px] text-amber-700">尾差 {computed.residueApplied > 0 ? "+" : ""}{computed.residueApplied.toLocaleString()}</span> : null}</td><td className={`${sheet.td} !p-1`}><input className={sheet.input} type="number" min="0" value={row.overrideAmount} onChange={(event) => update({ overrideAmount: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.overrideReason} onChange={(event) => update({ overrideReason: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} type="date" value={row.plannedOn} onChange={(event) => update({ plannedOn: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.note} onChange={(event) => update({ note: event.target.value })} /></td></tr>;
+                return <tr key={row.installmentNo} className={sheet.row}><td className={`${sheet.td} text-center tabular-nums`}>{row.installmentNo}</td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.milestone} onChange={(event) => update({ milestone: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} type="number" min="0" max="100" step="any" value={row.percentage} onChange={(event) => update({ percentage: event.target.value })} /></td><td className={`${sheet.td} ${sheet.num} ${(computed?.effectiveAmount ?? 0) < 0 ? "bg-red-50 text-red-700" : ""}`}>{money(computed?.effectiveAmount ?? null)}{computed?.residueApplied ? <span className="ml-1 block text-[10px] text-amber-700">尾差 {computed.residueApplied > 0 ? "+" : ""}{computed.residueApplied.toLocaleString()}</span> : null}</td><td className={`${sheet.td} !p-1`}><MoneyInput className={sheet.input} value={row.overrideAmount} onValueChange={(v) => update({ overrideAmount: v })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.overrideReason} onChange={(event) => update({ overrideReason: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} type="date" value={row.plannedOn} onChange={(event) => update({ plannedOn: event.target.value })} /></td><td className={`${sheet.td} !p-1`}><input className={sheet.input} value={row.note} onChange={(event) => update({ note: event.target.value })} /></td></tr>;
               })}</tbody>
             </table>
           </div>
@@ -307,7 +309,7 @@ export function ProjectApplicationForm({
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {disciplines.map((discipline) => {
             const assignment = draft.engineers[discipline] ?? { vendorId: "", name: "", amount: "" };
-            return <div key={discipline}><p className="mb-1 text-sm font-medium text-slate-600">{disciplineLabel(discipline)}</p><VendorCombo vendors={vendors} vendorId={assignment.vendorId || null} name={assignment.name || null} onChange={(value) => patch("engineers", { ...draft.engineers, [discipline]: { ...assignment, vendorId: value.vendorId ?? "", name: value.name ?? "" } })} />{visibility.showFinanceFields ? <input className={`${inputCls} mt-1 text-xs`} type="number" min="0" value={assignment.amount} onChange={(event) => patch("engineers", { ...draft.engineers, [discipline]: { ...assignment, amount: event.target.value } })} placeholder="預估發包／技師金額" /> : null}</div>;
+            return <div key={discipline}><p className="mb-1 text-sm font-medium text-slate-600">{disciplineLabel(discipline)}</p><VendorCombo vendors={vendors} vendorId={assignment.vendorId || null} name={assignment.name || null} onChange={(value) => patch("engineers", { ...draft.engineers, [discipline]: { ...assignment, vendorId: value.vendorId ?? "", name: value.name ?? "" } })} />{visibility.showFinanceFields ? <MoneyInput className={`${inputCls} mt-1 text-xs`} value={assignment.amount} onValueChange={(v) => patch("engineers", { ...draft.engineers, [discipline]: { ...assignment, amount: v } })} placeholder="預估發包／技師金額" /> : null}</div>;
           })}
         </div>
       </Section>
@@ -315,7 +317,7 @@ export function ProjectApplicationForm({
       <Section title="發包與費用摘要">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="rounded-lg bg-slate-50 p-3 text-sm text-slate-500">上方金額會同步建立各科別的正式發包資料；需要分期付款時，請於建案後在「專案明細」設定付款期程。</div>
-          {visibility.showFinanceFields ? <div><label className={labelCls}>其他支出（差旅、規費等）</label><input className={inputCls} type="number" min="0" value={draft.otherExpenses} onChange={(event) => patch("otherExpenses", event.target.value)} /></div> : null}
+          {visibility.showFinanceFields ? <div><label className={labelCls}>其他支出（差旅、規費等）</label><MoneyInput className={inputCls} value={draft.otherExpenses} onValueChange={(v) => patch("otherExpenses", v)} /></div> : null}
         </div>
       </Section>
 
@@ -327,7 +329,7 @@ export function ProjectApplicationForm({
           <div><label className={labelCls}>所屬部門</label><select className={inputCls} value={draft.deptId} onChange={(event) => patch("deptId", event.target.value)}><option value="">不指定</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select></div>
           <div><label className={labelCls}>專案負責人</label><EmployeeCombobox options={employees.map((employee) => ({ id: employee.id, label: `${employee.name}${employee.emp_no ? `（${employee.emp_no}）` : ""}`, searchText: `${employee.emp_no ?? ""} ${employee.name}` }))} value={draft.leadEmpId} onChange={(id) => patch("leadEmpId", id)} emptyLabel="不指定" ariaLabel="專案負責人" /></div>
           {/* 2026-10-27 分潤簡化：「指定金額」模式停用，新專案一律百分比（draft.shareMode 固定 pool_pct），不再顯示模式下拉。 */}
-          {draft.shareMode === "pool_pct" && visibility.showBonusFields ? <div><label className={labelCls}>獎金池總額</label><input className={inputCls} type="number" min="0" value={draft.bonusPool} onChange={(event) => patch("bonusPool", event.target.value)} /></div> : null}
+          {draft.shareMode === "pool_pct" && visibility.showBonusFields ? <div><label className={labelCls}>獎金池總額</label><MoneyInput className={inputCls} value={draft.bonusPool} onValueChange={(v) => patch("bonusPool", v)} /></div> : null}
           <div className="sm:col-span-2"><label className={labelCls}>說明</label><textarea className={inputCls} rows={3} value={draft.description} onChange={(event) => patch("description", event.target.value)} /></div>
         </div>
       </Section>

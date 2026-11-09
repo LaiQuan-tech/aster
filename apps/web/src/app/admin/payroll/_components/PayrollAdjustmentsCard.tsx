@@ -14,6 +14,8 @@
  * 純函式（表單驗證、歸屬、合計、錯誤訊息）與 API 呼叫在 lib/payroll-adjustments-api.ts（有單元測試）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { formatMoney } from "@/lib/money";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Button, Card, InlineError, Input, Pill, Select, Skeleton, useToast } from "@/components/admin-ui";
 import type { Employee } from "@/lib/admin-api";
 import {
@@ -45,7 +47,7 @@ function currentMonth(): string {
 }
 
 function money(n: number): string {
-  return n.toLocaleString("zh-TW", { maximumFractionDigits: 2 });
+  return formatMoney(n, { maximumFractionDigits: 2 });
 }
 
 interface Props {
@@ -437,10 +439,9 @@ export function PayrollAdjustmentsCard({ employees, refreshKey = 0, focus = null
                             </label>
                             <label className="block text-xs font-medium text-gray-500">
                               金額
-                              <Input
+                              <MoneyInput allowDecimal fieldStyle
                                 value={draft.amount}
-                                inputMode="decimal"
-                                onChange={(e) => setDraft({ ...draft, amount: e.target.value })}
+                                onValueChange={(v) => setDraft({ ...draft, amount: v })}
                                 placeholder="3000"
                                 className="mt-1"
                               />

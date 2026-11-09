@@ -1,13 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { formatMoney } from "@/lib/money";
 import Link from "next/link";
 import { Card, Empty, PrimaryButton } from "@/components/admin-ui";
 import { DISBURSEMENT_STATUS_LABELS, type Disbursement, type Payable } from "@/lib/disbursements-api";
 import { matchesKeyword } from "@/lib/billing-disbursement";
 
 function fmtMoney(n: number | null | undefined): string {
-  return n == null ? "—" : n.toLocaleString();
+  return n == null ? "—" : formatMoney(n, { maximumFractionDigits: 3 });
 }
 
 export type PayableGroupView = { key: string; vendorId: string | null; vendorName: string; rows: Payable[] };

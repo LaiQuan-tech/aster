@@ -1,3 +1,4 @@
+import { formatMoney } from "@/lib/money";
 /**
  * ESS 顯示用格式化函式（純函式、不碰 React／DOM；全部有單元測試）。
  *
@@ -220,9 +221,6 @@ export function fmtMoney(amount: number | string | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return "—";
   const abs = Math.abs(n);
   const isInt = Math.abs(abs - Math.round(abs)) < 1e-9;
-  const body = abs.toLocaleString("en-US", {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: isInt ? 0 : 2,
-  });
+  const body = formatMoney(abs, { maximumFractionDigits: isInt ? 0 : 2 });
   return `${n < 0 ? "-" : ""}NT$ ${body}`;
 }

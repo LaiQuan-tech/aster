@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { formatMoney } from "@/lib/money";
+import { MoneyInput } from "@/components/MoneyInput";
 import Link from "next/link";
 import { Button, Card, Empty, ErrorText, inputCls } from "@/components/admin-ui";
 import { FitToWidth } from "@/components/FitToWidth";
@@ -29,7 +31,7 @@ import {
 } from "@/lib/billing-disbursement";
 
 function fmtMoney(n: number | null | undefined): string {
-  return n == null ? "—" : n.toLocaleString();
+  return n == null ? "—" : formatMoney(n, { maximumFractionDigits: 3 });
 }
 
 /** 兩張子表固定欄寬（colgroup 合計 1074px＝外框 1100 扣邊框與內距），所有專案上下對齊；1280 寬由 FitToWidth 縮放。 */
@@ -301,13 +303,12 @@ export default function LedgerView({
                           <td className="py-1.5 pr-2 text-right tabular-nums text-gray-500">{fmtMoney(d.withheldAmount)}</td>
                           <td className="py-1.5 pr-2 text-right tabular-nums text-gray-700">{fmtMoney(d.amount)}</td>
                           <td className="py-1.5 pr-2 text-right">
-                            <input
+                            <MoneyInput allowDecimal
                               className={`${inputCls} w-32 text-right tabular-nums`}
-                              inputMode="decimal"
                               aria-label={`${d.disbursementNo} 實付`}
                               value={amounts[d.id] ?? String(d.amount)}
                               disabled={done || busy}
-                              onChange={(e) => setAmounts((a) => ({ ...a, [d.id]: e.target.value }))}
+                              onValueChange={(v) => setAmounts((a) => ({ ...a, [d.id]: v }))}
                             />
                           </td>
                           <td className="py-1.5 pr-2 text-xs">

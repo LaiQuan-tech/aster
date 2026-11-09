@@ -7,6 +7,7 @@
  * 後端 Email 版（apps/api/src/services/payslip-html.ts）與這裡的 printPayslip 欄位一致。
  */
 import { useState } from "react";
+import { formatMoney } from "@/lib/money";
 import type { Payslip, PayslipBreakdown } from "@/lib/admin-api";
 import type { PayslipSendFields } from "@/lib/cash-payouts-api";
 import { adjustmentDisplayOf, adjustmentPrintRows, signedMoney, TREATMENT_LABEL } from "@/lib/payroll-adjustments-api";
@@ -55,7 +56,7 @@ export function n(v: string | number | undefined | null): number {
   return Number.isFinite(x) ? x : 0;
 }
 export function money(v: number): string {
-  return v.toLocaleString("zh-TW");
+  return formatMoney(v, { maximumFractionDigits: 3 });
 }
 /** breakdown ＋ 2026-11-08 固定津貼／公司負擔欄位（舊薪資單沒有，一律以 0／不顯示呈現）。 */
 export type Breakdown = PayslipBreakdown & BreakdownAllowanceFields;

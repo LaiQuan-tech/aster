@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useState } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import Link from "next/link";
 import { Button, Card, PrimaryButton, ErrorText, Empty, inputCls } from "@/components/admin-ui";
 import { companyOptions } from "@/lib/company-options";
@@ -260,7 +261,7 @@ export function SubcontractsCard({
                       />
                     </td>
                     <td className="py-1.5 pr-2">
-                      <input className={`${inputCls} text-right`} type="number" min="0" value={row.withholdingThreshold} onChange={(e) => patchSub(idx, { withholdingThreshold: Number(e.target.value) || 0 })} />
+                      <MoneyInput className={`${inputCls} text-right`} value={row.withholdingThreshold} onValueChange={(v) => patchSub(idx, { withholdingThreshold: Number(v) || 0 })} />
                     </td>
                     <td className="py-1.5 pr-2 text-right whitespace-nowrap">
                       {row.id ? (
@@ -349,7 +350,7 @@ export function SubcontractsCard({
                                       {p.disbursementId ? (
                                         <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">{fmtMoney(p.paidAmount ?? null)}</span>
                                       ) : (
-                                        <input className="w-20 rounded border border-gray-300 px-1 py-0.5 text-right" type="number" value={p.paidAmount ?? ""} placeholder={fmtMoney(p.netAmount ?? null)} onChange={(e) => patchPayment(row.id as string, pIdx, { paidAmount: e.target.value === "" ? null : Number(e.target.value) })} />
+                                        <MoneyInput className="w-20 rounded border border-gray-300 px-1 py-0.5 text-right" value={p.paidAmount ?? ""} placeholder={fmtMoney(p.netAmount ?? null)} onValueChange={(v) => patchPayment(row.id as string, pIdx, { paidAmount: v === "" ? null : Number(v) })} />
                                       )}
                                     </td>
                                     <td className="py-1 pr-2 text-right text-gray-500">{fmtMoney(p.withheldAmount ?? null)}</td>

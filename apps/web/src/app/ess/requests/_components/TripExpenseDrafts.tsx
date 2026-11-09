@@ -11,6 +11,7 @@
  * 驗證與送出編排在 lib/trip-expense.ts（有單元測試）；本元件只管畫面狀態。
  */
 import { useEffect, useId, useRef, useState } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Button, Field, Icon, Input, Select } from "@/components/ess-ui";
 import type { MyExpenseCategory } from "@/lib/ess-api";
 import { fmtMoney } from "@/lib/ess-format";
@@ -133,15 +134,11 @@ export function TripExpenseDrafts({ categories, drafts, onChange, tripDate, defa
                 </Field>
                 <div className="grid grid-cols-2 gap-3">
                   <Field label="金額（元）" required htmlFor={`${id}-amt`}>
-                    <Input
+                    <MoneyInput fieldStyle
                       id={`${id}-amt`}
-                      type="number"
-                      inputMode="numeric"
-                      min={1}
-                      step={1}
                       value={d.amount}
                       disabled={disabled}
-                      onChange={(e) => update(d.key, { amount: e.target.value })}
+                      onValueChange={(v) => update(d.key, { amount: v })}
                     />
                   </Field>
                   <Field label="發生日期" required htmlFor={`${id}-date`}>

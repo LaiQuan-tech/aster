@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { Button, PrimaryButton } from "@/components/admin-ui";
 import { ClientCombo } from "@/components/ClientCombo";
+import { MoneyInput } from "@/components/MoneyInput";
 import type { Vendor } from "@/lib/company-api";
 import { companyOptions } from "@/lib/company-options";
 import { createContract, updateContract, type Contract } from "@/lib/projects-api";
@@ -472,7 +473,7 @@ export function ApplicationSheet({
               <div key={idx} data-err-field={`designScope:${idx}`} className={`flex flex-wrap items-center gap-1 sm:flex-nowrap ${isBad(`designScope:${idx}`) ? "rounded bg-red-50 ring-1 ring-red-400 print:bg-transparent print:ring-0" : ""}`}>
                 <input aria-label={`設計內容第 ${idx + 1} 列科別`} className={`${cellInput} sm:w-24 sm:flex-none`} list="sheet-discipline-suggestions" placeholder="科別" value={row.discipline} onChange={(e) => patchScopeRow(idx, { discipline: e.target.value })} />
                 <input aria-label={`設計內容第 ${idx + 1} 列項目`} className={`${cellInput} flex-1`} placeholder="服務項目" value={row.item ?? ""} onChange={(e) => patchScopeRow(idx, { item: e.target.value })} />
-                <input aria-label={`設計內容第 ${idx + 1} 列金額`} className={`${cellInput} text-right sm:w-32 sm:flex-none`} type="number" min="0" placeholder="金額" value={row.amount ?? ""} onChange={(e) => patchScopeRow(idx, { amount: e.target.value === "" ? null : Number(e.target.value) })} />
+                <MoneyInput aria-label={`設計內容第 ${idx + 1} 列金額`} className={`${cellInput} text-right sm:w-32 sm:flex-none`} placeholder="金額" value={row.amount ?? ""} onValueChange={(v) => patchScopeRow(idx, { amount: v === "" ? null : Number(v) })} />
                 <button type="button" className="shrink-0 px-1 text-xs text-gray-400 hover:text-red-600" onClick={() => setDraft((d) => ({ ...d, designScope: d.designScope.filter((_, i) => i !== idx) }))}>
                   移除
                 </button>
@@ -633,15 +634,12 @@ export function ApplicationSheet({
       case "amountUntaxed":
         if (!editable) return moneyText(money?.amountUntaxed);
         return (
-          <input
+          <MoneyInput
             aria-label="銷售金額（未稅）"
             title={money?.amountSource === "quotation" ? "目前取自最新報價單" : undefined}
             className={`${cellInput} text-right`}
-            type="number"
-            min="0"
-            inputMode="numeric"
             value={draft.amountUntaxed ?? (money?.amountUntaxed != null ? String(money.amountUntaxed) : "")}
-            onChange={(e) => set("amountUntaxed", e.target.value)}
+            onValueChange={(v) => set("amountUntaxed", v)}
           />
         );
       case "taxAmount":
@@ -755,7 +753,7 @@ export function ApplicationSheet({
       <Cell className={blankCls("payment")} key={`stage-${s.no}-2`} col={stageCols[2]} span={S[2]} row={r} kind="value" align="right" testId={`sheet-stage-${s.no}-amount`} editable={editable && !locks.amount} {...errAttr(`stage:${key}:amount`, `stage:${key}:overrideReason`)}>
         {mLabel("金額")}
         {editable && !locks.amount ? (
-          <input aria-label={`${rowLabel}金額`} title="填了就是人工指定金額；清空＝依百分比試算" className={`${cellInput} text-right tabular-nums`} type="number" min="0" inputMode="numeric" value={val("amount")} onChange={(e) => setStage(key, "amount", e.target.value)} />
+          <MoneyInput aria-label={`${rowLabel}金額`} title="填了就是人工指定金額；清空＝依百分比試算" className={`${cellInput} text-right tabular-nums`} value={val("amount")} onValueChange={(v) => setStage(key, "amount", v)} />
         ) : (
           <span className="tabular-nums" title={editable && locks.amount ? "已請款／已入帳，金額凍結" : undefined}>{s.amount != null ? fmtMoney(s.amount) : ""}</span>
         )}
@@ -815,7 +813,7 @@ export function ApplicationSheet({
   const summaryValues: ReactNode[] = [
     moneyText(money?.subcontractTotal),
     editable ? (
-      <input key="other" aria-label="其他支出" className={`${cellInput} text-right tabular-nums`} type="number" min="0" value={draft.otherExpenses} onChange={(e) => set("otherExpenses", e.target.value)} />
+      <MoneyInput key="other" aria-label="其他支出" className={`${cellInput} text-right tabular-nums`} value={draft.otherExpenses} onValueChange={(v) => set("otherExpenses", v)} />
     ) : moneyText(money?.otherExpenses),
     showProfit ? moneyText(money?.profit) : <span title="屬集團財務，僅老闆與授權人員可見">—</span>,
     showProfit ? (canFinance && money?.grossMarginPct != null ? `${money.grossMarginPct}%` : "—") : <span title="屬集團財務，僅老闆與授權人員可見">—</span>,

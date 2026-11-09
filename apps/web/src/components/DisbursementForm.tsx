@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { formatMoney } from "@/lib/money";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Button, inputCls, labelCls, PrimaryButton, ErrorText } from "@/components/admin-ui";
 import { vendorOptionLabel, type Vendor } from "@/lib/company-api";
 import { companyOptions } from "@/lib/company-options";
@@ -64,7 +66,7 @@ function toNum(s: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 function fmtMoney(n: number): string {
-  return n.toLocaleString();
+  return formatMoney(n, { maximumFractionDigits: 3 });
 }
 
 /** 從一筆應付清單期款帶出一個分攤列草稿（金額＝毛額、代扣＝該期代扣，比照規劃 §二「金額自動帶」）。 */
@@ -442,15 +444,15 @@ export default function DisbursementForm({
 
         <div>
           <label className={labelCls}>實付</label>
-          <input className={`${inputCls} text-right`} type="number" min="0" value={state.amount} onChange={(e) => handleAmountChange(e.target.value)} />
+          <MoneyInput className={`${inputCls} text-right`} value={state.amount} onValueChange={(v) => handleAmountChange(v)} />
         </div>
         <div>
           <label className={labelCls}>代扣</label>
-          <input className={`${inputCls} text-right`} type="number" min="0" value={state.withheldAmount} onChange={(e) => handleWithheldChange(e.target.value)} />
+          <MoneyInput className={`${inputCls} text-right`} value={state.withheldAmount} onValueChange={(v) => handleWithheldChange(v)} />
         </div>
         <div>
           <label className={labelCls}>毛額</label>
-          <input className={`${inputCls} text-right`} type="number" min="0" value={state.grossAmount} onChange={(e) => handleGrossChange(e.target.value)} />
+          <MoneyInput className={`${inputCls} text-right`} value={state.grossAmount} onValueChange={(v) => handleGrossChange(v)} />
           <p className="mt-1 text-xs text-gray-400">毛額＝實付＋代扣；改毛額時實付＝毛額－代扣。</p>
         </div>
 
@@ -525,10 +527,10 @@ export default function DisbursementForm({
                         {r.fromPayable ? `第 ${r.installmentNo} 期${r.vendorName ? `・${r.vendorName}` : ""}` : "手動"}
                       </td>
                       <td className="py-1.5 pr-2">
-                        <input className={`${inputCls} text-right text-xs`} type="number" min="0" value={r.amount} onChange={(e) => patchRow(r.key, { amount: e.target.value })} />
+                        <MoneyInput className={`${inputCls} text-right text-xs`} value={r.amount} onValueChange={(v) => patchRow(r.key, { amount: v })} />
                       </td>
                       <td className="py-1.5 pr-2">
-                        <input className={`${inputCls} text-right text-xs`} type="number" min="0" value={r.withheldAmount} onChange={(e) => patchRow(r.key, { withheldAmount: e.target.value })} />
+                        <MoneyInput className={`${inputCls} text-right text-xs`} value={r.withheldAmount} onValueChange={(v) => patchRow(r.key, { withheldAmount: v })} />
                       </td>
                       <td className="py-1.5 pr-2">
                         <input className={`${inputCls} text-xs`} value={r.note} onChange={(e) => patchRow(r.key, { note: e.target.value })} />

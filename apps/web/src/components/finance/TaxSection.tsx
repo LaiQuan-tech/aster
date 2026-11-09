@@ -3,6 +3,8 @@
 /** 報表與申報區塊（原 /admin/payroll-tax 整頁，2026-11-09 併入「費用與給付」；功能不變，全部 requireHrAdmin）。 */
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { formatMoney } from "@/lib/money";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Card, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
 import { BatchImportButton } from "@/components/BatchImport";
 import { CollapsibleCard } from "@/components/CollapsibleCard";
@@ -187,7 +189,7 @@ export function TaxSection() {
                   <tr key={adjustment.id} className="border-b border-gray-50">
                     <td className="py-2 pr-4 font-medium text-gray-800">{empName(adjustment.employee_id)}</td>
                     <td className="py-2 pr-4">{adjustment.effective_date}</td>
-                    <td className="py-2 pr-4">{adjustment.new_salary}</td>
+                    <td className="py-2 pr-4">{formatMoney(adjustment.new_salary)}</td>
                     <td className="py-2">{adjustment.reason ?? "—"}</td>
                   </tr>
                 ))}
@@ -214,7 +216,7 @@ export function TaxSection() {
             </div>
             <div>
               <label className={labelCls}>金額</label>
-              <input className={inputCls} type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="50000" />
+              <MoneyInput className={inputCls} value={amount} onValueChange={(v) => setAmount(v)} placeholder="50000" />
             </div>
             <div>
               <label className={labelCls}>扣繳率</label>
@@ -259,9 +261,9 @@ export function TaxSection() {
                     <td className="py-2 pr-4">{row.id_number ?? "—"}</td>
                     <td className="py-2 pr-4">{row.income_type ?? "—"}</td>
                     <td className="py-2 pr-4">{row.pay_date ?? "—"}</td>
-                    <td className="py-2 pr-4">{row.amount}</td>
-                    <td className="py-2 pr-4">{row.tax_withheld}</td>
-                    <td className="py-2 pr-4">{row.supplementary_premium}</td>
+                    <td className="py-2 pr-4">{formatMoney(row.amount)}</td>
+                    <td className="py-2 pr-4">{formatMoney(row.tax_withheld)}</td>
+                    <td className="py-2 pr-4">{formatMoney(row.supplementary_premium)}</td>
                     <td className="py-2">{row.note ?? "—"}</td>
                   </tr>
                 ))}
@@ -276,7 +278,7 @@ export function TaxSection() {
         <div className="flex items-end gap-3">
           <div>
             <label className={labelCls}>本次獎金</label>
-            <input className={inputCls} type="number" value={calcAmount} onChange={(e) => setCalcAmount(e.target.value)} />
+            <MoneyInput className={inputCls} value={calcAmount} onValueChange={(v) => setCalcAmount(v)} />
           </div>
           <PrimaryButton type="button" onClick={onCalc}>
             試算
@@ -290,7 +292,7 @@ export function TaxSection() {
         <div className="flex items-end gap-3">
           <div>
             <label className={labelCls}>給付總額</label>
-            <input className={inputCls} type="number" value={withholdingAmount} onChange={(event) => setWithholdingAmount(event.target.value)} />
+            <MoneyInput className={inputCls} value={withholdingAmount} onValueChange={(v) => setWithholdingAmount(v)} />
           </div>
           <PrimaryButton type="button" onClick={onWithholdingCalc}>
             試算

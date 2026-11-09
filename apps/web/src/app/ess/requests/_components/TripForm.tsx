@@ -14,6 +14,7 @@
  * 沒填或選先預支 → 照舊走 `onSubmit`，行為與以前相同。
  */
 import { useCallback, useId, useState, type FormEvent } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import type { CreateRequestBody, MyExpenseCategory } from "@/lib/ess-api";
 import { Field, Input, Segmented, Select } from "@/components/ess-ui";
 import { fmtMoney } from "@/lib/ess-format";
@@ -254,15 +255,12 @@ export function TripForm({
       </Field>
 
       <Field label="預估花費（元）" htmlFor={ids.cost} hint="供簽核者判斷，不是申請金額">
-        <Input
+        <MoneyInput fieldStyle
           id={ids.cost}
-          type="number"
-          inputMode="numeric"
-          min={0}
           value={estimatedCost}
           placeholder="選填"
-          onChange={(e) => {
-            setEstimatedCost(e.target.value);
+          onValueChange={(v) => {
+            setEstimatedCost(v);
             clear();
           }}
         />
@@ -288,15 +286,12 @@ export function TripForm({
                   : "預設帶預估花費，可修改。核准後由公司先撥款；回來後到「報銷」頁新增單據並選這筆預支，由公司核銷、多退少補"
               }
             >
-              <Input
+              <MoneyInput fieldStyle
                 id={ids.adv}
-                type="number"
-                inputMode="numeric"
-                min={0}
                 value={advanceValue}
-                onChange={(e) => {
+                onValueChange={(v) => {
                   setAdvanceTouched(true);
-                  setAdvanceRequested(e.target.value);
+                  setAdvanceRequested(v);
                   clear();
                 }}
                 aria-invalid={localError === "請填寫預支金額" ? true : undefined}

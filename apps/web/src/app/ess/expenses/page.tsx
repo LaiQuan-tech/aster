@@ -7,6 +7,8 @@
  * 但只限類別沒要求出差核准的費用（lib/trip-expense.ts isCategoryUsableForTrip；API 對要求核准的回 trip_not_approved）。
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { formatMoney } from "@/lib/money";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Button, Card, Field, InlineError, Input, Select } from "@/components/ess-ui";
 import {
   getMyExpenseCategories,
@@ -66,7 +68,7 @@ function today(): string {
 }
 
 function money(n: number): string {
-  return n.toLocaleString("zh-TW", { maximumFractionDigits: 0 });
+  return formatMoney(n);
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -448,13 +450,10 @@ export default function EssExpensesPage() {
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="金額" htmlFor="amt">
-              <Input
+              <MoneyInput fieldStyle
                 id="amt"
-                type="number"
-                min="1"
-                step="1"
                 value={amount}
-                onChange={(e) => setAmount(e.target.value)}
+                onValueChange={(v) => setAmount(v)}
                 required
               />
             </Field>

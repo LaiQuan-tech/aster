@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useMemo, useEffect, useState } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Card, PrimaryButton, ErrorText, Empty, Segmented, inputCls, labelCls } from "@/components/admin-ui";
 import {
   getBranding,
@@ -1805,14 +1806,11 @@ export default function ModuleSettingsPage() {
               </div>
               <div className="max-w-xs">
                 <label className={labelCls}>伙食費每月免稅額（元）</label>
-                <input
-                  type="number"
-                  min={0}
-                  step={1}
+                <MoneyInput
                   placeholder="3000"
                   className={inputCls}
                   value={mealTaxFree}
-                  onChange={(e) => setMealTaxFree(e.target.value)}
+                  onValueChange={(v) => setMealTaxFree(v)}
                   data-testid="meal-tax-free"
                 />
                 <p className="mt-1 text-xs text-gray-400">

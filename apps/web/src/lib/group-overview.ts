@@ -1,3 +1,4 @@
+import { formatMoney } from "@/lib/money";
 /**
  * 集團總覽（後台首頁 #group-overview 區塊；2026-10-27 前是 /admin/group-overview）的純函式：金額／百分比格式、查詢字串、公司勾選、月趨勢圖的幾何。
  * 全部無 React、無 IO，有 vitest（lib/__tests__/group-overview.test.ts）。
@@ -21,9 +22,7 @@ export const UNASSIGNED_COMPANY_ID = "unassigned";
 
 /** 全站金額格式：千分位、到「元」；null／undefined 顯示「—」。四捨五入成 0 的負小數顯示 0，不顯示「-0」。 */
 export function fmtMoney(n: number | null | undefined): string {
-  if (n == null) return "—";
-  const rounded = Math.round(n);
-  return (rounded === 0 ? 0 : rounded).toLocaleString("zh-TW");
+  return formatMoney(n);
 }
 
 /** 毛利率：一位小數；null（收入為 0）顯示「—」。 */

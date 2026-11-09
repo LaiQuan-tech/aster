@@ -1,4 +1,5 @@
 import { apiDownload, apiFetch } from "./api-client";
+import { formatMoney } from "@/lib/money";
 import type { StatementGrid } from "./statements-api";
 import { columnPx, rowPx } from "./statement-layout";
 
@@ -207,7 +208,7 @@ export function payoutDateText(v: string | null | undefined): string {
 
 /** 金額（到元、千分位；負數帶減號）。 */
 export function moneyText(n: number): string {
-  return Math.round(n).toLocaleString("zh-TW");
+  return formatMoney(n);
 }
 
 /* ──────────────────────────────────────────────────────────────────

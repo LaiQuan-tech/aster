@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { formatMoney } from "@/lib/money";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { Card, DetailHeading, Empty, ErrorText, PrimaryButton } from "@/components/admin-ui";
@@ -36,7 +37,7 @@ import type { ApiError } from "@/lib/api-client";
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 import { employeeOptionsOf } from "@/lib/employee-combobox";
 function fmtMoney(n: number | null | undefined): string {
-  return n == null ? "—" : n.toLocaleString();
+  return n == null ? "—" : formatMoney(n, { maximumFractionDigits: 3 });
 }
 function todayKey(): string {
   return new Date().toISOString().slice(0, 10);

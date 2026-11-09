@@ -8,6 +8,7 @@
  * 只給 HR（員工內頁 canManage；API requireHrAdmin）。
  */
 import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
+import { MoneyInput } from "@/components/MoneyInput";
 import { Button, ConfirmDialog, ErrorText } from "@/components/admin-ui";
 import {
   addInsuredChange,
@@ -150,11 +151,11 @@ export function SalaryHistorySection({ employeeId, reloadKey }: { employeeId: st
             </div>
             <div>
               <label className={labelCls}>原本薪（選填）</label>
-              <input type="number" min={0} className={inputCls} value={salaryForm.prevSalary} onChange={(e) => setSalaryForm({ ...salaryForm, prevSalary: e.target.value })} />
+              <MoneyInput className={inputCls} value={salaryForm.prevSalary} onValueChange={(v) => setSalaryForm({ ...salaryForm, prevSalary: v })} />
             </div>
             <div>
               <label className={labelCls}>新本薪</label>
-              <input type="number" min={0} className={inputCls} value={salaryForm.newSalary} onChange={(e) => setSalaryForm({ ...salaryForm, newSalary: e.target.value })} />
+              <MoneyInput className={inputCls} value={salaryForm.newSalary} onValueChange={(v) => setSalaryForm({ ...salaryForm, newSalary: v })} />
             </div>
             <div>
               <label className={labelCls}>原因（選填）</label>
@@ -249,11 +250,11 @@ export function SalaryHistorySection({ employeeId, reloadKey }: { employeeId: st
               <div key={nextKey} className="grid grid-cols-2 gap-2 sm:col-span-4 sm:grid-cols-4">
                 <div>
                   <label className={labelCls}>{label}（調整前）</label>
-                  <input type="number" min={0} step={1} className={inputCls} value={insuredForm[prevKey]} onChange={(e) => setInsuredForm({ ...insuredForm, [prevKey]: e.target.value })} />
+                  <MoneyInput className={inputCls} value={insuredForm[prevKey]} onValueChange={(v) => setInsuredForm({ ...insuredForm, [prevKey]: v })} />
                 </div>
                 <div>
                   <label className={labelCls}>{label}（調整後）</label>
-                  <input type="number" min={0} step={1} className={inputCls} value={insuredForm[nextKey]} onChange={(e) => setInsuredForm({ ...insuredForm, [nextKey]: e.target.value })} />
+                  <MoneyInput className={inputCls} value={insuredForm[nextKey]} onValueChange={(v) => setInsuredForm({ ...insuredForm, [nextKey]: v })} />
                 </div>
               </div>
             ))}

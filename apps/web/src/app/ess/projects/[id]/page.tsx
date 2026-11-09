@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { formatMoney } from "@/lib/money";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { Card, InlineError, Pill, SectionTitle } from "@/components/ess-ui";
@@ -24,7 +25,7 @@ import { BonusShareCard } from "@/app/admin/projects/[id]/_sections/BonusShareCa
 import { effectiveRoleSharePct } from "@/lib/project-share-calculation";
 
 function money(n: number | null): string {
-  return n == null ? "—" : n.toLocaleString("zh-TW");
+  return n == null ? "—" : formatMoney(n, { maximumFractionDigits: 3 });
 }
 
 export default function EssProjectDetailPage() {
