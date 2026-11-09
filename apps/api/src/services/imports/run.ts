@@ -28,6 +28,7 @@ import {
   type ManualPunchRecord,
   type PunchType,
   type SalaryAdjustmentInput,
+  sameId,
 } from "./writers.js"
 
 /**
@@ -211,7 +212,7 @@ async function runPunches(tenantId: string, rows: ParsedImportRow[], dryRun: boo
       const emp = resolver.resolve(v.empNo, v.name)
       if (!emp.ok) return fail(emp.message)
       // 2026-11-10 業主：不能補登自己的打卡（含 platform_admin）；自己的卡請到員工端送補卡申請。
-      if (actorEmpId && emp.employee.id === actorEmpId) return fail(SELF_PUNCH_MESSAGE)
+      if (sameId(actorEmpId, emp.employee.id)) return fail(SELF_PUNCH_MESSAGE)
       const date = parseDateInput(v.date)
       if (!v.date.trim()) return fail("「日期」必填")
       if (!date) return fail(`「日期」格式錯誤（${v.date}），請用 YYYY-MM-DD`)

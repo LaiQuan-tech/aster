@@ -14,7 +14,7 @@ import { logger } from "../lib/logger.js"
 import { checkPunchCooldown, cooldownSeconds, statusFromRecords } from "../services/punch-guard.js"
 import { findCarryOverIn } from "../services/punch-carry-over.js"
 import { assertInstantsOpen } from "../services/period-lock.js"
-import { SELF_MANUAL_PUNCH_FORBIDDEN, importManualPunches } from "../services/imports/writers.js"
+import { SELF_MANUAL_PUNCH_FORBIDDEN, importManualPunches, sameId } from "../services/imports/writers.js"
 import {
   dinnerPromptForOpenShift,
   lateMinutesForArrival,
@@ -715,7 +715,7 @@ punchRouter.get(
 // 補登 body — HR back-fills a punch for an employee (打卡紀錄維護的
 // 批次打卡補登/忘打卡補登). Explicit employeeId + timestamp + type.
 const manualSchema = z.object({
-  employeeId: z.string().uuid(),
+  employeeId: z.string().uuid().transform((v) => v.toLowerCase()),
   punchAt: z.string().datetime(),
   type: z.enum(["in", "out", "break_in", "break_out", "outing_in", "outing_out"]),
 })
@@ -851,7 +851,7 @@ punchRouter.post(
     try {
       // 2026-11-10 業主：HR 不能補登自己的打卡——任何角色（含 platform_admin、老闆）自己的卡一律走員工端補卡申請（簽核）。
       const self = await resolveSelf(tenantId, req.auth!.userId)
-      if (self && self.id === employeeId) {
+      if (self && sameId(self.id, employeeId)) {
         res.status(403).json({ error: SELF_MANUAL_PUNCH_FORBIDDEN, message: "不能補登自己的打卡；自己的打卡請到員工端送補卡申請" })
         return
       }

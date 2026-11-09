@@ -36,6 +36,11 @@ export interface ManualPunchRecord {
 /** HR 補登打卡的目標是自己 → 拒絕（POST /punch/manual 403、匯入逐列錯誤）。 */
 export const SELF_MANUAL_PUNCH_FORBIDDEN = "self_manual_punch_forbidden"
 
+/** UUID 比對不分大小寫（zod .uuid() 放行大寫、DB 也不分大小寫，字串 === 會被大寫繞過）。 */
+export function sameId(a: string | null | undefined, b: string | null | undefined): boolean {
+  return !!a && !!b && a.toLowerCase() === b.toLowerCase()
+}
+
 /**
  * 先用 `.in("id", …)` 確認員工屬於本租戶，不屬於的逐筆回 employee_not_found，其餘
  * 以 source='manual' 寫入 punch_records。records 為空或全部無效時不碰 DB（ids 為空）。
@@ -51,9 +56,11 @@ export async function importManualPunches(
   // 2026-11-10 業主：HR（含 platform_admin）不能補登自己的打卡——自己的卡一律走員工端補卡申請。
   // 呼叫者本人的列逐筆回 self_manual_punch_forbidden，其餘照常。
   const self = opts.selfEmployeeId ?? null
+  // 一律小寫化再用（寫入 DB 與 validEmployees 比對都吃小寫）。
+  records = records.map((record) => ({ ...record, employeeId: record.employeeId.toLowerCase() }))
   if (self) {
     records = records.filter((record) => {
-      if (record.employeeId !== self) return true
+      if (!sameId(record.employeeId, self)) return true
       errors.push({ line: record.line, error: SELF_MANUAL_PUNCH_FORBIDDEN })
       return false
     })

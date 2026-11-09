@@ -71,6 +71,23 @@ describe("POST /punch/manual：不能補登自己的打卡", () => {
   })
 })
 
+describe("大寫 UUID 不能繞過本人判斷", () => {
+  it("POST /punch/manual 大寫本人 id → 403 self_manual_punch_forbidden", async () => {
+    const res = await as(HR_TOKEN)(request(app).post("/punch/manual")).send({ employeeId: HR_ID.toUpperCase(), punchAt: "2026-10-01T06:37:00.000Z", type: "in" })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe("self_manual_punch_forbidden")
+    expect(inserted()).toHaveLength(0)
+  })
+
+  it("匯入列大寫本人 id → self 原因拒絕（不是 employee_not_found）", async () => {
+    const csv = ["employeeId,punchAt,type", `${HR_ID.toUpperCase()},2026-10-01T01:05:00.000Z,in`, `${EMP_ID.toUpperCase()},2026-10-01T01:00:00.000Z,in`].join("\n")
+    const res = await as(HR_TOKEN)(request(app).post("/punch/manual/import")).send({ csv })
+    expect(res.status).toBe(201)
+    expect(res.body.errors).toEqual([{ line: 2, error: "self_manual_punch_forbidden" }])
+    expect(inserted().map((r) => r.employee_id)).toEqual([EMP_ID])
+  })
+})
+
 describe("POST /punch/manual/import：含本人的列被拒，其餘照常", () => {
   it("本人列回 self_manual_punch_forbidden，他人列寫入", async () => {
     const csv = [
