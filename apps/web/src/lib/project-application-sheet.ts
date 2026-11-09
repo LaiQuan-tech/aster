@@ -312,21 +312,35 @@ function parseOptionalNumber(value: string): number | null | "invalid" {
   return Number.isFinite(n) && n >= 0 ? n : "invalid";
 }
 
+/**
+ * 存檔前的檢查錯誤：message 給清單／按鈕旁顯示，field 對應申請單上的格子（標紅用）。
+ * field：name｜siteAreaM2｜otherExpenses｜orderDocType｜amountUntaxed｜taxId｜guildRepaymentNote｜designScope:<列>｜
+ * stage:<列key>:<percentage|amount|receivedOn|invoiceNo|invoicedOn|overrideReason>｜sub:<欄key>:amount。
+ */
+export interface SheetError {
+  field: string;
+  message: string;
+}
+
 /** 存檔前的檢查，回人看得懂的訊息；空陣列＝可以存。 */
-export function applicationSheetErrors(draft: ApplicationSheetDraft, opts: { canFinance: boolean }): string[] {
-  const errors: string[] = [];
-  if (!draft.name.trim()) errors.push("工程名稱不可空白。");
-  if (parseOptionalNumber(draft.siteAreaM2) === "invalid") errors.push("設計面積必須是 0 以上的數字。");
-  if (opts.canFinance && parseOptionalNumber(draft.otherExpenses) === "invalid") errors.push("其他支出必須是 0 以上的數字。");
-  if (draft.designScope.some((row) => !row.discipline.trim() && ((row.item ?? "").trim() || row.amount != null))) {
-    errors.push("設計內容每一列都要填科別（只填項目或金額的列存不進去）。");
-  }
+export function applicationSheetErrors(draft: ApplicationSheetDraft, opts: { canFinance: boolean }): SheetError[] {
+  const errors: SheetError[] = [];
+  if (!draft.name.trim()) errors.push({ field: "name", message: "工程名稱不可空白。" });
+  if (parseOptionalNumber(draft.siteAreaM2) === "invalid") errors.push({ field: "siteAreaM2", message: "設計面積必須是 0 以上的數字。" });
+  if (opts.canFinance && parseOptionalNumber(draft.otherExpenses) === "invalid") errors.push({ field: "otherExpenses", message: "其他支出必須是 0 以上的數字。" });
+  draft.designScope.forEach((row, idx) => {
+    if (!row.discipline.trim() && ((row.item ?? "").trim() || row.amount != null)) {
+      errors.push({ field: `designScope:${idx}`, message: "設計內容每一列都要填科別（只填項目或金額的列存不進去）。" });
+    }
+  });
   if (draft.guildRepaymentNote.trim().length > GUILD_REPAYMENT_NOTE_MAX) {
-    errors.push(`審迄還款最多 ${GUILD_REPAYMENT_NOTE_MAX} 字。`);
+    errors.push({ field: "guildRepaymentNote", message: `審迄還款最多 ${GUILD_REPAYMENT_NOTE_MAX} 字。` });
   }
-  if (draft.designScope.some((row) => row.amount != null && (!Number.isFinite(row.amount) || row.amount < 0))) {
-    errors.push("設計內容的金額必須是 0 以上的數字。");
-  }
+  draft.designScope.forEach((row, idx) => {
+    if (row.amount != null && (!Number.isFinite(row.amount) || row.amount < 0)) {
+      errors.push({ field: `designScope:${idx}`, message: "設計內容的金額必須是 0 以上的數字。" });
+    }
+  });
   return errors;
 }
 

@@ -166,7 +166,7 @@ describe("草稿與只送變更欄位", () => {
     // 舊後端沒有這個鍵（undefined）＝沒填，空草稿不送
     const old = fakeProject()
     expect(applicationSheetPatch(old, applicationSheetDraftOf(old, disciplines), opts)).toEqual({})
-    expect(applicationSheetErrors({ ...d, guildRepaymentNote: "字".repeat(201) }, { canFinance: true })).toEqual(["審迄還款最多 200 字。"])
+    expect(applicationSheetErrors({ ...d, guildRepaymentNote: "字".repeat(201) }, { canFinance: true })).toEqual([{ field: "guildRepaymentNote", message: "審迄還款最多 200 字。" }])
   })
 
   it("看不到錢的人（非 finance）一律不送任何欄位", () => {
@@ -179,12 +179,16 @@ describe("草稿與只送變更欄位", () => {
     const p = fakeProject()
     const d = { ...applicationSheetDraftOf(p, disciplines), siteAreaM2: "-3", name: "" }
     expect(applicationSheetPatch(p, d, opts)).toEqual({})
-    expect(applicationSheetErrors(d, { canFinance: true })).toEqual(["工程名稱不可空白。", "設計面積必須是 0 以上的數字。"])
+    expect(applicationSheetErrors(d, { canFinance: true })).toEqual([
+      { field: "name", message: "工程名稱不可空白。" },
+      { field: "siteAreaM2", message: "設計面積必須是 0 以上的數字。" },
+    ])
+    expect(applicationSheetErrors({ ...d, name: "x", siteAreaM2: "", otherExpenses: "-1" }, { canFinance: true }).map((e) => e.field)).toEqual(["otherExpenses"])
   })
 
   it("設計內容只填項目沒填科別 → 錯誤", () => {
     const d = { ...applicationSheetDraftOf(fakeProject(), disciplines), designScope: [{ discipline: "", item: "x", amount: null }] }
-    expect(applicationSheetErrors(d, { canFinance: true })).toHaveLength(1)
+    expect(applicationSheetErrors(d, { canFinance: true })).toEqual([{ field: "designScope:0", message: expect.stringContaining("科別") }])
   })
 })
 

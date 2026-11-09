@@ -122,6 +122,19 @@ describe("申請單表格：可直接編輯", () => {
     expect(html).toContain('aria-label="付款階段第 7 列金額"')
   })
 
+  it("驗證擋住的格子標紅（data-invalid），沒錯誤就沒有；欄位順序：發票號碼、發票日期、入帳", () => {
+    expect(render()).not.toContain("data-invalid")
+    const html = render({ draft: { name: "", stageEdits: { b1: { percentage: "120", invoicedOn: "2026/1/1", invoiceNo: "AB1" } } } })
+    expect(html).toContain('data-err-field="name"')
+    expect(html).toContain('data-err-field="stage:b1:percentage" data-invalid="true"')
+    expect(html).toContain('data-err-field="stage:b1:invoicedOn" data-invalid="true"')
+    expect(html).not.toContain('data-err-field="stage:b1:invoiceNo" data-invalid')
+    const i = (t: string) => html.indexOf(t)
+    expect(i("第 1 列發票號碼")).toBeLessThan(i("第 1 列發票日期"))
+    expect(i("第 1 列發票日期")).toBeLessThan(i("第 1 列入帳日期"))
+    expect(html).not.toContain("入賬")
+  })
+
   it("發包單位：既有與空欄都可填；利潤、毛利率維持唯讀", () => {
     const html = render()
     expect(html).toContain('aria-label="發包單位第 1 欄發包單位"')
