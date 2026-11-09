@@ -73,6 +73,8 @@ const MS_PER_MIN = 60_000
 //     租戶預設（attendance.defaultLunch，預設 12:00 起 60 分），工時扣「在班區間與午休的重疊」——
 //     09:00–18:00 ＝ 8 小時、加班 0（以前這裡休息 0 分，會記成 9 小時、加班 60 分）。
 //     遲到／早退對它沒有意義，下面一律歸零。
+//   • 兼職不排班（isUnscheduledPartTime）→ 不扣預設午休，照實際打卡段（多組上下班卡／休息卡）算
+//     （unscheduledFallbackShift，2026-11-09）。
 //   • 沒排班的例假日／國定假日（加班）→ 不扣午休，在班多久算多久（業主 2026-10-11 確認，與 6 月 Excel
 //     一致）。
 //   • 沒排班的**工作日** → 彈性上班（@hr/rules flexShiftDef，attendance.flex，預設 08:00–10:00、
@@ -415,6 +417,18 @@ function pickDayShift(
   return unscheduledShift
 }
 
+/**
+ * 沒排班日子的退回班別（pickDayShift 第 4 參數）。純函式。
+ *   • 一般員工：工作日＝整天＋租戶預設午休（工時扣「在班區間與午休的重疊」）；例假日／國定假日＝整天、不扣午休。
+ *   • 兼職不排班（employee-shifts.ts isUnscheduledPartTime，2026-11-09 業主）：不論日別都＝整天、不扣預設午休，
+ *     工時＝各組上下班卡區間的總和——中午打下班卡、回來再打上班卡，中間空檔本來就不在任何一段裡；
+ *     打了休息卡（break_in/out）／外出卡（outing_in/out）的時段已由 punch-pairing 從 pairs 切掉（既有語意，全員一致）。
+ *     只有一組上下班卡、中間沒打休息卡 → 不扣任何休息。晚餐扣除（applyOvertimePipeline）照舊，不受影響。
+ */
+function unscheduledFallbackShift(rules: RuleConfigLike, dayType: DayType, unscheduledPartTime: boolean): ShiftDef {
+  return unscheduledShiftDef(rules, unscheduledPartTime ? "rest_day" : dayType)
+}
+
 export interface ArrivalLateness {
   /** 上班日（租戶時區）。 */
   workDate: DateKey
@@ -458,7 +472,7 @@ export async function lateMinutesForArrival(input: {
     scheduledShift,
     dayType,
     resolvedShift.unscheduledPartTime ? null : flexShiftDef(rules, workDate),
-    unscheduledShiftDef(rules, dayType),
+    unscheduledFallbackShift(rules, dayType, resolvedShift.unscheduledPartTime),
   )
   const mode: ArrivalLateness["mode"] = scheduledShift ? "shift" : shift.flex ? "flex" : "none"
   if (mode === "none") return { workDate, lateMinutes: 0, threshold: null, mode }
@@ -547,7 +561,7 @@ export async function dinnerPromptForOpenShift(input: {
     scheduledShift,
     dayType,
     resolvedShift.unscheduledPartTime ? null : flexShiftDef(rules, workDate),
-    unscheduledShiftDef(rules, dayType),
+    unscheduledFallbackShift(rules, dayType, resolvedShift.unscheduledPartTime),
   )
   const regular = regularMinutesForDay(
     resolveOvertimeBasis(rules),
@@ -744,13 +758,15 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
   // 都沒有＝「沒排班」：工作日＝彈性上班、例假日＝整天不扣午休。
   const resolver = await loadShiftResolver({ tenantId, from, to, employeeIds: employeeId ? [employeeId] : undefined })
   const shiftFor = (empId: string, date: DateKey): ShiftDef | null => resolver.forDay(empId, date, dayTypeFor(empId, date)).shift
-  // 兼職不排班（employee-shifts.ts isUnscheduledPartTime）→ 不套彈性上班：工作日改用「整天＋預設午休」，
-  // 沒有應上下班時間 → 遲到／早退歸零、工時照實。其餘員工照公司彈性上班。
+  // 兼職不排班（employee-shifts.ts isUnscheduledPartTime）→ 不套彈性上班：改用「整天、不扣預設午休」
+  // （unscheduledFallbackShift，2026-11-09 起照實際打卡段算，休息卡已切掉），沒有應上下班時間 →
+  // 遲到／早退歸零、工時照實。其餘員工照公司彈性上班。
+  const unscheduledPtFor = (empId: string, date: DateKey): boolean =>
+    resolver.forDay(empId, date, dayTypeFor(empId, date)).unscheduledPartTime
   const flexFor = (empId: string, date: DateKey): ShiftDef | null =>
-    resolver.forDay(empId, date, dayTypeFor(empId, date)).unscheduledPartTime ? null : flexShiftDef(rules, date)
-  // 沒排班的日子：工作日＝整天＋租戶預設午休（彈性上班生效後改彈性）；例假日／國定假日＝整天、不扣午休。
-  const unscheduledWorkday = unscheduledShiftDef(rules, "workday")
-  const unscheduledRestDay = unscheduledShiftDef(rules, "rest_day")
+    unscheduledPtFor(empId, date) ? null : flexShiftDef(rules, date)
+  // 沒排班的日子：工作日＝整天＋租戶預設午休（彈性上班生效後改彈性）；例假日／國定假日＝整天、不扣午休；
+  // 兼職不排班＝整天、不扣午休（unscheduledFallbackShift）。
   const defaultLunch = resolveDefaultLunch(rules)
 
   // --- approved leave overlapping the window, sliced per local day ---------------
@@ -919,7 +935,7 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
       scheduledShift,
       dayType,
       flexFor(empId, workDate),
-      dayType === "workday" ? unscheduledWorkday : unscheduledRestDay,
+      unscheduledFallbackShift(rules, dayType, unscheduledPtFor(empId, workDate)),
     )
     // 遲到／早退有意義＝有排班，或用彈性上班（有應上下班時間）；其餘歸零。
     const hasExpectedTimes = !!scheduledShift || !!shift.flex
@@ -1010,7 +1026,7 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
       scheduledShift,
       dayType,
       resolved.unscheduledPartTime ? null : flexShiftDef(rules, workDate),
-      dayType === "workday" ? unscheduledWorkday : unscheduledRestDay,
+      unscheduledFallbackShift(rules, dayType, resolved.unscheduledPartTime),
     )
     return {
       dayType,
@@ -1031,6 +1047,7 @@ export async function computeAttendanceRows({ tenantId, from, to, employeeId }: 
 /** Exposed for the settlement unit tests (pure, no IO). */
 export const __internal = {
   pickDayShift,
+  unscheduledFallbackShift,
   sliceLeave,
   shiftWindowUtc,
   sliceWfhDates,

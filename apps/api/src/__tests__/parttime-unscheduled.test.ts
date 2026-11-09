@@ -140,6 +140,44 @@ describe("settleAttendance／lateMinutesForArrival — 兼職不排班", () => {
     expect(arrival).toMatchObject({ lateMinutes: 0, mode: "none", threshold: null })
   })
 
+  describe("兼職不排班不扣預設午休，照實際打卡段算（2026-11-09）", () => {
+    const PT_DAYSHIFT = "bbbbbbbb-0000-4000-8000-0000000000e5" // 兼職、個人預設班別 09:00–18:00 午休 60
+    const SHIFT_DAY = "cccccccc-0000-4000-8000-000000000005"
+    beforeEach(() => {
+      fake.db.shifts!.push({ id: SHIFT_DAY, tenant_id: TENANT_ID, name: "日班", start_time: "09:00", end_time: "18:00", break_minutes: 60, break_start: "12:00" })
+      fake.db.employees!.push(emp(PT_DAYSHIFT, { employment_type: "parttime", default_shift_id: SHIFT_DAY }))
+    })
+    const workedOf = async (empId: string, cards: Array<[type: string, hhmm: string]>) => {
+      for (const [type, hhmm] of cards) punch(empId, type, `${DAY}T${hhmm}:00+08:00`)
+      await settleAttendance({ tenantId: TENANT_ID, from: DAY, to: DAY, employeeId: empId })
+      return rowOf(empId)?.worked_minutes
+    }
+
+    it("兼職不排班 11:00–15:00 一組卡（跨 12:00–13:00、沒打休息卡）→ 240 分，不扣午休", async () => {
+      expect(await workedOf(PT, [["in", "11:00"], ["out", "15:00"]])).toBe(240)
+    })
+
+    it("兼職不排班 11:00–12:30＋13:30–15:00 兩組卡 → 180 分（中間空檔自然不計），無未配對", async () => {
+      expect(await workedOf(PT, [["in", "11:00"], ["out", "12:30"], ["in", "13:30"], ["out", "15:00"]])).toBe(180)
+      expect((rowOf(PT) as Record<string, unknown> | undefined)?.anomaly ?? null).toBeNull()
+    })
+
+    it("兼職不排班 11:00–15:00 中間打休息卡 12:00–12:30 → 210 分（休息卡照既有語意扣，不再另扣午休）", async () => {
+      expect(await workedOf(PT, [["in", "11:00"], ["break_in", "12:00"], ["break_out", "12:30"], ["out", "15:00"]])).toBe(210)
+    })
+
+    it("回歸：正職同時段 11:00–15:00 照扣午休 60 → 180 分；兩組卡 11:00–12:30＋13:30–15:00 → 150 分", async () => {
+      expect(await workedOf(REGULAR, [["in", "11:00"], ["out", "15:00"]])).toBe(180)
+      fake.db.attendance_days = []
+      fake.db.punch_records = []
+      expect(await workedOf(REGULAR, [["in", "11:00"], ["out", "12:30"], ["in", "13:30"], ["out", "15:00"]])).toBe(150)
+    })
+
+    it("回歸：兼職有個人預設班別（含午休 12:00–13:00）11:00–15:00 → 照班別扣午休 180 分", async () => {
+      expect(await workedOf(PT_DAYSHIFT, [["in", "11:00"], ["out", "15:00"]])).toBe(180)
+    })
+  })
+
   it("兼職有個人預設班別 14:30：照班別判，14:37 到＝遲到 7 分", async () => {
     punch(PT_SHIFT, "in", `${DAY}T14:37:00+08:00`)
     punch(PT_SHIFT, "out", `${DAY}T22:30:00+08:00`)
