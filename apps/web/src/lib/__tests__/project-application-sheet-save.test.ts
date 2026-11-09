@@ -551,7 +551,9 @@ describe("依序儲存與失敗回報", () => {
     const res = await runApplicationSheetSave(plan, fullDraft, api)
     expect(api.invoiceBilling).not.toHaveBeenCalled()
     expect(api.receiveBilling).not.toHaveBeenCalled()
-    expect(res.steps.filter((s) => s.status === "skipped").map((s) => s.section)).toEqual(["invoice", "receipt"])
+    // 付款階段（依未稅換算 %）也一併不送（2026-11-09 審查）。
+    expect(api.saveBillingSchedule).not.toHaveBeenCalled()
+    expect(res.steps.filter((s) => s.status === "skipped").map((s) => s.section)).toEqual(["billings", "invoice", "receipt"])
     expect(res.residual.amountUntaxed).toBe("110000")
     const left = Object.values(res.residual.stageEdits)
     expect(left.some((e) => e.invoiceNo === "AB00000001")).toBe(true)
@@ -776,5 +778,75 @@ describe("下方期程的期別標籤：文字來自期別名稱，類型只用�
     expect(billingRowTag(fakeBilling({ kind: "guild_advance", milestone: null }))).toBeNull()
     expect(billingRowTag(fakeBilling({ kind: "guild_advance", milestone: "  " }))).toBeNull()
     expect(billingRowTag(fakeBilling({ kind: "installment", milestone: "訂金款" }))).toEqual({ text: "訂金款", tone: "plain" })
+  })
+})
+
+/** 付款階段金額為主：存後各期金額＝畫面金額（獨立審查 2026-11-09 回報的情境）。 */
+describe("付款階段金額為主：存後金額＝畫面金額", () => {
+  /** 前端鏡像後端 computeInstallments（無請款、無人工指定時）：round(總額 × %)，尾差落最後一期。 */
+  function amountsAfterSave(inst: InstallmentInputExt[], total: number, withResidue = true): number[] {
+    const list = inst.filter((i) => i.kind !== "guild_advance").sort((a, b) => a.installmentNo - b.installmentNo)
+    const out = list.map((i) => (i.overrideAmount != null ? i.overrideAmount : Math.round(total * ((i.percentage ?? 0) / 100))))
+    if (!withResidue) return out
+    const residue = total - out.reduce((a, b) => a + b, 0)
+    const last = list.map((i) => i.overrideAmount == null).lastIndexOf(true)
+    if (residue !== 0 && last >= 0) out[last] += residue
+    return out
+  }
+  const contract = fakeContract({ amount: 1000000 })
+  const mk = (id: string, no: number, pct: number, eff: number, over: Partial<BillingExt> = {}) =>
+    fakeBilling({ id, installmentNo: no, percentage: pct, calculatedAmount: eff, effectiveAmount: eff, plannedOn: null, ...over })
+
+  it("未稅 100 萬→200 萬、只改第 3 期為 100 萬：合約先存、重抓期程後仍存 40 萬／30 萬／100 萬", async () => {
+    const old = [mk("a", 1, 40, 400000), mk("b", 2, 30, 300000), mk("c", 3, 30, 300000)]
+    const fresh = [mk("a", 1, 40, 800000), mk("b", 2, 30, 600000), mk("c", 3, 30, 600000)]
+    const ctx = ctxOf({ billings: old, contracts: [contract], money: fakeMoney({ amountUntaxed: 1000000, amountSource: "contract" }) })
+    const draft = draftOf(ctx, { amountUntaxed: "2000000", stageEdits: { c: { amount: "1000000" } } })
+    const plan = applicationSheetPlan(ctx, draft)
+    expect(plan.errors).toEqual([])
+    // 各期 % 算回的金額＝畫面金額；合計 170 萬 ≠ 200 萬，差 30 萬依後端尾差規則加到最後一期，並提示。
+    expect(amountsAfterSave(plan.stages.installments ?? [], 2000000, false)).toEqual([400000, 300000, 1000000])
+    expect(plan.warnings.join()).toMatch(/差 300,000.*最後一期/)
+    const api = fakeApi({ fetchBillings: vi.fn(async () => fresh) })
+    await runApplicationSheetSave(plan, draft, api, ctx)
+    const sent = vi.mocked(api.saveBillingSchedule).mock.calls[0][0]
+    // 重抓到的期程金額已依新總額變成 80 萬／60 萬／60 萬，仍以畫面金額換算（不是 120%）。
+    expect(amountsAfterSave(sent, 2000000, false)).toEqual([400000, 300000, 1000000])
+    expect(Math.round(sent.reduce((a, i) => a + (i.percentage ?? 0), 0) * 1000) / 1000).toBe(85)
+  })
+
+  it("吸收尾差的期別換人：所有期別以畫面金額換算 % 一起送，第 3 期維持 1,000,200", () => {
+    const rows = [mk("a", 1, 33.33, 999900), mk("b", 2, 33.33, 999900), mk("c", 3, 33.33, 1000200, { residueApplied: 300 })]
+    const ctx = ctxOf({ billings: rows, money: fakeMoney({ amountUntaxed: 3000000, amountSource: "contract" }) })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { "new-installment-4": { milestone: "保留款", amount: "0" } } }))
+    expect(plan.errors).toEqual([])
+    expect(amountsAfterSave(plan.stages.installments ?? [], 3000000)).toEqual([999900, 999900, 1000200, 0])
+    expect(plan.warnings).toEqual([])
+  })
+
+  it("沒改任何期別也沒改未稅：不送期程（舊人工指定資料原封不動）", () => {
+    const legacy = [mk("a", 1, 33.33, 999900), mk("b", 2, 33.33, 1000000, { overrideAmount: 1000000, overrideReason: "談定" }), mk("c", 3, 33.34, 1000100)]
+    const ctx = ctxOf({ billings: legacy, money: fakeMoney({ amountUntaxed: 3000000, amountSource: "contract" }) })
+    expect(applicationSheetPlan(ctx, draftOf(ctx)).stages.installments).toBeNull()
+  })
+
+  it("未稅變動：沒被編輯的人工指定列保留指定金額與理由", () => {
+    const rows = [mk("a", 1, 50, 50000), mk("b", 2, 50, 45000, { overrideAmount: 45000, overrideReason: "談定" })]
+    const ctx = ctxOf({ billings: rows, money: fakeMoney({ amountUntaxed: 100000, amountSource: "contract" }) })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { amountUntaxed: "200000" }))
+    expect(plan.stages.installments?.[1]).toMatchObject({ id: "b", overrideAmount: 45000, overrideReason: "談定" })
+    expect(plan.stages.installments?.[0]).toMatchObject({ id: "a", percentage: 25 })
+  })
+
+  it("合約金額存失敗：付款階段不送、標示跳過", async () => {
+    const old = [mk("a", 1, 40, 400000), mk("b", 2, 60, 600000)]
+    const ctx = ctxOf({ billings: old, contracts: [contract], money: fakeMoney({ amountUntaxed: 1000000, amountSource: "contract" }) })
+    const draft = draftOf(ctx, { amountUntaxed: "2000000", stageEdits: { a: { amount: "500000" } } })
+    const plan = applicationSheetPlan(ctx, draft)
+    const api = fakeApi({ upsertMainContract: vi.fn(async () => { throw new Error("boom") }), fetchBillings: vi.fn(async () => old) })
+    const res = await runApplicationSheetSave(plan, draft, api, ctx)
+    expect(api.saveBillingSchedule).not.toHaveBeenCalled()
+    expect(res.steps.find((s) => s.section === "billings")).toMatchObject({ status: "skipped" })
+    expect(res.residual.stageEdits.a).toMatchObject({ amount: "500000" })
   })
 })

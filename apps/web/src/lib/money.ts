@@ -44,7 +44,8 @@ export interface SanitizeMoneyOptions {
 
 /**
  * 打字／貼上的字串 → 純數字字串（不含逗號）。
- * 全形數字轉半形；非數字字元丟掉；負號只留開頭一個（allowNegative）；小數點只留第一個（allowDecimal）。
+ * 全形數字轉半形；非數字字元丟掉；負號只留開頭一個（allowNegative）；小數點只留第一個（allowDecimal）；
+ * 不收小數時小數點後面捨去。
  */
 export function sanitizeMoneyInput(raw: string, options: SanitizeMoneyOptions = {}): string {
   const { allowNegative = false, allowDecimal = false } = options;
@@ -52,7 +53,8 @@ export function sanitizeMoneyInput(raw: string, options: SanitizeMoneyOptions = 
     .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
     .replace(/[．。]/g, ".")
     .replace(/[－—–]/g, "-");
-  const trimmed = halfWidth.trim();
+  // 不收小數的欄位：小數點之後整段捨去（「12,000.00」→ 12000），不能把點刪掉後接數字（會變 1200000）。
+  const trimmed = allowDecimal ? halfWidth.trim() : halfWidth.trim().split(".")[0];
   const negative = allowNegative && trimmed.startsWith("-");
   let out = "";
   let seenDot = false;

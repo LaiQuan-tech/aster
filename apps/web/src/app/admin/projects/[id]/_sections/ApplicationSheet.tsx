@@ -414,6 +414,8 @@ export function ApplicationSheet({
       : { taxAmount: money?.taxAmount ?? null, amountTotal: money?.amountTotal ?? null };
   const hasContractDoc = orderDoc?.docType === "contract";
   // 付款階段：金額為主、% ＝金額 ÷ 銷售金額（未稅）。總額取合約（後端試算口徑），沒有合約時用畫面上的未稅。
+  /** % 反算金額只在後端會依 % 試算時做（有合約）；只有報價單時填 % 不連帶寫金額（不必人工指定理由）。 */
+  const stageCalcTotal = editable ? stageContractTotal(money, contracts, draft) : null;
   const stageTotal = editable
     ? (stageContractTotal(money, contracts, draft) ?? (untaxedTyped !== null && Number.isFinite(untaxedTyped) ? untaxedTyped : (money?.amountUntaxed ?? null)))
     : null;
@@ -775,7 +777,7 @@ export function ApplicationSheet({
               type="text"
               inputMode="decimal"
               value={pctText}
-              onChange={(e) => patchStage(applyStagePctEdit(s, rowEdit, e.target.value.replace(/[^\d.]/g, ""), stageTotal))}
+              onChange={(e) => patchStage(applyStagePctEdit(s, rowEdit, e.target.value.replace(/[^\d.]/g, ""), stageCalcTotal))}
             />
             <span className="shrink-0">%</span>
           </span>
