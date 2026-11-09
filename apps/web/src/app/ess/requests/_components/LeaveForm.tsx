@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * 請假（單位精細到小時，2026-10-11）：假別 → 單日｜多日 → 事由 → （需憑證假別才出現附件且必填）→ 送出。
+ * 請假（單位精細到小時，2026-10-11）：假別 → 單日｜多日 → 事由 → 附件（所有假別都有；需憑證假別必填、其餘選填）→ 送出。
  *   單日：全天｜上午｜下午｜指定時數（開始時間＋請幾小時；開始時間從上班時間起每 30 分一格、
  *         不能落在午休，時數 0.5 小時為單位（2026-11-08 業主決定，所有假別一律）、最多到下班前可請的時數；
  *         結束時間由系統算、跳過午休，例 11:30 起 1.5 小時 → 11:30–14:00）。
@@ -427,21 +427,23 @@ export function LeaveForm({
 
       <ReasonField value={reason} onChange={setReason} placeholder="選填，最多 250 字" />
 
-      {requiresAttachment && (
-        <AttachmentField
-          files={files}
-          onChange={(next) => {
-            setFiles(next);
-            setLocalError(null);
-          }}
-          required
-          label="憑證"
-          // 附件限制的說法與 AttachmentField 預設說明（form-shared.tsx）一致：照片上傳前自動壓縮，PDF 等不壓縮的單檔 3 MB。
-          // 這個 hint 會取代預設說明（不是疊加），畫面上只出現這一句。
-          hint="此假別需附憑證（例如診所收據）；最多 3 個，照片會自動壓縮，PDF 單檔 3 MB"
-          error={localError === "此假別需要附上憑證" ? localError : undefined}
-        />
-      )}
+      <AttachmentField
+        files={files}
+        onChange={(next) => {
+          setFiles(next);
+          setLocalError(null);
+        }}
+        required={requiresAttachment}
+        label={requiresAttachment ? "憑證" : "佐證照片（選填）"}
+        // 附件限制的說法與 AttachmentField 預設說明（form-shared.tsx）一致：照片上傳前自動壓縮，PDF 等不壓縮的單檔 3 MB。
+        // 這個 hint 會取代預設說明（不是疊加），畫面上只出現這一句。
+        hint={
+          requiresAttachment
+            ? "此假別需附憑證（例如診所收據）；最多 3 個，照片會自動壓縮，PDF 單檔 3 MB"
+            : "例如診斷證明、行程截圖；最多 3 個，照片會自動壓縮"
+        }
+        error={localError === "此假別需要附上憑證" ? localError : undefined}
+      />
 
       <SubmitBar
         submitting={submitting}

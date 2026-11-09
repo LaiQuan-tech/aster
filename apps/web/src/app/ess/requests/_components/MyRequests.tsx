@@ -23,6 +23,7 @@ import {
   approvalLine,
   describeRequest,
   needsAttachment,
+  canAddAttachment,
   requestTitle,
 } from "@/lib/request-forms";
 import { pickedFileError } from "@/lib/upload-prep";
@@ -127,7 +128,7 @@ export function MyRequests({ requests, loading, error, highlightId, defaultShift
     setUploadingId(requestId);
     try {
       await uploadAttachment(requestId, file);
-      toast.show("已上傳憑證", "success");
+      toast.show("已上傳附件", "success");
       await onReload();
     } catch (err) {
       setActionError(describeError(err, "上傳憑證失敗"));
@@ -241,9 +242,10 @@ function RequestRow({
   const line = approvalLine(r);
   const comments = approvalComments(r);
   const missing = needsAttachment(r);
+  const canUpload = canAddAttachment(r);
   const attachments = typeof r.attachment_count === "number" ? r.attachment_count : null;
   const fillExpense = showFillExpense(r);
-  const showFooter = (attachments != null && attachments > 0) || missing || r.status === "pending" || fillExpense || !!claims;
+  const showFooter = (attachments != null && attachments > 0) || missing || canUpload || r.status === "pending" || fillExpense || !!claims;
 
   return (
     <li
@@ -281,9 +283,9 @@ function RequestRow({
             </span>
           )}
           {missing && <Pill tone="red">缺憑證</Pill>}
-          {missing && (
+          {canUpload && (
             <Button size="sm" variant="secondary" onClick={onUpload} loading={uploading}>
-              上傳憑證
+              {missing ? "上傳憑證" : "補傳附件"}
             </Button>
           )}
           {/* 已駁回／撤回的單：報銷頁不再列它（預填不到），只顯示文字不可點 */}

@@ -23,6 +23,7 @@ import {
   isBuildError,
   isRequestKind,
   needsAttachment,
+  canAddAttachment,
   overtimeHours,
   remainingHours,
   requestErrorCode,
@@ -443,6 +444,14 @@ describe("requestTitle / approvalLine / needsAttachment / remainingHours", () =>
     expect(approvalLine(row({ status: "rejected", decided_at: "2026-09-17T02:21:00Z" }), { tz: TZ })).toBe(
       "已駁回 · 09/17 10:21",
     );
+  });
+
+  it("canAddAttachment：待簽核且附件未滿 3 個（不分種類）；已核准／滿 3 個／欄位缺席 → false", () => {
+    expect(canAddAttachment(row({ kind: "ot", attachment_count: 0 }))).toBe(true);
+    expect(canAddAttachment(row({ kind: "business_trip", attachment_count: 2 }))).toBe(true);
+    expect(canAddAttachment(row({ kind: "fix_punch", attachment_count: 3 }))).toBe(false);
+    expect(canAddAttachment(row({ status: "approved", attachment_count: 0 }))).toBe(false);
+    expect(canAddAttachment(row({ attachment_count: undefined }))).toBe(false);
   });
 
   it("needsAttachment：pending 請假且需憑證且 0 附件才 true；欄位缺席 → false", () => {
@@ -1055,9 +1064,9 @@ describe("附件太大的錯誤碼：API 的 file_too_large 與舊碼 payload_to
 describe("請假附件上傳失敗的提醒（單已建立）", () => {
   const NET = "連線失敗，請確認網路連線後再試";
 
-  it("全部沒傳上 → 列出檔名、原因寫一次，請到「我的申請」按「上傳憑證」補傳", () => {
+  it("全部沒傳上 → 列出檔名、原因寫一次，可到「我的申請」補傳", () => {
     expect(attachmentUploadWarning([{ name: "診斷證明.jpg", reason: NET }], 1)).toBe(
-      `申請已送出，但附件「診斷證明.jpg」上傳失敗（${NET}）。請在下方「我的申請」按「上傳憑證」補傳。`,
+      `申請已送出，但附件「診斷證明.jpg」上傳失敗（${NET}）。可到下方「我的申請」補傳。`,
     );
     expect(
       attachmentUploadWarning(
@@ -1067,12 +1076,12 @@ describe("請假附件上傳失敗的提醒（單已建立）", () => {
         ],
         2,
       ),
-    ).toBe(`申請已送出，但附件「a.jpg」「b.pdf」上傳失敗（${NET}）。請在下方「我的申請」按「上傳憑證」補傳。`);
+    ).toBe(`申請已送出，但附件「a.jpg」「b.pdf」上傳失敗（${NET}）。可到下方「我的申請」補傳。`);
   });
 
   it("只有部分沒傳上 → 說其餘已上傳（列表不會再給「上傳憑證」）；原因不同就各寫各的", () => {
     expect(attachmentUploadWarning([{ name: "b.jpg", reason: NET }], 3)).toBe(
-      `申請已送出，但附件「b.jpg」上傳失敗（${NET}）；其餘 2 個已上傳。缺的附件若必要，請撤回這張申請後重新申請。`,
+      `申請已送出，但附件「b.jpg」上傳失敗（${NET}）；其餘 2 個已上傳。可到下方「我的申請」補傳（每單最多 3 個）。`,
     );
     expect(
       attachmentUploadWarning(
@@ -1083,7 +1092,7 @@ describe("請假附件上傳失敗的提醒（單已建立）", () => {
         3,
       ),
     ).toBe(
-      `申請已送出，但附件「a.jpg」（${NET}）、「b.pdf」（附件太大，單檔限 1 MB）上傳失敗；其餘 1 個已上傳。缺的附件若必要，請撤回這張申請後重新申請。`,
+      `申請已送出，但附件「a.jpg」（${NET}）、「b.pdf」（附件太大，單檔限 1 MB）上傳失敗；其餘 1 個已上傳。可到下方「我的申請」補傳（每單最多 3 個）。`,
     );
   });
 

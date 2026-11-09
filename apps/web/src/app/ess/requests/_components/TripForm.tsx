@@ -29,7 +29,7 @@ import {
   type ExpenseMethod,
 } from "@/lib/request-forms";
 import { tripExpenseNote, validateExpenseDrafts, type ExpenseDraft, type ReadyExpense } from "@/lib/trip-expense";
-import { ExpenseMethodField, ReasonField, SubmitBar, type FormCommonProps } from "./form-shared";
+import { AttachmentField, ExpenseMethodField, ReasonField, SubmitBar, validateFiles, type FormCommonProps } from "./form-shared";
 import { TripExpenseDrafts } from "./TripExpenseDrafts";
 
 type TripType = "outing" | "business_trip";
@@ -48,7 +48,7 @@ export interface TripFormProps extends FormCommonProps {
   /** 報銷類別（自行墊付當場填明細用）；null＝載入中或失敗，不顯示明細區。 */
   expenseCategories: MyExpenseCategory[] | null;
   /** 自行墊付且有填報銷明細時的送出（公出單＋報銷單）；沒填明細仍走 onSubmit。 */
-  onSubmitWithExpenses: (body: CreateRequestBody, summary: string, expenses: ReadyExpense[]) => Promise<void>;
+  onSubmitWithExpenses: (body: CreateRequestBody, summary: string, expenses: ReadyExpense[], files: File[]) => Promise<void>;
 }
 
 export function TripForm({
@@ -75,6 +75,7 @@ export function TripForm({
   // 預支金額欄：沒動過就帶預估花費當預設（可改）；改過就是員工填的值。
   const [advanceTouched, setAdvanceTouched] = useState(false);
   const [reason, setReason] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
   const [localError, setLocalError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<ExpenseDraft[]>([]);
   const [draftErrorIndex, setDraftErrorIndex] = useState<number | null>(null);
@@ -99,6 +100,8 @@ export function TripForm({
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setLocalError(null);
+    const fileError = validateFiles(files);
+    if (fileError) return setLocalError(fileError);
     const body = buildCreateBody("business_trip", {
       tripType,
       date,
@@ -122,9 +125,9 @@ export function TripForm({
         setDraftErrorIndex(checked.index);
         return setLocalError(checked.error);
       }
-      if (checked.ready.length > 0) return onSubmitWithExpenses(body, summary, checked.ready);
+      if (checked.ready.length > 0) return onSubmitWithExpenses(body, summary, checked.ready, files);
     }
-    await onSubmit(body, [], summary);
+    await onSubmit(body, files, summary);
   }
 
   return (
@@ -314,6 +317,16 @@ export function TripForm({
       </ExpenseMethodField>
 
       <ReasonField value={reason} onChange={setReason} placeholder="選填，例如：客戶拜訪、展會" />
+
+      <AttachmentField
+        files={files}
+        onChange={(next) => {
+          setFiles(next);
+          clear();
+        }}
+        label="佐證照片（選填）"
+        hint="例如邀約信、行程或會議通知截圖；最多 3 個，照片會自動壓縮"
+      />
 
       <SubmitBar submitting={submitting} error={localError ?? submitError} />
     </form>

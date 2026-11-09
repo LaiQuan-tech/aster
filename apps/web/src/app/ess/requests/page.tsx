@@ -300,7 +300,7 @@ function RequestsView() {
   // 公出單建立失敗才留在表單（什麼都沒建）；建好了就一律換成功畫面，報銷沒送成的在成功畫面說明、用「填報銷單」補——
   // 不會因為報銷失敗讓員工再按一次送出、多建一張公出單。
   const submitTripWithExpenses = useCallback(
-    async (body: CreateRequestBody, summary: string, expenses: ReadyExpense[]) => {
+    async (body: CreateRequestBody, summary: string, expenses: ReadyExpense[], files: File[]) => {
       setSubmitting(true);
       setSubmitError(null);
       try {
@@ -321,6 +321,15 @@ function RequestsView() {
           return;
         }
         if (result.failed.length > 0) console.warn("[申請] 公出單已建立，部分報銷沒送成", result.failed);
+        // 公出單的佐證照片：單已建好，逐檔上傳；失敗的不影響申請，成功畫面提示可到「我的申請」補傳。
+        const failedFiles: { name: string; reason: string }[] = [];
+        for (const file of files) {
+          try {
+            await uploadAttachment(result.trip.requestId, file);
+          } catch (error) {
+            failedFiles.push({ name: file.name, reason: describeError(error, "上傳失敗") });
+          }
+        }
         // 憑證沒傳上、撤回也失敗而留下的報銷單：報銷頁只有一格「留下的單」，空著才記（下次在報銷頁送出會先撤回它）。
         let savedLeftover = false;
         const leftover = result.failed.find((f) => f.leftover)?.leftover;
@@ -333,7 +342,7 @@ function RequestsView() {
         }
         invalidateEssState();
         showSuccess(result.trip, summary, {
-          uploadWarning: null,
+          uploadWarning: attachmentUploadWarning(failedFiles, files.length),
           expenseOutcome: tripExpenseOutcome(result.filed, result.failed, (f) => failedExpenseReason(f, savedLeftover && f.leftover === leftover)),
           fillExpenseHref: tripExpenseHref(result.trip.requestId),
         });
