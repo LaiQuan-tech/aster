@@ -5,8 +5,8 @@ import type { Subcontract, SubcontractKind } from "./projects-ext-api"
  *
  * - 類型＝事務所（firm）：顯示「代扣率%」「代扣日期」「起扣門檻」；不顯示發票。
  * - 其他類型（下包工程、技師簽證費）：顯示「發票號碼」「發票日期」；不顯示代扣欄。
- * - 提醒（只對事務所；不擋存）：金額 > 20,000 且代扣率 0 → 請確認是否需代扣 10%；
- *   金額 ≥ 20,000 → 提醒二代健保補充保費 2.11%。
+ * - 提醒（只對事務所；不擋存；逐期判斷，與後端 withheldAmount 一致）：任一期 > 20,000 且代扣率 0 → 請確認是否需代扣 10%；
+ *   任一期 ≥ 20,000 → 提醒二代健保補充保費 2.11%。沒有期款時用合約總額估算。
  */
 
 export const SUBCONTRACT_KIND_OPTIONS: ReadonlyArray<{ value: SubcontractKind; label: string }> = [
@@ -35,44 +35,73 @@ export const THRESHOLD_TIP =
   "起扣門檻：每期金額「超過」此數才依代扣率算代扣（預設 20,000，與上方所得稅規則一致；剛好等於門檻不扣）。"
 
 export interface WithholdingHints {
-  /** 金額 > 20,000 而代扣率為 0：請確認是否需代扣 10%。 */
+  /** 有期款且任一期 > 20,000 而代扣率為 0（無期款時用合約總額估算）：請確認是否需代扣 10%。 */
   confirmWithholding: boolean
-  /** 金額 ≥ 20,000：另需代扣二代健保補充保費 2.11%。 */
+  /** 任一期 ≥ 20,000（無期款時用合約總額估算）：另需代扣二代健保補充保費 2.11%。 */
   supplementaryPremium: boolean
+  /** true＝沒有期款資料，依合約總額估算；實際仍逐期判斷。 */
+  estimated: boolean
 }
 
-export function withholdingHints(row: Pick<Subcontract, "kind" | "amount" | "withholdingRate">): WithholdingHints {
-  if (!isFirmKind(row.kind)) return { confirmWithholding: false, supplementaryPremium: false }
-  const amount = Number(row.amount) || 0
+/** 單期金額：有效毛額優先，其次系統試算金額；都沒有就略過。 */
+function periodAmounts(payments: Subcontract["payments"]): number[] {
+  const out: number[] = []
+  for (const p of payments ?? []) {
+    const v = p.effectiveAmount ?? p.amount
+    if (v != null && Number.isFinite(Number(v))) out.push(Number(v))
+  }
+  return out
+}
+
+/** 與後端 withheldAmount 一致：逐期判斷，不是看合約總額。 */
+export function withholdingHints(
+  row: Pick<Subcontract, "kind" | "amount" | "withholdingRate"> & Partial<Pick<Subcontract, "payments">>,
+): WithholdingHints {
+  if (!isFirmKind(row.kind)) return { confirmWithholding: false, supplementaryPremium: false, estimated: false }
+  const periods = periodAmounts(row.payments)
+  const estimated = periods.length === 0
+  const amounts = estimated ? [Number(row.amount) || 0] : periods
   const rate = Number(row.withholdingRate) || 0
   return {
-    confirmWithholding: amount > WITHHOLDING_TAX_THRESHOLD && rate === 0,
-    supplementaryPremium: amount >= SUPPLEMENTARY_PREMIUM_THRESHOLD,
+    confirmWithholding: rate === 0 && amounts.some((a) => a > WITHHOLDING_TAX_THRESHOLD),
+    supplementaryPremium: amounts.some((a) => a >= SUPPLEMENTARY_PREMIUM_THRESHOLD),
+    estimated,
   }
+}
+
+/** 列載入時記住的原類型／原代扣率（toSubRows 填；新建列沒有）。 */
+export interface KindChangeOrigin {
+  _origKind?: SubcontractKind | null
+  _origRate?: number | null
 }
 
 /**
  * 切換類型時要一起改的欄位：不相關的那一組清成 null（後端也會再清一次）。
- * 改成事務所且代扣率是 0 → 帶預設 10%；從事務所改成其他類型 → 代扣率歸 0（開發票不代扣）。
+ * - 切成事務所：目前代扣率 > 0 保留；為 0 才帶預設 10%（切回原本就是事務所且原率 > 0 → 還原原值）。
+ * - 從事務所切到其他：該列原本是其他類型 → 還原載入時的原代扣率；原本就是事務所（或新建列）→ 歸 0（開發票不代扣）。
  */
 export function kindChangePatch(
-  row: Pick<Subcontract, "kind" | "withholdingRate">,
+  row: Pick<Subcontract, "kind" | "withholdingRate"> & KindChangeOrigin,
   next: SubcontractKind,
 ): Partial<Subcontract> {
   if (next === row.kind) return {}
+  const origRate = Number(row._origRate) || 0
   if (isFirmKind(next)) {
+    const cur = Number(row.withholdingRate) || 0
+    const rate = cur > 0 ? cur : row._origKind === "firm" && origRate > 0 ? origRate : DEFAULT_FIRM_WITHHOLDING_RATE
     return {
       kind: next,
       invoiceNo: null,
       invoiceDate: null,
-      ...((Number(row.withholdingRate) || 0) === 0 ? { withholdingRate: DEFAULT_FIRM_WITHHOLDING_RATE } : {}),
+      ...(rate !== cur ? { withholdingRate: rate } : {}),
     }
   }
-  return {
-    kind: next,
-    withholdingDate: null,
-    ...(isFirmKind(row.kind) ? { withholdingRate: 0 } : {}),
+  const patch: Partial<Subcontract> = { kind: next, withholdingDate: null }
+  if (isFirmKind(row.kind)) {
+    const originallyOther = row._origKind != null && !isFirmKind(row._origKind)
+    patch.withholdingRate = originallyOther ? origRate : 0
   }
+  return patch
 }
 
 /** 存檔 payload 裡 0089 三欄：依類型只送相關那組，另一組送 null。 */

@@ -195,7 +195,7 @@ export function SubcontractsCard({
         reason,
       });
       const nextPayments = res.subcontract.payments ?? [];
-      setSubDraft((rows) => rows.map((r) => (r.id === subId ? { ...res.subcontract, _key: r._key } : r)));
+      setSubDraft((rows) => rows.map((r) => (r.id === subId ? { ...res.subcontract, _key: r._key, _origKind: res.subcontract.kind, _origRate: res.subcontract.withholdingRate } : r)));
       setPaymentsDraft((d) => ({ ...d, [subId]: nextPayments }));
       setOriginalPayments((d) => ({ ...d, [subId]: nextPayments }));
       await load();
@@ -354,7 +354,7 @@ export function SubcontractsCard({
                       <button type="button" className="text-xs text-gray-400 hover:text-red-600" onClick={() => removeSubRow(idx)}>移除</button>
                     </td>
                   </tr>
-                  <SubcontractHintRow row={row} onClearRate={() => patchSub(idx, { withholdingRate: 0 })} />
+                  <SubcontractHintRow row={row} payments={row.id ? paymentsDraft[row.id] : undefined} onClearRate={() => patchSub(idx, { withholdingRate: 0 })} />
                   {row.id && expandedSub === row.id && (
                     <tr className="border-b bg-gray-50/60 last:border-0">
                       <td colSpan={7} className="p-3">
@@ -497,11 +497,11 @@ export function SubcontractsCard({
 
 /**
  * 每列下方的提醒（不擋存）：
- * - 事務所：金額 > 20,000 且代扣率 0 → 黃色「請確認是否需代扣 10%」；金額 ≥ 20,000 → 提醒二代健保補充保費 2.11%。
+ * - 事務所：任一期 > 20,000（無期款用合約總額估算）且代扣率 0 → 黃色「請確認是否需代扣 10%」；任一期 ≥ 20,000 → 提醒二代健保補充保費 2.11%。
  * - 其他類型但仍存著代扣率（舊資料預設 10%）：期款仍會依它代扣，提示一下並給「改為不代扣」。
  */
-function SubcontractHintRow({ row, onClearRate }: { row: SubRow; onClearRate: () => void }) {
-  const hints = withholdingHints(row);
+function SubcontractHintRow({ row, payments, onClearRate }: { row: SubRow; payments?: SubcontractPayment[]; onClearRate: () => void }) {
+  const hints = withholdingHints({ ...row, payments: payments ?? row.payments });
   const legacyRate = !isFirmKind(row.kind) && (Number(row.withholdingRate) || 0) > 0;
   if (!hints.confirmWithholding && !hints.supplementaryPremium && !legacyRate) return null;
   return (
@@ -510,12 +510,12 @@ function SubcontractHintRow({ row, onClearRate }: { row: SubRow; onClearRate: ()
         <div className="flex flex-wrap gap-2 text-xs">
           {hints.confirmWithholding && (
             <span className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-amber-800" data-testid="hint-confirm-withholding">
-              金額超過 20,000，請確認是否需代扣 10%
+              {hints.estimated ? "依合約總額估算，實際逐期判斷：" : ""}單期金額超過 20,000，請確認是否需代扣 10%
             </span>
           )}
           {hints.supplementaryPremium && (
             <span className="rounded border border-amber-200 bg-amber-50/60 px-2 py-0.5 text-amber-700" data-testid="hint-supplementary-premium">
-              金額達 20,000 以上，另需代扣二代健保補充保費 2.11%
+              {hints.estimated ? "依合約總額估算，實際逐期判斷：" : ""}單期金額達 20,000 以上，另需代扣二代健保補充保費 2.11%
             </span>
           )}
           {legacyRate && (

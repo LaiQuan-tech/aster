@@ -34,11 +34,11 @@ export function todayKey(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export type SubRow = Subcontract & { _key: string };
+export type SubRow = Subcontract & { _key: string; _origKind?: Subcontract["kind"] | null; _origRate?: number | null };
 let subSeq = 0;
 export const newSubKey = () => `newsub-${Date.now()}-${subSeq++}`;
 export function toSubRows(list: Subcontract[]): SubRow[] {
-  return list.map((s) => ({ ...s, _key: s.id ?? newSubKey() }));
+  return list.map((s) => ({ ...s, _key: s.id ?? newSubKey(), ...(s.id ? { _origKind: s.kind, _origRate: s.withholdingRate } : {}) }));
 }
 export function emptySubcontractsResponse(): SubcontractsResponse {
   return { subcontracts: [], summary: { subcontractTotal: 0, technicianTotal: 0, total: 0, paidTotal: 0, withheldTotal: 0 } };
