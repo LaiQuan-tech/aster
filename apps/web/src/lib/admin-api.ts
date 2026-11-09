@@ -608,6 +608,8 @@ export interface BeyondCapDetail {
 
 export interface LeaveRequest {
   id: string;
+  /** 簽核中的請假列：剩餘假摘要（API 批次附加；簽核人／HR 才有）。 */
+  leaveBalance?: import("./leave-balance-summary").LeaveBalanceSummary | null;
   tenant_id: string;
   employee_id: string;
   kind: RequestKind;

@@ -638,6 +638,7 @@ async function queueComplianceNotifications(
     .eq("status", "active")
   if (hrErr) throw new Error(`detectAnomalies (hr admins): ${hrErr.message}`)
   const hrIds = (hrData ?? []).map((r) => r.id as string)
+  const hrSet = new Set(hrIds)
 
   const subjects = Array.from(new Set(findings.map((f) => f.employeeId)))
   const recipientsBySubject = new Map<string, string[]>()
@@ -677,7 +678,8 @@ async function queueComplianceNotifications(
         body: complianceBody(f),
         channel: "inapp",
         status: "pending",
-        payload: { anomalyType: f.type, from: window.from, to: window.to, subjectEmployeeId: f.employeeId, key, detail: f.detail },
+        // recipientRole：HR → 寄信連結到後台打卡紀錄；非 HR 主管沒有後台權限（@hr/rules notificationLink）。
+        payload: { anomalyType: f.type, from: window.from, to: window.to, subjectEmployeeId: f.employeeId, key, detail: f.detail, recipientRole: hrSet.has(recipient) ? "hr" : "manager" },
       })
     }
   }

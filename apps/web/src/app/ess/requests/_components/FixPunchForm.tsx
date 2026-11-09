@@ -5,12 +5,14 @@
  * body：`segments:[{date,startTime:t,endTime:t,hours:0,type:"in"|"out"}]`、`startAt = endAt`。
  * 卡別預設上班；從打卡紀錄頁「申請補卡」進來時，缺下班的那天帶 `type=out`（請假頁讀網址傳 `initialPunchType`）。
  * 時間沒動過就跟著卡別與班別走（上班＝班別開始、下班＝班別結束；班別晚到也會更新），使用者改過就不覆蓋。
+ * 佐證照片（選填，2026-11-09）：最多 3 個，交給頁面層 onSubmit 的 files——與請假憑證同一條路（照片自動壓縮 →
+ * 建單成功後逐檔 uploadAttachment；附件失敗單子仍保留、顯示哪個檔沒傳上去）。
  */
 import { useId, useState, type FormEvent } from "react";
 import { Field, Input, Segmented } from "@/components/ess-ui";
 import { normalizeHm, type ShiftLike } from "@/lib/leave-hours";
 import { PUNCH_TYPE_LABEL, buildCreateBody, describeBody, isBuildError } from "@/lib/request-forms";
-import { ReasonField, SubmitBar, type FormCommonProps } from "./form-shared";
+import { AttachmentField, ReasonField, SubmitBar, validateFiles, type FormCommonProps } from "./form-shared";
 
 type PunchType = "in" | "out";
 
@@ -32,6 +34,7 @@ export function FixPunchForm({ defaultShift, initialPunchType, initialDate, subm
   const [type, setType] = useState<PunchType>(initialPunchType === "out" ? "out" : "in");
   const [time, setTime] = useState("");
   const [reason, setReason] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
   const [localError, setLocalError] = useState<string | null>(null);
 
   const timeValue = time || normalizeHm(type === "in" ? defaultShift.start_time : defaultShift.end_time);
@@ -39,6 +42,8 @@ export function FixPunchForm({ defaultShift, initialPunchType, initialDate, subm
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setLocalError(null);
+    const fileError = validateFiles(files);
+    if (fileError) return setLocalError(fileError);
     const body = buildCreateBody("fix_punch", {
       date,
       type,
@@ -46,7 +51,7 @@ export function FixPunchForm({ defaultShift, initialPunchType, initialDate, subm
       reason,
     });
     if (isBuildError(body)) return setLocalError(body.error);
-    await onSubmit(body, [], `補卡 · ${describeBody(body)}`);
+    await onSubmit(body, files, `補卡 · ${describeBody(body)}`);
   }
 
   return (
@@ -90,6 +95,16 @@ export function FixPunchForm({ defaultShift, initialPunchType, initialDate, subm
       </Field>
 
       <ReasonField value={reason} onChange={setReason} required label="補卡原因" placeholder="例如：忘記打卡、手機沒電" />
+
+      <AttachmentField
+        files={files}
+        onChange={(next) => {
+          setFiles(next);
+          setLocalError(null);
+        }}
+        label="佐證照片（選填）"
+        hint="例如當天的工作照、門禁紀錄截圖；最多 3 個，照片會自動壓縮"
+      />
 
       <SubmitBar submitting={submitting} error={localError ?? submitError} />
     </form>

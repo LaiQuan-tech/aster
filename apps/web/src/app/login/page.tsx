@@ -19,7 +19,7 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  // 登入後要回去的站內頁：只收同源的 /oauth/consent 與 /mcp/confirm/<id>（lib/mcp-safety.ts），其他一律回 /ess。
+  // 登入後要回去的站內頁：只收同源的 /oauth/consent、/mcp/confirm/<id>、/ess、/admin 底下（lib/mcp-safety.ts），其他一律回 /ess。
   const nextPath = (): string => {
     if (typeof window === "undefined") return "/ess";
     return safeNextPath(new URLSearchParams(window.location.search).get("next"), window.location.origin) ?? "/ess";

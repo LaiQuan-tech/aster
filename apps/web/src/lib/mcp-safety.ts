@@ -1,11 +1,13 @@
 /**
  * AI 連接（MCP）前端的安全判斷（純函式、無 I/O，有 vitest）。
- *   • safeNextPath：登入後回跳只准回「同源、/oauth/consent 或 /mcp/confirm/<id>」，其他一律回預設頁（資安驗收 M2）。
+ *   • safeNextPath：登入後回跳只准回「同源、/oauth/consent、/mcp/confirm/<id>，或站內 /ess、/admin 底下的頁」，
+ *     其他一律回預設頁（資安驗收 M2；2026-11-09 起通知信的深連結未登入時經 AuthGate 帶 next=，登入後回到該頁）。
+ *   • loginRedirectPath：AuthGate 未登入時要導去的登入網址（帶 next=目前路徑＋query）。
  *   • consentTrust：同意頁判斷用戶端是否「已知」（redirect 網域是 claude.ai／claude.com／chatgpt.com／本機），
  *     以及名稱冒用（名稱含 Claude／Anthropic／ChatGPT／OpenAI 但網域不符）（資安驗收 M5）。
  */
 
-const NEXT_ALLOWED = [/^\/oauth\/consent$/, /^\/mcp\/confirm\/[0-9a-fA-F-]{36}$/]
+const NEXT_ALLOWED = [/^\/oauth\/consent$/, /^\/mcp\/confirm\/[0-9a-fA-F-]{36}$/, /^\/(ess|admin)(\/[^\\]*)?$/]
 
 export function safeNextPath(next: string | null | undefined, origin: string): string | null {
   if (!next || typeof next !== "string") return null;
@@ -20,6 +22,17 @@ export function safeNextPath(next: string | null | undefined, origin: string): s
   if (url.origin !== new URL(origin).origin) return null;
   if (!NEXT_ALLOWED.some((re) => re.test(url.pathname))) return null;
   return `${url.pathname}${url.search}`;
+}
+
+/**
+ * AuthGate 未登入時的登入網址：站內 /ess、/admin 頁帶 `?next=<路徑＋query>`（login 頁再用 safeNextPath 驗一次），
+ * 其他頁（或回跳不合法）只導 /login。
+ */
+export function loginRedirectPath(pathname: string | null | undefined, search: string | null | undefined, origin: string): string {
+  if (!pathname) return "/login";
+  const query = search ? (search.startsWith("?") ? search : `?${search}`) : "";
+  const next = safeNextPath(`${pathname}${query}`, origin);
+  return next ? `/login?next=${encodeURIComponent(next)}` : "/login";
 }
 
 const KNOWN_HOSTS = ["claude.ai", "claude.com", "chatgpt.com"];

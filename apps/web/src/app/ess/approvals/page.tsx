@@ -26,6 +26,13 @@ import {
 } from "@/lib/ess-approval-batch";
 import { invalidateEssState } from "@/lib/ess-state";
 import {
+  APPROVAL_HIGHLIGHT_MISSING,
+  highlightDomId,
+  highlightState,
+  isHighlighted,
+  parseHighlightId,
+} from "@/lib/approval-highlight";
+import {
   approveDisbursement,
   getPendingDisbursementApprovals,
   humanizeDisbursementError,
@@ -40,6 +47,7 @@ import { overtimeCapErrorText } from "@/lib/overtime-approval";
 import { leaveBalanceErrorText } from "@/lib/leave-balance-cap";
 import { approvalPeriodText, approvalWhenText } from "@/lib/request-forms";
 import { LateReportsSection } from "./_components/LateReportsSection";
+import { LeaveBalanceSummaryText } from "@/components/LeaveBalanceSummary";
 import { BonusRunApprovalsSection } from "./_components/BonusRunApprovalsSection";
 import {
   BottomSheet,
@@ -172,6 +180,12 @@ export default function ApprovalsPage() {
   const [batchResult, setBatchResult] = useState<BatchSummary | null>(null);
   const batchResultRef = useRef<HTMLDivElement>(null);
   const selectAllRef = useRef<HTMLInputElement>(null);
+  // 通知信「前往處理」連結 ?id=<requestId／disbursementId>：載入後捲到並醒目該張（lib/approval-highlight.ts）。
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const scrolledHighlightRef = useRef<string | null>(null);
+  useEffect(() => {
+    setHighlightId(parseHighlightId(new URLSearchParams(window.location.search).get("id")));
+  }, []);
 
   // 清單重抓後被處理掉的單自動從勾選裡消失；送出的順序＝畫面順序。清單空了就退出多選。
   const rowIds = useMemo(() => rows.map((row) => row.id), [rows]);
@@ -179,6 +193,14 @@ export default function ApprovalsPage() {
   const selectedSet = useMemo(() => new Set(selected), [selected]);
   const selecting = selectMode && rows.length > 0;
   const allSelected = isAllSelected(selected, rowIds);
+
+  const highlight = highlightState(highlightId, loading, [...rowIds, ...disbursements.map((d) => d.id)]);
+  useEffect(() => {
+    if (highlight !== "found" || !highlightId || scrolledHighlightRef.current === highlightId) return;
+    scrolledHighlightRef.current = highlightId;
+    const target = [...rowIds, ...disbursements.map((d) => d.id)].find((id) => isHighlighted(highlightId, id));
+    if (target) document.getElementById(highlightDomId(target))?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+  }, [highlight, highlightId, rowIds, disbursements]);
 
   // 「全選」勾選框的半選狀態（只能用 property 設，不能用 attribute）。
   useEffect(() => {
@@ -460,6 +482,14 @@ export default function ApprovalsPage() {
         </div>
       </div>
 
+      {highlight === "missing" && (
+        <Card>
+          <p role="status" className="text-sm text-gray-600">
+            {APPROVAL_HIGHLIGHT_MISSING}
+          </p>
+        </Card>
+      )}
+
       {error && (
         <Card>
           <InlineError>{error}</InlineError>
@@ -539,8 +569,12 @@ export default function ApprovalsPage() {
             const amounts = requestAmountsOf(row);
             const checked = selecting && selectedSet.has(row.id);
             return (
-              <li key={row.id}>
-                <Card className={checked ? "ring-2 ring-[var(--brand)]" : undefined}>
+              <li key={row.id} id={highlightDomId(row.id)} className="scroll-mt-20">
+                <Card
+                  className={
+                    checked || isHighlighted(highlightId, row.id) ? "ring-2 ring-[var(--brand)]" : undefined
+                  }
+                >
                   {/* 頭：（多選時：勾選框，觸控區 44px）申請人·部門｜種類＋假別｜相對時間；多選時點頭部也能勾選 */}
                   <div className="flex items-start gap-1">
                     {selecting && (
@@ -596,6 +630,14 @@ export default function ApprovalsPage() {
                     <dt className="text-gray-400">期間</dt>
                     {/* 期間文字由 lib/request-forms.ts 的 approvalPeriodText 組（可單測）：整天型（出差、在家工作）只有日期，公出保留時刻 */}
                     <dd className="whitespace-pre-line">{approvalPeriodText(row)}</dd>
+                    {row.kind === "leave" && row.leaveBalance && (
+                      <>
+                        <dt className="text-gray-400">剩餘假</dt>
+                        <dd>
+                          <LeaveBalanceSummaryText balance={row.leaveBalance} hours={row.hours} />
+                        </dd>
+                      </>
+                    )}
                     {row.kind === "vehicle_booking" && (
                       <>
                         {/* 公務車預約（2026-11-05）：車牌 · 車型（GET /requests/pending-approvals 列上的 vehicle_booking） */}
@@ -736,8 +778,8 @@ export default function ApprovalsPage() {
               const busy = disbBusyId === d.id;
               const kindLabelText = d.stepKindLabel ?? (d.stepKind ? (DISBURSEMENT_STEP_KIND_LABELS[d.stepKind] ?? d.stepKind) : null);
               return (
-                <li key={d.id}>
-                  <Card>
+                <li key={d.id} id={highlightDomId(d.id)} className="scroll-mt-20">
+                  <Card className={isHighlighted(highlightId, d.id) ? "ring-2 ring-[var(--brand)]" : undefined}>
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <p className="truncate text-base font-semibold text-gray-900">{d.payeeName}</p>

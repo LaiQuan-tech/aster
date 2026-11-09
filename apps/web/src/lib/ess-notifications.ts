@@ -35,6 +35,14 @@ export const TYPE_LABEL: Record<string, string> = {
   vehicle_reminder: "公務車提醒",
   vehicle_condition: "車況異常",
   vehicle_booking_cancelled: "用車取消",
+  disbursement: "已放款",
+  profile_change_request: "資料異動",
+  profile_change_reviewed: "資料異動",
+  calendar_import_draft: "行事曆",
+  calendar_import_revision: "行事曆",
+  calendar_import_fetch_failed: "行事曆",
+  payroll_period: "月結",
+  overtime_unapproved_punch: "未核准出勤",
 };
 
 export function typeLabel(type: string | null | undefined): string {
@@ -42,8 +50,6 @@ export function typeLabel(type: string | null | undefined): string {
 }
 
 /* ------------------------------------------------------------ 未讀 --- */
-
-type NotificationLike = Pick<NotificationItem, "type" | "payload">;
 
 /** 未讀＝payload 沒有 `read: true`（payload 缺席／null／read=false 都算未讀）。 */
 export function isUnread(n: Pick<NotificationItem, "payload">): boolean {
@@ -54,89 +60,13 @@ export function isUnread(n: Pick<NotificationItem, "payload">): boolean {
 
 /* ------------------------------------------------------------ 導頁 --- */
 
-function str(value: unknown): string | null {
-  if (typeof value === "string") return value.trim() || null;
-  if (typeof value === "number" && Number.isFinite(value)) return String(value);
-  return null;
-}
-
 /**
  * 通知點下去要去哪一頁；回 null 代表沒有對應頁（只展開內文）。
- *
- *   approval submitted／advanced → `/ess/approvals`（輪到我簽）
- *   approval approved／rejected  → `/ess/requests?id=<requestId>`（缺 requestId 退回列表）
- *   missing_punch               → `/ess/requests?kind=fix_punch&date=<date>`
- *   attendance_sheet            → `/ess/attendance-sheet/<sheetId>`（缺 sheetId → null）
- *   anomaly                     → `/ess/punches?from=<from>&to=<to>`
- *   late_report                 → `/ess/approvals`（簽核頁的「遲到說明」段；老闆在那裡決定）
- *   announcement                → `/ess/announcements`（公告頁；payload 沒有公告 id，只導到列表）
- *   vehicle_booking_cancelled   → `/ess/vehicles`（HR 代取消了我的用車預約）
- *   vehicle_condition           → `/admin/vehicles/trips/<tripId>`（還車回報車況異常，收件人是 HR／提醒對象；缺 tripId 退回列表）
- *   vehicle_reminder            → `/admin/vehicles/<vehicleId>`（保養／保險／牌照稅到期、逾時未還；缺 vehicleId 退回車輛列表）
- *   其他類型／缺 payload         → null
+ * 2026-11-09 起搬到 packages/rules/src/notification-link.ts，API 寄 Email／LINE 的連結用同一份
+ * （對照表與收件角色規則見該檔；單元測試 packages/rules/src/__tests__/notification-link.test.ts）。
+ * web 沒有相依 @hr/rules 套件（不需先 build dist），直接 import 零相依的原始檔。
  */
-export function notificationLink(n: NotificationLike): string | null {
-  const payload = n.payload;
-  if (!payload || typeof payload !== "object") return null;
-
-  switch (n.type) {
-    case "approval": {
-      const event = str(payload.event);
-      if (event === "submitted" || event === "advanced") return "/ess/approvals";
-      if (event === "approved" || event === "rejected") {
-        const requestId = str(payload.requestId);
-        return requestId ? `/ess/requests?id=${encodeURIComponent(requestId)}` : "/ess/requests";
-      }
-      return null;
-    }
-    case "missing_punch": {
-      const params = new URLSearchParams({ kind: "fix_punch" });
-      const date = str(payload.date);
-      if (date) params.set("date", date);
-      return `/ess/requests?${params.toString()}`;
-    }
-    case "attendance_sheet": {
-      const sheetId = str(payload.sheetId);
-      return sheetId ? `/ess/attendance-sheet/${encodeURIComponent(sheetId)}` : null;
-    }
-    case "anomaly": {
-      const params = new URLSearchParams();
-      const from = str(payload.from);
-      const to = str(payload.to);
-      if (from) params.set("from", from);
-      if (to) params.set("to", to);
-      const qs = params.toString();
-      return qs ? `/ess/punches?${qs}` : "/ess/punches";
-    }
-    case "late_report":
-      return "/ess/approvals";
-    case "bonus_run": {
-      // 送審通知給老闆 → 簽核頁的「獎金批次」段；核准／退回通知給送審的 HR → 後台批次頁。
-      if (str(payload.event) === "submitted" || str(payload.audience) === "boss") return "/ess/approvals";
-      const id = str(payload.bonusRunId);
-      return id ? `/admin/bonus-runs/${id}` : "/admin/bonus-sheet";
-    }
-    case "announcement":
-      return "/ess/announcements";
-    // 公務車（2026-11-05）：payload 一律帶 { vehicleId, plateNo, bookingId?, tripId?, kind? }。
-    case "vehicle_booking_cancelled":
-      return "/ess/vehicles";
-    case "vehicle_condition": {
-      const tripId = str(payload.tripId);
-      return tripId ? `/admin/vehicles/trips/${encodeURIComponent(tripId)}` : "/admin/vehicles/trips";
-    }
-    case "vehicle_reminder": {
-      if (str(payload.kind) === "overdue_return") {
-        const tripId = str(payload.tripId);
-        if (tripId) return `/admin/vehicles/trips/${encodeURIComponent(tripId)}`;
-      }
-      const vehicleId = str(payload.vehicleId);
-      return vehicleId ? `/admin/vehicles/${encodeURIComponent(vehicleId)}` : "/admin/vehicles";
-    }
-    default:
-      return null;
-  }
-}
+export { notificationLink } from "../../../../packages/rules/src/notification-link";
 
 /* ------------------------------------------------------- 請假分段 --- */
 

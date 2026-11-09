@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useSession } from "@/lib/use-session";
 import { getMeCached, resetEssState } from "@/lib/ess-state";
+import { loginRedirectPath } from "@/lib/mcp-safety";
 
 const SET_PASSWORD_PATH = "/auth/set-password";
 
@@ -53,9 +54,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       // 同一分頁之後換人，或同一人拿 HR 配發的暫時密碼重登，會沿用舊的 mustChangePassword。
       resetMustChangeCache();
       essOwner = null;
-      router.replace("/login");
+      // 通知信的深連結（/ess/approvals?id=…）未登入時帶 next=，登入後回到該頁；login 頁再用 safeNextPath 驗一次。
+      router.replace(loginRedirectPath(pathname, window.location.search, window.location.origin));
     }
-  }, [loading, session, router]);
+  }, [loading, session, router, pathname]);
 
   useEffect(() => {
     if (!userId) return;

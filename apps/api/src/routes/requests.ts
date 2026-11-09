@@ -18,6 +18,7 @@ import { checkOtRequestCaps, splitMinutesByLocalDay, validateOtRequestTimes, typ
 import { findSheet, recomputeSheet } from "../services/attendance-sheets.js"
 import { resolveApproverChain, type StepKind } from "../services/approval-chain.js"
 import { enrichRequestRows } from "../services/request-enrich.js"
+import { attachLeaveBalances } from "../services/leave-balance-summary.js"
 import {
   BOSS_STEP_KIND,
   CHANGE_APPROVER_DENIAL_MESSAGE,
@@ -216,6 +217,9 @@ interface RequestListRow {
   leave_type_id: string | null
   status: string
   current_step: number
+  /** REQUEST_COLS 一定帶；剩餘假摘要（attachLeaveBalances）用。 */
+  start_at: string
+  end_at: string
   [key: string]: unknown
 }
 
@@ -1176,7 +1180,8 @@ requestsRouter.get(
           next(new Error(`GET /requests (hr): ${error.message}`))
           return
         }
-        res.status(200).json({ requests: await enrichRequestRows(tenantId, asRequestRows(data)) })
+        // 簽核中的請假單附剩餘假摘要（leaveBalance；後台簽核表格用，批次查詢）。
+        res.status(200).json({ requests: await attachLeaveBalances(tenantId, await enrichRequestRows(tenantId, asRequestRows(data))) })
         return
       }
 
@@ -1253,7 +1258,10 @@ requestsRouter.get(
 
       const visible = asRequestRows(data).filter(isVisible)
 
-      res.status(200).json({ requests: await enrichRequestRows(tenantId, visible) })
+      // 輪到我簽的請假單附剩餘假摘要（自己的單不附：自己的餘額走 GET /leave-balances 與 ESS 分頁守門）。
+      res.status(200).json({
+        requests: await attachLeaveBalances(tenantId, await enrichRequestRows(tenantId, visible), (r) => r.employee_id !== selfId),
+      })
     } catch (err) {
       next(err)
     }
@@ -1374,7 +1382,8 @@ requestsRouter.get(
       // 與 GET /requests 同一套補齊（申請人姓名／工號／部門、假別名、附件數、關卡進度、
       // 現行關卡候選與姓名）；current_approver_emp_id＝該關 approver_emp_id（第一候選），
       // 「輪到我」請看 current_candidate_emp_ids 是否含自己。
-      res.status(200).json({ requests: await enrichRequestRows(tenantId, mine) })
+      // 請假單附剩餘假摘要 leaveBalance（看得到這列＝簽核人，不另開餘額權限；批次查詢，不隨列數 N+1）。
+      res.status(200).json({ requests: await attachLeaveBalances(tenantId, await enrichRequestRows(tenantId, mine)) })
     } catch (err) {
       next(err)
     }
@@ -2468,10 +2477,12 @@ requestsRouter.post(
         employee_id: parsed.data.approverEmpId,
         type: "approval",
         title: "表單簽核人已變更",
-        body: `有一張 ${lr.kind} 表單已指派給你進行第 ${lr.current_step} 關簽核。`,
+        body: `有一張${kindLabel(lr.kind as string)}單已指派給你進行第 ${lr.current_step} 關簽核。`,
         channel: "inapp",
         status: "pending",
         payload: {
+          // event：寄信時決定「前往處理」連結（@hr/rules notificationLink → /ess/approvals?id=）。
+          event: "reassigned",
           requestId,
           requestKind: lr.kind,
           currentStep: lr.current_step,
@@ -2576,10 +2587,13 @@ requestsRouter.post(
           employee_id: employeeId,
           type: "approval",
           title: "待簽核提醒",
-          body: `有一張 ${lr.kind} 表單正在等待第 ${lr.current_step} 關簽核。`,
+          body: `有一張${kindLabel(lr.kind as string)}單正在等待第 ${lr.current_step} 關簽核。`,
           channel: "inapp",
           status: "pending",
           payload: {
+            // event／stepKind：寄信連結用（HR 覆核關 → 後台簽核頁，其餘 → /ess/approvals?id=）。
+            event: "reminded",
+            stepKind: step.step_kind ?? null,
             requestId,
             requestKind: lr.kind,
             currentStep: lr.current_step,

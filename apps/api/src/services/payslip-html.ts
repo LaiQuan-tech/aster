@@ -79,6 +79,8 @@ export interface RenderPayslipInput {
   breakdown?: PayslipBreakdownLike | null
   /** 信尾署名（租戶名稱）；省略＝不加署名段。 */
   appName?: string | null
+  /** 線上查看網址（`<WEB_URL>/ess/payslips`，寄信端用 auth-invite.webUrl 組）；省略＝不加這一行。 */
+  onlineUrl?: string | null
 }
 
 const OT_LABEL: Record<string, string> = {
@@ -275,6 +277,11 @@ export function renderPayslipHtml(input: RenderPayslipInput): string {
     )
   }
 
+  if (input.onlineUrl) {
+    parts.push(
+      `<p style="margin-top:20px;font-size:14px">線上查看：<a href="${esc(input.onlineUrl)}">${esc(input.onlineUrl)}</a></p>`,
+    )
+  }
   parts.push(
     `<p style="color:#777;font-size:12px;margin-top:24px">本信由系統自動寄出，內容以公司出具之工資清冊為準；如有疑問請洽人資。${input.appName ? `<br>${esc(input.appName)}` : ""}</p>`,
     `</div>`,
@@ -296,6 +303,7 @@ export function renderPayslipText(input: RenderPayslipInput): string {
     out.push("", `【${s.title}】`)
     for (const [label, value] of s.rows) out.push(`${label}：${value}`)
   }
+  if (input.onlineUrl) out.push("", `線上查看：${input.onlineUrl}`)
   out.push("", "本信由系統自動寄出，內容以公司出具之工資清冊為準；如有疑問請洽人資。")
   if (input.appName) out.push(input.appName)
   return out.join("\n")

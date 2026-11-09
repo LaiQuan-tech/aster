@@ -42,12 +42,12 @@ describe("notificationLink — 遲到說明（2026-10-11）", () => {
 });
 
 describe("notificationLink", () => {
-  it("approval submitted／advanced → /ess/approvals", () => {
+  it("approval submitted／advanced → /ess/approvals?id=<requestId>（2026-11-09 起帶 id，簽核頁捲到並醒目該筆）", () => {
     expect(notificationLink(notif("approval", { requestId: "r1", event: "submitted", currentStep: 1 }))).toBe(
-      "/ess/approvals",
+      "/ess/approvals?id=r1",
     );
     expect(notificationLink(notif("approval", { requestId: "r1", event: "advanced", currentStep: 2 }))).toBe(
-      "/ess/approvals",
+      "/ess/approvals?id=r1",
     );
   });
 

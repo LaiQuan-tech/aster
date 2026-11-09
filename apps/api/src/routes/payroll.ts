@@ -15,6 +15,7 @@ import { requireHrAdmin } from "../middleware/role.js"
 import { supabaseAdmin } from "../lib/supabase.js"
 import { setActor } from "../lib/request-context.js"
 import { writeAuditLog } from "../services/audit.js"
+import { webUrl } from "../services/auth-invite.js"
 import {
   columnsExist,
   isMissingColumnError,
@@ -862,6 +863,7 @@ async function sendOnePayslip(
     empNo: recipient.empNo,
     breakdown: row.breakdown ?? {},
     appName: tenantName,
+    onlineUrl: `${webUrl()}/ess/payslips`,
   }
   await sendMail({
     to: recipient.to as string,
