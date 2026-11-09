@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { GridCell, StatementGrid } from "@/lib/statements-api";
 import { FitModeBar, resolveFit, useFitMode } from "@/components/FitToWidth";
 import { gridBannerRows, gridCellExcelStyle, gridCellWebStyle } from "@/lib/sheet-styles";
+import { nextContentPx } from "@/lib/fit-zoom";
 import {
   columnPx,
   coveredPositions,
@@ -82,16 +83,23 @@ export function StatementTable({
   useEffect(() => {
     if (!(fit || fitControl) || !wrapRef.current) return;
     const el = wrapRef.current;
+    // 內容寬（未縮放）：同一張表只增不減，換表（effect 重跑）才歸零；規則與原因見 lib/fit-zoom.ts nextContentPx。
+    // 沒溢出時 scrollWidth 等於容器寬，不能拿來當內容寬（會一路縮到最小字級），改量表格本身；
+    // 也不能因為「縮到放得下、不再溢出」就把內容寬改回表格寬，否則 zoom 會在兩個值之間來回跳（畫面一直閃）。
+    let measured = 0;
+    setContentPx(0);
     const update = () => {
       const w = el.clientWidth;
       setContainerPx(w);
       if (fitControl) {
-        // 內容實際寬：有溢出（scrollWidth > clientWidth）才用 scrollWidth；沒溢出時 scrollWidth 就等於容器寬，
-        // 拿它當內容寬會被誤判成「比畫面寬」而一路縮到最小字級（表比容器窄卻被縮成 56%），改量表格本身。
-        const z = appliedZoomRef.current || 1;
         const table = el.querySelector("table");
-        const natural = el.scrollWidth > el.clientWidth + 1 ? el.scrollWidth : (table?.getBoundingClientRect().width ?? 0);
-        setContentPx(Math.ceil(natural / z));
+        measured = nextContentPx(measured, {
+          scrollWidth: el.scrollWidth,
+          clientWidth: el.clientWidth,
+          tableWidth: table?.getBoundingClientRect().width ?? 0,
+          zoom: appliedZoomRef.current || 1,
+        });
+        setContentPx(measured);
       }
       if (w > 0) setZoom(Math.min(1, w / geometry.width));
     };

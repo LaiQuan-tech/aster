@@ -67,3 +67,27 @@ export function fitZoom(containerPx: number, naturalPx: number, minZoom: number)
   if (raw >= floor) return { zoom: raw, overflow: true, clamped: false };
   return { zoom: floor, overflow: true, clamped: true };
 }
+
+export type ContentMeasure = {
+  /** 容器 scrollWidth（已套用 zoom 的畫面座標）。 */
+  scrollWidth: number;
+  /** 容器 clientWidth。 */
+  clientWidth: number;
+  /** 表格本身的畫面寬（getBoundingClientRect，已套用 zoom）。 */
+  tableWidth: number;
+  /** 量測當下套用的 zoom。 */
+  zoom: number;
+};
+
+/**
+ * 依量測結果換算內容實際寬（未縮放 px），同一張表只增不減（prev＝這張表上次量到的值，換表時由元件歸零）。
+ *
+ * 有溢出（scrollWidth > clientWidth）才量得到「文字溢出到表格右邊」的真實寬度；縮到放得下之後沒溢出，只能量到
+ * 表格本身。若此時改用表格寬，會放大回去 → 文字又溢出 → 再縮……無限循環（2026-11-09 出勤統計表「一直閃」），
+ * 所以取兩者與上次值的最大值。內容寬不隨容器或縮放改變，只增不減是安全的。
+ */
+export function nextContentPx(prev: number, m: ContentMeasure): number {
+  const z = m.zoom > 0 ? m.zoom : 1;
+  const natural = m.scrollWidth > m.clientWidth + 1 ? Math.max(m.scrollWidth, m.tableWidth) : m.tableWidth;
+  return Math.max(prev > 0 ? prev : 0, Math.ceil(natural / z));
+}
