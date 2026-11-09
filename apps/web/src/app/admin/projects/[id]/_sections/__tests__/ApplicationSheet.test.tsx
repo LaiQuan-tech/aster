@@ -135,6 +135,27 @@ describe("申請單表格：可直接編輯", () => {
     expect(html).not.toContain("入賬")
   })
 
+  it("付款階段欄名只在小表頭印一次（階段｜%｜金額｜發票號碼｜發票日期｜入帳日期），各列不再夾標籤格", () => {
+    for (const mode of ["edit", "print"] as const) {
+      const html = render({ mode })
+      const heads = ["階段", "%", "金額", "發票號碼", "發票日期", "入帳日期"]
+      heads.forEach((h, i) => expect(cell(html, `sheet-stage-head-${i}`)).toContain(`>${h}</div>`))
+      expect(html).not.toContain("發票號碼:")
+      expect(html).not.toContain("發票日期:")
+      expect(html).not.toContain("已於")
+      // 表頭在第 11 列（上半部 10 列之後），格線跨欄 2+1+2+4+3+4＝16
+      expect(cell(html, "sheet-stage-head-3")).toContain("--gc:6 / span 4")
+      expect(cell(html, "sheet-stage-head-4")).toContain("--gc:10 / span 3")
+      expect(cell(html, "sheet-stage-head-5")).toContain("--gc:13 / span 4")
+      // 公會代墊列：審迄還款說明佔發票號碼＋發票日期兩格，標籤完整
+      const guild = cell(html, "sheet-guild-repayment")
+      expect(guild).toContain("--gc:6 / span 7")
+      expect(guild).toContain("審迄還款:")
+    }
+    // 已開票已入帳列唯讀顯示民國日期
+    expect(render({ mode: "print" })).toContain("115.10.25")
+  })
+
   it("發包單位：既有與空欄都可填；利潤、毛利率維持唯讀", () => {
     const html = render()
     expect(html).toContain('aria-label="發包單位第 1 欄發包單位"')

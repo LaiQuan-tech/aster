@@ -39,6 +39,7 @@ import {
 import {
   APPLICATION_SHEET_COLUMNS,
   APPLICATION_SHEET_TOP_ROWS,
+  APPLICATION_STAGE_HEADERS,
   APPLICATION_STAGE_SPANS,
   APPLICATION_SUBCONTRACT_LABELS,
   APPLICATION_SUBCONTRACT_SPANS,
@@ -704,6 +705,20 @@ export function ApplicationSheet({
 
   let row = APPLICATION_SHEET_TOP_ROWS.length + 1;
   const stageCols = APPLICATION_STAGE_SPANS.reduce<number[]>((acc, span, i) => [...acc, i === 0 ? 1 : acc[i - 1] + APPLICATION_STAGE_SPANS[i - 1]], []);
+  const S = APPLICATION_STAGE_SPANS;
+  // 付款階段小表頭：欄名只印一次（桌機／列印）；手機堆疊版改由各格前的小標示說明。
+  {
+    const r = row++;
+    APPLICATION_STAGE_HEADERS.forEach((h, i) => {
+      cells.push(
+        <Cell key={`stage-head-${i}`} col={stageCols[i]} span={S[i]} row={r} kind="label" shade align="center" testId={`sheet-stage-head-${i}`} className="hidden py-0.5 text-[11px] md:flex print:flex">
+          {h}
+        </Cell>,
+      );
+    });
+  }
+  /** 手機堆疊版沒有表頭，格內前面補一個小欄名；桌機／列印隱藏。 */
+  const mLabel = (text: string) => <span className="mr-1 shrink-0 text-xs text-gray-500 md:hidden print:hidden">{text}</span>;
   for (const s of stageRows) {
     const r = row++;
     const guild = s.kind === "guild_advance";
@@ -714,59 +729,64 @@ export function ApplicationSheet({
     const val = (f: Exclude<keyof StageEdit, "overrideReason">) => edit[f] ?? base[f];
     const rowLabel = guild ? "技師公會代墊" : `付款階段第 ${s.no} 列`;
     cells.push(
-      <Cell key={`stage-${s.no}-0`} col={stageCols[0]} span={APPLICATION_STAGE_SPANS[0]} row={r} kind="label" shade testId={`sheet-stage-${s.no}`}>
+      <Cell key={`stage-${s.no}-0`} col={stageCols[0]} span={S[0]} row={r} kind="label" shade testId={`sheet-stage-${s.no}`}>
         {editable ? (
-          <span className="flex w-full items-center gap-0.5">
+          <span className="flex w-full min-w-0 items-center gap-0.5">
             <span className="shrink-0">{s.no}.</span>
             <input aria-label={`${rowLabel}項目說明`} className={cellInput} maxLength={200} placeholder={guild ? "" : "項目說明"} value={val("milestone")} onChange={(e) => setStage(key, "milestone", e.target.value)} />
           </span>
         ) : (
-          `${s.no}.${s.milestone}`
+          <span className="truncate" title={`${s.no}.${s.milestone}`}>{`${s.no}.${s.milestone}`}</span>
         )}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-1`} col={stageCols[1]} span={APPLICATION_STAGE_SPANS[1]} row={r} kind="value" align="center" editable={editable && !locks.percentage} {...errAttr(`stage:${key}:percentage`)}>
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-1`} col={stageCols[1]} span={S[1]} row={r} kind="value" align="center" editable={editable && !locks.percentage} {...errAttr(`stage:${key}:percentage`)}>
+        {mLabel("百分比")}
         {editable && !locks.percentage ? (
-          <span className="flex w-full items-center gap-0.5">
+          <span className="flex w-full min-w-0 items-center gap-0.5">
             <input aria-label={`${rowLabel}百分比`} className={`${cellInput} text-right`} type="number" min="0" max="100" inputMode="decimal" value={val("percentage")} onChange={(e) => setStage(key, "percentage", e.target.value)} />
             <span className="shrink-0">%</span>
           </span>
         ) : s.percentage != null ? `${s.percentage}%` : ""}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-2`} col={stageCols[2]} span={APPLICATION_STAGE_SPANS[2]} row={r} kind="value" align="right" editable={editable && !locks.amount} {...errAttr(`stage:${key}:amount`, `stage:${key}:overrideReason`)}>
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-2`} col={stageCols[2]} span={S[2]} row={r} kind="value" align="right" testId={`sheet-stage-${s.no}-amount`} editable={editable && !locks.amount} {...errAttr(`stage:${key}:amount`, `stage:${key}:overrideReason`)}>
+        {mLabel("金額")}
         {editable && !locks.amount ? (
-          <input aria-label={`${rowLabel}金額`} title="填了就是人工指定金額；清空＝依百分比試算" className={`${cellInput} text-right`} type="number" min="0" inputMode="numeric" value={val("amount")} onChange={(e) => setStage(key, "amount", e.target.value)} />
+          <input aria-label={`${rowLabel}金額`} title="填了就是人工指定金額；清空＝依百分比試算" className={`${cellInput} text-right tabular-nums`} type="number" min="0" inputMode="numeric" value={val("amount")} onChange={(e) => setStage(key, "amount", e.target.value)} />
         ) : (
-          <span title={editable && locks.amount ? "已請款／已入帳，金額凍結" : undefined}>{s.amount != null ? fmtMoney(s.amount) : ""}</span>
+          <span className="tabular-nums" title={editable && locks.amount ? "已請款／已入帳，金額凍結" : undefined}>{s.amount != null ? fmtMoney(s.amount) : ""}</span>
         )}
       </Cell>,
-      <Cell key={`stage-${s.no}-3`} col={stageCols[3]} span={APPLICATION_STAGE_SPANS[3]} row={r} kind="label" shade align="center">
-        {guild ? "審迄還款:" : "發票號碼:"}
-      </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-4`} col={stageCols[4]} span={guild ? APPLICATION_STAGE_SPANS[4] + APPLICATION_STAGE_SPANS[5] + APPLICATION_STAGE_SPANS[6] : APPLICATION_STAGE_SPANS[4]} row={r} kind="value" editable={editable && (guild || !locks.invoiceNo)} {...errAttr(guild ? "guildRepaymentNote" : `stage:${key}:invoiceNo`)}>
-        {guild
-          ? editable ? (
-              <input
-                aria-label="審迄還款"
-                className={cellInput}
-                maxLength={GUILD_REPAYMENT_NOTE_MAX}
-                placeholder="例：115.9.30 還款"
-                value={draft.guildRepaymentNote}
-                onChange={(e) => set("guildRepaymentNote", e.target.value)}
-              />
-            ) : draft.guildRepaymentNote
-          : editable && !locks.invoiceNo ? (
-              <input aria-label={`${rowLabel}發票號碼`} title="儲存時登記開票（發票日期未填＝今天，可到下方卡片撤銷重開）" className={cellInput} maxLength={40} placeholder="發票號碼" value={val("invoiceNo")} onChange={(e) => setStage(key, "invoiceNo", e.target.value)} />
-            ) : (
-              <span title={editable ? "已開票；撤銷請到下方「分期請款期程」" : undefined}>{s.invoiceNo ?? ""}</span>
-            )}
-      </Cell>,
+      guild ? (
+        <Cell className={blankCls("payment")} key={`stage-${s.no}-3`} col={stageCols[3]} span={S[3] + S[4]} row={r} kind="value" testId="sheet-guild-repayment" editable={editable} {...errAttr("guildRepaymentNote")}>
+          <span className="mr-1 shrink-0 text-xs font-medium text-gray-600">審迄還款:</span>
+          {editable ? (
+            <input
+              aria-label="審迄還款"
+              className={cellInput}
+              maxLength={GUILD_REPAYMENT_NOTE_MAX}
+              placeholder="例：115.9.30 還款"
+              value={draft.guildRepaymentNote}
+              onChange={(e) => set("guildRepaymentNote", e.target.value)}
+            />
+          ) : (
+            <span className="min-w-0 whitespace-normal break-words">{draft.guildRepaymentNote}</span>
+          )}
+        </Cell>
+      ) : (
+        <Cell className={blankCls("payment")} key={`stage-${s.no}-3`} col={stageCols[3]} span={S[3]} row={r} kind="value" editable={editable && !locks.invoiceNo} {...errAttr(`stage:${key}:invoiceNo`)}>
+          {mLabel("發票號碼")}
+          {editable && !locks.invoiceNo ? (
+            <input aria-label={`${rowLabel}發票號碼`} title="儲存時登記開票（發票日期未填＝今天，可到下方卡片撤銷重開）" className={cellInput} maxLength={40} value={val("invoiceNo")} onChange={(e) => setStage(key, "invoiceNo", e.target.value)} />
+          ) : (
+            <span className="min-w-0 truncate" title={editable ? "已開票；撤銷請到下方「分期請款期程」" : undefined}>{s.invoiceNo ?? ""}</span>
+          )}
+        </Cell>
+      ),
       ...(guild
         ? []
         : [
-            <Cell key={`stage-${s.no}-5`} col={stageCols[5]} span={APPLICATION_STAGE_SPANS[5]} row={r} kind="label" shade align="center">
-              發票日期:
-            </Cell>,
-            <Cell className={blankCls("payment")} key={`stage-${s.no}-6`} col={stageCols[6]} span={APPLICATION_STAGE_SPANS[6]} row={r} kind="value" editable={editable && !locks.invoicedOn} {...errAttr(`stage:${key}:invoicedOn`)}>
+            <Cell className={blankCls("payment")} key={`stage-${s.no}-4`} col={stageCols[4]} span={S[4]} row={r} kind="value" editable={editable && !locks.invoicedOn} {...errAttr(`stage:${key}:invoicedOn`)}>
+              {mLabel("發票日期")}
               {editable && !locks.invoicedOn ? (
                 <input aria-label={`${rowLabel}發票日期`} title="未填＝登記開票當天" className={`${cellInput} px-0.5`} type="date" value={val("invoicedOn")} onChange={(e) => setStage(key, "invoicedOn", e.target.value)} />
               ) : (
@@ -774,15 +794,12 @@ export function ApplicationSheet({
               )}
             </Cell>,
           ]),
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-7`} col={stageCols[7]} span={APPLICATION_STAGE_SPANS[7]} row={r} kind="value" editable={editable && !locks.receivedOn} {...errAttr(`stage:${key}:receivedOn`)}>
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-5`} col={stageCols[5]} span={S[5]} row={r} kind="value" editable={editable && !locks.receivedOn} {...errAttr(`stage:${key}:receivedOn`)}>
+        {mLabel("入帳日期")}
         {editable && !locks.receivedOn ? (
-          <span className="flex w-full items-center gap-1 whitespace-nowrap">
-            已於
-            <input aria-label={`${rowLabel}入帳日期`} className={`${cellInput} px-0.5`} type="date" value={val("receivedOn")} onChange={(e) => setStage(key, "receivedOn", e.target.value)} />
-            入帳
-          </span>
+          <input aria-label={`${rowLabel}入帳日期`} className={`${cellInput} px-0.5`} type="date" value={val("receivedOn")} onChange={(e) => setStage(key, "receivedOn", e.target.value)} />
         ) : (
-          <span className="whitespace-pre" title={editable && locks.receivedOn ? "已入帳；撤銷請到下方「分期請款期程」" : undefined}>已於 {s.receivedOn ? rocDots(s.receivedOn) : "         "} 入帳</span>
+          <span title={editable && locks.receivedOn ? "已入帳；撤銷請到下方「分期請款期程」" : undefined}>{s.receivedOn ? rocDots(s.receivedOn) : ""}</span>
         )}
       </Cell>,
     );
@@ -896,12 +913,15 @@ export function ApplicationSheet({
           <span className="shrink-0 text-gray-600">專案序號：<span className="font-mono text-gray-900">{project.code ?? "—"}</span></span>
         </div>
 
-        {/* 專案明細表：外框 gray-300、內框 1px gray-200（gap-px 露出底色當格線）。 */}
-        <div
-          className="grid grid-cols-[6.5rem_minmax(0,1fr)] overflow-hidden rounded-lg border border-gray-300 md:gap-px md:bg-gray-200 md:[grid-template-columns:var(--cols)] print:gap-px print:bg-gray-200 print:[print-color-adjust:exact] print:[grid-template-columns:var(--cols)] print:break-inside-avoid"
-          style={{ "--cols": GRID_TEMPLATE } as CSSProperties}
-        >
-          {cells}
+        {/* 專案明細表：外框 gray-300、內框 1px gray-200（gap-px 露出底色當格線）。
+            桌機格線最窄 920px（付款階段的日期輸入框才放得下）；介於 md 與 920px 之間改水平捲動，格子不互相覆蓋。列印照紙寬縮放。 */}
+        <div className="md:overflow-x-auto print:overflow-visible">
+          <div
+            className="grid grid-cols-[6.5rem_minmax(0,1fr)] overflow-hidden rounded-lg border border-gray-300 md:min-w-[920px] md:gap-px md:bg-gray-200 md:[grid-template-columns:var(--cols)] print:min-w-0 print:gap-px print:bg-gray-200 print:[print-color-adjust:exact] print:[grid-template-columns:var(--cols)] print:break-inside-avoid"
+            style={{ "--cols": GRID_TEMPLATE } as CSSProperties}
+          >
+            {cells}
+          </div>
         </div>
       </div>
       </fieldset>
