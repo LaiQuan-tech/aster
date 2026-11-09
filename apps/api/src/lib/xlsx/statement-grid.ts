@@ -24,7 +24,7 @@ function excelTime(hm: string): Date | string {
 export function excelValueOf(cell: GridCell): ExcelJS.CellValue {
   if (cell.value === null || cell.value === undefined || cell.value === "") return cell.text ? cell.text : null
   if (typeof cell.value === "string") {
-    if (cell.format === "md" || cell.format === "mdZh") return excelDate(cell.value)
+    if (cell.format === "md" || cell.format === "mdZh" || cell.format === "weekdayZh") return excelDate(cell.value)
     if (cell.format === "hm") return excelTime(cell.value)
     return cell.value
   }
@@ -92,15 +92,19 @@ export function writeStatementSheet(ws: ExcelJS.Worksheet, grid: StatementGrid, 
   }
   if (grid.page) {
     // 專案獎金總表：照原檔橫式（A3）、寬度縮成一頁、高度不限，每頁重複表頭列。
+    // 出勤統計表（115-10 版）／請假單／支出表：fit="none" 照原檔 100% 不縮放、原檔邊界與列印範圍。
+    const noFit = grid.page.fit === "none"
+    const m = grid.page.margins
     ws.pageSetup = {
       paperSize: grid.page.paperSize,
       orientation: grid.page.orientation,
-      fitToPage: true,
-      fitToWidth: 1,
-      fitToHeight: 0,
-      horizontalCentered: true,
-      margins: { left: 0.24, right: 0.24, top: 0.75, bottom: 0.5, header: 0.3, footer: 0.3 },
+      ...(noFit ? { fitToPage: false, scale: 100 } : { fitToPage: true, fitToWidth: 1, fitToHeight: 0 }),
+      horizontalCentered: !noFit,
+      margins: m
+        ? { left: m.left, right: m.right, top: m.top, bottom: m.bottom, header: 0.31, footer: 0.31 }
+        : { left: 0.24, right: 0.24, top: 0.75, bottom: 0.5, header: 0.3, footer: 0.3 },
       ...(grid.page.printTitleRows ? { printTitlesRow: `${grid.page.printTitleRows[0]}:${grid.page.printTitleRows[1]}` } : {}),
+      ...(grid.page.printArea ? { printArea: grid.page.printArea } : {}),
     }
   } else {
     ws.pageSetup = {
@@ -113,6 +117,8 @@ export function writeStatementSheet(ws: ExcelJS.Worksheet, grid: StatementGrid, 
       margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.3, footer: 0.3 },
     }
   }
+  for (const c of grid.hiddenColumns ?? []) ws.getColumn(c + 1).hidden = true
+  for (const r of grid.hiddenRows ?? []) ws.getRow(r + 1).hidden = true
   if (grid.freeze && (grid.freeze.rows > 0 || grid.freeze.cols > 0)) {
     ws.views = [{ state: "frozen", xSplit: grid.freeze.cols, ySplit: grid.freeze.rows }]
   }

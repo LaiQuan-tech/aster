@@ -3,12 +3,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { GridCell, StatementGrid } from "@/lib/statements-api";
 import { FitModeBar, resolveFit, useFitMode } from "@/components/FitToWidth";
-import { gridBannerRows, gridCellWebStyle } from "@/lib/sheet-styles";
+import { gridBannerRows, gridCellExcelStyle, gridCellWebStyle } from "@/lib/sheet-styles";
 import {
   columnPx,
   coveredPositions,
   gridGeometry,
   gridRowCount,
+  projectGrid,
   rowPx,
 } from "@/lib/statement-layout";
 
@@ -22,6 +23,8 @@ import {
  * `fitControl`（後台）時預設「符合寬度」縮到容器寬、可切「實際大小」（記住選擇），縮到字太小才水平捲動；
  * 都沒有時外層可水平捲動。
  * 列印：外層帶 `statement-print`，列印樣式只印這張表（A4 直式，表格縮放到一頁寬）。
+ * 隱藏欄／列（grid.hiddenColumns／hiddenRows，2026-11-09 出勤統計表 115-10 版）：隱藏欄不畫；隱藏列預設不畫，
+ * `showHiddenRows` 時照畫。`variant="excel"`：視覺照客戶 Excel 原樣（字型、黑框、原底色），後台「出勤統計表」頁用。
  */
 
 const PRINT_CSS = `
@@ -38,13 +41,19 @@ const PRINT_CSS = `
 const A4_PRINTABLE_PX = Math.floor((190 / 25.4) * 96);
 
 export function StatementTable({
-  grid,
+  grid: rawGrid,
   fit = false,
   fitControl = false,
   printing = false,
+  showHiddenRows = false,
+  variant = "admin",
   className,
 }: {
   grid: StatementGrid;
+  /** 隱藏列（週末／假日）照畫。 */
+  showHiddenRows?: boolean;
+  /** admin＝後台樣式（預設）；excel＝照客戶 Excel 原樣。 */
+  variant?: "admin" | "excel";
   /** 後台：顯示「符合寬度／實際大小」切換，預設符合寬度（字太小時改水平捲動）。 */
   fitControl?: boolean;
   /** 縮放到容器寬（不超過 100%）。 */
@@ -53,6 +62,7 @@ export function StatementTable({
   printing?: boolean;
   className?: string;
 }) {
+  const grid = useMemo(() => projectGrid(rawGrid, { showHiddenRows }), [rawGrid, showHiddenRows]);
   const geometry = useMemo(() => gridGeometry(grid), [grid]);
   const covered = useMemo(() => coveredPositions(grid), [grid]);
   const byPos = useMemo(() => new Map<string, GridCell>(grid.cells.map((c) => [`${c.row}:${c.col}`, c])), [grid]);
@@ -66,7 +76,7 @@ export function StatementTable({
   const appliedZoomRef = useRef(1);
   const [fitMode, setFitMode] = useFitMode();
   // 畫面字級統一 13px（gridCellWebStyle），「字太小」的判斷照實際畫面字級算。
-  const baseFontPx = 13;
+  const baseFontPx = variant === "excel" ? 15 : 13;
   const controlled = fitControl && !fit ? resolveFit(fitMode, Math.max(0, containerPx - 4), Math.max(geometry.width, contentPx), baseFontPx) : null;
 
   useEffect(() => {
@@ -136,7 +146,11 @@ export function StatementTable({
                       key={c}
                       rowSpan={cell.rowSpan}
                       colSpan={cell.colSpan}
-                      style={gridCellWebStyle(cell, { banner: r < bannerRows, bannerTitle: r === 0 })}
+                      style={
+                        variant === "excel"
+                          ? gridCellExcelStyle(cell)
+                          : gridCellWebStyle(cell, { banner: r < bannerRows, bannerTitle: r === 0 })
+                      }
                       data-money={cell.money ? "1" : undefined}
                     >
                       {cell.text}

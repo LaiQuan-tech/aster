@@ -297,6 +297,13 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       detail: { title: "出勤月表" },
     },
     {
+      key: "statements",
+      label: "出勤統計表",
+      href: "/admin/attendance-statements",
+      title: "出勤統計表",
+      desc: "選員工與月份，照公司 Excel「出勤統計表」格式檢視（出勤／請假單／支出表），可列印與下載 Excel；未核准月份即時重算",
+    },
+    {
       key: "lateReports",
       label: "遲到說明",
       href: "/admin/late-reports",
@@ -874,7 +881,7 @@ export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
   sections: ["home", "finance", "attendance", "payroll", "people", "settings"],
   tabs: {
     finance: ["projects", "disbursements", "directory"],
-    attendance: ["sheets"],
+    attendance: ["sheets", "statements"],
     payroll: ["expenses", "advances"],
     people: ["employees"],
     // 設定區只開「選項清單」：客戶分類的管理權限比照客戶名冊的寫入（API 是 requireFinance 層）。

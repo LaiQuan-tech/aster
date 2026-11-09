@@ -79,6 +79,23 @@ export interface StatementSalaryInfo {
   nhiDependents: number | null
 }
 
+/** 行事曆當日（tenant_calendar_days）：假日名稱（雙十節、颱風假…）與日別。 */
+export interface StatementCalendarDay {
+  dayType: string
+  label: string | null
+}
+
+/** 某一天的一筆核准假單（請假單工作表用）。 */
+export interface StatementLeaveDay {
+  /** 假別名稱（特休、病假…）。 */
+  name: string
+  /** 當日請假起訖（租戶當地 'HH:MM'）；不可得＝null。 */
+  start: string | null
+  end: string | null
+  hours: number | null
+  reason: string | null
+}
+
 export interface StatementData {
   period: string
   tz: string
@@ -96,4 +113,8 @@ export interface StatementData {
   payDate: string | null
   /** 加保日（系統目前沒有來源＝null）。 */
   insuredSince: string | null
+  /** 該月行事曆覆寫（日期 → 日別／假日名稱）；讀不到＝null（假日判斷退回週末）。 */
+  calendar?: Record<string, StatementCalendarDay> | null
+  /** 該月核准假單逐日明細（日期 → 假單）；讀不到＝null。 */
+  leaveDays?: Record<string, StatementLeaveDay[]> | null
 }

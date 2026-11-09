@@ -14,6 +14,8 @@ import {
   attendanceStatementOf,
   loadStatementData,
   payslipStatementOf,
+  refreshStatementSheet,
+  type RecomputeOutcome,
 } from "../services/employee-statements.js"
 
 /**
@@ -34,6 +36,12 @@ export const employeeStatementsRouter = Router()
 const periodRe = /^\d{4}-(0[1-9]|1[0-2])$/
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const periodQuery = z.object({ period: z.string().regex(periodRe).optional() })
+const statementsQuery = periodQuery.extend({
+  /** live=1：開畫面即重算（未凍結月份、5 分鐘節流）；後台「出勤統計表」頁用。 */
+  live: z.enum(["0", "1"]).optional(),
+  /** refresh=1：「重新整理」鈕，強制重算未凍結月份（最短間隔 30 秒）。 */
+  refresh: z.enum(["0", "1"]).optional(),
+})
 
 /** 上個月（'YYYY-MM'）。 */
 export function previousPeriodOf(today: string): string {
@@ -79,9 +87,10 @@ function sendXlsx(res: Response, buffer: Buffer, filename: string): void {
 }
 
 /**
- * GET /employees/:id/statements?period=YYYY-MM — 兩張表的格線（StatementGrid）。
+ * GET /employees/:id/statements?period=YYYY-MM[&live=1|&refresh=1] — 兩張表的格線（StatementGrid）。
  * period 省略 → 預設月份（見 defaultStatementPeriod）。回應：
- *   { period, periods, employee, attendance: {grid,…}, payslip: {grid,…} | null }
+ *   { period, periods, employee, recompute, attendance: {grid, leaveForm, expenseSheet, frozen, approvedAt,…}, payslip: {grid,…} | null }
+ * live／refresh：未凍結月份先重算（services/employee-statements.ts refreshStatementSheet）；recompute＝結果（沒要求＝null）。
  * payslip 只有 HR／平台管理員拿得到（會計＝null）。子資料讀不到時格線照樣回，對應格空白／「—」。
  */
 employeeStatementsRouter.get(
@@ -92,7 +101,7 @@ employeeStatementsRouter.get(
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     const id = String(req.params.id)
-    const parsed = periodQuery.safeParse(req.query)
+    const parsed = statementsQuery.safeParse(req.query)
     if (!uuidRe.test(id) || !parsed.success) {
       res.status(400).json({ error: "invalid_query" })
       return
@@ -100,8 +109,22 @@ employeeStatementsRouter.get(
     try {
       const self = await resolveSelf(tenantId, req.auth!.userId)
       const canSeeMoney = isHrRole(self?.role)
-      const periods = await periodsWithData(tenantId, id, canSeeMoney)
-      const period = parsed.data.period ?? defaultStatementPeriod(periods, todayKey(await getTenantTimezone(tenantId)))
+      const today = todayKey(await getTenantTimezone(tenantId))
+      let periods = await periodsWithData(tenantId, id, canSeeMoney)
+      const period = parsed.data.period ?? defaultStatementPeriod(periods, today)
+      // 開畫面即重算／重新整理：只對本租戶的員工（先確認存在，跨租戶 id 不觸發任何寫入）。
+      let recompute: RecomputeOutcome | null = null
+      const wantsRefresh = parsed.data.refresh === "1"
+      if (wantsRefresh || parsed.data.live === "1") {
+        const exists = await supabaseAdmin.from("employees").select("id").eq("tenant_id", tenantId).eq("id", id).maybeSingle()
+        if (exists.error) throw new Error(`statements (employee): ${exists.error.message}`)
+        if (!exists.data) {
+          res.status(404).json({ error: "not_found" })
+          return
+        }
+        recompute = await refreshStatementSheet(tenantId, id, period, { force: wantsRefresh, currentPeriod: today.slice(0, 7) })
+        if (recompute.ran) periods = await periodsWithData(tenantId, id, canSeeMoney)
+      }
       const data = await loadStatementData(tenantId, id, period, { includeMoney: canSeeMoney })
       if (!data) {
         res.status(404).json({ error: "not_found" })
@@ -113,6 +136,7 @@ employeeStatementsRouter.get(
         periods,
         employee: { id: data.employee.id, name: data.employee.name, empNo: data.employee.empNo },
         canSeeMoney,
+        recompute,
         attendance: attendanceStatementOf(data, canSeeMoney),
         payslip: canSeeMoney ? payslipStatementOf(data) : null,
       })
@@ -143,8 +167,15 @@ async function statementXlsx(req: Request, res: Response, next: NextFunction, ki
       res.status(404).json({ error: "not_found" })
       return
     }
-    const summary = kind === "attendance" ? attendanceStatementOf(data, canSeeMoney) : payslipStatementOf(data)
-    const wb = await buildStatementWorkbook([summary.grid], data.company?.name ?? "")
+    // 出勤統計表：與畫面同一份資料，一次三個工作表（出勤｜請假單｜支出表，照客戶 Excel）。
+    const grids =
+      kind === "attendance"
+        ? (() => {
+            const a = attendanceStatementOf(data, canSeeMoney)
+            return [{ ...a.grid, title: "出勤" }, { ...a.leaveForm, title: "請假單" }, { ...a.expenseSheet, title: "支出表" }]
+          })()
+        : [payslipStatementOf(data).grid]
+    const wb = await buildStatementWorkbook(grids, data.company?.name ?? "")
     const label = kind === "attendance" ? "出勤統計表" : "薪資明細表"
     sendXlsx(res, await workbookToBuffer(wb), `${label}_${rocPeriodPadded(period).replace(".", "-")}_${data.employee.empNo || data.employee.id.slice(0, 8)}.xlsx`)
   } catch (err) {

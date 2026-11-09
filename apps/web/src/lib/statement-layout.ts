@@ -67,3 +67,44 @@ export function coveredPositions(grid: StatementGrid): Set<string> {
   }
   return covered;
 }
+
+/**
+ * 套用隱藏欄／隱藏列（原 Excel 的隱藏試算欄、出勤統計表預設隱藏的週末假日列）→ 只剩可見欄列的新格線。純函式。
+ *   • 整格落在隱藏欄（列）→ 丟掉；合併範圍跨過隱藏欄（列）→ 錨點移到第一個可見位置、span＝可見格數
+ *     （例：小結「加給」K:M 合併、K/L 隱藏 → 畫在 M、span 1）。
+ *   • showHiddenRows＝true 時隱藏列照畫（「顯示假日列」）；隱藏欄永遠不畫（與 Excel 列印一致）。
+ */
+export function projectGrid(grid: StatementGrid, opts: { showHiddenRows?: boolean } = {}): StatementGrid {
+  const hiddenCols = new Set(grid.hiddenColumns ?? []);
+  const hiddenRows = new Set(opts.showHiddenRows ? [] : (grid.hiddenRows ?? []));
+  if (hiddenCols.size === 0 && hiddenRows.size === 0) return { ...grid, hiddenColumns: undefined, hiddenRows: undefined };
+  const colMap = new Map<number, number>();
+  grid.columns.forEach((_, c) => {
+    if (!hiddenCols.has(c)) colMap.set(c, colMap.size);
+  });
+  const rows = gridRowCount(grid);
+  const rowMap = new Map<number, number>();
+  for (let r = 0; r < rows; r += 1) if (!hiddenRows.has(r)) rowMap.set(r, rowMap.size);
+  const cells: GridCell[] = [];
+  for (const cell of grid.cells) {
+    const visCols: number[] = [];
+    for (let c = cell.col; c < cell.col + (cell.colSpan ?? 1); c += 1) if (colMap.has(c)) visCols.push(colMap.get(c)!);
+    const visRows: number[] = [];
+    for (let r = cell.row; r < cell.row + (cell.rowSpan ?? 1); r += 1) if (rowMap.has(r)) visRows.push(rowMap.get(r)!);
+    if (visCols.length === 0 || visRows.length === 0) continue;
+    const next: GridCell = { ...cell, row: visRows[0], col: visCols[0] };
+    if (visCols.length > 1) next.colSpan = visCols.length;
+    else delete next.colSpan;
+    if (visRows.length > 1) next.rowSpan = visRows.length;
+    else delete next.rowSpan;
+    cells.push(next);
+  }
+  return {
+    ...grid,
+    columns: grid.columns.filter((_, c) => colMap.has(c)),
+    rowHeights: Array.from({ length: rows }, (_, r) => grid.rowHeights[r] ?? 20.9).filter((_, r) => rowMap.has(r)),
+    cells,
+    hiddenColumns: undefined,
+    hiddenRows: undefined,
+  };
+}

@@ -4,6 +4,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 // 純測試：supabase 換成記憶體版（helpers/fake-supabase.ts），不連任何 DB。
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
+// 開畫面即重算：generateSheets（settle＋rebuild，連整條出勤引擎）換成假函式，只驗「有沒有被叫」。
+const generateSheetsMock = vi.hoisted(() => vi.fn(async () => ({ generated: 0, rebuilt: 1, skipped: [] })))
+vi.mock("../services/attendance-sheets.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/attendance-sheets.js")>()),
+  generateSheets: generateSheetsMock,
+}))
 
 import { employeeStatementsRouter, defaultStatementPeriod, previousPeriodOf } from "../routes/employee-statements.js"
 import { tabsForRoute } from "../middleware/ess-tab-guard.js"
@@ -19,10 +25,23 @@ import {
   type GridCell,
   type StatementGrid,
 } from "../lib/statements/grid.js"
-import { allowanceTotal, buildAttendanceStatementGrid, dayContent, isListedDay, leaveNamesOf, netPay } from "../lib/statements/attendance-statement.js"
+import {
+  allowanceTotal,
+  buildAttendanceStatementGrid,
+  dayContent,
+  isListedDay,
+  leaveNamesOf,
+  netPay,
+  statementDayInfo,
+  FILL_HOLIDAY,
+  FILL_PTO,
+  FILL_WEEKEND,
+} from "../lib/statements/attendance-statement.js"
+import { buildLeaveFormGrid } from "../lib/statements/leave-form-sheet.js"
+import { buildExpenseSheetGrid } from "../lib/statements/expense-sheet.js"
 import { absenceRows, buildPayslipStatementGrid, overtimeBlocks, ptoShare } from "../lib/statements/payslip-statement.js"
 import { buildStatementWorkbook } from "../lib/xlsx/statement-grid.js"
-import { mealNoteFor, moneyFromBreakdown, moneyFromPreview } from "../services/employee-statements.js"
+import { leaveDaysOf, mealNoteFor, moneyFromBreakdown, moneyFromPreview } from "../services/employee-statements.js"
 import { LEGACY_RULE_CONFIG_2026_09 } from "../lib/default-rule-config.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID } from "./helpers/fake-supabase.js"
 import { FAKE_EMPLOYEE_ID, fakeBreakdown, fakeSheetView, fakeStatementData } from "./fixtures/statement-fixture.js"
@@ -96,45 +115,142 @@ describe("出勤統計表格線", () => {
     expect(dayContent(d10)).toBe("有晚餐")
   })
 
-  it("版面：9 欄、抬頭三行合併、標題字串、表頭、逐日列與表尾", () => {
+  // 115-10 版列號（0 起算）：抬頭 0–2、標題 3、表頭 4、逐日 5–35、合計 36、到職日 37、小結 40–41、支出 43、備註 44、投保 46
+  const T = 36
+  const H = 40
+
+  it("版面（115-10 版）：14 欄、E/F/G/K/L 隱藏、標題列分格、表頭、整月 31 列、列印設定", () => {
     const data = fakeStatementData()
     const grid = buildAttendanceStatementGrid(data)
-    expect(grid.columns).toHaveLength(9)
-    expect(cellAt(grid, 0, 0)).toMatchObject({ text: "測試設計顧問有限公司", colSpan: 9, size: 20 })
-    expect(cellAt(grid, 4, 0)).toMatchObject({ text: "115年6月  出勤統計表-測試員工甲", colSpan: 9 })
-    expect([0, 1, 2, 3, 4, 5, 6, 7, 8].map((c) => cellAt(grid, 5, c)?.text)).toEqual([
-      "日期", "星期", "起", "迄", "請假", "加班", "超過2", "內容", "外出",
+    expect(grid.columns).toHaveLength(14)
+    expect(grid.hiddenColumns).toEqual([4, 5, 6, 10, 11])
+    expect(grid.page).toMatchObject({ paperSize: 9, orientation: "portrait", fit: "none", printArea: "A1:N47", printTitleRows: [1, 4] })
+    expect(cellAt(grid, 0, 0)).toMatchObject({ text: "測試設計顧問有限公司", colSpan: 14, size: 20 })
+    expect([2, 3, 7, 8].map((c) => cellAt(grid, 3, c)?.text)).toEqual(["115年", "6月", "出勤表", "測試員工甲"])
+    expect(cellAt(grid, 3, 0)?.border?.bottom).toBe("thin")
+    expect(Array.from({ length: 14 }, (_, c) => cellAt(grid, 4, c)?.text)).toEqual([
+      "日期", "星期", "起", "迄", "時數", "早退", "加班", "請假", "加班", "超過2", "超過8", "國定假日", "內容", "外出",
     ])
-    expect(cellAt(grid, 5, 0)?.fill).toBe("#D6E3BC")
-    const dayCount = data.attendance!.days.length
-    expect(cellAt(grid, 6, 0)?.text).toBe("6/1")
-    expect(cellAt(grid, 6, 2)?.text).toMatch(/^8:\d\d$/)
-    const footer = 6 + dayCount
-    expect(cellAt(grid, footer, 0)?.text).toBe("到職日：")
-    expect(cellAt(grid, footer, 1)?.text).toBe("110.3.15")
-    expect(cellAt(grid, footer, 4)?.text).toBe("5.5") // 請假合計
-    expect(cellAt(grid, footer + 2, 2)?.text).toBe("薪資月份:115.06")
-    expect(cellAt(grid, footer + 3, 5)).toMatchObject({ text: "加班", colSpan: 2 })
-    expect(cellAt(grid, footer + 4, 0)?.text).toBe("測試員工甲")
-    expect(cellAt(grid, footer + 4, 1)?.text).toBe("30,000")
-    expect(findText(grid, "二眷口")).toBeTruthy()
-    expect(findText(grid, "專案名稱")).toBeTruthy()
-    expect(findText(grid, "6月5日")).toBeTruthy()
+    expect(cellAt(grid, 4, 0)?.fill).toBe("#D6E3BC")
+    // 逐日：6/1（一）在第 5 列；日期 m月d日、星期全寫、時間 h:mm
+    expect(cellAt(grid, 5, 0)?.text).toBe("6月1日")
+    expect(cellAt(grid, 5, 1)?.text).toBe("星期一")
+    expect(cellAt(grid, 5, 2)?.text).toMatch(/^8:\d\d$/)
+    // 請假：會計格式兩位小數；6/8 病假 1.5h
+    expect(cellAt(grid, 5 + 7, 7)?.text).toBe("1.50")
+    // 6/30 是最後一天；第 31 列（6/31 不存在）空白
+    expect(cellAt(grid, 5 + 29, 0)?.text).toBe("6月30日")
+    expect(cellAt(grid, 5 + 30, 0)?.text).toBe("")
+    // 合計：請假 5.50、加班 tier1 合計
+    expect(cellAt(grid, T, 3)?.text).toBe("請假時數")
+    expect(cellAt(grid, T, 7)?.text).toBe("5.50")
+    expect(cellAt(grid, T, 12)?.text).toBe("125") // 時薪
+    // 表尾
+    expect(cellAt(grid, T + 1, 0)?.text).toBe("到職日：")
+    expect(cellAt(grid, T + 1, 1)?.text).toBe("110.03.15")
+    expect(cellAt(grid, T + 1, 7)?.text).toBe("115.6")
+    expect([1, 2, 3].map((i) => cellAt(grid, T + i, 12)?.text)).toEqual(["167", "208", "333"]) // 125 × 1.334／1.666667／2.666667
+    // 小結
+    expect(cellAt(grid, H, 8)).toMatchObject({ text: "加班", colSpan: 2 })
+    expect(cellAt(grid, H, 10)).toMatchObject({ text: "加給", colSpan: 3 })
+    expect(cellAt(grid, H + 1, 0)?.text).toBe("測試員工甲")
+    expect(cellAt(grid, H + 1, 1)?.text).toBe("30,000")
+    expect(cellAt(grid, H + 1, 7)?.fill).toBe("#FFFF00")
+    expect(cellAt(grid, H + 1, 13)).toMatchObject({ bold: true, color: "#FF0000" })
+    expect(cellAt(grid, H + 3, 0)?.text).toBe("支出：")
+    expect(cellAt(grid, H + 3, 12)?.text).toBe("薪資+支出")
+    expect(cellAt(grid, H + 4, 0)?.text).toContain("備註：晚上加班")
+  })
+
+  it("隱藏列＝沒有出勤的週末／假日與月底後；有出勤的週六不隱藏；底色照原檔", () => {
+    const data = fakeStatementData()
+    data.calendar = { "2026-06-19": { dayType: "fixed_holiday", label: "端午節" } }
+    const grid = buildAttendanceStatementGrid(data)
+    const hidden = new Set(grid.hiddenRows)
+    expect(hidden.has(5 + 5)).toBe(true) // 6/6（六）沒出勤
+    expect(hidden.has(5 + 6)).toBe(true) // 6/7（日）
+    expect(hidden.has(5 + 12)).toBe(false) // 6/13（六）休息日加班
+    expect(hidden.has(5 + 18)).toBe(true) // 6/19 國定假日（沒有月表紀錄 → 行事曆）
+    expect(hidden.has(5 + 30)).toBe(true) // 6/31
+    expect(hidden.has(5)).toBe(false)
+    expect(cellAt(grid, 5 + 12, 0)?.fill).toBe(FILL_WEEKEND)
+    expect(cellAt(grid, 5 + 18, 0)?.fill).toBe(FILL_HOLIDAY)
+    expect(cellAt(grid, 5 + 18, 12)?.text).toBe("端午節")
+    expect(cellAt(grid, 5, 0)?.fill).toBeUndefined()
+    const pto = statementDayInfo(
+      { attendance: { ...fakeSheetView(), days: [{ ...fakeSheetView().days[0], leaveSummary: "特休 8h", leaveMinutes: 480 }] }, calendar: null },
+      "2026-06-01",
+    )
+    expect(pto.fill).toBe(FILL_PTO)
   })
 
   it("會計：金額格遮成「—」，時數照常", () => {
     const grid = maskMoney(buildAttendanceStatementGrid(fakeStatementData()))
-    const footer = 6 + fakeSheetView().days.length
-    expect(cellAt(grid, footer + 4, 1)).toMatchObject({ text: "—", value: null })
-    expect(cellAt(grid, footer + 4, 8)).toMatchObject({ text: "—", value: null })
-    expect(cellAt(grid, footer, 4)?.text).toBe("5.5")
+    expect(cellAt(grid, H + 1, 1)).toMatchObject({ text: "—", value: null })
+    expect(cellAt(grid, H + 1, 13)).toMatchObject({ text: "—", value: null })
+    expect(cellAt(grid, T, 12)).toMatchObject({ text: "—", value: null })
+    expect(cellAt(grid, T, 7)?.text).toBe("5.50")
     expect(grid.cells.filter((c) => c.money).every((c) => c.value === null)).toBe(true)
   })
 
-  it("缺資料：沒有月表、沒有金額 → 不丟錯，逐日空白、金額「—」", () => {
+  it("缺資料：沒有月表、沒有金額 → 不丟錯，日期照列、時間空白、金額「—」", () => {
     const grid = buildAttendanceStatementGrid(fakeStatementData({ attendance: false, money: false }))
-    expect(cellAt(grid, 6, 0)?.text).toBe("到職日：")
-    expect(cellAt(grid, 10, 1)?.text).toBe("—")
+    expect(cellAt(grid, 5, 0)?.text).toBe("6月1日")
+    expect(cellAt(grid, 5, 2)?.text).toBe("")
+    expect(cellAt(grid, T + 1, 0)?.text).toBe("到職日：")
+    expect(cellAt(grid, H + 1, 1)?.text).toBe("—")
+    // 沒有月表：週末仍依星期判斷隱藏
+    expect(grid.hiddenRows).toContain(5 + 5)
+  })
+})
+
+describe("請假單／支出表", () => {
+  it("請假單：逐日鏡像、請假時間＝假單當日起訖、事由、隱藏列同出勤、加總", () => {
+    const data = fakeStatementData()
+    data.leaveDays = { "2026-06-08": [{ name: "病假", start: "08:30", end: "10:00", hours: 1.5, reason: "看診" }] }
+    const grid = buildLeaveFormGrid(data)
+    expect(grid.kind).toBe("leaveForm")
+    expect(grid.columns).toHaveLength(10)
+    expect(grid.hiddenColumns).toEqual([3, 4, 5, 9])
+    expect(cellAt(grid, 3, 6)?.text).toBe("請假單")
+    expect(cellAt(grid, 4, 2)?.text).toBe("請假日(時)數")
+    expect(cellAt(grid, 5 + 7, 1)?.text).toBe("08:30~10:00")
+    expect(cellAt(grid, 5 + 7, 2)?.text).toBe("1.5")
+    expect(cellAt(grid, 5 + 7, 6)?.text).toBe("病假")
+    expect(cellAt(grid, 5 + 7, 7)?.text).toBe("看診")
+    expect(cellAt(grid, 5, 2)?.text).toBe("0") // 無請假日顯示 0
+    expect(cellAt(grid, 36, 1)?.text).toBe("加總")
+    expect(cellAt(grid, 36, 2)?.text).toBe("5.5")
+    expect(grid.hiddenRows).toEqual(buildAttendanceStatementGrid(data).hiddenRows)
+  })
+
+  it("假單逐日歸屬：segments 逐段、單日用起訖（當地時間）、跨日無 segments 每天一筆", () => {
+    const names = new Map([["lt1", "特休"]])
+    const out = leaveDaysOf(
+      [
+        { start_at: "2026-06-03T01:00:00Z", end_at: "2026-06-03T03:00:00Z", hours: 2, reason: "私事", segments: null, leave_type_id: "lt1" },
+        { start_at: "2026-06-10T01:00:00Z", end_at: "2026-06-11T10:00:00Z", hours: 16, reason: null, segments: [{ date: "2026-06-10", startTime: "09:00", endTime: "18:00", hours: 8 }], leave_type_id: null },
+        { start_at: "2026-06-29T16:00:00Z", end_at: "2026-07-02T16:00:00Z", hours: null, reason: null, segments: null, leave_type_id: "lt1" },
+      ],
+      names,
+      "Asia/Taipei",
+      "2026-06",
+    )
+    expect(out["2026-06-03"]).toEqual([{ name: "特休", start: "09:00", end: "11:00", hours: 2, reason: "私事" }])
+    expect(out["2026-06-10"]?.[0]).toMatchObject({ name: "請假", start: "09:00", end: "18:00" })
+    expect(out["2026-06-11"]).toBeUndefined()
+    expect(out["2026-06-30"]?.[0]).toMatchObject({ start: null, end: null })
+    expect(Object.keys(out).every((d) => d.startsWith("2026-06"))).toBe(true)
+  })
+
+  it("支出表：表頭、明細、小計、製表人", () => {
+    const grid = buildExpenseSheetGrid(fakeStatementData())
+    expect(grid.kind).toBe("expenseSheet")
+    expect(Array.from({ length: 6 }, (_, c) => cellAt(grid, 5, c)?.text)).toEqual(["日期", "內容(單價含稅)", "金額", "說明", "專案名稱", "備註"])
+    expect(cellAt(grid, 4, 3)?.text).toBe("支出表")
+    expect(findText(grid, "6月5日")).toBeTruthy()
+    expect(cellAt(grid, 6 + 36, 1)?.text).toBe("小計")
+    expect(findText(grid, "製表：測試員工甲")).toBeTruthy()
   })
 })
 
@@ -202,7 +318,8 @@ describe("薪資明細表：加班分段對應 Excel 列", () => {
 })
 
 describe("驗收修正（2026-10-27）", () => {
-  const salaryPlusCell = (grid: StatementGrid, days: number) => cellAt(grid, 6 + days + 7, 8)
+  // 115-10 版：薪資+支出在列 44（0 起算 43）N 欄
+  const salaryPlusCell = (grid: StatementGrid, _days: number) => cellAt(grid, 43, 13)
 
   it("出勤統計表「薪資+支出」：有薪資單 → 薪資單 net（與薪資明細表一致）", () => {
     const data = fakeStatementData()
@@ -333,11 +450,22 @@ describe("xlsx 匯出版面", () => {
     const reloaded = new ExcelJS.Workbook()
     await reloaded.xlsx.load((await wb.xlsx.writeBuffer()) as ArrayBuffer)
     const [att, slip] = reloaded.worksheets
-    expect(att.getCell("A5").value).toBe("115年6月  出勤統計表-測試員工甲")
-    expect(att.columnCount).toBe(9)
+    expect(att.getCell("I4").value).toBe("測試員工甲")
+    expect(att.getCell("C4").numFmt).toBe('0"年"')
+    expect(att.columnCount).toBe(14)
     const attMerges = (att.model as unknown as { merges: string[] }).merges
-    expect(attMerges).toEqual(expect.arrayContaining(["A1:I1", "A2:I2", "A3:I3", "A5:I5"]))
-    expect(att.getCell("A6").fill).toMatchObject({ fgColor: { argb: "FFD6E3BC" } })
+    expect(attMerges).toEqual(expect.arrayContaining(["A1:N1", "A2:N2", "A3:N3", "I41:J41", "K41:M41"]))
+    expect(att.getCell("A5").fill).toMatchObject({ fgColor: { argb: "FFD6E3BC" } })
+    // 隱藏欄 E/F/G/K/L、隱藏列（6/6 週六＝第 11 列）、星期與時間格式、列印設定
+    expect(["E", "F", "G", "K", "L"].map((c) => att.getColumn(c).hidden)).toEqual([true, true, true, true, true])
+    expect(att.getColumn("H").hidden).toBe(false)
+    expect(att.getRow(11).hidden).toBe(true)
+    expect(att.getRow(6).hidden).toBe(false)
+    expect(att.getCell("B6").numFmt).toBe("[$-404]aaaa;@")
+    expect(att.getCell("C6").numFmt).toBe("h:mm")
+    expect(att.getCell("H13").numFmt).toContain("#,##0.00")
+    expect(att.pageSetup).toMatchObject({ paperSize: 9, orientation: "portrait", printArea: "A1:N47", printTitlesRow: "1:4" })
+    expect(att.pageSetup.margins).toMatchObject({ left: 0.51, right: 0.31, top: 0.35, bottom: 0.35 })
     expect(slip.getCell("A1").value).toBe("薪資明細表")
     expect(slip.columnCount).toBe(12)
     const slipMerges = (slip.model as unknown as { merges: string[] }).merges
@@ -393,7 +521,7 @@ function seed() {
     {
       id: snapshot.id, tenant_id: TENANT_ID, employee_id: FAKE_EMPLOYEE_ID, period: "2026-06", status: "approved",
       manager_emp_id: null, submitted_at: null, submitted_by: null, manager_reviewed_at: null, manager_reviewed_by: null,
-      approved_at: null, approved_by: null, locked_at: null, returned_at: null, returned_by: null, return_reason: null,
+      approved_at: "2026-07-03T02:00:00.000Z", approved_by: null, locked_at: null, returned_at: null, returned_by: null, return_reason: null,
       reopen_reason: null, rule_config_version: 1, computed_at: null, month_anomalies: [], snapshot, version: 1,
     },
   ]
@@ -407,6 +535,7 @@ function seed() {
 beforeEach(() => {
   fake.reset()
   seed()
+  generateSheetsMock.mockClear()
 })
 
 describe("GET /employees/:id/statements", () => {
@@ -420,9 +549,17 @@ describe("GET /employees/:id/statements", () => {
     expect(res.body.payslip.grid.kind).toBe("payslip")
     const grid = res.body.attendance.grid as StatementGrid
     expect(grid.cells.some((c) => c.text === "30,000")).toBe(true)
-    // 支出只算已核銷（隨薪資給付）的報銷
-    expect(grid.cells.some((c) => c.text === "未核銷")).toBe(false)
-    expect(grid.cells.some((c) => c.text === "停車費")).toBe(true)
+    // 支出只算已核銷（隨薪資給付）的報銷（明細在「支出表」頁，合計在出勤頁「支出：」）
+    const expense = res.body.attendance.expenseSheet as StatementGrid
+    expect(expense.cells.some((c) => c.text === "未核銷")).toBe(false)
+    expect(expense.cells.some((c) => c.text === "停車費")).toBe(true)
+    expect(cellAt(grid, 43, 1)?.text).toBe("350")
+    expect(res.body.attendance.leaveForm.kind).toBe("leaveForm")
+    // 已核准月表：凍結版本、帶核准時間；沒要求重算 → recompute=null、不重算
+    expect(res.body.attendance.frozen).toBe(true)
+    expect(res.body.attendance.approvedAt).toBe("2026-07-03T02:00:00.000Z")
+    expect(res.body.recompute).toBeNull()
+    expect(generateSheetsMock).not.toHaveBeenCalled()
   })
 
   it("會計：只有出勤統計表，金額全部「—」、回應裡沒有任何金額值", async () => {
@@ -463,6 +600,117 @@ describe("GET /employees/:id/statements", () => {
     expect(res.body.payslip.moneySource).toBeNull()
     const grid = res.body.payslip.grid as StatementGrid
     expect(grid.cells.some((c) => c.text === "—")).toBe(true)
+  })
+})
+
+describe("後台出勤統計表：畫面與 xlsx 同源、開畫面即重算（2026-11-09）", () => {
+  const url = (q: string) => `/employees/${FAKE_EMPLOYEE_ID}/statements?period=2026-06${q}`
+  const sheet = () => fake.db.attendance_sheets[0] as Record<string, unknown>
+  const draftComputed = (minutesAgo: number) => {
+    Object.assign(sheet(), { status: "draft", approved_at: null, computed_at: new Date(Date.now() - minutesAgo * 60000).toISOString() })
+  }
+
+  it("畫面格線的每一格數字＝xlsx 同一格（出勤｜請假單｜支出表三頁）", async () => {
+    const res = await request(app).get(url("")).use(as("hr-user"))
+    const xlsx = await request(app)
+      .get(`/employees/${FAKE_EMPLOYEE_ID}/attendance-statement.xlsx?period=2026-06`)
+      .use(as("hr-user"))
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks: Buffer[] = []
+        r.on("data", (c: Buffer) => chunks.push(c))
+        r.on("end", () => cb(null, Buffer.concat(chunks)))
+      })
+    expect(xlsx.status).toBe(200)
+    const { default: ExcelJS } = await import("exceljs")
+    const wb = new ExcelJS.Workbook()
+    await wb.xlsx.load(xlsx.body as ArrayBuffer)
+    expect(wb.worksheets.map((w) => w.name)).toEqual(["出勤", "請假單", "支出表"])
+    const grids = [res.body.attendance.grid, res.body.attendance.leaveForm, res.body.attendance.expenseSheet] as StatementGrid[]
+    let compared = 0
+    grids.forEach((grid, i) => {
+      const ws = wb.worksheets[i]
+      for (const c of grid.cells) {
+        if (typeof c.value !== "number") continue
+        expect(ws.getCell(c.row + 1, c.col + 1).value).toBe(c.value)
+        compared += 1
+      }
+    })
+    expect(compared).toBeGreaterThan(30)
+  })
+
+  it("會計：xlsx 的金額格同樣是「—」", async () => {
+    const xlsx = await request(app)
+      .get(`/employees/${FAKE_EMPLOYEE_ID}/attendance-statement.xlsx?period=2026-06`)
+      .use(as("acc-user"))
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks: Buffer[] = []
+        r.on("data", (c: Buffer) => chunks.push(c))
+        r.on("end", () => cb(null, Buffer.concat(chunks)))
+      })
+    const { default: ExcelJS } = await import("exceljs")
+    const wb = new ExcelJS.Workbook()
+    await wb.xlsx.load(xlsx.body as ArrayBuffer)
+    expect(wb.worksheets[0].getCell("B42").value).toBe("—") // 小結「薪資」
+    expect(wb.worksheets[0].getCell("N42").value).toBe("—") // 實領
+  })
+
+  it("已核准（凍結）：refresh=1 也不重算，回 frozen", async () => {
+    const res = await request(app).get(url("&refresh=1")).use(as("hr-user"))
+    expect(res.status).toBe(200)
+    expect(res.body.recompute).toEqual({ ran: false, reason: "frozen" })
+    expect(generateSheetsMock).not.toHaveBeenCalled()
+  })
+
+  it("審核中（submitted）：不重算", async () => {
+    Object.assign(sheet(), { status: "submitted" })
+    const res = await request(app).get(url("&live=1")).use(as("hr-user"))
+    expect(res.body.recompute).toEqual({ ran: false, reason: "in_review" })
+    expect(generateSheetsMock).not.toHaveBeenCalled()
+  })
+
+  it("草稿：5 分鐘內重算過 → live 節流不算；超過 5 分鐘 → 重算", async () => {
+    draftComputed(1)
+    const throttled = await request(app).get(url("&live=1")).use(as("hr-user"))
+    expect(throttled.status).toBe(200)
+    expect(throttled.body.recompute).toEqual({ ran: false, reason: "throttled" })
+    expect(throttled.body.attendance.frozen).toBe(false)
+    expect(generateSheetsMock).not.toHaveBeenCalled()
+    draftComputed(6)
+    const ran = await request(app).get(url("&live=1")).use(as("hr-user"))
+    expect(ran.body.recompute).toEqual({ ran: true, reason: "recomputed" })
+    expect(generateSheetsMock).toHaveBeenCalledTimes(1)
+    expect(generateSheetsMock).toHaveBeenCalledWith({ tenantId: TENANT_ID, period: "2026-06", employeeId: FAKE_EMPLOYEE_ID })
+  })
+
+  it("草稿：重新整理（refresh=1）1 分鐘前算過也重算；10 秒內連點仍節流", async () => {
+    draftComputed(1)
+    expect((await request(app).get(url("&refresh=1")).use(as("hr-user"))).body.recompute).toEqual({ ran: true, reason: "recomputed" })
+    Object.assign(sheet(), { computed_at: new Date(Date.now() - 10000).toISOString() })
+    expect((await request(app).get(url("&refresh=1")).use(as("hr-user"))).body.recompute).toEqual({ ran: false, reason: "throttled" })
+    expect(generateSheetsMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("沒有 live／refresh 參數（員工內頁既有分頁）→ 不重算、recompute=null", async () => {
+    draftComputed(60)
+    const res = await request(app).get(url("")).use(as("hr-user"))
+    expect(res.body.recompute).toBeNull()
+    expect(generateSheetsMock).not.toHaveBeenCalled()
+  })
+
+  it("權限：一般員工 refresh → 403；別租戶員工 refresh → 404 且不觸發重算", async () => {
+    expect((await request(app).get(url("&refresh=1")).use(as("staff-user"))).status).toBe(403)
+    const foreign = "eeeeeeee-0000-4000-8000-000000000002"
+    fake.db.employees.push({ ...employeeRow(foreign, "foreign-user2", "employee"), tenant_id: OTHER_TENANT_ID })
+    expect((await request(app).get(`/employees/${foreign}/statements?period=2026-06&refresh=1`).use(as("hr-user"))).status).toBe(404)
+    expect(generateSheetsMock).not.toHaveBeenCalled()
+  })
+
+  it("未來月份不重算", async () => {
+    const res = await request(app).get(`/employees/${FAKE_EMPLOYEE_ID}/statements?period=2099-01&live=1`).use(as("hr-user"))
+    expect(res.body.recompute).toEqual({ ran: false, reason: "future_period" })
+    expect(generateSheetsMock).not.toHaveBeenCalled()
   })
 })
 

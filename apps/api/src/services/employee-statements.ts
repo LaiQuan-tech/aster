@@ -4,11 +4,15 @@ import { logger } from "../lib/logger.js"
 import { resolveLetterhead } from "../lib/letterhead.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { employeesHaveCompany } from "../lib/schema-compat.js"
-import { DEFAULT_TIMEZONE } from "../lib/tz.js"
+import { DEFAULT_TIMEZONE, addDaysKey, localDateKey, localParts, monthRangeKeys } from "../lib/tz.js"
 import { chineseCount, buildAttendanceStatementGrid } from "../lib/statements/attendance-statement.js"
+import { buildLeaveFormGrid } from "../lib/statements/leave-form-sheet.js"
+import { buildExpenseSheetGrid } from "../lib/statements/expense-sheet.js"
 import { buildPayslipStatementGrid } from "../lib/statements/payslip-statement.js"
 import { maskMoney, type StatementGrid } from "../lib/statements/grid.js"
 import type {
+  StatementCalendarDay,
+  StatementLeaveDay,
   StatementCompany,
   StatementData,
   StatementEmployee,
@@ -17,7 +21,8 @@ import type {
   StatementSalaryInfo,
 } from "../lib/statements/types.js"
 import type { SheetMoney, SheetView } from "./attendance-sheet-types.js"
-import { findSheet, sheetViewFromRow } from "./attendance-sheets.js"
+import { findSheet, generateSheets, sheetViewFromRow } from "./attendance-sheets.js"
+import { isPeriodClosed } from "./period-lock.js"
 import { buildPayrollInputs, loadRuleConfigFor } from "./payroll-inputs.js"
 import { paysViaMonthlyPayroll } from "./payroll-claims.js"
 
@@ -280,6 +285,95 @@ async function loadSalaryInfo(tenantId: string, employeeId: string, period: stri
   }
 }
 
+/** 該月行事曆覆寫（假日名稱、日別）；表不存在＝空。 */
+async function loadCalendar(tenantId: string, period: string): Promise<Record<string, StatementCalendarDay>> {
+  const { from, to } = monthRangeKeys(period)
+  const { data, error } = await supabaseAdmin
+    .from("tenant_calendar_days")
+    .select("date, day_type, label")
+    .eq("tenant_id", tenantId)
+    .gte("date", from)
+    .lte("date", to)
+  if (error) throw new Error(error.message)
+  const out: Record<string, StatementCalendarDay> = {}
+  for (const row of (data ?? []) as Array<{ date: string; day_type: string; label: string | null }>)
+    out[String(row.date).slice(0, 10)] = { dayType: row.day_type, label: row.label ?? null }
+  return out
+}
+
+function hmOf(iso: string, tz: string): string {
+  const p = localParts(iso, tz)
+  return `${String(p.hh).padStart(2, "0")}:${String(p.mm).padStart(2, "0")}`
+}
+
+/**
+ * 該月核准假單逐日明細（請假單工作表的「請假時間／公司假別／請假事由」）。
+ * 有 segments（跨日假單逐日時段）就照 segments；單日假單用起訖；跨日沒有 segments → 每天一筆、時段空白。
+ */
+export function leaveDaysOf(
+  rows: Array<{ start_at: string; end_at: string; hours: number | string | null; reason: string | null; segments: unknown; leave_type_id: string | null }>,
+  typeName: Map<string, string>,
+  tz: string,
+  period: string,
+): Record<string, StatementLeaveDay[]> {
+  const { from, to } = monthRangeKeys(period)
+  const out: Record<string, StatementLeaveDay[]> = {}
+  const push = (date: string, item: StatementLeaveDay) => {
+    if (date < from || date > to) return
+    ;(out[date] ??= []).push(item)
+  }
+  for (const r of rows) {
+    const name = (r.leave_type_id && typeName.get(r.leave_type_id)) || "請假"
+    const reason = r.reason?.trim() || null
+    const segs = Array.isArray(r.segments) ? (r.segments as Array<{ date?: unknown; startTime?: unknown; endTime?: unknown; hours?: unknown }>) : []
+    if (segs.length > 0) {
+      for (const sg of segs) {
+        if (typeof sg.date !== "string") continue
+        push(sg.date, {
+          name,
+          start: typeof sg.startTime === "string" ? sg.startTime : null,
+          end: typeof sg.endTime === "string" ? sg.endTime : null,
+          hours: Number.isFinite(Number(sg.hours)) ? Number(sg.hours) : null,
+          reason,
+        })
+      }
+      continue
+    }
+    const startDay = localDateKey(r.start_at, tz)
+    const endDay = localDateKey(new Date(new Date(r.end_at).getTime() - 1), tz)
+    if (startDay === endDay) {
+      push(startDay, { name, start: hmOf(r.start_at, tz), end: hmOf(r.end_at, tz), hours: r.hours == null ? null : Number(r.hours), reason })
+      continue
+    }
+    for (let d = startDay; d <= endDay; d = addDaysKey(d, 1)) push(d, { name, start: null, end: null, hours: null, reason })
+  }
+  return out
+}
+
+async function loadLeaveDays(tenantId: string, employeeId: string, period: string, tz: string): Promise<Record<string, StatementLeaveDay[]>> {
+  const { from, to } = monthRangeKeys(period)
+  // 月份前後各放寬一天（時區差）；逐日歸屬由 leaveDaysOf 依當地日期再過濾。
+  const { data, error } = await supabaseAdmin
+    .from("leave_requests")
+    .select("id, leave_type_id, start_at, end_at, hours, reason, segments")
+    .eq("tenant_id", tenantId)
+    .eq("employee_id", employeeId)
+    .eq("kind", "leave")
+    .eq("status", "approved")
+    .is("deleted_at", null)
+    .lt("start_at", `${addDaysKey(to, 2)}T00:00:00Z`)
+    .gt("end_at", `${addDaysKey(from, -1)}T00:00:00Z`)
+  if (error) throw new Error(error.message)
+  const rows = (data ?? []) as Array<{ start_at: string; end_at: string; hours: number | string | null; reason: string | null; segments: unknown; leave_type_id: string | null }>
+  const typeIds = [...new Set(rows.map((r) => r.leave_type_id).filter((id): id is string => !!id))]
+  const typeName = new Map<string, string>()
+  if (typeIds.length > 0) {
+    const { data: types } = await supabaseAdmin.from("leave_types").select("id, name").eq("tenant_id", tenantId).in("id", typeIds)
+    for (const t of (types ?? []) as Array<{ id: string; name: string }>) typeName.set(t.id, t.name)
+  }
+  return leaveDaysOf(rows, typeName, tz, period)
+}
+
 async function loadAttendance(
   tenantId: string,
   employeeId: string,
@@ -304,8 +398,16 @@ export async function loadStatementData(
   const includeMoney = opts.includeMoney
   const finalizedOnly = opts.finalizedOnly === true
 
+  const tzPromise = safe("timezone", () => getTenantTimezone(tenantId), DEFAULT_TIMEZONE, ctx)
+  // 員工端（finalizedOnly）只畫薪資明細表，用不到行事曆與假單明細。
+  const extrasPromise = finalizedOnly
+    ? Promise.resolve([null, null] as const)
+    : Promise.all([
+        safe("calendar", () => loadCalendar(tenantId, period), null, ctx),
+        tzPromise.then((tz) => safe("leave days", () => loadLeaveDays(tenantId, employeeId, period, tz), null, ctx)),
+      ])
   const [tz, attendance, company, rules, leaveNames, expenses, title, payslipMoney, salary] = await Promise.all([
-    safe("timezone", () => getTenantTimezone(tenantId), DEFAULT_TIMEZONE, ctx),
+    tzPromise,
     safe("attendance", () => loadAttendance(tenantId, employeeId, period, includeMoney && !finalizedOnly), null, ctx),
     safe("company", () => loadCompany(tenantId, found.companyId), null, ctx),
     safe("rules", async () => (await loadRuleConfigFor(tenantId, period)).rules, null, ctx),
@@ -317,6 +419,7 @@ export async function loadStatementData(
     includeMoney && !finalizedOnly ? safe("salary", () => loadSalaryInfo(tenantId, employeeId, period), null, ctx) : null,
   ])
 
+  const [calendar, leaveDays] = await extrasPromise
   let money: StatementMoney | null = null
   if (includeMoney) {
     money = payslipMoney ?? (!finalizedOnly && attendance?.money ? moneyFromPreview(attendance.money) : null)
@@ -335,6 +438,8 @@ export async function loadStatementData(
     mealNote: mealNoteFor(rules),
     payDate: null,
     insuredSince: null,
+    calendar,
+    leaveDays,
   }
 }
 
@@ -349,14 +454,33 @@ export interface StatementSummary {
   payslipStatus: string | null
 }
 
-export function attendanceStatementOf(data: StatementData, canSeeMoney: boolean): StatementSummary {
+/** 出勤統計表：另帶同一份資料排出的「請假單」「支出表」兩頁，以及月表凍結狀態（2026-11-09）。 */
+export interface AttendanceStatementSummary extends StatementSummary {
+  leaveForm: StatementGrid
+  expenseSheet: StatementGrid
+  /** 月表已核准／鎖定＝顯示核准快照（不隨後續紀錄變動、不重算）。 */
+  frozen: boolean
+  approvedAt: string | null
+  lockedAt: string | null
+  /** 月表最後重算時間（未凍結月份）。 */
+  computedAt: string | null
+}
+
+export function attendanceStatementOf(data: StatementData, canSeeMoney: boolean): AttendanceStatementSummary {
   const grid = buildAttendanceStatementGrid(data)
+  const view = data.attendance
   return {
     grid: canSeeMoney ? grid : maskMoney(grid),
-    hasAttendance: !!data.attendance,
-    sheetStatus: data.attendance?.status ?? null,
+    leaveForm: buildLeaveFormGrid(data),
+    expenseSheet: buildExpenseSheetGrid(data),
+    hasAttendance: !!view,
+    sheetStatus: view?.status ?? null,
     moneySource: canSeeMoney ? (data.money?.source ?? null) : null,
     payslipStatus: canSeeMoney ? (data.money?.payslipStatus ?? null) : null,
+    frozen: view?.frozen === true,
+    approvedAt: view?.approvedAt ?? null,
+    lockedAt: view?.lockedAt ?? null,
+    computedAt: view?.computedAt ?? null,
   }
 }
 
@@ -368,4 +492,62 @@ export function payslipStatementOf(data: StatementData): StatementSummary {
     moneySource: data.money?.source ?? null,
     payslipStatus: data.money?.payslipStatus ?? null,
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 開畫面即重算（2026-11-09 業主：未核准月份 HR 開畫面就重算；已核准／鎖定顯示凍結版本、不重算）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 自動重算（開畫面）的節流：月表 5 分鐘內重算過就不再算。 */
+export const RECOMPUTE_THROTTLE_MS = 5 * 60 * 1000
+/** 「重新整理」鈕（force）的最短間隔，避免連點把結算打爆。 */
+export const FORCE_RECOMPUTE_MIN_MS = 30 * 1000
+
+export type RecomputeReason =
+  | "recomputed"
+  | "throttled"
+  | "frozen"
+  | "in_review"
+  | "period_closed"
+  | "future_period"
+  | "not_employed"
+  | "failed"
+
+export interface RecomputeOutcome {
+  ran: boolean
+  reason: RecomputeReason
+}
+
+/**
+ * 未凍結（沒有月表／draft／returned）的月份：跑一次 generateSheets（＝該員工 settle＋rebuild，與員工端
+ * GET /my/attendance-sheet 同一流程），讓新打卡／補登／請假核准立刻反映到出勤統計表。
+ *   • approved／locked → 不重算（frozen；顯示核准快照，與薪資單一致）
+ *   • submitted／manager_reviewed → 不重算（審核中數字不移動）
+ *   • 已結算月份、未來月份 → 不重算
+ *   • computed_at 在節流時間內 → 不重算（自動 5 分鐘、force 30 秒）
+ */
+export async function refreshStatementSheet(
+  tenantId: string,
+  employeeId: string,
+  period: string,
+  opts: { force: boolean; currentPeriod: string; now?: number },
+): Promise<RecomputeOutcome> {
+  if (period > opts.currentPeriod) return { ran: false, reason: "future_period" }
+  const sheet = await findSheet(tenantId, employeeId, period)
+  if (sheet) {
+    if (sheet.status === "approved" || sheet.status === "locked") return { ran: false, reason: "frozen" }
+    if (sheet.status !== "draft" && sheet.status !== "returned") return { ran: false, reason: "in_review" }
+    const computed = sheet.computed_at ? Date.parse(sheet.computed_at) : NaN
+    const window = opts.force ? FORCE_RECOMPUTE_MIN_MS : RECOMPUTE_THROTTLE_MS
+    if (Number.isFinite(computed) && (opts.now ?? Date.now()) - computed < window) return { ran: false, reason: "throttled" }
+  }
+  if (await isPeriodClosed(tenantId, period)) return { ran: false, reason: "period_closed" }
+  try {
+    await generateSheets({ tenantId, period, employeeId })
+  } catch (err) {
+    logger.warn({ err, tenantId, employeeId, period }, "employee-statements: recompute failed")
+    return { ran: false, reason: "failed" }
+  }
+  if (!sheet && !(await findSheet(tenantId, employeeId, period))) return { ran: false, reason: "not_employed" }
+  return { ran: true, reason: "recomputed" }
 }

@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 import type { BorderStyle, GridCell } from "./statements-api";
+import { STATEMENT_FONT_STACK, borderCss } from "./statement-layout";
 
 /**
  * 後台「仿 Excel／Word」表格的共用視覺（2026-10-27 業主：表格配色字體要跟後台風格一致）。
@@ -137,5 +138,34 @@ export function gridCellWebStyle(cell: GridCell, ctx: GridWebContext = {}): CSSP
     color: cell.negative ? SHEET_COLORS.danger : header ? SHEET_COLORS.headText : SHEET_COLORS.text,
     // 表頭（原本綠底／粗體欄名）→ gray-50；其他有底色的格（原本黃底強調）→ 品牌淡底。
     background: header ? SHEET_COLORS.headBg : cell.fill ? SHEET_COLORS.accentBg : undefined,
+  };
+}
+
+/* ------------------------------------------- StatementGrid → Excel 原樣 --- */
+
+/**
+ * 一格 Excel 格線 → 「跟客戶 Excel 一模一樣」的 inline style（後台「出勤統計表」頁，2026-11-09 業主）：
+ * 微軟正黑體堆疊、原檔字級（pt × 1.25 px）、黑色細框、原檔底色（表頭綠、週末／假日／特休底色、黃底強調）、
+ * 原檔字色（實領紅字）。結構與 gridCellWebStyle 相同，只有視覺不同。
+ */
+export function gridCellExcelStyle(cell: GridCell): CSSProperties {
+  const numeric = typeof cell.value === "number";
+  const b = cell.border ?? {};
+  return {
+    textAlign: cell.align ?? (numeric ? "right" : "left"),
+    whiteSpace: cell.wrap ? "normal" : "nowrap",
+    overflow: "visible",
+    padding: "0 3px",
+    verticalAlign: "middle",
+    lineHeight: 1.2,
+    fontFamily: STATEMENT_FONT_STACK,
+    fontSize: Math.round((cell.size ?? 12) * 1.25),
+    fontWeight: cell.bold ? 700 : 400,
+    color: cell.negative ? "#FF0000" : (cell.color ?? "#000"),
+    background: cell.fill ?? undefined,
+    borderTop: borderCss(b.top),
+    borderBottom: borderCss(b.bottom),
+    borderLeft: borderCss(b.left),
+    borderRight: borderCss(b.right),
   };
 }

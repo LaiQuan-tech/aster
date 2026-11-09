@@ -41,6 +41,10 @@ export type CellFormat =
   | "intRed"
   | "pct0"
   | "pct1"
+  | "acct2"
+  | "weekdayZh"
+  | "yearZh"
+  | "monthZh"
 
 export const NUM_FMT: Record<CellFormat, string> = {
   text: "@",
@@ -57,6 +61,11 @@ export const NUM_FMT: Record<CellFormat, string> = {
   intRed: "#,##0;[Red]-#,##0",
   pct0: "0%",
   pct1: "0.0\\ %",
+  // 2026-11-09 出勤統計表（115-10 版）：請假時數會計格式 2 位小數、星期全寫、標題列「115年｜10月」。
+  acct2: '_-* #,##0.00_-;\\-* #,##0.00_-;_-* "-"??_-;_-@_-',
+  weekdayZh: "[$-404]aaaa;@",
+  yearZh: '0"年"',
+  monthZh: '0"月"',
 }
 
 export interface GridCell {
@@ -92,7 +101,7 @@ export interface GridCell {
 }
 
 export interface StatementGrid {
-  kind: "attendance" | "payslip" | "bonusSheet"
+  kind: "attendance" | "payslip" | "bonusSheet" | "leaveForm" | "expenseSheet"
   /** xlsx 工作表名稱／檔名用的標題。 */
   title: string
   /** 欄寬（Excel 字元單位，照原檔）。 */
@@ -111,7 +120,22 @@ export interface StatementGrid {
     paperSize: number
     /** 每頁重複的表頭列（1 起算，含頭尾），例 [1, 4]。 */
     printTitleRows?: [number, number]
+    /** 縮放：省略＝一頁寬（高度不限）；"none"＝不縮放（照原檔 100%）。 */
+    fit?: "width" | "none"
+    /** 邊界（英吋）；省略＝預設。 */
+    margins?: { left: number; right: number; top: number; bottom: number }
+    /** 列印範圍（A1 參照，例 "A1:N47"）。 */
+    printArea?: string
   }
+  /**
+   * 隱藏欄（0 起算；原檔的試算欄，例出勤統計表 E/F/G/K/L）：xlsx 設 hidden、畫面不畫，合併範圍只算可見欄。
+   */
+  hiddenColumns?: number[]
+  /**
+   * 預設隱藏的列（0 起算；出勤統計表的週末／國定假日列，原檔「給主管前要把假日隱藏」）：xlsx 設 hidden，
+   * 畫面預設不畫、可切換顯示。
+   */
+  hiddenRows?: number[]
 }
 
 export const STATEMENT_FONT = "微軟正黑體"
@@ -183,6 +207,8 @@ function generalNumber(n: number): string {
   return String(r)
 }
 
+const WEEKDAY_ZH = ["日", "一", "二", "三", "四", "五", "六"]
+
 /** 依格式把值轉成顯示字串；null／undefined → ""。 */
 export function formatCellText(value: string | number | null | undefined, format: CellFormat): string {
   if (value === null || value === undefined || value === "") return ""
@@ -191,6 +217,11 @@ export function formatCellText(value: string | number | null | undefined, format
       const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
       if (!m) return value
       return format === "md" ? `${Number(m[2])}/${Number(m[3])}` : `${Number(m[2])}月${Number(m[3])}日`
+    }
+    if (format === "weekdayZh") {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+      if (!m) return value
+      return `星期${WEEKDAY_ZH[new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))).getUTCDay()]}`
     }
     if (format === "hm") {
       const m = /^(\d{1,2}):(\d{2})/.exec(value)
@@ -214,6 +245,13 @@ export function formatCellText(value: string | number | null | undefined, format
       return `${neg ? "-" : ""}${thousands(value, 0)}`
     case "num0":
       return String(roundHalfAway(value, 0))
+    case "acct2":
+      if (roundHalfAway(value, 2) === 0) return "-"
+      return `${neg ? "-" : ""}${thousands(value, 2)}`
+    case "yearZh":
+      return `${roundHalfAway(value, 0)}年`
+    case "monthZh":
+      return `${roundHalfAway(value, 0)}月`
     case "intRed":
       return `${neg ? "-" : ""}${thousands(value, 0)}`
     case "pct0":
@@ -264,7 +302,8 @@ export class GridBuilder {
   /** 只加框線（格子不存在就建一個空白格）。 */
   border(row: number, col: number, border: GridBorder): void {
     const prev = this.cells.get(`${row}:${col}`)
-    this.set(row, col, { value: prev?.value ?? null, border })
+    // 保留原本的顯示字串（例：不可得時的「—」），不要因為補框線被重新格式化成空白。
+    this.set(row, col, { value: prev?.value ?? null, border, ...(prev ? { text: prev.text } : {}) })
   }
 
   /** 範圍內每格四邊細框。 */

@@ -215,6 +215,7 @@ describe("resolveAdminPath：最長前綴", () => {
       module: "attendanceSettlement",
     });
     expect(resolveAdminPath("/admin/attendance-sheets")).toMatchObject({ section: "attendance", tab: "sheets" });
+    expect(resolveAdminPath("/admin/attendance-statements")).toMatchObject({ section: "attendance", tab: "statements", title: "出勤統計表" });
     expect(resolveAdminPath("/admin/late-reports")).toMatchObject({ section: "attendance", tab: "lateReports", title: "遲到說明" });
   });
 
@@ -466,7 +467,8 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
     ]);
     expect(tabsForSection("announce", { knowledge: true }).map((t) => t.key)).toEqual(["announcements", "companyInfo", "knowledge"]);
     // 班表（/admin/schedules）2026-10-11 移除；班別在設定區、值日／總機保留。
-    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "sheets", "lateReports", "duty"]);
+    // 2026-11-09：出勤統計表（/admin/attendance-statements）接在出勤月表後面。
+    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "sheets", "statements", "lateReports", "duty"]);
   });
 
   it("subTabsFor：有 children 回子分頁（含 href）、沒有回 []、null 回 []", () => {
@@ -510,7 +512,8 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
     const payroll = tabsForSection("payroll", null, { roleNav: NAV }).map((t) => t.key);
     expect(payroll).toEqual(["expenses", "advances"]);
     for (const key of ["payroll", "payslips", "tax", "cash"]) expect(payroll).not.toContain(key);
-    expect(tabsForSection("attendance", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["sheets"]);
+    // 出勤統計表：會計可看（金額在 API 端遮成「—」）。
+    expect(tabsForSection("attendance", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["sheets", "statements"]);
     expect(tabsForSection("people", { recruitment: true }, { roleNav: NAV }).map((t) => t.key)).toEqual(["employees"]);
     // 設定區只開選項清單（客戶分類的管理權限比照客戶名冊的寫入）＋個人頁「AI 連接」（personal：管自己的金鑰，任何角色都有）；
     // 假別、班別、規則參數、進階功能等仍是 HR 專屬
