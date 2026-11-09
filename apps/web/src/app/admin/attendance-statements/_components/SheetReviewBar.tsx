@@ -235,10 +235,10 @@ export function SheetReviewBar({
         <span className="text-sm font-semibold text-gray-900">出勤月表</span>
         <Pill tone={STATUS_TONE[sheet.status] ?? "gray"}>{SHEET_STATUS_LABEL[sheet.status]}</Pill>
         {sheet.anomalyCount.error > 0 && (
-          <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs text-red-700">error×{sheet.anomalyCount.error}</span>
+          <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs text-red-700">需處理 {sheet.anomalyCount.error}</span>
         )}
         {sheet.anomalyCount.warn > 0 && (
-          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">warn×{sheet.anomalyCount.warn}</span>
+          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">提醒 {sheet.anomalyCount.warn}</span>
         )}
         {loading && <span className="text-xs text-gray-400">更新中…</span>}
       </div>

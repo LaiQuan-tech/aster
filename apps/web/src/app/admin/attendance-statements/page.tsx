@@ -378,7 +378,7 @@ export default function AttendanceStatementsPage() {
             <p className="mt-1 text-lg font-semibold text-blue-700">{stats.pendingApproval}</p>
           </div>
           <div className="rounded-xl bg-red-50 p-3">
-            <p className="text-xs text-red-600">有 error 異常</p>
+            <p className="text-xs text-red-600">有需處理異常</p>
             <p className="mt-1 text-lg font-semibold text-red-700">{stats.hasError}</p>
           </div>
         </div>

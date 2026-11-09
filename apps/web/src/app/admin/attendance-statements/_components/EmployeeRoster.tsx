@@ -5,7 +5,7 @@ import { otAlertClass, type RosterRow } from "@/lib/attendance-statements-page";
 
 /**
  * 出勤統計表合併頁左側的員工清單（2026-11-09；取代原「出勤月表」列表頁的每員工一列）：
- * 工號姓名、月表狀態、異常數（error 紅／warn 黃）、加班累計與 36／40／46 小時警示、送出／核准時間；點選＝右側顯示該員工。
+ * 工號姓名、月表狀態、異常數（需處理紅／提醒黃）、加班累計與 36／40／46 小時警示、送出／核准時間；點選＝右側顯示該員工。
  */
 
 function fmtShort(iso: string | null): string {
@@ -58,10 +58,10 @@ export function EmployeeRoster({
                     加班 {(s.otTotalMinutes / 60).toFixed(1)}h{s.overtimeMonthlyAlert !== "none" && ` (${s.overtimeMonthlyAlert})`}
                   </span>
                   {s.anomalyCount.error > 0 && (
-                    <span className="rounded-full bg-red-100 px-1.5 text-red-700">error×{s.anomalyCount.error}</span>
+                    <span className="rounded-full bg-red-100 px-1.5 text-red-700">需處理 {s.anomalyCount.error}</span>
                   )}
                   {s.anomalyCount.warn > 0 && (
-                    <span className="rounded-full bg-amber-100 px-1.5 text-amber-700">warn×{s.anomalyCount.warn}</span>
+                    <span className="rounded-full bg-amber-100 px-1.5 text-amber-700">提醒 {s.anomalyCount.warn}</span>
                   )}
                   {(s.submittedAt || s.approvedAt) && (
                     <span className="w-full text-gray-400">

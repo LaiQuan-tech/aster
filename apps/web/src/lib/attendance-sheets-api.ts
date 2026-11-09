@@ -436,7 +436,7 @@ export function exportAttendanceSheetsXlsx(period: string, filename: string) {
 const API_ERROR_MESSAGES: Record<string, string> = {
   override_reason_required: "覆寫加班時數時必須填寫原因",
   sheet_not_editable: "此月表目前狀態不可編輯（若是加班覆寫，核准後需先「重開」才能再改）",
-  anomalies_unacknowledged: "尚有錯誤等級異常未填寫說明，請先逐項說明後再送出",
+  anomalies_unacknowledged: "尚有需處理異常未填寫說明，請先逐項說明後再送出",
   not_found: "找不到這張出勤月表",
   day_not_found: "找不到這一天的資料，或已超出本期範圍",
   invalid_transition: "目前狀態不允許這個操作",
@@ -469,7 +469,7 @@ export function friendlyError(err: unknown, fallback: string): string {
   return fallback;
 }
 
-/** 送出前的前端自我檢查：找出「錯誤等級且尚未填寫說明」的異常，逐日列出給 UI 顯示。 */
+/** 送出前的前端自我檢查：找出「需處理且尚未填寫說明」的異常，逐日列出給 UI 顯示。 */
 export function unacknowledgedErrors(sheet: SheetView): { date: string; anomaly: SheetAnomaly }[] {
   const out: { date: string; anomaly: SheetAnomaly }[] = [];
   for (const day of sheet.days) {

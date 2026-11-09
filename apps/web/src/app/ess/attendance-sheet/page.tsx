@@ -218,7 +218,7 @@ export default function AttendanceSheetPage() {
               )}
               {editable && blockers.length > 0 && (
                 <div className="no-print rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
-                  <p className="mb-1 font-medium">送出前請先在表格中說明以下錯誤等級異常：</p>
+                  <p className="mb-1 font-medium">送出前請先在表格中說明以下需處理異常：</p>
                   <ul className="list-disc space-y-0.5 pl-4">
                     {blockers.map((b, i) => (
                       <li key={`${b.date}-${i}`}>
@@ -260,10 +260,10 @@ export default function AttendanceSheetPage() {
                 </span>
                 <span className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
                   {row.anomalyCount.error > 0 && (
-                    <span className="rounded-full bg-red-100 px-2 py-0.5 text-red-700">error×{row.anomalyCount.error}</span>
+                    <span className="rounded-full bg-red-100 px-2 py-0.5 text-red-700">需處理 {row.anomalyCount.error}</span>
                   )}
                   {row.anomalyCount.warn > 0 && (
-                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">warn×{row.anomalyCount.warn}</span>
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">提醒 {row.anomalyCount.warn}</span>
                   )}
                   <span>送出 {fmtDateTime(row.submittedAt)}</span>
                   <span style={{ color: "var(--brand)" }}>審核 →</span>

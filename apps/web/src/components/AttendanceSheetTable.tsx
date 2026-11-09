@@ -101,8 +101,8 @@ const SEVERITY_STYLE: Record<SheetAnomaly["severity"], string> = {
 
 /** 嚴重度的文字（給螢幕報讀；畫面上靠顏色區分，與日級異常一致）。 */
 const SEVERITY_TEXT: Record<SheetAnomaly["severity"], string> = {
-  error: "錯誤",
-  warn: "警示",
+  error: "需處理",
+  warn: "提醒",
   info: "資訊",
 };
 
