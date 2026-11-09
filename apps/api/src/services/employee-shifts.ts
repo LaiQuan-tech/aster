@@ -38,6 +38,18 @@ export interface ResolvedDayShift {
 export const PART_TIME_EMPLOYMENT_TYPE = "parttime"
 
 /**
+ * 兼職值的正規化比對（去空白、轉小寫）：'parttime'、'part_time'、'part-time'、'兼職'。
+ * 批次邀請的 CSV 會把身分類別原字存進 employees.employment_type，所以不只認 'parttime'。
+ * 前端 apps/web/src/lib/sheet-no-punch.ts（hasFixedWorkdays 的 parttime／part_time 寫法）對齊同一組值。
+ */
+const PART_TIME_EMPLOYMENT_TYPES: ReadonlySet<string> = new Set(["parttime", "part_time", "part-time", "兼職"])
+
+export function isPartTimeType(value: unknown): boolean {
+  if (typeof value !== "string") return false
+  return PART_TIME_EMPLOYMENT_TYPES.has(value.trim().toLowerCase())
+}
+
+/**
  * 純函式（各判斷點共用）：兼職、且當天沒有排班也沒有個人預設班別 → true。
  * true 時沒有「應上班時間」：不判遲到／早退／缺卡／曠職、不產生遲到說明、不影響全勤，工時照實記錄。
  */
@@ -45,7 +57,7 @@ export function isUnscheduledPartTime(input: {
   employmentType: string | null | undefined
   source: DayShiftSource | null
 }): boolean {
-  return input.employmentType === PART_TIME_EMPLOYMENT_TYPE && input.source === null
+  return isPartTimeType(input.employmentType) && input.source === null
 }
 
 export interface EmploymentWindow {

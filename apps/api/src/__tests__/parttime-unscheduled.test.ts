@@ -7,7 +7,7 @@ vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase
 
 import { punchOverviewRouter } from "../routes/punch-overview.js"
 import { scanMissingPunches } from "../services/detection.js"
-import { isUnscheduledPartTime, resolveDayShift } from "../services/employee-shifts.js"
+import { isPartTimeType, isUnscheduledPartTime, resolveDayShift } from "../services/employee-shifts.js"
 import { classifyDay, describeShift, statsOf, type ClassifyInput, type OverviewDay } from "../services/punch-overview.js"
 import { computeAttendanceRows, lateMinutesForArrival, settleAttendance } from "../services/settlement.js"
 import { fake, TENANT_ID } from "./helpers/fake-supabase.js"
@@ -252,5 +252,16 @@ describe("打卡總覽 — 兼職不排班", () => {
     expect(off).toMatchObject({ status: "off", statusLabel: "未排班" })
     const day = { ...off, date: DAY, dayType: "workday", shift: { ...shift }, in: null, out: null } as unknown as OverviewDay
     expect(statsOf([day])).toMatchObject({ expected: 0, absent: 0 })
+  })
+})
+
+describe("isPartTimeType 兼職值正規化", () => {
+  it.each(["parttime", "part_time", "part-time", "兼職", " PartTime ", "PART_TIME", " 兼職 "])("%j 算兼職", (v) => {
+    expect(isPartTimeType(v)).toBe(true)
+    expect(isUnscheduledPartTime({ employmentType: v, source: null })).toBe(true)
+  })
+  it.each(["regular", "intern", "contract", "", "   ", null, undefined, 1])("%j 不算兼職", (v) => {
+    expect(isPartTimeType(v)).toBe(false)
+    expect(isUnscheduledPartTime({ employmentType: v as string | null | undefined, source: null })).toBe(false)
   })
 })

@@ -16,6 +16,15 @@
 --   • late_reports 列本身：遲到說明清單（GET /late-reports）、老闆待辦「遲到說明待決定」
 --     （boss-summary lateReportsPending）、月結檢查的 late_reports 提醒都直接數這張表。
 --
+-- 【執行前必做】
+--   (a) 把本檔所有 '<TENANT_ID>' 換成要清理的租戶 uuid（查詢段與刪除段各一處，兩處都要換；
+--       不換會因 uuid 格式錯誤直接報錯，不會誤刪其他租戶）。
+--   (b) 「當時是正職、後來才改兼職」的人要人工排除：資料裡沒有 employment_type 異動紀錄，無法由 SQL 判斷
+--       「遲到說明當天員工是不是兼職」。查詢結果多列 employee_updated_at（員工主檔最後更新時間）供判斷：
+--       若 employee_updated_at 晚於 work_date，該員工可能在遲到說明之後才改成兼職（或只是改了別的欄位），
+--       請與 HR 確認該日當時身分；確認是正職的列，不要刪。刪除段不會自動排除，請依核對結果加
+--       `AND lr.id NOT IN (...)` 或改成 `AND lr.id IN (...)` 明列要刪的 id。
+--
 -- 使用方式：**唯讀查詢先跑、人工核對**；清理段預設 ROLLBACK，確認後才把最後一行改成 COMMIT。
 -- 本檔不會由程式自動執行；不要在未核對前對正式庫執行。
 -- 判斷條件與程式一致（apps/api/src/services/employee-shifts.ts isUnscheduledPartTime）：
@@ -35,6 +44,8 @@ SELECT lr.id                AS late_report_id,
        lr.late_minutes      AS report_late_minutes,
        lr.attendance_decision,
        lr.created_at,
+       e.updated_at         AS employee_updated_at,
+       (e.updated_at::date > lr.work_date) AS employee_changed_after_report,
        ad.late_minutes      AS settled_late_minutes,
        sh.status            AS sheet_status
 FROM public.late_reports lr
@@ -45,7 +56,8 @@ LEFT JOIN public.attendance_days ad
 LEFT JOIN public.attendance_sheets sh
   ON sh.tenant_id = lr.tenant_id AND sh.employee_id = lr.employee_id
  AND sh.period = to_char(lr.work_date, 'YYYY-MM')
-WHERE e.employment_type = 'parttime'
+WHERE lr.tenant_id = '<TENANT_ID>'
+  AND lower(btrim(e.employment_type)) IN ('parttime', 'part_time', 'part-time', '兼職')
   AND e.default_shift_id IS NULL
   AND NOT EXISTS (
         SELECT 1 FROM public.schedules s
@@ -62,9 +74,10 @@ BEGIN;
 
 DELETE FROM public.late_reports lr
 USING public.employees e
-WHERE e.id = lr.employee_id
+WHERE lr.tenant_id = '<TENANT_ID>'
+  AND e.id = lr.employee_id
   AND e.tenant_id = lr.tenant_id
-  AND e.employment_type = 'parttime'
+  AND lower(btrim(e.employment_type)) IN ('parttime', 'part_time', 'part-time', '兼職')
   AND e.default_shift_id IS NULL
   AND NOT EXISTS (
         SELECT 1 FROM public.schedules s
