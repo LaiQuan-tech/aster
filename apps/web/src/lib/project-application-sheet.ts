@@ -673,3 +673,13 @@ export function receiptSummaryText(money: Pick<ProjectMoney, "receivedTotal" | "
   const pct = money.receiptProgressPct == null ? "—" : `${money.receiptProgressPct}%`;
   return `已收 ${fmt(money.receivedTotal)}／未收 ${fmt(money.unreceived)}（收款 ${pct}）`;
 }
+
+/**
+ * 下方「分期請款期程」每一期名稱旁的標籤：文字一律來自期別名稱（跟申請單付款階段同步），
+ * 類型（公會代墊）只用顏色區分；名稱空白就不顯示，不再印固定的「技師公會代墊」字樣（2026-11-09 業主回報）。
+ */
+export function billingRowTag(b: { kind?: BillingExt["kind"] | null; milestone?: string | null }): { text: string; tone: "guild" | "plain" } | null {
+  const text = (b.milestone ?? "").trim();
+  if (!text) return null;
+  return { text, tone: b.kind === "guild_advance" ? "guild" : "plain" };
+}

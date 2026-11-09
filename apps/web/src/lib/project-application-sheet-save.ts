@@ -247,6 +247,30 @@ function stageLabel(row: ApplicationStageRow): string {
   return row.kind === "guild_advance" ? "技師公會代墊" : `第 ${row.no} 列`;
 }
 
+/**
+ * 空殼期別：名稱、%、人工金額、預定日、備註都空，也沒請款／開票／入帳——在申請單上跟空白列無法區分，
+ * 留著只會讓下方期程多一列「第 N 期 —」。
+ */
+export function isEmptyShellBilling(b: BillingExt): boolean {
+  return (
+    trimmed(b.milestone ?? "") === "" &&
+    b.percentage == null &&
+    b.overrideAmount == null &&
+    !b.plannedOn &&
+    trimmed(b.note ?? "") === "" &&
+    !b.billedOn &&
+    !b.invoiceNo &&
+    !b.invoicedOn &&
+    !b.receivedOn
+  );
+}
+
+/** 這次的修改有沒有在該列填進任何內容（說明／%／金額／發票／日期）。 */
+function stageEditFills(edit: StageEdit | undefined): boolean {
+  if (!edit) return false;
+  return (["milestone", "percentage", "amount", "receivedOn", "invoiceNo", "invoicedOn"] as const).some((f) => trimmed(edit[f]) !== "");
+}
+
 export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): StagePlan {
   const out: StagePlan = { installments: null, created: [], removed: [], invoices: [], receipts: [], needsReason: [], changes: 0, errors: [], warnings: [] };
   if (!ctx.canFinance) return out;
@@ -276,10 +300,22 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
   for (const row of rows) {
     const key = stageRowKey(row);
     const edit: StageEdit | undefined = draft.stageEdits[key];
+    // 空殼期別（舊版清空名稱只存 null、沒移除而留下）：申請單這列看起來跟「沒有這一期」一樣空白，
+    // 使用者再清空也沒有差異可送，所以這次沒填任何內容就直接列入移除（2026-11-09 業主回報第 8 列刪不掉）。
+    const label = stageLabel(row);
+    const ghost = row.id ? byId.get(row.id) : undefined;
+    if (ghost && isEmptyShellBilling(ghost) && !stageEditFills(edit)) {
+      const target = payload.find((p) => p.id === row.id);
+      if (target) payload.splice(payload.indexOf(target), 1);
+      scheduleChanged = true;
+      out.changes += 1;
+      out.removed.push({ key, label });
+      out.warnings.push(`付款階段${label}在系統裡是空白期別（下方「分期請款期程」仍顯示），儲存時會一併移除。`);
+      continue;
+    }
     if (!edit) continue;
     const base = stageBaseValues(row);
     const locks = stageLocks(row);
-    const label = stageLabel(row);
 
     const milestoneChanged = edit.milestone !== undefined && trimmed(edit.milestone) !== trimmed(base.milestone);
     let percentage: number | null | undefined;

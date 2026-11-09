@@ -23,7 +23,7 @@ import {
   type InstallmentInputExt,
   type ProjectMoney,
 } from "@/lib/projects-ext-api";
-import { receiptSummaryText } from "@/lib/project-application-sheet";
+import { billingRowTag, receiptSummaryText } from "@/lib/project-application-sheet";
 import { fmtMoney, todayKey, humanError, type Setter } from "./shared";
 
 interface BillingsCardProps {
@@ -251,11 +251,17 @@ export function BillingsCard({
                   <tr className="border-b last:border-0">
                     <td className="py-2 pr-2 text-gray-700">
                       {/* 期別與說明只讀：改在上方申請單「付款階段」。 */}
+                      {/* 標籤文字來自期別名稱（跟申請單同步），公會代墊只用紫色區分；名稱空白不印固定字樣。 */}
                       <span>第 {rowDraft.installmentNo} 期</span>
-                      {rowDraft.milestone && <span className="ml-1">{rowDraft.milestone}</span>}
-                      {rowDraft.kind === "guild_advance" && (
-                        <span className="ml-1 rounded bg-purple-50 px-1.5 py-0.5 text-[10px] text-purple-700">{BILLING_KIND_LABELS.guild_advance}</span>
-                      )}
+                      {(() => {
+                        const tag = billingRowTag(rowDraft);
+                        if (!tag) return null;
+                        return tag.tone === "guild" ? (
+                          <span className="ml-1 rounded bg-purple-50 px-1.5 py-0.5 text-xs text-purple-700" title={BILLING_KIND_LABELS.guild_advance}>{tag.text}</span>
+                        ) : (
+                          <span className="ml-1">{tag.text}</span>
+                        );
+                      })()}
                     </td>
                     <td className="py-2 pr-2 text-right text-gray-600">
                       {saved?.calculatedAmount == null ? (

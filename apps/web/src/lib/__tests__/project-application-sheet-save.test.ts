@@ -3,6 +3,7 @@ import {
   applicationSheetDraftOf,
   applicationStageRows,
   applicationSubcontractSlots,
+  billingRowTag,
   rebaseApplicationSheetDraft,
   salesAmounts,
   stageRowKey,
@@ -678,5 +679,77 @@ describe("付款階段清空名稱／整列清空", () => {
     expect(plan.stages.removed).toEqual([])
     expect(plan.stages.installments?.[0]).toMatchObject({ id: "b1", milestone: null })
     expect(plan.warnings.join()).toMatch(/第 1 列.*不能整列移除/)
+  })
+})
+
+/**
+ * 業主回報（2026-11-09 第二次）：申請單第 8 列已清空並儲存，下方「分期請款期程」仍有「第 8 期」＋紫色「技師公會代墊」。
+ * 根因：舊版前端清空名稱只把 milestone 存成 null、沒移除這一期，留下「名稱／%／金額全空」的空殼期別；
+ * 新版申請單第 8 列顯示空白＝跟空殼一樣，使用者再清空也沒有差異可送，空殼永遠刪不掉。
+ */
+describe("申請單已是空白、系統裡卻還有空殼期別（舊版留下）", () => {
+  const inst = fakeBilling({ id: "b1", installmentNo: 1, milestone: "訂金款", percentage: 10, calculatedAmount: 10000, effectiveAmount: 10000 })
+  const ghost = fakeBilling({ id: "g1", installmentNo: 8, kind: "guild_advance", milestone: null, percentage: null, plannedOn: null, calculatedAmount: null, effectiveAmount: null })
+
+  it("沒動任何格子：空殼列入移除、算一個未儲存變更並提示，整批 PUT 不含它", () => {
+    const ctx = ctxOf({ billings: [inst, ghost] })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx))
+    expect(plan.errors).toEqual([])
+    expect(plan.stages.removed.map((r) => r.key)).toEqual(["g1"])
+    expect(plan.stages.installments?.map((p) => p.id)).toEqual(["b1"])
+    expect(plan.dirtyCount).toBe(1)
+    expect(plan.warnings.join()).toMatch(/下方「分期請款期程」.*移除/)
+  })
+
+  it("使用者在那列打字又清空（說明仍空白）：同樣移除，不重複計數", () => {
+    const ctx = ctxOf({ billings: [inst, ghost] })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { g1: { milestone: "", amount: "" } } }))
+    expect(plan.stages.removed.map((r) => r.key)).toEqual(["g1"])
+    expect(plan.dirtyCount).toBe(1)
+  })
+
+  it("那列這次填了內容：不移除，照一般修改送出", () => {
+    const ctx = ctxOf({ billings: [inst, ghost] })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { g1: { milestone: "公會代墊款" } } }))
+    expect(plan.stages.removed).toEqual([])
+    expect(plan.stages.installments?.find((p) => p.id === "g1")).toMatchObject({ milestone: "公會代墊款" })
+  })
+
+  it("已請款／開票／入帳，或有預定日／備註的空白期別：不當空殼、不移除", () => {
+    for (const over of [{ billedOn: "2026-10-20", billedAmount: 0 }, { invoiceNo: "AA00000001", invoicedOn: "2026-10-21" }, { receivedOn: "2026-10-25" }, { plannedOn: "2026-12-01" }, { note: "待公會核定" }]) {
+      const ctx = ctxOf({ billings: [inst, { ...ghost, ...over }] })
+      const plan = applicationSheetPlan(ctx, draftOf(ctx))
+      expect(plan.stages.removed).toEqual([])
+      expect(plan.stages.installments).toBeNull()
+      expect(plan.dirtyCount).toBe(0)
+    }
+  })
+
+  it("存檔：整批 PUT 不帶空殼（後端軟刪除），重新載入後第 8 列回到 placeholder", async () => {
+    const ctx = ctxOf({ billings: [inst, ghost] })
+    const draft = draftOf(ctx)
+    const plan = applicationSheetPlan(ctx, draft)
+    const putCalls: InstallmentInputExt[][] = []
+    const api = {
+      updateProject: vi.fn(), updateClient: vi.fn(), upsertMainContract: vi.fn(), updateContract: vi.fn(), createQuotation: vi.fn(),
+      saveBillingSchedule: vi.fn(async (list: InstallmentInputExt[]) => { putCalls.push(list); return { installments: list.map((p) => ({ id: p.id ?? "x", installmentNo: p.installmentNo })) } }),
+      invoiceBilling: vi.fn(), receiveBilling: vi.fn(), putSubcontracts: vi.fn(),
+      fetchBillings: vi.fn(async () => [inst, ghost]),
+      humanize: () => "x",
+    } as unknown as SheetSaveApi
+    const res = await runApplicationSheetSave(plan, draft, api, ctx)
+    expect(putCalls.map((l) => l.map((p) => p.id))).toEqual([["b1"]])
+    expect(res.steps.find((st) => st.section === "billings")?.status).toBe("ok")
+    const rows = applicationStageRows([inst])
+    expect(rows[rows.length - 1]).toMatchObject({ kind: "guild_advance", exists: false })
+  })
+})
+
+describe("下方期程的期別標籤：文字來自期別名稱，類型只用顏色區分", () => {
+  it("公會代墊列有名稱 → 紫色標籤顯示名稱；名稱空白 → 不顯示固定「技師公會代墊」字樣", () => {
+    expect(billingRowTag(fakeBilling({ kind: "guild_advance", milestone: "審迄還款" }))).toEqual({ text: "審迄還款", tone: "guild" })
+    expect(billingRowTag(fakeBilling({ kind: "guild_advance", milestone: null }))).toBeNull()
+    expect(billingRowTag(fakeBilling({ kind: "guild_advance", milestone: "  " }))).toBeNull()
+    expect(billingRowTag(fakeBilling({ kind: "installment", milestone: "訂金款" }))).toEqual({ text: "訂金款", tone: "plain" })
   })
 })
