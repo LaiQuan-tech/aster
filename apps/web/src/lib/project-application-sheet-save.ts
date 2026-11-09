@@ -315,7 +315,8 @@ export function pinStageScreenAmounts(ctx: SheetSaveContext, draft: ApplicationS
   for (const r of rows) {
     const key = stageRowKey(r);
     const e = stageEdits[key];
-    if (!r.exists || stageLocks(r).amount || r.amount == null || savedOverrideOf(r, ctx.billings) !== null) continue;
+    // 負數＝吸收超額配置尾差的列：不釘（不重送），讓後端照原規則吸收（見 stagePlan 的超額檢查）。
+    if (!r.exists || stageLocks(r).amount || r.amount == null || r.amount < 0 || savedOverrideOf(r, ctx.billings) !== null) continue;
     if (e?.amount !== undefined || e?.percentage !== undefined) continue;
     stageEdits[key] = { ...(e ?? {}), amount: String(r.amount) };
   }
@@ -344,6 +345,64 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
   /** 未稅變了：金額不動、% 依新總額重算 → 每列都要重送 %。 */
   const totalChanged = total !== null && total !== savedTotal;
   const mode = stageAmountMode(rows, draft, total, totalChanged);
+  if (totalChanged && total !== null) {
+    // 已入帳但還沒請款的期別：% 不能改（後端 409），金額會跟著新的未稅重算——事先講清楚。
+    for (const r of rows) {
+      if (!r.receivedOn || r.billed || r.percentage == null) continue;
+      const next = r.kind === "installment" ? null : amountFromPct(r.percentage, total);
+      const hint = next !== null ? `${formatMoney(next)}` : `約 ${formatMoney(amountFromPct(r.percentage, total))}`;
+      out.warnings.push(`付款階段${stageLabel(r)}已入帳但未請款：百分比 ${formatStagePct(r.percentage)}% 不能改，金額會依新的未稅重算為${hint}（含尾差時以存後為準）。`);
+    }
+  }
+  /** 目前金額為負、使用者沒動的列（期程原本就超額配置，最後一期吸收成負數）：不重送，交給後端照原規則吸收。 */
+  const negativeUntouched = new Set<string>();
+  if (mode && total !== null) {
+    const isEdited = (r: ApplicationStageRow) => {
+      const e = draft.stageEdits[stageRowKey(r)];
+      return !!e && (e.amount !== undefined || e.percentage !== undefined);
+    };
+    for (const r of rows) if (r.exists && !stageLocks(r).amount && r.amount != null && r.amount < 0 && !isEdited(r)) negativeUntouched.add(stageRowKey(r));
+    if (negativeUntouched.size > 0) {
+      // 其他各期（含人工指定、已請款、這次改的）存後的金額合計；超過未稅＝超額配置，後端無法吸收成 0 以上 → 擋存並指出原因。
+      let others = 0;
+      for (const r of rows) {
+        if (r.kind !== "installment" || negativeUntouched.has(stageRowKey(r))) continue;
+        const e = draft.stageEdits[stageRowKey(r)];
+        let a: number | null | "invalid" = stageLocks(r).amount ? r.amount : e?.amount !== undefined ? parseNumber(e.amount, { min: 0 }) : r.amount;
+        if (a === null && e?.percentage !== undefined && !stageLocks(r).amount) {
+          const p = parseNumber(e.percentage, { min: 0, max: 100 });
+          a = typeof p === "number" ? amountFromPct(p, total) : null;
+        }
+        if (typeof a === "number") others += a;
+      }
+      const editedKeys = rows.filter((r) => isEdited(r) && !stageLocks(r).amount).map(stageRowKey);
+      const errField = editedKeys.length > 0 ? `stage:${editedKeys[0]}:amount` : "amountUntaxed";
+      const overrides = rows.filter((r) => savedOverrideOf(r, ctx.billings) !== null && !isEdited(r)).map(stageLabel);
+      const cause = overrides.length > 0 ? `（人工指定金額：${overrides.join("、")}）` : "";
+      if (others > total) {
+        out.errors.push({
+          field: errField,
+          message: `付款階段超額配置 ${formatMoney(others - total)} 元：各期金額合計 ${formatMoney(others)} 超過銷售金額（未稅）${formatMoney(total)}${cause}，請先調整某期金額。`,
+        });
+      } else {
+        // 負數列必須仍是最後一個吸收尾差的期別，否則差額會落到別期、存後與畫面不符。
+        const absorbers = rows.filter((r) => {
+          if (r.kind !== "installment" || stageLocks(r).amount) return false;
+          const e = draft.stageEdits[stageRowKey(r)];
+          const willExist = r.exists || (!!e && stageEditFills(e));
+          const override = isEdited(r) ? false : savedOverrideOf(r, ctx.billings) !== null;
+          return willExist && !override;
+        });
+        const last = absorbers[absorbers.length - 1];
+        for (const r of rows) {
+          const key = stageRowKey(r);
+          if (negativeUntouched.has(key) && (!last || stageRowKey(last) !== key)) {
+            out.errors.push({ field: `stage:${key}:amount`, message: `付款階段${stageLabel(r)}目前是負數（期程超額配置的尾差），請先調整這一期的金額再存。` });
+          }
+        }
+      }
+    }
+  }
   let nextNo = ctx.billings.reduce((m, b) => Math.max(m, b.installmentNo), 0) + 1;
   let scheduleChanged = false;
   const rowKeys = new Set(rows.map(stageRowKey));
@@ -382,7 +441,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     const amountEdited = e.amount !== undefined || e.percentage !== undefined;
     // 金額為主模式（任一期金額／% 或未稅有變）：所有可編輯期別都以畫面金額換算 % 一起送，存後各期＝畫面值
     // （吸收尾差的期別換人時也不會默默變動）。沒被編輯的人工指定列不動（金額本來就固定，理由保留）。
-    if (mode && total !== null && !locks.amount && (amountEdited || (row.exists && savedOverride === null))) {
+    if (mode && total !== null && !locks.amount && !negativeUntouched.has(key) && (amountEdited || (row.exists && savedOverride === null))) {
       // 目標金額：金額格 > % 格反算 > 原金額（只有未稅變了）。
       let target: number | null | "invalid";
       if (e.amount !== undefined) target = parseNumber(e.amount, { min: 0 });

@@ -70,6 +70,9 @@ describe("sanitizeMoneyInput（打字／貼上）", () => {
     expect(sanitizeMoneyInput("12,000.00")).toBe("12000");
     expect(sanitizeMoneyInput("1234.56")).toBe("1234");
     expect(sanitizeMoneyInput(".5")).toBe("");
+    // 只認第一個點為小數點，其後整段捨去。
+    expect(sanitizeMoneyInput("1.2.3")).toBe("1");
+    expect(sanitizeMoneyInput("1.2.3", { allowDecimal: true })).toBe("1.23");
     // 舊資料小數字串：未聚焦顯示不放大
     expect(moneyInputDisplay("1234.5", false)).toBe("1,234.5");
     expect(moneyInputDisplay(1500.75, false)).toBe("1,500.75");
