@@ -24,6 +24,8 @@ import {
   REOPEN_REASON_MAX,
   REOPEN_REASON_MIN,
   canConfirmClose,
+  isCloseBlocked,
+  selectedPeriodRow,
   checklistSummary,
   checklistViews,
   closeButtonLabel,
@@ -112,6 +114,27 @@ export function PeriodLockCard({ period, blockers = null, onPickEmployee, onChan
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  // 選的月份不在最近 12 個月清單時，另行查詢該月狀態（既有的 checklist API 會一併回 status）。
+  // data 變動（鎖定／重新開放後重抓）會再查一次；查詢中或失敗都不顯示動作，避免把已鎖定的月份當成開放中。
+  const [lookup, setLookup] = useState<{ period: string; status: PeriodStatus | null; error: boolean } | null>(null);
+  useEffect(() => {
+    if (!period || !data || data.periods.some((p) => p.period === period)) {
+      setLookup(null);
+      return;
+    }
+    let active = true;
+    getPeriodChecklist(period)
+      .then((res) => {
+        if (active) setLookup({ period, status: res.status, error: false });
+      })
+      .catch(() => {
+        if (active) setLookup({ period, status: null, error: true });
+      });
+    return () => {
+      active = false;
+    };
+  }, [period, data]);
 
   /* ------------------------------------------------------------- 鎖定 --- */
 
@@ -294,21 +317,20 @@ export function PeriodLockCard({ period, blockers = null, onPickEmployee, onChan
       ) : data ? (
         <>
         {period && (() => {
-          const row: PayrollPeriodRow = data.periods.find((p) => p.period === period) ?? {
-            period,
-            status: "open",
-            closedAt: null,
-            closedByEmpId: null,
-            closedByName: null,
-            reopenedAt: null,
-            reopenedByEmpId: null,
-            reopenedByName: null,
-            reopenReason: null,
-            sheetCount: 0,
-            lockedCount: 0,
-          };
+          const looked = lookup && lookup.period === period ? lookup : null;
+          const row = selectedPeriodRow(period, data.periods, looked?.status ?? null);
+          if (!row) {
+            return (
+              <div className="mb-3 rounded-xl border border-gray-200 p-3" data-testid="period-lock-selected">
+                <span className="font-medium tabular-nums text-gray-900">{period}</span>
+                <p className="mt-0.5 text-sm text-gray-500" data-testid="period-lock-lookup">
+                  {looked?.error ? "查不到這個月的月結狀態，請按「重新整理」再試" : "查詢這個月的月結狀態中…"}
+                </p>
+              </div>
+            );
+          }
           const actions = periodActionsOf(row.status, data);
-          const blocked = blockers === null || blockers.length > 0;
+          const blocked = isCloseBlocked(blockers);
           return (
             <div className="mb-3 rounded-xl border border-gray-200 p-3" data-testid="period-lock-selected">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -390,7 +412,13 @@ export function PeriodLockCard({ period, blockers = null, onPickEmployee, onChan
                 </div>
                 <div className="flex min-w-0 flex-wrap items-center gap-2 sm:max-w-[50%] sm:shrink-0 sm:justify-end">
                   {actions.showClose && (
-                    <Button size="sm" onClick={() => openClose(row.period)} data-testid="period-close-btn">
+                    <Button
+                      size="sm"
+                      onClick={() => openClose(row.period)}
+                      // 目前選取月份那列與上方鎖定鈕同一條規則：有人未就緒就停用；testid 不同，避免與上方那顆重複。
+                      disabled={row.period === period && isCloseBlocked(blockers)}
+                      data-testid={row.period === period ? "period-close-btn-row" : "period-close-btn"}
+                    >
                       {closeButtonLabel(row.period)}
                     </Button>
                   )}

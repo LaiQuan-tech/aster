@@ -22,7 +22,7 @@
  *     真正的守門在 API（requireFinance／canSeeBonus）。
  *   - `isAdminPathAllowed({ pathname, roleNav, modules })`（2026-09-23 驗收修正）：直開網址時
  *     這個角色能不能看這一頁；AdminShell 不渲染未開放的頁、首頁卡片依它隱藏。HR 一律 true。
- *   - `AdminTab.hrOnly`（2026-10-11 集團總覽起；集團總覽 2026-10-27 已移到首頁、獎金分潤同日改為頁內區塊守門，目前沒有分頁帶這個旗標，機制保留）：只給 HR／平台管理員的分頁。帶了 roleNav（會計）就一律不列，
+ *   - `AdminTab.hrOnly`（2026-10-11 集團總覽起；集團總覽 2026-10-27 已移到首頁、獎金分潤同日改為頁內區塊守門，目前帶這個旗標的是月結發薪與未核准加班報表）：只給 HR／平台管理員的分頁。帶了 roleNav（會計）就一律不列，
  *     即使租戶自訂的會計範圍沒限縮該分區的分頁；直開網址同樣走 isAdminPathAllowed 擋掉。
  *   - `AdminTab.groupFinancials`（2026-10-26 老闆與一般 HR 分開）：集團財務頁的旗標（原用於集團總覽，之後是獎金分潤；2026-10-27 集團總覽移到首頁、獎金分潤總表改在頁內區塊守門，目前沒有分頁帶這個旗標，機制保留）。只有 /me.canSeeGroupFinancials
  *     （老闆／platform_admin／被授權的 HR）才列、直開才放行——tabsForSection／isAdminPathAllowed 帶
@@ -321,6 +321,8 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       href: "/admin/payroll",
       title: "月結發薪",
       desc: "當月每位員工還有什麼沒就緒，逐一處理；執行薪資、核對定案、寄送薪資條，全部就緒才完成發薪並鎖定",
+      // 頁內 API（薪資執行、薪資單、月結鎖定）皆 HR 限定：會計預設與自訂範圍都不列、直開擋下。
+      hrOnly: true,
     },
     {
       // 2026-11-09「稅務申報／現金給付（三節獎金、加班超額另計）／報銷／預支」合併成「費用與給付」；
@@ -855,16 +857,14 @@ export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
  * 已合併掉的舊分頁 key → 現在承接它的分頁 key。租戶自訂的會計範圍（tenants.features.roles.accountant）
  * 存的是分頁 key，合併後舊 key 要換成新 key，不然勾過舊分頁的會計會看不到合併後的頁。
  * 2026-10-27：receivables（請款與未收款）併入 disbursements（請款與放款）。
- * 2026-11-09：sheets（出勤月表與月結）併入 statements（出勤統計表）；payslips（薪資單）併入 payroll（月結發薪）；
- *   tax（稅務申報）、cash（現金給付）、advances（預支）併入 expenses（費用與給付）。
+ * 2026-11-09：sheets（出勤月表與月結）併入 statements（出勤統計表）；advances（預支）併入 expenses（費用與給付）。
+ *   payslips（薪資單）併入 payroll（月結發薪，HR 限定）、tax（稅務申報）與 cash（現金給付）併入 expenses 的 HR 專屬區塊，
+ *   同 lateReports **刻意不設別名**：對應過去會把只勾過 HR 專屬功能的自訂角色放大成可見頁，舊 key 直接丟棄。
  * lateReports（遲到說明）併入打卡紀錄，但**刻意不設別名**：打卡紀錄是整頁打卡資料，把只勾遲到說明的自訂角色放大成它會越權，舊 key 直接丟棄。
  */
 export const LEGACY_TAB_ALIASES: Readonly<Record<string, string>> = {
   receivables: "disbursements",
   sheets: "statements",
-  payslips: "payroll",
-  tax: "expenses",
-  cash: "expenses",
   advances: "expenses",
 };
 

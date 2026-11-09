@@ -540,7 +540,7 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
 
   it("hrOnly 目前只有「未核准加班」報表（2026-11；集團總覽 2026-10-27 移到首頁；獎金分潤同日併入、改在頁內區塊守門，見 lib/bonus-page-access.ts）", () => {
     const hrOnlyKeys = (Object.values(ADMIN_TABS).flat() as Array<{ key: string; hrOnly?: boolean }>).filter((t) => t.hrOnly).map((t) => t.key);
-    expect(hrOnlyKeys).toEqual(["unapprovedOvertime"]);
+    expect(hrOnlyKeys).toEqual(["payroll", "unapprovedOvertime"]);
     expect(ADMIN_TABS.finance.find((t) => t.key === "bonus")).toMatchObject({ href: "/admin/bonus-sheet" });
     expect(ADMIN_TABS.finance.find((t) => t.key === "bonus")).not.toHaveProperty("hrOnly");
     expect(ADMIN_TABS.finance.find((t) => t.key === "bonus")).not.toHaveProperty("groupFinancials");
@@ -885,9 +885,6 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
     expect(LEGACY_TAB_ALIASES).toEqual({
       receivables: "disbursements",
       sheets: "statements",
-      payslips: "payroll",
-      tax: "expenses",
-      cash: "expenses",
       advances: "expenses",
     });
     // 設定頁再勾／取消時舊 key 換成新 key，不會被當成不認得的 key 丟掉
@@ -914,7 +911,7 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
     expect(tabsForSection("attendance", null, { roleNav: lateOnly }).map((t) => t.key)).not.toContain("punches");
   });
 
-  it("舊分頁 key（2026-11-09 薪資與費用合併）：payslips → payroll；tax／cash／advances → expenses（只勾過報銷、預支的會計看得到「費用與給付」，不會多出月結發薪）", () => {
+  it("舊分頁 key（2026-11-09 薪資與費用合併）：advances → expenses；payslips／tax／cash 刻意不設別名、直接丟棄（HR 專屬功能不放大成會計可見頁）", () => {
     const legacy = roleNavOf("accountant", { roles: { accountant: { sections: ["payroll"], tabs: { payroll: ["expenses", "advances"] } } } });
     expect(legacy?.tabs.payroll).toEqual(["expenses"]);
     expect(tabsForSection("payroll", null, { roleNav: legacy }).map((t) => t.key)).toEqual(["expenses"]);
@@ -922,16 +919,24 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
     expect(isAdminPathAllowed({ pathname: "/admin/payroll", roleNav: legacy })).toBe(false);
     const advOnly = roleNavOf("accountant", { roles: { accountant: { sections: ["payroll"], tabs: { payroll: ["advances"] } } } });
     expect(tabsForSection("payroll", null, { roleNav: advOnly }).map((t) => t.key)).toEqual(["expenses"]);
-    const slipOnly = roleNavOf("accountant", { roles: { accountant: { sections: ["payroll"], tabs: { payroll: ["payslips"] } } } });
-    expect(slipOnly?.tabs.payroll).toEqual(["payroll"]);
-    expect(nextRoleTabs("payroll", ["tax", "cash", "advances"], "payroll", true)).toEqual(["payroll", "expenses"]);
+    for (const dead of ["payslips", "tax", "cash"]) {
+      const only = roleNavOf("accountant", { roles: { accountant: { sections: ["payroll"], tabs: { payroll: [dead] } } } });
+      expect(only?.tabs.payroll ?? [], dead).not.toContain("payroll");
+      expect(only?.tabs.payroll ?? [], dead).not.toContain("expenses");
+      expect(tabsForSection("payroll", null, { roleNav: only }).map((t) => t.key), dead).toEqual([]);
+    }
+    // 月結發薪 hrOnly：自訂範圍勾 payroll 也不列、直開擋下
+    const customPayroll = roleNavOf("accountant", { roles: { accountant: { sections: ["payroll"], tabs: { payroll: ["payroll", "expenses"] } } } });
+    expect(tabsForSection("payroll", null, { roleNav: customPayroll }).map((t) => t.key)).toEqual(["expenses"]);
+    expect(isAdminPathAllowed({ pathname: "/admin/payroll", roleNav: customPayroll })).toBe(false);
+    expect(nextRoleTabs("payroll", ["tax", "cash", "advances"], "payroll", true)).toEqual(["expenses"]);
     // 會計預設：只開「費用與給付」，直開月結發薪 → false
     expect(isAdminPathAllowed({ pathname: "/admin/payroll", roleNav: ACCOUNTANT_DEFAULT_NAV })).toBe(false);
     expect(isAdminPathAllowed({ pathname: "/admin/expenses", roleNav: ACCOUNTANT_DEFAULT_NAV })).toBe(true);
   });
 
-  it("目前的 hrOnly 分頁只有系統／未核准加班（2026-11；下面的路徑與提示測試會自動涵蓋）", () => {
-    expect(HR_ONLY_TABS.map(({ section, tab }) => `${section}/${tab.key}`)).toEqual(["system/unapprovedOvertime"]);
+  it("目前的 hrOnly 分頁是月結發薪＋系統／未核准加班（2026-11；下面的路徑與提示測試會自動涵蓋）", () => {
+    expect(HR_ONLY_TABS.map(({ section, tab }) => `${section}/${tab.key}`)).toEqual(["payroll/payroll", "system/unapprovedOvertime"]);
   });
 
   it("isHrOnlyAdminPath：HR 限定頁（含 query／尾斜線／子路徑）→ true；其他頁、首頁、未知路徑 → false", () => {
@@ -941,7 +946,7 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
       expect(isHrOnlyAdminPath(`${tab.href}?year=2026`), tab.href).toBe(true);
       expect(isHrOnlyAdminPath(`${tab.href}/detail`), tab.href).toBe(true);
     }
-    for (const path of ["/admin", "/admin/projects", "/admin/projects/receivables", "/admin/payroll", "/admin/bonus-runs", "/admin/settings/advanced", "/admin/whatever"]) {
+    for (const path of ["/admin", "/admin/projects", "/admin/projects/receivables", "/admin/expenses", "/admin/bonus-runs", "/admin/settings/advanced", "/admin/whatever"]) {
       expect(isHrOnlyAdminPath(path), path).toBe(false);
     }
   });
@@ -959,12 +964,12 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
   });
 
   it("offLimitsCopy：其他被擋的頁維持原本的說法（未開放給{角色}，請 HR 到進階功能調整）", () => {
-    for (const path of ["/admin/payroll", "/admin/bonus-runs", "/admin/whatever"]) {
+    for (const path of ["/admin/bonus-runs", "/admin/whatever"]) {
       const copy = offLimitsCopy({ pathname: path, roleLabel: "會計" });
       expect(copy.title, path).toBe("此頁未開放給會計");
       expect(copy.body, path).toBe("這個功能不在會計的後台範圍內；需要的話請 HR 到「設定 → 進階功能」調整可用範圍。");
     }
-    expect(offLimitsCopy({ pathname: "/admin/payroll", roleLabel: "此角色" }).title).toBe("此頁未開放給此角色");
+    expect(offLimitsCopy({ pathname: "/admin/bonus-runs", roleLabel: "此角色" }).title).toBe("此頁未開放給此角色");
   });
 
   it("會計預設範圍與自訂範圍的分頁清單都不含 hrOnly 的 key（設定頁不會再把它寫進去）", () => {

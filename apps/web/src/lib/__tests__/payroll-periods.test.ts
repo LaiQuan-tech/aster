@@ -25,6 +25,8 @@ import {
   isApprovalBoss,
   isBossOrPlatformAdmin,
   isChecklistReady,
+  isCloseBlocked,
+  selectedPeriodRow,
   isForbiddenError,
   isValidReopenReason,
   listPayrollPeriods,
@@ -706,5 +708,30 @@ describe("儲存名單失敗的訊息 unlockListSaveErrorMessage", () => {
     expect(unlockListSaveErrorMessage(apiError(403, { error: "forbidden" }))).toContain("沒有儲存設定的權限");
     expect(unlockListSaveErrorMessage(new Error("[500] kaboom"))).toBe("[500] kaboom");
     expect(unlockListSaveErrorMessage("boom")).toBe("儲存失敗");
+  });
+});
+
+describe("selectedPeriodRow／isCloseBlocked（選的月份不在最近 12 個月時另查狀態、鎖定鈕未就緒停用）", () => {
+  const listed = {
+    period: "2026-10", status: "closed", closedAt: null, closedByEmpId: null, closedByName: null,
+    reopenedAt: null, reopenedByEmpId: null, reopenedByName: null, reopenReason: null, sheetCount: 3, lockedCount: 3,
+  } as Parameters<typeof selectedPeriodRow>[1][number];
+
+  it("在清單內：用清單那列，不管另查的狀態", () => {
+    expect(selectedPeriodRow("2026-10", [listed], "open")).toBe(listed);
+  });
+  it("不在清單內：還沒查到 → null（不給任何動作）；查到 closed → 顯示已結算（可重新開放而非鎖定）", () => {
+    expect(selectedPeriodRow("2024-01", [listed], null)).toBeNull();
+    const row = selectedPeriodRow("2024-01", [listed], "closed");
+    expect(row).toMatchObject({ period: "2024-01", status: "closed" });
+    expect(periodActionsOf(row!.status, { canClose: true, canReopen: true })).toMatchObject({ showClose: false, showReopen: true });
+    const open = selectedPeriodRow("2024-01", [listed], "open");
+    expect(periodActionsOf(open!.status, { canClose: true, canReopen: true })).toMatchObject({ showClose: true, showReopen: false });
+  });
+  it("isCloseBlocked：名單未載入（null／undefined）或有人卡住 → 停用；空名單 → 可按", () => {
+    expect(isCloseBlocked(null)).toBe(true);
+    expect(isCloseBlocked(undefined)).toBe(true);
+    expect(isCloseBlocked([{}])).toBe(true);
+    expect(isCloseBlocked([])).toBe(false);
   });
 });

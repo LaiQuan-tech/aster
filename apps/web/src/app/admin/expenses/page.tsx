@@ -94,8 +94,19 @@ function errText(r: PromiseSettledResult<unknown>, label: string): string | null
   return `${label}：${r.reason instanceof Error ? r.reason.message : "載入失敗"}`;
 }
 
+const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+/** 網址 ?period=YYYY-MM → 月份；沒帶或格式不合就用本月。 */
+function initialPeriod(): string {
+  if (typeof window !== "undefined") {
+    const q = new URLSearchParams(window.location.search).get("period");
+    if (q && PERIOD_RE.test(q)) return q;
+  }
+  return todayKey().slice(0, 7);
+}
+
 export default function FinanceHubPage() {
-  const [period, setPeriod] = useState(() => todayKey().slice(0, 7));
+  const [period, setPeriod] = useState(initialPeriod);
   const [isHr, setIsHr] = useState(() => isHrRole(peekMeCached()?.role));
   const [roleReady, setRoleReady] = useState(() => peekMeCached() !== null);
   const [data, setData] = useState<HubData>(EMPTY);
@@ -126,6 +137,15 @@ export default function FinanceHubPage() {
       active = false;
     };
   }, []);
+
+  // 切換月份時同步回網址 ?period=（replaceState，保留 ?section= 等其他參數）。
+  useEffect(() => {
+    if (!PERIOD_RE.test(period)) return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("period") === period) return;
+    url.searchParams.set("period", period);
+    window.history.replaceState(window.history.state, "", url.toString());
+  }, [period]);
 
   // ?section= → 展開並捲到該區（角色確定後才判斷：會計帶 HR 區塊的參數就不動作）。
   useEffect(() => {

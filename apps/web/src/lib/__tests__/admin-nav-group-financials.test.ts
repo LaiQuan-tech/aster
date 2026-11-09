@@ -45,7 +45,7 @@ describe("集團財務導覽", () => {
 
   it("被擋時的說明：獎金分潤已不是集團財務頁，看不到集團財務也照一般文案；其他頁維持原說法", () => {
     expect(offLimitsCopy({ pathname: "/admin/bonus-sheet", roleLabel: "此角色", canSeeGroupFinancials: false }).title).toBe("此頁未開放給此角色");
-    expect(offLimitsCopy({ pathname: "/admin/payroll", roleLabel: "會計", canSeeGroupFinancials: false }).title).toBe("此頁未開放給會計");
+    expect(offLimitsCopy({ pathname: "/admin/bonus-runs", roleLabel: "會計", canSeeGroupFinancials: false }).title).toBe("此頁未開放給會計");
   });
 
   it("canSeeGroupFinancialsOf：新 API 照布林；舊 API 缺欄位退回 HR 角色", () => {

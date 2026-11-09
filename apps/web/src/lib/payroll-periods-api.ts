@@ -340,6 +340,39 @@ export function periodActionsOf(
   };
 }
 
+/**
+ * 月結發薪頁選的月份對應哪一列：在最近 12 個月清單內就用清單那列；不在清單內，要靠另行查到的狀態
+ * （GET /payroll-periods/:period/checklist 的 status）決定顯示鎖定或重新開放；還沒查到（null）就回 null，
+ * 畫面不給任何動作，免得把已鎖定的月份當成開放中。
+ */
+export function selectedPeriodRow(
+  period: string,
+  periods: readonly PayrollPeriodRow[],
+  lookedUpStatus: PeriodStatus | null,
+): PayrollPeriodRow | null {
+  const inList = periods.find((p) => p.period === period);
+  if (inList) return inList;
+  if (lookedUpStatus === null) return null;
+  return {
+    period,
+    status: lookedUpStatus,
+    closedAt: null,
+    closedByEmpId: null,
+    closedByName: null,
+    reopenedAt: null,
+    reopenedByEmpId: null,
+    reopenedByName: null,
+    reopenReason: null,
+    sheetCount: 0,
+    lockedCount: 0,
+  };
+}
+
+/** 鎖定鈕是否因「還有人未就緒」而停用：名單還沒載入（null）或有人卡住都停用。 */
+export function isCloseBlocked(blockers: readonly unknown[] | null | undefined): boolean {
+  return blockers === null || blockers === undefined || blockers.length > 0;
+}
+
 /** 鎖定鈕文字（固定）：「完成 2026-10 發薪並鎖定」。 */
 export function closeButtonLabel(period: string): string {
   return `完成 ${period} 發薪並鎖定`;
