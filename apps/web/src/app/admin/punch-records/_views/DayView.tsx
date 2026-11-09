@@ -3,17 +3,34 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Empty, ErrorText } from "@/components/admin-ui";
 import { sheet } from "@/lib/sheet-styles";
-import { fmtHours, getPunchOverview, type OverviewFilter, type PunchOverview } from "@/lib/punch-overview";
+import {
+  countByFilter,
+  DAY_FILTER_LABEL,
+  filterEmployeesByDay,
+  fmtHours,
+  getPunchOverview,
+  parseDayFilter,
+  type DayFilterKey,
+  type OverviewFilter,
+  type PunchOverview,
+} from "@/lib/punch-overview";
 import { PunchTime, Tag } from "./punch-bits";
 
 const inputCls = "rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 
-function Stat({ label, value, tone }: { label: string; value: number; tone?: string }) {
+function Stat({ label, value, tone, active, onClick }: { label: string; value: number; tone?: string; active: boolean; onClick: () => void }) {
   return (
-    <div className="rounded-xl bg-gray-50 px-3 py-2.5">
-      <p className="text-xs text-gray-500">{label}</p>
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={`min-w-0 rounded-xl px-2 py-2.5 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 sm:px-3 ${
+        active ? "bg-gray-900/5 ring-2 ring-gray-900" : "bg-gray-50 hover:bg-gray-100"
+      }`}
+    >
+      <p className="truncate text-xs text-gray-500">{label}</p>
       <p className={`mt-0.5 text-xl font-semibold tabular-nums ${tone ?? "text-gray-900"}`}>{value}</p>
-    </div>
+    </button>
   );
 }
 
@@ -29,6 +46,21 @@ export function DayView({ filter }: { filter: OverviewFilter }) {
   const [loading, setLoading] = useState(true);
   // 請求序號：只採用最後一次請求的回應，切日期很快時舊回應不會蓋掉新的。
   const reqSeq = useRef(0);
+  // 統計卡篩選：存在網址 ?filter=（換日期、重新整理都保留）。首次 render 用 all 避免 hydration 不一致，掛載後再讀網址。
+  const [statFilter, setStatFilter] = useState<DayFilterKey>("all");
+  const tableRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    setStatFilter(parseDayFilter(new URLSearchParams(window.location.search).get("filter")));
+  }, []);
+  const chooseFilter = (key: DayFilterKey) => {
+    const next = key === "all" || key === statFilter ? "all" : key;
+    setStatFilter(next);
+    const url = new URL(window.location.href);
+    if (next === "all") url.searchParams.delete("filter");
+    else url.searchParams.set("filter", next);
+    window.history.replaceState(null, "", url);
+    if (next !== "all") requestAnimationFrame(() => tableRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
+  };
 
   const load = useCallback(async () => {
     const seq = ++reqSeq.current;
@@ -52,7 +84,7 @@ export function DayView({ filter }: { filter: OverviewFilter }) {
   }, [load]);
 
   const day = data?.from ?? date;
-  const stats = data?.stats[day];
+  const counts = data ? countByFilter(data.employees, day) : null;
   const isToday = !!data && day === data.today;
 
   // 「今天」頁：每 5 分鐘自動刷新（只在頁面可見時；切回分頁時若已過期立即刷新）。
@@ -73,6 +105,8 @@ export function DayView({ filter }: { filter: OverviewFilter }) {
     };
   }, [isToday, load]);
 
+  const shownEmployees = data ? filterEmployeesByDay(data.employees, day, statFilter) : [];
+
   return (
     <Card>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -91,13 +125,13 @@ export function DayView({ filter }: { filter: OverviewFilter }) {
         </div>
       </div>
 
-      {stats && (
-        <div className="mb-4 grid grid-cols-5 gap-3">
-          <Stat label={isToday ? "今日應到" : "應到"} value={stats.expected} />
-          <Stat label="已到" value={stats.arrived} tone="text-green-700" />
-          <Stat label="遲到" value={stats.late} tone={stats.late ? "text-amber-700" : undefined} />
-          <Stat label="未打卡" value={stats.absent} tone={stats.absent ? "text-red-600" : undefined} />
-          <Stat label="請假／出差" value={stats.onLeave} tone="text-blue-700" />
+      {counts && (
+        <div className="mb-4 grid grid-cols-5 gap-2 sm:gap-3">
+          <Stat label={isToday ? "今日應到" : "應到"} value={counts.expected} active={statFilter === "all"} onClick={() => chooseFilter("all")} />
+          <Stat label="已到" value={counts.arrived} tone="text-green-700" active={statFilter === "arrived"} onClick={() => chooseFilter("arrived")} />
+          <Stat label="遲到" value={counts.late} tone={counts.late ? "text-amber-700" : undefined} active={statFilter === "late"} onClick={() => chooseFilter("late")} />
+          <Stat label="未打卡" value={counts.absent} tone={counts.absent ? "text-red-600" : undefined} active={statFilter === "absent"} onClick={() => chooseFilter("absent")} />
+          <Stat label="請假／出差" value={counts.onLeave} tone="text-blue-700" active={statFilter === "onLeave"} onClick={() => chooseFilter("onLeave")} />
         </div>
       )}
 
@@ -107,6 +141,16 @@ export function DayView({ filter }: { filter: OverviewFilter }) {
       ) : !data || data.employees.length === 0 ? (
         <Empty>查無員工</Empty>
       ) : (
+        <div ref={tableRef} className="scroll-mt-4">
+          {statFilter !== "all" && (
+            <p className="mb-2 text-sm text-gray-600" role="status">
+              顯示：{DAY_FILTER_LABEL[statFilter]}（{shownEmployees.length} 人）·{" "}
+              <button type="button" onClick={() => chooseFilter("all")} className="text-blue-600 underline hover:text-blue-800">清除篩選</button>
+            </p>
+          )}
+          {shownEmployees.length === 0 ? (
+            <Empty>沒有符合的員工</Empty>
+          ) : (
         <div className={`${sheet.frame} max-h-[calc(100vh-260px)] overflow-y-auto ${loading ? "opacity-60" : ""}`}>
           <table className={sheet.table}>
             <thead className="sticky top-0 z-20">
@@ -120,7 +164,7 @@ export function DayView({ filter }: { filter: OverviewFilter }) {
               </tr>
             </thead>
             <tbody>
-              {data.employees.map((e) => {
+              {shownEmployees.map((e) => {
                 const d = e.days.find((x) => x.date === day);
                 return (
                   <tr key={e.id} className={sheet.row}>
@@ -163,6 +207,8 @@ export function DayView({ filter }: { filter: OverviewFilter }) {
               })}
             </tbody>
           </table>
+        </div>
+          )}
         </div>
       )}
     </Card>

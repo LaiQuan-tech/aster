@@ -244,3 +244,72 @@ export function weekCellBadges(day: OverviewDay): OverviewTag[] {
   for (const t of day.tags) if (t.code === "late" || t.code === "early_leave") out.push(t);
   return out.slice(0, 2);
 }
+
+/* ------------------------------------------------------ 當日總覽：統計卡篩選 --- */
+
+export type DayFilterKey = "all" | "arrived" | "late" | "absent" | "onLeave";
+
+export const DAY_FILTER_LABEL: Record<DayFilterKey, string> = {
+  all: "今日應到",
+  arrived: "已到",
+  late: "遲到",
+  absent: "未打卡",
+  onLeave: "請假／出差",
+};
+
+const DAY_FILTER_KEYS = Object.keys(DAY_FILTER_LABEL) as DayFilterKey[];
+
+/** 網址 ?filter= 的值 → 篩選鍵；未知值一律當全部。 */
+export function parseDayFilter(v: string | null | undefined): DayFilterKey {
+  return DAY_FILTER_KEYS.includes(v as DayFilterKey) ? (v as DayFilterKey) : "all";
+}
+
+/** 這一天是否整天不在（與後端 statsOf 同一套）。 */
+function fullDayAway(d: OverviewDay): boolean {
+  return d.status === "leave" || d.status === "business_trip" || d.status === "outing";
+}
+
+/**
+ * 分類判斷：統計數字與表格篩選共用這一份（規則與 apps/api services/punch-overview.ts statsOf 一致）。
+ * "all" 永遠 true（＝顯示全部員工，含假日與請假者）。
+ */
+export function dayMatchesFilter(d: OverviewDay, key: DayFilterKey): boolean {
+  switch (key) {
+    case "all":
+      return true;
+    case "arrived":
+      return d.dayType === "workday" && !fullDayAway(d) && (!!d.in || d.status === "wfh");
+    case "late":
+      return d.lateMinutes > 0;
+    case "absent":
+      return d.status === "absent";
+    case "onLeave":
+      return fullDayAway(d);
+  }
+}
+
+/** 應到人數（workday 且非整天不在）。 */
+export function isExpected(d: OverviewDay): boolean {
+  return d.dayType === "workday" && !fullDayAway(d);
+}
+
+/** 沒有該日資料（未到職）的員工只出現在「全部」。 */
+export function filterEmployeesByDay(employees: OverviewEmployee[], day: string, key: DayFilterKey): OverviewEmployee[] {
+  if (key === "all") return employees;
+  return employees.filter((e) => {
+    const d = e.days.find((x) => x.date === day);
+    return !!d && dayMatchesFilter(d, key);
+  });
+}
+
+/** 五張卡的數字：直接由同一個判斷算出，點哪張就剛好有幾列。 */
+export function countByFilter(employees: OverviewEmployee[], day: string): { expected: number } & Record<Exclude<DayFilterKey, "all">, number> {
+  const days = employees.map((e) => e.days.find((x) => x.date === day)).filter((d): d is OverviewDay => !!d);
+  return {
+    expected: days.filter(isExpected).length,
+    arrived: days.filter((d) => dayMatchesFilter(d, "arrived")).length,
+    late: days.filter((d) => dayMatchesFilter(d, "late")).length,
+    absent: days.filter((d) => dayMatchesFilter(d, "absent")).length,
+    onLeave: days.filter((d) => dayMatchesFilter(d, "onLeave")).length,
+  };
+}
