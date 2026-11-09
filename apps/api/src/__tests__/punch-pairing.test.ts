@@ -91,8 +91,8 @@ describe("pairPunchesTz — in/out pairing", () => {
   })
 })
 
-describe("pairPunchesTz — outing / break deductions", () => {
-  it("an enclosed outing is attributed to the enclosing segment's day and cut out of worked time", () => {
+describe("pairPunchesTz — outing (counted) / break (deducted) segments", () => {
+  it("an enclosed outing is attributed to the enclosing segment's day and COUNTS as worked time (外出洽公計入工時)", () => {
     const days = pairPunchesTz(
       [
         punch("in", "2026-06-01", "09:00"),
@@ -106,11 +106,11 @@ describe("pairPunchesTz — outing / break deductions", () => {
     expect(d.outings).toHaveLength(1)
     expect(d.outings[0]).toMatchObject({ kind: "outing", workDate: "2026-06-01", minutes: 90, enclosed: true })
     expect(d.outingMinutes).toBe(90)
-    expect(d.workedMinutesRaw).toBe(540 - 90)
-    // Engine pairs: 09:00–14:00 and 15:30–18:00.
-    expect(d.pairs).toHaveLength(2)
-    expect(naiveMinutes(d.pairs[0].outAt)).toBe(14 * 60)
-    expect(naiveMinutes(d.pairs[1].inAt)).toBe(15 * 60 + 30)
+    expect(d.workedMinutesRaw).toBe(540)
+    // Engine pairs: the whole 09:00–18:00 segment, uncut.
+    expect(d.pairs).toHaveLength(1)
+    expect(naiveMinutes(d.pairs[0].inAt)).toBe(9 * 60)
+    expect(naiveMinutes(d.pairs[0].outAt)).toBe(18 * 60)
   })
 
   it("an outing inside a cross-midnight segment follows that segment's work_date", () => {
@@ -126,7 +126,7 @@ describe("pairPunchesTz — outing / break deductions", () => {
     expect([...days.keys()]).toEqual(["2026-06-01"])
     const d = days.get("2026-06-01")!
     expect(d.outingMinutes).toBe(30)
-    expect(d.workedMinutesRaw).toBe(270)
+    expect(d.workedMinutesRaw).toBe(300)
   })
 
   it("an outing no segment encloses goes to its own local day and deducts nothing", () => {
@@ -178,7 +178,7 @@ describe("pairPunchesTz — outing / break deductions", () => {
     expect(d.workedMinutesRaw).toBe(540)
   })
 
-  it("overlapping deductions are never subtracted twice", () => {
+  it("a break inside an outing is still deducted; the outing itself is not", () => {
     const days = pairPunchesTz(
       [
         punch("in", "2026-06-01", "09:00"),
@@ -191,15 +191,32 @@ describe("pairPunchesTz — outing / break deductions", () => {
       TPE,
     )
     const d = days.get("2026-06-01")!
-    expect(d.workedMinutesRaw).toBe(540 - 90)
+    expect(d.workedMinutesRaw).toBe(540 - 30)
+    expect(d.outingMinutes).toBe(90)
+    expect(d.breakMinutes).toBe(30)
   })
 
-  it("an outing covering the whole segment leaves a zero-length pair at the 'in'", () => {
+  it("an outing covering the whole segment keeps the whole segment as worked time", () => {
     const days = pairPunchesTz(
       [
         punch("in", "2026-06-01", "09:00"),
         punch("outing_in", "2026-06-01", "09:00"),
         punch("outing_out", "2026-06-01", "18:00"),
+        punch("out", "2026-06-01", "18:00"),
+      ],
+      TPE,
+    )
+    const d = days.get("2026-06-01")!
+    expect(d.workedMinutesRaw).toBe(540)
+    expect(d.pairs).toHaveLength(1)
+  })
+
+  it("a break covering the whole segment leaves a zero-length pair at the 'in'", () => {
+    const days = pairPunchesTz(
+      [
+        punch("in", "2026-06-01", "09:00"),
+        punch("break_in", "2026-06-01", "09:00"),
+        punch("break_out", "2026-06-01", "18:00"),
         punch("out", "2026-06-01", "18:00"),
       ],
       TPE,

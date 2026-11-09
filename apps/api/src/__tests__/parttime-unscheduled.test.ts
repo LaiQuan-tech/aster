@@ -176,6 +176,55 @@ describe("settleAttendance／lateMinutesForArrival — 兼職不排班", () => {
     it("回歸：兼職有個人預設班別（含午休 12:00–13:00）11:00–15:00 → 照班別扣午休 180 分", async () => {
       expect(await workedOf(PT_DAYSHIFT, [["in", "11:00"], ["out", "15:00"]])).toBe(180)
     })
+
+    describe("外出洽公計入工時（2026-11-09 業主）", () => {
+      it("正職 09:00 上班、13:00 外出、15:00 返回、18:00 下班 → 480（與沒外出相同，只扣午休）；外出 120 分照記", async () => {
+        expect(
+          await workedOf(REGULAR, [["in", "09:00"], ["outing_in", "13:00"], ["outing_out", "15:00"], ["out", "18:00"]]),
+        ).toBe(480)
+        expect(rowOf(REGULAR)).toMatchObject({ overtime_minutes: 0, outing_minutes: 120 })
+        fake.db.attendance_days = []
+        fake.db.punch_records = []
+        expect(await workedOf(REGULAR, [["in", "09:00"], ["out", "18:00"]])).toBe(480)
+      })
+
+      it("正職外出跨午休 11:30–14:00 → 午休照扣 60、外出不額外扣 → 480", async () => {
+        expect(
+          await workedOf(REGULAR, [["in", "09:00"], ["outing_in", "11:30"], ["outing_out", "14:00"], ["out", "18:00"]]),
+        ).toBe(480)
+      })
+
+      it("正職 09:00–20:00 中間外出 14:00–16:00 → 外出照算進加班：工時 600、加班 120", async () => {
+        expect(
+          await workedOf(REGULAR, [["in", "09:00"], ["outing_in", "14:00"], ["outing_out", "16:00"], ["out", "20:00"]]),
+        ).toBe(600)
+        expect(rowOf(REGULAR)).toMatchObject({ overtime_minutes: 120 })
+      })
+
+      it("兼職不排班 11:00–15:00 中間外出 12:00–13:00 → 240 分（無預設午休、外出也不扣）", async () => {
+        expect(await workedOf(PT, [["in", "11:00"], ["outing_in", "12:00"], ["outing_out", "13:00"], ["out", "15:00"]])).toBe(240)
+      })
+
+      it("休息卡仍扣：兼職不排班 11:00–15:00 外出 12:00–14:00、其中休息 12:30–13:00 → 210 分", async () => {
+        expect(
+          await workedOf(PT, [
+            ["in", "11:00"],
+            ["outing_in", "12:00"],
+            ["break_in", "12:30"],
+            ["break_out", "13:00"],
+            ["outing_out", "14:00"],
+            ["out", "15:00"],
+          ]),
+        ).toBe(210)
+      })
+
+      it("外出未配對（只有外出卡沒返回卡）→ 工時照上下班卡算 480、記 outing_unpaired（anomaly.unpairedOutings=1）", async () => {
+        expect(await workedOf(REGULAR, [["in", "09:00"], ["outing_in", "13:00"], ["out", "18:00"]])).toBe(480)
+        const row = rowOf(REGULAR) as Record<string, unknown> | undefined
+        expect(row?.anomaly).toMatchObject({ unpairedOutings: 1 })
+        expect(row?.outing_minutes).toBe(0)
+      })
+    })
   })
 
   it("兼職有個人預設班別 14:30：照班別判，14:37 到＝遲到 7 分", async () => {

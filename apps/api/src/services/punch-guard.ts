@@ -9,7 +9,8 @@
  *     are exempt — they carry an explicit timestamp and are not a double tap.
  *
  *   • Work status（上班中／已下班）：only work `in` / `out` punches flip the
- *     state. `break_*` / `outing_*` are deductions inside a work segment and
+ *     state. `break_*` (deducted) / `outing_*` (counted as work since 2026-11-09)
+ *     are sub-segments inside a work segment and
  *     must not make `GET /punch/today` report "off" while someone is on a
  *     break — the front page would otherwise offer "上班打卡" mid-shift.
  *

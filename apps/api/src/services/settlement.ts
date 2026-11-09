@@ -38,7 +38,8 @@ import { dinnerPunchByDate, effectiveDinnerTaken, pairPunchesTz, type PairedDay 
  * For a tenant + date range (+ optional single employee) it gathers, per
  * employee per work_date that has any punch, schedule or approved leave:
  *   • that day's punches paired into in/out segments (cross-midnight pairs
- *     belong to the 'in' day; outing/break pairs are cut out of worked time),
+ *     belong to the 'in' day; punched break pairs are cut out of worked time,
+ *     outing pairs count as worked time since 2026-11-09),
  *   • the employee's schedule → shift (start/end/break) for the day,
  *   • the day's type (services/day-type.ts：tenant_calendar_days 優先，沒有列＝依例假／休息日星期設定，
  *     員工個人設定優先；預設週日例假、週六休息日),
@@ -422,7 +423,8 @@ function pickDayShift(
  *   • 一般員工：工作日＝整天＋租戶預設午休（工時扣「在班區間與午休的重疊」）；例假日／國定假日＝整天、不扣午休。
  *   • 兼職不排班（employee-shifts.ts isUnscheduledPartTime，2026-11-09 業主）：不論日別都＝整天、不扣預設午休，
  *     工時＝各組上下班卡區間的總和——中午打下班卡、回來再打上班卡，中間空檔本來就不在任何一段裡；
- *     打了休息卡（break_in/out）／外出卡（outing_in/out）的時段已由 punch-pairing 從 pairs 切掉（既有語意，全員一致）。
+ *     打了休息卡（break_in/out）的時段已由 punch-pairing 從 pairs 切掉（全員一致）；外出卡（outing_in/out）
+ *     2026-11-09 起計入工時、不切掉（外出洽公算工時）。
  *     只有一組上下班卡、中間沒打休息卡 → 不扣任何休息。晚餐扣除（applyOvertimePipeline）照舊，不受影響。
  */
 function unscheduledFallbackShift(rules: RuleConfigLike, dayType: DayType, unscheduledPartTime: boolean): ShiftDef {

@@ -15,11 +15,14 @@ import { localDateKey, toNaiveLocal, type DateKey } from "../lib/tz.js"
  *   • A lone 'in' / 'out' (no partner, or partner > 24h away) is counted in
  *     `unpairedPunches` of the punch's own local day.
  *   • 'outing_in'/'outing_out' and 'break_in'/'break_out' are paired the same
- *     way into *deduction* segments. A deduction segment is attributed to the
- *     work segment that encloses it (→ that segment's work_date); one that no
- *     work segment encloses goes to its own local day. Lone outing/break
- *     punches are counted in `unpairedOutings` / `unpairedBreaks`.
- *   • Worked time = Σ work segments − the part of every deduction segment that
+ *     way into segments. A segment is attributed to the work segment that
+ *     encloses it (→ that segment's work_date); one that no work segment
+ *     encloses goes to its own local day. Lone outing/break punches are counted
+ *     in `unpairedOutings` / `unpairedBreaks`.
+ *   • 2026-11-09 業主：外出洽公計入工時。只有休息段（break）是扣除段；外出段（outing）
+ *     只記錄（outings / outingMinutes，月表「外出時數」用），不從工時切掉——照常算正常工時／
+ *     加班／夜間，與午休重疊時由引擎照班別午休規則扣（外出本身不額外扣）。
+ *   • Worked time = Σ work segments − the part of every BREAK segment that
  *     overlaps a work segment. The engine receives the work segments with those
  *     overlaps cut out (`pairs`), so its own gross/night/late/early maths stays
  *     untouched. Whether the SHIFT's fixed break is also deducted is the
@@ -56,12 +59,13 @@ export interface PairedDay {
   breaks: DeductSegment[]
   /**
    * Engine-ready in/out pairs as *naive local* Dates (tenant-tz wall clock on
-   * the host-local clock, see lib/tz.ts) with outing/break overlaps removed.
+   * the host-local clock, see lib/tz.ts) with punched-break overlaps removed
+   * (outings are NOT removed — 外出洽公計入工時).
    */
   pairs: PunchPair[]
-  /** Σ segments − deduction overlaps (before the shift's fixed break). */
+  /** Σ segments − punched-break overlaps (before the shift's fixed break); outings stay in. */
   workedMinutesRaw: number
-  /** Total length of outing segments attributed to this day. */
+  /** Total length of outing segments attributed to this day (informational; not deducted). */
   outingMinutes: number
   /** Total length of punched break segments attributed to this day. */
   breakMinutes: number
@@ -170,7 +174,7 @@ export function pairPunchesTz(punches: PunchLike[], tz: string): Map<DateKey, Pa
   }))
   for (const p of work.unpaired) dayOf(localDateKey(p.punch_at, tz)).unpairedPunches += 1
 
-  // --- deduction segments (outing / break) ------------------------------------
+  // --- outing / break segments (only breaks are deducted) ---------------------
   const attribute = (kind: "outing" | "break", [s, e]: [PunchLike, PunchLike]): DeductSegment => {
     const start = ms(s.punch_at)
     const end = ms(e.punch_at)
@@ -191,20 +195,21 @@ export function pairPunchesTz(punches: PunchLike[], tz: string): Map<DateKey, Pa
   for (const p of outing.unpaired) dayOf(localDateKey(p.punch_at, tz)).unpairedOutings += 1
   for (const p of brk.unpaired) dayOf(localDateKey(p.punch_at, tz)).unpairedBreaks += 1
 
-  const cuts: Interval[] = [...outings, ...breaks].map((d) => ({ start: ms(d.startAt), end: ms(d.endAt) }))
+  // 只有休息段從工時切掉；外出洽公計入工時（2026-11-09 業主），不進 cuts。
+  const cuts: Interval[] = breaks.map((d) => ({ start: ms(d.startAt), end: ms(d.endAt) }))
 
   // --- assemble per day ------------------------------------------------------
   for (const seg of segments) {
     const day = dayOf(seg.workDate)
     day.segments.push(seg)
     const iv: Interval = { start: ms(seg.inAt), end: ms(seg.outAt) }
-    // Interval subtraction (not a sum of overlaps) so two deduction segments
+    // Interval subtraction (not a sum of overlaps) so two break segments
     // that overlap each other can never be deducted twice.
     const remaining = subtractIntervals(iv, cuts)
     const remainingMs = remaining.reduce((acc, r) => acc + (r.end - r.start), 0)
     day.workedMinutesRaw += Math.round(remainingMs / MS_PER_MIN)
     if (remaining.length === 0) {
-      // Fully consumed by deductions: keep a zero-length pair at the 'in' so
+      // Fully consumed by breaks: keep a zero-length pair at the 'in' so
       // the engine still sees when the employee arrived (late minutes).
       day.pairs.push({ inAt: toNaiveLocal(seg.inAt, tz), outAt: toNaiveLocal(seg.inAt, tz) })
     } else {
