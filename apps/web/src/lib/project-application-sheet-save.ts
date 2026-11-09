@@ -33,7 +33,8 @@ import {
   CLIENT_SHEET_FIELDS,
   applicationSheetPatch,
   applicationStageRows,
-  applicationSubcontractSlots,
+  applicationSubcontractRows,
+  subcontractHasPaid,
   latestOrderDocument,
   stageRowKey,
   type ApplicationSheetDraft,
@@ -446,28 +447,45 @@ export interface SubPlan {
   changes: number;
   errors: SheetError[];
   warnings: string[];
-  /** 草稿裡對不到任何欄位的 subEdits key（空欄已被別人新增的副委託佔走，或那筆已被移除）。 */
+  /** 草稿裡對不到任何列的 subEdits key（空列已被別人新增的副委託佔走，或那筆已被移除）。 */
   orphanKeys: string[];
+  /** 這次有移除既有副委託時的理由（PUT 的 deleteReason）；沒移除＝null。 */
+  deleteReason: string | null;
 }
 
 export function subcontractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): SubPlan {
-  const out: SubPlan = { subcontracts: null, changes: 0, errors: [], warnings: [], orphanKeys: [] };
+  const out: SubPlan = { subcontracts: null, changes: 0, errors: [], warnings: [], orphanKeys: [], deleteReason: null };
   if (!ctx.canFinance) return out;
-  const slots = applicationSubcontractSlots(ctx.subcontracts, draft.subExtraBlocks, draft.subEdits).flat();
+  const slots = applicationSubcontractRows(ctx.subcontracts, draft.subExtraRows, draft.subEdits);
   const slotKeys = new Set(slots.map((sl) => sl.key));
   out.orphanKeys = Object.entries(draft.subEdits)
     .filter(([key, edit]) => !slotKeys.has(key) && Object.values(edit).some((v) => trimmed(v) !== ""))
     .map(([key]) => key);
   const orphanCount = out.orphanKeys.length;
   if (orphanCount > 0) {
-    out.warnings.push(`發包單位有 ${orphanCount} 欄的修改對不到副委託（已在別處新增或移除），不會送出；請按「還原」後重填。`);
+    out.warnings.push(`發包有 ${orphanCount} 列的修改對不到副委託（已在別處新增或移除），不會送出；請按「還原」後重填。`);
   }
-  const payload = ctx.subcontracts.map(subPayloadOf);
+  // 標記移除的既有列（對不到的 id＝已被別處移除，忽略）：整批 PUT 不帶＝後端軟刪，要理由；已付款的不准移除。
+  const removedIds = new Set((draft.subRemovedIds ?? []).filter((id) => ctx.subcontracts.some((s) => s.id === id)));
+  const payload = ctx.subcontracts.filter((s) => !(s.id && removedIds.has(s.id))).map(subPayloadOf);
   let nextSort = ctx.subcontracts.reduce((m, s, i) => Math.max(m, s.sortOrder ?? i), -1) + 1;
   let changed = false;
+  if (removedIds.size > 0) {
+    changed = true;
+    out.changes += removedIds.size;
+    slots.forEach((slot, idx) => {
+      if (slot.sub?.id && removedIds.has(slot.sub.id) && subcontractHasPaid(slot.sub)) {
+        out.errors.push({ field: `sub:${slot.key}:remove`, message: `發包第 ${idx + 1} 列已有付款紀錄，不能移除；要移除請先到下方「副委託」撤銷付款。` });
+      }
+    });
+    const reason = trimmed(draft.subDeleteReason);
+    if (reason === "") out.errors.push({ field: "subDeleteReason", message: "移除發包必須填理由。" });
+    else out.deleteReason = reason;
+  }
   slots.forEach((slot, idx) => {
     const edit: SubEdit | undefined = draft.subEdits[slot.key];
     if (!edit) return;
+    if (slot.sub?.id && removedIds.has(slot.sub.id)) return; // 要移除的列，改的格子不送
     const diff: Partial<Record<(typeof SUB_FIELDS)[number], string>> = {};
     for (const f of SUB_FIELDS) {
       const v = edit[f];
@@ -475,7 +493,7 @@ export function subcontractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDr
       if (f === "amount") {
         const n = parseNumber(v, { min: 0, max: 1e12 });
         if (n === "invalid") {
-          out.errors.push({ field: `sub:${slot.key}:amount`, message: `發包單位第 ${idx + 1} 欄的發包金額必須是 0 以上的數字。` });
+          out.errors.push({ field: `sub:${slot.key}:amount`, message: `發包第 ${idx + 1} 列的發包金額必須是 0 以上的數字。` });
           continue;
         }
         if ((n ?? 0) !== Number(subBaseValue(slot.sub, "amount") || 0)) diff.amount = String(n ?? 0);
@@ -535,6 +553,8 @@ export interface SheetSavePlan {
   contract: ContractStep | null;
   stages: StagePlan;
   subcontracts: Subcontract[] | null;
+  /** 移除既有副委託時的理由（PUT deleteReason）；沒移除＝null。 */
+  subDeleteReason: string | null;
   /** 未儲存的格子數（存檔鈕旁、離開頁面提醒）。 */
   dirtyCount: number;
   errors: SheetError[];
@@ -560,6 +580,7 @@ export function applicationSheetPlan(ctx: SheetSaveContext, draft: ApplicationSh
     contract: contract.step,
     stages,
     subcontracts: subs.subcontracts,
+    subDeleteReason: subs.deleteReason,
     dirtyCount:
       projectCount + (clientBody ? Object.keys(clientBody).length : 0) + contract.changes + stages.changes + subs.changes,
     errors,
@@ -589,7 +610,8 @@ export interface SheetSaveApi {
   saveBillingSchedule(installments: InstallmentInputExt[]): Promise<{ installments: Array<{ id: string; installmentNo: number }> }>;
   invoiceBilling(id: string, invoiceNo: string, invoicedOn?: string): Promise<unknown>;
   receiveBilling(id: string, receivedOn: string): Promise<unknown>;
-  putSubcontracts(subcontracts: Subcontract[]): Promise<unknown>;
+  /** deleteReason：這次有移除既有副委託（payload 沒帶到的列）時必帶。 */
+  putSubcontracts(subcontracts: Subcontract[], deleteReason?: string): Promise<unknown>;
   /**
    * 整批 PUT 前重抓最新清單（選填）：用最新資料重建 payload 再套上這次的修改，
    * 免得頁面開了很久、別人剛新增的期別被當成「不在清單裡」軟刪除，或剛改的欄位被舊值蓋回。
@@ -747,6 +769,7 @@ export async function runApplicationSheetSave(
 
   if (plan.subcontracts) {
     let subs = plan.subcontracts;
+    let deleteReason = plan.subDeleteReason;
     /** 重抓後對不到的修改（空欄「new-<序號>」被別人剛新增的副委託佔走等）：不能當成已存。 */
     let orphanKeys: string[] = [];
     const ok = await attempt("subcontracts", "發包單位", async () => {
@@ -756,8 +779,10 @@ export async function runApplicationSheetSave(
         orphanKeys = replanned.orphanKeys;
         if (!replanned.subcontracts) return; // 最新資料已跟草稿一致（或只剩對不到的修改），不必再送
         subs = replanned.subcontracts;
+        deleteReason = replanned.deleteReason;
       }
-      await api.putSubcontracts(subs);
+      if (deleteReason) await api.putSubcontracts(subs, deleteReason);
+      else await api.putSubcontracts(subs);
     });
     if (ok && orphanKeys.length > 0) {
       // 對得到的欄位已存；對不到的不送、草稿保留，這步改標失敗並說明原因（同付款階段：不默默吞掉）。
@@ -765,13 +790,13 @@ export async function runApplicationSheetSave(
       steps[steps.length - 1] = {
         ...step,
         status: "failed",
-        message: `有 ${orphanKeys.length} 欄的修改對不到副委託（存檔前別人剛新增或移除了副委託，空欄位置已變），這幾欄沒有送出、草稿已保留；請看過最新的發包單位後按「還原」重填。`,
+        message: `有 ${orphanKeys.length} 列的修改對不到副委託（存檔前別人剛新增或移除了副委託，空列位置已變），這幾列沒有送出、草稿已保留；請看過最新的發包列表後按「還原」重填。`,
       };
       const kept: Record<string, SubEdit> = {};
       for (const key of orphanKeys) kept[key] = draft.subEdits[key];
-      residual = { ...residual, subEdits: kept };
+      residual = { ...residual, subEdits: kept, subRemovedIds: [], subDeleteReason: "" };
     } else if (ok) {
-      residual = { ...residual, subEdits: {}, subExtraBlocks: 0 };
+      residual = { ...residual, subEdits: {}, subExtraRows: 0, subRemovedIds: [], subDeleteReason: "" };
     }
   }
 

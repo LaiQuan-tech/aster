@@ -156,11 +156,18 @@ describe("申請單表格：可直接編輯", () => {
     expect(render({ mode: "print" })).toContain("115.10.25")
   })
 
-  it("發包單位：既有與空欄都可填；利潤、毛利率維持唯讀", () => {
+  it("發包：每家一列（表頭只一列）、既有與空列都可填、可移除；利潤、毛利率維持唯讀", () => {
     const html = render()
-    expect(html).toContain('aria-label="發包單位第 1 欄發包單位"')
+    expect(html).toContain('aria-label="發包第 1 列發包單位"')
     expect(html).toContain('value="測試工程行"')
-    expect(html).toContain('aria-label="發包單位第 3 欄發包金額"')
+    expect(html).toContain('aria-label="發包第 3 列發包金額"')
+    expect(html).toContain('aria-label="移除發包第 1 列"')
+    expect(html).toContain("＋ 新增一列發包")
+    expect(html).not.toContain("多開一組發包欄")
+    // 列印版：沒有移除欄、沒有輸入框，金額千分位靠右
+    const printed = render({ mode: "print" })
+    expect(printed).not.toContain("移除發包")
+    expect(printed).not.toContain("＋ 新增一列發包")
     expect(html).toContain("80,000")
     expect(html).toContain("80%")
   })

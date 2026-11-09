@@ -41,14 +41,15 @@ import {
   APPLICATION_SHEET_TOP_ROWS,
   APPLICATION_STAGE_HEADERS,
   APPLICATION_STAGE_SPANS,
-  APPLICATION_SUBCONTRACT_LABELS,
-  APPLICATION_SUBCONTRACT_SPANS,
+  APPLICATION_SUBCONTRACT_HEADERS,
   APPLICATION_SUMMARY_LABELS,
   CLIENT_SHEET_FIELD_LABELS,
   applicationSheetDraftOf,
   applicationSheetErrors,
   applicationStageRows,
-  applicationSubcontractSlots,
+  applicationSubcontractRows,
+  removeNewSubcontractRow,
+  subcontractHasPaid,
   designScopeText,
   latestOrderDocument,
   orderDocumentCells,
@@ -283,6 +284,8 @@ export function ApplicationSheet({
   const [ownClients, setOwnClients] = useState<Client[]>([]);
   const clients = clientsProp ?? ownClients;
   const [saving, setSaving] = useState(false);
+  /** 正在輸入的發包金額格（slot key）：聚焦時顯示純數字方便改，離開後顯示千分位。 */
+  const [editingSubAmount, setEditingSubAmount] = useState<string | null>(null);
   const [localReport, setLocalReport] = useState<ApplicationSheetSaveReport | null>(null);
   const report = controlledReport !== undefined ? controlledReport : localReport;
   const setReport = onSaveReport ?? setLocalReport;
@@ -345,7 +348,7 @@ export function ApplicationSheet({
     saveBillingSchedule: (installments) => saveBillingSchedule(project.id, installments),
     invoiceBilling: (id, invoiceNo, invoicedOn) => invoiceBilling(id, invoicedOn ? { invoiceNo, invoicedOn } : { invoiceNo }),
     receiveBilling: (id, receivedOn) => receiveBilling(id, { receivedOn }),
-    putSubcontracts: (list) => putProjectSubcontracts(project.id, { subcontracts: list }),
+    putSubcontracts: (list, deleteReason) => putProjectSubcontracts(project.id, deleteReason ? { subcontracts: list, deleteReason } : { subcontracts: list }),
     fetchBillings: async () => (await getBillingSchedule(project.id)).installments,
     fetchSubcontracts: async () => (await getProjectSubcontracts(project.id)).subcontracts,
     humanize: (section, err) => {
@@ -388,7 +391,8 @@ export function ApplicationSheet({
   const clientChoices = project.client && !clients.some((c) => c.id === project.client?.id) ? [project.client, ...clients] : clients;
   const orderDoc = latestDocument !== undefined ? latestDocument : latestOrderDocument(contracts);
   const stageRows = applicationStageRows(billings);
-  const subBlocks = applicationSubcontractSlots(subcontracts, editable ? draft.subExtraBlocks : 0, editable ? draft.subEdits : {});
+  const subRows = applicationSubcontractRows(subcontracts, editable ? draft.subExtraRows : 0, editable ? draft.subEdits : {});
+  const subRemoved = new Set(editable ? draft.subRemovedIds : []);
   const companyChoices = companyOptions(companies, draft.companyId, { markDefault: true });
   const companyLabel =
     companyChoices.find((c) => c.id === selectedCompanyId(draft.companyId, companies))?.label ?? project.companyName ?? "";
@@ -807,69 +811,146 @@ export function ApplicationSheet({
   // Word 第 19 列：付款階段與發包單位之間的空白列。
   cells.push(<Cell key="spacer" col={1} span={16} row={row++} kind="full" className="hidden h-6 md:flex print:flex print:h-5" />);
 
-  const subCols = APPLICATION_SUBCONTRACT_SPANS.reduce<number[]>((acc, span, i) => [...acc, i === 0 ? 1 : acc[i - 1] + APPLICATION_SUBCONTRACT_SPANS[i - 1]], []);
+  // ---- 發包列表（2026-11-09 改版）：每家發包單位一列由上到下，表頭只印一次，小計列在列表下方 ----
   const summaryValues: ReactNode[] = [
     moneyText(money?.subcontractTotal),
     editable ? (
-      <input key="other" aria-label="其他支出" className={`${cellInput} text-right`} type="number" min="0" value={draft.otherExpenses} onChange={(e) => set("otherExpenses", e.target.value)} />
+      <input key="other" aria-label="其他支出" className={`${cellInput} text-right tabular-nums`} type="number" min="0" value={draft.otherExpenses} onChange={(e) => set("otherExpenses", e.target.value)} />
     ) : moneyText(money?.otherExpenses),
     showProfit ? moneyText(money?.profit) : <span title="屬集團財務，僅老闆與授權人員可見">—</span>,
     showProfit ? (canFinance && money?.grossMarginPct != null ? `${money.grossMarginPct}%` : "—") : <span title="屬集團財務，僅老闆與授權人員可見">—</span>,
-    "",
   ];
-  const SUB_FIELD_BY_ROW = ["vendorName", "contact", "item", "amount", "billingBasis"] as const;
-  subBlocks.forEach((block, b) => {
-    APPLICATION_SUBCONTRACT_LABELS.forEach((label, i) => {
-      const r = row++;
-      const field = SUB_FIELD_BY_ROW[i];
-      const valueOf = (sub: Subcontract | null): ReactNode => {
-        if (!sub) return "";
-        if (i === 0) return sub.vendorName || "";
-        if (i === 1) return sub.contact || "";
-        if (i === 2) return sub.item || "";
-        if (i === 3) return fmtMoney(sub.amount);
-        return sub.billingBasis || "";
-      };
-      const baseOf = (sub: Subcontract | null): string => {
-        if (!sub) return "";
-        if (field === "amount") return String(sub.amount ?? 0);
-        return sub[field] ?? "";
-      };
-      cells.push(
-        <Cell key={`sub-${b}-${i}-l`} col={subCols[0]} span={APPLICATION_SUBCONTRACT_SPANS[0]} row={r} kind="label" shade align="center">
-          {label}
-        </Cell>,
+  const SUB_FIELDS = ["vendorName", "contact", "item", "amount", "billingBasis"] as const;
+  const subBase = (sub: Subcontract | null, field: (typeof SUB_FIELDS)[number]): string => {
+    if (!sub) return "";
+    if (field === "amount") return String(sub.amount ?? 0);
+    return sub[field] ?? "";
+  };
+  /** 純數字（可含逗號）顯示成千分位；其他（打錯的字）原樣顯示，讓紅框看得到錯在哪。 */
+  const amountDisplay = (v: string) => {
+    const raw = v.replace(/,/g, "").trim();
+    return /^\d+(\.\d+)?$/.test(raw) ? Number(raw).toLocaleString("en-US") : v;
+  };
+  const subTd = "border border-gray-200 px-2 py-1 align-middle print:px-1 print:py-0.5";
+  const subTh = "border border-gray-200 bg-gray-50 px-2 py-1 text-xs font-medium text-gray-600 print:px-1 print:py-0.5 print:text-[11px]";
+  const subRowNodes = subRows.map((slot, idx) => {
+    const n = idx + 1;
+    const removed = !!slot.sub?.id && subRemoved.has(slot.sub.id);
+    const paid = subcontractHasPaid(slot.sub);
+    const rowLabel = `發包第 ${n} 列`;
+    const cellOf = (field: (typeof SUB_FIELDS)[number], extra = "") => {
+      const isAmount = field === "amount";
+      const header = APPLICATION_SUBCONTRACT_HEADERS[1 + SUB_FIELDS.indexOf(field)];
+      const errField = `sub:${slot.key}:${field}`;
+      const bad = isBad(errField);
+      const value = draft.subEdits[slot.key]?.[field] ?? subBase(slot.sub, field);
+      return (
+        <td
+          key={field}
+          className={`${subTd} ${isAmount ? "text-right tabular-nums" : "text-left"} ${bad ? INVALID_CELL_CLS : ""} ${blankCls("subcontract")} ${extra}`}
+          data-err-field={errField}
+          data-invalid={bad ? "true" : undefined}
+          data-testid={`sheet-sub-${n}-${field}`}
+        >
+          {editable && !removed ? (
+            <input
+              aria-label={`${rowLabel}${header}`}
+              className={`${cellInput} ${isAmount ? "text-right tabular-nums" : ""}`}
+              list={field === "vendorName" ? "sheet-vendor-suggestions" : undefined}
+              type="text"
+              inputMode={isAmount ? "numeric" : undefined}
+              title={field === "vendorName" && value ? value : undefined}
+              value={isAmount && editingSubAmount !== slot.key ? amountDisplay(value) : value}
+              onFocus={isAmount ? () => setEditingSubAmount(slot.key) : undefined}
+              onBlur={isAmount ? () => setEditingSubAmount(null) : undefined}
+              onChange={(e) => setSub(slot.key, field, isAmount ? e.target.value.replace(/,/g, "") : e.target.value)}
+            />
+          ) : isAmount ? (
+            slot.sub ? fmtMoney(slot.sub.amount) : ""
+          ) : (
+            <span className="whitespace-normal break-words">{slot.sub?.[field] ?? ""}</span>
+          )}
+        </td>
       );
-      block.forEach((slot, j) =>
-        cells.push(
-          <Cell className={blankCls("subcontract")} key={`sub-${b}-${i}-${j}`} col={subCols[1 + j]} span={APPLICATION_SUBCONTRACT_SPANS[1 + j]} row={r} kind="value" align={i === 3 ? "right" : "center"} editable={editable} {...(i === 3 ? errAttr(`sub:${slot.key}:amount`) : {})}>
-            {editable ? (
-              <input
-                aria-label={`發包單位第 ${b * 3 + j + 1} 欄${label.replace(/[\s：]/g, "")}`}
-                className={`${cellInput} ${i === 3 ? "text-right" : "text-center"}`}
-                list={i === 0 ? "sheet-vendor-suggestions" : undefined}
-                type={i === 3 ? "number" : "text"}
-                min={i === 3 ? "0" : undefined}
-                inputMode={i === 3 ? "numeric" : undefined}
-                value={draft.subEdits[slot.key]?.[field] ?? baseOf(slot.sub)}
-                onChange={(e) => setSub(slot.key, field, e.target.value)}
-              />
+    };
+    return (
+      <tr key={slot.key} data-testid={`sheet-sub-row-${n}`} data-removed={removed ? "true" : undefined} className={removed ? "bg-red-50/40 text-gray-400 line-through" : ""}>
+        <td className={`${subTd} bg-gray-50 text-center text-xs text-gray-600 tabular-nums`}>{n}</td>
+        {SUB_FIELDS.map((f) => cellOf(f))}
+        {editable && (
+          <td className={`${subTd} no-print text-center print:hidden`} data-err-field={`sub:${slot.key}:remove`}>
+            {removed ? (
+              <button type="button" className="text-xs text-[var(--brand)] no-underline hover:underline" aria-label={`復原${rowLabel}`} onClick={() => set("subRemovedIds", draft.subRemovedIds.filter((id) => id !== slot.sub?.id))}>
+                復原
+              </button>
+            ) : slot.sub && paid ? (
+              <span className="cursor-not-allowed text-xs text-gray-300" title="已有付款紀錄的發包不能移除；要移除請先到下方「副委託」撤銷付款">移除</span>
             ) : (
-              valueOf(slot.sub)
+              <button
+                type="button"
+                className="text-xs text-gray-400 hover:text-red-600"
+                aria-label={`移除${rowLabel}`}
+                title={slot.sub ? "儲存時移除這筆副委託（要填理由）" : "移除這一列"}
+                onClick={() => {
+                  if (slot.sub?.id) set("subRemovedIds", [...draft.subRemovedIds, slot.sub.id]);
+                  else setDraft((d) => removeNewSubcontractRow(d, idx));
+                }}
+              >
+                移除
+              </button>
             )}
-          </Cell>,
-        ),
-      );
-      cells.push(
-        <Cell key={`sub-${b}-${i}-sl`} col={subCols[4]} span={APPLICATION_SUBCONTRACT_SPANS[4]} row={r} kind="label" shade align="right">
-          {b === 0 ? APPLICATION_SUMMARY_LABELS[i] : ""}
-        </Cell>,
-        <Cell className={blankCls("subcontract")} key={`sub-${b}-${i}-sv`} col={subCols[5]} span={APPLICATION_SUBCONTRACT_SPANS[5]} row={r} kind="value" align="right" testId={b === 0 && i === 1 ? "sheet-other-expenses" : undefined} editable={editable && b === 0 && i === 1} {...(b === 0 && i === 1 ? errAttr("otherExpenses") : {})}>
-          {b === 0 ? summaryValues[i] : ""}
-        </Cell>,
-      );
-    });
+          </td>
+        )}
+      </tr>
+    );
   });
+  cells.push(
+    <div
+      key="subcontracts"
+      style={{ "--gc": "1 / span 16", "--gr": `${row++} / span 1` } as CSSProperties}
+      className="col-span-2 min-w-0 bg-white md:[grid-column:var(--gc)] md:[grid-row:var(--gr)] print:[grid-column:var(--gc)] print:[grid-row:var(--gr)]"
+      data-testid="sheet-subcontracts"
+    >
+      <div className="overflow-x-auto print:overflow-visible">
+        <table className="w-full min-w-[680px] table-fixed border-collapse text-[13px] leading-[1.4] print:min-w-0 print:text-[11px]">
+          <thead>
+            <tr>
+              <th className={`${subTh} w-9 text-center`}>#</th>
+              <th className={`${subTh} w-[25%] text-left`}>{APPLICATION_SUBCONTRACT_HEADERS[1]}</th>
+              <th className={`${subTh} w-[18%] text-left`}>{APPLICATION_SUBCONTRACT_HEADERS[2]}</th>
+              <th className={`${subTh} w-[17%] text-left`}>{APPLICATION_SUBCONTRACT_HEADERS[3]}</th>
+              <th className={`${subTh} w-[13%] text-right`}>{APPLICATION_SUBCONTRACT_HEADERS[4]}</th>
+              <th className={`${subTh} text-left`}>{APPLICATION_SUBCONTRACT_HEADERS[5]}</th>
+              {editable && <th className={`${subTh} no-print w-14 text-center print:hidden`}>移除</th>}
+            </tr>
+          </thead>
+          <tbody>{subRowNodes}</tbody>
+        </table>
+      </div>
+      {editable && (
+        <div className="no-print border-t border-gray-200 px-2 py-1 print:hidden">
+          <button type="button" className="text-sm text-[var(--brand)] hover:underline" onClick={() => set("subExtraRows", draft.subExtraRows + 1)}>
+            ＋ 新增一列發包
+          </button>
+        </div>
+      )}
+      {/* 發包小計／其他支出／利潤／毛利率：列表下方一列，標題｜值 四組 */}
+      <div className="grid grid-cols-2 gap-px border-t border-gray-200 bg-gray-200 sm:grid-cols-[repeat(4,minmax(0,0.8fr)_minmax(0,1.2fr))] print:grid-cols-[repeat(4,minmax(0,0.8fr)_minmax(0,1.2fr))] print:[print-color-adjust:exact]" data-testid="sheet-sub-summary">
+        {APPLICATION_SUMMARY_LABELS.map((label, i) => [
+          <div key={`${label}-l`} className="flex items-center justify-end bg-gray-50 px-2 py-1 text-xs font-medium text-gray-600 print:px-1 print:py-0.5 print:text-[11px]">{label}</div>,
+          <div
+            key={`${label}-v`}
+            className={`flex items-center justify-end bg-white px-2 py-1 text-[13px] tabular-nums text-gray-900 print:px-1 print:py-0.5 print:text-[11px] ${i === 1 && isBad("otherExpenses") ? INVALID_CELL_CLS : ""} ${blankCls("subcontract")}`}
+            data-testid={i === 1 ? "sheet-other-expenses" : `sheet-summary-${i}`}
+            data-editable={editable && i === 1 ? "true" : undefined}
+            data-err-field={i === 1 ? "otherExpenses" : undefined}
+          >
+            {summaryValues[i]}
+          </div>,
+        ])}
+      </div>
+    </div>,
+  );
 
   const failedSteps = report?.steps.filter((st) => st.status !== "ok") ?? [];
   const okSteps = report?.steps.filter((st) => st.status === "ok") ?? [];
@@ -944,9 +1025,6 @@ export function ApplicationSheet({
             ) : (
               <span className="text-sm text-gray-400">沒有未儲存的變更</span>
             )}
-            <Button type="button" variant="ghost" size="sm" className="ml-auto" onClick={() => set("subExtraBlocks", draft.subExtraBlocks + 1)}>
-              ＋ 多開一組發包欄
-            </Button>
           </div>
         ) : (
           <p className="text-sm text-gray-500">唯讀：修改申請單需要本案的財務權限（HR／會計／本案經理、主辦／部門主管）。</p>
@@ -976,6 +1054,19 @@ export function ApplicationSheet({
               </label>
             ))}
           </div>
+        )}
+        {editable && draft.subRemovedIds.length > 0 && (
+          <label className="flex flex-wrap items-center gap-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm" data-testid="sheet-sub-delete-reason">
+            <span className="shrink-0 text-amber-900">移除 {draft.subRemovedIds.length} 筆發包，請填理由（已有付款紀錄的不能移除）：</span>
+            <input
+              aria-label="移除發包理由"
+              data-err-field="subDeleteReason"
+              className={`${cellInput} max-w-md ${isBad("subDeleteReason") ? INVALID_INPUT_CLS : ""}`}
+              maxLength={1000}
+              value={draft.subDeleteReason}
+              onChange={(e) => set("subDeleteReason", e.target.value)}
+            />
+          </label>
         )}
         {editable && plan.warnings.length > 0 && (
           <ul className="text-sm text-amber-700">{plan.warnings.map((m) => <li key={m}>{m}</li>)}</ul>

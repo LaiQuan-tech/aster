@@ -4,13 +4,15 @@ import {
   APPLICATION_SHEET_COLUMN_COUNT,
   APPLICATION_SHEET_TOP_ROWS,
   APPLICATION_STAGE_SPANS,
-  APPLICATION_SUBCONTRACT_SPANS,
+  APPLICATION_SUBCONTRACT_HEADERS,
   applicationSheetDraftOf,
   applicationSheetDirtyCount,
   applicationSheetErrors,
   applicationSheetPatch,
   applicationStageRows,
-  applicationSubcontractBlocks,
+  applicationSubcontractRows,
+  removeNewSubcontractRow,
+  subcontractHasPaid,
   designScopeText,
   latestOrderDocument,
   orderDocumentCells,
@@ -76,7 +78,7 @@ describe("申請單版面定義（對照 Word 專案申請單）", () => {
       expect(row.reduce((sum, cell) => sum + cell.span, 0)).toBe(16)
     }
     expect(APPLICATION_STAGE_SPANS.reduce((a, b) => a + b, 0)).toBe(16)
-    expect(APPLICATION_SUBCONTRACT_SPANS.reduce((a, b) => a + b, 0)).toBe(16)
+    expect(APPLICATION_SUBCONTRACT_HEADERS).toEqual(["#", "發包單位", "聯絡資料", "項目", "發包金額", "請款依據"])
   })
 
   it("標題格文字與順序照 Word 原檔", () => {
@@ -232,18 +234,31 @@ describe("付款階段列", () => {
   })
 })
 
-describe("發包單位區塊", () => {
+describe("發包列（每家一列）", () => {
   const sub = (id: string): Subcontract => ({
     id, kind: "subcontract", discipline: null, vendorName: id, contact: null, item: null, amount: 1,
     billingBasis: null, orderType: null, withholdingRate: 0, withholdingThreshold: 0, note: null,
   }) as Subcontract
-  it("沒有下包 → 一個空白區塊（三格）", () => {
-    expect(applicationSubcontractBlocks([])).toEqual([[null, null, null]])
+  it("沒有下包 → 三列空白；既有依原順序一筆一列，空列 key 接續序號", () => {
+    expect(applicationSubcontractRows([]).map((r) => r.key)).toEqual(["new-0", "new-1", "new-2"])
+    const rows = applicationSubcontractRows(["a", "b", "c", "d"].map(sub))
+    expect(rows.map((r) => r.key)).toEqual(["a", "b", "c", "d"])
+    expect(rows.map((r) => r.sub?.id)).toEqual(["a", "b", "c", "d"])
+    expect(applicationSubcontractRows(["a", "b", "c", "d"].map(sub), 2).map((r) => r.key)).toEqual(["a", "b", "c", "d", "new-4", "new-5"])
+    // 草稿裡已填的新列一定畫得出來
+    expect(applicationSubcontractRows([sub("a")], 0, { "new-5": { item: "x" } })).toHaveLength(6)
   })
-  it("每三筆一塊", () => {
-    const blocks = applicationSubcontractBlocks(["a", "b", "c", "d"].map(sub))
-    expect(blocks).toHaveLength(2)
-    expect(blocks[1].map((s) => s?.id ?? null)).toEqual(["d", null, null])
+  it("移除還沒存的新列：後面的新列往上補位、多開列數減一", () => {
+    const draft = { ...applicationSheetDraftOf(fakeProject(), []), subExtraRows: 2, subEdits: { a: { item: "保留" }, "new-1": { item: "刪" }, "new-2": { item: "上移" } } }
+    const next = removeNewSubcontractRow(draft, 1)
+    expect(next.subEdits).toEqual({ a: { item: "保留" }, "new-1": { item: "上移" } })
+    expect(next.subExtraRows).toBe(1)
+    expect(removeNewSubcontractRow({ ...draft, subExtraRows: 0 }, 1).subExtraRows).toBe(0)
+  })
+  it("已付款判定", () => {
+    expect(subcontractHasPaid(null)).toBe(false)
+    expect(subcontractHasPaid(sub("a"))).toBe(false)
+    expect(subcontractHasPaid({ ...sub("a"), payments: [{ installmentNo: 1, percentage: 100, paidOn: "2026-10-01" }] })).toBe(true)
   })
 })
 

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 import {
   applicationSheetDraftOf,
   applicationStageRows,
-  applicationSubcontractSlots,
+  applicationSubcontractRows,
   billingRowTag,
   rebaseApplicationSheetDraft,
   salesAmounts,
@@ -391,13 +391,38 @@ describe("付款階段", () => {
 describe("發包單位", () => {
   const subs = [fakeSub({}), fakeSub({ id: "s2", vendorName: "測試技師事務所", kind: "technician", sortOrder: 1 })]
 
-  it("欄位與既有副委託對應；空欄 key 為 new-<序號>；多開區塊", () => {
-    const blocks = applicationSubcontractSlots(subs)
-    expect(blocks).toHaveLength(1)
-    expect(blocks[0].map((s) => s.key)).toEqual(["s1", "s2", "new-2"])
-    expect(applicationSubcontractSlots(subs, 1)).toHaveLength(2)
-    // 草稿裡已填的新欄一定畫得出來
-    expect(applicationSubcontractSlots(subs, 0, { "new-4": { item: "x" } })).toHaveLength(2)
+  it("列與既有副委託依序對應；空列 key 為 new-<序號>；新增一列", () => {
+    const rows = applicationSubcontractRows(subs)
+    expect(rows.map((s) => s.key)).toEqual(["s1", "s2", "new-2"])
+    expect(applicationSubcontractRows(subs, 1)).toHaveLength(4)
+    // 草稿裡已填的新列一定畫得出來
+    expect(applicationSubcontractRows(subs, 0, { "new-4": { item: "x" } })).toHaveLength(5)
+  })
+
+  it("移除既有列：整批 PUT 不帶那筆、帶理由；沒填理由擋存檔；已付款的擋存檔；改了的格子不送", () => {
+    const ctx = ctxOf({ subcontracts: subs })
+    const noReason = applicationSheetPlan(ctx, draftOf(ctx, { subRemovedIds: ["s2"] }))
+    expect(noReason.errors.map((e) => e.field)).toContain("subDeleteReason")
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { subRemovedIds: ["s2"], subDeleteReason: " 改自辦 ", subEdits: { s2: { item: "不送" } } }))
+    expect(plan.errors).toEqual([])
+    expect(plan.dirtyCount).toBe(1)
+    expect(plan.subcontracts?.map((s) => s.id)).toEqual(["s1"])
+    expect(plan.subDeleteReason).toBe("改自辦")
+    const paidSubs = [subs[0], { ...subs[1], payments: [{ installmentNo: 1, percentage: 100, paidOn: "2026-10-01" }] }]
+    const paidCtx = ctxOf({ subcontracts: paidSubs })
+    const paid = applicationSheetPlan(paidCtx, draftOf(paidCtx, { subRemovedIds: ["s2"], subDeleteReason: "x" }))
+    expect(paid.errors[0]).toMatchObject({ field: "sub:s2:remove" })
+    expect(paid.errors[0].message).toMatch(/發包第 2 列已有付款紀錄/)
+  })
+
+  it("移除既有列：存檔時 putSubcontracts 帶 deleteReason，成功後清掉移除標記", async () => {
+    const ctx = ctxOf({ subcontracts: subs })
+    const draft = draftOf(ctx, { subRemovedIds: ["s2"], subDeleteReason: "改自辦" })
+    const plan = applicationSheetPlan(ctx, draft)
+    const api = fakeApi()
+    const res = await runApplicationSheetSave(plan, draft, api)
+    expect(api.putSubcontracts).toHaveBeenCalledWith([expect.objectContaining({ id: "s1" })], "改自辦")
+    expect(res.residual).toMatchObject({ subRemovedIds: [], subDeleteReason: "" })
   })
 
   it("改既有一筆：整批 PUT 帶回全部列、保留 contractId／科別／訂單類型；單位名稱對到名冊才掛廠商", () => {
@@ -431,7 +456,7 @@ describe("對不到列的修改", () => {
     expect(plan.dirtyCount).toBe(0)
     expect(plan.warnings).toHaveLength(2)
     expect(plan.warnings[0]).toMatch(/付款階段有 1 列/)
-    expect(plan.warnings[1]).toMatch(/發包單位有 1 欄/)
+    expect(plan.warnings[1]).toMatch(/發包有 1 列/)
   })
 })
 
@@ -479,7 +504,7 @@ describe("依序儲存與失敗回報", () => {
     clientEdits: { fax: "02-0000-0003" },
     amountUntaxed: "110000",
     stageEdits: { b1: { milestone: "訂金", invoiceNo: "AB00000001" }, "new-installment-2": { percentage: "70", receivedOn: "2026-10-28" } },
-    subExtraBlocks: 0,
+    subExtraRows: 0,
     subEdits: { s1: { item: "弱電" } },
   })
 
@@ -490,7 +515,7 @@ describe("依序儲存與失敗回報", () => {
     const res = await runApplicationSheetSave(plan, fullDraft, api)
     expect(api.calls).toEqual(["project", "client", "main", "billings", "invoice:b1", "receive:created-1", "subs"])
     expect(res.steps.every((s) => s.status === "ok")).toBe(true)
-    expect(res.residual).toMatchObject({ clientEdits: {}, amountUntaxed: null, orderDocType: "", stageEdits: {}, subEdits: {}, subExtraBlocks: 0 })
+    expect(res.residual).toMatchObject({ clientEdits: {}, amountUntaxed: null, orderDocType: "", stageEdits: {}, subEdits: {}, subExtraRows: 0 })
     expect(api.updateProject).toHaveBeenCalledWith({ siteAddress: "新地點" })
     expect(api.updateClient).toHaveBeenCalledWith("c1", { fax: "02-0000-0003" })
     expect(api.upsertMainContract).toHaveBeenCalledWith({ amount: 110000 })
@@ -572,7 +597,7 @@ describe("依序儲存與失敗回報", () => {
   })
 
   it("重抓副委託時空欄已被別人新增的副委託佔走：對得到的照存，對不到的不送、該步標失敗並保留草稿", async () => {
-    const draft = draftOf(ctx, { subEdits: { s1: { item: "弱電" }, "new-1": { vendorName: "新廠商", amount: "3000" } }, subExtraBlocks: 0 })
+    const draft = draftOf(ctx, { subEdits: { s1: { item: "弱電" }, "new-1": { vendorName: "新廠商", amount: "3000" } }, subExtraRows: 0 })
     const plan = applicationSheetPlan(ctx, draft)
     expect(plan.subcontracts).not.toBeNull()
     const othersSub = fakeSub({ id: "s-other", vendorName: "別人加的", sortOrder: 1 })
@@ -585,7 +610,7 @@ describe("依序儲存與失敗回報", () => {
     expect(sent[1]).toMatchObject({ id: "s-other", vendorName: "別人加的" })
     const step = res.steps.find((s) => s.section === "subcontracts")
     expect(step).toMatchObject({ status: "failed", label: "發包單位" })
-    expect(step?.message).toMatch(/1 欄的修改對不到副委託.*草稿已保留/)
+    expect(step?.message).toMatch(/1 列的修改對不到副委託.*草稿已保留/)
     expect(res.residual.subEdits).toEqual({ "new-1": { vendorName: "新廠商", amount: "3000" } })
   })
 

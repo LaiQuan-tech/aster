@@ -129,12 +129,14 @@ export const APPLICATION_SHEET_TOP_ROWS: readonly (readonly SheetCell[])[] = [
 export const APPLICATION_STAGE_SPANS = [2, 1, 2, 4, 3, 4] as const;
 export const APPLICATION_STAGE_HEADERS = ["階段", "%", "金額", "發票號碼", "發票日期", "入帳日期"] as const;
 
-/** 發包單位區塊每一列的跨欄：標題｜單位一｜單位二｜單位三｜右側小計標題｜右側小計值。 */
-export const APPLICATION_SUBCONTRACT_SPANS = [1, 3, 3, 4, 3, 2] as const;
-export const APPLICATION_SUBCONTRACT_LABELS = ["發包單位：", "聯絡資料：", "項    目：", "發包金額：", "請款依據："] as const;
-export const APPLICATION_SUMMARY_LABELS = ["發包小計：", "其他支出：", "利潤：", "毛利率：", ""] as const;
-/** Word 一張申請單只有三個發包欄；超過三筆就往下再開一個同樣的區塊。 */
-export const SUBCONTRACTS_PER_BLOCK = 3;
+/**
+ * 發包區（2026-11-09 業主改版）：每家發包單位一列、由上到下排；表頭一列「#｜發包單位｜聯絡資料｜項目｜發包金額｜請款依據｜（移除）」，
+ * 發包小計／其他支出／利潤／毛利率放在列表下方一列。「移除」欄只在可編輯的螢幕版出現（列印不印）。
+ */
+export const APPLICATION_SUBCONTRACT_HEADERS = ["#", "發包單位", "聯絡資料", "項目", "發包金額", "請款依據"] as const;
+export const APPLICATION_SUMMARY_LABELS = ["發包小計", "其他支出", "利潤", "毛利率"] as const;
+/** 發包列至少畫幾列（沒有下包時也留空白列可填／列印手寫，同舊版 Word 一組三欄）。 */
+export const MIN_SUBCONTRACT_ROWS = 3;
 /** Word 付款階段固定 7 期＋第 8 列技師公會代墊（kind=guild_advance；名稱可空白）；期數不足 7 期時補空白列維持版面。 */
 export const MIN_INSTALLMENT_ROWS = 7;
 
@@ -222,10 +224,14 @@ export interface ApplicationSheetDraft {
   amountUntaxed: string | null;
   /** 付款階段各列改過的格子；key 見 stageRowKey()。 */
   stageEdits: Record<string, StageEdit>;
-  /** 發包單位各欄改過的格子；key 見 applicationSubcontractSlots()。 */
+  /** 發包各列改過的格子；key 見 applicationSubcontractRows()。 */
   subEdits: Record<string, SubEdit>;
-  /** 使用者按「多開一組發包欄」多開的區塊數（每塊 3 欄）。 */
-  subExtraBlocks: number;
+  /** 使用者按「＋ 新增一列發包」多開的列數。 */
+  subExtraRows: number;
+  /** 標記要移除的既有副委託 id（儲存時整批 PUT 不帶這些＝後端軟刪，需填理由；已有付款紀錄的後端不准移除）。 */
+  subRemovedIds: string[];
+  /** 移除發包的理由（後端 deleteReason）。 */
+  subDeleteReason: string;
 }
 
 /** 申請單上屬於客戶名冊的格子（「採購承辦」＝聯絡人姓名＋電話兩個欄位）。 */
@@ -304,7 +310,9 @@ export function applicationSheetDraftOf(project: ProjectDetail, disciplines: rea
     amountUntaxed: null,
     stageEdits: {},
     subEdits: {},
-    subExtraBlocks: 0,
+    subExtraRows: 0,
+    subRemovedIds: [],
+    subDeleteReason: "",
   };
 }
 
@@ -601,52 +609,57 @@ export function applicationStageRows(billings: readonly BillingExt[]): Applicati
   return rows;
 }
 
-/** 發包單位：每三筆一個區塊，最後一塊不足三格補 null；沒有任何下包時仍回一個空白區塊。 */
-export function applicationSubcontractBlocks(subcontracts: readonly Subcontract[]): Array<Array<Subcontract | null>> {
-  const blocks: Array<Array<Subcontract | null>> = [];
-  for (let i = 0; i < Math.max(1, subcontracts.length); i += SUBCONTRACTS_PER_BLOCK) {
-    const block: Array<Subcontract | null> = [];
-    for (let j = 0; j < SUBCONTRACTS_PER_BLOCK; j++) block.push(subcontracts[i + j] ?? null);
-    blocks.push(block);
-  }
-  return blocks;
-}
-
 export interface SubcontractSlot {
-  /** 草稿 subEdits 的 key：既有副委託用 id，空欄用 `new-<全域欄位序號>`。 */
+  /** 草稿 subEdits 的 key：既有副委託用 id，空列用 `new-<列序號（從 0 起，含既有列）>`。 */
   key: string;
   sub: Subcontract | null;
 }
 
 /**
- * 可編輯版的發包單位欄位：既有副委託依序排，空欄可直接填成新的一筆。
- * 區塊數＝放得下既有筆數的最少區塊（至少一塊）＋使用者多開的區塊；另外確保草稿裡已填的新欄都畫得出來。
+ * 發包列：既有副委託依原順序（＝API 回傳順序，同舊版欄序）一筆一列，後面接空列可直接填成新的一筆。
+ * 列數＝max(既有筆數, MIN_SUBCONTRACT_ROWS)＋使用者多開的列；另外確保草稿裡已填的新列都畫得出來。
  */
-export function applicationSubcontractSlots(
+export function applicationSubcontractRows(
   subcontracts: readonly Subcontract[],
-  extraBlocks = 0,
+  extraRows = 0,
   edits: Record<string, SubEdit> = {},
-): SubcontractSlot[][] {
-  const per = SUBCONTRACTS_PER_BLOCK;
+): SubcontractSlot[] {
   let maxNewIndex = -1;
   for (const key of Object.keys(edits)) {
     const m = /^new-(\d+)$/.exec(key);
     if (m) maxNewIndex = Math.max(maxNewIndex, Number(m[1]));
   }
-  const baseBlocks = Math.max(1, Math.ceil(subcontracts.length / per));
-  const neededForEdits = Math.ceil((maxNewIndex + 1) / per);
-  const blockCount = Math.max(baseBlocks + Math.max(0, extraBlocks), neededForEdits);
-  const blocks: SubcontractSlot[][] = [];
-  for (let b = 0; b < blockCount; b++) {
-    const block: SubcontractSlot[] = [];
-    for (let j = 0; j < per; j++) {
-      const i = b * per + j;
-      const sub = subcontracts[i] ?? null;
-      block.push({ key: sub ? (sub.id ?? `saved-${i}`) : `new-${i}`, sub });
-    }
-    blocks.push(block);
+  const count = Math.max(Math.max(MIN_SUBCONTRACT_ROWS, subcontracts.length) + Math.max(0, extraRows), maxNewIndex + 1);
+  const rows: SubcontractSlot[] = [];
+  for (let i = 0; i < count; i++) {
+    const sub = subcontracts[i] ?? null;
+    rows.push({ key: sub ? (sub.id ?? `saved-${i}`) : `new-${i}`, sub });
   }
-  return blocks;
+  return rows;
+}
+
+/**
+ * 移除一列還沒存的新發包列（`new-<index>`）：丟掉那列的草稿，後面的新列往上補位（key 序號減一），
+ * 多開的列數減一（不低於 0），畫面上就是「那一列不見了」而不是留一個空洞。純函式。
+ */
+export function removeNewSubcontractRow(draft: ApplicationSheetDraft, index: number): ApplicationSheetDraft {
+  const subEdits: Record<string, SubEdit> = {};
+  for (const [key, edit] of Object.entries(draft.subEdits)) {
+    const m = /^new-(\d+)$/.exec(key);
+    if (!m) {
+      subEdits[key] = edit;
+      continue;
+    }
+    const i = Number(m[1]);
+    if (i === index) continue;
+    subEdits[i > index ? `new-${i - 1}` : key] = edit;
+  }
+  return { ...draft, subEdits, subExtraRows: Math.max(0, draft.subExtraRows - 1) };
+}
+
+/** 這筆副委託有已付款的期款（後端不准移除：409 paid）。 */
+export function subcontractHasPaid(sub: Subcontract | null): boolean {
+  return !!sub && ((sub.payments ?? []).some((p) => !!p.paidOn) || (sub.summary?.paidTotal ?? 0) > 0);
 }
 
 /** 銷售金額：營業稅＝未稅 × 稅率四捨五入到元（同後端 computeMoney 的 round0），總額＝未稅＋稅。 */
