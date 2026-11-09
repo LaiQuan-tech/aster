@@ -2130,6 +2130,17 @@ export function getExpenseClaims(params: { period?: string; employeeId?: string;
   return apiFetch<{ claims: ExpenseClaim[] }>(`/expenses${qs ? `?${qs}` : ""}`);
 }
 
+/**
+ * HR／會計退件（PATCH /expenses/:id，status=rejected＋原因；API 早就支援，2026-11-09 才有按鈕）。
+ * 409：already_settled（已月結）／advance_settled（綁的預支已核銷）／period_closed（該期已發薪鎖定）。
+ */
+export function rejectExpenseClaim(id: string, reason: string) {
+  return apiFetch<{ id: string }>(`/expenses/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status: "rejected", statusReason: reason }),
+  });
+}
+
 /** 月結前的審視清單：缺憑證、超月限額、報銷 × 出勤不符。 */
 export function getExpenseReview(period: string) {
   return apiFetch<ExpenseReview>(`/expense-settlements/${period}/review`);
