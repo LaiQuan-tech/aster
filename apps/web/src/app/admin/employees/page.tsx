@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Button, Card, Empty, ErrorText, PrimaryButton, Segmented, inputCls, labelCls, useToast } from "@/components/admin-ui";
 import { ActionMenu } from "@/components/ActionMenu";
 import { BatchImportButton } from "@/components/BatchImport";
@@ -41,9 +42,6 @@ import {
 import { employeeActionsFor } from "@/lib/employee-actions";
 import { employeeDetailHref } from "@/lib/employee-edit";
 import { describeEmployeeError } from "@/lib/employee-errors";
-import {
-  bankDisplay,
-} from "@/lib/employee-personal";
 import {
   approveProfileChange,
   listProfileChangeRequests,
@@ -264,18 +262,6 @@ function employmentTypeLabel(value: string | null) {
   return EMPLOYMENT_TYPES.find((item) => item.value === value)?.label ?? value ?? "—";
 }
 
-/** 列表「匯款帳號」欄：第一行「代碼 銀行名稱」、第二行帳號、戶名與員工姓名不同才顯示第三行；全空＝「—」。 */
-function BankCell({ employee }: { employee: EmployeeWithProfile }) {
-  const { bank, account, holder } = bankDisplay(employee);
-  if (!bank && !account && !holder) return <>—</>;
-  return (
-    <div className="space-y-0.5">
-      {bank && <p>{bank}</p>}
-      {account && <p className="tabular-nums">{account}</p>}
-      {holder && <p className="text-xs text-gray-400">戶名 {holder}</p>}
-    </div>
-  );
-}
 
 /** 錯誤訊息對照搬到 lib/employee-errors.ts（員工內頁共用）。 */
 const describeError = describeEmployeeError;
@@ -300,15 +286,17 @@ function profileInitial(profile: ProfileAggregate | null) {
 const STICKY_TH = "sticky top-0 z-10 bg-white shadow-[inset_0_-1px_0_var(--color-gray-200)]";
 
 /**
- * 操作欄（編輯／⋯）釘在表格右側。加了生日／身分證／戶籍地／匯款帳號後表格比外框寬，橫向捲動時
- * 不釘住的話，要先捲到最右邊才找得到「編輯」。表頭那格同時釘上方與右側，z-20 蓋過其他表頭（z-10）；
- * 內容格 z-[5] 低於表頭（直向捲動時從表頭下面穿過去）。左緣 1px 淡線標出「這欄是浮著的」。
+ * 整列可點擊進員工內頁。點到列內互動元素（連結、按鈕、勾選框、選單等）不換頁；
+ * 選單可能 portal 到列外，事件仍會冒泡過來，所以也排除「target 不在列 DOM 內」的情況。
  */
-const PIN_RIGHT_TH =
-  "sticky top-0 right-0 z-20 bg-white shadow-[inset_0_-1px_0_var(--color-gray-200),inset_1px_0_0_var(--color-gray-100)]";
-const PIN_RIGHT_TD = "sticky right-0 z-[5] bg-white shadow-[inset_1px_0_0_var(--color-gray-100)]";
+function isInteractiveClick(e: { target: EventTarget; currentTarget: Element }) {
+  const target = e.target as Element | null;
+  if (!target || !e.currentTarget.contains(target)) return true;
+  return Boolean(target.closest("a,button,input,select,textarea,label,[role='menu'],[role='menuitem']"));
+}
 
 export default function EmployeesPage() {
+  const router = useRouter();
   const toast = useToast();
   // 登入者的 auth user id：拿來算 isSelf 給 employeeActionsFor（目前沒有「不能停用自己」的規則，只是傳真值）。
   const { session } = useSession();
@@ -904,7 +892,7 @@ export default function EmployeesPage() {
         ) : visibleRows.length === 0 ? (
           <Empty>這家公司目前沒有員工</Empty>
         ) : (
-          // 外框：直向超過視窗高度、橫向超過寬度都在框內捲（表頭釘上方、操作欄釘右側）。
+          // 外框：直向超過視窗高度、橫向超過寬度都在框內捲（表頭釘上方）。
           <div className="max-h-[calc(100dvh-12rem)] overflow-auto">
             <table className="w-full text-left text-sm">
               <thead>
@@ -923,17 +911,20 @@ export default function EmployeesPage() {
                   {/* 2026-10-27 業主「一目瞭然」：Email 併入員工欄、所屬公司併入單位欄、生日與身分證同欄，1280px 桌機不用左右捲動。 */}
                   <th className={`${STICKY_TH} min-w-[11rem] py-2 pr-3`}>員工／Email</th>
                   <th className={`${STICKY_TH} min-w-[7rem] py-2 pr-3`}>單位/身分・所屬公司</th>
-                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-3`}>到離職</th>
-                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-3`}>生日／身分證</th>
-                  <th className={`${STICKY_TH} min-w-[9rem] py-2 pr-3`}>戶籍地</th>
-                  <th className={`${STICKY_TH} whitespace-nowrap py-2 pr-3`}>匯款帳號</th>
                   <th className={`${STICKY_TH} min-w-[6rem] py-2 pr-3`}>角色/狀態</th>
-                  {canManage && <th className={`${PIN_RIGHT_TH} py-2 pl-3 text-right`}>操作</th>}
+                  {canManage && <th className={`${STICKY_TH} py-2 pl-3 text-right`}>操作</th>}
                 </tr>
               </thead>
               <tbody>
                 {visibleRows.map((employee) => (
-                  <tr key={employee.id} className="border-b border-gray-50 align-top">
+                  <tr
+                    key={employee.id}
+                    className="cursor-pointer border-b border-gray-50 align-top hover:bg-gray-50"
+                    onClick={(e) => {
+                      if (isInteractiveClick(e)) return;
+                      router.push(employeeDetailHref(employee.id));
+                    }}
+                  >
                       <>
                         {canManage && (
                           <td className="py-3 pr-2">
@@ -986,20 +977,6 @@ export default function EmployeesPage() {
                           <p>{deptNameMap.get(employee.dept_id ?? "") ?? "—"} / {employmentTypeLabel(employee.employment_type)}</p>
                           <p className={`text-xs ${employee.company_id ? "text-gray-500" : "text-amber-700"}`}>{companyLabel(employee, companies)}</p>
                         </td>
-                        <td className="whitespace-nowrap py-3 pr-3 tabular-nums text-gray-600">
-                          <p>{employee.hire_date ?? "—"}</p>
-                          <p className="text-xs text-gray-500">→ {employee.terminated_at ?? "在職"}</p>
-                        </td>
-                        <td className="whitespace-nowrap py-3 pr-3 tabular-nums text-gray-600">
-                          <p>{employee.birthday || "—"}</p>
-                          <p className="text-xs text-gray-500">{employee.idNumber || "—"}</p>
-                        </td>
-                        <td className="py-3 pr-3 text-gray-600">
-                          <div className="min-w-[9rem] max-w-[16rem] whitespace-normal break-words">{employee.registeredAddress || "—"}</div>
-                        </td>
-                        <td className="whitespace-nowrap py-3 pr-3 text-gray-600">
-                          <BankCell employee={employee} />
-                        </td>
                         <td className="py-3 pr-3">
                           <div className="flex flex-wrap gap-1">
                             <span className="rounded-full bg-gray-100 px-2 py-1 text-xs text-gray-600">{roleLabel(employee.role)}</span>
@@ -1008,16 +985,9 @@ export default function EmployeesPage() {
                           </div>
                         </td>
                         {canManage && (
-                          <td className={`${PIN_RIGHT_TD} whitespace-nowrap py-2 pl-3 text-right`}>
-                            {/* 只留「編輯」＋「⋯」；其餘動作收進選單，顯示／disabled 規則在 lib/employee-actions.ts */}
+                          <td className="whitespace-nowrap py-2 pl-3 text-right">
+                            {/* 只留「⋯」；編輯＝點整列／姓名進內頁。動作的顯示／disabled 規則在 lib/employee-actions.ts */}
                             <div className="flex items-center justify-end gap-1">
-                              {/* 2026-10-26：編輯改到員工內頁（原本是列下方展開的行內表單）。 */}
-                              <Link
-                                href={employeeDetailHref(employee.id)}
-                                className="rounded-md px-2 py-1.5 text-sm text-gray-600 hover:bg-gray-100 hover:text-gray-800"
-                              >
-                                編輯
-                              </Link>
                               <ActionMenu
                                 label={`${employee.name} 的更多操作`}
                                 items={employeeActionsFor(employee, {
