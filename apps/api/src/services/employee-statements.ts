@@ -219,17 +219,19 @@ async function loadLeaveNames(tenantId: string): Promise<Record<string, string>>
 }
 
 /**
- * 該月隨薪資給付的報銷（與薪資作業同一個判準：已核銷 settled、沒綁預支、實報實銷——定額補貼進應發不算支出）。
+ * 該月隨薪資給付的報銷（與薪資作業同一個判準：沒綁預支、實報實銷——定額補貼進應發不算支出）。
+ * 2026-11-10 業主：已送出（submitted）但 HR 尚未月結核銷的也列出，標 pending（支出表備註「待核銷」）；
+ * 已核銷 settled 照舊；rejected／cancelled／draft 不列。
  * 說明＝報銷備註，沒有備註用類別名稱；報銷單沒有專案欄位 → 專案名稱 null。
  */
 async function loadExpenses(tenantId: string, employeeId: string, period: string): Promise<StatementExpense[]> {
   const { data, error } = await supabaseAdmin
     .from("expense_claims")
-    .select("id, category_id, nature, amount, incurred_on, note, advance_id")
+    .select("id, category_id, nature, amount, incurred_on, note, advance_id, status")
     .eq("tenant_id", tenantId)
     .eq("employee_id", employeeId)
     .eq("period", period)
-    .eq("status", "settled")
+    .in("status", ["settled", "submitted"])
   if (error) throw new Error(error.message)
   const rows = ((data ?? []) as Array<{
     category_id: string | null
@@ -238,7 +240,8 @@ async function loadExpenses(tenantId: string, employeeId: string, period: string
     incurred_on: string
     note: string | null
     advance_id: string | null
-  }>).filter((r) => r.nature !== "allowance" && paysViaMonthlyPayroll(r))
+    status: string
+  }>).filter((r) => (r.status === "settled" || r.status === "submitted") && r.nature !== "allowance" && paysViaMonthlyPayroll(r))
   const categoryIds = [...new Set(rows.map((r) => r.category_id).filter((id): id is string => !!id))]
   const categoryName = new Map<string, string>()
   if (categoryIds.length > 0) {
@@ -255,6 +258,7 @@ async function loadExpenses(tenantId: string, employeeId: string, period: string
       amount: num(r.amount),
       description: (r.note ?? "").trim() || (r.category_id ? (categoryName.get(r.category_id) ?? "") : ""),
       project: null,
+      pending: r.status === "submitted",
     }))
     .sort((a, b) => a.date.localeCompare(b.date))
 }

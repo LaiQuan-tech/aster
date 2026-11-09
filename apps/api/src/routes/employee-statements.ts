@@ -277,7 +277,8 @@ employeeStatementsRouter.get(
         periods,
         employee: { id: data.employee.id, name: data.employee.name, empNo: data.employee.empNo },
         payslip: payslipStatementOf(data),
-        expenses: data.expenses,
+        // 員工端薪資單只列已隨薪資給付（已核銷）的報銷；待核銷的不在這張已定案的薪資單上
+        expenses: data.expenses ? data.expenses.filter((e) => !e.pending) : null,
       })
     } catch (err) {
       next(err)

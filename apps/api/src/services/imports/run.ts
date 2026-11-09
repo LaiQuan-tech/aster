@@ -20,6 +20,7 @@ import {
 } from "../privileged-accounts.js"
 import { resolveEmployees, type EmployeeRef } from "./resolve.js"
 import {
+  SELF_MANUAL_PUNCH_FORBIDDEN,
   generateTenantCalendar,
   importManualPunches,
   insertSalaryAdjustments,
@@ -200,13 +201,17 @@ function optionalDate(raw: string, label: string): RowOutcome<string | null> {
 
 /* ── punches ──────────────────────────────────────────────────────── */
 
-async function runPunches(tenantId: string, rows: ParsedImportRow[], dryRun: boolean) {
+const SELF_PUNCH_MESSAGE = "不能補登自己的打卡；自己的打卡請到員工端送補卡申請"
+
+async function runPunches(tenantId: string, rows: ParsedImportRow[], dryRun: boolean, actorEmpId: string | null) {
   const [resolver, tz] = await Promise.all([resolveEmployees(tenantId), getTenantTimezone(tenantId)])
   const { valid, errors } = validateRows<ManualPunchRecord>(
     rows,
     (v, line) => {
       const emp = resolver.resolve(v.empNo, v.name)
       if (!emp.ok) return fail(emp.message)
+      // 2026-11-10 業主：不能補登自己的打卡（含 platform_admin）；自己的卡請到員工端送補卡申請。
+      if (actorEmpId && emp.employee.id === actorEmpId) return fail(SELF_PUNCH_MESSAGE)
       const date = parseDateInput(v.date)
       if (!v.date.trim()) return fail("「日期」必填")
       if (!date) return fail(`「日期」格式錯誤（${v.date}），請用 YYYY-MM-DD`)
@@ -236,8 +241,10 @@ async function runPunches(tenantId: string, rows: ParsedImportRow[], dryRun: boo
       tenantId,
       valid.map((r) => r.value),
       "POST /imports/punches",
+      { selfEmployeeId: actorEmpId },
     )
-    for (const e of writeErrors) errors.push({ line: e.line, message: "找不到員工（可能剛被刪除）" })
+    for (const e of writeErrors)
+      errors.push({ line: e.line, message: e.error === SELF_MANUAL_PUNCH_FORBIDDEN ? SELF_PUNCH_MESSAGE : "找不到員工（可能剛被刪除）" })
     out.valid = valid.length - writeErrors.length
     out.imported = ids.length
   }
@@ -522,7 +529,7 @@ export async function runImport(
   let partial: Partial<ImportRunResult>
   switch (kind) {
     case "punches":
-      partial = await runPunches(tenantId, rows, dryRun)
+      partial = await runPunches(tenantId, rows, dryRun, opts.actorEmpId ?? null)
       break
     case "salary-adjustments":
       partial = await runSalaryAdjustments(tenantId, rows, dryRun)

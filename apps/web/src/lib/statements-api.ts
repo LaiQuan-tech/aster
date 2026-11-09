@@ -111,7 +111,7 @@ export interface MyPayslipStatement {
   periods: string[];
   employee: { id: string; name: string; empNo: string | null };
   payslip: StatementSummary;
-  expenses: Array<{ date: string; amount: number; description: string; project: string | null }> | null;
+  expenses: Array<{ date: string; amount: number; description: string; project: string | null; pending?: boolean }> | null;
 }
 
 /**

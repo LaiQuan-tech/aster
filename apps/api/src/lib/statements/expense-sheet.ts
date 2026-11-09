@@ -1,12 +1,13 @@
 import { GridBuilder, STATEMENT_FONT, rocPeriodTitle, type StatementGrid } from "./grid.js"
 import { letterheadRows } from "./attendance-statement.js"
-import type { StatementData } from "./types.js"
+import { expenseTotals, type StatementData } from "./types.js"
 
 /**
  * 支出表（客戶 Excel「115-10 出勤統計表」工作表「支出表」）的格線。純函式。
  *
  * 抬頭三行（合併 A:F）；列 5「10月｜姓名｜支出表」；列 6 表頭：日期｜內容(單價含稅)｜金額｜說明｜專案名稱｜備註；
- * 列 7–42 明細（36 列；該月隨薪資給付的已核銷報銷，超過 36 筆就往下長）；小計；「製表：姓名」。
+ * 列 7–42 明細（36 列；該月隨薪資給付的報銷——已核銷＋已送出待核銷（備註欄標「待核銷」），依日期排序，
+ * 超過 36 筆就往下長）；小計（含待核銷）；有待核銷時下一列「其中待核銷 X 元」；「製表：姓名」。
  * 報銷金額不是薪資金額（會計本來就看得到報銷），不遮。
  */
 
@@ -37,15 +38,22 @@ export function buildExpenseSheetGrid(data: StatementData): StatementGrid {
     g.set(r, 2, { value: item ? item.amount : null, format: "intSp", align: "right" })
     g.set(r, 3, { value: "", align: "left" })
     g.set(r, 4, { value: item?.project ?? "", ...center })
-    g.set(r, 5, { value: "", ...center })
+    g.set(r, 5, { value: item?.pending ? "待核銷" : "", ...center, ...(item?.pending ? { color: "#C00000" } : {}) })
   }
   const T = 6 + rows
   g.set(T, 1, { value: "小計", align: "right" })
-  g.set(T, 2, { value: data.expenses ? items.reduce((s, e) => s + e.amount, 0) : null, text: data.expenses ? undefined : "—", format: "intSp", bold: true, align: "right" })
+  const totals = expenseTotals(items)
+  g.set(T, 2, { value: data.expenses ? totals.total : null, text: data.expenses ? undefined : "—", format: "intSp", bold: true, align: "right" })
   g.thinGrid(5, 0, T, LAST)
-  g.set(T + 1, 0, { value: `製表：${data.employee.name}`, colSpan: 2, align: "left" })
+  let next = T + 1
+  if (data.expenses && totals.pending > 0) {
+    g.set(next, 1, { value: `其中待核銷 ${totals.pending.toLocaleString("en-US")} 元`, colSpan: 2, align: "right", color: "#C00000" })
+    next += 1
+  }
+  g.set(next, 0, { value: `製表：${data.employee.name}`, colSpan: 2, align: "left" })
+  const rowCount = next + 1
 
-  const rowHeights = Array.from({ length: T + 2 }, () => 22.35)
+  const rowHeights = Array.from({ length: rowCount }, () => 22.35)
   return {
     kind: "expenseSheet",
     title: `${rocPeriodTitle(data.period)}支出表-${data.employee.name}`,
@@ -58,7 +66,7 @@ export function buildExpenseSheetGrid(data: StatementData): StatementGrid {
       paperSize: 9,
       fit: "width",
       margins: { left: 0.51, right: 0.31, top: 0.35, bottom: 0.35 },
-      printArea: `A1:F${T + 2}`,
+      printArea: `A1:F${rowCount}`,
     },
   }
 }
