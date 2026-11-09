@@ -135,7 +135,7 @@ export const APPLICATION_SUBCONTRACT_LABELS = ["發包單位：", "聯絡資料�
 export const APPLICATION_SUMMARY_LABELS = ["發包小計：", "其他支出：", "利潤：", "毛利率：", ""] as const;
 /** Word 一張申請單只有三個發包欄；超過三筆就往下再開一個同樣的區塊。 */
 export const SUBCONTRACTS_PER_BLOCK = 3;
-/** Word 付款階段固定 7 期＋第 8 列技師公會代墊；期數不足 7 期時補空白列維持版面。 */
+/** Word 付款階段固定 7 期＋第 8 列技師公會代墊（kind=guild_advance；名稱可空白）；期數不足 7 期時補空白列維持版面。 */
 export const MIN_INSTALLMENT_ROWS = 7;
 
 /* ======================================================== 分區列印 == */
@@ -585,7 +585,9 @@ export function applicationStageRows(billings: readonly BillingExt[]): Applicati
   rows.push({
     no: count + 1,
     kind: "guild_advance",
-    milestone: guild?.milestone || "技師公會代墊",
+    // 不回填「技師公會代墊」：那是新建專案的預設模板（project-application-form DEFAULT_STAGES），
+    // 已存的名稱被使用者清空就該保持空白（2026-11-09 業主回報清空後重新整理又跑回來）。
+    milestone: guild?.milestone ?? "",
     percentage: guild?.percentage ?? null,
     amount: guild ? guild.effectiveAmount : null,
     receivedOn: guild?.receivedOn ?? null,

@@ -210,7 +210,7 @@ function billing(over: Partial<BillingExt>): BillingExt {
 }
 
 describe("付款階段列", () => {
-  it("不足 7 期補空白列，最後一列固定技師公會代墊", () => {
+  it("不足 7 期補空白列，最後一列固定技師公會代墊（不存在時名稱空白，不回填預設）", () => {
     const rows = applicationStageRows([
       billing({ id: "b2", installmentNo: 2, milestone: "第二期", receivedOn: "2026-10-05", invoiceNo: "AB00000001", invoicedOn: "2026-10-01" }),
       billing({ id: "b1", installmentNo: 1 }),
@@ -220,7 +220,7 @@ describe("付款階段列", () => {
     expect(rows[0].milestone).toBe("第一期")
     expect(rows[1]).toMatchObject({ receivedOn: "2026-10-05", invoiceNo: "AB00000001", exists: true })
     expect(rows[2].exists).toBe(false)
-    expect(rows[7]).toMatchObject({ kind: "guild_advance", milestone: "技師公會代墊", exists: false })
+    expect(rows[7]).toMatchObject({ kind: "guild_advance", milestone: "", exists: false })
   })
 
   it("超過 7 期全部列出，公會代墊接在最後", () => {

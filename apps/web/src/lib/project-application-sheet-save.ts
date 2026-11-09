@@ -231,6 +231,8 @@ export interface StagePlan {
   installments: InstallmentInputExt[] | null;
   /** 新增的期別：草稿 key → 期別編號（存完用編號找回新 id）。 */
   created: Array<{ key: string; installmentNo: number; label: string }>;
+  /** 整列清空（名稱、%、金額都空，且未請款／開票／入帳）→ 從整批 PUT 拿掉＝後端軟刪除。 */
+  removed: Array<{ key: string; label: string }>;
   invoices: Array<{ key: string; label: string; invoiceNo: string; invoicedOn: string }>;
   receipts: Array<{ key: string; label: string; receivedOn: string }>;
   /** 改了金額、要使用者填人工指定理由的列（沒有既有理由可沿用）。 */
@@ -246,7 +248,7 @@ function stageLabel(row: ApplicationStageRow): string {
 }
 
 export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): StagePlan {
-  const out: StagePlan = { installments: null, created: [], invoices: [], receipts: [], needsReason: [], changes: 0, errors: [], warnings: [] };
+  const out: StagePlan = { installments: null, created: [], removed: [], invoices: [], receipts: [], needsReason: [], changes: 0, errors: [], warnings: [] };
   if (!ctx.canFinance) return out;
   const rows = applicationStageRows(ctx.billings);
   const byId = new Map(ctx.billings.map((b) => [b.id, b]));
@@ -329,6 +331,19 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
       const saved = byId.get(row.id);
       if (!target || !saved) continue;
       scheduleChanged = true;
+      // 整列清空：名稱、%、人工金額存完都是空，而且這次沒填發票／入帳 → 移除這一期。
+      const milestoneAfter = milestoneChanged ? trimmed(edit.milestone) : trimmed(base.milestone);
+      const overrideAfter = amount !== undefined ? amount : saved.overrideAmount;
+      const cleared = milestoneAfter === "" && pctAfter == null && overrideAfter == null && !receivedOn && !invoiceNo && !invoicedOn;
+      if (cleared) {
+        if (!saved.billedOn && !saved.invoiceNo && !saved.invoicedOn && !saved.receivedOn) {
+          payload.splice(payload.indexOf(target), 1);
+          out.removed.push({ key, label });
+          continue;
+        }
+        // 已請款／開票／入帳的期別後端不准移除（409）：名稱照存空白，其他格維持原值，並說明原因（不默默還原）。
+        out.warnings.push(`付款階段${label}已請款／開票或入帳，不能整列移除：項目說明會存成空白、其他格維持原值；要移除請先到下方「分期請款期程」撤銷。`);
+      }
       if (milestoneChanged) target.milestone = textOrNull(edit.milestone);
       if (percentage !== undefined) target.percentage = percentage;
       if (amount !== undefined) {
@@ -344,7 +359,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
         installmentNo,
         kind: row.kind,
         percentage: percentage ?? null,
-        milestone: milestoneChanged ? textOrNull(edit.milestone) : row.kind === "guild_advance" ? row.milestone : null,
+        milestone: milestoneChanged ? textOrNull(edit.milestone) : null,
         plannedOn: null,
         overrideAmount: amount ?? null,
         overrideReason: amount != null ? overrideReason : null,

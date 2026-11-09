@@ -364,7 +364,7 @@ describe("付款階段", () => {
     expect(plan.dirtyCount).toBe(2)
   })
 
-  it("空白列填了就新增一期，編號接在最大期別後；公會代墊空白列預設名稱", () => {
+  it("空白列填了就新增一期，編號接在最大期別後；公會代墊空白列不自動塞名稱", () => {
     const ctx = ctxOf({ billings })
     const rows = applicationStageRows(billings)
     expect(stageRowKey(rows[2])).toBe("new-installment-3")
@@ -372,7 +372,7 @@ describe("付款階段", () => {
     const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { "new-installment-3": { milestone: "保留款", percentage: "10" }, "new-guild": { amount: "5000", overrideReason: "公會核定" } } }))
     expect(plan.stages.installments).toHaveLength(4)
     expect(plan.stages.installments?.[2]).toMatchObject({ installmentNo: 3, kind: "installment", milestone: "保留款", percentage: 10, overrideAmount: null })
-    expect(plan.stages.installments?.[3]).toMatchObject({ installmentNo: 4, kind: "guild_advance", milestone: "技師公會代墊", overrideAmount: 5000, overrideReason: "公會核定" })
+    expect(plan.stages.installments?.[3]).toMatchObject({ installmentNo: 4, kind: "guild_advance", milestone: null, overrideAmount: 5000, overrideReason: "公會核定" })
     expect(plan.stages.created).toEqual([
       { key: "new-installment-3", installmentNo: 3, label: "第 3 列" },
       { key: "new-guild", installmentNo: 4, label: "技師公會代墊" },
@@ -614,5 +614,69 @@ describe("存檔結果歸屬到專案（換專案時清掉上一案的結果）"
     expect(reportForProject(stored, "p1")).toBe(stored.report)
     expect(reportForProject(stored, "p2")).toBeNull()
     expect(reportForProject(null, "p1")).toBeNull()
+  })
+})
+
+/**
+ * 業主回報（2026-11-09）：付款階段第 8 列「技師公會代墊」清空名稱、儲存、重新整理後又跑回來。
+ * 重現：清空名稱 → 存檔計畫送 milestone null → 模擬後端照存 → 重新載入的列應保持空白。
+ */
+describe("付款階段清空名稱／整列清空", () => {
+  const guild = fakeBilling({ id: "g1", installmentNo: 8, kind: "guild_advance", milestone: "技師公會代墊", percentage: null, calculatedAmount: null, overrideAmount: 5000, overrideReason: "公會核定", effectiveAmount: 5000 })
+  const inst = fakeBilling({ id: "b1", installmentNo: 1, milestone: "訂金款", percentage: 10, calculatedAmount: 10000, effectiveAmount: 10000 })
+
+  /** 模擬後端 PUT /billings：照 payload 存（milestone ?? null，不回填預設），不在 payload 的軟刪除。 */
+  function saved(before: BillingExt[], payload: InstallmentInputExt[]): BillingExt[] {
+    return payload.map((p) => {
+      const old = before.find((b) => b.id === p.id)
+      return fakeBilling({ ...(old ?? {}), id: p.id ?? `new-${p.installmentNo}`, installmentNo: p.installmentNo, kind: p.kind ?? old?.kind ?? "installment", milestone: p.milestone ?? null, percentage: p.percentage ?? null })
+    })
+  }
+
+  it("第 8 列（技師公會代墊）清空名稱：送 null，重新載入仍空白、不回填預設", () => {
+    const billings = [inst, guild]
+    const ctx = ctxOf({ billings })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { g1: { milestone: "" } } }))
+    expect(plan.errors).toEqual([])
+    const g = plan.stages.installments?.find((p) => p.id === "g1")
+    expect(g).toMatchObject({ kind: "guild_advance", milestone: null })
+    const rows = applicationStageRows(saved(billings, plan.stages.installments ?? []))
+    expect(rows[rows.length - 1]).toMatchObject({ kind: "guild_advance", milestone: "", exists: true })
+  })
+
+  it("第 1～7 列清空名稱：重新載入仍空白", () => {
+    const billings = [inst, guild]
+    const ctx = ctxOf({ billings })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { milestone: "  " } } }))
+    expect(plan.stages.installments?.find((p) => p.id === "b1")).toMatchObject({ milestone: null, percentage: 10 })
+    expect(applicationStageRows(saved(billings, plan.stages.installments ?? []))[0].milestone).toBe("")
+  })
+
+  it("公會代墊列不存在時顯示空白（placeholder），不自動塞名稱", () => {
+    const rows = applicationStageRows([inst])
+    expect(rows[rows.length - 1]).toMatchObject({ kind: "guild_advance", milestone: "", exists: false })
+  })
+
+  it("整列清空（名稱、%、金額都空，未請款／開票／入帳）→ 該期從整批 PUT 移除", () => {
+    const billings = [inst, guild]
+    const ctx = ctxOf({ billings })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { milestone: "", percentage: "", amount: "" } } }))
+    expect(plan.errors).toEqual([])
+    expect(plan.stages.installments?.map((p) => p.id)).toEqual(["g1"])
+    expect(plan.stages.removed).toEqual([{ key: "b1", label: "第 1 列" }])
+    // 公會代墊列名稱＋金額都清空 → 移除；重新載入後第 8 列是空白列、名稱空白（審迄還款照常）。
+    const gAll = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { g1: { milestone: "", amount: "" } } }))
+    expect(gAll.stages.installments?.map((p) => p.id)).toEqual(["b1"])
+    const rows = applicationStageRows(saved(billings, gAll.stages.installments ?? []))
+    expect(rows[rows.length - 1]).toMatchObject({ kind: "guild_advance", milestone: "", exists: false })
+  })
+
+  it("已開票／已入帳的期別整列清空：不移除，名稱照存空白，畫面提示原因", () => {
+    const done = fakeBilling({ id: "b1", installmentNo: 1, milestone: "訂金款", billedOn: "2026-10-20", billedAmount: 30000, invoiceNo: "AA00000001", invoicedOn: "2026-10-21" })
+    const ctx = ctxOf({ billings: [done] })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { milestone: "", percentage: "" } } }))
+    expect(plan.stages.removed).toEqual([])
+    expect(plan.stages.installments?.[0]).toMatchObject({ id: "b1", milestone: null })
+    expect(plan.warnings.join()).toMatch(/第 1 列.*不能整列移除/)
   })
 })

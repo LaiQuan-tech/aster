@@ -733,7 +733,7 @@ export function ApplicationSheet({
         {editable ? (
           <span className="flex w-full min-w-0 items-center gap-0.5">
             <span className="shrink-0">{s.no}.</span>
-            <input aria-label={`${rowLabel}項目說明`} className={cellInput} maxLength={200} placeholder={guild ? "" : "項目說明"} value={val("milestone")} onChange={(e) => setStage(key, "milestone", e.target.value)} />
+            <input aria-label={`${rowLabel}項目說明`} className={cellInput} maxLength={200} placeholder="項目說明" title="名稱、百分比、金額都清空並儲存＝移除這一期（已請款／開票／入帳的不能移除）" value={val("milestone")} onChange={(e) => setStage(key, "milestone", e.target.value)} />
           </span>
         ) : (
           <span className="truncate" title={`${s.no}.${s.milestone}`}>{`${s.no}.${s.milestone}`}</span>
