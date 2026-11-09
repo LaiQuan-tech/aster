@@ -1,5 +1,5 @@
 import { GridBuilder, STATEMENT_FONT, rocPeriodTitle, rocYear, type StatementGrid } from "./grid.js"
-import { DAY_ROWS, DAY_ROW_START, letterheadRows, statementDayContent, statementDays } from "./attendance-statement.js"
+import { DAY_ROWS, DAY_ROW_START, leaveNamesOf, letterheadRows, statementDayContent, statementDays } from "./attendance-statement.js"
 import type { StatementData, StatementLeaveDay } from "./types.js"
 
 /**
@@ -7,7 +7,7 @@ import type { StatementData, StatementLeaveDay } from "./types.js"
  *
  * 逐日 31 列鏡像「出勤」：日期｜請假時間（核准假單當日起訖）｜請假日(時)數｜公司假別｜請假事由｜勞保局（＝出勤「內容」）；
  * 隱藏欄 D/E/F/J（職務代理人、經理簽核、老闆核准、請假人）照原檔保留欄位但隱藏；週末／假日列隱藏同「出勤」。
- * 列 37「加總」。
+ * 列 37「加總」（A37，列印範圍外，照原檔）。凍結月份：時數、假別照核准快照，時段、事由為目前紀錄並加註。
  */
 
 export const LEAVE_FORM_COLUMN_WIDTHS = [12, 13.625, 13.625, 12.375, 12.375, 12.375, 20.75, 11.625, 12, 12.5]
@@ -42,6 +42,10 @@ export function buildLeaveFormGrid(data: StatementData): StatementGrid {
   g.thinGrid(4, 0, 4, LAST)
 
   const { infos, hiddenRows } = statementDays(data)
+  // 凍結（已核准）月份：時數、假別以核准快照為準（逐日 leaveMinutes／leaveSummary）；假單時段、事由是目前紀錄，
+  // 只在快照當天有請假時才帶出，並在表尾加註。
+  const frozen = data.attendance?.frozen === true
+  let usedCurrent = false
   let total = 0
   infos.forEach((info, i) => {
     const r = DAY_ROW_START + i
@@ -49,23 +53,29 @@ export function buildLeaveFormGrid(data: StatementData): StatementGrid {
       for (let c = 0; c <= LAST; c += 1) g.set(r, c, { value: null })
       return
     }
-    const items = data.leaveDays?.[info.date] ?? []
     const hours = Math.round(((info.day?.leaveMinutes ?? 0) / 60) * 100) / 100
+    const current = data.leaveDays?.[info.date] ?? []
+    const items = frozen && hours <= 0 ? [] : current
+    if (frozen && items.length > 0) usedCurrent = true
+    const names = frozen && info.day?.leaveSummary ? leaveNamesOf(info.day.leaveSummary).replace(/／/g, "、") : uniqueJoin(items.map((l) => l.name))
     total += hours
     g.set(r, 0, { value: info.date, format: "mdZh", ...center })
     g.set(r, 1, { value: leaveTimeText(items), ...center, wrap: true })
     g.set(r, 2, { value: hours, format: "general", ...center })
-    g.set(r, 6, { value: uniqueJoin(items.map((l) => l.name)), ...center, wrap: true })
+    g.set(r, 6, { value: names, ...center, wrap: true })
     g.set(r, 7, { value: uniqueJoin(items.map((l) => l.reason)), ...center, wrap: true })
     g.set(r, 8, { value: statementDayContent(info), ...center, wrap: true })
   })
   g.thinGrid(DAY_ROW_START, 0, DAY_ROW_START + DAY_ROWS - 1, LAST)
   const T = DAY_ROW_START + DAY_ROWS
-  g.set(T, 1, { value: "加總", ...center })
+  // 原檔：加總在 A37、C37＝SUM（列印範圍 A1:J36 不含加總列）。
+  g.set(T, 0, { value: "加總", ...center })
   g.set(T, 2, { value: Math.round(total * 100) / 100, format: "general", ...center })
   g.thinGrid(T, 0, T, LAST)
+  if (usedCurrent)
+    g.set(T + 1, 0, { value: "註：已核准凍結版本；請假時數與假別為核准當時，時段與事由為目前紀錄", colSpan: LAST + 1, align: "left", size: 10 })
 
-  const rowHeights = Array.from({ length: T + 1 }, (_, i) => (i >= 4 && i < T ? 45.75 : 22.35))
+  const rowHeights = Array.from({ length: T + (usedCurrent ? 2 : 1) }, (_, i) => (i >= 4 && i < T ? 45.75 : 22.35))
   return {
     kind: "leaveForm",
     title: `${rocPeriodTitle(data.period)}請假單-${data.employee.name}`,

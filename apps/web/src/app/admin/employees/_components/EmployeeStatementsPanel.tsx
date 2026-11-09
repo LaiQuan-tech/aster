@@ -37,7 +37,7 @@ function sourceNote(data: EmployeeStatements, kind: StatementTab): string | null
   const summary = kind === "attendance" ? data.attendance : data.payslip;
   if (!summary) return null;
   const notes: string[] = [];
-  if (!summary.hasAttendance) notes.push("這個月還沒有出勤月表，逐日與時數為空白");
+  if (!summary.hasAttendance) notes.push("此月尚無出勤月表，逐日與時數為空白");
   if (data.canSeeMoney) {
     if (summary.moneySource === "preview") notes.push("尚未產生薪資單，金額為月表試算");
     else if (summary.moneySource === null) notes.push("沒有薪資資料（未設定薪資結構或尚未產生薪資單），金額顯示「—」");
@@ -177,10 +177,19 @@ export function EmployeeStatementsPanel({
           )}
         </div>
       )}
+      {!live && kind === "attendance" && summary && (
+        <div className="mb-3 flex justify-end print:hidden">
+          <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" checked={showHolidays} onChange={(e) => setShowHolidays(e.target.checked)} />
+            顯示假日列
+          </label>
+        </div>
+      )}
       {frozen && (
         <p className="mb-3 rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-800 print:hidden">
           已核准凍結版本（核准於 {fmtDateTime(att?.approvedAt)}
-          {att?.lockedAt ? `；鎖定於 ${fmtDateTime(att.lockedAt)}` : ""}），不隨之後的打卡、補登或請假變動，與薪資單一致。
+          {att?.lockedAt ? `；鎖定於 ${fmtDateTime(att.lockedAt)}` : ""}）：逐日起迄、請假時數與假別、加班沿用核准當時的快照，不重算；
+          請假單的時段與事由、假日名稱為目前紀錄（表上有加註）；金額來源見下方說明。
         </p>
       )}
       {liveNote && (
@@ -199,7 +208,7 @@ export function EmployeeStatementsPanel({
             grid={grid}
             fitControl
             printing
-            showHiddenRows={live && showHolidays}
+            showHiddenRows={kind === "attendance" && showHolidays}
             variant={live ? "excel" : "admin"}
           />
         </div>

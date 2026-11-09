@@ -22,14 +22,17 @@ import type {
 } from "../lib/statements/types.js"
 import type { SheetMoney, SheetView } from "./attendance-sheet-types.js"
 import { findSheet, generateSheets, sheetViewFromRow } from "./attendance-sheets.js"
-import { isPeriodClosed } from "./period-lock.js"
+import { PeriodClosedError, isPeriodClosed } from "./period-lock.js"
 import { buildPayrollInputs, loadRuleConfigFor } from "./payroll-inputs.js"
 import { paysViaMonthlyPayroll } from "./payroll-claims.js"
 
 /**
  * 員工內頁「出勤統計表／薪資明細表」（2026-10-27 業主：格式要跟公司現行 Excel 一模一樣）的資料彙總。
  *
- * 只讀不寫：月表沒產生就不產生（不像 /my/attendance-sheet 會即時 generate），薪資單沒跑就退回月表試算。
+ * loadStatementData 只讀不寫：月表沒產生就不產生，薪資單沒跑就退回月表試算。
+ * ⚠️ 例外（2026-11-09）：GET /employees/:id/statements 帶 live=1／refresh=1 時，路由會先呼叫
+ * refreshStatementSheet → generateSheets，**會寫入** attendance_days／attendance_sheets／attendance_sheet_days
+ * （settle＋rebuild，與員工端 /my/attendance-sheet 同一流程；只限未凍結月份，見該函式說明）。
  * 每一塊子資料各自 try/catch，讀不到就是 null（畫面顯示空白／「—」），一塊壞掉不拖垮整張表；
  * 只有「員工本人那一列」讀不到才算錯。
  *
@@ -510,6 +513,7 @@ export type RecomputeReason =
   | "in_review"
   | "period_closed"
   | "future_period"
+  | "no_sheet"
   | "not_employed"
   | "failed"
 
@@ -518,13 +522,38 @@ export interface RecomputeOutcome {
   reason: RecomputeReason
 }
 
+/** 'YYYY-MM' 的上個月。 */
+function prevPeriod(period: string): string {
+  const [y, m] = period.split("-").map(Number)
+  const d = new Date(Date.UTC(y, m - 2, 1))
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`
+}
+
+/** 該月是否在職（與 generateSheets 同一個判準：在職中或離職日 ≥ 月初，且到職日 ≤ 月底）。 */
+async function employedInPeriod(tenantId: string, employeeId: string, period: string): Promise<boolean> {
+  const { from, to } = monthRangeKeys(period)
+  const { data, error } = await supabaseAdmin
+    .from("employees")
+    .select("id, status, hire_date, terminated_at")
+    .eq("tenant_id", tenantId)
+    .eq("id", employeeId)
+    .maybeSingle()
+  if (error) throw new Error(error.message)
+  const e = data as { status: string; hire_date: string | null; terminated_at: string | null } | null
+  if (!e) return false
+  const employed = e.status === "active" || (e.terminated_at != null && e.terminated_at >= from)
+  return employed && (e.hire_date == null || e.hire_date <= to)
+}
+
 /**
- * 未凍結（沒有月表／draft／returned）的月份：跑一次 generateSheets（＝該員工 settle＋rebuild，與員工端
- * GET /my/attendance-sheet 同一流程），讓新打卡／補登／請假核准立刻反映到出勤統計表。
- *   • approved／locked → 不重算（frozen；顯示核准快照，與薪資單一致）
- *   • submitted／manager_reviewed → 不重算（審核中數字不移動）
+ * 未凍結（draft／returned，或當月／上月還沒有月表）的月份：跑一次 generateSheets（＝該員工 settle＋rebuild，
+ * 與員工端 GET /my/attendance-sheet 同一流程），讓新打卡／補登／請假核准立刻反映到出勤統計表。
+ *   • approved／locked → 不重算（frozen；顯示核准快照）
+ *   • submitted／manager_reviewed → 不重算（審核中數字不移動）；重算途中被送出（rebuild 狀態條件擋下）也算 in_review
  *   • 已結算月份、未來月份 → 不重算
+ *   • 沒有月表且早於上月 → 不重算、不建月表（no_sheet）；該月不在職 → 不 settle（not_employed）
  *   • computed_at 在節流時間內 → 不重算（自動 5 分鐘、force 30 秒）
+ *   • 讀取或重算失敗 → failed（畫面照常顯示現有資料，不整頁錯）
  */
 export async function refreshStatementSheet(
   tenantId: string,
@@ -533,21 +562,27 @@ export async function refreshStatementSheet(
   opts: { force: boolean; currentPeriod: string; now?: number },
 ): Promise<RecomputeOutcome> {
   if (period > opts.currentPeriod) return { ran: false, reason: "future_period" }
-  const sheet = await findSheet(tenantId, employeeId, period)
-  if (sheet) {
-    if (sheet.status === "approved" || sheet.status === "locked") return { ran: false, reason: "frozen" }
-    if (sheet.status !== "draft" && sheet.status !== "returned") return { ran: false, reason: "in_review" }
-    const computed = sheet.computed_at ? Date.parse(sheet.computed_at) : NaN
-    const window = opts.force ? FORCE_RECOMPUTE_MIN_MS : RECOMPUTE_THROTTLE_MS
-    if (Number.isFinite(computed) && (opts.now ?? Date.now()) - computed < window) return { ran: false, reason: "throttled" }
-  }
-  if (await isPeriodClosed(tenantId, period)) return { ran: false, reason: "period_closed" }
   try {
-    await generateSheets({ tenantId, period, employeeId })
+    const sheet = await findSheet(tenantId, employeeId, period)
+    if (sheet) {
+      if (sheet.status === "approved" || sheet.status === "locked") return { ran: false, reason: "frozen" }
+      if (sheet.status !== "draft" && sheet.status !== "returned") return { ran: false, reason: "in_review" }
+      const computed = sheet.computed_at ? Date.parse(sheet.computed_at) : NaN
+      const window = opts.force ? FORCE_RECOMPUTE_MIN_MS : RECOMPUTE_THROTTLE_MS
+      if (Number.isFinite(computed) && (opts.now ?? Date.now()) - computed < window) return { ran: false, reason: "throttled" }
+    } else {
+      if (period < prevPeriod(opts.currentPeriod)) return { ran: false, reason: "no_sheet" }
+      if (!(await employedInPeriod(tenantId, employeeId, period))) return { ran: false, reason: "not_employed" }
+    }
+    if (await isPeriodClosed(tenantId, period)) return { ran: false, reason: "period_closed" }
+    const result = await generateSheets({ tenantId, period, employeeId })
+    const skipped = result?.skipped?.find((x) => x.employeeId === employeeId)
+    if (skipped) return { ran: false, reason: skipped.status === "approved" || skipped.status === "locked" ? "frozen" : "in_review" }
+    if (!sheet && !(await findSheet(tenantId, employeeId, period))) return { ran: false, reason: "not_employed" }
+    return { ran: true, reason: "recomputed" }
   } catch (err) {
+    if (err instanceof PeriodClosedError) return { ran: false, reason: "period_closed" }
     logger.warn({ err, tenantId, employeeId, period }, "employee-statements: recompute failed")
     return { ran: false, reason: "failed" }
   }
-  if (!sheet && !(await findSheet(tenantId, employeeId, period))) return { ran: false, reason: "not_employed" }
-  return { ran: true, reason: "recomputed" }
 }

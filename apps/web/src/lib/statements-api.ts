@@ -90,6 +90,7 @@ export type RecomputeReason =
   | "in_review"
   | "period_closed"
   | "future_period"
+  | "no_sheet"
   | "not_employed"
   | "failed";
 
@@ -137,6 +138,10 @@ export function recomputeNote(r: EmployeeStatements["recompute"]): string | null
       return "月表審核中（已送出），數字暫不重算";
     case "period_closed":
       return "該月已結算，不再重算";
+    case "no_sheet":
+      return "此月尚無出勤月表（較早的月份不自動建立）";
+    case "not_employed":
+      return "該員工此月不在職，沒有出勤月表";
     case "failed":
       return "重算失敗，顯示上次計算結果";
     default:

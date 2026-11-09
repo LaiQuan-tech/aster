@@ -5,7 +5,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 // 純測試：supabase 換成記憶體版（helpers/fake-supabase.ts），不連任何 DB。
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
 // 開畫面即重算：generateSheets（settle＋rebuild，連整條出勤引擎）換成假函式，只驗「有沒有被叫」。
-const generateSheetsMock = vi.hoisted(() => vi.fn(async () => ({ generated: 0, rebuilt: 1, skipped: [] })))
+const generateSheetsMock = vi.hoisted(() =>
+  vi.fn(async (_input: unknown): Promise<{ generated: number; rebuilt: number; skipped: Array<{ employeeId: string; status: string }> }> => ({ generated: 0, rebuilt: 1, skipped: [] })),
+)
 vi.mock("../services/attendance-sheets.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../services/attendance-sheets.js")>()),
   generateSheets: generateSheetsMock,
@@ -44,6 +46,7 @@ import { buildStatementWorkbook } from "../lib/xlsx/statement-grid.js"
 import { leaveDaysOf, mealNoteFor, moneyFromBreakdown, moneyFromPreview } from "../services/employee-statements.js"
 import { LEGACY_RULE_CONFIG_2026_09 } from "../lib/default-rule-config.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID } from "./helpers/fake-supabase.js"
+import { todayKey } from "../lib/tz.js"
 import { FAKE_EMPLOYEE_ID, fakeBreakdown, fakeSheetView, fakeStatementData } from "./fixtures/statement-fixture.js"
 
 /**
@@ -219,7 +222,10 @@ describe("請假單／支出表", () => {
     expect(cellAt(grid, 5 + 7, 6)?.text).toBe("病假")
     expect(cellAt(grid, 5 + 7, 7)?.text).toBe("看診")
     expect(cellAt(grid, 5, 2)?.text).toBe("0") // 無請假日顯示 0
-    expect(cellAt(grid, 36, 1)?.text).toBe("加總")
+    expect(cellAt(grid, 36, 0)?.text).toBe("加總") // 原檔 A37
+    expect(grid.page?.printArea).toBe("A1:J36")
+    // 凍結（fixture 是已核准快照）：假別照快照、時段事由為目前紀錄 → 表尾加註
+    expect(findText(grid, "註：已核准凍結版本；請假時數與假別為核准當時，時段與事由為目前紀錄")).toBeTruthy()
     expect(cellAt(grid, 36, 2)?.text).toBe("5.5")
     expect(grid.hiddenRows).toEqual(buildAttendanceStatementGrid(data).hiddenRows)
   })
@@ -705,6 +711,70 @@ describe("後台出勤統計表：畫面與 xlsx 同源、開畫面即重算（2
     fake.db.employees.push({ ...employeeRow(foreign, "foreign-user2", "employee"), tenant_id: OTHER_TENANT_ID })
     expect((await request(app).get(`/employees/${foreign}/statements?period=2026-06&refresh=1`).use(as("hr-user"))).status).toBe(404)
     expect(generateSheetsMock).not.toHaveBeenCalled()
+  })
+
+  it("退回（returned）：照常重算", async () => {
+    Object.assign(sheet(), { status: "returned", approved_at: null, computed_at: null })
+    expect((await request(app).get(url("&live=1")).use(as("hr-user"))).body.recompute).toEqual({ ran: true, reason: "recomputed" })
+    expect(generateSheetsMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("鎖定（locked）：不重算", async () => {
+    Object.assign(sheet(), { status: "locked", locked_at: "2026-07-05T00:00:00.000Z" })
+    const res = await request(app).get(url("&refresh=1")).use(as("hr-user"))
+    expect(res.body.recompute).toEqual({ ran: false, reason: "frozen" })
+    expect(res.body.attendance.lockedAt).toBe("2026-07-05T00:00:00.000Z")
+    expect(generateSheetsMock).not.toHaveBeenCalled()
+  })
+
+  it("已結算月份（period_closed）：不重算", async () => {
+    draftComputed(60)
+    fake.db.period_closes = [{ tenant_id: TENANT_ID, period: "2026-06", status: "closed" }]
+    expect((await request(app).get(url("&refresh=1")).use(as("hr-user"))).body.recompute).toEqual({ ran: false, reason: "period_closed" })
+    expect(generateSheetsMock).not.toHaveBeenCalled()
+  })
+
+  it("上月以前且沒有月表：不重算、不建月表（no_sheet）", async () => {
+    fake.db.attendance_sheets = []
+    const res = await request(app).get(url("&live=1")).use(as("hr-user"))
+    expect(res.status).toBe(200)
+    expect(res.body.recompute).toEqual({ ran: false, reason: "no_sheet" })
+    expect(res.body.attendance.hasAttendance).toBe(false)
+    expect(generateSheetsMock).not.toHaveBeenCalled()
+  })
+
+  it("當月沒有月表：新建（generateSheets）；不在職 → 不 settle、not_employed", async () => {
+    fake.db.attendance_sheets = []
+    const current = todayKey("Asia/Taipei").slice(0, 7)
+    generateSheetsMock.mockImplementationOnce(async () => {
+      fake.db.attendance_sheets.push({ id: "dddddddd-0000-4000-8000-0000000000aa", tenant_id: TENANT_ID, employee_id: FAKE_EMPLOYEE_ID, period: current, status: "draft", computed_at: new Date().toISOString(), month_anomalies: [], snapshot: null, version: 1 })
+      return { generated: 1, rebuilt: 0, skipped: [] }
+    })
+    const ok = await request(app).get(`/employees/${FAKE_EMPLOYEE_ID}/statements?period=${current}&live=1`).use(as("hr-user"))
+    expect(ok.status).toBe(200)
+    expect(ok.body.recompute).toEqual({ ran: true, reason: "recomputed" })
+    expect(generateSheetsMock).toHaveBeenCalledTimes(1)
+    fake.db.attendance_sheets = []
+    const target = fake.db.employees.find((e) => e.id === FAKE_EMPLOYEE_ID)!
+    Object.assign(target, { status: "terminated", terminated_at: "2021-12-31" })
+    const gone = await request(app).get(`/employees/${FAKE_EMPLOYEE_ID}/statements?period=${current}&live=1`).use(as("hr-user"))
+    expect(gone.body.recompute).toEqual({ ran: false, reason: "not_employed" })
+    expect(generateSheetsMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("重算途中被送出（generateSheets 回 skipped）→ in_review，不報錯", async () => {
+    draftComputed(60)
+    generateSheetsMock.mockImplementationOnce(async () => ({ generated: 0, rebuilt: 0, skipped: [{ employeeId: FAKE_EMPLOYEE_ID, status: "submitted" }] }))
+    expect((await request(app).get(url("&live=1")).use(as("hr-user"))).body.recompute).toEqual({ ran: false, reason: "in_review" })
+  })
+
+  it("讀取月表失敗 → 降級（recompute=failed），整頁照回 200", async () => {
+    // 第一次 select 是 periodsWithData（本來就容錯），第二次是重算前的 findSheet。
+    fake.injectError({ table: "attendance_sheets", action: "select", error: { message: "boom" } })
+    fake.injectError({ table: "attendance_sheets", action: "select", error: { message: "boom" } })
+    const res = await request(app).get(url("&live=1")).use(as("hr-user"))
+    expect(res.status).toBe(200)
+    expect(res.body.recompute).toEqual({ ran: false, reason: "failed" })
   })
 
   it("未來月份不重算", async () => {

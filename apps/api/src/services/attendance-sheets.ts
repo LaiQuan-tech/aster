@@ -946,7 +946,7 @@ interface AttendanceRowWithAnomaly extends AttendanceDayRow {
   dinner_taken?: boolean | null
 }
 
-interface MonthFacts {
+export interface MonthFacts {
   tz: string
   rules: RuleConfig
   ruleConfigVersion: number
@@ -980,7 +980,7 @@ function hhmmToMinutes(hhmm: string): number {
 }
 
 /** Everything a rebuild of `employeeIds`' sheets for `period` needs, in one pass. */
-async function loadMonthFacts(tenantId: string, period: string, employeeIds: string[]): Promise<MonthFacts> {
+export async function loadMonthFacts(tenantId: string, period: string, employeeIds: string[]): Promise<MonthFacts> {
   const tz = await getTenantTimezone(tenantId)
   const { from, to } = monthRangeKeys(period)
   const { rules, version } = await loadRuleConfigFor(tenantId, period)
@@ -1450,11 +1450,17 @@ async function loadDays(tenantId: string, sheetId: string): Promise<SheetDayRow[
   return (data ?? []) as unknown as SheetDayRow[]
 }
 
+/** 可重算（rebuild）的月表狀態；其餘狀態（審核中／已核准／鎖定）數字不再移動。 */
+const REBUILDABLE_STATUSES = ["draft", "returned"] as const
+
 /**
  * Rebuild one sheet's day rows + month anomalies from `facts` (no settlement
  * here — the caller decides whether to settle first). Manual fields survive.
+ *
+ * 2026-11-09 狀態條件：先以「status in (draft, returned)」條件更新月表列（computed_at 等）——讀到月表之後
+ * 才被送出／核准的月表不會被覆寫；被擋（0 列）回 false、不動逐日列（呼叫端當作審核中處理，不報錯）。
  */
-async function rebuildSheet(tenantId: string, sheet: SheetRow, facts: MonthFacts): Promise<void> {
+export async function rebuildSheet(tenantId: string, sheet: SheetRow, facts: MonthFacts): Promise<boolean> {
   const existingRows = await loadDays(tenantId, sheet.id)
   const existing = new Map<DateKey, SheetDayRow>()
   for (const r of existingRows) existing.set(r.work_date, r)
@@ -1462,12 +1468,7 @@ async function rebuildSheet(tenantId: string, sheet: SheetRow, facts: MonthFacts
   const anomalies = computeAnomalies({ period: sheet.period }, rows, anomalyContextFor(sheet.employee_id, facts))
   for (const r of rows) r.anomalies = anomalies.days.get(r.work_date) ?? []
 
-  const { error: upErr } = await supabaseAdmin
-    .from("attendance_sheet_days")
-    .upsert(rows.map((r) => computedColumns(tenantId, r)), { onConflict: "sheet_id,work_date" })
-  if (upErr) throw wrapDbError("attendance-sheets (upsert days)", upErr)
-
-  const { error: shErr } = await supabaseAdmin
+  const { data: claimed, error: shErr } = await supabaseAdmin
     .from("attendance_sheets")
     .update({
       month_anomalies: anomalies.month,
@@ -1476,7 +1477,16 @@ async function rebuildSheet(tenantId: string, sheet: SheetRow, facts: MonthFacts
     })
     .eq("tenant_id", tenantId)
     .eq("id", sheet.id)
+    .in("status", [...REBUILDABLE_STATUSES])
+    .select("id")
   if (shErr) throw wrapDbError("attendance-sheets (update sheet)", shErr)
+  if (!claimed || (claimed as unknown[]).length === 0) return false
+
+  const { error: upErr } = await supabaseAdmin
+    .from("attendance_sheet_days")
+    .upsert(rows.map((r) => computedColumns(tenantId, r)), { onConflict: "sheet_id,work_date" })
+  if (upErr) throw wrapDbError("attendance-sheets (upsert days)", upErr)
+  return true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1542,11 +1552,26 @@ export async function generateSheets({ tenantId, period, employeeId }: GenerateI
       .from("attendance_sheets")
       .insert(toInsert.map((id) => ({ tenant_id: tenantId, employee_id: id, period, status: "draft" })))
       .select(SHEET_COLS)
-    if (insErr) throw wrapDbError("generateSheets (insert sheets)", insErr)
-    for (const s of (insData ?? []) as unknown as SheetRow[]) {
+    let insertedRows = (insData ?? []) as unknown as SheetRow[]
+    if (insErr) {
+      // 兩人同時開（HR 同時看同一位、或員工端同時產生）撞唯一索引 (tenant, employee, period)：
+      // 改讀現有月表，當作「已存在」處理（不重複建立、不報錯）。
+      if (insErr.code !== "23505") throw wrapDbError("generateSheets (insert sheets)", insErr)
+      const { data: again, error: againErr } = await supabaseAdmin
+        .from("attendance_sheets")
+        .select(SHEET_COLS)
+        .eq("tenant_id", tenantId)
+        .eq("period", period)
+        .in("employee_id", toInsert)
+      if (againErr) throw wrapDbError("generateSheets (reload sheets)", againErr)
+      for (const s of (again ?? []) as unknown as SheetRow[]) sheetByEmp.set(s.employee_id, s)
+      insertedRows = []
+    }
+    for (const s of insertedRows) {
       sheetByEmp.set(s.employee_id, s)
       result.generated += 1
     }
+    toInsert.splice(0, toInsert.length, ...insertedRows.map((s) => s.employee_id))
   }
 
   const inserted = new Set(toInsert)
@@ -1564,7 +1589,14 @@ export async function generateSheets({ tenantId, period, employeeId }: GenerateI
   if (rebuildable.length === 0) return result
 
   const facts = await loadMonthFacts(tenantId, period, rebuildable.map((s) => s.employee_id))
-  for (const s of rebuildable) await rebuildSheet(tenantId, s, facts)
+  for (const s of rebuildable) {
+    if (await rebuildSheet(tenantId, s, facts)) continue
+    // 讀到之後狀態已變（送出／核准）：不覆寫，改列為略過。
+    if (!inserted.has(s.employee_id)) result.rebuilt -= 1
+    else result.generated -= 1
+    const now = await loadSheet(tenantId, s.id).catch(() => null)
+    result.skipped.push({ employeeId: s.employee_id, status: now?.status ?? s.status })
+  }
   return result
 }
 
@@ -1583,14 +1615,20 @@ export async function recomputeSheet(tenantId: string, sheetId: string, opts: { 
   const { from, to } = monthRangeKeys(sheet.period)
   if (opts.settle ?? true) await settleAttendance({ tenantId, from, to, employeeId: sheet.employee_id })
   const facts = await loadMonthFacts(tenantId, sheet.period, [sheet.employee_id])
-  await rebuildSheet(tenantId, sheet, facts)
+  if (!(await rebuildSheet(tenantId, sheet, facts))) {
+    const now = await loadSheet(tenantId, sheetId)
+    throw new SheetError("sheet_not_editable", 409, { status: now.status })
+  }
   return loadSheet(tenantId, sheetId)
 }
 
 /** Refresh tiers + anomalies from the stored day rows after a manual edit (no settlement). */
 async function refreshDerived(tenantId: string, sheet: SheetRow): Promise<void> {
   const facts = await loadMonthFacts(tenantId, sheet.period, [sheet.employee_id])
-  await rebuildSheet(tenantId, sheet, facts)
+  if (!(await rebuildSheet(tenantId, sheet, facts))) {
+    const now = await loadSheet(tenantId, sheet.id)
+    throw new SheetError("sheet_not_editable", 409, { status: now.status })
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

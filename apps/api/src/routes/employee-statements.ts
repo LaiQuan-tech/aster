@@ -122,7 +122,9 @@ employeeStatementsRouter.get(
           res.status(404).json({ error: "not_found" })
           return
         }
-        recompute = await refreshStatementSheet(tenantId, id, period, { force: wantsRefresh, currentPeriod: today.slice(0, 7) })
+        recompute = await refreshStatementSheet(tenantId, id, period, { force: wantsRefresh, currentPeriod: today.slice(0, 7) }).catch(
+          (): RecomputeOutcome => ({ ran: false, reason: "failed" }),
+        )
         if (recompute.ran) periods = await periodsWithData(tenantId, id, canSeeMoney)
       }
       const data = await loadStatementData(tenantId, id, period, { includeMoney: canSeeMoney })

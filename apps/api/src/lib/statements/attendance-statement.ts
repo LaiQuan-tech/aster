@@ -122,11 +122,14 @@ export function statementDayInfo(data: Pick<StatementData, "attendance" | "calen
   const isPto = !!day?.leaveSummary && /特休/.test(day.leaveSummary)
   // 原檔：週末是條件格式（蓋過儲存格底色）；國定假日／颱風假、特休日是手動底色。
   const fill = isWeekend ? FILL_WEEKEND : dayType === "fixed_holiday" ? FILL_HOLIDAY : isPto ? FILL_PTO : undefined
+  // 凍結（已核准）月份：日別以核准快照為準；行事曆名稱是目前資料，只在快照也判定為非工作日時才顯示。
+  const frozen = data.attendance?.frozen === true && !!day
+  const label = cal?.label?.trim() || null
   return {
     date,
     weekday,
     dayType,
-    label: cal?.label?.trim() || null,
+    label: frozen && dayType === "workday" ? null : label,
     day,
     active,
     fill,
@@ -336,6 +339,9 @@ export function buildAttendanceStatementGrid(data: StatementData): StatementGrid
 
   // 列 45：備註；列 47：投保薪資
   g.set(S + 1, 0, { value: `備註：${data.mealNote}`, colSpan: LAST + 1, align: "left" })
+  // 凍結月份用到目前行事曆的假日名稱 → 加註（列 46，原檔加給歷程那列，系統不產生加給歷程）。
+  if (data.attendance?.frozen && infos.some((i) => i?.label))
+    g.set(S + 2, 0, { value: "註：已核准凍結版本；假日名稱為目前行事曆資料", colSpan: LAST + 1, align: "left", size: 10 })
   if (data.salary?.laborInsuredSalary)
     g.set(S + 3, 0, {
       value: `投保薪資 ${data.salary.laborInsuredSalary.toLocaleString("en-US")}`,
