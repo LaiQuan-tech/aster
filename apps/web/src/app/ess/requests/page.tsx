@@ -48,7 +48,7 @@ import { todayKey } from "@/lib/ess-format";
 import { invalidateEssState, useEssState } from "@/lib/ess-state";
 import { DEFAULT_SHIFT, type ShiftLike } from "@/lib/leave-hours";
 import { KIND_LABEL, KIND_ORDER, approvalChainSummary, attachmentUploadWarning, isRequestKind } from "@/lib/request-forms";
-import { createThenUploadAll, withFileName } from "@/lib/upload-prep";
+import { createThenUploadAll, prepareUploadFile, withFileName } from "@/lib/upload-prep";
 import {
   RECEIPT_AUTO_CANCEL_REASON,
   expenseErrorMessage,
@@ -304,6 +304,16 @@ function RequestsView() {
       setSubmitting(true);
       setSubmitError(null);
       try {
+        // 公出單的佐證照片先跑與一般送出相同的前置檢查（壓縮＋3 MB）：任一檔不過就不建單（什麼都沒建）。
+        const preparedFiles: { original: File; upload: File }[] = [];
+        for (const file of files) {
+          try {
+            preparedFiles.push({ original: file, upload: await prepareUploadFile(file) });
+          } catch (error) {
+            setSubmitError(withFileName(file.name, describeError(error, "附件無法使用，請換一個檔案"), files.length > 1));
+            return;
+          }
+        }
         const result = await fileTripWithExpenses({
           expenses,
           createTrip: () => createRequest(body),
@@ -323,11 +333,11 @@ function RequestsView() {
         if (result.failed.length > 0) console.warn("[申請] 公出單已建立，部分報銷沒送成", result.failed);
         // 公出單的佐證照片：單已建好，逐檔上傳；失敗的不影響申請，成功畫面提示可到「我的申請」補傳。
         const failedFiles: { name: string; reason: string }[] = [];
-        for (const file of files) {
+        for (const { original, upload } of preparedFiles) {
           try {
-            await uploadAttachment(result.trip.requestId, file);
+            await uploadAttachment(result.trip.requestId, upload);
           } catch (error) {
-            failedFiles.push({ name: file.name, reason: describeError(error, "上傳失敗") });
+            failedFiles.push({ name: original.name, reason: describeError(error, "上傳失敗") });
           }
         }
         // 憑證沒傳上、撤回也失敗而留下的報銷單：報銷頁只有一格「留下的單」，空著才記（下次在報銷頁送出會先撤回它）。

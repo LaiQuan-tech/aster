@@ -39,6 +39,12 @@ export interface LateReport {
   own?: boolean;
 }
 
+/** 不能再決定的原因 → 取代按鈕的灰字（對應 API decideLateReport 擋下的兩種情況）。 */
+export const LATE_LOCKED_NOTE: Record<LateLockedReason, string> = {
+  sheet_frozen: "月表已核准或鎖定，不能再改，請洽 HR",
+  period_closed: "這個月已結算，不能再改",
+};
+
 /** 自己的遲到說明取代按鈕的灰字。 */
 export const OWN_LATE_REPORT_NOTE = "這是你自己的遲到說明，請由其他平台管理員（老闆）決定。";
 

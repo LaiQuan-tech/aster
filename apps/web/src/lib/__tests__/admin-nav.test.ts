@@ -880,7 +880,7 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
   });
 
   it("舊分頁 key receivables（2026-10-27 併入請款與放款）：存過舊 key 的會計範圍視同勾了 disbursements", () => {
-    expect(LEGACY_TAB_ALIASES).toEqual({ receivables: "disbursements", sheets: "statements", lateReports: "punches" });
+    expect(LEGACY_TAB_ALIASES).toEqual({ receivables: "disbursements", sheets: "statements" });
     // 設定頁再勾／取消時舊 key 換成新 key，不會被當成不認得的 key 丟掉
     expect(nextRoleTabs("finance", ["projects", "receivables"], "directory", true)).toEqual(["projects", "disbursements", "directory"]);
     expect(nextRoleTabs("finance", ["projects", "receivables"], "disbursements", false)).toEqual(["projects"]);
@@ -899,9 +899,10 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
     expect(tabsForSection("attendance", null, { roleNav: legacyOnly }).map((t) => t.key)).toEqual(["statements"]);
     expect(isAdminPathAllowed({ pathname: "/admin/attendance-statements?employee=e1&period=2026-10", roleNav: legacyOnly })).toBe(true);
     expect(nextRoleTabs("attendance", ["sheets"], "punches", true)).toEqual(["punches", "statements"]);
-    // 遲到說明（lateReports）併入打卡紀錄：勾過遲到說明的會計看得到打卡紀錄
+    // 遲到說明（lateReports）併入打卡紀錄：不對應成 punches（避免只給遲到說明的自訂角色被放大成整個打卡紀錄），舊 key 直接丟棄
     const lateOnly = roleNavOf("accountant", { roles: { accountant: { sections: ["attendance"], tabs: { attendance: ["lateReports"] } } } });
-    expect(tabsForSection("attendance", null, { roleNav: lateOnly }).map((t) => t.key)).toEqual(["punches"]);
+    expect(lateOnly?.tabs.attendance ?? []).not.toContain("punches");
+    expect(tabsForSection("attendance", null, { roleNav: lateOnly }).map((t) => t.key)).not.toContain("punches");
   });
 
   it("目前的 hrOnly 分頁只有系統／未核准加班（2026-11；下面的路徑與提示測試會自動涵蓋）", () => {

@@ -114,7 +114,7 @@ export function rosterOption(row: RosterRow): EmployeeOption {
 }
 
 /**
- * 篩選：部門（員工主檔的 dept_id，沒有就用月表的 deptId）、狀態（只留該狀態的月表）、只看異常
+ * 篩選：部門（以月表的 deptId 為準、無月表才用員工主檔的 dept_id；與狀態磚同口徑）、狀態（只留該狀態的月表）、只看異常
  * （error＋warn > 0，與 API anomaly=1 同一條件）、關鍵字。
  */
 export function filterRoster(
@@ -122,7 +122,7 @@ export function filterRoster(
   f: { status: SheetStatus | ""; dept: string; anomaly: boolean; query: string },
 ): RosterRow[] {
   let out = rows.filter((r) => {
-    if (f.dept && (r.deptId ?? r.sheet?.deptId ?? null) !== f.dept) return false;
+    if (f.dept && (r.sheet?.deptId ?? r.deptId ?? null) !== f.dept) return false;
     if (f.status && r.sheet?.status !== f.status) return false;
     if (f.anomaly && !hasAnomaly(r.sheet)) return false;
     return true;

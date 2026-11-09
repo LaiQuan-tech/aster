@@ -886,9 +886,10 @@ export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
  * 已合併掉的舊分頁 key → 現在承接它的分頁 key。租戶自訂的會計範圍（tenants.features.roles.accountant）
  * 存的是分頁 key，合併後舊 key 要換成新 key，不然勾過舊分頁的會計會看不到合併後的頁。
  * 2026-10-27：receivables（請款與未收款）併入 disbursements（請款與放款）。
- * 2026-11-09：sheets（出勤月表與月結）併入 statements（出勤統計表）；lateReports（遲到說明）併入 punches（打卡紀錄）。
+ * 2026-11-09：sheets（出勤月表與月結）併入 statements（出勤統計表）。
+ * lateReports（遲到說明）併入打卡紀錄，但**刻意不設別名**：打卡紀錄是整頁打卡資料，把只勾遲到說明的自訂角色放大成它會越權，舊 key 直接丟棄。
  */
-export const LEGACY_TAB_ALIASES: Readonly<Record<string, string>> = { receivables: "disbursements", sheets: "statements", lateReports: "punches" };
+export const LEGACY_TAB_ALIASES: Readonly<Record<string, string>> = { receivables: "disbursements", sheets: "statements" };
 
 const SECTION_KEY_SET: ReadonlySet<string> = new Set<string>(ADMIN_SECTIONS.map((s) => s.key));
 

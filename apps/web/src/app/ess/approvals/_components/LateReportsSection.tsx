@@ -8,7 +8,7 @@ import {
   decideLateReport,
   getLateReports,
   lateDecisionErrorMessage,
-  type LateLockedReason,
+  LATE_LOCKED_NOTE,
   type LateReport,
 } from "@/lib/late-reports-api";
 import { lateDecisionLabel, lateDecisionTone, lateReportHeadline, periodOf, sortLateReports } from "@/lib/late-reason";
@@ -22,12 +22,6 @@ import { lateDecisionLabel, lateDecisionTone, lateReportHeadline, periodOf, sort
  *     不給按鈕，改一行灰字說明——跟老闆的簽核紅點（lib/ess-badges.ts，不算這些）一致。
  * 自己的遲到說明不列在這裡；一筆都沒有就整段不顯示。沒決定視為影響全勤。
  */
-
-/** 不能再決定的原因 → 卡片上取代按鈕的灰字（對應 API decideLateReport 擋下的兩種情況）。 */
-const LOCKED_NOTE: Record<LateLockedReason, string> = {
-  sheet_frozen: "月表已核准或鎖定，不能再改，請洽 HR",
-  period_closed: "這個月已結算，不能再改",
-};
 
 export function LateReportsSection() {
   const toast = useToast();
@@ -126,7 +120,7 @@ export function LateReportsSection() {
                 </p>
                 {report.decisionNote && <p className="mt-1 text-xs text-gray-500">老闆備註：{report.decisionNote}</p>}
                 {canDecide && report.lockedReason && (
-                  <p className="mt-3 text-sm text-gray-500">{LOCKED_NOTE[report.lockedReason] ?? "不能再改"}</p>
+                  <p className="mt-3 text-sm text-gray-500">{LATE_LOCKED_NOTE[report.lockedReason] ?? "不能再改"}</p>
                 )}
                 {canDecide && !report.lockedReason && (
                   <div className="mt-3 grid grid-cols-2 gap-2">

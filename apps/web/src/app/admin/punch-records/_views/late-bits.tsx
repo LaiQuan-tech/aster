@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Button, Pill, inputCls, useToast } from "@/components/admin-ui";
 import { fmtDateTime } from "@/lib/ess-format";
 import { invalidateEssState } from "@/lib/ess-state";
-import { decideLateReport, lateDecisionErrorMessage, OWN_LATE_REPORT_NOTE, type LateReport } from "@/lib/late-reports-api";
+import { decideLateReport, lateDecisionErrorMessage, LATE_LOCKED_NOTE, OWN_LATE_REPORT_NOTE, type LateReport } from "@/lib/late-reports-api";
 import { LATE_REPORTS_CHANGED_EVENT, lateDecisionLabel, lateDecisionTone } from "@/lib/late-reason";
 
 /**
@@ -66,6 +66,7 @@ export type LateDecider = ReturnType<typeof useLateDecider>;
 /** 備註欄＋「影響全勤」「不影響全勤」；自己的遲到說明只顯示灰字。呼叫端只在 canDecide 時渲染。 */
 export function LateDecisionControls({ report, decider }: { report: LateReport; decider: LateDecider }) {
   if (report.own) return <p className="text-xs text-gray-500">{OWN_LATE_REPORT_NOTE}</p>;
+  if (report.lockedReason) return <p className="text-xs text-gray-500">{LATE_LOCKED_NOTE[report.lockedReason] ?? "不能再改"}</p>;
   const busy = decider.busyId === report.id;
   return (
     <div className="flex min-w-[14rem] flex-col gap-2">

@@ -922,19 +922,24 @@ export default function EmployeesPage() {
                     className="cursor-pointer border-b border-gray-50 align-top hover:bg-gray-50"
                     onClick={(e) => {
                       if (isInteractiveClick(e)) return;
+                      // 正在選取文字（複製姓名、Email 等）不換頁。
+                      if (typeof window !== "undefined" && (window.getSelection()?.toString() ?? "") !== "") return;
                       router.push(employeeDetailHref(employee.id));
                     }}
                   >
                       <>
                         {canManage && (
-                          <td className="py-3 pr-2">
-                            <input
-                              type="checkbox"
-                              aria-label={`勾選 ${employee.name}`}
-                              checked={selectedIds.has(employee.id)}
-                              onChange={() => setSelectedIds((cur) => toggleSelected(cur, employee.id))}
-                              className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
-                            />
+                          <td className="p-0 pr-2" onClick={(e) => e.stopPropagation()}>
+                            {/* 整格都是勾選區：點格子空白處不換頁。 */}
+                            <label className="flex cursor-pointer items-start justify-center py-3 pl-1 pr-1">
+                              <input
+                                type="checkbox"
+                                aria-label={`勾選 ${employee.name}`}
+                                checked={selectedIds.has(employee.id)}
+                                onChange={() => setSelectedIds((cur) => toggleSelected(cur, employee.id))}
+                                className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
+                              />
+                            </label>
                           </td>
                         )}
                         <td className="py-3 pr-3">

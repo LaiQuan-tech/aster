@@ -87,6 +87,11 @@ export default function AttendanceStatementsPage() {
   const [periodCloseState, setPeriodCloseState] = useState<"loading" | "ready" | "error">("loading");
   const periodCloseSeq = useRef(0);
   const sheetsSeq = useRef(0);
+  // 自動跳月份要讀「最新」的員工與篩選（loadSheets 只依 period 重抓），用 ref 同步。
+  const employeeIdRef = useRef("");
+  const filtersActiveRef = useRef(false);
+  employeeIdRef.current = employeeId;
+  filtersActiveRef.current = Boolean(status || dept || onlyAnomaly);
 
   // 1) 讀網址；舊網址 /admin/attendance-sheets/:id 轉來帶 ?sheet=:id → 用月表換成員工＋月份。
   useEffect(() => {
@@ -152,7 +157,7 @@ export default function AttendanceStatementsPage() {
     if (queryReady) void loadPeriodClose();
   }, [loadPeriodClose, queryReady]);
 
-  // 當月還沒有月表（月初、或 demo 資料在別的月份）且網址沒指定月份、沒套篩選、沒選員工：往前找最近有月表的月份（最多 12 個月）。
+  // 當月還沒有月表（月初、或 demo 資料在別的月份）且網址沒指定月份、沒套篩選（狀態／部門／異常）、沒選員工：往前找最近有月表的月份（最多 12 個月）。
   const autoJumped = useRef(false);
   const loadSheets = useCallback(async () => {
     sheetsSeq.current += 1;
@@ -161,7 +166,7 @@ export default function AttendanceStatementsPage() {
     try {
       const res = await listAttendanceSheets({ period });
       if (seq !== sheetsSeq.current) return;
-      if (res.sheets.length === 0 && !autoJumped.current && !periodFromUrl.current && !employeeId) {
+      if (res.sheets.length === 0 && !autoJumped.current && !periodFromUrl.current && !employeeIdRef.current && !filtersActiveRef.current) {
         autoJumped.current = true;
         for (let back = 1; back <= 12; back += 1) {
           const candidate = prevPeriod(period, back);
@@ -176,13 +181,12 @@ export default function AttendanceStatementsPage() {
       }
       autoJumped.current = true;
       setSheets(res.sheets);
+      setError(null);
     } catch (err) {
       if (seq === sheetsSeq.current) setError(friendlyError(err, "載入失敗"));
     } finally {
       if (seq === sheetsSeq.current) setLoading(false);
     }
-    // employeeId 只用來判斷要不要自動跳月份，不觸發重抓。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [period]);
 
   useEffect(() => {
