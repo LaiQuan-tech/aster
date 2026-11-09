@@ -304,8 +304,8 @@ describe("付款階段", () => {
 
   it("鎖定規則：已入帳不能改%/金額/入帳日，已開票不能改發票，公會代墊那格是審迄還款", () => {
     const rows = applicationStageRows(billings)
-    expect(stageLocks(rows[0])).toEqual({ milestone: false, percentage: false, amount: false, receivedOn: false, invoiceNo: false })
-    expect(stageLocks(rows[1])).toEqual({ milestone: false, percentage: true, amount: true, receivedOn: true, invoiceNo: true })
+    expect(stageLocks(rows[0])).toEqual({ milestone: false, percentage: false, amount: false, receivedOn: false, invoiceNo: false, invoicedOn: false })
+    expect(stageLocks(rows[1])).toEqual({ milestone: false, percentage: true, amount: true, receivedOn: true, invoiceNo: true, invoicedOn: true })
     expect(stageLocks(rows[rows.length - 1]).invoiceNo).toBe(true)
   })
 
@@ -337,9 +337,24 @@ describe("付款階段", () => {
 
   it("只填發票號碼／入帳日 → 不動期程，直接登記開票／入帳", () => {
     const ctx = ctxOf({ billings })
-    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { invoiceNo: " AB12345678 ", receivedOn: "2026-10-28" } } }))
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { invoiceNo: " AB12345678 ", invoicedOn: "2026-10-27", receivedOn: "2026-10-28" } } }))
     expect(plan.stages.installments).toBeNull()
-    expect(plan.stages.invoices).toEqual([{ key: "b1", label: "第 1 列", invoiceNo: "AB12345678" }])
+    expect(plan.stages.invoices).toEqual([{ key: "b1", label: "第 1 列", invoiceNo: "AB12345678", invoicedOn: "2026-10-27" }])
+    expect(plan.dirtyCount).toBe(2)
+  })
+
+  it("發票日期格式錯擋存；只填發票日期沒號碼不擋也不送", () => {
+    const ctx = ctxOf({ billings })
+    const bad = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { invoiceNo: "AB1", invoicedOn: "2026/10/27" } } }))
+    expect(bad.errors.join()).toContain("發票日期格式不對")
+    const lone = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { invoicedOn: "2026-10-27" } } }))
+    expect(lone.errors).toEqual([])
+    expect(lone.stages.invoices).toEqual([])
+  })
+
+  it("開票日期與入帳日同送", () => {
+    const ctx = ctxOf({ billings })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { invoiceNo: " AB12345678 ", invoicedOn: "2026-10-27", receivedOn: "2026-10-28" } } }))
     expect(plan.stages.receipts).toEqual([{ key: "b1", label: "第 1 列", receivedOn: "2026-10-28" }])
     expect(plan.dirtyCount).toBe(2)
   })

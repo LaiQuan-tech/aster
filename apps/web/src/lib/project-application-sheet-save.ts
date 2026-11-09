@@ -190,6 +190,7 @@ interface StageBase {
   amount: string;
   receivedOn: string;
   invoiceNo: string;
+  invoicedOn: string;
 }
 
 export function stageBaseValues(row: ApplicationStageRow): StageBase {
@@ -199,6 +200,7 @@ export function stageBaseValues(row: ApplicationStageRow): StageBase {
     amount: row.amount != null ? String(row.amount) : "",
     receivedOn: row.receivedOn ?? "",
     invoiceNo: row.invoiceNo ?? "",
+    invoicedOn: row.invoicedOn ?? "",
   };
 }
 
@@ -215,6 +217,8 @@ export function stageLocks(row: ApplicationStageRow) {
     receivedOn: received,
     /** 已開票的要先撤銷開票（要理由）；公會代墊列那格在 Word 上是「審迄還款」。 */
     invoiceNo: !!row.invoiceNo || row.kind === "guild_advance",
+    /** 發票日期跟著開票走：已開票的要先撤銷開票；公會代墊列沒有發票。 */
+    invoicedOn: !!row.invoiceNo || !!row.invoicedOn || row.kind === "guild_advance",
   };
 }
 
@@ -223,7 +227,7 @@ export interface StagePlan {
   installments: InstallmentInputExt[] | null;
   /** 新增的期別：草稿 key → 期別編號（存完用編號找回新 id）。 */
   created: Array<{ key: string; installmentNo: number; label: string }>;
-  invoices: Array<{ key: string; label: string; invoiceNo: string }>;
+  invoices: Array<{ key: string; label: string; invoiceNo: string; invoicedOn: string }>;
   receipts: Array<{ key: string; label: string; receivedOn: string }>;
   /** 改了金額、要使用者填人工指定理由的列（沒有既有理由可沿用）。 */
   needsReason: Array<{ key: string; label: string }>;
@@ -286,7 +290,9 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     }
     const receivedOn = !locks.receivedOn && edit.receivedOn !== undefined ? trimmed(edit.receivedOn) : "";
     const invoiceNo = !locks.invoiceNo && edit.invoiceNo !== undefined ? trimmed(edit.invoiceNo) : "";
+    const invoicedOn = !locks.invoicedOn && edit.invoicedOn !== undefined ? trimmed(edit.invoicedOn) : "";
     if (receivedOn && !dateRe.test(receivedOn)) out.errors.push(`付款階段${label}的入帳日期格式不對。`);
+    if (invoicedOn && !dateRe.test(invoicedOn)) out.errors.push(`付款階段${label}的發票日期格式不對。`);
     if (invoiceNo.length > 40) out.errors.push(`付款階段${label}的發票號碼最多 40 字。`);
 
     const rowScheduleChanges = (milestoneChanged ? 1 : 0) + (percentage !== undefined ? 1 : 0) + (amount !== undefined ? 1 : 0);
@@ -312,7 +318,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     if (row.id) {
       if (rowScheduleChanges === 0) {
         if (receivedOn && dateRe.test(receivedOn)) out.receipts.push({ key, label, receivedOn });
-        if (invoiceNo) out.invoices.push({ key, label, invoiceNo });
+        if (invoiceNo) out.invoices.push({ key, label, invoiceNo, invoicedOn: dateRe.test(invoicedOn) ? invoicedOn : "" });
         continue;
       }
       const target = payload.find((p) => p.id === row.id);
@@ -343,7 +349,7 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
       out.created.push({ key, installmentNo, label });
     }
     if (receivedOn && dateRe.test(receivedOn)) out.receipts.push({ key, label, receivedOn });
-    if (invoiceNo) out.invoices.push({ key, label, invoiceNo });
+    if (invoiceNo) out.invoices.push({ key, label, invoiceNo, invoicedOn: dateRe.test(invoicedOn) ? invoicedOn : "" });
   }
   if (scheduleChanged) out.installments = payload;
   return out;
@@ -526,7 +532,7 @@ export interface SheetSaveApi {
   updateContract(id: string, body: { amount: number | null }): Promise<unknown>;
   createQuotation(body: { amount: number | null }): Promise<unknown>;
   saveBillingSchedule(installments: InstallmentInputExt[]): Promise<{ installments: Array<{ id: string; installmentNo: number }> }>;
-  invoiceBilling(id: string, invoiceNo: string): Promise<unknown>;
+  invoiceBilling(id: string, invoiceNo: string, invoicedOn?: string): Promise<unknown>;
   receiveBilling(id: string, receivedOn: string): Promise<unknown>;
   putSubcontracts(subcontracts: Subcontract[]): Promise<unknown>;
   /**
@@ -668,7 +674,7 @@ export async function runApplicationSheetSave(
       steps.push({ section: "invoice", label, status: "skipped", message: "銷售金額沒存成，這格未送出（避免用舊金額登記）。" });
       continue;
     }
-    if (await attempt("invoice", label, () => api.invoiceBilling(id, inv.invoiceNo).then(() => undefined))) dropStageField(inv.key, "invoiceNo");
+    if (await attempt("invoice", label, () => api.invoiceBilling(id, inv.invoiceNo, inv.invoicedOn || undefined).then(() => undefined))) { dropStageField(inv.key, "invoiceNo"); dropStageField(inv.key, "invoicedOn"); }
   }
   for (const rc of stages.receipts) {
     const label = `付款階段${rc.label}入帳日期`;

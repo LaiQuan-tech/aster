@@ -121,8 +121,8 @@ export const APPLICATION_SHEET_TOP_ROWS: readonly (readonly SheetCell[])[] = [
   ],
 ];
 
-/** 付款階段每一列的跨欄：期別名稱｜%｜金額｜已於…入賬｜發票號碼:｜號碼與日期。 */
-export const APPLICATION_STAGE_SPANS = [2, 1, 2, 5, 2, 4] as const;
+/** 付款階段每一列的跨欄：期別名稱｜%｜金額｜發票號碼:｜號碼｜發票日期:｜日期｜已於…入帳（最右）。公會代墊列：審迄還款:｜說明（吃掉號碼＋發票日期三格）｜入帳。 */
+export const APPLICATION_STAGE_SPANS = [2, 1, 2, 1, 2, 1, 3, 4] as const;
 
 /** 發包單位區塊每一列的跨欄：標題｜單位一｜單位二｜單位三｜右側小計標題｜右側小計值。 */
 export const APPLICATION_SUBCONTRACT_SPANS = [1, 3, 3, 4, 3, 2] as const;
@@ -244,6 +244,8 @@ export interface StageEdit {
   overrideReason?: string;
   receivedOn?: string;
   invoiceNo?: string;
+  /** 發票日期（YYYY-MM-DD）；沒填＝登記開票當天（後端預設）。 */
+  invoicedOn?: string;
 }
 
 /** 發包單位一欄可直接改的格子。 */

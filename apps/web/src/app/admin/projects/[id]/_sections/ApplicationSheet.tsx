@@ -317,7 +317,7 @@ export function ApplicationSheet({
     updateContract: (id, body) => updateContract(id, body),
     createQuotation: (body) => createContract(project.id, { docType: "quotation", title: "報價單", amount: body.amount }),
     saveBillingSchedule: (installments) => saveBillingSchedule(project.id, installments),
-    invoiceBilling: (id, invoiceNo) => invoiceBilling(id, { invoiceNo }),
+    invoiceBilling: (id, invoiceNo, invoicedOn) => invoiceBilling(id, invoicedOn ? { invoiceNo, invoicedOn } : { invoiceNo }),
     receiveBilling: (id, receivedOn) => receiveBilling(id, { receivedOn }),
     putSubcontracts: (list) => putProjectSubcontracts(project.id, { subcontracts: list }),
     fetchBillings: async () => (await getBillingSchedule(project.id)).installments,
@@ -708,21 +708,10 @@ export function ApplicationSheet({
           <span title={editable && locks.amount ? "已請款／已入帳，金額凍結" : undefined}>{s.amount != null ? fmtMoney(s.amount) : ""}</span>
         )}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-3`} col={stageCols[3]} span={APPLICATION_STAGE_SPANS[3]} row={r} kind="value" editable={editable && !locks.receivedOn}>
-        {editable && !locks.receivedOn ? (
-          <span className="flex w-full items-center gap-1 whitespace-nowrap">
-            已於
-            <input aria-label={`${rowLabel}入帳日期`} className={`${cellInput} px-0.5`} type="date" value={val("receivedOn")} onChange={(e) => setStage(key, "receivedOn", e.target.value)} />
-            入賬
-          </span>
-        ) : (
-          <span className="whitespace-pre" title={editable && locks.receivedOn ? "已入帳；撤銷請到下方「分期請款期程」" : undefined}>已於 {s.receivedOn ? rocDots(s.receivedOn) : "         "} 入賬</span>
-        )}
-      </Cell>,
-      <Cell key={`stage-${s.no}-4`} col={stageCols[4]} span={APPLICATION_STAGE_SPANS[4]} row={r} kind="label" shade align="center">
+      <Cell key={`stage-${s.no}-3`} col={stageCols[3]} span={APPLICATION_STAGE_SPANS[3]} row={r} kind="label" shade align="center">
         {guild ? "審迄還款:" : "發票號碼:"}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-5`} col={stageCols[5]} span={APPLICATION_STAGE_SPANS[5]} row={r} kind="value" editable={editable && (guild || !locks.invoiceNo)}>
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-4`} col={stageCols[4]} span={guild ? APPLICATION_STAGE_SPANS[4] + APPLICATION_STAGE_SPANS[5] + APPLICATION_STAGE_SPANS[6] : APPLICATION_STAGE_SPANS[4]} row={r} kind="value" editable={editable && (guild || !locks.invoiceNo)}>
         {guild
           ? editable ? (
               <input
@@ -735,10 +724,35 @@ export function ApplicationSheet({
               />
             ) : draft.guildRepaymentNote
           : editable && !locks.invoiceNo ? (
-              <input aria-label={`${rowLabel}發票號碼`} title="儲存時登記開票（開票日＝今天，可到下方卡片撤銷重開）" className={cellInput} maxLength={40} placeholder="發票號碼" value={val("invoiceNo")} onChange={(e) => setStage(key, "invoiceNo", e.target.value)} />
+              <input aria-label={`${rowLabel}發票號碼`} title="儲存時登記開票（發票日期未填＝今天，可到下方卡片撤銷重開）" className={cellInput} maxLength={40} placeholder="發票號碼" value={val("invoiceNo")} onChange={(e) => setStage(key, "invoiceNo", e.target.value)} />
             ) : (
-              <span title={editable ? "已開票；撤銷請到下方「分期請款期程」" : undefined}>{[s.invoiceNo, rocDots(s.invoicedOn)].filter(Boolean).join(" ")}</span>
+              <span title={editable ? "已開票；撤銷請到下方「分期請款期程」" : undefined}>{s.invoiceNo ?? ""}</span>
             )}
+      </Cell>,
+      ...(guild
+        ? []
+        : [
+            <Cell key={`stage-${s.no}-5`} col={stageCols[5]} span={APPLICATION_STAGE_SPANS[5]} row={r} kind="label" shade align="center">
+              發票日期:
+            </Cell>,
+            <Cell className={blankCls("payment")} key={`stage-${s.no}-6`} col={stageCols[6]} span={APPLICATION_STAGE_SPANS[6]} row={r} kind="value" editable={editable && !locks.invoicedOn}>
+              {editable && !locks.invoicedOn ? (
+                <input aria-label={`${rowLabel}發票日期`} title="未填＝登記開票當天" className={`${cellInput} px-0.5`} type="date" value={val("invoicedOn")} onChange={(e) => setStage(key, "invoicedOn", e.target.value)} />
+              ) : (
+                <span title={editable ? "已開票；撤銷請到下方「分期請款期程」" : undefined}>{s.invoicedOn ? rocDots(s.invoicedOn) : ""}</span>
+              )}
+            </Cell>,
+          ]),
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-7`} col={stageCols[7]} span={APPLICATION_STAGE_SPANS[7]} row={r} kind="value" editable={editable && !locks.receivedOn}>
+        {editable && !locks.receivedOn ? (
+          <span className="flex w-full items-center gap-1 whitespace-nowrap">
+            已於
+            <input aria-label={`${rowLabel}入帳日期`} className={`${cellInput} px-0.5`} type="date" value={val("receivedOn")} onChange={(e) => setStage(key, "receivedOn", e.target.value)} />
+            入帳
+          </span>
+        ) : (
+          <span className="whitespace-pre" title={editable && locks.receivedOn ? "已入帳；撤銷請到下方「分期請款期程」" : undefined}>已於 {s.receivedOn ? rocDots(s.receivedOn) : "         "} 入帳</span>
+        )}
       </Cell>,
     );
   }
