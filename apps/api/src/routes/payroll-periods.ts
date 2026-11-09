@@ -8,7 +8,7 @@ import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { localDateKey } from "../lib/tz.js"
 import { SheetError } from "../services/attendance-sheets.js"
 import { PeriodCloseError, closePeriod, listPeriodCloses, reopenPeriod } from "../services/backup-snapshot.js"
-import { buildPeriodRows, evaluatePeriodChecklist, recentPeriods } from "../services/payroll-period.js"
+import { buildPeriodRows, evaluatePeriodChecklist, evaluatePeriodEmployees, recentPeriods } from "../services/payroll-period.js"
 import { PERIOD_RE, canReopenPeriod, getPeriodLockState, loadPeriodUnlockPolicy } from "../services/period-lock.js"
 
 /**
@@ -19,6 +19,7 @@ import { PERIOD_RE, canReopenPeriod, getPeriodLockState, loadPeriodUnlockPolicy 
  *                                          canClose（HR）、canReopen（老闆、老闆指定的人或 platform_admin）給前端決定顯示哪顆按鈕。
  *                                          HR 或可解鎖的人才看得到，其他人 403。
  *   GET  /payroll-periods/:period/checklist  HR：「完成本月發薪」前的檢查清單（四項各自完成數／應完成數、未完成清單、warnings）。
+ *   GET  /payroll-periods/:period/employees  HR：月結發薪頁的逐人列表（誰卡在哪一項；ready 與 checklist 同一判定）。
  *   POST /payroll-periods/:period/close      HR：四項全過才鎖（沒有強制略過）。未全過 → 409 `checklist_incomplete` 附整份清單；
  *                                          已鎖 → 409 `already_closed`。鎖定時把 approved 的月表轉 locked、寫 period_closes。
  *   POST /payroll-periods/:period/reopen     **只有老闆（features.approval.fallbackApproverEmpId）與老闆指定的人
@@ -126,6 +127,31 @@ payrollPeriodsRouter.get(
     try {
       const [status, checklist] = await Promise.all([getPeriodLockState(tenantId, period), evaluatePeriodChecklist(tenantId, period)])
       res.status(200).json({ period, status, checklist })
+    } catch (err) {
+      sendPeriodError(res, err, next)
+    }
+  },
+)
+
+/**
+ * GET /payroll-periods/:period/employees（2026-11-09「月結發薪」頁）：HR 看當月每位員工還有什麼沒就緒。唯讀。
+ * 每人：月表狀態、待簽核申請（依 kind，排除公務車預約）、未核銷假單、未決定遲到說明、未月結報銷、未核銷預支（參考）、
+ * 薪資單（none／draft／finalized＋過期旗標＋寄送時間＋實發）、blockers／reminders／ready。
+ * ready 與 checklist 同一組判定（services/payroll-period.ts collectChecklist）：全部人 ready ⇔ checklist.ready。
+ * 權限同 checklist（requireHrAdmin）。
+ */
+payrollPeriodsRouter.get(
+  "/payroll-periods/:period/employees",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const period = periodOf(req, res)
+    if (!period) return
+    try {
+      const [status, result] = await Promise.all([getPeriodLockState(tenantId, period), evaluatePeriodEmployees(tenantId, period)])
+      res.status(200).json({ ...result, status })
     } catch (err) {
       sendPeriodError(res, err, next)
     }

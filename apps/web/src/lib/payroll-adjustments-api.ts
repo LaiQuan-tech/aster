@@ -376,6 +376,6 @@ export function adjustmentErrorMessage(err: unknown, fallback = "儲存失敗"):
 export function payslipStateNote(state: PayslipAdjustState | null | undefined, period: string): { tone: "warn" | "locked"; text: string } | null {
   if (!state) return null;
   if (state.status === "finalized") return { tone: "locked", text: `${period} 的薪資單已定稿，不能再改加減項；如需更正請加在下個月的薪資` };
-  if (state.stale) return { tone: "warn", text: "草稿薪資單還沒跟上這些加減項：請到下方「執行薪資/獎金作業」重新執行這個月的薪資，否則無法定稿" };
+  if (state.stale) return { tone: "warn", text: "草稿薪資單還沒跟上這些加減項：請按「重算此人」或上方「執行薪資（全部）」重新執行這個月的薪資，否則無法定稿" };
   return null;
 }

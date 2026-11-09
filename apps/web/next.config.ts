@@ -32,6 +32,11 @@ const ADMIN_REDIRECTS = [
   { source: "/admin/attendance-sheets", destination: "/admin/attendance-statements" },
   { source: "/admin/attendance-sheets/:id", destination: "/admin/attendance-statements?sheet=:id" },
   { source: "/admin/late-reports", destination: "/admin/punch-records?view=late" },
+  { source: "/admin/payslips", destination: "/admin/payroll" },
+  { source: "/admin/payroll-tax", destination: "/admin/expenses?section=tax" },
+  { source: "/admin/festival-bonuses", destination: "/admin/expenses?section=festival" },
+  { source: "/admin/overtime-settlements", destination: "/admin/expenses?section=overtime" },
+  { source: "/admin/advances", destination: "/admin/expenses?section=advances" },
 ];
 
 const nextConfig: NextConfig = {

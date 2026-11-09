@@ -17,8 +17,9 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { formatLeaveDuration } from "../lib/leave-duration.js"
 import { getTenantTimezone } from "../lib/tenant-tz.js"
 import { dayWindowUtc, localDateKey, monthRangeKeys } from "../lib/tz.js"
-import { isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
+import { columnsExist, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { loadDailyRegularHours } from "./daily-regular-hours.js"
+import { staleDraftPayslipsSafe } from "./fixed-allowances.js"
 import { shiftPeriod } from "./period-lock.js"
 
 export type ChecklistKey = "sheets" | "leave_settlement" | "expense_settlement" | "payslips"
@@ -93,6 +94,13 @@ function byName(a: ChecklistPendingEntry, b: ChecklistPendingEntry): number {
   return a.employeeName.localeCompare(b.employeeName, "zh-Hant") || a.detail.localeCompare(b.detail, "zh-Hant")
 }
 
+/** 一項檢查的原始結果（未排序、未截斷）。 */
+export interface Collected {
+  total: number
+  done: number
+  pending: ChecklistPendingEntry[]
+}
+
 function finishItem(key: ChecklistKey, total: number, done: number, pendingAll: ChecklistPendingEntry[]): ChecklistItem {
   const sorted = [...pendingAll].sort(byName)
   return {
@@ -142,6 +150,12 @@ export interface SheetLite {
  * （例如離職日在月初前才補的表）也要核准才算過。
  */
 export function summariseSheets(employed: readonly EmployeeLite[], sheets: readonly SheetLite[], names: ReadonlyMap<string, string>): ChecklistItem {
+  const c = collectSheets(employed, sheets, names)
+  return finishItem("sheets", c.total, c.done, c.pending)
+}
+
+/** 判定本體（不截斷未完成清單）；summariseSheets 與逐人列表（buildPeriodEmployeeRows）共用。 */
+export function collectSheets(employed: readonly EmployeeLite[], sheets: readonly SheetLite[], names: ReadonlyMap<string, string>): Collected {
   const sheetByEmp = new Map(sheets.map((s) => [s.employee_id, s]))
   const employedIds = new Set(employed.map((e) => e.id))
   const ready = (s: SheetLite) => s.status === "approved" || s.status === "locked"
@@ -178,7 +192,7 @@ export function summariseSheets(employed: readonly EmployeeLite[], sheets: reado
       detail: SHEET_PENDING_LABEL[s.status] ?? `月表狀態：${s.status}`,
     })
   }
-  return finishItem("sheets", employed.length + extra, done, pending)
+  return { total: employed.length + extra, done, pending }
 }
 
 export interface LeaveLite {
@@ -205,6 +219,17 @@ export function summariseLeaveSettlement(
   tz: string,
   hoursPerDay?: number,
 ): ChecklistItem {
+  const c = collectLeaveSettlement(rows, names, leaveTypeNames, tz, hoursPerDay)
+  return finishItem("leave_settlement", c.total, c.done, c.pending)
+}
+
+export function collectLeaveSettlement(
+  rows: readonly LeaveLite[],
+  names: ReadonlyMap<string, string>,
+  leaveTypeNames: ReadonlyMap<string, string>,
+  tz: string,
+  hoursPerDay?: number,
+): Collected {
   const pending: ChecklistPendingEntry[] = []
   let done = 0
   for (const r of rows) {
@@ -225,7 +250,7 @@ export function summariseLeaveSettlement(
       detail: `${typeName} ${start === end ? start : `${start}～${end}`}${hours}尚未核銷`,
     })
   }
-  return finishItem("leave_settlement", rows.length, done, pending)
+  return { total: rows.length, done, pending }
 }
 
 export interface ClaimLite {
@@ -240,6 +265,11 @@ export interface ClaimLite {
  * 沒有任何報銷單（0／0）視為通過。未月結的依員工合併成一列（幾筆、合計多少）。
  */
 export function summariseExpenseSettlement(claims: readonly ClaimLite[], names: ReadonlyMap<string, string>): ChecklistItem {
+  const c = collectExpenseSettlement(claims, names)
+  return finishItem("expense_settlement", c.total, c.done, c.pending)
+}
+
+export function collectExpenseSettlement(claims: readonly ClaimLite[], names: ReadonlyMap<string, string>): Collected {
   const counted = claims.filter((c) => c.status === "submitted" || c.status === "settled")
   const submitted = counted.filter((c) => c.status === "submitted")
   const byEmp = new Map<string, { count: number; total: number }>()
@@ -256,7 +286,7 @@ export function summariseExpenseSettlement(claims: readonly ClaimLite[], names: 
     status: "submitted",
     detail: `${v.count} 筆報銷尚未月結（合計 ${v.total.toLocaleString("zh-TW")} 元）`,
   }))
-  return finishItem("expense_settlement", counted.length, counted.length - submitted.length, pending)
+  return { total: counted.length, done: counted.length - submitted.length, pending }
 }
 
 export interface PayslipLite {
@@ -276,6 +306,16 @@ export function summarisePayslips(
   payslips: readonly PayslipLite[],
   names: ReadonlyMap<string, string>,
 ): ChecklistItem {
+  const c = collectPayslips(employed, withSalaryStructure, payslips, names)
+  return finishItem("payslips", c.total, c.done, c.pending)
+}
+
+export function collectPayslips(
+  employed: readonly EmployeeLite[],
+  withSalaryStructure: ReadonlySet<string>,
+  payslips: readonly PayslipLite[],
+  names: ReadonlyMap<string, string>,
+): Collected {
   const scope = employed.filter((e) => withSalaryStructure.has(e.id))
   const slipByEmp = new Map(payslips.map((p) => [p.employee_id, p]))
   const pending: ChecklistPendingEntry[] = []
@@ -294,7 +334,7 @@ export function summarisePayslips(
       detail: slip ? "薪資單還是草稿，尚未定稿" : "尚未產生薪資單（請先執行薪資作業）",
     })
   }
-  return finishItem("payslips", scope.length, done, pending)
+  return { total: scope.length, done, pending }
 }
 
 export function pendingRequestsWarning(count: number): ChecklistWarning | null {
@@ -417,10 +457,34 @@ export async function loadEmployeesLite(tenantId: string): Promise<EmployeeLite[
   return (res.data ?? []) as EmployeeLite[]
 }
 
+/** 檢查清單四項需要的原始資料（evaluatePeriodChecklist 與逐人列表共用同一份查詢）。 */
+export interface PeriodChecklistData {
+  tz: string
+  hoursPerDay: number
+  employees: EmployeeLite[]
+  names: Map<string, string>
+  employed: EmployeeLite[]
+  sheets: SheetLite[]
+  leaves: LeaveLite[]
+  leaveTypeNames: Map<string, string>
+  claims: ClaimLite[]
+  withSalary: Set<string>
+  payslips: PayslipLite[]
+  /** 碰到這個月的待簽核申請（排除公務車預約）。 */
+  pendingRequests: PendingRequestLite[]
+}
+
+export interface PendingRequestLite {
+  id: string
+  employee_id: string
+  kind: string
+}
+
 /**
- * 算某月的檢查清單。四項各自獨立查、再合成；任何一項查詢失敗就整個丟錯（不回「看起來全過」的假清單）。
+ * 撈某月檢查清單要用的全部資料：每張表一次查詢（Promise.all 並行、全部 tenant 過濾），不逐人查。
+ * 任何一項查詢失敗就整個丟錯（不回「看起來全過」的假清單）。
  */
-export async function evaluatePeriodChecklist(tenantId: string, period: string): Promise<PeriodChecklist> {
+export async function loadPeriodChecklistData(tenantId: string, period: string): Promise<PeriodChecklistData> {
   const tz = await getTenantTimezone(tenantId)
   const { from, to } = monthRangeKeys(period)
   const rangeStart = dayWindowUtc(from, tz).startIso
@@ -449,7 +513,7 @@ export async function evaluatePeriodChecklist(tenantId: string, period: string):
     supabaseAdmin.from("payslips").select("id, employee_id, status").eq("tenant_id", tenantId).eq("period", period),
     supabaseAdmin
       .from("leave_requests")
-      .select("id")
+      .select("id, employee_id, kind")
       .eq("tenant_id", tenantId)
       .eq("status", "pending")
       // 公務車預約（2026-11-05）與發薪無關，簽核中也不該擋關帳。
@@ -459,22 +523,261 @@ export async function evaluatePeriodChecklist(tenantId: string, period: string):
       .gt("end_at", rangeStart),
   ])
 
-  const sheets = rowsOrThrow<SheetLite>("attendance_sheets", sheetRes)
-  const leaves = rowsOrThrow<LeaveLite>("leave_requests", leaveRes)
-  const leaveTypeNames = new Map(rowsOrThrow<{ id: string; name: string }>("leave_types", leaveTypeRes).map((t) => [t.id, t.name]))
-  const claims = rowsOrThrow<ClaimLite>("expense_claims", claimRes)
-  const withSalary = new Set(rowsOrThrow<{ employee_id: string }>("salary_structures", salaryRes).map((r) => r.employee_id))
-  const payslips = rowsOrThrow<PayslipLite>("payslips", slipRes)
-  const pendingCount = rowsOrThrow<{ id: string }>("leave_requests (pending)", pendingRes).length
+  return {
+    tz,
+    hoursPerDay,
+    employees,
+    names,
+    employed,
+    sheets: rowsOrThrow<SheetLite>("attendance_sheets", sheetRes),
+    leaves: rowsOrThrow<LeaveLite>("leave_requests", leaveRes),
+    leaveTypeNames: new Map(rowsOrThrow<{ id: string; name: string }>("leave_types", leaveTypeRes).map((t) => [t.id, t.name])),
+    claims: rowsOrThrow<ClaimLite>("expense_claims", claimRes),
+    withSalary: new Set(rowsOrThrow<{ employee_id: string }>("salary_structures", salaryRes).map((r) => r.employee_id)),
+    payslips: rowsOrThrow<PayslipLite>("payslips", slipRes),
+    pendingRequests: rowsOrThrow<PendingRequestLite>("leave_requests (pending)", pendingRes),
+  }
+}
 
-  const items = [
-    summariseSheets(employed, sheets, names),
-    summariseLeaveSettlement(leaves, names, leaveTypeNames, tz, hoursPerDay),
-    summariseExpenseSettlement(claims, names),
-    summarisePayslips(employed, withSalary, payslips, names),
+/** 四項的原始結果（未截斷），順序固定：sheets、leave_settlement、expense_settlement、payslips。 */
+export function collectChecklist(d: PeriodChecklistData): Array<{ key: ChecklistKey } & Collected> {
+  return [
+    { key: "sheets", ...collectSheets(d.employed, d.sheets, d.names) },
+    { key: "leave_settlement", ...collectLeaveSettlement(d.leaves, d.names, d.leaveTypeNames, d.tz, d.hoursPerDay) },
+    { key: "expense_settlement", ...collectExpenseSettlement(d.claims, d.names) },
+    { key: "payslips", ...collectPayslips(d.employed, d.withSalary, d.payslips, d.names) },
   ]
-  const warning = pendingRequestsWarning(pendingCount)
+}
+
+/** 資料 → 檢查清單（純函式）。 */
+export function checklistFromData(period: string, d: PeriodChecklistData): PeriodChecklist {
+  const items = collectChecklist(d).map((c) => finishItem(c.key, c.total, c.done, c.pending))
+  const warning = pendingRequestsWarning(d.pendingRequests.length)
   return buildChecklist(period, items, warning ? [warning] : [])
+}
+
+/**
+ * 算某月的檢查清單。四項各自獨立查、再合成；任何一項查詢失敗就整個丟錯（不回「看起來全過」的假清單）。
+ */
+export async function evaluatePeriodChecklist(tenantId: string, period: string): Promise<PeriodChecklist> {
+  return checklistFromData(period, await loadPeriodChecklistData(tenantId, period))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 月結發薪頁的逐人列表（2026-11-09「薪資資料與執行」＋「薪資單」合併成「月結發薪」）
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type PayslipRowStatus = "none" | "draft" | "finalized"
+export type PayslipStaleReason = "fixed_allowances" | "pension_settings"
+
+export interface PeriodEmployeeRow {
+  employeeId: string
+  employeeName: string
+  empNo: string | null
+  /** 員工主檔狀態（active／terminated…）。 */
+  status: string
+  /** 該月在職（與檢查清單同一判準）；false＝離職但該月仍有資料。 */
+  employedInPeriod: boolean
+  /** 出勤月表：missing＝應有但還沒產生；null＝不需要（不在職且沒有月表）。 */
+  sheet: { id: string | null; status: string; ready: boolean } | null
+  /** 碰到這個月的待簽核申請（排除公務車預約），依 kind 分。提醒、不擋鎖定。 */
+  pendingRequests: { total: number; byKind: Record<string, number> }
+  /** 已核准、期間碰到這個月、尚未核銷的假單數（擋鎖定）。 */
+  unsettledLeaves: number
+  /** 這個月還沒決定的遲到說明數（提醒、不擋鎖定）。 */
+  undecidedLateReports: number
+  /** 歸屬這個月、還是 submitted（未月結）的報銷（擋鎖定）。 */
+  submittedExpenses: { count: number; amount: number }
+  /** 尚未核銷的預支（requested／paid；參考用，不擋鎖定）。 */
+  openAdvances: number
+  payslip: {
+    id: string | null
+    status: PayslipRowStatus
+    /** 這個人在檢查清單的薪資單範圍內（在職且有薪資結構）。 */
+    required: boolean
+    /** 草稿內嵌的固定津貼／勞退設定跟現在不一致（要重新執行才能定案）。 */
+    stale: PayslipStaleReason[]
+    sentAt: string | null
+    net: number | null
+  }
+  /** 擋住鎖定的項目（與 closePeriod 的檢查清單一致）。 */
+  blockers: ChecklistKey[]
+  /** 提醒（不擋）：pending_requests／late_reports。 */
+  reminders: Array<"pending_requests" | "late_reports">
+  /** blockers 為空＝這個人就緒。 */
+  ready: boolean
+}
+
+export interface PeriodEmployeesExtra {
+  empNos: ReadonlyMap<string, string | null>
+  undecidedLate: ReadonlyMap<string, number>
+  openAdvances: ReadonlyMap<string, number>
+  payslipInfo: ReadonlyMap<string, { stale: PayslipStaleReason[]; sentAt: string | null; net: number | null }>
+}
+
+function countBy<T>(rows: readonly T[], key: (r: T) => string): Map<string, number> {
+  const out = new Map<string, number>()
+  for (const r of rows) out.set(key(r), (out.get(key(r)) ?? 0) + 1)
+  return out
+}
+
+/**
+ * 逐人列表（純函式）：「就緒」＝這個人不在檢查清單四項任何一項的未完成清單裡——用的是同一組 collect*，
+ * 所以「全部人都就緒」⇔ 檢查清單 ready（＝closePeriod 放行）。待簽核申請與遲到說明只列提醒，與 closePeriod 一致。
+ * 列出：該月在職的人，加上不在職但該月有月表／假單／報銷／薪資單的人。依工號、姓名排序。
+ */
+export function buildPeriodEmployeeRows(d: PeriodChecklistData, extra: PeriodEmployeesExtra): PeriodEmployeeRow[] {
+  const collected = collectChecklist(d)
+  const blockersByEmp = new Map<string, Set<ChecklistKey>>()
+  for (const c of collected) {
+    for (const p of c.pending) {
+      if (!p.employeeId) continue
+      const set = blockersByEmp.get(p.employeeId) ?? new Set<ChecklistKey>()
+      set.add(c.key)
+      blockersByEmp.set(p.employeeId, set)
+    }
+  }
+  const employedIds = new Set(d.employed.map((e) => e.id))
+  const sheetByEmp = new Map(d.sheets.map((s) => [s.employee_id, s]))
+  const slipByEmp = new Map(d.payslips.map((p) => [p.employee_id, p]))
+  const unsettled = countBy(
+    d.leaves.filter((l) => l.settled_at == null),
+    (l) => l.employee_id,
+  )
+  const submitted = new Map<string, { count: number; amount: number }>()
+  for (const c of d.claims) {
+    if (c.status !== "submitted") continue
+    const cur = submitted.get(c.employee_id) ?? { count: 0, amount: 0 }
+    cur.count += 1
+    cur.amount += Number(c.amount) || 0
+    submitted.set(c.employee_id, cur)
+  }
+  const pendingByEmp = new Map<string, Record<string, number>>()
+  for (const r of d.pendingRequests) {
+    const cur = pendingByEmp.get(r.employee_id) ?? {}
+    cur[r.kind] = (cur[r.kind] ?? 0) + 1
+    pendingByEmp.set(r.employee_id, cur)
+  }
+
+  const ids = new Set<string>(employedIds)
+  for (const s of d.sheets) ids.add(s.employee_id)
+  for (const l of d.leaves) ids.add(l.employee_id)
+  for (const c of d.claims) if (c.status === "submitted" || c.status === "settled") ids.add(c.employee_id)
+  for (const p of d.payslips) ids.add(p.employee_id)
+  const empById = new Map(d.employees.map((e) => [e.id, e]))
+
+  const rows: PeriodEmployeeRow[] = []
+  for (const id of ids) {
+    const emp = empById.get(id)
+    const employedInPeriod = employedIds.has(id)
+    const sheet = sheetByEmp.get(id)
+    const slip = slipByEmp.get(id)
+    const byKind = pendingByEmp.get(id) ?? {}
+    const pendingTotal = Object.values(byKind).reduce((a, b) => a + b, 0)
+    const late = extra.undecidedLate.get(id) ?? 0
+    const info = extra.payslipInfo.get(id)
+    const blockers = collected.map((c) => c.key).filter((k) => blockersByEmp.get(id)?.has(k) === true)
+    const reminders: PeriodEmployeeRow["reminders"] = []
+    if (pendingTotal > 0) reminders.push("pending_requests")
+    if (late > 0) reminders.push("late_reports")
+    rows.push({
+      employeeId: id,
+      employeeName: d.names.get(id) || id.slice(0, 8),
+      empNo: extra.empNos.get(id) ?? null,
+      status: emp?.status ?? "unknown",
+      employedInPeriod,
+      sheet: sheet
+        ? { id: sheet.id, status: sheet.status, ready: sheet.status === "approved" || sheet.status === "locked" }
+        : employedInPeriod
+          ? { id: null, status: "missing", ready: false }
+          : null,
+      pendingRequests: { total: pendingTotal, byKind },
+      unsettledLeaves: unsettled.get(id) ?? 0,
+      undecidedLateReports: late,
+      submittedExpenses: submitted.get(id) ?? { count: 0, amount: 0 },
+      openAdvances: extra.openAdvances.get(id) ?? 0,
+      payslip: {
+        id: slip?.id ?? null,
+        status: slip ? (slip.status === "finalized" ? "finalized" : "draft") : "none",
+        required: employedInPeriod && d.withSalary.has(id),
+        stale: slip && slip.status !== "finalized" ? (info?.stale ?? []) : [],
+        sentAt: info?.sentAt ?? null,
+        net: info?.net ?? null,
+      },
+      blockers,
+      reminders,
+      ready: blockers.length === 0,
+    })
+  }
+  const keyOf = (r: PeriodEmployeeRow) => `${r.empNo ?? "￿"} ${r.employeeName}`
+  return rows.sort((a, b) => keyOf(a).localeCompare(keyOf(b), "zh-Hant"))
+}
+
+export interface PeriodEmployeesResult {
+  period: string
+  /** 與 GET checklist 同一份判定：全部人就緒＝可鎖。 */
+  ready: boolean
+  summary: { total: number; ready: number; blocked: number; withReminders: number }
+  employees: PeriodEmployeeRow[]
+}
+
+function netOfBreakdown(breakdown: unknown, gross: unknown): number | null {
+  const b = breakdown && typeof breakdown === "object" ? (breakdown as Record<string, unknown>) : null
+  if (b && typeof b.net === "number") return b.net
+  const g = Number(gross)
+  return gross != null && Number.isFinite(g) ? g : null
+}
+
+/**
+ * 月結發薪頁的逐人列表（GET /payroll-periods/:period/employees）。檢查清單那批查詢原樣重用，
+ * 另外批次補四支：工號、未決定的遲到說明、未核銷預支、薪資單的實發／寄送／過期旗標。全部 tenant 過濾、不逐人查。
+ */
+export async function evaluatePeriodEmployees(tenantId: string, period: string): Promise<PeriodEmployeesResult> {
+  const d = await loadPeriodChecklistData(tenantId, period)
+  const { from, to } = monthRangeKeys(period)
+  const withSent = await columnsExist("payslips", "sent_at")
+  const [empRes, lateRes, advRes, slipRes] = await Promise.all([
+    supabaseAdmin.from("employees").select("id, emp_no").eq("tenant_id", tenantId),
+    supabaseAdmin
+      .from("late_reports")
+      .select("id, employee_id")
+      .eq("tenant_id", tenantId)
+      .gte("work_date", from)
+      .lte("work_date", to)
+      .is("attendance_decision", null),
+    supabaseAdmin.from("advances").select("id, employee_id, status").eq("tenant_id", tenantId).in("status", ["requested", "paid"]),
+    supabaseAdmin
+      .from("payslips")
+      .select(withSent ? "id, employee_id, status, gross, breakdown, sent_at" : "id, employee_id, status, gross, breakdown")
+      .eq("tenant_id", tenantId)
+      .eq("period", period),
+  ])
+  const empNos = new Map(rowsOrThrow<{ id: string; emp_no: string | null }>("employees (emp_no)", empRes).map((e) => [e.id, e.emp_no ?? null]))
+  const undecidedLate = countBy(rowsOrThrow<{ employee_id: string }>("late_reports", lateRes), (r) => r.employee_id)
+  const openAdvances = countBy(rowsOrThrow<{ employee_id: string }>("advances", advRes), (r) => r.employee_id)
+  const slips = rowsOrThrow<{ id: string; employee_id: string; status: string; gross: unknown; breakdown: unknown; sent_at?: string | null }>(
+    "payslips (detail)",
+    slipRes,
+  )
+  const drafts = slips.filter((s) => s.status !== "finalized")
+  const stale = drafts.length > 0 ? await staleDraftPayslipsSafe(tenantId, [...new Set(drafts.map((s) => s.employee_id))], [period]) : []
+  const staleBySlip = new Map(stale.map((x) => [x.payslipId, x.reasons]))
+  const payslipInfo = new Map(
+    slips.map((s) => [s.employee_id, { stale: staleBySlip.get(s.id) ?? [], sentAt: s.sent_at ?? null, net: netOfBreakdown(s.breakdown, s.gross) }]),
+  )
+  const employees = buildPeriodEmployeeRows(d, { empNos, undecidedLate, openAdvances, payslipInfo })
+  const readyCount = employees.filter((e) => e.ready).length
+  return {
+    period,
+    ready: checklistFromData(period, d).ready,
+    summary: {
+      total: employees.length,
+      ready: readyCount,
+      blocked: employees.length - readyCount,
+      withReminders: employees.filter((e) => e.reminders.length > 0).length,
+    },
+    employees,
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

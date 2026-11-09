@@ -566,3 +566,148 @@ describe("GET /payroll-periods/:period/checklist", () => {
     expect((await as(TOKENS.hr).get(`/payroll-periods/${PERIOD}/checklist`)).body.status).toBe("reopened")
   })
 })
+
+describe("GET /payroll-periods/:period/employees — 月結發薪頁的逐人列表", () => {
+  type EmpRow = {
+    employeeId: string
+    ready: boolean
+    blockers: string[]
+    reminders: string[]
+    sheet: { status: string; ready: boolean } | null
+    pendingRequests: { total: number; byKind: Record<string, number> }
+    unsettledLeaves: number
+    undecidedLateReports: number
+    submittedExpenses: { count: number; amount: number }
+    openAdvances: number
+    payslip: { status: string; required: boolean; net: number | null; sentAt: string | null; stale: string[] }
+    employedInPeriod: boolean
+  }
+  const rowOf = (body: { employees: EmpRow[] }, id: string) => body.employees.find((e) => e.employeeId === id) as EmpRow
+  const leave = (id: string, employeeId: string, extra: Partial<Row> = {}): Row => ({
+    id,
+    tenant_id: TENANT_ID,
+    employee_id: employeeId,
+    kind: "leave",
+    status: "approved",
+    deleted_at: null,
+    leave_type_id: null,
+    hours: 8,
+    start_at: new Date("2026-09-10T09:00:00+08:00").toISOString(),
+    end_at: new Date("2026-09-10T18:00:00+08:00").toISOString(),
+    settled_at: null,
+    ...extra,
+  })
+
+  it("全部就緒 → ready=true、每人 ready、與 checklist.ready 一致", async () => {
+    const res = await as(TOKENS.hr).get(`/payroll-periods/${PERIOD}/employees`)
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body).toMatchObject({ period: PERIOD, status: "open", ready: true, summary: { total: 6, ready: 6, blocked: 0 } })
+    const checklist = await as(TOKENS.hr).get(`/payroll-periods/${PERIOD}/checklist`)
+    expect(checklist.body.checklist.ready).toBe(true)
+    expect(rowOf(res.body, EMP1).payslip).toMatchObject({ status: "finalized", required: true })
+    expect(rowOf(res.body, BOSS).payslip).toMatchObject({ status: "none", required: false })
+  })
+
+  it("每人卡在哪一項與檢查清單一致；待簽核申請（排除公務車）與遲到說明只是提醒、不擋", async () => {
+    fake.db.attendance_sheets[2] = { ...fake.db.attendance_sheets[2], status: "submitted" } // HR
+    fake.db.payslips[0] = { ...fake.db.payslips[0], status: "draft", gross: 30000, breakdown: { net: 27000 } } // EMP1
+    fake.db.leave_requests = [
+      leave("lv1", EMP1),
+      leave("lv2", EMP2, { settled_at: "2026-10-01T00:00:00Z" }),
+      leave("rq1", HR2, { kind: "ot", status: "pending" }),
+      leave("rq2", HR2, { kind: "leave", status: "pending" }),
+      leave("rq3", HR2, { kind: "vehicle_booking", status: "pending" }),
+    ]
+    fake.db.expense_claims = [{ id: "cl1", tenant_id: TENANT_ID, employee_id: EMP2, period: PERIOD, status: "submitted", amount: 500 }]
+    fake.db.late_reports = [
+      { id: "lr1", tenant_id: TENANT_ID, employee_id: BOSS, work_date: "2026-09-03", attendance_decision: null },
+      { id: "lr2", tenant_id: TENANT_ID, employee_id: BOSS, work_date: "2026-09-04", attendance_decision: "exempt" },
+      { id: "lr3", tenant_id: TENANT_ID, employee_id: BOSS, work_date: "2026-10-01", attendance_decision: null },
+    ]
+    fake.db.advances = [
+      { id: "ad1", tenant_id: TENANT_ID, employee_id: DESIGNEE, status: "paid" },
+      { id: "ad2", tenant_id: TENANT_ID, employee_id: DESIGNEE, status: "settled" },
+    ]
+
+    const res = await as(TOKENS.hr).get(`/payroll-periods/${PERIOD}/employees`)
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    const checklist = (await as(TOKENS.hr).get(`/payroll-periods/${PERIOD}/checklist`)).body.checklist
+    expect(res.body.ready).toBe(false)
+    expect(res.body.ready).toBe(checklist.ready)
+
+    // 每一項的未完成人＝列表裡 blockers 含該項的人。
+    for (const item of checklist.items as Array<{ key: string; pending: Array<{ employeeId: string }> }>) {
+      const fromChecklist = item.pending.map((p) => p.employeeId).sort()
+      const fromRows = (res.body.employees as EmpRow[]).filter((e) => e.blockers.includes(item.key)).map((e) => e.employeeId).sort()
+      expect(fromRows, item.key).toEqual(fromChecklist)
+    }
+
+    expect(rowOf(res.body, HR)).toMatchObject({ ready: false, blockers: ["sheets"], sheet: { status: "submitted", ready: false } })
+    expect(rowOf(res.body, EMP1)).toMatchObject({
+      ready: false,
+      blockers: ["leave_settlement", "payslips"],
+      unsettledLeaves: 1,
+      payslip: { status: "draft", net: 27000 },
+    })
+    expect(rowOf(res.body, EMP2)).toMatchObject({ ready: false, blockers: ["expense_settlement"], submittedExpenses: { count: 1, amount: 500 }, unsettledLeaves: 0 })
+    // 提醒不擋：HR2 有兩張待簽（公務車不算）、BOSS 有一筆本月未決定的遲到說明、DESIGNEE 有未核銷預支。
+    expect(rowOf(res.body, HR2)).toMatchObject({ ready: true, blockers: [], reminders: ["pending_requests"], pendingRequests: { total: 2, byKind: { ot: 1, leave: 1 } } })
+    expect(rowOf(res.body, BOSS)).toMatchObject({ ready: true, reminders: ["late_reports"], undecidedLateReports: 1 })
+    expect(rowOf(res.body, DESIGNEE)).toMatchObject({ ready: true, reminders: [], openAdvances: 1 })
+    expect(res.body.summary).toMatchObject({ total: 6, ready: 3, blocked: 3, withReminders: 2 })
+  })
+
+  it("離職但當月有資料的人也列出；只看自己租戶的資料", async () => {
+    const GONE = "b0000000-0000-4000-8000-000000000099"
+    const OTHER = "c0000000-0000-4000-8000-000000000001"
+    fake.db.employees.push({ ...employee(GONE, "u-gone", "employee", "已離職"), status: "terminated", terminated_at: "2026-08-15" })
+    fake.db.payslips.push({ id: "slip-gone", tenant_id: TENANT_ID, employee_id: GONE, period: PERIOD, status: "draft" })
+    // 別的租戶：同一個月的資料一筆都不該混進來。
+    fake.db.employees.push({ ...employee(OTHER, "u-x", "employee", "別家"), tenant_id: OTHER_TENANT_ID })
+    fake.db.attendance_sheets.push({ id: "x-sheet", tenant_id: OTHER_TENANT_ID, employee_id: OTHER, period: PERIOD, status: "draft" })
+    fake.db.payslips.push({ id: "x-slip", tenant_id: OTHER_TENANT_ID, employee_id: EMP1, period: PERIOD, status: "draft" })
+    fake.db.expense_claims = [{ id: "x-cl", tenant_id: OTHER_TENANT_ID, employee_id: EMP1, period: PERIOD, status: "submitted", amount: 9 }]
+
+    const res = await as(TOKENS.hr).get(`/payroll-periods/${PERIOD}/employees`)
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    const ids = (res.body.employees as EmpRow[]).map((e) => e.employeeId)
+    expect(ids).toHaveLength(7)
+    expect(ids).not.toContain(OTHER)
+    // 離職者的草稿薪資單不在檢查範圍（與 summarisePayslips 一致）→ 列出但不擋。
+    expect(rowOf(res.body, GONE)).toMatchObject({ employedInPeriod: false, ready: true, sheet: null, payslip: { status: "draft", required: false } })
+    expect(rowOf(res.body, EMP1)).toMatchObject({ ready: true, payslip: { status: "finalized" }, submittedExpenses: { count: 0 } })
+    expect(res.body.ready).toBe(true)
+  })
+
+  it("批次查詢：員工數變多，每張表的查詢次數不變（不 N+1）", async () => {
+    const count = (reads: string[]) => reads.reduce<Record<string, number>>((acc, t) => ((acc[t] = (acc[t] ?? 0) + 1), acc), {})
+    // 小樣本也留一張草稿：草稿的過期檢查（固定津貼／勞退設定）是整批一次查，兩邊都會走到。
+    fake.db.payslips[0] = { ...fake.db.payslips[0], status: "draft" }
+    fake.reads.length = 0
+    await as(TOKENS.hr).get(`/payroll-periods/${PERIOD}/employees`)
+    const small = count([...fake.reads])
+
+    for (let i = 0; i < 30; i += 1) {
+      const id = `d0000000-0000-4000-8000-${String(i).padStart(12, "0")}`
+      fake.db.employees.push(employee(id, `u-many-${i}`, "employee", `員工${i}`))
+      fake.db.attendance_sheets.push({ id: `many-sheet-${i}`, tenant_id: TENANT_ID, employee_id: id, period: PERIOD, status: "approved" })
+      fake.db.salary_structures.push({ id: `many-sal-${i}`, tenant_id: TENANT_ID, employee_id: id })
+      fake.db.payslips.push({ id: `many-slip-${i}`, tenant_id: TENANT_ID, employee_id: id, period: PERIOD, status: "draft" })
+    }
+    fake.reads.length = 0
+    const res = await as(TOKENS.hr).get(`/payroll-periods/${PERIOD}/employees`)
+    expect(res.status).toBe(200)
+    expect(res.body.employees).toHaveLength(36)
+    expect(res.body.summary).toMatchObject({ blocked: 31 })
+    const big = count([...fake.reads])
+    for (const table of ["employees", "attendance_sheets", "leave_requests", "expense_claims", "late_reports", "advances", "salary_structures"]) {
+      expect(big[table] ?? 0, table).toBe(small[table] ?? 0)
+    }
+  })
+
+  it("權限同 checklist：只有 HR；非 HR（含老闆）403；月份格式錯 400", async () => {
+    expect((await as(TOKENS.boss).get(`/payroll-periods/${PERIOD}/employees`)).status).toBe(403)
+    expect((await as(TOKENS.emp1).get(`/payroll-periods/${PERIOD}/employees`)).status).toBe(403)
+    expect((await as(TOKENS.hr).get(`/payroll-periods/2026-9/employees`)).status).toBe(400)
+  })
+})

@@ -333,7 +333,7 @@ describe("檢查清單的顯示整理 checklistViews", () => {
       sheets: "/admin/attendance-statements",
       leave_settlement: "/admin/leave-settlement",
       expense_settlement: "/admin/expenses",
-      payslips: "/admin/payslips",
+      payslips: "/admin/payroll",
     });
   });
 

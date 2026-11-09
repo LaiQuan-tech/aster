@@ -131,11 +131,10 @@ describe("resolveAdminPath：最長前綴", () => {
     });
   });
 
-  it("2026-09-23 新分頁：現金給付（三節獎金／加班超額另計）、值日／總機", () => {
-    expect(resolveAdminPath("/admin/festival-bonuses")).toMatchObject({ section: "payroll", tab: "cash", sub: "festival", title: "三節／節慶獎金" });
-    expect(resolveAdminPath("/admin/overtime-settlements")).toMatchObject({ section: "payroll", tab: "cash", sub: "otSettlements", title: "加班超額另計" });
+  it("值日／總機；2026-11-09 現金給付（三節獎金／加班超額另計）併入「費用與給付」", () => {
     expect(resolveAdminPath("/admin/duty-rosters")).toMatchObject({ section: "attendance", tab: "duty", title: "值日生／總機輪播排班" });
-    for (const path of ["/admin/festival-bonuses", "/admin/overtime-settlements", "/admin/duty-rosters"]) {
+    expect(resolveAdminPath("/admin/expenses")).toMatchObject({ section: "payroll", tab: "expenses", title: "費用與給付" });
+    for (const path of ["/admin/expenses", "/admin/duty-rosters"]) {
       expect(resolveAdminPath(path).module, path).toBeUndefined();
       expect(resolveAdminPath(path).narrow, path).toBe(false);
     }
@@ -195,9 +194,8 @@ describe("resolveAdminPath：最長前綴", () => {
     expect(tabsForSection("settings", null).map((t) => t.key)).toContain("optionLists");
   });
 
-  it("相似前綴不互相污染：payroll-tax／leave-*／attendance-*", () => {
-    expect(resolveAdminPath("/admin/payroll-tax")).toMatchObject({ section: "payroll", tab: "tax" });
-    expect(resolveAdminPath("/admin/payroll")).toMatchObject({ section: "payroll", tab: "payroll" });
+  it("相似前綴不互相污染：payroll／leave-*／attendance-*", () => {
+    expect(resolveAdminPath("/admin/payroll")).toMatchObject({ section: "payroll", tab: "payroll", title: "月結發薪" });
     expect(resolveAdminPath("/admin/leave-settlement")).toMatchObject({ section: "approvals", tab: "settlement" });
     expect(resolveAdminPath("/admin/leave-types")).toMatchObject({ section: "settings", tab: "leaveTypes" });
     expect(resolveAdminPath("/admin/leave-balances")).toMatchObject({ section: "approvals", tab: "balances" });
@@ -418,12 +416,10 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
     expect(ADMIN_TABS.home).toEqual([]);
   });
 
-  it("payroll 分頁順序：薪資 → 薪資單 → 稅務 → 現金給付（三節／加班超額）→ 報銷 → 預支", () => {
-    expect(ADMIN_TABS.payroll.map((t) => t.key)).toEqual(["payroll", "payslips", "tax", "cash", "expenses", "advances"]);
-    expect(subTabsFor("payroll", "cash").map((s) => `${s.key}:${s.href}`)).toEqual([
-      "festival:/admin/festival-bonuses",
-      "otSettlements:/admin/overtime-settlements",
-    ]);
+  it("payroll 分頁（2026-11-09 合併）：只剩 月結發薪 → 費用與給付", () => {
+    expect(ADMIN_TABS.payroll.map((t) => `${t.key}:${t.label}:${t.href}`)).toEqual(["payroll:月結發薪:/admin/payroll", "expenses:費用與給付:/admin/expenses"]);
+    expect(subTabsFor("payroll", "payroll")).toEqual([]);
+    expect(subTabsFor("payroll", "expenses")).toEqual([]);
   });
 
   it("tabsForSection('people')：預設 2 個；{recruitment:true} 加進來且順序照表", () => {
@@ -500,14 +496,14 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
 describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／tabsForSection({ roleNav })", () => {
   const NAV = ACCOUNTANT_DEFAULT_NAV;
 
-  it("會計預設範圍不含 bonus／payroll／payslips／tax／cash；分區只有 首頁、專案與財務、出勤、薪資與費用、人員、設定（只有選項清單）", () => {
+  it("會計預設範圍不含 bonus／月結發薪；薪資與費用只有「費用與給付」；分區只有 首頁、專案與財務、出勤、薪資與費用、人員、設定（只有選項清單）", () => {
     expect(NAV.sections).toEqual(["home", "finance", "attendance", "payroll", "people", "settings"]);
     const finance = tabsForSection("finance", null, { roleNav: NAV }).map((t) => t.key);
     expect(finance).not.toContain("bonus");
     expect(finance).toEqual(["projects", "disbursements", "directory"]);
     const payroll = tabsForSection("payroll", null, { roleNav: NAV }).map((t) => t.key);
-    expect(payroll).toEqual(["expenses", "advances"]);
-    for (const key of ["payroll", "payslips", "tax", "cash"]) expect(payroll).not.toContain(key);
+    expect(payroll).toEqual(["expenses"]);
+    expect(payroll).not.toContain("payroll");
     // 出勤統計表：會計可看（金額在 API 端遮成「—」）。
     expect(tabsForSection("attendance", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["statements"]);
     expect(tabsForSection("people", { recruitment: true }, { roleNav: NAV }).map((t) => t.key)).toEqual(["employees"]);
@@ -517,7 +513,7 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
     // 沒列在 tabs 的分區＝該區全部（module 開關照舊）
     expect(tabsForSection("system", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["reports", "audit", "backups", "notifications"]);
     // includeTab 仍強制保留（直開未開放網址時分頁列標「未開放」）
-    expect(tabsForSection("payroll", null, { roleNav: NAV, includeTab: "payslips" }).map((t) => t.key)).toEqual(["payslips", "expenses", "advances"]);
+    expect(tabsForSection("payroll", null, { roleNav: NAV, includeTab: "payroll" }).map((t) => t.key)).toEqual(["payroll", "expenses"]);
   });
 
   it("個人頁 AI 連接（personal）：會計範圍再怎麼限縮，直開網址都放行", () => {
@@ -636,7 +632,8 @@ describe("isAdminPathAllowed：直開網址的角色守門（2026-09-23 驗收�
       "/admin/option-lists",
       "/admin/attendance-statements",
       "/admin/expenses",
-      "/admin/advances",
+      // 2026-11-09 預支併入「費用與給付」：舊網址轉到 ?section=advances
+      "/admin/expenses?section=advances",
       "/admin/employees",
       "/admin/employees/zzz",
     ]) {
@@ -779,7 +776,7 @@ describe("ADMIN_ROUTES", () => {
 });
 
 describe("ADMIN_REDIRECTS 與 next.config.ts", () => {
-  it("十四條轉址：late-reports → punch-records?view=late、attendance-sheets（含 :id → ?sheet=:id）→ attendance-statements、form-records → approvals?status=all、org-chart → departments、onboarding／birthday-gifts → employees、projects/overview／annual／alerts、stamp-duty → projects、group-overview → 首頁 #group-overview、bonus-runs → bonus-sheet、projects/receivables → disbursements?view=receivables", () => {
+  it("十九條轉址：payslips → payroll、payroll-tax／festival-bonuses／overtime-settlements／advances → expenses?section=…、late-reports → punch-records?view=late、attendance-sheets（含 :id → ?sheet=:id）→ attendance-statements、form-records → approvals?status=all、org-chart → departments、onboarding／birthday-gifts → employees、projects/overview／annual／alerts、stamp-duty → projects、group-overview → 首頁 #group-overview、bonus-runs → bonus-sheet、projects/receivables → disbursements?view=receivables", () => {
     expect(ADMIN_REDIRECTS).toEqual([
       { source: "/admin/form-records", destination: "/admin/approvals?status=all" },
       { source: "/admin/org-chart", destination: "/admin/departments" },
@@ -795,6 +792,11 @@ describe("ADMIN_REDIRECTS 與 next.config.ts", () => {
       { source: "/admin/attendance-sheets", destination: "/admin/attendance-statements" },
       { source: "/admin/attendance-sheets/:id", destination: "/admin/attendance-statements?sheet=:id" },
       { source: "/admin/late-reports", destination: "/admin/punch-records?view=late" },
+      { source: "/admin/payslips", destination: "/admin/payroll" },
+      { source: "/admin/payroll-tax", destination: "/admin/expenses?section=tax" },
+      { source: "/admin/festival-bonuses", destination: "/admin/expenses?section=festival" },
+      { source: "/admin/overtime-settlements", destination: "/admin/expenses?section=overtime" },
+      { source: "/admin/advances", destination: "/admin/expenses?section=advances" },
     ]);
     // 轉址目標都解析得到自己的路由
     for (const redirect of ADMIN_REDIRECTS) {
@@ -880,7 +882,14 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
   });
 
   it("舊分頁 key receivables（2026-10-27 併入請款與放款）：存過舊 key 的會計範圍視同勾了 disbursements", () => {
-    expect(LEGACY_TAB_ALIASES).toEqual({ receivables: "disbursements", sheets: "statements" });
+    expect(LEGACY_TAB_ALIASES).toEqual({
+      receivables: "disbursements",
+      sheets: "statements",
+      payslips: "payroll",
+      tax: "expenses",
+      cash: "expenses",
+      advances: "expenses",
+    });
     // 設定頁再勾／取消時舊 key 換成新 key，不會被當成不認得的 key 丟掉
     expect(nextRoleTabs("finance", ["projects", "receivables"], "directory", true)).toEqual(["projects", "disbursements", "directory"]);
     expect(nextRoleTabs("finance", ["projects", "receivables"], "disbursements", false)).toEqual(["projects"]);
@@ -903,6 +912,22 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
     const lateOnly = roleNavOf("accountant", { roles: { accountant: { sections: ["attendance"], tabs: { attendance: ["lateReports"] } } } });
     expect(lateOnly?.tabs.attendance ?? []).not.toContain("punches");
     expect(tabsForSection("attendance", null, { roleNav: lateOnly }).map((t) => t.key)).not.toContain("punches");
+  });
+
+  it("舊分頁 key（2026-11-09 薪資與費用合併）：payslips → payroll；tax／cash／advances → expenses（只勾過報銷、預支的會計看得到「費用與給付」，不會多出月結發薪）", () => {
+    const legacy = roleNavOf("accountant", { roles: { accountant: { sections: ["payroll"], tabs: { payroll: ["expenses", "advances"] } } } });
+    expect(legacy?.tabs.payroll).toEqual(["expenses"]);
+    expect(tabsForSection("payroll", null, { roleNav: legacy }).map((t) => t.key)).toEqual(["expenses"]);
+    expect(isAdminPathAllowed({ pathname: "/admin/expenses?section=advances", roleNav: legacy })).toBe(true);
+    expect(isAdminPathAllowed({ pathname: "/admin/payroll", roleNav: legacy })).toBe(false);
+    const advOnly = roleNavOf("accountant", { roles: { accountant: { sections: ["payroll"], tabs: { payroll: ["advances"] } } } });
+    expect(tabsForSection("payroll", null, { roleNav: advOnly }).map((t) => t.key)).toEqual(["expenses"]);
+    const slipOnly = roleNavOf("accountant", { roles: { accountant: { sections: ["payroll"], tabs: { payroll: ["payslips"] } } } });
+    expect(slipOnly?.tabs.payroll).toEqual(["payroll"]);
+    expect(nextRoleTabs("payroll", ["tax", "cash", "advances"], "payroll", true)).toEqual(["payroll", "expenses"]);
+    // 會計預設：只開「費用與給付」，直開月結發薪 → false
+    expect(isAdminPathAllowed({ pathname: "/admin/payroll", roleNav: ACCOUNTANT_DEFAULT_NAV })).toBe(false);
+    expect(isAdminPathAllowed({ pathname: "/admin/expenses", roleNav: ACCOUNTANT_DEFAULT_NAV })).toBe(true);
   });
 
   it("目前的 hrOnly 分頁只有系統／未核准加班（2026-11；下面的路徑與提示測試會自動涵蓋）", () => {

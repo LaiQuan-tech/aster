@@ -75,7 +75,9 @@ describe("notificationLink — 每種 type × 收件角色", () => {
     for (const t of ["calendar_import_draft", "calendar_import_revision", "calendar_import_fetch_failed"]) {
       expect(notificationLink(n(t, { year: 2027 }))).toBe("/admin/calendar")
     }
-    expect(notificationLink(n("payroll_period", { event: "reopened", period: "2026-10" }))).toBe("/admin/payroll")
+    expect(notificationLink(n("payroll_period", { event: "reopened", period: "2026-10" }))).toBe("/admin/payroll?period=2026-10")
+    expect(notificationLink(n("payroll_period", { event: "reopened" }))).toBe("/admin/payroll")
+    expect(notificationLink(n("payroll_period", { event: "reopened", period: "2026-13&x=1" }))).toBe("/admin/payroll")
     expect(notificationLink(n("overtime_unapproved_punch", { employeeId: "e1" }))).toBe("/ess/approvals")
     expect(notificationLink(n("announcement", {}))).toBe("/ess/announcements")
     expect(notificationLink(n("vehicle_booking_cancelled", {}))).toBe("/ess/vehicles")

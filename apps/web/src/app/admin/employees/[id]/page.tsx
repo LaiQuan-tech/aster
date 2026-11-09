@@ -63,16 +63,22 @@ import { isHrRole } from "@/lib/roles";
 import { useSession } from "@/lib/use-session";
 import { useEmployeeAccountActions } from "../_components/useEmployeeAccountActions";
 import { EmployeeStatementsPanel, type StatementTab } from "../_components/EmployeeStatementsPanel";
+import { EmployeePayrollPanel } from "../_components/EmployeePayrollPanel";
 
 const UNSAVED_PROMPT = "這位員工的資料還沒儲存，確定要離開嗎？";
 
-/** 內頁分頁（2026-10-27）：員工資料｜出勤統計表｜薪資明細表（薪資明細表只有 HR／平台管理員看得到）。 */
-type DetailTab = "profile" | StatementTab;
+/**
+ * 內頁分頁（2026-10-27）：員工資料｜出勤統計表｜薪資明細表（薪資明細表只有 HR／平台管理員看得到）。
+ * 2026-11-09：加「薪資」分頁（原 /admin/payroll 的員工薪資保險資料卡），同樣只給 HR／平台管理員。
+ */
+type DetailTab = "profile" | "salary" | StatementTab;
+
+const isStatementTab = (t: DetailTab): t is StatementTab => t === "attendance" || t === "payslip";
 
 function tabFromLocation(): DetailTab {
   if (typeof window === "undefined") return "profile";
   const t = new URLSearchParams(window.location.search).get("tab");
-  return t === "attendance" || t === "payslip" ? t : "profile";
+  return t === "attendance" || t === "payslip" || t === "salary" ? t : "profile";
 }
 
 type DetailEmployee = EmployeeWithProfile & EditableEmployee;
@@ -210,11 +216,11 @@ export default function EmployeeDetailPage() {
   useEffect(() => {
     const initial = tabFromLocation();
     setTabState(initial);
-    if (initial !== "profile") setStatementsOpened(true);
+    if (isStatementTab(initial)) setStatementsOpened(true);
   }, []);
   const setTab = useCallback((next: DetailTab) => {
     setTabState(next);
-    if (next !== "profile") setStatementsOpened(true);
+    if (isStatementTab(next)) setStatementsOpened(true);
     // 分頁寫進網址（重新整理、分享連結停在同一頁），不新增瀏覽紀錄。
     const url = new URL(window.location.href);
     if (next === "profile") url.searchParams.delete("tab");
@@ -475,13 +481,13 @@ export default function EmployeeDetailPage() {
         </div>
       </Card>
 
-      {/* 分頁：員工資料｜出勤統計表｜薪資明細表（會計看不到薪資明細表） */}
+      {/* 分頁：員工資料｜出勤統計表｜薪資｜薪資明細表（會計看不到薪資與薪資明細表） */}
       <div role="tablist" aria-label="員工內頁分頁" className="flex gap-1 overflow-x-auto rounded-xl border border-gray-200 bg-white p-1 print:hidden">
         {(
           [
             ["profile", "員工資料"],
             ["attendance", "出勤統計表"],
-            ...(canManage ? ([["payslip", "薪資明細表"]] as const) : []),
+            ...(canManage ? ([["salary", "薪資"], ["payslip", "薪資明細表"]] as const) : []),
           ] as ReadonlyArray<readonly [DetailTab, string]>
         ).map(([key, label]) => (
           <button
@@ -500,10 +506,17 @@ export default function EmployeeDetailPage() {
       </div>
 
       {statementsOpened && (
-        <div hidden={tab === "profile"}>
+        <div hidden={!isStatementTab(tab)}>
           <EmployeeStatementsPanel employeeId={employee.id} kind={tab === "payslip" && canManage ? "payslip" : "attendance"} />
         </div>
       )}
+
+      {tab === "salary" &&
+        (canManage ? (
+          <EmployeePayrollPanel employeeId={employee.id} />
+        ) : (
+          <p className="rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-500">薪資資料只有 HR 與平台管理員可以查看。</p>
+        ))}
 
       {tab === "profile" && (
       <>
