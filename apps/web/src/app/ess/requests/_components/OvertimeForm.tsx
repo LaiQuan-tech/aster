@@ -8,7 +8,7 @@ import { useId, useState, type FormEvent } from "react";
 import { Field, Input, Segmented } from "@/components/ess-ui";
 import { fmtHours } from "@/lib/ess-format";
 import { PAYOUT_LABEL, buildCreateBody, describeBody, isBuildError, overtimeHours } from "@/lib/request-forms";
-import { ReasonField, SubmitBar, SummaryLine, type FormCommonProps } from "./form-shared";
+import { AttachmentField, ReasonField, SubmitBar, SummaryLine, validateFiles, type FormCommonProps } from "./form-shared";
 
 type Payout = "pay" | "comp_time";
 
@@ -24,6 +24,7 @@ export function OvertimeForm({ initialDate, submitting, submitError, onSubmit }:
   const [endTime, setEndTime] = useState("20:00");
   const [payout, setPayout] = useState<Payout>("pay");
   const [reason, setReason] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
   const [localError, setLocalError] = useState<string | null>(null);
 
   const hours = overtimeHours(startTime, endTime, 0);
@@ -32,6 +33,8 @@ export function OvertimeForm({ initialDate, submitting, submitError, onSubmit }:
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setLocalError(null);
+    const fileError = validateFiles(files);
+    if (fileError) return setLocalError(fileError);
     const body = buildCreateBody("ot", {
       date,
       startTime,
@@ -41,7 +44,7 @@ export function OvertimeForm({ initialDate, submitting, submitError, onSubmit }:
       reason,
     });
     if (isBuildError(body)) return setLocalError(body.error);
-    await onSubmit(body, [], `加班 · ${describeBody(body)}`);
+    await onSubmit(body, files, `加班 · ${describeBody(body)}`);
   }
 
   return (
@@ -111,6 +114,16 @@ export function OvertimeForm({ initialDate, submitting, submitError, onSubmit }:
       </div>
 
       <ReasonField value={reason} onChange={setReason} placeholder="選填，例如：趕結案、支援活動" />
+
+      <AttachmentField
+        files={files}
+        onChange={(next) => {
+          setFiles(next);
+          clear();
+        }}
+        label="佐證照片（選填）"
+        hint="例如現場工作照、加班成果截圖；最多 3 個，照片會自動壓縮"
+      />
 
       <SubmitBar submitting={submitting} error={localError ?? submitError} />
     </form>

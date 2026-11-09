@@ -170,8 +170,8 @@ export function attachmentTooLargeText(err: unknown): string | null {
 
 /**
  * 假單已建立、但有附件沒傳上去時（成功畫面的提醒）：列出沒傳上的檔名與原因（原因都一樣只寫一次）。
- *   • 全部沒傳上 → 請員工到「我的申請」按「上傳憑證」補傳（列表在一個附件都沒有時才給這個按鈕）；
- *   • 只有部分沒傳上 → 說其餘已上傳；這時列表不會再給「上傳憑證」，缺的檔若必要請撤回後重新申請。
+ *   • 全部沒傳上 → 請員工到「我的申請」補傳（待簽核且附件未滿 3 個都有補傳鈕）；
+ *   • 只有部分沒傳上 → 說其餘已上傳；列表仍可補傳到 3 個。
  * `failed` 是空的 → null。
  */
 export function attachmentUploadWarning(
@@ -186,8 +186,8 @@ export function attachmentUploadWarning(
       : `${failed.map((f) => `「${f.name}」（${f.reason}）`).join("、")}上傳失敗`;
   const uploaded = total - failed.length;
   return uploaded > 0
-    ? `申請已送出，但附件${which}；其餘 ${uploaded} 個已上傳。缺的附件若必要，請撤回這張申請後重新申請。`
-    : `申請已送出，但附件${which}。請在下方「我的申請」按「上傳憑證」補傳。`;
+    ? `申請已送出，但附件${which}；其餘 ${uploaded} 個已上傳。可到下方「我的申請」補傳（每單最多 3 個）。`
+    : `申請已送出，但附件${which}。可到下方「我的申請」補傳。`;
 }
 
 /** API 錯誤碼 → 中文（找不到的碼由呼叫端退回 attendance-sheets-api 的 friendlyError）。 */
@@ -954,7 +954,18 @@ export function approvalComments(r: Pick<LeaveRequest, "status" | "steps">, opts
   return lines;
 }
 
-/** pending 請假、假別需憑證、且一個附件都沒有 → 顯示「缺憑證」＋「上傳憑證」。 */
+/** 每張單附件上限（與 API attachments.ts 的 MAX_FILES 一致）。 */
+export const MAX_REQUEST_ATTACHMENTS = 3;
+
+/**
+ * 「我的申請」能不能補傳附件：待簽核、附件數已知且未滿 3 個（任何種類都行，API 不分 kind）。
+ * 缺憑證的假單（needsAttachment）一定符合。
+ */
+export function canAddAttachment(r: Pick<LeaveRequest, "status" | "attachment_count">): boolean {
+  return r.status === "pending" && typeof r.attachment_count === "number" && r.attachment_count < MAX_REQUEST_ATTACHMENTS;
+}
+
+/** pending 請假、假別需憑證、且一個附件都沒有 → 顯示「缺憑證」。 */
 export function needsAttachment(
   r: Pick<LeaveRequest, "status" | "kind" | "requires_attachment" | "attachment_count">,
 ): boolean {

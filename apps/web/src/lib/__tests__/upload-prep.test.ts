@@ -1120,7 +1120,7 @@ describe("describeError（請假送出、我的申請補傳／撤回、載入共
       1,
     );
     expect(warning).toBe(
-      `申請已送出，但附件「診斷證明.pdf」上傳失敗（${UNKNOWN_ERROR_MESSAGE}）。請在下方「我的申請」按「上傳憑證」補傳。`,
+      `申請已送出，但附件「診斷證明.pdf」上傳失敗（${UNKNOWN_ERROR_MESSAGE}）。可到下方「我的申請」補傳。`,
     );
     noStatusCode(warning!);
     expect(warning).not.toContain("internal_server_error");
