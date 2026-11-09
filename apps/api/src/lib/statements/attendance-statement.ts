@@ -11,7 +11,7 @@ import {
   type CellInput,
   type StatementGrid,
 } from "./grid.js"
-import type { StatementData, StatementMoney } from "./types.js"
+import { expenseTotals, type StatementData, type StatementMoney } from "./types.js"
 
 const HEADER_FILL = "#D6E3BC"
 const YELLOW = "#FFFF00"
@@ -318,7 +318,9 @@ export function buildAttendanceStatementGrid(data: StatementData): StatementGrid
 
   // 列 44：支出／薪資+支出
   const S = H + 3 // 43
-  const expenseTotal = (data.expenses ?? []).reduce((acc, e) => acc + e.amount, 0)
+  // 2026-11-10：支出含已送出待核銷的報銷；有待核銷時旁邊加註「（含待核銷 X）」
+  const { total: expenseTotal, pending: expensePending } = expenseTotals(data.expenses)
+  const pendingNote = data.expenses && expensePending > 0 ? `（含待核銷 ${expensePending.toLocaleString("en-US")}）` : null
   g.set(S, 0, { value: "支出：", ...center })
   g.set(S, 1, {
     value: data.expenses ? expenseTotal : null,
@@ -329,9 +331,16 @@ export function buildAttendanceStatementGrid(data: StatementData): StatementGrid
     align: "left",
     fill: YELLOW,
   })
+  if (pendingNote) g.set(S, 2, { value: pendingNote, colSpan: 5, align: "left", color: RED, size: 10 })
   g.set(S, 12, { value: "薪資+支出", ...center })
+  // 薪資單的實發只含已核銷（隨薪資給付）的報銷 → 再加上待核銷的；試算＝實領＋全部支出。
   const salaryPlus =
-    money?.source === "payslip" ? money.netWithExpenses : money && data.expenses ? netPay(money) + expenseTotal : null
+    money?.source === "payslip"
+      ? money.netWithExpenses + (data.expenses ? expensePending : 0)
+      : money && data.expenses
+        ? netPay(money) + expenseTotal
+        : null
+  if (pendingNote && salaryPlus != null) g.set(S, 8, { value: pendingNote, colSpan: 4, align: "right", color: RED, size: 10 })
   g.set(S, 13, {
     ...moneyCell(salaryPlus, { format: "intSp", bold: true, color: RED, ...center, fill: YELLOW }),
     ...(salaryPlus == null ? { value: null, text: MISSING_TEXT } : {}),

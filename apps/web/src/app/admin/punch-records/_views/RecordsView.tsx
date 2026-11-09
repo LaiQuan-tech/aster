@@ -16,6 +16,7 @@ import {
 } from "@/lib/admin-api";
 
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { useEssState } from "@/lib/ess-state";
 const inputCls =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 const labelCls = "mb-1 block text-xs font-medium text-gray-500";
@@ -60,6 +61,8 @@ function csvCell(value: string | number | null | undefined): string {
  * 「打卡紀錄」分頁：原本的流水帳頁（篩選、欄位不變）。2026-10-27 起單位／員工篩選由外層三個分頁共用
  * （page.tsx 持有狀態），員工與部門清單也由外層載入一次傳進來。
  */
+const SELF_PUNCH_TEXT = "自己的打卡請到員工端送補卡申請";
+
 export function RecordsView({
   employees,
   departments,
@@ -89,7 +92,10 @@ export function RecordsView({
   const [fTo, setFTo] = useState(today);
 
   // 補登 form
+  // 2026-11-10 業主：HR（含平台管理員）不能補登自己的打卡 → 員工選單排除自己；自己的卡走員工端補卡申請（API 也會擋 403）。
+  const myId = useEssState().me?.id ?? null;
   const [mEmp, setMEmp] = useState("");
+  const selfSelected = !!myId && mEmp === myId;
   const [mAt, setMAt] = useState("");
   const [mType, setMType] = useState<PunchRecord["type"]>("in");
   // 補登結果：成功是綠字；失敗（含送出前的欄位檢查）走 ErrorText（紅字、role="alert"），不能共用綠字。
@@ -153,6 +159,10 @@ export function RecordsView({
       setMMsg({ ok: false, text: "請選擇員工與時間" });
       return;
     }
+    if (selfSelected) {
+      setMMsg({ ok: false, text: SELF_PUNCH_TEXT });
+      return;
+    }
     try {
       await createManualPunch({ employeeId: mEmp, punchAt: new Date(mAt).toISOString(), type: mType });
       setMMsg({ ok: true, text: "補登完成" });
@@ -160,7 +170,10 @@ export function RecordsView({
       await load();
     } catch (err) {
       // 補登的打卡時間落在已發薪鎖定的月份 → 409 period_closed →「YYYY-MM 已結算，請洽管理者」。
-      setMMsg({ ok: false, text: errorMessageOf(err, "補登失敗") });
+      // 補登自己 → 403 self_manual_punch_forbidden → 中文說明。
+      const code = (err as { code?: string } | null)?.code;
+      const isSelf = code === "self_manual_punch_forbidden" || (err instanceof Error && err.message.includes("self_manual_punch_forbidden"));
+      setMMsg({ ok: false, text: isSelf ? SELF_PUNCH_TEXT : errorMessageOf(err, "補登失敗") });
     }
   }
 
@@ -204,7 +217,9 @@ export function RecordsView({
             <div>
               <label className={labelCls}>員工</label>
               <EmployeeCombobox
-                options={employees.map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}` }))}
+                options={employees
+                  .filter((e) => e.id !== myId)
+                  .map((e) => ({ id: e.id, label: e.name, searchText: `${(e as { emp_no?: string | null }).emp_no ?? ""} ${e.name}` }))}
                 value={mEmp}
                 onChange={setMEmp}
                 emptyLabel="請選擇"
@@ -223,9 +238,10 @@ export function RecordsView({
               </select>
             </div>
             <div className="flex items-end">
-              <PrimaryButton type="submit">補登</PrimaryButton>
+              <PrimaryButton type="submit" disabled={selfSelected}>補登</PrimaryButton>
             </div>
           </div>
+          <p className={`text-xs ${selfSelected ? "text-amber-700" : "text-gray-500"}`}>不能補登自己的打卡；{SELF_PUNCH_TEXT}。</p>
           {mMsg &&
             (mMsg.ok ? (
               <p role="status" className="text-sm text-green-600">{mMsg.text}</p>

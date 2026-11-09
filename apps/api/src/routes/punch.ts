@@ -14,7 +14,7 @@ import { logger } from "../lib/logger.js"
 import { checkPunchCooldown, cooldownSeconds, statusFromRecords } from "../services/punch-guard.js"
 import { findCarryOverIn } from "../services/punch-carry-over.js"
 import { assertInstantsOpen } from "../services/period-lock.js"
-import { importManualPunches } from "../services/imports/writers.js"
+import { SELF_MANUAL_PUNCH_FORBIDDEN, importManualPunches } from "../services/imports/writers.js"
 import {
   dinnerPromptForOpenShift,
   lateMinutesForArrival,
@@ -809,10 +809,13 @@ punchRouter.post(
       // 寫入段抽到 services/imports/writers.ts（xlsx 匯入 POST /imports/punches 共用）：
       // 先驗同租戶員工、逐筆 employee_not_found、source='manual'。行號沿用原本的
       // 「有效紀錄序 + 2」（parser 已把壞行剔掉，這是既有行為）。
+      // 2026-11-10：呼叫者本人的列逐筆 self_manual_punch_forbidden（含 platform_admin），其餘照常。
+      const self = await resolveSelf(tenantId, req.auth!.userId)
       const { ids, errors: writeErrors } = await importManualPunches(
         tenantId,
         records.map((record, index) => ({ ...record, line: index + 2 })),
         "POST /punch/manual/import",
+        { selfEmployeeId: self?.id ?? null },
       )
       errors.push(...writeErrors)
       if (ids.length === 0) {
@@ -830,7 +833,7 @@ punchRouter.post(
  * POST /punch/manual — HR-admin creates a punch record on someone's behalf
  * (source='manual' so audits can tell back-fills from real punches). The target
  * employee must belong to this tenant → otherwise 404. 打卡時間（租戶時區）落在已結算月
- * → 409 period_closed。
+ * → 409 period_closed。目標＝呼叫者本人 → 403 self_manual_punch_forbidden（2026-11-10，不分角色）。
  */
 punchRouter.post(
   "/punch/manual",
@@ -846,6 +849,12 @@ punchRouter.post(
     }
     const { employeeId, punchAt, type } = parsed.data
     try {
+      // 2026-11-10 業主：HR 不能補登自己的打卡——任何角色（含 platform_admin、老闆）自己的卡一律走員工端補卡申請（簽核）。
+      const self = await resolveSelf(tenantId, req.auth!.userId)
+      if (self && self.id === employeeId) {
+        res.status(403).json({ error: SELF_MANUAL_PUNCH_FORBIDDEN, message: "不能補登自己的打卡；自己的打卡請到員工端送補卡申請" })
+        return
+      }
       const { data: emp, error: empErr } = await supabaseAdmin
         .from("employees")
         .select("id")

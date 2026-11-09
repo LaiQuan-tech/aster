@@ -555,11 +555,11 @@ describe("GET /employees/:id/statements", () => {
     expect(res.body.payslip.grid.kind).toBe("payslip")
     const grid = res.body.attendance.grid as StatementGrid
     expect(grid.cells.some((c) => c.text === "30,000")).toBe(true)
-    // 支出只算已核銷（隨薪資給付）的報銷（明細在「支出表」頁，合計在出勤頁「支出：」）
+    // 支出＝已核銷＋已送出待核銷（2026-11-10；明細在「支出表」頁，合計在出勤頁「支出：」）
     const expense = res.body.attendance.expenseSheet as StatementGrid
-    expect(expense.cells.some((c) => c.text === "未核銷")).toBe(false)
+    expect(expense.cells.some((c) => c.text === "未核銷")).toBe(true)
     expect(expense.cells.some((c) => c.text === "停車費")).toBe(true)
-    expect(cellAt(grid, 43, 1)?.text).toBe("350")
+    expect(cellAt(grid, 43, 1)?.text).toBe("1,349")
     expect(res.body.attendance.leaveForm.kind).toBe("leaveForm")
     // 已核准月表：凍結版本、帶核准時間；沒要求重算 → recompute=null、不重算
     expect(res.body.attendance.frozen).toBe(true)
@@ -606,6 +606,82 @@ describe("GET /employees/:id/statements", () => {
     expect(res.body.payslip.moneySource).toBeNull()
     const grid = res.body.payslip.grid as StatementGrid
     expect(grid.cells.some((c) => c.text === "—")).toBe(true)
+  })
+})
+
+describe("支出表含待核銷報銷（2026-11-10）", () => {
+  const claim = (id: string, amount: number, day: string, note: string, status: string, extra: Record<string, unknown> = {}) => ({
+    id, tenant_id: TENANT_ID, employee_id: FAKE_EMPLOYEE_ID, category_id: null, nature: "reimbursement", amount: String(amount),
+    incurred_on: `2026-06-${day}`, period: "2026-06", note, status, advance_id: null, ...extra,
+  })
+  const net = () => Number(fakeBreakdown().net)
+
+  it("settled＋submitted 混合：依日期排序、待核銷標註、小計含全部、其中待核銷一行；rejected／cancelled／draft 不出現", async () => {
+    fake.db.expense_claims = [
+      claim("x1", 350, "20", "已核銷停車", "settled"),
+      claim("x2", 999, "03", "待核銷高鐵", "submitted"),
+      claim("x3", 111, "04", "被退回", "rejected"),
+      claim("x4", 222, "05", "已取消", "cancelled"),
+      claim("x5", 333, "06", "草稿", "draft"),
+      claim("x6", 444, "07", "定額補貼", "submitted", { nature: "allowance" }),
+      claim("x7", 555, "08", "綁預支", "submitted", { advance_id: "adv-1" }),
+    ]
+    const res = await request(app).get(`/employees/${FAKE_EMPLOYEE_ID}/statements?period=2026-06`).use(as("hr-user"))
+    expect(res.status).toBe(200)
+    const sheet = res.body.attendance.expenseSheet as StatementGrid
+    for (const t of ["被退回", "已取消", "草稿", "定額補貼", "綁預支"]) expect(findText(sheet, t)).toBeFalsy()
+    expect(cellAt(sheet, 6, 1)?.text).toBe("待核銷高鐵")
+    expect(cellAt(sheet, 6, 5)?.text).toBe("待核銷")
+    expect(cellAt(sheet, 7, 1)?.text).toBe("已核銷停車")
+    expect(cellAt(sheet, 7, 5)?.text).toBe("")
+    expect(cellAt(sheet, 6 + 36, 2)?.value).toBe(1349)
+    expect(findText(sheet, "其中待核銷 999 元")).toBeTruthy()
+    expect(findText(sheet, "製表：測試員工甲")).toBeTruthy()
+
+    const att = res.body.attendance.grid as StatementGrid
+    expect(cellAt(att, 43, 1)?.value).toBe(1349)
+    expect(att.cells.filter((c) => c.text === "（含待核銷 999）").length).toBe(2)
+    // 薪資單實發（只含已核銷的報銷）＋待核銷
+    expect(cellAt(att, 43, 13)?.value).toBe(net() + 999)
+
+    // xlsx 同值（支出表待核銷註記、出勤頁支出合計）
+    const xlsx = await request(app)
+      .get(`/employees/${FAKE_EMPLOYEE_ID}/attendance-statement.xlsx?period=2026-06`)
+      .use(as("hr-user"))
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks: Buffer[] = []
+        r.on("data", (c: Buffer) => chunks.push(c))
+        r.on("end", () => cb(null, Buffer.concat(chunks)))
+      })
+    const { default: ExcelJS } = await import("exceljs")
+    const wb = new ExcelJS.Workbook()
+    await wb.xlsx.load(xlsx.body as ArrayBuffer)
+    expect(wb.worksheets[2].getCell(7, 6).value).toBe("待核銷")
+    expect(wb.worksheets[2].getCell(7 + 36, 3).value).toBe(1349)
+    expect(wb.worksheets[0].getCell(44, 2).value).toBe(1349)
+    expect(wb.worksheets[0].getCell(44, 14).value).toBe(net() + 999)
+
+    // 員工端已定案薪資單只列已核銷的
+    const mine = await request(app).get("/my/payslip-statement?period=2026-06").use(as("target-user"))
+    expect(mine.body.expenses.map((e: { description: string }) => e.description)).toEqual(["已核銷停車"])
+  })
+
+  it("全部已核銷：不顯示待核銷註記", async () => {
+    fake.db.expense_claims = [claim("y1", 350, "05", "停車", "settled")]
+    const res = await request(app).get(`/employees/${FAKE_EMPLOYEE_ID}/statements?period=2026-06`).use(as("hr-user"))
+    const sheet = res.body.attendance.expenseSheet as StatementGrid
+    const att = res.body.attendance.grid as StatementGrid
+    expect(sheet.cells.some((c) => String(c.text ?? "").includes("待核銷"))).toBe(false)
+    expect(att.cells.some((c) => String(c.text ?? "").includes("待核銷"))).toBe(false)
+    expect(cellAt(att, 43, 13)?.value).toBe(net())
+  })
+
+  it("會計：報銷金額與待核銷註記看得到（不遮）", async () => {
+    const res = await request(app).get(`/employees/${FAKE_EMPLOYEE_ID}/statements?period=2026-06`).use(as("acc-user"))
+    const sheet = res.body.attendance.expenseSheet as StatementGrid
+    expect(cellAt(sheet, 6 + 36, 2)?.value).toBe(1349)
+    expect(findText(sheet, "其中待核銷 999 元")).toBeTruthy()
   })
 })
 

@@ -33,6 +33,9 @@ export interface ManualPunchRecord {
   type: PunchType
 }
 
+/** HR 補登打卡的目標是自己 → 拒絕（POST /punch/manual 403、匯入逐列錯誤）。 */
+export const SELF_MANUAL_PUNCH_FORBIDDEN = "self_manual_punch_forbidden"
+
 /**
  * 先用 `.in("id", …)` 確認員工屬於本租戶，不屬於的逐筆回 employee_not_found，其餘
  * 以 source='manual' 寫入 punch_records。records 為空或全部無效時不碰 DB（ids 為空）。
@@ -42,8 +45,19 @@ export async function importManualPunches(
   tenantId: string,
   records: ManualPunchRecord[],
   context = "importManualPunches",
+  opts: { selfEmployeeId?: string | null } = {},
 ): Promise<{ ids: string[]; errors: LineError[] }> {
   const errors: LineError[] = []
+  // 2026-11-10 業主：HR（含 platform_admin）不能補登自己的打卡——自己的卡一律走員工端補卡申請。
+  // 呼叫者本人的列逐筆回 self_manual_punch_forbidden，其餘照常。
+  const self = opts.selfEmployeeId ?? null
+  if (self) {
+    records = records.filter((record) => {
+      if (record.employeeId !== self) return true
+      errors.push({ line: record.line, error: SELF_MANUAL_PUNCH_FORBIDDEN })
+      return false
+    })
+  }
   if (records.length === 0) return { ids: [], errors }
 
   // 發薪鎖定：任何一列的打卡時間（租戶時區）落在已結算月 → 整批 409 period_closed，一筆都不寫

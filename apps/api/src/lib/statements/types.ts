@@ -72,6 +72,19 @@ export interface StatementExpense {
   amount: number
   description: string
   project: string | null
+  /** 已送出、HR 尚未月結核銷（2026-11-10）。舊資料沒有＝已核銷。 */
+  pending?: boolean
+}
+
+/** 報銷合計（含待核銷）與其中待核銷金額。 */
+export function expenseTotals(items: StatementExpense[] | null | undefined): { total: number; pending: number } {
+  let total = 0
+  let pending = 0
+  for (const e of items ?? []) {
+    total += e.amount
+    if (e.pending) pending += e.amount
+  }
+  return { total, pending }
 }
 
 export interface StatementSalaryInfo {

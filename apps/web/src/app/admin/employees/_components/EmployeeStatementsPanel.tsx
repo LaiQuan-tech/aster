@@ -207,7 +207,7 @@ export function EmployeeStatementsPanel({
         <p className="mb-3 rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-800 print:hidden">
           已核准凍結版本（核准於 {fmtDateTime(att?.approvedAt)}
           {att?.lockedAt ? `；鎖定於 ${fmtDateTime(att.lockedAt)}` : ""}）：逐日起迄、請假時數與假別、加班沿用核准當時的快照，不重算；
-          請假單的時段與事由、假日名稱為目前紀錄（表上有加註）；金額來源見下方說明。
+          請假單的時段與事由、假日名稱為目前紀錄（表上有加註）；支出表與表尾「支出」為目前即時的報銷紀錄（含已送出待核銷，表上有標註）；金額來源見下方說明。
         </p>
       )}
       {liveNote && (
