@@ -296,6 +296,10 @@ export function ApplicationSheet({
   );
   const dirtyCount = plan.dirtyCount;
   const validation = [...applicationSheetErrors(draft, { canFinance }), ...plan.errors];
+  const blockedHint = validation.length > 0
+    ? `無法儲存：${validation[0]}${validation.length > 1 ? `（還有 ${validation.length - 1} 項，見下方）` : ""}`
+    : null;
+  const blockedTitle = validation.length > 0 ? validation.join("\n") : undefined;
 
   const set = <K extends keyof ApplicationSheetDraft>(key: K, value: ApplicationSheetDraft[K]) =>
     setDraft((d) => ({ ...d, [key]: value }));
@@ -861,12 +865,15 @@ export function ApplicationSheet({
       <div className="no-print mx-auto mt-3 flex w-full max-w-[960px] flex-col gap-2">
         {editable ? (
           <div className="flex flex-wrap items-center gap-3">
-            <PrimaryButton onClick={save} disabled={saving || dirtyCount === 0 || validation.length > 0}>
-              {saving ? "儲存中…" : "儲存申請單"}
-            </PrimaryButton>
+            <span title={blockedTitle}>
+              <PrimaryButton onClick={save} disabled={saving || dirtyCount === 0 || validation.length > 0}>
+                {saving ? "儲存中…" : "儲存申請單"}
+              </PrimaryButton>
+            </span>
             {dirtyCount > 0 ? (
               <>
                 <span className="text-sm text-amber-700">{dirtyCount} 個欄位尚未儲存</span>
+                {blockedHint && <span className="text-sm text-red-600" data-testid="sheet-blocked-hint">{blockedHint}</span>}
                 <Button type="button" variant="ghost" size="sm" onClick={() => { setDraft(applicationSheetDraftOf(project, disciplines)); setReport(null); }}>還原</Button>
               </>
             ) : (
@@ -942,11 +949,11 @@ export function ApplicationSheet({
       {editable && dirtyCount > 0 && (
         <div role="status" className="no-print fixed inset-x-0 bottom-0 z-30 border-t border-amber-200 bg-amber-50/95 px-4 py-2 lg:pr-44 shadow-[0_-2px_8px_rgba(0,0,0,0.06)] backdrop-blur" data-testid="sheet-unsaved-bar">
           <div className="mx-auto flex max-w-[960px] flex-wrap items-center gap-x-3 gap-y-1.5 text-sm text-amber-900">
-            <span className="mr-auto">申請單有 {dirtyCount} 個欄位尚未儲存。</span>
+            <span className="mr-auto">申請單有 {dirtyCount} 個欄位尚未儲存。{blockedHint && <span className="ml-2 text-red-600">{blockedHint}</span>}</span>
             <Button type="button" variant="secondary" size="sm" onClick={() => document.querySelector('[data-testid="application-sheet"]')?.scrollIntoView({ behavior: "smooth", block: "start" })}>
               回到申請單
             </Button>
-            <Button type="button" variant="primary" size="sm" onClick={save} disabled={saving || validation.length > 0}>{saving ? "儲存中…" : "儲存申請單"}</Button>
+            <Button type="button" variant="primary" size="sm" onClick={save} disabled={saving || validation.length > 0} title={blockedTitle}>{saving ? "儲存中…" : "儲存申請單"}</Button>
           </div>
         </div>
       )}
