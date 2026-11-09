@@ -717,15 +717,11 @@ export default function EmployeeDetailPage() {
               checked={form.noNightPremium}
               onChange={(checked) => set("noNightPremium", checked)}
             />
-            {canGrantFinancials && (
+            {canGrantFinancials && form.role === "hr_admin" && (
               <Toggle
                 id="emp-group-financials"
                 label="可看集團財務"
-                hint={
-                  form.role === "hr_admin"
-                    ? "專案毛利、獎金批次的毛利欄、獎金分潤總表。集團總覽（首頁）只有平台管理員看得到，不受這個開關影響。只有平台管理員（老闆）能設定。"
-                    : "只對 HR 有效（這位目前不是 HR，勾了也看不到）。只有平台管理員（老闆）能設定。"
-                }
+                hint="可看營收、毛利等集團財務數字（首頁本年收入、專案獎金總表、毛利欄位）。只有平台管理員（老闆）能設定。"
                 checked={form.seeGroupFinancials}
                 onChange={(checked) => set("seeGroupFinancials", checked)}
               />
