@@ -7,6 +7,17 @@ import { getMeCached, resetEssState } from "@/lib/ess-state";
 import { loginRedirectPath } from "@/lib/mcp-safety";
 
 const SET_PASSWORD_PATH = "/auth/set-password";
+// 這個分頁曾經登入過（sessionStorage，分頁關掉就消失）：之後被登出就不帶 next，
+// 免得下一位登入者被帶去上一位的頁面。全新分頁開通知信連結才帶 next。
+const HAD_SESSION_KEY = "aster:had-session";
+
+function readHadSession(): boolean {
+  try {
+    return window.sessionStorage.getItem(HAD_SESSION_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 // /me 的 mustChangePassword 只在每個使用者第一次進站時查一次（module 快取），
 // 之後的 client-side 導頁不再重打。設完密碼的頁面呼叫 resetMustChangeCache()
@@ -49,13 +60,20 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   );
 
   useEffect(() => {
+    if (!loading && session) {
+      try {
+        window.sessionStorage.setItem(HAD_SESSION_KEY, "1");
+      } catch {
+        /* 無痕模式等：忽略 */
+      }
+    }
     if (!loading && !session) {
       // 登出（含別的分頁登出的廣播）：AuthGate 自己的快取與 ess-state 一起清。不清的話，
       // 同一分頁之後換人，或同一人拿 HR 配發的暫時密碼重登，會沿用舊的 mustChangePassword。
       resetMustChangeCache();
       essOwner = null;
       // 通知信的深連結（/ess/approvals?id=…）未登入時帶 next=，登入後回到該頁；login 頁再用 safeNextPath 驗一次。
-      router.replace(loginRedirectPath(pathname, window.location.search, window.location.origin));
+      router.replace(loginRedirectPath(pathname, window.location.search, window.location.origin, readHadSession()));
     }
   }, [loading, session, router, pathname]);
 

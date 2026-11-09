@@ -138,7 +138,11 @@ function ApprovalsView() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const view: ApprovalView = parseApprovalView(searchParams.get("status"));
-  const highlightId = parseHighlightId(searchParams.get("id"));
+  const urlHighlightId = parseHighlightId(searchParams.get("id"));
+  // 簽完（單從清單消失）後清掉醒目，不要跳出「此單已處理」。
+  const [dismissedHighlightId, setDismissedHighlightId] = useState<string | null>(null);
+  const highlightId = urlHighlightId && urlHighlightId === dismissedHighlightId ? null : urlHighlightId;
+  const highlightFoundRef = useRef<string | null>(null);
   const scrolledHighlightRef = useRef<string | null>(null);
   const statusParam = statusParamFor(view);
   const batchRow = hasBatchRow(view);
@@ -483,6 +487,10 @@ function ApprovalsView() {
   const showSkeleton = loading || !refsLoaded;
   // 通知信連結 ?status=pending&id=<requestId>：載入後捲到並醒目該列；不在本頁清單 → 提示（lib/approval-highlight.ts）。
   const highlight = highlightState(highlightId, showSkeleton, visible.map((row) => row.id));
+  useEffect(() => {
+    if (highlight === "found") highlightFoundRef.current = highlightId;
+    else if (highlight === "missing" && highlightId && highlightFoundRef.current === highlightId) setDismissedHighlightId(highlightId);
+  }, [highlight, highlightId]);
   useEffect(() => {
     if (highlight !== "found" || !highlightId || scrolledHighlightRef.current === highlightId) return;
     scrolledHighlightRef.current = highlightId;

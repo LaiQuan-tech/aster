@@ -27,9 +27,16 @@ export function safeNextPath(next: string | null | undefined, origin: string): s
 /**
  * AuthGate 未登入時的登入網址：站內 /ess、/admin 頁帶 `?next=<路徑＋query>`（login 頁再用 safeNextPath 驗一次），
  * 其他頁（或回跳不合法）只導 /login。
+ * `hadSession`：這個分頁曾經登入過（登出／換人／過期）→ 不帶 next，避免下一位登入者被帶去上一位的頁面；
+ * 只有「全新分頁直接開通知信連結」才帶 next。
  */
-export function loginRedirectPath(pathname: string | null | undefined, search: string | null | undefined, origin: string): string {
-  if (!pathname) return "/login";
+export function loginRedirectPath(
+  pathname: string | null | undefined,
+  search: string | null | undefined,
+  origin: string,
+  hadSession = false,
+): string {
+  if (!pathname || hadSession) return "/login";
   const query = search ? (search.startsWith("?") ? search : `?${search}`) : "";
   const next = safeNextPath(`${pathname}${query}`, origin);
   return next ? `/login?next=${encodeURIComponent(next)}` : "/login";

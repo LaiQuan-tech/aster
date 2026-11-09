@@ -195,6 +195,12 @@ export default function ApprovalsPage() {
   const allSelected = isAllSelected(selected, rowIds);
 
   const highlight = highlightState(highlightId, loading, [...rowIds, ...disbursements.map((d) => d.id)]);
+  // 從通知連結進來、簽完（單從清單消失）後清掉醒目，不要跳出「此單已處理」。
+  const highlightFoundRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (highlight === "found") highlightFoundRef.current = highlightId;
+    else if (highlight === "missing" && highlightId && highlightFoundRef.current === highlightId) setHighlightId(null);
+  }, [highlight, highlightId]);
   useEffect(() => {
     if (highlight !== "found" || !highlightId || scrolledHighlightRef.current === highlightId) return;
     scrolledHighlightRef.current = highlightId;

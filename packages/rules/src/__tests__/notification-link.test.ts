@@ -17,6 +17,9 @@ describe("notificationLink — 每種 type × 收件角色", () => {
       expect(notificationLink(n("approval", { requestId: "r1", event, recipientRole: "hr" }))).toBe("/admin/approvals?status=pending&id=r1")
     }
     expect(notificationLink(n("approval", { requestId: "r1", event: "submitted", stepKind: "fallback" }))).toBe("/ess/approvals?id=r1")
+    expect(notificationLink(n("approval", { requestId: "r1", event: "submitted", stepKind: "hr_admin" }))).toBe("/admin/approvals?status=pending&id=r1")
+    // 會計沒有後台簽核頁權限 → ESS
+    expect(notificationLink(n("approval", { requestId: "r1", event: "submitted", stepKind: "accountant" }))).toBe("/ess/approvals?id=r1")
     expect(notificationLink(n("approval", { event: "submitted" }))).toBe("/ess/approvals")
     expect(notificationLink(n("approval", { requestId: "r1", event: "approved" }))).toBe("/ess/requests?id=r1")
     expect(notificationLink(n("approval", { requestId: "r1", event: "rejected" }))).toBe("/ess/requests?id=r1")
@@ -57,7 +60,7 @@ describe("notificationLink — 每種 type × 收件角色", () => {
     )
     const compliance = { anomalyType: "seven_day_rule", from: "2026-09-01", to: "2026-09-30", subjectEmployeeId: "e1" }
     expect(notificationLink(n("anomaly", { ...compliance, recipientRole: "hr" }))).toBe("/admin/punch-records?from=2026-09-01&to=2026-09-30")
-    expect(notificationLink(n("anomaly", compliance))).toBe("/admin/punch-records?from=2026-09-01&to=2026-09-30")
+    expect(notificationLink(n("anomaly", compliance))).toBeNull()
     expect(notificationLink(n("anomaly", { ...compliance, recipientRole: "manager" }))).toBeNull()
   })
 
@@ -66,6 +69,7 @@ describe("notificationLink — 每種 type × 收件角色", () => {
     expect(notificationLink(n("late_report", { lateReportId: "x" }))).toBe("/ess/approvals")
     expect(notificationLink(n("bonus_run", { bonusRunId: "b1", event: "submitted" }))).toBe("/ess/approvals")
     expect(notificationLink(n("bonus_run", { bonusRunId: "b1", event: "approved" }))).toBe("/admin/bonus-runs/b1")
+    expect(notificationLink(n("bonus_run", { bonusRunId: "a/b?c", event: "approved" }))).toBe("/admin/bonus-runs/a%2Fb%3Fc")
     expect(notificationLink(n("profile_change_request", { changeRequestId: "c1" }))).toBe("/admin/employees")
     expect(notificationLink(n("profile_change_reviewed", { changeRequestId: "c1", status: "approved" }))).toBe("/ess/mydata")
     for (const t of ["calendar_import_draft", "calendar_import_revision", "calendar_import_fetch_failed"]) {

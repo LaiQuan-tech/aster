@@ -53,6 +53,9 @@ describe("loginRedirectPath（AuthGate 未登入導登入頁，帶 next）", () 
   });
   it("不合法或非站內頁 → 只導 /login", () => {
     expect(loginRedirectPath(null, null, ORIGIN)).toBe("/login");
+    // 這個分頁曾登入過（登出／換人）→ 不帶 next
+    expect(loginRedirectPath("/ess/approvals", "?id=abc", ORIGIN, true)).toBe("/login");
+    expect(loginRedirectPath("/ess/approvals", "?id=abc", ORIGIN, false)).toBe("/login?next=%2Fess%2Fapprovals%3Fid%3Dabc");
     expect(loginRedirectPath("//evil.com", "", ORIGIN)).toBe("/login");
     expect(loginRedirectPath("/auth/set-password", "?x=1", ORIGIN)).toBe("/login");
   });

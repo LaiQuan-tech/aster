@@ -36,7 +36,9 @@ const APPROVER_EVENTS = new Set(["submitted", "advanced", "reassigned", "reminde
 /** 申請單簽核連結：HR 覆核關（有後台權限）→ 後台簽核頁；其餘簽核人 → ESS 待我簽核。 */
 function requestApproverLink(payload: Record<string, unknown>): string {
   const requestId = str(payload.requestId)
-  const hr = str(payload.recipientRole) === "hr" || str(payload.stepKind) === "hr"
+  // accountant（會計）預設導覽沒有「假單與簽核」，後台簽核頁進不去 → 仍走 ESS。
+  const stepKind = str(payload.stepKind)
+  const hr = str(payload.recipientRole) === "hr" || stepKind === "hr" || stepKind === "hr_admin"
   if (hr) {
     return requestId ? `/admin/approvals?status=pending&id=${enc(requestId)}` : "/admin/approvals?status=pending"
   }
@@ -55,7 +57,7 @@ function requestApproverLink(payload: Record<string, unknown>): string {
  *   missing_punch       → `/ess/requests?kind=fix_punch&date=<date>`
  *   attendance_sheet    → 主管（submitted）`/ess/attendance-sheet/<sheetId>`；HR（manager_reviewed／beyond_cap_settlement）
  *                         `/admin/attendance-sheets/<sheetId>`；本人（approved／returned／reopened／locked）`/ess/attendance-sheet/<sheetId>`
- *   anomaly             → 本人 `/ess/punches?from&to`；合規預警（subjectEmployeeId）HR → `/admin/punch-records`，非 HR 主管 → null
+ *   anomaly             → 本人 `/ess/punches?from&to`；合規預警（subjectEmployeeId）recipientRole='hr' → `/admin/punch-records`，其他（含舊資料缺 recipientRole）→ null
  *   late_report         → `/ess/approvals`
  *   bonus_run           → 送審給老闆 `/ess/approvals`；核准／退回給 HR `/admin/bonus-runs/<id>`
  *   announcement        → `/ess/announcements`
@@ -116,7 +118,8 @@ export function notificationLink(n: NotificationLinkInput): string | null {
       const qs = params.toString()
       // 合規預警（七休一、例假出勤…）寄給主管與 HR，看的是別人的打卡；不是自己的打卡頁。
       if (str(payload.subjectEmployeeId)) {
-        if (role === "manager") return null
+        // 舊資料沒帶 recipientRole：不知道收件人是不是 HR，寧可 null（退回通知中心）也不讓非 HR 撞到後台權限頁。
+        if (role !== "hr") return null
         return qs ? `/admin/punch-records?${qs}` : "/admin/punch-records"
       }
       return qs ? `/ess/punches?${qs}` : "/ess/punches"
@@ -127,7 +130,7 @@ export function notificationLink(n: NotificationLinkInput): string | null {
       // 送審通知給老闆 → 簽核頁的「獎金批次」段；核准／退回通知給送審的 HR → 後台批次頁。
       if (str(payload.event) === "submitted" || str(payload.audience) === "boss") return "/ess/approvals"
       const id = str(payload.bonusRunId)
-      return id ? `/admin/bonus-runs/${id}` : "/admin/bonus-sheet"
+      return id ? `/admin/bonus-runs/${enc(id)}` : "/admin/bonus-sheet"
     }
     case "announcement":
       return "/ess/announcements"
