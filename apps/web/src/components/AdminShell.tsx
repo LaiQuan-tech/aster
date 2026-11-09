@@ -22,9 +22,12 @@
  *   導覽層守門，別把它當安全邊界。
  * - 共用資料（appName／features／待簽筆數）走 useEssState()（模組層快取，換頁不重打）；
  *   ToastProvider 在最外層，頁面用 useToast()。
+ * - 出勤分區的「打卡紀錄」分頁徽章「尚未決定 N」（2026-11-09 遲到說明併入打卡紀錄）：只在出勤分區、且
+ *   GET /late-reports?period=本月&decision=undecided 回 canDecide（老闆）時顯示；N＝本月還能決定的筆數
+ *   （排除自己的、已鎖定的，規則同 lib/ess-badges.ts）。決定後 late-bits 廣播 LATE_REPORTS_CHANGED_EVENT → 重抓。
  * - 保留 `admin-shell` class：globals.css 的手機表格 min-width 與列印隱藏 aside/header 都靠它。
  */
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import type { Me } from "@/lib/admin-api";
@@ -50,6 +53,9 @@ import {
 } from "@/lib/admin-nav";
 import { BottomSheet, Button, Icon, Pill, ToastProvider } from "@/components/ess-ui";
 import { essLogout } from "@/components/EssShell";
+import { getLateReports } from "@/lib/late-reports-api";
+import { countPendingLateReports } from "@/lib/ess-badges";
+import { LATE_REPORTS_CHANGED_EVENT, periodOf } from "@/lib/late-reason";
 
 /** 後台使用說明書（靜態站，aster-admin-guide 專案）。 */
 const ADMIN_GUIDE_URL = "https://aster-admin-guide.vercel.app"
@@ -185,18 +191,44 @@ const BRAND_OUTLINE: CSSProperties = { borderColor: "var(--brand)", color: "var(
  * `restricted`＝登入者是受限角色（會計，roleNav 不為 null）：HR 限定（hrOnly）的分頁同樣只會因為直開網址
  * 才出現在列上，標「僅限 HR／管理者」（不是「未開放給會計」——那暗示請 HR 勾選就能開）。
  */
+/** 本月老闆還能決定的遲到說明筆數（只在 enabled＝出勤分區時抓；不是老闆或失敗＝0）。 */
+function useMonthLateUndecided(enabled: boolean): number {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    const load = () => {
+      getLateReports({ period: periodOf(), decision: "undecided" })
+        .then((res) => {
+          if (!cancelled) setCount(countPendingLateReports({ ...res, lateReports: res.lateReports.filter((r) => !r.own) }, null));
+        })
+        .catch(() => !cancelled && setCount(0));
+    };
+    load();
+    window.addEventListener(LATE_REPORTS_CHANGED_EVENT, load);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(LATE_REPORTS_CHANGED_EVENT, load);
+    };
+  }, [enabled]);
+  return enabled ? count : 0;
+}
+
 function TabBar({
   tabs,
   activeKey,
   modules,
   allowedTabKeys,
   restricted,
+  badges,
 }: {
   tabs: AdminTab[];
   activeKey: string | null;
   modules: AdminModulesConfig;
   allowedTabKeys: ReadonlySet<string> | null;
   restricted: boolean;
+  /** 分頁 key → 徽章文字（例：punches →「尚未決定 3」）。 */
+  badges?: Readonly<Record<string, string>>;
 }) {
   return (
     <nav
@@ -219,6 +251,9 @@ function TabBar({
             style={active ? BRAND_OUTLINE : undefined}
           >
             {tab.label}
+            {badges?.[tab.key] && (
+              <span className="ml-1.5 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">{badges[tab.key]}</span>
+            )}
             {disabled && (
               <Pill tone="gray" className="ml-1.5">
                 未啟用
@@ -305,6 +340,8 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
     ? new Set<string>(roleNav.tabs[resolved.section] as string[])
     : null;
   const subTabs = subTabsFor(resolved.section, resolved.tab);
+  const lateUndecided = useMonthLateUndecided(resolved.section === "attendance");
+  const tabBadges = lateUndecided > 0 ? { punches: `尚未決定 ${lateUndecided}` } : undefined;
   // 直開未開放給這個角色的網址：不渲染頁面本體（見檔頭說明）。HR／平台管理員永遠 true。
   const pathAllowed = isAdminPathAllowed({ pathname, roleNav, modules, canSeeGroupFinancials });
   const roleLabel = me.role === "accountant" ? "會計" : "此角色";
@@ -412,7 +449,7 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
             </div>
             {tabs.length >= 2 && (
               <div className="px-3 pb-2">
-                <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} allowedTabKeys={allowedTabKeys} restricted={roleNav !== null} />
+                <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} allowedTabKeys={allowedTabKeys} restricted={roleNav !== null} badges={tabBadges} />
               </div>
             )}
             {subTabs.length > 0 && (
@@ -451,7 +488,7 @@ export function AdminShell({ me, children }: { me: Me; children: ReactNode }) {
                     {resolved.desc && <p className="mt-1 text-sm text-gray-500">{resolved.desc}</p>}
                     {tabs.length >= 2 && (
                       <div className="mt-4">
-                        <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} allowedTabKeys={allowedTabKeys} restricted={roleNav !== null} />
+                        <TabBar tabs={tabs} activeKey={resolved.tab} modules={modules} allowedTabKeys={allowedTabKeys} restricted={roleNav !== null} badges={tabBadges} />
                       </div>
                     )}
                     {subTabs.length > 0 && <SubTabBar subTabs={subTabs} activeKey={resolved.sub} />}

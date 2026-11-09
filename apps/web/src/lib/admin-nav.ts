@@ -152,7 +152,7 @@ export const ADMIN_SECTIONS: readonly AdminSection[] = [
   { key: "home", label: "首頁", icon: "home", href: "/admin", desc: "老闆數字與需要處理的事項" },
   { key: "finance", label: "專案與財務", icon: "finance", href: "/admin/projects", desc: "專案、請款放款、獎金與名冊" },
   { key: "approvals", label: "假單與簽核", icon: "approvals", href: "/admin/approvals", desc: "簽核表單、假別餘額與月底核銷" },
-  { key: "attendance", label: "出勤", icon: "attendance", href: "/admin/punch-records", desc: "打卡紀錄、出勤統計表與月表簽核、遲到說明與值日" },
+  { key: "attendance", label: "出勤", icon: "attendance", href: "/admin/punch-records", desc: "打卡紀錄與遲到說明、出勤統計表與月表簽核、值日" },
   { key: "payroll", label: "薪資與費用", icon: "payroll", href: "/admin/payroll", desc: "薪資、薪資單、稅務、報銷與預支" },
   { key: "people", label: "人員", icon: "people", href: "/admin/employees", desc: "員工主檔與部門組織圖" },
   { key: "announce", label: "公告與資訊", icon: "announce", href: "/admin/announcements", desc: "公告與公司資訊頁" },
@@ -286,7 +286,8 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       label: "打卡紀錄",
       href: "/admin/punch-records",
       title: "打卡紀錄維護",
-      desc: "查詢全公司打卡並進行補登",
+      // 2026-11-09 原「遲到說明」分頁（/admin/late-reports，key lateReports）併入成「遲到說明」檢視；舊網址走 ADMIN_REDIRECTS。
+      desc: "查詢全公司打卡並進行補登；當日總覽看遲到原因與全勤決定，「遲到說明」檢視逐筆決定是否影響全勤",
     },
     {
       key: "statements",
@@ -295,13 +296,6 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       title: "出勤統計表",
       // 2026-11-09 原「出勤月表與月結」（/admin/attendance-sheets，key sheets）併入這頁；舊網址走 ADMIN_REDIRECTS。
       desc: "依月份與部門看全員月表狀態、異常與月結進度，點員工即看出勤統計表（出勤／請假單／支出表）並核准／退回／重開；可產生月表、匯出整批 Excel",
-    },
-    {
-      key: "lateReports",
-      label: "遲到說明",
-      href: "/admin/late-reports",
-      title: "遲到說明",
-      desc: "超過上班時間（彈性上班最晚 10:00）才打上班卡的遲到原因；老闆決定是否影響全勤，沒決定視為影響",
     },
     {
       key: "duty",
@@ -725,6 +719,8 @@ export const ADMIN_REDIRECTS: readonly AdminRedirect[] = [
   // 單張月表 → ?sheet=:id，新頁用 GET /attendance-sheets/:id 換成員工＋月份（通知信、站內通知的舊連結靠這條）。
   { source: "/admin/attendance-sheets", destination: "/admin/attendance-statements" },
   { source: "/admin/attendance-sheets/:id", destination: "/admin/attendance-statements?sheet=:id" },
+  // 2026-11-09「遲到說明」分頁併入打卡紀錄的「遲到說明」檢視（帶的 query 原樣保留）。
+  { source: "/admin/late-reports", destination: "/admin/punch-records?view=late" },
 ];
 
 /* ------------------------------------------------------------- 路由表 --- */
@@ -890,9 +886,9 @@ export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
  * 已合併掉的舊分頁 key → 現在承接它的分頁 key。租戶自訂的會計範圍（tenants.features.roles.accountant）
  * 存的是分頁 key，合併後舊 key 要換成新 key，不然勾過舊分頁的會計會看不到合併後的頁。
  * 2026-10-27：receivables（請款與未收款）併入 disbursements（請款與放款）。
- * 2026-11-09：sheets（出勤月表與月結）併入 statements（出勤統計表）。
+ * 2026-11-09：sheets（出勤月表與月結）併入 statements（出勤統計表）；lateReports（遲到說明）併入 punches（打卡紀錄）。
  */
-export const LEGACY_TAB_ALIASES: Readonly<Record<string, string>> = { receivables: "disbursements", sheets: "statements" };
+export const LEGACY_TAB_ALIASES: Readonly<Record<string, string>> = { receivables: "disbursements", sheets: "statements", lateReports: "punches" };
 
 const SECTION_KEY_SET: ReadonlySet<string> = new Set<string>(ADMIN_SECTIONS.map((s) => s.key));
 

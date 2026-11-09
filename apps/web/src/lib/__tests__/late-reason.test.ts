@@ -90,3 +90,19 @@ describe("lateReasonRequiredOf（認出 POST /punch 的 400 late_reason_required
     expect(lateReasonRequiredOf("nope")).toBeNull();
   });
 });
+
+describe("lateReportsOnDay（當日總覽的遲到原因欄）", () => {
+  it("只留那一天；同一人多筆取打卡最早的", async () => {
+    const { lateReportsOnDay } = await import("../late-reason");
+    const reports = [
+      { id: "a", employeeId: "e1", workDate: "2026-11-09", punchAt: "2026-11-09T02:30:00Z" },
+      { id: "b", employeeId: "e1", workDate: "2026-11-09", punchAt: "2026-11-09T02:10:00Z" },
+      { id: "c", employeeId: "e2", workDate: "2026-11-08", punchAt: "2026-11-08T02:30:00Z" },
+      { id: "d", employeeId: "e3", workDate: "2026-11-09", punchAt: "2026-11-09T03:00:00Z" },
+    ];
+    const map = lateReportsOnDay(reports, "2026-11-09");
+    expect([...map.keys()].sort()).toEqual(["e1", "e3"]);
+    expect(map.get("e1")?.id).toBe("b");
+    expect(lateReportsOnDay(reports, "2026-11-10").size).toBe(0);
+  });
+});

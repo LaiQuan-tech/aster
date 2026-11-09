@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, Empty, ErrorText } from "@/components/admin-ui";
 import { sheet } from "@/lib/sheet-styles";
 import {
@@ -14,7 +14,10 @@ import {
   type OverviewFilter,
   type PunchOverview,
 } from "@/lib/punch-overview";
+import { getLateReports, type LateReport } from "@/lib/late-reports-api";
+import { lateReportsOnDay } from "@/lib/late-reason";
 import { PunchTime, Tag } from "./punch-bits";
+import { LateDecisionControls, LateDecisionStatus, useLateDecider } from "./late-bits";
 
 const inputCls = "rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 
@@ -34,7 +37,12 @@ function Stat({ label, value, tone, active, onClick }: { label: string; value: n
   );
 }
 
-/** 當日總覽：一人一列（含沒打卡的），預設今天。 */
+/**
+ * 當日總覽：一人一列（含沒打卡的），預設今天。
+ * 2026-11-09 多「遲到原因」「全勤」兩欄：資料用遲到說明 API（GET /late-reports 只能依月份查 → 查那天所在月份、
+ * 前端依上班日過濾）；遲到的人沒填說明顯示「未填說明」；老闆（API 回 canDecide）在該列可填備註並決定，
+ * 決定邏輯與「遲到說明」檢視共用（./late-bits）。
+ */
 /** 「今天」頁自動刷新間隔（頁面可見時）。 */
 const AUTO_REFRESH_MS = 5 * 60 * 1000;
 
@@ -107,6 +115,34 @@ export function DayView({ filter }: { filter: OverviewFilter }) {
 
   const shownEmployees = data ? filterEmployeesByDay(data.employees, day, statFilter) : [];
 
+  // 遲到說明（那天所在月份；換月份才重抓）。讀不到不擋總覽，只是兩欄顯示「—」。
+  const lateMonth = day ? day.slice(0, 7) : "";
+  const [lateReports, setLateReports] = useState<LateReport[]>([]);
+  const [canDecide, setCanDecide] = useState(false);
+  const [lateLoaded, setLateLoaded] = useState(false);
+  const lateSeq = useRef(0);
+  const loadLate = useCallback(async () => {
+    if (!lateMonth) return;
+    const seq = ++lateSeq.current;
+    try {
+      const res = await getLateReports({ period: lateMonth, employeeId: filter.employeeId });
+      if (seq !== lateSeq.current) return;
+      setLateReports(res.lateReports);
+      setCanDecide(res.canDecide);
+      setLateLoaded(true);
+    } catch {
+      if (seq === lateSeq.current) {
+        setLateReports([]);
+        setLateLoaded(false);
+      }
+    }
+  }, [lateMonth, filter.employeeId]);
+  useEffect(() => {
+    void loadLate();
+  }, [loadLate, data]);
+  const lateByEmp = useMemo(() => lateReportsOnDay(lateReports, day), [lateReports, day]);
+  const decider = useLateDecider((next) => setLateReports((prev) => prev.map((r) => (r.id === next.id ? next : r))));
+
   return (
     <Card>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -160,12 +196,16 @@ export function DayView({ filter }: { filter: OverviewFilter }) {
                 <th className={`${sheet.th} w-[110px]`}>上班時間</th>
                 <th className={`${sheet.th} w-[110px]`}>下班時間</th>
                 <th className={`${sheet.th} w-[70px]`}>工時</th>
-                <th className={`${sheet.th} text-left`}>狀態</th>
+                <th className={`${sheet.th} min-w-[140px] text-left`}>狀態</th>
+                <th className={`${sheet.th} min-w-[160px] text-left`}>遲到原因</th>
+                <th className={`${sheet.th} ${canDecide ? "min-w-[240px]" : "min-w-[150px]"} text-left`}>全勤</th>
               </tr>
             </thead>
             <tbody>
               {shownEmployees.map((e) => {
                 const d = e.days.find((x) => x.date === day);
+                const report = lateByEmp.get(e.id) ?? null;
+                const isLate = !!d && d.lateMinutes > 0;
                 return (
                   <tr key={e.id} className={sheet.row}>
                     <td className={sheet.td}>
@@ -200,6 +240,27 @@ export function DayView({ filter }: { filter: OverviewFilter }) {
                         </div>
                       ) : (
                         <span className="text-gray-400">未到職</span>
+                      )}
+                    </td>
+                    <td className={`${sheet.td} max-w-xs whitespace-pre-wrap break-words`}>
+                      {report ? (
+                        <span className="text-gray-800">{report.reason}</span>
+                      ) : isLate ? (
+                        <span className="text-amber-700">{lateLoaded ? "未填說明" : "—"}</span>
+                      ) : (
+                        <span className="text-gray-300">—</span>
+                      )}
+                    </td>
+                    <td className={sheet.td}>
+                      {report ? (
+                        <div className="space-y-2">
+                          <div>
+                            <LateDecisionStatus report={report} />
+                          </div>
+                          {canDecide && <LateDecisionControls report={report} decider={decider} />}
+                        </div>
+                      ) : (
+                        <span className="text-gray-300">—</span>
                       )}
                     </td>
                   </tr>

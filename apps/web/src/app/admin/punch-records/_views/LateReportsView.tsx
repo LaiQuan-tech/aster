@@ -1,27 +1,23 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Card, Empty, ErrorText, Pill, inputCls, labelCls, useToast } from "@/components/admin-ui";
-import { fmtDateWithWeekday, fmtDateTime, fmtHm } from "@/lib/ess-format";
-import { invalidateEssState } from "@/lib/ess-state";
-import {
-  decideLateReport,
-  getLateReports,
-  lateDecisionErrorMessage,
-  OWN_LATE_REPORT_NOTE,
-  type LateDecisionFilter,
-  type LateReport,
-} from "@/lib/late-reports-api";
-import { lateDecisionLabel, lateDecisionTone, periodOf, sortLateReports } from "@/lib/late-reason";
-
+import { Card, Empty, ErrorText, inputCls, labelCls } from "@/components/admin-ui";
+import { fmtDateWithWeekday, fmtHm } from "@/lib/ess-format";
+import { getLateReports, type LateDecisionFilter, type LateReport } from "@/lib/late-reports-api";
+import { periodOf, sortLateReports } from "@/lib/late-reason";
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
+import { LateDecisionControls, LateDecisionStatus, useLateDecider } from "./late-bits";
+
 /**
- * 後台「出勤 → 遲到說明」（2026-10-11 業主拍板）。
+ * 打卡紀錄 › 「遲到說明」檢視（2026-10-11 業主拍板；2026-11-09 原後台頁 /admin/late-reports 搬來這裡，
+ * 舊網址轉址到 /admin/punch-records?view=late，帶的 query 保留：period／decision／employee 會套用）。
  *
  * 當天第一張上班卡遲到（沒排班的工作日晚於 10:00、有排班晚於班別上班時間）員工必填原因；這裡列出來，
  * 依月份、員工、決定狀態篩選。**只有老闆**（設定裡的最後簽核人 fallbackApproverEmpId）看得到
  * 「影響全勤／不影響全勤」按鈕（可改決定、可加備註），其他人唯讀。沒決定視為影響全勤。
  */
+
+const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
 const DECISION_OPTIONS: { value: LateDecisionFilter; label: string }[] = [
   { value: "all", label: "全部" },
@@ -30,8 +26,7 @@ const DECISION_OPTIONS: { value: LateDecisionFilter; label: string }[] = [
   { value: "exempt", label: "不影響全勤" },
 ];
 
-export default function LateReportsPage() {
-  const toast = useToast();
+export function LateReportsView() {
   const [period, setPeriod] = useState(periodOf());
   const [decision, setDecision] = useState<LateDecisionFilter>("all");
   const [employeeId, setEmployeeId] = useState("");
@@ -39,8 +34,20 @@ export default function LateReportsPage() {
   const [canDecide, setCanDecide] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [notes, setNotes] = useState<Record<string, string>>({});
+  const [queryReady, setQueryReady] = useState(false);
+  const decider = useLateDecider((next) => setReports((prev) => prev.map((r) => (r.id === next.id ? next : r))));
+
+  // 舊網址帶來的篩選（掛載後才讀，避免 SSR 不一致）。
+  useEffect(() => {
+    const qs = new URLSearchParams(window.location.search);
+    const p = qs.get("period");
+    if (p && PERIOD_RE.test(p)) setPeriod(p);
+    const d = qs.get("decision");
+    if (d && DECISION_OPTIONS.some((o) => o.value === d)) setDecision(d as LateDecisionFilter);
+    const e = qs.get("employee") ?? qs.get("employeeId");
+    if (e) setEmployeeId(e);
+    setQueryReady(true);
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -57,8 +64,8 @@ export default function LateReportsPage() {
   }, [period, decision]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (queryReady) void load();
+  }, [load, queryReady]);
 
   // 員工下拉：用這次載入的清單組（同一人只出現一次，依姓名排序）。
   const employees = useMemo(() => {
@@ -72,21 +79,6 @@ export default function LateReportsPage() {
     [reports, employeeId],
   );
   const undecidedCount = rows.filter((r) => r.decision === null).length;
-
-  async function decide(report: LateReport, next: "affects" | "exempt") {
-    setBusyId(report.id);
-    try {
-      const res = await decideLateReport(report.id, next, notes[report.id]);
-      setReports((prev) => prev.map((r) => (r.id === report.id ? res.lateReport : r)));
-      setNotes((prev) => ({ ...prev, [report.id]: "" }));
-      invalidateEssState(); // 員工端「簽核」紅點含老闆待決定的遲到說明（lib/ess-badges.ts），立刻重抓、不等 30 秒 TTL
-      toast.show(`${report.employeeName}：${next === "exempt" ? "不影響全勤" : "影響全勤"}`, "success");
-    } catch (err) {
-      toast.show(lateDecisionErrorMessage(err), "error");
-    } finally {
-      setBusyId(null);
-    }
-  }
 
   return (
     <>
@@ -166,7 +158,6 @@ export default function LateReportsPage() {
               </thead>
               <tbody>
                 {rows.map((r) => {
-                  const busy = busyId === r.id;
                   return (
                     <tr key={r.id} className="border-b border-gray-50 align-top">
                       <td className="whitespace-nowrap py-2 pr-3 tabular-nums">{fmtDateWithWeekday(r.workDate)}</td>
@@ -175,46 +166,11 @@ export default function LateReportsPage() {
                       <td className="py-2 pr-3 text-right tabular-nums">{r.lateMinutes} 分</td>
                       <td className="max-w-xs whitespace-pre-wrap break-words py-2 pr-3 text-gray-800">{r.reason}</td>
                       <td className="py-2 pr-3">
-                        <Pill tone={lateDecisionTone(r.decision)}>{lateDecisionLabel(r.decision)}</Pill>
-                        {r.decidedAt && (
-                          <p className="mt-1 text-xs text-gray-400">
-                            {r.decidedByName ?? "老闆"} · {fmtDateTime(r.decidedAt)}
-                          </p>
-                        )}
-                        {r.decisionNote && <p className="mt-1 text-xs text-gray-500">備註：{r.decisionNote}</p>}
+                        <LateDecisionStatus report={r} />
                       </td>
-                      {canDecide && r.own && (
-                        <td className="py-2 text-xs text-gray-500">{OWN_LATE_REPORT_NOTE}</td>
-                      )}
-                      {canDecide && !r.own && (
+                      {canDecide && (
                         <td className="py-2">
-                          <div className="flex min-w-[14rem] flex-col gap-2">
-                            <input
-                              className={inputCls}
-                              placeholder="備註（選填）"
-                              maxLength={500}
-                              value={notes[r.id] ?? ""}
-                              onChange={(e) => setNotes((prev) => ({ ...prev, [r.id]: e.target.value }))}
-                            />
-                            <div className="flex gap-2">
-                              <Button
-                                size="sm"
-                                variant={r.decision === "affects" ? "primary" : "secondary"}
-                                disabled={busy}
-                                onClick={() => void decide(r, "affects")}
-                              >
-                                影響全勤
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant={r.decision === "exempt" ? "primary" : "secondary"}
-                                disabled={busy}
-                                onClick={() => void decide(r, "exempt")}
-                              >
-                                不影響全勤
-                              </Button>
-                            </div>
-                          </div>
+                          <LateDecisionControls report={r} decider={decider} />
                         </td>
                       )}
                     </tr>

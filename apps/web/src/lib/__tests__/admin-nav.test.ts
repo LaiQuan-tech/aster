@@ -215,7 +215,9 @@ describe("resolveAdminPath：最長前綴", () => {
       module: "attendanceSettlement",
     });
     expect(resolveAdminPath("/admin/attendance-statements")).toMatchObject({ section: "attendance", tab: "statements", title: "出勤統計表" });
-    expect(resolveAdminPath("/admin/late-reports")).toMatchObject({ section: "attendance", tab: "lateReports", title: "遲到說明" });
+    // 2026-11-09 遲到說明併入打卡紀錄（?view=late）：轉址目標解析成打卡紀錄分頁。
+    expect(resolveAdminPath("/admin/punch-records?view=late")).toMatchObject({ section: "attendance", tab: "punches" });
+    expect(ADMIN_ROUTES.some((r) => r.prefix === "/admin/late-reports")).toBe(false);
   });
 
   it("query／尾斜線不影響：/admin/approvals?status=all 是簽核分頁", () => {
@@ -461,8 +463,8 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
     ]);
     expect(tabsForSection("announce", { knowledge: true }).map((t) => t.key)).toEqual(["announcements", "companyInfo", "knowledge"]);
     // 班表（/admin/schedules）2026-10-11 移除；班別在設定區、值日／總機保留。
-    // 2026-11-09：出勤月表與月結（sheets）併入出勤統計表（statements）。
-    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "statements", "lateReports", "duty"]);
+    // 2026-11-09：出勤月表與月結（sheets）併入出勤統計表（statements）；遲到說明（lateReports）併入打卡紀錄（punches）。
+    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "statements", "duty"]);
   });
 
   it("subTabsFor：有 children 回子分頁（含 href）、沒有回 []、null 回 []", () => {
@@ -777,7 +779,7 @@ describe("ADMIN_ROUTES", () => {
 });
 
 describe("ADMIN_REDIRECTS 與 next.config.ts", () => {
-  it("十三條轉址：attendance-sheets（含 :id → ?sheet=:id）→ attendance-statements、form-records → approvals?status=all、org-chart → departments、onboarding／birthday-gifts → employees、projects/overview／annual／alerts、stamp-duty → projects、group-overview → 首頁 #group-overview、bonus-runs → bonus-sheet、projects/receivables → disbursements?view=receivables", () => {
+  it("十四條轉址：late-reports → punch-records?view=late、attendance-sheets（含 :id → ?sheet=:id）→ attendance-statements、form-records → approvals?status=all、org-chart → departments、onboarding／birthday-gifts → employees、projects/overview／annual／alerts、stamp-duty → projects、group-overview → 首頁 #group-overview、bonus-runs → bonus-sheet、projects/receivables → disbursements?view=receivables", () => {
     expect(ADMIN_REDIRECTS).toEqual([
       { source: "/admin/form-records", destination: "/admin/approvals?status=all" },
       { source: "/admin/org-chart", destination: "/admin/departments" },
@@ -792,6 +794,7 @@ describe("ADMIN_REDIRECTS 與 next.config.ts", () => {
       { source: "/admin/projects/receivables", destination: "/admin/disbursements?view=receivables" },
       { source: "/admin/attendance-sheets", destination: "/admin/attendance-statements" },
       { source: "/admin/attendance-sheets/:id", destination: "/admin/attendance-statements?sheet=:id" },
+      { source: "/admin/late-reports", destination: "/admin/punch-records?view=late" },
     ]);
     // 轉址目標都解析得到自己的路由
     for (const redirect of ADMIN_REDIRECTS) {
@@ -877,7 +880,7 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
   });
 
   it("舊分頁 key receivables（2026-10-27 併入請款與放款）：存過舊 key 的會計範圍視同勾了 disbursements", () => {
-    expect(LEGACY_TAB_ALIASES).toEqual({ receivables: "disbursements", sheets: "statements" });
+    expect(LEGACY_TAB_ALIASES).toEqual({ receivables: "disbursements", sheets: "statements", lateReports: "punches" });
     // 設定頁再勾／取消時舊 key 換成新 key，不會被當成不認得的 key 丟掉
     expect(nextRoleTabs("finance", ["projects", "receivables"], "directory", true)).toEqual(["projects", "disbursements", "directory"]);
     expect(nextRoleTabs("finance", ["projects", "receivables"], "disbursements", false)).toEqual(["projects"]);
@@ -896,6 +899,9 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
     expect(tabsForSection("attendance", null, { roleNav: legacyOnly }).map((t) => t.key)).toEqual(["statements"]);
     expect(isAdminPathAllowed({ pathname: "/admin/attendance-statements?employee=e1&period=2026-10", roleNav: legacyOnly })).toBe(true);
     expect(nextRoleTabs("attendance", ["sheets"], "punches", true)).toEqual(["punches", "statements"]);
+    // 遲到說明（lateReports）併入打卡紀錄：勾過遲到說明的會計看得到打卡紀錄
+    const lateOnly = roleNavOf("accountant", { roles: { accountant: { sections: ["attendance"], tabs: { attendance: ["lateReports"] } } } });
+    expect(tabsForSection("attendance", null, { roleNav: lateOnly }).map((t) => t.key)).toEqual(["punches"]);
   });
 
   it("目前的 hrOnly 分頁只有系統／未核准加班（2026-11；下面的路徑與提示測試會自動涵蓋）", () => {

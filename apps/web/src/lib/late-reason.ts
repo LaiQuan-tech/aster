@@ -61,3 +61,24 @@ export function periodOf(now: Date = new Date()): string {
   const m = now.getMonth() + 1;
   return `${now.getFullYear()}-${m < 10 ? `0${m}` : m}`;
 }
+
+/**
+ * 某一天每位員工的遲到說明（2026-11-09 打卡紀錄「當日總覽」多「遲到原因／全勤」兩欄）。
+ * API 只能依月份查（GET /late-reports?period=），前端用月份查完再依上班日過濾；同一人同一天理論上只有一筆，
+ * 萬一有多筆取打卡時間最早的那筆（第一張上班卡）。
+ */
+export function lateReportsOnDay<T extends { employeeId: string; workDate: string; punchAt: string }>(
+  reports: readonly T[],
+  day: string,
+): Map<string, T> {
+  const map = new Map<string, T>();
+  for (const r of reports) {
+    if (r.workDate !== day) continue;
+    const prev = map.get(r.employeeId);
+    if (!prev || r.punchAt < prev.punchAt) map.set(r.employeeId, r);
+  }
+  return map;
+}
+
+/** 決定遲到說明後廣播的視窗事件：後台分頁徽章（AdminShell「打卡紀錄 · 尚未決定 N」）收到就重抓。 */
+export const LATE_REPORTS_CHANGED_EVENT = "aster:late-reports-changed";

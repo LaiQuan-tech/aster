@@ -85,7 +85,7 @@ export const bossLinks = {
   /** 老闆專屬：獎金批次列表（「獎金分潤」分頁上方的發放批次，老闆點進批次核准）；角色開不了後台那頁時改連 ESS 簽核頁。 */
   bonusRuns: "/admin/bonus-sheet",
   /** 老闆專屬：遲到說明（老闆在這頁決定是否影響全勤）；開不了時改連 ESS 簽核頁。 */
-  lateReports: "/admin/late-reports",
+  lateReports: "/admin/punch-records?view=late",
   essApprovals: "/ess/approvals",
 } as const;
 

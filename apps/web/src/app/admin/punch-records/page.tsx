@@ -6,26 +6,44 @@ import { getDepartments, getEmployees, type Department, type Employee } from "@/
 import { RecordsView } from "./_views/RecordsView";
 import { DayView } from "./_views/DayView";
 import { WeekView } from "./_views/WeekView";
-
+import { LateReportsView } from "./_views/LateReportsView";
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
-type Tab = "day" | "week" | "records";
+
+type Tab = "day" | "week" | "records" | "late";
 
 const TABS: { value: Tab; label: string }[] = [
   { value: "day", label: "當日總覽" },
   { value: "week", label: "週表" },
   { value: "records", label: "打卡紀錄" },
+  { value: "late", label: "遲到說明" },
 ];
+
+/** 網址 ?view=（week／records／late；當日總覽＝預設、不寫）。舊網址 /admin/late-reports 轉到 ?view=late。 */
+function parseTab(v: string | null): Tab {
+  return v === "week" || v === "records" || v === "late" ? v : "day";
+}
 
 const inputCls = "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none";
 const labelCls = "mb-1 block text-xs font-medium text-gray-500";
 
 /**
  * 後台出勤 › 打卡紀錄（2026-10-27 業主：「這一頁我要一目瞭然，每位員工的上下班時間」）。
- * 三個分頁：當日總覽（預設）／週表／打卡紀錄（原本的流水帳，篩選與欄位不變）。
- * 單位、員工篩選三個分頁共用（打卡紀錄分頁沿用它原本那一排篩選，綁同一份狀態）。
+ * 四個檢視：當日總覽（預設）／週表／打卡紀錄（原本的流水帳，篩選與欄位不變）／遲到說明（2026-11-09 原
+ * 「遲到說明」分頁 /admin/late-reports 搬來，自帶月份／決定狀態／員工篩選）。檢視記在網址 ?view=。
+ * 單位、員工篩選前三個檢視共用（打卡紀錄分頁沿用它原本那一排篩選，綁同一份狀態）。
  */
 export default function PunchRecordsPage() {
-  const [tab, setTab] = useState<Tab>("day");
+  const [tab, setTabState] = useState<Tab>("day");
+  useEffect(() => {
+    setTabState(parseTab(new URLSearchParams(window.location.search).get("view")));
+  }, []);
+  const setTab = (next: Tab) => {
+    setTabState(next);
+    const url = new URL(window.location.href);
+    if (next === "day") url.searchParams.delete("view");
+    else url.searchParams.set("view", next);
+    window.history.replaceState(null, "", url);
+  };
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [fDept, setFDept] = useState("");
@@ -55,7 +73,7 @@ export default function PunchRecordsPage() {
     <>
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <Segmented options={TABS} value={tab} onChange={setTab} aria-label="打卡紀錄檢視方式" />
-        {tab !== "records" && (
+        {(tab === "day" || tab === "week") && (
           <div className="flex flex-wrap items-end gap-3">
             <div className="w-40">
               <label className={labelCls}>單位</label>
@@ -82,6 +100,7 @@ export default function PunchRecordsPage() {
 
       {tab === "day" && <DayView filter={filter} />}
       {tab === "week" && <WeekView filter={filter} />}
+      {tab === "late" && <LateReportsView />}
       {tab === "records" && (
         <RecordsView
           employees={employees}

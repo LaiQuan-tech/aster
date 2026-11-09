@@ -31,6 +31,7 @@ const ADMIN_REDIRECTS = [
   { source: "/admin/projects/receivables", destination: "/admin/disbursements?view=receivables" },
   { source: "/admin/attendance-sheets", destination: "/admin/attendance-statements" },
   { source: "/admin/attendance-sheets/:id", destination: "/admin/attendance-statements?sheet=:id" },
+  { source: "/admin/late-reports", destination: "/admin/punch-records?view=late" },
 ];
 
 const nextConfig: NextConfig = {
