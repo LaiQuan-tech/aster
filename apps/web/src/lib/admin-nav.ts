@@ -16,7 +16,7 @@
  *   - `ADMIN_REDIRECTS`：舊網址轉址；apps/web/next.config.ts 維持同一份（單元測試對照）。
  *   - 角色導覽（2026-09-23 W4 會計角色）：`RoleNavConfig`／`ACCOUNTANT_DEFAULT_NAV`／
  *     `roleNavOf(role, features)`／`sectionsForRole()`／`tabsForSection(…, { roleNav })`——
- *     會計只看得到「專案與財務／出勤月表／報銷預支／員工」，以及「設定」裡的「選項清單」
+ *     會計只看得到「專案與財務／出勤統計表／報銷預支／員工」，以及「設定」裡的「選項清單」
  *     （2026-10-10：客戶分類的管理權限比照客戶名冊的寫入，會計也能管），範圍可由
  *     tenants.features.roles.accountant 覆蓋（設定 → 進階功能）。這只是導覽可見性，
  *     真正的守門在 API（requireFinance／canSeeBonus）。
@@ -152,7 +152,7 @@ export const ADMIN_SECTIONS: readonly AdminSection[] = [
   { key: "home", label: "首頁", icon: "home", href: "/admin", desc: "老闆數字與需要處理的事項" },
   { key: "finance", label: "專案與財務", icon: "finance", href: "/admin/projects", desc: "專案、請款放款、獎金與名冊" },
   { key: "approvals", label: "假單與簽核", icon: "approvals", href: "/admin/approvals", desc: "簽核表單、假別餘額與月底核銷" },
-  { key: "attendance", label: "出勤", icon: "attendance", href: "/admin/punch-records", desc: "打卡紀錄、出勤月表、遲到說明與值日" },
+  { key: "attendance", label: "出勤", icon: "attendance", href: "/admin/punch-records", desc: "打卡紀錄、出勤統計表與月表簽核、遲到說明與值日" },
   { key: "payroll", label: "薪資與費用", icon: "payroll", href: "/admin/payroll", desc: "薪資、薪資單、稅務、報銷與預支" },
   { key: "people", label: "人員", icon: "people", href: "/admin/employees", desc: "員工主檔與部門組織圖" },
   { key: "announce", label: "公告與資訊", icon: "announce", href: "/admin/announcements", desc: "公告與公司資訊頁" },
@@ -289,19 +289,12 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       desc: "查詢全公司打卡並進行補登",
     },
     {
-      key: "sheets",
-      label: "出勤月表與月結",
-      href: "/admin/attendance-sheets",
-      title: "出勤月表 · 月結簽核",
-      desc: "依月份彙整全員出勤月表，追蹤送出／審核進度、產生本月與匯出",
-      detail: { title: "出勤月表" },
-    },
-    {
       key: "statements",
       label: "出勤統計表",
       href: "/admin/attendance-statements",
       title: "出勤統計表",
-      desc: "選員工與月份，照公司 Excel「出勤統計表」格式檢視（出勤／請假單／支出表），可列印與下載 Excel；未核准月份即時重算",
+      // 2026-11-09 原「出勤月表與月結」（/admin/attendance-sheets，key sheets）併入這頁；舊網址走 ADMIN_REDIRECTS。
+      desc: "依月份與部門看全員月表狀態、異常與月結進度，點員工即看出勤統計表（出勤／請假單／支出表）並核准／退回／重開；可產生月表、匯出整批 Excel",
     },
     {
       key: "lateReports",
@@ -728,6 +721,10 @@ export const ADMIN_REDIRECTS: readonly AdminRedirect[] = [
   { source: "/admin/bonus-runs", destination: "/admin/bonus-sheet" },
   // 2026-10-27「請款與未收款」併入「請款與放款」：舊網址導到新頁的「應收催收」子檢視。
   { source: "/admin/projects/receivables", destination: "/admin/disbursements?view=receivables" },
+  // 2026-11-09「出勤月表與月結」併入「出勤統計表」：列表帶的 query（period／status／dept／anomaly）原樣帶過去；
+  // 單張月表 → ?sheet=:id，新頁用 GET /attendance-sheets/:id 換成員工＋月份（通知信、站內通知的舊連結靠這條）。
+  { source: "/admin/attendance-sheets", destination: "/admin/attendance-statements" },
+  { source: "/admin/attendance-sheets/:id", destination: "/admin/attendance-statements?sheet=:id" },
 ];
 
 /* ------------------------------------------------------------- 路由表 --- */
@@ -874,14 +871,14 @@ export interface RoleNavConfig {
 
 /**
  * 會計預設範圍（業主決策 3）：專案與財務（發票／請款／入帳／放款／複委託付款；**不含**
- * 獎金分潤／獎金批次）、出勤月表、報銷與預支（**不含**薪資作業／薪資單／稅務／現金給付）、
+ * 獎金分潤／獎金批次）、出勤統計表（含月表簽核）、報銷與預支（**不含**薪資作業／薪資單／稅務／現金給付）、
  * 員工基本資料、設定區的「選項清單」（2026-10-10）。tenants.features.roles.accountant 可整鍵覆蓋（roleNavOf）。
  */
 export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
   sections: ["home", "finance", "attendance", "payroll", "people", "settings"],
   tabs: {
     finance: ["projects", "disbursements", "directory"],
-    attendance: ["sheets", "statements"],
+    attendance: ["statements"],
     payroll: ["expenses", "advances"],
     people: ["employees"],
     // 設定區只開「選項清單」：客戶分類的管理權限比照客戶名冊的寫入（API 是 requireFinance 層）。
@@ -893,8 +890,9 @@ export const ACCOUNTANT_DEFAULT_NAV: RoleNavConfig = {
  * 已合併掉的舊分頁 key → 現在承接它的分頁 key。租戶自訂的會計範圍（tenants.features.roles.accountant）
  * 存的是分頁 key，合併後舊 key 要換成新 key，不然勾過舊分頁的會計會看不到合併後的頁。
  * 2026-10-27：receivables（請款與未收款）併入 disbursements（請款與放款）。
+ * 2026-11-09：sheets（出勤月表與月結）併入 statements（出勤統計表）。
  */
-export const LEGACY_TAB_ALIASES: Readonly<Record<string, string>> = { receivables: "disbursements" };
+export const LEGACY_TAB_ALIASES: Readonly<Record<string, string>> = { receivables: "disbursements", sheets: "statements" };
 
 const SECTION_KEY_SET: ReadonlySet<string> = new Set<string>(ADMIN_SECTIONS.map((s) => s.key));
 

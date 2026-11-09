@@ -302,7 +302,7 @@ describe("檢查清單的顯示整理 checklistViews", () => {
     const sheets = views[0];
     expect(sheets).toMatchObject({ key: "sheets", progress: "3/5", passed: false, moreCount: 0, moreLabel: null });
     expect(sheets.shown.map(pendingEntryText)).toEqual(["王小明：月表還是草稿（員工尚未送出）", "李小華：尚未產生月表"]);
-    expect(sheets.fixHref).toBe("/admin/attendance-sheets");
+    expect(sheets.fixHref).toBe("/admin/attendance-statements");
     expect(views[1].passed).toBe(true);
   });
 
@@ -330,7 +330,7 @@ describe("檢查清單的顯示整理 checklistViews", () => {
 
   it("每一項的處理連結都指向既有的後台頁面", () => {
     expect(CHECKLIST_FIX_HREF).toEqual({
-      sheets: "/admin/attendance-sheets",
+      sheets: "/admin/attendance-statements",
       leave_settlement: "/admin/leave-settlement",
       expense_settlement: "/admin/expenses",
       payslips: "/admin/payslips",

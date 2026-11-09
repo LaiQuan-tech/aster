@@ -22,7 +22,7 @@ body {
   }
 }
 
-/* 出勤月表列印（ESS /ess/attendance-sheet 與 Admin /admin/attendance-sheets/[id]
+/* 出勤月表列印（ESS /ess/attendance-sheet 與 Admin 出勤統計表頁的「逐日月表」
    共用）。抬頭平常隱藏，只在列印時出現；.no-print 用來蓋掉不該印出來的操作列、
    篩選列與導覽（後台側欄／ESS 頂欄）。 */
 .print-sheet-header {
@@ -44,6 +44,18 @@ body {
   /* 報表「符合寬度」縮放只用於螢幕；列印照原本大小（components/FitToWidth.tsx）。 */
   .fit-zoom-inner {
     zoom: 1 !important;
+  }
+
+  /* 後台出勤統計表頁（/admin/attendance-statements）：平常列印＝統計表，月表狀態列不印；
+     按「列印月表」時 body 加 .print-attendance-sheet → 只印逐日月表。 */
+  .sheet-review-card {
+    display: none !important;
+  }
+  body.print-attendance-sheet .sheet-review-card {
+    display: block !important;
+  }
+  body.print-attendance-sheet .statement-print-area {
+    display: none !important;
   }
 
   .print-sheet-header {

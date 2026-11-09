@@ -489,7 +489,7 @@ function describeSaveResult(version: number, effectiveFrom: string): string {
     : `已儲存第 ${version} 版，將於 ${effectiveFrom} 生效`;
 }
 
-/** 版本歷史表格的建立時間欄位；沿用 attendance-sheets/[id] 頁面同款格式。 */
+/** 版本歷史表格的建立時間欄位；沿用原出勤月表詳細頁（現為出勤統計表的月表狀態列）同款格式。 */
 function fmtDateTime(iso: string | null): string {
   if (!iso) return "—";
   return new Date(iso).toLocaleString("zh-TW", {

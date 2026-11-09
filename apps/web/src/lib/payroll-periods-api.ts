@@ -403,7 +403,7 @@ export const CHECKLIST_PENDING_SHOW = 10;
 
 /** 每項不通過時，HR 到哪裡去處理（都是後台既有頁面）。 */
 export const CHECKLIST_FIX_HREF: Record<ChecklistKey, string> = {
-  sheets: "/admin/attendance-sheets",
+  sheets: "/admin/attendance-statements",
   leave_settlement: "/admin/leave-settlement",
   expense_settlement: "/admin/expenses",
   payslips: "/admin/payslips",

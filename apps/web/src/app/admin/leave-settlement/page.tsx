@@ -8,11 +8,11 @@
  * 一律是簽核已核准的假單。
  *
  * Pattern 來源（詳見 lib/leave-settlement-api.ts 檔頭與交付報告）：
- * - MonthPicker／部門下拉／狀態下拉／彙總卡／表格版型：app/admin/attendance-sheets/page.tsx
+ * - MonthPicker／部門下拉／狀態下拉／彙總卡／表格版型：app/admin/attendance-statements/page.tsx（原出勤月表列表頁，2026-11-09 併入）
  * - 勾選批次操作（Record<string, boolean> + toggle）：app/admin/disbursements/page.tsx
  * - 附件數點開清單（expandable row + cache）：app/admin/expenses/page.tsx 的 AttachmentsList
  * - 「理由必填才能送出」的 destructive 動作：window.prompt，見
- *   app/admin/attendance-sheets/[id]/page.tsx 的 onReturn／onReopen
+ *   app/admin/attendance-statements/_components/SheetReviewBar.tsx 的 onReturn／onReopen
  * - 訊息提示：這個專案沒有 toast 元件庫，既有慣例是 message/error 這兩個
  *   inline state（綠字/ErrorText），這裡沿用同一套。
  */

@@ -29,6 +29,8 @@ const ADMIN_REDIRECTS = [
   { source: "/admin/group-overview", destination: "/admin#group-overview" },
   { source: "/admin/bonus-runs", destination: "/admin/bonus-sheet" },
   { source: "/admin/projects/receivables", destination: "/admin/disbursements?view=receivables" },
+  { source: "/admin/attendance-sheets", destination: "/admin/attendance-statements" },
+  { source: "/admin/attendance-sheets/:id", destination: "/admin/attendance-statements?sheet=:id" },
 ];
 
 const nextConfig: NextConfig = {

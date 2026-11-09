@@ -255,7 +255,7 @@ export default function OvertimeSettlementsPage() {
             匯出 xlsx
           </button>
           {msg && <span className="text-sm text-green-600">{msg}</span>}
-          <Link href="/admin/attendance-sheets" className="ml-auto text-sm text-gray-500 hover:underline">
+          <Link href="/admin/attendance-statements" className="ml-auto text-sm text-gray-500 hover:underline">
             超額分鐘從哪來？看出勤月表 →
           </Link>
         </div>

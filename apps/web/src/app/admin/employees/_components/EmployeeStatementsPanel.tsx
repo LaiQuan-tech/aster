@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Card, Empty, ErrorText, Pill, useToast } from "@/components/admin-ui";
 import { MonthPicker } from "@/components/MonthPicker";
 import { StatementTable } from "@/components/StatementTable";
@@ -22,6 +22,9 @@ import {
  * `live`（2026-11-09 後台「出勤統計表」頁）：開畫面即重算未核准月份（API 端節流）、「重新整理」鈕強制重算；
  * 分頁「出勤｜請假單｜支出表」（照客戶 Excel 三個工作表）、「顯示假日列」切換（預設隱藏＝Excel 印出狀態）、
  * 已核准月份顯示凍結提示與核准時間；視覺照客戶 Excel 原樣（variant="excel"）。下載 Excel＝同一份資料三個工作表。
+ *
+ * 受控月份（2026-11-09 出勤統計表合併頁）：帶 `period` 時月份由頁面決定（頁首的月份選擇），面板不顯示自己的
+ * 月份選擇；`reloadKey` 變動＝重抓（簽核動作後）；`onLoaded` 回報每次讀到的資料（重算後頁面同步刷新月表清單）。
  */
 
 export type StatementTab = "attendance" | "payslip";
@@ -57,12 +60,26 @@ export function EmployeeStatementsPanel({
   employeeId,
   kind,
   live = false,
+  period: controlledPeriod,
+  reloadKey = 0,
+  onLoaded,
 }: {
   employeeId: string;
   kind: StatementTab;
   /** 後台「出勤統計表」頁：開畫面即重算＋三頁分頁＋假日列切換＋凍結提示（見檔頭）。 */
   live?: boolean;
+  /** 受控月份（見檔頭）；省略＝面板自己決定與切換月份。 */
+  period?: string;
+  /** 變動＝用同一個月份重抓。 */
+  reloadKey?: number;
+  /** 每次讀取成功後回報（含重新整理）。 */
+  onLoaded?: (data: EmployeeStatements, refreshed: boolean) => void;
 }) {
+  const controlled = controlledPeriod !== undefined;
+  const onLoadedRef = useRef(onLoaded);
+  useEffect(() => {
+    onLoadedRef.current = onLoaded;
+  }, [onLoaded]);
   const toast = useToast();
   const [period, setPeriod] = useState<string | undefined>(undefined);
   const [data, setData] = useState<EmployeeStatements | null>(null);
@@ -80,6 +97,7 @@ export function EmployeeStatementsPanel({
         const res = await getEmployeeStatements(employeeId, p, live ? { live: true, refresh } : {});
         setData(res);
         setPeriod(res.period);
+        onLoadedRef.current?.(res, refresh);
         if (refresh) {
           const note = recomputeNote(res.recompute);
           if (note) toast.show(note, res.recompute?.ran ? "success" : "info");
@@ -94,10 +112,10 @@ export function EmployeeStatementsPanel({
   );
 
   useEffect(() => {
-    void load();
-    // 換員工才重抓；load 依賴 toast（每次 render 穩定），不要讓它觸發重抓。
+    void load(controlledPeriod);
+    // 換員工（受控時換月份或 reloadKey）才重抓；load 依賴 toast（每次 render 穩定），不要讓它觸發重抓。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employeeId, live]);
+  }, [employeeId, live, controlledPeriod, reloadKey]);
 
   const summary = data ? (kind === "attendance" ? data.attendance : data.payslip) : null;
   const label = kind === "attendance" ? "出勤統計表" : "薪資明細表";
@@ -133,7 +151,7 @@ export function EmployeeStatementsPanel({
           {live && att && (frozen ? <Pill tone="blue">已核准（凍結）</Pill> : att.hasAttendance ? <Pill tone="amber">未核准（即時）</Pill> : null)}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {period && <MonthPicker value={period} onChange={(p) => void load(p)} disabled={loading} />}
+          {period && !controlled && <MonthPicker value={period} onChange={(p) => void load(p)} disabled={loading} />}
           {live && (
             <Button
               variant="secondary"

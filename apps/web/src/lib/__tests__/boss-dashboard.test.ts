@@ -394,7 +394,7 @@ describe("依身分分版（2026-10-26：老闆／一般 HR／會計／平台管
 
 describe("模組開關", () => {
   it("homeLinkModuleEnabled：分頁掛了 module 的要啟用才 true；沒掛 module 的永遠 true", () => {
-    expect(homeLinkModuleEnabled("/admin/attendance-sheets?period=2026-10&anomaly=1", {})).toBe(true);
+    expect(homeLinkModuleEnabled("/admin/attendance-statements?period=2026-10&anomaly=1", {})).toBe(true);
     expect(homeLinkModuleEnabled("/admin/approvals?status=pending", null)).toBe(true);
     expect(homeLinkModuleEnabled("/admin/attendance-settlement", {})).toBe(false);
     expect(homeLinkModuleEnabled("/admin/attendance-settlement", { attendanceSettlement: true })).toBe(true);
@@ -404,7 +404,7 @@ describe("模組開關", () => {
 
 describe("下鑽連結與下游頁讀網址", () => {
   it("bossLinks 帶篩選", () => {
-    expect(bossLinks.attendanceAnomalies("2026-10")).toBe("/admin/attendance-sheets?period=2026-10&anomaly=1");
+    expect(bossLinks.attendanceAnomalies("2026-10")).toBe("/admin/attendance-statements?period=2026-10&anomaly=1");
     expect(bossLinks.overtimeDrafts).toBe("/admin/overtime-settlements?status=draft&all=1");
     expect(bossLinks.leaveApprovals).toBe("/admin/approvals?status=pending");
     expect(bossLinks.disbursementApprovals).toBe("/admin/disbursements/approvals?scope=all");

@@ -214,7 +214,6 @@ describe("resolveAdminPath：最長前綴", () => {
       tab: "settlement",
       module: "attendanceSettlement",
     });
-    expect(resolveAdminPath("/admin/attendance-sheets")).toMatchObject({ section: "attendance", tab: "sheets" });
     expect(resolveAdminPath("/admin/attendance-statements")).toMatchObject({ section: "attendance", tab: "statements", title: "出勤統計表" });
     expect(resolveAdminPath("/admin/late-reports")).toMatchObject({ section: "attendance", tab: "lateReports", title: "遲到說明" });
   });
@@ -290,14 +289,9 @@ describe("resolveAdminPath：detail 頁（isDetail／parentPath／title）", () 
     expect(resolveAdminPath("/admin/bonus-sheet")).toMatchObject({ section: "finance", tab: "bonus", title: "獎金分潤", isDetail: false });
   });
 
-  it("/admin/attendance-sheets/[id] → 出勤月表", () => {
-    expect(resolveAdminPath("/admin/attendance-sheets/9f")).toMatchObject({
-      section: "attendance",
-      tab: "sheets",
-      title: "出勤月表",
-      isDetail: true,
-      parentPath: "/admin/attendance-sheets",
-    });
+  it("2026-11-09 出勤月表併入出勤統計表：/admin/attendance-sheets 不再是分頁（走轉址）", () => {
+    expect(resolveAdminPath("/admin/attendance-sheets").tab).not.toBe("sheets");
+    expect(ADMIN_ROUTES.some((r) => r.prefix.startsWith("/admin/attendance-sheets"))).toBe(false);
   });
 
   it("/admin/employees/[id] → 員工資料（2026-10-26 員工內頁）", () => {
@@ -365,7 +359,7 @@ describe("resolveAdminPath：detail 頁（isDetail／parentPath／title）", () 
     expect(parentPathFor("/admin/employees")).toBe(null);
     expect(parentPathFor("/admin/projects/abc")).toBe("/admin/projects");
     expect(parentPathFor("/admin/projects/abc/application?print=1")).toBe("/admin/projects/abc");
-    expect(parentPathFor("/admin/attendance-sheets/9f/")).toBe("/admin/attendance-sheets");
+    expect(parentPathFor("/admin/leave-balances/9f/")).toBe("/admin/leave-balances");
   });
 });
 
@@ -467,8 +461,8 @@ describe("ADMIN_TABS／tabsForSection／subTabsFor", () => {
     ]);
     expect(tabsForSection("announce", { knowledge: true }).map((t) => t.key)).toEqual(["announcements", "companyInfo", "knowledge"]);
     // 班表（/admin/schedules）2026-10-11 移除；班別在設定區、值日／總機保留。
-    // 2026-11-09：出勤統計表（/admin/attendance-statements）接在出勤月表後面。
-    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "sheets", "statements", "lateReports", "duty"]);
+    // 2026-11-09：出勤月表與月結（sheets）併入出勤統計表（statements）。
+    expect(tabsForSection("attendance", null).map((t) => t.key)).toEqual(["punches", "statements", "lateReports", "duty"]);
   });
 
   it("subTabsFor：有 children 回子分頁（含 href）、沒有回 []、null 回 []", () => {
@@ -513,7 +507,7 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
     expect(payroll).toEqual(["expenses", "advances"]);
     for (const key of ["payroll", "payslips", "tax", "cash"]) expect(payroll).not.toContain(key);
     // 出勤統計表：會計可看（金額在 API 端遮成「—」）。
-    expect(tabsForSection("attendance", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["sheets", "statements"]);
+    expect(tabsForSection("attendance", null, { roleNav: NAV }).map((t) => t.key)).toEqual(["statements"]);
     expect(tabsForSection("people", { recruitment: true }, { roleNav: NAV }).map((t) => t.key)).toEqual(["employees"]);
     // 設定區只開選項清單（客戶分類的管理權限比照客戶名冊的寫入）＋個人頁「AI 連接」（personal：管自己的金鑰，任何角色都有）；
     // 假別、班別、規則參數、進階功能等仍是 HR 專屬
@@ -537,7 +531,7 @@ describe("角色導覽：ACCOUNTANT_DEFAULT_NAV／roleNavOf／sectionsForRole／
     expect(acc.map((s) => s.href)).toEqual([
       "/admin",
       "/admin/projects",
-      "/admin/attendance-sheets",
+      "/admin/attendance-statements",
       "/admin/expenses",
       "/admin/employees",
       "/admin/option-lists",
@@ -638,8 +632,7 @@ describe("isAdminPathAllowed：直開網址的角色守門（2026-09-23 驗收�
       "/admin/companies",
       // 客戶分類的管理權限比照客戶名冊的寫入：客戶名冊的「管理分類」連結會連到這裡
       "/admin/option-lists",
-      "/admin/attendance-sheets",
-      "/admin/attendance-sheets/9f",
+      "/admin/attendance-statements",
       "/admin/expenses",
       "/admin/advances",
       "/admin/employees",
@@ -765,7 +758,7 @@ describe("ADMIN_ROUTES", () => {
     }
   });
 
-  it("12 種 detail：projects／disbursements list／客戶／廠商／假別餘額員工內頁／sheets／employees／announcements／公務車車輛／公務車用車紀錄／專案申請單／獎金批次", () => {
+  it("11 種 detail：projects／disbursements list／客戶／廠商／假別餘額員工內頁／employees／announcements／公務車車輛／公務車用車紀錄／專案申請單／獎金批次", () => {
     const details = ADMIN_ROUTES.filter((r) => r.detail).map((r) => `${r.prefix}${r.pattern ? "#pattern" : ""}`);
     expect(details).toEqual([
       "/admin/projects",
@@ -773,7 +766,6 @@ describe("ADMIN_ROUTES", () => {
       "/admin/clients",
       "/admin/vendors",
       "/admin/leave-balances",
-      "/admin/attendance-sheets",
       "/admin/employees",
       "/admin/announcements",
       "/admin/vehicles",
@@ -785,7 +777,7 @@ describe("ADMIN_ROUTES", () => {
 });
 
 describe("ADMIN_REDIRECTS 與 next.config.ts", () => {
-  it("十一條轉址：form-records → approvals?status=all、org-chart → departments、onboarding／birthday-gifts → employees、projects/overview／annual／alerts、stamp-duty → projects、group-overview → 首頁 #group-overview、bonus-runs → bonus-sheet、projects/receivables → disbursements?view=receivables", () => {
+  it("十三條轉址：attendance-sheets（含 :id → ?sheet=:id）→ attendance-statements、form-records → approvals?status=all、org-chart → departments、onboarding／birthday-gifts → employees、projects/overview／annual／alerts、stamp-duty → projects、group-overview → 首頁 #group-overview、bonus-runs → bonus-sheet、projects/receivables → disbursements?view=receivables", () => {
     expect(ADMIN_REDIRECTS).toEqual([
       { source: "/admin/form-records", destination: "/admin/approvals?status=all" },
       { source: "/admin/org-chart", destination: "/admin/departments" },
@@ -798,6 +790,8 @@ describe("ADMIN_REDIRECTS 與 next.config.ts", () => {
       { source: "/admin/group-overview", destination: "/admin#group-overview" },
       { source: "/admin/bonus-runs", destination: "/admin/bonus-sheet" },
       { source: "/admin/projects/receivables", destination: "/admin/disbursements?view=receivables" },
+      { source: "/admin/attendance-sheets", destination: "/admin/attendance-statements" },
+      { source: "/admin/attendance-sheets/:id", destination: "/admin/attendance-statements?sheet=:id" },
     ]);
     // 轉址目標都解析得到自己的路由
     for (const redirect of ADMIN_REDIRECTS) {
@@ -883,7 +877,7 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
   });
 
   it("舊分頁 key receivables（2026-10-27 併入請款與放款）：存過舊 key 的會計範圍視同勾了 disbursements", () => {
-    expect(LEGACY_TAB_ALIASES).toEqual({ receivables: "disbursements" });
+    expect(LEGACY_TAB_ALIASES).toEqual({ receivables: "disbursements", sheets: "statements" });
     // 設定頁再勾／取消時舊 key 換成新 key，不會被當成不認得的 key 丟掉
     expect(nextRoleTabs("finance", ["projects", "receivables"], "directory", true)).toEqual(["projects", "disbursements", "directory"]);
     expect(nextRoleTabs("finance", ["projects", "receivables"], "disbursements", false)).toEqual(["projects"]);
@@ -894,6 +888,14 @@ describe("HR 限定頁（hrOnly）：會計可用範圍的設定與直開被擋�
     // 新舊 key 都有：去重
     const both = roleNavOf("accountant", { roles: { accountant: { sections: ["finance"], tabs: { finance: ["receivables", "disbursements"] } } } });
     expect(both?.tabs.finance).toEqual(["disbursements"]);
+  });
+
+  it("舊分頁 key sheets（2026-11-09 出勤月表併入出勤統計表）：只勾過出勤月表的會計看得到出勤統計表", () => {
+    const legacyOnly = roleNavOf("accountant", { roles: { accountant: { sections: ["attendance"], tabs: { attendance: ["sheets"] } } } });
+    expect(legacyOnly?.tabs.attendance).toEqual(["statements"]);
+    expect(tabsForSection("attendance", null, { roleNav: legacyOnly }).map((t) => t.key)).toEqual(["statements"]);
+    expect(isAdminPathAllowed({ pathname: "/admin/attendance-statements?employee=e1&period=2026-10", roleNav: legacyOnly })).toBe(true);
+    expect(nextRoleTabs("attendance", ["sheets"], "punches", true)).toEqual(["punches", "statements"]);
   });
 
   it("目前的 hrOnly 分頁只有系統／未核准加班（2026-11；下面的路徑與提示測試會自動涵蓋）", () => {
