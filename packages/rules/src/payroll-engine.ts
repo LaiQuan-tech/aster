@@ -42,6 +42,9 @@
  * ÷ hourlyWageDivisor);員工明示了 hourlyWage 的月薪制 = round4(明示時薪 + 該津貼合計 ÷ divisor)。
  * 請假扣款、遲到早退扣款維持原本的 hourlyWage (不含津貼);時薪制／日薪制不攤入津貼。沒有計入加班基數的津貼
  * → 與原本完全相同,且不出現 overtimeHourlyBase 欄位。
+ * 全勤獎金計入加班基數(2026-11-11 業主決定;規則 overtime.includeAttendanceBonus,省略 = true):月薪制再加上
+ * 當月實際發放的全勤獎金淨額 (基準 − 遲到扣款) → round4((本薪 + 津貼 + 全勤淨額) ÷ divisor)。全勤只看遲到分鐘,
+ * 不依賴加班費,引擎先算全勤再算加班/夜間,不會循環。淨額 0 (未獲全勤或未設定) → 不加,結果與原本相同。
  *
  * 勞退(2026-11-08):月提繳工資 pensionWage = 員工薪資資料「勞退月提繳工資」(有填就照填),留空 = (本薪 + 計入投保的
  * 固定津貼) 依勞退月提繳分級表 (rules.pension.wageBrackets,依 extras.period 選版;內建 114／115 年版) 向上取級距;
@@ -56,6 +59,7 @@ import { MEAL_ALLOWANCE_TAX_FREE_MONTHLY, insurableFixedAllowanceTotal } from ".
 import { overtimeMinutesBeforeMinCharge } from "./worktime-engine.js";
 import {
   resolveFixedHolidayPay,
+  resolveOvertimeIncludeAttendanceBonus,
   resolveHourlyWageDivisor,
   resolveLateEarlyDeductionEnabled,
   resolveOvertimeRule,
@@ -185,6 +189,7 @@ export function resolvePensionWage(
  *   • 沒明示時薪 → round4((本薪 + 津貼) ÷ divisor) (與 resolveHourlyWage 同一個捨入)
  *   • 明示時薪   → round4(明示時薪 + 津貼 ÷ divisor)
  * 時薪制／日薪制一律回 hourlyWage (津貼不攤入)。
+ * attendanceBonus = 當月實發全勤獎金淨額;規則 overtime.includeAttendanceBonus (預設 true) 開啟且 > 0 時併入津貼合計。
  */
 export function resolveOvertimeHourlyBase(
   salary: SalaryStructure,
@@ -192,9 +197,14 @@ export function resolveOvertimeHourlyBase(
   method: PayrollMethod,
   hourlyWage: number,
   fixedAllowances: readonly FixedAllowanceInput[],
+  attendanceBonus = 0,
 ): number {
   if (method !== "monthly") return hourlyWage;
-  const otAllowances = overtimeBaseAllowanceTotal(fixedAllowances);
+  const bonus =
+    resolveOvertimeIncludeAttendanceBonus(rules) && Number.isFinite(attendanceBonus) && attendanceBonus > 0
+      ? attendanceBonus
+      : 0;
+  const otAllowances = overtimeBaseAllowanceTotal(fixedAllowances) + bonus;
   if (otAllowances <= 0) return hourlyWage;
   const divisor = resolveHourlyWageDivisor(rules);
   if (salary.hourlyWage !== undefined && salary.hourlyWage > 0) return round4(salary.hourlyWage + otAllowances / divisor);
@@ -395,8 +405,26 @@ export function computePayslip(
   }
   const hourlyWage = resolveHourlyWage(salary, rules);
   const flatHourly = rules.payroll.overtimeFlatHourly;
-  // 加班類給付的時薪基數：月薪制＋計入加班基數的固定津貼（見檔頭）。請假／遲到早退扣款仍用 hourlyWage。
-  const overtimeHourly = resolveOvertimeHourlyBase(salary, rules, method, hourlyWage, extras.fixedAllowances ?? []);
+  // --- 全勤獎金 (全月累計遲到 → 階梯扣款,從 base 扣) ----------------------
+  // 先算:加班時薪基數可能含全勤淨額 (見檔頭);全勤只看遲到分鐘,不依賴加班費。
+  // 老闆決定「不影響全勤」的遲到 (lateExempt) 不累計;沒決定 = 影響 (照算)。
+  const totalLateMinutes = days.reduce((acc, d) => acc + (d.lateExempt ? 0 : d.lateMinutes), 0);
+  const bonusBase = rules.attendance_bonus.base;
+  const attendanceDeduction = resolveAttendanceDeduction(
+    totalLateMinutes,
+    rules.attendance_bonus.tiers,
+  );
+  const attendanceBonus = bonusBase - attendanceDeduction;
+
+  // 加班類給付的時薪基數：月薪制＋計入加班基數的固定津貼＋全勤淨額（見檔頭）。請假／遲到早退扣款仍用 hourlyWage。
+  const overtimeHourly = resolveOvertimeHourlyBase(
+    salary,
+    rules,
+    method,
+    hourlyWage,
+    extras.fixedAllowances ?? [],
+    attendanceBonus,
+  );
 
   const isHourly = method === "hourly";
 
@@ -475,15 +503,7 @@ export function computePayslip(
     (totalNightMinutes / 60) * overtimeHourly * rules.night.multiplier,
   );
 
-  // --- 全勤獎金 (全月累計遲到 → 階梯扣款,從 base 扣) ----------------------
-  // 老闆決定「不影響全勤」的遲到 (lateExempt) 不累計;沒決定 = 影響 (照算)。
-  const totalLateMinutes = days.reduce((acc, d) => acc + (d.lateExempt ? 0 : d.lateMinutes), 0);
-  const bonusBase = rules.attendance_bonus.base;
-  const attendanceDeduction = resolveAttendanceDeduction(
-    totalLateMinutes,
-    rules.attendance_bonus.tiers,
-  );
-  const attendanceBonus = bonusBase - attendanceDeduction;
+  // 全勤獎金已在加班時薪基數之前算好 (attendanceBonus)。
 
   // --- gross + 逐項稽核明細 ---------------------------------------------
   const baseLabel =

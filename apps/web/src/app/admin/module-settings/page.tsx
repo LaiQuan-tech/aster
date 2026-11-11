@@ -133,6 +133,8 @@ interface OvertimeParamsForm {
   fixedHolidayPay: FixedHolidayPay;
   /* 2026-11 加班事前核准制：overtime.requirePreApproval（省略＝false）。 */
   requirePreApproval: boolean;
+  /* 2026-11-11 全勤獎金計入加班費基數：overtime.includeAttendanceBonus（省略＝true）。 */
+  includeAttendanceBonus: boolean;
 }
 
 const DEFAULT_OT_FORM: OvertimeParamsForm = {
@@ -158,6 +160,7 @@ const DEFAULT_OT_FORM: OvertimeParamsForm = {
   regularLeavePay: "max_rest_day",
   fixedHolidayPay: "statutory",
   requirePreApproval: false,
+  includeAttendanceBonus: true,
 };
 
 function tiersToForm(tiers: OvertimeTier[] | undefined): [TierFormRow, TierFormRow, TierFormRow] {
@@ -211,6 +214,8 @@ function hydrateOvertimeForm(config: RuleConfig): OvertimeParamsForm {
     regularLeavePay: ot.regularLeavePay ?? "max_rest_day",
     fixedHolidayPay: ot.fixedHolidayPay ?? "statutory",
     requirePreApproval: ot.requirePreApproval === true,
+    // 與 @hr/rules resolveOvertimeIncludeAttendanceBonus 同一組預設（省略＝true）。
+    includeAttendanceBonus: ot.includeAttendanceBonus !== false,
   };
 }
 
@@ -800,6 +805,7 @@ export default function ModuleSettingsPage() {
           regularLeavePay: otForm.regularLeavePay,
           fixedHolidayPay: otForm.fixedHolidayPay,
           requirePreApproval: otForm.requirePreApproval,
+          includeAttendanceBonus: otForm.includeAttendanceBonus,
         },
         payroll: {
           ...base.payroll,
@@ -1403,6 +1409,15 @@ export default function ModuleSettingsPage() {
                       onChange={(e) => patchOt({ requirePreApproval: e.target.checked })}
                     />
                     加班須事前核准（未核准的假日／延長工時出勤列為異常）
+                  </label>
+                  <label className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700 sm:col-span-3">
+                    <input
+                      type="checkbox"
+                      checked={otForm.includeAttendanceBonus}
+                      onChange={(e) => patchOt({ includeAttendanceBonus: e.target.checked })}
+                    />
+                    全勤獎金計入加班費基數
+                    <span className="text-xs text-gray-500">（月薪制：當月實際發放的全勤獎金淨額併入加班／夜間加給時薪基數）</span>
                   </label>
                 </div>
 

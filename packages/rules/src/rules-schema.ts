@@ -158,6 +158,8 @@ export type FixedHolidayPay = z.infer<typeof FixedHolidayPaySchema>;
 //   requirePreApproval 加班事前核准制 (2026-11-01;省略 = false)。true 時 API 才判月表 overtime_unapproved、
 //                     打卡提醒/主管通知、加班單核准上限 (月 monthlyCapHours、日 12h)。只看該月選到的規則版本,
 //                     所以由版本生效日控制從哪個月開始,歷史月份不受影響。引擎本身不讀。
+//   includeAttendanceBonus 全勤獎金計入加班費基數 (2026-11-11 業主決定;省略 = true)。月薪制加班時薪
+//                     = (本薪 + 計入的固定津貼 + 當月實發全勤獎金淨額) ÷ hourlyWageDivisor。依版本生效日選月份。
 const OvertimeSchema = z.object({
   rules: z.array(OvertimeRuleSchema),
   rounding: OvertimeRoundingSchema.optional(),
@@ -170,6 +172,7 @@ const OvertimeSchema = z.object({
   regularLeavePay: RegularLeavePaySchema.optional(),
   fixedHolidayPay: FixedHolidayPaySchema.optional(),
   requirePreApproval: z.boolean().optional(),
+  includeAttendanceBonus: z.boolean().optional(),
 });
 
 // 夜間加給：window 時段視窗 ("HH:MM"，允許跨午夜如 00:00–08:30)，multiplier 倍率。
@@ -651,6 +654,11 @@ export function resolveRegularLeavePay(rules: RuleConfig): RegularLeavePay {
 /** 國定假日出勤加發計法 (省略 → statutory「做 1 給 8」)。 */
 export function resolveFixedHolidayPay(rules: RuleConfig): FixedHolidayPay {
   return rules.overtime.fixedHolidayPay ?? DEFAULT_FIXED_HOLIDAY_PAY;
+}
+
+/** 全勤獎金是否計入月薪制加班時薪基數 (省略 → true;2026-11-11 業主決定)。 */
+export function resolveOvertimeIncludeAttendanceBonus(rules: RuleConfig): boolean {
+  return rules.overtime.includeAttendanceBonus !== false;
 }
 
 /** 超過月上限的處理 (省略 → settle_separately)。 */

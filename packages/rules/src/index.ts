@@ -52,6 +52,7 @@ export {
   resolveOvertimeBasis,
   resolveOvertimeMonthlyCapHours,
   resolveOvertimeBeyondCap,
+  resolveOvertimeIncludeAttendanceBonus,
   // 2026-10-17 驗收修正:例假／國定假日加發計法
   RegularLeavePaySchema,
   FixedHolidayPaySchema,
