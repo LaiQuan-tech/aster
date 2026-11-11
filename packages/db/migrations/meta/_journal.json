@@ -631,6 +631,13 @@
       "when": 1793900000000,
       "tag": "0089_subcontract_firm_invoice",
       "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1794000000000,
+      "tag": "0090_project_application_versions",
+      "breakpoints": true
     }
   ]
 }

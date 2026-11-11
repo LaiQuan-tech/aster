@@ -751,6 +751,52 @@ export function getProjectApplication(id: string) {
   return apiFetch<{ application: ApplicationData; access: ProjectAccess }>(`/projects/${id}/application`)
 }
 
+/* ── 申請單版本（2026-11-10，API routes/application-versions.ts，migration 0090） ── */
+
+export type ApplicationVersionTrigger = "initial" | "contract_amount_changed" | "manual"
+
+export interface ApplicationVersionMeta {
+  id: string
+  versionNo: number
+  trigger: ApplicationVersionTrigger
+  /** 合約金額（未稅）改前；manual／initial 為 null。 */
+  amountBefore: number | null
+  /** 合約金額（未稅）改後（manual／initial＝當時金額）。 */
+  amountAfter: number | null
+  note: string | null
+  createdByEmpId: string | null
+  createdByName: string | null
+  createdAt: string
+  /** 被下一版取代的時間；null＝目前版。 */
+  supersededAt: string | null
+}
+
+export interface ApplicationVersionList {
+  /** false＝migration 0090 未套用（前端隱藏版本 UI）。 */
+  available: boolean
+  /** 目前版號（最新那一版）；還沒有任何版本＝null。 */
+  currentVersionNo: number | null
+  /** 版號新→舊，不含 snapshot。 */
+  versions: ApplicationVersionMeta[]
+}
+
+export function listApplicationVersions(projectId: string) {
+  return apiFetch<ApplicationVersionList>(`/projects/${projectId}/application-versions`)
+}
+
+export function getApplicationVersion(projectId: string, versionNo: number) {
+  return apiFetch<{ version: ApplicationVersionMeta & { snapshot: ApplicationData }; access: { finance: boolean; profit: boolean } }>(
+    `/projects/${projectId}/application-versions/${versionNo}`,
+  )
+}
+
+export function createApplicationVersion(projectId: string, note: string | null) {
+  return apiFetch<{ version: { id: string; versionNo: number } }>(`/projects/${projectId}/application-versions`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  })
+}
+
 export interface UpdateProjectExtBody {
   name?: string
   fiscalYear?: number | null

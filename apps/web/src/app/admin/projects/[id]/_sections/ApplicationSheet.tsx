@@ -248,6 +248,17 @@ interface ApplicationSheetProps {
   /** 上次儲存的結果（page.tsx 持有；存完重新載入時本元件會重掛）。省略＝元件自己保存。 */
   saveReport?: ApplicationSheetSaveReport | null;
   onSaveReport?: (report: ApplicationSheetSaveReport | null) => void;
+  /**
+   * 唯讀檢視（2026-11-10 申請單舊版本）：同一版面、金額照顯示，但沒有任何輸入框、儲存列與說明文字。
+   * 與 canFinance=false 不同：canFinance=false 連金額都不顯示。
+   */
+  readOnly?: boolean;
+  /** 標題旁的版本號（「第 3 版」）；列印也會印。省略＝不顯示。 */
+  versionLabel?: string;
+  /** 標題旁的版本控制（版本下拉、另存新版本）；列印不印。函式形式拿得到「有未儲存修改」。 */
+  versionControls?: ReactNode | ((state: { dirty: boolean }) => ReactNode);
+  /** 申請單最上方的橫幅（檢視舊版時的黃色提示）；列印不印。 */
+  banner?: ReactNode;
 }
 
 /**
@@ -279,6 +290,10 @@ export function ApplicationSheet({
   canEditClients = true,
   saveReport: controlledReport,
   onSaveReport,
+  readOnly = false,
+  versionLabel,
+  versionControls,
+  banner,
 }: ApplicationSheetProps) {
   const print = mode === "print";
   const [localDraft, setLocalDraft] = useState<ApplicationSheetDraft>(() => applicationSheetDraftOf(project, disciplines));
@@ -292,15 +307,15 @@ export function ApplicationSheet({
   const [localReport, setLocalReport] = useState<ApplicationSheetSaveReport | null>(null);
   const report = controlledReport !== undefined ? controlledReport : localReport;
   const setReport = onSaveReport ?? setLocalReport;
-  const editable = canFinance && !print;
+  const editable = canFinance && !print && !readOnly;
   const blockOn = (key: PrintBlockKey) => printChecked?.[key] ?? true;
   /** 未勾選的列印區塊：螢幕淡化、列印時文字透明（格線與標題照印）。 */
   const blankCls = (key: PrintBlockKey) => (blockOn(key) ? "" : "opacity-40 print:opacity-100 print:text-transparent print:**:text-transparent");
 
   useEffect(() => {
-    if (print || clientsProp) return;
+    if (print || readOnly || clientsProp) return;
     listClients().then((r) => setOwnClients(r.clients)).catch(() => {});
-  }, [print, clientsProp]);
+  }, [print, readOnly, clientsProp]);
 
   // 客戶資料格：草稿裡選的客戶（還沒存也即時顯示它的名冊資料）。
   const client: Client | null = resolveSheetClient(clients, project, draft.clientId);
@@ -999,12 +1014,23 @@ export function ApplicationSheet({
   return (
     <section aria-label="專案申請單" className="rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-5 print:rounded-none print:border-0 print:p-0 print:shadow-none" data-testid="application-sheet">
       {/* 存檔中整張鎖住：存完會用「剩下的草稿」取代，存檔期間打的字會被蓋掉。 */}
+      {banner && <div className="no-print mx-auto mb-3 w-full max-w-[960px] print:hidden">{banner}</div>}
       <fieldset disabled={saving} className="m-0 min-w-0 border-0 p-0">
       <div className="mx-auto w-full max-w-[960px] text-gray-900 print:max-w-none">
         {/* 抬頭（後台卡片標題樣式）：標誌＋「專案申請單 民國　年　月　日」、承接公司、工程名稱／專案序號 */}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <img src="/brand/aster-logo.svg" alt="" aria-hidden="true" className="h-6 w-auto" />
           <h2 className={sheet.title}>專案申請單</h2>
+          {versionLabel && (
+            <span className="rounded border border-gray-300 px-1.5 py-0.5 text-xs font-medium text-gray-700 print:border-gray-400" data-testid="application-version-label">
+              {versionLabel}
+            </span>
+          )}
+          {versionControls && (
+            <span className="no-print flex flex-wrap items-center gap-2 print:hidden">
+              {typeof versionControls === "function" ? versionControls({ dirty: editable && dirtyCount > 0 }) : versionControls}
+            </span>
+          )}
           <span className="flex flex-wrap items-center gap-1 text-sm text-gray-600">
             民國<span className="min-w-[2.5em] border-b border-gray-300 text-center text-gray-900 tabular-nums">{opened?.year ?? ""}</span>年
             <span className="min-w-[1.5em] border-b border-gray-300 text-center text-gray-900 tabular-nums">{opened?.month ?? ""}</span>月
@@ -1048,7 +1074,7 @@ export function ApplicationSheet({
       </div>
       </fieldset>
 
-      {!print && (
+      {!print && !readOnly && (
       <div className="no-print mx-auto mt-3 flex w-full max-w-[960px] flex-col gap-2">
         {editable ? (
           <div className="flex flex-wrap items-center gap-3">

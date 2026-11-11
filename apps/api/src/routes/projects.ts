@@ -748,7 +748,7 @@ async function parentCodesById(tenantId: string, ids: Array<string | null>): Pro
  *     都只給這一群人。
  * 兩者由 resolveProjectAccess() 一次算完，HR 走零查詢的捷徑（見該函式說明）。
  */
-async function loadScope(
+export async function loadScope(
   tenantId: string,
   userId: string,
   projectId: string,
@@ -1253,9 +1253,33 @@ async function tenantToday(tenantId: string): Promise<string> {
 export async function loadProjectDetail(tenantId: string, userId: string, projectId: string) {
   const scope = await loadScope(tenantId, userId, projectId)
   if (!scope.ok) return scope
-  const row = scope.project
-  const finance = scope.canManage
-  const bonus = scope.canSeeBonus
+  // editBonus：分潤寫入權（只有老闆／platform_admin）；bossConfigured：租戶是否已指定老闆。
+  // profit：專案毛利／毛利率可見性（老闆／platform_admin／授權 HR；2026-10-26 業主決定 2：申請單金額摘要也算集團財務）。
+  const access = {
+    finance: scope.canManage,
+    bonus: scope.canSeeBonus,
+    profit: scope.canSeeProfit,
+    editBonus: scope.bonusEdit.canEdit,
+    bossConfigured: scope.bonusEdit.bossConfigured,
+  }
+  const core = await assembleProjectDetail(tenantId, scope.project, {
+    finance: scope.canManage,
+    bonus: scope.canSeeBonus,
+    profit: scope.canSeeProfit,
+  })
+  return { ok: true as const, ...core, access }
+}
+
+/**
+ * 專案詳情的資料本體（不含權限判斷）：依 finance／bonus／profit 旗標裁剪。
+ * loadProjectDetail（依登入者權限）與 buildApplicationSnapshot（申請單版本快照，完整財務、不含分潤）共用。
+ */
+async function assembleProjectDetail(
+  tenantId: string,
+  row: ProjectRow,
+  flags: { finance: boolean; bonus: boolean; profit: boolean },
+) {
+  const { finance, bonus } = flags
   const [signed, client, settings, companies, sharePctByRole, guildRepaymentNote] = await Promise.all([
     signedProjectIds(tenantId, [row.id]),
     loadClient(tenantId, row.client_id),
@@ -1265,7 +1289,7 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
     loadProjectGuildRepaymentNote(tenantId, row.id),
   ])
   const project = {
-    ...serializeProject(row, { finance, bonus, profit: scope.canSeeProfit, hasSignedContract: signed.has(row.id) }),
+    ...serializeProject(row, { finance, bonus, profit: flags.profit, hasSignedContract: signed.has(row.id) }),
     // 本案各角色分潤趴數（2026-10-27）：只給看得到分潤的人（canSeeBonus：老闆／HR／經理／主辦／部門主管）。
     // 趴數本身推不出毛利，所以不限 canSeeProfit。null＝本案未設定（或看不到）。
     sharePctByRole,
@@ -1275,20 +1299,9 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
     // 承接公司的有效名稱（申請單／列印頁左上角用）：company_id 為 null 時是租戶預設公司。
     companyName: effectiveCompanyOf(row.company_id, companies)?.name ?? null,
   }
-  // editBonus：分潤寫入權（只有老闆／platform_admin）；bossConfigured：租戶是否已指定老闆。
-  // profit：專案毛利／毛利率可見性（老闆／platform_admin／授權 HR；2026-10-26 業主決定 2：申請單金額摘要也算集團財務）。
-  const access = {
-    finance,
-    bonus,
-    profit: scope.canSeeProfit,
-    editBonus: scope.bonusEdit.canEdit,
-    bossConfigured: scope.bonusEdit.bossConfigured,
-  }
   if (!finance) {
     return {
-      ok: true as const,
       project,
-      access,
       money: null,
       billings: [] as ReturnType<typeof serializeBilling>[],
       subcontracts: [] as ReturnType<typeof serializeSubcontract>[],
@@ -1305,11 +1318,9 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
     else paymentsBySub.set(p.subcontract_id, [p])
   }
   return {
-    ok: true as const,
     project,
-    access,
     // 毛利（profit）與毛利率屬於集團財務：看不到的人（未授權 HR、會計、專案負責人、部門主管）API 不回。
-    money: scope.canSeeProfit ? bundle.money : { ...bundle.money, profit: null, grossMarginPct: null },
+    money: flags.profit ? bundle.money : { ...bundle.money, profit: null, grossMarginPct: null },
     billings: bundle.billings.map(serializeBilling),
     subcontracts: bundle.subcontracts.map((sc) => serializeSubcontract(sc, paymentsBySub.get(sc.id) ?? [])),
     contracts: bundle.contracts.map(serializeContractLite),
@@ -1317,6 +1328,51 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
     settings,
   }
 }
+
+/** GET /projects/:id/application 的 application 段（也是申請單版本快照的內容，見 services/application-versions.ts）。 */
+async function applicationPayloadOf(tenantId: string, detail: Awaited<ReturnType<typeof assembleProjectDetail>>) {
+  const tz = await getTenantTimezone(tenantId)
+  const createdOn = localDateKey(detail.project.createdAt, tz)
+  const { client, ...project } = detail.project
+  // A5：申請單抬頭印「開案日期」，用 openedOn（缺值才退回建立日）——
+  // createdOn／dateRoc 維持原本建立日語意，兩者刻意分開，別互相取代。
+  const openedOn = project.openedOn ?? createdOn
+  return {
+    code: project.code,
+    createdOn,
+    dateRoc: rocDate(createdOn),
+    openedOn,
+    project,
+    client,
+    latestDocument: detail.latestDocument,
+    designScope: project.designScope,
+    engineers: project.engineers,
+    billings: detail.billings,
+    subcontracts: detail.subcontracts,
+    money: detail.money,
+    settings: { vatRate: detail.settings.vatRate, disciplines: detail.settings.disciplines },
+  }
+}
+
+/**
+ * 申請單版本快照（2026-11-10，migration 0090）：跟 GET /projects/:id/application 的 application 段同一個形狀，
+ * 完整財務（含利潤／毛利率；讀版本時再依讀者的 profit 權限遮掉）、不含分潤（sharePctByRole／獎金欄位）。
+ * 專案不存在（或不屬此租戶）回 null。
+ */
+export async function buildApplicationSnapshot(tenantId: string, projectId: string) {
+  const { data, error } = await supabaseAdmin
+    .from("projects")
+    .select(PROJECT_COLS)
+    .eq("tenant_id", tenantId)
+    .eq("id", projectId)
+    .maybeSingle()
+  if (error) throw new Error(`buildApplicationSnapshot: ${error.message}`)
+  if (!data) return null
+  const detail = await assembleProjectDetail(tenantId, data as ProjectRow, { finance: true, bonus: false, profit: true })
+  return applicationPayloadOf(tenantId, detail)
+}
+
+export type ApplicationSnapshot = NonNullable<Awaited<ReturnType<typeof buildApplicationSnapshot>>>
 
 // ── GET /projects/:id — 全員讀專案詳情（錢依權限裁剪） ────────────────
 projectsRouter.get(
@@ -1373,28 +1429,8 @@ projectsRouter.get(
         res.status(detail.status).json({ error: detail.error })
         return
       }
-      const tz = await getTenantTimezone(tenantId)
-      const createdOn = localDateKey(detail.project.createdAt, tz)
-      const { client, ...project } = detail.project
-      // A5：申請單抬頭印「開案日期」，用 openedOn（缺值才退回建立日）——
-      // createdOn／dateRoc 維持原本建立日語意，兩者刻意分開，別互相取代。
-      const openedOn = project.openedOn ?? createdOn
       res.status(200).json({
-        application: {
-          code: project.code,
-          createdOn,
-          dateRoc: rocDate(createdOn),
-          openedOn,
-          project,
-          client,
-          latestDocument: detail.latestDocument,
-          designScope: project.designScope,
-          engineers: project.engineers,
-          billings: detail.billings,
-          subcontracts: detail.subcontracts,
-          money: detail.money,
-          settings: { vatRate: detail.settings.vatRate, disciplines: detail.settings.disciplines },
-        },
+        application: await applicationPayloadOf(tenantId, detail),
         access: detail.access,
       })
     } catch (err) {

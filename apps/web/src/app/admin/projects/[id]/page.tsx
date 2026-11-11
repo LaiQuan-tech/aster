@@ -41,6 +41,9 @@ import {
   listProjectsExt,
   getP3SettingsLite,
   listClients,
+  listApplicationVersions,
+  getApplicationVersion,
+  createApplicationVersion,
   loadContractsForProjectAccess,
   engineerDisciplinesOf,
   PROJECT_KIND_LABELS,
@@ -54,7 +57,12 @@ import {
   type Company,
   type Client,
   type ProjectListItem,
+  type ApplicationData,
+  type ApplicationVersionList,
+  type ApplicationVersionMeta,
 } from "@/lib/projects-ext-api";
+import { currentVersionNo, snapshotSheetProps, versionNoLabel } from "@/lib/project-application-versions";
+import { ApplicationVersionControls, OldVersionBanner } from "./_sections/ApplicationVersionControls";
 import { parentProjectChoices } from "../_components/project-application-form";
 import {
   humanError,
@@ -177,6 +185,11 @@ export default function AdminProjectDetailPage() {
    */
   const [sheetSaveStored, setSheetSaveStored] = useState<ProjectScopedReport<ApplicationSheetSaveReport> | null>(null);
   const sheetSaveReport = reportForProject(sheetSaveStored, projectId);
+  /** 申請單版本（2026-11-10）：null＝讀不到或 migration 未套用（隱藏版本 UI）。 */
+  const [versionList, setVersionList] = useState<ApplicationVersionList | null>(null);
+  /** 正在檢視的舊版（唯讀快照）；null＝目前版（即時資料）。 */
+  const [viewingVersion, setViewingVersion] = useState<(ApplicationVersionMeta & { snapshot: ApplicationData; profit: boolean; projectId: string }) | null>(null);
+  const [versionError, setVersionError] = useState<string | null>(null);
 
   // 開票／收款的小表單（模組五）
   const [invoiceFormId, setInvoiceFormId] = useState<string | null>(null);
@@ -205,7 +218,7 @@ export default function AdminProjectDetailPage() {
       // access 由 detail 回應決定；先取得它，避免非 finance 使用者先打合約 API 收到 403，
       // 進而讓整頁 Promise.all 失敗。
       const detail = await getProjectDetail(projectId);
-      const [m, adj, docs, contractsForAccess, bs, subs, d, e, ven, comp, p3, mains, cl, me] = await Promise.all([
+      const [m, adj, docs, contractsForAccess, bs, subs, d, e, ven, comp, p3, mains, cl, me, vers] = await Promise.all([
         getProjectMembers(projectId),
         getProjectAdjustments(projectId),
         getProjectDocuments(projectId),
@@ -227,6 +240,8 @@ export default function AdminProjectDetailPage() {
         // 客戶名冊只有可編輯申請單的人需要；讀不到就退回專案帶的 client。
         detail.access.finance ? listClients().catch(() => ({ clients: [] as Client[] })) : Promise.resolve({ clients: [] as Client[] }),
         getMe().catch(() => null),
+        // 申請單版本（finance 才看得到；讀不到或 migration 未套用＝隱藏版本 UI）。
+        detail.access.finance ? listApplicationVersions(projectId).catch(() => null) : Promise.resolve(null),
       ]);
       const clientsEditable = isAdminRole(me?.role);
       const disciplineList = engineerDisciplinesOf(p3?.settings.disciplines ?? null);
@@ -256,6 +271,8 @@ export default function AdminProjectDetailPage() {
         return pending.dirtyCount === 0 ? newBase : rebased;
       });
       setClients(cl.clients);
+      setVersionList(vers && vers.available ? vers : null);
+      setViewingVersion((prev) => (prev && prev.projectId === detail.project.id ? prev : null));
       setCanEditClients(clientsEditable);
       setProject(detail.project);
       setAccess(detail.access);
@@ -319,6 +336,26 @@ export default function AdminProjectDetailPage() {
   }, [projectId]);
 
   const canFinance = access.finance;
+
+  async function viewVersion(no: number | null) {
+    setVersionError(null);
+    if (no === null) {
+      setViewingVersion(null);
+      return;
+    }
+    try {
+      const res = await getApplicationVersion(projectId, no);
+      setViewingVersion({ ...res.version, projectId, profit: res.access.profit });
+    } catch {
+      setVersionError(`讀不到${versionNoLabel(no)}，請稍後再試`);
+    }
+  }
+
+  async function createVersion(note: string | null) {
+    await createApplicationVersion(projectId, note);
+    const next = await listApplicationVersions(projectId);
+    setVersionList(next.available ? next : null);
+  }
   /** W4：分潤區（獎金池／成員趴數／異動史）。會計有 finance 但沒有 bonus。 */
   const canBonus = access.bonus;
 
@@ -417,8 +454,34 @@ export default function AdminProjectDetailPage() {
       />
 
       {/* ① 專案申請單（版面照公司 Word 申請單；格子內直接編輯，只送有變的欄位） */}
-      {sheetDraft && (
+      {versionError && <ErrorText>{versionError}</ErrorText>}
+      {viewingVersion ? (
+        <ApplicationSheet
+          {...snapshotSheetProps(viewingVersion.snapshot)}
+          readOnly
+          canFinance={canFinance}
+          showProfit={viewingVersion.profit}
+          contracts={[]}
+          companies={[]}
+          vendors={vendors}
+          versionLabel={versionNoLabel(viewingVersion.versionNo)}
+          versionControls={
+            versionList ? (
+              <ApplicationVersionControls versions={versionList.versions} selected={viewingVersion.versionNo} onSelect={viewVersion} onCreate={createVersion} canCreate={false} dirty={false} />
+            ) : undefined
+          }
+          banner={<OldVersionBanner projectId={projectId} version={viewingVersion} onBack={() => viewVersion(null)} />}
+        />
+      ) : sheetDraft && (
       <ApplicationSheet
+        versionLabel={versionList ? versionNoLabel(currentVersionNo(versionList.versions)) : undefined}
+        versionControls={
+          versionList
+            ? ({ dirty }: { dirty: boolean }) => (
+                <ApplicationVersionControls versions={versionList.versions} selected={null} onSelect={viewVersion} onCreate={createVersion} canCreate={canFinance} dirty={dirty} />
+              )
+            : undefined
+        }
         draft={sheetDraft}
         onDraftChange={setSheetDraft as Dispatch<SetStateAction<ApplicationSheetDraft>>}
         project={project}

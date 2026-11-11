@@ -8,12 +8,15 @@ import { listVendors, type Vendor } from "@/lib/company-api";
 import { DOC_TYPE_LABELS, OUR_ROLE_SHORT_LABELS, getContracts, type Contract } from "@/lib/projects-api";
 import {
   getProjectApplication,
+  getApplicationVersion,
+  listApplicationVersions,
   engineerDisciplinesOf,
   type ApplicationData,
   type ProjectDetail,
 } from "@/lib/projects-ext-api";
 import { PRINT_BLOCKS, type PrintBlockKey } from "@/lib/project-application-sheet";
 import { ApplicationSheet } from "../_sections/ApplicationSheet";
+import { currentVersionNo, oldVersionBanner, versionNoLabel } from "@/lib/project-application-versions";
 
 /*
  * 列印區塊（B6）的 key／標籤由 lib/project-application-sheet.ts 提供（專案明細頁的申請單表格共用同一份）。
@@ -51,6 +54,7 @@ export function ApplicationDocument({
   vendors,
   showProfit = true,
   canFinance = true,
+  versionLabel,
 }: {
   data: ApplicationData;
   printChecked?: Partial<Record<PrintBlockKey, boolean>>;
@@ -62,6 +66,8 @@ export function ApplicationDocument({
   showProfit?: boolean;
   /** 看得到錢（access.finance）：false 時銷售金額等格顯示「—」（後端本來也不回）。 */
   canFinance?: boolean;
+  /** 申請單版本號（「第 2 版」，2026-11-10）；標題旁顯示並列印。省略＝不顯示。 */
+  versionLabel?: string;
 }) {
   const contractsOn = printChecked?.contracts ?? true;
   // /application 的 project 段不含 client（另外平行給），補回去就是明細頁同一份資料形狀。
@@ -82,6 +88,7 @@ export function ApplicationDocument({
         disciplines={engineerDisciplinesOf(data.settings?.disciplines)}
         printChecked={printChecked}
         latestDocument={data.latestDocument}
+        versionLabel={versionLabel}
       />
 
       {/* M17：合約與印花稅。合約本體在專案明細頁維護，這裡只印摘要。 */}
@@ -149,6 +156,11 @@ export default function ProjectApplicationPrintPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [printChecked, setPrintChecked] = useState<Record<PrintBlockKey, boolean>>(defaultPrintChecked);
+  /** 申請單版本（2026-11-10）：版本號文字；?version=N 時印的是那一版的快照（唯讀），合約表不印（快照不含）。 */
+  const [versionLabel, setVersionLabel] = useState<string | undefined>(undefined);
+  const [oldVersionNote, setOldVersionNote] = useState<string | null>(null);
+  /** 印的是版本快照（?version=N）：合約與印花稅表不印（快照不含合約明細）。 */
+  const [snapshotView, setSnapshotView] = useState(false);
   // 是否已經讀過 localStorage 一次——下面「存檔＋同步 body class」的 effect 要等這個
   // 變 true 才准寫，見該 effect 前的說明。
   const [printCheckedHydrated, setPrintCheckedHydrated] = useState(false);
@@ -156,13 +168,9 @@ export default function ProjectApplicationPrintPage() {
   useEffect(() => {
     let active = true;
     setLoading(true);
-    getContracts(projectId)
-      .then((res) => {
-        if (active) setContracts(res.contracts);
-      })
-      .catch(() => {
-        if (active) setContracts([]);
-      });
+    // ?version=N：印舊版快照（不用 useSearchParams，免得整頁要包 Suspense）。
+    const versionParam = Number(new URLSearchParams(window.location.search).get("version") ?? "");
+    const versionNo = Number.isInteger(versionParam) && versionParam >= 1 ? versionParam : null;
     listVendors()
       .then((res) => {
         if (active) setVendors(res.vendors);
@@ -170,6 +178,39 @@ export default function ProjectApplicationPrintPage() {
       .catch(() => {
         if (active) setVendors([]);
       });
+    if (versionNo !== null) {
+      getApplicationVersion(projectId, versionNo)
+        .then((res) => {
+          if (!active) return;
+          setData(res.version.snapshot);
+          setSnapshotView(true);
+          setShowProfit(res.access.profit !== false);
+          setCanFinance(true);
+          setVersionLabel(versionNoLabel(res.version.versionNo));
+          setOldVersionNote(res.version.supersededAt ? oldVersionBanner(res.version) : null);
+        })
+        .catch((err) => {
+          if (active) setError(err instanceof Error ? err.message : "載入失敗");
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+      return () => {
+        active = false;
+      };
+    }
+    getContracts(projectId)
+      .then((res) => {
+        if (active) setContracts(res.contracts);
+      })
+      .catch(() => {
+        if (active) setContracts([]);
+      });
+    listApplicationVersions(projectId)
+      .then((res) => {
+        if (active && res.available) setVersionLabel(versionNoLabel(currentVersionNo(res.versions)));
+      })
+      .catch(() => {});
     getProjectApplication(projectId)
       .then((res) => {
         if (active) {
@@ -257,7 +298,10 @@ export default function ProjectApplicationPrintPage() {
       ) : error || !data ? (
         <p className="text-sm text-red-600">{error ?? "找不到專案"}</p>
       ) : (
-        <ApplicationDocument data={data} printChecked={printChecked} contracts={contracts} vendors={vendors} showProfit={showProfit} canFinance={canFinance} />
+        <>
+          {oldVersionNote && <p className="no-print mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">{oldVersionNote}</p>}
+          <ApplicationDocument data={data} printChecked={printChecked} contracts={snapshotView ? undefined : contracts} vendors={vendors} showProfit={showProfit} canFinance={canFinance} versionLabel={versionLabel} />
+        </>
       )}
     </div>
   );

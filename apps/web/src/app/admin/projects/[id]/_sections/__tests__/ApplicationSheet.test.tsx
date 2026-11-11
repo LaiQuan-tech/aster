@@ -7,7 +7,8 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { ApplicationSheet } from "../ApplicationSheet"
 import { applicationSheetDraftOf, type ApplicationSheetDraft } from "@/lib/project-application-sheet"
 import type { Contract } from "@/lib/projects-api"
-import type { BillingExt, Client, ProjectDetail, ProjectMoney, Subcontract } from "@/lib/projects-ext-api"
+import type { ApplicationData, BillingExt, Client, ProjectDetail, ProjectMoney, Subcontract } from "@/lib/projects-ext-api"
+import { snapshotSheetProps } from "@/lib/project-application-versions"
 
 const client: Client = {
   id: "c1", name: "測試客戶甲", category: null, taxId: "12345675", phone: "02-0000-0001", fax: "02-0000-0002",
@@ -221,5 +222,61 @@ describe("申請單表格：唯讀情境", () => {
     expect(html).not.toContain("<input")
     expect(html).not.toContain("data-editable")
     expect(html).toContain("唯讀：修改申請單需要本案的財務權限")
+  })
+})
+
+describe("申請單版本：舊版快照唯讀渲染（2026-11-10）", () => {
+  // 快照＝ GET /projects/:id/application 的 application 段；用 snapshotSheetProps 轉成元件 props。
+  const snapshot = {
+    code: "T-115-001", createdOn: "2026-10-01", dateRoc: "115.10.1", openedOn: "2026-10-01",
+    project: (({ client: _c, ...rest }) => rest)(project as unknown as Record<string, unknown>),
+    client, latestDocument: { id: "k1", docType: "contract", title: "主合約", amount: 100000, signedOn: "2026-10-02" },
+    designScope: [], engineers: {}, billings, subcontracts, money, settings: { vatRate: 0.05, disciplines: [] },
+  } as unknown as ApplicationData
+
+  function renderSnapshot() {
+    return renderToStaticMarkup(
+      <ApplicationSheet
+        {...snapshotSheetProps(snapshot)}
+        readOnly
+        canFinance
+        showProfit
+        contracts={[]}
+        companies={[]}
+        vendors={[]}
+        versionLabel="第 2 版"
+        banner={<p data-testid="old-banner">正在檢視第 2 版</p>}
+      />,
+    )
+  }
+
+  it("同一版面完整渲染：金額、付款階段、發包、客戶、訂單、版本號與橫幅", () => {
+    const html = renderSnapshot()
+    expect(html).toContain('data-testid="application-version-label"')
+    expect(html).toContain("第 2 版")
+    expect(html).toContain('data-testid="old-banner"')
+    expect(cell(html, "sheet-amountUntaxed")).toContain("100,000")
+    expect(cell(html, "sheet-taxAmount")).toContain("5,000")
+    expect(html).toContain("簽約款")
+    expect(html).toContain("ZZ00000001")
+    expect(html).toContain("測試工程行")
+    expect(html).toContain("測試客戶甲")
+    expect(cell(html, "sheet-orderDocument")).toContain("■合約書")
+    expect(html).toContain("80,000") // 利潤
+  })
+
+  it("所有輸入停用：沒有輸入框、沒有儲存列與唯讀說明", () => {
+    const html = renderSnapshot()
+    expect(html).not.toMatch(/<input|<select|<textarea/)
+    expect(html).not.toContain('data-editable="true"')
+    expect(html).not.toContain("儲存申請單")
+    expect(html).not.toContain("唯讀：修改申請單需要")
+  })
+
+  it("列印版也印版本號", () => {
+    const html = renderToStaticMarkup(
+      <ApplicationSheet {...snapshotSheetProps(snapshot)} mode="print" canFinance showProfit contracts={[]} companies={[]} vendors={[]} versionLabel="第 3 版" />,
+    )
+    expect(html).toContain("第 3 版")
   })
 })

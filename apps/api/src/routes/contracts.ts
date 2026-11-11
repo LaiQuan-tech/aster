@@ -21,6 +21,7 @@ import {
   serializeMainContract,
   upsertMainContract,
 } from "../services/main-contract.js"
+import { withApplicationVersioning } from "../services/application-versions.js"
 
 export const contractsRouter = Router()
 
@@ -244,10 +245,14 @@ contractsRouter.put(
       const scope = await loadProjectScope(tenantId, userId, req.params.id as string)
       if (!scope.ok) return res.status(scope.status).json({ error: scope.error })
       if (!scope.finance) return res.status(403).json({ error: "forbidden" })
-      const contract = await upsertMainContract(tenantId, req.params.id as string, scope.self.id, parsed.data)
+      // 2026-11-10 申請單版本：合約金額（未稅）有變 → 同一流程內建版（services/application-versions.ts）。
+      const { result: contract, versioning } = await withApplicationVersioning(
+        { tenantId, projectId: req.params.id as string, empId: scope.self.id, source: "PUT /projects/:id/main-contract" },
+        () => upsertMainContract(tenantId, req.params.id as string, scope.self.id, parsed.data),
+      )
       // 分潤改版 #3：合約額變動 → 草稿獎金批次重算（best-effort）。
       await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "PUT /projects/:id/main-contract")
-      res.status(200).json({ contract: serializeMainContract(contract) })
+      res.status(200).json({ contract: serializeMainContract(contract), applicationVersion: versioning })
     } catch (err) {
       next(err)
     }
@@ -305,42 +310,51 @@ contractsRouter.post(
       const copies = b.copies ?? 1
       const duty = dutiable ? computeStampDuty({ amount: b.amount ?? null, rate, copies }) : null
 
-      const { data, error } = await supabaseAdmin
-        .from("contracts")
-        .insert({
-          tenant_id: tenantId,
-          project_id: req.params.id,
-          doc_type: b.docType,
-          our_role: ourRole,
-          title: b.title,
-          counterparty: b.counterparty ?? null,
-          amount: b.amount ?? null,
-          signed_on: b.signedOn ?? null,
-          copies,
-          supersedes_id: b.supersedesId ?? null,
-          // 改版：新列的 version = 被取代那列 + 1。
-          version: superseded ? superseded.version + 1 : 1,
-          stamp_duty_required: flag,
-          // 不應貼花就不存費率，免得清單誤以為算過。
-          stamp_duty_rate: dutiable ? rate : null,
-          stamp_duty_amount: duty,
-          stamp_duty_paid_on: b.stampDutyPaidOn ?? null,
-          stamp_duty_note: b.stampDutyNote ?? null,
-          content_note: contentNote,
-          created_by_emp_id: scope.self.id,
-        })
-        .select(CONTRACT_COLS)
-        .single()
-      if (error || !data) {
-        next(new Error(`POST /projects/${req.params.id}/contracts: ${error?.message}`))
+      // 2026-11-10 申請單版本：新增合約／追加減／報價單讓銷售金額（未稅）變了 → 同一流程內建版。
+      const { result: inserted, versioning } = await withApplicationVersioning(
+        { tenantId, projectId: req.params.id as string, empId: scope.self.id, source: "POST /projects/:id/contracts" },
+        async () => {
+          const { data, error } = await supabaseAdmin
+            .from("contracts")
+            .insert({
+              tenant_id: tenantId,
+              project_id: req.params.id,
+              doc_type: b.docType,
+              our_role: ourRole,
+              title: b.title,
+              counterparty: b.counterparty ?? null,
+              amount: b.amount ?? null,
+              signed_on: b.signedOn ?? null,
+              copies,
+              supersedes_id: b.supersedesId ?? null,
+              // 改版：新列的 version = 被取代那列 + 1。
+              version: superseded ? superseded.version + 1 : 1,
+              stamp_duty_required: flag,
+              // 不應貼花就不存費率，免得清單誤以為算過。
+              stamp_duty_rate: dutiable ? rate : null,
+              stamp_duty_amount: duty,
+              stamp_duty_paid_on: b.stampDutyPaidOn ?? null,
+              stamp_duty_note: b.stampDutyNote ?? null,
+              content_note: contentNote,
+              created_by_emp_id: scope.self.id,
+            })
+            .select(CONTRACT_COLS)
+            .single()
+          if (error || !data) return { error: new Error(`POST /projects/${req.params.id}/contracts: ${error?.message}`) }
+          // 合約金額是分期請款的分母（模組四第 4 條）。新增／追加後期程就過時了，
+          // 這裡重算，否則使用者要自己回去按一次存檔才會更新。
+          await recomputeBillings(tenantId, req.params.id as string)
+          return { data }
+        },
+      )
+      if ("error" in inserted) {
+        next(inserted.error)
         return
       }
-      // 合約金額是分期請款的分母（模組四第 4 條）。新增／追加後期程就過時了，
-      // 這裡重算，否則使用者要自己回去按一次存檔才會更新。
-      await recomputeBillings(tenantId, req.params.id as string)
+      const data = inserted.data
       // 分潤改版 #3：新增合約／追加減（change_order）→ 草稿獎金批次重算（best-effort）。
       await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "POST /projects/:id/contracts")
-      res.status(201).json({ contract: serialize(data as ContractRow, canSeeContent) })
+      res.status(201).json({ contract: serialize(data as ContractRow, canSeeContent), applicationVersion: versioning })
     } catch (err) {
       next(err)
     }
@@ -459,24 +473,37 @@ contractsRouter.patch(
         patch.stamp_duty_amount = dutiable ? computeStampDuty({ amount, rate, copies }) : null
       }
 
-      const { data, error } = await supabaseAdmin
-        .from("contracts")
-        .update(patch)
-        .eq("tenant_id", tenantId)
-        .eq("id", req.params.id)
-        .select(CONTRACT_COLS)
-        .single()
-      if (error || !data) {
-        next(new Error(`PATCH /contracts/${req.params.id}: ${error?.message}`))
-        return
-      }
       // 期程分母（contractTotal）取決於金額**和**我方角色（lib/contract-role.ts：
       // client 不算我方營收、contractor／both 才算）——B1 開放 ourRole 可改之後，
       // client→both 會讓分母從 null 變成合約額，只在改金額時重算就會讓
       // project_billings.calculated_amount 停在舊值（驗收抓到的 B 批次問題 1）。
       // docType 也是分母條件，但 PATCH 刻意不開放改（見 updateSchema），不必列。
-      if (b.amount !== undefined || b.ourRole !== undefined) {
-        await recomputeBillings(tenantId, row.project_id)
+      const amountTouched = b.amount !== undefined || b.ourRole !== undefined
+      const write = async () => {
+        const { data, error } = await supabaseAdmin
+          .from("contracts")
+          .update(patch)
+          .eq("tenant_id", tenantId)
+          .eq("id", req.params.id)
+          .select(CONTRACT_COLS)
+          .single()
+        if (error || !data) return { error: new Error(`PATCH /contracts/${req.params.id}: ${error?.message}`) }
+        if (amountTouched) await recomputeBillings(tenantId, row.project_id)
+        return { data }
+      }
+      // 2026-11-10 申請單版本：改金額／我方角色讓銷售金額（未稅）變了 → 同一流程內建版。
+      const { result: written, versioning } = amountTouched
+        ? await withApplicationVersioning(
+            { tenantId, projectId: row.project_id, empId: scope.self.id, source: "PATCH /contracts/:id" },
+            write,
+          )
+        : { result: await write(), versioning: null }
+      if ("error" in written) {
+        next(written.error)
+        return
+      }
+      const data = written.data
+      if (amountTouched) {
         // 分潤改版 #3：合約額（或是否算我方營收）變動 → 草稿獎金批次重算（best-effort）。
         await recomputeDraftRunsAfterWrite(tenantId, [row.project_id], "PATCH /contracts/:id")
       }
@@ -492,7 +519,7 @@ contractsRouter.patch(
         newRow: patch,
         context: "PATCH /contracts/:id — 修改合約",
       })
-      res.status(200).json({ contract: serialize(data as ContractRow, canSeeContent) })
+      res.status(200).json({ contract: serialize(data as ContractRow, canSeeContent), applicationVersion: versioning })
     } catch (err) {
       next(err)
     }
@@ -546,22 +573,30 @@ contractsRouter.delete(
       }
       // 金額憑證不實體刪除（sql/0018 同一套理由）——已貼花的合約更是如此，
       // 刪掉等於把「這筆稅貼過了」的證據一起刪掉。
-      const { error } = await supabaseAdmin
-        .from("contracts")
-        .update({
-          deleted_at: new Date().toISOString(),
-          deleted_by_emp_id: scope.self.id,
-          delete_reason: parsed.data.reason,
-        })
-        .eq("tenant_id", tenantId)
-        .eq("id", req.params.id)
-      if (error) {
-        next(new Error(`DELETE /contracts/${req.params.id}: ${error.message}`))
+      // 2026-11-10 申請單版本：作廢合約／報價單讓銷售金額（未稅）變了 → 同一流程內建版。
+      const { result: deleteError, versioning } = await withApplicationVersioning(
+        { tenantId, projectId: current.project_id as string, empId: scope.self.id, source: "DELETE /contracts/:id" },
+        async () => {
+          const { error } = await supabaseAdmin
+            .from("contracts")
+            .update({
+              deleted_at: new Date().toISOString(),
+              deleted_by_emp_id: scope.self.id,
+              delete_reason: parsed.data.reason,
+            })
+            .eq("tenant_id", tenantId)
+            .eq("id", req.params.id)
+          if (error) return new Error(`DELETE /contracts/${req.params.id}: ${error.message}`)
+          await recomputeBillings(tenantId, current.project_id as string)
+          return null
+        },
+      )
+      if (deleteError) {
+        next(deleteError)
         return
       }
-      await recomputeBillings(tenantId, current.project_id as string)
       await recomputeDraftRunsAfterWrite(tenantId, [current.project_id as string], "DELETE /contracts/:id")
-      res.status(200).json({ id: req.params.id })
+      res.status(200).json({ id: req.params.id, applicationVersion: versioning })
     } catch (err) {
       next(err)
     }

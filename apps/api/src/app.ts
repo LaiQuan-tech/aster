@@ -52,6 +52,7 @@ import { projectsRouter } from "./routes/projects.js"
 import { projectDocumentsRouter } from "./routes/project-documents.js"
 import { projectDuplicateRouter } from "./routes/project-duplicate.js"
 import { contractsRouter } from "./routes/contracts.js"
+import { applicationVersionsRouter } from "./routes/application-versions.js"
 import { billingsRouter } from "./routes/billings.js"
 import { projectsAnnualRouter } from "./routes/projects-annual.js"
 import { subcontractsRouter } from "./routes/subcontracts.js"
@@ -204,6 +205,7 @@ app.use(projectsRouter)
 app.use(projectDuplicateRouter) // /projects/:id/duplicate、/projects/:id/lineage（C2 複製專案）
 app.use(projectDocumentsRouter)
 app.use(contractsRouter)
+app.use(applicationVersionsRouter) // /projects/:id/application-versions（申請單版本；2026-11-10）
 app.use(billingsRouter)
 app.use(subcontractsRouter)
 app.use(clientsRouter)

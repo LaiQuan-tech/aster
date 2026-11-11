@@ -27,6 +27,7 @@ export const AUDIT_TABLE_LABELS: Record<string, string> = {
   payroll_adjustments: "薪資加減項（前期更正）",
   employee_fixed_allowances: "員工固定津貼",
   insured_salary_changes: "投保薪資調整歷程",
+  project_application_versions: "專案申請單版本",
   period_closes: "月結",
   rule_configs: "差勤／薪資規則",
   leave_requests: "申請單（假單／加班／補打卡／出差／預支）",
@@ -247,6 +248,12 @@ export const AUDIT_FIELD_LABELS: Record<string, string> = {
   prev_labor_insured_salary: "原勞保投保薪資",
   prev_health_insured_salary: "原健保投保薪資",
   prev_pension_wage: "原勞退月提繳工資",
+  // 專案申請單版本（2026-11-10）
+  version_no: "版號",
+  snapshot: "申請單內容快照",
+  amount_before: "原合約金額（未稅）",
+  amount_after: "新合約金額（未稅）",
+  superseded_at: "被取代時間",
 }
 
 export function tableLabel(table: string): string {
