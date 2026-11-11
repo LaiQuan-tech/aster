@@ -232,7 +232,9 @@ billingsRouter.get(
  *   • 已設定每期獎金分潤／發獎金日的期別不可移除（409 `billing_has_bonus_shares`，2026-11-11）。
  *   • 存後若某期分潤合計超過新的期別金額：照存，回 `warnings: [{ billingId, code: "shares_exceed_amount" }]`。
  *   • 帶 id 但不是**本專案**現有未刪期別 → 整批 400 `unknown_billing`（任何寫入前；擋跨專案改期別，2026-11-11）。
- *   • 寫到一半被 DB 觸發器擋（BS409）→ 先重算已寫入部分再回 409；其他單期寫入錯誤照存其餘期別，
+ *   • payload 內同一期別 id 出現兩次（轉小寫後比）→ 整批 400 `duplicate_billing_id`（任何寫入前）。
+ *   • 寫到一半被 DB 觸發器擋（BS409）、新增撞號（409 installment_no_taken）、其他新增錯誤（500）或拋例外
+ *     → 提早返回前先重算已寫入部分；其他單期寫入錯誤照存其餘期別，
  *     回 `warnings: [{ billingId, code: "update_failed" }]`。
  */
 billingsRouter.put(
@@ -252,6 +254,8 @@ billingsRouter.put(
       res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
       return
     }
+    // 開始寫入後才設 true：外層 catch 據此判斷要不要先把已寫入部分重算一致。
+    let writesStarted = false
     try {
       const scope = await loadProjectScope(tenantId, userId, projectId)
       if (!scope.ok) {
@@ -265,6 +269,16 @@ billingsRouter.put(
 
       // id 一律轉小寫比對（UUID 大小寫不同仍是同一期；不轉的話大寫 id 會被當成「不在 payload」而軟刪除）。
       const payload = parsed.data.installments.map((item) => (item.id ? { ...item, id: item.id.toLowerCase() } : item))
+      // 同一期別 id 出現兩次（轉小寫後）→ 任何寫入前整批擋：否則同一列會被寫兩次、後者蓋前者。
+      const seenIds = new Set<string>()
+      for (const item of payload) {
+        if (!item.id) continue
+        if (seenIds.has(item.id)) {
+          res.status(400).json({ error: "duplicate_billing_id", installmentNo: item.installmentNo })
+          return
+        }
+        seenIds.add(item.id)
+      }
       const seen = new Set<number>()
       for (const item of payload) {
         if (seen.has(item.installmentNo)) {
@@ -348,6 +362,7 @@ billingsRouter.put(
       }
 
       const writeWarnings: Warning[] = []
+      writesStarted = true
       // 先軟刪除要移除的，避免期別編號與新增的相撞。
       for (const row of removing) {
         const { error } = await supabaseAdmin
@@ -412,6 +427,8 @@ billingsRouter.put(
             created_by_emp_id: scope.self.id,
           })
           if (error) {
+            // 前面的期別可能已寫入：不論哪種錯誤，提早返回前都先重算已寫入部分。
+            await recomputeAfterPartialWrite(tenantId, projectId)
             if (error.code === "23505") {
               res.status(409).json({ error: "installment_no_taken", installmentNo: item.installmentNo })
               return
@@ -429,6 +446,8 @@ billingsRouter.put(
         warnings: [...writeWarnings, ...over.map((billingId) => ({ billingId, code: "shares_exceed_amount" as const }))],
       })
     } catch (err) {
+      // 寫到一半拋例外：已寫入部分先重算（失敗只 log），再交給錯誤處理。
+      if (writesStarted) await recomputeAfterPartialWrite(tenantId, projectId)
       next(err)
     }
   },

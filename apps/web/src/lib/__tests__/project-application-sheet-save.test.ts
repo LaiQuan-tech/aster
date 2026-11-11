@@ -916,6 +916,10 @@ describe("期程 PUT 回 update_failed（2026-11-11）：該期草稿保留、�
     expect(res.residual.stageEdits).toEqual({ b1: { milestone: "訂金改" } })
     expect(res.notices).toContain(BILLING_UPDATE_FAILED_NOTICE)
     expect(BILLING_UPDATE_FAILED_NOTICE).toBe("部分期別未儲存成功，請重試")
+    // 步驟不標 ok：沒有「部分成功」狀態 → 標 failed 並帶訊息。
+    const step = res.steps.find((st) => st.section === "billings")
+    expect(step).toMatchObject({ status: "failed", message: "部分期別未儲存成功，請重試" })
+    expect(res.steps.filter((st) => st.section === "billings")).toHaveLength(1)
   })
 
   it("沒有 update_failed：草稿照常清掉、不提示", async () => {
@@ -929,6 +933,7 @@ describe("期程 PUT 回 update_failed（2026-11-11）：該期草稿保留、�
     const res = await runApplicationSheetSave(plan, draft, api)
     expect(res.residual.stageEdits).toEqual({})
     expect(res.notices).not.toContain(BILLING_UPDATE_FAILED_NOTICE)
+    expect(res.steps.find((st) => st.section === "billings")).toMatchObject({ status: "ok" })
   })
 
   it("billingUpdateFailedIds 只挑 update_failed、id 轉小寫；keepFailedBillingDraftRows 只把失敗那幾期換回送出的值（期程卡）", () => {

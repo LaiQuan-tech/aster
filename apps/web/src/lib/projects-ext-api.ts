@@ -504,6 +504,7 @@ export const BILLING_ERRORS: Record<string, string> = {
   billing_has_bonus_shares: "此期已設定獎金分潤，請老闆先移除後再刪除或改成代墊款。",
   override_reason_required: "人工指定金額必須填理由。",
   unknown_billing: "有期別已不在本案期程裡（可能已被移除），請重新整理後再存。",
+  duplicate_billing_id: "同一期別在期程裡出現兩次，請重新整理後再存。",
   billed_installment_not_removable: "已請款的期別不能移除。",
   received: "已入帳的期別金額已凍結，不能移除或改百分比／覆寫金額。",
   duplicate_installment_no: "期別編號重複。",

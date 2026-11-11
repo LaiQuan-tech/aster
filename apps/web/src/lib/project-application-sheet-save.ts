@@ -1197,6 +1197,12 @@ export async function runApplicationSheetSave(
       failedStageIds = billingUpdateFailedIds(res.warnings);
       if (failedStageIds.size > 0) notices.push(BILLING_UPDATE_FAILED_NOTICE);
     });
+    if (scheduleOk && failedStageIds.size > 0) {
+      // 有期別 update_failed：這一步不能標 ok（步驟狀態沒有「部分成功」→ 標 failed 並說明）。
+      // scheduleOk 仍為 true——其餘期別確實存成了，下面的草稿清理（失敗那幾期保留）照舊。
+      const idx = steps.map((s) => s.section).lastIndexOf("billings");
+      if (idx >= 0 && steps[idx]!.status === "ok") steps[idx] = { ...steps[idx]!, status: "failed", message: BILLING_UPDATE_FAILED_NOTICE };
+    }
     if (scheduleOk) {
       const next: Record<string, StageEdit> = {};
       for (const [key, edit] of Object.entries(residual.stageEdits)) {

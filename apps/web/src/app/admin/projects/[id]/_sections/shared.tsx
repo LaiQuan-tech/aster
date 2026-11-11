@@ -21,6 +21,7 @@ export const STATUS_ERRORS: Record<string, string> = {
   override_reason_required: "人工指定金額必須填理由——偏離期程的金額是談出來的，要留得下痕跡。",
   billed_installment_not_removable: "已請款的期別不能移除。帳已經出去了，移掉那筆應收會憑空消失。",
   duplicate_installment_no: "期別編號重複。",
+  duplicate_billing_id: "同一期別在期程裡出現兩次，請重新整理後再存。",
   installment_no_taken: "期別編號已存在。",
   amount_unknown: "算不出金額（還沒有合約，或這期沒有百分比也沒有人工金額）。",
   already_billed: "這期已經標記請款過了。",

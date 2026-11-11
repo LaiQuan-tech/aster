@@ -233,3 +233,65 @@ describe("#3 其他單期寫入錯誤 → 其餘照存，回 warnings update_fai
     expect(res.body.warnings).toEqual([])
   })
 })
+
+describe("2026-11-11 補強：id 驗證與提早返回前重算", () => {
+  it("空字串／null id → 400 invalid_body，任何寫入都沒發生", async () => {
+    for (const id of ["", null]) {
+      const res = await put(T.accountant, PROJECT, [item(billing(B1)), item(billing(B2), { id })])
+      expect(res.status, JSON.stringify(res.body)).toBe(400)
+      expect(res.body.error).toBe("invalid_body")
+    }
+    expect(fake.writes).toHaveLength(0)
+  })
+
+  it("同一期別 id 出現兩次（大小寫不同也算）→ 400 duplicate_billing_id，任何寫入都沒發生", async () => {
+    const before = JSON.stringify(fake.db.project_billings)
+    for (const dup of [B1, B1.toUpperCase()]) {
+      const res = await put(T.accountant, PROJECT, [
+        item(billing(B1), { percentage: 30 }),
+        item(billing(B1), { id: dup, installmentNo: 2, percentage: 70 }),
+      ])
+      expect(res.status, JSON.stringify(res.body)).toBe(400)
+      expect(res.body).toMatchObject({ error: "duplicate_billing_id", installmentNo: 2 })
+    }
+    expect(fake.writes).toHaveLength(0)
+    expect(JSON.stringify(fake.db.project_billings)).toBe(before)
+  })
+
+  it("新增期別＋不明 id 混送 → 400 unknown_billing，新增與更新都沒寫", async () => {
+    const res = await put(T.accountant, PROJECT, [
+      item(billing(B1), { percentage: 30 }),
+      { installmentNo: 3, percentage: 20, milestone: "新增期" },
+      { id: "f0000000-0000-4000-8000-0000000005fe", installmentNo: 4, percentage: 50 },
+    ])
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "unknown_billing", installmentNos: [4] })
+    expect(fake.writes).toHaveLength(0)
+    expect(fake.db.project_billings).toHaveLength(4)
+  })
+
+  it("新增撞號（23505）→ 回 409 installment_no_taken 前，已更新的第 1 期試算金額已重算", async () => {
+    fake.injectError({ table: "project_billings", action: "insert", error: { code: "23505", message: "duplicate key" } })
+    const res = await put(T.accountant, PROJECT, [
+      item(billing(B1), { percentage: 30 }),
+      item(billing(B2), { percentage: 50 }),
+      { installmentNo: 3, percentage: 20, milestone: "新增期" },
+    ])
+    expect(res.status, JSON.stringify(res.body)).toBe(409)
+    expect(res.body).toMatchObject({ error: "installment_no_taken", installmentNo: 3 })
+    expect(billing(B1).percentage).toBe(30)
+    // 合約 200,000 × 30% ＝ 60,000（沒重算會停在舊的 100,000）。
+    expect(Number(billing(B1).calculated_amount)).toBe(60000)
+  })
+
+  it("新增其他錯誤 → 500 前也先重算", async () => {
+    fake.injectError({ table: "project_billings", action: "insert", error: { code: "XX000", message: "boom" } })
+    const res = await put(T.accountant, PROJECT, [
+      item(billing(B1), { percentage: 30 }),
+      item(billing(B2), { percentage: 50 }),
+      { installmentNo: 3, percentage: 20, milestone: "新增期" },
+    ])
+    expect(res.status).toBe(500)
+    expect(Number(billing(B1).calculated_amount)).toBe(60000)
+  })
+})
