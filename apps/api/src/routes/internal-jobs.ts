@@ -22,6 +22,7 @@ import {
   runSnapshotStep,
   signedSnapshotUrl,
 } from "../services/backup-snapshot.js"
+import { BILLING_SHARE_SNAPSHOT_TABLES, canSeeBillingSharesInTenant } from "../services/billing-shares.js"
 
 /**
  * 內部排程端點（`x-internal-job-token`）＋共用同一批 service 的 HR 端點。
@@ -547,6 +548,27 @@ internalJobsRouter.post(
   },
 )
 
+/**
+ * 備份裡含每期獎金分潤的表（project_billing_shares、project_billing_bonus_dates）：讀表列／下載要同
+ * 「看分潤」權限（canSeeProfit ∧ 看得到分潤，見 services/billing-shares.ts canSeeBillingSharesInTenant），
+ * 光是 hr_admin 不夠（未授權 HR 看不到專案毛利，也就不該從備份看到分潤）。
+ * 檔名用前綴比對（`{table}.json.gz`、`{table}.part-0001.json.gz`…），不分大小寫。
+ */
+function isBillingShareSnapshotName(name: string): boolean {
+  const lower = name.toLowerCase()
+  for (const t of BILLING_SHARE_SNAPSHOT_TABLES) if (lower === t || lower.startsWith(`${t}.`)) return true
+  return false
+}
+
+/** 是含分潤的表／檔且呼叫者沒有看分潤權限 → 回 403 並回 true（呼叫端直接 return）。 */
+async function denyBillingShareSnapshot(req: Request, res: Response, tenantId: string, name: string): Promise<boolean> {
+  if (!isBillingShareSnapshotName(name)) return false
+  const userId = req.auth?.userId
+  if (userId && (await canSeeBillingSharesInTenant(tenantId, userId))) return false
+  res.status(403).json({ error: "forbidden", reason: "billing_shares" })
+  return true
+}
+
 /** 舊路徑＝run 0（2026-09-23 之前直接落在 `{period}/` 的那批檔案）。 */
 internalJobsRouter.get(
   "/backups/:period/files/:name/url",
@@ -556,6 +578,7 @@ internalJobsRouter.get(
   async (req: Request, res: Response, next: NextFunction) => {
     const tenantId = res.locals.tenantId as string
     try {
+      if (await denyBillingShareSnapshot(req, res, tenantId, String(req.params.name))) return
       const url = await signedSnapshotUrl(tenantId, String(req.params.period), String(req.params.name), 0)
       res.status(200).json({ url, expiresIn: 900 })
     } catch (err) {
@@ -577,6 +600,7 @@ internalJobsRouter.get(
       return
     }
     try {
+      if (await denyBillingShareSnapshot(req, res, tenantId, String(req.params.name))) return
       const url = await signedSnapshotUrl(tenantId, String(req.params.period), String(req.params.name), run)
       res.status(200).json({ url, expiresIn: 900, run })
     } catch (err) {
@@ -607,6 +631,7 @@ internalJobsRouter.get(
       return
     }
     try {
+      if (await denyBillingShareSnapshot(req, res, tenantId, String(req.params.table))) return
       const page = await readSnapshotRows(
         tenantId,
         String(req.params.period),

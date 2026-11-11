@@ -2,6 +2,11 @@ import { supabaseAdmin } from "../lib/supabase.js"
 import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "../lib/schema-compat.js"
 import { loadBillings, num } from "./billing-store.js"
 import { effectiveBillingAmount } from "./project-money.js"
+import { isHrRole, resolveSelf } from "../middleware/scope.js"
+import { isBossOrPlatformAdmin } from "../lib/boss.js"
+import { actorIsInactive } from "../lib/actor-status.js"
+import { loadProjectBossEmpId } from "./project-scope.js"
+import { loadGroupFinancialsAccess } from "./financial-visibility.js"
 
 /**
  * 專案申請單「每期款獎金分潤」（2026-11-11，migration 0091）。
@@ -52,12 +57,32 @@ export interface BillingShare {
 
 export interface BillingShareSet {
   billingId: string
+  /** 'installment' 一般分期｜'guild_advance' 技師公會代墊（代墊款不可設分潤）。 */
+  kind: string
   /** 該期有效金額（已請款 ?? 人工覆寫 ?? 試算）；分潤合計不可超過它。 */
   billingAmount: number | null
   bonusPaidOn: string | null
   shares: BillingShare[]
   /** 分潤合計。 */
   total: number
+  /** 分潤合計（以分計）超過該期金額（例如會計事後把期別金額改小）：只是提示，不擋會計改金額。 */
+  overLimit: boolean
+}
+
+/** 金額轉成整數「分」再比，避免 0.1+0.2 這類浮點誤差（金額欄位最多到分）。 */
+export function toCents(n: number): number {
+  return Math.round(n * 100)
+}
+
+/** 純函式：分潤合計是否超過該期金額（合計 > 0 且該期沒有金額，也算超過）。 */
+export function sharesExceed(total: number, billingAmount: number | null): boolean {
+  if (!(toCents(total) > 0)) return false
+  return billingAmount === null || toCents(total) > toCents(billingAmount)
+}
+
+/** 代墊款期別（技師公會代墊）：不進尾差、不可設分潤。 */
+export function isAdvanceBillingKind(kind: string | null | undefined): boolean {
+  return kind === "guild_advance"
 }
 
 /** 純函式：分潤佔該期金額的 %（四捨五入到小數 2 位）；該期沒有金額或 ≤ 0 → null。 */
@@ -83,9 +108,9 @@ export function validateBillingShares(billingId: string, billingAmount: number |
     if (seen.has(id)) return { error: "duplicate_employee", billingId, employeeId: s.employeeId }
     seen.add(id)
   }
-  const total = shares.reduce((sum, s) => sum + s.amount, 0)
+  const total = shares.reduce((sum, s) => sum + toCents(s.amount), 0) / 100
   const limit = billingAmount
-  if (total > 0 && (limit === null || total > limit)) return { error: "shares_exceed_amount", billingId, total, limit }
+  if (sharesExceed(total, limit)) return { error: "shares_exceed_amount", billingId, total, limit }
   return null
 }
 
@@ -102,7 +127,8 @@ export async function loadBillingShares(tenantId: string, projectId: string): Pr
       .select("id, billing_id, employee_id, amount, note")
       .eq("tenant_id", tenantId)
       .eq("project_id", projectId)
-      .order("created_at", { ascending: true }),
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true }),
     supabaseAdmin.from(BONUS_DATES_TABLE).select("billing_id, bonus_paid_on").eq("tenant_id", tenantId).eq("project_id", projectId),
   ])
   if (sharesRes.error) throw new Error(`loadBillingShares: ${sharesRes.error.message}`)
@@ -116,17 +142,22 @@ export async function loadBillingShares(tenantId: string, projectId: string): Pr
     if (error) throw new Error(`loadBillingShares employees: ${error.message}`)
     for (const e of (data ?? []) as Array<{ id: string; name: string | null }>) names.set(e.id, e.name ?? "")
   }
-  const dateOf = new Map(dateRows.map((d) => [d.billing_id, d.bonus_paid_on]))
+  const dateOf = new Map(dateRows.map((d) => [d.billing_id.toLowerCase(), d.bonus_paid_on]))
   return billings.map((b) => {
+    const id = b.id.toLowerCase()
     const shares = shareRows
-      .filter((r) => r.billing_id === b.id)
+      .filter((r) => r.billing_id.toLowerCase() === id)
       .map((r) => ({ id: r.id, employeeId: r.employee_id, employeeName: names.get(r.employee_id) ?? null, amount: num(r.amount) ?? 0, note: r.note ?? null }))
+    const total = shares.reduce((s, r) => s + toCents(r.amount), 0) / 100
+    const billingAmount = effectiveBillingAmount(b)
     return {
       billingId: b.id,
-      billingAmount: effectiveBillingAmount(b),
-      bonusPaidOn: dateOf.get(b.id) ?? null,
+      kind: b.kind ?? "installment",
+      billingAmount,
+      bonusPaidOn: dateOf.get(id) ?? null,
       shares,
-      total: shares.reduce((s, r) => s + r.amount, 0),
+      total,
+      overLimit: sharesExceed(total, billingAmount),
     }
   })
 }
@@ -144,27 +175,82 @@ export async function hasQuarterlyShares(tenantId: string, projectId: string): P
   )
 }
 
-/** 寫一期（整批換掉）：走 DB 函式 set_billing_bonus_shares（同一交易、稽核摘要不含金額）。 */
-export async function saveBillingShareSet(
+export type ShareSetInput = { billingId: string; bonusPaidOn: string | null; shares: readonly ShareInput[] }
+
+/**
+ * 一次寫多期（每期整批換掉）：走 DB 函式 set_billing_bonus_shares_batch（migration 0092）——同一交易，
+ * 任何一期不合法（期別不存在／代墊款／員工不屬此租戶…）整批回滾，不會只存一半。稽核摘要不含金額與人名。
+ */
+export async function saveBillingShareSets(
   tenantId: string,
   projectId: string,
-  billingId: string,
-  bonusPaidOn: string | null,
-  shares: readonly ShareInput[],
+  items: readonly ShareSetInput[],
   actorEmpId: string | null,
 ): Promise<number> {
-  const { data, error } = await supabaseAdmin.rpc("set_billing_bonus_shares", {
+  const { data, error } = await supabaseAdmin.rpc("set_billing_bonus_shares_batch", {
     p_tenant_id: tenantId,
     p_project_id: projectId,
-    p_billing_id: billingId,
-    p_bonus_paid_on: bonusPaidOn,
-    p_shares: shares.map((s) => ({ employee_id: s.employeeId, amount: s.amount, note: s.note ?? null })),
+    p_items: items.map((it) => ({
+      billing_id: it.billingId,
+      bonus_paid_on: it.bonusPaidOn,
+      shares: it.shares.map((s) => ({ employee_id: s.employeeId, amount: s.amount, note: s.note ?? null })),
+    })),
     p_actor_emp_id: actorEmpId,
   })
   if (error) {
-    const e = new Error(`set_billing_bonus_shares: ${error.message}`) as Error & { code?: string }
+    const e = new Error(`set_billing_bonus_shares_batch: ${error.message}`) as Error & { code?: string }
     e.code = error.code ?? undefined
     throw e
   }
-  return typeof data === "number" ? data : shares.length
+  return typeof data === "number" ? data : items.reduce((n, it) => n + it.shares.length, 0)
+}
+
+/** 這些員工 id 裡，不屬於本租戶的（小寫比對）。 */
+export async function employeesOutsideTenant(tenantId: string, employeeIds: readonly string[]): Promise<string[]> {
+  const ids = [...new Set(employeeIds.map((id) => id.toLowerCase()))]
+  if (ids.length === 0) return []
+  const { data, error } = await supabaseAdmin.from("employees").select("id").eq("tenant_id", tenantId).in("id", ids)
+  if (error) throw new Error(`employeesOutsideTenant: ${error.message}`)
+  const found = new Set(((data ?? []) as Array<{ id: string }>).map((e) => e.id.toLowerCase()))
+  return ids.filter((id) => !found.has(id))
+}
+
+/**
+ * 這些期別裡，已有獎金分潤或發獎金日的（小寫 id）。表未套用 → 空集合。
+ * 用途：期程整批 PUT 不准軟刪除這種期別（409 billing_has_bonus_shares），避免分潤紀錄掛在看不到的期別上。
+ */
+export async function billingIdsWithBonusShares(tenantId: string, billingIds: readonly string[]): Promise<Set<string>> {
+  const out = new Set<string>()
+  if (billingIds.length === 0 || !(await billingSharesAvailable())) return out
+  const [a, b] = await Promise.all([
+    supabaseAdmin.from(SHARES_TABLE).select("billing_id").eq("tenant_id", tenantId).in("billing_id", [...billingIds]),
+    supabaseAdmin.from(BONUS_DATES_TABLE).select("billing_id").eq("tenant_id", tenantId).in("billing_id", [...billingIds]),
+  ])
+  if (a.error) throw new Error(`billingIdsWithBonusShares: ${a.error.message}`)
+  if (b.error) throw new Error(`billingIdsWithBonusShares dates: ${b.error.message}`)
+  for (const r of [...(a.data ?? []), ...(b.data ?? [])] as Array<{ billing_id: string }>) out.add(r.billing_id.toLowerCase())
+  return out
+}
+
+/** 期程存檔後，分潤合計超過期別金額的期別（給 PUT /billings 回 warnings）；表未套用 → 空陣列。 */
+export async function billingsOverShareLimit(tenantId: string, projectId: string): Promise<string[]> {
+  const sets = await loadBillingShares(tenantId, projectId)
+  return (sets ?? []).filter((s) => s.overLimit).map((s) => s.billingId)
+}
+
+/** 備份快照裡含分潤資料的表：讀表列／下載要同「看分潤」的權限。 */
+export const BILLING_SHARE_SNAPSHOT_TABLES: ReadonlySet<string> = new Set([SHARES_TABLE, BONUS_DATES_TABLE])
+
+/**
+ * 租戶層級的「看每期分潤」權限（備份讀表列／下載用，沒有特定專案）：同 routes/billing-shares.ts 的看權口徑——
+ * 看得到分潤（canSeeBonus：HR 角色或老闆／platform_admin，對每一案都成立）∧ 看得到專案毛利（canSeeProfit：
+ * 老闆／platform_admin／被授權的 hr_admin）。非在職一律 false。
+ */
+export async function canSeeBillingSharesInTenant(tenantId: string, userId: string): Promise<boolean> {
+  const self = await resolveSelf(tenantId, userId)
+  if (!self || actorIsInactive(self)) return false
+  const bossEmpId = await loadProjectBossEmpId(tenantId)
+  const canSeeBonus = isHrRole(self.role) || isBossOrPlatformAdmin(bossEmpId, self)
+  if (!canSeeBonus) return false
+  return (await loadGroupFinancialsAccess(tenantId, self, bossEmpId)).canSee
 }

@@ -5,22 +5,30 @@ import { requireTenant } from "../middleware/tenant.js"
 import { loadScope } from "./projects.js"
 import {
   billingSharesAvailable,
+  employeesOutsideTenant,
   hasQuarterlyShares,
+  isAdvanceBillingKind,
   loadBillingShares,
-  saveBillingShareSet,
+  saveBillingShareSets,
   validateBillingShares,
 } from "../services/billing-shares.js"
 
 /**
  * 專案申請單「每期款獎金分潤」（2026-11-11，migration 0091）。說明見 services/billing-shares.ts。
  *
- *   GET /projects/:id/billing-shares   { available, canEdit, quarterlyShares, billings: [{ billingId, billingAmount, bonusPaidOn, shares, total }] }
+ *   GET /projects/:id/billing-shares   { available, canEdit, quarterlyShares,
+ *                                        billings: [{ billingId, kind, billingAmount, bonusPaidOn, shares, total, overLimit }] }
+ *                                      overLimit＝分潤合計超過目前期別金額（會計事後改小期別金額時；只提示）
  *   PUT /projects/:id/billing-shares   { billings: [{ billingId, bonusPaidOn, shares: [{ employeeId, amount, note? }] }] }
  *                                      只換掉有帶到的期別（每期整批換掉）→ 回最新狀態（同 GET）
+ *                                      全成全敗（2026-11-11 修正）：先驗完所有期別存在、非代墊款、員工都屬本租戶、
+ *                                      合計不超過，再以一次 DB 函式呼叫（同一交易）寫入所有期別。
  *
  * 權限：看＝本案 finance ∧ canSeeBonus ∧ canSeeProfit；改＝看 ∧ 分潤寫入權（老闆／platform_admin）。
  *   看不到 → 403（不回任何分潤資料）；別租戶的專案 404。
- * 分潤合計 > 該期金額 → 400 shares_exceed_amount（同一期同一人重複 → 400 duplicate_employee）。
+ * 分潤合計 > 該期金額（以分比較）→ 400 shares_exceed_amount（同一期同一人重複 → 400 duplicate_employee）。
+ * 代墊款期別（技師公會代墊，kind=guild_advance）→ 400 advance_billing_no_shares。
+ * 員工不屬本租戶 → 400 invalid_shares（整批不寫）。
  * migration 未套用：GET available=false、PUT 409 migration_required（不 500）。
  */
 export const billingSharesRouter = Router()
@@ -120,18 +128,23 @@ billingSharesRouter.put(
         return
       }
       const current = (await loadBillingShares(ctx.tenantId, ctx.projectId)) ?? []
-      const byId = new Map(current.map((b) => [b.billingId, b]))
+      const byId = new Map(current.map((b) => [b.billingId.toLowerCase(), b]))
       const seen = new Set<string>()
       // 先全部驗完再寫：任何一期不合法就整批不寫。
       for (const item of parsed.data.billings) {
-        if (seen.has(item.billingId)) {
+        const id = item.billingId.toLowerCase()
+        if (seen.has(id)) {
           res.status(400).json({ error: "duplicate_billing", billingId: item.billingId })
           return
         }
-        seen.add(item.billingId)
-        const billing = byId.get(item.billingId)
+        seen.add(id)
+        const billing = byId.get(id)
         if (!billing) {
           res.status(404).json({ error: "billing_not_found", billingId: item.billingId })
+          return
+        }
+        if (isAdvanceBillingKind(billing.kind)) {
+          res.status(400).json({ error: "advance_billing_no_shares", billingId: item.billingId })
           return
         }
         const invalid = validateBillingShares(item.billingId, billing.billingAmount, item.shares)
@@ -140,21 +153,32 @@ billingSharesRouter.put(
           return
         }
       }
-      for (const item of parsed.data.billings) {
-        try {
-          await saveBillingShareSet(ctx.tenantId, ctx.projectId, item.billingId, item.bonusPaidOn ?? null, item.shares, ctx.scope.self.id)
-        } catch (err) {
-          const code = (err as { code?: string }).code
-          if (code === "P0002") {
-            res.status(404).json({ error: "billing_not_found", billingId: item.billingId })
-            return
-          }
-          if (code === "22023" || code === "23505" || code === "23514" || code === "23503") {
-            res.status(400).json({ error: "invalid_shares", billingId: item.billingId })
-            return
-          }
-          throw err
+      const outsiders = await employeesOutsideTenant(
+        ctx.tenantId,
+        parsed.data.billings.flatMap((b) => b.shares.map((s) => s.employeeId)),
+      )
+      if (outsiders.length > 0) {
+        res.status(400).json({ error: "invalid_shares", reason: "employee_not_in_tenant" })
+        return
+      }
+      try {
+        await saveBillingShareSets(
+          ctx.tenantId,
+          ctx.projectId,
+          parsed.data.billings.map((b) => ({ billingId: byId.get(b.billingId.toLowerCase())!.billingId, bonusPaidOn: b.bonusPaidOn ?? null, shares: b.shares })),
+          ctx.scope.self.id,
+        )
+      } catch (err) {
+        const code = (err as { code?: string }).code
+        if (code === "P0002") {
+          res.status(404).json({ error: "billing_not_found" })
+          return
         }
+        if (code === "22023" || code === "22007" || code === "22008" || code === "23505" || code === "23514" || code === "23503") {
+          res.status(400).json({ error: "invalid_shares" })
+          return
+        }
+        throw err
       }
       await respondState(ctx.tenantId, ctx.projectId, ctx.canEdit, res)
     } catch (err) {

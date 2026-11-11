@@ -29,7 +29,8 @@ export type BillingSharesView = BillingSharesState | null;
 
 export function shareSetOf(view: BillingSharesView, billingId: string | null): BillingShareSet | null {
   if (!view || !billingId) return null;
-  return view.billings.find((b) => b.billingId === billingId) ?? null;
+  const id = billingId.toLowerCase();
+  return view.billings.find((b) => b.billingId.toLowerCase() === id) ?? null;
 }
 
 /** 已存的分潤 → 編輯列。 */

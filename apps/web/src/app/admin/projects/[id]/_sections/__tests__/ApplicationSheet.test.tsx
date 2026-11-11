@@ -334,6 +334,23 @@ describe("每期款獎金分潤（2026-11-11）", () => {
     expect(bad).toContain('data-err-field="stage:b1:shares" data-invalid="true"')
   })
 
+  it("驗收 #7：技師公會代墊列不顯示分潤格內容與發獎金日輸入（代墊款不可設分潤）", () => {
+    const html = renderWith(sharesView(true))
+    expect(cell(html, "sheet-stage-8")).toContain("技師公會代墊")
+    expect(cell(html, "sheet-stage-8-shares")).not.toContain("設定")
+    expect(cell(html, "sheet-stage-8-shares")).not.toContain("<button")
+    expect(html).not.toContain('aria-label="技師公會代墊發獎金日"')
+    expect(html).not.toContain('aria-label="技師公會代墊獎金分潤')
+  })
+
+  it("驗收 #2a：GET 回 overLimit（期別金額被改小）→ 該期分潤格紅底＋「分潤超過本期金額」", () => {
+    const v = sharesView(false)
+    const html = renderWith({ ...v, billings: [{ ...v.billings[0], billingAmount: 20000, overLimit: true }, v.billings[1]] } as typeof v)
+    expect(cell(html, "sheet-stage-1-shares")).toContain("分潤超過本期金額")
+    expect(cell(html, "sheet-stage-1-shares")).toContain("bg-red-50!")
+    expect(cell(html, "sheet-stage-2-shares")).not.toContain("分潤超過本期金額")
+  })
+
   it("看不到（null）或列印：維持原本 7 欄，沒有任何分潤內容", () => {
     for (const html of [renderWith(null), renderWith(sharesView(true), { mode: "print" })]) {
       expect(html).not.toContain("sheet-stage-grid")

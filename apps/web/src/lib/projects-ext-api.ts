@@ -458,8 +458,11 @@ export interface BillingScheduleExt {
     receivedTotal: number
     unreceivedTotal: number
   }
-  warnings: string[]
+  /** 事件端點回字串（順序提醒）；PUT 期程可能回物件（某期分潤超過新的期別金額，2026-11-11）。 */
+  warnings: BillingScheduleWarning[]
 }
+
+export type BillingScheduleWarning = string | { billingId: string; code: "shares_exceed_amount" | (string & {}) }
 
 export interface InstallmentInputExt extends InstallmentInput {
   kind?: BillingKind
@@ -496,6 +499,8 @@ export function unreceiveBilling(id: string, reason: string) {
 
 /** 分期請款相關錯誤碼人性化（含 P3 開票／收款新增的碼）。 */
 export const BILLING_ERRORS: Record<string, string> = {
+  // 放第一個：比對是子字串，要排在 "received" 之類的短代碼前面。會計看不到分潤，訊息不帶任何分潤內容。
+  billing_has_bonus_shares: "此期已設定獎金分潤，請老闆先移除後再刪。",
   override_reason_required: "人工指定金額必須填理由。",
   billed_installment_not_removable: "已請款的期別不能移除。",
   received: "已入帳的期別金額已凍結，不能移除或改百分比／覆寫金額。",
@@ -816,11 +821,15 @@ export interface BillingShare {
 
 export interface BillingShareSet {
   billingId: string
+  /** 'installment'｜'guild_advance'（代墊款不可設分潤）。舊版 API 沒有這欄。 */
+  kind?: string
   /** 該期有效金額（後端口徑）；分潤合計不可超過。 */
   billingAmount: number | null
   bonusPaidOn: string | null
   shares: BillingShare[]
   total: number
+  /** 分潤合計超過目前期別金額（會計事後把期別金額改小）：該格紅底＋「分潤超過本期金額」。舊版 API 沒有這欄。 */
+  overLimit?: boolean
 }
 
 export interface BillingSharesState {

@@ -101,6 +101,11 @@ export interface SnapshotTableSpec {
   tenantColumn?: "tenant_id" | "id"
   /** 覆寫每頁列數（audit_logs 的 old_row／new_row jsonb 很肥，頁縮小才守得住預算）。 */
   pageSize?: number
+  /**
+   * 分頁排序／計數用的唯一鍵（預設 id）。沒有 id 欄的表要指定它的主鍵，分頁才穩定
+   * （例：project_billing_bonus_dates 的主鍵是 billing_id）。
+   */
+  keyColumn?: string
 }
 
 /**
@@ -145,7 +150,9 @@ export const SNAPSHOT_TABLES: readonly SnapshotTableSpec[] = [
   { name: "employee_fixed_allowances" }, // 員工固定津貼（sql/0076；未套用的環境記 skipped）
   { name: "insured_salary_changes" }, // 投保薪資調整歷程（sql/0078；未套用的環境記 skipped）
   { name: "project_application_versions" }, // 專案申請單版本（sql/0080；未套用的環境記 skipped）
-  { name: "project_billing_shares" }, // 每期款獎金分潤（sql/0081；未套用的環境記 skipped）
+  // 每期款獎金分潤＋發獎金日（sql/0081；未套用的環境記 skipped）。讀表列／下載要同「看分潤」權限（routes/internal-jobs.ts）。
+  { name: "project_billing_shares" },
+  { name: "project_billing_bonus_dates", keyColumn: "billing_id" }, // 沒有 id 欄：主鍵 billing_id
   { name: "payslips" },
   { name: "non_employee_income" },
   { name: "expense_categories" },
@@ -619,7 +626,7 @@ async function pruneStaleFiles(manifest: SnapshotManifest): Promise<string[]> {
 async function countRows(spec: SnapshotTableSpec, tenantId: string): Promise<number | null> {
   const { count, error } = await supabaseAdmin
     .from(spec.name)
-    .select("id", { count: "exact", head: true })
+    .select(spec.keyColumn ?? "id", { count: "exact", head: true })
     .eq(spec.tenantColumn ?? "tenant_id", tenantId)
   if (error) {
     if (isMissingTableError(error)) return null
@@ -633,7 +640,7 @@ async function fetchPage(spec: SnapshotTableSpec, tenantId: string, offset: numb
     .from(spec.name)
     .select("*")
     .eq(spec.tenantColumn ?? "tenant_id", tenantId)
-    .order("id", { ascending: true })
+    .order(spec.keyColumn ?? "id", { ascending: true })
     .range(offset, offset + pageSize - 1)
   if (error) throw new Error(`backup-snapshot (read ${spec.name} @${offset}): ${error.message}`)
   return (data ?? []) as Record<string, unknown>[]

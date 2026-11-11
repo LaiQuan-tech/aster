@@ -35,8 +35,10 @@ import {
   type BillingSharesView,
   type ShareEdit,
 } from "./project-billing-shares";
+import { predictScheduleAmounts } from "./billing-schedule-predict";
 import type {
   BillingExt,
+  BillingScheduleWarning,
   BillingShareSetInput,
   Client,
   InstallmentInputExt,
@@ -733,6 +735,11 @@ export interface SharePlan {
   items: SharePlanItem[];
   changes: number;
   errors: SheetError[];
+  /**
+   * 每期分潤的比較基準（key → 存後該期金額，以後端尾差規則預估；null＝沒有金額）。
+   * 分潤編輯器的 % 與「超過該期金額」也用它，跟存檔檢查一致。
+   */
+  limits: Record<string, number | null>;
 }
 
 /** 該期在畫面上的金額（金額格有改用草稿，否則已存的有效金額）；空白或不合法＝null。 */
@@ -741,47 +748,125 @@ export function stageScreenAmount(row: ApplicationStageRow, edit: StageEdit | un
   return typeof n === "number" ? n : null;
 }
 
+/** 金額轉整數「分」再比（避免浮點誤差，同後端）。 */
+function cents(n: number): number {
+  return Math.round(n * 100);
+}
+
+/** 分潤合計是否超過該期金額（合計 > 0 且沒有金額也算超過）。 */
+export function sharesOverLimit(total: number, limit: number | null): boolean {
+  if (!(cents(total) > 0)) return false;
+  return limit === null || cents(total) > cents(limit);
+}
+
 /**
- * 每期款獎金分潤的存檔計畫：只送有改的期別（每期整批換掉）。分潤合計超過該期金額（畫面上的金額）→ 擋存，
- * 紅底標在 `stage:<key>:shares`；後端以存檔後的期別金額再檢查一次。
+ * 預估存檔後每一列（stageRowKey）的期別金額：照後端尾差規則（billing-schedule-predict.ts）重算整份期程。
+ * 期程沒變（stages.installments＝null）→ 回 null（沿用已存的金額）。
  */
-export function sharePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft, createdKeys: ReadonlySet<string> = new Set()): SharePlan {
-  const out: SharePlan = { items: [], changes: 0, errors: [] };
+export function predictedStageAmounts(
+  ctx: SheetSaveContext,
+  draft: ApplicationSheetDraft,
+  stages: Pick<StagePlan, "installments" | "created">,
+): Map<string, number | null> | null {
+  if (!stages.installments) return null;
+  const byId = new Map(ctx.billings.map((b) => [b.id.toLowerCase(), b]));
+  const total = stageContractTotal(ctx.money, ctx.contracts, draft);
+  const byNo = predictScheduleAmounts(
+    stages.installments.map((i) => {
+      const saved = i.id ? byId.get(i.id.toLowerCase()) : undefined;
+      return {
+        installmentNo: i.installmentNo,
+        kind: i.kind ?? saved?.kind ?? "installment",
+        percentage: i.percentage ?? null,
+        overrideAmount: i.overrideAmount ?? null,
+        billed: !!saved?.billedOn,
+        billedAmount: saved?.billedAmount ?? null,
+      };
+    }),
+    total,
+  );
+  const out = new Map<string, number | null>();
+  for (const i of stages.installments) if (i.id) out.set(i.id, byNo.get(i.installmentNo) ?? null);
+  for (const c of stages.created) out.set(c.key, byNo.get(c.installmentNo) ?? null);
+  return out;
+}
+
+/**
+ * 每期款獎金分潤的存檔計畫：只送有改的期別（每期整批換掉）。
+ * - 比較基準＝**存後的期別金額**（依後端尾差規則預估，見 predictedStageAmounts），不是畫面上的金額。
+ * - 分潤有改、或該期金額會變（含被尾差影響）→ 檢查分潤合計 ≤ 該期金額；超過 → 擋存，紅底標在 `stage:<key>:shares`。
+ * - 技師公會代墊（代墊款）不可設分潤：略過。
+ * - 要移除的期別（stages.removed）：不送分潤；已有分潤或發獎金日 → 擋存（請先清除），否則後端 409。
+ */
+export function sharePlan(
+  ctx: SheetSaveContext,
+  draft: ApplicationSheetDraft,
+  stages: Pick<StagePlan, "installments" | "created" | "removed"> = stagePlan(ctx, draft),
+): SharePlan {
+  const out: SharePlan = { items: [], changes: 0, errors: [], limits: {} };
   const view = ctx.billingShares ?? null;
-  if (!ctx.canFinance || !view || !view.available || !view.canEdit) return out;
+  if (!ctx.canFinance || !view || !view.available) return out;
+  const removedKeys = new Set(stages.removed.map((r) => r.key));
+  const createdKeys = new Set(stages.created.map((c) => c.key));
+  const predicted = predictedStageAmounts(ctx, draft, stages);
   for (const row of applicationStageRows(ctx.billings)) {
     const key = stageRowKey(row);
-    const edit: ShareEdit | undefined = draft.shareEdits?.[key];
-    if (!edit) continue;
     const set = shareSetOf(view, row.id);
     const label = stageLabel(row);
     const field = `stage:${key}:shares`;
+    if (row.kind === "guild_advance") continue;
+    if (removedKeys.has(key)) {
+      if (set && (set.shares.length > 0 || !!set.bonusPaidOn)) {
+        out.errors.push({ field, message: `付款階段${label}此期已有獎金分潤／發獎金日，請先清除。` });
+      }
+      continue;
+    }
+    const savedAmount = set ? set.billingAmount : row.amount;
+    const limit = predicted?.has(key) ? (predicted.get(key) ?? null) : predicted && !row.id ? stageScreenAmount(row, draft.stageEdits[key]) : savedAmount;
+    out.limits[key] = limit;
+    if (!view.canEdit) continue;
+
+    const edit: ShareEdit | undefined = draft.shareEdits?.[key];
     const lines = filledShareLines(currentShareLines(set, edit));
-    const linesChanged = edit.lines !== undefined && !sameShareLines(edit.lines, savedShareLines(set));
+    const linesChanged = edit?.lines !== undefined && !sameShareLines(edit.lines, savedShareLines(set));
     const date = trimmed(currentBonusPaidOn(set, edit));
-    const dateChanged = edit.bonusPaidOn !== undefined && date !== (set?.bonusPaidOn ?? "");
-    if (!linesChanged && !dateChanged) continue;
+    const dateChanged = edit?.bonusPaidOn !== undefined && date !== (set?.bonusPaidOn ?? "");
+    const amountChanged = !!row.id && (limit === null ? savedAmount !== null : savedAmount === null || cents(limit) !== cents(savedAmount));
+    if (!linesChanged && !dateChanged) {
+      // 分潤沒改、但這次存檔會讓該期金額變（含被尾差影響）：已存的分潤超過新金額 → 擋存（有分潤權限的人）。
+      const total = set?.total ?? 0;
+      if (amountChanged && sharesOverLimit(total, limit)) {
+        out.errors.push({
+          field,
+          message:
+            limit === null
+              ? `付款階段${label}存檔後沒有金額，但已設定獎金分潤 ${formatMoney(total)}：請先清除分潤。`
+              : `付款階段${label}存檔後金額為 ${formatMoney(limit)}，已設定的獎金分潤合計 ${formatMoney(total)} 超過本期金額，請先調整分潤。`,
+        });
+      }
+      continue;
+    }
     out.changes += (linesChanged ? 1 : 0) + (dateChanged ? 1 : 0);
 
     const shares: SharePlanItem["shares"] = [];
     const seen = new Set<string>();
     lines.forEach((l, i) => {
       const n = parseShareAmount(l.amount);
-      if (!l.employeeId.trim()) out.errors.push({ field, message: `付款階段${label}獎金分潤第 ${i + 1} 位沒有選員工。` });
-      else if (seen.has(l.employeeId)) out.errors.push({ field, message: `付款階段${label}獎金分潤同一位員工重複。` });
+      const id = l.employeeId.trim().toLowerCase();
+      if (!id) out.errors.push({ field, message: `付款階段${label}獎金分潤第 ${i + 1} 位沒有選員工。` });
+      else if (seen.has(id)) out.errors.push({ field, message: `付款階段${label}獎金分潤同一位員工重複。` });
       if (n === "invalid" || n === null) out.errors.push({ field, message: `付款階段${label}獎金分潤第 ${i + 1} 位的金額必須是 0 以上的數字。` });
-      seen.add(l.employeeId);
-      if (l.employeeId.trim() && typeof n === "number") shares.push({ employeeId: l.employeeId, amount: n });
+      seen.add(id);
+      if (id && typeof n === "number") shares.push({ employeeId: l.employeeId, amount: n });
     });
     const total = shareLinesTotal(lines);
-    const stageAmount = stageScreenAmount(row, draft.stageEdits[key]);
-    if (total > 0 && (stageAmount === null || total > stageAmount)) {
+    if (sharesOverLimit(total, limit)) {
       out.errors.push({
         field,
         message:
-          stageAmount === null
+          limit === null
             ? `付款階段${label}還沒有金額，不能設定獎金分潤。`
-            : `付款階段${label}獎金分潤合計 ${formatMoney(total)} 超過該期金額 ${formatMoney(stageAmount)}。`,
+            : `付款階段${label}獎金分潤合計 ${formatMoney(total)} 超過該期金額 ${formatMoney(limit)}${amountChanged ? "（存檔後的金額，含尾差）" : ""}。`,
       });
     }
     if (date && !dateRe.test(date)) out.errors.push({ field: `stage:${key}:bonusPaidOn`, message: `付款階段${label}的發獎金日格式不對。` });
@@ -819,7 +904,7 @@ export function applicationSheetPlan(ctx: SheetSaveContext, draft: ApplicationSh
   const contract = contractPlan(ctx, draft);
   const stages = stagePlan(ctx, draft);
   const subs = subcontractPlan(ctx, draft);
-  const shares = sharePlan(ctx, draft, new Set(stages.created.map((c) => c.key)));
+  const shares = sharePlan(ctx, draft, stages);
   const errors = [...contract.errors, ...stages.errors, ...subs.errors, ...shares.errors];
   const taxId = draft.clientEdits.taxId;
   if (canEditClient && ctx.client && taxId !== undefined && trimmed(taxId) !== "" && !/^\d{8}$/.test(trimmed(taxId))) {
@@ -859,7 +944,9 @@ export interface SheetSaveApi {
   upsertMainContract(body: { amount: number }): Promise<unknown>;
   updateContract(id: string, body: { amount: number | null }): Promise<unknown>;
   createQuotation(body: { amount: number | null }): Promise<unknown>;
-  saveBillingSchedule(installments: InstallmentInputExt[]): Promise<{ installments: Array<{ id: string; installmentNo: number }> }>;
+  saveBillingSchedule(
+    installments: InstallmentInputExt[],
+  ): Promise<{ installments: Array<{ id: string; installmentNo: number; kind?: string | null }>; warnings?: ReadonlyArray<BillingScheduleWarning> }>;
   invoiceBilling(id: string, invoiceNo: string, invoicedOn?: string): Promise<unknown>;
   receiveBilling(id: string, receivedOn: string): Promise<unknown>;
   /** deleteReason：這次有移除既有副委託（payload 沒帶到的列）時必帶。 */
@@ -885,6 +972,27 @@ export interface SheetSaveResult {
 function withoutKeys<T extends object>(obj: T, keys: Array<keyof T>): T {
   const out = { ...obj };
   for (const k of keys) delete out[k];
+  return out;
+}
+
+/**
+ * 期程 PUT 回的 warnings 裡「某期分潤超過新的期別金額」（只提示，不擋會計改金額）→ 黃色提示文字。
+ * 期別用申請單上的稱呼（一般期別依期別編號排第 N 列；代墊款＝技師公會代墊），不帶任何分潤內容。
+ */
+export function shareExceedNotices(
+  warnings: ReadonlyArray<BillingScheduleWarning> | undefined,
+  installments: ReadonlyArray<{ id: string; installmentNo: number; kind?: string | null }>,
+): string[] {
+  const out: string[] = [];
+  const ordered = installments.filter((i) => i.kind !== "guild_advance").sort((a, b) => a.installmentNo - b.installmentNo);
+  for (const w of warnings ?? []) {
+    if (typeof w === "string" || w.code !== "shares_exceed_amount") continue;
+    const id = w.billingId.toLowerCase();
+    const hit = installments.find((i) => i.id.toLowerCase() === id);
+    const idx = ordered.findIndex((i) => i.id.toLowerCase() === id);
+    const label = hit?.kind === "guild_advance" ? "技師公會代墊" : idx >= 0 ? `第 ${idx + 1} 列` : "某一期";
+    out.push(`付款階段${label}的獎金分潤超過本期金額（期別金額已變小），請老闆調整分潤。`);
+  }
   return out;
 }
 
@@ -976,6 +1084,7 @@ export async function runApplicationSheetSave(
         const row = res.installments.find((i) => i.installmentNo === c.installmentNo);
         if (row) idOf.set(c.key, row.id);
       }
+      notices.push(...shareExceedNotices(res.warnings, res.installments));
     });
     if (scheduleOk) {
       const next: Record<string, StageEdit> = {};

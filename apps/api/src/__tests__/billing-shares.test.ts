@@ -15,26 +15,51 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
  * ⚠️ 識別碼、名稱、金額都是明顯的假值。
  */
 
+// 不依賴環境變數：本檔是純 fake-supabase 測試，連線設定一律換成假值——即使本機根目錄有 .env（真憑證），
+// setup.ts 的 afterAll 安全網看到 placeholder 也不會去連正式庫清測試租戶。
+vi.hoisted(() => {
+  process.env.SUPABASE_URL = "http://127.0.0.1:9"
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "placeholder"
+  process.env.SUPABASE_ANON_KEY = "placeholder"
+  process.env.DATABASE_URL = "postgres://x@127.0.0.1:9/x"
+})
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
 vi.mock("../lib/tenant-tz.js", () => ({ getTenantTimezone: async () => "Asia/Taipei" }))
 vi.mock("../services/bonus-estimate.js", () => ({ estimateProjectBonus: async () => [] }))
 vi.mock("../services/project-bonus-recompute.js", () => ({ recomputeDraftRunsAfterWrite: async () => {} }))
+// 備份快照的 Storage 存取換成假的（只驗權限閘門；Storage 本身在 backups-live.test.ts）。
+vi.mock("../services/backup-snapshot.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/backup-snapshot.js")>()),
+  readSnapshotRows: vi.fn(async (_t: string, period: string, run: number, table: string) => ({
+    tenantId: "t", period, run, table, offset: 0, limit: 50, total: 0, rows: [], nextOffset: null, columns: [],
+  })),
+  signedSnapshotUrl: vi.fn(async () => "https://storage.invalid/signed"),
+}))
 
 import { projectsRouter, buildApplicationSnapshot } from "../routes/projects.js"
 import { billingSharesRouter } from "../routes/billing-shares.js"
-import { resetBillingSharesProbe, sharePctOf, validateBillingShares } from "../services/billing-shares.js"
+import { billingsRouter } from "../routes/billings.js"
+import { internalJobsRouter } from "../routes/internal-jobs.js"
+import { SNAPSHOT_TABLES } from "../services/backup-snapshot.js"
+import { resetBillingSharesProbe, sharePctOf, sharesExceed, toCents, validateBillingShares } from "../services/billing-shares.js"
 import { resetColumnProbeCache } from "../lib/schema-compat.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 const app = express()
 app.use(express.json())
-app.use(projectsRouter, billingSharesRouter)
+app.use(projectsRouter, billingSharesRouter, billingsRouter)
+app.use("/internal", internalJobsRouter)
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
 })
 const as = (token: string) => ({
   get: (path: string) => request(app).get(path).set("Authorization", `Bearer ${token}`),
   put: (path: string) => request(app).put(path).set("Authorization", `Bearer ${token}`),
+})
+/** 期程整批 PUT 的 payload（既有期別照原樣帶，可覆寫）。 */
+const scheduleItem = (b: Row, over: Row = {}) => ({
+  id: b.id, installmentNo: b.installment_no, kind: b.kind, percentage: b.percentage === null ? null : Number(b.percentage),
+  milestone: b.milestone, plannedOn: null, overrideAmount: null, overrideReason: null, note: null, ...over,
 })
 
 const PROJECT = "dddddddd-0000-4000-8000-000000000301"
@@ -50,7 +75,7 @@ const E = { boss: emp(1), hr: emp(2), grantedHr: emp(3), accountant: emp(4), mem
 const T = { boss: "boss-user", hr: "hr-user", grantedHr: "granted-hr-user", accountant: "accountant-user", member: "member-user", platform: "platform-user" }
 const SHARES = "project_billing_shares"
 const DATES = "project_billing_bonus_dates"
-const RPC = "set_billing_bonus_shares"
+const RPC = "set_billing_bonus_shares_batch"
 
 function projectRow(over: Row): Row {
   return {
@@ -74,28 +99,39 @@ function billingRow(id: string, projectId: string, no: number, amount: string, o
   }
 }
 
-/** 照 migration 0091 set_billing_bonus_shares 的邏輯模擬（整批換掉一期＋發獎金日；稽核摘要不含金額）。 */
+/**
+ * 照 migration 0092 set_billing_bonus_shares_batch 的邏輯模擬：先驗完所有期別（存在、非代墊款）與所有員工，
+ * 全部合法才逐期整批換掉＋發獎金日（全成全敗）；稽核摘要不含金額。
+ */
 function registerRpc() {
   fake.rpcHandlers[RPC] = (a: Row) => {
-    const billing = fake.db.project_billings.find(
-      (b: Row) => b.id === a.p_billing_id && b.tenant_id === a.p_tenant_id && b.project_id === a.p_project_id && !b.deleted_at,
-    )
-    if (!billing) return { data: null, error: { code: "P0002", message: "billing not found" } }
-    for (const s of a.p_shares as Row[]) {
-      if (!fake.db.employees.some((e: Row) => e.id === s.employee_id && e.tenant_id === a.p_tenant_id))
-        return { data: null, error: { code: "22023", message: "employee not in tenant" } }
+    const items = a.p_items as Row[]
+    for (const it of items) {
+      const billing = fake.db.project_billings.find(
+        (b: Row) => b.id === it.billing_id && b.tenant_id === a.p_tenant_id && b.project_id === a.p_project_id && !b.deleted_at,
+      )
+      if (!billing) return { data: null, error: { code: "P0002", message: "billing not found" } }
+      if (billing.kind === "guild_advance") return { data: null, error: { code: "22023", message: "advance billing" } }
+      for (const s of it.shares as Row[]) {
+        if (!fake.db.employees.some((e: Row) => e.id === s.employee_id && e.tenant_id === a.p_tenant_id))
+          return { data: null, error: { code: "22023", message: "employee not in tenant" } }
+      }
     }
-    fake.db[SHARES] = fake.db[SHARES].filter((r: Row) => !(r.tenant_id === a.p_tenant_id && r.billing_id === a.p_billing_id))
-    for (const s of a.p_shares as Row[]) {
-      fake.db[SHARES].push({
-        id: `s-${fake.db[SHARES].length + 1}-${s.employee_id.slice(-2)}`, tenant_id: a.p_tenant_id, project_id: a.p_project_id,
-        billing_id: a.p_billing_id, employee_id: s.employee_id, amount: String(s.amount), note: s.note ?? null,
-        created_by: a.p_actor_emp_id, created_at: new Date().toISOString(),
-      })
+    let total = 0
+    for (const it of items) {
+      fake.db[SHARES] = fake.db[SHARES].filter((r: Row) => !(r.tenant_id === a.p_tenant_id && r.billing_id === it.billing_id))
+      for (const s of it.shares as Row[]) {
+        fake.db[SHARES].push({
+          id: `s-${fake.db[SHARES].length + 1}-${s.employee_id.slice(-2)}`, tenant_id: a.p_tenant_id, project_id: a.p_project_id,
+          billing_id: it.billing_id, employee_id: s.employee_id, amount: String(s.amount), note: s.note ?? null,
+          created_by: a.p_actor_emp_id, created_at: new Date().toISOString(),
+        })
+        total++
+      }
+      fake.db[DATES] = fake.db[DATES].filter((r: Row) => r.billing_id !== it.billing_id)
+      if (it.bonus_paid_on) fake.db[DATES].push({ billing_id: it.billing_id, tenant_id: a.p_tenant_id, project_id: a.p_project_id, bonus_paid_on: it.bonus_paid_on })
     }
-    fake.db[DATES] = fake.db[DATES].filter((r: Row) => r.billing_id !== a.p_billing_id)
-    if (a.p_bonus_paid_on) fake.db[DATES].push({ billing_id: a.p_billing_id, tenant_id: a.p_tenant_id, project_id: a.p_project_id, bonus_paid_on: a.p_bonus_paid_on })
-    return { data: (a.p_shares as Row[]).length, error: null }
+    return { data: total, error: null }
   }
 }
 
@@ -197,7 +233,8 @@ describe("GET／PUT /projects/:id/billing-shares", () => {
     expect(b1.bonusPaidOn).toBe("2027-01-15")
     expect(b1.shares.map((s: Row) => [s.employeeName, s.amount])).toEqual([["成員甲", 20000], ["人資甲", 25000]])
     expect(rpcCalls()).toHaveLength(1)
-    expect(rpcCalls()[0].args).toMatchObject({ p_tenant_id: TENANT_ID, p_project_id: PROJECT, p_billing_id: B1, p_actor_emp_id: E.boss })
+    expect(rpcCalls()[0].args).toMatchObject({ p_tenant_id: TENANT_ID, p_project_id: PROJECT, p_actor_emp_id: E.boss })
+    expect((rpcCalls()[0].args.p_items as Row[]).map((i) => i.billing_id)).toEqual([B1])
     expect(fake.writes.filter((w) => w.table === SHARES || w.table === DATES)).toEqual([])
     expect(fake.writes.filter((w) => w.table === "audit_logs" && /20000|25000/.test(JSON.stringify(w.payload)))).toEqual([])
     // 清空＝空陣列＋發獎金日 null
@@ -296,5 +333,135 @@ describe("GET／PUT /projects/:id/billing-shares", () => {
       fake.from = realFrom
       resetBillingSharesProbe()
     }
+  })
+})
+
+describe("2026-11-11 驗收修正", () => {
+  it("#6 金額以整數分比較：0.1＋0.2 剛好等於 0.3 不算超過；多 1 分才算", () => {
+    expect(toCents(0.1 + 0.2)).toBe(30)
+    expect(validateBillingShares(B1, 0.3, [{ employeeId: E.member, amount: 0.1 }, { employeeId: E.boss, amount: 0.2 }])).toBeNull()
+    expect(validateBillingShares(B1, 0.3, [{ employeeId: E.member, amount: 0.1 }, { employeeId: E.boss, amount: 0.21 }])).toMatchObject({ error: "shares_exceed_amount" })
+    expect(sharesExceed(0, null)).toBe(false)
+    expect(sharesExceed(0.001, null)).toBe(false)
+    expect(sharesExceed(1, null)).toBe(true)
+  })
+
+  it("#6 billingId 大寫也對得到；讀取依 created_at、再依 id 排序（順序穩定）", async () => {
+    fake.db[SHARES].push(
+      { id: "s-b", tenant_id: TENANT_ID, project_id: PROJECT, billing_id: B2, employee_id: E.hr, amount: "2", note: null, created_at: "2026-02-01T00:00:00.000Z" },
+      { id: "s-a", tenant_id: TENANT_ID, project_id: PROJECT, billing_id: B2, employee_id: E.member, amount: "1", note: null, created_at: "2026-02-01T00:00:00.000Z" },
+    )
+    const g = await as(T.boss).get(url())
+    expect(g.body.billings.find((b: Row) => b.billingId === B2).shares.map((s: Row) => s.id)).toEqual(["s-a", "s-b"])
+    const res = await put(T.boss, [{ billingId: B2.toUpperCase(), shares: [{ employeeId: E.member, amount: 10 }] }])
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect((rpcCalls()[0].args.p_items as Row[])[0].billing_id).toBe(B2)
+  })
+
+  it("#5 多期全成全敗：任一期員工不屬本租戶 → 400，DB 函式一次都不呼叫、兩期都不動", async () => {
+    const res = await put(T.boss, [
+      { billingId: B2, shares: [{ employeeId: E.member, amount: 100 }] },
+      { billingId: B1, shares: [{ employeeId: E.foreign, amount: 1 }] },
+    ])
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("invalid_shares")
+    expect(rpcCalls()).toHaveLength(0)
+    expect(fake.db[SHARES].filter((r: Row) => r.tenant_id === TENANT_ID).map((r: Row) => `${r.billing_id}:${r.amount}`)).toEqual([`${B1}:30000`])
+  })
+
+  it("#5 多期合法 → 一次 DB 函式呼叫寫完所有期別", async () => {
+    const res = await put(T.boss, [
+      { billingId: B1, bonusPaidOn: "2027-01-01", shares: [{ employeeId: E.member, amount: 100 }] },
+      { billingId: B2, shares: [{ employeeId: E.hr, amount: 200 }] },
+    ])
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(rpcCalls()).toHaveLength(1)
+    expect((rpcCalls()[0].args.p_items as Row[]).map((i) => [i.billing_id, i.bonus_paid_on])).toEqual([[B1, "2027-01-01"], [B2, null]])
+    expect(res.body.billings.map((b: Row) => b.total)).toEqual([100, 200])
+  })
+
+  it("#7 代墊款期別（技師公會代墊）不可設分潤 → 400，不寫", async () => {
+    fake.db.project_billings.push(billingRow("f0000000-0000-4000-8000-000000000308", PROJECT, 8, "5000", { kind: "guild_advance", milestone: "技師公會代墊" }))
+    const res = await put(T.boss, [{ billingId: "f0000000-0000-4000-8000-000000000308", shares: [{ employeeId: E.member, amount: 1 }] }])
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("advance_billing_no_shares")
+    expect(rpcCalls()).toHaveLength(0)
+    const g = await as(T.boss).get(url())
+    expect(g.body.billings.find((b: Row) => b.billingId === "f0000000-0000-4000-8000-000000000308")).toMatchObject({ kind: "guild_advance" })
+  })
+
+  it("#2a GET 每期帶 overLimit：期別金額被改小、分潤超過 → true", async () => {
+    fake.db.project_billings[0].override_amount = "20000"
+    const g = await as(T.boss).get(url())
+    expect(g.body.billings.find((b: Row) => b.billingId === B1)).toMatchObject({ billingAmount: 20000, total: 30000, overLimit: true })
+    expect(g.body.billings.find((b: Row) => b.billingId === B2)).toMatchObject({ overLimit: false })
+  })
+
+  it("#2c 期程 PUT 讓某期金額小於已設分潤：照存，回 warnings [{billingId, code:'shares_exceed_amount'}]", async () => {
+    const [b1, b2] = fake.db.project_billings
+    const res = await as(T.accountant).put(`/projects/${PROJECT}/billings`).send({
+      installments: [scheduleItem(b1, { overrideAmount: 20000, overrideReason: "談價" }), scheduleItem(b2)],
+    })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.warnings).toEqual([{ billingId: B1, code: "shares_exceed_amount" }])
+    // 沒超額時沒有 warnings
+    const ok = await as(T.accountant).put(`/projects/${PROJECT}/billings`).send({
+      installments: [scheduleItem(fake.db.project_billings[0], { overrideAmount: 90000, overrideReason: "談價" }), scheduleItem(fake.db.project_billings[1])],
+    })
+    expect(ok.body.warnings).toEqual([])
+  })
+
+  it("#4 期程 PUT 軟刪除有分潤／發獎金日的期別 → 409 billing_has_bonus_shares，不刪", async () => {
+    const [b1, b2] = fake.db.project_billings
+    const res = await as(T.accountant).put(`/projects/${PROJECT}/billings`).send({ installments: [scheduleItem(b2)] })
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: "billing_has_bonus_shares", installmentNo: 1, message: "此期已設定獎金分潤，請老闆先移除後再刪" })
+    expect(JSON.stringify(res.body)).not.toContain("30000")
+    expect(b1.deleted_at).toBeNull()
+    // 只有發獎金日（沒有分潤列）也擋
+    fake.db[SHARES] = []
+    expect((await as(T.accountant).put(`/projects/${PROJECT}/billings`).send({ installments: [scheduleItem(b2)] })).status).toBe(409)
+    // 都清掉之後可以刪
+    fake.db[DATES] = []
+    const ok = await as(T.accountant).put(`/projects/${PROJECT}/billings`).send({ installments: [scheduleItem(b2)] })
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    expect(b1.deleted_at).not.toBeNull()
+  })
+
+  describe("#1 備份快照：分潤表要同看分潤權限", () => {
+    const rowsUrl = (table: string) => `/internal/backups/2026-11/runs/1/tables/${table}/rows`
+    const fileUrl = (name: string) => `/internal/backups/2026-11/runs/1/files/${name}/url`
+    const legacyUrl = (name: string) => `/internal/backups/2026-11/files/${name}/url`
+
+    it("發獎金日表進快照，分頁排序用主鍵 billing_id（沒有 id 欄）", () => {
+      const spec = SNAPSHOT_TABLES.find((t) => t.name === "project_billing_bonus_dates")
+      expect(spec).toMatchObject({ keyColumn: "billing_id" })
+      expect(SNAPSHOT_TABLES.find((t) => t.name === "project_billing_shares")?.keyColumn).toBeUndefined()
+    })
+
+    it("未授權 HR（看不到毛利）：讀表列、下載（新舊路徑、分頁檔、大小寫變形）都 403；其他表照常", async () => {
+      for (const path of [
+        rowsUrl("project_billing_shares"),
+        rowsUrl("project_billing_bonus_dates"),
+        fileUrl("project_billing_shares.json.gz"),
+        fileUrl("project_billing_shares.part-0002.json.gz"),
+        fileUrl("Project_Billing_Bonus_Dates.json.gz"),
+        legacyUrl("project_billing_bonus_dates.json.gz"),
+      ]) {
+        const res = await as(T.hr).get(path)
+        expect(res.status, path).toBe(403)
+        expect(res.body).toMatchObject({ error: "forbidden" })
+      }
+      expect((await as(T.hr).get(rowsUrl("project_billings"))).status).toBe(200)
+      expect((await as(T.hr).get(fileUrl("project_billings.json.gz"))).status).toBe(200)
+    })
+
+    it("授權 HR（canSeeProfit）與 platform_admin 可讀可下載；會計／一般員工本來就進不來", async () => {
+      for (const token of [T.grantedHr, T.platform]) {
+        expect((await as(token).get(rowsUrl("project_billing_shares"))).status, token).toBe(200)
+        expect((await as(token).get(fileUrl("project_billing_bonus_dates.json.gz"))).status, token).toBe(200)
+      }
+      for (const token of [T.accountant, T.member]) expect((await as(token).get(rowsUrl("project_billing_shares"))).status, token).toBe(403)
+    })
   })
 })

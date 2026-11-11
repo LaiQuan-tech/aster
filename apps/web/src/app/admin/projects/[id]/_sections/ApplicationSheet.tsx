@@ -80,6 +80,7 @@ import {
   stageContractTotal,
   stageLocks,
   stageScreenAmount,
+  sharesOverLimit,
   type SheetSaveApi,
   type SheetSaveStep,
 } from "@/lib/project-application-sheet-save";
@@ -410,6 +411,7 @@ export function ApplicationSheet({
       const msg = err instanceof Error ? err.message : "";
       if (section === "shares") {
         if (/shares_exceed_amount/.test(msg)) return "某一期的獎金分潤合計超過該期金額（以存檔後的期別金額為準），請調整後再存。";
+        if (/advance_billing_no_shares/.test(msg)) return "技師公會代墊（代墊款）不能設定獎金分潤。";
         if (/bonus_edit_boss_only|boss_not_configured/.test(msg)) return "只有老闆（或平台管理員）可以改獎金分潤。";
         if (/migration_required/.test(msg)) return "系統尚未開通每期獎金分潤（資料庫待更新），請稍後再試。";
         return humanError(err, "儲存失敗");
@@ -827,7 +829,12 @@ export function ApplicationSheet({
     const shareEdit: ShareEdit | undefined = sharesEditable ? draft.shareEdits?.[key] : undefined;
     const shareLines = currentShareLines(shareSet, shareEdit);
     const shareSummary = shareSummaryText(shareLines);
-    const shareOpen = showShares && openShareKey === key;
+    // 代墊款（技師公會代墊）不可設分潤：不畫分潤格內容、不能點開。
+    const shareOpen = showShares && !guild && openShareKey === key;
+    /** 該期分潤的比較基準：存後金額（依後端尾差規則預估）；計畫沒算到時退回畫面金額。 */
+    const shareLimit = key in plan.shares.limits ? plan.shares.limits[key] : stageScreenAmount(s, rowEdit);
+    const shareOver =
+      showShares && !guild && (sharesOverLimit(shareLinesTotal(filledShareLines(shareLines)), shareLimit) || (!shareEdit?.lines && !!shareSet?.overLimit));
     stageCells.push(
       <Cell key={`stage-${s.no}-0`} col={stageCols[0]} span={S[0]} row={r} kind="label" shade testId={`sheet-stage-${s.no}`}>
         {editable ? (
@@ -918,9 +925,19 @@ export function ApplicationSheet({
       </Cell>,
       ...(showShares
         ? [
-            <Cell key={`stage-${s.no}-share`} col={stageCols[6]} span={S[6]} row={r} kind="value" testId={`sheet-stage-${s.no}-shares`} editable={sharesEditable} {...errAttr(`stage:${key}:shares`)}>
+            <Cell
+              key={`stage-${s.no}-share`}
+              col={stageCols[6]}
+              span={S[6]}
+              row={r}
+              kind="value"
+              testId={`sheet-stage-${s.no}-shares`}
+              editable={sharesEditable && !guild}
+              className={shareOver ? "bg-red-50!" : undefined}
+              {...errAttr(`stage:${key}:shares`)}
+            >
               {mLabel("獎金分潤")}
-              {sharesEditable || shareSummary ? (
+              {guild ? null : sharesEditable || shareSummary ? (
                 <button
                   type="button"
                   className={`${cellChoice} w-full truncate text-left tabular-nums`}
@@ -930,6 +947,11 @@ export function ApplicationSheet({
                   onClick={() => setOpenShareKey(shareOpen ? null : key)}
                 >
                   {shareSummary || <span className="text-gray-400">＋ 設定</span>}
+                  {shareOver && (
+                    <span className="block text-[11px] font-medium text-red-700" data-testid={`sheet-stage-${s.no}-share-over`}>
+                      分潤超過本期金額
+                    </span>
+                  )}
                 </button>
               ) : null}
             </Cell>,
@@ -945,9 +967,9 @@ export function ApplicationSheet({
       </Cell>,
       ...(showShares
         ? [
-            <Cell key={`stage-${s.no}-bonus-date`} col={stageCols[8]} span={S[8]} row={r} kind="value" testId={`sheet-stage-${s.no}-bonus-date`} editable={sharesEditable} {...errAttr(`stage:${key}:bonusPaidOn`)}>
+            <Cell key={`stage-${s.no}-bonus-date`} col={stageCols[8]} span={S[8]} row={r} kind="value" testId={`sheet-stage-${s.no}-bonus-date`} editable={sharesEditable && !guild} {...errAttr(`stage:${key}:bonusPaidOn`)}>
               {mLabel("發獎金日")}
-              {sharesEditable ? (
+              {guild ? null : sharesEditable ? (
                 <input
                   aria-label={`${rowLabel}發獎金日`}
                   className={`${cellInput} px-0.5`}
@@ -963,9 +985,9 @@ export function ApplicationSheet({
         : []),
     );
     if (shareOpen) {
-      const stageAmount = stageScreenAmount(s, rowEdit);
+      const stageAmount = shareLimit;
       const total = shareLinesTotal(filledShareLines(shareLines));
-      const over = total > 0 && (stageAmount === null || total > stageAmount);
+      const over = sharesOverLimit(total, stageAmount);
       const setLines = (lines: ShareLine[]) => patchShare(key, { lines });
       stageCells.push(
         <Cell key={`stage-${s.no}-share-editor`} col={1} span={stageHeaders.length} row={srow++} kind="full" testId={`sheet-stage-${s.no}-share-editor`} className="bg-gray-50!">

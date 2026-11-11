@@ -1,8 +1,17 @@
 import { describe, expect, it, vi } from "vitest"
 import { applicationSheetDraftOf, type ApplicationSheetDraft } from "../project-application-sheet"
-import { applicationSheetPlan, runApplicationSheetSave, sharePlan, type SheetSaveApi, type SheetSaveContext } from "../project-application-sheet-save"
+import {
+  applicationSheetPlan,
+  runApplicationSheetSave,
+  shareExceedNotices,
+  sharePlan,
+  sharesOverLimit,
+  type SheetSaveApi,
+  type SheetSaveContext,
+} from "../project-application-sheet-save"
 import {
   currentShareLines,
+  shareSetOf,
   sameShareLines,
   sharePctText,
   shareSummaryText,
@@ -192,5 +201,82 @@ describe("依序儲存：分潤在期程之後送", () => {
     const res = await runApplicationSheetSave(applicationSheetPlan(ctx, draft), draft, api)
     expect(res.steps.find((s) => s.section === "shares")).toMatchObject({ status: "failed" })
     expect(res.residual.shareEdits).toEqual(draft.shareEdits)
+  })
+})
+
+describe("2026-11-11 驗收修正", () => {
+  it("#6 金額以分比較：0.1＋0.2 不超過 0.3；billingId 大小寫不分", () => {
+    expect(sharesOverLimit(0.1 + 0.2, 0.3)).toBe(false)
+    expect(sharesOverLimit(0.31, 0.3)).toBe(true)
+    expect(sharesOverLimit(0, null)).toBe(false)
+    expect(shareSetOf(view(), "B1")?.billingId).toBe("b1")
+  })
+
+  it("#3 比較基準＝後端算出的存後金額：改了別期金額、尾差落到這期 → 用含尾差的金額比（不誤擋）", () => {
+    // 合約 200,000；b1 改成 20,000（10%）、b2 不動仍 50% → 尾差 80,000 落在 b2 → b2 存後 180,000。
+    const ctx = ctxOf()
+    const draft = draftOf(ctx, { stageEdits: { b1: { amount: "20000" } }, shareEdits: { b2: { lines: [{ employeeId: EMP_B, amount: "150000" }] } } })
+    const plan = applicationSheetPlan(ctx, draft)
+    expect(plan.shares.limits).toMatchObject({ b1: 20000, b2: 180000 })
+    expect(plan.errors.filter((e) => e.field === "stage:b2:shares")).toEqual([])
+    expect(plan.shares.items.map((i) => i.billingId)).toEqual(["b2"])
+  })
+
+  it("#2b 分潤沒改、但該期金額變小（含被尾差影響）→ 有權限者也被擋存並紅底", () => {
+    const ctx = ctxOf()
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { amount: "20000" } } }))
+    const err = plan.errors.find((e) => e.field === "stage:b1:shares")
+    expect(err?.message).toContain("存檔後金額為 20,000")
+    expect(err?.message).toContain("30,000")
+    // 金額沒變（只改備註）→ 不檢查
+    expect(applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: { note: "x" } } })).errors).toEqual([])
+    // 只能看（canEdit=false）的人不被擋
+    expect(applicationSheetPlan(ctxOf({ billingShares: view({ canEdit: false }) }), draftOf(ctx, { stageEdits: { b1: { amount: "20000" } } })).errors).toEqual([])
+  })
+
+  it("#4 刪除有分潤／發獎金日的期別 → 擋存並提示請先清除；沒有分潤的期別照常刪", () => {
+    const ctx = ctxOf()
+    const clear = { milestone: "", percentage: "", amount: "", note: "" }
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: clear } }))
+    expect(plan.stages.removed.map((r) => r.key)).toEqual(["b1"])
+    expect(plan.errors.find((e) => e.field === "stage:b1:shares")?.message).toContain("此期已有獎金分潤／發獎金日，請先清除")
+    // 只能看的人也擋（後端會 409）
+    expect(applicationSheetPlan(ctxOf({ billingShares: view({ canEdit: false }) }), draftOf(ctx, { stageEdits: { b1: clear } })).errors.length).toBeGreaterThan(0)
+    // b2 沒有分潤也沒有發獎金日 → 可刪，分潤計畫跳過它
+    const ok = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b2: clear }, shareEdits: { b2: { bonusPaidOn: "2027-01-01" } } }))
+    expect(ok.stages.removed.map((r) => r.key)).toEqual(["b2"])
+    expect(ok.shares.items).toEqual([])
+    expect(ok.errors.filter((e) => e.field.includes("shares"))).toEqual([])
+  })
+
+  it("#7 技師公會代墊列不進分潤計畫（即使草稿有改）", () => {
+    const ctx = ctxOf({ billings: [fakeBilling({}), fakeBilling({ id: "b2", installmentNo: 2 }), fakeBilling({ id: "g1", installmentNo: 3, kind: "guild_advance", percentage: null, calculatedAmount: null, effectiveAmount: 5000, overrideAmount: 5000, overrideReason: "代墊" })] })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { shareEdits: { g1: { lines: [{ employeeId: EMP_A, amount: "1" }] } } }))
+    expect(plan.shares.items).toEqual([])
+    expect(plan.dirtyCount).toBe(0)
+  })
+
+  it("#2c 期程 PUT 回 shares_exceed_amount 警告 → 黃色提示（不含分潤內容）", async () => {
+    expect(
+      shareExceedNotices(["invoiced_before_billed", { billingId: "B2", code: "shares_exceed_amount" }], [
+        { id: "b1", installmentNo: 1, kind: "installment" },
+        { id: "b2", installmentNo: 5, kind: "installment" },
+      ]),
+    ).toEqual(["付款階段第 2 列的獎金分潤超過本期金額（期別金額已變小），請老闆調整分潤。"])
+    const ctx = ctxOf()
+    const draft = draftOf(ctx, { stageEdits: { b1: { milestone: "訂金" } } })
+    const plan = applicationSheetPlan(ctx, draft)
+    const api: SheetSaveApi = {
+      updateProject: vi.fn(async () => {}), updateClient: vi.fn(async () => null), upsertMainContract: vi.fn(async () => {}),
+      updateContract: vi.fn(async () => {}), createQuotation: vi.fn(async () => {}),
+      saveBillingSchedule: vi.fn(async (inst: InstallmentInputExt[]) => ({
+        installments: inst.map((i) => ({ id: i.id!, installmentNo: i.installmentNo, kind: "installment" })),
+        warnings: [{ billingId: "b1", code: "shares_exceed_amount" }],
+      })),
+      invoiceBilling: vi.fn(async () => {}), receiveBilling: vi.fn(async () => {}), putSubcontracts: vi.fn(async () => {}),
+      humanize: () => "錯誤",
+    }
+    const res = await runApplicationSheetSave(plan, draft, api)
+    expect(res.notices).toContain("付款階段第 1 列的獎金分潤超過本期金額（期別金額已變小），請老闆調整分潤。")
   })
 })

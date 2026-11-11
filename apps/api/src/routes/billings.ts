@@ -19,6 +19,7 @@ import { serializeBilling } from "../services/project-application-store.js"
 import { writeAuditLog } from "../services/audit.js"
 import { scheduleBonusRecompute } from "../services/bonus-run-store.js"
 import { logger } from "../lib/logger.js"
+import { billingIdsWithBonusShares, billingsOverShareLimit } from "../services/billing-shares.js"
 
 export const billingsRouter = Router()
 
@@ -74,7 +75,12 @@ const receiveSchema = z.object({
   receivedAmount: z.number().nonnegative().nullish(),
 })
 
-type Warning = "invoiced_before_billed" | "received_before_invoiced" | "received_before_billed"
+type Warning =
+  | "invoiced_before_billed"
+  | "received_before_invoiced"
+  | "received_before_billed"
+  /** PUT 期程後某期金額變小、已設定的每期獎金分潤合計超過它（只提示，不擋會計改金額；2026-11-11）。 */
+  | { billingId: string; code: "shares_exceed_amount" }
 
 /**
  * M22：入帳／撤銷入帳成功後，排程重算該租戶所有未發放的一般獎金批次（2026-10-26 起非同步：
@@ -192,6 +198,8 @@ billingsRouter.get(
  *   • 既有列不在 payload 裡 → 軟刪除；**已請款的不可移除**（409）
  *   • **已入帳的期別不可改金額也不可移除**（409 `received`）——錢已經進來了，
  *     那一期的金額就是對帳的依據，改了等於改歷史。
+ *   • 已設定每期獎金分潤／發獎金日的期別不可移除（409 `billing_has_bonus_shares`，2026-11-11）。
+ *   • 存後若某期分潤合計超過新的期別金額：照存，回 `warnings: [{ billingId, code: "shares_exceed_amount" }]`。
  */
 billingsRouter.put(
   "/projects/:id/billings",
@@ -268,6 +276,21 @@ billingsRouter.put(
         }
       }
 
+      // 已設定每期獎金分潤／發獎金日的期別不可移除（2026-11-11）：分潤是另外發的紀錄，期別刪掉就對不到了。
+      // 會計看不到分潤，訊息只說「請老闆先移除」，不帶任何分潤內容。
+      if (removing.length > 0) {
+        const withShares = await billingIdsWithBonusShares(tenantId, removing.map((r) => r.id))
+        const blocked = removing.find((r) => withShares.has(r.id.toLowerCase()))
+        if (blocked) {
+          res.status(409).json({
+            error: "billing_has_bonus_shares",
+            installmentNo: blocked.installment_no,
+            message: "此期已設定獎金分潤，請老闆先移除後再刪",
+          })
+          return
+        }
+      }
+
       // 先軟刪除要移除的，避免期別編號與新增的相撞。
       for (const row of removing) {
         await supabaseAdmin
@@ -319,7 +342,11 @@ billingsRouter.put(
       }
 
       await recomputeBillings(tenantId, projectId)
-      await respondSchedule(tenantId, projectId, res)
+      // 期別金額變小 → 已設定的每期分潤可能超額：不擋（分潤只是紀錄），回 warnings 讓前端顯示黃色提示。
+      const over = await billingsOverShareLimit(tenantId, projectId)
+      await respondSchedule(tenantId, projectId, res, {
+        warnings: over.map((billingId) => ({ billingId, code: "shares_exceed_amount" as const })),
+      })
     } catch (err) {
       next(err)
     }
