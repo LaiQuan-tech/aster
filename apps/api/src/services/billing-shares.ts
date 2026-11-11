@@ -80,6 +80,22 @@ export function sharesExceed(total: number, billingAmount: number | null): boole
   return billingAmount === null || toCents(total) > toCents(billingAmount)
 }
 
+/**
+ * DB 觸發器 project_billings_bonus_shares_guard（migration 0093）的錯誤碼：期別要軟刪除或改成代墊款，
+ * 但該期還有獎金分潤或發獎金日 → API 對應成 409 billing_has_bonus_shares。
+ */
+export const BILLING_HAS_SHARES_ERRCODE = "BS409"
+
+/** 金額最多到「分」（小數 2 位）：數字轉回字串後須是整數或小數 1～2 位（同前端 parseShareAmount）。 */
+export function hasAtMostTwoDecimals(n: number): boolean {
+  return /^\d+(\.\d{1,2})?$/.test(String(n))
+}
+
+/** 這一期的寫入是「清除」（沒有分潤列、沒有發獎金日）：代墊款期別也允許（舊資料自救）。 */
+export function isClearingShareSet(item: { bonusPaidOn?: string | null; shares: readonly unknown[] }): boolean {
+  return item.shares.length === 0 && !item.bonusPaidOn
+}
+
 /** 代墊款期別（技師公會代墊）：不進尾差、不可設分潤。 */
 export function isAdvanceBillingKind(kind: string | null | undefined): boolean {
   return kind === "guild_advance"

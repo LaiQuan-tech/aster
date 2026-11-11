@@ -500,7 +500,7 @@ export function unreceiveBilling(id: string, reason: string) {
 /** 分期請款相關錯誤碼人性化（含 P3 開票／收款新增的碼）。 */
 export const BILLING_ERRORS: Record<string, string> = {
   // 放第一個：比對是子字串，要排在 "received" 之類的短代碼前面。會計看不到分潤，訊息不帶任何分潤內容。
-  billing_has_bonus_shares: "此期已設定獎金分潤，請老闆先移除後再刪。",
+  billing_has_bonus_shares: "此期已設定獎金分潤，請老闆先移除後再刪除或改成代墊款。",
   override_reason_required: "人工指定金額必須填理由。",
   billed_installment_not_removable: "已請款的期別不能移除。",
   received: "已入帳的期別金額已凍結，不能移除或改百分比／覆寫金額。",

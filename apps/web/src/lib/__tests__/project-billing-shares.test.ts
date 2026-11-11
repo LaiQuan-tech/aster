@@ -11,6 +11,8 @@ import {
 } from "../project-application-sheet-save"
 import {
   currentShareLines,
+  parseShareAmount,
+  shareLinesTotal,
   shareSetOf,
   sameShareLines,
   sharePctText,
@@ -278,5 +280,136 @@ describe("2026-11-11 驗收修正", () => {
     }
     const res = await runApplicationSheetSave(plan, draft, api)
     expect(res.notices).toContain("付款階段第 1 列的獎金分潤超過本期金額（期別金額已變小），請老闆調整分潤。")
+  })
+})
+
+describe("2026-11-11 驗收修正 2", () => {
+  function fakeApi(over: Partial<SheetSaveApi> = {}) {
+    const calls: string[] = []
+    const api: SheetSaveApi = {
+      updateProject: vi.fn(async () => { calls.push("project") }),
+      updateClient: vi.fn(async () => null),
+      upsertMainContract: vi.fn(async () => { calls.push("main") }),
+      updateContract: vi.fn(async () => {}),
+      createQuotation: vi.fn(async () => {}),
+      saveBillingSchedule: vi.fn(async (inst: InstallmentInputExt[]) => {
+        calls.push("billings")
+        return { installments: inst.map((i, n) => ({ id: i.id ?? `created-${n}`, installmentNo: i.installmentNo })) }
+      }),
+      invoiceBilling: vi.fn(async () => {}),
+      receiveBilling: vi.fn(async () => {}),
+      putSubcontracts: vi.fn(async () => {}),
+      saveBillingShares: vi.fn(async () => { calls.push("shares") }),
+      humanize: (_s: string, err: unknown) => (err instanceof Error ? err.message : "錯誤"),
+      ...over,
+    }
+    return { api, calls }
+  }
+  const clear = { milestone: "", percentage: "", amount: "", note: "" }
+  /** 空殼期別（名稱、%、金額都空；舊版留下）。 */
+  const shell = () => fakeBilling({ id: "b2", installmentNo: 2, milestone: null, percentage: null, calculatedAmount: null, effectiveAmount: null })
+
+  it("#3 要刪的期別、草稿已清空分潤與發獎金日 → 不擋存；先送分潤清除、再送期程（刪期別）", async () => {
+    const ctx = ctxOf()
+    const draft = draftOf(ctx, { stageEdits: { b1: clear }, shareEdits: { b1: { lines: [], bonusPaidOn: "" } } })
+    const plan = applicationSheetPlan(ctx, draft)
+    expect(plan.errors).toEqual([])
+    expect(plan.stages.removed.map((r) => r.key)).toEqual(["b1"])
+    expect(plan.shares.items).toEqual([{ key: "b1", label: "第 1 列", billingId: "b1", bonusPaidOn: null, shares: [], beforeSchedule: true }])
+    const { api, calls } = fakeApi()
+    const out = await runApplicationSheetSave(plan, draft, api, ctx)
+    expect(calls).toEqual(["shares", "billings"])
+    expect(api.saveBillingShares).toHaveBeenCalledTimes(1)
+    expect(api.saveBillingShares).toHaveBeenCalledWith([{ billingId: "b1", bonusPaidOn: null, shares: [] }])
+    expect((api.saveBillingSchedule as ReturnType<typeof vi.fn>).mock.calls[0][0].map((i: InstallmentInputExt) => i.id)).toEqual(["b2"])
+    expect(out.steps.every((s) => s.status === "ok")).toBe(true)
+    expect(out.residual.shareEdits ?? {}).toEqual({})
+    // 只清了名單、發獎金日還在 → 仍擋存
+    const half = applicationSheetPlan(ctx, draftOf(ctx, { stageEdits: { b1: clear }, shareEdits: { b1: { lines: [] } } }))
+    expect(half.errors.find((e) => e.field === "stage:b1:shares")?.message).toContain("請先清除")
+    // 只能看（canEdit=false）的人清不了 → 仍擋存
+    const viewOnly = ctxOf({ billingShares: view({ canEdit: false }) })
+    expect(applicationSheetPlan(viewOnly, draftOf(viewOnly, { stageEdits: { b1: clear }, shareEdits: { b1: { lines: [], bonusPaidOn: "" } } })).errors.length).toBeGreaterThan(0)
+  })
+
+  it("#3 先清分潤失敗 → 期程不送（不會去刪還有分潤的期別），草稿保留", async () => {
+    const ctx = ctxOf()
+    const draft = draftOf(ctx, { stageEdits: { b1: clear }, shareEdits: { b1: { lines: [], bonusPaidOn: "" } } })
+    const { api, calls } = fakeApi({ saveBillingShares: vi.fn(async () => { throw new Error("[500] boom") }) })
+    const out = await runApplicationSheetSave(applicationSheetPlan(ctx, draft), draft, api, ctx)
+    expect(calls).toEqual([])
+    expect(api.saveBillingSchedule).not.toHaveBeenCalled()
+    expect(out.steps.map((s) => [s.section, s.status])).toEqual([["shares", "failed"], ["billings", "skipped"]])
+    expect(out.residual.shareEdits?.b1).toEqual({ lines: [], bonusPaidOn: "" })
+    expect(out.residual.stageEdits.b1).toEqual(clear)
+  })
+
+  it("#3 已有分潤／發獎金日的空殼期別：不自動移除、不擋存；草稿清空後才一起移除（先清分潤）", () => {
+    const sharesOnShell = view({
+      billings: [
+        { billingId: "b1", billingAmount: 100000, bonusPaidOn: null, total: 0, shares: [] },
+        { billingId: "b2", billingAmount: null, bonusPaidOn: "2026-12-20", total: 0, shares: [] },
+      ],
+    } as Partial<NonNullable<BillingSharesView>>)
+    const ctx = ctxOf({ billings: [fakeBilling({}), shell()], billingShares: sharesOnShell })
+    const plan = applicationSheetPlan(ctx, draftOf(ctx))
+    expect(plan.stages.removed).toEqual([])
+    expect(plan.stages.installments).toBeNull()
+    expect(plan.errors).toEqual([])
+    expect(plan.dirtyCount).toBe(0)
+    // 草稿把發獎金日清掉 → 空殼照舊規則移除，並先送清除
+    const cleared = applicationSheetPlan(ctx, draftOf(ctx, { shareEdits: { b2: { bonusPaidOn: "" } } }))
+    expect(cleared.stages.removed.map((r) => r.key)).toEqual(["b2"])
+    expect(cleared.shares.items).toEqual([{ key: "b2", label: "第 2 列", billingId: "b2", bonusPaidOn: null, shares: [], beforeSchedule: true }])
+    expect(cleared.errors).toEqual([])
+    // 沒有分潤的空殼照舊自動移除
+    const plain = ctxOf({ billings: [fakeBilling({}), shell()] })
+    expect(applicationSheetPlan(plain, draftOf(plain)).stages.removed.map((r) => r.key)).toEqual(["b2"])
+  })
+
+  it("#3 看不到分潤的人（會計）：空殼自動移除被後端 409 billing_has_bonus_shares → 放回空殼重送一次，不卡住", async () => {
+    const ctx = ctxOf({ billings: [fakeBilling({}), shell()], billingShares: null })
+    const draft = draftOf(ctx, { stageEdits: { b1: { milestone: "改名簽約款" } } })
+    const plan = applicationSheetPlan(ctx, draft)
+    expect(plan.stages.removed.map((r) => r.key)).toEqual(["b2"])
+    expect(plan.stages.autoShells.map((i) => i.id)).toEqual(["b2"])
+    const sent: string[][] = []
+    const { api } = fakeApi({
+      saveBillingSchedule: vi.fn(async (inst: InstallmentInputExt[]) => {
+        sent.push(inst.map((i) => i.id ?? ""))
+        if (!inst.some((i) => i.id === "b2")) throw Object.assign(new Error("[409] billing_has_bonus_shares"), { code: "billing_has_bonus_shares" })
+        return { installments: inst.map((i) => ({ id: i.id!, installmentNo: i.installmentNo })) }
+      }),
+    })
+    const out = await runApplicationSheetSave(plan, draft, api, ctx)
+    expect(sent).toEqual([["b1"], ["b1", "b2"]])
+    expect(out.steps.find((s) => s.section === "billings")?.status).toBe("ok")
+    expect(out.notices.some((n) => n.includes("已保留未移除"))).toBe(true)
+    expect(out.residual.stageEdits).toEqual({})
+    // 其他錯誤不重送
+    const other = fakeApi({ saveBillingSchedule: vi.fn(async () => { throw new Error("[409] received") }) })
+    const failed = await runApplicationSheetSave(plan, draft, other.api, ctx)
+    expect(other.api.saveBillingSchedule).toHaveBeenCalledTimes(1)
+    expect(failed.steps.find((s) => s.section === "billings")?.status).toBe("failed")
+  })
+
+  it("#4 分潤金額最多小數 2 位；合計逐筆轉分再加（0.1＋0.2＝0.3）", () => {
+    expect(parseShareAmount("12.34")).toBe(12.34)
+    expect(parseShareAmount("1,234.5")).toBe(1234.5)
+    expect(parseShareAmount("100")).toBe(100)
+    expect(parseShareAmount("0.001")).toBe("invalid")
+    expect(parseShareAmount("1e-7")).toBe("invalid")
+    expect(parseShareAmount("-1")).toBe("invalid")
+    expect(shareLinesTotal([{ employeeId: EMP_A, amount: "0.1" }, { employeeId: EMP_B, amount: "0.2" }])).toBe(0.3)
+    const ctx = ctxOf()
+    const plan = applicationSheetPlan(ctx, draftOf(ctx, { shareEdits: { b2: { lines: [{ employeeId: EMP_A, amount: "10.005" }] } } }))
+    expect(plan.errors.find((e) => e.field === "stage:b2:shares")?.message).toContain("最多小數 2 位")
+    // 合計剛好等於期別金額（逐筆轉分）不算超過
+    const exact = ctxOf({ billingShares: view({ billings: [
+      { billingId: "b1", billingAmount: 0.3, bonusPaidOn: null, total: 0, shares: [] },
+      { billingId: "b2", billingAmount: 100000, bonusPaidOn: null, total: 0, shares: [] },
+    ] } as Partial<NonNullable<BillingSharesView>>) })
+    const ok = sharePlan(exact, draftOf(exact, { shareEdits: { b1: { lines: [{ employeeId: EMP_A, amount: "0.1" }, { employeeId: EMP_B, amount: "0.2" }] } } }))
+    expect(ok.errors).toEqual([])
   })
 })

@@ -38,6 +38,7 @@ import {
 import { predictScheduleAmounts } from "./billing-schedule-predict";
 import type {
   BillingExt,
+  BillingShareSet,
   BillingScheduleWarning,
   BillingShareSetInput,
   Client,
@@ -274,6 +275,11 @@ export interface StagePlan {
   created: Array<{ key: string; installmentNo: number; label: string }>;
   /** 整列清空（名稱、%、金額都空，且未請款／開票／入帳）→ 從整批 PUT 拿掉＝後端軟刪除。 */
   removed: Array<{ key: string; label: string }>;
+  /**
+   * 自動移除的空殼期別（使用者沒動、在申請單上看起來是空白列）原本的 PUT 內容。看不到分潤的人（會計）不知道
+   * 空殼上有沒有獎金分潤；後端回 409 billing_has_bonus_shares 時，存檔會把這些列放回去重送一次（保留、不擋存）。
+   */
+  autoShells: InstallmentInputExt[];
   invoices: Array<{ key: string; label: string; invoiceNo: string; invoicedOn: string }>;
   receipts: Array<{ key: string; label: string; receivedOn: string }>;
   /** 改了金額、要使用者填人工指定理由的列（沒有合約總額、只能人工指定時；沒有既有理由可沿用）。 */
@@ -304,6 +310,22 @@ export function isEmptyShellBilling(b: BillingExt): boolean {
     !b.invoicedOn &&
     !b.receivedOn
   );
+}
+
+/** 草稿（沒改就用已存的）裡該期的分潤名單與發獎金日是否都空了。 */
+export function draftClearsShares(set: BillingShareSet | null, edit: ShareEdit | undefined): boolean {
+  return filledShareLines(currentShareLines(set, edit)).length === 0 && trimmed(currentBonusPaidOn(set, edit)) === "";
+}
+
+/** 已存的這一期有獎金分潤或發獎金日（看得到分潤時才知道；看不到＝false）。 */
+function savedHasShares(set: BillingShareSet | null): boolean {
+  return !!set && (set.shares.length > 0 || !!set.bonusPaidOn);
+}
+
+/** 空殼期別要不要因為分潤保留：已存有分潤／發獎金日，且草稿沒有把它們清空。 */
+function shellKeepsForShares(ctx: SheetSaveContext, draft: ApplicationSheetDraft, key: string, billingId: string | null): boolean {
+  const set = shareSetOf(ctx.billingShares ?? null, billingId);
+  return savedHasShares(set) && !draftClearsShares(set, draft.shareEdits?.[key]);
 }
 
 /** 這次的修改有沒有在該列填進任何內容（說明／%／金額／發票／日期）。 */
@@ -345,7 +367,7 @@ export function pinStageScreenAmounts(ctx: SheetSaveContext, draft: ApplicationS
 }
 
 export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): StagePlan {
-  const out: StagePlan = { installments: null, created: [], removed: [], invoices: [], receipts: [], needsReason: [], changes: 0, errors: [], warnings: [] };
+  const out: StagePlan = { installments: null, created: [], removed: [], autoShells: [], invoices: [], receipts: [], needsReason: [], changes: 0, errors: [], warnings: [] };
   if (!ctx.canFinance) return out;
   const rows = applicationStageRows(ctx.billings);
   const byId = new Map(ctx.billings.map((b) => [b.id, b]));
@@ -441,9 +463,14 @@ export function stagePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft): 
     // 使用者再清空也沒有差異可送，所以這次沒填任何內容就直接列入移除（2026-11-09 業主回報第 8 列刪不掉）。
     const label = stageLabel(row);
     const ghost = row.id ? byId.get(row.id) : undefined;
-    if (ghost && isEmptyShellBilling(ghost) && !stageEditFills(edit)) {
+    // 已有獎金分潤／發獎金日的空殼（看得到分潤時才知道）：保留、不擋存——除非草稿已把分潤與發獎金日清空
+    // （那就跟一般要刪的期別一樣：存檔先清分潤、再刪期別，見 sharePlan／runApplicationSheetSave）。
+    if (ghost && isEmptyShellBilling(ghost) && !stageEditFills(edit) && !shellKeepsForShares(ctx, draft, key, row.id)) {
       const target = payload.find((p) => p.id === row.id);
-      if (target) payload.splice(payload.indexOf(target), 1);
+      if (target) {
+        payload.splice(payload.indexOf(target), 1);
+        out.autoShells.push(target);
+      }
       scheduleChanged = true;
       out.changes += 1;
       out.removed.push({ key, label });
@@ -729,6 +756,11 @@ export interface SharePlanItem {
   billingId: string | null;
   bonusPaidOn: string | null;
   shares: Array<{ employeeId: string; amount: number }>;
+  /**
+   * 要刪的期別、草稿已把分潤與發獎金日清空：存檔時**先**送這筆清除，再送期程（刪期別），
+   * 否則後端（API＋DB 觸發器）會因為該期還有分潤回 409。
+   */
+  beforeSchedule?: boolean;
 }
 
 export interface SharePlan {
@@ -744,7 +776,8 @@ export interface SharePlan {
 
 /** 該期在畫面上的金額（金額格有改用草稿，否則已存的有效金額）；空白或不合法＝null。 */
 export function stageScreenAmount(row: ApplicationStageRow, edit: StageEdit | undefined): number | null {
-  const n = parseShareAmount(stageAmountDisplay(row, edit));
+  // 期別金額不受分潤「最多小數 2 位」限制（那是分潤金額的規則），這裡只要 0 以上的數字。
+  const n = parseNumber(stageAmountDisplay(row, edit), { min: 0 });
   return typeof n === "number" ? n : null;
 }
 
@@ -796,7 +829,8 @@ export function predictedStageAmounts(
  * - 比較基準＝**存後的期別金額**（依後端尾差規則預估，見 predictedStageAmounts），不是畫面上的金額。
  * - 分潤有改、或該期金額會變（含被尾差影響）→ 檢查分潤合計 ≤ 該期金額；超過 → 擋存，紅底標在 `stage:<key>:shares`。
  * - 技師公會代墊（代墊款）不可設分潤：略過。
- * - 要移除的期別（stages.removed）：不送分潤；已有分潤或發獎金日 → 擋存（請先清除），否則後端 409。
+ * - 要移除的期別（stages.removed）：已有分潤或發獎金日時看草稿——草稿已清空（且有權改）→ 送一筆清除、標 beforeSchedule
+ *   （存檔先清分潤、再刪期別）；沒清空 → 擋存（請先清除），否則後端 409。
  */
 export function sharePlan(
   ctx: SheetSaveContext,
@@ -816,8 +850,13 @@ export function sharePlan(
     const field = `stage:${key}:shares`;
     if (row.kind === "guild_advance") continue;
     if (removedKeys.has(key)) {
-      if (set && (set.shares.length > 0 || !!set.bonusPaidOn)) {
-        out.errors.push({ field, message: `付款階段${label}此期已有獎金分潤／發獎金日，請先清除。` });
+      if (savedHasShares(set)) {
+        if (view.canEdit && row.id && draftClearsShares(set, draft.shareEdits?.[key])) {
+          out.changes += 1;
+          out.items.push({ key, label, billingId: row.id, bonusPaidOn: null, shares: [], beforeSchedule: true });
+        } else {
+          out.errors.push({ field, message: `付款階段${label}此期已有獎金分潤／發獎金日，請先清除。` });
+        }
       }
       continue;
     }
@@ -855,7 +894,7 @@ export function sharePlan(
       const id = l.employeeId.trim().toLowerCase();
       if (!id) out.errors.push({ field, message: `付款階段${label}獎金分潤第 ${i + 1} 位沒有選員工。` });
       else if (seen.has(id)) out.errors.push({ field, message: `付款階段${label}獎金分潤同一位員工重複。` });
-      if (n === "invalid" || n === null) out.errors.push({ field, message: `付款階段${label}獎金分潤第 ${i + 1} 位的金額必須是 0 以上的數字。` });
+      if (n === "invalid" || n === null) out.errors.push({ field, message: `付款階段${label}獎金分潤第 ${i + 1} 位的金額必須是 0 以上的數字（最多小數 2 位）。` });
       seen.add(id);
       if (id && typeof n === "number") shares.push({ employeeId: l.employeeId, amount: n });
     });
@@ -975,6 +1014,12 @@ function withoutKeys<T extends object>(obj: T, keys: Array<keyof T>): T {
   return out;
 }
 
+/** 後端 409 billing_has_bonus_shares（API 預檢或 DB 觸發器）：apiFetch 的 message 是 `[409] billing_has_bonus_shares`。 */
+export function isBonusSharesConflict(err: unknown): boolean {
+  const e = err as { code?: unknown; message?: unknown } | null;
+  return !!e && (e.code === "billing_has_bonus_shares" || (typeof e.message === "string" && e.message.includes("billing_has_bonus_shares")));
+}
+
 /**
  * 期程 PUT 回的 warnings 裡「某期分潤超過新的期別金額」（只提示，不擋會計改金額）→ 黃色提示文字。
  * 期別用申請單上的稱呼（一般期別依期別編號排第 N 列；代墊款＝技師公會代墊），不帶任何分潤內容。
@@ -1072,14 +1117,42 @@ export async function runApplicationSheetSave(
       for (const rc of plan.stages.receipts) steps.push({ section: "receipt", label: `付款階段${rc.label}入帳日期`, status: "skipped", message: "付款階段沒存成，這格未送出。" });
     }
   }
+  // 要刪的期別若已有獎金分潤：草稿已清空的，先送分潤清除、再送期程（刪期別）；清除沒成功 → 期程不送（後端也會 409）。
+  const removedNow = new Set(stages.removed.map((r) => r.key));
+  const preClear = stages.installments ? (plan.shares?.items ?? []).filter((i) => i.beforeSchedule && i.billingId && removedNow.has(i.key)) : [];
+  if (preClear.length > 0) {
+    const save = api.saveBillingShares;
+    const ok = save
+      ? await attempt("shares", "付款階段（先清除要刪期別的獎金分潤／發獎金日）", () =>
+          save(preClear.map((i) => ({ billingId: i.billingId!, bonusPaidOn: null, shares: [] }))).then(() => undefined),
+        )
+      : false;
+    if (ok) {
+      const next = { ...(residual.shareEdits ?? {}) };
+      for (const i of preClear) delete next[i.key];
+      residual = { ...residual, shareEdits: next };
+    } else {
+      steps.push({ section: "billings", label: "付款階段（項目說明／金額／%）", status: "skipped", message: "要刪的期別獎金分潤沒清除成功，付款階段未送出。" });
+      stages = { ...stages, installments: null, created: [] };
+    }
+  }
   /** 草稿 key → 已存在的期別 id（既有列 key 就是 id；新建的存完才知道）。 */
   const idOf = new Map<string, string>();
   for (const key of Object.keys(draft.stageEdits)) if (!key.startsWith("new-")) idOf.set(key, key);
   let scheduleOk = true;
   if (stages.installments) {
     const installments = stages.installments;
+    const autoShells = stages.autoShells ?? [];
     scheduleOk = await attempt("billings", "付款階段（項目說明／百分比／金額）", async () => {
-      const res = await api.saveBillingSchedule(installments);
+      let res: Awaited<ReturnType<SheetSaveApi["saveBillingSchedule"]>>;
+      try {
+        res = await api.saveBillingSchedule(installments);
+      } catch (err) {
+        // 自動移除的空殼上其實有獎金分潤（會計看不到分潤，不知道）：把空殼放回去重送一次——保留、不擋存。
+        if (autoShells.length === 0 || !isBonusSharesConflict(err)) throw err;
+        res = await api.saveBillingSchedule([...installments, ...autoShells].sort((a, b) => a.installmentNo - b.installmentNo));
+        notices.push("付款階段有空白期別已設定獎金分潤或發獎金日，已保留未移除（要刪請老闆先移除分潤）。");
+      }
       for (const c of stages.created) {
         const row = res.installments.find((i) => i.installmentNo === c.installmentNo);
         if (row) idOf.set(c.key, row.id);
@@ -1140,9 +1213,10 @@ export async function runApplicationSheetSave(
     if (await attempt("receipt", label, () => api.receiveBilling(id, rc.receivedOn).then(() => undefined))) dropStageField(rc.key, "receivedOn");
   }
 
-  if (plan.shares && plan.shares.items.length > 0) {
+  const shareItems = (plan.shares?.items ?? []).filter((i) => !i.beforeSchedule);
+  if (shareItems.length > 0) {
     const ready: Array<{ key: string; input: BillingShareSetInput }> = [];
-    for (const item of plan.shares.items) {
+    for (const item of shareItems) {
       const id = item.billingId ?? (scheduleOk ? idOf.get(item.key) : undefined);
       if (!id) {
         steps.push({ section: "shares", label: `付款階段${item.label}獎金分潤`, status: "skipped", message: "付款階段沒存成，這格未送出。" });

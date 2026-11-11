@@ -93,7 +93,8 @@ BEGIN
   BEGIN
     PERFORM public.set_billing_bonus_shares_batch(t, p, jsonb_build_array(
       jsonb_build_object('billing_id', b1, 'shares', '[]'::jsonb),
-      jsonb_build_object('billing_id', bg, 'shares', '[]'::jsonb)), NULL);
+      -- 0093 起代墊款允許「清除」（shares 空＋日期 null）；這裡驗的是寫入非空。
+      jsonb_build_object('billing_id', bg, 'shares', jsonb_build_array(jsonb_build_object('employee_id', e1, 'amount', 1)))), NULL);
     INSERT INTO _pbs2_check (item, ok, detail) VALUES ('代墊款期別被擋', false, '竟然成功');
   EXCEPTION WHEN invalid_parameter_value THEN INSERT INTO _pbs2_check (item, ok, detail) VALUES ('代墊款期別被擋', true, SQLSTATE); END;
   -- 同一期重複、同一期重複員工、負數、日期不合法
@@ -131,7 +132,7 @@ BEGIN
   SELECT bonus_paid_on::text INTO got FROM public.project_billing_bonus_dates WHERE billing_id = b2;
   INSERT INTO _pbs2_check (item, ok, detail) VALUES ('舊入口單期整批換掉＋發獎金日', n = 1 AND got = '2027-01-05', n::text || '/' || got);
   BEGIN
-    PERFORM public.set_billing_bonus_shares(t, p, bg, NULL, '[]'::jsonb, NULL);
+    PERFORM public.set_billing_bonus_shares(t, p, bg, DATE '2027-01-05', '[]'::jsonb, NULL);
     INSERT INTO _pbs2_check (item, ok, detail) VALUES ('舊入口也擋代墊款', false, '竟然成功');
   EXCEPTION WHEN invalid_parameter_value THEN INSERT INTO _pbs2_check (item, ok, detail) VALUES ('舊入口也擋代墊款', true, SQLSTATE); END;
 

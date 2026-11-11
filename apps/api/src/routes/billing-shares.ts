@@ -6,8 +6,10 @@ import { loadScope } from "./projects.js"
 import {
   billingSharesAvailable,
   employeesOutsideTenant,
+  hasAtMostTwoDecimals,
   hasQuarterlyShares,
   isAdvanceBillingKind,
+  isClearingShareSet,
   loadBillingShares,
   saveBillingShareSets,
   validateBillingShares,
@@ -27,7 +29,9 @@ import {
  * 權限：看＝本案 finance ∧ canSeeBonus ∧ canSeeProfit；改＝看 ∧ 分潤寫入權（老闆／platform_admin）。
  *   看不到 → 403（不回任何分潤資料）；別租戶的專案 404。
  * 分潤合計 > 該期金額（以分比較）→ 400 shares_exceed_amount（同一期同一人重複 → 400 duplicate_employee）。
- * 代墊款期別（技師公會代墊，kind=guild_advance）→ 400 advance_billing_no_shares。
+ * 代墊款期別（技師公會代墊，kind=guild_advance）→ 400 advance_billing_no_shares（只擋要寫入非空的；
+ *   shares 空＋發獎金日 null 的清除動作允許，舊資料自救，migration 0093）。
+ * 金額最多小數 2 位（400 invalid_body）。
  * 員工不屬本租戶 → 400 invalid_shares（整批不寫）。
  * migration 未套用：GET available=false、PUT 409 migration_required（不 500）。
  */
@@ -45,7 +49,8 @@ const putSchema = z.object({
           .array(
             z.object({
               employeeId: z.string().uuid(),
-              amount: z.number().finite().nonnegative().max(1e12),
+              // 最多小數 2 位（到分）：前端 parseShareAmount 同規則；合計一律逐筆轉分再加。
+              amount: z.number().finite().nonnegative().max(1e12).refine(hasAtMostTwoDecimals, { message: "at_most_2_decimals" }),
               note: z.string().trim().max(200).nullish(),
             }),
           )
@@ -143,7 +148,8 @@ billingSharesRouter.put(
           res.status(404).json({ error: "billing_not_found", billingId: item.billingId })
           return
         }
-        if (isAdvanceBillingKind(billing.kind)) {
+        // 代墊款不可設分潤；但「清除」（shares 空＋日期 null）允許，讓舊資料能自救。
+        if (isAdvanceBillingKind(billing.kind) && !isClearingShareSet(item)) {
           res.status(400).json({ error: "advance_billing_no_shares", billingId: item.billingId })
           return
         }

@@ -41,7 +41,16 @@ import { billingSharesRouter } from "../routes/billing-shares.js"
 import { billingsRouter } from "../routes/billings.js"
 import { internalJobsRouter } from "../routes/internal-jobs.js"
 import { SNAPSHOT_TABLES } from "../services/backup-snapshot.js"
-import { resetBillingSharesProbe, sharePctOf, sharesExceed, toCents, validateBillingShares } from "../services/billing-shares.js"
+import {
+  BILLING_HAS_SHARES_ERRCODE,
+  hasAtMostTwoDecimals,
+  isClearingShareSet,
+  resetBillingSharesProbe,
+  sharePctOf,
+  sharesExceed,
+  toCents,
+  validateBillingShares,
+} from "../services/billing-shares.js"
 import { resetColumnProbeCache } from "../lib/schema-compat.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
@@ -111,7 +120,9 @@ function registerRpc() {
         (b: Row) => b.id === it.billing_id && b.tenant_id === a.p_tenant_id && b.project_id === a.p_project_id && !b.deleted_at,
       )
       if (!billing) return { data: null, error: { code: "P0002", message: "billing not found" } }
-      if (billing.kind === "guild_advance") return { data: null, error: { code: "22023", message: "advance billing" } }
+      // 0093：代墊款只允許清除（shares 空＋日期 null）
+      if (billing.kind === "guild_advance" && ((it.shares as Row[]).length > 0 || it.bonus_paid_on))
+        return { data: null, error: { code: "22023", message: "advance billing" } }
       for (const s of it.shares as Row[]) {
         if (!fake.db.employees.some((e: Row) => e.id === s.employee_id && e.tenant_id === a.p_tenant_id))
           return { data: null, error: { code: "22023", message: "employee not in tenant" } }
@@ -463,5 +474,89 @@ describe("2026-11-11 驗收修正", () => {
       }
       for (const token of [T.accountant, T.member]) expect((await as(token).get(rowsUrl("project_billing_shares"))).status, token).toBe(403)
     })
+  })
+})
+
+describe("2026-11-11 驗收修正 2（migration 0093）", () => {
+  const ADV = "f0000000-0000-4000-8000-000000000318"
+
+  it("#1 期程 PUT 把有分潤的期別改成代墊款 → 409 billing_has_bonus_shares（訊息：再改），不改", async () => {
+    const [b1, b2] = fake.db.project_billings
+    const res = await as(T.accountant).put(`/projects/${PROJECT}/billings`).send({
+      installments: [scheduleItem(b1, { kind: "guild_advance" }), scheduleItem(b2)],
+    })
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: "billing_has_bonus_shares", installmentNo: 1, message: "此期已設定獎金分潤，請老闆先移除後再改" })
+    expect(JSON.stringify(res.body)).not.toContain("30000")
+    expect(b1.kind).toBe("installment")
+    // 只有發獎金日也擋
+    fake.db[SHARES] = fake.db[SHARES].filter((r: Row) => r.tenant_id !== TENANT_ID)
+    expect((await as(T.accountant).put(`/projects/${PROJECT}/billings`).send({ installments: [scheduleItem(b1, { kind: "guild_advance" }), scheduleItem(b2)] })).status).toBe(409)
+    // 沒有分潤的期別（第 2 期）改成代墊款照常
+    const ok = await as(T.accountant).put(`/projects/${PROJECT}/billings`).send({
+      installments: [scheduleItem(b1), scheduleItem(b2, { kind: "guild_advance" })],
+    })
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    expect(b2.kind).toBe("guild_advance")
+    // 原本就是代墊款、kind 不變：不檢查（不 409）
+    const again = await as(T.accountant).put(`/projects/${PROJECT}/billings`).send({
+      installments: [scheduleItem(b1), scheduleItem(b2, { kind: "guild_advance", milestone: "改說明" })],
+    })
+    expect(again.status, JSON.stringify(again.body)).toBe(200)
+  })
+
+  it("#2 競態：預檢通過後 DB 觸發器擋下（BS409）→ 409 billing_has_bonus_shares（刪除與改代墊款兩條路）", async () => {
+    expect(BILLING_HAS_SHARES_ERRCODE).toBe("BS409")
+    const [b1, b2] = fake.db.project_billings
+    // 第 2 期預檢時沒有分潤，軟刪除那一刻別人剛寫入 → 觸發器擋
+    fake.injectError({ table: "project_billings", action: "update", error: { code: "BS409", message: "project_billings: billing has bonus shares (delete)" } })
+    const del = await as(T.accountant).put(`/projects/${PROJECT}/billings`).send({ installments: [scheduleItem(b1)] })
+    expect(del.status).toBe(409)
+    expect(del.body).toMatchObject({ error: "billing_has_bonus_shares", installmentNo: 2, message: "此期已設定獎金分潤，請老闆先移除後再刪" })
+    expect(b2.deleted_at).toBeNull()
+    // 改代墊款那一刻被擋
+    fake.injectError({ table: "project_billings", action: "update", error: { code: "BS409", message: "project_billings: billing has bonus shares (kind)" } })
+    const kind = await as(T.accountant).put(`/projects/${PROJECT}/billings`).send({ installments: [scheduleItem(b2, { kind: "guild_advance" }), scheduleItem(b1)] })
+    expect(kind.status).toBe(409)
+    expect(kind.body).toMatchObject({ error: "billing_has_bonus_shares", installmentNo: 2, message: "此期已設定獎金分潤，請老闆先移除後再改" })
+    expect(b2.kind).toBe("installment")
+  })
+
+  it("#1 代墊款期別：清除（shares 空＋日期 null）允許（舊資料自救）；寫入非空或只設日期仍 400", async () => {
+    fake.db.project_billings.push(billingRow(ADV, PROJECT, 8, "5000", { kind: "guild_advance", milestone: "技師公會代墊" }))
+    fake.db[SHARES].push({ id: "s-adv", tenant_id: TENANT_ID, project_id: PROJECT, billing_id: ADV, employee_id: E.member, amount: "100", note: null, created_at: "2026-02-01T00:00:00.000Z" })
+    fake.db[DATES].push({ billing_id: ADV, tenant_id: TENANT_ID, project_id: PROJECT, bonus_paid_on: "2026-12-01" })
+    const dateOnly = await put(T.boss, [{ billingId: ADV, bonusPaidOn: "2026-12-02", shares: [] }])
+    expect(dateOnly.status).toBe(400)
+    expect(dateOnly.body.error).toBe("advance_billing_no_shares")
+    const nonEmpty = await put(T.boss, [{ billingId: ADV, shares: [{ employeeId: E.member, amount: 1 }] }])
+    expect(nonEmpty.body.error).toBe("advance_billing_no_shares")
+    expect(rpcCalls()).toHaveLength(0)
+    const clear = await put(T.boss, [{ billingId: ADV, bonusPaidOn: null, shares: [] }])
+    expect(clear.status, JSON.stringify(clear.body)).toBe(200)
+    expect(rpcCalls()).toHaveLength(1)
+    expect(fake.db[SHARES].some((r: Row) => r.billing_id === ADV)).toBe(false)
+    expect(fake.db[DATES].some((r: Row) => r.billing_id === ADV)).toBe(false)
+    expect(isClearingShareSet({ shares: [], bonusPaidOn: null })).toBe(true)
+    expect(isClearingShareSet({ shares: [], bonusPaidOn: "2026-12-01" })).toBe(false)
+  })
+
+  it("#4 金額最多小數 2 位：0.001／1e-7 → 400 invalid_body；12.34 可存；合計逐筆轉分再加", async () => {
+    expect(hasAtMostTwoDecimals(12.34)).toBe(true)
+    expect(hasAtMostTwoDecimals(100)).toBe(true)
+    expect(hasAtMostTwoDecimals(0.1)).toBe(true)
+    expect(hasAtMostTwoDecimals(0.001)).toBe(false)
+    expect(hasAtMostTwoDecimals(1e-7)).toBe(false)
+    expect(hasAtMostTwoDecimals(0.1 + 0.2)).toBe(false)
+    const bad = await put(T.boss, [{ billingId: B2, shares: [{ employeeId: E.member, amount: 0.001 }] }])
+    expect(bad.status).toBe(400)
+    expect(bad.body.error).toBe("invalid_body")
+    expect((await put(T.boss, [{ billingId: B2, shares: [{ employeeId: E.member, amount: 1e-7 }] }])).status).toBe(400)
+    expect(rpcCalls()).toHaveLength(0)
+    const ok = await put(T.boss, [{ billingId: B2, shares: [{ employeeId: E.member, amount: 12.34 }, { employeeId: E.boss, amount: 0.1 }, { employeeId: E.hr, amount: 0.2 }] }])
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+    expect(ok.body.billings.find((b: Row) => b.billingId === B2).total).toBe(12.64)
+    // 合計剛好等於期別金額（逐筆轉分）不算超過
+    expect(validateBillingShares(B2, 0.3, [{ employeeId: E.member, amount: 0.1 }, { employeeId: E.boss, amount: 0.2 }])).toBeNull()
   })
 })

@@ -19,7 +19,20 @@ import { serializeBilling } from "../services/project-application-store.js"
 import { writeAuditLog } from "../services/audit.js"
 import { scheduleBonusRecompute } from "../services/bonus-run-store.js"
 import { logger } from "../lib/logger.js"
-import { billingIdsWithBonusShares, billingsOverShareLimit } from "../services/billing-shares.js"
+import {
+  BILLING_HAS_SHARES_ERRCODE,
+  billingIdsWithBonusShares,
+  billingsOverShareLimit,
+  isAdvanceBillingKind,
+} from "../services/billing-shares.js"
+
+const BONUS_SHARES_REMOVE_MESSAGE = "此期已設定獎金分潤，請老闆先移除後再刪"
+const BONUS_SHARES_KIND_MESSAGE = "此期已設定獎金分潤，請老闆先移除後再改"
+
+/** DB 觸發器（migration 0093）擋下「刪除／改成代墊款，但該期還有分潤或發獎金日」。 */
+function isBillingHasSharesDbError(error: { code?: string | null }): boolean {
+  return error.code === BILLING_HAS_SHARES_ERRCODE
+}
 
 export const billingsRouter = Router()
 
@@ -277,15 +290,29 @@ billingsRouter.put(
       }
 
       // 已設定每期獎金分潤／發獎金日的期別不可移除（2026-11-11）：分潤是另外發的紀錄，期別刪掉就對不到了。
-      // 會計看不到分潤，訊息只說「請老闆先移除」，不帶任何分潤內容。
-      if (removing.length > 0) {
-        const withShares = await billingIdsWithBonusShares(tenantId, removing.map((r) => r.id))
-        const blocked = removing.find((r) => withShares.has(r.id.toLowerCase()))
-        if (blocked) {
+      // 也不可改成代墊款（guild_advance 不可設分潤）。會計看不到分潤，訊息只說「請老闆先移除」，不帶任何分潤內容。
+      // 這裡是預檢；與分潤寫入同時發生的競態由 DB 觸發器（migration 0093）兜底，錯誤碼同樣對應成 409。
+      const toAdvance = payload
+        .filter((item) => item.id && item.kind && isAdvanceBillingKind(item.kind) && !isAdvanceBillingKind(byId.get(item.id)?.kind))
+        .map((item) => byId.get(item.id as string))
+        .filter((r): r is BillingRow => !!r)
+      if (removing.length > 0 || toAdvance.length > 0) {
+        const withShares = await billingIdsWithBonusShares(tenantId, [...removing, ...toAdvance].map((r) => r.id))
+        const blockedRemoval = removing.find((r) => withShares.has(r.id.toLowerCase()))
+        if (blockedRemoval) {
           res.status(409).json({
             error: "billing_has_bonus_shares",
-            installmentNo: blocked.installment_no,
-            message: "此期已設定獎金分潤，請老闆先移除後再刪",
+            installmentNo: blockedRemoval.installment_no,
+            message: BONUS_SHARES_REMOVE_MESSAGE,
+          })
+          return
+        }
+        const blockedKind = toAdvance.find((r) => withShares.has(r.id.toLowerCase()))
+        if (blockedKind) {
+          res.status(409).json({
+            error: "billing_has_bonus_shares",
+            installmentNo: blockedKind.installment_no,
+            message: BONUS_SHARES_KIND_MESSAGE,
           })
           return
         }
@@ -293,7 +320,7 @@ billingsRouter.put(
 
       // 先軟刪除要移除的，避免期別編號與新增的相撞。
       for (const row of removing) {
-        await supabaseAdmin
+        const { error } = await supabaseAdmin
           .from("project_billings")
           .update({
             deleted_at: new Date().toISOString(),
@@ -302,6 +329,14 @@ billingsRouter.put(
           })
           .eq("tenant_id", tenantId)
           .eq("id", row.id)
+        if (error) {
+          if (isBillingHasSharesDbError(error)) {
+            res.status(409).json({ error: "billing_has_bonus_shares", installmentNo: row.installment_no, message: BONUS_SHARES_REMOVE_MESSAGE })
+            return
+          }
+          // 其他錯誤維持舊行為（不中斷整批），但留紀錄。
+          logger.warn({ projectId, billingId: row.id, code: error.code }, "PUT billings: soft delete failed")
+        }
       }
 
       for (const item of payload) {
@@ -317,11 +352,19 @@ billingsRouter.put(
           note: item.note ?? null,
         }
         if (item.id) {
-          await supabaseAdmin
+          const { error } = await supabaseAdmin
             .from("project_billings")
             .update({ ...fields, installment_no: item.installmentNo })
             .eq("tenant_id", tenantId)
             .eq("id", item.id)
+          if (error) {
+            if (isBillingHasSharesDbError(error)) {
+              res.status(409).json({ error: "billing_has_bonus_shares", installmentNo: item.installmentNo, message: BONUS_SHARES_KIND_MESSAGE })
+              return
+            }
+            // 其他錯誤維持舊行為（不中斷整批），但留紀錄。
+            logger.warn({ projectId, billingId: item.id, code: error.code }, "PUT billings: update failed")
+          }
         } else {
           const { error } = await supabaseAdmin.from("project_billings").insert({
             tenant_id: tenantId,

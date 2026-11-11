@@ -48,12 +48,25 @@ export function currentBonusPaidOn(set: BillingShareSet | null, edit: ShareEdit 
   return edit?.bonusPaidOn ?? set?.bonusPaidOn ?? "";
 }
 
-/** "" → null；不是 0 以上的數字 → "invalid"。可含千分位逗號。 */
+/**
+ * 金額最多到「分」（小數 2 位）：同後端 zod（routes/billing-shares.ts amountSchema）的判準——
+ * 數字轉回字串後不是「整數或小數 1～2 位」就不收（0.001、1e-7 都擋）。
+ */
+export function hasAtMostTwoDecimals(n: number): boolean {
+  return /^\d+(\.\d{1,2})?$/.test(String(n));
+}
+
+/** "" → null；不是 0 以上、最多小數 2 位的數字 → "invalid"。可含千分位逗號。 */
 export function parseShareAmount(value: string): number | null | "invalid" {
   const t = value.trim().replace(/,/g, "");
   if (t === "") return null;
   const n = Number(t);
-  return Number.isFinite(n) && n >= 0 ? n : "invalid";
+  return Number.isFinite(n) && n >= 0 && hasAtMostTwoDecimals(n) ? n : "invalid";
+}
+
+/** 金額轉整數「分」（合計逐筆轉分再加，同後端 toCents，避免 0.1+0.2 這類浮點誤差）。 */
+export function shareCents(n: number): number {
+  return Math.round(n * 100);
 }
 
 /** 完全空白的列（沒選人也沒填金額）不算數、不送出。 */
@@ -61,12 +74,13 @@ export function filledShareLines(lines: readonly ShareLine[]): ShareLine[] {
   return lines.filter((l) => l.employeeId.trim() !== "" || l.amount.trim() !== "");
 }
 
-/** 合計（無效金額當 0）。 */
+/** 合計（無效金額當 0）：逐筆轉成「分」再加、最後除回元（同後端 validateBillingShares／loadBillingShares）。 */
 export function shareLinesTotal(lines: readonly ShareLine[]): number {
-  return lines.reduce((sum, l) => {
+  const cents = lines.reduce((sum, l) => {
     const n = parseShareAmount(l.amount);
-    return sum + (typeof n === "number" ? n : 0);
+    return sum + (typeof n === "number" ? shareCents(n) : 0);
   }, 0);
+  return cents / 100;
 }
 
 /** % ＝分潤金額 ÷ 該期金額（小數 2 位，去掉多餘的 0）；該期沒有金額或金額不合法 → ""。 */
