@@ -15,6 +15,8 @@ import { buildApplicationSnapshot, type ApplicationSnapshot } from "../routes/pr
  *       – 專案還沒有任何版本：先把「改之前」的內容存成第 1 版（initial），再把改後內容存成第 2 版（contract_amount_changed）。
  *       – 已有版本：把目前版（最新那一版）的 snapshot 更新成「改之前」的最後內容並記 superseded_at（凍結），
  *         再把改後內容存成第 N+1 版。
+ *     凍結＋取號＋寫入＋稽核摘要在 DB 函式 record_application_version 內一個交易完成（每專案 advisory lock，防併發撞號）。
+ *   • 稽核：此表不掛 audit_all（快照含利潤／毛利率），函式另寫不含快照的摘要。
  *   • 手動「另存新版本」（manual，可填備註）：同樣先凍結目前版，再存一版目前內容。
  *   • 其他欄位修改不建新版：目前版＝即時資料（前端選「目前」時顯示的就是即時申請單）。
  * 舊版只能看（唯讀、可列印），不提供還原。
@@ -151,68 +153,40 @@ export async function getVersion(
   return { ...toMeta(row, names), snapshot: row.snapshot as ApplicationSnapshot }
 }
 
-async function latestVersion(tenantId: string, projectId: string): Promise<{ id: string; version_no: number } | null> {
-  const { data, error } = await supabaseAdmin
-    .from(VERSIONS_TABLE)
-    .select("id, version_no")
-    .eq("tenant_id", tenantId)
-    .eq("project_id", projectId)
-    .order("version_no", { ascending: false })
-    .limit(1)
-  if (error) throw new Error(`latestVersion: ${error.message}`)
-  const row = (data ?? [])[0] as { id: string; version_no: number } | undefined
-  return row ? { id: row.id, version_no: Number(row.version_no) } : null
-}
-
-/** 寫一版（版號＝目前最大＋1；併發撞號 23505 時重算再試，最多 3 次）。 */
-async function insertVersion(
+/**
+ * 建版（唯一入口）：DB 函式 record_application_version（migration 0090）。advisory lock（每專案）＋同一交易內
+ * 判斷有無版本 → 凍結目前版 → 取號 → 寫新版 → 寫不含快照的稽核摘要；任何一步失敗整體回滾。
+ *   contract_amount_changed：沒有版本時函式自己先把 before 存成第 1 版（initial）。
+ *   manual：before＝after＝目前內容。
+ */
+async function recordVersion(
   tenantId: string,
   projectId: string,
   input: {
-    snapshot: ApplicationSnapshot
-    trigger: VersionTrigger
+    trigger: "contract_amount_changed" | "manual"
+    before: ApplicationSnapshot
+    after: ApplicationSnapshot
     amountBefore: number | null
     amountAfter: number | null
     note: string | null
     empId: string | null
   },
-): Promise<{ id: string; versionNo: number }> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const latest = await latestVersion(tenantId, projectId)
-    const versionNo = (latest?.version_no ?? 0) + 1
-    const { data, error } = await supabaseAdmin
-      .from(VERSIONS_TABLE)
-      .insert({
-        tenant_id: tenantId,
-        project_id: projectId,
-        version_no: versionNo,
-        snapshot: input.snapshot,
-        trigger: input.trigger,
-        amount_before: input.amountBefore,
-        amount_after: input.amountAfter,
-        note: input.note,
-        created_by_emp_id: input.empId,
-      })
-      .select("id, version_no")
-      .single()
-    if (!error && data) return { id: (data as { id: string }).id, versionNo }
-    if (error?.code === "23505") continue
-    throw new Error(`insertVersion: ${error?.message ?? "missing row"}`)
-  }
-  throw new Error("insertVersion: version_no conflict (retries exhausted)")
-}
-
-/** 目前版（最新那一版）被取代：snapshot 更新成被取代前的最後內容、記 superseded_at。沒有任何版本回 false。 */
-async function freezeLatest(tenantId: string, projectId: string, snapshot: ApplicationSnapshot): Promise<boolean> {
-  const latest = await latestVersion(tenantId, projectId)
-  if (!latest) return false
-  const { error } = await supabaseAdmin
-    .from(VERSIONS_TABLE)
-    .update({ snapshot, superseded_at: new Date().toISOString() })
-    .eq("tenant_id", tenantId)
-    .eq("id", latest.id)
-  if (error) throw new Error(`freezeLatest: ${error.message}`)
-  return true
+): Promise<number> {
+  const { data, error } = await supabaseAdmin.rpc("record_application_version", {
+    p_tenant_id: tenantId,
+    p_project_id: projectId,
+    p_trigger: input.trigger,
+    p_before_snapshot: input.before,
+    p_after_snapshot: input.after,
+    p_amount_before: input.amountBefore,
+    p_amount_after: input.amountAfter,
+    p_note: input.note,
+    p_actor_emp_id: input.empId,
+  })
+  if (error) throw new Error(`record_application_version: ${error.message}`)
+  const no = Number(data)
+  if (!Number.isInteger(no) || no < 1) throw new Error("record_application_version: bad version_no")
+  return no
 }
 
 export interface VersioningOutcome {
@@ -222,8 +196,8 @@ export interface VersioningOutcome {
 }
 
 /**
- * 包住一次「可能改到合約金額」的寫入：寫入前記下金額與申請單內容，寫入後金額有變就建版。
- * 建版是附帶動作：失敗只記 log（合約已經存了，不能因為版本寫不進去就回錯），回傳 warning。
+ * 包住一次「可能改到合約金額」的寫入：寫入前記下金額與申請單內容，寫入後金額（銷售金額未稅）有變就建版。
+ * 建版是附帶動作：失敗（整筆回滾）只記 log、回傳 warning——合約已經存了，不能因為版本寫不進去就回錯。
  */
 export async function withApplicationVersioning<T>(
   ctx: { tenantId: string; projectId: string; empId: string | null; source: string },
@@ -246,51 +220,40 @@ export async function withApplicationVersioning<T>(
     if (after === before.amount) return { result, versioning: { versionNo: null, warning: null } }
     const afterSnapshot = await buildApplicationSnapshot(ctx.tenantId, ctx.projectId)
     if (!afterSnapshot) return { result, versioning: { versionNo: null, warning: null } }
-    const hadVersion = await freezeLatest(ctx.tenantId, ctx.projectId, before.snapshot)
-    if (!hadVersion) {
-      await insertVersion(ctx.tenantId, ctx.projectId, {
-        snapshot: before.snapshot,
-        trigger: "initial",
-        amountBefore: null,
-        amountAfter: before.amount,
-        note: null,
-        empId: ctx.empId,
-      })
-      // 第 1 版（改之前）一建好就被第 2 版取代。
-      await freezeLatest(ctx.tenantId, ctx.projectId, before.snapshot)
-    }
-    const created = await insertVersion(ctx.tenantId, ctx.projectId, {
-      snapshot: afterSnapshot,
+    const versionNo = await recordVersion(ctx.tenantId, ctx.projectId, {
       trigger: "contract_amount_changed",
+      before: before.snapshot,
+      after: afterSnapshot,
       amountBefore: before.amount,
       amountAfter: after,
       note: null,
       empId: ctx.empId,
     })
-    return { result, versioning: { versionNo: created.versionNo, warning: null } }
+    return { result, versioning: { versionNo, warning: null } }
   } catch (err) {
     logger.error({ err, source: ctx.source, projectId: ctx.projectId }, "application version: create failed")
     return { result, versioning: { versionNo: null, warning: "application_version_failed" } }
   }
 }
 
-/** 手動另存新版本：凍結目前版，再存一版目前內容。表未套用回 null；專案不存在回 "not_found"。 */
+/** 手動另存新版本：凍結目前版，再存一版目前內容（同一個 DB 函式、同一交易）。表未套用回 null；專案不存在回 "not_found"。 */
 export async function saveManualVersion(
   tenantId: string,
   projectId: string,
   empId: string | null,
   note: string | null,
-): Promise<{ id: string; versionNo: number } | null | "not_found"> {
+): Promise<{ versionNo: number } | null | "not_found"> {
   if (!(await versionsAvailable())) return null
   const snapshot = await buildApplicationSnapshot(tenantId, projectId)
   if (!snapshot) return "not_found"
-  await freezeLatest(tenantId, projectId, snapshot)
-  return insertVersion(tenantId, projectId, {
-    snapshot,
+  const versionNo = await recordVersion(tenantId, projectId, {
     trigger: "manual",
+    before: snapshot,
+    after: snapshot,
     amountBefore: null,
     amountAfter: snapshot.money?.amountUntaxed ?? null,
     note,
     empId,
   })
+  return { versionNo }
 }

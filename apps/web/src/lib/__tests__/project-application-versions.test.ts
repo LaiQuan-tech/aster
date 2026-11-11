@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest"
 import {
   currentVersionNo,
   oldVersionBanner,
+  printSourceFor,
   snapshotSheetProps,
   versionDate,
   versionOptions,
@@ -66,5 +67,19 @@ describe("快照 → 申請單 props", () => {
     expect(p.latestDocument?.docType).toBe("contract")
     expect(p.money?.amountUntaxed).toBe(1600000)
     expect(p.disciplines).toContain("電機")
+  })
+})
+
+describe("列印頁：印即時資料還是快照", () => {
+  const list = { versions: [meta({ versionNo: 3 }), meta({ versionNo: 2 }), meta({ versionNo: 1 })] }
+  it("沒帶版號、帶目前版號 → 即時資料；舊版 → 快照", () => {
+    expect(printSourceFor(null, list)).toEqual({ kind: "live" })
+    expect(printSourceFor(3, list)).toEqual({ kind: "live" })
+    expect(printSourceFor(2, list)).toEqual({ kind: "snapshot", versionNo: 2 })
+    expect(printSourceFor(9, list)).toEqual({ kind: "snapshot", versionNo: 9 })
+  })
+  it("版本功能未套用 → 即時資料；還沒有版本時第 1 版＝即時資料", () => {
+    expect(printSourceFor(2, null)).toEqual({ kind: "live" })
+    expect(printSourceFor(1, { versions: [] })).toEqual({ kind: "live" })
   })
 })

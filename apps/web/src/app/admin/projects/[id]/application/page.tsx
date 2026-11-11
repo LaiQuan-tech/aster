@@ -16,7 +16,7 @@ import {
 } from "@/lib/projects-ext-api";
 import { PRINT_BLOCKS, type PrintBlockKey } from "@/lib/project-application-sheet";
 import { ApplicationSheet } from "../_sections/ApplicationSheet";
-import { currentVersionNo, oldVersionBanner, versionNoLabel } from "@/lib/project-application-versions";
+import { currentVersionNo, oldVersionBanner, printSourceFor, versionNoLabel } from "@/lib/project-application-versions";
 
 /*
  * 列印區塊（B6）的 key／標籤由 lib/project-application-sheet.ts 提供（專案明細頁的申請單表格共用同一份）。
@@ -178,8 +178,8 @@ export default function ProjectApplicationPrintPage() {
       .catch(() => {
         if (active) setVendors([]);
       });
-    if (versionNo !== null) {
-      getApplicationVersion(projectId, versionNo)
+    const loadSnapshot = (no: number) =>
+      getApplicationVersion(projectId, no)
         .then((res) => {
           if (!active) return;
           setData(res.version.snapshot);
@@ -187,7 +187,7 @@ export default function ProjectApplicationPrintPage() {
           setShowProfit(res.access.profit !== false);
           setCanFinance(true);
           setVersionLabel(versionNoLabel(res.version.versionNo));
-          setOldVersionNote(res.version.supersededAt ? oldVersionBanner(res.version) : null);
+          setOldVersionNote(oldVersionBanner(res.version));
         })
         .catch((err) => {
           if (active) setError(err instanceof Error ? err.message : "載入失敗");
@@ -195,35 +195,39 @@ export default function ProjectApplicationPrintPage() {
         .finally(() => {
           if (active) setLoading(false);
         });
-      return () => {
-        active = false;
-      };
-    }
-    getContracts(projectId)
-      .then((res) => {
-        if (active) setContracts(res.contracts);
-      })
-      .catch(() => {
-        if (active) setContracts([]);
-      });
+    const loadLive = () => {
+      getContracts(projectId)
+        .then((res) => {
+          if (active) setContracts(res.contracts);
+        })
+        .catch(() => {
+          if (active) setContracts([]);
+        });
+      getProjectApplication(projectId)
+        .then((res) => {
+          if (active) {
+            setData(res.application);
+            setShowProfit(res.access.profit !== false);
+            setCanFinance(res.access.finance);
+          }
+        })
+        .catch((err) => {
+          if (active) setError(err instanceof Error ? err.message : "載入失敗");
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+    };
+    // 先拿版本清單：?version=目前版號（或沒帶）→ 即時資料（與申請單目前畫面一致）；只有舊版才印快照＋舊版提示。
     listApplicationVersions(projectId)
-      .then((res) => {
-        if (active && res.available) setVersionLabel(versionNoLabel(currentVersionNo(res.versions)));
-      })
-      .catch(() => {});
-    getProjectApplication(projectId)
-      .then((res) => {
-        if (active) {
-          setData(res.application);
-          setShowProfit(res.access.profit !== false);
-          setCanFinance(res.access.finance);
-        }
-      })
-      .catch((err) => {
-        if (active) setError(err instanceof Error ? err.message : "載入失敗");
-      })
-      .finally(() => {
-        if (active) setLoading(false);
+      .catch(() => null)
+      .then((list) => {
+        if (!active) return;
+        const available = list?.available ? list : null;
+        if (available) setVersionLabel(versionNoLabel(currentVersionNo(available.versions)));
+        const source = printSourceFor(versionNo, available);
+        if (source.kind === "snapshot") void loadSnapshot(source.versionNo);
+        else loadLive();
       });
     return () => {
       active = false;

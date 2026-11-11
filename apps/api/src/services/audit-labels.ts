@@ -250,7 +250,6 @@ export const AUDIT_FIELD_LABELS: Record<string, string> = {
   prev_pension_wage: "原勞退月提繳工資",
   // 專案申請單版本（2026-11-10）
   version_no: "版號",
-  snapshot: "申請單內容快照",
   amount_before: "原合約金額（未稅）",
   amount_after: "新合約金額（未稅）",
   superseded_at: "被取代時間",

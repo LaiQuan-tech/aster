@@ -10,6 +10,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
  *   • 各入口：PUT main-contract、POST／PATCH／DELETE contracts
  *   • 手動另存（manual，可填備註）；權限（無 finance 403）、跨租戶 404、利潤依 profit 權限遮掉
  *   • migration 未套用：合約照存不建版、列表 available=false、單版 404、手動另存 409（不 500）
+ *   • 建版走 DB 函式 record_application_version（這裡用 JS 照同一套邏輯模擬；advisory lock／交易／權限在
+ *     docs/驗證-2026-11-10-申請單版本.sql 以 pglite 實測）；併發兩個改金額不撞號；建版失敗不擋合約存檔
  * ⚠️ 識別碼、名稱、金額都是明顯的假值。
  */
 
@@ -70,6 +72,35 @@ const mainContract = (amount: string): Row => ({
 const versions = () => [...(fake.db[TABLE] ?? [])].sort((a, b) => a.version_no - b.version_no)
 const putMain = (amount: number, token = T.hr) => as(token).put(`/projects/${PROJECT}/main-contract`).send({ amount })
 
+/** 照 migration 0090 record_application_version 的邏輯模擬（同步執行＝等同 advisory lock 排隊＋單一交易）。 */
+function registerRecordVersionRpc() {
+  fake.rpcHandlers.record_application_version = (a: Row) => {
+    const now = new Date().toISOString()
+    if (!["contract_amount_changed", "manual"].includes(a.p_trigger)) return { data: null, error: { code: "22023", message: "invalid trigger" } }
+    if (!fake.db.projects.some((p: Row) => p.id === a.p_project_id && p.tenant_id === a.p_tenant_id))
+      return { data: null, error: { code: "P0002", message: "project not found" } }
+    const rows = fake.db[TABLE].filter((r: Row) => r.tenant_id === a.p_tenant_id && r.project_id === a.p_project_id)
+    const latest = rows.sort((x: Row, y: Row) => y.version_no - x.version_no)[0]
+    const base = { tenant_id: a.p_tenant_id, project_id: a.p_project_id, note: null, created_by_emp_id: a.p_actor_emp_id, created_at: now, superseded_at: null }
+    let no: number
+    if (!latest) {
+      if (a.p_trigger === "contract_amount_changed") {
+        fake.db[TABLE].push({ ...base, id: `v-${fake.db[TABLE].length + 1}`, version_no: 1, snapshot: a.p_before_snapshot, trigger: "initial", amount_before: null, amount_after: a.p_amount_before, superseded_at: now })
+        no = 2
+      } else no = 1
+    } else {
+      latest.snapshot = a.p_before_snapshot
+      latest.superseded_at = now
+      no = latest.version_no + 1
+    }
+    fake.db[TABLE].push({
+      ...base, id: `v-${fake.db[TABLE].length + 1}`, version_no: no, snapshot: a.p_after_snapshot, trigger: a.p_trigger,
+      amount_before: a.p_trigger === "manual" ? null : a.p_amount_before, amount_after: a.p_amount_after, note: a.p_note,
+    })
+    return { data: no, error: null }
+  }
+}
+
 function withMissingTable(fn: () => Promise<void>) {
   const realFrom = fake.from
   fake.from = ((t: string) => {
@@ -118,6 +149,7 @@ beforeEach(() => {
   fake.db.companies = []
   fake.db[TABLE] = []
   fake.uniques[TABLE] = [["project_id", "version_no"]]
+  registerRecordVersionRpc()
 })
 
 describe("合約金額變動 → 建版（後端同一流程）", () => {
@@ -162,12 +194,56 @@ describe("合約金額變動 → 建版（後端同一流程）", () => {
     expect(v3).toMatchObject({ trigger: "contract_amount_changed", amount_before: 1_600_000, amount_after: 1_700_000 })
   })
 
+  it("PATCH 改簽訂日讓「最新報價單」換人（沒有合約時的分母）→ 也建版", async () => {
+    fake.db.contracts = [
+      { ...mainContract("0"), id: "eeeeeeee-0000-4000-8000-0000000002a1", doc_type: "quotation", is_primary: false, title: "報價 A", amount: "1000000", signed_on: "2026-01-10" },
+      { ...mainContract("0"), id: "eeeeeeee-0000-4000-8000-0000000002a2", doc_type: "quotation", is_primary: false, title: "報價 B", amount: "1200000", signed_on: "2026-01-05" },
+    ]
+    // 目前最新報價＝A（1,000,000）；把 B 的簽訂日改晚 → 最新變 B（1,200,000）
+    const res = await as(T.hr).patch(`/contracts/eeeeeeee-0000-4000-8000-0000000002a2`).send({ signedOn: "2026-02-01" })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.applicationVersion.versionNo).toBe(2)
+    expect(versions().map((v) => [v.version_no, v.amount_before, v.amount_after])).toEqual([
+      [1, null, 1_000_000],
+      [2, 1_000_000, 1_200_000],
+    ])
+  })
+
+  it("併發：兩個改金額同時送 → 版號不重複、連號、只有一個 initial 與一個目前版", async () => {
+    const [a, b] = await Promise.all([putMain(1_600_000), putMain(1_700_000)])
+    expect(a.status).toBe(200)
+    expect(b.status).toBe(200)
+    const nos = versions().map((v) => v.version_no)
+    expect(new Set(nos).size).toBe(nos.length)
+    expect(nos[0]).toBe(1)
+    expect(nos.length).toBeGreaterThanOrEqual(2)
+    expect(nos).toEqual(Array.from({ length: nos.length }, (_, i) => i + 1))
+    expect(versions().filter((v) => v.trigger === "initial")).toHaveLength(1)
+    expect(versions().filter((v) => v.superseded_at == null)).toHaveLength(1)
+  })
+
+  it("建版失敗（DB 函式整筆回滾）不擋合約存檔：200＋warning、合約金額已改、沒有半套版本", async () => {
+    fake.rpcHandlers.record_application_version = () => ({ data: null, error: { code: "XX000", message: "boom" } })
+    const res = await putMain(1_600_000)
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.applicationVersion).toEqual({ versionNo: null, warning: "application_version_failed" })
+    expect(fake.db.contracts.find((c: Row) => c.id === MAIN)?.amount).toBe(1_600_000)
+    expect(versions()).toHaveLength(0)
+  })
+
+  it("API 不寫含快照的稽核（此表不掛 audit_all，摘要由 DB 函式寫）", async () => {
+    await putMain(1_600_000)
+    const leaked = fake.writes.filter((w) => w.table === "audit_logs" && JSON.stringify(w.payload).includes("snapshot"))
+    expect(leaked).toEqual([])
+    expect(fake.writes.filter((w) => w.table === TABLE)).toEqual([]) // 版本表只經 DB 函式寫
+  })
+
   it("金額沒變的存檔、非金額欄位（名稱／貼花）不建版", async () => {
     expect((await putMain(1_428_571)).status).toBe(200)
     expect(versions()).toHaveLength(0)
     const p = await as(T.hr).patch(`/contracts/${MAIN}`).send({ stampDutyNote: "已貼" })
     expect(p.status, JSON.stringify(p.body)).toBe(200)
-    expect(p.body.applicationVersion).toBeNull()
+    expect(p.body.applicationVersion).toEqual({ versionNo: null, warning: null })
     expect(versions()).toHaveLength(0)
   })
 

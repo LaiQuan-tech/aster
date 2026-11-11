@@ -1,5 +1,5 @@
 import { formatMoney } from "./money";
-import { engineerDisciplinesOf, type ApplicationData, type ApplicationVersionMeta, type ProjectDetail } from "./projects-ext-api";
+import { engineerDisciplinesOf, type ApplicationData, type ApplicationVersionList, type ApplicationVersionMeta, type ProjectDetail } from "./projects-ext-api";
 
 /**
  * 專案申請單版本（2026-11-10）——純函式（畫面文字、快照轉申請單元件的 props）。
@@ -71,4 +71,19 @@ export function snapshotSheetProps(snapshot: ApplicationData) {
     disciplines: engineerDisciplinesOf(snapshot.settings?.disciplines),
     clients: snapshot.client ? [snapshot.client] : [],
   };
+}
+
+/**
+ * 列印頁要印哪一份：?version=N 是舊版（版本清單裡有、且不是目前版）→ 快照；
+ * 沒帶、帶的是目前版號、版本功能未套用 → 即時資料（與申請單目前畫面一致）。
+ * 清單裡找不到的版號照樣走快照（讓 API 回 404 顯示錯誤，不默默印成目前內容）。
+ */
+export function printSourceFor(
+  requested: number | null,
+  list: Pick<ApplicationVersionList, "versions"> | null,
+): { kind: "live" } | { kind: "snapshot"; versionNo: number } {
+  if (requested === null || !list) return { kind: "live" };
+  if (list.versions.length === 0) return requested === 1 ? { kind: "live" } : { kind: "snapshot", versionNo: requested };
+  if (requested === currentVersionNo(list.versions)) return { kind: "live" };
+  return { kind: "snapshot", versionNo: requested };
 }

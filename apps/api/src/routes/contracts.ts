@@ -491,13 +491,12 @@ contractsRouter.patch(
         if (amountTouched) await recomputeBillings(tenantId, row.project_id)
         return { data }
       }
-      // 2026-11-10 申請單版本：改金額／我方角色讓銷售金額（未稅）變了 → 同一流程內建版。
-      const { result: written, versioning } = amountTouched
-        ? await withApplicationVersioning(
-            { tenantId, projectId: row.project_id, empId: scope.self.id, source: "PATCH /contracts/:id" },
-            write,
-          )
-        : { result: await write(), versioning: null }
+      // 2026-11-10 申請單版本：每次 PATCH 都比對前後的銷售金額（未稅）——不只改金額／我方角色，
+      // 改簽訂日也可能換掉「最新報價單」（沒有合約時分母取最新報價單）——有變就同一流程內建版。
+      const { result: written, versioning } = await withApplicationVersioning(
+        { tenantId, projectId: row.project_id, empId: scope.self.id, source: "PATCH /contracts/:id" },
+        write,
+      )
       if ("error" in written) {
         next(written.error)
         return
