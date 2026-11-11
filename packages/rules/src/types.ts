@@ -330,6 +330,9 @@ export interface PayslipBreakdown {
    * 只有與 hourlyWage 不同時才有;請假／遲到早退扣款仍用 hourlyWage。
    */
   overtimeHourlyBase?: number;
+  /** overtimeHourlyBase 實際含固定津貼／全勤獎金 (供顯示文字區分來源;只在 overtimeHourlyBase 出現時帶)。 */
+  overtimeBaseIncludesAllowances?: boolean;
+  overtimeBaseIncludesAttendanceBonus?: boolean;
   /** 加班費現金總額 (compTime 的部分不計入此)。 */
   overtimePay: number;
   /** 夜間加給總額。 */

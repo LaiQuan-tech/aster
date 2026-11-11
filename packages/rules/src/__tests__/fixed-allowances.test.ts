@@ -351,19 +351,14 @@ describe("雇主勞退提撥（公司負擔）", () => {
 
 describe("回歸：沒有固定津貼的員工與改動前完全一致", () => {
   const EMPLOYER_KEYS = ["employerPension", "employerPensionRate", "pensionWage", "pensionWageSource"];
-  // 快照凍結於全勤計入加班基數 (2026-11-11) 之前 → 這裡明確關掉該開關,只驗固定津貼的回歸。
-  const legacyRules = (r: unknown) => {
-    const o = r as { overtime?: Record<string, unknown> };
-    return parseRuleConfig({ ...o, overtime: { ...o.overtime, includeAttendanceBonus: false } });
-  };
   for (const s of REGRESSION_SCENARIOS) {
     it(s.name, () => {
-      const now = computePayslip(s.days, s.salary, legacyRules(s.rules), s.expenses, s.allowances, s.adjustments) as unknown as Record<string, unknown>;
+      const now = computePayslip(s.days, s.salary, parseRuleConfig(s.rules), s.expenses, s.allowances, s.adjustments) as unknown as Record<string, unknown>;
       const stripped = Object.fromEntries(Object.entries(now).filter(([k]) => !EMPLOYER_KEYS.includes(k)));
       expect(stripped).toEqual((preAllowances as Record<string, unknown>)[s.name]);
       expect(Object.keys(now).some((k) => k.startsWith("fixedAllowances"))).toBe(false);
       // 第 7 個參數給空陣列也一樣
-      const withEmpty = computePayslip(s.days, s.salary, legacyRules(s.rules), s.expenses, s.allowances, s.adjustments, { fixedAllowances: [] });
+      const withEmpty = computePayslip(s.days, s.salary, parseRuleConfig(s.rules), s.expenses, s.allowances, s.adjustments, { fixedAllowances: [] });
       expect(withEmpty).toEqual(now);
     });
   }

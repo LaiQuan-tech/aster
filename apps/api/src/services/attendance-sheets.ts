@@ -1917,7 +1917,13 @@ function toMoney(breakdown: ReturnType<typeof computePayslip>, rules: RuleConfig
     base: breakdown.base,
     hourlyWage: breakdown.hourlyWage,
     // 加班類給付的時薪基數（月薪制含計入的固定津貼；2026-11-08）。沒有＝同 hourlyWage。
-    ...(breakdown.overtimeHourlyBase !== undefined ? { overtimeHourlyBase: breakdown.overtimeHourlyBase } : {}),
+    ...(breakdown.overtimeHourlyBase !== undefined
+      ? {
+          overtimeHourlyBase: breakdown.overtimeHourlyBase,
+          ...(breakdown.overtimeBaseIncludesAllowances !== undefined ? { overtimeBaseIncludesAllowances: breakdown.overtimeBaseIncludesAllowances } : {}),
+          ...(breakdown.overtimeBaseIncludesAttendanceBonus !== undefined ? { overtimeBaseIncludesAttendanceBonus: breakdown.overtimeBaseIncludesAttendanceBonus } : {}),
+        }
+      : {}),
     otPay: breakdown.overtimePay,
     otPayByTier: otPayByTierFromSegments(breakdown.overtimeSegments, rules),
     nightPay: breakdown.nightPay,

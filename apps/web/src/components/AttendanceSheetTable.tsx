@@ -2,7 +2,7 @@
 
 import { SHEET_MONEY_STRONG, sheetMoneySections } from "@/lib/attendance-sheet-money";
 import { formatMoney } from "@/lib/money";
-import { hourlyRateText } from "@/lib/fixed-allowances-api";
+import { hourlyRateText, overtimeBaseNote } from "@/lib/fixed-allowances-api";
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ess-ui";
 import { fmtHm } from "@/lib/ess-format";
@@ -740,7 +740,7 @@ function MoneyCard({ money: m, tierLabels }: { money: SheetMoney; tierLabels: [s
       <p className="mb-3 text-sm font-semibold text-gray-700">薪資試算</p>
       <p className="mb-3 text-xs text-gray-500">
         基準時薪 {hourlyRateText(m.hourlyWage)}
-        {m.overtimeHourlyBase !== undefined && <>　加班時薪基數 {hourlyRateText(m.overtimeHourlyBase)}（含固定津貼）</>}
+        {m.overtimeHourlyBase !== undefined && <>　加班時薪基數 {hourlyRateText(m.overtimeHourlyBase)}{overtimeBaseNote(m)}</>}
       </p>
       <div className="grid gap-4 text-sm md:grid-cols-3">
         {sections.map((section) => (

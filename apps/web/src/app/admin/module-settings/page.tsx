@@ -133,7 +133,7 @@ interface OvertimeParamsForm {
   fixedHolidayPay: FixedHolidayPay;
   /* 2026-11 加班事前核准制：overtime.requirePreApproval（省略＝false）。 */
   requirePreApproval: boolean;
-  /* 2026-11-11 全勤獎金計入加班費基數：overtime.includeAttendanceBonus（省略＝true）。 */
+  /* 2026-11-11 全勤獎金計入加班費基數：overtime.includeAttendanceBonus（省略＝false，未設定顯示關閉）。 */
   includeAttendanceBonus: boolean;
 }
 
@@ -160,7 +160,7 @@ const DEFAULT_OT_FORM: OvertimeParamsForm = {
   regularLeavePay: "max_rest_day",
   fixedHolidayPay: "statutory",
   requirePreApproval: false,
-  includeAttendanceBonus: true,
+  includeAttendanceBonus: false,
 };
 
 function tiersToForm(tiers: OvertimeTier[] | undefined): [TierFormRow, TierFormRow, TierFormRow] {
@@ -215,7 +215,7 @@ function hydrateOvertimeForm(config: RuleConfig): OvertimeParamsForm {
     fixedHolidayPay: ot.fixedHolidayPay ?? "statutory",
     requirePreApproval: ot.requirePreApproval === true,
     // 與 @hr/rules resolveOvertimeIncludeAttendanceBonus 同一組預設（省略＝true）。
-    includeAttendanceBonus: ot.includeAttendanceBonus !== false,
+    includeAttendanceBonus: ot.includeAttendanceBonus === true,
   };
 }
 

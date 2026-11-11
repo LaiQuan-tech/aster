@@ -42,7 +42,7 @@
  * ÷ hourlyWageDivisor);員工明示了 hourlyWage 的月薪制 = round4(明示時薪 + 該津貼合計 ÷ divisor)。
  * 請假扣款、遲到早退扣款維持原本的 hourlyWage (不含津貼);時薪制／日薪制不攤入津貼。沒有計入加班基數的津貼
  * → 與原本完全相同,且不出現 overtimeHourlyBase 欄位。
- * 全勤獎金計入加班基數(2026-11-11 業主決定;規則 overtime.includeAttendanceBonus,省略 = true):月薪制再加上
+ * 全勤獎金計入加班基數(2026-11-11 業主決定;規則 overtime.includeAttendanceBonus,省略 = false,需明確設 true):月薪制再加上
  * 當月實際發放的全勤獎金淨額 (基準 − 遲到扣款) → round4((本薪 + 津貼 + 全勤淨額) ÷ divisor)。全勤只看遲到分鐘,
  * 不依賴加班費,引擎先算全勤再算加班/夜間,不會循環。淨額 0 (未獲全勤或未設定) → 不加,結果與原本相同。
  *
@@ -189,7 +189,7 @@ export function resolvePensionWage(
  *   • 沒明示時薪 → round4((本薪 + 津貼) ÷ divisor) (與 resolveHourlyWage 同一個捨入)
  *   • 明示時薪   → round4(明示時薪 + 津貼 ÷ divisor)
  * 時薪制／日薪制一律回 hourlyWage (津貼不攤入)。
- * attendanceBonus = 當月實發全勤獎金淨額;規則 overtime.includeAttendanceBonus (預設 true) 開啟且 > 0 時併入津貼合計。
+ * attendanceBonus = 當月實發全勤獎金淨額;規則 overtime.includeAttendanceBonus (預設 false,設 true) 開啟且 > 0 時併入津貼合計。
  */
 export function resolveOvertimeHourlyBase(
   salary: SalaryStructure,
@@ -425,6 +425,15 @@ export function computePayslip(
     extras.fixedAllowances ?? [],
     attendanceBonus,
   );
+
+  // 顯示用:加班時薪基數實際含哪些來源 (只有 overtimeHourlyBase 出現時才帶)。
+  const otIncludesAllowances =
+    method === "monthly" && overtimeBaseAllowanceTotal(extras.fixedAllowances ?? []) > 0;
+  const otIncludesAttendanceBonus =
+    method === "monthly" &&
+    resolveOvertimeIncludeAttendanceBonus(rules) &&
+    Number.isFinite(attendanceBonus) &&
+    attendanceBonus > 0;
 
   const isHourly = method === "hourly";
 
@@ -685,7 +694,13 @@ export function computePayslip(
     regularPay: base,
     hourlyWage,
     // 只有月薪制且有計入加班基數的固定津貼時才帶（加班費／夜間加給用這個時薪；沒有就與以前相同）。
-    ...(overtimeHourly !== hourlyWage ? { overtimeHourlyBase: overtimeHourly } : {}),
+    ...(overtimeHourly !== hourlyWage
+      ? {
+          overtimeHourlyBase: overtimeHourly,
+          overtimeBaseIncludesAllowances: otIncludesAllowances,
+          overtimeBaseIncludesAttendanceBonus: otIncludesAttendanceBonus,
+        }
+      : {}),
     overtimePay,
     nightPay,
     attendanceBonus,

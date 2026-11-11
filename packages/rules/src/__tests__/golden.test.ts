@@ -314,16 +314,13 @@ describe("payroll-engine 組合與稽核", () => {
       },
     ];
     const slip = computePayslip(days, salary, rules);
-    // base 40000;全勤累計遲到 3 分 → 扣 0 → 全勤 2000。
-    // 加班時薪基數含全勤淨額 (2026-11-11,預設開):200 + 2000÷240 = 208.3333
-    // OT 2h×208.3333×1.34 = 558.33;夜間 1h×208.3333×2 = 416.67。
+    // base 40000;OT 2h×200×1.34 = 536;夜間 1h×200×2 = 400;全勤累計遲到 3 分 → 扣 0 → 全勤 2000。
     expect(slip.base).toBe(40000);
-    expect(slip.overtimeHourlyBase).toBe(208.3333);
-    expect(slip.overtimePay).toBe(558.33);
-    expect(slip.nightPay).toBe(416.67);
+    expect(slip.overtimePay).toBe(536);
+    expect(slip.nightPay).toBe(400);
     expect(slip.attendanceBonus).toBe(2000);
     expect(slip.attendanceDeduction).toBe(0);
-    expect(slip.gross).toBe(round2(40000 + 558.33 + 416.67 + 2000));
+    expect(slip.gross).toBe(40000 + 536 + 400 + 2000);
 
     // lines 必須逐項加總回 gross (可稽核)。
     const sum = slip.lines.reduce((acc, l) => acc + l.amount, 0);
@@ -1339,7 +1336,3 @@ describe("規則七 午休 12:00–13:00 (做滿 8 小時不含午休)", () => {
     expect(day.workedMinutes).toBe(300);
   });
 });
-
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
-}

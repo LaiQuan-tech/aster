@@ -5,11 +5,12 @@ import type { AttendanceDay, FixedAllowanceInput, SalaryStructure } from "../typ
 
 /**
  * 全勤獎金計入加班費基數（2026-11-11 業主決定）。⚠️ 金額都是假資料。
- *   月薪制加班時薪 = round4((本薪 + 計入的固定津貼 + 當月實發全勤淨額) ÷ 240)；規則 overtime.includeAttendanceBonus（省略 = true）。
+ *   月薪制加班時薪 = round4((本薪 + 計入的固定津貼 + 當月實發全勤淨額) ÷ 240)；規則 overtime.includeAttendanceBonus（省略 = false，需明確設 true 才開）。
  *   不變：請假扣款、遲到早退扣款的時薪；時薪制；全勤淨額 0 或未設定 → 與以前完全相同。
  */
 
-const makeRules = (opts: { bonus?: number; include?: boolean } = {}) =>
+/** include 預設明確設 true（驗開啟行為）；傳 "omit" = 不寫該欄位（驗預設關閉）。 */
+const makeRules = (opts: { bonus?: number; include?: boolean | "omit" } = {}) =>
   parseRuleConfig({
     attendance_bonus: {
       base: opts.bonus ?? 2000,
@@ -24,7 +25,7 @@ const makeRules = (opts: { bonus?: number; include?: boolean } = {}) =>
         { when: "weekday_ot", multiplier: 1.34 },
         { when: "rest_day", multiplier: 1.34, tiers: [{ uptoHours: 2, multiplier: 1.34 }, { multiplier: 1.67 }] },
       ],
-      ...(opts.include === undefined ? {} : { includeAttendanceBonus: opts.include }),
+      ...(opts.include === "omit" ? {} : { includeAttendanceBonus: opts.include ?? true }),
     },
     night: { window: { from: "22:00", to: "06:00" }, multiplier: 0.2 },
     payroll: { method: "monthly", dailyRegularHours: 8, hourlyWageDivisor: 240 },
@@ -49,7 +50,8 @@ const otPay = (h: number) => Math.round(h * 8.7 * 100) / 100;
 const nightPay = (h: number) => Math.round(h * 0.2 * 100) / 100;
 
 describe("規則參數 overtime.includeAttendanceBonus", () => {
-  it("省略 = true；明確 false = 關", () => {
+  it("省略 = false（不改變舊月份金額）；明確 true = 開；明確 false = 關", () => {
+    expect(resolveOvertimeIncludeAttendanceBonus(makeRules({ include: "omit" }))).toBe(false);
     expect(resolveOvertimeIncludeAttendanceBonus(makeRules())).toBe(true);
     expect(resolveOvertimeIncludeAttendanceBonus(makeRules({ include: true }))).toBe(true);
     expect(resolveOvertimeIncludeAttendanceBonus(makeRules({ include: false }))).toBe(false);
@@ -102,6 +104,25 @@ describe("月薪制：加班時薪基數含當月實發全勤淨額", () => {
     const off = computePayslip(days(0), monthly, makeRules({ bonus: 0, include: false }));
     expect(on).toEqual(off);
     expect("overtimeHourlyBase" in on).toBe(false);
+  });
+
+  it("規則沒設定該欄位 → 不計入，與改動前完全相同", () => {
+    const omitted = computePayslip(days(0), monthly, makeRules({ include: "omit" }));
+    const off = computePayslip(days(0), monthly, makeRules({ include: false }));
+    expect(omitted).toEqual(off);
+    expect("overtimeHourlyBase" in omitted).toBe(false);
+  });
+
+  it("來源旗標：只有全勤 / 只有津貼 / 兩者", () => {
+    const onlyBonus = computePayslip(days(0), monthly, makeRules());
+    expect(onlyBonus.overtimeBaseIncludesAttendanceBonus).toBe(true);
+    expect(onlyBonus.overtimeBaseIncludesAllowances).toBe(false);
+    const onlyAllow = computePayslip(days(0), monthly, makeRules({ include: false }), 0, 0, [], { fixedAllowances: [fa()], period: "2030-03" });
+    expect(onlyAllow.overtimeBaseIncludesAllowances).toBe(true);
+    expect(onlyAllow.overtimeBaseIncludesAttendanceBonus).toBe(false);
+    const both = computePayslip(days(0), monthly, makeRules(), 0, 0, [], { fixedAllowances: [fa()], period: "2030-03" });
+    expect(both.overtimeBaseIncludesAllowances).toBe(true);
+    expect(both.overtimeBaseIncludesAttendanceBonus).toBe(true);
   });
 
   it("與計入的固定津貼併計：(40,000＋3,000＋2,000)÷240 = 187.5", () => {

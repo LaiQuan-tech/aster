@@ -170,6 +170,8 @@ export interface SheetMoney {
   fixedAllowancesTaxFree?: number
   /** 加班類給付的時薪基數（月薪制含計入加班基數的固定津貼）；與 hourlyWage 相同時沒有。 */
   overtimeHourlyBase?: number
+  overtimeBaseIncludesAllowances?: boolean
+  overtimeBaseIncludesAttendanceBonus?: boolean
 }
 
 /** Full sheet view returned by GET /attendance-sheets/:id (and similar). */

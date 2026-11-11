@@ -242,6 +242,8 @@ export interface BreakdownAllowanceFields {
   }>;
   /** 加班類給付的時薪基數（月薪制含計入加班基數的固定津貼）。 */
   overtimeHourlyBase?: number;
+  overtimeBaseIncludesAllowances?: boolean;
+  overtimeBaseIncludesAttendanceBonus?: boolean;
   hourlyWage?: number;
   fixedAllowancesTotal?: number;
   fixedAllowancesTaxable?: number;
@@ -370,4 +372,15 @@ export function parseEmployerRatePct(input: string): { ok: true; rate: number | 
   if (pct < 6) return { ok: false, error: "雇主提撥率不得低於 6%（勞工退休金條例 §14）" };
   if (pct > 100) return { ok: false, error: "雇主提撥率不得超過 100%" };
   return { ok: true, rate: Math.round(pct * 100) / 10000 };
+}
+
+/** 加班時薪基數括號說明：依實際含固定津貼／全勤獎金顯示；舊資料沒有旗標＝視為含固定津貼。 */
+export function overtimeBaseNote(b: { overtimeBaseIncludesAllowances?: boolean; overtimeBaseIncludesAttendanceBonus?: boolean }): string {
+  const a = b.overtimeBaseIncludesAllowances
+  const g = b.overtimeBaseIncludesAttendanceBonus
+  if (a === undefined && g === undefined) return "（含固定津貼）"
+  if (a && g) return "（含固定津貼與全勤獎金）"
+  if (g) return "（含全勤獎金）"
+  if (a) return "（含固定津貼）"
+  return ""
 }

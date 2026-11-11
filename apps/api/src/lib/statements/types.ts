@@ -33,6 +33,8 @@ export interface StatementMoney {
   hourlyWage: number
   /** 加班類給付的時薪基數（2026-11-08；月薪制含計入的固定津貼）；沒有＝同 hourlyWage。 */
   overtimeHourlyBase?: number
+  overtimeBaseIncludesAllowances?: boolean
+  overtimeBaseIncludesAttendanceBonus?: boolean
   overtimePay: number
   nightPay: number
   /** 全勤獎金實發（基準−扣款）。 */

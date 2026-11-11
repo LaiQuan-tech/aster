@@ -180,6 +180,8 @@ export interface SheetMoney {
   fixedAllowancesTaxFree?: number;
   /** 加班類給付的時薪基數（月薪制含計入加班基數的固定津貼；2026-11-08）；與 hourlyWage 相同時沒有。 */
   overtimeHourlyBase?: number;
+  overtimeBaseIncludesAllowances?: boolean;
+  overtimeBaseIncludesAttendanceBonus?: boolean;
 }
 
 /** GET /attendance-sheets/:id、/my/attendance-sheet 回傳的完整月表。 */

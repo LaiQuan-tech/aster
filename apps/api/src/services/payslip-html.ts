@@ -34,11 +34,24 @@ export interface PayslipAdjustmentLike {
   treatment?: "earning" | "deduction" | "non_taxable"
 }
 
+/** 加班時薪基數括號說明：依實際含固定津貼／全勤獎金顯示；舊資料沒有旗標＝視為含固定津貼。 */
+function overtimeBaseNote(b: { overtimeBaseIncludesAllowances?: boolean; overtimeBaseIncludesAttendanceBonus?: boolean }): string {
+  const a = b.overtimeBaseIncludesAllowances
+  const g = b.overtimeBaseIncludesAttendanceBonus
+  if (a === undefined && g === undefined) return "（含固定津貼）"
+  if (a && g) return "（含固定津貼與全勤獎金）"
+  if (g) return "（含全勤獎金）"
+  if (a) return "（含固定津貼）"
+  return ""
+}
+
 /** 只取用得到的欄位，舊資料 breakdown 可能是 `{}`，全部 optional。 */
 export interface PayslipBreakdownLike {
   hourlyWage?: number
   /** 加班類給付的時薪基數（月薪制含計入加班基數的固定津貼；2026-11-08）。 */
   overtimeHourlyBase?: number
+  overtimeBaseIncludesAllowances?: boolean
+  overtimeBaseIncludesAttendanceBonus?: boolean
   allowances?: number
   laborInsurance?: number
   healthInsurance?: number
@@ -248,7 +261,7 @@ export function renderPayslipHtml(input: RenderPayslipInput): string {
   parts.push(
     `<div style="font-family:ui-sans-serif,system-ui,'Noto Sans TC',sans-serif;color:#111;max-width:680px">`,
     `<h1 style="font-size:20px;margin:0 0 4px">薪資單　${esc(displayName(input.employeeName, input.empNo))}</h1>`,
-    `<div style="color:#777;font-size:12px">期間 ${esc(p.period)}　狀態 ${p.status === "finalized" ? "已定案" : "草稿"}　基準時薪 ${hourlyRate(n(b.hourlyWage))}${typeof b.overtimeHourlyBase === "number" ? `　加班時薪基數 ${hourlyRate(b.overtimeHourlyBase)}（含固定津貼）` : ""}</div>`,
+    `<div style="color:#777;font-size:12px">期間 ${esc(p.period)}　狀態 ${p.status === "finalized" ? "已定案" : "草稿"}　基準時薪 ${hourlyRate(n(b.hourlyWage))}${typeof b.overtimeHourlyBase === "number" ? `　加班時薪基數 ${hourlyRate(b.overtimeHourlyBase)}${overtimeBaseNote(b)}` : ""}</div>`,
   )
 
   for (const s of sections(p, b)) {
@@ -297,7 +310,7 @@ export function renderPayslipText(input: RenderPayslipInput): string {
   const b = input.breakdown ?? {}
   const out: string[] = [
     `薪資單　${displayName(input.employeeName, input.empNo)}`,
-    `期間 ${p.period}　狀態 ${p.status === "finalized" ? "已定案" : "草稿"}　基準時薪 ${hourlyRate(n(b.hourlyWage))}${typeof b.overtimeHourlyBase === "number" ? `　加班時薪基數 ${hourlyRate(b.overtimeHourlyBase)}（含固定津貼）` : ""}`,
+    `期間 ${p.period}　狀態 ${p.status === "finalized" ? "已定案" : "草稿"}　基準時薪 ${hourlyRate(n(b.hourlyWage))}${typeof b.overtimeHourlyBase === "number" ? `　加班時薪基數 ${hourlyRate(b.overtimeHourlyBase)}${overtimeBaseNote(b)}` : ""}`,
   ]
   for (const s of sections(p, b)) {
     out.push("", `【${s.title}】`)
