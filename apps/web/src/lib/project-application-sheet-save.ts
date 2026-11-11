@@ -14,6 +14,7 @@
  * | 付款階段（說明、%、金額）             | PUT /projects/:id/billings（整批）     | 本案 finance        |
  * | 付款階段（入帳日、發票號碼）          | POST /billings/:id/receive｜invoice    | 本案 finance        |
  * | 發包單位                              | PUT /projects/:id/subcontracts（整批） | 本案 finance        |
+ * | 付款階段（獎金分潤、發獎金日）        | PUT /projects/:id/billing-shares       | 老闆／platform_admin |
  *
  * 權限一律交給後端既有檢查（前端只在 canFinance=false 時整張唯讀），這裡不放寬任何東西。
  *
@@ -21,9 +22,22 @@
  */
 import { isOurContract, type Contract } from "./projects-api";
 import { formatMoney } from "./money";
-import { amountFromPct, formatStagePct, pctFromAmount, savedOverrideOf, stageScheduleSummary } from "./project-application-stage-amounts";
+import { amountFromPct, formatStagePct, pctFromAmount, savedOverrideOf, stageAmountDisplay, stageScheduleSummary } from "./project-application-stage-amounts";
+import {
+  currentBonusPaidOn,
+  currentShareLines,
+  filledShareLines,
+  parseShareAmount,
+  sameShareLines,
+  savedShareLines,
+  shareLinesTotal,
+  shareSetOf,
+  type BillingSharesView,
+  type ShareEdit,
+} from "./project-billing-shares";
 import type {
   BillingExt,
+  BillingShareSetInput,
   Client,
   InstallmentInputExt,
   ProjectDetail,
@@ -65,6 +79,11 @@ export interface SheetSaveContext {
   billings: readonly BillingExt[];
   subcontracts: readonly Subcontract[];
   vendors: ReadonlyArray<{ id: string; name: string }>;
+  /**
+   * 每期款獎金分潤（2026-11-11）：null／省略＝看不到（不畫兩欄、不進存檔計畫）。
+   * canEdit=false（授權 HR 只能看）時分潤修改不進存檔計畫。
+   */
+  billingShares?: BillingSharesView;
 }
 
 /** 草稿選的客戶：名冊裡找；找不到但就是本案現在的客戶時用專案帶的 client。 */
@@ -699,6 +718,81 @@ export function subcontractPlan(ctx: SheetSaveContext, draft: ApplicationSheetDr
   return out;
 }
 
+/* ==================================================== 每期獎金分潤 == */
+
+export interface SharePlanItem {
+  key: string;
+  label: string;
+  /** 既有期別 id；新建的期別存完才知道（null）。 */
+  billingId: string | null;
+  bonusPaidOn: string | null;
+  shares: Array<{ employeeId: string; amount: number }>;
+}
+
+export interface SharePlan {
+  items: SharePlanItem[];
+  changes: number;
+  errors: SheetError[];
+}
+
+/** 該期在畫面上的金額（金額格有改用草稿，否則已存的有效金額）；空白或不合法＝null。 */
+export function stageScreenAmount(row: ApplicationStageRow, edit: StageEdit | undefined): number | null {
+  const n = parseShareAmount(stageAmountDisplay(row, edit));
+  return typeof n === "number" ? n : null;
+}
+
+/**
+ * 每期款獎金分潤的存檔計畫：只送有改的期別（每期整批換掉）。分潤合計超過該期金額（畫面上的金額）→ 擋存，
+ * 紅底標在 `stage:<key>:shares`；後端以存檔後的期別金額再檢查一次。
+ */
+export function sharePlan(ctx: SheetSaveContext, draft: ApplicationSheetDraft, createdKeys: ReadonlySet<string> = new Set()): SharePlan {
+  const out: SharePlan = { items: [], changes: 0, errors: [] };
+  const view = ctx.billingShares ?? null;
+  if (!ctx.canFinance || !view || !view.available || !view.canEdit) return out;
+  for (const row of applicationStageRows(ctx.billings)) {
+    const key = stageRowKey(row);
+    const edit: ShareEdit | undefined = draft.shareEdits?.[key];
+    if (!edit) continue;
+    const set = shareSetOf(view, row.id);
+    const label = stageLabel(row);
+    const field = `stage:${key}:shares`;
+    const lines = filledShareLines(currentShareLines(set, edit));
+    const linesChanged = edit.lines !== undefined && !sameShareLines(edit.lines, savedShareLines(set));
+    const date = trimmed(currentBonusPaidOn(set, edit));
+    const dateChanged = edit.bonusPaidOn !== undefined && date !== (set?.bonusPaidOn ?? "");
+    if (!linesChanged && !dateChanged) continue;
+    out.changes += (linesChanged ? 1 : 0) + (dateChanged ? 1 : 0);
+
+    const shares: SharePlanItem["shares"] = [];
+    const seen = new Set<string>();
+    lines.forEach((l, i) => {
+      const n = parseShareAmount(l.amount);
+      if (!l.employeeId.trim()) out.errors.push({ field, message: `付款階段${label}獎金分潤第 ${i + 1} 位沒有選員工。` });
+      else if (seen.has(l.employeeId)) out.errors.push({ field, message: `付款階段${label}獎金分潤同一位員工重複。` });
+      if (n === "invalid" || n === null) out.errors.push({ field, message: `付款階段${label}獎金分潤第 ${i + 1} 位的金額必須是 0 以上的數字。` });
+      seen.add(l.employeeId);
+      if (l.employeeId.trim() && typeof n === "number") shares.push({ employeeId: l.employeeId, amount: n });
+    });
+    const total = shareLinesTotal(lines);
+    const stageAmount = stageScreenAmount(row, draft.stageEdits[key]);
+    if (total > 0 && (stageAmount === null || total > stageAmount)) {
+      out.errors.push({
+        field,
+        message:
+          stageAmount === null
+            ? `付款階段${label}還沒有金額，不能設定獎金分潤。`
+            : `付款階段${label}獎金分潤合計 ${formatMoney(total)} 超過該期金額 ${formatMoney(stageAmount)}。`,
+      });
+    }
+    if (date && !dateRe.test(date)) out.errors.push({ field: `stage:${key}:bonusPaidOn`, message: `付款階段${label}的發獎金日格式不對。` });
+    if (!row.id && !createdKeys.has(key)) {
+      out.errors.push({ field, message: `付款階段${label}還沒有這一期：請先填項目說明或金額，再設定獎金分潤。` });
+    }
+    out.items.push({ key, label, billingId: row.id, bonusPaidOn: date || null, shares });
+  }
+  return out;
+}
+
 /* ========================================================== 總計畫 == */
 
 export interface SheetSavePlan {
@@ -709,6 +803,8 @@ export interface SheetSavePlan {
   subcontracts: Subcontract[] | null;
   /** 移除既有副委託時的理由（PUT deleteReason）；沒移除＝null。 */
   subDeleteReason: string | null;
+  /** 每期款獎金分潤（2026-11-11）。 */
+  shares: SharePlan;
   /** 未儲存的格子數（存檔鈕旁、離開頁面提醒）。 */
   dirtyCount: number;
   errors: SheetError[];
@@ -723,7 +819,8 @@ export function applicationSheetPlan(ctx: SheetSaveContext, draft: ApplicationSh
   const contract = contractPlan(ctx, draft);
   const stages = stagePlan(ctx, draft);
   const subs = subcontractPlan(ctx, draft);
-  const errors = [...contract.errors, ...stages.errors, ...subs.errors];
+  const shares = sharePlan(ctx, draft, new Set(stages.created.map((c) => c.key)));
+  const errors = [...contract.errors, ...stages.errors, ...subs.errors, ...shares.errors];
   const taxId = draft.clientEdits.taxId;
   if (canEditClient && ctx.client && taxId !== undefined && trimmed(taxId) !== "" && !/^\d{8}$/.test(trimmed(taxId))) {
     errors.push({ field: "taxId", message: "統一編號須為 8 碼數字。" });
@@ -735,8 +832,9 @@ export function applicationSheetPlan(ctx: SheetSaveContext, draft: ApplicationSh
     stages,
     subcontracts: subs.subcontracts,
     subDeleteReason: subs.deleteReason,
+    shares,
     dirtyCount:
-      projectCount + (clientBody ? Object.keys(clientBody).length : 0) + contract.changes + stages.changes + subs.changes,
+      projectCount + (clientBody ? Object.keys(clientBody).length : 0) + contract.changes + stages.changes + subs.changes + shares.changes,
     errors,
     warnings: [...stages.warnings, ...subs.warnings],
   };
@@ -744,7 +842,7 @@ export function applicationSheetPlan(ctx: SheetSaveContext, draft: ApplicationSh
 
 /* ========================================================== 執行 == */
 
-export type SheetSaveSection = "project" | "client" | "contract" | "billings" | "invoice" | "receipt" | "subcontracts";
+export type SheetSaveSection = "project" | "client" | "contract" | "billings" | "invoice" | "receipt" | "subcontracts" | "shares";
 
 export interface SheetSaveStep {
   section: SheetSaveSection;
@@ -772,6 +870,8 @@ export interface SheetSaveApi {
    */
   fetchBillings?(): Promise<BillingExt[]>;
   fetchSubcontracts?(): Promise<Subcontract[]>;
+  /** 每期款獎金分潤（只換掉有帶到的期別）；省略＝不送（分潤修改留在草稿）。 */
+  saveBillingShares?(billings: BillingShareSetInput[]): Promise<unknown>;
   humanize(section: SheetSaveSection, err: unknown): string;
 }
 
@@ -885,6 +985,10 @@ export async function runApplicationSheetSave(
         next[idOf.get(key) ?? key] = rest;
       }
       residual = { ...residual, stageEdits: next };
+      // 分潤修改跟著換成新期別的 id（新建的空白列）。
+      const nextShares: Record<string, ShareEdit> = {};
+      for (const [key, edit] of Object.entries(residual.shareEdits ?? {})) nextShares[idOf.get(key) ?? key] = edit;
+      residual = { ...residual, shareEdits: nextShares };
     }
   }
 
@@ -925,6 +1029,30 @@ export async function runApplicationSheetSave(
       continue;
     }
     if (await attempt("receipt", label, () => api.receiveBilling(id, rc.receivedOn).then(() => undefined))) dropStageField(rc.key, "receivedOn");
+  }
+
+  if (plan.shares && plan.shares.items.length > 0) {
+    const ready: Array<{ key: string; input: BillingShareSetInput }> = [];
+    for (const item of plan.shares.items) {
+      const id = item.billingId ?? (scheduleOk ? idOf.get(item.key) : undefined);
+      if (!id) {
+        steps.push({ section: "shares", label: `付款階段${item.label}獎金分潤`, status: "skipped", message: "付款階段沒存成，這格未送出。" });
+        continue;
+      }
+      ready.push({ key: item.key, input: { billingId: id, bonusPaidOn: item.bonusPaidOn, shares: item.shares } });
+    }
+    if (ready.length > 0 && api.saveBillingShares) {
+      const save = api.saveBillingShares;
+      const ok = await attempt("shares", "付款階段（獎金分潤／發獎金日）", () => save(ready.map((r) => r.input)).then(() => undefined));
+      if (ok) {
+        const next = { ...(residual.shareEdits ?? {}) };
+        for (const r of ready) {
+          delete next[r.key];
+          delete next[r.input.billingId];
+        }
+        residual = { ...residual, shareEdits: next };
+      }
+    }
   }
 
   if (plan.subcontracts) {

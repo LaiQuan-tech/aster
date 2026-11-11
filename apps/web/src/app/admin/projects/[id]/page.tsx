@@ -42,6 +42,7 @@ import {
   getP3SettingsLite,
   listClients,
   listApplicationVersions,
+  getBillingShares,
   getApplicationVersion,
   createApplicationVersion,
   loadContractsForProjectAccess,
@@ -59,6 +60,7 @@ import {
   type ProjectListItem,
   type ApplicationData,
   type ApplicationVersionList,
+  type BillingSharesState,
   type ApplicationVersionMeta,
 } from "@/lib/projects-ext-api";
 import { currentVersionNo, snapshotSheetProps, versionNoLabel } from "@/lib/project-application-versions";
@@ -190,6 +192,8 @@ export default function AdminProjectDetailPage() {
   /** 正在檢視的舊版（唯讀快照）；null＝目前版（即時資料）。 */
   const [viewingVersion, setViewingVersion] = useState<(ApplicationVersionMeta & { snapshot: ApplicationData; profit: boolean; projectId: string }) | null>(null);
   const [versionError, setVersionError] = useState<string | null>(null);
+  /** 每期款獎金分潤（2026-11-11）：null＝看不到（無權限）、讀不到或 migration 未套用＝不畫兩欄。 */
+  const [billingShares, setBillingShares] = useState<BillingSharesState | null>(null);
 
   // 開票／收款的小表單（模組五）
   const [invoiceFormId, setInvoiceFormId] = useState<string | null>(null);
@@ -218,7 +222,7 @@ export default function AdminProjectDetailPage() {
       // access 由 detail 回應決定；先取得它，避免非 finance 使用者先打合約 API 收到 403，
       // 進而讓整頁 Promise.all 失敗。
       const detail = await getProjectDetail(projectId);
-      const [m, adj, docs, contractsForAccess, bs, subs, d, e, ven, comp, p3, mains, cl, me, vers] = await Promise.all([
+      const [m, adj, docs, contractsForAccess, bs, subs, d, e, ven, comp, p3, mains, cl, me, vers, shares] = await Promise.all([
         getProjectMembers(projectId),
         getProjectAdjustments(projectId),
         getProjectDocuments(projectId),
@@ -242,7 +246,10 @@ export default function AdminProjectDetailPage() {
         getMe().catch(() => null),
         // 申請單版本（finance 才看得到；讀不到或 migration 未套用＝隱藏版本 UI）。
         detail.access.finance ? listApplicationVersions(projectId).catch(() => null) : Promise.resolve(null),
+        // 每期款獎金分潤：只有 finance ∧ bonus ∧ profit 的人才打（其他人後端 403，不送請求）。
+        detail.access.billingShares ? getBillingShares(projectId).catch(() => null) : Promise.resolve(null),
       ]);
+      const sharesView = shares && shares.available ? shares : null;
       const clientsEditable = isAdminRole(me?.role);
       const disciplineList = engineerDisciplinesOf(p3?.settings.disciplines ?? null);
       setDisciplines(disciplineList);
@@ -265,6 +272,7 @@ export default function AdminProjectDetailPage() {
             billings: bs.installments,
             subcontracts: subs.subcontracts,
             vendors: ven.vendors,
+            billingShares: sharesView,
           },
           rebased,
         );
@@ -272,6 +280,7 @@ export default function AdminProjectDetailPage() {
       });
       setClients(cl.clients);
       setVersionList(vers && vers.available ? vers : null);
+      setBillingShares(sharesView);
       setViewingVersion((prev) => (prev && prev.projectId === detail.project.id ? prev : null));
       setCanEditClients(clientsEditable);
       setProject(detail.project);
@@ -408,6 +417,7 @@ export default function AdminProjectDetailPage() {
         billings: schedule?.installments ?? [],
         subcontracts: savedSubs,
         vendors,
+        billingShares,
       }
     : null;
   const sheetDirtyCount = sheetContext && sheetDraft ? applicationSheetPlan(sheetContext, sheetDraft).dirtyCount : 0;
@@ -499,6 +509,8 @@ export default function AdminProjectDetailPage() {
         saveReport={sheetSaveReport}
         onSaveReport={(report) => setSheetSaveStored(report ? { projectId, report } : null)}
         load={load}
+        billingShares={billingShares}
+        shareEmployees={emps}
       />
       )}
 

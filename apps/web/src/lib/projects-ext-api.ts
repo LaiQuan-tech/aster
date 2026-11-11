@@ -398,6 +398,13 @@ export interface ProjectAccess {
    * 是 null，畫面整欄不畫。舊版後端沒有這個鍵＝照舊顯示。
    */
   profit?: boolean
+  /**
+   * 每期款獎金分潤（2026-11-11）：看得到申請單付款階段的「獎金分潤／發獎金日」兩欄＝finance ∧ bonus ∧ profit。
+   * 分潤資料另打 GET /projects/:id/billing-shares；舊版後端沒有這個鍵＝不顯示。
+   */
+  billingShares?: boolean
+  /** 能改每期款獎金分潤（再加分潤寫入權：老闆／platform_admin）。 */
+  editBillingShares?: boolean
 }
 
 /** project-money.ts computeMoney() 的原始輸出——欄位與後端逐一對照過。 */
@@ -794,6 +801,51 @@ export function createApplicationVersion(projectId: string, note: string | null)
   return apiFetch<{ version: { id: string; versionNo: number } }>(`/projects/${projectId}/application-versions`, {
     method: "POST",
     body: JSON.stringify({ note }),
+  })
+}
+
+/* ── 每期款獎金分潤（2026-11-11，API routes/billing-shares.ts，migration 0091） ── */
+
+export interface BillingShare {
+  id: string
+  employeeId: string
+  employeeName: string | null
+  amount: number
+  note: string | null
+}
+
+export interface BillingShareSet {
+  billingId: string
+  /** 該期有效金額（後端口徑）；分潤合計不可超過。 */
+  billingAmount: number | null
+  bonusPaidOn: string | null
+  shares: BillingShare[]
+  total: number
+}
+
+export interface BillingSharesState {
+  /** false＝migration 0091 未套用（前端不顯示兩欄）。 */
+  available: boolean
+  canEdit: boolean
+  /** 同一案也有季獎金分潤設定（成員趴數／固定金額）：顯示「不要重複發放」提醒。 */
+  quarterlyShares: boolean
+  billings: BillingShareSet[]
+}
+
+export interface BillingShareSetInput {
+  billingId: string
+  bonusPaidOn: string | null
+  shares: Array<{ employeeId: string; amount: number; note?: string | null }>
+}
+
+export function getBillingShares(projectId: string) {
+  return apiFetch<BillingSharesState>(`/projects/${projectId}/billing-shares`)
+}
+
+export function putBillingShares(projectId: string, billings: BillingShareSetInput[]) {
+  return apiFetch<BillingSharesState>(`/projects/${projectId}/billing-shares`, {
+    method: "PUT",
+    body: JSON.stringify({ billings }),
   })
 }
 

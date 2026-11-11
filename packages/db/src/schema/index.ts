@@ -90,3 +90,4 @@ export { mcpOauthClients, mcpGrants, mcpTokens, mcpOauthCodes, mcpConfirmations,
 export { vehicles, vehicleMaintenanceLogs, vehicleBookings, vehicleTrips, vehicleTripCosts, vehicleTripPhotos, vehicleReminderLog, vehicleSettings } from "./vehicles"
 export { insuredSalaryChanges } from "./insured-salary-changes"
 export { projectApplicationVersions } from "./project-application-versions"
+export { projectBillingShares, projectBillingBonusDates } from "./project-billing-shares"

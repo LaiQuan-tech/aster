@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { Button, PrimaryButton } from "@/components/admin-ui";
 import { ClientCombo } from "@/components/ClientCombo";
+import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 import { MoneyInput } from "@/components/MoneyInput";
 import type { Vendor } from "@/lib/company-api";
 import { companyOptions } from "@/lib/company-options";
@@ -21,6 +22,7 @@ import {
   humanizeSubcontractError,
   invoiceBilling,
   listClients,
+  putBillingShares,
   putProjectSubcontracts,
   receiveBilling,
   saveBillingSchedule,
@@ -40,6 +42,8 @@ import {
 import {
   APPLICATION_SHEET_COLUMNS,
   APPLICATION_SHEET_TOP_ROWS,
+  APPLICATION_STAGE_BONUS_HEADERS,
+  APPLICATION_STAGE_BONUS_WEIGHTS,
   APPLICATION_STAGE_HEADERS,
   APPLICATION_STAGE_SPANS,
   APPLICATION_SUBCONTRACT_HEADERS,
@@ -75,11 +79,26 @@ import {
   stageBaseValues,
   stageContractTotal,
   stageLocks,
+  stageScreenAmount,
   type SheetSaveApi,
   type SheetSaveStep,
 } from "@/lib/project-application-sheet-save";
 import { applyStageAmountEdit, applyStagePctEdit, formatStagePct, releaseTypedPercentages, stageAmountDisplay, stagePctDisplay, stageScheduleSummary } from "@/lib/project-application-stage-amounts";
 
+import {
+  currentBonusPaidOn,
+  currentShareLines,
+  filledShareLines,
+  shareLinesTotal,
+  sharePctText,
+  shareSetOf,
+  shareSummaryText,
+  type BillingSharesView,
+  type ShareEdit,
+  type ShareLine,
+} from "@/lib/project-billing-shares";
+import { employeeOptionsOf, type EmployeeOption } from "@/lib/employee-combobox";
+import { formatMoney } from "@/lib/money";
 import { sheet } from "@/lib/sheet-styles";
 import { selectedCompanyId } from "../../_components/project-application-form";
 import { fmtMoney, humanError } from "./shared";
@@ -259,6 +278,13 @@ interface ApplicationSheetProps {
   versionControls?: ReactNode | ((state: { dirty: boolean }) => ReactNode);
   /** 申請單最上方的橫幅（檢視舊版時的黃色提示）；列印不印。 */
   banner?: ReactNode;
+  /**
+   * 每期款獎金分潤（2026-11-11，GET /projects/:id/billing-shares）：有值且 available 時付款階段多畫
+   * 「獎金分潤」「發獎金日」兩欄；canEdit 時可編輯。省略／null＝看不到（無權限），維持原 7 欄。列印／舊版檢視不畫。
+   */
+  billingShares?: BillingSharesView;
+  /** 分潤選人的員工清單（在職）。 */
+  shareEmployees?: ReadonlyArray<{ id: string; name?: string | null; empNo?: string | null; emp_no?: string | null }>;
 }
 
 /**
@@ -294,6 +320,8 @@ export function ApplicationSheet({
   versionLabel,
   versionControls,
   banner,
+  billingShares,
+  shareEmployees,
 }: ApplicationSheetProps) {
   const print = mode === "print";
   const [localDraft, setLocalDraft] = useState<ApplicationSheetDraft>(() => applicationSheetDraftOf(project, disciplines));
@@ -308,6 +336,12 @@ export function ApplicationSheet({
   const report = controlledReport !== undefined ? controlledReport : localReport;
   const setReport = onSaveReport ?? setLocalReport;
   const editable = canFinance && !print && !readOnly;
+  /** 付款階段的「獎金分潤／發獎金日」兩欄（看得到才畫；列印與舊版檢視不畫）。 */
+  const shareView: BillingSharesView = canFinance && !print && !readOnly && billingShares?.available ? billingShares : null;
+  const showShares = !!shareView;
+  const sharesEditable = editable && !!shareView?.canEdit;
+  /** 正在展開分潤明細的付款階段列（stageRowKey）。 */
+  const [openShareKey, setOpenShareKey] = useState<string | null>(null);
   const blockOn = (key: PrintBlockKey) => printChecked?.[key] ?? true;
   /** 未勾選的列印區塊：螢幕淡化、列印時文字透明（格線與標題照印）。 */
   const blankCls = (key: PrintBlockKey) => (blockOn(key) ? "" : "opacity-40 print:opacity-100 print:text-transparent print:**:text-transparent");
@@ -322,10 +356,10 @@ export function ApplicationSheet({
   const plan = useMemo(
     () =>
       applicationSheetPlan(
-        { project, canFinance: editable, canEditClient: canEditClients, disciplines, client, money, contracts, billings, subcontracts, vendors },
+        { project, canFinance: editable, canEditClient: canEditClients, disciplines, client, money, contracts, billings, subcontracts, vendors, billingShares: shareView },
         draft,
       ),
-    [project, editable, canEditClients, disciplines, client, money, contracts, billings, subcontracts, vendors, draft],
+    [project, editable, canEditClients, disciplines, client, money, contracts, billings, subcontracts, vendors, draft, shareView],
   );
   const dirtyCount = plan.dirtyCount;
   const validationErrors = [...applicationSheetErrors(draft, { canFinance }), ...plan.errors];
@@ -356,6 +390,8 @@ export function ApplicationSheet({
     setDraft((d) => ({ ...d, stageEdits: { ...d.stageEdits, [key]: { ...d.stageEdits[key], [field]: value } } }));
   const setSub = (key: string, field: keyof SubEdit, value: string) =>
     setDraft((d) => ({ ...d, subEdits: { ...d.subEdits, [key]: { ...d.subEdits[key], [field]: value } } }));
+  const patchShare = (key: string, next: ShareEdit) =>
+    setDraft((d) => ({ ...d, shareEdits: { ...(d.shareEdits ?? {}), [key]: { ...(d.shareEdits?.[key] ?? {}), ...next } } }));
 
   const api: SheetSaveApi = {
     updateProject: (body) => updateProjectFields(project.id, body),
@@ -369,8 +405,15 @@ export function ApplicationSheet({
     putSubcontracts: (list, deleteReason) => putProjectSubcontracts(project.id, deleteReason ? { subcontracts: list, deleteReason } : { subcontracts: list }),
     fetchBillings: async () => (await getBillingSchedule(project.id)).installments,
     fetchSubcontracts: async () => (await getProjectSubcontracts(project.id)).subcontracts,
+    saveBillingShares: (list) => putBillingShares(project.id, list),
     humanize: (section, err) => {
       const msg = err instanceof Error ? err.message : "";
+      if (section === "shares") {
+        if (/shares_exceed_amount/.test(msg)) return "某一期的獎金分潤合計超過該期金額（以存檔後的期別金額為準），請調整後再存。";
+        if (/bonus_edit_boss_only|boss_not_configured/.test(msg)) return "只有老闆（或平台管理員）可以改獎金分潤。";
+        if (/migration_required/.test(msg)) return "系統尚未開通每期獎金分潤（資料庫待更新），請稍後再試。";
+        return humanError(err, "儲存失敗");
+      }
       if (/\[403\]/.test(msg) && section === "client") return "沒有權限修改客戶名冊（限 HR／會計），請請他們改，或到客戶名冊頁處理。";
       if (/\[403\]/.test(msg) && /forbidden\b/.test(msg)) return "沒有權限（後端拒絕）。";
       switch (section) {
@@ -394,7 +437,7 @@ export function ApplicationSheet({
     setReport(null);
     try {
       const result = await runApplicationSheetSave(plan, draft, api, {
-        project, canFinance: editable, canEditClient: canEditClients, disciplines, client, money, contracts, billings, subcontracts, vendors,
+        project, canFinance: editable, canEditClient: canEditClients, disciplines, client, money, contracts, billings, subcontracts, vendors, billingShares: shareView,
       });
       // 先把已存成的格子從草稿拿掉，再重新載入（沒存成的留著，下一次只送那些）。
       setDraft(result.residual);
@@ -729,13 +772,37 @@ export function ApplicationSheet({
   });
 
   let row = APPLICATION_SHEET_TOP_ROWS.length + 1;
-  const stageCols = APPLICATION_STAGE_SPANS.reduce<number[]>((acc, span, i) => [...acc, i === 0 ? 1 : acc[i - 1] + APPLICATION_STAGE_SPANS[i - 1]], []);
-  const S = APPLICATION_STAGE_SPANS;
+  /*
+   * 付款階段的格線：看不到獎金分潤＝跟 Word 一樣畫在 16 欄格線上（7 欄）；看得到＝9 欄，16 欄格線切不出夠寬的格子，
+   * 改畫在付款階段自己的小格線裡（stageCells 包進一個跨 16 欄的容器，欄寬比例見 APPLICATION_STAGE_BONUS_WEIGHTS）。
+   */
+  const stageHeaders: readonly string[] = showShares ? APPLICATION_STAGE_BONUS_HEADERS : APPLICATION_STAGE_HEADERS;
+  const S: readonly number[] = showShares ? stageHeaders.map(() => 1) : APPLICATION_STAGE_SPANS;
+  const stageCols = S.reduce<number[]>((acc, _span, i) => [...acc, i === 0 ? 1 : acc[i - 1] + S[i - 1]], []);
+  const stageCells: ReactNode[] = showShares ? [] : cells;
+  let srow = showShares ? 1 : row;
+  /** 備註欄在第幾欄（看得到分潤時，獎金分潤插在入帳日期與備註之間）。 */
+  const NOTE = showShares ? 7 : 6;
+  const shareOptions: EmployeeOption[] = (() => {
+    if (!showShares) return [];
+    const opts = employeeOptionsOf(shareEmployees ?? []);
+    const known = new Set(opts.map((o) => o.id));
+    // 已存的分潤對象不在在職清單（離職等）：補一個選項，免得選單顯示空白。
+    for (const b of shareView?.billings ?? []) {
+      for (const sh of b.shares) {
+        if (known.has(sh.employeeId)) continue;
+        known.add(sh.employeeId);
+        opts.push({ id: sh.employeeId, label: sh.employeeName ?? "（已不在名冊）", note: "非在職" });
+      }
+    }
+    return opts;
+  })();
+  const shareNameOf = (id: string) => shareOptions.find((o) => o.id === id)?.label ?? "";
   // 付款階段小表頭：欄名只印一次（桌機／列印）；手機堆疊版改由各格前的小標示說明。
   {
-    const r = row++;
-    APPLICATION_STAGE_HEADERS.forEach((h, i) => {
-      cells.push(
+    const r = srow++;
+    stageHeaders.forEach((h, i) => {
+      stageCells.push(
         <Cell key={`stage-head-${i}`} col={stageCols[i]} span={S[i]} row={r} kind="label" shade align="center" testId={`sheet-stage-head-${i}`} className="hidden py-0.5 text-[11px] md:flex print:flex">
           {h}
         </Cell>,
@@ -745,7 +812,7 @@ export function ApplicationSheet({
   /** 手機堆疊版沒有表頭，格內前面補一個小欄名；桌機／列印隱藏。 */
   const mLabel = (text: string) => <span className="mr-1 shrink-0 text-xs text-gray-500 md:hidden print:hidden">{text}</span>;
   for (const s of stageRows) {
-    const r = row++;
+    const r = srow++;
     const guild = s.kind === "guild_advance";
     const key = stageRowKey(s);
     const base = stageBaseValues(s);
@@ -756,7 +823,12 @@ export function ApplicationSheet({
     const patchStage = (next: StageEdit) => setDraft((d) => ({ ...d, stageEdits: { ...d.stageEdits, [key]: next } }));
     const pctText = stagePctDisplay(s, rowEdit, stageTotal);
     const rowLabel = guild ? "技師公會代墊" : `付款階段第 ${s.no} 列`;
-    cells.push(
+    const shareSet = shareSetOf(shareView, s.id);
+    const shareEdit: ShareEdit | undefined = sharesEditable ? draft.shareEdits?.[key] : undefined;
+    const shareLines = currentShareLines(shareSet, shareEdit);
+    const shareSummary = shareSummaryText(shareLines);
+    const shareOpen = showShares && openShareKey === key;
+    stageCells.push(
       <Cell key={`stage-${s.no}-0`} col={stageCols[0]} span={S[0]} row={r} kind="label" shade testId={`sheet-stage-${s.no}`}>
         {editable ? (
           <span className="flex w-full min-w-0 items-center gap-0.5">
@@ -844,7 +916,26 @@ export function ApplicationSheet({
           <span title={editable && locks.receivedOn ? "已入帳；撤銷請到下方「分期請款期程」" : undefined}>{s.receivedOn ? rocDots(s.receivedOn) : ""}</span>
         )}
       </Cell>,
-      <Cell className={blankCls("payment")} key={`stage-${s.no}-6`} col={stageCols[6]} span={S[6]} row={r} kind="value" testId={`sheet-stage-${s.no}-note`} editable={editable} {...errAttr(`stage:${key}:note`)}>
+      ...(showShares
+        ? [
+            <Cell key={`stage-${s.no}-share`} col={stageCols[6]} span={S[6]} row={r} kind="value" testId={`sheet-stage-${s.no}-shares`} editable={sharesEditable} {...errAttr(`stage:${key}:shares`)}>
+              {mLabel("獎金分潤")}
+              {sharesEditable || shareSummary ? (
+                <button
+                  type="button"
+                  className={`${cellChoice} w-full truncate text-left tabular-nums`}
+                  aria-expanded={shareOpen}
+                  aria-label={`${rowLabel}獎金分潤${shareSummary ? `：${shareSummary}` : ""}`}
+                  title={sharesEditable ? "點開設定這一期誰分多少（按期另外發，不進薪資與季獎金）" : "點開看明細"}
+                  onClick={() => setOpenShareKey(shareOpen ? null : key)}
+                >
+                  {shareSummary || <span className="text-gray-400">＋ 設定</span>}
+                </button>
+              ) : null}
+            </Cell>,
+          ]
+        : []),
+      <Cell className={blankCls("payment")} key={`stage-${s.no}-6`} col={stageCols[NOTE]} span={S[NOTE]} row={r} kind="value" testId={`sheet-stage-${s.no}-note`} editable={editable} {...errAttr(`stage:${key}:note`)}>
         {mLabel("備註")}
         {editable ? (
           <input aria-label={`${rowLabel}備註`} className={cellInput} maxLength={1000} value={val("note")} onChange={(e) => setStage(key, "note", e.target.value)} />
@@ -852,7 +943,114 @@ export function ApplicationSheet({
           <span className="min-w-0 whitespace-normal break-words">{s.note}</span>
         )}
       </Cell>,
+      ...(showShares
+        ? [
+            <Cell key={`stage-${s.no}-bonus-date`} col={stageCols[8]} span={S[8]} row={r} kind="value" testId={`sheet-stage-${s.no}-bonus-date`} editable={sharesEditable} {...errAttr(`stage:${key}:bonusPaidOn`)}>
+              {mLabel("發獎金日")}
+              {sharesEditable ? (
+                <input
+                  aria-label={`${rowLabel}發獎金日`}
+                  className={`${cellInput} px-0.5`}
+                  type="date"
+                  value={currentBonusPaidOn(shareSet, shareEdit)}
+                  onChange={(e) => patchShare(key, { bonusPaidOn: e.target.value })}
+                />
+              ) : (
+                <span>{shareSet?.bonusPaidOn ? rocDots(shareSet.bonusPaidOn) : ""}</span>
+              )}
+            </Cell>,
+          ]
+        : []),
     );
+    if (shareOpen) {
+      const stageAmount = stageScreenAmount(s, rowEdit);
+      const total = shareLinesTotal(filledShareLines(shareLines));
+      const over = total > 0 && (stageAmount === null || total > stageAmount);
+      const setLines = (lines: ShareLine[]) => patchShare(key, { lines });
+      stageCells.push(
+        <Cell key={`stage-${s.no}-share-editor`} col={1} span={stageHeaders.length} row={srow++} kind="full" testId={`sheet-stage-${s.no}-share-editor`} className="bg-gray-50!">
+          <div className="w-full space-y-1.5 py-1 text-[13px]">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-medium text-gray-700">{rowLabel}獎金分潤（按期另外發的紀錄，不寫入月結薪資或季獎金批次）</span>
+              <button type="button" className="text-xs text-gray-500 hover:text-gray-800" onClick={() => setOpenShareKey(null)}>
+                收合
+              </button>
+            </div>
+            {shareView?.quarterlyShares && (
+              <p className="rounded-md bg-amber-50 px-2 py-1 text-xs text-amber-800 ring-1 ring-amber-200" data-testid="sheet-share-quarterly-warning">
+                此專案也有季獎金分潤，請確認不要重複發放。
+              </p>
+            )}
+            {shareLines.length === 0 && !sharesEditable && <p className="text-xs text-gray-500">這一期沒有獎金分潤。</p>}
+            {shareLines.map((line, i) => (
+              <div key={i} className="flex flex-wrap items-center gap-1.5 sm:flex-nowrap" data-testid={`sheet-share-line-${i}`}>
+                {sharesEditable ? (
+                  <>
+                    <EmployeeCombobox
+                      options={shareOptions}
+                      value={line.employeeId}
+                      onChange={(id) => setLines(shareLines.map((l, j) => (j === i ? { ...l, employeeId: id } : l)))}
+                      ariaLabel={`${rowLabel}獎金分潤第 ${i + 1} 位員工`}
+                      className="min-w-[10rem] flex-1"
+                    />
+                    <MoneyInput
+                      aria-label={`${rowLabel}獎金分潤第 ${i + 1} 位金額`}
+                      className={`${cellInput} text-right tabular-nums sm:w-32 sm:flex-none`}
+                      placeholder="金額"
+                      value={line.amount}
+                      onValueChange={(v) => setLines(shareLines.map((l, j) => (j === i ? { ...l, amount: v } : l)))}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <span className="flex-1">{shareNameOf(line.employeeId)}</span>
+                    <span className="w-32 text-right tabular-nums">{formatMoney(Number(line.amount))}</span>
+                  </>
+                )}
+                <span className="w-16 shrink-0 text-right text-xs text-gray-500 tabular-nums" data-testid={`sheet-share-line-${i}-pct`}>
+                  {sharePctText(line.amount, stageAmount)}
+                </span>
+                {sharesEditable && (
+                  <button type="button" className="shrink-0 px-1 text-xs text-gray-400 hover:text-red-600" onClick={() => setLines(shareLines.filter((_, j) => j !== i))}>
+                    移除
+                  </button>
+                )}
+              </div>
+            ))}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              {sharesEditable ? (
+                <button type="button" className="text-xs font-medium" style={{ color: "var(--brand)" }} onClick={() => setLines([...shareLines, { employeeId: "", amount: "" }])}>
+                  ＋ 新增一人
+                </button>
+              ) : (
+                <span />
+              )}
+              <span className={`text-xs tabular-nums ${over ? "font-medium text-red-700" : "text-gray-600"}`} data-testid={`sheet-stage-${s.no}-share-total`}>
+                合計 {formatMoney(total)}
+                {stageAmount !== null && stageAmount > 0 ? `（${sharePctText(total, stageAmount)}）` : ""}／該期金額 {stageAmount !== null ? formatMoney(stageAmount) : "—"}
+                {over ? "：超過該期金額" : ""}
+              </span>
+            </div>
+          </div>
+        </Cell>,
+      );
+    }
+  }
+  if (showShares) {
+    const template = APPLICATION_STAGE_BONUS_WEIGHTS.map((w) => `minmax(0, ${w}fr)`).join(" ");
+    cells.push(
+      <div
+        key="stage-grid"
+        data-testid="sheet-stage-grid"
+        style={{ "--gc": "1 / span 16", "--gr": `${row} / span 1`, "--stage-cols": template } as CSSProperties}
+        className="col-span-2 grid grid-cols-[6.5rem_minmax(0,1fr)] md:gap-px md:bg-gray-200 md:[grid-column:var(--gc)] md:[grid-row:var(--gr)] md:[grid-template-columns:var(--stage-cols)]"
+      >
+        {stageCells}
+      </div>,
+    );
+    row++;
+  } else {
+    row = srow;
   }
   if (editable && stageTotal !== null && stageTotal > 0) {
     const sum = stageScheduleSummary(stageRows, draft.stageEdits, stageRowKey, stageTotal);

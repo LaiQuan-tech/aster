@@ -1261,6 +1261,10 @@ export async function loadProjectDetail(tenantId: string, userId: string, projec
     profit: scope.canSeeProfit,
     editBonus: scope.bonusEdit.canEdit,
     bossConfigured: scope.bonusEdit.bossConfigured,
+    // 每期款獎金分潤（2026-11-11，routes/billing-shares.ts）：看＝finance ∧ bonus ∧ profit；改＝再加分潤寫入權。
+    // 分潤資料本身不在這支回應裡（另打 GET /projects/:id/billing-shares），這裡只給前端決定要不要畫那兩欄。
+    billingShares: scope.canManage && scope.canSeeBonus && scope.canSeeProfit,
+    editBillingShares: scope.canManage && scope.canSeeBonus && scope.canSeeProfit && scope.bonusEdit.canEdit,
   }
   const core = await assembleProjectDetail(tenantId, scope.project, {
     finance: scope.canManage,

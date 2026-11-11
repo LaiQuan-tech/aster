@@ -145,6 +145,7 @@ export const SNAPSHOT_TABLES: readonly SnapshotTableSpec[] = [
   { name: "employee_fixed_allowances" }, // 員工固定津貼（sql/0076；未套用的環境記 skipped）
   { name: "insured_salary_changes" }, // 投保薪資調整歷程（sql/0078；未套用的環境記 skipped）
   { name: "project_application_versions" }, // 專案申請單版本（sql/0080；未套用的環境記 skipped）
+  { name: "project_billing_shares" }, // 每期款獎金分潤（sql/0081；未套用的環境記 skipped）
   { name: "payslips" },
   { name: "non_employee_income" },
   { name: "expense_categories" },

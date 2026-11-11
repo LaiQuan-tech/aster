@@ -280,3 +280,66 @@ describe("申請單版本：舊版快照唯讀渲染（2026-11-10）", () => {
     expect(html).toContain("第 3 版")
   })
 })
+
+describe("每期款獎金分潤（2026-11-11）", () => {
+  const EMP = "bbbbbbbb-0000-4000-8000-0000000005a1"
+  const sharesView = (canEdit: boolean, quarterlyShares = false) => ({
+    available: true,
+    canEdit,
+    quarterlyShares,
+    billings: [
+      { billingId: "b1", billingAmount: 50000, bonusPaidOn: "2026-12-20", total: 30000, shares: [{ id: "s1", employeeId: EMP, employeeName: "測試甲", amount: 30000, note: null }] },
+      { billingId: "b2", billingAmount: 50000, bonusPaidOn: null, total: 0, shares: [] },
+    ],
+  })
+  function renderWith(view: ReturnType<typeof sharesView> | null, opts: { mode?: "edit" | "print"; draft?: Partial<ApplicationSheetDraft> } = {}) {
+    return renderToStaticMarkup(
+      <ApplicationSheet
+        project={project}
+        canFinance
+        showProfit
+        money={money}
+        billings={billings}
+        subcontracts={subcontracts}
+        contracts={contracts}
+        companies={[]}
+        vendors={[]}
+        disciplines={[]}
+        clients={[client]}
+        mode={opts.mode}
+        draft={{ ...applicationSheetDraftOf(project, []), ...opts.draft }}
+        onDraftChange={() => {}}
+        billingShares={view}
+        shareEmployees={[{ id: EMP, name: "測試甲" }]}
+      />,
+    )
+  }
+
+  it("看得到：付款階段 9 欄（獎金分潤在入帳日期與備註之間、發獎金日在最後），格子顯示摘要與民國日期", () => {
+    const html = renderWith(sharesView(false))
+    expect(html).toContain('data-testid="sheet-stage-grid"')
+    const heads = ["階段", "金額", "%", "發票號碼", "發票日期", "入帳日期", "獎金分潤", "備註", "發獎金日"]
+    heads.forEach((h, i) => expect(cell(html, `sheet-stage-head-${i}`)).toContain(`>${h}</div>`))
+    expect(cell(html, "sheet-stage-1-shares")).toContain("1 人 · 30,000")
+    expect(cell(html, "sheet-stage-1-bonus-date")).toContain("115.12.20")
+    // 只能看（授權 HR）：沒有日期輸入框
+    expect(html).not.toContain('aria-label="付款階段第 1 列發獎金日"')
+  })
+
+  it("能改：發獎金日是日期輸入框、空白期別顯示「＋ 設定」；分潤超額時格子標紅", () => {
+    const html = renderWith(sharesView(true))
+    expect(html).toContain('aria-label="付款階段第 1 列發獎金日"')
+    expect(cell(html, "sheet-stage-2-shares")).toContain("＋ 設定")
+    const bad = renderWith(sharesView(true), { draft: { shareEdits: { b1: { lines: [{ employeeId: EMP, amount: "50001" }] } } } })
+    expect(bad).toContain('data-err-field="stage:b1:shares" data-invalid="true"')
+  })
+
+  it("看不到（null）或列印：維持原本 7 欄，沒有任何分潤內容", () => {
+    for (const html of [renderWith(null), renderWith(sharesView(true), { mode: "print" })]) {
+      expect(html).not.toContain("sheet-stage-grid")
+      expect(html).not.toContain("獎金分潤")
+      expect(html).not.toContain("30,000")
+      expect(html).not.toContain("發獎金日")
+    }
+  })
+})

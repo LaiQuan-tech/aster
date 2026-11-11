@@ -195,6 +195,8 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "PUT", path: "/projects/:id/main-contract", label: "修改專案主合約" },
   // 2026-11-10 申請單手動另存新版本（只多一筆版本紀錄、不改任何資料）：中風險。
   { method: "POST", path: "/projects/:id/application-versions", label: "申請單另存新版本" },
+  // 2026-11-11 每期款獎金分潤（按期另外發的紀錄，不動薪資／季獎金）：中風險。
+  { method: "PUT", path: "/projects/:id/billing-shares", label: "修改每期款獎金分潤" },
   { method: "POST", path: "/projects/:id/members", label: "新增專案成員（影響分潤）" },
   { method: "PATCH", path: "/projects/:id/members/:memberId", label: "修改專案成員（影響分潤）" },
   { method: "POST", path: "/billings/:id/bill", label: "請款" },

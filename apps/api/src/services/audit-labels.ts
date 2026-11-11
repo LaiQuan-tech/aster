@@ -28,6 +28,7 @@ export const AUDIT_TABLE_LABELS: Record<string, string> = {
   employee_fixed_allowances: "員工固定津貼",
   insured_salary_changes: "投保薪資調整歷程",
   project_application_versions: "專案申請單版本",
+  project_billing_shares: "每期款獎金分潤（摘要，不含金額）",
   period_closes: "月結",
   rule_configs: "差勤／薪資規則",
   leave_requests: "申請單（假單／加班／補打卡／出差／預支）",

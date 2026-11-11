@@ -53,6 +53,7 @@ import { projectDocumentsRouter } from "./routes/project-documents.js"
 import { projectDuplicateRouter } from "./routes/project-duplicate.js"
 import { contractsRouter } from "./routes/contracts.js"
 import { applicationVersionsRouter } from "./routes/application-versions.js"
+import { billingSharesRouter } from "./routes/billing-shares.js"
 import { billingsRouter } from "./routes/billings.js"
 import { projectsAnnualRouter } from "./routes/projects-annual.js"
 import { subcontractsRouter } from "./routes/subcontracts.js"
@@ -206,6 +207,7 @@ app.use(projectDuplicateRouter) // /projects/:id/duplicate、/projects/:id/linea
 app.use(projectDocumentsRouter)
 app.use(contractsRouter)
 app.use(applicationVersionsRouter) // /projects/:id/application-versions（申請單版本；2026-11-10）
+app.use(billingSharesRouter) // /projects/:id/billing-shares（每期款獎金分潤；2026-11-11）
 app.use(billingsRouter)
 app.use(subcontractsRouter)
 app.use(clientsRouter)

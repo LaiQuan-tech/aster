@@ -18,6 +18,7 @@ import type {
   Subcontract,
   UpdateProjectExtBody,
 } from "./projects-ext-api";
+import type { ShareEdit } from "./project-billing-shares";
 
 /* ============================================================ 版面 == */
 
@@ -131,6 +132,15 @@ export const APPLICATION_STAGE_SPANS = [2, 2, 1, 3, 3, 2, 3] as const;
 export const APPLICATION_STAGE_HEADERS = ["階段", "金額", "%", "發票號碼", "發票日期", "入帳日期", "備註"] as const;
 
 /**
+ * 看得到每期款獎金分潤的人（2026-11-11，access.billingShares）：付款階段改成 9 欄
+ * 階段｜金額｜%｜發票號碼｜發票日期｜入帳日期｜獎金分潤｜備註｜發獎金日。
+ * Word 的 16 欄格線切不出 9 個夠寬的格子（最右一欄只有 43 twips），所以這時付款階段改畫在自己的小格線裡，
+ * 欄寬比例如下（fr）；看不到的人維持上面 7 欄、與 Word 原版相同。
+ */
+export const APPLICATION_STAGE_BONUS_HEADERS = ["階段", "金額", "%", "發票號碼", "發票日期", "入帳日期", "獎金分潤", "備註", "發獎金日"] as const;
+export const APPLICATION_STAGE_BONUS_WEIGHTS = [1.9, 1.15, 0.8, 1.1, 1.2, 1.2, 1.3, 1.25, 1.2] as const;
+
+/**
  * 發包區（2026-11-09 業主改版）：每家發包單位一列、由上到下排；表頭一列「#｜發包單位｜聯絡資料｜項目｜發包金額｜請款依據｜（移除）」，
  * 發包小計／其他支出／利潤／毛利率放在列表下方一列。「移除」欄只在可編輯的螢幕版出現（列印不印）。
  */
@@ -233,6 +243,8 @@ export interface ApplicationSheetDraft {
   subRemovedIds: string[];
   /** 移除發包的理由（後端 deleteReason）。 */
   subDeleteReason: string;
+  /** 每期款獎金分潤的修改（2026-11-11；key 同 stageEdits）。只有 access.editBillingShares 的人會有內容。 */
+  shareEdits: Record<string, ShareEdit>;
 }
 
 /** 申請單上屬於客戶名冊的格子（「採購承辦」＝聯絡人姓名＋電話兩個欄位）。 */
@@ -316,6 +328,7 @@ export function applicationSheetDraftOf(project: ProjectDetail, disciplines: rea
     subExtraRows: 0,
     subRemovedIds: [],
     subDeleteReason: "",
+    shareEdits: {},
   };
 }
 
