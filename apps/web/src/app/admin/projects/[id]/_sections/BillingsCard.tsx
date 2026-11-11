@@ -25,6 +25,7 @@ import {
   type ProjectMoney,
 } from "@/lib/projects-ext-api";
 import { billingRowTag, receiptSummaryText } from "@/lib/project-application-sheet";
+import { BILLING_UPDATE_FAILED_NOTICE, billingUpdateFailedIds, keepFailedBillingDraftRows } from "@/lib/project-application-sheet-save";
 import { fmtMoney, todayKey, humanError, type Setter } from "./shared";
 
 interface BillingsCardProps {
@@ -103,9 +104,16 @@ export function BillingsCard({
     setError(null);
     try {
       // 整批端點：draft 是由已存檔的期程建出來的（含期別、說明、百分比、預定日原值），這裡只改了人工指定金額與理由。
-      const res = await saveBillingSchedule(projectId, draft);
+      const sent = draft;
+      const res = await saveBillingSchedule(projectId, sent);
       setSchedule(res);
       await load();
+      // 後端回 update_failed 的期別沒寫成：load() 會用已存檔的值重建草稿，這幾期要把剛才的輸入放回去。
+      const failed = billingUpdateFailedIds(res.warnings);
+      if (failed.size > 0) {
+        setDraft((fresh) => keepFailedBillingDraftRows(fresh, sent, failed));
+        setError(BILLING_UPDATE_FAILED_NOTICE);
+      }
     } catch (err) {
       setError(humanizeBillingError(err, humanError(err, "儲存人工指定金額失敗")));
     } finally {

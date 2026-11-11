@@ -144,7 +144,7 @@ export function createFakeSupabase() {
   const rpcCalls: Array<{ name: string; args: Row }> = []
   const rpcHandlers: Record<string, (args: Row) => RpcResult | Promise<RpcResult>> = {}
   /** 一次性的錯誤注入（見檔頭）。 */
-  const injected: Array<{ table: string; action: "select" | "insert" | "update" | "delete" | "upsert"; error: PgError }> = []
+  const injected: Array<{ table: string; action: "select" | "insert" | "update" | "delete" | "upsert"; error: PgError; skip?: number }> = []
   /** 列級 CHECK（見檔頭）：回傳違反訊息，null＝通過。 */
   const checks: Record<string, (row: Row) => string | null> = {}
   /** 唯一索引（見檔頭）：每個資料表一組一組的欄位。 */
@@ -186,8 +186,13 @@ export function createFakeSupabase() {
 
       const injectedAt = injected.findIndex((entry) => entry.table === table && entry.action === action)
       if (injectedAt >= 0) {
-        const [entry] = injected.splice(injectedAt, 1)
-        return { data: null, error: entry!.error }
+        const pending = injected[injectedAt]!
+        if (pending.skip && pending.skip > 0) {
+          pending.skip--
+        } else {
+          injected.splice(injectedAt, 1)
+          return { data: null, error: pending.error }
+        }
       }
       const violation = (candidates: Row[]): string | null => {
         const check = checks[table]
@@ -364,9 +369,9 @@ export function createFakeSupabase() {
     idSeq = 0
   }
 
-  /** 讓下一次對 `table` 的 `action` 回傳 `error`（一次性，見檔頭）。 */
-  function injectError(entry: { table: string; action: "select" | "insert" | "update" | "delete" | "upsert"; error: PgError }) {
-    injected.push(entry)
+  /** 讓下一次對 `table` 的 `action` 回傳 `error`（一次性，見檔頭）；`skip: n`＝先放過 n 次，第 n+1 次才失敗。 */
+  function injectError(entry: { table: string; action: "select" | "insert" | "update" | "delete" | "upsert"; error: PgError; skip?: number }) {
+    injected.push({ ...entry })
   }
 
   return { db, writes, reads, orFilters, rpcCalls, rpcHandlers, checks, uniques, limits, injectError, from, rpc, reset }

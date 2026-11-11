@@ -94,6 +94,8 @@ type Warning =
   | "received_before_billed"
   /** PUT 期程後某期金額變小、已設定的每期獎金分潤合計超過它（只提示，不擋會計改金額；2026-11-11）。 */
   | { billingId: string; code: "shares_exceed_amount" }
+  /** PUT 期程時這一期的更新／軟刪除寫入失敗（非 BS409）：其他期照存，前端保留該期草稿並提示重試。 */
+  | { billingId: string; code: "update_failed" }
 
 /**
  * M22：入帳／撤銷入帳成功後，排程重算該租戶所有未發放的一般獎金批次（2026-10-26 起非同步：
@@ -148,7 +150,11 @@ async function respondSchedule(
   })
 }
 
-/** 載入單一期別並檢查 finance 權限；四個事件端點共用。 */
+/**
+ * 載入單一期別並檢查 finance 權限；四個事件端點共用。
+ * 權限依「這一期自己的 project_id」判斷（不是從網址帶專案），所以不會被拿來改別案的期別；
+ * 各端點寫入時仍再比對 project_id 當第二道防線。
+ */
 async function loadBillingForWrite(tenantId: string, userId: string, billingId: string) {
   const { data: current, error } = await supabaseAdmin
     .from("project_billings")
@@ -164,6 +170,18 @@ async function loadBillingForWrite(tenantId: string, userId: string, billingId: 
   if (!scope.ok) return scope
   if (!scope.finance) return { ok: false as const, status: 403, error: "forbidden" }
   return { ok: true as const, row, self: scope.self }
+}
+
+/**
+ * 期程 PUT 寫到一半被擋（409）時，先把已寫入部分的試算金額與尾差重算一致。
+ * 重算失敗只記 log——仍回原本的 409（不要把「期別有分潤」的明確錯誤蓋成 500）。
+ */
+async function recomputeAfterPartialWrite(tenantId: string, projectId: string): Promise<void> {
+  try {
+    await recomputeBillings(tenantId, projectId)
+  } catch (err) {
+    logger.warn({ projectId, err: err instanceof Error ? err.message : String(err) }, "PUT billings: recompute after partial write failed")
+  }
 }
 
 /** 撤銷事件的理由附在備註後面：欄位本身被清掉，稽核 trigger 留得住舊值，但人要看得到原因。 */
@@ -213,6 +231,9 @@ billingsRouter.get(
  *     那一期的金額就是對帳的依據，改了等於改歷史。
  *   • 已設定每期獎金分潤／發獎金日的期別不可移除（409 `billing_has_bonus_shares`，2026-11-11）。
  *   • 存後若某期分潤合計超過新的期別金額：照存，回 `warnings: [{ billingId, code: "shares_exceed_amount" }]`。
+ *   • 帶 id 但不是**本專案**現有未刪期別 → 整批 400 `unknown_billing`（任何寫入前；擋跨專案改期別，2026-11-11）。
+ *   • 寫到一半被 DB 觸發器擋（BS409）→ 先重算已寫入部分再回 409；其他單期寫入錯誤照存其餘期別，
+ *     回 `warnings: [{ billingId, code: "update_failed" }]`。
  */
 billingsRouter.put(
   "/projects/:id/billings",
@@ -242,7 +263,8 @@ billingsRouter.put(
         return
       }
 
-      const payload = parsed.data.installments
+      // id 一律轉小寫比對（UUID 大小寫不同仍是同一期；不轉的話大寫 id 會被當成「不在 payload」而軟刪除）。
+      const payload = parsed.data.installments.map((item) => (item.id ? { ...item, id: item.id.toLowerCase() } : item))
       const seen = new Set<number>()
       for (const item of payload) {
         if (seen.has(item.installmentNo)) {
@@ -258,11 +280,18 @@ billingsRouter.put(
       }
 
       const existing = await loadBillings(tenantId, projectId)
-      const byId = new Map(existing.map((r) => [r.id, r]))
+      const byId = new Map(existing.map((r) => [r.id.toLowerCase(), r]))
+      // 權限：帶 id 的項目必須是**本專案**現有（未刪）的期別。否則對 A 案有財務權的人可帶同租戶 B 案的
+      // 期別 id 改掉它（還繞過已入帳凍結檢查）。在任何寫入前整批擋下。
+      const unknown = payload.filter((p) => p.id && !byId.has(p.id))
+      if (unknown.length > 0) {
+        res.status(400).json({ error: "unknown_billing", installmentNos: unknown.map((p) => p.installmentNo) })
+        return
+      }
       const keepIds = new Set(payload.map((p) => p.id).filter(Boolean) as string[])
 
       // 已請款的期別不可移除：帳已經出去了，移掉等於讓那筆請款憑空消失。
-      const removing = existing.filter((r) => !keepIds.has(r.id))
+      const removing = existing.filter((r) => !keepIds.has(r.id.toLowerCase()))
       const receivedRemoval = removing.find((r) => r.received_on !== null)
       if (receivedRemoval) {
         res.status(409).json({ error: "received", installmentNo: receivedRemoval.installment_no })
@@ -318,6 +347,7 @@ billingsRouter.put(
         }
       }
 
+      const writeWarnings: Warning[] = []
       // 先軟刪除要移除的，避免期別編號與新增的相撞。
       for (const row of removing) {
         const { error } = await supabaseAdmin
@@ -328,14 +358,18 @@ billingsRouter.put(
             delete_reason: "期程調整",
           })
           .eq("tenant_id", tenantId)
+          .eq("project_id", projectId)
           .eq("id", row.id)
         if (error) {
           if (isBillingHasSharesDbError(error)) {
+            // 前面可能已寫入一部分：先重算，讓已寫入部分的試算金額與尾差一致，再回 409。
+            await recomputeAfterPartialWrite(tenantId, projectId)
             res.status(409).json({ error: "billing_has_bonus_shares", installmentNo: row.installment_no, message: BONUS_SHARES_REMOVE_MESSAGE })
             return
           }
-          // 其他錯誤維持舊行為（不中斷整批），但留紀錄。
+          // 其他錯誤不中斷整批，但回 warnings 讓前端保留這一期的草稿、提示重試。
           logger.warn({ projectId, billingId: row.id, code: error.code }, "PUT billings: soft delete failed")
+          writeWarnings.push({ billingId: row.id, code: "update_failed" })
         }
       }
 
@@ -356,14 +390,18 @@ billingsRouter.put(
             .from("project_billings")
             .update({ ...fields, installment_no: item.installmentNo })
             .eq("tenant_id", tenantId)
+            .eq("project_id", projectId)
             .eq("id", item.id)
           if (error) {
             if (isBillingHasSharesDbError(error)) {
+              // 前面的期別可能已寫入：先重算，讓已寫入部分的試算金額與尾差一致，再回 409。
+              await recomputeAfterPartialWrite(tenantId, projectId)
               res.status(409).json({ error: "billing_has_bonus_shares", installmentNo: item.installmentNo, message: BONUS_SHARES_KIND_MESSAGE })
               return
             }
-            // 其他錯誤維持舊行為（不中斷整批），但留紀錄。
+            // 其他錯誤不中斷整批，但回 warnings 讓前端保留這一期的草稿、提示重試。
             logger.warn({ projectId, billingId: item.id, code: error.code }, "PUT billings: update failed")
+            writeWarnings.push({ billingId: item.id, code: "update_failed" })
           }
         } else {
           const { error } = await supabaseAdmin.from("project_billings").insert({
@@ -388,7 +426,7 @@ billingsRouter.put(
       // 期別金額變小 → 已設定的每期分潤可能超額：不擋（分潤只是紀錄），回 warnings 讓前端顯示黃色提示。
       const over = await billingsOverShareLimit(tenantId, projectId)
       await respondSchedule(tenantId, projectId, res, {
-        warnings: over.map((billingId) => ({ billingId, code: "shares_exceed_amount" as const })),
+        warnings: [...writeWarnings, ...over.map((billingId) => ({ billingId, code: "shares_exceed_amount" as const }))],
       })
     } catch (err) {
       next(err)
@@ -442,7 +480,8 @@ billingsRouter.post(
           billed_amount: billedAmount,
         })
         .eq("tenant_id", tenantId)
-        .eq("id", req.params.id)
+        .eq("project_id", row.project_id)
+        .eq("id", row.id)
       if (error) {
         next(new Error(`POST /billings/${req.params.id}/bill: ${error.message}`))
         return
@@ -490,7 +529,8 @@ billingsRouter.post(
         .from("project_billings")
         .update({ billed_on: null, billed_amount: null, note })
         .eq("tenant_id", tenantId)
-        .eq("id", req.params.id)
+        .eq("project_id", row.project_id)
+        .eq("id", row.id)
       if (error) {
         next(new Error(`POST /billings/${req.params.id}/unbill: ${error.message}`))
         return
@@ -544,7 +584,8 @@ billingsRouter.post(
         .from("project_billings")
         .update(patch)
         .eq("tenant_id", tenantId)
-        .eq("id", req.params.id)
+        .eq("project_id", row.project_id)
+        .eq("id", row.id)
       if (error) {
         next(new Error(`POST /billings/${req.params.id}/invoice: ${error.message}`))
         return
@@ -602,7 +643,8 @@ billingsRouter.post(
         .from("project_billings")
         .update({ invoice_no: null, invoiced_on: null, note })
         .eq("tenant_id", tenantId)
-        .eq("id", req.params.id)
+        .eq("project_id", row.project_id)
+        .eq("id", row.id)
       if (error) {
         next(new Error(`POST /billings/${req.params.id}/uninvoice: ${error.message}`))
         return
@@ -667,7 +709,8 @@ billingsRouter.post(
         .from("project_billings")
         .update(patch)
         .eq("tenant_id", tenantId)
-        .eq("id", req.params.id)
+        .eq("project_id", row.project_id)
+        .eq("id", row.id)
       if (error) {
         next(new Error(`POST /billings/${req.params.id}/receive: ${error.message}`))
         return
@@ -727,7 +770,8 @@ billingsRouter.post(
         .from("project_billings")
         .update({ received_on: null, received_amount: null, note })
         .eq("tenant_id", tenantId)
-        .eq("id", req.params.id)
+        .eq("project_id", row.project_id)
+        .eq("id", row.id)
       if (error) {
         next(new Error(`POST /billings/${req.params.id}/unreceive: ${error.message}`))
         return

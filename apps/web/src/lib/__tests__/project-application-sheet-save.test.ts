@@ -17,6 +17,9 @@ import {
   resolveSheetClient,
   runApplicationSheetSave,
   stageLocks,
+  BILLING_UPDATE_FAILED_NOTICE,
+  billingUpdateFailedIds,
+  keepFailedBillingDraftRows,
   type SheetSaveApi,
   type SheetSaveContext,
 } from "../project-application-sheet-save"
@@ -887,5 +890,60 @@ describe("付款階段金額為主：存後金額＝畫面金額", () => {
     expect(api.saveBillingSchedule).not.toHaveBeenCalled()
     expect(res.steps.find((s) => s.section === "billings")).toMatchObject({ status: "skipped" })
     expect(res.residual.stageEdits.a).toMatchObject({ amount: "500000" })
+  })
+})
+
+describe("期程 PUT 回 update_failed（2026-11-11）：該期草稿保留、提示重試", () => {
+  const ctx = ctxOf({
+    billings: [fakeBilling({}), fakeBilling({ id: "b2", installmentNo: 2, milestone: "第二期" })],
+    subcontracts: [],
+    contracts: [fakeContract({})],
+    money: fakeMoney({ amountUntaxed: 100000, amountSource: "contract" }),
+  })
+  const draft = draftOf(ctx, { stageEdits: { b1: { milestone: "訂金改" }, b2: { milestone: "尾款改" } } })
+
+  it("b1 寫入失敗：b1 草稿整個留著、b2 已存成的拿掉，notices 有「部分期別未儲存成功，請重試」", async () => {
+    const plan = applicationSheetPlan(ctx, draft)
+    expect(plan.errors).toEqual([])
+    const api = fakeApi({
+      saveBillingSchedule: vi.fn(async (inst: InstallmentInputExt[]) => ({
+        installments: inst.map((i, n) => ({ id: i.id ?? `created-${n}`, installmentNo: i.installmentNo })),
+        warnings: [{ billingId: "B1", code: "update_failed" }],
+      })),
+    })
+    const res = await runApplicationSheetSave(plan, draft, api)
+    expect(api.saveBillingSchedule).toHaveBeenCalled()
+    expect(res.residual.stageEdits).toEqual({ b1: { milestone: "訂金改" } })
+    expect(res.notices).toContain(BILLING_UPDATE_FAILED_NOTICE)
+    expect(BILLING_UPDATE_FAILED_NOTICE).toBe("部分期別未儲存成功，請重試")
+  })
+
+  it("沒有 update_failed：草稿照常清掉、不提示", async () => {
+    const plan = applicationSheetPlan(ctx, draft)
+    const api = fakeApi({
+      saveBillingSchedule: vi.fn(async (inst: InstallmentInputExt[]) => ({
+        installments: inst.map((i) => ({ id: i.id ?? "x", installmentNo: i.installmentNo })),
+        warnings: [{ billingId: "b1", code: "shares_exceed_amount" }],
+      })),
+    })
+    const res = await runApplicationSheetSave(plan, draft, api)
+    expect(res.residual.stageEdits).toEqual({})
+    expect(res.notices).not.toContain(BILLING_UPDATE_FAILED_NOTICE)
+  })
+
+  it("billingUpdateFailedIds 只挑 update_failed、id 轉小寫；keepFailedBillingDraftRows 只把失敗那幾期換回送出的值（期程卡）", () => {
+    const ids = billingUpdateFailedIds(["invoiced_before_billed", { billingId: "B1", code: "update_failed" }, { billingId: "b2", code: "shares_exceed_amount" }])
+    expect([...ids]).toEqual(["b1"])
+    expect(billingUpdateFailedIds(undefined).size).toBe(0)
+    const fresh = [
+      { id: "b1", installmentNo: 1, overrideAmount: null, overrideReason: null },
+      { id: "b2", installmentNo: 2, overrideAmount: 5000, overrideReason: "已存" },
+    ]
+    const sent = [
+      { id: "b1", installmentNo: 1, overrideAmount: 1234, overrideReason: "談價" },
+      { id: "b2", installmentNo: 2, overrideAmount: 5000, overrideReason: "已存" },
+    ]
+    expect(keepFailedBillingDraftRows(fresh, sent, ids)).toEqual([sent[0], fresh[1]])
+    expect(keepFailedBillingDraftRows(fresh, sent, new Set())).toEqual(fresh)
   })
 })

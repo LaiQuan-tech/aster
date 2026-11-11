@@ -1020,6 +1020,40 @@ export function isBonusSharesConflict(err: unknown): boolean {
   return !!e && (e.code === "billing_has_bonus_shares" || (typeof e.message === "string" && e.message.includes("billing_has_bonus_shares")));
 }
 
+/** 期程 PUT 有期別寫入失敗（warnings 帶 update_failed）時給使用者的提示。 */
+export const BILLING_UPDATE_FAILED_NOTICE = "部分期別未儲存成功，請重試";
+
+/**
+ * 期程 PUT 回的 warnings 裡「這一期寫入失敗」（code: update_failed；後端其他期照存）→ 期別 id（小寫）。
+ * 這些期別的草稿不能清掉，要留著讓使用者重試。
+ */
+export function billingUpdateFailedIds(warnings: ReadonlyArray<BillingScheduleWarning> | undefined): Set<string> {
+  const out = new Set<string>();
+  for (const w of warnings ?? []) {
+    if (typeof w === "string" || w.code !== "update_failed" || !w.billingId) continue;
+    out.add(w.billingId.toLowerCase());
+  }
+  return out;
+}
+
+/**
+ * 期程卡（BillingsCard）存檔後：重新載入的草稿 `fresh` 裡，寫入失敗（`failed`，小寫 id）的期別換回剛才送出的那一列，
+ * 其他期別用最新資料。失敗的期別若已不在最新資料裡（例如軟刪除失敗）就不補回。
+ */
+export function keepFailedBillingDraftRows<T extends { id?: string | null }>(
+  fresh: readonly T[],
+  sent: readonly T[],
+  failed: ReadonlySet<string>,
+): T[] {
+  if (failed.size === 0) return [...fresh];
+  const sentById = new Map(sent.filter((r) => r.id).map((r) => [String(r.id).toLowerCase(), r]));
+  return fresh.map((row) => {
+    const id = row.id ? row.id.toLowerCase() : null;
+    if (!id || !failed.has(id)) return row;
+    return sentById.get(id) ?? row;
+  });
+}
+
 /**
  * 期程 PUT 回的 warnings 裡「某期分潤超過新的期別金額」（只提示，不擋會計改金額）→ 黃色提示文字。
  * 期別用申請單上的稱呼（一般期別依期別編號排第 N 列；代墊款＝技師公會代墊），不帶任何分潤內容。
@@ -1140,6 +1174,8 @@ export async function runApplicationSheetSave(
   const idOf = new Map<string, string>();
   for (const key of Object.keys(draft.stageEdits)) if (!key.startsWith("new-")) idOf.set(key, key);
   let scheduleOk = true;
+  /** 期程 PUT 回 update_failed 的期別（小寫 id）：草稿保留不清。 */
+  let failedStageIds = new Set<string>();
   if (stages.installments) {
     const installments = stages.installments;
     const autoShells = stages.autoShells ?? [];
@@ -1158,10 +1194,17 @@ export async function runApplicationSheetSave(
         if (row) idOf.set(c.key, row.id);
       }
       notices.push(...shareExceedNotices(res.warnings, res.installments));
+      failedStageIds = billingUpdateFailedIds(res.warnings);
+      if (failedStageIds.size > 0) notices.push(BILLING_UPDATE_FAILED_NOTICE);
     });
     if (scheduleOk) {
       const next: Record<string, StageEdit> = {};
       for (const [key, edit] of Object.entries(residual.stageEdits)) {
+        // 後端說這一期沒寫成（update_failed）：整個草稿留著，下次儲存重送。
+        if (failedStageIds.has((idOf.get(key) ?? key).toLowerCase())) {
+          next[key] = edit;
+          continue;
+        }
         const rest = withoutKeys(edit, ["milestone", "percentage", "amount", "overrideReason", "note"]);
         if (Object.keys(rest).length === 0) continue;
         next[idOf.get(key) ?? key] = rest;
