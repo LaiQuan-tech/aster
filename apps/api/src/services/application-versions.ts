@@ -202,6 +202,8 @@ export interface VersioningOutcome {
 export async function withApplicationVersioning<T>(
   ctx: { tenantId: string; projectId: string; empId: string | null; source: string },
   mutate: () => Promise<T>,
+  /** 寫入結果是否「真的寫成功」：回 false（例如列已被刪除、0 列更新）就不建版。預設一律建版判斷。 */
+  succeeded: (result: T) => boolean = () => true,
 ): Promise<{ result: T; versioning: VersioningOutcome }> {
   let before: { amount: number | null; snapshot: ApplicationSnapshot } | null = null
   try {
@@ -214,7 +216,7 @@ export async function withApplicationVersioning<T>(
     before = null
   }
   const result = await mutate()
-  if (!before) return { result, versioning: { versionNo: null, warning: null } }
+  if (!before || !succeeded(result)) return { result, versioning: { versionNo: null, warning: null } }
   try {
     const after = await currentAmountUntaxed(ctx.tenantId, ctx.projectId)
     if (after === before.amount) return { result, versioning: { versionNo: null, warning: null } }

@@ -25,7 +25,13 @@ import {
   type ProjectMoney,
 } from "@/lib/projects-ext-api";
 import { billingRowTag, receiptSummaryText } from "@/lib/project-application-sheet";
-import { BILLING_UPDATE_FAILED_NOTICE, billingUpdateFailedIds, keepFailedBillingDraftRows } from "@/lib/project-application-sheet-save";
+import {
+  BILLING_ROW_GONE_NOTICE,
+  BILLING_UPDATE_FAILED_NOTICE,
+  billingUpdateFailedIds,
+  hasBillingRowGone,
+  keepFailedBillingDraftRows,
+} from "@/lib/project-application-sheet-save";
 import { fmtMoney, todayKey, humanError, type Setter } from "./shared";
 
 interface BillingsCardProps {
@@ -114,6 +120,8 @@ export function BillingsCard({
         setDraft((fresh) => keepFailedBillingDraftRows(fresh, sent, failed));
         setError(BILLING_UPDATE_FAILED_NOTICE);
       }
+      // 有期別在讀取後被刪除（或整個專案已刪除）：沒寫進去，提示重新整理。
+      if (hasBillingRowGone(res.warnings)) setError(BILLING_ROW_GONE_NOTICE);
     } catch (err) {
       setError(humanizeBillingError(err, humanError(err, "儲存人工指定金額失敗")));
     } finally {

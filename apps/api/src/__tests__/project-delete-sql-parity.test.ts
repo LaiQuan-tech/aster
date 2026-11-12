@@ -40,7 +40,7 @@ async function loadPglite(): Promise<null | { PGlite: new (o: unknown) => PG; ve
   }
 }
 
-// 與 docs/套用-2026-11-12-刪除專案-修正2.sql 檔頭的 db:replay 指令同一套 base（正式庫實際套用的順序）。
+// 與 docs/套用-2026-11-12-刪除專案-修正3.sql 檔頭的 db:replay 指令同一套 base（正式庫實際套用的順序）。
 const BASE_FILES = [
   "docs/套用-2026-11-08-薪資津貼勞退.sql",
   "docs/套用-2026-11-08-加班基數.sql",
@@ -54,6 +54,7 @@ const BASE_FILES = [
   "docs/套用-2026-11-12-刪除專案.sql",
   "docs/套用-2026-11-12-刪除專案-修正.sql",
   "docs/套用-2026-11-12-刪除專案-修正2.sql",
+  "docs/套用-2026-11-12-刪除專案-修正3.sql",
 ]
 
 const T = "f0000000-0000-4000-8000-0000000000f1"
@@ -81,8 +82,9 @@ const SCENARIOS: Array<{ name: string; sql: string }> = [
     INSERT INTO project_subcontracts (id, tenant_id, project_id) VALUES ($S, '${T}', $P);
     INSERT INTO project_subcontract_payments (tenant_id, subcontract_id, installment_no, accepted_on) VALUES ('${T}', $S, 1, '2026-11-01');` },
   { name: "已刪除副委託底下的已付期款（仍擋）", sql: `
-    INSERT INTO project_subcontracts (id, tenant_id, project_id, deleted_at) VALUES ($S, '${T}', $P, now());
-    INSERT INTO project_subcontract_payments (tenant_id, subcontract_id, installment_no, paid_on, paid_amount) VALUES ('${T}', $S, 1, '2026-10-01', 100);` },
+    INSERT INTO project_subcontracts (id, tenant_id, project_id) VALUES ($S, '${T}', $P);
+    INSERT INTO project_subcontract_payments (tenant_id, subcontract_id, installment_no, paid_on, paid_amount) VALUES ('${T}', $S, 1, '2026-10-01', 100);
+    UPDATE project_subcontracts SET deleted_at = now() WHERE id = $S;` },
   { name: "事務所已代扣", sql: `INSERT INTO project_subcontracts (id, tenant_id, project_id, kind, withholding_date) VALUES ($S, '${T}', $P, 'firm', '2026-11-03');` },
   { name: "非事務所有代扣日（不算代扣）", sql: `INSERT INTO project_subcontracts (id, tenant_id, project_id, kind, withholding_date) VALUES ($S, '${T}', $P, 'subcontract', '2026-11-03');` },
   { name: "專案文件＋分潤異動", sql: `

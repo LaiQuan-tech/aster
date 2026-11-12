@@ -465,7 +465,9 @@ export interface BillingScheduleExt {
 }
 
 /** shares_exceed_amount：某期分潤超過新的期別金額；update_failed：這一期沒寫成（其他期照存），草稿要保留。 */
-export type BillingScheduleWarning = string | { billingId: string; code: "shares_exceed_amount" | "update_failed" | (string & {}) }
+export type BillingScheduleWarning =
+  | string
+  | { billingId: string; code: "shares_exceed_amount" | "update_failed" | "row_gone" | (string & {}) }
 
 export interface InstallmentInputExt extends InstallmentInput {
   kind?: BillingKind
@@ -960,6 +962,8 @@ export interface ProjectDeleteResult {
   unverified?: Array<{ id: string; code: string | null }>
   /** 還原原案的說明，畫面直接顯示；沒有還原時為 null。 */
   restoredMessage?: string | null
+  /** 無法確認的原案提醒（黃色警示，與成功訊息分開）；沒有時為 null。 */
+  unverifiedMessage?: string | null
 }
 
 export function deleteProject(id: string, confirmCode: string) {
@@ -985,7 +989,12 @@ export function humanizeProjectDeleteError(err: unknown): { message: string; blo
   if (code === "project_delete_forbidden" || code === "forbidden") return { message: "只有老闆或平台管理員可以刪除專案", blockers }
   if (code === "confirm_mismatch") return { message: "輸入的序號與此專案不符", blockers }
   if (code === "not_found") return { message: "找不到此專案（可能已被刪除）", blockers }
-  return { message: (err instanceof Error && err.message) || "刪除失敗", blockers }
+  if (code === "conflict_retry") return { message: "資料正在被其他操作修改，請重新整理後再試", blockers }
+  // 其他：優先用後端附的中文說明（serverMessage／body.message），不要把英文錯誤碼丟給使用者。
+  const server = (err as { serverMessage?: unknown } | null)?.serverMessage
+  if (typeof server === "string" && server.trim()) return { message: server, blockers }
+  if (typeof body?.message === "string" && body.message.trim()) return { message: body.message, blockers }
+  return { message: "刪除失敗，請稍後再試", blockers }
 }
 
 /** 分潤改版 #6：只有老闆可以改分潤的兩個錯誤碼。 */

@@ -30,7 +30,7 @@ vi.mock("../services/project-bonus-recompute.js", () => ({
 import { projectsRouter } from "../routes/projects.js"
 import { resetColumnProbeCache } from "../lib/schema-compat.js"
 import { DEFAULT_CODE_FORMAT, nextProjectCode } from "../services/project-code.js"
-import { blockerMessage, confirmMatches, planProjectDelete, restoredMessage } from "../services/project-delete.js"
+import { blockerMessage, confirmMatches, planProjectDelete, restoredMessage, unverifiedMessage } from "../services/project-delete.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 const app = express()
@@ -352,6 +352,7 @@ describe("DELETE /projects/:id — 刪除換案複製的新案，原案解除「
     expect(res.body.restored).toEqual([])
     expect(res.body.unverified).toEqual([])
     expect(res.body.restoredMessage).toBeNull()
+    expect(res.body.unverifiedMessage).toBeNull()
     expect(recompute.calls).toEqual([])
   })
 
@@ -369,15 +370,19 @@ describe("DELETE /projects/:id — 刪除換案複製的新案，原案解除「
     expect(res.body.restored).toEqual([{ id: "o1", code: "AT-115-010", mode: "repointed", archived: true, toId: P2, toCode: "AT-115-017" }])
     expect(res.body.unverified).toEqual([{ id: "o2", code: "AT-115-009" }])
     expect(res.body.restoredMessage).toContain("改由 AT-115-017 取代")
-    expect(res.body.restoredMessage).toContain("AT-115-009")
-    expect(res.body.restoredMessage).toContain("手動檢查")
+    // 無法確認的原案另放 unverifiedMessage（畫面黃色警示），不混進成功訊息
+    expect(res.body.restoredMessage).not.toContain("AT-115-009")
+    expect(res.body.unverifiedMessage).toContain("AT-115-009")
+    expect(res.body.unverifiedMessage).toContain("手動檢查")
   })
 
   it("restoredMessage：restored／unmarked／恢復未封存三種說法", () => {
     expect(restoredMessage([])).toBeNull()
     expect(restoredMessage([{ id: "a", code: "X-1", mode: "restored", archived: false }])).toContain("恢復為未封存")
     expect(restoredMessage([{ id: "a", code: "X-1", mode: "restored", archived: true }])).toContain("回到複製前的封存狀態")
-    expect(restoredMessage([{ id: "a", code: null, mode: "unmarked", archived: true }])).toContain("自行解除封存")
+    expect(restoredMessage([{ id: "a", code: null, mode: "unmarked", archived: true }])).toContain("請手動確認")
+    expect(unverifiedMessage([])).toBeNull()
+    expect(unverifiedMessage([{ id: "b", code: "X-2" }])).toContain("X-2")
   })
 })
 

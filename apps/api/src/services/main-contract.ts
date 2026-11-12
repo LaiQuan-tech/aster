@@ -139,6 +139,14 @@ export async function createMainContract(
   return data as MainContractRow
 }
 
+/** 讀到之後主合約（或整個專案）被刪除：條件更新 0 列（路由回 404，不是 500）。 */
+export class MainContractGoneError extends Error {
+  constructor() {
+    super("main_contract_gone")
+    this.name = "MainContractGoneError"
+  }
+}
+
 export async function upsertMainContract(
   tenantId: string,
   projectId: string,
@@ -157,8 +165,9 @@ export async function upsertMainContract(
         .eq("id", legacy.id)
         .is("deleted_at", null)
         .select(MAIN_CONTRACT_COLS)
-        .single()
-      if (error || !data) throw new Error(`adoptMainContract: ${error?.message ?? "missing row"}`)
+        .maybeSingle()
+      if (error) throw new Error(`adoptMainContract: ${error.message}`)
+      if (!data) throw new MainContractGoneError()
       target = data as MainContractRow
     }
   }
@@ -186,8 +195,9 @@ export async function upsertMainContract(
     .eq("id", target.id)
     .is("deleted_at", null)
     .select(MAIN_CONTRACT_COLS)
-    .single()
-  if (error || !data) throw new Error(`upsertMainContract: ${error?.message ?? "missing row"}`)
+    .maybeSingle()
+  if (error) throw new Error(`upsertMainContract: ${error.message}`)
+  if (!data) throw new MainContractGoneError()
   await recomputeBillings(tenantId, projectId)
   return data as MainContractRow
 }

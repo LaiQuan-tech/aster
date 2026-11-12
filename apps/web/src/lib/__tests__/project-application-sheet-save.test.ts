@@ -952,3 +952,13 @@ describe("期程 PUT 回 update_failed（2026-11-11）：該期草稿保留、�
     expect(keepFailedBillingDraftRows(fresh, sent, new Set())).toEqual(fresh)
   })
 })
+
+describe("期程 PUT 回 row_gone（2026-11-12 刪除專案驗收）", () => {
+  it("hasBillingRowGone 只認 row_gone；提示文字要使用者重新整理", async () => {
+    const { hasBillingRowGone, BILLING_ROW_GONE_NOTICE } = await import("../project-application-sheet-save")
+    expect(hasBillingRowGone([{ billingId: "b1", code: "row_gone" }])).toBe(true)
+    expect(hasBillingRowGone([{ billingId: "b1", code: "update_failed" }, "invoiced_before_billed"])).toBe(false)
+    expect(hasBillingRowGone(undefined)).toBe(false)
+    expect(BILLING_ROW_GONE_NOTICE).toContain("重新整理")
+  })
+})

@@ -94,7 +94,7 @@ describe("送出流程（submitProjectDelete → DeleteProjectDialog）", () => 
       restored: [{ id: "o1", code: "ZZ-115-000", mode: "restored", archived: false }],
       restoredMessage: "原案 ZZ-115-000 已解除「被取代」標記並恢復為未封存",
     }))
-    expect(outcome).toEqual({ kind: "notice", message: "原案 ZZ-115-000 已解除「被取代」標記並恢復為未封存" })
+    expect(outcome).toEqual({ kind: "notice", message: "原案 ZZ-115-000 已解除「被取代」標記並恢復為未封存", warning: null })
     if (outcome.kind !== "notice") return
     const html = renderToStaticMarkup(<DeleteProjectDialog {...base} restoredNotice={outcome.message} />)
     expect(html).toContain('data-testid="delete-project-restored"')
@@ -106,5 +106,41 @@ describe("送出流程（submitProjectDelete → DeleteProjectDialog）", () => 
 
   it("成功、沒有原案說明 → done（直接回列表）", async () => {
     expect(await submitProjectDelete(async () => ({ id: "p1", code: null, deleted: true, restoredMessage: null }))).toEqual({ kind: "done" })
+  })
+})
+
+describe("第三輪驗收：無法確認的原案、錯誤文案", () => {
+  const base: DeleteProjectDialogProps = {
+    project: { code: "ZZ-115-001", name: "假專案" },
+    typed: "ZZ-115-001", busy: false, error: null, blockers: [], restoredNotice: null,
+    onTyped: () => {}, onSubmit: () => {}, onClose: () => {}, onDone: () => {},
+  }
+
+  it("unverifiedMessage → 黃色警示框（role=alert）與成功訊息分開；只有警示時也進入完成狀態", async () => {
+    const outcome = await submitProjectDelete(async () => ({
+      id: "p1", code: "ZZ-115-001", deleted: true, restoredMessage: null,
+      unverifiedMessage: "ZZ-115-000 的封存原因寫著「已由本案取代」，但無法確認…請手動檢查",
+    }))
+    expect(outcome).toMatchObject({ kind: "notice", message: null })
+    if (outcome.kind !== "notice") return
+    const html = renderToStaticMarkup(
+      <DeleteProjectDialog {...base} restoredNotice={outcome.message} unverifiedNotice={outcome.warning} />,
+    )
+    expect(html).toContain('data-testid="delete-project-unverified"')
+    expect(html).toContain('role="alert" data-testid="delete-project-unverified"')
+    expect(html).toContain("bg-amber-50")
+    expect(html).toContain("ZZ-115-000")
+    // 成功訊息框不含警示內容
+    const okBox = html.split('data-testid="delete-project-restored"')[1]!.split("</div>")[0]!
+    expect(okBox).not.toContain("ZZ-115-000")
+    expect(html).toContain('data-testid="delete-project-done"')
+  })
+
+  it("conflict_retry 顯示中文；其他錯誤優先用後端中文 message，不丟英文錯誤碼", () => {
+    expect(humanizeProjectDeleteError(apiErr({ error: "conflict_retry" })).message).toContain("重新整理")
+    const withServer = Object.assign(new Error("some_code"), { body: { error: "some_code" }, serverMessage: "後端的中文說明" })
+    expect(humanizeProjectDeleteError(withServer).message).toBe("後端的中文說明")
+    expect(humanizeProjectDeleteError(apiErr({ error: "weird_code", message: "body 的中文" })).message).toBe("body 的中文")
+    expect(humanizeProjectDeleteError(new Error("internal_server_error")).message).toBe("刪除失敗，請稍後再試")
   })
 })

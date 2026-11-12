@@ -4,7 +4,7 @@ import type { Request, Response, NextFunction } from "express"
  * 刪除專案相關的 DB 錯誤（2026-11-12，migrations 0096／0097）→ 一律 409，不要變成 500：
  *   • PD409 `project_deleted:` ——觸發器 assert_project_not_deleted：所屬專案已刪除。
  *   • RD409 `row_deleted:`     ——同一個觸發器：這一列（期程／合約／副委託）已軟刪除，不能再寫金額／日期。
- *   • 40P01 deadlock／40001 serialization ——刪除與寫入同時進行時偶發；請使用者重試即可。
+ *   • 40P01 deadlock／40001 serialization ——同時寫入時偶發（任何路由都可能）；文案保持中性，請使用者重新整理後再試。
  * 服務層多半把 PostgREST 錯誤包成 `new Error(\`…: ${error.message}\`)` 往上丟（code 會掉），所以同時認 code 與訊息。
  *
  * 跟 period-closed.ts 同一個位置：放在所有路由之後、最後那個 500 處理器之前（app.ts）。
@@ -46,7 +46,7 @@ export function projectDeletedErrorHandler(err: unknown, _req: Request, res: Res
     return
   }
   if (isRetryableConflictError(err)) {
-    res.status(409).json({ error: "conflict_retry", message: "資料正被同時修改（例如專案正在刪除），請稍後重試" })
+    res.status(409).json({ error: "conflict_retry", message: "資料正在被其他操作修改，請重新整理後再試" })
     return
   }
   next(err)

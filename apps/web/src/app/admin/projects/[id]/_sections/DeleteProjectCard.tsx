@@ -21,7 +21,7 @@ import {
 /** 送出一次刪除後畫面要變成什麼（純函式，測試直接驗送出流程）。 */
 export type DeleteSubmitOutcome =
   | { kind: "done" }
-  | { kind: "notice"; message: string }
+  | { kind: "notice"; message: string | null; warning: string | null }
   | { kind: "error"; message: string; blockers: ProjectDeleteBlocker[] };
 
 export async function submitProjectDelete(
@@ -29,7 +29,9 @@ export async function submitProjectDelete(
 ): Promise<DeleteSubmitOutcome> {
   try {
     const result = await run();
-    if (result?.restoredMessage) return { kind: "notice", message: result.restoredMessage };
+    const message = result?.restoredMessage || null;
+    const warning = result?.unverifiedMessage || null;
+    if (message || warning) return { kind: "notice", message, warning };
     return { kind: "done" };
   } catch (err) {
     const h = humanizeProjectDeleteError(err);
@@ -44,6 +46,8 @@ export type DeleteProjectDialogProps = {
   error: string | null;
   blockers: ProjectDeleteBlocker[];
   restoredNotice: string | null;
+  /** 無法確認的原案（黃色警示框，role=alert）。 */
+  unverifiedNotice?: string | null;
   onTyped: (v: string) => void;
   onSubmit: (e: FormEvent) => void;
   onClose: () => void;
@@ -53,6 +57,9 @@ export type DeleteProjectDialogProps = {
 /** 確認框本體（無狀態；DeleteProjectCard 管狀態）。 */
 export function DeleteProjectDialog(props: DeleteProjectDialogProps) {
   const { project, typed, busy, error, blockers, restoredNotice } = props;
+  const unverifiedNotice = props.unverifiedNotice ?? null;
+  // 刪除已完成（有成功說明或有待手動檢查的提醒）：輸入框鎖住、只剩「回專案列表」。
+  const finished = !!restoredNotice || !!unverifiedNotice;
   const expected = (project.code ?? project.name).trim();
   const matches = typed.trim().toLowerCase() === expected.toLowerCase() && expected !== "";
   return (
@@ -87,14 +94,24 @@ export function DeleteProjectDialog(props: DeleteProjectDialogProps) {
             onChange={(e) => props.onTyped(e.target.value)}
             autoComplete="off"
             autoFocus
-            disabled={!!restoredNotice}
+            disabled={finished}
             data-testid="delete-project-confirm-input"
           />
         </div>
 
-        {restoredNotice && (
+        {finished && (
           <div className="mt-3 rounded-lg bg-green-50 p-3 text-sm text-green-800" role="status" data-testid="delete-project-restored">
-            專案已刪除。{restoredNotice}。
+            專案已刪除。{restoredNotice ? `${restoredNotice}。` : ""}
+          </div>
+        )}
+
+        {unverifiedNotice && (
+          <div
+            className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+            role="alert"
+            data-testid="delete-project-unverified"
+          >
+            請手動檢查：{unverifiedNotice}。
           </div>
         )}
 
@@ -114,7 +131,7 @@ export function DeleteProjectDialog(props: DeleteProjectDialogProps) {
         )}
 
         <div className="mt-5 flex flex-wrap justify-end gap-2">
-          {restoredNotice ? (
+          {finished ? (
             <Button onClick={props.onDone} data-testid="delete-project-done">
               回專案列表
             </Button>
@@ -141,13 +158,15 @@ export function DeleteProjectCard({ project, onDeleted }: { project: ProjectDeta
   const [error, setError] = useState<string | null>(null);
   const [blockers, setBlockers] = useState<ProjectDeleteBlocker[]>([]);
   const [restoredNotice, setRestoredNotice] = useState<string | null>(null);
+  const [unverifiedNotice, setUnverifiedNotice] = useState<string | null>(null);
+  const finished = !!restoredNotice || !!unverifiedNotice;
 
   const expected = (project.code ?? project.name).trim();
   const matches = typed.trim().toLowerCase() === expected.toLowerCase() && expected !== "";
 
   function close() {
     if (busy) return;
-    if (restoredNotice) {
+    if (finished) {
       onDeleted();
       return;
     }
@@ -159,7 +178,7 @@ export function DeleteProjectCard({ project, onDeleted }: { project: ProjectDeta
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!matches || busy || restoredNotice) return;
+    if (!matches || busy || finished) return;
     setBusy(true);
     setError(null);
     setBlockers([]);
@@ -167,6 +186,7 @@ export function DeleteProjectCard({ project, onDeleted }: { project: ProjectDeta
     setBusy(false);
     if (outcome.kind === "notice") {
       setRestoredNotice(outcome.message);
+      setUnverifiedNotice(outcome.warning);
       return;
     }
     if (outcome.kind === "error") {
@@ -201,6 +221,7 @@ export function DeleteProjectCard({ project, onDeleted }: { project: ProjectDeta
           error={error}
           blockers={blockers}
           restoredNotice={restoredNotice}
+          unverifiedNotice={unverifiedNotice}
           onTyped={setTyped}
           onSubmit={submit}
           onClose={close}

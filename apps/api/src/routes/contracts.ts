@@ -20,6 +20,7 @@ import {
   loadMainContract,
   serializeMainContract,
   upsertMainContract,
+  MainContractGoneError,
 } from "../services/main-contract.js"
 import { withApplicationVersioning } from "../services/application-versions.js"
 
@@ -246,10 +247,20 @@ contractsRouter.put(
       if (!scope.ok) return res.status(scope.status).json({ error: scope.error })
       if (!scope.finance) return res.status(403).json({ error: "forbidden" })
       // 2026-11-10 申請單版本：合約金額（未稅）有變 → 同一流程內建版（services/application-versions.ts）。
-      const { result: contract, versioning } = await withApplicationVersioning(
-        { tenantId, projectId: req.params.id as string, empId: scope.self.id, source: "PUT /projects/:id/main-contract" },
-        () => upsertMainContract(tenantId, req.params.id as string, scope.self.id, parsed.data),
-      )
+      let contract: Awaited<ReturnType<typeof upsertMainContract>>
+      let versioning: Awaited<ReturnType<typeof withApplicationVersioning>>["versioning"]
+      try {
+        ;({ result: contract, versioning } = await withApplicationVersioning(
+          { tenantId, projectId: req.params.id as string, empId: scope.self.id, source: "PUT /projects/:id/main-contract" },
+          () => upsertMainContract(tenantId, req.params.id as string, scope.self.id, parsed.data),
+        ))
+      } catch (err) {
+        // 讀到之後主合約（或整個專案）被刪除：0 列更新 → 404（2026-11-12 驗收；原本 .single() 會 500）。
+        if (err instanceof MainContractGoneError) {
+          return res.status(404).json({ error: "not_found", message: "主合約已被刪除（或專案已刪除），請重新整理" })
+        }
+        throw err
+      }
       // 分潤改版 #3：合約額變動 → 草稿獎金批次重算（best-effort）。
       await recomputeDraftRunsAfterWrite(tenantId, [req.params.id as string], "PUT /projects/:id/main-contract")
       res.status(200).json({ contract: serializeMainContract(contract), applicationVersion: versioning })
@@ -499,6 +510,8 @@ contractsRouter.patch(
       const { result: written, versioning } = await withApplicationVersioning(
         { tenantId, projectId: row.project_id, empId: scope.self.id, source: "PATCH /contracts/:id" },
         write,
+        // 寫入失敗或合約已被刪除（0 列）：不建申請單版本（2026-11-12 驗收）。
+        (r) => !("error" in r) && !("gone" in r),
       )
       if ("error" in written) {
         next(written.error)
@@ -592,6 +605,8 @@ contractsRouter.delete(
             })
             .eq("tenant_id", tenantId)
             .eq("id", req.params.id)
+            // 已被別人（或專案刪除）先刪掉的不重刪：不覆蓋原本的刪除人／原因（2026-11-12 驗收）。
+            .is("deleted_at", null)
           if (error) return new Error(`DELETE /contracts/${req.params.id}: ${error.message}`)
           await recomputeBillings(tenantId, current.project_id as string)
           return null

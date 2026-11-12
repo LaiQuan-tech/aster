@@ -424,6 +424,8 @@ subcontractsRouter.put(
             .update({ deleted_at: nowIso, deleted_by: scope.self.id, delete_reason: parsed.data.deleteReason, updated_at: nowIso })
             .eq("tenant_id", tenantId)
             .eq("id", s.id)
+            // 已被別人（或專案刪除）先刪掉的不重刪：不覆蓋原本的刪除人／原因（2026-11-12 驗收）。
+            .is("deleted_at", null)
           if (error) {
             next(new Error(`PUT /projects/${projectId}/subcontracts (delete): ${error.message}`))
             return
@@ -433,6 +435,28 @@ subcontractsRouter.put(
 
       const nowIso = new Date().toISOString()
       const touched: string[] = []
+      // 寫入後的收尾（期款重算、稽核、獎金批次重算）。中途因副委託已被刪除而回 404 時，前面已寫入的列也要收尾
+      // （比照期程 PUT 的 recomputeAfterPartialWrite）；部分寫入時收尾失敗只記 log，仍回原本的 404。
+      const finishWrites = async () => {
+        // 下包金額／扣繳參數改了，未付的期款要跟著重算。
+        const refreshed = await loadSubcontracts(tenantId, projectId)
+        const payments = await loadPayments(tenantId, refreshed.map((s) => s.id))
+        for (const s of refreshed) {
+          if (!touched.includes(s.id)) continue
+          await recomputePayments(tenantId, s, payments.filter((p) => p.subcontract_id === s.id))
+        }
+        await writeAuditLog({
+          tenantId,
+          tableName: "project_subcontracts",
+          recordId: projectId,
+          action: "UPDATE",
+          newRow: parsed.data,
+          actorEmpId: scope.self.id,
+          context: "PUT /projects/:id/subcontracts",
+        })
+        // #3：副委託結構變動（期款金額重算等）後，順手重算未發放的獎金批次（best-effort；已付的副委託本來就刪不掉，成本多半不變）。
+        await recomputeBonusRunsBestEffort(tenantId, [projectId], "PUT /projects/:id/subcontracts")
+      }
       for (let i = 0; i < payload.length; i++) {
         const p = payload[i]
         const fields: Record<string, unknown> = {
@@ -467,6 +491,11 @@ subcontractsRouter.put(
             return
           }
           if (!updated || updated.length === 0) {
+            if (touched.length > 0 || removing.length > 0) {
+              await finishWrites().catch((err: unknown) =>
+                console.error(`[subcontracts] PUT partial-write finish failed: ${err instanceof Error ? err.message : String(err)}`),
+              )
+            }
             res.status(404).json({ error: "not_found", message: "這筆副委託已被刪除（或專案已刪除），請重新整理" })
             return
           }
@@ -485,25 +514,7 @@ subcontractsRouter.put(
         }
       }
 
-      // 下包金額／扣繳參數改了，未付的期款要跟著重算。
-      const refreshed = await loadSubcontracts(tenantId, projectId)
-      const payments = await loadPayments(tenantId, refreshed.map((s) => s.id))
-      for (const s of refreshed) {
-        if (!touched.includes(s.id)) continue
-        await recomputePayments(tenantId, s, payments.filter((p) => p.subcontract_id === s.id))
-      }
-
-      await writeAuditLog({
-        tenantId,
-        tableName: "project_subcontracts",
-        recordId: projectId,
-        action: "UPDATE",
-        newRow: parsed.data,
-        actorEmpId: scope.self.id,
-        context: "PUT /projects/:id/subcontracts",
-      })
-      // #3：副委託結構變動（期款金額重算等）後，順手重算未發放的獎金批次（best-effort；已付的副委託本來就刪不掉，成本多半不變）。
-      await recomputeBonusRunsBestEffort(tenantId, [projectId], "PUT /projects/:id/subcontracts")
+      await finishWrites()
       await respondSubcontracts(tenantId, projectId, res)
     } catch (err) {
       next(err)

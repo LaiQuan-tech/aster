@@ -38,6 +38,7 @@ import {
   blockerMessage as deleteBlockerMessage,
   confirmMatches as confirmDeleteMatches,
   restoredMessage as deleteRestoredMessage,
+  unverifiedMessage as deleteUnverifiedMessage,
 } from "../services/project-delete.js"
 import { DEFAULT_AUTO_ARCHIVE_MONTHS } from "../services/project-archive.js"
 import {
@@ -1851,7 +1852,7 @@ projectsRouter.delete(
         res.status(404).json({ error: "not_found" })
         return
       }
-      const restoredMsg = deleteRestoredMessage(result.restored, result.unverified)
+      const restoredMsg = deleteRestoredMessage(result.restored)
       await writeAuditLog({
         tenantId,
         tableName: "projects",
@@ -1881,6 +1882,7 @@ projectsRouter.delete(
         restored: result.restored,
         unverified: result.unverified,
         restoredMessage: restoredMsg,
+        unverifiedMessage: deleteUnverifiedMessage(result.unverified),
       })
     } catch (err) {
       next(err)

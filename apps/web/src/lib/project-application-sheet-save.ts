@@ -1020,6 +1020,14 @@ export function isBonusSharesConflict(err: unknown): boolean {
   return !!e && (e.code === "billing_has_bonus_shares" || (typeof e.message === "string" && e.message.includes("billing_has_bonus_shares")));
 }
 
+/** 期程 PUT 有期別在讀取後被刪除（warnings 帶 row_gone；可能整個專案已刪除）時給使用者的提示（2026-11-12）。 */
+export const BILLING_ROW_GONE_NOTICE = "部分期別已被刪除（或專案已刪除），沒有儲存，請重新整理";
+
+/** warnings 裡有沒有 row_gone。 */
+export function hasBillingRowGone(warnings: ReadonlyArray<BillingScheduleWarning> | undefined): boolean {
+  return (warnings ?? []).some((w) => typeof w !== "string" && w.code === "row_gone");
+}
+
 /** 期程 PUT 有期別寫入失敗（warnings 帶 update_failed）時給使用者的提示。 */
 export const BILLING_UPDATE_FAILED_NOTICE = "部分期別未儲存成功，請重試";
 
@@ -1196,6 +1204,7 @@ export async function runApplicationSheetSave(
       notices.push(...shareExceedNotices(res.warnings, res.installments));
       failedStageIds = billingUpdateFailedIds(res.warnings);
       if (failedStageIds.size > 0) notices.push(BILLING_UPDATE_FAILED_NOTICE);
+      if (hasBillingRowGone(res.warnings)) notices.push(BILLING_ROW_GONE_NOTICE);
     });
     if (scheduleOk && failedStageIds.size > 0) {
       // 有期別 update_failed：這一步不能標 ok（步驟狀態沒有「部分成功」→ 標 failed 並說明）。

@@ -96,6 +96,8 @@ type Warning =
   | { billingId: string; code: "shares_exceed_amount" }
   /** PUT 期程時這一期的更新／軟刪除寫入失敗（非 BS409）：其他期照存，前端保留該期草稿並提示重試。 */
   | { billingId: string; code: "update_failed" }
+  /** PUT 期程時這一期在讀取之後被刪除（或整個專案被刪除）：沒寫進去，前端提示重新整理（2026-11-12）。 */
+  | { billingId: string; code: "row_gone" }
 
 /**
  * M22：入帳／撤銷入帳成功後，排程重算該租戶所有未發放的一般獎金批次（2026-10-26 起非同步：
@@ -378,6 +380,8 @@ billingsRouter.put(
           .eq("tenant_id", tenantId)
           .eq("project_id", projectId)
           .eq("id", row.id)
+          // 已被別人（或專案刪除）先刪掉的不重刪：不覆蓋原本的刪除人／原因（2026-11-12 驗收）。
+          .is("deleted_at", null)
         if (error) {
           if (isBillingHasSharesDbError(error)) {
             // 前面可能已寫入一部分：先重算，讓已寫入部分的試算金額與尾差一致，再回 409。
@@ -404,13 +408,18 @@ billingsRouter.put(
           note: item.note ?? null,
         }
         if (item.id) {
-          const { error } = await supabaseAdmin
+          const { data: updatedRows, error } = await supabaseAdmin
             .from("project_billings")
             .update({ ...fields, installment_no: item.installmentNo })
             .eq("tenant_id", tenantId)
             .eq("project_id", projectId)
             .eq("id", item.id)
             .is("deleted_at", null)
+            .select("id")
+          if (!error && (!updatedRows || updatedRows.length === 0)) {
+            // 讀到之後這一期（或整個專案）被刪除：沒有寫進去，回 row_gone 讓前端提示重新整理（2026-11-12 驗收）。
+            writeWarnings.push({ billingId: item.id, code: "row_gone" })
+          }
           if (error) {
             if (isBillingHasSharesDbError(error)) {
               // 前面的期別可能已寫入：先重算，讓已寫入部分的試算金額與尾差一致，再回 409。
@@ -443,6 +452,21 @@ billingsRouter.put(
         }
       }
 
+      // 每一期都沒寫成（row_gone）且專案已刪除 → 404（不是「部分成功」）。
+      const goneCount = writeWarnings.filter((w) => typeof w !== "string" && w.code === "row_gone").length
+      if (goneCount > 0 && goneCount === payload.filter((i) => i.id).length && payload.every((i) => i.id)) {
+        const { data: proj } = await supabaseAdmin
+          .from("projects")
+          .select("id")
+          .eq("tenant_id", tenantId)
+          .eq("id", projectId)
+          .is("deleted_at", null)
+          .maybeSingle()
+        if (!proj) {
+          res.status(404).json({ error: "not_found", message: "專案已刪除，請重新整理" })
+          return
+        }
+      }
       await recomputeBillings(tenantId, projectId)
       // 期別金額變小 → 已設定的每期分潤可能超額：不擋（分潤只是紀錄），回 warnings 讓前端顯示黃色提示。
       const over = await billingsOverShareLimit(tenantId, projectId)

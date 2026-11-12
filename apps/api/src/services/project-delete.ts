@@ -254,21 +254,24 @@ export function labelBlockers(raw: unknown): DeleteBlocker[] {
     }))
 }
 
-/** 原案處理的說明文字（API 回應 restoredMessage／畫面直接顯示）；沒有任何原案要說明回 null。 */
-export function restoredMessage(restored: RestoredOriginal[], unverified: UnverifiedOriginal[] = []): string | null {
+/** 原案處理的說明文字（API 回應 restoredMessage／畫面綠色訊息）；沒有任何原案回 null。 */
+export function restoredMessage(restored: RestoredOriginal[]): string | null {
   const parts = restored.map((r) => {
     const code = r.code ?? "（無序號）"
     if (r.mode === "repointed") return `原案 ${code} 改由 ${r.toCode ?? "後繼案"} 取代（仍封存，獎金仍由 ${r.toCode ?? "後繼案"} 計）`
-    if (r.mode === "unmarked") return `原案 ${code} 已解除「被取代」標記（仍是封存，需要時請自行解除封存）`
+    if (r.mode === "unmarked") return `原案 ${code} 已解除「被取代」標記（找不到複製前的狀態，仍是封存；請手動確認是否解除封存）`
     return r.archived
       ? `原案 ${code} 已解除「被取代」標記，回到複製前的封存狀態`
       : `原案 ${code} 已解除「被取代」標記並恢復為未封存`
   })
-  if (unverified.length > 0) {
-    const codes = unverified.map((u) => u.code ?? "（無序號）").join("、")
-    parts.push(`${codes} 的封存原因寫著「已由本案取代」，但無法確認是本案複製出來的，系統沒有更動，請手動檢查`)
-  }
   return parts.length > 0 ? parts.join("；") : null
+}
+
+/** 無法確認的原案提醒（API 回應 unverifiedMessage／畫面黃色警示，與成功訊息分開）；沒有回 null。 */
+export function unverifiedMessage(unverified: UnverifiedOriginal[]): string | null {
+  if (unverified.length === 0) return null
+  const codes = unverified.map((u) => u.code ?? "（無序號）").join("、")
+  return `${codes} 的封存原因寫著「已由本案取代」，但無法確認是本案複製出來的（或取代關係有循環），系統沒有更動，請手動檢查`
 }
 
 /**
