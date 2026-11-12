@@ -385,6 +385,8 @@ export function describeBatchPayError(code: string, details?: Record<string, unk
     return `第 ${details.installmentNo} 期尚未驗收，請先在專案頁按「驗收確認」。`
   }
   if (code === "approval_required") return "放款單尚未簽核完成（草稿或送簽中），核准後才能放款。"
+  // 需人工確認：後端附了含單號的中文說明（2026-11-12）。
+  if (code === "manual_check_required" && typeof details?.message === "string" && details.message.trim()) return details.message
   return DISBURSEMENT_ERRORS[code] ?? code
 }
 
@@ -575,6 +577,7 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   invalid_project: "選到的專案不存在。",
   project_deleted: "選到的專案已刪除，不能再新增或修改分攤。",
   subcontract_deleted: "這一期所屬的副委託已被刪除（或專案已刪除），不能付款；請重新整理後把這一筆分攤移除。",
+  manual_check_required: "放款單與期款狀態可能不一致，需人工確認，請聯絡管理員。",
   paid_on_required: "標記已匯款必須填放款日。",
   void: "已作廢的匯款不能再修改。",
   invalid_allocation: "分攤列格式錯誤。",
@@ -598,6 +601,10 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
 
 export function humanizeDisbursementError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : fallback
+  // 後端附了具體說明（已自動作廢的單號、需人工確認的單號，2026-11-12）→ 直接顯示，比通用文案清楚。
+  const body = (err as { body?: { autoVoided?: unknown; error?: unknown } } | null)?.body
+  const server = (err as { serverMessage?: unknown } | null)?.serverMessage
+  if (typeof server === "string" && server.trim() && (body?.autoVoided === true || msg.includes("manual_check_required"))) return server
   for (const [code, text] of Object.entries(DISBURSEMENT_ERRORS)) {
     if (msg.includes(code)) return text
   }

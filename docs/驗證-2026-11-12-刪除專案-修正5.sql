@@ -67,7 +67,9 @@ SELECT item, ok, detail FROM (
             EXISTS (SELECT 1 FROM public.project_billings b WHERE b.project_id = p.id AND b.deleted_at IS NULL)
             OR EXISTS (SELECT 1 FROM public.contracts c WHERE c.project_id = p.id AND c.deleted_at IS NULL)
             OR EXISTS (SELECT 1 FROM public.project_subcontracts s WHERE s.project_id = p.id AND s.deleted_at IS NULL)
-            OR EXISTS (SELECT 1 FROM public.disbursement_allocations x WHERE x.project_id = p.id)
+            OR EXISTS (SELECT 1 FROM public.disbursement_allocations x
+                        JOIN public.disbursements d ON d.id = x.disbursement_id AND d.status <> 'void'
+                       WHERE x.project_id = p.id)
             OR EXISTS (SELECT 1 FROM public.attendance_sheet_days d WHERE d.project_id = p.id)
             OR EXISTS (SELECT 1 FROM public.bonus_run_items i WHERE i.project_id = p.id)
             OR EXISTS (SELECT 1 FROM public.project_documents d WHERE d.project_id = p.id)
