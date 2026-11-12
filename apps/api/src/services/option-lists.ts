@@ -50,6 +50,19 @@ export type OptionListDef = {
   usage: readonly OptionUsageSource[]
   /** 可以新增／改名／排序／停用／刪除的角色（employees.role）；讀取不限（登入即可）。 */
   manageRoles: readonly string[]
+  /** 老闆本人（tenants.features.approval.fallbackApproverEmpId）也可管理；platform_admin 視同老闆（lib/boss.ts）。 */
+  bossCanManage?: boolean
+  /** 單一名稱的字數上限（預設 OPTION_LABEL_MAX）。 */
+  labelMax?: number
+  /** 這份清單最多幾項（預設 OPTION_LIST_MAX_ITEMS）。 */
+  maxItems?: number
+  /**
+   * 非管理者的「快速加入」（POST /option-lists/:key/items，只能新增、不能改名／排序／刪除）：
+   *   • "project_editor"：能編輯專案的人——財務層（可建案）或對 body.projectId 那個案子有 finance 權限
+   *     （services/project-scope.ts canManageProject：lead／部門主管／老闆…）。
+   * 沒設＝只有管理者能新增。
+   */
+  quickAdd?: "project_editor"
 }
 
 export const CLIENT_CATEGORY_LIST_KEY = "client_category"
@@ -71,7 +84,30 @@ export const OPTION_LISTS: readonly OptionListDef[] = [
     // 比照客戶名冊的寫入權限（routes/clients.ts：POST／PATCH 是 requireFinance）。
     manageRoles: FINANCE_ROLES,
   },
+  {
+    key: "design_discipline",
+    title: "設計內容科別選項",
+    description:
+      "專案申請單「專案明細 → 設計內容（科別／服務項目）」科別欄的下拉建議。能編輯專案的人可在輸入框旁「加入常用選項」；刪除、排序、停用在這裡。專案上存的是文字，刪除或改名不影響既有專案。名稱最多 20 字、最多 50 項。",
+    defaults: [
+      { code: "electrical", label: "電機", sortOrder: 10 },
+      { code: "hvac", label: "空調", sortOrder: 20 },
+      { code: "fire", label: "消防", sortOrder: 30 },
+      { code: "sewage", label: "汙水", sortOrder: 40 },
+      { code: "fees", label: "規費", sortOrder: 50 },
+    ],
+    // 設計內容存的是科別文字（不是 code），沒有資料引用 code → 永遠可刪、刪了不影響既有專案。
+    usage: [],
+    // 業主 2026-11-12：刪除／排序限老闆／platform_admin／HR 管理員（沿用設定頁權限）。
+    manageRoles: ["hr_admin", "platform_admin"],
+    bossCanManage: true,
+    labelMax: 20,
+    maxItems: 50,
+    quickAdd: "project_editor",
+  },
 ]
+
+export const DESIGN_DISCIPLINE_LIST_KEY = "design_discipline"
 
 const LIST_BY_KEY: ReadonlyMap<string, OptionListDef> = new Map(OPTION_LISTS.map((def) => [def.key, def]))
 
@@ -82,6 +118,13 @@ export function findOptionList(key: string): OptionListDef | undefined {
 
 export function canManageOptionList(role: string | null | undefined, def: OptionListDef): boolean {
   return !!role && def.manageRoles.includes(role)
+}
+
+export function labelMaxOf(def: OptionListDef): number {
+  return def.labelMax ?? OPTION_LABEL_MAX
+}
+export function maxItemsOf(def: OptionListDef): number {
+  return def.maxItems ?? OPTION_LIST_MAX_ITEMS
 }
 
 /** 選項名稱最長 40 字（與 PUT 的驗證一致）。 */
@@ -332,7 +375,11 @@ function orderUpdates(existing: readonly OptionExisting[], changes: readonly Opt
  *   • 套用後超過 OPTION_LIST_MAX_ITEMS 項 → too_many_items。
  * 更新只列出真的有變的欄位；沒變的項目不產生寫入。新項目沒給 sortOrder 就排在最後（每項加 10）、預設啟用。
  */
-export function planOptionPut(existing: readonly OptionExisting[], items: readonly OptionPutItem[]): OptionPutPlan {
+export function planOptionPut(
+  existing: readonly OptionExisting[],
+  items: readonly OptionPutItem[],
+  maxItems: number = OPTION_LIST_MAX_ITEMS,
+): OptionPutPlan {
   const byCode = new Map(existing.map((row) => [row.code, row]))
 
   const seen = new Set<string>()
@@ -344,7 +391,7 @@ export function planOptionPut(existing: readonly OptionExisting[], items: readon
   }
 
   const created = items.filter((item) => item.code === undefined)
-  if (existing.length + created.length > OPTION_LIST_MAX_ITEMS) return { ok: false, error: "too_many_items" }
+  if (existing.length + created.length > maxItems) return { ok: false, error: "too_many_items" }
 
   // 名稱重複：payload 沒提到的項目維持原名；payload 的項目依序佔名稱，後來的撞到就是重複。
   const owners = new Set<string>()
@@ -377,4 +424,36 @@ export function planOptionPut(existing: readonly OptionExisting[], items: readon
   }
 
   return { ok: true, updates: orderUpdates(existing, changes), inserts }
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * 快速加入（POST /option-lists/:key/items）：純函式
+ * ────────────────────────────────────────────────────────────────── */
+
+export type OptionQuickAddPlan =
+  | { ok: true; kind: "exists"; code: string }
+  | { ok: true; kind: "insert"; row: OptionInsertRow }
+  | { ok: false; error: "invalid_label" | "label_too_long" | "too_many_items" }
+
+/**
+ * 輸入框「加入常用選項」：名稱去頭尾空白後
+ *   • 空字串 → invalid_label；超過 `labelMax` → label_too_long；
+ *   • 已有同名（正規化後比：大小寫、全半形不分；停用的也算）→ exists（回既有 code，不新增、不改動）；
+ *   • 否則清單已滿 `maxItems` → too_many_items；不然排在最後新增（啟用）。
+ */
+export function planOptionQuickAdd(
+  existing: readonly OptionExisting[],
+  rawLabel: string,
+  limits: { labelMax: number; maxItems: number },
+): OptionQuickAddPlan {
+  const label = rawLabel.trim()
+  if (!label) return { ok: false, error: "invalid_label" }
+  if (label.length > limits.labelMax) return { ok: false, error: "label_too_long" }
+  const key = optionLabelKey(label)
+  const hit = existing.find((row) => optionLabelKey(row.label) === key)
+  if (hit) return { ok: true, kind: "exists", code: hit.code }
+  if (existing.length >= limits.maxItems) return { ok: false, error: "too_many_items" }
+  const code = allocateOptionCode(label, new Set(existing.map((row) => row.code)))
+  const tail = Math.max(0, ...existing.map((row) => row.sort_order))
+  return { ok: true, kind: "insert", row: { code, label, sort_order: tail + 10, is_active: true } }
 }

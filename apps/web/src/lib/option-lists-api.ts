@@ -33,6 +33,12 @@ export interface OptionListInfo {
   description: string;
   /** 呼叫者能不能新增／改名／排序／停用／刪除這份清單的項目。 */
   canManage: boolean;
+  /** 名稱字數上限（舊後端沒回＝40）。 */
+  labelMax?: number;
+  /** 項目數上限（舊後端沒回＝200）。 */
+  maxItems?: number;
+  /** 非管理者能不能「快速加入」："project_editor"＝能編輯專案的人；null＝只有管理者。 */
+  quickAdd?: "project_editor" | null;
 }
 
 export interface OptionListDetail extends OptionListInfo {
@@ -82,6 +88,17 @@ export function deleteOptionItem(key: string, code: string) {
   });
 }
 
+/**
+ * 快速加入一項（輸入框旁的「加入常用選項」）。同名（去空白、大小寫／全半形不分）已存在回 `added:false`。
+ * 權限依清單：design_discipline＝能編輯專案的人（建案時是財務層；專案頁帶 `projectId`）。
+ */
+export function quickAddOptionItem(key: string, label: string, projectId?: string | null) {
+  return apiFetch<{ added: boolean; item: OptionItem }>(`/option-lists/${encodeURIComponent(key)}/items`, {
+    method: "POST",
+    body: JSON.stringify(projectId ? { label, projectId } : { label }),
+  });
+}
+
 export function humanizeOptionListError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : fallback;
   // list_not_found 含 not_found，要先判。
@@ -92,7 +109,10 @@ export function humanizeOptionListError(err: unknown, fallback: string): string 
     const count = typeof usage?.usage === "number" ? ` ${usage.usage} 筆` : "";
     return `這個選項已被${count}資料使用，無法刪除，可改為停用。`;
   }
-  if (msg.includes("too_many_items")) return "這份清單的項目太多了（最多 200 項），請先刪掉用不到的。";
+  const max = ((err as ApiError | undefined)?.body as { max?: unknown } | undefined)?.max;
+  if (msg.includes("too_many_items")) return `這份清單的項目太多了（最多 ${typeof max === "number" ? max : 200} 項），請先刪掉用不到的。`;
+  if (msg.includes("label_too_long")) return `名稱太長了（最多 ${typeof max === "number" ? max : 40} 字）。`;
+  if (msg.includes("invalid_label")) return "請先輸入名稱。";
   if (msg.includes("duplicate_item")) return "同一個選項出現了兩次，請重新整理後再試。";
   if (msg.includes("not_found")) return "找不到這個選項，可能已被刪除，請重新整理。";
   if (msg.includes("forbidden")) return "你沒有管理這份清單的權限。";

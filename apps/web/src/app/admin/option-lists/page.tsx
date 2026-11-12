@@ -135,7 +135,7 @@ function OptionListEditor({ info, defaultOpen }: { info: OptionListInfo; default
 
   async function save() {
     setSavedAt(null);
-    const problem = validateOptionRows(rows);
+    const problem = validateOptionRows(rows, labelMax, info.maxItems);
     if (problem) {
       setError(problem);
       return;
@@ -184,6 +184,8 @@ function OptionListEditor({ info, defaultOpen }: { info: OptionListInfo; default
   }
 
   const busy = saving || deletingCode !== null;
+  const labelMax = info.labelMax ?? OPTION_LABEL_MAX;
+  const full = info.maxItems !== undefined && rows.length >= info.maxItems;
 
   return (
     <CollapsibleCard title={info.title} hint={info.description} defaultOpen={defaultOpen}>
@@ -241,7 +243,7 @@ function OptionListEditor({ info, defaultOpen }: { info: OptionListInfo; default
                         <input
                           className={`${inputCls}${dim}`}
                           value={r.label}
-                          maxLength={OPTION_LABEL_MAX}
+                          maxLength={labelMax}
                           placeholder="選項名稱"
                           aria-label="選項名稱"
                           onChange={(e) => patch(r.key, { label: e.target.value })}
@@ -295,7 +297,8 @@ function OptionListEditor({ info, defaultOpen }: { info: OptionListInfo; default
         <button
           type="button"
           className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50"
-          disabled={busy || loading}
+          disabled={busy || loading || full}
+          title={full ? `最多 ${info.maxItems} 項` : undefined}
           onClick={addRow}
         >
           ＋ 新增一項

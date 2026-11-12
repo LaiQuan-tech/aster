@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { formatMoney } from "@/lib/money";
 import { MoneyInput } from "@/components/MoneyInput";
+import { AddDisciplineOptionButton, DesignDisciplineDatalist } from "@/components/DesignDisciplineInput";
 import { ClientCombo } from "@/components/ClientCombo";
 import { VendorCombo } from "@/components/VendorCombo";
 import { Button, ErrorText, PrimaryButton, inputCls, labelCls } from "@/components/admin-ui";
@@ -234,14 +235,17 @@ export function ProjectApplicationForm({
           <div className="space-y-2">
             {draft.designScope.map((row, index) => (
               <div key={index} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_2fr_10rem_auto]">
-                <input className={inputCls} list="project-discipline-options" value={row.discipline} placeholder="科別" onChange={(event) => patch("designScope", draft.designScope.map((item, rowIndex) => rowIndex === index ? { ...item, discipline: event.target.value } : item))} />
+                <div className="flex items-center gap-2">
+                  <input className={inputCls} list="project-discipline-options" value={row.discipline} placeholder="科別" onChange={(event) => patch("designScope", draft.designScope.map((item, rowIndex) => rowIndex === index ? { ...item, discipline: event.target.value } : item))} />
+                  <AddDisciplineOptionButton value={row.discipline} />
+                </div>
                 <input className={inputCls} value={row.item} placeholder="服務項目" onChange={(event) => patch("designScope", draft.designScope.map((item, rowIndex) => rowIndex === index ? { ...item, item: event.target.value } : item))} />
                 {visibility.showFinanceFields ? <MoneyInput className={inputCls} value={row.amount} placeholder="金額" onValueChange={(v) => patch("designScope", draft.designScope.map((item, rowIndex) => rowIndex === index ? { ...item, amount: v } : item))} /> : <span />}
                 <button type="button" className="px-2 text-sm text-red-500" onClick={() => patch("designScope", draft.designScope.filter((_, rowIndex) => rowIndex !== index))}>移除</button>
               </div>
             ))}
           </div>
-          <datalist id="project-discipline-options">{disciplines.map((discipline) => <option key={discipline} value={discipline} />)}</datalist>
+          <DesignDisciplineDatalist id="project-discipline-options" />
         </div>
       </Section>
 

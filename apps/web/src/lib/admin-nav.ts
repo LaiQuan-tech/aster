@@ -459,7 +459,7 @@ export const ADMIN_TABS: Readonly<Record<AdminSectionKey, readonly AdminTab[]>> 
       key: "optionLists",
       label: "選項清單",
       href: "/admin/option-lists",
-      desc: "後台各處「分類」類下拉的選項（目前：客戶名冊的客戶分類），可自行新增、改名、調整順序；用過的選項只能停用，沒用過的才能刪除",
+      desc: "後台各處「分類」類下拉的選項（目前：客戶名冊的客戶分類、專案申請單設計內容的科別），可自行新增、改名、調整順序；用過的選項只能停用，沒用過的才能刪除",
       narrow: true,
     },
     {

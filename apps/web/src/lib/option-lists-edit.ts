@@ -57,7 +57,7 @@ export function normalizeOptionLabel(label: string): string {
  *   • 已存的項目名稱被清空 → 不能存（要拿掉請停用或刪除）；新增卻沒填名稱的空列直接略過。
  *   • 名稱超過 40 字、同清單名稱重複（正規化後比）。
  */
-export function validateOptionRows(rows: readonly OptionRow[]): string | null {
+export function validateOptionRows(rows: readonly OptionRow[], labelMax: number = OPTION_LABEL_MAX, maxItems?: number): string | null {
   const seen = new Set<string>();
   for (const row of rows) {
     const label = row.label.trim();
@@ -65,11 +65,12 @@ export function validateOptionRows(rows: readonly OptionRow[]): string | null {
       if (row.code) return "已存的選項名稱不能空白；要拿掉請勾「停用」，或按「刪除」（沒用過才能刪）。";
       continue;
     }
-    if (label.length > OPTION_LABEL_MAX) return `名稱「${label.slice(0, 10)}…」超過 ${OPTION_LABEL_MAX} 字。`;
+    if (label.length > labelMax) return `名稱「${label.slice(0, 10)}…」超過 ${labelMax} 字。`;
     const key = normalizeOptionLabel(label);
     if (seen.has(key)) return `名稱重複：「${label}」，請改一下再存。`;
     seen.add(key);
   }
+  if (maxItems !== undefined && seen.size > maxItems) return `最多 ${maxItems} 項，請先刪掉用不到的。`;
   return null;
 }
 

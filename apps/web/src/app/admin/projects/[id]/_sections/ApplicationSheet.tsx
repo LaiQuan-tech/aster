@@ -5,11 +5,11 @@ import { Button, PrimaryButton } from "@/components/admin-ui";
 import { ClientCombo } from "@/components/ClientCombo";
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 import { MoneyInput } from "@/components/MoneyInput";
+import { AddDisciplineOptionButton, DesignDisciplineDatalist } from "@/components/DesignDisciplineInput";
 import type { Vendor } from "@/lib/company-api";
 import { companyOptions } from "@/lib/company-options";
 import { createContract, updateContract, type Contract } from "@/lib/projects-api";
 import {
-  COMMON_DISCIPLINES,
   INVOICE_TYPE_LABELS,
   PAYMENT_METHOD_LABELS,
   clientSaveWarningText,
@@ -540,6 +540,7 @@ export function ApplicationSheet({
             {draft.designScope.map((row, idx) => (
               <div key={idx} data-err-field={`designScope:${idx}`} className={`flex flex-wrap items-center gap-1 sm:flex-nowrap ${isBad(`designScope:${idx}`) ? "rounded bg-red-50 ring-1 ring-red-400 print:bg-transparent print:ring-0" : ""}`}>
                 <input aria-label={`設計內容第 ${idx + 1} 列科別`} className={`${cellInput} sm:w-24 sm:flex-none`} list="sheet-discipline-suggestions" placeholder="科別" value={row.discipline} onChange={(e) => patchScopeRow(idx, { discipline: e.target.value })} />
+                <AddDisciplineOptionButton value={row.discipline} projectId={project.id} />
                 <input aria-label={`設計內容第 ${idx + 1} 列項目`} className={`${cellInput} flex-1`} placeholder="服務項目" value={row.item ?? ""} onChange={(e) => patchScopeRow(idx, { item: e.target.value })} />
                 <MoneyInput aria-label={`設計內容第 ${idx + 1} 列金額`} className={`${cellInput} text-right sm:w-32 sm:flex-none`} placeholder="金額" value={row.amount ?? ""} onValueChange={(v) => patchScopeRow(idx, { amount: v === "" ? null : Number(v) })} />
                 <button type="button" className="shrink-0 px-1 text-xs text-gray-400 hover:text-red-600" onClick={() => setDraft((d) => ({ ...d, designScope: d.designScope.filter((_, i) => i !== idx) }))}>
@@ -550,9 +551,7 @@ export function ApplicationSheet({
             <button type="button" className="text-xs font-medium" style={{ color: "var(--brand)" }} onClick={() => set("designScope", [...draft.designScope, { discipline: "", item: "", amount: null }])}>
               ＋ 新增一列
             </button>
-            <datalist id="sheet-discipline-suggestions">
-              {COMMON_DISCIPLINES.map((d) => <option key={d} value={d} />)}
-            </datalist>
+            <DesignDisciplineDatalist id="sheet-discipline-suggestions" />
           </div>
         );
       case "clientName":

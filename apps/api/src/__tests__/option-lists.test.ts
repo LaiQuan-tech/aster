@@ -165,6 +165,9 @@ describe("GET /option-lists — 清單定義", () => {
         title: def.title,
         description: def.description,
         canManage: !!role && def.manageRoles.includes(role),
+        labelMax: def.labelMax ?? OPTION_LABEL_MAX,
+        maxItems: def.maxItems ?? OPTION_LIST_MAX_ITEMS,
+        quickAdd: def.quickAdd ?? null,
       })),
     })
     for (const [token, role] of [
