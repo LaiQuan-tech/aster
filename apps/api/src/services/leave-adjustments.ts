@@ -15,6 +15,11 @@
  * 歷程寫失敗 → 把 entitled 改回原值再報錯（不留下沒有歷程的調整）；補償本身也帶
  * `.eq("entitled", 調整後值)` 樂觀鎖並檢查列數，補償失敗 → 拋「需人工確認」錯誤。
  *
+ * 直接設定剩餘（2026-11-12 業主：「也可以手動更新」）：`targetRemainingHours` 取代 `deltaHours`，
+ * 由**伺服器**依讀到的當下餘額算差額（目標 − 目前剩餘），再走同一條樂觀鎖 update——讀完到寫入
+ * 之間有人改了 entitled → 409 conflict，不會用舊的餘額算出錯的差額。差額 0 → 400 no_change。
+ * 歷程照記差額，原因前面加「設定剩餘為 N 小時」方便事後看懂。
+ *
  * 沒指定桶：只取「期間包含今天」的桶（多個時與扣假 resolveBalanceBucket 同規則：起日最新）。
  * 沒有這種桶時**不改**過期／未開始的桶，改新開一個期間含今天的手動桶，期間沿用該員該假別
  * 既有桶的制度（週年制＝到職日週年期間、曆年制＝本年 1/1–12/31）；判斷不出 → 409 bucket_required。
@@ -103,7 +108,10 @@ export interface AdjustInput {
   employeeId: string
   leaveTypeId: string
   balanceId?: string
-  deltaHours: number
+  /** 增減模式：正＝增加、負＝減少（小時）。與 targetRemainingHours 二擇一。 */
+  deltaHours?: number
+  /** 直接設定模式：把剩餘設成這個值（小時，≥0）；差額由伺服器依當下餘額計算。 */
+  targetRemainingHours?: number
   reason: string
   allowNegative?: boolean
   /** 找不到可用的桶時，新開桶用的曆年（＝今天的年份）。 */
@@ -115,6 +123,14 @@ export interface AdjustResult {
   balance: { id: string; entitled: number; deferred: number; used: number; remaining: number }
   createdBalance: boolean
   negative: boolean
+  /** 實際套用的差額（直接設定模式＝目標 − 調整前剩餘）。 */
+  deltaHours: number
+  remainingBefore: number
+}
+
+/** 直接設定剩餘的差額：目標 − 目前剩餘（兩位小數）。前端預覽與後端共用同一個算法。 */
+export function deltaForTargetRemaining(currentRemaining: number, targetRemaining: number): number {
+  return round2(round2(targetRemaining) - round2(currentRemaining))
 }
 
 interface BucketRow {
@@ -129,14 +145,17 @@ interface BucketRow {
 }
 
 export async function adjustLeaveBalance(input: AdjustInput): Promise<AdjustResult> {
-  const reason = input.reason.trim()
-  if (!reason) throw new LeaveAdjustmentError(400, "reason_required", "請填寫調整原因")
-  const delta = Number.isFinite(input.deltaHours) ? round2(input.deltaHours) : 0
-  if (delta === 0) {
-    throw new LeaveAdjustmentError(400, "invalid_delta", "調整時數不可為 0")
-  }
-  if (Math.abs(delta) > MAX_DELTA_HOURS) {
-    throw new LeaveAdjustmentError(400, "invalid_delta", `單次調整不可超過 ${MAX_DELTA_HOURS} 小時`)
+  const userReason = input.reason.trim()
+  if (!userReason) throw new LeaveAdjustmentError(400, "reason_required", "請填寫調整原因")
+  const setMode = input.targetRemainingHours !== undefined
+  let target = 0
+  if (setMode) {
+    target = Number.isFinite(input.targetRemainingHours) ? round2(input.targetRemainingHours as number) : NaN
+    if (!Number.isFinite(target) || target < 0 || target > MAX_DELTA_HOURS) {
+      throw new LeaveAdjustmentError(400, "invalid_target", `目標剩餘必須介於 0 到 ${MAX_DELTA_HOURS} 小時`)
+    }
+  } else {
+    assertDelta(Number.isFinite(input.deltaHours) ? round2(input.deltaHours as number) : 0)
   }
 
   if (!(await adjustmentsTableReady())) {
@@ -217,6 +236,20 @@ export async function adjustLeaveBalance(input: AdjustInput): Promise<AdjustResu
   const entitledBefore = bucket ? num(bucket.entitled) : 0
   const deferred = bucket ? num(bucket.deferred) : 0
   const used = bucket ? num(bucket.used) : 0
+  const remainingBefore = round2(entitledBefore + deferred - used)
+  let delta: number
+  let reason = userReason
+  if (setMode) {
+    // 以剛讀到的餘額算差額；寫入時的樂觀鎖（.eq entitled）保證這個「目前」沒有被別人改掉。
+    delta = deltaForTargetRemaining(remainingBefore, target)
+    if (delta === 0) {
+      throw new LeaveAdjustmentError(400, "no_change", "目前剩餘已經是這個數字，不需調整", { remainingBefore })
+    }
+    assertDelta(delta)
+    reason = `設定剩餘為 ${target} 小時（原 ${remainingBefore}）：${userReason}`
+  } else {
+    delta = round2(input.deltaHours as number)
+  }
   const entitledAfter = round2(entitledBefore + delta)
   const remainingAfter = round2(entitledAfter + deferred - used)
 
@@ -228,7 +261,7 @@ export async function adjustLeaveBalance(input: AdjustInput): Promise<AdjustResu
   }
   if (remainingAfter < 0 && !input.allowNegative) {
     throw new LeaveAdjustmentError(409, "would_be_negative", "減少後剩餘時數會變成負數", {
-      remainingBefore: round2(entitledBefore + deferred - used),
+      remainingBefore,
       remainingAfter,
     })
   }
@@ -330,6 +363,17 @@ export async function adjustLeaveBalance(input: AdjustInput): Promise<AdjustResu
     balance: { id: bucket.id, entitled: entitledAfter, deferred, used, remaining: remainingAfter },
     createdBalance,
     negative: remainingAfter < 0,
+    deltaHours: delta,
+    remainingBefore,
+  }
+}
+
+function assertDelta(delta: number): void {
+  if (delta === 0) {
+    throw new LeaveAdjustmentError(400, "invalid_delta", "調整時數不可為 0")
+  }
+  if (Math.abs(delta) > MAX_DELTA_HOURS) {
+    throw new LeaveAdjustmentError(400, "invalid_delta", `單次調整不可超過 ${MAX_DELTA_HOURS} 小時`)
   }
 }
 

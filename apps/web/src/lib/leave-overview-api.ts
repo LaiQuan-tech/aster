@@ -121,7 +121,10 @@ export interface AdjustLeaveBody {
   employeeId: string;
   leaveTypeId: string;
   balanceId?: string;
-  deltaHours: number;
+  /** delta（預設）＝增減 deltaHours；set_remaining＝把剩餘設成 targetHours（差額由伺服器依當下餘額算）。 */
+  mode?: "delta" | "set_remaining";
+  deltaHours?: number;
+  targetHours?: number;
   reason: string;
   allowNegative?: boolean;
 }
@@ -130,6 +133,10 @@ export interface AdjustLeaveResult {
   balance: { id: string; entitled: number; deferred: number; used: number; remaining: number };
   createdBalance: boolean;
   negative: boolean;
+  /** 實際套用的差額（小時）。 */
+  deltaHours: number;
+  /** 調整前剩餘（伺服器當下讀到的）。 */
+  remainingBefore: number;
 }
 
 export function adjustLeaveBalance(body: AdjustLeaveBody) {
@@ -141,10 +148,21 @@ export function adjustLeaveBalance(body: AdjustLeaveBody) {
 
 /* ------------------------------------------------------------ 純函式（有測試） */
 
-/** 員工內頁網址。 */
-export function leaveDetailHref(employeeId: string, year?: number): string {
+/**
+ * 員工內頁網址。`leaveTypeId`＋`mode: "set"`＝總覽點格子直接帶入假別並選好「直接設定剩餘」。
+ */
+export function leaveDetailHref(
+  employeeId: string,
+  year?: number,
+  opts: { leaveTypeId?: string; mode?: "set" } = {},
+): string {
   const base = `/admin/leave-balances/${encodeURIComponent(employeeId)}`;
-  return year ? `${base}?year=${year}` : base;
+  const qs = new URLSearchParams();
+  if (year) qs.set("year", String(year));
+  if (opts.leaveTypeId) qs.set("leaveType", opts.leaveTypeId);
+  if (opts.mode) qs.set("mode", opts.mode);
+  const str = qs.toString();
+  return str ? `${base}?${str}` : base;
 }
 
 /**
@@ -160,6 +178,8 @@ export function daysHoursToHours(days: string, hours: string, hoursPerDay = 8): 
 }
 
 export type AdjustDirection = "add" | "subtract";
+/** 調整表單的三種方式：增加／減少／直接設定剩餘為。 */
+export type AdjustMode = AdjustDirection | "set";
 
 /** 單次調整上限（小時），與 API zod 上限一致。 */
 export const MAX_ADJUST_HOURS = 9999.99;
@@ -199,6 +219,35 @@ export function validateAdjustForm(
   if (hours > MAX_ADJUST_HOURS) return { error: `單次調整不可超過 ${MAX_ADJUST_HOURS} 小時` };
   if (!form.reason.trim()) return { error: "請填寫調整原因" };
   return { deltaHours: form.direction === "subtract" ? -hours : hours };
+}
+
+/** 直接設定剩餘的差額：目標 − 目前剩餘（兩位小數；與 API deltaForTargetRemaining 同算法）。 */
+export function deltaToTarget(currentRemaining: number, targetHours: number): number {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  return r2(r2(targetHours) - r2(currentRemaining));
+}
+
+/**
+ * 「直接設定剩餘為」表單驗證：回 `{ targetHours, deltaHours }` 或 `{ error }`。
+ * 目標可為 0（全部歸零）；差額 0 → 提示不需調整。`currentRemaining` 為 null（多期間還沒選）→ 要求先選期間。
+ * 這裡的差額只是預覽；送出時帶 targetHours，實際差額由伺服器依當下餘額計算。
+ */
+export function validateSetRemainingForm(
+  form: Omit<AdjustFormInput, "direction">,
+  currentRemaining: number | null,
+  hoursPerDay = 8,
+): { targetHours: number; deltaHours: number; error?: undefined } | { error: string; targetHours?: undefined; deltaHours?: undefined } {
+  if (!form.leaveTypeId) return { error: "請選擇假別" };
+  if (form.days.trim() === "" && form.hours.trim() === "") return { error: "請輸入要設定的剩餘天數或時數（全部歸零請填 0）" };
+  const target = daysHoursToHours(form.days, form.hours, hoursPerDay);
+  if (target === null) return { error: "天數與時數須為不小於 0 的數字" };
+  if (target > MAX_ADJUST_HOURS) return { error: `剩餘不可超過 ${MAX_ADJUST_HOURS} 小時` };
+  if (currentRemaining === null) return { error: "這個假別有多個期間，請選擇要調整的期間（餘額桶）" };
+  const deltaHours = deltaToTarget(currentRemaining, target);
+  if (deltaHours === 0) return { error: "目前剩餘已經是這個數字，不需調整" };
+  if (Math.abs(deltaHours) > MAX_ADJUST_HOURS) return { error: `單次調整不可超過 ${MAX_ADJUST_HOURS} 小時` };
+  if (!form.reason.trim()) return { error: "請填寫調整原因" };
+  return { targetHours: target, deltaHours };
 }
 
 /** 依「本次調整後剩餘」判斷會不會變負數（前端先提示，送出時再帶 allowNegative）。 */

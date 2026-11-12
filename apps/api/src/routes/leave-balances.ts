@@ -60,6 +60,8 @@ const annualGrantSchema = z.object({
   asOf: z.string().regex(DATE_KEY).optional(),
   dryRun: z.boolean().optional(),
   migrate: z.boolean().optional(),
+  /** 只處理這位員工（員工假別內頁「依到職日重新計算特休」）。 */
+  employeeId: z.string().uuid().optional(),
 })
 
 const BASE_COLS =
@@ -282,7 +284,7 @@ leaveBalancesRouter.put(
 /**
  * POST /leave-balances/annual-grant — 年度給假（W1）。
  *
- * body `{ asOf?, dryRun?, migrate? }`：`dryRun` 先看清單再正式跑（上線步驟 9 要求
+ * body `{ asOf?, dryRun?, migrate?, employeeId? }`（employeeId＝只算這位員工）：`dryRun` 先看清單再正式跑（上線步驟 9 要求
  * 把清單交 HR 核對）；`migrate` 只在上線那次用，把舊的曆年列改成週年期。
  * 與 WP9 的 internal cron 共用 `services/annual-leave.ts` 的同一支函式。
  *
@@ -303,6 +305,22 @@ leaveBalancesRouter.post(
     }
     try {
       const result = await grantAnnualLeave(tenantId, parsed.data)
+      if (parsed.data.employeeId && result.granted.length + result.migrated.length + result.skipped.length === 0) {
+        // 單一員工但名單是空的：不是這個租戶的人 → 404；否則是非在職或沒有到職日。
+        const { data: emp, error } = await supabaseAdmin
+          .from("employees")
+          .select("id")
+          .eq("tenant_id", tenantId)
+          .eq("id", parsed.data.employeeId)
+          .maybeSingle()
+        if (error) throw new Error(`annual-grant employee: ${error.message}`)
+        if (!emp) {
+          res.status(404).json({ error: "employee_not_found", message: "找不到這位員工" })
+          return
+        }
+        res.status(200).json({ ...result, ineligible: "inactive_or_no_hire_date" })
+        return
+      }
       res.status(200).json(result)
     } catch (err) {
       if (err instanceof AnnualLeaveError) {
@@ -497,10 +515,23 @@ const adjustSchema = z.object({
   employeeId: z.string().uuid(),
   leaveTypeId: z.string().uuid(),
   balanceId: z.string().uuid().optional(),
+  /**
+   * delta（預設）＝增減 `deltaHours`；set_remaining＝把剩餘直接設成 `targetHours`，
+   * 差額由伺服器依當下餘額計算（2026-11-12）。
+   */
+  mode: z.enum(["delta", "set_remaining"]).optional(),
   /** 正＝增加、負＝減少（小時）。前端把「天＋時」依 1 天＝N 小時換算後送來。 */
-  deltaHours: z.number().finite().min(-MAX_DELTA_HOURS).max(MAX_DELTA_HOURS),
+  deltaHours: z.number().finite().min(-MAX_DELTA_HOURS).max(MAX_DELTA_HOURS).optional(),
+  /** set_remaining 模式的目標剩餘（小時）。 */
+  targetHours: z.number().finite().min(0).max(MAX_DELTA_HOURS).optional(),
   reason: z.string().max(500),
   allowNegative: z.boolean().optional(),
+}).superRefine((v, ctx) => {
+  if (v.mode === "set_remaining") {
+    if (v.targetHours === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["targetHours"], message: "請填目標剩餘時數" })
+  } else if (v.deltaHours === undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["deltaHours"], message: "請填調整時數" })
+  }
 })
 
 /** POST /leave-balances/adjustments — HR／平台管理員手動增減某員某假別的時數（原因必填、寫歷程）。 */
@@ -523,11 +554,13 @@ leaveBalancesRouter.post(
     }
     try {
       const self = req.auth?.userId ? await resolveSelf(tenantId, req.auth.userId) : null
+      const { mode, deltaHours, targetHours, ...rest } = parsed.data
       const result = await adjustLeaveBalance({
         tenantId,
         actorEmpId: self?.id ?? null,
         today: todayKey(DEFAULT_TIMEZONE),
-        ...parsed.data,
+        ...rest,
+        ...(mode === "set_remaining" ? { targetRemainingHours: targetHours } : { deltaHours }),
       })
       res.status(201).json(result)
     } catch (err) {

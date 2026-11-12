@@ -15,7 +15,7 @@ import {
   sortLeaveTypes,
   summarizeBuckets,
 } from "../services/leave-overview.js"
-import { inferNewPeriod, pickBucketContaining } from "../services/leave-adjustments.js"
+import { deltaForTargetRemaining, inferNewPeriod, pickBucketContaining } from "../services/leave-adjustments.js"
 import { SNAPSHOT_TABLES } from "../services/backup-snapshot.js"
 import { anniversaryPeriod } from "../services/annual-leave.js"
 import { DEFAULT_TIMEZONE, todayKey } from "../lib/tz.js"
@@ -360,6 +360,113 @@ describe("POST /leave-balances/adjustments（驗收修正 2026-10-27）", () => 
     expect(res.status, JSON.stringify(res.body)).toBe(201)
     expect(row(BUCKET).entitled).toBe(24)
     expect(row(OLD_BUCKET).entitled).toBe(10)
+  })
+})
+
+describe("POST /leave-balances/adjustments mode=set_remaining（直接設定剩餘，2026-11-12）", () => {
+  afterEach(() => vi.restoreAllMocks())
+  const row = (id: string) => fake.db.leave_balances!.find((b) => b.id === id)!
+  const setTo = (token: string, targetHours: number, extra: Record<string, unknown> = {}) =>
+    adjust(token, { mode: "set_remaining", targetHours, reason: "盤點後更正", ...extra })
+
+  it("目前剩 48 → 設為 80：伺服器算差額 +32，entitled 56→88，歷程記差額與「設定剩餘」字樣", async () => {
+    const res = await setTo(HR, 80)
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(res.body).toMatchObject({ deltaHours: 32, remainingBefore: 48, balance: { entitled: 88, remaining: 80 } })
+    expect(fake.db.leave_balance_adjustments![0]).toMatchObject({ delta_hours: 32, entitled_before: 56, entitled_after: 88, created_by_emp_id: HR_ID })
+    expect(fake.db.leave_balance_adjustments![0].reason).toContain("設定剩餘為 80 小時")
+    expect(fake.db.leave_balance_adjustments![0].reason).toContain("盤點後更正")
+  })
+
+  it("設成較少（剩 48 → 20）→ 差額 −28；設成 0 也可以", async () => {
+    const res = await setTo(BOSS, 20)
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(res.body).toMatchObject({ deltaHours: -28, balance: { entitled: 28, remaining: 20 } })
+    const zero = await setTo(HR, 0)
+    expect(zero.status, JSON.stringify(zero.body)).toBe(201)
+    expect(zero.body).toMatchObject({ deltaHours: -20, balance: { remaining: 0 } })
+  })
+
+  it("以伺服器「當下」餘額計算：前端畫面停在舊值（剩 48），但 DB 已被扣到剩 40 → 設 80 時差額是 +40", async () => {
+    row(BUCKET).used = 16 // 送出前別人核了一張 8 小時的假
+    const res = await setTo(HR, 80)
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(res.body).toMatchObject({ deltaHours: 40, remainingBefore: 40, balance: { entitled: 96, remaining: 80 } })
+  })
+
+  it("讀完餘額後、寫入前被別人改了 entitled → 409 conflict（不會用舊值算錯差額）", async () => {
+    const original = fake.from
+    vi.spyOn(fake, "from").mockImplementation((table: string) => {
+      const builder = original(table)
+      if (table === "leave_balances") {
+        const update = builder.update
+        builder.update = (value: Record<string, unknown>) => {
+          row(BUCKET).entitled = 60
+          return update(value)
+        }
+      }
+      return builder
+    })
+    const res = await setTo(HR, 80)
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("conflict")
+    expect(row(BUCKET).entitled).toBe(60)
+    expect(fake.db.leave_balance_adjustments).toHaveLength(0)
+  })
+
+  it("目標＝目前剩餘 → 400 no_change，不寫任何東西", async () => {
+    const res = await setTo(HR, 48)
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: "no_change", remainingBefore: 48 })
+    expect(row(BUCKET).entitled).toBe(56)
+    expect(fake.db.leave_balance_adjustments).toHaveLength(0)
+  })
+
+  it("缺 targetHours、負的目標 → 400 invalid_body；原因空白 → 400 reason_required", async () => {
+    const missing = await adjust(HR, { mode: "set_remaining" })
+    expect(missing.status).toBe(400)
+    expect(missing.body.error).toBe("invalid_body")
+    const neg = await setTo(HR, -8)
+    expect(neg.status).toBe(400)
+    expect(neg.body.error).toBe("invalid_body")
+    const blank = await setTo(HR, 80, { reason: "  " })
+    expect(blank.status).toBe(400)
+    expect(blank.body.error).toBe("reason_required")
+    expect(row(BUCKET).entitled).toBe(56)
+  })
+
+  it("權限：一般員工、會計 → 403，不動資料", async () => {
+    for (const token of [STAFF, ACCT]) {
+      const res = await setTo(token, 80)
+      expect(res.status, token).toBe(403)
+    }
+    expect(row(BUCKET).entitled).toBe(56)
+    expect(fake.db.leave_balance_adjustments).toHaveLength(0)
+  })
+
+  it("該假別還沒有桶 → 設為 16 等同新增 16（新開手動桶）", async () => {
+    const res = await setTo(HR, 16, { leaveTypeId: PERSONAL, balanceId: undefined })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    expect(res.body).toMatchObject({ createdBalance: true, deltaHours: 16, remainingBefore: 0 })
+  })
+
+  it("annual-grant 單一員工：一般員工／會計 → 403；employeeId 格式錯 → 400", async () => {
+    for (const token of [STAFF, ACCT]) {
+      const res = await as(token).post("/leave-balances/annual-grant", { employeeId: STAFF_ID, dryRun: true })
+      expect(res.status, token).toBe(403)
+    }
+    const bad = await as(HR).post("/leave-balances/annual-grant", { employeeId: "nope", dryRun: true })
+    expect(bad.status).toBe(400)
+  })
+})
+
+describe("deltaForTargetRemaining", () => {
+  it("目標 − 目前剩餘，兩位小數", () => {
+    expect(deltaForTargetRemaining(48, 80)).toBe(32)
+    expect(deltaForTargetRemaining(48, 20)).toBe(-28)
+    expect(deltaForTargetRemaining(10.1, 10.3)).toBe(0.2)
+    expect(deltaForTargetRemaining(-4, 0)).toBe(4)
+    expect(deltaForTargetRemaining(48, 48)).toBe(0)
   })
 })
 

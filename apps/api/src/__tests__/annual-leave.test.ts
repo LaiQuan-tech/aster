@@ -420,4 +420,32 @@ describe("grantAnnualLeave — 發放／搬遷／跳過（假 DB）", () => {
   it("asOf 格式錯 → invalid_as_of", async () => {
     await expect(grantAnnualLeave(TENANT, { asOf: "2026/09/22" })).rejects.toMatchObject({ code: "invalid_as_of" })
   })
+
+  it("employeeId：只處理這一位（其他人不在清單、不寫入）；再按一次冪等", async () => {
+    const res = await grantAnnualLeave(TENANT, { asOf: ASOF, employeeId: "e-junior" })
+    expect(res.granted.map((g) => [g.employeeId, g.days, g.entitledHours])).toEqual([["e-junior", 7, 56]])
+    expect(res.skipped).toHaveLength(0)
+    expect(insertedRows).toHaveLength(1)
+    expect(insertedRows[0]).toMatchObject({ employee_id: "e-junior", period_start: "2026-05-01", source: "auto" })
+
+    insertedRows = []
+    const again = await grantAnnualLeave(TENANT, { asOf: ASOF, employeeId: "e-junior" })
+    expect(again.granted).toHaveLength(0)
+    expect(again.skipped.map((s2) => [s2.employeeId, s2.reason])).toEqual([["e-junior", "already_granted"]])
+    expect(insertedRows).toHaveLength(0)
+  })
+
+  it("employeeId＋dryRun：只回這一位的預覽，不寫入；別人已有的桶不影響判斷", async () => {
+    fakeDb.leave_balances.push({ id: "b-other", tenant_id: TENANT, leave_type_id: "lt-annual", employee_id: "e-junior", year: 2026, period_start: "2026-05-10", period_end: "2027-05-09", source: "auto", used: 0 })
+    const res = await grantAnnualLeave(TENANT, { asOf: ASOF, dryRun: true, employeeId: "e-senior" })
+    expect(res.granted.map((g) => [g.employeeId, g.periodStart, g.days])).toEqual([["e-senior", "2026-05-10", 15]])
+    expect(insertedRows).toHaveLength(0)
+  })
+
+  it("employeeId 是非在職員工 → 清單為空、不寫入", async () => {
+    fakeDb.employees.push({ id: "e-left", tenant_id: TENANT, emp_no: "A4", name: "離職", status: "inactive", hire_date: "2019-01-01" })
+    const res = await grantAnnualLeave(TENANT, { asOf: ASOF, employeeId: "e-left" })
+    expect([...res.granted, ...res.migrated, ...res.skipped]).toHaveLength(0)
+    expect(insertedRows).toHaveLength(0)
+  })
 })

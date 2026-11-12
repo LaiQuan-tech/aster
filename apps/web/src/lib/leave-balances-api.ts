@@ -45,6 +45,8 @@ export interface AnnualGrantResult {
   granted: AnnualGrantEntry[];
   migrated: AnnualGrantEntry[];
   skipped: AnnualGrantEntry[];
+  /** 單一員工模式且該員非在職或沒填到職日時才有。 */
+  ineligible?: "inactive_or_no_hire_date";
 }
 
 export interface AnnualGrantBody {
@@ -54,7 +56,17 @@ export interface AnnualGrantBody {
   dryRun?: boolean;
   /** true ＝ 同時把該員的曆年列搬成週年期（上線一次性）。 */
   migrate?: boolean;
+  /** 只處理這位員工（員工假別內頁「依到職日重新計算特休」）。 */
+  employeeId?: string;
 }
+
+/** 年度給假 skip 原因的中文說明（總覽批次與員工內頁共用）。 */
+export const ANNUAL_GRANT_SKIP_REASONS: Record<string, string> = {
+  calendar_basis: "規則設為曆年制，不自動給假",
+  not_hired_yet: "到職日晚於基準日",
+  under_six_months: "年資未滿 6 個月",
+  already_granted: "本期已有餘額桶",
+};
 
 export function runAnnualGrant(body: AnnualGrantBody = {}) {
   return apiFetch<AnnualGrantResult>("/leave-balances/annual-grant", {

@@ -19,6 +19,7 @@ import {
 } from "@/lib/admin-api";
 import { fmtHm, localDateKey } from "@/lib/ess-format";
 import {
+  ANNUAL_GRANT_SKIP_REASONS as SKIP_REASONS,
   balancePeriodLabel,
   balanceSourceClass,
   balanceSourceLabel,
@@ -54,13 +55,6 @@ function todayKey(): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
-
-const SKIP_REASONS: Record<string, string> = {
-  calendar_basis: "規則設為曆年制，不自動給假",
-  not_hired_yet: "到職日晚於基準日",
-  under_six_months: "年資未滿 6 個月",
-  already_granted: "本期已有餘額桶",
-};
 
 // useSearchParams 需要 Suspense 邊界（next build 的 CSR bailout 規則）。
 export default function LeaveBalancesPage() {

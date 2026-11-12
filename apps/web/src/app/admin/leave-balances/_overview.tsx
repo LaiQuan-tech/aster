@@ -3,7 +3,8 @@
 /**
  * 假別剩餘總覽（2026-10-27 業主：「一個頁面就可以看到大家的假別剩餘狀況」）。
  * 一人一列、欄＝假別（依租戶實際有餘額桶的假別動態產生，常用的在前）；每格大字剩餘、小字已用／總額，
- * 30 天內到期且仍有剩餘的格子掛「到期」標籤。點姓名或整列進員工內頁 /admin/leave-balances/[employeeId]。
+ * 30 天內到期且仍有剩餘的格子掛「到期」標籤。點姓名或整列進員工內頁 /admin/leave-balances/[employeeId]；
+ * HR 點某一格（2026-11-12）→ 內頁直接帶入該假別並選好「直接設定剩餘為」（?leaveType=…&mode=set）。
  * 表頭與姓名欄凍結（sticky），表格自己捲動。資料來源：GET /leave-balances/overview（lib/leave-overview-api.ts）。
  */
 import { useCallback, useEffect, useState } from "react";
@@ -101,7 +102,7 @@ export function LeaveOverviewPanel({
             {data ? <span className="ml-2 text-xs font-normal text-gray-400">{data.rows.length} 人</span> : null}
           </h2>
           <p className="mt-0.5 text-xs text-gray-400">
-            每格大字＝剩餘，小字＝已用／總額（目前有效的期間）；1 天＝{perDay ?? 8} 小時。點姓名進內頁看明細與手動調整。
+            每格大字＝剩餘，小字＝已用／總額（目前有效的期間）；1 天＝{perDay ?? 8} 小時。點姓名進內頁看明細{data?.canAdjust ? "；點格子直接設定該假別剩餘" : "與手動調整"}。
           </p>
         </div>
         <button
@@ -162,8 +163,25 @@ export function LeaveOverviewPanel({
                     const cell = row.cells[type.id];
                     const tone = cellTone(cell);
                     const exp = cell ? expiringLabel(cell.expiring) : null;
+                    const setHref = data.canAdjust
+                      ? leaveDetailHref(row.employeeId, year, { leaveTypeId: type.id, mode: "set" })
+                      : null;
                     return (
-                      <td key={type.id} className="border-b border-gray-100 px-3 py-2 text-center group-hover:bg-gray-50">
+                      <td
+                        key={type.id}
+                        className={`border-b border-gray-100 px-3 py-2 text-center group-hover:bg-gray-50 ${
+                          setHref ? "hover:!bg-blue-50 hover:ring-1 hover:ring-inset hover:ring-blue-200" : ""
+                        }`}
+                        title={setHref ? `直接設定 ${row.name} 的${type.name}剩餘` : undefined}
+                        onClick={
+                          setHref
+                            ? (e) => {
+                                e.stopPropagation();
+                                router.push(setHref);
+                              }
+                            : undefined
+                        }
+                      >
                         {cell ? (
                           <>
                             <p className={`text-base font-semibold tabular-nums whitespace-nowrap ${TONE_CLS[tone]}`}>

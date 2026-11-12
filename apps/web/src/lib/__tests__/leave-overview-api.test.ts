@@ -8,6 +8,8 @@ import {
   remainingAfter,
   signedDelta,
   validateAdjustForm,
+  validateSetRemainingForm,
+  deltaToTarget,
   type OverviewCell,
 } from "../leave-overview-api";
 
@@ -92,3 +94,44 @@ describe("顯示小工具", () => {
     expect(leaveDetailHref("abc")).toBe("/admin/leave-balances/abc");
   });
 });
+
+describe("直接設定剩餘為（2026-11-12）", () => {
+  const form = (days: string, hours: string, reason = "盤點更正") => ({ days, hours, reason, leaveTypeId: "t" });
+
+  it("deltaToTarget：目標 − 目前剩餘，兩位小數", () => {
+    expect(deltaToTarget(48, 80)).toBe(32);
+    expect(deltaToTarget(48, 20)).toBe(-28);
+    expect(deltaToTarget(10.1, 10.3)).toBe(0.2);
+    expect(deltaToTarget(-4, 0)).toBe(4);
+  });
+
+  it("目前剩 6 天（48h）→ 設為 10 天 → targetHours 80、差額 +32；7.5 小時制換算", () => {
+    expect(validateSetRemainingForm(form("10", ""), 48)).toEqual({ targetHours: 80, deltaHours: 32 });
+    expect(validateSetRemainingForm(form("2", "4"), 48)).toEqual({ targetHours: 20, deltaHours: -28 });
+    expect(validateSetRemainingForm(form("1", "0"), 0, 7.5)).toEqual({ targetHours: 7.5, deltaHours: 7.5 });
+  });
+
+  it("可設為 0（全部歸零）；但兩欄都空白要提示", () => {
+    expect(validateSetRemainingForm(form("0", ""), 12)).toEqual({ targetHours: 0, deltaHours: -12 });
+    expect(validateSetRemainingForm(form("", ""), 12).error).toContain("全部歸零請填 0");
+  });
+
+  it("差額 0 → 提示不需調整；多期間未選（current=null）→ 要求選期間", () => {
+    expect(validateSetRemainingForm(form("6", ""), 48).error).toContain("不需調整");
+    expect(validateSetRemainingForm(form("6", ""), null).error).toContain("請選擇要調整的期間");
+  });
+
+  it("負數／非數字、沒選假別、原因空白 → 錯誤", () => {
+    expect(validateSetRemainingForm(form("-1", ""), 48).error).toBeDefined();
+    expect(validateSetRemainingForm({ ...form("1", ""), leaveTypeId: "" }, 48).error).toBe("請選擇假別");
+    expect(validateSetRemainingForm(form("10", "", "  "), 48).error).toBe("請填寫調整原因");
+  });
+
+  it("leaveDetailHref 帶假別與 mode=set（總覽點格子）", () => {
+    expect(leaveDetailHref("abc", 2026, { leaveTypeId: "t1", mode: "set" })).toBe(
+      "/admin/leave-balances/abc?year=2026&leaveType=t1&mode=set",
+    );
+    expect(leaveDetailHref("abc", undefined, { leaveTypeId: "t1" })).toBe("/admin/leave-balances/abc?leaveType=t1");
+  });
+});
+

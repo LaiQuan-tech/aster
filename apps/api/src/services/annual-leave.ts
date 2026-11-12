@@ -13,7 +13,7 @@
  *   entitledHoursFor(days, daily)      天數 → 小時（`leave_balances.entitled` 是**小時**）
  *
  * 一個 IO 函式：
- *   grantAnnualLeave(tenantId, { asOf?, dryRun?, migrate? })
+ *   grantAnnualLeave(tenantId, { asOf?, dryRun?, migrate?, employeeId? })
  *     → `{ granted[], migrated[], skipped[] }`；WP9 的 internal cron 與
  *       `POST /leave-balances/annual-grant` 共用同一支。
  *
@@ -198,6 +198,11 @@ export interface GrantAnnualLeaveOptions {
   dryRun?: boolean
   /** true ＝ 把該員同假別的「本年曆年列」搬成週年期（上線一次性，見 §3.0 D）。 */
   migrate?: boolean
+  /**
+   * 只處理這一位員工（2026-11-12 員工假別內頁「依到職日重新計算特休」）。
+   * 省略＝全租戶（排程／總覽批次）。一樣冪等：同期間已有桶 → already_granted。
+   */
+  employeeId?: string
 }
 
 interface EmployeeRow {
@@ -263,13 +268,14 @@ export async function grantAnnualLeave(
   }
   const leaveTypeId = typeRow.id as string
 
-  const { data: empData, error: empErr } = await supabaseAdmin
+  let empQuery = supabaseAdmin
     .from("employees")
     .select("id, emp_no, name, hire_date")
     .eq("tenant_id", tenantId)
     .eq("status", "active")
     .not("hire_date", "is", null)
-    .order("emp_no", { ascending: true })
+  if (opts.employeeId) empQuery = empQuery.eq("id", opts.employeeId)
+  const { data: empData, error: empErr } = await empQuery.order("emp_no", { ascending: true })
   if (empErr) throw new Error(`grantAnnualLeave (employees): ${empErr.message}`)
   const employees = (empData ?? []) as EmployeeRow[]
 
@@ -307,11 +313,13 @@ export async function grantAnnualLeave(
     return result
   }
 
-  const { data: balData, error: balErr } = await supabaseAdmin
+  let balQuery = supabaseAdmin
     .from("leave_balances")
     .select("id, employee_id, year, period_start, period_end, source, used")
     .eq("tenant_id", tenantId)
     .eq("leave_type_id", leaveTypeId)
+  if (opts.employeeId) balQuery = balQuery.eq("employee_id", opts.employeeId)
+  const { data: balData, error: balErr } = await balQuery
   if (balErr) throw new Error(`grantAnnualLeave (balances): ${balErr.message}`)
   const byEmployee = new Map<string, BalanceRow[]>()
   for (const row of (balData ?? []) as BalanceRow[]) {
