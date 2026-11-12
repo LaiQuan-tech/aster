@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
+import { isProjectDeletedError, isRowDeletedError } from "../middleware/project-deleted.js"
 import { logger } from "../lib/logger.js"
 import { sanitizeSearchTerm } from "../lib/search-term.js"
 import { addDaysKey, dayWindowUtc, todayKey } from "../lib/tz.js"
@@ -1583,6 +1584,17 @@ export async function syncPaymentsOnPay(tenantId: string, d: SyncHeader, allocat
     }
   }
   await assertPaymentsPayable(tenantId, d.id, payments)
+  // 期款所屬副委託已軟刪除（或專案已刪除）：不付款，回明確的 409（2026-11-12 驗收）。
+  const subs = await batch<{ id: string; project_id: string; deleted_at: string | null }>(
+    "project_subcontracts",
+    "id, project_id, deleted_at",
+    tenantId,
+    uniq(payments.map((p) => p.subcontract_id)),
+    "id",
+    false,
+  )
+  const deletedSub = subs.find((s) => !!s.deleted_at)
+  if (deletedSub) throw new DisbursementError(409, "subcontract_deleted", { subcontractId: deletedSub.id })
 
   const nowIso = new Date().toISOString()
   const touched: string[] = []
@@ -1605,7 +1617,12 @@ export async function syncPaymentsOnPay(tenantId: string, d: SyncHeader, allocat
         // 2026-10-27 驗收：兩張放款單分到同一期款並發付款時只能一張成功——期款仍未付、或本來就掛這張單才寫。
         .or(`paid_on.is.null,disbursement_id.eq.${d.id}`)
         .select("id")
-      if (error) throw new Error(`syncPaymentsOnPay: ${error.message}`)
+      if (error) {
+        // 讀到之後副委託被軟刪除／專案被刪除（DB 觸發器 RD409／PD409）：明確的 409，不是 500；已寫的期款照下面還原。
+        if (isRowDeletedError(error)) throw new DisbursementError(409, "subcontract_deleted", { paymentId: a.subcontract_payment_id })
+        if (isProjectDeletedError(error)) throw new DisbursementError(409, "project_deleted", { paymentId: a.subcontract_payment_id })
+        throw new Error(`syncPaymentsOnPay: ${error.message}`)
+      }
       if (!data || data.length === 0) throw new DisbursementError(409, "payment_already_paid", { paymentId: a.subcontract_payment_id })
       touched.push(a.subcontract_payment_id!)
     }
@@ -1702,6 +1719,8 @@ async function recomputeUnpaid(tenantId: string, subcontractId: string): Promise
     .select(SUBCONTRACT_COLS)
     .eq("tenant_id", tenantId)
     .eq("id", subcontractId)
+    // 已軟刪除的副委託不重算（2026-11-12 驗收）。
+    .is("deleted_at", null)
     .maybeSingle()
   if (subErr) throw new Error(`recomputeUnpaid (subcontract): ${subErr.message}`)
   if (!subData) return
@@ -1743,6 +1762,8 @@ async function recomputeUnpaid(tenantId: string, subcontractId: string): Promise
       .update({ amount, withheld_amount: withheld, updated_at: new Date().toISOString() })
       .eq("tenant_id", tenantId)
       .eq("id", p.id)
+    // 讀到之後副委託被軟刪除（或專案被刪除）：觸發器 RD409／PD409，試算重算略過即可（2026-11-12 驗收）。
+    if (upErr && (isRowDeletedError(upErr) || isProjectDeletedError(upErr))) return
     if (upErr) throw new Error(`recomputeUnpaid (update): ${upErr.message}`)
   }
 }

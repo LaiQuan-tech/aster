@@ -954,11 +954,53 @@ describe("期程 PUT 回 update_failed（2026-11-11）：該期草稿保留、�
 })
 
 describe("期程 PUT 回 row_gone（2026-11-12 刪除專案驗收）", () => {
-  it("hasBillingRowGone 只認 row_gone；提示文字要使用者重新整理", async () => {
-    const { hasBillingRowGone, BILLING_ROW_GONE_NOTICE } = await import("../project-application-sheet-save")
+  const ctx = ctxOf({
+    billings: [fakeBilling({}), fakeBilling({ id: "b2", installmentNo: 2, milestone: "第二期" })],
+    subcontracts: [],
+    contracts: [fakeContract({})],
+    money: fakeMoney({ amountUntaxed: 100000, amountSource: "contract" }),
+  })
+  const draft = draftOf(ctx, { stageEdits: { b1: { milestone: "訂金改" }, b2: { milestone: "尾款改" } } })
+
+  it("hasBillingRowGone／billingSaveNotices：只有 row_gone 一個提示；兩種都有時兩個提示都要", async () => {
+    const { hasBillingRowGone, billingSaveNotices, BILLING_ROW_GONE_NOTICE } = await import("../project-application-sheet-save")
     expect(hasBillingRowGone([{ billingId: "b1", code: "row_gone" }])).toBe(true)
     expect(hasBillingRowGone([{ billingId: "b1", code: "update_failed" }, "invoiced_before_billed"])).toBe(false)
     expect(hasBillingRowGone(undefined)).toBe(false)
     expect(BILLING_ROW_GONE_NOTICE).toContain("重新整理")
+    expect(billingSaveNotices([{ billingId: "b1", code: "row_gone" }])).toEqual([BILLING_ROW_GONE_NOTICE])
+    expect(billingSaveNotices([{ billingId: "b1", code: "row_gone" }, { billingId: "b2", code: "update_failed" }])).toEqual([
+      BILLING_UPDATE_FAILED_NOTICE,
+      BILLING_ROW_GONE_NOTICE,
+    ])
+    expect(billingSaveNotices([])).toEqual([])
+  })
+
+  it("申請單儲存只有 row_gone：付款階段這一步標成 warning（黃），不是 ok", async () => {
+    const { BILLING_ROW_GONE_NOTICE } = await import("../project-application-sheet-save")
+    const plan = applicationSheetPlan(ctx, draft)
+    const api = fakeApi({
+      saveBillingSchedule: vi.fn(async (inst: InstallmentInputExt[]) => ({
+        installments: inst.map((i, n) => ({ id: i.id ?? `created-${n}`, installmentNo: i.installmentNo })),
+        warnings: [{ billingId: "b2", code: "row_gone" }],
+      })),
+    })
+    const res = await runApplicationSheetSave(plan, draft, api)
+    expect(res.steps.find((st) => st.section === "billings")).toMatchObject({ status: "warning", message: BILLING_ROW_GONE_NOTICE })
+  })
+
+  it("update_failed 與 row_gone 同時：步驟 failed（update_failed 優先），row_gone 另以 notice 提示", async () => {
+    const { BILLING_ROW_GONE_NOTICE } = await import("../project-application-sheet-save")
+    const plan = applicationSheetPlan(ctx, draft)
+    const api = fakeApi({
+      saveBillingSchedule: vi.fn(async (inst: InstallmentInputExt[]) => ({
+        installments: inst.map((i, n) => ({ id: i.id ?? `created-${n}`, installmentNo: i.installmentNo })),
+        warnings: [{ billingId: "b1", code: "update_failed" }, { billingId: "b2", code: "row_gone" }],
+      })),
+    })
+    const res = await runApplicationSheetSave(plan, draft, api)
+    expect(res.steps.find((st) => st.section === "billings")).toMatchObject({ status: "failed", message: BILLING_UPDATE_FAILED_NOTICE })
+    expect(res.notices).toContain(BILLING_UPDATE_FAILED_NOTICE)
+    expect(res.notices).toContain(BILLING_ROW_GONE_NOTICE)
   })
 })

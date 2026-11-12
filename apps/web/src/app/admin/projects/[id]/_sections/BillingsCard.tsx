@@ -26,10 +26,8 @@ import {
 } from "@/lib/projects-ext-api";
 import { billingRowTag, receiptSummaryText } from "@/lib/project-application-sheet";
 import {
-  BILLING_ROW_GONE_NOTICE,
-  BILLING_UPDATE_FAILED_NOTICE,
   billingUpdateFailedIds,
-  hasBillingRowGone,
+  billingSaveNotices,
   keepFailedBillingDraftRows,
 } from "@/lib/project-application-sheet-save";
 import { fmtMoney, todayKey, humanError, type Setter } from "./shared";
@@ -116,12 +114,10 @@ export function BillingsCard({
       await load();
       // 後端回 update_failed 的期別沒寫成：load() 會用已存檔的值重建草稿，這幾期要把剛才的輸入放回去。
       const failed = billingUpdateFailedIds(res.warnings);
-      if (failed.size > 0) {
-        setDraft((fresh) => keepFailedBillingDraftRows(fresh, sent, failed));
-        setError(BILLING_UPDATE_FAILED_NOTICE);
-      }
-      // 有期別在讀取後被刪除（或整個專案已刪除）：沒寫進去，提示重新整理。
-      if (hasBillingRowGone(res.warnings)) setError(BILLING_ROW_GONE_NOTICE);
+      if (failed.size > 0) setDraft((fresh) => keepFailedBillingDraftRows(fresh, sent, failed));
+      // 有期別寫入失敗（update_failed）與有期別在讀取後被刪除（row_gone）可能同時發生：兩個提示都顯示。
+      const notices = billingSaveNotices(res.warnings);
+      if (notices.length > 0) setError(notices.join(" "));
     } catch (err) {
       setError(humanizeBillingError(err, humanError(err, "儲存人工指定金額失敗")));
     } finally {

@@ -25,6 +25,7 @@ vi.mock("../services/mcp/tools.js", () => ({ createMcpServer: () => ({}), format
 
 import { app } from "../app.js"
 import { resetBillingSharesProbe } from "../services/billing-shares.js"
+import { resetVersionsProbe } from "../services/application-versions.js"
 import { resetColumnProbeCache } from "../lib/schema-compat.js"
 import { fake, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
@@ -157,6 +158,33 @@ describe("讀取之後被刪除（競態）：條件寫入 0 列 → 404／row_g
     }
   })
 
+  it("PATCH /contracts/:id：0 列、但同時有人把它刪掉（銷售金額因此改變）→ 不建申請單版本（驗 succeeded 判斷）", async () => {
+    resetVersionsProbe()
+    fake.db.project_application_versions = []
+    fake.rpcHandlers.record_application_version = () => ({ data: 1, error: null })
+    // 追加減單：合計 100,000＋50,000；它在 PATCH 前一刻被刪 → 合計變 100,000（寫入前後金額不同）。
+    fake.db.contracts.push({ ...(fake.db.contracts[0] as Row), id: "c-803", is_primary: false, doc_type: "change_order", title: "追加減", amount: "50000" })
+    const spy = deleteBeforeUpdate("contracts", () => (row("contracts", "c-803").deleted_at = NOW))
+    try {
+      const res = await request(app).patch("/contracts/c-803").set("Authorization", `Bearer ${T.accountant}`).send({ amount: 60000 })
+      expect(res.status, JSON.stringify(res.body)).toBe(404)
+      expect(row("contracts", "c-803").amount).toBe("50000")
+      expect(fake.rpcCalls.filter((c) => c.name === "record_application_version")).toEqual([])
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("對照組：PATCH /contracts/:id 正常改金額 → 有建申請單版本（確認上一個測試不是空轉）", async () => {
+    resetVersionsProbe()
+    fake.db.project_application_versions = []
+    fake.rpcHandlers.record_application_version = () => ({ data: 1, error: null })
+    fake.db.contracts.push({ ...(fake.db.contracts[0] as Row), id: "c-803", is_primary: false, doc_type: "change_order", title: "追加減", amount: "50000" })
+    const res = await request(app).patch("/contracts/c-803").set("Authorization", `Bearer ${T.accountant}`).send({ amount: 60000 })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(fake.rpcCalls.filter((c) => c.name === "record_application_version")).toHaveLength(1)
+  })
+
   it("PUT /projects/:id/subcontracts：第 2 筆被刪 → 404，但第 1 筆已寫入的照樣收尾（稽核＋期款重算）", async () => {
     const spy = deleteBeforeUpdate("project_subcontracts", () => (row("project_subcontracts", SUB2).deleted_at = NOW), 2)
     try {
@@ -227,6 +255,107 @@ describe("讀取之後被刪除（競態）：條件寫入 0 列 → 404／row_g
     } finally {
       spy.mockRestore()
     }
+  })
+})
+
+describe("第四輪驗收：試算重算略過已刪除的列、副委託 PUT 收尾與移除條件", () => {
+  beforeEach(seedRaceRows)
+
+  it("請款成功後的試算重算碰到「剛被軟刪的期別」→ 0 列略過，請款照樣 200（不再撞 RD409 變 409／500）", async () => {
+    // 仿 DB 觸發器：寫入已刪除的期別一律失敗（沒有 deleted_at 條件的 update 就會撞到）。
+    fake.checks.project_billings = (r) => (r.deleted_at ? "row_deleted: 這一列已刪除，不能再寫入金額／日期（project_billings）" : null)
+    row("project_billings", B3).calculated_amount = "1" // 讓試算重算一定會去更新 B3
+    const spy = deleteBeforeUpdate("project_billings", () => (row("project_billings", B3).deleted_at = NOW), 2)
+    try {
+      const res = await post(T.accountant, `/billings/${B2}/bill`, { billedOn: "2026-04-01" })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      expect(row("project_billings", B2).billed_on).toBe("2026-04-01")
+      expect(row("project_billings", B3).calculated_amount).toBe("1")
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("副委託 PUT 後的期款重算撞到 RD409（副委託剛被刪）→ 略過，主寫入照樣 200", async () => {
+    fake.db.project_subcontract_payments = [{
+      id: "f0000000-0000-4000-8000-000000000821", tenant_id: TENANT_ID, subcontract_id: SUB1, installment_no: 1, percentage: "100",
+      amount: "1000", override_amount: null, override_reason: null, due_when: null, paid_on: null, paid_amount: null, withheld_amount: "0",
+      paying_company_id: null, receipt_issuer_company_id: null, receipt_ref: null, disbursement_id: null, note: null,
+      created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z",
+    }]
+    fake.injectError({ table: "project_subcontract_payments", action: "update", error: { code: "RD409", message: "row_deleted: 副委託已刪除，不能再寫入期款的付款／驗收／金額" } })
+    const res = await request(app)
+      .put(`/projects/${PROJECT}/subcontracts`)
+      .set("Authorization", `Bearer ${T.accountant}`)
+      .send({ subcontracts: [{ id: SUB1, amount: 1500 }, { id: SUB2, amount: 2000 }] })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(row("project_subcontracts", SUB1).amount).toBe(1500)
+  })
+
+  it("副委託 PUT 第一筆就被刪 → 404「沒有儲存任何變更」，不寫稽核（沒有實際寫入就不收尾）", async () => {
+    const spy = deleteBeforeUpdate("project_subcontracts", () => (row("project_subcontracts", SUB1).deleted_at = NOW))
+    try {
+      const res = await request(app)
+        .put(`/projects/${PROJECT}/subcontracts`)
+        .set("Authorization", `Bearer ${T.accountant}`)
+        .send({ subcontracts: [{ id: SUB1, amount: 1500 }, { id: SUB2, amount: 2500 }] })
+      expect(res.status, JSON.stringify(res.body)).toBe(404)
+      expect(res.body.savedCount).toBe(0)
+      expect(res.body.message).toContain("沒有儲存任何變更")
+      expect(fake.db.audit_logs.some((a: Row) => a.context === "PUT /projects/:id/subcontracts")).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("副委託 PUT 第二筆被刪 → 404「前面 1 筆已儲存」，稽核只記實際寫入的那一筆", async () => {
+    const spy = deleteBeforeUpdate("project_subcontracts", () => (row("project_subcontracts", SUB2).deleted_at = NOW), 2)
+    try {
+      const res = await request(app)
+        .put(`/projects/${PROJECT}/subcontracts`)
+        .set("Authorization", `Bearer ${T.accountant}`)
+        .send({ subcontracts: [{ id: SUB1, amount: 1500 }, { id: SUB2, amount: 2500 }] })
+      expect(res.status, JSON.stringify(res.body)).toBe(404)
+      expect(res.body.savedCount).toBe(1)
+      expect(res.body.message).toContain("前面 1 筆已儲存")
+      const audit = fake.db.audit_logs.find((a: Row) => a.context === "PUT /projects/:id/subcontracts")!
+      expect(audit.new_row.written.map((w: Row) => w.id)).toEqual([SUB1])
+      expect(audit.new_row.deleted).toEqual([])
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("副委託 PUT 中途撞到 PD409（專案剛被刪）→ 已寫入的先收尾（稽核），再回 409 project_deleted", async () => {
+    fake.injectError({ table: "project_subcontracts", action: "update", skip: 1, error: { code: "PD409", message: "project_deleted: 專案已刪除，不能再寫入 project_subcontracts" } })
+    const res = await request(app)
+      .put(`/projects/${PROJECT}/subcontracts`)
+      .set("Authorization", `Bearer ${T.accountant}`)
+      .send({ subcontracts: [{ id: SUB1, amount: 1500 }, { id: SUB2, amount: 2500 }] })
+    expect(res.status, JSON.stringify(res.body)).toBe(409)
+    expect(res.body.error).toBe("project_deleted")
+    const audit = fake.db.audit_logs.find((a: Row) => a.context === "PUT /projects/:id/subcontracts")!
+    expect(audit.new_row.written.map((w: Row) => w.id)).toEqual([SUB1])
+  })
+
+  it.each<[string, () => void, string]>([
+    ["期款已驗收", () => {
+      fake.db.project_subcontract_payments = [{ id: "f0000000-0000-4000-8000-000000000822", tenant_id: TENANT_ID, subcontract_id: SUB2, installment_no: 1, paid_on: null, paid_amount: null, accepted_on: "2026-11-01", accepted_by_emp_id: null, acceptance_note: null, created_at: "2026-01-01T00:00:00.000Z" }]
+    }, "accepted"],
+    ["已有請款／放款分攤", () => {
+      fake.db.disbursement_allocations = [{ id: "x-822", tenant_id: TENANT_ID, project_id: PROJECT, subcontract_id: SUB2 }]
+    }, "has_disbursement"],
+  ])("副委託 PUT 移除%s的副委託 → 409（與刪除專案的擋刪條件一致），一筆都沒動", async (_label, seed, code) => {
+    seed()
+    const res = await request(app)
+      .put(`/projects/${PROJECT}/subcontracts`)
+      .set("Authorization", `Bearer ${T.accountant}`)
+      .send({ subcontracts: [{ id: SUB1, amount: 1500 }], deleteReason: "不做了" })
+    expect(res.status, JSON.stringify(res.body)).toBe(409)
+    expect(res.body.error).toBe(code)
+    expect(res.body.message).toBeTruthy()
+    expect(row("project_subcontracts", SUB2).deleted_at).toBeNull()
+    expect(row("project_subcontracts", SUB1).amount).toBe("1000")
   })
 })
 

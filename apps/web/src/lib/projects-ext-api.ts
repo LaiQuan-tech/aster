@@ -670,9 +670,17 @@ export const SUBCONTRACT_ERRORS: Record<string, string> = {
   reason_required: "把已付款的期別改回未付，必須填理由。",
   amount_unknown: "算不出金額，無法標記已付。",
   migration_required: "資料庫尚未更新（副委託事務所／發票欄位），暫時不能選「事務所」，請聯絡管理員。",
+  // 2026-11-12 刪除專案驗收：移除副委託與刪除專案的擋刪條件一致。
+  accepted: "已有驗收紀錄的期別，所屬副委託不能移除（請先撤銷驗收）。",
+  has_disbursement: "這筆副委託已有請款／放款單分攤，不能移除（請先處理放款單）。",
+  row_deleted: "這筆資料已被刪除，不能再寫入金額或日期，請重新整理。",
+  project_deleted: "此專案已刪除，不能再新增或修改相關資料。",
 }
 export function humanizeSubcontractError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : fallback
+  // 中途發現某筆已被刪除（404）：後端訊息說明「前面 N 筆已儲存、其餘未儲存」，直接顯示。
+  const server = (err as { serverMessage?: unknown } | null)?.serverMessage
+  if (msg.includes("not_found") && typeof server === "string" && server.trim()) return server
   for (const [code, text] of Object.entries(SUBCONTRACT_ERRORS)) {
     if (msg.includes(code)) return text
   }

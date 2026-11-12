@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest"
 import { renderToStaticMarkup } from "react-dom/server"
 import { DeleteProjectCard, DeleteProjectDialog, submitProjectDelete, type DeleteProjectDialogProps } from "../DeleteProjectCard"
-import { humanizeProjectDeleteError, type ProjectDetail } from "@/lib/projects-ext-api"
+import { humanizeProjectDeleteError, humanizeSubcontractError, type ProjectDetail } from "@/lib/projects-ext-api"
 
 const apiErr = (body: Record<string, unknown>) => Object.assign(new Error(String(body.error)), { body })
 
@@ -142,5 +142,14 @@ describe("第三輪驗收：無法確認的原案、錯誤文案", () => {
     expect(humanizeProjectDeleteError(withServer).message).toBe("後端的中文說明")
     expect(humanizeProjectDeleteError(apiErr({ error: "weird_code", message: "body 的中文" })).message).toBe("body 的中文")
     expect(humanizeProjectDeleteError(new Error("internal_server_error")).message).toBe("刪除失敗，請稍後再試")
+  })
+})
+
+describe("副委託錯誤文案（2026-11-12 第四輪）", () => {
+  it("移除已驗收／已有分攤 → 中文；中途 404 → 用後端「前面 N 筆已儲存」說明", () => {
+    expect(humanizeSubcontractError(new Error("accepted"), "x")).toContain("驗收")
+    expect(humanizeSubcontractError(new Error("has_disbursement"), "x")).toContain("放款")
+    const gone = Object.assign(new Error("not_found"), { serverMessage: "其中一筆副委託已被刪除（或專案已刪除）：前面 1 筆已儲存、其餘未儲存，請重新整理" })
+    expect(humanizeSubcontractError(gone, "x")).toContain("前面 1 筆已儲存")
   })
 })

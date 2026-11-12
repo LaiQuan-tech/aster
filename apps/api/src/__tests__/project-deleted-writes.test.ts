@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 // 純測試：supabase 換成記憶體版（helpers/fake-supabase.ts），不連任何 DB。
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
 
-import { createDisbursement, DisbursementError, type DisbursementInput } from "../services/disbursements.js"
+import { createDisbursement, DisbursementError, syncPaymentsOnPay, type DisbursementInput } from "../services/disbursements.js"
 import { isProjectDeletedError, projectDeletedErrorHandler } from "../middleware/project-deleted.js"
 import { dangerOf } from "../services/mcp/danger.js"
 import { fake, TENANT_ID } from "./helpers/fake-supabase.js"
@@ -105,5 +105,50 @@ describe("MCP：刪除專案是最高風險", () => {
   it("只精確比對 DELETE /projects/:id：刪專案文件維持原本的中風險；移除成員維持原本的最高風險", () => {
     expect(dangerOf("DELETE", "/projects/x/documents/d")?.tier).toBe("medium")
     expect(dangerOf("DELETE", "/projects/x/members/m")?.tier).toBe("high")
+  })
+})
+
+describe("匯款付款同步（syncPaymentsOnPay）：期款所屬副委託已刪除", () => {
+  const SUB = "f0000000-0000-4000-8000-000000000731"
+  const PAY = "f0000000-0000-4000-8000-000000000732"
+  const header = { id: "dddddddd-0000-4000-8000-0000000007d1", disbursement_no: "D-2026-001", paid_on: "2026-11-12", paying_company_id: COMPANY, receipt_issuer_company_id: null, receipt_ref: null }
+  const allocs = [{ subcontract_payment_id: PAY, amount: 1000, withheld_amount: 0 }]
+  const payment = () => fake.db.project_subcontract_payments!.find((p) => p.id === PAY)!
+  beforeEach(() => {
+    fake.db.project_subcontracts = [{ id: SUB, tenant_id: TENANT_ID, project_id: LIVE, deleted_at: null }]
+    fake.db.project_subcontract_payments = [{
+      id: PAY, tenant_id: TENANT_ID, subcontract_id: SUB, installment_no: 1, percentage: "100", amount: "1000", override_amount: null,
+      override_reason: null, due_when: null, paid_on: null, paid_amount: null, withheld_amount: "0", paying_company_id: null,
+      receipt_issuer_company_id: null, receipt_ref: null, disbursement_id: null, note: null,
+      created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z",
+    }]
+  })
+
+  it("副委託已軟刪除 → 寫入前就 409 subcontract_deleted，期款不動", async () => {
+    fake.db.project_subcontracts![0]!.deleted_at = "2026-11-12T00:00:00.000Z"
+    const err = await syncPaymentsOnPay(TENANT_ID, header, allocs).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(DisbursementError)
+    expect((err as DisbursementError).httpStatus).toBe(409)
+    expect((err as DisbursementError).code).toBe("subcontract_deleted")
+    expect(payment().paid_on).toBeNull()
+  })
+
+  it("檢查之後副委託才被刪（觸發器 RD409）→ 409 subcontract_deleted（不是 500、也沒有靜默吞掉付款）", async () => {
+    fake.injectError({ table: "project_subcontract_payments", action: "update", error: { code: "RD409", message: "row_deleted: 副委託已刪除，不能再寫入期款的付款／驗收／金額" } })
+    const err = await syncPaymentsOnPay(TENANT_ID, header, allocs).catch((e: unknown) => e)
+    expect((err as DisbursementError).code).toBe("subcontract_deleted")
+    expect((err as DisbursementError).httpStatus).toBe(409)
+    expect(payment().paid_on).toBeNull()
+  })
+
+  it("撞到 PD409（專案剛被刪）→ 409 project_deleted", async () => {
+    fake.injectError({ table: "project_subcontract_payments", action: "update", error: { code: "PD409", message: "project_deleted: 專案已刪除，不能再寫入 project_subcontract_payments" } })
+    const err = await syncPaymentsOnPay(TENANT_ID, header, allocs).catch((e: unknown) => e)
+    expect((err as DisbursementError).code).toBe("project_deleted")
+  })
+
+  it("對照組：副委託未刪除 → 正常寫入已付", async () => {
+    expect(await syncPaymentsOnPay(TENANT_ID, header, allocs)).toEqual([PAY])
+    expect(payment().paid_on).toBe("2026-11-12")
   })
 })

@@ -180,6 +180,8 @@ export async function recomputeBillings(tenantId: string, projectId: string): Pr
       })
       .eq("tenant_id", tenantId)
       .eq("id", row.id)
+      // 讀到之後這一期被軟刪除（期程調整、專案刪除）：0 列略過，不讓試算重算撞 RD409 把已成功的主寫入變成錯誤（2026-11-12 驗收）。
+      .is("deleted_at", null)
     if (error) throw new Error(`recomputeBillings: ${error.message}`)
   }
 }

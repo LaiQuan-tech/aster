@@ -40,7 +40,7 @@ async function loadPglite(): Promise<null | { PGlite: new (o: unknown) => PG; ve
   }
 }
 
-// 與 docs/套用-2026-11-12-刪除專案-修正3.sql 檔頭的 db:replay 指令同一套 base（正式庫實際套用的順序）。
+// 與 docs/套用-2026-11-12-刪除專案-修正4.sql 檔頭的 db:replay 指令同一套 base（正式庫實際套用的順序）。
 const BASE_FILES = [
   "docs/套用-2026-11-08-薪資津貼勞退.sql",
   "docs/套用-2026-11-08-加班基數.sql",
@@ -55,6 +55,7 @@ const BASE_FILES = [
   "docs/套用-2026-11-12-刪除專案-修正.sql",
   "docs/套用-2026-11-12-刪除專案-修正2.sql",
   "docs/套用-2026-11-12-刪除專案-修正3.sql",
+  "docs/套用-2026-11-12-刪除專案-修正4.sql",
 ]
 
 const T = "f0000000-0000-4000-8000-0000000000f1"

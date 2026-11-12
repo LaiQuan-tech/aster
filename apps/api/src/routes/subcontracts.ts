@@ -27,6 +27,7 @@ import { firstNewlyPickedInactive } from "../services/company-lifecycle.js"
 import { writeAuditLog } from "../services/audit.js"
 import { columnsExist } from "../lib/schema-compat.js"
 import { recomputeBonusRunsBestEffort } from "../services/bonus-run-store.js"
+import { isProjectDeletedError, isRowDeletedError } from "../middleware/project-deleted.js"
 
 export const subcontractsRouter = Router()
 
@@ -311,6 +312,9 @@ async function recomputePayments(tenantId: string, sub: SubcontractRow, payments
       .update({ amount, withheld_amount: withheld, updated_at: new Date().toISOString() })
       .eq("tenant_id", tenantId)
       .eq("id", p.id)
+    // 期款表沒有 deleted_at：讀到之後所屬副委託被軟刪除（或專案被刪除）時 DB 觸發器回 RD409／PD409——
+    // 這只是試算重算，該副委託已不存在，略過即可，不讓已成功的主寫入變成 409／500（2026-11-12 驗收）。
+    if (error && (isRowDeletedError(error) || isProjectDeletedError(error))) return
     if (error) throw new Error(`recomputePayments: ${error.message}`)
   }
 }
@@ -403,7 +407,7 @@ subcontractsRouter.put(
         }
       }
 
-      // 未出現的 → 軟刪；有已付期款的不可移除。
+      // 未出現的 → 軟刪；有已付／已驗收期款、或已有請款放款分攤的不可移除（與刪除專案的擋刪條件一致，2026-11-12 驗收）。
       const keepIds = new Set(payload.map((p) => p.id).filter((v): v is string => !!v))
       const removing = existing.filter((s) => !keepIds.has(s.id))
       if (removing.length > 0) {
@@ -411,32 +415,54 @@ subcontractsRouter.put(
           res.status(400).json({ error: "delete_reason_required", ids: removing.map((s) => s.id) })
           return
         }
-        const paidRows = await loadPayments(tenantId, removing.map((s) => s.id))
-        const paid = paidRows.find((p) => p.paid_on !== null)
+        const removingIds = removing.map((s) => s.id)
+        const paidRows = await loadPayments(tenantId, removingIds)
+        const paid = paidRows.find((p) => p.paid_on !== null || p.paid_amount !== null)
         if (paid) {
-          res.status(409).json({ error: "paid", subcontractId: paid.subcontract_id, installmentNo: paid.installment_no })
+          res.status(409).json({
+            error: "paid",
+            subcontractId: paid.subcontract_id,
+            installmentNo: paid.installment_no,
+            message: `第 ${paid.installment_no} 期已付款，這筆副委託不能移除`,
+          })
           return
         }
-        const nowIso = new Date().toISOString()
-        for (const s of removing) {
-          const { error } = await supabaseAdmin
-            .from("project_subcontracts")
-            .update({ deleted_at: nowIso, deleted_by: scope.self.id, delete_reason: parsed.data.deleteReason, updated_at: nowIso })
-            .eq("tenant_id", tenantId)
-            .eq("id", s.id)
-            // 已被別人（或專案刪除）先刪掉的不重刪：不覆蓋原本的刪除人／原因（2026-11-12 驗收）。
-            .is("deleted_at", null)
-          if (error) {
-            next(new Error(`PUT /projects/${projectId}/subcontracts (delete): ${error.message}`))
-            return
-          }
+        const acceptance = await loadPaymentAcceptance(tenantId, paidRows.map((p) => p.id))
+        const accepted = acceptance ? paidRows.find((p) => !!acceptance.get(p.id)?.accepted_on) : undefined
+        if (accepted) {
+          res.status(409).json({
+            error: "accepted",
+            subcontractId: accepted.subcontract_id,
+            installmentNo: accepted.installment_no,
+            message: `第 ${accepted.installment_no} 期已驗收，這筆副委託不能移除（請先撤銷驗收）`,
+          })
+          return
+        }
+        const { data: allocs, error: allocErr } = await supabaseAdmin
+          .from("disbursement_allocations")
+          .select("id, subcontract_id")
+          .eq("tenant_id", tenantId)
+          .in("subcontract_id", removingIds)
+          .limit(1)
+        if (allocErr) throw new Error(`PUT /projects/${projectId}/subcontracts (allocations): ${allocErr.message}`)
+        if (allocs && allocs.length > 0) {
+          res.status(409).json({
+            error: "has_disbursement",
+            subcontractId: (allocs[0] as { subcontract_id: string }).subcontract_id,
+            message: "這筆副委託已有請款／放款單分攤，不能移除（請先處理放款單）",
+          })
+          return
         }
       }
 
       const nowIso = new Date().toISOString()
       const touched: string[] = []
-      // 寫入後的收尾（期款重算、稽核、獎金批次重算）。中途因副委託已被刪除而回 404 時，前面已寫入的列也要收尾
-      // （比照期程 PUT 的 recomputeAfterPartialWrite）；部分寫入時收尾失敗只記 log，仍回原本的 404。
+      // 實際寫成的內容（稽核只記這些）：deleted＝真的軟刪掉的 id，written＝真的更新／新增的列。
+      const deleted: string[] = []
+      const written: Array<{ id: string; action: "update" | "insert"; index: number }> = []
+      const writeCount = () => deleted.length + written.length
+      // 寫入後的收尾（期款重算、稽核、獎金批次重算）。中途回 404 或出錯（PD409 等）時，前面已寫入的列也要收尾
+      // （比照期程 PUT 的 recomputeAfterPartialWrite）；部分寫入時收尾失敗只記 log，仍回原本的結果／錯誤。
       const finishWrites = async () => {
         // 下包金額／扣繳參數改了，未付的期款要跟著重算。
         const refreshed = await loadSubcontracts(tenantId, projectId)
@@ -450,68 +476,99 @@ subcontractsRouter.put(
           tableName: "project_subcontracts",
           recordId: projectId,
           action: "UPDATE",
-          newRow: parsed.data,
+          newRow: {
+            deleteReason: deleted.length > 0 ? parsed.data.deleteReason ?? null : null,
+            deleted,
+            written: written.map((w) => ({ id: w.id, action: w.action, ...payload[w.index] })),
+          },
           actorEmpId: scope.self.id,
           context: "PUT /projects/:id/subcontracts",
         })
         // #3：副委託結構變動（期款金額重算等）後，順手重算未發放的獎金批次（best-effort；已付的副委託本來就刪不掉，成本多半不變）。
         await recomputeBonusRunsBestEffort(tenantId, [projectId], "PUT /projects/:id/subcontracts")
       }
-      for (let i = 0; i < payload.length; i++) {
-        const p = payload[i]
-        const fields: Record<string, unknown> = {
-          kind: p.kind ?? "subcontract",
-          discipline: p.discipline ?? null,
-          vendor_id: p.vendorId ?? null,
-          vendor_name: p.vendorName ?? null,
-          contact: p.contact ?? null,
-          item: p.item ?? null,
-          amount: p.amount,
-          billing_basis: p.billingBasis ?? null,
-          order_type: p.orderType ?? null,
-          contract_id: p.contractId ?? null,
-          withholding_rate: p.withholdingRate ?? DEFAULT_WITHHOLDING_RATE,
-          withholding_threshold: p.withholdingThreshold ?? DEFAULT_WITHHOLDING_THRESHOLD,
-          sort_order: p.sortOrder ?? i,
-          note: p.note ?? null,
-          updated_at: nowIso,
-          ...(extrasAvailable ? subcontractExtraFields(p) : {}),
-        }
-        if (p.id) {
-          const { data: updated, error } = await supabaseAdmin
+      const finishPartial = async () => {
+        if (writeCount() === 0) return
+        await finishWrites().catch((err: unknown) =>
+          console.error(`[subcontracts] PUT partial-write finish failed: ${err instanceof Error ? err.message : String(err)}`),
+        )
+      }
+
+      try {
+        for (const s of removing) {
+          const { data: gone, error } = await supabaseAdmin
             .from("project_subcontracts")
-            .update(fields)
+            .update({ deleted_at: nowIso, deleted_by: scope.self.id, delete_reason: parsed.data.deleteReason, updated_at: nowIso })
             .eq("tenant_id", tenantId)
-            .eq("id", p.id)
-            // 讀到之後這筆副委託（或整個專案）被刪除：不把發票／代扣寫進已刪除的列（2026-11-12 驗收）→ 404。
+            .eq("id", s.id)
+            // 已被別人（或專案刪除）先刪掉的不重刪：不覆蓋原本的刪除人／原因（2026-11-12 驗收）。
             .is("deleted_at", null)
             .select("id")
-          if (error) {
-            next(new Error(`PUT /projects/${projectId}/subcontracts (update): ${error.message}`))
-            return
-          }
-          if (!updated || updated.length === 0) {
-            if (touched.length > 0 || removing.length > 0) {
-              await finishWrites().catch((err: unknown) =>
-                console.error(`[subcontracts] PUT partial-write finish failed: ${err instanceof Error ? err.message : String(err)}`),
-              )
-            }
-            res.status(404).json({ error: "not_found", message: "這筆副委託已被刪除（或專案已刪除），請重新整理" })
-            return
-          }
-          touched.push(p.id)
-        } else {
-          const { data, error } = await supabaseAdmin
-            .from("project_subcontracts")
-            .insert({ tenant_id: tenantId, project_id: projectId, created_by_emp_id: scope.self.id, ...fields })
-            .select("id")
-            .single()
-          if (error || !data) {
-            next(new Error(`PUT /projects/${projectId}/subcontracts (insert): ${error?.message}`))
-            return
-          }
-          touched.push(data.id as string)
+          if (error) throw new Error(`PUT /projects/${projectId}/subcontracts (delete): ${error.message}`)
+          if (gone && gone.length > 0) deleted.push(s.id)
         }
+
+        for (let i = 0; i < payload.length; i++) {
+          const p = payload[i]
+          const fields: Record<string, unknown> = {
+            kind: p.kind ?? "subcontract",
+            discipline: p.discipline ?? null,
+            vendor_id: p.vendorId ?? null,
+            vendor_name: p.vendorName ?? null,
+            contact: p.contact ?? null,
+            item: p.item ?? null,
+            amount: p.amount,
+            billing_basis: p.billingBasis ?? null,
+            order_type: p.orderType ?? null,
+            contract_id: p.contractId ?? null,
+            withholding_rate: p.withholdingRate ?? DEFAULT_WITHHOLDING_RATE,
+            withholding_threshold: p.withholdingThreshold ?? DEFAULT_WITHHOLDING_THRESHOLD,
+            sort_order: p.sortOrder ?? i,
+            note: p.note ?? null,
+            updated_at: nowIso,
+            ...(extrasAvailable ? subcontractExtraFields(p) : {}),
+          }
+          if (p.id) {
+            const { data: updated, error } = await supabaseAdmin
+              .from("project_subcontracts")
+              .update(fields)
+              .eq("tenant_id", tenantId)
+              .eq("id", p.id)
+              // 讀到之後這筆副委託（或整個專案）被刪除：不把發票／代扣寫進已刪除的列（2026-11-12 驗收）→ 404。
+              .is("deleted_at", null)
+              .select("id")
+            if (error) throw new Error(`PUT /projects/${projectId}/subcontracts (update): ${error.message}`)
+            if (!updated || updated.length === 0) {
+              const n = writeCount()
+              await finishPartial()
+              res.status(404).json({
+                error: "not_found",
+                id: p.id,
+                savedCount: n,
+                message:
+                  n > 0
+                    ? `其中一筆副委託已被刪除（或專案已刪除）：前面 ${n} 筆已儲存、其餘未儲存，請重新整理`
+                    : "這筆副委託已被刪除（或專案已刪除），沒有儲存任何變更，請重新整理",
+              })
+              return
+            }
+            touched.push(p.id)
+            written.push({ id: p.id, action: "update", index: i })
+          } else {
+            const { data, error } = await supabaseAdmin
+              .from("project_subcontracts")
+              .insert({ tenant_id: tenantId, project_id: projectId, created_by_emp_id: scope.self.id, ...fields })
+              .select("id")
+              .single()
+            if (error || !data) throw new Error(`PUT /projects/${projectId}/subcontracts (insert): ${error?.message}`)
+            touched.push(data.id as string)
+            written.push({ id: data.id as string, action: "insert", index: i })
+          }
+        }
+      } catch (err) {
+        // 中途出錯（PD409 專案已刪除等）：已寫入的部分先收尾，再交給錯誤處理。
+        await finishPartial()
+        throw err
       }
 
       await finishWrites()

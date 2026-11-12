@@ -972,7 +972,8 @@ export interface SheetSaveStep {
   section: SheetSaveSection;
   /** 給人看的「哪一部分」。 */
   label: string;
-  status: "ok" | "failed" | "skipped";
+  /** warning＝已送出、但有部分內容沒寫進去（例如期別在讀取後被刪除，row_gone）：黃色提示，不算失敗也不算全部成功。 */
+  status: "ok" | "failed" | "skipped" | "warning";
   message?: string;
 }
 
@@ -1022,6 +1023,14 @@ export function isBonusSharesConflict(err: unknown): boolean {
 
 /** 期程 PUT 有期別在讀取後被刪除（warnings 帶 row_gone；可能整個專案已刪除）時給使用者的提示（2026-11-12）。 */
 export const BILLING_ROW_GONE_NOTICE = "部分期別已被刪除（或專案已刪除），沒有儲存，請重新整理";
+
+/** 期程卡存檔後要顯示的提示（update_failed 與 row_gone 可能同時發生，兩個都要）。 */
+export function billingSaveNotices(warnings: ReadonlyArray<BillingScheduleWarning> | undefined): string[] {
+  const out: string[] = [];
+  if (billingUpdateFailedIds(warnings).size > 0) out.push(BILLING_UPDATE_FAILED_NOTICE);
+  if (hasBillingRowGone(warnings)) out.push(BILLING_ROW_GONE_NOTICE);
+  return out;
+}
 
 /** warnings 裡有沒有 row_gone。 */
 export function hasBillingRowGone(warnings: ReadonlyArray<BillingScheduleWarning> | undefined): boolean {
@@ -1184,6 +1193,7 @@ export async function runApplicationSheetSave(
   let scheduleOk = true;
   /** 期程 PUT 回 update_failed 的期別（小寫 id）：草稿保留不清。 */
   let failedStageIds = new Set<string>();
+  let rowGone = false;
   if (stages.installments) {
     const installments = stages.installments;
     const autoShells = stages.autoShells ?? [];
@@ -1204,13 +1214,19 @@ export async function runApplicationSheetSave(
       notices.push(...shareExceedNotices(res.warnings, res.installments));
       failedStageIds = billingUpdateFailedIds(res.warnings);
       if (failedStageIds.size > 0) notices.push(BILLING_UPDATE_FAILED_NOTICE);
-      if (hasBillingRowGone(res.warnings)) notices.push(BILLING_ROW_GONE_NOTICE);
+      rowGone = hasBillingRowGone(res.warnings);
     });
     if (scheduleOk && failedStageIds.size > 0) {
       // 有期別 update_failed：這一步不能標 ok（步驟狀態沒有「部分成功」→ 標 failed 並說明）。
       // scheduleOk 仍為 true——其餘期別確實存成了，下面的草稿清理（失敗那幾期保留）照舊。
       const idx = steps.map((s) => s.section).lastIndexOf("billings");
       if (idx >= 0 && steps[idx]!.status === "ok") steps[idx] = { ...steps[idx]!, status: "failed", message: BILLING_UPDATE_FAILED_NOTICE };
+    }
+    if (scheduleOk && rowGone) {
+      // 有期別在讀取後被刪除（row_gone）：沒有 update_failed 時這一步標成警告（黃），不是 ok；兩者都有時 failed 優先、另附提示。
+      const idx = steps.map((s) => s.section).lastIndexOf("billings");
+      if (idx >= 0 && steps[idx]!.status === "ok") steps[idx] = { ...steps[idx]!, status: "warning", message: BILLING_ROW_GONE_NOTICE };
+      else notices.push(BILLING_ROW_GONE_NOTICE);
     }
     if (scheduleOk) {
       const next: Record<string, StageEdit> = {};

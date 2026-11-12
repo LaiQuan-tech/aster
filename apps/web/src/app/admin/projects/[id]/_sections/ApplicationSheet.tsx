@@ -451,7 +451,7 @@ export function ApplicationSheet({
       // 先把已存成的格子從草稿拿掉，再重新載入（沒存成的留著，下一次只送那些）。
       setDraft(result.residual);
       setReport({ steps: result.steps, notices: result.notices });
-      if (result.steps.some((st) => st.status === "ok")) await load?.();
+      if (result.steps.some((st) => st.status === "ok" || st.status === "warning")) await load?.();
     } finally {
       setSaving(false);
     }
@@ -1234,7 +1234,8 @@ export function ApplicationSheet({
     </div>,
   );
 
-  const failedSteps = report?.steps.filter((st) => st.status !== "ok") ?? [];
+  const failedSteps = report?.steps.filter((st) => st.status === "failed" || st.status === "skipped") ?? [];
+  const warningSteps = report?.steps.filter((st) => st.status === "warning") ?? [];
   const okSteps = report?.steps.filter((st) => st.status === "ok") ?? [];
 
   return (
@@ -1376,6 +1377,15 @@ export function ApplicationSheet({
                 <ul className="mt-1 list-disc pl-5">
                   {failedSteps.map((st, i) => (
                     <li key={`${st.section}-${i}`}>{st.label}：{st.status === "skipped" ? "未送出，" : ""}{st.message}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {warningSteps.length > 0 && (
+              <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900" data-testid="sheet-save-warnings">
+                <ul className="list-disc pl-5">
+                  {warningSteps.map((st, i) => (
+                    <li key={`${st.section}-w-${i}`}>{st.label}：{st.message}</li>
                   ))}
                 </ul>
               </div>
