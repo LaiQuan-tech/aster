@@ -11,18 +11,26 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
  *     GET /projects（含 includeArchived）不再出現、GET /projects/:id 404
  *   • 序號釋放：自動編號忽略已刪除者（刪掉最後一號可補回）、手動改序號不再撞已刪除者的號
  * DB 層的 partial unique index（同號可重用）在 docs/驗證-2026-11-12-刪除專案.sql 以 pglite 實測。
+ * 2026-11-12 驗收修正：真正的檢查＋寫入改由 DB 函式 soft_delete_project（migration 0096）在同一交易內完成，
+ *   這裡以 rpc 假實作（fakeSoftDelete：預檢同一套條件＋連帶軟刪除＋解除原案取代標記）驗證路由的串接；
+ *   函式本身（鎖、擋刪、連帶、原案還原）與子表觸發器（PD409）在 docs/驗證-2026-11-12-刪除專案-修正.sql 以 pglite 實測。
  * ⚠️ 識別碼、名稱都是明顯的假值。
  */
 
 vi.mock("../lib/supabase.js", async () => (await import("./helpers/fake-supabase.js")).fakeSupabaseModule())
 vi.mock("../lib/tenant-tz.js", () => ({ getTenantTimezone: async () => "Asia/Taipei" }))
 vi.mock("../services/bonus-estimate.js", () => ({ estimateProjectBonus: async () => [] }))
-vi.mock("../services/project-bonus-recompute.js", () => ({ recomputeDraftRunsAfterWrite: async () => {} }))
+const recompute = vi.hoisted(() => ({ calls: [] as Array<{ ids: unknown; context: string }> }))
+vi.mock("../services/project-bonus-recompute.js", () => ({
+  recomputeDraftRunsAfterWrite: async (_t: string, ids: unknown, context: string) => {
+    recompute.calls.push({ ids, context })
+  },
+}))
 
 import { projectsRouter } from "../routes/projects.js"
 import { resetColumnProbeCache } from "../lib/schema-compat.js"
 import { DEFAULT_CODE_FORMAT, nextProjectCode } from "../services/project-code.js"
-import { blockerMessage, confirmMatches } from "../services/project-delete.js"
+import { blockerMessage, confirmMatches, planProjectDelete, restoredMessage } from "../services/project-delete.js"
 import { fake, OTHER_TENANT_ID, TENANT_ID, type Row } from "./helpers/fake-supabase.js"
 
 const app = express()
@@ -62,8 +70,43 @@ const emptyBilling = (over: Row = {}): Row => ({
   ...over,
 })
 
+/**
+ * soft_delete_project 的假實作（真正的 SQL 在 pglite 驗證檔）：同一套擋刪條件（借 planProjectDelete）、
+ * 連帶軟刪除、把「已由 {本案序號} 取代：」的原案解除標記（假 DB 沒有 audit 快照 → 一律 unmarked、保留封存）。
+ */
+async function fakeSoftDelete(a: Row) {
+  const p = fake.db.projects.find((r: Row) => r.tenant_id === a.p_tenant_id && r.id === a.p_project_id && !r.deleted_at)
+  if (!p) return { data: { status: "not_found" }, error: null }
+  const plan = await planProjectDelete(a.p_tenant_id as string, a.p_project_id as string)
+  if (plan.blockers.length > 0) {
+    return { data: { status: "blocked", blockers: plan.blockers.map((b) => ({ key: b.key, count: b.count })) }, error: null }
+  }
+  const now = "2026-11-12T08:00:00.000Z"
+  const mark = (table: string, ids: string[], patch: Row) => {
+    for (const r of fake.db[table] as Row[]) if (ids.includes(r.id as string)) Object.assign(r, patch)
+    return ids.length
+  }
+  const cascade = {
+    billings: mark("project_billings", plan.cascade.billings, { deleted_at: now, deleted_by_emp_id: a.p_actor_emp_id, delete_reason: a.p_reason }),
+    contracts: mark("contracts", plan.cascade.contracts, { deleted_at: now, deleted_by_emp_id: a.p_actor_emp_id, delete_reason: a.p_reason }),
+    subcontracts: mark("project_subcontracts", plan.cascade.subcontracts, { deleted_at: now, deleted_by: a.p_actor_emp_id, delete_reason: a.p_reason }),
+  }
+  const restored: Row[] = []
+  for (const o of fake.db.projects as Row[]) {
+    if (o.tenant_id !== p.tenant_id || o.deleted_at || o.id === p.id) continue
+    if (typeof o.archive_reason !== "string" || !o.archive_reason.startsWith(`已由 ${p.code} 取代：`)) continue
+    o.archive_reason = `原取代案 ${p.code} 已刪除，已解除取代標記`
+    restored.push({ id: o.id, code: o.code, mode: "unmarked", archived: !!o.archived_at })
+  }
+  p.deleted_at = now
+  p.deleted_by_emp_id = a.p_actor_emp_id
+  return { data: { status: "deleted", id: p.id, code: p.code, cascade, restored }, error: null }
+}
+
 beforeEach(() => {
   fake.reset()
+  recompute.calls.length = 0
+  fake.rpcHandlers.soft_delete_project = fakeSoftDelete
   resetColumnProbeCache()
   fake.db.tenants = [
     { id: TENANT_ID, features: { approval: { fallbackApproverEmpId: E.boss } } },
@@ -93,7 +136,7 @@ beforeEach(() => {
   for (const t of [
     "project_billings", "project_billing_shares", "project_billing_bonus_dates", "bonus_run_items",
     "project_share_adjustments", "attendance_sheet_days", "disbursement_allocations", "project_documents",
-    "contracts", "project_subcontracts",
+    "contracts", "project_subcontracts", "project_subcontract_payments",
   ]) fake.db[t] = []
 })
 
@@ -150,6 +193,19 @@ describe("DELETE /projects/:id — 擋刪條件（有實質資料 → 409）", (
     ["專案文件", () => fake.db.project_documents.push({ id: "doc1", tenant_id: TENANT_ID, project_id: P1 }), "documents"],
     ["已簽約合約", () => fake.db.contracts.push({ id: "c1", tenant_id: TENANT_ID, project_id: P1, deleted_at: null, signed_on: "2026-01-05", stamp_duty_paid_on: null }), "signed_contracts"],
     ["已開發票的副委託", () => fake.db.project_subcontracts.push({ id: "sub2", tenant_id: TENANT_ID, project_id: P1, deleted_at: null, invoice_no: "ZZ00000002", invoice_date: null }), "invoiced_subcontracts"],
+    ["副委託期款已付款（沒有發票）", () => {
+      fake.db.project_subcontracts.push({ id: "sub3", tenant_id: TENANT_ID, project_id: P1, deleted_at: null, invoice_no: null, invoice_date: null, kind: "subcontract", withholding_date: null })
+      fake.db.project_subcontract_payments.push({ id: "pay3", tenant_id: TENANT_ID, subcontract_id: "sub3", paid_on: "2026-11-01", paid_amount: "1000", accepted_on: null })
+    }, "paid_subcontract_payments"],
+    ["副委託期款已驗收（未付款）", () => {
+      fake.db.project_subcontracts.push({ id: "sub4", tenant_id: TENANT_ID, project_id: P1, deleted_at: null, invoice_no: null, invoice_date: null, kind: "subcontract", withholding_date: null })
+      fake.db.project_subcontract_payments.push({ id: "pay4", tenant_id: TENANT_ID, subcontract_id: "sub4", paid_on: null, paid_amount: null, accepted_on: "2026-11-02" })
+    }, "paid_subcontract_payments"],
+    ["已刪除副委託底下的已付期款也擋", () => {
+      fake.db.project_subcontracts.push({ id: "sub5", tenant_id: TENANT_ID, project_id: P1, deleted_at: "2026-10-01T00:00:00.000Z", invoice_no: null, invoice_date: null, kind: "subcontract", withholding_date: null })
+      fake.db.project_subcontract_payments.push({ id: "pay5", tenant_id: TENANT_ID, subcontract_id: "sub5", paid_on: "2026-09-01", paid_amount: "500", accepted_on: null })
+    }, "paid_subcontract_payments"],
+    ["事務所副委託已代扣", () => fake.db.project_subcontracts.push({ id: "sub6", tenant_id: TENANT_ID, project_id: P1, deleted_at: null, invoice_no: null, invoice_date: null, kind: "firm", withholding_date: "2026-11-03" }), "withheld_subcontracts"],
     ["底下有子案", () => fake.db.projects.push(projectRow({ id: "dddddddd-0000-4000-8000-000000000503", code: "AT-115-018-1", kind: "change", parent_project_id: P1 })), "child_projects"],
   ])("%s → 409 project_has_data，專案與子列都不動", async (_label, seed, key) => {
     seed()
@@ -237,6 +293,96 @@ describe("刪除後序號釋放", () => {
     const res = await patch()
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     expect(proj(P2)!.code).toBe("AT-115-018")
+  })
+})
+
+describe("DELETE /projects/:id — 以 DB 函式為準（TOCTOU）", () => {
+  it("預檢通過、但 DB 函式在鎖住專案後重新檢查發現新資料 → 409 project_has_data（帶中文標籤），專案不動", async () => {
+    fake.rpcHandlers.soft_delete_project = () => ({
+      data: { status: "blocked", blockers: [{ key: "attendance_days", count: 1 }, { key: "paid_subcontract_payments", count: 2 }] },
+      error: null,
+    })
+    const res = await del(T.boss, P1, "AT-115-018")
+    expect(res.status, JSON.stringify(res.body)).toBe(409)
+    expect(res.body.error).toBe("project_has_data")
+    expect(res.body.blockers).toEqual([
+      { key: "attendance_days", label: "出勤表工時（工作內容選了此專案）", count: 1 },
+      { key: "paid_subcontract_payments", label: "副委託期款已付款或已驗收", count: 2 },
+    ])
+    expect(proj(P1)!.deleted_at).toBeNull()
+    expect(fake.db.audit_logs.filter((a: Row) => a.context === "刪除專案（軟刪除）")).toHaveLength(0)
+  })
+
+  it("DB 函式回 not_found（同時被別人刪掉）→ 404，不寫稽核", async () => {
+    fake.rpcHandlers.soft_delete_project = () => ({ data: { status: "not_found" }, error: null })
+    expect((await del(T.boss, P1, "AT-115-018")).status).toBe(404)
+    expect(fake.db.audit_logs.filter((a: Row) => a.context === "刪除專案（軟刪除）")).toHaveLength(0)
+  })
+
+  it("rpc 帶 tenant／project／操作者，寫入只經過 DB 函式（路由本身不直接 update 子表）", async () => {
+    fake.db.project_billings.push(emptyBilling({ id: "b-plan-1" }))
+    expect((await del(T.boss, P1, "AT-115-018")).status).toBe(200)
+    expect(fake.rpcCalls).toEqual([
+      { name: "soft_delete_project", args: expect.objectContaining({ p_tenant_id: TENANT_ID, p_project_id: P1, p_actor_emp_id: E.boss }) },
+    ])
+    expect(fake.writes.filter((w: { table: string }) => ["project_billings", "contracts", "project_subcontracts", "projects"].includes(w.table))).toEqual([])
+  })
+})
+
+describe("DELETE /projects/:id — 刪除換案複製的新案，原案解除「被取代」標記", () => {
+  it("原案（已由 本案 取代：…）解除標記、回應帶 restored／restoredMessage、原案重算草稿獎金批次", async () => {
+    const ORIG = "dddddddd-0000-4000-8000-000000000505"
+    fake.db.projects.push(projectRow({
+      id: ORIG, code: "AT-115-010", name: "原案", archived_at: "2026-11-01T00:00:00.000Z", archive_reason: "已由 AT-115-018 取代：換案",
+    }))
+    const res = await del(T.boss, P1, "AT-115-018")
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.restored).toEqual([{ id: ORIG, code: "AT-115-010", mode: "unmarked", archived: true }])
+    expect(res.body.restoredMessage).toContain("AT-115-010")
+    expect(res.body.restoredMessage).toContain("解除")
+    expect(proj(ORIG)!.archive_reason).not.toMatch(/^已由 .+ 取代：/)
+    expect(recompute.calls).toEqual([{ ids: [ORIG], context: expect.stringContaining("DELETE /projects/:id") }])
+    const audit = fake.db.audit_logs.find((a: Row) => a.context === "刪除專案（軟刪除）")
+    expect(audit!.new_row.restored_originals).toEqual(res.body.restored)
+  })
+
+  it("沒有被取代的原案 → restored 空、restoredMessage null、不重算", async () => {
+    const res = await del(T.boss, P1, "AT-115-018")
+    expect(res.status).toBe(200)
+    expect(res.body.restored).toEqual([])
+    expect(res.body.restoredMessage).toBeNull()
+    expect(recompute.calls).toEqual([])
+  })
+
+  it("restoredMessage：restored／unmarked／恢復未封存三種說法", () => {
+    expect(restoredMessage([])).toBeNull()
+    expect(restoredMessage([{ id: "a", code: "X-1", mode: "restored", archived: false }])).toContain("恢復為未封存")
+    expect(restoredMessage([{ id: "a", code: "X-1", mode: "restored", archived: true }])).toContain("回到複製前的封存狀態")
+    expect(restoredMessage([{ id: "a", code: null, mode: "unmarked", archived: true }])).toContain("自行解除封存")
+  })
+})
+
+describe("PATCH /projects/:id — 讀到後被刪除（競態）", () => {
+  it("loadScope 之後、update 之前專案被刪 → 404，專案列不被改", async () => {
+    const realFrom = fake.from.bind(fake)
+    const spy = vi.spyOn(fake, "from").mockImplementation((table: string) => {
+      const q = realFrom(table)
+      if (table !== "projects") return q
+      const origUpdate = q.update.bind(q)
+      q.update = (patch: Row) => {
+        // update 送出前一刻，別人把專案刪掉了
+        proj(P1)!.deleted_at = "2026-11-12T08:00:00.000Z"
+        return origUpdate(patch)
+      }
+      return q
+    })
+    try {
+      const res = await request(app).patch(`/projects/${P1}`).set("Authorization", `Bearer ${T.hr}`).send({ name: "改名" })
+      expect(res.status, JSON.stringify(res.body)).toBe(404)
+      expect(proj(P1)!.name).toBe("打錯的案")
+    } finally {
+      spy.mockRestore()
+    }
   })
 })
 

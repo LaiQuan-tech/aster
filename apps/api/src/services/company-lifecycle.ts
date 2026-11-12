@@ -21,6 +21,8 @@ import { isMissingColumnError, isMissingTableError, warnSchemaGapOnce } from "..
  *     檢查與刪除之間剛好有人被指派到這家（競態）時，DB 照 SET NULL 處理，不會 500。
  * 外鍵對所有列生效，所以這裡**不排除**已軟刪（deleted_at）、已封存、已作廢（void）的列——
  * 一筆作廢的放款單照樣讓 DB 拒絕刪除那間公司。
+ * 例外：已刪除（打錯、deleted_at 非空）的專案不算使用量（2026-11-12）。DELETE /companies 在刪除前先呼叫
+ * detachDeletedProjects 把這些專案的 company_id 清成 null（audit_all 留痕），外鍵就不會擋。
  *
  * 沒有任何公司 id 存在 JSON 欄位裡（已查 tenants.features／branding、project_settings、
  * projects.engineers／design_scope、rule_configs、notifications.payload：只有廠商 id、科別名稱、
@@ -44,11 +46,13 @@ type UsageBucket = "projects" | "disbursements" | "subcontractPayments" | "emplo
 
 export const emptyCompanyUsage = (): CompanyUsage => ({ projects: 0, disbursements: 0, subcontractPayments: 0, employees: 0, total: 0 })
 
-type UsageSource = { bucket: UsageBucket; table: string; column: string }
+/** notDeleted：只算未軟刪除的列（projects：刪除的專案是打錯的空殼，不算「使用中」）。 */
+type UsageSource = { bucket: UsageBucket; table: string; column: string; notDeleted?: boolean }
 
 /** 五個外鍵欄位＋員工所屬公司（見檔頭）。新增引用 companies.id 的欄位時，這裡一定要跟著加。 */
 export const COMPANY_USAGE_SOURCES: readonly UsageSource[] = [
-  { bucket: "projects", table: "projects", column: "company_id" },
+  // 已刪除（打錯）的專案不算使用量（2026-11-12）；DELETE /companies 刪除前會先把這些專案的 company_id 清掉，外鍵才不會擋。
+  { bucket: "projects", table: "projects", column: "company_id", notDeleted: true },
   { bucket: "disbursements", table: "disbursements", column: "paying_company_id" },
   { bucket: "disbursements", table: "disbursements", column: "receipt_issuer_company_id" },
   { bucket: "subcontractPayments", table: "project_subcontract_payments", column: "paying_company_id" },
@@ -73,15 +77,16 @@ async function referencingRows(
     const chunk = companyIds.slice(i, i + USAGE_ID_CHUNK)
     {
       const res = await fetchAllPages<Record<string, string>>(
-        (from, to) =>
-          supabaseAdmin
+        (from, to) => {
+          let q = supabaseAdmin
             .from(source.table)
             .select(`id, ${source.column}`)
             .eq("tenant_id", tenantId)
             .in(source.column, chunk)
-            // 跨頁 .range() 要有穩定排序才保證不重不漏。
-            .order("id", { ascending: true })
-            .range(from, to),
+          if (source.notDeleted) q = q.is("deleted_at", null)
+          // 跨頁 .range() 要有穩定排序才保證不重不漏。
+          return q.order("id", { ascending: true }).range(from, to)
+        },
         `loadCompanyUsage (${source.table}.${source.column})`,
       )
       const error = res.error
@@ -204,4 +209,23 @@ export function firstNewlyPickedInactive(picks: readonly CompanyPick[], inactive
     if (inactiveIds.has(pick.companyId)) return pick.companyId
   }
   return null
+}
+
+/**
+ * 刪除公司前：把「已刪除（打錯）的專案」上的承接公司清掉（company_id → null），外鍵才不會因為已刪除的空殼專案擋下刪除。
+ * 只動 deleted_at 非空的專案；audit_all 觸發器會記下每一列的舊值。
+ */
+export async function detachDeletedProjects(tenantId: string, companyId: string): Promise<number> {
+  const { data, error } = await supabaseAdmin
+    .from("projects")
+    .update({ company_id: null })
+    .eq("tenant_id", tenantId)
+    .eq("company_id", companyId)
+    .not("deleted_at", "is", null)
+    .select("id")
+  if (error) {
+    if (isMissingColumnError(error)) return 0
+    throw new Error(`detachDeletedProjects: ${error.message}`)
+  }
+  return (data ?? []).length
 }

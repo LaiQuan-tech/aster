@@ -673,6 +673,13 @@
       "when": 1794500000000,
       "tag": "0095_project_soft_delete",
       "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1794600000000,
+      "tag": "0096_project_soft_delete_atomic",
+      "breakpoints": true
     }
   ]
 }

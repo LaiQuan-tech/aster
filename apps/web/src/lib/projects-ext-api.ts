@@ -943,8 +943,18 @@ export interface ProjectDeleteBlocker {
  * 刪除打錯（key 錯）的專案（2026-11-12，DELETE /projects/:id，軟刪除）。只有老闆／platform_admin；
  * confirmCode 須等於該專案序號（沒有序號的案用專案名稱）。有實際資料 → 409 project_has_data（err.body.blockers）。
  */
+export interface ProjectDeleteResult {
+  id: string
+  code: string | null
+  deleted: true
+  /** 被本案（換案複製的新案）取代而封存的原案，已解除「被取代」標記（舊版後端沒有這個鍵）。 */
+  restored?: Array<{ id: string; code: string | null; mode: "restored" | "unmarked"; archived: boolean }>
+  /** 還原原案的說明，畫面直接顯示；沒有還原時為 null。 */
+  restoredMessage?: string | null
+}
+
 export function deleteProject(id: string, confirmCode: string) {
-  return apiFetch<{ id: string; code: string | null; deleted: true }>(`/projects/${id}`, {
+  return apiFetch<ProjectDeleteResult>(`/projects/${id}`, {
     method: "DELETE",
     body: JSON.stringify({ confirmCode }),
   })
@@ -956,6 +966,8 @@ export function humanizeProjectDeleteError(err: unknown): { message: string; blo
   const code = typeof body?.error === "string" ? body.error : err instanceof Error ? err.message : ""
   const blockers = Array.isArray(body?.blockers) ? (body!.blockers as ProjectDeleteBlocker[]) : []
   if (code === "project_has_data") {
+    // 有 blockers 時畫面另列清單，這裡只放總結句（後端 message 已含同一份清單，兩個都顯示會重複）。
+    if (blockers.length > 0) return { message: "此專案已有實際資料，不能刪除；若只是不再使用，請改用「封存」。原因：", blockers }
     return {
       message: typeof body?.message === "string" ? body.message : "此專案已有實際資料，不能刪除。若只是不再使用，請改用「封存」。",
       blockers,

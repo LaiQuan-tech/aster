@@ -1252,9 +1252,12 @@ async function resolveAllocations(tenantId: string, inputs: AllocationInput[]): 
   const projectIds = uniq(inputs.map((a) => a.projectId))
   const paymentIds = uniq(inputs.map((a) => a.subcontractPaymentId))
   const [projects, payments] = await Promise.all([
-    batch<ProjectLite>("projects", PROJECT_LITE_COLS, tenantId, projectIds, "id", false),
+    // deleted_at 一併讀：已刪除的專案不能再新增／改到分攤（2026-11-12 驗收；DB 觸發器 assert_project_not_deleted 是第二道）。
+    batch<ProjectLite & { deleted_at?: string | null }>("projects", `${PROJECT_LITE_COLS}, deleted_at`, tenantId, projectIds, "id", false),
     batch<PaymentRow>("project_subcontract_payments", PAYMENT_COLS, tenantId, paymentIds, "id", false),
   ])
+  const deletedProject = projects.find((p) => !!p.deleted_at)
+  if (deletedProject) throw new DisbursementError(409, "project_deleted", { projectId: deletedProject.id })
   const subIds = uniq([...inputs.map((a) => a.subcontractId), ...payments.map((p) => p.subcontract_id)])
   const subcontracts = await batch<SubcontractRow>("project_subcontracts", SUBCONTRACT_COLS, tenantId, subIds, "id", true)
   const projectById = new Map(projects.map((p) => [p.id, p]))

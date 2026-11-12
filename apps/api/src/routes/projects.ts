@@ -37,6 +37,7 @@ import {
   softDeleteProject,
   blockerMessage as deleteBlockerMessage,
   confirmMatches as confirmDeleteMatches,
+  restoredMessage as deleteRestoredMessage,
 } from "../services/project-delete.js"
 import { DEFAULT_AUTO_ARCHIVE_MONTHS } from "../services/project-archive.js"
 import {
@@ -1667,6 +1668,8 @@ projectsRouter.patch(
         .update(patch)
         .eq("tenant_id", tenantId)
         .eq("id", req.params.id)
+        // 讀到之後被刪除（競態）：0 列更新 → 下面回 404，不要改到已刪除的專案。
+        .is("deleted_at", null)
         .select("id")
         .maybeSingle()
       if (error) {
@@ -1836,11 +1839,17 @@ projectsRouter.delete(
         res.status(409).json({ error: "project_has_data", message: deleteBlockerMessage(plan.blockers), blockers: plan.blockers })
         return
       }
-      const deleted = await softDeleteProject(tenantId, project.id, scope.self.id, plan.cascade)
-      if (!deleted) {
+      // 以 DB 函式為準（同一交易內鎖專案列、重新檢查、連帶軟刪除、還原被取代的原案）；上面的預檢只是快速擋下常見情況。
+      const result = await softDeleteProject(tenantId, project.id, scope.self.id)
+      if (result.status === "blocked") {
+        res.status(409).json({ error: "project_has_data", message: deleteBlockerMessage(result.blockers), blockers: result.blockers })
+        return
+      }
+      if (result.status === "not_found") {
         res.status(404).json({ error: "not_found" })
         return
       }
+      const restoredMsg = deleteRestoredMessage(result.restored)
       await writeAuditLog({
         tenantId,
         tableName: "projects",
@@ -1851,24 +1860,23 @@ projectsRouter.delete(
           code: project.code,
           name: project.name,
           deleted: true,
-          cascade: {
-            billings: plan.cascade.billings.length,
-            contracts: plan.cascade.contracts.length,
-            subcontracts: plan.cascade.subcontracts.length,
-          },
+          cascade: result.cascade,
+          restored_originals: result.restored,
         },
         actorEmpId: scope.self.id,
         context: "刪除專案（軟刪除）",
       })
+      // 原案解除「被取代」標記後會重新進獎金批次（isDuplicateReplacedArchive）→ 草稿批次重算（best-effort）。
+      if (result.restored.length > 0) {
+        await recomputeDraftRunsAfterWrite(tenantId, result.restored.map((r) => r.id), "DELETE /projects/:id (restore original)")
+      }
       res.status(200).json({
         id: project.id,
         code: project.code,
         deleted: true,
-        cascade: {
-          billings: plan.cascade.billings.length,
-          contracts: plan.cascade.contracts.length,
-          subcontracts: plan.cascade.subcontracts.length,
-        },
+        cascade: result.cascade,
+        restored: result.restored,
+        restoredMessage: restoredMsg,
       })
     } catch (err) {
       next(err)

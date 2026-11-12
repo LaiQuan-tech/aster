@@ -21,12 +21,18 @@ export function DeleteProjectCard({ project, onDeleted }: { project: ProjectDeta
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [blockers, setBlockers] = useState<ProjectDeleteBlocker[]>([]);
+  // 刪除成功且有原案被解除「被取代」標記：先顯示說明，按「回專案列表」才離開。
+  const [restoredNotice, setRestoredNotice] = useState<string | null>(null);
 
   const expected = (project.code ?? project.name).trim();
   const matches = typed.trim().toLowerCase() === expected.toLowerCase() && expected !== "";
 
   function close() {
     if (busy) return;
+    if (restoredNotice) {
+      onDeleted();
+      return;
+    }
     setOpen(false);
     setTyped("");
     setError(null);
@@ -35,12 +41,16 @@ export function DeleteProjectCard({ project, onDeleted }: { project: ProjectDeta
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!matches || busy) return;
+    if (!matches || busy || restoredNotice) return;
     setBusy(true);
     setError(null);
     setBlockers([]);
     try {
-      await deleteProject(project.id, typed.trim());
+      const result = await deleteProject(project.id, typed.trim());
+      if (result?.restoredMessage) {
+        setRestoredNotice(result.restoredMessage);
+        return;
+      }
       setOpen(false);
       onDeleted();
     } catch (err) {
@@ -103,6 +113,12 @@ export function DeleteProjectCard({ project, onDeleted }: { project: ProjectDeta
               />
             </div>
 
+            {restoredNotice && (
+              <div className="mt-3 rounded-lg bg-green-50 p-3 text-sm text-green-800" role="status" data-testid="delete-project-restored">
+                專案已刪除。{restoredNotice}。
+              </div>
+            )}
+
             {error && (
               <div className="mt-3" role="alert">
                 <ErrorText>{error}</ErrorText>
@@ -119,12 +135,20 @@ export function DeleteProjectCard({ project, onDeleted }: { project: ProjectDeta
             )}
 
             <div className="mt-5 flex flex-wrap justify-end gap-2">
-              <Button variant="secondary" onClick={close} disabled={busy}>
-                取消
-              </Button>
-              <Button type="submit" variant="danger" disabled={!matches || busy} loading={busy} data-testid="delete-project-submit">
-                確認刪除
-              </Button>
+              {restoredNotice ? (
+                <Button onClick={onDeleted} data-testid="delete-project-done">
+                  回專案列表
+                </Button>
+              ) : (
+                <>
+                  <Button variant="secondary" onClick={close} disabled={busy}>
+                    取消
+                  </Button>
+                  <Button type="submit" variant="danger" disabled={!matches || busy} loading={busy} data-testid="delete-project-submit">
+                    確認刪除
+                  </Button>
+                </>
+              )}
             </div>
           </form>
         </div>

@@ -573,6 +573,7 @@ export const DISBURSEMENT_ERRORS: Record<string, string> = {
   invalid_company: "選到的公司主體不存在。",
   company_inactive: "選到的付款公司或收據抬頭已停用，請改選其他公司。",
   invalid_project: "選到的專案不存在。",
+  project_deleted: "選到的專案已刪除，不能再新增或修改分攤。",
   paid_on_required: "標記已匯款必須填放款日。",
   void: "已作廢的匯款不能再修改。",
   invalid_allocation: "分攤列格式錯誤。",

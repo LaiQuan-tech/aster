@@ -81,6 +81,7 @@ import { groupOverviewRouter } from "./routes/group-overview.js"
 import { bonusSheetRouter } from "./routes/bonus-sheet.js"
 import { essTabGuard } from "./middleware/ess-tab-guard.js"
 import { periodClosedErrorHandler } from "./middleware/period-closed.js"
+import { projectDeletedErrorHandler } from "./middleware/project-deleted.js"
 import { privilegeErrorHandler } from "./middleware/privilege-error.js"
 import { runWithRequestContext } from "./lib/request-context.js"
 import { bearerOf, isInternalToken, isLoopbackAddress, resolveInternalIdentity } from "./lib/internal-identity.js"
@@ -248,6 +249,8 @@ app.use((_req: Request, res: Response) => {
 app.use(periodClosedErrorHandler)
 // 特權帳號邊界（services/privileged-accounts.ts）：PrivilegeError 一律回 403 { error: "not_boss" | "platform_admin_required", message }。
 app.use(privilegeErrorHandler)
+// 已刪除專案的子表寫入（DB 觸發器 assert_project_not_deleted，PD409）：一律回 409 { error: "project_deleted" }。
+app.use(projectDeletedErrorHandler)
 
 // Centralised error handler — must be last and have 4 args for Express to
 // recognise it as an error handler.

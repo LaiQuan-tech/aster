@@ -18,6 +18,26 @@ describe("humanizeProjectDeleteError", () => {
     expect(h.message).toContain("封存")
     expect(h.blockers).toEqual([{ key: "attendance_days", label: "工時", count: 1 }])
   })
+  it("409 有 blockers 時 message 只放總結句，不重複列原因（畫面另列清單，只留一份）", () => {
+    const h = humanizeProjectDeleteError(
+      apiErr({
+        error: "project_has_data",
+        message: "此專案已有實際資料，不能刪除：出勤表工時（1 筆）、副委託期款已付款或已驗收（2 筆）。若只是不再使用，請改用「封存」。",
+        blockers: [
+          { key: "attendance_days", label: "出勤表工時", count: 1 },
+          { key: "paid_subcontract_payments", label: "副委託期款已付款或已驗收", count: 2 },
+        ],
+      }),
+    )
+    expect(h.message).toContain("封存")
+    expect(h.message).not.toContain("出勤表工時")
+    expect(h.message).not.toContain("副委託期款")
+    expect(h.blockers).toHaveLength(2)
+  })
+  it("409 沒有 blockers（舊版後端）時仍用後端說明", () => {
+    const h = humanizeProjectDeleteError(apiErr({ error: "project_has_data", message: "後端說明：工時（1 筆）" }))
+    expect(h.message).toBe("後端說明：工時（1 筆）")
+  })
   it("權限／確認不符／找不到", () => {
     expect(humanizeProjectDeleteError(apiErr({ error: "project_delete_forbidden" })).message).toContain("老闆")
     expect(humanizeProjectDeleteError(apiErr({ error: "confirm_mismatch" })).message).toContain("不符")

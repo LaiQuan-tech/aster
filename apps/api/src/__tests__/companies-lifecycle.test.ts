@@ -91,8 +91,10 @@ beforeEach(() => {
 function seedUsageOfC_USED() {
   fake.db.projects = [
     { id: "dddddddd-0000-4000-8000-000000000001", tenant_id: TENANT_ID, company_id: C_USED },
-    // 已封存＋已軟刪的專案：外鍵照樣擋，使用量要算。
-    { id: "dddddddd-0000-4000-8000-000000000002", tenant_id: TENANT_ID, company_id: C_USED, archived_at: "2026-09-01T00:00:00.000Z", deleted_at: "2026-09-02T00:00:00.000Z" },
+    // 已封存的專案：外鍵照樣擋，使用量要算。
+    { id: "dddddddd-0000-4000-8000-000000000002", tenant_id: TENANT_ID, company_id: C_USED, archived_at: "2026-09-01T00:00:00.000Z", deleted_at: null },
+    // 已刪除（打錯的空殼，2026-11-12）的專案：不算使用量；刪公司時先把它的 company_id 清掉。
+    { id: "dddddddd-0000-4000-8000-000000000004", tenant_id: TENANT_ID, company_id: C_USED, deleted_at: "2026-11-12T00:00:00.000Z" },
     { id: "dddddddd-0000-4000-8000-000000000003", tenant_id: TENANT_ID, company_id: null },
   ]
   fake.db.disbursements = [
@@ -110,7 +112,7 @@ function seedUsageOfC_USED() {
 }
 
 describe("GET /companies — isActive 與使用量", () => {
-  it("每筆帶 isActive 與 usage：已封存／軟刪／作廢的列照算，同一列兩個欄位指到同一間只算一筆", async () => {
+  it("每筆帶 isActive 與 usage：已封存／作廢的列照算（已刪除的專案不算），同一列兩個欄位指到同一間只算一筆", async () => {
     seedUsageOfC_USED()
 
     const res = await as(STAFF_TOKEN, request(app).get("/companies"))
@@ -336,6 +338,35 @@ describe("PUT /companies — 停用", () => {
 
     expect(res.status).toBe(403)
     expect(companyWrites()).toHaveLength(0)
+  })
+})
+
+describe("已刪除（打錯）的專案不算公司使用量（2026-11-12）", () => {
+  it("只被已刪除專案引用的公司：使用量 0、可以刪，刪除前先把那些專案的 company_id 清成 null（只動已刪除的）", async () => {
+    fake.db.projects = [
+      { id: "dddddddd-0000-4000-8000-000000000011", tenant_id: TENANT_ID, company_id: C_SECOND, deleted_at: "2026-11-12T00:00:00.000Z" },
+      { id: "dddddddd-0000-4000-8000-000000000012", tenant_id: TENANT_ID, company_id: C_USED, deleted_at: null },
+    ]
+    const usage = (await loadCompanyUsage(TENANT_ID, [C_SECOND, C_USED]))
+    expect(usage.get(C_SECOND)!.total).toBe(0)
+    expect(usage.get(C_USED)!.projects).toBe(1)
+
+    const res = await as(HR_TOKEN, request(app).delete(`/companies/${C_SECOND}`))
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(stored(C_SECOND)).toBeUndefined()
+    expect(fake.db.projects.find((p: Row) => p.id === "dddddddd-0000-4000-8000-000000000011")!.company_id).toBeNull()
+    expect(fake.db.projects.find((p: Row) => p.id === "dddddddd-0000-4000-8000-000000000012")!.company_id).toBe(C_USED)
+  })
+
+  it("同時被未刪除專案引用：仍 409 company_in_use，已刪除專案的 company_id 也不動", async () => {
+    fake.db.projects = [
+      { id: "dddddddd-0000-4000-8000-000000000013", tenant_id: TENANT_ID, company_id: C_SECOND, deleted_at: "2026-11-12T00:00:00.000Z" },
+      { id: "dddddddd-0000-4000-8000-000000000014", tenant_id: TENANT_ID, company_id: C_SECOND, deleted_at: null },
+    ]
+    const res = await as(HR_TOKEN, request(app).delete(`/companies/${C_SECOND}`))
+    expect(res.status).toBe(409)
+    expect(res.body.usage.projects).toBe(1)
+    expect(fake.db.projects.find((p: Row) => p.id === "dddddddd-0000-4000-8000-000000000013")!.company_id).toBe(C_SECOND)
   })
 })
 

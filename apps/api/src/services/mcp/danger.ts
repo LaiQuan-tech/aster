@@ -71,6 +71,7 @@ export const HIGH_RISK_DELETE_PREFIXES = [
   "/expense",
   "/nhi-dependents", // 影響薪資扣繳
   "/income-tax-dependents",
+  "/projects", // 刪除專案（2026-11-12；連帶軟刪除期程／合約／副委託、還原被取代的原案）
 ] as const
 
 /** 員工資料裡屬於「角色／權限／帳號狀態」的欄位（PATCH /employees/:id 帶到任一個＝最高風險）。 */

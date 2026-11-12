@@ -11,6 +11,7 @@ import {
   emptyCompanyUsage,
   findInactiveDefault,
   loadCompanyUsage,
+  detachDeletedProjects,
   resolveFinalFlags,
   type CompanyUsage,
 } from "../services/company-lifecycle.js"
@@ -280,6 +281,8 @@ companiesRouter.delete("/companies/:id", requireAuth, requireTenant, requireFina
       res.status(409).json({ error: "company_in_use", usage })
       return
     }
+    // 已刪除（打錯）的專案不算使用量，但外鍵仍指向這間公司 → 先清掉（只動已刪除的專案）。
+    await detachDeletedProjects(tenantId, id)
 
     const { data: deleted, error: deleteError } = await supabaseAdmin
       .from("companies")
