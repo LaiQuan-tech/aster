@@ -219,6 +219,29 @@ describe("DELETE /projects/:id — 擋刪條件（有實質資料 → 409）", (
     expect(JSON.stringify([fake.db.project_billings, fake.db.contracts, fake.db.project_subcontracts])).toBe(before)
   })
 
+  it("已作廢（void）放款單的分攤不擋刪（直接掛專案或掛副委託）；同一案還有草稿單的分攤仍擋", async () => {
+    fake.db.disbursements = [
+      { id: "d-void", tenant_id: TENANT_ID, status: "void" },
+      { id: "d-draft", tenant_id: TENANT_ID, status: "draft" },
+    ]
+    fake.db.project_subcontracts.push({ id: "sub-v", tenant_id: TENANT_ID, project_id: P1, deleted_at: null, invoice_no: null, invoice_date: null, kind: "subcontract", withholding_date: null })
+    fake.db.disbursement_allocations.push(
+      { id: "xa", tenant_id: TENANT_ID, project_id: P1, subcontract_id: null, disbursement_id: "d-void" },
+      { id: "xb", tenant_id: TENANT_ID, project_id: null, subcontract_id: "sub-v", disbursement_id: "d-void" },
+    )
+    const ok = await del(T.boss, P1, "AT-115-018")
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200)
+
+    // 另一案：作廢單＋草稿單 → 只算草稿那一筆
+    fake.db.disbursement_allocations.push(
+      { id: "xc", tenant_id: TENANT_ID, project_id: P2, subcontract_id: null, disbursement_id: "d-void" },
+      { id: "xd", tenant_id: TENANT_ID, project_id: P2, subcontract_id: null, disbursement_id: "d-draft" },
+    )
+    const res = await del(T.boss, P2, "AT-115-017")
+    expect(res.status, JSON.stringify(res.body)).toBe(409)
+    expect(res.body.blockers).toContainEqual({ key: "disbursements", label: "請款／放款單", count: 1 })
+  })
+
   it("已軟刪除的期程／合約／副委託不算資料；已刪除的子案也不擋", async () => {
     fake.db.project_billings.push(emptyBilling({ id: "b-old", received_amount: "500", deleted_at: "2026-02-01T00:00:00.000Z" }))
     fake.db.contracts.push({ id: "c-old", tenant_id: TENANT_ID, project_id: P1, deleted_at: "2026-02-01T00:00:00.000Z", signed_on: "2026-01-05", stamp_duty_paid_on: null })

@@ -345,6 +345,10 @@ describe("第四輪驗收：試算重算略過已刪除的列、副委託 PUT �
     ["已有請款／放款分攤", () => {
       fake.db.disbursement_allocations = [{ id: "x-822", tenant_id: TENANT_ID, project_id: PROJECT, subcontract_id: SUB2 }]
     }, "has_disbursement"],
+    ["已有草稿放款單的分攤", () => {
+      fake.db.disbursements = [{ id: "d-822", tenant_id: TENANT_ID, status: "draft" }]
+      fake.db.disbursement_allocations = [{ id: "x-823", tenant_id: TENANT_ID, project_id: PROJECT, subcontract_id: SUB2, disbursement_id: "d-822" }]
+    }, "has_disbursement"],
   ])("副委託 PUT 移除%s的副委託 → 409（與刪除專案的擋刪條件一致），一筆都沒動", async (_label, seed, code) => {
     seed()
     const res = await request(app)
@@ -356,6 +360,20 @@ describe("第四輪驗收：試算重算略過已刪除的列、副委託 PUT �
     expect(res.body.message).toBeTruthy()
     expect(row("project_subcontracts", SUB2).deleted_at).toBeNull()
     expect(row("project_subcontracts", SUB1).amount).toBe("1000")
+  })
+})
+
+describe("第五輪：作廢放款單的分攤不擋副委託移除", () => {
+  beforeEach(seedRaceRows)
+  it("只有作廢（void）放款單的分攤 → 可以移除副委託（200，已軟刪除）", async () => {
+    fake.db.disbursements = [{ id: "d-824", tenant_id: TENANT_ID, status: "void" }]
+    fake.db.disbursement_allocations = [{ id: "x-824", tenant_id: TENANT_ID, project_id: PROJECT, subcontract_id: SUB2, disbursement_id: "d-824" }]
+    const res = await request(app)
+      .put(`/projects/${PROJECT}/subcontracts`)
+      .set("Authorization", `Bearer ${T.accountant}`)
+      .send({ subcontracts: [{ id: SUB1, amount: 1000 }], deleteReason: "不做了" })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(row("project_subcontracts", SUB2).deleted_at).toBeTruthy()
   })
 })
 

@@ -28,6 +28,7 @@ import { writeAuditLog } from "../services/audit.js"
 import { columnsExist } from "../lib/schema-compat.js"
 import { recomputeBonusRunsBestEffort } from "../services/bonus-run-store.js"
 import { isProjectDeletedError, isRowDeletedError } from "../middleware/project-deleted.js"
+import { countableAllocations } from "../services/project-delete.js"
 
 export const subcontractsRouter = Router()
 
@@ -438,14 +439,18 @@ subcontractsRouter.put(
           })
           return
         }
-        const { data: allocs, error: allocErr } = await supabaseAdmin
+        const { data: allocRows, error: allocErr } = await supabaseAdmin
           .from("disbursement_allocations")
-          .select("id, subcontract_id")
+          .select("id, subcontract_id, disbursement_id")
           .eq("tenant_id", tenantId)
           .in("subcontract_id", removingIds)
-          .limit(1)
         if (allocErr) throw new Error(`PUT /projects/${projectId}/subcontracts (allocations): ${allocErr.message}`)
-        if (allocs && allocs.length > 0) {
+        // 已作廢放款單的分攤不算（與刪除專案一致）；草稿、送簽中、已核准、已匯款仍擋。
+        const allocs = await countableAllocations(
+          tenantId,
+          (allocRows ?? []) as Array<{ id: string; subcontract_id: string; disbursement_id: string }>,
+        )
+        if (allocs.length > 0) {
           res.status(409).json({
             error: "has_disbursement",
             subcontractId: (allocs[0] as { subcontract_id: string }).subcontract_id,

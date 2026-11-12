@@ -1639,6 +1639,60 @@ export async function syncPaymentsOnPay(tenantId: string, d: SyncHeader, allocat
   return touched
 }
 
+/**
+ * 已匯款單改收據編號 → 連動期款：依期款 id 排序逐筆寫。任何一筆失敗：已寫的期款還原成舊收據編號、
+ * 放款單的收據編號也還原成舊值，再拋出原錯誤；還原本身也失敗就拋出需人工確認的錯誤。
+ */
+async function syncReceiptRefToPayments(
+  tenantId: string,
+  disbursementId: string,
+  nextRef: string | null,
+  prevRef: string | null,
+  nowIso: string,
+): Promise<void> {
+  const { data, error } = await supabaseAdmin
+    .from("project_subcontract_payments")
+    .select("id, receipt_ref")
+    .eq("tenant_id", tenantId)
+    .eq("disbursement_id", disbursementId)
+    .order("id", { ascending: true })
+  if (error) throw new Error(`updateDisbursement (receipt_ref → payments, load): ${error.message}`)
+  const rows = (data ?? []) as Array<{ id: string; receipt_ref: string | null }>
+  const done: Array<{ id: string; receipt_ref: string | null }> = []
+  try {
+    for (const p of rows) {
+      const { error: pErr } = await supabaseAdmin
+        .from("project_subcontract_payments")
+        .update({ receipt_ref: nextRef, updated_at: nowIso })
+        .eq("tenant_id", tenantId)
+        .eq("id", p.id)
+      if (pErr) throw new Error(`updateDisbursement (receipt_ref → payments): ${pErr.message}`)
+      done.push(p)
+    }
+  } catch (err) {
+    const restoreErrors: string[] = []
+    for (const p of done) {
+      const { error: rErr } = await supabaseAdmin
+        .from("project_subcontract_payments")
+        .update({ receipt_ref: p.receipt_ref, updated_at: new Date().toISOString() })
+        .eq("tenant_id", tenantId)
+        .eq("id", p.id)
+      if (rErr) restoreErrors.push(`期款 ${p.id}：${rErr.message}`)
+    }
+    const { error: dErr } = await supabaseAdmin
+      .from("disbursements")
+      .update({ receipt_ref: prevRef, updated_at: new Date().toISOString() })
+      .eq("tenant_id", tenantId)
+      .eq("id", disbursementId)
+    if (dErr) restoreErrors.push(`放款單：${dErr.message}`)
+    if (restoreErrors.length > 0) {
+      const m = err instanceof Error ? err.message : String(err)
+      throw new Error(`updateDisbursement: 收據編號連動期款失敗且還原失敗（需人工確認）：${m}；還原錯誤：${restoreErrors.join("；")}`)
+    }
+    throw err
+  }
+}
+
 /** syncPaymentsOnPay 寫到一半失敗、且還原快照也失敗：部分期款已寫成已付，需人工確認。 */
 export class PaymentRestoreError extends Error {
   constructor(cause: unknown, restoreErr: unknown) {
@@ -1937,18 +1991,23 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
 
   await insertAllocations(tenantId, row.id, allocations)
   if (input.status === "paid") {
-    await syncPaymentsOnPay(
-      tenantId,
-      {
-        id: row.id,
-        disbursement_no: row.disbursement_no,
-        paid_on: row.paid_on!,
-        paying_company_id: row.paying_company_id,
-        receipt_issuer_company_id: row.receipt_issuer_company_id,
-        receipt_ref: row.receipt_ref,
-      },
-      allocations.map((a) => ({ subcontract_payment_id: a.subcontractPaymentId, amount: a.amount, withheld_amount: a.withheldAmount })),
-    )
+    try {
+      await syncPaymentsOnPay(
+        tenantId,
+        {
+          id: row.id,
+          disbursement_no: row.disbursement_no,
+          paid_on: row.paid_on!,
+          paying_company_id: row.paying_company_id,
+          receipt_issuer_company_id: row.receipt_issuer_company_id,
+          receipt_ref: row.receipt_ref,
+        },
+        allocations.map((a) => ({ subcontract_payment_id: a.subcontractPaymentId, amount: a.amount, withheld_amount: a.withheldAmount })),
+      )
+    } catch (syncErr) {
+      await voidCreatedAfterSyncFailure(tenantId, actor, row, syncErr)
+      throw syncErr
+    }
     await notifyProjectLeads(tenantId, row, await loadAllocations(tenantId, [row.id]))
   }
   await writeAuditLog({
@@ -1969,6 +2028,43 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
     await recomputeBonusRunsBestEffort(tenantId, allocations.map((a) => a.projectId), "POST /disbursements (paid)")
   }
   return (await getDisbursement(tenantId, row.id))!
+}
+
+/**
+ * 直接建成已匯款、但期款同步失敗（2026-11-12 驗收）：不留「已匯款的單頭＋分攤、期款卻沒付」的半成品。
+ * 單頭不能實體刪除（no_hard_delete）、非草稿的分攤也不能刪 → 用既有的作廢機制：狀態改 void＋作廢原因
+ *（作廢單的分攤不算擋刪），並寫稽核。syncPaymentsOnPay 已把寫到一半的期款還原；若連還原都失敗
+ *（PaymentRestoreError：部分期款已付）就不作廢、單頭維持已匯款，拋出需人工確認的錯誤（同 payDisbursement）。
+ */
+async function voidCreatedAfterSyncFailure(tenantId: string, actor: Actor, row: DisbursementRow, syncErr: unknown): Promise<void> {
+  const msg = syncErr instanceof Error ? syncErr.message : String(syncErr)
+  if (syncErr instanceof PaymentRestoreError) {
+    throw new Error(`createDisbursement: ${msg}（單號 ${row.disbursement_no}，放款單維持已匯款，需人工確認期款）`)
+  }
+  const reason = `建立時期款同步失敗，系統自動作廢（${syncErr instanceof DisbursementError ? syncErr.code : "error"}）`
+  const { data: voided, error: voidErr } = await supabaseAdmin
+    .from("disbursements")
+    .update({ status: "void", void_reason: reason, updated_at: new Date().toISOString() })
+    .eq("tenant_id", tenantId)
+    .eq("id", row.id)
+    .eq("status", "paid")
+    .select("id")
+    .maybeSingle()
+  if (voidErr || !voided) {
+    throw new Error(
+      `createDisbursement: 期款同步失敗且剛建立的放款單無法作廢（單號 ${row.disbursement_no}，需人工確認）：${msg}${voidErr ? `；作廢錯誤：${voidErr.message}` : ""}`,
+    )
+  }
+  await writeAuditLog({
+    tenantId,
+    tableName: "disbursements",
+    recordId: row.id,
+    action: "UPDATE",
+    oldRow: { status: "paid" },
+    newRow: { status: "void", void_reason: reason },
+    actorEmpId: actor.empId,
+    context: "POST /disbursements (paid, sync failed → auto void)",
+  })
 }
 
 const PAID_EDITABLE = new Set<keyof DisbursementPatch>(["note", "receiptRef", "purpose", "hasInvoice", "invoiceNo"])
@@ -2068,13 +2164,9 @@ export async function updateDisbursement(
     if (patch.invoiceNo !== undefined) fields.invoice_no = patch.invoiceNo?.trim() || null
     await guardedUpdate(fields, frozenCode, current.updated_at ?? null)
     if (current.status === "paid" && fields.receipt_ref !== undefined && fields.receipt_ref !== current.receipt_ref) {
-      // 收據編號是連動寫進期款的，改了要跟著走。
-      const { error: pErr } = await supabaseAdmin
-        .from("project_subcontract_payments")
-        .update({ receipt_ref: fields.receipt_ref, updated_at: nowIso })
-        .eq("tenant_id", tenantId)
-        .eq("disbursement_id", id)
-      if (pErr) throw new Error(`updateDisbursement (receipt_ref → payments): ${pErr.message}`)
+      // 收據編號是連動寫進期款的，改了要跟著走。依期款 id 排序逐筆更新（一句多筆會以不定順序鎖期款列，
+      // 可能與刪除專案的交易反序死鎖，2026-11-12 驗收）；中途失敗就把已改的期款與放款單的收據編號還原，不留不一致。
+      await syncReceiptRefToPayments(tenantId, id, (fields.receipt_ref as string | null) ?? null, current.receipt_ref ?? null, nowIso)
     }
   } else {
     const merged: Omit<DisbursementInput, "status" | "allocations"> & { allocations?: AllocationInput[] } = {

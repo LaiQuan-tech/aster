@@ -40,7 +40,7 @@ async function loadPglite(): Promise<null | { PGlite: new (o: unknown) => PG; ve
   }
 }
 
-// 與 docs/套用-2026-11-12-刪除專案-修正4.sql 檔頭的 db:replay 指令同一套 base（正式庫實際套用的順序）。
+// 與 docs/套用-2026-11-12-刪除專案-修正5.sql 檔頭的 db:replay 指令同一套 base（正式庫實際套用的順序）。
 const BASE_FILES = [
   "docs/套用-2026-11-08-薪資津貼勞退.sql",
   "docs/套用-2026-11-08-加班基數.sql",
@@ -56,9 +56,11 @@ const BASE_FILES = [
   "docs/套用-2026-11-12-刪除專案-修正2.sql",
   "docs/套用-2026-11-12-刪除專案-修正3.sql",
   "docs/套用-2026-11-12-刪除專案-修正4.sql",
+  "docs/套用-2026-11-12-刪除專案-修正5.sql",
 ]
 
 const T = "f0000000-0000-4000-8000-0000000000f1"
+const COMPANY = "f0000000-0000-4000-8000-0000000000f2"
 const pid = (n: number) => `f0000000-0000-4000-8000-0000000a${String(n).padStart(4, "0")}`
 const sid = (n: number) => `f0000000-0000-4000-8000-0000000b${String(n).padStart(4, "0")}`
 
@@ -94,6 +96,25 @@ const SCENARIOS: Array<{ name: string; sql: string }> = [
   { name: "未刪除的子案＋已刪除的子案", sql: `
     INSERT INTO projects (tenant_id, name, code, kind, parent_project_id) VALUES ('${T}', '子案', 'ZZ-PAR-' || substr($P::text, 33), 'change', $P);
     INSERT INTO projects (tenant_id, name, code, kind, parent_project_id, deleted_at) VALUES ('${T}', '刪掉的子案', 'ZZ-PAR-D-' || substr($P::text, 33), 'change', $P, now());` },
+  { name: "只有作廢放款單的分攤（直接掛專案＋掛副委託）→ 兩邊都不擋", sql: `
+    INSERT INTO project_subcontracts (id, tenant_id, project_id) VALUES ($S, '${T}', $P);
+    INSERT INTO disbursements (id, tenant_id, disbursement_no, status, payee_kind, payee_name, paying_company_id, method, amount, paid_on)
+      VALUES ($S, '${T}', 'ZZ-PAR-D-' || substr($P::text, 33), 'paid', 'other', '測試收款', '${COMPANY}', 'transfer', 100, '2026-11-01');
+    INSERT INTO disbursement_allocations (tenant_id, disbursement_id, project_id, amount) VALUES ('${T}', $S, $P, 50);
+    INSERT INTO disbursement_allocations (tenant_id, disbursement_id, project_id, subcontract_id, amount) VALUES ('${T}', $S, $P, $S, 50);
+    UPDATE disbursements SET status = 'void', void_reason = '測試作廢' WHERE id = $S;` },
+  { name: "作廢單＋草稿單的分攤 → 兩邊都只算草稿那一筆", sql: `
+    INSERT INTO disbursements (id, tenant_id, disbursement_no, status, payee_kind, payee_name, paying_company_id, method, amount, void_reason)
+      VALUES ($S, '${T}', 'ZZ-PAR-V-' || substr($P::text, 33), 'void', 'other', '測試收款', '${COMPANY}', 'transfer', 100, '測試作廢');
+    INSERT INTO disbursements (tenant_id, disbursement_no, status, payee_kind, payee_name, paying_company_id, method, amount)
+      VALUES ('${T}', 'ZZ-PAR-W-' || substr($P::text, 33), 'draft', 'other', '測試收款', '${COMPANY}', 'transfer', 100);
+    INSERT INTO disbursement_allocations (tenant_id, disbursement_id, project_id, amount) VALUES ('${T}', $S, $P, 50);
+    INSERT INTO disbursement_allocations (tenant_id, disbursement_id, project_id, amount)
+      SELECT '${T}', d.id, $P, 50 FROM disbursements d WHERE d.disbursement_no = 'ZZ-PAR-W-' || substr($P::text, 33);` },
+  { name: "已匯款單的分攤 → 擋", sql: `
+    INSERT INTO disbursements (id, tenant_id, disbursement_no, status, payee_kind, payee_name, paying_company_id, method, amount, paid_on)
+      VALUES ($S, '${T}', 'ZZ-PAR-P-' || substr($P::text, 33), 'paid', 'other', '測試收款', '${COMPANY}', 'transfer', 100, '2026-11-01');
+    INSERT INTO disbursement_allocations (tenant_id, disbursement_id, project_id, amount) VALUES ('${T}', $S, $P, 100);` },
   { name: "多項同時（請款＋簽約＋代扣＋文件）", sql: `
     INSERT INTO project_billings (tenant_id, project_id, installment_no, billed_on, billed_amount) VALUES ('${T}', $P, 1, '2026-11-01', 100);
     INSERT INTO contracts (tenant_id, project_id, doc_type, title, signed_on) VALUES ('${T}', $P, 'contract', '已簽', '2026-11-01');
@@ -104,7 +125,7 @@ const SCENARIOS: Array<{ name: string; sql: string }> = [
 const FAKE_TABLES = [
   "project_billings", "project_billing_shares", "project_billing_bonus_dates", "bonus_run_items", "project_share_adjustments",
   "attendance_sheet_days", "disbursement_allocations", "project_documents", "contracts", "project_subcontracts",
-  "project_subcontract_payments", "projects",
+  "project_subcontract_payments", "projects", "disbursements",
 ]
 
 const pglite = await loadPglite()
@@ -130,6 +151,7 @@ describe.skipIf(!pglite)("刪除專案：TS 預檢 vs DB 函式（pglite）", ()
     }
     for (const f of BASE_FILES) await db.exec(readFileSync(join(REPO, f), "utf8"))
     await db.exec(`INSERT INTO public.tenants (id, name, status) VALUES ('${T}', '一致性測試租戶', 'active')`)
+    await db.exec(`INSERT INTO public.companies (id, tenant_id, name) VALUES ('${COMPANY}', '${T}', '一致性測試公司')`)
     for (let i = 0; i < SCENARIOS.length; i++) {
       await db.exec(`INSERT INTO public.projects (id, tenant_id, name, code) VALUES ('${pid(i)}', '${T}', '情境 ${i}', 'ZZ-PAR-${i}')`)
       await db.exec(
@@ -175,7 +197,7 @@ describe.skipIf(!pglite)("刪除專案：TS 預檢 vs DB 函式（pglite）", ()
   it("情境確實有覆蓋到擋刪與放行兩種結果（不是全部空轉）", async () => {
     const results = await Promise.all(SCENARIOS.map((_, i) => planProjectDelete(T, pid(i))))
     const keys = new Set(results.flatMap((p) => p.blockers.map((b) => b.key)))
-    for (const k of ["billing_activity", "signed_contracts", "invoiced_subcontracts", "paid_subcontract_payments", "withheld_subcontracts", "documents", "share_adjustments", "child_projects"]) {
+    for (const k of ["billing_activity", "disbursements", "signed_contracts", "invoiced_subcontracts", "paid_subcontract_payments", "withheld_subcontracts", "documents", "share_adjustments", "child_projects"]) {
       expect(keys.has(k as never), k).toBe(true)
     }
     expect(results.some((p) => p.blockers.length === 0)).toBe(true)

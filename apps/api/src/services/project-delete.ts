@@ -17,7 +17,8 @@ import { supabaseAdmin } from "../lib/supabase.js"
  *     • bonus_run_items           獎金計算批次（含草稿）
  *     • project_share_adjustments 分潤異動紀錄
  *     • attendance_sheet_days     出勤表工作內容掛了這個專案（工時）
- *     • disbursement_allocations  請款／放款分攤（直接掛專案，或掛在本案副委託上）
+ *     • disbursement_allocations  請款／放款分攤（直接掛專案，或掛在本案副委託上）；已作廢（void）放款單的分攤不算
+ *                                 （作廢單與其分攤都不能刪，算進去的話專案永遠刪不掉；草稿仍算，2026-11-12 決定）
  *     • project_documents         專案文件／合約掃描檔（storage 有實體檔）
  *     • contracts                 未刪除且已簽約（signed_on）或已繳印花稅（stamp_duty_paid_on）的合約
  *     • project_subcontracts      未刪除且已有發票（invoice_no／invoice_date）的副委託
@@ -113,6 +114,23 @@ type SubLite = {
 }
 type SubPaymentLite = { id: string; paid_on: string | null; paid_amount: string | number | null; accepted_on: string | null }
 
+type AllocationLite = { id: string; disbursement_id: string }
+
+/**
+ * 只留「放款單沒有作廢」的分攤（已作廢＝status 'void' 的不算擋刪；草稿、送簽中、已核准、已匯款都算）。
+ * 刪除專案預檢、副委託 PUT 移除共用，與 DB 函式 soft_delete_project（migration 0100）同一條規則。
+ */
+export async function countableAllocations<T extends AllocationLite>(tenantId: string, rows: T[]): Promise<T[]> {
+  const ids = [...new Set(rows.map((r) => r.disbursement_id))]
+  if (ids.length === 0) return []
+  const voided = new Set(
+    (await rowsOf<{ id: string; status: string }>("disbursements", "id, status", tenantId, "id", ids))
+      .filter((d) => d.status === "void")
+      .map((d) => d.id),
+  )
+  return rows.filter((r) => !voided.has(r.disbursement_id))
+}
+
 export type DeletePlan = {
   blockers: DeleteBlocker[]
   /** 沒有擋刪時，隨專案一併軟刪除的列 id。 */
@@ -134,7 +152,7 @@ export async function planProjectDelete(tenantId: string, projectId: string): Pr
       rowsOf<{ id: string }>("bonus_run_items", "id", tenantId, "project_id", ids),
       rowsOf<{ id: string }>("project_share_adjustments", "id", tenantId, "project_id", ids),
       rowsOf<{ id: string }>("attendance_sheet_days", "id", tenantId, "project_id", ids),
-      rowsOf<{ id: string }>("disbursement_allocations", "id", tenantId, "project_id", ids),
+      rowsOf<AllocationLite>("disbursement_allocations", "id, disbursement_id", tenantId, "project_id", ids),
       rowsOf<{ id: string }>("project_documents", "id", tenantId, "project_id", ids),
       rowsOf<ContractLite>("contracts", "id, signed_on, stamp_duty_paid_on", tenantId, "project_id", ids, { notDeleted: true }),
       rowsOf<SubLite>(
@@ -147,14 +165,14 @@ export async function planProjectDelete(tenantId: string, projectId: string): Pr
   // 放款分攤也可能只掛副委託（subcontract_id）沒帶 project_id：本案副委託（含已刪除的）上有分攤一樣擋。
   const allSubIds = (await rowsOf<{ id: string }>("project_subcontracts", "id", tenantId, "project_id", ids)).map((s) => s.id)
   const [subAllocations, subPayments] = await Promise.all([
-    rowsOf<{ id: string }>("disbursement_allocations", "id", tenantId, "subcontract_id", allSubIds),
+    rowsOf<AllocationLite>("disbursement_allocations", "id, disbursement_id", tenantId, "subcontract_id", allSubIds),
     rowsOf<SubPaymentLite>(
       "project_subcontract_payments",
       "id, paid_on, paid_amount, accepted_on",
       tenantId, "subcontract_id", allSubIds,
     ),
   ])
-  const allocationIds = new Set([...allocations, ...subAllocations].map((a) => a.id))
+  const allocationIds = new Set((await countableAllocations(tenantId, [...allocations, ...subAllocations])).map((a) => a.id))
 
   const activeBillings = billings.filter(
     (b) =>
