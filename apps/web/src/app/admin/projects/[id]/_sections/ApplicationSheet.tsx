@@ -266,6 +266,8 @@ interface ApplicationSheetProps {
   canEditClients?: boolean;
   /** 客戶名冊（edit 模式由 page.tsx 隨 load() 一起重抓，存完客戶欄位才比得出已存成）。省略＝元件自己抓一次。 */
   clients?: Client[];
+  /** 重新抓客戶名冊（客戶名稱格聚焦時呼叫：別的分頁剛新增的客戶才選得到）。省略且沒給 clients＝元件自己重抓。 */
+  onRefreshClients?: () => Promise<void>;
   /** 上次儲存的結果（page.tsx 持有；存完重新載入時本元件會重掛）。省略＝元件自己保存。 */
   saveReport?: ApplicationSheetSaveReport | null;
   onSaveReport?: (report: ApplicationSheetSaveReport | null) => void;
@@ -315,6 +317,7 @@ export function ApplicationSheet({
   printChecked,
   latestDocument,
   clients: clientsProp,
+  onRefreshClients,
   canEditClients = true,
   saveReport: controlledReport,
   onSaveReport,
@@ -352,6 +355,9 @@ export function ApplicationSheet({
     if (print || readOnly || clientsProp) return;
     listClients().then((r) => setOwnClients(r.clients)).catch(() => {});
   }, [print, readOnly, clientsProp]);
+  /** 客戶名稱格聚焦時重抓名冊；page.tsx 持有名冊時交給它，否則重抓自己那份。 */
+  const refreshClients =
+    onRefreshClients ?? (clientsProp ? undefined : async () => setOwnClients((await listClients()).clients));
 
   // 客戶資料格：草稿裡選的客戶（還沒存也即時顯示它的名冊資料）。
   const client: Client | null = resolveSheetClient(clients, project, draft.clientId);
@@ -559,7 +565,7 @@ export function ApplicationSheet({
         return editable ? (
           <div className="w-full [&_input]:max-w-none [&_input]:rounded-md [&_input]:px-1.5 [&_input]:py-0.5 [&_input]:text-[13px]">
             {/* 換客戶時清掉客戶欄位的修改（那些是改「原客戶」名冊用的）。 */}
-            <ClientCombo clients={clientChoices} clientId={draft.clientId || null} onChange={(id) => setDraft((d) => ({ ...d, clientId: id ?? "", clientEdits: {} }))} />
+            <ClientCombo clients={clientChoices} clientId={draft.clientId || null} onRefresh={refreshClients} onChange={(id) => setDraft((d) => ({ ...d, clientId: id ?? "", clientEdits: {} }))} />
           </div>
         ) : (client?.name ?? "—");
       case "clientPhone":

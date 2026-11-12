@@ -79,6 +79,8 @@ interface ProjectApplicationFormProps {
   apiError: string | null;
   onSubmit: (body: CreateProjectExtBody) => Promise<void>;
   onCreateClient: (body: ClientInput) => Promise<Client>;
+  /** 重新抓客戶名冊（客戶名稱格聚焦時呼叫：別的分頁剛新增的客戶才選得到）。 */
+  onRefreshClients?: () => Promise<void>;
 }
 
 export function ProjectApplicationForm({
@@ -99,6 +101,7 @@ export function ProjectApplicationForm({
   apiError,
   onSubmit,
   onCreateClient,
+  onRefreshClients,
 }: ProjectApplicationFormProps) {
   const [draft, setDraft] = useState<ProjectApplicationDraft>(() =>
     emptyProjectApplicationDraft(new Date().toLocaleDateString("sv-SE"), disciplines, roleShareDefaults),
@@ -254,7 +257,7 @@ export function ProjectApplicationForm({
           <div className="sm:col-span-2">
             <label className={labelCls}>客戶名稱</label>
             <div className="flex flex-wrap items-start gap-2">
-              <ClientCombo clients={clients} clientId={draft.clientId || null} onChange={(id) => patch("clientId", id ?? "")} />
+              <ClientCombo clients={clients} clientId={draft.clientId || null} onRefresh={onRefreshClients} onChange={(id) => patch("clientId", id ?? "")} />
               <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-sm" onClick={() => setShowNewClient((current) => !current)}>{showNewClient ? "取消新增客戶" : "＋ 新增客戶"}</button>
             </div>
           </div>

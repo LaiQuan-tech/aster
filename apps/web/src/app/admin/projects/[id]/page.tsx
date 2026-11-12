@@ -505,6 +505,7 @@ export default function AdminProjectDetailPage() {
         vendors={vendors}
         disciplines={disciplines}
         clients={clients}
+        onRefreshClients={async () => setClients((await listClients()).clients)}
         canEditClients={canEditClients}
         saveReport={sheetSaveReport}
         onSaveReport={(report) => setSheetSaveStored(report ? { projectId, report } : null)}

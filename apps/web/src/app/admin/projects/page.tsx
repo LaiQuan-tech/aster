@@ -280,6 +280,7 @@ export default function AdminProjectsPage() {
           apiError={error}
           onSubmit={submit}
           onCreateClient={submitNewClient}
+          onRefreshClients={async () => setClients((await listClients()).clients)}
         />
         </div>
       </Card> : null}
