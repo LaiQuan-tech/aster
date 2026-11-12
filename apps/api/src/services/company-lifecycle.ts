@@ -213,9 +213,10 @@ export function firstNewlyPickedInactive(picks: readonly CompanyPick[], inactive
 
 /**
  * 刪除公司前：把「已刪除（打錯）的專案」上的承接公司清掉（company_id → null），外鍵才不會因為已刪除的空殼專案擋下刪除。
- * 只動 deleted_at 非空的專案；audit_all 觸發器會記下每一列的舊值。
+ * 只動 deleted_at 非空的專案；audit_all 觸發器會記下每一列的舊值。回被清掉的專案 id，刪公司失敗時交給
+ * reattachDeletedProjects 放回去。
  */
-export async function detachDeletedProjects(tenantId: string, companyId: string): Promise<number> {
+export async function detachDeletedProjects(tenantId: string, companyId: string): Promise<string[]> {
   const { data, error } = await supabaseAdmin
     .from("projects")
     .update({ company_id: null })
@@ -224,8 +225,23 @@ export async function detachDeletedProjects(tenantId: string, companyId: string)
     .not("deleted_at", "is", null)
     .select("id")
   if (error) {
-    if (isMissingColumnError(error)) return 0
+    if (isMissingColumnError(error)) return []
     throw new Error(`detachDeletedProjects: ${error.message}`)
   }
-  return (data ?? []).length
+  return (data ?? []).map((r) => (r as { id: string }).id)
+}
+
+/**
+ * 刪公司沒成功（外鍵競態、找不到、其他錯誤）時把 detachDeletedProjects 清掉的 company_id 放回去，
+ * 已刪除專案的承接公司不會因為一次失敗的刪除而遺失。只回填仍是 null 的列；失敗只記 log（不蓋掉原本的錯誤）。
+ */
+export async function reattachDeletedProjects(tenantId: string, companyId: string, projectIds: readonly string[]): Promise<void> {
+  if (projectIds.length === 0) return
+  const { error } = await supabaseAdmin
+    .from("projects")
+    .update({ company_id: companyId })
+    .eq("tenant_id", tenantId)
+    .in("id", [...projectIds])
+    .is("company_id", null)
+  if (error) console.error(`[companies] reattachDeletedProjects failed: ${error.message}`)
 }

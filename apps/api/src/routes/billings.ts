@@ -184,6 +184,9 @@ async function recomputeAfterPartialWrite(tenantId: string, projectId: string): 
   }
 }
 
+/** 期別在讀取之後被刪除（含整個專案被刪除）：事件端點條件寫入 0 列時回這個（2026-11-12）。 */
+const BILLING_GONE_BODY = { error: "not_found", message: "這一期已被刪除（或專案已刪除），請重新整理" }
+
 /** 撤銷事件的理由附在備註後面：欄位本身被清掉，稽核 trigger 留得住舊值，但人要看得到原因。 */
 function appendNote(note: string | null, line: string): string {
   return [note, line].filter(Boolean).join("\n")
@@ -407,6 +410,7 @@ billingsRouter.put(
             .eq("tenant_id", tenantId)
             .eq("project_id", projectId)
             .eq("id", item.id)
+            .is("deleted_at", null)
           if (error) {
             if (isBillingHasSharesDbError(error)) {
               // 前面的期別可能已寫入：先重算，讓已寫入部分的試算金額與尾差一致，再回 409。
@@ -492,7 +496,7 @@ billingsRouter.post(
         return
       }
 
-      const { error } = await supabaseAdmin
+      const { data: updated, error } = await supabaseAdmin
         .from("project_billings")
         .update({
           billed_on: parsed.data.billedOn ?? taipeiToday(),
@@ -501,8 +505,15 @@ billingsRouter.post(
         .eq("tenant_id", tenantId)
         .eq("project_id", row.project_id)
         .eq("id", row.id)
+        // 讀到之後這一期（或整個專案）被刪除：不寫進已刪除的列（2026-11-12 驗收）。
+        .is("deleted_at", null)
+        .select("id")
       if (error) {
         next(new Error(`POST /billings/${req.params.id}/bill: ${error.message}`))
+        return
+      }
+      if (!updated || updated.length === 0) {
+        res.status(404).json(BILLING_GONE_BODY)
         return
       }
       // 這一期凍結後，尾差要改落到下一個未請款的期別。
@@ -544,14 +555,21 @@ billingsRouter.post(
       }
 
       const note = appendNote(row.note, `取消請款（原 ${row.billed_on}）：${parsed.data.reason}`)
-      const { error } = await supabaseAdmin
+      const { data: updated, error } = await supabaseAdmin
         .from("project_billings")
         .update({ billed_on: null, billed_amount: null, note })
         .eq("tenant_id", tenantId)
         .eq("project_id", row.project_id)
         .eq("id", row.id)
+        // 讀到之後這一期（或整個專案）被刪除：不寫進已刪除的列（2026-11-12 驗收）。
+        .is("deleted_at", null)
+        .select("id")
       if (error) {
         next(new Error(`POST /billings/${req.params.id}/unbill: ${error.message}`))
+        return
+      }
+      if (!updated || updated.length === 0) {
+        res.status(404).json(BILLING_GONE_BODY)
         return
       }
       await recomputeBillings(tenantId, row.project_id)
@@ -599,14 +617,21 @@ billingsRouter.post(
       if (!row.billed_on) warnings.push("invoiced_before_billed")
 
       const patch = { invoice_no: parsed.data.invoiceNo, invoiced_on: parsed.data.invoicedOn ?? taipeiToday() }
-      const { error } = await supabaseAdmin
+      const { data: updated, error } = await supabaseAdmin
         .from("project_billings")
         .update(patch)
         .eq("tenant_id", tenantId)
         .eq("project_id", row.project_id)
         .eq("id", row.id)
+        // 讀到之後這一期（或整個專案）被刪除：不寫進已刪除的列（2026-11-12 驗收）。
+        .is("deleted_at", null)
+        .select("id")
       if (error) {
         next(new Error(`POST /billings/${req.params.id}/invoice: ${error.message}`))
+        return
+      }
+      if (!updated || updated.length === 0) {
+        res.status(404).json(BILLING_GONE_BODY)
         return
       }
       await writeAuditLog({
@@ -658,14 +683,21 @@ billingsRouter.post(
         row.note,
         `撤銷開票（原 ${row.invoiced_on} 發票 ${row.invoice_no ?? "-"}）：${parsed.data.reason}`,
       )
-      const { error } = await supabaseAdmin
+      const { data: updated, error } = await supabaseAdmin
         .from("project_billings")
         .update({ invoice_no: null, invoiced_on: null, note })
         .eq("tenant_id", tenantId)
         .eq("project_id", row.project_id)
         .eq("id", row.id)
+        // 讀到之後這一期（或整個專案）被刪除：不寫進已刪除的列（2026-11-12 驗收）。
+        .is("deleted_at", null)
+        .select("id")
       if (error) {
         next(new Error(`POST /billings/${req.params.id}/uninvoice: ${error.message}`))
+        return
+      }
+      if (!updated || updated.length === 0) {
+        res.status(404).json(BILLING_GONE_BODY)
         return
       }
       await writeAuditLog({
@@ -724,14 +756,21 @@ billingsRouter.post(
       if (!row.billed_on) warnings.push("received_before_billed")
 
       const patch = { received_on: parsed.data.receivedOn ?? taipeiToday(), received_amount: receivedAmount }
-      const { error } = await supabaseAdmin
+      const { data: updated, error } = await supabaseAdmin
         .from("project_billings")
         .update(patch)
         .eq("tenant_id", tenantId)
         .eq("project_id", row.project_id)
         .eq("id", row.id)
+        // 讀到之後這一期（或整個專案）被刪除：不寫進已刪除的列（2026-11-12 驗收）。
+        .is("deleted_at", null)
+        .select("id")
       if (error) {
         next(new Error(`POST /billings/${req.params.id}/receive: ${error.message}`))
+        return
+      }
+      if (!updated || updated.length === 0) {
+        res.status(404).json(BILLING_GONE_BODY)
         return
       }
       await writeAuditLog({
@@ -785,14 +824,21 @@ billingsRouter.post(
         row.note,
         `撤銷入帳（原 ${row.received_on} 實收 ${num(row.received_amount) ?? "-"}）：${parsed.data.reason}`,
       )
-      const { error } = await supabaseAdmin
+      const { data: updated, error } = await supabaseAdmin
         .from("project_billings")
         .update({ received_on: null, received_amount: null, note })
         .eq("tenant_id", tenantId)
         .eq("project_id", row.project_id)
         .eq("id", row.id)
+        // 讀到之後這一期（或整個專案）被刪除：不寫進已刪除的列（2026-11-12 驗收）。
+        .is("deleted_at", null)
+        .select("id")
       if (error) {
         next(new Error(`POST /billings/${req.params.id}/unreceive: ${error.message}`))
+        return
+      }
+      if (!updated || updated.length === 0) {
+        res.status(404).json(BILLING_GONE_BODY)
         return
       }
       await writeAuditLog({

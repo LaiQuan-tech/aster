@@ -71,7 +71,6 @@ export const HIGH_RISK_DELETE_PREFIXES = [
   "/expense",
   "/nhi-dependents", // 影響薪資扣繳
   "/income-tax-dependents",
-  "/projects", // 刪除專案（2026-11-12；連帶軟刪除期程／合約／副委託、還原被取代的原案）
 ] as const
 
 /** 員工資料裡屬於「角色／權限／帳號狀態」的欄位（PATCH /employees/:id 帶到任一個＝最高風險）。 */
@@ -169,6 +168,9 @@ export const DANGEROUS_OPERATIONS: readonly DangerRule[] = [
   { method: "POST", path: "/projects/:id/subcontracts/:sid/payments/:installmentNo/accept", label: "複委託付款驗收" },
   { method: "POST", path: "/attendance-sheets/:id/approve", label: "核定出勤月表（鎖定）" },
   { method: "DELETE", path: "/projects/:id/members/:memberId", tier: "high", label: "移除專案成員（影響分潤）" },
+  // 刪除專案（2026-11-12）：只有 DELETE /projects/:id 本身是最高風險（連帶軟刪除期程／合約／副委託、還原被取代的原案）；
+  // /projects/:id/documents/:docId 等子資源的 DELETE 維持原本等級。
+  { method: "DELETE", path: "/projects/:id", tier: "high", label: "刪除專案（軟刪除，連帶期程／合約／副委託）" },
   // 功能驗收追加（2026-11-02）：最高風險（需後台確認）
   // 員工個資／廠商：只有改到銀行欄位才是最高風險，其餘中風險（功能複驗 1）。規則依序比對、第一條符合的生效。
   { method: "PUT", path: "/employees/:empId/profile", tier: "high", label: "修改員工銀行帳號", when: hasBankKey },

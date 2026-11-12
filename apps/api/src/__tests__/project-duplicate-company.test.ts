@@ -103,6 +103,15 @@ describe("複製專案（追加減／加做）— 承接公司", () => {
     expect(archive[0]?.payload).not.toHaveProperty("company_id")
     expect(fake.db.projects.find((row) => row.id === SOURCE_ID)?.company_id).toBe(COMPANY_SECOND)
   })
+  // 2026-11-12 刪除專案驗收：用 id 記下取代關係（刪除新案時只靠 id 找回原案，不靠序號前綴）。
+  it("封存原案時寫入 replaced_by_project_id＝新案 id", async () => {
+    const result = await duplicate({ archiveOriginal: true })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const archive = writesTo("projects", "update")
+    expect(archive[0]?.payload).toHaveProperty("replaced_by_project_id", result.project.id)
+    expect(archive[0]?.payload).toHaveProperty("archive_reason", expect.stringMatching(/^已由 .+ 取代：/))
+  })
 })
 
 describe("複製專案 — 本案各角色分潤趴數（share_pct_by_role，2026-10-27）", () => {

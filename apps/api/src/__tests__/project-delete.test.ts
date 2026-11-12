@@ -100,7 +100,7 @@ async function fakeSoftDelete(a: Row) {
   }
   p.deleted_at = now
   p.deleted_by_emp_id = a.p_actor_emp_id
-  return { data: { status: "deleted", id: p.id, code: p.code, cascade, restored }, error: null }
+  return { data: { status: "deleted", id: p.id, code: p.code, cascade, restored, unverified: [] }, error: null }
 }
 
 beforeEach(() => {
@@ -350,8 +350,27 @@ describe("DELETE /projects/:id — 刪除換案複製的新案，原案解除「
     const res = await del(T.boss, P1, "AT-115-018")
     expect(res.status).toBe(200)
     expect(res.body.restored).toEqual([])
+    expect(res.body.unverified).toEqual([])
     expect(res.body.restoredMessage).toBeNull()
     expect(recompute.calls).toEqual([])
+  })
+
+  it("換案鏈（repointed）與只有前綴吻合（unverified）：回應帶清單，說明告知改指向／請手動檢查", async () => {
+    fake.rpcHandlers.soft_delete_project = () => ({
+      data: {
+        status: "deleted", id: P1, code: "AT-115-018", cascade: { billings: 0, contracts: 0, subcontracts: 0 },
+        restored: [{ id: "o1", code: "AT-115-010", mode: "repointed", archived: true, toId: P2, toCode: "AT-115-017" }],
+        unverified: [{ id: "o2", code: "AT-115-009" }],
+      },
+      error: null,
+    })
+    const res = await del(T.boss, P1, "AT-115-018")
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.restored).toEqual([{ id: "o1", code: "AT-115-010", mode: "repointed", archived: true, toId: P2, toCode: "AT-115-017" }])
+    expect(res.body.unverified).toEqual([{ id: "o2", code: "AT-115-009" }])
+    expect(res.body.restoredMessage).toContain("改由 AT-115-017 取代")
+    expect(res.body.restoredMessage).toContain("AT-115-009")
+    expect(res.body.restoredMessage).toContain("手動檢查")
   })
 
   it("restoredMessage：restored／unmarked／恢復未封存三種說法", () => {

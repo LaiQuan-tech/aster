@@ -1768,6 +1768,8 @@ projectsRouter.patch(
         .update({ code })
         .eq("tenant_id", tenantId)
         .eq("id", scope.project.id)
+        // 讀到之後被刪除（競態）：0 列 → 下面回 404。
+        .is("deleted_at", null)
         .select("id, code")
         .maybeSingle()
       if (error) {
@@ -1849,7 +1851,7 @@ projectsRouter.delete(
         res.status(404).json({ error: "not_found" })
         return
       }
-      const restoredMsg = deleteRestoredMessage(result.restored)
+      const restoredMsg = deleteRestoredMessage(result.restored, result.unverified)
       await writeAuditLog({
         tenantId,
         tableName: "projects",
@@ -1862,6 +1864,7 @@ projectsRouter.delete(
           deleted: true,
           cascade: result.cascade,
           restored_originals: result.restored,
+          unverified_originals: result.unverified,
         },
         actorEmpId: scope.self.id,
         context: "刪除專案（軟刪除）",
@@ -1876,6 +1879,7 @@ projectsRouter.delete(
         deleted: true,
         cascade: result.cascade,
         restored: result.restored,
+        unverified: result.unverified,
         restoredMessage: restoredMsg,
       })
     } catch (err) {

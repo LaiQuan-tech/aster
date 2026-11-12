@@ -370,6 +370,46 @@ describe("已刪除（打錯）的專案不算公司使用量（2026-11-12）", 
   })
 })
 
+describe("已刪除專案 × 公司刪除：跨租戶與失敗回復（2026-11-12 驗收）", () => {
+  it("別租戶已刪除的專案即使 company_id 相同也不會被清；別租戶的公司刪不到（404）", async () => {
+    fake.db.projects = [
+      { id: "dddddddd-0000-4000-8000-000000000021", tenant_id: TENANT_ID, company_id: C_SECOND, deleted_at: "2026-11-12T00:00:00.000Z" },
+      { id: "dddddddd-0000-4000-8000-000000000022", tenant_id: OTHER_TENANT_ID, company_id: C_SECOND, deleted_at: "2026-11-12T00:00:00.000Z" },
+      { id: "dddddddd-0000-4000-8000-000000000023", tenant_id: OTHER_TENANT_ID, company_id: C_OTHER_TENANT, deleted_at: "2026-11-12T00:00:00.000Z" },
+    ]
+    const res = await as(HR_TOKEN, request(app).delete(`/companies/${C_SECOND}`))
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(fake.db.projects.find((p: Row) => p.id === "dddddddd-0000-4000-8000-000000000021")!.company_id).toBeNull()
+    expect(fake.db.projects.find((p: Row) => p.id === "dddddddd-0000-4000-8000-000000000022")!.company_id).toBe(C_SECOND)
+
+    const foreign = await as(HR_TOKEN, request(app).delete(`/companies/${C_OTHER_TENANT}`))
+    expect(foreign.status).toBe(404)
+    expect(fake.db.projects.find((p: Row) => p.id === "dddddddd-0000-4000-8000-000000000023")!.company_id).toBe(C_OTHER_TENANT)
+    expect(stored(C_OTHER_TENANT)).toBeTruthy()
+  })
+
+  it("刪公司失敗（外鍵競態 23503）→ 已刪除專案的 company_id 放回去", async () => {
+    fake.db.projects = [
+      { id: "dddddddd-0000-4000-8000-000000000031", tenant_id: TENANT_ID, company_id: C_SECOND, deleted_at: "2026-11-12T00:00:00.000Z" },
+    ]
+    fake.injectError({ table: "companies", action: "delete", error: { code: "23503", message: "violates foreign key constraint" } })
+    const res = await as(HR_TOKEN, request(app).delete(`/companies/${C_SECOND}`))
+    expect(res.status).toBe(409)
+    expect(stored(C_SECOND)).toBeTruthy()
+    expect(fake.db.projects[0].company_id).toBe(C_SECOND)
+  })
+
+  it("刪公司其他錯誤（500）也放回去", async () => {
+    fake.db.projects = [
+      { id: "dddddddd-0000-4000-8000-000000000032", tenant_id: TENANT_ID, company_id: C_SECOND, deleted_at: "2026-11-12T00:00:00.000Z" },
+    ]
+    fake.injectError({ table: "companies", action: "delete", error: { code: "XX000", message: "boom" } })
+    const res = await as(HR_TOKEN, request(app).delete(`/companies/${C_SECOND}`))
+    expect(res.status).toBe(500)
+    expect(fake.db.projects[0].company_id).toBe(C_SECOND)
+  })
+})
+
 describe("DELETE /companies/:id", () => {
   it("從沒被用過的非預設公司：刪除成功，稽核留下舊資料", async () => {
     const res = await as(HR_TOKEN, request(app).delete(`/companies/${C_SECOND}`))

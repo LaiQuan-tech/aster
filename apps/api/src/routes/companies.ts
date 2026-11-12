@@ -12,6 +12,7 @@ import {
   findInactiveDefault,
   loadCompanyUsage,
   detachDeletedProjects,
+  reattachDeletedProjects,
   resolveFinalFlags,
   type CompanyUsage,
 } from "../services/company-lifecycle.js"
@@ -282,7 +283,8 @@ companiesRouter.delete("/companies/:id", requireAuth, requireTenant, requireFina
       return
     }
     // 已刪除（打錯）的專案不算使用量，但外鍵仍指向這間公司 → 先清掉（只動已刪除的專案）。
-    await detachDeletedProjects(tenantId, id)
+    // 刪除沒成功時（下面任何一條失敗路徑）放回去，不讓失敗的刪除把它們的承接公司弄丟。
+    const detached = await detachDeletedProjects(tenantId, id)
 
     const { data: deleted, error: deleteError } = await supabaseAdmin
       .from("companies")
@@ -290,6 +292,7 @@ companiesRouter.delete("/companies/:id", requireAuth, requireTenant, requireFina
       .eq("tenant_id", tenantId)
       .eq("id", id)
       .select("id")
+    if (deleteError || !deleted || deleted.length === 0) await reattachDeletedProjects(tenantId, id, detached)
     if (deleteError) {
       // 檢查到刪除之間有人剛好用了這間公司：DB 外鍵（NO ACTION）擋下，也是「用過了」，不是 500。
       if (deleteError.code === "23503") {

@@ -485,9 +485,12 @@ contractsRouter.patch(
           .update(patch)
           .eq("tenant_id", tenantId)
           .eq("id", req.params.id)
+          // 讀到之後合約（或整個專案）被刪除：不寫進已刪除的列（2026-11-12 驗收）→ 404。
+          .is("deleted_at", null)
           .select(CONTRACT_COLS)
-          .single()
-        if (error || !data) return { error: new Error(`PATCH /contracts/${req.params.id}: ${error?.message}`) }
+          .maybeSingle()
+        if (error) return { error: new Error(`PATCH /contracts/${req.params.id}: ${error.message}`) }
+        if (!data) return { gone: true as const }
         if (amountTouched) await recomputeBillings(tenantId, row.project_id)
         return { data }
       }
@@ -499,6 +502,10 @@ contractsRouter.patch(
       )
       if ("error" in written) {
         next(written.error)
+        return
+      }
+      if ("gone" in written) {
+        res.status(404).json({ error: "not_found", message: "這份合約已被刪除（或專案已刪除），請重新整理" })
         return
       }
       const data = written.data

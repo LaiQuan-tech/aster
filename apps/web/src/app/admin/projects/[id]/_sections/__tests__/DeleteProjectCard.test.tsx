@@ -1,7 +1,7 @@
 /** 刪除專案（2026-11-12）：錯誤訊息人性化與卡片靜態渲染。假資料。 */
 import { describe, expect, it } from "vitest"
 import { renderToStaticMarkup } from "react-dom/server"
-import { DeleteProjectCard } from "../DeleteProjectCard"
+import { DeleteProjectCard, DeleteProjectDialog, submitProjectDelete, type DeleteProjectDialogProps } from "../DeleteProjectCard"
 import { humanizeProjectDeleteError, type ProjectDetail } from "@/lib/projects-ext-api"
 
 const apiErr = (body: Record<string, unknown>) => Object.assign(new Error(String(body.error)), { body })
@@ -53,5 +53,58 @@ describe("DeleteProjectCard 靜態渲染", () => {
     expect(html).toContain("刪除專案")
     expect(html).toContain("封存")
     expect(html).not.toContain('data-testid="delete-project-dialog"')
+  })
+})
+
+describe("送出流程（submitProjectDelete → DeleteProjectDialog）", () => {
+  const base: DeleteProjectDialogProps = {
+    project: { code: "ZZ-115-001", name: "假專案" },
+    typed: "ZZ-115-001",
+    busy: false,
+    error: null,
+    blockers: [],
+    restoredNotice: null,
+    onTyped: () => {},
+    onSubmit: () => {},
+    onClose: () => {},
+    onDone: () => {},
+  }
+  const count = (html: string, needle: string) => html.split(needle).length - 1
+
+  it("409 project_has_data：原因清單在畫面上只出現一次（總結句不再重複列）", async () => {
+    const outcome = await submitProjectDelete(async () => {
+      throw apiErr({
+        error: "project_has_data",
+        message: "此專案已有實際資料，不能刪除：出勤表工時（1 筆）。若只是不再使用，請改用「封存」。",
+        blockers: [{ key: "attendance_days", label: "出勤表工時", count: 1 }],
+      })
+    })
+    expect(outcome.kind).toBe("error")
+    if (outcome.kind !== "error") return
+    const html = renderToStaticMarkup(<DeleteProjectDialog {...base} error={outcome.message} blockers={outcome.blockers} />)
+    expect(count(html, "出勤表工時")).toBe(1)
+    expect(html).toContain('data-testid="delete-project-blockers"')
+    expect(html).toContain("封存")
+    expect(html).toContain('data-testid="delete-project-submit"')
+  })
+
+  it("成功且有原案說明：顯示說明與「回專案列表」，不再有確認刪除鈕", async () => {
+    const outcome = await submitProjectDelete(async () => ({
+      id: "p1", code: "ZZ-115-001", deleted: true,
+      restored: [{ id: "o1", code: "ZZ-115-000", mode: "restored", archived: false }],
+      restoredMessage: "原案 ZZ-115-000 已解除「被取代」標記並恢復為未封存",
+    }))
+    expect(outcome).toEqual({ kind: "notice", message: "原案 ZZ-115-000 已解除「被取代」標記並恢復為未封存" })
+    if (outcome.kind !== "notice") return
+    const html = renderToStaticMarkup(<DeleteProjectDialog {...base} restoredNotice={outcome.message} />)
+    expect(html).toContain('data-testid="delete-project-restored"')
+    expect(html).toContain("ZZ-115-000")
+    expect(html).toContain('data-testid="delete-project-done"')
+    expect(html).toContain("回專案列表")
+    expect(html).not.toContain('data-testid="delete-project-submit"')
+  })
+
+  it("成功、沒有原案說明 → done（直接回列表）", async () => {
+    expect(await submitProjectDelete(async () => ({ id: "p1", code: null, deleted: true, restoredMessage: null }))).toEqual({ kind: "done" })
   })
 })

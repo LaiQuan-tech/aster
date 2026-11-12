@@ -108,6 +108,9 @@ export const projects = pgTable(
      * （比照 departments.managerEmpId／projects.leadEmpId 的排除理由：
      * 這裡純粹是分類用的軟參照，不是完整性關鍵鏈）。 */
     parentProjectId: uuid("parent_project_id"),
+    /** 換案複製時被哪一案取代（project-duplicate.ts 封存原案時寫入；migration 0097）。軟參照、不設 FK（同 parentProjectId）。
+     * 刪除專案時用它（而不是 archive_reason 的序號前綴）找回原案。 */
+    replacedByProjectId: uuid("replaced_by_project_id"),
     /** 'main' 主案 | 'change' 追加減 | 'addition' 加做 | 'advance' 估驗（公會制）。 */
     kind: text("kind").notNull().default("main"),
     /** 建案／保留案號的時點，與 createdAt（系統寫入時點）分開。 */
@@ -156,5 +159,6 @@ export const projects = pgTable(
     // 承接公司（companyId）的查詢用。正式庫已由 sql/0046（migrations/0056，IF NOT EXISTS）建好，
     // 這裡只補宣告讓 schema 與實際 DB 一致，不需要新遷移。
     tenantCompanyIdx: index("projects_tenant_company_idx").on(table.tenantId, table.companyId),
+    tenantReplacedByIdx: index("projects_tenant_replaced_by_idx").on(table.tenantId, table.replacedByProjectId),
   }),
 )

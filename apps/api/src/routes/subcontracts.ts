@@ -454,13 +454,20 @@ subcontractsRouter.put(
           ...(extrasAvailable ? subcontractExtraFields(p) : {}),
         }
         if (p.id) {
-          const { error } = await supabaseAdmin
+          const { data: updated, error } = await supabaseAdmin
             .from("project_subcontracts")
             .update(fields)
             .eq("tenant_id", tenantId)
             .eq("id", p.id)
+            // 讀到之後這筆副委託（或整個專案）被刪除：不把發票／代扣寫進已刪除的列（2026-11-12 驗收）→ 404。
+            .is("deleted_at", null)
+            .select("id")
           if (error) {
             next(new Error(`PUT /projects/${projectId}/subcontracts (update): ${error.message}`))
+            return
+          }
+          if (!updated || updated.length === 0) {
+            res.status(404).json({ error: "not_found", message: "這筆副委託已被刪除（或專案已刪除），請重新整理" })
             return
           }
           touched.push(p.id)

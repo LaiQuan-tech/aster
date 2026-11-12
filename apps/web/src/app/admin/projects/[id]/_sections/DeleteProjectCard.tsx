@@ -6,6 +6,7 @@ import {
   deleteProject,
   humanizeProjectDeleteError,
   type ProjectDeleteBlocker,
+  type ProjectDeleteResult,
   type ProjectDetail,
 } from "@/lib/projects-ext-api";
 
@@ -13,15 +14,132 @@ import {
  * 刪除打錯（key 錯）的專案（2026-11-12）。放在專案頁最底下的「危險操作」區，只給老闆／platform_admin
  * （access.deleteProject；後端 DELETE /projects/:id 自己再驗一次權限與擋刪條件）。
  * 確認框要輸入該專案序號（沒有序號的案輸入專案名稱）才能按刪除；有實際資料時後端回 409，
- * 這裡列出原因並建議改用封存。成功後由 page.tsx 回列表。
+ * 這裡列出原因並建議改用封存。成功後由 page.tsx 回列表；有原案被解除／改指向「被取代」標記
+ * （或需要手動檢查）時先顯示說明，按「回專案列表」才離開。
  */
+
+/** 送出一次刪除後畫面要變成什麼（純函式，測試直接驗送出流程）。 */
+export type DeleteSubmitOutcome =
+  | { kind: "done" }
+  | { kind: "notice"; message: string }
+  | { kind: "error"; message: string; blockers: ProjectDeleteBlocker[] };
+
+export async function submitProjectDelete(
+  run: () => Promise<ProjectDeleteResult>,
+): Promise<DeleteSubmitOutcome> {
+  try {
+    const result = await run();
+    if (result?.restoredMessage) return { kind: "notice", message: result.restoredMessage };
+    return { kind: "done" };
+  } catch (err) {
+    const h = humanizeProjectDeleteError(err);
+    return { kind: "error", message: h.message, blockers: h.blockers };
+  }
+}
+
+export type DeleteProjectDialogProps = {
+  project: Pick<ProjectDetail, "code" | "name">;
+  typed: string;
+  busy: boolean;
+  error: string | null;
+  blockers: ProjectDeleteBlocker[];
+  restoredNotice: string | null;
+  onTyped: (v: string) => void;
+  onSubmit: (e: FormEvent) => void;
+  onClose: () => void;
+  onDone: () => void;
+};
+
+/** 確認框本體（無狀態；DeleteProjectCard 管狀態）。 */
+export function DeleteProjectDialog(props: DeleteProjectDialogProps) {
+  const { project, typed, busy, error, blockers, restoredNotice } = props;
+  const expected = (project.code ?? project.name).trim();
+  const matches = typed.trim().toLowerCase() === expected.toLowerCase() && expected !== "";
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="delete-project-title"
+      onClick={props.onClose}
+    >
+      <form
+        onSubmit={props.onSubmit}
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl"
+        data-testid="delete-project-dialog"
+      >
+        <h2 id="delete-project-title" className="text-lg font-semibold text-red-700">
+          刪除專案
+        </h2>
+        <p className="mt-2 text-sm text-gray-600">
+          即將刪除 <span className="font-medium text-gray-900">{project.code ?? "（無序號）"}</span> {project.name}
+          。沒有收款、工時、獎金等資料的空期程、未簽約合約與副委託列會一併刪除。
+        </p>
+        <div className="mt-4">
+          <label className={labelCls} htmlFor="delete-project-confirm">
+            請輸入{project.code ? "專案序號" : "專案名稱"}「{expected}」以確認
+          </label>
+          <input
+            id="delete-project-confirm"
+            className={inputCls}
+            value={typed}
+            onChange={(e) => props.onTyped(e.target.value)}
+            autoComplete="off"
+            autoFocus
+            disabled={!!restoredNotice}
+            data-testid="delete-project-confirm-input"
+          />
+        </div>
+
+        {restoredNotice && (
+          <div className="mt-3 rounded-lg bg-green-50 p-3 text-sm text-green-800" role="status" data-testid="delete-project-restored">
+            專案已刪除。{restoredNotice}。
+          </div>
+        )}
+
+        {error && (
+          <div className="mt-3" role="alert">
+            <ErrorText>{error}</ErrorText>
+            {blockers.length > 0 && (
+              <ul className="mt-1 list-disc pl-5 text-xs text-red-700" data-testid="delete-project-blockers">
+                {blockers.map((b) => (
+                  <li key={b.key}>
+                    {b.label}：{b.count} 筆
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        <div className="mt-5 flex flex-wrap justify-end gap-2">
+          {restoredNotice ? (
+            <Button onClick={props.onDone} data-testid="delete-project-done">
+              回專案列表
+            </Button>
+          ) : (
+            <>
+              <Button variant="secondary" onClick={props.onClose} disabled={busy}>
+                取消
+              </Button>
+              <Button type="submit" variant="danger" disabled={!matches || busy} loading={busy} data-testid="delete-project-submit">
+                確認刪除
+              </Button>
+            </>
+          )}
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export function DeleteProjectCard({ project, onDeleted }: { project: ProjectDetail; onDeleted: () => void }) {
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [blockers, setBlockers] = useState<ProjectDeleteBlocker[]>([]);
-  // 刪除成功且有原案被解除「被取代」標記：先顯示說明，按「回專案列表」才離開。
   const [restoredNotice, setRestoredNotice] = useState<string | null>(null);
 
   const expected = (project.code ?? project.name).trim();
@@ -45,21 +163,19 @@ export function DeleteProjectCard({ project, onDeleted }: { project: ProjectDeta
     setBusy(true);
     setError(null);
     setBlockers([]);
-    try {
-      const result = await deleteProject(project.id, typed.trim());
-      if (result?.restoredMessage) {
-        setRestoredNotice(result.restoredMessage);
-        return;
-      }
-      setOpen(false);
-      onDeleted();
-    } catch (err) {
-      const h = humanizeProjectDeleteError(err);
-      setError(h.message);
-      setBlockers(h.blockers);
-    } finally {
-      setBusy(false);
+    const outcome = await submitProjectDelete(() => deleteProject(project.id, typed.trim()));
+    setBusy(false);
+    if (outcome.kind === "notice") {
+      setRestoredNotice(outcome.message);
+      return;
     }
+    if (outcome.kind === "error") {
+      setError(outcome.message);
+      setBlockers(outcome.blockers);
+      return;
+    }
+    setOpen(false);
+    onDeleted();
   }
 
   return (
@@ -78,80 +194,18 @@ export function DeleteProjectCard({ project, onDeleted }: { project: ProjectDeta
       </div>
 
       {open && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="delete-project-title"
-          onClick={close}
-        >
-          <form
-            onSubmit={submit}
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl"
-            data-testid="delete-project-dialog"
-          >
-            <h2 id="delete-project-title" className="text-lg font-semibold text-red-700">
-              刪除專案
-            </h2>
-            <p className="mt-2 text-sm text-gray-600">
-              即將刪除 <span className="font-medium text-gray-900">{project.code ?? "（無序號）"}</span>{" "}
-              {project.name}。沒有收款、工時、獎金等資料的空期程、未簽約合約與副委託列會一併刪除。
-            </p>
-            <div className="mt-4">
-              <label className={labelCls} htmlFor="delete-project-confirm">
-                請輸入{project.code ? "專案序號" : "專案名稱"}「{expected}」以確認
-              </label>
-              <input
-                id="delete-project-confirm"
-                className={inputCls}
-                value={typed}
-                onChange={(e) => setTyped(e.target.value)}
-                autoComplete="off"
-                autoFocus
-                data-testid="delete-project-confirm-input"
-              />
-            </div>
-
-            {restoredNotice && (
-              <div className="mt-3 rounded-lg bg-green-50 p-3 text-sm text-green-800" role="status" data-testid="delete-project-restored">
-                專案已刪除。{restoredNotice}。
-              </div>
-            )}
-
-            {error && (
-              <div className="mt-3" role="alert">
-                <ErrorText>{error}</ErrorText>
-                {blockers.length > 0 && (
-                  <ul className="mt-1 list-disc pl-5 text-xs text-red-700" data-testid="delete-project-blockers">
-                    {blockers.map((b) => (
-                      <li key={b.key}>
-                        {b.label}：{b.count} 筆
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            )}
-
-            <div className="mt-5 flex flex-wrap justify-end gap-2">
-              {restoredNotice ? (
-                <Button onClick={onDeleted} data-testid="delete-project-done">
-                  回專案列表
-                </Button>
-              ) : (
-                <>
-                  <Button variant="secondary" onClick={close} disabled={busy}>
-                    取消
-                  </Button>
-                  <Button type="submit" variant="danger" disabled={!matches || busy} loading={busy} data-testid="delete-project-submit">
-                    確認刪除
-                  </Button>
-                </>
-              )}
-            </div>
-          </form>
-        </div>
+        <DeleteProjectDialog
+          project={project}
+          typed={typed}
+          busy={busy}
+          error={error}
+          blockers={blockers}
+          restoredNotice={restoredNotice}
+          onTyped={setTyped}
+          onSubmit={submit}
+          onClose={close}
+          onDone={onDeleted}
+        />
       )}
     </Card>
   );

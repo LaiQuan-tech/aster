@@ -211,18 +211,34 @@ export function confirmMatches(input: unknown, project: { code: string | null; n
   return input.trim().toLowerCase() === expected.toLowerCase()
 }
 
-/** 被刪除的新案取代而封存的原案，刪除時已還原（DB 函式回傳）。 */
+/** 被刪除的新案取代而封存的原案，刪除時的處理（DB 函式回傳；只用 id 比對，見 migration 0097）。 */
 export type RestoredOriginal = {
   id: string
   code: string | null
-  /** restored＝回到複製前的封存狀態與原因；unmarked＝找不到複製前快照，只解除「被取代」標記、封存保留。 */
-  mode: "restored" | "unmarked"
-  /** 還原後是否仍封存。 */
+  /**
+   * restored＝回到複製前的封存狀態與原因；unmarked＝找不到複製前快照，只解除「被取代」標記、封存保留；
+   * repointed＝被刪除的案自己也已被別案（toCode）取代（換案鏈 O→本案→X），原案改由 X 取代，仍封存、仍不計獎金。
+   */
+  mode: "restored" | "unmarked" | "repointed"
+  /** 處理後是否仍封存。 */
   archived: boolean
+  /** repointed 時：改指向的後繼案。 */
+  toId?: string | null
+  toCode?: string | null
 }
 
+/** 只有序號前綴吻合（「已由 本案序號 取代：」）、但 id 對不上的案：DB 不動，請使用者手動檢查。 */
+export type UnverifiedOriginal = { id: string; code: string | null }
+
 export type SoftDeleteResult =
-  | { status: "deleted"; id: string; code: string | null; cascade: { billings: number; contracts: number; subcontracts: number }; restored: RestoredOriginal[] }
+  | {
+      status: "deleted"
+      id: string
+      code: string | null
+      cascade: { billings: number; contracts: number; subcontracts: number }
+      restored: RestoredOriginal[]
+      unverified: UnverifiedOriginal[]
+    }
   | { status: "blocked"; blockers: DeleteBlocker[] }
   | { status: "not_found" }
 
@@ -238,18 +254,21 @@ export function labelBlockers(raw: unknown): DeleteBlocker[] {
     }))
 }
 
-/** 還原原案的說明文字（API 回應 restoredMessage／畫面直接顯示）；沒有還原回 null。 */
-export function restoredMessage(restored: RestoredOriginal[]): string | null {
-  if (restored.length === 0) return null
-  return restored
-    .map((r) => {
-      const code = r.code ?? "（無序號）"
-      if (r.mode === "unmarked") return `原案 ${code} 已解除「被取代」標記（仍是封存，需要時請自行解除封存）`
-      return r.archived
-        ? `原案 ${code} 已解除「被取代」標記，回到複製前的封存狀態`
-        : `原案 ${code} 已解除「被取代」標記並恢復為未封存`
-    })
-    .join("；")
+/** 原案處理的說明文字（API 回應 restoredMessage／畫面直接顯示）；沒有任何原案要說明回 null。 */
+export function restoredMessage(restored: RestoredOriginal[], unverified: UnverifiedOriginal[] = []): string | null {
+  const parts = restored.map((r) => {
+    const code = r.code ?? "（無序號）"
+    if (r.mode === "repointed") return `原案 ${code} 改由 ${r.toCode ?? "後繼案"} 取代（仍封存，獎金仍由 ${r.toCode ?? "後繼案"} 計）`
+    if (r.mode === "unmarked") return `原案 ${code} 已解除「被取代」標記（仍是封存，需要時請自行解除封存）`
+    return r.archived
+      ? `原案 ${code} 已解除「被取代」標記，回到複製前的封存狀態`
+      : `原案 ${code} 已解除「被取代」標記並恢復為未封存`
+  })
+  if (unverified.length > 0) {
+    const codes = unverified.map((u) => u.code ?? "（無序號）").join("、")
+    parts.push(`${codes} 的封存原因寫著「已由本案取代」，但無法確認是本案複製出來的，系統沒有更動，請手動檢查`)
+  }
+  return parts.length > 0 ? parts.join("；") : null
 }
 
 /**
@@ -270,12 +289,14 @@ export async function softDeleteProject(
     p_actor_emp_id: empId,
     p_reason: reason,
   })
-  if (error) throw new Error(`softDeleteProject: ${error.message}`)
+  // 帶著 code 往上丟：死鎖（40P01）等可重試衝突由全域錯誤處理轉成 409 conflict_retry。
+  if (error) throw Object.assign(new Error(`softDeleteProject: ${error.message}`), { code: error.code })
   const out = (data ?? {}) as Record<string, unknown>
   if (out.status === "blocked") return { status: "blocked", blockers: labelBlockers(out.blockers) }
   if (out.status !== "deleted") return { status: "not_found" }
   const cascade = (out.cascade ?? {}) as Record<string, unknown>
   const restored = Array.isArray(out.restored) ? (out.restored as Array<Record<string, unknown>>) : []
+  const unverified = Array.isArray(out.unverified) ? (out.unverified as Array<Record<string, unknown>>) : []
   return {
     status: "deleted",
     id: String(out.id ?? projectId),
@@ -288,8 +309,12 @@ export async function softDeleteProject(
     restored: restored.map((r) => ({
       id: String(r.id),
       code: (r.code as string | null | undefined) ?? null,
-      mode: r.mode === "unmarked" ? "unmarked" : "restored",
+      mode: r.mode === "unmarked" || r.mode === "repointed" ? r.mode : "restored",
       archived: r.archived === true,
+      ...(r.mode === "repointed"
+        ? { toId: (r.toId as string | null | undefined) ?? null, toCode: (r.toCode as string | null | undefined) ?? null }
+        : {}),
     })),
+    unverified: unverified.map((u) => ({ id: String(u.id), code: (u.code as string | null | undefined) ?? null })),
   }
 }

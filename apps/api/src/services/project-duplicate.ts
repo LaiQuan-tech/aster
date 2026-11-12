@@ -426,7 +426,12 @@ export async function duplicateProject(input: DuplicateProjectInput): Promise<Du
   // ── 6. 原案封存（最後一步：前面失敗不會連帶把原案收掉） ────────────
   let archived: { id: string; code: string | null } | null = null
   if (input.archiveOriginal) {
-    const patch: Record<string, unknown> = { archive_reason: archiveReasonFor(inserted.code, reason) }
+    // replaced_by_project_id：用 id 記下「被哪一案取代」（migration 0097）——刪除新案時只靠 id 找回原案，
+    // 不靠「已由 {序號} 取代：」這個文字前綴（改號後舊號被重用、或手填相同字樣都會誤判）。
+    const patch: Record<string, unknown> = {
+      archive_reason: archiveReasonFor(inserted.code, reason),
+      replaced_by_project_id: newId,
+    }
     // 已封存就不覆寫時點——重複封存不該把原本的封存日洗掉（同 project-status.ts）。
     if (!source.archived_at) patch.archived_at = nowIso
     const { error } = await supabaseAdmin

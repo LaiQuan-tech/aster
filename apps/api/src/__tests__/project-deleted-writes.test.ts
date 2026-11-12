@@ -71,6 +71,16 @@ describe("DB 觸發器 PD409 → 409 project_deleted", () => {
     expect(isProjectDeletedError(null)).toBe(false)
   })
 
+  it("RD409 → row_deleted；40P01／40001（含包過一層的訊息）→ conflict_retry", async () => {
+    const { isRowDeletedError, isRetryableConflictError } = await import("../middleware/project-deleted.js")
+    expect(isRowDeletedError({ code: "RD409" })).toBe(true)
+    expect(isRowDeletedError(new Error("x: row_deleted: 這一列已刪除"))).toBe(true)
+    expect(isRetryableConflictError({ code: "40P01" })).toBe(true)
+    expect(isRetryableConflictError({ code: "40001" })).toBe(true)
+    expect(isRetryableConflictError(new Error("POST /billings/x/receive: deadlock detected"))).toBe(true)
+    expect(isRetryableConflictError(new Error("boom"))).toBe(false)
+  })
+
   it("全域錯誤處理：PD409 回 409，其他錯誤交給下一個處理器", async () => {
     const app = express()
     app.get("/deleted", (_req, _res, next) => next(new Error("PUT billings: project_deleted: 專案已刪除，不能再寫入 project_billings")))
@@ -90,5 +100,10 @@ describe("MCP：刪除專案是最高風險", () => {
   it("DELETE /projects/:id → high（要後台本人確認）；GET 不受影響", () => {
     expect(dangerOf("DELETE", "/projects/dddddddd-0000-4000-8000-000000000701", { confirmCode: "ZZ-701" })?.tier).toBe("high")
     expect(dangerOf("GET", "/projects/dddddddd-0000-4000-8000-000000000701")).toBeNull()
+  })
+
+  it("只精確比對 DELETE /projects/:id：刪專案文件維持原本的中風險；移除成員維持原本的最高風險", () => {
+    expect(dangerOf("DELETE", "/projects/x/documents/d")?.tier).toBe("medium")
+    expect(dangerOf("DELETE", "/projects/x/members/m")?.tier).toBe("high")
   })
 })

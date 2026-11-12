@@ -948,7 +948,16 @@ export interface ProjectDeleteResult {
   code: string | null
   deleted: true
   /** 被本案（換案複製的新案）取代而封存的原案，已解除「被取代」標記（舊版後端沒有這個鍵）。 */
-  restored?: Array<{ id: string; code: string | null; mode: "restored" | "unmarked"; archived: boolean }>
+  restored?: Array<{
+    id: string
+    code: string | null
+    mode: "restored" | "unmarked" | "repointed"
+    archived: boolean
+    toId?: string | null
+    toCode?: string | null
+  }>
+  /** 只有序號前綴吻合、無法確認的原案（後端沒有更動，請手動檢查）。 */
+  unverified?: Array<{ id: string; code: string | null }>
   /** 還原原案的說明，畫面直接顯示；沒有還原時為 null。 */
   restoredMessage?: string | null
 }
