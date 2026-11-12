@@ -6,6 +6,7 @@ import { ClientCombo } from "@/components/ClientCombo";
 import { EmployeeCombobox } from "@/components/EmployeeCombobox";
 import { MoneyInput } from "@/components/MoneyInput";
 import { AddDisciplineOptionButton, DesignDisciplineDatalist } from "@/components/DesignDisciplineInput";
+import { ProjectCodeField } from "./ProjectCodeField";
 import type { Vendor } from "@/lib/company-api";
 import { companyOptions } from "@/lib/company-options";
 import { createContract, updateContract, type Contract } from "@/lib/projects-api";
@@ -1277,7 +1278,8 @@ export function ApplicationSheet({
               <span className="font-medium text-gray-900">{draft.name}</span>
             )}
           </label>
-          <span className="shrink-0 text-gray-600">專案序號：<span className="font-mono text-gray-900">{project.code ?? "—"}</span></span>
+          {/* 2026-11-12 序號可手動調整：鉛筆鈕只給能編輯本案基本資料的人（editable＝access.finance 且非列印／舊版檢視）；外層 fieldset 存檔中會一併鎖住 */}
+          <ProjectCodeField projectId={project.id} code={project.code ?? null} canEdit={editable && !!load} onSaved={load ? () => load() : undefined} />
         </div>
 
         {/* 專案明細表：外框 gray-300、內框 1px gray-200（gap-px 露出底色當格線）。

@@ -73,10 +73,15 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
-/** 從編號字串取出流水號；格式不符回 null（人工輸入的舊編號不參與計算）。 */
-export function parseSeq(fmt: CodeFormat, code: string, year: number): number | null {
+/**
+ * 從編號字串取出流水號；格式不符回 null（人工輸入的舊編號不參與計算）。
+ * `ignoreCase`：專案序號在同租戶內是「大小寫不敏感」唯一（0094 `projects_tenant_code_ci_uq`），
+ * 手動改成 `at-115-020` 也算占用 020，產號時要用 true 一起算進最大號。
+ */
+export function parseSeq(fmt: CodeFormat, code: string, year: number, ignoreCase = false): number | null {
   const re = new RegExp(
     `^${escapeRe(fmt.prefix)}${escapeRe(fmt.separator)}${codeYear(fmt, year)}${escapeRe(fmt.separator)}(\\d+)$`,
+    ignoreCase ? "i" : "",
   )
   const m = code.match(re)
   return m ? Number(m[1]) : null
@@ -113,11 +118,25 @@ export async function loadCodeFormat(tenantId: string): Promise<CodeFormat> {
 }
 
 /**
- * 取該租戶該年度的下一個編號。
+ * 由既有編號算出下一個自動編號：取「符合本格式」者（大小寫不敏感）的最大流水號 +1。
  *
- * 只掃描「符合本格式」的既有編號——人工輸入的例外編號不參與流水號計算，
- * 否則一筆手打的 `ABC-999` 會把之後所有自動編號推到 1000。
- * `fmt` 省略時自動載入租戶設定。
+ * 2026-11-12 專案序號可手動調整後：手動改成符合格式的號（例 `AT-115-050`、`at-115-020`）
+ * 一樣算進最大號，所以自動編號**永遠大於所有已占用的號**，不會產生已存在的號碼
+ * （代價是流水號可能跳號——跳號可以接受，撞號不行）。手打的非格式編號（`ABC-999`）不參與，
+ * 否則會把之後所有自動編號推到 1000。純函式，方便測試。
+ */
+export function pickNextCode(fmt: CodeFormat, year: number, existingCodes: ReadonlyArray<string | null | undefined>): string {
+  let maxSeq = 0
+  for (const code of existingCodes) {
+    const seq = parseSeq(fmt, code ?? "", year, true)
+    if (seq !== null && seq > maxSeq) maxSeq = seq
+  }
+  return formatCode(fmt, year, maxSeq + 1)
+}
+
+/**
+ * 取該租戶該年度的下一個編號（見 pickNextCode）。
+ * `fmt` 省略時自動載入租戶設定。用 ilike 撈：手動改成小寫的號也要算進來。
  */
 export async function nextProjectCode(
   tenantId: string,
@@ -129,15 +148,45 @@ export async function nextProjectCode(
     .from("projects")
     .select("code")
     .eq("tenant_id", tenantId)
-    .like("code", codeLikePrefix(format, year))
+    .ilike("code", codeLikePrefix(format, year))
   if (error) throw new Error(`nextProjectCode: ${error.message}`)
+  return pickNextCode(format, year, (data ?? []).map((row) => row.code as string | null))
+}
 
-  let maxSeq = 0
-  for (const row of data ?? []) {
-    const seq = parseSeq(format, (row.code as string) ?? "", year)
-    if (seq !== null && seq > maxSeq) maxSeq = seq
-  }
-  return formatCode(format, year, maxSeq + 1)
+/* ──────────────────────────────────────────────────────────────────
+ * 手動調整專案序號（2026-11-12，PATCH /projects/:id/code）
+ * ────────────────────────────────────────────────────────────────── */
+
+/** 手動序號長度上限（字元）。 */
+export const MANUAL_CODE_MAX = 40
+
+export type ManualCodeCheck =
+  | { ok: true; code: string }
+  | { ok: false; error: "project_no_required" | "project_no_too_long" | "project_no_invalid" }
+
+/**
+ * 手動序號的正規化與驗證：去頭尾空白、不可空、≤ MANUAL_CODE_MAX 字、不可含換行等控制字元。
+ * 重複與否要查 DB，在路由處理（大小寫不敏感比較）。
+ */
+export function normalizeManualCode(raw: unknown): ManualCodeCheck {
+  if (typeof raw !== "string") return { ok: false, error: "project_no_required" }
+  const code = raw.trim()
+  if (!code) return { ok: false, error: "project_no_required" }
+  if ([...code].length > MANUAL_CODE_MAX) return { ok: false, error: "project_no_too_long" }
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(code)) return { ok: false, error: "project_no_invalid" }
+  return { ok: true, code }
+}
+
+/** 大小寫不敏感比較兩個序號是否相同（同租戶唯一的判準）。 */
+export function sameCodeIgnoreCase(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (a == null || b == null) return false
+  return a.toLowerCase() === b.toLowerCase()
+}
+
+/** PostgREST ilike 樣式跳脫：`%`／`_`／`\` 當字面字元（`*` 也是 PostgREST 萬用字元，呼叫端另以 sameCodeIgnoreCase 精確比對）。 */
+export function escapeLikePattern(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => `\\${c}`)
 }
 
 /** Postgres unique violation —— 併發撞號時重試的判斷依據。 */
@@ -162,9 +211,9 @@ export function isUniqueViolation(err: { code?: string } | null): boolean {
  */
 
 /** `AT-115-013-7` 相對根案 `AT-115-013` → 7；非同源或格式不符回 null。 */
-export function parseDupSuffix(rootCode: string, code: string): number | null {
+export function parseDupSuffix(rootCode: string, code: string, ignoreCase = false): number | null {
   if (!rootCode || !code) return null
-  const m = code.match(new RegExp(`^${escapeRe(rootCode)}-(\\d+)$`))
+  const m = code.match(new RegExp(`^${escapeRe(rootCode)}-(\\d+)$`, ignoreCase ? "i" : ""))
   return m ? Number(m[1]) : null
 }
 
@@ -182,12 +231,13 @@ export async function nextDuplicateCode(tenantId: string, rootCode: string): Pro
     .from("projects")
     .select("code")
     .eq("tenant_id", tenantId)
-    .like("code", `${rootCode}-%`)
+    .ilike("code", `${rootCode}-%`)
   if (error) throw new Error(`nextDuplicateCode: ${error.message}`)
 
+  // 大小寫不敏感：手動改成 `at-115-013-2` 也占用尾碼 2（同租戶序號大小寫不敏感唯一）。
   let max = 0
   for (const row of data ?? []) {
-    const n = parseDupSuffix(rootCode, (row.code as string) ?? "")
+    const n = parseDupSuffix(rootCode, (row.code as string) ?? "", true)
     if (n !== null && n > max) max = n
   }
   return formatDupCode(rootCode, max + 1)

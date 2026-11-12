@@ -52,7 +52,7 @@ const subcontracts: Subcontract[] = [{
   amount: 20000, billingBasis: "完工", orderType: null, withholdingRate: 0.1, withholdingThreshold: 20000, note: null,
 }]
 
-function render(opts: { canFinance?: boolean; canEditClients?: boolean; mode?: "edit" | "print"; draft?: Partial<ApplicationSheetDraft>; money?: ProjectMoney } = {}) {
+function render(opts: { canFinance?: boolean; canEditClients?: boolean; mode?: "edit" | "print"; draft?: Partial<ApplicationSheetDraft>; money?: ProjectMoney; load?: () => Promise<void>; readOnly?: boolean } = {}) {
   const draft = { ...applicationSheetDraftOf(project, []), ...opts.draft }
   return renderToStaticMarkup(
     <ApplicationSheet
@@ -71,6 +71,8 @@ function render(opts: { canFinance?: boolean; canEditClients?: boolean; mode?: "
       mode={opts.mode}
       draft={draft}
       onDraftChange={() => {}}
+      load={opts.load}
+      readOnly={opts.readOnly}
     />,
   )
 }
@@ -357,6 +359,21 @@ describe("每期款獎金分潤（2026-11-11）", () => {
       expect(html).not.toContain("獎金分潤")
       expect(html).not.toContain("30,000")
       expect(html).not.toContain("發獎金日")
+    }
+  })
+})
+
+describe("專案序號手動調整（2026-11-12）", () => {
+  const load = async () => {}
+  it("能編輯本案（canFinance）＋編輯模式：序號旁有鉛筆鈕", () => {
+    const html = render({ load })
+    expect(html).toContain('data-testid="project-code-edit"')
+    expect(html).toContain("T-115-001")
+  })
+  it("沒有編輯權限／列印／舊版唯讀：只顯示序號、沒有鉛筆鈕", () => {
+    for (const html of [render({ load, canFinance: false }), render({ load, mode: "print" }), render({ load, readOnly: true })]) {
+      expect(html).toContain("T-115-001")
+      expect(html).not.toContain('data-testid="project-code-edit"')
     }
   })
 })

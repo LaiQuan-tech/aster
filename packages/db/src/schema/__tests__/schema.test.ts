@@ -130,6 +130,13 @@ describe("projects table", () => {
     ])
   })
 
+  // 2026-11-12 專案序號可手動調整：同租戶大小寫不敏感唯一（migrations/0094）。
+  it("(tenant_id, lower(code)) 有 unique index（序號大小寫不敏感不可重複）", () => {
+    const idx = getTableConfig(projects).indexes.find((i) => i.config.name === "projects_tenant_code_ci_uq")
+    expect(idx).toBeDefined()
+    expect(idx!.config.unique).toBe(true)
+  })
+
   // 承接公司（company_id）的查詢用一般 index。正式庫已由 sql/0046（migrations/0056）建好，
   // schema 補上宣告只是讓 drizzle 與實際 DB 一致，不需要新遷移。
   it("(tenant_id, company_id) 有一般 index（承接公司；與 sql/0046 對齊）", () => {

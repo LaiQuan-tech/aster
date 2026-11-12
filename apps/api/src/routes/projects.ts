@@ -10,6 +10,9 @@ import {
   loadCodeFormat,
   MAX_CODE_ATTEMPTS,
   DEFAULT_CODE_FORMAT,
+  normalizeManualCode,
+  sameCodeIgnoreCase,
+  escapeLikePattern,
 } from "../services/project-code.js"
 import {
   PROJECT_STATUSES,
@@ -1678,6 +1681,96 @@ projectsRouter.patch(
         await recomputeDraftRunsAfterWrite(tenantId, [data.id as string], "PATCH /projects/:id")
       }
       res.status(200).json({ id: data.id })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// ── PATCH /projects/:id/code — 手動調整專案序號（2026-11-12 業主需求） ─────────
+// 原本序號建立後不可變更（PATCH /projects/:id 帶 code 仍回 409 code_immutable），業主要求可手動調整，
+// 改走這支專用端點：權限同專案基本資料編輯（canManage：老闆／platform_admin／HR／該案主辦或部門主管）。
+// 驗證：去頭尾空白、不可空、≤40 字、同租戶不可重複（大小寫不敏感）；DB 端 0094 `projects_tenant_code_ci_uq`
+// 是最後防線，23505 一律轉 409 project_no_taken。之後的自動編號取「符合格式者最大號 +1」（大小寫不敏感），
+// 不會再產生已被手動占用的號（services/project-code.ts pickNextCode）。
+// 申請單舊版本快照裡的序號維持當時的值，不回頭改。
+const PROJECT_NO_TAKEN = { error: "project_no_taken", message: "此序號已被其他專案使用" } as const
+
+projectsRouter.patch(
+  "/projects/:id/code",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
+    try {
+      const scope = await loadScope(tenantId, userId, req.params.id as string)
+      if (!scope.ok) {
+        res.status(scope.status).json({ error: scope.error })
+        return
+      }
+      if (!scope.canManage) {
+        res.status(403).json({ error: "forbidden" })
+        return
+      }
+      const checked = normalizeManualCode((req.body as { code?: unknown } | undefined)?.code)
+      if (!checked.ok) {
+        res.status(400).json({ error: checked.error })
+        return
+      }
+      const code = checked.code
+      const oldCode = scope.project.code
+      if (code === oldCode) {
+        res.status(200).json({ id: scope.project.id, code })
+        return
+      }
+
+      // 同租戶大小寫不敏感比對（ilike 粗篩，再以 sameCodeIgnoreCase 精確判定；DB 唯一索引是最後防線）。
+      const { data: clash, error: clashErr } = await supabaseAdmin
+        .from("projects")
+        .select("id, code")
+        .eq("tenant_id", tenantId)
+        .neq("id", scope.project.id)
+        .ilike("code", escapeLikePattern(code))
+      if (clashErr) throw new Error(`PATCH /projects/${scope.project.id}/code (clash): ${clashErr.message}`)
+      if ((clash ?? []).some((row) => sameCodeIgnoreCase(row.code as string | null, code))) {
+        res.status(409).json(PROJECT_NO_TAKEN)
+        return
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from("projects")
+        .update({ code })
+        .eq("tenant_id", tenantId)
+        .eq("id", scope.project.id)
+        .select("id, code")
+        .maybeSingle()
+      if (error) {
+        if (isUniqueViolation(error)) {
+          res.status(409).json(PROJECT_NO_TAKEN)
+          return
+        }
+        throw new Error(`PATCH /projects/${scope.project.id}/code: ${error.message}`)
+      }
+      if (!data) {
+        res.status(404).json({ error: "not_found" })
+        return
+      }
+      await writeAuditLog({
+        tenantId,
+        tableName: "projects",
+        recordId: scope.project.id,
+        action: "UPDATE",
+        oldRow: { code: oldCode },
+        newRow: { code },
+        actorEmpId: scope.self.id,
+        context: "手動調整專案序號",
+      })
+      res.status(200).json({ id: data.id, code: data.code })
     } catch (err) {
       next(err)
     }

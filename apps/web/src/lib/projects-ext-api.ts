@@ -897,12 +897,37 @@ export interface UpdateProjectExtBody {
   guildRepaymentNote?: string | null
 }
 
-/** 編輯專案（含 P3 新欄位）。code 一樣不在參數裡——不可變更（後端回 409 code_immutable）。 */
+/** 編輯專案（含 P3 新欄位）。code 不在參數裡（一般 PATCH 帶 code 回 409 code_immutable）；改序號走 updateProjectCode。 */
 export function updateProjectFields(id: string, body: UpdateProjectExtBody) {
   return apiFetch<{ id: string }>(`/projects/${id}`, {
     method: "PATCH",
     body: JSON.stringify(body),
   })
+}
+
+/** 手動調整專案序號上限（與後端 MANUAL_CODE_MAX 一致）。 */
+export const PROJECT_CODE_MAX = 40
+
+/**
+ * 手動調整專案序號（2026-11-12，PATCH /projects/:id/code）。權限同專案基本資料編輯（access.finance）。
+ * 後端會去頭尾空白；同租戶重複（大小寫不敏感）回 409 project_no_taken。
+ */
+export function updateProjectCode(id: string, code: string) {
+  return apiFetch<{ id: string; code: string }>(`/projects/${id}/code`, {
+    method: "PATCH",
+    body: JSON.stringify({ code }),
+  })
+}
+
+/** 改序號的錯誤碼人性化。 */
+export function humanizeProjectCodeError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err ?? "")
+  if (msg.includes("project_no_taken")) return "此序號已被其他專案使用"
+  if (msg.includes("project_no_required")) return "序號不可空白"
+  if (msg.includes("project_no_too_long")) return `序號最多 ${PROJECT_CODE_MAX} 字`
+  if (msg.includes("project_no_invalid")) return "序號不可包含換行等特殊字元"
+  if (msg.includes("forbidden")) return "您沒有修改此專案序號的權限"
+  return msg || "序號儲存失敗"
 }
 
 /** 分潤改版 #6：只有老闆可以改分潤的兩個錯誤碼。 */

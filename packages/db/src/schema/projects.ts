@@ -1,6 +1,7 @@
 import {
   pgTable, uuid, text, integer, numeric, timestamp, date, jsonb, uniqueIndex, index,
 } from "drizzle-orm/pg-core"
+import { sql } from "drizzle-orm"
 import { tenants } from "./tenants"
 import { departments } from "./departments"
 import { clients } from "./clients"
@@ -141,6 +142,9 @@ export const projects = pgTable(
   },
   (table) => ({
     tenantCodeUnique: uniqueIndex("projects_tenant_code_uq").on(table.tenantId, table.code),
+    // 2026-11-12 專案序號可手動調整：同租戶序號「大小寫不敏感」唯一（migrations/0094 ＝ sql/0084）。
+    // 原本的 projects_tenant_code_uq 保留（大小寫敏感，被這個涵蓋，但不拿掉以免動到既有依賴）。
+    tenantCodeCiUnique: uniqueIndex("projects_tenant_code_ci_uq").on(table.tenantId, sql`lower(${table.code})`),
     // 承接公司（companyId）的查詢用。正式庫已由 sql/0046（migrations/0056，IF NOT EXISTS）建好，
     // 這裡只補宣告讓 schema 與實際 DB 一致，不需要新遷移。
     tenantCompanyIdx: index("projects_tenant_company_idx").on(table.tenantId, table.companyId),
