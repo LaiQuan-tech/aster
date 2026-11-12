@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase.js"
-import { isProjectDeletedError, isRowDeletedError } from "../middleware/project-deleted.js"
+import { isProjectDeletedError, isRetryableConflictError, isRowDeletedError } from "../middleware/project-deleted.js"
 import { logger } from "../lib/logger.js"
 import { sanitizeSearchTerm } from "../lib/search-term.js"
 import { addDaysKey, dayWindowUtc, todayKey } from "../lib/tz.js"
@@ -1671,6 +1671,7 @@ async function syncReceiptRefToPayments(
     }
   } catch (err) {
     const restoreErrors: string[] = []
+    let restoreSkipped = false
     // 還原只在「仍是這次寫的新值」時才做（條件 receipt_ref = nextRef）：期間有人又改了就不蓋掉，記 log。
     const sameRef = <Q extends { is: (c: string, v: null) => Q; eq: (c: string, v: string) => Q }>(q: Q): Q =>
       nextRef === null ? q.is("receipt_ref", null) : q.eq("receipt_ref", nextRef)
@@ -1683,7 +1684,10 @@ async function syncReceiptRefToPayments(
           .eq("id", p.id),
       ).select("id")
       if (rErr) restoreErrors.push(`期款 ${p.id}：${rErr.message}`)
-      else if (!back || back.length === 0) logger.warn({ paymentId: p.id }, "receipt_ref restore skipped: payment changed by someone else")
+      else if (!back || back.length === 0) {
+        logger.warn({ paymentId: p.id }, "receipt_ref restore skipped: payment changed by someone else")
+        restoreSkipped = true
+      }
     }
     const { data: dBack, error: dErr } = await sameRef(
       supabaseAdmin
@@ -1693,13 +1697,19 @@ async function syncReceiptRefToPayments(
         .eq("id", disbursementId),
     ).select("id")
     if (dErr) restoreErrors.push(`放款單：${dErr.message}`)
-    else if (!dBack || dBack.length === 0) logger.warn({ disbursementId }, "receipt_ref restore skipped: disbursement changed by someone else")
-    if (restoreErrors.length > 0) {
+    else if (!dBack || dBack.length === 0) {
+      logger.warn({ disbursementId }, "receipt_ref restore skipped: disbursement changed by someone else")
+      restoreSkipped = true
+    }
+    // 還原失敗、或被略過（別人已改）都視同需人工確認：放款單與期款的收據編號可能不一致。
+    if (restoreErrors.length > 0 || restoreSkipped) {
       const m = err instanceof Error ? err.message : String(err)
-      logger.error({ disbursementId, err: m, restoreErrors }, "updateDisbursement: receipt_ref restore failed (manual check)")
+      logger.error({ disbursementId, err: m, restoreErrors, restoreSkipped }, "updateDisbursement: receipt_ref restore incomplete (manual check)")
       const { data: d } = await supabaseAdmin.from("disbursements").select("disbursement_no").eq("tenant_id", tenantId).eq("id", disbursementId).maybeSingle()
       const no = (d?.disbursement_no as string | undefined) ?? ""
-      throw manualCheckError(no, `單號 ${no} 的收據編號連動期款失敗且無法還原，放款單與期款的收據編號可能不一致，需人工確認`)
+      const label = no ? `單號 ${no}` : "此放款單"
+      const detail = restoreErrors.length > 0 ? "且無法還原" : "且還原時發現已被他人修改"
+      throw manualCheckError(no, `${label}的收據編號連動期款失敗${detail}，放款單與期款的收據編號可能不一致，需人工確認`)
     }
     throw err
   }
@@ -2001,9 +2011,26 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
   }
   if (!row) throw new DisbursementError(409, "code_conflict", { hint: "單號連續撞號，請重試。" })
 
+  const writeInsertAudit = () =>
+    writeAuditLog({
+      tenantId,
+      tableName: "disbursements",
+      recordId: row!.id,
+      action: "INSERT",
+      newRow: {
+        ...row,
+        allocations: input.allocations,
+        ...(forcedPayReason ? { forcedPaid: true, forceReason: forcedPayReason } : {}),
+      },
+      actorEmpId: actor.empId,
+      context: "POST /disbursements",
+    })
   if (input.status !== "paid") {
     await insertAllocations(tenantId, row.id, allocations)
   } else {
+    // 已匯款的單頭一建立就先寫 app 層 INSERT 稽核（含建立人、強制匯款理由）：之後任何失敗路徑
+    //（自動作廢、作廢失敗、期款還原失敗）都查得到這張單是誰、為什麼直接建成已匯款（2026-11-12 驗收）。
+    await writeInsertAudit()
     // 直接建成已匯款：寫分攤與連動期款都在同一個 try 裡——任何一步失敗（例：分攤寫到一半撞 PD409 專案已刪除）
     // 都把剛建的單自動作廢，不留已匯款單頭＋部分分攤的半成品（2026-11-12 驗收）。
     try {
@@ -2021,23 +2048,11 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
         allocations.map((a) => ({ subcontract_payment_id: a.subcontractPaymentId, amount: a.amount, withheld_amount: a.withheldAmount })),
       )
     } catch (syncErr) {
-      throw await voidCreatedAfterSyncFailure(tenantId, actor, row, syncErr, { allocations: input.allocations, forcedPayReason })
+      throw await voidCreatedAfterSyncFailure(tenantId, actor, row, syncErr)
     }
     await notifyProjectLeads(tenantId, row, await loadAllocations(tenantId, [row.id]))
   }
-  await writeAuditLog({
-    tenantId,
-    tableName: "disbursements",
-    recordId: row.id,
-    action: "INSERT",
-    newRow: {
-      ...row,
-      allocations: input.allocations,
-      ...(forcedPayReason ? { forcedPaid: true, forceReason: forcedPayReason } : {}),
-    },
-    actorEmpId: actor.empId,
-    context: "POST /disbursements",
-  })
+  if (input.status !== "paid") await writeInsertAudit()
   // #3：直接建成已匯款＝專案成本增加 → 排程重算未發放的獎金批次（非同步、失敗只 log）。
   if (input.status === "paid") {
     await recomputeBonusRunsBestEffort(tenantId, allocations.map((a) => a.projectId), "POST /disbursements (paid)")
@@ -2049,17 +2064,17 @@ export async function createDisbursement(tenantId: string, actor: Actor, input: 
  * 直接建成已匯款、但寫分攤或連動期款失敗（2026-11-12 驗收）：不留「已匯款的單頭＋分攤、期款卻沒付」的半成品。
  * 單頭不能實體刪除（no_hard_delete）、非草稿的分攤也不能刪 → 用既有的作廢機制：狀態改 void＋作廢原因
  *（作廢單的分攤不算擋刪）；作廢後若仍有掛這張單的已付期款（網路不確定是否寫成）比照 unsyncPaymentsOnVoid 清回未付。
- * 稽核：先補一筆 app 層 INSERT（含 forceReason），再寫作廢 UPDATE（oldRow 是完整單頭）。
- * syncPaymentsOnPay 已把寫到一半的期款還原；若連還原都失敗（PaymentRestoreError：部分期款已付）就不作廢、
- * 單頭維持已匯款，回需人工確認（同 payDisbursement）。
- * 回傳要丟給使用者的 DisbursementError（帶中文 message 與單號；內部錯誤細節只進 log）。
+ * 稽核：INSERT 由 createDisbursement 在單頭建立後就寫好；這裡在作廢成功當下寫作廢 UPDATE（oldRow 是完整單頭），
+ * 之後清期款失敗也已留下作廢紀錄。syncPaymentsOnPay 已把寫到一半的期款還原；若連還原都失敗
+ *（PaymentRestoreError：部分期款已付）就不作廢、單頭維持已匯款，回需人工確認（同 payDisbursement）。
+ * 回傳要丟給使用者的 DisbursementError：帶中文 message、自己被作廢的單號 autoVoidedNo（原錯誤 details 裡的單號——
+ * 例如搶先付款的那張——原樣保留）；內部錯誤細節只進 log。
  */
 async function voidCreatedAfterSyncFailure(
   tenantId: string,
   actor: Actor,
   row: DisbursementRow,
   syncErr: unknown,
-  ctx: { allocations: AllocationInput[]; forcedPayReason: string | null },
 ): Promise<DisbursementError> {
   const no = row.disbursement_no
   const internal = syncErr instanceof Error ? syncErr.message : String(syncErr)
@@ -2074,7 +2089,9 @@ async function voidCreatedAfterSyncFailure(
         ? "project_deleted"
         : isRowDeletedError(syncErr)
           ? "subcontract_deleted"
-          : "sync_failed"
+          : isRetryableConflictError(syncErr)
+            ? "conflict_retry"
+            : "sync_failed"
   const reason = `建立時寫入分攤／期款失敗，系統自動作廢（${code}）`
   const { data: voided, error: voidErr } = await supabaseAdmin
     .from("disbursements")
@@ -2088,26 +2105,6 @@ async function voidCreatedAfterSyncFailure(
     logger.error({ disbursementId: row.id, err: internal, voidErr: voidErr?.message }, "createDisbursement: auto void failed (manual check)")
     return manualCheckError(no, `已建立單號 ${no}，但寫入分攤／期款失敗，且系統無法自動作廢這張單，需人工確認`)
   }
-  // 作廢保險：仍掛這張單、已寫成已付的期款（網路不確定是否寫成）清回未付。
-  try {
-    await unsyncPaymentsOnVoid(tenantId, { id: row.id, disbursement_no: no }, "建立時期款同步失敗，系統自動作廢")
-  } catch (err) {
-    logger.error({ disbursementId: row.id, err: err instanceof Error ? err.message : String(err) }, "createDisbursement: unsync after auto void failed")
-    return manualCheckError(no, `已建立單號 ${no} 並已自動作廢，但連動的期款無法清回未付，需人工確認期款`)
-  }
-  await writeAuditLog({
-    tenantId,
-    tableName: "disbursements",
-    recordId: row.id,
-    action: "INSERT",
-    newRow: {
-      ...row,
-      allocations: ctx.allocations,
-      ...(ctx.forcedPayReason ? { forcedPaid: true, forceReason: ctx.forcedPayReason } : {}),
-    },
-    actorEmpId: actor.empId,
-    context: "POST /disbursements",
-  })
   await writeAuditLog({
     tenantId,
     tableName: "disbursements",
@@ -2118,15 +2115,30 @@ async function voidCreatedAfterSyncFailure(
     actorEmpId: actor.empId,
     context: "POST /disbursements (paid, sync failed → auto void)",
   })
+  // 作廢保險：仍掛這張單、已寫成已付的期款（網路不確定是否寫成）清回未付。
+  try {
+    await unsyncPaymentsOnVoid(tenantId, { id: row.id, disbursement_no: no }, "建立時期款同步失敗，系統自動作廢")
+  } catch (err) {
+    logger.error({ disbursementId: row.id, err: err instanceof Error ? err.message : String(err) }, "createDisbursement: unsync after auto void failed")
+    return manualCheckError(no, `已建立單號 ${no} 並已自動作廢，但連動的期款無法清回未付，需人工確認期款`)
+  }
   const base = syncErr instanceof DisbursementError ? syncErr : null
+  const fixable = code in CREATE_FAIL_REASON
+  const why =
+    code === "payment_already_paid" && typeof base?.details?.disbursementNo === "string" && base.details.disbursementNo
+      ? `期款已由其他匯款（單號 ${base.details.disbursementNo}）標記為已付`
+      : code === "conflict_retry"
+        ? "資料正被同時修改"
+        : (CREATE_FAIL_REASON[code] ?? "寫入分攤／期款失敗")
   return new DisbursementError(base?.httpStatus && base.httpStatus < 500 ? base.httpStatus : 409, code, {
     ...(base?.details ?? {}),
-    disbursementNo: no,
+    autoVoidedNo: no,
     autoVoided: true,
-    message: `已建立單號 ${no}，但${CREATE_FAIL_REASON[code] ?? "寫入分攤／期款失敗"}，系統已自動作廢這張單；請修正後重新建立`,
+    message: `已建立單號 ${no}，但${why}，系統已自動作廢這張單；${fixable ? "請修正後重新建立" : "請重新建立（重試）"}`,
   })
 }
 
+/** 可由使用者修正的失敗原因（其餘如死鎖、未知錯誤 → 請重新建立／重試）。 */
 const CREATE_FAIL_REASON: Record<string, string> = {
   project_deleted: "分攤的專案已被刪除",
   subcontract_deleted: "分攤的副委託已被刪除",
@@ -2136,7 +2148,10 @@ const CREATE_FAIL_REASON: Record<string, string> = {
 
 /** 需人工確認：500，帶中文說明與單號（不含內部錯誤細節，細節只進 log）。 */
 function manualCheckError(disbursementNo: string, message: string): DisbursementError {
-  return new DisbursementError(500, "manual_check_required", { disbursementNo, message })
+  return new DisbursementError(500, "manual_check_required", {
+    disbursementNo,
+    message: `${message}；請勿直接重新建立或重新送出，以免重複付款`,
+  })
 }
 
 const PAID_EDITABLE = new Set<keyof DisbursementPatch>(["note", "receiptRef", "purpose", "hasInvoice", "invoiceNo"])

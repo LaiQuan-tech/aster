@@ -196,7 +196,7 @@ describe("第五輪：直接建成已匯款但期款同步失敗、改收據編�
     expect(err.httpStatus).toBe(409)
     const no = fake.db.disbursements![0]!.disbursement_no as string
     expect(fake.db.disbursements![0]).toMatchObject({ status: "void" })
-    expect(err.details).toMatchObject({ disbursementNo: no, autoVoided: true })
+    expect(err.details).toMatchObject({ autoVoidedNo: no, autoVoided: true })
     expect(String(err.details!.message)).toContain(`已建立單號 ${no}`)
     expect(String(err.details!.message)).toContain("自動作廢")
     expect(String(err.details!.message)).not.toContain("disbursement_allocations")
@@ -246,7 +246,88 @@ describe("第五輪：直接建成已匯款但期款同步失敗、改收據編�
     const no = fake.db.disbursements![0]!.disbursement_no as string
     expect(String(err.details!.message)).toContain(no)
     expect(String(err.details!.message)).toContain("需人工確認")
+    expect(String(err.details!.message)).toContain("請勿直接重新建立")
     expect(JSON.stringify(err.details)).not.toContain("secret internal detail")
+    // 單維持已匯款，而且一建立就寫的 INSERT 稽核（含建立人、強制匯款理由）在
+    expect(fake.db.disbursements![0]).toMatchObject({ status: "paid" })
+    const ins = fake.db.audit_logs!.find((a) => a.table_name === "disbursements" && a.action === "INSERT")!
+    expect(ins).toMatchObject({ actor_emp_id: HR })
+    expect(ins.new_row).toMatchObject({ forcedPaid: true, forceReason: "測試直接匯款", created_by_emp_id: HR })
+  })
+
+  it("期款還原也失敗（PaymentRestoreError）→ 需人工確認、單維持已匯款，INSERT 稽核照樣在", async () => {
+    // 第 2 筆期款寫入失敗 → 還原第 1 筆時也失敗
+    fake.injectError({ table: "project_subcontract_payments", action: "update", skip: 1, error: { code: "XX000", message: "write failed" } })
+    fake.injectError({ table: "project_subcontract_payments", action: "update", error: { code: "XX000", message: "restore failed" } })
+    const err = (await createDisbursement(TENANT_ID, { empId: HR, role: "hr_admin" }, paidInput()).catch((e: unknown) => e)) as DisbursementError
+    expect(err.code).toBe("manual_check_required")
+    expect(String(err.details!.message)).toContain("請勿直接重新建立")
+    expect(fake.db.disbursements![0]).toMatchObject({ status: "paid" })
+    expect(fake.db.audit_logs!.some((a) => a.table_name === "disbursements" && a.action === "INSERT")).toBe(true)
+  })
+
+  it("作廢成功但期款清不回 → 需人工確認，作廢 UPDATE 稽核已寫", async () => {
+    fake.injectError({ table: "disbursement_allocations", action: "insert", error: { code: "PD409", message: "project_deleted: x" } })
+    // 作廢的那一刻才布置：之後清期款（unsyncPaymentsOnVoid 讀期款）失敗
+    const realFrom = fake.from.bind(fake)
+    const spy = vi.spyOn(fake, "from").mockImplementation((t: string) => {
+      const q = realFrom(t)
+      if (t !== "disbursements") return q
+      const origUpdate = q.update.bind(q)
+      q.update = (patch: Record<string, unknown>) => {
+        if (patch.status === "void") fake.injectError({ table: "project_subcontract_payments", action: "select", error: { code: "XX000", message: "load failed" } })
+        return origUpdate(patch)
+      }
+      return q
+    })
+    try {
+      const err = (await createDisbursement(TENANT_ID, { empId: HR, role: "hr_admin" }, paidInput()).catch((e: unknown) => e)) as DisbursementError
+      expect(err.code, JSON.stringify(err.details)).toBe("manual_check_required")
+      expect(String(err.details!.message)).toContain("請勿直接重新建立")
+      expect(fake.db.disbursements![0]).toMatchObject({ status: "void" })
+      expect(fake.db.audit_logs!.some((a) => String(a.context).includes("auto void"))).toBe(true)
+      expect(fake.db.audit_logs!.some((a) => a.table_name === "disbursements" && a.action === "INSERT")).toBe(true)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("搶先付款（payment_already_paid）→ 保留搶付單號（disbursementNo），自己被作廢的單號另放 autoVoidedNo，說明兩者都有", async () => {
+    fake.db.disbursements = [{
+      id: "dddddddd-0000-4000-8000-0000000007e1", tenant_id: TENANT_ID, disbursement_no: "D-OTHER-9", status: "paid", payee_kind: "other",
+      payee_name: "別人", paying_company_id: COMPANY, method: "transfer", paid_on: "2026-11-11", amount: "500", withheld_amount: "0",
+      created_at: "2026-11-11T00:00:00.000Z", updated_at: "2026-11-11T00:00:00.000Z",
+    }]
+    // 讀期款時還沒付（通過建立前的檢查），寫入那一刻已被別張單付掉
+    const realFrom = fake.from.bind(fake)
+    let armed = true
+    const spy = vi.spyOn(fake, "from").mockImplementation((t: string) => {
+      const q = realFrom(t)
+      if (t === "disbursement_allocations" && armed) {
+        armed = false
+        Object.assign(fake.db.project_subcontract_payments!.find((p) => p.id === PAY1)!, { paid_on: "2026-11-11", disbursement_id: "dddddddd-0000-4000-8000-0000000007e1" })
+      }
+      return q
+    })
+    try {
+      const err = (await createDisbursement(TENANT_ID, { empId: HR, role: "hr_admin" }, paidInput()).catch((e: unknown) => e)) as DisbursementError
+      expect(err.code, JSON.stringify(err.details)).toBe("payment_already_paid")
+      const mine = fake.db.disbursements!.find((d) => d.disbursement_no !== "D-OTHER-9")!
+      expect(err.details).toMatchObject({ disbursementNo: "D-OTHER-9", autoVoidedNo: mine.disbursement_no, autoVoided: true })
+      expect(String(err.details!.message)).toContain("D-OTHER-9")
+      expect(String(err.details!.message)).toContain(String(mine.disbursement_no))
+      expect(String(err.details!.message)).toContain("請修正後重新建立")
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("死鎖等無法歸類的錯誤 → conflict_retry，說明是「請重新建立（重試）」而不是「請修正後」", async () => {
+    fake.injectError({ table: "disbursement_allocations", action: "insert", error: { code: "40P01", message: "deadlock detected" } })
+    const err = (await createDisbursement(TENANT_ID, { empId: HR, role: "hr_admin" }, paidInput()).catch((e: unknown) => e)) as DisbursementError
+    expect(err.code).toBe("conflict_retry")
+    expect(String(err.details!.message)).toContain("請重新建立（重試）")
+    expect(String(err.details!.message)).not.toContain("請修正後")
   })
 
   it("createDisbursement（status=paid）期款同步撞錯 → 剛建的單自動作廢（不留已匯款半成品），錯誤照樣拋出、期款沒付", async () => {
@@ -309,7 +390,11 @@ describe("第五輪：直接建成已匯款但期款同步失敗、改收據編�
       return q
     })
     try {
-      await updateDisbursement(TENANT_ID, { empId: HR, role: "hr_admin" }, DISB, { receiptRef: "R-NEW" }).catch(() => {})
+      const err = (await updateDisbursement(TENANT_ID, { empId: HR, role: "hr_admin" }, DISB, { receiptRef: "R-NEW" }).catch((e: unknown) => e)) as DisbursementError
+      // 被略過（別人已改）視同需人工確認，附單號
+      expect(err.code).toBe("manual_check_required")
+      expect(String(err.details!.message)).toContain("D-2026-002")
+      expect(String(err.details!.message)).toContain("已被他人修改")
       expect(fake.db.project_subcontract_payments.find((p) => p.id === PAY1)!.receipt_ref).toBe("R-OTHER")
       expect(fake.db.disbursements[0]!.receipt_ref).toBe("R-OLD")
     } finally {
